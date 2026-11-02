@@ -100,8 +100,10 @@ It is written in Go, so it shares code with `box` and later with the operator.
   category is created per Arr instance.
 - In every Arr: download client, category, root folder, `copyUsingHardlinks: true`, and
   Forms auth with the shared admin credential. Every setting is read back and asserted,
-  not assumed.
-- Prowlarr: Arr applications registered, so indexers sync out.
+  and the Arr↔qBittorrent link is proven with the Arr's own connection test — Arr never
+  returns the stored password, so a passing test is the only honest evidence.
+- Prowlarr: Arr applications registered, so indexers sync out; each registration is
+  likewise proven with Prowlarr's test endpoint before it is written.
 - Seerr: connected to the Arrs and the media server.
 - Plex: claimed with the token prompted at install (it expires in 4 minutes, so `box init`
   asks for it last). Jellyfin is the alternative media server.
@@ -154,13 +156,15 @@ It must be safe to re-run.
 
 ```
 charts/s5n/              chart, values.schema.json, ci/ values matrices
-cmd/box/                 CLI
-cmd/wiring/              wiring Job
-internal/apps/           per-app clients and wiring logic shared by box and the Job
+cmd/s5n/                 one binary: wiring (the Job), qbt-config (init container), box (CLI)
+internal/apps/           per-app clients, shared by the Job and box
+internal/wiring/         the wiring reconciler and the receipt it publishes
+internal/qbtconf/        qBittorrent credential hashing and config editing
 install/                 installer script and k0s config fragments
-hack/                    kind config, Traefik values, e2e-kind.sh (phase-0 smoke)
+hack/                    kind config, Traefik values, e2e-kind.sh
 test/e2e/                k0s + k3s end-to-end suites (phase 1+)
 docs/
+Dockerfile               the image the wiring Job and the qBittorrent init container run
 ```
 
 ## CI and acceptance

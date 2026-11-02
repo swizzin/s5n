@@ -1,0 +1,169 @@
+{{- /*
+The wiring Job: Helm post-install / post-upgrade hook.
+
+It reads a rendered config (URLs, categories, paths, and file paths into the
+mounted Secret — never the secrets themselves), reconciles the apps into the s5n
+data contract, proves hardlinks on /data, and writes its receipt into
+`<release>-wiring` under status.json / summary.txt.
+
+The Job pod uses the ServiceAccount below, whose only permission is that one
+ConfigMap. It is not tracked by Helm, so `helm upgrade` replaces it and the
+previous run's logs stay readable until then.
+*/ -}}
+{{- if .Values.wiring.enabled }}
+{{- $root := . }}
+{{- $name := printf "%s-wiring" (include "s5n.fullname" .) }}
+{{- $image := dict "repository" .Values.wiring.image.repository "tag" (default .Chart.AppVersion .Values.wiring.image.tag) "digest" .Values.wiring.image.digest }}
+
+{{- /* One entry per enabled Arr instance. */ -}}
+{{- $instances := list }}
+{{- range $inst := include "s5n.instances" . | fromJsonArray }}
+{{- /* Prowlarr also carries an API key, but it is not an Arr instance. */ -}}
+{{- if and $inst.arr (ne $inst.app "prowlarr") }}
+{{- $instances = append $instances (dict
+      "name" $inst.name
+      "kind" $inst.app
+      "url" (printf "http://%s:%v" $inst.name $inst.cfg.port)
+      "urlBase" (printf "/%s" $inst.name)
+      "apiKeyFile" (printf "/etc/s5n/keys/%s-apikey" $inst.name)
+      "category" $inst.category
+      "savePath" (printf "/data/torrents/%s" $inst.category)
+      "rootFolder" (printf "/data/media/%s" $inst.category)) }}
+{{- end }}
+{{- end }}
+
+{{- $cfg := dict
+      "namespace" .Release.Namespace
+      "configMap" $name
+      "timeoutSeconds" .Values.wiring.timeoutSeconds
+      "instances" $instances }}
+{{- if and .Values.apps.qbittorrent .Values.apps.qbittorrent.enabled }}
+{{- $_ := set $cfg "qbittorrent" (dict
+      "url" (printf "http://qbittorrent:%v" .Values.apps.qbittorrent.port)
+      "username" (default "admin" .Values.apps.qbittorrent.webuiUsername)
+      "passwordFile" "/etc/s5n/keys/qbittorrent-password") }}
+{{- end }}
+{{- if and .Values.apps.prowlarr .Values.apps.prowlarr.enabled }}
+{{- $_ := set $cfg "prowlarr" (dict
+      "url" (printf "http://prowlarr:%v" .Values.apps.prowlarr.port)
+      "urlBase" "/prowlarr"
+      "selfUrl" (printf "http://prowlarr:%v/prowlarr" .Values.apps.prowlarr.port)
+      "apiKeyFile" "/etc/s5n/keys/prowlarr-apikey") }}
+{{- end }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "s5n.labels" . | nindent 4 }}
+data:
+  wiring.json: |
+    {{- toJson $cfg | nindent 4 }}
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "s5n.labels" . | nindent 4 }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "s5n.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["create"]
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    resourceNames: [{{ $name | quote }}]
+    verbs: ["get", "update", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "s5n.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ $name }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ $name }}
+    namespace: {{ .Release.Namespace }}
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "s5n.labels" . | nindent 4 }}
+  annotations:
+    helm.sh/hook: post-install,post-upgrade
+    helm.sh/hook-weight: "0"
+    helm.sh/hook-delete-policy: before-hook-creation
+spec:
+  backoffLimit: {{ .Values.wiring.backoffLimit }}
+  activeDeadlineSeconds: {{ add .Values.wiring.timeoutSeconds 120 }}
+  template:
+    metadata:
+      labels:
+        {{- include "s5n.labels" $root | nindent 8 }}
+        app.kubernetes.io/name: {{ $name }}
+        s5n.io/role: wiring
+      {{- with .Values.wiring.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    spec:
+      restartPolicy: Never
+      # This pod needs the API to publish its receipt; every app pod explicitly
+      # does not get a token.
+      automountServiceAccountToken: true
+      enableServiceLinks: false
+      serviceAccountName: {{ $name }}
+      securityContext:
+        {{- include "s5n.podSecurity" $root | nindent 8 }}
+      containers:
+        - name: wiring
+          image: {{ include "s5n.image" $image }}
+          imagePullPolicy: IfNotPresent
+          args: ["wiring", "--config=/etc/s5n/wiring/wiring.json"]
+          env:
+            - name: TZ
+              value: {{ .Values.global.tz | quote }}
+          securityContext:
+            {{- include "s5n.containerSecurity" $root | nindent 12 }}
+          {{- with .Values.wiring.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          volumeMounts:
+            - name: wiring
+              mountPath: /etc/s5n/wiring
+              readOnly: true
+            - name: keys
+              mountPath: /etc/s5n/keys
+              readOnly: true
+            - name: data
+              mountPath: /data
+      volumes:
+        - name: wiring
+          configMap:
+            name: {{ $name }}
+        - name: keys
+          secret:
+            secretName: {{ include "s5n.secretName" . }}
+            # fsGroup makes the release's gid the group owner; group read is what
+            # lets the non-root process read the keys.
+            defaultMode: 0440
+        - name: data
+          persistentVolumeClaim:
+            claimName: {{ include "s5n.dataClaim" . }}
+{{- end }}

@@ -52,6 +52,61 @@ spec:
         - podSelector:
             matchLabels:
               app.kubernetes.io/instance: {{ .Release.Name }}
+{{- if .Values.wiring.enabled }}
+{{- /*
+The wiring Job's only extra flow: the API server, to publish its receipt.
+
+NetworkPolicies are evaluated after kube-proxy has DNAT'd a Service, so the address
+that matters is the API server's endpoint, not the `kubernetes` Service IP — and the
+port is the endpoint's (6443 on k0s, k3s and kind; 443 where the API is fronted by a
+load balancer). Both are looked up at install time, with values.apiServerCIDRs as the
+fallback for offline rendering.
+*/ -}}
+{{- $api := list }}
+{{- with (lookup "v1" "Service" "default" "kubernetes") }}
+{{- range (.spec.clusterIPs | default list) }}{{ $api = append $api (printf "%s/32" .) }}{{ end }}
+{{- end }}
+{{- with (lookup "v1" "Endpoints" "default" "kubernetes") }}
+{{- range .subsets }}{{ range .addresses }}{{ $api = append $api (printf "%s/32" .ip) }}{{ end }}{{ end }}
+{{- end }}
+{{- range .Values.networkPolicy.apiServerCIDRs }}{{ $api = append $api . }}{{ end }}
+{{- if $api }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "s5n.fullname" . }}-wiring-egress
+  labels:
+    {{- include "s5n.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/instance: {{ .Release.Name }}
+      s5n.io/role: wiring
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - namespaceSelector: {}
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - { port: 53, protocol: UDP }
+        - { port: 53, protocol: TCP }
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/instance: {{ .Release.Name }}
+    - to:
+        {{- range $cidr := $api }}
+        - ipBlock:
+            cidr: {{ $cidr | quote }}
+        {{- end }}
+      ports:
+        - { port: 443, protocol: TCP }
+        - { port: 6443, protocol: TCP }
+{{- end }}
+{{- end }}
 {{- range $inst := include "s5n.instances" . | fromJsonArray }}
 {{- $ctx := dict "root" $root "inst" $inst }}
 ---
@@ -80,6 +135,13 @@ spec:
             matchLabels:
               app.kubernetes.io/instance: {{ $root.Release.Name }}
               s5n.io/app: {{ $p }}
+        {{- end }}
+        {{- /* The wiring Job must reach every app's API to configure it. */}}
+        {{- if $root.Values.wiring.enabled }}
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/instance: {{ $root.Release.Name }}
+              s5n.io/role: wiring
         {{- end }}
       ports:
         - port: http

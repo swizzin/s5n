@@ -4,11 +4,14 @@ swizzin on Kubernetes. A free, self-hosted seedbox stack: qBittorrent, Prowlarr,
 Sonarr, Radarr — installed as one Helm release, wired together, hardlink-safe, and
 locked down by default.
 
-Status: Phase 0. The chart installs and passes its smoke test; wiring, the `box` CLI and
-the installer are next. See `PLAN.md` for the design and `AGENTS.md` for how to work here.
+Status: Phase 1. The chart installs, and its wiring Job connects qBittorrent, Sonarr,
+Radarr and Prowlarr on every install or upgrade — then proves the `/data` hardlink
+contract and records what it verified. The e2e runs that Job twice and asserts the second
+run changes nothing. Seerr, the media servers, the `box` CLI and the installer are next.
+See `PLAN.md` for the design and `AGENTS.md` for how to work here.
 
 ```sh
-hack/e2e-kind.sh   # spin up kind, install everything, assert, tear down
+hack/e2e-kind.sh   # build, install everything on kind, assert, tear down
 ```
 
 ## AI disclosure

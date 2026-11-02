@@ -49,6 +49,27 @@ networkPolicy:
           kubernetes.io/metadata.name: s5n-gateway
   # Extra NetworkPolicyPeers allowed to reach app HTTP ports (e.g. a hostNetwork proxy's node IP).
   extraHttpFrom: []
+  # The wiring Job needs the API server to publish its receipt. The chart reads
+  # the `kubernetes` Service ClusterIP at install time; these CIDRs are only the
+  # fallback for offline rendering (`helm template`), where lookup returns nothing.
+  apiServerCIDRs: []
+
+# The wiring Job. It runs as a Helm post-install/post-upgrade hook: connects the
+# Arrs to qBittorrent, registers them in Prowlarr, proves the /data hardlink
+# contract, and records what it verified in the `<release>-wiring` ConfigMap.
+# It is a reconciler, so a second run on an unchanged release changes nothing.
+wiring:
+  enabled: true
+  image:
+    repository: ghcr.io/swizzin/s5n
+    # Empty = the chart's appVersion.
+    tag: ""
+    digest: ""
+  # How long the Job may wait for an app to answer before the release fails.
+  timeoutSeconds: 300
+  backoffLimit: 2
+  resources: {}
+  podAnnotations: {}
 
 # Arr API keys live here, generated once and preserved across upgrades (lookup).
 secrets:
@@ -62,6 +83,9 @@ apps:
       tag: "5.3.0"
       digest: sha256:5a858e61f94cf2712391db32ed03556576c700858f3e62c4c6fcde262443ebd8
     port: 8080
+    # Seeded into qBittorrent.conf by an init container, together with a generated
+    # password from the release Secret. The wiring Job logs in with the same pair.
+    webuiUsername: admin
     # qBittorrent has no URL base setting; the route strips the prefix.
     rewritePath: true
     torrent:

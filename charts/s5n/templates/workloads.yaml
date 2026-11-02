@@ -32,6 +32,30 @@ spec:
       enableServiceLinks: false
       securityContext:
         {{- include "s5n.podSecurity" $root | nindent 8 }}
+      {{- if eq $inst.app "qbittorrent" }}
+      # qBittorrent has no way to set a WebUI password from the environment, so the
+      # credential is sealed into qBittorrent.conf before the app's first start.
+      # Re-running is a no-op: the same password produces the same stored hash.
+      initContainers:
+        - name: webui-credentials
+          image: {{ include "s5n.image" (dict "repository" $root.Values.wiring.image.repository "tag" (default $root.Chart.AppVersion $root.Values.wiring.image.tag) "digest" $root.Values.wiring.image.digest) }}
+          imagePullPolicy: IfNotPresent
+          args:
+            - qbt-config
+            - --conf=/config/qBittorrent/qBittorrent.conf
+            - --username={{ default "admin" $cfg.webuiUsername }}
+            - --port={{ $cfg.port }}
+            - --password-file=/etc/s5n/keys/qbittorrent-password
+          securityContext:
+            {{- include "s5n.containerSecurity" $root | nindent 12 }}
+          volumeMounts:
+            - name: config
+              mountPath: /config
+              subPath: {{ $inst.name }}
+            - name: keys
+              mountPath: /etc/s5n/keys
+              readOnly: true
+      {{- end }}
       containers:
         - name: {{ $inst.app }}
           image: {{ include "s5n.image" $cfg.image }}
@@ -118,6 +142,15 @@ spec:
             claimName: {{ include "s5n.configClaim" $root }}
         - name: tmp
           emptyDir: {}
+        {{- if eq $inst.app "qbittorrent" }}
+        - name: keys
+          secret:
+            secretName: {{ include "s5n.secretName" $root }}
+            defaultMode: 0440
+            items:
+              - key: qbittorrent-password
+                path: qbittorrent-password
+        {{- end }}
 ---
 apiVersion: v1
 kind: Service
