@@ -1,0 +1,12 @@
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+name: s5n
+nodes:
+  - role: control-plane
+    extraPortMappings:
+      - containerPort: 30080   # Traefik web (Gateway listener)
+        hostPort: 18080
+        protocol: TCP
+      - containerPort: 31111   # qBittorrent peers
+        hostPort: 31111
+        protocol: TCP

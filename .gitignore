@@ -1,0 +1,5 @@
+*.tgz
+/dist/
+/bin/
+.env
+*.kubeconfig

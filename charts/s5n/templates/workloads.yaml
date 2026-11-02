@@ -1,0 +1,207 @@
+{{- /*
+One StatefulSet + Service (+ HTTPRoute) per instance. Per-app differences are data in
+values.yaml; this template is the only place a pod spec is written.
+*/ -}}
+{{- $root := . -}}
+{{- range $inst := include "s5n.instances" . | fromJsonArray }}
+{{- $cfg := $inst.cfg }}
+{{- $ctx := dict "root" $root "inst" $inst }}
+{{- $urlBase := printf "/%s" $inst.name }}
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ $inst.name }}
+  labels:
+    {{- include "s5n.labels" $root | nindent 4 }}
+    app.kubernetes.io/name: {{ $inst.name }}
+spec:
+  replicas: 1
+  serviceName: {{ $inst.name }}
+  selector:
+    matchLabels:
+      {{- include "s5n.selector" $ctx | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "s5n.labels" $root | nindent 8 }}
+        app.kubernetes.io/name: {{ $inst.name }}
+        s5n.io/app: {{ $inst.app }}
+    spec:
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      securityContext:
+        {{- include "s5n.podSecurity" $root | nindent 8 }}
+      containers:
+        - name: {{ $inst.app }}
+          image: {{ include "s5n.image" $cfg.image }}
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: TZ
+              value: {{ $root.Values.global.tz | quote }}
+            {{- if $inst.arr }}
+            - name: {{ $cfg.envPrefix }}__SERVER__PORT
+              value: {{ $cfg.port | quote }}
+            - name: {{ $cfg.envPrefix }}__SERVER__URLBASE
+              value: {{ $urlBase | quote }}
+            - name: {{ $cfg.envPrefix }}__AUTH__APIKEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "s5n.secretName" $root }}
+                  key: {{ printf "%s-apikey" $inst.name }}
+            - name: {{ $cfg.envPrefix }}__AUTH__METHOD
+              value: Forms
+            - name: {{ $cfg.envPrefix }}__AUTH__REQUIRED
+              value: Enabled
+            {{- end }}
+            {{- if eq $inst.app "qbittorrent" }}
+            - name: QBT_WEBUI_PORT
+              value: {{ $cfg.port | quote }}
+            - name: QBT_TORRENTING_PORT
+              value: {{ $cfg.torrent.port | quote }}
+            {{- end }}
+            {{- range $k, $v := $cfg.env }}
+            - name: {{ $k }}
+              value: {{ $v | quote }}
+            {{- end }}
+          ports:
+            - name: http
+              containerPort: {{ $cfg.port }}
+            {{- if eq $inst.app "qbittorrent" }}
+            - name: bt-tcp
+              containerPort: {{ $cfg.torrent.port }}
+              protocol: TCP
+            - name: bt-udp
+              containerPort: {{ $cfg.torrent.port }}
+              protocol: UDP
+            {{- end }}
+          startupProbe:
+            tcpSocket:
+              port: http
+            periodSeconds: 5
+            failureThreshold: 60
+          readinessProbe:
+            {{- if $inst.arr }}
+            httpGet:
+              path: {{ printf "%s/ping" $urlBase }}
+              port: http
+            {{- else }}
+            tcpSocket:
+              port: http
+            {{- end }}
+            periodSeconds: 15
+          livenessProbe:
+            tcpSocket:
+              port: http
+            periodSeconds: 30
+            failureThreshold: 5
+          securityContext:
+            {{- include "s5n.containerSecurity" $root | nindent 12 }}
+          {{- with $cfg.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          volumeMounts:
+            - name: data
+              mountPath: /data
+            - name: config
+              mountPath: /config
+              subPath: {{ $inst.name }}
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: {{ include "s5n.dataClaim" $root }}
+        - name: config
+          persistentVolumeClaim:
+            claimName: {{ include "s5n.configClaim" $root }}
+        - name: tmp
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $inst.name }}
+  labels:
+    {{- include "s5n.labels" $root | nindent 4 }}
+    app.kubernetes.io/name: {{ $inst.name }}
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "s5n.selector" $ctx | nindent 4 }}
+  ports:
+    - name: http
+      port: {{ $cfg.port }}
+      targetPort: http
+{{- if eq $inst.app "qbittorrent" }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $inst.name }}-peers
+  labels:
+    {{- include "s5n.labels" $root | nindent 4 }}
+    app.kubernetes.io/name: {{ $inst.name }}
+spec:
+  type: {{ $cfg.torrent.service.type }}
+  {{- if ne $cfg.torrent.service.type "ClusterIP" }}
+  externalTrafficPolicy: {{ $cfg.torrent.service.externalTrafficPolicy }}
+  {{- end }}
+  selector:
+    {{- include "s5n.selector" $ctx | nindent 4 }}
+  ports:
+    - name: bt-tcp
+      port: {{ $cfg.torrent.port }}
+      targetPort: bt-tcp
+      protocol: TCP
+      {{- if eq $cfg.torrent.service.type "NodePort" }}
+      nodePort: {{ $cfg.torrent.port }}
+      {{- end }}
+    - name: bt-udp
+      port: {{ $cfg.torrent.port }}
+      targetPort: bt-udp
+      protocol: UDP
+      {{- if eq $cfg.torrent.service.type "NodePort" }}
+      nodePort: {{ $cfg.torrent.port }}
+      {{- end }}
+{{- end }}
+{{- if $root.Values.gateway.enabled }}
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: {{ $inst.name }}
+  labels:
+    {{- include "s5n.labels" $root | nindent 4 }}
+    app.kubernetes.io/name: {{ $inst.name }}
+spec:
+  parentRefs:
+    - group: gateway.networking.k8s.io
+      kind: Gateway
+      name: {{ $root.Values.gateway.parentRef.name }}
+      namespace: {{ $root.Values.gateway.parentRef.namespace }}
+      {{- with $root.Values.gateway.parentRef.sectionName }}
+      sectionName: {{ . }}
+      {{- end }}
+  {{- with $root.Values.gateway.host }}
+  hostnames: [{{ . | quote }}]
+  {{- end }}
+  rules:
+    - matches:
+        - path:
+            type: PathPrefix
+            value: {{ $urlBase }}
+      {{- if $cfg.rewritePath }}
+      filters:
+        - type: URLRewrite
+          urlRewrite:
+            path:
+              type: ReplacePrefixMatch
+              replacePrefixMatch: /
+      {{- end }}
+      backendRefs:
+        - name: {{ $inst.name }}
+          port: {{ $cfg.port }}
+{{- end }}
+{{- end }}

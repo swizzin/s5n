@@ -1,0 +1,27 @@
+# Traefik as the Gateway API implementation for s5n dev/e2e and the default install.
+# Creates GatewayClass "traefik" and Gateway "s5n" in the traefik release namespace
+# (install it into namespace s5n-gateway to match the chart's default parentRef).
+providers:
+  kubernetesIngress:
+    enabled: false
+  kubernetesGateway:
+    enabled: true
+gateway:
+  enabled: true
+  name: s5n
+  listeners:
+    web:
+      port: 8000
+      protocol: HTTP
+      namespacePolicy:
+        from: All
+ingressRoute:
+  dashboard:
+    enabled: false
+service:
+  type: NodePort
+ports:
+  web:
+    nodePort: 30080
+  websecure:
+    nodePort: 30443
