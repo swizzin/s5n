@@ -6,7 +6,8 @@ Read `PLAN.md` first. It is the architecture; this file is how to work in the re
 
 - `charts/s5n/` — the chart. qBittorrent, Prowlarr, Sonarr, Radarr (HD + optional 4K
   instance per Arr). Storage claims, generated credentials Secret, StatefulSets,
-  Services, HTTPRoutes, NetworkPolicies.
+  Services, HTTPRoutes, NetworkPolicies, and `values.schema.json`, which rejects unknown
+  keys, floating image tags and malformed values before anything renders.
 - `cmd/s5n/` — the one binary the image ships. Subcommands: `wiring` (the Job),
   `qbt-config` (qBittorrent's init container), `version`. `box` lands here too.
 - `internal/apps/` — schema-driven HTTP clients for qBittorrent (`/api/v2`), Sonarr and
@@ -89,6 +90,9 @@ one needs a live `lookup`. The e2e asserts the policy exists in the cluster.
 - Helm templates are not valid YAML. Editors/linters that YAML-validate `templates/*.yaml`
   will refuse them; that is expected — write templates with a script, not a YAML-aware
   editor.
+- `values.schema.json` is validated by Helm with gojsonschema, whose regexes are Go RE2:
+  lookahead such as `^(?!latest$).+$` fails the metaschema check. Express "not this tag"
+  as `"not": {"enum": ["latest", "rolling"]}` instead.
 - `lookup` returns nothing under `helm template` / `--dry-run`, so offline renders show
   fresh credentials every time and omit the API-server egress policy. Only a live
   install/upgrade preserves credentials or renders that policy.
@@ -125,9 +129,8 @@ one needs a live `lookup`. The e2e asserts the policy exists in the cluster.
 
 ## Next work, in order (Phase 1)
 
-1. **values.schema.json** for the chart; fail fast on bad values.
-2. **Seerr + Plex/Jellyfin + Tautulli** entries (v1 catalog) and their wiring steps.
-3. Extend `hack/e2e-kind.sh` with a real grab-through-Prowlarr→qBittorrent→hardlink-import
+1. **Seerr + Plex/Jellyfin + Tautulli** entries (v1 catalog) and their wiring steps.
+2. Extend `hack/e2e-kind.sh` with a real grab-through-Prowlarr→qBittorrent→hardlink-import
    assertion, then add k0s and k3s e2e (`test/e2e/`), and a GitHub Actions workflow
    running lint + kubeconform + kind e2e.
 
