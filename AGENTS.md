@@ -52,6 +52,11 @@ calling any chart change done. A change is not done until the e2e prints PASS.
    (`secret.yaml`, preserved across upgrades via `lookup`).
 8. **Enterprise features stay out** (quotas, metering, multi-tenancy, SSH, shells).
    See PLAN.md "Non-goals".
+9. **Nothing personal or private enters the repo.** Commit identity comes from the repo's
+   git config; never override it. No personal names beyond the maintainer's handle, no
+   real hostnames, IPs, domains, cluster names or details of anyone's own infrastructure,
+   in code, docs, examples, test fixtures or commit messages. Use `example.com` and
+   generic names.
 
 ## Gotchas already hit
 
