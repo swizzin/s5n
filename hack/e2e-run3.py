@@ -65,6 +65,21 @@ def curl_delete(ctx, ns, pod, key, url):
     kubectl(ctx, ns, "exec", pod, "--", "curl", "-s", "-X", "DELETE", "-H", f"X-Api-Key: {key}", url)
 
 
+def qbittorrent_password(ctx, ns):
+    out = kubectl(ctx, ns, "get", "secret", "s5n-keys", "-o", "jsonpath={.data.qbittorrent-password}")
+    return base64.b64decode(out).decode()
+
+
+def expect_object(value, what):
+    """Sonarr/Radarr/Prowlarr answer a failed save with a JSON array of
+    validation failures instead of the object, even with forceSave=true, when
+    the save still fails outright (e.g. a credential the live app rejects).
+    Fail with that body rather than a confusing AttributeError two lines later."""
+    if not isinstance(value, dict):
+        sys.exit(f"setup: {what}: expected an object, got: {json.dumps(value)}")
+    return value
+
+
 def scrub_secrets(obj):
     """Secret fields are masked on every read after the write that set them,
     so a snapshot taken right after creation cannot be compared byte for byte
@@ -95,8 +110,17 @@ def setup(ctx, ns, work):
         if f["name"] == "tvCategory":
             f["value"] = "user-edit"
     curl_put(ctx, ns, "sonarr-0", sonarr_key, f"{sonarr_url}/{owned_id}?forceSave=true", owned)
+    after_edit = curl_get(ctx, ns, "sonarr-0", sonarr_key, sonarr_url)
+    edited = next((c for c in after_edit if c["id"] == owned_id), None)
+    if edited is None or edited["name"] != "qBit (renamed)" or edited.get("priority") != 7:
+        sys.exit(f"setup: the rename/priority/tvCategory edit did not take: {after_edit!r}")
 
-    # sonarr: a second download client the Job never created and must never touch.
+    # sonarr: a second download client the Job never created and must never
+    # touch. Its password must be the real qBittorrent credential, not a
+    # placeholder: GET always masks the stored one (********), and a create
+    # with a password the live qBittorrent actually rejects fails validation
+    # outright even with forceSave=true.
+    qbit_password = qbittorrent_password(ctx, ns)
     mine = json.loads(json.dumps(owned))
     mine.pop("id", None)
     mine["name"] = "mine"
@@ -105,8 +129,11 @@ def setup(ctx, ns, work):
         if f["name"] == "tvCategory":
             f["value"] = "tv"
         if f["name"] == "password":
-            f["value"] = "irrelevant"
-    created = curl_post(ctx, ns, "sonarr-0", sonarr_key, f"{sonarr_url}?forceSave=true", mine)
+            f["value"] = qbit_password
+    created = expect_object(
+        curl_post(ctx, ns, "sonarr-0", sonarr_key, f"{sonarr_url}?forceSave=true", mine),
+        "create the 'mine' download client",
+    )
     with open(f"{work}/mine-before.json", "w", encoding="utf-8") as fh:
         json.dump(scrub_secrets(created), fh)
 
@@ -116,6 +143,9 @@ def setup(ctx, ns, work):
     sonarr_app = next(a for a in apps if a["name"].lower().startswith("sonarr"))
     sonarr_app["syncLevel"] = "addOnly"
     curl_put(ctx, ns, "prowlarr-0", prowlarr_key, f"{prowlarr_url}/{sonarr_app['id']}?forceSave=true", sonarr_app)
+    after_sync = curl_get(ctx, ns, "prowlarr-0", prowlarr_key, prowlarr_url)
+    if not any(a["id"] == sonarr_app["id"] and a.get("syncLevel") == "addOnly" for a in after_sync):
+        sys.exit(f"setup: the prowlarr syncLevel edit did not take: {after_sync!r}")
 
     # radarr: delete the owned client outright.
     radarr_url = f"http://localhost:{radarr_port}/radarr/api/v3/downloadclient"
@@ -124,6 +154,8 @@ def setup(ctx, ns, work):
         sys.exit(f"setup: expected exactly one radarr download client, found {len(rclients)}")
     radarr_old_id = rclients[0]["id"]
     curl_delete(ctx, ns, "radarr-0", radarr_key, f"{radarr_url}/{radarr_old_id}")
+    if curl_get(ctx, ns, "radarr-0", radarr_key, radarr_url):
+        sys.exit("setup: radarr download client was not actually deleted")
 
     with open(f"{work}/run3-setup.json", "w", encoding="utf-8") as fh:
         json.dump({"radarrOldID": radarr_old_id, "mineID": created["id"]}, fh)
