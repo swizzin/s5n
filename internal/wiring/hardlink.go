@@ -25,8 +25,9 @@ type HardlinkCheck struct {
 const linkCheckName = ".s5n-linkcheck"
 
 // CheckHardlink proves the data contract on a live filesystem: a file written
-// under the torrents tree and hardlinked into the media tree must show nlink 2 on
-// the same device. If this fails, imports will copy instead of link and the box
+// under the download tree and hardlinked into the media tree must show nlink 2 on
+// the same device. (The kernel already refuses a cross-device link with EXDEV, so
+// sameDevice is belt and braces; it makes the receipt self-explanatory.) If this fails, imports will copy instead of link and the box
 // will fill up twice as fast, so it is a hard failure rather than a warning.
 func CheckHardlink(savePath, rootFolder string) *HardlinkCheck {
 	out := &HardlinkCheck{

@@ -80,26 +80,30 @@ func (q *Qbit) Version(ctx context.Context) (string, error) {
 	return strings.TrimSpace(s), err
 }
 
-// EnsureDataContract makes the two settings the /data contract depends on match,
-// then leaves them alone. qBittorrent's image starts with its save path on the config
-// volume and (with automatic torrent management off) ignores category paths, so an
-// Arr's download would land outside /data and could never be hardlinked. Seeding the
-// config file is not enough: the image re-applies its own runtime default, which is
-// why this is done through the API after the app is up.
+// dataContract is what qBittorrent must report for the /data contract to hold.
+var dataContract = map[string]string{
+	"save_path": saveRoot,
+	"temp_path": saveRoot + "/temp",
+}
+
+// EnsureDataContract makes the settings the /data contract depends on match, then
+// reads them back. qBittorrent's image starts with its save path on the config volume
+// and (with automatic torrent management off) ignores category paths, so an Arr's
+// download would land outside /data and could never be hardlinked. Seeding the config
+// file is not enough: the image re-applies its own runtime default, which is why this
+// is done through the API after the app is up, and why the write is not trusted
+// until a fresh read agrees with it.
 func (q *Qbit) EnsureDataContract(ctx context.Context) (Change, error) {
-	var prefs Item
-	if err := q.client.Get(ctx, "/api/v2/app/preferences", &prefs); err != nil {
-		return Unchanged, fmt.Errorf("read preferences: %w", err)
+	prefs, err := q.preferences(ctx)
+	if err != nil {
+		return Unchanged, err
 	}
-	savePath, _ := prefs["save_path"].(string)
-	categoryPaths, _ := prefs["use_category_paths_in_manual_mode"].(bool)
-	if strings.HasPrefix(savePath, "/data/") && categoryPaths {
+	if contractDrift(prefs) == "" {
 		return Unchanged, nil
 	}
-	desired := map[string]any{
-		"save_path":                         saveRoot,
-		"temp_path":                         saveRoot + "/temp",
-		"use_category_paths_in_manual_mode": true,
+	desired := map[string]any{"use_category_paths_in_manual_mode": true}
+	for k, v := range dataContract {
+		desired[k] = v
 	}
 	payload, err := json.Marshal(desired)
 	if err != nil {
@@ -109,28 +113,51 @@ func (q *Qbit) EnsureDataContract(ctx context.Context) (Change, error) {
 	if _, err := q.client.PostForm(ctx, "/api/v2/app/setPreferences", form, nil); err != nil {
 		return Unchanged, fmt.Errorf("set preferences: %w", err)
 	}
+	if err := q.DataContract(ctx); err != nil {
+		return Unchanged, fmt.Errorf("qBittorrent accepted the preferences but did not apply them: %w", err)
+	}
 	return Updated, nil
 }
 
-// DataContract asserts the two settings the /data contract depends on: everything
-// downloads under /data, and a categorised torrent actually uses its category's path.
-// qBittorrent's defaults fail both — its save path is on the config volume, and it
-// ignores category paths in manual mode — which silently turns hardlink imports into
-// copies, or into downloads nothing will ever import.
+// DataContract asserts the settings the /data contract depends on: downloads land
+// exactly under the save root, and a categorised torrent actually uses its
+// category's path. qBittorrent's defaults fail both — its save path is on the config
+// volume, and it ignores category paths in manual mode — which silently turns
+// hardlink imports into copies, or into downloads nothing will ever import.
 func (q *Qbit) DataContract(ctx context.Context) error {
-	var prefs Item
-	if err := q.client.Get(ctx, "/api/v2/app/preferences", &prefs); err != nil {
-		return fmt.Errorf("read preferences: %w", err)
+	prefs, err := q.preferences(ctx)
+	if err != nil {
+		return err
 	}
-	savePath, _ := prefs["save_path"].(string)
-	if !strings.HasPrefix(savePath, "/data/") {
-		return fmt.Errorf("save path %q is outside /data", savePath)
-	}
-	categoryPaths, _ := prefs["use_category_paths_in_manual_mode"].(bool)
-	if !categoryPaths {
-		return fmt.Errorf("category paths are not applied in manual mode, so categorised downloads land in %s", savePath)
+	if drift := contractDrift(prefs); drift != "" {
+		return fmt.Errorf("%s", drift)
 	}
 	return nil
+}
+
+func (q *Qbit) preferences(ctx context.Context) (Item, error) {
+	var prefs Item
+	if err := q.client.Get(ctx, "/api/v2/app/preferences", &prefs); err != nil {
+		return nil, fmt.Errorf("read preferences: %w", err)
+	}
+	return prefs, nil
+}
+
+// contractDrift describes the first way prefs break the data contract, or "" when
+// they hold. Paths are compared exactly (trailing slash aside): "somewhere under
+// /data" is not the contract, because the Arrs' categories and root folders are
+// derived from this one root.
+func contractDrift(prefs Item) string {
+	for _, key := range []string{"save_path", "temp_path"} {
+		got, _ := prefs[key].(string)
+		if strings.TrimRight(got, "/") != dataContract[key] {
+			return fmt.Sprintf("%s is %q, want %q", key, got, dataContract[key])
+		}
+	}
+	if on, _ := prefs["use_category_paths_in_manual_mode"].(bool); !on {
+		return "category paths are not applied in manual mode, so categorised downloads ignore their category's save path"
+	}
+	return ""
 }
 
 // Category is one qBittorrent category.

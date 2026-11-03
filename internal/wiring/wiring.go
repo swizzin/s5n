@@ -31,14 +31,14 @@ type Step struct {
 // Result is the whole receipt, written to the wiring ConfigMap so that `box
 // status` and a human with kubectl can both read it.
 type Result struct {
-	Status          string         `json:"status"` // ok | failed
-	StartedAt       time.Time      `json:"startedAt"`
-	FinishedAt      time.Time      `json:"finishedAt"`
-	DurationSeconds float64        `json:"durationSeconds"`
-	Writes          Writes         `json:"writes"`
-	Steps           []Step         `json:"steps"`
-	Hardlink        *HardlinkCheck `json:"hardlink,omitempty"`
-	Error           string         `json:"error,omitempty"`
+	Status          string          `json:"status"` // ok | failed
+	StartedAt       time.Time       `json:"startedAt"`
+	FinishedAt      time.Time       `json:"finishedAt"`
+	DurationSeconds float64         `json:"durationSeconds"`
+	Writes          Writes          `json:"writes"`
+	Steps           []Step          `json:"steps"`
+	Hardlinks       []HardlinkCheck `json:"hardlinks,omitempty"`
+	Error           string          `json:"error,omitempty"`
 }
 
 // Runner executes the wiring. Log receives human-readable progress lines.
@@ -50,6 +50,10 @@ type Runner struct {
 	// HardlinkCheck is injectable so tests can avoid needing a real filesystem
 	// proof; production uses the real thing.
 	HardlinkCheck func(savePath, rootFolder string) *HardlinkCheck
+	// ContractRetry bounds how long qBittorrent gets to settle on the data
+	// contract, since its image can re-apply its own default after start-up.
+	// Zero means 90 seconds.
+	ContractRetry time.Duration
 }
 
 func (r *Runner) now() time.Time {
@@ -63,6 +67,13 @@ func (r *Runner) logf(format string, args ...any) {
 	if r.Log != nil {
 		fmt.Fprintf(r.Log, format+"\n", args...)
 	}
+}
+
+func (r *Runner) contractRetry() time.Duration {
+	if r.ContractRetry > 0 {
+		return r.ContractRetry
+	}
+	return 90 * time.Second
 }
 
 func (r *Runner) hardlink() func(string, string) *HardlinkCheck {
@@ -156,7 +167,7 @@ func (r *Runner) work(ctx context.Context, res *Result) error {
 		// qBittorrent's image re-applies its own save path at runtime, so the config
 		// seed cannot be trusted alone: set it through the API, then assert.
 		change := apps.Unchanged
-		err = apps.Retry(ctx, 90*time.Second, func(ctx context.Context) error {
+		err = apps.Retry(ctx, r.contractRetry(), func(ctx context.Context) error {
 			var e error
 			change, e = qbit.EnsureDataContract(ctx)
 			return e
@@ -253,15 +264,24 @@ func (r *Runner) work(ctx context.Context, res *Result) error {
 		}
 	}
 
-	if len(c.Instances) > 0 {
-		first := c.Instances[0]
-		check := r.hardlink()(first.SavePath, first.RootFolder)
-		res.Hardlink = check
-		if !check.OK {
-			return r.ensure(res, "data/hardlink", apps.Unchanged,
-				fmt.Errorf("hardlink proof failed: %s", check.Error))
+	// Prove every distinct download/library pair, not just the first. One claim is
+	// not one filesystem: a disk mounted on the host at, say, /data/media/movies-4k
+	// sits inside the claim, passes a tv check, and turns every 4K import into a copy.
+	proven := map[[2]string]bool{}
+	for _, inst := range c.Instances {
+		pair := [2]string{inst.SavePath, inst.RootFolder}
+		if proven[pair] {
+			continue
 		}
-		r.okStep(res, "data/hardlink", fmt.Sprintf("nlink=%d sameDevice=%v", check.Nlink, check.SameDevice))
+		proven[pair] = true
+		name := "data/hardlink/" + inst.Category
+		check := r.hardlink()(inst.SavePath, inst.RootFolder)
+		res.Hardlinks = append(res.Hardlinks, *check)
+		if !check.OK {
+			return r.ensure(res, name, apps.Unchanged,
+				fmt.Errorf("hardlink proof failed between %s and %s: %s", inst.SavePath, inst.RootFolder, check.Error))
+		}
+		r.okStep(res, name, fmt.Sprintf("nlink=%d sameDevice=%v", check.Nlink, check.SameDevice))
 	}
 
 	if r.Publish != nil {

@@ -158,7 +158,8 @@ for expected in \
   sonarr/downloadclient sonarr/rootfolder sonarr/hardlinks \
   radarr/downloadclient radarr/rootfolder radarr/hardlinks \
   prowlarr/application/sonarr prowlarr/application/radarr \
-  qbittorrent/category/tv qbittorrent/category/movies data/hardlink; do
+  qbittorrent/data-contract qbittorrent/category/tv qbittorrent/category/movies \
+  data/hardlink/tv data/hardlink/movies; do
   res=$(status_field "[s['result'] for s in d['steps'] if s['name']=='$expected'][0]" 2>/dev/null || echo missing)
   echo "  ${expected}: ${res}"; [ "$res" = ok ] || fail=1
 done

@@ -18,16 +18,19 @@ import (
 // real APIs where wiring touches them, including masked secrets and the
 // connection-test endpoints.
 type fakeStack struct {
-	mu       sync.Mutex
-	cats     map[string]string
-	clients  map[string]apps.Item // keyed "sonarr/qBittorrent"
-	folders  map[string]bool      // keyed "sonarr:/data/media/tv"
-	apps     map[string]apps.Item // prowlarr applications
-	hardlink bool
-	writes   int
-	tests    int
-	nextID   int
-	loginErr bool
+	mu          sync.Mutex
+	cats        map[string]string
+	clients     map[string]apps.Item // keyed "sonarr/qBittorrent"
+	folders     map[string]bool      // keyed "sonarr:/data/media/tv"
+	apps        map[string]apps.Item // prowlarr applications
+	hardlink    bool
+	writes      int
+	tests       int
+	nextID      int
+	loginErr    bool
+	prefs       map[string]any
+	ignorePrefs bool   // a qBittorrent that accepts setPreferences and changes nothing
+	linkFail    string // a save path whose hardlink proof fails
 }
 
 func (f *fakeStack) count() int {
@@ -50,10 +53,17 @@ func (f *fakeStack) qbitHandler() http.HandlerFunc {
 		case "/api/v2/app/version":
 			_, _ = w.Write([]byte("v5.3.0"))
 		case "/api/v2/app/preferences":
-			writeJSON(w, map[string]any{
-				"save_path":                         "/data/torrents",
-				"use_category_paths_in_manual_mode": true,
-			})
+			writeJSON(w, f.prefs)
+		case "/api/v2/app/setPreferences":
+			_ = r.ParseForm()
+			var body map[string]any
+			_ = json.Unmarshal([]byte(r.PostForm.Get("json")), &body)
+			f.writes++
+			if !f.ignorePrefs {
+				for k, v := range body {
+					f.prefs[k] = v
+				}
+			}
 		case "/api/v2/torrents/categories":
 			out := map[string]any{}
 			for name, path := range f.cats {
@@ -223,6 +233,9 @@ func newHarness(t *testing.T) *harness {
 	f := &fakeStack{
 		cats: map[string]string{}, clients: map[string]apps.Item{},
 		folders: map[string]bool{}, apps: map[string]apps.Item{}, hardlink: true,
+		// The image's own runtime default: on the config volume, category paths off.
+		prefs: map[string]any{"save_path": "/config/Downloads/", "temp_path": "/config/Downloads/temp/",
+			"use_category_paths_in_manual_mode": false},
 	}
 	qbit := httptest.NewServer(f.qbitHandler())
 	sonarr := httptest.NewServer(f.arrHandler("sonarr", "/sonarr"))
@@ -252,9 +265,13 @@ func newHarness(t *testing.T) *harness {
 		},
 	}
 	h.runner = &Runner{
-		Config: h.config,
-		Now:    func() time.Time { return time.Unix(0, 0).UTC() },
+		Config:        h.config,
+		ContractRetry: 2 * time.Second,
+		Now:           func() time.Time { return time.Unix(0, 0).UTC() },
 		HardlinkCheck: func(savePath, rootFolder string) *HardlinkCheck {
+			if savePath == f.linkFail {
+				return &HardlinkCheck{Nlink: 1, Source: savePath, Target: rootFolder, Error: "link: invalid cross-device link"}
+			}
 			return &HardlinkCheck{OK: true, Nlink: 2, SameDevice: true, Source: savePath, Target: rootFolder}
 		},
 		Publish: func(_ context.Context, data map[string]string) error {
@@ -277,12 +294,17 @@ func TestWiringIsIdempotent(t *testing.T) {
 		t.Fatalf("first run status = %s", first.Status)
 	}
 	wantCreated := 8 // 2 categories, 2 download clients, 2 root folders, 2 Prowlarr applications
-	if first.Writes.Created != wantCreated || first.Writes.Unchanged != 3 {
-		t.Fatalf("first run writes = %+v, want created=%d unchanged=3 (data contract, hardlinks)\n%s",
+	// The data contract starts on the image's default and is corrected once; the
+	// Arrs' hardlink setting starts true in the fake.
+	if first.Writes.Created != wantCreated || first.Writes.Updated != 1 || first.Writes.Unchanged != 2 {
+		t.Fatalf("first run writes = %+v, want created=%d updated=1 (data contract) unchanged=2 (hardlinks)\n%s",
 			first.Writes, wantCreated, Summary(first))
 	}
-	if first.Hardlink == nil || !first.Hardlink.OK {
-		t.Fatalf("hardlink proof missing or failed: %+v", first.Hardlink)
+	if got := h.stack.prefs["save_path"]; got != "/data/torrents" {
+		t.Fatalf("save_path after wiring = %v", got)
+	}
+	if len(first.Hardlinks) != 2 || !first.Hardlinks[0].OK || !first.Hardlinks[1].OK {
+		t.Fatalf("want one passing hardlink proof per download/library pair, got %+v", first.Hardlinks)
 	}
 
 	writesAfterFirst := h.stack.count()
@@ -333,6 +355,51 @@ func TestWiringFailsLoudlyAndStillPublishes(t *testing.T) {
 	}
 	if len(h.results) != 1 {
 		t.Fatalf("failure receipt not published")
+	}
+}
+
+// A qBittorrent that answers 200 to setPreferences but keeps its own default must
+// fail the run, not report "updated".
+func TestWiringFailsWhenQbitIgnoresPreferences(t *testing.T) {
+	h := newHarness(t)
+	h.stack.ignorePrefs = true
+	res, err := h.runner.Run(context.Background())
+	if err == nil {
+		t.Fatalf("run succeeded although qBittorrent kept its default save path\n%s", Summary(res))
+	}
+	if !strings.Contains(res.Error, "qbittorrent/data-contract") || !strings.Contains(res.Error, "save_path") {
+		t.Fatalf("error does not name the drift: %s", res.Error)
+	}
+}
+
+// A save path under /data but not the contract's root is drift, not "fine".
+func TestWiringCorrectsNearMissSavePath(t *testing.T) {
+	h := newHarness(t)
+	h.stack.prefs = map[string]any{"save_path": "/data/media/", "temp_path": "/data/torrents/temp",
+		"use_category_paths_in_manual_mode": true}
+	res, err := h.runner.Run(context.Background())
+	if err != nil {
+		t.Fatalf("run: %v\n%s", err, Summary(res))
+	}
+	if got := h.stack.prefs["save_path"]; got != "/data/torrents" {
+		t.Fatalf("save_path = %v, want /data/torrents", got)
+	}
+}
+
+// Every download/library pair is proven, so a separate filesystem mounted under one
+// library folder is caught even when the first pair links fine.
+func TestWiringProvesEveryPair(t *testing.T) {
+	h := newHarness(t)
+	h.stack.linkFail = "/data/torrents/movies"
+	res, err := h.runner.Run(context.Background())
+	if err == nil {
+		t.Fatalf("run succeeded with a cross-device movies pair\n%s", Summary(res))
+	}
+	if !strings.Contains(res.Error, "data/hardlink/movies") {
+		t.Fatalf("error does not name the failing pair: %s", res.Error)
+	}
+	if len(res.Hardlinks) != 2 || !res.Hardlinks[0].OK || res.Hardlinks[1].OK {
+		t.Fatalf("receipt hardlinks = %+v, want tv ok then movies failed", res.Hardlinks)
 	}
 }
 
