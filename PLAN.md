@@ -222,6 +222,15 @@ Dockerfile               the image the wiring Job and the qBittorrent init conta
 - `box migrate`: import a bare-metal swizzin install (Arr configs and DBs, qBittorrent
   BT_backup, paths rewritten to `/data`). This is the adoption lever, and the hard part is
   rewriting root folders and paths inside the Arr SQLite DBs.
+- Source boxes are not empty. `migrate` imports catalog apps only and leaves everything
+  else running untouched: other apps, an existing ingress controller, cert-manager,
+  monitoring. It detects shared infrastructure instead of installing a second copy.
+- Foreign clients of migrated apps (exporters, peer-ban tools, autobrr/qui before they
+  are catalog entries, a Prometheus scraping the apps) are listed by the dry run and
+  become explicit `networkPolicy` allow entries, because default-deny would otherwise
+  cut them off silently on cut-over.
+- Auto-updaters (keel, Watchtower) watching migrated workloads are reported; a digest-
+  pinned release must not be fought by one.
 - Exit: a real swizzin box is migrated in a test VM without losing anything.
 
 ## Constraints that protect the enterprise track
