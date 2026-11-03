@@ -3,6 +3,7 @@ package wiring
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -398,6 +399,44 @@ func TestWiringFailsLoudlyAndStillPublishes(t *testing.T) {
 	}
 	if len(h.results) != 1 {
 		t.Fatalf("failure receipt not published")
+	}
+}
+
+// A failed read of owned.json must stop the run rather than fall back to
+// adoption by name: a renamed owned client would be missed, duplicated, and the
+// duplicate's id would replace the real one. The published receipt must leave
+// the existing owned.json untouched.
+func TestWiringStopsWhenOwnedRecordCannotBeRead(t *testing.T) {
+	h := newHarness(t)
+	ctx := context.Background()
+	if _, err := h.runner.Run(ctx); err != nil {
+		t.Fatalf("first run: %v", err)
+	}
+	before := h.cmData["owned.json"]
+	if before == "" {
+		t.Fatal("first run recorded no owned.json")
+	}
+	writes := h.stack.count()
+
+	h.runner.LoadOwned = func(context.Context) ([]byte, error) {
+		return nil, errors.New("kubernetes API: 503: unavailable")
+	}
+	res, err := h.runner.Run(ctx)
+	if err == nil {
+		t.Fatal("run succeeded although owned.json could not be read")
+	}
+	if res.Status != "failed" || !strings.Contains(res.Error, "wiring/owned") {
+		t.Fatalf("receipt = %+v", res)
+	}
+	if got := h.stack.count(); got != writes {
+		t.Fatalf("run wrote %d times to the apps after failing to read ownership", got-writes)
+	}
+	last := h.results[len(h.results)-1]
+	if _, ok := last["owned.json"]; ok {
+		t.Fatal("failed read published an owned.json over the existing record")
+	}
+	if h.cmData["owned.json"] != before {
+		t.Fatal("owned.json changed after a failed read")
 	}
 }
 

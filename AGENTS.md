@@ -100,7 +100,9 @@ one needs a live `lookup`. The e2e asserts the policy exists in the cluster.
     is adopted, and after that the id is authoritative, so a rename is the user's
     business. A drifted owned field is restored and the receipt names the old and new
     value; a deleted owned object is recreated and reported. If the ConfigMap is gone,
-    fall back to adoption by name.
+    fall back to adoption by name. A failed *read* of it is not "gone": the run stops
+    and the existing record is left alone, because adopting by name after an API blip
+    would duplicate a renamed client and then record the duplicate.
     **Never use tags as the ownership marker.** In Sonarr and Radarr a tag on a download
     client restricts it to series/films carrying that tag, and in Prowlarr a tag on an
     application restricts which indexers sync to it. A marker tag would silently stop

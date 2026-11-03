@@ -181,32 +181,34 @@ func (r *Runner) ensureResult(res *Result, name string, result apps.EnsureResult
 	return nil
 }
 
-// loadOwned reads owned.json through LoadOwned. Any failure to read or parse
-// it — a 404, a missing key, or content that does not parse — falls back to
-// an empty record, which makes every lookup below adopt by name instead of by
-// id; fellBack tells the caller whether that happened, so the receipt can say
-// so.
-func (r *Runner) loadOwned(ctx context.Context) (rec *OwnedRecord, fellBack bool) {
+// loadOwned reads owned.json through LoadOwned. A record that is absent (a new
+// release, or a ConfigMap `helm uninstall` removed) or unparsable falls back to
+// an empty record, which makes every lookup below adopt by name; note says why,
+// so the receipt can show it.
+//
+// A failed *read* is different and stops the run. Adopting by name after a
+// transient API error would miss any owned object the user has renamed, create
+// a second one beside it, and then overwrite owned.json with the duplicate's id,
+// so a blip would turn into a permanent duplicate.
+func (r *Runner) loadOwned(ctx context.Context) (rec *OwnedRecord, note string, err error) {
 	if r.LoadOwned == nil {
 		// Ownership tracking is not wired up at all (e.g. --no-publish): there is
-		// no ConfigMap to have failed to read, so this is not worth a receipt
-		// line, just the normal adopt-by-name behavior.
-		return NewOwnedRecord(), false
+		// no ConfigMap to read, so adopt by name without a receipt line.
+		return NewOwnedRecord(), "", nil
 	}
 	raw, err := r.LoadOwned(ctx)
 	if err != nil {
-		r.logf("owned.json: %v; falling back to adoption by name", err)
-		return NewOwnedRecord(), true
+		return nil, "", fmt.Errorf("read owned.json: %w", err)
 	}
 	if raw == nil {
-		return NewOwnedRecord(), true
+		return NewOwnedRecord(), "no owned.json yet: adopting existing objects by name", nil
 	}
 	rec, perr := ParseOwnedRecord(raw)
 	if perr != nil {
 		r.logf("owned.json: %v; falling back to adoption by name", perr)
-		return NewOwnedRecord(), true
+		return NewOwnedRecord(), "owned.json unreadable: adopting existing objects by name", nil
 	}
-	return rec, false
+	return rec, "", nil
 }
 
 // okStep records a check that has no desired-state diff of its own.
@@ -225,10 +227,15 @@ func (r *Runner) work(ctx context.Context, res *Result) error {
 	// Ownership (AGENTS.md invariant 11): only an object whose id is recorded
 	// here is "ours" to update, drift-correct or recreate. Everything else,
 	// including an object merely named the same, is the user's.
-	owned, fellBack := r.loadOwned(ctx)
+	owned, note, err := r.loadOwned(ctx)
+	if err != nil {
+		// res.OwnedRecord stays nil, so the receipt is published without an
+		// owned.json key and the record already in the ConfigMap is left alone.
+		return r.ensure(res, "wiring/owned", apps.Unchanged, err)
+	}
 	res.OwnedRecord = owned
-	if fellBack {
-		r.okStep(res, "wiring/owned", "owned.json unavailable: adopting existing objects by name")
+	if note != "" {
+		r.okStep(res, "wiring/owned", note)
 	}
 
 	var qbit *apps.Qbit
