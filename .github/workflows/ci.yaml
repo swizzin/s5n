@@ -16,8 +16,13 @@ concurrency:
 
 env:
   HELM_VERSION: v4.3.0
+  # Tools come from their release binaries, checked against these sha256s, not
+  # from `go install`: setup-go pins the toolchain to go.mod with
+  # GOTOOLCHAIN=local, and kubeconform v0.8.0 needs a newer Go than s5n does.
   KUBECONFORM_VERSION: v0.8.0
+  KUBECONFORM_SHA256: 9bc2bffbf71f261128533edaf912153948b7ff238f9a531ae6d34466ec287883 # kubeconform-linux-amd64.tar.gz
   KIND_VERSION: v0.33.0
+  KIND_SHA256: aee6151561422756b764a4ae28e7f44cda5af5a9eead3cc9985112b1de8d8e0d # kind-linux-amd64
 
 jobs:
   go:
@@ -49,7 +54,12 @@ jobs:
       - uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
         with:
           version: ${{ env.HELM_VERSION }}
-      - run: go install github.com/yannh/kubeconform/cmd/kubeconform@${KUBECONFORM_VERSION}
+      - name: install kubeconform
+        run: |
+          curl -fsSLo kubeconform.tgz "https://github.com/yannh/kubeconform/releases/download/${KUBECONFORM_VERSION}/kubeconform-linux-amd64.tar.gz"
+          echo "${KUBECONFORM_SHA256}  kubeconform.tgz" | sha256sum -c -
+          mkdir -p "$HOME/.local/bin" && tar -xzf kubeconform.tgz -C "$HOME/.local/bin" kubeconform && rm kubeconform.tgz
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
       - run: hack/validate-chart.sh "${{ matrix.kubernetes }}"
 
   e2e-kind:
@@ -64,5 +74,11 @@ jobs:
       - uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
         with:
           version: ${{ env.HELM_VERSION }}
-      - run: go install sigs.k8s.io/kind@${KIND_VERSION}
+      - name: install kind
+        run: |
+          mkdir -p "$HOME/.local/bin"
+          curl -fsSLo "$HOME/.local/bin/kind" "https://github.com/kubernetes-sigs/kind/releases/download/${KIND_VERSION}/kind-linux-amd64"
+          echo "${KIND_SHA256}  $HOME/.local/bin/kind" | sha256sum -c -
+          chmod +x "$HOME/.local/bin/kind"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
       - run: hack/e2e-kind.sh
