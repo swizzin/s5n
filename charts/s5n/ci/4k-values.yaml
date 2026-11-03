@@ -1,0 +1,10 @@
+# Both 4K instances enabled: the HD/4K pair path through every template.
+apps:
+  sonarr:
+    instances:
+      - { suffix: "", category: tv, enabled: true }
+      - { suffix: 4k, category: tv-4k, enabled: true }
+  radarr:
+    instances:
+      - { suffix: "", category: movies, enabled: true }
+      - { suffix: 4k, category: movies-4k, enabled: true }
