@@ -84,7 +84,7 @@ func TestSeal(t *testing.T) {
 		"LocalHostAuth=false",
 		"AuthSubnetWhitelistEnabled=false",
 		"Port=8080",
-		`Session\DefaultSavePath=/data/torrents`,
+		`Session\DefaultSavePath=/data/downloads`,
 		`Session\UseCategoryPathsInManualMode=true`,
 		"Session\\Port=31111", // untouched
 		"MigrationVersion=12",

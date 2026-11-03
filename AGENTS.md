@@ -61,7 +61,7 @@ one needs a live `lookup`. The e2e asserts the policy exists in the cluster.
    `kubeVersion` in Chart.yaml is a floor, never a pin. No Ingress objects; HTTP is
    Gateway API `HTTPRoute` only (ingress-nginx is retired).
 3. **The data contract.** Every app mounts the same data claim at `/data`
-   (`/data/torrents/<category>`, `/data/media/<category>`) and its config at `/config`
+   (`/data/downloads/<category>`, `/data/media/<category>`) and its config at `/config`
    via `subPath: <instance-name>`. Never add a second data mount, a remote path mapping,
    or a per-app data volume. That is what keeps hardlinks working.
 4. **Pod Security `restricted` must admit every pod.** No hostPath in pod specs (hostPath

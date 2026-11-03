@@ -27,7 +27,7 @@ import (
 
 // saveRoot is where qBittorrent puts torrents that carry no category. The chart
 // mounts the release's data claim at /data; see PLAN.md's data contract.
-const saveRoot = "/data/torrents"
+const saveRoot = "/data/downloads"
 
 const (
 	// Iterations and key length are fixed by qBittorrent; changing either makes

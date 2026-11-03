@@ -62,13 +62,14 @@ Optional Tailscale exposure is a later add-on.
 Every pod mounts the same data claim at the same path, `/data`:
 
 ```
-/data/torrents/{tv,movies,tv-4k,movies-4k,music,misc}
+/data/downloads/{tv,movies,tv-4k,movies-4k,music,misc}
 /data/media/{tv,movies,tv-4k,movies-4k,music}
 ```
 
 That puts everything on one filesystem with one path, so hardlinks always work and no
-remote path mappings are needed. This is the TRaSH layout that most of the ecosystem
-already documents.
+remote path mappings are needed. This is the TRaSH single-mount layout, with `downloads` in place of `torrents` so
+the name still fits once a Usenet client shares it. The download directory is
+`downloads` by decision.
 
 - `storage.data.hostPath`: default `/srv/s5n/data`, configurable to a mounted disk
 - `storage.config.hostPath`: default `/srv/s5n/config`, one subdirectory per app instance,

@@ -13,7 +13,7 @@ import (
 
 // saveRoot is where every download must live: the release's data claim, which the
 // library is hardlinked from.
-const saveRoot = "/data/torrents"
+const saveRoot = "/data/downloads"
 
 // Qbit is the qBittorrent WebUI API. Every call after Login rides the session
 // cookie, so the client owns a jar.

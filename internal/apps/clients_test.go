@@ -84,10 +84,10 @@ func TestQbitLoginAndCategories(t *testing.T) {
 		t.Fatalf("WaitReady: %v", err)
 	}
 
-	if got, err := q.EnsureCategory(ctx, "tv", "/data/torrents/tv"); err != nil || got != Created {
+	if got, err := q.EnsureCategory(ctx, "tv", "/data/downloads/tv"); err != nil || got != Created {
 		t.Fatalf("create = %v, %v", got, err)
 	}
-	if got, err := q.EnsureCategory(ctx, "tv", "/data/torrents/tv"); err != nil || got != Unchanged {
+	if got, err := q.EnsureCategory(ctx, "tv", "/data/downloads/tv"); err != nil || got != Unchanged {
 		t.Fatalf("second = %v, %v", got, err)
 	}
 	if f.writes != 1 {

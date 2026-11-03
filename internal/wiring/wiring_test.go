@@ -259,9 +259,9 @@ func newHarness(t *testing.T) *harness {
 		Prowlarr:    &ProwlarrConfig{URL: prowlarr.URL, URLBase: "/prowlarr", SelfURL: prowlarr.URL + "/prowlarr", APIKeyFile: write("prowlarr.key", "prowlarr-key")},
 		Instances: []Instance{
 			{Name: "sonarr", Kind: "sonarr", URL: sonarr.URL, URLBase: "/sonarr", APIKeyFile: write("sonarr.key", "sonarr-key"),
-				Category: "tv", SavePath: "/data/torrents/tv", RootFolder: "/data/media/tv"},
+				Category: "tv", SavePath: "/data/downloads/tv", RootFolder: "/data/media/tv"},
 			{Name: "radarr", Kind: "radarr", URL: radarr.URL, URLBase: "/radarr", APIKeyFile: write("radarr.key", "radarr-key"),
-				Category: "movies", SavePath: "/data/torrents/movies", RootFolder: "/data/media/movies"},
+				Category: "movies", SavePath: "/data/downloads/movies", RootFolder: "/data/media/movies"},
 		},
 	}
 	h.runner = &Runner{
@@ -300,7 +300,7 @@ func TestWiringIsIdempotent(t *testing.T) {
 		t.Fatalf("first run writes = %+v, want created=%d updated=1 (data contract) unchanged=2 (hardlinks)\n%s",
 			first.Writes, wantCreated, Summary(first))
 	}
-	if got := h.stack.prefs["save_path"]; got != "/data/torrents" {
+	if got := h.stack.prefs["save_path"]; got != "/data/downloads" {
 		t.Fatalf("save_path after wiring = %v", got)
 	}
 	if len(first.Hardlinks) != 2 || !first.Hardlinks[0].OK || !first.Hardlinks[1].OK {
@@ -375,14 +375,14 @@ func TestWiringFailsWhenQbitIgnoresPreferences(t *testing.T) {
 // A save path under /data but not the contract's root is drift, not "fine".
 func TestWiringCorrectsNearMissSavePath(t *testing.T) {
 	h := newHarness(t)
-	h.stack.prefs = map[string]any{"save_path": "/data/media/", "temp_path": "/data/torrents/temp",
+	h.stack.prefs = map[string]any{"save_path": "/data/media/", "temp_path": "/data/downloads/temp",
 		"use_category_paths_in_manual_mode": true}
 	res, err := h.runner.Run(context.Background())
 	if err != nil {
 		t.Fatalf("run: %v\n%s", err, Summary(res))
 	}
-	if got := h.stack.prefs["save_path"]; got != "/data/torrents" {
-		t.Fatalf("save_path = %v, want /data/torrents", got)
+	if got := h.stack.prefs["save_path"]; got != "/data/downloads" {
+		t.Fatalf("save_path = %v, want /data/downloads", got)
 	}
 }
 
@@ -390,7 +390,7 @@ func TestWiringCorrectsNearMissSavePath(t *testing.T) {
 // library folder is caught even when the first pair links fine.
 func TestWiringProvesEveryPair(t *testing.T) {
 	h := newHarness(t)
-	h.stack.linkFail = "/data/torrents/movies"
+	h.stack.linkFail = "/data/downloads/movies"
 	res, err := h.runner.Run(context.Background())
 	if err == nil {
 		t.Fatalf("run succeeded with a cross-device movies pair\n%s", Summary(res))
@@ -407,14 +407,14 @@ func TestConfigValidation(t *testing.T) {
 	base := Config{
 		Qbittorrent: &QbitConfig{URL: "http://qbittorrent:8080", Username: "admin", PasswordFile: "/k"},
 		Instances: []Instance{{Name: "sonarr", Kind: "sonarr", URL: "http://sonarr:8989", APIKeyFile: "/k2",
-			Category: "tv", SavePath: "/data/torrents/tv", RootFolder: "/data/media/tv"}},
+			Category: "tv", SavePath: "/data/downloads/tv", RootFolder: "/data/media/tv"}},
 	}
 	if err := base.validate(); err != nil {
 		t.Fatalf("valid config rejected: %v", err)
 	}
 	bad := base
 	bad.Instances = append(bad.Instances, Instance{Name: "sonarr-4k", Kind: "sonarr", URL: "http://sonarr-4k:8989",
-		APIKeyFile: "/k3", Category: "tv", SavePath: "/data/torrents/tv-4k", RootFolder: "/data/media/tv-4k"})
+		APIKeyFile: "/k3", Category: "tv", SavePath: "/data/downloads/tv-4k", RootFolder: "/data/media/tv-4k"})
 	if err := bad.validate(); err == nil {
 		t.Fatal("two save paths for one category accepted")
 	}

@@ -34,7 +34,7 @@ $KIND load docker-image --name "$CLUSTER" "$IMAGE"
 
 log "preparing host paths inside the node (the installer does this on real hosts)"
 docker exec "${CLUSTER}-control-plane" bash -c '
-  mkdir -p /srv/s5n/data/torrents/{tv,movies,tv-4k,movies-4k,misc} \
+  mkdir -p /srv/s5n/data/downloads/{tv,movies,tv-4k,movies-4k,misc} \
            /srv/s5n/data/media/{tv,movies,tv-4k,movies-4k} \
            /srv/s5n/config/{qbittorrent,prowlarr,sonarr,sonarr-4k,radarr,radarr-4k}
   chown -R 1000:1000 /srv/s5n'
@@ -87,10 +87,10 @@ done
 code=$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:18080/qbittorrent/")
 echo "GET /qbittorrent/ via gateway -> ${code}"; [ "$code" = 200 ] || fail=1
 
-# Hardlink invariant: torrents/ and media/ are one filesystem, as seen by an Arr pod.
+# Hardlink invariant: downloads/ and media/ are one filesystem, as seen by an Arr pod.
 $K -n "$NS" exec sonarr-0 -- sh -c '
   set -e
-  f=/data/torrents/tv/.s5n-linkcheck; l=/data/media/tv/.s5n-linkcheck
+  f=/data/downloads/tv/.s5n-linkcheck; l=/data/media/tv/.s5n-linkcheck
   rm -f "$f" "$l"; echo x > "$f"; ln "$f" "$l"
   n=$(stat -c %h "$l"); d1=$(stat -c %d "$f"); d2=$(stat -c %d "$l")
   rm -f "$f" "$l"

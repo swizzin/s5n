@@ -8,7 +8,7 @@ global:
   tz: Etc/UTC
 
 # The data contract. Every app mounts the same claim at /data:
-#   /data/torrents/<category>   qBittorrent save paths
+#   /data/downloads/<category>   qBittorrent save paths
 #   /data/media/<category>      Arr root folders
 # One filesystem, one path => hardlinks always work, no remote path mappings.
 storage:

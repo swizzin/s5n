@@ -27,7 +27,7 @@ previous run's logs stay readable until then.
       "urlBase" (printf "/%s" $inst.name)
       "apiKeyFile" (printf "/etc/s5n/keys/%s-apikey" $inst.name)
       "category" $inst.category
-      "savePath" (printf "/data/torrents/%s" $inst.category)
+      "savePath" (printf "/data/downloads/%s" $inst.category)
       "rootFolder" (printf "/data/media/%s" $inst.category)) }}
 {{- end }}
 {{- end }}
