@@ -189,9 +189,21 @@ one needs a live `lookup`. The e2e asserts the policy exists in the cluster.
 
 ## Next work, in order (Phase 1)
 
-1. **Seerr + Plex/Jellyfin + Tautulli** entries (v1 catalog) and their wiring steps.
-2. Fold `hack/grab-test.sh` into CI once it no longer needs live TMDB/TVDB metadata,
+1. **Envoy Gateway in the e2e**, replacing Traefik, and the torrent port as a
+   LoadBalancer Service sharing the Gateway's address (`metallb.io/allow-shared-ip`).
+   Record Envoy Gateway's idle memory: it decides whether it stays the default on small boxes.
+2. **Plex, then Tautulli and Seerr** (v1 catalog) and their wiring steps. Plex first:
+   the other two attach to it. A missing claim token leaves the media rows `pending`
+   in the receipt rather than failing the release. Jellyfin is v1.x, not now.
+3. **Upgrade e2e**: the previous tagged chart to the current one, data and wiring intact.
+4. Fold `hack/grab-test.sh` into CI once it no longer needs live TMDB/TVDB metadata,
    then add k0s and k3s e2e (`test/e2e/`) as a nightly workflow.
+
+In parallel, outside this repo: `swizzin/qbittorrent`, the userdocs static recipe plus
+`build/libtorrent/` patches, published as `<qbit>-lt<libtorrent>` for amd64 and arm64.
+
+Phase 2 then starts with `box bootstrap`'s cluster detection and platform probes: pure Go
+over interfaces, testable without a cluster, before any Helm SDK code lands in `cmd/box`.
 
 Keep commits small. Each commit: lint + kubeconform green; chart-changing commits also
 e2e green.
