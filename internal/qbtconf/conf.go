@@ -25,6 +25,10 @@ import (
 	"strings"
 )
 
+// saveRoot is where qBittorrent puts torrents that carry no category. The chart
+// mounts the release's data claim at /data; see PLAN.md's data contract.
+const saveRoot = "/data/torrents"
+
 const (
 	// Iterations and key length are fixed by qBittorrent; changing either makes
 	// every stored login fail.
@@ -275,6 +279,15 @@ func Seal(existing []byte, username, password string, port int) (out []byte, cha
 
 	desired := []struct{ section, key, value string }{
 		{"WebUI", "Username", quote(username)},
+		// The data contract in one setting each. qBittorrent defaults its save path
+		// to a directory on the config volume, and ignores a category's path unless
+		// automatic torrent management is on — so a download from an Arr would land
+		// outside /data and could never be hardlinked into the library.
+		// qBittorrent 5 nests these under [Preferences] with QSettings-escaped keys,
+		// not in a [Session] section of their own.
+		{"Preferences", `Session\DefaultSavePath`, saveRoot},
+		{"Preferences", `Session\TempPath`, saveRoot + "/temp"},
+		{"Preferences", `Session\UseCategoryPathsInManualMode`, "true"},
 		{"WebUI", "Address", "*"},
 		{"WebUI", "Port", strconv.Itoa(port)},
 		{"WebUI", "ServerDomains", "*"},

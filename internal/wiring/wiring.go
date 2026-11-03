@@ -153,6 +153,18 @@ func (r *Runner) work(ctx context.Context, res *Result) error {
 		version, _ := qbit.Version(ctx)
 		r.okStep(res, "qbittorrent/ready", version)
 
+		// qBittorrent's image re-applies its own save path at runtime, so the config
+		// seed cannot be trusted alone: set it through the API, then assert.
+		change := apps.Unchanged
+		err = apps.Retry(ctx, 90*time.Second, func(ctx context.Context) error {
+			var e error
+			change, e = qbit.EnsureDataContract(ctx)
+			return e
+		})
+		if err := r.ensure(res, "qbittorrent/data-contract", change, err); err != nil {
+			return err
+		}
+
 		seen := map[string]bool{}
 		for _, inst := range c.Instances {
 			if seen[inst.Category] {

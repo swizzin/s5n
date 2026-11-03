@@ -2,6 +2,7 @@ package apps
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/cookiejar"
@@ -9,6 +10,10 @@ import (
 	"strings"
 	"time"
 )
+
+// saveRoot is where every download must live: the release's data claim, which the
+// library is hardlinked from.
+const saveRoot = "/data/torrents"
 
 // Qbit is the qBittorrent WebUI API. Every call after Login rides the session
 // cookie, so the client owns a jar.
@@ -73,6 +78,59 @@ func (q *Qbit) WaitReady(ctx context.Context, timeout time.Duration) error {
 func (q *Qbit) Version(ctx context.Context) (string, error) {
 	s, err := q.client.GetText(ctx, "/api/v2/app/version")
 	return strings.TrimSpace(s), err
+}
+
+// EnsureDataContract makes the two settings the /data contract depends on match,
+// then leaves them alone. qBittorrent's image starts with its save path on the config
+// volume and (with automatic torrent management off) ignores category paths, so an
+// Arr's download would land outside /data and could never be hardlinked. Seeding the
+// config file is not enough: the image re-applies its own runtime default, which is
+// why this is done through the API after the app is up.
+func (q *Qbit) EnsureDataContract(ctx context.Context) (Change, error) {
+	var prefs Item
+	if err := q.client.Get(ctx, "/api/v2/app/preferences", &prefs); err != nil {
+		return Unchanged, fmt.Errorf("read preferences: %w", err)
+	}
+	savePath, _ := prefs["save_path"].(string)
+	categoryPaths, _ := prefs["use_category_paths_in_manual_mode"].(bool)
+	if strings.HasPrefix(savePath, "/data/") && categoryPaths {
+		return Unchanged, nil
+	}
+	desired := map[string]any{
+		"save_path":                         saveRoot,
+		"temp_path":                         saveRoot + "/temp",
+		"use_category_paths_in_manual_mode": true,
+	}
+	payload, err := json.Marshal(desired)
+	if err != nil {
+		return Unchanged, fmt.Errorf("encode preferences: %w", err)
+	}
+	form := url.Values{"json": {string(payload)}}
+	if _, err := q.client.PostForm(ctx, "/api/v2/app/setPreferences", form, nil); err != nil {
+		return Unchanged, fmt.Errorf("set preferences: %w", err)
+	}
+	return Updated, nil
+}
+
+// DataContract asserts the two settings the /data contract depends on: everything
+// downloads under /data, and a categorised torrent actually uses its category's path.
+// qBittorrent's defaults fail both — its save path is on the config volume, and it
+// ignores category paths in manual mode — which silently turns hardlink imports into
+// copies, or into downloads nothing will ever import.
+func (q *Qbit) DataContract(ctx context.Context) error {
+	var prefs Item
+	if err := q.client.Get(ctx, "/api/v2/app/preferences", &prefs); err != nil {
+		return fmt.Errorf("read preferences: %w", err)
+	}
+	savePath, _ := prefs["save_path"].(string)
+	if !strings.HasPrefix(savePath, "/data/") {
+		return fmt.Errorf("save path %q is outside /data", savePath)
+	}
+	categoryPaths, _ := prefs["use_category_paths_in_manual_mode"].(bool)
+	if !categoryPaths {
+		return fmt.Errorf("category paths are not applied in manual mode, so categorised downloads land in %s", savePath)
+	}
+	return nil
 }
 
 // Category is one qBittorrent category.

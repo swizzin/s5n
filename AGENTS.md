@@ -19,6 +19,12 @@ Read `PLAN.md` first. It is the architecture; this file is how to work in the re
 - `internal/qbtconf/` — qBittorrent 5 credential hashing and `qBittorrent.conf` editing.
 - `Dockerfile` — static binary on distroless; the image the wiring Job and the
   qBittorrent init container run.
+- `hack/grab-test.sh` — the end-to-end grab: a local mock indexer (`hack/mock-indexer.py`,
+  `hack/make-torrent.py`) serves one synthetic torrent, Prowlarr syncs it to Sonarr,
+  Sonarr grabs it into qBittorrent, and the test completes the download on disk so
+  Sonarr does a real import. It asserts `nlink == 2` on the imported file. Opt-in, not
+  part of CI: it needs TMDB/TVDB metadata, and everything it handles is synthetic
+  (ffmpeg noise filed under a public-domain work).
 - `hack/e2e-kind.sh` — the acceptance test. Creates a kind cluster, installs Gateway API
   CRDs and Traefik, enforces Pod Security `restricted`, builds and loads the image,
   installs the chart, then asserts: pods Ready, routes Accepted, every app answers
@@ -108,6 +114,14 @@ one needs a live `lookup`. The e2e asserts the policy exists in the cluster.
   only generates a config when the file is *absent*, so the init container writes the
   whole `[WebUI]` section (Address, Port, ServerDomains, HostHeaderValidation,
   LocalHostAuth, whitelist, CSRF), not just credentials.
+- qBittorrent's image re-applies its own save path at runtime, so seeding
+  `qBittorrent.conf` is not enough: a fresh install still reports `/config/Downloads`,
+  which is on the config volume and can never be hardlinked. The wiring Job sets
+  `save_path`, `temp_path` and `use_category_paths_in_manual_mode` through
+  `app/setPreferences` after the app is up, then asserts them. That step is what makes
+  the data contract true rather than aspirational.
+- The session keys are QSettings-escaped in the file: `[Preferences]` with
+  `Session\DefaultSavePath` (two backslashes on disk), not a `[Session]` section.
 - Never retry a rejected qBittorrent login: five failures ban the client IP for an hour,
   and the ban answers 403 on everything, which looks like a routing fault.
 - NetworkPolicy is evaluated *after* kube-proxy DNATs a Service, so the wiring Job's
@@ -116,6 +130,11 @@ one needs a live `lookup`. The e2e asserts the policy exists in the cluster.
   both and falls back to `networkPolicy.apiServerCIDRs`.
 - Secrets mounted into a pod are owned root:fsGroup, so `defaultMode: 0440` is what a
   non-root process can read. `0400` locks it out.
+- Prowlarr does not default an indexer's `enable` to true on create, and a disabled
+  indexer is silently absent from the Arr's searches — no error, no results.
+- Sonarr and Radarr reject a release whose parsed title is not the series/film being
+  searched for, and refuse to import a file with no audio track or a runtime far below
+  the episode's (it reads as a sample). A test fixture has to look like the real thing.
 - The wiring Job is a Helm hook, so it is not a tracked release resource:
   `helm upgrade --wait` waits for it, `helm rollback` does not revert its ConfigMap
   changes, and `helm uninstall` leaves `<release>-wiring` behind.

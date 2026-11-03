@@ -49,6 +49,11 @@ func (f *fakeStack) qbitHandler() http.HandlerFunc {
 			w.WriteHeader(http.StatusNoContent)
 		case "/api/v2/app/version":
 			_, _ = w.Write([]byte("v5.3.0"))
+		case "/api/v2/app/preferences":
+			writeJSON(w, map[string]any{
+				"save_path":                         "/data/torrents",
+				"use_category_paths_in_manual_mode": true,
+			})
 		case "/api/v2/torrents/categories":
 			out := map[string]any{}
 			for name, path := range f.cats {
@@ -272,8 +277,8 @@ func TestWiringIsIdempotent(t *testing.T) {
 		t.Fatalf("first run status = %s", first.Status)
 	}
 	wantCreated := 8 // 2 categories, 2 download clients, 2 root folders, 2 Prowlarr applications
-	if first.Writes.Created != wantCreated || first.Writes.Unchanged != 2 {
-		t.Fatalf("first run writes = %+v, want created=%d unchanged=2 (hardlinks)\n%s",
+	if first.Writes.Created != wantCreated || first.Writes.Unchanged != 3 {
+		t.Fatalf("first run writes = %+v, want created=%d unchanged=3 (data contract, hardlinks)\n%s",
 			first.Writes, wantCreated, Summary(first))
 	}
 	if first.Hardlink == nil || !first.Hardlink.OK {
@@ -291,8 +296,8 @@ func TestWiringIsIdempotent(t *testing.T) {
 	if got := h.stack.count(); got != writesAfterFirst {
 		t.Fatalf("second run made %d API writes", got-writesAfterFirst)
 	}
-	if second.Writes.Unchanged != 10 {
-		t.Fatalf("second run unchanged = %d, want 10\n%s", second.Writes.Unchanged, Summary(second))
+	if second.Writes.Unchanged != 11 {
+		t.Fatalf("second run unchanged = %d, want 11\n%s", second.Writes.Unchanged, Summary(second))
 	}
 	// The connection tests still run every time: that is the proof, not a write.
 	// One download-client test per Arr plus one application test per Arr, per run.
