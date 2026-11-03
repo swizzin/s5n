@@ -23,11 +23,14 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+
+	"github.com/swizzin/s5n/internal/apps"
 )
 
-// saveRoot is where qBittorrent puts torrents that carry no category. The chart
-// mounts the release's data claim at /data; see PLAN.md's data contract.
-const saveRoot = "/data/downloads"
+// saveRoot is where qBittorrent puts torrents that carry no category. The
+// chart mounts the release's data claim at /data; see PLAN.md's data
+// contract. internal/apps.SaveRoot is the one place this path is defined.
+const saveRoot = apps.SaveRoot
 
 const (
 	// Iterations and key length are fixed by qBittorrent; changing either makes

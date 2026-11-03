@@ -11,9 +11,11 @@ import (
 	"time"
 )
 
-// saveRoot is where every download must live: the release's data claim, which the
-// library is hardlinked from.
-const saveRoot = "/data/downloads"
+// SaveRoot is where every download must live: the release's data claim, which
+// the library is hardlinked from. internal/qbtconf imports this constant
+// rather than defining its own, so the data contract's path lives in one
+// place.
+const SaveRoot = "/data/downloads"
 
 // Qbit is the qBittorrent WebUI API. Every call after Login rides the session
 // cookie, so the client owns a jar.
@@ -82,8 +84,8 @@ func (q *Qbit) Version(ctx context.Context) (string, error) {
 
 // dataContract is what qBittorrent must report for the /data contract to hold.
 var dataContract = map[string]string{
-	"save_path": saveRoot,
-	"temp_path": saveRoot + "/temp",
+	"save_path": SaveRoot,
+	"temp_path": SaveRoot + "/temp",
 }
 
 // EnsureDataContract makes the settings the /data contract depends on match, then
