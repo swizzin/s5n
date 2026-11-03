@@ -21,6 +21,10 @@ Multi-tenancy, shell pods, SSH routing (sshpiper), per-user ZFS datasets and quo
 uid allocation, user namespaces, the Kata tier, bandwidth metering and quotas
 (`s5n-meter`, torrent-only billing with grace ports), abuse controls, billing ledger.
 
+Also out of v1 entirely: a monitoring stack. s5n ships no Prometheus, Grafana or
+exporters. A user who runs their own can scrape the apps; the chart's only obligation is
+that `networkPolicy.extraHttpFrom` lets them in.
+
 v1 has to leave room for these without building them (see "Constraints that protect the
 enterprise track").
 
