@@ -53,7 +53,7 @@ managed and on by default:
 | component | role | why this one |
 |---|---|---|
 | Gateway API CRDs | standard channel | the routing contract the chart emits against |
-| MetalLB (L2) | makes `type: LoadBalancer` work on bare metal | default pool is the node's own primary IP as a /32, which works on any VPS with no extra addresses or ARP. The Gateway and the torrent port both get ordinary LoadBalancer Services, so neither needs hostNetwork or the 30000-32767 NodePort range. With one address, every Service carries the same `metallb.io/allow-shared-ip` key so they can share it on different ports |
+| MetalLB (L2) | makes `type: LoadBalancer` work on bare metal | default pool is the node's own primary IP as a /32, which works on any VPS with no extra addresses or ARP. The Gateway and the torrent port both get ordinary LoadBalancer Services, so neither needs hostNetwork or the 30000-32767 NodePort range. One address cannot be shared the way `metallb.io/allow-shared-ip` suggests: MetalLB only shares an IP between Services that are both `externalTrafficPolicy: Cluster` (which SNATs peer traffic and hides real peer IPs) or that select the exact same pods — and the Gateway's Service and the peers Service are both `Local` with different selectors. Each therefore gets its own pool address by default (verified in kind); a single-address VPS is an open decision |
 | Envoy Gateway | Gateway API implementation | the Envoy project's own Gateway controller, started by the Contour and Emissary teams on the same data plane, with a minor release roughly every quarter. Contour itself has had no minor release since 1.33 (Sept 2025), and almost all of its non-bot commits since May 2026 come from one maintainer |
 | cert-manager | TLS | Gateway API support on; HTTP-01 through the Gateway when a domain is given, self-signed otherwise |
 
@@ -87,7 +87,8 @@ skipped. `box migrate` runs the same probes, so it uses what a box already has.
 The chart itself stays platform-agnostic: it emits HTTPRoutes and one LoadBalancer or
 NodePort Service, and never depends on which implementation sits behind them.
 CI runs the chart on kind (vanilla) on every PR and on k0s + k3s nightly. The kind e2e
-still installs Traefik (`hack/traefik-values.yaml`) until it is switched to Envoy Gateway.
+installs Envoy Gateway (the chart's own CRDs) and MetalLB L2, then drives the apps
+through the Gateway's LoadBalancer address.
 
 ### Routing: Gateway API, not Ingress
 
@@ -226,7 +227,7 @@ puid:pgid, then `box init`. Every step is safe to re-run.
 - `readOnlyRootFilesystem`, all capabilities dropped, seccomp `RuntimeDefault`.
 - Default-deny NetworkPolicy, with only the needed flows allowed
   (Arr → qBittorrent, Prowlarr ↔ Arr, Seerr → Arr/media, Gateway → app).
-- Only the Gateway and the torrent port (a NodePort Service with
+- Only the Gateway and the torrent port (a LoadBalancer Service with
   `externalTrafficPolicy: Local`; hostPort is forbidden under `restricted`) are reachable
   from outside.
 - No credentials in values, in the repo, or in the wiring ConfigMap.
@@ -249,7 +250,7 @@ internal/apps/           per-app clients, shared by the Job and box
 internal/wiring/         the wiring reconciler and the receipt it publishes
 internal/qbtconf/        qBittorrent credential hashing and config editing
 install/                 installer script and k0s config fragments
-hack/                    kind config, Traefik values, e2e-kind.sh
+hack/                    kind config, Envoy Gateway manifest, e2e-kind.sh
 test/e2e/                k0s + k3s end-to-end suites (phase 1+)
 docs/
 Dockerfile               the image the wiring Job and the qBittorrent init container run

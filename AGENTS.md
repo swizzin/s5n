@@ -28,13 +28,15 @@ Read `PLAN.md` first. It is the architecture; this file is how to work in the re
   Sonarr does a real import. It asserts `nlink == 2` on the imported file. Opt-in, not
   part of CI: it needs TMDB/TVDB metadata, and everything it handles is synthetic
   (ffmpeg noise filed under a public-domain work).
-- `hack/e2e-kind.sh` — the acceptance test. Creates a kind cluster, installs Gateway API
-  CRDs and Traefik, enforces Pod Security `restricted`, builds and loads the image,
-  installs the chart, then asserts: pods Ready, routes Accepted, every app answers
-  through the Gateway, `/data` hardlinks work, NetworkPolicy allows Prowlarr→Sonarr and
-  blocks an outside pod, the wiring Job connects everything, and a second `helm upgrade`
-  performs **zero writes** with app state identical before and after. `--keep` leaves the
-  cluster up.
+- `hack/e2e-kind.sh` — the acceptance test. Creates a kind cluster, installs Envoy
+  Gateway (which brings the Gateway API CRDs) and MetalLB (L2, with a small pool carved
+  from the kind docker network), enforces Pod Security `restricted`, builds and loads the
+  image, installs the chart, then asserts: pods Ready, routes Accepted, every app answers
+  through the Gateway's LoadBalancer address, the peers Service gets its own
+  LoadBalancer address and accepts a TCP connect, `/data` hardlinks work, NetworkPolicy
+  allows Prowlarr→Sonarr and blocks an outside pod, the wiring Job connects everything,
+  and a second `helm upgrade` performs **zero writes** with app state identical before
+  and after. `--keep` leaves the cluster up.
 - `.github/workflows/ci.yaml` — every PR and push to main: gofmt/vet/`go test -race`,
   `hack/validate-chart.sh` on 1.31/1.34/1.37, then the kind e2e.
   Actions are pinned by commit SHA.
@@ -168,8 +170,24 @@ one needs a live `lookup`. The e2e asserts the policy exists in the cluster.
 - hostPath directories must exist and be owned by puid:pgid *before* install; the PV uses
   `type: Directory`. In e2e the script creates them inside the kind node; on real hosts
   the installer will.
-- The torrent port is a NodePort (default 31111), so it must sit in the cluster's
-  NodePort range (30000–32767 by default).
+- The torrent port is a LoadBalancer Service by default (31111): with MetalLB on the
+  platform layer it gets its own address, no hostPort. NodePort stays available (it must
+  then sit in the cluster's NodePort range, 30000–32767 by default); `nodePort` is only
+  rendered for NodePort.
+- Envoy Gateway deploys its Envoy proxy pods and their LoadBalancer Service in the
+  controller's namespace (`envoy-gateway-system`) in standard mode, *not* in the
+  Gateway's namespace — so `networkPolicy.gatewayFrom` defaults to a selector on
+  `envoy-gateway-system`, not the Gateway namespace.
+- MetalLB `allow-shared-ip` cannot share one address between the Gateway's Service and
+  the peers Service the way PLAN once hoped. Envoy Gateway's proxy Service and the peers
+  Service are both `externalTrafficPolicy: Local` (needed to keep real peer source IPs),
+  and MetalLB only shares an IP between Services that are both `Cluster` or select the
+  exact same pods. Both-Local with different selectors → the second Service gets
+  `AllocationFailed` ("can't change sharing key … address also in use by …") and no IP.
+  Both-`Cluster` shares the IP, but kube-proxy SNATs peer traffic at the node (conntrack
+  shows the pod replying to the node's IP, not the peer's), so qBittorrent loses real
+  peer IPs. The e2e gives the two Services separate pool addresses; a single-IP VPS must
+  solve this some other way.
 - Sonarr/Radarr/Prowlarr's `PUT`/`POST` on `downloadclient`/`applications` run the same
   validation as the UI's save button — a warning (e.g. an unused but still-present field,
   or a value the schema flags but does not hard-reject) can fail the request outright. The
