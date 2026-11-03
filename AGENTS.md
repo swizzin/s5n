@@ -9,7 +9,9 @@ Read `PLAN.md` first. It is the architecture; this file is how to work in the re
   Services, HTTPRoutes, NetworkPolicies, and `values.schema.json`, which rejects unknown
   keys, floating image tags and malformed values before anything renders.
 - `cmd/s5n/` — the one binary the image ships. Subcommands: `wiring` (the Job),
-  `qbt-config` (qBittorrent's init container), `version`. `box` lands here too.
+  `qbt-config` (qBittorrent's init container), `version`. It stays stdlib-only: `box`
+  gets its own binary, `cmd/box/`, in the same module, so the Helm SDK and client-go
+  never reach the distroless image the Job and the init container run.
 - `internal/apps/` — schema-driven HTTP clients for qBittorrent (`/api/v2`), Sonarr and
   Radarr (`/api/v3`) and Prowlarr (`/api/v1`). Every `Ensure…` reads live state, writes
   only what differs, and returns `Created`/`Updated`/`Unchanged`.

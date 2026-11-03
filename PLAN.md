@@ -173,7 +173,8 @@ It must be safe to re-run.
 
 ```
 charts/s5n/              chart, values.schema.json, ci/ values matrices
-cmd/s5n/                 one binary: wiring (the Job), qbt-config (init container), box (CLI)
+cmd/s5n/                 in-cluster binary: wiring (the Job), qbt-config (init container); stdlib only
+cmd/box/                 host CLI over the Helm SDK; never shipped in the cluster image
 internal/apps/           per-app clients, shared by the Job and box
 internal/wiring/         the wiring reconciler and the receipt it publishes
 internal/qbtconf/        qBittorrent credential hashing and config editing
