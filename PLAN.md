@@ -43,16 +43,33 @@ The chart itself is distribution-agnostic: vanilla kubeadm, k0s, k3s and managed
 all work through plain `helm install`, and nothing in the chart may depend on a distro
 add-on. `kubeVersion` is a floor only (`>=1.29`), never pinned to one release.
 
-k0s ships no ingress, Gateway, or LoadBalancer, so the installer adds:
-Gateway API CRDs (standard channel), Traefik as the Gateway implementation (hostNetwork or
-NodePort on 80/443), cert-manager, and the k0s local-path / hostPath storage.
-CI runs the chart on kind (vanilla) on every PR and on k0s + k3s nightly.
+k0s ships no ingress, Gateway, or LoadBalancer, so the box carries a **platform layer**,
+managed and on by default:
+
+| component | role | why this one |
+|---|---|---|
+| Gateway API CRDs | standard channel | the routing contract the chart emits against |
+| MetalLB (L2) | makes `type: LoadBalancer` work on bare metal | default pool is the node's own primary IP as a /32, which works on any VPS with no extra addresses or ARP. The Gateway and the torrent port both get ordinary LoadBalancer Services, so neither needs hostNetwork or the 30000-32767 NodePort range. With one address, every Service carries the same `metallb.io/allow-shared-ip` key so they can share it on different ports |
+| Envoy Gateway | Gateway API implementation | the Envoy project's own Gateway controller, started by the Contour and Emissary teams on the same data plane, with a minor release roughly every quarter. Contour itself has had no minor release since 1.33 (Sept 2025), and almost all of its non-bot commits since May 2026 come from one maintainer |
+| cert-manager | TLS | Gateway API support on; HTTP-01 through the Gateway when a domain is given, self-signed otherwise |
+
+Each is its own Helm release pinned by `box`, with `platform.<component>.managed: true` by
+default. Setting it false means "the cluster already has one": `box` then checks for it
+instead of installing it (a GatewayClass that accepts the Gateway, a cert-manager whose
+version supports Gateway API, a LoadBalancer Service that actually gets an address) and
+refuses to continue if the check fails. `box migrate` sets these from what it finds
+rather than installing a second copy beside an existing one.
+
+The chart itself stays platform-agnostic: it emits HTTPRoutes and one LoadBalancer or
+NodePort Service, and never depends on which implementation sits behind them.
+CI runs the chart on kind (vanilla) on every PR and on k0s + k3s nightly. The kind e2e
+still installs Traefik (`hack/traefik-values.yaml`) until it is switched to Envoy Gateway.
 
 ### Routing: Gateway API, not Ingress
 
 ingress-nginx was retired in March 2026, so a new project must not start on it. The chart
-emits `HTTPRoute`s against one `Gateway`. The installer deploys Traefik with its Gateway provider enabled
-(`hack/traefik-values.yaml` is the reference config). Every app gets a path under one
+emits `HTTPRoute`s against one `Gateway`, served by Envoy Gateway on a managed install
+(see the platform layer above). Every app gets a path under one
 host (`https://box.example.com/sonarr`), matching swizzin's URL habits.
 TLS: cert-manager with Let's Encrypt HTTP-01 when a domain is given, self-signed otherwise.
 Optional Tailscale exposure is a later add-on.
@@ -147,7 +164,7 @@ merges and diffs; it never regenerates the file from scratch.
 ### Installer
 
 `curl -fsSL get.<domain> | bash`: checks the OS, installs k0s (single node, pinned version), Gateway API CRDs,
-Traefik as the Gateway, cert-manager, creates `/srv/s5n/{data,config}` owned by puid:pgid, installs `box`, runs `box init`.
+then the managed platform layer (MetalLB, Envoy Gateway, cert-manager), creates `/srv/s5n/{data,config}` owned by puid:pgid, installs `box`, runs `box init`.
 It must be safe to re-run.
 
 ### Default hardening (the community box finally gets it)
