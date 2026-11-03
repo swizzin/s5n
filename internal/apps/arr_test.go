@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -151,8 +152,14 @@ func TestEnsureDownloadClientIsIdempotent(t *testing.T) {
 		Username: "admin", Password: "hunter2",
 	}
 
-	if got, err := arr.EnsureDownloadClient(ctx, spec); err != nil || got != Created {
-		t.Fatalf("first ensure = %v, %v; want created", got, err)
+	// ownedID 0: nothing recorded yet, so this both creates and tells the
+	// caller the new id to record.
+	result, err := arr.EnsureDownloadClient(ctx, spec, 0)
+	if err != nil || result.Change != Created {
+		t.Fatalf("first ensure = %+v, %v; want created", result, err)
+	}
+	if result.ID == 0 {
+		t.Fatal("created client has no id to record")
 	}
 	if len(f.clients) != 1 || f.writes != 1 {
 		t.Fatalf("writes = %d, clients = %d; want 1", f.writes, len(f.clients))
@@ -170,8 +177,12 @@ func TestEnsureDownloadClientIsIdempotent(t *testing.T) {
 
 	// The API never returns the password; the second run must still be a no-op.
 	f.maskedClients()
-	if got, err := arr.EnsureDownloadClient(ctx, spec); err != nil || got != Unchanged {
-		t.Fatalf("second ensure = %v, %v; want unchanged", got, err)
+	result, err = arr.EnsureDownloadClient(ctx, spec, result.ID)
+	if err != nil || result.Change != Unchanged {
+		t.Fatalf("second ensure = %+v, %v; want unchanged", result, err)
+	}
+	if len(result.Drift) != 0 {
+		t.Fatalf("second ensure reported drift: %+v", result.Drift)
 	}
 	if f.writes != 1 {
 		t.Fatalf("second run wrote %d times, want 0 more", f.writes-1)
@@ -185,18 +196,202 @@ func TestEnsureDownloadClientRepairsDrift(t *testing.T) {
 	f, arr, _ := newFakeArr(t, "/sonarr")
 	ctx := context.Background()
 	spec := DownloadClientSpec{Name: "qBittorrent", Category: "tv", Host: "qbittorrent", Port: 8080, Username: "admin", Password: "hunter2"}
-	if _, err := arr.EnsureDownloadClient(ctx, spec); err != nil {
+	first, err := arr.EnsureDownloadClient(ctx, spec, 0)
+	if err != nil {
 		t.Fatal(err)
 	}
 	// Someone pointed the client at the wrong host.
 	f.clients[0].SetField("host", "localhost")
 	f.maskedClients()
 
-	if got, err := arr.EnsureDownloadClient(ctx, spec); err != nil || got != Updated {
-		t.Fatalf("ensure after drift = %v, %v; want updated", got, err)
+	result, err := arr.EnsureDownloadClient(ctx, spec, first.ID)
+	if err != nil || result.Change != Updated {
+		t.Fatalf("ensure after drift = %+v, %v; want updated", result, err)
 	}
 	if v, _ := f.clients[0].FieldValue("host"); v != "qbittorrent" {
 		t.Fatalf("host not repaired: %v", v)
+	}
+	if len(result.Drift) != 1 || result.Drift[0].Field != "host" || result.Drift[0].Old != "localhost" || result.Drift[0].New != "qbittorrent" {
+		t.Fatalf("drift not reported correctly: %+v", result.Drift)
+	}
+}
+
+// A field the wiring Job does not own (priority, here) must survive an
+// ensure even though it differs from what Create would have written: the
+// object already exists and is being overlaid, not replaced.
+func TestEnsureDownloadClientSurvivesNonOwnedFieldChange(t *testing.T) {
+	f, arr, _ := newFakeArr(t, "/sonarr")
+	ctx := context.Background()
+	spec := DownloadClientSpec{Name: "qBittorrent", Category: "tv", Host: "qbittorrent", Port: 8080, Username: "admin", Password: "hunter2"}
+	first, err := arr.EnsureDownloadClient(ctx, spec, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The user changed the client's priority and tags in the Sonarr UI.
+	f.clients[0]["priority"] = 7
+	f.clients[0]["tags"] = []any{"anime"}
+	f.maskedClients()
+
+	if result, err := arr.EnsureDownloadClient(ctx, spec, first.ID); err != nil || result.Change != Unchanged {
+		t.Fatalf("ensure over a non-owned change = %+v, %v; want unchanged", result, err)
+	}
+	if got := f.clients[0].Int("priority"); got != 7 {
+		t.Fatalf("priority was overwritten: %d", got)
+	}
+	if got := f.clients[0].TagList("tags"); len(got) != 1 || got[0] != "anime" {
+		t.Fatalf("tags were overwritten: %v", got)
+	}
+}
+
+// A rename in the Sonarr UI must not cause a second client to be created: the
+// recorded id is what makes an object "ours", not its name.
+func TestEnsureDownloadClientFollowsRename(t *testing.T) {
+	f, arr, _ := newFakeArr(t, "/sonarr")
+	ctx := context.Background()
+	spec := DownloadClientSpec{Name: "qBittorrent", Category: "tv", Host: "qbittorrent", Port: 8080, Username: "admin", Password: "hunter2"}
+	first, err := arr.EnsureDownloadClient(ctx, spec, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.clients[0]["name"] = "qBit (renamed)"
+	f.clients[0].SetField("tvCategory", "something-else")
+	f.maskedClients()
+
+	result, err := arr.EnsureDownloadClient(ctx, spec, first.ID)
+	if err != nil || result.Change != Updated {
+		t.Fatalf("ensure after rename = %+v, %v; want updated", result, err)
+	}
+	if len(f.clients) != 1 {
+		t.Fatalf("rename caused a duplicate: %d clients", len(f.clients))
+	}
+	if f.clients[0]["name"] != "qBit (renamed)" {
+		t.Fatalf("name was touched: %v", f.clients[0]["name"])
+	}
+	if v, _ := f.clients[0].FieldValue("tvCategory"); v != "tv" {
+		t.Fatalf("category not restored after rename: %v", v)
+	}
+}
+
+// A deleted owned client must be recreated, not silently dropped, and the
+// receipt must be able to say what the old id was.
+func TestEnsureDownloadClientRecreatesWhenDeleted(t *testing.T) {
+	f, arr, _ := newFakeArr(t, "/sonarr")
+	ctx := context.Background()
+	spec := DownloadClientSpec{Name: "qBittorrent", Category: "tv", Host: "qbittorrent", Port: 8080, Username: "admin", Password: "hunter2"}
+	first, err := arr.EnsureDownloadClient(ctx, spec, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.clients = nil // the user deleted the client entirely
+
+	result, err := arr.EnsureDownloadClient(ctx, spec, first.ID)
+	if err != nil || result.Change != Created || !result.Recreated || result.PreviousID != first.ID {
+		t.Fatalf("recreate after delete = %+v, %v", result, err)
+	}
+	if result.ID == 0 || result.ID == first.ID {
+		t.Fatalf("recreated client did not get a fresh id: %d (previous %d)", result.ID, first.ID)
+	}
+	if len(f.clients) != 1 {
+		t.Fatalf("recreate left %d clients, want 1", len(f.clients))
+	}
+}
+
+// With no owned.json (ownedID 0), an existing client named spec.Name is
+// adopted rather than duplicated, and its id comes back so the caller can
+// record it.
+func TestEnsureDownloadClientAdoptsByNameWithoutOwnedID(t *testing.T) {
+	f, arr, _ := newFakeArr(t, "/sonarr")
+	ctx := context.Background()
+	spec := DownloadClientSpec{Name: "qBittorrent", Category: "tv", Host: "qbittorrent", Port: 8080, Username: "admin", Password: "hunter2"}
+	first, err := arr.EnsureDownloadClient(ctx, spec, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.maskedClients()
+
+	// Simulate a fresh process with no owned.json: ownedID 0 again, against the
+	// very same live client.
+	result, err := arr.EnsureDownloadClient(ctx, spec, 0)
+	if err != nil || result.Change != Unchanged || result.ID != first.ID {
+		t.Fatalf("adopt by name = %+v, %v; want unchanged with id %d", result, err, first.ID)
+	}
+	if len(f.clients) != 1 {
+		t.Fatalf("adoption created a duplicate: %d clients", len(f.clients))
+	}
+}
+
+// A second download client the user added by hand is never written to, never
+// tested, and never mistaken for the owned one.
+func TestEnsureDownloadClientNeverTouchesUserAddedSecondClient(t *testing.T) {
+	f, arr, _ := newFakeArr(t, "/sonarr")
+	ctx := context.Background()
+	spec := DownloadClientSpec{Name: "qBittorrent", Category: "tv", Host: "qbittorrent", Port: 8080, Username: "admin", Password: "hunter2"}
+	first, err := arr.EnsureDownloadClient(ctx, spec, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.nextID++
+	mine := Item{"id": f.nextID, "name": "mine", "implementation": "Transmission", "priority": 3, "tags": []any{}}
+	f.clients = append(f.clients, mine)
+	// A shallow copy, not Clone(): Clone round-trips through JSON and would
+	// turn the literal's int fields into float64, making the comparison below
+	// about this test's fixture instead of about what the Job wrote.
+	before := Item{}
+	for k, v := range mine {
+		before[k] = v
+	}
+	writesBefore, testsBefore := f.writes, f.tests
+
+	if result, err := arr.EnsureDownloadClient(ctx, spec, first.ID); err != nil || result.Change != Unchanged {
+		t.Fatalf("ensure with a user-added client present = %+v, %v", result, err)
+	}
+	if f.writes != writesBefore {
+		t.Fatalf("the user-added client was written to: %d extra writes", f.writes-writesBefore)
+	}
+	if f.tests != testsBefore+1 {
+		t.Fatalf("connection tests = %d, want exactly 1 more (the owned client only)", f.tests-testsBefore)
+	}
+	for _, c := range f.clients {
+		if c.Int("id") == mine.Int("id") {
+			if !reflect.DeepEqual(c, before) {
+				t.Fatalf("user-added client changed: got %+v, want %+v", c, before)
+			}
+			return
+		}
+	}
+	t.Fatal("user-added client disappeared")
+}
+
+// A masked password must never be written back as if it were the real
+// secret, and it must never appear in the receipt's drift list.
+func TestEnsureDownloadClientNeverLeaksMaskedSecret(t *testing.T) {
+	f, arr, _ := newFakeArr(t, "/sonarr")
+	ctx := context.Background()
+	spec := DownloadClientSpec{Name: "qBittorrent", Category: "tv", Host: "qbittorrent", Port: 8080, Username: "admin", Password: "hunter2"}
+	first, err := arr.EnsureDownloadClient(ctx, spec, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.maskedClients()
+	// Also drift an owned field so an update (and a PUT body) actually happens.
+	f.clients[0].SetField("host", "localhost")
+
+	result, err := arr.EnsureDownloadClient(ctx, spec, first.ID)
+	if err != nil || result.Change != Updated {
+		t.Fatalf("ensure = %+v, %v", result, err)
+	}
+	for _, d := range result.Drift {
+		if strings.Contains(d.Field, "password") || strings.Contains(d.Old, "hunter2") || strings.Contains(d.New, "hunter2") {
+			t.Fatalf("secret leaked into drift: %+v", d)
+		}
+	}
+	if v, _ := f.clients[0].FieldValue("password"); v != "hunter2" {
+		t.Fatalf("PUT body did not carry the real password forward: %v", v)
+	}
+	// The masked placeholder must never have been written back as the secret.
+	b, _ := json.Marshal(f.clients[0])
+	if strings.Contains(string(b), "********") {
+		t.Fatalf("masked placeholder ended up in the stored client: %s", b)
 	}
 }
 

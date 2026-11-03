@@ -166,17 +166,27 @@ one needs a live `lookup`. The e2e asserts the policy exists in the cluster.
   the installer will.
 - The torrent port is a NodePort (default 31111), so it must sit in the cluster's
   NodePort range (30000–32767 by default).
+- Sonarr/Radarr/Prowlarr's `PUT`/`POST` on `downloadclient`/`applications` run the same
+  validation as the UI's save button — a warning (e.g. an unused but still-present field,
+  or a value the schema flags but does not hard-reject) can fail the request outright. The
+  real API accepts `?forceSave=true` on those calls to save anyway, same as the UI's own
+  "Save Anyway" prompt; the e2e's hand-edits through the app APIs use it so a test
+  fixture's quirks do not block the thing actually under test.
+- Overlaying owned fields onto the *live* object (instead of a fresh schema template) means
+  a masked secret (`********`) is never read as the live value — `MatchesFields`'s masked-value
+  skip still matters, but the overlay itself goes one step further and never even compares a
+  secret field; it always writes the spec's real value over whatever was there, masked or not.
+  The one failure mode to watch for is the reverse: never write the *masked placeholder* back
+  as if it were the secret. Since the overlay source of truth for a secret field is always
+  `spec.Password`/`spec.APIKey`, not the live value, this cannot happen by construction — but
+  it is exactly the invariant the apps-level tests assert directly (`internal/apps/arr_test.go`'s
+  `TestEnsureDownloadClientNeverLeaksMaskedSecret`), because the overlay is new code and it
+  would have been easy to accidentally route the live (masked) value back into the PUT body.
 
 ## Next work, in order (Phase 1)
 
-1. **Narrow ownership (invariant 11)** in the existing `Ensure…` steps, before any new
-   app copies the current pattern: `owned.json` in the wiring ConfigMap, overlay onto the
-   live object, drift restored and reported in the receipt, and an e2e case that edits a
-   non-owned field and an owned field through the app API and asserts one survives the upgrade
-   and the other is restored and reported. Make Prowlarr's implementation mapping a switch
-   that errors on an unknown kind (it falls through to Sonarr today).
-2. **Seerr + Plex/Jellyfin + Tautulli** entries (v1 catalog) and their wiring steps.
-3. Fold `hack/grab-test.sh` into CI once it no longer needs live TMDB/TVDB metadata,
+1. **Seerr + Plex/Jellyfin + Tautulli** entries (v1 catalog) and their wiring steps.
+2. Fold `hack/grab-test.sh` into CI once it no longer needs live TMDB/TVDB metadata,
    then add k0s and k3s e2e (`test/e2e/`) as a nightly workflow.
 
 Keep commits small. Each commit: lint + kubeconform green; chart-changing commits also

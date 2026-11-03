@@ -101,6 +101,23 @@ func (p *Publisher) Upsert(ctx context.Context, name string, data map[string]str
 	}
 }
 
+// Get reads one key from the ConfigMap. ok is false, with no error, when the
+// ConfigMap or the key does not exist: that is the normal shape of a release's
+// first run, not a fault, so the wiring Job can fall back to adopting existing
+// objects by name without treating absence as a hard failure.
+func (p *Publisher) Get(ctx context.Context, name, key string) (value string, ok bool, err error) {
+	path := fmt.Sprintf("%s/api/v1/namespaces/%s/configmaps/%s", p.BaseURL, p.Namespace, name)
+	var cur configMap
+	if err := p.do(ctx, http.MethodGet, path, nil, &cur); err != nil {
+		if isStatus(err, http.StatusNotFound) {
+			return "", false, nil
+		}
+		return "", false, err
+	}
+	v, found := cur.Data[key]
+	return v, found, nil
+}
+
 type apiError struct {
 	Status int
 	Body   string

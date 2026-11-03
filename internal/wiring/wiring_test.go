@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -20,9 +21,9 @@ import (
 type fakeStack struct {
 	mu          sync.Mutex
 	cats        map[string]string
-	clients     map[string]apps.Item // keyed "sonarr/qBittorrent"
-	folders     map[string]bool      // keyed "sonarr:/data/media/tv"
-	apps        map[string]apps.Item // prowlarr applications
+	clients     map[string][]apps.Item // keyed by Arr instance name; each client carries an id
+	folders     map[string]bool        // keyed "sonarr:/data/media/tv"
+	apps        []apps.Item            // prowlarr applications, flat, each carries an id
 	hardlink    bool
 	writes      int
 	tests       int
@@ -115,7 +116,7 @@ func (f *fakeStack) arrHandler(instance, urlBase string) http.HandlerFunc {
 			}})
 		case p == "/api/v3/downloadclient" && r.Method == http.MethodGet:
 			out := []apps.Item{}
-			if c, ok := f.clients[instance]; ok {
+			for _, c := range f.clients[instance] {
 				out = append(out, maskedItem(c, "password"))
 			}
 			writeJSON(w, out)
@@ -124,12 +125,24 @@ func (f *fakeStack) arrHandler(instance, urlBase string) http.HandlerFunc {
 			_ = json.NewDecoder(r.Body).Decode(&body)
 			f.nextID++
 			body["id"] = f.nextID
-			f.clients[instance] = body
+			f.clients[instance] = append(f.clients[instance], body)
 			f.writes++
 			writeJSON(w, body)
 		case strings.HasSuffix(p, "/downloadclient/test"):
 			f.tests++
 			writeJSON(w, map[string]any{"ok": true})
+		case strings.HasPrefix(p, "/api/v3/downloadclient/") && r.Method == http.MethodPut:
+			var body apps.Item
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			for i, c := range f.clients[instance] {
+				if c.Int("id") == body.Int("id") {
+					f.clients[instance][i] = body
+					f.writes++
+					writeJSON(w, body)
+					return
+				}
+			}
+			http.Error(w, "not found", http.StatusNotFound)
 		case p == "/api/v3/rootfolder" && r.Method == http.MethodGet:
 			out := []apps.Item{}
 			for key := range f.folders {
@@ -191,12 +204,24 @@ func (f *fakeStack) prowlarrHandler() http.HandlerFunc {
 			_ = json.NewDecoder(r.Body).Decode(&body)
 			f.nextID++
 			body["id"] = f.nextID
-			f.apps[body.Str("name")] = body
+			f.apps = append(f.apps, body)
 			f.writes++
 			writeJSON(w, body)
 		case p == "/api/v1/applications/test":
 			f.tests++
 			writeJSON(w, map[string]any{"ok": true})
+		case strings.HasPrefix(p, "/api/v1/applications/") && r.Method == http.MethodPut:
+			var body apps.Item
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			for i, a := range f.apps {
+				if a.Int("id") == body.Int("id") {
+					f.apps[i] = body
+					f.writes++
+					writeJSON(w, body)
+					return
+				}
+			}
+			http.Error(w, "not found", http.StatusNotFound)
 		default:
 			http.Error(w, "unexpected "+r.Method+" "+r.URL.Path, http.StatusNotFound)
 		}
@@ -226,13 +251,18 @@ type harness struct {
 	runner  *Runner
 	dir     string
 	results []map[string]string
+	// cmData models the `<release>-wiring` ConfigMap across runs, the same way
+	// Publisher.Upsert merges keys without blanking ones it was not asked to
+	// write. LoadOwned reads owned.json back out of it, so a test can run the
+	// Runner twice and see ownership survive exactly as it would in the cluster.
+	cmData map[string]string
 }
 
 func newHarness(t *testing.T) *harness {
 	t.Helper()
 	f := &fakeStack{
-		cats: map[string]string{}, clients: map[string]apps.Item{},
-		folders: map[string]bool{}, apps: map[string]apps.Item{}, hardlink: true,
+		cats: map[string]string{}, clients: map[string][]apps.Item{},
+		folders: map[string]bool{}, hardlink: true,
 		// The image's own runtime default: on the config volume, category paths off.
 		prefs: map[string]any{"save_path": "/config/Downloads/", "temp_path": "/config/Downloads/temp/",
 			"use_category_paths_in_manual_mode": false},
@@ -276,7 +306,20 @@ func newHarness(t *testing.T) *harness {
 		},
 		Publish: func(_ context.Context, data map[string]string) error {
 			h.results = append(h.results, data)
+			if h.cmData == nil {
+				h.cmData = map[string]string{}
+			}
+			for k, v := range data {
+				h.cmData[k] = v
+			}
 			return nil
+		},
+		LoadOwned: func(_ context.Context) ([]byte, error) {
+			v, ok := h.cmData["owned.json"]
+			if !ok {
+				return nil, nil
+			}
+			return []byte(v), nil
 		},
 	}
 	return h
@@ -400,6 +443,129 @@ func TestWiringProvesEveryPair(t *testing.T) {
 	}
 	if len(res.Hardlinks) != 2 || !res.Hardlinks[0].OK || res.Hardlinks[1].OK {
 		t.Fatalf("receipt hardlinks = %+v, want tv ok then movies failed", res.Hardlinks)
+	}
+}
+
+// stepByName finds one step in the receipt, failing the test if it is absent.
+func stepByName(t *testing.T, res *Result, name string) Step {
+	t.Helper()
+	for _, s := range res.Steps {
+		if s.Name == name {
+			return s
+		}
+	}
+	t.Fatalf("no step %q in receipt:\n%s", name, Summary(res))
+	return Step{}
+}
+
+// With no owned.json yet, the first run adopts by name and records the id it
+// found, so a second process (or a restarted Job) has something to trust.
+func TestWiringRecordsOwnershipOnFirstRun(t *testing.T) {
+	h := newHarness(t)
+	res, err := h.runner.Run(context.Background())
+	if err != nil {
+		t.Fatalf("run: %v\n%s", err, Summary(res))
+	}
+	raw, ok := h.cmData["owned.json"]
+	if !ok {
+		t.Fatal("owned.json was not published")
+	}
+	rec, err := ParseOwnedRecord([]byte(raw))
+	if err != nil {
+		t.Fatalf("owned.json did not parse: %v", err)
+	}
+	if rec.ArrDownloadClientID("sonarr") == 0 || rec.ArrDownloadClientID("radarr") == 0 {
+		t.Fatalf("download client ids not recorded: %+v", rec.Arr)
+	}
+	if rec.ProwlarrApplicationID("sonarr") == 0 || rec.ProwlarrApplicationID("radarr") == 0 {
+		t.Fatalf("prowlarr application ids not recorded: %+v", rec.Prowlarr)
+	}
+}
+
+// A rename in the Sonarr UI, an owned field drifted (tvCategory), and a
+// non-owned field changed (priority) must all be handled correctly on the
+// next run: the rename is left alone (found by id), the owned field is
+// restored and reported with old/new, and the non-owned field survives.
+func TestWiringFollowsRenameRestoresOwnedDriftKeepsNonOwned(t *testing.T) {
+	h := newHarness(t)
+	if _, err := h.runner.Run(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	client := &h.stack.clients["sonarr"][0]
+	(*client)["name"] = "qBit (renamed)"
+	(*client)["priority"] = 7
+	client.SetField("tvCategory", "user-edit")
+
+	res, err := h.runner.Run(context.Background())
+	if err != nil {
+		t.Fatalf("second run: %v\n%s", err, Summary(res))
+	}
+	if len(h.stack.clients["sonarr"]) != 1 {
+		t.Fatalf("rename caused a duplicate client: %d", len(h.stack.clients["sonarr"]))
+	}
+	if h.stack.clients["sonarr"][0]["name"] != "qBit (renamed)" {
+		t.Fatal("rename was reverted; names are not owned")
+	}
+	if got := h.stack.clients["sonarr"][0].Int("priority"); got != 7 {
+		t.Fatalf("priority (not owned) was overwritten: %d", got)
+	}
+	if v, _ := h.stack.clients["sonarr"][0].FieldValue("tvCategory"); v != "tv" {
+		t.Fatalf("tvCategory (owned) was not restored: %v", v)
+	}
+
+	step := stepByName(t, res, "sonarr/downloadclient")
+	if step.Result != "ok" || step.Detail != "updated" {
+		t.Fatalf("sonarr/downloadclient step = %+v", step)
+	}
+	if len(step.Drift) != 1 || step.Drift[0].Field != "tvCategory" ||
+		step.Drift[0].Old != "user-edit" || step.Drift[0].New != "tv" {
+		t.Fatalf("drift not reported: %+v", step.Drift)
+	}
+}
+
+// A deleted owned download client is recreated, and the receipt says so by
+// naming the id that is now gone.
+func TestWiringRecreatesDeletedOwnedDownloadClient(t *testing.T) {
+	h := newHarness(t)
+	if _, err := h.runner.Run(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	oldID := h.stack.clients["radarr"][0].Int("id")
+	h.stack.clients["radarr"] = nil
+
+	res, err := h.runner.Run(context.Background())
+	if err != nil {
+		t.Fatalf("second run: %v\n%s", err, Summary(res))
+	}
+	step := stepByName(t, res, "radarr/downloadclient")
+	if step.Result != "ok" || !strings.Contains(step.Detail, "recreated") || !strings.Contains(step.Detail, strconv.Itoa(oldID)) {
+		t.Fatalf("radarr/downloadclient step = %+v, want recreated mentioning id %d", step, oldID)
+	}
+	if len(h.stack.clients["radarr"]) != 1 {
+		t.Fatalf("recreate left %d clients", len(h.stack.clients["radarr"]))
+	}
+	rec, err := ParseOwnedRecord([]byte(h.cmData["owned.json"]))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rec.ArrDownloadClientID("radarr") == oldID || rec.ArrDownloadClientID("radarr") == 0 {
+		t.Fatalf("owned.json still points at the deleted id %d: got %d", oldID, rec.ArrDownloadClientID("radarr"))
+	}
+}
+
+// An unknown Arr kind has no Prowlarr application implementation, and must
+// fail loudly rather than silently registering as Sonarr (the old default).
+func TestWiringUnknownProwlarrKindErrors(t *testing.T) {
+	h := newHarness(t)
+	h.runner.Config.Instances[0].Kind = "lidarr"
+
+	res, err := h.runner.Run(context.Background())
+	if err == nil {
+		t.Fatalf("run succeeded with an unknown Arr kind\n%s", Summary(res))
+	}
+	if !strings.Contains(err.Error(), "unknown Arr kind") {
+		t.Fatalf("error does not name the problem: %v", err)
 	}
 }
 

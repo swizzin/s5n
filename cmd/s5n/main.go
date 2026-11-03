@@ -72,6 +72,16 @@ func runWiring(args []string) error {
 		runner.Publish = func(ctx context.Context, data map[string]string) error {
 			return pub.Upsert(ctx, cfg.ConfigMap, data)
 		}
+		runner.LoadOwned = func(ctx context.Context) ([]byte, error) {
+			v, ok, err := pub.Get(ctx, cfg.ConfigMap, "owned.json")
+			if err != nil {
+				return nil, err
+			}
+			if !ok {
+				return nil, nil
+			}
+			return []byte(v), nil
+		}
 	}
 	ctx, cancel := cfg.Context(context.Background())
 	defer cancel()

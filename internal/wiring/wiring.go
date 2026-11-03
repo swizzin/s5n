@@ -21,15 +21,20 @@ type Writes struct {
 	Unchanged int `json:"unchanged"`
 }
 
-// Step is one line of the receipt: what was checked and what it cost.
+// Step is one line of the receipt: what was checked and what it cost. Drift
+// lists owned fields that had been changed on the live object and were
+// restored; a secret field is never represented in it (see apps.ownedField).
 type Step struct {
-	Name   string `json:"name"`
-	Result string `json:"result"` // ok | skipped | failed
-	Detail string `json:"detail,omitempty"`
+	Name   string             `json:"name"`
+	Result string             `json:"result"` // ok | skipped | failed
+	Detail string             `json:"detail,omitempty"`
+	Drift  []apps.FieldChange `json:"drift,omitempty"`
 }
 
 // Result is the whole receipt, written to the wiring ConfigMap so that `box
-// status` and a human with kubectl can both read it.
+// status` and a human with kubectl can both read it. OwnedRecord is published
+// separately as owned.json (see Render) rather than embedded in status.json,
+// so it is excluded from this struct's own JSON.
 type Result struct {
 	Status          string          `json:"status"` // ok | failed
 	StartedAt       time.Time       `json:"startedAt"`
@@ -39,6 +44,7 @@ type Result struct {
 	Steps           []Step          `json:"steps"`
 	Hardlinks       []HardlinkCheck `json:"hardlinks,omitempty"`
 	Error           string          `json:"error,omitempty"`
+	OwnedRecord     *OwnedRecord    `json:"-"`
 }
 
 // Runner executes the wiring. Log receives human-readable progress lines.
@@ -54,6 +60,11 @@ type Runner struct {
 	// contract, since its image can re-apply its own default after start-up.
 	// Zero means 90 seconds.
 	ContractRetry time.Duration
+	// LoadOwned reads owned.json from the wiring ConfigMap, returning nil with
+	// no error when the key or the ConfigMap is absent. It is injectable, like
+	// Publish, so unit tests need no cluster; nil means ownership is never
+	// recorded, so every run adopts by name.
+	LoadOwned func(ctx context.Context) ([]byte, error)
 }
 
 func (r *Runner) now() time.Time {
@@ -135,6 +146,69 @@ func (r *Runner) ensure(res *Result, name string, change apps.Change, err error)
 	return nil
 }
 
+// ensureResult is ensure's counterpart for an owned object: it records drift
+// (an owned field that was restored) and a recreated object's previous id in
+// the step detail, on top of counting the write.
+func (r *Runner) ensureResult(res *Result, name string, result apps.EnsureResult, err error) error {
+	if err != nil {
+		res.Steps = append(res.Steps, Step{Name: name, Result: "failed", Detail: err.Error()})
+		r.logf("  %-38s failed: %v", name, err)
+		return fmt.Errorf("%s: %w", name, err)
+	}
+	switch result.Change {
+	case apps.Created:
+		res.Writes.Created++
+	case apps.Updated:
+		res.Writes.Updated++
+	case apps.Skipped:
+		res.Steps = append(res.Steps, Step{Name: name, Result: "skipped"})
+		r.logf("  %-38s skipped", name)
+		return nil
+	default:
+		res.Writes.Unchanged++
+	}
+	detail := result.Change.String()
+	if result.Recreated {
+		detail = fmt.Sprintf("recreated (previous id %d)", result.PreviousID)
+	}
+	step := Step{Name: name, Result: "ok", Detail: detail, Drift: result.Drift}
+	res.Steps = append(res.Steps, step)
+	if len(result.Drift) > 0 {
+		r.logf("  %-38s %s (%d field(s) restored)", name, detail, len(result.Drift))
+	} else {
+		r.logf("  %-38s %s", name, detail)
+	}
+	return nil
+}
+
+// loadOwned reads owned.json through LoadOwned. Any failure to read or parse
+// it — a 404, a missing key, or content that does not parse — falls back to
+// an empty record, which makes every lookup below adopt by name instead of by
+// id; fellBack tells the caller whether that happened, so the receipt can say
+// so.
+func (r *Runner) loadOwned(ctx context.Context) (rec *OwnedRecord, fellBack bool) {
+	if r.LoadOwned == nil {
+		// Ownership tracking is not wired up at all (e.g. --no-publish): there is
+		// no ConfigMap to have failed to read, so this is not worth a receipt
+		// line, just the normal adopt-by-name behavior.
+		return NewOwnedRecord(), false
+	}
+	raw, err := r.LoadOwned(ctx)
+	if err != nil {
+		r.logf("owned.json: %v; falling back to adoption by name", err)
+		return NewOwnedRecord(), true
+	}
+	if raw == nil {
+		return NewOwnedRecord(), true
+	}
+	rec, perr := ParseOwnedRecord(raw)
+	if perr != nil {
+		r.logf("owned.json: %v; falling back to adoption by name", perr)
+		return NewOwnedRecord(), true
+	}
+	return rec, false
+}
+
 // okStep records a check that has no desired-state diff of its own.
 func (r *Runner) okStep(res *Result, name, detail string) {
 	res.Steps = append(res.Steps, Step{Name: name, Result: "ok", Detail: detail})
@@ -147,6 +221,15 @@ func (r *Runner) work(ctx context.Context, res *Result) error {
 
 	r.logf("s5n wiring: %d Arr instance(s), qBittorrent=%v, Prowlarr=%v",
 		len(c.Instances), c.Qbittorrent != nil, c.Prowlarr != nil)
+
+	// Ownership (AGENTS.md invariant 11): only an object whose id is recorded
+	// here is "ours" to update, drift-correct or recreate. Everything else,
+	// including an object merely named the same, is the user's.
+	owned, fellBack := r.loadOwned(ctx)
+	res.OwnedRecord = owned
+	if fellBack {
+		r.okStep(res, "wiring/owned", "owned.json unavailable: adopting existing objects by name")
+	}
 
 	var qbit *apps.Qbit
 	var qbitPassword string
@@ -214,15 +297,18 @@ func (r *Runner) work(ctx context.Context, res *Result) error {
 		r.okStep(res, inst.Name+"/ready", inst.URL+inst.URLBase)
 
 		if qbit != nil {
-			change, err := arr.EnsureDownloadClient(ctx, apps.DownloadClientSpec{
+			result, err := arr.EnsureDownloadClient(ctx, apps.DownloadClientSpec{
 				Name:     "qBittorrent",
 				Category: inst.Category,
 				Host:     host,
 				Port:     port,
 				Username: c.Qbittorrent.Username,
 				Password: qbitPassword,
-			})
-			if err := r.ensure(res, inst.Name+"/downloadclient", change, err); err != nil {
+			}, owned.ArrDownloadClientID(inst.Name))
+			if err == nil && result.ID != 0 {
+				owned.SetArrDownloadClientID(inst.Name, result.ID)
+			}
+			if err := r.ensureResult(res, inst.Name+"/downloadclient", result, err); err != nil {
 				return err
 			}
 		}
@@ -248,17 +334,26 @@ func (r *Runner) work(ctx context.Context, res *Result) error {
 		}
 		r.okStep(res, "prowlarr/ready", c.Prowlarr.URL+c.Prowlarr.URLBase)
 		for _, inst := range c.Instances {
-			impl := "Sonarr"
-			if inst.Kind == "radarr" {
+			var impl string
+			switch apps.Kind(inst.Kind) {
+			case apps.Sonarr:
+				impl = "Sonarr"
+			case apps.Radarr:
 				impl = "Radarr"
+			default:
+				return r.ensure(res, "prowlarr/application/"+inst.Name, apps.Unchanged,
+					fmt.Errorf("instance %q: unknown Arr kind %q has no Prowlarr application implementation", inst.Name, inst.Kind))
 			}
-			change, err := p.EnsureApplication(ctx, apps.ApplicationSpec{
+			result, err := p.EnsureApplication(ctx, apps.ApplicationSpec{
 				Name:           inst.Name,
 				Implementation: impl,
 				BaseURL:        strings.TrimRight(inst.URL, "/") + inst.URLBase,
 				APIKey:         arrKeys[inst.Name],
-			})
-			if err := r.ensure(res, "prowlarr/application/"+inst.Name, change, err); err != nil {
+			}, owned.ProwlarrApplicationID(inst.Name))
+			if err == nil && result.ID != 0 {
+				owned.SetProwlarrApplicationID(inst.Name, result.ID)
+			}
+			if err := r.ensureResult(res, "prowlarr/application/"+inst.Name, result, err); err != nil {
 				return err
 			}
 		}
@@ -302,16 +397,27 @@ func (r *Runner) publish(ctx context.Context, res *Result) error {
 	return r.Publish(pctx, data)
 }
 
-// Render builds the ConfigMap payload for a receipt.
+// Render builds the ConfigMap payload for a receipt. owned.json is written
+// alongside status.json and summary.txt in the same Upsert — including on a
+// failed run, so the record reflects whatever ids were confirmed before the
+// run stopped (AGENTS.md invariant 11).
 func Render(res *Result) (map[string]string, error) {
 	b, err := json.MarshalIndent(res, "", "  ")
 	if err != nil {
 		return nil, fmt.Errorf("encode result: %w", err)
 	}
-	return map[string]string{
+	out := map[string]string{
 		"status.json": string(b),
 		"summary.txt": Summary(res),
-	}, nil
+	}
+	if res.OwnedRecord != nil {
+		ob, err := json.MarshalIndent(res.OwnedRecord, "", "  ")
+		if err != nil {
+			return nil, fmt.Errorf("encode owned record: %w", err)
+		}
+		out["owned.json"] = string(ob)
+	}
+	return out, nil
 }
 
 // Summary renders the receipt as lines a human can read with kubectl.
@@ -321,6 +427,9 @@ func Summary(res *Result) string {
 	fmt.Fprintf(&b, "writes: %d created, %d updated, %d unchanged\n", res.Writes.Created, res.Writes.Updated, res.Writes.Unchanged)
 	for _, s := range res.Steps {
 		fmt.Fprintf(&b, "  %-38s %-7s %s\n", s.Name, s.Result, s.Detail)
+		for _, d := range s.Drift {
+			fmt.Fprintf(&b, "      %s: %s -> %s\n", d.Field, d.Old, d.New)
+		}
 	}
 	if res.Error != "" {
 		fmt.Fprintf(&b, "error: %s\n", res.Error)

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 )
@@ -155,8 +156,33 @@ func (f *fakeProwlarr) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case p == "/prowlarr/api/v1/applications/test":
 		f.tests++
 		writeJSON(w, map[string]any{"ok": true})
+	case strings.HasPrefix(p, "/prowlarr/api/v1/applications/") && r.Method == http.MethodPut:
+		body, ok := readBody(w, r)
+		if !ok {
+			return
+		}
+		for i, a := range f.apps {
+			if a.Int("id") == body.Int("id") {
+				f.apps[i] = body
+				f.writes++
+				writeJSON(w, body)
+				return
+			}
+		}
+		http.Error(w, "not found", http.StatusNotFound)
 	default:
 		http.Error(w, "unexpected "+r.Method+" "+p, http.StatusNotFound)
+	}
+}
+
+func (f *fakeProwlarr) maskedApps() {
+	for _, a := range f.apps {
+		for _, raw := range a["fields"].([]any) {
+			field := raw.(map[string]any)
+			if field["name"] == "apiKey" {
+				field["value"] = "********"
+			}
+		}
 	}
 }
 
@@ -169,8 +195,12 @@ func TestProwlarrEnsureApplicationIsIdempotent(t *testing.T) {
 	p := NewProwlarr(srv.URL, "/prowlarr", "http://prowlarr:9696/prowlarr", "key")
 	spec := ApplicationSpec{Name: "sonarr", Implementation: "Sonarr", BaseURL: "http://sonarr:8989/sonarr", APIKey: "arrkey"}
 
-	if got, err := p.EnsureApplication(ctx, spec); err != nil || got != Created {
-		t.Fatalf("first = %v, %v", got, err)
+	result, err := p.EnsureApplication(ctx, spec, 0)
+	if err != nil || result.Change != Created {
+		t.Fatalf("first = %+v, %v", result, err)
+	}
+	if result.ID == 0 {
+		t.Fatal("created application has no id to record")
 	}
 	if v, _ := f.apps[0].FieldValue("prowlarrUrl"); v != "http://prowlarr:9696/prowlarr" {
 		t.Fatalf("prowlarrUrl = %v", v)
@@ -180,19 +210,113 @@ func TestProwlarrEnsureApplicationIsIdempotent(t *testing.T) {
 	}
 
 	// The API masks the key on read; the second run must still be a no-op.
-	for _, raw := range f.apps[0]["fields"].([]any) {
-		field := raw.(map[string]any)
-		if field["name"] == "apiKey" {
-			field["value"] = "********"
-		}
-	}
-	if got, err := p.EnsureApplication(ctx, spec); err != nil || got != Unchanged {
-		t.Fatalf("second = %v, %v", got, err)
+	f.maskedApps()
+	result, err = p.EnsureApplication(ctx, spec, result.ID)
+	if err != nil || result.Change != Unchanged {
+		t.Fatalf("second = %+v, %v", result, err)
 	}
 	if f.writes != 1 {
 		t.Fatalf("second run wrote: %d", f.writes)
 	}
 	if f.tests != 2 {
 		t.Fatalf("connection test ran %d times, want 2", f.tests)
+	}
+}
+
+// syncLevel is not owned: the user's choice in the Prowlarr UI must survive.
+func TestProwlarrEnsureApplicationSurvivesNonOwnedFieldChange(t *testing.T) {
+	f := &fakeProwlarr{urlBase: "/prowlarr"}
+	srv := httptest.NewServer(f)
+	defer srv.Close()
+	ctx := context.Background()
+	p := NewProwlarr(srv.URL, "/prowlarr", "http://prowlarr:9696/prowlarr", "key")
+	spec := ApplicationSpec{Name: "sonarr", Implementation: "Sonarr", BaseURL: "http://sonarr:8989/sonarr", APIKey: "arrkey"}
+	first, err := p.EnsureApplication(ctx, spec, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.apps[0]["syncLevel"] = "addOnly"
+	f.maskedApps()
+
+	if result, err := p.EnsureApplication(ctx, spec, first.ID); err != nil || result.Change != Unchanged {
+		t.Fatalf("ensure over a non-owned change = %+v, %v; want unchanged", result, err)
+	}
+	if f.apps[0]["syncLevel"] != "addOnly" {
+		t.Fatalf("syncLevel was overwritten: %v", f.apps[0]["syncLevel"])
+	}
+}
+
+// baseUrl is owned: drift is restored and reported with old/new.
+func TestProwlarrEnsureApplicationRepairsDriftAndReportsIt(t *testing.T) {
+	f := &fakeProwlarr{urlBase: "/prowlarr"}
+	srv := httptest.NewServer(f)
+	defer srv.Close()
+	ctx := context.Background()
+	p := NewProwlarr(srv.URL, "/prowlarr", "http://prowlarr:9696/prowlarr", "key")
+	spec := ApplicationSpec{Name: "sonarr", Implementation: "Sonarr", BaseURL: "http://sonarr:8989/sonarr", APIKey: "arrkey"}
+	first, err := p.EnsureApplication(ctx, spec, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.apps[0].SetField("baseUrl", "http://wrong:8989/sonarr")
+	f.maskedApps()
+
+	result, err := p.EnsureApplication(ctx, spec, first.ID)
+	if err != nil || result.Change != Updated {
+		t.Fatalf("ensure after drift = %+v, %v; want updated", result, err)
+	}
+	if v, _ := f.apps[0].FieldValue("baseUrl"); v != "http://sonarr:8989/sonarr" {
+		t.Fatalf("baseUrl not repaired: %v", v)
+	}
+	if len(result.Drift) != 1 || result.Drift[0].Field != "baseUrl" ||
+		result.Drift[0].Old != "http://wrong:8989/sonarr" || result.Drift[0].New != "http://sonarr:8989/sonarr" {
+		t.Fatalf("drift not reported correctly: %+v", result.Drift)
+	}
+}
+
+// A rename never creates a duplicate registration: the id is what matters.
+func TestProwlarrEnsureApplicationFollowsRename(t *testing.T) {
+	f := &fakeProwlarr{urlBase: "/prowlarr"}
+	srv := httptest.NewServer(f)
+	defer srv.Close()
+	ctx := context.Background()
+	p := NewProwlarr(srv.URL, "/prowlarr", "http://prowlarr:9696/prowlarr", "key")
+	spec := ApplicationSpec{Name: "sonarr", Implementation: "Sonarr", BaseURL: "http://sonarr:8989/sonarr", APIKey: "arrkey"}
+	first, err := p.EnsureApplication(ctx, spec, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.apps[0]["name"] = "sonarr (renamed)"
+	f.maskedApps()
+
+	result, err := p.EnsureApplication(ctx, spec, first.ID)
+	if err != nil || result.Change != Unchanged {
+		t.Fatalf("ensure after rename = %+v, %v; want unchanged", result, err)
+	}
+	if len(f.apps) != 1 {
+		t.Fatalf("rename caused a duplicate: %d applications", len(f.apps))
+	}
+}
+
+// A deleted owned application is recreated and the previous id is reported.
+func TestProwlarrEnsureApplicationRecreatesWhenDeleted(t *testing.T) {
+	f := &fakeProwlarr{urlBase: "/prowlarr"}
+	srv := httptest.NewServer(f)
+	defer srv.Close()
+	ctx := context.Background()
+	p := NewProwlarr(srv.URL, "/prowlarr", "http://prowlarr:9696/prowlarr", "key")
+	spec := ApplicationSpec{Name: "sonarr", Implementation: "Sonarr", BaseURL: "http://sonarr:8989/sonarr", APIKey: "arrkey"}
+	first, err := p.EnsureApplication(ctx, spec, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.apps = nil
+
+	result, err := p.EnsureApplication(ctx, spec, first.ID)
+	if err != nil || result.Change != Created || !result.Recreated || result.PreviousID != first.ID {
+		t.Fatalf("recreate after delete = %+v, %v", result, err)
+	}
+	if result.ID == 0 || result.ID == first.ID {
+		t.Fatalf("recreated application did not get a fresh id: %d (previous %d)", result.ID, first.ID)
 	}
 }

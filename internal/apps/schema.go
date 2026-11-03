@@ -2,7 +2,9 @@ package apps
 
 import (
 	"encoding/json"
+	"fmt"
 	"reflect"
+	"strconv"
 	"strings"
 )
 
@@ -201,4 +203,100 @@ func MatchesFields(want, have Item, names []string) bool {
 		}
 	}
 	return true
+}
+
+// FieldChange records one owned field that had drifted from what the wiring
+// Job last set and was restored. Old and New are human-readable; a secret
+// field is never represented here at all (see ownedField.secret) so a
+// password or API key can never leak into the receipt.
+type FieldChange struct {
+	Field string `json:"field"`
+	Old   string `json:"old,omitempty"`
+	New   string `json:"new,omitempty"`
+}
+
+// EnsureResult is what an Ensure call against an owned Arr/Prowlarr object did.
+// ID is the object's id after the call, which the caller persists as
+// ownership. Drift lists owned fields that were found different on the live
+// object and were restored. Recreated/PreviousID describe a deleted owned
+// object that had to be created again.
+type EnsureResult struct {
+	Change     Change
+	ID         int
+	Drift      []FieldChange
+	Recreated  bool
+	PreviousID int
+}
+
+// ownedField is one field the wiring Job may write on an object it owns.
+// Secret fields (password, apiKey) are always overlaid but never compared:
+// the API never returns their real value, only a mask.
+type ownedField struct {
+	name   string
+	value  any
+	secret bool
+}
+
+// locateOwned finds the object the wiring Job owns, by rule, not by habit:
+//
+//   - ownedID != 0: only an id match counts. A rename in the app's own UI is
+//     the user's business and must never cause a second object to be created.
+//     If no object carries that id, it was deleted: report recreated=true so
+//     the caller creates a fresh one and the receipt can say so.
+//   - ownedID == 0: nothing is recorded yet (first run, or an owned.json the
+//     Job could not read). Adopt an existing object with the expected name,
+//     exactly as a first run always has.
+func locateOwned(list []Item, ownedID int, name string) (cur Item, found, recreated bool, previousID int) {
+	if ownedID != 0 {
+		for _, item := range list {
+			if item.Int("id") == ownedID {
+				return item, true, false, 0
+			}
+		}
+		return nil, false, true, ownedID
+	}
+	if item, ok := FindByName(list, name); ok {
+		return item, true, false, 0
+	}
+	return nil, false, false, 0
+}
+
+// overlayOwned clones the live object and writes only the owned fields onto
+// it, so every other field — name, enable, priority, tags, syncLevel, and
+// anything a future schema adds — is left exactly as the user last set it.
+// It reports drift for every non-secret owned field whose live value did not
+// already match.
+func overlayOwned(live Item, fields []ownedField) (Item, []FieldChange) {
+	desired := live.Clone()
+	var drift []FieldChange
+	for _, f := range fields {
+		if !f.secret {
+			if cv, ok := live.FieldValue(f.name); ok && !SameValue(cv, f.value) {
+				drift = append(drift, FieldChange{Field: f.name, Old: formatValue(cv), New: formatValue(f.value)})
+			}
+		}
+		desired.SetField(f.name, f.value)
+	}
+	return desired, drift
+}
+
+// formatValue renders a decoded JSON scalar the way a human reading the
+// receipt expects: whole numbers without a trailing ".0".
+func formatValue(v any) string {
+	if f, ok := number(v); ok {
+		if f == float64(int64(f)) {
+			return strconv.FormatInt(int64(f), 10)
+		}
+		return strconv.FormatFloat(f, 'g', -1, 64)
+	}
+	switch t := v.(type) {
+	case string:
+		return t
+	case bool:
+		return strconv.FormatBool(t)
+	case nil:
+		return ""
+	default:
+		return fmt.Sprint(v)
+	}
 }

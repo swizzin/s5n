@@ -184,6 +184,26 @@ else
   echo "app state after run 2: CHANGED"; head -40 "$WORK/wiring.diff"; fail=1
 fi
 
+# ---- wiring run 3: narrow ownership ---------------------------------------
+# Edit live objects through the app APIs the same way a human would, then
+# prove the next install respects ownership: a rename and a non-owned field
+# survive, an owned field drifts and is restored (and the receipt says so), a
+# deleted owned object is recreated (and the receipt names the old id), and an
+# object the Job never created is left alone.
+log "wiring run 3: rename, drift, delete and a user-added object"
+python3 hack/e2e-run3.py setup "$CTX" "$NS" "$WORK" || fail=1
+
+install_release
+$K -n "$NS" wait --for=condition=complete job/s5n-wiring --timeout=600s || fail=1
+$K -n "$NS" get cm s5n-wiring -o jsonpath='{.data.status\.json}' >"$WORK/status-run3.json"
+third_status=$(status_field 'd["status"]')
+echo "wiring status = ${third_status}"
+[ "$third_status" = ok ] || fail=1
+
+if ! python3 hack/e2e-run3.py assert "$CTX" "$NS" "$WORK"; then
+  fail=1
+fi
+
 if [ "$fail" != 0 ]; then
   log "wiring Job logs"
   $K -n "$NS" logs job/s5n-wiring --tail=80 || true

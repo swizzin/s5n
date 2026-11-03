@@ -82,82 +82,90 @@ func (a *Arr) categoryField() string {
 	return "tvCategory"
 }
 
-// EnsureDownloadClient makes the Arr's qBittorrent download client match the spec
-// and then proves the connection with the app's own test endpoint. Secrets are
-// never read back by the API, so a passing test is the only honest evidence that
-// the stored password still works.
-func (a *Arr) EnsureDownloadClient(ctx context.Context, spec DownloadClientSpec) (Change, error) {
-	schemas, err := a.downloadClientSchema(ctx)
-	if err != nil {
-		return Unchanged, fmt.Errorf("read download client schema: %w", err)
-	}
-	tmpl, ok := FindImplementation(schemas, "QBittorrent")
-	if !ok {
-		return Unchanged, fmt.Errorf("this %s build has no qBittorrent download client implementation", a.Kind)
-	}
-	desired := tmpl.Clone()
-	desired["name"] = spec.Name
-	desired["enable"] = true
-	desired["protocol"] = "torrent"
-	desired["priority"] = 1
-	desired["tags"] = []any{}
-
-	// Only the fields the s5n data contract depends on are forced; everything
-	// else keeps the app's own schema default, so a version bump does not fight
-	// us over settings we do not care about.
-	set := []struct {
-		name  string
-		value any
-	}{
-		{"host", spec.Host},
-		{"port", spec.Port},
-		{"useSsl", spec.UseSSL},
-		{"urlBase", ""},
-		{"username", spec.Username},
-		{"password", spec.Password},
-		{a.categoryField(), spec.Category},
-	}
-	compared := make([]string, 0, len(set))
-	for _, f := range set {
-		if desired.SetField(f.name, f.value) {
-			compared = append(compared, f.name)
-		}
-	}
-
+// EnsureDownloadClient makes the Arr's qBittorrent download client match the
+// spec and then proves the connection with the app's own test endpoint.
+// Secrets are never read back by the API, so a passing test is the only
+// honest evidence that the stored password still works.
+//
+// ownedID, when nonzero, is the id the wiring Job recorded the last time it
+// created or adopted this client: only an id match counts as "ours", so a
+// rename in the Sonarr/Radarr UI is the user's business and never creates a
+// duplicate. A zero ownedID means nothing is recorded (first run, or an
+// owned.json the Job could not read), so an existing client named spec.Name is
+// adopted instead.
+//
+// On update the live object is cloned and only the data-contract fields are
+// overlaid (host, port, useSsl, urlBase, username, password, the category
+// field) — name, enable, priority, tags and anything else are left exactly as
+// the user set them. A deleted owned client is recreated.
+func (a *Arr) EnsureDownloadClient(ctx context.Context, spec DownloadClientSpec, ownedID int) (EnsureResult, error) {
 	list, err := a.downloadClients(ctx)
 	if err != nil {
-		return Unchanged, fmt.Errorf("list download clients: %w", err)
+		return EnsureResult{}, fmt.Errorf("list download clients: %w", err)
 	}
+	cur, found, recreated, previousID := locateOwned(list, ownedID, spec.Name)
+
+	fields := []ownedField{
+		{"host", spec.Host, false},
+		{"port", spec.Port, false},
+		{"useSsl", spec.UseSSL, false},
+		{"urlBase", "", false},
+		{"username", spec.Username, false},
+		{"password", spec.Password, true},
+		{a.categoryField(), spec.Category, false},
+	}
+
+	var desired Item
+	var drift []FieldChange
 	change := Created
-	if cur, ok := FindByName(list, spec.Name); ok {
-		// Carry the id so the connection test's uniqueness check skips this very
-		// client instead of reporting its own name as a duplicate.
+	if found {
+		desired, drift = overlayOwned(cur, fields)
 		desired["id"] = cur["id"]
-		if SameValue(cur["enable"], true) && SameValue(cur["protocol"], "torrent") &&
-			SameValue(cur["priority"], 1) && MatchesFields(desired, cur, compared) {
-			change = Unchanged
-		} else {
+		if len(drift) > 0 {
 			change = Updated
+		} else {
+			change = Unchanged
+		}
+	} else {
+		schemas, err := a.downloadClientSchema(ctx)
+		if err != nil {
+			return EnsureResult{}, fmt.Errorf("read download client schema: %w", err)
+		}
+		tmpl, ok := FindImplementation(schemas, "QBittorrent")
+		if !ok {
+			return EnsureResult{}, fmt.Errorf("this %s build has no qBittorrent download client implementation", a.Kind)
+		}
+		desired = tmpl.Clone()
+		desired["name"] = spec.Name
+		desired["enable"] = true
+		desired["protocol"] = "torrent"
+		desired["priority"] = 1
+		desired["tags"] = []any{}
+		for _, f := range fields {
+			desired.SetField(f.name, f.value)
 		}
 	}
 
-	// Test before writing. Arr validates the payload as if it were being saved, so
-	// sending it with the id above is what makes the test idempotent.
+	// Test before writing. Arr validates the payload as if it were being saved,
+	// so sending it with the id above (when present) is what makes the test
+	// idempotent instead of reporting this very client's own name as a clash.
 	if err := a.client.Post(ctx, a.api("/downloadclient/test"), desired, nil); err != nil {
-		return change, fmt.Errorf("test download client %q: %w", spec.Name, err)
+		return EnsureResult{Change: change, ID: desired.Int("id")}, fmt.Errorf("test download client %q: %w", spec.Name, err)
 	}
 
 	switch change {
 	case Created:
-		if err := a.client.Post(ctx, a.api("/downloadclient"), desired, nil); err != nil {
-			return Unchanged, fmt.Errorf("create download client %q: %w", spec.Name, err)
+		var out Item
+		if err := a.client.Post(ctx, a.api("/downloadclient"), desired, &out); err != nil {
+			return EnsureResult{}, fmt.Errorf("create download client %q: %w", spec.Name, err)
 		}
+		desired = out
 	case Updated:
 		if err := a.client.Put(ctx, fmt.Sprintf("%s/%d", a.api("/downloadclient"), desired.Int("id")), desired, nil); err != nil {
-			return Unchanged, fmt.Errorf("update download client %q: %w", spec.Name, err)
+			return EnsureResult{}, fmt.Errorf("update download client %q: %w", spec.Name, err)
 		}
 	}
-	return change, nil
+	return EnsureResult{Change: change, ID: desired.Int("id"), Drift: drift, Recreated: recreated, PreviousID: previousID}, nil
 }
 
 // EnsureRootFolder adds a root folder and asserts it is writable by the app.
