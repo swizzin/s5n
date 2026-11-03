@@ -176,6 +176,10 @@ metadata:
   labels:
     {{- include "s5n.labels" $root | nindent 4 }}
     app.kubernetes.io/name: {{ $inst.name }}
+  {{- with $cfg.torrent.service.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
 spec:
   type: {{ $cfg.torrent.service.type }}
   {{- if ne $cfg.torrent.service.type "ClusterIP" }}
