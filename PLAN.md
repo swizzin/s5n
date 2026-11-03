@@ -70,9 +70,9 @@ That puts everything on one filesystem with one path, so hardlinks always work a
 remote path mappings are needed. This is the TRaSH layout that most of the ecosystem
 already documents.
 
-- `dataRoot`: a hostPath, default `/srv/swizzin/data`, configurable to a mounted disk
-- `configRoot`: one hostPath per app under `/srv/swizzin/config/<app>`, so a single path
-  covers backup. A `storageClass` alternative exists for BYO clusters.
+- `storage.data.hostPath`: default `/srv/s5n/data`, configurable to a mounted disk
+- `storage.config.hostPath`: default `/srv/s5n/config`, one subdirectory per app instance,
+  so a single path covers backup. A `storageClass` alternative exists for BYO clusters.
 - `puid`/`pgid`: set once for the whole release. Per-app overrides are possible but need
   a value written out explicitly.
 
@@ -97,7 +97,8 @@ It is written in Go, so it shares code with `box` and later with the operator.
 - Arr API keys are injected by env (`SONARR__AUTH__APIKEY`, …), so nothing has to be
   scraped from `config.xml`.
 - The qBittorrent WebUI password is seeded as a PBKDF2 hash by an init container, and one
-  category is created per Arr instance.
+  category is created per Arr instance. Save path, temp path and category paths are set
+  through the API and read back, because the image re-applies its own default at runtime.
 - In every Arr: download client, category, root folder, `copyUsingHardlinks: true`, and
   Forms auth with the shared admin credential. Every setting is read back and asserted,
   and the Arr↔qBittorrent link is proven with the Arr's own connection test — Arr never
@@ -107,9 +108,11 @@ It is written in Go, so it shares code with `box` and later with the operator.
 - Seerr: connected to the Arrs and the media server.
 - Plex: claimed with the token prompted at install (it expires in 4 minutes, so `box init`
   asks for it last). Jellyfin is the alternative media server.
-- End-to-end hardlink proof: write a file under `/data/torrents`, link it under
-  `/data/media`, assert `nlink == 2` and the same device, then clean up.
-- The result goes into a `swizzin-wiring` ConfigMap: what is connected to what and when it
+- End-to-end hardlink proof, for every distinct download/library pair: write a file
+  under the download folder, link it into the library folder, assert `nlink == 2` and the
+  same device, then clean up. Every pair, because one claim is not one filesystem: a disk
+  mounted inside the data directory breaks hardlinks for that one category only.
+- The result goes into the `<release>-wiring` ConfigMap: what is connected to what and when it
   was verified.
 
 ### `box` CLI (Go, single binary)
@@ -141,7 +144,9 @@ It must be safe to re-run.
 - `readOnlyRootFilesystem`, all capabilities dropped, seccomp `RuntimeDefault`.
 - Default-deny NetworkPolicy, with only the needed flows allowed
   (Arr → qBittorrent, Prowlarr ↔ Arr, Seerr → Arr/media, Gateway → app).
-- Only the Gateway and the torrent port (qBittorrent `hostPort`) are reachable from outside.
+- Only the Gateway and the torrent port (a NodePort Service with
+  `externalTrafficPolicy: Local`; hostPort is forbidden under `restricted`) are reachable
+  from outside.
 - No credentials in values, in the repo, or in the wiring ConfigMap.
 
 ## Catalog

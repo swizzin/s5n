@@ -75,6 +75,9 @@ metadata:
   labels:
     {{- include "s5n.labels" . | nindent 4 }}
 rules:
+  # RBAC cannot scope `create` by resourceNames (the object has no name until it
+  # exists), so this verb covers any ConfigMap in the namespace. The Job only ever
+  # creates its own receipt, and only when `helm uninstall` has left it absent.
   - apiGroups: [""]
     resources: ["configmaps"]
     verbs: ["create"]

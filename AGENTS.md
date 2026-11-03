@@ -13,7 +13,8 @@ Read `PLAN.md` first. It is the architecture; this file is how to work in the re
 - `internal/apps/` — schema-driven HTTP clients for qBittorrent (`/api/v2`), Sonarr and
   Radarr (`/api/v3`) and Prowlarr (`/api/v1`). Every `Ensure…` reads live state, writes
   only what differs, and returns `Created`/`Updated`/`Unchanged`.
-- `internal/wiring/` — the reconciler: config, steps, the hardlink proof on `/data`, and
+- `internal/wiring/` — the reconciler: config, steps, the hardlink proof on `/data` (one
+  per distinct download/library pair, since a nested mount can break just one), and
   the receipt published into the `<release>-wiring` ConfigMap (`status.json`,
   `summary.txt`).
 - `internal/qbtconf/` — qBittorrent 5 credential hashing and `qBittorrent.conf` editing.
@@ -32,16 +33,16 @@ Read `PLAN.md` first. It is the architecture; this file is how to work in the re
   blocks an outside pod, the wiring Job connects everything, and a second `helm upgrade`
   performs **zero writes** with app state identical before and after. `--keep` leaves the
   cluster up.
+- `.github/workflows/ci.yaml` — every PR and push to main: gofmt/vet/`go test -race`,
+  `hack/validate-chart.sh` on 1.31/1.34/1.37, then the kind e2e.
+  Actions are pinned by commit SHA.
 - No `box` yet. No installer yet.
 
 ## Commands
 
 ```sh
 gofmt -l . && go vet ./... && go test ./...
-helm lint charts/s5n
-helm template t charts/s5n -n seedbox | kubeconform -strict -summary \
-  -kubernetes-version 1.31.0 -schema-location default \
-  -schema-location 'https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json' -
+hack/validate-chart.sh 1.31.0  # helm lint + kubeconform for every charts/s5n/ci/*-values.yaml
 docker build -t s5n:e2e .     # what the e2e uses
 hack/e2e-kind.sh              # full smoke; needs docker, kind, helm, kubectl
 ```
@@ -93,6 +94,10 @@ one needs a live `lookup`. The e2e asserts the policy exists in the cluster.
 
 ## Gotchas already hit
 
+- `--set apps.sonarr.instances[1].enabled=true` replaces the whole list, so the render
+  fails the schema; use a values file (`charts/s5n/ci/`). And kubeconform reports
+  "0 resources" as success, including for a path without a `.yaml` extension.
+  `hack/validate-chart.sh` fails unless every rendered object was validated.
 - Helm templates are not valid YAML. Editors/linters that YAML-validate `templates/*.yaml`
   will refuse them; that is expected — write templates with a script, not a YAML-aware
   editor.
@@ -118,7 +123,9 @@ one needs a live `lookup`. The e2e asserts the policy exists in the cluster.
   `qBittorrent.conf` is not enough: a fresh install still reports `/config/Downloads`,
   which is on the config volume and can never be hardlinked. The wiring Job sets
   `save_path`, `temp_path` and `use_category_paths_in_manual_mode` through
-  `app/setPreferences` after the app is up, then asserts them. That step is what makes
+  `app/setPreferences` after the app is up, then reads them back and fails if they did
+  not stick (`setPreferences` answers 200 either way). Paths are compared exactly, not
+  by prefix: `/data/media` is under `/data` and still wrong. That step is what makes
   the data contract true rather than aspirational.
 - The session keys are QSettings-escaped in the file: `[Preferences]` with
   `Session\DefaultSavePath` (two backslashes on disk), not a `[Session]` section.
@@ -149,9 +156,8 @@ one needs a live `lookup`. The e2e asserts the policy exists in the cluster.
 ## Next work, in order (Phase 1)
 
 1. **Seerr + Plex/Jellyfin + Tautulli** entries (v1 catalog) and their wiring steps.
-2. Extend `hack/e2e-kind.sh` with a real grab-through-Prowlarr→qBittorrent→hardlink-import
-   assertion, then add k0s and k3s e2e (`test/e2e/`), and a GitHub Actions workflow
-   running lint + kubeconform + kind e2e.
+2. Fold `hack/grab-test.sh` into CI once it no longer needs live TMDB/TVDB metadata,
+   then add k0s and k3s e2e (`test/e2e/`) as a nightly workflow.
 
 Keep commits small. Each commit: lint + kubeconform green; chart-changing commits also
 e2e green.
