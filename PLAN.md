@@ -53,12 +53,32 @@ managed and on by default:
 | Envoy Gateway | Gateway API implementation | the Envoy project's own Gateway controller, started by the Contour and Emissary teams on the same data plane, with a minor release roughly every quarter. Contour itself has had no minor release since 1.33 (Sept 2025), and almost all of its non-bot commits since May 2026 come from one maintainer |
 | cert-manager | TLS | Gateway API support on; HTTP-01 through the Gateway when a domain is given, self-signed otherwise |
 
-Each is its own Helm release pinned by `box`, with `platform.<component>.managed: true` by
-default. Setting it false means "the cluster already has one": `box` then checks for it
-instead of installing it (a GatewayClass that accepts the Gateway, a cert-manager whose
-version supports Gateway API, a LoadBalancer Service that actually gets an address) and
-refuses to continue if the check fails. `box migrate` sets these from what it finds
-rather than installing a second copy beside an existing one.
+Each is its own Helm release pinned by `box`, and each has a `platform.<component>.mode`:
+
+- `auto` (default): probe for a working instance; use it if found, install ours if not.
+- `managed`: always ours. `box` installs, upgrades and removes it.
+- `external`: the user's. `box` never installs or touches it, only verifies it.
+
+Detection checks capability, never brand. "Traefik is running" is not evidence; "a
+GatewayClass reports `Accepted` and a Gateway attached to it gets an address" is. The probes:
+
+| component | counts as present when |
+|---|---|
+| Gateway API CRDs | the CRDs exist at or above the bundle version the chart needs (k3s now ships them itself) |
+| LoadBalancer | a throwaway `type: LoadBalancer` Service gets an address within 60s (MetalLB, k3s servicelb, a cloud provider all pass) |
+| Gateway | a GatewayClass is `Accepted`; `platform.gateway.className` picks one when there are several |
+| cert-manager | its webhook answers and its version supports Gateway API HTTP-01 |
+
+A component with no working instance is installed only in `auto` or `managed`; in
+`external` mode a failed probe stops `box` with the reason. A probe that finds something
+*conflicting* (an ingress controller already holding 80/443 on the only address, a second
+LoadBalancer implementation) stops `box` in every mode: it reports and never fights it.
+
+Distribution presets only fill in what probes cannot decide. On k3s, the bundled Traefik
+does not serve Gateway API until its provider is enabled, so `box` offers to write the
+`HelmChartConfig` that turns it on and then uses it as `external`, rather than installing
+Envoy Gateway beside it. k3s servicelb satisfies the LoadBalancer probe, so MetalLB is
+skipped. `box migrate` runs the same probes, so it uses what a box already has.
 
 The chart itself stays platform-agnostic: it emits HTTPRoutes and one LoadBalancer or
 NodePort Service, and never depends on which implementation sits behind them.
@@ -161,11 +181,40 @@ box logs <app>
 `box` owns `/etc/swizzin/values.yaml`. Hand edits are allowed and preserved: `box` reads,
 merges and diffs; it never regenerates the file from scratch.
 
-### Installer
+### Installer and cluster detection
 
-`curl -fsSL get.<domain> | bash`: checks the OS, installs k0s (single node, pinned version), Gateway API CRDs,
-then the managed platform layer (MetalLB, Envoy Gateway, cert-manager), creates `/srv/s5n/{data,config}` owned by puid:pgid, installs `box`, runs `box init`.
-It must be safe to re-run.
+The installer is deliberately thin: `curl -fsSL get.<domain> | bash` checks OS and
+architecture, downloads `box` with its sha256, and runs `box bootstrap`. Every decision
+lives in Go, where it can be tested, and none in bash.
+
+`box bootstrap` decides which cluster to use, in this order:
+
+1. **An explicit cluster.** `--kubeconfig` or `KUBECONFIG`: use it or fail; never fall back.
+2. **A cluster on this host.** Look for a kubeconfig where distributions put one
+   (`/etc/rancher/k3s/k3s.yaml`, `/etc/rancher/rke2/rke2.yaml`, k0s's
+   `/var/lib/k0s/pki/admin.conf`, kubeadm's `/etc/kubernetes/admin.conf`,
+   `~/.kube/config`). A candidate counts only if `/version` answers and a
+   SelfSubjectAccessReview says this user can create namespaces, CRDs and cluster roles.
+3. **Something present but not usable.** A running kubelet, containerd or Docker
+   holding the ports, a `k3s`/`k0s`/`rke2`/`microk8s` binary or unit, or anything
+   listening on 6443, 10250 or 2379. `box` stops and explains; it never installs a
+   second cluster over a broken first one.
+4. **A clean host.** Only now does it install k0s: pinned version and sha256,
+   `k0s install controller --single`, then wait for the node to be Ready.
+
+Then the distribution is identified, only to choose presets: the server version suffix
+(`+k3s`, `+k0s`, `-eks-`, `-gke.`), a `kubeadm-config` ConfigMap, the node's labels.
+A multi-node cluster is supported but cannot use hostPath storage, so `box init` asks
+for a storage class instead.
+
+The result is recorded in `/etc/swizzin/cluster.yaml` (source: `k0s-managed` or
+`external`, kubeconfig path, distribution, platform modes). Re-running reads that record
+before probing: a `k0s-managed` box gets k0s started and upgraded by `box update`; an
+`external` cluster's lifecycle is never touched, only its reachability checked. `box`
+owns the lifecycle of exactly what it installed.
+
+The rest of the bootstrap: the platform layer by mode, `/srv/s5n/{data,config}` owned by
+puid:pgid, then `box init`. Every step is safe to re-run.
 
 ### Default hardening (the community box finally gets it)
 
