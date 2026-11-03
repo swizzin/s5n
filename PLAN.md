@@ -95,6 +95,17 @@ the name still fits once a Usenet client shares it. The download directory is
 This is swizzin's `install.sh`, made idempotent and run after every install or upgrade.
 It is written in Go, so it shares code with `box` and later with the operator.
 
+**Ownership is narrow.** Users live in the Arr and qBittorrent UIs, and an upgrade must
+not undo their settings. The Job owns only the objects it created, and on those only the
+fields the data contract depends on: host, port, credentials, category, save paths and
+hardlink import. Everything else on those objects, and every object the user adds, belongs
+to the user and is never written. An update writes the owned fields on top of the live
+object; it never resends a schema template. When an owned field has drifted, the Job puts
+it back and the receipt records the old and new value, because a changed category or save
+path silently breaks hardlinks and the user should know their edit didn't stick. A
+deleted owned object is recreated and reported. Owned objects are identified by the ids
+recorded in the wiring ConfigMap, not by name and not by tag (see AGENTS.md invariant 11).
+
 - Arr API keys are injected by env (`SONARR__AUTH__APIKEY`, …), so nothing has to be
   scraped from `config.xml`.
 - The qBittorrent WebUI password is seeded as a PBKDF2 hash by an init container, and one

@@ -91,6 +91,20 @@ one needs a live `lookup`. The e2e asserts the policy exists in the cluster.
     proof that the secret still works is the app's own `/test` endpoint — called *before*
     the write, with the existing `id` carried, or Arr reports "Name should be unique"
     against the object being tested.
+11. **The wiring Job owns narrowly.** It owns only objects it created, and on them only
+    the data-contract fields (host, port, credentials, category, save paths, hardlink
+    import). An update is the *live* object with those fields overlaid, never a fresh
+    schema template, so a user's other settings survive every upgrade. Objects the user
+    added are never touched. Ownership is the object id recorded in the `<release>-wiring`
+    ConfigMap (`owned.json`): on the first run an existing object with the expected name
+    is adopted, and after that the id is authoritative, so a rename is the user's
+    business. A drifted owned field is restored and the receipt names the old and new
+    value; a deleted owned object is recreated and reported. If the ConfigMap is gone,
+    fall back to adoption by name.
+    **Never use tags as the ownership marker.** In Sonarr and Radarr a tag on a download
+    client restricts it to series/films carrying that tag, and in Prowlarr a tag on an
+    application restricts which indexers sync to it. A marker tag would silently stop
+    grabs and indexer sync.
 
 ## Gotchas already hit
 
@@ -155,8 +169,14 @@ one needs a live `lookup`. The e2e asserts the policy exists in the cluster.
 
 ## Next work, in order (Phase 1)
 
-1. **Seerr + Plex/Jellyfin + Tautulli** entries (v1 catalog) and their wiring steps.
-2. Fold `hack/grab-test.sh` into CI once it no longer needs live TMDB/TVDB metadata,
+1. **Narrow ownership (invariant 11)** in the existing `Ensure…` steps, before any new
+   app copies the current pattern: `owned.json` in the wiring ConfigMap, overlay onto the
+   live object, drift restored and reported in the receipt, and an e2e case that edits a
+   non-owned field and an owned field through the app API and asserts one survives the upgrade
+   and the other is restored and reported. Make Prowlarr's implementation mapping a switch
+   that errors on an unknown kind (it falls through to Sonarr today).
+2. **Seerr + Plex/Jellyfin + Tautulli** entries (v1 catalog) and their wiring steps.
+3. Fold `hack/grab-test.sh` into CI once it no longer needs live TMDB/TVDB metadata,
    then add k0s and k3s e2e (`test/e2e/`) as a nightly workflow.
 
 Keep commits small. Each commit: lint + kubeconform green; chart-changing commits also
