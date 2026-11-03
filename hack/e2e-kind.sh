@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
-# Phase-0/1 smoke test on kind: cluster -> Gateway API CRDs -> Traefik Gateway -> s5n chart,
-# then assert pods Ready, routes Accepted, the Arr answers through the Gateway, the
-# hardlink invariant holds on /data, and the wiring Job does its job twice: the first
-# run connects everything, the second changes nothing.
+# Phase-0/1 smoke test on kind: cluster -> Envoy Gateway (Gateway API) -> MetalLB (L2)
+# -> s5n chart. Asserts pods Ready, routes Accepted, every app answers through the
+# Gateway's LoadBalancer address, the peers Service gets its own LoadBalancer address
+# and accepts a TCP connect, the hardlink invariant holds on /data, and the wiring Job
+# does its job twice: the first run connects everything, the second changes nothing.
 # Usage: hack/e2e-kind.sh [--keep]
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -10,8 +11,12 @@ cd "$(dirname "$0")/.."
 KIND=${KIND:-kind}
 CLUSTER=s5n
 NS=seedbox
-GW_API_VERSION=${GW_API_VERSION:-v1.7.0}
-TRAEFIK_CHART_VERSION=${TRAEFIK_CHART_VERSION:-42.2.0}
+# Envoy Gateway's Helm chart ships its own Gateway API CRDs (crds.enabled: true), so
+# there is no separate standard-install apply here: the chart's experimental channel is
+# the exact set Envoy Gateway v1.9.3 supports, and a separately-pinned channel could
+# drift from (or conflict with) it.
+ENVOY_GATEWAY_CHART_VERSION=${ENVOY_GATEWAY_CHART_VERSION:-1.9.3}
+METALLB_VERSION=${METALLB_VERSION:-v0.16.1}
 KEEP=${1:-}
 CTX="kind-${CLUSTER}"
 K="kubectl --context ${CTX}"
@@ -39,21 +44,64 @@ docker exec "${CLUSTER}-control-plane" bash -c '
            /srv/s5n/config/{qbittorrent,prowlarr,sonarr,sonarr-4k,radarr,radarr-4k}
   chown -R 1000:1000 /srv/s5n'
 
-log "Gateway API CRDs ${GW_API_VERSION}"
-$K apply --server-side -f "https://github.com/kubernetes-sigs/gateway-api/releases/download/${GW_API_VERSION}/standard-install.yaml" >/dev/null
+log "Envoy Gateway ${ENVOY_GATEWAY_CHART_VERSION} as the Gateway (installs Gateway API CRDs)"
+$HELM upgrade --install envoy-gateway oci://docker.io/envoyproxy/gateway-helm \
+  --version "$ENVOY_GATEWAY_CHART_VERSION" -n envoy-gateway-system --create-namespace \
+  --wait --timeout 5m >/dev/null
 
-log "Traefik ${TRAEFIK_CHART_VERSION} as the Gateway"
-helm repo add traefik https://traefik.github.io/charts >/dev/null 2>&1 || true
-helm repo update traefik >/dev/null
-$HELM upgrade --install traefik traefik/traefik \
-  --version "$TRAEFIK_CHART_VERSION" -n s5n-gateway --create-namespace \
-  -f hack/traefik-values.yaml --wait --timeout 5m >/dev/null
+log "MetalLB ${METALLB_VERSION} (L2) so LoadBalancer Services get real addresses"
+$K apply -f "https://raw.githubusercontent.com/metallb/metallb/${METALLB_VERSION}/config/manifests/metallb-native.yaml" >/dev/null
+$K -n metallb-system rollout status deploy/controller --timeout=180s
+$K -n metallb-system rollout status daemonset/speaker --timeout=180s
+# The IPAddressPool/L2Advertisement below pass MetalLB's validating webhook, which the
+# controller serves; wait for its endpoints so the apply does not race it.
+for i in $(seq 1 30); do
+  ep=$($K -n metallb-system get endpoints metallb-webhook-service -o jsonpath='{.subsets[0].addresses[0].ip}' 2>/dev/null || true)
+  [ -n "$ep" ] && break
+  sleep 2
+done
+
+# Carve a small L2 pool from the top of the kind docker network's IPv4 subnet, so the
+# host reaches LoadBalancer addresses directly — the same trick GitHub ubuntu runners
+# rely on, and the same reason no extraPortMappings are needed.
+kind_subnet=$(docker network inspect kind -f '{{range .IPAM.Config}}{{.Subnet}} {{end}}' | tr ' ' '\n' | grep -v ':' | head -1)
+pool=$(python3 - "$kind_subnet" <<'PY'
+import ipaddress, sys
+net = ipaddress.ip_network(sys.argv[1], strict=False)
+ips = list(net.hosts())[-16:]
+print(f"{ips[0]}-{ips[-1]}")
+PY
+)
+echo "  MetalLB pool: ${pool}"
+$K apply -f - >/dev/null <<EOF
+apiVersion: metallb.io/v1beta1
+kind: IPAddressPool
+metadata:
+  name: s5n-pool
+  namespace: metallb-system
+spec:
+  addresses:
+    - ${pool}
+---
+apiVersion: metallb.io/v1beta1
+kind: L2Advertisement
+metadata:
+  name: s5n-l2
+  namespace: metallb-system
+spec:
+  ipAddressPools:
+    - s5n-pool
+EOF
 
 log "namespace ${NS} with Pod Security restricted (enforced)"
 $K create namespace "$NS" --dry-run=client -o yaml | $K apply -f - >/dev/null
 $K label --overwrite namespace "$NS" \
   pod-security.kubernetes.io/enforce=restricted \
   pod-security.kubernetes.io/warn=restricted >/dev/null
+
+log "GatewayClass + Gateway (the chart's default parentRef target)"
+$K create namespace s5n-gateway --dry-run=client -o yaml | $K apply -f - >/dev/null
+$K apply -f hack/envoy-gateway.yaml >/dev/null
 
 # The chart under test, with the locally built image instead of the published one.
 install_release() {
@@ -79,13 +127,40 @@ for r in $($K -n "$NS" get httproute -o name); do
   echo "$r Accepted=$acc"; [ "$acc" = True ] || fail=1
 done
 
-# Through the Gateway from the host (kind maps node 30080 -> host 18080).
+# The Gateway's address is MetalLB's, assigned through Envoy Gateway's proxy Service.
+GW_ADDR=""
+for i in $(seq 1 60); do
+  GW_ADDR=$($K -n s5n-gateway get gateway s5n -o jsonpath='{.status.addresses[0].value}' 2>/dev/null || true)
+  [ -n "$GW_ADDR" ] && break
+  sleep 5
+done
+[ -n "$GW_ADDR" ] || { echo "Gateway never got an address"; fail=1; }
+echo "Gateway address: ${GW_ADDR}"
+
+# Through the Gateway from the host, on its LoadBalancer address.
 for path in /sonarr/ping /radarr/ping /prowlarr/ping; do
-  code=$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:18080${path}")
+  code=$(curl -s -o /dev/null -w '%{http_code}' "http://${GW_ADDR}${path}")
   echo "GET ${path} via gateway -> ${code}"; [ "$code" = 200 ] || fail=1
 done
-code=$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:18080/qbittorrent/")
+code=$(curl -s -o /dev/null -w '%{http_code}' "http://${GW_ADDR}/qbittorrent/")
 echo "GET /qbittorrent/ via gateway -> ${code}"; [ "$code" = 200 ] || fail=1
+
+# The peers Service is type LoadBalancer: MetalLB assigns it its own address and
+# qBittorrent listens on it, so a TCP connect from the host must succeed.
+PEER_ADDR=$($K -n "$NS" get svc qbittorrent-peers -o jsonpath='{.status.loadBalancer.ingress[0].ip}')
+echo "peers Service address: ${PEER_ADDR}"
+[ -n "$PEER_ADDR" ] || fail=1
+if python3 - "$PEER_ADDR" <<'PY'
+import socket, sys
+s = socket.create_connection((sys.argv[1], 31111), timeout=10)
+s.close()
+print("TCP", sys.argv[1], "31111 -> connected")
+PY
+then
+  :
+else
+  echo "TCP ${PEER_ADDR}:31111 -> REFUSED/TIMEOUT"; fail=1
+fi
 
 # Hardlink invariant: downloads/ and media/ are one filesystem, as seen by an Arr pod.
 $K -n "$NS" exec sonarr-0 -- sh -c '

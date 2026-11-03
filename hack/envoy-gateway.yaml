@@ -1,0 +1,42 @@
+# Envoy Gateway as the Gateway API implementation for s5n dev/e2e and the default
+# managed install.
+#
+# The envoy-gateway Helm chart (installed by hack/e2e-kind.sh) ships:
+#   - the envoy-gateway controller Deployment + Service, in the release namespace
+#     (envoy-gateway-system here)
+#   - the Gateway API CRDs and Envoy Gateway CRDs (crds.enabled: true by default).
+#     The chart bundles the Gateway API *experimental* channel at the version Envoy
+#     Gateway v1.9.3 is built against, so the e2e deliberately lets the chart own the
+#     CRDs and does NOT apply standard-install.yaml separately: a separately-pinned
+#     standard channel could drift ahead of (or conflict with) the set the controller
+#     expects, and Helm would then skip or fight an already-installed CRD.
+#   - the managed Envoy Proxy data plane (Deployment + LoadBalancer Service). In
+#     standard mode the controller creates these in envoy-gateway-system, so the
+#     chart's default networkPolicy.gatewayFrom targets that namespace, not the
+#     Gateway's.
+#
+# This file creates the GatewayClass and the Gateway "s5n" in namespace s5n-gateway
+# (the chart's default parentRef is {name: s5n, namespace: s5n-gateway}). The listener
+# is plain HTTP on port 80 and accepts routes from every namespace, matching how the
+# installer's managed install is configured.
+apiVersion: gateway.networking.k8s.io/v1
+kind: GatewayClass
+metadata:
+  name: eg
+spec:
+  controllerName: gateway.envoyproxy.io/gatewayclass-controller
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: s5n
+  namespace: s5n-gateway
+spec:
+  gatewayClassName: eg
+  listeners:
+    - name: http
+      protocol: HTTP
+      port: 80
+      allowedRoutes:
+        namespaces:
+          from: All
