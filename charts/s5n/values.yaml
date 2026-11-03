@@ -94,14 +94,16 @@ apps:
       # Must equal the externally reachable port so peers are told the right one.
       port: 31111
       service:
-        # LoadBalancer keeps the pod free of hostPort (forbidden under Pod Security
-        # baseline+). With MetalLB on the platform layer the peer port gets its own
-        # reachable address; NodePort and ClusterIP stay available where no
-        # LoadBalancer implementation exists.
-        type: LoadBalancer
+        # NodePort on the node's own address, so the peer port shares a single-IP box
+        # with the Gateway's LoadBalancer address without any address sharing, and
+        # keeps the pod free of hostPort (forbidden under Pod Security baseline+).
+        # Local keeps real peer source IPs (bans, per-peer limits). The port must sit
+        # in the cluster's NodePort range (30000-32767 unless widened). LoadBalancer is
+        # available for boxes with a spare address.
+        type: NodePort
         externalTrafficPolicy: Local
-        # Optional annotations for the peers Service, e.g. metallb.io/allow-shared-ip
-        # or metallb.io/loadBalancerIPs on a single-IP box.
+        # Optional annotations for the peers Service, e.g. metallb.io/loadBalancerIPs
+        # when type is LoadBalancer.
         annotations: {}
     resources: {}
     env: {}

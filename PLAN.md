@@ -53,7 +53,7 @@ managed and on by default:
 | component | role | why this one |
 |---|---|---|
 | Gateway API CRDs | standard channel | the routing contract the chart emits against |
-| MetalLB (L2) | makes `type: LoadBalancer` work on bare metal | default pool is the node's own primary IP as a /32, which works on any VPS with no extra addresses or ARP. The Gateway and the torrent port both get ordinary LoadBalancer Services, so neither needs hostNetwork or the 30000-32767 NodePort range. One address cannot be shared the way `metallb.io/allow-shared-ip` suggests: MetalLB only shares an IP between Services that are both `externalTrafficPolicy: Cluster` (which SNATs peer traffic and hides real peer IPs) or that select the exact same pods — and the Gateway's Service and the peers Service are both `Local` with different selectors. Each therefore gets its own pool address by default (verified in kind); a single-address VPS is an open decision |
+| MetalLB (L2) | makes `type: LoadBalancer` work on bare metal | default pool is the node's own primary IP as a /32, which works on any VPS with no extra addresses or ARP. The Gateway's Service takes that address on 80/443. The torrent port is a NodePort on the same node address with `externalTrafficPolicy: Local`, so one IP serves both and real peer IPs survive. MetalLB address sharing cannot do this: it only shares between Services that are both `Cluster` (which SNATs peers) or select the same pods (verified in kind). A box with a spare address can set the peers Service to LoadBalancer instead |
 | Envoy Gateway | Gateway API implementation | the Envoy project's own Gateway controller, started by the Contour and Emissary teams on the same data plane, with a minor release roughly every quarter. Contour itself has had no minor release since 1.33 (Sept 2025), and almost all of its non-bot commits since May 2026 come from one maintainer |
 | cert-manager | TLS | Gateway API support on; HTTP-01 through the Gateway when a domain is given, self-signed otherwise |
 
@@ -227,7 +227,7 @@ puid:pgid, then `box init`. Every step is safe to re-run.
 - `readOnlyRootFilesystem`, all capabilities dropped, seccomp `RuntimeDefault`.
 - Default-deny NetworkPolicy, with only the needed flows allowed
   (Arr → qBittorrent, Prowlarr ↔ Arr, Seerr → Arr/media, Gateway → app).
-- Only the Gateway and the torrent port (a LoadBalancer Service with
+- Only the Gateway and the torrent port (a NodePort Service with
   `externalTrafficPolicy: Local`; hostPort is forbidden under `restricted`) are reachable
   from outside.
 - No credentials in values, in the repo, or in the wiring ConfigMap.

@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Phase-0/1 smoke test on kind: cluster -> Envoy Gateway (Gateway API) -> MetalLB (L2)
 # -> s5n chart. Asserts pods Ready, routes Accepted, every app answers through the
-# Gateway's LoadBalancer address, the peers Service gets its own LoadBalancer address
-# and accepts a TCP connect, the hardlink invariant holds on /data, and the wiring Job
+# Gateway's LoadBalancer address, the peers NodePort accepts a TCP connect on the
+# node's own address, the hardlink invariant holds on /data, and the wiring Job
 # does its job twice: the first run connects everything, the second changes nothing.
 # Usage: hack/e2e-kind.sh [--keep]
 set -euo pipefail
@@ -145,10 +145,13 @@ done
 code=$(curl -s -o /dev/null -w '%{http_code}' "http://${GW_ADDR}/qbittorrent/")
 echo "GET /qbittorrent/ via gateway -> ${code}"; [ "$code" = 200 ] || fail=1
 
-# The peers Service is type LoadBalancer: MetalLB assigns it its own address and
-# qBittorrent listens on it, so a TCP connect from the host must succeed.
-PEER_ADDR=$($K -n "$NS" get svc qbittorrent-peers -o jsonpath='{.status.loadBalancer.ingress[0].ip}')
-echo "peers Service address: ${PEER_ADDR}"
+# The peers Service is a NodePort on the node's own address (how a single-IP box
+# runs: the Gateway holds the LoadBalancer address, peers use the node port), so a
+# TCP connect from the host to <node>:31111 must succeed.
+peer_type=$($K -n "$NS" get svc qbittorrent-peers -o jsonpath='{.spec.type}/{.spec.ports[0].nodePort}')
+echo "peers Service: ${peer_type}"; [ "$peer_type" = NodePort/31111 ] || fail=1
+PEER_ADDR=$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "${CLUSTER}-control-plane")
+echo "node address: ${PEER_ADDR}"
 [ -n "$PEER_ADDR" ] || fail=1
 if python3 - "$PEER_ADDR" <<'PY'
 import socket, sys

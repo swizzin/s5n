@@ -220,7 +220,7 @@
                   "type": "integer",
                   "minimum": 1024,
                   "maximum": 65535,
-                  "description": "Externally reachable peer port. With a NodePort service it must also sit in the cluster's NodePort range; with LoadBalancer (the default) the LoadBalancer implementation assigns the address."
+                  "description": "Externally reachable peer port. With a NodePort service it must also sit in the cluster's NodePort range; NodePort is the default; with LoadBalancer the LoadBalancer implementation assigns the address."
                 },
                 "service": {
                   "type": "object",
