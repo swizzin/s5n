@@ -230,6 +230,11 @@ puid:pgid, then `box init`. Every step is safe to re-run.
 - Only the Gateway and the torrent port (a NodePort Service with
   `externalTrafficPolicy: Local`; hostPort is forbidden under `restricted`) are reachable
   from outside.
+- The Gateway is the only address a user ever has to remember. The torrent port is
+  plumbing: `box init` picks a free port in the NodePort range at random, records it in
+  values, and the chart hands the same number to qBittorrent and the Service. Peers learn
+  it from the tracker announce, so nobody types it. `box migrate` re-randomizes rather
+  than carrying an old port across; trackers accept the new one on the next announce.
 - No credentials in values, in the repo, or in the wiring ConfigMap.
 
 ## Catalog
