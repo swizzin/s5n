@@ -389,7 +389,10 @@ func (r *Runner) work(ctx context.Context, res *Result) error {
 	// Plex, then the two apps that attach to it (PLAN.md's catalog order).
 	// A missing or not-yet-successful claim token leaves Plex unclaimed —
 	// /identity still answers, so that alone is not a failure — and the media
-	// rows below report pending rather than failing the release.
+	// rows below report pending rather than failing the release. Tautulli needs
+	// its own Plex server token for the PMS link (the release Secret's
+	// plex-token), which is independent of the claim token: claim signs the
+	// server in to Plex.tv, plex-token authorizes a client against the server.
 	var plexIdentity *apps.Identity
 	if c.Plex != nil {
 		plex := apps.NewPlex(c.Plex.URL)
@@ -426,13 +429,28 @@ func (r *Runner) work(ctx context.Context, res *Result) error {
 				return r.ensure(res, "tautulli/ready", apps.Unchanged, err)
 			}
 			r.okStep(res, "tautulli/ready", c.Tautulli.URL)
-			plexHost, plexPort, err := hostPort(c.Plex.URL)
+			// The PMS link is token-based. Without a Plex server token the only
+			// alternative would be Plex trusting a network range, and the
+			// Gateway's Envoy reaches Plex from a pod IP inside the pod CIDR —
+			// that would expose the server unauthenticated through the Gateway.
+			// No token therefore means pending, not a tokenless write.
+			plexToken, haveToken, err := ReadOptionalSecret(c.Tautulli.PlexTokenFile)
 			if err != nil {
 				return r.ensure(res, "tautulli/plex", apps.Unchanged, err)
 			}
-			change, err := tt.EnsurePlexConnection(ctx, plexHost, plexPort, plexIdentity.MachineIdentifier)
-			if err := r.ensure(res, "tautulli/plex", change, err); err != nil {
-				return err
+			if !haveToken {
+				const detail = "no Plex token: set plex-token (from a claimed server) to let the wiring Job connect Tautulli"
+				res.Steps = append(res.Steps, Step{Name: "tautulli/plex", Result: "pending", Detail: detail})
+				r.logf("  %-38s pending: no Plex token", "tautulli/plex")
+			} else {
+				plexHost, plexPort, err := hostPort(c.Plex.URL)
+				if err != nil {
+					return r.ensure(res, "tautulli/plex", apps.Unchanged, err)
+				}
+				change, err := tt.EnsurePlexConnection(ctx, plexHost, plexPort, plexIdentity.MachineIdentifier, plexToken)
+				if err := r.ensure(res, "tautulli/plex", change, err); err != nil {
+					return err
+				}
 			}
 		}
 	}

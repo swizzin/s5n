@@ -138,7 +138,9 @@ spec:
         also reaches the Arrs once a human has signed it in (see
         internal/wiring's seerr/plex pending step). Egress within the release is
         already unrestricted (the blanket podSelector rule below), so only the
-        ingress side -- who may call Plex -- needs this.
+        ingress side -- who may call Plex -- needs this. Admitting a peer here
+        is not authorization: Plex still requires its server token, and no
+        network range is trusted for that.
         */}}
         {{- if eq $inst.app "plex" }}{{ $peers = list "tautulli" "seerr" }}{{ end }}
         {{- range $p := $peers }}

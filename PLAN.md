@@ -162,6 +162,12 @@ recorded in the wiring ConfigMap, not by name and not by tag (see AGENTS.md inva
 - Seerr: connected to the Arrs and the media server.
 - Plex: claimed with the token prompted at install (it expires in 4 minutes, so `box init`
   asks for it last). Jellyfin is the alternative media server.
+- Tautulli: connected to Plex with the server token (`plex-token` in the release Secret,
+  `secrets.plexToken`, the same token a claimed server hands out), and the link is proven
+  with `get_server_identity`. Plex is never told to trust a network range: the public
+  Gateway's Envoy reaches Plex from its own pod IP, inside the cluster pod CIDR, so
+  `apps.plex.noAuthNetworks` defaults to empty — a trusted range there would expose the
+  server unauthenticated through the Gateway. Without a token the row is `pending`.
 - End-to-end hardlink proof, for every distinct download/library pair: write a file
   under the download folder, link it into the library folder, assert `nlink == 2` and the
   same device, then clean up. Every pair, because one claim is not one filesystem: a disk

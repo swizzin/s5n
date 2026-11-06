@@ -76,11 +76,14 @@ func (t *Tautulli) WaitReady(ctx context.Context, timeout time.Duration) error {
 }
 
 // PMSSettings is the subset of Tautulli's "PMS" settings section the data
-// contract depends on.
+// contract depends on. Token is a pointer because get_settings may withhold it
+// (see EnsurePlexConnection): null and "the stored token is empty" must not
+// look the same.
 type PMSSettings struct {
 	IP         string
 	Port       int
 	Identifier string
+	Token      *string
 	APIEnabled bool
 }
 
@@ -95,9 +98,10 @@ func (t *Tautulli) currentPMS(ctx context.Context) (PMSSettings, error) {
 					APIEnabled int `json:"api_enabled"`
 				} `json:"General"`
 				PMS struct {
-					IP         string `json:"pms_ip"`
-					Port       int    `json:"pms_port"`
-					Identifier string `json:"pms_identifier"`
+					IP         string  `json:"pms_ip"`
+					Port       int     `json:"pms_port"`
+					Identifier string  `json:"pms_identifier"`
+					Token      *string `json:"pms_token"`
 				} `json:"PMS"`
 			} `json:"data"`
 		} `json:"response"`
@@ -112,6 +116,7 @@ func (t *Tautulli) currentPMS(ctx context.Context) (PMSSettings, error) {
 		IP:         out.Response.Data.PMS.IP,
 		Port:       out.Response.Data.PMS.Port,
 		Identifier: out.Response.Data.PMS.Identifier,
+		Token:      out.Response.Data.PMS.Token,
 		APIEnabled: out.Response.Data.General.APIEnabled != 0,
 	}, nil
 }
@@ -134,27 +139,47 @@ func (t *Tautulli) csrfToken(ctx context.Context) (string, error) {
 	return m[1], nil
 }
 
-// EnsurePlexConnection points Tautulli's PMS section at the release's Plex and
+// EnsurePlexConnection points Tautulli's PMS section at the release's Plex,
+// with the Plex server token (X-Plex-Token) supplied in the release Secret, and
 // proves the connection with get_server_identity, Tautulli's equivalent of the
 // Arr apps' own /test endpoint: it makes Tautulli fetch identity from the live
 // Plex server, so a wrong host/port cannot pass as "configured".
 //
-// pms_token is intentionally left empty: the wiring Job has no mount into
-// Plex's /config and so never holds its Plex.tv owner token (see AGENTS.md).
-// Reachability without one relies on the chart's apps.plex.noAuthNetworks
-// (PLEX_NO_AUTH_NETWORKS), which is why this succeeds regardless of whether a
-// claim token was supplied at install — unlike Seerr, Tautulli has no
-// interactive-sign-in gate in front of its settings.
+// That proof is reachability and identity, not authorization: Tautulli's
+// get_server_identity reads Plex's /identity, which answers unauthenticated on
+// every build. A wrong or expired token therefore still reports ok here; only
+// an authenticated Plex call (for example /library/sections) would prove it.
+// The token still has to be supplied, because Plex no longer treats any client
+// network as trusted.
+//
+// A token is mandatory. Plex must never be configured to trust a network range
+// instead (the chart's apps.plex.noAuthNetworks defaults to empty): the public
+// Gateway's Envoy proxy connects to Plex from its own pod IP, which is inside
+// the cluster pod CIDR, so a trusted range there would hand anyone who can
+// reach the Gateway unauthenticated admin of the server. An empty token is
+// therefore an error here rather than a tokenless write.
+//
+// The token cannot always be compared: Tautulli lists PMS_TOKEN among its
+// config's do-not-download keys, so get_settings returns it as JSON null rather
+// than as a value. A null (or a "********" placeholder from a build that masks
+// it) is "unknown", not "different" — comparing it would rewrite every run.
+// When the value is readable a difference is real drift, and the write below
+// always carries the Secret's token, never the value just read: a masked
+// placeholder must never be stored back (see MatchesFields' masked-value rule).
 //
 // api_enabled is resent on every write: /configUpdate treats an absent
 // checkbox field as "unchecked" (CherryPy form semantics), so omitting it
 // would silently disable Tautulli's own API on the very call that configures it.
-func (t *Tautulli) EnsurePlexConnection(ctx context.Context, host string, port int, machineIdentifier string) (Change, error) {
+func (t *Tautulli) EnsurePlexConnection(ctx context.Context, host string, port int, machineIdentifier, token string) (Change, error) {
+	if strings.TrimSpace(token) == "" {
+		return Unchanged, fmt.Errorf("no Plex token: refusing to configure a tokenless PMS link")
+	}
 	cur, err := t.currentPMS(ctx)
 	if err != nil {
 		return Unchanged, err
 	}
-	if cur.Identifier == machineIdentifier && cur.IP == host && cur.Port == port && cur.APIEnabled {
+	if cur.Identifier == machineIdentifier && cur.IP == host && cur.Port == port && cur.APIEnabled &&
+		plexTokenMatches(cur.Token, token) {
 		return Unchanged, nil
 	}
 	change := Updated
@@ -162,7 +187,7 @@ func (t *Tautulli) EnsurePlexConnection(ctx context.Context, host string, port i
 		change = Created
 	}
 
-	token, err := t.csrfToken(ctx)
+	csrf, err := t.csrfToken(ctx)
 	if err != nil {
 		return Unchanged, err
 	}
@@ -173,7 +198,7 @@ func (t *Tautulli) EnsurePlexConnection(ctx context.Context, host string, port i
 		"pms_name":       {"s5n-plex"},
 		"pms_ssl":        {"0"},
 		"pms_is_remote":  {"0"},
-		"pms_token":      {""},
+		"pms_token":      {token},
 		"api_enabled":    {"1"},
 	}
 	req := t.client.BaseURL + "/configUpdate"
@@ -182,7 +207,7 @@ func (t *Tautulli) EnsurePlexConnection(ctx context.Context, host string, port i
 		Message string `json:"message"`
 	}
 	hdr := t.client.Header.Clone()
-	hdr.Set("X-CSRF-Token", token)
+	hdr.Set("X-CSRF-Token", csrf)
 	if err := postForm(ctx, t.client, req, form, hdr, &saveResult); err != nil {
 		return Unchanged, fmt.Errorf("configUpdate: %w", err)
 	}
@@ -200,6 +225,26 @@ func (t *Tautulli) EnsurePlexConnection(ctx context.Context, host string, port i
 		}
 	}
 	return change, nil
+}
+
+// plexTokenMatches reports whether the PMS token Tautulli has stored is the one
+// in the release Secret. live is nil when get_settings withheld the token
+// (PMS_TOKEN is a do-not-download key there, so it arrives as JSON null); a
+// masked placeholder is treated the same way: both mean "cannot compare", not
+// "differs", because rewriting on every run would defeat the reconciler and the
+// only thing the Job can prove is that Plex answers the stored token
+// (get_server_identity). A genuinely empty stored token is a difference.
+func plexTokenMatches(live *string, want string) bool {
+	if live == nil {
+		return true
+	}
+	if *live == "" {
+		return false
+	}
+	if masked(*live) {
+		return true
+	}
+	return *live == want
 }
 
 // postForm is a small helper for the one non-JSON, cookie-and-header-carrying

@@ -24,6 +24,7 @@ type fakeMediaStack struct {
 	pmsIP      string
 	pmsPort    int
 	pmsID      string
+	pmsToken   string
 	apiEnabled bool
 	writes     int
 
@@ -66,6 +67,7 @@ func (f *fakeMediaStack) tautulliHandler() http.HandlerFunc {
 			f.pmsIP = r.Form.Get("pms_ip")
 			f.pmsPort, _ = strconv.Atoi(r.Form.Get("pms_port"))
 			f.pmsID = r.Form.Get("pms_identifier")
+			f.pmsToken = r.Form.Get("pms_token")
 			f.apiEnabled = r.Form.Get("api_enabled") == "1"
 			writeJSONAny(w, map[string]any{"result": "success", "message": "Settings saved."})
 		default:
@@ -89,7 +91,12 @@ func (f *fakeMediaStack) tautulliAPI(w http.ResponseWriter, r *http.Request) {
 		}
 		writeJSONAny(w, map[string]any{"response": map[string]any{"result": "success", "data": map[string]any{
 			"General": map[string]any{"api_enabled": apiEnabled},
-			"PMS":     map[string]any{"pms_ip": f.pmsIP, "pms_port": f.pmsPort, "pms_identifier": f.pmsID},
+			"PMS": map[string]any{
+				"pms_ip":         f.pmsIP,
+				"pms_port":       f.pmsPort,
+				"pms_identifier": f.pmsID,
+				"pms_token":      f.pmsToken,
+			},
 		}}})
 	case "get_server_identity":
 		writeJSONAny(w, map[string]any{"response": map[string]any{"result": "success", "data": map[string]any{"machine_identifier": f.pmsID}}})
@@ -119,9 +126,16 @@ func writeJSONAny(w http.ResponseWriter, v any) {
 	_ = json.NewEncoder(w).Encode(v)
 }
 
+// mediaPlexToken is the Plex server token the media harness mounts as the
+// release Secret's plex-token key, standing in for a token taken from a
+// claimed server.
+const mediaPlexToken = "plex-token-abc123"
+
 // newMediaHarness builds a Runner wired to fake Plex, Tautulli and Seerr
 // servers only (no qBittorrent/Arr/Prowlarr), so the media steps can be
-// asserted in isolation from the rest of internal/wiring's coverage.
+// asserted in isolation from the rest of internal/wiring's coverage. The Plex
+// token file is present and non-empty; tests about a missing token repoint
+// Config.Tautulli.PlexTokenFile at an absent, empty or unreadable path.
 func newMediaHarness(t *testing.T, claimed bool) (*Runner, *fakeMediaStack) {
 	t.Helper()
 	f := &fakeMediaStack{claimed: claimed, machine: "machine-123", apiKey: "tautulli-key", seerrUp: true}
@@ -135,11 +149,16 @@ func newMediaHarness(t *testing.T, claimed bool) (*Runner, *fakeMediaStack) {
 	if err := os.WriteFile(apiKeyFile, []byte(f.apiKey), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	plexTokenFile := dir + "/plex-token"
+	// A trailing newline, as a Secret patched from a shell prompt usually has.
+	if err := os.WriteFile(plexTokenFile, []byte(mediaPlexToken+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 
 	cfg := Config{
 		TimeoutSeconds: 10,
 		Plex:           &PlexConfig{URL: plex.URL},
-		Tautulli:       &TautulliConfig{URL: tautulli.URL, APIKeyFile: apiKeyFile},
+		Tautulli:       &TautulliConfig{URL: tautulli.URL, APIKeyFile: apiKeyFile, PlexTokenFile: plexTokenFile},
 		Seerr:          &SeerrConfig{URL: seerr.URL},
 	}
 	runner := &Runner{Config: cfg}
@@ -173,6 +192,9 @@ func TestWiringClaimedPlexWiresTautulliButSeerrStaysPending(t *testing.T) {
 	if f.pmsID != "machine-123" {
 		t.Fatalf("tautulli PMS identifier = %q", f.pmsID)
 	}
+	if f.pmsToken != mediaPlexToken {
+		t.Fatalf("tautulli PMS token = %q, want the mounted plex-token", f.pmsToken)
+	}
 	if s := step(res, "seerr/ready"); s == nil || s.Result != "ok" {
 		t.Fatalf("seerr/ready = %+v", s)
 	}
@@ -190,8 +212,8 @@ func TestWiringUnclaimedPlexLeavesClaimPendingButStillWiresTautulli(t *testing.T
 	if s := step(res, "plex/claim"); s == nil || s.Result != "pending" {
 		t.Fatalf("plex/claim = %+v, want pending (no claim token)", s)
 	}
-	// Tautulli needs no Plex.tv token at all (PLEX_NO_AUTH_NETWORKS on the
-	// chart side covers it), so it still wires regardless of claim state.
+	// The claim token only signs the server in to Plex.tv; the PMS link uses
+	// the release Secret's plex-token, so it wires regardless of claim state.
 	if s := step(res, "tautulli/plex"); s == nil || s.Result != "ok" {
 		t.Fatalf("tautulli/plex = %+v, want ok even though Plex is unclaimed", s)
 	}
@@ -253,5 +275,60 @@ func TestTautulliConfigValidationRequiresPlex(t *testing.T) {
 	}
 	if err := cfg.validate(); err == nil {
 		t.Fatal("tautulli without plex accepted")
+	}
+}
+
+// No Plex token: the PMS link is pending, not configured tokenless and not a
+// failure of the release. Nothing may be written to Tautulli.
+func TestWiringTautulliPlexPendingWithoutToken(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		path func(t *testing.T) string
+	}{
+		{"no token file configured", func(t *testing.T) string { return "" }},
+		{"token file absent", func(t *testing.T) string { return t.TempDir() + "/plex-token" }},
+		{"token file empty", func(t *testing.T) string {
+			p := t.TempDir() + "/plex-token"
+			if err := os.WriteFile(p, []byte("\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			return p
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r, f := newMediaHarness(t, true)
+			r.Config.Tautulli.PlexTokenFile = tc.path(t)
+
+			res, err := r.Run(context.Background())
+			if err != nil {
+				t.Fatalf("run: %v\n%s", err, Summary(res))
+			}
+			s := step(res, "tautulli/plex")
+			if s == nil || s.Result != "pending" {
+				t.Fatalf("tautulli/plex = %+v, want pending", s)
+			}
+			const want = "no Plex token: set plex-token (from a claimed server) to let the wiring Job connect Tautulli"
+			if s.Detail != want {
+				t.Fatalf("tautulli/plex detail = %q, want %q", s.Detail, want)
+			}
+			if f.writes != 0 {
+				t.Fatalf("Tautulli was written %d time(s) without a Plex token", f.writes)
+			}
+		})
+	}
+}
+
+// A token file that exists but cannot be read is an error: fail closed rather
+// than quietly configuring a tokenless link.
+func TestWiringTautulliPlexErrorsOnUnreadableToken(t *testing.T) {
+	r, f := newMediaHarness(t, true)
+	r.Config.Tautulli.PlexTokenFile = t.TempDir() // a directory: EISDIR, not ENOENT
+
+	res, err := r.Run(context.Background())
+	if err == nil {
+		t.Fatalf("run succeeded with an unreadable Plex token file\n%s", Summary(res))
+	}
+	if f.writes != 0 {
+		t.Fatalf("Tautulli was written %d time(s) after a token read failure", f.writes)
 	}
 }

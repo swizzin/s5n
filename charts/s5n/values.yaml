@@ -76,6 +76,13 @@ wiring:
 # Arr API keys live here, generated once and preserved across upgrades (lookup).
 secrets:
   existingSecret: ""
+  # Optional Plex server token (X-Plex-Token) from a claimed server. The wiring
+  # Job mounts it as the Secret's `plex-token` key and hands it to Tautulli, so
+  # no network range ever has to be trusted for Plex authentication. Empty or
+  # absent leaves tautulli/plex pending in the wiring receipt. The key can also
+  # be patched straight into the release Secret (upgrades preserve it); a
+  # non-empty value here wins, which is how a rotation is applied.
+  plexToken: ""
 
 apps:
   qbittorrent:
@@ -168,18 +175,16 @@ apps:
     port: 32400
     # Plex has no URL-base setting, same as qBittorrent; the route strips the prefix.
     rewritePath: true
-    # CIDRs that may reach Plex without a Plex.tv account token (PLEX_NO_AUTH_NETWORKS),
-    # even once Plex is claimed. This is what lets Tautulli (and, once a human has
-    # signed Seerr in, Seerr) reach Plex regardless of claim state: the wiring Job has
-    # no mount into Plex's own /config and so never holds its Plex.tv owner token.
-    # NetworkPolicy is the real boundary (only the Gateway, Tautulli, Seerr and the
-    # wiring Job may reach this port at all); these are the same RFC1918 + CGNAT
-    # ranges networkPolicy's egress rule already treats as "local" network space.
-    noAuthNetworks:
-      - 10.0.0.0/8
-      - 172.16.0.0/12
-      - 192.168.0.0/16
-      - 100.64.0.0/10
+    # CIDRs that may reach Plex without a Plex.tv account token
+    # (PLEX_NO_AUTH_NETWORKS). Empty by default, and it must stay empty unless a
+    # human has checked the ranges: the public Gateway's Envoy proxy reaches Plex
+    # from its own pod IP, which sits inside the cluster pod CIDR, so listing any
+    # range that contains the pod CIDR makes every request arriving through the
+    # Gateway count as "local" — that is unauthenticated admin of the server for
+    # anyone on the internet. NetworkPolicy cannot help; it already has to admit
+    # the Gateway. Tautulli connects with a real token instead
+    # (secrets.plexToken), so nothing needs to be trusted here.
+    noAuthNetworks: []
     resources: {}
     env: {}
 

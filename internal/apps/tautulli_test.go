@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strings"
 	"sync"
 	"testing"
 )
@@ -16,11 +17,17 @@ import (
 // testable the same way fakeArr proves qBittorrent/Sonarr/Radarr in
 // internal/wiring's tests.
 type fakeTautulli struct {
-	mu           sync.Mutex
-	apiKey       string
-	pmsIP        string
-	pmsPort      int
-	pmsID        string
+	mu       sync.Mutex
+	apiKey   string
+	pmsIP    string
+	pmsPort  int
+	pmsID    string
+	pmsToken string
+	// tokenMode mimics how get_settings exposes pms_token: "" returns the
+	// stored value, "hide" returns null (Tautulli's PMS_TOKEN is a
+	// do-not-download key) and "mask" returns the placeholder a masking
+	// build would send.
+	tokenMode    string
 	apiEnabled   bool
 	writes       int
 	configUpdate int
@@ -61,6 +68,7 @@ func (f *fakeTautulli) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		f.pmsID = r.Form.Get("pms_identifier")
+		f.pmsToken = r.Form.Get("pms_token")
 		f.apiEnabled = r.Form.Get("api_enabled") == "1"
 		writeTautulliJSON(w, map[string]any{"result": "success", "message": "Settings saved."})
 	default:
@@ -96,12 +104,20 @@ func (f *fakeTautulli) serveAPI(w http.ResponseWriter, r *http.Request) {
 		if f.apiEnabled {
 			apiEnabled = 1
 		}
+		var token any = f.pmsToken
+		switch f.tokenMode {
+		case "hide":
+			token = nil
+		case "mask":
+			token = "********"
+		}
 		writeTautulliJSON(w, map[string]any{"response": map[string]any{"result": "success", "data": map[string]any{
 			"General": map[string]any{"api_enabled": apiEnabled},
 			"PMS": map[string]any{
 				"pms_ip":         f.pmsIP,
 				"pms_port":       f.pmsPort,
 				"pms_identifier": f.pmsID,
+				"pms_token":      token,
 			},
 		}}})
 	case "get_server_identity":
@@ -118,6 +134,10 @@ func writeTautulliJSON(w http.ResponseWriter, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(v)
 }
+
+// testPlexToken is the Plex server token every test hands the wiring, standing
+// in for the release Secret's plex-token key.
+const testPlexToken = "plex-token-abc123"
 
 func TestTautulliWaitReady(t *testing.T) {
 	_, srv := newFakeTautulli(t, "test-key")
@@ -140,7 +160,7 @@ func TestEnsurePlexConnectionCreatesThenIsIdempotent(t *testing.T) {
 	tt := NewTautulli(srv.URL, "test-key")
 	ctx := context.Background()
 
-	change, err := tt.EnsurePlexConnection(ctx, "plex", 32400, "machine-123")
+	change, err := tt.EnsurePlexConnection(ctx, "plex", 32400, "machine-123", testPlexToken)
 	if err != nil {
 		t.Fatalf("first ensure: %v", err)
 	}
@@ -160,7 +180,7 @@ func TestEnsurePlexConnectionCreatesThenIsIdempotent(t *testing.T) {
 		t.Fatal("api_enabled was turned off by the write")
 	}
 
-	change, err = tt.EnsurePlexConnection(ctx, "plex", 32400, "machine-123")
+	change, err = tt.EnsurePlexConnection(ctx, "plex", 32400, "machine-123", testPlexToken)
 	if err != nil {
 		t.Fatalf("second ensure: %v", err)
 	}
@@ -176,13 +196,13 @@ func TestEnsurePlexConnectionRepairsDrift(t *testing.T) {
 	f, srv := newFakeTautulli(t, "test-key")
 	tt := NewTautulli(srv.URL, "test-key")
 	ctx := context.Background()
-	if _, err := tt.EnsurePlexConnection(ctx, "plex", 32400, "machine-123"); err != nil {
+	if _, err := tt.EnsurePlexConnection(ctx, "plex", 32400, "machine-123", testPlexToken); err != nil {
 		t.Fatal(err)
 	}
 	// The user (or a reinstalled Plex) changed identity.
 	f.pmsID = "stale"
 
-	change, err := tt.EnsurePlexConnection(ctx, "plex", 32400, "machine-123")
+	change, err := tt.EnsurePlexConnection(ctx, "plex", 32400, "machine-123", testPlexToken)
 	if err != nil {
 		t.Fatalf("ensure after drift: %v", err)
 	}
@@ -229,8 +249,122 @@ func TestEnsurePlexConnectionFailsWhenIdentityDoesNotMatch(t *testing.T) {
 		}
 		http.Error(w, "unexpected", http.StatusNotFound)
 	})
-	_, err := tt.EnsurePlexConnection(context.Background(), "plex", 32400, "machine-123")
+	_, err := tt.EnsurePlexConnection(context.Background(), "plex", 32400, "machine-123", testPlexToken)
 	if err == nil {
 		t.Fatal("ensure succeeded although get_server_identity proved a different server")
+	}
+}
+
+func TestEnsurePlexConnectionSendsPlexToken(t *testing.T) {
+	f, srv := newFakeTautulli(t, "test-key")
+	tt := NewTautulli(srv.URL, "test-key")
+
+	if _, err := tt.EnsurePlexConnection(context.Background(), "plex", 32400, "machine-123", testPlexToken); err != nil {
+		t.Fatalf("ensure: %v", err)
+	}
+	if got := f.lastForm.Get("pms_token"); got != testPlexToken {
+		t.Fatalf("pms_token sent as %q, want %q", got, testPlexToken)
+	}
+	if f.pmsToken != testPlexToken {
+		t.Fatalf("stored pms_token = %q, want %q", f.pmsToken, testPlexToken)
+	}
+}
+
+// A rotated token is drift even though host, port and identifier still match:
+// otherwise Tautulli would keep using a token the release no longer has.
+func TestEnsurePlexConnectionRewritesRotatedToken(t *testing.T) {
+	f, srv := newFakeTautulli(t, "test-key")
+	tt := NewTautulli(srv.URL, "test-key")
+	ctx := context.Background()
+	if _, err := tt.EnsurePlexConnection(ctx, "plex", 32400, "machine-123", testPlexToken); err != nil {
+		t.Fatal(err)
+	}
+	before := f.configUpdate
+
+	change, err := tt.EnsurePlexConnection(ctx, "plex", 32400, "machine-123", testPlexToken)
+	if err != nil {
+		t.Fatalf("unchanged token: %v", err)
+	}
+	if change != Unchanged || f.configUpdate != before {
+		t.Fatalf("same token: change=%v writes=%d, want Unchanged and no write", change, f.configUpdate-before)
+	}
+
+	rotated := testPlexToken + "-rotated"
+	change, err = tt.EnsurePlexConnection(ctx, "plex", 32400, "machine-123", rotated)
+	if err != nil {
+		t.Fatalf("rotated token: %v", err)
+	}
+	if change != Updated {
+		t.Fatalf("rotated token: change = %v, want Updated", change)
+	}
+	if f.pmsToken != rotated {
+		t.Fatalf("rotated token not stored: %q", f.pmsToken)
+	}
+}
+
+// Tautulli withholds pms_token from get_settings (PMS_TOKEN is a
+// do-not-download key), so it arrives as null. That is "unknown", not
+// "different": the second run must stay a no-op rather than rewrite every time.
+func TestEnsurePlexConnectionWithheldTokenStaysUnchanged(t *testing.T) {
+	f, srv := newFakeTautulli(t, "test-key")
+	tt := NewTautulli(srv.URL, "test-key")
+	ctx := context.Background()
+	if _, err := tt.EnsurePlexConnection(ctx, "plex", 32400, "machine-123", testPlexToken); err != nil {
+		t.Fatal(err)
+	}
+	f.tokenMode = "hide"
+	before := f.configUpdate
+
+	change, err := tt.EnsurePlexConnection(ctx, "plex", 32400, "machine-123", testPlexToken)
+	if err != nil {
+		t.Fatalf("withheld token: %v", err)
+	}
+	if change != Unchanged {
+		t.Fatalf("withheld token: change = %v, want Unchanged", change)
+	}
+	if f.configUpdate != before {
+		t.Fatalf("withheld token: rewrote settings (%d writes)", f.configUpdate-before)
+	}
+}
+
+// A masked placeholder must never be compared as if it were the stored token,
+// and — the failure mode that matters — never written back. Force a real drift
+// (the host) so a write happens, then assert the body carried the Secret's
+// token and not the placeholder.
+func TestEnsurePlexConnectionNeverWritesMaskedToken(t *testing.T) {
+	f, srv := newFakeTautulli(t, "test-key")
+	tt := NewTautulli(srv.URL, "test-key")
+	ctx := context.Background()
+	if _, err := tt.EnsurePlexConnection(ctx, "plex", 32400, "machine-123", testPlexToken); err != nil {
+		t.Fatal(err)
+	}
+	f.tokenMode = "mask"
+	f.pmsIP = "elsewhere"
+
+	change, err := tt.EnsurePlexConnection(ctx, "plex", 32400, "machine-123", testPlexToken)
+	if err != nil {
+		t.Fatalf("masked live token: %v", err)
+	}
+	if change != Updated {
+		t.Fatalf("masked live token with host drift: change = %v, want Updated", change)
+	}
+	if got := f.lastForm.Get("pms_token"); got != testPlexToken {
+		t.Fatalf("pms_token sent as %q, want the Secret's token", got)
+	}
+	if strings.Contains(f.lastForm.Encode(), "********") {
+		t.Fatalf("masked placeholder written back: %v", f.lastForm)
+	}
+}
+
+// Without a token the client must refuse outright: the only alternative
+// (relying on Plex trusting a network range) is the hole this replaced.
+func TestEnsurePlexConnectionRequiresToken(t *testing.T) {
+	f, srv := newFakeTautulli(t, "test-key")
+	tt := NewTautulli(srv.URL, "test-key")
+	if _, err := tt.EnsurePlexConnection(context.Background(), "plex", 32400, "machine-123", "  "); err == nil {
+		t.Fatal("ensure succeeded with an empty Plex token")
+	}
+	if f.configUpdate != 0 {
+		t.Fatalf("configUpdate called %d times without a token", f.configUpdate)
 	}
 }

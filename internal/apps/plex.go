@@ -17,10 +17,11 @@ type Plex struct {
 	client *Client
 }
 
-// NewPlex builds a client. Plex needs no API key for /identity or for any
-// endpoint reached from a PLEX_NO_AUTH_NETWORKS range (see the chart's
-// apps.plex.noAuthNetworks), which is how Tautulli reaches it without ever
-// holding a Plex.tv account token.
+// NewPlex builds a client. /identity needs no credential at all: Plex answers
+// it unauthenticated on every build, claimed or not. Nothing else here is
+// tokenless — clients that call Plex's library API (Tautulli) are given the
+// server token from the release Secret, because trusting a network range
+// instead would trust the pod CIDR the Gateway proxies from.
 func NewPlex(baseURL string) *Plex {
 	c := NewClient(baseURL, nil)
 	// Plex serves /identity as XML by default and content-negotiates: an

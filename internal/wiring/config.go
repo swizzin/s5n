@@ -10,7 +10,9 @@ package wiring
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"strings"
 )
@@ -38,9 +40,15 @@ type PlexConfig struct {
 // TautulliConfig points at Tautulli. APIKeyFile is a file reference into the
 // mounted Secret, seeded by the tautulli-config init container — the wiring
 // Job has no mount into Tautulli's own /config to read its generated key back.
+//
+// PlexTokenFile is the Plex server token (X-Plex-Token) the PMS link uses, also
+// a file reference into the mounted Secret. It is optional: absent or empty
+// means "no token yet", which makes the PMS link pending rather than
+// configuring Tautulli against a Plex that trusts the pod network.
 type TautulliConfig struct {
-	URL        string `json:"url"`
-	APIKeyFile string `json:"apiKeyFile"`
+	URL           string `json:"url"`
+	APIKeyFile    string `json:"apiKeyFile"`
+	PlexTokenFile string `json:"plexTokenFile"`
 }
 
 // SeerrConfig points at Seerr. There is no API key here either: every
@@ -180,6 +188,30 @@ func ReadSecret(path string) (string, error) {
 		return "", fmt.Errorf("secret %s is empty", path)
 	}
 	return s, nil
+}
+
+// ReadOptionalSecret reads a secret file that may legitimately be absent.
+//
+// An unconfigured path, a missing file, or an empty one all mean "not supplied
+// yet" — the caller reports its dependent step as pending, which is a normal
+// state and not an error. Any other read error is returned: a credential that
+// cannot be read must never degrade into configuring the app without it.
+func ReadOptionalSecret(path string) (string, bool, error) {
+	if path == "" {
+		return "", false, nil
+	}
+	b, err := os.ReadFile(path)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return "", false, nil
+		}
+		return "", false, fmt.Errorf("read secret %s: %w", path, err)
+	}
+	s := strings.TrimSpace(string(b))
+	if s == "" {
+		return "", false, nil
+	}
+	return s, true, nil
 }
 
 // Context returns a context bounded by the config's timeout.

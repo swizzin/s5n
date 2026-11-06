@@ -176,6 +176,10 @@
         "existingSecret": {
           "type": "string",
           "description": "Use a pre-made Secret instead of generating one. It must hold <instance>-apikey keys and qbittorrent-password."
+        },
+        "plexToken": {
+          "type": "string",
+          "description": "Optional Plex server token (X-Plex-Token), mounted as the Secret's plex-token key and given to Tautulli. Empty leaves tautulli/plex pending; Plex never trusts a network range instead."
         }
       }
     },
@@ -325,7 +329,8 @@
                 "type": "string",
                 "pattern": "^[0-9a-fA-F:.]+/[0-9]{1,3}$"
               },
-              "description": "CIDRs allowed to reach Plex without a Plex.tv account token (PLEX_NO_AUTH_NETWORKS)."
+              "default": [],
+              "description": "CIDRs allowed to reach Plex without a Plex.tv account token (PLEX_NO_AUTH_NETWORKS). Empty by default: the Gateway reaches Plex from a pod IP, so a trusted range would expose the server unauthenticated."
             },
             "resources": {
               "$ref": "#/definitions/resources"
