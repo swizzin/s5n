@@ -41,7 +41,7 @@ log "preparing host paths inside the node (the installer does this on real hosts
 docker exec "${CLUSTER}-control-plane" bash -c '
   mkdir -p /srv/s5n/data/downloads/{tv,movies,tv-4k,movies-4k,misc} \
            /srv/s5n/data/media/{tv,movies,tv-4k,movies-4k} \
-           /srv/s5n/config/{qbittorrent,prowlarr,sonarr,sonarr-4k,radarr,radarr-4k}
+           /srv/s5n/config/{qbittorrent,prowlarr,sonarr,sonarr-4k,radarr,radarr-4k,plex,tautulli,seerr}
   chown -R 1000:1000 /srv/s5n'
 
 log "Envoy Gateway ${ENVOY_GATEWAY_CHART_VERSION} as the Gateway (installs Gateway API CRDs)"
@@ -144,6 +144,13 @@ for path in /sonarr/ping /radarr/ping /prowlarr/ping; do
 done
 code=$(curl -s -o /dev/null -w '%{http_code}' "http://${GW_ADDR}/qbittorrent/")
 echo "GET /qbittorrent/ via gateway -> ${code}"; [ "$code" = 200 ] || fail=1
+# Plex's /identity answers unauthenticated whether or not it is claimed, and
+# Seerr's /api/v1/settings/public answers before any admin user exists —
+# both are exactly what makes them usable readiness/reachability checks here.
+code=$(curl -s -o /dev/null -w '%{http_code}' "http://${GW_ADDR}/plex/identity")
+echo "GET /plex/identity via gateway -> ${code}"; [ "$code" = 200 ] || fail=1
+code=$(curl -s -o /dev/null -w '%{http_code}' "http://${GW_ADDR}/seerr/api/v1/settings/public")
+echo "GET /seerr/api/v1/settings/public via gateway -> ${code}"; [ "$code" = 200 ] || fail=1
 
 # The peers Service is a NodePort on the node's own address (how a single-IP box
 # runs: the Gateway holds the LoadBalancer address, peers use the node port), so a
@@ -224,6 +231,12 @@ snapshot() { # snapshot <dir>
     --data-urlencode 'username=admin' --data-urlencode 'password=$qpw' \
     http://localhost:8080/api/v2/auth/login && curl -s -b /tmp/s5n-jar http://localhost:8080/api/v2/torrents/categories" \
     >"$dir/qbittorrent-categories.json"
+  # Tautulli's PMS section, using the seeded api_key: also the proof that the
+  # tautulli-config init container's seed is one Tautulli actually accepts.
+  local tpw
+  tpw=$($K -n "$NS" get secret s5n-keys -o jsonpath='{.data.tautulli-apikey}' | base64 -d)
+  $K -n "$NS" exec tautulli-0 -- curl -s \
+    "http://localhost:8181/api/v2?apikey=${tpw}&cmd=get_settings" >"$dir/tautulli-settings.json"
 }
 
 log "wiring run 1: asserts the release is actually connected"
@@ -237,10 +250,24 @@ for expected in \
   radarr/downloadclient radarr/rootfolder radarr/hardlinks \
   prowlarr/application/sonarr prowlarr/application/radarr \
   qbittorrent/data-contract qbittorrent/category/tv qbittorrent/category/movies \
-  data/hardlink/tv data/hardlink/movies; do
+  data/hardlink/tv data/hardlink/movies \
+  plex/ready tautulli/ready tautulli/plex seerr/ready; do
   res=$(status_field "[s['result'] for s in d['steps'] if s['name']=='$expected'][0]" 2>/dev/null || echo missing)
   echo "  ${expected}: ${res}"; [ "$res" = ok ] || fail=1
 done
+
+# No claim token is given anywhere in this e2e, so Plex stays unclaimed and
+# the two media rows that depend on a signed-in Plex/Seerr admin must say so
+# in the receipt rather than failing the release (AGENTS.md's "Next work"
+# item 2). Tautulli still wires regardless, since it needs no Plex.tv token.
+for pending in plex/claim seerr/plex; do
+  res=$(status_field "[s['result'] for s in d['steps'] if s['name']=='$pending'][0]" 2>/dev/null || echo missing)
+  echo "  ${pending}: ${res} (expected pending: no claim token in this e2e)"
+  [ "$res" = pending ] || fail=1
+done
+claimed=$(status_field "[s['detail'] for s in d['steps'] if s['name']=='plex/ready'][0]")
+echo "  plex/ready detail: ${claimed}"
+case "$claimed" in *claimed=false*) ;; *) echo "expected an unclaimed Plex in this e2e"; fail=1 ;; esac
 
 snapshot "$WORK/before"
 
