@@ -166,7 +166,12 @@ func (c *Client) request(ctx context.Context, method, path, contentType string, 
 	if contentType != "" {
 		req.Header.Set("Content-Type", contentType)
 	}
-	req.Header.Set("Accept", "application/json")
+	// JSON is the default, but Plex content-negotiates /identity: asking for
+	// application/json gets a JSON document, and the XML parser would then read
+	// an empty body. A client that sets its own Accept keeps it.
+	if req.Header.Get("Accept") == "" {
+		req.Header.Set("Accept", "application/json")
+	}
 	return req, nil
 }
 

@@ -163,7 +163,16 @@ spec:
             - name: data
               mountPath: /data
             - name: config
+              {{- if eq $inst.app "seerr" }}
+              # Seerr keeps its database, settings and rotated logs in
+              # CONFIG_DIRECTORY, which its image defaults to /app/config.
+              # Mounting the claim at /config would leave that on the read-only
+              # root filesystem, which is an EROFS crash at start-up; this is
+              # the one app whose config path is not /config.
+              mountPath: /app/config
+              {{- else }}
               mountPath: /config
+              {{- end }}
               subPath: {{ $inst.name }}
             - name: tmp
               mountPath: /tmp

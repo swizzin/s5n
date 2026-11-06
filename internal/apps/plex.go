@@ -22,7 +22,12 @@ type Plex struct {
 // apps.plex.noAuthNetworks), which is how Tautulli reaches it without ever
 // holding a Plex.tv account token.
 func NewPlex(baseURL string) *Plex {
-	return &Plex{client: NewClient(baseURL, nil)}
+	c := NewClient(baseURL, nil)
+	// Plex serves /identity as XML by default and content-negotiates: an
+	// Accept of application/json returns a JSON body instead, which the XML
+	// parser in Identity cannot read. Ask for the format this client parses.
+	c.Header.Set("Accept", "application/xml")
+	return &Plex{client: c}
 }
 
 // Identity is the parsed /identity response.
