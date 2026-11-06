@@ -213,7 +213,9 @@ A multi-node cluster is supported but cannot use hostPath storage, so `box init`
 for a storage class instead.
 
 The result is recorded in `/etc/swizzin/cluster.yaml` (source: `k0s-managed` or
-`external`, kubeconfig path, distribution, platform modes). Re-running reads that record
+`external`, kubeconfig path, distribution, platform modes, node count — the node
+count is kept so a re-run still knows whether a storage class is required
+without re-probing the cluster). Re-running reads that record
 before probing: a `k0s-managed` box gets k0s started and upgraded by `box update`; an
 `external` cluster's lifecycle is never touched, only its reachability checked. `box`
 owns the lifecycle of exactly what it installed.
