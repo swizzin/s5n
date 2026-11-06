@@ -2,8 +2,13 @@ package apps
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/xml"
 	"fmt"
+	"io"
+	"net/http"
+	"strings"
 	"time"
 )
 
@@ -72,4 +77,71 @@ func (p *Plex) Identity(ctx context.Context) (Identity, error) {
 		MachineIdentifier: x.MachineIdentifier,
 		Version:           x.Version,
 	}, nil
+}
+
+// TokenRejectedError is Plex answering 401 to an authenticated call: the server
+// token in the release Secret is not one this server accepts. It carries the
+// status code and nothing else — never the token, which travels in a request
+// header rather than the URL, so no error value below can contain it.
+type TokenRejectedError struct {
+	Status int
+}
+
+func (e *TokenRejectedError) Error() string {
+	return fmt.Sprintf("plex-token rejected by Plex (%d)", e.Status)
+}
+
+// VerifyToken proves the release's Plex server token (X-Plex-Token) against Plex
+// itself: /library/sections answers 200 to a token the server accepts and 401 to
+// one it does not.
+//
+// /identity cannot do this job. It answers unauthenticated on every build, so
+// Tautulli's get_server_identity — its own "connection test", which reads
+// /identity through its configured PMS host — reports a bogus or expired token
+// as a working link. Only an authenticated Plex call can tell the difference.
+//
+// The token goes in a header, never a query string: URL and transport errors
+// then carry only /library/sections, and the response body is drained rather
+// than quoted, so a server echo can never reach a receipt.
+func (p *Plex) VerifyToken(ctx context.Context, token string) error {
+	if strings.TrimSpace(token) == "" {
+		return fmt.Errorf("no Plex token: cannot verify an empty token")
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, p.client.BaseURL+"/library/sections", nil)
+	if err != nil {
+		return fmt.Errorf("check plex token: %w", err)
+	}
+	for k, values := range p.client.Header {
+		for _, v := range values {
+			req.Header.Add(k, v)
+		}
+	}
+	req.Header.Set("X-Plex-Token", token)
+	req.Header.Set("Accept", "application/xml")
+
+	resp, err := p.client.HTTP.Do(req)
+	if err != nil {
+		return fmt.Errorf("check plex token: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<20))
+
+	if resp.StatusCode == http.StatusUnauthorized {
+		return &TokenRejectedError{Status: resp.StatusCode}
+	}
+	if resp.StatusCode < 200 || resp.StatusCode > 299 {
+		return fmt.Errorf("check plex token: GET /library/sections returned %s", http.StatusText(resp.StatusCode))
+	}
+	return nil
+}
+
+// PlexTokenFingerprint is sha256-hex of a Plex server token: the only form of it
+// the wiring Job may persist. Tautulli lists PMS_TOKEN among its
+// do-not-download keys, so get_settings returns it as null; without a record of
+// what was last proven, a rotated token in the release Secret would never be
+// pushed. The fingerprint makes that comparison possible while the Secret stays
+// the only place the token exists.
+func PlexTokenFingerprint(token string) string {
+	sum := sha256.Sum256([]byte(token))
+	return hex.EncodeToString(sum[:])
 }

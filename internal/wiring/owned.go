@@ -15,6 +15,19 @@ type OwnedRecord struct {
 	Version  int                 `json:"version"`
 	Arr      map[string]ArrOwned `json:"arr,omitempty"`
 	Prowlarr ProwlarrOwned       `json:"prowlarr,omitempty"`
+	Tautulli *TautulliOwned      `json:"tautulli,omitempty"`
+}
+
+// TautulliOwned is what the Job last wrote into Tautulli that the app will not
+// read back. PlexTokenFingerprint is sha256-hex of the Plex server token the
+// PMS link was last written and proven with: Tautulli lists PMS_TOKEN among its
+// do-not-download keys, so get_settings answers null and the fingerprint is the
+// only way a rotated token in the release Secret can be detected. It is a
+// fingerprint, never the token itself (AGENTS.md invariant 7), and it lives in
+// owned.json because that record is already the Job's durable, fail-closed
+// state: a read error stops the run rather than guessing.
+type TautulliOwned struct {
+	PlexTokenFingerprint string `json:"plexTokenFingerprint,omitempty"`
 }
 
 // ArrOwned is what the Job owns on one Arr instance.
@@ -86,4 +99,24 @@ func (o *OwnedRecord) SetProwlarrApplicationID(instance string, id int) {
 		o.Prowlarr.Applications = map[string]int{}
 	}
 	o.Prowlarr.Applications[instance] = id
+}
+
+// TautulliPlexTokenFingerprint returns the fingerprint of the Plex server token
+// last written and proven into Tautulli's PMS link, or "" when no successful
+// write is on record (a first run, or an install predating this record).
+func (o *OwnedRecord) TautulliPlexTokenFingerprint() string {
+	if o.Tautulli == nil {
+		return ""
+	}
+	return o.Tautulli.PlexTokenFingerprint
+}
+
+// SetTautulliPlexTokenFingerprint records the fingerprint of the Plex server
+// token the Job just wrote and proved. Call it only after that succeeded: a
+// fingerprint stored for a write the app did not accept would hide a rotation.
+func (o *OwnedRecord) SetTautulliPlexTokenFingerprint(fingerprint string) {
+	if o.Tautulli == nil {
+		o.Tautulli = &TautulliOwned{}
+	}
+	o.Tautulli.PlexTokenFingerprint = fingerprint
 }

@@ -163,8 +163,15 @@ recorded in the wiring ConfigMap, not by name and not by tag (see AGENTS.md inva
 - Plex: claimed with the token prompted at install (it expires in 4 minutes, so `box init`
   asks for it last). Jellyfin is the alternative media server.
 - Tautulli: connected to Plex with the server token (`plex-token` in the release Secret,
-  `secrets.plexToken`, the same token a claimed server hands out), and the link is proven
-  with `get_server_identity`. Plex is never told to trust a network range: the public
+  `secrets.plexToken`, the same token a claimed server hands out). The token is proven
+  against Plex itself *before* Tautulli is touched: `GET /library/sections` with
+  `X-Plex-Token` answers 200 only for a token that server accepts, and a 401 fails the
+  run with no Tautulli write and no contact at all. `get_server_identity` alone cannot
+  prove it — it reads Plex's unauthenticated `/identity`, so even a bogus token passes.
+  Tautulli hides `pms_token` from `get_settings`, so the sha256 fingerprint of the token
+  last written and proven is recorded in the wiring ConfigMap's `owned.json`; a changed
+  fingerprint (a rotated Secret) rewrites the link although the live value is unreadable.
+  Plex is never told to trust a network range: the public
   Gateway's Envoy reaches Plex from its own pod IP, inside the cluster pod CIDR, so
   `apps.plex.noAuthNetworks` defaults to empty — a trusted range there would expose the
   server unauthenticated through the Gateway. Without a token the row is `pending`.

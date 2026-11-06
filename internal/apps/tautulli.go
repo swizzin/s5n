@@ -147,10 +147,9 @@ func (t *Tautulli) csrfToken(ctx context.Context) (string, error) {
 //
 // That proof is reachability and identity, not authorization: Tautulli's
 // get_server_identity reads Plex's /identity, which answers unauthenticated on
-// every build. A wrong or expired token therefore still reports ok here; only
-// an authenticated Plex call (for example /library/sections) would prove it.
-// The token still has to be supplied, because Plex no longer treats any client
-// network as trusted.
+// every build, so it cannot tell a valid token from an invalid one. Callers
+// must prove the token against Plex's authenticated API first
+// (apps.Plex.VerifyToken); by the time this runs the token is known good.
 //
 // A token is mandatory. Plex must never be configured to trust a network range
 // instead (the chart's apps.plex.noAuthNetworks defaults to empty): the public
@@ -162,15 +161,20 @@ func (t *Tautulli) csrfToken(ctx context.Context) (string, error) {
 // The token cannot always be compared: Tautulli lists PMS_TOKEN among its
 // config's do-not-download keys, so get_settings returns it as JSON null rather
 // than as a value. A null (or a "********" placeholder from a build that masks
-// it) is "unknown", not "different" — comparing it would rewrite every run.
-// When the value is readable a difference is real drift, and the write below
-// always carries the Secret's token, never the value just read: a masked
-// placeholder must never be stored back (see MatchesFields' masked-value rule).
+// it) is "unknown", so the comparison falls back to knownFingerprint, the
+// sha256-hex fingerprint of the token last written and proven (see
+// apps.PlexTokenFingerprint). An absent or different fingerprint is a rotation:
+// the write goes out again. With no record at all — a first run on an existing
+// release — the link is rewritten once, which is the only safe reading of
+// "unknown". When the value is readable a difference is real drift, and the
+// write below always carries the Secret's token, never the value just read: a
+// masked placeholder must never be stored back (see MatchesFields' masked-value
+// rule).
 //
 // api_enabled is resent on every write: /configUpdate treats an absent
 // checkbox field as "unchecked" (CherryPy form semantics), so omitting it
 // would silently disable Tautulli's own API on the very call that configures it.
-func (t *Tautulli) EnsurePlexConnection(ctx context.Context, host string, port int, machineIdentifier, token string) (Change, error) {
+func (t *Tautulli) EnsurePlexConnection(ctx context.Context, host string, port int, machineIdentifier, token, knownFingerprint string) (Change, error) {
 	if strings.TrimSpace(token) == "" {
 		return Unchanged, fmt.Errorf("no Plex token: refusing to configure a tokenless PMS link")
 	}
@@ -179,7 +183,7 @@ func (t *Tautulli) EnsurePlexConnection(ctx context.Context, host string, port i
 		return Unchanged, err
 	}
 	if cur.Identifier == machineIdentifier && cur.IP == host && cur.Port == port && cur.APIEnabled &&
-		plexTokenMatches(cur.Token, token) {
+		plexTokenMatches(cur.Token, token, knownFingerprint) {
 		return Unchanged, nil
 	}
 	change := Updated
@@ -230,19 +234,18 @@ func (t *Tautulli) EnsurePlexConnection(ctx context.Context, host string, port i
 // plexTokenMatches reports whether the PMS token Tautulli has stored is the one
 // in the release Secret. live is nil when get_settings withheld the token
 // (PMS_TOKEN is a do-not-download key there, so it arrives as JSON null); a
-// masked placeholder is treated the same way: both mean "cannot compare", not
-// "differs", because rewriting on every run would defeat the reconciler and the
-// only thing the Job can prove is that Plex answers the stored token
-// (get_server_identity). A genuinely empty stored token is a difference.
-func plexTokenMatches(live *string, want string) bool {
-	if live == nil {
-		return true
-	}
-	if *live == "" {
+// masked placeholder is treated the same way. Both mean "cannot compare", so
+// the answer comes from knownFingerprint: the sha256-hex fingerprint of the
+// token the Job last wrote and proved. An absent fingerprint means no successful
+// write is on record, and a different one means the Secret's token was rotated
+// since — both are differences. A genuinely empty stored token is a difference
+// too.
+func plexTokenMatches(live *string, want, knownFingerprint string) bool {
+	if live != nil && *live == "" {
 		return false
 	}
-	if masked(*live) {
-		return true
+	if live == nil || masked(*live) {
+		return knownFingerprint != "" && knownFingerprint == PlexTokenFingerprint(want)
 	}
 	return *live == want
 }

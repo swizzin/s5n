@@ -394,8 +394,9 @@ func (r *Runner) work(ctx context.Context, res *Result) error {
 	// plex-token), which is independent of the claim token: claim signs the
 	// server in to Plex.tv, plex-token authorizes a client against the server.
 	var plexIdentity *apps.Identity
+	var plex *apps.Plex
 	if c.Plex != nil {
-		plex := apps.NewPlex(c.Plex.URL)
+		plex = apps.NewPlex(c.Plex.URL)
 		r.logf("waiting for Plex at %s", c.Plex.URL)
 		if err := plex.WaitReady(ctx, timeout); err != nil {
 			return r.ensure(res, "plex/ready", apps.Unchanged, err)
@@ -423,12 +424,6 @@ func (r *Runner) work(ctx context.Context, res *Result) error {
 			if err != nil {
 				return r.ensure(res, "tautulli/credentials", apps.Unchanged, err)
 			}
-			tt := apps.NewTautulli(c.Tautulli.URL, key)
-			r.logf("waiting for Tautulli at %s", c.Tautulli.URL)
-			if err := tt.WaitReady(ctx, timeout); err != nil {
-				return r.ensure(res, "tautulli/ready", apps.Unchanged, err)
-			}
-			r.okStep(res, "tautulli/ready", c.Tautulli.URL)
 			// The PMS link is token-based. Without a Plex server token the only
 			// alternative would be Plex trusting a network range, and the
 			// Gateway's Envoy reaches Plex from a pod IP inside the pod CIDR —
@@ -438,6 +433,24 @@ func (r *Runner) work(ctx context.Context, res *Result) error {
 			if err != nil {
 				return r.ensure(res, "tautulli/plex", apps.Unchanged, err)
 			}
+			if haveToken {
+				// Prove the token against Plex itself, and before touching
+				// Tautulli at all. Tautulli's own get_server_identity reads
+				// Plex's unauthenticated /identity, so a bogus token would
+				// otherwise "prove" a link Plex refuses on every real request;
+				// /library/sections answers 401 to a token Plex does not
+				// accept. A rejected token is a release credential error like
+				// any other: no Tautulli write, and the run stops.
+				if err := plex.VerifyToken(ctx, plexToken); err != nil {
+					return r.ensure(res, "tautulli/plex", apps.Unchanged, err)
+				}
+			}
+			tt := apps.NewTautulli(c.Tautulli.URL, key)
+			r.logf("waiting for Tautulli at %s", c.Tautulli.URL)
+			if err := tt.WaitReady(ctx, timeout); err != nil {
+				return r.ensure(res, "tautulli/ready", apps.Unchanged, err)
+			}
+			r.okStep(res, "tautulli/ready", c.Tautulli.URL)
 			if !haveToken {
 				const detail = "no Plex token: set plex-token (from a claimed server) to let the wiring Job connect Tautulli"
 				res.Steps = append(res.Steps, Step{Name: "tautulli/plex", Result: "pending", Detail: detail})
@@ -447,10 +460,17 @@ func (r *Runner) work(ctx context.Context, res *Result) error {
 				if err != nil {
 					return r.ensure(res, "tautulli/plex", apps.Unchanged, err)
 				}
-				change, err := tt.EnsurePlexConnection(ctx, plexHost, plexPort, plexIdentity.MachineIdentifier, plexToken)
+				// Tautulli withholds pms_token from get_settings, so the
+				// fingerprint of the token last written and proven is what
+				// makes a rotation in the Secret visible (owned.json).
+				change, err := tt.EnsurePlexConnection(ctx, plexHost, plexPort,
+					plexIdentity.MachineIdentifier, plexToken, owned.TautulliPlexTokenFingerprint())
 				if err := r.ensure(res, "tautulli/plex", change, err); err != nil {
 					return err
 				}
+				// Only after the write and its proof succeeded: a fingerprint
+				// recorded for an unaccepted write would mask a rotation.
+				owned.SetTautulliPlexTokenFingerprint(apps.PlexTokenFingerprint(plexToken))
 			}
 		}
 	}
