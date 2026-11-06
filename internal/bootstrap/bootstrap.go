@@ -89,7 +89,10 @@ type Result struct {
 	StorageClassRequired bool
 	Platform             []ComponentResult
 	// Skips records why each discovered candidate kubeconfig was not used.
-	Skips  []string
+	Skips []string
+	// Notes records host evidence that is not, by itself, a reason to stop:
+	// a Docker or containerd daemon that no cluster port depends on.
+	Notes  []string
 	Reason string
 }
 
@@ -166,12 +169,14 @@ func FormatResult(res Result) string {
 	switch res.Action {
 	case ActionStop:
 		writeSkips(&b, res.Skips)
+		writeNotes(&b, res.Notes)
 		fmt.Fprintf(&b, "%s\n", res.Reason)
 		return b.String()
 	case ActionInstall:
 		fmt.Fprintf(&b, "source: %s\n", res.Source)
 		fmt.Fprintf(&b, "distribution: %s\n", res.Distribution)
 		fmt.Fprintf(&b, "kubeconfig: %s\n", res.Kubeconfig)
+		writeNotes(&b, res.Notes)
 		fmt.Fprintf(&b, "%s\n", res.Reason)
 		return b.String()
 	}
@@ -205,5 +210,11 @@ func writeSkips(b *strings.Builder, skips []string) {
 	fmt.Fprintf(b, "skipped candidates:\n")
 	for _, s := range skips {
 		fmt.Fprintf(b, "  %s\n", s)
+	}
+}
+
+func writeNotes(b *strings.Builder, notes []string) {
+	for _, n := range notes {
+		fmt.Fprintf(b, "note: %s\n", n)
 	}
 }

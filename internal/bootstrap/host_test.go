@@ -44,3 +44,62 @@ func TestRunningProcessesNameOnly(t *testing.T) {
 		}
 	}
 }
+
+func TestClassifyFindings(t *testing.T) {
+	// Docker and containerd run on hosts with no Kubernetes, so they are notes;
+	// every other sign of an installation stays a blocker. A runtime holding an
+	// API port is caught by the port finding.
+	cases := []struct {
+		name     string
+		in       []Finding
+		blockers string
+		notes    string
+	}{
+		{
+			name:  "docker alone is a note",
+			in:    []Finding{{Kind: "process", Name: "dockerd"}},
+			notes: "process dockerd",
+		},
+		{
+			name:  "containerd alone is a note",
+			in:    []Finding{{Kind: "process", Name: "containerd"}},
+			notes: "process containerd",
+		},
+		{
+			name:     "docker with the API port listening blocks through the port",
+			in:       []Finding{{Kind: "process", Name: "dockerd"}, {Kind: "port", Name: "6443"}},
+			blockers: "port 6443",
+			notes:    "process dockerd",
+		},
+		{
+			name:     "kubelet alone still blocks",
+			in:       []Finding{{Kind: "process", Name: "kubelet"}},
+			blockers: "process kubelet",
+		},
+		{
+			name:     "k3s binary alone still blocks",
+			in:       []Finding{{Kind: "binary", Name: "/usr/local/bin/k3s"}},
+			blockers: "binary /usr/local/bin/k3s",
+		},
+		{
+			name:     "k0s unit names the cluster, its containerd is a note",
+			in:       []Finding{{Kind: "process", Name: "containerd"}, {Kind: "unit", Name: "k0scontroller.service"}},
+			blockers: "unit k0scontroller.service",
+			notes:    "process containerd",
+		},
+		{
+			name: "nothing present",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			blockers, notes := classifyFindings(tc.in)
+			if got := formatFindings(blockers); got != tc.blockers {
+				t.Errorf("blockers = %q, want %q", got, tc.blockers)
+			}
+			if got := formatFindings(notes); got != tc.notes {
+				t.Errorf("notes = %q, want %q", got, tc.notes)
+			}
+		})
+	}
+}

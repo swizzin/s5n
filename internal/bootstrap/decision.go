@@ -76,11 +76,16 @@ func (d *Decision) Bootstrap(ctx context.Context, opts Options) (Result, error) 
 		return d.useCluster(ctx, opts, kc, path, SourceExternal, "cluster on this host"), nil
 	}
 
-	// 3. Something present but not usable.
-	if findings := d.Host.Present(); len(findings) > 0 {
+	// 3. Something present but not usable. Docker and containerd are excluded
+	// from the blockers: they also run on hosts with no Kubernetes, which are
+	// exactly the clean k0s targets. They stay as notes, and a runtime holding
+	// an API port is caught by the listening-port finding.
+	blockers, notes := classifyFindings(d.Host.Present())
+	if len(blockers) > 0 {
 		res := stop("a cluster appears to be present on this host but is not usable through any kubeconfig:")
 		res.Skips = skips
-		res.Reason += "\n  " + formatFindings(findings) +
+		res.Notes = describeNotes(notes)
+		res.Reason += "\n  " + formatFindings(blockers) +
 			"\nbox will not install a second cluster over a broken first one."
 		return res, nil
 	}
@@ -107,6 +112,7 @@ func (d *Decision) Bootstrap(ctx context.Context, opts Options) (Result, error) 
 		Distribution: DistK0s,
 		Nodes:        1,
 		Skips:        skips,
+		Notes:        describeNotes(notes),
 		Reason:       "clean host: k0s install planned (the platform layer is a later bootstrap step)",
 	}
 	return res, nil
@@ -259,4 +265,14 @@ func formatFindings(findings []Finding) string {
 		parts = append(parts, fmt.Sprintf("%s %s", f.Kind, f.Name))
 	}
 	return strings.Join(parts, ", ")
+}
+
+// describeNotes renders runtime findings as informational lines. They are
+// reported to the operator, never acted on.
+func describeNotes(findings []Finding) []string {
+	out := make([]string, 0, len(findings))
+	for _, f := range findings {
+		out = append(out, fmt.Sprintf("%s running; not a cluster by itself", f.Name))
+	}
+	return out
 }

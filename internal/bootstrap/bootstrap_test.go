@@ -351,6 +351,125 @@ func TestBootstrapPresentButUnusableStops(t *testing.T) {
 	}
 }
 
+// ---- a bare container runtime is not a cluster; it is an install target ----
+
+func TestBootstrapContainerRuntimeNotACluster(t *testing.T) {
+	cases := []struct {
+		name       string
+		findings   []Finding
+		wantAction Action
+		wantReason string   // substring, checked on stop
+		wantNotes  []string // exact
+	}{
+		{
+			name:       "docker only installs with a note",
+			findings:   []Finding{{Kind: "process", Name: "dockerd"}},
+			wantAction: ActionInstall,
+			wantNotes:  []string{"dockerd running; not a cluster by itself"},
+		},
+		{
+			name:       "containerd only installs",
+			findings:   []Finding{{Kind: "process", Name: "containerd"}},
+			wantAction: ActionInstall,
+			wantNotes:  []string{"containerd running; not a cluster by itself"},
+		},
+		{
+			name: "docker and containerd install with two notes",
+			findings: []Finding{
+				{Kind: "process", Name: "dockerd"},
+				{Kind: "process", Name: "containerd"},
+			},
+			wantAction: ActionInstall,
+			wantNotes:  []string{"dockerd running; not a cluster by itself", "containerd running; not a cluster by itself"},
+		},
+		{
+			name: "dockerd with 6443 listening stops on the port",
+			findings: []Finding{
+				{Kind: "process", Name: "dockerd"},
+				{Kind: "port", Name: "6443"},
+			},
+			wantAction: ActionStop,
+			wantReason: "port 6443",
+			wantNotes:  []string{"dockerd running; not a cluster by itself"},
+		},
+		{
+			name:       "kubelet alone still stops",
+			findings:   []Finding{{Kind: "process", Name: "kubelet"}},
+			wantAction: ActionStop,
+			wantReason: "process kubelet",
+		},
+		{
+			name:       "k3s binary alone still stops",
+			findings:   []Finding{{Kind: "binary", Name: "/usr/local/bin/k3s"}},
+			wantAction: ActionStop,
+			wantReason: "binary /usr/local/bin/k3s",
+		},
+		{
+			name: "k0s unit still stops even with its containerd visible",
+			findings: []Finding{
+				{Kind: "process", Name: "containerd"},
+				{Kind: "unit", Name: "k0scontroller.service"},
+			},
+			wantAction: ActionStop,
+			wantReason: "unit k0scontroller.service",
+			wantNotes:  []string{"containerd running; not a cluster by itself"},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			src := &fakeSource{}
+			prober := &fakeProber{}
+			host := &fakeHost{findings: tc.findings}
+			recs := &fakeRecords{}
+			inst := &fakeInstaller{}
+			d := newDecision(src, prober, host, recs, inst)
+
+			res, err := d.Bootstrap(context.Background(), Options{})
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if res.Action != tc.wantAction {
+				t.Fatalf("action = %q, want %q; reason: %s", res.Action, tc.wantAction, res.Reason)
+			}
+			if len(tc.wantNotes) != len(res.Notes) {
+				t.Fatalf("notes = %v, want %v", res.Notes, tc.wantNotes)
+			}
+			for i, want := range tc.wantNotes {
+				if res.Notes[i] != want {
+					t.Errorf("note[%d] = %q, want %q", i, res.Notes[i], want)
+				}
+			}
+
+			switch tc.wantAction {
+			case ActionInstall:
+				if len(inst.plans) != 1 || inst.plans[0].Version != K0sVersion {
+					t.Errorf("installer should get one plan for %s: %v", K0sVersion, inst.plans)
+				}
+				if len(recs.saved) != 1 || recs.saved[0].Source != SourceK0sManaged {
+					t.Errorf("an install over a bare runtime must be recorded as k0s-managed")
+				}
+				out := FormatResult(res)
+				for _, want := range tc.wantNotes {
+					if !strings.Contains(out, "note: "+want) {
+						t.Errorf("dry run should print %q:\n%s", "note: "+want, out)
+					}
+				}
+			case ActionStop:
+				if !strings.Contains(res.Reason, tc.wantReason) {
+					t.Errorf("reason = %q, want it to name %q", res.Reason, tc.wantReason)
+				}
+				if !strings.Contains(res.Reason, "will not install a second cluster") {
+					t.Errorf("reason should explain it never installs over a broken cluster: %s", res.Reason)
+				}
+				if len(inst.plans) != 0 {
+					t.Errorf("installer must not run when something present is unusable")
+				}
+			}
+		})
+	}
+}
+
 // ---- existing record: probing skipped, external lifecycle never touched ----
 
 func TestBootstrapRecordSkipsProbing(t *testing.T) {

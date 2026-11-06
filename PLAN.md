@@ -200,10 +200,11 @@ lives in Go, where it can be tested, and none in bash.
    `/var/lib/k0s/pki/admin.conf`, kubeadm's `/etc/kubernetes/admin.conf`,
    `~/.kube/config`). A candidate counts only if `/version` answers and a
    SelfSubjectAccessReview says this user can create namespaces, CRDs and cluster roles.
-3. **Something present but not usable.** A running kubelet, containerd or Docker
-   holding the ports, a `k3s`/`k0s`/`rke2`/`microk8s` binary or unit, or anything
-   listening on 6443, 10250 or 2379. `box` stops and explains; it never installs a
-   second cluster over a broken first one.
+3. **Something present but not usable.** A running kubelet, a `k3s`/`k0s`/`rke2`/
+   `microk8s` binary or unit, or anything listening on 6443, 10250 or 2379. Docker or
+   containerd alone is not a cluster: it is reported as a note and the install goes
+   ahead, and a runtime holding one of those ports is caught by the listener. `box`
+   stops and explains; it never installs a second cluster over a broken first one.
 4. **A clean host.** Only now does it install k0s: pinned version and sha256,
    `k0s install controller --single`, then wait for the node to be Ready.
 
