@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
 # Phase-0/1 smoke test on kind: cluster -> Envoy Gateway (Gateway API) -> MetalLB (L2)
 # -> s5n chart. Asserts pods Ready, routes Accepted, every app answers through the
-# Gateway's LoadBalancer address, the peers NodePort accepts a TCP connect on the
-# node's own address, the hardlink invariant holds on /data, and the wiring Job
-# does its job twice: the first run connects everything, the second changes nothing.
+# Gateway's LoadBalancer address (and Plex refuses an unauthenticated library call
+# there, instead of trusting the pod network the proxy dials from), the peers
+# NodePort accepts a TCP connect on the node's own address, the hardlink invariant
+# holds on /data, and the wiring Job does its job twice: the first run connects
+# everything, the second changes nothing.
 # Usage: hack/e2e-kind.sh [--keep]
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -149,6 +151,13 @@ echo "GET /qbittorrent/ via gateway -> ${code}"; [ "$code" = 200 ] || fail=1
 # both are exactly what makes them usable readiness/reachability checks here.
 code=$(curl -s -o /dev/null -w '%{http_code}' "http://${GW_ADDR}/plex/identity")
 echo "GET /plex/identity via gateway -> ${code}"; [ "$code" = 200 ] || fail=1
+# The regression test for the no-auth hole: Envoy connects to Plex from its own
+# pod IP, inside the cluster pod CIDR. If Plex trusted a network range covering
+# that (PLEX_NO_AUTH_NETWORKS), this library call would answer 200 with full
+# admin for anyone who can reach the Gateway. It must be 401.
+code=$(curl -s -o /dev/null -w '%{http_code}' "http://${GW_ADDR}/plex/library/sections")
+echo "GET /plex/library/sections via gateway -> ${code} (want 401)"
+[ "$code" = 401 ] || { echo "Plex served /library/sections as ${code} through the Gateway: unauthenticated access"; fail=1; }
 code=$(curl -s -o /dev/null -w '%{http_code}' "http://${GW_ADDR}/seerr/api/v1/settings/public")
 echo "GET /seerr/api/v1/settings/public via gateway -> ${code}"; [ "$code" = 200 ] || fail=1
 
@@ -231,8 +240,10 @@ snapshot() { # snapshot <dir>
     --data-urlencode 'username=admin' --data-urlencode 'password=$qpw' \
     http://localhost:8080/api/v2/auth/login && curl -s -b /tmp/s5n-jar http://localhost:8080/api/v2/torrents/categories" \
     >"$dir/qbittorrent-categories.json"
-  # Tautulli's PMS section, using the seeded api_key: also the proof that the
-  # tautulli-config init container's seed is one Tautulli actually accepts.
+  # Tautulli's settings, using the seeded api_key: also the proof that the
+  # tautulli-config init container's seed is one Tautulli actually accepts. The
+  # PMS section is legitimately empty here: this e2e supplies no Plex token, so
+  # the link stays pending rather than being pointed at Plex tokenless.
   local tpw
   tpw=$($K -n "$NS" get secret s5n-keys -o jsonpath='{.data.tautulli-apikey}' | base64 -d)
   $K -n "$NS" exec tautulli-0 -- curl -s \
@@ -251,18 +262,19 @@ for expected in \
   prowlarr/application/sonarr prowlarr/application/radarr \
   qbittorrent/data-contract qbittorrent/category/tv qbittorrent/category/movies \
   data/hardlink/tv data/hardlink/movies \
-  plex/ready tautulli/ready tautulli/plex seerr/ready; do
+  plex/ready tautulli/ready seerr/ready; do
   res=$(status_field "[s['result'] for s in d['steps'] if s['name']=='$expected'][0]" 2>/dev/null || echo missing)
   echo "  ${expected}: ${res}"; [ "$res" = ok ] || fail=1
 done
 
-# No claim token is given anywhere in this e2e, so Plex stays unclaimed and
-# the two media rows that depend on a signed-in Plex/Seerr admin must say so
-# in the receipt rather than failing the release (AGENTS.md's "Next work"
-# item 2). Tautulli still wires regardless, since it needs no Plex.tv token.
-for pending in plex/claim seerr/plex; do
+# No claim token and no Plex server token are given anywhere in this e2e, so
+# Plex stays unclaimed, Tautulli has nothing to authenticate its PMS link with,
+# and Seerr has no signed-in admin: all three rows must say so in the receipt
+# rather than failing the release (AGENTS.md's "Next work" item 2). The receipt
+# never claims a PMS link it was given no token for.
+for pending in plex/claim tautulli/plex seerr/plex; do
   res=$(status_field "[s['result'] for s in d['steps'] if s['name']=='$pending'][0]" 2>/dev/null || echo missing)
-  echo "  ${pending}: ${res} (expected pending: no claim token in this e2e)"
+  echo "  ${pending}: ${res} (expected pending: no Plex token in this e2e)"
   [ "$res" = pending ] || fail=1
 done
 claimed=$(status_field "[s['detail'] for s in d['steps'] if s['name']=='plex/ready'][0]")
