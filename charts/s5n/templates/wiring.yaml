@@ -50,6 +50,19 @@ previous run's logs stay readable until then.
       "selfUrl" (printf "http://prowlarr:%v/prowlarr" .Values.apps.prowlarr.port)
       "apiKeyFile" "/etc/s5n/keys/prowlarr-apikey") }}
 {{- end }}
+{{- if and .Values.apps.plex .Values.apps.plex.enabled }}
+{{- $_ := set $cfg "plex" (dict
+      "url" (printf "http://plex:%v" .Values.apps.plex.port)) }}
+{{- end }}
+{{- if and .Values.apps.tautulli .Values.apps.tautulli.enabled }}
+{{- $_ := set $cfg "tautulli" (dict
+      "url" (printf "http://tautulli:%v" .Values.apps.tautulli.port)
+      "apiKeyFile" "/etc/s5n/keys/tautulli-apikey") }}
+{{- end }}
+{{- if and .Values.apps.seerr .Values.apps.seerr.enabled }}
+{{- $_ := set $cfg "seerr" (dict
+      "url" (printf "http://seerr:%v" .Values.apps.seerr.port)) }}
+{{- end }}
 ---
 apiVersion: v1
 kind: ConfigMap

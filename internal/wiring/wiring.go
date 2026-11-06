@@ -386,6 +386,76 @@ func (r *Runner) work(ctx context.Context, res *Result) error {
 		r.okStep(res, name, fmt.Sprintf("nlink=%d sameDevice=%v", check.Nlink, check.SameDevice))
 	}
 
+	// Plex, then the two apps that attach to it (PLAN.md's catalog order).
+	// A missing or not-yet-successful claim token leaves Plex unclaimed —
+	// /identity still answers, so that alone is not a failure — and the media
+	// rows below report pending rather than failing the release.
+	var plexIdentity *apps.Identity
+	if c.Plex != nil {
+		plex := apps.NewPlex(c.Plex.URL)
+		r.logf("waiting for Plex at %s", c.Plex.URL)
+		if err := plex.WaitReady(ctx, timeout); err != nil {
+			return r.ensure(res, "plex/ready", apps.Unchanged, err)
+		}
+		ident, err := plex.Identity(ctx)
+		if err != nil {
+			return r.ensure(res, "plex/ready", apps.Unchanged, err)
+		}
+		plexIdentity = &ident
+		r.okStep(res, "plex/ready", fmt.Sprintf("version=%s claimed=%v", ident.Version, ident.Claimed))
+		if ident.Claimed {
+			r.okStep(res, "plex/claim", "machineIdentifier="+ident.MachineIdentifier)
+		} else {
+			res.Steps = append(res.Steps, Step{Name: "plex/claim", Result: "pending",
+				Detail: "no claim token (or it expired before Plex started): Plex is not signed in to a Plex.tv account"})
+			r.logf("  %-38s pending: no claim token", "plex/claim")
+		}
+	}
+
+	if c.Tautulli != nil {
+		if plexIdentity == nil {
+			res.Steps = append(res.Steps, Step{Name: "tautulli/plex", Result: "pending", Detail: "plex is not deployed in this release"})
+		} else {
+			key, err := ReadSecret(c.Tautulli.APIKeyFile)
+			if err != nil {
+				return r.ensure(res, "tautulli/credentials", apps.Unchanged, err)
+			}
+			tt := apps.NewTautulli(c.Tautulli.URL, key)
+			r.logf("waiting for Tautulli at %s", c.Tautulli.URL)
+			if err := tt.WaitReady(ctx, timeout); err != nil {
+				return r.ensure(res, "tautulli/ready", apps.Unchanged, err)
+			}
+			r.okStep(res, "tautulli/ready", c.Tautulli.URL)
+			plexHost, plexPort, err := hostPort(c.Plex.URL)
+			if err != nil {
+				return r.ensure(res, "tautulli/plex", apps.Unchanged, err)
+			}
+			change, err := tt.EnsurePlexConnection(ctx, plexHost, plexPort, plexIdentity.MachineIdentifier)
+			if err := r.ensure(res, "tautulli/plex", change, err); err != nil {
+				return err
+			}
+		}
+	}
+
+	if c.Seerr != nil {
+		seerr := apps.NewSeerr(c.Seerr.URL)
+		r.logf("waiting for Seerr at %s", c.Seerr.URL)
+		if err := seerr.WaitReady(ctx, timeout); err != nil {
+			return r.ensure(res, "seerr/ready", apps.Unchanged, err)
+		}
+		r.okStep(res, "seerr/ready", c.Seerr.URL)
+		// Every settings endpoint in Seerr needs an authenticated admin
+		// session, and the only way to create its first admin user is an
+		// interactive Plex (or Jellyfin) OAuth sign-in through a browser — a
+		// claim token does not help, because it authenticates the Plex
+		// *server* to plex.tv, not a plex.tv *account* into Seerr. This is
+		// always pending until a human signs in once, regardless of Plex's
+		// claim state.
+		res.Steps = append(res.Steps, Step{Name: "seerr/plex", Result: "pending",
+			Detail: "Seerr has no admin account yet: sign in once at /seerr with Plex to let the wiring Job take over"})
+		r.logf("  %-38s pending: needs one interactive Plex sign-in", "seerr/plex")
+	}
+
 	if r.Publish != nil {
 		r.okStep(res, "publish", c.ConfigMap)
 	}

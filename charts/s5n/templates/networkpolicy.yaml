@@ -3,9 +3,12 @@ Default-deny inside the release, then only the flows the stack needs:
   gateway -> every app http
   sonarr + radarr instances -> qbittorrent, prowlarr
   prowlarr -> sonarr + radarr instances
+  tautulli, seerr -> plex
   internet -> qbittorrent peer port
   all -> DNS; all -> public internet (indexers, metadata); all -> pods of this release
-Egress to other in-cluster namespaces and RFC1918 ranges is denied except DNS.
+Egress to other in-cluster namespaces and RFC1918 ranges is denied except DNS, but is
+unrestricted *within* the release (the blanket podSelector rule below), so Seerr's
+eventual egress to the Arrs needs no extra rule here -- only Plex's ingress does.
 */ -}}
 {{- if .Values.networkPolicy.enabled }}
 {{- $root := . }}
@@ -130,6 +133,14 @@ spec:
         {{- $peers := list }}
         {{- if or (eq $inst.app "qbittorrent") (eq $inst.app "prowlarr") }}{{ $peers = list "sonarr" "radarr" }}{{ end }}
         {{- if $inst.arr }}{{ if ne $inst.app "prowlarr" }}{{ $peers = list "prowlarr" }}{{ end }}{{ end }}
+        {{- /*
+        Tautulli and Seerr both attach to Plex (PLAN.md's catalog order); Seerr
+        also reaches the Arrs once a human has signed it in (see
+        internal/wiring's seerr/plex pending step). Egress within the release is
+        already unrestricted (the blanket podSelector rule below), so only the
+        ingress side -- who may call Plex -- needs this.
+        */}}
+        {{- if eq $inst.app "plex" }}{{ $peers = list "tautulli" "seerr" }}{{ end }}
         {{- range $p := $peers }}
         - podSelector:
             matchLabels:

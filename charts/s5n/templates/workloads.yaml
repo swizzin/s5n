@@ -32,11 +32,13 @@ spec:
       enableServiceLinks: false
       securityContext:
         {{- include "s5n.podSecurity" $root | nindent 8 }}
-      {{- if eq $inst.app "qbittorrent" }}
-      # qBittorrent has no way to set a WebUI password from the environment, so the
-      # credential is sealed into qBittorrent.conf before the app's first start.
-      # Re-running is a no-op: the same password produces the same stored hash.
+      {{- if or (eq $inst.app "qbittorrent") (eq $inst.app "tautulli") }}
+      # qBittorrent and Tautulli both generate their own WebUI/API credential on
+      # first start and never offer a way to set one from the environment, so
+      # each gets its own init container sealing a known value into its config
+      # file first. Re-running is a no-op once the file already holds it.
       initContainers:
+        {{- if eq $inst.app "qbittorrent" }}
         - name: webui-credentials
           image: {{ include "s5n.image" (dict "repository" $root.Values.wiring.image.repository "tag" (default $root.Chart.AppVersion $root.Values.wiring.image.tag) "digest" $root.Values.wiring.image.digest) }}
           imagePullPolicy: IfNotPresent
@@ -55,6 +57,24 @@ spec:
             - name: keys
               mountPath: /etc/s5n/keys
               readOnly: true
+        {{- else if eq $inst.app "tautulli" }}
+        - name: api-credentials
+          image: {{ include "s5n.image" (dict "repository" $root.Values.wiring.image.repository "tag" (default $root.Chart.AppVersion $root.Values.wiring.image.tag) "digest" $root.Values.wiring.image.digest) }}
+          imagePullPolicy: IfNotPresent
+          args:
+            - tautulli-config
+            - --conf=/config/config.ini
+            - --api-key-file=/etc/s5n/keys/tautulli-apikey
+          securityContext:
+            {{- include "s5n.containerSecurity" $root | nindent 12 }}
+          volumeMounts:
+            - name: config
+              mountPath: /config
+              subPath: {{ $inst.name }}
+            - name: keys
+              mountPath: /etc/s5n/keys
+              readOnly: true
+        {{- end }}
       {{- end }}
       containers:
         - name: {{ $inst.app }}
@@ -83,6 +103,20 @@ spec:
               value: {{ $cfg.port | quote }}
             - name: QBT_TORRENTING_PORT
               value: {{ $cfg.torrent.port | quote }}
+            {{- else if eq $inst.app "plex" }}
+            # Absent (optional secretKeyRef) when no claim token was supplied at
+            # install, or once it has already been consumed: the entrypoint only
+            # exchanges it for a server token when PlexOnlineToken is still empty.
+            - name: PLEX_CLAIM_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "s5n.secretName" $root }}
+                  key: plex-claim-token
+                  optional: true
+            {{- with $cfg.noAuthNetworks }}
+            - name: PLEX_NO_AUTH_NETWORKS
+              value: {{ join "," . | quote }}
+            {{- end }}
             {{- end }}
             {{- range $k, $v := $cfg.env }}
             - name: {{ $k }}
@@ -133,6 +167,10 @@ spec:
               subPath: {{ $inst.name }}
             - name: tmp
               mountPath: /tmp
+            {{- if eq $inst.app "plex" }}
+            - name: transcode
+              mountPath: /transcode
+            {{- end }}
       volumes:
         - name: data
           persistentVolumeClaim:
@@ -142,6 +180,10 @@ spec:
             claimName: {{ include "s5n.configClaim" $root }}
         - name: tmp
           emptyDir: {}
+        {{- if eq $inst.app "plex" }}
+        - name: transcode
+          emptyDir: {}
+        {{- end }}
         {{- if eq $inst.app "qbittorrent" }}
         - name: keys
           secret:
@@ -150,6 +192,14 @@ spec:
             items:
               - key: qbittorrent-password
                 path: qbittorrent-password
+        {{- else if eq $inst.app "tautulli" }}
+        - name: keys
+          secret:
+            secretName: {{ include "s5n.secretName" $root }}
+            defaultMode: 0440
+            items:
+              - key: tautulli-apikey
+                path: tautulli-apikey
         {{- end }}
 ---
 apiVersion: v1

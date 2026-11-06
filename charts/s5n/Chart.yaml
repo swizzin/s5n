@@ -2,8 +2,8 @@ apiVersion: v2
 name: s5n
 description: swizzin on Kubernetes — a wired, hardlink-safe seedbox stack in one release
 type: application
-version: 0.1.0
-appVersion: "0.1.0"
+version: 0.2.0
+appVersion: "0.2.0"
 # Distribution-agnostic: vanilla, k0s, k3s, managed. Only a floor, never a ceiling.
 kubeVersion: ">=1.29.0-0"
 home: https://github.com/swizzin/s5n

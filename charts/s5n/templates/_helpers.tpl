@@ -41,7 +41,7 @@ enabled instance (sonarr, sonarr-4k, ...). Every other template ranges over this
 */}}
 {{- define "s5n.instances" -}}
 {{- $out := list -}}
-{{- range $app := list "qbittorrent" "prowlarr" "sonarr" "radarr" -}}
+{{- range $app := list "qbittorrent" "prowlarr" "sonarr" "radarr" "plex" "tautulli" "seerr" -}}
   {{- $cfg := index $.Values.apps $app -}}
   {{- if and $cfg $cfg.enabled -}}
     {{- if $cfg.instances -}}

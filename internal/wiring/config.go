@@ -23,7 +23,32 @@ type Config struct {
 	TimeoutSeconds int             `json:"timeoutSeconds"`
 	Qbittorrent    *QbitConfig     `json:"qbittorrent,omitempty"`
 	Prowlarr       *ProwlarrConfig `json:"prowlarr,omitempty"`
+	Plex           *PlexConfig     `json:"plex,omitempty"`
+	Tautulli       *TautulliConfig `json:"tautulli,omitempty"`
+	Seerr          *SeerrConfig    `json:"seerr,omitempty"`
 	Instances      []Instance      `json:"instances"`
+}
+
+// PlexConfig points at Plex. There is no API key: /identity answers
+// unauthenticated on every build, claimed or not (see internal/apps.Plex).
+type PlexConfig struct {
+	URL string `json:"url"`
+}
+
+// TautulliConfig points at Tautulli. APIKeyFile is a file reference into the
+// mounted Secret, seeded by the tautulli-config init container — the wiring
+// Job has no mount into Tautulli's own /config to read its generated key back.
+type TautulliConfig struct {
+	URL        string `json:"url"`
+	APIKeyFile string `json:"apiKeyFile"`
+}
+
+// SeerrConfig points at Seerr. There is no API key here either: every
+// settings endpoint needs an authenticated admin session the wiring Job
+// cannot create (see internal/apps.Seerr), so this is only ever used to wait
+// for readiness before reporting the media rows pending.
+type SeerrConfig struct {
+	URL string `json:"url"`
 }
 
 // QbitConfig points at the qBittorrent WebUI.
@@ -112,6 +137,24 @@ func (c *Config) validate() error {
 				return fmt.Errorf("prowlarr: %s is empty", field)
 			}
 		}
+	}
+	if c.Plex != nil && c.Plex.URL == "" {
+		return fmt.Errorf("plex: url is empty")
+	}
+	if c.Tautulli != nil {
+		for field, value := range map[string]string{
+			"url": c.Tautulli.URL, "apiKeyFile": c.Tautulli.APIKeyFile,
+		} {
+			if value == "" {
+				return fmt.Errorf("tautulli: %s is empty", field)
+			}
+		}
+		if c.Plex == nil {
+			return fmt.Errorf("tautulli is configured but plex is not")
+		}
+	}
+	if c.Seerr != nil && c.Seerr.URL == "" {
+		return fmt.Errorf("seerr: url is empty")
 	}
 	// Categories drive qBittorrent save paths; two instances sharing a name but
 	// not a path would fight over the same downloads.

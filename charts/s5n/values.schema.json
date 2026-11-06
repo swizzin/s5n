@@ -297,6 +297,49 @@
               "$ref": "#/definitions/env"
             }
           }
+        },
+        "plex": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "enabled",
+            "image",
+            "port"
+          ],
+          "properties": {
+            "enabled": {
+              "type": "boolean"
+            },
+            "image": {
+              "$ref": "#/definitions/image"
+            },
+            "port": {
+              "$ref": "#/definitions/port"
+            },
+            "rewritePath": {
+              "type": "boolean"
+            },
+            "noAuthNetworks": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "pattern": "^[0-9a-fA-F:.]+/[0-9]{1,3}$"
+              },
+              "description": "CIDRs allowed to reach Plex without a Plex.tv account token (PLEX_NO_AUTH_NETWORKS)."
+            },
+            "resources": {
+              "$ref": "#/definitions/resources"
+            },
+            "env": {
+              "$ref": "#/definitions/env"
+            }
+          }
+        },
+        "tautulli": {
+          "$ref": "#/definitions/simpleApp"
+        },
+        "seerr": {
+          "$ref": "#/definitions/simpleApp"
         }
       }
     }
@@ -341,6 +384,35 @@
       "type": "integer",
       "minimum": 1,
       "maximum": 65535
+    },
+    "simpleApp": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "enabled",
+        "image",
+        "port"
+      ],
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "image": {
+          "$ref": "#/definitions/image"
+        },
+        "port": {
+          "$ref": "#/definitions/port"
+        },
+        "rewritePath": {
+          "type": "boolean"
+        },
+        "resources": {
+          "$ref": "#/definitions/resources"
+        },
+        "env": {
+          "$ref": "#/definitions/env"
+        }
+      }
     },
     "resources": {
       "type": "object"
