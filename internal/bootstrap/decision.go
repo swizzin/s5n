@@ -139,22 +139,25 @@ func (d *Decision) useCluster(ctx context.Context, opts Options, kc []byte, path
 	return d.finishCluster(ctx, opts, probe, version, cluster, path, source, how)
 }
 
-// finishCluster computes distribution, platform decisions and the record.
+// finishCluster computes distribution, refuses a cluster v1 does not support,
+// then computes platform decisions and the record.
 func (d *Decision) finishCluster(ctx context.Context, opts Options, probe Prober, version Version, cluster Cluster, path string, source Source, how string) Result {
 	dist := DetectDistribution(version.GitVersion, cluster)
+	if problem := supportProblem(dist, cluster.Nodes); problem != "" {
+		return stop(fmt.Sprintf("%s at %s: %s", how, path, problem))
+	}
 	plat, err := probe.Platform(ctx)
 	if err != nil {
 		return stop(fmt.Sprintf("%s at %s: platform probe: %v", how, path, describeRemote(err)))
 	}
 	components, conflict := decidePlatform(opts.Platform, plat)
 	res := Result{
-		Action:               ActionUseCluster,
-		Source:               source,
-		Kubeconfig:           path,
-		Distribution:         dist,
-		Nodes:                cluster.Nodes,
-		StorageClassRequired: storageClassRequired(cluster.Nodes),
-		Platform:             components,
+		Action:       ActionUseCluster,
+		Source:       source,
+		Kubeconfig:   path,
+		Distribution: dist,
+		Nodes:        cluster.Nodes,
+		Platform:     components,
 	}
 	if conflict != "" {
 		res.Action = ActionStop
@@ -179,8 +182,13 @@ func (d *Decision) finishCluster(ctx context.Context, opts Options, probe Prober
 
 // useRecord short-circuits a re-run: an external cluster's lifecycle is never
 // touched, only its reachability checked; a k0s-managed cluster's start and
-// upgrade belong to box update, a later phase.
+// upgrade belong to box update, a later phase. A record written by an older box
+// can name a cluster v1 no longer supports, so support is re-checked before any
+// probing.
 func (d *Decision) useRecord(ctx context.Context, rec *Record) Result {
+	if problem := supportProblem(rec.Distribution, rec.Nodes); problem != "" {
+		return stop(fmt.Sprintf("recorded %s cluster at %s: %s", rec.Source, rec.Kubeconfig, problem))
+	}
 	switch rec.Source {
 	case SourceExternal:
 		kc, err := d.Source.Read(rec.Kubeconfig)
@@ -195,26 +203,24 @@ func (d *Decision) useRecord(ctx context.Context, rec *Record) Result {
 			return stop(fmt.Sprintf("recorded external cluster at %s is unreachable: %v", rec.Kubeconfig, describeRemote(err)))
 		}
 		res := Result{
-			Action:               ActionUseCluster,
-			Source:               SourceExternal,
-			Kubeconfig:           rec.Kubeconfig,
-			Distribution:         rec.Distribution,
-			Nodes:                rec.Nodes,
-			StorageClassRequired: storageClassRequired(rec.Nodes),
-			Platform:             platformFromConfig(rec.Platform),
-			Reason:               fmt.Sprintf("using recorded external cluster at %s (%s); lifecycle never touched", rec.Kubeconfig, rec.Distribution),
+			Action:       ActionUseCluster,
+			Source:       SourceExternal,
+			Kubeconfig:   rec.Kubeconfig,
+			Distribution: rec.Distribution,
+			Nodes:        rec.Nodes,
+			Platform:     platformFromConfig(rec.Platform),
+			Reason:       fmt.Sprintf("using recorded external cluster at %s (%s); lifecycle never touched", rec.Kubeconfig, rec.Distribution),
 		}
 		return res
 	case SourceK0sManaged:
 		return Result{
-			Action:               ActionUseManaged,
-			Source:               SourceK0sManaged,
-			Kubeconfig:           rec.Kubeconfig,
-			Distribution:         rec.Distribution,
-			Nodes:                rec.Nodes,
-			StorageClassRequired: storageClassRequired(rec.Nodes),
-			Platform:             platformFromConfig(rec.Platform),
-			Reason:               "recorded k0s-managed cluster; k0s is started and upgraded by box update (a later phase)",
+			Action:       ActionUseManaged,
+			Source:       SourceK0sManaged,
+			Kubeconfig:   rec.Kubeconfig,
+			Distribution: rec.Distribution,
+			Nodes:        rec.Nodes,
+			Platform:     platformFromConfig(rec.Platform),
+			Reason:       "recorded k0s-managed cluster; k0s is started and upgraded by box update (a later phase)",
 		}
 	default:
 		return stop(fmt.Sprintf("record has unknown source %q", rec.Source))

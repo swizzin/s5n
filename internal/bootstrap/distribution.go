@@ -4,8 +4,9 @@ import "strings"
 
 // DetectDistribution names the Kubernetes distribution from the server version
 // and cluster evidence. The version suffix is authoritative when present; then
-// a kubeadm-config ConfigMap; then node labels. The answer only chooses
-// presets — the chart itself is distribution-agnostic.
+// a kubeadm-config ConfigMap; then node labels. The answer chooses presets, and
+// lets box refuse a managed cluster by name — the chart itself is
+// distribution-agnostic.
 func DetectDistribution(version string, cluster Cluster) Distribution {
 	switch {
 	case strings.Contains(version, "+k3s"):

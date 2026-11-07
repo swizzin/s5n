@@ -46,6 +46,9 @@ The installer provisions k0s (single binary, no host packages, and what the main
 The chart itself is distribution-agnostic: vanilla kubeadm, k0s, k3s and managed clusters
 all work through plain `helm install`, and nothing in the chart may depend on a distro
 add-on. `kubeVersion` is a floor only (`>=1.29`), never pinned to one release.
+`box`, the installer's CLI, is stricter than the chart: it drives one seedbox on one node
+it owns, and refuses managed and multi-node clusters by name (see cluster detection
+below). The chart's licence to install anywhere is not `box`'s licence to manage it.
 
 k0s ships no ingress, Gateway, or LoadBalancer, so the box carries a **platform layer**,
 managed and on by default:
@@ -220,26 +223,33 @@ lives in Go, where it can be tested, and none in bash.
    `/var/lib/k0s/pki/admin.conf`, kubeadm's `/etc/kubernetes/admin.conf`,
    `~/.kube/config`). A candidate counts only if `/version` answers and a
    SelfSubjectAccessReview says this user can create namespaces, CRDs and cluster roles.
-3. **Something present but not usable.** A running kubelet, a `k3s`/`k0s`/`rke2`/
+3. **A single-node cluster, or nothing.** The distribution is identified only to choose
+   presets and to refuse by name: the server version suffix (`+k3s`, `+k0s`, `-eks-`,
+   `-gke.`), a `kubeadm-config` ConfigMap, the node's labels. A managed cluster (EKS,
+   GKE) is refused, because there is no node `box` owns: the hostPath data path with
+   hardlinks, the peers port with real source addresses and the one host `box` backs up
+   all have nowhere to live. A cluster listing more than one node is refused for the
+   same reason — the data contract is one filesystem, the peers port shares that node's
+   address, and `box` backs up one host — and one listing no nodes is refused as a
+   fault. `box` names which and stops. The chart is unaffected: it still installs
+   anywhere, managed clusters included, through plain `helm install`.
+4. **Something present but not usable.** A running kubelet, a `k3s`/`k0s`/`rke2`/
    `microk8s` binary or unit, or anything listening on 6443, 10250 or 2379. Docker or
    containerd alone is not a cluster: it is reported as a note and the install goes
    ahead, and a runtime holding one of those ports is caught by the listener. `box`
    stops and explains; it never installs a second cluster over a broken first one.
-4. **A clean host.** Only now does it install k0s: pinned version and sha256,
+5. **A clean host.** Only now does it install k0s: pinned version and sha256,
    `k0s install controller --single`, then wait for the node to be Ready.
 
-Then the distribution is identified, only to choose presets: the server version suffix
-(`+k3s`, `+k0s`, `-eks-`, `-gke.`), a `kubeadm-config` ConfigMap, the node's labels.
-A multi-node cluster is supported but cannot use hostPath storage, so `box init` asks
-for a storage class instead.
+Candidates that were found but not used are always printed, on every path: a remote
+cluster's `~/.kube/config` skipping silently would read as "there was nothing there".
 
 The result is recorded in `/etc/swizzin/cluster.yaml` (source: `k0s-managed` or
-`external`, kubeconfig path, distribution, platform modes, node count — the node
-count is kept so a re-run still knows whether a storage class is required
-without re-probing the cluster). Re-running reads that record
-before probing: a `k0s-managed` box gets k0s started and upgraded by `box update`; an
-`external` cluster's lifecycle is never touched, only its reachability checked. `box`
-owns the lifecycle of exactly what it installed.
+`external`, kubeconfig path, distribution, platform modes, node count). Re-running reads
+that record before probing, and re-checks that it still describes a cluster v1 drives: a
+`k0s-managed` box gets k0s started and upgraded by `box update`; an `external` cluster's
+lifecycle is never touched, only its reachability checked. `box` owns the lifecycle of
+exactly what it installed.
 
 The rest of the bootstrap: the platform layer by mode, `/srv/s5n/{data,config}` owned by
 puid:pgid, then `box init`. Every step is safe to re-run.

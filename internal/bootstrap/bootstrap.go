@@ -37,7 +37,8 @@ const (
 )
 
 // Distribution is the Kubernetes distribution box detected. It only selects
-// presets; the chart itself is distribution-agnostic.
+// presets and lets box refuse a managed cluster by name; the chart itself is
+// distribution-agnostic.
 type Distribution string
 
 const (
@@ -81,13 +82,12 @@ type InstallPlan struct {
 
 // Result is the full decision with its human-readable reasoning.
 type Result struct {
-	Action               Action
-	Source               Source
-	Kubeconfig           string
-	Distribution         Distribution
-	Nodes                int
-	StorageClassRequired bool
-	Platform             []ComponentResult
+	Action       Action
+	Source       Source
+	Kubeconfig   string
+	Distribution Distribution
+	Nodes        int
+	Platform     []ComponentResult
 	// Skips records why each discovered candidate kubeconfig was not used.
 	Skips []string
 	// Notes records host evidence that is not, by itself, a reason to stop:
@@ -176,6 +176,7 @@ func FormatResult(res Result) string {
 		fmt.Fprintf(&b, "source: %s\n", res.Source)
 		fmt.Fprintf(&b, "distribution: %s\n", res.Distribution)
 		fmt.Fprintf(&b, "kubeconfig: %s\n", res.Kubeconfig)
+		writeSkips(&b, res.Skips)
 		writeNotes(&b, res.Notes)
 		fmt.Fprintf(&b, "%s\n", res.Reason)
 		return b.String()
@@ -185,11 +186,6 @@ func FormatResult(res Result) string {
 	fmt.Fprintf(&b, "kubeconfig: %s\n", res.Kubeconfig)
 	fmt.Fprintf(&b, "distribution: %s\n", res.Distribution)
 	fmt.Fprintf(&b, "nodes: %d\n", res.Nodes)
-	if res.StorageClassRequired {
-		fmt.Fprintf(&b, "storage class required: yes (multi-node; hostPath is single-node only)\n")
-	} else {
-		fmt.Fprintf(&b, "storage class required: no\n")
-	}
 	writeSkips(&b, res.Skips)
 	if len(res.Platform) > 0 {
 		fmt.Fprintf(&b, "platform:\n")

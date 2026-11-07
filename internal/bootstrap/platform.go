@@ -158,7 +158,3 @@ func platformFromOutcomes(cfg PlatformConfig, probe PlatformProbe) []ComponentRe
 	}
 	return out
 }
-
-// storageClassRequired reports whether a cluster with this many nodes must use
-// a storage class instead of hostPath (hostPath is single-node only).
-func storageClassRequired(nodes int) bool { return nodes > 1 }

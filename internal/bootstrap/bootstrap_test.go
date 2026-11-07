@@ -224,7 +224,7 @@ func TestBootstrapExplicitUsesCluster(t *testing.T) {
 	src := &fakeSource{files: map[string][]byte{path: []byte("kubeconfig")}}
 	prober := &fakeProber{
 		version:  Version{GitVersion: "v1.31.3+k3s1"},
-		cluster:  Cluster{Nodes: 3},
+		cluster:  Cluster{Nodes: 1},
 		platform: PlatformProbe{GatewayAPI: OutcomePresent, LoadBalancer: OutcomePresent, Gateway: OutcomePresent, CertManager: OutcomePresent},
 	}
 	host := &fakeHost{}
@@ -244,9 +244,6 @@ func TestBootstrapExplicitUsesCluster(t *testing.T) {
 	}
 	if res.Distribution != DistK3s {
 		t.Errorf("distribution = %q, want k3s", res.Distribution)
-	}
-	if !res.StorageClassRequired {
-		t.Errorf("storage class should be required for %d nodes", res.Nodes)
 	}
 	if len(recs.saved) != 1 || recs.saved[0].Source != SourceExternal {
 		t.Errorf("record not saved as external")
@@ -483,7 +480,7 @@ func TestBootstrapRecordSkipsProbing(t *testing.T) {
 			Source:       SourceExternal,
 			Kubeconfig:   path,
 			Distribution: DistK3s,
-			Nodes:        3,
+			Nodes:        1,
 		}}
 		inst := &fakeInstaller{}
 		d := newDecision(src, prober, host, recs, inst)
@@ -495,11 +492,8 @@ func TestBootstrapRecordSkipsProbing(t *testing.T) {
 		if res.Action != ActionUseCluster || res.Source != SourceExternal {
 			t.Fatalf("action=%q source=%q, want use-cluster external", res.Action, res.Source)
 		}
-		if res.Distribution != DistK3s || res.Nodes != 3 {
+		if res.Distribution != DistK3s || res.Nodes != 1 {
 			t.Errorf("distribution/nodes must come from the record, not a re-probe")
-		}
-		if !res.StorageClassRequired {
-			t.Errorf("3-node recorded cluster must require a storage class")
 		}
 		if host.called != 0 {
 			t.Errorf("host probing must be skipped when a record exists")
@@ -594,6 +588,24 @@ func TestBootstrapCleanHostInstalls(t *testing.T) {
 	}
 }
 
+// A usable-looking kubeconfig that was skipped must be printed on the install
+// path too: silence reads as "there was nothing there", which is exactly what a
+// remote cluster's ~/.kube/config must not look like.
+func TestFormatResultInstallPrintsSkips(t *testing.T) {
+	res := Result{
+		Action:       ActionInstall,
+		Source:       SourceK0sManaged,
+		Kubeconfig:   K0sAdminConfig,
+		Distribution: DistK0s,
+		Skips:        []string{"/home/example/.kube/config: skipped: remote cluster"},
+		Reason:       "clean host: k0s install planned",
+	}
+	out := FormatResult(res)
+	if !strings.Contains(out, "skipped candidates:") || !strings.Contains(out, "skipped: remote cluster") {
+		t.Fatalf("install output must print the skips:\n%s", out)
+	}
+}
+
 // ---- the record read is a fault, not a clean host ----
 
 func TestBootstrapRecordLoadError(t *testing.T) {
@@ -613,17 +625,112 @@ func TestBootstrapRecordLoadError(t *testing.T) {
 	}
 }
 
-// ---- multi-node forces a storage class ----
+// ---- v1 drives one node box owns; everything else is refused ----
 
-func TestStorageClassRequired(t *testing.T) {
+func TestSupportProblem(t *testing.T) {
 	cases := []struct {
+		dist  Distribution
 		nodes int
-		want  bool
-	}{{0, false}, {1, false}, {2, true}, {3, true}, {10, true}}
+		want  string // "" means supported
+	}{
+		{DistK0s, 1, ""},
+		{DistK3s, 1, ""},
+		{DistVanilla, 1, ""},
+		{DistKubeadm, 1, ""},
+		{DistEKS, 1, "managed clusters are not supported"},
+		{DistGKE, 1, "managed clusters are not supported"},
+		{DistEKS, 3, "managed clusters are not supported"}, // named before the count
+		{DistK3s, 0, "lists no nodes"},
+		{DistK3s, 2, "2 nodes: box runs one seedbox on one node"},
+		{DistK3s, 10, "10 nodes"},
+	}
 	for _, tc := range cases {
-		if got := storageClassRequired(tc.nodes); got != tc.want {
-			t.Errorf("storageClassRequired(%d) = %v, want %v", tc.nodes, got, tc.want)
+		got := supportProblem(tc.dist, tc.nodes)
+		switch {
+		case tc.want == "" && got != "":
+			t.Errorf("supportProblem(%s, %d) = %q, want supported", tc.dist, tc.nodes, got)
+		case tc.want != "" && !strings.Contains(got, tc.want):
+			t.Errorf("supportProblem(%s, %d) = %q, want it to contain %q", tc.dist, tc.nodes, got, tc.want)
 		}
+	}
+}
+
+func TestBootstrapRefusesUnsupportedCluster(t *testing.T) {
+	const path = "/explicit.yaml"
+	cases := []struct {
+		name       string
+		version    string
+		nodes      int
+		wantReason string
+	}{
+		{"eks is refused by name", "v1.30.5-eks-123abc", 1, "managed clusters are not supported"},
+		{"gke is refused by name, not by node count", "v1.29.2-gke.100", 3, "managed clusters are not supported"},
+		{"two nodes", "v1.31.3+k3s1", 2, "2 nodes: box runs one seedbox on one node"},
+		{"three nodes", "v1.31.3+k0s.0", 3, "3 nodes"},
+		{"no nodes", "v1.31.3+k3s1", 0, "lists no nodes"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			src := &fakeSource{files: map[string][]byte{path: []byte("kubeconfig")}}
+			prober := &fakeProber{
+				version: Version{GitVersion: tc.version},
+				cluster: Cluster{Nodes: tc.nodes},
+			}
+			host := &fakeHost{}
+			recs := &fakeRecords{}
+			inst := &fakeInstaller{}
+			d := newDecision(src, prober, host, recs, inst)
+
+			res, err := d.Bootstrap(context.Background(), Options{Kubeconfig: path})
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if res.Action != ActionStop {
+				t.Fatalf("action = %q, want stop; reason: %s", res.Action, res.Reason)
+			}
+			if !strings.Contains(res.Reason, tc.wantReason) {
+				t.Errorf("reason = %q, want it to contain %q", res.Reason, tc.wantReason)
+			}
+			if prober.calls["describe"] != 1 {
+				t.Errorf("the node count must come from the cluster: %v", prober.calls)
+			}
+			// Refused before anything is configured or recorded.
+			if prober.calls["platform"] != 0 {
+				t.Errorf("an unsupported cluster must not be platform-probed: %v", prober.calls)
+			}
+			if len(inst.plans) != 0 {
+				t.Errorf("an unsupported cluster must not be installed onto")
+			}
+			if len(recs.saved) != 0 {
+				t.Errorf("an unsupported cluster must not be recorded as usable")
+			}
+		})
+	}
+}
+
+func TestBootstrapRecordUnsupportedClusterStops(t *testing.T) {
+	// A record written by an older box can name a cluster v1 no longer drives;
+	// it is refused before any probe.
+	const path = "/var/lib/k0s/pki/admin.conf"
+	src := &fakeSource{files: map[string][]byte{path: []byte("kubeconfig")}}
+	prober := &fakeProber{version: Version{GitVersion: "v1.30.5-eks-123abc"}}
+	host := &fakeHost{}
+	recs := &fakeRecords{rec: &Record{Source: SourceExternal, Kubeconfig: path, Distribution: DistEKS, Nodes: 1}}
+	inst := &fakeInstaller{}
+	d := newDecision(src, prober, host, recs, inst)
+
+	res, err := d.Bootstrap(context.Background(), Options{})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if res.Action != ActionStop || !strings.Contains(res.Reason, "managed clusters are not supported") {
+		t.Fatalf("action=%q reason=%q, want stop naming the managed cluster", res.Action, res.Reason)
+	}
+	if prober.calls["new"] != 0 || prober.calls["version"] != 0 {
+		t.Errorf("an unsupported recorded cluster must not be probed: %v", prober.calls)
+	}
+	if len(inst.plans) != 0 {
+		t.Errorf("installer must not run")
 	}
 }
 
