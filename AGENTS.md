@@ -82,8 +82,10 @@ one needs a live `lookup`. The e2e asserts the policy exists in the cluster.
    `_helpers.tpl`; do not write ad-hoc ones in templates.
 5. **One pod spec.** `workloads.yaml` is the only place an app pod spec is written.
    Per-app differences are values (`apps.<name>`), or a small `if eq $inst.app` branch when
-   unavoidable. Adding an app = adding a values entry + adding its name to the list in
-   `s5n.instances`. The wiring Job and the qBittorrent init container are separate
+   unavoidable. Adding an app = a values entry plus its `apps.<name>` definition in
+   `values.schema.json`. `s5n.instances` derives the workload list from those keys, so
+   no template edit is needed for a generic app; an app that acts like an Arr also
+   needs its kind in `internal/wiring` and its peers in `networkpolicy.yaml`. The wiring Job and the qBittorrent init container are separate
    templates because they are not app replicas.
 6. **Images pinned by tag + digest** from `ghcr.io/home-operations/*`. No `:latest`,
    no `:rolling`, no keel.
