@@ -89,6 +89,14 @@ user can't change it:
   routes from the user's namespace. Without it, one user's HTTPRoute could claim
   another user's host name.
 
+**The cluster enforces the grant (decided).** box refuses a grant key in values, but a
+user holds a kubeconfig for their namespace and can skip box (`kubectl set image`,
+`helm upgrade` with their own values, a Service on any nodePort). So root installs a
+ValidatingAdmissionPolicy at `bootstrap` and binds it to each user namespace at
+`adduser`, with that user's grant as its parameters: only blessed image repositories,
+only the granted nodePort and Service type. Pod Security `restricted` still does the
+rest. This raises the chart's `kubeVersion` floor to 1.30, where the API is GA.
+
 **Root assigns the torrent port (decided).** It's a port on the node that every seedbox
 shares, so it lives in the grant with the Service type, and `box adduser` picks a free
 one.
@@ -228,7 +236,7 @@ says so ("radarr: held at 6.1 by your values"). Removing the pin releases it.
 key and the schema accepts any repository, so a user could patch in an arbitrary image.
 The fix: the repository comes only from the chart's variant list. Values choose a
 variant by name and may hold a pin inside that variant's repository, nothing else.
-How it's enforced is open; see "What enforces the grant".
+The admission policy under Scopes enforces it in the cluster, not only in box.
 
 ### uninstall (decided)
 
@@ -355,14 +363,6 @@ reason instead of a stack trace.
 
 ## Open questions
 
-- **What enforces the grant.** box refuses a grant key in values, but a user's box
-  runs with a kubeconfig scoped to their namespace, and the user can read it. With it
-  they can skip box: `kubectl set image`, `helm upgrade` with their own values, a
-  Service with any nodePort. Pod Security `restricted` keeps that inside their own
-  namespace, but the grant is a box rule, not a cluster rule. Two ways to close it:
-  admission policies root installs at `adduser` (a ValidatingAdmissionPolicy that
-  admits only blessed images and only the granted nodePort in that namespace), or no
-  user kubeconfig at all, with a user's box asking a root-owned helper to act for it.
 - **Apps with no base URL** (Seerr/Overseerr, likely Plex's web app). The chart routes
   them under `/<name>` with a prefix rewrite. That keeps the API answering, which is
   all the e2e checks, but a UI that writes absolute asset paths breaks under a prefix.
