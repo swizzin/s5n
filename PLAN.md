@@ -45,7 +45,8 @@ curl installer ──► k0s (single node) ──► box (Go CLI)
 The installer provisions k0s (single binary, no host packages, and what the maintainer runs).
 The chart itself is distribution-agnostic: vanilla kubeadm, k0s, k3s and managed clusters
 all work through plain `helm install`, and nothing in the chart may depend on a distro
-add-on. `kubeVersion` is a floor only (`>=1.29`), never pinned to one release.
+add-on. `kubeVersion` is a floor only (`>=1.30`, where ValidatingAdmissionPolicy is GA),
+never pinned to one release.
 `box`, the installer's CLI, is stricter than the chart: it drives one seedbox on one node
 it owns, and refuses managed and multi-node clusters by name (see cluster detection
 below). The chart's licence to install anywhere is not `box`'s licence to manage it.

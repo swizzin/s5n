@@ -5,7 +5,9 @@ type: application
 version: 0.2.0
 appVersion: "0.2.0"
 # Distribution-agnostic: vanilla, k0s, k3s, managed. Only a floor, never a ceiling.
-kubeVersion: ">=1.29.0-0"
+# 1.30 is where ValidatingAdmissionPolicy is GA; the platform layer binds one to
+# every user namespace to enforce the grant.
+kubeVersion: ">=1.30.0-0"
 home: https://github.com/swizzin/s5n
 sources:
   - https://github.com/swizzin/s5n

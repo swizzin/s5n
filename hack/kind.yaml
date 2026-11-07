@@ -3,6 +3,10 @@ apiVersion: kind.x-k8s.io/v1alpha4
 name: s5n
 nodes:
   - role: control-plane
+    # Pinned so the e2e's Kubernetes version does not move with the kind release.
+    # 1.30 is the chart floor (ValidatingAdmissionPolicy is GA there); the e2e
+    # also exercises that policy, so it must never fall below it.
+    image: kindest/node:v1.37.0@sha256:a1ed56cfb0e7b93589bdf97c8cd566405a265939e3620fc4f5de89adff580ae5
 # No extraPortMappings: MetalLB assigns LoadBalancer addresses from the kind docker
 # network, and the peers NodePort is reached on the node container's own address; the
 # host reaches both directly, so no host-port passthrough is needed.
