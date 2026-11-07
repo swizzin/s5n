@@ -20,6 +20,14 @@ Read `PLAN.md` first. It is the architecture; this file is how to work in the re
   the receipt published into the `<release>-wiring` ConfigMap (`status.json`,
   `summary.txt`).
 - `internal/qbtconf/` — qBittorrent 5 credential hashing and `qBittorrent.conf` editing.
+- `internal/seedbox/` — the grant/values contract from `docs/box.md`: loads both files,
+  merges them with the grant winning, validates against a chart release's `values.yaml`
+  + `values.schema.json`, diffs for `apply`, and edits by splicing one key's bytes so
+  comments and indentation survive. `grant.go` is the only list of what the grant owns:
+  a new values key that decides isolation needs a rule there, and
+  `TestGrantKeysAreRealKeys` fails if a rule names a key the chart does not have. Only
+  this package may import `go.yaml.in/yaml/v3` or the JSON-schema library; `cmd/s5n`
+  must stay stdlib-only.
 - `Dockerfile` — static binary on distroless; the image the wiring Job and the
   qBittorrent init container run.
 - `hack/grab-test.sh` — the end-to-end grab: a local mock indexer (`hack/mock-indexer.py`,
