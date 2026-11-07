@@ -58,13 +58,16 @@ func TestEffectiveAgainstTheRealChart(t *testing.T) {
 	if instances[1].(map[string]any)["enabled"] != true {
 		t.Errorf("instances[1] = %v, want the grant's enabled 4k", instances[1])
 	}
-	if sonarr["image"].(map[string]any)["tag"] != "5.0.0.2907" {
-		t.Errorf("apps.sonarr.image.tag = %v, want the chart default", sonarr["image"])
+	if sonarr["image"].(map[string]any)["variant"] != "default" {
+		t.Errorf("apps.sonarr.image = %v, want the chart's default variant", sonarr["image"])
+	}
+	if _, ok := sonarr["image"].(map[string]any)["repository"]; ok {
+		t.Errorf("apps.sonarr.image carries a repository: %v", sonarr["image"])
 	}
 
 	qbt := apps["qbittorrent"].(map[string]any)
-	if qbt["image"].(map[string]any)["tag"] != "5.3.0-lt2" {
-		t.Errorf("qbt image tag = %v, want the user's variant", qbt["image"].(map[string]any)["tag"])
+	if qbt["image"].(map[string]any)["variant"] != "default" {
+		t.Errorf("qbt image = %v, want the user's chosen variant", qbt["image"])
 	}
 	if port := qbt["torrent"].(map[string]any)["port"]; port != 31111 {
 		t.Errorf("torrent port = %v, want the chart default", port)
@@ -108,6 +111,14 @@ func TestValidateNamesTheKeyPath(t *testing.T) {
 			},
 			want: "apps.sonarr.image.tag",
 			msg:  "not an allowed value",
+		},
+		{
+			name: "a repository where only a variant belongs",
+			mutate: func(m map[string]any) {
+				m["apps"].(map[string]any)["radarr"].(map[string]any)["image"].(map[string]any)["repository"] = "ghcr.io/example/radarr"
+			},
+			want: "apps.radarr.image.repository",
+			msg:  "not a key the chart knows",
 		},
 		{
 			name: "an app the chart does not have",
@@ -197,6 +208,35 @@ func TestValidateReportsEveryProblemAtOnce(t *testing.T) {
 	if len(se.Problems) != 2 {
 		t.Fatalf("problems = %v, want both pgid and tz", se.Problems)
 	}
+}
+
+// The variant list is the chart's, not the user's: a repository in the user's
+// values file must fail as a key the chart does not have, naming the path, not
+// as a value that was quietly overridden.
+func TestEffectiveRefusesARepositoryInValues(t *testing.T) {
+	values := writeTemp(t, "values.yaml", `apps:
+  radarr:
+    image:
+      repository: ghcr.io/example/radarr
+`)
+	s, err := Load(fixture(t, "grant.yaml"), values)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	_, err = s.Effective(realChart(t))
+	if err == nil {
+		t.Fatal("Effective accepted a user-chosen repository")
+	}
+	var se *SchemaError
+	if !errors.As(err, &se) {
+		t.Fatalf("error is %T, want *SchemaError: %v", err, err)
+	}
+	for _, p := range se.Problems {
+		if p.Path == "apps.radarr.image.repository" {
+			return
+		}
+	}
+	t.Fatalf("no problem names apps.radarr.image.repository; got:\n%s", err)
 }
 
 // A chart schema is untrusted input to a root process: a $ref to a local file

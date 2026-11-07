@@ -1,0 +1,65 @@
+# Blessed image variants. The chart owns this file and ships it inside the
+# chart archive; it is NOT a values file, so neither `--set`, a user's
+# values.yaml nor a box values file can add a repository to it. The set of
+# images a release can ever run is the set this chart shipped with.
+#
+# apps.<app>.image.variant names one of the variants below. Values may pin a tag
+# or a digest inside that variant's repository, nothing else — the repository
+# comes from here. A variant other than `default` is an alternate build of the
+# same app that the e2e has to test like the default before it ships.
+#
+# The admission policy's blessed-repository list is generated from this file
+# too (install/platform/admission/), so "blessed by the chart" and "admitted by
+# the cluster" are the same list, not two lists that drift.
+qbittorrent:
+  default:
+    repository: ghcr.io/home-operations/qbittorrent
+    tag: "5.3.0"
+    digest: sha256:5a858e61f94cf2712391db32ed03556576c700858f3e62c4c6fcde262443ebd8
+
+sonarr:
+  default:
+    repository: ghcr.io/home-operations/sonarr
+    tag: "5.0.0.2907"
+    digest: sha256:75866f930b8e49c0acfc965c8ace0429231cdc69e2e4b287eb51443aa3249d86
+
+radarr:
+  default:
+    repository: ghcr.io/home-operations/radarr
+    tag: "7.0.0.10815"
+    digest: sha256:c044b4df8e7b2546ef389481626a56fabe291575ff2d65481b1555432d6161ff
+
+prowlarr:
+  default:
+    repository: ghcr.io/home-operations/prowlarr
+    tag: "2.7.0.5723"
+    digest: sha256:fcf7498692f97698ea8b8f7078a0f81120a16e7354e4c232b5e3810e3e783dff
+
+plex:
+  default:
+    repository: ghcr.io/home-operations/plex
+    tag: "1.43.5.11079"
+    digest: sha256:06ef0fc23e9af9bbaf284c3f27972f94e703d13d6f745edeb6818fcbebf6c673
+
+tautulli:
+  default:
+    repository: ghcr.io/home-operations/tautulli
+    tag: "2.18.2"
+    digest: sha256:d7ea1a79cf8cc2603890287d7c0e5bc277e4909c1df93f48f000833d2771eca0
+
+seerr:
+  default:
+    # Upstream digest pin, not ghcr.io/home-operations: that catalog has no Seerr
+    # image. Its Dockerfile ends USER node:node (uid 1000) and exposes 5055.
+    repository: ghcr.io/seerr-team/seerr
+    tag: "v3.5.1"
+    digest: sha256:d8fab675b55ad293ded98fd71efcfd46054cbad9746534ae1cc4794a88c0b3be
+
+# The s5n image itself: the wiring Job and the qBittorrent / Tautulli credential
+# init containers. An empty tag means the chart's appVersion, which is the tag
+# this repo publishes the image under.
+s5n:
+  default:
+    repository: ghcr.io/swizzin/s5n
+    tag: ""
+    digest: ""

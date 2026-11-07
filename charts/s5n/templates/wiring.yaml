@@ -13,7 +13,6 @@ previous run's logs stay readable until then.
 {{- if .Values.wiring.enabled }}
 {{- $root := . }}
 {{- $name := printf "%s-wiring" (include "s5n.fullname" .) }}
-{{- $image := dict "repository" .Values.wiring.image.repository "tag" (default .Chart.AppVersion .Values.wiring.image.tag) "digest" .Values.wiring.image.digest }}
 
 {{- /* One entry per enabled Arr instance. */ -}}
 {{- $instances := list }}
@@ -152,7 +151,7 @@ spec:
         {{- include "s5n.podSecurity" $root | nindent 8 }}
       containers:
         - name: wiring
-          image: {{ include "s5n.image" $image }}
+          image: {{ include "s5n.image" (dict "root" $root "app" "s5n" "path" "wiring.image" "image" .Values.wiring.image) }}
           imagePullPolicy: IfNotPresent
           args: ["wiring", "--config=/etc/s5n/wiring/wiring.json"]
           env:

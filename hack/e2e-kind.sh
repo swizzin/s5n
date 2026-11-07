@@ -23,7 +23,9 @@ KEEP=${1:-}
 CTX="kind-${CLUSTER}"
 K="kubectl --context ${CTX}"
 HELM="helm --kube-context ${CTX}"
-IMAGE=s5n:e2e
+# Built under the repository the chart's s5n variant names, so the release uses
+# the local image by tag instead of pulling the published one.
+IMAGE=ghcr.io/swizzin/s5n:e2e
 WORK=$(mktemp -d)
 trap 'rm -rf "$WORK"' EXIT
 
@@ -109,9 +111,7 @@ $K apply -f hack/envoy-gateway.yaml >/dev/null
 install_release() {
   $HELM upgrade --install s5n charts/s5n -n "$NS" \
     --set storage.data.size=10Gi --set storage.config.size=1Gi \
-    --set wiring.image.repository=s5n \
     --set wiring.image.tag=e2e \
-    --set wiring.image.digest="" \
     --wait --timeout 15m
 }
 

@@ -56,9 +56,11 @@ type Rule struct {
 //     would live, so it is grant now rather than a value that has to move
 //     later. The Service's annotations are grant for the same reason: they
 //     choose the address a LoadBalancer gets.
-//   - apps.*.image.* is values. docs/box.md puts image variants in the user's
-//     file; the blessed-variant list the schema will carry is what constrains
-//     it.
+//   - apps.*.image is values, but only as a choice: the variant name and a
+//     tag or digest pin inside that variant's repository. The repository
+//     comes from the chart's own variant list, and values.schema.json rejects
+//     a repository key outright, so this is not a grant key — it is not a key
+//     a user has at all.
 var GrantKeys = []Rule{
 	{Path: "namespace", BoxOnly: true, Why: "the release namespace: one user is one namespace"},
 

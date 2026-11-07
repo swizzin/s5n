@@ -40,7 +40,7 @@ spec:
       initContainers:
         {{- if eq $inst.app "qbittorrent" }}
         - name: webui-credentials
-          image: {{ include "s5n.image" (dict "repository" $root.Values.wiring.image.repository "tag" (default $root.Chart.AppVersion $root.Values.wiring.image.tag) "digest" $root.Values.wiring.image.digest) }}
+          image: {{ include "s5n.image" (dict "root" $root "app" "s5n" "path" "wiring.image" "image" $root.Values.wiring.image) }}
           imagePullPolicy: IfNotPresent
           args:
             - qbt-config
@@ -59,7 +59,7 @@ spec:
               readOnly: true
         {{- else if eq $inst.app "tautulli" }}
         - name: api-credentials
-          image: {{ include "s5n.image" (dict "repository" $root.Values.wiring.image.repository "tag" (default $root.Chart.AppVersion $root.Values.wiring.image.tag) "digest" $root.Values.wiring.image.digest) }}
+          image: {{ include "s5n.image" (dict "root" $root "app" "s5n" "path" "wiring.image" "image" $root.Values.wiring.image) }}
           imagePullPolicy: IfNotPresent
           args:
             - tautulli-config
@@ -78,7 +78,7 @@ spec:
       {{- end }}
       containers:
         - name: {{ $inst.app }}
-          image: {{ include "s5n.image" $cfg.image }}
+          image: {{ include "s5n.image" (dict "root" $root "app" $inst.app "path" (printf "apps.%s.image" $inst.app) "image" $cfg.image) }}
           imagePullPolicy: IfNotPresent
           env:
             - name: TZ

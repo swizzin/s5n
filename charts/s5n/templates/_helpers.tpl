@@ -19,8 +19,42 @@ app.kubernetes.io/instance: {{ .root.Release.Name }}
 app.kubernetes.io/name: {{ .inst.name }}
 {{- end -}}
 
+{{- /*
+s5n.image: the image reference for one app (or for s5n itself), resolved from
+the chart's variant list. The repository is never a value: values choose a
+variant by name and may pin a tag or a digest inside that variant's
+repository, so a release cannot be pointed at an image the chart has not seen.
+
+  include "s5n.image" (dict "root" $ "app" "sonarr" "path" "apps.sonarr.image" "image" $cfg.image)
+
+Pinning a tag drops the variant's digest, because the digest belongs to the
+variant's own tag; pin both to hold an exact image at a new tag.
+*/}}
 {{- define "s5n.image" -}}
-{{- if .digest -}}{{ .repository }}:{{ .tag }}@{{ .digest }}{{- else -}}{{ .repository }}:{{ .tag }}{{- end -}}
+{{- $variants := .root.Files.Get "variants.yaml" | fromYaml -}}
+{{- $app := get $variants .app -}}
+{{- if not $app -}}
+{{- fail (printf "%s.variant: this chart has no variants for %q" .path .app) -}}
+{{- end -}}
+{{- $name := toString .image.variant -}}
+{{- $v := get $app $name -}}
+{{- if not $v -}}
+{{- fail (printf "%s.variant: %q is not a blessed variant; this chart has %s" .path $name (join ", " (keys $app | sortAlpha))) -}}
+{{- end -}}
+{{- $tag := default $v.tag .image.tag -}}
+{{- if and (not $tag) (eq .app "s5n") -}}
+{{- $tag = .root.Chart.AppVersion -}}
+{{- end -}}
+{{- $digest := $v.digest -}}
+{{- if .image.digest -}}
+{{- $digest = .image.digest -}}
+{{- else if .image.tag -}}
+{{- $digest = "" -}}
+{{- end -}}
+{{- if not $tag -}}
+{{- fail (printf "%s: variant %q has no tag and none was pinned" .path $name) -}}
+{{- end -}}
+{{- if $digest -}}{{ $v.repository }}:{{ $tag }}@{{ $digest }}{{- else -}}{{ $v.repository }}:{{ $tag }}{{- end -}}
 {{- end -}}
 
 {{- define "s5n.dataClaim" -}}

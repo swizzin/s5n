@@ -123,30 +123,7 @@
           "type": "boolean"
         },
         "image": {
-          "type": "object",
-          "additionalProperties": false,
-          "required": [
-            "repository"
-          ],
-          "properties": {
-            "repository": {
-              "type": "string",
-              "minLength": 1
-            },
-            "tag": {
-              "type": "string",
-              "not": {
-                "enum": [
-                  "latest",
-                  "rolling"
-                ]
-              },
-              "description": "Empty uses the chart's appVersion."
-            },
-            "digest": {
-              "$ref": "#/definitions/digest"
-            }
-          }
+          "$ref": "#/definitions/image"
         },
         "timeoutSeconds": {
           "type": "integer",
@@ -360,17 +337,17 @@
       "type": "object",
       "additionalProperties": false,
       "required": [
-        "repository",
-        "tag"
+        "variant"
       ],
+      "description": "A blessed image variant, by name. The repository comes only from the chart's variants.yaml; a user may pin a tag or a digest inside that variant's repository.",
       "properties": {
-        "repository": {
+        "variant": {
           "type": "string",
-          "minLength": 1
+          "minLength": 1,
+          "description": "A variant name from the chart's variants.yaml (apps.<app>.image.variant)."
         },
         "tag": {
           "type": "string",
-          "minLength": 1,
           "not": {
             "enum": [
               "latest",
@@ -379,7 +356,7 @@
               "master"
             ]
           },
-          "description": "Pinned tag. Floating tags are rejected; digests are pinned beside them."
+          "description": "Optional tag pin inside the variant's repository. It replaces the variant's tag, and drops the variant's digest unless a digest is pinned too."
         },
         "digest": {
           "$ref": "#/definitions/digest"

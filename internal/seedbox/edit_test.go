@@ -335,14 +335,14 @@ func TestDeleteTakesItsComment(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	if err := s.DeleteValue("apps.qbittorrent.image.repository"); err != nil {
+	if err := s.DeleteValue("apps.qbittorrent.image.tag"); err != nil {
 		t.Fatalf("DeleteValue: %v", err)
 	}
 	after, _ := os.ReadFile(path)
-	if strings.Contains(string(after), "blessed variant") {
+	if strings.Contains(string(after), "A pin is held") {
 		t.Errorf("the key's comment was left behind:\n%s", after)
 	}
-	if !strings.Contains(string(after), `tag: "5.3.0-lt2"`) {
+	if !strings.Contains(string(after), "variant: default") {
 		t.Errorf("the sibling key went too:\n%s", after)
 	}
 }

@@ -11,9 +11,11 @@ global:
 apps:
   qbittorrent:
     image:
-      # blessed variant: libtorrent 2.x
-      repository: ghcr.io/swizzin/qbittorrent
-      tag: "5.3.0-lt2"
+      # A blessed variant, by name: the repository comes from the chart's
+      # variants.yaml and cannot be written here.
+      variant: default
+      # A pin is held within the variant's repository.
+      tag: "5.3.0"
     torrent:
       service:
         externalTrafficPolicy: Local

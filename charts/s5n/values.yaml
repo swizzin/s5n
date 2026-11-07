@@ -63,10 +63,9 @@ networkPolicy:
 wiring:
   enabled: true
   image:
-    repository: ghcr.io/swizzin/s5n
-    # Empty = the chart's appVersion.
-    tag: ""
-    digest: ""
+    # The s5n image (this repo), by blessed variant from variants.yaml. The
+    # repository is chart-owned; tag/digest may be pinned within it.
+    variant: default
   # How long the Job may wait for an app to answer before the release fails.
   timeoutSeconds: 300
   backoffLimit: 2
@@ -88,9 +87,9 @@ apps:
   qbittorrent:
     enabled: true
     image:
-      repository: ghcr.io/home-operations/qbittorrent
-      tag: "5.3.0"
-      digest: sha256:5a858e61f94cf2712391db32ed03556576c700858f3e62c4c6fcde262443ebd8
+      # Blessed variant from variants.yaml. The repository comes only from
+      # there; a tag or digest pin here is held within that repository.
+      variant: default
     port: 8080
     # Seeded into qBittorrent.conf by an init container, together with a generated
     # password from the release Secret. The wiring Job logs in with the same pair.
@@ -118,9 +117,9 @@ apps:
   sonarr:
     enabled: true
     image:
-      repository: ghcr.io/home-operations/sonarr
-      tag: "5.0.0.2907"
-      digest: sha256:75866f930b8e49c0acfc965c8ace0429231cdc69e2e4b287eb51443aa3249d86
+      # Blessed variant from variants.yaml. The repository comes only from
+      # there; a tag or digest pin here is held within that repository.
+      variant: default
     port: 8989
     envPrefix: SONARR
     instances:
@@ -136,9 +135,9 @@ apps:
   radarr:
     enabled: true
     image:
-      repository: ghcr.io/home-operations/radarr
-      tag: "7.0.0.10815"
-      digest: sha256:c044b4df8e7b2546ef389481626a56fabe291575ff2d65481b1555432d6161ff
+      # Blessed variant from variants.yaml. The repository comes only from
+      # there; a tag or digest pin here is held within that repository.
+      variant: default
     port: 7878
     envPrefix: RADARR
     instances:
@@ -154,9 +153,9 @@ apps:
   prowlarr:
     enabled: true
     image:
-      repository: ghcr.io/home-operations/prowlarr
-      tag: "2.7.0.5723"
-      digest: sha256:fcf7498692f97698ea8b8f7078a0f81120a16e7354e4c232b5e3810e3e783dff
+      # Blessed variant from variants.yaml. The repository comes only from
+      # there; a tag or digest pin here is held within that repository.
+      variant: default
     port: 9696
     envPrefix: PROWLARR
     resources: {}
@@ -169,9 +168,9 @@ apps:
   plex:
     enabled: true
     image:
-      repository: ghcr.io/home-operations/plex
-      tag: "1.43.5.11079"
-      digest: sha256:06ef0fc23e9af9bbaf284c3f27972f94e703d13d6f745edeb6818fcbebf6c673
+      # Blessed variant from variants.yaml. The repository comes only from
+      # there; a tag or digest pin here is held within that repository.
+      variant: default
     port: 32400
     # Plex has no URL-base setting, same as qBittorrent; the route strips the prefix.
     rewritePath: true
@@ -191,9 +190,9 @@ apps:
   tautulli:
     enabled: true
     image:
-      repository: ghcr.io/home-operations/tautulli
-      tag: "2.18.2"
-      digest: sha256:d7ea1a79cf8cc2603890287d7c0e5bc277e4909c1df93f48f000833d2771eca0
+      # Blessed variant from variants.yaml. The repository comes only from
+      # there; a tag or digest pin here is held within that repository.
+      variant: default
     port: 8181
     # Tautulli has a url-base setting (http_root) but wiring it through the same
     # checkbox-unsafe /configUpdate endpoint used for the Plex link is not worth the
@@ -205,11 +204,9 @@ apps:
   seerr:
     enabled: true
     image:
-      # Upstream digest pin, not ghcr.io/home-operations: that catalog has no Seerr
-      # image. Its Dockerfile ends USER node:node (uid 1000) and exposes 5055.
-      repository: ghcr.io/seerr-team/seerr
-      tag: "v3.5.1"
-      digest: sha256:d8fab675b55ad293ded98fd71efcfd46054cbad9746534ae1cc4794a88c0b3be
+      # Blessed variant from variants.yaml. The repository comes only from
+      # there; a tag or digest pin here is held within that repository.
+      variant: default
     port: 5055
     rewritePath: true
     resources: {}
