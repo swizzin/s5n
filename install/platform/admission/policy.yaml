@@ -50,10 +50,15 @@ spec:
       # Pods and the pod template of every workload kind that can carry one.
       # CronJobs are included so a bad template is refused when it is written,
       # not when the Job it eventually creates is.
+      #
+      # `pods/ephemeralcontainers` is the subresource `kubectl debug` writes
+      # to. A rule for "pods" does not match a subresource request, so without
+      # it the user could add any image as an ephemeral container to a pod
+      # they can already patch.
       - apiGroups: [""]
         apiVersions: ["v1"]
         operations: ["CREATE", "UPDATE"]
-        resources: ["pods"]
+        resources: ["pods", "pods/ephemeralcontainers"]
       - apiGroups: ["apps"]
         apiVersions: ["v1"]
         operations: ["CREATE", "UPDATE"]
@@ -71,7 +76,8 @@ spec:
     - name: images
       expression: >
         variables.podspec.containers.map(c, c.image) +
-        (has(variables.podspec.initContainers) ? variables.podspec.initContainers.map(c, c.image) : [])
+        (has(variables.podspec.initContainers) ? variables.podspec.initContainers.map(c, c.image) : []) +
+        (has(variables.podspec.ephemeralContainers) ? variables.podspec.ephemeralContainers.map(c, c.image) : [])
     - name: blessed
       expression: "params.data.blessedRepositories.split(',').filter(r, r != '')"
     # An image matches a blessed repository only as `repo:tag` or `repo@digest`,
@@ -105,10 +111,18 @@ spec:
     - name: serviceType
       expression: "has(object.spec.type) ? object.spec.type : 'ClusterIP'"
   validations:
+    # ExternalName is never admitted: it is neither ClusterIP nor a type
+    # render-grant.py can grant, so the type rule below refuses it already.
     - expression: >
         variables.serviceType == 'ClusterIP' ||
         variables.serviceType == params.data.serviceType
       message: "s5n: a Service may only use ClusterIP or the type the grant assigns"
+    # CVE-2020-8554: a ClusterIP Service with spec.externalIPs lets its tenant
+    # claim an arbitrary address and intercept traffic to it. The grant has no
+    # legitimate use for externalIPs, on any Service type.
+    - expression: >-
+        !has(object.spec.externalIPs) || object.spec.externalIPs.size() == 0
+      message: "s5n: a Service may not set externalIPs"
     - expression: >
         !has(object.spec.ports) || object.spec.ports.all(p,
         !has(p.nodePort) || p.nodePort == int(params.data.torrentNodePort))

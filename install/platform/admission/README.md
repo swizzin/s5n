@@ -6,10 +6,23 @@ still be written with `kubectl` or `helm`, so those refusals are not
 enforcement on their own. These policies are the enforcement:
 
 - **`s5n-blessed-images`** admits a Pod, or the pod template of a Deployment,
-  StatefulSet, DaemonSet, ReplicaSet, Job or CronJob, only when every container
-  and init container image uses a repository in the params list.
+  StatefulSet, DaemonSet, ReplicaSet, Job or CronJob, only when every container,
+  init container and ephemeral container image uses a repository in the params
+  list. It also matches `pods/ephemeralcontainers`, the subresource
+  `kubectl debug` writes to: a rule for `pods` alone does not cover a
+  subresource, and an unguarded subresource would let a user run any image
+  alongside an already-admitted pod.
 - **`s5n-granted-service`** admits a Service only as ClusterIP or the granted
-  type, and admits a `nodePort` only when it is the granted peer port.
+  type, and admits a `nodePort` only when it is the granted peer port. It
+  refuses `spec.externalIPs` outright: a tenant who can set one can claim an
+  arbitrary address and intercept traffic to it (CVE-2020-8554). `ExternalName`
+  is never admitted either, because it is neither ClusterIP nor a type the
+  grant can assign.
+
+Because a policy evaluates the whole Pod, a pod admitted before its namespace
+was bound is held to the list on its next write: if it still runs an unblessed
+image, every update to it is denied — `kubectl debug` included — until it is
+replaced with a blessed pod.
 
 Both use `failurePolicy: Fail`: a params object that is missing or a CEL error
 refuses the write rather than admitting it.

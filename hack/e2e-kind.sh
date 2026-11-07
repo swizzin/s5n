@@ -247,6 +247,54 @@ else
   grep -q "nodePort may only be the peer port" "$WORK/allow-svc.txt" || fail=1
 fi
 
+log "admission: the user cannot attach externalIPs to a Service"
+# A ClusterIP Service is otherwise admitted, so only spec.externalIPs stands
+# between a tenant and claiming an arbitrary address (CVE-2020-8554).
+cat >"$WORK/external-ips-svc.yaml" <<'EOF'
+apiVersion: v1
+kind: Service
+metadata:
+  name: external-ips
+spec:
+  type: ClusterIP
+  externalIPs:
+    - 203.0.113.10
+  selector:
+    app: unblessed
+  ports:
+    - port: 6881
+      targetPort: 6881
+EOF
+if $K --as="$SA" -n "$NS" create -f "$WORK/external-ips-svc.yaml" >"$WORK/deny-external-ips.txt" 2>&1; then
+  echo "user created a ClusterIP Service with externalIPs"; fail=1
+else
+  echo "$(cat "$WORK/deny-external-ips.txt")"
+  grep -q "may not set externalIPs" "$WORK/deny-external-ips.txt" || fail=1
+fi
+
+log "admission: a plain ClusterIP Service is still admitted"
+# The control for the externalIPs rule: the grant's own peer Service is a
+# ClusterIP, so an ordinary one must not be refused along with it.
+cat >"$WORK/plain-svc.yaml" <<'EOF'
+apiVersion: v1
+kind: Service
+metadata:
+  name: clusterip-probe
+spec:
+  type: ClusterIP
+  selector:
+    app: unblessed
+  ports:
+    - port: 6881
+      targetPort: 6881
+EOF
+if $K --as="$SA" -n "$NS" create -f "$WORK/plain-svc.yaml" >"$WORK/allow-plain-svc.txt" 2>&1; then
+  echo "plain ClusterIP Service admitted"
+else
+  echo "$(cat "$WORK/allow-plain-svc.txt")"; fail=1
+fi
+$K -n "$NS" delete svc clusterip-probe --ignore-not-found >/dev/null
+
 log "admission: the user cannot reach the params that define the grant"
 # can-i exits 1 for "no", which is the answer here; set -e must not see it.
 ssar_params=$($K auth can-i patch configmaps -n s5n-system --as="$SA" 2>/dev/null | tail -1 || true)
@@ -313,6 +361,47 @@ $K -n "$NS" get pods -o wide
 # Only the apps: the wiring Job's pod shares the instance label and ends Completed,
 # which never satisfies Ready.
 $K -n "$NS" wait --for=condition=Ready pod -l 'app.kubernetes.io/instance=s5n,s5n.io/app' --timeout=300s || fail=1
+
+# `kubectl debug` adds containers through the pods/ephemeralcontainers
+# subresource: an UPDATE a rule for "pods" does not match. The policy sees the
+# whole Pod there, so the target must already be blessed in every container.
+# sonarr-0 is; a pod admitted before the binding that runs an unblessed image
+# could not be debugged at all. Strategic merge is what kubectl debug sends and
+# appends by container name, so a rerun on a --keep cluster stays a no-op.
+log "admission: the user cannot add an unblessed image as an ephemeral container"
+pod=sonarr-0
+echo "ephemeral container target: ${pod} ($($K -n "$NS" get pod "$pod" -o jsonpath='{.status.phase}'))"
+cat >"$WORK/ephemeral-unblessed.json" <<'EOF'
+{"spec":{"ephemeralContainers":[{"name":"debugger-deny","image":"docker.io/library/busybox:1.36","command":["sleep","3600"],"securityContext":{"allowPrivilegeEscalation":false,"runAsNonRoot":true,"capabilities":{"drop":["ALL"]},"seccompProfile":{"type":"RuntimeDefault"}}}]}}
+EOF
+if $K --as="$SA" -n "$NS" patch pod "$pod" --subresource=ephemeralcontainers --type=strategic \
+  -p "$(cat "$WORK/ephemeral-unblessed.json")" >"$WORK/deny-ephemeral.txt" 2>&1; then
+  echo "user added an unblessed ephemeral container"; fail=1
+else
+  echo "$(cat "$WORK/deny-ephemeral.txt")"
+  grep -q "not blessed by the chart" "$WORK/deny-ephemeral.txt" || fail=1
+  # The denial must name the ephemeral image, not just the pod's own container:
+  # that is the proof this path is actually evaluated.
+  grep -q "busybox:1.36" "$WORK/deny-ephemeral.txt" || fail=1
+fi
+
+log "admission: a blessed image through the same subresource is admitted"
+# The denied PATCH persisted nothing, so this appends the first ephemeral
+# container. The image is the one this e2e built and loaded, under the
+# repository the chart's s5n variant names.
+cat >"$WORK/ephemeral-blessed.json" <<'EOF'
+{"spec":{"ephemeralContainers":[{"name":"debugger-allow","image":"ghcr.io/swizzin/s5n:e2e","command":["/usr/local/bin/s5n","version"],"securityContext":{"allowPrivilegeEscalation":false,"runAsNonRoot":true,"capabilities":{"drop":["ALL"]},"seccompProfile":{"type":"RuntimeDefault"}}}]}}
+EOF
+if $K --as="$SA" -n "$NS" patch pod "$pod" --subresource=ephemeralcontainers --type=strategic \
+  -p "$(cat "$WORK/ephemeral-blessed.json")" >"$WORK/allow-ephemeral.txt" 2>&1; then
+  got=$($K -n "$NS" get pod "$pod" \
+    -o jsonpath='{range .spec.ephemeralContainers[*]}{.name}={.image}{"\n"}{end}' |
+    grep '^debugger-allow=' || true)
+  echo "ephemeral image admitted: ${got}"
+  [ "$got" = "debugger-allow=ghcr.io/swizzin/s5n:e2e" ] || fail=1
+else
+  echo "$(cat "$WORK/allow-ephemeral.txt")"; fail=1
+fi
 
 for r in $($K -n "$NS" get httproute -o name); do
   acc=$($K -n "$NS" get "$r" -o jsonpath='{.status.parents[0].conditions[?(@.type=="Accepted")].status}')
