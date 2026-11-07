@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"io"
 	"sort"
 	"strings"
 
@@ -99,6 +100,12 @@ func Validate(schema []byte, values map[string]any) error {
 		return errors.New("no chart schema: refusing to apply values nothing has checked")
 	}
 	c := jsonschema.NewCompiler()
+	// The schema arrives inside a chart and box runs as root, so a $ref must
+	// never reach outside the schema itself. The library's default loader
+	// opens file:// URLs; this one opens nothing.
+	c.LoadURL = func(url string) (io.ReadCloser, error) {
+		return nil, fmt.Errorf("schema reference %q is outside the chart schema; refusing to load it", url)
+	}
 	if err := c.AddResource("values.schema.json", bytes.NewReader(schema)); err != nil {
 		return fmt.Errorf("chart schema: %w", err)
 	}

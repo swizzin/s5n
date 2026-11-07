@@ -198,3 +198,13 @@ func TestValidateReportsEveryProblemAtOnce(t *testing.T) {
 		t.Fatalf("problems = %v, want both pgid and tz", se.Problems)
 	}
 }
+
+// A chart schema is untrusted input to a root process: a $ref to a local file
+// must fail to compile rather than be read.
+func TestValidateRefusesExternalRefs(t *testing.T) {
+	schema := []byte(`{"$schema":"http://json-schema.org/draft-07/schema#","properties":{"x":{"$ref":"file:///etc/hostname"}}}`)
+	err := Validate(schema, map[string]any{"x": 1})
+	if err == nil || !strings.Contains(err.Error(), "outside the chart schema") {
+		t.Fatalf("external $ref was not refused: %v", err)
+	}
+}
