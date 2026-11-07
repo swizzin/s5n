@@ -238,6 +238,22 @@ The fix: the repository comes only from the chart's variant list. Values choose 
 variant by name and may hold a pin inside that variant's repository, nothing else.
 The admission policy under Scopes enforces it in the cluster, not only in box.
 
+**Two jobs, one list (decided).** The variant list does two different jobs, and they
+are enforced in different places:
+
+- **Layout.** The chart only promises mounts, users and config paths for images it has
+  tested. That holds on every seedbox, root's included, and the schema and box enforce
+  it. Root can still `kubectl set image` on their own seedbox; it's their server, and
+  the guardrail is there to stop a values file from breaking it, not to stop root.
+- **Tenancy.** On a shared server, a user mustn't run images or take ports root didn't
+  grant. Only the admission policy enforces that, and it's bound only to user
+  namespaces, so a single-user box never meets it.
+
+The policy's allowlist is generated from the variant list, never kept by hand. Adding
+an app already means a values entry and its variants, so it reaches the allowlist with
+no extra step. Anything outside the catalog stays outside a user's namespace, which is
+the decided rule that root decides which apps a user has.
+
 ### uninstall (decided)
 
 - **Never deleted:** media and downloads, even when asked. The user removes those
