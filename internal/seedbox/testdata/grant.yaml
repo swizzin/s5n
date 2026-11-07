@@ -1,0 +1,48 @@
+# alice's seedbox: what root granted her.
+#
+# Root owns this file. box adduser, box install and box remove edit it; hand
+# edits are kept, because box reads and splices this file and never rewrites it.
+namespace: alice
+
+global:
+  puid: 1001
+  pgid: 1001
+
+storage:
+  data:
+    existingClaim: alice-data
+  config:
+    existingClaim: alice-config
+
+gateway:
+  host: alice.example.com
+  parentRef:
+    name: s5n
+    namespace: s5n-gateway
+
+networkPolicy:
+  enabled: true
+
+apps:
+  qbittorrent:
+    enabled: true
+  prowlarr:
+    enabled: true
+  sonarr:
+    enabled: true
+    instances:
+      - suffix: ""
+        category: tv
+        enabled: true
+      - suffix: 4k
+        category: tv-4k
+        enabled: true
+  radarr:
+    enabled: true
+    instances:
+      - suffix: ""
+        category: movies
+        enabled: true
+      - suffix: 4k
+        category: movies-4k
+        enabled: false

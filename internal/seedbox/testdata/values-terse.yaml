@@ -1,0 +1,13 @@
+# Tuning kept short, in a style of its own: four spaces at the top, two below,
+# a flow mapping, an empty flow list, and single quotes.
+global:
+    tz: 'Etc/UTC'    # single quotes matter
+
+apps:
+  sonarr:
+    env:
+      SONARR__LOG__LEVEL: debug
+    resources: {limits: {memory: 2Gi}}
+
+  plex:
+    noAuthNetworks: []

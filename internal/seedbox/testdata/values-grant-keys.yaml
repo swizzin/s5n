@@ -1,0 +1,12 @@
+# A user's file that has been copied from a grant shape.
+namespace: alice
+
+gateway:
+  host: alice.example.com
+
+apps:
+  sonarr:
+    instances:
+      - suffix: ""
+        category: tv
+        enabled: true

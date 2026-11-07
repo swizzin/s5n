@@ -66,6 +66,13 @@ regenerates a file from scratch. box merges the two, and the grant always wins. 
 key in the values file is an error that names the key, not something silently ignored.
 Root's own seedbox works the same way, with root as the user.
 
+`internal/seedbox` implements the split: it loads both files, merges them (a grant key in
+values is an error naming the key and its line), checks the result against a chart
+release's `values.schema.json`, and edits either file by splicing the bytes of the one
+key that changed, so comments, key order, blank lines and indentation survive. `box` is
+not wired to it yet. The per-key decision of what the grant owns lives in
+`internal/seedbox/grant.go`; the torrent port below is treated as the grant's for now.
+
 ### How a user's box gets its power (proposed)
 
 Without root, a user's box gets a kubeconfig scoped to that user's namespace. Everything

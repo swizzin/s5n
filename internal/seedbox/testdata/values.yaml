@@ -1,0 +1,33 @@
+# alice's box: everything here is hers to tune.
+#
+# The grant decides what this box can reach and which apps it has. Anything the
+# grant decides is refused here rather than ignored, so every key below is a key
+# she may actually change.
+
+global:
+    # Four spaces, on purpose: a box command must not reformat this file.
+    tz: "Europe/Berlin"
+
+apps:
+  qbittorrent:
+    image:
+      # blessed variant: libtorrent 2.x
+      repository: ghcr.io/swizzin/qbittorrent
+      tag: "5.3.0-lt2"
+    torrent:
+      service:
+        externalTrafficPolicy: Local
+    env:
+      TZ: "Europe/Berlin"
+
+  sonarr:
+    env:
+      SONARR__LOG__LEVEL: debug
+    resources: {limits: {memory: 1Gi}}
+
+  radarr:
+    env: {}
+
+wiring:
+  enabled: true
+  timeoutSeconds: 600
