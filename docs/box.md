@@ -89,8 +89,9 @@ user can't change it:
   routes from the user's namespace. Without it, one user's HTTPRoute could claim
   another user's host name.
 
-Open: the torrent NodePort is chosen inside the user's release, so two users could ask
-for the same port. Root assigning it in the grant would close that.
+**Root assigns the torrent port (decided).** It's a port on the node that every seedbox
+shares, so it lives in the grant with the Service type, and `box adduser` picks a free
+one.
 
 ## Commands
 
@@ -139,6 +140,77 @@ They change different things, so they stay separate commands:
 
 Both end in the same step: diff, confirm, apply. Using one never locks out the other.
 
+### How box versions against the chart (proposed)
+
+box and the chart live in one repo but ship as separate artifacts. The image and the
+chart release together: one tag, appVersion equal to the image tag. box has its own
+version. What they share is a short list of interfaces, and the rule versions those
+interfaces, not the code:
+
+- the values schema and the grant key set (what box may write and merge);
+- `status.json` in the wiring ConfigMap (what `status` and `doctor` read);
+- the catalog manifest, once it exists (what `init` and `install` ask);
+- the migration floor (which older releases a release can upgrade from).
+
+**A minimum box version (decided).** The chart declares it in `Chart.yaml`, next to
+its migration floor:
+
+```yaml
+annotations:
+  box.s5n/min-box: "0.4.0"
+  box.s5n/upgrade-from: "0.2.0"
+```
+
+`min-box` goes up only when one of those interfaces changes in a way an older box
+would get wrong: a renamed grant key, a status field whose meaning changed, a new kind
+of setup question. Adding an app, bumping a digest or adding an optional values key
+leaves it alone. A box older than `min-box` refuses that release until it's updated.
+In the other direction, box keeps reading every release back to the oldest
+`upgrade-from` it knows, so a new box never strands an old install.
+
+**box only uses published charts.** It pulls a released chart by version from the OCI
+registry and reads the schema, manifest and annotations from that artifact. It never
+loads `charts/` from its own tree, so a box built from main can't depend on templates
+no user has. box's own tests run against the chart packaged from the same commit,
+the same way.
+
+**What update does with it:**
+
+- **box updates itself first (decided), then re-runs as the new binary (proposed).**
+  `box update` checks for a newer box before it looks at charts, replaces itself, and
+  execs the new binary with the same arguments, so the chart update always runs under
+  the newest box. The timer does the same, which is why a release that raises
+  `min-box` never leaves an unattended box stuck.
+- Self-update rules (proposed):
+  - **Verified before it runs.** The new binary is checked against the release's signed
+    checksum before it replaces anything. It runs as root, so an unverified self-update
+    would be remote code execution as root.
+  - **Atomic, with one step back.** Written beside the old binary and renamed over it.
+    The previous binary is kept as `box.previous`, and `box update --rollback-box` puts
+    it back.
+  - **Root only.** The binary is root-owned. A user's `box update` that needs a newer
+    box says so and stops: "box 0.4.0 is needed; root's next update brings it".
+  - **Held like a pinned image.** `--hold-box` (or a key in root's config) skips the
+    self-update and says so on every run. A release whose `min-box` a held box doesn't
+    meet is shown, not taken.
+  - **Package-managed installs defer.** If box came from a distro package, it never
+    overwrites itself. It names the package command instead.
+- It picks the newest release this box meets `min-box` for. A newer release that needs
+  a newer box is shown, not taken: "s5n 0.6.0 is out and needs a newer box".
+- It never skips past `upgrade-from`. If the installed release is older than the
+  target's floor, update steps through the intermediate releases, each with its own
+  health and wiring gate. This is what lets old migrations be deleted safely.
+- `apply` re-reads the annotations of the release already installed. A box that's too
+  old for the installed release refuses to apply rather than writing values it can't
+  check.
+
+**What CI proves:** box at HEAD against the newest released chart and the oldest
+release back to its `upgrade-from` floor; the chart at HEAD against the newest released
+box, which must meet its `min-box`. A chart change that needs a newer box but forgets
+to raise `min-box` fails there and not on a user's server. The self-update path gets
+its own test: the previous box release updates itself to HEAD and finishes a chart
+update.
+
 ### Image choice: blessed variants (decided in principle)
 
 A user can't run an arbitrary image. A different image can move config files, mounts or
@@ -151,6 +223,12 @@ writes the choice into values.
 
 A digest pinned by hand in values is held: `update` leaves that app where it is and
 says so ("radarr: held at 6.1 by your values"). Removing the pin releases it.
+
+**A user can't name an image repository (decided).** Today `apps.*.image.*` is a values
+key and the schema accepts any repository, so a user could patch in an arbitrary image.
+The fix: the repository comes only from the chart's variant list. Values choose a
+variant by name and may hold a pin inside that variant's repository, nothing else.
+How it's enforced is open; see "What enforces the grant".
 
 ### uninstall (decided)
 
@@ -277,6 +355,19 @@ reason instead of a stack trace.
 
 ## Open questions
 
+- **What enforces the grant.** box refuses a grant key in values, but a user's box
+  runs with a kubeconfig scoped to their namespace, and the user can read it. With it
+  they can skip box: `kubectl set image`, `helm upgrade` with their own values, a
+  Service with any nodePort. Pod Security `restricted` keeps that inside their own
+  namespace, but the grant is a box rule, not a cluster rule. Two ways to close it:
+  admission policies root installs at `adduser` (a ValidatingAdmissionPolicy that
+  admits only blessed images and only the granted nodePort in that namespace), or no
+  user kubeconfig at all, with a user's box asking a root-owned helper to act for it.
+- **Apps with no base URL** (Seerr/Overseerr, likely Plex's web app). The chart routes
+  them under `/<name>` with a prefix rewrite. That keeps the API answering, which is
+  all the e2e checks, but a UI that writes absolute asset paths breaks under a prefix.
+  The likely fix is a subdomain for those apps (`seerr.<domain>`), which puts more
+  host names in the grant and needs DNS and certificates for each one, or a wildcard.
 - Where adopting existing data ends: is "I already have downloads and configs at these
   paths" part of `init`, or always `migrate`?
 - `migrate` sources: bare-metal swizzin, Docker, an existing Kubernetes stack. Proposed:
