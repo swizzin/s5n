@@ -49,7 +49,7 @@ certificates are per host name.
 **Root installs and removes apps; users run their own (decided).** Users can restart,
 read logs, update and back up their own apps. Root decides which apps they have.
 
-### Two files per seedbox (proposed)
+### Two files per seedbox (decided)
 
 A user's values file can't be applied with root's power. One `storage.data.hostPath`
 pointing at someone else's downloads would end the isolation. So each seedbox is split
