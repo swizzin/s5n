@@ -4,11 +4,13 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
-	"io"
 	"sort"
 	"strings"
 
-	"github.com/santhosh-tekuri/jsonschema/v5"
+	"github.com/santhosh-tekuri/jsonschema/v6"
+	"github.com/santhosh-tekuri/jsonschema/v6/kind"
+	"golang.org/x/text/language"
+	"golang.org/x/text/message"
 )
 
 // Chart is one chart release's own defaults: the values.yaml and
@@ -92,6 +94,18 @@ func (e *SchemaError) Error() string {
 	return b.String()
 }
 
+// schemaURL is the name the chart schema is compiled under. It is a bare
+// synthetic URL, not a path: the compiler resolves relative references against
+// it and never has a reason to touch the filesystem for it.
+const schemaURL = "https://chart.s5n.invalid/values.schema.json"
+
+// noRefLoader refuses every URL the compiler would otherwise load. See Validate.
+type noRefLoader struct{}
+
+func (noRefLoader) Load(url string) (any, error) {
+	return nil, fmt.Errorf("schema reference %q is outside the chart schema; refusing to load it", url)
+}
+
 // Validate checks a complete values document against a chart release's schema.
 // The schema is a parameter, not a file this package reads: the schema that
 // matters is the one in the release being installed.
@@ -99,17 +113,20 @@ func Validate(schema []byte, values map[string]any) error {
 	if len(schema) == 0 {
 		return errors.New("no chart schema: refusing to apply values nothing has checked")
 	}
-	c := jsonschema.NewCompiler()
-	// The schema arrives inside a chart and box runs as root, so a $ref must
-	// never reach outside the schema itself. The library's default loader
-	// opens file:// URLs; this one opens nothing.
-	c.LoadURL = func(url string) (io.ReadCloser, error) {
-		return nil, fmt.Errorf("schema reference %q is outside the chart schema; refusing to load it", url)
-	}
-	if err := c.AddResource("values.schema.json", bytes.NewReader(schema)); err != nil {
+	doc, err := jsonschema.UnmarshalJSON(bytes.NewReader(schema))
+	if err != nil {
 		return fmt.Errorf("chart schema: %w", err)
 	}
-	sch, err := c.Compile("values.schema.json")
+	c := jsonschema.NewCompiler()
+	// The schema arrives inside a chart and box runs as root, so a $ref must
+	// never reach outside the schema itself. v6 loads meta-schemas from an
+	// embedded copy and sends everything else to this loader, which opens
+	// nothing.
+	c.UseLoader(noRefLoader{})
+	if err := c.AddResource(schemaURL, doc); err != nil {
+		return fmt.Errorf("chart schema: %w", err)
+	}
+	sch, err := c.Compile(schemaURL)
 	if err != nil {
 		return fmt.Errorf("chart schema: %w", err)
 	}
@@ -122,6 +139,8 @@ func Validate(schema []byte, values map[string]any) error {
 	}
 	return nil
 }
+
+var printer = message.NewPrinter(language.English)
 
 // problemsOf flattens the validator's error tree to one entry per offending
 // key. Branch errors ("doesn't validate with ...") are dropped: they name a
@@ -157,36 +176,39 @@ func problemsOf(ve *jsonschema.ValidationError) []Problem {
 }
 
 func problemsFor(e *jsonschema.ValidationError) []Problem {
-	base := pointerPath(e.InstanceLocation)
-	switch {
-	case strings.HasSuffix(e.KeywordLocation, "/required"):
+	base := tokenPath(e.InstanceLocation)
+	switch k := e.ErrorKind.(type) {
+	case *kind.Required:
 		var out []Problem
-		for _, name := range quotedNames(e.Message) {
+		for _, name := range k.Missing {
 			out = append(out, Problem{Path: joinPath(base, name), Message: "is required"})
 		}
 		return out
-	case strings.HasSuffix(e.KeywordLocation, "/additionalProperties"):
+	case *kind.AdditionalProperties:
 		var out []Problem
-		for _, name := range quotedNames(e.Message) {
+		for _, name := range k.Properties {
 			out = append(out, Problem{Path: joinPath(base, name), Message: "is not a key the chart knows"})
 		}
 		return out
-	case strings.HasSuffix(e.KeywordLocation, "/not"):
+	case *kind.Not:
 		return []Problem{{Path: base, Message: "is not an allowed value"}}
+	case *kind.Type:
+		// The library words this "got string, want integer"; the user's file
+		// reads better the other way round, and the existing errors keep their
+		// wording across the v5 -> v6 move.
+		return []Problem{{Path: base, Message: fmt.Sprintf("expected %s, got %s", strings.Join(k.Want, " or "), k.Got)}}
 	}
-	return []Problem{{Path: base, Message: e.Message}}
+	return []Problem{{Path: base, Message: e.ErrorKind.LocalizedString(printer)}}
 }
 
-// pointerPath turns a JSON pointer such as /apps/sonarr/instances/1/enabled
-// into apps.sonarr.instances[1].enabled.
-func pointerPath(ptr string) string {
-	if ptr == "" || ptr == "/" {
+// tokenPath turns the validator's instance tokens (apps, sonarr, instances,
+// 1, enabled) into apps.sonarr.instances[1].enabled.
+func tokenPath(tokens []string) string {
+	if len(tokens) == 0 {
 		return "(top level)"
 	}
-	parts := strings.Split(strings.TrimPrefix(ptr, "/"), "/")
 	var b strings.Builder
-	for i, part := range parts {
-		part = strings.ReplaceAll(strings.ReplaceAll(part, "~1", "/"), "~0", "~")
+	for i, part := range tokens {
 		if isIndex(part) {
 			fmt.Fprintf(&b, "[%s]", part)
 			continue
