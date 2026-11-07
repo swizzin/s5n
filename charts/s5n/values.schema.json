@@ -186,6 +186,7 @@
     "apps": {
       "type": "object",
       "additionalProperties": false,
+      "description": "One entry per catalog app. Every key here is a workload: s5n.instances builds the workload list from these keys, so adding an app means adding a key here and in this schema (additionalProperties false is what keeps a non-app key out), never editing a template.",
       "properties": {
         "qbittorrent": {
           "type": "object",

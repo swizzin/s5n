@@ -226,9 +226,9 @@ unattended install. A new app ships as one chart PR, plus a wiring step in the i
 it needs connecting to the others. box changes only when an app needs a new *kind* of
 question.
 
-Also: `s5n.instances` in `charts/s5n/templates/_helpers.tpl` lists the apps by hand.
-Building the list from the keys under `apps:` makes a new values entry render with no
-template change.
+`s5n.instances` in `charts/s5n/templates/_helpers.tpl` builds the workload list from the
+keys under `apps:`, so a new app is a values entry plus its entry in
+`values.schema.json`, never a template edit.
 
 ## Ownership and kubectl (decided)
 

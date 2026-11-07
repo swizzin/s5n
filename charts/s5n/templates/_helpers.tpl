@@ -36,13 +36,17 @@ app.kubernetes.io/name: {{ .inst.name }}
 {{- end -}}
 
 {{/*
-s5n.instances: the flat list of workloads, as JSON. Arr apps expand into one entry per
-enabled instance (sonarr, sonarr-4k, ...). Every other template ranges over this.
+s5n.instances: the flat list of workloads, as JSON, built from the keys under `apps:`.
+Every key there is an app -- values.schema.json rejects anything else -- so a new
+catalog app needs a values entry and its schema definition, never a template edit.
+Arr apps have `instances:` and expand into one entry per enabled instance (sonarr,
+sonarr-4k, ...); every other app contributes one entry. Helm ranges map keys in
+sorted order, so the list is alphabetical by app name; nothing downstream depends on
+that order (wiring.json's instance list is per-Arr work with no cross-entry ordering).
 */}}
 {{- define "s5n.instances" -}}
 {{- $out := list -}}
-{{- range $app := list "qbittorrent" "prowlarr" "sonarr" "radarr" "plex" "tautulli" "seerr" -}}
-  {{- $cfg := index $.Values.apps $app -}}
+{{- range $app, $cfg := $.Values.apps -}}
   {{- if and $cfg $cfg.enabled -}}
     {{- if $cfg.instances -}}
       {{- range $i := $cfg.instances -}}
