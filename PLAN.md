@@ -153,6 +153,13 @@ recorded in the wiring ConfigMap, not by name and not by tag (see AGENTS.md inva
 - The qBittorrent WebUI password is seeded as a PBKDF2 hash by an init container, and one
   category is created per Arr instance. Save path, temp path and category paths are set
   through the API and read back, because the image re-applies its own default at runtime.
+- qBittorrent performance settings (send-buffer watermarks, async I/O threads, disk
+  queue, disk cache, uTP, preallocation) come in three tiers. Compiled defaults are baked
+  into the image and fixed at build, so they have to be right. Seeded preferences come from
+  a runtime profile (`light`, `1g`, `10g`) and are written once, at first install, as a
+  starting point. After that they are user-owned: nothing re-applies them on upgrade,
+  `box update` or reset, and an edited watermark is not drift. Only the data-contract
+  fields above are re-asserted.
 - In every Arr: download client, category, root folder, `copyUsingHardlinks: true`, and
   Forms auth with the shared admin credential. Every setting is read back and asserted,
   and the Arr↔qBittorrent link is proven with the Arr's own connection test — Arr never
@@ -338,3 +345,9 @@ Dockerfile               the image the wiring Job and the qBittorrent init conta
 
 - **Name:** decided — `s5n`.
 - **Licence:** decided — GPL-3.0 (`LICENSE`), continuing swizzin's.
+- **libtorrent 2.x image:** not built. qBittorrent 5.3 still compiles against either
+  branch (`QBT_USES_LIBTORRENT2` guards in `sessionimpl.cpp`) and userdocs publishes
+  `release-5.3.0_v1.2.20` and `release-5.3.0_v2.1.2` from the same app version, so it
+  would be an image tag axis (`lt2.1.2`), not a fork. 2.x removes the disk cache and
+  deprecates the 1.2 cache settings, so 1.2-era cache advice does not carry over; the
+  compiled-defaults patch ports by value.
