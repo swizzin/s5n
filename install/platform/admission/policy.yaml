@@ -1,0 +1,115 @@
+# The grant, enforced by the cluster.
+#
+# A user's seedbox namespace comes with a kubeconfig scoped to that namespace,
+# so box refusing a key in the user's values file is not enforcement: the user
+# can run kubectl or helm directly. These policies are what make the grant true.
+#
+# They live on the platform layer, installed by root at `box bootstrap`, never in
+# the s5n release: the release stays namespace-scoped with no cluster RBAC.
+# Root binds them to one namespace per user at `box adduser` (see
+# render-grant.py), and the bindings' params live in the root-owned s5n-system
+# namespace. A ConfigMap in the user's own namespace would be writable by them
+# and enforce nothing. Root's own seedbox namespace gets no binding: this is
+# tenancy, not a cluster-wide image policy.
+#
+# Params (ConfigMap s5n-grant-<namespace> in s5n-system) carry the user's grant:
+#   blessedRepositories  comma-separated repositories, generated from the
+#                        chart's variants.yaml so "blessed" has one definition
+#   serviceType          the type granted for the torrent peers Service
+#   torrentNodePort      the nodePort root assigned to this user
+#
+# One policy per resource shape rather than one policy with a kind switch: the
+# API server type-checks each expression against every matched kind, and a
+# Service field read inside a Pod rule is a warning (and a hazard) even when a
+# ternary would never reach it. Two policies, one params object, two bindings
+# written together at adduser.
+#
+# failurePolicy Fail: if the API server cannot evaluate a policy (params
+# missing, CEL error), the write is refused rather than admitted. An admission
+# hole on a typo is worse than a release that will not install.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: s5n-system
+  labels:
+    app.kubernetes.io/part-of: s5n
+    # Root owns this namespace; nothing a seedbox user can do reaches it.
+    pod-security.kubernetes.io/enforce: restricted
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: s5n-blessed-images
+spec:
+  failurePolicy: Fail
+  paramKind:
+    apiVersion: v1
+    kind: ConfigMap
+  matchConstraints:
+    resourceRules:
+      # Pods and the pod template of every workload kind that can carry one.
+      # CronJobs are included so a bad template is refused when it is written,
+      # not when the Job it eventually creates is.
+      - apiGroups: [""]
+        apiVersions: ["v1"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["pods"]
+      - apiGroups: ["apps"]
+        apiVersions: ["v1"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["deployments", "statefulsets", "daemonsets", "replicasets"]
+      - apiGroups: ["batch"]
+        apiVersions: ["v1"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["jobs", "cronjobs"]
+  variables:
+    - name: podspec
+      expression: >
+        has(object.spec.containers) ? object.spec :
+        (has(object.spec.jobTemplate) ? object.spec.jobTemplate.spec.template.spec :
+        object.spec.template.spec)
+    - name: images
+      expression: >
+        variables.podspec.containers.map(c, c.image) +
+        (has(variables.podspec.initContainers) ? variables.podspec.initContainers.map(c, c.image) : [])
+    - name: blessed
+      expression: "params.data.blessedRepositories.split(',').filter(r, r != '')"
+    # An image matches a blessed repository only as `repo:tag` or `repo@digest`,
+    # so `ghcr.io/home-operations/sonarr-evil` cannot pass as `.../sonarr`.
+    - name: unblessed
+      expression: >
+        variables.images.filter(i, !variables.blessed.exists(r,
+        i.startsWith(r + ':') || i.startsWith(r + '@')))
+  validations:
+    - expression: "variables.unblessed.size() == 0"
+      messageExpression: >
+        's5n: image repository is not blessed by the chart: ' + variables.unblessed.join(', ')
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: s5n-granted-service
+spec:
+  failurePolicy: Fail
+  paramKind:
+    apiVersion: v1
+    kind: ConfigMap
+  matchConstraints:
+    resourceRules:
+      # Services: only the granted peer port and Service type.
+      - apiGroups: [""]
+        apiVersions: ["v1"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["services"]
+  variables:
+    - name: serviceType
+      expression: "has(object.spec.type) ? object.spec.type : 'ClusterIP'"
+  validations:
+    - expression: >
+        variables.serviceType == 'ClusterIP' ||
+        variables.serviceType == params.data.serviceType
+      message: "s5n: a Service may only use ClusterIP or the type the grant assigns"
+    - expression: >
+        !has(object.spec.ports) || object.spec.ports.all(p,
+        !has(p.nodePort) || p.nodePort == int(params.data.torrentNodePort))
+      message: "s5n: a nodePort may only be the peer port the grant assigns"

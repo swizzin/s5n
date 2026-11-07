@@ -107,6 +107,196 @@ log "GatewayClass + Gateway (the chart's default parentRef target)"
 $K create namespace s5n-gateway --dry-run=client -o yaml | $K apply -f - >/dev/null
 $K apply -f hack/envoy-gateway.yaml >/dev/null
 
+# ---- the grant, enforced by the cluster ---------------------------------------
+# Root installs the policies with the platform layer; `box adduser` binds them to
+# one namespace with that user's grant as params (root-owned s5n-system, never
+# the user's namespace). The e2e stands in for both, then acts as the user with
+# a ServiceAccount holding the namespace RBAC a user's box gets.
+log "platform layer: the grant's admission policies"
+$K apply -f install/platform/admission/policy.yaml >/dev/null
+# A rerun on a --keep cluster starts unbound, so the "predates the binding"
+# step is true again. DELETEs are not matched by the policy.
+$K delete validatingadmissionpolicybinding "s5n-grant-${NS}" "s5n-grant-${NS}-service" --ignore-not-found >/dev/null
+$K -n "$NS" delete deploy unblessed --ignore-not-found >/dev/null
+
+# One pod, admitted before any binding exists, to answer the question every
+# admission policy raises: what happens to what is already running? Nothing --
+# admission only sees new writes. Kept out of the app label selectors on
+# purpose.
+cat >"$WORK/unblessed.yaml" <<'EOF'
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: unblessed
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: unblessed
+  template:
+    metadata:
+      labels:
+        app: unblessed
+    spec:
+      # Pod Security restricted is enforced here, so the pod is otherwise
+      # admissible: the only reason left to refuse it is the repository.
+      securityContext:
+        runAsUser: 1000
+        runAsGroup: 1000
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: unblessed
+          image: docker.io/curlimages/curl:8.11.1
+          command: ["sleep", "3600"]
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+EOF
+
+# A second copy under another name: `create` of an object that already exists
+# answers AlreadyExists, which is not the denial under test.
+sed 's/name: unblessed/name: admission-probe/; s/app: unblessed/app: admission-probe/g' \
+  "$WORK/unblessed.yaml" >"$WORK/probe.yaml"
+
+log "a pod that predates the binding (admission never re-checks running pods)"
+$K -n "$NS" apply -f "$WORK/unblessed.yaml" >/dev/null
+$K -n "$NS" wait --for=condition=Available deploy/unblessed --timeout=180s || fail=1
+
+log "bind the policy to ${NS} with the grant as params (root-owned s5n-system)"
+python3 install/platform/admission/render-grant.py charts/s5n "$NS" 31111 NodePort | $K apply -f - >/dev/null
+
+# A binding takes effect a moment after it is created, so wait for a denial
+# instead of sleeping. A dry-run CREATE of a new object is a real admission
+# request that persists nothing.
+effective=no
+for i in $(seq 1 30); do
+  if ! $K -n "$NS" create --dry-run=server -f "$WORK/probe.yaml" >/dev/null 2>"$WORK/deny-image.txt"; then
+    grep -q "not blessed by the chart" "$WORK/deny-image.txt" && { effective=yes; break; }
+  fi
+  sleep 1
+done
+echo "policy effective: ${effective}"
+[ "$effective" = yes ] || { cat "$WORK/deny-image.txt"; fail=1; }
+
+log "a namespace-scoped user identity, as a user's box gets"
+$K apply -f - >/dev/null <<EOF
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: box-user
+  namespace: ${NS}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: box-user
+  namespace: ${NS}
+rules:
+  - apiGroups: ["*"]
+    resources: ["*"]
+    verbs: ["*"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: box-user
+  namespace: ${NS}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: box-user
+subjects:
+  - kind: ServiceAccount
+    name: box-user
+    namespace: ${NS}
+EOF
+SA="system:serviceaccount:${NS}:box-user"
+
+log "admission: the user cannot run an image the chart has not blessed"
+sed 's/name: unblessed/name: user-unblessed/; s/app: unblessed/app: user-unblessed/g' \
+  "$WORK/unblessed.yaml" >"$WORK/user-unblessed.yaml"
+if $K --as="$SA" -n "$NS" create -f "$WORK/user-unblessed.yaml" >"$WORK/allow-image.txt" 2>&1; then
+  echo "user created an unblessed Deployment"; cat "$WORK/allow-image.txt"; fail=1
+else
+  echo "$(cat "$WORK/allow-image.txt")"
+  grep -q "not blessed by the chart" "$WORK/allow-image.txt" || fail=1
+fi
+
+log "admission: the user can only use the granted nodePort"
+cat >"$WORK/unblessed-svc.yaml" <<'EOF'
+apiVersion: v1
+kind: Service
+metadata:
+  name: unblessed
+spec:
+  type: NodePort
+  selector:
+    app: unblessed
+  ports:
+    - port: 6881
+      targetPort: 6881
+      nodePort: 30001
+EOF
+if $K --as="$SA" -n "$NS" create -f "$WORK/unblessed-svc.yaml" >"$WORK/allow-svc.txt" 2>&1; then
+  echo "user created a Service on a nodePort the grant did not assign"; fail=1
+else
+  echo "$(cat "$WORK/allow-svc.txt")"
+  grep -q "nodePort may only be the peer port" "$WORK/allow-svc.txt" || fail=1
+fi
+
+log "admission: the user cannot reach the params that define the grant"
+# can-i exits 1 for "no", which is the answer here; set -e must not see it.
+ssar_params=$($K auth can-i patch configmaps -n s5n-system --as="$SA" 2>/dev/null | tail -1 || true)
+echo "patch configmaps in s5n-system: ${ssar_params}"
+[ "$ssar_params" = no ] || fail=1
+if $K --as="$SA" -n s5n-system patch cm "s5n-grant-${NS}" --type merge \
+  -p '{"data":{"blessedRepositories":"docker.io/library/evil"}}' >"$WORK/patch.txt" 2>&1; then
+  echo "user patched the params"; fail=1
+else
+  echo "$(cat "$WORK/patch.txt")"
+  grep -q "Forbidden" "$WORK/patch.txt" || fail=1
+fi
+for res in validatingadmissionpolicies validatingadmissionpolicybindings; do
+  can=$($K auth can-i update "${res}.admissionregistration.k8s.io" --as="$SA" 2>/dev/null | tail -1 || true)
+  echo "update ${res}: ${can}"; [ "$can" = no ] || fail=1
+done
+# Exactly one seedbox is bound, and its params are that seedbox's: the policy
+# is tenancy, not a cluster-wide image allowlist.
+bindings=$($K get validatingadmissionpolicybindings -o jsonpath='{range .items[*]}{.spec.paramRef.name}{"\n"}{end}')
+echo "bindings:"; echo "$bindings"
+[ "$(echo "$bindings" | grep -c .)" = 2 ] || fail=1
+echo "$bindings" | grep -qx "s5n-grant-${NS}" || fail=1
+
+log "admission: an unbound namespace still admits an unblessed image"
+$K -n default apply -f "$WORK/unblessed.yaml" >/dev/null || fail=1
+$K -n default get deploy unblessed >/dev/null || fail=1
+$K -n default delete deploy unblessed --wait=false >/dev/null || fail=1
+
+log "admission: the pod already running survives; the next one does not"
+phase=$($K -n "$NS" get pod -l app=unblessed -o jsonpath='{.items[0].status.phase}')
+echo "pod admitted before the binding: ${phase}"
+[ "$phase" = Running ] || fail=1
+if $K -n "$NS" rollout restart deploy/unblessed >"$WORK/restart.txt" 2>&1; then
+  echo "rollout restart of an unblessed Deployment was admitted"; fail=1
+else
+  echo "$(cat "$WORK/restart.txt")"
+  grep -q "not blessed by the chart" "$WORK/restart.txt" || fail=1
+fi
+# Wait for the pod to actually be gone: a terminating pod still counts, and
+# the ReplicaSet's replacement attempt is what must fail.
+$K -n "$NS" delete pod -l app=unblessed --wait=true --timeout=120s >/dev/null
+sleep 5
+left=$($K -n "$NS" get pod -l app=unblessed --no-headers | wc -l)
+echo "pods the ReplicaSet could recreate: ${left}"
+[ "$left" = 0 ] || fail=1
+replica_failure=$($K -n "$NS" get rs -o jsonpath='{range .items[*]}{.status.conditions[?(@.type=="ReplicaFailure")].message}{"\n"}{end}' | grep -c "not blessed by the chart" || true)
+echo "ReplicaSets reporting the denial: ${replica_failure}"
+[ "$replica_failure" -ge 1 ] || fail=1
+$K -n "$NS" delete deploy unblessed --ignore-not-found >/dev/null
+
 # The chart under test, with the locally built image instead of the published one.
 install_release() {
   $HELM upgrade --install s5n charts/s5n -n "$NS" \
