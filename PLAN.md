@@ -194,20 +194,9 @@ recorded in the wiring ConfigMap, not by name and not by tag (see AGENTS.md inva
 
 ### `box` CLI (Go, single binary)
 
-The swizzin UX, backed by Helm instead of apt.
-
-```
-box init                 # interactive: domain, data path, admin user, apps, Plex claim
-box install sonarr       # flip apps.sonarr.enabled, helm upgrade, wait, run wiring
-box remove sonarr        # disable; config kept unless --purge
-box update               # pull the next chart release, show the diff, apply
-box status               # pods, routes, certificate, wiring ConfigMap, free space
-box backup / restore     # configRoot + qBittorrent BT_backup + Arr DB backups (restic optional)
-box logs <app>
-```
-
-`box` owns `/etc/swizzin/values.yaml`. Hand edits are allowed and preserved: `box` reads,
-merges and diffs; it never regenerates the file from scratch.
+The swizzin UX, backed by Helm instead of apt. Commands, scopes, values files, updates,
+migrations and uninstall are specified in [`docs/box.md`](docs/box.md); this plan keeps
+only the installer's cluster decision below.
 
 ### Installer and cluster detection
 
