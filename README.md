@@ -14,6 +14,11 @@ See `PLAN.md` for the design and `AGENTS.md` for how to work here.
 hack/e2e-kind.sh   # build, install everything on kind, assert, tear down
 ```
 
+The e2e keeps its kubeconfig in `${XDG_CACHE_HOME:-~/.cache}/s5n-e2e/kubeconfig`
+(override with `S5N_E2E_KUBECONFIG`) and never reads or writes `~/.kube/config`, so
+your current context survives a run; after `--keep`, reach the cluster with
+`KUBECONFIG=${XDG_CACHE_HOME:-~/.cache}/s5n-e2e/kubeconfig kubectl --context kind-s5n ...`.
+
 ## AI disclosure
 
 s5n is built with substantial help from AI coding assistants (Anthropic's Claude and

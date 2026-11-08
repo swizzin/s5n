@@ -20,6 +20,13 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 CTX=${CTX:-kind-s5n}
+# The e2e keeps the kind cluster's context out of ~/.kube/config, so the cluster
+# `hack/e2e-kind.sh --keep` leaves behind is reachable only through that file.
+# An explicit KUBECONFIG still wins.
+if [ -z "${KUBECONFIG:-}" ] && [ -e "${XDG_CACHE_HOME:-$HOME/.cache}/s5n-e2e/kubeconfig" ]; then
+  KUBECONFIG=${XDG_CACHE_HOME:-$HOME/.cache}/s5n-e2e/kubeconfig
+  export KUBECONFIG
+fi
 K="kubectl --context ${CTX}"
 NS=${NS:-seedbox}
 RELEASE=${RELEASE:-s5n}

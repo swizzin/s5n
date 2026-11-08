@@ -32,7 +32,28 @@ trap 'rm -rf "$WORK"' EXIT
 log() { printf '\n==> %s\n' "$*"; }
 fail=0
 
-if ! $KIND get clusters 2>/dev/null | grep -qx "$CLUSTER"; then
+# kind writes the cluster's context into KUBECONFIG and makes it the
+# current-context, then `kind delete cluster` drops that context without putting
+# the previous one back: a plain `kind create` would leave the operator pointed at
+# a cluster that no longer exists, and `--keep` would leave it pointed at ours.
+# So the e2e brings its own kubeconfig and kind, kubectl and helm all read that
+# file; ~/.kube/config is never opened. It lives outside $WORK so a kept cluster
+# stays reachable after this script exits.
+KUBECONFIG=${S5N_E2E_KUBECONFIG:-${XDG_CACHE_HOME:-$HOME/.cache}/s5n-e2e/kubeconfig}
+export KUBECONFIG
+mkdir -p "$(dirname "$KUBECONFIG")"
+[ -e "$KUBECONFIG" ] || : >"$KUBECONFIG"
+chmod 600 "$KUBECONFIG"
+log "kubeconfig: ${KUBECONFIG} (~/.kube/config is not used)"
+
+if $KIND get clusters 2>/dev/null | grep -qx "$CLUSTER"; then
+  # A kept cluster can outlive its kubeconfig (a cleared cache): export it again
+  # rather than fail on a missing kind-<cluster> context.
+  if ! kubectl config get-contexts "$CTX" -o name 2>/dev/null | grep -qx "$CTX"; then
+    log "exporting the existing kind cluster's kubeconfig"
+    $KIND export kubeconfig --name "$CLUSTER"
+  fi
+else
   log "creating kind cluster"
   $KIND create cluster --config hack/kind.yaml --wait 120s
 fi
