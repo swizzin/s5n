@@ -1,5 +1,5 @@
-# Envoy Gateway as the Gateway API implementation for s5n dev/e2e and the default
-# managed install.
+# The Gateway box bootstrap installs (Envoy Gateway as the Gateway API
+# implementation); the kind e2e applies the same file.
 #
 # The envoy-gateway Helm chart (installed by hack/e2e-kind.sh) ships:
 #   - the envoy-gateway controller Deployment + Service, in the release namespace

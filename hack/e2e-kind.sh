@@ -136,7 +136,7 @@ $K label --overwrite namespace "$NS" \
 
 log "GatewayClass + Gateway (the chart's default parentRef target)"
 $K create namespace s5n-gateway --dry-run=client -o yaml | $K apply -f - >/dev/null
-$K apply -f hack/envoy-gateway.yaml >/dev/null
+$K apply -f install/platform/gateway/gateway.yaml >/dev/null
 
 # ---- the grant, enforced by the cluster ---------------------------------------
 # Root installs the policies with the platform layer; `box adduser` binds them to

@@ -51,7 +51,7 @@ const (
 	MetalLBRelease   = "metallb"
 	MetalLBNamespace = "metallb-system"
 
-	// The Gateway the chart's HTTPRoutes attach to (hack/envoy-gateway.yaml,
+	// The Gateway the chart's HTTPRoutes attach to (install/platform/gateway/gateway.yaml,
 	// which the kind e2e applies and box embeds).
 	GatewayNamespace = "s5n-gateway"
 	GatewayName      = "s5n"

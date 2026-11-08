@@ -8,8 +8,8 @@ import (
 
 	utilyaml "k8s.io/apimachinery/pkg/util/yaml"
 
-	gatewayassets "github.com/swizzin/s5n/hack"
 	admissionassets "github.com/swizzin/s5n/install/platform/admission"
+	gatewayassets "github.com/swizzin/s5n/install/platform/gateway"
 )
 
 // Access is one SelfSubjectAccessReview question: may this identity do verb on
@@ -24,10 +24,10 @@ type Access struct {
 }
 
 // gatewayManifest is the GatewayClass and Gateway the chart's HTTPRoutes
-// attach to. The bytes are hack/envoy-gateway.yaml, the same file the kind e2e
-// applies with kubectl, embedded rather than copied: box and the e2e cannot
-// disagree about what the platform's Gateway is.
-var gatewayManifest = gatewayassets.EnvoyGatewayManifest
+// attach to. The bytes are install/platform/gateway/gateway.yaml, the same
+// file the kind e2e applies with kubectl, embedded rather than copied: box and
+// the e2e cannot disagree about what the platform's Gateway is.
+var gatewayManifest = gatewayassets.Manifest
 
 // admissionPolicy is install/platform/admission/policy.yaml, embedded from the
 // file beside it. The Go tests in internal/admission read that file by path,
