@@ -1,17 +1,23 @@
-// Package admission is the platform layer's admission contract in Go.
+// Package admission is the platform layer's admission contract.
 //
-// Render turns one user's grant into the params ConfigMap and the two
-// ValidatingAdmissionPolicyBindings that attach the platform policies to
-// exactly that namespace. box calls it as root where the platform layer used to
-// run a Python script; hack/render-grant is the same render as a command until
-// `box adduser` exists.
+// Two halves, one rule set. Render turns one user's grant into the params
+// ConfigMap and the two ValidatingAdmissionPolicyBindings that attach the
+// platform policies to exactly that namespace; UnblessedImages applies the
+// policies' image rule to pods that already exist.
 //
-// It is not internal/seedbox. That package decides what a grant may contain from
-// a user's own files, before anything is installed. This one is the other side
-// of the contract: what root writes into the cluster, and therefore what the
-// cluster refuses. They are separate because their inputs are: seedbox reads
-// values files, this reads the chart's variants.yaml and the grant root
+// It is not internal/seedbox. That package decides what a grant may contain
+// from a user's own files, before anything is installed. This one is the other
+// side of the contract: what root writes into the cluster, and therefore what
+// the cluster refuses. They are separate because their inputs are: seedbox
+// reads values files, this reads the chart's variants.yaml and the grant root
 // assigned.
+//
+// The image rule lives here in Go as well as in policy.yaml because a binding
+// never re-checks a running pod (AGENTS.md, gotchas): the pods a new binding
+// strands are exactly the ones this package names before the binding is
+// created. The two rules must agree: TestBlessedMatchesThePolicyRule is the
+// case table and TestPolicyCELStillMatchesTheGoRule fails when the CEL under it
+// changes.
 package admission
 
 import (
