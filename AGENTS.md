@@ -26,8 +26,22 @@ Read `PLAN.md` first. It is the architecture; this file is how to work in the re
   comments and indentation survive. `grant.go` is the only list of what the grant owns:
   a new values key that decides isolation needs a rule there, and
   `TestGrantKeysAreRealKeys` fails if a rule names a key the chart does not have. Only
-  this package may import `go.yaml.in/yaml/v3` or the JSON-schema library; `cmd/s5n`
-  must stay stdlib-only.
+  this package and `internal/admission` may import `go.yaml.in/yaml/v3`, and only this
+  package the JSON-schema library; `cmd/s5n` must stay stdlib-only.
+- `internal/admission/` — the admission contract root writes. `Render` turns one grant
+  (namespace, torrent nodePort, Service type) into the params ConfigMap in `s5n-system`
+  and the two bindings, reading the blessed list from a chart's `variants.yaml`;
+  `UnblessedImages` applies the policies' image rule to pods that already exist, because
+  a binding never re-checks a running pod. Pure: no client-go. Its goldens are the
+  output of the Python renderer it replaced, and one renders the real `variants.yaml`,
+  so re-blessing an image fails a test on purpose.
+- `internal/release/` — `box apply`'s decision over `ChartSource`, `ReleaseClient` and
+  `Confirmer`, with the Helm v4 + client-go implementation in `helm.go`. The only
+  package that imports Helm or client-go; only `cmd/box` links it.
+- `cmd/box/` — the host CLI. `bootstrap` decides the cluster (it still installs
+  nothing); `apply` loads root's grant and values, checks them against the chart's
+  schema, diffs against the deployed release, confirms, installs or upgrades release
+  `s5n` in the grant's namespace, and prints the wiring receipt.
 - `Dockerfile` — static binary on distroless; the image the wiring Job and the
   qBittorrent init container run.
 - `hack/grab-test.sh` — the end-to-end grab: a local mock indexer (`hack/mock-indexer.py`,
@@ -45,10 +59,15 @@ Read `PLAN.md` first. It is the architecture; this file is how to work in the re
   allows Prowlarr→Sonarr and blocks an outside pod, the wiring Job connects everything,
   and a second `helm upgrade` performs **zero writes** with app state identical before
   and after. `--keep` leaves the cluster up.
+- `hack/e2e-box.sh` — the same install done by `box apply` instead of helm: first
+  install, a re-apply that must be zero writes, and a one-key edit whose diff names only
+  that key. Not in CI yet.
+- `hack/render-grant/` — `internal/admission` as a command, the e2e's caller until
+  `box adduser` exists.
 - `.github/workflows/ci.yaml` — every PR and push to main: gofmt/vet/`go test -race`,
   `hack/validate-chart.sh` on 1.30/1.34/1.37, then the kind e2e.
   Actions are pinned by commit SHA.
-- No `box` yet. No installer yet.
+- No installer yet: `box` uses an existing cluster.
 
 ## Commands
 
@@ -57,6 +76,7 @@ gofmt -l . && go vet ./... && go test ./...
 hack/validate-chart.sh 1.30.0  # helm lint + kubeconform for every charts/s5n/ci/*-values.yaml
 docker build -t s5n:e2e .     # what the e2e uses
 hack/e2e-kind.sh              # full smoke; needs docker, kind, helm, kubectl
+hack/e2e-box.sh               # the install through box apply; same needs
 ```
 
 Run lint + kubeconform against 1.30, 1.34 and 1.37 before every commit. Run the e2e before
@@ -75,11 +95,15 @@ one needs a live `lookup`. The e2e asserts the policy exists in the cluster.
 3. **The data contract.** Every app mounts the same data claim at `/data`
    (`/data/downloads/<category>`, `/data/media/<category>`) and its config at `/config`
    via `subPath: <instance-name>`. Never add a second data mount, a remote path mapping,
-   or a per-app data volume. That is what keeps hardlinks working.
-4. **Pod Security `restricted` must admit every pod.** No hostPath in pod specs (hostPath
-   is a static PV in `storage.yaml`), no hostPort, no hostNetwork, no privileged, no root.
-   Security contexts come only from `s5n.podSecurity` / `s5n.containerSecurity` in
-   `_helpers.tpl`; do not write ad-hoc ones in templates.
+   or a per-app data volume. That is what keeps hardlinks working. The claims are not
+   the chart's: `storage.{data,config}.existingClaim` name claims that already exist, and
+   `storage` accepts nothing else (no hostPath, storage class or size). box creates the
+   static PV and claim from the grant's `storage.<kind>.path`; a plain `helm install`
+   brings its own. No CSI or provisioner: a volume per claim splits `/data`.
+4. **Pod Security `restricted` must admit every pod.** No hostPath in pod specs (the only
+   hostPath is in the static PV box creates), no hostPort, no hostNetwork, no privileged,
+   no root. Security contexts come only from `s5n.podSecurity` / `s5n.containerSecurity`
+   in `_helpers.tpl`; do not write ad-hoc ones in templates.
 5. **One pod spec.** `workloads.yaml` is the only place an app pod spec is written.
    Per-app differences are values (`apps.<name>`), or a small `if eq $inst.app` branch when
    unavoidable. Adding an app = a values entry plus its `apps.<name>` definition in
@@ -131,9 +155,24 @@ one needs a live `lookup`. The e2e asserts the policy exists in the cluster.
     unbound). The blessed repository list is generated from `variants.yaml`; there is no
     second list in Go, `install/` or docs. Changing a policy or its params means changing
     the e2e admission asserts in the same commit.
+13. **box apply writes only what it showed.** The files are loaded, merged and checked
+    before a cluster client exists, so a refusal (grant key in values, schema violation,
+    no chart, no cluster) opens no connection, and an empty diff returns before Helm is
+    called. The diff compares the effective values (chart defaults, then values, then
+    grant) with the values Helm stored on the deployed release. Tests assert the client
+    was never opened, not just the message.
 
 ## Gotchas already hit
 
+- box trusts the kubeconfig path `box bootstrap` recorded, not the cluster behind it:
+  changing that file's current-context retargets `apply`. No cluster identity check yet.
+- A release named `s5n` that box did not install is adopted, and Helm stored only the
+  flags it was given, so the first apply shows box's whole model as added. A release
+  left `failed` makes `apply` refuse (`exists but is not deployed`): recover with
+  `helm rollback`, never by deleting release Secrets.
+- The chart's `lookup "v1" "Endpoints"` (`templates/networkpolicy.yaml`) makes client-go
+  print a deprecation line through klog. `internal/release` installs `rest.NoWarnings`
+  so box's output stays its own; `hack/e2e-box.sh` greps apply output for klog lines.
 - A ValidatingAdmissionPolicy takes effect a moment after its binding is created and
   never re-checks running objects. An e2e that asserts a denial right after `kubectl apply`
   races the binding: poll for a dry-run denial. A pod admitted before the binding keeps
@@ -178,7 +217,7 @@ one needs a live `lookup`. The e2e asserts the policy exists in the cluster.
   by prefix: `/data/media` is under `/data` and still wrong. That step is what makes
   the data contract true rather than aspirational.
 - The session keys are QSettings-escaped in the file: `[Preferences]` with
-  `Session\DefaultSavePath` (two backslashes on disk), not a `[Session]` section.
+  `Session\\DefaultSavePath` (two backslashes on disk), not a `[Session]` section.
 - Never retry a rejected qBittorrent login: five failures ban the client IP for an hour,
   and the ban answers 403 on everything, which looks like a routing fault.
 - NetworkPolicy is evaluated *after* kube-proxy DNATs a Service, so the wiring Job's
@@ -197,9 +236,15 @@ one needs a live `lookup`. The e2e asserts the policy exists in the cluster.
   changes, and `helm uninstall` leaves `<release>-wiring` behind.
 - Pod template labels must not duplicate keys from `s5n.labels`
   (`app.kubernetes.io/instance` is already there).
-- hostPath directories must exist and be owned by puid:pgid *before* install; the PV uses
-  `type: Directory`. In e2e the script creates them inside the kind node; on real hosts
-  the installer will.
+- Host directories must exist and be owned by puid:pgid *before* install; the PV uses
+  `type: Directory`. `box apply` stats both paths and refuses before any write if one is
+  missing; `--paths-in-node` skips that only for the kind e2e, whose paths are inside the
+  node. `box init` will create them on real hosts.
+- box never changes a static PV in place. A PV of box's name that backs another path or
+  claim, or a claim pinned to another volume, is refused with both sides named. The
+  pre-claims chart named its PV `<ns>-<fullname>-<kind>`, the same as box's for release
+  `s5n`, but bound to the old claim, so an existing install refuses until `migrate`
+  adopts it.
 - The torrent port is a LoadBalancer Service by default (31111): with MetalLB on the
   platform layer it gets its own address, no hostPort. NodePort stays available (it must
   then sit in the cluster's NodePort range, 30000–32767 by default); `nodePort` is only
