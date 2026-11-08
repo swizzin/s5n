@@ -16,9 +16,8 @@ concurrency:
 
 env:
   HELM_VERSION: v4.3.0
-  # Tools come from their release binaries, checked against these sha256s, not
-  # from `go install`: setup-go pins the toolchain to go.mod with
-  # GOTOOLCHAIN=local, and kubeconform v0.8.0 needs a newer Go than s5n does.
+  # Tools come from their release binaries, checked against these sha256s, so
+  # the verifiers do not depend on the Go toolchain setup-go pins from go.mod.
   KUBECONFORM_VERSION: v0.8.0
   KUBECONFORM_SHA256: 9bc2bffbf71f261128533edaf912153948b7ff238f9a531ae6d34466ec287883 # kubeconform-linux-amd64.tar.gz
   KIND_VERSION: v0.33.0
