@@ -230,7 +230,7 @@ func TestBootstrapExplicitUsesCluster(t *testing.T) {
 			LoadBalancer: OutcomePresent,
 			Gateway:      OutcomePresent,
 			CertManager:  OutcomePresent,
-			Classes:      []GatewayClass{{Name: "eg", ControllerName: "gateway.envoyproxy.io/gatewayclass-controller", Accepted: true}},
+			Classes:      []GatewayClass{{Name: "eg", ControllerName: "gateway.envoyproxy.io/gatewayclass-controller", Accepted: true, ManagedByBox: true}},
 		},
 	}
 	host := &fakeHost{}

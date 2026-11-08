@@ -208,6 +208,11 @@ func FormatResult(res Result) string {
 		}
 		fmt.Fprintf(&b, "%s\n", line)
 	}
+	if res.Gateway.FeaturesChecked {
+		fmt.Fprintf(&b, "gateway features: %s is supported\n", FeaturePathRewrite)
+	} else if res.Gateway.Assumed {
+		fmt.Fprintf(&b, "gateway features: GatewayClass %s publishes none; continuing because platform.gateway.assumeFeatures is set\n", res.Gateway.Class)
+	}
 	if res.Reason != "" {
 		fmt.Fprintf(&b, "%s\n", res.Reason)
 	}

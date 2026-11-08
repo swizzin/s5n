@@ -81,6 +81,7 @@ func runBootstrap(args []string) {
 	yes := fs.Bool("yes", false, "confirm the platform and run init without asking")
 	plain := fs.Bool("plain", false, "ask init's questions with plain line prompts, even on a terminal (for a flaky terminal or a screen reader)")
 	gatewayClass := fs.String("gateway-class", "", "the GatewayClass to use when several are Accepted (platform.gateway.className)")
+	assumeFeatures := fs.Bool("gateway-assume-features", false, "use a GatewayClass that publishes no supportedFeatures list (platform.gateway.assumeFeatures)")
 	initFlags := addInitFlags(fs)
 	if err := fs.Parse(args); err != nil {
 		fmt.Fprintf(os.Stderr, "box: %v\n", err)
@@ -112,10 +113,11 @@ func runBootstrap(args []string) {
 	}
 
 	res, err := d.Bootstrap(context.Background(), bootstrap.Options{
-		Kubeconfig:    *kubeconfig,
-		KubeconfigEnv: os.Getenv("KUBECONFIG"),
-		Platform:      bootstrap.DefaultPlatform(),
-		GatewayClass:  *gatewayClass,
+		Kubeconfig:            *kubeconfig,
+		KubeconfigEnv:         os.Getenv("KUBECONFIG"),
+		Platform:              bootstrap.DefaultPlatform(),
+		GatewayClass:          *gatewayClass,
+		AssumeGatewayFeatures: *assumeFeatures,
 	})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "box: %v\n", err)

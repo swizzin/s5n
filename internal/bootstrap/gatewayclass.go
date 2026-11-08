@@ -11,6 +11,15 @@ import (
 // keeps its own class, and box's Gateway attaches to that one instead.
 const EnvoyGatewayClass = "eg"
 
+// FeaturePathRewrite is the Gateway API supportedFeature the chart's routes
+// need. The chart's HTTPRoutes use a URLRewrite filter with
+// path.type=ReplacePrefixMatch, which Gateway API names HTTPRoutePathRewrite
+// (there is no "HTTPRouteURLRewrite" feature: URLRewrite is the filter, and
+// path rewriting is the feature it is gated by). A class that publishes
+// features without this one cannot serve the chart, and box refuses it rather
+// than installing Envoy Gateway beside it.
+const FeaturePathRewrite = "HTTPRoutePathRewrite"
+
 // GatewayClass is one GatewayClass the probe found, reduced to what the class
 // decision needs. The class is the operator's (or box's) statement that a
 // controller is willing to serve Gateways; box never guesses one.
@@ -59,6 +68,12 @@ type GatewayChoice struct {
 	// the GatewayClass: box's own implementation does not need to be asked
 	// about features.
 	BoxInstalls bool
+	// FeaturesChecked says the class published a feature list and it contains
+	// FeaturePathRewrite.
+	FeaturesChecked bool
+	// Assumed says the class published no feature list and the operator
+	// allowed box to use it anyway (platform.gateway.assumeFeatures).
+	Assumed bool
 }
 
 // ClassChooser asks which of several Accepted GatewayClasses box should use.
@@ -110,7 +125,7 @@ func (d *Decision) gatewayChoice(opts Options, probe PlatformProbe, gw Component
 				return GatewayChoice{}, fmt.Sprintf("platform.gateway.className is %q, but that GatewayClass is not Accepted (%s): box will not attach its Gateway to a class no controller serves",
 					c.Name, acceptedReason(c))
 			}
-			return choiceOf(c), ""
+			return d.withFeatures(opts, c)
 		}
 		return GatewayChoice{}, fmt.Sprintf("platform.gateway.className is %q, but this cluster has no GatewayClass by that name (accepted: %s)",
 			opts.GatewayClass, names(accepted))
@@ -122,7 +137,7 @@ func (d *Decision) gatewayChoice(opts Options, probe PlatformProbe, gw Component
 		// refusal is better than an empty class name.
 		return GatewayChoice{}, "no GatewayClass is Accepted, so there is no class for box's Gateway"
 	case 1:
-		return choiceOf(accepted[0]), ""
+		return d.withFeatures(opts, accepted[0])
 	}
 
 	if d.Prompt == nil {
@@ -135,7 +150,7 @@ func (d *Decision) gatewayChoice(opts Options, probe PlatformProbe, gw Component
 	}
 	for _, c := range accepted {
 		if c.Name == chosen {
-			return choiceOf(c), ""
+			return d.withFeatures(opts, c)
 		}
 	}
 	return GatewayChoice{}, fmt.Sprintf("the chosen GatewayClass %q is not one of the Accepted classes (%s)", chosen, names(accepted))
@@ -143,6 +158,41 @@ func (d *Decision) gatewayChoice(opts Options, probe PlatformProbe, gw Component
 
 func choiceOf(c GatewayClass) GatewayChoice {
 	return GatewayChoice{Class: c.Name, ControllerName: c.ControllerName}
+}
+
+// withFeatures applies the feature rule to a class box did not create. The
+// chart needs HTTPRoutePathRewrite; a class that publishes a feature list
+// without it cannot serve the routes, and a class that publishes no list at
+// all is only used with the operator's explicit override. A class box created
+// beside its own Envoy Gateway is skipped: box chose that implementation and
+// pinned it, and Envoy Gateway does not publish a supportedFeatures list, so
+// asking would make box's own platform require an override on every run.
+func (d *Decision) withFeatures(opts Options, c GatewayClass) (GatewayChoice, string) {
+	choice := choiceOf(c)
+	if c.ManagedByBox {
+		return choice, ""
+	}
+	if len(c.Features) == 0 {
+		if !opts.AssumeGatewayFeatures {
+			return GatewayChoice{}, fmt.Sprintf("GatewayClass %q (controller %s) publishes no supportedFeatures list, so box cannot check that it supports %s, which the chart's routes need (URLRewrite with ReplacePrefixMatch). Set platform.gateway.assumeFeatures: true (--gateway-assume-features) to use it anyway, or use an implementation that publishes its features",
+				c.Name, controllerOr(c), FeaturePathRewrite)
+		}
+		choice.Assumed = true
+		return choice, ""
+	}
+	if !c.HasFeature(FeaturePathRewrite) {
+		return GatewayChoice{}, fmt.Sprintf("GatewayClass %q (controller %s) does not support %s, which the chart's routes need (URLRewrite with ReplacePrefixMatch): box will not install Envoy Gateway beside another implementation, so use one that supports it or set platform.gateway.className to a class that does",
+			c.Name, controllerOr(c), FeaturePathRewrite)
+	}
+	choice.FeaturesChecked = true
+	return choice, ""
+}
+
+func controllerOr(c GatewayClass) string {
+	if c.ControllerName == "" {
+		return "unknown"
+	}
+	return c.ControllerName
 }
 
 func acceptedClasses(classes []GatewayClass) []GatewayClass {

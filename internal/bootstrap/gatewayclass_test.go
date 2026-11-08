@@ -59,7 +59,7 @@ func (f *classFixture) run(t *testing.T, opts Options) Result {
 // asked and no implementation is installed.
 func TestGatewayClassSingleAcceptedIsUsed(t *testing.T) {
 	f := newClassFixture(classProbe(
-		GatewayClass{Name: "nginx", ControllerName: "gateway.nginx.org/nginx-gateway-controller", Accepted: true},
+		GatewayClass{Name: "nginx", ControllerName: "gateway.nginx.org/nginx-gateway-controller", Accepted: true, Features: []string{FeaturePathRewrite}},
 	))
 	res := f.run(t, Options{})
 	if res.Action != ActionUseCluster {
@@ -80,8 +80,8 @@ func TestGatewayClassSingleAcceptedIsUsed(t *testing.T) {
 // names the setting and the flag, and writes nothing.
 func TestGatewayClassSeveralUnattendedStops(t *testing.T) {
 	f := newClassFixture(classProbe(
-		GatewayClass{Name: "nginx", ControllerName: "gateway.nginx.org/nginx-gateway-controller", Accepted: true},
-		GatewayClass{Name: "traefik", ControllerName: "traefik.io/gateway-controller", Accepted: true},
+		GatewayClass{Name: "nginx", ControllerName: "gateway.nginx.org/nginx-gateway-controller", Accepted: true, Features: []string{FeaturePathRewrite}},
+		GatewayClass{Name: "traefik", ControllerName: "traefik.io/gateway-controller", Accepted: true, Features: []string{FeaturePathRewrite}},
 	))
 	res := f.run(t, Options{})
 	if res.Action != ActionStop {
@@ -113,8 +113,8 @@ func (c *recordingChooser) ChooseGatewayClass(classes []GatewayClass) (string, e
 func TestGatewayClassSeveralGuidedPicks(t *testing.T) {
 	chooser := &recordingChooser{answer: "traefik"}
 	f := newClassFixture(classProbe(
-		GatewayClass{Name: "nginx", ControllerName: "gateway.nginx.org/nginx-gateway-controller", Accepted: true},
-		GatewayClass{Name: "traefik", ControllerName: "traefik.io/gateway-controller", Accepted: true},
+		GatewayClass{Name: "nginx", ControllerName: "gateway.nginx.org/nginx-gateway-controller", Accepted: true, Features: []string{FeaturePathRewrite}},
+		GatewayClass{Name: "traefik", ControllerName: "traefik.io/gateway-controller", Accepted: true, Features: []string{FeaturePathRewrite}},
 	))
 	f.d.Prompt = chooser
 	res := f.run(t, Options{})
@@ -137,7 +137,7 @@ func TestGatewayClassSeveralGuidedPicks(t *testing.T) {
 // to a class nobody serves.
 func TestGatewayClassConfiguredNotAcceptedStops(t *testing.T) {
 	f := newClassFixture(classProbe(
-		GatewayClass{Name: "nginx", ControllerName: "gateway.nginx.org/nginx-gateway-controller", Accepted: true},
+		GatewayClass{Name: "nginx", ControllerName: "gateway.nginx.org/nginx-gateway-controller", Accepted: true, Features: []string{FeaturePathRewrite}},
 		GatewayClass{Name: "traefik", ControllerName: "traefik.io/gateway-controller", Accepted: false, AcceptedReason: "Waiting for controller"},
 	))
 	res := f.run(t, Options{GatewayClass: "traefik"})
@@ -156,7 +156,7 @@ func TestGatewayClassConfiguredNotAcceptedStops(t *testing.T) {
 
 func TestGatewayClassConfiguredUnknownStops(t *testing.T) {
 	f := newClassFixture(classProbe(
-		GatewayClass{Name: "nginx", ControllerName: "gateway.nginx.org/nginx-gateway-controller", Accepted: true},
+		GatewayClass{Name: "nginx", ControllerName: "gateway.nginx.org/nginx-gateway-controller", Accepted: true, Features: []string{FeaturePathRewrite}},
 	))
 	res := f.run(t, Options{GatewayClass: "traefik"})
 	if res.Action != ActionStop || !strings.Contains(res.Reason, "no GatewayClass by that name") {
@@ -209,4 +209,95 @@ func componentAction(components []ComponentResult, component PlatformComponent) 
 		}
 	}
 	return ""
+}
+
+// A class that publishes a feature list without HTTPRoutePathRewrite cannot
+// serve the chart's URLRewrite; box stops, and never installs Envoy beside it.
+func TestGatewayClassMissingPathRewriteStops(t *testing.T) {
+	f := newClassFixture(classProbe(
+		GatewayClass{Name: "nginx", ControllerName: "gateway.nginx.org/nginx-gateway-controller", Accepted: true,
+			Features: []string{"Gateway", "HTTPRoute", "HTTPRouteHostRewrite"}},
+	))
+	res := f.run(t, Options{})
+	if res.Action != ActionStop {
+		t.Fatalf("action = %q, want stop", res.Action)
+	}
+	for _, want := range []string{"nginx", FeaturePathRewrite, "will not install Envoy Gateway beside", "ReplacePrefixMatch"} {
+		if !strings.Contains(res.Reason, want) {
+			t.Fatalf("the refusal does not say %q: %s", want, res.Reason)
+		}
+	}
+	if len(f.recs.saved) != 0 {
+		t.Fatal("a refused class wrote the record")
+	}
+}
+
+// A class that publishes no feature list is only usable with the operator's
+// explicit override, which the refusal names by setting and by flag.
+func TestGatewayClassNoFeatureListStopsNamingTheOverride(t *testing.T) {
+	f := newClassFixture(classProbe(
+		GatewayClass{Name: "nginx", ControllerName: "gateway.nginx.org/nginx-gateway-controller", Accepted: true},
+	))
+	res := f.run(t, Options{})
+	if res.Action != ActionStop {
+		t.Fatalf("action = %q, want stop", res.Action)
+	}
+	for _, want := range []string{"nginx", "publishes no supportedFeatures", "platform.gateway.assumeFeatures", "--gateway-assume-features"} {
+		if !strings.Contains(res.Reason, want) {
+			t.Fatalf("the refusal does not say %q: %s", want, res.Reason)
+		}
+	}
+	if len(f.recs.saved) != 0 {
+		t.Fatal("a refused class wrote the record")
+	}
+}
+
+// The override continues, says once that box could not check, and records the
+// choice so a re-run does not have to be told again.
+func TestGatewayClassNoFeatureListOverrideContinues(t *testing.T) {
+	f := newClassFixture(classProbe(
+		GatewayClass{Name: "nginx", ControllerName: "gateway.nginx.org/nginx-gateway-controller", Accepted: true},
+	))
+	res := f.run(t, Options{AssumeGatewayFeatures: true})
+	if res.Action != ActionUseCluster {
+		t.Fatalf("action = %q, want use-cluster (%s)", res.Action, res.Reason)
+	}
+	if !res.Gateway.Assumed || res.Gateway.FeaturesChecked {
+		t.Fatalf("gateway = %+v, want the unchecked override", res.Gateway)
+	}
+	if len(f.recs.saved) != 1 || !f.recs.saved[0].AssumeGatewayFeatures {
+		t.Fatalf("the override was not recorded: %+v", f.recs.saved)
+	}
+	if !strings.Contains(FormatResult(res), "platform.gateway.assumeFeatures is set") {
+		t.Fatalf("box did not say it could not check: %s", FormatResult(res))
+	}
+}
+
+// A published list that contains the feature is used, and box says so.
+func TestGatewayClassFeatureChecked(t *testing.T) {
+	f := newClassFixture(classProbe(
+		GatewayClass{Name: "nginx", ControllerName: "gateway.nginx.org/nginx-gateway-controller", Accepted: true, Features: []string{FeaturePathRewrite}},
+	))
+	res := f.run(t, Options{})
+	if res.Action != ActionUseCluster {
+		t.Fatalf("action = %q, want use-cluster (%s)", res.Action, res.Reason)
+	}
+	if !res.Gateway.FeaturesChecked {
+		t.Fatalf("gateway = %+v, want the feature checked", res.Gateway)
+	}
+	if !strings.Contains(FormatResult(res), FeaturePathRewrite+" is supported") {
+		t.Fatalf("box did not report the feature: %s", FormatResult(res))
+	}
+}
+
+// A class box created beside its own Envoy Gateway needs no published feature
+// list: box chose that implementation. This is the re-run of a box install.
+func TestGatewayClassBoxOwnedSkipsFeatureCheck(t *testing.T) {
+	f := newClassFixture(classProbe(
+		GatewayClass{Name: "eg", ControllerName: "gateway.envoyproxy.io/gatewayclass-controller", Accepted: true, ManagedByBox: true},
+	))
+	res := f.run(t, Options{})
+	if res.Action != ActionUseCluster || res.Gateway.Class != "eg" {
+		t.Fatalf("action=%q gateway=%+v, want box's own class used", res.Action, res.Gateway)
+	}
 }
