@@ -154,6 +154,30 @@ They are different jobs. `bootstrap` sets up the machine once. `init` sets up on
 seedbox: once for root, once per user through `adduser`. Every step of both is safe to
 re-run. The cluster decision is in `PLAN.md`.
 
+What `init` does (decided):
+
+- **It asks, then writes the two files.** Domain, data and config paths, which apps,
+  and each chosen app's setup questions from the catalog manifest. Answers are spliced
+  into the grant and values files key by key, then `init` hands over to `apply`, whose
+  diff and confirm are the review. There is no separate "here is your file" step.
+- **Re-running it edits.** On a seedbox that already has its files, `init` asks the
+  same questions with the current answers filled in and splices only the keys that
+  changed. Hand edits elsewhere in either file survive.
+- **Paths.** For each path `init` reports the device, mount point, filesystem, free
+  space and owner. A path that doesn't exist yet is the case to be careful with: a disk
+  that didn't mount leaves an empty directory on `/`, and a seedbox would fill it.
+  Guided `init` asks before it creates a missing path and says which filesystem it
+  would land on. Unattended `init` refuses a missing path. The directories s5n needs
+  beneath an existing path are created without asking, owned by the seedbox's
+  puid:pgid.
+- **Existing data is used as it is.** A path that already holds downloads or configs
+  is reported ("2.1 TiB in 3 directories") and used without changes. Adopting a
+  previous install properly (rewriting paths in the Arr databases, carrying
+  qBittorrent's state) is `migrate`'s job, never `init`'s.
+- **Unattended.** Every question is a flag or a file key. With `--yes`, or when there's
+  no terminal, `init` asks nothing. A missing required answer is an error that names
+  the flag or key to set.
+
 ### install, remove and instances (decided)
 
 Only the Arrs take multiple instances (an HD and a 4K Sonarr, for example). The chart
@@ -339,7 +363,7 @@ into swizzin's upgrade scripts:
 - **Every migration is proven** by the upgrade e2e: previous release → current, data
   intact, wiring green.
 
-## The catalog and box (proposed)
+## The catalog and box (decided)
 
 Every seedbox-oriented app belongs in the catalog, and contributors are expected to
 add most of them. Adding an app shouldn't need a box release.
@@ -357,6 +381,14 @@ from it. Because every answer maps to a values key, the manifest also documents 
 unattended install. A new app ships as one chart PR, plus a wiring step in the image if
 it needs connecting to the others. box changes only when an app needs a new *kind* of
 question.
+
+The manifest lives in the chart beside `variants.yaml` and is read the same way: values
+can't override it. A question may only name a key the user owns. Grant keys (domain,
+paths, the app list) are box's own questions, never a manifest's.
+
+Some answers can't live in a file. The Plex claim token expires about four minutes
+after it's issued, so a question can be **transient**: box asks it last, after the
+confirm, passes it to this one apply and never writes it to either file.
 
 `s5n.instances` in `charts/s5n/templates/_helpers.tpl` builds the workload list from the
 keys under `apps:`, so a new app is a values entry plus its entry in
@@ -407,11 +439,9 @@ reason instead of a stack trace.
   all the e2e checks, but a UI that writes absolute asset paths breaks under a prefix.
   The likely fix is a subdomain for those apps (`seerr.<domain>`), which puts more
   host names in the grant and needs DNS and certificates for each one, or a wildcard.
-- Where adopting existing data ends: is "I already have downloads and configs at these
-  paths" part of `init`, or always `migrate`?
 - `migrate` sources: bare-metal swizzin, Docker, an existing Kubernetes stack. Proposed:
   one command that detects the source, since the hard part (rewriting paths in the Arr
   databases, carrying qBittorrent's state) is the same for all of them.
 - Who assigns the torrent port with multiple users (see Scopes).
-- What the guided dialogs look like beyond "terminal, with personality": the library,
-  and whether `init` shows the finished values file before applying it.
+- What the guided dialogs look like beyond "terminal, with personality": which
+  library, and the style box gives it.
