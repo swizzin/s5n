@@ -22,9 +22,8 @@ type Chart struct {
 	Schema []byte
 }
 
-// Effective returns the values the chart would actually render for this
-// seedbox: the release's defaults with every app switched off, then the user's
-// values, then the grant.
+// Base is the chart's own values with every app switched off: the document a
+// seedbox starts from before either file is read.
 //
 // Starting from the chart's defaults is not a shortcut. The schema requires
 // `image` and `port` on every app object, so a "disabled" app can only be
@@ -33,7 +32,11 @@ type Chart struct {
 // apps exist: Helm would otherwise take the chart default `enabled: true` for
 // any app the grant never mentions, and a new app in a new release would appear
 // on every box without root deciding it.
-func (s *Seedbox) Effective(c Chart) (map[string]any, error) {
+//
+// `box init` reads it directly for a host that has no files yet: the questions
+// are prefilled from what the chart would render, which is the same document an
+// apply of those files would produce.
+func Base(c Chart) (map[string]any, error) {
 	base, err := parseChartValues(c.Values)
 	if err != nil {
 		return nil, err
@@ -47,7 +50,16 @@ func (s *Seedbox) Effective(c Chart) (map[string]any, error) {
 			entry["enabled"] = false
 		}
 	}
+	return base, nil
+}
 
+// Effective returns the values the chart would actually render for this
+// seedbox: Base, then the user's values, then the grant.
+func (s *Seedbox) Effective(c Chart) (map[string]any, error) {
+	base, err := Base(c)
+	if err != nil {
+		return nil, err
+	}
 	merged, err := s.Merge()
 	if err != nil {
 		return nil, err

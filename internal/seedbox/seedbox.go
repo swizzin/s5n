@@ -64,6 +64,18 @@ type Seedbox struct {
 	Values *Doc
 }
 
+// New returns a seedbox whose files may not exist yet. `box init` writes a
+// grant that was never there, so it starts from an empty document with the
+// right path and permission bits; a file already on disk is read with Load,
+// never assumed empty.
+func New(grantPath, valuesPath string) *Seedbox {
+	return &Seedbox{Grant: newDoc(grantPath), Values: newDoc(valuesPath)}
+}
+
+func newDoc(path string) *Doc {
+	return &Doc{Path: path, data: map[string]any{}, mode: 0o600}
+}
+
 // Load reads a seedbox's two files. The grant must exist: it is what root
 // decided. A missing values file is an empty document, because a user who has
 // never run `box init` or edited anything has no file yet.
@@ -90,7 +102,7 @@ func loadDoc(path string, required bool) (*Doc, error) {
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
 			if required {
-				return nil, fmt.Errorf("seedbox grant %s does not exist: root creates it with `box adduser`", path)
+				return nil, fmt.Errorf("seedbox grant %s does not exist: root creates it with `box init` (or `box adduser` for someone else)", path)
 			}
 			return &Doc{Path: path, data: map[string]any{}, mode: 0o600}, nil
 		}

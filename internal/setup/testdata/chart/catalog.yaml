@@ -1,0 +1,21 @@
+# The catalog for testdata/chart. One stored question and one transient one,
+# so the tests can tell the two paths apart.
+apps:
+  alpha:
+    description: the first app
+    instances: false
+    default: true
+    questions:
+      - key: apps.alpha.greeting
+        prompt: greeting
+        help: what it says first
+        kind: string
+        default: hello
+  beta:
+    description: the second app
+    instances: true
+    default: true
+    questions:
+      - key: apps.beta.token
+        prompt: beta token
+        kind: transient

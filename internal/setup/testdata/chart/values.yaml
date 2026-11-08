@@ -1,0 +1,39 @@
+# A two-app chart for init's tests. It is not charts/s5n: the real chart's
+# defaults would make every assertion about question order and splicing depend
+# on it. The shapes are the real ones -- a plain app, an Arr-like app with an
+# instances list, and one transient question.
+global:
+  puid: 1000
+  pgid: 1000
+  tz: Etc/UTC
+
+storage:
+  data:
+    existingClaim: ""
+  config:
+    existingClaim: ""
+
+gateway:
+  enabled: true
+  host: ""
+  parentRef:
+    name: s5n
+    namespace: s5n-gateway
+    sectionName: ""
+
+apps:
+  alpha:
+    enabled: true
+    greeting: hello
+    port: 8080
+  beta:
+    enabled: true
+    token: ""
+    port: 9090
+    instances:
+      - suffix: ""
+        category: tv
+        enabled: true
+      - suffix: 4k
+        category: tv-4k
+        enabled: false
