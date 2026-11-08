@@ -2,17 +2,20 @@
 # The box-driven install path, on kind.
 #
 # hack/e2e-kind.sh installs the chart with `helm upgrade --install` and asserts
-# the result. This script installs the same release the other way: `box init`
-# asks a seedbox's questions, writes root's grant and values file (the values
-# file is written first, by hand, with the locally built image tag, and init
-# must leave it alone), then hands over to `box apply`, which reads both files,
-# checks them against the chart's schema, diffs, confirms and calls the Helm SDK
-# itself. It then proves the four properties the init/apply path has to have:
+# the result. This script installs the same release the other way: on a fresh
+# kind cluster with nothing installed, `box bootstrap` decides the cluster,
+# installs the platform layer (Envoy Gateway's Gateway API CRDs, MetalLB, the
+# GatewayClass and Gateway, the admission policy), then runs init for root,
+# which writes root's grant and values file and hands over to `box apply`. The
+# values file is written first, by hand, with the locally built image tag, and
+# init must leave it alone. It then proves:
 #
-#   1. a first init on a cluster with no namespace creates it (Pod Security
-#      restricted) and installs the stack, and its wiring receipt says ok;
-#   2. a second init with identical answers splices nothing (both files are
-#      byte-identical) and its apply is a no-op;
+#   1. a first bootstrap on a cluster with no platform and no namespace
+#      installs the platform, creates the namespace (Pod Security restricted)
+#      and installs the stack, and its wiring receipt says ok;
+#   2. a second bootstrap with nothing to do installs nothing: no new Helm
+#      revision, no changed resourceVersion on the platform's objects, the
+#      same storage and namespace, and both files byte-identical;
 #   3. one edited value is printed as a diff, applied, and visible in the
 #      release afterwards;
 #   4. the claims outlive `helm uninstall`.
@@ -32,11 +35,6 @@ cd "$(dirname "$0")/.."
 KIND=${KIND:-kind}
 CLUSTER=s5n-box
 NS=seedbox
-# Envoy Gateway's chart ships the Gateway API CRDs the chart's HTTPRoutes need,
-# at the same pinned version hack/e2e-kind.sh uses. MetalLB is not installed:
-# the box path renders the peers Service as a NodePort and never asks for a
-# LoadBalancer address, so the address layer is out of scope here.
-ENVOY_GATEWAY_CHART_VERSION=${ENVOY_GATEWAY_CHART_VERSION:-1.9.3}
 KEEP=${1:-}
 CTX="kind-${CLUSTER}"
 K="kubectl --context ${CTX}"
@@ -62,24 +60,24 @@ mkdir -p "$(dirname "$KUBECONFIG")"
 chmod 600 "$KUBECONFIG"
 log "kubeconfig: ${KUBECONFIG} (~/.kube/config is not used)"
 
+# This test's premise is a cluster with nothing installed, so a leftover from
+# an interrupted run is deleted rather than reused: reusing one would leave
+# Envoy Gateway and MetalLB in place, the probes would say "use", and the run
+# would silently stop testing the install path.
 if $KIND get clusters 2>/dev/null | grep -qx "$CLUSTER"; then
-  # A kept cluster can outlive its kubeconfig (a cleared cache): export it again
-  # rather than fail on a missing kind-<cluster> context.
-  if ! kubectl config get-contexts "$CTX" -o name 2>/dev/null | grep -qx "$CTX"; then
-    log "exporting the existing kind cluster's kubeconfig"
-    $KIND export kubeconfig --name "$CLUSTER"
-  fi
-else
-  log "creating kind cluster"
-  $KIND create cluster --name "$CLUSTER" --config hack/kind.yaml --wait 120s
+  log "deleting the leftover kind cluster (this test needs a fresh one)"
+  $KIND delete cluster --name "$CLUSTER"
 fi
+
+log "creating kind cluster"
+$KIND create cluster --name "$CLUSTER" --config hack/kind.yaml --wait 120s
 
 log "building the s5n image (the wiring Job and the qBittorrent credential seed)"
 docker build -q -t "$IMAGE" .
 $KIND load docker-image --name "$CLUSTER" "$IMAGE"
 
 log "building box"
-go build -o "$WORK/box" ./cmd/box
+CGO_ENABLED=0 go build -o "$WORK/box" ./cmd/box
 $KIND get kubeconfig --name "$CLUSTER" >"$WORK/kubeconfig"
 
 log "preparing host paths inside the node (the installer does this on real hosts)"
@@ -89,17 +87,11 @@ docker exec "${CLUSTER}-control-plane" bash -c '
            /srv/s5n/config/{qbittorrent,prowlarr,sonarr,sonarr-4k,radarr,radarr-4k,plex,tautulli,seerr}
   chown -R 1000:1000 /srv/s5n'
 
-log "Gateway API CRDs and a Gateway (the chart's parentRef target)"
-$HELM upgrade --install envoy-gateway oci://docker.io/envoyproxy/gateway-helm \
-  --version "$ENVOY_GATEWAY_CHART_VERSION" -n envoy-gateway-system --create-namespace \
-  --wait --timeout 5m >/dev/null
-$K create namespace s5n-gateway --dry-run=client -o yaml | $K apply -f - >/dev/null
-$K apply -f hack/envoy-gateway.yaml >/dev/null
-
 # Root's values file, written by hand: the tuning `box init` must never touch.
 # The wiring image is the locally built one, under the repository the chart's
 # s5n variant names (the override hack/e2e-kind.sh passes as --set), and it is
-# not a catalog question, so init has no opinion about it.
+# not a catalog question, so init has no opinion about it. It has to exist
+# before bootstrap: bootstrap hands over to init, which reads it.
 log "root's values file: the tuning init must leave alone"
 cat >"$WORK/values.yaml" <<'EOF'
 wiring:
@@ -108,6 +100,20 @@ wiring:
     # names: the same override hack/e2e-kind.sh passes as --set.
     tag: e2e
 EOF
+
+bootstrap() { # bootstrap <output file>
+  # The platform and root's seedbox are one command now. --record points the
+  # cluster decision at this work directory: on a real host it is
+  # /etc/swizzin/cluster.yaml, written by root, and the e2e is not root.
+  "$WORK/box" bootstrap --yes --chart charts/s5n \
+    --grant "$WORK/grant.yaml" --values "$WORK/values.yaml" \
+    --namespace "$NS" --domain box.example.com \
+    --data-path /srv/s5n/data --config-path /srv/s5n/config \
+    --apps qbittorrent,sonarr,radarr,prowlarr,plex,tautulli,seerr \
+    --puid 1000 --pgid 1000 \
+    --paths-in-node --record "$WORK/cluster.yaml" \
+    --kubeconfig "$WORK/kubeconfig" >"$1" 2>&1
+}
 
 init() { # init <output file>
   # --paths-in-node: the paths are in the kind node's filesystem, not this
@@ -154,37 +160,42 @@ status_field() { # status_field <python expression over `d`>
     python3 -c "import json,sys; d=json.load(sys.stdin); print($1)"
 }
 
-# ---- init 1: the install -----------------------------------------------------
-log "box init: first install"
-if init "$WORK/apply1.txt"; then
-  cat "$WORK/apply1.txt"
+# ---- bootstrap 1: the platform and root's first install ---------------------
+# The cluster has nothing: no CRDs, no LoadBalancer, no Gateway, no policy. So
+# the decision says "install" for each, and bootstrap must apply all of it
+# before init writes root's files. The plan is the review; --yes is the answer,
+# and the init half is the same `first install` `box init` prints on its own.
+log "box bootstrap: the platform layer, then root's first install"
+if bootstrap "$WORK/bootstrap1.txt"; then
+  cat "$WORK/bootstrap1.txt"
 else
-  cat "$WORK/apply1.txt"; fail=1
+  cat "$WORK/bootstrap1.txt"; fail=1
 fi
-grep -q "first install" "$WORK/apply1.txt" || { echo "no 'first install' line"; fail=1; }
-grep -q "^wiring ok" "$WORK/apply1.txt" || { echo "box did not report a healthy receipt"; fail=1; }
+grep -q "^platform plan:" "$WORK/bootstrap1.txt" || { echo "bootstrap printed no platform plan"; fail=1; }
+grep -qF "+ envoy-gateway 1.9.3 (Helm, envoy-gateway-system)" "$WORK/bootstrap1.txt" ||
+  { echo "the plan did not install Envoy Gateway at its pinned version"; fail=1; }
+grep -qF "+ metallb 0.16.1 (Helm, metallb-system)" "$WORK/bootstrap1.txt" ||
+  { echo "the plan did not install MetalLB at its pinned version"; fail=1; }
+# The first run installs, it does not verify: the cluster had none of it.
+if grep -q "^  = envoy-gateway" "$WORK/bootstrap1.txt"; then
+  echo "bootstrap thought Envoy Gateway was already installed on a fresh cluster"; fail=1
+fi
+grep -qF "Gateway s5n-gateway/s5n: Programmed" "$WORK/bootstrap1.txt" ||
+  { echo "the Gateway was never Programmed"; fail=1; }
+# cert-manager is the one component this lane does not install. Silence would
+# read as "nothing to do"; the line is asserted so it cannot regress into a
+# skip.
+grep -q "cert-manager: box does not install it yet" "$WORK/bootstrap1.txt" ||
+  { echo "an unhandled cert-manager install was not reported"; fail=1; }
+
+# The init half ran in the same process: root's first release, and the
+# namespace box created because the cluster had none.
+grep -q "first install" "$WORK/bootstrap1.txt" || { echo "no 'first install' line"; fail=1; }
+grep -q "^wiring ok" "$WORK/bootstrap1.txt" || { echo "box did not report a healthy receipt"; fail=1; }
 # The namespace was box's first write, and the plan said so: the cluster had
 # none of it before this run.
-grep -qF '+ Namespace seedbox (Pod Security restricted)' "$WORK/apply1.txt" ||
+grep -qF '+ Namespace seedbox (Pod Security restricted)' "$WORK/bootstrap1.txt" ||
   { echo "the plan did not show the namespace it creates"; fail=1; }
-
-# The receipt is the same object the helm path asserts, so the same checks
-# apply: every wiring step ok, and the three that need a Plex token pending.
-for expected in \
-  sonarr/downloadclient sonarr/rootfolder sonarr/hardlinks \
-  radarr/downloadclient radarr/rootfolder radarr/hardlinks \
-  prowlarr/application/sonarr prowlarr/application/radarr \
-  qbittorrent/data-contract qbittorrent/category/tv qbittorrent/category/movies \
-  data/hardlink/tv data/hardlink/movies \
-  plex/ready tautulli/ready seerr/ready; do
-  res=$(status_field "[s['result'] for s in d['steps'] if s['name']=='$expected'][0]" 2>/dev/null || echo missing)
-  echo "  ${expected}: ${res}"; [ "$res" = ok ] || fail=1
-done
-for pending in plex/claim tautulli/plex seerr/plex; do
-  res=$(status_field "[s['result'] for s in d['steps'] if s['name']=='$pending'][0]" 2>/dev/null || echo missing)
-  echo "  ${pending}: ${res} (expected pending: no Plex token in this e2e)"
-  [ "$res" = pending ] || fail=1
-done
 
 $K -n "$NS" wait --for=condition=Ready pod -l 'app.kubernetes.io/instance=s5n,s5n.io/app' --timeout=300s || fail=1
 # ---- storage: box created the claims, and they are bound ----
@@ -231,6 +242,73 @@ ns_before=$($K get namespace "$NS" -o jsonpath='{.metadata.resourceVersion}')
 rev1=$(revision); secrets1=$(release_secrets)
 echo "release revision ${rev1} (${secrets1} release secrets)"
 [ "$rev1" = 1 ] || { echo "first apply is not revision 1"; fail=1; }
+
+# ---- bootstrap 2: nothing installed, nothing to install ---------------------
+# The idempotence contract of the platform half: the probes now find the CRDs
+# and an Accepted GatewayClass, the releases are at their pinned versions, and
+# box's objects are server-side applies it already owns. A second bootstrap may
+# only verify: no Helm revision (box never calls Helm for a release at its
+# pinned version), no changed resourceVersion on anything it applied, and both
+# seedbox files byte-identical.
+helm_revision() { # helm_revision <namespace>
+  $HELM list -n "$1" -o json |
+    python3 -c 'import json,sys; r=json.load(sys.stdin); print(r[0]["revision"] if r else 0)'
+}
+platform_state() {
+  echo "releases=$(helm_revision envoy-gateway-system),$(helm_revision metallb-system),$(helm_revision "$NS")"
+  echo "gatewayclass=$($K get gatewayclass eg -o json | platform_spec)"
+  echo "gateway=$($K -n s5n-gateway get gateway s5n -o json | platform_spec)"
+  echo "pool=$($K -n metallb-system get ipaddresspool s5n-pool -o json | platform_spec)"
+  echo "l2=$($K -n metallb-system get l2advertisement s5n-l2 -o json | platform_spec)"
+  for p in s5n-blessed-images s5n-granted-service; do
+    echo "vap-${p}=$($K get validatingadmissionpolicy "$p" -o json | platform_spec)"
+  done
+  echo "s5n-system=$($K get namespace s5n-system -o json | platform_spec)"
+}
+# What box owns, not the whole object: a controller rewriting a status or a
+# managedFields timestamp bumps resourceVersion without box having written
+# anything, so comparing resourceVersions makes this assert flaky. A spec or
+# label change is a write; status churn is not.
+platform_spec() {
+  python3 -c 'import json,sys; o=json.load(sys.stdin); print(json.dumps({"spec": o.get("spec"), "labels": o.get("metadata", {}).get("labels")}, sort_keys=True))'
+}
+platform_before=$(platform_state)
+grant_before2=$(sha256sum "$WORK/grant.yaml" | cut -d' ' -f1)
+values_before2=$(sha256sum "$WORK/values.yaml" | cut -d' ' -f1)
+
+log "box bootstrap: a second run must install nothing and change nothing"
+if bootstrap "$WORK/bootstrap2.txt"; then
+  cat "$WORK/bootstrap2.txt"
+else
+  cat "$WORK/bootstrap2.txt"; fail=1
+fi
+grep -qF "= metallb: already at 0.16.1" "$WORK/bootstrap2.txt" ||
+  { echo "the second run did not verify MetalLB"; fail=1; }
+# Envoy Gateway is used, not managed, once its CRDs and an Accepted
+# GatewayClass are there: the probes verify the capability, so the second run
+# must not mention the release at all.
+if grep -q "envoy-gateway" "$WORK/bootstrap2.txt"; then
+  echo "the second run took the Envoy Gateway release back over"; fail=1
+fi
+if grep -qE "^\s+\+ (envoy-gateway|metallb) " "$WORK/bootstrap2.txt"; then
+  echo "the second run planned an install on an installed platform"; fail=1
+fi
+grep -q "already says this" "$WORK/bootstrap2.txt" || { echo "the second init did not say the grant was already right"; fail=1; }
+grep -q "nothing to change" "$WORK/bootstrap2.txt" || { echo "the second init did not say nothing to change"; fail=1; }
+
+platform_after=$(platform_state)
+if [ "$platform_after" != "$platform_before" ]; then
+  echo "the second bootstrap touched the platform"
+  echo "  before: ${platform_before}"
+  echo "  after:  ${platform_after}"
+  fail=1
+else
+  echo "platform untouched: ${platform_after}"
+fi
+[ "$(sha256sum "$WORK/grant.yaml" | cut -d' ' -f1)" = "$grant_before2" ] ||
+  { echo "the second bootstrap rewrote the grant"; fail=1; }
+[ "$(sha256sum "$WORK/values.yaml" | cut -d' ' -f1)" = "$values_before2" ] ||
+  { echo "the second bootstrap rewrote the values file"; fail=1; }
 
 # ---- init 2: the same answers ----------------------------------------------
 # Re-running init is the other half of its contract: every question is prefilled
@@ -335,7 +413,7 @@ done
 
 # box is the whole interface: a client-go/klog line such as
 # "I1107 ... warnings.go:107] ..." must never appear in what the operator reads.
-for f in "$WORK"/apply*.txt; do
+for f in "$WORK"/apply*.txt "$WORK"/bootstrap*.txt; do
   if grep -Eq '^[IWE][0-9]{4} ' "$f"; then
     echo "client-go/klog noise in $(basename "$f"):"
     grep -E '^[IWE][0-9]{4} ' "$f"

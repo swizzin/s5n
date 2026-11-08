@@ -169,6 +169,50 @@ func TestBuildPlanInstallsOnlyInstallActions(t *testing.T) {
 	}
 }
 
+// bootstrap's probe cannot decide the LoadBalancer capability without writing
+// a throwaway Service, so it reports not-probed; auto mode must still install
+// MetalLB, because the Gateway's Service has no address without one.
+func TestBuildPlanInstallsAnUnprobedLoadBalancer(t *testing.T) {
+	comps := []bootstrap.ComponentResult{
+		{Component: bootstrap.ComponentGatewayAPI, Action: "use", Outcome: bootstrap.OutcomePresent, Mode: bootstrap.ModeAuto},
+		{Component: bootstrap.ComponentLoadBalancer, Action: "unknown", Outcome: bootstrap.OutcomeNotProbed, Mode: bootstrap.ModeAuto},
+		{Component: bootstrap.ComponentGateway, Action: "use", Outcome: bootstrap.OutcomePresent, Mode: bootstrap.ModeAuto},
+		{Component: bootstrap.ComponentCertManager, Action: "use", Outcome: bootstrap.OutcomePresent, Mode: bootstrap.ModeAuto},
+	}
+	plan, err := BuildPlan(comps)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got []StepKind
+	for _, s := range plan.Steps {
+		got = append(got, s.Kind)
+	}
+	want := []StepKind{StepRelease, StepPool, StepManifests}
+	if len(got) != len(want) {
+		t.Fatalf("plan = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("plan = %v, want %v", got, want)
+		}
+	}
+	if plan.Steps[0].Release.Name != MetalLBRelease {
+		t.Fatalf("the only release is %s, want MetalLB", plan.Steps[0].Release.Name)
+	}
+
+	// external mode is the user's address layer: never installs one.
+	comps[1].Mode = bootstrap.ModeExternal
+	plan, err = BuildPlan(comps)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, s := range plan.Steps {
+		if s.Kind == StepRelease {
+			t.Fatalf("external mode planned a release: %+v", s.Release)
+		}
+	}
+}
+
 // A conflict stops box in every mode, before any client exists.
 func TestBuildPlanRefusesConflict(t *testing.T) {
 	comps := components(map[bootstrap.PlatformComponent]string{
@@ -258,11 +302,14 @@ func TestApplyInstallsInOrder(t *testing.T) {
 	if pool := cl.writes[0][0]; !strings.Contains(pool["spec"].(map[string]any)["addresses"].([]any)[0].(string), "192.0.2.10/32") {
 		t.Fatalf("pool addresses = %v", pool["spec"])
 	}
-	if kind, _, name := objectMeta(cl.writes[1][0]); kind != "GatewayClass" || name != "eg" {
-		t.Fatalf("second apply is %s %s, want the GatewayClass", kind, name)
+	if kind, ns, name := objectMeta(cl.writes[1][0]); kind != "Namespace" || name != GatewayNamespace {
+		t.Fatalf("second apply is %s %s/%s, want the Gateway's namespace", kind, ns, name)
 	}
-	if kind, ns, name := objectMeta(cl.writes[1][1]); kind != "Gateway" || ns != GatewayNamespace || name != GatewayName {
-		t.Fatalf("second apply's second doc is %s %s/%s", kind, ns, name)
+	if kind, _, name := objectMeta(cl.writes[1][1]); kind != "GatewayClass" || name != "eg" {
+		t.Fatalf("second apply's second doc is %s %s, want the GatewayClass", kind, name)
+	}
+	if kind, ns, name := objectMeta(cl.writes[1][2]); kind != "Gateway" || ns != GatewayNamespace || name != GatewayName {
+		t.Fatalf("second apply's third doc is %s %s/%s", kind, ns, name)
 	}
 	if kind, _, _ := objectMeta(cl.writes[2][0]); kind != "Namespace" {
 		t.Fatalf("third apply starts with %s, want the policy's namespace", kind)
@@ -375,14 +422,17 @@ func TestEmbeddedManifests(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(docs) != 2 {
-		t.Fatalf("gateway manifest has %d documents, want GatewayClass + Gateway", len(docs))
+	if len(docs) != 3 {
+		t.Fatalf("gateway manifest has %d documents, want namespace + GatewayClass + Gateway", len(docs))
 	}
-	if kind, _, name := objectMeta(docs[0]); kind != "GatewayClass" || name != "eg" {
+	if kind, _, name := objectMeta(docs[0]); kind != "Namespace" || name != GatewayNamespace {
 		t.Fatalf("first document = %s %s", kind, name)
 	}
-	if kind, ns, name := objectMeta(docs[1]); kind != "Gateway" || ns != GatewayNamespace || name != GatewayName {
-		t.Fatalf("second document = %s %s/%s", kind, ns, name)
+	if kind, _, name := objectMeta(docs[1]); kind != "GatewayClass" || name != "eg" {
+		t.Fatalf("second document = %s %s", kind, name)
+	}
+	if kind, ns, name := objectMeta(docs[2]); kind != "Gateway" || ns != GatewayNamespace || name != GatewayName {
+		t.Fatalf("third document = %s %s/%s", kind, ns, name)
 	}
 
 	docs, err = ParseManifests(admissionPolicy)

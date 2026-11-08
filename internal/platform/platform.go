@@ -374,7 +374,7 @@ func (d *Decision) printPlan(plan Plan) {
 	if len(plan.Steps) == 0 && len(plan.NotHandled) == 0 {
 		return
 	}
-	d.logf("platform:\n")
+	d.logf("platform plan:\n")
 	for _, s := range plan.Steps {
 		switch s.Kind {
 		case StepRelease:
@@ -434,7 +434,7 @@ func BuildPlan(components []bootstrap.ComponentResult) (Plan, error) {
 	// MetalLB before the Gateway: the Gateway's Service only gets an address
 	// once a LoadBalancer implementation answers, and Envoy Gateway reports
 	// Programmed only when its data plane has one.
-	if lb.Action == actionInstall {
+	if installsLoadBalancer(lb) {
 		plan.Steps = append(plan.Steps,
 			Step{
 				Component: bootstrap.ComponentLoadBalancer,
@@ -485,6 +485,25 @@ func BuildPlan(components []bootstrap.ComponentResult) (Plan, error) {
 			"cert-manager: box does not install it yet; install cert-manager yourself, or set platform.cert-manager.mode=external, and run bootstrap again")
 	}
 	return plan, nil
+}
+
+// installsLoadBalancer is the one place a step can appear without the decision
+// saying "install". bootstrap's platform probe is read-only, so the
+// LoadBalancer capability is reported not-probed rather than absent (deciding
+// it for real means creating a throwaway Service, which is a write before the
+// confirmation). In auto and managed mode the decision treats an absent
+// LoadBalancer as box's to install, so bootstrap does the same here: the
+// Gateway's Service has no address until something answers, and MetalLB is the
+// platform's LoadBalancer. external mode is never written: box does not own
+// someone else's address layer, and a missing one there is the decision's
+// "unknown", not an install.
+func installsLoadBalancer(c bootstrap.ComponentResult) bool {
+	if c.Action == actionInstall {
+		return true
+	}
+	return c.Component == bootstrap.ComponentLoadBalancer &&
+		c.Outcome == bootstrap.OutcomeNotProbed &&
+		c.Mode != bootstrap.ModeExternal
 }
 
 // preflightAccess is the RBAC box needs for what the plan will write. It is a

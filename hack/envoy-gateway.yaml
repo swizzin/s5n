@@ -16,9 +16,18 @@
 #     Gateway's.
 #
 # This file creates the GatewayClass and the Gateway "s5n" in namespace s5n-gateway
-# (the chart's default parentRef is {name: s5n, namespace: s5n-gateway}). The listener
-# is plain HTTP on port 80 and accepts routes from every namespace, matching how the
-# installer's managed install is configured.
+# (the chart's default parentRef is {name: s5n, namespace: s5n-gateway}), plus that
+# namespace itself: box applies this file with server-side apply, and the Gateway
+# cannot be written into a namespace that is not there. The listener is plain HTTP
+# on port 80 and accepts routes from every namespace, matching how the installer's
+# managed install is configured.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: s5n-gateway
+  labels:
+    app.kubernetes.io/part-of: s5n
+---
 apiVersion: gateway.networking.k8s.io/v1
 kind: GatewayClass
 metadata:
