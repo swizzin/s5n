@@ -179,6 +179,15 @@ revision; the objects box applies are server-side applies under field manager `b
 re-applying them changes nothing. cert-manager is not installed yet: bootstrap says so
 and continues, leaving the decision's `install` for it unhandled rather than silent.
 
+**MetalLB is installed unless a LoadBalancer already answers (decided).** Knowing
+whether one works means creating a throwaway `type: LoadBalancer` Service, which is a
+write, so it can't happen before the confirm. In auto mode the plan says so plainly
+("MetalLB, unless a LoadBalancer already answers"). After the confirm, box creates the
+probe Service, waits up to 60 seconds for an address, and always deletes it. With an
+address, box uses what answered and installs neither MetalLB nor its pool; without one,
+it installs MetalLB. In external mode the same probe verifies, and no address stops
+bootstrap. Managed mode installs MetalLB without probing.
+
 What `init` does (decided):
 
 - **It asks, then writes the two files.** Domain, data and config paths, which apps,
