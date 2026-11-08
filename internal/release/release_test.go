@@ -9,6 +9,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/swizzin/s5n/internal/seedbox"
 )
 
 // fakeRelease stands in for the Helm client. It records what box asked it to
@@ -24,6 +26,8 @@ type fakeRelease struct {
 
 	receipt    Receipt
 	receiptErr error
+
+	events *[]string
 }
 
 func (f *fakeRelease) Deployed(context.Context) (map[string]any, bool, error) {
@@ -38,6 +42,9 @@ func (f *fakeRelease) Upgrade(_ context.Context, _ Chart, values map[string]any)
 	f.revision++
 	f.upgraded = append(f.upgraded, values)
 	f.values, f.exists = values, true
+	if f.events != nil {
+		*f.events = append(*f.events, "helm")
+	}
 	return f.revision, nil
 }
 
@@ -48,14 +55,56 @@ func (f *fakeRelease) Receipt(context.Context) (Receipt, error) {
 	return f.receipt, nil
 }
 
+// fakeStorage is a tiny cluster of storage objects: a claim exists or it does
+// not, and Apply records the order box wrote things in. It shares the event log
+// with fakeRelease, so a test can prove storage lands before the release.
+type fakeStorage struct {
+	existing map[string]bool
+	planErr  error
+	plans    int
+	applied  []StorageObject
+	events   *[]string
+}
+
+func (f *fakeStorage) Plan(_ context.Context, _ string, vols []seedbox.Volume) ([]StorageObject, error) {
+	f.plans++
+	if f.planErr != nil {
+		return nil, f.planErr
+	}
+	var out []StorageObject
+	for _, v := range vols {
+		if f.existing[v.Claim] {
+			continue
+		}
+		out = append(out, StorageObject{Kind: "PersistentVolume", Name: v.Claim, Detail: "hostPath " + v.Path})
+		out = append(out, StorageObject{Kind: "PersistentVolumeClaim", Name: v.Claim, Detail: "volume " + v.Claim})
+	}
+	return out, nil
+}
+
+func (f *fakeStorage) Apply(_ context.Context, obj StorageObject) error {
+	f.applied = append(f.applied, obj)
+	f.existing[obj.Name] = true
+	if f.events != nil {
+		*f.events = append(*f.events, "storage:"+obj.Name)
+	}
+	return nil
+}
+
 type fakes struct {
-	app       *Applier
-	rel       *fakeRelease
-	out       *bytes.Buffer
-	grantPath string
-	values    string
-	openCalls int
-	namespace string
+	app         *Applier
+	rel         *fakeRelease
+	store       *fakeStorage
+	out         *bytes.Buffer
+	events      []string
+	grantPath   string
+	values      string
+	openCalls   int
+	storeOpens  int
+	namespace   string
+	pathsInNode bool
+	dataPath    string
+	configPath  string
 }
 
 func newFakes(t *testing.T) *fakes {
@@ -69,6 +118,7 @@ func newFakes(t *testing.T) *fakes {
 				Steps:     []Step{{Name: "sonarr/downloadclient", Result: "ok"}},
 			},
 		},
+		store:     &fakeStorage{existing: map[string]bool{}, events: nil},
 		out:       &bytes.Buffer{},
 		grantPath: filepath.Join(dir, "grant.yaml"),
 		values:    filepath.Join(dir, "values.yaml"),
@@ -76,6 +126,23 @@ func newFakes(t *testing.T) *fakes {
 	copyFile(t, "testdata/grant.yaml", f.grantPath)
 	copyFile(t, "testdata/values.yaml", f.values)
 
+	// The grant's paths are real directories in the test's own temp dir: box
+	// stats them, and the refusal it can make is about a path that is missing.
+	data := filepath.Join(dir, "data")
+	config := filepath.Join(dir, "config")
+	for _, d := range []string{data, config} {
+		if err := os.MkdirAll(d, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	rewrite(t, f.grantPath, map[string]string{
+		"/srv/s5n/data":   data,
+		"/srv/s5n/config": config,
+	})
+
+	f.dataPath, f.configPath = data, config
+	f.rel.events = &f.events
+	f.store.events = &f.events
 	f.app = &Applier{
 		Charts:  DirChart{},
 		Confirm: &Terminal{Yes: true},
@@ -85,6 +152,10 @@ func newFakes(t *testing.T) *fakes {
 			f.namespace = ns
 			return f.rel, nil
 		},
+		OpenStorage: func(string) (StorageClient, error) {
+			f.storeOpens++
+			return f.store, nil
+		},
 	}
 	return f
 }
@@ -92,10 +163,28 @@ func newFakes(t *testing.T) *fakes {
 func (f *fakes) apply(t *testing.T) (Result, error) {
 	t.Helper()
 	return f.app.Apply(context.Background(), Options{
-		ChartDir:   "testdata/chart",
-		GrantPath:  f.grantPath,
-		ValuesPath: f.values,
+		ChartDir:    "testdata/chart",
+		GrantPath:   f.grantPath,
+		ValuesPath:  f.values,
+		PathsInNode: f.pathsInNode,
 	})
+}
+
+// rewrite replaces fixed strings in a file, so a fixture can name paths the
+// test can actually create.
+func rewrite(t *testing.T, path string, repl map[string]string) {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := string(data)
+	for from, to := range repl {
+		out = strings.ReplaceAll(out, from, to)
+	}
+	if err := os.WriteFile(path, []byte(out), 0o600); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func (f *fakes) writeValues(t *testing.T, content string) {
@@ -148,8 +237,13 @@ func TestFirstApplyInstallsWithTheGrantInCharge(t *testing.T) {
 	if on("radarr") {
 		t.Fatalf("radarr is enabled although the grant never mentions it: %v", apps)
 	}
-	if got := vals["storage"].(map[string]any)["data"].(map[string]any)["size"]; got != "10Gi" {
-		t.Fatalf("storage.data.size = %v, want the values file's 10Gi", got)
+	// The claims are box's: named from the grant's namespace, not from either
+	// file, and not from the chart's defaults.
+	if got := vals["storage"].(map[string]any)["data"].(map[string]any)["existingClaim"]; got != "testbox-s5n-data" {
+		t.Fatalf("storage.data.existingClaim = %v, want testbox-s5n-data", got)
+	}
+	if got := vals["storage"].(map[string]any)["config"].(map[string]any)["existingClaim"]; got != "testbox-s5n-config" {
+		t.Fatalf("storage.config.existingClaim = %v, want testbox-s5n-config", got)
 	}
 	if !strings.Contains(f.out.String(), "first install") {
 		t.Fatalf("output does not say first install:\n%s", f.out)
@@ -183,24 +277,24 @@ func TestOneKeyChangeIsShownAndApplied(t *testing.T) {
 	if _, err := f.apply(t); err != nil {
 		t.Fatalf("first apply: %v", err)
 	}
-	f.writeValues(t, "storage:\n  data:\n    size: 12Gi\n")
+	f.writeValues(t, "wiring:\n  timeoutSeconds: 600\n")
 
 	res, err := f.apply(t)
 	if err != nil {
 		t.Fatalf("changed apply: %v\n%s", err, f.out)
 	}
-	if len(res.Changes) != 1 || res.Changes[0].Path != "storage.data.size" {
-		t.Fatalf("changes = %+v, want exactly storage.data.size", res.Changes)
+	if len(res.Changes) != 1 || res.Changes[0].Path != "wiring.timeoutSeconds" {
+		t.Fatalf("changes = %+v, want exactly wiring.timeoutSeconds", res.Changes)
 	}
-	if !strings.Contains(f.out.String(), `~ storage.data.size: "10Gi" -> "12Gi"`) {
+	if !strings.Contains(f.out.String(), `~ wiring.timeoutSeconds: 300 -> 600`) {
 		t.Fatalf("the diff was not printed:\n%s", f.out)
 	}
 	if f.rel.upgrades != 2 {
 		t.Fatalf("upgrades = %d, want 2", f.rel.upgrades)
 	}
 	last := f.rel.upgraded[len(f.rel.upgraded)-1]
-	if got := last["storage"].(map[string]any)["data"].(map[string]any)["size"]; got != "12Gi" {
-		t.Fatalf("applied storage.data.size = %v, want 12Gi", got)
+	if got := last["wiring"].(map[string]any)["timeoutSeconds"]; got != 600 {
+		t.Fatalf("applied wiring.timeoutSeconds = %v, want 600", got)
 	}
 	if res.Revision != 2 {
 		t.Fatalf("revision = %d, want 2", res.Revision)
@@ -350,5 +444,100 @@ func TestNoChartIsRefused(t *testing.T) {
 	}
 	if f.openCalls != 0 {
 		t.Fatalf("a refusal opened a cluster client")
+	}
+}
+
+// TestFirstApplyCreatesStorageBeforeTheRelease: the claims are not release
+// objects, so box writes them itself, before Helm runs. The order matters: a
+// pod cannot schedule against a claim that appears after it.
+func TestFirstApplyCreatesStorageBeforeTheRelease(t *testing.T) {
+	f := newFakes(t)
+	res, err := f.apply(t)
+	if err != nil {
+		t.Fatalf("apply: %v\n%s", err, f.out)
+	}
+	if res.StorageCreated != 4 {
+		t.Fatalf("storage created = %d, want two PVs and two claims", res.StorageCreated)
+	}
+	var kinds []string
+	for _, o := range f.store.applied {
+		kinds = append(kinds, o.Kind+"/"+o.Name)
+	}
+	want := []string{"PersistentVolume/testbox-s5n-data", "PersistentVolumeClaim/testbox-s5n-data",
+		"PersistentVolume/testbox-s5n-config", "PersistentVolumeClaim/testbox-s5n-config"}
+	if strings.Join(kinds, " ") != strings.Join(want, " ") {
+		t.Fatalf("applied %v, want %v", kinds, want)
+	}
+	if len(f.events) == 0 || f.events[len(f.events)-1] != "helm" {
+		t.Fatalf("events = %v, want the release last", f.events)
+	}
+	if !strings.Contains(f.out.String(), "+ PersistentVolume testbox-s5n-data (hostPath ") {
+		t.Fatalf("the diff does not show the storage it creates:\n%s", f.out)
+	}
+	if !strings.Contains(f.out.String(), "+ PersistentVolumeClaim testbox-s5n-config (volume testbox-s5n-config)") {
+		t.Fatalf("the diff does not show the config claim:\n%s", f.out)
+	}
+}
+
+// TestStorageConflictRefusesBeforeAnyWrite: a PV of box's name that backs
+// another path is a refusal, and it names both paths. Nothing is written -- not
+// the release and not the other volume's objects.
+func TestStorageConflictRefusesBeforeAnyWrite(t *testing.T) {
+	f := newFakes(t)
+	f.store.planErr = errors.New("PersistentVolume testbox-s5n-data already backs /srv/old, but storage.data.path is /srv/new: box never changes a volume's path in place")
+
+	_, err := f.apply(t)
+	if err == nil {
+		t.Fatal("apply succeeded although a PV backs another path")
+	}
+	if !strings.Contains(err.Error(), "/srv/old") || !strings.Contains(err.Error(), "/srv/new") {
+		t.Fatalf("error does not name both paths: %v", err)
+	}
+	if f.rel.upgrades != 0 || len(f.store.applied) != 0 {
+		t.Fatalf("a refusal wrote: upgrades=%d storage=%d", f.rel.upgrades, len(f.store.applied))
+	}
+	if strings.Contains(f.out.String(), "first install") {
+		t.Fatalf("a refusal printed an apply plan:\n%s", f.out)
+	}
+}
+
+// TestMissingHostPathRefusesBeforeTheClusterIsOpened: a grant pointing at a
+// directory that is not there stops before box has a cluster client at all. The
+// message names `box init`, which is the command that creates the directory.
+func TestMissingHostPathRefusesBeforeTheClusterIsOpened(t *testing.T) {
+	f := newFakes(t)
+	gone := filepath.Join(t.TempDir(), "gone")
+	rewrite(t, f.grantPath, map[string]string{f.dataPath: gone})
+
+	_, err := f.apply(t)
+	if err == nil {
+		t.Fatal("apply succeeded although the data path does not exist")
+	}
+	if !strings.Contains(err.Error(), "storage.data.path") || !strings.Contains(err.Error(), "box init") {
+		t.Fatalf("error = %v, want it to name the key and `box init`", err)
+	}
+	if f.openCalls != 0 || f.storeOpens != 0 {
+		t.Fatalf("a refusal opened a client: release=%d storage=%d", f.openCalls, f.storeOpens)
+	}
+}
+
+// TestPathsInNodeSkipsTheHostCheck: the e2e writes the directories inside the
+// kind node, where this host cannot see them, so it is the one caller allowed to
+// skip the stat. Nothing else changes: the objects still come from the grant.
+func TestPathsInNodeSkipsTheHostCheck(t *testing.T) {
+	f := newFakes(t)
+	f.pathsInNode = true
+	gone := filepath.Join(t.TempDir(), "only-in-the-node")
+	rewrite(t, f.grantPath, map[string]string{f.dataPath: gone})
+
+	res, err := f.apply(t)
+	if err != nil {
+		t.Fatalf("apply: %v\n%s", err, f.out)
+	}
+	if !res.Applied || res.StorageCreated != 4 {
+		t.Fatalf("result = %+v, want an install with four storage objects", res)
+	}
+	if f.store.applied[0].Detail != "hostPath "+gone {
+		t.Fatalf("PV detail = %q, want the grant's path", f.store.applied[0].Detail)
 	}
 }

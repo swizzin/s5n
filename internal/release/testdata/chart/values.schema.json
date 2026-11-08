@@ -45,6 +45,13 @@
         "enabled": { "type": "boolean" }
       }
     },
+    "wiring": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "timeoutSeconds": { "type": "integer" }
+      }
+    },
     "apps": {
       "type": "object",
       "additionalProperties": {

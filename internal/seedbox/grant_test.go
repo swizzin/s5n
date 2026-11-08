@@ -122,8 +122,11 @@ func TestGrantRule(t *testing.T) {
 		{keys: []string{"global", "puid"}, want: true},
 		{keys: []string{"networkPolicy", "enabled"}, want: true},
 		{keys: []string{"networkPolicy", "extraHttpFrom"}, want: false},
-		{keys: []string{"storage", "data", "size"}, want: false},
+		{keys: []string{"storage", "data", "path"}, want: true},
+		{keys: []string{"storage", "data", "existingClaim"}, want: true},
+		{keys: []string{"storage", "data", "size"}, want: true},
 		{keys: []string{"storage", "data", "hostPath"}, want: true},
+		{keys: []string{"global", "puid", "nested"}, want: false},
 	}
 	for _, c := range cases {
 		if _, ok := GrantRule(c.keys); ok != c.want {

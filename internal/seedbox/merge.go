@@ -30,7 +30,7 @@ func (s *Seedbox) Merge() (map[string]any, error) {
 		return nil, err
 	}
 	out := cloneMap(s.Values.data)
-	overlay(out, s.Grant.data, true)
+	overlay(out, s.Grant.data, nil)
 	if _, ok := out["apps"]; !ok {
 		out["apps"] = map[string]any{}
 	}
@@ -39,18 +39,19 @@ func (s *Seedbox) Merge() (map[string]any, error) {
 
 // overlay applies src on top of dst. Scalars and lists are replaced; mappings
 // are merged key by key so that a grant's global.puid does not discard the
-// user's global.tz. At the top level the grant's namespace key is skipped: it is
-// box's, not the chart's.
-func overlay(dst, src map[string]any, top bool) {
+// user's global.tz. A BoxOnly key is skipped at any depth: it is box's own
+// record -- the namespace, the host paths -- and never a chart value.
+func overlay(dst, src map[string]any, path []string) {
 	for k, v := range src {
-		if top {
-			if rule, ok := GrantRule([]string{k}); ok && rule.BoxOnly {
-				continue
-			}
+		keys := make([]string, len(path)+1)
+		copy(keys, path)
+		keys[len(path)] = k
+		if rule, ok := GrantRule(keys); ok && rule.BoxOnly {
+			continue
 		}
 		if sm, ok := v.(map[string]any); ok {
 			if dm, ok := dst[k].(map[string]any); ok {
-				overlay(dm, sm, false)
+				overlay(dm, sm, keys)
 				continue
 			}
 		}
@@ -81,10 +82,14 @@ func (s *Seedbox) checkGrant() error {
 		if val.Kind == yaml.MappingNode {
 			return // a branch is not a decision; its leaves are
 		}
-		if rule, ok := GrantRule(keys); ok && rule.BoxOnly {
+		rule, ok := GrantRule(keys)
+		switch {
+		case ok && rule.BoxOnly:
 			return
-		}
-		if _, ok := GrantRule(keys); !ok {
+		case ok && rule.BoxSets:
+			add("%s:%d: %s is box's; box derives it from what the grant already says, so it does not belong in either file",
+				g.Path, key.Line, strings.Join(keys, "."))
+		case !ok:
 			add("%s:%d: %s is not a grant key; a grant holds only what decides isolation and which apps exist, so this belongs in the user's values file",
 				g.Path, key.Line, strings.Join(keys, "."))
 		}
@@ -115,17 +120,25 @@ func (s *Seedbox) checkGrant() error {
 
 // checkValues refuses every grant key a user's file sets. It reports all of
 // them at once: a user who copied a grant-shaped file wants the whole list, not
-// one key per run.
+// one key per run. A branch is not a decision, so a rule on a branch reports
+// the leaves beneath it -- that is what names the key the user actually wrote.
 func (s *Seedbox) checkValues() error {
 	v := s.Values
 	var problems []string
-	walkKeys(v.root, nil, func(keys []string, key, _ *yaml.Node) {
+	walkKeys(v.root, nil, func(keys []string, key, val *yaml.Node) {
+		if val.Kind == yaml.MappingNode {
+			return
+		}
 		rule, ok := GrantRule(keys)
 		if !ok {
 			return
 		}
-		problems = append(problems, fmt.Sprintf("%s:%d: %s is set by the grant (%s); remove it from this file",
-			v.Path, key.Line, strings.Join(keys, "."), rule.Why))
+		by := "the grant"
+		if rule.BoxSets {
+			by = "box"
+		}
+		problems = append(problems, fmt.Sprintf("%s:%d: %s is set by %s (%s); remove it from this file",
+			v.Path, key.Line, strings.Join(keys, "."), by, rule.Why))
 	})
 	if len(problems) > 0 {
 		return errors.New(strings.Join(problems, "\n"))

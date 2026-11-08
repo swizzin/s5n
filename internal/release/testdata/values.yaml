@@ -1,4 +1,4 @@
-# The user's file: only keys the grant does not own.
-storage:
-  data:
-    size: 10Gi
+# The user's file: only keys the grant does not own. Nothing under `storage`:
+# box creates the claims, and a static claim has no size to set.
+wiring:
+  timeoutSeconds: 300

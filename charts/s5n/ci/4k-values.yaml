@@ -1,4 +1,12 @@
 # Both 4K instances enabled: the HD/4K pair path through every template.
+# The claims are named explicitly, as a BYO-cluster operator would: any existing
+# claim works, and only the volumes' claimName changes in the render.
+storage:
+  data:
+    existingClaim: box-4k-data
+  config:
+    existingClaim: box-4k-config
+
 apps:
   sonarr:
     instances:

@@ -50,7 +50,7 @@ func TestOverlayPrecedence(t *testing.T) {
 			"instances": []any{map[string]any{"suffix": "4k"}, map[string]any{"suffix": "1080"}},
 		}},
 	}
-	overlay(values, grant, true)
+	overlay(values, grant, nil)
 
 	if host := values["gateway"].(map[string]any)["host"]; host != "grant.example.com" {
 		t.Errorf("gateway.host = %v, want the grant's", host)

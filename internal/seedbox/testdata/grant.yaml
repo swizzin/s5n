@@ -9,10 +9,12 @@ global:
   pgid: 1001
 
 storage:
+  # The host directories box turns into a static PV + claim. box-only: they are
+  # never chart values, and neither file names the claim.
   data:
-    existingClaim: alice-data
+    path: /srv/s5n/data
   config:
-    existingClaim: alice-config
+    path: /srv/s5n/config
 
 gateway:
   host: alice.example.com

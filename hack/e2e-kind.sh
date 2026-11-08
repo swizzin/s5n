@@ -347,16 +347,86 @@ echo "ReplicaSets reporting the denial: ${replica_failure}"
 [ "$replica_failure" -ge 1 ] || fail=1
 $K -n "$NS" delete deploy unblessed --ignore-not-found >/dev/null
 
+# The claims, as the plain-helm operator creates them: the chart creates no
+# storage, and its defaults are the names below. A static hostPath PV bound to
+# exactly one claim, and the claim pinned to it, with an empty storageClassName
+# so no provisioner is involved. On a real host this is `box init`'s job (box
+# writes the same objects); here it is the operator's, which is the point of
+# this script.
+log "creating the storage claims (the chart creates none)"
+$K apply -f - >/dev/null <<EOF
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: s5n-data
+spec:
+  capacity: {storage: 10Gi}
+  accessModes: [ReadWriteMany]
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: ""
+  volumeMode: Filesystem
+  claimRef: {namespace: ${NS}, name: s5n-data}
+  hostPath: {path: /srv/s5n/data, type: Directory}
+---
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: s5n-config
+spec:
+  capacity: {storage: 1Gi}
+  accessModes: [ReadWriteMany]
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: ""
+  volumeMode: Filesystem
+  claimRef: {namespace: ${NS}, name: s5n-config}
+  hostPath: {path: /srv/s5n/config, type: Directory}
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: s5n-data
+  namespace: ${NS}
+spec:
+  accessModes: [ReadWriteMany]
+  storageClassName: ""
+  volumeName: s5n-data
+  resources: {requests: {storage: 10Gi}}
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: s5n-config
+  namespace: ${NS}
+spec:
+  accessModes: [ReadWriteMany]
+  storageClassName: ""
+  volumeName: s5n-config
+  resources: {requests: {storage: 1Gi}}
+EOF
+for pvc in s5n-data s5n-config; do
+  phase=$($K -n "$NS" get pvc "$pvc" -o jsonpath='{.status.phase}')
+  echo "  claim ${pvc}: ${phase}"; [ "$phase" = Bound ] || fail=1
+done
+
 # The chart under test, with the locally built image instead of the published one.
 install_release() {
   $HELM upgrade --install s5n charts/s5n -n "$NS" \
-    --set storage.data.size=10Gi --set storage.config.size=1Gi \
     --set wiring.image.tag=e2e \
     --wait --timeout 15m
 }
 
 log "installing s5n (the wiring Job runs as the post-install hook)"
 install_release
+# The claims are not release objects: the chart must not own a PV or a PVC, or
+# `helm uninstall` would be a data-loss command.
+$HELM get manifest s5n -n "$NS" >"$WORK/manifest.yaml"
+if grep -q '^kind: PersistentVolume' "$WORK/manifest.yaml"; then
+  echo "the chart's release manifest owns a PersistentVolume"; fail=1
+fi
+if grep -q '^kind: PersistentVolumeClaim' "$WORK/manifest.yaml"; then
+  echo "the chart's release manifest owns a PersistentVolumeClaim"; fail=1
+fi
+echo "chart objects: $(grep -c '^kind: ' "$WORK/manifest.yaml"), none a PV or PVC"
 
 log "asserting"
 $K -n "$NS" get pods -o wide

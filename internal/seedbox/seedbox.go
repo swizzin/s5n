@@ -3,7 +3,7 @@
 // ~<user>/.config/box/values.yaml.
 //
 // Why two files: a user's values file is applied with root's power, so one
-// storage.data.hostPath pointing at someone else's downloads would end the
+// storage.data.path pointing at someone else's downloads would end the
 // isolation between boxes. The split is therefore not a convenience. The grant
 // holds every key that decides what a box can reach; values holds everything a
 // user may tune. The grant always wins, and a grant key in values is an error

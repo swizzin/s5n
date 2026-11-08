@@ -11,23 +11,27 @@ global:
 #   /data/downloads/<category>   qBittorrent save paths
 #   /data/media/<category>      Arr root folders
 # One filesystem, one path => hardlinks always work, no remote path mappings.
+#
+# The chart creates no storage. Both settings name PersistentVolumeClaims that
+# already exist in the release namespace; the chart mounts them and creates
+# nothing else. There is no host path, storage class or size here: a claim's
+# capacity is its own, and a static claim cannot be resized from values.
+#
+# box creates the claims (and the static PVs behind them) from the grant's host
+# paths, named per namespace. On a plain `helm install`, create them first:
+#
+#   kubectl create -f your-pv-and-claim.yaml
+#
+# The names below are the defaults a plain install expects to find; box passes
+# its own (`<namespace>-s5n-data`, `<namespace>-s5n-config`).
 storage:
   data:
-    # Precedence: existingClaim > storageClass > hostPath.
-    existingClaim: ""
-    storageClass: ""
-    size: 1Ti
-    # hostPath mode creates a static PV (reclaim Retain). The directory must already
-    # exist and be owned by puid:pgid; the installer / `box init` creates it.
-    # A static PV keeps hostPath out of the pod spec, so Pod Security "restricted" holds.
-    hostPath: /srv/s5n/data
+    existingClaim: s5n-data
   config:
-    existingClaim: ""
-    storageClass: ""
-    size: 20Gi
-    # Each app instance uses subPath <instance-name> beneath this, e.g. /srv/s5n/config/sonarr.
-    # The subdirectories must exist and be owned by puid:pgid (see storage.data.hostPath).
-    hostPath: /srv/s5n/config
+    # Each app instance uses subPath <instance-name> beneath this claim, e.g.
+    # /config/sonarr. Those subdirectories must already exist and be owned by
+    # puid:pgid.
+    existingClaim: s5n-config
 
 # HTTP exposure through the Gateway API. The chart attaches HTTPRoutes to a Gateway it
 # does not own; the installer (or the cluster admin) provides the Gateway.

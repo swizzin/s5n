@@ -51,7 +51,7 @@ read logs, update and back up their own apps. Root decides which apps they have.
 
 ### Two files per seedbox (decided)
 
-A user's values file can't be applied with root's power. One `storage.data.hostPath`
+A user's values file can't be applied with root's power. One `storage.data.path`
 pointing at someone else's downloads would end the isolation. So each seedbox is split
 into what root grants and what the user tunes:
 

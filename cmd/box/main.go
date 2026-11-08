@@ -89,6 +89,7 @@ func runApply(args []string) {
 	}
 	valuesPath := fs.String("values", valuesDefault, "the user's values file")
 	kubeconfig := fs.String("kubeconfig", "", "explicit kubeconfig to use, or fail with no fallback")
+	pathsInNode := fs.Bool("paths-in-node", false, "the grant's storage paths live inside a test node (kind), not on this host: skip the host directory check")
 	yes := fs.Bool("yes", false, "apply without asking")
 	if err := fs.Parse(args); err != nil {
 		fmt.Fprintf(os.Stderr, "box: %v\n", err)
@@ -119,12 +120,16 @@ func runApply(args []string) {
 		Open: func(namespace string) (release.ReleaseClient, error) {
 			return release.NewHelm(kc, namespace, release.ReleaseName)
 		},
+		OpenStorage: func(namespace string) (release.StorageClient, error) {
+			return release.NewStorage(kc, namespace)
+		},
 	}
 
 	_, err = app.Apply(context.Background(), release.Options{
-		ChartDir:   *chartDir,
-		GrantPath:  *grantPath,
-		ValuesPath: *valuesPath,
+		ChartDir:    *chartDir,
+		GrantPath:   *grantPath,
+		ValuesPath:  *valuesPath,
+		PathsInNode: *pathsInNode,
 	})
 	if err != nil {
 		if errors.Is(err, release.ErrCancelled) {

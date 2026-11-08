@@ -42,6 +42,7 @@
         "data",
         "config"
       ],
+      "description": "The claims the release mounts. Both must already exist; the chart creates no storage. Create them before helm install (box creates them from the grant's host paths).",
       "properties": {
         "data": {
           "$ref": "#/definitions/claim"
@@ -414,23 +415,14 @@
       "type": "object",
       "additionalProperties": false,
       "required": [
-        "size"
+        "existingClaim"
       ],
+      "description": "A claim that already exists. The chart creates no PersistentVolume and no claim: create the claim before helm install (box does this from the grant's host path).",
       "properties": {
         "existingClaim": {
-          "type": "string"
-        },
-        "storageClass": {
-          "type": "string"
-        },
-        "size": {
           "type": "string",
-          "pattern": "^[0-9]+(\\.[0-9]+)?(Ki|Mi|Gi|Ti|Pi|Ei|k|M|G|T|P|E)?$"
-        },
-        "hostPath": {
-          "type": "string",
-          "pattern": "^/",
-          "description": "Absolute host directory for the static PV. It must already exist and be owned by puid:pgid."
+          "minLength": 1,
+          "description": "Name of an existing PersistentVolumeClaim in the release namespace. Create it before helm install; the chart creates no storage and has no host path, storage class or size setting."
         }
       }
     },

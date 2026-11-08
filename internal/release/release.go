@@ -106,15 +106,24 @@ type Options struct {
 	ChartDir   string
 	GrantPath  string
 	ValuesPath string
+	// PathsInNode says the grant's storage paths live inside a test node rather
+	// than on this host, so box cannot stat them. It exists for the kind e2e,
+	// which writes the directories in the node's filesystem; on a real host the
+	// check is what catches a grant pointing at a directory that is not there.
+	PathsInNode bool
 }
 
 // Result is what happened, for the caller to report or a test to assert.
 type Result struct {
 	FirstInstall bool
 	Changes      []seedbox.Change
-	Applied      bool
-	Revision     int
-	Receipt      Receipt
+	// Storage is what box found it had to create, as Plan returned it.
+	Storage []StorageObject
+	// StorageCreated is how many of those it wrote.
+	StorageCreated int
+	Applied        bool
+	Revision       int
+	Receipt        Receipt
 }
 
 // Applier is `box apply`'s whole decision.
@@ -122,9 +131,13 @@ type Applier struct {
 	Charts ChartSource
 	// Open returns the namespace-scoped release handle. The namespace comes
 	// from the grant, so it can only be opened after the files are read.
-	Open    func(namespace string) (ReleaseClient, error)
-	Confirm Confirmer
-	Log     io.Writer
+	Open func(namespace string) (ReleaseClient, error)
+	// OpenStorage returns the storage handle for that namespace. It is separate
+	// from Open because the PVs are cluster-scoped and the claims are not part
+	// of the release: Helm must never own them.
+	OpenStorage func(namespace string) (StorageClient, error)
+	Confirm     Confirmer
+	Log         io.Writer
 
 	// ReceiptWait bounds how long box waits for the wiring hook's receipt
 	// after the release is ready. Zero means ten minutes.
@@ -155,9 +168,21 @@ func (a *Applier) Apply(ctx context.Context, opts Options) (Result, error) {
 	if err != nil {
 		return res, err
 	}
-	namespace, err := namespaceOf(sb)
+	namespace, err := sb.Namespace()
 	if err != nil {
 		return res, err
+	}
+	// The grant's host paths. A path that is not there is refused here, before
+	// the chart is even read: box does not create the directories (`box init`
+	// does), and a release over an empty volume is worse than a refusal.
+	vols, err := sb.Storage()
+	if err != nil {
+		return res, err
+	}
+	if !opts.PathsInNode {
+		if err := checkHostPaths(vols); err != nil {
+			return res, err
+		}
 	}
 	chart, err := a.Charts.Load(ctx, opts.ChartDir)
 	if err != nil {
@@ -184,7 +209,20 @@ func (a *Applier) Apply(ctx context.Context, opts Options) (Result, error) {
 		res.Changes = seedbox.Diff(deployed, values)
 	}
 
-	if exists && len(res.Changes) == 0 {
+	// The storage is not a release object, so it is planned separately and
+	// written before the release: pods cannot schedule without the claims, and
+	// Helm must never own them (a `helm uninstall` must not delete the data).
+	store, err := a.OpenStorage(namespace)
+	if err != nil {
+		return res, err
+	}
+	plan, err := store.Plan(ctx, namespace, vols)
+	if err != nil {
+		return res, err
+	}
+	res.Storage = plan
+
+	if exists && len(res.Changes) == 0 && len(plan) == 0 {
 		a.logf("%s in %s: nothing to change\n", ReleaseName, namespace)
 		return res, nil
 	}
@@ -201,6 +239,7 @@ func (a *Applier) Apply(ctx context.Context, opts Options) (Result, error) {
 			a.logf("  apps: %s\n", strings.Join(apps, ", "))
 		}
 	}
+	a.printStorage(plan)
 
 	ok, err := a.Confirm.Ask(fmt.Sprintf("apply %s in %s?", ReleaseName, namespace))
 	if err != nil {
@@ -209,6 +248,13 @@ func (a *Applier) Apply(ctx context.Context, opts Options) (Result, error) {
 	if !ok {
 		a.logf("oh heck, nvm\n")
 		return res, ErrCancelled
+	}
+
+	for _, obj := range plan {
+		if err := store.Apply(ctx, obj); err != nil {
+			return res, err
+		}
+		res.StorageCreated++
 	}
 
 	started := time.Now()
@@ -269,6 +315,19 @@ func (a *Applier) waitReceipt(ctx context.Context, client ReleaseClient, since t
 	}
 }
 
+// printStorage is the storage part of the diff: what box will create before the
+// release. On a first install these lines are the only trace of the claims,
+// because they are not chart objects and Helm never sees them.
+func (a *Applier) printStorage(objs []StorageObject) {
+	if len(objs) == 0 {
+		return
+	}
+	a.logf("storage:\n")
+	for _, o := range objs {
+		a.logf("  + %s %s (%s)\n", o.Kind, o.Name, o.Detail)
+	}
+}
+
 func (a *Applier) printReceipt(rec Receipt) {
 	a.logf("wiring %s\n", rec.Status)
 	for _, s := range rec.Steps {
@@ -278,17 +337,6 @@ func (a *Applier) printReceipt(rec Receipt) {
 		}
 		a.logf("  %s: %s\n", s.Name, s.Result)
 	}
-}
-
-// namespaceOf is the grant's `namespace` key, which is box's own record and
-// never a chart value. It names the release namespace, so it is read before
-// anything is sent to Helm.
-func namespaceOf(sb *seedbox.Seedbox) (string, error) {
-	ns, _ := sb.Grant.Map()["namespace"].(string)
-	if strings.TrimSpace(ns) == "" {
-		return "", fmt.Errorf("%s: namespace is missing or is not a name; the grant is what names the release namespace", sb.Grant.Path)
-	}
-	return ns, nil
 }
 
 func hostOf(values map[string]any) string {

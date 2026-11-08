@@ -117,9 +117,16 @@ remote path mappings are needed. This is the TRaSH single-mount layout, with `do
 the name still fits once a Usenet client shares it. The download directory is
 `downloads` by decision.
 
-- `storage.data.hostPath`: default `/srv/s5n/data`, configurable to a mounted disk
-- `storage.config.hostPath`: default `/srv/s5n/config`, one subdirectory per app instance,
-  so a single path covers backup. A `storageClass` alternative exists for BYO clusters.
+- `storage.data.existingClaim` / `storage.config.existingClaim`: the claims every pod
+  mounts, which must exist before install. The chart creates no PersistentVolume, no
+  claim and no pod hostPath, and has no storage class or size setting; a plain
+  `helm install` operator brings the claims. The config claim holds one subdirectory
+  per app instance, so a single claim covers backup.
+- box creates them: a static PersistentVolume (reclaim `Retain`, bound to exactly one
+  claim, `type: Directory`) and its claim, from the host paths in the grant, before the
+  release. Capacity is nominal and never enforced; the disk is the limit, and there is
+  no quota. `box init` creates the paths. The data outlives the release: the claims are
+  not release objects, so `helm uninstall` cannot delete them.
 - `puid`/`pgid`: set once for the whole release. Per-app overrides are possible but need
   a value written out explicitly.
 

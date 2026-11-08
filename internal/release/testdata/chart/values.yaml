@@ -28,6 +28,9 @@ gateway:
 networkPolicy:
   enabled: true
 
+wiring:
+  timeoutSeconds: 300
+
 apps:
   qbittorrent:
     enabled: true

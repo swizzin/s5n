@@ -57,12 +57,18 @@ variant's own tag; pin both to hold an exact image at a new tag.
 {{- if $digest -}}{{ $v.repository }}:{{ $tag }}@{{ $digest }}{{- else -}}{{ $v.repository }}:{{ $tag }}{{- end -}}
 {{- end -}}
 
+{{- /*
+The claims every pod mounts. The chart creates no storage: both claims must exist
+before install. Box creates them from the grant's host paths; a plain `helm install`
+expects the operator to have created them. A host path is therefore never in a pod
+spec, and Pod Security "restricted" still admits every pod.
+*/ -}}
 {{- define "s5n.dataClaim" -}}
-{{- default (printf "%s-data" (include "s5n.fullname" .)) .Values.storage.data.existingClaim -}}
+{{- required "storage.data.existingClaim: create the PersistentVolumeClaim before helm install; the chart creates no storage (box does)" .Values.storage.data.existingClaim -}}
 {{- end -}}
 
 {{- define "s5n.configClaim" -}}
-{{- default (printf "%s-config" (include "s5n.fullname" .)) .Values.storage.config.existingClaim -}}
+{{- required "storage.config.existingClaim: create the PersistentVolumeClaim before helm install; the chart creates no storage (box does)" .Values.storage.config.existingClaim -}}
 {{- end -}}
 
 {{- define "s5n.secretName" -}}

@@ -8,9 +8,9 @@ global:
 
 storage:
   data:
-    hostPath: /srv/s5n/data
+    path: /srv/s5n/data
   config:
-    hostPath: /srv/s5n/config
+    path: /srv/s5n/config
 
 gateway:
   host: box.example.com

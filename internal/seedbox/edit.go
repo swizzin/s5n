@@ -49,6 +49,9 @@ func (s *Seedbox) SetGrant(path string, value any) error {
 	if !grantOwned(p.Keys()) {
 		return fmt.Errorf("%s is not a grant key; it belongs in the user's values file", p)
 	}
+	if rule, _ := GrantRule(p.Keys()); rule.BoxSets {
+		return fmt.Errorf("%s is set by box (%s), so neither file may name it", p, rule.Why)
+	}
 	return s.edit(s.Grant, p, value)
 }
 
@@ -61,6 +64,9 @@ func (s *Seedbox) SetValue(path string, value any) error {
 		return err
 	}
 	if rule, ok := GrantRule(p.Keys()); ok {
+		if rule.BoxSets {
+			return fmt.Errorf("%s is set by box (%s); no file names it", p, rule.Why)
+		}
 		return fmt.Errorf("%s is set by the grant (%s); change it there, as root", p, rule.Why)
 	}
 	return s.edit(s.Values, p, value)

@@ -52,7 +52,14 @@ func (s *Seedbox) Effective(c Chart) (map[string]any, error) {
 	if err != nil {
 		return nil, err
 	}
-	overlay(base, merged, true)
+	vols, err := s.Storage()
+	if err != nil {
+		return nil, err
+	}
+	overlay(base, merged, nil)
+	// The claim names are box's, from the volumes it creates: not the chart's
+	// defaults and not either file. Applied last so nothing can shadow them.
+	overlay(base, claims(vols), nil)
 	if err := Validate(c.Schema, base); err != nil {
 		return nil, err
 	}

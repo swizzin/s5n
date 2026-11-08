@@ -13,9 +13,15 @@ type Rule struct {
 	// branch that merely contains grant keys.
 	Whole bool
 	// BoxOnly marks a key that is box's own record rather than a chart value.
-	// namespace is the only one: it names the release namespace, so box reads it
-	// and never hands it to Helm.
+	// namespace is one: it names the release namespace, so box reads it and
+	// never hands it to Helm. storage.<kind>.path is the other: it is the host
+	// directory box turns into a PersistentVolume, so it is read, never charted.
 	BoxOnly bool
+	// BoxSets marks a chart key box writes from its own decision, which no file
+	// may set. The claim names are the only ones: box derives them from the
+	// namespace and creates the claim, so a name in either file would either be
+	// overwritten or clone the volume.
+	BoxSets bool
 	// Why is the line box shows when a user's values file sets this key. It
 	// should say what the grant is protecting, not repeat the key name.
 	Why string
@@ -32,11 +38,14 @@ type Rule struct {
 //
 //   - global.tz is values. It changes how a user's own apps name files, and
 //     nothing about who can read them.
-//   - storage.*.size is values. The chart ignores it when the claim root
-//     created is used (existingClaim wins), and a per-user cap would be a
-//     quota, which PLAN.md keeps out.
-//   - storage.*.storageClass is grant. It decides which volume the data lands
-//     on, which is the same class of decision as the path itself.
+//   - storage.<kind>.path is grant and box-only: it is where this box's volume
+//     lives on the host, which is the same class of decision as the domain. The
+//     chart's storage.<kind>.existingClaim is set by box, from the claim it
+//     creates for that path, so it is BoxSets: neither file names a claim, and
+//     neither file has a size or a storage class to set any more.
+//   - storage.*.size is gone with the chart's storage objects. A static claim's
+//     capacity is nominal and a per-user cap would be a quota, which PLAN.md
+//     keeps out.
 //   - gateway.enabled is values: taking your own box off the air is yours.
 //     gateway.parentRef.* is grant: the Gateway and the listener belong to
 //     root, and a user who could point at another listener could attach their
@@ -67,12 +76,11 @@ var GrantKeys = []Rule{
 	{Path: "global.puid", Why: "the uid every file on the data volume is owned by"},
 	{Path: "global.pgid", Why: "the gid every file on the data volume is owned by"},
 
-	{Path: "storage.data.hostPath", Why: "where the box's downloads and media live on the host"},
-	{Path: "storage.data.existingClaim", Why: "the claim root created for this box"},
-	{Path: "storage.data.storageClass", Why: "which volume the data lands on"},
-	{Path: "storage.config.hostPath", Why: "where the box's app configs live on the host"},
-	{Path: "storage.config.existingClaim", Why: "the claim root created for this box"},
-	{Path: "storage.config.storageClass", Why: "which volume the configs land on"},
+	{Path: "storage.data.path", BoxOnly: true, Why: "where this box's downloads and media live on the host"},
+	{Path: "storage.config.path", BoxOnly: true, Why: "where this box's app configs live on the host"},
+	// The chart's storage keys, as a unit: box names the claims it creates and
+	// there is nothing under storage for a file to decide.
+	{Path: "storage", Whole: true, BoxSets: true, Why: "box creates the claims from the grant's host paths, and a static claim has no size or storage class to set"},
 
 	{Path: "gateway.host", Why: "the box's domain, which is how it is reached"},
 	{Path: "gateway.parentRef.name", Why: "the Gateway that serves this box"},

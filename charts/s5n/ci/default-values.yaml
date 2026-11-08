@@ -1,2 +1,3 @@
-# The chart's defaults, unchanged.
+# The chart's defaults, unchanged: the two claims a plain install expects to
+# find (`s5n-data`, `s5n-config`). The chart creates neither.
 {}

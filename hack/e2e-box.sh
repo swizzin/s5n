@@ -90,10 +90,12 @@ global:
   pgid: 1000
 
 storage:
+  # The host directories box turns into a static PV + claim. box-only: they are
+  # never chart values, and neither file names a claim.
   data:
-    hostPath: /srv/s5n/data
+    path: /srv/s5n/data
   config:
-    hostPath: /srv/s5n/config
+    path: /srv/s5n/config
 
 gateway:
   host: box.example.com
@@ -124,12 +126,6 @@ EOF
 grant_sum=$(sha256sum "$WORK/grant.yaml" | cut -d' ' -f1)
 
 cat >"$WORK/values.yaml" <<'EOF'
-storage:
-  data:
-    size: 10Gi
-  config:
-    size: 1Gi
-
 wiring:
   image:
     # The locally built image, under the repository the chart's s5n variant
@@ -138,9 +134,21 @@ wiring:
 EOF
 
 apply() { # apply <output file>
+  # --paths-in-node: the grant's directories are in the kind node's filesystem,
+  # not this host's, so box cannot stat them. It is the one place the check is
+  # skipped, and only a script that wrote those directories itself passes it.
   "$WORK/box" apply --yes --chart charts/s5n \
     --grant "$WORK/grant.yaml" --values "$WORK/values.yaml" \
+    --paths-in-node \
     --kubeconfig "$WORK/kubeconfig" >"$1" 2>&1
+}
+
+# storage_state is the two claims and two volumes, by resourceVersion: a second
+# apply that touches any of them shows up as a changed number, and the claims
+# are not release objects so Helm's revision cannot prove anything about them.
+storage_state() {
+  $K get pv seedbox-s5n-data seedbox-s5n-config -o jsonpath='{range .items[*]}{.metadata.name}={.metadata.resourceVersion} {end}'
+  $K -n "$NS" get pvc seedbox-s5n-data seedbox-s5n-config -o jsonpath='{range .items[*]}{.metadata.name}={.metadata.resourceVersion} {end}'
 }
 
 revision() {
@@ -184,6 +192,33 @@ for pending in plex/claim tautulli/plex seerr/plex; do
 done
 
 $K -n "$NS" wait --for=condition=Ready pod -l 'app.kubernetes.io/instance=s5n,s5n.io/app' --timeout=300s || fail=1
+# ---- storage: box created the claims, and they are bound ----
+for kind in data config; do
+  pv=seedbox-s5n-${kind}
+  pvc=$pv
+  pv_phase=$($K get pv "$pv" -o jsonpath='{.status.phase}')
+  pvc_phase=$($K -n "$NS" get pvc "$pvc" -o jsonpath='{.status.phase}')
+  pv_manager=$($K get pv "$pv" -o jsonpath='{.metadata.labels.app\.kubernetes\.io/managed-by}')
+  pv_path=$($K get pv "$pv" -o jsonpath='{.spec.hostPath.path}')
+  pv_claim=$($K get pv "$pv" -o jsonpath='{.spec.claimRef.name}')
+  pv_reclaim=$($K get pv "$pv" -o jsonpath='{.spec.persistentVolumeReclaimPolicy}')
+  pvc_volume=$($K -n "$NS" get pvc "$pvc" -o jsonpath='{.spec.volumeName}')
+  pvc_class=$($K -n "$NS" get pvc "$pvc" -o jsonpath='{.spec.storageClassName}')
+  echo "  ${pv}: ${pv_phase} -> ${pvc}/${pvc_phase} (path ${pv_path}, claimRef ${pv_claim}, reclaim ${pv_reclaim}, managed-by ${pv_manager}, volumeName ${pvc_volume}, class '${pvc_class}')"
+  [ "$pv_phase" = Bound ] || fail=1
+  [ "$pvc_phase" = Bound ] || fail=1
+  [ "$pv_manager" = box ] || fail=1
+  [ "$pv_claim" = "$pvc" ] || fail=1
+  [ "$pv_reclaim" = Retain ] || fail=1
+  [ "$pvc_volume" = "$pv" ] || fail=1
+  [ -z "$pvc_class" ] || fail=1
+done
+[ "$($K get pv seedbox-s5n-data -o jsonpath='{.spec.hostPath.path}')" = /srv/s5n/data ] || fail=1
+[ "$($K get pv seedbox-s5n-config -o jsonpath='{.spec.hostPath.path}')" = /srv/s5n/config ] || fail=1
+
+# Zero writes includes the storage: the same resourceVersions after apply 2.
+storage_before=$(storage_state)
+
 rev1=$(revision); secrets1=$(release_secrets)
 echo "release revision ${rev1} (${secrets1} release secrets)"
 [ "$rev1" = 1 ] || { echo "first apply is not revision 1"; fail=1; }
@@ -203,6 +238,15 @@ echo "release revision ${rev2} (${secrets2} release secrets)"
 # receipt cannot have been rewritten either, because the wiring Job never ran.
 [ "$rev2" = "$rev1" ] || { echo "the unchanged apply created revision ${rev2}"; fail=1; }
 [ "$secrets2" = "$secrets1" ] || { echo "the unchanged apply wrote a release secret"; fail=1; }
+storage_after=$(storage_state)
+if [ "$storage_after" != "$storage_before" ]; then
+  echo "the unchanged apply touched storage"
+  echo "  before: ${storage_before}"
+  echo "  after:  ${storage_after}"
+  fail=1
+else
+  echo "storage untouched: ${storage_after}"
+fi
 
 # ---- apply 3: one key edited -------------------------------------------------
 log "box apply: one edited value is diffed and applied"
@@ -243,6 +287,20 @@ $K -n "$NS" get statefulset sonarr -o jsonpath='{.spec.template.spec.containers[
 # and box never writes it on apply.
 [ "$(sha256sum "$WORK/grant.yaml" | cut -d' ' -f1)" = "$grant_sum" ] ||
   { echo "box rewrote the grant"; fail=1; }
+
+# ---- the claims outlive the release -------------------------------------
+# The one destructive command an operator runs is `helm uninstall`: the data
+# must not go with it. The claims and their volumes are not release objects, so
+# this is not reclamation behaviour box configured -- it is what "not Helm's"
+# means, and it is worth asserting rather than assuming.
+log "helm uninstall keeps the claims and their volumes"
+$HELM uninstall s5n -n "$NS" >/dev/null 2>&1 || { echo "helm uninstall failed"; fail=1; }
+for kind in data config; do
+  pv=seedbox-s5n-${kind}
+  $K get pv "$pv" >/dev/null 2>&1 || { echo "helm uninstall deleted ${pv}"; fail=1; }
+  $K -n "$NS" get pvc "$pv" >/dev/null 2>&1 || { echo "helm uninstall deleted claim ${pv}"; fail=1; }
+  echo "  ${pv}: PV and claim still there"
+done
 
 # box is the whole interface: a client-go/klog line such as
 # "I1107 ... warnings.go:107] ..." must never appear in what the operator reads.
