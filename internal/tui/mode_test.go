@@ -86,14 +86,18 @@ func TestMastheadTrimsALongBreadcrumb(t *testing.T) {
 			t.Fatalf("line %d is %d wide, want %d: %q", i, got, mastheadWidth, line)
 		}
 	}
-	if !strings.Contains(shown, "… · ") {
+	// The deep paths are shortened rather than allowed to push the domain out;
+	// the elision is itself the visible sign that the line was trimmed.
+	if !strings.Contains(shown, "…") {
 		t.Fatalf("nothing says the breadcrumb was trimmed:\n%s", shown)
 	}
 }
 
-// TestMastheadFitsTheWidestBreadcrumbThatFits is the case the first capture
-// caught: a trail exactly as wide as the line, with the indent on top.
-func TestMastheadFitsTheWidestBreadcrumbThatFits(t *testing.T) {
+// TestMastheadElidesPathsBeforeDroppingItems is the case the 80-column capture
+// caught: the two paths filled the line, and the breadcrumb answered by
+// eliding the domain to "…" while showing both paths in full. A path's middle
+// is what can go.
+func TestMastheadElidesPathsBeforeDroppingItems(t *testing.T) {
 	c := &chrome{step: 3, total: 4, question: "which apps should run here?"}
 	c.answers = []answered{
 		{step: 1, value: "box.example.com"},
@@ -105,8 +109,58 @@ func TestMastheadFitsTheWidestBreadcrumbThatFits(t *testing.T) {
 			t.Fatalf("line %d is %d wide, want %d: %q", i, got, mastheadWidth, line)
 		}
 	}
-	if !strings.Contains(stripANSI(c.masthead()), "/tmp/s5n-demo/config") {
-		t.Fatalf("the newest answer was dropped even though it fits:\n%s", stripANSI(c.masthead()))
+	trail := c.trail(textWidth() - 2)
+	for _, want := range []string{"box.example.com", "/tmp/…/data", "/tmp/…/config"} {
+		if !strings.Contains(trail, want) {
+			t.Fatalf("the trail is missing %q: %s", want, trail)
+		}
+	}
+	if strings.Contains(trail, "· … ·") || strings.HasPrefix(trail, "…") {
+		t.Fatalf("an answer was dropped when eliding the paths was enough: %s", trail)
+	}
+	if lipgloss.Width("→ "+trail) > textWidth()-2 {
+		t.Fatalf("the trail is %d wide, want at most %d: %s", lipgloss.Width("→ "+trail), textWidth()-2, trail)
+	}
+}
+
+// TestBreadcrumbKeepsTheDomainWhenItMustDrop: with a domain too long to sit
+// beside both paths even elided, the domain stays and the oldest path is the
+// one that goes.
+func TestBreadcrumbKeepsTheDomainWhenItMustDrop(t *testing.T) {
+	domain := "box.a-rather-long-name.example.com"
+	c := &chrome{step: 3, total: 4}
+	c.answers = []answered{
+		{step: 1, value: domain},
+		{step: 2, value: "/tmp/s5n-demo/data"},
+		{step: 2, value: "/tmp/s5n-demo/config"},
+	}
+	trail := c.trail(textWidth() - 2)
+	if !strings.HasPrefix(trail, domain) {
+		t.Fatalf("the domain was not kept: %s", trail)
+	}
+	if !strings.Contains(trail, "/tmp/…/config") {
+		t.Fatalf("the newest answer was not kept: %s", trail)
+	}
+	if !strings.Contains(trail, "…") {
+		t.Fatalf("the dropped answer is not marked: %s", trail)
+	}
+	if lipgloss.Width("→ "+trail) > textWidth()-2 {
+		t.Fatalf("the trail is %d wide, want at most %d: %s", lipgloss.Width("→ "+trail), textWidth()-2, trail)
+	}
+}
+
+func TestElidePathKeepsTheEnds(t *testing.T) {
+	for in, want := range map[string]string{
+		"/srv/s5n/data":                  "/srv/…/data",
+		"/tmp/s5n-demo/config":           "/tmp/…/config",
+		"/srv/data":                      "/srv/data",
+		"/data":                          "/data",
+		"box.example.com":                "box.example.com",
+		"/srv/a/very/long/path/keeps/on": "/srv/…/on",
+	} {
+		if got := elidePath(in); got != want {
+			t.Fatalf("elidePath(%q) = %q, want %q", in, got, want)
+		}
 	}
 }
 

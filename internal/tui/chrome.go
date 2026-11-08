@@ -77,27 +77,108 @@ func (c *chrome) paint(plain, styled string) string {
 func textWidth() int { return mastheadWidth - 4 }
 
 // trail is the answers-so-far line, or "" when there is nothing to show yet. It
-// keeps the newest answers and drops the oldest, because a long breadcrumb must
-// not push the frame open.
+// fits the line by giving up as little as possible: a path loses its middle
+// first (/srv/…/data still says which tree and which directory), and only then
+// are whole answers dropped -- between the domain, which is pinned, and the
+// newest, which is the answer nearest the question on screen.
 func (c *chrome) trail(max int) string {
-	var parts []string
-	dropped := false
-	for i := len(c.answers) - 1; i >= 0; i-- {
-		if c.answers[i].step >= c.step {
+	var values []string
+	for _, a := range c.answers {
+		if a.step >= c.step {
 			continue
 		}
-		candidate := strings.Join(append([]string{c.answers[i].value}, parts...), " · ")
+		values = append(values, a.value)
+	}
+	if len(values) == 0 {
+		return ""
+	}
+	if trailFits(values, max) {
+		return strings.Join(values, " · ")
+	}
+	elided := make([]string, len(values))
+	for i, v := range values {
+		elided[i] = elidePath(v)
+	}
+	values = elided
+	if trailFits(values, max) {
+		return strings.Join(values, " · ")
+	}
+
+	// Dropping is now unavoidable. The first answer is the domain: an elided
+	// path is still recognisable, an elided domain is "…", so the domain is
+	// pinned and only the answers between it and the newest are dropped.
+	if lipgloss.Width("→ "+values[0]) > max {
+		return trimTrail(values, max)
+	}
+	parts := []string{values[0]}
+	for i := len(values) - 1; i >= 1; i-- {
+		candidate := append([]string{parts[0]}, append([]string{values[i]}, parts[1:]...)...)
+		if !trailFits(candidate, max) {
+			break
+		}
+		parts = candidate
+	}
+	if len(parts) == 1 {
+		trail := parts[0] + " · …"
+		if !c.fits(trail, max) {
+			trail = parts[0]
+		}
+		return trail
+	}
+	trail := parts[0] + " · … · " + strings.Join(parts[1:], " · ")
+	if !c.fits(trail, max) {
+		// The marker is wider than what the answers leave; the answers
+		// themselves still say it.
+		trail = strings.Join(parts, " · ")
+	}
+	return trail
+}
+
+// trailFits says whether a trail of these answers fits in max columns.
+func trailFits(values []string, max int) bool {
+	return lipgloss.Width("→ "+strings.Join(values, " · ")) <= max
+}
+
+// fits applies trailFits to one rendered trail.
+func (c *chrome) fits(trail string, max int) bool {
+	return lipgloss.Width("→ "+trail) <= max
+}
+
+// trimTrail is the last resort, for a domain too wide to keep even on its own:
+// the newest answers, the oldest dropped, and a marker when something was.
+func trimTrail(values []string, max int) string {
+	var parts []string
+	dropped := false
+	for i := len(values) - 1; i >= 0; i-- {
+		candidate := strings.Join(append([]string{values[i]}, parts...), " · ")
 		if lipgloss.Width("→ "+candidate) > max {
 			dropped = true
 			break
 		}
-		parts = append([]string{c.answers[i].value}, parts...)
+		parts = append([]string{values[i]}, parts...)
 	}
 	trail := strings.Join(parts, " · ")
 	if dropped && trail != "" && lipgloss.Width("→ … · "+trail) <= max {
 		trail = "… · " + trail
 	}
 	return trail
+}
+
+// elidePath shortens an absolute path to its first and last segment, so it
+// keeps saying which tree and which directory while losing only the middle:
+// /srv/s5n/data becomes /srv/…/data. Anything that is not a path with a middle
+// segment to spare is returned unchanged.
+func elidePath(v string) string {
+	if !strings.HasPrefix(v, "/") {
+		return v
+	}
+	parts := strings.Split(v, "/")
+	// "/srv/s5n/data" splits into ["", "srv", "s5n", "data"]: the empty head
+	// is the leading slash, so four parts are the shortest path with a middle.
+	if len(parts) < 4 || parts[len(parts)-1] == "" {
+		return v
+	}
+	return "/" + parts[1] + "/…/" + parts[len(parts)-1]
 }
 
 // boxed draws the masthead frame: a rounded border in the muted colour, every
