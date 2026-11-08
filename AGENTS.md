@@ -46,7 +46,7 @@ Read `PLAN.md` first. It is the architecture; this file is how to work in the re
   and a second `helm upgrade` performs **zero writes** with app state identical before
   and after. `--keep` leaves the cluster up.
 - `.github/workflows/ci.yaml` — every PR and push to main: gofmt/vet/`go test -race`,
-  `hack/validate-chart.sh` on 1.31/1.34/1.37, then the kind e2e.
+  `hack/validate-chart.sh` on 1.30/1.34/1.37, then the kind e2e.
   Actions are pinned by commit SHA.
 - No `box` yet. No installer yet.
 
@@ -54,12 +54,12 @@ Read `PLAN.md` first. It is the architecture; this file is how to work in the re
 
 ```sh
 gofmt -l . && go vet ./... && go test ./...
-hack/validate-chart.sh 1.31.0  # helm lint + kubeconform for every charts/s5n/ci/*-values.yaml
+hack/validate-chart.sh 1.30.0  # helm lint + kubeconform for every charts/s5n/ci/*-values.yaml
 docker build -t s5n:e2e .     # what the e2e uses
 hack/e2e-kind.sh              # full smoke; needs docker, kind, helm, kubectl
 ```
 
-Run lint + kubeconform against 1.31, 1.34 and 1.37 before every commit. Run the e2e before
+Run lint + kubeconform against 1.30, 1.34 and 1.37 before every commit. Run the e2e before
 calling any chart change done. A change is not done until the e2e prints PASS.
 
 `helm template` renders the wiring Job but *not* the API-server egress policy, because that
@@ -87,8 +87,11 @@ one needs a live `lookup`. The e2e asserts the policy exists in the cluster.
    no template edit is needed for a generic app; an app that acts like an Arr also
    needs its kind in `internal/wiring` and its peers in `networkpolicy.yaml`. The wiring Job and the qBittorrent init container are separate
    templates because they are not app replicas.
-6. **Images pinned by tag + digest** from `ghcr.io/home-operations/*`. No `:latest`,
-   no `:rolling`, no keel.
+6. **Images are blessed variants, pinned by tag + digest.** Each app's image comes from
+   `charts/s5n/variants.yaml` (chart-owned, read with `.Files.Get`), never from values.
+   `apps.<app>.image.variant` names one and may pin a tag or digest inside that variant's
+   repository; `values.schema.json` rejects `repository`. No `:latest`, no `:rolling`,
+   no keel, no arbitrary registry.
 7. **No secrets in values, ConfigMaps, the repo, or logs.** Credentials live in the Secret
    (`secret.yaml`, preserved across upgrades via `lookup`). The wiring config points at
    *file paths* in the mounted Secret, never at values.
@@ -121,9 +124,26 @@ one needs a live `lookup`. The e2e asserts the policy exists in the cluster.
     client restricts it to series/films carrying that tag, and in Prowlarr a tag on an
     application restricts which indexers sync to it. A marker tag would silently stop
     grabs and indexer sync.
+12. **The grant is enforced in the cluster, not only by box.** Root installs
+    `install/platform/admission/policy.yaml` at bootstrap and binds both policies per user
+    namespace at adduser, with params in a ConfigMap in the root-owned `s5n-system`
+    namespace: never the user's namespace, never a global binding (root's own seedbox is
+    unbound). The blessed repository list is generated from `variants.yaml`; there is no
+    second list in Go, `install/` or docs. Changing a policy or its params means changing
+    the e2e admission asserts in the same commit.
 
 ## Gotchas already hit
 
+- A ValidatingAdmissionPolicy takes effect a moment after its binding is created and
+  never re-checks running objects. An e2e that asserts a denial right after `kubectl apply`
+  races the binding: poll for a dry-run denial. A pod admitted before the binding keeps
+  running, but its next replacement is refused.
+- A VAP resource rule for `pods` does not match `pods/ephemeralcontainers` (`kubectl
+  debug`); name the subresource. On it, `object` is the whole Pod, so a pre-binding pod
+  still running an unblessed image cannot be updated or debugged until it is replaced.
+- CEL in a VAP is type-checked against every kind in `matchConstraints`; one policy can't
+  read Service and Pod fields behind a ternary without permanent warnings. One policy per
+  resource shape.
 - `--set apps.sonarr.instances[1].enabled=true` replaces the whole list, so the render
   fails the schema; use a values file (`charts/s5n/ci/`). And kubeconform reports
   "0 resources" as success, including for a path without a `.yaml` extension.
