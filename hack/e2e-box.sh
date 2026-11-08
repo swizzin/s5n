@@ -2,15 +2,19 @@
 # The box-driven install path, on kind.
 #
 # hack/e2e-kind.sh installs the chart with `helm upgrade --install` and asserts
-# the result. This script installs the same release the other way: root's grant
-# and values file, then `box apply`, which reads both, checks them against the
-# chart's schema, diffs, confirms and calls the Helm SDK itself. It then proves
-# the three properties the apply path has to have:
+# the result. This script installs the same release the other way: `box init`
+# asks a seedbox's questions, writes root's grant and values file (the values
+# file is written first, by hand, with the locally built image tag, and init
+# must leave it alone), then hands over to `box apply`, which reads both files,
+# checks them against the chart's schema, diffs, confirms and calls the Helm SDK
+# itself. It then proves the four properties the init/apply path has to have:
 #
-#   1. a first apply installs the stack and its wiring receipt says ok;
-#   2. a second apply with nothing edited says so and makes zero writes;
+#   1. a first init installs the stack and its wiring receipt says ok;
+#   2. a second init with identical answers splices nothing (both files are
+#      byte-identical) and its apply is a no-op;
 #   3. one edited value is printed as a diff, applied, and visible in the
-#      release afterwards.
+#      release afterwards;
+#   4. the claims outlive `helm uninstall`.
 #
 # Why a separate script instead of a mode of hack/e2e-kind.sh: the existing e2e
 # is the chart's acceptance test, and its helm install is what proves the chart
@@ -76,55 +80,11 @@ $HELM upgrade --install envoy-gateway oci://docker.io/envoyproxy/gateway-helm \
 $K create namespace s5n-gateway --dry-run=client -o yaml | $K apply -f - >/dev/null
 $K apply -f hack/envoy-gateway.yaml >/dev/null
 
-# Root's two files, written exactly as `box adduser` would for root's own
-# seedbox. The grant carries every decision hack/e2e-kind.sh leaves to chart
-# defaults (every app, every path, the domain); the values file carries the
-# tuning that helm run passes as --set: the claim sizes and the locally built
-# image tag. Phase 3 appends one app setting to this file.
-log "writing root's grant and values file"
-cat >"$WORK/grant.yaml" <<'EOF'
-namespace: seedbox
-
-global:
-  puid: 1000
-  pgid: 1000
-
-storage:
-  # The host directories box turns into a static PV + claim. box-only: they are
-  # never chart values, and neither file names a claim.
-  data:
-    path: /srv/s5n/data
-  config:
-    path: /srv/s5n/config
-
-gateway:
-  host: box.example.com
-  parentRef:
-    name: s5n
-    namespace: s5n-gateway
-
-networkPolicy:
-  enabled: true
-
-apps:
-  qbittorrent:
-    enabled: true
-  sonarr:
-    enabled: true
-  radarr:
-    enabled: true
-  prowlarr:
-    enabled: true
-  plex:
-    enabled: true
-  tautulli:
-    enabled: true
-  seerr:
-    enabled: true
-EOF
-
-grant_sum=$(sha256sum "$WORK/grant.yaml" | cut -d' ' -f1)
-
+# Root's values file, written by hand: the tuning `box init` must never touch.
+# The wiring image is the locally built one, under the repository the chart's
+# s5n variant names (the override hack/e2e-kind.sh passes as --set), and it is
+# not a catalog question, so init has no opinion about it.
+log "root's values file: the tuning init must leave alone"
 cat >"$WORK/values.yaml" <<'EOF'
 wiring:
   image:
@@ -132,6 +92,21 @@ wiring:
     # names: the same override hack/e2e-kind.sh passes as --set.
     tag: e2e
 EOF
+
+init() { # init <output file>
+  # --paths-in-node: the paths are in the kind node's filesystem, not this
+  # host's, so init neither reports nor creates them, and apply skips its stat
+  # the same way. On a real host init creates them (hack/e2e-box.sh cannot:
+  # this host is not the node).
+  "$WORK/box" init --yes --chart charts/s5n \
+    --grant "$WORK/grant.yaml" --values "$WORK/values.yaml" \
+    --namespace "$NS" --domain box.example.com \
+    --data-path /srv/s5n/data --config-path /srv/s5n/config \
+    --apps qbittorrent,sonarr,radarr,prowlarr,plex,tautulli,seerr \
+    --puid 1000 --pgid 1000 \
+    --paths-in-node \
+    --kubeconfig "$WORK/kubeconfig" >"$1" 2>&1
+}
 
 apply() { # apply <output file>
   # --paths-in-node: the grant's directories are in the kind node's filesystem,
@@ -163,9 +138,9 @@ status_field() { # status_field <python expression over `d`>
     python3 -c "import json,sys; d=json.load(sys.stdin); print($1)"
 }
 
-# ---- apply 1: install -------------------------------------------------------
-log "box apply: first install"
-if apply "$WORK/apply1.txt"; then
+# ---- init 1: the install -----------------------------------------------------
+log "box init: first install"
+if init "$WORK/apply1.txt"; then
   cat "$WORK/apply1.txt"
 else
   cat "$WORK/apply1.txt"; fail=1
@@ -223,13 +198,26 @@ rev1=$(revision); secrets1=$(release_secrets)
 echo "release revision ${rev1} (${secrets1} release secrets)"
 [ "$rev1" = 1 ] || { echo "first apply is not revision 1"; fail=1; }
 
-# ---- apply 2: nothing edited -------------------------------------------------
-log "box apply: an unchanged seedbox must be zero writes"
-if apply "$WORK/apply2.txt"; then
+# ---- init 2: the same answers ----------------------------------------------
+# Re-running init is the other half of its contract: every question is prefilled
+# from the files, so identical answers splice nothing, and the files must come
+# out byte for byte. Its apply then has nothing to change, exactly like a second
+# `box apply`.
+log "box init: the same answers must splice nothing and apply nothing"
+grant_before=$(sha256sum "$WORK/grant.yaml" | cut -d' ' -f1)
+values_before=$(sha256sum "$WORK/values.yaml" | cut -d' ' -f1)
+if init "$WORK/apply2.txt"; then
   cat "$WORK/apply2.txt"
 else
   cat "$WORK/apply2.txt"; fail=1
 fi
+grant_after=$(sha256sum "$WORK/grant.yaml" | cut -d' ' -f1)
+values_after=$(sha256sum "$WORK/values.yaml" | cut -d' ' -f1)
+echo "grant   ${grant_before} -> ${grant_after}"
+echo "values  ${values_before} -> ${values_after}"
+[ "$grant_before" = "$grant_after" ] || { echo "the second init spliced into the grant"; fail=1; }
+[ "$values_before" = "$values_after" ] || { echo "the second init spliced into the values file"; fail=1; }
+grep -q "already says this" "$WORK/apply2.txt" || { echo "init did not say the grant was already right"; fail=1; }
 grep -q "nothing to change" "$WORK/apply2.txt" || { echo "box did not say nothing to change"; fail=1; }
 rev2=$(revision); secrets2=$(release_secrets)
 echo "release revision ${rev2} (${secrets2} release secrets)"
@@ -284,8 +272,8 @@ $K -n "$NS" get statefulset sonarr -o jsonpath='{.spec.template.spec.containers[
   grep -qx '1Gi' || { echo "sonarr's pod spec does not carry the new limit"; fail=1; }
 
 # The editing itself must not have touched the second file: the grant is root's
-# and box never writes it on apply.
-[ "$(sha256sum "$WORK/grant.yaml" | cut -d' ' -f1)" = "$grant_sum" ] ||
+# and neither apply nor a re-run of init writes it when nothing changed.
+[ "$(sha256sum "$WORK/grant.yaml" | cut -d' ' -f1)" = "$grant_before" ] ||
   { echo "box rewrote the grant"; fail=1; }
 
 # ---- the claims outlive the release -------------------------------------
