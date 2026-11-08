@@ -34,6 +34,17 @@ func isTerminal(f *os.File) bool {
 	return term.IsTerminal(int(f.Fd()))
 }
 
+// terminalWidth is how many columns box draws into. A terminal that cannot
+// report its size gets zero, which the UI reads as the narrowest width init
+// supports: wrapping text to a width nobody measured is always safe.
+func terminalWidth(f *os.File) int {
+	w, _, err := term.GetSize(int(f.Fd()))
+	if err != nil || w <= 0 {
+		return 0
+	}
+	return w
+}
+
 func main() {
 	if len(os.Args) < 2 {
 		usage()
@@ -218,7 +229,7 @@ func runInit(args []string) {
 			Plain:   *plain,
 		})
 		if plan.Mode == tui.ModeHuh {
-			prompt = tui.New(tui.Options{In: os.Stdin, Out: os.Stdout, NoColor: plan.NoColor})
+			prompt = tui.New(tui.Options{In: os.Stdin, Out: os.Stdout, NoColor: plan.NoColor, Width: terminalWidth(os.Stdout)})
 			break
 		}
 		line := &setup.LinePrompt{In: os.Stdin, Out: os.Stdout}

@@ -13,6 +13,12 @@ import (
 // that matter (is it there, which disk, how full, who owns it) and a red line
 // when the path would grow the disk the host itself runs from. The plain text
 // of the same report is setup.PathCheck.Text(), which the line prompt prints.
+//
+// Every line wraps to the terminal's width with its continuation kept under
+// the line's own indent. init claims to support 80 columns, and an 80-column
+// terminal is exactly where the footer and the root-device warning overflow;
+// letting the terminal wrap them put the continuation at column 0, which read
+// as a new block rather than the end of this one.
 func (u *UI) ShowPathCheck(check setup.PathCheck) error {
 	u.begin()
 	title := "path check"
@@ -24,7 +30,7 @@ func (u *UI) ShowPathCheck(check setup.PathCheck) error {
 		u.pathBlock(r)
 	}
 	if check.Footer != "" {
-		fmt.Fprintln(u.out, u.chrome.paint("  "+check.Footer, mutedStyle.Render("  "+check.Footer)))
+		u.block("    ", strings.TrimLeft(check.Footer, " "), mutedStyle)
 	}
 	u.end()
 	return nil
@@ -54,17 +60,17 @@ func (u *UI) pathBlock(r setup.PathReport) {
 		if i == len(rows)-1 && len(notes) == 0 {
 			glyph = "└ "
 		}
-		u.row(glyph, rw)
+		u.treeRow(glyph, rw)
 	}
 	for i, note := range notes {
 		glyph := "├ "
 		if i == len(notes)-1 {
 			glyph = "└ "
 		}
-		u.row(glyph, row{label: "", value: note, warning: true})
+		u.treeRow(glyph, row{label: "", value: note, warning: true})
 	}
 	for _, warn := range warnings(r) {
-		fmt.Fprintln(u.out, u.chrome.paint("  ⚠ "+warn, badStyle.Render("  ⚠ "+warn)))
+		u.warning(warn)
 	}
 }
 
@@ -77,29 +83,70 @@ type row struct {
 	warning bool
 }
 
-// row prints one row, with the tree glyph and the label muted and the value in
-// ink, unless the value is itself a verdict.
-func (u *UI) row(glyph string, r row) {
+// treeRow prints one row, with the tree glyph and the label muted and the value
+// styled by what it means. A value too wide for the row wraps under its own
+// column, so a long path or note does not run to the margin or break the tree.
+func (u *UI) treeRow(glyph string, r row) {
+	style := u.valueStyle(r)
 	edge := u.chrome.paint(glyph, mutedStyle.Render(glyph))
 	if r.label == "" {
-		fmt.Fprintf(u.out, "  %s%s\n", edge, u.colour(r, mutedStyle))
+		// The glyph and its two leading columns are the hanging indent.
+		const indent = "    "
+		for _, line := range wrapText(r.value, u.width-lipgloss.Width(indent)) {
+			fmt.Fprintf(u.out, "%s%s\n", indent, u.chrome.paint(line, style.Render(line)))
+		}
 		return
 	}
 	label := fmt.Sprintf("%-12s", r.label)
-	fmt.Fprintf(u.out, "  %s%s  %s\n", edge, u.chrome.paint(label, mutedStyle.Render(label)), u.colour(r, inkStyle))
+	painted := u.chrome.paint(label, mutedStyle.Render(label))
+	const gap = "  "
+	prefix := "  " + glyph + label + gap
+	cont := strings.Repeat(" ", lipgloss.Width(prefix))
+	for i, line := range wrapText(r.value, u.width-lipgloss.Width(prefix)) {
+		if i == 0 {
+			fmt.Fprintf(u.out, "  %s%s%s%s\n", edge, painted, gap, u.chrome.paint(line, style.Render(line)))
+			continue
+		}
+		fmt.Fprintf(u.out, "%s%s\n", cont, u.chrome.paint(line, style.Render(line)))
+	}
 }
 
-// colour paints a row's value according to what it means.
-func (u *UI) colour(r row, normal lipgloss.Style) string {
+// warning is the red line under a path's block: the two ways a path can sink
+// the host, both of which are about the disk rather than the directory. Its
+// continuation lines stay under the glyph, not against the margin.
+func (u *UI) warning(text string) {
+	const indent = "  ⚠ "
+	cont := strings.Repeat(" ", lipgloss.Width(indent))
+	for i, line := range wrapText(text, u.width-lipgloss.Width(indent)) {
+		if i == 0 {
+			fmt.Fprintf(u.out, "%s%s\n", u.chrome.paint(indent, badStyle.Render(indent)), u.chrome.paint(line, badStyle.Render(line)))
+			continue
+		}
+		fmt.Fprintf(u.out, "%s%s\n", cont, u.chrome.paint(line, badStyle.Render(line)))
+	}
+}
+
+// block prints a paragraph at one indent, wrapped to the terminal. The
+// continuation lines keep the indent, which is the whole point of wrapping
+// here rather than letting the terminal do it.
+func (u *UI) block(indent, text string, style lipgloss.Style) {
+	for _, line := range wrapText(text, u.width-lipgloss.Width(indent)) {
+		fmt.Fprintf(u.out, "%s%s\n", indent, u.chrome.paint(line, style.Render(line)))
+	}
+}
+
+// valueStyle colours a row's value according to what it means.
+func (u *UI) valueStyle(r row) lipgloss.Style {
 	switch {
 	case r.verdict && r.value == "yes":
-		return u.chrome.paint(r.value, goodStyle.Render(r.value))
-	case r.verdict:
-		return u.chrome.paint(r.value, badStyle.Render(r.value))
-	case r.warning:
-		return u.chrome.paint(r.value, badStyle.Render(r.value))
+		return goodStyle
+	case r.verdict, r.warning:
+		return badStyle
+	case r.label == "":
+		// The "what is already there" line is explanation, not a fact column.
+		return mutedStyle
 	}
-	return u.chrome.paint(r.value, normal.Render(r.value))
+	return inkStyle
 }
 
 func existsText(r setup.PathReport) string {

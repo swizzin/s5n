@@ -9,6 +9,7 @@ import (
 
 	"charm.land/bubbles/v2/key"
 	"charm.land/huh/v2"
+	"charm.land/lipgloss/v2"
 
 	"github.com/swizzin/s5n/internal/setup"
 )
@@ -21,6 +22,10 @@ type Options struct {
 	Out io.Writer
 	// NoColor draws the same layout with every colour dropped (NO_COLOR).
 	NoColor bool
+	// Width is how many columns the terminal has, as cmd/box measured it. A
+	// zero (a caller that did not measure) is the narrowest width init
+	// supports, so text still wraps rather than running off the screen.
+	Width int
 }
 
 // UI is setup.Prompter on huh.
@@ -35,6 +40,9 @@ type UI struct {
 	styles *huh.Styles
 	keys   *huh.KeyMap
 	chrome chrome
+	// width is the terminal's columns. Everything box draws outside huh's own
+	// form wraps to it; see wrapText.
+	width int
 
 	// accessible is huh's line mode, driven by a scripted reader in tests. box
 	// never selects it: without a terminal huh's own secret field returns an
@@ -58,6 +66,10 @@ func New(o Options) *UI {
 		out:    out,
 		styles: theme(o.NoColor),
 		keys:   keyMap(),
+		width:  o.Width,
+	}
+	if u.width <= 0 {
+		u.width = defaultWidth
 	}
 	u.chrome.noColor = o.NoColor
 	return u
@@ -140,8 +152,16 @@ func (u *UI) record(label, value string) {
 	}
 	mark := u.chrome.paint("✓", accentStyle.Render("✓"))
 	title := u.chrome.paint(label, mutedStyle.Render(label))
-	body := u.chrome.paint(value, inkStyle.Render(value))
-	fmt.Fprintf(u.out, "  %s %s  %s\n", mark, title, body)
+	head := "  " + mark + " " + title + "  "
+	cont := strings.Repeat(" ", lipgloss.Width(head))
+	for i, line := range wrapText(value, u.width-lipgloss.Width(head)) {
+		body := u.chrome.paint(line, inkStyle.Render(line))
+		if i == 0 {
+			fmt.Fprintf(u.out, "%s%s\n", head, body)
+			continue
+		}
+		fmt.Fprintf(u.out, "%s%s\n", cont, body)
+	}
 }
 
 // hidden is what the scrollback says in place of a secret's value.

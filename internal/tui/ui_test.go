@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"charm.land/huh/v2"
+	"charm.land/lipgloss/v2"
 
 	"github.com/swizzin/s5n/internal/setup"
 )
@@ -289,7 +290,9 @@ func TestStepMovesTheMasthead(t *testing.T) {
 
 func TestPathCheckDrawsTreeAndWarning(t *testing.T) {
 	var out bytes.Buffer
-	u := New(Options{Out: &out})
+	// Wide enough for every line to stay whole: this test is about what the
+	// block says, and the 80-column wrapping has its own tests below.
+	u := New(Options{Out: &out, Width: 100})
 	u.Step(2, 4, "where should your data and settings live?")
 	err := u.ShowPathCheck(setup.PathCheck{
 		Reports: []setup.PathReport{
@@ -357,6 +360,67 @@ func TestPathCheckSharesTheRootDeviceWarns(t *testing.T) {
 	}
 	if !strings.Contains(stripANSI(out.String()), "⚠ shares the root device (8:1) — filling it takes the host down") {
 		t.Fatalf("the same-device warning is missing:\n%s", stripANSI(out.String()))
+	}
+}
+
+// pathCheckOverEighty is a report whose footer and ownership note both run
+// past 80 columns: the exact lines an 80-column terminal used to break at the
+// margin.
+func pathCheckOverEighty() setup.PathCheck {
+	return setup.PathCheck{
+		Reports: []setup.PathReport{{
+			Kind:    "config",
+			Path:    "/srv/s5n/config",
+			Exists:  true,
+			Owner:   "1000:1000",
+			Mount:   setup.Mount{Major: 8, Minor: 2, Point: "/srv", FSType: "btrfs", Source: "/dev/sdb1"},
+			Free:    400 * 1024 * 1024 * 1024,
+			Summary: "holds 2 entries at the top level: appdata, media\n          note: owned 0:0, not the box's 1000:1000; the apps cannot write there as it is",
+		}},
+		Footer: "  downloads/<category> and media/<category> are made on the first start, owned as above",
+	}
+}
+
+// TestPathCheckWrapsAtEightyColumns: the footer and the ownership note are
+// box-drawn lines, so they wrap to the terminal and their continuation keeps
+// the indent instead of starting at column 0.
+func TestPathCheckWrapsAtEightyColumns(t *testing.T) {
+	var out bytes.Buffer
+	u := New(Options{Out: &out, Width: 80})
+	if err := u.ShowPathCheck(pathCheckOverEighty()); err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(strings.TrimRight(stripANSI(out.String()), "\n"), "\n")
+	for _, line := range lines {
+		if lipgloss.Width(line) > 80 {
+			t.Fatalf("%d-column line in an 80-column report: %q", lipgloss.Width(line), line)
+		}
+	}
+	text := strings.Join(lines, "\n")
+	if !strings.Contains(text, "    downloads/<category> and media/<category> are made on the first start, owned\n    as above") {
+		t.Fatalf("the footer does not wrap under its indent:\n%s", text)
+	}
+	if !strings.Contains(text, "    note: owned 0:0, not the box's 1000:1000; the apps cannot write there as it\n    is") {
+		t.Fatalf("the ownership note does not wrap under the tree:\n%s", text)
+	}
+}
+
+// TestPathCheckUsesWiderTerminals: at 100 columns the same lines fit, and
+// nothing is wrapped that did not have to be.
+func TestPathCheckUsesWiderTerminals(t *testing.T) {
+	var out bytes.Buffer
+	u := New(Options{Out: &out, Width: 100})
+	if err := u.ShowPathCheck(pathCheckOverEighty()); err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(strings.TrimRight(stripANSI(out.String()), "\n"), "\n")
+	for _, line := range lines {
+		if lipgloss.Width(line) > 100 {
+			t.Fatalf("%d-column line in a 100-column report: %q", lipgloss.Width(line), line)
+		}
+	}
+	if !strings.Contains(strings.Join(lines, "\n"), "    downloads/<category> and media/<category> are made on the first start, owned as above") {
+		t.Fatalf("the footer was wrapped at 100 columns:\n%s", strings.Join(lines, "\n"))
 	}
 }
 
