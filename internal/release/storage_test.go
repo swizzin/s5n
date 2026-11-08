@@ -183,6 +183,43 @@ func TestKubeStorageRefusesABoundClaim(t *testing.T) {
 	}
 }
 
+// TestKubeStorageDeletesOnlyAVolumeItWouldRemove: undo is narrow on purpose. A
+// volume goes; a claim is refused rather than guessed at.
+func TestKubeStorageDeletesOnlyAVolumeItWouldRemove(t *testing.T) {
+	ctx := context.Background()
+	cs := fake.NewClientset()
+	s := NewStorageFor("testbox", cs)
+	if _, err := cs.CoreV1().PersistentVolumes().Create(ctx, &corev1.PersistentVolume{
+		ObjectMeta: metav1.ObjectMeta{Name: "testbox-s5n-data"},
+	}, metav1.CreateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := s.Delete(ctx, StorageObject{Kind: KindPersistentVolumeClaim, Name: "testbox-s5n-data"}); err == nil {
+		t.Fatal("Delete accepted a claim")
+	}
+	if _, err := cs.CoreV1().PersistentVolumes().Get(ctx, "testbox-s5n-data", metav1.GetOptions{}); err != nil {
+		t.Fatalf("a refused delete removed the volume: %v", err)
+	}
+
+	if err := s.Delete(ctx, StorageObject{Kind: KindPersistentVolume, Name: "testbox-s5n-data"}); err != nil {
+		t.Fatalf("Delete: %v", err)
+	}
+	if _, err := cs.CoreV1().PersistentVolumes().Get(ctx, "testbox-s5n-data", metav1.GetOptions{}); err == nil {
+		t.Fatal("the volume is still there")
+	}
+}
+
+// TestKubeStorageDeletingAGoneVolumeIsNotAnError: a volume someone removed
+// between the write and the failure is already the state box wants.
+func TestKubeStorageDeletingAGoneVolumeIsNotAnError(t *testing.T) {
+	ctx := context.Background()
+	if err := NewStorageFor("testbox", fake.NewClientset()).Delete(ctx,
+		StorageObject{Kind: KindPersistentVolume, Name: "testbox-s5n-data"}); err != nil {
+		t.Fatalf("Delete of a missing volume: %v", err)
+	}
+}
+
 func ptr[T any](v T) *T { return &v }
 
 // reviewAnswers answers the access review with one verdict. The TypeMeta is

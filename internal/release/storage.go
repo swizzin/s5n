@@ -127,11 +127,18 @@ func (s *KubeStorage) CreateNamespace(ctx context.Context) error {
 // fields are what box prints; the apply is what box runs after the operator
 // says yes.
 type StorageObject struct {
-	Kind   string // "PersistentVolume" or "PersistentVolumeClaim"
+	Kind   string // KindPersistentVolume or KindPersistentVolumeClaim
 	Name   string
 	Detail string // e.g. "hostPath /srv/s5n/data"
 	apply  func(ctx context.Context) error
 }
+
+// The two kinds Plan returns. They are constants because undo reads them: only
+// a volume this run created is ever deleted again.
+const (
+	KindPersistentVolume      = "PersistentVolume"
+	KindPersistentVolumeClaim = "PersistentVolumeClaim"
+)
 
 // StorageClient is box's handle on the namespace a seedbox lives in and the
 // storage it needs. The namespace comes first because the claims live in it:
@@ -147,6 +154,9 @@ type StorageClient interface {
 	PlanNamespace(ctx context.Context) (NamespacePlan, error)
 	CreateNamespace(ctx context.Context) error
 	Apply(ctx context.Context, obj StorageObject) error
+	// Delete removes an object this run wrote, when the run cannot finish. It
+	// is only ever given a volume apply created itself.
+	Delete(ctx context.Context, obj StorageObject) error
 }
 
 // KubeStorage is the client-go implementation: cluster-scoped PVs and the
@@ -207,7 +217,7 @@ func (s *KubeStorage) planVolume(ctx context.Context, namespace string, v seedbo
 	switch {
 	case apierrors.IsNotFound(err):
 		out = append(out, StorageObject{
-			Kind:   "PersistentVolume",
+			Kind:   KindPersistentVolume,
 			Name:   v.Claim,
 			Detail: "hostPath " + v.Path,
 			apply: func(ctx context.Context) error {
@@ -228,7 +238,7 @@ func (s *KubeStorage) planVolume(ctx context.Context, namespace string, v seedbo
 	switch {
 	case apierrors.IsNotFound(err):
 		out = append(out, StorageObject{
-			Kind:   "PersistentVolumeClaim",
+			Kind:   KindPersistentVolumeClaim,
 			Name:   v.Claim,
 			Detail: "volume " + v.Claim,
 			apply: func(ctx context.Context) error {
@@ -279,6 +289,21 @@ func (s *KubeStorage) Apply(ctx context.Context, obj StorageObject) error {
 	}
 	if err := obj.apply(ctx); err != nil {
 		return fmt.Errorf("apply %s %s: %w", obj.Kind, obj.Name, err)
+	}
+	return nil
+}
+
+// Delete removes one object this run created, when a later write failed and the
+// run will not finish. Only volumes: a claim is namespaced and harmless, and
+// the next apply finds it and binds the volume it names again, while a PV is
+// cluster-scoped and would be left backing a path on a box that never came up.
+// Anything else is refused rather than guessed at.
+func (s *KubeStorage) Delete(ctx context.Context, obj StorageObject) error {
+	if obj.Kind != KindPersistentVolume {
+		return fmt.Errorf("refusing to delete %s %s: box only removes a volume it created in this run", obj.Kind, obj.Name)
+	}
+	if err := s.cs.CoreV1().PersistentVolumes().Delete(ctx, obj.Name, metav1.DeleteOptions{}); err != nil && !apierrors.IsNotFound(err) {
+		return fmt.Errorf("delete PersistentVolume %s: %w", obj.Name, err)
 	}
 	return nil
 }

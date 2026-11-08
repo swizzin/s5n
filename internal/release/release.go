@@ -6,7 +6,8 @@
 // chart release's values.schema.json, read the namespace, the storage and what
 // is deployed, show the difference, ask, then create the namespace if it is
 // missing, write the storage, install or upgrade, and read the wiring receipt
-// back.
+// back. A volume box wrote in a run that did not finish is removed again before
+// the error is returned, so a failed first install leaves no cluster-scoped PV.
 // Nothing here does the cluster's work by hand: the Helm SDK is the client
 // (PLAN.md), so a release box installs is a release `helm` can read, upgrade
 // and roll back.
@@ -313,6 +314,13 @@ func (a *Applier) Apply(ctx context.Context, opts Options) (Result, error) {
 		}
 	}
 
+	// Everything box can check has been checked: the namespace is there or may
+	// be created, and every volume and claim is either what box would write or
+	// a refusal. A write can still fail, and a volume is cluster-scoped, so
+	// what this run creates is remembered and removed again if the run stops
+	// before the release exists.
+	var created []StorageObject
+
 	// The namespace first: it is what the claims and the release live in. It is
 	// created only when it was missing at plan time, so an existing namespace
 	// -- root's or an admin's, with whatever labels they gave it -- is never
@@ -327,15 +335,18 @@ func (a *Applier) Apply(ctx context.Context, opts Options) (Result, error) {
 
 	for _, obj := range plan {
 		if err := store.Apply(ctx, obj); err != nil {
-			return res, err
+			return res, a.undo(ctx, store, created, err)
 		}
 		res.StorageCreated++
+		if obj.Kind == KindPersistentVolume {
+			created = append(created, obj)
+		}
 	}
 
 	started := time.Now()
 	rev, err := client.Upgrade(ctx, chart, values)
 	if err != nil {
-		return res, err
+		return res, a.undo(ctx, store, created, err)
 	}
 	res.Applied = true
 	res.Revision = rev
@@ -388,6 +399,29 @@ func (a *Applier) waitReceipt(ctx context.Context, client ReleaseClient, since t
 		case <-time.After(poll):
 		}
 	}
+}
+
+// undo removes the volumes this run created, after a failure that stopped it
+// before the release existed. A PV is cluster-scoped and reclaim Retain, so one
+// left behind is a volume nobody's release owns; it would make the next apply
+// against a different path refuse over it. Only what this run wrote is removed:
+// a volume that was already there is never touched, and neither are the claims,
+// which are namespaced, harmless, and what the next apply binds the recreated
+// volume to. The namespace stays too: it is empty and it is what the box wants.
+func (a *Applier) undo(ctx context.Context, store StorageClient, created []StorageObject, cause error) error {
+	if len(created) == 0 {
+		return cause
+	}
+	errs := []error{cause}
+	for _, obj := range created {
+		if err := store.Delete(ctx, obj); err != nil {
+			errs = append(errs, fmt.Errorf("%s %s was created by this run and is still there; delete it with kubectl: %w",
+				obj.Kind, obj.Name, err))
+			continue
+		}
+		a.logf("removed %s %s: this run created it and did not finish\n", obj.Kind, obj.Name)
+	}
+	return errors.Join(errs...)
 }
 
 // printPlan is what box will create before the release, in the order it will

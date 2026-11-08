@@ -19,6 +19,7 @@ type fakeRelease struct {
 	values      map[string]any
 	exists      bool
 	deployedErr error
+	upgradeErr  error
 
 	upgrades int
 	upgraded []map[string]any
@@ -38,6 +39,9 @@ func (f *fakeRelease) Deployed(context.Context) (map[string]any, bool, error) {
 }
 
 func (f *fakeRelease) Upgrade(_ context.Context, _ Chart, values map[string]any) (int, error) {
+	if f.upgradeErr != nil {
+		return 0, f.upgradeErr
+	}
 	f.upgrades++
 	f.revision++
 	f.upgraded = append(f.upgraded, values)
@@ -73,7 +77,13 @@ type fakeStorage struct {
 	planErr  error
 	plans    int
 	applied  []StorageObject
-	events   *[]string
+	// applyErr fails the write of applyErrOn ("Kind/Name"), or any write when
+	// it is empty: the failure that used to strand a volume.
+	applyErr   error
+	applyErrOn string
+	deleteErr  error
+	deleted    []StorageObject
+	events     *[]string
 }
 
 func (f *fakeStorage) PlanNamespace(context.Context) (NamespacePlan, error) {
@@ -116,10 +126,27 @@ func (f *fakeStorage) Plan(_ context.Context, _ string, vols []seedbox.Volume) (
 }
 
 func (f *fakeStorage) Apply(_ context.Context, obj StorageObject) error {
+	if f.applyErr != nil && (f.applyErrOn == "" || f.applyErrOn == obj.Kind+"/"+obj.Name) {
+		return f.applyErr
+	}
 	f.applied = append(f.applied, obj)
 	f.existing[obj.Name] = true
 	if f.events != nil {
 		*f.events = append(*f.events, "storage:"+obj.Name)
+	}
+	return nil
+}
+
+func (f *fakeStorage) Delete(_ context.Context, obj StorageObject) error {
+	if f.deleteErr != nil {
+		return f.deleteErr
+	}
+	if obj.Kind != KindPersistentVolume {
+		return errors.New("box only deletes a volume it created")
+	}
+	f.deleted = append(f.deleted, obj)
+	if f.events != nil {
+		*f.events = append(*f.events, "deleted:"+obj.Name)
 	}
 	return nil
 }
@@ -620,6 +647,101 @@ func TestExistingRestrictedNamespaceIsSilent(t *testing.T) {
 	}
 	if strings.Contains(f.out.String(), "does not enforce Pod Security") {
 		t.Fatalf("box warned about a namespace that is already restricted:\n%s", f.out)
+	}
+}
+
+// TestAFailedWriteRemovesTheVolumeThisRunCreated: the PV lands, the claim after
+// it fails, and the volume goes again. A claim is namespaced and left for the
+// next apply; a PV is cluster-scoped and is exactly the thing that used to be
+// stranded.
+func TestAFailedWriteRemovesTheVolumeThisRunCreated(t *testing.T) {
+	f := newFakes(t)
+	f.store.applyErr = errors.New("namespaces \"testbox\" not found")
+	f.store.applyErrOn = KindPersistentVolumeClaim + "/testbox-s5n-data"
+
+	_, err := f.apply(t)
+	if err == nil {
+		t.Fatalf("apply succeeded although the claim could not be written\n%s", f.out)
+	}
+	if !strings.Contains(err.Error(), "namespaces \"testbox\" not found") {
+		t.Fatalf("error lost the cause: %v", err)
+	}
+	if len(f.store.deleted) != 1 || f.store.deleted[0].Name != "testbox-s5n-data" {
+		t.Fatalf("deleted = %+v, want only the volume this run created", f.store.deleted)
+	}
+	if !strings.Contains(f.out.String(), "removed PersistentVolume testbox-s5n-data: this run created it and did not finish") {
+		t.Fatalf("box did not say what it removed:\n%s", f.out)
+	}
+	// The claim that failed was never written, and Helm never ran.
+	var claims int
+	for _, o := range f.store.applied {
+		if o.Kind == KindPersistentVolumeClaim {
+			claims++
+		}
+	}
+	if claims != 0 || f.rel.upgrades != 0 {
+		t.Fatalf("a failed run wrote %d claims and %d releases", claims, f.rel.upgrades)
+	}
+}
+
+// TestAFailedReleaseRemovesTheVolumesThisRunCreated: the storage landed and Helm
+// did not, so the volumes go too. Without this, a first install that never got
+// a release leaves two cluster-scoped PVs behind.
+func TestAFailedReleaseRemovesTheVolumesThisRunCreated(t *testing.T) {
+	f := newFakes(t)
+	f.rel.upgradeErr = errors.New("apply s5n in testbox: release failed")
+
+	_, err := f.apply(t)
+	if err == nil {
+		t.Fatal("apply succeeded although the release failed")
+	}
+	if len(f.store.deleted) != 2 {
+		t.Fatalf("deleted = %+v, want both volumes this run created", f.store.deleted)
+	}
+	for _, obj := range f.store.deleted {
+		if obj.Kind != KindPersistentVolume {
+			t.Fatalf("deleted a %s: box only removes volumes it created", obj.Kind)
+		}
+	}
+}
+
+// TestAFailedApplyNeverDeletesAPreExistingVolume: a volume that was there
+// before this run is not box's to remove, even when the run fails after it.
+// Volume "config" exists; the data volume is created and its claim fails.
+func TestAFailedApplyNeverDeletesAPreExistingVolume(t *testing.T) {
+	f := newFakes(t)
+	f.store.existing["testbox-s5n-config"] = true
+	f.store.applyErr = errors.New("claim refused")
+	f.store.applyErrOn = KindPersistentVolumeClaim + "/testbox-s5n-data"
+
+	if _, err := f.apply(t); err == nil {
+		t.Fatal("apply succeeded although the claim could not be written")
+	}
+	for _, obj := range f.store.deleted {
+		if obj.Name == "testbox-s5n-config" {
+			t.Fatalf("deleted the pre-existing volume %s", obj.Name)
+		}
+	}
+	if len(f.store.deleted) != 1 || f.store.deleted[0].Name != "testbox-s5n-data" {
+		t.Fatalf("deleted = %+v, want only the data volume this run created", f.store.deleted)
+	}
+}
+
+// TestAFailedUndoSaysTheVolumeIsStillThere: when the delete itself fails, the
+// operator gets both the cause and the leftover, by name.
+func TestAFailedUndoSaysTheVolumeIsStillThere(t *testing.T) {
+	f := newFakes(t)
+	f.rel.upgradeErr = errors.New("release failed")
+	f.store.deleteErr = errors.New("forbidden")
+
+	_, err := f.apply(t)
+	if err == nil {
+		t.Fatal("apply succeeded although the release failed")
+	}
+	for _, want := range []string{"release failed", "PersistentVolume testbox-s5n-data was created by this run and is still there"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error does not say %q: %v", want, err)
+		}
 	}
 }
 
