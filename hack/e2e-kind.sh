@@ -98,7 +98,11 @@ print(f"{ips[0]}-{ips[-1]}")
 PY
 )
 echo "  MetalLB pool: ${pool}"
-$K apply -f - >/dev/null <<EOF
+# An endpoint address only says the pod is Ready; the webhook server can still be
+# refusing connections while it loads its certificate (seen in CI). So the apply
+# itself is retried until the webhook answers.
+metallb_pool() {
+  $K apply -f - >/dev/null <<EOF
 apiVersion: metallb.io/v1beta1
 kind: IPAddressPool
 metadata:
@@ -117,6 +121,12 @@ spec:
   ipAddressPools:
     - s5n-pool
 EOF
+}
+for i in $(seq 1 30); do
+  metallb_pool 2>"$WORK/metallb.err" && break
+  [ "$i" = 30 ] && { cat "$WORK/metallb.err" >&2; exit 1; }
+  sleep 2
+done
 
 log "namespace ${NS} with Pod Security restricted (enforced)"
 $K create namespace "$NS" --dry-run=client -o yaml | $K apply -f - >/dev/null
