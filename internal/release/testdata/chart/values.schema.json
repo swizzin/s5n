@@ -52,6 +52,13 @@
         "timeoutSeconds": { "type": "integer" }
       }
     },
+    "secrets": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "plexClaimToken": { "type": "string" }
+      }
+    },
     "apps": {
       "type": "object",
       "additionalProperties": {

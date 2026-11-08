@@ -111,6 +111,19 @@ type Options struct {
 	// which writes the directories in the node's filesystem; on a real host the
 	// check is what catches a grant pointing at a directory that is not there.
 	PathsInNode bool
+	// AfterConfirm asks for the answers that outlive no file, after the
+	// operator said yes and before the first write. `box init` asks for the Plex
+	// claim token here: it expires about four minutes after plex.tv/claim
+	// issues it, so it can only reach the apply that installs Plex and must
+	// never be written to either file. What it returns is merged into this
+	// apply's values by dotted values path.
+	AfterConfirm func(ctx context.Context) (map[string]any, error)
+	// TransientKeys names the values paths AfterConfirm answers. The release
+	// Helm stored last time still holds the previous answer, so the diff would
+	// otherwise print a secret the second time box runs; these keys are dropped
+	// from it. A transient answer is therefore never reviewable and never
+	// changeable through apply, which is the point: it is not a setting.
+	TransientKeys []string
 }
 
 // Result is what happened, for the caller to report or a test to assert.
@@ -208,6 +221,10 @@ func (a *Applier) Apply(ctx context.Context, opts Options) (Result, error) {
 	if exists {
 		res.Changes = seedbox.Diff(deployed, values)
 	}
+	// A transient answer is not a setting: the release Helm stored last time
+	// holds the previous one, and showing it would print a secret. Dropping it
+	// before the empty-diff check is also what makes a re-run a no-op.
+	res.Changes = withoutTransient(res.Changes, opts.TransientKeys)
 
 	// The storage is not a release object, so it is planned separately and
 	// written before the release: pods cannot schedule without the claims, and
@@ -248,6 +265,19 @@ func (a *Applier) Apply(ctx context.Context, opts Options) (Result, error) {
 	if !ok {
 		a.logf("oh heck, nvm\n")
 		return res, ErrCancelled
+	}
+
+	// Answers that outlive no file are asked last, and only now: the diff above
+	// is the review, and a claim token that expires in minutes would be expired
+	// by the time a slow reader finished it.
+	if opts.AfterConfirm != nil {
+		extra, err := opts.AfterConfirm(ctx)
+		if err != nil {
+			return res, err
+		}
+		if err := mergeTransient(values, extra); err != nil {
+			return res, err
+		}
 	}
 
 	for _, obj := range plan {
