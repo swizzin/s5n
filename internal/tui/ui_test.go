@@ -253,6 +253,17 @@ func TestTooFewNamesTheMinimum(t *testing.T) {
 	}
 }
 
+// TestValidationErrorIsIndentedWithTheField: huh draws a field's error in the
+// group's footer, outside the field's indent, so the theme has to add it. Both
+// modes keep the same alignment; only the colour differs.
+func TestValidationErrorIsIndentedWithTheField(t *testing.T) {
+	for _, plain := range []bool{false, true} {
+		if got := theme(plain).Focused.ErrorMessage.GetPaddingLeft(); got != 2 {
+			t.Fatalf("plain=%v: the error is indented %d columns, want the field's 2", plain, got)
+		}
+	}
+}
+
 func TestCancelMapsAHuhAbortOnlyOnce(t *testing.T) {
 	if got := cancel(huh.ErrUserAborted); !errors.Is(got, setup.ErrCancelled) {
 		t.Fatalf("huh's abort became %v, want setup.ErrCancelled", got)

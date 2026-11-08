@@ -50,7 +50,10 @@ func theme(plain bool) *huh.Styles {
 	t.Focused.Title = weight(paint(lipgloss.NewStyle(), ink))
 	t.Focused.Description = paint(lipgloss.NewStyle(), muted)
 	t.Focused.ErrorIndicator = lipgloss.NewStyle().SetString("")
-	t.Focused.ErrorMessage = paint(lipgloss.NewStyle(), bad)
+	// The error is drawn by the group's footer, outside the field's own base
+	// style, so it needs the field's indent of its own: flush left, it read as
+	// a message about the step rather than about this answer.
+	t.Focused.ErrorMessage = paint(lipgloss.NewStyle().PaddingLeft(2), bad)
 	t.Focused.SelectSelector = paint(lipgloss.NewStyle().SetString("▸ "), accent)
 	t.Focused.MultiSelectSelector = paint(lipgloss.NewStyle().SetString("▸ "), accent)
 	t.Focused.SelectedPrefix = paint(lipgloss.NewStyle().SetString("▣ "), accent)
