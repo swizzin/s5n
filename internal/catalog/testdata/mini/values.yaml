@@ -1,0 +1,16 @@
+# A two-app chart, for the loader's own tests: small enough that a broken
+# manifest is readable in the test, with the shapes the real chart has (an
+# app with questions, an Arr-like app with an instances list, a local $ref).
+global:
+  tz: Etc/UTC
+
+apps:
+  alpha:
+    enabled: true
+    greeting: hello
+    verbose: false
+  beta:
+    enabled: true
+    instances:
+      - suffix: ""
+        enabled: true
