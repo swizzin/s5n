@@ -785,3 +785,58 @@ func TestPathsInNodeSkipsTheHostCheck(t *testing.T) {
 		t.Fatalf("PV detail = %q, want the grant's path", f.store.applied[0].Detail)
 	}
 }
+
+// Values box derives from the cluster are overlaid after both files and before
+// the diff, so the release Helm stores is the same document a re-run computes.
+func TestBoxValuesAreOverlaidOnTheEffectiveValues(t *testing.T) {
+	f := newFakes(t)
+	peers := []any{map[string]any{
+		"namespaceSelector": map[string]any{"matchLabels": map[string]any{"kubernetes.io/metadata.name": "s5n-gateway"}},
+	}}
+	_, err := f.app.Apply(context.Background(), Options{
+		ChartDir:    "testdata/chart",
+		GrantPath:   f.grantPath,
+		ValuesPath:  f.values,
+		PathsInNode: f.pathsInNode,
+		BoxValues: func(context.Context) (map[string]any, error) {
+			return map[string]any{"networkPolicy": map[string]any{"gatewayFrom": peers}}, nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(f.rel.upgraded) != 1 {
+		t.Fatalf("upgrades = %d, want one", len(f.rel.upgraded))
+	}
+	np, _ := f.rel.upgraded[0]["networkPolicy"].(map[string]any)
+	got, _ := np["gatewayFrom"].([]any)
+	if len(got) != 1 {
+		t.Fatalf("networkPolicy.gatewayFrom = %v, want box's peer", np["gatewayFrom"])
+	}
+	if enabled, _ := np["enabled"].(bool); !enabled {
+		t.Fatal("the overlay dropped networkPolicy.enabled")
+	}
+}
+
+// A derivation failure is a refusal before anything is opened or written: box
+// will not guess a NetworkPolicy peer, and it will not install a release whose
+// apps the Gateway cannot reach.
+func TestBoxValuesRefusalWritesNothing(t *testing.T) {
+	f := newFakes(t)
+	_, err := f.app.Apply(context.Background(), Options{
+		ChartDir:    "testdata/chart",
+		GrantPath:   f.grantPath,
+		ValuesPath:  f.values,
+		PathsInNode: f.pathsInNode,
+		BoxValues: func(context.Context) (map[string]any, error) {
+			return nil, errors.New("the Gateway's address is not held by any LoadBalancer Service")
+		},
+	})
+	if err == nil || !strings.Contains(err.Error(), "NetworkPolicy") && !strings.Contains(err.Error(), "Gateway") {
+		t.Fatalf("want the derivation refusal, got %v", err)
+	}
+	if f.openCalls != 0 || f.storeOpens != 0 || len(f.rel.upgraded) != 0 || len(f.events) != 0 {
+		t.Fatalf("a derivation refusal touched the cluster: opens=%d stores=%d upgrades=%d events=%v",
+			f.openCalls, f.storeOpens, len(f.rel.upgraded), f.events)
+	}
+}

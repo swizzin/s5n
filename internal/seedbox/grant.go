@@ -88,6 +88,11 @@ var GrantKeys = []Rule{
 	{Path: "gateway.parentRef.sectionName", Why: "the listener root opened for this box"},
 
 	{Path: "networkPolicy.enabled", Why: "the default-deny that keeps one box off another"},
+	// gatewayFrom is box's because it is read from the cluster: the namespace
+	// the chosen Gateway implementation's proxy actually runs in. A user who
+	// could set it could widen their apps to whatever namespace they named,
+	// and it would be overwritten on the next apply anyway.
+	{Path: "networkPolicy.gatewayFrom", Whole: true, BoxSets: true, Why: "box reads where the Gateway's proxy runs from the Gateway's own address, so the peer follows the implementation in use rather than a namespace a file guessed"},
 
 	{Path: "apps.*.enabled", Why: "which apps this box has"},
 	{Path: "apps.*.instances", Whole: true, Why: "which instances exist: a suffix is a host name and a category is a directory"},

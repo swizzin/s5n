@@ -46,9 +46,12 @@ gateway:
 
 networkPolicy:
   enabled: true
-  # Where Gateway traffic comes from. Default: the namespace Envoy Gateway deploys
-  # its proxy fleet into (envoy-gateway-system in standard mode), because that is
-  # where the Envoy data plane pods run, not the Gateway's own namespace.
+  # Where Gateway traffic comes from. This default is for a plain `helm install`
+  # behind Envoy Gateway: the namespace its proxy fleet runs in
+  # (envoy-gateway-system in standard mode), not the Gateway's own namespace.
+  # box overrides it on every apply with the namespace of the Service that holds
+  # the Gateway's address, so a box behind another implementation admits that
+  # implementation's proxy instead. Neither file may set it (see the grant rules).
   gatewayFrom:
     - namespaceSelector:
         matchLabels:

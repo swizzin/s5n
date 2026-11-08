@@ -180,6 +180,22 @@ func applyPlatform(ctx context.Context, kubeconfig string, components []bootstra
 	return err
 }
 
+// boxValues is what `box apply` reads from the cluster rather than from either
+// file. The NetworkPolicy peer follows the Gateway implementation in use: box
+// asks the Gateway's own address which Service holds it, and admits that
+// Service's namespace. A box whose Gateway is Envoy Gateways gets
+// envoy-gateway-system exactly as before; one behind another implementation
+// gets wherever that implementation runs its proxy.
+func boxValues(kubeconfig string) func(context.Context) (map[string]any, error) {
+	return func(ctx context.Context) (map[string]any, error) {
+		peers, err := platform.GatewayFrom(ctx, kubeconfig)
+		if err != nil {
+			return nil, fmt.Errorf("networkPolicy.gatewayFrom: %w", err)
+		}
+		return map[string]any{"networkPolicy": map[string]any{"gatewayFrom": peers}}, nil
+	}
+}
+
 // classChooser adapts bootstrap's class question onto setup.Prompter, so
 // choosing an implementation is the same dialog init asks with. The classes
 // are listed by name with their controller as the help line.
@@ -279,6 +295,7 @@ func runApply(args []string) {
 		GrantPath:   *grantPath,
 		ValuesPath:  *valuesPath,
 		PathsInNode: *pathsInNode,
+		BoxValues:   boxValues(kc),
 	})
 	if err != nil {
 		if errors.Is(err, release.ErrCancelled) {
@@ -421,6 +438,7 @@ func (o *initFlags) run(ctx context.Context, kubeconfig string, yes, plain bool)
 				PathsInNode:   req.PathsInNode,
 				AfterConfirm:  req.AfterConfirm,
 				TransientKeys: req.TransientKeys,
+				BoxValues:     boxValues(kc),
 			})
 			return err
 		},

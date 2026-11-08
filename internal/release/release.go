@@ -127,6 +127,12 @@ type Options struct {
 	// from it. A transient answer is therefore never reviewable and never
 	// changeable through apply, which is the point: it is not a setting.
 	TransientKeys []string
+	// BoxValues returns values box derives from the cluster rather than from
+	// either file, overlaid after both and before the diff. It is how
+	// networkPolicy.gatewayFrom follows the Gateway implementation actually in
+	// use: a value that is box's, not the operator's, and that has to be
+	// recomputed on every apply so a re-run is still a no-op.
+	BoxValues func(ctx context.Context) (map[string]any, error)
 }
 
 // Result is what happened, for the caller to report or a test to assert.
@@ -214,6 +220,20 @@ func (a *Applier) Apply(ctx context.Context, opts Options) (Result, error) {
 	values, err := sb.Effective(seedbox.Chart{Values: chart.Values, Schema: chart.Schema})
 	if err != nil {
 		return res, err
+	}
+	// Values box derives from the cluster are applied last, exactly like the
+	// claim names: neither file may set them, and nothing in either file can
+	// shadow them. They are recomputed on every apply, so the stored release
+	// and the computed document stay comparable and a re-run remains empty.
+	if opts.BoxValues != nil {
+		box, err := opts.BoxValues(ctx)
+		if err != nil {
+			return res, err
+		}
+		overlayTree(values, box)
+		if err := seedbox.Validate(chart.Schema, values); err != nil {
+			return res, err
+		}
 	}
 
 	// The namespace is read before the release is: a claim cannot be written
@@ -476,4 +496,19 @@ func plural(n int, one, many string) string {
 		return one
 	}
 	return many
+}
+
+// overlayTree applies box's cluster-derived values on top of the effective
+// document. Mappings merge, so networkPolicy's other keys survive; a list or a
+// scalar replaces, because a NetworkPolicy peer list is one decision.
+func overlayTree(dst, src map[string]any) {
+	for k, v := range src {
+		if sm, ok := v.(map[string]any); ok {
+			if dm, ok := dst[k].(map[string]any); ok {
+				overlayTree(dm, sm)
+				continue
+			}
+		}
+		dst[k] = v
+	}
 }

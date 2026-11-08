@@ -42,7 +42,8 @@
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "enabled": { "type": "boolean" }
+        "enabled": { "type": "boolean" },
+        "gatewayFrom": { "type": "array", "items": { "type": "object" } }
       }
     },
     "wiring": {

@@ -27,6 +27,7 @@ gateway:
 
 networkPolicy:
   enabled: true
+  gatewayFrom: []
 
 wiring:
   timeoutSeconds: 300
