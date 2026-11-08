@@ -26,7 +26,7 @@ Read `PLAN.md` first. It is the architecture; this file is how to work in the re
   comments and indentation survive. `grant.go` is the only list of what the grant owns:
   a new values key that decides isolation needs a rule there, and
   `TestGrantKeysAreRealKeys` fails if a rule names a key the chart does not have. Only
-  this package and `internal/admission` may import `go.yaml.in/yaml/v3`, and only this
+  this package, `internal/admission` and `internal/catalog` may import `go.yaml.in/yaml/v3`, and only this
   package the JSON-schema library; `cmd/s5n` must stay stdlib-only.
 - `internal/admission/` — the admission contract root writes. `Render` turns one grant
   (namespace, torrent nodePort, Service type) into the params ConfigMap in `s5n-system`
@@ -35,11 +35,30 @@ Read `PLAN.md` first. It is the architecture; this file is how to work in the re
   a binding never re-checks a running pod. Pure: no client-go. Its goldens are the
   output of the Python renderer it replaced, and one renders the real `variants.yaml`,
   so re-blessing an image fails a test on purpose.
+- `charts/s5n/catalog.yaml` — the catalog manifest: one entry per app under `apps:`
+  (description, whether it takes instances, whether init preselects it, its setup
+  questions). Chart-owned beside `variants.yaml`; values cannot override it. A question
+  names a user-owned values path only, never a grant key, and its kind (`string`,
+  `secret`, `bool`, `transient`) must match `values.schema.json`.
+- `internal/catalog/` — reads that manifest as untrusted input: strict decode, 256 KiB
+  cap, exactly one entry per app in `values.yaml`, every question key a schema leaf the
+  grant does not own. Errors name the entry.
+- `internal/setup/` — `box init`'s decision over `Prompter` (the UI seam) and `PathHost`
+  (stat, statfs, mountinfo, mkdir, chown). A re-run asks with the current answers filled
+  in and splices only changed keys; nothing is written until the last question; a cancel
+  writes nothing and says "oh heck, nvm". `LinePrompt` is the plain implementation.
+- `internal/tui/` — init's dialogs: huh behind `setup.Prompter`, with box's masthead,
+  accent and step header drawn by box. The only package that imports huh, lipgloss or
+  bubbletea. `tui.Decide` picks the UI: no terminal on stdin is unattended, `TERM=dumb`,
+  `--plain` or a piped stdout get `LinePrompt`, `NO_COLOR` keeps the form without colour.
 - `internal/release/` — `box apply`'s decision over `ChartSource`, `ReleaseClient` and
   `Confirmer`, with the Helm v4 + client-go implementation in `helm.go`. The only
-  package that imports Helm or client-go; only `cmd/box` links it.
+  package that imports Helm or client-go; only `cmd/box` links it. It creates a missing
+  seedbox namespace (Pod Security `restricted`, managed-by `box`) before the first
+  volume, and removes only the volumes it created if a run fails before the release.
 - `cmd/box/` — the host CLI. `bootstrap` decides the cluster (it still installs
-  nothing); `apply` loads root's grant and values, checks them against the chart's
+  nothing); `init` asks a seedbox's questions, writes the two files and hands over to
+  `apply`; `apply` loads root's grant and values, checks them against the chart's
   schema, diffs against the deployed release, confirms, installs or upgrades release
   `s5n` in the grant's namespace, and prints the wiring receipt.
 - `Dockerfile` — static binary on distroless; the image the wiring Job and the
@@ -59,15 +78,15 @@ Read `PLAN.md` first. It is the architecture; this file is how to work in the re
   allows Prowlarr→Sonarr and blocks an outside pod, the wiring Job connects everything,
   and a second `helm upgrade` performs **zero writes** with app state identical before
   and after. `--keep` leaves the cluster up.
-- `hack/e2e-box.sh` — the same install done by `box apply` instead of helm: first
-  install, a re-apply that must be zero writes, and a one-key edit whose diff names only
-  that key. Not in CI yet.
+- `hack/e2e-box.sh` — the same install done by box instead of helm: `box init` on a
+  cluster with no namespace, a second identical init that changes nothing, and a
+  one-key `box apply` edit whose diff names only that key. Not in CI yet.
 - `hack/render-grant/` — `internal/admission` as a command, the e2e's caller until
   `box adduser` exists.
 - `.github/workflows/ci.yaml` — every PR and push to main: gofmt/vet/`go test -race`,
   `hack/validate-chart.sh` on 1.30/1.34/1.37, then the kind e2e.
   Actions are pinned by commit SHA.
-- No installer yet: `box` uses an existing cluster.
+- No cluster installer yet: `box` uses an existing cluster.
 
 ## Commands
 
@@ -118,7 +137,11 @@ one needs a live `lookup`. The e2e asserts the policy exists in the cluster.
    no keel, no arbitrary registry.
 7. **No secrets in values, ConfigMaps, the repo, or logs.** Credentials live in the Secret
    (`secret.yaml`, preserved across upgrades via `lookup`). The wiring config points at
-   *file paths* in the mounted Secret, never at values.
+   *file paths* in the mounted Secret, never at values. One exception, by design: a
+   *transient* answer (the Plex claim token, which expires minutes after issue) reaches
+   one apply through `release.Options.AfterConfirm`, is never written to either file and
+   is dropped from diffs by `Options.TransientKeys`. Helm stores the values it renders,
+   so it sits in the release Secret until the next apply.
 8. **Enterprise features stay out** (quotas, metering, multi-tenancy, SSH, shells).
    See PLAN.md "Non-goals".
 9. **Nothing personal or private enters the repo.** Commit identity comes from the repo's
@@ -160,7 +183,9 @@ one needs a live `lookup`. The e2e asserts the policy exists in the cluster.
     no chart, no cluster) opens no connection, and an empty diff returns before Helm is
     called. The diff compares the effective values (chart defaults, then values, then
     grant) with the values Helm stored on the deployed release. Tests assert the client
-    was never opened, not just the message.
+    was never opened, not just the message. A first install's plan names the namespace
+    box will create; a volume this run wrote is removed if the run fails before the
+    release, and a pre-existing volume never is.
 
 ## Gotchas already hit
 
@@ -239,7 +264,30 @@ one needs a live `lookup`. The e2e asserts the policy exists in the cluster.
 - Host directories must exist and be owned by puid:pgid *before* install; the PV uses
   `type: Directory`. `box apply` stats both paths and refuses before any write if one is
   missing; `--paths-in-node` skips that only for the kind e2e, whose paths are inside the
-  node. `box init` will create them on real hosts.
+  node. `box init` creates them on real hosts: it asks first in guided mode (a disk that
+  didn't mount leaves an empty directory on `/`) and refuses a missing path unattended.
+- A kubelet creating a missing `subPath` makes it root-owned, so the app starts and can't
+  save its settings. `box init` creates `<config>/<instance>` for every enabled instance,
+  owned puid:pgid; the data categories stay the wiring Job's, which creates them as puid.
+- `box init --puid/--pgid` track whether the flag was given: the default comes from the
+  invoking user, and a re-run keeps the grant's ids instead of re-chowning to whoever ran
+  it.
+- A fresh cluster has no seedbox namespace. `apply` checks with a SelfSubjectAccessReview
+  and refuses before any write when the kubeconfig can't create one (a user's is
+  namespace-scoped; root makes it at `adduser`). An existing namespace is never
+  relabelled; one whose `enforce` isn't `restricted` gets a warning, not a change.
+- huh's accessible mode silently returns an empty secret when its reader isn't a real
+  terminal, so box never uses it. A huh form knows nothing of the flow: box prints the
+  masthead, step counter and breadcrumb itself, and Esc has to be added to
+  `huh.KeyMap.Quit`.
+- `os.File.ReadDir(n)` with n > 0 reports the end of a directory as `io.EOF`, not nil;
+  a probe that doesn't swallow it reads every empty directory as a failure.
+- The e2e scripts own their kubeconfig (`$S5N_E2E_KUBECONFIG`, default
+  `~/.cache/s5n-e2e/kubeconfig`): kind rewrites the file it's given and leaves no
+  current-context after a delete, so they never touch `~/.kube/config`. Point
+  `KUBECONFIG` at that file to reach a `--keep` cluster.
+- MetalLB's webhook endpoint can be Ready while the server still refuses connections, so
+  the e2e retries the pool apply rather than trusting the endpoint.
 - box never changes a static PV in place. A PV of box's name that backs another path or
   claim, or a claim pinned to another volume, is refused with both sides named. The
   pre-claims chart named its PV `<ns>-<fullname>-<kind>`, the same as box's for release
@@ -280,23 +328,20 @@ one needs a live `lookup`. The e2e asserts the policy exists in the cluster.
   `TestEnsureDownloadClientNeverLeaksMaskedSecret`), because the overlay is new code and it
   would have been easy to accidentally route the live (masked) value back into the PUT body.
 
-## Next work, in order (Phase 1)
+## Next work
 
-1. **Envoy Gateway in the e2e**, replacing Traefik, and the torrent port as a
-   LoadBalancer Service sharing the Gateway's address (`metallb.io/allow-shared-ip`).
-   Record Envoy Gateway's idle memory: it decides whether it stays the default on small boxes.
-2. **Plex, then Tautulli and Seerr** (v1 catalog) and their wiring steps. Plex first:
-   the other two attach to it. A missing claim token leaves the media rows `pending`
-   in the receipt rather than failing the release. Jellyfin is v1.x, not now.
-3. **Upgrade e2e**: the previous tagged chart to the current one, data and wiring intact.
-4. Fold `hack/grab-test.sh` into CI once it no longer needs live TMDB/TVDB metadata,
-   then add k0s and k3s e2e (`test/e2e/`) as a nightly workflow.
+The proof of concept: box takes a fresh host from nothing to a running, wired stack.
+
+1. `box bootstrap` applies the platform layer (Gateway API CRDs and Envoy Gateway,
+   MetalLB, `install/platform/admission/policy.yaml`) instead of printing it, then runs
+   `init`.
+2. bootstrap installs k0s on a clean host (`PrintInstaller` is still a stub).
+
+Then: `hack/e2e-box.sh` in CI, the upgrade e2e, and `adduser`. The product decisions are
+in `docs/box.md`, marked decided, proposed or open.
 
 In parallel, outside this repo: `swizzin/qbittorrent`, the userdocs static recipe plus
 `build/libtorrent/` patches, published as `<qbit>-lt<libtorrent>` for amd64 and arm64.
-
-Phase 2 then starts with `box bootstrap`'s cluster detection and platform probes: pure Go
-over interfaces, testable without a cluster, before any Helm SDK code lands in `cmd/box`.
 
 Keep commits small. Each commit: lint + kubeconform green; chart-changing commits also
 e2e green.
