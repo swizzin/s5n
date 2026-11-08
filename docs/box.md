@@ -73,16 +73,39 @@ key that changed, so comments, key order, blank lines and indentation survive. `
 not wired to it yet. The per-key decision of what the grant owns lives in
 `internal/seedbox/grant.go`; the torrent port below is treated as the grant's for now.
 
+### Storage: host paths and claims box creates (decided)
+
+A seedbox's data and config live on host paths. Mounting them (fstab, a pool, a union
+filesystem) is the host's business; box never mounts anything. There is no CSI driver
+and no provisioner: one that creates a directory or volume per claim splits `/data`
+across filesystems, and hardlinks don't cross them.
+
+- **The chart takes a claim and nothing else.** `storage.data.existingClaim` and
+  `storage.config.existingClaim` name claims that already exist. The chart creates no
+  PersistentVolume or claim and has no hostPath, storage class or size setting. On a
+  plain `helm install` the operator brings the claims, from any storage they like.
+- **box creates them.** From the paths in the grant, box writes a static PersistentVolume
+  (reclaim `Retain`, bound to exactly one claim) and its claim, before the release:
+  for root at `init`, for each user at `adduser`. A host path never appears in a pod
+  spec, so Pod Security `restricted` still admits every pod.
+- **Size is nominal.** A host path PV's capacity is not enforced; the disk is the
+  limit. box writes a fixed size, and nothing a user edits can resize a static claim.
+  box enforces no quota.
+- **The data outlives the release.** The claims aren't release objects, so
+  `helm uninstall` can't delete them; only box's `--purge` does.
+- **`init` creates the paths.** Guided init reports back what it found: device, mount
+  point, free space and owner. Unattended runs the same check at the start, with fewer
+  guardrails.
+
 ### How a user's box gets its power (proposed)
 
 Without root, a user's box gets a kubeconfig scoped to that user's namespace. Everything
 that would let the user reach past it is created by root at `box adduser`, where the
 user can't change it:
 
-- **Storage.** Root creates the PersistentVolumes and claims, and the user's release
-  uses them through `existingClaim`. The chart already prefers `existingClaim` over
-  `hostPath` (`charts/s5n/templates/storage.yaml`), and PVs are cluster-scoped, so the
-  user couldn't create one anyway.
+- **Storage.** Root creates the PersistentVolumes and claims (above), and the user's
+  release uses them through `existingClaim`. PVs are cluster-scoped, so the user
+  couldn't create one anyway.
 - **Pod Security.** Root sets `restricted` on the namespace. Namespaces are
   cluster-scoped, so the user can't relabel their own.
 - **Routing.** Root adds a Gateway listener for the user's domain that only accepts
