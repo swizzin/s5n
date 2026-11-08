@@ -20,6 +20,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/cli-runtime/pkg/genericclioptions"
 	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/rest"
 )
 
 // DirChart loads a chart from a local directory. A chart release read from the
@@ -80,6 +81,13 @@ func NewHelm(kubeconfig, namespace, releaseName string) (*Helm, error) {
 	flags := genericclioptions.NewConfigFlags(false)
 	flags.KubeConfig = &kubeconfigPath
 	flags.Namespace = &ns
+
+	// client-go's default warning handler prints deprecation notices through
+	// klog, which would put a line like "I1107 ... Endpoints is deprecated" in
+	// the middle of box's own output. box is the whole interface (docs/box.md),
+	// so Kubernetes noise is dropped here rather than explained away. Helm's own
+	// warnings go through slog to stderr and are unaffected.
+	rest.SetDefaultWarningHandler(rest.NoWarnings{})
 
 	cfg := new(action.Configuration)
 	if err := cfg.Init(flags, ns, "secret"); err != nil {
