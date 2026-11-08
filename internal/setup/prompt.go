@@ -37,6 +37,27 @@ type Prompter interface {
 	Note(text string) error
 }
 
+// Stepper is an optional extension of Prompter. A prompter that shows progress
+// implements it and init tells it which piece of the flow the next answer
+// belongs to, before asking. Nothing is decided by it: a prompter that does not
+// implement it (LinePrompt does not) simply never hears the steps.
+type Stepper interface {
+	// Step is the step the next field belongs to, out of however many this run
+	// will show, and the step's own question as a line of chrome. The field
+	// still carries its own label.
+	Step(n, total int, question string)
+}
+
+// PathChecker is an optional extension of Prompter. The path report is the one
+// thing init shows that is more than a line of text, and a prompter that can
+// style it is handed the structure instead: a row per fact, and a warning the
+// prompter can colour. LinePrompt does not implement it and keeps receiving
+// Note(check.Text()), which is exactly the text it printed before the seam
+// existed.
+type PathChecker interface {
+	ShowPathCheck(check PathCheck) error
+}
+
 // Input is one line of free text. Key is the values path it answers: it is what
 // an error names, so the operator knows which answer is wrong.
 type Input struct {
@@ -56,10 +77,16 @@ type Secret struct {
 	Optional bool
 }
 
-// Confirm is one yes/no question.
+// Confirm is one yes/no question. Default is the answer an empty line takes,
+// and the button a terminal UI focuses first.
 type Confirm struct {
 	Prompt  string
 	Default bool
+	// Affirmative and Negative label the two buttons for a prompter that draws
+	// them. Empty means the prompter's own "yes" and "no"; the line prompt
+	// always prints y/n.
+	Affirmative string
+	Negative    string
 }
 
 // Option is one entry of a Select or MultiSelect.

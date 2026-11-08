@@ -41,6 +41,18 @@ type Decision struct {
 	// function rather than the release package so init does not link Helm.
 	Apply ApplyFunc
 	Log   io.Writer
+
+	// steps is how many steps this run shows, for a prompter that draws a step
+	// counter. It is advice for a UI, never an input: nothing reads it back.
+	steps int
+}
+
+// step tells a prompter that draws progress where the next answer belongs.
+// Prompters without a Stepper (LinePrompt) hear nothing.
+func (d *Decision) step(n int, question string) {
+	if st, ok := d.Prompt.(Stepper); ok {
+		st.Step(n, d.steps, question)
+	}
 }
 
 // Options are one `box init`. Every grant question has a field here: that is
@@ -160,6 +172,18 @@ func (d *Decision) Run(ctx context.Context, opts Options) (Result, error) {
 	}
 
 	// The grant's questions, in the order docs/box.md lists them.
+	//
+	// The flow has three steps of its own, and a fourth when an app has
+	// questions of its own (the catalog's qBittorrent does). A prompter that
+	// draws a counter is told, and a prompter without one never notices.
+	d.steps = 3
+	for _, name := range d.appsOn(grantNow, res.ReRun) {
+		if app, ok := d.Catalog.App(name); ok && len(app.Stored()) > 0 {
+			d.steps = 4
+			break
+		}
+	}
+	d.step(1, "what domain will this box answer on?")
 	domain, err := d.askText(textQuestion{
 		key: "gateway.host", flag: "--domain",
 		prompt: "domain", help: "the name this box is reached at, e.g. box.example.com",
@@ -169,6 +193,7 @@ func (d *Decision) Run(ctx context.Context, opts Options) (Result, error) {
 	if err != nil {
 		return res, d.stop(err)
 	}
+	d.step(2, "where should your data and settings live?")
 	dataPath, err := d.askText(textQuestion{
 		key: "storage.data.path", flag: "--data-path",
 		prompt: "data path", help: "where downloads and media live on this host",
@@ -199,14 +224,25 @@ func (d *Decision) Run(ctx context.Context, opts Options) (Result, error) {
 		{kind: "config", flag: "--config-path", path: configPath},
 	}
 	if !opts.PathsInNode {
+		d.step(2, "where should your data and settings live?")
 		if err := d.reportPaths(paths, puid, pgid, opts.Unattended); err != nil {
 			return res, d.stop(err)
 		}
 	}
 
+	d.step(3, "which apps should run here?")
 	apps, err := d.askApps(opts, grantNow, res.ReRun)
 	if err != nil {
 		return res, d.stop(err)
+	}
+	// The app list decides whether there is a fourth step, so correct the
+	// counter before the questions that belong to it.
+	d.steps = 3
+	for _, name := range apps {
+		if app, ok := d.Catalog.App(name); ok && len(app.Stored()) > 0 {
+			d.steps = 4
+			break
+		}
 	}
 
 	// Each selected app's own questions, from the catalog. A transient one is
@@ -221,6 +257,9 @@ func (d *Decision) Run(ctx context.Context, opts Options) (Result, error) {
 		transient = append(transient, app.Transient()...)
 		if opts.Unattended {
 			continue
+		}
+		if len(app.Stored()) > 0 {
+			d.step(4, "how should "+name+" be set up?")
 		}
 		for _, q := range app.Stored() {
 			value, err := d.askQuestion(q, base)
@@ -415,6 +454,26 @@ func (d *Decision) ids(opts Options, grantNow map[string]any, reRun bool) (int, 
 	return puid, pgid, nil
 }
 
+// appsOn is the app list init offers preselected: the grant's on a re-run, the
+// catalog's defaults on a fresh box. `--apps` is not here: in guided mode it is
+// a starting answer the multi-select still shows, so the only use for this list
+// is the step count before that question is asked.
+func (d *Decision) appsOn(grantNow map[string]any, reRun bool) []string {
+	names := d.Catalog.Names()
+	var current []string
+	if reRun {
+		for _, name := range names {
+			if on, ok := lookupPath(grantNow, "apps."+name+".enabled"); ok {
+				if b, _ := on.(bool); b {
+					current = append(current, name)
+				}
+			}
+		}
+		return current
+	}
+	return d.Catalog.Defaults()
+}
+
 // askApps resolves the app list: the flag unattended, a multi-select otherwise,
 // preselected from the grant on a re-run and from the catalog on a fresh box.
 func (d *Decision) askApps(opts Options, grantNow map[string]any, reRun bool) ([]string, error) {
@@ -425,18 +484,7 @@ func (d *Decision) askApps(opts Options, grantNow map[string]any, reRun bool) ([
 		options = append(options, Option{Value: name, Label: name, Help: app.Description})
 	}
 
-	var current []string
-	if reRun {
-		for _, name := range names {
-			if on, ok := lookupPath(grantNow, "apps."+name+".enabled"); ok {
-				if b, _ := on.(bool); b {
-					current = append(current, name)
-				}
-			}
-		}
-	} else {
-		current = d.Catalog.Defaults()
-	}
+	current := d.appsOn(grantNow, reRun)
 
 	given := splitApps(opts.Apps)
 	if opts.Unattended {
@@ -638,22 +686,33 @@ type pathTarget struct {
 	create bool
 }
 
+// pathCheckFooter says what init then does without asking: the directories
+// under the two paths that belong to the apps. It lives here, not in a UI,
+// because both prompters must say the same thing.
+const pathCheckFooter = "  downloads/<category> and media/<category> are made on the first start, owned as above"
+
 // reportPaths shows what is at both paths and asks about a missing one. The
 // answer is remembered, not acted on: the directories are created after the last
 // question, so a cancel leaves the host as it was.
 func (d *Decision) reportPaths(paths []pathTarget, uid, gid int, unattended bool) error {
-	var b strings.Builder
-	b.WriteString("paths\n")
+	check := PathCheck{Footer: pathCheckFooter}
 	for i := range paths {
 		rep, err := d.inspect(paths[i].kind, paths[i].path, uid, gid)
 		if err != nil {
 			return err
 		}
 		paths[i].report = rep
-		b.WriteString(rep.String())
+		check.Reports = append(check.Reports, rep)
 	}
-	b.WriteString("  downloads/<category> and media/<category> are made on the first start, owned as above\n")
-	if err := d.Prompt.Note(strings.TrimRight(b.String(), "\n")); err != nil {
+	// A terminal UI draws the block; the line prompt gets the plain text, which
+	// is exactly what it printed before this seam existed.
+	var err error
+	if pc, ok := d.Prompt.(PathChecker); ok {
+		err = pc.ShowPathCheck(check)
+	} else {
+		err = d.Prompt.Note(check.Text())
+	}
+	if err != nil {
 		return err
 	}
 	for i := range paths {
@@ -664,8 +723,12 @@ func (d *Decision) reportPaths(paths []pathTarget, uid, gid int, unattended bool
 			return fmt.Errorf("%s %s does not exist, and --yes does not create it: create the directory (or mount its disk) and run init again", paths[i].flag, paths[i].path)
 		}
 		ok, err := d.Prompt.Confirm(Confirm{
-			Prompt:  "create " + paths[i].path + " on that filesystem?",
-			Default: false,
+			Prompt: "create " + paths[i].path + " on that filesystem?",
+			// The safe answer stays the focused one: init never creates a
+			// directory because somebody pressed enter.
+			Default:     false,
+			Affirmative: "create it",
+			Negative:    "stop here",
 		})
 		if err != nil {
 			return err

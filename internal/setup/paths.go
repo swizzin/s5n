@@ -34,6 +34,39 @@ type PathReport struct {
 	// OnRoot says the path (or the ancestor a missing path would land under)
 	// is on the root filesystem, which is the unmounted-disk case.
 	OnRoot bool
+	// SameDevice says the path sits on the same device as the root filesystem
+	// without being on its mount point: a separate partition of the system
+	// disk. Filling it takes the host down just the same, and the plain text
+	// does not say so (it is a warning a terminal UI draws; the line prompt's
+	// report is older than this field and stays byte for byte what it was).
+	SameDevice bool
+}
+
+// PathCheck is the whole report: one entry per host path, and the line about
+// the directories the apps create themselves on first start. It is structure
+// rather than text so a prompter can draw it as a table with glyphs and a
+// coloured warning; Text is the plain rendering init has always shown.
+type PathCheck struct {
+	Reports []PathReport
+	// Footer is the line about the directories beneath the paths, which init
+	// does create without asking.
+	Footer string
+}
+
+// Text renders the check the way `box init`'s line prompt has always printed
+// it: a heading, one block per path, and the footer. It is the contract for
+// prompters that cannot style anything.
+func (c PathCheck) Text() string {
+	var b strings.Builder
+	b.WriteString("paths\n")
+	for _, r := range c.Reports {
+		b.WriteString(r.String())
+	}
+	if c.Footer != "" {
+		b.WriteString(c.Footer)
+		b.WriteString("\n")
+	}
+	return strings.TrimRight(b.String(), "\n")
 }
 
 // String renders one path for the report block. Continuation lines are indented
@@ -102,6 +135,9 @@ func (d *Decision) inspect(kind, path string, uid, gid int) (PathReport, error) 
 	if m, ok := mountFor(mounts, anchor); ok {
 		rep.Mount = m
 		rep.OnRoot = m.Point == string(filepath.Separator)
+		if root, ok := mountFor(mounts, string(filepath.Separator)); ok {
+			rep.SameDevice = root.Major == m.Major && root.Minor == m.Minor
+		}
 	}
 	fsinfo, err := d.Host.StatFS(anchor)
 	if err != nil {
