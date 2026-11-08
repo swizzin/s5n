@@ -88,6 +88,14 @@ across filesystems, and hardlinks don't cross them.
   (reclaim `Retain`, bound to exactly one claim) and its claim, before the release:
   for root at `init`, for each user at `adduser`. A host path never appears in a pod
   spec, so Pod Security `restricted` still admits every pod.
+- **The namespace comes first, when it is missing.** box creates it with Pod Security
+  `restricted` -- the labels root's `adduser` sets -- and only before the first volume:
+  a claim written into a namespace that is not there fails after its cluster-scoped PV
+  has been created. An existing namespace is never relabelled: root's or an admin's
+  labels win, and one that does not enforce `restricted` is reported, not changed. A
+  user's kubeconfig is namespace-scoped and cannot create a namespace, so root creates
+  a user's at `adduser`; apply refuses and names that command instead of writing a
+  volume it cannot finish.
 - **Size is nominal.** A host path PV's capacity is not enforced; the disk is the
   limit. box writes a fixed size, and nothing a user edits can resize a static claim.
   box enforces no quota.

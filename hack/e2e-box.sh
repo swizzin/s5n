@@ -9,7 +9,8 @@
 # checks them against the chart's schema, diffs, confirms and calls the Helm SDK
 # itself. It then proves the four properties the init/apply path has to have:
 #
-#   1. a first init installs the stack and its wiring receipt says ok;
+#   1. a first init on a cluster with no namespace creates it (Pod Security
+#      restricted) and installs the stack, and its wiring receipt says ok;
 #   2. a second init with identical answers splices nothing (both files are
 #      byte-identical) and its apply is a no-op;
 #   3. one edited value is printed as a diff, applied, and visible in the
@@ -66,12 +67,6 @@ docker exec "${CLUSTER}-control-plane" bash -c '
            /srv/s5n/data/media/{tv,movies,tv-4k,movies-4k} \
            /srv/s5n/config/{qbittorrent,prowlarr,sonarr,sonarr-4k,radarr,radarr-4k,plex,tautulli,seerr}
   chown -R 1000:1000 /srv/s5n'
-
-log "namespace ${NS} with Pod Security restricted (enforced)"
-$K create namespace "$NS" --dry-run=client -o yaml | $K apply -f - >/dev/null
-$K label --overwrite namespace "$NS" \
-  pod-security.kubernetes.io/enforce=restricted \
-  pod-security.kubernetes.io/warn=restricted >/dev/null
 
 log "Gateway API CRDs and a Gateway (the chart's parentRef target)"
 $HELM upgrade --install envoy-gateway oci://docker.io/envoyproxy/gateway-helm \
@@ -147,6 +142,10 @@ else
 fi
 grep -q "first install" "$WORK/apply1.txt" || { echo "no 'first install' line"; fail=1; }
 grep -q "^wiring ok" "$WORK/apply1.txt" || { echo "box did not report a healthy receipt"; fail=1; }
+# The namespace was box's first write, and the plan said so: the cluster had
+# none of it before this run.
+grep -qF '+ Namespace seedbox (Pod Security restricted)' "$WORK/apply1.txt" ||
+  { echo "the plan did not show the namespace it creates"; fail=1; }
 
 # The receipt is the same object the helm path asserts, so the same checks
 # apply: every wiring step ok, and the three that need a Plex token pending.
@@ -191,8 +190,22 @@ done
 [ "$($K get pv seedbox-s5n-data -o jsonpath='{.spec.hostPath.path}')" = /srv/s5n/data ] || fail=1
 [ "$($K get pv seedbox-s5n-config -o jsonpath='{.spec.hostPath.path}')" = /srv/s5n/config ] || fail=1
 
+# ---- the namespace: box created it, at restricted ----
+# init owns the namespace on a fresh cluster now, so it is what proves the
+# claims could be written at all. The labels are the ones root's `adduser`
+# sets: enforce is what admits a pod, audit and warn say the same level.
+ns_label() { $K get namespace "$NS" -o jsonpath="{.metadata.labels.pod-security\.kubernetes\.io/$1}"; }
+ns_enforce=$(ns_label enforce); ns_audit=$(ns_label audit); ns_warn=$(ns_label warn)
+ns_manager=$($K get namespace "$NS" -o jsonpath='{.metadata.labels.app\.kubernetes\.io/managed-by}')
+echo "  namespace ${NS}: enforce=${ns_enforce} audit=${ns_audit} warn=${ns_warn} managed-by=${ns_manager}"
+[ "$ns_enforce" = restricted ] || { echo "the namespace does not enforce restricted"; fail=1; }
+[ "$ns_audit" = restricted ] || { echo "the namespace does not audit restricted"; fail=1; }
+[ "$ns_warn" = restricted ] || { echo "the namespace does not warn restricted"; fail=1; }
+[ "$ns_manager" = box ] || { echo "the namespace is not labelled managed-by box"; fail=1; }
+
 # Zero writes includes the storage: the same resourceVersions after apply 2.
 storage_before=$(storage_state)
+ns_before=$($K get namespace "$NS" -o jsonpath='{.metadata.resourceVersion}')
 
 rev1=$(revision); secrets1=$(release_secrets)
 echo "release revision ${rev1} (${secrets1} release secrets)"
@@ -234,6 +247,15 @@ if [ "$storage_after" != "$storage_before" ]; then
   fail=1
 else
   echo "storage untouched: ${storage_after}"
+fi
+ns_after=$($K get namespace "$NS" -o jsonpath='{.metadata.resourceVersion}')
+if [ "$ns_after" != "$ns_before" ]; then
+  echo "the unchanged apply touched the namespace"
+  echo "  before: ${ns_before}"
+  echo "  after:  ${ns_after}"
+  fail=1
+else
+  echo "namespace untouched: ${ns_after}"
 fi
 
 # ---- apply 3: one key edited -------------------------------------------------

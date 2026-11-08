@@ -5,9 +5,12 @@ import (
 	"strings"
 	"testing"
 
+	authv1 "k8s.io/api/authorization/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/kubernetes/fake"
+	k8stesting "k8s.io/client-go/testing"
 
 	"github.com/swizzin/s5n/internal/seedbox"
 )
@@ -181,3 +184,139 @@ func TestKubeStorageRefusesABoundClaim(t *testing.T) {
 }
 
 func ptr[T any](v T) *T { return &v }
+
+// reviewAnswers answers the access review with one verdict. The TypeMeta is
+// what the API server sends back; the fake tracker needs it to decode the
+// object it returns.
+func reviewAnswers(cs *fake.Clientset, allowed bool) {
+	cs.PrependReactor("create", "selfsubjectaccessreviews", func(k8stesting.Action) (bool, runtime.Object, error) {
+		return true, &authv1.SelfSubjectAccessReview{
+			TypeMeta: metav1.TypeMeta{APIVersion: "authorization.k8s.io/v1", Kind: "SelfSubjectAccessReview"},
+			Status:   authv1.SubjectAccessReviewStatus{Allowed: allowed},
+		}, nil
+	})
+}
+
+// allowNamespaceCreate answers the access review the way root's kubeconfig
+// does.
+func allowNamespaceCreate(cs *fake.Clientset) { reviewAnswers(cs, true) }
+
+// TestKubeStorageCreatesTheNamespaceItNeeds: a fresh cluster has no namespace,
+// so box asks whether it may create one, creates it with the restricted labels
+// and its own managed-by label, and then plans the namespace as present.
+func TestKubeStorageCreatesTheNamespaceItNeeds(t *testing.T) {
+	ctx := context.Background()
+	cs := fake.NewClientset()
+	allowNamespaceCreate(cs)
+	s := NewStorageFor("testbox", cs)
+
+	plan, err := s.PlanNamespace(ctx)
+	if err != nil {
+		t.Fatalf("PlanNamespace: %v", err)
+	}
+	if plan.Exists || !plan.CanCreate {
+		t.Fatalf("plan = %+v, want a missing namespace this identity may create", plan)
+	}
+	if _, err := cs.CoreV1().Namespaces().Get(ctx, "testbox", metav1.GetOptions{}); err == nil {
+		t.Fatal("planning the namespace created it")
+	}
+
+	if err := s.CreateNamespace(ctx); err != nil {
+		t.Fatalf("CreateNamespace: %v", err)
+	}
+	ns, err := cs.CoreV1().Namespaces().Get(ctx, "testbox", metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("get namespace: %v", err)
+	}
+	for label, want := range map[string]string{
+		podSecurityEnforce: "restricted",
+		podSecurityAudit:   "restricted",
+		podSecurityWarn:    "restricted",
+		ManagedByLabel:     StorageFieldManager,
+	} {
+		if got := ns.Labels[label]; got != want {
+			t.Errorf("label %s = %q, want %q", label, got, want)
+		}
+	}
+
+	plan, err = s.PlanNamespace(ctx)
+	if err != nil {
+		t.Fatalf("second PlanNamespace: %v", err)
+	}
+	if !plan.Exists || plan.Enforce != podSecurityRestricted {
+		t.Fatalf("plan = %+v, want an existing namespace at restricted", plan)
+	}
+}
+
+// TestKubeStorageWillNotCreateANamespaceWithoutPermission: the access review is
+// the gate, and a denial is a plain answer -- no error, nothing created. This
+// is a user's kubeconfig, which is namespace-scoped.
+func TestKubeStorageWillNotCreateANamespaceWithoutPermission(t *testing.T) {
+	ctx := context.Background()
+	cs := fake.NewClientset()
+	reviewAnswers(cs, false)
+	s := NewStorageFor("testbox", cs)
+
+	plan, err := s.PlanNamespace(ctx)
+	if err != nil {
+		t.Fatalf("PlanNamespace: %v", err)
+	}
+	if plan.Exists || plan.CanCreate {
+		t.Fatalf("plan = %+v, want a missing namespace this identity may not create", plan)
+	}
+	if _, err := cs.CoreV1().Namespaces().Get(ctx, "testbox", metav1.GetOptions{}); err == nil {
+		t.Fatal("a refused plan created the namespace")
+	}
+}
+
+// TestKubeStorageReportsAWeakNamespaceAndLeavesItAlone: enforce is what admits
+// a pod, so a namespace enforcing baseline is weaker than the chart assumes.
+// Planning it changes nothing; the labels are still the admin's.
+func TestKubeStorageReportsAWeakNamespaceAndLeavesItAlone(t *testing.T) {
+	ctx := context.Background()
+	cs := fake.NewClientset()
+	existing := &corev1.Namespace{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:   "testbox",
+			Labels: map[string]string{podSecurityEnforce: "baseline"},
+		},
+	}
+	if _, err := cs.CoreV1().Namespaces().Create(ctx, existing, metav1.CreateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+
+	plan, err := NewStorageFor("testbox", cs).PlanNamespace(ctx)
+	if err != nil {
+		t.Fatalf("PlanNamespace: %v", err)
+	}
+	if !plan.Exists || plan.Enforce != "baseline" {
+		t.Fatalf("plan = %+v, want an existing namespace enforcing baseline", plan)
+	}
+	ns, err := cs.CoreV1().Namespaces().Get(ctx, "testbox", metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := len(ns.Labels); got != 1 || ns.Labels[podSecurityEnforce] != "baseline" {
+		t.Fatalf("labels = %v, want the admin's one label untouched", ns.Labels)
+	}
+}
+
+// TestKubeStorageReportsANamespaceWithNoEnforceLabel: an unlabelled namespace
+// admits anything, so it is weaker too and apply warns.
+func TestKubeStorageReportsANamespaceWithNoEnforceLabel(t *testing.T) {
+	ctx := context.Background()
+	cs := fake.NewClientset()
+	if _, err := cs.CoreV1().Namespaces().Create(ctx, &corev1.Namespace{
+		ObjectMeta: metav1.ObjectMeta{Name: "testbox"},
+	}, metav1.CreateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+
+	plan, err := NewStorageFor("testbox", cs).PlanNamespace(ctx)
+	if err != nil {
+		t.Fatalf("PlanNamespace: %v", err)
+	}
+	if !plan.Exists || plan.Enforce != "" {
+		t.Fatalf("plan = %+v, want an existing namespace with no enforce label", plan)
+	}
+}

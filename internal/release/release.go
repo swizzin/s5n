@@ -3,8 +3,10 @@
 //
 // The flow is linear, and every refusal happens before the first cluster write:
 // load the grant and the values file, merge them, check the result against the
-// chart release's values.schema.json, read what is deployed, show the
-// difference, ask, then install or upgrade and read the wiring receipt back.
+// chart release's values.schema.json, read the namespace, the storage and what
+// is deployed, show the difference, ask, then create the namespace if it is
+// missing, write the storage, install or upgrade, and read the wiring receipt
+// back.
 // Nothing here does the cluster's work by hand: the Helm SDK is the client
 // (PLAN.md), so a release box installs is a release `helm` can read, upgrade
 // and roll back.
@@ -132,6 +134,10 @@ type Result struct {
 	Changes      []seedbox.Change
 	// Storage is what box found it had to create, as Plan returned it.
 	Storage []StorageObject
+	// NamespaceCreated says apply created the seedbox's namespace, which only
+	// happens on a cluster where it is missing and this identity may create
+	// one (root's).
+	NamespaceCreated bool
 	// StorageCreated is how many of those it wrote.
 	StorageCreated int
 	Applied        bool
@@ -209,13 +215,44 @@ func (a *Applier) Apply(ctx context.Context, opts Options) (Result, error) {
 		return res, err
 	}
 
+	// The namespace is read before the release is: a claim cannot be written
+	// into a namespace that is not there, and on a fresh cluster the namespace
+	// is exactly what is missing. Both the read and the access question are
+	// reads, so nothing is written before the confirm.
+	store, err := a.OpenStorage(namespace)
+	if err != nil {
+		return res, err
+	}
+	nsp, err := store.PlanNamespace(ctx)
+	if err != nil {
+		return res, err
+	}
+	if !nsp.Exists {
+		if !nsp.CanCreate {
+			return res, fmt.Errorf("the namespace %s does not exist, and this kubeconfig may not create namespaces: root creates a seedbox's namespace with `box adduser`; ask root to add the box, then apply again", namespace)
+		}
+	} else if nsp.Enforce != podSecurityRestricted {
+		enforce := "no " + podSecurityEnforce + " label"
+		if nsp.Enforce != "" {
+			enforce = podSecurityEnforce + "=" + nsp.Enforce
+		}
+		a.logf("namespace %s does not enforce Pod Security %s (%s): root's labels win, box leaves it alone\n",
+			namespace, podSecurityRestricted, enforce)
+	}
+
 	client, err := a.Open(namespace)
 	if err != nil {
 		return res, err
 	}
-	deployed, exists, err := client.Deployed(ctx)
-	if err != nil {
-		return res, err
+	// A release lives in the namespace, so a missing namespace is a missing
+	// release. Asking Helm about it would only report the archive back.
+	var deployed map[string]any
+	exists := false
+	if nsp.Exists {
+		deployed, exists, err = client.Deployed(ctx)
+		if err != nil {
+			return res, err
+		}
 	}
 	res.FirstInstall = !exists
 	if exists {
@@ -229,17 +266,13 @@ func (a *Applier) Apply(ctx context.Context, opts Options) (Result, error) {
 	// The storage is not a release object, so it is planned separately and
 	// written before the release: pods cannot schedule without the claims, and
 	// Helm must never own them (a `helm uninstall` must not delete the data).
-	store, err := a.OpenStorage(namespace)
-	if err != nil {
-		return res, err
-	}
 	plan, err := store.Plan(ctx, namespace, vols)
 	if err != nil {
 		return res, err
 	}
 	res.Storage = plan
 
-	if exists && len(res.Changes) == 0 && len(plan) == 0 {
+	if exists && len(res.Changes) == 0 && len(plan) == 0 && nsp.Exists {
 		a.logf("%s in %s: nothing to change\n", ReleaseName, namespace)
 		return res, nil
 	}
@@ -256,7 +289,7 @@ func (a *Applier) Apply(ctx context.Context, opts Options) (Result, error) {
 			a.logf("  apps: %s\n", strings.Join(apps, ", "))
 		}
 	}
-	a.printStorage(plan)
+	a.printPlan(nsp, plan)
 
 	ok, err := a.Confirm.Ask(fmt.Sprintf("apply %s in %s?", ReleaseName, namespace))
 	if err != nil {
@@ -278,6 +311,18 @@ func (a *Applier) Apply(ctx context.Context, opts Options) (Result, error) {
 		if err := mergeTransient(values, extra); err != nil {
 			return res, err
 		}
+	}
+
+	// The namespace first: it is what the claims and the release live in. It is
+	// created only when it was missing at plan time, so an existing namespace
+	// -- root's or an admin's, with whatever labels they gave it -- is never
+	// applied over.
+	if !nsp.Exists {
+		if err := store.CreateNamespace(ctx); err != nil {
+			return res, err
+		}
+		res.NamespaceCreated = true
+		a.logf("created namespace %s (Pod Security %s)\n", namespace, podSecurityRestricted)
 	}
 
 	for _, obj := range plan {
@@ -345,14 +390,18 @@ func (a *Applier) waitReceipt(ctx context.Context, client ReleaseClient, since t
 	}
 }
 
-// printStorage is the storage part of the diff: what box will create before the
-// release. On a first install these lines are the only trace of the claims,
-// because they are not chart objects and Helm never sees them.
-func (a *Applier) printStorage(objs []StorageObject) {
-	if len(objs) == 0 {
+// printPlan is what box will create before the release, in the order it will
+// create it: the namespace, when it is missing, then the claims. On a first
+// install these lines are the only trace of the storage, because it is not
+// chart objects and Helm never sees it.
+func (a *Applier) printPlan(nsp NamespacePlan, objs []StorageObject) {
+	if nsp.Exists && len(objs) == 0 {
 		return
 	}
-	a.logf("storage:\n")
+	a.logf("plan:\n")
+	if !nsp.Exists {
+		a.logf("  + Namespace %s (Pod Security %s)\n", nsp.Name, podSecurityRestricted)
+	}
 	for _, o := range objs {
 		a.logf("  + %s %s (%s)\n", o.Kind, o.Name, o.Detail)
 	}

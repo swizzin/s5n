@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 
+	authv1 "k8s.io/api/authorization/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -33,6 +34,95 @@ const StorageFieldManager = "box"
 // and claimRef, not a label anyone can edit.
 const ManagedByLabel = "app.kubernetes.io/managed-by"
 
+// Pod Security Admission labels on the namespace box creates. enforce is the
+// one that admits or refuses a pod; audit and warn say the same level because
+// that is what makes the namespace's intent legible to whoever looks at it --
+// and because they are what root's `adduser` writes for a user's namespace.
+// Anything weaker than restricted lets a pod through that the chart's own
+// security context assumes it will not get.
+const (
+	podSecurityEnforce    = "pod-security.kubernetes.io/enforce"
+	podSecurityAudit      = "pod-security.kubernetes.io/audit"
+	podSecurityWarn       = "pod-security.kubernetes.io/warn"
+	podSecurityRestricted = "restricted"
+)
+
+// NamespacePlan is what box found of the seedbox's namespace before any write.
+type NamespacePlan struct {
+	Name   string
+	Exists bool
+	// CanCreate is whether this identity may create a namespace. It is asked
+	// only when the namespace is missing, and it is the whole gate: a
+	// namespace is cluster-scoped, so root's kubeconfig can and a user's
+	// namespace-scoped one cannot.
+	CanCreate bool
+	// Enforce is an existing namespace's Pod Security enforce value, or "" for
+	// no label. Only enforce decides admission; audit and warn change what the
+	// API server records, not what it lets in, so "weaker than restricted" is
+	// about this value alone.
+	Enforce string
+}
+
+// PlanNamespace is one namespace, read. A missing one also costs a
+// SelfSubjectAccessReview -- a read the API server answers -- because the next
+// thing apply would do is create it, and that has to be refused before the PV
+// is written rather than after.
+func (s *KubeStorage) PlanNamespace(ctx context.Context) (NamespacePlan, error) {
+	plan := NamespacePlan{Name: s.namespace}
+	live, err := s.cs.CoreV1().Namespaces().Get(ctx, s.namespace, metav1.GetOptions{})
+	switch {
+	case apierrors.IsNotFound(err):
+		allowed, err := s.canCreateNamespaces(ctx)
+		if err != nil {
+			return plan, err
+		}
+		plan.CanCreate = allowed
+		return plan, nil
+	case err != nil:
+		return plan, fmt.Errorf("read namespace %s: %w", s.namespace, err)
+	}
+	plan.Exists = true
+	plan.Enforce = live.Labels[podSecurityEnforce]
+	return plan, nil
+}
+
+// canCreateNamespaces asks the API server, as this identity, the one question
+// that decides whether apply may go on. A denial is an answer, not an error:
+// the operator gets the refusal that names root's command.
+func (s *KubeStorage) canCreateNamespaces(ctx context.Context) (bool, error) {
+	review := &authv1.SelfSubjectAccessReview{
+		Spec: authv1.SelfSubjectAccessReviewSpec{
+			ResourceAttributes: &authv1.ResourceAttributes{
+				Verb:     "create",
+				Resource: "namespaces",
+			},
+		},
+	}
+	out, err := s.cs.AuthorizationV1().SelfSubjectAccessReviews().Create(ctx, review, metav1.CreateOptions{})
+	if err != nil {
+		return false, fmt.Errorf("ask whether this kubeconfig may create namespaces: %w", err)
+	}
+	return out.Status.Allowed, nil
+}
+
+// CreateNamespace creates the seedbox's namespace with the Pod Security
+// restricted labels, plus box's managed-by label. It is a server-side apply
+// under the same field manager as the volumes, so `kubectl apply
+// --field-manager=box` and box agree about who owns what. An existing
+// namespace is never applied: root's or an admin's labels win.
+func (s *KubeStorage) CreateNamespace(ctx context.Context) error {
+	ns := coreapply.Namespace(s.namespace).WithLabels(map[string]string{
+		ManagedByLabel:     StorageFieldManager,
+		podSecurityEnforce: podSecurityRestricted,
+		podSecurityAudit:   podSecurityRestricted,
+		podSecurityWarn:    podSecurityRestricted,
+	})
+	if _, err := s.cs.CoreV1().Namespaces().Apply(ctx, ns, metav1.ApplyOptions{FieldManager: StorageFieldManager}); err != nil {
+		return fmt.Errorf("create namespace %s: %w", s.namespace, err)
+	}
+	return nil
+}
+
 // StorageObject is one PV or claim box has to write, as Plan found it. The
 // fields are what box prints; the apply is what box runs after the operator
 // says yes.
@@ -43,12 +133,19 @@ type StorageObject struct {
 	apply  func(ctx context.Context) error
 }
 
-// StorageClient is box's handle on the storage a seedbox needs. Plan only
-// reads: every refusal -- a PV that backs another path, a claim bound to
-// another volume -- happens there, before anything is written. Apply writes one
-// planned object with server-side apply.
+// StorageClient is box's handle on the namespace a seedbox lives in and the
+// storage it needs. The namespace comes first because the claims live in it:
+// on a fresh cluster it is the one object that is missing, and a claim written
+// into a namespace that does not exist fails after its cluster-scoped PV has
+// already been created. Plan and PlanNamespace only read: every refusal -- a
+// PV that backs another path, a claim bound to another volume, a namespace
+// that is missing and cannot be created -- happens there, before anything is
+// written. Apply and CreateNamespace write one planned object each, with
+// server-side apply.
 type StorageClient interface {
 	Plan(ctx context.Context, namespace string, vols []seedbox.Volume) ([]StorageObject, error)
+	PlanNamespace(ctx context.Context) (NamespacePlan, error)
+	CreateNamespace(ctx context.Context) error
 	Apply(ctx context.Context, obj StorageObject) error
 }
 

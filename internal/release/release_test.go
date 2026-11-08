@@ -55,15 +55,48 @@ func (f *fakeRelease) Receipt(context.Context) (Receipt, error) {
 	return f.receipt, nil
 }
 
-// fakeStorage is a tiny cluster of storage objects: a claim exists or it does
-// not, and Apply records the order box wrote things in. It shares the event log
-// with fakeRelease, so a test can prove storage lands before the release.
+// fakeStorage is a tiny cluster of storage objects: a namespace and its claims
+// exist or they do not, and Apply records the order box wrote things in. It
+// shares the event log with fakeRelease, so a test can prove the namespace and
+// the storage land before the release.
 type fakeStorage struct {
+	// nsExists starts false: a fake cluster is a fresh one, which is the case
+	// that used to fail. nsCanCreate is what the access review answers.
+	nsExists    bool
+	nsCanCreate bool
+	nsEnforce   string
+	nsErr       error
+	nsCreateErr error
+	nsCreates   int
+
 	existing map[string]bool
 	planErr  error
 	plans    int
 	applied  []StorageObject
 	events   *[]string
+}
+
+func (f *fakeStorage) PlanNamespace(context.Context) (NamespacePlan, error) {
+	if f.nsErr != nil {
+		return NamespacePlan{}, f.nsErr
+	}
+	plan := NamespacePlan{Name: "testbox", Exists: f.nsExists, CanCreate: f.nsCanCreate}
+	if f.nsExists {
+		plan.Enforce = f.nsEnforce
+	}
+	return plan, nil
+}
+
+func (f *fakeStorage) CreateNamespace(context.Context) error {
+	if f.nsCreateErr != nil {
+		return f.nsCreateErr
+	}
+	f.nsCreates++
+	f.nsExists = true
+	if f.events != nil {
+		*f.events = append(*f.events, "namespace")
+	}
+	return nil
 }
 
 func (f *fakeStorage) Plan(_ context.Context, _ string, vols []seedbox.Volume) ([]StorageObject, error) {
@@ -118,7 +151,7 @@ func newFakes(t *testing.T) *fakes {
 				Steps:     []Step{{Name: "sonarr/downloadclient", Result: "ok"}},
 			},
 		},
-		store:     &fakeStorage{existing: map[string]bool{}, events: nil},
+		store:     &fakeStorage{existing: map[string]bool{}, events: nil, nsCanCreate: true},
 		out:       &bytes.Buffer{},
 		grantPath: filepath.Join(dir, "grant.yaml"),
 		values:    filepath.Join(dir, "values.yaml"),
@@ -498,6 +531,95 @@ func TestStorageConflictRefusesBeforeAnyWrite(t *testing.T) {
 	}
 	if strings.Contains(f.out.String(), "first install") {
 		t.Fatalf("a refusal printed an apply plan:\n%s", f.out)
+	}
+}
+
+// TestFirstInstallCreatesTheMissingNamespaceFirst: on a fresh cluster nothing
+// exists, and the namespace has to be box's first write -- before the PV, which
+// is cluster-scoped and used to be left behind when the claim failed.
+func TestFirstInstallCreatesTheMissingNamespaceFirst(t *testing.T) {
+	f := newFakes(t)
+	res, err := f.apply(t)
+	if err != nil {
+		t.Fatalf("apply: %v\n%s", err, f.out)
+	}
+	if !res.NamespaceCreated || f.store.nsCreates != 1 {
+		t.Fatalf("namespace created %d times, result %+v, want one creation", f.store.nsCreates, res)
+	}
+	if want := "namespace"; len(f.events) == 0 || f.events[0] != want {
+		t.Fatalf("events = %v, want the namespace before the storage and the release", f.events)
+	}
+	if !strings.Contains(f.out.String(), "  + Namespace testbox (Pod Security restricted)") {
+		t.Fatalf("the plan does not show the namespace it creates:\n%s", f.out)
+	}
+	if strings.Index(f.out.String(), "+ Namespace testbox") > strings.Index(f.out.String(), "+ PersistentVolume testbox-s5n-data") {
+		t.Fatalf("the namespace is planned after the volumes it has to precede:\n%s", f.out)
+	}
+}
+
+// TestMissingNamespaceWithoutCreatePermissionRefusesBeforeAnyWrite: the gate
+// fires before side effects. A user's kubeconfig is namespace-scoped, so it
+// cannot create the namespace and apply says whose job that is; nothing --
+// namespace, PV, claim or release -- is written.
+func TestMissingNamespaceWithoutCreatePermissionRefusesBeforeAnyWrite(t *testing.T) {
+	f := newFakes(t)
+	f.store.nsCanCreate = false
+
+	_, err := f.apply(t)
+	if err == nil {
+		t.Fatal("apply succeeded although the namespace is missing and cannot be created")
+	}
+	for _, want := range []string{"namespace testbox does not exist", "box adduser"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error does not say %q: %v", want, err)
+		}
+	}
+	if f.store.nsCreates != 0 || len(f.store.applied) != 0 || f.rel.upgrades != 0 {
+		t.Fatalf("a refusal wrote: namespaces=%d storage=%d upgrades=%d",
+			f.store.nsCreates, len(f.store.applied), f.rel.upgrades)
+	}
+	if strings.Contains(f.out.String(), "first install") {
+		t.Fatalf("a refusal printed an apply plan:\n%s", f.out)
+	}
+}
+
+// TestExistingNamespaceIsNeverRelabelled: root's or an admin's namespace wins,
+// even when it does not enforce restricted. box says so once and writes
+// nothing; a second apply says it again and still does not apply the namespace.
+func TestExistingNamespaceIsNeverRelabelled(t *testing.T) {
+	f := newFakes(t)
+	f.store.nsExists = true
+	f.store.nsEnforce = "baseline"
+
+	for i := 0; i < 2; i++ {
+		if _, err := f.apply(t); err != nil {
+			t.Fatalf("apply %d: %v\n%s", i+1, err, f.out)
+		}
+	}
+	if f.store.nsCreates != 0 {
+		t.Fatalf("apply applied over an existing namespace %d times", f.store.nsCreates)
+	}
+	warn := "namespace testbox does not enforce Pod Security restricted (pod-security.kubernetes.io/enforce=baseline): root's labels win, box leaves it alone"
+	if got := strings.Count(f.out.String(), warn); got != 2 {
+		t.Fatalf("the weak-namespace warning printed %d times over two applies, want 2:\n%s", got, f.out)
+	}
+	if strings.Contains(f.out.String(), "+ Namespace testbox") {
+		t.Fatalf("the plan offers to create a namespace that exists:\n%s", f.out)
+	}
+}
+
+// TestExistingRestrictedNamespaceIsSilent: a namespace already at restricted is
+// not something to warn about, and it is not in the plan either.
+func TestExistingRestrictedNamespaceIsSilent(t *testing.T) {
+	f := newFakes(t)
+	f.store.nsExists = true
+	f.store.nsEnforce = "restricted"
+
+	if _, err := f.apply(t); err != nil {
+		t.Fatalf("apply: %v\n%s", err, f.out)
+	}
+	if strings.Contains(f.out.String(), "does not enforce Pod Security") {
+		t.Fatalf("box warned about a namespace that is already restricted:\n%s", f.out)
 	}
 }
 
