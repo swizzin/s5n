@@ -1,0 +1,6 @@
+# One repository, one variant: the smallest chart variant list the params render
+# accepts. Used for a grant that does not expose the peers port at all.
+plex:
+  default:
+    repository: registry.example.com/seedbox/plex
+    tag: "1.43.5"

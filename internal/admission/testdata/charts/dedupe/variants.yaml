@@ -1,0 +1,23 @@
+# A chart's variant list is a map of app -> variant -> image. This fixture
+# exists to pin what the params render does with it, not to describe an app:
+# two apps ship the same repository (sonarr and radarr both use `arr`), one app
+# has two variants, and `arr-alt` shares a prefix with `arr` that the image rule
+# must not confuse for a match.
+qbittorrent:
+  default:
+    repository: registry.example.com/seedbox/qbittorrent
+    tag: "5.3.0"
+    digest: sha256:1111111111111111111111111111111111111111111111111111111111111111
+
+sonarr:
+  default:
+    repository: registry.example.com/seedbox/arr
+    tag: "5.0.0"
+
+radarr:
+  default:
+    repository: registry.example.com/seedbox/arr
+    tag: "7.0.0"
+  alt:
+    repository: registry.example.com/seedbox/arr-alt
+    tag: "7.0.0"

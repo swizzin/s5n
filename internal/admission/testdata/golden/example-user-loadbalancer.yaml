@@ -1,0 +1,58 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: s5n-grant-example-user
+  namespace: s5n-system
+  labels:
+    app.kubernetes.io/part-of: s5n
+    s5n.io/grant: example-user
+data:
+  # Generated from internal/admission/testdata/charts/dedupe/variants.yaml; edit the chart, not this.
+  blessedRepositories: "registry.example.com/seedbox/arr,registry.example.com/seedbox/arr-alt,registry.example.com/seedbox/qbittorrent"
+  serviceType: LoadBalancer
+  torrentNodePort: "30500"
+
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: s5n-grant-example-user
+  labels:
+    app.kubernetes.io/part-of: s5n
+spec:
+  policyName: s5n-blessed-images
+  validationActions: ["Deny"]
+  paramRef:
+    name: s5n-grant-example-user
+    namespace: s5n-system
+    parameterNotFoundAction: Deny
+  matchResources:
+    # The binding is cluster-scoped, so the user cannot edit it; it selects
+    # their namespace by the name label the API server puts on every namespace.
+    namespaceSelector:
+      matchExpressions:
+        - key: kubernetes.io/metadata.name
+          operator: In
+          values: ["example-user"]
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: s5n-grant-example-user-service
+  labels:
+    app.kubernetes.io/part-of: s5n
+spec:
+  policyName: s5n-granted-service
+  validationActions: ["Deny"]
+  paramRef:
+    name: s5n-grant-example-user
+    namespace: s5n-system
+    parameterNotFoundAction: Deny
+  matchResources:
+    # The binding is cluster-scoped, so the user cannot edit it; it selects
+    # their namespace by the name label the API server puts on every namespace.
+    namespaceSelector:
+      matchExpressions:
+        - key: kubernetes.io/metadata.name
+          operator: In
+          values: ["example-user"]
