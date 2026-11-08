@@ -166,6 +166,19 @@ They are different jobs. `bootstrap` sets up the machine once. `init` sets up on
 seedbox: once for root, once per user through `adduser`. Every step of both is safe to
 re-run. The cluster decision is in `PLAN.md`.
 
+**What bootstrap installs (decided).** It applies only the platform components the
+decision says are missing: Envoy Gateway from its OCI chart (the chart ships the Gateway
+API CRDs at the channel the controller is built against), MetalLB in L2 mode with a
+single `/32` pool at the node's primary address, the `GatewayClass` and `Gateway` the
+chart's HTTPRoutes attach to, and the admission policy that enforces the grant. Charts
+are fetched at run time at versions pinned in one place; the manifests box owns are
+compiled in. The plan names every release, version and namespace and asks before the
+first write (`--yes`, or no terminal, is unattended). A release already at its pinned
+version is verified rather than upgraded, so a second bootstrap creates no Helm
+revision; the objects box applies are server-side applies under field manager `box`, so
+re-applying them changes nothing. cert-manager is not installed yet: bootstrap says so
+and continues, leaving the decision's `install` for it unhandled rather than silent.
+
 What `init` does (decided):
 
 - **It asks, then writes the two files.** Domain, data and config paths, which apps,

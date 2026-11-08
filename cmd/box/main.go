@@ -1,11 +1,11 @@
 // Command box is the host CLI: swizzin's installer and operator UI.
 //
-// `box bootstrap` decides which cluster to use and probes the platform layer.
-// `box init` asks a seedbox's questions, edits its two files key by key and
-// hands over to `box apply`, whose diff and confirm are the review. `box apply`
-// installs or upgrades one seedbox from those files, using the Helm SDK. There
-// is no `box adduser` yet: init writes root's own seedbox, at the grant path it
-// is given.
+// `box bootstrap` decides which cluster to use, installs the platform layer
+// the decision says is missing, and then runs init for root. `box init` asks a
+// seedbox's questions, edits its two files key by key and hands over to `box
+// apply`, whose diff and confirm are the review. `box apply` installs or
+// upgrades one seedbox from those files, using the Helm SDK. There is no `box
+// adduser` yet: init writes root's own seedbox, at the grant path it is given.
 package main
 
 import (
@@ -21,6 +21,7 @@ import (
 
 	"github.com/swizzin/s5n/internal/bootstrap"
 	"github.com/swizzin/s5n/internal/catalog"
+	"github.com/swizzin/s5n/internal/platform"
 	"github.com/swizzin/s5n/internal/release"
 	"github.com/swizzin/s5n/internal/seedbox"
 	"github.com/swizzin/s5n/internal/setup"
@@ -65,7 +66,7 @@ func usage() {
 	fmt.Fprintf(os.Stderr, `usage: box <command> [flags]
 
 commands:
-  bootstrap   decide which cluster to use and probe the platform layer
+  bootstrap   decide which cluster to use, install the platform layer, then run init for root
   init        ask a seedbox's questions, edit its two files, then apply
   apply       install or upgrade root's seedbox from its grant and values
 `)
@@ -76,12 +77,16 @@ func runBootstrap(args []string) {
 	fs := flag.NewFlagSet("bootstrap", flag.ExitOnError)
 	dryRun := fs.Bool("dry-run", false, "print the decision and reasons; probe nothing remote, install nothing")
 	kubeconfig := fs.String("kubeconfig", "", "explicit kubeconfig to use, or fail with no fallback")
+	recordPath := fs.String("record", bootstrap.RecordPath, "where box records the cluster decision")
+	yes := fs.Bool("yes", false, "confirm the platform and run init without asking")
+	plain := fs.Bool("plain", false, "ask init's questions with plain line prompts, even on a terminal (for a flaky terminal or a screen reader)")
+	initFlags := addInitFlags(fs)
 	if err := fs.Parse(args); err != nil {
 		fmt.Fprintf(os.Stderr, "box: %v\n", err)
 		os.Exit(2)
 	}
 
-	var records bootstrap.RecordStore = bootstrap.FilesystemRecords{Path: bootstrap.RecordPath}
+	var records bootstrap.RecordStore = bootstrap.FilesystemRecords{Path: *recordPath}
 	if *dryRun {
 		records = bootstrap.ReadOnlyRecords{Inner: records}
 	}
@@ -106,6 +111,55 @@ func runBootstrap(args []string) {
 		os.Exit(1)
 	}
 	fmt.Print(bootstrap.FormatResult(res))
+	switch res.Action {
+	case bootstrap.ActionStop:
+		os.Exit(1)
+	case bootstrap.ActionInstall:
+		// The cluster installer is a later step: there is nothing to apply
+		// to and nothing to init on a host box has not provisioned.
+		return
+	}
+	if *dryRun {
+		return
+	}
+
+	ctx := context.Background()
+	if err := applyPlatform(ctx, res.Kubeconfig, res.Platform, *yes); err != nil {
+		if errors.Is(err, platform.ErrCancelled) {
+			os.Exit(1)
+		}
+		fmt.Fprintf(os.Stderr, "box: %v\n", err)
+		os.Exit(1)
+	}
+	// bootstrap sets the machine up once; init sets up root's seedbox. It runs
+	// here in the same process, over the same cluster, with the flags bootstrap
+	// was given -- and stays runnable on its own (`box init`).
+	if err := initFlags.run(ctx, res.Kubeconfig, *yes, *plain); err != nil {
+		if errors.Is(err, release.ErrCancelled) || errors.Is(err, setup.ErrCancelled) {
+			os.Exit(1)
+		}
+		fmt.Fprintf(os.Stderr, "box: %v\n", err)
+		os.Exit(1)
+	}
+}
+
+// applyPlatform applies the platform layer the decision says install. The
+// confirmation is box's existing one: --yes, or no terminal to ask on, is
+// unattended (docs/box.md, "bootstrap and init").
+func applyPlatform(ctx context.Context, kubeconfig string, components []bootstrap.ComponentResult, yes bool) error {
+	p := &platform.Decision{
+		Open:     func() (platform.Cluster, error) { return platform.NewCluster(kubeconfig) },
+		Releases: platform.NewHelm(kubeconfig),
+		Confirm: &release.Terminal{
+			In:    os.Stdin,
+			Out:   os.Stdout,
+			Yes:   yes || !isTerminal(os.Stdin),
+			IsTTY: func() bool { return release.TTY(os.Stdin) },
+		},
+		Log: os.Stdout,
+	}
+	_, err := p.Apply(ctx, components)
+	return err
 }
 
 func runApply(args []string) {
@@ -171,42 +225,79 @@ func runApply(args []string) {
 
 func runInit(args []string) {
 	fs := flag.NewFlagSet("init", flag.ExitOnError)
-	chartDir := fs.String("chart", "", "chart directory to install (pulling a published chart is a later step)")
-	grantPath := fs.String("grant", seedbox.GrantPath("root"), "the root-owned grant file to write")
-	valuesDefault := ""
-	if home, err := os.UserHomeDir(); err == nil {
-		valuesDefault = seedbox.ValuesPath(home)
-	}
-	valuesPath := fs.String("values", valuesDefault, "the user's values file to edit")
-	namespace := fs.String("namespace", "seedbox", "the box's namespace; a re-run keeps whatever the grant says")
-	domain := fs.String("domain", "", "the domain this box is reached at, e.g. box.example.com")
-	dataPath := fs.String("data-path", "", "the host path downloads and media live on")
-	configPath := fs.String("config-path", "", "the host path the apps keep their settings on")
-	apps := fs.String("apps", "", "comma separated app names from the chart's catalog")
-	puid := fs.Int("puid", defaultPUID(), "uid every file on the data path is owned by (default: $SUDO_UID, else the invoking user, else 1000)")
-	pgid := fs.Int("pgid", defaultPGID(), "gid every file on the data path is owned by (default: $SUDO_GID, else the invoking user, else 1000)")
-	transient := transientAnswers{}
-	fs.Var(&transient, "set-transient", "an answer that lives in no file, as key=value (repeatable), e.g. secrets.plexClaimToken=claim-xxxx")
+	initFlags := addInitFlags(fs)
 	kubeconfig := fs.String("kubeconfig", "", "explicit kubeconfig for the apply this hands over to, or fail with no fallback")
-	pathsInNode := fs.Bool("paths-in-node", false, "the storage paths live inside a test node (kind), not on this host: skip verifying and creating them")
 	yes := fs.Bool("yes", false, "ask nothing: flags and file keys only")
 	plain := fs.Bool("plain", false, "ask with plain line prompts, even on a terminal (for a flaky terminal or a screen reader)")
 	if err := fs.Parse(args); err != nil {
 		fmt.Fprintf(os.Stderr, "box: %v\n", err)
 		os.Exit(2)
 	}
-	if *valuesPath == "" {
-		fmt.Fprintln(os.Stderr, "box: no values file: pass --values")
-		os.Exit(2)
+	if err := initFlags.run(context.Background(), *kubeconfig, *yes, *plain); err != nil {
+		if errors.Is(err, release.ErrCancelled) || errors.Is(err, setup.ErrCancelled) {
+			os.Exit(1)
+		}
+		fmt.Fprintf(os.Stderr, "box: %v\n", err)
+		os.Exit(1)
+	}
+}
+
+// initFlags are init's questions as flags. `box bootstrap` accepts the same
+// ones and hands them to init for root once the platform is ready, so the two
+// commands cannot drift apart; `box init` on its own parses exactly these.
+type initFlags struct {
+	fs          *flag.FlagSet
+	chartDir    *string
+	grantPath   *string
+	valuesPath  *string
+	namespace   *string
+	domain      *string
+	dataPath    *string
+	configPath  *string
+	apps        *string
+	puid        *int
+	pgid        *int
+	transient   *transientAnswers
+	pathsInNode *bool
+}
+
+func addInitFlags(fs *flag.FlagSet) *initFlags {
+	valuesDefault := ""
+	if home, err := os.UserHomeDir(); err == nil {
+		valuesDefault = seedbox.ValuesPath(home)
+	}
+	o := &initFlags{fs: fs}
+	o.chartDir = fs.String("chart", "", "chart directory to install (pulling a published chart is a later step)")
+	o.grantPath = fs.String("grant", seedbox.GrantPath("root"), "the root-owned grant file to write")
+	o.valuesPath = fs.String("values", valuesDefault, "the user's values file to edit")
+	o.namespace = fs.String("namespace", "seedbox", "the box's namespace; a re-run keeps whatever the grant says")
+	o.domain = fs.String("domain", "", "the domain this box is reached at, e.g. box.example.com")
+	o.dataPath = fs.String("data-path", "", "the host path downloads and media live on")
+	o.configPath = fs.String("config-path", "", "the host path the apps keep their settings on")
+	o.apps = fs.String("apps", "", "comma separated app names from the chart's catalog")
+	o.puid = fs.Int("puid", defaultPUID(), "uid every file on the data path is owned by (default: $SUDO_UID, else the invoking user, else 1000)")
+	o.pgid = fs.Int("pgid", defaultPGID(), "gid every file on the data path is owned by (default: $SUDO_GID, else the invoking user, else 1000)")
+	o.transient = &transientAnswers{}
+	fs.Var(o.transient, "set-transient", "an answer that lives in no file, as key=value (repeatable), e.g. secrets.plexClaimToken=claim-xxxx")
+	o.pathsInNode = fs.Bool("paths-in-node", false, "the storage paths live inside a test node (kind), not on this host: skip verifying and creating them")
+	return o
+}
+
+// run asks a seedbox's questions, writes its two files and hands over to apply.
+// The kubeconfig is the one bootstrap decided on, when bootstrap calls this;
+// `box init` alone passes its flag, and apply resolves the record when it is
+// empty.
+func (o *initFlags) run(ctx context.Context, kubeconfig string, yes, plain bool) error {
+	if *o.valuesPath == "" {
+		return errors.New("no values file: pass --values")
 	}
 
 	// The questions come from the chart's catalog, so the chart is read before
 	// anything is asked: a missing or broken manifest is a refusal, not a
 	// half-finished dialog.
-	cat, err := catalog.Load(*chartDir)
+	cat, err := catalog.Load(*o.chartDir)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "box: %v\n", err)
-		os.Exit(1)
+		return err
 	}
 
 	// Which prompt: huh when the terminal can carry a form, the line prompt
@@ -215,7 +306,7 @@ func runInit(args []string) {
 	// fallback is deliberately not huh's accessible mode: that one returns an
 	// empty secret without a terminal, which would silently install a box with
 	// an empty claim token.
-	unattended := *yes || !isTerminal(os.Stdin)
+	unattended := yes || !isTerminal(os.Stdin)
 	var prompt setup.Prompter
 	switch {
 	case unattended:
@@ -226,7 +317,7 @@ func runInit(args []string) {
 			Stdout:  isTerminal(os.Stdout),
 			TERM:    os.Getenv("TERM"),
 			NoColor: os.Getenv("NO_COLOR") != "",
-			Plain:   *plain,
+			Plain:   plain,
 		})
 		if plan.Mode == tui.ModeHuh {
 			prompt = tui.New(tui.Options{In: os.Stdin, Out: os.Stdout, NoColor: plan.NoColor, Width: terminalWidth(os.Stdout)})
@@ -244,7 +335,7 @@ func runInit(args []string) {
 	}
 
 	set := map[string]bool{}
-	fs.Visit(func(f *flag.Flag) { set[f.Name] = true })
+	o.fs.Visit(func(f *flag.Flag) { set[f.Name] = true })
 
 	d := &setup.Decision{
 		Host:    setup.LinuxPathHost{},
@@ -255,7 +346,7 @@ func runInit(args []string) {
 			// The cluster decision belongs to `box bootstrap`; apply reuses it.
 			// It is resolved here, after init has written the files, so a host
 			// without a cluster yet still gets its two files written.
-			kc, err := release.ResolveKubeconfig(*kubeconfig, os.Getenv("KUBECONFIG"), bootstrap.FilesystemRecords{Path: bootstrap.RecordPath})
+			kc, err := release.ResolveKubeconfig(kubeconfig, os.Getenv("KUBECONFIG"), bootstrap.FilesystemRecords{Path: bootstrap.RecordPath})
 			if err != nil {
 				return err
 			}
@@ -264,7 +355,7 @@ func runInit(args []string) {
 				Confirm: &release.Terminal{
 					In:    os.Stdin,
 					Out:   os.Stdout,
-					Yes:   *yes,
+					Yes:   yes,
 					IsTTY: func() bool { return release.TTY(os.Stdin) },
 				},
 				Log: os.Stdout,
@@ -287,30 +378,24 @@ func runInit(args []string) {
 		},
 	}
 
-	_, err = d.Run(context.Background(), setup.Options{
-		ChartDir:     *chartDir,
-		GrantPath:    *grantPath,
-		ValuesPath:   *valuesPath,
-		Namespace:    *namespace,
-		Domain:       *domain,
-		DataPath:     *dataPath,
-		ConfigPath:   *configPath,
-		Apps:         []string{*apps},
-		PUID:         *puid,
-		PGID:         *pgid,
+	_, err = d.Run(ctx, setup.Options{
+		ChartDir:     *o.chartDir,
+		GrantPath:    *o.grantPath,
+		ValuesPath:   *o.valuesPath,
+		Namespace:    *o.namespace,
+		Domain:       *o.domain,
+		DataPath:     *o.dataPath,
+		ConfigPath:   *o.configPath,
+		Apps:         []string{*o.apps},
+		PUID:         *o.puid,
+		PGID:         *o.pgid,
 		PUIDSet:      set["puid"],
 		PGIDSet:      set["pgid"],
-		SetTransient: transient,
+		SetTransient: *o.transient,
 		Unattended:   unattended,
-		PathsInNode:  *pathsInNode,
+		PathsInNode:  *o.pathsInNode,
 	})
-	if err != nil {
-		if errors.Is(err, release.ErrCancelled) || errors.Is(err, setup.ErrCancelled) {
-			os.Exit(1)
-		}
-		fmt.Fprintf(os.Stderr, "box: %v\n", err)
-		os.Exit(1)
-	}
+	return err
 }
 
 // transientAnswers is a repeatable --set-transient key=value, the unattended
