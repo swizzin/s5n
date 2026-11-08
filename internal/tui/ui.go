@@ -322,7 +322,7 @@ func (u *UI) MultiSelect(f setup.MultiSelect) ([]string, error) {
 	field := huh.NewMultiSelect[string]().
 		Key(f.Key).
 		Title("").
-		Description("space toggles · a all · A none · enter continues").
+		Description("space toggles · ctrl+a all/none · enter continues").
 		Height(len(keys)).
 		Options(keys...).
 		Value(&value)
