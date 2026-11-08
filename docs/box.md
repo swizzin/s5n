@@ -27,6 +27,10 @@ Each section marks its status:
 - **box can be removed** from a server, cleanly.
 - **Personality stays.** Dialogs keep the voice: cancelling says "oh heck, nvm", not
   "Operation aborted by user". Not tied to whiptail.
+- **Dialogs are huh (decided),** behind box's own prompt interface, with box's theme
+  on top: its masthead, accent and step header. Where huh can't behave (no terminal,
+  `TERM=dumb`), box falls back to plain line prompts. `NO_COLOR` drops the styling.
+  Choosing another library later means rewriting one adapter, not init.
 
 ## Scopes: root and users (decided, mechanism proposed)
 
@@ -451,5 +455,3 @@ reason instead of a stack trace.
   one command that detects the source, since the hard part (rewriting paths in the Arr
   databases, carrying qBittorrent's state) is the same for all of them.
 - Who assigns the torrent port with multiple users (see Scopes).
-- What the guided dialogs look like beyond "terminal, with personality": which
-  library, and the style box gives it.
