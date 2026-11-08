@@ -102,7 +102,10 @@ func (u *UI) end() {
 }
 
 // run draws one field as a whole (one-field) form and waits for the answer.
-func (u *UI) run(field huh.Field) error {
+// answered is called only when the field was answered, and before the blank
+// line that separates it from what comes next, so the record it leaves reads
+// as part of the field rather than as a stray line.
+func (u *UI) run(field huh.Field, answered func()) error {
 	form := huh.NewForm(huh.NewGroup(field)).
 		WithTheme(huh.ThemeFunc(func(bool) *huh.Styles { return u.styles })).
 		WithKeyMap(u.keys).
@@ -114,8 +117,61 @@ func (u *UI) run(field huh.Field) error {
 	}
 	u.begin()
 	err := cancel(form.Run())
+	if err == nil && answered != nil {
+		answered()
+	}
 	u.end()
 	return err
+}
+
+// record is the one line a finished form leaves in the scrollback: what was
+// asked, then what was answered. huh clears its own drawing when the form
+// ends, and without this the transcript would keep each question's title and
+// drop the answer, which is exactly the part a run is reviewed for.
+//
+// The value is the answer as a person would say it (an option's label, not the
+// value a file keeps), and a secret is recorded as hidden. NO_COLOR keeps the
+// same words with no escapes: the check is a glyph, not a colour.
+func (u *UI) record(label, value string) {
+	label = strings.TrimSpace(label)
+	value = strings.TrimSpace(value)
+	if label == "" || value == "" {
+		return
+	}
+	mark := u.chrome.paint("✓", accentStyle.Render("✓"))
+	title := u.chrome.paint(label, mutedStyle.Render(label))
+	body := u.chrome.paint(value, inkStyle.Render(value))
+	fmt.Fprintf(u.out, "  %s %s  %s\n", mark, title, body)
+}
+
+// hidden is what the scrollback says in place of a secret's value.
+const hidden = "•••• (hidden)"
+
+// recordSecret is a secret's record line. The value is not an argument, so no
+// caller can pass it here by mistake: a secret never reaches the scrollback.
+func (u *UI) recordSecret(label string) {
+	u.record(label, hidden)
+}
+
+// optionLabel is the word a person chose, so a record does not show the value
+// the file stores when the two differ.
+func optionLabel(options []setup.Option, value string) string {
+	for _, o := range options {
+		if o.Value == value {
+			return o.Label
+		}
+	}
+	return value
+}
+
+// optionLabels is optionLabel for a multi-select, in the order the answer
+// holds them.
+func optionLabels(options []setup.Option, values []string) []string {
+	out := make([]string, 0, len(values))
+	for _, v := range values {
+		out = append(out, optionLabel(options, v))
+	}
+	return out
 }
 
 // label is what a field is called: the flow's prompt, or the values key when
@@ -142,11 +198,14 @@ func (u *UI) Input(f setup.Input) (string, error) {
 		// space cannot decide whether a domain is valid.
 		field = field.Validate(func(s string) error { return validate(strings.TrimSpace(s)) })
 	}
-	if err := u.run(field); err != nil {
+	if err := u.run(field, func() {
+		value = strings.TrimSpace(value)
+		u.record(label(f.Prompt, f.Key), value)
+		u.chrome.remember(value)
+	}); err != nil {
 		return "", err
 	}
 	value = strings.TrimSpace(value)
-	u.chrome.remember(value)
 	return value, nil
 }
 
@@ -169,7 +228,9 @@ func (u *UI) Secret(f setup.Secret) (string, error) {
 			return nil
 		})
 	}
-	if err := u.run(field); err != nil {
+	if err := u.run(field, func() {
+		u.recordSecret(label(f.Prompt, f.Key))
+	}); err != nil {
 		return "", err
 	}
 	return strings.TrimSpace(value), nil
@@ -193,7 +254,13 @@ func (u *UI) Confirm(f setup.Confirm) (bool, error) {
 		Affirmative(affirmative).
 		Negative(negative).
 		Value(&value)
-	if err := u.run(field); err != nil {
+	if err := u.run(field, func() {
+		answer := negative
+		if value {
+			answer = affirmative
+		}
+		u.record(label(f.Prompt, "confirm"), answer)
+	}); err != nil {
 		return false, err
 	}
 	return value, nil
@@ -211,7 +278,9 @@ func (u *UI) Select(f setup.Select) (string, error) {
 		Title(label(f.Prompt, f.Key)).
 		Options(optionKeys(f.Options)...).
 		Value(&value)
-	if err := u.run(field); err != nil {
+	if err := u.run(field, func() {
+		u.record(label(f.Prompt, f.Key), optionLabel(f.Options, value))
+	}); err != nil {
 		return "", err
 	}
 	return value, nil
@@ -240,7 +309,15 @@ func (u *UI) MultiSelect(f setup.MultiSelect) ([]string, error) {
 	if f.Min > 0 {
 		field = field.Validate(func(v []string) error { return tooFew(f.Min, len(v)) })
 	}
-	if err := u.run(field); err != nil {
+	if err := u.run(field, func() {
+		// The field's own title is empty (the masthead carries the question),
+		// so the record names it by its key: "apps  qbittorrent, sonarr".
+		name := f.Key
+		if strings.TrimSpace(name) == "" {
+			name = f.Prompt
+		}
+		u.record(name, strings.Join(optionLabels(f.Options, value), ", "))
+	}); err != nil {
 		return nil, err
 	}
 	return value, nil

@@ -49,6 +49,74 @@ func TestInputTakesTheAnswerAndShowsTheChrome(t *testing.T) {
 	}
 }
 
+// TestAnsweredFieldsLeaveTheirAnswerInTheScrollback: huh clears its drawing
+// when a form ends, so each finished question leaves one compact record —
+// what was asked, then the answer as a person would say it.
+func TestAnsweredFieldsLeaveTheirAnswerInTheScrollback(t *testing.T) {
+	u, out := line("\n")
+	if _, err := u.Input(setup.Input{Key: "gateway.host", Prompt: "domain", Default: "box.example.com"}); err != nil {
+		t.Fatal(err)
+	}
+	if text := stripANSI(out.String()); !strings.Contains(text, "✓ domain  box.example.com") {
+		t.Fatalf("the input's record is missing:\n%s", text)
+	}
+
+	u, out = line("\n")
+	if _, err := u.Confirm(setup.Confirm{
+		Prompt:      "create /srv/s5n/data on that filesystem?",
+		Default:     false,
+		Affirmative: "create it",
+		Negative:    "stop here",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if text := stripANSI(out.String()); !strings.Contains(text, "✓ create /srv/s5n/data on that filesystem?  stop here") {
+		t.Fatalf("the confirm's record is missing:\n%s", text)
+	}
+
+	u, out = line("\n")
+	if _, err := u.Select(setup.Select{
+		Key:     "kind",
+		Prompt:  "which kind?",
+		Options: []setup.Option{{Value: "hd", Label: "high definition"}, {Value: "4k", Label: "4k"}},
+		Default: "4k",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if text := stripANSI(out.String()); !strings.Contains(text, "✓ which kind?  4k") {
+		t.Fatalf("the select's record is missing:\n%s", text)
+	}
+
+	u, out = line("0\n")
+	if _, err := u.MultiSelect(setup.MultiSelect{
+		Key:      "apps",
+		Prompt:   "which apps should this box have",
+		Options:  []setup.Option{{Value: "qbittorrent", Label: "qbittorrent"}, {Value: "sonarr", Label: "sonarr"}, {Value: "radarr", Label: "radarr"}},
+		Selected: []string{"qbittorrent", "radarr"},
+		Min:      1,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if text := stripANSI(out.String()); !strings.Contains(text, "✓ apps  qbittorrent, radarr") {
+		t.Fatalf("the multi-select's record is missing:\n%s", text)
+	}
+}
+
+// TestAnsweredRecordNeverShowsASecret: the value is not even an argument to
+// the function Secret uses, so there is no path that prints it.
+func TestAnsweredRecordNeverShowsASecret(t *testing.T) {
+	var out bytes.Buffer
+	u := New(Options{Out: &out})
+	u.recordSecret("claim token")
+	text := stripANSI(out.String())
+	if !strings.Contains(text, "✓ claim token  •••• (hidden)") {
+		t.Fatalf("the secret's record is missing the mask:\n%s", text)
+	}
+	if strings.Contains(text, "claim-") {
+		t.Fatalf("a secret value reached the record:\n%s", text)
+	}
+}
+
 func TestInputShowsTheFlowValidation(t *testing.T) {
 	u, out := line("seedbox\nbox.example.com\n")
 	got, err := u.Input(setup.Input{
