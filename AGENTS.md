@@ -217,7 +217,7 @@ one needs a live `lookup`. The e2e asserts the policy exists in the cluster.
   by prefix: `/data/media` is under `/data` and still wrong. That step is what makes
   the data contract true rather than aspirational.
 - The session keys are QSettings-escaped in the file: `[Preferences]` with
-  `Session\\DefaultSavePath` (two backslashes on disk), not a `[Session]` section.
+  `Session\DefaultSavePath` (two backslashes on disk), not a `[Session]` section.
 - Never retry a rejected qBittorrent login: five failures ban the client IP for an hour,
   and the ban answers 403 on everything, which looks like a routing fault.
 - NetworkPolicy is evaluated *after* kube-proxy DNATs a Service, so the wiring Job's
