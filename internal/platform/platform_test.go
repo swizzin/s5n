@@ -6,14 +6,30 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/swizzin/s5n/internal/bootstrap"
 )
+
+// trace records the writes in the order they happened. Every assertion about
+// ordering (the Gateway before the question, the question before MetalLB, a
+// skipped install, the reachability check last) reads it, so a passing test is
+// about side effects rather than the text box printed.
+type trace struct{ steps []string }
+
+func (t *trace) add(step string) {
+	if t != nil {
+		t.steps = append(t.steps, step)
+	}
+}
+
+func (t *trace) String() string { return strings.Join(t.steps, ",") }
 
 type fakeReleases struct {
 	versions  map[string]string
 	installed []Release
 	err       error
+	tr        *trace
 }
 
 func (f *fakeReleases) key(name, namespace string) string { return namespace + "/" + name }
@@ -31,22 +47,24 @@ func (f *fakeReleases) Install(_ context.Context, spec Release) error {
 		return f.err
 	}
 	f.installed = append(f.installed, spec)
+	f.tr.add("install:" + spec.Name)
 	return nil
 }
 
 type fakeCluster struct {
-	deny      string
-	ip        string
-	writes    [][]map[string]any
-	awaits    []Wait
-	allowed   []Access
-	applyErrs []error
-	openable  bool
+	deny          string
+	denyNamespace string
+	ip            string
+	writes        [][]map[string]any
+	awaits        []Wait
+	allowed       []Access
+	applyErrs     []error
+	tr            *trace
 }
 
 func (f *fakeCluster) Allowed(_ context.Context, a Access) (bool, error) {
 	f.allowed = append(f.allowed, a)
-	if a.Resource == f.deny {
+	if a.Resource == f.deny && (f.denyNamespace == "" || a.Namespace == f.denyNamespace) {
 		return false, nil
 	}
 	return true, nil
@@ -68,22 +86,121 @@ func (f *fakeCluster) Apply(_ context.Context, docs []map[string]any) error {
 		}
 	}
 	f.writes = append(f.writes, docs)
+	kind, _, _ := objectMeta(docs[0])
+	f.tr.add("apply:" + kind)
 	return nil
 }
 
 func (f *fakeCluster) Await(_ context.Context, w Wait) error {
 	f.awaits = append(f.awaits, w)
+	f.tr.add("await:" + w.String())
 	return nil
 }
 
 type fakeConfirm struct {
 	answer bool
 	asked  int
+	tr     *trace
 }
 
 func (f *fakeConfirm) Ask(string) (bool, error) {
 	f.asked++
+	f.tr.add("confirm")
 	return f.answer, nil
+}
+
+// fakeProbe is the Gateway's answer: successive Address calls return
+// successive answers (the last repeats), so "no address, then an address after
+// MetalLB" is one sequence.
+type fakeProbe struct {
+	answers      []GatewayAnswer
+	addressErr   error
+	reachCode    int
+	reachErr     error
+	addressCalls int
+	reachCalls   int
+	reached      string
+	reachRetry   time.Duration
+	addressWaits []time.Duration
+	tr           *trace
+}
+
+func (f *fakeProbe) Address(_ context.Context, timeout time.Duration) (GatewayAnswer, error) {
+	f.addressCalls++
+	f.addressWaits = append(f.addressWaits, timeout)
+	f.tr.add("address")
+	if f.addressErr != nil {
+		return GatewayAnswer{}, f.addressErr
+	}
+	if len(f.answers) == 0 {
+		return GatewayAnswer{}, nil
+	}
+	answer := f.answers[0]
+	if len(f.answers) > 1 {
+		f.answers = f.answers[1:]
+	}
+	// The probe only stops early on an address the Gateway also calls
+	// Programmed, so an answer with an address means both unless a test says
+	// otherwise.
+	if answer.Address != "" && answer.Status == "" {
+		answer.Status = "True"
+	}
+	return answer, nil
+}
+
+func (f *fakeProbe) Reachable(_ context.Context, address string, retry time.Duration) (int, error) {
+	f.reachCalls++
+	f.reached = address
+	f.reachRetry = retry
+	f.tr.add("reach")
+	if f.reachErr != nil {
+		return 0, f.reachErr
+	}
+	return f.reachCode, nil
+}
+
+// fixture is one Decision wired to recording fakes.
+type fixture struct {
+	d       *Decision
+	cl      *fakeCluster
+	rel     *fakeReleases
+	confirm *fakeConfirm
+	probe   *fakeProbe
+	log     *bytes.Buffer
+	tr      *trace
+	// opened is how many times the cluster client was built, probes how many
+	// times the Gateway probe was built.
+	opened int
+	probes int
+}
+
+func newFixture() *fixture {
+	f := &fixture{
+		tr:      &trace{},
+		log:     &bytes.Buffer{},
+		cl:      &fakeCluster{},
+		rel:     &fakeReleases{},
+		confirm: &fakeConfirm{answer: true},
+		probe:   &fakeProbe{reachCode: 404},
+	}
+	f.cl.tr = f.tr
+	f.rel.tr = f.tr
+	f.confirm.tr = f.tr
+	f.probe.tr = f.tr
+	f.d = &Decision{
+		Open: func() (Cluster, error) {
+			f.opened++
+			return f.cl, nil
+		},
+		Releases: f.rel,
+		Probe: func() (GatewayProbe, error) {
+			f.probes++
+			return f.probe, nil
+		},
+		Confirm: f.confirm,
+		Log:     f.log,
+	}
+	return f
 }
 
 func components(actions map[bootstrap.PlatformComponent]string) []bootstrap.ComponentResult {
@@ -100,20 +217,6 @@ func components(actions map[bootstrap.PlatformComponent]string) []bootstrap.Comp
 	return out
 }
 
-func newDecision(cl *fakeCluster, rel *fakeReleases, confirm *fakeConfirm) (*Decision, *bytes.Buffer, *int) {
-	log := &bytes.Buffer{}
-	opened := 0
-	return &Decision{
-		Open: func() (Cluster, error) {
-			opened++
-			return cl, nil
-		},
-		Releases: rel,
-		Confirm:  confirm,
-		Log:      log,
-	}, log, &opened
-}
-
 var allInstall = []bootstrap.ComponentResult{
 	{Component: bootstrap.ComponentGatewayAPI, Action: "install", Mode: bootstrap.ModeAuto},
 	{Component: bootstrap.ComponentLoadBalancer, Action: "install", Mode: bootstrap.ModeAuto},
@@ -121,9 +224,25 @@ var allInstall = []bootstrap.ComponentResult{
 	{Component: bootstrap.ComponentCertManager, Action: "install", Mode: bootstrap.ModeAuto},
 }
 
-// Only an install action becomes a step. A component box uses or verifies is
-// never written, and the order is the PLAN.md order: CRDs, LoadBalancer,
-// Gateway, then the tenancy policy.
+// notProbed is what bootstrap's read-only probes produce on a cluster with
+// nothing on it: Envoy Gateway and its Gateway are planned installs, and the
+// LoadBalancer is the question the plan defers to the Gateway's own status.
+func notProbed(mode bootstrap.PlatformMode) []bootstrap.ComponentResult {
+	action := "probe"
+	if mode == bootstrap.ModeExternal {
+		action = "verify"
+	}
+	return []bootstrap.ComponentResult{
+		{Component: bootstrap.ComponentGatewayAPI, Action: "install", Outcome: bootstrap.OutcomeAbsent, Mode: bootstrap.ModeAuto},
+		{Component: bootstrap.ComponentLoadBalancer, Action: action, Outcome: bootstrap.OutcomeNotProbed, Mode: mode},
+		{Component: bootstrap.ComponentGateway, Action: "install", Outcome: bootstrap.OutcomeAbsent, Mode: bootstrap.ModeAuto},
+		{Component: bootstrap.ComponentCertManager, Action: "use", Outcome: bootstrap.OutcomePresent, Mode: bootstrap.ModeAuto},
+	}
+}
+
+// Only an install action becomes a step. A component box uses is never
+// written, and the order is the PLAN.md order: CRDs, LoadBalancer, Gateway,
+// then the tenancy policy.
 func TestBuildPlanInstallsOnlyInstallActions(t *testing.T) {
 	plan, err := BuildPlan(components(map[bootstrap.PlatformComponent]string{
 		bootstrap.ComponentGatewayAPI:   "use",
@@ -158,9 +277,11 @@ func TestBuildPlanInstallsOnlyInstallActions(t *testing.T) {
 			} else {
 				got = append(got, "policy")
 			}
+		case StepReachable:
+			got = append(got, "reachable")
 		}
 	}
-	want := []string{"release/envoy-gateway", "release/metallb", "pool", "gateway", "policy"}
+	want := []string{"release/envoy-gateway", "release/metallb", "pool", "gateway", "reachable", "policy"}
 	if strings.Join(got, ",") != strings.Join(want, ",") {
 		t.Fatalf("plan order = %v, want %v", got, want)
 	}
@@ -169,13 +290,56 @@ func TestBuildPlanInstallsOnlyInstallActions(t *testing.T) {
 	}
 }
 
-// bootstrap's probe cannot decide the LoadBalancer capability without writing
-// a throwaway Service, so it reports not-probed; auto mode must still install
-// MetalLB, because the Gateway's Service has no address without one.
-func TestBuildPlanInstallsAnUnprobedLoadBalancer(t *testing.T) {
+// The Gateway is applied first in auto mode, then the question, then (only if
+// the answer is "no address") MetalLB and its pool, then the reachability
+// check. That order is the whole design: the Gateway's own status decides.
+func TestBuildPlanMakesMetalLBConditionalWhenUnprobed(t *testing.T) {
+	plan, err := BuildPlan(notProbed(bootstrap.ModeAuto))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var kinds []StepKind
+	var conditional []string
+	for _, s := range plan.Steps {
+		kinds = append(kinds, s.Kind)
+		if s.Unless != "" {
+			if s.Unless != UnlessGatewayAddress {
+				t.Fatalf("%s step carries an unknown condition %q", s.Kind, s.Unless)
+			}
+			conditional = append(conditional, string(s.Kind)+"/"+s.Release.Name)
+		}
+	}
+	want := []StepKind{StepRelease, StepManifests, StepGatewayAddress, StepRelease, StepPool, StepReachable, StepManifests}
+	if len(kinds) != len(want) {
+		t.Fatalf("plan = %v, want %v", kinds, want)
+	}
+	for i := range want {
+		if kinds[i] != want[i] {
+			t.Fatalf("plan = %v, want %v", kinds, want)
+		}
+	}
+	if plan.Steps[0].Release.Name != EnvoyGatewayRelease || plan.Steps[3].Release.Name != MetalLBRelease {
+		t.Fatalf("plan releases = %s, %s", plan.Steps[0].Release.Name, plan.Steps[3].Release.Name)
+	}
+	if got := strings.Join(conditional, ","); got != "release/metallb,metallb-pool/" {
+		t.Fatalf("conditional steps = %q, want MetalLB and its pool only", got)
+	}
+	if plan.Steps[2].Mode != bootstrap.ModeAuto {
+		t.Fatalf("the address question does not run in auto mode: %+v", plan.Steps[2])
+	}
+	// The policy is never conditional: tenancy is not a LoadBalancer question.
+	if plan.Steps[len(plan.Steps)-1].Unless != "" {
+		t.Fatal("the admission policy was made conditional")
+	}
+}
+
+// A re-run does not write the Gateway, but it still asks the Gateway that is
+// already there: that is what keeps a second bootstrap on a cluster whose
+// MetalLB someone else installed from installing one of box's own.
+func TestBuildPlanAsksAboutTheGatewayItDidNotWrite(t *testing.T) {
 	comps := []bootstrap.ComponentResult{
 		{Component: bootstrap.ComponentGatewayAPI, Action: "use", Outcome: bootstrap.OutcomePresent, Mode: bootstrap.ModeAuto},
-		{Component: bootstrap.ComponentLoadBalancer, Action: "unknown", Outcome: bootstrap.OutcomeNotProbed, Mode: bootstrap.ModeAuto},
+		{Component: bootstrap.ComponentLoadBalancer, Action: "probe", Outcome: bootstrap.OutcomeNotProbed, Mode: bootstrap.ModeAuto},
 		{Component: bootstrap.ComponentGateway, Action: "use", Outcome: bootstrap.OutcomePresent, Mode: bootstrap.ModeAuto},
 		{Component: bootstrap.ComponentCertManager, Action: "use", Outcome: bootstrap.OutcomePresent, Mode: bootstrap.ModeAuto},
 	}
@@ -183,33 +347,77 @@ func TestBuildPlanInstallsAnUnprobedLoadBalancer(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var got []StepKind
+	var kinds []StepKind
 	for _, s := range plan.Steps {
-		got = append(got, s.Kind)
+		kinds = append(kinds, s.Kind)
 	}
-	want := []StepKind{StepRelease, StepPool, StepManifests}
-	if len(got) != len(want) {
-		t.Fatalf("plan = %v, want %v", got, want)
+	want := []StepKind{StepGatewayAddress, StepRelease, StepPool, StepManifests}
+	if len(kinds) != len(want) {
+		t.Fatalf("plan = %v, want %v", kinds, want)
 	}
 	for i := range want {
-		if got[i] != want[i] {
-			t.Fatalf("plan = %v, want %v", got, want)
+		if kinds[i] != want[i] {
+			t.Fatalf("plan = %v, want %v", kinds, want)
 		}
 	}
-	if plan.Steps[0].Release.Name != MetalLBRelease {
-		t.Fatalf("the only release is %s, want MetalLB", plan.Steps[0].Release.Name)
+	if plan.Steps[1].Unless != UnlessGatewayAddress || plan.Steps[2].Unless != UnlessGatewayAddress {
+		t.Fatal("MetalLB is not conditional on a Gateway box did not write")
 	}
+}
 
-	// external mode is the user's address layer: never installs one.
-	comps[1].Mode = bootstrap.ModeExternal
-	plan, err = BuildPlan(comps)
+// managed is box's own address layer: installed before the Gateway (whose
+// Service is what needs it) without asking anything.
+func TestBuildPlanManagedInstallsMetalLBWithoutAQuestion(t *testing.T) {
+	comps := notProbed(bootstrap.ModeManaged)
+	comps[1].Action = "install"
+	plan, err := BuildPlan(comps)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var kinds []StepKind
+	for _, s := range plan.Steps {
+		kinds = append(kinds, s.Kind)
+		if s.Unless != "" {
+			t.Fatalf("managed mode planned a conditional step: %+v", s)
+		}
+	}
+	want := []StepKind{StepRelease, StepRelease, StepPool, StepManifests, StepReachable, StepManifests}
+	if len(kinds) != len(want) {
+		t.Fatalf("managed plan = %v, want %v", kinds, want)
+	}
+	for i := range want {
+		if kinds[i] != want[i] {
+			t.Fatalf("managed plan = %v, want %v", kinds, want)
+		}
+	}
+	if plan.Steps[1].Release.Name != MetalLBRelease {
+		t.Fatalf("managed mode installs %s before the Gateway, want MetalLB", plan.Steps[1].Release.Name)
+	}
+}
+
+// external mode writes nothing for the address layer: the Gateway's address
+// verifies the operator's own, and the plan says so with a question.
+func TestBuildPlanExternalVerifiesWithTheGatewayAddress(t *testing.T) {
+	plan, err := BuildPlan(notProbed(bootstrap.ModeExternal))
 	if err != nil {
 		t.Fatal(err)
 	}
 	for _, s := range plan.Steps {
-		if s.Kind == StepRelease {
-			t.Fatalf("external mode planned a release: %+v", s.Release)
+		if s.Component == bootstrap.ComponentLoadBalancer && s.Kind != StepGatewayAddress && s.Kind != StepReachable {
+			t.Fatalf("external mode planned a write for the address layer: %+v", s)
 		}
+	}
+	question := false
+	for _, s := range plan.Steps {
+		if s.Kind == StepGatewayAddress {
+			question = true
+			if s.Mode != bootstrap.ModeExternal {
+				t.Fatalf("the question runs in %s mode, want external", s.Mode)
+			}
+		}
+	}
+	if !question {
+		t.Fatal("external mode planned no verification of the Gateway's address")
 	}
 }
 
@@ -222,197 +430,480 @@ func TestBuildPlanRefusesConflict(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "platform conflict") {
 		t.Fatalf("want a conflict refusal, got %v (%+v)", err, plan)
 	}
-	cl := &fakeCluster{}
-	d, _, opened := newDecision(cl, &fakeReleases{}, &fakeConfirm{answer: true})
-	if _, err := d.Apply(context.Background(), comps); err == nil {
+	f := newFixture()
+	if _, err := f.d.Apply(context.Background(), comps); err == nil {
 		t.Fatal("Apply accepted a conflict")
 	}
-	if *opened != 0 {
+	if f.opened != 0 {
 		t.Fatal("Apply opened a cluster client for a conflict")
 	}
 }
 
-// A no writes nothing at all: not a Helm release, not a manifest, not the pool.
+// A no writes nothing at all: not a Helm release, not a manifest, not the pool
+// -- and the Gateway is never asked about its address.
 func TestApplyRefusalWritesNothing(t *testing.T) {
-	cl := &fakeCluster{}
-	rel := &fakeReleases{}
-	confirm := &fakeConfirm{answer: false}
-	d, log, _ := newDecision(cl, rel, confirm)
+	f := newFixture()
+	f.confirm.answer = false
 
-	_, err := d.Apply(context.Background(), allInstall)
+	_, err := f.d.Apply(context.Background(), notProbed(bootstrap.ModeAuto))
 	if !errors.Is(err, ErrCancelled) {
 		t.Fatalf("want ErrCancelled, got %v", err)
 	}
-	if !strings.Contains(log.String(), "oh heck, nvm") {
-		t.Fatalf("the refusal has no voice: %q", log.String())
+	if !strings.Contains(f.log.String(), "oh heck, nvm") {
+		t.Fatalf("the refusal has no voice: %q", f.log.String())
 	}
-	if len(rel.installed) != 0 || len(cl.writes) != 0 || len(cl.awaits) != 0 {
-		t.Fatalf("a refusal wrote: %d releases, %d applies, %d waits", len(rel.installed), len(cl.writes), len(cl.awaits))
+	if len(f.rel.installed) != 0 || len(f.cl.writes) != 0 || len(f.cl.awaits) != 0 {
+		t.Fatalf("a refusal wrote: %d releases, %d applies, %d waits", len(f.rel.installed), len(f.cl.writes), len(f.cl.awaits))
 	}
-	if confirm.asked != 1 {
-		t.Fatalf("asked %d times, want once", confirm.asked)
+	if f.probe.addressCalls != 0 || f.probes != 0 {
+		t.Fatalf("a refusal asked about the Gateway: %d answers, %d probes built", f.probe.addressCalls, f.probes)
+	}
+	if got := f.tr.String(); got != "confirm" {
+		t.Fatalf("a refusal did more than ask: %s", got)
+	}
+	if f.confirm.asked != 1 {
+		t.Fatalf("asked %d times, want once", f.confirm.asked)
 	}
 	// The plan was still printed before the question: that is the review.
-	if !strings.Contains(log.String(), "envoy-gateway 1.9.3") {
-		t.Fatalf("the plan did not name the pinned Envoy Gateway: %q", log.String())
+	if !strings.Contains(f.log.String(), "envoy-gateway 1.9.3") {
+		t.Fatalf("the plan did not name the pinned Envoy Gateway: %q", f.log.String())
+	}
+	if !strings.Contains(f.log.String(), "? metallb 0.16.1 (Helm, metallb-system), unless the Gateway gets an address without it") {
+		t.Fatalf("the plan did not say MetalLB is conditional: %q", f.log.String())
+	}
+	if !strings.Contains(f.log.String(), "? Gateway s5n-gateway/s5n getting an address") {
+		t.Fatalf("the plan did not say it waits for the Gateway's address: %q", f.log.String())
 	}
 }
 
 // Missing RBAC is refused before the confirm and before any write.
 func TestApplyRefusesWithoutAccess(t *testing.T) {
-	cl := &fakeCluster{deny: "customresourcedefinitions"}
-	rel := &fakeReleases{}
-	confirm := &fakeConfirm{answer: true}
-	d, _, _ := newDecision(cl, rel, confirm)
+	f := newFixture()
+	f.cl.deny = "customresourcedefinitions"
 
-	_, err := d.Apply(context.Background(), allInstall)
+	_, err := f.d.Apply(context.Background(), allInstall)
 	if err == nil || !strings.Contains(err.Error(), "custom resource definitions") {
 		t.Fatalf("want an RBAC refusal naming the CRDs, got %v", err)
 	}
-	if confirm.asked != 0 {
+	if f.confirm.asked != 0 {
 		t.Fatal("box asked before it knew it could do the work")
 	}
-	if len(rel.installed) != 0 || len(cl.writes) != 0 {
-		t.Fatalf("an RBAC refusal wrote: %d releases, %d applies", len(rel.installed), len(cl.writes))
+	if len(f.rel.installed) != 0 || len(f.cl.writes) != 0 {
+		t.Fatalf("an RBAC refusal wrote: %d releases, %d applies", len(f.rel.installed), len(f.cl.writes))
+	}
+	if f.probe.addressCalls != 0 {
+		t.Fatal("an RBAC refusal asked about the Gateway")
 	}
 }
 
-// The whole install, in order, with readiness after each component.
+// The whole install, in order, with readiness after each component. This is
+// the managed shape: MetalLB before the Gateway.
 func TestApplyInstallsInOrder(t *testing.T) {
-	cl := &fakeCluster{}
-	rel := &fakeReleases{}
-	confirm := &fakeConfirm{answer: true}
-	d, log, _ := newDecision(cl, rel, confirm)
+	f := newFixture()
+	f.probe.answers = []GatewayAnswer{{Address: "192.0.2.10"}}
 
-	res, err := d.Apply(context.Background(), allInstall)
+	res, err := f.d.Apply(context.Background(), allInstall)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(rel.installed) != 2 ||
-		rel.installed[0].Name != EnvoyGatewayRelease || rel.installed[0].Version != EnvoyGatewayVersion ||
-		rel.installed[1].Name != MetalLBRelease || rel.installed[1].Version != MetalLBVersion {
-		t.Fatalf("releases = %+v", rel.installed)
+	if len(f.rel.installed) != 2 ||
+		f.rel.installed[0].Name != EnvoyGatewayRelease || f.rel.installed[0].Version != EnvoyGatewayVersion ||
+		f.rel.installed[1].Name != MetalLBRelease || f.rel.installed[1].Version != MetalLBVersion {
+		t.Fatalf("releases = %+v", f.rel.installed)
 	}
-	if len(cl.writes) != 3 {
-		t.Fatalf("applies = %d, want pool, gateway, policy", len(cl.writes))
+	if len(f.cl.writes) != 3 {
+		t.Fatalf("applies = %d, want pool, gateway, policy", len(f.cl.writes))
 	}
-	if kind, ns, name := objectMeta(cl.writes[0][0]); kind != "IPAddressPool" || ns != MetalLBNamespace || name != MetalLBPoolName {
+	if kind, ns, name := objectMeta(f.cl.writes[0][0]); kind != "IPAddressPool" || ns != MetalLBNamespace || name != MetalLBPoolName {
 		t.Fatalf("first apply is %s %s/%s, want the MetalLB pool", kind, ns, name)
 	}
-	if pool := cl.writes[0][0]; !strings.Contains(pool["spec"].(map[string]any)["addresses"].([]any)[0].(string), "192.0.2.10/32") {
+	if pool := f.cl.writes[0][0]; !strings.Contains(pool["spec"].(map[string]any)["addresses"].([]any)[0].(string), "192.0.2.10/32") {
 		t.Fatalf("pool addresses = %v", pool["spec"])
 	}
-	if kind, ns, name := objectMeta(cl.writes[1][0]); kind != "Namespace" || name != GatewayNamespace {
+	if kind, ns, name := objectMeta(f.cl.writes[1][0]); kind != "Namespace" || name != GatewayNamespace {
 		t.Fatalf("second apply is %s %s/%s, want the Gateway's namespace", kind, ns, name)
 	}
-	if kind, _, name := objectMeta(cl.writes[1][1]); kind != "GatewayClass" || name != "eg" {
+	if kind, _, name := objectMeta(f.cl.writes[1][1]); kind != "GatewayClass" || name != "eg" {
 		t.Fatalf("second apply's second doc is %s %s, want the GatewayClass", kind, name)
 	}
-	if kind, ns, name := objectMeta(cl.writes[1][2]); kind != "Gateway" || ns != GatewayNamespace || name != GatewayName {
+	if kind, ns, name := objectMeta(f.cl.writes[1][2]); kind != "Gateway" || ns != GatewayNamespace || name != GatewayName {
 		t.Fatalf("second apply's third doc is %s %s/%s", kind, ns, name)
 	}
-	if kind, _, _ := objectMeta(cl.writes[2][0]); kind != "Namespace" {
+	if kind, _, _ := objectMeta(f.cl.writes[2][0]); kind != "Namespace" {
 		t.Fatalf("third apply starts with %s, want the policy's namespace", kind)
 	}
 
 	var waits []string
-	for _, w := range cl.awaits {
+	for _, w := range f.cl.awaits {
 		waits = append(waits, w.String())
 	}
 	want := []string{
 		"Deployment envoy-gateway-system/envoy-gateway",
 		"Deployment metallb-system/metallb-controller",
 		"DaemonSet metallb-system/metallb-speaker",
-		"Gateway s5n-gateway/s5n",
 	}
 	if strings.Join(waits, ",") != strings.Join(want, ",") {
 		t.Fatalf("waits = %v, want %v", waits, want)
 	}
-	if len(res.Installed) == 0 || !strings.Contains(log.String(), "platform ready") {
-		t.Fatalf("result/log do not report the install: %+v %q", res, log.String())
+	// No question: managed mode owns the address layer. The reachability check
+	// still runs, because an address nobody can reach is not an install.
+	if f.probe.addressCalls != 1 || f.probe.reachCalls != 1 {
+		t.Fatalf("address calls = %d, reach calls = %d, want the reachability check only", f.probe.addressCalls, f.probe.reachCalls)
+	}
+	if len(res.Installed) == 0 || !strings.Contains(f.log.String(), "platform ready") {
+		t.Fatalf("result/log do not report the install: %+v %q", res, f.log.String())
+	}
+}
+
+// The point of the design: when the Gateway gets an address on its own, MetalLB
+// and its pool are neither installed nor applied.
+func TestApplySkipsMetalLBWhenTheGatewayGetsAnAddress(t *testing.T) {
+	f := newFixture()
+	f.probe.answers = []GatewayAnswer{{Address: "10.0.0.50"}}
+
+	_, err := f.d.Apply(context.Background(), notProbed(bootstrap.ModeAuto))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, r := range f.rel.installed {
+		if r.Name == MetalLBRelease {
+			t.Fatal("MetalLB was installed although the Gateway got an address")
+		}
+	}
+	for _, docs := range f.cl.writes {
+		if kind, _, _ := objectMeta(docs[0]); kind == "IPAddressPool" {
+			t.Fatal("the MetalLB pool was applied although the Gateway got an address")
+		}
+	}
+	if f.probe.addressCalls != 2 {
+		t.Fatalf("address calls = %d, want the question and the reachability check", f.probe.addressCalls)
+	}
+	if f.probe.reached != "10.0.0.50" {
+		t.Fatalf("the reachability check used %q, want the Gateway's address", f.probe.reached)
+	}
+	if f.probe.addressWaits[0] != ProbeTimeout {
+		t.Fatalf("the question waited %s, want %s", f.probe.addressWaits[0], ProbeTimeout)
+	}
+	if ProbeTimeout != 60*time.Second {
+		t.Fatalf("the address wait is %s, want the 60s docs/box.md specifies", ProbeTimeout)
+	}
+	if ReachTimeout != 30*time.Second {
+		t.Fatalf("the reachability retry is %s, want 30s", ReachTimeout)
+	}
+	// Ordering: the Gateway is applied, then asked, then the check.
+	got := f.tr.String()
+	want := []string{
+		"confirm",
+		"install:" + EnvoyGatewayRelease,
+		"await:Deployment envoy-gateway-system/envoy-gateway",
+		"apply:Namespace",
+		"address",
+		"address",
+		"reach",
+		"apply:Namespace",
+	}
+	if strings.Join(want, ",") != got {
+		t.Fatalf("trace = %s, want %s", got, strings.Join(want, ","))
+	}
+	if !strings.Contains(f.log.String(), "the Gateway already has an address: 10.0.0.50") {
+		t.Fatalf("box did not say what answered: %q", f.log.String())
+	}
+	if !strings.Contains(f.log.String(), "the Gateway answers on 10.0.0.50:80 (HTTP 404)") {
+		t.Fatalf("box did not print the reachability result: %q", f.log.String())
+	}
+}
+
+// AddressNotAssigned: MetalLB is installed and the pool applied, then the
+// Gateway is waited on again -- and only then is the address checked.
+func TestApplyInstallsMetalLBOnAddressNotAssigned(t *testing.T) {
+	f := newFixture()
+	f.probe.answers = []GatewayAnswer{
+		{Reason: gatewayAddressNotAssigned},
+		{Address: "192.0.2.10"},
+	}
+
+	if _, err := f.d.Apply(context.Background(), notProbed(bootstrap.ModeAuto)); err != nil {
+		t.Fatal(err)
+	}
+	if len(f.rel.installed) != 2 || f.rel.installed[1].Name != MetalLBRelease {
+		t.Fatalf("releases = %+v, want Envoy Gateway then MetalLB", f.rel.installed)
+	}
+	if len(f.cl.writes) != 3 {
+		t.Fatalf("applies = %d, want pool, gateway, policy", len(f.cl.writes))
+	}
+	// The Gateway is applied before the question, so the pool is the second
+	// write, not the first.
+	if kind, _, name := objectMeta(f.cl.writes[1][0]); kind != "IPAddressPool" || name != MetalLBPoolName {
+		t.Fatalf("the pool was not applied after the Gateway: %s %s", kind, name)
+	}
+	got := f.tr.String()
+	want := []string{
+		"confirm",
+		"install:" + EnvoyGatewayRelease,
+		"await:Deployment envoy-gateway-system/envoy-gateway",
+		"apply:Namespace",
+		"address",
+		"install:" + MetalLBRelease,
+		"await:Deployment metallb-system/metallb-controller",
+		"await:DaemonSet metallb-system/metallb-speaker",
+		"apply:IPAddressPool",
+		"address",
+		"reach",
+		"apply:Namespace",
+	}
+	if strings.Join(want, ",") != got {
+		t.Fatalf("trace = %s, want %s", got, strings.Join(want, ","))
+	}
+	if !strings.Contains(f.log.String(), "the Gateway has no address ("+gatewayAddressNotAssigned+") after waiting up to 1m0s; installing MetalLB") {
+		t.Fatalf("box did not say why it installed MetalLB: %q", f.log.String())
+	}
+	if f.probe.reached != "192.0.2.10" {
+		t.Fatalf("the reachability check used %q", f.probe.reached)
+	}
+}
+
+// An address and a Programmed reason that is not AddressNotAssigned is a
+// failure to stop on: Envoy Gateway reports NoResources while its data plane
+// is still coming up, and box must not install MetalLB over a Gateway that has
+// an address it cannot call ready by the deadline.
+func TestApplyStopsOnAnAddressThatIsNotProgrammed(t *testing.T) {
+	f := newFixture()
+	f.probe.answers = []GatewayAnswer{{
+		Address: "172.18.255.239",
+		Status:  "False",
+		Reason:  "NoResources",
+		Message: "Envoy replicas unavailable",
+	}}
+
+	_, err := f.d.Apply(context.Background(), notProbed(bootstrap.ModeAuto))
+	if err == nil {
+		t.Fatal("box accepted a Gateway with an address it will not call Programmed")
+	}
+	for _, want := range []string{"has address 172.18.255.239 but is not Programmed", "NoResources", "Envoy replicas unavailable"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("the refusal does not say %q: %v", want, err)
+		}
+	}
+	for _, r := range f.rel.installed {
+		if r.Name == MetalLBRelease {
+			t.Fatal("MetalLB was installed over an address that already existed")
+		}
+	}
+	if f.probe.reachCalls != 0 {
+		t.Fatal("the reachability check ran on a Gateway that had already failed")
+	}
+}
+
+// A Gateway with no address that is failing for a reason MetalLB cannot answer
+// stops too: installing an address layer would hide it.
+func TestApplyStopsOnAnotherReasonWithNoAddress(t *testing.T) {
+	f := newFixture()
+	f.probe.answers = []GatewayAnswer{{Status: "False", Reason: "AddressNotUsable", Message: "One or more Gateway addresses cannot be used"}}
+
+	_, err := f.d.Apply(context.Background(), notProbed(bootstrap.ModeAuto))
+	if err == nil || !strings.Contains(err.Error(), "AddressNotUsable") {
+		t.Fatalf("want the Gateway's own reason, got %v", err)
+	}
+	for _, r := range f.rel.installed {
+		if r.Name == MetalLBRelease {
+			t.Fatal("MetalLB was installed over a Gateway failing for another reason")
+		}
+	}
+}
+
+// The last check is the one that matters: an address in the API server that
+// nothing answers on is not a working platform.
+func TestApplyFailsWhenNothingAnswersOnTheAddress(t *testing.T) {
+	f := newFixture()
+	f.probe.answers = []GatewayAnswer{{Address: "10.0.0.50"}}
+	f.probe.reachErr = errors.New("dial tcp 10.0.0.50:80: connect: connection refused")
+
+	_, err := f.d.Apply(context.Background(), notProbed(bootstrap.ModeAuto))
+	if err == nil {
+		t.Fatal("box accepted an address nothing answers on")
+	}
+	for _, want := range []string{
+		"the Gateway has address 10.0.0.50, but nothing answers on 10.0.0.50:80 from this host",
+		"connection refused",
+	} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("the refusal does not say %q: %v", want, err)
+		}
+	}
+	if strings.Contains(f.log.String(), "answers on 10.0.0.50:80 (HTTP") {
+		t.Fatalf("box reported a pass it did not get: %q", f.log.String())
+	}
+}
+
+// external mode: no MetalLB ever. A Gateway with no address stops bootstrap
+// with a reason of box's own.
+func TestApplyExternalWithoutAnAddressStops(t *testing.T) {
+	f := newFixture()
+	f.probe.answers = []GatewayAnswer{{Reason: gatewayAddressNotAssigned}}
+
+	_, err := f.d.Apply(context.Background(), notProbed(bootstrap.ModeExternal))
+	if err == nil {
+		t.Fatal("external mode installed a platform with no address behind it")
+	}
+	for _, want := range []string{"external", "got no address within 1m0s", "platform.loadbalancer.mode=auto"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("the refusal does not say %q: %v", want, err)
+		}
+	}
+	// The Gateway itself has to be applied before anything can be asked about
+	// it; nothing the address layer would write is.
+	for _, r := range f.rel.installed {
+		if r.Name == MetalLBRelease {
+			t.Fatal("external mode installed MetalLB")
+		}
+	}
+	for _, docs := range f.cl.writes {
+		if kind, _, _ := objectMeta(docs[0]); kind == "IPAddressPool" || kind == "L2Advertisement" {
+			t.Fatal("external mode applied MetalLB's pool")
+		}
+	}
+	if f.probe.reachCalls != 0 {
+		t.Fatal("the reachability check ran with no address")
+	}
+}
+
+// external mode with an address: the rest proceeds, and box says the address
+// layer is the operator's.
+func TestApplyExternalWithAnAddressInstallsTheRest(t *testing.T) {
+	f := newFixture()
+	f.probe.answers = []GatewayAnswer{{Address: "203.0.113.9"}}
+
+	if _, err := f.d.Apply(context.Background(), notProbed(bootstrap.ModeExternal)); err != nil {
+		t.Fatal(err)
+	}
+	if len(f.rel.installed) != 1 || f.rel.installed[0].Name != EnvoyGatewayRelease {
+		t.Fatalf("releases = %+v, want only Envoy Gateway", f.rel.installed)
+	}
+	if !strings.Contains(f.log.String(), "the Gateway has an address from the external LoadBalancer: 203.0.113.9") {
+		t.Fatalf("box did not report the external address: %q", f.log.String())
+	}
+	if f.probe.reached != "203.0.113.9" {
+		t.Fatalf("the reachability check used %q", f.probe.reached)
+	}
+}
+
+// box's own MetalLB is not a question: a second bootstrap verifies it as
+// before and never asks whether the Gateway could have done without it.
+func TestApplyVerifiesBoxMetalLBWithoutAsking(t *testing.T) {
+	f := newFixture()
+	f.rel.versions = map[string]string{"metallb-system/metallb": MetalLBVersion}
+	f.probe.answers = []GatewayAnswer{{Address: "192.0.2.10"}}
+
+	if _, err := f.d.Apply(context.Background(), notProbed(bootstrap.ModeAuto)); err != nil {
+		t.Fatal(err)
+	}
+	for _, r := range f.rel.installed {
+		if r.Name == MetalLBRelease {
+			t.Fatalf("Helm was called for MetalLB already at its pinned version: %+v", f.rel.installed)
+		}
+	}
+	if !strings.Contains(f.log.String(), "= metallb: already at "+MetalLBVersion) {
+		t.Fatalf("the plan did not verify MetalLB: %q", f.log.String())
+	}
+	if strings.Contains(f.log.String(), "? metallb") {
+		t.Fatalf("a release already deployed was printed as a question: %q", f.log.String())
+	}
+	if strings.Contains(f.log.String(), "getting an address") {
+		t.Fatalf("box asked whether the Gateway needed MetalLB it already owns: %q", f.log.String())
+	}
+	// One read, from the reachability check; no question.
+	if f.probe.addressCalls != 1 || f.probe.reachCalls != 1 {
+		t.Fatalf("address calls = %d, reach calls = %d", f.probe.addressCalls, f.probe.reachCalls)
+	}
+	if !strings.Contains(f.log.String(), "applied IPAddressPool "+MetalLBPoolName) {
+		t.Fatalf("the pool was not applied: %q", f.log.String())
 	}
 }
 
 // A release already at the pinned version is verified, not sent to Helm: a
 // second bootstrap must do no writes, and piling up Helm revisions is a write.
 func TestApplyVerifiesPinnedReleases(t *testing.T) {
-	cl := &fakeCluster{}
-	rel := &fakeReleases{versions: map[string]string{
+	f := newFixture()
+	f.rel.versions = map[string]string{
 		"envoy-gateway-system/envoy-gateway": EnvoyGatewayVersion,
 		"metallb-system/metallb":             MetalLBVersion,
-	}}
-	d, log, _ := newDecision(cl, rel, &fakeConfirm{answer: true})
+	}
+	f.probe.answers = []GatewayAnswer{{Address: "192.0.2.10"}}
 
-	if _, err := d.Apply(context.Background(), allInstall); err != nil {
+	if _, err := f.d.Apply(context.Background(), allInstall); err != nil {
 		t.Fatal(err)
 	}
-	if len(rel.installed) != 0 {
-		t.Fatalf("Helm was called for releases already at their pinned version: %+v", rel.installed)
+	if len(f.rel.installed) != 0 {
+		t.Fatalf("Helm was called for releases already at their pinned version: %+v", f.rel.installed)
 	}
-	if !strings.Contains(log.String(), "already at "+EnvoyGatewayVersion) {
-		t.Fatalf("the plan did not say the release is already there: %q", log.String())
+	if !strings.Contains(f.log.String(), "already at "+EnvoyGatewayVersion) {
+		t.Fatalf("the plan did not say the release is already there: %q", f.log.String())
 	}
 	// Readiness is still checked: a no-op run is verification, not silence.
-	if len(cl.awaits) != 4 {
-		t.Fatalf("waits = %v, want all four readiness checks", cl.awaits)
+	if len(f.cl.awaits) != 3 {
+		t.Fatalf("waits = %v, want all three readiness checks", f.cl.awaits)
 	}
 }
 
-// A release at another version is an upgrade, and the plan says so with ~.
+// A release at another version is an upgrade — including MetalLB's, which is
+// never skipped in favour of an address box's own older copy provides.
 func TestApplyUpgradesAnotherVersion(t *testing.T) {
-	cl := &fakeCluster{}
-	rel := &fakeReleases{versions: map[string]string{
+	f := newFixture()
+	f.rel.versions = map[string]string{
 		"envoy-gateway-system/envoy-gateway": "1.9.2",
-	}}
-	d, log, _ := newDecision(cl, rel, &fakeConfirm{answer: true})
+		"metallb-system/metallb":             "0.15.0",
+	}
+	f.probe.answers = []GatewayAnswer{{Address: "192.0.2.10"}}
 
-	if _, err := d.Apply(context.Background(), allInstall); err != nil {
+	if _, err := f.d.Apply(context.Background(), notProbed(bootstrap.ModeAuto)); err != nil {
 		t.Fatal(err)
 	}
-	if len(rel.installed) != 2 || rel.installed[0].Name != EnvoyGatewayRelease {
-		t.Fatalf("releases = %+v", rel.installed)
+	var upgraded []string
+	for _, r := range f.rel.installed {
+		upgraded = append(upgraded, r.Name)
 	}
-	if !strings.Contains(log.String(), "~ envoy-gateway 1.9.3") {
-		t.Fatalf("the plan did not mark the upgrade: %q", log.String())
+	if strings.Join(upgraded, ",") != EnvoyGatewayRelease+","+MetalLBRelease {
+		t.Fatalf("upgrades = %v, want Envoy Gateway and MetalLB", upgraded)
+	}
+	if !strings.Contains(f.log.String(), "~ metallb 0.16.1") {
+		t.Fatalf("the plan did not mark the MetalLB upgrade: %q", f.log.String())
 	}
 }
 
 // MetalLB's webhook answers a moment after its pods are Ready. The pool apply
 // is retried until it accepts, and the error is box's own.
 func TestApplyRetriesThePool(t *testing.T) {
-	cl := &fakeCluster{
-		applyErrs: []error{errors.New("no endpoints available for service \"metallb-webhook-service\""), nil},
-	}
-	rel := &fakeReleases{versions: map[string]string{"metallb-system/metallb": MetalLBVersion}}
-	d, log, _ := newDecision(cl, rel, &fakeConfirm{answer: true})
-	d.PoolTimeout = 1000000000 // one second
-	d.Poll = 1000000           // one millisecond
+	f := newFixture()
+	f.cl.applyErrs = []error{errors.New("no endpoints available for service \"metallb-webhook-service\""), nil}
+	f.rel.versions = map[string]string{"metallb-system/metallb": MetalLBVersion}
+	f.probe.answers = []GatewayAnswer{{Address: "192.0.2.10"}}
+	f.d.PoolTimeout = time.Second
+	f.d.Poll = time.Millisecond
 
-	if _, err := d.Apply(context.Background(), allInstall); err != nil {
+	if _, err := f.d.Apply(context.Background(), allInstall); err != nil {
 		t.Fatal(err)
 	}
-	if len(cl.writes) != 3 {
-		t.Fatalf("applies = %d, want the pool retried then the gateway and policy", len(cl.writes))
+	if len(f.cl.writes) != 3 {
+		t.Fatalf("applies = %d, want the pool retried then the gateway and policy", len(f.cl.writes))
 	}
-	if !strings.Contains(log.String(), "applied IPAddressPool s5n-pool (192.0.2.10/32)") {
-		t.Fatalf("the pool was not reported: %q", log.String())
+	if !strings.Contains(f.log.String(), "applied IPAddressPool s5n-pool (192.0.2.10/32)") {
+		t.Fatalf("the pool was not reported: %q", f.log.String())
 	}
 }
 
 func TestApplyReportsCertManager(t *testing.T) {
-	cl := &fakeCluster{}
-	rel := &fakeReleases{}
-	d, log, _ := newDecision(cl, rel, &fakeConfirm{answer: true})
+	f := newFixture()
+	f.probe.answers = []GatewayAnswer{{Address: "192.0.2.10"}}
 
-	res, err := d.Apply(context.Background(), allInstall)
+	res, err := f.d.Apply(context.Background(), allInstall)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(res.NotHandled) != 1 || !strings.Contains(res.NotHandled[0], "cert-manager") {
 		t.Fatalf("cert-manager was silently skipped: %+v", res.NotHandled)
 	}
-	if !strings.Contains(log.String(), "! cert-manager: box does not install it yet") {
-		t.Fatalf("cert-manager was not printed: %q", log.String())
+	if !strings.Contains(f.log.String(), "! cert-manager: box does not install it yet") {
+		t.Fatalf("cert-manager was not printed: %q", f.log.String())
 	}
 }
 

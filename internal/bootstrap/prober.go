@@ -489,8 +489,9 @@ func (p *HTTPProber) getKubeadmConfig(ctx context.Context) (any, error) {
 }
 
 // Platform runs the read-only subset of the capability probes. The
-// LoadBalancer probe would have to create a throwaway Service, so it is never
-// run here and reports not-probed.
+// LoadBalancer probe asks whether box's own Gateway got an address, and that
+// Gateway is written after the confirm, so it is never run here and reports
+// not-probed.
 func (p *HTTPProber) Platform(ctx context.Context) (PlatformProbe, error) {
 	var probe PlatformProbe
 

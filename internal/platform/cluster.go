@@ -213,26 +213,6 @@ func (k *Kubernetes) ready(ctx context.Context, w Wait) (bool, error) {
 			return false, err
 		}
 		return daemonSetReady(d), nil
-	case WaitGateway:
-		gvr, err := k.mapping(schema.GroupVersionKind{Group: "gateway.networking.k8s.io", Version: "v1", Kind: "Gateway"})
-		if err != nil {
-			return false, err
-		}
-		obj, err := k.dyn.Resource(gvr.Resource).Namespace(w.Namespace).Get(ctx, w.Name, metav1.GetOptions{})
-		if apierrors.IsNotFound(err) {
-			return false, nil
-		}
-		if err != nil {
-			return false, err
-		}
-		conditions, _, _ := unstructured.NestedSlice(obj.Object, "status", "conditions")
-		for _, c := range conditions {
-			cond, _ := c.(map[string]any)
-			if cond["type"] == "Programmed" && cond["status"] == "True" {
-				return true, nil
-			}
-		}
-		return false, nil
 	default:
 		return false, fmt.Errorf("unknown wait kind %q", w.Kind)
 	}

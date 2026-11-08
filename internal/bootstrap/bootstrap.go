@@ -114,9 +114,11 @@ type ConfigSource interface {
 }
 
 // Prober validates a cluster and probes its capabilities. All of its methods
-// are read-only with respect to cluster state, except that a full
-// LoadBalancer probe would create a throwaway Service — that one the real
-// prober reports as not probed rather than writing.
+// are read-only with respect to cluster state. The LoadBalancer capability
+// cannot be settled that way -- it is box's own Gateway that has to get an
+// address, and the Gateway only exists after `box bootstrap` writes it -- so
+// the real prober reports it as not probed and the platform decision settles
+// it after the confirm.
 type Prober interface {
 	// Version returns the API server's version; an error means the kubeconfig
 	// does not reach a live cluster.

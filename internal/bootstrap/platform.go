@@ -100,7 +100,7 @@ func decidePlatform(cfg PlatformConfig, probe PlatformProbe) ([]ComponentResult,
 			Mode:      c.mode(cfg),
 			Outcome:   c.out(probe),
 		}
-		cr.Action, cr.Reason = decideComponent(cr.Mode, cr.Outcome)
+		cr.Action, cr.Reason = decideComponent(cr.Component, cr.Mode, cr.Outcome)
 		out = append(out, cr)
 	}
 	for _, cr := range out {
@@ -111,12 +111,18 @@ func decidePlatform(cfg PlatformConfig, probe PlatformProbe) ([]ComponentResult,
 	return out, ""
 }
 
-// decideComponent maps a mode and a probe outcome to an action.
-func decideComponent(mode PlatformMode, out ProbeOutcome) (action, reason string) {
+// decideComponent maps a component, a mode and a probe outcome to an action.
+// The LoadBalancer is the one capability a read-only probe cannot settle: what
+// it has to look at is the Gateway box itself writes, so "not probed" there
+// means "settled after the confirm", never "unknown".
+func decideComponent(component PlatformComponent, mode PlatformMode, out ProbeOutcome) (action, reason string) {
 	switch out {
 	case OutcomeConflict:
 		return "stop", "a conflicting implementation is present; box will not fight it"
 	case OutcomeNotProbed:
+		if component == ComponentLoadBalancer {
+			return deferredLoadBalancer(mode)
+		}
 		return "unknown", "capability not probed"
 	case OutcomePresent:
 		switch mode {
@@ -139,6 +145,21 @@ func decideComponent(mode PlatformMode, out ProbeOutcome) (action, reason string
 	}
 }
 
+// deferredLoadBalancer is what box can say about the address layer before the
+// Gateway exists to ask: in auto mode MetalLB is installed unless the Gateway
+// gets an address without it, in managed mode it is installed regardless, in
+// external mode the Gateway's address verifies the operator's own.
+func deferredLoadBalancer(mode PlatformMode) (action, reason string) {
+	switch mode {
+	case ModeManaged:
+		return "install", "managed: box installs its own, without probing"
+	case ModeExternal:
+		return "verify", "external: verified after the confirm, by the Gateway's own address"
+	default:
+		return "probe", "settled after the confirm: MetalLB unless the Gateway gets an address without it"
+	}
+}
+
 // platformFromConfig renders a PlatformConfig into results with nothing probed:
 // what a recorded cluster shows on a re-run, when capability probes are skipped.
 func platformFromConfig(cfg PlatformConfig) []ComponentResult {
@@ -153,7 +174,7 @@ func platformFromOutcomes(cfg PlatformConfig, probe PlatformProbe) []ComponentRe
 			Mode:      c.mode(cfg),
 			Outcome:   c.out(probe),
 		}
-		cr.Action, cr.Reason = decideComponent(cr.Mode, cr.Outcome)
+		cr.Action, cr.Reason = decideComponent(cr.Component, cr.Mode, cr.Outcome)
 		out = append(out, cr)
 	}
 	return out

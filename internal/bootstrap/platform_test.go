@@ -7,33 +7,71 @@ import (
 
 func TestDecideComponent(t *testing.T) {
 	cases := []struct {
+		component  PlatformComponent
 		mode       PlatformMode
 		out        ProbeOutcome
 		wantAction string
 	}{
 		// auto: use when present, install when absent
-		{ModeAuto, OutcomePresent, "use"},
-		{ModeAuto, OutcomeAbsent, "install"},
+		{ComponentGateway, ModeAuto, OutcomePresent, "use"},
+		{ComponentGateway, ModeAuto, OutcomeAbsent, "install"},
 		// managed: always install ours, present or absent
-		{ModeManaged, OutcomePresent, "install"},
-		{ModeManaged, OutcomeAbsent, "install"},
+		{ComponentGateway, ModeManaged, OutcomePresent, "install"},
+		{ComponentGateway, ModeManaged, OutcomeAbsent, "install"},
 		// external: verify when present, stop when absent
-		{ModeExternal, OutcomePresent, "verify"},
-		{ModeExternal, OutcomeAbsent, "stop"},
+		{ComponentGateway, ModeExternal, OutcomePresent, "verify"},
+		{ComponentGateway, ModeExternal, OutcomeAbsent, "stop"},
 		// conflict stops in every mode
-		{ModeAuto, OutcomeConflict, "stop"},
-		{ModeManaged, OutcomeConflict, "stop"},
-		{ModeExternal, OutcomeConflict, "stop"},
-		// not probed is unknown in every mode
-		{ModeAuto, OutcomeNotProbed, "unknown"},
-		{ModeExternal, OutcomeNotProbed, "unknown"},
+		{ComponentGateway, ModeAuto, OutcomeConflict, "stop"},
+		{ComponentGateway, ModeManaged, OutcomeConflict, "stop"},
+		{ComponentGateway, ModeExternal, OutcomeConflict, "stop"},
+		// not probed is unknown for every capability whose probe is read-only
+		{ComponentGateway, ModeAuto, OutcomeNotProbed, "unknown"},
+		{ComponentCertManager, ModeExternal, OutcomeNotProbed, "unknown"},
+		// the LoadBalancer's probe is a write, so not probed means after the
+		// confirm: a conditional install in auto, an install in managed, a
+		// verification in external.
+		{ComponentLoadBalancer, ModeAuto, OutcomeNotProbed, "probe"},
+		{ComponentLoadBalancer, ModeManaged, OutcomeNotProbed, "install"},
+		{ComponentLoadBalancer, ModeExternal, OutcomeNotProbed, "verify"},
 	}
 	for _, tc := range cases {
-		got, _ := decideComponent(tc.mode, tc.out)
+		got, _ := decideComponent(tc.component, tc.mode, tc.out)
 		if got != tc.wantAction {
-			t.Errorf("decideComponent(%s, %s) = %q, want %q", tc.mode, tc.out, got, tc.wantAction)
+			t.Errorf("decideComponent(%s, %s, %s) = %q, want %q", tc.component, tc.mode, tc.out, got, tc.wantAction)
 		}
 	}
+}
+
+// The decision block bootstrap prints before the platform plan must not
+// contradict the plan: a not-probed LoadBalancer is not "unknown", it is the
+// question the plan prints as "unless the Gateway gets an address without it".
+func TestDecidePlatformLoadBalancerSaysWhenItIsDecided(t *testing.T) {
+	components, conflict := decidePlatform(DefaultPlatform(), PlatformProbe{
+		GatewayAPI:   OutcomePresent,
+		LoadBalancer: OutcomeNotProbed,
+		Gateway:      OutcomePresent,
+		CertManager:  OutcomePresent,
+	})
+	if conflict != "" {
+		t.Fatalf("unexpected conflict: %s", conflict)
+	}
+	for _, c := range components {
+		if c.Component != ComponentLoadBalancer {
+			continue
+		}
+		if c.Action != "probe" {
+			t.Fatalf("auto LoadBalancer action = %q, want probe", c.Action)
+		}
+		if !strings.Contains(c.Reason, "unless the Gateway gets an address without it") {
+			t.Fatalf("the decision does not say what the plan decides: %q", c.Reason)
+		}
+		if strings.Contains(c.Reason, "not probed") {
+			t.Fatalf("the decision still reads as undecided: %q", c.Reason)
+		}
+		return
+	}
+	t.Fatal("no LoadBalancer result")
 }
 
 func TestDecidePlatformConflictStopsInEveryMode(t *testing.T) {

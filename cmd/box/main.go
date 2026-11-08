@@ -150,6 +150,10 @@ func applyPlatform(ctx context.Context, kubeconfig string, components []bootstra
 	p := &platform.Decision{
 		Open:     func() (platform.Cluster, error) { return platform.NewCluster(kubeconfig) },
 		Releases: platform.NewHelm(kubeconfig),
+		// The LoadBalancer question is settled by the Gateway's own status, so
+		// the probe is built only once the plan asks for it: after the confirm,
+		// once the Gateway exists.
+		Probe: func() (platform.GatewayProbe, error) { return platform.NewGatewayProbe(kubeconfig) },
 		Confirm: &release.Terminal{
 			In:    os.Stdin,
 			Out:   os.Stdout,

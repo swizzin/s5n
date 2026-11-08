@@ -65,6 +65,18 @@ const (
 	MetalLBL2Name   = "s5n-l2"
 )
 
+// Condition names what has to be false for a step to run. A plan is printed
+// before the confirm, so a question that can only be settled by a write is
+// printed as a question (`?`) rather than guessed at.
+type Condition string
+
+const (
+	// UnlessGatewayAddress: the step runs only if the Gateway box applied
+	// gets no address of its own. The Gateway's status answers it, after the
+	// Gateway exists, which is why it is not known when the plan is printed.
+	UnlessGatewayAddress Condition = "unless the Gateway gets an address without it"
+)
+
 // Step kinds, in the order box applies them.
 type StepKind string
 
@@ -76,6 +88,12 @@ const (
 	// StepPool is MetalLB's IPAddressPool/L2Advertisement, built from the
 	// node's primary InternalIP once the cluster is open.
 	StepPool StepKind = "metallb-pool"
+	// StepGatewayAddress is the question the plan could not answer before the
+	// confirm: does the Gateway get an address without MetalLB? It waits, and
+	// what it finds decides the conditional steps that follow.
+	StepGatewayAddress StepKind = "gateway-address"
+	// StepReachable is the Gateway's address answering HTTP from this host.
+	StepReachable StepKind = "gateway-reachable"
 )
 
 // WaitKind is what readiness means for one object.
@@ -84,7 +102,6 @@ type WaitKind string
 const (
 	WaitDeployment WaitKind = "deployment"
 	WaitDaemonSet  WaitKind = "daemonset"
-	WaitGateway    WaitKind = "gateway"
 )
 
 // Wait is one readiness check after a step. The cluster implementation bounds
@@ -98,8 +115,6 @@ type Wait struct {
 // String is how box names the object in its output.
 func (w Wait) String() string {
 	switch w.Kind {
-	case WaitGateway:
-		return fmt.Sprintf("Gateway %s/%s", w.Namespace, w.Name)
 	case WaitDaemonSet:
 		return fmt.Sprintf("DaemonSet %s/%s", w.Namespace, w.Name)
 	default:
@@ -131,6 +146,14 @@ type Step struct {
 	Release   Release
 	Manifests []byte
 	Wait      []Wait
+	// Unless is set when the step only happens if the question the plan
+	// cannot answer before the confirm comes back one way: MetalLB and its
+	// pool are skipped when the Gateway has an address without them.
+	Unless Condition
+	// Mode is the ownership a step that asks the cluster a question acts
+	// under: in external mode the Gateway must get an address from something
+	// box does not manage, in auto mode its absence is box's to fix.
+	Mode bootstrap.PlatformMode
 	// InstalledVersion is filled in by resolution: the chart version a
 	// deployed release already has. Equal to Release.Version means the step
 	// is verification only, and no Helm call happens.
@@ -147,6 +170,8 @@ type Plan struct {
 
 var (
 	actionInstall = "install"
+	actionProbe   = "probe"
+	actionVerify  = "verify"
 	actionStop    = "stop"
 
 	// ErrCancelled says the operator answered no. Nothing was written.
@@ -185,9 +210,19 @@ type Decision struct {
 	// is only called when something will be read or written.
 	Open     func() (Cluster, error)
 	Releases Releases
-	Confirm  Confirmer
-	Log      io.Writer
+	// Probe builds the Gateway probe. It is only called by a step that needs
+	// it -- after the confirm, never before -- and it does not contact the
+	// cluster either.
+	Probe   func() (GatewayProbe, error)
+	Confirm Confirmer
+	Log     io.Writer
 
+	// ProbeTimeout is how long the Gateway gets to report an address. Zero
+	// means ProbeTimeout (60s).
+	ProbeTimeout time.Duration
+	// ReachTimeout is how long that address gets to answer HTTP. Zero means
+	// ReachTimeout (30s).
+	ReachTimeout time.Duration
 	// PoolTimeout bounds how long the MetalLB webhook may refuse its pool.
 	// Zero means two minutes.
 	PoolTimeout time.Duration
@@ -251,7 +286,14 @@ func (d *Decision) Apply(ctx context.Context, components []bootstrap.ComponentRe
 		return res, ErrCancelled
 	}
 
+	// answered is what the plan's question found, once it has been asked. It
+	// is only known after the Gateway is applied, so the steps carry it: every
+	// step with Unless runs or not depending on it.
+	answered := ""
 	for _, s := range plan.Steps {
+		if s.Unless != "" && answered != "" {
+			continue
+		}
 		switch s.Kind {
 		case StepRelease:
 			if s.InstalledVersion == s.Release.Version {
@@ -290,6 +332,18 @@ func (d *Decision) Apply(ctx context.Context, components []bootstrap.ComponentRe
 				return res, err
 			}
 			res.Installed = append(res.Installed, "MetalLB address pool")
+		case StepGatewayAddress:
+			answer, err := d.gatewayAddress(ctx, s.Mode)
+			if err != nil {
+				return res, err
+			}
+			answered = answer.Address
+		case StepReachable:
+			address, err := d.reachable(ctx)
+			if err != nil {
+				return res, err
+			}
+			res.Verified = append(res.Verified, "Gateway "+address)
 		}
 	}
 	d.logf("platform ready\n")
@@ -300,6 +354,7 @@ func (d *Decision) Apply(ctx context.Context, components []bootstrap.ComponentRe
 // install or verify instead of guessing. A release at another version is an
 // upgrade: Helm's own action, one write.
 func (d *Decision) resolve(ctx context.Context, plan *Plan) error {
+	boxMetalLB := false
 	for i := range plan.Steps {
 		s := &plan.Steps[i]
 		if s.Kind != StepRelease {
@@ -312,8 +367,153 @@ func (d *Decision) resolve(ctx context.Context, plan *Plan) error {
 		if ok {
 			s.InstalledVersion = v
 		}
+		if ok && s.Release.Name == MetalLBRelease {
+			boxMetalLB = true
+		}
+	}
+	if boxMetalLB {
+		// A MetalLB release box can see is box's, at the pinned version or one
+		// upgrade behind: verify or upgrade it as before. There is no install
+		// left to decide, so the Gateway question goes -- and keeping it would
+		// skip box's own upgrade, since box's own MetalLB is exactly what
+		// gives the Gateway an address.
+		plan.settle()
 	}
 	return nil
+}
+
+// settle drops the Gateway question and makes every conditional step
+// unconditional: box's MetalLB is already there, so nothing is being decided.
+func (p *Plan) settle() {
+	steps := make([]Step, 0, len(p.Steps))
+	for _, s := range p.Steps {
+		if s.Kind == StepGatewayAddress {
+			continue
+		}
+		s.Unless = ""
+		steps = append(steps, s)
+	}
+	p.Steps = steps
+}
+
+// gatewayAddress asks whether the Gateway got an address without box's
+// MetalLB. In auto mode no address is the answer that installs MetalLB; in
+// external mode it is a refusal, because the operator said the address layer
+// is theirs.
+func (d *Decision) gatewayAddress(ctx context.Context, mode bootstrap.PlatformMode) (GatewayAnswer, error) {
+	p, err := d.probe()
+	if err != nil {
+		return GatewayAnswer{}, err
+	}
+	timeout := d.ProbeTimeout
+	if timeout <= 0 {
+		timeout = ProbeTimeout
+	}
+	d.logf("waiting up to %s for Gateway %s/%s to report an address\n", timeout, GatewayNamespace, GatewayName)
+	answer, err := p.Address(ctx, timeout)
+	if err != nil {
+		return answer, err
+	}
+	switch {
+	case answer.Address != "" && answer.Programmed() && mode == bootstrap.ModeExternal:
+		d.logf("the Gateway has an address from the external LoadBalancer: %s\n", answer.Address)
+	case answer.Address != "" && answer.Programmed():
+		d.logf("the Gateway already has an address: %s; MetalLB and its address pool are not installed\n", answer.Address)
+	case answer.Address != "" || !deferredReason(answer.Reason):
+		// An address the Gateway will not call Programmed, or no address for a
+		// reason an address layer cannot answer: both are failures at the
+		// deadline, and installing MetalLB over one would only hide it.
+		return answer, gatewayFailure(answer, timeout)
+	case mode == bootstrap.ModeExternal:
+		return answer, fmt.Errorf("platform.loadbalancer.mode is external, but Gateway %s/%s got no address within %s (%s): something else has to assign one (MetalLB, k3s servicelb or a cloud provider). Install it and run `box bootstrap` again, or set platform.loadbalancer.mode=auto to let box install MetalLB",
+			GatewayNamespace, GatewayName, timeout, reasonOr(answer.Reason))
+	default:
+		d.logf("the Gateway has no address (%s) after waiting up to %s; installing MetalLB\n", reasonOr(answer.Reason), timeout)
+	}
+	return answer, nil
+}
+
+// reachable is the last check on every path: the address the Gateway reports
+// has to answer HTTP from this host, not only in the API server's opinion.
+func (d *Decision) reachable(ctx context.Context) (string, error) {
+	p, err := d.probe()
+	if err != nil {
+		return "", err
+	}
+	timeout := d.ProbeTimeout
+	if timeout <= 0 {
+		timeout = ProbeTimeout
+	}
+	// The same rule as the question, with one difference: MetalLB has been
+	// installed and its pool applied by now, so a second AddressNotAssigned is
+	// the end of what box can do.
+	d.logf("waiting up to %s for Gateway %s/%s to be Programmed with its address\n", timeout, GatewayNamespace, GatewayName)
+	answer, err := p.Address(ctx, timeout)
+	if err != nil {
+		return "", err
+	}
+	switch {
+	case answer.Address == "" && deferredReason(answer.Reason):
+		return "", fmt.Errorf("Gateway %s/%s still has no address after another %s (%s): its Service has no LoadBalancer address, and box has nothing left to install for it",
+			GatewayNamespace, GatewayName, timeout, reasonOr(answer.Reason))
+	case answer.Address == "" || !answer.Programmed():
+		return "", gatewayFailure(answer, timeout)
+	}
+	retry := d.ReachTimeout
+	if retry <= 0 {
+		retry = ReachTimeout
+	}
+	d.logf("checking that the Gateway answers on %s:80 from this host\n", answer.Address)
+	code, err := p.Reachable(ctx, answer.Address, retry)
+	if err != nil {
+		return "", fmt.Errorf("the Gateway has address %s, but nothing answers on %s:80 from this host: %w", answer.Address, answer.Address, err)
+	}
+	d.logf("the Gateway answers on %s:80 (HTTP %d)\n", answer.Address, code)
+	return answer.Address, nil
+}
+
+// probe builds the Gateway probe, or says the binary has none.
+func (d *Decision) probe() (GatewayProbe, error) {
+	if d.Probe == nil {
+		return nil, errNoProbe
+	}
+	p, err := d.Probe()
+	if err != nil {
+		return nil, fmt.Errorf("Gateway probe: %w", err)
+	}
+	return p, nil
+}
+
+// gatewayFailure is box's refusal when the Gateway is not going to be fixed by
+// an address layer: it has an address but will not call itself Programmed, or
+// it has none and says why in a way MetalLB cannot answer.
+func gatewayFailure(answer GatewayAnswer, timeout time.Duration) error {
+	what := "has no address and is not Programmed"
+	if answer.Address != "" {
+		what = "has address " + answer.Address + " but is not Programmed"
+	}
+	reason := reasonOr(answer.Reason)
+	if answer.Message != "" {
+		reason += ": " + answer.Message
+	}
+	return fmt.Errorf("Gateway %s/%s %s after %s (%s)", GatewayNamespace, GatewayName, what, timeout, reason)
+}
+
+// deferredReason is a reason that says nothing about the address layer: the
+// Gateway's Service has no address yet, or the Gateway has not been reconciled
+// at all. Anything else (NoResources, AddressNotUsable) is about the data
+// plane, and box stops on it rather than installing MetalLB over it.
+func deferredReason(reason string) bool {
+	return reason == "" || reason == gatewayAddressNotAssigned
+}
+
+// reasonOr is the Gateway's own word for why it has no address, for box's
+// line: the field is empty on a Gateway that has not been reconciled yet.
+func reasonOr(reason string) string {
+	if reason == "" {
+		return "not reconciled yet"
+	}
+	return reason
 }
 
 func (d *Decision) await(ctx context.Context, cl Cluster, w Wait) error {
@@ -321,12 +521,7 @@ func (d *Decision) await(ctx context.Context, cl Cluster, w Wait) error {
 	if err := cl.Await(ctx, w); err != nil {
 		return fmt.Errorf("%s: %w", w, err)
 	}
-	switch w.Kind {
-	case WaitGateway:
-		d.logf("%s: Programmed\n", w)
-	default:
-		d.logf("%s: rolled out\n", w)
-	}
+	d.logf("%s: rolled out\n", w)
 	return nil
 }
 
@@ -382,12 +577,27 @@ func (d *Decision) printPlan(plan Plan) {
 				d.logf("  = %s: already at %s; verifying\n", s.Release.Name, s.Release.Version)
 				continue
 			}
+			// A conditional release is never an upgrade: resolve() drops the
+			// condition as soon as the release is there, so `?` never has to
+			// carry an install-or-upgrade mark.
+			if s.Unless != "" {
+				d.logf("  ? %s, %s\n", s.Release, s.Unless)
+				continue
+			}
 			verb := "+"
 			if s.InstalledVersion != "" {
 				verb = "~"
 			}
 			d.logf("  %s %s\n", verb, s.Release)
+		case StepGatewayAddress:
+			// A question the plan cannot answer yet: box finds out after the
+			// Gateway is applied, and the `?` steps below depend on the answer.
+			d.logf("  ? %s\n", s.What)
 		default:
+			if s.Unless != "" {
+				d.logf("  ? %s, %s\n", s.What, s.Unless)
+				continue
+			}
 			d.logf("  + %s\n", s.What)
 		}
 	}
@@ -431,32 +641,18 @@ func BuildPlan(components []bootstrap.ComponentResult) (Plan, error) {
 		})
 	}
 
-	// MetalLB before the Gateway: the Gateway's Service only gets an address
-	// once a LoadBalancer implementation answers, and Envoy Gateway reports
-	// Programmed only when its data plane has one.
-	if installsLoadBalancer(lb) {
-		plan.Steps = append(plan.Steps,
-			Step{
-				Component: bootstrap.ComponentLoadBalancer,
-				Kind:      StepRelease,
-				Release: Release{
-					Name:      MetalLBRelease,
-					Namespace: MetalLBNamespace,
-					Ref:       MetalLBRef,
-					Chart:     MetalLBChart,
-					Version:   MetalLBVersion,
-				},
-				Wait: []Wait{
-					{Kind: WaitDeployment, Namespace: MetalLBNamespace, Name: MetalLBRelease + "-controller"},
-					{Kind: WaitDaemonSet, Namespace: MetalLBNamespace, Name: MetalLBRelease + "-speaker"},
-				},
-			},
-			Step{
-				Component: bootstrap.ComponentLoadBalancer,
-				Kind:      StepPool,
-				What:      fmt.Sprintf("IPAddressPool %s (the node's InternalIP as a /32) and L2Advertisement %s", MetalLBPoolName, MetalLBL2Name),
-			},
-		)
+	// MetalLB is the address layer, and the Gateway is what needs it: in
+	// s5n the torrent port is a NodePort, so a LoadBalancer Service exists
+	// only because Envoy Gateway creates one for the Gateway. That is what
+	// makes the Gateway's own status the capability probe.
+	//
+	// managed mode owns the address layer, so it installs it first and never
+	// asks anything. auto mode applies the Gateway and then asks whether it
+	// got an address on its own; only no address installs MetalLB. external
+	// mode owns nothing: the same question verifies the operator's answer.
+	managedLB := lb.Action == actionInstall
+	if managedLB {
+		plan.Steps = append(plan.Steps, metalLBSteps("")...)
 	}
 
 	if gw.Action == actionInstall {
@@ -465,7 +661,44 @@ func BuildPlan(components []bootstrap.ComponentResult) (Plan, error) {
 			Kind:      StepManifests,
 			What:      fmt.Sprintf("GatewayClass eg and Gateway %s/%s", GatewayNamespace, GatewayName),
 			Manifests: gatewayManifest,
-			Wait:      []Wait{{Kind: WaitGateway, Namespace: GatewayNamespace, Name: GatewayName}},
+		})
+	}
+
+	switch lb.Action {
+	case actionProbe:
+		// auto mode: the Gateway's own status decides whether MetalLB is box's
+		// to install. The question is asked even when this run does not write
+		// the Gateway -- a re-run asks the Gateway that is already there, and
+		// a cluster with none answers at once rather than waiting a minute.
+		plan.Steps = append(plan.Steps, Step{
+			Component: bootstrap.ComponentLoadBalancer,
+			Kind:      StepGatewayAddress,
+			Mode:      lb.Mode,
+			What:      fmt.Sprintf("Gateway %s/%s getting an address", GatewayNamespace, GatewayName),
+		})
+		plan.Steps = append(plan.Steps, metalLBSteps(UnlessGatewayAddress)...)
+	case actionVerify:
+		// external mode: no MetalLB ever. The question verifies the operator's
+		// address layer, and it is only asked of a Gateway box wrote in this
+		// run -- the only one whose intent box knows.
+		if gw.Action == actionInstall {
+			plan.Steps = append(plan.Steps, Step{
+				Component: bootstrap.ComponentLoadBalancer,
+				Kind:      StepGatewayAddress,
+				Mode:      lb.Mode,
+				What:      fmt.Sprintf("Gateway %s/%s getting an address", GatewayNamespace, GatewayName),
+			})
+		}
+	}
+
+	// Every path that writes a Gateway ends the same way: the address it
+	// reports has to answer HTTP from this host, whether it came from box's
+	// MetalLB, the operator's, or a cloud provider's.
+	if gw.Action == actionInstall {
+		plan.Steps = append(plan.Steps, Step{
+			Component: bootstrap.ComponentLoadBalancer,
+			Kind:      StepReachable,
+			What:      "the Gateway answering HTTP on 80",
 		})
 	}
 
@@ -487,23 +720,34 @@ func BuildPlan(components []bootstrap.ComponentResult) (Plan, error) {
 	return plan, nil
 }
 
-// installsLoadBalancer is the one place a step can appear without the decision
-// saying "install". bootstrap's platform probe is read-only, so the
-// LoadBalancer capability is reported not-probed rather than absent (deciding
-// it for real means creating a throwaway Service, which is a write before the
-// confirmation). In auto and managed mode the decision treats an absent
-// LoadBalancer as box's to install, so bootstrap does the same here: the
-// Gateway's Service has no address until something answers, and MetalLB is the
-// platform's LoadBalancer. external mode is never written: box does not own
-// someone else's address layer, and a missing one there is the decision's
-// "unknown", not an install.
-func installsLoadBalancer(c bootstrap.ComponentResult) bool {
-	if c.Action == actionInstall {
-		return true
+// metalLBSteps are the two writes the address layer needs: MetalLB itself and
+// the pool its speaker advertises. The condition is empty when box owns the
+// layer outright and non-empty when the Gateway may get an address without it.
+func metalLBSteps(unless Condition) []Step {
+	return []Step{
+		{
+			Component: bootstrap.ComponentLoadBalancer,
+			Kind:      StepRelease,
+			Unless:    unless,
+			Release: Release{
+				Name:      MetalLBRelease,
+				Namespace: MetalLBNamespace,
+				Ref:       MetalLBRef,
+				Chart:     MetalLBChart,
+				Version:   MetalLBVersion,
+			},
+			Wait: []Wait{
+				{Kind: WaitDeployment, Namespace: MetalLBNamespace, Name: MetalLBRelease + "-controller"},
+				{Kind: WaitDaemonSet, Namespace: MetalLBNamespace, Name: MetalLBRelease + "-speaker"},
+			},
+		},
+		{
+			Component: bootstrap.ComponentLoadBalancer,
+			Kind:      StepPool,
+			Unless:    unless,
+			What:      fmt.Sprintf("IPAddressPool %s (the node's InternalIP as a /32) and L2Advertisement %s", MetalLBPoolName, MetalLBL2Name),
+		},
 	}
-	return c.Component == bootstrap.ComponentLoadBalancer &&
-		c.Outcome == bootstrap.OutcomeNotProbed &&
-		c.Mode != bootstrap.ModeExternal
 }
 
 // preflightAccess is the RBAC box needs for what the plan will write. It is a
