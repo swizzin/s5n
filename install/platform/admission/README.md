@@ -22,7 +22,13 @@ enforcement on their own. These policies are the enforcement:
 Because a policy evaluates the whole Pod, a pod admitted before its namespace
 was bound is held to the list on its next write: if it still runs an unblessed
 image, every update to it is denied — `kubectl debug` included — until it is
-replaced with a blessed pod.
+replaced with a blessed pod. Those pods are therefore worth naming *before* the
+binding exists, so `internal/admission` carries the same image rule in Go:
+`UnblessedImages` takes the pods in a namespace and the blessed list and returns
+every container a binding would strand, using the policy's own boundary test (a
+tag or digest must follow the repository, so `…/s5n-evil` is not `…/s5n`).
+Printing that list at `box adduser`, before the bindings are applied, is the
+caller it is written for.
 
 Both use `failurePolicy: Fail`: a params object that is missing or a CEL error
 refuses the write rather than admitting it.
@@ -33,8 +39,11 @@ refuses the write rather than admitting it.
 the Gateway and MetalLB manifests. It is not part of `charts/s5n`: a release
 stays namespace-scoped and carries no cluster RBAC.
 
-`render-grant.py` runs as root at `box adduser` (and again at `box install`,
-`box update` and `box bootstrap`) and prints, for one user:
+The render is `internal/admission`: a chart directory and one grant in, the
+objects below out, with no cluster access and no client-go. `box adduser` calls
+it as root (and again at `box install`, `box update` and `box bootstrap`); until
+`box` exists, `hack/render-grant` is that same render as a command. For one user
+it prints:
 
 1. `ConfigMap s5n-grant-<namespace>` in **`s5n-system`** — the grant as params:
    the blessed repositories, the granted Service type and the torrent nodePort.
@@ -51,14 +60,18 @@ policy. An unbound namespace admits what its own RBAC allows.
 The repository list is read from `charts/s5n/variants.yaml`, the same file
 `_helpers.tpl` resolves every release image from. There is no second list:
 adding an app means a values entry, its schema definition and its variants
-entry, and the next params render carries it. `box` replaces this script with
-the same logic in Go against the chart artifact it is about to install; it must
-re-render the params on chart updates so a release that blesses a new
-repository reaches existing seedboxes without a manual step.
+entry, and the next params render carries it. `internal/admission` is that
+render, and it is what `box` calls against the chart artifact it is about to
+install; box must re-render the params on chart updates so a release that
+blesses a new repository reaches existing seedboxes without a manual step.
+
+A test renders the real `charts/s5n/variants.yaml` and compares the result with a
+committed golden, so changing the variants list fails the suite until the golden
+is regenerated: blessing another repository is a decision, not a side effect.
 
 Until `box` exists, the e2e is the caller:
 
 ```sh
 kubectl apply -f install/platform/admission/policy.yaml
-python3 install/platform/admission/render-grant.py charts/s5n seedbox 31111 NodePort | kubectl apply -f -
+go run ./hack/render-grant charts/s5n seedbox 31111 NodePort | kubectl apply -f -
 ```

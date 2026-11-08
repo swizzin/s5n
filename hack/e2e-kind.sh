@@ -166,7 +166,9 @@ $K -n "$NS" apply -f "$WORK/unblessed.yaml" >/dev/null
 $K -n "$NS" wait --for=condition=Available deploy/unblessed --timeout=180s || fail=1
 
 log "bind the policy to ${NS} with the grant as params (root-owned s5n-system)"
-python3 install/platform/admission/render-grant.py charts/s5n "$NS" 31111 NodePort | $K apply -f - >/dev/null
+# The renderer is Go and reads the chart's variants.yaml, the same file the
+# templates resolve images from; it is the package box will call.
+go run ./hack/render-grant charts/s5n "$NS" 31111 NodePort | $K apply -f - >/dev/null
 
 # A binding takes effect a moment after it is created, so wait for a denial
 # instead of sleeping. A dry-run CREATE of a new object is a real admission

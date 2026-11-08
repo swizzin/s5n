@@ -7,7 +7,7 @@
 # They live on the platform layer, installed by root at `box bootstrap`, never in
 # the s5n release: the release stays namespace-scoped with no cluster RBAC.
 # Root binds them to one namespace per user at `box adduser` (see
-# render-grant.py), and the bindings' params live in the root-owned s5n-system
+# hack/render-grant), and the bindings' params live in the root-owned s5n-system
 # namespace. A ConfigMap in the user's own namespace would be writable by them
 # and enforce nothing. Root's own seedbox namespace gets no binding: this is
 # tenancy, not a cluster-wide image policy.
@@ -112,7 +112,7 @@ spec:
       expression: "has(object.spec.type) ? object.spec.type : 'ClusterIP'"
   validations:
     # ExternalName is never admitted: it is neither ClusterIP nor a type
-    # render-grant.py can grant, so the type rule below refuses it already.
+    # the grant renderer can assign, so the type rule below refuses it already.
     - expression: >
         variables.serviceType == 'ClusterIP' ||
         variables.serviceType == params.data.serviceType
