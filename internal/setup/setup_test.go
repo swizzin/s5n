@@ -101,6 +101,9 @@ type fakePrompt struct {
 	events []string
 	asked  []string // "key=default" for every Input, in order
 	notes  []string
+	// confirmDefaults is the starting answer of every Confirm, in order, so a
+	// test can prove the safe choice is the one an empty enter takes.
+	confirmDefaults []bool
 }
 
 func (p *fakePrompt) pop(list *[]string) (string, bool) {
@@ -144,6 +147,7 @@ func (p *fakePrompt) Secret(f Secret) (string, error) {
 
 func (p *fakePrompt) Confirm(f Confirm) (bool, error) {
 	p.events = append(p.events, "confirm:"+f.Prompt)
+	p.confirmDefaults = append(p.confirmDefaults, f.Default)
 	if p.cancelAt == "confirm" {
 		return false, ErrCancelled
 	}
@@ -492,6 +496,70 @@ func TestGuidedMissingPathSaysWhereItWouldLand(t *testing.T) {
 	}
 	if h.host.owners["/srv/newbox/data"] != (owner{1000, 1000}) {
 		t.Fatalf("the new directory's owner = %+v, want 1000:1000", h.host.owners["/srv/newbox/data"])
+	}
+}
+
+// TestBothMissingPathsAreAskedAboutSeparately: data and config are two
+// volumes, so a run where both are missing asks two questions, in
+// data-then-config order, each naming its own path, each starting on the safe
+// answer. Answering the first does not answer the second.
+func TestBothMissingPathsAreAskedAboutSeparately(t *testing.T) {
+	h := newHarness(t)
+	delete(h.host.dirs, "/srv/s5n/data")
+	delete(h.host.dirs, "/srv/s5n/config")
+	h.prompt.inputs = []string{"box.example.com", "/srv/s5n/data", "/srv/s5n/config"}
+	h.prompt.multis = [][]string{{"alpha"}}
+	h.prompt.confirms = []bool{true, true}
+
+	res, err := h.run(h.options())
+	if err != nil {
+		t.Fatalf("init: %v\n%s", err, h.out)
+	}
+	want := []string{
+		"confirm:create /srv/s5n/data on that filesystem?",
+		"confirm:create /srv/s5n/config on that filesystem?",
+	}
+	var asked []string
+	for _, e := range h.prompt.events {
+		if strings.HasPrefix(e, "confirm:") {
+			asked = append(asked, e)
+		}
+	}
+	if strings.Join(asked, "\n") != strings.Join(want, "\n") {
+		t.Fatalf("confirms asked:\n%s\nwant:\n%s", strings.Join(asked, "\n"), strings.Join(want, "\n"))
+	}
+	if len(h.prompt.confirmDefaults) != 2 || h.prompt.confirmDefaults[0] || h.prompt.confirmDefaults[1] {
+		t.Fatalf("confirm defaults = %v, want both to start on the safe no", h.prompt.confirmDefaults)
+	}
+	for _, want := range []string{"/srv/s5n/data", "/srv/s5n/config"} {
+		if !contains(res.Created, want) {
+			t.Fatalf("created = %v, want %s", res.Created, want)
+		}
+	}
+}
+
+// TestDecliningEitherMissingPathStopsBeforeAnythingIsWritten: the second
+// path's no is as final as the first's, and the error names which one.
+func TestDecliningEitherMissingPathStopsBeforeAnythingIsWritten(t *testing.T) {
+	h := newHarness(t)
+	delete(h.host.dirs, "/srv/s5n/data")
+	delete(h.host.dirs, "/srv/s5n/config")
+	h.prompt.inputs = []string{"box.example.com", "/srv/s5n/data", "/srv/s5n/config"}
+	h.prompt.multis = [][]string{{"alpha"}}
+	h.prompt.confirms = []bool{true, false}
+
+	_, err := h.run(h.options())
+	if err == nil || !strings.Contains(err.Error(), "not creating /srv/s5n/config: nothing was written") {
+		t.Fatalf("error = %v, want the config path's refusal", err)
+	}
+	if len(h.host.mkdirs) != 0 || len(h.host.chowns) != 0 {
+		t.Fatalf("a refusal touched directories: mkdirs=%v chowns=%v", h.host.mkdirs, h.host.chowns)
+	}
+	if h.exists(h.grantPath) || h.exists(h.valuesPath) {
+		t.Fatal("a refusal wrote a file")
+	}
+	if len(h.applied) != 0 {
+		t.Fatal("a refusal reached apply")
 	}
 }
 

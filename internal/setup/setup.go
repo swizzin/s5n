@@ -691,9 +691,10 @@ type pathTarget struct {
 // because both prompters must say the same thing.
 const pathCheckFooter = "  downloads/<category> and media/<category> are made on the first start, owned as above"
 
-// reportPaths shows what is at both paths and asks about a missing one. The
-// answer is remembered, not acted on: the directories are created after the last
-// question, so a cancel leaves the host as it was.
+// reportPaths shows what is at both paths and asks about each missing one, in
+// data-then-config order: they are two volumes, and accepting one is no answer
+// about the other. The answer is remembered, not acted on: the directories are
+// created after the last question, so a cancel leaves the host as it was.
 func (d *Decision) reportPaths(paths []pathTarget, uid, gid int, unattended bool) error {
 	check := PathCheck{Footer: pathCheckFooter}
 	for i := range paths {
