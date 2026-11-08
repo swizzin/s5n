@@ -192,6 +192,20 @@ named, and box never installs MetalLB over an address something else handed out.
 external mode MetalLB is never installed and the Gateway must pass the same checks.
 Managed mode installs MetalLB without waiting to see.
 
+**An existing Gateway implementation is used, not replaced (decided).** Gateway API has
+no default class, so box looks for GatewayClasses a controller has accepted. With one,
+box uses it; with several and none chosen, guided bootstrap lets the operator pick from
+the list and unattended bootstrap stops with an error naming the setting
+(`platform.gateway.className`). Either way box creates its own Gateway on that class,
+and the chart's routes attach to it; the Gateway checks above (address, HTTP answer)
+apply unchanged. The chart's routes need one Extended feature, URLRewrite, so box checks
+the class's published supported features first. A class without it stops bootstrap with
+the reason: box never installs Envoy Gateway beside another implementation. A class that
+publishes no feature list at all also stops bootstrap, with a message naming the class
+and the override (`platform.gateway.assumeFeatures: true`), so using an implementation
+box can't check is the operator's explicit choice. The NetworkPolicy lets in traffic
+from wherever that implementation's proxy runs, not from a namespace box assumes.
+
 What `init` does (decided):
 
 - **It asks, then writes the two files.** Domain, data and config paths, which apps,
