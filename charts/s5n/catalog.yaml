@@ -1,0 +1,92 @@
+# The catalog: every app a seedbox can run, and the setup questions `box init`
+# asks for it.
+#
+# The chart owns this file, the same way it owns variants.yaml: it ships inside
+# the chart archive and `--set` or a values file cannot add to it, change it or
+# override it. box reads it from the chart release it is installing, so adding
+# an app does not need a box release -- one entry here, one entry under `apps:`
+# in values.yaml, its values.schema.json definition, and, if the app needs
+# connecting to the others, a wiring step in the s5n image.
+#
+# Every app under `apps:` in values.yaml has exactly one entry below and vice
+# versa. internal/catalog refuses a manifest that disagrees, and refuses a
+# question whose key is not a chart value or is a grant key: the grant (domain,
+# paths, uid, the app list) is box's own question, never a manifest's. So a
+# question may only name a key the *user* owns.
+#
+# A question is:
+#   key       the chart values path the answer is written to
+#   prompt    the line `box init` shows
+#   help      one optional line under the prompt (why, or where to get it)
+#   kind      one of:
+#               string     free text
+#               secret     masked input; written to the values file, never echoed
+#                          and never printed in an apply diff
+#               bool       yes or no
+#               transient  a secret that outlives no file: asked last, after
+#                          apply's confirm, handed to that one apply and never
+#                          written to values or the grant. The Plex claim token
+#                          is the case: it expires about four minutes after
+#                          https://plex.tv/claim issues it, so it can only be
+#                          supplied at install time. A transient key still has
+#                          to exist in values.schema.json, because it is passed
+#                          to the chart.
+#   default   a starting answer; must match the kind
+#   optional  an empty answer is allowed (the app copes without it)
+#
+# A new *kind* of question is the only catalog change that needs a box release
+# (docs/box.md, "The catalog and box").
+apps:
+  qbittorrent:
+    description: the download client; it seeds what the Arrs grab
+    instances: false
+    default: true
+    questions:
+      - key: apps.qbittorrent.webuiUsername
+        prompt: qBittorrent's web login name
+        help: the password is generated for you and kept in the box's Secret
+        kind: string
+        default: admin
+
+  sonarr:
+    description: TV, from the tracker to the library
+    instances: true
+    default: true
+    # An Arr's second instance (an HD and a 4K Sonarr) is a grant decision, not
+    # a values question: `box install sonarr --instance 4k` writes it.
+    questions: []
+
+  radarr:
+    description: films, from the tracker to the library
+    instances: true
+    default: true
+    questions: []
+
+  prowlarr:
+    description: one indexer list, kept in sync with the Arrs
+    instances: false
+    default: true
+    questions: []
+
+  plex:
+    description: the media server your players talk to
+    instances: false
+    default: true
+    questions:
+      - key: secrets.plexClaimToken
+        prompt: Plex claim token
+        help: from https://plex.tv/claim; press enter to skip and claim the server yourself later
+        kind: transient
+        optional: true
+
+  tautulli:
+    description: watch history and stats for Plex
+    instances: false
+    default: true
+    questions: []
+
+  seerr:
+    description: a request page for the people you share with
+    instances: false
+    default: true
+    questions: []

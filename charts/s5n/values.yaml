@@ -86,6 +86,16 @@ secrets:
   # be patched straight into the release Secret (upgrades preserve it); a
   # non-empty value here wins, which is how a rotation is applied.
   plexToken: ""
+  # The claim token https://plex.tv/claim issues. It expires about four minutes
+  # after issue, so it can only be supplied at install time: it is a "transient"
+  # question in catalog.yaml, which `box init` asks last and hands to the one
+  # apply without ever writing it to a file. This key is the way in for a plain
+  # `helm install`. Plex only exchanges it while its server is still unclaimed,
+  # so it does nothing on an upgraded release; empty is the normal state and
+  # leaves the server unclaimed until it is claimed by hand. A hand-patched
+  # plex-claim-token in the release Secret survives an upgrade; a non-empty
+  # value here wins over it.
+  plexClaimToken: ""
 
 apps:
   qbittorrent:

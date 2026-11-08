@@ -158,6 +158,10 @@
         "plexToken": {
           "type": "string",
           "description": "Optional Plex server token (X-Plex-Token), mounted as the Secret's plex-token key and given to Tautulli. Empty leaves tautulli/plex pending; Plex never trusts a network range instead."
+        },
+        "plexClaimToken": {
+          "type": "string",
+          "description": "The claim token from plex.tv/claim, mounted as the Secret's plex-claim-token key. It expires minutes after issue, so box init asks it last and passes it to one apply instead of writing it to a file. Plex only uses it while the server is unclaimed."
         }
       }
     },
