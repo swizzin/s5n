@@ -36,12 +36,13 @@ type fakeReleases struct {
 
 func (f *fakeReleases) key(name, namespace string) string { return namespace + "/" + name }
 
-func (f *fakeReleases) Version(_ context.Context, name, namespace string) (string, bool, error) {
+func (f *fakeReleases) Version(_ context.Context, name, namespace string) (string, bool, bool, error) {
 	if f.err != nil {
-		return "", false, f.err
+		return "", false, false, f.err
 	}
-	v, ok := f.versions[f.key(name, namespace)]
-	return v, ok, nil
+	key := f.key(name, namespace)
+	v, ok := f.versions[key]
+	return v, ok && !f.unowned[key], ok, nil
 }
 
 func (f *fakeReleases) Install(_ context.Context, spec Release) error {
@@ -964,5 +965,79 @@ func TestEmbeddedManifests(t *testing.T) {
 	}
 	if policies != 2 {
 		t.Fatalf("policy manifest has %d policies, want 2", policies)
+	}
+}
+
+// A same-named release box did not install is the operator's. When the
+// Gateway's own address means MetalLB is not needed, box leaves it alone and
+// does not even call Helm about it.
+func TestApplyLeavesAForeignMetalLBAlone(t *testing.T) {
+	f := newFixture()
+	f.rel.versions = map[string]string{"metallb-system/metallb": "0.15.0"}
+	f.rel.unowned = map[string]bool{"metallb-system/metallb": true}
+	f.probe.answers = []GatewayAnswer{{Address: "192.0.2.10"}}
+
+	res, err := f.d.Apply(context.Background(), notProbed(bootstrap.ModeAuto))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, v := range res.Verified {
+		if v == MetalLBRelease {
+			t.Fatalf("box verified a release it does not own: %v", res.Verified)
+		}
+	}
+	if strings.Contains(f.log.String(), "already at 0.15.0") {
+		t.Fatalf("box treated an operator's release as its own: %q", f.log.String())
+	}
+	for _, r := range f.rel.installed {
+		if r.Name == MetalLBRelease {
+			t.Fatalf("box called Helm for a release it does not own: %+v", f.rel.installed)
+		}
+	}
+}
+
+// If MetalLB is actually needed and the name is taken by a release box did not
+// install, box stops rather than upgrading it into box's version.
+func TestApplyRefusesToUpgradeAForeignMetalLB(t *testing.T) {
+	f := newFixture()
+	f.rel.versions = map[string]string{"metallb-system/metallb": "0.15.0"}
+	f.rel.unowned = map[string]bool{"metallb-system/metallb": true}
+	f.probe.answers = []GatewayAnswer{
+		{Reason: gatewayAddressNotAssigned},
+		{Reason: gatewayAddressNotAssigned},
+	}
+
+	_, err := f.d.Apply(context.Background(), notProbed(bootstrap.ModeAuto))
+	if err == nil {
+		t.Fatal("box accepted a platform that needs MetalLB but cannot install it")
+	}
+	for _, want := range []string{"metallb", "did not install it", "will not upgrade"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("the refusal does not say %q: %v", want, err)
+		}
+	}
+	for _, r := range f.rel.installed {
+		if r.Name == MetalLBRelease {
+			t.Fatalf("box upgraded an operator's release: %+v", f.rel.installed)
+		}
+	}
+}
+
+// An unconditional release step -- Envoy Gateway when box has to install the
+// implementation -- is refused before the confirm and before any write.
+func TestApplyRefusesAForeignEnvoyBeforeTheConfirm(t *testing.T) {
+	f := newFixture()
+	f.rel.versions = map[string]string{"envoy-gateway-system/envoy-gateway": "1.8.0"}
+	f.rel.unowned = map[string]bool{"envoy-gateway-system/envoy-gateway": true}
+
+	_, err := f.d.Apply(context.Background(), allInstall)
+	if err == nil || !strings.Contains(err.Error(), "did not install it") {
+		t.Fatalf("want a refusal naming the operator's release, got %v", err)
+	}
+	if f.confirm.asked != 0 {
+		t.Fatal("box asked to install before refusing another operator's release")
+	}
+	if len(f.rel.installed) != 0 || len(f.cl.writes) != 0 {
+		t.Fatalf("a refusal wrote: %d releases, %d applies", len(f.rel.installed), len(f.cl.writes))
 	}
 }

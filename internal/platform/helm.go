@@ -68,33 +68,34 @@ func (h *Helm) configuration(namespace string) (*action.Configuration, error) {
 	return cfg, nil
 }
 
-// Version returns the chart version of a deployed release. A release that
-// exists in another state (failed, pending) is an error, not something to
-// install over: Helm would refuse the name, and silently removing it is not
-// box's call.
-func (h *Helm) Version(_ context.Context, name, namespace string) (string, bool, error) {
+// Version returns the chart version of a deployed release and whether box's
+// ownership label is on it. A release that exists in another state (failed,
+// pending) is an error, not something to install over: Helm would refuse the
+// name, and silently removing it is not box's call.
+func (h *Helm) Version(_ context.Context, name, namespace string) (string, bool, bool, error) {
 	cfg, err := h.configuration(namespace)
 	if err != nil {
-		return "", false, err
+		return "", false, false, err
 	}
 	rel, err := cfg.Releases.Deployed(name)
 	if err != nil {
 		if errors.Is(err, driver.ErrNoDeployedReleases) || errors.Is(err, driver.ErrReleaseNotFound) {
-			return "", false, nil
+			return "", false, false, nil
 		}
-		return "", false, fmt.Errorf("read release %s in %s: %w", name, namespace, err)
+		return "", false, false, fmt.Errorf("read release %s in %s: %w", name, namespace, err)
 	}
 	acc, err := helmrelease.NewAccessor(rel)
 	if err != nil {
-		return "", false, fmt.Errorf("read release %s in %s: %w", name, namespace, err)
+		return "", false, false, fmt.Errorf("read release %s in %s: %w", name, namespace, err)
 	}
+	owned := acc.Labels()[ReleaseOwnerLabel] == ReleaseOwner
 	switch c := acc.Chart().(type) {
 	case *chartv2.Chart:
 		if c.Metadata != nil {
-			return c.Metadata.Version, true, nil
+			return c.Metadata.Version, owned, true, nil
 		}
 	}
-	return "", false, fmt.Errorf("release %s in %s: the stored chart has no version", name, namespace)
+	return "", owned, false, fmt.Errorf("release %s in %s: the stored chart has no version", name, namespace)
 }
 
 // Install installs or upgrades one release and waits for its workloads.
@@ -119,6 +120,7 @@ func (h *Helm) Install(ctx context.Context, spec Release) error {
 		up.WaitForJobs = true
 		up.Timeout = timeout
 		up.Description = "box bootstrap"
+		up.Labels = ownerLabels()
 		if _, err := up.RunWithContext(ctx, spec.Name, chrt, valuesOf(spec)); err != nil {
 			return fmt.Errorf("upgrade %s in %s: %w", spec.Name, spec.Namespace, err)
 		}
@@ -132,10 +134,18 @@ func (h *Helm) Install(ctx context.Context, spec Release) error {
 	in.WaitForJobs = true
 	in.Timeout = timeout
 	in.Description = "box bootstrap install"
+	in.Labels = ownerLabels()
 	if _, err := in.RunWithContext(ctx, chrt, valuesOf(spec)); err != nil {
 		return fmt.Errorf("install %s in %s: %w", spec.Name, spec.Namespace, err)
 	}
 	return nil
+}
+
+// ownerLabels is what makes a release box's. It is stored on the Helm release
+// record itself (Helm v4's release labels), not in chart values, so it is read
+// back without rendering anything and is never mistaken for a chart setting.
+func ownerLabels() map[string]string {
+	return map[string]string{ReleaseOwnerLabel: ReleaseOwner}
 }
 
 func (h *Helm) exists(cfg *action.Configuration, name string) bool {

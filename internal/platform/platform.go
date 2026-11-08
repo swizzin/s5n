@@ -60,6 +60,14 @@ const (
 	// second bootstrap field-for-field the same write as the first.
 	FieldManager = "box"
 
+	// ReleaseOwnerLabel and ReleaseOwner are how box tells a Helm release it
+	// installed from a same-named one it did not. Helm v4 stores release
+	// labels beside the release record, so the marker survives upgrades and
+	// is readable without parsing chart values. A release without it is the
+	// operator's: box never upgrades or modifies it.
+	ReleaseOwnerLabel = "app.kubernetes.io/managed-by"
+	ReleaseOwner      = "box"
+
 	// MetalLBPoolName and MetalLBL2Name are box's pool and advertisement.
 	MetalLBPoolName = "s5n-pool"
 	MetalLBL2Name   = "s5n-l2"
@@ -161,6 +169,10 @@ type Step struct {
 	// deployed release already has. Equal to Release.Version means the step
 	// is verification only, and no Helm call happens.
 	InstalledVersion string
+	// Foreign marks a deployed release of the same name that box did not
+	// install (it carries no ownership label). It is never upgraded; a
+	// conditional step that would have to run stops instead.
+	Foreign bool
 }
 
 // Plan is what bootstrap will apply, in order.
@@ -195,10 +207,12 @@ type Cluster interface {
 
 // Releases is the Helm side.
 type Releases interface {
-	// Version returns the chart version of a deployed release, and false when
-	// the release is not installed.
-	Version(ctx context.Context, name, namespace string) (version string, exists bool, err error)
+	// Version returns the chart version of a deployed release, whether box
+	// installed it (its ownership label), and false when the release is not
+	// installed.
+	Version(ctx context.Context, name, namespace string) (version string, owned, exists bool, err error)
 	// Install installs or upgrades the release and waits for its workloads.
+	// It always stamps box's ownership label.
 	Install(ctx context.Context, spec Release) error
 }
 
@@ -303,6 +317,10 @@ func (d *Decision) Apply(ctx context.Context, components []bootstrap.ComponentRe
 		}
 		switch s.Kind {
 		case StepRelease:
+			if s.Foreign {
+				return res, fmt.Errorf("a Helm release named %s already exists in %s, but box did not install it (no %s=%s label): box will not upgrade another operator's release. Remove it, or use the implementation it provides",
+					s.Release.Name, s.Release.Namespace, ReleaseOwnerLabel, ReleaseOwner)
+			}
 			if s.InstalledVersion == s.Release.Version {
 				d.logf("= %s in %s: already at %s\n", s.Release.Name, s.Release.Namespace, s.Release.Version)
 				res.Verified = append(res.Verified, s.Release.Name)
@@ -363,23 +381,35 @@ func (d *Decision) resolve(ctx context.Context, plan *Plan) error {
 		if s.Kind != StepRelease {
 			continue
 		}
-		v, ok, err := d.Releases.Version(ctx, s.Release.Name, s.Release.Namespace)
+		v, owned, ok, err := d.Releases.Version(ctx, s.Release.Name, s.Release.Namespace)
 		if err != nil {
 			return err
 		}
-		if ok {
+		if ok && owned {
 			s.InstalledVersion = v
+			if s.Release.Name == MetalLBRelease {
+				boxMetalLB = true
+			}
+			continue
 		}
-		if ok && s.Release.Name == MetalLBRelease {
-			boxMetalLB = true
+		if ok {
+			// A same-named release box did not install is the operator's.
+			// A conditional step may never run (the Gateway's own address
+			// decides), so it is only marked here; an unconditional one is
+			// refused before the confirm.
+			s.Foreign = true
+			if s.Unless == "" {
+				return fmt.Errorf("a Helm release named %s already exists in %s, but box did not install it (no %s=%s label): box will not upgrade another operator's release. Remove it, or use the implementation it provides",
+					s.Release.Name, s.Release.Namespace, ReleaseOwnerLabel, ReleaseOwner)
+			}
 		}
 	}
 	if boxMetalLB {
-		// A MetalLB release box can see is box's, at the pinned version or one
-		// upgrade behind: verify or upgrade it as before. There is no install
-		// left to decide, so the Gateway question goes -- and keeping it would
-		// skip box's own upgrade, since box's own MetalLB is exactly what
-		// gives the Gateway an address.
+		// A MetalLB release box installed is box's, at the pinned version or
+		// one upgrade behind: verify or upgrade it as before. There is no
+		// install left to decide, so the Gateway question goes -- and keeping
+		// it would skip box's own upgrade, since box's own MetalLB is exactly
+		// what gives the Gateway an address.
 		plan.settle()
 	}
 	return nil
@@ -576,6 +606,12 @@ func (d *Decision) printPlan(plan Plan) {
 	for _, s := range plan.Steps {
 		switch s.Kind {
 		case StepRelease:
+			if s.Foreign {
+				// Only a conditional foreign release reaches the plan: the
+				// unconditional one is refused in resolve.
+				d.logf("  ? %s, %s (a release box did not install already exists; box will not upgrade it)\n", s.Release, s.Unless)
+				continue
+			}
 			if s.InstalledVersion == s.Release.Version {
 				d.logf("  = %s: already at %s; verifying\n", s.Release.Name, s.Release.Version)
 				continue
