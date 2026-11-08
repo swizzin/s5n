@@ -32,6 +32,21 @@ type chrome struct {
 	// answers are the text answers already given. A secret never goes in
 	// here: the breadcrumb is shown on screen.
 	answers []answered
+	// last is the step this chrome has already printed, so a step with several
+	// fields (the two paths, then the confirm) gets one masthead, the way one
+	// box per step reads.
+	last string
+}
+
+// head is the masthead to print, or false when this step's is already on
+// screen above the field about to be drawn.
+func (c *chrome) head() (string, bool) {
+	key := fmt.Sprintf("%d/%d\x00%s", c.step, c.total, c.question)
+	if key == c.last {
+		return "", false
+	}
+	c.last = key
+	return c.masthead(), true
 }
 
 // answered is one text answer and the step it belongs to. The breadcrumb only
@@ -57,15 +72,32 @@ func (c *chrome) paint(plain, styled string) string {
 	return styled
 }
 
-// trail is the answers-so-far line, or "" when there is nothing to show yet.
-func (c *chrome) trail() string {
+// textWidth is how many columns a masthead line has to work with, after the
+// frame and its padding.
+func textWidth() int { return mastheadWidth - 4 }
+
+// trail is the answers-so-far line, or "" when there is nothing to show yet. It
+// keeps the newest answers and drops the oldest, because a long breadcrumb must
+// not push the frame open.
+func (c *chrome) trail(max int) string {
 	var parts []string
-	for _, a := range c.answers {
-		if a.step < c.step {
-			parts = append(parts, a.value)
+	dropped := false
+	for i := len(c.answers) - 1; i >= 0; i-- {
+		if c.answers[i].step >= c.step {
+			continue
 		}
+		candidate := strings.Join(append([]string{c.answers[i].value}, parts...), " · ")
+		if lipgloss.Width("→ "+candidate) > max {
+			dropped = true
+			break
+		}
+		parts = append([]string{c.answers[i].value}, parts...)
 	}
-	return strings.Join(parts, " · ")
+	trail := strings.Join(parts, " · ")
+	if dropped && trail != "" && lipgloss.Width("→ … · "+trail) <= max {
+		trail = "… · " + trail
+	}
+	return trail
 }
 
 // boxed draws the masthead frame: a rounded border in the muted colour, every
@@ -102,14 +134,32 @@ func (c *chrome) masthead() string {
 		n := fmt.Sprintf("%d/%d", c.step, c.total)
 		counter = c.paint(n, mutedStyle.Render(n))
 	}
-	lines := []string{padTo("  "+mark+"   "+tag, counter, mastheadWidth-4)}
+	// Every row after the wordmark is indented two columns, so it has two
+	// fewer columns to work with.
+	inner := textWidth() - 2
+	lines := []string{padTo("  "+mark+"   "+tag, counter, textWidth())}
 	if c.question != "" {
-		lines = append(lines, padTo("  "+c.paint(c.question, boldInkStyle.Render(c.question)), "", mastheadWidth-4))
+		q := clip(c.question, inner)
+		lines = append(lines, padTo("  "+c.paint(q, boldInkStyle.Render(q)), "", textWidth()))
 	}
-	if trail := c.trail(); trail != "" {
-		lines = append(lines, padTo("  "+c.paint("→ "+trail, mutedStyle.Render("→ "+trail)), "", mastheadWidth-4))
+	if trail := c.trail(inner); trail != "" {
+		t := "→ " + trail
+		lines = append(lines, padTo("  "+c.paint(t, mutedStyle.Render(t)), "", textWidth()))
 	}
 	return c.boxed(lines)
+}
+
+// clip shortens a line to max columns, with an ellipsis. The frame must never
+// be pushed open by an answer somebody typed.
+func clip(s string, max int) string {
+	if lipgloss.Width(s) <= max {
+		return s
+	}
+	r := []rune(s)
+	for len(r) > 0 && lipgloss.Width(string(r)+"…") > max {
+		r = r[:len(r)-1]
+	}
+	return string(r) + "…"
 }
 
 // padTo is a row with its left text and right text at the edges of w columns.

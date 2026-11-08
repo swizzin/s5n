@@ -112,8 +112,13 @@ func existsText(r setup.PathReport) string {
 // deviceName is what the disk is called. The source is the device node when the
 // mount table has one; a container or a network mount may only have numbers.
 func deviceName(r setup.PathReport) string {
-	if r.Mount.Source != "" {
-		return r.Mount.Source
+	if src := r.Mount.Source; src != "" {
+		// mountinfo names a btrfs subvolume as /dev/sda1[/@srv]; the disk is
+		// what matters here, not the subvolume it was cut from.
+		if i := strings.Index(src, "["); i > 0 {
+			src = src[:i]
+		}
+		return src
 	}
 	if r.Mount.Point != "" {
 		return fmt.Sprintf("%d:%d", r.Mount.Major, r.Mount.Minor)

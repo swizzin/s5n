@@ -65,11 +65,48 @@ func TestMastheadIsAFixedWidthBox(t *testing.T) {
 			}
 		}
 		text := stripANSI(c.masthead())
-		for _, want := range []string{"b o x", "s5n · seedbox setup", "3/4", "which apps should run here?", "→ box.example.com · /srv/s5n/data"} {
+		for _, want := range []string{"b o x", "s5n · seedbox setup", "3/4", "which apps should run here?", "box.example.com"} {
 			if !strings.Contains(text, want) {
 				t.Fatalf("noColor=%v: the masthead is missing %q:\n%s", noColor, want, text)
 			}
 		}
+	}
+}
+
+func TestMastheadTrimsALongBreadcrumb(t *testing.T) {
+	c := &chrome{step: 3, total: 4, question: "which apps should run here?"}
+	c.answers = []answered{
+		{step: 1, value: "box.example.com"},
+		{step: 2, value: "/srv/a/very/long/seedbox/data/path/that/keeps/going"},
+		{step: 2, value: "/srv/a/very/long/seedbox/config/path/that/keeps/going"},
+	}
+	shown := stripANSI(c.masthead())
+	for i, line := range strings.Split(shown, "\n") {
+		if got := lipgloss.Width(line); got != mastheadWidth {
+			t.Fatalf("line %d is %d wide, want %d: %q", i, got, mastheadWidth, line)
+		}
+	}
+	if !strings.Contains(shown, "… · ") {
+		t.Fatalf("nothing says the breadcrumb was trimmed:\n%s", shown)
+	}
+}
+
+// TestMastheadFitsTheWidestBreadcrumbThatFits is the case the first capture
+// caught: a trail exactly as wide as the line, with the indent on top.
+func TestMastheadFitsTheWidestBreadcrumbThatFits(t *testing.T) {
+	c := &chrome{step: 3, total: 4, question: "which apps should run here?"}
+	c.answers = []answered{
+		{step: 1, value: "box.example.com"},
+		{step: 2, value: "/tmp/s5n-demo/data"},
+		{step: 2, value: "/tmp/s5n-demo/config"},
+	}
+	for i, line := range strings.Split(stripANSI(c.masthead()), "\n") {
+		if got := lipgloss.Width(line); got != mastheadWidth {
+			t.Fatalf("line %d is %d wide, want %d: %q", i, got, mastheadWidth, line)
+		}
+	}
+	if !strings.Contains(stripANSI(c.masthead()), "/tmp/s5n-demo/config") {
+		t.Fatalf("the newest answer was dropped even though it fits:\n%s", stripANSI(c.masthead()))
 	}
 }
 

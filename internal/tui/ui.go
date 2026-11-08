@@ -86,10 +86,14 @@ func (u *UI) Step(n, total int, question string) {
 }
 
 // begin prints the chrome above a field and leaves one blank line, so the form
-// is drawn under the masthead rather than against it.
+// is drawn under the masthead rather than against it. A step asked in several
+// fields shows its masthead once: the fields and the path report under it are
+// all the same step.
 func (u *UI) begin() {
-	fmt.Fprintln(u.out, u.chrome.masthead())
-	fmt.Fprintln(u.out)
+	if head, ok := u.chrome.head(); ok {
+		fmt.Fprintln(u.out, head)
+		fmt.Fprintln(u.out)
+	}
 }
 
 // end separates one field's output from the next masthead.
