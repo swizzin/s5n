@@ -1,0 +1,4 @@
+# The user's file: only keys the grant does not own.
+storage:
+  data:
+    size: 10Gi

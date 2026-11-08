@@ -1,0 +1,28 @@
+# A grant: root's decisions for one seedbox. Every key here is one
+# internal/seedbox/grant.go says the grant owns.
+namespace: testbox
+
+global:
+  puid: 1000
+  pgid: 1000
+
+storage:
+  data:
+    hostPath: /srv/s5n/data
+  config:
+    hostPath: /srv/s5n/config
+
+gateway:
+  host: box.example.com
+  parentRef:
+    name: s5n
+    namespace: s5n-gateway
+
+networkPolicy:
+  enabled: true
+
+apps:
+  qbittorrent:
+    enabled: true
+  sonarr:
+    enabled: true

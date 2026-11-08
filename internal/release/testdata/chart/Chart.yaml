@@ -1,0 +1,7 @@
+apiVersion: v2
+name: s5n-test
+description: a three-key slice of the s5n chart, enough to exercise `box apply`
+type: application
+version: 0.0.1
+appVersion: "0.0.1"
+kubeVersion: ">=1.30.0-0"
