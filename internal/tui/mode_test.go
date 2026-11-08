@@ -51,7 +51,8 @@ func TestThemePaintsAndDropsColour(t *testing.T) {
 }
 
 func TestMastheadIsAFixedWidthBox(t *testing.T) {
-	c := &chrome{step: 2, total: 4, question: "where should your data live?", answers: []string{"box.example.com", "/srv/s5n/data"}}
+	c := &chrome{step: 3, total: 4, question: "which apps should run here?"}
+	c.answers = []answered{{step: 1, value: "box.example.com"}, {step: 2, value: "/srv/s5n/data"}}
 	for _, noColor := range []bool{false, true} {
 		c.noColor = noColor
 		lines := strings.Split(c.masthead(), "\n")
@@ -64,7 +65,7 @@ func TestMastheadIsAFixedWidthBox(t *testing.T) {
 			}
 		}
 		text := stripANSI(c.masthead())
-		for _, want := range []string{"b o x", "s5n · seedbox setup", "2/4", "where should your data live?", "→ box.example.com · /srv/s5n/data"} {
+		for _, want := range []string{"b o x", "s5n · seedbox setup", "3/4", "which apps should run here?", "→ box.example.com · /srv/s5n/data"} {
 			if !strings.Contains(text, want) {
 				t.Fatalf("noColor=%v: the masthead is missing %q:\n%s", noColor, want, text)
 			}

@@ -29,9 +29,24 @@ type chrome struct {
 	noColor     bool
 	step, total int
 	question    string
-	// answers are the text answers already given, oldest first. A secret never
-	// goes in here: the breadcrumb is shown on screen.
-	answers []string
+	// answers are the text answers already given. A secret never goes in
+	// here: the breadcrumb is shown on screen.
+	answers []answered
+}
+
+// answered is one text answer and the step it belongs to. The breadcrumb only
+// shows earlier steps, so a step's own answers do not appear until it is done.
+type answered struct {
+	step  int
+	value string
+}
+
+// remember records a text answer for the breadcrumb.
+func (c *chrome) remember(value string) {
+	if strings.TrimSpace(value) == "" {
+		return
+	}
+	c.answers = append(c.answers, answered{step: c.step, value: value})
 }
 
 // paint applies a style unless NO_COLOR asked for none.
@@ -44,7 +59,13 @@ func (c *chrome) paint(plain, styled string) string {
 
 // trail is the answers-so-far line, or "" when there is nothing to show yet.
 func (c *chrome) trail() string {
-	return strings.Join(c.answers, " · ")
+	var parts []string
+	for _, a := range c.answers {
+		if a.step < c.step {
+			parts = append(parts, a.value)
+		}
+	}
+	return strings.Join(parts, " · ")
 }
 
 // boxed draws the masthead frame: a rounded border in the muted colour, every
