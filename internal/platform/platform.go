@@ -144,7 +144,10 @@ type Step struct {
 	Kind      StepKind
 	What      string
 	Release   Release
-	Manifests []byte
+	// Documents is the objects of a StepManifests step, already parsed and
+	// (for the Gateway) pointed at the chosen GatewayClass. Parsing at plan
+	// time keeps the apply path free of YAML.
+	Documents []map[string]any
 	Wait      []Wait
 	// Unless is set when the step only happens if the question the plan
 	// cannot answer before the confirm comes back one way: MetalLB and its
@@ -194,7 +197,7 @@ type Cluster interface {
 type Releases interface {
 	// Version returns the chart version of a deployed release, and false when
 	// the release is not installed.
-	Version(ctx context.Context, name, namespace string) (string, bool, error)
+	Version(ctx context.Context, name, namespace string) (version string, exists bool, err error)
 	// Install installs or upgrades the release and waits for its workloads.
 	Install(ctx context.Context, spec Release) error
 }
@@ -216,6 +219,10 @@ type Decision struct {
 	Probe   func() (GatewayProbe, error)
 	Confirm Confirmer
 	Log     io.Writer
+	// GatewayClass is the class bootstrap chose (bootstrap.Result.Gateway.
+	// Class). The Gateway box applies attaches to it; the GatewayClass itself
+	// is created only when this run installs its implementation.
+	GatewayClass string
 
 	// ProbeTimeout is how long the Gateway gets to report an address. Zero
 	// means ProbeTimeout (60s).
@@ -248,7 +255,7 @@ func (d *Decision) logf(format string, args ...any) {
 // Apply plans, asks and applies the platform layer.
 func (d *Decision) Apply(ctx context.Context, components []bootstrap.ComponentResult) (Result, error) {
 	var res Result
-	plan, err := BuildPlan(components)
+	plan, err := BuildPlan(components, d.GatewayClass)
 	if err != nil {
 		return res, err
 	}
@@ -313,11 +320,7 @@ func (d *Decision) Apply(ctx context.Context, components []bootstrap.ComponentRe
 				}
 			}
 		case StepManifests:
-			docs, err := ParseManifests(s.Manifests)
-			if err != nil {
-				return res, fmt.Errorf("%s: %w", s.What, err)
-			}
-			if err := cl.Apply(ctx, docs); err != nil {
+			if err := cl.Apply(ctx, s.Documents); err != nil {
 				return res, fmt.Errorf("%s: %w", s.What, err)
 			}
 			d.logf("applied %s\n", s.What)
@@ -607,9 +610,17 @@ func (d *Decision) printPlan(plan Plan) {
 }
 
 // BuildPlan turns the decision's component results into the ordered list of
-// writes. It is pure: no cluster, no clock. Only `install` produces a step;
-// `use` and `verify` are left alone, and `stop` refuses the whole run.
-func BuildPlan(components []bootstrap.ComponentResult) (Plan, error) {
+// writes. It is pure: no cluster, no clock. Only `install` produces a release;
+// `use` and `verify` leave an implementation alone, and `stop` refuses the
+// whole run.
+//
+// gatewayClass is the class bootstrap chose (bootstrap.Result.Gateway). The
+// Gateway box owns is written on every run, on that class: the chart's routes
+// attach to box's Gateway, so it has to exist whether box installed the
+// implementation or found one. The GatewayClass is written only when box
+// installs Envoy Gateway, because a class someone else's controller serves is
+// the operator's and must not be rewritten.
+func BuildPlan(components []bootstrap.ComponentResult, gatewayClass string) (Plan, error) {
 	var plan Plan
 	byComponent := make(map[bootstrap.PlatformComponent]bootstrap.ComponentResult, len(components))
 	for _, c := range components {
@@ -618,6 +629,9 @@ func BuildPlan(components []bootstrap.ComponentResult) (Plan, error) {
 		}
 		byComponent[c.Component] = c
 	}
+	if gatewayClass == "" {
+		return Plan{}, errors.New("no GatewayClass: box bootstrap chooses one before planning the Gateway")
+	}
 
 	gwAPI := byComponent[bootstrap.ComponentGatewayAPI]
 	gw := byComponent[bootstrap.ComponentGateway]
@@ -625,8 +639,10 @@ func BuildPlan(components []bootstrap.ComponentResult) (Plan, error) {
 	cm := byComponent[bootstrap.ComponentCertManager]
 
 	// Envoy Gateway is both the Gateway API CRDs and the controller, so an
-	// install of either capability is one Helm release.
-	if gwAPI.Action == actionInstall || gw.Action == actionInstall {
+	// install of either capability is one Helm release -- and that release is
+	// exactly the case where box also creates the GatewayClass.
+	installEnvoy := gwAPI.Action == actionInstall || gw.Action == actionInstall
+	if installEnvoy {
 		plan.Steps = append(plan.Steps, Step{
 			Component: bootstrap.ComponentGatewayAPI,
 			Kind:      StepRelease,
@@ -643,8 +659,8 @@ func BuildPlan(components []bootstrap.ComponentResult) (Plan, error) {
 
 	// MetalLB is the address layer, and the Gateway is what needs it: in
 	// s5n the torrent port is a NodePort, so a LoadBalancer Service exists
-	// only because Envoy Gateway creates one for the Gateway. That is what
-	// makes the Gateway's own status the capability probe.
+	// only because the Gateway implementation creates one for the Gateway.
+	// That is what makes the Gateway's own status the capability probe.
 	//
 	// managed mode owns the address layer, so it installs it first and never
 	// asks anything. auto mode applies the Gateway and then asks whether it
@@ -655,21 +671,25 @@ func BuildPlan(components []bootstrap.ComponentResult) (Plan, error) {
 		plan.Steps = append(plan.Steps, metalLBSteps("")...)
 	}
 
-	if gw.Action == actionInstall {
-		plan.Steps = append(plan.Steps, Step{
-			Component: bootstrap.ComponentGateway,
-			Kind:      StepManifests,
-			What:      fmt.Sprintf("GatewayClass eg and Gateway %s/%s", GatewayNamespace, GatewayName),
-			Manifests: gatewayManifest,
-		})
+	// Box's Gateway, on every path. On `use` it is still box's object: the
+	// chart's HTTPRoutes name it, and nothing else on the cluster does.
+	objects, err := gatewayObjects(gatewayClass, installEnvoy)
+	if err != nil {
+		return Plan{}, err
 	}
+	plan.Steps = append(plan.Steps, Step{
+		Component: bootstrap.ComponentGateway,
+		Kind:      StepManifests,
+		What:      gatewayStepName(gatewayClass, installEnvoy),
+		Documents: objects,
+	})
 
 	switch lb.Action {
 	case actionProbe:
 		// auto mode: the Gateway's own status decides whether MetalLB is box's
-		// to install. The question is asked even when this run does not write
-		// the Gateway -- a re-run asks the Gateway that is already there, and
-		// a cluster with none answers at once rather than waiting a minute.
+		// to install. The question is asked on every run -- a re-run asks the
+		// Gateway that is already there, and a cluster with none answers at
+		// once rather than waiting a minute.
 		plan.Steps = append(plan.Steps, Step{
 			Component: bootstrap.ComponentLoadBalancer,
 			Kind:      StepGatewayAddress,
@@ -679,38 +699,37 @@ func BuildPlan(components []bootstrap.ComponentResult) (Plan, error) {
 		plan.Steps = append(plan.Steps, metalLBSteps(UnlessGatewayAddress)...)
 	case actionVerify:
 		// external mode: no MetalLB ever. The question verifies the operator's
-		// address layer, and it is only asked of a Gateway box wrote in this
-		// run -- the only one whose intent box knows.
-		if gw.Action == actionInstall {
-			plan.Steps = append(plan.Steps, Step{
-				Component: bootstrap.ComponentLoadBalancer,
-				Kind:      StepGatewayAddress,
-				Mode:      lb.Mode,
-				What:      fmt.Sprintf("Gateway %s/%s getting an address", GatewayNamespace, GatewayName),
-			})
-		}
-	}
-
-	// Every path that writes a Gateway ends the same way: the address it
-	// reports has to answer HTTP from this host, whether it came from box's
-	// MetalLB, the operator's, or a cloud provider's.
-	if gw.Action == actionInstall {
+		// address layer against the Gateway box writes on this run.
 		plan.Steps = append(plan.Steps, Step{
 			Component: bootstrap.ComponentLoadBalancer,
-			Kind:      StepReachable,
-			What:      "the Gateway answering HTTP on 80",
+			Kind:      StepGatewayAddress,
+			Mode:      lb.Mode,
+			What:      fmt.Sprintf("Gateway %s/%s getting an address", GatewayNamespace, GatewayName),
 		})
 	}
+
+	// Every path ends the same way: the address the Gateway reports has to
+	// answer HTTP from this host, whether it came from box's MetalLB, the
+	// operator's, or a cloud provider's.
+	plan.Steps = append(plan.Steps, Step{
+		Component: bootstrap.ComponentLoadBalancer,
+		Kind:      StepReachable,
+		What:      "the Gateway answering HTTP on 80",
+	})
 
 	// The admission policy is the platform layer's tenancy contract: root
 	// installs it once, `box adduser` binds it per namespace. Applying it on
 	// every run is safe (server-side apply, same bytes, no change) and it is
 	// what repairs a platform whose policy was removed.
+	policy, err := ParseManifests(admissionPolicy)
+	if err != nil {
+		return Plan{}, fmt.Errorf("the admission policy manifest: %w", err)
+	}
 	plan.Steps = append(plan.Steps, Step{
 		Component: bootstrap.ComponentGatewayAPI,
 		Kind:      StepManifests,
 		What:      "ValidatingAdmissionPolicies in s5n-system (the grant, enforced by the cluster)",
-		Manifests: admissionPolicy,
+		Documents: policy,
 	})
 
 	if cm.Action == actionInstall {
@@ -718,6 +737,15 @@ func BuildPlan(components []bootstrap.ComponentResult) (Plan, error) {
 			"cert-manager: box does not install it yet; install cert-manager yourself, or set platform.cert-manager.mode=external, and run bootstrap again")
 	}
 	return plan, nil
+}
+
+// gatewayStepName is how the plan names the one manifest step that is now on
+// every path: with the class box creates, or with the class it found.
+func gatewayStepName(class string, withClass bool) string {
+	if withClass {
+		return fmt.Sprintf("GatewayClass %s and Gateway %s/%s", class, GatewayNamespace, GatewayName)
+	}
+	return fmt.Sprintf("Gateway %s/%s on GatewayClass %s", GatewayNamespace, GatewayName, class)
 }
 
 // metalLBSteps are the two writes the address layer needs: MetalLB itself and

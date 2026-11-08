@@ -66,6 +66,10 @@ type PlatformProbe struct {
 	LoadBalancer ProbeOutcome
 	Gateway      ProbeOutcome
 	CertManager  ProbeOutcome
+	// Classes is every GatewayClass the cluster serves, accepted or not. The
+	// Gateway outcome above is "present" only when at least one is Accepted;
+	// the classes themselves decide which one box's Gateway attaches to.
+	Classes []GatewayClass
 }
 
 // ComponentResult is the decision for one platform component.

@@ -80,6 +80,7 @@ func runBootstrap(args []string) {
 	recordPath := fs.String("record", bootstrap.RecordPath, "where box records the cluster decision")
 	yes := fs.Bool("yes", false, "confirm the platform and run init without asking")
 	plain := fs.Bool("plain", false, "ask init's questions with plain line prompts, even on a terminal (for a flaky terminal or a screen reader)")
+	gatewayClass := fs.String("gateway-class", "", "the GatewayClass to use when several are Accepted (platform.gateway.className)")
 	initFlags := addInitFlags(fs)
 	if err := fs.Parse(args); err != nil {
 		fmt.Fprintf(os.Stderr, "box: %v\n", err)
@@ -91,6 +92,14 @@ func runBootstrap(args []string) {
 		records = bootstrap.ReadOnlyRecords{Inner: records}
 	}
 
+	// Choosing between several implementations is a question, and only a
+	// terminal can answer it: --yes, no terminal, or a dry run leaves the
+	// class unset, and the decision then refuses by naming the setting.
+	var chooser bootstrap.ClassChooser
+	if !*dryRun && !*yes && isTerminal(os.Stdin) {
+		chooser = classChooser{prompt: newPrompt(*plain)}
+	}
+
 	d := &bootstrap.Decision{
 		Source: bootstrap.FilesystemSource{},
 		NewProber: func(kc []byte) (bootstrap.Prober, error) {
@@ -99,12 +108,14 @@ func runBootstrap(args []string) {
 		Host:    bootstrap.LinuxHost{},
 		Records: records,
 		Install: bootstrap.PrintInstaller{W: os.Stdout},
+		Prompt:  chooser,
 	}
 
 	res, err := d.Bootstrap(context.Background(), bootstrap.Options{
 		Kubeconfig:    *kubeconfig,
 		KubeconfigEnv: os.Getenv("KUBECONFIG"),
 		Platform:      bootstrap.DefaultPlatform(),
+		GatewayClass:  *gatewayClass,
 	})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "box: %v\n", err)
@@ -124,7 +135,7 @@ func runBootstrap(args []string) {
 	}
 
 	ctx := context.Background()
-	if err := applyPlatform(ctx, res.Kubeconfig, res.Platform, *yes); err != nil {
+	if err := applyPlatform(ctx, res.Kubeconfig, res.Platform, res.Gateway.Class, *yes); err != nil {
 		if errors.Is(err, platform.ErrCancelled) {
 			os.Exit(1)
 		}
@@ -146,10 +157,11 @@ func runBootstrap(args []string) {
 // applyPlatform applies the platform layer the decision says install. The
 // confirmation is box's existing one: --yes, or no terminal to ask on, is
 // unattended (docs/box.md, "bootstrap and init").
-func applyPlatform(ctx context.Context, kubeconfig string, components []bootstrap.ComponentResult, yes bool) error {
+func applyPlatform(ctx context.Context, kubeconfig string, components []bootstrap.ComponentResult, gatewayClass string, yes bool) error {
 	p := &platform.Decision{
-		Open:     func() (platform.Cluster, error) { return platform.NewCluster(kubeconfig) },
-		Releases: platform.NewHelm(kubeconfig),
+		GatewayClass: gatewayClass,
+		Open:         func() (platform.Cluster, error) { return platform.NewCluster(kubeconfig) },
+		Releases:     platform.NewHelm(kubeconfig),
 		// The LoadBalancer question is settled by the Gateway's own status, so
 		// the probe is built only once the plan asks for it: after the confirm,
 		// once the Gateway exists.
@@ -164,6 +176,54 @@ func applyPlatform(ctx context.Context, kubeconfig string, components []bootstra
 	}
 	_, err := p.Apply(ctx, components)
 	return err
+}
+
+// classChooser adapts bootstrap's class question onto setup.Prompter, so
+// choosing an implementation is the same dialog init asks with. The classes
+// are listed by name with their controller as the help line.
+type classChooser struct {
+	prompt setup.Prompter
+}
+
+func (c classChooser) ChooseGatewayClass(classes []bootstrap.GatewayClass) (string, error) {
+	options := make([]setup.Option, 0, len(classes))
+	for _, class := range classes {
+		options = append(options, setup.Option{
+			Value: class.Name,
+			Label: class.Name,
+			Help:  class.ControllerName,
+		})
+	}
+	return c.prompt.Select(setup.Select{
+		Key:     "platform.gateway.className",
+		Prompt:  "Which GatewayClass should serve this box?",
+		Options: options,
+	})
+}
+
+// newPrompt builds the interactive prompt box uses on a terminal: huh when the
+// terminal can carry a form, the line prompt otherwise. Unattended runs do not
+// call it at all.
+func newPrompt(plain bool) setup.Prompter {
+	plan := tui.Decide(tui.Terminal{
+		Stdin:   isTerminal(os.Stdin),
+		Stdout:  isTerminal(os.Stdout),
+		TERM:    os.Getenv("TERM"),
+		NoColor: os.Getenv("NO_COLOR") != "",
+		Plain:   plain,
+	})
+	if plan.Mode == tui.ModeHuh {
+		return tui.New(tui.Options{In: os.Stdin, Out: os.Stdout, NoColor: plan.NoColor, Width: terminalWidth(os.Stdout)})
+	}
+	line := &setup.LinePrompt{In: os.Stdin, Out: os.Stdout}
+	// A secret question is masked on a terminal, and only there: without a
+	// terminal there is nobody to hide it from, and --set-transient is the
+	// unattended form anyway.
+	line.Mask = func() (string, error) {
+		b, err := term.ReadPassword(int(os.Stdin.Fd()))
+		return string(b), err
+	}
+	return line
 }
 
 func runApply(args []string) {
@@ -312,30 +372,12 @@ func (o *initFlags) run(ctx context.Context, kubeconfig string, yes, plain bool)
 	// an empty claim token.
 	unattended := yes || !isTerminal(os.Stdin)
 	var prompt setup.Prompter
-	switch {
-	case unattended:
+	if unattended {
 		prompt = &setup.LinePrompt{}
-	default:
-		plan := tui.Decide(tui.Terminal{
-			Stdin:   isTerminal(os.Stdin),
-			Stdout:  isTerminal(os.Stdout),
-			TERM:    os.Getenv("TERM"),
-			NoColor: os.Getenv("NO_COLOR") != "",
-			Plain:   plain,
-		})
-		if plan.Mode == tui.ModeHuh {
-			prompt = tui.New(tui.Options{In: os.Stdin, Out: os.Stdout, NoColor: plan.NoColor, Width: terminalWidth(os.Stdout)})
-			break
-		}
-		line := &setup.LinePrompt{In: os.Stdin, Out: os.Stdout}
-		// A secret question is masked on a terminal, and only there: without a
-		// terminal there is nobody to hide it from, and --set-transient is the
-		// unattended form anyway.
-		line.Mask = func() (string, error) {
-			b, err := term.ReadPassword(int(os.Stdin.Fd()))
-			return string(b), err
-		}
-		prompt = line
+	} else {
+		// newPrompt is the same decision bootstrap's class question uses, so
+		// the two commands cannot drift into different UIs.
+		prompt = newPrompt(plain)
 	}
 
 	set := map[string]bool{}

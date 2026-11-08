@@ -223,9 +223,15 @@ func TestBootstrapExplicitUsesCluster(t *testing.T) {
 	const path = "/explicit.yaml"
 	src := &fakeSource{files: map[string][]byte{path: []byte("kubeconfig")}}
 	prober := &fakeProber{
-		version:  Version{GitVersion: "v1.31.3+k3s1"},
-		cluster:  Cluster{Nodes: 1},
-		platform: PlatformProbe{GatewayAPI: OutcomePresent, LoadBalancer: OutcomePresent, Gateway: OutcomePresent, CertManager: OutcomePresent},
+		version: Version{GitVersion: "v1.31.3+k3s1"},
+		cluster: Cluster{Nodes: 1},
+		platform: PlatformProbe{
+			GatewayAPI:   OutcomePresent,
+			LoadBalancer: OutcomePresent,
+			Gateway:      OutcomePresent,
+			CertManager:  OutcomePresent,
+			Classes:      []GatewayClass{{Name: "eg", ControllerName: "gateway.envoyproxy.io/gatewayclass-controller", Accepted: true}},
+		},
 	}
 	host := &fakeHost{}
 	recs := &fakeRecords{}

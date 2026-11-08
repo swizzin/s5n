@@ -26,7 +26,9 @@ func (t *trace) add(step string) {
 func (t *trace) String() string { return strings.Join(t.steps, ",") }
 
 type fakeReleases struct {
-	versions  map[string]string
+	versions map[string]string
+	// unowned names releases that exist but carry no box ownership label.
+	unowned   map[string]bool
 	installed []Release
 	err       error
 	tr        *trace
@@ -188,6 +190,7 @@ func newFixture() *fixture {
 	f.confirm.tr = f.tr
 	f.probe.tr = f.tr
 	f.d = &Decision{
+		GatewayClass: "eg",
 		Open: func() (Cluster, error) {
 			f.opened++
 			return f.cl, nil
@@ -240,27 +243,40 @@ func notProbed(mode bootstrap.PlatformMode) []bootstrap.ComponentResult {
 	}
 }
 
-// Only an install action becomes a step. A component box uses is never
-// written, and the order is the PLAN.md order: CRDs, LoadBalancer, Gateway,
-// then the tenancy policy.
+// Only an install action becomes a release. A component box uses is never
+// installed or rewritten -- but box's own Gateway is on every path, because
+// the chart's routes name it -- and the tenancy policy always closes the plan.
 func TestBuildPlanInstallsOnlyInstallActions(t *testing.T) {
 	plan, err := BuildPlan(components(map[bootstrap.PlatformComponent]string{
 		bootstrap.ComponentGatewayAPI:   "use",
 		bootstrap.ComponentLoadBalancer: "use",
 		bootstrap.ComponentGateway:      "use",
 		bootstrap.ComponentCertManager:  "verify",
-	}))
+	}), "nginx")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(plan.Steps) != 1 || plan.Steps[0].Kind != StepManifests {
-		t.Fatalf("using every capability must leave only the policy, got %+v", plan.Steps)
+	if len(plan.Steps) != 3 || plan.Steps[0].Kind != StepManifests || plan.Steps[2].Kind != StepManifests {
+		t.Fatalf("using every capability must leave the Gateway, its HTTP check, and the policy, got %+v", plan.Steps)
+	}
+	if plan.Steps[1].Kind != StepReachable {
+		t.Fatalf("the Gateway's HTTP check is not among the steps: %+v", plan.Steps)
+	}
+	if !strings.Contains(plan.Steps[0].What, "GatewayClass nginx") {
+		t.Fatalf("the Gateway was not planned on the chosen class: %q", plan.Steps[0].What)
+	}
+	// A class someone else's controller serves is never rewritten: no
+	// GatewayClass document when box does not install the implementation.
+	for _, doc := range plan.Steps[0].Documents {
+		if kind, _, _ := objectMeta(doc); kind == "GatewayClass" {
+			t.Fatal("box planned to write a GatewayClass it does not own")
+		}
 	}
 	if len(plan.NotHandled) != 0 {
 		t.Fatalf("nothing installs, so nothing is unhandled: %v", plan.NotHandled)
 	}
 
-	plan, err = BuildPlan(allInstall)
+	plan, err = BuildPlan(allInstall, "eg")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -294,7 +310,7 @@ func TestBuildPlanInstallsOnlyInstallActions(t *testing.T) {
 // the answer is "no address") MetalLB and its pool, then the reachability
 // check. That order is the whole design: the Gateway's own status decides.
 func TestBuildPlanMakesMetalLBConditionalWhenUnprobed(t *testing.T) {
-	plan, err := BuildPlan(notProbed(bootstrap.ModeAuto))
+	plan, err := BuildPlan(notProbed(bootstrap.ModeAuto), "eg")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -333,9 +349,10 @@ func TestBuildPlanMakesMetalLBConditionalWhenUnprobed(t *testing.T) {
 	}
 }
 
-// A re-run does not write the Gateway, but it still asks the Gateway that is
-// already there: that is what keeps a second bootstrap on a cluster whose
-// MetalLB someone else installed from installing one of box's own.
+// A re-run writes the Gateway again (it is box's object on every path) but it
+// still asks the Gateway that is already there: that is what keeps a second
+// bootstrap on a cluster whose MetalLB someone else installed from installing
+// one of box's own.
 func TestBuildPlanAsksAboutTheGatewayItDidNotWrite(t *testing.T) {
 	comps := []bootstrap.ComponentResult{
 		{Component: bootstrap.ComponentGatewayAPI, Action: "use", Outcome: bootstrap.OutcomePresent, Mode: bootstrap.ModeAuto},
@@ -343,7 +360,7 @@ func TestBuildPlanAsksAboutTheGatewayItDidNotWrite(t *testing.T) {
 		{Component: bootstrap.ComponentGateway, Action: "use", Outcome: bootstrap.OutcomePresent, Mode: bootstrap.ModeAuto},
 		{Component: bootstrap.ComponentCertManager, Action: "use", Outcome: bootstrap.OutcomePresent, Mode: bootstrap.ModeAuto},
 	}
-	plan, err := BuildPlan(comps)
+	plan, err := BuildPlan(comps, "nginx")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -351,7 +368,7 @@ func TestBuildPlanAsksAboutTheGatewayItDidNotWrite(t *testing.T) {
 	for _, s := range plan.Steps {
 		kinds = append(kinds, s.Kind)
 	}
-	want := []StepKind{StepGatewayAddress, StepRelease, StepPool, StepManifests}
+	want := []StepKind{StepManifests, StepGatewayAddress, StepRelease, StepPool, StepReachable, StepManifests}
 	if len(kinds) != len(want) {
 		t.Fatalf("plan = %v, want %v", kinds, want)
 	}
@@ -360,7 +377,10 @@ func TestBuildPlanAsksAboutTheGatewayItDidNotWrite(t *testing.T) {
 			t.Fatalf("plan = %v, want %v", kinds, want)
 		}
 	}
-	if plan.Steps[1].Unless != UnlessGatewayAddress || plan.Steps[2].Unless != UnlessGatewayAddress {
+	if !strings.Contains(plan.Steps[0].What, "GatewayClass nginx") {
+		t.Fatalf("the Gateway was not written on the used class: %q", plan.Steps[0].What)
+	}
+	if plan.Steps[2].Unless != UnlessGatewayAddress || plan.Steps[3].Unless != UnlessGatewayAddress {
 		t.Fatal("MetalLB is not conditional on a Gateway box did not write")
 	}
 }
@@ -370,7 +390,7 @@ func TestBuildPlanAsksAboutTheGatewayItDidNotWrite(t *testing.T) {
 func TestBuildPlanManagedInstallsMetalLBWithoutAQuestion(t *testing.T) {
 	comps := notProbed(bootstrap.ModeManaged)
 	comps[1].Action = "install"
-	plan, err := BuildPlan(comps)
+	plan, err := BuildPlan(comps, "eg")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -398,7 +418,7 @@ func TestBuildPlanManagedInstallsMetalLBWithoutAQuestion(t *testing.T) {
 // external mode writes nothing for the address layer: the Gateway's address
 // verifies the operator's own, and the plan says so with a question.
 func TestBuildPlanExternalVerifiesWithTheGatewayAddress(t *testing.T) {
-	plan, err := BuildPlan(notProbed(bootstrap.ModeExternal))
+	plan, err := BuildPlan(notProbed(bootstrap.ModeExternal), "eg")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -426,7 +446,7 @@ func TestBuildPlanRefusesConflict(t *testing.T) {
 	comps := components(map[bootstrap.PlatformComponent]string{
 		bootstrap.ComponentGateway: "stop",
 	})
-	plan, err := BuildPlan(comps)
+	plan, err := BuildPlan(comps, "eg")
 	if err == nil || !strings.Contains(err.Error(), "platform conflict") {
 		t.Fatalf("want a conflict refusal, got %v (%+v)", err, plan)
 	}

@@ -32,6 +32,12 @@ apiVersion: gateway.networking.k8s.io/v1
 kind: GatewayClass
 metadata:
   name: eg
+  labels:
+    app.kubernetes.io/part-of: s5n
+    # Box created this class beside the Envoy Gateway release box installed.
+    # A re-run reads it as box's own, so box does not have to ask a controller
+    # it chose itself whether it supports the chart's routes.
+    app.kubernetes.io/managed-by: box
 spec:
   controllerName: gateway.envoyproxy.io/gatewayclass-controller
 ---
@@ -40,6 +46,9 @@ kind: Gateway
 metadata:
   name: s5n
   namespace: s5n-gateway
+  labels:
+    app.kubernetes.io/part-of: s5n
+    app.kubernetes.io/managed-by: box
 spec:
   gatewayClassName: eg
   listeners:

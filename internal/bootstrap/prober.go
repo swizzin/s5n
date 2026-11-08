@@ -509,13 +509,18 @@ func (p *HTTPProber) Platform(ctx context.Context) (PlatformProbe, error) {
 		probe.GatewayAPI = OutcomeAbsent
 	}
 
-	accepted, err := p.gatewayClassAccepted(ctx)
+	classes, err := p.gatewayClasses(ctx)
 	if err != nil {
 		return probe, err
 	}
-	if accepted {
-		probe.Gateway = OutcomePresent
-	} else {
+	probe.Classes = classes
+	for _, c := range classes {
+		if c.Accepted {
+			probe.Gateway = OutcomePresent
+			break
+		}
+	}
+	if probe.Gateway != OutcomePresent {
 		probe.Gateway = OutcomeAbsent
 	}
 
@@ -546,30 +551,63 @@ func (p *HTTPProber) hasCRD(ctx context.Context, name string) (bool, error) {
 	return true, nil
 }
 
-func (p *HTTPProber) gatewayClassAccepted(ctx context.Context) (bool, error) {
+// gatewayClasses reads every GatewayClass with what box needs to choose one:
+// its controller, whether it is Accepted (and why not), whether box created it,
+// and the features its controller publishes. It is a read; box acts on it in
+// gatewayChoice, not here.
+func (p *HTTPProber) gatewayClasses(ctx context.Context) ([]GatewayClass, error) {
 	var list struct {
 		Items []struct {
+			Metadata struct {
+				Name   string            `json:"name"`
+				Labels map[string]string `json:"labels"`
+			} `json:"metadata"`
+			Spec struct {
+				ControllerName string `json:"controllerName"`
+			} `json:"spec"`
 			Status struct {
 				Conditions []struct {
-					Type   string `json:"type"`
-					Status string `json:"status"`
+					Type    string `json:"type"`
+					Status  string `json:"status"`
+					Reason  string `json:"reason"`
+					Message string `json:"message"`
 				} `json:"conditions"`
+				SupportedFeatures []struct {
+					Name string `json:"name"`
+				} `json:"supportedFeatures"`
 			} `json:"status"`
 		} `json:"items"`
 	}
 	if err := p.get(ctx, "/apis/gateway.networking.k8s.io/v1/gatewayclasses", &list); err != nil {
 		var ae *apiError
 		if errors.As(err, &ae) && (ae.Status == http.StatusNotFound) {
-			return false, nil
+			return nil, nil
 		}
-		return false, err
+		return nil, err
 	}
+	out := make([]GatewayClass, 0, len(list.Items))
 	for _, item := range list.Items {
+		class := GatewayClass{
+			Name:           item.Metadata.Name,
+			ControllerName: item.Spec.ControllerName,
+			ManagedByBox:   item.Metadata.Labels["app.kubernetes.io/managed-by"] == "box",
+		}
 		for _, c := range item.Status.Conditions {
-			if c.Type == "Accepted" && c.Status == "True" {
-				return true, nil
+			if c.Type != "Accepted" {
+				continue
+			}
+			class.Accepted = c.Status == "True"
+			if !class.Accepted {
+				class.AcceptedReason = c.Message
+				if class.AcceptedReason == "" {
+					class.AcceptedReason = c.Reason
+				}
 			}
 		}
+		for _, f := range item.Status.SupportedFeatures {
+			class.Features = append(class.Features, f.Name)
+		}
+		out = append(out, class)
 	}
-	return false, nil
+	return out, nil
 }

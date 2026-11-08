@@ -29,6 +29,34 @@ type Access struct {
 // the e2e cannot disagree about what the platform's Gateway is.
 var gatewayManifest = gatewayassets.Manifest
 
+// gatewayObjects is the Gateway box applies on every run: the namespace, the
+// Gateway pointed at the chosen class, and -- only when box installs Envoy
+// Gateway -- the GatewayClass box owns. Keeping one embedded definition and
+// editing it here is what stops the e2e's copy and box's copy from drifting;
+// the class is the only field that varies.
+func gatewayObjects(class string, withClass bool) ([]map[string]any, error) {
+	docs, err := ParseManifests(gatewayManifest)
+	if err != nil {
+		return nil, fmt.Errorf("the Gateway manifest: %w", err)
+	}
+	out := make([]map[string]any, 0, len(docs))
+	for _, doc := range docs {
+		kind, _, _ := objectMeta(doc)
+		if kind == "GatewayClass" && !withClass {
+			continue
+		}
+		if kind == "Gateway" {
+			spec, _ := doc["spec"].(map[string]any)
+			if spec == nil {
+				return nil, errors.New("the Gateway manifest: the Gateway has no spec")
+			}
+			spec["gatewayClassName"] = class
+		}
+		out = append(out, doc)
+	}
+	return out, nil
+}
+
 // admissionPolicy is install/platform/admission/policy.yaml, embedded from the
 // file beside it. The Go tests in internal/admission read that file by path,
 // and box compiles the same bytes in, so there is one definition of the rule.

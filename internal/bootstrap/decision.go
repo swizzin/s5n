@@ -17,13 +17,27 @@ type Decision struct {
 	Host      Host
 	Records   RecordStore
 	Install   Installer
+	// Prompt asks which GatewayClass to use when more than one is Accepted.
+	// Nil means unattended: the decision then refuses and names the setting,
+	// because choosing an implementation is the operator's call, never box's.
+	Prompt ClassChooser
 }
 
-// Options carries the explicit cluster and platform modes from the CLI.
+// Options carries the explicit cluster and platform modes from the CLI, plus
+// the Gateway decisions that are not modes: which class to attach to, and
+// whether a class that publishes no feature list may be used anyway.
 type Options struct {
 	Kubeconfig    string // --kubeconfig; empty when not given
 	KubeconfigEnv string // KUBECONFIG; empty when not set
 	Platform      PlatformConfig
+	// GatewayClass is platform.gateway.className: the GatewayClass to use
+	// when several are Accepted. Empty lets box use the only Accepted one, or
+	// ask.
+	GatewayClass string
+	// AssumeGatewayFeatures is platform.gateway.assumeFeatures: use a class
+	// that publishes no supportedFeatures list. Empty is the safe default:
+	// box stops rather than using an implementation it cannot check.
+	AssumeGatewayFeatures bool
 }
 
 // Bootstrap decides which cluster to use, in PLAN.md's fixed order, and never
@@ -164,12 +178,21 @@ func (d *Decision) finishCluster(ctx context.Context, opts Options, probe Prober
 		res.Reason = conflict
 		return res
 	}
+	choice, problem := d.gatewayChoice(opts, plat, gatewayComponent(components))
+	if problem != "" {
+		res.Action = ActionStop
+		res.Reason = problem
+		return res
+	}
+	res.Gateway = choice
 	rec := &Record{
-		Source:       source,
-		Kubeconfig:   path,
-		Distribution: dist,
-		Nodes:        cluster.Nodes,
-		Platform:     opts.Platform,
+		Source:                source,
+		Kubeconfig:            path,
+		Distribution:          dist,
+		Nodes:                 cluster.Nodes,
+		Platform:              opts.Platform,
+		GatewayClass:          choice.Class,
+		AssumeGatewayFeatures: opts.AssumeGatewayFeatures,
 	}
 	if err := d.Records.Save(rec); err != nil {
 		res.Action = ActionStop
@@ -209,6 +232,7 @@ func (d *Decision) useRecord(ctx context.Context, rec *Record) Result {
 			Distribution: rec.Distribution,
 			Nodes:        rec.Nodes,
 			Platform:     platformFromConfig(rec.Platform),
+			Gateway:      recordedGateway(rec),
 			Reason:       fmt.Sprintf("using recorded external cluster at %s (%s); lifecycle never touched", rec.Kubeconfig, rec.Distribution),
 		}
 		return res
@@ -220,11 +244,34 @@ func (d *Decision) useRecord(ctx context.Context, rec *Record) Result {
 			Distribution: rec.Distribution,
 			Nodes:        rec.Nodes,
 			Platform:     platformFromConfig(rec.Platform),
+			Gateway:      recordedGateway(rec),
 			Reason:       "recorded k0s-managed cluster; k0s is started and upgraded by box update (a later phase)",
 		}
 	default:
 		return stop(fmt.Sprintf("record has unknown source %q", rec.Source))
 	}
+}
+
+// gatewayComponent is the Gateway's result, for the class decision that needs
+// to know whether box installs its own implementation or uses one that is
+// already there.
+func gatewayComponent(components []ComponentResult) ComponentResult {
+	for _, c := range components {
+		if c.Component == ComponentGateway {
+			return c
+		}
+	}
+	return ComponentResult{Component: ComponentGateway}
+}
+
+// recordedGateway is the class a re-run attaches to. A record written before
+// box recorded one came from a box that only ever wrote class `eg`, so that is
+// the upgrade path; managed mode owns its implementation and always writes it.
+func recordedGateway(rec *Record) GatewayChoice {
+	if rec.Platform.Gateway == ModeManaged || rec.GatewayClass == "" {
+		return GatewayChoice{Class: EnvoyGatewayClass, BoxInstalls: rec.Platform.Gateway == ModeManaged}
+	}
+	return GatewayChoice{Class: rec.GatewayClass}
 }
 
 // firstKubeconfig resolves the explicit cluster path: the flag wins, else the

@@ -21,6 +21,14 @@ type Record struct {
 	// without re-probing the cluster.
 	Nodes    int
 	Platform PlatformConfig
+	// GatewayClass is the GatewayClass box attached its Gateway to. A re-run
+	// reuses it rather than re-probing: the class is a decision, and asking a
+	// second time would be able to silently move a box's routes.
+	GatewayClass string
+	// AssumeGatewayFeatures records that the operator allowed a class that
+	// publishes no supportedFeatures list. It is a choice, so it survives a
+	// re-run like the class itself.
+	AssumeGatewayFeatures bool
 }
 
 // encodeRecord renders a Record as the fixed YAML schema. The kubeconfig path
@@ -36,6 +44,12 @@ func encodeRecord(r *Record) []byte {
 	fmt.Fprintf(&b, "  loadbalancer: %s\n", r.Platform.LoadBalancer)
 	fmt.Fprintf(&b, "  gateway: %s\n", r.Platform.Gateway)
 	fmt.Fprintf(&b, "  cert-manager: %s\n", r.Platform.CertManager)
+	if r.GatewayClass != "" {
+		fmt.Fprintf(&b, "gatewayClass: %q\n", r.GatewayClass)
+	}
+	if r.AssumeGatewayFeatures {
+		fmt.Fprintf(&b, "assumeGatewayFeatures: true\n")
+	}
 	return []byte(b.String())
 }
 
@@ -78,6 +92,13 @@ func parseRecord(data []byte) (*Record, error) {
 				rec.Nodes = n
 			case "platform":
 				inPlatform = true
+			case "gatewayClass":
+				rec.GatewayClass = unquote(val)
+			case "assumeGatewayFeatures":
+				if strings.TrimSpace(val) != "true" && strings.TrimSpace(val) != "false" {
+					return nil, fmt.Errorf("cluster.yaml: assumeGatewayFeatures %q is not true or false", val)
+				}
+				rec.AssumeGatewayFeatures = strings.TrimSpace(val) == "true"
 			default:
 				return nil, fmt.Errorf("cluster.yaml: unknown key %q", key)
 			}

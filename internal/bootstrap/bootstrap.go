@@ -88,6 +88,9 @@ type Result struct {
 	Distribution Distribution
 	Nodes        int
 	Platform     []ComponentResult
+	// Gateway is the class box's own Gateway attaches to. It is chosen here
+	// because it is a decision about the cluster, not about the plan.
+	Gateway GatewayChoice
 	// Skips records why each discovered candidate kubeconfig was not used.
 	Skips []string
 	// Notes records host evidence that is not, by itself, a reason to stop:
@@ -194,6 +197,16 @@ func FormatResult(res Result) string {
 		for _, c := range res.Platform {
 			fmt.Fprintf(&b, "  %s: %s -> %s (%s)\n", c.Component, c.Mode, c.Action, c.Reason)
 		}
+	}
+	if res.Gateway.Class != "" {
+		line := fmt.Sprintf("gateway class: %s", res.Gateway.Class)
+		if res.Gateway.ControllerName != "" {
+			line += " (" + res.Gateway.ControllerName + ")"
+		}
+		if res.Gateway.BoxInstalls {
+			line += ", installed by box"
+		}
+		fmt.Fprintf(&b, "%s\n", line)
 	}
 	if res.Reason != "" {
 		fmt.Fprintf(&b, "%s\n", res.Reason)
