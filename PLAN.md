@@ -73,7 +73,7 @@ GatewayClass reports `Accepted` and a Gateway attached to it gets an address" is
 | component | counts as present when |
 |---|---|
 | Gateway API CRDs | the CRDs exist at or above the bundle version the chart needs (k3s now ships them itself) |
-| LoadBalancer | a throwaway `type: LoadBalancer` Service gets an address within 60s (MetalLB, k3s servicelb, a cloud provider all pass) |
+| LoadBalancer | box's own Gateway is Programmed with an address within 60s and answers HTTP from the host (MetalLB, k3s servicelb, a cloud provider, a host-networked Gateway all pass); see docs/box.md |
 | Gateway | a GatewayClass is `Accepted`; `platform.gateway.className` picks one when there are several |
 | cert-manager | its webhook answers and its version supports Gateway API HTTP-01 |
 
