@@ -24,7 +24,15 @@ import (
 	"github.com/swizzin/s5n/internal/release"
 	"github.com/swizzin/s5n/internal/seedbox"
 	"github.com/swizzin/s5n/internal/setup"
+	"github.com/swizzin/s5n/internal/tui"
 )
+
+// isTerminal is the check a dialog needs. A character device is not enough:
+// /dev/null is one, and a form drawn on it would wait for keys nobody can
+// press.
+func isTerminal(f *os.File) bool {
+	return term.IsTerminal(int(f.Fd()))
+}
 
 func main() {
 	if len(os.Args) < 2 {
@@ -171,6 +179,7 @@ func runInit(args []string) {
 	kubeconfig := fs.String("kubeconfig", "", "explicit kubeconfig for the apply this hands over to, or fail with no fallback")
 	pathsInNode := fs.Bool("paths-in-node", false, "the storage paths live inside a test node (kind), not on this host: skip verifying and creating them")
 	yes := fs.Bool("yes", false, "ask nothing: flags and file keys only")
+	plain := fs.Bool("plain", false, "ask with plain line prompts, even on a terminal (for a flaky terminal or a screen reader)")
 	if err := fs.Parse(args); err != nil {
 		fmt.Fprintf(os.Stderr, "box: %v\n", err)
 		os.Exit(2)
@@ -189,15 +198,38 @@ func runInit(args []string) {
 		os.Exit(1)
 	}
 
-	prompt := &setup.LinePrompt{In: os.Stdin, Out: os.Stdout}
-	if release.TTY(os.Stdin) {
+	// Which prompt: huh when the terminal can carry a form, the line prompt
+	// otherwise, and no prompt at all when nobody is there to answer. The
+	// decision is tui.Decide's so it can be tested without a terminal, and the
+	// fallback is deliberately not huh's accessible mode: that one returns an
+	// empty secret without a terminal, which would silently install a box with
+	// an empty claim token.
+	unattended := *yes || !isTerminal(os.Stdin)
+	var prompt setup.Prompter
+	switch {
+	case unattended:
+		prompt = &setup.LinePrompt{}
+	default:
+		plan := tui.Decide(tui.Terminal{
+			Stdin:   isTerminal(os.Stdin),
+			Stdout:  isTerminal(os.Stdout),
+			TERM:    os.Getenv("TERM"),
+			NoColor: os.Getenv("NO_COLOR") != "",
+			Plain:   *plain,
+		})
+		if plan.Mode == tui.ModeHuh {
+			prompt = tui.New(tui.Options{In: os.Stdin, Out: os.Stdout, NoColor: plan.NoColor})
+			break
+		}
+		line := &setup.LinePrompt{In: os.Stdin, Out: os.Stdout}
 		// A secret question is masked on a terminal, and only there: without a
 		// terminal there is nobody to hide it from, and --set-transient is the
 		// unattended form anyway.
-		prompt.Mask = func() (string, error) {
+		line.Mask = func() (string, error) {
 			b, err := term.ReadPassword(int(os.Stdin.Fd()))
 			return string(b), err
 		}
+		prompt = line
 	}
 
 	set := map[string]bool{}
@@ -258,7 +290,7 @@ func runInit(args []string) {
 		PUIDSet:      set["puid"],
 		PGIDSet:      set["pgid"],
 		SetTransient: transient,
-		Unattended:   *yes || !release.TTY(os.Stdin),
+		Unattended:   unattended,
 		PathsInNode:  *pathsInNode,
 	})
 	if err != nil {
