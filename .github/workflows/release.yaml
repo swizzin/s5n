@@ -1,0 +1,236 @@
+# One tag publishes everything: the image, the chart that names that image by
+# digest, and box's binaries. A branch push publishes nothing (docs/box.md,
+# "Where a release lives").
+#
+# The tag is the version. `v0.3.0` publishes chart 0.3.0 and image 0.3.0, and the
+# job fails if charts/s5n/Chart.yaml says anything else: the maintainer bumps
+# the chart in the commit she tags.
+#
+# Actions are pinned by commit; the comment names the tag the commit belongs to.
+# Tool binaries are fetched and sha256-checked the way ci.yaml does it.
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+  packages: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  HELM_VERSION: v4.3.0
+  KUBECONFORM_VERSION: v0.8.0
+  KUBECONFORM_SHA256: 9bc2bffbf71f261128533edaf912153948b7ff238f9a531ae6d34466ec287883 # kubeconform-linux-amd64.tar.gz
+  IMAGE: ghcr.io/swizzin/s5n
+  CHART_REPO: oci://ghcr.io/swizzin/charts
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.tag.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: the tag is the chart's version
+        id: tag
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          version="${TAG#v}"
+          if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+([+-][0-9A-Za-z.-]+)?$ ]]; then
+            echo "tag ${TAG}: a release tag is v<major>.<minor>.<patch>, e.g. v0.3.0" >&2
+            exit 1
+          fi
+          # Only top-level keys: Chart.yaml's annotations and kubeVersion are not
+          # this question, and helm is not needed to read one line.
+          chart_version=$(awk '/^version:/ { print $2; exit }' charts/s5n/Chart.yaml)
+          app_version=$(awk '/^appVersion:/ { print $2; exit }' charts/s5n/Chart.yaml | tr -d '"')
+          if [[ "$chart_version" != "$version" ]]; then
+            echo "charts/s5n/Chart.yaml version is ${chart_version}, but the tag is ${TAG}: bump the chart in the commit you tag" >&2
+            exit 1
+          fi
+          if [[ "$app_version" != "$version" ]]; then
+            echo "charts/s5n/Chart.yaml appVersion is ${app_version}, but the tag is ${TAG}: the image tag and the chart's appVersion are the same version" >&2
+            exit 1
+          fi
+          echo "releasing ${version}"
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+
+  image:
+    needs: verify
+    runs-on: ubuntu-latest
+    outputs:
+      digest: ${{ steps.build.outputs.digest }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # arm64 is built on an amd64 runner: qemu runs the Dockerfile's build
+      # stage, and Go cross-compiles inside it.
+      - uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: build and push linux/amd64 and linux/arm64
+        id: build
+        env:
+          VERSION: ${{ needs.verify.outputs.version }}
+        run: |
+          set -euo pipefail
+          docker buildx build \
+            --platform linux/amd64,linux/arm64 \
+            --build-arg "VERSION=${VERSION}" \
+            --tag "${IMAGE}:${VERSION}" \
+            --metadata-file "${RUNNER_TEMP}/image.json" \
+            --push .
+          # The digest of the pushed manifest list: the chart pins the image by
+          # this, so every architecture resolves to the bytes this run built.
+          digest=$(jq -r '."containerimage.digest"' "${RUNNER_TEMP}/image.json")
+          if [[ ! "$digest" =~ ^sha256:[a-f0-9]{64}$ ]]; then
+            echo "no manifest-list digest in the build metadata (got '${digest}')" >&2
+            exit 1
+          fi
+          echo "digest=${digest}" >> "$GITHUB_OUTPUT"
+      - name: the tag is a two-platform list
+        env:
+          VERSION: ${{ needs.verify.outputs.version }}
+        run: |
+          set -euo pipefail
+          out=$(docker buildx imagetools inspect "${IMAGE}:${VERSION}")
+          grep -q "linux/amd64" <<<"$out" || { echo "${IMAGE}:${VERSION} has no linux/amd64 image" >&2; exit 1; }
+          grep -q "linux/arm64" <<<"$out" || { echo "${IMAGE}:${VERSION} has no linux/arm64 image" >&2; exit 1; }
+
+  chart:
+    needs: [verify, image]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
+        with:
+          version: ${{ env.HELM_VERSION }}
+      - name: install kubeconform
+        run: |
+          curl -fsSLo kubeconform.tgz "https://github.com/yannh/kubeconform/releases/download/${KUBECONFORM_VERSION}/kubeconform-linux-amd64.tar.gz"
+          echo "${KUBECONFORM_SHA256}  kubeconform.tgz" | sha256sum -c -
+          mkdir -p "$HOME/.local/bin" && tar -xzf kubeconform.tgz -C "$HOME/.local/bin" kubeconform && rm kubeconform.tgz
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+      # The packaged chart, not the tree, is what a release is: the digest is
+      # stamped into a copy, so the committed variants.yaml keeps its "" and a
+      # checkout stays reproducible.
+      - name: stamp the image digest into the chart
+        env:
+          VERSION: ${{ needs.verify.outputs.version }}
+          DIGEST: ${{ needs.image.outputs.digest }}
+        run: |
+          set -euo pipefail
+          work="${RUNNER_TEMP}/chart"
+          rm -rf "$work"
+          mkdir -p "$work/charts" "$work/hack" "$work/dist"
+          cp -a charts/s5n "$work/charts/s5n"
+          cp hack/validate-chart.sh "$work/hack/validate-chart.sh"
+
+          # values.schema.json owns what a digest may look like. Reading the
+          # pattern from the schema means a tightened pattern fails this step
+          # instead of quietly accepting something the chart would refuse.
+          pattern=$(jq -r '.definitions.digest.pattern' charts/s5n/values.schema.json)
+          if [[ "$pattern" != '^(|sha256:[a-f0-9]{64})$' ]]; then
+            echo "values.schema.json's digest pattern is '${pattern}'; this workflow stamps a sha256 digest" >&2
+            exit 1
+          fi
+          if [[ ! "$DIGEST" =~ ^sha256:[a-f0-9]{64}$ ]]; then
+            echo "digest '${DIGEST}' is not a sha256 digest" >&2
+            exit 1
+          fi
+
+          # Only s5n.default.digest: every other variant keeps the digest it
+          # shipped with.
+          python3 - "$work/charts/s5n/variants.yaml" "$DIGEST" <<'PY'
+          import sys
+          path, digest = sys.argv[1], sys.argv[2]
+          lines = open(path).read().splitlines(keepends=True)
+          out, in_s5n, in_default, stamped = [], False, False, False
+          for line in lines:
+              stripped = line.strip()
+              if stripped and not line[:1].isspace() and not stripped.startswith("#"):
+                  in_s5n = stripped == "s5n:"
+                  in_default = False
+              elif in_s5n and line.startswith("  ") and not line.startswith("    ") and stripped:
+                  in_default = stripped == "default:"
+              elif in_s5n and in_default and stripped.startswith("digest:"):
+                  indent = line[: len(line) - len(line.lstrip())]
+                  line = f'{indent}digest: "{digest}"\n'
+                  stamped = True
+              out.append(line)
+          if not stamped:
+              sys.exit("variants.yaml: no s5n.default.digest line to stamp")
+          open(path, "w").write("".join(out))
+          PY
+
+          # The chart's own validation, against the stamped copy: helm lint and
+          # kubeconform for every ci values file. The tree is not what ships;
+          # this copy is.
+          "$work/hack/validate-chart.sh" 1.37.0
+
+          helm package "$work/charts/s5n" --destination "$work/dist"
+          tgz="$work/dist/s5n-${VERSION}.tgz"
+          test -f "$tgz" || { echo "helm package did not produce $(basename "$tgz")" >&2; exit 1; }
+          # The package itself lints, reads back, and renders the image this run
+          # pushed, by tag and by digest: the archive is the chart that ships.
+          helm lint "$tgz"
+          helm show values "$tgz" >/dev/null
+          rendered=$(helm template release "$tgz" -n seedbox)
+          want="${IMAGE}:${VERSION}@${DIGEST}"
+          if ! grep -q "$want" <<<"$rendered"; then
+            echo "the packaged chart does not render ${want}" >&2
+            exit 1
+          fi
+          echo "packaged $(basename "$tgz") naming ${want}"
+          cp "$tgz" "${RUNNER_TEMP}/chart.tgz"
+      - name: push the chart
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          echo "${GITHUB_TOKEN}" | helm registry login ghcr.io -u "${GITHUB_ACTOR}" --password-stdin
+          helm push "${RUNNER_TEMP}/chart.tgz" "${CHART_REPO}"
+
+  box:
+    # The release is the last thing that exists: a chart push that failed must
+    # not leave a GitHub release pointing at a tag nothing was published for.
+    needs: [verify, chart]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      - name: build box for linux/amd64 and linux/arm64
+        env:
+          VERSION: ${{ needs.verify.outputs.version }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          for arch in amd64 arm64; do
+            CGO_ENABLED=0 GOOS=linux GOARCH="$arch" \
+              go build -trimpath -ldflags "-s -w -X main.version=${VERSION}" \
+              -o "dist/box-linux-${arch}" ./cmd/box
+          done
+          (cd dist && sha256sum box-linux-amd64 box-linux-arm64 > sha256sums.txt && cat sha256sums.txt)
+      - name: publish the GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.verify.outputs.version }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          gh release create "$TAG" \
+            --title "s5n ${VERSION}" \
+            --generate-notes \
+            dist/box-linux-amd64 dist/box-linux-arm64 dist/sha256sums.txt
