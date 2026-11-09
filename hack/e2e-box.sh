@@ -8,7 +8,7 @@
 # policy), then runs init for root, which writes root's grant and values file
 # and hands over to `box apply`.
 #
-# Two scenarios, two clusters:
+# Three scenarios, three clusters:
 #
 #   fresh         a cluster with nothing installed. The Gateway box applies
 #                 gets no address, so MetalLB and its pool are installed, and
@@ -23,16 +23,23 @@
 #                 no MetalLB release and no s5n-pool, removes its probe
 #                 Service, and the Gateway still becomes Programmed on an
 #                 address from the pool that was already there.
+#   existing      a different Gateway API implementation -- NGINX Gateway
+#                 Fabric -- installed before box runs, on Gateway API's
+#                 standard channel. box must use its Accepted class, never
+#                 install Envoy Gateway beside it, put its own Gateway on that
+#                 class, derive the NetworkPolicy peer from where that
+#                 implementation's proxy actually runs, and still serve an app
+#                 through the Gateway with the chart's URLRewrite.
 #
-# Why one script and two clusters instead of a flag inside hack/e2e-kind.sh:
+# Why one script and three clusters instead of a flag inside hack/e2e-kind.sh:
 # the existing e2e is the chart's acceptance test, and its helm install is what
-# proves the chart still installs the way users install it today. These two
+# proves the chart still installs the way users install it today. These
 # scenarios are about box's decision, share the bootstrap command line, and
 # disagree about what is on the cluster before it runs -- so they cannot share
 # a cluster. `all` runs this script once per scenario, which gives each its own
 # work directory, cluster name and exit code.
 #
-# Usage: hack/e2e-box.sh [--keep] [fresh|preinstalled|all]   (default: all)
+# Usage: hack/e2e-box.sh [--keep] [fresh|preinstalled|existing|all]   (default: all)
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -40,19 +47,26 @@ KIND=${KIND:-kind}
 NS=seedbox
 IMAGE=ghcr.io/swizzin/s5n:e2e
 METALLB_VERSION=${METALLB_VERSION:-v0.16.1}
+# The third scenario's Gateway API implementation. NGINX Gateway Fabric is one
+# Deployment plus one data-plane pod per Gateway, publishes supportedFeatures
+# including HTTPRoutePathRewrite (the feature the chart's URLRewrite needs),
+# and its Gateway class is created by its own chart. Pinned, like every other
+# platform version here.
+GATEWAY_API_VERSION=${GATEWAY_API_VERSION:-v1.6.3}
+NGF_VERSION=${NGF_VERSION:-2.8.1}
 
 KEEP=""
 SCENARIO=all
 for arg in "$@"; do
   case "$arg" in
     --keep) KEEP=--keep ;;
-    fresh | preinstalled | all) SCENARIO=$arg ;;
+    fresh | preinstalled | existing | all) SCENARIO=$arg ;;
     -h | --help)
       sed -n '2,40p' "$0" | sed 's/^# \{0,1\}//'
       exit 0
       ;;
     *)
-      echo "unknown argument: $arg (want fresh, preinstalled or all)" >&2
+      echo "unknown argument: $arg (want fresh, preinstalled, existing or all)" >&2
       exit 2
       ;;
   esac
@@ -62,12 +76,14 @@ if [ "$SCENARIO" = all ]; then
   status=0
   "$0" fresh $KEEP || status=1
   "$0" preinstalled $KEEP || status=1
+  "$0" existing $KEEP || status=1
   exit "$status"
 fi
 
 case "$SCENARIO" in
   fresh) CLUSTER=s5n-box ;;
   preinstalled) CLUSTER=s5n-box-lb ;;
+  existing) CLUSTER=s5n-box-gw ;;
 esac
 CTX="kind-${CLUSTER}"
 K="kubectl --context ${CTX}"
@@ -274,6 +290,9 @@ fresh() {
   # printed passed on it.
   no_probe_service
   [ "$(helm_revision metallb-system)" != 0 ] || { echo "MetalLB is not a Helm release after the install"; fail=1; }
+  # The release is box's because box labelled it, not because of its name.
+  $HELM get metadata metallb -n metallb-system -o json |
+    python3 -c 'import json,sys; d=json.load(sys.stdin); m=d["labels"].get("app.kubernetes.io/managed-by"); print("  metallb release managed-by:", m); sys.exit(0 if m=="box" else 1)' || fail=1
   node_ip=$($K get node -o jsonpath='{.items[0].status.addresses[?(@.type=="InternalIP")].address}')
   pool_addr=$($K -n metallb-system get ipaddresspool s5n-pool -o jsonpath='{.spec.addresses[0]}')
   gw_addr=$($K -n s5n-gateway get gateway s5n -o jsonpath='{.status.addresses[0].value}')
@@ -499,12 +518,12 @@ EOF
   done
 }
 
-# ---- scenario: preinstalled --------------------------------------------------
-# The same cluster state a box on k3s (servicelb), on a cloud provider, or with
-# MetalLB installed by hand already has: LoadBalancer Services get addresses
-# before box runs. box must find out, by asking, that it does not need to
-# install anything -- and must leave the operator's address layer alone.
-preinstalled() {
+# install_metallb puts MetalLB on the cluster the way a user would: the
+# upstream manifest and an L2 pool carved from the bottom of the kind docker
+# network, not through box. It sets MANUAL_POOL for the assertions that follow.
+# Both the preinstalled and the existing scenario need this exact state: an
+# address layer box did not install and must not touch.
+install_metallb() {
   log "MetalLB ${METALLB_VERSION} from the upstream manifest, not through box"
   $K apply -f "https://raw.githubusercontent.com/metallb/metallb/${METALLB_VERSION}/config/manifests/metallb-native.yaml" >/dev/null
   $K -n metallb-system rollout status deploy/controller --timeout=180s
@@ -559,7 +578,18 @@ EOF
     [ "$i" = 30 ] && { cat "$WORK/metallb.err" >&2; fail=1; }
     sleep 2
   done
+  MANUAL_POOL=$pool
+}
+
+# ---- scenario: preinstalled --------------------------------------------------
+# The same cluster state a box on k3s (servicelb), on a cloud provider, or with
+# MetalLB installed by hand already has: LoadBalancer Services get addresses
+# before box runs. box must find out, by asking, that it does not need to
+# install anything -- and must leave the operator's address layer alone.
+preinstalled() {
+  install_metallb
   [ "$fail" = 0 ] || return 0
+  pool=$MANUAL_POOL
 
   # The proof the cluster is in the state under test: a LoadBalancer Service
   # gets an address before box has done anything.
@@ -699,6 +729,167 @@ PY
   [ "$(revision)" = "$rev1" ] || { echo "the second bootstrap created a release revision"; fail=1; }
 }
 
+# ---- scenario: existing ------------------------------------------------------
+# A Gateway API implementation box did not install. NGINX Gateway Fabric v2 is
+# one Deployment plus a data-plane pod per Gateway; its chart creates the
+# GatewayClass `nginx` and publishes supportedFeatures, including
+# HTTPRoutePathRewrite -- the Gateway API feature the chart's URLRewrite filter
+# is gated by. Its proxy runs in the Gateway's own namespace (s5n-gateway), not
+# in the controller's (nginx-gateway) and not in envoy-gateway-system, which is
+# exactly the assumption networkPolicy.gatewayFrom used to make.
+existing() {
+  install_metallb
+  [ "$fail" = 0 ] || return 0
+
+  log "Gateway API ${GATEWAY_API_VERSION} (the standard channel NGINX Gateway Fabric is built against)"
+  $K apply -f "https://github.com/kubernetes-sigs/gateway-api/releases/download/${GATEWAY_API_VERSION}/standard-install.yaml" >/dev/null
+
+  log "NGINX Gateway Fabric ${NGF_VERSION}, not through box"
+  $HELM upgrade --install ngf oci://ghcr.io/nginx/charts/nginx-gateway-fabric \
+    --version "${NGF_VERSION}" -n nginx-gateway --create-namespace --wait --timeout 5m >/dev/null
+  accepted=""
+  for i in $(seq 1 60); do
+    accepted=$($K get gatewayclass nginx -o jsonpath='{.status.conditions[?(@.type=="Accepted")].status}' 2>/dev/null || true)
+    [ "$accepted" = True ] && break
+    sleep 2
+  done
+  [ "$accepted" = True ] || { echo "the NGINX Gateway Fabric GatewayClass was never Accepted"; fail=1; return 0; }
+  features=$($K get gatewayclass nginx -o jsonpath='{range .status.supportedFeatures[*]}{.name}{"\n"}{end}')
+  echo "  GatewayClass nginx accepted; publishes HTTPRoutePathRewrite: $(grep -cx HTTPRoutePathRewrite <<<"$features")"
+  grep -qx HTTPRoutePathRewrite <<<"$features" ||
+    { echo "the implementation does not publish HTTPRoutePathRewrite, so the scenario proves nothing"; fail=1; return 0; }
+
+  # ---- bootstrap: box must use the class it found ---------------------------
+  log "box bootstrap: the existing implementation is used, not replaced"
+  if bootstrap "$WORK/bootstrap1.txt"; then
+    cat "$WORK/bootstrap1.txt"
+  else
+    cat "$WORK/bootstrap1.txt"; fail=1
+  fi
+  grep -qF "gateway class: nginx (gateway.nginx.org/nginx-gateway-controller)" "$WORK/bootstrap1.txt" ||
+    { echo "box did not choose the Accepted class and name its controller"; fail=1; }
+  grep -qF "gateway features: HTTPRoutePathRewrite is supported" "$WORK/bootstrap1.txt" ||
+    { echo "box did not check the class's published features"; fail=1; }
+  grep -qF "+ Gateway s5n-gateway/s5n on GatewayClass nginx" "$WORK/bootstrap1.txt" ||
+    { echo "the plan did not put box's Gateway on the existing class"; fail=1; }
+  if grep -q "envoy-gateway" "$WORK/bootstrap1.txt"; then
+    echo "box installed Envoy Gateway beside the existing implementation"; fail=1
+  fi
+  if grep -qF "GatewayClass eg" "$WORK/bootstrap1.txt"; then
+    echo "box planned its own GatewayClass beside the existing implementation"; fail=1
+  fi
+  grep -q "the Gateway already has an address: " "$WORK/bootstrap1.txt" ||
+    { echo "the Gateway's own address did not answer the MetalLB question"; fail=1; }
+  grep -q "^wiring ok" "$WORK/bootstrap1.txt" || { echo "box did not report a healthy receipt"; fail=1; }
+
+  # ---- what is (and is not) on the cluster ----------------------------------
+  if $K get gatewayclass eg >/dev/null 2>&1; then
+    echo "box created GatewayClass eg"; fail=1
+  fi
+  [ "$(helm_revision envoy-gateway-system)" = 0 ] ||
+    { echo "box created an envoy-gateway Helm release"; fail=1; }
+  [ "$(helm_revision metallb-system)" = 0 ] ||
+    { echo "box created a metallb Helm release beside the one installed by hand"; fail=1; }
+  if $K -n metallb-system get ipaddresspool s5n-pool >/dev/null 2>&1; then
+    echo "box created its own MetalLB pool beside the operator's"; fail=1
+  fi
+
+  gw_class=$($K -n s5n-gateway get gateway s5n -o jsonpath='{.spec.gatewayClassName}')
+  gw_addr=$($K -n s5n-gateway get gateway s5n -o jsonpath='{.status.addresses[0].value}')
+  gw_programmed=$($K -n s5n-gateway get gateway s5n -o jsonpath='{.status.conditions[?(@.type=="Programmed")].status}')
+  echo "  Gateway s5n: class ${gw_class}, address ${gw_addr}, Programmed ${gw_programmed}"
+  [ "$gw_class" = nginx ] || { echo "box's Gateway is on class ${gw_class}, want nginx"; fail=1; }
+  [ -n "$gw_addr" ] || { echo "the Gateway has no address"; fail=1; }
+  [ "$gw_programmed" = True ] || { echo "the Gateway is not Programmed"; fail=1; }
+  python3 - "$gw_addr" "$MANUAL_POOL" <<'PY' || fail=1
+import ipaddress, sys
+addr, pool = sys.argv[1], sys.argv[2]
+first, last = pool.split("-")
+if not (ipaddress.ip_address(first) <= ipaddress.ip_address(addr) <= ipaddress.ip_address(last)):
+    print(f"the Gateway's address {addr} is not from the pool that was already there ({pool})")
+    sys.exit(1)
+PY
+  grep -qF "the Gateway answers on ${gw_addr}:80 (HTTP " "$WORK/bootstrap1.txt" ||
+    { echo "box did not report the reachability check on ${gw_addr}"; fail=1; }
+  # The class box found is still the operator's: same controller, no box label.
+  class_controller=$($K get gatewayclass nginx -o jsonpath='{.spec.controllerName}')
+  class_manager=$($K get gatewayclass nginx -o jsonpath='{.metadata.labels.app\.kubernetes\.io/managed-by}')
+  [ "$class_controller" = gateway.nginx.org/nginx-gateway-controller ] || { echo "box rewrote the class controller"; fail=1; }
+  [ "$class_manager" != box ] || { echo "box labelled the operator's GatewayClass as its own"; fail=1; }
+
+  # ---- the NetworkPolicy follows the proxy, not a guessed namespace ---------
+  # NGINX Gateway Fabric v2 runs the pod that dials the apps in the Gateway's
+  # namespace. The chart's default (envoy-gateway-system) would refuse it.
+  $K -n "$NS" get networkpolicy sonarr-ingress -o json |
+    python3 -c '
+import json, sys
+np = json.load(sys.stdin)
+peers = np["spec"]["ingress"][0]["from"]
+names = [p.get("namespaceSelector", {}).get("matchLabels", {}).get("kubernetes.io/metadata.name") for p in peers]
+print("  sonarr-ingress admits namespaces:", names)
+sys.exit(0 if "s5n-gateway" in names and "envoy-gateway-system" not in names else 1)' || fail=1
+  $HELM get values s5n -n "$NS" -o json |
+    python3 -c '
+import json, sys
+v = json.load(sys.stdin)
+peers = v["networkPolicy"]["gatewayFrom"]
+names = [p.get("namespaceSelector", {}).get("matchLabels", {}).get("kubernetes.io/metadata.name") for p in peers]
+print("  release networkPolicy.gatewayFrom namespaces:", names)
+sys.exit(0 if "s5n-gateway" in names else 1)' || fail=1
+
+  $K -n "$NS" wait --for=condition=Ready pod -l 'app.kubernetes.io/instance=s5n,s5n.io/app' --timeout=300s || fail=1
+
+  # ---- the app through the Gateway, which is the URLRewrite proof -----------
+  # /qbittorrent is served by an HTTPRoute whose URLRewrite strips the prefix;
+  # if the filter were unsupported the path would reach qBittorrent unstripped
+  # and answer 404. The route carries the box's domain (box init wrote
+  # gateway.host), so the request names it: the same URL a browser uses.
+  code=$(curl -s -o /dev/null -w '%{http_code}' -H 'Host: box.example.com' "http://${gw_addr}/qbittorrent/")
+  echo "  GET http://${gw_addr}/qbittorrent/ (Host: box.example.com) -> ${code}"
+  [ "$code" = 200 ] || { echo "an app is not reachable through the existing Gateway"; fail=1; }
+
+  # ---- a second bootstrap: still nothing installed, still the same class ----
+  platform_state() {
+    echo "releases=$(helm_revision envoy-gateway-system),$(helm_revision metallb-system),$(helm_revision "$NS")"
+    echo "gatewayclass=$($K get gatewayclass nginx -o json | platform_spec)"
+    echo "gateway=$($K -n s5n-gateway get gateway s5n -o json | platform_spec)"
+    echo "pool=$($K -n metallb-system get ipaddresspool pre-existing-pool -o json | platform_spec)"
+    for p in s5n-blessed-images s5n-granted-service; do
+      echo "vap-${p}=$($K get validatingadmissionpolicy "$p" -o json | platform_spec)"
+    done
+    echo "s5n-system=$($K get namespace s5n-system -o json | platform_spec)"
+  }
+  platform_before=$(platform_state)
+  grant_before=$(sha256sum "$WORK/grant.yaml" | cut -d' ' -f1)
+  values_before=$(sha256sum "$WORK/values.yaml" | cut -d' ' -f1)
+  rev1=$(revision)
+
+  log "box bootstrap: the second run keeps the class and installs nothing"
+  if bootstrap "$WORK/bootstrap2.txt"; then
+    cat "$WORK/bootstrap2.txt"
+  else
+    cat "$WORK/bootstrap2.txt"; fail=1
+  fi
+  grep -qF "gateway class: nginx" "$WORK/bootstrap2.txt" ||
+    { echo "the second run forgot the class it chose"; fail=1; }
+  if grep -q "installing \|envoy-gateway" "$WORK/bootstrap2.txt"; then
+    echo "the second run installed something"; fail=1
+  fi
+  grep -q "nothing to change" "$WORK/bootstrap2.txt" || { echo "the second init did not say nothing to change"; fail=1; }
+  [ "$(revision)" = "$rev1" ] || { echo "the second bootstrap created a release revision"; fail=1; }
+  [ "$(sha256sum "$WORK/grant.yaml" | cut -d' ' -f1)" = "$grant_before" ] || { echo "the second bootstrap rewrote the grant"; fail=1; }
+  [ "$(sha256sum "$WORK/values.yaml" | cut -d' ' -f1)" = "$values_before" ] || { echo "the second bootstrap rewrote the values file"; fail=1; }
+  platform_after=$(platform_state)
+  if [ "$platform_after" != "$platform_before" ]; then
+    echo "the second bootstrap touched the platform"
+    echo "  before: ${platform_before}"
+    echo "  after:  ${platform_after}"
+    fail=1
+  else
+    echo "platform untouched: ${platform_after}"
+  fi
+}
+
 # box is the whole interface: a client-go/klog line such as
 # "I1107 ... warnings.go:107] ..." must never appear in what the operator reads.
 no_klog() {
@@ -712,7 +903,13 @@ no_klog() {
   done
 }
 
-if [ "$SCENARIO" = fresh ]; then fresh; else preinstalled; fi
+if [ "$SCENARIO" = fresh ]; then
+  fresh
+elif [ "$SCENARIO" = preinstalled ]; then
+  preinstalled
+else
+  existing
+fi
 no_klog
 
 if [ "$fail" != 0 ]; then
