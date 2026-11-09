@@ -66,9 +66,6 @@ func (o *OCIChart) logf(format string, args ...any) {
 // client takes none, so what bounds a pull is the HTTP client's timeout and the
 // response cap, not cancellation.
 func (o *OCIChart) Load(_ context.Context, ref ChartRef) (Chart, error) {
-	if ref.Dir != "" {
-		return Chart{}, errors.New("chart: a directory and a registry reference are exclusive")
-	}
 	repo, base, err := chartRepo(ref.Repo)
 	if err != nil {
 		return Chart{}, err

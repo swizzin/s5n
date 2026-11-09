@@ -43,7 +43,7 @@ var ErrCancelled = errors.New("cancelled")
 
 // Chart is the chart release box is about to install, and ChartSource loads
 // one; both live in chart.go, because a chart pulled from the registry and the
-// same chart read from a checkout have to be the same value to apply.
+// fixture copy of the same files have to be the same value to apply.
 // ReleaseClient is box's handle on one release in one namespace. It is the
 // only thing that touches a cluster, and it is opened only after the two files
 // have passed every check, so a refusal cannot write by construction.
@@ -102,14 +102,12 @@ type Options struct {
 	// ChartRepo and ChartVersion name the published release to load when
 	// Chart is nil. An empty version means the newest release this box can
 	// install (version.go); an empty repo means release.DefaultChartRepo.
+	// ChartRef is the one mapping from these fields to what the chart source
+	// is asked for.
 	ChartRepo    string
 	ChartVersion string
-	// ChartDir reads the chart from a local checkout instead of the registry.
-	// Test-only: --chart is hidden from box's help, and this path goes away
-	// once the e2e pulls its chart from a local registry.
-	ChartDir   string
-	GrantPath  string
-	ValuesPath string
+	GrantPath    string
+	ValuesPath   string
 	// PathsInNode says the grant's storage paths live inside a test node rather
 	// than on this host, so box cannot stat them. It exists for the kind e2e,
 	// which writes the directories in the node's filesystem; on a real host the
@@ -134,6 +132,13 @@ type Options struct {
 	// use: a value that is box's, not the operator's, and that has to be
 	// recomputed on every apply so a re-run is still a no-op.
 	BoxValues func(ctx context.Context) (map[string]any, error)
+}
+
+// ChartRef is the reference the chart source is asked for. loadChart uses it,
+// and cmd/box's flag tests pin the options it builds, so a field dropped
+// between a flag and the source breaks a test rather than an e2e.
+func (o Options) ChartRef() ChartRef {
+	return ChartRef{Repo: o.ChartRepo, Version: o.ChartVersion}
 }
 
 // Result is what happened, for the caller to report or a test to assert.
@@ -389,7 +394,7 @@ func (a *Applier) Apply(ctx context.Context, opts Options) (Result, error) {
 }
 
 // loadChart returns the chart this apply installs: the one the caller already
-// read, or one loaded from the directory/registry the options name.
+// read, or one loaded from the registry the options name.
 //
 // This is the first thing Apply does after the files are read, and it is where
 // a chart box is too old for is refused (minbox.go), so no refusal here can
@@ -399,9 +404,9 @@ func (a *Applier) loadChart(ctx context.Context, opts Options) (Chart, error) {
 		return *opts.Chart, nil
 	}
 	if a.Charts == nil {
-		return Chart{}, errors.New("no chart source: box reads its chart from the registry or a directory")
+		return Chart{}, errors.New("no chart source: box reads its chart from the registry")
 	}
-	return a.Charts.Load(ctx, ChartRef{Dir: opts.ChartDir, Repo: opts.ChartRepo, Version: opts.ChartVersion})
+	return a.Charts.Load(ctx, opts.ChartRef())
 }
 
 // waitReceipt waits for a receipt from this run. A receipt left by an earlier

@@ -60,8 +60,8 @@ func (d *Decision) step(n int, question string) {
 type Options struct {
 	// Chart is the release box is installing: the defaults every question is
 	// prefilled from and the schema every answer is checked against. init does
-	// not read charts/ from its own tree, so the caller loads the chart (a
-	// published release, or --chart for a local checkout) and hands it over.
+	// not read charts/ from its own tree, so the caller loads the published
+	// release and hands it over.
 	Chart      seedbox.Chart
 	GrantPath  string
 	ValuesPath string

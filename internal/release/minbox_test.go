@@ -1,7 +1,6 @@
 package release
 
 import (
-	"context"
 	"os"
 	"path/filepath"
 	"strings"
@@ -62,10 +61,10 @@ func TestCheckMinBox(t *testing.T) {
 	}
 }
 
-// TestDirChartChecksTheFloorToo: where a chart came from does not decide
-// whether this box may install it. The test path refuses for the same reason
-// the registry path does.
-func TestDirChartChecksTheFloorToo(t *testing.T) {
+// TestACheckoutIsNotExemptFromTheFloor: where a chart came from does not
+// decide whether this box may install it. The fixture loader refuses for the
+// same reason the registry path does.
+func TestACheckoutIsNotExemptFromTheFloor(t *testing.T) {
 	dir := t.TempDir()
 	src := filepath.Join("..", "..", "charts", "s5n")
 	for _, name := range []string{"Chart.yaml", "values.yaml", "values.schema.json"} {
@@ -87,7 +86,7 @@ annotations:
 `), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	_, err := (DirChart{BoxVersion: "0.4.0"}).Load(context.Background(), ChartRef{Dir: dir})
+	_, err := loadChartDir("0.4.0", dir)
 	if err == nil || !strings.Contains(err.Error(), "needs box 0.5.0") {
 		t.Fatalf("error = %v, want the floor refusal", err)
 	}

@@ -83,15 +83,41 @@ commands:
 	os.Exit(2)
 }
 
-// chartSource is where box reads the chart: a published release by default, a
-// local directory only when --chart names one. --chart is hidden and test-only
-// (docs/box.md, "box only uses published charts"); a later commit removes it
-// once the e2e pulls its chart from a local registry.
-func chartSource(chartDir string) release.ChartSource {
-	if chartDir != "" {
-		return release.DirChart{BoxVersion: version, Log: os.Stdout}
-	}
+// chartSource is where box reads the chart: a published release. box never
+// loads charts/ from its own tree (docs/box.md, "box only uses published
+// charts"), so even the e2e packages the chart from its commit and pushes it
+// to a registry, and box pulls it the way it pulls any release.
+func chartSource() release.ChartSource {
 	return &release.OCIChart{BoxVersion: version, Log: os.Stdout}
+}
+
+// chartFlags are the two flags that name a published release. Every command
+// that loads a chart takes them from here, so bootstrap, init and apply cannot
+// drift into asking for different releases.
+type chartFlags struct {
+	repo    *string
+	version *string
+}
+
+func addChartFlags(fs *flag.FlagSet) *chartFlags {
+	return &chartFlags{
+		repo:    fs.String("chart-repo", release.DefaultChartRepo, "OCI reference of the chart repository"),
+		version: fs.String("chart-version", "", "chart release to install (default: the newest released version this box can use)"),
+	}
+}
+
+// ref is the reference the chart source is asked for. It is one function on
+// purpose: a field dropped here is invisible in every other test, which is how
+// the init path once lost --chart-version.
+func (c *chartFlags) ref() release.ChartRef {
+	return release.ChartRef{Repo: *c.repo, Version: *c.version}
+}
+
+// load reads the release the flags name. init reads the chart before it asks
+// anything, and the apply it hands over to installs that same value rather
+// than pulling a second time and risking a different release.
+func (c *chartFlags) load(ctx context.Context, src release.ChartSource) (release.Chart, error) {
+	return src.Load(ctx, c.ref())
 }
 
 func runBootstrap(args []string) {
@@ -274,62 +300,72 @@ func newPrompt(plain bool) setup.Prompter {
 	return line
 }
 
-// hideFlag keeps a flag parseable but out of `-h`. The standard flag package
-// has no Hidden field, so the help function prints a copy of the set without
-// it; --chart is box's test path (chartSource) and only the docs should
-// mention it.
-func hideFlag(fs *flag.FlagSet, name string) {
-	fs.Usage = func() {
-		shown := flag.NewFlagSet(fs.Name(), flag.ContinueOnError)
-		shown.SetOutput(fs.Output())
-		fs.VisitAll(func(f *flag.Flag) {
-			if f.Name != name {
-				shown.Var(f.Value, f.Name, f.Usage)
-			}
-		})
-		fmt.Fprintf(fs.Output(), "Usage of %s:\n", fs.Name())
-		shown.PrintDefaults()
+// applyFlags are `box apply`'s flags, including the chart reference. They are
+// a value rather than locals in runApply so the mapping from flags to the
+// options the release client receives is testable without a cluster.
+type applyFlags struct {
+	chart       *chartFlags
+	grantPath   *string
+	valuesPath  *string
+	kubeconfig  *string
+	pathsInNode *bool
+	yes         *bool
+}
+
+func addApplyFlags(fs *flag.FlagSet) *applyFlags {
+	valuesDefault := ""
+	if home, err := os.UserHomeDir(); err == nil {
+		valuesDefault = seedbox.ValuesPath(home)
+	}
+	o := &applyFlags{chart: addChartFlags(fs)}
+	o.grantPath = fs.String("grant", seedbox.GrantPath("root"), "the root-owned grant file")
+	o.valuesPath = fs.String("values", valuesDefault, "the user's values file")
+	o.kubeconfig = fs.String("kubeconfig", "", "explicit kubeconfig to use, or fail with no fallback")
+	o.pathsInNode = fs.Bool("paths-in-node", false, "the grant's storage paths live inside a test node (kind), not on this host: skip the host directory check")
+	o.yes = fs.Bool("yes", false, "apply without asking")
+	return o
+}
+
+// options is what this invocation hands the Applier. The chart flags become
+// the ChartRef the chart source is asked for; BoxValues is added by the caller
+// once it has a kubeconfig.
+func (o *applyFlags) options() release.Options {
+	ref := o.chart.ref()
+	return release.Options{
+		ChartRepo:    ref.Repo,
+		ChartVersion: ref.Version,
+		GrantPath:    *o.grantPath,
+		ValuesPath:   *o.valuesPath,
+		PathsInNode:  *o.pathsInNode,
 	}
 }
 
 func runApply(args []string) {
 	fs := flag.NewFlagSet("apply", flag.ExitOnError)
-	chartDir := fs.String("chart", "", "test only: read the chart from a local directory instead of the registry")
-	chartVersion := fs.String("chart-version", "", "chart release to install (default: the newest released version this box can use)")
-	chartRepo := fs.String("chart-repo", release.DefaultChartRepo, "OCI reference of the chart repository")
-	hideFlag(fs, "chart")
-	grantPath := fs.String("grant", seedbox.GrantPath("root"), "the root-owned grant file")
-	valuesDefault := ""
-	if home, err := os.UserHomeDir(); err == nil {
-		valuesDefault = seedbox.ValuesPath(home)
-	}
-	valuesPath := fs.String("values", valuesDefault, "the user's values file")
-	kubeconfig := fs.String("kubeconfig", "", "explicit kubeconfig to use, or fail with no fallback")
-	pathsInNode := fs.Bool("paths-in-node", false, "the grant's storage paths live inside a test node (kind), not on this host: skip the host directory check")
-	yes := fs.Bool("yes", false, "apply without asking")
+	o := addApplyFlags(fs)
 	if err := fs.Parse(args); err != nil {
 		fmt.Fprintf(os.Stderr, "box: %v\n", err)
 		os.Exit(2)
 	}
-	if *valuesPath == "" {
+	if *o.valuesPath == "" {
 		fmt.Fprintln(os.Stderr, "box: no values file: pass --values")
 		os.Exit(2)
 	}
 
 	// The cluster decision belongs to `box bootstrap`; apply reuses it and
 	// never probes or re-detects a cluster of its own.
-	kc, err := release.ResolveKubeconfig(*kubeconfig, os.Getenv("KUBECONFIG"), bootstrap.FilesystemRecords{Path: bootstrap.RecordPath})
+	kc, err := release.ResolveKubeconfig(*o.kubeconfig, os.Getenv("KUBECONFIG"), bootstrap.FilesystemRecords{Path: bootstrap.RecordPath})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "box: %v\n", err)
 		os.Exit(1)
 	}
 
 	app := &release.Applier{
-		Charts: chartSource(*chartDir),
+		Charts: chartSource(),
 		Confirm: &release.Terminal{
 			In:    os.Stdin,
 			Out:   os.Stdout,
-			Yes:   *yes,
+			Yes:   *o.yes,
 			IsTTY: func() bool { return release.TTY(os.Stdin) },
 		},
 		Log: os.Stdout,
@@ -341,15 +377,9 @@ func runApply(args []string) {
 		},
 	}
 
-	_, err = app.Apply(context.Background(), release.Options{
-		ChartDir:     *chartDir,
-		ChartRepo:    *chartRepo,
-		ChartVersion: *chartVersion,
-		GrantPath:    *grantPath,
-		ValuesPath:   *valuesPath,
-		PathsInNode:  *pathsInNode,
-		BoxValues:    boxValues(kc),
-	})
+	opts := o.options()
+	opts.BoxValues = boxValues(kc)
+	_, err = app.Apply(context.Background(), opts)
 	if err != nil {
 		if errors.Is(err, release.ErrCancelled) {
 			os.Exit(1)
@@ -382,21 +412,19 @@ func runInit(args []string) {
 // ones and hands them to init for root once the platform is ready, so the two
 // commands cannot drift apart; `box init` on its own parses exactly these.
 type initFlags struct {
-	fs           *flag.FlagSet
-	chartDir     *string
-	chartVersion *string
-	chartRepo    *string
-	grantPath    *string
-	valuesPath   *string
-	namespace    *string
-	domain       *string
-	dataPath     *string
-	configPath   *string
-	apps         *string
-	puid         *int
-	pgid         *int
-	transient    *transientAnswers
-	pathsInNode  *bool
+	fs          *flag.FlagSet
+	chart       *chartFlags
+	grantPath   *string
+	valuesPath  *string
+	namespace   *string
+	domain      *string
+	dataPath    *string
+	configPath  *string
+	apps        *string
+	puid        *int
+	pgid        *int
+	transient   *transientAnswers
+	pathsInNode *bool
 }
 
 func addInitFlags(fs *flag.FlagSet) *initFlags {
@@ -404,11 +432,7 @@ func addInitFlags(fs *flag.FlagSet) *initFlags {
 	if home, err := os.UserHomeDir(); err == nil {
 		valuesDefault = seedbox.ValuesPath(home)
 	}
-	o := &initFlags{fs: fs}
-	o.chartDir = fs.String("chart", "", "test only: read the chart from a local directory instead of the registry")
-	o.chartVersion = fs.String("chart-version", "", "chart release to install (default: the newest released version this box can use)")
-	o.chartRepo = fs.String("chart-repo", release.DefaultChartRepo, "OCI reference of the chart repository")
-	hideFlag(fs, "chart")
+	o := &initFlags{fs: fs, chart: addChartFlags(fs)}
 	o.grantPath = fs.String("grant", seedbox.GrantPath("root"), "the root-owned grant file to write")
 	o.valuesPath = fs.String("values", valuesDefault, "the user's values file to edit")
 	o.namespace = fs.String("namespace", "seedbox", "the box's namespace; a re-run keeps whatever the grant says")
@@ -439,8 +463,8 @@ func (o *initFlags) run(ctx context.Context, kubeconfig string, yes, plain bool)
 	// refusal, not a half-finished dialog. The same value is handed to the
 	// apply at the end, so the release init asked about is the release box
 	// installs.
-	source := chartSource(*o.chartDir)
-	chart, err := source.Load(ctx, release.ChartRef{Dir: *o.chartDir, Repo: *o.chartRepo, Version: *o.chartVersion})
+	source := chartSource()
+	chart, err := o.chart.load(ctx, source)
 	if err != nil {
 		return err
 	}

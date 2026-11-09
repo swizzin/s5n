@@ -3,9 +3,7 @@ package release
 import (
 	"bytes"
 	"context"
-	"errors"
 	"fmt"
-	"io"
 
 	chartv2 "helm.sh/helm/v4/pkg/chart/v2"
 	"helm.sh/helm/v4/pkg/chart/v2/loader"
@@ -47,19 +45,14 @@ type Chart struct {
 	// when the chart does not ship them.
 	Catalog  []byte
 	Variants []byte
-	// Dir is the chart directory, when the chart came from a checkout.
-	Dir string
 	// Archive is the packaged chart (.tgz), when it came from a registry.
-	// Upgrade installs one or the other, never both.
 	Archive []byte
 }
 
-// ChartRef says which chart release to load. Dir names a local checkout and is
-// the test-only --chart path; otherwise Repo and Version name a published
-// release, with an empty Version meaning the newest release this box can
-// install.
+// ChartRef says which chart release to load: the repository and the version.
+// An empty Version means the newest release this box can install, which is the
+// path a user's first install takes; an empty Repo means DefaultChartRepo.
 type ChartRef struct {
-	Dir     string
 	Repo    string
 	Version string
 }
@@ -75,45 +68,6 @@ type ChartSource interface {
 // process that may run as root, and "read whatever this file says" needs a
 // limit. The catalog has its own, smaller cap (catalog.MaxManifest).
 const MaxChartFile = 1 << 20
-
-// DirChart reads a chart from a local directory.
-//
-// It is box's test path: box only uses published charts (docs/box.md), and
-// --chart is hidden from help. It stays until the e2e pulls its chart from a
-// local registry; a later commit removes it, with the flag. The min-box rule
-// applies here too: where a chart came from is not what decides whether this
-// box may install it.
-type DirChart struct {
-	// BoxVersion is this box's version, as OCIChart's is.
-	BoxVersion string
-	// Log receives the "built without a version" notice. A command loads one
-	// chart, so saying it here is saying it once.
-	Log io.Writer
-}
-
-// Load reads the chart directory's files through Helm's own loader, so a chart
-// read here and the same chart pulled from a registry produce the same Chart.
-func (d DirChart) Load(_ context.Context, ref ChartRef) (Chart, error) {
-	if IsDevVersion(d.BoxVersion) && d.Log != nil {
-		fmt.Fprintf(d.Log, "box was built without a version (%s): skipping the chart's %s check\n", DevVersion, MinBoxAnnotation)
-	}
-	if ref.Dir == "" {
-		return Chart{}, errors.New("no chart: pass --chart <dir> for a local checkout, or --chart-version for a published release")
-	}
-	ch, err := loader.LoadDir(ref.Dir)
-	if err != nil {
-		return Chart{}, fmt.Errorf("chart %s: %w", ref.Dir, err)
-	}
-	chart, err := chartFrom(ref.Dir, ch)
-	if err != nil {
-		return Chart{}, err
-	}
-	if err := CheckMinBox(d.BoxVersion, chart); err != nil {
-		return Chart{}, err
-	}
-	chart.Dir = ref.Dir
-	return chart, nil
-}
 
 // chartFrom builds box's view of a chart Helm has already loaded. Both sources
 // go through it: the same chart must not mean two different things depending on
@@ -173,14 +127,11 @@ func chartFile(ch *chartv2.Chart, name string, limit int) ([]byte, error) {
 	return nil, nil
 }
 
-// open loads the chart the way Helm's install and upgrade want it: the archive
-// for a pulled release, the directory for a checkout.
+// open loads the chart the way Helm's install and upgrade want it: the
+// packaged archive a registry served.
 func (c Chart) open() (*chartv2.Chart, error) {
-	if len(c.Archive) > 0 {
-		return loader.LoadArchive(bytes.NewReader(c.Archive))
+	if len(c.Archive) == 0 {
+		return nil, fmt.Errorf("chart %s: no archive to load", c.Ref)
 	}
-	if c.Dir == "" {
-		return nil, fmt.Errorf("chart %s: nothing to load", c.Ref)
-	}
-	return loader.Load(c.Dir)
+	return loader.LoadArchive(bytes.NewReader(c.Archive))
 }

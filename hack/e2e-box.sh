@@ -8,6 +8,11 @@
 # policy), then runs init for root, which writes root's grant and values file
 # and hands over to `box apply`.
 #
+# The chart is installed the way a user installs one: `helm package` from this
+# working tree, `helm push` to a distribution registry container bound to 127.0.0.1, and
+# box pulls it from there with --chart-repo (and --chart-version). box never
+# reads `charts/` from its own tree; the kind cluster never pulls the chart.
+#
 # Three scenarios, three clusters:
 #
 #   fresh         a cluster with nothing installed. The Gateway box applies
@@ -90,7 +95,16 @@ K="kubectl --context ${CTX}"
 HELM="helm --kube-context ${CTX}"
 WORK=$(mktemp -d)
 START=$(date +%s)
-trap 'rm -rf "$WORK"' EXIT
+REGISTRY=""
+# The registry is a container on this host: it must not outlive the run, even
+# when a scenario fails before its own cleanup.
+cleanup() {
+  if [ -n "$REGISTRY" ]; then
+    docker rm -f "$REGISTRY" >/dev/null 2>&1 || true
+  fi
+  rm -rf "$WORK"
+}
+trap cleanup EXIT
 
 log() { printf '\n==> %s\n' "$*"; }
 fail=0
@@ -109,6 +123,47 @@ mkdir -p "$(dirname "$KUBECONFIG")"
 chmod 600 "$KUBECONFIG"
 log "scenario ${SCENARIO}: kubeconfig ${KUBECONFIG} (~/.kube/config is not used)"
 
+# ---- the chart a user would get -------------------------------------------
+# box only installs published charts (docs/box.md), so the e2e publishes one:
+# `helm package` from this working tree, `helm push` to a registry on this
+# host, and box pulls it by repository (and version) like any release. The
+# registry is a distribution container published on 127.0.0.1 only, which is
+# also the only host box speaks plain HTTP to (loopback registries). The kind
+# cluster never pulls the chart: box runs on the host.
+# distribution v3.1.2, pinned by digest like every other image the e2e runs.
+REGISTRY_IMAGE=registry:3@sha256:38907510915c3f1604c7e83d6ab602ab3020d092f73bdaed8696773693ff768c
+REGISTRY=s5n-e2e-registry-${SCENARIO}
+log "OCI registry (distribution 3.1.2) on 127.0.0.1 only (container ${REGISTRY})"
+docker rm -f "$REGISTRY" >/dev/null 2>&1 || true
+docker run -d --rm --name "$REGISTRY" -p 127.0.0.1::5000 "$REGISTRY_IMAGE" >/dev/null
+REGISTRY_PORT=$(docker port "$REGISTRY" 5000/tcp | head -1 | sed 's/.*://')
+[ -n "$REGISTRY_PORT" ] || {
+  echo "the local registry published no port"
+  exit 1
+}
+for i in $(seq 1 30); do
+  curl -fsS "http://127.0.0.1:${REGISTRY_PORT}/v2/" >/dev/null 2>&1 && break
+  [ "$i" = 30 ] && {
+    echo "the local registry never answered on 127.0.0.1:${REGISTRY_PORT}"
+    exit 1
+  }
+  sleep 1
+done
+
+# The version the packaged chart declares is the version box is built as and
+# the one it asks the registry for. It is the chart's own version, so the e2e
+# cannot drift from what `helm package` writes.
+CHART_VERSION=$(helm show chart charts/s5n | awk '$1 == "version:" {print $2}')
+[ -n "$CHART_VERSION" ] || {
+  echo "charts/s5n/Chart.yaml declares no version"
+  exit 1
+}
+CHART_REPO="oci://127.0.0.1:${REGISTRY_PORT}/charts/s5n"
+log "packaging charts/s5n ${CHART_VERSION} from this commit and pushing it to ${CHART_REPO}"
+mkdir -p "$WORK/charts"
+helm package charts/s5n --destination "$WORK/charts" >/dev/null
+helm push "$WORK/charts/s5n-${CHART_VERSION}.tgz" "oci://127.0.0.1:${REGISTRY_PORT}/charts" --plain-http >/dev/null
+
 # Each scenario's premise is a cluster in one known state, so a leftover from an
 # interrupted run is deleted rather than reused: reusing one would leave the
 # platform (or MetalLB) in place and the probes would say "use", which is not
@@ -125,8 +180,13 @@ log "building the s5n image (the wiring Job and the qBittorrent credential seed)
 docker build -q -t "$IMAGE" .
 $KIND load docker-image --name "$CLUSTER" "$IMAGE"
 
-log "building box"
-CGO_ENABLED=0 go build -o "$WORK/box" ./cmd/box
+log "building box ${CHART_VERSION} (the version it pulls the chart as)"
+CGO_ENABLED=0 go build -ldflags "-X main.version=${CHART_VERSION}" -o "$WORK/box" ./cmd/box
+built=$("$WORK/box" version)
+[ "$built" = "$CHART_VERSION" ] || {
+  echo "box reports version '${built}', want the chart version ${CHART_VERSION}"
+  fail=1
+}
 $KIND get kubeconfig --name "$CLUSTER" >"$WORK/kubeconfig"
 
 # Only what `box init` creates on a real host, and only because --paths-in-node
@@ -169,7 +229,11 @@ bootstrap() { # bootstrap <output file>
   # The platform and root's seedbox are one command now. --record points the
   # cluster decision at this work directory: on a real host it is
   # /etc/swizzin/cluster.yaml, written by root, and the e2e is not root.
-  "$WORK/box" bootstrap --yes --chart charts/s5n \
+  #
+  # No --chart-version: bootstrap takes the default-version path, so the e2e
+  # exercises the newest-release selection against a real registry. The chart
+  # is the one pushed above; box pulls it over loopback.
+  "$WORK/box" bootstrap --yes --chart-repo "$CHART_REPO" \
     --grant "$WORK/grant.yaml" --values "$WORK/values.yaml" \
     --namespace "$NS" --domain box.example.com \
     --data-path /srv/s5n/data --config-path /srv/s5n/config \
@@ -184,7 +248,10 @@ init() { # init <output file>
   # host's, so init neither reports nor creates them, and apply skips its stat
   # the same way. On a real host init creates them (hack/e2e-box.sh cannot:
   # this host is not the node).
-  "$WORK/box" init --yes --chart charts/s5n \
+  #
+  # --chart-version pins the release to the package pushed above: init reads
+  # one chart, and the apply it hands over to installs that same value.
+  "$WORK/box" init --yes --chart-repo "$CHART_REPO" --chart-version "$CHART_VERSION" \
     --grant "$WORK/grant.yaml" --values "$WORK/values.yaml" \
     --namespace "$NS" --domain box.example.com \
     --data-path /srv/s5n/data --config-path /srv/s5n/config \
@@ -198,7 +265,7 @@ apply() { # apply <output file>
   # --paths-in-node: the grant's directories are in the kind node's filesystem,
   # not this host's, so box cannot stat them. It is the one place the check is
   # skipped, and only a script that wrote those directories itself passes it.
-  "$WORK/box" apply --yes --chart charts/s5n \
+  "$WORK/box" apply --yes --chart-repo "$CHART_REPO" --chart-version "$CHART_VERSION" \
     --grant "$WORK/grant.yaml" --values "$WORK/values.yaml" \
     --paths-in-node \
     --kubeconfig "$WORK/kubeconfig" >"$1" 2>&1
@@ -293,6 +360,11 @@ fresh() {
 
   # The init half ran in the same process: root's first release, and the
   # namespace box created because the cluster had none.
+  # The chart was pulled from the registry the e2e pushed it to, not read from
+  # this checkout: box only installs published charts. Bootstrap used the
+  # default version, so the ref names the version box selected.
+  grep -qF "chart: s5n ${CHART_VERSION} (${CHART_REPO}:${CHART_VERSION})" "$WORK/bootstrap1.txt" ||
+    { echo "box did not pull ${CHART_REPO}:${CHART_VERSION}"; fail=1; }
   grep -q "first install" "$WORK/bootstrap1.txt" || { echo "no 'first install' line"; fail=1; }
   grep -q "^wiring ok" "$WORK/bootstrap1.txt" || { echo "box did not report a healthy receipt"; fail=1; }
   # The data path was empty before this run: these steps are the wiring Job
@@ -932,6 +1004,19 @@ no_klog() {
   done
 }
 
+# A box built with -X main.version is what a release is. Without it box says it
+# is skipping the chart's min-box check, which would quietly make the e2e pass
+# a floor a real box could not.
+no_dev_notice() {
+  for f in "$WORK"/*.txt; do
+    [ -e "$f" ] || continue
+    if grep -q "built without a version" "$f"; then
+      echo "box skipped the min-box check: $(basename "$f") says it was built without a version"
+      fail=1
+    fi
+  done
+}
+
 if [ "$SCENARIO" = fresh ]; then
   fresh
 elif [ "$SCENARIO" = preinstalled ]; then
@@ -940,6 +1025,7 @@ else
   existing
 fi
 no_klog
+no_dev_notice
 
 if [ "$fail" != 0 ]; then
   log "wiring Job logs"

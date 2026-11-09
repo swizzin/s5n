@@ -204,7 +204,6 @@ func newFakes(t *testing.T) *fakes {
 	f.rel.events = &f.events
 	f.store.events = &f.events
 	f.app = &Applier{
-		Charts:  DirChart{},
 		Confirm: &Terminal{Yes: true},
 		Log:     f.out,
 		Open: func(ns string) (ReleaseClient, error) {
@@ -223,7 +222,7 @@ func newFakes(t *testing.T) *fakes {
 func (f *fakes) apply(t *testing.T) (Result, error) {
 	t.Helper()
 	return f.app.Apply(context.Background(), Options{
-		ChartDir:    "testdata/chart",
+		Chart:       testChartPtr(t),
 		GrantPath:   f.grantPath,
 		ValuesPath:  f.values,
 		PathsInNode: f.pathsInNode,
@@ -499,11 +498,48 @@ func TestStaleReceiptIsNotThisRunsReceipt(t *testing.T) {
 func TestNoChartIsRefused(t *testing.T) {
 	f := newFakes(t)
 	_, err := f.app.Apply(context.Background(), Options{GrantPath: f.grantPath, ValuesPath: f.values})
-	if err == nil || !strings.Contains(err.Error(), "--chart") {
+	if err == nil || !strings.Contains(err.Error(), "no chart source") {
 		t.Fatalf("error = %v, want a missing-chart refusal", err)
 	}
 	if f.openCalls != 0 {
 		t.Fatalf("a refusal opened a cluster client")
+	}
+}
+
+// recordingChartSource records the reference apply asks for, so the mapping
+// from Options to the source is asserted from this side too.
+type recordingChartSource struct {
+	ref   ChartRef
+	chart Chart
+}
+
+func (r *recordingChartSource) Load(_ context.Context, ref ChartRef) (Chart, error) {
+	r.ref = ref
+	return r.chart, nil
+}
+
+// TestApplyAsksItsSourceForTheOptionsRef: apply loads its chart inside the
+// Applier, after both files are read. A --chart-repo or --chart-version that
+// stops at Options would silently pull the default release instead of the one
+// the operator named, which is what the flag tests in cmd/box cannot see.
+func TestApplyAsksItsSourceForTheOptionsRef(t *testing.T) {
+	f := newFakes(t)
+	src := &recordingChartSource{chart: testChart(t)}
+	f.app.Charts = src
+
+	_, err := f.app.Apply(context.Background(), Options{
+		ChartRepo:    "oci://127.0.0.1:5000/charts/s5n",
+		ChartVersion: "1.2.3",
+		GrantPath:    f.grantPath,
+		ValuesPath:   f.values,
+		PathsInNode:  f.pathsInNode,
+	})
+	if err != nil {
+		t.Fatalf("apply: %v\n%s", err, f.out)
+	}
+	want := ChartRef{Repo: "oci://127.0.0.1:5000/charts/s5n", Version: "1.2.3"}
+	if src.ref != want {
+		t.Fatalf("the chart source was asked for %+v, want %+v", src.ref, want)
 	}
 }
 
@@ -794,7 +830,7 @@ func TestBoxValuesAreOverlaidOnTheEffectiveValues(t *testing.T) {
 		"namespaceSelector": map[string]any{"matchLabels": map[string]any{"kubernetes.io/metadata.name": "s5n-gateway"}},
 	}}
 	_, err := f.app.Apply(context.Background(), Options{
-		ChartDir:    "testdata/chart",
+		Chart:       testChartPtr(t),
 		GrantPath:   f.grantPath,
 		ValuesPath:  f.values,
 		PathsInNode: f.pathsInNode,
@@ -824,7 +860,7 @@ func TestBoxValuesAreOverlaidOnTheEffectiveValues(t *testing.T) {
 func TestBoxValuesRefusalWritesNothing(t *testing.T) {
 	f := newFakes(t)
 	_, err := f.app.Apply(context.Background(), Options{
-		ChartDir:    "testdata/chart",
+		Chart:       testChartPtr(t),
 		GrantPath:   f.grantPath,
 		ValuesPath:  f.values,
 		PathsInNode: f.pathsInNode,

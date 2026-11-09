@@ -23,7 +23,7 @@ func (f confirmFunc) Ask(q string) (bool, error) { return f(q) }
 func (f *fakes) withTransient(t *testing.T, extra map[string]any, events *[]string) (Result, error) {
 	t.Helper()
 	opts := Options{
-		ChartDir:      "testdata/chart",
+		Chart:         testChartPtr(t),
 		GrantPath:     f.grantPath,
 		ValuesPath:    f.values,
 		TransientKeys: []string{tokenKey},
@@ -155,7 +155,7 @@ func TestTransientCannotSetAGrantKey(t *testing.T) {
 func TestTransientAskerFailureWritesNothing(t *testing.T) {
 	f := newFakes(t)
 	opts := Options{
-		ChartDir:      "testdata/chart",
+		Chart:         testChartPtr(t),
 		GrantPath:     f.grantPath,
 		ValuesPath:    f.values,
 		TransientKeys: []string{tokenKey},

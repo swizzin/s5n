@@ -122,8 +122,9 @@ func packageChart(t *testing.T, dir string) []byte {
 }
 
 // TestOCIRoundTrip: the chart this checkout ships, pushed to a registry and
-// pulled by version, is the same Chart DirChart reads from the directory. box
-// reads one chart, not two dialects of it.
+// pulled by version, is the same Chart the fixture loader reads from the
+// directory. box reads one chart, not two dialects of it; the directory is a
+// test fixture, never a source box installs from.
 func TestOCIRoundTrip(t *testing.T) {
 	host := registry(t)
 	want := pushChart(t, host, "charts")
@@ -134,7 +135,7 @@ func TestOCIRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("pull: %v", err)
 	}
-	fromDir, err := (DirChart{}).Load(context.Background(), ChartRef{Dir: filepath.Join("..", "..", "charts", "s5n")})
+	fromDir, err := loadChartDir(DevVersion, filepath.Join("..", "..", "charts", "s5n"))
 	if err != nil {
 		t.Fatalf("load the directory: %v", err)
 	}
@@ -164,9 +165,6 @@ func TestOCIRoundTrip(t *testing.T) {
 	}
 	if len(pulled.Archive) == 0 || len(pulled.Archive) != len(want) {
 		t.Fatalf("archive = %d bytes, want the %d that were pushed", len(pulled.Archive), len(want))
-	}
-	if pulled.Dir != "" {
-		t.Fatalf("a pulled chart has no directory: %q", pulled.Dir)
 	}
 	if fromDir.Archive != nil {
 		t.Fatalf("a directory chart carries no archive")
