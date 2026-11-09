@@ -39,7 +39,7 @@ type classFixture struct {
 func newClassFixture(platform PlatformProbe) *classFixture {
 	const path = "/explicit.yaml"
 	src := &fakeSource{files: map[string][]byte{path: []byte("kubeconfig")}}
-	prober := &fakeProber{version: Version{GitVersion: "v1.31.3+k3s1"}, cluster: Cluster{Nodes: 1}, platform: platform}
+	prober := &fakeProber{version: Version{GitVersion: "v1.37.2+k3s1"}, cluster: Cluster{Nodes: 1}, platform: platform}
 	recs := &fakeRecords{}
 	d := newDecision(src, prober, &fakeHost{}, recs, &fakeInstaller{})
 	return &classFixture{recs: recs, probe: prober, d: d}

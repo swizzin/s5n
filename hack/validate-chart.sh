@@ -2,10 +2,10 @@
 # Static chart validation: helm lint, then kubeconform for every values file in
 # charts/s5n/ci/ against one Kubernetes version. A render that produces nothing is a
 # failure, not a pass.
-# Usage: hack/validate-chart.sh [kubernetes-version]   (default 1.31.0)
+# Usage: hack/validate-chart.sh [kubernetes-version]   (default 1.37.0)
 set -euo pipefail
 cd "$(dirname "$0")/.."
-KUBE=${1:-1.31.0}
+KUBE=${1:-1.37.0}
 CRDS='https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json'
 
 helm lint charts/s5n

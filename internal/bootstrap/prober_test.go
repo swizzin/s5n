@@ -202,7 +202,7 @@ func TestHTTPProberLocalOnlySkipsRemote(t *testing.T) {
 func TestHTTPProberAgainstLoopbackServer(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/version", func(w http.ResponseWriter, _ *http.Request) {
-		_, _ = w.Write([]byte(`{"gitVersion":"v1.31.3+k0s.0"}`))
+		_, _ = w.Write([]byte(`{"gitVersion":"v1.37.2+k0s.1"}`))
 	})
 	mux.HandleFunc("/apis/authorization.k8s.io/v1/selfsubjectaccessreviews", func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = w.Write([]byte(`{"status":{"allowed":true}}`))
@@ -226,7 +226,7 @@ func TestHTTPProberAgainstLoopbackServer(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Version: %v", err)
 	}
-	if v.GitVersion != "v1.31.3+k0s.0" {
+	if v.GitVersion != "v1.37.2+k0s.1" {
 		t.Errorf("gitVersion = %q", v.GitVersion)
 	}
 	if err := p.CanAdmin(ctx); err != nil {

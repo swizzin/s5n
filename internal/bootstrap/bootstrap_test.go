@@ -194,7 +194,7 @@ func TestBootstrapExplicitBrokenNeverFallsBack(t *testing.T) {
 			name: "identity cannot manage it",
 			setup: func(src *fakeSource, p *fakeProber, _ *fakeHost) {
 				src.files[path] = []byte("kubeconfig")
-				p.version = Version{GitVersion: "v1.31.3+k0s.0"}
+				p.version = Version{GitVersion: "v1.37.2+k0s.1"}
 				p.adminErr = errors.New("identity cannot create namespaces")
 			},
 			wantReason: "cannot manage it",
@@ -242,7 +242,7 @@ func TestBootstrapExplicitUsesCluster(t *testing.T) {
 	const path = "/explicit.yaml"
 	src := &fakeSource{files: map[string][]byte{path: []byte("kubeconfig")}}
 	prober := &fakeProber{
-		version: Version{GitVersion: "v1.31.3+k3s1"},
+		version: Version{GitVersion: "v1.37.2+k3s1"},
 		cluster: Cluster{Nodes: 1},
 		platform: PlatformProbe{
 			GatewayAPI:   OutcomePresent,
@@ -286,7 +286,7 @@ func TestBootstrapCandidateSSARDeniedNotUsable(t *testing.T) {
 			files:      map[string][]byte{candidate: []byte("kubeconfig")},
 		}
 		prober := &fakeProber{
-			version:  Version{GitVersion: "v1.31.3+k3s1"},
+			version:  Version{GitVersion: "v1.37.2+k3s1"},
 			adminErr: errors.New("identity cannot create namespaces, create clusterroles"),
 			cluster:  Cluster{Nodes: 1},
 			platform: PlatformProbe{},
@@ -317,7 +317,7 @@ func TestBootstrapCandidateSSARDeniedNotUsable(t *testing.T) {
 			files:      map[string][]byte{candidate: []byte("kubeconfig")},
 		}
 		prober := &fakeProber{
-			version:  Version{GitVersion: "v1.31.3+k3s1"},
+			version:  Version{GitVersion: "v1.37.2+k3s1"},
 			adminErr: errors.New("forbidden"),
 			cluster:  Cluster{Nodes: 1},
 		}
@@ -501,7 +501,7 @@ func TestBootstrapRecordSkipsProbing(t *testing.T) {
 
 	t.Run("external record: reachable, never touched", func(t *testing.T) {
 		src := &fakeSource{files: map[string][]byte{path: []byte("kubeconfig")}}
-		prober := &fakeProber{version: Version{GitVersion: "v1.31.3+k3s1"}}
+		prober := &fakeProber{version: Version{GitVersion: "v1.37.2+k3s1"}}
 		host := &fakeHost{findings: []Finding{{Kind: "process", Name: "kubelet"}}}
 		recs := &fakeRecords{rec: &Record{
 			Source:       SourceExternal,
@@ -813,9 +813,9 @@ func TestBootstrapRefusesUnsupportedCluster(t *testing.T) {
 	}{
 		{"eks is refused by name", "v1.30.5-eks-123abc", 1, "managed clusters are not supported"},
 		{"gke is refused by name, not by node count", "v1.29.2-gke.100", 3, "managed clusters are not supported"},
-		{"two nodes", "v1.31.3+k3s1", 2, "2 nodes: box runs one seedbox on one node"},
-		{"three nodes", "v1.31.3+k0s.0", 3, "3 nodes"},
-		{"no nodes", "v1.31.3+k3s1", 0, "lists no nodes"},
+		{"two nodes", "v1.37.2+k3s1", 2, "2 nodes: box runs one seedbox on one node"},
+		{"three nodes", "v1.37.2+k0s.1", 3, "3 nodes"},
+		{"no nodes", "v1.37.2+k3s1", 0, "lists no nodes"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
