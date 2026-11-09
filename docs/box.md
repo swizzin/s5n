@@ -198,8 +198,12 @@ box uses it; with several and none chosen, guided bootstrap lets the operator pi
 the list and unattended bootstrap stops with an error naming the setting
 (`platform.gateway.className`). Either way box creates its own Gateway on that class,
 and the chart's routes attach to it; the Gateway checks above (address, HTTP answer)
-apply unchanged. The chart's routes need one Extended feature, URLRewrite, so box checks
-the class's published supported features first. A class without it stops bootstrap with
+apply unchanged. The chart's routes need one Extended feature, `HTTPRoutePathRewrite`
+(the URLRewrite filter with a prefix replacement), so box checks the class's published
+supported features first. GatewayClasses that exist but none of which a controller has
+accepted stop bootstrap with each class's reason: a controller that is still starting
+is not a reason to install Envoy Gateway beside it. Only a cluster with no
+GatewayClass at all gets Envoy Gateway. A class without it stops bootstrap with
 the reason: box never installs Envoy Gateway beside another implementation. A class that
 publishes no feature list at all also stops bootstrap, with a message naming the class
 and the override (`platform.gateway.assumeFeatures: true`), so using an implementation
