@@ -2,6 +2,8 @@ package bootstrap
 
 import (
 	"encoding/hex"
+	"os"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
@@ -68,6 +70,22 @@ func TestK0sPlanCarriesThePinAndTheChoice(t *testing.T) {
 	// installer can refuse it on the architecture rather than on an empty plan.
 	if _, ok := k0sSHA256[runtime.GOARCH]; !ok && plan.SHA256 != "" {
 		t.Errorf("no pin for %s but the plan carries %q", runtime.GOARCH, plan.SHA256)
+	}
+}
+
+func TestK0sStatePresent(t *testing.T) {
+	dir := t.TempDir()
+	if k0sStatePresent(dir) {
+		t.Error("an empty directory must not read as a k0s install")
+	}
+	if k0sStatePresent(filepath.Join(dir, "missing")) {
+		t.Error("a missing directory must not read as a k0s install")
+	}
+	if err := os.WriteFile(filepath.Join(dir, "k0s.yaml"), []byte("apiVersion: k0s.k0sproject.io/v1beta1\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if !k0sStatePresent(dir) {
+		t.Error("a state directory with content must read as a k0s install")
 	}
 }
 

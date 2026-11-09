@@ -168,15 +168,15 @@ re-run. The cluster decision is in `PLAN.md`.
 
 **The cluster, when there isn't one (decided).** On a clean host, bootstrap is the
 installer. It runs only as root, only after the decision found no usable cluster, and it
-refuses if anything named k0s is already there — the binary, k0s's state directory, its
-unit, or something listening on 6443 — because that k0s is not box's to replace. The
-release and the sha256 of its asset for this architecture (amd64, arm64) are compiled
-into box, never read from the release: a checksum served beside the archive proves only
-that both came from the same place, and what box writes runs as root. The download goes
-to a temporary file beside `/usr/local/bin/k0s` and is hashed while it is written; only a
-match is renamed into place, so an interrupted or tampered download never lands where the
-unit would exec it. Then `k0s install controller --single`, `k0s start`, and box waits
-until the API answers `/readyz` *and* a node is Ready through
+refuses if anything named k0s is already there — the binary, a k0s state directory with
+something in it, its unit, or something listening on 6443 — because that k0s is not
+box's to replace. The release and the sha256 of its asset for this architecture (amd64,
+arm64) are compiled into box, never read from the release: a checksum served beside the
+archive proves only that both came from the same place, and what box writes runs as root.
+The download goes to a temporary file beside `/usr/local/bin/k0s` and is hashed while it
+is written; only a match is renamed into place, so an interrupted or tampered download
+never lands where the unit would exec it. Then `k0s install controller --single`, `k0s
+start`, and box waits until the API answers `/readyz` *and* a node is Ready through
 `/var/lib/k0s/pki/admin.conf`: readyz turns true a moment before the node registers, and
 the decision that follows refuses a cluster that lists no nodes. Only then is the cluster
 probed for its distribution and platform layer and recorded — a cluster box started but

@@ -25,12 +25,22 @@ func k0sEvidence() []Finding {
 	if _, err := os.Stat(K0sBinaryPath); err == nil {
 		out = append(out, Finding{Kind: "binary", Name: K0sBinaryPath})
 	}
-	if fi, err := os.Stat(K0sStateDir); err == nil && fi.IsDir() {
+	if k0sStatePresent(K0sStateDir) {
 		out = append(out, Finding{Kind: "state", Name: K0sStateDir})
 	}
 	out = append(out, installedUnits("k0scontroller.service", "k0sworker.service")...)
 	out = append(out, listeningOn(6443)...)
 	return out
+}
+
+// k0sStatePresent reports whether path holds a k0s state directory: it exists
+// and has something in it. An empty directory is not evidence of an install --
+// it is what a prepared mount point or a leftover from a refused run looks
+// like -- and refusing on it would make box unable to install onto a host whose
+// operator had already laid the directory out.
+func k0sStatePresent(path string) bool {
+	entries, err := os.ReadDir(path)
+	return err == nil && len(entries) > 0
 }
 
 // HTTPDownloader fetches a release asset over HTTPS. The zero value is usable.
