@@ -52,13 +52,34 @@ Read `PLAN.md` first. It is the architecture; this file is how to work in the re
   bubbletea. `tui.Decide` picks the UI: no terminal on stdin is unattended, `TERM=dumb`,
   `--plain` or a piped stdout get `LinePrompt`, `NO_COLOR` keeps the form without colour.
 - `internal/release/` — `box apply`'s decision over `ChartSource`, `ReleaseClient` and
-  `Confirmer`, with the Helm v4 + client-go implementation in `helm.go`. The only
-  package that imports Helm or client-go; only `cmd/box` links it. It creates a missing
+  `Confirmer`, with the Helm v4 + client-go implementation in `helm.go`. With
+  `internal/platform`, the only package that imports Helm or client-go; only `cmd/box`
+  links them. It creates a missing
   seedbox namespace (Pod Security `restricted`, managed-by `box`) before the first
   volume, and removes only the volumes it created if a run fails before the release.
-- `cmd/box/` — the host CLI. `bootstrap` decides the cluster (it still installs
-  nothing); `init` asks a seedbox's questions, writes the two files and hands over to
-  `apply`; `apply` loads root's grant and values, checks them against the chart's
+- `internal/bootstrap/` — the cluster decision, and on a clean host the k0s
+  installer: the release and its sha256 per architecture are pinned in `policy.go`, the
+  download is verified and renamed into `/usr/local/bin/k0s`, then `k0s install
+  controller --single` and `k0s start`, and bootstrap waits for `/readyz` *and* a Ready
+  node before it records the cluster. After a failure it names what it left and the
+  undo (`k0s stop; k0s reset`); it never runs the reset. A record is re-probed, never
+  trusted: the full probe chain and every gate run again on the cluster it names.
+- `internal/platform/` — bootstrap's write half. It applies only what the decision says
+  to install: Envoy Gateway from its OCI chart, MetalLB (the node's InternalIP as a /32
+  pool, L2 advertisement), the GatewayClass and Gateway, the admission policy. It prints
+  the plan, checks RBAC with SelfSubjectAccessReview, asks once, then writes with
+  bounded readiness waits. A release already at its pin is verified, never upgraded, so
+  a re-run makes no Helm revision. cert-manager is not installed yet and bootstrap says
+  so.
+- `install/platform/` — the manifests box installs (`gateway/`, `admission/`), each
+  with its `embed.go` beside the file, because go:embed can't reach a sibling tree. The
+  bytes box compiles in are the bytes the e2e applies; product code never imports
+  `hack/`.
+- `cmd/box/` — the host CLI. `bootstrap` decides the cluster, installs k0s when there
+  is none, applies the platform layer, then runs init for root in the same process
+  with init's flags (`--record` moves the record off `/etc/swizzin/cluster.yaml` for the
+  non-root e2e); `init` asks a seedbox's questions, writes the two files and hands over
+  to `apply`; `apply` loads root's grant and values, checks them against the chart's
   schema, diffs against the deployed release, confirms, installs or upgrades release
   `s5n` in the grant's namespace, and prints the wiring receipt.
 - `Dockerfile` — static binary on distroless; the image the wiring Job and the
@@ -78,15 +99,20 @@ Read `PLAN.md` first. It is the architecture; this file is how to work in the re
   allows Prowlarr→Sonarr and blocks an outside pod, the wiring Job connects everything,
   and a second `helm upgrade` performs **zero writes** with app state identical before
   and after. `--keep` leaves the cluster up.
-- `hack/e2e-box.sh` — the same install done by box instead of helm: `box init` on a
-  cluster with no namespace, a second identical init that changes nothing, and a
-  one-key `box apply` edit whose diff names only that key. Not in CI yet.
+- `hack/e2e-box.sh` — the same install done by box instead of helm, through `box
+  bootstrap` on three kind clusters: `fresh` (box installs the whole platform),
+  `preinstalled` (MetalLB already there, so box adds none) and `existing` (Gateway API
+  v1.6.3 + NGINX Gateway Fabric 2.8.1, used, not replaced, an app reached through the
+  rewrite with `Host: box.example.com`). Each asserts a second `--yes` run changes no
+  Helm revision, spec or label (spec and labels, not resourceVersion: controllers
+  rewrite status). `fresh` also runs init's no-op re-run, a one-key `box apply` edit
+  and a `helm uninstall` that keeps the claims. `all` (the default) runs the three and
+  prints each wall time. Not in CI yet.
 - `hack/render-grant/` — `internal/admission` as a command, the e2e's caller until
   `box adduser` exists.
 - `.github/workflows/ci.yaml` — every PR and push to main: gofmt/vet/`go test -race`,
   `hack/validate-chart.sh` on 1.30/1.34/1.37, then the kind e2e.
   Actions are pinned by commit SHA.
-- No cluster installer yet: `box` uses an existing cluster.
 
 ## Commands
 
@@ -95,7 +121,7 @@ gofmt -l . && go vet ./... && go test ./...
 hack/validate-chart.sh 1.30.0  # helm lint + kubeconform for every charts/s5n/ci/*-values.yaml
 docker build -t s5n:e2e .     # what the e2e uses
 hack/e2e-kind.sh              # full smoke; needs docker, kind, helm, kubectl
-hack/e2e-box.sh               # the install through box apply; same needs
+hack/e2e-box.sh [fresh|preinstalled|existing]  # through box bootstrap; same needs
 ```
 
 Run lint + kubeconform against 1.30, 1.34 and 1.37 before every commit. Run the e2e before
@@ -268,7 +294,14 @@ one needs a live `lookup`. The e2e asserts the policy exists in the cluster.
   didn't mount leaves an empty directory on `/`) and refuses a missing path unattended.
 - A kubelet creating a missing `subPath` makes it root-owned, so the app starts and can't
   save its settings. `box init` creates `<config>/<instance>` for every enabled instance,
-  owned puid:pgid; the data categories stay the wiring Job's, which creates them as puid.
+  owned puid:pgid; the data categories stay the wiring Job's, which creates them as puid
+  before qBittorrent or any Arr is touched (`internal/wiring/dirs.go`), because an Arr
+  refuses a root folder whose directory doesn't exist. One receipt line per directory,
+  `ok (created)` or `ok (exists)`.
+- The hardlink proof doesn't create the directories it checks. A proof that prepared its
+  own subject is what hid the empty-data-path first install. `hack/e2e-*.sh` pre-create
+  only what `box init` makes on a real host (the data and config roots,
+  `config/<instance>`), and both fail if the category trees exist before install.
 - `box init --puid/--pgid` track whether the flag was given: the default comes from the
   invoking user, and a re-run keeps the grant's ids instead of re-chowning to whoever ran
   it.
@@ -288,6 +321,34 @@ one needs a live `lookup`. The e2e asserts the policy exists in the cluster.
   `KUBECONFIG` at that file to reach a `--keep` cluster.
 - MetalLB's webhook endpoint can be Ready while the server still refuses connections, so
   the e2e retries the pool apply rather than trusting the endpoint.
+- The LoadBalancer probe is the Gateway's own status. After applying the Gateway, box
+  waits up to 60s for Programmed=True with an address and decides only at the deadline:
+  Envoy reports NoResources while its proxy starts, with the address already assigned,
+  so an intermediate reason is never acted on. No address at the deadline
+  (AddressNotAssigned) installs MetalLB; anything else stops bootstrap.
+- An address isn't a working platform. box sends an HTTP GET to `http://<address>:80/`
+  from the host and stops, naming the address, if nothing answers; an empty Envoy's 404
+  passes.
+- The feature the chart's routes need is `HTTPRoutePathRewrite` (URLRewrite with
+  ReplacePrefixMatch); there is no `HTTPRouteURLRewrite`. A class whose feature list
+  lacks it stops bootstrap; a class with no list stops unless
+  `platform.gateway.assumeFeatures` / `--gateway-assume-features` is set. Envoy Gateway
+  1.9.3 publishes no list, so box trusts only the class it labelled managed-by=box.
+- box always applies its own Gateway `s5n-gateway/s5n` on the class it chose. It writes
+  GatewayClass `eg` only when it installs Envoy Gateway and never rewrites another
+  controller's class. Platform Helm releases carry `app.kubernetes.io/managed-by=box`;
+  an unmarked release of the same name is the operator's and is never upgraded.
+- A recorded GatewayClass is kept only while the cluster still serves it (Accepted, with
+  `HTTPRoutePathRewrite`). A vanished non-`eg` class, or a missing class while another
+  implementation is accepted, stops rather than moving the routes; a vanished `eg` with
+  no accepted class is box's own implementation missing, and is reinstalled. A record
+  whose kubeconfig no longer answers stops naming it, and never falls through to the
+  k0s installer. The record path never rewrites the record.
+- A fresh k0s node is Ready only after its kube-router CNI pod starts, so readiness is
+  `/readyz` plus a Ready node; `/readyz` alone is early.
+- k0s in a container whose root is overlayfs needs `/var/lib/k0s` on a real filesystem:
+  containerd's overlay snapshotter can't nest (`mount source: overlay … invalid
+  argument`).
 - box never changes a static PV in place. A PV of box's name that backs another path or
   claim, or a claim pinned to another volume, is refused with both sides named. The
   pre-claims chart named its PV `<ns>-<fullname>-<kind>`, the same as box's for release
@@ -297,10 +358,11 @@ one needs a live `lookup`. The e2e asserts the policy exists in the cluster.
   platform layer it gets its own address, no hostPort. NodePort stays available (it must
   then sit in the cluster's NodePort range, 30000–32767 by default); `nodePort` is only
   rendered for NodePort.
-- Envoy Gateway deploys its Envoy proxy pods and their LoadBalancer Service in the
-  controller's namespace (`envoy-gateway-system`) in standard mode, *not* in the
-  Gateway's namespace — so `networkPolicy.gatewayFrom` defaults to a selector on
-  `envoy-gateway-system`, not the Gateway namespace.
+- The Gateway's proxy runs wherever its implementation puts it: Envoy Gateway in the
+  controller's namespace (`envoy-gateway-system`), NGINX Gateway Fabric v2 in the
+  Gateway's own. So `networkPolicy.gatewayFrom` is box's (a key no file may set),
+  derived on every apply from the Service holding the Gateway's address; a node address
+  becomes an ipBlock /32. Never assume `envoy-gateway-system`.
 - MetalLB `allow-shared-ip` cannot share one address between the Gateway's Service and
   the peers Service the way PLAN once hoped. Envoy Gateway's proxy Service and the peers
   Service are both `externalTrafficPolicy: Local` (needed to keep real peer source IPs),
@@ -331,13 +393,16 @@ one needs a live `lookup`. The e2e asserts the policy exists in the cluster.
 ## Next work
 
 The proof of concept: box takes a fresh host from nothing to a running, wired stack.
+The code path exists (k0s, platform layer, init, wiring on an empty data path). What's
+left:
 
-1. `box bootstrap` applies the platform layer (Gateway API CRDs and Envoy Gateway,
-   MetalLB, `install/platform/admission/policy.yaml`) instead of printing it, then runs
-   `init`.
-2. bootstrap installs k0s on a clean host (`PrintInstaller` is still a stub).
+1. Publish the s5n image and the chart, so a host needs neither a checkout (`--chart`)
+   nor a side-loaded image.
+2. Retry a 5xx on chart and manifest fetches; one upstream 504 fails a bootstrap today.
+3. A run on a clean VM.
 
-Then: `hack/e2e-box.sh` in CI, the upgrade e2e, and `adduser`. The product decisions are
+Then: cert-manager on the platform layer, `hack/e2e-box.sh` in CI, the upgrade e2e,
+and `adduser`. The product decisions are
 in `docs/box.md`, marked decided, proposed or open.
 
 In parallel, outside this repo: `swizzin/qbittorrent`, the userdocs static recipe plus
