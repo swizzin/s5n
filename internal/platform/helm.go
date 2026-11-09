@@ -12,7 +12,6 @@ import (
 	"helm.sh/helm/v4/pkg/action"
 	"helm.sh/helm/v4/pkg/chart/loader"
 	chartv2 "helm.sh/helm/v4/pkg/chart/v2"
-	"helm.sh/helm/v4/pkg/cli"
 	"helm.sh/helm/v4/pkg/downloader"
 	"helm.sh/helm/v4/pkg/getter"
 	"helm.sh/helm/v4/pkg/kube"
@@ -22,6 +21,7 @@ import (
 	"helm.sh/helm/v4/pkg/storage/driver"
 	"k8s.io/cli-runtime/pkg/genericclioptions"
 	"k8s.io/client-go/rest"
+	orasauth "oras.land/oras-go/v2/registry/remote/auth"
 
 	"github.com/swizzin/s5n/internal/fetch"
 )
@@ -42,10 +42,7 @@ type Helm struct {
 	// time.
 	Retry fetch.Policy
 
-	configs  map[string]*action.Configuration
-	settings *cli.EnvSettings
-	getters  getter.Providers
-	registry *registry.Client
+	configs map[string]*action.Configuration
 }
 
 // NewHelm builds the client. It does not contact the cluster: Helm's
@@ -195,23 +192,32 @@ func (h *Helm) chart(spec Release) (*chartv2.Chart, error) {
 }
 
 func (h *Helm) download(spec Release, dir string) (string, error) {
-	if h.settings == nil {
-		h.settings = cli.New()
+	env, err := newHelmEnv()
+	if err != nil {
+		return "", fmt.Errorf("chart %s: %w", spec.Chart, err)
 	}
-	if h.getters == nil {
-		h.getters = chartGetters(getter.All(h.settings), h.Retry)
-	}
+	defer env.Close()
+
+	getters := chartGetters(getter.All(env.settings), h.Retry)
+	httpClient := h.chartClient()
+	var reg *registry.Client
 	ref := spec.Ref
 	if isOCI(ref) {
-		if h.registry == nil {
-			rc, err := registry.NewClient(registry.ClientOptHTTPClient(h.chartClient()))
-			if err != nil {
-				return "", fmt.Errorf("chart %s: %w", spec.Chart, err)
-			}
-			h.registry = rc
+		// The credentials file is inside the private home and does not exist,
+		// and the authorizer carries no credential, so registry credentials --
+		// Helm's registry/config.json or docker's config.json -- are never read
+		// or sent. box only pulls public charts; a private registry is out of
+		// scope (docs/box.md), and box says so when one asks for credentials.
+		reg, err = registry.NewClient(
+			registry.ClientOptHTTPClient(httpClient),
+			registry.ClientOptCredentialsFile(env.settings.RegistryConfig),
+			registry.ClientOptAuthorizer(orasauth.Client{Client: httpClient}),
+		)
+		if err != nil {
+			return "", fmt.Errorf("chart %s: %w", spec.Chart, err)
 		}
 	} else {
-		url, err := repo.FindChartInRepoURL(ref, spec.Chart, h.getters, repo.WithChartVersion(spec.Version))
+		url, err := findChartInRepo(ref, spec.Chart, spec.Version, getters, env.settings.RepositoryCache)
 		if err != nil {
 			return "", fmt.Errorf("chart %s %s from %s: %w", spec.Chart, spec.Version, ref, err)
 		}
@@ -219,18 +225,58 @@ func (h *Helm) download(spec Release, dir string) (string, error) {
 	}
 	cd := downloader.ChartDownloader{
 		Out:              io.Discard,
-		Getters:          h.getters,
-		Options:          []getter.Option{getter.WithRegistryClient(h.registry)},
-		RegistryClient:   h.registry,
-		RepositoryConfig: h.settings.RepositoryConfig,
-		RepositoryCache:  h.settings.RepositoryCache,
-		ContentCache:     h.settings.ContentCache,
+		Getters:          getters,
+		Options:          []getter.Option{getter.WithRegistryClient(reg)},
+		RegistryClient:   reg,
+		RepositoryConfig: env.settings.RepositoryConfig,
+		RepositoryCache:  env.settings.RepositoryCache,
+		ContentCache:     env.settings.ContentCache,
 	}
 	path, _, err := cd.DownloadTo(ref, spec.Version, dir)
 	if err != nil {
 		return "", fmt.Errorf("chart %s %s: %w", spec.Chart, spec.Version, err)
 	}
 	return path, nil
+}
+
+// findChartInRepo is Helm's repo.FindChartInRepoURL, with the one thing box
+// cannot have: the copy in Helm's repo package writes its scratch index to
+// helmpath.CachePath("repository") -- root's ~/.cache/helm -- which it creates
+// and writes into before deleting the files again. That path comes from the
+// process environment (HELM_CACHE_HOME/XDG_CACHE_HOME/HOME) at call time, so no
+// settings value can redirect it. repo.ChartRepository.CachePath is a field,
+// though: the same index download, parsing and chart lookup happen here, and
+// every byte Helm writes lands in the private home the caller removes.
+//
+// Which repository, and which chart in it, is still Helm's decision: only the
+// cache location moves.
+func findChartInRepo(ref, chart, version string, getters getter.Providers, cache string) (string, error) {
+	entry := &repo.Entry{Name: "box", URL: ref}
+	r, err := repo.NewChartRepository(entry, getters)
+	if err != nil {
+		return "", err
+	}
+	r.CachePath = cache
+	indexPath, err := r.DownloadIndexFile()
+	if err != nil {
+		return "", fmt.Errorf("looks like %q is not a valid chart repository or cannot be reached: %w", ref, err)
+	}
+	index, err := repo.LoadIndexFile(indexPath)
+	if err != nil {
+		return "", err
+	}
+	errMsg := fmt.Sprintf("chart %q", chart)
+	if version != "" {
+		errMsg = fmt.Sprintf("%s version %q", errMsg, version)
+	}
+	cv, err := index.Get(chart, version)
+	if err != nil {
+		return "", repo.ChartNotFoundError{Chart: errMsg, RepoURL: ref}
+	}
+	if len(cv.URLs) == 0 {
+		return "", fmt.Errorf("%s has no downloadable URLs", errMsg)
+	}
+	return repo.ResolveReferenceURL(ref, cv.URLs[0])
 }
 
 // chartClient is the client the OCI chart fetch goes through. Helm's registry
