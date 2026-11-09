@@ -400,6 +400,49 @@ the decided rule that root decides which apps a user has.
 - **Always removed:** the seedbox releases, the platform layer box installed, box's own
   records and the box binary.
 
+### migrate (decided in part, mechanism proposed)
+
+`migrate` adopts an install box didn't make: its app configs, its torrent state and its
+data. Everything it will change is written down before it changes anything.
+
+- **Discovery comes first and writes a plan (decided).** migrate reads the source while
+  it is still running: each app's config directory, the paths the apps saw (container
+  mounts, or the paths the configs themselves name), the categories, and how the apps
+  reach each other. It writes this to a plan file and changes nothing. When the source
+  has to be torn down before box can install, for example a cluster box will replace
+  with its own, the operator does that between discovery and apply, and the plan
+  carries across what box needs. box never removes a cluster it didn't install.
+- **Configs are copied, data is adopted (proposed).** Configs are copied into box's
+  config root and rewritten there, so the source stays as the rollback. Data never
+  moves, so hardlinks survive.
+- **Existing category names are kept (decided).** The chart accepts the names a source
+  already uses (`Movies`, `4K/Movies`); migrate renames nothing.
+- **Ports go to the chart's defaults (decided).** Port changes are what broke moving a
+  swizzin box. Copied configs get the chart's ports, bind addresses and URL bases, and
+  references between the apps are rewritten to match.
+- **Only local addresses are rewritten (decided).** This covers the connections the apps
+  hold to each other: an Arr's download clients, Prowlarr's applications, Seerr's Arr
+  servers, and the Arr, qBittorrent and Plex connections in any other catalog app. A
+  connection is rewritten only when it points at localhost (`localhost`, `127.0.0.0/8`, `::1`) or
+  at a name that is plainly inside the source cluster: a Service discovery found there,
+  by its short name or as `<svc>.<ns>`, `<svc>.<ns>.svc` or
+  `<svc>.<ns>.svc.cluster.local`. On localhost, the port says which app it was, from
+  the ports the source's own configs set. Anything else (a LAN or public address, a
+  domain, another machine) is left as it is and listed in the plan, because box can't
+  know what it points at; the plan can map one by hand. Matching discovered Services
+  rather than app names keeps box naming no apps.
+- **Shown before it's done; unattended runs only what was shown (decided goal,
+  mechanism proposed).** The plan holds the rules: the path rewrite table, the port
+  map, every host reference marked rewritten or left alone, what is copied where, and
+  what is not migrated (workloads outside the catalog). Guided, migrate prints the
+  changes with counts per file and table and asks once. Unattended,
+  `box migrate --apply <plan> --yes` runs the plan and nothing else. Apply works from
+  the stopped source, which will have moved on since discovery (new torrents, new
+  history), so it recomputes the changes and refuses before its first write if any fall
+  outside the plan's rules: a path prefix the table doesn't cover, a host reference the
+  plan never classified. Guided, those become questions; unattended, the refusal names
+  each one and the plan key that would settle it.
+
 ## Updates (decided goal, proposed mechanism)
 
 Goal: everything stays current without anyone thinking about it, apps and k0s
