@@ -248,3 +248,54 @@ func TestValidateRefusesExternalRefs(t *testing.T) {
 		t.Fatalf("external $ref was not refused: %v", err)
 	}
 }
+
+// A category names one qBittorrent category and both /data trees, and an
+// existing seedbox keeps the names it already used (docs/box.md, migrate): so
+// upper case and one subcategory level are legal, while anything that could
+// escape a tree, split differently in the two apps, or that qBittorrent itself
+// refuses is not.
+func TestCategoryPattern(t *testing.T) {
+	c := realChart(t)
+	base, err := Base(c)
+	if err != nil {
+		t.Fatalf("chart base: %v", err)
+	}
+	apps, _ := base["apps"].(map[string]any)
+	radarr, _ := apps["radarr"].(map[string]any)
+	instances, _ := radarr["instances"].([]any)
+	if len(instances) == 0 {
+		t.Fatal("chart values have no radarr instance to carry a category")
+	}
+	inst, _ := instances[0].(map[string]any)
+
+	accept := []string{
+		"movies", "Movies", "tv-4k", "TV",
+		"4K/Movies", "4K/TV", "Movies.2024", "a_b",
+	}
+	for _, name := range accept {
+		inst["category"] = name
+		if err := Validate(c.Schema, base); err != nil {
+			t.Errorf("category %q was rejected: %v", name, err)
+		}
+	}
+
+	reject := []string{
+		"",      // a category is required
+		"/x",    // no leading separator
+		"x/",    // no trailing separator
+		"a//b",  // no empty segment
+		"a/b/c", // one level only: both trees stay two deep
+		"../x",  // no parent traversal
+		"x/..",  // the second segment may not be ..
+		".",     // not a directory name
+		"..",    // nor the parent
+		"a b",   // no spaces
+		`a\b`,   // no backslash
+	}
+	for _, name := range reject {
+		inst["category"] = name
+		if err := Validate(c.Schema, base); err == nil {
+			t.Errorf("category %q was accepted", name)
+		}
+	}
+}

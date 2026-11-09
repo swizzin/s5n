@@ -135,6 +135,9 @@ the name still fits once a Usenet client shares it. The download directory is
   does not exist, and qBittorrent's category save paths are the other half of the same
   contract, so both are made up front, under the one `/data` mount. `box init` creates the
   volume roots and `config/<instance>`, and says the categories follow on the first run.
+A category may be one qBittorrent subcategory level (`4K/Movies`), so a seedbox
+migrating from another install keeps the names it already had; the Job creates the
+intermediate directory (`4K`) too, with the leaf's owner.
 
 ### Chart
 

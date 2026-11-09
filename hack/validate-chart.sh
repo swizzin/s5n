@@ -37,3 +37,29 @@ for values in charts/s5n/ci/*-values.yaml; do
   valid=$(sed -n 's/.*Valid: \([0-9]*\).*/\1/p' <<<"$summary" | tail -1)
   [ "$valid" = "$count" ] || { echo "kubeconform validated ${valid:-0} of ${count} objects"; exit 1; }
 done
+
+# A category is a value inside wiring.json only: never an object name, label,
+# port name or ConfigMap key. Upper case and "/" are legal in a category and
+# illegal in a Kubernetes name, so two renders of the same four instances --
+# one with the old names (tv, movies-4k), one nested and mixed case
+# (4K/Movies) -- must produce exactly the same objects; if a category ever
+# reaches metadata.name, this comparison catches it. wiring.json still carries
+# the nested paths the Job creates.
+render_objects() { # render_objects <values file>
+  helm template t charts/s5n -n seedbox -f "$1" |
+    awk '/^kind: /{kind=$2} /^  name: /{print kind "/" $2}'
+}
+default_objects=$(render_objects charts/s5n/ci/4k-values.yaml)
+nested_objects=$(render_objects charts/s5n/ci/nested-values.yaml)
+if [ "$default_objects" != "$nested_objects" ]; then
+  echo "nested categories changed an object's kind or name:"
+  diff <(echo "$default_objects") <(echo "$nested_objects") || true
+  exit 1
+fi
+echo "== nested categories: $(grep -c . <<<"$nested_objects") objects, same kinds and names as the old names"
+nested_render=$(helm template t charts/s5n -n seedbox -f charts/s5n/ci/nested-values.yaml)
+grep -q '/data/downloads/4K/Movies' <<<"$nested_render" ||
+  { echo "the nested render does not carry /data/downloads/4K/Movies"; exit 1; }
+grep -q '/data/media/4K/TV' <<<"$nested_render" ||
+  { echo "the nested render does not carry /data/media/4K/TV"; exit 1; }
+

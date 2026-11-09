@@ -1,0 +1,19 @@
+# Existing category names are kept, never renamed: migrate adopts what the
+# source seedbox already used. Mixed case and one qBittorrent subcategory level
+# are legal here, and the parent directory (4K) is created with the leaf.
+# The claims are named explicitly, as in 4k-values.yaml.
+storage:
+  data:
+    existingClaim: box-nested-data
+  config:
+    existingClaim: box-nested-config
+
+apps:
+  sonarr:
+    instances:
+      - { suffix: "", category: TV, enabled: true }
+      - { suffix: 4k, category: "4K/TV", enabled: true }
+  radarr:
+    instances:
+      - { suffix: "", category: Movies, enabled: true }
+      - { suffix: 4k, category: "4K/Movies", enabled: true }
