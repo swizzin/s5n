@@ -186,7 +186,7 @@ place says exactly what is left on the host and the command that removes it
 destroy a k0s installation box did not make. With the cluster up, bootstrap goes on to the
 platform layer and `init` exactly as it does on a host that already had one.
 
-**A record is checked, not trusted (proposed).** A re-run reads
+**A record is checked, not trusted (decided).** A re-run reads
 `/etc/swizzin/cluster.yaml` for what box decided — which cluster, who owns its
 lifecycle, the platform modes, the GatewayClass — then probes that cluster again:
 `/version`, the privilege checks, the node count and distribution, and the platform
