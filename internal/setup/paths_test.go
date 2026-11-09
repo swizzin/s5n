@@ -53,6 +53,14 @@ func TestLinePromptStaysOnTheTextPath(t *testing.T) {
 	}
 }
 
+// The unattended init path uses a zero-value prompt: it asks nothing, but the
+// path report still reaches Note. That must be silent, not a nil dereference.
+func TestZeroLinePromptNoteDoesNotPanic(t *testing.T) {
+	if err := (&LinePrompt{}).Note("a report"); err != nil {
+		t.Fatalf("Note: %v", err)
+	}
+}
+
 // TestInspectMarksTheRootDevice covers the warning a terminal UI draws: a path
 // on a separate mount that is the same device as /. It is not in the plain
 // text, so nothing here may leak into PathReport.String.

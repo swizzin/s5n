@@ -28,7 +28,14 @@ type LinePrompt struct {
 }
 
 func (p *LinePrompt) printf(format string, args ...any) {
-	fmt.Fprintf(p.Out, format, args...)
+	// A zero-value prompt has nowhere to write. The unattended init path asks
+	// nothing but does print the path report through here, so a nil Out must
+	// be quiet rather than a nil dereference; cmd/box passes real streams.
+	w := p.Out
+	if w == nil {
+		w = io.Discard
+	}
+	fmt.Fprintf(w, format, args...)
 }
 
 func (p *LinePrompt) Input(f Input) (string, error) {

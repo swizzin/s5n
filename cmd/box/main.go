@@ -401,7 +401,9 @@ func (o *initFlags) run(ctx context.Context, kubeconfig string, yes, plain bool)
 	unattended := yes || !isTerminal(os.Stdin)
 	var prompt setup.Prompter
 	if unattended {
-		prompt = &setup.LinePrompt{}
+		// Unattended asks nothing, but the path report still goes through the
+		// prompt's Note: it needs somewhere real to write.
+		prompt = &setup.LinePrompt{In: os.Stdin, Out: os.Stdout}
 	} else {
 		// newPrompt is the same decision bootstrap's class question uses, so
 		// the two commands cannot drift into different UIs.
