@@ -1,0 +1,403 @@
+package release
+
+import (
+	"archive/tar"
+	"bytes"
+	"compress/gzip"
+	"context"
+	"io"
+	"io/fs"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"regexp"
+	"strings"
+	"testing"
+
+	"github.com/distribution/distribution/v3/configuration"
+	"github.com/distribution/distribution/v3/registry/handlers"
+	// The registry in this test stores everything in memory: no disk, no
+	// daemon. Importing the driver is how distribution registers it.
+	_ "github.com/distribution/distribution/v3/registry/storage/driver/inmemory"
+
+	chartv2 "helm.sh/helm/v4/pkg/chart/v2"
+	"helm.sh/helm/v4/pkg/chart/v2/loader"
+	helmregistry "helm.sh/helm/v4/pkg/registry"
+)
+
+// registry is an in-process OCI registry: distribution's app over an httptest
+// server, backed by its in-memory driver. It is the same server Helm's own
+// registry tests run against, so the round trip below exercises the real push
+// and pull paths, not a fake of them.
+func registry(t *testing.T) string {
+	t.Helper()
+	cfg := &configuration.Configuration{
+		Version: "0.1",
+		Storage: configuration.Storage{
+			"inmemory": configuration.Parameters{},
+		},
+		HTTP: configuration.HTTP{
+			Addr:   "localhost:0",
+			Secret: "box-test-registry-secret",
+		},
+		Log: configuration.Log{Level: "error", Formatter: "text"},
+	}
+	app := handlers.NewApp(context.Background(), cfg)
+	srv := httptest.NewServer(app)
+	t.Cleanup(srv.Close)
+	return strings.TrimPrefix(srv.URL, "http://")
+}
+
+// pushChart packages charts/s5n from this checkout and pushes it, the way the
+// release workflow does with helm package and helm push.
+func pushChart(t *testing.T, host, repo string) []byte {
+	t.Helper()
+	data := packageChart(t, filepath.Join("..", "..", "charts", "s5n"))
+	ch, err := loader.LoadArchive(bytes.NewReader(data))
+	if err != nil {
+		t.Fatalf("load the packaged chart: %v", err)
+	}
+	client, err := helmregistry.NewClient(helmregistry.ClientOptWriter(io.Discard), helmregistry.ClientOptPlainHTTP())
+	if err != nil {
+		t.Fatal(err)
+	}
+	ref := host + "/" + repo + "/" + ch.Metadata.Name + ":" + ch.Metadata.Version
+	if _, err := client.Push(data, ref); err != nil {
+		t.Fatalf("push %s: %v", ref, err)
+	}
+	return data
+}
+
+// packageChart builds a chart archive in memory. helm package is not available
+// to a Go test, and an archive is what a registry carries: the files, under a
+// <name>/ prefix, gzipped and tarred.
+func packageChart(t *testing.T, dir string) []byte {
+	t.Helper()
+	ch, err := loader.LoadDir(dir)
+	if err != nil {
+		t.Fatalf("load %s: %v", dir, err)
+	}
+	var buf bytes.Buffer
+	zw := gzip.NewWriter(&buf)
+	tw := tar.NewWriter(zw)
+	err = filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return err
+		}
+		rel, err := filepath.Rel(dir, path)
+		if err != nil {
+			return err
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		hdr := &tar.Header{
+			Name:     ch.Metadata.Name + "/" + filepath.ToSlash(rel),
+			Mode:     0o644,
+			Size:     int64(len(data)),
+			Typeflag: tar.TypeReg,
+		}
+		if err := tw.WriteHeader(hdr); err != nil {
+			return err
+		}
+		_, err = tw.Write(data)
+		return err
+	})
+	if err != nil {
+		t.Fatalf("package %s: %v", dir, err)
+	}
+	if err := tw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return buf.Bytes()
+}
+
+// TestOCIRoundTrip: the chart this checkout ships, pushed to a registry and
+// pulled by version, is the same Chart DirChart reads from the directory. box
+// reads one chart, not two dialects of it.
+func TestOCIRoundTrip(t *testing.T) {
+	host := registry(t)
+	want := pushChart(t, host, "charts")
+	pulled, err := (&OCIChart{BoxVersion: "0.0.0"}).Load(context.Background(), ChartRef{
+		Repo:    "oci://" + host + "/charts/s5n",
+		Version: chartVersion(t, want),
+	})
+	if err != nil {
+		t.Fatalf("pull: %v", err)
+	}
+	fromDir, err := (DirChart{}).Load(context.Background(), ChartRef{Dir: filepath.Join("..", "..", "charts", "s5n")})
+	if err != nil {
+		t.Fatalf("load the directory: %v", err)
+	}
+
+	if pulled.Name != "s5n" || pulled.Name != fromDir.Name {
+		t.Fatalf("name = %q, want s5n from both sources", pulled.Name)
+	}
+	if pulled.Version == "" || pulled.Version != fromDir.Version {
+		t.Fatalf("version = %q, want the directory's %q", pulled.Version, fromDir.Version)
+	}
+	if pulled.AppVersion != fromDir.AppVersion {
+		t.Fatalf("appVersion = %q, want %q", pulled.AppVersion, fromDir.AppVersion)
+	}
+	if pulled.Annotations[MinBoxAnnotation] != fromDir.Annotations[MinBoxAnnotation] {
+		t.Fatalf("min-box = %q, want %q", pulled.Annotations[MinBoxAnnotation], fromDir.Annotations[MinBoxAnnotation])
+	}
+	for name, pair := range map[string][2][]byte{
+		"values.yaml":        {pulled.Values, fromDir.Values},
+		"values.schema.json": {pulled.Schema, fromDir.Schema},
+		"catalog.yaml":       {pulled.Catalog, fromDir.Catalog},
+		"variants.yaml":      {pulled.Variants, fromDir.Variants},
+	} {
+		if len(pair[0]) == 0 || !bytes.Equal(pair[0], pair[1]) {
+			t.Fatalf("%s: pulled %d bytes, directory %d bytes, equal=%v",
+				name, len(pair[0]), len(pair[1]), bytes.Equal(pair[0], pair[1]))
+		}
+	}
+	if len(pulled.Archive) == 0 || len(pulled.Archive) != len(want) {
+		t.Fatalf("archive = %d bytes, want the %d that were pushed", len(pulled.Archive), len(want))
+	}
+	if pulled.Dir != "" {
+		t.Fatalf("a pulled chart has no directory: %q", pulled.Dir)
+	}
+	if fromDir.Archive != nil {
+		t.Fatalf("a directory chart carries no archive")
+	}
+}
+
+// TestOCINoPublishedRelease: a tag nobody published is box's sentence, not
+// Helm's error chain.
+func TestOCINoPublishedRelease(t *testing.T) {
+	host := registry(t)
+	pushChart(t, host, "charts")
+	_, err := (&OCIChart{BoxVersion: "0.0.0"}).Load(context.Background(), ChartRef{
+		Repo:    "oci://" + host + "/charts/s5n",
+		Version: "9.9.9",
+	})
+	if err == nil {
+		t.Fatal("pull of a version nobody published succeeded")
+	}
+	want := "no published release 9.9.9 at oci://" + host + "/charts/s5n: nothing with that version has been published"
+	if err.Error() != want {
+		t.Fatalf("error = %q, want %q", err, want)
+	}
+}
+
+// TestOCIEmptyRepository: a repository nothing has been published to is box's
+// sentence, and it is not the same sentence as a version that is missing.
+func TestOCIEmptyRepository(t *testing.T) {
+	host := registry(t)
+	repo := "oci://" + host + "/charts/s5n"
+	_, err := (&OCIChart{BoxVersion: "0.1.0"}).Load(context.Background(), ChartRef{Repo: repo})
+	if err == nil {
+		t.Fatal("pull from an empty repository succeeded")
+	}
+	want := "no published releases at " + repo + ": nothing has been published there yet"
+	if err.Error() != want {
+		t.Fatalf("error = %q, want %q", err, want)
+	}
+}
+
+// TestOCIPicksTheNewestReleaseBoxCanUse: pushing two releases and adding a
+// floor to the newer one selects the older, and says which one it skipped and
+// why. The skip is on stdout, in box's voice.
+func TestOCIPicksTheNewestReleaseBoxCanUse(t *testing.T) {
+	host := registry(t)
+	pushChart(t, host, "charts")
+
+	// A second release, 0.9.0, whose floor is above this box.
+	data := packageChart(t, filepath.Join("..", "..", "charts", "s5n"))
+	ch, err := loader.LoadArchive(bytes.NewReader(data))
+	if err != nil {
+		t.Fatal(err)
+	}
+	setChartVersion(t, ch, "0.9.0", "9.9.9")
+	if _, err := pushData(t, host+"/charts/s5n:0.9.0", archiveChart(t, ch)); err != nil {
+		t.Fatalf("push 0.9.0: %v", err)
+	}
+
+	var log bytes.Buffer
+	src := &OCIChart{BoxVersion: "0.1.0", Log: &log}
+	got, err := src.Load(context.Background(), ChartRef{Repo: "oci://" + host + "/charts/s5n"})
+	if err != nil {
+		t.Fatalf("pull: %v\n%s", err, log.String())
+	}
+	if got.Version == "0.9.0" {
+		t.Fatalf("installed 0.9.0 although it needs box 9.9.9")
+	}
+	if !strings.Contains(log.String(), "0.9.0 is newer but needs box 9.9.9") {
+		t.Fatalf("the skipped release is not named:\n%s", log.String())
+	}
+}
+
+// TestOCIRefusesAFloorAboveBox: an explicitly requested release box is too old
+// for is refused, naming both versions, and the refusal happens before apply
+// has a cluster client — so nothing can have been written.
+func TestOCIRefusesAFloorAboveBox(t *testing.T) {
+	host := registry(t)
+	pushChart(t, host, "charts")
+	data := packageChart(t, filepath.Join("..", "..", "charts", "s5n"))
+	ch, err := loader.LoadArchive(bytes.NewReader(data))
+	if err != nil {
+		t.Fatal(err)
+	}
+	setChartVersion(t, ch, "0.4.0", "0.5.0")
+	if _, err := pushData(t, host+"/charts/s5n:0.4.0", archiveChart(t, ch)); err != nil {
+		t.Fatalf("push 0.4.0: %v", err)
+	}
+
+	f := newFakes(t)
+	f.app.Charts = &OCIChart{BoxVersion: "0.4.0"}
+	_, err = f.app.Apply(context.Background(), Options{
+		ChartRepo:    "oci://" + host + "/charts/s5n",
+		ChartVersion: "0.4.0",
+		GrantPath:    f.grantPath,
+		ValuesPath:   f.values,
+	})
+	if err == nil {
+		t.Fatal("apply installed a release that needs a newer box")
+	}
+	if !strings.Contains(err.Error(), "needs box 0.5.0") || !strings.Contains(err.Error(), "this is box 0.4.0") {
+		t.Fatalf("error does not name both versions: %v", err)
+	}
+	if f.openCalls != 0 || f.storeOpens != 0 || f.rel.upgrades != 0 || len(f.store.applied) != 0 || f.store.nsCreates != 0 {
+		t.Fatalf("the refusal touched the cluster: open=%d storageOpen=%d upgrades=%d applied=%d namespaces=%d",
+			f.openCalls, f.storeOpens, f.rel.upgrades, len(f.store.applied), f.store.nsCreates)
+	}
+}
+
+// TestOCIDevBoxSkipsTheFloorOnce: a box built without a version cannot be
+// compared with a floor. It skips the check and says so exactly once per run.
+func TestOCIDevBoxSkipsTheFloorOnce(t *testing.T) {
+	host := registry(t)
+	pushChart(t, host, "charts")
+	var log bytes.Buffer
+	src := &OCIChart{BoxVersion: DevVersion, Log: &log}
+	for i := 0; i < 2; i++ {
+		if _, err := src.Load(context.Background(), ChartRef{Repo: "oci://" + host + "/charts/s5n"}); err != nil {
+			t.Fatalf("pull %d: %v", i, err)
+		}
+	}
+	if n := strings.Count(log.String(), "built without a version"); n != 1 {
+		t.Fatalf("the dev notice printed %d times, want once:\n%s", n, log.String())
+	}
+}
+
+func chartVersion(t *testing.T, data []byte) string {
+	t.Helper()
+	ch, err := loader.LoadArchive(bytes.NewReader(data))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return ch.Metadata.Version
+}
+
+// setChartVersion rewrites Chart.yaml's version, appVersion and min-box, so a
+// test can publish a release whose floor differs from the one in this checkout.
+// It edits the bytes the chart was loaded from, which is what helm package
+// ships.
+func setChartVersion(t *testing.T, ch *chartv2.Chart, version, minBox string) {
+	t.Helper()
+	for _, f := range ch.Raw {
+		if f.Name != "Chart.yaml" {
+			continue
+		}
+		text := regexp.MustCompile(`(?m)^version:.*$`).ReplaceAllString(string(f.Data), "version: "+version)
+		text = regexp.MustCompile(`(?m)^appVersion:.*$`).ReplaceAllString(text, `appVersion: "`+version+`"`)
+		text += "annotations:\n  " + MinBoxAnnotation + ": \"" + minBox + "\"\n"
+		f.Data = []byte(text)
+		ch.Metadata.Version = version
+		ch.Metadata.AppVersion = version
+		ch.Metadata.Annotations = map[string]string{MinBoxAnnotation: minBox}
+		return
+	}
+	t.Fatal("the chart has no Chart.yaml")
+}
+
+// archiveChart writes a modified chart back to an archive, the shape helm
+// package would produce.
+func archiveChart(t *testing.T, ch *chartv2.Chart) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	zw := gzip.NewWriter(&buf)
+	tw := tar.NewWriter(zw)
+	for _, f := range ch.Raw {
+		hdr := &tar.Header{
+			Name:     ch.Metadata.Name + "/" + f.Name,
+			Mode:     0o644,
+			Size:     int64(len(f.Data)),
+			Typeflag: tar.TypeReg,
+		}
+		if err := tw.WriteHeader(hdr); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := tw.Write(f.Data); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := tw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return buf.Bytes()
+}
+
+func pushData(t *testing.T, ref string, data []byte) (string, error) {
+	t.Helper()
+	client, err := helmregistry.NewClient(helmregistry.ClientOptWriter(io.Discard), helmregistry.ClientOptPlainHTTP())
+	if err != nil {
+		return "", err
+	}
+	res, err := client.Push(data, ref)
+	if err != nil {
+		return "", err
+	}
+	return res.Ref, nil
+}
+
+// TestChartRepoRefusesAURL: --chart-repo is an OCI reference; an https URL is
+// a mistake box can explain rather than a TLS failure to decode.
+func TestChartRepoRefusesAURL(t *testing.T) {
+	_, _, err := chartRepo("https://ghcr.io/swizzin/charts/s5n")
+	if err == nil || !strings.Contains(err.Error(), "oci://") {
+		t.Fatalf("error = %v, want a refusal naming oci://", err)
+	}
+	if _, _, err := chartRepo("ghcr.io/swizzin/charts/s5n"); err != nil {
+		t.Fatalf("a bare registry reference was refused: %v", err)
+	}
+	if plain, err := plainHTTPFor("127.0.0.1:5000/charts/s5n"); err != nil || !plain {
+		t.Fatalf("loopback registry: plain=%v err=%v, want plain HTTP", plain, err)
+	}
+	if plain, err := plainHTTPFor("localhost:5000/charts/s5n"); err != nil || !plain {
+		t.Fatalf("localhost registry: plain=%v err=%v, want plain HTTP", plain, err)
+	}
+	if plain, err := plainHTTPFor("ghcr.io/swizzin/charts/s5n"); err != nil || plain {
+		t.Fatalf("ghcr: plain=%v err=%v, want TLS", plain, err)
+	}
+}
+
+// TestUnreadableRegistryIsNotAStackOfHelm: a registry that answers 500 is not
+// "no published release"; box says what it tried and keeps the cause.
+func TestUnreadableRegistryIsNotAStackOfHelm(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "no", http.StatusInternalServerError)
+	}))
+	t.Cleanup(srv.Close)
+	repo := "oci://" + strings.TrimPrefix(srv.URL, "http://") + "/charts/s5n"
+	_, err := (&OCIChart{BoxVersion: "0.1.0"}).Load(context.Background(), ChartRef{Repo: repo, Version: "1.2.3"})
+	if err == nil {
+		t.Fatal("pull from a broken registry succeeded")
+	}
+	if strings.Contains(err.Error(), "no published release") {
+		t.Fatalf("a server failure read as a missing release: %v", err)
+	}
+	if !strings.Contains(err.Error(), repo) || !strings.Contains(err.Error(), "1.2.3") {
+		t.Fatalf("error does not name the ref and the version: %v", err)
+	}
+}

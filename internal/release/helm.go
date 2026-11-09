@@ -5,13 +5,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"os"
-	"path/filepath"
 	"strings"
 	"time"
 
 	"helm.sh/helm/v4/pkg/action"
-	"helm.sh/helm/v4/pkg/chart/loader"
 	"helm.sh/helm/v4/pkg/kube"
 	helmrelease "helm.sh/helm/v4/pkg/release"
 	v1release "helm.sh/helm/v4/pkg/release/v1"
@@ -22,35 +19,6 @@ import (
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 )
-
-// DirChart loads a chart from a local directory. A chart release read from the
-// OCI registry is a later step (docs/box.md, "box only uses published charts");
-// until then --chart points at a checkout, and the e2e points it at charts/s5n.
-type DirChart struct{}
-
-// Load reads the three files box needs from a chart directory. Chart.yaml is
-// checked first so a wrong --chart fails as "not a chart", not as a YAML error
-// from whichever file happened to be read.
-func (DirChart) Load(_ context.Context, dir string) (Chart, error) {
-	if dir == "" {
-		return Chart{}, errors.New("no chart: pass --chart <dir>; box cannot pull a published chart yet")
-	}
-	for _, name := range []string{"Chart.yaml", "values.yaml", "values.schema.json"} {
-		path := filepath.Join(dir, name)
-		if _, err := os.Stat(path); err != nil {
-			return Chart{}, fmt.Errorf("chart %s: %s is missing; --chart wants a chart directory such as charts/s5n", dir, name)
-		}
-	}
-	values, err := os.ReadFile(filepath.Join(dir, "values.yaml"))
-	if err != nil {
-		return Chart{}, fmt.Errorf("chart %s: %w", dir, err)
-	}
-	schema, err := os.ReadFile(filepath.Join(dir, "values.schema.json"))
-	if err != nil {
-		return Chart{}, fmt.Errorf("chart %s: %w", dir, err)
-	}
-	return Chart{Dir: dir, Values: values, Schema: schema}, nil
-}
 
 // Helm is the release client: the Helm SDK over client-go, which the maintainer
 // decided is box's cluster client. It is namespace-scoped, because one release
@@ -141,9 +109,9 @@ func (h *Helm) Deployed(_ context.Context) (map[string]any, bool, error) {
 // is visible in the code and an unexpected existing release cannot be adopted
 // by accident.
 func (h *Helm) Upgrade(ctx context.Context, chart Chart, values map[string]any) (int, error) {
-	chrt, err := loader.Load(chart.Dir)
+	chrt, err := chart.open()
 	if err != nil {
-		return 0, fmt.Errorf("load chart %s: %w", chart.Dir, err)
+		return 0, fmt.Errorf("load chart %s: %w", chart.Ref, err)
 	}
 	timeout := h.Timeout
 	if timeout <= 0 {

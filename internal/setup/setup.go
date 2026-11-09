@@ -58,7 +58,11 @@ func (d *Decision) step(n int, question string) {
 // Options are one `box init`. Every grant question has a field here: that is
 // what makes an unattended run possible, and the flags are the same names.
 type Options struct {
-	ChartDir   string
+	// Chart is the release box is installing: the defaults every question is
+	// prefilled from and the schema every answer is checked against. init does
+	// not read charts/ from its own tree, so the caller loads the chart (a
+	// published release, or --chart for a local checkout) and hands it over.
+	Chart      seedbox.Chart
 	GrantPath  string
 	ValuesPath string
 
@@ -94,7 +98,6 @@ type Options struct {
 // ApplyOptions is what init hands the applier: the same arguments `box apply`
 // takes, plus the hook for answers that outlive no file.
 type ApplyOptions struct {
-	ChartDir    string
 	GrantPath   string
 	ValuesPath  string
 	PathsInNode bool
@@ -143,9 +146,8 @@ func (d *Decision) Run(ctx context.Context, opts Options) (Result, error) {
 	if err := d.check(); err != nil {
 		return res, err
 	}
-	chart, err := readChart(opts.ChartDir)
-	if err != nil {
-		return res, err
+	if len(opts.Chart.Values) == 0 || len(opts.Chart.Schema) == 0 {
+		return res, errors.New("no chart: box init asks its questions from the chart release it installs")
 	}
 	sb, err := loadSeedbox(opts.GrantPath, opts.ValuesPath)
 	if err != nil {
@@ -156,7 +158,7 @@ func (d *Decision) Run(ctx context.Context, opts Options) (Result, error) {
 	// The baseline every question is prefilled from: what the two files say
 	// today (merged, checked against the chart) or, on a fresh host, the chart's
 	// own defaults with every app off.
-	base, err := d.baseline(sb, chart)
+	base, err := d.baseline(sb, opts.Chart)
 	if err != nil {
 		return res, err
 	}
@@ -327,7 +329,6 @@ func (d *Decision) Run(ctx context.Context, opts Options) (Result, error) {
 		return res, errors.New("no apply: init edits the two files and hands over to `box apply`")
 	}
 	req := ApplyOptions{
-		ChartDir:      opts.ChartDir,
 		GrantPath:     opts.GrantPath,
 		ValuesPath:    opts.ValuesPath,
 		PathsInNode:   opts.PathsInNode,
@@ -758,23 +759,6 @@ func checkPathPair(data, config string) error {
 		return fmt.Errorf("--config-path %s is inside --data-path %s: the two volumes must not overlap", config, data)
 	}
 	return nil
-}
-
-// readChart reads the two files every question is checked against. The chart is
-// the release box is installing: init never guesses a default.
-func readChart(dir string) (seedbox.Chart, error) {
-	if dir == "" {
-		return seedbox.Chart{}, errors.New("no chart: pass --chart <dir>; box cannot pull a published chart yet")
-	}
-	values, err := os.ReadFile(filepath.Join(dir, "values.yaml"))
-	if err != nil {
-		return seedbox.Chart{}, fmt.Errorf("chart %s: %w", dir, err)
-	}
-	schema, err := os.ReadFile(filepath.Join(dir, "values.schema.json"))
-	if err != nil {
-		return seedbox.Chart{}, fmt.Errorf("chart %s: %w", dir, err)
-	}
-	return seedbox.Chart{Values: values, Schema: schema}, nil
 }
 
 // loadSeedbox reads the two files, or starts from empty ones. A missing grant is

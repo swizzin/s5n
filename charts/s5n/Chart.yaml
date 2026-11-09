@@ -12,3 +12,13 @@ home: https://github.com/swizzin/s5n
 sources:
   - https://github.com/swizzin/s5n
 keywords: [seedbox, swizzin, sonarr, radarr, prowlarr, qbittorrent]
+# What box may do with this release (docs/box.md, "A minimum box version").
+# min-box goes up only when an interface box and the chart share changes in a
+# way an older box would get wrong; a new app, a digest bump or an optional
+# values key leaves it alone. upgrade-from is the oldest release this one can be
+# upgraded from, and `box update` steps through the releases between when it is
+# older. 0.0.0 is "no floor yet": nothing has been released that box must
+# refuse, and there is no older release to come from.
+annotations:
+  box.s5n/min-box: "0.0.0"
+  box.s5n/upgrade-from: "0.0.0"

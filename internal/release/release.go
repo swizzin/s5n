@@ -41,21 +41,9 @@ const ReleaseName = "s5n"
 // was written; the caller prints the voice and stops.
 var ErrCancelled = errors.New("cancelled")
 
-// Chart is the chart release box is about to install. Dir is where the Helm
-// loader reads it from; Values and Schema are the two files box checks a
-// seedbox against, so one chart is read once and used for both.
-type Chart struct {
-	Dir    string
-	Values []byte
-	Schema []byte
-}
-
-// ChartSource loads a chart from a directory. Pulling a published chart from
-// the registry is a later step; this phase reads a local checkout.
-type ChartSource interface {
-	Load(ctx context.Context, dir string) (Chart, error)
-}
-
+// Chart is the chart release box is about to install, and ChartSource loads
+// one; both live in chart.go, because a chart pulled from the registry and the
+// same chart read from a checkout have to be the same value to apply.
 // ReleaseClient is box's handle on one release in one namespace. It is the
 // only thing that touches a cluster, and it is opened only after the two files
 // have passed every check, so a refusal cannot write by construction.
@@ -106,6 +94,19 @@ type Confirmer interface {
 
 // Options are one `box apply`.
 type Options struct {
+	// Chart is a chart release the caller has already loaded. `box init` sets
+	// it: init reads the chart to ask its questions, and the apply it hands
+	// over to must install that same release rather than pull a second time
+	// and risk a different one.
+	Chart *Chart
+	// ChartRepo and ChartVersion name the published release to load when
+	// Chart is nil. An empty version means the newest release this box can
+	// install (version.go); an empty repo means release.DefaultChartRepo.
+	ChartRepo    string
+	ChartVersion string
+	// ChartDir reads the chart from a local checkout instead of the registry.
+	// Test-only: --chart is hidden from box's help, and this path goes away
+	// once the e2e pulls its chart from a local registry.
 	ChartDir   string
 	GrantPath  string
 	ValuesPath string
@@ -183,9 +184,6 @@ func (a *Applier) logf(format string, args ...any) {
 // Apply reads the files, checks them, shows what would change and applies it.
 func (a *Applier) Apply(ctx context.Context, opts Options) (Result, error) {
 	var res Result
-	if opts.ChartDir == "" {
-		return res, errors.New("no chart: pass --chart <dir>; box cannot pull a published chart yet")
-	}
 
 	// The two files. A grant key in values, a key the chart does not know and
 	// a missing namespace are all refused here, before box has a cluster
@@ -210,12 +208,15 @@ func (a *Applier) Apply(ctx context.Context, opts Options) (Result, error) {
 			return res, err
 		}
 	}
-	chart, err := a.Charts.Load(ctx, opts.ChartDir)
+	chart, err := a.loadChart(ctx, opts)
 	if err != nil {
 		return res, err
 	}
-	if chart.Dir == "" {
-		chart.Dir = opts.ChartDir
+	// init prints the chart before its questions; a bare `box apply` has not
+	// shown anyone which release it is about to install, and "newest this box
+	// can use" is not obvious from the tag it ends up with.
+	if opts.Chart == nil && chart.Version != "" {
+		a.logf("chart: %s %s (%s)\n", chart.Name, chart.Version, chart.Ref)
 	}
 	values, err := sb.Effective(seedbox.Chart{Values: chart.Values, Schema: chart.Schema})
 	if err != nil {
@@ -385,6 +386,22 @@ func (a *Applier) Apply(ctx context.Context, opts Options) (Result, error) {
 		return res, errors.New("wiring failed: the receipt does not say ok")
 	}
 	return res, nil
+}
+
+// loadChart returns the chart this apply installs: the one the caller already
+// read, or one loaded from the directory/registry the options name.
+//
+// This is the first thing Apply does after the files are read, and it is where
+// a chart box is too old for is refused (minbox.go), so no refusal here can
+// have touched a cluster.
+func (a *Applier) loadChart(ctx context.Context, opts Options) (Chart, error) {
+	if opts.Chart != nil {
+		return *opts.Chart, nil
+	}
+	if a.Charts == nil {
+		return Chart{}, errors.New("no chart source: box reads its chart from the registry or a directory")
+	}
+	return a.Charts.Load(ctx, ChartRef{Dir: opts.ChartDir, Repo: opts.ChartRepo, Version: opts.ChartVersion})
 }
 
 // waitReceipt waits for a receipt from this run. A receipt left by an earlier

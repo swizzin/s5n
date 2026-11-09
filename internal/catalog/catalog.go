@@ -195,10 +195,11 @@ func (e *Error) Error() string {
 	return b.String()
 }
 
-// Load reads and validates the catalog manifest in a chart directory. The same
-// directory box hands release.DirChart: values.yaml and values.schema.json are
-// read from it, because the manifest is only meaningful against the chart it
-// shipped with.
+// Load reads and validates the catalog manifest in a chart directory, with
+// values.yaml and values.schema.json from the same directory: the manifest is
+// only meaningful against the chart it shipped with. `box init` reads a chart
+// release instead — a pulled artifact's files are bytes, not a directory — and
+// calls Parse with exactly those three files.
 func Load(dir string) (*Catalog, error) {
 	raw, err := readCapped(filepath.Join(dir, FileName))
 	if err != nil {

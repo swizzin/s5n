@@ -185,6 +185,21 @@ func (p *fakePrompt) Note(text string) error {
 	return nil
 }
 
+// chartAt is the chart box would hand init: the two files a question's default
+// and every answer are read against. init never reads a chart itself.
+func chartAt(t *testing.T, dir string) seedbox.Chart {
+	t.Helper()
+	values, err := os.ReadFile(filepath.Join(dir, "values.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	schema, err := os.ReadFile(filepath.Join(dir, "values.schema.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return seedbox.Chart{Values: values, Schema: schema}
+}
+
 // ---- the harness -------------------------------------------------------------
 
 type harness struct {
@@ -248,7 +263,7 @@ func newHarness(t *testing.T) *harness {
 // come from the prompts, not the flags.
 func (h *harness) options() Options {
 	return Options{
-		ChartDir:   h.chartDir,
+		Chart:      chartAt(h.t, h.chartDir),
 		GrantPath:  h.grantPath,
 		ValuesPath: h.valuesPath,
 		Namespace:  "seedbox",
@@ -722,10 +737,7 @@ func TestAppsFlagNamesTheCatalog(t *testing.T) {
 // TestSettingsDirsFollowTheInstances: one directory per enabled instance, named
 // as the chart names the workload, because that is the subPath the pod mounts.
 func TestSettingsDirsFollowTheInstances(t *testing.T) {
-	chart, err := readChart("testdata/chart")
-	if err != nil {
-		t.Fatal(err)
-	}
+	chart := chartAt(t, "testdata/chart")
 	base, err := seedbox.Base(chart)
 	if err != nil {
 		t.Fatal(err)
