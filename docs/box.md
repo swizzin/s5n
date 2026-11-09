@@ -269,6 +269,41 @@ What `init` does (decided):
   no terminal, `init` asks nothing. A missing required answer is an error that names
   the flag or key to set.
 
+### Certificates (proposed)
+
+PLAN settles the goal: cert-manager, HTTP-01 through the Gateway when the domain can be
+validated, self-signed otherwise. This is how box would do it.
+
+- **What bootstrap installs.** cert-manager from its OCI chart at a pinned version, with
+  its CRDs and Gateway API support switched on (`config.enableGatewayAPI`), in
+  `cert-manager`. An existing cert-manager is used when its webhook answers, its version
+  has the Gateway HTTP-01 solver, and its controller runs with Gateway API enabled. box
+  reads that from the controller's config and never changes another install's flags. One
+  that is present but has it switched off stops bootstrap and names the setting.
+- **Issuers are root's.** Two ClusterIssuers box owns: `s5n-letsencrypt` (ACME, HTTP-01
+  solver whose HTTPRoute attaches to the `s5n` Gateway's port-80 listener) and
+  `s5n-selfsigned`. No ACME email: Let's Encrypt no longer sends expiry mail, so there is
+  nothing to ask.
+- **Certificates live beside the Gateway.** A listener can only reference a Secret in
+  its own namespace without a ReferenceGrant, so each host name gets a `Certificate` in
+  `s5n-gateway` and an HTTPS listener on 443 on the `s5n` Gateway, both written by root
+  from the grant's host name. Users never write listeners or Certificates. That keeps
+  issuance in root's hands, the way the grant keeps ports and images there.
+- **HTTP stays open for the challenge only.** Once a host's certificate is Ready, its
+  port-80 traffic gets a redirect route to HTTPS. The solver's own route for
+  `/.well-known/acme-challenge/` is more specific and keeps winning, so renewals work.
+- **Which issuer a host gets.** Each user has a domain, but not every domain is publicly
+  resolvable (`box.lan`, a split-horizon name). Proposed: init resolves the name. A
+  public address picks Let's Encrypt; a private address, or no answer, picks
+  self-signed, and init says which and why. It doesn't compare the address with the
+  node's, because a box behind NAT has a private node address and a public name that
+  still validates. `tls.issuer` in root's values forces either one.
+- **Tested without the internet.** The e2e runs Pebble (Let's Encrypt's test ACME
+  server) in the kind cluster and points a test issuer at it, so HTTP-01 through the
+  Gateway is proven on every run. The self-signed path gets its own assertion.
+
+Open: whether a renewal failure should block `apply` or only show in `doctor`.
+
 ### install, remove and instances (decided)
 
 Only the Arrs take multiple instances (an HD and a 4K Sonarr, for example). The chart
