@@ -154,32 +154,59 @@ func (d *Decision) adoptInstalled(ctx context.Context, opts Options) Result {
 // useCluster validates an existing cluster and, when it is usable, probes the
 // platform layer, computes the result and records it.
 func (d *Decision) useCluster(ctx context.Context, opts Options, kc []byte, path string, source Source, how string) Result {
+	obs, res, ok := d.inspectCluster(ctx, kc, path, how)
+	if !ok {
+		return res
+	}
+	return d.finishCluster(ctx, opts, obs, path, source, how)
+}
+
+// clusterProbes is what the probe chain learned about a cluster before any
+// capability probe or write: the live prober, the version it answered, the
+// node count and distribution its evidence supports.
+type clusterProbes struct {
+	probe   Prober
+	cluster Cluster
+	dist    Distribution
+}
+
+// inspectCluster is the gate chain every path that uses a cluster runs, in the
+// order the gates need their evidence: /version answers, the identity can
+// manage the cluster, the node list is readable, and the distribution and node
+// count are one box supports. It returns the refusal Result and false when a
+// gate fires, so no caller can probe capabilities or write before it.
+//
+// A recorded cluster runs this same chain (see useRecord): a record is a cached
+// decision, not evidence, and a cluster that has since gone multi-node or been
+// replaced must be refused with the wording a freshly found cluster gets.
+func (d *Decision) inspectCluster(ctx context.Context, kc []byte, path, how string) (clusterProbes, Result, bool) {
+	var obs clusterProbes
 	probe, err := d.NewProber(kc)
 	if err != nil {
-		return stop(fmt.Sprintf("%s at %s: %v", how, path, err))
+		return obs, stop(fmt.Sprintf("%s at %s: %v", how, path, err)), false
 	}
 	version, err := probe.Version(ctx)
 	if err != nil {
-		return stop(fmt.Sprintf("%s at %s did not answer /version: %v", how, path, describeRemote(err)))
+		return obs, stop(fmt.Sprintf("%s at %s did not answer /version: %v", how, path, describeRemote(err))), false
 	}
 	if err := probe.CanAdmin(ctx); err != nil {
-		return stop(fmt.Sprintf("%s at %s answers /version (%s) but this identity cannot manage it: %v", how, path, version.GitVersion, describeRemote(err)))
+		return obs, stop(fmt.Sprintf("%s at %s answers /version (%s) but this identity cannot manage it: %v", how, path, version.GitVersion, describeRemote(err))), false
 	}
 	cluster, err := probe.Describe(ctx)
 	if err != nil {
-		return stop(fmt.Sprintf("%s at %s: %v", how, path, describeRemote(err)))
+		return obs, stop(fmt.Sprintf("%s at %s: %v", how, path, describeRemote(err))), false
 	}
-	return d.finishCluster(ctx, opts, probe, version, cluster, path, source, how)
-}
-
-// finishCluster computes distribution, refuses a cluster v1 does not support,
-// then computes platform decisions and the record.
-func (d *Decision) finishCluster(ctx context.Context, opts Options, probe Prober, version Version, cluster Cluster, path string, source Source, how string) Result {
 	dist := DetectDistribution(version.GitVersion, cluster)
 	if problem := supportProblem(dist, cluster.Nodes); problem != "" {
-		return stop(fmt.Sprintf("%s at %s: %s", how, path, problem))
+		return obs, stop(fmt.Sprintf("%s at %s: %s", how, path, problem)), false
 	}
-	plat, err := probe.Platform(ctx)
+	return clusterProbes{probe: probe, cluster: cluster, dist: dist}, Result{}, true
+}
+
+// finishCluster probes the platform layer of a cluster inspectCluster accepted,
+// then computes the platform decisions and the record.
+func (d *Decision) finishCluster(ctx context.Context, opts Options, obs clusterProbes, path string, source Source, how string) Result {
+	plat, err := obs.probe.Platform(ctx)
 	if err != nil {
 		return stop(fmt.Sprintf("%s at %s: platform probe: %v", how, path, describeRemote(err)))
 	}
@@ -188,8 +215,8 @@ func (d *Decision) finishCluster(ctx context.Context, opts Options, probe Prober
 		Action:       ActionUseCluster,
 		Source:       source,
 		Kubeconfig:   path,
-		Distribution: dist,
-		Nodes:        cluster.Nodes,
+		Distribution: obs.dist,
+		Nodes:        obs.cluster.Nodes,
 		Platform:     components,
 	}
 	if conflict != "" {
@@ -207,8 +234,8 @@ func (d *Decision) finishCluster(ctx context.Context, opts Options, probe Prober
 	rec := &Record{
 		Source:                source,
 		Kubeconfig:            path,
-		Distribution:          dist,
-		Nodes:                 cluster.Nodes,
+		Distribution:          obs.dist,
+		Nodes:                 obs.cluster.Nodes,
 		Platform:              opts.Platform,
 		GatewayClass:          choice.Class,
 		AssumeGatewayFeatures: opts.AssumeGatewayFeatures,
@@ -218,57 +245,41 @@ func (d *Decision) finishCluster(ctx context.Context, opts Options, probe Prober
 		res.Reason = fmt.Sprintf("record cluster: %v", err)
 		return res
 	}
-	res.Reason = fmt.Sprintf("using %s at %s (%s)", source, path, dist)
+	res.Reason = fmt.Sprintf("using %s at %s (%s)", source, path, obs.dist)
 	return res
 }
 
-// useRecord short-circuits a re-run: an external cluster's lifecycle is never
-// touched, only its reachability checked; a k0s-managed cluster's start and
-// upgrade belong to box update, a later phase. A record written by an older box
-// can name a cluster v1 no longer supports, so support is re-checked before any
-// probing.
+// useRecord handles a re-run. The record is a cached decision, not evidence:
+// it supplies which kubeconfig to read, who owns the lifecycle, the platform
+// modes and the GatewayClass, and every fact the cluster can answer for itself
+// is re-probed. A record is cheap to trust and expensive to be wrong about — a
+// cluster that went multi-node, lost its class or lost its platform layer must
+// stop or be repaired here, before anything is written, exactly as a freshly
+// found cluster would.
+//
+// A record whose kubeconfig no longer answers stops, naming the record path; it
+// never falls through to the candidate scan and the k0s installer, because an
+// unreachable recorded cluster may still be there and installing over it would
+// destroy a cluster box owns.
 func (d *Decision) useRecord(ctx context.Context, rec *Record) Result {
 	if problem := supportProblem(rec.Distribution, rec.Nodes); problem != "" {
 		return stop(fmt.Sprintf("recorded %s cluster at %s: %s", rec.Source, rec.Kubeconfig, problem))
 	}
 	switch rec.Source {
-	case SourceExternal:
-		kc, err := d.Source.Read(rec.Kubeconfig)
-		if err != nil {
-			return stop(fmt.Sprintf("recorded external cluster kubeconfig %s: %v", rec.Kubeconfig, err))
-		}
-		probe, err := d.NewProber(kc)
-		if err != nil {
-			return stop(fmt.Sprintf("recorded external cluster at %s: %v", rec.Kubeconfig, err))
-		}
-		if _, err := probe.Version(ctx); err != nil {
-			return stop(fmt.Sprintf("recorded external cluster at %s is unreachable: %v", rec.Kubeconfig, describeRemote(err)))
-		}
-		res := Result{
-			Action:       ActionUseCluster,
-			Source:       SourceExternal,
-			Kubeconfig:   rec.Kubeconfig,
-			Distribution: rec.Distribution,
-			Nodes:        rec.Nodes,
-			Platform:     platformFromConfig(rec.Platform),
-			Gateway:      recordedGateway(rec),
-			Reason:       fmt.Sprintf("using recorded external cluster at %s (%s); lifecycle never touched", rec.Kubeconfig, rec.Distribution),
-		}
-		return res
-	case SourceK0sManaged:
-		return Result{
-			Action:       ActionUseManaged,
-			Source:       SourceK0sManaged,
-			Kubeconfig:   rec.Kubeconfig,
-			Distribution: rec.Distribution,
-			Nodes:        rec.Nodes,
-			Platform:     platformFromConfig(rec.Platform),
-			Gateway:      recordedGateway(rec),
-			Reason:       "recorded k0s-managed cluster; k0s is started and upgraded by box update (a later phase)",
-		}
+	case SourceExternal, SourceK0sManaged:
 	default:
 		return stop(fmt.Sprintf("record has unknown source %q", rec.Source))
 	}
+	kc, err := d.Source.Read(rec.Kubeconfig)
+	if err != nil {
+		return stop(fmt.Sprintf("recorded %s cluster kubeconfig %s: %v", rec.Source, rec.Kubeconfig, err))
+	}
+	how := fmt.Sprintf("recorded %s cluster", rec.Source)
+	obs, res, ok := d.inspectCluster(ctx, kc, rec.Kubeconfig, how)
+	if !ok {
+		return res
+	}
+	return d.finishRecorded(ctx, obs, rec, how)
 }
 
 // gatewayComponent is the Gateway's result, for the class decision that needs
@@ -281,16 +292,6 @@ func gatewayComponent(components []ComponentResult) ComponentResult {
 		}
 	}
 	return ComponentResult{Component: ComponentGateway}
-}
-
-// recordedGateway is the class a re-run attaches to. A record written before
-// box recorded one came from a box that only ever wrote class `eg`, so that is
-// the upgrade path; managed mode owns its implementation and always writes it.
-func recordedGateway(rec *Record) GatewayChoice {
-	if rec.Platform.Gateway == ModeManaged || rec.GatewayClass == "" {
-		return GatewayChoice{Class: EnvoyGatewayClass, BoxInstalls: rec.Platform.Gateway == ModeManaged}
-	}
-	return GatewayChoice{Class: rec.GatewayClass}
 }
 
 // firstKubeconfig resolves the explicit cluster path: the flag wins, else the

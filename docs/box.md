@@ -186,6 +186,21 @@ place says exactly what is left on the host and the command that removes it
 destroy a k0s installation box did not make. With the cluster up, bootstrap goes on to the
 platform layer and `init` exactly as it does on a host that already had one.
 
+**A record is checked, not trusted (proposed).** A re-run reads
+`/etc/swizzin/cluster.yaml` for what box decided — which cluster, who owns its
+lifecycle, the platform modes, the GatewayClass — then probes that cluster again:
+`/version`, the privilege checks, the node count and distribution, and the platform
+layer. Those are the same probes and the same refusals a freshly found cluster gets,
+so a recorded cluster that has since gone multi-node or lost its class stops before
+anything is written. A record whose kubeconfig no longer answers stops with that path
+named, and never falls through to installing k0s over it. The recorded class is kept
+while the cluster still serves it (Accepted, and publishing the feature the routes
+need); what a re-run repairs instead is box's own missing implementation, which is
+what a first run whose platform apply failed leaves behind. So a second bootstrap
+plans and installs whatever the probe says is missing — Envoy Gateway, the Gateway API
+CRDs, MetalLB and its pool, the admission policy — instead of reporting components it
+never looked at as unknown.
+
 **What bootstrap installs (decided).** It applies only the platform components the
 decision says are missing: Envoy Gateway from its OCI chart (the chart ships the Gateway
 API CRDs at the channel the controller is built against), MetalLB in L2 mode with a

@@ -163,23 +163,3 @@ func deferredLoadBalancer(mode PlatformMode) (action, reason string) {
 		return "probe", "settled after the confirm: MetalLB unless the Gateway gets an address without it"
 	}
 }
-
-// platformFromConfig renders a PlatformConfig into results with nothing probed:
-// what a recorded cluster shows on a re-run, when capability probes are skipped.
-func platformFromConfig(cfg PlatformConfig) []ComponentResult {
-	return platformFromOutcomes(cfg, PlatformProbe{})
-}
-
-func platformFromOutcomes(cfg PlatformConfig, probe PlatformProbe) []ComponentResult {
-	out := make([]ComponentResult, 0, len(componentSet))
-	for _, c := range componentSet {
-		cr := ComponentResult{
-			Component: c.comp,
-			Mode:      c.mode(cfg),
-			Outcome:   c.out(probe),
-		}
-		cr.Action, cr.Reason = decideComponent(cr.Component, cr.Mode, cr.Outcome)
-		out = append(out, cr)
-	}
-	return out
-}

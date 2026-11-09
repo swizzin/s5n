@@ -248,11 +248,15 @@ Candidates that were found but not used are always printed, on every path: a rem
 cluster's `~/.kube/config` skipping silently would read as "there was nothing there".
 
 The result is recorded in `/etc/swizzin/cluster.yaml` (source: `k0s-managed` or
-`external`, kubeconfig path, distribution, platform modes, node count). Re-running reads
-that record before probing, and re-checks that it still describes a cluster v1 drives: a
-`k0s-managed` box gets k0s started and upgraded by `box update`; an `external` cluster's
-lifecycle is never touched, only its reachability checked. `box` owns the lifecycle of
-exactly what it installed.
+`external`, kubeconfig path, distribution, platform modes, node count). Re-running
+reads that record before the candidate scan, then probes the cluster it names again:
+version, privileges, node count and distribution, and the platform layer, with the
+same refusals a freshly found cluster gets. The record supplies the decisions
+(lifecycle owner, platform modes, GatewayClass); the cluster supplies the evidence. A
+recorded cluster that now fails a gate stops, and one whose kubeconfig no longer
+answers stops naming that path rather than installing k0s over it. A `k0s-managed`
+box's start and upgrade still belong to `box update`; an `external` cluster's lifecycle
+is never touched. `box` owns the lifecycle of exactly what it installed.
 
 The rest of the bootstrap: the platform layer by mode, `/srv/s5n/{data,config}` owned by
 puid:pgid, then `box init`. Every step is safe to re-run.

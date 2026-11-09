@@ -17,13 +17,15 @@ type Record struct {
 	Source       Source
 	Kubeconfig   string
 	Distribution Distribution
-	// Nodes is recorded so a re-run knows whether a storage class is required
-	// without re-probing the cluster.
+	// Nodes is what the run that wrote the record saw. A re-run refuses the
+	// recorded value cheaply before touching the network and then re-probes the
+	// node list: the record is a cached decision, not evidence.
 	Nodes    int
 	Platform PlatformConfig
 	// GatewayClass is the GatewayClass box attached its Gateway to. A re-run
-	// reuses it rather than re-probing: the class is a decision, and asking a
-	// second time would be able to silently move a box's routes.
+	// keeps it while the cluster still serves it: the class is a decision, and
+	// asking a second time would be able to silently move a box's routes. The
+	// cluster still has to show it Accepted and supporting the chart's routes.
 	GatewayClass string
 	// AssumeGatewayFeatures records that the operator allowed a class that
 	// publishes no supportedFeatures list. It is a choice, so it survives a
