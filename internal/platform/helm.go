@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
 	"time"
 
@@ -21,17 +22,25 @@ import (
 	"helm.sh/helm/v4/pkg/storage/driver"
 	"k8s.io/cli-runtime/pkg/genericclioptions"
 	"k8s.io/client-go/rest"
+
+	"github.com/swizzin/s5n/internal/fetch"
 )
 
 // Helm is the Releases implementation: the Helm SDK over client-go, the same
 // client `box apply` uses, for the platform's own releases. Charts are fetched
 // from their published homes at run time at the pinned version; nothing is
-// embedded but the manifests box itself owns.
+// embedded but the manifests box itself owns. Both chart fetches -- the chart
+// repository and the OCI registry -- carry fetch.Transport, so an upstream 5xx
+// is retried instead of failing the install.
 type Helm struct {
 	Kubeconfig string
 	// Timeout bounds one install or upgrade, including its wait. Zero means
 	// five minutes.
 	Timeout time.Duration
+	// Retry is the policy for the chart fetches. Zero means box's policy:
+	// four attempts, 1s/2s/4s. Tests replace the sleeper so backoff costs no
+	// time.
+	Retry fetch.Policy
 
 	configs  map[string]*action.Configuration
 	settings *cli.EnvSettings
@@ -190,12 +199,12 @@ func (h *Helm) download(spec Release, dir string) (string, error) {
 		h.settings = cli.New()
 	}
 	if h.getters == nil {
-		h.getters = getter.All(h.settings)
+		h.getters = chartGetters(getter.All(h.settings), h.Retry)
 	}
 	ref := spec.Ref
 	if isOCI(ref) {
 		if h.registry == nil {
-			rc, err := registry.NewClient()
+			rc, err := registry.NewClient(registry.ClientOptHTTPClient(h.chartClient()))
 			if err != nil {
 				return "", fmt.Errorf("chart %s: %w", spec.Chart, err)
 			}
@@ -222,6 +231,13 @@ func (h *Helm) download(spec Release, dir string) (string, error) {
 		return "", fmt.Errorf("chart %s %s: %w", spec.Chart, spec.Version, err)
 	}
 	return path, nil
+}
+
+// chartClient is the client the OCI chart fetch goes through. Helm's registry
+// client takes one (registry.ClientOptHTTPClient), so the retrying transport is
+// installed here rather than around the pull.
+func (h *Helm) chartClient() *http.Client {
+	return &http.Client{Transport: fetch.Transport{Policy: h.Retry}}
 }
 
 func isOCI(ref string) bool {

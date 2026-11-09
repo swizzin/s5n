@@ -3,13 +3,17 @@ package bootstrap
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"strings"
 	"time"
+
+	"github.com/swizzin/s5n/internal/fetch"
 )
 
 // This file holds the real implementations behind the installer's three
@@ -45,35 +49,66 @@ func k0sStatePresent(path string) bool {
 
 // HTTPDownloader fetches a release asset over HTTPS. The zero value is usable.
 type HTTPDownloader struct {
+	// Client, when set, is used as it is instead of the client box builds:
+	// no retries, no timeout of box's. It exists so a test can replace the
+	// network entirely.
 	Client *http.Client
 	// Timeout covers the whole download, body included: a k0s binary is a few
 	// hundred megabytes, and a stalled connection must not hang bootstrap.
 	Timeout time.Duration
+	// Retry is the policy for a transient upstream failure. A release asset
+	// comes from a public CDN on a first run, and one 5xx there must not fail
+	// an install the operator cannot fix from this side. Zero means box's
+	// policy (four attempts, 1s/2s/4s); a test replaces the sleeper so the
+	// backoff costs no time.
+	Retry fetch.Policy
+}
+
+// client is what one fetch goes through: box's client, with the retrying
+// transport, unless a test supplied its own.
+func (d HTTPDownloader) client() *http.Client {
+	if d.Client != nil {
+		return d.Client
+	}
+	timeout := d.Timeout
+	if timeout <= 0 {
+		timeout = 30 * time.Minute
+	}
+	return &http.Client{Timeout: timeout, Transport: fetch.Transport{Policy: d.Retry}}
 }
 
 // Fetch opens the URL and refuses anything that is not a 200.
 func (d HTTPDownloader) Fetch(ctx context.Context, url string) (io.ReadCloser, error) {
-	client := d.Client
-	if client == nil {
-		timeout := d.Timeout
-		if timeout <= 0 {
-			timeout = 30 * time.Minute
-		}
-		client = &http.Client{Timeout: timeout}
-	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return nil, err
 	}
-	resp, err := client.Do(req)
+	resp, err := d.client().Do(req)
 	if err != nil {
-		return nil, err
+		return nil, withoutMethodAndURL(err)
 	}
 	if resp.StatusCode != http.StatusOK {
 		_ = resp.Body.Close()
 		return nil, fmt.Errorf("%s: %s", url, resp.Status)
 	}
 	return resp.Body, nil
+}
+
+// withoutMethodAndURL drops the wrapper net/http puts around a transport
+// error ("Get \"https://…\": …") when box's retrying transport already said
+// what happened. That sentence names the URL and the attempt count, and box
+// does not say it twice; any other failure keeps the wrapper, which names the
+// method and the URL.
+func withoutMethodAndURL(err error) error {
+	var uerr *url.Error
+	if !errors.As(err, &uerr) {
+		return err
+	}
+	var failure *fetch.Failure
+	if errors.As(uerr.Err, &failure) {
+		return failure
+	}
+	return err
 }
 
 // ExecRunner runs one command with no shell, and returns its combined output.
