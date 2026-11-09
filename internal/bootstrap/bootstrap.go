@@ -71,13 +71,19 @@ type Finding struct {
 	Name string // "kubelet", "k3s.service", "/usr/local/bin/k0s", "6443"
 }
 
-// InstallPlan is what box would install on a clean host.
+// InstallPlan is what box installs on a clean host.
 type InstallPlan struct {
-	// Version is the pinned k0s release. SHA256 stays empty until the real
-	// installer (a later Phase 2 step) downloads and verifies the archive;
-	// nothing in this phase fetches or installs anything.
+	// Version and SHA256 are the pinned release and its checksum, filled from
+	// the policy in policy.go for this binary's architecture. The installer
+	// re-resolves the pin and refuses a plan that names anything else.
 	Version string
 	SHA256  string
+	// Arch is the k0s build's GOARCH (amd64 or arm64).
+	Arch string
+	// CleanHost is set only by the branch that found no usable cluster and
+	// chose to install. The installer refuses a plan without it, so an
+	// install cannot happen because a caller took the wrong path by accident.
+	CleanHost bool
 }
 
 // Result is the full decision with its human-readable reasoning.
@@ -150,15 +156,12 @@ type RecordStore interface {
 	Save(*Record) error
 }
 
-// Installer provisions k0s on a clean host. In this phase the real
-// implementation only prints what it would do; nothing installs anything.
+// Installer provisions k0s on a clean host: it downloads the pinned release,
+// verifies it, installs it and starts a single-node controller, then waits for
+// the API to answer. It is the only part of bootstrap that changes the host.
 type Installer interface {
 	Install(ctx context.Context, plan InstallPlan) error
 }
-
-// K0sVersion is the k0s release box installs on a clean host. Pinned: the real
-// installer (a later phase) downloads exactly this release and verifies it.
-const K0sVersion = "v1.31.3+k0s.0"
 
 // K0sAdminConfig is where k0s writes the admin kubeconfig box records and uses.
 const K0sAdminConfig = "/var/lib/k0s/pki/admin.conf"

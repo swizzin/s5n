@@ -101,6 +101,14 @@ func runBootstrap(args []string) {
 		chooser = classChooser{prompt: newPrompt(*plain)}
 	}
 
+	// A dry run reaches the same clean-host branch as a real run, and the only
+	// honest installer it can have is one that says what it would do: nothing
+	// is probed or written, so there is no host to change.
+	var install bootstrap.Installer = bootstrap.K0sInstaller{Log: os.Stdout}
+	if *dryRun {
+		install = bootstrap.DryRunInstaller{W: os.Stdout}
+	}
+
 	d := &bootstrap.Decision{
 		Source: bootstrap.FilesystemSource{},
 		NewProber: func(kc []byte) (bootstrap.Prober, error) {
@@ -108,7 +116,7 @@ func runBootstrap(args []string) {
 		},
 		Host:    bootstrap.LinuxHost{},
 		Records: records,
-		Install: bootstrap.PrintInstaller{W: os.Stdout},
+		Install: install,
 		Prompt:  chooser,
 	}
 
@@ -118,6 +126,7 @@ func runBootstrap(args []string) {
 		Platform:              bootstrap.DefaultPlatform(),
 		GatewayClass:          *gatewayClass,
 		AssumeGatewayFeatures: *assumeFeatures,
+		DryRun:                *dryRun,
 	})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "box: %v\n", err)
@@ -128,9 +137,9 @@ func runBootstrap(args []string) {
 	case bootstrap.ActionStop:
 		os.Exit(1)
 	case bootstrap.ActionInstall:
-		// The cluster installer is a later step: there is nothing to apply
-		// to and nothing to init on a host box has not provisioned.
-		return
+		// A clean host that box has just installed k0s on now has a cluster:
+		// fall through to the same platform apply and init every other path
+		// runs, over the kubeconfig k0s wrote.
 	}
 	if *dryRun {
 		return

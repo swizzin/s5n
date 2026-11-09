@@ -38,6 +38,10 @@ type Options struct {
 	// that publishes no supportedFeatures list. Empty is the safe default:
 	// box stops rather than using an implementation it cannot check.
 	AssumeGatewayFeatures bool
+	// DryRun is box bootstrap --dry-run: probe nothing remote and change
+	// nothing. A clean host gets the install plan printed and stops there,
+	// because the cluster to adopt does not exist and must not be probed.
+	DryRun bool
 }
 
 // Bootstrap decides which cluster to use, in PLAN.md's fixed order, and never
@@ -104,32 +108,47 @@ func (d *Decision) Bootstrap(ctx context.Context, opts Options) (Result, error) 
 		return res, nil
 	}
 
-	// 4. A clean host: install k0s.
-	plan := InstallPlan{Version: K0sVersion}
+	// 4. A clean host: install k0s, then adopt the cluster box just started.
+	// The plan carries the affirmative choice, so nothing that is not this
+	// branch can reach the installer's download.
+	plan := k0sPlan()
 	if err := d.Install.Install(ctx, plan); err != nil {
 		return stop(fmt.Sprintf("k0s install failed: %v", err)), nil
 	}
-	rec = &Record{
-		Source:       SourceK0sManaged,
-		Kubeconfig:   K0sAdminConfig,
-		Distribution: DistK0s,
-		Nodes:        1,
-		Platform:     opts.Platform,
+	if opts.DryRun {
+		return Result{
+			Action:       ActionInstall,
+			Source:       SourceK0sManaged,
+			Kubeconfig:   K0sAdminConfig,
+			Distribution: DistK0s,
+			Skips:        skips,
+			Notes:        describeNotes(notes),
+			Reason:       fmt.Sprintf("clean host: k0s %s would be installed (dry run)", K0sVersion),
+		}, nil
 	}
-	if err := d.Records.Save(rec); err != nil {
-		return stop(fmt.Sprintf("record the install: %v", err)), nil
-	}
-	res = Result{
-		Action:       ActionInstall,
-		Source:       SourceK0sManaged,
-		Kubeconfig:   K0sAdminConfig,
-		Distribution: DistK0s,
-		Nodes:        1,
-		Skips:        skips,
-		Notes:        describeNotes(notes),
-		Reason:       "clean host: k0s install planned (the platform layer is a later bootstrap step)",
-	}
+	res = d.adoptInstalled(ctx, opts)
+	res.Skips = skips
+	res.Notes = describeNotes(notes)
 	return res, nil
+}
+
+// adoptInstalled is the second half of the clean-host path. k0s is up, so
+// there is a cluster: the same probe every other path uses decides its
+// distribution, its platform layer and its Gateway class, and only then is it
+// recorded. A cluster box started but cannot reach is never written down as one
+// box manages, and it is never probed for capabilities before it answers.
+func (d *Decision) adoptInstalled(ctx context.Context, opts Options) Result {
+	kc, err := d.Source.Read(K0sAdminConfig)
+	if err != nil {
+		return stop(fmt.Sprintf("read the kubeconfig k0s wrote (%s): %v", K0sAdminConfig, err))
+	}
+	res := d.useCluster(ctx, opts, kc, K0sAdminConfig, SourceK0sManaged, "the cluster box just installed")
+	if res.Action != ActionUseCluster {
+		return res
+	}
+	res.Action = ActionInstall
+	res.Reason = fmt.Sprintf("clean host: k0s %s installed; using %s (%s)", K0sVersion, K0sAdminConfig, res.Distribution)
+	return res
 }
 
 // useCluster validates an existing cluster and, when it is usable, probes the

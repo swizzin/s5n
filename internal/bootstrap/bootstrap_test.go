@@ -16,6 +16,7 @@ type fakeSource struct {
 	readErr     map[string]error
 	reads       []string
 	candidatesN int
+	log         *[]string
 }
 
 func (f *fakeSource) Candidates() []string {
@@ -24,6 +25,9 @@ func (f *fakeSource) Candidates() []string {
 }
 
 func (f *fakeSource) Read(path string) ([]byte, error) {
+	if f.log != nil {
+		*f.log = append(*f.log, "read "+path)
+	}
 	f.reads = append(f.reads, path)
 	if err, ok := f.readErr[path]; ok {
 		return nil, err
@@ -46,6 +50,7 @@ type fakeProber struct {
 	factoryErr  error
 
 	calls map[string]int
+	log   *[]string
 }
 
 func newFakeProber(p *fakeProber) func([]byte) (Prober, error) {
@@ -54,6 +59,9 @@ func newFakeProber(p *fakeProber) func([]byte) (Prober, error) {
 			p.calls = map[string]int{}
 		}
 		p.calls["new"]++
+		if p.log != nil {
+			*p.log = append(*p.log, "prober new")
+		}
 		if p.factoryErr != nil {
 			return nil, p.factoryErr
 		}
@@ -66,6 +74,9 @@ func (f *fakeProber) bump(name string) {
 		f.calls = map[string]int{}
 	}
 	f.calls[name]++
+	if f.log != nil {
+		*f.log = append(*f.log, "prober "+name)
+	}
 }
 
 func (f *fakeProber) Version(context.Context) (Version, error) {
@@ -103,11 +114,15 @@ type fakeRecords struct {
 	loadErr error
 	saved   []*Record
 	saveErr error
+	log     *[]string
 }
 
 func (f *fakeRecords) Load() (*Record, error) { return f.rec, f.loadErr }
 
 func (f *fakeRecords) Save(r *Record) error {
+	if f.log != nil {
+		*f.log = append(*f.log, "save record")
+	}
 	f.saved = append(f.saved, r)
 	return f.saveErr
 }
@@ -115,9 +130,13 @@ func (f *fakeRecords) Save(r *Record) error {
 type fakeInstaller struct {
 	plans []InstallPlan
 	err   error
+	log   *[]string
 }
 
 func (f *fakeInstaller) Install(_ context.Context, p InstallPlan) error {
+	if f.log != nil {
+		*f.log = append(*f.log, "install k0s")
+	}
 	f.plans = append(f.plans, p)
 	return f.err
 }
@@ -277,7 +296,7 @@ func TestBootstrapCandidateSSARDeniedNotUsable(t *testing.T) {
 		inst := &fakeInstaller{}
 		d := newDecision(src, prober, host, recs, inst)
 
-		res, err := d.Bootstrap(context.Background(), Options{})
+		res, err := d.Bootstrap(context.Background(), Options{DryRun: true})
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -428,7 +447,7 @@ func TestBootstrapContainerRuntimeNotACluster(t *testing.T) {
 			inst := &fakeInstaller{}
 			d := newDecision(src, prober, host, recs, inst)
 
-			res, err := d.Bootstrap(context.Background(), Options{})
+			res, err := d.Bootstrap(context.Background(), Options{DryRun: true})
 			if err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}
@@ -449,8 +468,10 @@ func TestBootstrapContainerRuntimeNotACluster(t *testing.T) {
 				if len(inst.plans) != 1 || inst.plans[0].Version != K0sVersion {
 					t.Errorf("installer should get one plan for %s: %v", K0sVersion, inst.plans)
 				}
-				if len(recs.saved) != 1 || recs.saved[0].Source != SourceK0sManaged {
-					t.Errorf("an install over a bare runtime must be recorded as k0s-managed")
+				// The plan is all a dry run produces: the cluster it describes
+				// does not exist yet, so nothing can be probed or recorded.
+				if len(recs.saved) != 0 {
+					t.Errorf("a dry run recorded a cluster it did not install")
 				}
 				out := FormatResult(res)
 				for _, want := range tc.wantNotes {
@@ -563,22 +584,37 @@ func TestBootstrapRecordSkipsProbing(t *testing.T) {
 	})
 }
 
-// ---- clean host: install planned ----
+// ---- clean host: install the cluster, then adopt and record it ----
 
 func TestBootstrapCleanHostInstalls(t *testing.T) {
-	src := &fakeSource{candidates: []string{}}
-	prober := &fakeProber{}
+	trace := &[]string{}
+	src := &fakeSource{
+		candidates: []string{},
+		files:      map[string][]byte{K0sAdminConfig: []byte("kubeconfig")},
+		log:        trace,
+	}
+	prober := &fakeProber{
+		version: Version{GitVersion: K0sVersion},
+		cluster: Cluster{Nodes: 1},
+		platform: PlatformProbe{
+			GatewayAPI:   OutcomeAbsent,
+			LoadBalancer: OutcomeNotProbed,
+			Gateway:      OutcomeAbsent,
+			CertManager:  OutcomeAbsent,
+		},
+		log: trace,
+	}
 	host := &fakeHost{}
-	recs := &fakeRecords{}
-	inst := &fakeInstaller{}
+	recs := &fakeRecords{log: trace}
+	inst := &fakeInstaller{log: trace}
 	d := newDecision(src, prober, host, recs, inst)
 
-	res, err := d.Bootstrap(context.Background(), Options{})
+	res, err := d.Bootstrap(context.Background(), Options{Platform: DefaultPlatform()})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if res.Action != ActionInstall {
-		t.Fatalf("action = %q, want install", res.Action)
+		t.Fatalf("action = %q, want install; reason: %s", res.Action, res.Reason)
 	}
 	if res.Source != SourceK0sManaged {
 		t.Errorf("source = %q, want k0s-managed", res.Source)
@@ -586,11 +622,117 @@ func TestBootstrapCleanHostInstalls(t *testing.T) {
 	if res.Kubeconfig != K0sAdminConfig {
 		t.Errorf("kubeconfig = %q, want %q", res.Kubeconfig, K0sAdminConfig)
 	}
-	if len(inst.plans) != 1 || inst.plans[0].Version != K0sVersion {
-		t.Errorf("installer should get one plan for %s: %v", K0sVersion, inst.plans)
+	if len(inst.plans) != 1 || inst.plans[0].Version != K0sVersion || !inst.plans[0].CleanHost {
+		t.Fatalf("installer should get one clean-host plan for %s: %+v", K0sVersion, inst.plans)
+	}
+	if inst.plans[0].SHA256 != k0sSHA256[inst.plans[0].Arch] {
+		t.Errorf("plan carries no pinned checksum: %+v", inst.plans[0])
+	}
+
+	// The cluster box just started is probed like any other, so the platform
+	// plan that follows is a real decision rather than a default: a fresh k0s
+	// has no GatewayClass, so box installs Envoy Gateway and its own class.
+	if len(res.Platform) == 0 {
+		t.Fatal("a freshly installed cluster must be platform-probed before it is recorded")
+	}
+	if res.Gateway.Class != EnvoyGatewayClass || !res.Gateway.BoxInstalls {
+		t.Errorf("gateway = %+v, want box's own %s on a bare cluster", res.Gateway, EnvoyGatewayClass)
 	}
 	if len(recs.saved) != 1 || recs.saved[0].Source != SourceK0sManaged {
-		t.Errorf("clean install must record source k0s-managed")
+		t.Fatalf("clean install must record one k0s-managed cluster: %+v", recs.saved)
+	}
+	rec := recs.saved[0]
+	if rec.Kubeconfig != K0sAdminConfig || rec.GatewayClass != EnvoyGatewayClass {
+		t.Errorf("recorded %+v, want k0s's admin.conf and class %s", rec, EnvoyGatewayClass)
+	}
+	if rec.Platform.GatewayAPI != ModeAuto {
+		t.Errorf("recorded platform = %+v, want the configured modes", rec.Platform)
+	}
+
+	// The order is the contract: nothing is read from an API that does not
+	// exist, and the record is written only after the cluster answers.
+	want := []string{
+		"install k0s",
+		"read " + K0sAdminConfig,
+		"prober new",
+		"prober version",
+		"prober admin",
+		"prober describe",
+		"prober platform",
+		"save record",
+	}
+	if got := strings.Join(*trace, "|"); got != strings.Join(want, "|") {
+		t.Fatalf("order = %v, want %v", *trace, want)
+	}
+}
+
+// A cluster box installed but cannot reach is not recorded as one box manages.
+func TestBootstrapCleanHostInstallUnreachableStops(t *testing.T) {
+	src := &fakeSource{files: map[string][]byte{K0sAdminConfig: []byte("kubeconfig")}}
+	prober := &fakeProber{versionErr: errors.New("connection refused")}
+	recs := &fakeRecords{}
+	inst := &fakeInstaller{}
+	d := newDecision(src, prober, &fakeHost{}, recs, inst)
+
+	res, err := d.Bootstrap(context.Background(), Options{})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if res.Action != ActionStop || !strings.Contains(res.Reason, "connection refused") {
+		t.Fatalf("action=%q reason=%q, want stop naming the unreachable API", res.Action, res.Reason)
+	}
+	if len(recs.saved) != 0 {
+		t.Errorf("an unreachable fresh cluster must not be recorded")
+	}
+}
+
+// A failed install stops the run: nothing is probed, nothing is recorded.
+func TestBootstrapCleanHostInstallFailsStops(t *testing.T) {
+	src := &fakeSource{}
+	prober := &fakeProber{}
+	recs := &fakeRecords{}
+	inst := &fakeInstaller{err: errors.New("disk full")}
+	d := newDecision(src, prober, &fakeHost{}, recs, inst)
+
+	res, err := d.Bootstrap(context.Background(), Options{})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if res.Action != ActionStop || !strings.Contains(res.Reason, "disk full") {
+		t.Fatalf("action=%q reason=%q, want stop naming the failure", res.Action, res.Reason)
+	}
+	if prober.calls["new"] != 0 {
+		t.Errorf("a failed install must not build a prober: %v", prober.calls)
+	}
+	if len(recs.saved) != 0 {
+		t.Errorf("a failed install must not be recorded")
+	}
+}
+
+// A dry run prints the plan and stops: there is no cluster to adopt, and
+// nothing may be probed or written.
+func TestBootstrapCleanHostDryRunPlansOnly(t *testing.T) {
+	src := &fakeSource{}
+	prober := &fakeProber{}
+	recs := &fakeRecords{}
+	inst := &fakeInstaller{}
+	d := newDecision(src, prober, &fakeHost{}, recs, inst)
+
+	res, err := d.Bootstrap(context.Background(), Options{DryRun: true})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if res.Action != ActionInstall || !strings.Contains(res.Reason, "dry run") {
+		t.Fatalf("action=%q reason=%q, want an install plan only", res.Action, res.Reason)
+	}
+	if len(src.reads) != 0 {
+		t.Errorf("a dry run read %v; it must not touch the cluster it did not create", src.reads)
+	}
+	if prober.calls["new"] != 0 || len(recs.saved) != 0 {
+		t.Errorf("a dry run probed or recorded something: %v %v", prober.calls, recs.saved)
+	}
+	if len(inst.plans) != 1 || !inst.plans[0].CleanHost {
+		t.Errorf("a dry run still asks the (dry-run) installer for the plan: %+v", inst.plans)
 	}
 }
 
