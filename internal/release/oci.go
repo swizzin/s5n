@@ -16,6 +16,7 @@ import (
 	helmregistry "helm.sh/helm/v4/pkg/registry"
 	"oras.land/oras-go/v2/errdef"
 	orasregistry "oras.land/oras-go/v2/registry"
+	orasauth "oras.land/oras-go/v2/registry/remote/auth"
 	"oras.land/oras-go/v2/registry/remote/errcode"
 )
 
@@ -76,7 +77,15 @@ func (o *OCIChart) Load(_ context.Context, ref ChartRef) (Chart, error) {
 	if err != nil {
 		return Chart{}, err
 	}
-	client, err := o.client(plain)
+	// One private Helm home for this pull: its credentials path is inside the
+	// directory box creates, so Helm reads nothing of the operator's, and the
+	// directory is removed before Load returns.
+	env, err := newHelmEnv()
+	if err != nil {
+		return Chart{}, fmt.Errorf("chart registry for %s: %w", repo, err)
+	}
+	defer env.Close()
+	client, err := o.client(env, plain)
 	if err != nil {
 		return Chart{}, fmt.Errorf("chart registry for %s: %w", repo, err)
 	}
@@ -141,13 +150,21 @@ func (o *OCIChart) Load(_ context.Context, ref ChartRef) (Chart, error) {
 // its own writer, which would be box's voice saying someone else's lines, so it
 // is discarded; the HTTP client caps what one response may be and refuses to
 // wait on a registry forever.
-func (o *OCIChart) client(plainHTTP bool) (*helmregistry.Client, error) {
+//
+// env is the private Helm home the client's credentials file points into, and
+// the authorizer carries no credential, so no credentials store -- Helm's
+// registry/config.json or docker's config.json -- is ever queried: every pull
+// is anonymous.
+func (o *OCIChart) client(env *helmEnv, plainHTTP bool) (*helmregistry.Client, error) {
+	httpClient := &http.Client{
+		Transport: cappedTransport{max: MaxChartArchive},
+		Timeout:   2 * time.Minute,
+	}
 	opts := []helmregistry.ClientOption{
 		helmregistry.ClientOptWriter(io.Discard),
-		helmregistry.ClientOptHTTPClient(&http.Client{
-			Transport: cappedTransport{max: MaxChartArchive},
-			Timeout:   2 * time.Minute,
-		}),
+		helmregistry.ClientOptHTTPClient(httpClient),
+		helmregistry.ClientOptCredentialsFile(env.registryConfig),
+		helmregistry.ClientOptAuthorizer(orasauth.Client{Client: httpClient}),
 	}
 	if plainHTTP {
 		opts = append(opts, helmregistry.ClientOptPlainHTTP())

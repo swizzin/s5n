@@ -5,6 +5,9 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"fmt"
 	"io"
 	"io/fs"
 	"net/http"
@@ -14,6 +17,7 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/distribution/distribution/v3/configuration"
 	"github.com/distribution/distribution/v3/registry/handlers"
@@ -400,4 +404,162 @@ func TestUnreadableRegistryIsNotAStackOfHelm(t *testing.T) {
 	if !strings.Contains(err.Error(), repo) || !strings.Contains(err.Error(), "1.2.3") {
 		t.Fatalf("error does not name the ref and the version: %v", err)
 	}
+}
+
+// poisonRegistryHome writes the operator Helm state a pull must never read and
+// points the process environment at it. The registry config is not valid JSON:
+// Helm's registry client parses its credentials file when it is constructed, so
+// if box let that path default to helmpath.ConfigPath (HELM_REGISTRY_CONFIG,
+// then ~/.config/helm) the pull would fail before it reached the registry. A
+// stale repository entry and a plugin getter are there for the same reason they
+// are in the platform test: none of root's Helm environment decides what box
+// installs.
+//
+// It returns the root of the poisoned tree, for a before/after comparison.
+func poisonRegistryHome(t *testing.T) string {
+	t.Helper()
+	root := t.TempDir()
+	write := func(path, content string) {
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write(filepath.Join(root, "config", "registry", "config.json"), `{"auths": `)
+	write(filepath.Join(root, "config", "repositories.yaml"), `apiVersion: ""
+generated: "2020-01-01T00:00:00Z"
+repositories:
+  - name: stale
+    url: https://charts.example.com
+`)
+	write(filepath.Join(root, "plugins", "box-getter", "plugin.yaml"), `name: box-getter
+version: 0.1.0
+downloaders:
+  - command: "box-getter"
+    protocols:
+      - "https"
+`)
+	for key, path := range map[string]string{
+		"HOME":                   root,
+		"XDG_CONFIG_HOME":        filepath.Join(root, "config"),
+		"XDG_CACHE_HOME":         filepath.Join(root, "cache"),
+		"HELM_CONFIG_HOME":       filepath.Join(root, "config"),
+		"HELM_CACHE_HOME":        filepath.Join(root, "cache"),
+		"HELM_REPOSITORY_CONFIG": filepath.Join(root, "config", "repositories.yaml"),
+		"HELM_REPOSITORY_CACHE":  filepath.Join(root, "cache", "repository"),
+		"HELM_REGISTRY_CONFIG":   filepath.Join(root, "config", "registry", "config.json"),
+		"HELM_PLUGINS":           filepath.Join(root, "plugins"),
+	} {
+		t.Setenv(key, path)
+	}
+	return root
+}
+
+// treeSnapshot renders every entry under root: path, mode, size, mtime and the
+// content hash of a file. Directory mtimes are included so a write Helm cleans
+// up again -- the shape of helmpath's scratch index -- is still visible.
+func treeSnapshot(t *testing.T, root string) string {
+	t.Helper()
+	var b strings.Builder
+	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		info, err := d.Info()
+		if err != nil {
+			return err
+		}
+		rel, err := filepath.Rel(root, path)
+		if err != nil {
+			return err
+		}
+		hash := ""
+		if d.Type().IsRegular() {
+			data, err := os.ReadFile(path)
+			if err != nil {
+				return err
+			}
+			sum := sha256.Sum256(data)
+			hash = hex.EncodeToString(sum[:])
+		}
+		fmt.Fprintf(&b, "%s mode=%s size=%d mtime=%s sha=%s\n",
+			rel, info.Mode(), info.Size(), info.ModTime().UTC().Format(time.RFC3339Nano), hash)
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("snapshot %s: %v", root, err)
+	}
+	return b.String()
+}
+
+// TestOCIPullIgnoresTheOperatorsRegistryConfig: root's Helm registry config is
+// unparseable and its repository state is stale, and box still pulls a public
+// chart anonymously. Nothing in that tree is read for a secret or written to.
+func TestOCIPullIgnoresTheOperatorsRegistryConfig(t *testing.T) {
+	host := registry(t)
+	want := pushChart(t, host, "charts")
+
+	poison := poisonRegistryHome(t)
+	before := treeSnapshot(t, poison)
+
+	pulled, err := (&OCIChart{BoxVersion: "0.0.0"}).Load(context.Background(), ChartRef{
+		Repo:    "oci://" + host + "/charts/s5n",
+		Version: chartVersion(t, want),
+	})
+	if err != nil {
+		t.Fatalf("the operator's Helm environment must not decide what box pulls: %v", err)
+	}
+	if !bytes.Equal(pulled.Archive, want) {
+		t.Fatalf("pulled %d bytes, want the %d that were pushed", len(pulled.Archive), len(want))
+	}
+	if after := treeSnapshot(t, poison); after != before {
+		t.Fatalf("box wrote into the operator's Helm home:\n--- before\n%s--- after\n%s", before, after)
+	}
+}
+
+// TestOCIPullLeavesNoTemporaryHelmHome: the private home lives for one pull.
+// TMPDIR is a sandbox, so a leftover directory is visible; the failure path is
+// checked too, because a missing release is the common case and a defer is easy
+// to miss on it.
+func TestOCIPullLeavesNoTemporaryHelmHome(t *testing.T) {
+	host := registry(t)
+	want := pushChart(t, host, "charts")
+	version := chartVersion(t, want)
+
+	root := t.TempDir()
+	sandbox := filepath.Join(root, "tmp")
+	if err := os.MkdirAll(sandbox, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("TMPDIR", sandbox)
+
+	src := &OCIChart{BoxVersion: "0.0.0"}
+	if _, err := src.Load(context.Background(), ChartRef{Repo: "oci://" + host + "/charts/s5n", Version: version}); err != nil {
+		t.Fatalf("pull: %v", err)
+	}
+	if left := tempEntries(t, sandbox); len(left) != 0 {
+		t.Fatalf("a successful pull left %v behind in its temporary directory", left)
+	}
+
+	if _, err := src.Load(context.Background(), ChartRef{Repo: "oci://" + host + "/charts/s5n", Version: "9.9.9"}); err == nil {
+		t.Fatal("a version nobody published must fail the pull")
+	}
+	if left := tempEntries(t, sandbox); len(left) != 0 {
+		t.Fatalf("a failed pull left %v behind in its temporary directory", left)
+	}
+}
+
+func tempEntries(t *testing.T, dir string) []string {
+	t.Helper()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var names []string
+	for _, e := range entries {
+		names = append(names, e.Name())
+	}
+	return names
 }
