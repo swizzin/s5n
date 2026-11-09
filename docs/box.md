@@ -314,11 +314,19 @@ leaves it alone. A box older than `min-box` refuses that release until it's upda
 In the other direction, box keeps reading every release back to the oldest
 `upgrade-from` it knows, so a new box never strands an old install.
 
-**box only uses published charts.** It pulls a released chart by version from the OCI
-registry and reads the schema, manifest and annotations from that artifact. It never
-loads `charts/` from its own tree, so a box built from main can't depend on templates
-no user has. box's own tests run against the chart packaged from the same commit,
-the same way.
+**box only uses published charts (decided).** It pulls a released chart by version from
+the OCI registry and reads the schema, manifest and annotations from that artifact. It
+never loads `charts/` from its own tree, so a box built from main can't depend on
+templates no user has. box's own tests run against the chart packaged from the same
+commit, the same way: pushed to a local registry and pulled like any release.
+
+**Where a release lives (decided).** A `v<version>` tag publishes everything at once:
+the image at `ghcr.io/swizzin/s5n:<version>`, the chart at
+`oci://ghcr.io/swizzin/charts/s5n` with `version` and `appVersion` both `<version>`, and
+box's binaries with a `sha256sums.txt` as assets of the GitHub release. The chart is
+packaged after the image is pushed and names that image by digest, so a chart can never
+point at an image other than the one built from its commit. Nothing is published from a
+branch push.
 
 **What update does with it:**
 
@@ -431,6 +439,12 @@ data. Everything it will change is written down before it changes anything.
   domain, another machine) is left as it is and listed in the plan, because box can't
   know what it points at; the plan can map one by hand. Matching discovered Services
   rather than app names keeps box naming no apps.
+- **Migrated connections are adopted by ID (decided).** Wiring adopts the objects it
+  finds by name on its first run, so a migrated download client under a different
+  name would get a second one created beside it. migrate records the IDs of the
+  connections it rewrote (download clients, Prowlarr's applications) in wiring's
+  ownership record, and wiring takes them over by ID: the client the source already
+  had becomes the one box manages.
 - **Shown before it's done; unattended runs only what was shown (decided goal,
   mechanism proposed).** The plan holds the rules: the path rewrite table, the port
   map, every host reference marked rewritten or left alone, what is copied where, and
