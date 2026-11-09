@@ -180,6 +180,13 @@ func (q *Qbit) Categories(ctx context.Context) (map[string]Category, error) {
 // EnsureCategory creates a category, or corrects its save path. The save path is
 // what makes imports hardlink instead of copy, so a wrong one is repaired rather
 // than tolerated.
+//
+// A name may be one qBittorrent subcategory ("4K/Movies"). qBittorrent 5.3
+// accepts that shape — its isValidCategoryName refuses only backslashes and empty
+// segments — and creates the parent category ("4K") itself. There is no
+// subcategories preference to set: 5.2 removed the switch 5.0 and 5.1 had
+// (default off), and the explicit save path written here is what the data
+// contract relies on either way.
 func (q *Qbit) EnsureCategory(ctx context.Context, name, savePath string) (Change, error) {
 	cats, err := q.Categories(ctx)
 	if err != nil {

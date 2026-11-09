@@ -320,3 +320,35 @@ func TestProwlarrEnsureApplicationRecreatesWhenDeleted(t *testing.T) {
 		t.Fatalf("recreated application did not get a fresh id: %d (previous %d)", result.ID, first.ID)
 	}
 }
+
+// A category may be one qBittorrent subcategory level. The name is sent
+// form-encoded, read back under the same key, and a later run matches it
+// without writing; repairing its save path is an edit, never a second create.
+func TestQbitSubcategory(t *testing.T) {
+	f := &fakeQbit{creds: [2]string{"admin", "hunter2"}, cats: map[string]string{}, sessions: map[string]bool{}}
+	srv := httptest.NewServer(f)
+	defer srv.Close()
+
+	ctx := context.Background()
+	q := NewQbit(srv.URL, "admin", "hunter2")
+	if err := q.WaitReady(ctx, 0); err != nil {
+		t.Fatalf("WaitReady: %v", err)
+	}
+
+	name, path := "4K/Movies", "/data/downloads/4K/Movies"
+	if got, err := q.EnsureCategory(ctx, name, path); err != nil || got != Created {
+		t.Fatalf("create = %v, %v", got, err)
+	}
+	if f.cats[name] != path {
+		t.Fatalf("category %q = %q, want %q", name, f.cats[name], path)
+	}
+	if got, err := q.EnsureCategory(ctx, name, path+"/"); err != nil || got != Unchanged {
+		t.Fatalf("second = %v, %v (a trailing slash is the same path)", got, err)
+	}
+	if got, err := q.EnsureCategory(ctx, name, "/data/downloads/elsewhere"); err != nil || got != Updated {
+		t.Fatalf("repair = %v, %v", got, err)
+	}
+	if f.writes != 2 {
+		t.Fatalf("writes = %d, want the create and the one repair", f.writes)
+	}
+}

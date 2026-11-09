@@ -2,6 +2,8 @@ package wiring
 
 import (
 	"context"
+	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -179,5 +181,89 @@ func TestWiringMakesDataDirsBeforeTheArrSteps(t *testing.T) {
 	}
 	if firstDir > firstArr {
 		t.Fatalf("a root folder was added before the directories existed:\n%s", Summary(res))
+	}
+}
+
+// A category may be one qBittorrent subcategory level. Both trees then have an
+// intermediate directory the Job must make before the Arr asks for its root
+// folder, and it must carry the leaf's owner: the Arr writes into the leaf, so
+// a root-owned parent is a permission failure one level up.
+func TestEnsureDataDirsNestedCategory(t *testing.T) {
+	root := t.TempDir()
+	save := filepath.Join(root, "downloads/4K/Movies")
+	lib := filepath.Join(root, "media/4K/Movies")
+	dirs, err := EnsureDataDirs([]Instance{{
+		Name: "radarr-4k", Category: "4K/Movies", SavePath: save, RootFolder: lib,
+	}})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	want := []string{"data/dirs/downloads/4K/Movies", "data/dirs/media/4K/Movies"}
+	if len(dirs) != len(want) {
+		t.Fatalf("got %d directories, want %d: %+v", len(dirs), len(want), dirs)
+	}
+	for i, d := range dirs {
+		if d.Name != want[i] || !d.Created {
+			t.Fatalf("dir %d = %+v, want %q created", i, d, want[i])
+		}
+	}
+
+	for _, path := range []string{
+		save, lib,
+		filepath.Join(root, "downloads/4K"), filepath.Join(root, "media/4K"),
+	} {
+		info, err := os.Stat(path)
+		if err != nil {
+			t.Fatalf("stat %s: %v", path, err)
+		}
+		if !info.IsDir() {
+			t.Fatalf("%s is not a directory", path)
+		}
+		st, ok := info.Sys().(*syscall.Stat_t)
+		if !ok {
+			t.Fatalf("%s: no stat_t", path)
+		}
+		if int(st.Uid) != os.Geteuid() || int(st.Gid) != os.Getegid() {
+			t.Fatalf("%s owned %d:%d, want the creating process %d:%d", path, st.Uid, st.Gid, os.Geteuid(), os.Getegid())
+		}
+		if info.Mode().Perm()&0o700 != 0o700 {
+			t.Fatalf("%s mode %v is not owner-writable", path, info.Mode().Perm())
+		}
+	}
+
+	// The hardlink proof runs per download/library pair, so it must pass on the
+	// nested leaf and leave nothing behind in either tree.
+	check := CheckHardlink(save, lib)
+	if !check.OK || check.Nlink != 2 || !check.SameDevice {
+		t.Fatalf("hardlink proof on the nested pair = %+v", check)
+	}
+	for _, path := range []string{
+		filepath.Join(save, linkCheckName), filepath.Join(lib, linkCheckName),
+	} {
+		if _, err := os.Stat(path); !errors.Is(err, fs.ErrNotExist) {
+			t.Fatalf("%s left behind after the proof: %v", path, err)
+		}
+	}
+}
+
+// The intermediate is made once, not per instance: two 4K instances share 4K.
+// A second run reports the leaves without pretending it created the parent.
+func TestEnsureDataDirsNestedParentShared(t *testing.T) {
+	root := t.TempDir()
+	insts := []Instance{
+		{Name: "sonarr-4k", Category: "4K/TV", SavePath: filepath.Join(root, "downloads/4K/TV"), RootFolder: filepath.Join(root, "media/4K/TV")},
+		{Name: "radarr-4k", Category: "4K/Movies", SavePath: filepath.Join(root, "downloads/4K/Movies"), RootFolder: filepath.Join(root, "media/4K/Movies")},
+	}
+	if _, err := EnsureDataDirs(insts); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	again, err := EnsureDataDirs(insts)
+	if err != nil {
+		t.Fatalf("second run: %v", err)
+	}
+	for _, d := range again {
+		if d.Created {
+			t.Fatalf("%s reported as created on the second run", d.Path)
+		}
 	}
 }
