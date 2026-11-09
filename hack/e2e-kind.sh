@@ -456,8 +456,14 @@ done
 
 # The chart under test, with the locally built image instead of the published one.
 install_release() {
+  # hack/e2e-values.yaml carries the locally built image and one 4K instance
+  # with a name an existing seedbox may already use: upper case and a
+  # qBittorrent subcategory level ("4K/Movies"). That drives the real
+  # qBittorrent category API, both /data trees and the Arr root folder on a
+  # nested pair, not only on single-segment names. The job's other runs reuse
+  # this, so the path is exercised on every install.
   $HELM upgrade --install s5n charts/s5n -n "$NS" \
-    --set wiring.image.tag=e2e \
+    -f hack/e2e-values.yaml \
     --wait --timeout 15m
 }
 
@@ -589,8 +595,13 @@ $K -n "$NS" exec sonarr-0 -- sh -c '
 
 # The categories the wiring Job made are on the host's data path and owned by
 # the release's uid:gid — the owner `box init` promises the operator. The Arrs
-# share that uid, which is why they can write their root folders at all.
-for d in /srv/s5n/data/downloads/tv /srv/s5n/data/media/tv; do
+# share that uid, which is why they can write their root folders at all. The
+# nested category's parent (4K) is a data directory the Job had to make too,
+# and it must carry the leaf's owner: a root-owned intermediate would let an
+# Arr create a leaf under it and then fail to write there.
+for d in /srv/s5n/data/downloads/tv /srv/s5n/data/media/tv \
+         /srv/s5n/data/downloads/4K /srv/s5n/data/media/4K \
+         /srv/s5n/data/downloads/4K/Movies /srv/s5n/data/media/4K/Movies; do
   got=$(docker exec "${CLUSTER}-control-plane" stat -c '%u:%g %a' "$d" 2>/dev/null || echo missing)
   echo "  ${d}: ${got}"
   case "$got" in 1000:1000\ *) ;; *) echo "want 1000:1000, got ${got}"; fail=1 ;; esac
@@ -628,7 +639,7 @@ arr_key() { $K -n "$NS" get secret s5n-keys -o jsonpath="{.data.$1-apikey}" | ba
 snapshot() { # snapshot <dir>
   local dir=$1 key port app
   mkdir -p "$dir"
-  for app in sonarr radarr; do
+  for app in sonarr radarr radarr-4k; do
     key=$(arr_key "$app"); port=$(arr_port "$app")
     for path in downloadclient rootfolder config/mediamanagement; do
       $K -n "$NS" exec "${app}-0" -- curl -s -H "X-Api-Key: $key" \
@@ -665,11 +676,14 @@ echo "wiring status = ${first_status}"
 for expected in \
   data/dirs/downloads/tv data/dirs/media/tv \
   data/dirs/downloads/movies data/dirs/media/movies \
+  data/dirs/downloads/4K/Movies data/dirs/media/4K/Movies \
   sonarr/downloadclient sonarr/rootfolder sonarr/hardlinks \
   radarr/downloadclient radarr/rootfolder radarr/hardlinks \
-  prowlarr/application/sonarr prowlarr/application/radarr \
+  radarr-4k/downloadclient radarr-4k/rootfolder radarr-4k/hardlinks \
+  prowlarr/application/sonarr prowlarr/application/radarr prowlarr/application/radarr-4k \
   qbittorrent/data-contract qbittorrent/category/tv qbittorrent/category/movies \
-  data/hardlink/tv data/hardlink/movies \
+  qbittorrent/category/4K/Movies \
+  data/hardlink/tv data/hardlink/movies data/hardlink/4K/Movies \
   plex/ready tautulli/ready seerr/ready; do
   res=$(status_field "[s['result'] for s in d['steps'] if s['name']=='$expected'][0]" 2>/dev/null || echo missing)
   echo "  ${expected}: ${res}"; [ "$res" = ok ] || fail=1
@@ -690,6 +704,19 @@ echo "  plex/ready detail: ${claimed}"
 case "$claimed" in *claimed=false*) ;; *) echo "expected an unclaimed Plex in this e2e"; fail=1 ;; esac
 
 snapshot "$WORK/before"
+
+# qBittorrent's own view of the nested category: the name was accepted and the
+# save path it stored is the downloads tree the Job made. qBittorrent 5.3
+# creates the parent category itself, so 4K is listed too; the leaf is what the
+# Arr's downloads are filed under.
+python3 - "$WORK/before/qbittorrent-categories.json" <<'PY' || fail=1
+import json, sys
+cats = json.load(open(sys.argv[1], encoding="utf-8"))
+cat = cats.get("4K/Movies") or {}
+path = cat.get("savePath", "")
+print(f"  qbittorrent 4K/Movies savePath = {path!r}")
+sys.exit(0 if path.rstrip("/") == "/data/downloads/4K/Movies" else 1)
+PY
 
 log "wiring run 2: an unchanged release must produce zero writes"
 install_release

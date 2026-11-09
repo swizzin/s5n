@@ -1,0 +1,16 @@
+# The e2e's own values. The image tag is the locally built one (loaded into
+# kind under the chart's s5n repository); the 4K Radarr instance is enabled with
+# a category an existing seedbox may already use: upper case and one qBittorrent
+# subcategory level. Everything else is the chart's defaults.
+#
+# A values file, not --set: --set on one index of a list replaces the whole
+# list, so instances[1] would arrive without its suffix and instances[0] null.
+wiring:
+  image:
+    tag: e2e
+
+apps:
+  radarr:
+    instances:
+      - { suffix: "", category: movies, enabled: true }
+      - { suffix: 4k, category: "4K/Movies", enabled: true }
