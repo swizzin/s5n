@@ -13,8 +13,12 @@ import (
 	"github.com/swizzin/s5n/internal/apps"
 )
 
-// Writes counts what the run actually changed. The e2e asserts that a second run
-// reports zero created and zero updated.
+// Writes counts the application objects the run actually changed: download
+// clients, root folders, hardlink settings, Prowlarr applications, qBittorrent
+// categories and preferences. Directory creation is reported per step
+// (data/dirs/...) instead, because a directory is not an owned object and is
+// made only when it is missing. The e2e asserts that a second run reports zero
+// created and zero updated.
 type Writes struct {
 	Created   int `json:"created"`
 	Updated   int `json:"updated"`
@@ -236,6 +240,21 @@ func (r *Runner) work(ctx context.Context, res *Result) error {
 	res.OwnedRecord = owned
 	if note != "" {
 		r.okStep(res, "wiring/owned", note)
+	}
+
+	// The data directories before any app step (dirs.go): the Arr root-folder
+	// step rejects a library path that does not exist yet, so on an empty data
+	// path this is what makes the first install possible at all.
+	dirs, err := EnsureDataDirs(c.Instances)
+	for _, d := range dirs {
+		detail := "exists"
+		if d.Created {
+			detail = "created"
+		}
+		r.okStep(res, d.Name, detail)
+	}
+	if err != nil {
+		return r.ensure(res, "data/dirs", apps.Unchanged, err)
 	}
 
 	var qbit *apps.Qbit

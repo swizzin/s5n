@@ -38,11 +38,11 @@ func CheckHardlink(savePath, rootFolder string) *HardlinkCheck {
 		out.Error = fmt.Sprintf(format, args...)
 		return out
 	}
-	for _, dir := range []string{savePath, rootFolder} {
-		if err := os.MkdirAll(dir, 0o775); err != nil {
-			return fail("create %s: %v", dir, err)
-		}
-	}
+	// Both directories belong to the data contract and EnsureDataDirs made them
+	// before any app step. The proof deliberately does not create them: a check
+	// that prepares what it proves would hide exactly the empty-path first
+	// install this file exists to catch, and it did — this used to be the only
+	// MkdirAll in the package, and it ran after the Arr root-folder step.
 	_ = os.Remove(out.Source)
 	_ = os.Remove(out.Target)
 	defer func() {

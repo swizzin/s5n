@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -284,15 +285,19 @@ func newHarness(t *testing.T) *harness {
 		return path
 	}
 	h := &harness{stack: f, dir: dir}
+	// The data paths are real, under this test's temp directory: the wiring run
+	// creates them itself (the Arr root-folder step needs them to exist), so a
+	// fixed /data would need root and would hide a failure to create them.
+	data := filepath.Join(dir, "data")
 	h.config = Config{
 		Namespace: "seedbox", ConfigMap: "s5n-wiring", TimeoutSeconds: 10,
 		Qbittorrent: &QbitConfig{URL: qbit.URL, Username: "admin", PasswordFile: write("qbit.pw", "hunter2\n")},
 		Prowlarr:    &ProwlarrConfig{URL: prowlarr.URL, URLBase: "/prowlarr", SelfURL: prowlarr.URL + "/prowlarr", APIKeyFile: write("prowlarr.key", "prowlarr-key")},
 		Instances: []Instance{
 			{Name: "sonarr", Kind: "sonarr", URL: sonarr.URL, URLBase: "/sonarr", APIKeyFile: write("sonarr.key", "sonarr-key"),
-				Category: "tv", SavePath: "/data/downloads/tv", RootFolder: "/data/media/tv"},
+				Category: "tv", SavePath: filepath.Join(data, "downloads/tv"), RootFolder: filepath.Join(data, "media/tv")},
 			{Name: "radarr", Kind: "radarr", URL: radarr.URL, URLBase: "/radarr", APIKeyFile: write("radarr.key", "radarr-key"),
-				Category: "movies", SavePath: "/data/downloads/movies", RootFolder: "/data/media/movies"},
+				Category: "movies", SavePath: filepath.Join(data, "downloads/movies"), RootFolder: filepath.Join(data, "media/movies")},
 		},
 	}
 	h.runner = &Runner{
@@ -472,7 +477,7 @@ func TestWiringCorrectsNearMissSavePath(t *testing.T) {
 // library folder is caught even when the first pair links fine.
 func TestWiringProvesEveryPair(t *testing.T) {
 	h := newHarness(t)
-	h.stack.linkFail = "/data/downloads/movies"
+	h.stack.linkFail = h.config.Instances[1].SavePath
 	res, err := h.runner.Run(context.Background())
 	if err == nil {
 		t.Fatalf("run succeeded with a cross-device movies pair\n%s", Summary(res))

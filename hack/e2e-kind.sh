@@ -62,12 +62,27 @@ log "building the s5n image (wiring Job + qBittorrent credential seed)"
 docker build -q -t "$IMAGE" .
 $KIND load docker-image --name "$CLUSTER" "$IMAGE"
 
-log "preparing host paths inside the node (the installer does this on real hosts)"
+# Only what `box init` creates on a real host, repeated inside the node because
+# this host is not the node: the two volume roots and one /config/<instance>
+# directory per enabled app (setup.settingsDirs). The data categories are
+# deliberately absent — downloads/<category> and media/<category> are the wiring
+# Job's, and pre-creating them would hide a first install that cannot make the
+# root folders its Arr steps need.
+log "preparing host paths inside the node (what box init creates on real hosts)"
 docker exec "${CLUSTER}-control-plane" bash -c '
-  mkdir -p /srv/s5n/data/downloads/{tv,movies,tv-4k,movies-4k,misc} \
-           /srv/s5n/data/media/{tv,movies,tv-4k,movies-4k} \
+  mkdir -p /srv/s5n/data \
            /srv/s5n/config/{qbittorrent,prowlarr,sonarr,sonarr-4k,radarr,radarr-4k,plex,tautulli,seerr}
   chown -R 1000:1000 /srv/s5n'
+
+# Nothing below may prepare the data categories: the wiring Job owns them, and a
+# first install that cannot create its own root folders is the failure this e2e
+# is here to catch. A guard rather than a comment, so a pre-create cannot creep
+# back in.
+for d in /srv/s5n/data/downloads /srv/s5n/data/media; do
+  if docker exec "${CLUSTER}-control-plane" test -e "$d"; then
+    echo "${d} already exists before the install: the e2e prepared a path the wiring Job must create"; fail=1
+  fi
+done
 
 log "Envoy Gateway ${ENVOY_GATEWAY_CHART_VERSION} as the Gateway (installs Gateway API CRDs)"
 $HELM upgrade --install envoy-gateway oci://docker.io/envoyproxy/gateway-helm \
@@ -572,6 +587,15 @@ $K -n "$NS" exec sonarr-0 -- sh -c '
   rm -f "$f" "$l"
   echo "hardlink nlink=$n dev=$d1/$d2"; [ "$n" = 2 ] && [ "$d1" = "$d2" ]' || fail=1
 
+# The categories the wiring Job made are on the host's data path and owned by
+# the release's uid:gid — the owner `box init` promises the operator. The Arrs
+# share that uid, which is why they can write their root folders at all.
+for d in /srv/s5n/data/downloads/tv /srv/s5n/data/media/tv; do
+  got=$(docker exec "${CLUSTER}-control-plane" stat -c '%u:%g %a' "$d" 2>/dev/null || echo missing)
+  echo "  ${d}: ${got}"
+  case "$got" in 1000:1000\ *) ;; *) echo "want 1000:1000, got ${got}"; fail=1 ;; esac
+done
+
 # NetworkPolicy: the release policies exist, prowlarr may reach sonarr, and a pod
 # outside the release may not.
 for p in s5n-default-deny s5n-egress s5n-wiring-egress; do
@@ -639,6 +663,8 @@ echo "wiring status = ${first_status}"
 [ "$first_status" = ok ] || { fail=1; $K -n "$NS" get cm s5n-wiring -o jsonpath='{.data.summary\.txt}'; }
 
 for expected in \
+  data/dirs/downloads/tv data/dirs/media/tv \
+  data/dirs/downloads/movies data/dirs/media/movies \
   sonarr/downloadclient sonarr/rootfolder sonarr/hardlinks \
   radarr/downloadclient radarr/rootfolder radarr/hardlinks \
   prowlarr/application/sonarr prowlarr/application/radarr \

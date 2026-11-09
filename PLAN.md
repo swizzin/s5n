@@ -129,6 +129,12 @@ the name still fits once a Usenet client shares it. The download directory is
   not release objects, so `helm uninstall` cannot delete them.
 - `puid`/`pgid`: set once for the whole release. Per-app overrides are possible but need
   a value written out explicitly.
+- The two trees themselves are the wiring Job's, not the installer's: before it contacts
+  any application it creates `downloads/<category>` and `media/<category>` for every
+  instance, as the release's `puid`/`pgid`. An Arr refuses a root folder whose directory
+  does not exist, and qBittorrent's category save paths are the other half of the same
+  contract, so both are made up front, under the one `/data` mount. `box init` creates the
+  volume roots and `config/<instance>`, and says the categories follow on the first run.
 
 ### Chart
 

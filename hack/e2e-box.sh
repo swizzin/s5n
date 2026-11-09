@@ -129,12 +129,27 @@ log "building box"
 CGO_ENABLED=0 go build -o "$WORK/box" ./cmd/box
 $KIND get kubeconfig --name "$CLUSTER" >"$WORK/kubeconfig"
 
-log "preparing host paths inside the node (the installer does this on real hosts)"
+# Only what `box init` creates on a real host, and only because --paths-in-node
+# keeps it from touching this node itself: the two volume roots and one
+# /config/<instance> directory per enabled app (setup.settingsDirs). The data
+# categories are deliberately absent — downloads/<category> and media/<category>
+# are the wiring Job's, and pre-creating them would hide a first install that
+# cannot make the root folders its Arr steps need.
+log "preparing host paths inside the node (what box init creates on real hosts)"
 docker exec "${CLUSTER}-control-plane" bash -c '
-  mkdir -p /srv/s5n/data/downloads/{tv,movies,tv-4k,movies-4k,misc} \
-           /srv/s5n/data/media/{tv,movies,tv-4k,movies-4k} \
+  mkdir -p /srv/s5n/data \
            /srv/s5n/config/{qbittorrent,prowlarr,sonarr,sonarr-4k,radarr,radarr-4k,plex,tautulli,seerr}
   chown -R 1000:1000 /srv/s5n'
+
+# Nothing below may prepare the data categories: the wiring Job owns them, and a
+# first install that cannot create its own root folders is the failure this e2e
+# is here to catch. A guard rather than a comment, so a pre-create cannot creep
+# back in. Every scenario installs through box, so this holds for all three.
+for d in /srv/s5n/data/downloads /srv/s5n/data/media; do
+  if docker exec "${CLUSTER}-control-plane" test -e "$d"; then
+    echo "${d} already exists before the install: the e2e prepared a path the wiring Job must create"; fail=1
+  fi
+done
 
 # Root's values file, written by hand: the tuning `box init` must never touch.
 # The wiring image is the locally built one, under the repository the chart's
@@ -280,6 +295,20 @@ fresh() {
   # namespace box created because the cluster had none.
   grep -q "first install" "$WORK/bootstrap1.txt" || { echo "no 'first install' line"; fail=1; }
   grep -q "^wiring ok" "$WORK/bootstrap1.txt" || { echo "box did not report a healthy receipt"; fail=1; }
+  # The data path was empty before this run: these steps are the wiring Job
+  # making both trees itself, before the Arr root-folder steps that need them.
+  for d in downloads/tv media/tv downloads/movies media/movies; do
+    got=$(status_field "[s['detail'] for s in d['steps'] if s['name']=='data/dirs/$d'][0]" 2>/dev/null || echo missing)
+    echo "  data/dirs/${d}: ${got}"
+    [ "$got" = created ] || { echo "the wiring Job did not create data/dirs/${d}"; fail=1; }
+  done
+  # Created by the Job, so owned by the release's uid:gid — the owner init
+  # promises, and the one the apps themselves run as.
+  for d in /srv/s5n/data/downloads/tv /srv/s5n/data/media/tv; do
+    got=$(docker exec "${CLUSTER}-control-plane" stat -c '%u:%g' "$d" 2>/dev/null || echo missing)
+    echo "  ${d}: owner ${got}"
+    [ "$got" = 1000:1000 ] || { echo "${d} is not owned by the release's uid:gid"; fail=1; }
+  done
   # The namespace was box's first write, and the plan said so: the cluster had
   # none of it before this run.
   grep -qF '+ Namespace seedbox (Pod Security restricted)' "$WORK/bootstrap1.txt" ||
