@@ -365,7 +365,7 @@ What `init` does (decided):
   no terminal, `init` asks nothing. A missing required answer is an error that names
   the flag or key to set.
 
-### Certificates (proposed)
+### Certificates (decided)
 
 PLAN settles the goal: cert-manager, HTTP-01 through the Gateway when the domain can be
 validated, self-signed otherwise. This is how box would do it.
@@ -398,7 +398,9 @@ validated, self-signed otherwise. This is how box would do it.
   server) in the kind cluster and points a test issuer at it, so HTTP-01 through the
   Gateway is proven on every run. The self-signed path gets its own assertion.
 
-Open: whether a renewal failure should block `apply` or only show in `doctor`.
+- **A failed renewal doesn't block `apply`.** It shows in `status` and `doctor`, which
+  name the host and cert-manager's reason. `apply` changes the seedbox, not the
+  certificate, so refusing it would only get in the way of the fix.
 
 ### install, remove and instances (decided)
 
