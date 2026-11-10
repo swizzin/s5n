@@ -352,11 +352,38 @@ fresh() {
   if grep -q "^  = envoy-gateway" "$WORK/bootstrap1.txt"; then
     echo "bootstrap thought Envoy Gateway was already installed on a fresh cluster"; fail=1
   fi
-  # cert-manager is the one component this lane does not install. Silence would
-  # read as "nothing to do"; the line is asserted so it cannot regress into a
-  # skip.
-  grep -q "cert-manager: box does not install it yet" "$WORK/bootstrap1.txt" ||
-    { echo "an unhandled cert-manager install was not reported"; fail=1; }
+  # cert-manager is part of the platform layer now: the plan names it at its
+  # pin, and the install waits for its controller, webhook and cainjector.
+  grep -qF "+ cert-manager v1.21.3 (Helm, cert-manager)" "$WORK/bootstrap1.txt" ||
+    { echo "the plan did not install cert-manager at its pinned version"; fail=1; }
+  $K -n cert-manager rollout status deploy/cert-manager --timeout=180s >/dev/null ||
+    { echo "cert-manager's controller never rolled out"; fail=1; }
+  $K -n cert-manager rollout status deploy/cert-manager-webhook --timeout=180s >/dev/null ||
+    { echo "cert-manager's webhook never rolled out"; fail=1; }
+  cm_args=$($K -n cert-manager get deploy cert-manager -o jsonpath='{.spec.template.spec.containers[0].args}')
+  case "$cm_args" in
+    *--config=*) ;;
+    *) echo "cert-manager was installed without its controller configuration"; fail=1 ;;
+  esac
+  cm_config=$($K -n cert-manager get cm cert-manager -o jsonpath='{.data.config\.yaml}')
+  case "$cm_config" in
+    *"gatewayAPI:"*"enabled: true"*) ;;
+    *) echo "cert-manager was installed without Gateway API support"; fail=1 ;;
+  esac
+  # Root's two issuers are applied after the Gateway they solve through. The
+  # production one keeps Let's Encrypt's directory: the override is the e2e's
+  # own Pebble run, not this scenario.
+  grep -qF "+ ClusterIssuers s5n-letsencrypt and s5n-selfsigned" "$WORK/bootstrap1.txt" ||
+    { echo "the plan did not apply root's ClusterIssuers"; fail=1; }
+  for issuer in s5n-letsencrypt s5n-selfsigned; do
+    $K get clusterissuer "$issuer" >/dev/null 2>&1 ||
+      { echo "ClusterIssuer ${issuer} was not applied"; fail=1; }
+  done
+  acme_server=$($K get clusterissuer s5n-letsencrypt -o jsonpath='{.spec.acme.server}')
+  [ "$acme_server" = "https://acme-v02.api.letsencrypt.org/directory" ] ||
+    { echo "s5n-letsencrypt points at ${acme_server}"; fail=1; }
+  solver_ref=$($K get clusterissuer s5n-letsencrypt -o jsonpath='{.spec.acme.solvers[0].http01.gatewayHTTPRoute.parentRefs[0].sectionName}')
+  [ "$solver_ref" = http ] || { echo "the HTTP-01 solver does not attach to the http listener (${solver_ref})"; fail=1; }
 
   # The init half ran in the same process: root's first release, and the
   # namespace box created because the cluster had none.
@@ -468,6 +495,8 @@ fresh() {
     echo "gateway=$($K -n s5n-gateway get gateway s5n -o json | platform_spec)"
     echo "pool=$($K -n metallb-system get ipaddresspool s5n-pool -o json | platform_spec)"
     echo "l2=$($K -n metallb-system get l2advertisement s5n-l2 -o json | platform_spec)"
+    echo "issuer-le=$($K get clusterissuer s5n-letsencrypt -o json | platform_spec)"
+    echo "issuer-ss=$($K get clusterissuer s5n-selfsigned -o json | platform_spec)"
     for p in s5n-blessed-images s5n-granted-service; do
       echo "vap-${p}=$($K get validatingadmissionpolicy "$p" -o json | platform_spec)"
     done
@@ -495,6 +524,11 @@ fresh() {
   # must not mention the release at all.
   if grep -q "envoy-gateway" "$WORK/bootstrap2.txt"; then
     echo "the second run took the Envoy Gateway release back over"; fail=1
+  fi
+  # The cert-manager box installed is, by then, a working install its own
+  # probe uses, so a re-run leaves it alone exactly like Envoy Gateway.
+  if grep -qE '^\s+[+~] cert-manager ' "$WORK/bootstrap2.txt"; then
+    echo "the second run took the cert-manager release back over"; fail=1
   fi
   if grep -qE "^\s+[+?] (envoy-gateway|metallb) " "$WORK/bootstrap2.txt"; then
     echo "the second run planned an install on an installed platform"; fail=1
@@ -786,6 +820,8 @@ PY
     echo "gateway=$($K -n s5n-gateway get gateway s5n -o json | platform_spec)"
     echo "pool=$($K -n metallb-system get ipaddresspool pre-existing-pool -o json | platform_spec)"
     echo "l2=$($K -n metallb-system get l2advertisement pre-existing-l2 -o json | platform_spec)"
+    echo "issuer-le=$($K get clusterissuer s5n-letsencrypt -o json | platform_spec)"
+    echo "issuer-ss=$($K get clusterissuer s5n-selfsigned -o json | platform_spec)"
     for p in s5n-blessed-images s5n-granted-service; do
       echo "vap-${p}=$($K get validatingadmissionpolicy "$p" -o json | platform_spec)"
     done

@@ -254,15 +254,15 @@ func TestBuildPlanInstallsOnlyInstallActions(t *testing.T) {
 		bootstrap.ComponentLoadBalancer: "use",
 		bootstrap.ComponentGateway:      "use",
 		bootstrap.ComponentCertManager:  "verify",
-	}), "nginx")
+	}), "nginx", "")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(plan.Steps) != 3 || plan.Steps[0].Kind != StepManifests || plan.Steps[2].Kind != StepManifests {
-		t.Fatalf("using every capability must leave the Gateway, its HTTP check, and the policy, got %+v", plan.Steps)
+	if len(plan.Steps) != 4 || plan.Steps[0].Kind != StepManifests || plan.Steps[3].Kind != StepManifests {
+		t.Fatalf("using every capability must leave the Gateway, the issuers, its HTTP check, and the policy, got %+v", plan.Steps)
 	}
-	if plan.Steps[1].Kind != StepReachable {
-		t.Fatalf("the Gateway's HTTP check is not among the steps: %+v", plan.Steps)
+	if plan.Steps[1].Kind != StepIssuers || plan.Steps[2].Kind != StepReachable {
+		t.Fatalf("the issuers and the Gateway's HTTP check are not among the steps: %+v", plan.Steps)
 	}
 	if !strings.Contains(plan.Steps[0].What, "GatewayClass nginx") {
 		t.Fatalf("the Gateway was not planned on the chosen class: %q", plan.Steps[0].What)
@@ -278,7 +278,7 @@ func TestBuildPlanInstallsOnlyInstallActions(t *testing.T) {
 		t.Fatalf("nothing installs, so nothing is unhandled: %v", plan.NotHandled)
 	}
 
-	plan, err = BuildPlan(allInstall, "eg")
+	plan, err = BuildPlan(allInstall, "eg", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -299,12 +299,28 @@ func TestBuildPlanInstallsOnlyInstallActions(t *testing.T) {
 			got = append(got, "reachable")
 		}
 	}
-	want := []string{"release/envoy-gateway", "release/metallb", "pool", "gateway", "reachable", "policy"}
+	want := []string{"release/envoy-gateway", "release/cert-manager", "release/metallb", "pool", "gateway", "reachable", "policy"}
 	if strings.Join(got, ",") != strings.Join(want, ",") {
 		t.Fatalf("plan order = %v, want %v", got, want)
 	}
-	if len(plan.NotHandled) != 1 || !strings.Contains(plan.NotHandled[0], "cert-manager") {
-		t.Fatalf("cert-manager install must be reported, got %v", plan.NotHandled)
+	if len(plan.NotHandled) != 0 {
+		t.Fatalf("every install is handled, so nothing is unhandled: %v", plan.NotHandled)
+	}
+	var certManager *Release
+	for _, s := range plan.Steps {
+		if s.Kind == StepRelease && s.Release.Name == CertManagerRelease {
+			r := s.Release
+			certManager = &r
+		}
+	}
+	if certManager == nil || certManager.Version != CertManagerVersion {
+		t.Fatalf("cert-manager was not planned at its pin: %+v", certManager)
+	}
+	crds, _ := certManager.Values["crds"].(map[string]any)
+	config, _ := certManager.Values["config"].(map[string]any)
+	gwapi, _ := config["gatewayAPI"].(map[string]any)
+	if crds["enabled"] != true || gwapi["enabled"] != true {
+		t.Fatalf("cert-manager values = %v, want its CRDs and Gateway API support on", certManager.Values)
 	}
 }
 
@@ -312,7 +328,7 @@ func TestBuildPlanInstallsOnlyInstallActions(t *testing.T) {
 // the answer is "no address") MetalLB and its pool, then the reachability
 // check. That order is the whole design: the Gateway's own status decides.
 func TestBuildPlanMakesMetalLBConditionalWhenUnprobed(t *testing.T) {
-	plan, err := BuildPlan(notProbed(bootstrap.ModeAuto), "eg")
+	plan, err := BuildPlan(notProbed(bootstrap.ModeAuto), "eg", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -327,7 +343,7 @@ func TestBuildPlanMakesMetalLBConditionalWhenUnprobed(t *testing.T) {
 			conditional = append(conditional, string(s.Kind)+"/"+s.Release.Name)
 		}
 	}
-	want := []StepKind{StepRelease, StepManifests, StepGatewayAddress, StepRelease, StepPool, StepReachable, StepManifests}
+	want := []StepKind{StepRelease, StepManifests, StepIssuers, StepGatewayAddress, StepRelease, StepPool, StepReachable, StepManifests}
 	if len(kinds) != len(want) {
 		t.Fatalf("plan = %v, want %v", kinds, want)
 	}
@@ -336,14 +352,14 @@ func TestBuildPlanMakesMetalLBConditionalWhenUnprobed(t *testing.T) {
 			t.Fatalf("plan = %v, want %v", kinds, want)
 		}
 	}
-	if plan.Steps[0].Release.Name != EnvoyGatewayRelease || plan.Steps[3].Release.Name != MetalLBRelease {
-		t.Fatalf("plan releases = %s, %s", plan.Steps[0].Release.Name, plan.Steps[3].Release.Name)
+	if plan.Steps[0].Release.Name != EnvoyGatewayRelease || plan.Steps[4].Release.Name != MetalLBRelease {
+		t.Fatalf("plan releases = %s, %s", plan.Steps[0].Release.Name, plan.Steps[4].Release.Name)
 	}
 	if got := strings.Join(conditional, ","); got != "release/metallb,metallb-pool/" {
 		t.Fatalf("conditional steps = %q, want MetalLB and its pool only", got)
 	}
-	if plan.Steps[2].Mode != bootstrap.ModeAuto {
-		t.Fatalf("the address question does not run in auto mode: %+v", plan.Steps[2])
+	if plan.Steps[3].Mode != bootstrap.ModeAuto {
+		t.Fatalf("the address question does not run in auto mode: %+v", plan.Steps[3])
 	}
 	// The policy is never conditional: tenancy is not a LoadBalancer question.
 	if plan.Steps[len(plan.Steps)-1].Unless != "" {
@@ -362,7 +378,7 @@ func TestBuildPlanAsksAboutTheGatewayItDidNotWrite(t *testing.T) {
 		{Component: bootstrap.ComponentGateway, Action: "use", Outcome: bootstrap.OutcomePresent, Mode: bootstrap.ModeAuto},
 		{Component: bootstrap.ComponentCertManager, Action: "use", Outcome: bootstrap.OutcomePresent, Mode: bootstrap.ModeAuto},
 	}
-	plan, err := BuildPlan(comps, "nginx")
+	plan, err := BuildPlan(comps, "nginx", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -370,7 +386,7 @@ func TestBuildPlanAsksAboutTheGatewayItDidNotWrite(t *testing.T) {
 	for _, s := range plan.Steps {
 		kinds = append(kinds, s.Kind)
 	}
-	want := []StepKind{StepManifests, StepGatewayAddress, StepRelease, StepPool, StepReachable, StepManifests}
+	want := []StepKind{StepManifests, StepIssuers, StepGatewayAddress, StepRelease, StepPool, StepReachable, StepManifests}
 	if len(kinds) != len(want) {
 		t.Fatalf("plan = %v, want %v", kinds, want)
 	}
@@ -382,7 +398,7 @@ func TestBuildPlanAsksAboutTheGatewayItDidNotWrite(t *testing.T) {
 	if !strings.Contains(plan.Steps[0].What, "GatewayClass nginx") {
 		t.Fatalf("the Gateway was not written on the used class: %q", plan.Steps[0].What)
 	}
-	if plan.Steps[2].Unless != UnlessGatewayAddress || plan.Steps[3].Unless != UnlessGatewayAddress {
+	if plan.Steps[3].Unless != UnlessGatewayAddress || plan.Steps[4].Unless != UnlessGatewayAddress {
 		t.Fatal("MetalLB is not conditional on a Gateway box did not write")
 	}
 }
@@ -392,7 +408,7 @@ func TestBuildPlanAsksAboutTheGatewayItDidNotWrite(t *testing.T) {
 func TestBuildPlanManagedInstallsMetalLBWithoutAQuestion(t *testing.T) {
 	comps := notProbed(bootstrap.ModeManaged)
 	comps[1].Action = "install"
-	plan, err := BuildPlan(comps, "eg")
+	plan, err := BuildPlan(comps, "eg", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -403,7 +419,7 @@ func TestBuildPlanManagedInstallsMetalLBWithoutAQuestion(t *testing.T) {
 			t.Fatalf("managed mode planned a conditional step: %+v", s)
 		}
 	}
-	want := []StepKind{StepRelease, StepRelease, StepPool, StepManifests, StepReachable, StepManifests}
+	want := []StepKind{StepRelease, StepRelease, StepPool, StepManifests, StepIssuers, StepReachable, StepManifests}
 	if len(kinds) != len(want) {
 		t.Fatalf("managed plan = %v, want %v", kinds, want)
 	}
@@ -420,7 +436,7 @@ func TestBuildPlanManagedInstallsMetalLBWithoutAQuestion(t *testing.T) {
 // external mode writes nothing for the address layer: the Gateway's address
 // verifies the operator's own, and the plan says so with a question.
 func TestBuildPlanExternalVerifiesWithTheGatewayAddress(t *testing.T) {
-	plan, err := BuildPlan(notProbed(bootstrap.ModeExternal), "eg")
+	plan, err := BuildPlan(notProbed(bootstrap.ModeExternal), "eg", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -448,7 +464,7 @@ func TestBuildPlanRefusesConflict(t *testing.T) {
 	comps := components(map[bootstrap.PlatformComponent]string{
 		bootstrap.ComponentGateway: "stop",
 	})
-	plan, err := BuildPlan(comps, "eg")
+	plan, err := BuildPlan(comps, "eg", "")
 	if err == nil || !strings.Contains(err.Error(), "platform conflict") {
 		t.Fatalf("want a conflict refusal, got %v (%+v)", err, plan)
 	}
@@ -528,13 +544,14 @@ func TestApplyInstallsInOrder(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(f.rel.installed) != 2 ||
+	if len(f.rel.installed) != 3 ||
 		f.rel.installed[0].Name != EnvoyGatewayRelease || f.rel.installed[0].Version != EnvoyGatewayVersion ||
-		f.rel.installed[1].Name != MetalLBRelease || f.rel.installed[1].Version != MetalLBVersion {
+		f.rel.installed[1].Name != CertManagerRelease || f.rel.installed[1].Version != CertManagerVersion ||
+		f.rel.installed[2].Name != MetalLBRelease || f.rel.installed[2].Version != MetalLBVersion {
 		t.Fatalf("releases = %+v", f.rel.installed)
 	}
-	if len(f.cl.writes) != 3 {
-		t.Fatalf("applies = %d, want pool, gateway, policy", len(f.cl.writes))
+	if len(f.cl.writes) != 4 {
+		t.Fatalf("applies = %d, want pool, gateway, issuers, policy", len(f.cl.writes))
 	}
 	if kind, ns, name := objectMeta(f.cl.writes[0][0]); kind != "IPAddressPool" || ns != MetalLBNamespace || name != MetalLBPoolName {
 		t.Fatalf("first apply is %s %s/%s, want the MetalLB pool", kind, ns, name)
@@ -551,8 +568,11 @@ func TestApplyInstallsInOrder(t *testing.T) {
 	if kind, ns, name := objectMeta(f.cl.writes[1][2]); kind != "Gateway" || ns != GatewayNamespace || name != GatewayName {
 		t.Fatalf("second apply's third doc is %s %s/%s", kind, ns, name)
 	}
-	if kind, _, _ := objectMeta(f.cl.writes[2][0]); kind != "Namespace" {
-		t.Fatalf("third apply starts with %s, want the policy's namespace", kind)
+	if kind, _, name := objectMeta(f.cl.writes[2][0]); kind != "ClusterIssuer" || name != LetsEncryptIssuer {
+		t.Fatalf("third apply starts with %s %s, want the cert-manager issuers", kind, name)
+	}
+	if kind, _, _ := objectMeta(f.cl.writes[3][0]); kind != "Namespace" {
+		t.Fatalf("fourth apply starts with %s, want the policy's namespace", kind)
 	}
 
 	var waits []string
@@ -561,6 +581,9 @@ func TestApplyInstallsInOrder(t *testing.T) {
 	}
 	want := []string{
 		"Deployment envoy-gateway-system/envoy-gateway",
+		"Deployment cert-manager/cert-manager",
+		"Deployment cert-manager/cert-manager-webhook",
+		"Deployment cert-manager/cert-manager-cainjector",
 		"Deployment metallb-system/metallb-controller",
 		"DaemonSet metallb-system/metallb-speaker",
 	}
@@ -622,6 +645,7 @@ func TestApplySkipsMetalLBWhenTheGatewayGetsAnAddress(t *testing.T) {
 		"install:" + EnvoyGatewayRelease,
 		"await:Deployment envoy-gateway-system/envoy-gateway",
 		"apply:Namespace",
+		"apply:ClusterIssuer",
 		"address",
 		"address",
 		"reach",
@@ -653,12 +677,12 @@ func TestApplyInstallsMetalLBOnAddressNotAssigned(t *testing.T) {
 	if len(f.rel.installed) != 2 || f.rel.installed[1].Name != MetalLBRelease {
 		t.Fatalf("releases = %+v, want Envoy Gateway then MetalLB", f.rel.installed)
 	}
-	if len(f.cl.writes) != 3 {
-		t.Fatalf("applies = %d, want pool, gateway, policy", len(f.cl.writes))
+	if len(f.cl.writes) != 4 {
+		t.Fatalf("applies = %d, want pool, gateway, issuers, policy", len(f.cl.writes))
 	}
-	// The Gateway is applied before the question, so the pool is the second
-	// write, not the first.
-	if kind, _, name := objectMeta(f.cl.writes[1][0]); kind != "IPAddressPool" || name != MetalLBPoolName {
+	// The Gateway and its issuers are applied before the question, so the
+	// pool is the third write, not the first.
+	if kind, _, name := objectMeta(f.cl.writes[2][0]); kind != "IPAddressPool" || name != MetalLBPoolName {
 		t.Fatalf("the pool was not applied after the Gateway: %s %s", kind, name)
 	}
 	got := f.tr.String()
@@ -667,6 +691,7 @@ func TestApplyInstallsMetalLBOnAddressNotAssigned(t *testing.T) {
 		"install:" + EnvoyGatewayRelease,
 		"await:Deployment envoy-gateway-system/envoy-gateway",
 		"apply:Namespace",
+		"apply:ClusterIssuer",
 		"address",
 		"install:" + MetalLBRelease,
 		"await:Deployment metallb-system/metallb-controller",
@@ -892,6 +917,7 @@ func TestApplyVerifiesPinnedReleases(t *testing.T) {
 	f := newFixture()
 	f.rel.versions = map[string]string{
 		"envoy-gateway-system/envoy-gateway": EnvoyGatewayVersion,
+		"cert-manager/cert-manager":          CertManagerVersion,
 		"metallb-system/metallb":             MetalLBVersion,
 	}
 	f.probe.answers = []GatewayAnswer{{Address: "192.0.2.10"}}
@@ -906,8 +932,8 @@ func TestApplyVerifiesPinnedReleases(t *testing.T) {
 		t.Fatalf("the plan did not say the release is already there: %q", f.log.String())
 	}
 	// Readiness is still checked: a no-op run is verification, not silence.
-	if len(f.cl.awaits) != 3 {
-		t.Fatalf("waits = %v, want all three readiness checks", f.cl.awaits)
+	if len(f.cl.awaits) != 6 {
+		t.Fatalf("waits = %v, want every readiness check", f.cl.awaits)
 	}
 }
 
@@ -949,15 +975,15 @@ func TestApplyRetriesThePool(t *testing.T) {
 	if _, err := f.d.Apply(context.Background(), allInstall); err != nil {
 		t.Fatal(err)
 	}
-	if len(f.cl.writes) != 3 {
-		t.Fatalf("applies = %d, want the pool retried then the gateway and policy", len(f.cl.writes))
+	if len(f.cl.writes) != 4 {
+		t.Fatalf("applies = %d, want the pool retried, then the gateway, issuers and policy", len(f.cl.writes))
 	}
 	if !strings.Contains(f.log.String(), "applied IPAddressPool s5n-pool (192.0.2.10/32)") {
 		t.Fatalf("the pool was not reported: %q", f.log.String())
 	}
 }
 
-func TestApplyReportsCertManager(t *testing.T) {
+func TestApplyInstallsCertManager(t *testing.T) {
 	f := newFixture()
 	f.probe.answers = []GatewayAnswer{{Address: "192.0.2.10"}}
 
@@ -965,10 +991,10 @@ func TestApplyReportsCertManager(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(res.NotHandled) != 1 || !strings.Contains(res.NotHandled[0], "cert-manager") {
-		t.Fatalf("cert-manager was silently skipped: %+v", res.NotHandled)
+	if len(res.NotHandled) != 0 {
+		t.Fatalf("cert-manager was left unhandled: %+v", res.NotHandled)
 	}
-	if !strings.Contains(f.log.String(), "! cert-manager: box does not install it yet") {
+	if !strings.Contains(f.log.String(), "installing cert-manager v1.21.3 (Helm, cert-manager)") {
 		t.Fatalf("cert-manager was not printed: %q", f.log.String())
 	}
 }
@@ -1084,5 +1110,119 @@ func TestApplyRefusesAForeignEnvoyBeforeTheConfirm(t *testing.T) {
 	}
 	if len(f.rel.installed) != 0 || len(f.cl.writes) != 0 {
 		t.Fatalf("a refusal wrote: %d releases, %d applies", len(f.rel.installed), len(f.cl.writes))
+	}
+}
+
+// The embedded ClusterIssuers are root's contract: a production ACME issuer
+// that solves HTTP-01 through the s5n Gateway's port-80 listener, and a
+// self-signed issuer for everything that cannot be validated. There is no
+// ACME email: Let's Encrypt stopped sending expiry mail.
+func TestEmbeddedIssuers(t *testing.T) {
+	docs, err := issuerObjects("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(docs) != 2 {
+		t.Fatalf("issuer manifest has %d documents, want two ClusterIssuers", len(docs))
+	}
+	byName := map[string]map[string]any{}
+	for _, doc := range docs {
+		kind, _, name := objectMeta(doc)
+		if kind != "ClusterIssuer" {
+			t.Fatalf("%s %s is not a ClusterIssuer", kind, name)
+		}
+		byName[name] = doc
+	}
+	le := byName[LetsEncryptIssuer]
+	if le == nil {
+		t.Fatalf("no %s", LetsEncryptIssuer)
+	}
+	acme, _ := le["spec"].(map[string]any)["acme"].(map[string]any)
+	if acme["server"] != "https://acme-v02.api.letsencrypt.org/directory" {
+		t.Fatalf("ACME server = %v, want Let's Encrypt production", acme["server"])
+	}
+	if _, ok := acme["email"]; ok {
+		t.Fatal("the issuer sets an email address")
+	}
+	solvers, _ := acme["solvers"].([]any)
+	if len(solvers) != 1 {
+		t.Fatalf("solvers = %v", acme["solvers"])
+	}
+	solver, _ := solvers[0].(map[string]any)["http01"].(map[string]any)
+	gw, _ := solver["gatewayHTTPRoute"].(map[string]any)
+	parentRefs, _ := gw["parentRefs"].([]any)
+	if len(parentRefs) != 1 {
+		t.Fatalf("parentRefs = %v", gw["parentRefs"])
+	}
+	ref, _ := parentRefs[0].(map[string]any)
+	// No sectionName: the solver route must attach to the generic http listener
+	// and to every per-host http-<host> listener that admits its namespace. A
+	// pinned sectionName would stop matching once a host has its own listener.
+	if ref["name"] != GatewayName || ref["namespace"] != GatewayNamespace {
+		t.Fatalf("the solver does not attach to the s5n Gateway: %v", ref)
+	}
+	if _, ok := ref["sectionName"]; ok {
+		t.Fatalf("the solver pins a listener section: %v", ref)
+	}
+	if byName[SelfSignedIssuer] == nil {
+		t.Fatalf("no %s", SelfSignedIssuer)
+	}
+	if _, ok := byName[SelfSignedIssuer]["spec"].(map[string]any)["selfSigned"]; !ok {
+		t.Fatalf("%s is not self-signed: %v", SelfSignedIssuer, byName[SelfSignedIssuer]["spec"])
+	}
+}
+
+// The only ACME server override in the tree: a development run points the
+// production issuer at its test server, and that server's own certificate is
+// self-signed, so the test issuer skips verifying it. A real run keeps the
+// manifest byte for byte.
+func TestIssuerOverrideIsForTestServersOnly(t *testing.T) {
+	const testServer = "https://pebble.pebble.svc:14000/dir"
+	docs, err := issuerObjects(testServer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	acme, _ := docs[0]["spec"].(map[string]any)["acme"].(map[string]any)
+	if acme["server"] != testServer || acme["skipTLSVerify"] != true {
+		t.Fatalf("overridden acme = %v", acme)
+	}
+	plain, err := issuerObjects("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	prod, _ := plain[0]["spec"].(map[string]any)["acme"].(map[string]any)
+	if _, ok := prod["skipTLSVerify"]; ok {
+		t.Fatal("a production issuer skips ACME endpoint verification")
+	}
+}
+
+// cert-manager's webhook can refuse the first apply while its certificate is
+// still being injected, exactly like MetalLB's; the issuer apply is retried,
+// bounded, and the error is box's own.
+func TestApplyRetriesTheIssuers(t *testing.T) {
+	f := newFixture()
+	f.cl.applyErrs = []error{nil, nil, errors.New("failed calling webhook: no endpoints available"), nil}
+	f.probe.answers = []GatewayAnswer{{Address: "192.0.2.10"}}
+	f.d.WebhookTimeout = time.Second
+	f.d.Poll = time.Millisecond
+
+	res, err := f.d.Apply(context.Background(), allInstall)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(f.cl.writes) != 4 {
+		t.Fatalf("applies = %d, want the issuers retried, then the policy", len(f.cl.writes))
+	}
+	if !strings.Contains(f.log.String(), "applied ClusterIssuers "+LetsEncryptIssuer) {
+		t.Fatalf("the issuers were not reported: %q", f.log.String())
+	}
+	found := false
+	for _, name := range res.Installed {
+		if strings.Contains(name, LetsEncryptIssuer) {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("the issuers are not in the result: %+v", res.Installed)
 	}
 }

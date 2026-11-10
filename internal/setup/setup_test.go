@@ -241,10 +241,11 @@ func newHarness(t *testing.T) *harness {
 		t.Fatalf("load the fixture catalog: %v", err)
 	}
 	h.decision = &Decision{
-		Host:    h.host,
-		Prompt:  h.prompt,
-		Catalog: cat,
-		Say:     &say.Plain{W: h.out},
+		Host:     h.host,
+		Prompt:   h.prompt,
+		Catalog:  cat,
+		Say:      &say.Plain{W: h.out},
+		Resolver: stubResolver{},
 		Apply: func(ctx context.Context, opts ApplyOptions) error {
 			h.applied = append(h.applied, opts)
 			if opts.AfterConfirm != nil {
@@ -874,3 +875,61 @@ apps:
         # it says this when it starts
         greeting: "hi"
 `
+
+// stubResolver answers one fixed lookups map, so init's issuer decision never
+// depends on the machine a test runs on.
+type stubResolver struct {
+	addrs map[string][]string
+	errs  map[string]error
+}
+
+func (s stubResolver) LookupHost(_ context.Context, host string) ([]string, error) {
+	if err := s.errs[host]; err != nil {
+		return nil, err
+	}
+	return s.addrs[host], nil
+}
+
+// tls.issuer in the values file forces the issuer, even on a first run where
+// the chart's defaults are the baseline. It is the operator's file, not the
+// chart's, so init reads it directly.
+func TestForcedIssuerFromTheValuesFile(t *testing.T) {
+	h := newHarness(t)
+	if err := os.WriteFile(h.valuesPath, []byte("tls:\n  issuer: selfsigned\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	h.decision.Resolver = stubResolver{addrs: map[string][]string{"box.example.com": {"203.0.113.7"}}}
+	h.prompt.inputs = []string{"box.example.com", "/srv/s5n/data", "/srv/s5n/config"}
+	h.prompt.multis = [][]string{{"alpha"}}
+
+	res, err := h.run(h.options())
+	if err != nil {
+		t.Fatalf("init: %v\n%s", err, h.out)
+	}
+	if res.Issuer != IssuerSelfSigned {
+		t.Fatalf("issuer = %q, want the values file's selfsigned", res.Issuer)
+	}
+	if !strings.Contains(h.out.String(), "tls.issuer=selfsigned forces a self-signed certificate") {
+		t.Fatalf("init did not say the issuer was forced:\n%s", h.out)
+	}
+}
+
+// The resolution is init's default: a public answer gets Let's Encrypt, and
+// the line says so.
+func TestIssuerFollowsTheDomain(t *testing.T) {
+	h := newHarness(t)
+	h.decision.Resolver = stubResolver{addrs: map[string][]string{"box.example.com": {"203.0.113.7"}}}
+	h.prompt.inputs = []string{"box.example.com", "/srv/s5n/data", "/srv/s5n/config"}
+	h.prompt.multis = [][]string{{"alpha"}}
+
+	res, err := h.run(h.options())
+	if err != nil {
+		t.Fatalf("init: %v\n%s", err, h.out)
+	}
+	if res.Issuer != IssuerLetsEncrypt {
+		t.Fatalf("issuer = %q, want Let's Encrypt", res.Issuer)
+	}
+	if !strings.Contains(h.out.String(), "box.example.com resolves to 203.0.113.7: using Let's Encrypt") {
+		t.Fatalf("init did not explain the issuer:\n%s", h.out)
+	}
+}

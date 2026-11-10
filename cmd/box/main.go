@@ -157,6 +157,16 @@ func (c *chartFlags) load(ctx context.Context, src release.ChartSource) (release
 }
 
 func runBootstrap(args []string) {
+	// The ACME server override is a development and e2e switch, not operator
+	// surface: flag.PrintDefaults lists every registered flag even with an
+	// empty usage, so the only way to keep it off --help is to take it out of
+	// the arguments before the FlagSet parses them. Its removal (and the
+	// e2e's switch to a test issuer of its own) is a follow-up.
+	acmeServer, args, err := takeDevFlag(args, "acme-server")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "box: %v\n", err)
+		os.Exit(2)
+	}
 	fs := flag.NewFlagSet("bootstrap", flag.ExitOnError)
 	dryRun := fs.Bool("dry-run", false, "print the decision and reasons; probe nothing remote, install nothing")
 	kubeconfig := fs.String("kubeconfig", "", "explicit kubeconfig to use, or fail with no fallback")
@@ -234,7 +244,7 @@ func runBootstrap(args []string) {
 	}
 
 	ctx := context.Background()
-	if err := applyPlatform(ctx, res.Kubeconfig, res.Platform, res.Gateway.Class, *yes, out); err != nil {
+	if err := applyPlatform(ctx, res.Kubeconfig, res.Platform, res.Gateway.Class, acmeServer, *yes, out); err != nil {
 		if errors.Is(err, platform.ErrCancelled) {
 			os.Exit(1)
 		}
@@ -256,7 +266,7 @@ func runBootstrap(args []string) {
 // applyPlatform applies the platform layer the decision says install. The
 // confirmation is box's existing one: --yes, or no terminal to ask on, is
 // unattended (docs/box.md, "bootstrap and init").
-func applyPlatform(ctx context.Context, kubeconfig string, components []bootstrap.ComponentResult, gatewayClass string, yes bool, out say.Reporter) error {
+func applyPlatform(ctx context.Context, kubeconfig string, components []bootstrap.ComponentResult, gatewayClass, acmeServer string, yes bool, out say.Reporter) error {
 	out.Phase("platform")
 	var confirm platform.Confirmer
 	if tr, ok := live(out); ok {
@@ -272,6 +282,7 @@ func applyPlatform(ctx context.Context, kubeconfig string, components []bootstra
 	}
 	p := &platform.Decision{
 		GatewayClass: gatewayClass,
+		ACMEServer:   acmeServer,
 		Open:         func() (platform.Cluster, error) { return platform.NewCluster(kubeconfig) },
 		Releases:     platform.NewHelm(kubeconfig),
 		// The LoadBalancer question is settled by the Gateway's own status, so
@@ -554,10 +565,11 @@ func (o *initFlags) run(ctx context.Context, kubeconfig string, yes, plain bool,
 	o.fs.Visit(func(f *flag.Flag) { set[f.Name] = true })
 
 	d := &setup.Decision{
-		Host:    setup.LinuxPathHost{},
-		Prompt:  prompt,
-		Catalog: cat,
-		Say:     out,
+		Host:     setup.LinuxPathHost{},
+		Prompt:   prompt,
+		Catalog:  cat,
+		Say:      out,
+		Resolver: setup.NetResolver{},
 		Apply: func(ctx context.Context, req setup.ApplyOptions) error {
 			// The cluster decision belongs to `box bootstrap`; apply reuses it.
 			// It is resolved here, after init has written the files, so a host
@@ -622,10 +634,60 @@ func (o *initFlags) run(ctx context.Context, kubeconfig string, yes, plain bool,
 	if err != nil {
 		return err
 	}
+	// The release is installed; now the host's TLS. It runs after apply
+	// because the host name only exists once init has written the grant, and
+	// it is harmless when the certificate is already there (the same objects,
+	// server-side applied).
+	if res.Domain != "" && res.Issuer != "" {
+		kc, err := release.ResolveKubeconfig(kubeconfig, os.Getenv("KUBECONFIG"), bootstrap.FilesystemRecords{Path: bootstrap.RecordPath})
+		if err != nil {
+			return err
+		}
+		out.Phase("certificate")
+		cert := &platform.CertificateDecision{
+			Host:   res.Domain,
+			Issuer: res.Issuer,
+			Open:   func() (platform.CertificateCluster, error) { return platform.NewCluster(kc) },
+			Say:    out,
+		}
+		if _, err := cert.Apply(ctx); err != nil {
+			return err
+		}
+	}
 	if res.Domain != "" {
 		out.Banner("seedbox ready", res.Domain)
 	}
 	return nil
+}
+
+// takeDevFlag removes one development-only flag from args before a FlagSet
+// parses them, in either --name=value or --name value form. It is how a
+// switch that is not operator surface stays off --help: registering it would
+// list it there even with an empty usage.
+func takeDevFlag(args []string, name string) (value string, rest []string, err error) {
+	rest = make([]string, 0, len(args))
+	found := false
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		switch {
+		case arg == "--"+name || arg == "-"+name:
+			if i+1 >= len(args) {
+				return "", nil, fmt.Errorf("--%s needs a value", name)
+			}
+			value = args[i+1]
+			found = true
+			i++
+		case strings.HasPrefix(arg, "--"+name+"=") || strings.HasPrefix(arg, "-"+name+"="):
+			value = arg[strings.Index(arg, "=")+1:]
+			found = true
+		default:
+			rest = append(rest, arg)
+		}
+	}
+	if found && value == "" {
+		return "", nil, fmt.Errorf("--%s needs a value", name)
+	}
+	return value, rest, nil
 }
 
 // transientAnswers is a repeatable --set-transient key=value, the unattended

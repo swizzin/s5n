@@ -362,14 +362,259 @@ func (p *HTTPProber) Platform(ctx context.Context) (PlatformProbe, error) {
 	if err != nil {
 		return probe, err
 	}
-	if certmanager {
-		probe.CertManager = OutcomePresent
-	} else {
-		probe.CertManager = OutcomeAbsent
+	state, err := p.certManagerState(ctx, certmanager)
+	if err != nil {
+		return probe, err
 	}
+	probe.CertManager, probe.CertManagerReason = classifyCertManager(state)
 
 	probe.LoadBalancer = OutcomeNotProbed
 	return probe, nil
+}
+
+// deploymentList is the subset of apps/v1 Deployment box reads to tell whether
+// an installed cert-manager can do what s5n needs. Only the controller's
+// command line, its mounted controller configuration and the webhook's
+// availability matter.
+type deploymentList struct {
+	Items []deploymentItem `json:"items"`
+}
+
+type deploymentItem struct {
+	Metadata struct {
+		Name      string            `json:"name"`
+		Namespace string            `json:"namespace"`
+		Labels    map[string]string `json:"labels"`
+	} `json:"metadata"`
+	Spec struct {
+		Template struct {
+			Spec struct {
+				Volumes    []deploymentVolume    `json:"volumes"`
+				Containers []deploymentContainer `json:"containers"`
+			} `json:"spec"`
+		} `json:"template"`
+	} `json:"spec"`
+	Status struct {
+		AvailableReplicas int                   `json:"availableReplicas"`
+		Conditions        []deploymentCondition `json:"conditions"`
+	} `json:"status"`
+}
+
+type deploymentVolume struct {
+	Name      string `json:"name"`
+	ConfigMap *struct {
+		Name string `json:"name"`
+	} `json:"configMap"`
+}
+
+type deploymentContainer struct {
+	Name         string           `json:"name"`
+	Image        string           `json:"image"`
+	Args         []string         `json:"args"`
+	VolumeMounts []volumeMountRef `json:"volumeMounts"`
+}
+
+type volumeMountRef struct {
+	Name      string `json:"name"`
+	MountPath string `json:"mountPath"`
+}
+
+type deploymentCondition struct {
+	Type   string `json:"type"`
+	Status string `json:"status"`
+}
+
+// certManagerState reads an existing cert-manager: the controller's version,
+// whether its webhook is available, and whether the controller runs with
+// Gateway API support. It reads flags and the controller's own configuration
+// file; it never changes either.
+func (p *HTTPProber) certManagerState(ctx context.Context, crd bool) (CertManagerState, error) {
+	var s CertManagerState
+	if !crd {
+		return s, nil
+	}
+	s.CRD = true
+	controller, err := p.deployments(ctx, "app.kubernetes.io/name=cert-manager,app.kubernetes.io/component=controller")
+	if err != nil {
+		return s, err
+	}
+	if len(controller.Items) == 0 {
+		return s, nil
+	}
+	dep := controller.Items[0]
+	s.Controller = true
+	s.Version = controllerVersion(dep)
+	enabled, err := gatewayAPIEnabled(ctx, p, dep)
+	if err != nil {
+		return s, err
+	}
+	s.GatewayAPI = enabled
+
+	webhook, err := p.webhookAvailable(ctx, dep.Metadata.Namespace, dep.Metadata.Name)
+	if err != nil {
+		return s, err
+	}
+	s.Webhook = webhook
+	return s, nil
+}
+
+// deployments lists Deployments cluster-wide with a label selector: an
+// install box did not make may live in any namespace.
+func (p *HTTPProber) deployments(ctx context.Context, selector string) (deploymentList, error) {
+	var out deploymentList
+	path := "/apis/apps/v1/deployments?labelSelector=" + url.QueryEscape(selector)
+	if err := p.get(ctx, path, &out); err != nil {
+		return out, fmt.Errorf("list deployments: %w", err)
+	}
+	return out, nil
+}
+
+// webhookAvailable finds the webhook Deployment beside the controller and
+// answers whether it is Available. The upstream chart names it
+// "<release>-webhook"; a differently named one in the same namespace with the
+// webhook component label is accepted too.
+func (p *HTTPProber) webhookAvailable(ctx context.Context, namespace, controller string) (bool, error) {
+	var list deploymentList
+	path := "/apis/apps/v1/namespaces/" + namespace + "/deployments"
+	if err := p.get(ctx, path, &list); err != nil {
+		return false, fmt.Errorf("list deployments in %s: %w", namespace, err)
+	}
+	var chosen *deploymentItem
+	for i := range list.Items {
+		item := &list.Items[i]
+		// The chart labels the webhook app.kubernetes.io/name=webhook, not
+		// cert-manager, so the name is the reliable match; a differently
+		// named sibling with the webhook component label is the fallback.
+		if item.Metadata.Name == controller+"-webhook" {
+			chosen = item
+			break
+		}
+		if chosen == nil && item.Metadata.Labels["app.kubernetes.io/component"] == "webhook" {
+			chosen = item
+		}
+	}
+	if chosen == nil {
+		return false, nil
+	}
+	for _, c := range chosen.Status.Conditions {
+		if c.Type == "Available" {
+			return c.Status == "True", nil
+		}
+	}
+	return chosen.Status.AvailableReplicas > 0, nil
+}
+
+// controllerVersion is the version the controller runs, from its image tag.
+// The chart also labels the Deployment with app.kubernetes.io/version; that is
+// the fallback for a digest-pinned image.
+func controllerVersion(dep deploymentItem) string {
+	for _, c := range dep.Spec.Template.Spec.Containers {
+		if !strings.Contains(c.Image, "cert-manager-controller") && len(dep.Spec.Template.Spec.Containers) > 1 {
+			continue
+		}
+		if tag := imageTag(c.Image); tag != "" && tag != "latest" {
+			return tag
+		}
+	}
+	return dep.Metadata.Labels["app.kubernetes.io/version"]
+}
+
+// imageTag is the tag in an image reference, empty for a digest-only one.
+func imageTag(image string) string {
+	ref := image
+	if i := strings.LastIndex(ref, "@"); i >= 0 {
+		ref = ref[:i]
+	}
+	slash := strings.LastIndex(ref, "/")
+	colon := strings.LastIndex(ref, ":")
+	if colon < 0 || colon < slash {
+		return ""
+	}
+	return ref[colon+1:]
+}
+
+// gatewayAPIEnabled reads whether the controller has Gateway API support on:
+// the legacy boolean flag, or gatewayAPI.enabled in the controller
+// configuration file the Deployment mounts. The file is the chart's
+// config.gatewayAPI.enabled setting; box reads it and never rewrites it.
+func gatewayAPIEnabled(ctx context.Context, p *HTTPProber, dep deploymentItem) (bool, error) {
+	for _, c := range dep.Spec.Template.Spec.Containers {
+		for _, arg := range c.Args {
+			if arg == "--enable-gateway-api" || arg == "--enable-gateway-api=true" {
+				return true, nil
+			}
+			if strings.HasPrefix(arg, "--enable-gateway-api=") {
+				return strings.TrimPrefix(arg, "--enable-gateway-api=") == "true", nil
+			}
+			path, ok := strings.CutPrefix(arg, "--config=")
+			if !ok || path == "" {
+				continue
+			}
+			return pollConfigMap(ctx, p, dep, c, path)
+		}
+	}
+	return false, nil
+}
+
+// pollConfigMap resolves --config=<path> through the container's volume mounts
+// to a ConfigMap and reads the one setting. A configuration mounted some other
+// way is not something box can read, so it answers false and the refusal names
+// the setting.
+func pollConfigMap(ctx context.Context, p *HTTPProber, dep deploymentItem, c deploymentContainer, path string) (bool, error) {
+	volume := volumeForPath(c.VolumeMounts, path)
+	if volume == "" {
+		return false, nil
+	}
+	name := configMapForVolume(dep.Spec.Template.Spec.Volumes, volume)
+	if name == "" {
+		return false, nil
+	}
+	var cm struct {
+		Data map[string]string `json:"data"`
+	}
+	apiPath := fmt.Sprintf("/api/v1/namespaces/%s/configmaps/%s", dep.Metadata.Namespace, name)
+	if err := p.get(ctx, apiPath, &cm); err != nil {
+		return false, fmt.Errorf("read controller config %s/%s: %w", dep.Metadata.Namespace, name, err)
+	}
+	text, ok := cm.Data[pathBase(path)]
+	if !ok {
+		for _, v := range cm.Data {
+			text = v
+			break
+		}
+	}
+	return configEnablesGatewayAPI(text), nil
+}
+
+// volumeForPath is the volume mounted at path or at a directory above it.
+func volumeForPath(mounts []volumeMountRef, path string) string {
+	best := ""
+	bestLen := -1
+	for _, m := range mounts {
+		if path == m.MountPath || strings.HasPrefix(path, strings.TrimRight(m.MountPath, "/")+"/") {
+			if len(m.MountPath) > bestLen {
+				best, bestLen = m.Name, len(m.MountPath)
+			}
+		}
+	}
+	return best
+}
+
+func configMapForVolume(volumes []deploymentVolume, name string) string {
+	for _, v := range volumes {
+		if v.Name == name && v.ConfigMap != nil {
+			return v.ConfigMap.Name
+		}
+	}
+	return ""
+}
+
+func pathBase(path string) string {
+	path = strings.TrimRight(path, "/")
+	if i := strings.LastIndex(path, "/"); i >= 0 {
+		return path[i+1:]
+	}
+	return path
 }
 
 func (p *HTTPProber) hasCRD(ctx context.Context, name string) (bool, error) {

@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"flag"
+	"strings"
 	"testing"
 
 	"github.com/swizzin/s5n/internal/release"
@@ -84,5 +85,52 @@ func TestChartFlagsDefaultToTheNewestRelease(t *testing.T) {
 	parse(t, "apply", func(fs *flag.FlagSet) { applyF = addApplyFlags(fs) })
 	if got, want := applyF.options().ChartRef(), (release.ChartRef{Repo: release.DefaultChartRepo}); got != want {
 		t.Fatalf("apply default = %+v, want %+v", got, want)
+	}
+}
+
+// TestTakeDevFlag: a development switch is taken out of the arguments before
+// the FlagSet sees them, in both forms, and never reaches --help. A missing
+// value is a refusal rather than an empty override.
+func TestTakeDevFlag(t *testing.T) {
+	cases := []struct {
+		name string
+		args []string
+		want string
+		rest []string
+	}{
+		{"absent", []string{"--yes", "--domain", "box.example.test"}, "", []string{"--yes", "--domain", "box.example.test"}},
+		{"equals", []string{"--yes", "--acme-server=https://pebble.example/dir"}, "https://pebble.example/dir", []string{"--yes"}},
+		{"space", []string{"--acme-server", "https://pebble.example/dir", "--yes"}, "https://pebble.example/dir", []string{"--yes"}},
+		{"single dash", []string{"-acme-server=https://pebble.example/dir"}, "https://pebble.example/dir", nil},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, rest, err := takeDevFlag(tc.args, "acme-server")
+			if err != nil {
+				t.Fatalf("takeDevFlag: %v", err)
+			}
+			if got != tc.want {
+				t.Fatalf("value = %q, want %q", got, tc.want)
+			}
+			if strings.Join(rest, " ") != strings.Join(tc.rest, " ") {
+				t.Fatalf("rest = %v, want %v", rest, tc.rest)
+			}
+		})
+	}
+	if _, _, err := takeDevFlag([]string{"--acme-server"}, "acme-server"); err == nil {
+		t.Fatal("a missing value was accepted")
+	}
+}
+
+// TestAcmeServerIsNotInBootstrapHelp: the dev flag is not registered, so the
+// usage a person reads cannot mention it.
+func TestAcmeServerIsNotInBootstrapHelp(t *testing.T) {
+	fs := flag.NewFlagSet("bootstrap", flag.ContinueOnError)
+	fs.String("yes", "", "confirm without asking")
+	var b strings.Builder
+	fs.SetOutput(&b)
+	fs.PrintDefaults()
+	if strings.Contains(b.String(), "acme-server") {
+		t.Fatalf("bootstrap help lists the dev flag:\n%s", b.String())
 	}
 }

@@ -1,0 +1,48 @@
+# cert-manager's two ClusterIssuers, owned by box. They are cluster-scoped
+# because a Certificate in any seedbox namespace may name them, and because a
+# user's box must not be able to replace them.
+#
+# s5n-letsencrypt solves HTTP-01 through the Gateway box owns: the solver's
+# temporary HTTPRoute attaches to every listener that admits its namespace --
+# the platform's generic http listener and each host's own http-<host> listener
+# -- and the challenge path is served by the acmesolver pod. No sectionName:
+# pinning it to the generic listener would stop matching once a host has its
+# own port-80 listener, which is where that host's requests go.
+# No email address is set: Let's Encrypt stopped sending expiry mail, so there
+# is nothing to ask for.
+#
+# The account key lives in cert-manager's cluster-resource namespace; it is
+# cert-manager's own Secret, not the seedbox's.
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: s5n-letsencrypt
+  labels:
+    app.kubernetes.io/part-of: s5n
+    app.kubernetes.io/managed-by: box
+spec:
+  acme:
+    server: https://acme-v02.api.letsencrypt.org/directory
+    privateKeySecretRef:
+      name: s5n-letsencrypt-account-key
+    solvers:
+      - http01:
+          gatewayHTTPRoute:
+            parentRefs:
+              - name: s5n
+                namespace: s5n-gateway
+---
+# s5n-selfsigned is the issuer for a host name that does not resolve to a
+# public address (a LAN name, a split-horizon name, or nothing yet). The
+# certificate is still a real TLS certificate; clients have to be told to trust
+# it (-k, or its CA), which is the honest state of a box nobody can reach from
+# the internet.
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: s5n-selfsigned
+  labels:
+    app.kubernetes.io/part-of: s5n
+    app.kubernetes.io/managed-by: box
+spec:
+  selfSigned: {}

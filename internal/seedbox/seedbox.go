@@ -76,6 +76,13 @@ func newDoc(path string) *Doc {
 	return &Doc{Path: path, data: map[string]any{}, mode: 0o600}
 }
 
+// LoadValues reads a values file on its own. `box init` needs it on a host
+// whose grant is not written yet: the user's tuning (and tls.issuer) is
+// already there even when root has decided nothing.
+func LoadValues(valuesPath string) (*Doc, error) {
+	return loadDoc(valuesPath, false)
+}
+
 // Load reads a seedbox's two files. The grant must exist: it is what root
 // decided. A missing values file is an empty document, because a user who has
 // never run `box init` or edited anything has no file yet.

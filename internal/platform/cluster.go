@@ -116,10 +116,17 @@ func (k *Kubernetes) PrimaryInternalIP(ctx context.Context) (string, error) {
 	return "", errors.New("no node reports an InternalIP address")
 }
 
-// Apply server-side-applies each document with field manager box. Force is set
-// because box owns the platform layer: a field another manager once touched
-// must not make `box bootstrap` fail forever.
+// Apply server-side-applies each document with field manager box.
 func (k *Kubernetes) Apply(ctx context.Context, docs []map[string]any) error {
+	return k.ApplyWith(ctx, FieldManager, docs)
+}
+
+// ApplyWith is the same write under another field manager. A list that is
+// merged by key (the Gateway's listeners) is what needs it: the TLS flow owns
+// its host's listener, so the platform's own Gateway apply never removes it.
+// Force is set because box owns the platform layer: a field another manager
+// once touched must not make `box bootstrap` fail forever.
+func (k *Kubernetes) ApplyWith(ctx context.Context, manager string, docs []map[string]any) error {
 	for _, doc := range docs {
 		obj := &unstructured.Unstructured{Object: doc}
 		gvk := obj.GroupVersionKind()
@@ -138,7 +145,7 @@ func (k *Kubernetes) Apply(ctx context.Context, docs []map[string]any) error {
 			}
 			ri = k.dyn.Resource(mapping.Resource).Namespace(ns)
 		}
-		if _, err := ri.Apply(ctx, obj.GetName(), obj, metav1.ApplyOptions{FieldManager: FieldManager, Force: true}); err != nil {
+		if _, err := ri.Apply(ctx, obj.GetName(), obj, metav1.ApplyOptions{FieldManager: manager, Force: true}); err != nil {
 			return fmt.Errorf("%s %s: %w", gvk.Kind, obj.GetName(), err)
 		}
 	}
@@ -163,9 +170,63 @@ func (k *Kubernetes) mapping(gvk schema.GroupVersionKind) (*meta.RESTMapping, er
 	return m, nil
 }
 
+// Serves reports whether the cluster's API serves a kind. It is how init tells
+// a box whose platform installed cert-manager from one whose did not, before
+// the first write.
+func (k *Kubernetes) Serves(_ context.Context, group, version, kind string) (bool, error) {
+	if _, err := k.mapping(schema.GroupVersionKind{Group: group, Version: version, Kind: kind}); err != nil {
+		return false, nil
+	}
+	return true, nil
+}
+
+// CertificateReady answers a Certificate's Ready condition. A Certificate
+// that is not there yet is not an error: the wait that follows is what gives
+// cert-manager time to write it.
+func (k *Kubernetes) CertificateReady(ctx context.Context, namespace, name string) (bool, string, error) {
+	gvr, err := k.mapping(schema.GroupVersionKind{Group: "cert-manager.io", Version: "v1", Kind: "Certificate"})
+	if err != nil {
+		return false, "", err
+	}
+	obj, err := k.dyn.Resource(gvr.Resource).Namespace(namespace).Get(ctx, name, metav1.GetOptions{})
+	if apierrors.IsNotFound(err) {
+		return false, "the Certificate has not been written yet", nil
+	}
+	if err != nil {
+		return false, "", fmt.Errorf("read Certificate %s/%s: %w", namespace, name, err)
+	}
+	conditions, _, _ := unstructured.NestedSlice(obj.Object, "status", "conditions")
+	for _, raw := range conditions {
+		cond, _ := raw.(map[string]any)
+		if cond["type"] != "Ready" {
+			continue
+		}
+		if cond["status"] == "True" {
+			return true, "", nil
+		}
+		reason, _ := cond["reason"].(string)
+		message, _ := cond["message"].(string)
+		if reason == "" {
+			reason = "not Ready"
+		}
+		if message != "" {
+			reason += ": " + message
+		}
+		return false, reason, nil
+	}
+	return false, "cert-manager has not reconciled it yet", nil
+}
+
+// ErrNotReady is the deadline answer of a read-only wait: the object is still
+// not ready, which a caller may handle differently from a failed read.
+var ErrNotReady = errors.New("not ready")
+
 // Await blocks until the object is ready or the bound expires.
 func (k *Kubernetes) Await(ctx context.Context, w Wait) error {
 	timeout := k.Timeout
+	if w.Timeout > 0 {
+		timeout = w.Timeout
+	}
 	if timeout <= 0 {
 		timeout = 5 * time.Minute
 	}
@@ -183,7 +244,7 @@ func (k *Kubernetes) Await(ctx context.Context, w Wait) error {
 			return nil
 		}
 		if time.Now().After(deadline) {
-			return fmt.Errorf("not ready after %s", timeout)
+			return fmt.Errorf("%w after %s", ErrNotReady, timeout)
 		}
 		select {
 		case <-ctx.Done():
@@ -213,6 +274,9 @@ func (k *Kubernetes) ready(ctx context.Context, w Wait) (bool, error) {
 			return false, err
 		}
 		return daemonSetReady(d), nil
+	case WaitCertificate:
+		ready, _, err := k.CertificateReady(ctx, w.Namespace, w.Name)
+		return ready, err
 	default:
 		return false, fmt.Errorf("unknown wait kind %q", w.Kind)
 	}

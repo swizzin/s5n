@@ -70,6 +70,11 @@ type PlatformProbe struct {
 	// Gateway outcome above is "present" only when at least one is Accepted;
 	// the classes themselves decide which one box's Gateway attaches to.
 	Classes []GatewayClass
+	// CertManagerReason is the probe's own words for a cert-manager it found
+	// but cannot use (Gateway API off, too old, webhook not answering). The
+	// component decision carries it to the operator instead of the generic
+	// "conflicting implementation" line.
+	CertManagerReason string
 }
 
 // ComponentResult is the decision for one platform component.
@@ -105,6 +110,12 @@ func decidePlatform(cfg PlatformConfig, probe PlatformProbe) ([]ComponentResult,
 			Outcome:   c.out(probe),
 		}
 		cr.Action, cr.Reason = decideComponent(cr.Component, cr.Mode, cr.Outcome)
+		if cr.Component == ComponentCertManager && cr.Outcome == OutcomeConflict && probe.CertManagerReason != "" {
+			// The probe saw what is wrong (Gateway API off, an old version,
+			// a webhook that does not answer); naming the setting is the
+			// operator's next move.
+			cr.Reason = probe.CertManagerReason
+		}
 		out = append(out, cr)
 	}
 	for _, cr := range out {

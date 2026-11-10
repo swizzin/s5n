@@ -51,6 +51,19 @@ const (
 	MetalLBRelease   = "metallb"
 	MetalLBNamespace = "metallb-system"
 
+	// CertManagerVersion is the cert-manager chart. Its CRDs and Gateway API
+	// support are part of the install: the CRDs are what a Certificate is,
+	// and config.gatewayAPI.enabled is what lets the controller solve an
+	// HTTP-01 challenge through the Gateway's HTTPRoute. The upstream chart
+	// publishes its versions with the leading "v"; the pin carries it, so the
+	// deployed release's chart version compares equal and a re-run verifies
+	// instead of upgrading.
+	CertManagerVersion   = "v1.21.3"
+	CertManagerChart     = "cert-manager"
+	CertManagerRef       = "oci://quay.io/jetstack/charts/cert-manager"
+	CertManagerRelease   = "cert-manager"
+	CertManagerNamespace = "cert-manager"
+
 	// The Gateway the chart's HTTPRoutes attach to (install/platform/gateway/gateway.yaml,
 	// which the kind e2e applies and box embeds).
 	GatewayNamespace = "s5n-gateway"
@@ -96,6 +109,10 @@ const (
 	// StepPool is MetalLB's IPAddressPool/L2Advertisement, built from the
 	// node's primary InternalIP once the cluster is open.
 	StepPool StepKind = "metallb-pool"
+	// StepIssuers is cert-manager's two ClusterIssuers. They are retried like
+	// the MetalLB pool: the webhook's endpoint can be Ready while the server
+	// still refuses its certificate, and the first apply is what waits it out.
+	StepIssuers StepKind = "cert-manager-issuers"
 	// StepGatewayAddress is the question the plan could not answer before the
 	// confirm: does the Gateway get an address without MetalLB? It waits, and
 	// what it finds decides the conditional steps that follow.
@@ -108,8 +125,9 @@ const (
 type WaitKind string
 
 const (
-	WaitDeployment WaitKind = "deployment"
-	WaitDaemonSet  WaitKind = "daemonset"
+	WaitDeployment  WaitKind = "deployment"
+	WaitDaemonSet   WaitKind = "daemonset"
+	WaitCertificate WaitKind = "certificate"
 )
 
 // Wait is one readiness check after a step. The cluster implementation bounds
@@ -118,6 +136,10 @@ type Wait struct {
 	Kind      WaitKind
 	Namespace string
 	Name      string
+	// Timeout bounds this wait when non-zero; otherwise the client's own
+	// bound applies. A caller with a shorter budget than the platform's five
+	// minutes (a certificate that is not issued yet) uses it.
+	Timeout time.Duration
 }
 
 // String is how box names the object in its output.
@@ -125,6 +147,8 @@ func (w Wait) String() string {
 	switch w.Kind {
 	case WaitDaemonSet:
 		return fmt.Sprintf("DaemonSet %s/%s", w.Namespace, w.Name)
+	case WaitCertificate:
+		return fmt.Sprintf("Certificate %s/%s", w.Namespace, w.Name)
 	default:
 		return fmt.Sprintf("Deployment %s/%s", w.Namespace, w.Name)
 	}
@@ -240,6 +264,12 @@ type Decision struct {
 	// Class). The Gateway box applies attaches to it; the GatewayClass itself
 	// is created only when this run installs its implementation.
 	GatewayClass string
+	// ACMEServer points the s5n-letsencrypt issuer at another ACME directory.
+	// Empty in every real run: the manifest's Let's Encrypt production URL is
+	// the only one box ships. It exists for the e2e's Pebble server, which
+	// cannot be reached at the production URL and whose own certificate is
+	// self-signed.
+	ACMEServer string
 
 	// AddressTimeout is how long the Gateway gets to say it has no address
 	// before MetalLB is installed. Zero means AddressTimeout (15s).
@@ -253,6 +283,9 @@ type Decision struct {
 	// PoolTimeout bounds how long the MetalLB webhook may refuse its pool.
 	// Zero means two minutes.
 	PoolTimeout time.Duration
+	// WebhookTimeout bounds how long cert-manager's webhook may refuse the
+	// first ClusterIssuer apply. Zero means two minutes.
+	WebhookTimeout time.Duration
 	// Poll is how often a refused pool is retried. Zero means two seconds.
 	Poll time.Duration
 }
@@ -271,7 +304,7 @@ func (d *Decision) report() say.Reporter { return say.Or(d.Say, nil) }
 // Apply plans, asks and applies the platform layer.
 func (d *Decision) Apply(ctx context.Context, components []bootstrap.ComponentResult) (Result, error) {
 	var res Result
-	plan, err := BuildPlan(components, d.GatewayClass)
+	plan, err := BuildPlan(components, d.GatewayClass, d.ACMEServer)
 	if err != nil {
 		return res, err
 	}
@@ -297,7 +330,7 @@ func (d *Decision) Apply(ctx context.Context, components []bootstrap.ComponentRe
 	// Every check below is a read, and they are the last thing before the
 	// confirm: a kubeconfig that cannot create a CRD is refused before the
 	// operator is asked, and before anything is written.
-	if err := preflight(ctx, cl, plan); err != nil {
+	if err := preflight(ctx, cl, preflightAccess(plan)); err != nil {
 		return res, err
 	}
 
@@ -365,6 +398,11 @@ func (d *Decision) Apply(ctx context.Context, components []bootstrap.ComponentRe
 				return res, err
 			}
 			res.Installed = append(res.Installed, "MetalLB address pool")
+		case StepIssuers:
+			if err := d.applyIssuers(ctx, cl, s.Documents); err != nil {
+				return res, err
+			}
+			res.Installed = append(res.Installed, s.What)
 		case StepGatewayAddress:
 			answer, err := d.gatewayAddress(ctx, s.Mode)
 			if err != nil {
@@ -632,11 +670,38 @@ func (d *Decision) await(ctx context.Context, cl Cluster, w Wait) error {
 	return nil
 }
 
+// retryApply applies docs until the API server accepts them or the bound
+// expires. Both webhooks box talks to -- MetalLB's pool and cert-manager's
+// issuers -- are served by pods that are Ready a moment before they can accept
+// a connection (they load their certificate first), and the chart's wait only
+// proves the pod is Ready. The caller keeps its own words for the refusal.
+func (d *Decision) retryApply(ctx context.Context, cl Cluster, docs []map[string]any, timeout time.Duration) error {
+	if timeout <= 0 {
+		timeout = 2 * time.Minute
+	}
+	poll := d.Poll
+	if poll <= 0 {
+		poll = 2 * time.Second
+	}
+	deadline := time.Now().Add(timeout)
+	for {
+		err := cl.Apply(ctx, docs)
+		if err == nil {
+			return nil
+		}
+		if time.Now().After(deadline) {
+			return err
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(poll):
+		}
+	}
+}
+
 // applyPool writes MetalLB's pool and advertisement, retrying until the
-// webhook answers. The controller's webhook is served by a pod that is Ready
-// before it can accept connections (it loads its certificate first), and the
-// chart's wait only proves the pod is Ready. Retrying is the same robustness
-// hack/e2e-kind.sh needed; here it is bounded and box-worded.
+// webhook answers.
 func (d *Decision) applyPool(ctx context.Context, cl Cluster) error {
 	r := d.report()
 	step := r.Start(say.Op{Label: "applying the MetalLB address pool"})
@@ -654,28 +719,33 @@ func (d *Decision) applyPool(ctx context.Context, cl Cluster) error {
 	if wait <= 0 {
 		wait = 2 * time.Minute
 	}
-	poll := d.Poll
-	if poll <= 0 {
-		poll = 2 * time.Second
-	}
-	deadline := time.Now().Add(wait)
-	for {
-		err = cl.Apply(ctx, docs)
-		if err == nil {
-			step.Done(fmt.Sprintf("applied IPAddressPool %s (%s/32) and L2Advertisement %s", MetalLBPoolName, ip, MetalLBL2Name))
-			return nil
-		}
-		if time.Now().After(deadline) {
-			step.Failed(err)
-			return fmt.Errorf("MetalLB refused its address pool for %s: %w (the chart is installed; fix the cause and run `box bootstrap` again)", wait, err)
-		}
-		select {
-		case <-ctx.Done():
-			step.Failed(ctx.Err())
+	if err := d.retryApply(ctx, cl, docs, wait); err != nil {
+		step.Failed(err)
+		if ctx.Err() != nil {
 			return ctx.Err()
-		case <-time.After(poll):
 		}
+		return fmt.Errorf("MetalLB refused its address pool for %s: %w (the chart is installed; fix the cause and run `box bootstrap` again)", wait, err)
 	}
+	step.Done(fmt.Sprintf("applied IPAddressPool %s (%s/32) and L2Advertisement %s", MetalLBPoolName, ip, MetalLBL2Name))
+	return nil
+}
+
+func (d *Decision) applyIssuers(ctx context.Context, cl Cluster, docs []map[string]any) error {
+	r := d.report()
+	step := r.Start(say.Op{Label: "applying the cert-manager ClusterIssuers"})
+	wait := d.WebhookTimeout
+	if wait <= 0 {
+		wait = 2 * time.Minute
+	}
+	if err := d.retryApply(ctx, cl, docs, wait); err != nil {
+		step.Failed(err)
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		return fmt.Errorf("cert-manager's webhook refused its ClusterIssuers for %s: %w (cert-manager is installed; fix the cause and run `box bootstrap` again)", wait, err)
+	}
+	step.Done(fmt.Sprintf("applied ClusterIssuers %s and %s", LetsEncryptIssuer, SelfSignedIssuer))
+	return nil
 }
 
 func (d *Decision) printPlan(r say.Reporter, plan Plan) {
@@ -737,7 +807,7 @@ func (d *Decision) printPlan(r say.Reporter, plan Plan) {
 // implementation or found one. The GatewayClass is written only when box
 // installs Envoy Gateway, because a class someone else's controller serves is
 // the operator's and must not be rewritten.
-func BuildPlan(components []bootstrap.ComponentResult, gatewayClass string) (Plan, error) {
+func BuildPlan(components []bootstrap.ComponentResult, gatewayClass, acmeServer string) (Plan, error) {
 	var plan Plan
 	byComponent := make(map[bootstrap.PlatformComponent]bootstrap.ComponentResult, len(components))
 	for _, c := range components {
@@ -774,6 +844,37 @@ func BuildPlan(components []bootstrap.ComponentResult, gatewayClass string) (Pla
 		})
 	}
 
+	// cert-manager is the TLS half of the platform. It is installed only when
+	// the decision says so; an existing install box can use is verified
+	// instead (the probe already refused one it cannot use). Its CRDs ship
+	// with the chart -- a separately pinned CRD bundle could drift from the
+	// controller -- and config.gatewayAPI.enabled is the controller setting
+	// that makes the Gateway HTTP-01 solver work at all.
+	if cm.Action == actionInstall {
+		plan.Steps = append(plan.Steps, Step{
+			Component: bootstrap.ComponentCertManager,
+			Kind:      StepRelease,
+			Release: Release{
+				Name:      CertManagerRelease,
+				Namespace: CertManagerNamespace,
+				Ref:       CertManagerRef,
+				Chart:     CertManagerChart,
+				Version:   CertManagerVersion,
+				Values: map[string]any{
+					"crds": map[string]any{"enabled": true},
+					"config": map[string]any{
+						"gatewayAPI": map[string]any{"enabled": true},
+					},
+				},
+			},
+			Wait: []Wait{
+				{Kind: WaitDeployment, Namespace: CertManagerNamespace, Name: CertManagerRelease},
+				{Kind: WaitDeployment, Namespace: CertManagerNamespace, Name: CertManagerRelease + "-webhook"},
+				{Kind: WaitDeployment, Namespace: CertManagerNamespace, Name: CertManagerRelease + "-cainjector"},
+			},
+		})
+	}
+
 	// MetalLB is the address layer, and the Gateway is what needs it: in
 	// s5n the torrent port is a NodePort, so a LoadBalancer Service exists
 	// only because the Gateway implementation creates one for the Gateway.
@@ -799,6 +900,22 @@ func BuildPlan(components []bootstrap.ComponentResult, gatewayClass string) (Pla
 		Kind:      StepManifests,
 		What:      gatewayStepName(gatewayClass, installEnvoy),
 		Documents: objects,
+	})
+
+	// The issuers are root's, and every seedbox's Certificate names one. They
+	// are applied after the Gateway they solve through, on every run: a
+	// re-apply is the same bytes, and it is what repairs a cluster whose
+	// ClusterIssuers were removed. They are only meaningful when cert-manager
+	// is going to be there, which the decision has already settled.
+	issuers, err := issuerObjects(acmeServer)
+	if err != nil {
+		return Plan{}, err
+	}
+	plan.Steps = append(plan.Steps, Step{
+		Component: bootstrap.ComponentCertManager,
+		Kind:      StepIssuers,
+		What:      fmt.Sprintf("ClusterIssuers %s and %s", LetsEncryptIssuer, SelfSignedIssuer),
+		Documents: issuers,
 	})
 
 	switch lb.Action {
@@ -849,10 +966,6 @@ func BuildPlan(components []bootstrap.ComponentResult, gatewayClass string) (Pla
 		Documents: policy,
 	})
 
-	if cm.Action == actionInstall {
-		plan.NotHandled = append(plan.NotHandled,
-			"cert-manager: box does not install it yet; install cert-manager yourself, or set platform.cert-manager.mode=external, and run bootstrap again")
-	}
 	return plan, nil
 }
 
@@ -910,6 +1023,7 @@ func preflightAccess(plan Plan) []Access {
 		{Verb: "create", Group: "gateway.networking.k8s.io", Resource: "gateways", Namespace: GatewayNamespace, What: "gateways"},
 		{Verb: "create", Group: "metallb.io", Resource: "ipaddresspools", Namespace: MetalLBNamespace, What: "MetalLB address pools"},
 		{Verb: "create", Group: "metallb.io", Resource: "l2advertisements", Namespace: MetalLBNamespace, What: "MetalLB L2 advertisements"},
+		{Verb: "create", Group: "cert-manager.io", Resource: "clusterissuers", What: "cert-manager ClusterIssuers"},
 	}
 	seen := map[string]bool{}
 	namespaces := []string{}
@@ -930,9 +1044,9 @@ func preflightAccess(plan Plan) []Access {
 	return access
 }
 
-func preflight(ctx context.Context, cl Cluster, plan Plan) error {
+func preflight(ctx context.Context, cl Cluster, access []Access) error {
 	var denied []string
-	for _, a := range preflightAccess(plan) {
+	for _, a := range access {
 		ok, err := cl.Allowed(ctx, a)
 		if err != nil {
 			return fmt.Errorf("platform pre-flight: SelfSubjectAccessReview: %w", err)
@@ -944,6 +1058,6 @@ func preflight(ctx context.Context, cl Cluster, plan Plan) error {
 	if len(denied) == 0 {
 		return nil
 	}
-	return fmt.Errorf("the platform layer needs cluster admin, and this kubeconfig cannot %s: run `box bootstrap` as root, or with a cluster-admin kubeconfig",
+	return fmt.Errorf("box needs cluster admin, and this kubeconfig cannot %s: run `box bootstrap` as root, or with a cluster-admin kubeconfig",
 		strings.Join(denied, ", "))
 }

@@ -43,6 +43,14 @@ storage:
     # puid:pgid.
     existingClaim: s5n-config
 
+# TLS. Nothing in this chart renders from this key: `box init` resolves the
+# box's host name and picks Let's Encrypt when it has a public address, and a
+# self-signed certificate when it does not. Setting either value here forces
+# that choice for this seedbox. A plain `helm install` gets HTTPRoutes only;
+# TLS is the platform Gateway's job.
+tls:
+  issuer: ""
+
 # HTTP exposure through the Gateway API. The chart attaches HTTPRoutes to a Gateway it
 # does not own; the installer (or the cluster admin) provides the Gateway.
 gateway:

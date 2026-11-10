@@ -43,6 +43,11 @@ type Decision struct {
 	// Say is every line init writes. A nil reporter writes nothing; cmd/box
 	// always gives the plain or the live one.
 	Say say.Reporter
+	// Resolver answers what the box's domain resolves to, which decides
+	// between Let's Encrypt and a self-signed certificate. Nil answers
+	// "nothing", so the safe issuer is chosen rather than a DNS lookup
+	// invented.
+	Resolver Resolver
 
 	// steps is how many steps this run shows, for a prompter that draws a step
 	// counter. It is advice for a UI, never an input: nothing reads it back.
@@ -119,6 +124,10 @@ type Result struct {
 	// Domain is the host name the box answered with, so the caller can close
 	// the run with the one fact a person wants repeated back.
 	Domain string
+	// Issuer is the ClusterIssuer the host's certificate should name:
+	// IssuerLetsEncrypt or IssuerSelfSigned. It is the values file's
+	// tls.issuer when that is set, and otherwise what the domain resolved to.
+	Issuer string
 	// GrantChanged and ValuesChanged are the keys spliced, in the order they
 	// were written. A re-run with identical answers leaves both empty.
 	GrantChanged  []string
@@ -197,6 +206,20 @@ func (d *Decision) Run(ctx context.Context, opts Options) (Result, error) {
 		return res, d.stop(err)
 	}
 	res.Domain = domain
+	// The certificate's issuer follows the name, not the node: a public
+	// answer gets Let's Encrypt, and a private one, no answer or a forced
+	// tls.issuer says otherwise. init says which and why before it asks
+	// anything else, so the operator can correct the domain.
+	// tls.issuer is the operator's own file, not a chart default: on a first
+	// run base is the chart's values only, so the answer is read from the
+	// values document first.
+	forced, _ := lookupPath(base, "tls.issuer")
+	if v, ok := lookupPath(sb.Values.Map(), "tls.issuer"); ok && text(v) != "" {
+		forced = v
+	}
+	issuer, why := chooseIssuer(ctx, d.Resolver, domain, text(forced))
+	res.Issuer = issuer
+	d.report().Line("tls: " + why)
 	d.step(2, "where should your data and settings live?")
 	dataPath, err := d.askText(textQuestion{
 		key: "storage.data.path", flag: "--data-path",
@@ -778,7 +801,17 @@ func loadSeedbox(grantPath, valuesPath string) (*seedbox.Seedbox, error) {
 		if !errors.Is(err, fs.ErrNotExist) {
 			return nil, fmt.Errorf("read %s: %w", grantPath, err)
 		}
-		return seedbox.New(grantPath, valuesPath), nil
+		// The grant is root's and does not exist yet; the values file is the
+		// user's and may already say something (tuning, tls.issuer). Read it
+		// rather than starting from empty, so init's questions and its one
+		// forced answer see what is there.
+		values, err := seedbox.LoadValues(valuesPath)
+		if err != nil {
+			return nil, err
+		}
+		sb := seedbox.New(grantPath, valuesPath)
+		sb.Values = values
+		return sb, nil
 	}
 	return seedbox.Load(grantPath, valuesPath)
 }

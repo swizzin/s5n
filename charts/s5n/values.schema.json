@@ -97,6 +97,21 @@
         }
       }
     },
+    "tls": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "TLS issuer for this seedbox. The chart renders nothing from it; box init reads it, and an empty value lets init decide from the domain.",
+      "properties": {
+        "issuer": {
+          "type": "string",
+          "enum": [
+            "",
+            "letsencrypt",
+            "selfsigned"
+          ]
+        }
+      }
+    },
     "networkPolicy": {
       "type": "object",
       "additionalProperties": false,

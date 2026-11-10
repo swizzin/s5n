@@ -180,3 +180,26 @@ func TestDocMapIsACopy(t *testing.T) {
 		t.Error("Map returned the document's own map")
 	}
 }
+
+// LoadValues exists for the one caller that has a values file and no grant
+// yet: box init on a host root has decided nothing about. The file is read,
+// not assumed empty.
+func TestLoadValues(t *testing.T) {
+	doc, err := LoadValues(fixture(t, "values.yaml"))
+	if err != nil {
+		t.Fatalf("LoadValues: %v", err)
+	}
+	if !doc.Exists {
+		t.Fatal("Values.Exists = false for a file that is there")
+	}
+	if len(doc.data) == 0 {
+		t.Fatal("a values file with content loaded empty")
+	}
+	absent, err := LoadValues(filepath.Join(t.TempDir(), "absent.yaml"))
+	if err != nil {
+		t.Fatalf("LoadValues(absent): %v", err)
+	}
+	if absent.Exists || len(absent.data) != 0 {
+		t.Fatalf("an absent values file loaded as %+v", absent.data)
+	}
+}
