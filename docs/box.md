@@ -465,13 +465,34 @@ never loads `charts/` from its own tree, so a box built from main can't depend o
 templates no user has. box's own tests run against the chart packaged from the same
 commit, the same way: pushed to a local registry and pulled like any release.
 
-**Where a release lives (decided).** A `v<version>` tag publishes everything at once:
-the image at `ghcr.io/swizzin/s5n:<version>`, the chart at
-`oci://ghcr.io/swizzin/charts/s5n` with `version` and `appVersion` both `<version>`, and
-box's binaries with a `sha256sums.txt` as assets of the GitHub release. The chart is
-packaged after the image is pushed and names that image by digest, so a chart can never
-point at an image other than the one built from its commit. Nothing is published from a
-branch push.
+**Where a release lives (decided).** The chart and box release separately, each from
+its own tag family, so a new Sonarr never needs a new box and a box fix never
+republishes the chart.
+
+- An `s5n-v<version>` tag publishes the image at `ghcr.io/swizzin/s5n:<version>` and the
+  chart at `oci://ghcr.io/swizzin/charts/s5n`, with `version` and `appVersion` both
+  `<version>`. The chart is packaged after the image is pushed and names that image by
+  digest, so a chart can never point at an image other than the one built from its
+  commit. Its GitHub release lists the app images that moved and is never marked latest.
+- A `box-v<version>` tag publishes box's binaries with a `sha256sums.txt` as assets of a
+  GitHub release, which is marked latest, so `releases/latest` always means box.
+
+Nothing is published from a branch push. `main` is what has been released; work lands on
+`develop`, and a feature release merges `develop` into `main` and tags it there.
+
+**Nightly chart releases (decided).** Renovate bumps the app images in `variants.yaml`
+on both branches. On `main`, a patch or digest bump merges itself as soon as the full e2e
+is green; anything larger waits for the maintainer. There is no waiting period: the
+upstream projects stage their own releases, and holding a build longer adds age, not
+testing. Each night, if `main` has changed since the last `s5n-v*` tag and every change
+since is one of those bumps, a scheduled job raises the chart's patch version and tags
+it. Any other change on `main` waits for a maintainer's release.
+
+What makes this safe is the e2e plus a rollback that really works. The Arrs migrate
+their databases forward when they start and don't support running an older version
+on a newer database, so stepping a chart back is not enough. `update` snapshots each
+app's config before it moves a release, and a rollback restores the snapshot together
+with the previous chart.
 
 **What update does with it:**
 
@@ -624,7 +645,11 @@ Envoy Gateway, MetalLB and cert-manager follow the same path as the images, at t
 level instead of the chart level:
 
 1. Renovate opens a pull request when an upstream release lands for a pinned component.
-2. CI runs the full e2e on it; a green bump ships in the next box release.
+2. CI runs the full e2e on it. On `main`, a patch bump merges itself as soon as it is green,
+   and the same nightly job tags a `box-v*`
+   patch release when every change since the last one is such a bump. Minor and major
+   bumps (a k0s minor is a Kubernetes minor; MetalLB is still 0.x) wait for the
+   maintainer.
 3. `box update` on its timer upgrades the components box manages, with doctor run
    before and after. A component in `external` mode is only checked, and status warns
    when it drifts outside the tested range.
