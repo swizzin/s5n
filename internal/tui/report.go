@@ -554,7 +554,7 @@ func (r *Reporter) Error(err error) {
 		if i == 0 {
 			prefix = "│ ✗ "
 		}
-		gap := inner - lipgloss.Width(prefix) - lipgloss.Width(line)
+		gap := inner - 2 - lipgloss.Width(line)
 		if gap < 0 {
 			gap = 0
 		}
@@ -585,7 +585,7 @@ func (r *Reporter) Banner(title, detail string) {
 	b.WriteString(strings.Repeat(" ", pad) + r.chrome.paint(" │", mutedStyle.Render(" │")) + "\n")
 	if detail != "" {
 		for _, l := range wrapText(detail, inner-2) {
-			gap := inner - 2 - lipgloss.Width(l)
+			gap := inner - lipgloss.Width(l)
 			if gap < 0 {
 				gap = 0
 			}
