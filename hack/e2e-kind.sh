@@ -15,10 +15,32 @@ CLUSTER=s5n
 NS=seedbox
 # Envoy Gateway's Helm chart ships its own Gateway API CRDs (crds.enabled: true), so
 # there is no separate standard-install apply here: the chart's experimental channel is
-# the exact set Envoy Gateway v1.9.3 supports, and a separately-pinned channel could
+# the exact set the pinned Envoy Gateway supports, and a separately-pinned channel could
 # drift from (or conflict with) it.
-ENVOY_GATEWAY_CHART_VERSION=${ENVOY_GATEWAY_CHART_VERSION:-1.9.3}
-METALLB_VERSION=${METALLB_VERSION:-v0.16.1}
+#
+# The platform versions are not this script's. Every version box installs lives in
+# install/platform/versions.yaml, and hack/versions prints them from the same bytes box
+# compiles in, so this e2e installs exactly what box installs -- and the host needs no
+# YAML parser. MetalLB's upstream manifest is tagged with a leading "v" while its chart
+# pin has none: the tag is derived from the one pin, never a second copy of it.
+pins=$(go run ./hack/versions)
+pin() { printf '%s\n' "$pins" | sed -n "s/^$1=//p"; }
+v_tag() { case "$1" in v*) printf '%s' "$1" ;; *) printf 'v%s' "$1" ;; esac; }
+for pin_key in k0s envoyGateway metallb certManager; do
+  [ -n "$(pin "$pin_key")" ] || {
+    echo "install/platform/versions.yaml has no ${pin_key} pin"
+    exit 1
+  }
+done
+ENVOY_GATEWAY_CHART_VERSION=${ENVOY_GATEWAY_CHART_VERSION:-$(pin envoyGateway)}
+METALLB_VERSION=${METALLB_VERSION:-$(v_tag "$(pin metallb)")}
+
+# Test-only images, pinned by tag and digest. They are not box's to install, so
+# they stay in the scripts rather than install/platform/versions.yaml; Renovate
+# watches them here (.github/renovate.json), and the tag stays in the reference
+# so a bump to either the tag or the digest is one line.
+CURL_IMAGE=${CURL_IMAGE:-docker.io/curlimages/curl:8.11.1@sha256:c1fe1679c34d9784c1b0d1e5f62ac0a79fca01fb6377cdd33e90473c6f9f9a69}  # renovate: datasource=docker
+BUSYBOX_IMAGE=${BUSYBOX_IMAGE:-docker.io/library/busybox:1.36@sha256:73aaf090f3d85aa34ee199857f03fa3a95c8ede2ffd4cc2cdb5b94e566b11662}    # renovate: datasource=docker
 KEEP=${1:-}
 CTX="kind-${CLUSTER}"
 K="kubectl --context ${CTX}"
@@ -169,7 +191,7 @@ $K -n "$NS" delete deploy unblessed --ignore-not-found >/dev/null
 # admission policy raises: what happens to what is already running? Nothing --
 # admission only sees new writes. Kept out of the app label selectors on
 # purpose.
-cat >"$WORK/unblessed.yaml" <<'EOF'
+cat >"$WORK/unblessed.yaml" <<EOF
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -194,7 +216,7 @@ spec:
           type: RuntimeDefault
       containers:
         - name: unblessed
-          image: docker.io/curlimages/curl:8.11.1
+          image: ${CURL_IMAGE}
           command: ["sleep", "3600"]
           securityContext:
             allowPrivilegeEscalation: false
@@ -495,8 +517,8 @@ $K -n "$NS" wait --for=condition=Ready pod -l 'app.kubernetes.io/instance=s5n,s5
 log "admission: the user cannot add an unblessed image as an ephemeral container"
 pod=sonarr-0
 echo "ephemeral container target: ${pod} ($($K -n "$NS" get pod "$pod" -o jsonpath='{.status.phase}'))"
-cat >"$WORK/ephemeral-unblessed.json" <<'EOF'
-{"spec":{"ephemeralContainers":[{"name":"debugger-deny","image":"docker.io/library/busybox:1.36","command":["sleep","3600"],"securityContext":{"allowPrivilegeEscalation":false,"runAsNonRoot":true,"capabilities":{"drop":["ALL"]},"seccompProfile":{"type":"RuntimeDefault"}}}]}}
+cat >"$WORK/ephemeral-unblessed.json" <<EOF
+{"spec":{"ephemeralContainers":[{"name":"debugger-deny","image":"${BUSYBOX_IMAGE}","command":["sleep","3600"],"securityContext":{"allowPrivilegeEscalation":false,"runAsNonRoot":true,"capabilities":{"drop":["ALL"]},"seccompProfile":{"type":"RuntimeDefault"}}}]}}
 EOF
 if $K --as="$SA" -n "$NS" patch pod "$pod" --subresource=ephemeralcontainers --type=strategic \
   -p "$(cat "$WORK/ephemeral-unblessed.json")" >"$WORK/deny-ephemeral.txt" 2>&1; then
@@ -651,7 +673,7 @@ for p in s5n-default-deny s5n-egress s5n-wiring-egress; do
   fi
 done
 $K -n "$NS" exec prowlarr-0 -- curl -s -o /dev/null -w 'prowlarr->sonarr %{http_code}\n' --max-time 5 http://sonarr:8989/sonarr/ping || fail=1
-if $K -n default run np-probe --rm -i --restart=Never --image=curlimages/curl:8.11.1 --quiet -- \
+if $K -n default run np-probe --rm -i --restart=Never --image="${CURL_IMAGE}" --quiet -- \
      curl -s -o /dev/null --max-time 5 "http://sonarr.${NS}:8989/sonarr/ping"; then
   echo "outsider->sonarr: REACHABLE (policy not enforced)"; fail=1
 else

@@ -1,0 +1,31 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": ["config:recommended"],
+  "automerge": false,
+  "customManagers": [
+    {
+      "customType": "regex",
+      "description": "Every version box installs: install/platform/versions.yaml. One key per component, and the comment on the line names the datasource and package the version comes from, so a bump is one line in one file and CI's e2e tests exactly what box ships. The shape is flat and the marker inline because both readers are then trivial: this regex here, and `sed` in the e2e (no YAML parser on the host).",
+      "fileMatch": ["^install/platform/versions\\.yaml$"],
+      "matchStrings": [
+        "\\n[ \\t]*(?<depKey>[A-Za-z][A-Za-z0-9]*):[ \\t]*\"?(?<currentValue>[^\\s\"#]+)\"?[ \\t]+# renovate: datasource=(?<datasource>[a-z0-9-]+) depName=(?<depName>[^\\s]+)(?:[ \\t]+registryUrl=(?<registryUrl>[^\\s]+))?"
+      ]
+    },
+    {
+      "customType": "regex",
+      "datasourceTemplate": "docker",
+      "description": "Test-only images the e2e runs, pinned by tag and digest in the scripts: box never installs them, so they stay where they are used. The `# renovate: datasource=docker` marker is what keeps Renovate off the e2e's own locally built image, which is tagged, never pinned.",
+      "fileMatch": ["^hack/.*\\.sh$"],
+      "matchStrings": [
+        "(?<depName>[a-z0-9][a-z0-9._/-]*):(?<currentValue>[A-Za-z0-9._-]+)@(?<currentDigest>sha256:[a-f0-9]{64})[^\\n]*# renovate: datasource=docker"
+      ]
+    }
+  ],
+  "packageRules": [
+    {
+      "description": "A platform pin or an e2e image changes what box installs: it is never automerged, whatever a preset later says.",
+      "matchFileNames": ["install/platform/versions.yaml", "hack/**"],
+      "automerge": false
+    }
+  ]
+}

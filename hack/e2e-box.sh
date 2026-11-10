@@ -59,7 +59,24 @@ cd "$(dirname "$0")/.."
 KIND=${KIND:-kind}
 NS=seedbox
 IMAGE=ghcr.io/swizzin/s5n:e2e
-METALLB_VERSION=${METALLB_VERSION:-v0.16.1}
+# The platform versions box installs are not this script's: they come from
+# install/platform/versions.yaml, printed by hack/versions from the bytes box
+# compiles in, so the plan box prints is asserted against the pin it printed.
+# MetalLB's upstream manifest is tagged with a leading "v" while its chart pin
+# has none, so the tag is derived from the one pin.
+pins=$(go run ./hack/versions)
+pin() { printf '%s\n' "$pins" | sed -n "s/^$1=//p"; }
+v_tag() { case "$1" in v*) printf '%s' "$1" ;; *) printf 'v%s' "$1" ;; esac; }
+for pin_key in k0s envoyGateway metallb certManager; do
+  [ -n "$(pin "$pin_key")" ] || {
+    echo "install/platform/versions.yaml has no ${pin_key} pin"
+    exit 1
+  }
+done
+ENVOY_GATEWAY_VERSION=$(pin envoyGateway)
+METALLB_CHART_VERSION=$(pin metallb)
+CERT_MANAGER_VERSION=$(pin certManager)
+METALLB_VERSION=${METALLB_VERSION:-$(v_tag "$(pin metallb)")}
 # The third scenario's Gateway API implementation. NGINX Gateway Fabric is one
 # Deployment plus one data-plane pod per Gateway, and its Gateway class is
 # created by its own chart. It is here because it is an implementation box does
@@ -68,8 +85,8 @@ METALLB_VERSION=${METALLB_VERSION:-v0.16.1}
 GATEWAY_API_VERSION=${GATEWAY_API_VERSION:-v1.6.3}
 NGF_VERSION=${NGF_VERSION:-2.8.1}
 # Pebble 2.10.1, the ACME test server the fresh scenario proves HTTP-01
-# against, pinned by digest like every other image here.
-PEBBLE_IMAGE=${PEBBLE_IMAGE:-ghcr.io/letsencrypt/pebble@sha256:ddf230642b1a584f519f32e347de1b05a6e4c1f6c35c1863b33effeab5f78199}
+# against, pinned by tag and digest like every other test image here.
+PEBBLE_IMAGE=${PEBBLE_IMAGE:-ghcr.io/letsencrypt/pebble:2.10.1@sha256:ddf230642b1a584f519f32e347de1b05a6e4c1f6c35c1863b33effeab5f78199}  # renovate: datasource=docker
 
 KEEP=""
 SCENARIO=all
@@ -144,8 +161,8 @@ log "scenario ${SCENARIO}: kubeconfig ${KUBECONFIG} (~/.kube/config is not used)
 # registry is a distribution container published on 127.0.0.1 only, which is
 # also the only host box speaks plain HTTP to (loopback registries). The kind
 # cluster never pulls the chart: box runs on the host.
-# distribution v3.1.2, pinned by digest like every other image the e2e runs.
-REGISTRY_IMAGE=registry:3@sha256:38907510915c3f1604c7e83d6ab602ab3020d092f73bdaed8696773693ff768c
+# distribution v3.1.2, pinned by tag and digest like every other test image.
+REGISTRY_IMAGE=registry:3@sha256:38907510915c3f1604c7e83d6ab602ab3020d092f73bdaed8696773693ff768c  # renovate: datasource=docker
 REGISTRY=s5n-e2e-registry-${SCENARIO}
 log "OCI registry (distribution 3.1.2) on 127.0.0.1 only (container ${REGISTRY})"
 docker rm -f "$REGISTRY" >/dev/null 2>&1 || true
@@ -507,13 +524,13 @@ fresh() {
     cat "$WORK/bootstrap1.txt"; fail=1
   fi
   grep -q "^platform plan:" "$WORK/bootstrap1.txt" || { echo "bootstrap printed no platform plan"; fail=1; }
-  grep -qF "+ envoy-gateway 1.9.3 (Helm, envoy-gateway-system)" "$WORK/bootstrap1.txt" ||
+  grep -qF "+ envoy-gateway ${ENVOY_GATEWAY_VERSION} (Helm, envoy-gateway-system)" "$WORK/bootstrap1.txt" ||
     { echo "the plan did not install Envoy Gateway at its pinned version"; fail=1; }
   grep -qF "+ GatewayClass eg and Gateway s5n-gateway/s5n" "$WORK/bootstrap1.txt" ||
     { echo "the plan did not apply the Gateway before the address layer"; fail=1; }
   grep -qF "? Gateway s5n-gateway/s5n getting an address" "$WORK/bootstrap1.txt" ||
     { echo "the plan did not print the Gateway's address as the question"; fail=1; }
-  grep -qF "? metallb 0.16.1 (Helm, metallb-system), unless the Gateway gets an address without it" "$WORK/bootstrap1.txt" ||
+  grep -qF "? metallb ${METALLB_CHART_VERSION} (Helm, metallb-system), unless the Gateway gets an address without it" "$WORK/bootstrap1.txt" ||
     { echo "the plan did not print MetalLB as conditional"; fail=1; }
   grep -qF "? IPAddressPool s5n-pool" "$WORK/bootstrap1.txt" ||
     { echo "the plan did not print the MetalLB pool as conditional"; fail=1; }
@@ -527,7 +544,7 @@ fresh() {
   fi
   # cert-manager is part of the platform layer now: the plan names it at its
   # pin, and the install waits for its controller, webhook and cainjector.
-  grep -qF "+ cert-manager v1.21.3 (Helm, cert-manager)" "$WORK/bootstrap1.txt" ||
+  grep -qF "+ cert-manager ${CERT_MANAGER_VERSION} (Helm, cert-manager)" "$WORK/bootstrap1.txt" ||
     { echo "the plan did not install cert-manager at its pinned version"; fail=1; }
   $K -n cert-manager rollout status deploy/cert-manager --timeout=180s >/dev/null ||
     { echo "cert-manager's controller never rolled out"; fail=1; }
@@ -902,7 +919,7 @@ for r in items:
     grep -vxE '301|000' "$port80_window" | sort | uniq -c | head -5 || true
     fail=1
   fi
-  grep -qF "= metallb: already at 0.16.1" "$WORK/bootstrap2.txt" ||
+  grep -qF "= metallb: already at ${METALLB_CHART_VERSION}" "$WORK/bootstrap2.txt" ||
     { echo "the second run did not verify MetalLB"; fail=1; }
   # box's own MetalLB is the answer the question would look for, so the second
   # run does not ask it and does not wait for a Gateway it did not write.
@@ -1238,7 +1255,7 @@ EOF
   else
     cat "$WORK/bootstrap1.txt"; fail=1
   fi
-  grep -qF "? metallb 0.16.1 (Helm, metallb-system), unless the Gateway gets an address without it" "$WORK/bootstrap1.txt" ||
+  grep -qF "? metallb ${METALLB_CHART_VERSION} (Helm, metallb-system), unless the Gateway gets an address without it" "$WORK/bootstrap1.txt" ||
     { echo "the plan did not print MetalLB as conditional"; fail=1; }
   # The plan prints the question on every run -- that is the point of it -- so
   # what must not happen is the answer: no install, and no verification of a
