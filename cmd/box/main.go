@@ -163,8 +163,7 @@ func runBootstrap(args []string) {
 	recordPath := fs.String("record", bootstrap.RecordPath, "where box records the cluster decision")
 	yes := fs.Bool("yes", false, "confirm the platform and run init without asking")
 	plain := fs.Bool("plain", false, "ask init's questions with plain line prompts, even on a terminal (for a flaky terminal or a screen reader)")
-	gatewayClass := fs.String("gateway-class", "", "the GatewayClass to use when several are Accepted (platform.gateway.className)")
-	assumeFeatures := fs.Bool("gateway-assume-features", false, "use a GatewayClass that publishes no supportedFeatures list (platform.gateway.assumeFeatures)")
+	gatewayClass := fs.String("gateway-class", "", "the Envoy Gateway GatewayClass to use when several are Accepted (platform.gateway.className)")
 	initFlags := addInitFlags(fs)
 	if err := fs.Parse(args); err != nil {
 		fmt.Fprintf(os.Stderr, "box: %v\n", err)
@@ -211,12 +210,11 @@ func runBootstrap(args []string) {
 	}
 
 	res, err := d.Bootstrap(context.Background(), bootstrap.Options{
-		Kubeconfig:            *kubeconfig,
-		KubeconfigEnv:         os.Getenv("KUBECONFIG"),
-		Platform:              bootstrap.DefaultPlatform(),
-		GatewayClass:          *gatewayClass,
-		AssumeGatewayFeatures: *assumeFeatures,
-		DryRun:                *dryRun,
+		Kubeconfig:    *kubeconfig,
+		KubeconfigEnv: os.Getenv("KUBECONFIG"),
+		Platform:      bootstrap.DefaultPlatform(),
+		GatewayClass:  *gatewayClass,
+		DryRun:        *dryRun,
 	})
 	if err != nil {
 		out.Error(err)
@@ -290,9 +288,9 @@ func applyPlatform(ctx context.Context, kubeconfig string, components []bootstra
 // boxValues is what `box apply` reads from the cluster rather than from either
 // file. The NetworkPolicy peer follows the Gateway implementation in use: box
 // asks the Gateway's own address which Service holds it, and admits that
-// Service's namespace. A box whose Gateway is Envoy Gateways gets
-// envoy-gateway-system exactly as before; one behind another implementation
-// gets wherever that implementation runs its proxy.
+// Service's namespace. With Envoy Gateway, the only implementation box
+// supports, that is envoy-gateway-system; asking the cluster keeps it a fact
+// rather than a guess.
 func boxValues(kubeconfig string) func(context.Context) (map[string]any, error) {
 	return func(ctx context.Context) (map[string]any, error) {
 		peers, err := platform.GatewayFrom(ctx, kubeconfig)
@@ -304,8 +302,8 @@ func boxValues(kubeconfig string) func(context.Context) (map[string]any, error) 
 }
 
 // classChooser adapts bootstrap's class question onto setup.Prompter, so
-// choosing an implementation is the same dialog init asks with. The classes
-// are listed by name with their controller as the help line.
+// choosing between Accepted Envoy Gateway classes is the same dialog init asks
+// with. The classes are listed by name with their controller as the help line.
 type classChooser struct {
 	prompt setup.Prompter
 }

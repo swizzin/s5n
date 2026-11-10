@@ -116,7 +116,7 @@ func TestBootstrapRecordIdempotent(t *testing.T) {
 				LoadBalancer: OutcomeNotProbed,
 				Gateway:      OutcomePresent,
 				CertManager:  OutcomePresent,
-				Classes:      []GatewayClass{{Name: EnvoyGatewayClass, Accepted: true, ManagedByBox: true}},
+				Classes:      []GatewayClass{{Name: EnvoyGatewayClass, ControllerName: EnvoyGatewayController, Accepted: true, ManagedByBox: true}},
 			},
 		}
 		d, _, recs, inst, _ := recordedCluster(externalRecord(kubeconfig), prober)
@@ -145,10 +145,10 @@ func TestBootstrapRecordIdempotent(t *testing.T) {
 		}
 	})
 
-	t.Run("an external class the operator chose", func(t *testing.T) {
+	t.Run("a second Envoy class the operator chose", func(t *testing.T) {
 		const kubeconfig = "/home/someone/.kube/config"
 		rec := externalRecord(kubeconfig)
-		rec.GatewayClass = "nginx"
+		rec.GatewayClass = "envoy"
 		prober := &fakeProber{
 			version: Version{GitVersion: "v1.37.2+k3s1"},
 			cluster: Cluster{Nodes: 1},
@@ -158,8 +158,8 @@ func TestBootstrapRecordIdempotent(t *testing.T) {
 				Gateway:      OutcomePresent,
 				CertManager:  OutcomePresent,
 				Classes: []GatewayClass{
-					{Name: "nginx", ControllerName: "example.com/nginx", Accepted: true, Features: []string{FeaturePathRewrite}},
-					{Name: "other", ControllerName: "example.com/other", Accepted: true, Features: []string{FeaturePathRewrite}},
+					{Name: "envoy", ControllerName: EnvoyGatewayController, Accepted: true},
+					{Name: "eg", ControllerName: EnvoyGatewayController, Accepted: true},
 				},
 			},
 		}
@@ -172,8 +172,8 @@ func TestBootstrapRecordIdempotent(t *testing.T) {
 		if res.Action != ActionUseCluster {
 			t.Fatalf("action = %q, want use-cluster; reason: %s", res.Action, res.Reason)
 		}
-		if res.Gateway.Class != "nginx" || !res.Gateway.FeaturesChecked {
-			t.Errorf("gateway = %+v, want the recorded class kept and its features checked", res.Gateway)
+		if res.Gateway.Class != "envoy" {
+			t.Errorf("gateway = %+v, want the recorded class kept over the list", res.Gateway)
 		}
 		if len(recs.saved) != 0 {
 			t.Errorf("a re-run must not rewrite the record")
@@ -237,7 +237,7 @@ func TestBootstrapRecordGateFiresBeforeAnyWrite(t *testing.T) {
 				Gateway:      OutcomePresent,
 				CertManager:  OutcomePresent,
 				Classes: []GatewayClass{
-					{Name: "traefik", ControllerName: "example.com/traefik", Accepted: true, Features: []string{FeaturePathRewrite}},
+					{Name: "traefik", ControllerName: "example.com/traefik", Accepted: true},
 				},
 			},
 		}
@@ -252,6 +252,42 @@ func TestBootstrapRecordGateFiresBeforeAnyWrite(t *testing.T) {
 		}
 		if !strings.Contains(res.Reason, `the recorded GatewayClass "nginx" is gone from the cluster (accepted: traefik)`) {
 			t.Errorf("reason = %q, want the vanished recorded class named", res.Reason)
+		}
+		if len(recs.saved) != 0 || len(inst.plans) != 0 {
+			t.Errorf("a refused re-run wrote: %d records, %d installs", len(recs.saved), len(inst.plans))
+		}
+	})
+
+	t.Run("the recorded class belongs to another implementation", func(t *testing.T) {
+		const kubeconfig = "/home/someone/.kube/config"
+		rec := externalRecord(kubeconfig)
+		rec.GatewayClass = "nginx"
+		prober := &fakeProber{
+			version: Version{GitVersion: "v1.37.2+k3s1"},
+			cluster: Cluster{Nodes: 1},
+			platform: PlatformProbe{
+				GatewayAPI:   OutcomePresent,
+				LoadBalancer: OutcomeNotProbed,
+				Gateway:      OutcomePresent,
+				CertManager:  OutcomePresent,
+				Classes: []GatewayClass{
+					{Name: "nginx", ControllerName: nginxController, Accepted: true},
+				},
+			},
+		}
+		d, _, recs, inst, _ := recordedCluster(rec, prober)
+
+		res, err := d.Bootstrap(context.Background(), Options{})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if res.Action != ActionStop {
+			t.Fatalf("action = %q, want stop; reason: %s", res.Action, res.Reason)
+		}
+		for _, want := range []string{`the recorded GatewayClass "nginx"`, nginxController, "is not Envoy Gateway", RecordPath} {
+			if !strings.Contains(res.Reason, want) {
+				t.Errorf("reason = %q, want it to name %q", res.Reason, want)
+			}
 		}
 		if len(recs.saved) != 0 || len(inst.plans) != 0 {
 			t.Errorf("a refused re-run wrote: %d records, %d installs", len(recs.saved), len(inst.plans))
@@ -318,7 +354,7 @@ func TestBootstrapExplicitMatchesRecordUsesRecord(t *testing.T) {
 			LoadBalancer: OutcomeNotProbed,
 			Gateway:      OutcomePresent,
 			CertManager:  OutcomePresent,
-			Classes:      []GatewayClass{{Name: EnvoyGatewayClass, Accepted: true, ManagedByBox: true}},
+			Classes:      []GatewayClass{{Name: EnvoyGatewayClass, ControllerName: EnvoyGatewayController, Accepted: true, ManagedByBox: true}},
 		},
 	}
 	d, _, recs, inst, _ := recordedCluster(rec, prober)

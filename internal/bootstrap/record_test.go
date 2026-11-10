@@ -47,6 +47,25 @@ func TestRecordRoundTripK0sManaged(t *testing.T) {
 	}
 }
 
+// The record schema no longer carries the retired override: a fresh record is
+// written without the key, and the class it chose is still there.
+func TestRecordDoesNotWriteRetiredFeaturesKey(t *testing.T) {
+	out := encodeRecord(&Record{
+		Source:       SourceExternal,
+		Kubeconfig:   "/home/example/.kube/config",
+		Distribution: DistK3s,
+		Nodes:        1,
+		Platform:     DefaultPlatform(),
+		GatewayClass: EnvoyGatewayClass,
+	})
+	if strings.Contains(string(out), "assumeGatewayFeatures") {
+		t.Fatalf("a fresh record carries the retired key:\n%s", out)
+	}
+	if !strings.Contains(string(out), `gatewayClass: "eg"`) {
+		t.Fatalf("a fresh record does not carry the class:\n%s", out)
+	}
+}
+
 func TestParseRecordRejectsBadInput(t *testing.T) {
 	base := `source: external
 kubeconfig: "/home/example/.kube/config"
@@ -69,6 +88,11 @@ platform:
 		{"missing platform key", func(s string) string { return strings.Replace(s, "  cert-manager: auto\n", "", 1) }, "missing"},
 		{"bad mode", func(s string) string { return strings.Replace(s, "  gateway: auto", "  gateway: cloud", 1) }, "unknown mode"},
 		{"unknown platform key", func(s string) string { return strings.Replace(s, "  gateway: auto", "  traefik: auto", 1) }, "unknown platform key"},
+		// The key was the override for a class publishing no feature list.
+		// box accepts only Envoy Gateway now, so the key is refused by name
+		// with the line to remove, not reported as an unknown key.
+		{"retired assumeGatewayFeatures", func(s string) string { return s + "assumeGatewayFeatures: true\n" }, "assumeGatewayFeatures is no longer supported"},
+		{"retired assumeGatewayFeatures false", func(s string) string { return s + "assumeGatewayFeatures: false\n" }, "assumeGatewayFeatures is no longer supported"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

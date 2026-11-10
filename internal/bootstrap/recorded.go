@@ -57,12 +57,12 @@ func (d *Decision) finishRecorded(ctx context.Context, obs clusterProbes, rec *R
 // recordedClass keeps the class the record chose while the cluster still
 // serves it: the class is a decision, and asking again could silently move a
 // box's routes, so the record wins over a second look. The cluster is still
-// the evidence, though, so the class must be Accepted and must publish the
-// feature the chart's routes need (under the assumeFeatures choice the record
-// carries). A recorded class that is no longer Accepted stops with the same
-// refusal a chosen class gets; so does one that is gone while another
-// implementation is serving the cluster, because box will not move a box's
-// routes to a different implementation on its own.
+// the evidence, though, so the class must be Accepted and must belong to Envoy
+// Gateway, the only implementation box supports. A recorded class that is no
+// longer Accepted stops with the same refusal a chosen class gets; so does one
+// for another controller, or one that is gone while another implementation is
+// serving the cluster, because box will not move a box's routes to a different
+// implementation on its own.
 //
 // The one vanished class box repairs is its own `eg`, and only when the
 // platform decision found no accepted class at all: then the implementation
@@ -85,10 +85,14 @@ func (d *Decision) recordedClass(rec *Record, probe PlatformProbe, gw ComponentR
 		if !c.Accepted {
 			return GatewayChoice{}, fmt.Sprintf("the recorded GatewayClass %q is not Accepted (%s): box will not attach its Gateway to a class no controller serves", c.Name, acceptedReason(c))
 		}
-		return d.withFeatures(Options{AssumeGatewayFeatures: rec.AssumeGatewayFeatures}, c)
+		if !isEnvoyClass(c) {
+			return GatewayChoice{}, fmt.Sprintf("the recorded GatewayClass %q (controller %s) is not Envoy Gateway, the only implementation box supports (controller %s): install Envoy Gateway in place of that implementation, then remove %s deliberately so box chooses a class again.%s",
+				c.Name, controllerOr(c), EnvoyGatewayController, d.Records.RecordPath(), k3sTraefikHint(rec.Distribution, []GatewayClass{c}))
+		}
+		return choiceOf(c), ""
 	}
 	if class == EnvoyGatewayClass && gw.Action == "install" {
 		return GatewayChoice{Class: EnvoyGatewayClass, BoxInstalls: true}, ""
 	}
-	return GatewayChoice{}, fmt.Sprintf("the recorded GatewayClass %q is gone from the cluster (accepted: %s): box will not move this box's routes to another implementation", class, names(acceptedClasses(probe.Classes)))
+	return GatewayChoice{}, fmt.Sprintf("the recorded GatewayClass %q is gone from the cluster (accepted: %s): box will not move this seedbox's routes to another implementation.%s", class, names(acceptedClasses(probe.Classes)), k3sTraefikHint(rec.Distribution, probe.Classes))
 }

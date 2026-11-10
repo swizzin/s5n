@@ -25,12 +25,9 @@ type Record struct {
 	// GatewayClass is the GatewayClass box attached its Gateway to. A re-run
 	// keeps it while the cluster still serves it: the class is a decision, and
 	// asking a second time would be able to silently move a box's routes. The
-	// cluster still has to show it Accepted and supporting the chart's routes.
+	// cluster still has to show it Accepted and owned by Envoy Gateway's
+	// controller.
 	GatewayClass string
-	// AssumeGatewayFeatures records that the operator allowed a class that
-	// publishes no supportedFeatures list. It is a choice, so it survives a
-	// re-run like the class itself.
-	AssumeGatewayFeatures bool
 }
 
 // encodeRecord renders a Record as the fixed YAML schema. The kubeconfig path
@@ -48,9 +45,6 @@ func encodeRecord(r *Record) []byte {
 	fmt.Fprintf(&b, "  cert-manager: %s\n", r.Platform.CertManager)
 	if r.GatewayClass != "" {
 		fmt.Fprintf(&b, "gatewayClass: %q\n", r.GatewayClass)
-	}
-	if r.AssumeGatewayFeatures {
-		fmt.Fprintf(&b, "assumeGatewayFeatures: true\n")
 	}
 	return []byte(b.String())
 }
@@ -97,10 +91,12 @@ func parseRecord(data []byte) (*Record, error) {
 			case "gatewayClass":
 				rec.GatewayClass = unquote(val)
 			case "assumeGatewayFeatures":
-				if strings.TrimSpace(val) != "true" && strings.TrimSpace(val) != "false" {
-					return nil, fmt.Errorf("cluster.yaml: assumeGatewayFeatures %q is not true or false", val)
-				}
-				rec.AssumeGatewayFeatures = strings.TrimSpace(val) == "true"
+				// The key only existed for a class publishing no feature list,
+				// and box no longer accepts any implementation other than
+				// Envoy Gateway. Refuse by name rather than reporting it as an
+				// unknown key: an operator upgrading a box needs to know which
+				// line to remove and why.
+				return nil, fmt.Errorf("cluster.yaml: assumeGatewayFeatures is no longer supported: box supports only Envoy Gateway, which publishes no feature list to override. Remove that line and run box bootstrap again")
 			default:
 				return nil, fmt.Errorf("cluster.yaml: unknown key %q", key)
 			}

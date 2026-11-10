@@ -24,20 +24,15 @@ type Decision struct {
 }
 
 // Options carries the explicit cluster and platform modes from the CLI, plus
-// the Gateway decisions that are not modes: which class to attach to, and
-// whether a class that publishes no feature list may be used anyway.
+// the Gateway decision that is not a mode: which class to attach to.
 type Options struct {
 	Kubeconfig    string // --kubeconfig; empty when not given
 	KubeconfigEnv string // KUBECONFIG; empty when not set
 	Platform      PlatformConfig
-	// GatewayClass is platform.gateway.className: the GatewayClass to use
-	// when several are Accepted. Empty lets box use the only Accepted one, or
-	// ask.
+	// GatewayClass is platform.gateway.className: the Envoy Gateway
+	// GatewayClass to use when several are Accepted. Empty lets box use the
+	// only Accepted one, or ask.
 	GatewayClass string
-	// AssumeGatewayFeatures is platform.gateway.assumeFeatures: use a class
-	// that publishes no supportedFeatures list. Empty is the safe default:
-	// box stops rather than using an implementation it cannot check.
-	AssumeGatewayFeatures bool
 	// DryRun is box bootstrap --dry-run: probe nothing remote and change
 	// nothing. A clean host gets the install plan printed and stops there,
 	// because the cluster to adopt does not exist and must not be probed.
@@ -265,7 +260,7 @@ func (d *Decision) finishCluster(ctx context.Context, opts Options, obs clusterP
 		res.Reason = conflict
 		return res
 	}
-	choice, problem := d.gatewayChoice(opts, plat, gatewayComponent(components))
+	choice, problem := d.gatewayChoice(opts, plat, gatewayComponent(components), obs.dist)
 	if problem != "" {
 		res.Action = ActionStop
 		res.Reason = problem
@@ -273,13 +268,12 @@ func (d *Decision) finishCluster(ctx context.Context, opts Options, obs clusterP
 	}
 	res.Gateway = choice
 	rec := &Record{
-		Source:                source,
-		Kubeconfig:            path,
-		Distribution:          obs.dist,
-		Nodes:                 obs.cluster.Nodes,
-		Platform:              opts.Platform,
-		GatewayClass:          choice.Class,
-		AssumeGatewayFeatures: opts.AssumeGatewayFeatures,
+		Source:       source,
+		Kubeconfig:   path,
+		Distribution: obs.dist,
+		Nodes:        obs.cluster.Nodes,
+		Platform:     opts.Platform,
+		GatewayClass: choice.Class,
 	}
 	if err := d.Records.Save(rec); err != nil {
 		res.Action = ActionStop

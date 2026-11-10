@@ -42,22 +42,21 @@ func TestReportResultMatchesFormatResult(t *testing.T) {
 				{Component: ComponentCertManager, Mode: "auto", Action: "use", Reason: "cert-manager 1.16 is ready"},
 			},
 			Gateway: GatewayChoice{
-				Class:           "eg",
-				ControllerName:  "gateway.envoyproxy.io/gatewayclass-controller",
-				BoxInstalls:     true,
-				FeaturesChecked: true,
+				Class:          "eg",
+				ControllerName: "gateway.envoyproxy.io/gatewayclass-controller",
+				BoxInstalls:    true,
 			},
 			Reason: "using the kubeconfig at /home/example/.kube/config",
 		}},
-		{"assumed-features", Result{
+		{"recorded-class", Result{
 			Action:       ActionUseManaged,
 			Source:       SourceExternal,
 			Kubeconfig:   "/home/example/.kube/config",
 			Distribution: DistVanilla,
 			Nodes:        3,
 			Gateway: GatewayChoice{
-				Class:   "nginx",
-				Assumed: true,
+				Class:          "envoy",
+				ControllerName: "gateway.envoyproxy.io/gatewayclass-controller",
 			},
 			Reason: "using the cluster box recorded",
 		}},
