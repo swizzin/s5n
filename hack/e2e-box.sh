@@ -36,6 +36,14 @@
 #                 cluster, naming the class and its controller, and write
 #                 nothing: no namespace, no GatewayClass, no record.
 #
+# The fresh scenario runs Pebble, Let's Encrypt's test ACME server, inside the
+# cluster and points the production issuer at it, so HTTP-01 through the
+# Gateway is proven on every run: Certificate Ready, HTTPS with Pebble's CA, an
+# HTTP redirect for app paths, and a challenge path that is not redirected --
+# including on a renewal issued with the redirect already in place. The
+# preinstalled scenario's name does not resolve, which proves the self-signed
+# half.
+#
 # Why one script and three clusters instead of a flag inside hack/e2e-kind.sh:
 # the existing e2e is the chart's acceptance test, and its helm install is what
 # proves the chart still installs the way users install it today. These
@@ -59,6 +67,9 @@ METALLB_VERSION=${METALLB_VERSION:-v0.16.1}
 # like every other platform version here.
 GATEWAY_API_VERSION=${GATEWAY_API_VERSION:-v1.6.3}
 NGF_VERSION=${NGF_VERSION:-2.8.1}
+# Pebble 2.10.1, the ACME test server the fresh scenario proves HTTP-01
+# against, pinned by digest like every other image here.
+PEBBLE_IMAGE=${PEBBLE_IMAGE:-ghcr.io/letsencrypt/pebble@sha256:ddf230642b1a584f519f32e347de1b05a6e4c1f6c35c1863b33effeab5f78199}
 
 KEEP=""
 SCENARIO=all
@@ -86,10 +97,13 @@ if [ "$SCENARIO" = all ]; then
 fi
 
 case "$SCENARIO" in
-  fresh) CLUSTER=s5n-box ;;
-  preinstalled) CLUSTER=s5n-box-lb ;;
-  foreign-gateway) CLUSTER=s5n-box-gw ;;
+  fresh) CLUSTER=s5n-box; DOMAIN=box.example.test ;;
+  preinstalled) CLUSTER=s5n-box-lb; DOMAIN=box.internal.example ;;
+  foreign-gateway) CLUSTER=s5n-box-gw; DOMAIN=box.example.com ;;
 esac
+# The fresh scenario points the production issuer at Pebble; every other
+# scenario keeps Let's Encrypt's directory and never issues from it.
+ACME_ARGS=()
 CTX="kind-${CLUSTER}"
 K="kubectl --context ${CTX}"
 HELM="helm --kube-context ${CTX}"
@@ -224,6 +238,16 @@ wiring:
     # names: the same override hack/e2e-kind.sh passes as --set.
     tag: e2e
 EOF
+# The fresh scenario's ACME server is Pebble, not Let's Encrypt: the values
+# file forces the production issuer, so the Certificate names s5n-letsencrypt
+# and the test can prove the HTTP-01 path without the internet.
+if [ "$SCENARIO" = fresh ]; then
+  cat >>"$WORK/values.yaml" <<'EOF'
+
+tls:
+  issuer: letsencrypt
+EOF
+fi
 
 bootstrap() { # bootstrap <output file>
   # The platform and root's seedbox are one command now. --record points the
@@ -233,9 +257,9 @@ bootstrap() { # bootstrap <output file>
   # No --chart-version: bootstrap takes the default-version path, so the e2e
   # exercises the newest-release selection against a real registry. The chart
   # is the one pushed above; box pulls it over loopback.
-  "$WORK/box" bootstrap --yes --chart-repo "$CHART_REPO" \
+  "$WORK/box" bootstrap --yes --chart-repo "$CHART_REPO" ${ACME_ARGS[@]+"${ACME_ARGS[@]}"} \
     --grant "$WORK/grant.yaml" --values "$WORK/values.yaml" \
-    --namespace "$NS" --domain box.example.com \
+    --namespace "$NS" --domain "$DOMAIN" \
     --data-path /srv/s5n/data --config-path /srv/s5n/config \
     --apps qbittorrent,sonarr,radarr,prowlarr,plex,tautulli,seerr \
     --puid 1000 --pgid 1000 \
@@ -253,7 +277,7 @@ init() { # init <output file>
   # one chart, and the apply it hands over to installs that same value.
   "$WORK/box" init --yes --chart-repo "$CHART_REPO" --chart-version "$CHART_VERSION" \
     --grant "$WORK/grant.yaml" --values "$WORK/values.yaml" \
-    --namespace "$NS" --domain box.example.com \
+    --namespace "$NS" --domain "$DOMAIN" \
     --data-path /srv/s5n/data --config-path /srv/s5n/config \
     --apps qbittorrent,sonarr,radarr,prowlarr,plex,tautulli,seerr \
     --puid 1000 --pgid 1000 \
@@ -315,6 +339,148 @@ no_probe_service() {
   fi
 }
 
+
+# https_get retries a TLS request while the Gateway's data plane converges.
+# Replacing a Certificate's Secret briefly makes the listener's certificateRef
+# unresolved, so Envoy withdraws and restores port 443; a client retries, and
+# the e2e does the same. It prints the last status code, and -k skips
+# verification for the self-signed scenario.
+https_get() { # https_get <address> <path> <ca-file|-> [requests]
+  local addr=$1 path=$2 ca=$3 requests=${4:-60} code="" i
+  for i in $(seq 1 "$requests"); do
+    if [ "$ca" = - ]; then
+      code=$(curl -k -sS -o /dev/null -w '%{http_code}'         --resolve "${DOMAIN}:443:${addr}" "https://${DOMAIN}${path}" 2>"$WORK/https.err" || true)
+    else
+      code=$(curl -sS -o /dev/null -w '%{http_code}'         --resolve "${DOMAIN}:443:${addr}" --cacert "$ca" "https://${DOMAIN}${path}" 2>"$WORK/https.err" || true)
+    fi
+    [ "$code" = 200 ] && break
+    sleep 1
+  done
+  printf '%s' "$code"
+}
+
+# tls_serial prints the serial number of the certificate in a cert-manager
+# Secret. A renewal is a new serial; the Secret's UID alone only says it was
+# rewritten.
+tls_serial() { # tls_serial <secret-name>
+  $K -n s5n-gateway get secret "$1" -o jsonpath='{.data.tls\.crt}' 2>/dev/null |
+    base64 -d 2>/dev/null |
+    openssl x509 -noout -serial 2>/dev/null |
+    sed 's/^serial=//'
+}
+
+# ---- the ACME test server ----------------------------------------------------
+# Pebble is Let's Encrypt's test ACME server: same protocol, no rate limits, and
+# a CA it generates at startup (fetched from its management API). cert-manager
+# reaches its directory through the issuer override box takes for development
+# runs. Pebble validates HTTP-01 on port 80, through the Gateway, exactly like
+# production, and the certificate the app serves chains to that CA.
+install_pebble() {
+  log "Pebble 2.10.1 (the ACME test server) in the cluster, pinned by digest"
+  node_ip=$($K get node -o jsonpath='{.items[0].status.addresses[?(@.type=="InternalIP")].address}')
+  $K create namespace pebble --dry-run=client -o yaml | $K apply -f - >/dev/null
+  cat <<EOF | $K apply -f - >/dev/null
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: pebble
+  namespace: pebble
+data:
+  pebble-config.json: |
+    {
+      "pebble": {
+        "listenAddress": "0.0.0.0:14000",
+        "managementListenAddress": "0.0.0.0:15000",
+        "certificate": "/test/certs/localhost/cert.pem",
+        "privateKey": "/test/certs/localhost/key.pem",
+        "httpPort": 80,
+        "tlsPort": 5001,
+        "ocspResponderURL": "",
+        "externalAccountBindingRequired": false
+      }
+    }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: pebble
+  namespace: pebble
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: pebble
+  template:
+    metadata:
+      labels:
+        app: pebble
+    spec:
+      containers:
+        - name: pebble
+          image: ${PEBBLE_IMAGE}
+          args: ["-config", "/config/pebble-config.json"]
+          ports:
+            - {containerPort: 14000, name: acme}
+            - {containerPort: 15000, name: management}
+          readinessProbe:
+            tcpSocket: {port: 14000}
+            initialDelaySeconds: 2
+          volumeMounts:
+            - {name: config, mountPath: /config, readOnly: true}
+      volumes:
+        - name: config
+          configMap:
+            name: pebble
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: pebble
+  namespace: pebble
+spec:
+  type: NodePort
+  selector:
+    app: pebble
+  ports:
+    - {name: acme, port: 14000, targetPort: 14000}
+    - {name: management, port: 15000, targetPort: 15000, nodePort: 31500}
+EOF
+  $K -n pebble rollout status deploy/pebble --timeout=180s || { echo "Pebble never rolled out"; fail=1; return 0; }
+  for i in $(seq 1 60); do
+    if curl -k -fsS "https://${node_ip}:31500/roots/0" -o "$WORK/pebble-root.pem" 2>/dev/null; then
+      break
+    fi
+    if [ "$i" = 60 ]; then
+      echo "Pebble never served its root CA"; fail=1; return 0
+    fi
+    sleep 2
+  done
+  echo "  Pebble root CA in $WORK/pebble-root.pem"
+}
+
+# cert-manager's HTTP-01 self-check and Pebble both resolve the test name
+# themselves, so the smallest change that makes it point at the Gateway is a
+# CoreDNS hosts entry. Nothing in the chart or box depends on it: this is the
+# test's own DNS.
+patch_coredns() { # patch_coredns <host> <ip>
+  $K -n kube-system get cm coredns -o jsonpath='{.data.Corefile}' >"$WORK/Corefile" || return 1
+  python3 - "$WORK/Corefile" "$1" "$2" <<'PYEOF' || return 1
+import sys
+path, host, ip = sys.argv[1:4]
+text = open(path).read()
+if host not in text:
+    block = "    hosts {\n        " + ip + " " + host + "\n        fallthrough\n    }\n"
+    marker = "    forward . /etc/resolv.conf"
+    if marker not in text:
+        raise SystemExit("the CoreDNS Corefile has no forward block to patch")
+    text = text.replace(marker, block + marker, 1)
+    open(path, "w").write(text)
+PYEOF
+  $K -n kube-system create cm coredns --from-file=Corefile="$WORK/Corefile" --dry-run=client -o yaml | $K apply -f - >/dev/null
+  $K -n kube-system rollout restart deploy/coredns >/dev/null
+  $K -n kube-system rollout status deploy/coredns --timeout=120s >/dev/null
+}
+
 # ---- scenario: fresh --------------------------------------------------------
 fresh() {
   # ---- bootstrap 1: the platform and root's first install -------------------
@@ -327,6 +493,13 @@ fresh() {
   # settled by the Gateway's own status after the confirm. On a bare kind
   # cluster nothing assigns an address, so the question runs its 60 seconds and
   # MetalLB follows.
+  # The ACME server and the DNS entry come first: bootstrap issues the host's
+  # certificate inside this run, so both have to answer before it starts.
+  install_pebble
+  [ "$fail" = 0 ] || return 0
+  patch_coredns "$DOMAIN" "$node_ip" || { echo "could not patch CoreDNS for ${DOMAIN}"; fail=1; return 0; }
+  ACME_ARGS=(--acme-server "https://pebble.pebble.svc:14000/dir")
+
   log "box bootstrap: the platform layer, then root's first install"
   if bootstrap "$WORK/bootstrap1.txt"; then
     cat "$WORK/bootstrap1.txt"
@@ -379,11 +552,14 @@ fresh() {
     $K get clusterissuer "$issuer" >/dev/null 2>&1 ||
       { echo "ClusterIssuer ${issuer} was not applied"; fail=1; }
   done
+  # This scenario's issuer is pointed at Pebble below; the production URL is
+  # the preinstalled scenario's assertion.
   acme_server=$($K get clusterissuer s5n-letsencrypt -o jsonpath='{.spec.acme.server}')
-  [ "$acme_server" = "https://acme-v02.api.letsencrypt.org/directory" ] ||
+  [ "$acme_server" = "https://pebble.pebble.svc:14000/dir" ] ||
     { echo "s5n-letsencrypt points at ${acme_server}"; fail=1; }
-  solver_ref=$($K get clusterissuer s5n-letsencrypt -o jsonpath='{.spec.acme.solvers[0].http01.gatewayHTTPRoute.parentRefs[0].sectionName}')
-  [ "$solver_ref" = http ] || { echo "the HTTP-01 solver does not attach to the http listener (${solver_ref})"; fail=1; }
+  solver_ref=$($K get clusterissuer s5n-letsencrypt -o jsonpath='{.spec.acme.solvers[0].http01.gatewayHTTPRoute.parentRefs[0].sectionName}' || true)
+  [ -z "$solver_ref" ] ||
+    { echo "the HTTP-01 solver pins sectionName '${solver_ref}': it must attach to the generic http listener and each host's http-<host> listener"; fail=1; }
 
   # The init half ran in the same process: root's first release, and the
   # namespace box created because the cluster had none.
@@ -431,6 +607,183 @@ fresh() {
   [ "$gw_programmed" = True ] || { echo "the Gateway is not Programmed"; fail=1; }
   grep -qF "the Gateway answers on ${gw_addr}:80 (HTTP " "$WORK/bootstrap1.txt" ||
     { echo "box did not report the reachability check on ${gw_addr}"; fail=1; }
+
+  # ---- TLS: Pebble proved HTTP-01 through the Gateway ------------------------
+  # The Certificate is real: cert-manager created an order, Pebble fetched the
+  # challenge through the Gateway on port 80, and the issued chain is signed by
+  # Pebble's own CA. https with --cacert is the proof the listener serves it;
+  # the redirect and the challenge path are the proof of which route wins.
+  cert=s5n-tls-box-example-test
+  grep -qF "tls: tls.issuer=letsencrypt forces Let's Encrypt" "$WORK/bootstrap1.txt" ||
+    { echo "init did not say the issuer was forced"; fail=1; }
+  grep -qF "applied Certificate s5n-gateway/${cert} (issuer s5n-letsencrypt)" "$WORK/bootstrap1.txt" ||
+    { echo "box did not apply the certificate with the production issuer"; fail=1; }
+  $K -n s5n-gateway wait --for=condition=Ready "certificate/$cert" --timeout=180s ||
+    { echo "the Certificate never became Ready"; fail=1; }
+  cert_issuer=$($K -n s5n-gateway get certificate "$cert" -o jsonpath='{.spec.issuerRef.name}')
+  [ "$cert_issuer" = s5n-letsencrypt ] || { echo "the Certificate names issuer ${cert_issuer}"; fail=1; }
+  acme_server=$($K get clusterissuer s5n-letsencrypt -o jsonpath='{.spec.acme.server}')
+  [ "$acme_server" = "https://pebble.pebble.svc:14000/dir" ] ||
+    { echo "s5n-letsencrypt points at ${acme_server}, not the test server"; fail=1; }
+  # The test override accepts Pebble's self-signed ACME endpoint; a production
+  # run leaves verification on, which the second scenario's issuer asserts.
+  [ "$($K get clusterissuer s5n-letsencrypt -o jsonpath='{.spec.acme.skipTLSVerify}')" = true ] ||
+    { echo "the test issuer does not accept Pebble's certificate"; fail=1; }
+
+  # The listener references the Certificate's Secret. The shared generic http
+  # listener is untouched (from All, so hosts without a certificate keep
+  # serving); this host has its own port-80 listener, hostname-matched and
+  # narrowed to s5n-gateway, which listener isolation prefers for its Host.
+  # That is what makes the redirect win over an app route's longer prefix
+  # without closing port 80 for any other host.
+  listener_port=$($K -n s5n-gateway get gateway s5n -o jsonpath='{.spec.listeners[?(@.name=="https-box-example-test")].port}')
+  listener_secret=$($K -n s5n-gateway get gateway s5n -o jsonpath='{.spec.listeners[?(@.name=="https-box-example-test")].tls.certificateRefs[0].name}')
+  listener_routes=$($K -n s5n-gateway get gateway s5n -o jsonpath='{.spec.listeners[?(@.name=="https-box-example-test")].allowedRoutes.namespaces.from}')
+  http_routes=$($K -n s5n-gateway get gateway s5n -o jsonpath='{.spec.listeners[?(@.name=="http")].allowedRoutes.namespaces.from}')
+  http_host_port=$($K -n s5n-gateway get gateway s5n -o jsonpath='{.spec.listeners[?(@.name=="http-box-example-test")].port}')
+  http_host_hostname=$($K -n s5n-gateway get gateway s5n -o jsonpath='{.spec.listeners[?(@.name=="http-box-example-test")].hostname}')
+  http_host_routes=$($K -n s5n-gateway get gateway s5n -o jsonpath='{.spec.listeners[?(@.name=="http-box-example-test")].allowedRoutes.namespaces.from}')
+  http_host_selector=$($K -n s5n-gateway get gateway s5n -o jsonpath='{.spec.listeners[?(@.name=="http-box-example-test")].allowedRoutes.namespaces.selector.matchLabels.kubernetes\.io/metadata\.name}')
+  echo "  listener https-box-example-test: ${listener_port} -> ${listener_secret}, 443 routes ${listener_routes}"
+  echo "  listener http-box-example-test: ${http_host_port} ${http_host_hostname}, 80 routes ${http_host_routes} (${http_host_selector}); generic http routes ${http_routes}"
+  [ "$listener_port" = 443 ] || { echo "no HTTPS listener on 443"; fail=1; }
+  [ "$listener_secret" = "$cert" ] || { echo "the listener does not reference ${cert}"; fail=1; }
+  [ "$listener_routes" = All ] || { echo "the HTTPS listener does not admit the seedbox's routes"; fail=1; }
+  [ "$http_routes" = All ] || { echo "the shared http listener was narrowed (from ${http_routes}): it must keep serving every host"; fail=1; }
+  [ "$http_host_port" = 80 ] || { echo "the host's own port-80 listener is on ${http_host_port}"; fail=1; }
+  [ "$http_host_hostname" = "$DOMAIN" ] || { echo "the host's port-80 listener matches ${http_host_hostname}, want ${DOMAIN}"; fail=1; }
+  [ "$http_host_routes" = Selector ] || { echo "the host's port-80 listener was not narrowed to s5n-gateway"; fail=1; }
+  [ "$http_host_selector" = s5n-gateway ] || { echo "the host's port-80 listener selects ${http_host_selector}, want s5n-gateway"; fail=1; }
+
+  # The redirect attaches to the host's own port-80 listener, not the shared
+  # one. The chart's app routes attach with no sectionName at all, so under
+  # isolation they land on the HTTPS listener and the generic http listener --
+  # never on the host's port-80 listener.
+  redirect_section=$($K -n s5n-gateway get httproute s5n-tls-box-example-test-redirect -o jsonpath='{.spec.parentRefs[0].sectionName}')
+  echo "  redirect route sectionName: ${redirect_section}"
+  [ "$redirect_section" = "http-box-example-test" ] || { echo "the redirect does not attach to http-box-example-test"; fail=1; }
+  $K -n "$NS" get httproute -o json | python3 -c '
+import json, sys
+items = json.load(sys.stdin).get("items", [])
+bad = []
+for r in items:
+    for ref in r["spec"]["parentRefs"]:
+        if ref.get("sectionName"):
+            bad.append(r["metadata"]["name"] + " -> " + ref["sectionName"])
+if bad:
+    print("app routes pin a listener: " + ", ".join(bad))
+    sys.exit(1)
+print("  app routes: %d HTTPRoutes, none pins a sectionName" % len(items))
+' || { echo "the chart's app routes must attach without a sectionName"; fail=1; }
+
+  https_code=$(https_get "$gw_addr" /sonarr/ping "$WORK/pebble-root.pem")
+  echo "  HTTPS ${DOMAIN}/sonarr/ping through the Gateway: ${https_code}"
+  [ "$https_code" = 200 ] || { echo "HTTPS did not answer 200 with Pebble's CA"; fail=1; }
+
+  http_code=$(curl -sS -D "$WORK/http-headers" -o /dev/null -w '%{http_code}' \
+    --resolve "${DOMAIN}:80:${gw_addr}" "http://${DOMAIN}/sonarr/ping" || true)
+  echo "  HTTP ${DOMAIN}/sonarr/ping: ${http_code}"
+  [ "$http_code" = 301 ] || { echo "an app path on port 80 was not redirected"; fail=1; }
+  grep -qi "^location: https://${DOMAIN}/sonarr/ping" "$WORK/http-headers" ||
+    { echo "the redirect does not point at HTTPS"; fail=1; }
+
+  # The challenge path is not asserted here: cert-manager's solver HTTPRoute
+  # exists only while an order is pending, so after issuance that path is the
+  # redirect's. The renewal below observes the solver route while it exists.
+
+  # ---- a renewal, with the redirect and the narrowed listener in place -------
+  # The renewal is triggered the way `cmctl renew` does: the Certificate's
+  # Issuing condition is set to True/ManuallyTriggered, cert-manager orders a
+  # new certificate and updates the existing Secret in place. Deleting the
+  # Secret would be a different event -- Envoy Gateway would drop :443 while
+  # the certificateRef was unresolved, which no real renewal does.
+  #
+  # HTTPS is polled through the whole renewal: it must answer 200 every time,
+  # and the certificate must end with a new serial. The solver's HTTPRoute is
+  # also caught while it exists, when the poll sees it: an exact path served by
+  # the solver, with the redirect on the same host and port, is the precedence
+  # the renewals depend on.
+  log "renewal: a new order through the same port 80, with the redirect in place"
+  old_serial=$(tls_serial "$cert")
+  [ -n "$old_serial" ] || { echo "could not read the first certificate's serial"; fail=1; }
+  stamp=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+  if ! $K -n s5n-gateway patch certificate "$cert" --subresource=status --type=merge \
+    -p "{\"status\":{\"conditions\":[{\"type\":\"Issuing\",\"status\":\"True\",\"reason\":\"ManuallyTriggered\",\"message\":\"e2e renewal\",\"lastTransitionTime\":\"${stamp}\"}]}}" >/dev/null; then
+    echo "could not trigger the renewal"
+    fail=1
+  fi
+  solver_seen=""
+  new_serial=""
+  https_ok=0
+  https_bad=0
+  for i in $(seq 1 240); do
+    if [ -z "$solver_seen" ]; then
+      solver=$($K -n s5n-gateway get httproute -o json 2>/dev/null | python3 -c '
+import json, sys
+items = json.load(sys.stdin).get("items", [])
+for r in items:
+    name = r["metadata"]["name"]
+    if not name.startswith("cm-acme-http-solver"):
+        continue
+    ref = r["spec"]["parentRefs"][0]
+    for rule in r["spec"].get("rules", []):
+        for m in rule.get("matches", []):
+            path = m.get("path", {})
+            if path.get("type") == "Exact" and path.get("value", "").startswith("/.well-known/acme-challenge/"):
+                print(name + " " + path["value"] + " " + str(ref.get("sectionName", "")))
+                sys.exit(0)
+' || true)
+      if [ -n "$solver" ]; then
+        solver_seen=$(echo "$solver" | awk '{print $2}')
+        solver_section=$(echo "$solver" | awk '{print $3}')
+        [ -z "$solver_section" ] || { echo "the solver route pins the ${solver_section} listener instead of attaching to every admitting listener"; fail=1; }
+        solver_code=$(curl -sS -o /dev/null -w '%{http_code}' \
+          --resolve "${DOMAIN}:80:${gw_addr}" "http://${DOMAIN}${solver_seen}" || true)
+        echo "  solver path ${solver_seen}: ${solver_code}"
+        case "$solver_code" in
+          301 | 302 | 307 | 308) echo "the solver's path was redirected"; fail=1 ;;
+        esac
+      fi
+    fi
+    code=$(curl -sS -o /dev/null -w '%{http_code}' \
+      --resolve "${DOMAIN}:443:${gw_addr}" --cacert "$WORK/pebble-root.pem" \
+      "https://${DOMAIN}/sonarr/ping" 2>"$WORK/https.err" || true)
+    if [ "$code" = 200 ]; then
+      https_ok=$((https_ok + 1))
+    else
+      https_bad=$((https_bad + 1))
+    fi
+    new_serial=$(tls_serial "$cert")
+    if [ -n "$new_serial" ] && [ "$new_serial" != "$old_serial" ]; then
+      break
+    fi
+    sleep 1
+  done
+  echo "  HTTPS during the renewal: ${https_ok} answers 200, ${https_bad} did not"
+  if [ "$https_bad" != 0 ]; then
+    echo "HTTPS did not answer throughout the renewal:"
+    sed -n '1,5p' "$WORK/https.err" 2>/dev/null || true
+    fail=1
+  fi
+  [ "$https_ok" -gt 0 ] || { echo "HTTPS was never checked successfully during the renewal"; fail=1; }
+  if [ -z "$solver_seen" ]; then
+    # The route lives about as long as Pebble's validation sleep (5s). Missing
+    # it changes nothing: the new serial below is the proof the solver won.
+    echo "  the solver route was not observed (it exists only during the challenge)"
+  fi
+  echo "  certificate serial ${old_serial} -> ${new_serial}"
+  [ -n "$new_serial" ] && [ "$new_serial" != "$old_serial" ] ||
+    { echo "the renewal did not issue a new certificate"; fail=1; }
+  $K -n s5n-gateway wait --for=condition=Ready "certificate/$cert" --timeout=180s ||
+    { echo "the renewed Certificate never became Ready"; fail=1; }
+  # Pebble generates its CA at startup; re-fetch it in case the pod restarted.
+  re=$(curl -k -fsS "https://${gw_addr}:31500/roots/0" 2>/dev/null || true)
+  if [ -n "$re" ]; then
+    printf '%s\n' "$re" >"$WORK/pebble-root.pem"
+  fi
+  https_code=$(https_get "$gw_addr" /sonarr/ping "$WORK/pebble-root.pem")
+  echo "  renewed HTTPS: ${https_code}"
+  [ "$https_code" = 200 ] || { echo "HTTPS did not answer after the renewal"; fail=1; }
 
   $K -n "$NS" wait --for=condition=Ready pod -l 'app.kubernetes.io/instance=s5n,s5n.io/app' --timeout=300s || fail=1
   # ---- storage: box created the claims, and they are bound ----
@@ -506,11 +859,48 @@ fresh() {
   grant_before2=$(sha256sum "$WORK/grant.yaml" | cut -d' ' -f1)
   values_before2=$(sha256sum "$WORK/values.yaml" | cut -d' ' -f1)
 
+  # The second bootstrap re-applies gateway.yaml under manager box while the
+  # Certificate is already Ready, so the TLS half re-applies this host's two
+  # listeners. Under the old design that re-opened the shared listener between
+  # the two writes and served /sonarr/ in plaintext. Poll the app path through
+  # the whole run: every answer must be the redirect, never the app.
+  port80_window="$WORK/port80-window.log"
+  : >"$port80_window"
+  rm -f "$WORK/port80-stop"
+  (
+    while [ ! -e "$WORK/port80-stop" ]; do
+      window_code=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 3 \
+        --resolve "${DOMAIN}:80:${gw_addr}" "http://${DOMAIN}/sonarr/" 2>/dev/null || true)
+      printf '%s\n' "$window_code" >>"$port80_window"
+      sleep 0.2
+    done
+  ) &
+  port80_poll=$!
+
   log "box bootstrap: a second run must install nothing and change nothing"
   if bootstrap "$WORK/bootstrap2.txt"; then
     cat "$WORK/bootstrap2.txt"
   else
     cat "$WORK/bootstrap2.txt"; fail=1
+  fi
+  touch "$WORK/port80-stop"
+  wait "$port80_poll" || true
+  port80_samples=$(grep -c . "$port80_window" || true)
+  port80_200=$(grep -cx 200 "$port80_window" || true)
+  port80_301=$(grep -cx 301 "$port80_window" || true)
+  port80_other=$(grep -vxE '301|000' "$port80_window" | grep -c . || true)
+  echo "  port 80 during the second bootstrap: ${port80_samples} samples, ${port80_301} x 301, ${port80_200} x 200, ${port80_other} other"
+  [ "$port80_samples" -gt 0 ] || { echo "the second bootstrap was too quick to sample port 80"; fail=1; }
+  [ "$port80_301" -gt 0 ] || { echo "port 80 never answered 301 during the second bootstrap"; fail=1; }
+  if [ "$port80_200" != 0 ]; then
+    echo "port 80 served the app in plaintext during the second bootstrap:"
+    grep -n '^200$' "$port80_window" | head -5 || true
+    fail=1
+  fi
+  if [ "$port80_other" != 0 ]; then
+    echo "port 80 answered something other than the redirect during the second bootstrap:"
+    grep -vxE '301|000' "$port80_window" | sort | uniq -c | head -5 || true
+    fail=1
   fi
   grep -qF "= metallb: already at 0.16.1" "$WORK/bootstrap2.txt" ||
     { echo "the second run did not verify MetalLB"; fail=1; }
@@ -546,6 +936,98 @@ fresh() {
   else
     echo "platform untouched: ${platform_after}"
   fi
+  # A re-run re-applies gateway.yaml, which only carries the generic http
+  # listener. That listener belongs to manager box; each host's two listeners
+  # belong to the host's manager, so neither apply can remove the other's.
+  https_after=$($K -n s5n-gateway get gateway s5n -o jsonpath='{.spec.listeners[?(@.name=="https-box-example-test")].port}')
+  http_host_after=$($K -n s5n-gateway get gateway s5n -o jsonpath='{.spec.listeners[?(@.name=="http-box-example-test")].port}')
+  http_after=$($K -n s5n-gateway get gateway s5n -o jsonpath='{.spec.listeners[?(@.name=="http")].allowedRoutes.namespaces.from}')
+  [ "$https_after" = 443 ] ||
+    { echo "the second bootstrap dropped the HTTPS listener (port ${https_after})"; fail=1; }
+  [ "$http_host_after" = 80 ] ||
+    { echo "the second bootstrap dropped the host's port-80 listener (port ${http_host_after})"; fail=1; }
+  [ "$http_after" = All ] ||
+    { echo "the second bootstrap narrowed the shared http listener (from ${http_after})"; fail=1; }
+
+  # Which manager owns which listener, read from the Gateway's own
+  # managedFields: box owns the generic http listener and nothing else; the
+  # host's manager owns exactly its http-<host> and https-<host>. No field is
+  # owned by two box managers, so no bootstrap can flip one under the other.
+  $K -n s5n-gateway get gateway s5n -o json --show-managed-fields | python3 -c '
+import json, sys
+g = json.load(sys.stdin)
+want = {
+    "box": {"http"},
+    "box-tls-box-example-test": {"http-box-example-test", "https-box-example-test"},
+}
+got = {}
+for entry in g["metadata"].get("managedFields") or []:
+    manager = entry.get("manager", "")
+    listeners = (entry.get("fieldsV1") or {}).get("f:spec", {}).get("f:listeners", {})
+    names = set()
+    for key in listeners:
+        if key.startswith("k:"):
+            names.add(json.loads(key[2:])["name"])
+    if names:
+        got.setdefault(manager, set()).update(names)
+print("  managedFields listeners:", {m: sorted(v) for m, v in sorted(got.items())})
+for manager, names in want.items():
+    if got.get(manager) != names:
+        print("manager %s owns %s, want %s" % (manager, sorted(got.get(manager, [])), sorted(names)))
+        sys.exit(1)
+owner = {}
+for manager, names in got.items():
+    for name in names:
+        if name in owner:
+            print("listener %s is owned by both %s and %s" % (name, owner[name], manager))
+            sys.exit(1)
+        owner[name] = manager
+' || { echo "the Gateway's listeners are not owned one-manager-each"; fail=1; }
+
+  # After the re-apply, the app path on this host's port 80 is still the
+  # redirect. A different host name with no certificate still reaches the
+  # generic listener: its route is admitted from the seedbox namespace, and
+  # nothing narrowed the shared listener. (This box's app routes are host-scoped
+  # to its own domain, so the test writes the route a second, certificate-less
+  # box would own.)
+  http_code=$(curl -sS -D "$WORK/http-headers2" -o /dev/null -w '%{http_code}' \
+    --resolve "${DOMAIN}:80:${gw_addr}" "http://${DOMAIN}/sonarr/" || true)
+  echo "  HTTP ${DOMAIN}/sonarr/ after the second bootstrap: ${http_code}"
+  [ "$http_code" = 301 ] || { echo "an app path on port 80 was not redirected after the second bootstrap"; fail=1; }
+  grep -qi "^location: https://${DOMAIN}/sonarr/" "$WORK/http-headers2" ||
+    { echo "the redirect after the second bootstrap does not point at HTTPS"; fail=1; }
+  $K apply -f - >/dev/null <<'EOF'
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: e2e-other-host
+  namespace: seedbox
+spec:
+  parentRefs:
+    - name: s5n
+      namespace: s5n-gateway
+  hostnames:
+    - other.example.test
+  rules:
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /sonarr
+      backendRefs:
+        - name: sonarr
+          port: 8989
+EOF
+  other_code=""
+  for i in $(seq 1 30); do
+    other_code=$(curl -sS -o /dev/null -w '%{http_code}' \
+      --resolve "other.example.test:80:${gw_addr}" "http://other.example.test/sonarr/ping" || true)
+    [ "$other_code" = 200 ] && break
+    sleep 1
+  done
+  echo "  HTTP other.example.test/sonarr/ping (no certificate): ${other_code}"
+  [ "$other_code" = 200 ] ||
+    { echo "a host with no certificate is not served on plain HTTP by the generic listener"; fail=1; }
+  $K -n "$NS" delete httproute e2e-other-host --ignore-not-found >/dev/null || fail=1
   [ "$(sha256sum "$WORK/grant.yaml" | cut -d' ' -f1)" = "$grant_before2" ] ||
     { echo "the second bootstrap rewrote the grant"; fail=1; }
   [ "$(sha256sum "$WORK/values.yaml" | cut -d' ' -f1)" = "$values_before2" ] ||
@@ -807,6 +1289,34 @@ if not (ipaddress.ip_address(first) <= ipaddress.ip_address(addr) <= ipaddress.i
     print(f"the Gateway's address {addr} is not from the pool that was already there ({pool})")
     sys.exit(1)
 PY
+
+  # ---- TLS: a name that does not resolve gets the self-signed issuer ---------
+  # No CoreDNS entry and a reserved TLD: init resolves nothing, picks
+  # s5n-selfsigned, and the certificate is still a real TLS certificate. -k is
+  # the honest client behaviour for a box nobody can reach from the internet.
+  cert=s5n-tls-box-internal-example
+  grep -qF "tls: ${DOMAIN} does not resolve" "$WORK/bootstrap1.txt" ||
+    { echo "init did not report that the domain does not resolve"; fail=1; }
+  grep -qF "using a self-signed certificate" "$WORK/bootstrap1.txt" ||
+    { echo "init did not choose the self-signed issuer"; fail=1; }
+  $K -n s5n-gateway wait --for=condition=Ready "certificate/$cert" --timeout=120s ||
+    { echo "the self-signed Certificate never became Ready"; fail=1; }
+  cert_issuer=$($K -n s5n-gateway get certificate "$cert" -o jsonpath='{.spec.issuerRef.name}')
+  [ "$cert_issuer" = s5n-selfsigned ] || { echo "the self-signed Certificate names issuer ${cert_issuer}"; fail=1; }
+  # The production issuer was not touched by this scenario: no Pebble override.
+  acme_server=$($K get clusterissuer s5n-letsencrypt -o jsonpath='{.spec.acme.server}')
+  [ "$acme_server" = "https://acme-v02.api.letsencrypt.org/directory" ] ||
+    { echo "s5n-letsencrypt was pointed away from Let's Encrypt"; fail=1; }
+  [ -z "$($K get clusterissuer s5n-letsencrypt -o jsonpath='{.spec.acme.skipTLSVerify}')" ] ||
+    { echo "the production issuer skips ACME endpoint verification"; fail=1; }
+
+  https_code=$(https_get "$lb_addr" /sonarr/ping -)
+  echo "  HTTPS ${DOMAIN}/sonarr/ping (self-signed): ${https_code}"
+  [ "$https_code" = 200 ] || { echo "HTTPS did not answer 200 with the self-signed certificate"; fail=1; }
+  http_code=$(curl -sS -o /dev/null -w '%{http_code}' \
+    --resolve "${DOMAIN}:80:${lb_addr}" "http://${DOMAIN}/sonarr/ping" || true)
+  echo "  HTTP ${DOMAIN}/sonarr/ping: ${http_code}"
+  [ "$http_code" = 301 ] || { echo "an app path on port 80 was not redirected"; fail=1; }
 
   $K -n "$NS" wait --for=condition=Ready pod -l 'app.kubernetes.io/instance=s5n,s5n.io/app' --timeout=300s || fail=1
 
