@@ -834,6 +834,155 @@ print("  app routes: %d HTTPRoutes, none pins a sectionName" % len(items))
     *) echo "the redirect carries no rd=, so the portal cannot send the browser back"; fail=1 ;;
   esac
 
+  # Port 80: this host's own listener carries no login (the Allow box writes
+  # with it), so an app URL gets the 301 to HTTPS -- the behaviour a browser,
+  # a bookmark and a renewal need -- and never Sonarr's UI.
+  nl_section=$($K -n s5n-gateway get securitypolicy s5n-no-login-box-example-test -o jsonpath='{.spec.targetRefs[0].sectionName}' || true)
+  nl_action=$($K -n s5n-gateway get securitypolicy s5n-no-login-box-example-test -o jsonpath='{.spec.authorization.defaultAction}' || true)
+  nl_extauth=$($K -n s5n-gateway get securitypolicy s5n-no-login-box-example-test -o jsonpath='{.spec.extAuth}' || true)
+  nl_accepted=$($K -n s5n-gateway get securitypolicy s5n-no-login-box-example-test -o jsonpath='{.status.ancestors[?(@.ancestorRef.sectionName=="http-box-example-test")].conditions[?(@.type=="Accepted")].status}' || true)
+  echo "  port-80 Allow policy: sectionName ${nl_section}, defaultAction ${nl_action}, extAuth [${nl_extauth}], Accepted ${nl_accepted}"
+  [ "$nl_section" = http-box-example-test ] ||
+    { echo "the port-80 Allow targets ${nl_section}, want this host's own listener"; fail=1; }
+  [ "$nl_action" = Allow ] || { echo "the port-80 policy does not allow: ${nl_action}"; fail=1; }
+  [ -z "$nl_extauth" ] || { echo "the port-80 policy still carries extAuth"; fail=1; }
+  [ "$nl_accepted" = True ] || { echo "Envoy Gateway never accepted the port-80 Allow"; fail=1; }
+
+  # Envoy Gateway's own account of the two policies is the proof that the login
+  # was carved out of exactly one listener rather than switched off for the
+  # host: the Gateway-wide policy stays Accepted, and its Overridden condition
+  # names this host's port-80 listener and no HTTPS one.
+  gw_overridden=$($K -n s5n-gateway get securitypolicy s5n-authelia -o jsonpath='{.status.ancestors[?(@.ancestorRef.name=="s5n")].conditions[?(@.type=="Overridden")].status}' || true)
+  gw_override_msg=$($K -n s5n-gateway get securitypolicy s5n-authelia -o jsonpath='{.status.ancestors[?(@.ancestorRef.name=="s5n")].conditions[?(@.type=="Overridden")].message}' || true)
+  echo "  the Gateway-wide login is overridden on: ${gw_override_msg}"
+  [ "$gw_overridden" = True ] ||
+    { echo "Envoy Gateway does not report the Gateway-wide login overridden, so the port-80 Allow is not taking effect"; fail=1; }
+  case "$gw_override_msg" in
+    *"s5n-gateway/s5n/http-box-example-test"*) ;;
+    *) echo "the login is not overridden on s5n-gateway/s5n/http-box-example-test: ${gw_override_msg}"; fail=1 ;;
+  esac
+  case "$gw_override_msg" in
+    *"https-box-example-test"*) echo "the login is overridden on an HTTPS listener too: ${gw_override_msg}"; fail=1 ;;
+  esac
+  http_unauth=$(curl -sS -o "$WORK/port80-body" -D "$WORK/port80-headers" -w '%{http_code}' \
+    --resolve "${DOMAIN}:80:${gw_addr}" "http://${DOMAIN}/sonarr/" 2>/dev/null || true)
+  http_unauth_location=$(grep -i '^location:' "$WORK/port80-headers" | tr -d '\r' | sed 's/^[Ll]ocation: *//' || true)
+  echo "  GET http://${DOMAIN}/sonarr/ (port 80) without a cookie: ${http_unauth} -> ${http_unauth_location}"
+  [ "$http_unauth" = 301 ] ||
+    { echo "port 80 answered ${http_unauth} for an app path: it must redirect to HTTPS, not ask for a login or serve Sonarr"; fail=1; }
+  [ "$http_unauth_location" = "https://${DOMAIN}/sonarr/" ] ||
+    { echo "port 80 redirected to ${http_unauth_location}"; fail=1; }
+  if grep -qi '<title>Sonarr' "$WORK/port80-body"; then
+    echo "port 80 served Sonarr's UI in plaintext"
+    fail=1
+  fi
+
+  # The other half: the shared generic http listener keeps the login, so a host
+  # with no certificate of its own is not served and is not redirected into
+  # someone else's name either. The shared listener has no hostname, so any
+  # Host that this host's listener does not match lands on it. With no route at
+  # all for that Host the router answers 404 -- Envoy Gateway attaches ext_authz
+  # per route, so there is nothing for the login to guard, and nothing of
+  # Sonarr's is served. The assertion below this one adds a route for a
+  # certificate-less host and gets the login's own refusal, which is the half
+  # that matters.
+  shared_code=$(curl -sS -o "$WORK/shared-body" -w '%{http_code}' \
+    --resolve "other.example.test:80:${gw_addr}" "http://other.example.test/sonarr/" 2>/dev/null || true)
+  echo "  GET http://other.example.test/sonarr/ (the shared listener, no certificate): ${shared_code}"
+  case "$shared_code" in
+    404) ;;
+    *) echo "the shared port-80 listener answered ${shared_code} for a host with no route and no certificate: want the router's 404, not an app"; fail=1 ;;
+  esac
+  if grep -qi '<title>Sonarr' "$WORK/shared-body"; then
+    echo "the shared listener served Sonarr to a host with no certificate"
+    fail=1
+  fi
+
+  # The portal is the login page, and its assets resolve under /auth/ (the
+  # server mounts the configured path and the root; the browser only ever uses
+  # the former).
+  portal_code=$(curl -sS -o "$WORK/portal.html" -w '%{http_code}' \
+    --resolve "${DOMAIN}:443:${gw_addr}" --cacert "$WORK/pebble-root.pem" \
+    "https://${DOMAIN}/auth/" 2>"$WORK/portal.err" || true)
+  echo "  GET https://${DOMAIN}/auth/: ${portal_code} ($(wc -c <"$WORK/portal.html" 2>/dev/null || echo 0) bytes)"
+  [ "$portal_code" = 200 ] || { echo "the portal did not answer 200"; fail=1; }
+  grep -q 'manifest.json' "$WORK/portal.html" || { echo "the portal is not Authelia's HTML"; fail=1; }
+  asset_code=$(curl -sS -o /dev/null -w '%{http_code}' \
+    --resolve "${DOMAIN}:443:${gw_addr}" --cacert "$WORK/pebble-root.pem" \
+    "https://${DOMAIN}/auth/manifest.json" 2>/dev/null || true)
+  echo "  GET https://${DOMAIN}/auth/manifest.json: ${asset_code}"
+  [ "$asset_code" = 200 ] || { echo "the portal's assets do not resolve under /auth/"; fail=1; }
+
+  # The password: the digest in the node's users database is the one this
+  # password hashes to, and the portal sets a session cookie for it.
+  login_json=$(printf '{"username":"%s","password":"%s","targetURL":"https://%s/sonarr/"}' \
+    "$LOGIN" "$AUTHELIA_PASSWORD" "$DOMAIN")
+  ff_headers="$WORK/firstfactor-headers.txt"
+  ff_code=$(curl -sS -o "$WORK/firstfactor.json" -D "$ff_headers" -w '%{http_code}' \
+    -c "$JAR" -X POST "https://${DOMAIN}/auth/api/firstfactor" \
+    --resolve "${DOMAIN}:443:${gw_addr}" --cacert "$WORK/pebble-root.pem" \
+    -H 'Content-Type: application/json' --data "$login_json" 2>"$WORK/firstfactor.err" || true)
+  echo "  POST /auth/api/firstfactor: ${ff_code}"
+  [ "$ff_code" = 200 ] || { echo "the login did not accept the password (${ff_code})"; sed -n 1,3p "$WORK/firstfactor.json" || true; fail=1; }
+  grep -qi 'set-cookie: authelia_session=' "$ff_headers" ||
+    { echo "no authelia_session cookie was set"; fail=1; }
+
+  # A wrong password is refused, once: never a retry loop (Authelia bans an
+  # address after a handful of failures, which would fail the rest of this run
+  # for the wrong reason).
+  wrong_code=$(curl -sS -o /dev/null -w '%{http_code}' -X POST "https://${DOMAIN}/auth/api/firstfactor" \
+    --resolve "${DOMAIN}:443:${gw_addr}" --cacert "$WORK/pebble-root.pem" \
+    -H 'Content-Type: application/json' \
+    --data "$(printf '{"username":"%s","password":"not-the-password","targetURL":"https://%s/sonarr/"}' "$LOGIN" "$DOMAIN")" \
+    2>/dev/null || true)
+  echo "  POST /auth/api/firstfactor with a wrong password: ${wrong_code}"
+  [ "$wrong_code" = 401 ] || { echo "a wrong password answered ${wrong_code}, want 401 from the portal"; fail=1; }
+
+  # With the jar: the app itself, and the two prefixes that carry their own
+  # credentials and must never be redirected.
+  authed_code=$(curl -sS -o "$WORK/sonarr-authed.html" -w '%{http_code}' \
+    -b "$JAR" --resolve "${DOMAIN}:443:${gw_addr}" --cacert "$WORK/pebble-root.pem" \
+    "https://${DOMAIN}/sonarr/" 2>/dev/null || true)
+  echo "  GET https://${DOMAIN}/sonarr/ with the session: ${authed_code}"
+  [ "$authed_code" = 200 ] || { echo "the login did not give access to Sonarr (${authed_code})"; fail=1; }
+  grep -qi '<title>Sonarr' "$WORK/sonarr-authed.html" ||
+    { echo "the 200 was not Sonarr's page: the cookie may not be in scope"; fail=1; }
+  api_code=$(curl -sS -o /dev/null -w '%{http_code}' \
+    --resolve "${DOMAIN}:443:${gw_addr}" --cacert "$WORK/pebble-root.pem" \
+    "https://${DOMAIN}/sonarr/api/v3/system/status" 2>/dev/null || true)
+  ping_code=$(curl -sS -o /dev/null -w '%{http_code}' \
+    --resolve "${DOMAIN}:443:${gw_addr}" --cacert "$WORK/pebble-root.pem" \
+    "https://${DOMAIN}/sonarr/ping" 2>/dev/null || true)
+  echo "  without a cookie: /sonarr/api/v3/system/status ${api_code}, /sonarr/ping ${ping_code}"
+  [ "$api_code" = 401 ] ||
+    { echo "the API without a key answered ${api_code}: it must be Sonarr's own 401, not the login's redirect (the API bypass is missing)"; fail=1; }
+  [ "$ping_code" = 200 ] || { echo "/sonarr/ping answered ${ping_code}: the ping bypass is missing"; fail=1; }
+
+  # Path normalisation: Envoy normalises the request path before its filters
+  # run (normalize_path is on by default and Envoy Gateway sets it explicitly),
+  # so /sonarr/api/../ is a request for / -- not the API, and not a bypass.
+  # An escaped dot is not a path separator: %2e%2e stays on the wire and the
+  # API prefix matches. What matters either way is that no app page is served
+  # without the login, so both are asserted against the UI, and the first
+  # against the redirect.
+  dotdot_code=$(curl -sS --path-as-is -o "$WORK/dotdot.html" -D "$WORK/dotdot-headers" -w '%{http_code}' \
+    --resolve "${DOMAIN}:443:${gw_addr}" --cacert "$WORK/pebble-root.pem" \
+    "https://${DOMAIN}/sonarr/api/../" 2>/dev/null || true)
+  escaped_code=$(curl -sS --path-as-is -o "$WORK/escaped.html" -w '%{http_code}' \
+    --resolve "${DOMAIN}:443:${gw_addr}" --cacert "$WORK/pebble-root.pem" \
+    "https://${DOMAIN}/sonarr/api/%2e%2e/" 2>/dev/null || true)
+  echo "  --path-as-is /sonarr/api/../: ${dotdot_code}; /sonarr/api/%2e%2e/: ${escaped_code}"
+  [ "$dotdot_code" = 302 ] ||
+    { echo "/sonarr/api/../ answered ${dotdot_code}: Envoy did not normalise it to /, so the login did not run"; fail=1; }
+  if grep -qi '<title>Sonarr' "$WORK/dotdot.html"; then
+    echo "/sonarr/api/../ served Sonarr's UI"
+    fail=1
+  fi
+  if [ "$escaped_code" = 200 ] && grep -qi '<title>Sonarr' "$WORK/escaped.html"; then
+    echo "/sonarr/api/%2e%2e/ served Sonarr's UI through the API bypass"
+    fail=1
+  fi
+
   # The challenge path is not asserted here: cert-manager's solver HTTPRoute
   # exists only while an order is pending, so after issuance that path is the
   # redirect's. The renewal below observes the solver route while it exists.
@@ -1085,9 +1234,10 @@ EOF
 
   # The second bootstrap re-applies gateway.yaml under manager box while the
   # Certificate is already Ready, so the TLS half re-applies this host's two
-  # listeners. Under the old design that re-opened the shared listener between
-  # the two writes and served /sonarr/ in plaintext. Poll the app path through
-  # the whole run: every answer must be the redirect, never the app.
+  # listeners and their Allow. Under the old design that re-opened the shared
+  # listener between the two writes and served /sonarr/ in plaintext. Poll the
+  # app path through the whole run: every sample is the 301 to HTTPS, and none
+  # may ever be the app.
   port80_window="$WORK/port80-window.log"
   : >"$port80_window"
   rm -f "$WORK/port80-stop"
@@ -1111,11 +1261,11 @@ EOF
   wait "$port80_poll" || true
   port80_samples=$(grep -c . "$port80_window" || true)
   port80_200=$(grep -cx 200 "$port80_window" || true)
-  port80_301=$(grep -cx 301 "$port80_window" || true)
+  port80_redirect=$(grep -cx 301 "$port80_window" || true)
   port80_other=$(grep -vxE '301|000' "$port80_window" | grep -c . || true)
-  echo "  port 80 during the second bootstrap: ${port80_samples} samples, ${port80_301} x 301, ${port80_200} x 200, ${port80_other} other"
+  echo "  port 80 during the second bootstrap: ${port80_samples} samples, ${port80_redirect} x 301, ${port80_200} x 200, ${port80_other} other"
   [ "$port80_samples" -gt 0 ] || { echo "the second bootstrap was too quick to sample port 80"; fail=1; }
-  [ "$port80_301" -gt 0 ] || { echo "port 80 never answered 301 during the second bootstrap"; fail=1; }
+  [ "$port80_redirect" -gt 0 ] || { echo "port 80 never redirected an app path during the second bootstrap"; fail=1; }
   if [ "$port80_200" != 0 ]; then
     echo "port 80 served the app in plaintext during the second bootstrap:"
     grep -n '^200$' "$port80_window" | head -5 || true
@@ -1188,15 +1338,17 @@ EOF
     { echo "the second bootstrap narrowed the shared http listener (from ${http_after})"; fail=1; }
 
   # Which manager owns which listener, read from the Gateway's own
-  # managedFields: box owns the generic http listener and nothing else; the
-  # host's manager owns exactly its http-<host> and https-<host>. No field is
-  # owned by two box managers, so no bootstrap can flip one under the other.
+  # managedFields: box owns the generic http listener and nothing else; this
+  # host's port-80 listener and its HTTPS one have a manager each, so an apply
+  # that names one can never remove the other. No field is owned by two box
+  # managers, so no bootstrap can flip one under the other.
   $K -n s5n-gateway get gateway s5n -o json --show-managed-fields | python3 -c '
 import json, sys
 g = json.load(sys.stdin)
 want = {
     "box": {"http"},
-    "box-tls-box-example-test": {"http-box-example-test", "https-box-example-test"},
+    "box-tls-box-example-test-http": {"http-box-example-test"},
+    "box-tls-box-example-test-https": {"https-box-example-test"},
 }
 got = {}
 for entry in g["metadata"].get("managedFields") or []:
@@ -1223,17 +1375,22 @@ for manager, names in got.items():
 ' || { echo "the Gateway's listeners are not owned one-manager-each"; fail=1; }
 
   # After the re-apply, the app path on this host's port 80 is still the
-  # redirect. A different host name with no certificate still reaches the
-  # generic listener: its route is admitted from the seedbox namespace, and
-  # nothing narrowed the shared listener. (This box's app routes are host-scoped
+  # redirect, and the Allow that makes it work is still there. A different host
+  # name with no certificate still reaches the generic listener, where the login
+  # is: its route attaches there, and Authelia refuses the plain-HTTP target
+  # outright (400, before it reads any rule) -- so not even /ping answers, and
+  # certainly no app. That is what the shared listener is for: a host without a
+  # certificate stays closed on port 80. (This box's app routes are host-scoped
   # to its own domain, so the test writes the route a second, certificate-less
   # box would own.)
   http_code=$(curl -sS -D "$WORK/http-headers2" -o /dev/null -w '%{http_code}' \
     --resolve "${DOMAIN}:80:${gw_addr}" "http://${DOMAIN}/sonarr/" || true)
   echo "  HTTP ${DOMAIN}/sonarr/ after the second bootstrap: ${http_code}"
-  [ "$http_code" = 301 ] || { echo "an app path on port 80 was not redirected after the second bootstrap"; fail=1; }
+  [ "$http_code" = 301 ] || { echo "an app path on port 80 answered ${http_code} after the second bootstrap, want the 301"; fail=1; }
   grep -qi "^location: https://${DOMAIN}/sonarr/" "$WORK/http-headers2" ||
     { echo "the redirect after the second bootstrap does not point at HTTPS"; fail=1; }
+  nl_after=$($K -n s5n-gateway get securitypolicy s5n-no-login-box-example-test -o jsonpath='{.spec.authorization.defaultAction}' 2>/dev/null || true)
+  [ "$nl_after" = Allow ] || { echo "the second bootstrap removed the port-80 Allow"; fail=1; }
   $K apply -f - >/dev/null <<'EOF'
 apiVersion: gateway.networking.k8s.io/v1
 kind: HTTPRoute
@@ -1259,12 +1416,12 @@ EOF
   for i in $(seq 1 30); do
     other_code=$(curl -sS -o /dev/null -w '%{http_code}' \
       --resolve "other.example.test:80:${gw_addr}" "http://other.example.test/sonarr/ping" || true)
-    [ "$other_code" = 200 ] && break
+    [ "$other_code" = 400 ] && break
     sleep 1
   done
   echo "  HTTP other.example.test/sonarr/ping (no certificate): ${other_code}"
-  [ "$other_code" = 200 ] ||
-    { echo "a host with no certificate is not served on plain HTTP by the generic listener"; fail=1; }
+  [ "$other_code" = 400 ] ||
+    { echo "a host with no certificate answered ${other_code} on plain HTTP: the login must refuse its route (400, an http target) rather than serve it"; fail=1; }
   $K -n "$NS" delete httproute e2e-other-host --ignore-not-found >/dev/null || fail=1
   [ "$(sha256sum "$WORK/grant.yaml" | cut -d' ' -f1)" = "$grant_before2" ] ||
     { echo "the second bootstrap rewrote the grant"; fail=1; }
@@ -1555,6 +1712,15 @@ PY
     --resolve "${DOMAIN}:80:${lb_addr}" "http://${DOMAIN}/sonarr/ping" || true)
   echo "  HTTP ${DOMAIN}/sonarr/ping: ${http_code}"
   [ "$http_code" = 301 ] || { echo "an app path on port 80 was not redirected"; fail=1; }
+  # The same on the app root: the host's port-80 listener carries no login, so
+  # the UI path gets the 301 rather than the portal's refusal.
+  http_ui=$(curl -sS -D "$WORK/preinstalled-http-headers" -o /dev/null -w '%{http_code}' \
+    --resolve "${DOMAIN}:80:${lb_addr}" "http://${DOMAIN}/sonarr/" || true)
+  echo "  HTTP ${DOMAIN}/sonarr/: ${http_ui}"
+  [ "$http_ui" = 301 ] || { echo "an app UI path on port 80 answered ${http_ui}, want the 301"; fail=1; }
+  grep -qi "^location: https://${DOMAIN}/sonarr/" "$WORK/preinstalled-http-headers" ||
+    { echo "the port-80 redirect on this host does not point at HTTPS"; fail=1; }
+
   # Every scenario installs the login, so the app UI is never served to an
   # unauthenticated request: no cookie means the portal, on this host's own
   # name and its self-signed certificate.

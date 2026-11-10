@@ -28,11 +28,13 @@ const (
 	// manager `kubectl apply --field-manager=box` agrees with.
 	FieldManager = "box"
 
-	// TLSManagerPrefix is the field-manager prefix the per-host TLS flow
-	// writes one host's Gateway listeners under, besides FieldManager. A
-	// Gateway's listeners are a map keyed by name, so a partial apply of one
-	// host's listeners has to be owned by a manager of its own: the platform's
-	// full Gateway apply must not be able to remove them, and one host's
-	// manager must not be able to remove another host's.
+	// TLSManagerPrefix is the field-manager prefix the per-host TLS flow names
+	// its managers with, besides FieldManager. A Gateway's listeners are a map
+	// keyed by name, so a partial apply of one host's listeners has to be
+	// owned by a manager of its own: the platform's full Gateway apply must
+	// not be able to remove them, and one host's manager must not be able to
+	// remove another host's. The flow uses one manager per listener (a host's
+	// port-80 listener and its HTTPS one are separate fields, and server-side
+	// apply removes what a manager leaves out), so the names carry a suffix.
 	TLSManagerPrefix = "box-tls-"
 )

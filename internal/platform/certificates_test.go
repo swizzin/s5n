@@ -2,6 +2,7 @@ package platform
 
 import (
 	"context"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -90,8 +91,14 @@ func TestCertificateNames(t *testing.T) {
 	if HTTPListenerName("box.example.test") != "http-box-example-test" {
 		t.Errorf("HTTPListenerName = %q", HTTPListenerName("box.example.test"))
 	}
-	if tlsManager("box.example.test") != "box-tls-box-example-test" {
-		t.Errorf("tlsManager = %q", tlsManager("box.example.test"))
+	if httpListenerManager("box.example.test") != "box-tls-box-example-test-http" {
+		t.Errorf("httpListenerManager = %q", httpListenerManager("box.example.test"))
+	}
+	if httpsListenerManager("box.example.test") != "box-tls-box-example-test-https" {
+		t.Errorf("httpsListenerManager = %q", httpsListenerManager("box.example.test"))
+	}
+	if ListenerPolicyName("box.example.test") != "s5n-no-login-box-example-test" {
+		t.Errorf("ListenerPolicyName = %q", ListenerPolicyName("box.example.test"))
 	}
 }
 
@@ -159,10 +166,11 @@ func TestGatewayPartial(t *testing.T) {
 	}
 }
 
-// The flow's order is the design: the Certificate first, then (only once it
-// is Ready) this host's listeners, then the redirect. The listener write uses
-// the host's own manager and carries both listeners; the shared, generic http
-// listener is never in it.
+// The flow's order is the design: the host's port-80 listener, then the Allow
+// that keeps the login off it, then the Certificate, then -- only once it is
+// Ready -- both listeners (https included) and the redirect. The listener
+// writes use the host's own manager and never carry the shared, generic http
+// listener.
 func TestCertificateApply(t *testing.T) {
 	cl := &fakeCertCluster{ready: true, serves: true}
 	d := &CertificateDecision{
@@ -175,42 +183,65 @@ func TestCertificateApply(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !res.Ready || !res.Listener || !res.Redirect {
+	if !res.Ready || !res.Listener || !res.Policy || !res.HTTPS || !res.Redirect {
 		t.Fatalf("result = %+v", res)
 	}
-	if len(cl.writes) != 3 {
-		t.Fatalf("writes = %d, want Certificate, listeners, redirect", len(cl.writes))
+	if len(cl.writes) != 5 {
+		t.Fatalf("writes = %d, want port-80 listener, policy, Certificate, listeners, redirect", len(cl.writes))
 	}
-	if kind, ns, name := objectMeta(cl.writes[0][0]); kind != "Certificate" || ns != GatewayNamespace || name != "s5n-tls-box-example-test" {
-		t.Fatalf("first write = %s %s/%s", kind, ns, name)
+	if kind, ns, name := objectMeta(cl.writes[0][0]); kind != "Gateway" || ns != GatewayNamespace || name != GatewayName {
+		t.Fatalf("first write = %s %s/%s, want the port-80 listener", kind, ns, name)
 	}
-	if kind, _, _ := objectMeta(cl.writes[1][0]); kind != "Gateway" {
-		t.Fatalf("second write = %s, want the Gateway listeners", kind)
+	first := listenersOf(t, cl.writes[0][0])
+	if len(first) != 1 {
+		t.Fatalf("first Gateway write carries %d listeners, want only http-box-example-test: %v", len(first), first)
 	}
-	if cl.managers[1] != "box-tls-box-example-test" {
-		t.Fatalf("listener manager = %q", cl.managers[1])
+	if l, ok := first["http-box-example-test"]; !ok || l["port"] != int64(80) {
+		t.Fatalf("first Gateway write = %v, want the host's port-80 listener alone", first)
 	}
-	if kind, ns, name := objectMeta(cl.writes[2][0]); kind != "HTTPRoute" || ns != GatewayNamespace || name != "s5n-tls-box-example-test-redirect" {
-		t.Fatalf("third write = %s %s/%s", kind, ns, name)
+	if cl.managers[0] != "box-tls-box-example-test-http" {
+		t.Fatalf("port-80 listener manager = %q", cl.managers[0])
 	}
-	if cl.managers[2] != kube.FieldManager {
-		t.Fatalf("redirect manager = %q", cl.managers[2])
+	if kind, ns, name := objectMeta(cl.writes[1][0]); kind != "SecurityPolicy" || ns != GatewayNamespace || name != "s5n-no-login-box-example-test" {
+		t.Fatalf("second write = %s %s/%s, want the port-80 Allow", kind, ns, name)
+	}
+	if cl.managers[1] != "box-tls-box-example-test-http" {
+		t.Fatalf("policy manager = %q, want the port-80 listener's own manager", cl.managers[1])
+	}
+	if kind, ns, name := objectMeta(cl.writes[2][0]); kind != "Certificate" || ns != GatewayNamespace || name != "s5n-tls-box-example-test" {
+		t.Fatalf("third write = %s %s/%s, want the Certificate", kind, ns, name)
+	}
+	if kind, _, _ := objectMeta(cl.writes[3][0]); kind != "Gateway" {
+		t.Fatalf("fourth write = %s, want the HTTPS listener", kind)
+	}
+	if kind, ns, name := objectMeta(cl.writes[4][0]); kind != "HTTPRoute" || ns != GatewayNamespace || name != "s5n-tls-box-example-test-redirect" {
+		t.Fatalf("fifth write = %s %s/%s", kind, ns, name)
+	}
+	if cl.managers[4] != kube.FieldManager {
+		t.Fatalf("redirect manager = %q", cl.managers[4])
 	}
 	// The Certificate carries the issuer init chose and the one DNS name.
-	certSpec, _ := cl.writes[0][0]["spec"].(map[string]any)
+	certSpec, _ := cl.writes[2][0]["spec"].(map[string]any)
 	issuer, _ := certSpec["issuerRef"].(map[string]any)
 	names, _ := certSpec["dnsNames"].([]any)
 	if issuer["name"] != LetsEncryptIssuer || issuer["kind"] != "ClusterIssuer" || names[0] != "box.example.test" {
 		t.Fatalf("certificate spec = %v", certSpec)
 	}
-	// One Gateway write, two complete listeners: HTTPS on 443 for every
-	// namespace, and this host's own port-80 listener for the Gateway's.
-	got := listenersOf(t, cl.writes[1][0])
-	if len(got) != 2 {
-		t.Fatalf("listener write carries %d listeners, want two: %v", len(got), got)
+	// The fourth write is the HTTPS listener alone, under its own manager:
+	// the two listeners never share a manager, so neither apply can remove
+	// the other by omitting it.
+	got := listenersOf(t, cl.writes[3][0])
+	if len(got) != 1 {
+		t.Fatalf("HTTPS write carries %d listeners, want one: %v", len(got), got)
 	}
 	if _, ok := got["http"]; ok {
 		t.Fatal("the TLS apply wrote the platform's generic http listener")
+	}
+	if _, ok := got["http-box-example-test"]; ok {
+		t.Fatal("the TLS apply rewrote the host's port-80 listener: it has its own manager")
+	}
+	if cl.managers[3] != "box-tls-box-example-test-https" {
+		t.Fatalf("HTTPS listener manager = %q", cl.managers[3])
 	}
 	https, ok := got["https-box-example-test"]
 	if !ok {
@@ -219,15 +250,8 @@ func TestCertificateApply(t *testing.T) {
 	if https["port"] != int64(443) || https["protocol"] != "HTTPS" || https["hostname"] != "box.example.test" {
 		t.Fatalf("https listener = %v", https)
 	}
-	httpL, ok := got["http-box-example-test"]
-	if !ok {
-		t.Fatalf("listeners = %v, want http-box-example-test", got)
-	}
-	if httpL["port"] != int64(80) || httpL["protocol"] != "HTTP" || httpL["hostname"] != "box.example.test" {
-		t.Fatalf("http listener = %v", httpL)
-	}
 	// The redirect names the host's own port-80 listener, not the shared one.
-	routeSpec, _ := cl.writes[2][0]["spec"].(map[string]any)
+	routeSpec, _ := cl.writes[4][0]["spec"].(map[string]any)
 	parentRefs, _ := routeSpec["parentRefs"].([]any)
 	ref, _ := parentRefs[0].(map[string]any)
 	if ref["sectionName"] != "http-box-example-test" {
@@ -235,11 +259,57 @@ func TestCertificateApply(t *testing.T) {
 	}
 }
 
-// Every Gateway field is owned by exactly one box manager: the platform's box
-// manager owns the generic http listener, and each host's manager owns only
-// that host's two listeners. A TLS apply that carried "http" would make two
-// managers flip the shared listener on every bootstrap.
-func TestTLSApplyNeverTouchesSharedListener(t *testing.T) {
+// The port-80 Allow is one object with one job: this host's http-<host>
+// listener, an explicit Allow, and no extAuth at all. Anything more (a
+// Gateway-wide target, an extAuth left in place, a rule that denies
+// something) would either put the login back on the listener or narrow the
+// HTTPS side.
+func TestListenerPolicyManifest(t *testing.T) {
+	docs, err := ParseManifests(listenerPolicyManifest("box.example.test"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(docs) != 1 {
+		t.Fatalf("manifest carries %d documents", len(docs))
+	}
+	doc := docs[0]
+	if kind, ns, name := objectMeta(doc); kind != "SecurityPolicy" || ns != GatewayNamespace || name != "s5n-no-login-box-example-test" {
+		t.Fatalf("object = %s %s/%s", kind, ns, name)
+	}
+	spec, _ := doc["spec"].(map[string]any)
+	for key := range spec {
+		if key != "targetRefs" && key != "authorization" {
+			t.Fatalf("spec carries %q: the Allow is targetRefs and authorization only", key)
+		}
+	}
+	if _, ok := spec["extAuth"]; ok {
+		t.Fatal("the port-80 policy carries extAuth: the login is exactly what it must not have")
+	}
+	refs, _ := spec["targetRefs"].([]any)
+	if len(refs) != 1 {
+		t.Fatalf("targetRefs = %v, want the one listener", refs)
+	}
+	ref, _ := refs[0].(map[string]any)
+	if ref["group"] != "gateway.networking.k8s.io" || ref["kind"] != "Gateway" || ref["name"] != GatewayName {
+		t.Fatalf("targetRefs = %v", refs)
+	}
+	if ref["sectionName"] != "http-box-example-test" {
+		t.Fatalf("sectionName = %v, want the host's port-80 listener, not the shared one", ref["sectionName"])
+	}
+	auth, _ := spec["authorization"].(map[string]any)
+	if auth["defaultAction"] != "Allow" {
+		t.Fatalf("authorization = %v, want defaultAction: Allow", auth)
+	}
+	if _, ok := auth["rules"]; ok {
+		t.Fatal("the port-80 policy carries rules: there is nothing to deny on a listener only root's routes attach to")
+	}
+}
+
+// The policy is written only after the listener it names exists -- a
+// sectionName that resolves to nothing is an error Envoy Gateway reports
+// instead of an Allow -- and only on that path: a Certificate that is not
+// Ready writes no policy at all.
+func TestListenerPolicyFollowsItsListener(t *testing.T) {
 	cl := &fakeCertCluster{ready: true, serves: true}
 	d := &CertificateDecision{
 		Host:   "box.example.test",
@@ -249,31 +319,89 @@ func TestTLSApplyNeverTouchesSharedListener(t *testing.T) {
 	if _, err := d.Apply(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	tlsApplies := 0
+	listenerAt, policyAt := -1, -1
+	for i, docs := range cl.writes {
+		kind, ns, _ := objectMeta(docs[0])
+		switch {
+		case kind == "Gateway":
+			if _, ok := listenersOf(t, docs[0])["http-box-example-test"]; ok && listenerAt < 0 {
+				listenerAt = i
+			}
+		case kind == "SecurityPolicy":
+			if ns != GatewayNamespace {
+				t.Fatalf("SecurityPolicy %d is in %s, want %s", i, ns, GatewayNamespace)
+			}
+			if policyAt >= 0 {
+				t.Fatal("the policy was written twice in one apply")
+			}
+			policyAt = i
+		}
+	}
+	if listenerAt < 0 {
+		t.Fatal("the apply wrote no http-box-example-test listener")
+	}
+	if policyAt < 0 {
+		t.Fatal("the apply wrote no port-80 Allow")
+	}
+	if policyAt <= listenerAt {
+		t.Fatalf("policy written at %d, its listener at %d: the sectionName has to exist first", policyAt, listenerAt)
+	}
+}
+
+// Every Gateway field is owned by exactly one box manager: the platform's box
+// manager owns the generic http listener, and each host's listeners have a
+// manager each -- one for port 80, one for 443. Sharing one manager between
+// them would mean every apply has to restate both, and the port-80 apply (made
+// while the certificate is still issuing, with no HTTPS listener in existence)
+// would delete the HTTPS listener of an already-established box on every
+// re-run. A TLS apply that carried "http" would make two managers flip the
+// shared listener on every bootstrap.
+func TestEachListenerHasItsOwnManager(t *testing.T) {
+	cl := &fakeCertCluster{ready: true, serves: true}
+	d := &CertificateDecision{
+		Host:   "box.example.test",
+		Issuer: LetsEncryptIssuer,
+		Open:   func() (CertificateCluster, error) { return cl, nil },
+	}
+	if _, err := d.Apply(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	want := map[int]struct {
+		manager   string
+		listeners []string
+	}{
+		0: {httpListenerManager("box.example.test"), []string{"http-box-example-test"}},
+		3: {httpsListenerManager("box.example.test"), []string{"https-box-example-test"}},
+	}
 	for i, docs := range cl.writes {
 		if kind, _, _ := objectMeta(docs[0]); kind != "Gateway" {
 			continue
 		}
-		if cl.managers[i] != tlsManager("box.example.test") {
-			t.Fatalf("Gateway write %d under manager %q", i, cl.managers[i])
+		w, ok := want[i]
+		if !ok {
+			t.Fatalf("unexpected Gateway write at %d", i)
 		}
-		tlsApplies++
-		for name := range listenersOf(t, docs[0]) {
-			if name == "http" {
-				t.Fatal("a TLS apply wrote the shared http listener")
+		if cl.managers[i] != w.manager {
+			t.Fatalf("Gateway write %d under manager %q, want %q", i, cl.managers[i], w.manager)
+		}
+		got := listenersOf(t, docs[0])
+		if len(got) != len(w.listeners) {
+			t.Fatalf("Gateway write %d carries %v, want %v", i, got, w.listeners)
+		}
+		for _, name := range w.listeners {
+			if _, ok := got[name]; !ok {
+				t.Fatalf("Gateway write %d carries %v, want %v", i, got, w.listeners)
 			}
-			if name != "http-box-example-test" && name != "https-box-example-test" {
-				t.Fatalf("a TLS apply wrote %q, which is not this host's", name)
-			}
+		}
+		if _, ok := got["http"]; ok {
+			t.Fatal("a per-host apply wrote the shared http listener")
 		}
 	}
-	if tlsApplies != 1 {
-		t.Fatalf("TLS applies = %d, want one Gateway write", tlsApplies)
+	if httpListenerManager("box.example.test") == httpsListenerManager("box.example.test") {
+		t.Fatal("both listeners share one manager: an apply that names one would remove the other")
 	}
-	for _, m := range cl.managers {
-		if m == "box-tls-http" {
-			t.Fatal("the shared listener has its own manager again")
-		}
+	if cl.managers[1] != httpListenerManager("box.example.test") {
+		t.Fatalf("the port-80 Allow is written under %q, want the port-80 manager", cl.managers[1])
 	}
 }
 
@@ -297,7 +425,12 @@ func listenersOf(t *testing.T, doc map[string]any) map[string]map[string]any {
 	return out
 }
 
-func TestCertificateNotReadyWritesNothingElse(t *testing.T) {
+// A certificate that is not Ready leaves the host unserved: port 80 answers
+// the challenge and nothing else -- no HTTPS listener, no redirect -- because
+// the redirect would send browsers to a listener that does not exist. The
+// port-80 listener and its Allow do stay: they are what lets cert-manager try
+// again on the next run.
+func TestCertificateNotReadyWritesOnlyPort80(t *testing.T) {
 	cl := &fakeCertCluster{ready: false, reason: "Issuing: waiting for HTTP-01 challenge", serves: true}
 	d := &CertificateDecision{
 		Host:    "box.example.test",
@@ -309,14 +442,81 @@ func TestCertificateNotReadyWritesNothingElse(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if res.Ready || res.Listener || res.Redirect {
-		t.Fatalf("result = %+v", res)
+	if res.Ready || res.HTTPS || res.Redirect {
+		t.Fatalf("result = %+v, want nothing served", res)
 	}
-	if len(cl.writes) != 1 {
-		t.Fatalf("writes = %d, want only the Certificate", len(cl.writes))
+	if !res.Listener || !res.Policy {
+		t.Fatalf("result = %+v, want the port-80 listener and its Allow to stay", res)
+	}
+	if len(cl.writes) != 3 {
+		t.Fatalf("writes = %d, want the port-80 listener, its Allow and the Certificate", len(cl.writes))
+	}
+	for i, docs := range cl.writes {
+		kind, _, name := objectMeta(docs[0])
+		switch {
+		case kind == "Certificate":
+			if name != "s5n-tls-box-example-test" {
+				t.Fatalf("write %d = %s, want the Certificate", i, name)
+			}
+		case kind == "SecurityPolicy":
+			spec, _ := docs[0]["spec"].(map[string]any)
+			refs, _ := spec["targetRefs"].([]any)
+			ref, _ := refs[0].(map[string]any)
+			if ref["sectionName"] != "http-box-example-test" {
+				t.Fatalf("the Allow names %v", ref["sectionName"])
+			}
+		case kind == "Gateway":
+			got := listenersOf(t, docs[0])
+			if _, ok := got["https-box-example-test"]; ok {
+				t.Fatal("a Certificate that is not Ready wrote an HTTPS listener")
+			}
+			if _, ok := got["http-box-example-test"]; !ok || len(got) != 1 {
+				t.Fatalf("write %d carries %v, want only the port-80 listener", i, got)
+			}
+		case kind == "HTTPRoute":
+			t.Fatal("a Certificate that is not Ready wrote the redirect")
+		default:
+			t.Fatalf("write %d is %s", i, kind)
+		}
 	}
 	if !strings.Contains(res.Reason, "HTTP-01") {
 		t.Fatalf("reason = %q", res.Reason)
+	}
+}
+
+// A second run against a certificate that is already Ready writes the same
+// objects in the same order: the TLS half is idempotent, so a box that is
+// bootstrapped twice does not churn its listeners.
+func TestCertificateApplyIsIdempotent(t *testing.T) {
+	cl := &fakeCertCluster{ready: true, serves: true}
+	d := &CertificateDecision{
+		Host:   "box.example.test",
+		Issuer: LetsEncryptIssuer,
+		Open:   func() (CertificateCluster, error) { return cl, nil },
+	}
+	if _, err := d.Apply(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	first := len(cl.writes)
+	if _, err := d.Apply(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(cl.writes) != 2*first {
+		t.Fatalf("two runs wrote %d objects, want %d", len(cl.writes), 2*first)
+	}
+	for i := 0; i < first; i++ {
+		a, b := cl.writes[i], cl.writes[i+first]
+		if len(a) != len(b) {
+			t.Fatalf("write %d: %d documents then %d", i, len(a), len(b))
+		}
+		for j := range a {
+			if !reflect.DeepEqual(a[j], b[j]) {
+				t.Fatalf("write %d document %d changed:\n%v\n%v", i, j, a[j], b[j])
+			}
+		}
+		if cl.managers[i] != cl.managers[i+first] {
+			t.Fatalf("write %d manager %q then %q", i, cl.managers[i], cl.managers[i+first])
+		}
 	}
 }
 
