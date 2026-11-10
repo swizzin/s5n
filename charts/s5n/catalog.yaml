@@ -75,7 +75,7 @@ apps:
     questions:
       - key: secrets.plexClaimToken
         prompt: Plex claim token
-        help: from https://plex.tv/claim; press enter to skip and claim the server yourself later
+        help: press enter to skip and claim the server yourself later; the token is at https://plex.tv/claim
         kind: transient
         optional: true
 
