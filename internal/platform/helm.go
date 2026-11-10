@@ -93,7 +93,7 @@ func (h *Helm) Version(_ context.Context, name, namespace string) (string, bool,
 	if err != nil {
 		return "", false, false, fmt.Errorf("read release %s in %s: %w", name, namespace, err)
 	}
-	owned := acc.Labels()[ReleaseOwnerLabel] == ReleaseOwner
+	owned := acc.Labels()[kube.ManagedByLabel] == kube.ManagedBy
 	switch c := acc.Chart().(type) {
 	case *chartv2.Chart:
 		if c.Metadata != nil {
@@ -149,8 +149,10 @@ func (h *Helm) Install(ctx context.Context, spec Release) error {
 // ownerLabels is what makes a release box's. It is stored on the Helm release
 // record itself (Helm v4's release labels), not in chart values, so it is read
 // back without rendering anything and is never mistaken for a chart setting.
+// It tells a release box installed from a same-named one it did not: a
+// release without it is the operator's, and box never upgrades or modifies it.
 func ownerLabels() map[string]string {
-	return map[string]string{ReleaseOwnerLabel: ReleaseOwner}
+	return map[string]string{kube.ManagedByLabel: kube.ManagedBy}
 }
 
 func (h *Helm) exists(cfg *action.Configuration, name string) bool {

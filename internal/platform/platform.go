@@ -65,18 +65,6 @@ const (
 	GatewayNamespace = "s5n-gateway"
 	GatewayName      = "s5n"
 
-	// FieldManager is box's server-side-apply manager. It is what makes a
-	// second bootstrap field-for-field the same write as the first.
-	FieldManager = "box"
-
-	// ReleaseOwnerLabel and ReleaseOwner are how box tells a Helm release it
-	// installed from a same-named one it did not. Helm v4 stores release
-	// labels beside the release record, so the marker survives upgrades and
-	// is readable without parsing chart values. A release without it is the
-	// operator's: box never upgrades or modifies it.
-	ReleaseOwnerLabel = "app.kubernetes.io/managed-by"
-	ReleaseOwner      = "box"
-
 	// MetalLBPoolName and MetalLBL2Name are box's pool and advertisement.
 	MetalLBPoolName = "s5n-pool"
 	MetalLBL2Name   = "s5n-l2"
@@ -351,7 +339,7 @@ func (d *Decision) Apply(ctx context.Context, components []bootstrap.ComponentRe
 		case StepRelease:
 			if s.Foreign {
 				return res, fmt.Errorf("a Helm release named %s already exists in %s, but box did not install it (no %s=%s label): box will not upgrade another operator's release. Remove it, or use the implementation it provides",
-					s.Release.Name, s.Release.Namespace, ReleaseOwnerLabel, ReleaseOwner)
+					s.Release.Name, s.Release.Namespace, kube.ManagedByLabel, kube.ManagedBy)
 			}
 			if AtPin(s.InstalledVersion, s.Release.Version) {
 				step := r.Start(say.Op{Label: "verifying " + s.Release.Name})
@@ -446,7 +434,7 @@ func (d *Decision) resolve(ctx context.Context, plan *Plan) error {
 			s.Foreign = true
 			if s.Unless == "" {
 				return fmt.Errorf("a Helm release named %s already exists in %s, but box did not install it (no %s=%s label): box will not upgrade another operator's release. Remove it, or use the implementation it provides",
-					s.Release.Name, s.Release.Namespace, ReleaseOwnerLabel, ReleaseOwner)
+					s.Release.Name, s.Release.Namespace, kube.ManagedByLabel, kube.ManagedBy)
 			}
 		}
 	}

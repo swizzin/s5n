@@ -5,6 +5,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/swizzin/s5n/internal/kube"
 )
 
 // fakeCertCluster is the per-host flow's cluster: one Certificate's status,
@@ -34,7 +36,7 @@ func (f *fakeCertCluster) PrimaryInternalIP(context.Context) (string, error) {
 }
 
 func (f *fakeCertCluster) Apply(ctx context.Context, docs []map[string]any) error {
-	return f.ApplyWith(ctx, FieldManager, docs)
+	return f.ApplyWith(ctx, kube.FieldManager, docs)
 }
 
 func (f *fakeCertCluster) ApplyWith(_ context.Context, manager string, docs []map[string]any) error {
@@ -191,7 +193,7 @@ func TestCertificateApply(t *testing.T) {
 	if kind, ns, name := objectMeta(cl.writes[2][0]); kind != "HTTPRoute" || ns != GatewayNamespace || name != "s5n-tls-box-example-test-redirect" {
 		t.Fatalf("third write = %s %s/%s", kind, ns, name)
 	}
-	if cl.managers[2] != FieldManager {
+	if cl.managers[2] != kube.FieldManager {
 		t.Fatalf("redirect manager = %q", cl.managers[2])
 	}
 	// The Certificate carries the issuer init chose and the one DNS name.

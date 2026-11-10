@@ -105,19 +105,3 @@ func TestPerHostManifestsCarryTheOwnershipStrings(t *testing.T) {
 		})
 	}
 }
-
-// TestPlatformOwnershipConstantsMatchKube is the seam that has not collapsed
-// yet: platform.go's const block also declares the field manager and the
-// release-ownership pair, and that block belongs to the versions lane while the
-// pins move out of it. The values cannot drift in the meantime.
-func TestPlatformOwnershipConstantsMatchKube(t *testing.T) {
-	if FieldManager != kube.FieldManager {
-		t.Errorf("platform.FieldManager = %q, kube.FieldManager = %q", FieldManager, kube.FieldManager)
-	}
-	if ReleaseOwnerLabel != kube.ManagedByLabel {
-		t.Errorf("platform.ReleaseOwnerLabel = %q, kube.ManagedByLabel = %q", ReleaseOwnerLabel, kube.ManagedByLabel)
-	}
-	if ReleaseOwner != kube.ManagedBy {
-		t.Errorf("platform.ReleaseOwner = %q, kube.ManagedBy = %q", ReleaseOwner, kube.ManagedBy)
-	}
-}
