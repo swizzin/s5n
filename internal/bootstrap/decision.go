@@ -148,7 +148,26 @@ func (d *Decision) adoptInstalled(ctx context.Context, opts Options) Result {
 	}
 	res.Action = ActionInstall
 	res.Reason = fmt.Sprintf("clean host: k0s %s installed; using %s (%s)", K0sVersion, K0sAdminConfig, res.Distribution)
+	res.Platform = freshClusterAddresses(res.Platform)
 	return res
+}
+
+// freshClusterAddresses settles the address question on a cluster box has just
+// started. k0s ships nothing that hands out LoadBalancer addresses, and nothing
+// else has had a chance to be installed, so in auto mode the Gateway would only
+// report AddressNotAssigned after the wait: MetalLB is planned as an install
+// up front instead of a question. Only this run knows that. The record keeps
+// the configured mode, so a later run asks the Gateway as usual, and external
+// and managed modes are left as the operator set them.
+func freshClusterAddresses(components []ComponentResult) []ComponentResult {
+	out := append([]ComponentResult(nil), components...)
+	for i, c := range out {
+		if c.Component == ComponentLoadBalancer && c.Mode == ModeAuto && c.Action == "probe" {
+			out[i].Action = "install"
+			out[i].Reason = "box just installed k0s, which hands out no LoadBalancer addresses; box installs MetalLB"
+		}
+	}
+	return out
 }
 
 // useCluster validates an existing cluster and, when it is usable, probes the

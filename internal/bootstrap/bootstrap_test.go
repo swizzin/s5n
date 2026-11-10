@@ -557,8 +557,15 @@ func TestBootstrapCleanHostInstalls(t *testing.T) {
 	if rec.Kubeconfig != K0sAdminConfig || rec.GatewayClass != EnvoyGatewayClass {
 		t.Errorf("recorded %+v, want k0s's admin.conf and class %s", rec, EnvoyGatewayClass)
 	}
-	if rec.Platform.GatewayAPI != ModeAuto {
+	if rec.Platform.GatewayAPI != ModeAuto || rec.Platform.LoadBalancer != ModeAuto {
 		t.Errorf("recorded platform = %+v, want the configured modes", rec.Platform)
+	}
+	// k0s hands out no addresses, so a cluster box just started gets MetalLB
+	// planned outright rather than after a wait that can only say no.
+	for _, c := range res.Platform {
+		if c.Component == ComponentLoadBalancer && c.Action != "install" {
+			t.Errorf("loadbalancer on a fresh k0s = %+v, want install without the question", c)
+		}
 	}
 
 	// The order is the contract: nothing is read from an API that does not
@@ -811,5 +818,22 @@ func TestFirstKubeconfig(t *testing.T) {
 		if got := firstKubeconfig(tc.flag, tc.env); got != tc.want {
 			t.Errorf("firstKubeconfig(%q, %q) = %q, want %q", tc.flag, tc.env, got, tc.want)
 		}
+	}
+}
+
+// Only auto mode is settled up front. An operator who said the address layer
+// is theirs (external) is still verified by the Gateway, and managed already
+// installs.
+func TestFreshClusterAddressesKeepsExternal(t *testing.T) {
+	in := []ComponentResult{
+		{Component: ComponentLoadBalancer, Mode: ModeExternal, Action: "verify"},
+		{Component: ComponentGateway, Mode: ModeAuto, Action: "install"},
+	}
+	out := freshClusterAddresses(in)
+	if out[0].Action != "verify" || out[1].Action != "install" {
+		t.Fatalf("got %+v, want external left to verify", out)
+	}
+	if in[0].Action != "verify" {
+		t.Fatal("freshClusterAddresses changed its input")
 	}
 }

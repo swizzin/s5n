@@ -228,7 +228,9 @@ the whole 60 seconds at once, since there is no MetalLB to fall back to. Either 
 address on port 80. Any HTTP answer passes; silence stops bootstrap with the address
 named, and box never installs MetalLB over an address something else handed out. In
 external mode MetalLB is never installed and the Gateway must pass the same checks.
-Managed mode installs MetalLB without waiting to see.
+Managed mode installs MetalLB without waiting to see, and so does auto mode on a cluster
+box has just installed: k0s hands out no addresses, so the question could only answer no.
+The record keeps auto, so later runs ask the Gateway as usual.
 
 **An existing Gateway implementation is used, not replaced (decided).** Gateway API has
 no default class, so box looks for GatewayClasses a controller has accepted. With one,
