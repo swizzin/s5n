@@ -203,7 +203,7 @@ func (d *CertificateDecision) awaitCertificate(ctx context.Context, cl Certifica
 		return false, reason, nil
 	}
 	wait.Failed(err)
-	return false, "", fmt.Errorf("Certificate %s/%s: %w", GatewayNamespace, name, err)
+	return false, "", fmt.Errorf("certificate %s/%s: %w", GatewayNamespace, name, err)
 }
 
 // attach adds this host's two listeners in one partial Gateway apply: the
