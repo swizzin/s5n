@@ -18,10 +18,15 @@ type Rule struct {
 	// directory box turns into a PersistentVolume, so it is read, never charted.
 	BoxOnly bool
 	// BoxSets marks a chart key box writes from its own decision, which no file
-	// may set. The claim names are the only ones: box derives them from the
-	// namespace and creates the claim, so a name in either file would either be
-	// overwritten or clone the volume.
+	// may set. The claim names are one: box derives them from the namespace and
+	// creates the claim, so a name in either file would either be overwritten
+	// or clone the volume. auth.edge is the other: box puts a login in front of
+	// every release, and the chart ships none.
 	BoxSets bool
+	// Fixed marks a BoxSets key box writes as a constant rather than deriving
+	// it from the grant. auth.edge is the only one: it says a login is in
+	// front, which is a fact about box's deployment, not about this grant.
+	Fixed bool
 	// Why is the line box shows when a user's values file sets this key. It
 	// should say what the grant is protecting, not repeat the key name.
 	Why string
@@ -36,6 +41,10 @@ type Rule struct {
 //
 // The judgement calls, and why they land where they do:
 //
+//   - auth.edge is BoxSets, and Fixed: the chart ships no login and refuses to
+//     render without the statement that one is in front, so box writes true at
+//     merge time. It is a fact about the deployment, not a setting a file gets
+//     to deny.
 //   - global.tz is values. It changes how a user's own apps name files, and
 //     nothing about who can read them.
 //   - storage.<kind>.path is grant and box-only: it is where this box's volume
@@ -72,6 +81,11 @@ type Rule struct {
 //     a user has at all.
 var GrantKeys = []Rule{
 	{Path: "namespace", BoxOnly: true, Why: "the release namespace: one user is one namespace"},
+
+	// The chart ships no login; box is what puts one in front of every release,
+	// so no file may say otherwise. Fixed: box writes true rather than deriving
+	// it from anything in the grant.
+	{Path: "auth.edge", BoxSets: true, Fixed: true, Why: "box puts a login in front of every release, and the chart refuses to render one without it"},
 
 	{Path: "global.puid", Why: "the uid every file on the data volume is owned by"},
 	{Path: "global.pgid", Why: "the gid every file on the data volume is owned by"},

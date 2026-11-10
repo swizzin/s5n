@@ -71,6 +71,19 @@ spec, and Pod Security "restricted" still admits every pod.
 {{- required "storage.config.existingClaim: create the PersistentVolumeClaim before helm install; the chart creates no storage (box does)" .Values.storage.config.existingClaim -}}
 {{- end -}}
 
+{{- /*
+s5n.authEdge: the operator's statement that a login sits in front of this
+release. The chart ships no login of its own and there is no default, so a plain
+install must set auth.edge=true; box always does. False is refused as well: a
+release whose admin apps nobody signs in to is not a release this chart renders.
+*/ -}}
+{{- define "s5n.authEdge" -}}
+{{- $auth := .Values.auth -}}
+{{- if not (and $auth (kindIs "bool" $auth.edge) $auth.edge) -}}
+{{- fail "auth.edge: set it to true to say a login is in front of this release; the chart ships no login, so false is refused too (box sets it)" -}}
+{{- end -}}
+{{- end -}}
+
 {{- define "s5n.secretName" -}}
 {{- default (printf "%s-keys" (include "s5n.fullname" .)) .Values.secrets.existingSecret -}}
 {{- end -}}

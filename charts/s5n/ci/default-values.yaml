@@ -1,3 +1,6 @@
-# The chart's defaults, unchanged: the two claims a plain install expects to
-# find (`s5n-data`, `s5n-config`). The chart creates neither.
-{}
+# The chart's defaults, plus the one statement a plain install must make: the
+# chart ships no login, so the operator says one is in front of the release.
+# The two claims a plain install expects to find (`s5n-data`, `s5n-config`)
+# are still the chart's defaults. The chart creates neither.
+auth:
+  edge: true

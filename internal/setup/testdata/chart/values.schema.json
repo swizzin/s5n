@@ -12,6 +12,13 @@
         "tz": { "type": "string" }
       }
     },
+    "auth": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "edge": { "type": "boolean" }
+      }
+    },
     "storage": {
       "type": "object",
       "additionalProperties": false,

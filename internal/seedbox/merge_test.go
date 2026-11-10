@@ -200,3 +200,82 @@ func TestMergeDoesNotMutateDocuments(t *testing.T) {
 		t.Error("Merge returned the document's own map")
 	}
 }
+
+// TestMergeForcesAuthEdge: the chart ships no login and refuses to render
+// without auth.edge, so box's own values say it. Neither an absent key nor an
+// empty branch can leave it out, and the effective values (what Helm receives)
+// carry it too.
+func TestMergeForcesAuthEdge(t *testing.T) {
+	cases := []struct {
+		name   string
+		values string
+	}{
+		{"omitted", "wiring:\n  timeoutSeconds: 60\n"},
+		{"empty auth branch", "auth: {}\n"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			s, err := Load(fixture(t, "grant.yaml"), writeTemp(t, "values.yaml", c.values))
+			if err != nil {
+				t.Fatalf("Load: %v", err)
+			}
+			got, err := s.Merge()
+			if err != nil {
+				t.Fatalf("Merge: %v", err)
+			}
+			auth, ok := got["auth"].(map[string]any)
+			if !ok || auth["edge"] != true {
+				t.Fatalf("auth = %#v, want edge true: the chart refuses to render without it", got["auth"])
+			}
+		})
+	}
+
+	s := loadFixture(t, "values.yaml")
+	got, err := s.Effective(realChart(t))
+	if err != nil {
+		t.Fatalf("Effective: %v", err)
+	}
+	auth, ok := got["auth"].(map[string]any)
+	if !ok || auth["edge"] != true {
+		t.Fatalf("effective auth = %#v, want edge true", got["auth"])
+	}
+}
+
+// TestMergeRefusesAuthEdgeInValues: auth.edge is box's, like a claim name. A
+// user's file may not turn the login off -- or on: setting it at all is a grant
+// key in values, and the error names the key and the line.
+func TestMergeRefusesAuthEdgeInValues(t *testing.T) {
+	for _, edge := range []string{"false", "true"} {
+		t.Run(edge, func(t *testing.T) {
+			s, err := Load(fixture(t, "grant.yaml"), writeTemp(t, "values.yaml", "auth:\n  edge: "+edge+"\n"))
+			if err != nil {
+				t.Fatalf("Load: %v", err)
+			}
+			_, err = s.Merge()
+			if err == nil {
+				t.Fatal("Merge accepted a values file that sets auth.edge")
+			}
+			if !strings.Contains(err.Error(), "values.yaml:2: auth.edge is set by box") {
+				t.Errorf("error = %v, want it to name the key, the line and box", err)
+			}
+		})
+	}
+}
+
+// TestMergeRefusesAuthEdgeInGrant: root's grant may not carry it either. box
+// writes the constant itself, so the grant refusal says so rather than claiming
+// it is derived from the grant.
+func TestMergeRefusesAuthEdgeInGrant(t *testing.T) {
+	grant := writeTemp(t, "grant.yaml", "namespace: alice\ngateway:\n  host: alice.example.com\nauth:\n  edge: true\n")
+	s, err := Load(grant, "")
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	_, err = s.Merge()
+	if err == nil {
+		t.Fatal("Merge accepted a grant that sets auth.edge")
+	}
+	if !strings.Contains(err.Error(), "grant.yaml:5: auth.edge is box's; box sets it itself") {
+		t.Errorf("error = %v, want it to say box sets it itself", err)
+	}
+}

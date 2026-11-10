@@ -8,14 +8,36 @@ cd "$(dirname "$0")/.."
 KUBE=${1:-1.37.0}
 CRDS='https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json'
 
-helm lint charts/s5n
+helm lint charts/s5n --set auth.edge=true
+
+# auth.edge is the operator's statement that a login sits in front of the
+# release. The chart ships no login, so a render with the key missing and a
+# render with it false must both fail with the message naming the key and the
+# fix: an open admin stack must never be the result of forgetting a value.
+auth_message='auth.edge: set it to true to say a login is in front of this release; the chart ships no login, so false is refused too (box sets it)'
+for mode in missing false; do
+  err=$(mktemp)
+  args=()
+  [ "$mode" = false ] && args=(--set auth.edge=false)
+  if helm template t charts/s5n -n seedbox "${args[@]}" >/dev/null 2>"$err"; then
+    echo "auth.edge $mode: rendered; the chart must refuse a release with no login in front"
+    rm -f "$err"; exit 1
+  fi
+  if ! grep -qF "$auth_message" "$err"; then
+    echo "auth.edge $mode: failed without the refusal message:"
+    cat "$err"
+    rm -f "$err"; exit 1
+  fi
+  rm -f "$err"
+  echo "== auth.edge $mode: refused"
+done
 
 # Plex must never trust a network range by default. The public Gateway's Envoy
 # proxy connects to Plex from its own pod IP, which is inside the pod CIDR, so
 # PLEX_NO_AUTH_NETWORKS containing that range would make the whole internet look
 # like a "local" client: unauthenticated admin of the server. apps.plex.noAuthNetworks
 # is opt-in only, and the default render must not carry the env var at all.
-if helm template t charts/s5n -n seedbox | grep -q 'PLEX_NO_AUTH_NETWORKS'; then
+if helm template t charts/s5n -n seedbox --set auth.edge=true | grep -q 'PLEX_NO_AUTH_NETWORKS'; then
   echo "default render sets PLEX_NO_AUTH_NETWORKS: Plex would trust the pod network"
   exit 1
 fi

@@ -35,6 +35,17 @@
         }
       }
     },
+    "auth": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Who checks the login in front of this release. The chart ships no login; auth.edge is the operator's explicit statement that one is there, and there is no default.",
+      "properties": {
+        "edge": {
+          "type": "boolean",
+          "description": "Must be true. The chart refuses to render when it is missing or false: a release whose admin apps nobody signs in to is not one this chart installs. box sets it."
+        }
+      }
+    },
     "storage": {
       "type": "object",
       "additionalProperties": false,

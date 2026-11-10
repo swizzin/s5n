@@ -5,6 +5,9 @@
 #
 # A values file, not --set: --set on one index of a list replaces the whole
 # list, so instances[1] would arrive without its suffix and instances[0] null.
+auth:
+  edge: true
+
 wiring:
   image:
     tag: e2e

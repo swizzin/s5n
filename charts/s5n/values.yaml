@@ -7,6 +7,16 @@ global:
   pgid: 1000
   tz: Etc/UTC
 
+# The chart ships no login of its own, and the apps behind it are admin panels.
+# auth.edge is the explicit statement that a login does sit in front of this
+# release: box sets it, and a plain `helm install` must set it too, the way it
+# would configure an ingress with basic auth. There is deliberately no default;
+# a missing or false value is refused at render time rather than shipping the
+# stack open.
+#
+# auth:
+#   edge: true
+
 # The data contract. Every app mounts the same claim at /data:
 #   /data/downloads/<category>   qBittorrent save paths
 #   /data/media/<category>      Arr root folders

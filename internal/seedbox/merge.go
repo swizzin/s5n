@@ -31,6 +31,11 @@ func (s *Seedbox) Merge() (map[string]any, error) {
 	}
 	out := cloneMap(s.Values.data)
 	overlay(out, s.Grant.data, nil)
+	// auth.edge is box's, always true: the chart ships no login and refuses to
+	// render without the statement that one is in front, and box is what puts
+	// it there. Overlaid after both files so no file can shadow it; a file that
+	// tries (true or false) is already refused by checkValues.
+	overlay(out, map[string]any{"auth": map[string]any{"edge": true}}, nil)
 	if _, ok := out["apps"]; !ok {
 		out["apps"] = map[string]any{}
 	}
@@ -87,8 +92,12 @@ func (s *Seedbox) checkGrant() error {
 		case ok && rule.BoxOnly:
 			return
 		case ok && rule.BoxSets:
-			add("%s:%d: %s is box's; box derives it from what the grant already says, so it does not belong in either file",
-				g.Path, key.Line, strings.Join(keys, "."))
+			how := "box derives it from what the grant already says"
+			if rule.Fixed {
+				how = "box sets it itself"
+			}
+			add("%s:%d: %s is box's; %s, so it does not belong in either file",
+				g.Path, key.Line, strings.Join(keys, "."), how)
 		case !ok:
 			add("%s:%d: %s is not a grant key; a grant holds only what decides isolation and which apps exist, so this belongs in the user's values file",
 				g.Path, key.Line, strings.Join(keys, "."))

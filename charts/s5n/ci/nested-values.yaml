@@ -2,6 +2,9 @@
 # source seedbox already used. Mixed case and one qBittorrent subcategory level
 # are legal here, and the parent directory (4K) is created with the leaf.
 # The claims are named explicitly, as in 4k-values.yaml.
+auth:
+  edge: true
+
 storage:
   data:
     existingClaim: box-nested-data

@@ -131,6 +131,11 @@ func TestHostileManifestIsNamed(t *testing.T) {
 			wants:    []string{"storage.data.existingClaim", "set by box"},
 		},
 		{
+			name:     "box-sets auth.edge",
+			manifest: strings.Replace(miniManifest, "key: global.tz", "key: auth.edge", 1),
+			wants:    []string{"auth.edge", "set by box"},
+		},
+		{
 			name:     "unknown kind",
 			manifest: strings.Replace(miniManifest, "kind: bool", "kind: integer", 1),
 			wants:    []string{"apps.alpha.questions[1].kind", "integer"},

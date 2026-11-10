@@ -115,8 +115,10 @@ helm install s5n oci://ghcr.io/swizzin/charts/s5n --version 0.2.0 -f values.yaml
 ```
 
 It creates no storage of its own. Bring two claims (`storage.data.existingClaim` and
-`storage.config.existingClaim`) and a Gateway for its routes. `charts/s5n/values.yaml`
-documents every key, and `values.schema.json` rejects anything it doesn't know.
+`storage.config.existingClaim`) and a Gateway for its routes. It ships no login either:
+put one in front at your Gateway and set `auth.edge: true` to say you have, or the chart
+refuses to render. `charts/s5n/values.yaml` documents every key, and `values.schema.json`
+rejects anything it doesn't know.
 
 ## The data layout
 
