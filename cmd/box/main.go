@@ -14,13 +14,18 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 
 	"golang.org/x/term"
 
+	platformassets "github.com/swizzin/s5n/install/platform"
+
+	"github.com/swizzin/s5n/internal/authelia"
 	"github.com/swizzin/s5n/internal/bootstrap"
 	"github.com/swizzin/s5n/internal/catalog"
+	"github.com/swizzin/s5n/internal/login"
 	"github.com/swizzin/s5n/internal/platform"
 	"github.com/swizzin/s5n/internal/release"
 	"github.com/swizzin/s5n/internal/say"
@@ -496,6 +501,8 @@ type initFlags struct {
 	dataPath    *string
 	configPath  *string
 	apps        *string
+	loginName   *string
+	password    *string
 	puid        *int
 	pgid        *int
 	transient   *transientAnswers
@@ -515,6 +522,8 @@ func addInitFlags(fs *flag.FlagSet) *initFlags {
 	o.dataPath = fs.String("data-path", "", "the host path downloads and media live on")
 	o.configPath = fs.String("config-path", "", "the host path the apps keep their settings on")
 	o.apps = fs.String("apps", "", "comma separated app names from the chart's catalog")
+	o.loginName = fs.String("login", "", "the account the login page admits (default: $SUDO_USER, else the invoking user)")
+	o.password = fs.String("password-file", "", "read the login's password from this file, or from stdin with - (default: ask, or generate one)")
 	o.puid = fs.Int("puid", defaultPUID(), "uid every file on the data path is owned by (default: $SUDO_UID, else the invoking user, else 1000)")
 	o.pgid = fs.Int("pgid", defaultPGID(), "gid every file on the data path is owned by (default: $SUDO_GID, else the invoking user, else 1000)")
 	o.transient = &transientAnswers{}
@@ -570,6 +579,8 @@ func (o *initFlags) run(ctx context.Context, kubeconfig string, yes, plain bool,
 		Catalog:  cat,
 		Say:      out,
 		Resolver: setup.NetResolver{},
+		Login:    loginStep(kubeconfig, *o.pathsInNode, out),
+		HasLogin: hasLogin(*o.pathsInNode),
 		Apply: func(ctx context.Context, req setup.ApplyOptions) error {
 			// The cluster decision belongs to `box bootstrap`; apply reuses it.
 			// It is resolved here, after init has written the files, so a host
@@ -595,7 +606,7 @@ func (o *initFlags) run(ctx context.Context, kubeconfig string, yes, plain bool,
 				GrantPath:     req.GrantPath,
 				ValuesPath:    req.ValuesPath,
 				PathsInNode:   req.PathsInNode,
-				AfterConfirm:  req.AfterConfirm,
+				AfterConfirm:  afterConfirm(req),
 				TransientKeys: req.TransientKeys,
 				BoxValues:     boxValues(kc),
 			})
@@ -617,6 +628,10 @@ func (o *initFlags) run(ctx context.Context, kubeconfig string, yes, plain bool,
 		PUIDSet:      set["puid"],
 		PGIDSet:      set["pgid"],
 		SetTransient: *o.transient,
+		Login:        *o.loginName,
+		LoginSet:     set["login"],
+		DefaultLogin: defaultLogin(),
+		PasswordFile: *o.password,
 		Unattended:   unattended,
 		PathsInNode:  *o.pathsInNode,
 	})
@@ -646,7 +661,101 @@ func (o *initFlags) run(ctx context.Context, kubeconfig string, yes, plain bool,
 	if res.Domain != "" {
 		out.Banner("seedbox ready", res.Domain)
 	}
+	// The login is the one answer a person has to write down: the account, and
+	// a password only when box made it. It is printed here and nowhere else.
+	if res.Login != "" {
+		out.Line("login: " + res.Login + " at https://" + res.Domain + "/auth/")
+	}
+	if res.GeneratedPassword != "" {
+		out.Line("password: " + res.GeneratedPassword + "  (shown once; box keeps only the hash)")
+	}
 	return nil
+}
+
+// afterConfirm is the one hook apply runs after its confirm and before its
+// first write. The login goes first: a release behind a login that is not
+// answering would be served unauthenticated, and a login Envoy Gateway refuses
+// has to stop the run before the apps exist.
+func afterConfirm(req setup.ApplyOptions) func(context.Context) (map[string]any, error) {
+	if req.Login == nil && req.AfterConfirm == nil {
+		return nil
+	}
+	return func(ctx context.Context) (map[string]any, error) {
+		if req.Login != nil {
+			if err := req.Login(ctx); err != nil {
+				return nil, err
+			}
+		}
+		if req.AfterConfirm != nil {
+			return req.AfterConfirm(ctx)
+		}
+		return nil, nil
+	}
+}
+
+// loginStep installs root's login. It resolves the cluster the same way apply
+// and the certificate step do, and it does so inside the hook: a run that is
+// refused at the confirm never opens a client.
+func loginStep(kubeconfig string, pathsInNode bool, out say.Reporter) setup.LoginFunc {
+	return func(ctx context.Context, l setup.Login) error {
+		kc, err := release.ResolveKubeconfig(kubeconfig, os.Getenv("KUBECONFIG"), bootstrap.FilesystemRecords{Path: bootstrap.RecordPath})
+		if err != nil {
+			return err
+		}
+		d := &login.Decision{
+			Open:    func() (login.Cluster, error) { return platform.NewCluster(kc) },
+			Storage: func() (release.StorageClient, error) { return release.NewStorage(kc, login.Namespace) },
+			Host:    login.LinuxHost{},
+			Say:     out,
+		}
+		_, err = d.Apply(ctx, login.Options{
+			Host:        l.Host,
+			Login:       l.Name,
+			Password:    l.Password,
+			NewPassword: l.NewPassword,
+			PathsInNode: pathsInNode,
+			// The pin comes from install/platform/versions.yaml, the one file
+			// every version box installs lives in.
+			Image:  platformassets.Pins.Authelia,
+			Values: l.Values,
+		})
+		return err
+	}
+}
+
+// hasLogin answers whether the users database already holds this account. It
+// is init's first-run-or-re-run question: an empty password keeps an existing
+// row and makes one when there is none. A file inside a test node is not
+// visible from here, which is why the kind e2e always passes --password-file.
+func hasLogin(pathsInNode bool) setup.HasLoginFunc {
+	return func(name string) bool {
+		if pathsInNode {
+			return false
+		}
+		raw, err := os.ReadFile(filepath.Join(authelia.HostPath, authelia.UsersDBFile))
+		if err != nil {
+			return false
+		}
+		db, err := authelia.ParseUsers(raw)
+		if err != nil {
+			return false
+		}
+		_, ok := db.Get(name)
+		return ok
+	}
+}
+
+// defaultLogin is what init offers when no --login was given: the account of
+// the person who ran sudo, because that is whose box this is. A root shell has
+// no such answer and init asks (or refuses, unattended).
+func defaultLogin() string {
+	if user := strings.TrimSpace(os.Getenv("SUDO_USER")); user != "" && user != "root" {
+		return user
+	}
+	if user := strings.TrimSpace(os.Getenv("USER")); user != "" && user != "root" {
+		return user
+	}
+	return ""
 }
 
 // takeDevFlag removes one development-only flag from args before a FlagSet

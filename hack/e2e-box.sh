@@ -36,6 +36,13 @@
 #                 cluster, naming the class and its controller, and write
 #                 nothing: no namespace, no GatewayClass, no record.
 #
+# The login is part of every install: bootstrap puts one Authelia in
+# s5n-system and one SecurityPolicy on the Gateway, root's `box init` creates
+# the one account, and the fresh scenario then proves the whole flow with a
+# cookie jar -- an app path redirects to the portal, the portal takes the
+# password, the jar gets in, and the Arrs' own API keys still answer. The
+# preinstalled scenario proves the same redirect on its own host name.
+#
 # The fresh scenario runs Pebble, Let's Encrypt's test ACME server, inside the
 # cluster and points the production issuer at it, so HTTP-01 through the
 # Gateway is proven on every run: Certificate Ready, HTTPS with Pebble's CA, an
@@ -58,6 +65,9 @@ cd "$(dirname "$0")/.."
 
 KIND=${KIND:-kind}
 NS=seedbox
+# The one account the login admits. A generic name: the repo carries no real
+# one, and the e2e's password is generated per run below.
+LOGIN=alice
 IMAGE=ghcr.io/swizzin/s5n:e2e
 # The platform versions box installs are not this script's: they come from
 # install/platform/versions.yaml, printed by hack/versions from the bytes box
@@ -67,13 +77,14 @@ IMAGE=ghcr.io/swizzin/s5n:e2e
 pins=$(go run ./hack/versions)
 pin() { printf '%s\n' "$pins" | sed -n "s/^$1=//p"; }
 v_tag() { case "$1" in v*) printf '%s' "$1" ;; *) printf 'v%s' "$1" ;; esac; }
-for pin_key in k0s envoyGateway metallb certManager; do
+for pin_key in authelia k0s envoyGateway metallb certManager; do
   [ -n "$(pin "$pin_key")" ] || {
     echo "install/platform/versions.yaml has no ${pin_key} pin"
     exit 1
   }
 done
 ENVOY_GATEWAY_VERSION=$(pin envoyGateway)
+AUTHELIA_IMAGE=$(pin authelia)
 METALLB_CHART_VERSION=$(pin metallb)
 CERT_MANAGER_VERSION=$(pin certManager)
 METALLB_VERSION=${METALLB_VERSION:-$(v_tag "$(pin metallb)")}
@@ -220,6 +231,15 @@ built=$("$WORK/box" version)
 }
 $KIND get kubeconfig --name "$CLUSTER" >"$WORK/kubeconfig"
 
+# The login's password: generated per run, written where only `box init`
+# reads it (--password-file), and asserted never to appear in box's output.
+# The node's users database is seeded from the same file, because
+# --paths-in-node means the host path is inside the test node and box cannot
+# write there: hack/authelia-users is the same internal/authelia code box uses.
+AUTHELIA_PASSWORD=$(openssl rand -hex 16)
+printf '%s\n' "$AUTHELIA_PASSWORD" >"$WORK/authelia-password"
+chmod 600 "$WORK/authelia-password"
+
 # Only what `box init` creates on a real host, and only because --paths-in-node
 # keeps it from touching this node itself: the two volume roots and one
 # /config/<instance> directory per enabled app (setup.settingsDirs). The data
@@ -231,6 +251,21 @@ docker exec "${CLUSTER}-control-plane" bash -c '
   mkdir -p /srv/s5n/data \
            /srv/s5n/config/{qbittorrent,prowlarr,sonarr,sonarr-4k,radarr,radarr-4k,plex,tautulli,seerr}
   chown -R 1000:1000 /srv/s5n'
+
+# The login's own directory, which box init creates on a real host: 0700, owned
+# by the uid the container runs as (65532). The users database goes in before
+# the install because Authelia will not start without it, and box cannot write
+# into the node -- hack/authelia-users writes the same file from the same
+# package, so the row the login verifies is the row box would have written.
+log "seeding the login's state directory in the node (0700, uid 65532)"
+go run ./hack/authelia-users --login "$LOGIN" --password-file "$WORK/authelia-password" --out "$WORK/users_database.yml"
+docker exec -i "${CLUSTER}-control-plane" bash -c '
+  mkdir -p /var/lib/s5n/authelia
+  cat >/var/lib/s5n/authelia/users_database.yml
+  chown -R 65532:65532 /var/lib/s5n/authelia
+  chmod 700 /var/lib/s5n/authelia
+  chmod 600 /var/lib/s5n/authelia/users_database.yml
+' <"$WORK/users_database.yml"
 
 # Nothing below may prepare the data categories: the wiring Job owns them, and a
 # first install that cannot create its own root folders is the failure this e2e
@@ -280,6 +315,7 @@ bootstrap() { # bootstrap <output file>
     --data-path /srv/s5n/data --config-path /srv/s5n/config \
     --apps qbittorrent,sonarr,radarr,prowlarr,plex,tautulli,seerr \
     --puid 1000 --pgid 1000 \
+    --login "$LOGIN" --password-file "$WORK/authelia-password" \
     --paths-in-node --record "$WORK/cluster.yaml" \
     --kubeconfig "$WORK/kubeconfig" >"$1" 2>&1
 }
@@ -298,6 +334,7 @@ init() { # init <output file>
     --data-path /srv/s5n/data --config-path /srv/s5n/config \
     --apps qbittorrent,sonarr,radarr,prowlarr,plex,tautulli,seerr \
     --puid 1000 --pgid 1000 \
+    --login "$LOGIN" --password-file "$WORK/authelia-password" \
     --paths-in-node \
     --kubeconfig "$WORK/kubeconfig" >"$1" 2>&1
 }
@@ -704,6 +741,99 @@ print("  app routes: %d HTTPRoutes, none pins a sectionName" % len(items))
   grep -qi "^location: https://${DOMAIN}/sonarr/ping" "$WORK/http-headers" ||
     { echo "the redirect does not point at HTTPS"; fail=1; }
 
+  # ---- the login: root's seedbox is behind Authelia --------------------------
+  # The SecurityPolicy targets the Gateway itself, so every listener and every
+  # route asks Authelia first -- including the shared port-80 listener, which is
+  # what keeps an app from ever being served unauthenticated over plain HTTP.
+  # These assertions are the whole flow: redirect, portal, password, cookie,
+  # and the paths that carry their own credentials.
+  log "the login: an unauthenticated app path redirects to the portal"
+  authelia_pod=$($K -n s5n-system get pod -l app.kubernetes.io/name=authelia -o jsonpath='{.items[0].metadata.name}' || true)
+  authelia_uid=$($K -n s5n-system get pod -l app.kubernetes.io/name=authelia -o jsonpath='{.items[0].metadata.uid}' || true)
+  authelia_runas=$($K -n s5n-system get deploy authelia -o jsonpath='{.spec.template.spec.securityContext.runAsUser}' || true)
+  authelia_image=$($K -n s5n-system get deploy authelia -o jsonpath='{.spec.template.spec.containers[0].image}' || true)
+  policy_target=$($K -n s5n-gateway get securitypolicy s5n-authelia -o jsonpath='{.spec.targetRefs[0].kind}/{.spec.targetRefs[0].name}' || true)
+  policy_accepted=$($K -n s5n-gateway get securitypolicy s5n-authelia -o jsonpath='{.status.ancestors[?(@.ancestorRef.name=="s5n")].conditions[?(@.type=="Accepted")].status}' || true)
+  policy_failopen=$($K -n s5n-gateway get securitypolicy s5n-authelia -o jsonpath='{.spec.extAuth.failOpen}' || true)
+  policy_headers=$($K -n s5n-gateway get securitypolicy s5n-authelia -o jsonpath='{.spec.extAuth.headersToExtAuth[*]}' || true)
+  echo "  pod ${authelia_pod} (uid ${authelia_uid}), runAsUser ${authelia_runas}, image ${authelia_image}"
+  echo "  SecurityPolicy -> ${policy_target}, Accepted ${policy_accepted}, failOpen ${policy_failopen}, headers [${policy_headers}]"
+  [ -n "$authelia_pod" ] || { echo "the login has no pod"; fail=1; }
+  [ "$authelia_runas" = 65532 ] || { echo "the login runs as ${authelia_runas}, want 65532"; fail=1; }
+  [ "$authelia_image" = "$AUTHELIA_IMAGE" ] ||
+    { echo "the login runs ${authelia_image}, want the pinned ${AUTHELIA_IMAGE}"; fail=1; }
+  [ "$policy_target" = Gateway/s5n ] ||
+    { echo "the SecurityPolicy targets ${policy_target}, want the Gateway itself"; fail=1; }
+  [ "$policy_accepted" = True ] || { echo "Envoy Gateway never accepted the SecurityPolicy"; fail=1; }
+  [ "$policy_failopen" = false ] || { echo "the SecurityPolicy fails open"; fail=1; }
+  case " ${policy_headers} " in
+    *" cookie "*) ;;
+    *) echo "headersToExtAuth = [${policy_headers}]: without cookie every request is anonymous"; fail=1 ;;
+  esac
+  # The claim and the file: the state is on the host, owned by the login's uid,
+  # and the digest is the one the portal will accept below.
+  for kind in authelia; do
+    pv_phase=$($K get pv s5n-${kind} -o jsonpath='{.status.phase}' || true)
+    pvc_phase=$($K -n s5n-system get pvc s5n-${kind} -o jsonpath='{.status.phase}' || true)
+    pv_path=$($K get pv s5n-${kind} -o jsonpath='{.spec.hostPath.path}' || true)
+    echo "  s5n-${kind}: ${pv_phase} -> ${pvc_phase} (path ${pv_path})"
+    [ "$pv_phase" = Bound ] || fail=1
+    [ "$pvc_phase" = Bound ] || fail=1
+    [ "$pv_path" = /var/lib/s5n/authelia ] || { echo "the login's volume backs ${pv_path}"; fail=1; }
+  done
+  node_owner=$(docker exec "${CLUSTER}-control-plane" stat -c '%u:%g' /var/lib/s5n/authelia 2>/dev/null || echo missing)
+  node_mode=$(docker exec "${CLUSTER}-control-plane" stat -c '%a' /var/lib/s5n/authelia 2>/dev/null || echo missing)
+  echo "  /var/lib/s5n/authelia: owner ${node_owner}, mode ${node_mode}"
+  [ "$node_owner" = 65532:65532 ] || { echo "the login's directory is not owned by its uid"; fail=1; }
+  [ "$node_mode" = 700 ] || { echo "the login's directory is mode ${node_mode}, want 700"; fail=1; }
+  $K -n s5n-system get secret s5n-authelia -o jsonpath='{.data.storage-encryption-key}' >/dev/null 2>&1 ||
+    { echo "the login's storage encryption key is not in s5n-authelia"; fail=1; }
+  # box's own words: it installed the login and reported the policy accepted,
+  # both before the release was written. The step's Label ("installing root's
+  # login") is TUI-only; the plain path prints the Done line, so that is what
+  # the log carries.
+  grep -qF "login ready: s5n-system/authelia, SecurityPolicy s5n-gateway/s5n-authelia accepted" "$WORK/bootstrap1.txt" ||
+    { echo "box did not say it installed the login and accepted its SecurityPolicy"; fail=1; }
+  grep -qF "login: ${LOGIN} at https://${DOMAIN}/auth/" "$WORK/bootstrap1.txt" ||
+    { echo "the final card did not print the login"; fail=1; }
+  if grep -qF "$AUTHELIA_PASSWORD" "$WORK/bootstrap1.txt"; then
+    echo "box printed the password: it is read from --password-file, and the card must not repeat it"
+    fail=1
+  fi
+  # The login is installed before the release: its Done line comes before the
+  # release apply in the transcript. (The step's Label is TUI-only, and the
+  # "first install" line is part of init's plan, printed before any write, so
+  # neither is the thing to look for.)
+  login_line=$(grep -n "login ready:" "$WORK/bootstrap1.txt" | head -1 | cut -d: -f1)
+  release_line=$(grep -n "applied: s5n revision" "$WORK/bootstrap1.txt" | head -1 | cut -d: -f1)
+  echo "  transcript: login at line ${login_line}, release at line ${release_line}"
+  if [ -z "$login_line" ] || [ -z "$release_line" ]; then
+    echo "the transcript does not show both the login and the release"
+    fail=1
+  elif [ "$login_line" -ge "$release_line" ]; then
+    echo "the login was not installed before the release"
+    fail=1
+  fi
+
+  JAR="$WORK/authelia-jar.txt"
+  rm -f "$JAR"
+  unauth_headers="$WORK/unauth-headers.txt"
+  unauth_code=$(curl -sS -o /dev/null -D "$unauth_headers" -w '%{http_code}' \
+    --resolve "${DOMAIN}:443:${gw_addr}" --cacert "$WORK/pebble-root.pem" \
+    "https://${DOMAIN}/sonarr/" 2>"$WORK/unauth.err" || true)
+  unauth_location=$(grep -i '^location:' "$unauth_headers" | tr -d '\r' | sed 's/^[Ll]ocation: *//' || true)
+  echo "  GET https://${DOMAIN}/sonarr/ without a cookie: ${unauth_code} -> ${unauth_location}"
+  [ "$unauth_code" = 302 ] ||
+    { echo "an unauthenticated app path answered ${unauth_code}, not a redirect to the login (sonarr was served open)"; fail=1; }
+  case "$unauth_location" in
+    "https://${DOMAIN}/auth/"*) ;;
+    *) echo "the redirect does not point at the portal: ${unauth_location}"; fail=1 ;;
+  esac
+  case "$unauth_location" in
+    *"rd="*) ;;
+    *) echo "the redirect carries no rd=, so the portal cannot send the browser back"; fail=1 ;;
+  esac
+
   # The challenge path is not asserted here: cert-manager's solver HTTPRoute
   # exists only while an order is pending, so after issuance that path is the
   # redirect's. The renewal below observes the solver route while it exists.
@@ -943,6 +1073,20 @@ for r in items:
   grep -q "already says this" "$WORK/bootstrap2.txt" || { echo "the second init did not say the grant was already right"; fail=1; }
   grep -q "nothing to change" "$WORK/bootstrap2.txt" || { echo "the second init did not say nothing to change"; fail=1; }
   no_probe_service
+  # The login is a second object set box owns, and it must be as still as the
+  # platform: the second run re-renders the same configuration, the same pod
+  # template annotation, and the same SecurityPolicy. A restarted pod would be
+  # a changed hash, so its uid is the assertion; the session cookie from before
+  # the run is the user-visible half of the same fact.
+  authelia_uid_after=$($K -n s5n-system get pod -l app.kubernetes.io/name=authelia -o jsonpath='{.items[0].metadata.uid}' || true)
+  echo "  login pod uid: ${authelia_uid} -> ${authelia_uid_after}"
+  [ "$authelia_uid_after" = "$authelia_uid" ] ||
+    { echo "the second bootstrap restarted the login (a changed configuration rolls the pod)"; fail=1; }
+  session_after=$(curl -sS -o /dev/null -w '%{http_code}' -b "$JAR" \
+    --resolve "${DOMAIN}:443:${gw_addr}" --cacert "$WORK/pebble-root.pem" \
+    "https://${DOMAIN}/sonarr/" 2>/dev/null || true)
+  echo "  the session from before the second bootstrap: ${session_after}"
+  [ "$session_after" = 200 ] || { echo "the second bootstrap logged everyone out"; fail=1; }
 
   platform_after=$(platform_state)
   if [ "$platform_after" != "$platform_before" ]; then
@@ -1334,6 +1478,19 @@ PY
     --resolve "${DOMAIN}:80:${lb_addr}" "http://${DOMAIN}/sonarr/ping" || true)
   echo "  HTTP ${DOMAIN}/sonarr/ping: ${http_code}"
   [ "$http_code" = 301 ] || { echo "an app path on port 80 was not redirected"; fail=1; }
+  # Every scenario installs the login, so the app UI is never served to an
+  # unauthenticated request: no cookie means the portal, on this host's own
+  # name and its self-signed certificate.
+  unauth_headers="$WORK/preinstalled-unauth-headers.txt"
+  unauth_code=$(curl -sS -k -o /dev/null -D "$unauth_headers" -w '%{http_code}' \
+    --resolve "${DOMAIN}:443:${lb_addr}" "https://${DOMAIN}/sonarr/" 2>/dev/null || true)
+  unauth_location=$(grep -i '^location:' "$unauth_headers" | tr -d '\r' | sed 's/^[Ll]ocation: *//' || true)
+  echo "  GET https://${DOMAIN}/sonarr/ without a cookie: ${unauth_code} -> ${unauth_location}"
+  [ "$unauth_code" = 302 ] || { echo "an unauthenticated app path answered ${unauth_code}"; fail=1; }
+  case "$unauth_location" in
+    "https://${DOMAIN}/auth/"*) ;;
+    *) echo "the redirect does not point at the portal: ${unauth_location}"; fail=1 ;;
+  esac
 
   $K -n "$NS" wait --for=condition=Ready pod -l 'app.kubernetes.io/instance=s5n,s5n.io/app' --timeout=300s || fail=1
 

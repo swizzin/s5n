@@ -217,6 +217,10 @@ type harness struct {
 	applied   []ApplyOptions
 	transient map[string]any
 	applyErr  error
+	// logins is every login the hand-over carried, and loginErr fails it: the
+	// hook runs after apply's confirm, so a test can prove both orders.
+	logins   []Login
+	loginErr error
 }
 
 func newHarness(t *testing.T) *harness {
@@ -246,8 +250,21 @@ func newHarness(t *testing.T) *harness {
 		Catalog:  cat,
 		Say:      &say.Plain{W: h.out},
 		Resolver: stubResolver{},
+		// The login is installed by internal/login; these tests only need to
+		// know what init decided, and that the hook ran where apply runs it.
+		Login: func(_ context.Context, l Login) error {
+			h.logins = append(h.logins, l)
+			return h.loginErr
+		},
 		Apply: func(ctx context.Context, opts ApplyOptions) error {
 			h.applied = append(h.applied, opts)
+			// The real hand-over runs the login hook here: after its own
+			// confirm and before the release. The fake does the same.
+			if opts.Login != nil {
+				if err := opts.Login(ctx); err != nil {
+					return err
+				}
+			}
 			if opts.AfterConfirm != nil {
 				extra, err := opts.AfterConfirm(ctx)
 				if err != nil {
@@ -271,6 +288,9 @@ func (h *harness) options() Options {
 		Namespace:  "seedbox",
 		PUID:       1000,
 		PGID:       1000,
+		// The login is a question like the others; the flag is its starting
+		// answer, so a test that says nothing about it gets this one.
+		Login: "alice",
 	}
 }
 
@@ -323,7 +343,7 @@ func TestFirstRunAsksTheQuestionsInOrder(t *testing.T) {
 	}
 	want := []string{
 		"input:gateway.host", "input:storage.data.path", "input:storage.config.path",
-		"multi:apps", "input:apps.alpha.greeting",
+		"multi:apps", "input:login", "secret:login.password", "input:apps.alpha.greeting",
 	}
 	if got := strings.Join(h.prompt.events, ","); got != strings.Join(want, ",") {
 		t.Fatalf("questions were %s, want %s", got, strings.Join(want, ","))
@@ -633,7 +653,9 @@ func TestTransientAnswerReachesApplyAndNoFile(t *testing.T) {
 	h := newHarness(t)
 	h.prompt.inputs = []string{"box.example.com", "/srv/s5n/data", "/srv/s5n/config"}
 	h.prompt.multis = [][]string{{"alpha", "beta"}}
-	h.prompt.secrets = []string{"tok-do-not-write"}
+	// The first secret is the login's password question (empty: box makes
+	// one), the second is the claim token.
+	h.prompt.secrets = []string{"", "tok-do-not-write"}
 
 	res, err := h.run(h.options())
 	if err != nil {
@@ -845,6 +867,7 @@ func write(t *testing.T, path, content string) {
 // indentation in one section, and a comment between a key and its value.
 const reRunGrant = `# root's grant for this box, edited by hand
 namespace: seedbox
+login: alice
 
 global:
     puid: 1000
