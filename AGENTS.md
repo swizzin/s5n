@@ -49,9 +49,10 @@ Read `PLAN.md` first. It is the architecture; this file is how to work in the re
   writes nothing and says "oh heck, nvm". `LinePrompt` is init's plain implementation.
 - `internal/say/` — box's one output seam. The flow packages emit events (a phase, a
   plan item, a step that starts and finishes, a timed wait with its budget, a confirm,
-  a final card) and a reporter decides how they look. `say.Plain` is the byte-for-byte
-  transcript every non-TTY, `--plain` and `TERM=dumb` run reads; `internal/tui` is the
-  live one. Dependency-free on purpose: bootstrap and platform may not import a TUI.
+  a wiring receipt, a final card) and a reporter decides how they look. `say.Plain` is
+  the byte-for-byte transcript every non-TTY, `--plain` and `TERM=dumb` run reads;
+  `internal/tui` is the live one. Dependency-free on purpose: bootstrap and platform
+  may not import a TUI.
 - `internal/tui/` — init's dialogs and the live reporter: huh behind `setup.Prompter`,
   with box's masthead, accent and step header drawn by box, and the same events above
   drawn with a spinner, wrapped plans and the success card. The only package that
