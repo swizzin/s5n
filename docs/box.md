@@ -184,16 +184,21 @@ in a Secret volume. That means exactly one replica, with file watching on, so a 
 change shows up without a restart. Its sign-in page is served at `/auth` on each
 seedbox's own host name, so a seedbox needs one certificate and one cookie domain.
 
-**The login is on root's listener, and users can't take it off (decided).** Each user's
-domain has a Gateway listener that root creates at `adduser`. The SecurityPolicy that
-sends requests to Authelia targets that listener, so every route attached to it is behind
-the login, including any route the user adds later. Envoy Gateway lets a policy on a
-route override the listener's, so the grant denies users any write to SecurityPolicies,
-and to Gateways so a user can't open a listener of their own. Users still create their
-own HTTPRoutes, so the chart is unaffected. Exemptions live in Authelia's own rules, which
-root owns: paths that check their own key (the Arrs' `/api`, and `/ping` for health
-checks), Plex, Seerr and Tautulli, and the sign-in page itself. Each user's domain admits
-only that user.
+**The login is on root's Gateway, and users can't take it off (decided).** The
+SecurityPolicy that sends requests to Authelia targets the `s5n` Gateway itself and lives
+beside it in `s5n-gateway`, so every listener is behind the login: each host's HTTPS
+listener, the shared port-80 listener a host uses until its certificate is Ready (or for
+good, if it never issues), and any listener added later. Every route attached to them is
+covered, including any route the user adds later, and nothing is served without a login
+while a certificate is pending. Envoy Gateway lets a policy on a route override the
+Gateway's, so the grant denies users any write to SecurityPolicies, and to Gateways so a
+user can't open a listener of their own. Users still create their own HTTPRoutes, so the
+chart is unaffected. Exemptions live in Authelia's own rules, which root owns: paths that
+check their own key (the Arrs' `/api`, and `/ping` for health checks), Plex, Seerr and
+Tautulli, the sign-in page itself, and cert-manager's `/.well-known/acme-challenge/`, so
+certificates issue through the same Gateway. Anything else routed through the Gateway is
+behind the login unless a root-owned rule exempts it. Each user's domain admits only that
+user.
 
 **Sessions live in Authelia's memory (decided).** Authelia keeps sessions in memory unless
 it has Redis, and box doesn't run one. Adding a user changes Authelia's rules, which means
