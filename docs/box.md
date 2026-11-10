@@ -181,11 +181,11 @@ claim box creates, never in a Secret: Authelia can't see a Secret's file change 
 it, and it rewrites the whole file on save. That means exactly one replica, with file
 watching on, so an `adduser` shows up without a restart.
 
-**Only root changes a password, with `box chpasswd` (decided).** There is no self-service
-password change and no password reset in the provider. Authelia allows those only after
-an emailed one-time code, and box asks for no mail server. A user who wants a new
-password, or has forgotten theirs, asks root. As a result, box is the only writer of the
-users file.
+**A password changes only through `box chpasswd` (decided).** Root can set any user's
+password, and a user can set their own from their own box, in their own scope. The
+provider offers no self-service change and no reset, because Authelia allows those only
+after an emailed one-time code, and box asks for no mail server. A user who has
+forgotten their password asks root.
 
 Proposed:
 
@@ -194,6 +194,12 @@ Proposed:
   own key (the Arrs' `/api`, and `/ping` for health checks) bypass it, so mobile apps
   keep working. The policy attaches per route, never at the Gateway, because only a
   route-level policy can leave those paths out.
+- A user's `box chpasswd` can't reach the users file: their box holds a kubeconfig for
+  their own namespace and nothing else. So the user's box hashes the password locally and
+  leaves a request in the user's own namespace. A root-owned writer beside Authelia picks
+  it up, maps the namespace to its login name from root's record, rewrites that one row
+  and deletes the request. Root's `chpasswd` takes the same path, so the users file has
+  one writer, and the password never leaves the machine it was typed on.
 - Unattended, a password comes from a file or stdin, never a flag (it would sit in shell
   history and `ps`), and none supplied means a generated one, printed once.
 
@@ -206,7 +212,7 @@ Status per command: **D** decided, **P** proposed.
 | `box bootstrap` | root | prepares the host: finds or installs the cluster, the platform layer, directories; then runs `init` for root | D |
 | `box init` | root, user | sets up a seedbox: domain, paths, apps, existing data, Plex claim | D |
 | `box adduser <name>` | root | creates the OS user and shell, the grant, and the namespace pieces above; then runs `init` as that user | D |
-| `box chpasswd <name>` | root | sets a seedbox user's login password; asked for, or generated and shown once | D |
+| `box chpasswd [name]` | root, user | sets a login password: root for any user, a user for their own; asked for, or generated and shown once | D |
 | `box deluser <name>` | root | removes that user's seedbox, with the same keep rules as `uninstall` | P |
 | `box install <app>` | root | adds an app to a seedbox; an Arr can take a second instance | D |
 | `box remove <app>` | root | removes an app, keeping its config; `--purge` deletes it | D |
