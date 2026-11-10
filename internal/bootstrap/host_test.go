@@ -32,7 +32,7 @@ func TestRunningProcessesNameOnly(t *testing.T) {
 	// The /proc walk is host-dependent; just assert the name set is what PLAN
 	// step 3 lists, and that the helper is deterministic for a missing path.
 	got := runningProcesses("kubelet", "containerd", "dockerd")
-	if got != nil && len(got) > 0 {
+	if len(got) > 0 {
 		// If we are on a host with these running, every finding must be one of
 		// the asked-for names.
 		for _, f := range got {

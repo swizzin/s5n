@@ -258,22 +258,3 @@ func joinPath(base, name string) string {
 	}
 	return base + "." + name
 }
-
-// quotedNames pulls the single-quoted names out of messages such as
-// "missing properties: 'image', 'port'" and "additionalProperties 'extra' not
-// allowed", because the validator names the key only in prose.
-func quotedNames(msg string) []string {
-	var out []string
-	for {
-		i := strings.IndexByte(msg, '\'')
-		if i < 0 {
-			return out
-		}
-		j := strings.IndexByte(msg[i+1:], '\'')
-		if j < 0 {
-			return out
-		}
-		out = append(out, msg[i+1:i+1+j])
-		msg = msg[i+1+j+1:]
-	}
-}

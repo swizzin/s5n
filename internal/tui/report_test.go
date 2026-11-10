@@ -20,10 +20,7 @@ var ansi = regexp.MustCompile(`\x1b\[[0-9;?]*[A-Za-z]`)
 func strip(s string) []string {
 	s = strings.ReplaceAll(s, "\r", "\n")
 	s = ansi.ReplaceAllString(s, "")
-	var out []string
-	for _, line := range strings.Split(s, "\n") {
-		out = append(out, line)
-	}
+	out := strings.Split(s, "\n")
 	return out
 }
 

@@ -655,9 +655,7 @@ func (r *Reporter) Error(err error) {
 			body = append(body, "")
 			continue
 		}
-		for _, line := range wrapText(raw, inner-2) {
-			body = append(body, line)
-		}
+		body = append(body, wrapText(raw, inner-2)...)
 	}
 	var b strings.Builder
 	b.WriteString(r.chrome.paint("╭"+strings.Repeat("─", width-2)+"╮", badStyle.Render("╭"+strings.Repeat("─", width-2)+"╮")) + "\n")

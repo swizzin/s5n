@@ -63,7 +63,7 @@ func (s *schema) resolve(node map[string]any, depth int) (map[string]any, error)
 	}
 	const prefix = "#/definitions/"
 	if !strings.HasPrefix(ref, prefix) {
-		return nil, fmt.Errorf("values.schema.json refers to %q; box only follows #/definitions/...", ref)
+		return nil, fmt.Errorf("values.schema.json refers to %q; box only follows refs under #/definitions/", ref)
 	}
 	defs, _ := s.root["definitions"].(map[string]any)
 	target, ok := defs[ref[len(prefix):]].(map[string]any)
