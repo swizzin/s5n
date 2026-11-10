@@ -54,12 +54,19 @@ type HTTPProber struct {
 	baseURL   string
 	client    *http.Client
 	localOnly bool
+	// localAddrs is this machine's own interface addresses. It is a field so
+	// a test can stand in a fake host instead of depending on the machine it
+	// runs on; nil means net.InterfaceAddrs.
+	localAddrs func() ([]net.IP, error)
 }
 
 // NewHTTPProber builds a prober for a kubeconfig's current context. When
 // localOnly is set, every call first refuses to touch a server that is not
-// loopback, returning ErrRemoteCluster — the --dry-run guard. The check runs
-// before any request, so an exec credential plugin has not run yet either.
+// this machine, returning ErrRemoteCluster — the --dry-run guard. Local means
+// loopback or an IP literal bound to one of this host's interfaces: a local
+// kubeadm cluster's admin.conf names the node's own address, not 127.0.0.1.
+// The check runs before any request, so an exec credential plugin has not run
+// yet either.
 func NewHTTPProber(kubeconfig []byte, localOnly bool) (Prober, error) {
 	client, baseURL, err := kubeClient(kubeconfig, 20*time.Second)
 	if err != nil {
@@ -69,7 +76,7 @@ func NewHTTPProber(kubeconfig []byte, localOnly bool) (Prober, error) {
 }
 
 // checkLocal returns ErrRemoteCluster when the prober is in local-only mode and
-// the server is not loopback.
+// the server is not this machine.
 func (p *HTTPProber) checkLocal() error {
 	if !p.localOnly {
 		return nil
@@ -80,13 +87,61 @@ func (p *HTTPProber) checkLocal() error {
 		return fmt.Errorf("%w (server %q)", ErrRemoteCluster, p.baseURL)
 	}
 	host := u.Hostname()
-	if isLoopback(host) {
+	if isLocal(host, p.localAddrs) {
 		return nil
 	}
 	return fmt.Errorf("%w (server %s)", ErrRemoteCluster, host)
 }
 
-// isLoopback reports whether host names this machine unambiguously.
+// isLocal reports whether host is this machine: loopback, or an IP literal
+// bound to one of its interfaces. A name other than localhost is never local.
+// Proving a name would need a DNS lookup, and this guard must make no network
+// call before it has decided.
+func isLocal(host string, addrs func() ([]net.IP, error)) bool {
+	if isLoopback(host) {
+		return true
+	}
+	ip := net.ParseIP(strings.Trim(host, "[]"))
+	if ip == nil {
+		return false
+	}
+	if addrs == nil {
+		addrs = interfaceAddrs
+	}
+	local, err := addrs()
+	if err != nil {
+		// The machine's addresses cannot be read, so its own address cannot
+		// be proved: refuse rather than guess.
+		return false
+	}
+	for _, a := range local {
+		if a.Equal(ip) {
+			return true
+		}
+	}
+	return false
+}
+
+// interfaceAddrs is the real lookup behind isLocal: every address bound to an
+// interface on this host, whatever the family.
+func interfaceAddrs() ([]net.IP, error) {
+	addrs, err := net.InterfaceAddrs()
+	if err != nil {
+		return nil, err
+	}
+	out := make([]net.IP, 0, len(addrs))
+	for _, a := range addrs {
+		switch v := a.(type) {
+		case *net.IPNet:
+			out = append(out, v.IP)
+		case *net.IPAddr:
+			out = append(out, v.IP)
+		}
+	}
+	return out, nil
+}
+
+// isLoopback reports whether host names the loopback interface.
 func isLoopback(host string) bool {
 	host = strings.Trim(host, "[]")
 	if host == "localhost" || host == "localhost.localdomain" {

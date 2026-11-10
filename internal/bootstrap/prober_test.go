@@ -13,12 +13,15 @@ import (
 	"errors"
 	"fmt"
 	"math/big"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -293,16 +296,156 @@ func TestHTTPProberCheckLocal(t *testing.T) {
 			t.Errorf("checkLocal(%q) = %v, want local", server, err)
 		}
 	}
+
+	// A local kubeadm cluster's admin.conf names the node's own address. The
+	// address list is injected so this does not depend on the test machine.
+	onMachine := fakeAddrs("192.0.2.10", "2001:db8::5")
+	for _, server := range []string{
+		"https://192.0.2.10:6443",
+		"https://[2001:db8::5]:6443",
+	} {
+		p := &HTTPProber{baseURL: server, localOnly: true, localAddrs: onMachine}
+		if err := p.checkLocal(); err != nil {
+			t.Errorf("checkLocal(%q) = %v, want local (an address on this machine)", server, err)
+		}
+	}
+
 	remote := []string{
 		"https://10.0.0.1:6443",
 		"https://example.com:6443",
 		"https://[2001:db8::1]:6443",
+		"https://192.0.2.11:6443",
+		"https://[2001:db8::6]:6443",
 	}
 	for _, server := range remote {
-		p := &HTTPProber{baseURL: server, localOnly: true}
+		p := &HTTPProber{baseURL: server, localOnly: true, localAddrs: onMachine}
 		if err := p.checkLocal(); !errors.Is(err, ErrRemoteCluster) {
 			t.Errorf("checkLocal(%q) = %v, want ErrRemoteCluster", server, err)
 		}
+	}
+
+	// A hostname is never local, even when the machine has addresses: proving
+	// it would take a DNS lookup, which this guard must not make.
+	p := &HTTPProber{baseURL: "https://node.example.com:6443", localOnly: true, localAddrs: onMachine}
+	if err := p.checkLocal(); !errors.Is(err, ErrRemoteCluster) {
+		t.Errorf("checkLocal(a hostname) = %v, want ErrRemoteCluster", err)
+	}
+
+	// An address list that cannot be read proves nothing, so it refuses.
+	failing := func() ([]net.IP, error) { return nil, errors.New("no interfaces") }
+	p = &HTTPProber{baseURL: "https://192.0.2.10:6443", localOnly: true, localAddrs: failing}
+	if err := p.checkLocal(); !errors.Is(err, ErrRemoteCluster) {
+		t.Errorf("checkLocal with an unreadable address list = %v, want ErrRemoteCluster", err)
+	}
+}
+
+// fakeAddrs is the injected interface-address lookup: these addresses are the
+// machine's, and only these.
+func fakeAddrs(ips ...string) func() ([]net.IP, error) {
+	return func() ([]net.IP, error) {
+		out := make([]net.IP, 0, len(ips))
+		for _, s := range ips {
+			out = append(out, net.ParseIP(s))
+		}
+		return out, nil
+	}
+}
+
+// The tests above inject the address list, so prove the real lookup finds this
+// host's own loopback address: a broken interfaceAddrs would still pass every
+// fake-host case while making a local cluster look remote.
+func TestInterfaceAddrsIncludesLoopback(t *testing.T) {
+	addrs, err := interfaceAddrs()
+	if err != nil {
+		t.Fatalf("interfaceAddrs: %v", err)
+	}
+	for _, a := range addrs {
+		if a.IsLoopback() {
+			return
+		}
+	}
+	t.Fatalf("interfaceAddrs = %v, want this host's loopback address", addrs)
+}
+
+// dialTo delivers every connection to srv, whatever host the request names.
+// It lets a test prove what the guard decided without giving it a resolvable
+// name: if the guard lets the call through, the counting server sees it.
+func dialTo(srv *httptest.Server) *http.Client {
+	return &http.Client{Transport: &http.Transport{
+		DialContext: func(ctx context.Context, network, _ string) (net.Conn, error) {
+			return (&net.Dialer{}).DialContext(ctx, network, srv.Listener.Addr().String())
+		},
+	}}
+}
+
+// TestHTTPProberLocalOnlyAcceptsAnAddressOnThisMachine is the local kubeadm
+// case end to end: the kubeconfig names 192.0.2.10, an address this (fake)
+// host holds, and the request goes through.
+func TestHTTPProberLocalOnlyAcceptsAnAddressOnThisMachine(t *testing.T) {
+	var requests atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		requests.Add(1)
+		_, _ = w.Write([]byte(`{"gitVersion":"v1.37.2+kubeadm.1"}`))
+	}))
+	defer srv.Close()
+	u, err := url.Parse(srv.URL)
+	if err != nil {
+		t.Fatalf("parse test server URL: %v", err)
+	}
+	server := "http://192.0.2.10:" + u.Port()
+	p, err := NewHTTPProber(kubeconfigFixtureToken(t, server), true)
+	if err != nil {
+		t.Fatalf("NewHTTPProber: %v", err)
+	}
+	hp := p.(*HTTPProber)
+	hp.localAddrs = fakeAddrs("192.0.2.10")
+	hp.client = dialTo(srv)
+	if _, err := p.Version(context.Background()); err != nil {
+		t.Fatalf("Version against an address on this machine: %v", err)
+	}
+	if got := requests.Load(); got != 1 {
+		t.Fatalf("requests = %d, want 1", got)
+	}
+}
+
+// TestHTTPProberLocalOnlyRefusesBeforeAnyRequest: a refused hostname reaches
+// no server at all — zero HTTP requests — even though the client would have
+// delivered the call to the counting server.
+func TestHTTPProberLocalOnlyRefusesBeforeAnyRequest(t *testing.T) {
+	var requests atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		requests.Add(1)
+		_, _ = w.Write([]byte(`{"gitVersion":"v1.37.2+kubeadm.1"}`))
+	}))
+	defer srv.Close()
+	u, err := url.Parse(srv.URL)
+	if err != nil {
+		t.Fatalf("parse test server URL: %v", err)
+	}
+	server := "http://node.example.com:" + u.Port()
+	p, err := NewHTTPProber(kubeconfigFixtureToken(t, server), true)
+	if err != nil {
+		t.Fatalf("NewHTTPProber: %v", err)
+	}
+	hp := p.(*HTTPProber)
+	hp.localAddrs = fakeAddrs("192.0.2.10")
+	hp.client = dialTo(srv)
+
+	ctx := context.Background()
+	if _, err := p.Version(ctx); !errors.Is(err, ErrRemoteCluster) {
+		t.Fatalf("Version = %v, want ErrRemoteCluster", err)
+	}
+	if err := p.CanAdmin(ctx); !errors.Is(err, ErrRemoteCluster) {
+		t.Fatalf("CanAdmin = %v, want ErrRemoteCluster", err)
+	}
+	if _, err := p.Describe(ctx); !errors.Is(err, ErrRemoteCluster) {
+		t.Fatalf("Describe = %v, want ErrRemoteCluster", err)
+	}
+	if _, err := p.Platform(ctx); !errors.Is(err, ErrRemoteCluster) {
+		t.Fatalf("Platform = %v, want ErrRemoteCluster", err)
+	}
+	if got := requests.Load(); got != 0 {
+		t.Fatalf("requests = %d, want 0: a refused server was contacted", got)
 	}
 }
 
