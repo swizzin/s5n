@@ -28,6 +28,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/swizzin/s5n/internal/say"
 	"github.com/swizzin/s5n/internal/seedbox"
 )
 
@@ -144,7 +145,9 @@ func (o Options) ChartRef() ChartRef {
 // Result is what happened, for the caller to report or a test to assert.
 type Result struct {
 	FirstInstall bool
-	Changes      []seedbox.Change
+	// Host is the domain this release serves, when its values name one.
+	Host    string
+	Changes []seedbox.Change
 	// Storage is what box found it had to create, as Plan returned it.
 	Storage []StorageObject
 	// NamespaceCreated says apply created the seedbox's namespace, which only
@@ -169,7 +172,10 @@ type Applier struct {
 	// of the release: Helm must never own them.
 	OpenStorage func(namespace string) (StorageClient, error)
 	Confirm     Confirmer
-	Log         io.Writer
+	// Log is the plain transcript when no reporter was given.
+	Log io.Writer
+	// Say renders the same events with box's TUI.
+	Say say.Reporter
 
 	// ReceiptWait bounds how long box waits for the wiring hook's receipt
 	// after the release is ready. Zero means ten minutes.
@@ -186,9 +192,15 @@ func (a *Applier) logf(format string, args ...any) {
 	fmt.Fprintf(a.Log, format, args...)
 }
 
+// report is the one place apply writes progress: the live reporter when
+// cmd/box gave one, otherwise the plain transcript.
+func (a *Applier) report() say.Reporter { return say.Or(a.Say, a.Log) }
+
 // Apply reads the files, checks them, shows what would change and applies it.
 func (a *Applier) Apply(ctx context.Context, opts Options) (Result, error) {
 	var res Result
+	r := a.report()
+	r.Phase("apply")
 
 	// The two files. A grant key in values, a key the chart does not know and
 	// a missing namespace are all refused here, before box has a cluster
@@ -221,7 +233,7 @@ func (a *Applier) Apply(ctx context.Context, opts Options) (Result, error) {
 	// shown anyone which release it is about to install, and "newest this box
 	// can use" is not obvious from the tag it ends up with.
 	if opts.Chart == nil && chart.Version != "" {
-		a.logf("chart: %s %s (%s)\n", chart.Name, chart.Version, chart.Ref)
+		r.Chart(chart.Name, chart.Version, chart.Ref)
 	}
 	values, err := sb.Effective(seedbox.Chart{Values: chart.Values, Schema: chart.Schema})
 	if err != nil {
@@ -263,8 +275,8 @@ func (a *Applier) Apply(ctx context.Context, opts Options) (Result, error) {
 		if nsp.Enforce != "" {
 			enforce = podSecurityEnforce + "=" + nsp.Enforce
 		}
-		a.logf("namespace %s does not enforce Pod Security %s (%s): root's labels win, box leaves it alone\n",
-			namespace, podSecurityRestricted, enforce)
+		r.Warn(fmt.Sprintf("namespace %s does not enforce Pod Security %s (%s): root's labels win, box leaves it alone",
+			namespace, podSecurityRestricted, enforce))
 	}
 
 	client, err := a.Open(namespace)
@@ -282,6 +294,7 @@ func (a *Applier) Apply(ctx context.Context, opts Options) (Result, error) {
 		}
 	}
 	res.FirstInstall = !exists
+	res.Host = hostOf(values)
 	if exists {
 		res.Changes = seedbox.Diff(deployed, values)
 	}
@@ -300,30 +313,34 @@ func (a *Applier) Apply(ctx context.Context, opts Options) (Result, error) {
 	res.Storage = plan
 
 	if exists && len(res.Changes) == 0 && len(plan) == 0 && nsp.Exists {
-		a.logf("%s in %s: nothing to change\n", ReleaseName, namespace)
+		r.Line(fmt.Sprintf("%s in %s: nothing to change", ReleaseName, namespace))
 		return res, nil
 	}
 
 	if exists {
-		a.logf("%s in %s: %d %s\n", ReleaseName, namespace, len(res.Changes), plural(len(res.Changes), "change", "changes"))
-		a.logf("%s\n", seedbox.FormatChanges(res.Changes))
+		r.Line(fmt.Sprintf("%s in %s: %d %s", ReleaseName, namespace, len(res.Changes), plural(len(res.Changes), "change", "changes")))
+		r.Diff(changeItems(res.Changes))
 	} else {
-		a.logf("%s in %s: first install\n", ReleaseName, namespace)
+		r.Line(fmt.Sprintf("%s in %s: first install", ReleaseName, namespace))
+		var details []string
 		if host := hostOf(values); host != "" {
-			a.logf("  host: %s\n", host)
+			details = append(details, "host: "+host)
 		}
 		if apps := enabledApps(values); len(apps) > 0 {
-			a.logf("  apps: %s\n", strings.Join(apps, ", "))
+			details = append(details, "apps: "+strings.Join(apps, ", "))
+		}
+		if len(details) > 0 {
+			r.List("", details)
 		}
 	}
-	a.printPlan(nsp, plan)
+	a.printPlan(r, nsp, plan)
 
 	ok, err := a.Confirm.Ask(fmt.Sprintf("apply %s in %s?", ReleaseName, namespace))
 	if err != nil {
 		return res, err
 	}
 	if !ok {
-		a.logf("oh heck, nvm\n")
+		r.Line("oh heck, nvm")
 		return res, ErrCancelled
 	}
 
@@ -356,34 +373,41 @@ func (a *Applier) Apply(ctx context.Context, opts Options) (Result, error) {
 			return res, err
 		}
 		res.NamespaceCreated = true
-		a.logf("created namespace %s (Pod Security %s)\n", namespace, podSecurityRestricted)
+		r.Success(fmt.Sprintf("created namespace %s (Pod Security %s)", namespace, podSecurityRestricted))
 	}
 
-	for _, obj := range plan {
-		if err := store.Apply(ctx, obj); err != nil {
-			return res, a.undo(ctx, store, created, err)
+	if len(plan) > 0 {
+		step := r.Start(say.Op{Label: fmt.Sprintf("writing the storage for %s", namespace)})
+		for _, obj := range plan {
+			if err := store.Apply(ctx, obj); err != nil {
+				step.Failed(err)
+				return res, a.undo(ctx, store, created, err)
+			}
+			res.StorageCreated++
+			if obj.Kind == KindPersistentVolume {
+				created = append(created, obj)
+			}
 		}
-		res.StorageCreated++
-		if obj.Kind == KindPersistentVolume {
-			created = append(created, obj)
-		}
+		step.DoneAs("", fmt.Sprintf("wrote %d storage object%s", len(plan), plural(len(plan), "", "s")))
 	}
 
 	started := time.Now()
+	upgrade := r.Start(say.Op{Label: fmt.Sprintf("installing %s in %s", ReleaseName, namespace)})
 	rev, err := client.Upgrade(ctx, chart, values)
 	if err != nil {
+		upgrade.Failed(err)
 		return res, a.undo(ctx, store, created, err)
 	}
 	res.Applied = true
 	res.Revision = rev
-	a.logf("applied: %s revision %d in %s\n", ReleaseName, rev, namespace)
+	upgrade.Done(fmt.Sprintf("applied: %s revision %d in %s", ReleaseName, rev, namespace))
 
 	receipt, err := a.waitReceipt(ctx, client, started)
 	if err != nil {
 		return res, err
 	}
 	res.Receipt = receipt
-	a.printReceipt(receipt)
+	a.printReceipt(r, receipt)
 	if receipt.Status != "ok" {
 		if receipt.Error != "" {
 			return res, fmt.Errorf("wiring failed: %s", receipt.Error)
@@ -423,20 +447,26 @@ func (a *Applier) waitReceipt(ctx context.Context, client ReleaseClient, since t
 	}
 	deadline := time.Now().Add(wait)
 	fresh := since.Add(-2 * time.Second)
+	r := a.report()
+	task := r.Start(say.Op{Label: "waiting for the wiring receipt", Budget: wait})
 
 	for {
 		rec, err := client.Receipt(ctx)
 		switch {
 		case err == nil && !rec.StartedAt.Before(fresh):
+			task.Done("")
 			return rec, nil
 		case err != nil && !errors.Is(err, ErrNoReceipt):
+			task.Failed(err)
 			return Receipt{}, err
 		}
 		if time.Now().After(deadline) {
+			task.Failed(nil)
 			return Receipt{}, errors.New("the wiring receipt never arrived: the release is installed but its wiring hook has not reported")
 		}
 		select {
 		case <-ctx.Done():
+			task.Failed(ctx.Err())
 			return Receipt{}, ctx.Err()
 		case <-time.After(poll):
 		}
@@ -461,7 +491,7 @@ func (a *Applier) undo(ctx context.Context, store StorageClient, created []Stora
 				obj.Kind, obj.Name, err))
 			continue
 		}
-		a.logf("removed %s %s: this run created it and did not finish\n", obj.Kind, obj.Name)
+		a.report().Line(fmt.Sprintf("removed %s %s: this run created it and did not finish", obj.Kind, obj.Name))
 	}
 	return errors.Join(errs...)
 }
@@ -470,28 +500,60 @@ func (a *Applier) undo(ctx context.Context, store StorageClient, created []Stora
 // create it: the namespace, when it is missing, then the claims. On a first
 // install these lines are the only trace of the storage, because it is not
 // chart objects and Helm never sees it.
-func (a *Applier) printPlan(nsp NamespacePlan, objs []StorageObject) {
+func (a *Applier) printPlan(r say.Reporter, nsp NamespacePlan, objs []StorageObject) {
 	if nsp.Exists && len(objs) == 0 {
 		return
 	}
-	a.logf("plan:\n")
+	var items []say.Item
 	if !nsp.Exists {
-		a.logf("  + Namespace %s (Pod Security %s)\n", nsp.Name, podSecurityRestricted)
+		items = append(items, say.Item{Mark: say.Install, Text: fmt.Sprintf("Namespace %s (Pod Security %s)", nsp.Name, podSecurityRestricted)})
 	}
 	for _, o := range objs {
-		a.logf("  + %s %s (%s)\n", o.Kind, o.Name, o.Detail)
+		items = append(items, say.Item{Mark: say.Install, Text: fmt.Sprintf("%s %s (%s)", o.Kind, o.Name, o.Detail)})
+	}
+	r.Plan("plan", items)
+}
+
+func (a *Applier) printReceipt(r say.Reporter, rec Receipt) {
+	r.Success("wiring " + rec.Status)
+	rows := make([]string, 0, len(rec.Steps))
+	for _, s := range rec.Steps {
+		if s.Detail != "" {
+			rows = append(rows, fmt.Sprintf("%s: %s (%s)", s.Name, s.Result, s.Detail))
+			continue
+		}
+		rows = append(rows, fmt.Sprintf("%s: %s", s.Name, s.Result))
+	}
+	if len(rows) > 0 {
+		r.List("", rows)
 	}
 }
 
-func (a *Applier) printReceipt(rec Receipt) {
-	a.logf("wiring %s\n", rec.Status)
-	for _, s := range rec.Steps {
-		if s.Detail != "" {
-			a.logf("  %s: %s (%s)\n", s.Name, s.Result, s.Detail)
-			continue
+// changeItems turns a values diff into the marked plan the reporter draws. The
+// text is FormatChanges' own, so the plain transcript is unchanged.
+func changeItems(changes []seedbox.Change) []say.Item {
+	items := make([]say.Item, 0, len(changes))
+	for _, c := range changes {
+		mark := say.Change
+		switch c.Kind {
+		case seedbox.Added:
+			mark = say.Install
+		case seedbox.Removed:
+			mark = say.Remove
 		}
-		a.logf("  %s: %s\n", s.Name, s.Result)
+		for _, line := range strings.Split(seedbox.FormatChanges([]seedbox.Change{c}), "\n") {
+			if line == "" {
+				continue
+			}
+			// FormatChanges already carries the mark; the plan's own mark is
+			// what a live renderer colours, so the text drops the glyph.
+			if i := strings.IndexByte(line, ' '); i >= 0 {
+				line = line[i+1:]
+			}
+			items = append(items, say.Item{Mark: mark, Text: line})
+		}
 	}
+	return items
 }
 
 func hostOf(values map[string]any) string {

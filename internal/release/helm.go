@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"log/slog"
 	"strings"
 	"time"
 
@@ -61,6 +63,12 @@ func NewHelm(kubeconfig, namespace, releaseName string) (*Helm, error) {
 	if err := cfg.Init(flags, ns, "secret"); err != nil {
 		return nil, fmt.Errorf("release client for %s: %w", namespace, err)
 	}
+	// Helm's own slog output and hook stdout would land in the middle of
+	// box's transcript. box is the whole interface (docs/box.md), and the
+	// reporter is the only thing that speaks: Helm's noise is dropped, not
+	// explained away. Its errors still come back through the API calls.
+	cfg.SetLogger(slog.DiscardHandler)
+	cfg.HookOutputFunc = func(string, string, string) io.Writer { return io.Discard }
 	rest, err := flags.ToRESTConfig()
 	if err != nil {
 		return nil, fmt.Errorf("kubeconfig %s: %w", kubeconfig, err)

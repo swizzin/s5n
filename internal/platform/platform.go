@@ -27,6 +27,7 @@ import (
 	"time"
 
 	"github.com/swizzin/s5n/internal/bootstrap"
+	"github.com/swizzin/s5n/internal/say"
 )
 
 // The pinned platform releases. hack/e2e-kind.sh and hack/e2e-box.sh install
@@ -232,7 +233,11 @@ type Decision struct {
 	// cluster either.
 	Probe   func() (GatewayProbe, error)
 	Confirm Confirmer
-	Log     io.Writer
+	// Log is the plain transcript when no reporter was given.
+	Log io.Writer
+	// Say renders the same events with box's TUI. Policy stays here; only
+	// how a plan, a wait and a finished step look is the reporter's.
+	Say say.Reporter
 	// GatewayClass is the class bootstrap chose (bootstrap.Result.Gateway.
 	// Class). The Gateway box applies attaches to it; the GatewayClass itself
 	// is created only when this run installs its implementation.
@@ -269,6 +274,10 @@ func (d *Decision) logf(format string, args ...any) {
 	fmt.Fprintf(d.Log, format, args...)
 }
 
+// report is the one place the flow writes: the live reporter when cmd/box gave
+// one, otherwise the plain transcript over the old Log seam.
+func (d *Decision) report() say.Reporter { return say.Or(d.Say, d.Log) }
+
 // Apply plans, asks and applies the platform layer.
 func (d *Decision) Apply(ctx context.Context, components []bootstrap.ComponentResult) (Result, error) {
 	var res Result
@@ -283,7 +292,8 @@ func (d *Decision) Apply(ctx context.Context, components []bootstrap.ComponentRe
 		return res, err
 	}
 	res.Plan = plan
-	d.printPlan(plan)
+	r := d.report()
+	d.printPlan(r, plan)
 
 	if len(plan.Steps) == 0 {
 		return res, nil
@@ -306,7 +316,7 @@ func (d *Decision) Apply(ctx context.Context, components []bootstrap.ComponentRe
 		return res, err
 	}
 	if !ok {
-		d.logf("oh heck, nvm\n")
+		r.Line("oh heck, nvm")
 		return res, ErrCancelled
 	}
 
@@ -325,14 +335,21 @@ func (d *Decision) Apply(ctx context.Context, components []bootstrap.ComponentRe
 					s.Release.Name, s.Release.Namespace, ReleaseOwnerLabel, ReleaseOwner)
 			}
 			if s.InstalledVersion == s.Release.Version {
-				d.logf("= %s in %s: already at %s\n", s.Release.Name, s.Release.Namespace, s.Release.Version)
+				step := r.Start(say.Op{Label: "verifying " + s.Release.Name})
+				step.DoneAs(
+					fmt.Sprintf("= %s in %s: already at %s", s.Release.Name, s.Release.Namespace, s.Release.Version),
+					fmt.Sprintf("%s in %s is already at %s", s.Release.Name, s.Release.Namespace, s.Release.Version))
 				res.Verified = append(res.Verified, s.Release.Name)
 			} else {
-				d.logf("installing %s\n", s.Release)
+				step := r.Start(say.Op{
+					Label: "installing " + s.Release.String(),
+					Plain: "installing " + s.Release.String(),
+				})
 				if err := d.Releases.Install(ctx, s.Release); err != nil {
+					step.Failed(err)
 					return res, err
 				}
-				d.logf("installed %s in %s\n", s.Release.Name, s.Release.Namespace)
+				step.Done(fmt.Sprintf("installed %s in %s", s.Release.Name, s.Release.Namespace))
 				res.Installed = append(res.Installed, s.Release.Name)
 			}
 			for _, w := range s.Wait {
@@ -341,10 +358,12 @@ func (d *Decision) Apply(ctx context.Context, components []bootstrap.ComponentRe
 				}
 			}
 		case StepManifests:
+			step := r.Start(say.Op{Label: "applying " + s.What})
 			if err := cl.Apply(ctx, s.Documents); err != nil {
+				step.Failed(err)
 				return res, fmt.Errorf("%s: %w", s.What, err)
 			}
-			d.logf("applied %s\n", s.What)
+			step.Done("applied " + s.What)
 			res.Installed = append(res.Installed, s.What)
 			for _, w := range s.Wait {
 				if err := d.await(ctx, cl, w); err != nil {
@@ -370,7 +389,7 @@ func (d *Decision) Apply(ctx context.Context, components []bootstrap.ComponentRe
 			res.Verified = append(res.Verified, "Gateway "+address)
 		}
 	}
-	d.logf("platform ready\n")
+	r.Success("platform ready")
 	return res, nil
 }
 
@@ -441,6 +460,7 @@ func (d *Decision) gatewayAddress(ctx context.Context, mode bootstrap.PlatformMo
 	if err != nil {
 		return GatewayAnswer{}, err
 	}
+	r := d.report()
 	quick := d.AddressTimeout
 	if quick <= 0 {
 		quick = AddressTimeout
@@ -455,8 +475,13 @@ func (d *Decision) gatewayAddress(ctx context.Context, mode bootstrap.PlatformMo
 		// gets the whole wait.
 		quick = timeout
 	}
-	d.logf("waiting up to %s for Gateway %s/%s to report an address\n", quick, GatewayNamespace, GatewayName)
+	wait := r.Start(say.Op{
+		Label:  "waiting for the Gateway to report an address",
+		Plain:  fmt.Sprintf("waiting up to %s for Gateway %s/%s to report an address", quick, GatewayNamespace, GatewayName),
+		Budget: quick,
+	})
 	answer, err := p.Address(ctx, quick)
+	wait.Done("")
 	if err != nil {
 		return answer, err
 	}
@@ -464,8 +489,13 @@ func (d *Decision) gatewayAddress(ctx context.Context, mode bootstrap.PlatformMo
 		// Only "no address, AddressNotAssigned" is an answer at the short
 		// deadline. Anything else is still moving, so it gets the rest of
 		// the whole wait before box judges it.
-		d.logf("the Gateway is still settling (%s); waiting up to another %s\n", reasonOr(answer.Reason), timeout-quick)
+		wait = r.Start(say.Op{
+			Label:  "waiting for the Gateway to settle",
+			Plain:  fmt.Sprintf("the Gateway is still settling (%s); waiting up to another %s", reasonOr(answer.Reason), timeout-quick),
+			Budget: timeout - quick,
+		})
 		answer, err = p.Address(ctx, timeout-quick)
+		wait.Done("")
 		if err != nil {
 			return answer, err
 		}
@@ -474,9 +504,9 @@ func (d *Decision) gatewayAddress(ctx context.Context, mode bootstrap.PlatformMo
 	}
 	switch {
 	case answer.Address != "" && answer.Programmed() && mode == bootstrap.ModeExternal:
-		d.logf("the Gateway has an address from the external LoadBalancer: %s\n", answer.Address)
+		r.Success(fmt.Sprintf("the Gateway has an address from the external LoadBalancer: %s", answer.Address))
 	case answer.Address != "" && answer.Programmed():
-		d.logf("the Gateway already has an address: %s; MetalLB and its address pool are not installed\n", answer.Address)
+		r.Success(fmt.Sprintf("the Gateway already has an address: %s; MetalLB and its address pool are not installed", answer.Address))
 	case answer.Address != "" || !deferredReason(answer.Reason):
 		// An address the Gateway will not call Programmed, or no address for a
 		// reason an address layer cannot answer: both are failures at the
@@ -486,7 +516,7 @@ func (d *Decision) gatewayAddress(ctx context.Context, mode bootstrap.PlatformMo
 		return answer, fmt.Errorf("platform.loadbalancer.mode is external, but Gateway %s/%s got no address within %s (%s): something else has to assign one (MetalLB, k3s servicelb or a cloud provider). Install it and run `box bootstrap` again, or set platform.loadbalancer.mode=auto to let box install MetalLB",
 			GatewayNamespace, GatewayName, timeout, reasonOr(answer.Reason))
 	default:
-		d.logf("the Gateway has no address (%s) after waiting up to %s; installing MetalLB\n", reasonOr(answer.Reason), timeout)
+		r.Line(fmt.Sprintf("the Gateway has no address (%s) after waiting up to %s; installing MetalLB", reasonOr(answer.Reason), timeout))
 	}
 	return answer, nil
 }
@@ -505,8 +535,14 @@ func (d *Decision) reachable(ctx context.Context) (string, error) {
 	// The same rule as the question, with one difference: MetalLB has been
 	// installed and its pool applied by now, so a second AddressNotAssigned is
 	// the end of what box can do.
-	d.logf("waiting up to %s for Gateway %s/%s to be Programmed with its address\n", timeout, GatewayNamespace, GatewayName)
+	r := d.report()
+	wait := r.Start(say.Op{
+		Label:  "waiting for the Gateway to be Programmed with its address",
+		Plain:  fmt.Sprintf("waiting up to %s for Gateway %s/%s to be Programmed with its address", timeout, GatewayNamespace, GatewayName),
+		Budget: timeout,
+	})
 	answer, err := p.Address(ctx, timeout)
+	wait.Done("")
 	if err != nil {
 		return "", err
 	}
@@ -521,12 +557,16 @@ func (d *Decision) reachable(ctx context.Context) (string, error) {
 	if retry <= 0 {
 		retry = ReachTimeout
 	}
-	d.logf("checking that the Gateway answers on %s:80 from this host\n", answer.Address)
+	reach := r.Start(say.Op{
+		Label: fmt.Sprintf("checking that the Gateway answers on %s:80", answer.Address),
+		Plain: fmt.Sprintf("checking that the Gateway answers on %s:80 from this host", answer.Address),
+	})
 	code, err := p.Reachable(ctx, answer.Address, retry)
 	if err != nil {
+		reach.Failed(err)
 		return "", fmt.Errorf("the Gateway has address %s, but nothing answers on %s:80 from this host: %w", answer.Address, answer.Address, err)
 	}
-	d.logf("the Gateway answers on %s:80 (HTTP %d)\n", answer.Address, code)
+	reach.Done(fmt.Sprintf("the Gateway answers on %s:80 (HTTP %d)", answer.Address, code))
 	return answer.Address, nil
 }
 
@@ -590,11 +630,15 @@ func reasonOr(reason string) string {
 }
 
 func (d *Decision) await(ctx context.Context, cl Cluster, w Wait) error {
-	d.logf("waiting for %s\n", w)
+	step := d.report().Start(say.Op{
+		Label: fmt.Sprintf("waiting for %s", w),
+		Plain: fmt.Sprintf("waiting for %s", w),
+	})
 	if err := cl.Await(ctx, w); err != nil {
+		step.Failed(err)
 		return fmt.Errorf("%s: %w", w, err)
 	}
-	d.logf("%s: rolled out\n", w)
+	step.Done(fmt.Sprintf("%s: rolled out", w))
 	return nil
 }
 
@@ -604,12 +648,16 @@ func (d *Decision) await(ctx context.Context, cl Cluster, w Wait) error {
 // chart's wait only proves the pod is Ready. Retrying is the same robustness
 // hack/e2e-kind.sh needed; here it is bounded and box-worded.
 func (d *Decision) applyPool(ctx context.Context, cl Cluster) error {
+	r := d.report()
+	step := r.Start(say.Op{Label: "applying the MetalLB address pool"})
 	ip, err := cl.PrimaryInternalIP(ctx)
 	if err != nil {
+		step.Failed(err)
 		return fmt.Errorf("MetalLB address pool: %w", err)
 	}
 	docs, err := ParseManifests(poolManifest(ip))
 	if err != nil {
+		step.Failed(err)
 		return fmt.Errorf("MetalLB address pool: %w", err)
 	}
 	wait := d.PoolTimeout
@@ -624,65 +672,68 @@ func (d *Decision) applyPool(ctx context.Context, cl Cluster) error {
 	for {
 		err = cl.Apply(ctx, docs)
 		if err == nil {
-			d.logf("applied IPAddressPool %s (%s/32) and L2Advertisement %s\n", MetalLBPoolName, ip, MetalLBL2Name)
+			step.Done(fmt.Sprintf("applied IPAddressPool %s (%s/32) and L2Advertisement %s", MetalLBPoolName, ip, MetalLBL2Name))
 			return nil
 		}
 		if time.Now().After(deadline) {
+			step.Failed(err)
 			return fmt.Errorf("MetalLB refused its address pool for %s: %w (the chart is installed; fix the cause and run `box bootstrap` again)", wait, err)
 		}
 		select {
 		case <-ctx.Done():
+			step.Failed(ctx.Err())
 			return ctx.Err()
 		case <-time.After(poll):
 		}
 	}
 }
 
-func (d *Decision) printPlan(plan Plan) {
+func (d *Decision) printPlan(r say.Reporter, plan Plan) {
 	if len(plan.Steps) == 0 && len(plan.NotHandled) == 0 {
 		return
 	}
-	d.logf("platform plan:\n")
+	var items []say.Item
 	for _, s := range plan.Steps {
 		switch s.Kind {
 		case StepRelease:
 			if s.Foreign {
 				// Only a conditional foreign release reaches the plan: the
 				// unconditional one is refused in resolve.
-				d.logf("  ? %s, %s (a release box did not install already exists; box will not upgrade it)\n", s.Release, s.Unless)
+				items = append(items, say.Item{Mark: say.Question, Text: fmt.Sprintf("%s, %s (a release box did not install already exists; box will not upgrade it)", s.Release, s.Unless)})
 				continue
 			}
 			if s.InstalledVersion == s.Release.Version {
-				d.logf("  = %s: already at %s; verifying\n", s.Release.Name, s.Release.Version)
+				items = append(items, say.Item{Mark: say.Verify, Text: fmt.Sprintf("%s: already at %s; verifying", s.Release.Name, s.Release.Version)})
 				continue
 			}
 			// A conditional release is never an upgrade: resolve() drops the
 			// condition as soon as the release is there, so `?` never has to
 			// carry an install-or-upgrade mark.
 			if s.Unless != "" {
-				d.logf("  ? %s, %s\n", s.Release, s.Unless)
+				items = append(items, say.Item{Mark: say.Question, Text: fmt.Sprintf("%s, %s", s.Release, s.Unless)})
 				continue
 			}
-			verb := "+"
+			mark := say.Install
 			if s.InstalledVersion != "" {
-				verb = "~"
+				mark = say.Change
 			}
-			d.logf("  %s %s\n", verb, s.Release)
+			items = append(items, say.Item{Mark: mark, Text: s.Release.String()})
 		case StepGatewayAddress:
 			// A question the plan cannot answer yet: box finds out after the
 			// Gateway is applied, and the `?` steps below depend on the answer.
-			d.logf("  ? %s\n", s.What)
+			items = append(items, say.Item{Mark: say.Question, Text: s.What})
 		default:
 			if s.Unless != "" {
-				d.logf("  ? %s, %s\n", s.What, s.Unless)
+				items = append(items, say.Item{Mark: say.Question, Text: fmt.Sprintf("%s, %s", s.What, s.Unless)})
 				continue
 			}
-			d.logf("  + %s\n", s.What)
+			items = append(items, say.Item{Mark: say.Install, Text: s.What})
 		}
 	}
 	for _, line := range plan.NotHandled {
-		d.logf("  ! %s\n", line)
+		items = append(items, say.Item{Mark: say.Warning, Text: line})
 	}
+	r.Plan("platform plan", items)
 }
 
 // BuildPlan turns the decision's component results into the ordered list of

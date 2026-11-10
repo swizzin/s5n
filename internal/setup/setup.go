@@ -29,6 +29,7 @@ import (
 	"strings"
 
 	"github.com/swizzin/s5n/internal/catalog"
+	"github.com/swizzin/s5n/internal/say"
 	"github.com/swizzin/s5n/internal/seedbox"
 )
 
@@ -40,7 +41,10 @@ type Decision struct {
 	// Apply is the hand-over: the same `box apply` a user runs. It is a
 	// function rather than the release package so init does not link Helm.
 	Apply ApplyFunc
-	Log   io.Writer
+	// Log is the plain transcript when no reporter was given.
+	Log io.Writer
+	// Say renders the same events with box's TUI.
+	Say say.Reporter
 
 	// steps is how many steps this run shows, for a prompter that draws a step
 	// counter. It is advice for a UI, never an input: nothing reads it back.
@@ -114,6 +118,9 @@ type ApplyFunc func(ctx context.Context, opts ApplyOptions) error
 // Result is what init did, for the caller to report and a test to assert.
 type Result struct {
 	ReRun bool
+	// Domain is the host name the box answered with, so the caller can close
+	// the run with the one fact a person wants repeated back.
+	Domain string
 	// GrantChanged and ValuesChanged are the keys spliced, in the order they
 	// were written. A re-run with identical answers leaves both empty.
 	GrantChanged  []string
@@ -132,10 +139,14 @@ func (d *Decision) logf(format string, args ...any) {
 	fmt.Fprintf(d.Log, format, args...)
 }
 
+// report is the one place init writes progress: the live reporter when
+// cmd/box gave one, otherwise the plain transcript.
+func (d *Decision) report() say.Reporter { return say.Or(d.Say, d.Log) }
+
 // stop prints the voice for a cancelled question and passes the error on.
 func (d *Decision) stop(err error) error {
 	if errors.Is(err, ErrCancelled) {
-		d.logf("oh heck, nvm\n")
+		d.report().Line("oh heck, nvm")
 	}
 	return err
 }
@@ -195,6 +206,7 @@ func (d *Decision) Run(ctx context.Context, opts Options) (Result, error) {
 	if err != nil {
 		return res, d.stop(err)
 	}
+	res.Domain = domain
 	d.step(2, "where should your data and settings live?")
 	dataPath, err := d.askText(textQuestion{
 		key: "storage.data.path", flag: "--data-path",
@@ -321,7 +333,7 @@ func (d *Decision) Run(ctx context.Context, opts Options) (Result, error) {
 			return res, err
 		}
 		if len(res.Created) > 0 {
-			d.logf("created %s\n", strings.Join(res.Created, ", "))
+			d.report().Created(res.Created)
 		}
 	}
 
@@ -607,7 +619,7 @@ func (d *Decision) transientAsker(questions []catalog.Question, opts Options) fu
 			v, err := d.Prompt.Secret(Secret{Key: q.Key, Prompt: q.Prompt, Help: q.Help, Optional: true})
 			if err != nil {
 				if errors.Is(err, ErrCancelled) {
-					d.logf("oh heck, nvm\n")
+					d.report().Line("oh heck, nvm")
 				}
 				return nil, err
 			}
@@ -665,15 +677,16 @@ func (d *Decision) writeFiles(opts Options, sb *seedbox.Seedbox, grantNow, base 
 }
 
 func (d *Decision) reportWrites(opts Options, res Result) {
+	r := d.report()
 	if len(res.GrantChanged) == 0 {
-		d.logf("%s: already says this\n", opts.GrantPath)
+		r.Line(fmt.Sprintf("%s: already says this", opts.GrantPath))
 	} else {
-		d.logf("%s: edited %d %s\n", opts.GrantPath, len(res.GrantChanged), plural(len(res.GrantChanged), "key", "keys"))
+		r.Line(fmt.Sprintf("%s: edited %d %s", opts.GrantPath, len(res.GrantChanged), plural(len(res.GrantChanged), "key", "keys")))
 	}
 	if len(res.ValuesChanged) == 0 {
-		d.logf("%s: nothing to add\n", opts.ValuesPath)
+		r.Line(fmt.Sprintf("%s: nothing to add", opts.ValuesPath))
 	} else {
-		d.logf("%s: edited %d %s\n", opts.ValuesPath, len(res.ValuesChanged), plural(len(res.ValuesChanged), "key", "keys"))
+		r.Line(fmt.Sprintf("%s: edited %d %s", opts.ValuesPath, len(res.ValuesChanged), plural(len(res.ValuesChanged), "key", "keys")))
 	}
 }
 

@@ -29,6 +29,9 @@ type chrome struct {
 	noColor     bool
 	step, total int
 	question    string
+	// phase is the section name in the masthead ("cluster", "platform",
+	// "apply"). Empty is init's own "seedbox setup".
+	phase string
 	// answers are the text answers already given. A secret never goes in
 	// here: the breadcrumb is shown on screen.
 	answers []answered
@@ -208,8 +211,12 @@ func (c *chrome) boxed(lines []string) string {
 // step, the step's question and, once a step is answered, the answers so far,
 // so the operator can see where they are without scrolling back.
 func (c *chrome) masthead() string {
+	tag := "s5n · seedbox setup"
+	if c.phase != "" {
+		tag = "s5n · " + c.phase
+	}
 	mark := c.paint("b o x", wordmarkStyle.Render("b o x"))
-	tag := c.paint("s5n · seedbox setup", mutedStyle.Render("s5n · seedbox setup"))
+	tag = c.paint(tag, mutedStyle.Render(tag))
 	counter := ""
 	if c.total > 0 {
 		n := fmt.Sprintf("%d/%d", c.step, c.total)
@@ -228,6 +235,17 @@ func (c *chrome) masthead() string {
 		lines = append(lines, padTo("  "+c.paint(t, mutedStyle.Render(t)), "", textWidth()))
 	}
 	return c.boxed(lines)
+}
+
+// phaseHead is the masthead with only a section name: the same frame, the same
+// wordmark, so the whole run reads as one product from cluster detection to the
+// last apply. The question and the step counter belong to a dialog, not a
+// section.
+func (c *chrome) phaseHead(name string) string {
+	mark := c.paint("b o x", wordmarkStyle.Render("b o x"))
+	tag := "s5n · " + name
+	tag = c.paint(tag, mutedStyle.Render(tag))
+	return c.boxed([]string{padTo("  "+mark+"   "+tag, "", textWidth())})
 }
 
 // clip shortens a line to max columns, with an ellipsis. The frame must never

@@ -12,6 +12,8 @@ import (
 	"runtime"
 	"strings"
 	"time"
+
+	"github.com/swizzin/s5n/internal/say"
 )
 
 // Downloader fetches one URL. The caller closes the body.
@@ -45,9 +47,13 @@ const (
 // node answer. The zero value is usable; every field exists so a test can
 // replace one piece without a host, a network or a systemd.
 type K0sInstaller struct {
-	// Log is where box's own progress lines go. k0s's output never goes here:
-	// it appears only in a failure, quoted under box's message.
+	// Log is where box's own progress lines go when no reporter was given.
+	// k0s's output never goes here: it appears only in a failure, quoted
+	// under box's message.
 	Log io.Writer
+	// Say renders the same progress when the command has a terminal UI. Log
+	// stays the plain transcript and the unit tests' seam.
+	Say say.Reporter
 	// Root reports whether box may install a system service. Default euid 0.
 	Root func() bool
 	// Evidence reports what is already on the host. Default k0sEvidence.
@@ -89,12 +95,17 @@ func (k K0sInstaller) Install(ctx context.Context, plan InstallPlan) error {
 		return errors.New(why)
 	}
 
+	r := say.Or(k.Say, k.Log)
 	bin := k.binPath()
-	k.logf("installing k0s %s for %s\n", rel.Version, rel.Arch)
+	step := r.Start(say.Op{
+		Label: fmt.Sprintf("installing k0s %s for %s", rel.Version, rel.Arch),
+		Plain: fmt.Sprintf("installing k0s %s for %s", rel.Version, rel.Arch),
+	})
 	if err := k.writeBinary(ctx, rel, bin); err != nil {
+		step.Failed(err)
 		return err
 	}
-	k.logf("installed %s\n", bin)
+	step.Done(fmt.Sprintf("installed %s", bin))
 
 	// From here the host is changed by this run: every failure names what is
 	// there now and the one command that removes it. box never runs that
@@ -111,7 +122,6 @@ func (k K0sInstaller) Install(ctx context.Context, plan InstallPlan) error {
 	if err := k.waitReady(ctx); err != nil {
 		return k.leftBehind("the cluster API did not answer ready", nil, err)
 	}
-	k.logf("the cluster API is ready\n")
 	return nil
 }
 
@@ -186,18 +196,26 @@ func (k K0sInstaller) waitReady(ctx context.Context) error {
 		sleep = time.Sleep
 	}
 
-	k.logf("waiting up to %s for the cluster API\n", timeout)
+	r := say.Or(k.Say, k.Log)
+	wait := r.Start(say.Op{
+		Label:  "waiting for the cluster API",
+		Plain:  fmt.Sprintf("waiting up to %s for the cluster API", timeout),
+		Budget: timeout,
+	})
 	deadline := now().Add(timeout)
 	var last error
 	for {
 		if err := ctx.Err(); err != nil {
+			wait.Failed(err)
 			return err
 		}
 		last = k.ready().Ready(ctx)
 		if last == nil {
+			wait.Done("the cluster API is ready")
 			return nil
 		}
 		if !now().Before(deadline) {
+			wait.Failed(last)
 			return fmt.Errorf("not ready after %s: %w", timeout, last)
 		}
 		sleep(interval)
@@ -300,19 +318,24 @@ func (k K0sInstaller) logf(format string, args ...any) {
 // installer it gets: a dry run probes nothing and writes nothing, so the only
 // honest thing it can do with an install is say what it would have done.
 type DryRunInstaller struct {
-	W io.Writer
+	W   io.Writer
+	Say say.Reporter
 }
 
 // Install prints the planned k0s install.
 func (p DryRunInstaller) Install(_ context.Context, plan InstallPlan) error {
-	w := p.W
-	if w == nil {
-		w = io.Discard
-	}
 	arch := plan.Arch
 	if arch == "" {
 		arch = runtime.GOARCH
 	}
-	fmt.Fprintf(w, "box would install k0s %s for %s on this clean host: /usr/local/bin/k0s, install controller --single, start\n", plan.Version, arch)
+	r := p.Say
+	if r == nil {
+		w := p.W
+		if w == nil {
+			w = io.Discard
+		}
+		r = &say.Plain{W: w}
+	}
+	r.Line(fmt.Sprintf("box would install k0s %s for %s on this clean host: /usr/local/bin/k0s, install controller --single, start", plan.Version, arch))
 	return nil
 }

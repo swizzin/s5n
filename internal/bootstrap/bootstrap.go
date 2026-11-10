@@ -11,6 +11,8 @@ import (
 	"fmt"
 	"io/fs"
 	"strings"
+
+	"github.com/swizzin/s5n/internal/say"
 )
 
 // Action is what box decided to do about the cluster.
@@ -235,5 +237,73 @@ func writeSkips(b *strings.Builder, skips []string) {
 func writeNotes(b *strings.Builder, notes []string) {
 	for _, n := range notes {
 		fmt.Fprintf(b, "note: %s\n", n)
+	}
+}
+
+// ReportResult is FormatResult through the output seam: the same facts, stated
+// as events so a live renderer can lay them out as rows and a wrapped list.
+// Under say.Plain it is byte-for-byte FormatResult, which is what the tests and
+// every piped run read; TestReportResultMatchesFormatResult pins that.
+func ReportResult(res Result, r say.Reporter) {
+	switch res.Action {
+	case ActionStop:
+		r.Fact("decision", string(res.Action))
+		reportSkips(r, res.Skips)
+		reportNotes(r, res.Notes)
+		r.Line(res.Reason)
+		return
+	case ActionInstall:
+		r.Fact("decision", string(res.Action))
+		r.Fact("source", string(res.Source))
+		r.Fact("distribution", string(res.Distribution))
+		r.Fact("kubeconfig", res.Kubeconfig)
+		reportSkips(r, res.Skips)
+		reportNotes(r, res.Notes)
+		r.Line(res.Reason)
+		return
+	}
+	// use-cluster / use-managed
+	r.Fact("decision", string(res.Action))
+	r.Fact("source", string(res.Source))
+	r.Fact("kubeconfig", res.Kubeconfig)
+	r.Fact("distribution", string(res.Distribution))
+	r.Fact("nodes", fmt.Sprintf("%d", res.Nodes))
+	reportSkips(r, res.Skips)
+	if len(res.Platform) > 0 {
+		rows := make([]string, 0, len(res.Platform))
+		for _, c := range res.Platform {
+			rows = append(rows, fmt.Sprintf("%s: %s -> %s (%s)", c.Component, c.Mode, c.Action, c.Reason))
+		}
+		r.List("platform", rows)
+	}
+	if res.Gateway.Class != "" {
+		line := fmt.Sprintf("gateway class: %s", res.Gateway.Class)
+		if res.Gateway.ControllerName != "" {
+			line += " (" + res.Gateway.ControllerName + ")"
+		}
+		if res.Gateway.BoxInstalls {
+			line += ", installed by box"
+		}
+		r.Line(line)
+	}
+	if res.Gateway.FeaturesChecked {
+		r.Line(fmt.Sprintf("gateway features: %s is supported", FeaturePathRewrite))
+	} else if res.Gateway.Assumed {
+		r.Line(fmt.Sprintf("gateway features: GatewayClass %s publishes none; continuing because platform.gateway.assumeFeatures is set", res.Gateway.Class))
+	}
+	if res.Reason != "" {
+		r.Line(res.Reason)
+	}
+}
+
+func reportSkips(r say.Reporter, skips []string) {
+	if len(skips) > 0 {
+		r.List("skipped candidates", skips)
+	}
+}
+
+func reportNotes(r say.Reporter, notes []string) {
+	for _, n := range notes {
+		r.Line("note: " + n)
 	}
 }

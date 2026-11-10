@@ -23,6 +23,7 @@ import (
 	"github.com/swizzin/s5n/internal/catalog"
 	"github.com/swizzin/s5n/internal/platform"
 	"github.com/swizzin/s5n/internal/release"
+	"github.com/swizzin/s5n/internal/say"
 	"github.com/swizzin/s5n/internal/seedbox"
 	"github.com/swizzin/s5n/internal/setup"
 	"github.com/swizzin/s5n/internal/tui"
@@ -87,8 +88,43 @@ commands:
 // loads charts/ from its own tree (docs/box.md, "box only uses published
 // charts"), so even the e2e packages the chart from its commit and pushes it
 // to a registry, and box pulls it the way it pulls any release.
-func chartSource() release.ChartSource {
-	return &release.OCIChart{BoxVersion: version, Log: os.Stdout}
+func chartSource(r say.Reporter) release.ChartSource {
+	return &release.OCIChart{BoxVersion: version, Log: say.AsWriter(r)}
+}
+
+// newOutput picks the renderer for the whole command. The same tui.Decide that
+// chooses the prompt chooses this: a terminal that can carry a form gets the
+// live reporter, and --plain, TERM=dumb or a piped stdout gets the exact plain
+// transcript. NO_COLOR keeps the live layout without colour.
+func newOutput(plain, yes bool) say.Reporter {
+	plan := tui.Decide(tui.Terminal{
+		Stdin:   isTerminal(os.Stdin),
+		Stdout:  isTerminal(os.Stdout),
+		TERM:    os.Getenv("TERM"),
+		NoColor: os.Getenv("NO_COLOR") != "",
+		Plain:   plain,
+	})
+	if plan.Mode == tui.ModeHuh {
+		r := tui.NewReporter(tui.ReporterOptions{Width: terminalWidth(os.Stdout), NoColor: plan.NoColor, Yes: yes})
+		return r
+	}
+	p := &say.Plain{W: os.Stdout, Err: os.Stderr, Yes: yes}
+	// A caller with no terminal is not asked: release's old Terminal
+	// refused there, and the platform flow treated it as unattended. The
+	// reporter's policy callers keep their own Yes, so only set the reader
+	// when there is one.
+	if isTerminal(os.Stdin) {
+		p.In = os.Stdin
+	}
+	return p
+}
+
+// live returns the TUI reporter when this command has one. A plain run keeps
+// the exact Terminal behaviour it had, including its two different unattended
+// rules (the platform flow auto-confirms without a terminal, apply refuses).
+func live(r say.Reporter) (*tui.Reporter, bool) {
+	tr, ok := r.(*tui.Reporter)
+	return tr, ok
 }
 
 // chartFlags are the two flags that name a published release. Every command
@@ -135,6 +171,9 @@ func runBootstrap(args []string) {
 		os.Exit(2)
 	}
 
+	out := newOutput(*plain, *yes)
+	defer out.Close()
+
 	var records bootstrap.RecordStore = bootstrap.FilesystemRecords{Path: *recordPath}
 	if *dryRun {
 		records = bootstrap.ReadOnlyRecords{Inner: records}
@@ -151,10 +190,14 @@ func runBootstrap(args []string) {
 	// A dry run reaches the same clean-host branch as a real run, and the only
 	// honest installer it can have is one that says what it would do: nothing
 	// is probed or written, so there is no host to change.
-	var install bootstrap.Installer = bootstrap.K0sInstaller{Log: os.Stdout}
+	var install bootstrap.Installer = bootstrap.K0sInstaller{Log: os.Stdout, Say: out}
 	if *dryRun {
-		install = bootstrap.DryRunInstaller{W: os.Stdout}
+		install = bootstrap.DryRunInstaller{W: os.Stdout, Say: out}
 	}
+
+	// The section header comes before the first probe: on a clean host the
+	// installer's own steps are the first thing a person sees.
+	out.Phase("cluster")
 
 	d := &bootstrap.Decision{
 		Source: bootstrap.FilesystemSource{},
@@ -176,10 +219,10 @@ func runBootstrap(args []string) {
 		DryRun:                *dryRun,
 	})
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "box: %v\n", err)
+		out.Error(err)
 		os.Exit(1)
 	}
-	fmt.Print(bootstrap.FormatResult(res))
+	bootstrap.ReportResult(res, out)
 	switch res.Action {
 	case bootstrap.ActionStop:
 		os.Exit(1)
@@ -193,21 +236,21 @@ func runBootstrap(args []string) {
 	}
 
 	ctx := context.Background()
-	if err := applyPlatform(ctx, res.Kubeconfig, res.Platform, res.Gateway.Class, *yes); err != nil {
+	if err := applyPlatform(ctx, res.Kubeconfig, res.Platform, res.Gateway.Class, *yes, out); err != nil {
 		if errors.Is(err, platform.ErrCancelled) {
 			os.Exit(1)
 		}
-		fmt.Fprintf(os.Stderr, "box: %v\n", err)
+		out.Error(err)
 		os.Exit(1)
 	}
 	// bootstrap sets the machine up once; init sets up root's seedbox. It runs
 	// here in the same process, over the same cluster, with the flags bootstrap
 	// was given -- and stays runnable on its own (`box init`).
-	if err := initFlags.run(ctx, res.Kubeconfig, *yes, *plain); err != nil {
+	if err := initFlags.run(ctx, res.Kubeconfig, *yes, *plain, out); err != nil {
 		if errors.Is(err, release.ErrCancelled) || errors.Is(err, setup.ErrCancelled) {
 			os.Exit(1)
 		}
-		fmt.Fprintf(os.Stderr, "box: %v\n", err)
+		out.Error(err)
 		os.Exit(1)
 	}
 }
@@ -215,7 +258,20 @@ func runBootstrap(args []string) {
 // applyPlatform applies the platform layer the decision says install. The
 // confirmation is box's existing one: --yes, or no terminal to ask on, is
 // unattended (docs/box.md, "bootstrap and init").
-func applyPlatform(ctx context.Context, kubeconfig string, components []bootstrap.ComponentResult, gatewayClass string, yes bool) error {
+func applyPlatform(ctx context.Context, kubeconfig string, components []bootstrap.ComponentResult, gatewayClass string, yes bool, out say.Reporter) error {
+	out.Phase("platform")
+	var confirm platform.Confirmer
+	if tr, ok := live(out); ok {
+		tr.SetYes(yes)
+		confirm = tr
+	} else {
+		confirm = &release.Terminal{
+			In:    os.Stdin,
+			Out:   os.Stdout,
+			Yes:   yes || !isTerminal(os.Stdin),
+			IsTTY: func() bool { return release.TTY(os.Stdin) },
+		}
+	}
 	p := &platform.Decision{
 		GatewayClass: gatewayClass,
 		Open:         func() (platform.Cluster, error) { return platform.NewCluster(kubeconfig) },
@@ -223,14 +279,10 @@ func applyPlatform(ctx context.Context, kubeconfig string, components []bootstra
 		// The LoadBalancer question is settled by the Gateway's own status, so
 		// the probe is built only once the plan asks for it: after the confirm,
 		// once the Gateway exists.
-		Probe: func() (platform.GatewayProbe, error) { return platform.NewGatewayProbe(kubeconfig) },
-		Confirm: &release.Terminal{
-			In:    os.Stdin,
-			Out:   os.Stdout,
-			Yes:   yes || !isTerminal(os.Stdin),
-			IsTTY: func() bool { return release.TTY(os.Stdin) },
-		},
-		Log: os.Stdout,
+		Probe:   func() (platform.GatewayProbe, error) { return platform.NewGatewayProbe(kubeconfig) },
+		Confirm: confirm,
+		Log:     os.Stdout,
+		Say:     out,
 	}
 	_, err := p.Apply(ctx, components)
 	return err
@@ -352,23 +404,34 @@ func runApply(args []string) {
 		os.Exit(2)
 	}
 
+	out := newOutput(false, *o.yes)
+	defer out.Close()
+
 	// The cluster decision belongs to `box bootstrap`; apply reuses it and
 	// never probes or re-detects a cluster of its own.
 	kc, err := release.ResolveKubeconfig(*o.kubeconfig, os.Getenv("KUBECONFIG"), bootstrap.FilesystemRecords{Path: bootstrap.RecordPath})
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "box: %v\n", err)
+		out.Error(err)
 		os.Exit(1)
 	}
 
-	app := &release.Applier{
-		Charts: chartSource(),
-		Confirm: &release.Terminal{
+	var confirm release.Confirmer
+	if tr, ok := live(out); ok {
+		tr.SetYes(*o.yes)
+		confirm = tr
+	} else {
+		confirm = &release.Terminal{
 			In:    os.Stdin,
 			Out:   os.Stdout,
 			Yes:   *o.yes,
 			IsTTY: func() bool { return release.TTY(os.Stdin) },
-		},
-		Log: os.Stdout,
+		}
+	}
+	app := &release.Applier{
+		Charts:  chartSource(out),
+		Confirm: confirm,
+		Log:     os.Stdout,
+		Say:     out,
 		Open: func(namespace string) (release.ReleaseClient, error) {
 			return release.NewHelm(kc, namespace, release.ReleaseName)
 		},
@@ -379,13 +442,16 @@ func runApply(args []string) {
 
 	opts := o.options()
 	opts.BoxValues = boxValues(kc)
-	_, err = app.Apply(context.Background(), opts)
+	res, err := app.Apply(context.Background(), opts)
 	if err != nil {
 		if errors.Is(err, release.ErrCancelled) {
 			os.Exit(1)
 		}
-		fmt.Fprintf(os.Stderr, "box: %v\n", err)
+		out.Error(err)
 		os.Exit(1)
+	}
+	if res.Host != "" {
+		out.Banner("seedbox ready", res.Host)
 	}
 }
 
@@ -399,11 +465,13 @@ func runInit(args []string) {
 		fmt.Fprintf(os.Stderr, "box: %v\n", err)
 		os.Exit(2)
 	}
-	if err := initFlags.run(context.Background(), *kubeconfig, *yes, *plain); err != nil {
+	out := newOutput(*plain, *yes)
+	defer out.Close()
+	if err := initFlags.run(context.Background(), *kubeconfig, *yes, *plain, out); err != nil {
 		if errors.Is(err, release.ErrCancelled) || errors.Is(err, setup.ErrCancelled) {
 			os.Exit(1)
 		}
-		fmt.Fprintf(os.Stderr, "box: %v\n", err)
+		out.Error(err)
 		os.Exit(1)
 	}
 }
@@ -452,7 +520,7 @@ func addInitFlags(fs *flag.FlagSet) *initFlags {
 // The kubeconfig is the one bootstrap decided on, when bootstrap calls this;
 // `box init` alone passes its flag, and apply resolves the record when it is
 // empty.
-func (o *initFlags) run(ctx context.Context, kubeconfig string, yes, plain bool) error {
+func (o *initFlags) run(ctx context.Context, kubeconfig string, yes, plain bool, out say.Reporter) error {
 	if *o.valuesPath == "" {
 		return errors.New("no values file: pass --values")
 	}
@@ -463,7 +531,7 @@ func (o *initFlags) run(ctx context.Context, kubeconfig string, yes, plain bool)
 	// refusal, not a half-finished dialog. The same value is handed to the
 	// apply at the end, so the release init asked about is the release box
 	// installs.
-	source := chartSource()
+	source := chartSource(out)
 	chart, err := o.chart.load(ctx, source)
 	if err != nil {
 		return err
@@ -473,7 +541,7 @@ func (o *initFlags) run(ctx context.Context, kubeconfig string, yes, plain bool)
 		return err
 	}
 	if chart.Version != "" {
-		fmt.Printf("chart: %s %s (%s)\n", chart.Name, chart.Version, chart.Ref)
+		out.Chart(chart.Name, chart.Version, chart.Ref)
 	}
 
 	// Which prompt: huh when the terminal can carry a form, the line prompt
@@ -502,6 +570,7 @@ func (o *initFlags) run(ctx context.Context, kubeconfig string, yes, plain bool)
 		Prompt:  prompt,
 		Catalog: cat,
 		Log:     os.Stdout,
+		Say:     out,
 		Apply: func(ctx context.Context, req setup.ApplyOptions) error {
 			// The cluster decision belongs to `box bootstrap`; apply reuses it.
 			// It is resolved here, after init has written the files, so a host
@@ -510,15 +579,23 @@ func (o *initFlags) run(ctx context.Context, kubeconfig string, yes, plain bool)
 			if err != nil {
 				return err
 			}
-			app := &release.Applier{
-				Charts: source,
-				Confirm: &release.Terminal{
+			var confirm release.Confirmer
+			if tr, ok := live(out); ok {
+				tr.SetYes(yes)
+				confirm = tr
+			} else {
+				confirm = &release.Terminal{
 					In:    os.Stdin,
 					Out:   os.Stdout,
 					Yes:   yes,
 					IsTTY: func() bool { return release.TTY(os.Stdin) },
-				},
-				Log: os.Stdout,
+				}
+			}
+			app := &release.Applier{
+				Charts:  source,
+				Confirm: confirm,
+				Log:     os.Stdout,
+				Say:     out,
 				Open: func(namespace string) (release.ReleaseClient, error) {
 					return release.NewHelm(kc, namespace, release.ReleaseName)
 				},
@@ -539,7 +616,7 @@ func (o *initFlags) run(ctx context.Context, kubeconfig string, yes, plain bool)
 		},
 	}
 
-	_, err = d.Run(ctx, setup.Options{
+	res, err := d.Run(ctx, setup.Options{
 		Chart:        seedbox.Chart{Values: chart.Values, Schema: chart.Schema},
 		GrantPath:    *o.grantPath,
 		ValuesPath:   *o.valuesPath,
@@ -556,7 +633,13 @@ func (o *initFlags) run(ctx context.Context, kubeconfig string, yes, plain bool)
 		Unattended:   unattended,
 		PathsInNode:  *o.pathsInNode,
 	})
-	return err
+	if err != nil {
+		return err
+	}
+	if res.Domain != "" {
+		out.Banner("seedbox ready", res.Domain)
+	}
+	return nil
 }
 
 // transientAnswers is a repeatable --set-transient key=value, the unattended
