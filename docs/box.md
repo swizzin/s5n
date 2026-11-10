@@ -186,23 +186,21 @@ seedbox's own host name, so a seedbox needs one certificate and one cookie domai
 
 **The login is on root's Gateway, and users can't take it off (decided).** The
 SecurityPolicy that sends requests to Authelia targets the `s5n` Gateway itself and lives
-beside it in `s5n-gateway`, so every listener is behind the login: each host's HTTPS
-listener, the shared port-80 listener a host uses until its certificate is Ready (or for
-good, if it never issues), and any listener added later. Every route attached to them is
-covered, including any route the user adds later, and nothing is served without a login
-while a certificate is pending. Envoy Gateway lets a policy on a route override the
-Gateway's, so the grant denies users any write to SecurityPolicies, and to Gateways so a
-user can't open a listener of their own. Users still create their own HTTPRoutes, so the
-chart is unaffected. Exemptions live in Authelia's own rules, which root owns: paths that
-check their own key (the Arrs' `/api`, and `/ping` for health checks), Plex, Seerr and
-Tautulli, the sign-in page itself, and cert-manager's `/.well-known/acme-challenge/`, so
-certificates issue through the same Gateway. One listener is left out on purpose: once a
-host's certificate is Ready, its own port-80 listener gets a root-owned policy with no
-login. Only root's redirect to HTTPS and cert-manager's challenge route can attach there,
-so nothing opens, a plain `http://` link still redirects instead of failing at the login,
-and renewals don't depend on Authelia. Anything else routed through the Gateway is behind
-the login unless a root-owned rule exempts it. Each user's domain admits only that
-user.
+beside it in `s5n-gateway`, so every listener is behind the login unless root says
+otherwise: each host's HTTPS listener, the shared port-80 listener, and any listener added
+later. Every route attached to them is covered, including any route the user adds later.
+Envoy Gateway lets a policy on a route override the Gateway's, so the grant denies users
+any write to SecurityPolicies, and to Gateways so a user can't open a listener of their
+own. Users still create their own HTTPRoutes, so the chart is unaffected. Exemptions live
+in Authelia's own rules, which root owns: paths that check their own key (the Arrs' `/api`,
+and `/ping` for health checks), Plex, Seerr and Tautulli, and the sign-in page itself.
+
+One listener is left out on purpose: each host's own port-80 listener gets a root-owned
+policy with no login, written with the listener before box asks for the certificate. Only
+root's redirect to HTTPS and cert-manager's challenge route can attach there, so nothing
+opens. It has to be this way: Authelia refuses any plain-HTTP request before it reads its
+rules, so a challenge behind the login would never pass, and a plain `http://` link would
+fail at the login instead of redirecting. Each user's domain admits only that user.
 
 **Sessions live in Authelia's memory (decided).** Authelia keeps sessions in memory unless
 it has Redis, and box doesn't run one. Adding a user changes Authelia's rules, which means
@@ -396,14 +394,15 @@ validated, self-signed otherwise. This is how box would do it.
   on the `s5n` Gateway, all written by root
   from the grant's host name. Users never write listeners or Certificates. That keeps
   issuance in root's hands, the way the grant keeps ports and images there.
-- **HTTP stays open for the challenge only.** Once a host's certificate is Ready, box
-  adds that host's two listeners and a redirect route to HTTPS on its port-80 listener.
-  Gateway API's listener isolation sends the host's port-80 requests to that listener
-  and no other, so its app routes answer only on 443, while hosts without a certificate
-  stay on the shared port-80 listener, untouched. The host's listener admits only
-  `s5n-gateway`, so no app route can attach there. The solver's own route for
+- **HTTP stays open for the challenge only.** Before it asks for a host's certificate,
+  box gives the host its own port-80 listener. It admits only `s5n-gateway`, so no app
+  route can attach there, and Gateway API's listener isolation sends the host's port-80
+  requests to it and no other. cert-manager's solver route attaches to it and answers the
+  challenge. Once the certificate is Ready, box adds the HTTPS listener on 443 and a
+  redirect route to HTTPS on the port-80 one; the solver's own route for
   `/.well-known/acme-challenge/` is an exact match and keeps winning, so renewals work.
-  Until the certificate is Ready, box writes no listener and the host stays on HTTP.
+  A host is never served over plain HTTP: until its certificate is Ready it serves only
+  the challenge, and box says so.
 - **Which issuer a host gets.** Each user has a domain, but not every domain is publicly
   resolvable (`box.lan`, a split-horizon name). init resolves the name. A
   public address picks Let's Encrypt; a private address, or no answer, picks
