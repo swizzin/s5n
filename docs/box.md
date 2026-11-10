@@ -606,6 +606,25 @@ The chart pins every image by digest; there's no in-cluster image updater and no
 New images arrive hours after upstream instead of minutes, and a broken upstream image
 fails in CI instead of on a user's box.
 
+### The platform layer (decided)
+
+Envoy Gateway, MetalLB and cert-manager follow the same path as the images, at the box
+level instead of the chart level:
+
+1. Renovate opens a pull request when an upstream release lands for a pinned component.
+2. CI runs the full e2e on it; a green bump ships in the next box release.
+3. `box update` on its timer upgrades the components box manages, with doctor run
+   before and after. A component in `external` mode is only checked, and status warns
+   when it drifts outside the tested range.
+
+Every version box installs lives in one file, `install/platform/versions.yaml`: k0s and
+each platform component, with the chart or release it comes from. box embeds it, the
+e2e scripts read it instead of carrying their own copies, and Renovate watches it. That
+way the e2e always tests the versions box ships, and one pull request moves one pin.
+App images stay in the chart's `variants.yaml`, because they ship with chart releases,
+not box releases. Versions that exist only for tests (the foreign Gateway scenario, the
+local registry, Pebble) stay in the scripts, pinned by digest and watched by Renovate too.
+
 ### The cluster itself (decided)
 
 The cluster has the same modes as the platform components in `PLAN.md`:
