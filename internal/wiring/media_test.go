@@ -245,6 +245,10 @@ func TestWiringClaimedPlexWiresTautulliButSeerrStaysPending(t *testing.T) {
 	}
 	if s := step(res, "plex/claim"); s == nil || s.Result != "ok" {
 		t.Fatalf("plex/claim = %+v, want ok (claimed)", s)
+	} else if s.Detail != "machineIdentifier=machine-123" {
+		// An already-claimed server (a migrated Preferences.xml, say) needs
+		// no claim warning: the consequence cannot apply to it.
+		t.Fatalf("plex/claim detail = %q, want the machineIdentifier only", s.Detail)
 	}
 	if s := step(res, "tautulli/plex"); s == nil || s.Result != "ok" || s.Detail != "created" {
 		t.Fatalf("tautulli/plex = %+v, want ok/created", s)
@@ -271,6 +275,18 @@ func TestWiringUnclaimedPlexLeavesClaimPendingButStillWiresTautulli(t *testing.T
 	}
 	if s := step(res, "plex/claim"); s == nil || s.Result != "pending" {
 		t.Fatalf("plex/claim = %+v, want pending (no claim token)", s)
+	} else {
+		// Seerr is deployed in this harness, so the to-finish row must say
+		// what skipping the claim costs, and end on the claim URL.
+		if !strings.HasPrefix(s.Detail, "Plex is not claimed yet: ") {
+			t.Fatalf("plex/claim detail = %q, want it to start with the claim state", s.Detail)
+		}
+		if !strings.Contains(s.Detail, "whoever signs in to Seerr first becomes its owner") {
+			t.Fatalf("plex/claim detail = %q, want the Seerr-owner consequence", s.Detail)
+		}
+		if !strings.HasSuffix(s.Detail, "https://plex.tv/claim") {
+			t.Fatalf("plex/claim detail = %q, want it to end on the claim URL", s.Detail)
+		}
 	}
 	// The claim token only signs the server in to Plex.tv; the PMS link uses
 	// the release Secret's plex-token, so it wires regardless of claim state.
@@ -282,6 +298,25 @@ func TestWiringUnclaimedPlexLeavesClaimPendingButStillWiresTautulli(t *testing.T
 	}
 	if s := step(res, "seerr/plex"); s == nil || s.Result != "pending" {
 		t.Fatalf("seerr/plex = %+v, want pending", s)
+	}
+}
+
+// Without Seerr in the release the ownership consequence cannot happen, so
+// the pending row keeps the narrow sentence and never mentions Seerr.
+func TestWiringUnclaimedPlexWithoutSeerrDoesNotMentionAnOwner(t *testing.T) {
+	r, _ := newMediaHarness(t, false)
+	r.Config.Seerr = nil
+	res, err := r.Run(context.Background())
+	if err != nil {
+		t.Fatalf("run: %v\n%s", err, Summary(res))
+	}
+	s := step(res, "plex/claim")
+	if s == nil || s.Result != "pending" {
+		t.Fatalf("plex/claim = %+v, want pending (no claim token)", s)
+	}
+	const want = "no claim token (or it expired before Plex started): Plex is not signed in to a Plex.tv account"
+	if s.Detail != want {
+		t.Fatalf("plex/claim detail = %q, want %q", s.Detail, want)
 	}
 }
 

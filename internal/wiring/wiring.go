@@ -429,8 +429,16 @@ func (r *Runner) work(ctx context.Context, res *Result) error {
 		if ident.Claimed {
 			r.okStep(res, "plex/claim", "machineIdentifier="+ident.MachineIdentifier)
 		} else {
-			res.Steps = append(res.Steps, Step{Name: "plex/claim", Result: "pending",
-				Detail: "no claim token (or it expired before Plex started): Plex is not signed in to a Plex.tv account"})
+			// Skipping the claim is allowed, but the consequence is not
+			// obvious: Seerr builds its first admin from a Plex sign-in, so
+			// on an unclaimed server the first visitor to Seerr owns it.
+			// Say that only when Seerr is in this release; without Seerr the
+			// older, narrower sentence is the whole truth.
+			detail := "no claim token (or it expired before Plex started): Plex is not signed in to a Plex.tv account"
+			if c.Seerr != nil {
+				detail = "Plex is not claimed yet: until it is, whoever signs in to Seerr first becomes its owner. Claim it at https://plex.tv/claim"
+			}
+			res.Steps = append(res.Steps, Step{Name: "plex/claim", Result: "pending", Detail: detail})
 			r.logf("  %-38s pending: no claim token", "plex/claim")
 		}
 	}
