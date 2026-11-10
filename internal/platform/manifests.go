@@ -11,18 +11,14 @@ import (
 	admissionassets "github.com/swizzin/s5n/install/platform/admission"
 	certmanagerassets "github.com/swizzin/s5n/install/platform/cert-manager"
 	gatewayassets "github.com/swizzin/s5n/install/platform/gateway"
+	"github.com/swizzin/s5n/internal/kube"
 )
 
-// Access is one SelfSubjectAccessReview question: may this identity do verb on
-// resource in namespace (empty means cluster-scoped)?
-type Access struct {
-	Verb      string
-	Group     string
-	Resource  string
-	Namespace string
-	// What is how box names the permission when it is missing.
-	What string
-}
+// Access is one permission the platform needs before it writes: may this
+// identity do a verb on a resource? The type and the review live in
+// internal/kube, with the verbs server-side apply needs, so `box bootstrap`,
+// root's per-host TLS write and `box apply` ask the same question.
+type Access = kube.Access
 
 // gatewayManifest is the GatewayClass and Gateway the chart's HTTPRoutes
 // attach to. The bytes are install/platform/gateway/gateway.yaml, the same

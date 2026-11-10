@@ -22,11 +22,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"strings"
 	"time"
 
 	platformassets "github.com/swizzin/s5n/install/platform"
 	"github.com/swizzin/s5n/internal/bootstrap"
+	"github.com/swizzin/s5n/internal/kube"
 	"github.com/swizzin/s5n/internal/say"
 )
 
@@ -1014,18 +1014,25 @@ func metalLBSteps(unless Condition) []Step {
 // fixed list rather than an enumeration of every chart object: these are the
 // cluster-scoped rights and the per-namespace writes a chart install needs, and
 // any identity that has them is cluster-admin enough for the platform.
+//
+// Every entry is an apply, not a create. box writes with server-side apply, and
+// the API server authorizes that as create for an object it has to make and as
+// patch for one that already exists -- which on every run after the first is
+// what the Gateway, the Certificate and the admission policy are. Asking only
+// for create passed an identity that could not patch, and the write failed
+// after the operator had confirmed the plan.
 func preflightAccess(plan Plan) []Access {
 	access := []Access{
-		{Verb: "create", Resource: "namespaces", What: "namespaces"},
-		{Verb: "create", Group: "apiextensions.k8s.io", Resource: "customresourcedefinitions", What: "custom resource definitions"},
-		{Verb: "create", Group: "rbac.authorization.k8s.io", Resource: "clusterroles", What: "cluster roles"},
-		{Verb: "create", Group: "rbac.authorization.k8s.io", Resource: "clusterrolebindings", What: "cluster role bindings"},
-		{Verb: "create", Group: "admissionregistration.k8s.io", Resource: "validatingadmissionpolicies", What: "validating admission policies"},
-		{Verb: "create", Group: "gateway.networking.k8s.io", Resource: "gatewayclasses", What: "gateway classes"},
-		{Verb: "create", Group: "gateway.networking.k8s.io", Resource: "gateways", Namespace: GatewayNamespace, What: "gateways"},
-		{Verb: "create", Group: "metallb.io", Resource: "ipaddresspools", Namespace: MetalLBNamespace, What: "MetalLB address pools"},
-		{Verb: "create", Group: "metallb.io", Resource: "l2advertisements", Namespace: MetalLBNamespace, What: "MetalLB L2 advertisements"},
-		{Verb: "create", Group: "cert-manager.io", Resource: "clusterissuers", What: "cert-manager ClusterIssuers"},
+		{Verb: kube.VerbApply, Resource: "namespaces", What: "namespaces"},
+		{Verb: kube.VerbApply, Group: "apiextensions.k8s.io", Resource: "customresourcedefinitions", What: "custom resource definitions"},
+		{Verb: kube.VerbApply, Group: "rbac.authorization.k8s.io", Resource: "clusterroles", What: "cluster roles"},
+		{Verb: kube.VerbApply, Group: "rbac.authorization.k8s.io", Resource: "clusterrolebindings", What: "cluster role bindings"},
+		{Verb: kube.VerbApply, Group: "admissionregistration.k8s.io", Resource: "validatingadmissionpolicies", What: "validating admission policies"},
+		{Verb: kube.VerbApply, Group: "gateway.networking.k8s.io", Resource: "gatewayclasses", What: "gateway classes"},
+		{Verb: kube.VerbApply, Group: "gateway.networking.k8s.io", Resource: "gateways", Namespace: GatewayNamespace, What: "gateways"},
+		{Verb: kube.VerbApply, Group: "metallb.io", Resource: "ipaddresspools", Namespace: MetalLBNamespace, What: "MetalLB address pools"},
+		{Verb: kube.VerbApply, Group: "metallb.io", Resource: "l2advertisements", Namespace: MetalLBNamespace, What: "MetalLB L2 advertisements"},
+		{Verb: kube.VerbApply, Group: "cert-manager.io", Resource: "clusterissuers", What: "cert-manager ClusterIssuers"},
 	}
 	seen := map[string]bool{}
 	namespaces := []string{}
@@ -1040,26 +1047,15 @@ func preflightAccess(plan Plan) []Access {
 	}
 	for _, ns := range namespaces {
 		for _, r := range []string{"deployments", "daemonsets", "services", "secrets", "configmaps", "serviceaccounts"} {
-			access = append(access, Access{Verb: "create", Resource: r, Namespace: ns, What: r + " in " + ns})
+			access = append(access, Access{Verb: kube.VerbApply, Resource: r, Namespace: ns, What: r + " in " + ns})
 		}
 	}
 	return access
 }
 
+// preflight is the gate before the confirm and the first write. The question,
+// the verbs and the refusal live in internal/kube: `box apply`'s storage check
+// and root's per-host TLS write ask the same one.
 func preflight(ctx context.Context, cl Cluster, access []Access) error {
-	var denied []string
-	for _, a := range access {
-		ok, err := cl.Allowed(ctx, a)
-		if err != nil {
-			return fmt.Errorf("platform pre-flight: SelfSubjectAccessReview: %w", err)
-		}
-		if !ok {
-			denied = append(denied, "create "+a.What)
-		}
-	}
-	if len(denied) == 0 {
-		return nil
-	}
-	return fmt.Errorf("box needs cluster admin, and this kubeconfig cannot %s: run `box bootstrap` as root, or with a cluster-admin kubeconfig",
-		strings.Join(denied, ", "))
+	return kube.Preflight(ctx, cl, access)
 }

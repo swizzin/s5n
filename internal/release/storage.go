@@ -5,15 +5,14 @@ import (
 	"fmt"
 	"os"
 
-	authv1 "k8s.io/api/authorization/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	coreapply "k8s.io/client-go/applyconfigurations/core/v1"
 	"k8s.io/client-go/kubernetes"
-	"k8s.io/client-go/tools/clientcmd"
 
+	"github.com/swizzin/s5n/internal/kube"
 	"github.com/swizzin/s5n/internal/seedbox"
 )
 
@@ -23,16 +22,6 @@ import (
 // requires a number anyway. Nothing enforces this one -- there is no quota, no
 // resize, and `box` never reads it back as a limit.
 const NominalCapacity = "1Ti"
-
-// StorageFieldManager is the server-side-apply field manager for the PVs and
-// claims box creates, so `kubectl apply --field-manager=box` and box agree about
-// who owns which field.
-const StorageFieldManager = "box"
-
-// ManagedByLabel is how an operator (and the e2e) can find the storage box
-// created. It is not used to decide ownership: what a PV backs is its hostPath
-// and claimRef, not a label anyone can edit.
-const ManagedByLabel = "app.kubernetes.io/managed-by"
 
 // Pod Security Admission labels on the namespace box creates. enforce is the
 // one that admits or refuses a pod; audit and warn say the same level because
@@ -89,20 +78,17 @@ func (s *KubeStorage) PlanNamespace(ctx context.Context) (NamespacePlan, error) 
 // canCreateNamespaces asks the API server, as this identity, the one question
 // that decides whether apply may go on. A denial is an answer, not an error:
 // the operator gets the refusal that names root's command.
+//
+// It is an apply, not a create: CreateNamespace server-side-applies, which the
+// API server authorizes as create on a namespace that is not there and as patch
+// on one that is, and box must not be told yes by an identity that can only do
+// the first.
 func (s *KubeStorage) canCreateNamespaces(ctx context.Context) (bool, error) {
-	review := &authv1.SelfSubjectAccessReview{
-		Spec: authv1.SelfSubjectAccessReviewSpec{
-			ResourceAttributes: &authv1.ResourceAttributes{
-				Verb:     "create",
-				Resource: "namespaces",
-			},
-		},
-	}
-	out, err := s.cs.AuthorizationV1().SelfSubjectAccessReviews().Create(ctx, review, metav1.CreateOptions{})
+	allowed, err := kube.Allowed(ctx, kube.SSAR(s.cs), kube.Access{Verb: kube.VerbApply, Resource: "namespaces", What: "namespaces"})
 	if err != nil {
 		return false, fmt.Errorf("ask whether this kubeconfig may create namespaces: %w", err)
 	}
-	return out.Status.Allowed, nil
+	return allowed, nil
 }
 
 // CreateNamespace creates the seedbox's namespace with the Pod Security
@@ -112,12 +98,12 @@ func (s *KubeStorage) canCreateNamespaces(ctx context.Context) (bool, error) {
 // namespace is never applied: root's or an admin's labels win.
 func (s *KubeStorage) CreateNamespace(ctx context.Context) error {
 	ns := coreapply.Namespace(s.namespace).WithLabels(map[string]string{
-		ManagedByLabel:     StorageFieldManager,
-		podSecurityEnforce: podSecurityRestricted,
-		podSecurityAudit:   podSecurityRestricted,
-		podSecurityWarn:    podSecurityRestricted,
+		kube.ManagedByLabel: kube.FieldManager,
+		podSecurityEnforce:  podSecurityRestricted,
+		podSecurityAudit:    podSecurityRestricted,
+		podSecurityWarn:     podSecurityRestricted,
 	})
-	if _, err := s.cs.CoreV1().Namespaces().Apply(ctx, ns, metav1.ApplyOptions{FieldManager: StorageFieldManager}); err != nil {
+	if _, err := s.cs.CoreV1().Namespaces().Apply(ctx, ns, metav1.ApplyOptions{FieldManager: kube.FieldManager}); err != nil {
 		return fmt.Errorf("create namespace %s: %w", s.namespace, err)
 	}
 	return nil
@@ -172,9 +158,7 @@ func NewStorage(kubeconfig, namespace string) (*KubeStorage, error) {
 	if namespace == "" {
 		return nil, fmt.Errorf("no namespace: the grant names the release namespace")
 	}
-	rules := clientcmd.NewDefaultClientConfigLoadingRules()
-	rules.ExplicitPath = kubeconfig
-	cfg, err := clientcmd.NewNonInteractiveDeferredLoadingClientConfig(rules, &clientcmd.ConfigOverrides{}).ClientConfig()
+	cfg, err := kube.Config(kubeconfig)
 	if err != nil {
 		return nil, fmt.Errorf("kubeconfig %s: %w", kubeconfig, err)
 	}
@@ -221,7 +205,7 @@ func (s *KubeStorage) planVolume(ctx context.Context, namespace string, v seedbo
 			Name:   v.Claim,
 			Detail: "hostPath " + v.Path,
 			apply: func(ctx context.Context) error {
-				_, err := s.cs.CoreV1().PersistentVolumes().Apply(ctx, pv, metav1.ApplyOptions{FieldManager: StorageFieldManager})
+				_, err := s.cs.CoreV1().PersistentVolumes().Apply(ctx, pv, metav1.ApplyOptions{FieldManager: kube.FieldManager})
 				return err
 			},
 		})
@@ -242,7 +226,7 @@ func (s *KubeStorage) planVolume(ctx context.Context, namespace string, v seedbo
 			Name:   v.Claim,
 			Detail: "volume " + v.Claim,
 			apply: func(ctx context.Context) error {
-				_, err := s.cs.CoreV1().PersistentVolumeClaims(namespace).Apply(ctx, pvc, metav1.ApplyOptions{FieldManager: StorageFieldManager})
+				_, err := s.cs.CoreV1().PersistentVolumeClaims(namespace).Apply(ctx, pvc, metav1.ApplyOptions{FieldManager: kube.FieldManager})
 				return err
 			},
 		})
@@ -332,7 +316,7 @@ func checkHostPaths(vols []seedbox.Volume) error {
 // write back; nothing else on the object is touched.
 func (s *KubeStorage) persistentVolume(namespace string, v seedbox.Volume) *coreapply.PersistentVolumeApplyConfiguration {
 	return coreapply.PersistentVolume(v.Claim).
-		WithLabels(map[string]string{ManagedByLabel: StorageFieldManager}).
+		WithLabels(map[string]string{kube.ManagedByLabel: kube.FieldManager}).
 		WithSpec(coreapply.PersistentVolumeSpec().
 			WithCapacity(capacity()).
 			WithAccessModes(corev1.ReadWriteMany).
@@ -347,7 +331,7 @@ func (s *KubeStorage) persistentVolume(namespace string, v seedbox.Volume) *core
 // exact volume can satisfy it.
 func (s *KubeStorage) persistentVolumeClaim(namespace string, v seedbox.Volume) *coreapply.PersistentVolumeClaimApplyConfiguration {
 	return coreapply.PersistentVolumeClaim(v.Claim, namespace).
-		WithLabels(map[string]string{ManagedByLabel: StorageFieldManager}).
+		WithLabels(map[string]string{kube.ManagedByLabel: kube.FieldManager}).
 		WithSpec(coreapply.PersistentVolumeClaimSpec().
 			WithAccessModes(corev1.ReadWriteMany).
 			WithStorageClassName("").

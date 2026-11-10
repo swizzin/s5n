@@ -8,7 +8,6 @@ import (
 	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
-	authorizationv1 "k8s.io/api/authorization/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -19,9 +18,9 @@ import (
 	"k8s.io/client-go/discovery/cached/memory"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
-	"k8s.io/client-go/rest"
 	"k8s.io/client-go/restmapper"
-	"k8s.io/client-go/tools/clientcmd"
+
+	"github.com/swizzin/s5n/internal/kube"
 )
 
 // Kubernetes is the cluster client: client-go for the typed reads and the
@@ -43,11 +42,7 @@ func NewCluster(kubeconfig string) (*Kubernetes, error) {
 	if kubeconfig == "" {
 		return nil, errors.New("no kubeconfig: box bootstrap always has one from its cluster decision")
 	}
-	// client-go's deprecation warnings go through klog and would land in the
-	// middle of box's output; box is the whole interface.
-	rest.SetDefaultWarningHandler(rest.NoWarnings{})
-
-	cfg, err := clientcmd.BuildConfigFromFlags("", kubeconfig)
+	cfg, err := kube.Config(kubeconfig)
 	if err != nil {
 		return nil, fmt.Errorf("kubeconfig %s: %w", kubeconfig, err)
 	}
@@ -72,21 +67,7 @@ func NewCluster(kubeconfig string) (*Kubernetes, error) {
 
 // Allowed answers one SelfSubjectAccessReview.
 func (k *Kubernetes) Allowed(ctx context.Context, a Access) (bool, error) {
-	review := &authorizationv1.SelfSubjectAccessReview{
-		Spec: authorizationv1.SelfSubjectAccessReviewSpec{
-			ResourceAttributes: &authorizationv1.ResourceAttributes{
-				Verb:      a.Verb,
-				Group:     a.Group,
-				Resource:  a.Resource,
-				Namespace: a.Namespace,
-			},
-		},
-	}
-	out, err := k.cs.AuthorizationV1().SelfSubjectAccessReviews().Create(ctx, review, metav1.CreateOptions{})
-	if err != nil {
-		return false, err
-	}
-	return out.Status.Allowed, nil
+	return kube.SSAR(k.cs).Allowed(ctx, a)
 }
 
 // PrimaryInternalIP is the address MetalLB advertises: the node's own primary
@@ -118,7 +99,7 @@ func (k *Kubernetes) PrimaryInternalIP(ctx context.Context) (string, error) {
 
 // Apply server-side-applies each document with field manager box.
 func (k *Kubernetes) Apply(ctx context.Context, docs []map[string]any) error {
-	return k.ApplyWith(ctx, FieldManager, docs)
+	return k.ApplyWith(ctx, kube.FieldManager, docs)
 }
 
 // ApplyWith is the same write under another field manager. A list that is

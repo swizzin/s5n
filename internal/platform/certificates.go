@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/swizzin/s5n/internal/kube"
 	"github.com/swizzin/s5n/internal/say"
 )
 
@@ -16,13 +17,6 @@ import (
 // docs/box.md is explicit that a failed issuance or renewal does not block
 // apply.
 const CertificateTimeout = 3 * time.Minute
-
-// tlsManagerPrefix is the field manager prefix the per-host TLS flow applies
-// under, besides box's own. A Gateway's listeners are a map keyed by name, so a
-// partial server-side apply of one host's listeners merges them and leaves the
-// platform's full Gateway apply (manager box) unable to remove them -- and one
-// host's manager cannot remove another host's listeners.
-const tlsManagerPrefix = "box-tls-"
 
 // CertificateCluster is the cluster client the per-host TLS flow needs beyond
 // the platform writes: a Certificate's status, whether cert-manager is there,
@@ -254,12 +248,15 @@ func (d *CertificateDecision) redirect(ctx context.Context, cl Cluster, name str
 }
 
 // certificateAccess is the RBAC the per-host write needs, checked before the
-// first object is written.
+// first object is written. All three are applies: on every run after the first,
+// this host's Certificate and HTTPRoute exist, so the write the API server
+// authorizes is a patch, and the Gateway's listeners are patched by a partial
+// apply under the host's own field manager.
 func certificateAccess() []Access {
 	return []Access{
-		{Verb: "create", Group: "cert-manager.io", Resource: "certificates", Namespace: GatewayNamespace, What: "cert-manager Certificates in " + GatewayNamespace},
-		{Verb: "create", Group: "gateway.networking.k8s.io", Resource: "httproutes", Namespace: GatewayNamespace, What: "HTTPRoutes in " + GatewayNamespace},
-		{Verb: "create", Group: "gateway.networking.k8s.io", Resource: "gateways", Namespace: GatewayNamespace, What: "gateways"},
+		{Verb: kube.VerbApply, Group: "cert-manager.io", Resource: "certificates", Namespace: GatewayNamespace, What: "cert-manager Certificates in " + GatewayNamespace},
+		{Verb: kube.VerbApply, Group: "gateway.networking.k8s.io", Resource: "httproutes", Namespace: GatewayNamespace, What: "HTTPRoutes in " + GatewayNamespace},
+		{Verb: kube.VerbApply, Group: "gateway.networking.k8s.io", Resource: "gateways", Namespace: GatewayNamespace, What: "gateways"},
 	}
 }
 
@@ -276,7 +273,7 @@ func ListenerName(host string) string { return "https-" + dnsLabel(host) }
 func HTTPListenerName(host string) string { return "http-" + dnsLabel(host) }
 
 // tlsManager is the field manager that owns this host's listeners.
-func tlsManager(host string) string { return tlsManagerPrefix + dnsLabel(host) }
+func tlsManager(host string) string { return kube.TLSManagerPrefix + dnsLabel(host) }
 
 // dnsLabel flattens a host name into characters Kubernetes object names and
 // field managers accept, short enough for both.
@@ -311,8 +308,8 @@ metadata:
   name: %s
   namespace: %s
   labels:
-    app.kubernetes.io/part-of: s5n
-    app.kubernetes.io/managed-by: box
+    %s: %s
+    %s: %s
 spec:
   secretName: %s
   dnsNames:
@@ -320,7 +317,7 @@ spec:
   issuerRef:
     name: %s
     kind: ClusterIssuer
-`, name, GatewayNamespace, name, host, issuer))
+`, name, GatewayNamespace, kube.PartOfLabel, kube.PartOf, kube.ManagedByLabel, kube.ManagedBy, name, host, issuer))
 }
 
 // redirectManifest is the port-80 route for one host. It attaches to that
@@ -334,8 +331,8 @@ metadata:
   name: %s-redirect
   namespace: %s
   labels:
-    app.kubernetes.io/part-of: s5n
-    app.kubernetes.io/managed-by: box
+    %s: %s
+    %s: %s
 spec:
   parentRefs:
     - name: %s
@@ -353,7 +350,7 @@ spec:
           requestRedirect:
             scheme: https
             statusCode: 301
-`, name, GatewayNamespace, GatewayName, GatewayNamespace, HTTPListenerName(host), host))
+`, name, GatewayNamespace, kube.PartOfLabel, kube.PartOf, kube.ManagedByLabel, kube.ManagedBy, GatewayName, GatewayNamespace, HTTPListenerName(host), host))
 }
 
 // gatewayPartial is the smallest Gateway object a server-side apply can carry

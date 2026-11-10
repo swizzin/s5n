@@ -166,6 +166,27 @@ func (r FilesystemRecords) Load() (*Record, error) {
 // RecordPath reports where this store persists the record.
 func (r FilesystemRecords) RecordPath() string { return r.Path }
 
+// RecordedKubeconfig reports the kubeconfig the record names, and whether there
+// is a record at all. It is kube.Records: a command that only has to know where
+// the cluster is (`box apply`, and root's `box adduser` next) asks the store
+// this and never sees the record's schema.
+func (r FilesystemRecords) RecordedKubeconfig() (string, bool, error) {
+	return recordedKubeconfig(r.Load)
+}
+
+// recordedKubeconfig is the one reading of "where is the recorded cluster" both
+// stores answer with.
+func recordedKubeconfig(load func() (*Record, error)) (string, bool, error) {
+	rec, err := load()
+	if err != nil {
+		return "", false, err
+	}
+	if rec == nil {
+		return "", false, nil
+	}
+	return rec.Kubeconfig, true, nil
+}
+
 // Save writes the record atomically, mode 0600, creating the directory first.
 func (r FilesystemRecords) Save(rec *Record) error {
 	if err := os.MkdirAll(filepath.Dir(r.Path), 0o755); err != nil {
@@ -191,3 +212,9 @@ type ReadOnlyRecords struct {
 func (r ReadOnlyRecords) Load() (*Record, error) { return r.Inner.Load() }
 func (r ReadOnlyRecords) RecordPath() string     { return r.Inner.RecordPath() }
 func (r ReadOnlyRecords) Save(*Record) error     { return nil }
+
+// RecordedKubeconfig is the read half of kube.Records; a dry run still answers
+// where the cluster is, it just never writes.
+func (r ReadOnlyRecords) RecordedKubeconfig() (string, bool, error) {
+	return recordedKubeconfig(r.Inner.Load)
+}

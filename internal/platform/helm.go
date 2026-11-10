@@ -15,16 +15,15 @@ import (
 	chartv2 "helm.sh/helm/v4/pkg/chart/v2"
 	"helm.sh/helm/v4/pkg/downloader"
 	"helm.sh/helm/v4/pkg/getter"
-	"helm.sh/helm/v4/pkg/kube"
+	helmkube "helm.sh/helm/v4/pkg/kube"
 	"helm.sh/helm/v4/pkg/registry"
 	helmrelease "helm.sh/helm/v4/pkg/release"
 	repo "helm.sh/helm/v4/pkg/repo/v1"
 	"helm.sh/helm/v4/pkg/storage/driver"
-	"k8s.io/cli-runtime/pkg/genericclioptions"
-	"k8s.io/client-go/rest"
 	orasauth "oras.land/oras-go/v2/registry/remote/auth"
 
 	"github.com/swizzin/s5n/internal/fetch"
+	"github.com/swizzin/s5n/internal/kube"
 )
 
 // Helm is the Releases implementation: the Helm SDK over client-go, the same
@@ -59,16 +58,10 @@ func (h *Helm) configuration(namespace string) (*action.Configuration, error) {
 	if cfg, ok := h.configs[namespace]; ok {
 		return cfg, nil
 	}
-	path := h.Kubeconfig
-	ns := namespace
-	flags := genericclioptions.NewConfigFlags(false)
-	flags.KubeConfig = &path
-	flags.Namespace = &ns
-
-	rest.SetDefaultWarningHandler(rest.NoWarnings{})
+	flags := kube.Flags(h.Kubeconfig, namespace)
 
 	cfg := new(action.Configuration)
-	if err := cfg.Init(flags, ns, "secret"); err != nil {
+	if err := cfg.Init(flags, namespace, "secret"); err != nil {
 		return nil, fmt.Errorf("release client for %s: %w", namespace, err)
 	}
 	// Same rule as `box apply`: the reporter is the only thing that speaks.
@@ -128,7 +121,7 @@ func (h *Helm) Install(ctx context.Context, spec Release) error {
 	if h.exists(cfg, spec.Name) {
 		up := action.NewUpgrade(cfg)
 		up.Namespace = spec.Namespace
-		up.WaitStrategy = kube.StatusWatcherStrategy
+		up.WaitStrategy = helmkube.StatusWatcherStrategy
 		up.WaitForJobs = true
 		up.Timeout = timeout
 		up.Description = "box bootstrap"
@@ -142,7 +135,7 @@ func (h *Helm) Install(ctx context.Context, spec Release) error {
 	in.ReleaseName = spec.Name
 	in.Namespace = spec.Namespace
 	in.CreateNamespace = true
-	in.WaitStrategy = kube.StatusWatcherStrategy
+	in.WaitStrategy = helmkube.StatusWatcherStrategy
 	in.WaitForJobs = true
 	in.Timeout = timeout
 	in.Description = "box bootstrap install"

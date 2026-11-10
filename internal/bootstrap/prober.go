@@ -12,8 +12,9 @@ import (
 	"strings"
 	"time"
 
-	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
+
+	"github.com/swizzin/s5n/internal/kube"
 )
 
 // kubeClient builds the HTTP client and base URL for a kubeconfig's current
@@ -32,19 +33,9 @@ func kubeClient(kubeconfig []byte, timeout time.Duration) (*http.Client, string,
 	if raw, err := clientcmd.Load(kubeconfig); err == nil && raw.CurrentContext == "" {
 		return nil, "", fmt.Errorf("kubeconfig sets no current-context: select one with `kubectl config use-context`")
 	}
-	cfg, err := clientcmd.RESTConfigFromKubeConfig(kubeconfig)
-	if err != nil {
-		return nil, "", fmt.Errorf("kubeconfig: %w", err)
-	}
-	// client-go prints scheme and deprecation warnings through klog; box's
-	// output stays its own.
-	rest.SetDefaultWarningHandler(rest.NoWarnings{})
-	client, err := rest.HTTPClientFor(cfg)
-	if err != nil {
-		return nil, "", fmt.Errorf("kubeconfig: %w", err)
-	}
-	client.Timeout = timeout
-	return client, strings.TrimRight(cfg.Host, "/"), nil
+	// The same config (and the same silenced warnings) every writer builds,
+	// from the bytes box already has.
+	return kube.ProbeClient(kubeconfig, timeout)
 }
 
 // HTTPProber is the real, read-only Prober: it talks to the API server with
@@ -227,25 +218,26 @@ func (p *HTTPProber) Version(ctx context.Context) (Version, error) {
 	return Version{GitVersion: v.GitVersion}, nil
 }
 
-// CanAdmin checks, with one SelfSubjectAccessReview per privilege, that the
-// identity can create namespaces, CRDs and cluster roles.
-func (p *HTTPProber) CanAdmin(ctx context.Context) error {
-	checks := []struct {
-		name, resource, group string
-	}{
-		{"create namespaces", "namespaces", ""},
-		{"create customresourcedefinitions", "customresourcedefinitions", "apiextensions.k8s.io"},
-		{"create clusterroles", "clusterroles", "rbac.authorization.k8s.io"},
+// adminAccess is what bootstrap needs to install a cluster: the cluster-scoped
+// writes k0s's platform layer makes through Helm. Every one is an apply, because
+// a re-run patches what the first run created and an identity that can only
+// create would pass this probe and then fail mid-install.
+func adminAccess() []kube.Access {
+	return []kube.Access{
+		{Verb: kube.VerbApply, Resource: "namespaces", What: "namespaces"},
+		{Verb: kube.VerbApply, Group: "apiextensions.k8s.io", Resource: "customresourcedefinitions", What: "custom resource definitions"},
+		{Verb: kube.VerbApply, Group: "rbac.authorization.k8s.io", Resource: "clusterroles", What: "cluster roles"},
 	}
-	var denied []string
-	for _, c := range checks {
-		allowed, err := p.ssar(ctx, c.resource, c.group, "create")
-		if err != nil {
-			return fmt.Errorf("SelfSubjectAccessReview: %w", err)
-		}
-		if !allowed {
-			denied = append(denied, c.name)
-		}
+}
+
+// CanAdmin checks, with one SelfSubjectAccessReview per privilege, that the
+// identity can manage the cluster box is about to install onto. The questions
+// and the verbs are kube's; the sentence is bootstrap's, because this is a
+// probe that goes into a skip reason, not a write that stopped.
+func (p *HTTPProber) CanAdmin(ctx context.Context) error {
+	denied, err := kube.Denied(ctx, p, adminAccess())
+	if err != nil {
+		return fmt.Errorf("SelfSubjectAccessReview: %w", err)
 	}
 	if len(denied) > 0 {
 		return fmt.Errorf("identity cannot %s", strings.Join(denied, ", "))
@@ -253,16 +245,24 @@ func (p *HTTPProber) CanAdmin(ctx context.Context) error {
 	return nil
 }
 
-func (p *HTTPProber) ssar(ctx context.Context, resource, group, verb string) (bool, error) {
+// Allowed answers one SelfSubjectAccessReview as this kubeconfig's identity
+// (kube.Reviewer). The prober posts the review itself rather than building a
+// typed client: a kubeconfig this read-only client can use must not be refused
+// later by a client it cannot build.
+func (p *HTTPProber) Allowed(ctx context.Context, a kube.Access) (bool, error) {
+	return p.ssar(ctx, a)
+}
+
+func (p *HTTPProber) ssar(ctx context.Context, a kube.Access) (bool, error) {
 	req := map[string]any{
 		"apiVersion": "authorization.k8s.io/v1",
 		"kind":       "SelfSubjectAccessReview",
 		"spec": map[string]any{
 			"resourceAttributes": map[string]any{
-				"namespace": "",
-				"verb":      verb,
-				"group":     group,
-				"resource":  resource,
+				"namespace": a.Namespace,
+				"verb":      a.Verb,
+				"group":     a.Group,
+				"resource":  a.Resource,
 			},
 		},
 	}
@@ -669,7 +669,7 @@ func (p *HTTPProber) gatewayClasses(ctx context.Context) ([]GatewayClass, error)
 		class := GatewayClass{
 			Name:           item.Metadata.Name,
 			ControllerName: item.Spec.ControllerName,
-			ManagedByBox:   item.Metadata.Labels["app.kubernetes.io/managed-by"] == "box",
+			ManagedByBox:   item.Metadata.Labels[kube.ManagedByLabel] == kube.ManagedBy,
 		}
 		for _, c := range item.Status.Conditions {
 			if c.Type != "Accepted" {

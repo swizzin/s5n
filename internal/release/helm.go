@@ -11,15 +11,15 @@ import (
 	"time"
 
 	"helm.sh/helm/v4/pkg/action"
-	"helm.sh/helm/v4/pkg/kube"
+	helmkube "helm.sh/helm/v4/pkg/kube"
 	helmrelease "helm.sh/helm/v4/pkg/release"
 	v1release "helm.sh/helm/v4/pkg/release/v1"
 	"helm.sh/helm/v4/pkg/storage/driver"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/cli-runtime/pkg/genericclioptions"
 	"k8s.io/client-go/kubernetes"
-	"k8s.io/client-go/rest"
+
+	"github.com/swizzin/s5n/internal/kube"
 )
 
 // Helm is the release client: the Helm SDK over client-go, which the maintainer
@@ -46,21 +46,15 @@ func NewHelm(kubeconfig, namespace, releaseName string) (*Helm, error) {
 	if releaseName == "" {
 		releaseName = ReleaseName
 	}
-	kubeconfigPath := kubeconfig
-	ns := namespace
-	flags := genericclioptions.NewConfigFlags(false)
-	flags.KubeConfig = &kubeconfigPath
-	flags.Namespace = &ns
-
-	// client-go's default warning handler prints deprecation notices through
-	// klog, which would put a line like "I1107 ... Endpoints is deprecated" in
-	// the middle of box's own output. box is the whole interface (docs/box.md),
-	// so Kubernetes noise is dropped here rather than explained away. Helm's own
-	// warnings go through slog to stderr and are unaffected.
-	rest.SetDefaultWarningHandler(rest.NoWarnings{})
+	// Helm builds its own clients from this getter, so kube.Flags is what
+	// carries box's warning policy into them: client-go's deprecation notices
+	// would otherwise print through klog in the middle of box's output
+	// (docs/box.md: box is the whole interface). Helm's own warnings go
+	// through slog and are silenced below.
+	flags := kube.Flags(kubeconfig, namespace)
 
 	cfg := new(action.Configuration)
-	if err := cfg.Init(flags, ns, "secret"); err != nil {
+	if err := cfg.Init(flags, namespace, "secret"); err != nil {
 		return nil, fmt.Errorf("release client for %s: %w", namespace, err)
 	}
 	// Helm's own slog output and hook stdout would land in the middle of
@@ -69,11 +63,11 @@ func NewHelm(kubeconfig, namespace, releaseName string) (*Helm, error) {
 	// explained away. Its errors still come back through the API calls.
 	cfg.SetLogger(slog.DiscardHandler)
 	cfg.HookOutputFunc = func(string, string, string) io.Writer { return io.Discard }
-	rest, err := flags.ToRESTConfig()
+	restConfig, err := flags.ToRESTConfig()
 	if err != nil {
 		return nil, fmt.Errorf("kubeconfig %s: %w", kubeconfig, err)
 	}
-	cs, err := kubernetes.NewForConfig(rest)
+	cs, err := kubernetes.NewForConfig(restConfig)
 	if err != nil {
 		return nil, fmt.Errorf("release client for %s: %w", namespace, err)
 	}
@@ -134,7 +128,7 @@ func (h *Helm) Upgrade(ctx context.Context, chart Chart, values map[string]any) 
 	if exists {
 		up := action.NewUpgrade(h.cfg)
 		up.Namespace = h.Namespace
-		up.WaitStrategy = kube.StatusWatcherStrategy
+		up.WaitStrategy = helmkube.StatusWatcherStrategy
 		up.WaitForJobs = true
 		up.Timeout = timeout
 		up.Description = "box apply"
@@ -143,7 +137,7 @@ func (h *Helm) Upgrade(ctx context.Context, chart Chart, values map[string]any) 
 		in := action.NewInstall(h.cfg)
 		in.ReleaseName = h.Release
 		in.Namespace = h.Namespace
-		in.WaitStrategy = kube.StatusWatcherStrategy
+		in.WaitStrategy = helmkube.StatusWatcherStrategy
 		in.WaitForJobs = true
 		in.Timeout = timeout
 		in.Description = "box apply install"

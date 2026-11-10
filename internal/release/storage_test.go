@@ -12,6 +12,7 @@ import (
 	"k8s.io/client-go/kubernetes/fake"
 	k8stesting "k8s.io/client-go/testing"
 
+	"github.com/swizzin/s5n/internal/kube"
 	"github.com/swizzin/s5n/internal/seedbox"
 )
 
@@ -63,8 +64,8 @@ func TestKubeStoragePlansAndWritesTheStaticVolume(t *testing.T) {
 	if pv.Spec.ClaimRef == nil || pv.Spec.ClaimRef.Namespace != "testbox" || pv.Spec.ClaimRef.Name != "testbox-s5n-data" {
 		t.Errorf("claimRef = %+v, want testbox/testbox-s5n-data", pv.Spec.ClaimRef)
 	}
-	if got := pv.Labels[ManagedByLabel]; got != "box" {
-		t.Errorf("label %s = %q, want box", ManagedByLabel, got)
+	if got := pv.Labels[kube.ManagedByLabel]; got != "box" {
+		t.Errorf("label %s = %q, want box", kube.ManagedByLabel, got)
 	}
 	if pv.Spec.Capacity.Storage().String() != NominalCapacity {
 		t.Errorf("capacity = %s, want the nominal %s", pv.Spec.Capacity.Storage(), NominalCapacity)
@@ -83,8 +84,8 @@ func TestKubeStoragePlansAndWritesTheStaticVolume(t *testing.T) {
 	if pvc.Spec.Resources.Requests.Storage().String() != NominalCapacity {
 		t.Errorf("request = %s, want the nominal %s", pvc.Spec.Resources.Requests.Storage(), NominalCapacity)
 	}
-	if got := pvc.Labels[ManagedByLabel]; got != "box" {
-		t.Errorf("label %s = %q, want box", ManagedByLabel, got)
+	if got := pvc.Labels[kube.ManagedByLabel]; got != "box" {
+		t.Errorf("label %s = %q, want box", kube.ManagedByLabel, got)
 	}
 
 	// A second Plan over what box just wrote is empty: a re-apply is no writes.
@@ -266,10 +267,10 @@ func TestKubeStorageCreatesTheNamespaceItNeeds(t *testing.T) {
 		t.Fatalf("get namespace: %v", err)
 	}
 	for label, want := range map[string]string{
-		podSecurityEnforce: "restricted",
-		podSecurityAudit:   "restricted",
-		podSecurityWarn:    "restricted",
-		ManagedByLabel:     StorageFieldManager,
+		podSecurityEnforce:  "restricted",
+		podSecurityAudit:    "restricted",
+		podSecurityWarn:     "restricted",
+		kube.ManagedByLabel: kube.FieldManager,
 	} {
 		if got := ns.Labels[label]; got != want {
 			t.Errorf("label %s = %q, want %q", label, got, want)
