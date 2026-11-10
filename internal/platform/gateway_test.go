@@ -210,6 +210,27 @@ func TestReachableAcceptsAnyHTTPStatus(t *testing.T) {
 }
 
 // A refused connection is not: the address does not reach anything.
+// TestReachableAnswersAfterARefusal: a Gateway whose proxy is still binding
+// port 80 refuses the first request and answers the next. The answer wins; the
+// earlier refusal is reported only when nothing ever answered.
+func TestReachableAnswersAfterARefusal(t *testing.T) {
+	attempts := 0
+	g := &Gateway{Client: &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		attempts++
+		if attempts == 1 {
+			return nil, errors.New("dial tcp 10.0.0.50:80: connect: connection refused")
+		}
+		return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader("")), Header: http.Header{}}, nil
+	})}}
+	code, err := g.Reachable(context.Background(), "10.0.0.50", 5*time.Second)
+	if err != nil {
+		t.Fatalf("answered on attempt %d, but Reachable failed: %v", attempts, err)
+	}
+	if code != http.StatusOK || attempts != 2 {
+		t.Fatalf("code = %d after %d attempts, want 200 after 2", code, attempts)
+	}
+}
+
 func TestReachableFailsWhenNothingConnects(t *testing.T) {
 	attempts := 0
 	g := &Gateway{Client: &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {

@@ -29,6 +29,7 @@ import (
 
 	"github.com/swizzin/s5n/internal/say"
 	"github.com/swizzin/s5n/internal/seedbox"
+	"github.com/swizzin/s5n/internal/wait"
 )
 
 // ReleaseName is the Helm release box owns on root's own seedbox. One release
@@ -428,40 +429,41 @@ func (a *Applier) loadChart(ctx context.Context, opts Options) (Chart, error) {
 // revision is not evidence about this one, so its start time must be after the
 // upgrade began (with a little slack for clock granularity).
 func (a *Applier) waitReceipt(ctx context.Context, client ReleaseClient, since time.Time) (Receipt, error) {
-	wait := a.ReceiptWait
-	if wait <= 0 {
-		wait = 10 * time.Minute
+	budget := a.ReceiptWait
+	if budget <= 0 {
+		budget = 10 * time.Minute
 	}
 	poll := a.Poll
 	if poll <= 0 {
 		poll = 2 * time.Second
 	}
-	deadline := time.Now().Add(wait)
 	fresh := since.Add(-2 * time.Second)
 	r := a.report()
-	task := r.Start(say.Op{Label: "waiting for the wiring receipt", Budget: wait})
+	task := r.Start(say.Op{Label: "waiting for the wiring receipt", Budget: budget})
 
-	for {
+	var receipt Receipt
+	waited, err := wait.Until(ctx, budget, poll, func(ctx context.Context) (bool, error) {
 		rec, err := client.Receipt(ctx)
 		switch {
 		case err == nil && !rec.StartedAt.Before(fresh):
-			task.Done("")
-			return rec, nil
+			receipt = rec
+			return true, nil
 		case err != nil && !errors.Is(err, ErrNoReceipt):
-			task.Failed(err)
-			return Receipt{}, err
+			return false, err
 		}
-		if time.Now().After(deadline) {
-			task.Failed(nil)
-			return Receipt{}, errors.New("the wiring receipt never arrived: the release is installed but its wiring hook has not reported")
-		}
-		select {
-		case <-ctx.Done():
-			task.Failed(ctx.Err())
-			return Receipt{}, ctx.Err()
-		case <-time.After(poll):
-		}
+		// No receipt yet, or one from an earlier revision: still waiting.
+		return false, nil
+	})
+	switch {
+	case err != nil:
+		task.Failed(err)
+		return Receipt{}, err
+	case waited.Done:
+		task.Done("")
+		return receipt, nil
 	}
+	task.Failed(nil)
+	return Receipt{}, errors.New("the wiring receipt never arrived: the release is installed but its wiring hook has not reported")
 }
 
 // undo removes the volumes this run created, after a failure that stopped it

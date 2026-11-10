@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/swizzin/s5n/internal/say"
+	"github.com/swizzin/s5n/internal/wait"
 )
 
 // Downloader fetches one URL. The caller closes the body.
@@ -193,29 +194,30 @@ func (k K0sInstaller) waitReady(ctx context.Context) error {
 	}
 
 	r := say.Or(k.Say, nil)
-	wait := r.Start(say.Op{
+	waitStep := r.Start(say.Op{
 		Label:  "waiting for the cluster API",
 		Plain:  fmt.Sprintf("waiting up to %s for the cluster API", timeout),
 		Budget: timeout,
 	})
-	deadline := now().Add(timeout)
+	// The installer's own clock is the wait's: a test that proves how many
+	// attempts five seconds made moves a fake Now forward instead of spending
+	// the five seconds.
 	var last error
-	for {
-		if err := ctx.Err(); err != nil {
-			wait.Failed(err)
-			return err
-		}
-		last = k.ready().Ready(ctx)
-		if last == nil {
-			wait.Done("the cluster API is ready")
-			return nil
-		}
-		if !now().Before(deadline) {
-			wait.Failed(last)
-			return fmt.Errorf("not ready after %s: %w", timeout, last)
-		}
-		sleep(interval)
+	waited, err := wait.UntilClock(ctx, wait.Clock{Now: now, Sleep: sleep}, timeout, interval,
+		func(ctx context.Context) (bool, error) {
+			last = k.ready().Ready(ctx)
+			return last == nil, nil
+		})
+	if err != nil {
+		waitStep.Failed(err)
+		return err
 	}
+	if waited.Done {
+		waitStep.Done("the cluster API is ready")
+		return nil
+	}
+	waitStep.Failed(last)
+	return fmt.Errorf("not ready after %s: %w", timeout, last)
 }
 
 // leftBehind is the failure box returns once this run has changed the host: it

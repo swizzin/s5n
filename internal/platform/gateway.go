@@ -13,6 +13,8 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+
+	"github.com/swizzin/s5n/internal/wait"
 )
 
 // The Gateway probe. MetalLB exists in s5n only to give the Gateway's Service
@@ -130,22 +132,23 @@ func (g *Gateway) Address(ctx context.Context, timeout time.Duration) (GatewayAn
 	if timeout <= 0 {
 		timeout = ProbeTimeout
 	}
-	deadline := time.Now().Add(timeout)
-	for {
-		answer, err := g.current(ctx)
+	var answer GatewayAnswer
+	_, err := wait.Until(ctx, timeout, g.poll(), func(ctx context.Context) (bool, error) {
+		current, err := g.current(ctx)
 		if err != nil {
-			return GatewayAnswer{}, err
+			return false, err
 		}
-		if (answer.Address != "" && answer.Programmed()) || answer.missing {
-			return answer, nil
-		}
-		if time.Now().After(deadline) {
-			return answer, nil
-		}
-		if err := pause(ctx, sleepFor(g.poll(), deadline)); err != nil {
-			return answer, err
-		}
+		answer = current
+		return (current.Address != "" && current.Programmed()) || current.missing, nil
+	})
+	if err != nil {
+		// The last answer goes back with the error too: a wait that stopped
+		// on a cancelled context still saw something.
+		return answer, err
 	}
+	// A Gateway that never got Programmed is the last answer, not an error:
+	// what to do about it is the Decision's question at the deadline.
+	return answer, nil
 }
 
 // Reachable asks address for HTTP on port 80, retrying until retry expires.
@@ -154,19 +157,28 @@ func (g *Gateway) Reachable(ctx context.Context, address string, retry time.Dura
 		retry = ReachTimeout
 	}
 	url := "http://" + net.JoinHostPort(address, "80") + "/"
-	deadline := time.Now().Add(retry)
-	for {
-		code, err := g.get(ctx, url)
-		if err == nil {
-			return code, nil
+	// A refused connection is not an answer, so it is remembered and the wait
+	// keeps asking; the last refusal is what box reports at the deadline.
+	var code int
+	var lastErr error
+	waited, err := wait.Until(ctx, retry, reachPoll, func(ctx context.Context) (bool, error) {
+		c, err := g.get(ctx, url)
+		if err != nil {
+			lastErr = err
+			return false, nil
 		}
-		if time.Now().After(deadline) {
-			return 0, err
-		}
-		if err := pause(ctx, sleepFor(reachPoll, deadline)); err != nil {
-			return 0, err
-		}
+		code = c
+		return true, nil
+	})
+	if err != nil {
+		return 0, err
 	}
+	// An answer on a later attempt is the answer; an earlier refusal only
+	// matters when nothing ever answered.
+	if !waited.Done {
+		return 0, lastErr
+	}
+	return code, nil
 }
 
 func (g *Gateway) current(ctx context.Context) (GatewayAnswer, error) {
@@ -276,29 +288,6 @@ func (g *Gateway) poll() time.Duration {
 		return g.Poll
 	}
 	return probePoll
-}
-
-// sleepFor is how long one wait may take: never past the deadline, so a short
-// timeout is a short wait rather than one poll interval longer.
-func sleepFor(poll time.Duration, deadline time.Time) time.Duration {
-	if left := time.Until(deadline); left < poll {
-		return left
-	}
-	return poll
-}
-
-func pause(ctx context.Context, d time.Duration) error {
-	if d <= 0 {
-		return nil
-	}
-	t := time.NewTimer(d)
-	defer t.Stop()
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	case <-t.C:
-		return nil
-	}
 }
 
 // interface check: the real probe is what cmd/box hands the platform decision.

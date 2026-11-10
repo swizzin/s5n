@@ -21,6 +21,7 @@ import (
 	"k8s.io/client-go/restmapper"
 
 	"github.com/swizzin/s5n/internal/kube"
+	"github.com/swizzin/s5n/internal/wait"
 )
 
 // Kubernetes is the cluster client: client-go for the typed reads and the
@@ -215,24 +216,16 @@ func (k *Kubernetes) Await(ctx context.Context, w Wait) error {
 	if poll <= 0 {
 		poll = 2 * time.Second
 	}
-	deadline := time.Now().Add(timeout)
-	for {
-		ready, err := k.ready(ctx, w)
-		if err != nil {
-			return err
-		}
-		if ready {
-			return nil
-		}
-		if time.Now().After(deadline) {
-			return fmt.Errorf("%w after %s", ErrNotReady, timeout)
-		}
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-time.After(poll):
-		}
+	waited, err := wait.Until(ctx, timeout, poll, func(ctx context.Context) (bool, error) {
+		return k.ready(ctx, w)
+	})
+	if err != nil {
+		return err
 	}
+	if waited.Done {
+		return nil
+	}
+	return fmt.Errorf("%w after %s", ErrNotReady, timeout)
 }
 
 func (k *Kubernetes) ready(ctx context.Context, w Wait) (bool, error) {

@@ -28,6 +28,7 @@ import (
 	"github.com/swizzin/s5n/internal/bootstrap"
 	"github.com/swizzin/s5n/internal/kube"
 	"github.com/swizzin/s5n/internal/say"
+	"github.com/swizzin/s5n/internal/wait"
 )
 
 // The platform releases: where each chart comes from and what box calls the
@@ -658,7 +659,9 @@ func (d *Decision) await(ctx context.Context, cl Cluster, w Wait) error {
 // expires. Both webhooks box talks to -- MetalLB's pool and cert-manager's
 // issuers -- are served by pods that are Ready a moment before they can accept
 // a connection (they load their certificate first), and the chart's wait only
-// proves the pod is Ready. The caller keeps its own words for the refusal.
+// proves the pod is Ready. The caller keeps its own words for the refusal, and
+// the last one is what it says: a webhook that refused for its own reason is
+// the thing the operator has to fix.
 func (d *Decision) retryApply(ctx context.Context, cl Cluster, docs []map[string]any, timeout time.Duration) error {
 	if timeout <= 0 {
 		timeout = 2 * time.Minute
@@ -667,21 +670,21 @@ func (d *Decision) retryApply(ctx context.Context, cl Cluster, docs []map[string
 	if poll <= 0 {
 		poll = 2 * time.Second
 	}
-	deadline := time.Now().Add(timeout)
-	for {
-		err := cl.Apply(ctx, docs)
-		if err == nil {
-			return nil
+	var last error
+	waited, err := wait.Until(ctx, timeout, poll, func(ctx context.Context) (bool, error) {
+		if applyErr := cl.Apply(ctx, docs); applyErr != nil {
+			last = applyErr
+			return false, nil
 		}
-		if time.Now().After(deadline) {
-			return err
-		}
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-time.After(poll):
-		}
+		return true, nil
+	})
+	if err != nil {
+		return err
 	}
+	if !waited.Done {
+		return last
+	}
+	return nil
 }
 
 // applyPool writes MetalLB's pool and advertisement, retrying until the
