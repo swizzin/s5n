@@ -87,32 +87,40 @@ func (d *Decision) Bootstrap(ctx context.Context, opts Options) (Result, error) 
 
 	// 2. A cluster on this host, at a distribution's kubeconfig path.
 	var skips []string
-	for _, path := range d.Source.Candidates() {
-		kc, err := d.Source.Read(path)
+	var dead []Finding
+	for _, cand := range d.Source.Candidates() {
+		kc, err := d.Source.Read(cand.Path)
 		if err != nil {
 			continue // absent candidate, not a skip
 		}
 		probe, err := d.NewProber(kc)
 		if err != nil {
-			skips = append(skips, fmt.Sprintf("%s: %v", path, err))
+			skips = append(skips, fmt.Sprintf("%s: %v", cand.Path, err))
+			dead = appendDeadCandidate(dead, cand, err)
 			continue
 		}
 		if _, err := probe.Version(ctx); err != nil {
-			skips = append(skips, describeSkip(path, "version", err))
+			skips = append(skips, describeSkip(cand.Path, "version", err))
+			dead = appendDeadCandidate(dead, cand, err)
 			continue
 		}
 		if err := probe.CanAdmin(ctx); err != nil {
-			skips = append(skips, describeSkip(path, "privileges", err))
+			skips = append(skips, describeSkip(cand.Path, "privileges", err))
+			dead = appendDeadCandidate(dead, cand, err)
 			continue
 		}
-		return d.useCluster(ctx, opts, kc, path, SourceExternal, "cluster on this host"), nil
+		return d.useCluster(ctx, opts, kc, cand.Path, SourceExternal, "cluster on this host"), nil
 	}
 
-	// 3. Something present but not usable. Docker and containerd are excluded
+	// 3. Something present but not usable. A distribution-owned kubeconfig that
+	// exists but cannot be used is part of this evidence: the distribution
+	// wrote it when it installed a cluster, so a dead one means that cluster is
+	// still on the host. Docker and containerd are excluded
 	// from the blockers: they also run on hosts with no Kubernetes, which are
 	// exactly the clean k0s targets. They stay as notes, and a runtime holding
 	// an API port is caught by the listening-port finding.
 	blockers, notes := classifyFindings(d.Host.Present())
+	blockers = append(blockers, dead...)
 	if len(blockers) > 0 {
 		res := stop("a cluster appears to be present on this host but is not usable through any kubeconfig:")
 		res.Skips = skips
@@ -359,6 +367,20 @@ func describeSkip(path, stage string, err error) string {
 		return fmt.Sprintf("%s: skipped: remote cluster", path)
 	}
 	return fmt.Sprintf("%s: %s: %v", path, stage, err)
+}
+
+// appendDeadCandidate marks a candidate whose kubeconfig exists but cannot be
+// used as a blocker when a distribution owns that path. Only a distribution
+// that installed a cluster writes its admin kubeconfig there, so a dead one is
+// evidence of a broken installation box must not build a second cluster over.
+// ~/.kube/config is not distribution-owned: it is often a remote cluster, and
+// an unusable one is only a skip. A dry run's ErrRemoteCluster says nothing
+// about the cluster's health, so it never blocks either.
+func appendDeadCandidate(dead []Finding, cand Candidate, err error) []Finding {
+	if !cand.DistributionOwned || errors.Is(err, ErrRemoteCluster) {
+		return dead
+	}
+	return append(dead, Finding{Kind: "kubeconfig", Name: cand.Path})
 }
 
 func stop(reason string) Result {

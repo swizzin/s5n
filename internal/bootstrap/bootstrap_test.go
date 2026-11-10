@@ -3,6 +3,7 @@ package bootstrap
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"strings"
 	"testing"
@@ -11,7 +12,7 @@ import (
 // ---- fakes ----
 
 type fakeSource struct {
-	candidates  []string
+	candidates  []Candidate
 	files       map[string][]byte
 	readErr     map[string]error
 	reads       []string
@@ -19,7 +20,7 @@ type fakeSource struct {
 	log         *[]string
 }
 
-func (f *fakeSource) Candidates() []string {
+func (f *fakeSource) Candidates() []Candidate {
 	f.candidatesN++
 	return f.candidates
 }
@@ -286,11 +287,13 @@ func TestBootstrapExplicitUsesCluster(t *testing.T) {
 // ---- candidate: /version answers but SSAR denies -> not usable ----
 
 func TestBootstrapCandidateSSARDeniedNotUsable(t *testing.T) {
-	const candidate = "/etc/rancher/k3s/k3s.yaml"
+	// A user-owned kubeconfig is often a remote cluster: unusable, it is a skip
+	// rather than evidence that this host holds a broken installation.
+	const candidate = "/home/example/.kube/config"
 
 	t.Run("falls through to clean host", func(t *testing.T) {
 		src := &fakeSource{
-			candidates: []string{candidate},
+			candidates: []Candidate{{Path: candidate}},
 			files:      map[string][]byte{candidate: []byte("kubeconfig")},
 		}
 		prober := &fakeProber{
@@ -321,7 +324,7 @@ func TestBootstrapCandidateSSARDeniedNotUsable(t *testing.T) {
 
 	t.Run("stops when the host shows an existing cluster", func(t *testing.T) {
 		src := &fakeSource{
-			candidates: []string{candidate},
+			candidates: []Candidate{{Path: candidate}},
 			files:      map[string][]byte{candidate: []byte("kubeconfig")},
 		}
 		prober := &fakeProber{
@@ -347,10 +350,118 @@ func TestBootstrapCandidateSSARDeniedNotUsable(t *testing.T) {
 	})
 }
 
+// ---- a dead distribution kubeconfig blocks; a dead user one does not ----
+
+// A distribution writes its admin kubeconfig only after it installed a
+// cluster, so one that exists but no longer answers is a broken installation.
+// Installing k0s on top would be a second cluster over the first. The finding
+// names it alongside any host evidence, and the skip line keeps the reason.
+func TestBootstrapDeadDistributionKubeconfigStops(t *testing.T) {
+	const candidate = "/etc/kubernetes/admin.conf"
+	trace := &[]string{}
+	src := &fakeSource{
+		candidates: []Candidate{{Path: candidate, DistributionOwned: true}},
+		files:      map[string][]byte{candidate: []byte("kubeconfig")},
+		log:        trace,
+	}
+	prober := &fakeProber{versionErr: errors.New("connection refused"), log: trace}
+	recs := &fakeRecords{log: trace}
+	inst := &fakeInstaller{log: trace}
+	d := newDecision(src, prober, &fakeHost{}, recs, inst)
+
+	res, err := d.Bootstrap(context.Background(), Options{})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if res.Action != ActionStop {
+		t.Fatalf("action = %q, want stop; reason: %s", res.Action, res.Reason)
+	}
+	if !strings.Contains(res.Reason, "kubeconfig "+candidate) {
+		t.Errorf("reason = %q, want the dead distribution kubeconfig listed as a finding", res.Reason)
+	}
+	if !strings.Contains(res.Reason, "box will not install a second cluster over a broken first one") {
+		t.Errorf("reason = %q, want the broken-first-cluster framing", res.Reason)
+	}
+	if len(res.Skips) != 1 || !strings.Contains(res.Skips[0], candidate) || !strings.Contains(res.Skips[0], "connection refused") {
+		t.Errorf("skips = %v, want the skip line kept with its reason", res.Skips)
+	}
+	// No gate after a side effect: nothing is capability-probed, installed or
+	// recorded.
+	if prober.calls["platform"] != 0 {
+		t.Errorf("platform probed before the refusal: %v", prober.calls)
+	}
+	if len(inst.plans) != 0 || len(recs.saved) != 0 {
+		t.Errorf("a refused host was installed onto or recorded: %d plans, %d records", len(inst.plans), len(recs.saved))
+	}
+	if got := strings.Join(*trace, "|"); strings.Contains(got, "install k0s") || strings.Contains(got, "save record") {
+		t.Errorf("the refusal reached a write: %v", *trace)
+	}
+}
+
+// ~/.kube/config is not distribution-owned: it is often a remote cluster, so
+// an unusable one stays a printed skip and the clean-host install goes ahead.
+func TestBootstrapDeadUserKubeconfigInstalls(t *testing.T) {
+	const candidate = "/home/example/.kube/config"
+	src := &fakeSource{
+		candidates: []Candidate{{Path: candidate, DistributionOwned: false}},
+		files:      map[string][]byte{candidate: []byte("kubeconfig")},
+	}
+	prober := &fakeProber{versionErr: errors.New("connection refused")}
+	recs := &fakeRecords{}
+	inst := &fakeInstaller{}
+	d := newDecision(src, prober, &fakeHost{}, recs, inst)
+
+	res, err := d.Bootstrap(context.Background(), Options{DryRun: true})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if res.Action != ActionInstall {
+		t.Fatalf("action = %q, want install; reason: %s", res.Action, res.Reason)
+	}
+	if len(res.Skips) != 1 || !strings.Contains(res.Skips[0], candidate) {
+		t.Errorf("skips = %v, want the unusable user kubeconfig printed", res.Skips)
+	}
+	if len(inst.plans) != 1 {
+		t.Errorf("installer plans = %v, want one clean-host plan", inst.plans)
+	}
+	if len(recs.saved) != 0 {
+		t.Errorf("a dry run recorded a cluster it did not install")
+	}
+}
+
+// A dry run refuses to probe a remote cluster (ErrRemoteCluster), even at a
+// distribution path reached through a symlink or a copied file. That guard is
+// not evidence of a broken install and must not block the plan.
+func TestBootstrapRemoteCandidateSkipStillPlans(t *testing.T) {
+	const candidate = "/etc/rancher/k3s/k3s.yaml"
+	src := &fakeSource{
+		candidates: []Candidate{{Path: candidate, DistributionOwned: true}},
+		files:      map[string][]byte{candidate: []byte("kubeconfig")},
+	}
+	prober := &fakeProber{versionErr: fmt.Errorf("%w (server 203.0.113.10:6443)", ErrRemoteCluster)}
+	recs := &fakeRecords{}
+	inst := &fakeInstaller{}
+	d := newDecision(src, prober, &fakeHost{}, recs, inst)
+
+	res, err := d.Bootstrap(context.Background(), Options{DryRun: true})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if res.Action != ActionInstall {
+		t.Fatalf("action = %q, want install; reason: %s", res.Action, res.Reason)
+	}
+	if len(res.Skips) != 1 || !strings.Contains(res.Skips[0], "skipped: remote cluster") {
+		t.Errorf("skips = %v, want the remote skip printed", res.Skips)
+	}
+	if len(inst.plans) != 1 {
+		t.Errorf("installer plans = %v, want one clean-host plan", inst.plans)
+	}
+}
+
 // ---- present but unusable: stop with an explanation naming what was found ----
 
 func TestBootstrapPresentButUnusableStops(t *testing.T) {
-	src := &fakeSource{candidates: []string{"/var/lib/k0s/pki/admin.conf"}}
+	src := &fakeSource{candidates: []Candidate{{Path: "/var/lib/k0s/pki/admin.conf", DistributionOwned: true}}}
 	prober := &fakeProber{versionErr: errors.New("connection refused")}
 	host := &fakeHost{findings: []Finding{
 		{Kind: "process", Name: "kubelet"},
@@ -509,7 +620,7 @@ func TestBootstrapContainerRuntimeNotACluster(t *testing.T) {
 func TestBootstrapCleanHostInstalls(t *testing.T) {
 	trace := &[]string{}
 	src := &fakeSource{
-		candidates: []string{},
+		candidates: []Candidate{},
 		files:      map[string][]byte{K0sAdminConfig: []byte("kubeconfig")},
 		log:        trace,
 	}

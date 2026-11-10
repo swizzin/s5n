@@ -9,10 +9,10 @@ import (
 )
 
 // LinuxHost reports, read-only, the host-level signs PLAN.md step 3 lists: a
-// running kubelet; a kubelet/k3s/k0s/rke2/microk8s binary or unit; or anything
-// listening on 6443, 10250 or 2379. Docker and containerd are scanned as well,
-// but they are never blockers by themselves: they also run on hosts that have
-// no Kubernetes at all, and k0s brings its own containerd. classifyFindings
+// running kubelet process; a kubelet/k3s/k0s/rke2/microk8s binary or unit; or
+// anything listening on 6443, 10250 or 2379. Docker and containerd are scanned
+// as well, but they are never blockers by themselves: they also run on hosts
+// that have no Kubernetes at all, and k0s brings its own containerd. classifyFindings
 // separates them from the blockers, and a runtime that is actually holding an
 // API port is caught by the port finding itself.
 type LinuxHost struct{}
@@ -60,11 +60,12 @@ func classifyFindings(findings []Finding) (blockers, notes []Finding) {
 }
 
 func binaryNames() []string {
-	return []string{"k3s", "k0s", "rke2", "microk8s"}
+	return []string{"kubelet", "k3s", "k0s", "rke2", "microk8s"}
 }
 
 func unitNames() []string {
 	return []string{
+		"kubelet.service",
 		"k3s.service", "k3s-agent.service",
 		"rke2.service", "rke2-server.service", "rke2-agent.service",
 		"k0scontroller.service", "k0sworker.service",

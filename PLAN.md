@@ -236,6 +236,8 @@ lives in Go, where it can be tested, and none in bash.
    `/var/lib/k0s/pki/admin.conf`, kubeadm's `/etc/kubernetes/admin.conf`,
    `~/.kube/config`). A candidate counts only if `/version` answers and a
    SelfSubjectAccessReview says this user can create namespaces, CRDs and cluster roles.
+   The first four are distribution-owned (see step 4); `~/.kube/config` is not, because
+   it is often a remote cluster, so an unusable one is only a skip.
 3. **A single-node cluster, or nothing.** The distribution is identified only to choose
    presets and to refuse by name: the server version suffix (`+k3s`, `+k0s`, `-eks-`,
    `-gke.`), a `kubeadm-config` ConfigMap, the node's labels. A managed cluster (EKS,
@@ -246,11 +248,18 @@ lives in Go, where it can be tested, and none in bash.
    address, and `box` backs up one host — and one listing no nodes is refused as a
    fault. `box` names which and stops. The chart is unaffected: it still installs
    anywhere, managed clusters included, through plain `helm install`.
-4. **Something present but not usable.** A running kubelet, a `k3s`/`k0s`/`rke2`/
-   `microk8s` binary or unit, or anything listening on 6443, 10250 or 2379. Docker or
+4. **Something present but not usable.** A running kubelet; a
+   `kubelet`/`k3s`/`k0s`/`rke2`/`microk8s` binary or unit; anything listening on 6443,
+   10250 or 2379; or a kubeconfig at a distribution-owned path
+   (`/etc/rancher/k3s/k3s.yaml`, `/etc/rancher/rke2/rke2.yaml`,
+   `/var/lib/k0s/pki/admin.conf`, `/etc/kubernetes/admin.conf`) that exists but does not
+   answer or cannot be administered — the distribution wrote it when it installed a
+   cluster, so a dead one means that cluster is still there. Docker or
    containerd alone is not a cluster: it is reported as a note and the install goes
    ahead, and a runtime holding one of those ports is caught by the listener. `box`
-   stops and explains; it never installs a second cluster over a broken first one.
+   stops and explains; it never installs a second cluster over a broken first one. An
+   unusable `~/.kube/config` and a dry run's remote-cluster skip stay skips: neither is
+   evidence of a broken installation.
 5. **A clean host.** Only now does it install k0s: pinned version and sha256,
    `k0s install controller --single`, then wait for the node to be Ready.
 

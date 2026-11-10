@@ -252,7 +252,10 @@ to another cluster is the operator's decision (unset `KUBECONFIG`, drop
 `--kubeconfig`, or remove the record deliberately). The recorded class is kept
 while the cluster still serves it (Accepted, and publishing the feature the routes
 need); what a re-run repairs instead is box's own missing implementation, which is
-what a first run whose platform apply failed leaves behind. So a second bootstrap
+what a first run whose platform apply failed leaves behind. On a fresh host, a
+kubeconfig at a distribution's own path that exists but does not answer blocks the
+install as a broken cluster; an unusable `~/.kube/config` or a dry run's
+remote-cluster skip is only a skip. So a second bootstrap
 plans and installs whatever the probe says is missing — Envoy Gateway, the Gateway API
 CRDs, MetalLB and its pool, the admission policy — instead of reporting components it
 never looked at as unknown.

@@ -9,21 +9,22 @@ import (
 // PLAN.md's order, plus the user's ~/.kube/config.
 type FilesystemSource struct{}
 
-// Candidates returns the candidate paths in PLAN.md's order. A candidate only
+// Candidates returns the candidate paths in PLAN.md's order, each marked with
+// whether the distribution that owns this host writes it. A candidate only
 // counts after the prober validates it; most will not exist on a given host.
-func (FilesystemSource) Candidates() []string {
+func (FilesystemSource) Candidates() []Candidate {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		home = ""
 	}
-	paths := []string{
-		"/etc/rancher/k3s/k3s.yaml",
-		"/etc/rancher/rke2/rke2.yaml",
-		"/var/lib/k0s/pki/admin.conf",
-		"/etc/kubernetes/admin.conf",
+	paths := []Candidate{
+		{Path: "/etc/rancher/k3s/k3s.yaml", DistributionOwned: true},
+		{Path: "/etc/rancher/rke2/rke2.yaml", DistributionOwned: true},
+		{Path: "/var/lib/k0s/pki/admin.conf", DistributionOwned: true},
+		{Path: "/etc/kubernetes/admin.conf", DistributionOwned: true},
 	}
 	if home != "" {
-		paths = append(paths, filepath.Join(home, ".kube", "config"))
+		paths = append(paths, Candidate{Path: filepath.Join(home, ".kube", "config")})
 	}
 	return paths
 }

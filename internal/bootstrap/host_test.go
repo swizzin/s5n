@@ -45,6 +45,30 @@ func TestRunningProcessesNameOnly(t *testing.T) {
 	}
 }
 
+func TestHostNamesIncludeKubelet(t *testing.T) {
+	// PLAN step 4 promises a kubelet binary or unit as evidence of a cluster;
+	// the lists must actually carry them.
+	for _, name := range []string{"kubelet"} {
+		if !containsName(binaryNames(), name) {
+			t.Errorf("binaryNames() = %v, want %q", binaryNames(), name)
+		}
+	}
+	for _, name := range []string{"kubelet.service"} {
+		if !containsName(unitNames(), name) {
+			t.Errorf("unitNames() = %v, want %q", unitNames(), name)
+		}
+	}
+}
+
+func containsName(names []string, want string) bool {
+	for _, n := range names {
+		if n == want {
+			return true
+		}
+	}
+	return false
+}
+
 func TestClassifyFindings(t *testing.T) {
 	// Docker and containerd run on hosts with no Kubernetes, so they are notes;
 	// every other sign of an installation stays a blocker. A runtime holding an

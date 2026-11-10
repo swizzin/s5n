@@ -69,7 +69,7 @@ type Cluster struct {
 // Finding is one piece of evidence that a cluster already exists on this host
 // but is not usable through any discovered kubeconfig.
 type Finding struct {
-	Kind string // "process", "unit", "binary", "port"
+	Kind string // "process", "unit", "binary", "port", "kubeconfig"
 	Name string // "kubelet", "k3s.service", "/usr/local/bin/k0s", "6443"
 }
 
@@ -116,11 +116,21 @@ var ErrRemoteCluster = errors.New("remote cluster: not probed")
 // callers can errors.Is it.
 var ErrNotExist = fs.ErrNotExist
 
+// Candidate is one kubeconfig path box will try. DistributionOwned marks the
+// paths a distribution writes for the cluster it installed: one that exists but
+// is not usable is evidence of a broken installation, not a stray file. The
+// user's ~/.kube/config is not distribution-owned; it is often a remote
+// cluster, so an unusable one is only a skip.
+type Candidate struct {
+	Path              string
+	DistributionOwned bool
+}
+
 // ConfigSource reads kubeconfig files from the local filesystem. Candidates
 // lists where distributions put their admin kubeconfig; a candidate only counts
 // after the prober validates it.
 type ConfigSource interface {
-	Candidates() []string
+	Candidates() []Candidate
 	Read(path string) ([]byte, error)
 }
 
