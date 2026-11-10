@@ -61,24 +61,45 @@ Read `PLAN.md` first. It is the architecture; this file is how to work in the re
   `NO_COLOR` keeps the form and the live layout without colour.
 - `internal/release/` — `box apply`'s decision over `ChartSource`, `ReleaseClient` and
   `Confirmer`, with the Helm v4 + client-go implementation in `helm.go`. With
-  `internal/platform`, the only package that imports Helm or client-go; only `cmd/box`
+  `internal/platform` and `internal/bootstrap` (clientcmd for the prober and the k0s
+  readiness check), the only packages that import Helm or client-go; only `cmd/box`
   links them. It creates a missing
   seedbox namespace (Pod Security `restricted`, managed-by `box`) before the first
   volume, and removes only the volumes it created if a run fails before the release.
+  box pulls its chart by version from `oci://ghcr.io/swizzin/charts/s5n` (`oci.go`,
+  `chart.go`); `minbox.go` is the chart's `box.s5n/min-box` rule, refused before any
+  cluster client opens.
 - `internal/bootstrap/` — the cluster decision, and on a clean host the k0s
   installer: the release and its sha256 per architecture are pinned in `policy.go`, the
   download is verified and renamed into `/usr/local/bin/k0s`, then `k0s install
   controller --single` and `k0s start`, and bootstrap waits for `/readyz` *and* a Ready
   node before it records the cluster. After a failure it names what it left and the
   undo (`k0s stop; k0s reset`); it never runs the reset. A record is re-probed, never
-  trusted: the full probe chain and every gate run again on the cluster it names.
+  trusted: the full probe chain and every gate run again on the cluster it names. An
+  explicit path never replaces it: `--kubeconfig`/`KUBECONFIG` naming the record's own
+  kubeconfig is the recorded re-run, and any other file stops before a probe or write,
+  naming the record file (`RecordStore.RecordPath()`). Candidates carry
+  `DistributionOwned` (`source.go`): a distribution-owned kubeconfig that exists but
+  fails `/version` or the SSAR blocks the install, while a dead `~/.kube/config` or a
+  dry run's remote skip does not. The host scan includes the kubelet binary and unit.
+  The prober and the readiness check load kubeconfigs through clientcmd (`kubeClient`),
+  so tokens, tokenFile, client certificates and exec plugins work as under kubectl and
+  as for box's writers; a kubeconfig with no current-context is refused by name, and
+  box never picks a context.
 - `internal/platform/` — bootstrap's write half. It applies only what the decision says
   to install: Envoy Gateway from its OCI chart, MetalLB (the node's InternalIP as a /32
   pool, L2 advertisement), the GatewayClass and Gateway, the admission policy. It prints
   the plan, checks RBAC with SelfSubjectAccessReview, asks once, then writes with
   bounded readiness waits. A release already at its pin is verified, never upgraded, so
   a re-run makes no Helm revision. cert-manager is not installed yet and bootstrap says
-  so.
+  so. Every chart fetch (platform or apply) runs Helm on a private, empty home: settings
+  built as a literal inside a 0700 temp dir removed when the fetch ends. Never
+  `cli.New()`, never `repo.FindChartInRepoURL` (it writes into helmpath's
+  environment-derived cache), so root's Helm environment can't redirect, cache or break
+  what box installs.
+- `internal/fetch/` — the retrying transport for every bootstrap download: GET/HEAD
+  only, on 5xx/429 or a refused, reset or timed-out connection, four attempts at
+  1s/2s/4s, ctx honoured. A 404 or a certificate error is the answer on the first try.
 - `install/platform/` — the manifests box installs (`gateway/`, `admission/`), each
   with its `embed.go` beside the file, because go:embed can't reach a sibling tree. The
   bytes box compiles in are the bytes the e2e applies; product code never imports
@@ -106,7 +127,8 @@ Read `PLAN.md` first. It is the architecture; this file is how to work in the re
   LoadBalancer address and accepts a TCP connect, `/data` hardlinks work, NetworkPolicy
   allows Prowlarr→Sonarr and blocks an outside pod, the wiring Job connects everything,
   and a second `helm upgrade` performs **zero writes** with app state identical before
-  and after. `--keep` leaves the cluster up.
+  and after. The 4K Radarr runs on category `4K/Movies`, so a nested category meets real
+  qBittorrent and a real Arr root folder on every run. `--keep` leaves the cluster up.
 - `hack/e2e-box.sh` — the same install done by box instead of helm, through `box
   bootstrap` on three kind clusters: `fresh` (box installs the whole platform),
   `preinstalled` (MetalLB already there, so box adds none) and `existing` (Gateway API
@@ -115,12 +137,21 @@ Read `PLAN.md` first. It is the architecture; this file is how to work in the re
   Helm revision, spec or label (spec and labels, not resourceVersion: controllers
   rewrite status). `fresh` also runs init's no-op re-run, a one-key `box apply` edit
   and a `helm uninstall` that keeps the claims. `all` (the default) runs the three and
-  prints each wall time. Not in CI yet.
+  prints each wall time. The chart is packaged from the same commit, pushed to a
+  distribution registry container on 127.0.0.1, and pulled by box through
+  `--chart-repo`/`--chart-version`; there is no local-chart flag. box under test is
+  built with `-X main.version=<chart version>`, and the run fails on the dev-build
+  notice. Not in CI yet.
 - `hack/render-grant/` — `internal/admission` as a command, the e2e's caller until
   `box adduser` exists.
 - `.github/workflows/ci.yaml` — every PR and push to main: gofmt/vet/`go test -race`,
   `hack/validate-chart.sh` on 1.30/1.34/1.37, then the kind e2e.
   Actions are pinned by commit SHA.
+- `.github/workflows/release.yaml` — a `v*` tag publishes the image (amd64 + arm64,
+  digest captured), the chart with that digest stamped into the packaged copy and
+  validated before `helm push`, then box's binaries and `sha256sums.txt` as a GitHub
+  release. It fails unless Chart.yaml's version and appVersion equal the tag. Nothing
+  publishes from a branch.
 
 ## Commands
 
@@ -152,7 +183,12 @@ one needs a live `lookup`. The e2e asserts the policy exists in the cluster.
    the chart's: `storage.{data,config}.existingClaim` name claims that already exist, and
    `storage` accepts nothing else (no hostPath, storage class or size). box creates the
    static PV and claim from the grant's `storage.<kind>.path`; a plain `helm install`
-   brings its own. No CSI or provisioner: a volume per claim splits `/data`.
+   brings its own. No CSI or provisioner: a volume per claim splits `/data`. A category
+   is one qBittorrent category and one directory name in each tree: letters, digits,
+   `.`, `_`, `-`, and at most one `/` for a subcategory (`4K/Movies`). It lives only in
+   `wiring.json`, never in an object name, label or port name; the wiring Job creates
+   the intermediate directory in both trees, owned like the leaf. The schema accepts
+   the names an existing seedbox already uses, because migrate renames nothing.
 4. **Pod Security `restricted` must admit every pod.** No hostPath in pod specs (the only
    hostPath is in the static PV box creates), no hostPort, no hostNetwork, no privileged,
    no root. Security contexts come only from `s5n.podSecurity` / `s5n.containerSecurity`
@@ -397,6 +433,24 @@ one needs a live `lookup`. The e2e asserts the policy exists in the cluster.
   it is exactly the invariant the apps-level tests assert directly (`internal/apps/arr_test.go`'s
   `TestEnsureDownloadClientNeverLeaksMaskedSecret`), because the overlay is new code and it
   would have been easy to accidentally route the live (masked) value back into the PUT body.
+- Helm's chart-repo getter takes only a concrete `*http.Transport` and builds its own
+  client, so its retry wraps `Getter.Get` and reads the status from Helm's error text.
+  `TestGetterStatusReadsTheStatusHelmReturns` pins that wording, so a Helm bump fails a
+  test instead of silently disabling retries. `Retry-After` is honoured only where box
+  sees headers (k0s download, OCI); on the chart-repo path the backoff is box's own.
+- Helm's registry client still opens `$DOCKER_CONFIG/config.json` when it is built (no
+  option disables it); the anonymous authorizer means nothing from it is ever sent.
+- `go.mod` carries `distribution/v3` for the in-process OCI registry in
+  `TestOCIRoundTrip` only. Its ~45 indirect requirements must never reach
+  `go list -deps ./cmd/...`.
+- `--dry-run` refuses a non-loopback host in the prober's `get`/`post`, before the
+  first request and therefore before client-go runs an exec plugin. Keep the guard
+  there, not in a transport wrapper.
+- clientcmd sends no credentials (token, certificate, exec) to a plain `http://`
+  server, exactly as kubectl does. A fake API over HTTP proves reachability, not
+  authentication; auth tests need TLS.
+- Which kubeconfigs are distribution-owned is `source.go`'s answer. Don't add path
+  matching in `decision.go`.
 
 ## Next work
 
@@ -404,10 +458,8 @@ The proof of concept: box takes a fresh host from nothing to a running, wired st
 The code path exists (k0s, platform layer, init, wiring on an empty data path). What's
 left:
 
-1. Publish the s5n image and the chart, so a host needs neither a checkout (`--chart`)
-   nor a side-loaded image.
-2. Retry a 5xx on chart and manifest fetches; one upstream 504 fails a bootstrap today.
-3. A run on a clean VM.
+1. A run on a clean VM. The image, the chart and box's binaries are published from
+   `v*` tags and pull anonymously, so a host needs no checkout and no side-loaded image.
 
 Then: cert-manager on the platform layer, `hack/e2e-box.sh` in CI, the upgrade e2e,
 and `adduser`. The product decisions are
