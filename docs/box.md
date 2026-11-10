@@ -303,8 +303,8 @@ compiled in. The plan names every release, version and namespace and asks before
 first write (`--yes`, or no terminal, is unattended). A release already at its pinned
 version is verified rather than upgraded, so a second bootstrap creates no Helm
 revision; the objects box applies are server-side applies under field manager `box`, so
-re-applying them changes nothing. cert-manager is not installed yet: bootstrap says so
-and continues, leaving the decision's `install` for it unhandled rather than silent.
+re-applying them changes nothing. cert-manager is installed the same way, with the
+issuers box owns (see "Certificates").
 
 **MetalLB is installed unless the Gateway gets an address without it (decided).** In
 s5n, MetalLB has one job: giving the Gateway's Service the node address (the torrent port
@@ -371,25 +371,32 @@ PLAN settles the goal: cert-manager, HTTP-01 through the Gateway when the domain
 validated, self-signed otherwise. This is how box would do it.
 
 - **What bootstrap installs.** cert-manager from its OCI chart at a pinned version, with
-  its CRDs and Gateway API support switched on (`config.enableGatewayAPI`), in
+  its CRDs and Gateway API support switched on (`config.gatewayAPI.enabled`), in
   `cert-manager`. An existing cert-manager is used when its webhook answers, its version
   has the Gateway HTTP-01 solver, and its controller runs with Gateway API enabled. box
   reads that from the controller's config and never changes another install's flags. One
   that is present but has it switched off stops bootstrap and names the setting.
 - **Issuers are root's.** Two ClusterIssuers box owns: `s5n-letsencrypt` (ACME, HTTP-01
-  solver whose HTTPRoute attaches to the `s5n` Gateway's port-80 listener) and
+  solver whose HTTPRoute names the `s5n` Gateway but no listener, so it attaches to
+  every listener that admits `s5n-gateway`) and
   `s5n-selfsigned`. No ACME email: Let's Encrypt no longer sends expiry mail, so there is
   nothing to ask.
 - **Certificates live beside the Gateway.** A listener can only reference a Secret in
   its own namespace without a ReferenceGrant, so each host name gets a `Certificate` in
-  `s5n-gateway` and an HTTPS listener on 443 on the `s5n` Gateway, both written by root
+  `s5n-gateway`, plus an HTTPS listener on 443 and its own host-matched port-80 listener
+  on the `s5n` Gateway, all written by root
   from the grant's host name. Users never write listeners or Certificates. That keeps
   issuance in root's hands, the way the grant keeps ports and images there.
-- **HTTP stays open for the challenge only.** Once a host's certificate is Ready, its
-  port-80 traffic gets a redirect route to HTTPS. The solver's own route for
-  `/.well-known/acme-challenge/` is more specific and keeps winning, so renewals work.
+- **HTTP stays open for the challenge only.** Once a host's certificate is Ready, box
+  adds that host's two listeners and a redirect route to HTTPS on its port-80 listener.
+  Gateway API's listener isolation sends the host's port-80 requests to that listener
+  and no other, so its app routes answer only on 443, while hosts without a certificate
+  stay on the shared port-80 listener, untouched. The host's listener admits only
+  `s5n-gateway`, so no app route can attach there. The solver's own route for
+  `/.well-known/acme-challenge/` is an exact match and keeps winning, so renewals work.
+  Until the certificate is Ready, box writes no listener and the host stays on HTTP.
 - **Which issuer a host gets.** Each user has a domain, but not every domain is publicly
-  resolvable (`box.lan`, a split-horizon name). Proposed: init resolves the name. A
+  resolvable (`box.lan`, a split-horizon name). init resolves the name. A
   public address picks Let's Encrypt; a private address, or no answer, picks
   self-signed, and init says which and why. It doesn't compare the address with the
   node's, because a box behind NAT has a private node address and a public name that
