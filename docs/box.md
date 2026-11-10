@@ -128,14 +128,15 @@ user can't change it:
   cluster-scoped, so the user can't relabel their own.
 - **Routing.** Root adds a Gateway listener for the user's domain that only accepts
   routes from the user's namespace. Without it, one user's HTTPRoute could claim
-  another user's host name.
+  another user's host name. The login is attached to that listener (see Logins).
 
 **The cluster enforces the grant (decided).** box refuses a grant key in values, but a
 user holds a kubeconfig for their namespace and can skip box (`kubectl set image`,
 `helm upgrade` with their own values, a Service on any nodePort). So root installs a
 ValidatingAdmissionPolicy at `bootstrap` and binds it to each user namespace at
 `adduser`, with that user's grant as its parameters: only blessed image repositories,
-only the granted nodePort and Service type. Pod Security `restricted` still does the
+only the granted nodePort and Service type, and no SecurityPolicies or Gateways of
+the user's own (see Logins). Pod Security `restricted` still does the
 rest. This raises the chart's `kubeVersion` floor to 1.30, where the API is GA.
 
 **Root assigns the torrent port (decided).** It's a port on the node that every seedbox
@@ -175,31 +176,46 @@ way an ingress with basic auth does. The chart never wires per-app logins.
 
 **The provider is Authelia (decided).** Users live in a file with argon2id hashes, and
 Envoy's ext_authz asks Authelia about every request. Apps that speak OIDC (qui) use its
-OIDC provider. The file backend still needs Authelia's storage (SQLite, with its
-encryption key) for session state, so the users file and the database sit together on a
-claim box creates, never in a Secret: Authelia can't see a Secret's file change under
-it, and it rewrites the whole file on save. That means exactly one replica, with file
-watching on, so an `adduser` shows up without a restart.
+OIDC provider. box installs it from its own small manifests, not the upstream chart, so
+that it runs as a non-root user under Pod Security `restricted`. Authelia requires a
+storage backend (SQLite, with its encryption key), so the users file and the database sit
+together on a claim box creates, never in a Secret, because Authelia can't watch a file
+in a Secret volume. That means exactly one replica, with file watching on, so a password
+change shows up without a restart. Its sign-in page is served at `/auth` on each
+seedbox's own host name, so a seedbox needs one certificate and one cookie domain.
+
+**The login is on root's listener, and users can't take it off (decided).** Each user's
+domain has a Gateway listener that root creates at `adduser`. The SecurityPolicy that
+sends requests to Authelia targets that listener, so every route attached to it is behind
+the login, including any route the user adds later. Envoy Gateway lets a policy on a
+route override the listener's, so the grant denies users any write to SecurityPolicies,
+and to Gateways so a user can't open a listener of their own. Users still create their
+own HTTPRoutes, so the chart is unaffected. Exemptions live in Authelia's own rules, which
+root owns: paths that check their own key (the Arrs' `/api`, and `/ping` for health
+checks), Plex, Seerr and Tautulli, and the sign-in page itself. Each user's domain admits
+only that user.
+
+**Sessions live in Authelia's memory (decided).** Authelia keeps sessions in memory unless
+it has Redis, and box doesn't run one. Adding a user changes Authelia's rules, which means
+a restart, so `adduser` signs every user out. A login expires after an hour idle; "remember
+me" keeps it for 30 days.
 
 **A password changes only through `box chpasswd` (decided).** Root can set any user's
 password, and a user can set their own from their own box, in their own scope. The
 provider offers no self-service change and no reset, because Authelia allows those only
 after an emailed one-time code, and box asks for no mail server. A user who has
-forgotten their password asks root.
+forgotten their password asks root. Authelia still needs a notifier configured to start,
+so box gives it the filesystem one, which sends nothing.
 
 Proposed:
 
-- Envoy Gateway's SecurityPolicy attaches Authelia to each user's routes. Root creates
-  the policy at `adduser`, where the user's box can't remove it. Paths that check their
-  own key (the Arrs' `/api`, and `/ping` for health checks) bypass it, so mobile apps
-  keep working. The policy attaches per route, never at the Gateway, because only a
-  route-level policy can leave those paths out.
 - A user's `box chpasswd` can't reach the users file: their box holds a kubeconfig for
   their own namespace and nothing else. So the user's box hashes the password locally and
   leaves a request in the user's own namespace. A root-owned writer beside Authelia picks
   it up, maps the namespace to its login name from root's record, rewrites that one row
-  and deletes the request. Root's `chpasswd` takes the same path, so the users file has
-  one writer, and the password never leaves the machine it was typed on.
+  and deletes the request. Root's `chpasswd` takes the same path. With self-service off,
+  Authelia never writes the file itself, so the users file has one writer, and the
+  password never leaves the machine it was typed on.
 - Unattended, a password comes from a file or stdin, never a flag (it would sit in shell
   history and `ps`), and none supplied means a generated one, printed once.
 
