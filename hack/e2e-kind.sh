@@ -547,6 +547,40 @@ for path in /sonarr/ping /radarr/ping /prowlarr/ping; do
   code=$(curl -s -o /dev/null -w '%{http_code}' "http://${GW_ADDR}${path}")
   echo "GET ${path} via gateway -> ${code}"; [ "$code" = 200 ] || fail=1
 done
+
+# The logins decision (docs/box.md, "Logins"): one login at the edge, so every
+# Arr runs External authentication. Its UI and /initialize.json answer with no
+# credential, while /api stays API-key-gated. Forms with no user is a lockout,
+# and through the Gateway that is exactly a 302 to /login instead of the shell.
+for spec in sonarr:api/v3 radarr:api/v3 prowlarr:api/v1; do
+  app=${spec%%:*}; api=${spec##*:}
+  : >"$WORK/ui-headers"
+  code=$(curl -s -D "$WORK/ui-headers" -o "$WORK/ui-body" -w '%{http_code}' "http://${GW_ADDR}/${app}/" || true)
+  loc=$(grep -i '^location:' "$WORK/ui-headers" | tr -d '\r' | awk '{print $2}' || true)
+  echo "GET /${app}/ via gateway -> ${code} location='${loc}'"
+  [ "$code" = 200 ] || { echo "/${app}/ did not serve the UI: ${code}"; fail=1; }
+  case "$loc" in *login*) echo "/${app}/ redirected to ${loc}: the app is asking for a login of its own"; fail=1;; esac
+  grep -qi '<!doctype html' "$WORK/ui-body" || { echo "/${app}/ answered ${code} without an HTML document"; fail=1; }
+  if grep -qi 'login?returnUrl' "$WORK/ui-body"; then
+    echo "/${app}/ served a login page instead of the app"; fail=1
+  fi
+
+  # The API gate must be untouched: no key is 401, the release Secret's key is
+  # 200, and the status body says which method the app actually booted with, so
+  # a typo in the env var name cannot pass as "the UI is open anyway".
+  code=$(curl -s -o /dev/null -w '%{http_code}' "http://${GW_ADDR}/${app}/${api}/system/status" || true)
+  echo "GET /${app}/${api}/system/status without a key -> ${code} (want 401)"
+  [ "$code" = 401 ] || { echo "${app} answered its API without a key: ${code}"; fail=1; }
+  apikey=$($K -n "$NS" get secret s5n-keys -o jsonpath="{.data.${app}-apikey}" | base64 -d || true)
+  status=$(curl -s -w '\n%{http_code}' -H "X-Api-Key: ${apikey}" "http://${GW_ADDR}/${app}/${api}/system/status" || true)
+  code=${status##*$'\n'}; body=${status%$'\n'*}
+  method=$(printf '%s' "$body" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("authentication"))' 2>/dev/null || true)
+  echo "GET /${app}/${api}/system/status with the key -> ${code} authentication=${method}"
+  [ "$code" = 200 ] || { echo "${app} refused its own API key: ${code}"; fail=1; }
+  [ "$method" = external ] || { echo "${app} is not running External auth: ${method}"; fail=1; }
+done
+code=$(curl -s -o /dev/null -w '%{http_code}' "http://${GW_ADDR}/sonarr/initialize.json" || true)
+echo "GET /sonarr/initialize.json via gateway -> ${code}"; [ "$code" = 200 ] || fail=1
 code=$(curl -s -o /dev/null -w '%{http_code}' "http://${GW_ADDR}/qbittorrent/")
 echo "GET /qbittorrent/ via gateway -> ${code}"; [ "$code" = 200 ] || fail=1
 # Plex's /identity answers unauthenticated whether or not it is claimed, and

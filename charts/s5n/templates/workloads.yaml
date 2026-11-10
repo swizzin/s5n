@@ -94,10 +94,11 @@ spec:
                 secretKeyRef:
                   name: {{ include "s5n.secretName" $root }}
                   key: {{ printf "%s-apikey" $inst.name }}
+            # External is the no-op scheme: the UI and /initialize.json are open,
+            # /api stays API-key-gated, and AuthenticationRequired does nothing.
+            # The login is in front of the release (auth.edge), not in the app.
             - name: {{ $cfg.envPrefix }}__AUTH__METHOD
-              value: Forms
-            - name: {{ $cfg.envPrefix }}__AUTH__REQUIRED
-              value: Enabled
+              value: External
             {{- end }}
             {{- if eq $inst.app "qbittorrent" }}
             - name: QBT_WEBUI_PORT

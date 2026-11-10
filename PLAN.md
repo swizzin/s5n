@@ -181,8 +181,10 @@ recorded in the wiring ConfigMap, not by name and not by tag (see AGENTS.md inva
   starting point. After that they are user-owned: nothing re-applies them on upgrade,
   `box update` or reset, and an edited watermark is not drift. Only the data-contract
   fields above are re-asserted.
-- In every Arr: download client, category, root folder, `copyUsingHardlinks: true`, and
-  Forms auth with the shared admin credential. Every setting is read back and asserted,
+- In every Arr: download client, category, root folder and `copyUsingHardlinks: true`.
+  Auth is `External`, the no-op scheme: the UI trusts whoever got past the edge, so the
+  login is checked in front of the release and not inside the app (`docs/box.md`,
+  "Logins"). Every setting the Job owns is read back and asserted,
   and the Arr↔qBittorrent link is proven with the Arr's own connection test — Arr never
   returns the stored password, so a passing test is the only honest evidence.
 - Prowlarr: Arr applications registered, so indexers sync out; each registration is
