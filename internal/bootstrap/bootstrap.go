@@ -259,7 +259,11 @@ func ReportResult(res Result, r say.Reporter) {
 		r.Fact("kubeconfig", res.Kubeconfig)
 		reportSkips(r, res.Skips)
 		reportNotes(r, res.Notes)
-		r.Line(res.Reason)
+		// The facts above already name the source, the distribution and the
+		// kubeconfig; the reason says why, in one muted sentence instead of a
+		// second raw line. The plain transcript is unchanged: Plain.Muted and
+		// Plain.Line print the same words.
+		r.Muted(res.Reason)
 		return
 	}
 	// use-cluster / use-managed
