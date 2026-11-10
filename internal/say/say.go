@@ -46,6 +46,16 @@ type Item struct {
 	Text string
 }
 
+// ReceiptRow is one step of the wiring receipt: what was checked, what it cost
+// ("ok", "pending", "skipped" or "failed") and, when a live renderer has room
+// for it, the reason. Pending means a person still has to do something, which
+// a live renderer collects for after the final card.
+type ReceiptRow struct {
+	Name   string
+	Result string
+	Detail string
+}
+
 // Op is one step that starts and then finishes.
 //
 // Label is the present-tense line a live renderer animates; Plain is the line
@@ -84,10 +94,14 @@ type Reporter interface {
 	Fact(key, value string)
 	// List is a titled list of plain rows ("" omits the title).
 	List(title string, rows []string)
+	// Receipt is the wiring receipt: the overall status and one row per step.
+	// Pending rows wait on a person, so a live renderer may print them after
+	// the final card instead of in place.
+	Receipt(status string, rows []ReceiptRow)
 	// Plan is a titled list of marked items ("" omits the title).
 	Plan(title string, items []Item)
-	// Diff is a values diff: marked items with no title and no indent, which
-	// is how `box apply` has always printed them.
+	// Diff is a values diff: marked items with no title, printed flush left by
+	// the plain transcript, which is how `box apply` has always printed them.
 	Diff(items []Item)
 	// Line is one line of box's own prose.
 	Line(text string)
@@ -154,6 +168,19 @@ func (p *Plain) List(title string, rows []string) {
 	}
 	for _, row := range rows {
 		fmt.Fprintf(p.out(), "  %s\n", row)
+	}
+}
+
+// Receipt is the transcript's receipt: the same lines box has always printed,
+// with a pending row in place (a live renderer moves it after the card).
+func (p *Plain) Receipt(status string, rows []ReceiptRow) {
+	fmt.Fprintf(p.out(), "wiring %s\n", status)
+	for _, row := range rows {
+		if row.Detail != "" {
+			fmt.Fprintf(p.out(), "  %s: %s (%s)\n", row.Name, row.Result, row.Detail)
+			continue
+		}
+		fmt.Fprintf(p.out(), "  %s: %s\n", row.Name, row.Result)
 	}
 }
 

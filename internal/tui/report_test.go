@@ -27,6 +27,127 @@ func strip(s string) []string {
 	return out
 }
 
+// The wiring receipt is drawn row by row, and a row that waits on a person is
+// not buried in the middle of it: it comes after the card, under its own
+// heading, because it is the next thing to do.
+func TestReporterReceiptPutsPendingAfterTheCard(t *testing.T) {
+	var buf bytes.Buffer
+	r := NewReporter(ReporterOptions{Out: &buf, Width: 100, NoColor: true, Yes: true})
+	r.Phase("apply")
+	r.Receipt("ok", []say.ReceiptRow{
+		{Name: "qbittorrent/login", Result: "ok", Detail: "signed in"},
+		{Name: "sonarr/downloadclient", Result: "ok", Detail: "created"},
+		{Name: "plex/claim", Result: "pending", Detail: "no claim token"},
+		{Name: "tautulli/plex", Result: "pending", Detail: "plex is not configured yet"},
+	})
+	r.Banner("seedbox ready", "box.example.com")
+	r.Close()
+
+	lines := strip(buf.String())
+	card := indexPrefix(lines, "│ ✓ seedbox ready")
+	finish := indexOf(lines, "  to finish")
+	claim := indexOf(lines, "  ◌ plex/claim  no claim token")
+	if card < 0 || finish < 0 || claim < 0 {
+		t.Fatalf("missing a receipt line, a card or the to-finish list:\n%s", strings.Join(lines, "\n"))
+	}
+	if !(finish > card && claim > finish) {
+		t.Fatalf("pending rows are not after the card (card %d, heading %d, row %d):\n%s", card, finish, claim, strings.Join(lines, "\n"))
+	}
+	for _, want := range []string{"  ✓ wiring ok", "  ✓ qbittorrent/login  signed in", "  ✓ sonarr/downloadclient  created"} {
+		if indexOf(lines, want) < 0 {
+			t.Fatalf("receipt is missing %q:\n%s", want, strings.Join(lines, "\n"))
+		}
+	}
+}
+
+// Every check mark is one colour: the accent, wherever it is drawn. A ✓ in the
+// plan, a finished step, the chart and the card are the same glyph and the
+// same escape.
+func TestReporterUsesOneCheckColour(t *testing.T) {
+	var buf bytes.Buffer
+	r := NewReporter(ReporterOptions{Out: &buf, Width: 100, Yes: true})
+	r.Phase("apply")
+	r.Success("created namespace seedbox")
+	h := r.Start(say.Op{Label: "installing s5n"})
+	h.Done("applied: s5n revision 1")
+	r.Receipt("ok", []say.ReceiptRow{{Name: "wiring", Result: "ok"}})
+	r.Banner("seedbox ready", "box.example.com")
+	r.Close()
+
+	out := buf.String()
+	accent := "38;2;242;166;90"
+	total := 0
+	for i := 0; i < len(out); i++ {
+		if !strings.HasPrefix(out[i:], "✓") {
+			continue
+		}
+		total++
+		start := strings.LastIndex(out[:i], "\x1b[")
+		if start < 0 || !strings.Contains(out[start:i], accent) {
+			t.Fatalf("check mark %d is not accent-coloured (escape %q):\n%q", total, out[start:i], out)
+		}
+	}
+	if total < 5 {
+		t.Fatalf("expected check marks from every event, found %d:\n%q", total, out)
+	}
+}
+
+func indexPrefix(lines []string, want string) int {
+	for i, line := range lines {
+		if strings.HasPrefix(line, want) {
+			return i
+		}
+	}
+	return -1
+}
+
+func indexOf(lines []string, want string) int {
+	for i, line := range lines {
+		if line == want {
+			return i
+		}
+	}
+	return -1
+}
+
+// One block: nothing the reporter prints sits at column 0 under a phase frame.
+// Only the frames themselves (the masthead, the card, the error box) are flush
+// left; every fact, plan, step, list, warning, receipt row and continuation
+// starts at box's two columns, the same place huh's fields do.
+func TestReporterNeverWritesAtColumnZero(t *testing.T) {
+	var buf bytes.Buffer
+	r := NewReporter(ReporterOptions{Out: &buf, Width: 96, NoColor: true, Yes: true})
+	r.Phase("apply")
+	r.Fact("kubeconfig", "/home/example/.kube/config")
+	r.List("platform", []string{"gateway-api: auto -> install (no Gateway API CRDs)"})
+	r.Plan("plan", []say.Item{{Mark: say.Install, Text: "Namespace seedbox (Pod Security restricted)"}})
+	r.Diff([]say.Item{{Mark: say.Change, Text: "gateway.host: old.example.com -> box.example.com"}})
+	r.Line("s5n in seedbox: first install")
+	r.Muted("clean host: k0s v1.37.2+k0s.1 installed; using /var/lib/k0s/pki/admin.conf (k0s)")
+	r.Warn("namespace seedbox does not enforce Pod Security restricted (no label): root's labels win, box leaves it alone")
+	r.Success("created namespace seedbox (Pod Security restricted)")
+	r.Chart("s5n", "0.2.0", "oci://ghcr.io/swizzin/charts/s5n:0.2.0")
+	r.Created([]string{"/srv/s5n/data", "/srv/s5n/config", "/srv/s5n/config/radarr-4k"})
+	h := r.Start(say.Op{Label: "installing s5n in seedbox"})
+	h.Detail("this run created it")
+	h.Done("applied: s5n revision 1 in seedbox")
+	r.Receipt("ok", []say.ReceiptRow{{Name: "qbittorrent/login", Result: "ok", Detail: "signed in"}, {Name: "plex/claim", Result: "pending", Detail: "no claim token"}})
+	r.Banner("seedbox ready", "box.example.com")
+	r.Close()
+
+	for _, line := range strip(buf.String()) {
+		if line == "" {
+			continue
+		}
+		if strings.HasPrefix(line, "╭") || strings.HasPrefix(line, "│") || strings.HasPrefix(line, "╰") {
+			continue
+		}
+		if !strings.HasPrefix(line, "  ") {
+			t.Fatalf("line starts at column 0: %q\n%s", line, buf.String())
+		}
+	}
+}
+
 // Every line the live renderer leaves behind fits the terminal. The plain
 // transcript has the same promise, and the 80-column terminal is the narrowest
 // box claims to support.

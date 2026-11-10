@@ -430,7 +430,6 @@ func runApply(args []string) {
 	app := &release.Applier{
 		Charts:  chartSource(out),
 		Confirm: confirm,
-		Log:     os.Stdout,
 		Say:     out,
 		Open: func(namespace string) (release.ReleaseClient, error) {
 			return release.NewHelm(kc, namespace, release.ReleaseName)
@@ -586,7 +585,6 @@ func (o *initFlags) run(ctx context.Context, kubeconfig string, yes, plain bool,
 			app := &release.Applier{
 				Charts:  source,
 				Confirm: confirm,
-				Log:     os.Stdout,
 				Say:     out,
 				Open: func(namespace string) (release.ReleaseClient, error) {
 					return release.NewHelm(kc, namespace, release.ReleaseName)

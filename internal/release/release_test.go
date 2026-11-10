@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/swizzin/s5n/internal/say"
 	"github.com/swizzin/s5n/internal/seedbox"
 )
 
@@ -205,7 +206,7 @@ func newFakes(t *testing.T) *fakes {
 	f.store.events = &f.events
 	f.app = &Applier{
 		Confirm: &Terminal{Yes: true},
-		Log:     f.out,
+		Say:     &say.Plain{W: f.out},
 		Open: func(ns string) (ReleaseClient, error) {
 			f.openCalls++
 			f.namespace = ns

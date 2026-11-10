@@ -33,6 +33,12 @@ type ReporterOptions struct {
 	Yes bool
 }
 
+// indent is where every line the reporter prints under a phase frame starts.
+// It is the same two columns huh's fields and the setup record lines use, so a
+// whole run reads as one block; the frames themselves stay at column 0, like
+// the masthead.
+const indent = "  "
+
 // Reporter is say.Reporter in box's own dress: the masthead frame for a phase,
 // a spinner for the one step that is running, a ✓ line left in scrollback for
 // each finished step, plans with coloured marks, and the same huh confirm init
@@ -49,6 +55,9 @@ type Reporter struct {
 	ui     *UI
 	// yes answers every confirm without a form (--yes).
 	yes bool
+	// pending is the wiring receipt's rows that wait on a person. They are
+	// printed after the success card, because they are what to do next.
+	pending []say.ReceiptRow
 
 	mu     sync.Mutex
 	active *live
@@ -141,12 +150,13 @@ func (r *Reporter) Fact(key, value string) {
 	const kw = 14
 	k := fmt.Sprintf("%-*s", kw, key)
 	var b strings.Builder
+	cont := indent + strings.Repeat(" ", kw) + "  "
 	for i, line := range wrapText(value, r.width-2-kw-2) {
 		if i == 0 {
-			fmt.Fprintf(&b, "  %s  %s\n", r.chrome.paint(k, mutedStyle.Render(k)), r.chrome.paint(line, inkStyle.Render(line)))
+			fmt.Fprintf(&b, "%s%s  %s\n", indent, r.chrome.paint(k, mutedStyle.Render(k)), r.chrome.paint(line, inkStyle.Render(line)))
 			continue
 		}
-		fmt.Fprintf(&b, "  %s  %s\n", strings.Repeat(" ", kw), r.chrome.paint(line, inkStyle.Render(line)))
+		fmt.Fprintf(&b, "%s%s\n", cont, r.chrome.paint(line, inkStyle.Render(line)))
 	}
 	r.emit(b.String())
 }
@@ -156,15 +166,11 @@ func (r *Reporter) Fact(key, value string) {
 func (r *Reporter) List(title string, rows []string) {
 	var b strings.Builder
 	if title != "" {
-		b.WriteString("  " + r.chrome.paint(title, accentStyle.Bold(true).Render(title)) + "\n")
+		b.WriteString(indent + r.chrome.paint(title, accentStyle.Bold(true).Render(title)) + "\n")
 	}
 	for _, row := range rows {
-		for i, line := range wrapText(row, r.width-2) {
-			prefix := "  "
-			if i > 0 {
-				prefix = "  "
-			}
-			b.WriteString(prefix + r.chrome.paint(line, inkStyle.Render(line)) + "\n")
+		for _, line := range wrapText(row, r.width-lipgloss.Width(indent)) {
+			b.WriteString(indent + r.chrome.paint(line, inkStyle.Render(line)) + "\n")
 		}
 	}
 	r.emit(b.String())
@@ -174,30 +180,30 @@ func (r *Reporter) List(title string, rows []string) {
 // coloured: + installs, ~ changes, ? depends on an answer, ! is a warning,
 // = verifies and - removes.
 func (r *Reporter) Plan(title string, items []say.Item) {
-	r.plan(title, items, 2)
+	r.plan(title, items)
 }
 
-// Diff is a values diff: the same marks, no title and no indent, which is what
-// the plain transcript has always printed.
-func (r *Reporter) Diff(items []say.Item) { r.plan("", items, 0) }
+// Diff is a values diff: the same marks and the same indent. The plain
+// transcript has always printed these flush left, and still does; a live
+// renderer keeps its one block at box's two columns.
+func (r *Reporter) Diff(items []say.Item) { r.plan("", items) }
 
-func (r *Reporter) plan(title string, items []say.Item, indent int) {
+func (r *Reporter) plan(title string, items []say.Item) {
 	var b strings.Builder
-	pad := strings.Repeat(" ", indent)
 	if title != "" {
-		b.WriteString(pad + r.chrome.paint(title, accentStyle.Bold(true).Render(title)) + "\n")
+		b.WriteString(indent + r.chrome.paint(title, accentStyle.Bold(true).Render(title)) + "\n")
 	}
 	for _, it := range items {
 		mark := string(it.Mark)
 		if mark == "" {
 			mark = "·"
 		}
-		prefix := pad + mark + " "
+		prefix := indent + mark + " "
 		cont := strings.Repeat(" ", lipgloss.Width(prefix))
-		style := r.markStyle(it.Mark)
+		style := r.planStyle(it.Mark)
 		for i, line := range wrapText(it.Text, r.width-lipgloss.Width(prefix)) {
 			if i == 0 {
-				b.WriteString(pad + r.chrome.paint(mark, style.Render(mark)) + " " + r.chrome.paint(line, inkStyle.Render(line)) + "\n")
+				b.WriteString(indent + r.chrome.paint(mark, style.Render(mark)) + " " + r.chrome.paint(line, inkStyle.Render(line)) + "\n")
 				continue
 			}
 			b.WriteString(cont + r.chrome.paint(line, inkStyle.Render(line)) + "\n")
@@ -206,7 +212,8 @@ func (r *Reporter) plan(title string, items []say.Item, indent int) {
 	r.emit(b.String())
 }
 
-func (r *Reporter) markStyle(m say.Mark) lipgloss.Style {
+// planStyle colours a plan mark by what it does to the cluster.
+func (r *Reporter) planStyle(m say.Mark) lipgloss.Style {
 	switch m {
 	case say.Install, say.Verify:
 		return goodStyle
@@ -220,42 +227,48 @@ func (r *Reporter) markStyle(m say.Mark) lipgloss.Style {
 	return inkStyle
 }
 
-// Line is one line of box's prose, wrapped with its indent kept.
-func (r *Reporter) Line(text string) {
-	r.block("", text, inkStyle, "")
+// glyphStyle is the one rule for a status glyph: ✓ is accent, ✗ and ! are bad,
+// ◌ waits on a person and is accent too, · is a skip and muted. Every place a
+// glyph is drawn goes through here, so one run never shows a check in two
+// colours.
+func glyphStyle(g string) lipgloss.Style {
+	switch g {
+	case "✓", "◌":
+		return accentStyle
+	case "✗", "!", "⚠":
+		return badStyle
+	case "·":
+		return mutedStyle
+	}
+	return inkStyle
 }
+
+// Line is one line of box's prose, wrapped with its indent kept.
+func (r *Reporter) Line(text string) { r.block(text, "", inkStyle, inkStyle) }
 
 // Muted is explanation.
-func (r *Reporter) Muted(text string) {
-	r.block("", text, mutedStyle, "")
-}
+func (r *Reporter) Muted(text string) { r.block(text, "", mutedStyle, mutedStyle) }
 
-// Warn is a line that is a warning: marked red, wrapped.
-func (r *Reporter) Warn(text string) {
-	r.block("", text, badStyle, "⚠ ")
-}
+// Warn is a line that is a warning: marked and painted bad, wrapped.
+func (r *Reporter) Warn(text string) { r.block(text, "⚠ ", badStyle, badStyle) }
 
-// Success is something that finished well.
-func (r *Reporter) Success(text string) {
-	r.block("", text, inkStyle, "✓ ")
-}
+// Success is something that finished well: one accent ✓, then the words.
+func (r *Reporter) Success(text string) { r.block(text, "✓ ", glyphStyle("✓"), inkStyle) }
 
-func (r *Reporter) block(indent, text string, style lipgloss.Style, mark string) {
-	const pad = "  "
-	prefixPlain := pad + mark
+func (r *Reporter) block(text, mark string, markStyle, textStyle lipgloss.Style) {
+	prefixPlain := indent + mark
 	cont := strings.Repeat(" ", lipgloss.Width(prefixPlain))
 	var b strings.Builder
 	for i, line := range wrapText(text, r.width-lipgloss.Width(prefixPlain)) {
 		if i == 0 {
+			b.WriteString(indent)
 			if mark != "" {
-				b.WriteString(pad + r.chrome.paint(mark, style.Render(mark)))
-			} else {
-				b.WriteString(pad)
+				b.WriteString(r.chrome.paint(mark, markStyle.Render(mark)))
 			}
-			b.WriteString(r.chrome.paint(line, style.Render(line)) + "\n")
+			b.WriteString(r.chrome.paint(line, textStyle.Render(line)) + "\n")
 			continue
 		}
-		b.WriteString(cont + r.chrome.paint(line, style.Render(line)) + "\n")
+		b.WriteString(cont + r.chrome.paint(line, textStyle.Render(line)) + "\n")
 	}
 	r.emit(b.String())
 }
@@ -263,8 +276,8 @@ func (r *Reporter) block(indent, text string, style lipgloss.Style, mark string)
 // Chart names the release box pulled. The reference is the muted detail; the
 // name and version are what a person needs.
 func (r *Reporter) Chart(name, version, ref string) {
-	mark := r.chrome.paint("✓", accentStyle.Render("✓"))
-	head := "  " + mark + " chart " + name + " " + version
+	mark := r.chrome.paint("✓", glyphStyle("✓").Render("✓"))
+	head := indent + mark + " chart " + name + " " + version
 	tail := " (" + ref + ")"
 	if lipgloss.Width(head+tail) <= r.width {
 		r.emit(head + r.chrome.paint(tail, mutedStyle.Render(tail)) + "\n")
@@ -278,9 +291,9 @@ func (r *Reporter) Chart(name, version, ref string) {
 	r.emit(b.String())
 }
 
-// Created reports the directories init made. A long comma list runs off the
-// screen, so a live renderer says how many, under which root, and wraps the
-// names in muted text below.
+// Created reports the directories init made. A live renderer says how many,
+// under which root, and lists the names muted below, wrapped between names and
+// never inside one.
 func (r *Reporter) Created(paths []string) {
 	if len(paths) == 0 {
 		return
@@ -290,15 +303,20 @@ func (r *Reporter) Created(paths []string) {
 		return
 	}
 	base := commonDir(paths)
-	noun := "directories"
 	if base == "" {
 		base = "/"
 	}
-	title := fmt.Sprintf("created %d %s under %s", len(paths), noun, base)
+	summary := fmt.Sprintf("created %d directories under %s", len(paths), base)
 	var b strings.Builder
-	line := title
-	for _, raw := range wrapText(line, r.width-2) {
-		b.WriteString("  " + r.chrome.paint(raw, inkStyle.Render(raw)) + "\n")
+	prefix := indent + "✓ "
+	cont := strings.Repeat(" ", lipgloss.Width(prefix))
+	for i, line := range wrapText(summary, r.width-lipgloss.Width(prefix)) {
+		if i == 0 {
+			b.WriteString(indent + r.chrome.paint("✓", glyphStyle("✓").Render("✓")) + " ")
+			b.WriteString(r.chrome.paint(line, inkStyle.Render(line)) + "\n")
+			continue
+		}
+		b.WriteString(cont + r.chrome.paint(line, inkStyle.Render(line)) + "\n")
 	}
 	var names []string
 	for _, p := range paths {
@@ -307,8 +325,9 @@ func (r *Reporter) Created(paths []string) {
 			names = append(names, name)
 		}
 	}
-	for _, raw := range wrapText(strings.Join(names, " · "), r.width-4) {
-		b.WriteString("    " + r.chrome.paint(raw, mutedStyle.Render(raw)) + "\n")
+	detail := indent + "  "
+	for _, raw := range wrapList(names, " · ", r.width-lipgloss.Width(detail)) {
+		b.WriteString(detail + r.chrome.paint(raw, mutedStyle.Render(raw)) + "\n")
 	}
 	r.emit(b.String())
 }
@@ -335,6 +354,91 @@ func commonDir(paths []string) string {
 		return string(filepath.Separator)
 	}
 	return out
+}
+
+// Receipt draws the wiring receipt: one status glyph per step, the name in ink
+// and any reason muted under it. A row that is pending waits on a person, so
+// it is held back for the card and printed as the "to finish" list: it is what
+// to do next, not something that happened in the middle of the run.
+func (r *Reporter) Receipt(status string, rows []say.ReceiptRow) {
+	mark := "✓"
+	if status != "ok" {
+		mark = "✗"
+	}
+	var b strings.Builder
+	b.WriteString(r.row(mark, "wiring "+status, "", boldInkStyle))
+	var pending []say.ReceiptRow
+	for _, row := range rows {
+		switch row.Result {
+		case "pending":
+			pending = append(pending, row)
+		case "failed":
+			b.WriteString(r.row("✗", row.Name, row.Detail, inkStyle))
+		case "skipped":
+			b.WriteString(r.row("·", row.Name, row.Detail, inkStyle))
+		default:
+			b.WriteString(r.row("✓", row.Name, row.Detail, inkStyle))
+		}
+	}
+	r.pending = pending
+	r.emit(b.String())
+	if status != "ok" {
+		r.flushPending()
+	}
+}
+
+// row is one status line: a glyph in its status colour, a name, and a detail
+// muted beside it or wrapped under it. Nothing is ever flush left.
+func (r *Reporter) row(mark, name, detail string, nameStyle lipgloss.Style) string {
+	prefix := indent + mark + " "
+	cont := strings.Repeat(" ", lipgloss.Width(prefix))
+	detailPad := cont + "  "
+	avail := r.width - lipgloss.Width(prefix)
+	if avail < 8 {
+		avail = 8
+	}
+	nameLines := wrapText(name, avail)
+	var b strings.Builder
+	for i, line := range nameLines {
+		if i == 0 {
+			b.WriteString(indent + r.chrome.paint(mark, glyphStyle(mark).Render(mark)) + " ")
+		} else {
+			b.WriteString(cont)
+		}
+		b.WriteString(r.chrome.paint(line, nameStyle.Render(line)))
+		if len(nameLines) == 1 && detail != "" && lipgloss.Width(name)+2+lipgloss.Width(detail) <= avail {
+			b.WriteString("  " + r.chrome.paint(detail, mutedStyle.Render(detail)) + "\n")
+			return b.String()
+		}
+		b.WriteString("\n")
+	}
+	if detail != "" {
+		w := r.width - lipgloss.Width(detailPad)
+		if w < 8 {
+			w = 8
+		}
+		for _, line := range wrapText(detail, w) {
+			b.WriteString(detailPad + r.chrome.paint(line, mutedStyle.Render(line)) + "\n")
+		}
+	}
+	return b.String()
+}
+
+// flushPending prints the rows the receipt held back, under a short heading.
+// The card is drawn first: these are the next things to do, so they belong
+// after it and not wedged into the receipt.
+func (r *Reporter) flushPending() {
+	if len(r.pending) == 0 {
+		return
+	}
+	rows := r.pending
+	r.pending = nil
+	var b strings.Builder
+	b.WriteString(indent + r.chrome.paint("to finish", accentStyle.Bold(true).Render("to finish")) + "\n")
+	for _, row := range rows {
+		b.WriteString(r.row("◌", row.Name, row.Detail, inkStyle))
+	}
+	r.emit(b.String())
 }
 
 // Start begins a step. The previous one, if any, is cleared: box runs one
@@ -386,13 +490,13 @@ func (r *Reporter) drawLocked() {
 	if l.budget > 0 {
 		counter = elapsedLabel(time.Since(l.start)) + " / " + durationLabel(l.budget)
 	}
-	prefixWidth := lipgloss.Width("  " + frame + " ")
+	prefixWidth := lipgloss.Width(indent + frame + " ")
 	avail := r.width - prefixWidth - lipgloss.Width(counter) - 2
 	if avail < 8 {
 		avail = 8
 	}
 	label := clip(l.label, avail)
-	line := "  " + r.chrome.paint(frame, accentStyle.Render(frame)) + " " + r.chrome.paint(label, inkStyle.Render(label))
+	line := indent + r.chrome.paint(frame, accentStyle.Render(frame)) + " " + r.chrome.paint(label, inkStyle.Render(label))
 	if counter != "" {
 		line += "  " + r.chrome.paint(counter, mutedStyle.Render(counter))
 	}
@@ -486,23 +590,19 @@ func (h *liveHandle) finish(mark, text, detail string) {
 	}
 	var b strings.Builder
 	if text != "" {
-		pad := "  "
-		cont := "    "
-		plainPrefix := pad + mark + " "
-		style := accentStyle
-		if mark == "✗" {
-			style = badStyle
-		}
+		cont := indent + "  "
+		plainPrefix := indent + mark + " "
+		style := glyphStyle(mark)
 		for i, line := range wrapText(text, r.width-lipgloss.Width(plainPrefix)) {
 			if i == 0 {
-				b.WriteString(pad + r.chrome.paint(mark, style.Render(mark)) + " " + r.chrome.paint(line, inkStyle.Render(line)) + "\n")
+				b.WriteString(indent + r.chrome.paint(mark, style.Render(mark)) + " " + r.chrome.paint(line, inkStyle.Render(line)) + "\n")
 				continue
 			}
 			b.WriteString(cont + r.chrome.paint(line, inkStyle.Render(line)) + "\n")
 		}
 		if detail != "" {
-			for _, line := range wrapText(detail, r.width-4) {
-				b.WriteString("    " + r.chrome.paint(line, mutedStyle.Render(line)) + "\n")
+			for _, line := range wrapText(detail, r.width-lipgloss.Width(cont)) {
+				b.WriteString(cont + r.chrome.paint(line, mutedStyle.Render(line)) + "\n")
 			}
 		}
 	}
@@ -543,6 +643,7 @@ func (r *Reporter) Error(err error) {
 	if err == nil {
 		return
 	}
+	r.flushPending()
 	width := mastheadWidth
 	if r.width > 0 && r.width < width {
 		width = r.width
@@ -605,10 +706,12 @@ func (r *Reporter) Banner(title, detail string) {
 	}
 	b.WriteString(r.chrome.paint("╰"+strings.Repeat("─", width-2)+"╯", mutedStyle.Render("╰"+strings.Repeat("─", width-2)+"╯")) + "\n")
 	r.emit(b.String())
+	r.flushPending()
 }
 
 // Close stops the spinner and the interrupt handler. Safe to call twice.
 func (r *Reporter) Close() {
+	r.flushPending()
 	r.stopActive()
 	r.mu.Lock()
 	already := r.closed

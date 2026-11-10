@@ -23,7 +23,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"sort"
 	"strings"
 	"time"
@@ -172,9 +171,9 @@ type Applier struct {
 	// of the release: Helm must never own them.
 	OpenStorage func(namespace string) (StorageClient, error)
 	Confirm     Confirmer
-	// Log is the plain transcript when no reporter was given.
-	Log io.Writer
-	// Say renders the same events with box's TUI.
+	// Say is every line apply writes. A nil reporter writes nothing, which is
+	// what a caller with no output wants; cmd/box always gives the plain or the
+	// live one.
 	Say say.Reporter
 
 	// ReceiptWait bounds how long box waits for the wiring hook's receipt
@@ -185,16 +184,8 @@ type Applier struct {
 	Poll time.Duration
 }
 
-func (a *Applier) logf(format string, args ...any) {
-	if a.Log == nil {
-		return
-	}
-	fmt.Fprintf(a.Log, format, args...)
-}
-
-// report is the one place apply writes progress: the live reporter when
-// cmd/box gave one, otherwise the plain transcript.
-func (a *Applier) report() say.Reporter { return say.Or(a.Say, a.Log) }
+// report is the one place apply writes progress.
+func (a *Applier) report() say.Reporter { return say.Or(a.Say, nil) }
 
 // Apply reads the files, checks them, shows what would change and applies it.
 func (a *Applier) Apply(ctx context.Context, opts Options) (Result, error) {
@@ -515,18 +506,11 @@ func (a *Applier) printPlan(r say.Reporter, nsp NamespacePlan, objs []StorageObj
 }
 
 func (a *Applier) printReceipt(r say.Reporter, rec Receipt) {
-	r.Success("wiring " + rec.Status)
-	rows := make([]string, 0, len(rec.Steps))
+	rows := make([]say.ReceiptRow, 0, len(rec.Steps))
 	for _, s := range rec.Steps {
-		if s.Detail != "" {
-			rows = append(rows, fmt.Sprintf("%s: %s (%s)", s.Name, s.Result, s.Detail))
-			continue
-		}
-		rows = append(rows, fmt.Sprintf("%s: %s", s.Name, s.Result))
+		rows = append(rows, say.ReceiptRow{Name: s.Name, Result: s.Result, Detail: s.Detail})
 	}
-	if len(rows) > 0 {
-		r.List("", rows)
-	}
+	r.Receipt(rec.Status, rows)
 }
 
 // changeItems turns a values diff into the marked plan the reporter draws. The
