@@ -47,12 +47,8 @@ const (
 // node answer. The zero value is usable; every field exists so a test can
 // replace one piece without a host, a network or a systemd.
 type K0sInstaller struct {
-	// Log is where box's own progress lines go when no reporter was given.
-	// k0s's output never goes here: it appears only in a failure, quoted
-	// under box's message.
-	Log io.Writer
-	// Say renders the same progress when the command has a terminal UI. Log
-	// stays the plain transcript and the unit tests' seam.
+	// Say is every progress line the installer writes; k0s's own output never
+	// goes here, it appears only in a failure, quoted under box's message.
 	Say say.Reporter
 	// Root reports whether box may install a system service. Default euid 0.
 	Root func() bool
@@ -95,7 +91,7 @@ func (k K0sInstaller) Install(ctx context.Context, plan InstallPlan) error {
 		return errors.New(why)
 	}
 
-	r := say.Or(k.Say, k.Log)
+	r := say.Or(k.Say, nil)
 	bin := k.binPath()
 	step := r.Start(say.Op{
 		Label: fmt.Sprintf("installing k0s %s for %s", rel.Version, rel.Arch),
@@ -196,7 +192,7 @@ func (k K0sInstaller) waitReady(ctx context.Context) error {
 		sleep = time.Sleep
 	}
 
-	r := say.Or(k.Say, k.Log)
+	r := say.Or(k.Say, nil)
 	wait := r.Start(say.Op{
 		Label:  "waiting for the cluster API",
 		Plain:  fmt.Sprintf("waiting up to %s for the cluster API", timeout),
@@ -305,20 +301,11 @@ func (k K0sInstaller) confPath() string {
 	return K0sAdminConfig
 }
 
-func (k K0sInstaller) logf(format string, args ...any) {
-	w := k.Log
-	if w == nil {
-		return
-	}
-	fmt.Fprintf(w, format, args...)
-}
-
 // DryRunInstaller prints the plan instead of carrying it out. `box bootstrap
 // --dry-run` reaches the same clean-host branch as a real run, and this is the
 // installer it gets: a dry run probes nothing and writes nothing, so the only
 // honest thing it can do with an install is say what it would have done.
 type DryRunInstaller struct {
-	W   io.Writer
 	Say say.Reporter
 }
 
@@ -328,14 +315,7 @@ func (p DryRunInstaller) Install(_ context.Context, plan InstallPlan) error {
 	if arch == "" {
 		arch = runtime.GOARCH
 	}
-	r := p.Say
-	if r == nil {
-		w := p.W
-		if w == nil {
-			w = io.Discard
-		}
-		r = &say.Plain{W: w}
-	}
+	r := say.Or(p.Say, nil)
 	r.Line(fmt.Sprintf("box would install k0s %s for %s on this clean host: /usr/local/bin/k0s, install controller --single, start", plan.Version, arch))
 	return nil
 }

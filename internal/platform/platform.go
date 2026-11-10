@@ -22,7 +22,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"strings"
 	"time"
 
@@ -233,10 +232,9 @@ type Decision struct {
 	// cluster either.
 	Probe   func() (GatewayProbe, error)
 	Confirm Confirmer
-	// Log is the plain transcript when no reporter was given.
-	Log io.Writer
-	// Say renders the same events with box's TUI. Policy stays here; only
-	// how a plan, a wait and a finished step look is the reporter's.
+	// Say is every line the decision writes. A nil reporter writes nothing;
+	// cmd/box always gives the plain or the live one, and policy stays here —
+	// only how a plan, a wait and a finished step look is the reporter's.
 	Say say.Reporter
 	// GatewayClass is the class bootstrap chose (bootstrap.Result.Gateway.
 	// Class). The Gateway box applies attaches to it; the GatewayClass itself
@@ -267,16 +265,8 @@ type Result struct {
 	NotHandled []string
 }
 
-func (d *Decision) logf(format string, args ...any) {
-	if d.Log == nil {
-		return
-	}
-	fmt.Fprintf(d.Log, format, args...)
-}
-
-// report is the one place the flow writes: the live reporter when cmd/box gave
-// one, otherwise the plain transcript over the old Log seam.
-func (d *Decision) report() say.Reporter { return say.Or(d.Say, d.Log) }
+// report is the one place the flow writes.
+func (d *Decision) report() say.Reporter { return say.Or(d.Say, nil) }
 
 // Apply plans, asks and applies the platform layer.
 func (d *Decision) Apply(ctx context.Context, components []bootstrap.ComponentResult) (Result, error) {

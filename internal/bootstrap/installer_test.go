@@ -12,6 +12,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/swizzin/s5n/internal/say"
 )
 
 const testK0sVersion = "v9.9.9-test"
@@ -88,7 +90,6 @@ func testInstaller(t *testing.T, payload []byte) (K0sInstaller, *installStubs) {
 	sum := sha256.Sum256(payload)
 	clock := time.Unix(0, 0)
 	return K0sInstaller{
-		Log:      io.Discard,
 		Root:     func() bool { return true },
 		Evidence: func() []Finding { return nil },
 		Release: func(arch string) (k0sRelease, error) {
@@ -383,7 +384,7 @@ func TestK0sInstallDownloadFailureLeavesNoUndoNote(t *testing.T) {
 func TestDryRunInstallerPrintsThePlan(t *testing.T) {
 	var b strings.Builder
 	plan := InstallPlan{Version: testK0sVersion, Arch: "arm64", CleanHost: true}
-	if err := (DryRunInstaller{W: &b}).Install(context.Background(), plan); err != nil {
+	if err := (DryRunInstaller{Say: &say.Plain{W: &b}}).Install(context.Background(), plan); err != nil {
 		t.Fatal(err)
 	}
 	out := b.String()

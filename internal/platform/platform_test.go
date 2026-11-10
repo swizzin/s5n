@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/swizzin/s5n/internal/bootstrap"
+	"github.com/swizzin/s5n/internal/say"
 )
 
 // trace records the writes in the order they happened. Every assertion about
@@ -202,7 +203,7 @@ func newFixture() *fixture {
 			return f.probe, nil
 		},
 		Confirm: f.confirm,
-		Log:     f.log,
+		Say:     &say.Plain{W: f.log},
 	}
 	return f
 }

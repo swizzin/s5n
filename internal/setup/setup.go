@@ -20,7 +20,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -41,9 +40,8 @@ type Decision struct {
 	// Apply is the hand-over: the same `box apply` a user runs. It is a
 	// function rather than the release package so init does not link Helm.
 	Apply ApplyFunc
-	// Log is the plain transcript when no reporter was given.
-	Log io.Writer
-	// Say renders the same events with box's TUI.
+	// Say is every line init writes. A nil reporter writes nothing; cmd/box
+	// always gives the plain or the live one.
 	Say say.Reporter
 
 	// steps is how many steps this run shows, for a prompter that draws a step
@@ -132,16 +130,8 @@ type Result struct {
 	Applied bool
 }
 
-func (d *Decision) logf(format string, args ...any) {
-	if d.Log == nil {
-		return
-	}
-	fmt.Fprintf(d.Log, format, args...)
-}
-
-// report is the one place init writes progress: the live reporter when
-// cmd/box gave one, otherwise the plain transcript.
-func (d *Decision) report() say.Reporter { return say.Or(d.Say, d.Log) }
+// report is the one place init writes progress.
+func (d *Decision) report() say.Reporter { return say.Or(d.Say, nil) }
 
 // stop prints the voice for a cancelled question and passes the error on.
 func (d *Decision) stop(err error) error {

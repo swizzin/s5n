@@ -17,7 +17,6 @@ import (
 	"fmt"
 	"io"
 	"strings"
-	"sync"
 	"time"
 )
 
@@ -274,35 +273,3 @@ func (p *Plain) Error(err error) {
 }
 
 func (p *Plain) Close() {}
-
-// AsWriter adapts a reporter to the io.Writer some third-party client insists
-// on (the chart pull's one skipped-release line). Each complete line becomes a
-// Line event, so it is wrapped and styled like box's own output and still
-// appears verbatim in the plain transcript.
-func AsWriter(r Reporter) io.Writer {
-	return &lineWriter{r: r}
-}
-
-type lineWriter struct {
-	mu  sync.Mutex
-	r   Reporter
-	buf []byte
-}
-
-func (w *lineWriter) Write(p []byte) (int, error) {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	w.buf = append(w.buf, p...)
-	for {
-		i := strings.IndexByte(string(w.buf), '\n')
-		if i < 0 {
-			break
-		}
-		line := strings.TrimRight(string(w.buf[:i]), "\r")
-		w.buf = w.buf[i+1:]
-		if line != "" {
-			w.r.Line(line)
-		}
-	}
-	return len(p), nil
-}

@@ -28,6 +28,8 @@ import (
 	chartv2 "helm.sh/helm/v4/pkg/chart/v2"
 	"helm.sh/helm/v4/pkg/chart/v2/loader"
 	helmregistry "helm.sh/helm/v4/pkg/registry"
+
+	"github.com/swizzin/s5n/internal/say"
 )
 
 // registry is an in-process OCI registry: distribution's app over an httptest
@@ -223,7 +225,7 @@ func TestOCIPicksTheNewestReleaseBoxCanUse(t *testing.T) {
 	}
 
 	var log bytes.Buffer
-	src := &OCIChart{BoxVersion: "0.1.0", Log: &log}
+	src := &OCIChart{BoxVersion: "0.1.0", Say: &say.Plain{W: &log}}
 	got, err := src.Load(context.Background(), ChartRef{Repo: "oci://" + host + "/charts/s5n"})
 	if err != nil {
 		t.Fatalf("pull: %v\n%s", err, log.String())
@@ -278,7 +280,7 @@ func TestOCIDevBoxSkipsTheFloorOnce(t *testing.T) {
 	host := registry(t)
 	pushChart(t, host, "charts")
 	var log bytes.Buffer
-	src := &OCIChart{BoxVersion: DevVersion, Log: &log}
+	src := &OCIChart{BoxVersion: DevVersion, Say: &say.Plain{W: &log}}
 	for i := 0; i < 2; i++ {
 		if _, err := src.Load(context.Background(), ChartRef{Repo: "oci://" + host + "/charts/s5n"}); err != nil {
 			t.Fatalf("pull %d: %v", i, err)

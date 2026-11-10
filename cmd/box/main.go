@@ -89,7 +89,7 @@ commands:
 // charts"), so even the e2e packages the chart from its commit and pushes it
 // to a registry, and box pulls it the way it pulls any release.
 func chartSource(r say.Reporter) release.ChartSource {
-	return &release.OCIChart{BoxVersion: version, Log: say.AsWriter(r)}
+	return &release.OCIChart{BoxVersion: version, Say: r}
 }
 
 // newOutput picks the renderer for the whole command. The same tui.Decide that
@@ -190,9 +190,9 @@ func runBootstrap(args []string) {
 	// A dry run reaches the same clean-host branch as a real run, and the only
 	// honest installer it can have is one that says what it would do: nothing
 	// is probed or written, so there is no host to change.
-	var install bootstrap.Installer = bootstrap.K0sInstaller{Log: os.Stdout, Say: out}
+	var install bootstrap.Installer = bootstrap.K0sInstaller{Say: out}
 	if *dryRun {
-		install = bootstrap.DryRunInstaller{W: os.Stdout, Say: out}
+		install = bootstrap.DryRunInstaller{Say: out}
 	}
 
 	// The section header comes before the first probe: on a clean host the
@@ -281,7 +281,6 @@ func applyPlatform(ctx context.Context, kubeconfig string, components []bootstra
 		// once the Gateway exists.
 		Probe:   func() (platform.GatewayProbe, error) { return platform.NewGatewayProbe(kubeconfig) },
 		Confirm: confirm,
-		Log:     os.Stdout,
 		Say:     out,
 	}
 	_, err := p.Apply(ctx, components)
@@ -560,7 +559,6 @@ func (o *initFlags) run(ctx context.Context, kubeconfig string, yes, plain bool,
 		Host:    setup.LinuxPathHost{},
 		Prompt:  prompt,
 		Catalog: cat,
-		Log:     os.Stdout,
 		Say:     out,
 		Apply: func(ctx context.Context, req setup.ApplyOptions) error {
 			// The cluster decision belongs to `box bootstrap`; apply reuses it.

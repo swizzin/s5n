@@ -18,6 +18,8 @@ import (
 	orasregistry "oras.land/oras-go/v2/registry"
 	orasauth "oras.land/oras-go/v2/registry/remote/auth"
 	"oras.land/oras-go/v2/registry/remote/errcode"
+
+	"github.com/swizzin/s5n/internal/say"
 )
 
 // DefaultChartRepo is where s5n publishes its chart (docs/box.md, "Where a
@@ -45,17 +47,17 @@ type OCIChart struct {
 	// BoxVersion is this box's version. "dev" (a build without -X
 	// main.version) skips the min-box check and says so once.
 	BoxVersion string
-	// Log receives the one line about a release box skipped. Nil is silent.
-	Log io.Writer
+	// Say receives the one line about a release box skipped. Nil is silent.
+	Say say.Reporter
 
 	devOnce sync.Once
 }
 
 func (o *OCIChart) logf(format string, args ...any) {
-	if o.Log == nil {
+	if o.Say == nil {
 		return
 	}
-	fmt.Fprintf(o.Log, format, args...)
+	o.Say.Line(fmt.Sprintf(format, args...))
 }
 
 // Load pulls one chart release, or the newest this box can install when
@@ -88,7 +90,7 @@ func (o *OCIChart) Load(_ context.Context, ref ChartRef) (Chart, error) {
 	}
 	if IsDevVersion(o.BoxVersion) {
 		o.devOnce.Do(func() {
-			o.logf("box was built without a version (%s): skipping the chart's %s check\n", DevVersion, MinBoxAnnotation)
+			o.logf("box was built without a version (%s): skipping the chart's %s check", DevVersion, MinBoxAnnotation)
 		})
 	}
 
@@ -137,7 +139,7 @@ func (o *OCIChart) Load(_ context.Context, ref ChartRef) (Chart, error) {
 		return Chart{}, o.noVersionError(repo, err)
 	}
 	for _, skip := range skipped {
-		o.logf("%s %s is newer but needs box %s; this is box %s, so box installs %s\n",
+		o.logf("%s %s is newer but needs box %s; this is box %s, so box installs %s",
 			chartName(repo), skip.Version, skip.MinBox, o.BoxVersion, chosen)
 	}
 	return once(chosen)

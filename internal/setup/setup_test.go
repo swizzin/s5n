@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/swizzin/s5n/internal/catalog"
+	"github.com/swizzin/s5n/internal/say"
 	"github.com/swizzin/s5n/internal/seedbox"
 )
 
@@ -243,7 +244,7 @@ func newHarness(t *testing.T) *harness {
 		Host:    h.host,
 		Prompt:  h.prompt,
 		Catalog: cat,
-		Log:     h.out,
+		Say:     &say.Plain{W: h.out},
 		Apply: func(ctx context.Context, opts ApplyOptions) error {
 			h.applied = append(h.applied, opts)
 			if opts.AfterConfirm != nil {
