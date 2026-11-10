@@ -3,10 +3,13 @@ package main
 import (
 	"context"
 	"flag"
+	"io"
+	"os"
 	"strings"
 	"testing"
 
 	"github.com/swizzin/s5n/internal/release"
+	"github.com/swizzin/s5n/internal/say"
 )
 
 const (
@@ -133,4 +136,75 @@ func TestAcmeServerIsNotInBootstrapHelp(t *testing.T) {
 	if strings.Contains(b.String(), "acme-server") {
 		t.Fatalf("bootstrap help lists the dev flag:\n%s", b.String())
 	}
+}
+
+// withStdin points the process's stdin at a file for one test, which is the
+// only way to prove what `box apply < /dev/null` does.
+func withStdin(t *testing.T, f *os.File) {
+	t.Helper()
+	old := os.Stdin
+	os.Stdin = f
+	t.Cleanup(func() { os.Stdin = old })
+}
+
+// `box apply < /dev/null` runs with a stdin that is a character device but not a
+// terminal. The old check treated the device as enough, so it printed the
+// prompt and failed with "read the answer: EOF" instead of the documented
+// refusal. The confirmer reads the terminal, so a redirection cannot answer a
+// question nobody was asked.
+func TestConfirmerRefusesAStdinThatIsNotATerminal(t *testing.T) {
+	devNull, err := os.Open(os.DevNull)
+	if err != nil {
+		t.Fatalf("open %s: %v", os.DevNull, err)
+	}
+	t.Cleanup(func() { devNull.Close() })
+	if info, err := devNull.Stat(); err != nil || info.Mode()&os.ModeCharDevice == 0 {
+		// The point of this test is that the older check would have accepted
+		// this file; if it stops being a character device, say so rather than
+		// passing for the wrong reason.
+		t.Fatalf("%s is no longer a character device, so this test no longer proves the old check was wrong", os.DevNull)
+	}
+	withStdin(t, devNull)
+
+	var out strings.Builder
+	confirm := confirmer(&say.Plain{W: &out}, false)
+	ok, err := confirm.Ask("apply s5n in the seedbox namespace?")
+	if err == nil {
+		t.Fatal("a question was answered by nobody")
+	}
+	if ok {
+		t.Fatal("a question nobody could answer came back yes")
+	}
+	if !strings.Contains(err.Error(), "not a terminal: pass --yes to apply without a prompt") {
+		t.Fatalf("err = %q, want the documented not-a-terminal refusal", err)
+	}
+	if strings.Contains(out.String(), "[y/N]") {
+		t.Fatalf("a prompt was printed where nobody can answer it:\n%s", out.String())
+	}
+}
+
+// The platform layer's unattended rule is the opposite one and stays: with no
+// terminal to ask on it does not refuse, because the caller passed yes for it.
+// apply is the command that refuses, which is the policy difference the two
+// call sites of confirmer keep.
+func TestConfirmerAutoConfirmsWhenTheCallerSaysYes(t *testing.T) {
+	withStdin(t, mustOpen(t, os.DevNull))
+	confirm := confirmer(&say.Plain{W: io.Discard}, true)
+	ok, err := confirm.Ask("install the platform layer?")
+	if err != nil {
+		t.Fatalf("Ask: %v", err)
+	}
+	if !ok {
+		t.Fatal("the platform layer's unattended answer was refused")
+	}
+}
+
+func mustOpen(t *testing.T, path string) *os.File {
+	t.Helper()
+	f, err := os.Open(path)
+	if err != nil {
+		t.Fatalf("open %s: %v", path, err)
+	}
+	t.Cleanup(func() { f.Close() })
+	return f
 }

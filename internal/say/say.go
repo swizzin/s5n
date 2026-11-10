@@ -238,8 +238,17 @@ func (h plainHandle) Done(text string) {
 func (h plainHandle) DoneAs(plain, _ string) { h.Done(plain) }
 func (h plainHandle) Failed(error)           {}
 
-// Confirm asks the same question the old Terminal did, with the same default
-// and the same refusal when there is nobody to ask.
+// Ask is release.Confirmer and platform.Confirmer: the same question the live
+// reporter draws a form for, answered on the transcript. It names Confirm
+// because that is what the plain path asks; the flows call Ask.
+func (p *Plain) Ask(question string) (bool, error) { return p.Confirm(question) }
+
+// Confirm is one yes/no question. --yes answers it, and there is no answer
+// without a reader: a prompt that cannot be shown is a refusal rather than an
+// implicit yes, because box writes to a cluster as root, so "nobody was there"
+// must never mean "go ahead". cmd/box only gives a Plain a reader when stdin is
+// a terminal -- a character device is not enough, because /dev/null is one and
+// a question on it fails with an EOF nobody typed.
 func (p *Plain) Confirm(question string) (bool, error) {
 	if p.Yes {
 		return true, nil

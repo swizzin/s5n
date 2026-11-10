@@ -108,23 +108,45 @@ func newOutput(plain, yes bool) say.Reporter {
 		r := tui.NewReporter(tui.ReporterOptions{Width: terminalWidth(os.Stdout), NoColor: plan.NoColor, Yes: yes})
 		return r
 	}
+	// Output only: a flow that asks builds its own question through
+	// confirmer, because --yes is that flow's policy (the platform layer
+	// treats "no terminal" as unattended, apply refuses) and this reporter
+	// has one.
+	return &say.Plain{W: os.Stdout, Err: os.Stderr}
+}
+
+// live returns the TUI reporter when this command has one. A plain run answers
+// through confirmer instead, and keeps the two unattended rules it had: the
+// platform flow auto-confirms without a terminal, apply refuses.
+func live(r say.Reporter) (*tui.Reporter, bool) {
+	tr, ok := r.(*tui.Reporter)
+	return tr, ok
+}
+
+// asker is the one question release.Confirmer and platform.Confirmer both ask.
+type asker interface {
+	Ask(question string) (bool, error)
+}
+
+// confirmer is what a flow asks its one question with: the live reporter, which
+// draws the same form init's questions use, or the plain transcript's line
+// prompt.
+//
+// yes is the caller's unattended policy, not cmd/box's: the platform layer
+// treats "there is no terminal to ask on" as unattended, while apply refuses
+// there, so each flow passes its own answer. The plain prompt gets a reader
+// only from a real terminal -- a character device is not enough, because
+// /dev/null is one and a question asked on it fails with an EOF nobody typed.
+func confirmer(out say.Reporter, yes bool) asker {
+	if tr, ok := live(out); ok {
+		tr.SetYes(yes)
+		return tr
+	}
 	p := &say.Plain{W: os.Stdout, Err: os.Stderr, Yes: yes}
-	// A caller with no terminal is not asked: release's old Terminal
-	// refused there, and the platform flow treated it as unattended. The
-	// reporter's policy callers keep their own Yes, so only set the reader
-	// when there is one.
 	if isTerminal(os.Stdin) {
 		p.In = os.Stdin
 	}
 	return p
-}
-
-// live returns the TUI reporter when this command has one. A plain run keeps
-// the exact Terminal behaviour it had, including its two different unattended
-// rules (the platform flow auto-confirms without a terminal, apply refuses).
-func live(r say.Reporter) (*tui.Reporter, bool) {
-	tr, ok := r.(*tui.Reporter)
-	return tr, ok
 }
 
 // chartFlags are the two flags that name a published release. Every command
@@ -268,18 +290,7 @@ func runBootstrap(args []string) {
 // unattended (docs/box.md, "bootstrap and init").
 func applyPlatform(ctx context.Context, kubeconfig string, components []bootstrap.ComponentResult, gatewayClass, acmeServer string, yes bool, out say.Reporter) error {
 	out.Phase("platform")
-	var confirm platform.Confirmer
-	if tr, ok := live(out); ok {
-		tr.SetYes(yes)
-		confirm = tr
-	} else {
-		confirm = &release.Terminal{
-			In:    os.Stdin,
-			Out:   os.Stdout,
-			Yes:   yes || !isTerminal(os.Stdin),
-			IsTTY: func() bool { return release.TTY(os.Stdin) },
-		}
-	}
+	confirm := confirmer(out, yes || !isTerminal(os.Stdin))
 	p := &platform.Decision{
 		GatewayClass: gatewayClass,
 		ACMEServer:   acmeServer,
@@ -423,18 +434,7 @@ func runApply(args []string) {
 		os.Exit(1)
 	}
 
-	var confirm release.Confirmer
-	if tr, ok := live(out); ok {
-		tr.SetYes(*o.yes)
-		confirm = tr
-	} else {
-		confirm = &release.Terminal{
-			In:    os.Stdin,
-			Out:   os.Stdout,
-			Yes:   *o.yes,
-			IsTTY: func() bool { return release.TTY(os.Stdin) },
-		}
-	}
+	confirm := confirmer(out, *o.yes)
 	app := &release.Applier{
 		Charts:  chartSource(out),
 		Confirm: confirm,
@@ -578,18 +578,7 @@ func (o *initFlags) run(ctx context.Context, kubeconfig string, yes, plain bool,
 			if err != nil {
 				return err
 			}
-			var confirm release.Confirmer
-			if tr, ok := live(out); ok {
-				tr.SetYes(yes)
-				confirm = tr
-			} else {
-				confirm = &release.Terminal{
-					In:    os.Stdin,
-					Out:   os.Stdout,
-					Yes:   yes,
-					IsTTY: func() bool { return release.TTY(os.Stdin) },
-				}
-			}
+			confirm := confirmer(out, yes)
 			app := &release.Applier{
 				Charts:  source,
 				Confirm: confirm,

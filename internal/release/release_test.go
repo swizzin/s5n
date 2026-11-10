@@ -205,7 +205,7 @@ func newFakes(t *testing.T) *fakes {
 	f.rel.events = &f.events
 	f.store.events = &f.events
 	f.app = &Applier{
-		Confirm: &Terminal{Yes: true},
+		Confirm: &say.Plain{Yes: true},
 		Say:     &say.Plain{W: f.out},
 		Open: func(ns string) (ReleaseClient, error) {
 			f.openCalls++
@@ -415,11 +415,7 @@ func TestMissingNamespaceRefusesBeforeTheClusterIsOpened(t *testing.T) {
 
 func TestDeclinedPromptWritesNothing(t *testing.T) {
 	f := newFakes(t)
-	f.app.Confirm = &Terminal{
-		In:    strings.NewReader("n\n"),
-		Out:   f.out,
-		IsTTY: func() bool { return true },
-	}
+	f.app.Confirm = &say.Plain{In: strings.NewReader("n\n"), W: f.out}
 	_, err := f.apply(t)
 	if !errors.Is(err, ErrCancelled) {
 		t.Fatalf("error = %v, want ErrCancelled", err)
@@ -434,7 +430,9 @@ func TestDeclinedPromptWritesNothing(t *testing.T) {
 
 func TestNoTTYWithoutYesRefuses(t *testing.T) {
 	f := newFakes(t)
-	f.app.Confirm = &Terminal{Out: f.out, IsTTY: func() bool { return false }}
+	// No reader: this is a stdin that is not a terminal, which is the case a
+	// pipe and /dev/null both are.
+	f.app.Confirm = &say.Plain{W: f.out}
 	_, err := f.apply(t)
 	if err == nil || !strings.Contains(err.Error(), "not a terminal") {
 		t.Fatalf("error = %v, want a not-a-terminal refusal", err)
