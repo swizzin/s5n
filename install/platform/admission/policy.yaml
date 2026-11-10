@@ -127,3 +127,40 @@ spec:
         !has(object.spec.ports) || object.spec.ports.all(p,
         !has(p.nodePort) || p.nodePort == int(params.data.torrentNodePort))
       message: "s5n: a nodePort may only be the peer port the grant assigns"
+---
+# The login is root's, so a user's namespace may not touch it.
+#
+# Root puts one Authelia and one SecurityPolicy on the Gateway, covering every
+# listener and every route attached to it, and the exemptions (the ACME
+# challenge, the portal, the Arrs' own API keys) are root's Authelia
+# configuration. A namespace-scoped kubeconfig with namespace-admin rights
+# could otherwise delete that policy, or write a SecurityPolicy of its own on
+# a route -- Envoy Gateway lets a route-targeted policy override the
+# Gateway-level one, so "no policy" is a working bypass. Gateways are here for
+# the same reason: a Gateway of the user's own would be a listener the login
+# was never attached to.
+#
+# No params: the rule refuses these writes outright, whoever asks, in a bound
+# namespace. Root's own seedbox is unbound like every other policy here.
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: s5n-no-login-changes
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: ["gateway.envoyproxy.io"]
+        apiVersions: ["v1alpha1"]
+        operations: ["CREATE", "UPDATE", "DELETE"]
+        resources: ["securitypolicies"]
+      - apiGroups: ["gateway.networking.k8s.io"]
+        # Both served versions: v1 is the Gateway, v1beta1 the ReferenceGrant
+        # generation's sibling. A policy that matched one version only would
+        # leave the other writable.
+        apiVersions: ["v1", "v1beta1"]
+        operations: ["CREATE", "UPDATE", "DELETE"]
+        resources: ["gateways"]
+  validations:
+    - expression: "false"
+      message: "s5n: the login in front of the Gateway is root's; a seedbox namespace may not add, change or remove it"

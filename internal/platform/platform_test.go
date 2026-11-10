@@ -1035,8 +1035,11 @@ func TestEmbeddedManifests(t *testing.T) {
 			policies++
 		}
 	}
-	if policies != 2 {
-		t.Fatalf("policy manifest has %d policies, want 2", policies)
+	// Three: the image rule, the granted Service, and the login -- the last
+	// one is what keeps a namespace from removing or overrode the
+	// SecurityPolicy root put on the Gateway.
+	if policies != 3 {
+		t.Fatalf("policy manifest has %d policies, want 3", policies)
 	}
 }
 

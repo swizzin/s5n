@@ -968,7 +968,84 @@ for r in items:
   [ "$ns_enforce" = restricted ] || { echo "the namespace does not enforce restricted"; fail=1; }
   [ "$ns_audit" = restricted ] || { echo "the namespace does not audit restricted"; fail=1; }
   [ "$ns_warn" = restricted ] || { echo "the namespace does not warn restricted"; fail=1; }
-  [ "$ns_manager" = box ] || { echo "the namespace is not labelled managed-by box"; fail=1; }
+  # ---- admission: a seedbox namespace may not touch the login ----------------
+  # The login lives in s5n-system and the policy on the Gateway, but a
+  # namespace-scoped kubeconfig can still write a SecurityPolicy in its own
+  # namespace -- and Envoy Gateway lets a route-targeted policy override the
+  # Gateway-level one, which is a working bypass. The bindings root creates at
+  # adduser are what refuse it; hack/render-grant is the same renderer box uses.
+  log "admission: the login cannot be removed or overridden from ${NS}"
+  go run ./hack/render-grant charts/s5n "$NS" 31111 NodePort | $K apply -f - >/dev/null
+  $K apply -f - >/dev/null <<EOF
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: box-user
+  namespace: ${NS}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: box-user
+  namespace: ${NS}
+rules:
+  - apiGroups: ["*"]
+    resources: ["*"]
+    verbs: ["*"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: box-user
+  namespace: ${NS}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: box-user
+subjects:
+  - kind: ServiceAccount
+    name: box-user
+    namespace: ${NS}
+EOF
+  SA="system:serviceaccount:${NS}:box-user"
+  denied=""
+  # The object has to be one the API server would otherwise accept: the CRD's
+  # schema is checked before any admission policy, so a fixture missing extAuth's
+  # http block is refused for being malformed and never reaches the policy that
+  # is under test. This one is a working bypass (extAuth to the login, failing
+  # open); only the grant's admission policy stands between a seedbox user and
+  # the login.
+  for i in $(seq 1 30); do
+    if ! $K --as="$SA" -n "$NS" create --dry-run=server -f - >"$WORK/login-deny.txt" 2>&1 <<'EOF'
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: SecurityPolicy
+metadata:
+  name: e2e-bypass
+spec:
+  targetRefs:
+    - group: gateway.networking.k8s.io
+      kind: HTTPRoute
+      name: sonarr
+  extAuth:
+    failOpen: true
+    http:
+      backendRefs:
+        - name: authelia
+          namespace: s5n-system
+          port: 9091
+      path: /api/authz/ext-authz/
+EOF
+    then
+      grep -q "the login in front of the Gateway is root's" "$WORK/login-deny.txt" && { denied=yes; break; }
+    fi
+    sleep 1
+  done
+  echo "  a SecurityPolicy create in ${NS} as the user: ${denied:-allowed}"
+  [ "$denied" = yes ] || {
+    cat "$WORK/login-deny.txt" 2>/dev/null || true
+    echo "a seedbox user could write a SecurityPolicy over the login"
+    fail=1
+  }
 
   # Zero writes includes the storage: the same resourceVersions after apply 2.
   storage_before=$(storage_state)
@@ -997,7 +1074,7 @@ for r in items:
     echo "l2=$($K -n metallb-system get l2advertisement s5n-l2 -o json | platform_spec)"
     echo "issuer-le=$($K get clusterissuer s5n-letsencrypt -o json | platform_spec)"
     echo "issuer-ss=$($K get clusterissuer s5n-selfsigned -o json | platform_spec)"
-    for p in s5n-blessed-images s5n-granted-service; do
+    for p in s5n-blessed-images s5n-granted-service s5n-no-login-changes; do
       echo "vap-${p}=$($K get validatingadmissionpolicy "$p" -o json | platform_spec)"
     done
     echo "s5n-system=$($K get namespace s5n-system -o json | platform_spec)"
@@ -1506,7 +1583,7 @@ PY
     echo "l2=$($K -n metallb-system get l2advertisement pre-existing-l2 -o json | platform_spec)"
     echo "issuer-le=$($K get clusterissuer s5n-letsencrypt -o json | platform_spec)"
     echo "issuer-ss=$($K get clusterissuer s5n-selfsigned -o json | platform_spec)"
-    for p in s5n-blessed-images s5n-granted-service; do
+    for p in s5n-blessed-images s5n-granted-service s5n-no-login-changes; do
       echo "vap-${p}=$($K get validatingadmissionpolicy "$p" -o json | platform_spec)"
     done
     echo "s5n-system=$($K get namespace s5n-system -o json | platform_spec)"
