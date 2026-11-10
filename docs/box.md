@@ -173,15 +173,27 @@ explicit `auth.edge: true`, with no default, and refuses to render without it. b
 it; an operator without box sets it to say they put a login in front themselves, the
 way an ingress with basic auth does. The chart never wires per-app logins.
 
+**The provider is Authelia (decided).** Users live in a file with argon2id hashes, and
+Envoy's ext_authz asks Authelia about every request. Apps that speak OIDC (qui) use its
+OIDC provider. The file backend still needs Authelia's storage (SQLite, with its
+encryption key) for session state, so the users file and the database sit together on a
+claim box creates, never in a Secret: Authelia can't see a Secret's file change under
+it, and it rewrites the whole file on save. That means exactly one replica, with file
+watching on, so an `adduser` shows up without a restart.
+
+**Only root changes a password, with `box chpasswd` (decided).** There is no self-service
+password change and no password reset in the provider. Authelia allows those only after
+an emailed one-time code, and box asks for no mail server. A user who wants a new
+password, or has forgotten theirs, asks root. As a result, box is the only writer of the
+users file.
+
 Proposed:
 
-- The provider is Authelia: users in a file with argon2id hashes, forward auth through
-  Envoy's ext_authz, OIDC for apps that speak it (qui), no database.
-- Envoy Gateway's SecurityPolicy attaches it to each user's routes. Root creates the
-  policy at `adduser`, where the user's box can't remove it. Paths that check their own
-  key (the Arrs' `/api`) bypass it, so mobile apps keep working.
-- A user changes their own password on the provider's page, without root.
-  Whether Authelia's file backend allows that is still to be checked.
+- Envoy Gateway's SecurityPolicy attaches Authelia to each user's routes. Root creates
+  the policy at `adduser`, where the user's box can't remove it. Paths that check their
+  own key (the Arrs' `/api`, and `/ping` for health checks) bypass it, so mobile apps
+  keep working. The policy attaches per route, never at the Gateway, because only a
+  route-level policy can leave those paths out.
 - Unattended, a password comes from a file or stdin, never a flag (it would sit in shell
   history and `ps`), and none supplied means a generated one, printed once.
 
@@ -194,6 +206,7 @@ Status per command: **D** decided, **P** proposed.
 | `box bootstrap` | root | prepares the host: finds or installs the cluster, the platform layer, directories; then runs `init` for root | D |
 | `box init` | root, user | sets up a seedbox: domain, paths, apps, existing data, Plex claim | D |
 | `box adduser <name>` | root | creates the OS user and shell, the grant, and the namespace pieces above; then runs `init` as that user | D |
+| `box chpasswd <name>` | root | sets a seedbox user's login password; asked for, or generated and shown once | D |
 | `box deluser <name>` | root | removes that user's seedbox, with the same keep rules as `uninstall` | P |
 | `box install <app>` | root | adds an app to a seedbox; an Arr can take a second instance | D |
 | `box remove <app>` | root | removes an app, keeping its config; `--purge` deletes it | D |
