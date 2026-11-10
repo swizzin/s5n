@@ -25,6 +25,11 @@ var File []byte
 
 // Versions is one pin per component box installs.
 type Versions struct {
+	// Authelia is root's login: an image reference, tag and digest together,
+	// because the login is box's own manifest and never a chart's. It is the
+	// one pin here that is not a chart version, which is why it carries its
+	// digest: box writes the Deployment, so nothing else would pin the bytes.
+	Authelia string
 	// K0s is the k0s release box installs on a clean host: the release tag,
 	// because that is what its download URL is built from.
 	K0s string
@@ -63,6 +68,7 @@ func parseVersions(b []byte) (Versions, error) {
 	}
 	var v Versions
 	pins := map[string]*string{
+		"authelia":     &v.Authelia,
 		"k0s":          &v.K0s,
 		"envoyGateway": &v.EnvoyGateway,
 		"metallb":      &v.MetalLB,

@@ -1,0 +1,90 @@
+## Rendered by box: do not edit. Every line here is a decision box makes from
+## the grant (the host, the login) or from the chart's own instance list (the
+## paths that carry their own credentials). Change box, not this file.
+##
+## The portal is served on a path of the seedbox's own host name -- no second
+## name, no second certificate -- and the server mounts it at /auth and at /.
+## disable_healthcheck is set because the binary's own healthcheck writes into
+## the image's filesystem, which is read-only here; the /api/health handler the
+## probes use is still registered.
+theme: 'dark'
+server:
+  address: 'tcp://0.0.0.0:9091/auth'
+  disable_healthcheck: true
+  endpoints:
+    authz:
+      # Envoy Gateway's extAuth calls this path with the original request path
+      # appended (the SecurityPolicy's `path` ends in '/', which is what
+      # Authelia's own Envoy example uses: the endpoint's own route captures
+      # the appended path including its leading slash). HTTP, not gRPC: 4.39
+      # has no gRPC ext_authz implementation.
+      ext-authz:
+        implementation: 'ExtAuthz'
+log:
+  level: 'info'
+# No self-service: with both flows disabled Authelia registers neither route,
+# so nothing but box ever writes the users database.
+authentication_backend:
+  password_reset:
+    disable: true
+  password_change:
+    disable: true
+  refresh_interval: '5 minutes'
+  file:
+    path: '/config/users_database.yml'
+    # The file is on the claim, written by box before this Deployment exists.
+    # Watching it is what makes a password box writes apply without a restart.
+    watch: true
+    password:
+      # Authelia's own defaults, which box's hasher uses too: a rehash on login
+      # then cannot disagree with the row box wrote.
+      algorithm: 'argon2'
+      argon2:
+        variant: 'argon2id'
+        iterations: {{ .Argon2.Iterations }}
+        memory: {{ .Argon2.Memory }}
+        parallelism: {{ .Argon2.Parallelism }}
+        key_length: {{ .Argon2.KeyLength }}
+        salt_length: {{ .Argon2.SaltLength }}
+access_control:
+  # Fail closed: every path on this host needs the one login unless a rule
+  # below says the request carries its own credentials.
+  default_policy: 'deny'
+  rules:
+{{- range .Rules }}
+    - domain: ['{{ $.Host }}']
+      policy: '{{ .Policy }}'
+{{- if .Resources }}
+      resources:
+{{- range .Resources }}
+        - '{{ . }}'
+{{- end }}
+{{- end }}
+{{- if .Subject }}
+      subject:
+        - 'user:{{ .Subject }}'
+{{- end }}
+{{- end }}
+session:
+  cookies:
+    # One cookie per host name. The portal sits inside it, which is what the
+    # validator requires, and every app on the host is what sends it back.
+    - domain: '{{ .Host }}'
+      authelia_url: 'https://{{ .Host }}/auth/'
+      default_redirection_url: 'https://{{ .Host }}/'
+      same_site: 'lax'
+      expiration: '1 hour'
+      inactivity: '1 hour'
+      remember_me: '30 days'
+storage:
+  # The key encrypts rows in SQLite. Losing it does not stop a password login,
+  # but it permanently orphans anything encrypted, so box creates it once and
+  # never rotates it; it must be backed up with the claim.
+  encryption_key: '{{ .EncryptionKey }}'
+  local:
+    path: '/config/db.sqlite3'
+notifier:
+  # Authelia refuses to start without exactly one notifier, and there is no
+  # "none" mode. With both password flows off nothing is ever written here.
+  filesystem:
+    filename: '/config/notifications.txt'

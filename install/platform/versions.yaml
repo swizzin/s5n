@@ -5,9 +5,11 @@
 # the versions box ships, and a bump is one line in one file.
 #
 # A value is the version exactly as the upstream artefact publishes it: k0s's
-# release tag, the chart's own version. Nothing downstream adds or strips a
-# leading "v" by hand; internal/platform.AtPin compares the deployed chart
-# version to the pin as semver, which accepts either spelling.
+# release tag, the chart's own version, or -- for the login, which box writes
+# the Deployment for -- the whole image reference, repository, tag and digest.
+# Nothing downstream adds or strips a leading "v" by hand; internal/platform.AtPin
+# compares the deployed chart version to the pin as semver, which accepts either
+# spelling.
 #
 # The comment on each line is the pin's source, and it is what Renovate reads:
 # datasource and the package name the version comes from. One line, one pin, one
@@ -16,6 +18,7 @@
 #
 # Versions that exist only for tests (the foreign Gateway scenario, the local
 # registry, Pebble) stay in the scripts, pinned by digest.
+authelia: "docker.io/authelia/authelia:4.39.28@sha256:bd97cff4fcbf715b5ff1f9ae286afbe6033afce385302520b0368122d43a6f54"  # renovate: datasource=docker depName=authelia/authelia
 k0s: v1.37.2+k0s.1       # renovate: datasource=github-releases depName=k0sproject/k0s
 envoyGateway: 1.9.3       # renovate: datasource=docker depName=envoyproxy/gateway-helm
 metallb: 0.16.1           # renovate: datasource=helm depName=metallb registryUrl=https://metallb.github.io/metallb

@@ -1,0 +1,230 @@
+## Rendered by box: do not edit. One login per host, in {{ .Namespace }}, in
+## front of the Gateway that serves every seedbox on it.
+##
+## The Deployment runs unprivileged with a read-only root filesystem: the
+## upstream image's entrypoint only works as root because it chowns /config for
+## you, so box owns that directory instead (uid {{ .UID }}, mode 0700) and the
+## container never needs to.
+apiVersion: v1
+kind: Service
+metadata:
+  name: authelia
+  namespace: {{ .Namespace }}
+  labels:
+    app.kubernetes.io/name: authelia
+    app.kubernetes.io/part-of: s5n
+    app.kubernetes.io/managed-by: box
+spec:
+  selector:
+    app.kubernetes.io/name: authelia
+  ports:
+    - name: http
+      port: 9091
+      targetPort: http
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: authelia
+  namespace: {{ .Namespace }}
+  labels:
+    app.kubernetes.io/name: authelia
+    app.kubernetes.io/part-of: s5n
+    app.kubernetes.io/managed-by: box
+spec:
+  # One replica: sessions live in the process's memory unless Redis is
+  # configured, and box does not run Redis. Recreate rather than RollingUpdate
+  # because two pods would answer the same cookie with two different session
+  # stores.
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: authelia
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: authelia
+        app.kubernetes.io/part-of: s5n
+        app.kubernetes.io/managed-by: box
+      annotations:
+        # The configuration is a ConfigMap, which a running process has already
+        # read: a hash of it is what makes a change to the configuration roll
+        # the pod instead of waiting for someone to notice.
+        s5n.io/config-hash: {{ printf "%q" .ConfigHash }}
+    spec:
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      securityContext:
+        runAsUser: {{ .UID }}
+        runAsGroup: {{ .GID }}
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: authelia
+          image: {{ .Image }}
+          imagePullPolicy: IfNotPresent
+          args:
+            - --config
+            - /etc/authelia/configuration.yml
+          ports:
+            - name: http
+              containerPort: 9091
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            capabilities:
+              drop: ["ALL"]
+            seccompProfile:
+              type: RuntimeDefault
+          # The server listens on /auth, so the health handler the binary
+          # always registers is under it. The probe talks to the pod, not
+          # through the Gateway, so the login never gates its own probe.
+          readinessProbe:
+            httpGet:
+              path: /auth/api/health
+              port: http
+            periodSeconds: 5
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /auth/api/health
+              port: http
+            periodSeconds: 30
+            failureThreshold: 3
+            initialDelaySeconds: 60
+          volumeMounts:
+            # The claim: users_database.yml (0600), db.sqlite3, notifications.
+            - name: config
+              mountPath: /config
+            - name: configuration
+              mountPath: /etc/authelia
+              readOnly: true
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: config
+          persistentVolumeClaim:
+            claimName: {{ .Claim }}
+        - name: configuration
+          configMap:
+            name: {{ .ConfigMap }}
+        - name: tmp
+          emptyDir: {}
+---
+apiVersion: gateway.networking.k8s.io/v1beta1
+kind: ReferenceGrant
+metadata:
+  name: s5n-authelia
+  namespace: {{ .Namespace }}
+  labels:
+    app.kubernetes.io/part-of: s5n
+    app.kubernetes.io/managed-by: box
+spec:
+  # Envoy Gateway 1.9.3 resolves the cross-namespace backendRef without asking
+  # for a grant. Gateway API says one is required, and a later EG may enforce
+  # it, so box writes the grant the wiring actually needs rather than relying
+  # on that gap.
+  from:
+    - group: gateway.envoyproxy.io
+      kind: SecurityPolicy
+      namespace: {{ .GatewayNamespace }}
+  to:
+    - group: ""
+      kind: Service
+      name: authelia
+---
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: SecurityPolicy
+metadata:
+  name: s5n-authelia
+  namespace: {{ .GatewayNamespace }}
+  labels:
+    app.kubernetes.io/part-of: s5n
+    app.kubernetes.io/managed-by: box
+spec:
+  # The Gateway itself, no sectionName: every listener and every route
+  # attached to it, including the shared port-80 listener and including a
+  # listener or route this box adds later. A route-level policy could exempt a
+  # path; this one cannot, which is why the exemptions live in access_control
+  # and are root's configuration rather than a user's object.
+  targetRefs:
+    - group: gateway.networking.k8s.io
+      kind: Gateway
+      name: {{ .Gateway }}
+  extAuth:
+    http:
+      backendRefs:
+        - name: authelia
+          namespace: {{ .Namespace }}
+          port: 9091
+      # A prefix: Envoy appends the original request path. Authelia's own Envoy
+      # example uses the trailing slash, and it is required: the appended path
+      # starts with '/', and the endpoint's route captures the remainder.
+      path: /api/authz/ext-authz/
+      headersToBackend:
+        - remote-user
+        - remote-groups
+        - remote-email
+        - remote-name
+    headersToExtAuth:
+      # A field of extAuth, not of extAuth.http (Envoy Gateway's ExtAuth struct;
+      # the API server refuses it under http). Only Host, Method, Path,
+      # Content-Length and Authorization reach the auth server by default, so
+      # the session cookie has to be named or every request looks anonymous.
+      - cookie
+      # Envoy's connection manager adds x-forwarded-proto to a request before
+      # its filters run, but it is not one of the five defaults either.
+      # Authelia takes the object's scheme from it and refuses an http one (the
+      # transport from Envoy to Authelia is plain HTTP), so without this every
+      # request would be a 400.
+      - x-forwarded-proto
+      # Accept, because Authelia's ext-authz answer depends on it: it replies
+      # 401 to an XHR or to a request that does not accept text/html, and 302
+      # to the portal otherwise (handler_authz_util.go: getAuthzRedirectStatusCode,
+      # 4.39.28). Without the header every browser gets a bare 401 with a
+      # Location it will not follow, and the portal is unreachable.
+      - accept
+    # Fail closed: an unreachable login refuses the request rather than serving
+    # the app.
+    failOpen: false
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: s5n-authelia
+  namespace: {{ .Namespace }}
+  labels:
+    app.kubernetes.io/name: authelia
+    app.kubernetes.io/part-of: s5n
+    app.kubernetes.io/managed-by: box
+spec:
+  # The portal itself, on the host's own name. This is the route Authelia's 302
+  # sends the browser to, so it is the one thing that must not sit behind the
+  # login: Authelia's access_control bypasses ^/auth, and the Gateway-wide
+  # policy still runs for every other path.
+  #
+  # No sectionName, and none is needed: for this host name the most specific
+  # listener is the host's own port-80 one, which admits only s5n-gateway, so a
+  # plain-HTTP request for this name never reaches this route -- it attaches to
+  # the HTTPS listener, which admits every namespace. (Until the certificate
+  # flow has written that port-80 listener, port 80 falls back to the shared
+  # one, where the login refuses an http target outright.) Written at init, not
+  # when the certificate is Ready, so the portal is there the moment HTTPS is --
+  # and unattached, harmlessly, before that.
+  parentRefs:
+    - name: {{ .Gateway }}
+      namespace: {{ .GatewayNamespace }}
+  hostnames:
+    - {{ .Host }}
+  rules:
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /auth
+      backendRefs:
+        - name: authelia
+          port: 9091

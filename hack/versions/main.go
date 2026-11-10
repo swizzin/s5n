@@ -21,6 +21,7 @@ import (
 
 func main() {
 	pins := [][2]string{
+		{"authelia", platformassets.Pins.Authelia},
 		{"k0s", platformassets.Pins.K0s},
 		{"envoyGateway", platformassets.Pins.EnvoyGateway},
 		{"metallb", platformassets.Pins.MetalLB},

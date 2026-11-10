@@ -5,10 +5,10 @@
   "customManagers": [
     {
       "customType": "regex",
-      "description": "Every version box installs: install/platform/versions.yaml. One key per component, and the comment on the line names the datasource and package the version comes from, so a bump is one line in one file and CI's e2e tests exactly what box ships. The shape is flat and the marker inline because both readers are then trivial: this regex here, and `sed` in the e2e (no YAML parser on the host).",
+      "description": "Every version box installs: install/platform/versions.yaml. One key per component, and the comment on the line names the datasource and package the version comes from, so a bump is one line in one file and CI's e2e tests exactly what box ships. The shape is flat and the marker inline because both readers are then trivial: this regex here, and `sed` in the e2e (no YAML parser on the host). A value may be a whole image reference (`repository:tag@sha256:...`, which is the login's pin), so the digest is captured as currentDigest and the reference without it as currentValue: Renovate then reads both from the one line and bumps them together.",
       "fileMatch": ["^install/platform/versions\\.yaml$"],
       "matchStrings": [
-        "\\n[ \\t]*(?<depKey>[A-Za-z][A-Za-z0-9]*):[ \\t]*\"?(?<currentValue>[^\\s\"#]+)\"?[ \\t]+# renovate: datasource=(?<datasource>[a-z0-9-]+) depName=(?<depName>[^\\s]+)(?:[ \\t]+registryUrl=(?<registryUrl>[^\\s]+))?"
+        "\\n[ \\t]*(?<depKey>[A-Za-z][A-Za-z0-9]*):[ \\t]*\"?(?<currentValue>[^\\s\"#@]+)(?:@(?<currentDigest>sha256:[a-f0-9]{64}))?\"?[ \\t]+# renovate: datasource=(?<datasource>[a-z0-9-]+) depName=(?<depName>[^\\s]+)(?:[ \\t]+registryUrl=(?<registryUrl>[^\\s]+))?"
       ]
     },
     {
