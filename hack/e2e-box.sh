@@ -344,7 +344,7 @@ fresh() {
     { echo "the plan did not print MetalLB as conditional"; fail=1; }
   grep -qF "? IPAddressPool s5n-pool" "$WORK/bootstrap1.txt" ||
     { echo "the plan did not print the MetalLB pool as conditional"; fail=1; }
-  grep -qF "the Gateway has no address (AddressNotAssigned) after waiting up to 1m0s; installing MetalLB" "$WORK/bootstrap1.txt" ||
+  grep -qF "the Gateway has no address (AddressNotAssigned) after waiting up to 15s; installing MetalLB" "$WORK/bootstrap1.txt" ||
     { echo "the Gateway's own status did not decide the install"; fail=1; }
   grep -qF "the Gateway answers on " "$WORK/bootstrap1.txt" ||
     { echo "box never checked that the Gateway's address answers from the host"; fail=1; }
