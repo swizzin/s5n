@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/swizzin/s5n/internal/atomicfile"
 	"github.com/swizzin/s5n/internal/qbtconf"
 	"github.com/swizzin/s5n/internal/ttlconf"
 	"github.com/swizzin/s5n/internal/wiring"
@@ -128,13 +129,8 @@ func runQbtConfig(args []string) error {
 	if err := os.MkdirAll(filepath.Dir(*conf), 0o750); err != nil {
 		return fmt.Errorf("create %s: %w", filepath.Dir(*conf), err)
 	}
-	tmp := *conf + ".s5n-tmp"
-	if err := os.WriteFile(tmp, out, 0o600); err != nil {
-		return fmt.Errorf("write %s: %w", tmp, err)
-	}
-	if err := os.Rename(tmp, *conf); err != nil {
-		_ = os.Remove(tmp)
-		return fmt.Errorf("replace %s: %w", *conf, err)
+	if err := atomicfile.Write(*conf, out, 0o600); err != nil {
+		return err
 	}
 	fmt.Printf("qbt-config: seeded WebUI credential into %s\n", *conf)
 	return nil
@@ -172,13 +168,8 @@ func runTautulliConfig(args []string) error {
 	if err := os.MkdirAll(filepath.Dir(*conf), 0o750); err != nil {
 		return fmt.Errorf("create %s: %w", filepath.Dir(*conf), err)
 	}
-	tmp := *conf + ".s5n-tmp"
-	if err := os.WriteFile(tmp, out, 0o600); err != nil {
-		return fmt.Errorf("write %s: %w", tmp, err)
-	}
-	if err := os.Rename(tmp, *conf); err != nil {
-		_ = os.Remove(tmp)
-		return fmt.Errorf("replace %s: %w", *conf, err)
+	if err := atomicfile.Write(*conf, out, 0o600); err != nil {
+		return err
 	}
 	fmt.Printf("tautulli-config: seeded api_key into %s\n", *conf)
 	return nil

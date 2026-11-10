@@ -4,13 +4,12 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
-	"io/fs"
-	"os"
-	"path/filepath"
 	"reflect"
 	"strings"
 
 	"go.yaml.in/yaml/v3"
+
+	"github.com/swizzin/s5n/internal/atomicfile"
 )
 
 // Editor changes one key at a time and writes the file back atomically. It uses
@@ -27,15 +26,12 @@ import (
 type Editor struct {
 	doc *Doc
 	src []byte
-	// rename is os.Rename in production. Tests replace it to prove that a failed
-	// write leaves the original file exactly as it was.
-	rename func(oldpath, newpath string) error
 }
 
 // Editor returns an editor over the document. The document is not changed until
 // Save succeeds.
 func (d *Doc) Editor() *Editor {
-	return &Editor{doc: d, src: d.Src, rename: os.Rename}
+	return &Editor{doc: d, src: d.Src}
 }
 
 // SetGrant sets one key in the grant and saves it. Only grant keys may be
@@ -166,7 +162,7 @@ func (e *Editor) Save() error {
 	if e.doc.Path == "" {
 		return errors.New("cannot save: the document has no file")
 	}
-	if err := writeAtomic(e.doc.Path, e.src, e.doc.mode, e.rename); err != nil {
+	if err := atomicfile.Write(e.doc.Path, e.src, e.doc.mode); err != nil {
 		return err
 	}
 	d, err := parseDoc(e.doc.Path, e.src)
@@ -784,49 +780,6 @@ func isBareNull(n *yaml.Node) bool {
 func checkLineEndings(src []byte) error {
 	if bytes.Contains(src, []byte("\r\n")) {
 		return errors.New("this file has Windows line endings; edit it once with a Unix editor, then box can change it")
-	}
-	return nil
-}
-
-// writeAtomic writes through a temporary file in the same directory and renames
-// it over the target, so a crash mid-write leaves the old file whole. The mode
-// is the one the file already had.
-func writeAtomic(path string, data []byte, mode fs.FileMode, rename func(string, string) error) error {
-	dir := filepath.Dir(path)
-	f, err := os.CreateTemp(dir, "."+filepath.Base(path)+".tmp-")
-	if err != nil {
-		return fmt.Errorf("write %s: %w", path, err)
-	}
-	tmp := f.Name()
-	fail := func(err error) error {
-		f.Close()
-		os.Remove(tmp)
-		return err
-	}
-	if _, err := f.Write(data); err != nil {
-		return fail(fmt.Errorf("write %s: %w", path, err))
-	}
-	if err := f.Sync(); err != nil {
-		return fail(fmt.Errorf("write %s: %w", path, err))
-	}
-	if err := f.Close(); err != nil {
-		os.Remove(tmp)
-		return fmt.Errorf("write %s: %w", path, err)
-	}
-	if err := os.Chmod(tmp, mode.Perm()); err != nil {
-		os.Remove(tmp)
-		return fmt.Errorf("write %s: %w", path, err)
-	}
-	if rename == nil {
-		rename = os.Rename
-	}
-	if err := rename(tmp, path); err != nil {
-		os.Remove(tmp)
-		return fmt.Errorf("write %s: %w", path, err)
-	}
-	if d, err := os.Open(dir); err == nil {
-		d.Sync()
-		d.Close()
 	}
 	return nil
 }

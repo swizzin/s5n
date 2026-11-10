@@ -1,12 +1,13 @@
 package seedbox
 
 import (
-	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/swizzin/s5n/internal/atomicfile"
 )
 
 // blockDiff trims the unchanged prefix and suffix, so an assertion is about the
@@ -60,8 +61,8 @@ func TestRoundTripIsByteIdentical(t *testing.T) {
 			// And the writer itself adds nothing: the same bytes through the
 			// atomic path come back byte for byte.
 			out := filepath.Join(t.TempDir(), "copy.yaml")
-			if err := writeAtomic(out, before, 0o600, os.Rename); err != nil {
-				t.Fatalf("writeAtomic: %v", err)
+			if err := atomicfile.Write(out, before, 0o600); err != nil {
+				t.Fatalf("atomicfile.Write: %v", err)
 			}
 			if got, err := os.ReadFile(out); err != nil || string(got) != string(before) {
 				t.Errorf("the atomic write changed the bytes (%v)", err)
@@ -465,7 +466,11 @@ func TestSaveKeepsTheFileMode(t *testing.T) {
 	}
 }
 
-func TestFailedWriteLeavesTheOriginal(t *testing.T) {
+// A save that cannot write reports the failure and leaves the document as it
+// was: what the atomic write itself promises (the target's old bytes, no
+// temporary file left beside it) is internal/atomicfile's test, since that is
+// where the write now lives.
+func TestFailedSaveKeepsTheDocument(t *testing.T) {
 	path := copyFixture(t, "values.yaml")
 	before, _ := os.ReadFile(path)
 	s, err := Load(fixture(t, "grant.yaml"), path)
@@ -476,23 +481,24 @@ func TestFailedWriteLeavesTheOriginal(t *testing.T) {
 	if err := e.Set("wiring.timeoutSeconds", 900); err != nil {
 		t.Fatalf("Set: %v", err)
 	}
-	e.rename = func(_, _ string) error { return errors.New("simulated rename failure") }
+	// A file whose directory is not there cannot be written, which is the one
+	// failure this package still has to survive without a seam into the writer.
+	e.doc.Path = filepath.Join(t.TempDir(), "missing", "values.yaml")
 	if err := e.Save(); err == nil {
-		t.Fatal("Save reported success after the rename failed")
-	}
-	after, _ := os.ReadFile(path)
-	if string(after) != string(before) {
-		t.Error("the original file changed after a failed write")
-	}
-	leftovers, err := filepath.Glob(filepath.Join(filepath.Dir(path), ".*.tmp-*"))
-	if err != nil {
-		t.Fatalf("glob: %v", err)
-	}
-	if len(leftovers) != 0 {
-		t.Errorf("temporary files left behind: %v", leftovers)
+		t.Fatal("Save reported success into a directory that is not there")
 	}
 	if s.Values.Src != nil && string(s.Values.Src) != string(before) {
 		t.Error("the in-memory document moved even though the write failed")
+	}
+	if e.Changed() == false {
+		t.Error("the edit was dropped by a failed save")
+	}
+	after, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read the original: %v", err)
+	}
+	if string(after) != string(before) {
+		t.Error("the original file changed after a failed write")
 	}
 }
 

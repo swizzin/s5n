@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+
+	"github.com/swizzin/s5n/internal/atomicfile"
 )
 
 // Record is the persisted /etc/swizzin/cluster.yaml. It is written in a fixed,
@@ -192,15 +194,7 @@ func (r FilesystemRecords) Save(rec *Record) error {
 	if err := os.MkdirAll(filepath.Dir(r.Path), 0o755); err != nil {
 		return err
 	}
-	tmp := r.Path + ".s5n-tmp"
-	if err := os.WriteFile(tmp, encodeRecord(rec), 0o600); err != nil {
-		return err
-	}
-	if err := os.Rename(tmp, r.Path); err != nil {
-		_ = os.Remove(tmp)
-		return err
-	}
-	return nil
+	return atomicfile.Write(r.Path, encodeRecord(rec), 0o600)
 }
 
 // ReadOnlyRecords wraps a store: Load still reads, Save is a no-op. box
