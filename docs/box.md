@@ -168,6 +168,11 @@ the provider. Skipping the Plex claim at `init` stays allowed, with a warning th
 until the server is claimed, whoever signs in to Seerr first becomes its owner. A
 migrated server that is already claimed needs no warning.
 
+**A plain `helm install` must say who checks the login (decided).** The chart requires an
+explicit `auth.edge: true`, with no default, and refuses to render without it. box sets
+it; an operator without box sets it to say they put a login in front themselves, the
+way an ingress with basic auth does. The chart never wires per-app logins.
+
 Proposed:
 
 - The provider is Authelia: users in a file with argon2id hashes, forward auth through
@@ -179,13 +184,6 @@ Proposed:
   Whether Authelia's file backend allows that is still to be checked.
 - Unattended, a password comes from a file or stdin, never a flag (it would sit in shell
   history and `ps`), and none supplied means a generated one, printed once.
-
-Open:
-
-- A plain `helm install` has no provider in front of it. Proposed: the chart requires an
-  explicit `auth.edge: true`, with no default, and refuses to render without it. box sets
-  it; an operator without box sets it to say they put a login in front themselves, the
-  way an ingress with basic auth does. The chart never wires per-app logins.
 
 ## Commands
 
