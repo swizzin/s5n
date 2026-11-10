@@ -302,7 +302,10 @@ func (r *Reporter) Created(paths []string) {
 	}
 	var names []string
 	for _, p := range paths {
-		names = append(names, strings.TrimPrefix(strings.TrimPrefix(p, base), "/"))
+		name := strings.TrimPrefix(strings.TrimPrefix(p, base), "/")
+		if name != "" {
+			names = append(names, name)
+		}
 	}
 	for _, raw := range wrapText(strings.Join(names, " · "), r.width-4) {
 		b.WriteString("    " + r.chrome.paint(raw, mutedStyle.Render(raw)) + "\n")
