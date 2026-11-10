@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"net/url"
 	"runtime"
+
+	platformassets "github.com/swizzin/s5n/install/platform"
 )
 
 // This file is box's k0s policy: the one release box installs, the checksum of
@@ -18,11 +20,14 @@ import (
 // published sha256sums.txt and were confirmed by hashing the downloaded assets;
 // changing them is a deliberate edit, not something a run can drift into.
 
-// K0sVersion is the k0s release box installs on a clean host. It is the newest
-// stable release, not the version in an old test fixture: k8s 1.31 is out of
-// support. The chart's kubeVersion is a floor (>=1.30), so a newer cluster
-// needs no chart change.
-const K0sVersion = "v1.37.2+k0s.1"
+// k0sVersion is the k0s release box installs on a clean host. It is not a pin
+// of its own: every version box installs lives in install/platform/versions.yaml,
+// which this package reads through the same embedded bytes internal/platform
+// does (bootstrap does not import platform). It is the newest stable release,
+// not the version in an old test fixture: k8s 1.31 is out of support. The
+// chart's kubeVersion is a floor (>=1.30), so a newer cluster needs no chart
+// change.
+var k0sVersion = platformassets.Pins.K0s
 
 const (
 	// K0sBinaryPath is where box puts the single k0s binary, and therefore
@@ -56,9 +61,9 @@ type k0sRelease struct {
 func k0sReleaseFor(arch string) (k0sRelease, error) {
 	sum, ok := k0sSHA256[arch]
 	if !ok {
-		return k0sRelease{}, fmt.Errorf("k0s %s is not published for %q: box installs amd64 or arm64", K0sVersion, arch)
+		return k0sRelease{}, fmt.Errorf("k0s %s is not published for %q: box installs amd64 or arm64", k0sVersion, arch)
 	}
-	return k0sRelease{Version: K0sVersion, Arch: arch, SHA256: sum}, nil
+	return k0sRelease{Version: k0sVersion, Arch: arch, SHA256: sum}, nil
 }
 
 // URL is the release asset. The tag carries a '+', which a path segment may
@@ -73,7 +78,7 @@ func (r k0sRelease) URL() string {
 // the installer requires. A host with no verified pin still gets a plan naming
 // the version; the installer refuses it on the architecture.
 func k0sPlan() InstallPlan {
-	plan := InstallPlan{Version: K0sVersion, Arch: runtime.GOARCH, CleanHost: true}
+	plan := InstallPlan{Version: k0sVersion, Arch: runtime.GOARCH, CleanHost: true}
 	if rel, err := k0sReleaseFor(runtime.GOARCH); err == nil {
 		plan.SHA256 = rel.SHA256
 	}

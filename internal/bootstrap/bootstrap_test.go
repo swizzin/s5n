@@ -7,6 +7,8 @@ import (
 	"os"
 	"strings"
 	"testing"
+
+	platformassets "github.com/swizzin/s5n/install/platform"
 )
 
 // ---- fakes ----
@@ -584,8 +586,8 @@ func TestBootstrapContainerRuntimeNotACluster(t *testing.T) {
 
 			switch tc.wantAction {
 			case ActionInstall:
-				if len(inst.plans) != 1 || inst.plans[0].Version != K0sVersion {
-					t.Errorf("installer should get one plan for %s: %v", K0sVersion, inst.plans)
+				if len(inst.plans) != 1 || inst.plans[0].Version != platformassets.Pins.K0s {
+					t.Errorf("installer should get one plan for %s: %v", platformassets.Pins.K0s, inst.plans)
 				}
 				// The plan is all a dry run produces: the cluster it describes
 				// does not exist yet, so nothing can be probed or recorded.
@@ -625,7 +627,7 @@ func TestBootstrapCleanHostInstalls(t *testing.T) {
 		log:        trace,
 	}
 	prober := &fakeProber{
-		version: Version{GitVersion: K0sVersion},
+		version: Version{GitVersion: platformassets.Pins.K0s},
 		cluster: Cluster{Nodes: 1},
 		platform: PlatformProbe{
 			GatewayAPI:   OutcomeAbsent,
@@ -653,8 +655,8 @@ func TestBootstrapCleanHostInstalls(t *testing.T) {
 	if res.Kubeconfig != K0sAdminConfig {
 		t.Errorf("kubeconfig = %q, want %q", res.Kubeconfig, K0sAdminConfig)
 	}
-	if len(inst.plans) != 1 || inst.plans[0].Version != K0sVersion || !inst.plans[0].CleanHost {
-		t.Fatalf("installer should get one clean-host plan for %s: %+v", K0sVersion, inst.plans)
+	if len(inst.plans) != 1 || inst.plans[0].Version != platformassets.Pins.K0s || !inst.plans[0].CleanHost {
+		t.Fatalf("installer should get one clean-host plan for %s: %+v", platformassets.Pins.K0s, inst.plans)
 	}
 	if inst.plans[0].SHA256 != k0sSHA256[inst.plans[0].Arch] {
 		t.Errorf("plan carries no pinned checksum: %+v", inst.plans[0])

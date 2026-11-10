@@ -7,6 +7,8 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+
+	platformassets "github.com/swizzin/s5n/install/platform"
 )
 
 func TestK0sPinsAreReal(t *testing.T) {
@@ -27,8 +29,8 @@ func TestK0sPinsAreReal(t *testing.T) {
 		if err != nil {
 			t.Fatalf("%s: %v", arch, err)
 		}
-		if rel.Version != K0sVersion {
-			t.Errorf("%s: release version = %q, want the single pin %q", arch, rel.Version, K0sVersion)
+		if rel.Version != platformassets.Pins.K0s {
+			t.Errorf("%s: release version = %q, want the single pin %q", arch, rel.Version, platformassets.Pins.K0s)
 		}
 	}
 	for _, arch := range []string{"amd64", "arm64"} {
@@ -54,8 +56,8 @@ func TestK0sReleaseURL(t *testing.T) {
 
 func TestK0sPlanCarriesThePinAndTheChoice(t *testing.T) {
 	plan := k0sPlan()
-	if plan.Version != K0sVersion {
-		t.Errorf("version = %q, want %q", plan.Version, K0sVersion)
+	if plan.Version != platformassets.Pins.K0s {
+		t.Errorf("version = %q, want %q", plan.Version, platformassets.Pins.K0s)
 	}
 	if !plan.CleanHost {
 		t.Error("a plan built for the clean-host branch must say so")
@@ -90,7 +92,7 @@ func TestK0sStatePresent(t *testing.T) {
 }
 
 func TestInstallRefusal(t *testing.T) {
-	clean := InstallPlan{Version: K0sVersion, CleanHost: true}
+	clean := InstallPlan{Version: platformassets.Pins.K0s, CleanHost: true}
 	cases := []struct {
 		name     string
 		plan     InstallPlan
@@ -102,7 +104,7 @@ func TestInstallRefusal(t *testing.T) {
 		{name: "not root", plan: clean, root: false, want: "as root"},
 		{
 			name: "the decision did not choose to install",
-			plan: InstallPlan{Version: K0sVersion},
+			plan: InstallPlan{Version: platformassets.Pins.K0s},
 			root: true,
 			want: "did not choose to install",
 		},

@@ -25,40 +25,36 @@ import (
 	"strings"
 	"time"
 
+	platformassets "github.com/swizzin/s5n/install/platform"
 	"github.com/swizzin/s5n/internal/bootstrap"
 	"github.com/swizzin/s5n/internal/say"
 )
 
-// The pinned platform releases. hack/e2e-kind.sh and hack/e2e-box.sh install
-// the same versions, so the platform the e2e accepts is the platform box
-// installs. Bumping one of these means bumping the e2e's default too.
+// The platform releases: where each chart comes from and what box calls the
+// result. The versions themselves are not here -- every version box installs
+// lives in install/platform/versions.yaml, which this package and the e2e read
+// (platformassets.Pins), so a bump moves one line and the e2e tests it.
 const (
-	// EnvoyGatewayVersion is the Envoy Gateway chart, which ships the Gateway
+	// EnvoyGatewayChart is the Envoy Gateway chart, which ships the Gateway
 	// API CRDs at the experimental channel it is built against. The chart owns
 	// the CRDs on purpose: a separately pinned standard channel can drift from
 	// (or conflict with) the set the controller expects.
-	EnvoyGatewayVersion   = "1.9.3"
 	EnvoyGatewayChart     = "gateway-helm"
 	EnvoyGatewayRef       = "oci://docker.io/envoyproxy/gateway-helm"
 	EnvoyGatewayRelease   = "envoy-gateway"
 	EnvoyGatewayNamespace = "envoy-gateway-system"
 
-	// MetalLBVersion is the MetalLB chart, in L2 mode: it makes
+	// MetalLBChart is the MetalLB chart, in L2 mode: it makes
 	// `type: LoadBalancer` work on bare metal with no extra addresses.
-	MetalLBVersion   = "0.16.1"
 	MetalLBChart     = "metallb"
 	MetalLBRef       = "https://metallb.github.io/metallb"
 	MetalLBRelease   = "metallb"
 	MetalLBNamespace = "metallb-system"
 
-	// CertManagerVersion is the cert-manager chart. Its CRDs and Gateway API
+	// CertManagerChart is the cert-manager chart. Its CRDs and Gateway API
 	// support are part of the install: the CRDs are what a Certificate is,
 	// and config.gatewayAPI.enabled is what lets the controller solve an
-	// HTTP-01 challenge through the Gateway's HTTPRoute. The upstream chart
-	// publishes its versions with the leading "v"; the pin carries it, so the
-	// deployed release's chart version compares equal and a re-run verifies
-	// instead of upgrading.
-	CertManagerVersion   = "v1.21.3"
+	// HTTP-01 challenge through the Gateway's HTTPRoute.
 	CertManagerChart     = "cert-manager"
 	CertManagerRef       = "oci://quay.io/jetstack/charts/cert-manager"
 	CertManagerRelease   = "cert-manager"
@@ -190,8 +186,8 @@ type Step struct {
 	// box does not manage, in auto mode its absence is box's to fix.
 	Mode bootstrap.PlatformMode
 	// InstalledVersion is filled in by resolution: the chart version a
-	// deployed release already has. Equal to Release.Version means the step
-	// is verification only, and no Helm call happens.
+	// deployed release already has. AtPin(InstalledVersion, Release.Version)
+	// means the step is verification only, and no Helm call happens.
 	InstalledVersion string
 	// Foreign marks a deployed release of the same name that box did not
 	// install (it carries no ownership label). It is never upgraded; a
@@ -357,7 +353,7 @@ func (d *Decision) Apply(ctx context.Context, components []bootstrap.ComponentRe
 				return res, fmt.Errorf("a Helm release named %s already exists in %s, but box did not install it (no %s=%s label): box will not upgrade another operator's release. Remove it, or use the implementation it provides",
 					s.Release.Name, s.Release.Namespace, ReleaseOwnerLabel, ReleaseOwner)
 			}
-			if s.InstalledVersion == s.Release.Version {
+			if AtPin(s.InstalledVersion, s.Release.Version) {
 				step := r.Start(say.Op{Label: "verifying " + s.Release.Name})
 				step.DoneAs(
 					fmt.Sprintf("= %s in %s: already at %s", s.Release.Name, s.Release.Namespace, s.Release.Version),
@@ -762,7 +758,7 @@ func (d *Decision) printPlan(r say.Reporter, plan Plan) {
 				items = append(items, say.Item{Mark: say.Question, Text: fmt.Sprintf("%s, %s (a release box did not install already exists; box will not upgrade it)", s.Release, s.Unless)})
 				continue
 			}
-			if s.InstalledVersion == s.Release.Version {
+			if AtPin(s.InstalledVersion, s.Release.Version) {
 				items = append(items, say.Item{Mark: say.Verify, Text: fmt.Sprintf("%s: already at %s; verifying", s.Release.Name, s.Release.Version)})
 				continue
 			}
@@ -774,10 +770,16 @@ func (d *Decision) printPlan(r say.Reporter, plan Plan) {
 				continue
 			}
 			mark := say.Install
+			text := s.Release.String()
 			if s.InstalledVersion != "" {
 				mark = say.Change
+				// The upgrade is a write, so the plan says what it is
+				// replacing -- including a deployed version box cannot read.
+				if why := notAtPin(s.InstalledVersion, s.Release.Version); why != "" {
+					text += ", " + why
+				}
 			}
-			items = append(items, say.Item{Mark: mark, Text: s.Release.String()})
+			items = append(items, say.Item{Mark: mark, Text: text})
 		case StepGatewayAddress:
 			// A question the plan cannot answer yet: box finds out after the
 			// Gateway is applied, and the `?` steps below depend on the answer.
@@ -838,7 +840,7 @@ func BuildPlan(components []bootstrap.ComponentResult, gatewayClass, acmeServer 
 				Namespace: EnvoyGatewayNamespace,
 				Ref:       EnvoyGatewayRef,
 				Chart:     EnvoyGatewayChart,
-				Version:   EnvoyGatewayVersion,
+				Version:   platformassets.Pins.EnvoyGateway,
 			},
 			Wait: []Wait{{Kind: WaitDeployment, Namespace: EnvoyGatewayNamespace, Name: EnvoyGatewayRelease}},
 		})
@@ -859,7 +861,7 @@ func BuildPlan(components []bootstrap.ComponentResult, gatewayClass, acmeServer 
 				Namespace: CertManagerNamespace,
 				Ref:       CertManagerRef,
 				Chart:     CertManagerChart,
-				Version:   CertManagerVersion,
+				Version:   platformassets.Pins.CertManager,
 				Values: map[string]any{
 					"crds": map[string]any{"enabled": true},
 					"config": map[string]any{
@@ -992,7 +994,7 @@ func metalLBSteps(unless Condition) []Step {
 				Namespace: MetalLBNamespace,
 				Ref:       MetalLBRef,
 				Chart:     MetalLBChart,
-				Version:   MetalLBVersion,
+				Version:   platformassets.Pins.MetalLB,
 			},
 			Wait: []Wait{
 				{Kind: WaitDeployment, Namespace: MetalLBNamespace, Name: MetalLBRelease + "-controller"},

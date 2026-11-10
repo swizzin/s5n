@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	platformassets "github.com/swizzin/s5n/install/platform"
 	"github.com/swizzin/s5n/internal/bootstrap"
 	"github.com/swizzin/s5n/internal/say"
 )
@@ -313,7 +314,7 @@ func TestBuildPlanInstallsOnlyInstallActions(t *testing.T) {
 			certManager = &r
 		}
 	}
-	if certManager == nil || certManager.Version != CertManagerVersion {
+	if certManager == nil || certManager.Version != platformassets.Pins.CertManager {
 		t.Fatalf("cert-manager was not planned at its pin: %+v", certManager)
 	}
 	crds, _ := certManager.Values["crds"].(map[string]any)
@@ -545,9 +546,9 @@ func TestApplyInstallsInOrder(t *testing.T) {
 		t.Fatal(err)
 	}
 	if len(f.rel.installed) != 3 ||
-		f.rel.installed[0].Name != EnvoyGatewayRelease || f.rel.installed[0].Version != EnvoyGatewayVersion ||
-		f.rel.installed[1].Name != CertManagerRelease || f.rel.installed[1].Version != CertManagerVersion ||
-		f.rel.installed[2].Name != MetalLBRelease || f.rel.installed[2].Version != MetalLBVersion {
+		f.rel.installed[0].Name != EnvoyGatewayRelease || f.rel.installed[0].Version != platformassets.Pins.EnvoyGateway ||
+		f.rel.installed[1].Name != CertManagerRelease || f.rel.installed[1].Version != platformassets.Pins.CertManager ||
+		f.rel.installed[2].Name != MetalLBRelease || f.rel.installed[2].Version != platformassets.Pins.MetalLB {
 		t.Fatalf("releases = %+v", f.rel.installed)
 	}
 	if len(f.cl.writes) != 4 {
@@ -882,7 +883,7 @@ func TestApplyExternalWithAnAddressInstallsTheRest(t *testing.T) {
 // before and never asks whether the Gateway could have done without it.
 func TestApplyVerifiesBoxMetalLBWithoutAsking(t *testing.T) {
 	f := newFixture()
-	f.rel.versions = map[string]string{"metallb-system/metallb": MetalLBVersion}
+	f.rel.versions = map[string]string{"metallb-system/metallb": platformassets.Pins.MetalLB}
 	f.probe.answers = []GatewayAnswer{{Address: "192.0.2.10"}}
 
 	if _, err := f.d.Apply(context.Background(), notProbed(bootstrap.ModeAuto)); err != nil {
@@ -893,7 +894,7 @@ func TestApplyVerifiesBoxMetalLBWithoutAsking(t *testing.T) {
 			t.Fatalf("Helm was called for MetalLB already at its pinned version: %+v", f.rel.installed)
 		}
 	}
-	if !strings.Contains(f.log.String(), "= metallb: already at "+MetalLBVersion) {
+	if !strings.Contains(f.log.String(), "= metallb: already at "+platformassets.Pins.MetalLB) {
 		t.Fatalf("the plan did not verify MetalLB: %q", f.log.String())
 	}
 	if strings.Contains(f.log.String(), "? metallb") {
@@ -916,9 +917,9 @@ func TestApplyVerifiesBoxMetalLBWithoutAsking(t *testing.T) {
 func TestApplyVerifiesPinnedReleases(t *testing.T) {
 	f := newFixture()
 	f.rel.versions = map[string]string{
-		"envoy-gateway-system/envoy-gateway": EnvoyGatewayVersion,
-		"cert-manager/cert-manager":          CertManagerVersion,
-		"metallb-system/metallb":             MetalLBVersion,
+		"envoy-gateway-system/envoy-gateway": platformassets.Pins.EnvoyGateway,
+		"cert-manager/cert-manager":          platformassets.Pins.CertManager,
+		"metallb-system/metallb":             platformassets.Pins.MetalLB,
 	}
 	f.probe.answers = []GatewayAnswer{{Address: "192.0.2.10"}}
 
@@ -928,7 +929,7 @@ func TestApplyVerifiesPinnedReleases(t *testing.T) {
 	if len(f.rel.installed) != 0 {
 		t.Fatalf("Helm was called for releases already at their pinned version: %+v", f.rel.installed)
 	}
-	if !strings.Contains(f.log.String(), "already at "+EnvoyGatewayVersion) {
+	if !strings.Contains(f.log.String(), "already at "+platformassets.Pins.EnvoyGateway) {
 		t.Fatalf("the plan did not say the release is already there: %q", f.log.String())
 	}
 	// Readiness is still checked: a no-op run is verification, not silence.
@@ -967,7 +968,7 @@ func TestApplyUpgradesAnotherVersion(t *testing.T) {
 func TestApplyRetriesThePool(t *testing.T) {
 	f := newFixture()
 	f.cl.applyErrs = []error{errors.New("no endpoints available for service \"metallb-webhook-service\""), nil}
-	f.rel.versions = map[string]string{"metallb-system/metallb": MetalLBVersion}
+	f.rel.versions = map[string]string{"metallb-system/metallb": platformassets.Pins.MetalLB}
 	f.probe.answers = []GatewayAnswer{{Address: "192.0.2.10"}}
 	f.d.PoolTimeout = time.Second
 	f.d.Poll = time.Millisecond

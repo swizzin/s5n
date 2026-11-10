@@ -5,6 +5,8 @@ import (
 	"errors"
 	"strings"
 	"testing"
+
+	platformassets "github.com/swizzin/s5n/install/platform"
 )
 
 // recordedCluster stages a re-run: a record on disk, the kubeconfig it names,
@@ -347,7 +349,7 @@ func TestBootstrapExplicitMatchesRecordUsesRecord(t *testing.T) {
 		GatewayClass: EnvoyGatewayClass,
 	}
 	prober := &fakeProber{
-		version: Version{GitVersion: K0sVersion},
+		version: Version{GitVersion: platformassets.Pins.K0s},
 		cluster: Cluster{Nodes: 1},
 		platform: PlatformProbe{
 			GatewayAPI:   OutcomePresent,
@@ -388,7 +390,7 @@ func TestBootstrapExplicitDifferentRecordStops(t *testing.T) {
 	const recorded = K0sAdminConfig
 	const explicit = "/root/.kube/config"
 	prober := &fakeProber{
-		version: Version{GitVersion: K0sVersion},
+		version: Version{GitVersion: platformassets.Pins.K0s},
 		cluster: Cluster{Nodes: 1},
 	}
 	d, src, recs, inst, trace := recordedCluster(externalRecord(recorded), prober)
@@ -485,7 +487,7 @@ func TestBootstrapManagedRecordReprobes(t *testing.T) {
 		GatewayClass: EnvoyGatewayClass,
 	}
 	prober := &fakeProber{
-		version: Version{GitVersion: K0sVersion},
+		version: Version{GitVersion: platformassets.Pins.K0s},
 		cluster: Cluster{Nodes: 1},
 		platform: PlatformProbe{
 			GatewayAPI:   OutcomeAbsent,

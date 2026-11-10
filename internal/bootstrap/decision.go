@@ -140,7 +140,7 @@ func (d *Decision) Bootstrap(ctx context.Context, opts Options) (Result, error) 
 			Distribution: DistK0s,
 			Skips:        skips,
 			Notes:        describeNotes(notes),
-			Reason:       fmt.Sprintf("clean host: k0s %s would be installed (dry run)", K0sVersion),
+			Reason:       fmt.Sprintf("clean host: k0s %s would be installed (dry run)", k0sVersion),
 		}, nil
 	}
 	res = d.adoptInstalled(ctx, opts)
@@ -164,7 +164,7 @@ func (d *Decision) adoptInstalled(ctx context.Context, opts Options) Result {
 		return res
 	}
 	res.Action = ActionInstall
-	res.Reason = fmt.Sprintf("clean host: k0s %s installed; using %s (%s)", K0sVersion, K0sAdminConfig, res.Distribution)
+	res.Reason = fmt.Sprintf("clean host: k0s %s installed; using %s (%s)", k0sVersion, K0sAdminConfig, res.Distribution)
 	res.Platform = freshClusterAddresses(res.Platform)
 	return res
 }
