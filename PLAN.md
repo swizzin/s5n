@@ -225,6 +225,12 @@ lives in Go, where it can be tested, and none in bash.
 `box bootstrap` decides which cluster to use, in this order:
 
 1. **An explicit cluster.** `--kubeconfig` or `KUBECONFIG`: use it or fail; never fall back.
+   When a record already exists, the explicit path must name the same file the record
+   does (compared after `filepath.Clean`): the same file is the recorded re-run and keeps
+   the record's decisions, a `k0s-managed` lifecycle included. A different file stops
+   before any probe or write and names both paths, the record's source and the record
+   file, because moving a box to another cluster is the operator's decision: unset
+   `KUBECONFIG`, drop `--kubeconfig`, or remove the record deliberately.
 2. **A cluster on this host.** Look for a kubeconfig where distributions put one
    (`/etc/rancher/k3s/k3s.yaml`, `/etc/rancher/rke2/rke2.yaml`, k0s's
    `/var/lib/k0s/pki/admin.conf`, kubeadm's `/etc/kubernetes/admin.conf`,
@@ -256,9 +262,13 @@ The result is recorded in `/etc/swizzin/cluster.yaml` (source: `k0s-managed` or
 reads that record before the candidate scan, then probes the cluster it names again:
 version, privileges, node count and distribution, and the platform layer, with the
 same refusals a freshly found cluster gets. The record supplies the decisions
-(lifecycle owner, platform modes, GatewayClass); the cluster supplies the evidence. A
-recorded cluster that now fails a gate stops, and one whose kubeconfig no longer
-answers stops naming that path rather than installing k0s over it. A `k0s-managed`
+(lifecycle owner, platform modes, GatewayClass); the cluster supplies the evidence. An
+explicit `--kubeconfig`/`KUBECONFIG` that names the recorded path is that same
+recorded re-run, with the record's decisions kept and nothing rewritten; one that names
+a different path stops and names both, rather than silently replacing the record and
+resetting its decisions. A recorded cluster that now fails a gate stops, and one whose
+kubeconfig no longer answers stops naming that path rather than installing k0s over it.
+A `k0s-managed`
 box's start and upgrade still belong to `box update`; an `external` cluster's lifecycle
 is never touched. `box` owns the lifecycle of exactly what it installed.
 

@@ -16,6 +16,7 @@ type fakeRecords struct {
 }
 
 func (f fakeRecords) Load() (*bootstrap.Record, error) { return f.rec, f.err }
+func (f fakeRecords) RecordPath() string               { return "/etc/swizzin/cluster.yaml" }
 func (f fakeRecords) Save(*bootstrap.Record) error     { return nil }
 
 func tempFile(t *testing.T) string {

@@ -57,8 +57,22 @@ func (d *Decision) Bootstrap(ctx context.Context, opts Options) (Result, error) 
 		return res, fmt.Errorf("read cluster record: %w", err)
 	}
 
-	// 1. An explicit cluster: use it or fail, never fall back.
+	// 1. An explicit cluster: use it or fail, never fall back. When a record
+	// already exists it decides what an explicit path means. The record's own
+	// kubeconfig is the recorded re-run (the e2e passes both flags every run,
+	// and a k0s-managed record must stay managed), while a different file is a
+	// move to another cluster that only the operator may make: stop before any
+	// probe or write rather than replacing the record and resetting its
+	// decisions.
 	if path := firstKubeconfig(opts.Kubeconfig, opts.KubeconfigEnv); path != "" {
+		if rec != nil {
+			if filepath.Clean(path) == filepath.Clean(rec.Kubeconfig) {
+				return d.useRecord(ctx, rec), nil
+			}
+			return stop(fmt.Sprintf(
+				"explicit kubeconfig %s does not match the cluster record at %s, which names %s (%s): box will not switch this host to another cluster. Unset KUBECONFIG or drop --kubeconfig to use the recorded cluster, or remove %s deliberately to move box to another cluster.",
+				path, d.Records.RecordPath(), rec.Kubeconfig, rec.Source, d.Records.RecordPath())), nil
+		}
 		kc, err := d.Source.Read(path)
 		if err != nil {
 			return stop(fmt.Sprintf("explicit kubeconfig %s: %v", path, err)), nil

@@ -167,6 +167,9 @@ func (r FilesystemRecords) Load() (*Record, error) {
 	return parseRecord(data)
 }
 
+// RecordPath reports where this store persists the record.
+func (r FilesystemRecords) RecordPath() string { return r.Path }
+
 // Save writes the record atomically, mode 0600, creating the directory first.
 func (r FilesystemRecords) Save(rec *Record) error {
 	if err := os.MkdirAll(filepath.Dir(r.Path), 0o755); err != nil {
@@ -190,4 +193,5 @@ type ReadOnlyRecords struct {
 }
 
 func (r ReadOnlyRecords) Load() (*Record, error) { return r.Inner.Load() }
+func (r ReadOnlyRecords) RecordPath() string     { return r.Inner.RecordPath() }
 func (r ReadOnlyRecords) Save(*Record) error     { return nil }

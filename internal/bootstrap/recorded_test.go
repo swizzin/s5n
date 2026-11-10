@@ -293,6 +293,99 @@ func TestBootstrapRecordGateFiresBeforeAnyWrite(t *testing.T) {
 	})
 }
 
+// ---- explicit kubeconfig against an existing record ----
+
+// The e2e and any documented re-run pass --kubeconfig on every run. When that
+// path is the one the record names, it is the recorded re-run: the record's
+// decisions (including a k0s-managed lifecycle) are kept and nothing is
+// rewritten. filepath.Clean decides, so a harmless spelling difference is not
+// a different cluster.
+func TestBootstrapExplicitMatchesRecordUsesRecord(t *testing.T) {
+	const kubeconfig = K0sAdminConfig
+	rec := &Record{
+		Source:       SourceK0sManaged,
+		Kubeconfig:   kubeconfig,
+		Distribution: DistK0s,
+		Nodes:        1,
+		Platform:     DefaultPlatform(),
+		GatewayClass: EnvoyGatewayClass,
+	}
+	prober := &fakeProber{
+		version: Version{GitVersion: K0sVersion},
+		cluster: Cluster{Nodes: 1},
+		platform: PlatformProbe{
+			GatewayAPI:   OutcomePresent,
+			LoadBalancer: OutcomeNotProbed,
+			Gateway:      OutcomePresent,
+			CertManager:  OutcomePresent,
+			Classes:      []GatewayClass{{Name: EnvoyGatewayClass, Accepted: true, ManagedByBox: true}},
+		},
+	}
+	d, _, recs, inst, _ := recordedCluster(rec, prober)
+
+	// The same file, spelled differently: filepath.Clean makes it the record.
+	res, err := d.Bootstrap(context.Background(), Options{Kubeconfig: "/var/lib/k0s/pki/./admin.conf"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if res.Action != ActionUseManaged || res.Source != SourceK0sManaged {
+		t.Fatalf("action=%q source=%q, want the recorded use-managed cluster; reason: %s", res.Action, res.Source, res.Reason)
+	}
+	if res.Kubeconfig != kubeconfig {
+		t.Errorf("kubeconfig = %q, want the record's %q", res.Kubeconfig, kubeconfig)
+	}
+	if len(recs.saved) != 0 {
+		t.Errorf("the recorded re-run rewrote the record: %+v", recs.saved)
+	}
+	if len(inst.plans) != 0 {
+		t.Errorf("the recorded re-run reached the installer")
+	}
+	if prober.calls["platform"] != 1 {
+		t.Errorf("the record was not re-probed: %v", prober.calls)
+	}
+}
+
+// An explicit kubeconfig naming a different file than the record is a move to
+// another cluster. box refuses it before any probe or write and names both
+// paths, the record's source, and the file to remove deliberately.
+func TestBootstrapExplicitDifferentRecordStops(t *testing.T) {
+	const recorded = K0sAdminConfig
+	const explicit = "/root/.kube/config"
+	prober := &fakeProber{
+		version: Version{GitVersion: K0sVersion},
+		cluster: Cluster{Nodes: 1},
+	}
+	d, src, recs, inst, trace := recordedCluster(externalRecord(recorded), prober)
+	src.files[explicit] = []byte("kubeconfig") // a fall-through would find it
+
+	res, err := d.Bootstrap(context.Background(), Options{Kubeconfig: explicit})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if res.Action != ActionStop {
+		t.Fatalf("action = %q, want stop; reason: %s", res.Action, res.Reason)
+	}
+	for _, want := range []string{explicit, recorded, RecordPath, string(SourceExternal), "Unset KUBECONFIG", "drop --kubeconfig", "remove"} {
+		if !strings.Contains(res.Reason, want) {
+			t.Errorf("reason = %q, want it to name %q", res.Reason, want)
+		}
+	}
+	// The gate fires before anything is read from either kubeconfig, probed,
+	// installed or written.
+	if len(src.reads) != 0 {
+		t.Errorf("read %v before refusing; the gate must fire before any probe", src.reads)
+	}
+	if len(prober.calls) != 0 {
+		t.Errorf("probed before refusing: %v", prober.calls)
+	}
+	if len(recs.saved) != 0 || len(inst.plans) != 0 {
+		t.Errorf("a refused explicit path wrote: %d records, %d installs", len(recs.saved), len(inst.plans))
+	}
+	if got := strings.Join(*trace, "|"); strings.Contains(got, "install k0s") || strings.Contains(got, "save record") {
+		t.Errorf("the refusal reached a write: %v", *trace)
+	}
+}
+
 // A record whose cluster no longer answers stops naming the kubeconfig the
 // record holds, and never reaches the installer.
 func TestBootstrapRecordUnreachableStops(t *testing.T) {

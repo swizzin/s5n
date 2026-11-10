@@ -156,6 +156,10 @@ type RecordStore interface {
 	// cannot be read is an error: box must not install over what it cannot see.
 	Load() (*Record, error)
 	Save(*Record) error
+	// RecordPath reports where the record lives. A refusal that hinges on the
+	// record names the file an operator would remove deliberately, and --record
+	// can move it off the default.
+	RecordPath() string
 }
 
 // Installer provisions k0s on a clean host: it downloads the pinned release,

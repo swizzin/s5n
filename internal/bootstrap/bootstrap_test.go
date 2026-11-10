@@ -111,6 +111,7 @@ func (f *fakeHost) Present() []Finding {
 
 type fakeRecords struct {
 	rec     *Record
+	path    string
 	loadErr error
 	saved   []*Record
 	saveErr error
@@ -118,6 +119,13 @@ type fakeRecords struct {
 }
 
 func (f *fakeRecords) Load() (*Record, error) { return f.rec, f.loadErr }
+
+func (f *fakeRecords) RecordPath() string {
+	if f.path != "" {
+		return f.path
+	}
+	return RecordPath
+}
 
 func (f *fakeRecords) Save(r *Record) error {
 	if f.log != nil {

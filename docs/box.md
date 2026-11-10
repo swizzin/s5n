@@ -244,7 +244,12 @@ lifecycle, the platform modes, the GatewayClass — then probes that cluster aga
 layer. Those are the same probes and the same refusals a freshly found cluster gets,
 so a recorded cluster that has since gone multi-node or lost its class stops before
 anything is written. A record whose kubeconfig no longer answers stops with that path
-named, and never falls through to installing k0s over it. The recorded class is kept
+named, and never falls through to installing k0s over it. An explicit `--kubeconfig`
+or `KUBECONFIG` naming the recorded path is that same re-run, with the record's
+decisions kept and nothing rewritten; naming a different path stops before any probe
+and names both files, the record's source and the record file, because moving the host
+to another cluster is the operator's decision (unset `KUBECONFIG`, drop
+`--kubeconfig`, or remove the record deliberately). The recorded class is kept
 while the cluster still serves it (Accepted, and publishing the feature the routes
 need); what a re-run repairs instead is box's own missing implementation, which is
 what a first run whose platform apply failed leaves behind. So a second bootstrap
