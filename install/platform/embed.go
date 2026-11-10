@@ -4,8 +4,8 @@
 // hack/versions (which reads this file's embedded copy), so the platform the
 // e2e accepts is the platform box installs.
 //
-// embed.go lives here rather than in a package directory of its own because
-// go:embed cannot reach a sibling tree: the file has to sit in the directory
+// embed.go lives here rather than in a package directory of its own, because
+// an embed directive cannot reach a sibling tree: the file has to sit in the directory
 // that embeds it, and its path is the one docs/box.md names.
 package platformassets
 
