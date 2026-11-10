@@ -68,13 +68,15 @@ Each is its own Helm release pinned by `box`, and each has a `platform.<componen
 - `external`: the user's. `box` never installs or touches it, only verifies it.
 
 Detection checks capability, never brand. "Traefik is running" is not evidence; "a
-GatewayClass reports `Accepted` and a Gateway attached to it gets an address" is. The probes:
+GatewayClass reports `Accepted` and a Gateway attached to it gets an address" is. The one
+deliberate exception is the Gateway implementation itself, which must be Envoy Gateway
+because the login is checked there (docs/box.md). The probes:
 
 | component | counts as present when |
 |---|---|
 | Gateway API CRDs | the CRDs exist at or above the bundle version the chart needs (k3s now ships them itself) |
 | LoadBalancer | box's own Gateway reports an address within 15s (60s to be Programmed) and answers HTTP from the host (MetalLB, k3s servicelb, a cloud provider, a host-networked Gateway all pass); see docs/box.md |
-| Gateway | a GatewayClass is `Accepted`; `platform.gateway.className` picks one when there are several |
+| Gateway | an Envoy Gateway GatewayClass is `Accepted` (any other implementation stops `box`); `platform.gateway.className` picks one when there are several |
 | cert-manager | its webhook answers and its version supports Gateway API HTTP-01 |
 
 A component with no working instance is installed only in `auto` or `managed`; in
@@ -83,10 +85,9 @@ A component with no working instance is installed only in `auto` or `managed`; i
 LoadBalancer implementation) stops `box` in every mode: it reports and never fights it.
 
 Distribution presets only fill in what probes cannot decide. On k3s, the bundled Traefik
-does not serve Gateway API until its provider is enabled, so `box` offers to write the
-`HelmChartConfig` that turns it on and then uses it as `external`, rather than installing
-Envoy Gateway beside it. k3s servicelb satisfies the LoadBalancer probe, so MetalLB is
-skipped. `box migrate` runs the same probes, so it uses what a box already has.
+holds 80/443 and box supports only Envoy Gateway (docs/box.md), so `box` stops and names
+k3s's `--disable=traefik` rather than installing Envoy Gateway beside it. k3s servicelb
+satisfies the LoadBalancer probe, so MetalLB is skipped. `box migrate` runs the same probes, so it uses what a box already has.
 
 The chart itself stays platform-agnostic: it emits HTTPRoutes and one LoadBalancer or
 NodePort Service, and never depends on which implementation sits behind them.
@@ -97,8 +98,8 @@ through the Gateway's LoadBalancer address.
 ### Routing: Gateway API, not Ingress
 
 ingress-nginx was retired in March 2026, so a new project must not start on it. The chart
-emits `HTTPRoute`s against one `Gateway`, served by Envoy Gateway on a managed install
-(see the platform layer above). Every app gets a path under one
+emits `HTTPRoute`s against one `Gateway`, served by Envoy Gateway, the one implementation
+box supports (see the platform layer above; the chart itself attaches to any Gateway). Every app gets a path under one
 host (`https://box.example.com/sonarr`), matching swizzin's URL habits.
 TLS: cert-manager with Let's Encrypt HTTP-01 when a domain is given, self-signed otherwise.
 Optional Tailscale exposure is a later add-on.

@@ -136,6 +136,48 @@ rest. This raises the chart's `kubeVersion` floor to 1.30, where the API is GA.
 shares, so it lives in the grant with the Service type, and `box adduser` picks a free
 one.
 
+## Logins (decided, mechanism proposed)
+
+**One login per seedbox user, checked at the edge (decided).** A person signs in once,
+with their account name, and reaches every app that has an admin UI: qBittorrent, the
+Arrs, Prowlarr, qui. One auth provider checks the login at the Gateway. It is part of the
+platform layer: root's `bootstrap` installs it, and `box adduser` adds the user to it.
+Each user's domain admits only that user. Behind it the apps have no login of their own
+(the Arrs run with `External` authentication) and are reachable only through the Gateway.
+
+**One auth mechanism, no fallback (decided).** Wiring a login into each app separately
+would be a second auth system with its own reset path, tests and docs, so box doesn't
+build one. That is why Envoy Gateway is the only Gateway implementation box supports.
+
+**The password is never stored where it can be read back (decided).** The provider keeps
+a hash and nothing else does. A forgotten password is reset, not recovered. Credentials
+between apps (API keys, the qBittorrent account the Arrs use) are generated, kept in the
+release Secret, and never the person's password.
+
+**Plex, Seerr and Tautulli sign in through Plex (decided).** Players talk to Plex
+directly, and Seerr's users are the Plex server's friends, so these three stay outside
+the provider. Skipping the Plex claim at `init` stays allowed, with a warning that
+until the server is claimed, whoever signs in to Seerr first becomes its owner. A
+migrated server that is already claimed needs no warning.
+
+Proposed:
+
+- The provider is Authelia: users in a file with argon2id hashes, forward auth through
+  Envoy's ext_authz, OIDC for apps that speak it (qui), no database.
+- Envoy Gateway's SecurityPolicy attaches it to each user's routes. Root creates the
+  policy at `adduser`, where the user's box can't remove it. Paths that check their own
+  key (the Arrs' `/api`) bypass it, so mobile apps keep working.
+- A user changes their own password on the provider's page, without root.
+  Whether Authelia's file backend allows that is still to be checked.
+
+Open:
+
+- Whether `init` asks for the password or generates one and shows it once.
+- A plain `helm install` has no provider in front of it. Proposed: the chart requires an
+  explicit `auth.edge: true`, with no default, and refuses to render without it. box sets
+  it; an operator without box sets it to say they put a login in front themselves, the
+  way an ingress with basic auth does. The chart never wires per-app logins.
+
 ## Commands
 
 Status per command: **D** decided, **P** proposed.
@@ -232,23 +274,22 @@ Managed mode installs MetalLB without waiting to see, and so does auto mode on a
 box has just installed: k0s hands out no addresses, so the question could only answer no.
 The record keeps auto, so later runs ask the Gateway as usual.
 
-**An existing Gateway implementation is used, not replaced (decided).** Gateway API has
-no default class, so box looks for GatewayClasses a controller has accepted. With one,
-box uses it; with several and none chosen, guided bootstrap lets the operator pick from
-the list and unattended bootstrap stops with an error naming the setting
-(`platform.gateway.className`). Either way box creates its own Gateway on that class,
-and the chart's routes attach to it; the Gateway checks above (address, HTTP answer)
-apply unchanged. The chart's routes need one Extended feature, `HTTPRoutePathRewrite`
-(the URLRewrite filter with a prefix replacement), so box checks the class's published
-supported features first. GatewayClasses that exist but none of which a controller has
-accepted stop bootstrap with each class's reason: a controller that is still starting
-is not a reason to install Envoy Gateway beside it. Only a cluster with no
-GatewayClass at all gets Envoy Gateway. A class without it stops bootstrap with
-the reason: box never installs Envoy Gateway beside another implementation. A class that
-publishes no feature list at all also stops bootstrap, with a message naming the class
-and the override (`platform.gateway.assumeFeatures: true`), so using an implementation
-box can't check is the operator's explicit choice. The NetworkPolicy lets in traffic
-from wherever that implementation's proxy runs, not from a namespace box assumes.
+**Envoy Gateway is the only Gateway implementation (decided).** box checks logins at the
+edge (see "Logins"), and Gateway API has no standard auth filter yet, so box supports one
+implementation rather than one auth mechanism per implementation. A cluster with no
+GatewayClass gets box's own Envoy Gateway. An existing Envoy Gateway (a GatewayClass
+accepted by `gateway.envoyproxy.io/gatewayclass-controller`) is used: box creates its own
+Gateway on that class, the chart's routes attach to it, and the Gateway checks above
+(address, HTTP answer) apply unchanged. With several Envoy classes, guided bootstrap lets
+the operator pick and unattended bootstrap stops naming `platform.gateway.className`. Any
+other implementation stops bootstrap with the class and its controller named, and box
+never installs Envoy Gateway beside it: both would want the same address and ports.
+GatewayClasses that no controller has accepted stop bootstrap with each class's reason.
+On k3s this means Traefik's Gateway provider is not used; bootstrap stops and names k3s's
+`--disable=traefik`. If Gateway API's ExternalAuth filter (GEP-1494) reaches the standard
+channel, this can widen to every implementation that supports it, still with one auth
+mechanism. The NetworkPolicy lets in traffic from wherever the Envoy proxy runs, not from
+a namespace box assumes.
 
 What `init` does (decided):
 
