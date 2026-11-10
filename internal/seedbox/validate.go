@@ -2,6 +2,7 @@ package seedbox
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"sort"
@@ -69,6 +70,22 @@ func (s *Seedbox) Effective(c Chart) (map[string]any, error) {
 		return nil, err
 	}
 	overlay(base, merged, nil)
+	// auth.edge is box's: the chart ships no login and refuses to render
+	// without the statement that one is in front, and box is what puts it
+	// there. It is written here, not in Merge, because only the release being
+	// installed can say whether the key exists at all: a box keeps reading
+	// every release back to the oldest upgrade-from it knows, and 0.2.0's
+	// schema has no auth section, so writing it blindly would refuse a
+	// perfectly good install with "auth: is not a key the chart knows".
+	// Overlaid after both files so no file can shadow it; a file that tries
+	// (true or false) is already refused by checkValues and checkGrant.
+	declares, err := declaresAuthEdge(c.Schema)
+	if err != nil {
+		return nil, err
+	}
+	if declares {
+		overlay(base, map[string]any{"auth": map[string]any{"edge": true}}, nil)
+	}
 	// The claim names are box's, from the volumes it creates: not the chart's
 	// defaults and not either file. Applied last so nothing can shadow them.
 	overlay(base, claims(vols), nil)
@@ -76,6 +93,32 @@ func (s *Seedbox) Effective(c Chart) (map[string]any, error) {
 		return nil, err
 	}
 	return base, nil
+}
+
+// declaresAuthEdge reports whether the chart's schema describes auth.edge.
+// Presence is the whole question: a schema that never mentions the key has a
+// release that would reject it, so box leaves it out rather than refusing the
+// install. An empty schema answers false; Validate refuses that document after
+// this with the sentence about a schema nothing has checked, and a schema that
+// does not parse is reported here in the same words Validate uses.
+func declaresAuthEdge(schema []byte) (bool, error) {
+	if len(schema) == 0 {
+		return false, nil
+	}
+	var doc struct {
+		Properties map[string]struct {
+			Properties map[string]json.RawMessage `json:"properties"`
+		} `json:"properties"`
+	}
+	if err := json.Unmarshal(schema, &doc); err != nil {
+		return false, fmt.Errorf("chart schema: %w", err)
+	}
+	auth, ok := doc.Properties["auth"]
+	if !ok {
+		return false, nil
+	}
+	_, ok = auth.Properties["edge"]
+	return ok, nil
 }
 
 // parseChartValues reads a release's values.yaml into the same shape as a user

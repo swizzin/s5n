@@ -1,0 +1,494 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "s5n values",
+  "description": "One release = one namespace = one seedbox. Fields here are the contract the templates and the wiring Job both read; anything not described fails the install rather than rendering something surprising.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "global",
+    "storage",
+    "apps"
+  ],
+  "properties": {
+    "global": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "puid",
+        "pgid",
+        "tz"
+      ],
+      "properties": {
+        "puid": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "uid every app runs as, and the owner of /data."
+        },
+        "pgid": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "tz": {
+          "type": "string",
+          "minLength": 1,
+          "description": "IANA timezone, e.g. Etc/UTC."
+        }
+      }
+    },
+    "storage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "data",
+        "config"
+      ],
+      "description": "The claims the release mounts. Both must already exist; the chart creates no storage. Create them before helm install (box creates them from the grant's host paths).",
+      "properties": {
+        "data": {
+          "$ref": "#/definitions/claim"
+        },
+        "config": {
+          "$ref": "#/definitions/claim"
+        }
+      }
+    },
+    "gateway": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "parentRef": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "name",
+            "namespace"
+          ],
+          "properties": {
+            "name": {
+              "type": "string",
+              "minLength": 1
+            },
+            "namespace": {
+              "type": "string",
+              "minLength": 1
+            },
+            "sectionName": {
+              "type": "string"
+            }
+          }
+        },
+        "host": {
+          "type": "string",
+          "description": "Public hostname. Empty matches any host."
+        }
+      }
+    },
+    "networkPolicy": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "gatewayFrom": {
+          "type": "array",
+          "items": {
+            "type": "object"
+          },
+          "description": "NetworkPolicyPeers the Gateway answers from."
+        },
+        "extraHttpFrom": {
+          "type": "array",
+          "items": {
+            "type": "object"
+          }
+        },
+        "apiServerCIDRs": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^[0-9a-fA-F:.]+/[0-9]{1,3}$"
+          },
+          "description": "Fallback for the wiring Job's API-server egress when the chart cannot look the endpoint up (offline rendering)."
+        }
+      }
+    },
+    "wiring": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "image": {
+          "$ref": "#/definitions/image"
+        },
+        "timeoutSeconds": {
+          "type": "integer",
+          "minimum": 10,
+          "maximum": 3600
+        },
+        "backoffLimit": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 10
+        },
+        "resources": {
+          "$ref": "#/definitions/resources"
+        },
+        "podAnnotations": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "secrets": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "existingSecret": {
+          "type": "string",
+          "description": "Use a pre-made Secret instead of generating one. It must hold <instance>-apikey keys and qbittorrent-password."
+        },
+        "plexToken": {
+          "type": "string",
+          "description": "Optional Plex server token (X-Plex-Token), mounted as the Secret's plex-token key and given to Tautulli. Empty leaves tautulli/plex pending; Plex never trusts a network range instead."
+        },
+        "plexClaimToken": {
+          "type": "string",
+          "description": "The claim token from plex.tv/claim, mounted as the Secret's plex-claim-token key. It expires minutes after issue, so box init asks it last and passes it to one apply instead of writing it to a file. Plex only uses it while the server is unclaimed."
+        }
+      }
+    },
+    "apps": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "One entry per catalog app. Every key here is a workload: s5n.instances builds the workload list from these keys, so adding an app means adding a key here and in this schema (additionalProperties false is what keeps a non-app key out), never editing a template.",
+      "properties": {
+        "qbittorrent": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "enabled",
+            "image",
+            "port"
+          ],
+          "properties": {
+            "enabled": {
+              "type": "boolean"
+            },
+            "image": {
+              "$ref": "#/definitions/image"
+            },
+            "port": {
+              "$ref": "#/definitions/port"
+            },
+            "webuiUsername": {
+              "type": "string",
+              "minLength": 1
+            },
+            "rewritePath": {
+              "type": "boolean"
+            },
+            "torrent": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "port",
+                "service"
+              ],
+              "properties": {
+                "port": {
+                  "type": "integer",
+                  "minimum": 1024,
+                  "maximum": 65535,
+                  "description": "Externally reachable peer port. With a NodePort service it must also sit in the cluster's NodePort range; NodePort is the default; with LoadBalancer the LoadBalancer implementation assigns the address."
+                },
+                "service": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "type"
+                  ],
+                  "properties": {
+                    "type": {
+                      "enum": [
+                        "ClusterIP",
+                        "NodePort",
+                        "LoadBalancer"
+                      ]
+                    },
+                    "externalTrafficPolicy": {
+                      "enum": [
+                        "Cluster",
+                        "Local"
+                      ]
+                    },
+                    "annotations": {
+                      "type": "object",
+                      "additionalProperties": {
+                        "type": "string"
+                      },
+                      "description": "Annotations applied to the peers Service, e.g. metallb.io/allow-shared-ip or metallb.io/loadBalancerIPs."
+                    }
+                  }
+                }
+              }
+            },
+            "resources": {
+              "$ref": "#/definitions/resources"
+            },
+            "env": {
+              "$ref": "#/definitions/env"
+            }
+          }
+        },
+        "sonarr": {
+          "$ref": "#/definitions/arr"
+        },
+        "radarr": {
+          "$ref": "#/definitions/arr"
+        },
+        "prowlarr": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "enabled",
+            "image",
+            "port",
+            "envPrefix"
+          ],
+          "properties": {
+            "enabled": {
+              "type": "boolean"
+            },
+            "image": {
+              "$ref": "#/definitions/image"
+            },
+            "port": {
+              "$ref": "#/definitions/port"
+            },
+            "envPrefix": {
+              "type": "string",
+              "pattern": "^[A-Z][A-Z0-9_]*$"
+            },
+            "resources": {
+              "$ref": "#/definitions/resources"
+            },
+            "env": {
+              "$ref": "#/definitions/env"
+            }
+          }
+        },
+        "plex": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "enabled",
+            "image",
+            "port"
+          ],
+          "properties": {
+            "enabled": {
+              "type": "boolean"
+            },
+            "image": {
+              "$ref": "#/definitions/image"
+            },
+            "port": {
+              "$ref": "#/definitions/port"
+            },
+            "rewritePath": {
+              "type": "boolean"
+            },
+            "noAuthNetworks": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "pattern": "^[0-9a-fA-F:.]+/[0-9]{1,3}$"
+              },
+              "default": [],
+              "description": "CIDRs allowed to reach Plex without a Plex.tv account token (PLEX_NO_AUTH_NETWORKS). Empty by default: the Gateway reaches Plex from a pod IP, so a trusted range would expose the server unauthenticated."
+            },
+            "resources": {
+              "$ref": "#/definitions/resources"
+            },
+            "env": {
+              "$ref": "#/definitions/env"
+            }
+          }
+        },
+        "tautulli": {
+          "$ref": "#/definitions/simpleApp"
+        },
+        "seerr": {
+          "$ref": "#/definitions/simpleApp"
+        }
+      }
+    }
+  },
+  "definitions": {
+    "digest": {
+      "type": "string",
+      "pattern": "^(|sha256:[a-f0-9]{64})$",
+      "description": "Optional image digest, pinned alongside the tag."
+    },
+    "image": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "variant"
+      ],
+      "description": "A blessed image variant, by name. The repository comes only from the chart's variants.yaml; a user may pin a tag or a digest inside that variant's repository.",
+      "properties": {
+        "variant": {
+          "type": "string",
+          "minLength": 1,
+          "description": "A variant name from the chart's variants.yaml (apps.<app>.image.variant)."
+        },
+        "tag": {
+          "type": "string",
+          "not": {
+            "enum": [
+              "latest",
+              "rolling",
+              "main",
+              "master"
+            ]
+          },
+          "description": "Optional tag pin inside the variant's repository. It replaces the variant's tag, and drops the variant's digest unless a digest is pinned too."
+        },
+        "digest": {
+          "$ref": "#/definitions/digest"
+        }
+      }
+    },
+    "port": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 65535
+    },
+    "simpleApp": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "enabled",
+        "image",
+        "port"
+      ],
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "image": {
+          "$ref": "#/definitions/image"
+        },
+        "port": {
+          "$ref": "#/definitions/port"
+        },
+        "rewritePath": {
+          "type": "boolean"
+        },
+        "resources": {
+          "$ref": "#/definitions/resources"
+        },
+        "env": {
+          "$ref": "#/definitions/env"
+        }
+      }
+    },
+    "resources": {
+      "type": "object"
+    },
+    "env": {
+      "type": "object",
+      "additionalProperties": {
+        "type": [
+          "string",
+          "number",
+          "boolean"
+        ]
+      }
+    },
+    "claim": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "existingClaim"
+      ],
+      "description": "A claim that already exists. The chart creates no PersistentVolume and no claim: create the claim before helm install (box does this from the grant's host path).",
+      "properties": {
+        "existingClaim": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Name of an existing PersistentVolumeClaim in the release namespace. Create it before helm install; the chart creates no storage and has no host path, storage class or size setting."
+        }
+      }
+    },
+    "arr": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "enabled",
+        "image",
+        "port",
+        "envPrefix",
+        "instances"
+      ],
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "image": {
+          "$ref": "#/definitions/image"
+        },
+        "port": {
+          "$ref": "#/definitions/port"
+        },
+        "envPrefix": {
+          "type": "string",
+          "pattern": "^[A-Z][A-Z0-9_]*$"
+        },
+        "instances": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "suffix",
+              "category",
+              "enabled"
+            ],
+            "properties": {
+              "suffix": {
+                "type": "string",
+                "pattern": "^[a-z0-9]*$",
+                "description": "Appended to the app name: sonarr + \"4k\" = sonarr-4k. Empty for the primary instance."
+              },
+              "category": {
+                "type": "string",
+                "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*(/[A-Za-z0-9][A-Za-z0-9._-]*)?$",
+                "description": "One name for the qBittorrent category and both /data subdirectories. Letters, digits, '.', '_' and '-' per segment, with at most one '/' for a qBittorrent subcategory (4K/Movies); the parent directory is created too."
+              },
+              "enabled": {
+                "type": "boolean"
+              }
+            }
+          }
+        },
+        "resources": {
+          "$ref": "#/definitions/resources"
+        },
+        "env": {
+          "$ref": "#/definitions/env"
+        }
+      }
+    }
+  }
+}

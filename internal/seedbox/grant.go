@@ -42,9 +42,10 @@ type Rule struct {
 // The judgement calls, and why they land where they do:
 //
 //   - auth.edge is BoxSets, and Fixed: the chart ships no login and refuses to
-//     render without the statement that one is in front, so box writes true at
-//     merge time. It is a fact about the deployment, not a setting a file gets
-//     to deny.
+//     render without the statement that one is in front, so box writes true
+//     when it builds the release's values (Effective), for every release whose
+//     schema declares it. It is a fact about the deployment, not a setting a
+//     file gets to deny.
 //   - global.tz is values. It changes how a user's own apps name files, and
 //     nothing about who can read them.
 //   - storage.<kind>.path is grant and box-only: it is where this box's volume

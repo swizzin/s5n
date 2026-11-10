@@ -1,0 +1,230 @@
+# s5n — one release = one namespace = one seedbox.
+# Nothing in this chart may assume it is the only release in the cluster.
+
+global:
+  # One uid/gid for every app, so every file on /data has one owner.
+  puid: 1000
+  pgid: 1000
+  tz: Etc/UTC
+
+# The data contract. Every app mounts the same claim at /data:
+#   /data/downloads/<category>   qBittorrent save paths
+#   /data/media/<category>      Arr root folders
+# One filesystem, one path => hardlinks always work, no remote path mappings.
+#
+# The chart creates no storage. Both settings name PersistentVolumeClaims that
+# already exist in the release namespace; the chart mounts them and creates
+# nothing else. There is no host path, storage class or size here: a claim's
+# capacity is its own, and a static claim cannot be resized from values.
+#
+# box creates the claims (and the static PVs behind them) from the grant's host
+# paths, named per namespace. On a plain `helm install`, create them first:
+#
+#   kubectl create -f your-pv-and-claim.yaml
+#
+# The names below are the defaults a plain install expects to find; box passes
+# its own (`<namespace>-s5n-data`, `<namespace>-s5n-config`).
+storage:
+  data:
+    existingClaim: s5n-data
+  config:
+    # Each app instance uses subPath <instance-name> beneath this claim, e.g.
+    # /config/sonarr. Those subdirectories must already exist and be owned by
+    # puid:pgid.
+    existingClaim: s5n-config
+
+# HTTP exposure through the Gateway API. The chart attaches HTTPRoutes to a Gateway it
+# does not own; the installer (or the cluster admin) provides the Gateway.
+gateway:
+  enabled: true
+  parentRef:
+    name: s5n
+    namespace: s5n-gateway
+    sectionName: ""
+  # Public host, e.g. box.example.com. Empty = match any host.
+  host: ""
+
+networkPolicy:
+  enabled: true
+  # Where Gateway traffic comes from. This default is for a plain `helm install`
+  # behind Envoy Gateway: the namespace its proxy fleet runs in
+  # (envoy-gateway-system in standard mode), not the Gateway's own namespace.
+  # box overrides it on every apply with the namespace of the Service that holds
+  # the Gateway's address, so a box behind another implementation admits that
+  # implementation's proxy instead. Neither file may set it (see the grant rules).
+  gatewayFrom:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: envoy-gateway-system
+  # Extra NetworkPolicyPeers allowed to reach app HTTP ports (e.g. a hostNetwork proxy's node IP).
+  extraHttpFrom: []
+  # The wiring Job needs the API server to publish its receipt. The chart reads
+  # the `kubernetes` Service ClusterIP at install time; these CIDRs are only the
+  # fallback for offline rendering (`helm template`), where lookup returns nothing.
+  apiServerCIDRs: []
+
+# The wiring Job. It runs as a Helm post-install/post-upgrade hook: connects the
+# Arrs to qBittorrent, registers them in Prowlarr, proves the /data hardlink
+# contract, and records what it verified in the `<release>-wiring` ConfigMap.
+# It is a reconciler, so a second run on an unchanged release changes nothing.
+wiring:
+  enabled: true
+  image:
+    # The s5n image (this repo), by blessed variant from variants.yaml. The
+    # repository is chart-owned; tag/digest may be pinned within it.
+    variant: default
+  # How long the Job may wait for an app to answer before the release fails.
+  timeoutSeconds: 300
+  backoffLimit: 2
+  resources: {}
+  podAnnotations: {}
+
+# Arr API keys live here, generated once and preserved across upgrades (lookup).
+secrets:
+  existingSecret: ""
+  # Optional Plex server token (X-Plex-Token) from a claimed server. The wiring
+  # Job mounts it as the Secret's `plex-token` key and hands it to Tautulli, so
+  # no network range ever has to be trusted for Plex authentication. Empty or
+  # absent leaves tautulli/plex pending in the wiring receipt. The key can also
+  # be patched straight into the release Secret (upgrades preserve it); a
+  # non-empty value here wins, which is how a rotation is applied.
+  plexToken: ""
+  # The claim token https://plex.tv/claim issues. It expires about four minutes
+  # after issue, so it can only be supplied at install time: it is a "transient"
+  # question in catalog.yaml, which `box init` asks last and hands to the one
+  # apply without ever writing it to a file. This key is the way in for a plain
+  # `helm install`. Plex only exchanges it while its server is still unclaimed,
+  # so it does nothing on an upgraded release; empty is the normal state and
+  # leaves the server unclaimed until it is claimed by hand. A hand-patched
+  # plex-claim-token in the release Secret survives an upgrade; a non-empty
+  # value here wins over it.
+  plexClaimToken: ""
+
+apps:
+  qbittorrent:
+    enabled: true
+    image:
+      # Blessed variant from variants.yaml. The repository comes only from
+      # there; a tag or digest pin here is held within that repository.
+      variant: default
+    port: 8080
+    # Seeded into qBittorrent.conf by an init container, together with a generated
+    # password from the release Secret. The wiring Job logs in with the same pair.
+    webuiUsername: admin
+    # qBittorrent has no URL base setting; the route strips the prefix.
+    rewritePath: true
+    torrent:
+      # Must equal the externally reachable port so peers are told the right one.
+      port: 31111
+      service:
+        # NodePort on the node's own address, so the peer port shares a single-IP box
+        # with the Gateway's LoadBalancer address without any address sharing, and
+        # keeps the pod free of hostPort (forbidden under Pod Security baseline+).
+        # Local keeps real peer source IPs (bans, per-peer limits). The port must sit
+        # in the cluster's NodePort range (30000-32767 unless widened). LoadBalancer is
+        # available for boxes with a spare address.
+        type: NodePort
+        externalTrafficPolicy: Local
+        # Optional annotations for the peers Service, e.g. metallb.io/loadBalancerIPs
+        # when type is LoadBalancer.
+        annotations: {}
+    resources: {}
+    env: {}
+
+  sonarr:
+    enabled: true
+    image:
+      # Blessed variant from variants.yaml. The repository comes only from
+      # there; a tag or digest pin here is held within that repository.
+      variant: default
+    port: 8989
+    envPrefix: SONARR
+    instances:
+      - suffix: ""
+        category: tv
+        enabled: true
+      - suffix: 4k
+        category: tv-4k
+        enabled: false
+    resources: {}
+    env: {}
+
+  radarr:
+    enabled: true
+    image:
+      # Blessed variant from variants.yaml. The repository comes only from
+      # there; a tag or digest pin here is held within that repository.
+      variant: default
+    port: 7878
+    envPrefix: RADARR
+    instances:
+      - suffix: ""
+        category: movies
+        enabled: true
+      - suffix: 4k
+        category: movies-4k
+        enabled: false
+    resources: {}
+    env: {}
+
+  prowlarr:
+    enabled: true
+    image:
+      # Blessed variant from variants.yaml. The repository comes only from
+      # there; a tag or digest pin here is held within that repository.
+      variant: default
+    port: 9696
+    envPrefix: PROWLARR
+    resources: {}
+    env: {}
+
+  # Plex first: Tautulli and Seerr both attach to it. A missing (or expired)
+  # claim token leaves Plex unclaimed; the wiring Job still deploys it and
+  # proves it answers, it just can't sign it into a Plex.tv account. See
+  # AGENTS.md invariant notes and PLAN.md's wiring section.
+  plex:
+    enabled: true
+    image:
+      # Blessed variant from variants.yaml. The repository comes only from
+      # there; a tag or digest pin here is held within that repository.
+      variant: default
+    port: 32400
+    # Plex has no URL-base setting, same as qBittorrent; the route strips the prefix.
+    rewritePath: true
+    # CIDRs that may reach Plex without a Plex.tv account token
+    # (PLEX_NO_AUTH_NETWORKS). Empty by default, and it must stay empty unless a
+    # human has checked the ranges: the public Gateway's Envoy proxy reaches Plex
+    # from its own pod IP, which sits inside the cluster pod CIDR, so listing any
+    # range that contains the pod CIDR makes every request arriving through the
+    # Gateway count as "local" — that is unauthenticated admin of the server for
+    # anyone on the internet. NetworkPolicy cannot help; it already has to admit
+    # the Gateway. Tautulli connects with a real token instead
+    # (secrets.plexToken), so nothing needs to be trusted here.
+    noAuthNetworks: []
+    resources: {}
+    env: {}
+
+  tautulli:
+    enabled: true
+    image:
+      # Blessed variant from variants.yaml. The repository comes only from
+      # there; a tag or digest pin here is held within that repository.
+      variant: default
+    port: 8181
+    # Tautulli has a url-base setting (http_root) but wiring it through the same
+    # checkbox-unsafe /configUpdate endpoint used for the Plex link is not worth the
+    # extra risk for v1; the route strips the prefix instead, same as qBittorrent.
+    rewritePath: true
+    resources: {}
+    env: {}
+
+  seerr:
+    enabled: true
+    image:
+      # Blessed variant from variants.yaml. The repository comes only from
+      # there; a tag or digest pin here is held within that repository.
+      variant: default
+    port: 5055
+    rewritePath: true
+    resources: {}
+    env: {}

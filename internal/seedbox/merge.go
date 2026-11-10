@@ -22,6 +22,10 @@ import (
 // who sets gateway.host and sees no change will assume it worked. The error
 // names the key and the line, in both directions: a grant key in values, and a
 // non-grant key in the grant.
+//
+// Merge reads the two files and nothing else. The keys box writes from its own
+// decision are not added here: they belong to Effective, which has the release
+// being installed and can tell which of its keys the chart actually declares.
 func (s *Seedbox) Merge() (map[string]any, error) {
 	if err := s.checkGrant(); err != nil {
 		return nil, err
@@ -31,11 +35,6 @@ func (s *Seedbox) Merge() (map[string]any, error) {
 	}
 	out := cloneMap(s.Values.data)
 	overlay(out, s.Grant.data, nil)
-	// auth.edge is box's, always true: the chart ships no login and refuses to
-	// render without the statement that one is in front, and box is what puts
-	// it there. Overlaid after both files so no file can shadow it; a file that
-	// tries (true or false) is already refused by checkValues.
-	overlay(out, map[string]any{"auth": map[string]any{"edge": true}}, nil)
 	if _, ok := out["apps"]; !ok {
 		out["apps"] = map[string]any{}
 	}

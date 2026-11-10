@@ -1,6 +1,7 @@
 package seedbox
 
 import (
+	"encoding/json"
 	"errors"
 	"os"
 	"strings"
@@ -79,6 +80,154 @@ func TestEffectiveAgainstTheRealChart(t *testing.T) {
 	}
 	if _, ok := got["namespace"]; ok {
 		t.Error("namespace reached the effective values")
+	}
+}
+
+// chartAt reads a chart release out of testdata: a release's values.yaml and
+// values.schema.json are the whole of what box takes from one, so a pair of
+// files is a release as far as this package is concerned.
+func chartAt(t *testing.T, valuesName, schemaName string) Chart {
+	t.Helper()
+	values, err := os.ReadFile("testdata/" + valuesName)
+	if err != nil {
+		t.Fatalf("read %s: %v", valuesName, err)
+	}
+	schema, err := os.ReadFile("testdata/" + schemaName)
+	if err != nil {
+		t.Fatalf("read %s: %v", schemaName, err)
+	}
+	return Chart{Values: values, Schema: schema}
+}
+
+// TestEffectiveWritesAuthEdgeWhereTheChartDeclaresIt: the chart ships no login
+// and refuses to render without auth.edge, so box's values carry it -- but only
+// for a release whose schema says the key exists. It is written after the
+// chart's defaults and after both files, so neither can shadow it.
+func TestEffectiveWritesAuthEdgeWhereTheChartDeclaresIt(t *testing.T) {
+	t.Run("the chart main ships", func(t *testing.T) {
+		s := loadFixture(t, "values.yaml")
+		got, err := s.Effective(realChart(t))
+		if err != nil {
+			t.Fatalf("Effective: %v", err)
+		}
+		auth, ok := got["auth"].(map[string]any)
+		if !ok || auth["edge"] != true {
+			t.Fatalf("auth = %#v, want edge true: the chart refuses to render without it", got["auth"])
+		}
+	})
+
+	t.Run("a chart whose values default it to false", func(t *testing.T) {
+		c := Chart{
+			Values: []byte("apps: {}\nauth:\n  edge: false\n"),
+			Schema: []byte(`{"type": "object", "properties": {"auth": {"type": "object", "properties": {"edge": {"type": "boolean"}}}}}`),
+		}
+		s := loadFixture(t, "values.yaml")
+		got, err := s.Effective(c)
+		if err != nil {
+			t.Fatalf("Effective: %v", err)
+		}
+		auth, ok := got["auth"].(map[string]any)
+		if !ok || auth["edge"] != true {
+			t.Fatalf("auth = %#v, want edge true over the chart's default false", got["auth"])
+		}
+	})
+}
+
+// TestEffectiveOmitsAuthEdgeForChart020 is the compatibility claim: a box that
+// knows auth.edge still applies to the release that predates it. The pair below
+// is copied verbatim from the published tag v0.2.0 (`git show
+// v0.2.0:charts/s5n/values.yaml` and the schema beside it). That schema sets
+// additionalProperties: false and has no auth section, so writing the key is
+// exactly the refusal -- "auth: is not a key the chart knows" -- an older
+// install must not get from a newer box.
+func TestEffectiveOmitsAuthEdgeForChart020(t *testing.T) {
+	c := chartAt(t, "chart-0.2.0.values.yaml", "chart-0.2.0.schema.json")
+
+	var doc map[string]any
+	if err := json.Unmarshal(c.Schema, &doc); err != nil {
+		t.Fatalf("parse the 0.2.0 schema: %v", err)
+	}
+	props, _ := doc["properties"].(map[string]any)
+	if _, ok := props["auth"]; ok {
+		t.Fatal("the 0.2.0 fixture declares auth: it is not the release this test is about any more")
+	}
+
+	s := loadFixture(t, "values.yaml")
+	got, err := s.Effective(c)
+	if err != nil {
+		t.Fatalf("Effective against the 0.2.0 chart: %v", err)
+	}
+	if auth, ok := got["auth"]; ok {
+		t.Errorf("auth = %#v, want no auth key: the 0.2.0 schema has none", auth)
+	}
+	if err := Validate(c.Schema, got); err != nil {
+		t.Errorf("Validate against the 0.2.0 schema: %v", err)
+	}
+}
+
+// TestEffectiveOmitsAuthEdgeWhenOnlyTheBranchIsDeclared: presence of
+// properties.auth.properties.edge is the question, not presence of an auth
+// branch. A release that describes some other auth key would still reject
+// auth.edge, so box writes nothing.
+func TestEffectiveOmitsAuthEdgeWhenOnlyTheBranchIsDeclared(t *testing.T) {
+	c := Chart{
+		Values: []byte("apps: {}\n"),
+		Schema: []byte(`{"type": "object", "properties": {"auth": {"type": "object", "properties": {"other": {"type": "boolean"}}}}}`),
+	}
+	s := loadFixture(t, "values.yaml")
+	got, err := s.Effective(c)
+	if err != nil {
+		t.Fatalf("Effective: %v", err)
+	}
+	if auth, ok := got["auth"]; ok {
+		t.Errorf("auth = %#v, want no auth key: the schema does not declare auth.edge", auth)
+	}
+}
+
+// TestEffectiveRefusesAuthInEitherChart: moving the write out of Merge must not
+// move the refusal. A file that sets auth.edge is refused whatever release is
+// being applied, old or new, because the refusal is about the file: box writes
+// the key, so saying it in either file is a mistake in that file.
+func TestEffectiveRefusesAuthInEitherChart(t *testing.T) {
+	charts := map[string]func(*testing.T) Chart{
+		"chart 0.2.0": func(t *testing.T) Chart {
+			return chartAt(t, "chart-0.2.0.values.yaml", "chart-0.2.0.schema.json")
+		},
+		"the chart main ships": realChart,
+	}
+	for name, chart := range charts {
+		t.Run(name, func(t *testing.T) {
+			for _, edge := range []string{"true", "false"} {
+				t.Run("values "+edge, func(t *testing.T) {
+					s, err := Load(fixture(t, "grant.yaml"), writeTemp(t, "values.yaml", "auth:\n  edge: "+edge+"\n"))
+					if err != nil {
+						t.Fatalf("Load: %v", err)
+					}
+					_, err = s.Effective(chart(t))
+					if err == nil {
+						t.Fatal("Effective accepted a values file that sets auth.edge")
+					}
+					if !strings.Contains(err.Error(), "values.yaml:2: auth.edge is set by box") {
+						t.Errorf("error = %v, want it to name the key, the line and box", err)
+					}
+				})
+			}
+
+			t.Run("grant", func(t *testing.T) {
+				grant := writeTemp(t, "grant.yaml", "namespace: alice\ngateway:\n  host: alice.example.com\nauth:\n  edge: true\n")
+				s, err := Load(grant, "")
+				if err != nil {
+					t.Fatalf("Load: %v", err)
+				}
+				_, err = s.Effective(chart(t))
+				if err == nil {
+					t.Fatal("Effective accepted a grant that sets auth.edge")
+				}
+				if !strings.Contains(err.Error(), "grant.yaml:5: auth.edge is box's; box sets it itself") {
+					t.Errorf("error = %v, want it to say box sets it itself", err)
+				}
+			})
+		})
 	}
 }
 
