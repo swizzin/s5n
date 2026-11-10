@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"os"
 	"time"
@@ -70,6 +71,11 @@ func (h *Helm) configuration(namespace string) (*action.Configuration, error) {
 	if err := cfg.Init(flags, ns, "secret"); err != nil {
 		return nil, fmt.Errorf("release client for %s: %w", namespace, err)
 	}
+	// Same rule as `box apply`: the reporter is the only thing that speaks.
+	// Helm's slog output and hook stdout are dropped, never mixed into box's
+	// transcript (AGENTS.md, the client-go/klog noise rule).
+	cfg.SetLogger(slog.DiscardHandler)
+	cfg.HookOutputFunc = func(string, string, string) io.Writer { return io.Discard }
 	h.configs[namespace] = cfg
 	return cfg, nil
 }
