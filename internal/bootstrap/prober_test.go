@@ -18,6 +18,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 )
@@ -381,4 +382,30 @@ func selfSignedCert(t *testing.T) (certPEM, keyPEM []byte) {
 	}
 	keyPEM = pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: kb})
 	return certPEM, keyPEM
+}
+
+// A kubeconfig with contexts but no current-context is refused with what is
+// missing, not clientcmd's "no configuration has been provided". box does not
+// pick a context: the writers load the same file and would refuse it too.
+func TestNewHTTPProberNoCurrentContext(t *testing.T) {
+	kc := []byte(`apiVersion: v1
+kind: Config
+clusters:
+- name: c
+  cluster:
+    server: https://127.0.0.1:6443
+contexts:
+- name: only
+  context:
+    cluster: c
+    user: u
+users:
+- name: u
+  user:
+    token: t
+`)
+	_, err := NewHTTPProber(kc, false)
+	if err == nil || !strings.Contains(err.Error(), "no current-context") {
+		t.Fatalf("err = %v, want a no-current-context refusal", err)
+	}
 }

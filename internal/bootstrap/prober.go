@@ -25,6 +25,13 @@ import (
 // This is the one place bootstrap turns kubeconfig bytes into a client;
 // HTTPProber and APIReadiness (k0s.go) both call it.
 func kubeClient(kubeconfig []byte, timeout time.Duration) (*http.Client, string, error) {
+	// clientcmd reports a kubeconfig with no current-context as "no
+	// configuration has been provided", which reads as an empty file. Say what
+	// is actually missing. box does not pick a context itself: the writers
+	// load the same file through clientcmd and would refuse it too.
+	if raw, err := clientcmd.Load(kubeconfig); err == nil && raw.CurrentContext == "" {
+		return nil, "", fmt.Errorf("kubeconfig sets no current-context: select one with `kubectl config use-context`")
+	}
 	cfg, err := clientcmd.RESTConfigFromKubeConfig(kubeconfig)
 	if err != nil {
 		return nil, "", fmt.Errorf("kubeconfig: %w", err)
