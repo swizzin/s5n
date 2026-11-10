@@ -46,11 +46,18 @@ Read `PLAN.md` first. It is the architecture; this file is how to work in the re
 - `internal/setup/` — `box init`'s decision over `Prompter` (the UI seam) and `PathHost`
   (stat, statfs, mountinfo, mkdir, chown). A re-run asks with the current answers filled
   in and splices only changed keys; nothing is written until the last question; a cancel
-  writes nothing and says "oh heck, nvm". `LinePrompt` is the plain implementation.
-- `internal/tui/` — init's dialogs: huh behind `setup.Prompter`, with box's masthead,
-  accent and step header drawn by box. The only package that imports huh, lipgloss or
-  bubbletea. `tui.Decide` picks the UI: no terminal on stdin is unattended, `TERM=dumb`,
-  `--plain` or a piped stdout get `LinePrompt`, `NO_COLOR` keeps the form without colour.
+  writes nothing and says "oh heck, nvm". `LinePrompt` is init's plain implementation.
+- `internal/say/` — box's one output seam. The flow packages emit events (a phase, a
+  plan item, a step that starts and finishes, a timed wait with its budget, a confirm,
+  a final card) and a reporter decides how they look. `say.Plain` is the byte-for-byte
+  transcript every non-TTY, `--plain` and `TERM=dumb` run reads; `internal/tui` is the
+  live one. Dependency-free on purpose: bootstrap and platform may not import a TUI.
+- `internal/tui/` — init's dialogs and the live reporter: huh behind `setup.Prompter`,
+  with box's masthead, accent and step header drawn by box, and the same events above
+  drawn with a spinner, wrapped plans and the success card. The only package that
+  imports huh, lipgloss or bubbletea. `tui.Decide` picks the UI: no terminal on stdin is
+  unattended, `TERM=dumb`, `--plain` or a piped stdout get `LinePrompt` and `say.Plain`,
+  `NO_COLOR` keeps the form and the live layout without colour.
 - `internal/release/` — `box apply`'s decision over `ChartSource`, `ReleaseClient` and
   `Confirmer`, with the Helm v4 + client-go implementation in `helm.go`. With
   `internal/platform`, the only package that imports Helm or client-go; only `cmd/box`

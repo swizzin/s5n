@@ -44,7 +44,7 @@ type chrome struct {
 // head is the masthead to print, or false when this step's is already on
 // screen above the field about to be drawn.
 func (c *chrome) head() (string, bool) {
-	key := fmt.Sprintf("%d/%d\x00%s", c.step, c.total, c.question)
+	key := fmt.Sprintf("%d/%d\x00%s\x00%s", c.step, c.total, c.phase, c.question)
 	if key == c.last {
 		return "", false
 	}

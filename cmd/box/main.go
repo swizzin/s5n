@@ -545,22 +545,14 @@ func (o *initFlags) run(ctx context.Context, kubeconfig string, yes, plain bool,
 	}
 
 	// Which prompt: huh when the terminal can carry a form, the line prompt
-	// otherwise, and no prompt at all when nobody is there to answer. The
-	// decision is tui.Decide's so it can be tested without a terminal, and the
-	// fallback is deliberately not huh's accessible mode: that one returns an
-	// empty secret without a terminal, which would silently install a box with
-	// an empty claim token.
+	// otherwise. Unattended asks nothing, but the path report still needs a
+	// renderer: on a terminal it goes through the same TUI as the questions,
+	// so a `--yes` run is not a fancy transcript with one raw block in it.
+	// Falling back rather than using huh's accessible mode is deliberate: that
+	// one returns an empty secret without a terminal, which would silently
+	// install a box with an empty claim token.
 	unattended := yes || !isTerminal(os.Stdin)
-	var prompt setup.Prompter
-	if unattended {
-		// Unattended asks nothing, but the path report still goes through the
-		// prompt's Note: it needs somewhere real to write.
-		prompt = &setup.LinePrompt{In: os.Stdin, Out: os.Stdout}
-	} else {
-		// newPrompt is the same decision bootstrap's class question uses, so
-		// the two commands cannot drift into different UIs.
-		prompt = newPrompt(plain)
-	}
+	prompt := newPrompt(plain)
 
 	set := map[string]bool{}
 	o.fs.Visit(func(f *flag.Flag) { set[f.Name] = true })

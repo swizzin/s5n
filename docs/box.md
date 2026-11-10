@@ -31,6 +31,12 @@ Each section marks its status:
   on top: its masthead, accent and step header. Where huh can't behave (no terminal,
   `TERM=dumb`), box falls back to plain line prompts. `NO_COLOR` drops the styling.
   Choosing another library later means rewriting one adapter, not init.
+- **The whole run is box (decided).** Progress outside a dialog is not raw text either:
+  cluster detection, the platform plan, installs and waits, file writes and the apply all
+  go through one reporter (`internal/say`), so a bootstrap reads as one product. The
+  plain reporter is the exact transcript a pipe, `--plain` or `TERM=dumb` has always
+  printed; the reporter only decides how a phase, a step, a timed wait and a plan look.
+  The policy packages keep their wording and their decisions.
 
 ## Scopes: root and users (decided, mechanism proposed)
 

@@ -118,6 +118,14 @@ var _ say.Reporter = (*Reporter)(nil)
 // terminal. It is set after the flags are parsed.
 func (r *Reporter) SetYes(v bool) { r.yes = v }
 
+// SetPhase names the section a following confirm belongs to without drawing a
+// header. The setup questions' own masthead is their header, so cmd/box never
+// draws a separate one for it.
+func (r *Reporter) SetPhase(name string) {
+	r.chrome.phase = name
+	r.ui.chrome.phase = name
+}
+
 // Phase draws the masthead for a section. The same frame as init's step
 // header, with the section name where "seedbox setup" would be.
 func (r *Reporter) Phase(name string) {
@@ -512,7 +520,7 @@ func (noHandle) Failed(error)          {}
 func (r *Reporter) Confirm(question string) (bool, error) {
 	r.stopActive()
 	r.ui.chrome.phase = r.chrome.phase
-	r.ui.chrome.question = question
+	r.ui.chrome.question = ""
 	r.ui.chrome.step, r.ui.chrome.total = 0, 0
 	r.ui.chrome.noColor = r.chrome.noColor
 	if r.yes {
@@ -554,7 +562,7 @@ func (r *Reporter) Error(err error) {
 		if i == 0 {
 			prefix = "│ ✗ "
 		}
-		gap := inner - 2 - lipgloss.Width(line)
+		gap := inner + 2 - lipgloss.Width(prefix) - lipgloss.Width(line)
 		if gap < 0 {
 			gap = 0
 		}
