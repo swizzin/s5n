@@ -238,8 +238,11 @@ type Decision struct {
 	// is created only when this run installs its implementation.
 	GatewayClass string
 
-	// ProbeTimeout is how long the Gateway gets to report an address. Zero
-	// means ProbeTimeout (60s).
+	// AddressTimeout is how long the Gateway gets to say it has no address
+	// before MetalLB is installed. Zero means AddressTimeout (15s).
+	AddressTimeout time.Duration
+	// ProbeTimeout is the whole wait for the Gateway to be Programmed with an
+	// address. Zero means ProbeTimeout (60s).
 	ProbeTimeout time.Duration
 	// ReachTimeout is how long that address gets to answer HTTP. Zero means
 	// ReachTimeout (30s).
@@ -438,14 +441,36 @@ func (d *Decision) gatewayAddress(ctx context.Context, mode bootstrap.PlatformMo
 	if err != nil {
 		return GatewayAnswer{}, err
 	}
+	quick := d.AddressTimeout
+	if quick <= 0 {
+		quick = AddressTimeout
+	}
 	timeout := d.ProbeTimeout
 	if timeout <= 0 {
 		timeout = ProbeTimeout
 	}
-	d.logf("waiting up to %s for Gateway %s/%s to report an address\n", timeout, GatewayNamespace, GatewayName)
-	answer, err := p.Address(ctx, timeout)
+	if quick > timeout || mode == bootstrap.ModeExternal {
+		// In external mode the operator said something else hands out
+		// addresses, and a slow LoadBalancer is still a working one, so it
+		// gets the whole wait.
+		quick = timeout
+	}
+	d.logf("waiting up to %s for Gateway %s/%s to report an address\n", quick, GatewayNamespace, GatewayName)
+	answer, err := p.Address(ctx, quick)
 	if err != nil {
 		return answer, err
+	}
+	if settling(answer) && timeout > quick {
+		// Only "no address, AddressNotAssigned" is an answer at the short
+		// deadline. Anything else is still moving, so it gets the rest of
+		// the whole wait before box judges it.
+		d.logf("the Gateway is still settling (%s); waiting up to another %s\n", reasonOr(answer.Reason), timeout-quick)
+		answer, err = p.Address(ctx, timeout-quick)
+		if err != nil {
+			return answer, err
+		}
+	} else {
+		timeout = quick
 	}
 	switch {
 	case answer.Address != "" && answer.Programmed() && mode == bootstrap.ModeExternal:
@@ -530,6 +555,21 @@ func gatewayFailure(answer GatewayAnswer, timeout time.Duration) error {
 		reason += ": " + answer.Message
 	}
 	return fmt.Errorf("Gateway %s/%s %s after %s (%s)", GatewayNamespace, GatewayName, what, timeout, reason)
+}
+
+// settling says an answer at the short deadline is not yet one to act on: the
+// Gateway is neither Programmed with an address nor saying plainly that no
+// address was assigned, and it exists. Envoy Gateway reports NoResources with
+// its address already assigned while the proxy pod rolls out, which is the
+// common case on a cluster that already has a LoadBalancer.
+func settling(a GatewayAnswer) bool {
+	if a.missing {
+		return false
+	}
+	if a.Address != "" && a.Programmed() {
+		return false
+	}
+	return !(a.Address == "" && a.Reason == gatewayAddressNotAssigned)
 }
 
 // deferredReason is a reason that says nothing about the address layer: the

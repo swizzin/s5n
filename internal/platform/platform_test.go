@@ -602,11 +602,14 @@ func TestApplySkipsMetalLBWhenTheGatewayGetsAnAddress(t *testing.T) {
 	if f.probe.reached != "10.0.0.50" {
 		t.Fatalf("the reachability check used %q, want the Gateway's address", f.probe.reached)
 	}
-	if f.probe.addressWaits[0] != ProbeTimeout {
-		t.Fatalf("the question waited %s, want %s", f.probe.addressWaits[0], ProbeTimeout)
+	if f.probe.addressWaits[0] != AddressTimeout {
+		t.Fatalf("the question waited %s, want %s", f.probe.addressWaits[0], AddressTimeout)
+	}
+	if AddressTimeout != 15*time.Second {
+		t.Fatalf("the address question is %s, want the 15s docs/box.md specifies", AddressTimeout)
 	}
 	if ProbeTimeout != 60*time.Second {
-		t.Fatalf("the address wait is %s, want the 60s docs/box.md specifies", ProbeTimeout)
+		t.Fatalf("the Programmed wait is %s, want the 60s docs/box.md specifies", ProbeTimeout)
 	}
 	if ReachTimeout != 30*time.Second {
 		t.Fatalf("the reachability retry is %s, want 30s", ReachTimeout)
@@ -675,7 +678,7 @@ func TestApplyInstallsMetalLBOnAddressNotAssigned(t *testing.T) {
 	if strings.Join(want, ",") != got {
 		t.Fatalf("trace = %s, want %s", got, strings.Join(want, ","))
 	}
-	if !strings.Contains(f.log.String(), "the Gateway has no address ("+gatewayAddressNotAssigned+") after waiting up to 1m0s; installing MetalLB") {
+	if !strings.Contains(f.log.String(), "the Gateway has no address ("+gatewayAddressNotAssigned+") after waiting up to 15s; installing MetalLB") {
 		t.Fatalf("box did not say why it installed MetalLB: %q", f.log.String())
 	}
 	if f.probe.reached != "192.0.2.10" {
@@ -712,6 +715,47 @@ func TestApplyStopsOnAnAddressThatIsNotProgrammed(t *testing.T) {
 	}
 	if f.probe.reachCalls != 0 {
 		t.Fatal("the reachability check ran on a Gateway that had already failed")
+	}
+}
+
+// The short deadline only decides "no address": a Gateway that already has an
+// address from an existing LoadBalancer, with Envoy's proxy still rolling out
+// (NoResources), gets the rest of the whole wait and is then used as it is.
+func TestApplyWaitsOutASettlingGatewayPastTheShortDeadline(t *testing.T) {
+	f := newFixture()
+	f.probe.answers = []GatewayAnswer{
+		{Address: "192.0.2.10", Status: "False", Reason: "NoResources"},
+		{Address: "192.0.2.10"},
+	}
+
+	if _, err := f.d.Apply(context.Background(), notProbed(bootstrap.ModeAuto)); err != nil {
+		t.Fatal(err)
+	}
+	for _, r := range f.rel.installed {
+		if r.Name == MetalLBRelease {
+			t.Fatal("MetalLB was installed over a Gateway that was still settling")
+		}
+	}
+	if len(f.probe.addressWaits) < 2 || f.probe.addressWaits[0] != AddressTimeout || f.probe.addressWaits[1] != ProbeTimeout-AddressTimeout {
+		t.Fatalf("address waits = %v, want %s then the rest of %s", f.probe.addressWaits, AddressTimeout, ProbeTimeout)
+	}
+	if !strings.Contains(f.log.String(), "the Gateway is still settling (NoResources); waiting up to another 45s") {
+		t.Fatalf("box did not say why it kept waiting: %q", f.log.String())
+	}
+}
+
+// In external mode the operator's LoadBalancer gets the whole wait at once:
+// there is no MetalLB to fall back to, so a short deadline would only refuse a
+// slow address layer.
+func TestApplyExternalGetsTheWholeWait(t *testing.T) {
+	f := newFixture()
+	f.probe.answers = []GatewayAnswer{{Address: "203.0.113.9"}}
+
+	if _, err := f.d.Apply(context.Background(), notProbed(bootstrap.ModeExternal)); err != nil {
+		t.Fatal(err)
+	}
+	if f.probe.addressWaits[0] != ProbeTimeout {
+		t.Fatalf("external mode waited %s, want %s", f.probe.addressWaits[0], ProbeTimeout)
 	}
 }
 

@@ -218,10 +218,13 @@ and continues, leaving the decision's `install` for it unhandled rather than sil
 s5n, MetalLB has one job: giving the Gateway's Service the node address (the torrent port
 is a NodePort and needs no LoadBalancer). So box asks the Gateway, not a generic
 LoadBalancer Service. In auto mode the plan shows MetalLB as conditional. After the
-confirm, box installs Envoy Gateway if needed, applies the Gateway and waits up to 60
-seconds for it to be Programmed with an address. If the reason is that no address was
-assigned, box installs MetalLB and its pool and waits again; any other reason stops
-bootstrap. Either way, box then sends an HTTP request from the host to the Gateway's
+confirm, box installs Envoy Gateway if needed, applies the Gateway and gives it 15
+seconds to report an address. If by then it has none and says the address was not
+assigned, box installs MetalLB and its pool and waits again, up to 60 seconds. Anything
+else at 15 seconds (an address with Envoy's proxy still rolling out, another reason) is
+still settling and gets the rest of a 60-second wait before box judges it; any reason
+other than an unassigned address at that deadline stops bootstrap. External mode gets
+the whole 60 seconds at once, since there is no MetalLB to fall back to. Either way, box then sends an HTTP request from the host to the Gateway's
 address on port 80. Any HTTP answer passes; silence stops bootstrap with the address
 named, and box never installs MetalLB over an address something else handed out. In
 external mode MetalLB is never installed and the Gateway must pass the same checks.

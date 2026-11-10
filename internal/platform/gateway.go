@@ -21,8 +21,18 @@ import (
 // question can only be asked after the Gateway is applied, which is why the
 // plan defers it past the confirm instead of answering it up front.
 const (
-	// ProbeTimeout is how long the Gateway gets to report an address before
-	// box stops waiting for one. Decision.ProbeTimeout overrides it in tests.
+	// AddressTimeout is how long the Gateway gets to say it has no address
+	// before box installs MetalLB. It is short because that answer comes from
+	// Envoy Gateway within seconds of the Gateway being applied: on a host
+	// with nothing to hand out addresses, a longer wait is only a pause with
+	// a known ending. Decision.AddressTimeout overrides it in tests.
+	AddressTimeout = 15 * time.Second
+	// ProbeTimeout is the whole wait for the Gateway to be Programmed with an
+	// address. Anything other than AddressNotAssigned at AddressTimeout (an
+	// address with the data plane still rolling out, a reason that is not
+	// about addresses) gets the rest of it before box judges, because those
+	// reasons are transient until the deadline. It is also the wait after
+	// MetalLB is installed. Decision.ProbeTimeout overrides it in tests.
 	ProbeTimeout = 60 * time.Second
 	// ReachTimeout is how long the address gets to answer HTTP from this
 	// host. Decision.ReachTimeout overrides it in tests.
