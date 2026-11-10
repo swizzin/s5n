@@ -9,9 +9,10 @@ Read `PLAN.md` first. It is the architecture; this file is how to work in the re
   Services, HTTPRoutes, NetworkPolicies, and `values.schema.json`, which rejects unknown
   keys, floating image tags and malformed values before anything renders.
 - `cmd/s5n/` — the one binary the image ships. Subcommands: `wiring` (the Job),
-  `qbt-config` (qBittorrent's init container), `version`. It stays stdlib-only: `box`
-  gets its own binary, `cmd/box/`, in the same module, so the Helm SDK and client-go
-  never reach the distroless image the Job and the init container run.
+  `qbt-config` (qBittorrent's init container), `version`. It stays stdlib-only (stdlib
+  plus `internal/{apps,atomicfile,qbtconf,ttlconf,wiring}`): `box` gets its own binary,
+  `cmd/box/`, in the same module, so the Helm SDK and client-go never reach the
+  distroless image the Job and the init container run.
 - `internal/apps/` — schema-driven HTTP clients for qBittorrent (`/api/v2`), Sonarr and
   Radarr (`/api/v3`) and Prowlarr (`/api/v1`). Every `Ensure…` reads live state, writes
   only what differs, and returns `Created`/`Updated`/`Unchanged`.
@@ -23,7 +24,11 @@ Read `PLAN.md` first. It is the architecture; this file is how to work in the re
 - `internal/seedbox/` — the grant/values contract from `docs/box.md`: loads both files,
   merges them with the grant winning, validates against a chart release's `values.yaml`
   + `values.schema.json`, diffs for `apply`, and edits by splicing one key's bytes so
-  comments and indentation survive. `grant.go` is the only list of what the grant owns:
+  comments and indentation survive. Keys box writes itself (the claim names,
+  `auth.edge`) go in last, in `Effective`, which has the release being applied:
+  `auth.edge` is written only when that release's schema declares it, so a new box
+  still applies to every release back to `upgrade-from` (`testdata/chart-0.2.0.*` are
+  verbatim from the tag). `grant.go` is the only list of what the grant owns:
   a new values key that decides isolation needs a rule there, and
   `TestGrantKeysAreRealKeys` fails if a rule names a key the chart does not have. Only
   this package, `internal/admission` and `internal/catalog` may import `go.yaml.in/yaml/v3`, and only this
@@ -51,24 +56,41 @@ Read `PLAN.md` first. It is the architecture; this file is how to work in the re
   plan item, a step that starts and finishes, a timed wait with its budget, a confirm,
   a wiring receipt, a final card) and a reporter decides how they look. `say.Plain` is
   the byte-for-byte transcript every non-TTY, `--plain` and `TERM=dumb` run reads;
-  `internal/tui` is the live one. Dependency-free on purpose: bootstrap and platform
-  may not import a TUI.
+  `internal/tui` is the live one. `say.Plain` also owns the plain yes/no prompt
+  (`Confirm`, asked as `Ask`); `cmd/box` gives it a reader only when
+  `term.IsTerminal(stdin)`, because a character device is not a terminal (`/dev/null`
+  is one). Dependency-free on purpose: bootstrap and platform may not import a TUI.
 - `internal/tui/` — init's dialogs and the live reporter: huh behind `setup.Prompter`,
   with box's masthead, accent and step header drawn by box, and the same events above
   drawn with a spinner, wrapped plans and the success card. The only package that
   imports huh, lipgloss or bubbletea. `tui.Decide` picks the UI: no terminal on stdin is
   unattended, `TERM=dumb`, `--plain` or a piped stdout get `LinePrompt` and `say.Plain`,
   `NO_COLOR` keeps the form and the live layout without colour.
+- `internal/kube/` — how every host-side client is built: `Config` (a kubeconfig path,
+  required, because an empty one would make client-go fall back to `KUBECONFIG`,
+  `~/.kube/config` or in-cluster), `ProbeClient` for bytes bootstrap already holds, and
+  Helm's `Flags`, each with `rest.NoWarnings` set on the config. It also holds the one
+  SelfSubjectAccessReview preflight and the ownership strings (field manager `box`,
+  `app.kubernetes.io/managed-by: box`, `part-of: s5n`, the `box-tls-` prefix). With
+  `internal/platform`, `internal/release` and `internal/bootstrap` (clientcmd only, for
+  the no-current-context refusal), the only packages that import Helm or client-go;
+  only `cmd/box` links them.
+- `internal/wait/` — the one deadline-and-poll loop (`Until`, `UntilClock` with an
+  injected clock). A new wait brings a budget, a poll interval and its own sentence,
+  never a loop. An error ends the wait; a site that retries a refusal keeps the last one
+  itself and reports it only when nothing answered (check `Waited.Done`).
+- `internal/atomicfile/` — the one atomic write: temp file beside the target, fsync,
+  chmod, rename, fsync the directory. The grant and values edits, the cluster record and
+  `cmd/s5n`'s two config writes use it; each caller creates the parent directory with
+  its own mode.
 - `internal/release/` — `box apply`'s decision over `ChartSource`, `ReleaseClient` and
-  `Confirmer`, with the Helm v4 + client-go implementation in `helm.go`. With
-  `internal/platform` and `internal/bootstrap` (clientcmd for the prober and the k0s
-  readiness check), the only packages that import Helm or client-go; only `cmd/box`
-  links them. It creates a missing
+  `Confirmer`, with the Helm v4 implementation in `helm.go`. It creates a missing
   seedbox namespace (Pod Security `restricted`, managed-by `box`) before the first
   volume, and removes only the volumes it created if a run fails before the release.
   box pulls its chart by version from `oci://ghcr.io/swizzin/charts/s5n` (`oci.go`,
-  `chart.go`); `minbox.go` is the chart's `box.s5n/min-box` rule, refused before any
-  cluster client opens.
+  `chart.go`) through `fetch.Transport`, with the archive size cap outside the retry so
+  every attempt's body is capped; `minbox.go` is the chart's `box.s5n/min-box` rule,
+  refused before any cluster client opens.
 - `internal/bootstrap/` — the cluster decision, and on a clean host the k0s
   installer: the release and its sha256 per architecture are pinned in `policy.go`, the
   download is verified and renamed into `/usr/local/bin/k0s`, then `k0s install
@@ -82,28 +104,45 @@ Read `PLAN.md` first. It is the architecture; this file is how to work in the re
   `DistributionOwned` (`source.go`): a distribution-owned kubeconfig that exists but
   fails `/version` or the SSAR blocks the install, while a dead `~/.kube/config` or a
   dry run's remote skip does not. The host scan includes the kubelet binary and unit.
-  The prober and the readiness check load kubeconfigs through clientcmd (`kubeClient`),
-  so tokens, tokenFile, client certificates and exec plugins work as under kubectl and
-  as for box's writers; a kubeconfig with no current-context is refused by name, and
-  box never picks a context.
+  The prober and the readiness check build their client through `kubeClient`, which
+  refuses a kubeconfig with no current-context by name (box never picks a context) and
+  then calls `kube.ProbeClient`, so tokens, tokenFile, client certificates and exec
+  plugins work as under kubectl and as for box's writers.
 - `internal/platform/` — bootstrap's write half. It applies only what the decision says
   to install: Envoy Gateway from its OCI chart, MetalLB (the node's InternalIP as a /32
-  pool, L2 advertisement), the GatewayClass and Gateway, the admission policy. It prints
-  the plan, checks RBAC with SelfSubjectAccessReview, asks once, then writes with
-  bounded readiness waits. A release already at its pin is verified, never upgraded, so
-  a re-run makes no Helm revision. cert-manager is not installed yet and bootstrap says
-  so. Every chart fetch (platform or apply) runs Helm on a private, empty home: settings
+  pool, L2 advertisement), cert-manager from its OCI chart (CRDs and
+  `config.gatewayAPI.enabled`) with box's ClusterIssuers `s5n-letsencrypt` and
+  `s5n-selfsigned`, the GatewayClass and Gateway, the admission policy. It prints the
+  plan, checks RBAC with SelfSubjectAccessReview for create *and* patch
+  (`kube.VerbApply`: box writes by server-side apply, which a re-run authorizes as
+  patch), asks once, then writes with bounded readiness waits. A release already at its
+  pin is verified, never upgraded (`AtPin`: semver, so `1.9.3` and `v1.9.3` are one
+  pin, and `+k0s.N` build metadata is compared explicitly), so a re-run makes no Helm
+  revision. An existing cert-manager is used only when its webhook answers, it is at
+  least 1.15 and its controller has Gateway API enabled; one without it stops bootstrap
+  naming the setting. `certificates.go` is root's per-host TLS: a Certificate in
+  `s5n-gateway`, and once it is Ready, field manager `box-tls-<host>` applies listeners
+  `https-<host>` (443) and `http-<host>` (80, routes from `s5n-gateway` only) as a partial
+  Gateway, plus the port-80 redirect. The generic `http` listener is `gateway.yaml`'s
+  (manager `box`) and no TLS apply touches it. Every chart fetch (platform or apply)
+  runs Helm on a private, empty home: settings
   built as a literal inside a 0700 temp dir removed when the fetch ends. Never
   `cli.New()`, never `repo.FindChartInRepoURL` (it writes into helmpath's
   environment-derived cache), so root's Helm environment can't redirect, cache or break
   what box installs.
-- `internal/fetch/` — the retrying transport for every bootstrap download: GET/HEAD
-  only, on 5xx/429 or a refused, reset or timed-out connection, four attempts at
-  1s/2s/4s, ctx honoured. A 404 or a certificate error is the answer on the first try.
-- `install/platform/` — the manifests box installs (`gateway/`, `admission/`), each
-  with its `embed.go` beside the file, because go:embed can't reach a sibling tree. The
-  bytes box compiles in are the bytes the e2e applies; product code never imports
-  `hack/`.
+- `internal/fetch/` — the retrying transport for every bootstrap download and `box
+  apply`'s chart pull: GET/HEAD only, on 5xx/429 or a refused, reset or timed-out
+  connection, four attempts at 1s/2s/4s, ctx honoured. A 404 or a certificate error is
+  the answer on the first try.
+- `install/platform/` — the manifests box installs (`gateway/`, `admission/`,
+  `cert-manager/`'s issuers), each with its `embed.go` beside the file, because go:embed
+  can't reach a sibling tree. The bytes box compiles in are the bytes the e2e applies;
+  product code never imports `hack/`. `versions.yaml` is the one file every version box
+  installs (k0s and each platform chart): box reads it through `embed.go` beside it
+  (package `platformassets`), the e2e through `go run ./hack/versions`. A new platform
+  component adds a key there with its `# renovate:` comment, never a Go constant and
+  never a literal in `hack/`. `.github/renovate.json` watches it and the digest-pinned
+  test images in `hack/`, with no automerge.
 - `cmd/box/` — the host CLI. `bootstrap` decides the cluster, installs k0s when there
   is none, applies the platform layer, then runs init for root in the same process
   with init's flags (`--record` moves the record off `/etc/swizzin/cluster.yaml` for the
@@ -130,14 +169,19 @@ Read `PLAN.md` first. It is the architecture; this file is how to work in the re
   and after. The 4K Radarr runs on category `4K/Movies`, so a nested category meets real
   qBittorrent and a real Arr root folder on every run. `--keep` leaves the cluster up.
 - `hack/e2e-box.sh` — the same install done by box instead of helm, through `box
-  bootstrap` on three kind clusters: `fresh` (box installs the whole platform),
-  `preinstalled` (MetalLB already there, so box adds none) and `existing` (Gateway API
-  v1.6.3 + NGINX Gateway Fabric 2.8.1, used, not replaced, an app reached through the
-  rewrite with `Host: box.example.com`). Each asserts a second `--yes` run changes no
-  Helm revision, spec or label (spec and labels, not resourceVersion: controllers
-  rewrite status). `fresh` also runs init's no-op re-run, a one-key `box apply` edit
-  and a `helm uninstall` that keeps the claims. `all` (the default) runs the three and
-  prints each wall time. The chart is packaged from the same commit, pushed to a
+  bootstrap` on three kind clusters: `fresh` (box installs the whole platform; Pebble in
+  the cluster proves HTTP-01 through the Gateway: HTTPS answers, port 80 redirects, a
+  forced renewal goes through the redirect with a new serial, each listener has one
+  owner in managedFields, port 80 is sampled during a second bootstrap, and a host
+  with no certificate is still served on plain HTTP), `preinstalled` (MetalLB already
+  there, so box adds none; the self-signed issuer) and `foreign-gateway` (Gateway API
+  v1.6.3 + NGINX Gateway Fabric 2.8.1: bootstrap refuses it by class and controller,
+  writes nothing, and refuses the same way on a re-run). `fresh` and `preinstalled`
+  assert a second `--yes` run changes no Helm revision, spec or label (spec and
+  labels, not resourceVersion: controllers rewrite status). `fresh` also runs init's
+  no-op re-run, a one-key `box apply` edit and a `helm uninstall` that keeps the
+  claims. Platform versions come from `hack/versions`. `all` (the default) runs the
+  three and prints each wall time. The chart is packaged from the same commit, pushed to a
   distribution registry container on 127.0.0.1, and pulled by box through
   `--chart-repo`/`--chart-version`; there is no local-chart flag. box under test is
   built with `-X main.version=<chart version>`, and the run fails on the dev-build
@@ -160,7 +204,8 @@ gofmt -l . && go vet ./... && go test ./...
 hack/validate-chart.sh 1.30.0  # helm lint + kubeconform for every charts/s5n/ci/*-values.yaml
 docker build -t s5n:e2e .     # what the e2e uses
 hack/e2e-kind.sh              # full smoke; needs docker, kind, helm, kubectl
-hack/e2e-box.sh [fresh|preinstalled|existing]  # through box bootstrap; same needs
+hack/e2e-box.sh [fresh|preinstalled|foreign-gateway|all]  # through box bootstrap; same needs
+go run ./hack/versions        # the platform pins box installs; the e2e reads them here
 ```
 
 Run lint + kubeconform against 1.30, 1.34 and 1.37 before every commit. Run the e2e before
@@ -266,8 +311,9 @@ one needs a live `lookup`. The e2e asserts the policy exists in the cluster.
   left `failed` makes `apply` refuse (`exists but is not deployed`): recover with
   `helm rollback`, never by deleting release Secrets.
 - The chart's `lookup "v1" "Endpoints"` (`templates/networkpolicy.yaml`) makes client-go
-  print a deprecation line through klog. `internal/release` installs `rest.NoWarnings`
-  so box's output stays its own; `hack/e2e-box.sh` greps apply output for klog lines.
+  print a deprecation line through klog. `internal/kube` sets `rest.NoWarnings` on every
+  config it hands out (`Config`, `ProbeClient`, Helm's `Flags`), never process-wide, so
+  box's output stays its own; `hack/e2e-box.sh` greps apply output for klog lines.
 - A ValidatingAdmissionPolicy takes effect a moment after its binding is created and
   never re-checks running objects. An e2e that asserts a denial right after `kubectl apply`
   races the binding: poll for a dry-run denial. A pod admitted before the binding keeps
@@ -366,24 +412,28 @@ one needs a live `lookup`. The e2e asserts the policy exists in the cluster.
 - MetalLB's webhook endpoint can be Ready while the server still refuses connections, so
   the e2e retries the pool apply rather than trusting the endpoint.
 - The LoadBalancer probe is the Gateway's own status. After applying the Gateway, box
-  waits up to 60s for Programmed=True with an address and decides only at the deadline:
-  Envoy reports NoResources while its proxy starts, with the address already assigned,
-  so an intermediate reason is never acted on. No address at the deadline
-  (AddressNotAssigned) installs MetalLB; anything else stops bootstrap.
+  gives it 15s (`AddressTimeout`): AddressNotAssigned with no address installs MetalLB.
+  Anything else at 15s (Envoy reports NoResources while its proxy starts, with the
+  address already assigned) is still settling and gets the rest of 60s
+  (`ProbeTimeout`) before box judges; anything but Programmed then stops bootstrap.
+  External mode gets the whole 60s at once. A cluster box has just installed (k0s
+  hands out no addresses) gets MetalLB without the question.
 - An address isn't a working platform. box sends an HTTP GET to `http://<address>:80/`
   from the host and stops, naming the address, if nothing answers; an empty Envoy's 404
   passes.
-- The feature the chart's routes need is `HTTPRoutePathRewrite` (URLRewrite with
-  ReplacePrefixMatch); there is no `HTTPRouteURLRewrite`. A class whose feature list
-  lacks it stops bootstrap; a class with no list stops unless
-  `platform.gateway.assumeFeatures` / `--gateway-assume-features` is set. Envoy Gateway
-  1.9.3 publishes no list, so box trusts only the class it labelled managed-by=box.
+- box supports only Envoy Gateway: a GatewayClass counts only when its controller is
+  `gateway.envoyproxy.io/gatewayclass-controller`. Any other Accepted class stops
+  bootstrap before the record or any write, naming the class and its controller; there
+  is no feature check and no override, and a record still carrying
+  `assumeGatewayFeatures` is refused by name. On k3s with Traefik the stop names
+  `--disable=traefik`. An Accepted Envoy class beside a foreign one is used and the
+  foreign one left alone.
 - box always applies its own Gateway `s5n-gateway/s5n` on the class it chose. It writes
   GatewayClass `eg` only when it installs Envoy Gateway and never rewrites another
   controller's class. Platform Helm releases carry `app.kubernetes.io/managed-by=box`;
   an unmarked release of the same name is the operator's and is never upgraded.
-- A recorded GatewayClass is kept only while the cluster still serves it (Accepted, with
-  `HTTPRoutePathRewrite`). A vanished non-`eg` class, or a missing class while another
+- A recorded GatewayClass is kept only while the cluster still serves it (Accepted, by
+  Envoy Gateway's controller). A vanished non-`eg` class, or a missing class while another
   implementation is accepted, stops rather than moving the routes; a vanished `eg` with
   no accepted class is box's own implementation missing, and is reinstalled. A record
   whose kubeconfig no longer answers stops naming it, and never falls through to the
@@ -443,14 +493,39 @@ one needs a live `lookup`. The e2e asserts the policy exists in the cluster.
 - `go.mod` carries `distribution/v3` for the in-process OCI registry in
   `TestOCIRoundTrip` only. Its ~45 indirect requirements must never reach
   `go list -deps ./cmd/...`.
-- `--dry-run` refuses a non-loopback host in the prober's `get`/`post`, before the
-  first request and therefore before client-go runs an exec plugin. Keep the guard
-  there, not in a transport wrapper.
+- `--dry-run` refuses any API server the prober can't prove is this machine: loopback,
+  or an IP literal on one of this host's interfaces (kubeadm's admin.conf names the
+  node's own address), never a hostname, which would need DNS. The check runs in the
+  prober's `get`/`post`, before the first request and therefore before client-go runs an
+  exec plugin. Keep the guard there, not in a transport wrapper.
 - clientcmd sends no credentials (token, certificate, exec) to a plain `http://`
   server, exactly as kubectl does. A fake API over HTTP proves reachability, not
   authentication; auth tests need TLS.
 - Which kubeconfigs are distribution-owned is `source.go`'s answer. Don't add path
   matching in `decision.go`.
+- Every values file the chart renders must set `auth.edge: true`: there is no default,
+  and missing or false is refused at render. box writes it (seedbox rule BoxSets +
+  Fixed) and refuses it in either file; `charts/s5n/ci/*-values.yaml`,
+  `hack/e2e-values.yaml` and any new render fixture set it explicitly.
+- The Arrs run `External` auth, set only by `<PREFIX>__AUTH__METHOD=External`; the login
+  lives at the edge, never in the app. Don't set `__AUTH__REQUIRED` (no effect under
+  External) and never `__AUTH__ENABLED` (it forces Forms in Sonarr, Radarr and Prowlarr
+  alike).
+- No field has two box managers. box applies with `Force: true`, so two of its own
+  managers setting one field (a shared listener's `allowedRoutes`) never conflict; they
+  overwrite each other on every run while the e2e stays green. A per-host change gets its
+  own list item under its own manager.
+- Never force a renewal in an e2e by deleting the TLS Secret (Envoy drops :443 until it
+  returns); set the Certificate's Issuing condition, as `cmctl renew` does.
+- `--acme-server` is development-only: `takeDevFlag` removes it from the arguments before
+  flag parsing, so it never appears in `--help`, and it marks only the e2e's test issuer
+  skipTLSVerify.
+- Charts publish their own spelling of a version (`1.9.3`, `v1.21.3`). Never compare a
+  deployed chart version to a pin with `==`; use `AtPin`. semver's Equal ignores build
+  metadata, so `+k0s.N` is compared separately.
+- Never edit a `hack/*.sh` while its e2e is running: bash reads a script as it goes, so
+  the run is meaningless. Under `set -euo pipefail` a failing `code=$(curl …)` exits with
+  no message; end such captures with `|| true` and assert the captured value.
 
 ## Next work
 
@@ -461,8 +536,8 @@ left:
 1. A run on a clean VM. The image, the chart and box's binaries are published from
    `v*` tags and pull anonymously, so a host needs no checkout and no side-loaded image.
 
-Then: cert-manager on the platform layer, `hack/e2e-box.sh` in CI, the upgrade e2e,
-and `adduser`. The product decisions are
+Then: logins (Authelia on the platform layer, `docs/box.md` "Logins"),
+`hack/e2e-box.sh` in CI, the upgrade e2e, and `adduser`. The product decisions are
 in `docs/box.md`, marked decided, proposed or open.
 
 In parallel, outside this repo: `swizzin/qbittorrent`, the userdocs static recipe plus
