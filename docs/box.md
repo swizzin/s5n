@@ -196,8 +196,12 @@ user can't open a listener of their own. Users still create their own HTTPRoutes
 chart is unaffected. Exemptions live in Authelia's own rules, which root owns: paths that
 check their own key (the Arrs' `/api`, and `/ping` for health checks), Plex, Seerr and
 Tautulli, the sign-in page itself, and cert-manager's `/.well-known/acme-challenge/`, so
-certificates issue through the same Gateway. Anything else routed through the Gateway is
-behind the login unless a root-owned rule exempts it. Each user's domain admits only that
+certificates issue through the same Gateway. One listener is left out on purpose: once a
+host's certificate is Ready, its own port-80 listener gets a root-owned policy with no
+login. Only root's redirect to HTTPS and cert-manager's challenge route can attach there,
+so nothing opens, a plain `http://` link still redirects instead of failing at the login,
+and renewals don't depend on Authelia. Anything else routed through the Gateway is behind
+the login unless a root-owned rule exempts it. Each user's domain admits only that
 user.
 
 **Sessions live in Authelia's memory (decided).** Authelia keeps sessions in memory unless
