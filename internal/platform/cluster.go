@@ -20,6 +20,7 @@ import (
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/restmapper"
 
+	"github.com/swizzin/s5n/internal/bootstrap"
 	"github.com/swizzin/s5n/internal/kube"
 	"github.com/swizzin/s5n/internal/wait"
 )
@@ -160,6 +161,170 @@ func (k *Kubernetes) Serves(_ context.Context, group, version, kind string) (boo
 		return false, nil
 	}
 	return true, nil
+}
+
+// Get reads one object as an unstructured document. A missing object is
+// (nil, false, nil): a caller deciding between create and leave-alone asks
+// this, and "not there" is an answer.
+func (k *Kubernetes) Get(ctx context.Context, group, version, kind, namespace, name string) (map[string]any, bool, error) {
+	gvr, err := k.mapping(schema.GroupVersionKind{Group: group, Version: version, Kind: kind})
+	if err != nil {
+		return nil, false, err
+	}
+	obj, err := k.dyn.Resource(gvr.Resource).Namespace(namespace).Get(ctx, name, metav1.GetOptions{})
+	if apierrors.IsNotFound(err) {
+		return nil, false, nil
+	}
+	if err != nil {
+		return nil, false, fmt.Errorf("read %s %s/%s: %w", kind, namespace, name, err)
+	}
+	return obj.Object, true, nil
+}
+
+// Create makes one object and never updates one. A Secret box must not rotate
+// is written with this and not with Apply: an apply would happily replace the
+// field another run had set.
+func (k *Kubernetes) Create(ctx context.Context, doc map[string]any) error {
+	obj := &unstructured.Unstructured{Object: doc}
+	gvk := obj.GroupVersionKind()
+	if gvk.Kind == "" || obj.GetName() == "" {
+		return errors.New("manifest: an object has no kind or name")
+	}
+	mapping, err := k.mapping(gvk)
+	if err != nil {
+		return fmt.Errorf("%s %s: %w", gvk.Kind, obj.GetName(), err)
+	}
+	var ri dynamic.ResourceInterface = k.dyn.Resource(mapping.Resource)
+	if mapping.Scope.Name() == meta.RESTScopeNameNamespace {
+		ns := obj.GetNamespace()
+		if ns == "" {
+			return fmt.Errorf("%s %s: no namespace", gvk.Kind, obj.GetName())
+		}
+		ri = k.dyn.Resource(mapping.Resource).Namespace(ns)
+	}
+	if _, err := ri.Create(ctx, obj, metav1.CreateOptions{FieldManager: kube.FieldManager}); err != nil {
+		return fmt.Errorf("%s %s: %w", gvk.Kind, obj.GetName(), err)
+	}
+	return nil
+}
+
+// NamespaceExists is the one read that decides whether a platform object can
+// be written at all: s5n-system is the admission policy's namespace, so box
+// creates it at bootstrap.
+func (k *Kubernetes) NamespaceExists(ctx context.Context, name string) (bool, error) {
+	_, err := k.cs.CoreV1().Namespaces().Get(ctx, name, metav1.GetOptions{})
+	if apierrors.IsNotFound(err) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("read namespace %s: %w", name, err)
+	}
+	return true, nil
+}
+
+// PolicyTarget is the object a policy attaches to: the same fields its
+// targetRefs carries, because that is what status.ancestors echoes back. A
+// Gateway-wide policy leaves SectionName empty; a listener-scoped one names the
+// listener.
+type PolicyTarget struct {
+	Group       string
+	Kind        string
+	Name        string
+	Namespace   string
+	SectionName string
+}
+
+// PolicyAccepted reads a policy's status for one target. It is a function of
+// the status document rather than of the client so the shapes Envoy Gateway
+// really writes can be tested from a captured status.
+//
+// Envoy Gateway does not put an Accepted condition on the policy itself: a
+// policy is accepted by the controller that serves the object it targets, and
+// it reports that under status.ancestors, one entry per target and controller,
+// with the ancestorRef naming the target. Top-level status.conditions is
+// therefore not looked at -- a policy with only those has not been accepted,
+// and reading them would make the wait succeed on a document EG never writes.
+func PolicyAccepted(status map[string]any, target PolicyTarget) (bool, string) {
+	ancestors, _ := status["ancestors"].([]any)
+	for _, raw := range ancestors {
+		ancestor, _ := raw.(map[string]any)
+		if name, _ := ancestor["controllerName"].(string); name != bootstrap.EnvoyGatewayController {
+			continue
+		}
+		ref, _ := ancestor["ancestorRef"].(map[string]any)
+		if !sameTargetRef(ref, target) {
+			continue
+		}
+		conditions, _ := ancestor["conditions"].([]any)
+		for _, raw := range conditions {
+			cond, _ := raw.(map[string]any)
+			if cond["type"] != "Accepted" {
+				continue
+			}
+			if cond["status"] == "True" {
+				return true, ""
+			}
+			return false, policyReason(cond)
+		}
+		// The ancestor is there, the condition is not: still transient.
+		return false, "Envoy Gateway has not accepted it yet"
+	}
+	return false, "Envoy Gateway has not accepted it yet"
+}
+
+// sameTargetRef is the ancestorRef match. Every field the ancestorRef sets is
+// compared, and sectionName is compared as written: a listener-scoped policy
+// must not be satisfied by an ancestor entry for the whole Gateway (or another
+// listener).
+func sameTargetRef(ref map[string]any, target PolicyTarget) bool {
+	for field, want := range map[string]string{
+		"group":       target.Group,
+		"kind":        target.Kind,
+		"name":        target.Name,
+		"namespace":   target.Namespace,
+		"sectionName": target.SectionName,
+	} {
+		got, _ := ref[field].(string)
+		if got != want {
+			return false
+		}
+	}
+	return true
+}
+
+// policyReason is the condition as one sentence: Envoy Gateway's reason, and
+// its message when it has one.
+func policyReason(cond map[string]any) string {
+	reason, _ := cond["reason"].(string)
+	message, _ := cond["message"].(string)
+	if reason == "" {
+		reason = "not Accepted"
+	}
+	if message != "" {
+		reason += ": " + message
+	}
+	return reason
+}
+
+// Accepted answers whether the controller serving target has accepted the
+// object, with the reason when it has not. It is the wait a policy needs:
+// Envoy Gateway reports a SecurityPolicy it has not translated yet with a
+// transient reason, and a policy it refuses with a permanent one.
+func (k *Kubernetes) Accepted(ctx context.Context, group, version, kind, namespace, name string, target PolicyTarget) (bool, string, error) {
+	gvr, err := k.mapping(schema.GroupVersionKind{Group: group, Version: version, Kind: kind})
+	if err != nil {
+		return false, "", err
+	}
+	obj, err := k.dyn.Resource(gvr.Resource).Namespace(namespace).Get(ctx, name, metav1.GetOptions{})
+	if apierrors.IsNotFound(err) {
+		return false, "the " + kind + " has not been written yet", nil
+	}
+	if err != nil {
+		return false, "", fmt.Errorf("read %s %s/%s: %w", kind, namespace, name, err)
+	}
+	status, _, _ := unstructured.NestedMap(obj.Object, "status")
+	ok, why := PolicyAccepted(status, target)
+	return ok, why, nil
 }
 
 // CertificateReady answers a Certificate's Ready condition. A Certificate

@@ -83,6 +83,14 @@ type Rule struct {
 var GrantKeys = []Rule{
 	{Path: "namespace", BoxOnly: true, Why: "the release namespace: one user is one namespace"},
 
+	// login is the account the login in front of the Gateway is for: root's
+	// own identity on this box, written once at init and read back on every
+	// re-run. BoxOnly like the namespace, because it is box's record of who
+	// the box belongs to and never a chart value -- the chart knows nothing
+	// about Authelia, and a user editing this key would be renaming their own
+	// account behind root's back.
+	{Path: "login", BoxOnly: true, Why: "the account root's login creates: this box's own identity"},
+
 	// The chart ships no login; box is what puts one in front of every release,
 	// so no file may say otherwise. Fixed: box writes true rather than deriving
 	// it from anything in the grant.
