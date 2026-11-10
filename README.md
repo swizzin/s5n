@@ -1,29 +1,32 @@
 # s5n
 
-swizzin on Kubernetes. A free, self-hosted seedbox: qBittorrent, Prowlarr, Sonarr,
-Radarr, Plex, Seerr and Tautulli, installed on one server by one command, wired to each
-other, hardlink-safe, and locked down by default.
+[swizzin](https://github.com/swizzin/swizzin) re-imagined for a modern era, powered by Kubernetes. A free, self-hosted seedbox environment: qBittorrent, Prowlarr, Sonarr, Radarr, Plex, Seerr and Tautulli, installed and managed by `box`. Applications wired for minimal config, hardlink-friendly, and locked down by default. Your media server isn't a pet -- stop treating it like one.
 
-You never type `kubectl`. `box`, a single binary, finds or installs the cluster, asks
-you a few questions, and runs the stack. Kubernetes is underneath because it gives a
-seedbox real updates, real isolation and a way back when something breaks, not because
-you should have to learn it.
+You never type `kubectl`. `box`, your familiar friend since 2017, finds or installs the cluster, asks
+you a few questions, and runs the stack. s5n is built on Kubernetes to address current
+limitations and pain points of swizzin: continuous updates tested and deployed with CI/CD, the freedom to choose
+your Linux distribution of choice, applications managed by charts, meaningful application
+isolation, ease of upgrading _all the things_ and a way back when something breaks.
 
 > [!WARNING]
-> s5n is early. v0.2.0 is the first release and the first one meant to install from a
-> clean host. It serves plain HTTP only, and most of the day-two commands (`update`,
+> s5n is in early PoC stages. While v0.2.0 is currently public, it's not quite ready for public consumption.
+> It serves plain HTTP only, and most of the day-two commands (`update`,
 > `status`, `backup`, `migrate`, `uninstall`) aren't written yet. Try it on a VM or a
-> spare box, not on the seedbox you depend on.
+> spare box, not on the seedbox you depend on. Expect nothing yet. No support, a shifting layout with no migration path, etc.
+> The bar for support will rise once this is my daily driver.
 
 ## What you get
 
+- **Managed k0s.** Don't know Kubernetes and don't care? You're in luck, `box` will gladly install k0s for you. Managing and upgrading it, backed by E2E compatibility testing, is *(planned)*.
+- **Unmanaged Kubernetes.** Prefer to have more control over your kubernetes environment? Want to use `kubeadm` or `k3s` instead? Be my guest!
+- **A Kubernetes cluster.** Install out-of-scope projects easily in their own namespace, as long as they ship a container image.
 - **One data layout where hardlinks always work.** Every app mounts the same directory
   at `/data`, with `downloads/` and `media/` side by side on one filesystem. Imports are
   hardlinks, never copies, and no app needs a remote path mapping.
 - **Apps that are already talking to each other.** After every install or upgrade a
-  wiring job connects qBittorrent, Prowlarr and the Arrs, points Seerr and Tautulli at
+  wiring job connects managed aspects of qBittorrent, Prowlarr and the Arrs, points Seerr and Tautulli at
   them and at Plex, creates the category folders, and proves that a hardlink really
-  works between your download and library paths. It writes only what's missing, so
+  works between your download and library paths. It writes only what's missing or incorrect, so
   running it again changes nothing.
 - **HD and 4K instances.** Sonarr and Radarr can each run a second instance with its
   own categories and library folders.
@@ -32,7 +35,22 @@ you should have to learn it.
   images pinned by digest. From outside, only the web gateway and the torrent port are
   reachable.
 - **Every app at a path under one name:** `http://box.example.com/sonarr`, `/radarr`,
-  `/qbittorrent` and so on, the way swizzin always laid them out.
+  `/qbittorrent` and so on, the way swizzin always laid them out. Wildcard DNS for those that don't provide base URL support *(planned)*.
+- **Zero obligation to use box:** The charts are freely available and can be used directly with helm in a completely standalone environment.
+
+## Requirements
+
+### Basic Assumptions
+- Single node clusters
+- Local storage
+- Cloud provider support (EKS, GKE, etc) not in scope
+- No bare IP support
+  - Every user requires a DNS name. Ideally with wildcard to support Seerr and Plex gateways *(planned)*
+- Runs wherever `k0s`, `k3s` or `kubeadm` runs
+
+### Hardware
+
+This will expand as the project grows. Kubernetes has overhead and this project may not be suitable for low powered hardware, expect ~800MB of RAM utilization on an idling k0s process. This will be filled out as testing is performed.
 
 ## Install
 
@@ -140,10 +158,9 @@ follows, and what CI checks.
 
 ## AI disclosure
 
-s5n is built with substantial help from AI coding assistants (Anthropic's Claude and
-DeepSeek). The maintainer directs the design, reviews the work, and is responsible for
-every commit. `AGENTS.md` is the brief those assistants work from, and it's public on
-purpose.
+s5n is built with the assistance of Anthropic's Claude and
+DeepSeek. The maintainer directs the design, reviews the work, and is responsible for
+every commit. `AGENTS.md` is the brief those assistants work from.
 
 ## Licence
 
