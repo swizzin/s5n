@@ -2,9 +2,12 @@ package bootstrap
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -111,5 +114,52 @@ func TestHTTPDownloaderNamesTheURLEOnceWhenItGivesUp(t *testing.T) {
 	}
 	if n := h.count.Load(); n != 4 {
 		t.Errorf("requests = %d, want 4", n)
+	}
+}
+
+func TestAPIReadinessSendsBearerToken(t *testing.T) {
+	const token = "readytoken"
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("Authorization"); got != "Bearer "+token {
+			t.Errorf("%s Authorization = %q, want %q", r.URL.Path, got, "Bearer "+token)
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		switch r.URL.Path {
+		case "/readyz":
+			_, _ = io.WriteString(w, "ok")
+		case "/api/v1/nodes":
+			_, _ = io.WriteString(w, `{"items":[{"status":{"conditions":[{"type":"Ready","status":"True"}]}}]}`)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	config := fmt.Sprintf(`apiVersion: v1
+kind: Config
+clusters:
+- cluster:
+    insecure-skip-tls-verify: true
+    server: %s
+  name: c
+contexts:
+- context:
+    cluster: c
+    user: u
+  name: ctx
+current-context: ctx
+users:
+- name: u
+  user:
+    token: %s
+`, srv.URL, token)
+	path := filepath.Join(t.TempDir(), "admin.conf")
+	if err := os.WriteFile(path, []byte(config), 0o600); err != nil {
+		t.Fatalf("write kubeconfig: %v", err)
+	}
+
+	if err := (APIReadiness{ConfigPath: path}).Ready(context.Background()); err != nil {
+		t.Fatalf("Ready with a token kubeconfig: %v", err)
 	}
 }

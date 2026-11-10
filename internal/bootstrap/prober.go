@@ -2,285 +2,63 @@ package bootstrap
 
 import (
 	"context"
-	"crypto/tls"
-	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
+
+	"k8s.io/client-go/rest"
+	"k8s.io/client-go/tools/clientcmd"
 )
 
-// kubeconfig is the subset of a kubeconfig file the real prober needs: enough
-// to resolve the current context to a server and its TLS material. It is
-// parsed from the machine-generated files k0s/k3s/kubeadm/kubectl write, not
-// from arbitrary YAML, so exec credential plugins are out of scope here.
-type kubeconfig struct {
-	currentContext string
-	clusters       map[string]*clusterEntry
-	contexts       map[string]*contextEntry
-	users          map[string]*userEntry
-}
-
-type clusterEntry struct {
-	server          string
-	caData          []byte
-	caFile          string
-	insecureSkipTLS bool
-}
-
-type contextEntry struct {
-	cluster string
-	user    string
-}
-
-type userEntry struct {
-	clientCertData []byte
-	clientKeyData  []byte
-	clientCertFile string
-	clientKeyFile  string
-	token          string
-}
-
-// parseKubeconfig reads the fixed shape machine-generated kubeconfigs use:
+// kubeClient builds the HTTP client and base URL for a kubeconfig's current
+// context through client-go's clientcmd, the loader kubectl itself uses. That
+// keeps the prober on the same auth box's later client-go writes use: bearer
+// tokens, tokenFile, client certificates, and exec credential plugins, which
+// client-go runs lazily inside the transport on the first request.
 //
-//	clusters:
-//	- cluster:
-//	    certificate-authority-data: <b64>
-//	    server: https://…
-//	  name: foo
-//	contexts:
-//	- context:
-//	    cluster: foo
-//	    user: bar
-//	  name: ctx
-//	users:
-//	- name: bar
-//	  user:
-//	    client-certificate-data: <b64>
-//	    client-key-data: <b64>
-func parseKubeconfig(data []byte) (*kubeconfig, error) {
-	kc := &kubeconfig{
-		clusters: map[string]*clusterEntry{},
-		contexts: map[string]*contextEntry{},
-		users:    map[string]*userEntry{},
-	}
-	section := ""
-	var (
-		item        string // "cluster", "context", "user"
-		pendingName string
-		cluster     *clusterEntry
-		context     *contextEntry
-		user        *userEntry
-	)
-	commit := func() {
-		if pendingName == "" {
-			return
-		}
-		switch item {
-		case "cluster":
-			if cluster != nil {
-				kc.clusters[pendingName] = cluster
-			}
-		case "context":
-			if context != nil {
-				kc.contexts[pendingName] = context
-			}
-		case "user":
-			if user != nil {
-				kc.users[pendingName] = user
-			}
-		}
-	}
-	lines := strings.Split(string(data), "\n")
-	for _, raw := range lines {
-		line := strings.TrimRight(raw, "\r")
-		trimmed := strings.TrimSpace(line)
-		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
-			continue
-		}
-		indent := len(line) - len(strings.TrimLeft(line, " "))
-		if indent == 0 {
-			if strings.HasPrefix(trimmed, "- ") {
-				commit()
-				pendingName = ""
-				cluster, context, user = nil, nil, nil
-				body := strings.TrimSpace(trimmed[2:])
-				key, val, _ := splitKV(body)
-				switch key {
-				case "cluster":
-					item, cluster = "cluster", &clusterEntry{}
-				case "context":
-					item, context = "context", &contextEntry{}
-				case "name":
-					if section == "users" {
-						item, user = "user", &userEntry{}
-						pendingName = unquote(val)
-					}
-				}
-				continue
-			}
-			commit()
-			pendingName = ""
-			cluster, context, user = nil, nil, nil
-			key, val, ok := splitKV(trimmed)
-			if !ok {
-				continue
-			}
-			switch key {
-			case "current-context":
-				kc.currentContext = unquote(val)
-			case "clusters", "contexts", "users", "preferences":
-				section = key
-			default:
-				section = ""
-			}
-			continue
-		}
-		// indented: belongs to the current list item.
-		key, val, ok := splitKV(trimmed)
-		if !ok {
-			continue
-		}
-		switch section {
-		case "clusters":
-			if item != "cluster" || cluster == nil {
-				continue
-			}
-			switch key {
-			case "name":
-				pendingName = unquote(val)
-			case "server":
-				cluster.server = unquote(val)
-			case "certificate-authority-data":
-				cluster.caData = decodeB64(val)
-			case "certificate-authority":
-				cluster.caFile = unquote(val)
-			case "insecure-skip-tls-verify":
-				cluster.insecureSkipTLS = val == "true"
-			}
-		case "contexts":
-			if item != "context" || context == nil {
-				continue
-			}
-			switch key {
-			case "name":
-				pendingName = unquote(val)
-			case "cluster":
-				context.cluster = unquote(val)
-			case "user":
-				context.user = unquote(val)
-			}
-		case "users":
-			if item != "user" || user == nil {
-				continue
-			}
-			switch key {
-			case "client-certificate-data":
-				user.clientCertData = decodeB64(val)
-			case "client-key-data":
-				user.clientKeyData = decodeB64(val)
-			case "client-certificate":
-				user.clientCertFile = unquote(val)
-			case "client-key":
-				user.clientKeyFile = unquote(val)
-			case "token":
-				user.token = unquote(val)
-			}
-		}
-	}
-	commit()
-	return kc, nil
-}
-
-func decodeB64(val string) []byte {
-	val = unquote(strings.TrimSpace(val))
-	b, err := base64.StdEncoding.DecodeString(val)
+// This is the one place bootstrap turns kubeconfig bytes into a client;
+// HTTPProber and APIReadiness (k0s.go) both call it.
+func kubeClient(kubeconfig []byte, timeout time.Duration) (*http.Client, string, error) {
+	cfg, err := clientcmd.RESTConfigFromKubeConfig(kubeconfig)
 	if err != nil {
-		return nil
+		return nil, "", fmt.Errorf("kubeconfig: %w", err)
 	}
-	return b
+	// client-go prints scheme and deprecation warnings through klog; box's
+	// output stays its own.
+	rest.SetDefaultWarningHandler(rest.NoWarnings{})
+	client, err := rest.HTTPClientFor(cfg)
+	if err != nil {
+		return nil, "", fmt.Errorf("kubeconfig: %w", err)
+	}
+	client.Timeout = timeout
+	return client, strings.TrimRight(cfg.Host, "/"), nil
 }
 
-// resolve returns the server URL and TLS/auth material for the current context.
-func (k *kubeconfig) resolve() (*clusterEntry, *userEntry, error) {
-	ctxName := k.currentContext
-	if ctxName == "" {
-		switch len(k.contexts) {
-		case 0:
-			return nil, nil, fmt.Errorf("kubeconfig: no contexts")
-		case 1:
-			for name := range k.contexts {
-				ctxName = name
-			}
-		default:
-			return nil, nil, fmt.Errorf("kubeconfig: no current-context and %d contexts; set one to select a cluster", len(k.contexts))
-		}
-	}
-	ctx, ok := k.contexts[ctxName]
-	if !ok {
-		return nil, nil, fmt.Errorf("kubeconfig: context %q not found", ctxName)
-	}
-	cl, ok := k.clusters[ctx.cluster]
-	if !ok {
-		return nil, nil, fmt.Errorf("kubeconfig: cluster %q not found", ctx.cluster)
-	}
-	var us *userEntry
-	if ctx.user != "" {
-		u, ok := k.users[ctx.user]
-		if !ok {
-			return nil, nil, fmt.Errorf("kubeconfig: user %q not found", ctx.user)
-		}
-		us = u
-	}
-	return cl, us, nil
-}
-
-// HTTPProber is the real, read-only Prober: it talks to the API server over
-// plain stdlib HTTP, the same way internal/wiring does in-cluster, so box adds
-// no client-go dependency.
+// HTTPProber is the real, read-only Prober: it talks to the API server with
+// the client client-go builds from the kubeconfig, so every credential
+// clientcmd understands works the same way it does for box's later writes.
 type HTTPProber struct {
 	baseURL   string
 	client    *http.Client
 	localOnly bool
 }
 
-// NewHTTPProber parses a kubeconfig and builds a prober for its current
-// context. When localOnly is set, every call first refuses to touch a server
-// that is not loopback, returning ErrRemoteCluster — the --dry-run guard.
+// NewHTTPProber builds a prober for a kubeconfig's current context. When
+// localOnly is set, every call first refuses to touch a server that is not
+// loopback, returning ErrRemoteCluster — the --dry-run guard. The check runs
+// before any request, so an exec credential plugin has not run yet either.
 func NewHTTPProber(kubeconfig []byte, localOnly bool) (Prober, error) {
-	kc, err := parseKubeconfig(kubeconfig)
+	client, baseURL, err := kubeClient(kubeconfig, 20*time.Second)
 	if err != nil {
 		return nil, err
 	}
-	cl, us, err := kc.resolve()
-	if err != nil {
-		return nil, err
-	}
-	transport, err := buildTransport(cl, us)
-	if err != nil {
-		return nil, err
-	}
-	return &HTTPProber{
-		baseURL:   strings.TrimRight(cl.server, "/"),
-		client:    &http.Client{Timeout: 20 * time.Second, Transport: transport},
-		localOnly: localOnly,
-	}, nil
-}
-
-func buildTransport(cl *clusterEntry, us *userEntry) (*http.Transport, error) {
-	tlsCfg := tlsConfig(cl)
-	if us != nil && (len(us.clientCertData) > 0 || us.clientCertFile != "") {
-		cert, err := tlsCert(us)
-		if err != nil {
-			return nil, err
-		}
-		tlsCfg.Certificates = []tls.Certificate{cert}
-	}
-	return &http.Transport{TLSClientConfig: tlsCfg}, nil
+	return &HTTPProber{baseURL: baseURL, client: client, localOnly: localOnly}, nil
 }
 
 // checkLocal returns ErrRemoteCluster when the prober is in local-only mode and
@@ -289,18 +67,12 @@ func (p *HTTPProber) checkLocal() error {
 	if !p.localOnly {
 		return nil
 	}
-	u := p.baseURL
-	host := u
-	if i := strings.Index(u, "://"); i >= 0 {
-		host = u[i+3:]
+	u, err := url.Parse(p.baseURL)
+	if err != nil || u.Hostname() == "" {
+		// An address box cannot parse is not one it can prove local.
+		return fmt.Errorf("%w (server %q)", ErrRemoteCluster, p.baseURL)
 	}
-	if i := strings.IndexByte(host, '/'); i >= 0 {
-		host = host[:i]
-	}
-	if i := strings.LastIndexByte(host, ':'); i >= 0 && strings.Count(host, ":") == 1 {
-		host = host[:i]
-	}
-	host = strings.Trim(host, "[]")
+	host := u.Hostname()
 	if isLoopback(host) {
 		return nil
 	}

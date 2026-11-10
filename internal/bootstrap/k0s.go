@@ -147,24 +147,14 @@ func (a APIReadiness) Ready(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("read %s: %w", path, err)
 	}
-	kc, err := parseKubeconfig(data)
-	if err != nil {
-		return fmt.Errorf("%s: %w", path, err)
-	}
-	cl, us, err := kc.resolve()
-	if err != nil {
-		return fmt.Errorf("%s: %w", path, err)
-	}
-	transport, err := buildTransport(cl, us)
-	if err != nil {
-		return err
-	}
 	timeout := a.Timeout
 	if timeout <= 0 {
 		timeout = 10 * time.Second
 	}
-	client := &http.Client{Timeout: timeout, Transport: transport}
-	base := strings.TrimRight(cl.server, "/")
+	client, base, err := kubeClient(data, timeout)
+	if err != nil {
+		return fmt.Errorf("%s: %w", path, err)
+	}
 
 	if err := readyz(ctx, client, base); err != nil {
 		return err
