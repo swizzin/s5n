@@ -150,7 +150,9 @@ would be a second auth system with its own reset path, tests and docs, so box do
 build one. That is why Envoy Gateway is the only Gateway implementation box supports.
 
 **The password is never stored where it can be read back (decided).** The provider keeps
-a hash and nothing else does. A forgotten password is reset, not recovered. Credentials
+a hash and nothing else does. A forgotten password is reset, not recovered. `init` (and
+`adduser`) asks for one; an empty answer means box generates a random one and shows it
+once, at the end of the run, the way swizzin always has. Credentials
 between apps (API keys, the qBittorrent account the Arrs use) are generated, kept in the
 release Secret, and never the person's password.
 
@@ -169,10 +171,11 @@ Proposed:
   key (the Arrs' `/api`) bypass it, so mobile apps keep working.
 - A user changes their own password on the provider's page, without root.
   Whether Authelia's file backend allows that is still to be checked.
+- Unattended, a password comes from a file or stdin, never a flag (it would sit in shell
+  history and `ps`), and none supplied means a generated one, printed once.
 
 Open:
 
-- Whether `init` asks for the password or generates one and shows it once.
 - A plain `helm install` has no provider in front of it. Proposed: the chart requires an
   explicit `auth.edge: true`, with no default, and refuses to render without it. box sets
   it; an operator without box sets it to say they put a login in front themselves, the
