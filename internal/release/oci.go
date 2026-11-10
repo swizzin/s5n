@@ -19,6 +19,7 @@ import (
 	orasauth "oras.land/oras-go/v2/registry/remote/auth"
 	"oras.land/oras-go/v2/registry/remote/errcode"
 
+	"github.com/swizzin/s5n/internal/fetch"
 	"github.com/swizzin/s5n/internal/say"
 )
 
@@ -49,6 +50,12 @@ type OCIChart struct {
 	BoxVersion string
 	// Say receives the one line about a release box skipped. Nil is silent.
 	Say say.Reporter
+	// Retry is the policy a failed registry request is retried under: the
+	// same rule bootstrap's downloads use (internal/fetch), so an upstream
+	// 5xx during apply's chart pull is retried instead of aborting the
+	// operator's apply. The zero value is box's policy: GET/HEAD only, 5xx
+	// and 429 and a refused, reset or timed-out connection, four attempts.
+	Retry fetch.Policy
 
 	devOnce sync.Once
 }
@@ -64,10 +71,14 @@ func (o *OCIChart) logf(format string, args ...any) {
 // ref.Version is empty. The min-box refusal happens here, before Applier has a
 // cluster client, so a chart box is too old for cannot have written anything.
 //
-// The context is part of ChartSource for the caller's sake; Helm's registry
-// client takes none, so what bounds a pull is the HTTP client's timeout and the
-// response cap, not cancellation.
-func (o *OCIChart) Load(_ context.Context, ref ChartRef) (Chart, error) {
+// The context is the pull's: Helm's registry client builds its requests with
+// context.Background() and takes none, so the transport installs it on every
+// attempt (see transport). A cancelled apply therefore stops a pull in flight,
+// and stops the wait between a retried attempt.
+func (o *OCIChart) Load(ctx context.Context, ref ChartRef) (Chart, error) {
+	if err := ctx.Err(); err != nil {
+		return Chart{}, err
+	}
 	repo, base, err := chartRepo(ref.Repo)
 	if err != nil {
 		return Chart{}, err
@@ -84,7 +95,7 @@ func (o *OCIChart) Load(_ context.Context, ref ChartRef) (Chart, error) {
 		return Chart{}, fmt.Errorf("chart registry for %s: %w", repo, err)
 	}
 	defer env.Close()
-	client, err := o.client(env, plain)
+	client, err := o.client(ctx, env, plain)
 	if err != nil {
 		return Chart{}, fmt.Errorf("chart registry for %s: %w", repo, err)
 	}
@@ -154,9 +165,9 @@ func (o *OCIChart) Load(_ context.Context, ref ChartRef) (Chart, error) {
 // the authorizer carries no credential, so no credentials store -- Helm's
 // registry/config.json or docker's config.json -- is ever queried: every pull
 // is anonymous.
-func (o *OCIChart) client(env *helmEnv, plainHTTP bool) (*helmregistry.Client, error) {
+func (o *OCIChart) client(ctx context.Context, env *helmEnv, plainHTTP bool) (*helmregistry.Client, error) {
 	httpClient := &http.Client{
-		Transport: cappedTransport{max: MaxChartArchive},
+		Transport: o.transport(ctx, nil),
 		Timeout:   2 * time.Minute,
 	}
 	opts := []helmregistry.ClientOption{
@@ -169,6 +180,55 @@ func (o *OCIChart) client(env *helmEnv, plainHTTP bool) (*helmregistry.Client, e
 		opts = append(opts, helmregistry.ClientOptPlainHTTP())
 	}
 	return helmregistry.NewClient(opts...)
+}
+
+// transport is what every request of one pull goes through, outermost first:
+//
+//	capped  refuses a response over MaxChartArchive
+//	pull    gives the attempt the pull's context
+//	retry   fetch.Transport's policy, the one bootstrap's downloads use
+//	net     base, or http.DefaultTransport
+//
+// The cap is outside the retry on purpose: the body that survives the retries
+// is the one capped, and a 5xx body is never read. base is the network; nil
+// means http.DefaultTransport, and a test replaces it.
+func (o *OCIChart) transport(ctx context.Context, base http.RoundTripper) http.RoundTripper {
+	if base == nil {
+		base = http.DefaultTransport
+	}
+	return cappedTransport{max: MaxChartArchive, base: pullContext{ctx: ctx, base: fetch.Transport{
+		Policy: o.Retry,
+		Base:   base,
+	}}}
+}
+
+// pullContext installs the pull's context on a request Helm's registry client
+// built with context.Background() (v4.3.1, registry/generic.go: every request
+// of a pull). Without it neither a cancelled apply nor the retry policy's wait
+// could see the context, because the policy reads the request's own.
+//
+// The request's context stays the parent: http.Client.Timeout puts its
+// deadline there, and replacing it would turn a stalled registry into an
+// unbounded wait. The two are joined instead, so a cancelled apply and a
+// timed-out request both stop it.
+type pullContext struct {
+	ctx  context.Context
+	base http.RoundTripper
+}
+
+func (t pullContext) RoundTrip(req *http.Request) (*http.Response, error) {
+	if t.ctx.Done() == nil {
+		// Nothing can cancel this pull (context.Background): the request's
+		// own context already carries the client's deadline, and there is
+		// no registration worth making.
+		return t.base.RoundTrip(req)
+	}
+	ctx, cancel := context.WithCancel(req.Context())
+	// The pull ending cancels this request. Nothing stops the registration
+	// here: when the client is done with the response it stops its timer and
+	// cancels the request's context, which releases this child with it.
+	_ = context.AfterFunc(t.ctx, cancel)
+	return t.base.RoundTrip(req.WithContext(ctx))
 }
 
 // pull downloads one version and reads it the way Helm will install it.
@@ -304,12 +364,21 @@ func notPublished(err error) bool {
 // cappedTransport refuses a response larger than max. It is what keeps a
 // hostile registry from making box allocate an unbounded download before any
 // size check could see it: the check has to be on the way in, not after.
+//
+// It is the outer layer of transport: base is the retrying fetch under it, so
+// what the cap sees is the response that survived the retries, and a retried
+// body is still capped.
 type cappedTransport struct {
-	max int64
+	max  int64
+	base http.RoundTripper
 }
 
 func (t cappedTransport) RoundTrip(req *http.Request) (*http.Response, error) {
-	resp, err := http.DefaultTransport.RoundTrip(req)
+	base := t.base
+	if base == nil {
+		base = http.DefaultTransport
+	}
+	resp, err := base.RoundTrip(req)
 	if err != nil {
 		return nil, err
 	}

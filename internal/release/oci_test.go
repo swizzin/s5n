@@ -7,6 +7,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"io/fs"
@@ -16,6 +17,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -29,14 +31,15 @@ import (
 	"helm.sh/helm/v4/pkg/chart/v2/loader"
 	helmregistry "helm.sh/helm/v4/pkg/registry"
 
+	"github.com/swizzin/s5n/internal/fetch"
 	"github.com/swizzin/s5n/internal/say"
 )
 
-// registry is an in-process OCI registry: distribution's app over an httptest
-// server, backed by its in-memory driver. It is the same server Helm's own
-// registry tests run against, so the round trip below exercises the real push
-// and pull paths, not a fake of them.
-func registry(t *testing.T) string {
+// registryHandler is the in-process OCI registry's handler: distribution's app
+// over its in-memory driver. It is the same server Helm's own registry tests
+// run against, so the round trip below exercises the real push and pull paths,
+// not a fake of them.
+func registryHandler(t *testing.T) http.Handler {
 	t.Helper()
 	cfg := &configuration.Configuration{
 		Version: "0.1",
@@ -49,8 +52,13 @@ func registry(t *testing.T) string {
 		},
 		Log: configuration.Log{Level: "error", Formatter: "text"},
 	}
-	app := handlers.NewApp(context.Background(), cfg)
-	srv := httptest.NewServer(app)
+	return handlers.NewApp(context.Background(), cfg)
+}
+
+// registry is that handler on a server of its own.
+func registry(t *testing.T) string {
+	t.Helper()
+	srv := httptest.NewServer(registryHandler(t))
 	t.Cleanup(srv.Close)
 	return strings.TrimPrefix(srv.URL, "http://")
 }
@@ -387,14 +395,17 @@ func TestChartRepoRefusesAURL(t *testing.T) {
 }
 
 // TestUnreadableRegistryIsNotAStackOfHelm: a registry that answers 500 is not
-// "no published release"; box says what it tried and keeps the cause.
+// "no published release"; box says what it tried and keeps the cause. Two
+// attempts with no wait: the point is the sentence, and the backoff is the
+// other tests'.
 func TestUnreadableRegistryIsNotAStackOfHelm(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		http.Error(w, "no", http.StatusInternalServerError)
 	}))
 	t.Cleanup(srv.Close)
 	repo := "oci://" + strings.TrimPrefix(srv.URL, "http://") + "/charts/s5n"
-	_, err := (&OCIChart{BoxVersion: "0.1.0"}).Load(context.Background(), ChartRef{Repo: repo, Version: "1.2.3"})
+	src := &OCIChart{BoxVersion: "0.1.0", Retry: instantRetry(2)}
+	_, err := src.Load(context.Background(), ChartRef{Repo: repo, Version: "1.2.3"})
 	if err == nil {
 		t.Fatal("pull from a broken registry succeeded")
 	}
@@ -562,4 +573,216 @@ func tempEntries(t *testing.T, dir string) []string {
 		names = append(names, e.Name())
 	}
 	return names
+}
+
+// instantRetry is box's retry policy with the waits taken out, so a test that
+// retries does not spend the backoff. The attempt count stays the caller's.
+func instantRetry(attempts int) fetch.Policy {
+	return fetch.Policy{
+		Attempts: attempts,
+		Sleep:    func(context.Context, time.Duration) error { return nil },
+	}
+}
+
+// stubTransport is the network under OCIChart.transport: reply answers the
+// nth attempt, and tries counts them. It lets a test pin the retry rule and
+// the response cap without a registry.
+type stubTransport struct {
+	tries int
+	reply func(try int, req *http.Request) (*http.Response, error)
+}
+
+func (s *stubTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	s.tries++
+	return s.reply(s.tries, req)
+}
+
+// stubResponse is one scripted answer. A negative length leaves the size
+// unknown, the way a chunked response arrives.
+func stubResponse(req *http.Request, status int, body string, length int64) *http.Response {
+	return &http.Response{
+		Status:        fmt.Sprintf("%d %s", status, http.StatusText(status)),
+		StatusCode:    status,
+		Proto:         "HTTP/1.1",
+		ProtoMajor:    1,
+		ProtoMinor:    1,
+		Header:        make(http.Header),
+		Body:          io.NopCloser(strings.NewReader(body)),
+		ContentLength: length,
+		Request:       req,
+	}
+}
+
+// chartRequest is one manifest GET, the request a pull makes.
+func chartRequest(t *testing.T) *http.Request {
+	t.Helper()
+	req, err := http.NewRequest(http.MethodGet, "https://registry.example.com/v2/charts/s5n/manifests/1.0.0", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return req
+}
+
+// TestOCIPullRetriesATransientRegistryFailure: a registry that answers 503
+// once, in the middle of a pull, does not abort apply's chart pull. It is the
+// same rule bootstrap's downloads follow, and it is the failure that made a
+// first install fail right after a bootstrap that survived it.
+func TestOCIPullRetriesATransientRegistryFailure(t *testing.T) {
+	host, failures, served := unhealthyRegistry(t)
+	want := pushChart(t, host, "charts")
+	failures.Store(1)
+
+	pulled, err := (&OCIChart{BoxVersion: "0.0.0", Retry: instantRetry(4)}).Load(context.Background(), ChartRef{
+		Repo:    "oci://" + host + "/charts/s5n",
+		Version: chartVersion(t, want),
+	})
+	if err != nil {
+		t.Fatalf("a 503 from the registry aborted the pull: %v", err)
+	}
+	if n := served.Load(); n != 1 {
+		t.Fatalf("the registry turned away %d requests, want the 1 this pull retried", n)
+	}
+	if !bytes.Equal(pulled.Archive, want) {
+		t.Fatalf("pulled %d bytes after the retry, want the %d that were pushed", len(pulled.Archive), len(want))
+	}
+}
+
+// TestChartTransportRetriesAServerError: a 503 once then a 200 is one retried
+// attempt, not a failed pull, and the body that arrives is the second one.
+func TestChartTransportRetriesAServerError(t *testing.T) {
+	stub := &stubTransport{reply: func(try int, req *http.Request) (*http.Response, error) {
+		if try == 1 {
+			return stubResponse(req, http.StatusServiceUnavailable, "upstream is unwell", -1), nil
+		}
+		return stubResponse(req, http.StatusOK, "chart", 5), nil
+	}}
+	tr := (&OCIChart{Retry: instantRetry(4)}).transport(context.Background(), stub)
+	resp, err := tr.RoundTrip(chartRequest(t))
+	if err != nil {
+		t.Fatalf("a 503 once aborted the request: %v", err)
+	}
+	defer resp.Body.Close()
+	if stub.tries != 2 {
+		t.Fatalf("the stub saw %d attempts, want 2", stub.tries)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+	body, err := io.ReadAll(resp.Body)
+	if err != nil || string(body) != "chart" {
+		t.Fatalf("body = %q (err %v), want the retried attempt's \"chart\"", body, err)
+	}
+}
+
+// TestChartTransportDoesNotRetryANotFound: a 404 is the registry's answer. A
+// second attempt would get the same one, so the retry must not make it.
+func TestChartTransportDoesNotRetryANotFound(t *testing.T) {
+	stub := &stubTransport{reply: func(_ int, req *http.Request) (*http.Response, error) {
+		return stubResponse(req, http.StatusNotFound, `{"errors":[]}`, -1), nil
+	}}
+	tr := (&OCIChart{Retry: instantRetry(4)}).transport(context.Background(), stub)
+	resp, err := tr.RoundTrip(chartRequest(t))
+	if err != nil {
+		t.Fatalf("a 404 came back as an error: %v", err)
+	}
+	defer resp.Body.Close()
+	if stub.tries != 1 {
+		t.Fatalf("the stub saw %d attempts for a 404, want exactly 1", stub.tries)
+	}
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404", resp.StatusCode)
+	}
+}
+
+// TestChartTransportCapsTheBodyAfterARetry: the size cap is outside the retry,
+// so the body a retry landed on is capped exactly like a first attempt's --
+// both when the registry declares the length and when it streams it.
+func TestChartTransportCapsTheBodyAfterARetry(t *testing.T) {
+	const over = int64(MaxChartArchive) + 1
+	for name, reply := range map[string]func(req *http.Request) *http.Response{
+		"declared length": func(req *http.Request) *http.Response {
+			return stubResponse(req, http.StatusOK, "unread", over)
+		},
+		"streamed length": func(req *http.Request) *http.Response {
+			return stubResponse(req, http.StatusOK, strings.Repeat("x", int(over)), -1)
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			stub := &stubTransport{reply: func(try int, req *http.Request) (*http.Response, error) {
+				if try == 1 {
+					return stubResponse(req, http.StatusServiceUnavailable, "upstream is unwell", -1), nil
+				}
+				return reply(req), nil
+			}}
+			tr := (&OCIChart{Retry: instantRetry(4)}).transport(context.Background(), stub)
+			resp, err := tr.RoundTrip(chartRequest(t))
+			if err == nil {
+				_, err = io.ReadAll(resp.Body)
+				resp.Body.Close()
+			}
+			if err == nil {
+				t.Fatalf("a %d-byte response was accepted after a retry", over)
+			}
+			if !strings.Contains(err.Error(), "box reads at most") && !strings.Contains(err.Error(), "larger than box reads") {
+				t.Fatalf("error = %v, want the size cap's sentence", err)
+			}
+			if stub.tries != 2 {
+				t.Fatalf("the stub saw %d attempts, want the retry then the over-size answer", stub.tries)
+			}
+		})
+	}
+}
+
+// TestChartTransportStopsWhenThePullIsCancelled: a cancelled apply does not sit
+// out the backoff. Helm's registry client gives its requests no context, so the
+// transport installs the pull's; this is the proof it reaches the wait.
+func TestChartTransportStopsWhenThePullIsCancelled(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	// The pull is cancelled as the first attempt fails, which is when the
+	// policy would otherwise start waiting.
+	stub := &stubTransport{reply: func(_ int, req *http.Request) (*http.Response, error) {
+		cancel()
+		return stubResponse(req, http.StatusServiceUnavailable, "upstream is unwell", -1), nil
+	}}
+	// A wait long enough that a policy which ignored the context would hold
+	// the request for it.
+	tr := (&OCIChart{Retry: fetch.Policy{Attempts: 4, Delay: 30 * time.Second, MaxDelay: 30 * time.Second}}).
+		transport(ctx, stub)
+
+	start := time.Now()
+	resp, err := tr.RoundTrip(chartRequest(t))
+	if took := time.Since(start); took > 5*time.Second {
+		t.Fatalf("a cancelled pull waited %s in the backoff", took)
+	}
+	if resp != nil {
+		resp.Body.Close()
+		t.Fatalf("a cancelled pull returned a response")
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("error = %v, want context.Canceled", err)
+	}
+	if stub.tries != 1 {
+		t.Fatalf("the stub saw %d attempts after cancellation, want 1", stub.tries)
+	}
+}
+
+// unhealthyRegistry is the in-process registry behind a front that answers 503
+// while `failures` is positive and counts what it turned away. A test pushes
+// its chart, sets failures, then pulls: one 503 during a pull is an upstream
+// having a bad moment, which is the case box's retry exists for.
+func unhealthyRegistry(t *testing.T) (host string, failures, served *atomic.Int32) {
+	t.Helper()
+	failures, served = new(atomic.Int32), new(atomic.Int32)
+	app := registryHandler(t)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if failures.Add(-1) >= 0 {
+			served.Add(1)
+			http.Error(w, "upstream is unwell", http.StatusServiceUnavailable)
+			return
+		}
+		app.ServeHTTP(w, r)
+	}))
+	t.Cleanup(srv.Close)
+	return strings.TrimPrefix(srv.URL, "http://"), failures, served
 }
