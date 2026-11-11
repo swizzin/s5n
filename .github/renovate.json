@@ -1,14 +1,25 @@
 {
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "description": "main is what has been released and develop is where work lands (docs/box.md, \"Where a release lives\"). Renovate feeds the release train: the chart's app images on main only, whose patch and digest bumps merge themselves once CI is green, and the platform pins on both branches, one pull request per pin, never automerged. Nothing merges itself on develop, from any file.",
   "extends": ["config:recommended"],
+  "baseBranchPatterns": ["main", "develop"],
   "automerge": false,
   "customManagers": [
     {
       "customType": "regex",
-      "description": "Every version box installs: install/platform/versions.yaml. One key per component, and the comment on the line names the datasource and package the version comes from, so a bump is one line in one file and CI's e2e tests exactly what box ships. The shape is flat and the marker inline because both readers are then trivial: this regex here, and `sed` in the e2e (no YAML parser on the host). A value may be a whole image reference (`repository:tag@sha256:...`, which is the login's pin), so the digest is captured as currentDigest and the reference without it as currentValue: Renovate then reads both from the one line and bumps them together.",
-      "fileMatch": ["^install/platform/versions\\.yaml$"],
+      "description": "Every version box installs: charts/s5n/platform.yaml. The pins ship in the chart, so a platform bump is a chart release, and box reads them from the release it pulled. One key per component, and the comment on the line names the datasource and package the version comes from, so a bump is one line in one file and CI's e2e tests exactly what ships. The shape is flat and the marker inline because both readers are then trivial: this regex here, and `sed` in the e2e (no YAML parser on the host). A value may be a whole image reference (`repository:tag@sha256:...`, which is the login's pin), so the digest is captured as currentDigest and the reference without it as currentValue: Renovate then reads both from the one line and bumps them together.",
+      "fileMatch": ["^charts/s5n/platform\\.yaml$"],
       "matchStrings": [
         "\\n[ \\t]*(?<depKey>[A-Za-z][A-Za-z0-9]*):[ \\t]*\"?(?<currentValue>[^\\s\"#@]+)(?:@(?<currentDigest>sha256:[a-f0-9]{64}))?\"?[ \\t]+# renovate: datasource=(?<datasource>[a-z0-9-]+) depName=(?<depName>[^\\s]+)(?:[ \\t]+registryUrl=(?<registryUrl>[^\\s]+))?"
+      ]
+    },
+    {
+      "customType": "regex",
+      "datasourceTemplate": "docker",
+      "description": "Every app image the chart blesses: charts/s5n/variants.yaml. The chart owns the file, ships it inside the archive, and generates the admission policy's blessed-repository list from it, so a bump here is how a new app image reaches a seedbox. Renovate's helm-values manager reads only values.yaml, so nothing else watches this file: one app per block, repository/tag/digest on three lines, and the digest is captured too so a tag and its digest move together. The s5n entry does not match: its digest is empty (the chart stamps it at packaging), so it never looks like a sha256 to bump.",
+      "fileMatch": ["^charts/s5n/variants\\.yaml$"],
+      "matchStrings": [
+        "repository:[ \\t]*(?<depName>[^\\s#]+)[^\\n]*\\n[ \\t]*tag:[ \\t]*\"?(?<currentValue>[^\"\\n]*)\"?\\n[ \\t]*digest:[ \\t]*\"?(?<currentDigest>sha256:[a-f0-9]{64})\"?"
       ]
     },
     {
@@ -23,8 +34,46 @@
   ],
   "packageRules": [
     {
-      "description": "A platform pin or an e2e image changes what box installs: it is never automerged, whatever a preset later says.",
-      "matchFileNames": ["install/platform/versions.yaml", "hack/**"],
+      "description": "The app images are main only: develop gets them through the back-merge after each release, never as a pull request of its own, so a develop branch is never ahead of the images users run. A custom manager cannot be scoped to a base branch, so the rule disables this file on develop rather than the manager: the nearest Renovate allows, and it leaves the platform pins (which both branches want) alone.",
+      "matchFileNames": ["charts/s5n/variants.yaml"],
+      "matchBaseBranches": ["develop"],
+      "enabled": false
+    },
+    {
+      "description": "The chart's app images are exactly what the kind e2e installs, so on main every patch or digest bump that lands in one window goes into one pull request and merges itself as soon as the checks are green: CI runs the full e2e on them, and the push that carries it cuts the chart release. Grouping is the batching -- there is no schedule to tune.",
+      "matchFileNames": ["charts/s5n/variants.yaml"],
+      "matchBaseBranches": ["main"],
+      "matchUpdateTypes": ["patch", "digest"],
+      "groupName": "app images",
+      "automerge": true
+    },
+    {
+      "description": "A minor or major app image bump changes an app's behaviour, and the e2e proves the images, not the release notes: it gets its own pull request (no groupName, so it never joins the app images one) and waits for the maintainer, who cuts the release that ships it.",
+      "matchFileNames": ["charts/s5n/variants.yaml"],
+      "matchBaseBranches": ["main"],
+      "matchUpdateTypes": ["minor", "major"],
+      "automerge": false
+    },
+    {
+      "description": "The platform pins are bumped on both branches, so work on develop is built and tested against the platform it will ship on. One pull request per pin: no groupName here on purpose, because a bad cert-manager and a bad k0s are different questions and the maintainer reads them one at a time. Patch bumps on main are what the next rule would merge, and it is off.",
+      "matchFileNames": ["charts/s5n/platform.yaml"],
+      "automerge": false
+    },
+    {
+      "description": "DISABLED until CI covers the platform pins. CI runs hack/e2e-kind.sh, which installs Envoy Gateway and MetalLB from these pins and nothing else: k0s (kind stands in for the cluster), cert-manager and the login (authelia) are never installed, so a green run says nothing about them. The rule is written now so it turns on in one line: patch-only, on main, when hack/e2e-box.sh -- which installs the whole platform through box -- runs in CI. The authelia line's digest moves with its tag, so a patch covers it; a minor or major bump (a k0s minor is a Kubernetes minor, MetalLB is still 0.x) always waits for the maintainer.",
+      "matchFileNames": ["charts/s5n/platform.yaml"],
+      "matchBaseBranches": ["main"],
+      "matchUpdateTypes": ["patch"],
+      "automerge": false
+    },
+    {
+      "description": "A test-only image in hack/ changes what the e2e runs, never what box ships: it is never automerged, whatever a preset later says.",
+      "matchFileNames": ["hack/**"],
+      "automerge": false
+    },
+    {
+      "description": "Nothing ever merges itself on develop, from any file, whatever a rule above says: develop is where a change is read before it is released. This rule is last so it wins.",
+      "matchBaseBranches": ["develop"],
       "automerge": false
     }
   ]
