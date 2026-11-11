@@ -166,6 +166,9 @@ func newDecision(src *fakeSource, prober *fakeProber, host *fakeHost, recs *fake
 		Records: recs,
 		Install: inst,
 		Pins:    releasePins(pins),
+		// A clean host's uplink, fixed: the tests must not read the machine
+		// they run on. A test that cares about the host's routes replaces it.
+		Net: testNet{uplink: Uplink{Interface: "eth0", Address: testNodeIP, MTU: 1500}},
 	}
 	if prober != nil {
 		d.NewProber = newFakeProber(prober)

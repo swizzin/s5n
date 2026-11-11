@@ -46,7 +46,8 @@ func TestReportResultMatchesFormatResult(t *testing.T) {
 				ControllerName: "gateway.envoyproxy.io/gatewayclass-controller",
 				BoxInstalls:    true,
 			},
-			Reason: "using the kubeconfig at /home/example/.kube/config",
+			Warnings: []string{"the node registered 100.64.0.7, the address on tailscale0, a tunnel: every pod inherits tailscale0's MTU 1280. Pin the kubelet node IP to the uplink (--node-ip) and restart kubelet."},
+			Reason:   "using the kubeconfig at /home/example/.kube/config",
 		}},
 		{"recorded-class", Result{
 			Action:       ActionUseManaged,

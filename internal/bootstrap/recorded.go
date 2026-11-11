@@ -33,6 +33,7 @@ func (d *Decision) finishRecorded(ctx context.Context, obs clusterProbes, rec *R
 		Distribution: obs.dist,
 		Nodes:        obs.cluster.Nodes,
 		Platform:     components,
+		Warnings:     nodeIPWarnings(obs.cluster, d.net()),
 	}
 	if conflict != "" {
 		res.Action = ActionStop

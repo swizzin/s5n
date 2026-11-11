@@ -277,20 +277,33 @@ func (p *HTTPProber) ssar(ctx context.Context, a kube.Access) (bool, error) {
 	return out.Status.Allowed, nil
 }
 
-// Describe reads the node count, the first node's labels, and whether a
-// kubeadm-config ConfigMap exists.
+// Describe reads the node count, the nodes' InternalIPs, the first node's
+// labels, and whether a kubeadm-config ConfigMap exists.
 func (p *HTTPProber) Describe(ctx context.Context) (Cluster, error) {
 	var nodes struct {
 		Items []struct {
 			Metadata struct {
 				Labels map[string]string `json:"labels"`
 			} `json:"metadata"`
+			Status struct {
+				Addresses []struct {
+					Type    string `json:"type"`
+					Address string `json:"address"`
+				} `json:"addresses"`
+			} `json:"status"`
 		} `json:"items"`
 	}
 	if err := p.get(ctx, "/api/v1/nodes", &nodes); err != nil {
 		return Cluster{}, fmt.Errorf("list nodes: %w", err)
 	}
 	cl := Cluster{Nodes: len(nodes.Items)}
+	for _, item := range nodes.Items {
+		for _, addr := range item.Status.Addresses {
+			if addr.Type == "InternalIP" {
+				cl.NodeIPs = append(cl.NodeIPs, addr.Address)
+			}
+		}
+	}
 	if len(nodes.Items) > 0 {
 		cl.NodeLabels = nodes.Items[0].Metadata.Labels
 	}
@@ -498,7 +511,7 @@ func (p *HTTPProber) webhookAvailable(ctx context.Context, namespace, controller
 	}
 	for _, c := range chosen.Status.Conditions {
 		if c.Type == "Available" {
-			return c.Status == "True", nil
+			return c.Status == conditionTrue, nil
 		}
 	}
 	return chosen.Status.AvailableReplicas > 0, nil
@@ -675,7 +688,7 @@ func (p *HTTPProber) gatewayClasses(ctx context.Context) ([]GatewayClass, error)
 			if c.Type != "Accepted" {
 				continue
 			}
-			class.Accepted = c.Status == "True"
+			class.Accepted = c.Status == conditionTrue
 			if !class.Accepted {
 				class.AcceptedReason = c.Message
 				if class.AcceptedReason == "" {
