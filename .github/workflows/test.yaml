@@ -134,8 +134,9 @@ jobs:
   # installs the whole platform, then Pebble proves HTTP-01 through the
   # Gateway), preinstalled (an address layer box must not touch) and
   # foreign-gateway (a Gateway implementation box refuses, writing nothing).
-  # It is the only test that installs k0s, cert-manager and Authelia, and the
-  # platform pins' automerge waits on it.
+  # It is the only test that installs cert-manager and Authelia, and the
+  # platform pins' patch automerge rests on it. It never installs k0s: kind
+  # stands in for the cluster, so k0s bumps are not automerged.
   #
   # Beside e2e-kind, not after it: each job gets its own runner, so they share
   # no docker image tag, cluster name or kubeconfig. (On one machine they

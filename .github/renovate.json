@@ -1,6 +1,6 @@
 {
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
-  "description": "main is what has been released and develop is where work lands (docs/box.md, \"Where a release lives\"). Renovate feeds the release train: the chart's app images on main only, whose patch and digest bumps merge themselves once CI is green, and the platform pins on both branches, one pull request per pin, never automerged. Nothing merges itself on develop, from any file. The sums bot is listed in gitIgnoredAuthors: it commits k0s's asset checksums onto Renovate's own k0s branch, and without that listing Renovate reads the commit as another author's edit -- it stops committing to the branch, and the pull request is left alone.",
+  "description": "main is what has been released and develop is where work lands (docs/box.md, \"Where a release lives\"). Renovate feeds the release train: the chart's app images on main only, whose patch and digest bumps merge themselves once CI is green, and the platform pins on both branches, one pull request per pin, whose patch bumps on main merge themselves once CI is green (k0s excepted: no CI job installs it). Nothing merges itself on develop, from any file. The sums bot is listed in gitIgnoredAuthors: it commits k0s's asset checksums onto Renovate's own k0s branch, and without that listing Renovate reads the commit as another author's edit -- it stops committing to the branch, and the pull request is left alone.",
   "extends": ["config:recommended"],
   "baseBranchPatterns": ["main", "develop"],
   "gitIgnoredAuthors": ["SUMS_BOT_EMAIL_PLACEHOLDER"],
@@ -56,20 +56,20 @@
       "automerge": false
     },
     {
-      "description": "The platform pins are bumped on both branches, so work on develop is built and tested against the platform it will ship on. One pull request per pin: no groupName here on purpose, because a bad cert-manager and a bad k0s are different questions and the maintainer reads them one at a time. Patch bumps on main are what the next rule would merge, and it is off.",
+      "description": "The platform pins are bumped on both branches, so work on develop is built and tested against the platform it will ship on. One pull request per pin: no groupName here on purpose, because a bad cert-manager and a bad k0s are different questions and the maintainer reads them one at a time. Patch bumps on main merge themselves through the next rule.",
       "matchFileNames": ["charts/s5n/platform.yaml"],
       "automerge": false
     },
     {
-      "description": "A k0s bump never merges itself, whatever platform automerge is set to: Renovate bumps the version and cannot write the asset checksums pinned beside it (they are not versions and carry no marker), so `.github/workflows/k0s-sums.yaml` writes them on Renovate's branch with the sums bot's token -- a token push starts CI, which a GITHUB_TOKEN one would not -- and the bump still waits for the maintainer, because a k0s minor is a Kubernetes minor and someone has to read what the release publishes. This rule is explicit so that turning on patch automerge for the other pins -- the rule below, when box's own e2e covers them -- cannot carry k0s with it.",
-      "matchDepNames": ["k0sproject/k0s"],
-      "automerge": false
-    },
-    {
-      "description": "DISABLED until CI covers the platform pins. CI runs hack/e2e-kind.sh, which installs Envoy Gateway and MetalLB from these pins and nothing else: k0s (kind stands in for the cluster), cert-manager and the login (authelia) are never installed, so a green run says nothing about them. The rule is written now so it turns on in one line: patch-only, on main, when hack/e2e-box.sh -- which installs the whole platform through box -- runs in CI. The authelia line's digest moves with its tag, so a patch covers it; a minor or major bump (a k0s minor is a Kubernetes minor, MetalLB is still 0.x) always waits for the maintainer.",
+      "description": "Platform pin patch bumps on main merge themselves once CI is green: hack/e2e-box.sh runs in CI and installs the platform through box (Envoy Gateway, MetalLB, cert-manager and the login; not k0s, since kind stands in for the cluster), so a green run tests exactly the pins that ship, and the push that carries the merge cuts the chart patch release. The authelia line's digest moves with its tag, so a patch covers it. A minor or major bump (MetalLB is still 0.x) always waits for the maintainer. k0s is excluded by the next rule, which must stay after this one: in Renovate the later matching rule wins.",
       "matchFileNames": ["charts/s5n/platform.yaml"],
       "matchBaseBranches": ["main"],
       "matchUpdateTypes": ["patch"],
+      "automerge": true
+    },
+    {
+      "description": "A k0s bump never merges itself, and this rule sits after the platform patch rule so it wins over it. No CI job installs k0s: hack/e2e-box.sh runs on kind, which stands in for the cluster, so a green run says nothing about a new k0s. .github/workflows/k0s-sums.yaml writes the asset checksums Renovate cannot (as the sums bot, whose App token push starts CI where a GITHUB_TOKEN one would not), so the pull request can go green; a maintainer still merges it. Patch bumps join the platform automerge when an e2e that boots k0s runs in CI; a k0s minor is a Kubernetes minor and always waits.",
+      "matchDepNames": ["k0sproject/k0s"],
       "automerge": false
     },
     {

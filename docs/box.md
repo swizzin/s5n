@@ -279,7 +279,8 @@ lines as the sums bot — a GitHub App whose token, not `GITHUB_TOKEN`, pushes t
 a `GITHUB_TOKEN` push starts no workflow and Renovate, which has no post-upgrade hook,
 would wait on a head CI never saw. The bot's email is in `gitIgnoredAuthors`, so Renovate
 still commits to its own branch. CI checks the sums against the published assets, and a
-k0s bump still never merges itself: the maintainer reads what the release publishes.
+k0s bump still never merges itself: no CI job boots k0s (the box e2e runs on kind), so
+a green run has not tested the new release, and the maintainer merges it.
 The download goes to a temporary file beside `/usr/local/bin/k0s` and is hashed while it
 is written; only a match is renamed into place, so an interrupted or tampered download
 never lands where the unit would exec it. Then `k0s install controller --single`, `k0s
@@ -713,7 +714,7 @@ images. Their pins ship in the chart:
 1. Renovate opens a pull request when an upstream release lands for a pinned component,
    on `main` and on `develop`.
 2. CI runs the full e2e on it. On `main`, a patch bump merges itself as soon as it is
-   green, and the push cuts a chart patch release like any image bump. Minor and major
+   green (k0s excepted until an e2e that boots k0s runs in CI), and the push cuts a chart patch release like any image bump. Minor and major
    bumps (a k0s minor is a Kubernetes minor; MetalLB is still 0.x) wait for the
    maintainer.
 3. Root's `update` takes the pins from the release it is moving to and upgrades the

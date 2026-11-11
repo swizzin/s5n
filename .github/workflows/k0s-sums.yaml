@@ -46,11 +46,9 @@ jobs:
       - id: app
         uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
         with:
-          # The App's numeric ID. The action also takes a Client ID and
-          # deprecates this input, but the secret is the App ID, so moving to
-          # `client-id` means a new secret holding a different value, and is a
-          # change of its own rather than a rename in this file.
-          app-id: ${{ secrets.SUMS_APP_ID }}
+          # The App's Client ID (`Iv…` on its settings page); the action
+          # deprecates the numeric `app-id` in its favour.
+          client-id: ${{ secrets.SUMS_CLIENT_ID }}
           private-key: ${{ secrets.SUMS_APP_PRIVATE_KEY }}
       # The head branch, with the App's token persisted in the checkout: that
       # token is what makes the commit below start the pull request's workflows
