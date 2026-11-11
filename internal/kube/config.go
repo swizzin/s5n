@@ -96,9 +96,10 @@ func Flags(path, namespace string) *genericclioptions.ConfigFlags {
 
 // quiet installs box's warning policy on one config and returns it.
 //
-// client-go prints deprecation notices through klog, which puts a line like
-// "Endpoints is deprecated" in the middle of box's own output; box is the whole
-// interface (docs/box.md), so that noise is dropped rather than explained away.
+// client-go prints the API server's deprecation and admission warnings through
+// klog, which puts a raw `warnings.go` line in the middle of box's own output;
+// box is the whole interface (docs/box.md), so that noise is dropped rather
+// than explained away.
 // Helm's own warnings go through slog and are silenced by each caller's logger.
 //
 // It is set on the config, never through rest.SetDefaultWarningHandler: a

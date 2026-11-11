@@ -64,13 +64,24 @@ that matters is the API server's endpoint, not the `kubernetes` Service IP — a
 port is the endpoint's (6443 on k0s, k3s and kind; 443 where the API is fronted by a
 load balancer). Both are looked up at install time, with values.apiServerCIDRs as the
 fallback for offline rendering.
+
+The endpoint addresses come from the `kubernetes` Service's EndpointSlices, not its
+v1 Endpoints: Endpoints is deprecated in favour of discovery.k8s.io/v1, and reading
+the old kind makes client-go warn on every install. A slice belongs to a Service
+through its kubernetes.io/service-name label, and its addresses are IPv4 (/32) or
+IPv6 (/128), so the suffix follows the address's family.
 */ -}}
 {{- $api := list }}
 {{- with (lookup "v1" "Service" "default" "kubernetes") }}
 {{- range (.spec.clusterIPs | default list) }}{{ $api = append $api (printf "%s/32" .) }}{{ end }}
 {{- end }}
-{{- with (lookup "v1" "Endpoints" "default" "kubernetes") }}
-{{- range .subsets }}{{ range .addresses }}{{ $api = append $api (printf "%s/32" .ip) }}{{ end }}{{ end }}
+{{- with (lookup "discovery.k8s.io/v1" "EndpointSlice" "default" "") }}
+{{- range .items }}
+{{- $service := index (.metadata.labels | default dict) "kubernetes.io/service-name" | default "" }}
+{{- if eq $service "kubernetes" }}
+{{- range .endpoints }}{{ range .addresses }}{{ $api = append $api (printf "%s/%s" . (ternary "32" "128" (not (contains ":" .)))) }}{{ end }}{{ end }}
+{{- end }}
+{{- end }}
 {{- end }}
 {{- range .Values.networkPolicy.apiServerCIDRs }}{{ $api = append $api . }}{{ end }}
 {{- if $api }}
