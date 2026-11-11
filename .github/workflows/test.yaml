@@ -43,6 +43,14 @@ jobs:
           if [ -n "$unformatted" ]; then echo "gofmt needed:"; echo "$unformatted"; exit 1; fi
       - run: go vet ./...
       - run: go test -race ./...
+      # The k0s checksums charts/s5n/platform.yaml pins are checked against the
+      # release's own assets here, in the job everything else already waits for:
+      # a Renovate k0s pull request bumps a version it cannot write sums for, so
+      # it fails on this step until someone runs `go run ./hack/k0s-sums
+      # --write` on the branch, and no e2e is spent on a pin nobody verified.
+      # It downloads both assets (a few hundred MB), hence its own step.
+      - name: k0s checksums match the release's assets
+        run: go run ./hack/k0s-sums --check
 
   lint:
     runs-on: ubuntu-latest
