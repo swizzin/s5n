@@ -250,7 +250,7 @@ chmod 600 "$WORK/authelia-password"
 log "preparing host paths inside the node (what box init creates on real hosts)"
 docker exec "${CLUSTER}-control-plane" bash -c '
   mkdir -p /srv/s5n/data \
-           /srv/s5n/config/{qbittorrent,prowlarr,sonarr,sonarr-4k,radarr,radarr-4k,plex,tautulli,seerr,qui}
+           /srv/s5n/config/{qbittorrent,prowlarr,sonarr,sonarr-4k,radarr,radarr-4k,plex,tautulli,seerr,qui,maintainerr}
   chown -R 1000:1000 /srv/s5n'
 
 # The login's own directory, which box init creates on a real host: 0700, owned
@@ -314,7 +314,7 @@ bootstrap() { # bootstrap <output file>
     --grant "$WORK/grant.yaml" --values "$WORK/values.yaml" \
     --namespace "$NS" --domain "$DOMAIN" \
     --data-path /srv/s5n/data --config-path /srv/s5n/config \
-    --apps qbittorrent,sonarr,radarr,prowlarr,plex,tautulli,seerr,qui \
+    --apps qbittorrent,sonarr,radarr,prowlarr,plex,tautulli,seerr,qui,maintainerr \
     --puid 1000 --pgid 1000 \
     --login "$LOGIN" --password-file "$WORK/authelia-password" \
     --paths-in-node --record "$WORK/cluster.yaml" \
@@ -333,7 +333,7 @@ init() { # init <output file>
     --grant "$WORK/grant.yaml" --values "$WORK/values.yaml" \
     --namespace "$NS" --domain "$DOMAIN" \
     --data-path /srv/s5n/data --config-path /srv/s5n/config \
-    --apps qbittorrent,sonarr,radarr,prowlarr,plex,tautulli,seerr,qui \
+    --apps qbittorrent,sonarr,radarr,prowlarr,plex,tautulli,seerr,qui,maintainerr \
     --puid 1000 --pgid 1000 \
     --login "$LOGIN" --password-file "$WORK/authelia-password" \
     --paths-in-node \
@@ -837,7 +837,7 @@ print("  app routes: %d HTTPRoutes, none pins a sectionName" % len(items))
 
   # Every opt-in app is behind the same login, and none of them keeps one of its
   # own: an unauthenticated request must reach the edge before the app does.
-  for app in qui; do
+  for app in qui maintainerr; do
     app_headers="$WORK/unauth-${app}-headers.txt"
     app_code=$(curl -sS -o /dev/null -D "$app_headers" -w '%{http_code}' \
       --resolve "${DOMAIN}:443:${gw_addr}" --cacert "$WORK/pebble-root.pem" \

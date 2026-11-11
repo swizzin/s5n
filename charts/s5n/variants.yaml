@@ -64,6 +64,14 @@ qui:
     tag: "v1.35.0"
     digest: sha256:a5b2f5faf6388cce257137c88e4b189458fd799cf9119ed476c980e5a69341b2
 
+maintainerr:
+  default:
+    # Upstream digest pin, not ghcr.io/home-operations: no Maintainerr image
+    # there. Its Dockerfile ends USER node (uid 1000) and its tags carry no "v".
+    repository: ghcr.io/maintainerr/maintainerr
+    tag: "3.32.0"
+    digest: sha256:5dcd5bef9d49c614bb74453df3da198afc05a38d8e2cd96b3669bc2c76a94112
+
 # The s5n image itself: the wiring Job and the qBittorrent / Tautulli credential
 # init containers. An empty tag means the chart's appVersion, which is the tag
 # this repo publishes the image under.

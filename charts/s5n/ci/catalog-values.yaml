@@ -1,0 +1,19 @@
+# The catalog's opt-in apps, both enabled: their StatefulSets, Services and
+# routes are rendered and validated like every other app's. They default off, so
+# this file is the only render that carries them — including Maintainerr's
+# no-timeout rule for the live event stream, which kubeconform would otherwise
+# never see.
+auth:
+  edge: true
+
+storage:
+  data:
+    existingClaim: box-catalog-data
+  config:
+    existingClaim: box-catalog-config
+
+apps:
+  qui:
+    enabled: true
+  maintainerr:
+    enabled: true

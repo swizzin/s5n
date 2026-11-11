@@ -94,7 +94,7 @@ $KIND load docker-image --name "$CLUSTER" "$IMAGE"
 log "preparing host paths inside the node (what box init creates on real hosts)"
 docker exec "${CLUSTER}-control-plane" bash -c '
   mkdir -p /srv/s5n/data \
-           /srv/s5n/config/{qbittorrent,prowlarr,sonarr,sonarr-4k,radarr,radarr-4k,plex,tautulli,seerr,qui}
+           /srv/s5n/config/{qbittorrent,prowlarr,sonarr,sonarr-4k,radarr,radarr-4k,plex,tautulli,seerr,qui,maintainerr}
   chown -R 1000:1000 /srv/s5n'
 
 # Nothing below may prepare the data categories: the wiring Job owns them, and a
@@ -500,6 +500,8 @@ cat >"$WORK/apps-values.yaml" <<'EOF'
 apps:
   qui:
     enabled: true
+  maintainerr:
+    enabled: true
 EOF
 
 # The chart under test, with the locally built image instead of the published one.
@@ -653,7 +655,7 @@ echo "GET /seerr/api/v1/settings/public via gateway -> ${code}"; [ "$code" = 200
 # exactly as the Arrs run External. So the HTML must arrive without a redirect,
 # and the asset URLs it builds must resolve through the same prefix — that is
 # what makes the base-path setting right rather than merely present.
-for app in qui; do
+for app in qui maintainerr; do
   : >"$WORK/${app}-headers"
   code=$(curl -s -D "$WORK/${app}-headers" -o "$WORK/${app}.html" -w '%{http_code}' \
     "http://${GW_ADDR}/${app}/" || true)
@@ -674,14 +676,40 @@ for app in qui; do
     code=$(curl -s -o /dev/null -w '%{http_code}' "http://${GW_ADDR}${asset}" || true)
     echo "GET ${asset} via gateway -> ${code}"; [ "$code" = 200 ] || fail=1
   fi
+  case "$app" in
+    qui)
+      # qui's health endpoints are on its root router, outside its base path
+      # (only /api and the UI sit under baseUrl), so the Gateway — which routes
+      # /qui — must not be used for them: ask the pod, as its readinessProbe
+      # does. A prefixed /qui/healthz/readiness is the SPA's catch-all.
+      code=$($K -n "$NS" exec qui-0 -- curl -s -o /dev/null -w '%{http_code}' \
+        http://127.0.0.1:7476/healthz/readiness || true)
+      echo "GET /${app} in-pod /healthz/readiness -> ${code}"; [ "$code" = 200 ] || fail=1 ;;
+    maintainerr)
+      # BASE_PATH covers every route, health included, so this one is reachable
+      # through the Gateway like any other path.
+      code=$(curl -s -o /dev/null -w '%{http_code}' "http://${GW_ADDR}/${app}/api/health/ready" || true)
+      echo "GET /${app}/api/health/ready via gateway -> ${code}"; [ "$code" = 200 ] || fail=1
+      # Its whole state is one directory, and DATA_DIR=/config is what puts it
+      # on the chart's config subPath instead of the read-only root: the
+      # database has to be in the mounted directory, not in the image.
+      state=$($K -n "$NS" exec maintainerr-0 -- ls -1 /config || true)
+      echo "  /config holds: $(echo "$state" | tr '\n' ' ')"
+      grep -qx "maintainerr.sqlite" <<<"$state" ||
+        { echo "maintainerr's database is not on the config mount"; fail=1; } ;;
+  esac
 done
-# qui's health endpoints are on its root router, outside its base path (only
-# /api and the UI sit under baseUrl), so the Gateway — which routes /qui — must
-# not be used for them: ask the pod, which is exactly what its readinessProbe
-# does. A prefixed /qui/healthz/readiness is the SPA's catch-all, not health.
-code=$($K -n "$NS" exec qui-0 -- curl -s -o /dev/null -w '%{http_code}' \
-  http://127.0.0.1:7476/healthz/readiness || true)
-echo "qui in-pod /healthz/readiness -> ${code}"; [ "$code" = 200 ] || fail=1
+
+# Maintainerr streams live task progress as Server-Sent Events. Envoy's route
+# timeout defaults to 15s and would cut that stream, leaving the log and task
+# views silently dead, so the chart gives that one path no request timeout.
+# Held open for 30s here: exit 28 is curl's own --max-time firing, which means
+# the stream outlived the window; anything else is the proxy closing it.
+sse_exit=0
+sse_secs=$(curl -sN --max-time 30 -w '%{time_total}' -o "$WORK/maintainerr-sse.txt" \
+  "http://${GW_ADDR}/maintainerr/api/events/stream") || sse_exit=$?
+echo "GET /maintainerr/api/events/stream: curl exit ${sse_exit} after ${sse_secs}s (28 = still open at the 30s cap), $(wc -c <"$WORK/maintainerr-sse.txt") bytes"
+[ "$sse_exit" = 28 ] || { echo "the event stream closed before 30s (curl exit ${sse_exit}): something is timing it out"; fail=1; }
 
 # The peers Service is a NodePort on the node's own address (how a single-IP box
 # runs: the Gateway holds the LoadBalancer address, peers use the node port), so a

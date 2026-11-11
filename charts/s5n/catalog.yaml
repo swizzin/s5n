@@ -98,3 +98,11 @@ apps:
     instances: false
     default: false
     questions: []
+
+  # Opt-in, and louder so: it deletes media and torrents on rules the operator
+  # writes. Nothing here configures it; it is set up in its own UI.
+  maintainerr:
+    description: deletes what nobody watched, once your rules say so
+    instances: false
+    default: false
+    questions: []

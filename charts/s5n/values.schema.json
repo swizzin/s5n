@@ -357,6 +357,9 @@
         },
         "qui": {
           "$ref": "#/definitions/simpleApp"
+        },
+        "maintainerr": {
+          "$ref": "#/definitions/simpleApp"
         }
       }
     }

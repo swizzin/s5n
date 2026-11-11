@@ -372,7 +372,7 @@ func TestRealChartManifestLoads(t *testing.T) {
 	// The opt-in apps: off unless the operator says so, no instances, and
 	// nothing to ask at init. A box that installs the defaults must not get
 	// them, so `default: false` is the assertion that matters most here.
-	for _, name := range []string{"qui"} {
+	for _, name := range []string{"qui", "maintainerr"} {
 		app, ok := cat.App(name)
 		if !ok {
 			t.Fatalf("%s is not in the catalog", name)

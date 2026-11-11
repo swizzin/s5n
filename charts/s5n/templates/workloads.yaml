@@ -147,6 +147,28 @@ spec:
               value: "true"
             - name: QUI__AUTH_DISABLED_ALLOWED_CIDRS
               value: "0.0.0.0/0,::/0"
+            {{- else if eq $inst.app "maintainerr" }}
+            - name: UI_HOSTNAME
+              value: 0.0.0.0
+            - name: UI_PORT
+              value: {{ $cfg.port | quote }}
+            # Maintainerr applies its global prefix to every route, health and
+            # API included, so its own BASE_PATH does the work and the route
+            # keeps the prefix.
+            - name: BASE_PATH
+              value: {{ $urlBase | quote }}
+            # One directory holds everything it writes: the SQLite database,
+            # logs, overlays and the UI bundle start.sh stages on every boot.
+            # DATA_DIR moves that directory, so /config (the subPath mount) is
+            # enough and no second mount branch is needed. The staged UI is why
+            # it has to be writable, not merely readable.
+            - name: DATA_DIR
+              value: /config
+            # A weekly usage report to the vendor is not a default anyone here
+            # chose. TELEMETRY=off is the app's own switch, and it wins over the
+            # in-app setting.
+            - name: TELEMETRY
+              value: "off"
             {{- end }}
             {{- range $k, $v := $cfg.env }}
             - name: {{ $k }}
@@ -318,6 +340,24 @@ spec:
   hostnames: [{{ . | quote }}]
   {{- end }}
   rules:
+    {{- if eq $inst.app "maintainerr" }}
+    # The live task stream is a Server-Sent Events connection that has to stay
+    # open, and Envoy's route timeout defaults to 15s, which would cut it: the
+    # UI's log and task views would go quiet with nothing in the logs to say
+    # why. So this one path asks for no request timeout (Gateway API reads "0s"
+    # as "none") and every other path keeps the default. Gateway API sends a
+    # request to the rule with the longest matching path prefix, so the stream
+    # takes this rule and the rest of /maintainerr the one below.
+    - matches:
+        - path:
+            type: PathPrefix
+            value: {{ printf "%s/api/events/stream" $urlBase }}
+      timeouts:
+        request: 0s
+      backendRefs:
+        - name: {{ $inst.name }}
+          port: {{ $cfg.port }}
+    {{- end }}
     - matches:
         - path:
             type: PathPrefix
