@@ -272,8 +272,9 @@ box's to replace. The release and the sha256 of its asset for each architecture 
 arm64) are pinned together in the chart's `platform.yaml`, never read from k0s's release:
 a checksum served beside the archive proves only that both came from the same place, and
 what box writes runs as root. Box can't carry them, because it can't know the sum of a
-release newer than itself. The sums are written in the pull request that moves the pin,
-and CI checks them against the published assets; Renovate can't write them, so a k0s
+release newer than itself. The sums are written in the pull request that moves the pin
+(`go run ./hack/k0s-sums --write`, which refuses when the asset and k0s's published sum
+disagree), and CI checks them against the published assets; Renovate can't write them, so a k0s
 bump never merges itself.
 The download goes to a temporary file beside `/usr/local/bin/k0s` and is hashed while it
 is written; only a match is renamed into place, so an interrupted or tampered download
