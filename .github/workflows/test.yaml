@@ -52,9 +52,10 @@ jobs:
       # The k0s checksums charts/s5n/platform.yaml pins are checked against the
       # release's own assets here, in the job everything else already waits for:
       # a Renovate k0s pull request bumps a version it cannot write sums for, so
-      # it fails on this step until someone runs `go run ./hack/k0s-sums
-      # --write` on the branch, and no e2e is spent on a pin nobody verified.
-      # It downloads both assets (a few hundred MB), hence its own step.
+      # its own branch gets them from .github/workflows/k0s-sums.yaml (the sums
+      # bot, whose App-token push starts this run again), and no e2e is spent on
+      # a pin nobody verified. It downloads both assets (a few hundred MB),
+      # hence its own step.
       - name: k0s checksums match the release's assets
         run: go run ./hack/k0s-sums --check
 

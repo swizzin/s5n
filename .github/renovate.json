@@ -1,8 +1,9 @@
 {
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
-  "description": "main is what has been released and develop is where work lands (docs/box.md, \"Where a release lives\"). Renovate feeds the release train: the chart's app images on main only, whose patch and digest bumps merge themselves once CI is green, and the platform pins on both branches, one pull request per pin, never automerged. Nothing merges itself on develop, from any file.",
+  "description": "main is what has been released and develop is where work lands (docs/box.md, \"Where a release lives\"). Renovate feeds the release train: the chart's app images on main only, whose patch and digest bumps merge themselves once CI is green, and the platform pins on both branches, one pull request per pin, never automerged. Nothing merges itself on develop, from any file. The sums bot is listed in gitIgnoredAuthors: it commits k0s's asset checksums onto Renovate's own k0s branch, and without that listing Renovate reads the commit as another author's edit -- it stops committing to the branch, and the pull request is left alone.",
   "extends": ["config:recommended"],
   "baseBranchPatterns": ["main", "develop"],
+  "gitIgnoredAuthors": ["SUMS_BOT_EMAIL_PLACEHOLDER"],
   "automerge": false,
   "customManagers": [
     {
@@ -60,7 +61,7 @@
       "automerge": false
     },
     {
-      "description": "A k0s bump never merges itself, whatever platform automerge is set to: Renovate bumps the version and cannot write the asset checksums pinned beside it (they are not versions and carry no marker), so its pull request fails CI's `go run ./hack/k0s-sums --check` until a maintainer runs `--write` on the branch and reads what the release publishes. A k0s minor is a Kubernetes minor as well. This rule is explicit so that turning on patch automerge for the other pins -- the rule below, when box's own e2e covers them -- cannot carry k0s with it.",
+      "description": "A k0s bump never merges itself, whatever platform automerge is set to: Renovate bumps the version and cannot write the asset checksums pinned beside it (they are not versions and carry no marker), so `.github/workflows/k0s-sums.yaml` writes them on Renovate's branch with the sums bot's token -- a token push starts CI, which a GITHUB_TOKEN one would not -- and the bump still waits for the maintainer, because a k0s minor is a Kubernetes minor and someone has to read what the release publishes. This rule is explicit so that turning on patch automerge for the other pins -- the rule below, when box's own e2e covers them -- cannot carry k0s with it.",
       "matchDepNames": ["k0sproject/k0s"],
       "automerge": false
     },

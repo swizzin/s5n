@@ -23,7 +23,9 @@
 # one pull request: `go run ./hack/k0s-sums --write` reads the pinned release,
 # hashes both assets, checks them against its sha256sums.txt and rewrites the
 # two lines; `go run ./hack/k0s-sums --check` is what CI runs, so a k0s bump
-# whose sums were not written fails until someone does that.
+# whose sums were not written fails. On a Renovate pull request
+# .github/workflows/k0s-sums.yaml does that write itself and commits the two
+# lines with the sums bot's token, so the fixed head is the one CI tests.
 #
 # The comment on each line is the pin's source, and it is what Renovate reads:
 # datasource and the package name the version comes from. One line, one pin, one

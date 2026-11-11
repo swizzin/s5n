@@ -1,0 +1,112 @@
+# The sums bot. A Renovate k0s pull request bumps the version in
+# charts/s5n/platform.yaml but cannot write the asset checksums pinned beside
+# it, so the pull request fails test.yaml's `go run ./hack/k0s-sums --check`
+# until something writes them. GITHUB_TOKEN cannot be that something: a push
+# made with it starts no workflow, so the fixed head would never be tested and
+# Renovate -- which has no post-upgrade hook on the hosted app -- would wait
+# forever on a run CI never made. A GitHub App's installation token does start
+# workflows, so this job commits the two lines with it and the pull request's
+# own CI runs again on the head that carries them.
+#
+# The job only touches Renovate's own branches in this repository. A fork never
+# holds the App's token, and a branch a person wrote is not this bot's to
+# commit to.
+#
+# Actions are pinned by commit; the comment names the tag the commit belongs to.
+name: k0s sums
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+    branches: [main, develop]
+    paths: ["charts/s5n/platform.yaml"]
+
+# The App's token does every write, so the job needs nothing from GITHUB_TOKEN:
+# this workflow holds no permission of its own, and the checkout below is given
+# the App's token instead of the default one.
+permissions: {}
+
+# One run per pull request. A synchronize from the bot's own push meets a
+# finished run and finds nothing to do; a push that lands while this one is
+# still downloading k0s's assets is the newer state, so the older run's write
+# would be against a head that no longer exists.
+concurrency:
+  group: k0s-sums-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  sums:
+    if: >-
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      startsWith(github.head_ref, 'renovate/')
+    runs-on: ubuntu-latest
+    # Both k0s assets are a few hundred MB, which is most of the run.
+    timeout-minutes: 20
+    steps:
+      - id: app
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        with:
+          # The App's numeric ID. The action also takes a Client ID and
+          # deprecates this input, but the secret is the App ID, so moving to
+          # `client-id` means a new secret holding a different value, and is a
+          # change of its own rather than a rename in this file.
+          app-id: ${{ secrets.SUMS_APP_ID }}
+          private-key: ${{ secrets.SUMS_APP_PRIVATE_KEY }}
+      # The head branch, with the App's token persisted in the checkout: that
+      # token is what makes the commit below start the pull request's workflows
+      # again, and what makes the push allowed at all.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.head_ref }}
+          token: ${{ steps.app.outputs.token }}
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      - name: write the sums, and commit them when they moved
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+          BRANCH: ${{ github.head_ref }}
+          APP_SLUG: ${{ steps.app.outputs.app-slug }}
+        run: |
+          set -euo pipefail
+          # --write reads the pinned version, hashes both architectures' assets
+          # and checks them against the release's own sha256sums.txt, and
+          # refuses (non-zero) when the release's two accounts of an asset
+          # disagree: a sum copied from an inconsistent release could never be
+          # verified by the host that installs it.
+          go run ./hack/k0s-sums --write
+
+          version=$(sed -n 's/^k0s:[[:space:]]*\([^[:space:]#]*\).*/\1/p' charts/s5n/platform.yaml)
+          if [ -z "$version" ]; then
+            echo "charts/s5n/platform.yaml pins no k0s version"
+            exit 1
+          fi
+
+          # Nothing to do: the sums already describe the pinned release. This is
+          # the branch the bot's own push comes back on, so a run that would
+          # commit the same bytes again ends here instead of looping.
+          if git diff --quiet -- charts/s5n/platform.yaml; then
+            echo "k0s ${version}: sums already written"
+            exit 0
+          fi
+
+          # The bot's own identity, not the runner's: the commit reads as the
+          # App, and its email is the one gitIgnoredAuthors lists in
+          # .github/renovate.json, without which Renovate would treat this
+          # commit as another author's edit to its branch.
+          user_id=$(gh api "/users/${APP_SLUG}%5Bbot%5D" --jq .id)
+          git config user.name "${APP_SLUG}[bot]"
+          git config user.email "${user_id}+${APP_SLUG}[bot]@users.noreply.github.com"
+
+          git add -- charts/s5n/platform.yaml
+          git commit -F - <<EOF
+          platform: write k0s's checksums for ${version}
+
+          Renovate bumps the k0s pin and cannot write the asset checksums
+          pinned beside it, so the pull request fails CI's k0s-sums check
+          until something writes them. This is that something, and it is
+          pushed with the App's token rather than GITHUB_TOKEN: a
+          GITHUB_TOKEN push starts no workflow, so the fixed head would
+          never be tested.
+          EOF
+          git push origin "HEAD:${BRANCH}"
