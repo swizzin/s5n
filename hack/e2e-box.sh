@@ -1196,6 +1196,116 @@ EOF
     fail=1
   }
 
+  # ---- admission: a route may not reach the sign-in path ---------------------
+  # Authelia serves ^/auth without a login and Gateway API gives the request to
+  # the most specific route, so a user's own HTTPRoute under /auth on their
+  # host would be served unauthenticated. The binding refuses the write.
+  log "admission: a route under /auth cannot be created from ${NS}"
+  # The fixture is a route the API server would otherwise accept: a parentRef
+  # to the Gateway and one backend. The path is the only thing under test.
+  httproute() { # <name> <type> <path>
+    cat <<EOF
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: $1
+spec:
+  parentRefs:
+    - name: s5n
+      namespace: s5n-gateway
+  rules:
+    - matches:
+        - path:
+            type: $2
+            value: "$3"
+      backendRefs:
+        - name: sonarr
+          port: 8989
+EOF
+  }
+  # The binding lands a moment after the grant is applied: a dry-run admitted
+  # while it is still missing is retried, not reported as a pass.
+  deny_route() { # <name> <type> <path> <message> <out>
+    local name=$1 type=$2 path=$3 want=$4 out=$5
+    : >"$out"
+    for _ in $(seq 1 30); do
+      if httproute "$name" "$type" "$path" |
+        $K --as="$SA" -n "$NS" create --dry-run=server -f - >"$out" 2>&1; then
+        sleep 1
+        continue
+      fi
+      grep -q "$want" "$out"
+      return
+    done
+    return 1
+  }
+  allow_route() { # <namespace> <name> <type> <path> <out>
+    httproute "$2" "$3" "$4" |
+      $K --as="$SA" -n "$1" create --dry-run=server -f - >"$5" 2>&1
+  }
+  auth_case() { # <label> <name> <type> <path> <message>
+    if deny_route "$2" "$3" "$4" "$5" "$WORK/auth-$2.txt"; then
+      echo "  $1: denied ($(sed -n 's/.*denied request: //p' "$WORK/auth-$2.txt" | head -1))"
+    else
+      echo "  $1: admitted, or refused for another reason"
+      cat "$WORK/auth-$2.txt" || true
+      fail=1
+    fi
+  }
+  auth_case "PathPrefix /auth/x" e2e-auth-prefix PathPrefix /auth/x \
+    "s5n: /auth is root's sign-in path; a seedbox route may not match it"
+  auth_case "Exact /auth" e2e-auth-exact Exact /auth \
+    "s5n: /auth is root's sign-in path; a seedbox route may not match it"
+  auth_case "RegularExpression /a.th/.*" e2e-auth-regex RegularExpression "/a.th/.*" \
+    "may not use a RegularExpression path"
+  # The CRD allows %61 (it refuses only %2f and dot segments), so this one
+  # reaches the policy; if a future CRD refuses it first, this case says which
+  # layer refused instead of asserting the policy's message.
+  auth_case "PathPrefix /%61uth/x" e2e-auth-percent PathPrefix "/%61uth/x" \
+    "may not use a percent-encoded path"
+  if allow_route "$NS" e2e-auth-neighbour PathPrefix /authx "$WORK/auth-neighbour.txt"; then
+    echo "  PathPrefix /authx: admitted"
+  else
+    echo "  PathPrefix /authx: refused"
+    cat "$WORK/auth-neighbour.txt" || true
+    fail=1
+  fi
+  # The policy is bound to one namespace, not installed cluster-wide: the same
+  # route in a namespace with no binding is admitted.
+  $K create namespace s5n-e2e-unbound --dry-run=client -o yaml | $K apply -f - >/dev/null
+  $K apply -f - >/dev/null <<EOF
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: box-user
+  namespace: s5n-e2e-unbound
+rules:
+  - apiGroups: ["gateway.networking.k8s.io"]
+    resources: ["httproutes"]
+    verbs: ["create"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: box-user
+  namespace: s5n-e2e-unbound
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: box-user
+subjects:
+  - kind: ServiceAccount
+    name: box-user
+    namespace: ${NS}
+EOF
+  if allow_route s5n-e2e-unbound e2e-auth-unbound PathPrefix /auth/x "$WORK/auth-unbound.txt"; then
+    echo "  PathPrefix /auth/x in an unbound namespace: admitted"
+  else
+    echo "  an unbound namespace refused /auth/x: the policy is not scoped"
+    cat "$WORK/auth-unbound.txt" || true
+    fail=1
+  fi
+
   # Zero writes includes the storage: the same resourceVersions after apply 2.
   storage_before=$(storage_state)
   ns_before=$($K get namespace "$NS" -o jsonpath='{.metadata.resourceVersion}')
@@ -1223,7 +1333,7 @@ EOF
     echo "l2=$($K -n metallb-system get l2advertisement s5n-l2 -o json | platform_spec)"
     echo "issuer-le=$($K get clusterissuer s5n-letsencrypt -o json | platform_spec)"
     echo "issuer-ss=$($K get clusterissuer s5n-selfsigned -o json | platform_spec)"
-    for p in s5n-blessed-images s5n-granted-service s5n-no-login-changes; do
+    for p in s5n-blessed-images s5n-granted-service s5n-no-login-changes s5n-no-auth-routes; do
       echo "vap-${p}=$($K get validatingadmissionpolicy "$p" -o json | platform_spec)"
     done
     echo "s5n-system=$($K get namespace s5n-system -o json | platform_spec)"
@@ -1749,7 +1859,7 @@ PY
     echo "l2=$($K -n metallb-system get l2advertisement pre-existing-l2 -o json | platform_spec)"
     echo "issuer-le=$($K get clusterissuer s5n-letsencrypt -o json | platform_spec)"
     echo "issuer-ss=$($K get clusterissuer s5n-selfsigned -o json | platform_spec)"
-    for p in s5n-blessed-images s5n-granted-service s5n-no-login-changes; do
+    for p in s5n-blessed-images s5n-granted-service s5n-no-login-changes s5n-no-auth-routes; do
       echo "vap-${p}=$($K get validatingadmissionpolicy "$p" -o json | platform_spec)"
     done
     echo "s5n-system=$($K get namespace s5n-system -o json | platform_spec)"

@@ -74,3 +74,20 @@ spec:
         - key: kubernetes.io/metadata.name
           operator: In
           values: ["example-user"]
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: s5n-grant-example-user-auth-route
+  labels:
+    app.kubernetes.io/part-of: s5n
+spec:
+  policyName: s5n-no-auth-routes
+  validationActions: ["Deny"]
+  # No paramRef: the /auth rule is a constant rule too.
+  matchResources:
+    namespaceSelector:
+      matchExpressions:
+        - key: kubernetes.io/metadata.name
+          operator: In
+          values: ["example-user"]

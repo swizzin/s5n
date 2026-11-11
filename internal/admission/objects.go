@@ -9,7 +9,7 @@ import (
 )
 
 // Docs is what one grant renders to, in apply order: the params object, then
-// the binding for the image policy, then the binding for the Service policy.
+// the bindings, one per policy the grant is held to.
 type Docs struct {
 	// Source names the variants file the blessed list came from. It is only
 	// the generated-from note on the first object; empty writes no note.
@@ -168,6 +168,9 @@ func grantDocs(repos []string, g Grant) Docs {
 			// SecurityPolicy and route around it. The policy needs no params:
 			// it refuses the writes outright.
 			binding(name+"-login", "s5n-no-login-changes", false),
+			// Neither does this one: Authelia serves /auth without a login,
+			// and Gateway API would give a more specific route the request.
+			binding(name+"-auth-route", "s5n-no-auth-routes", false),
 		},
 	}
 }

@@ -164,3 +164,55 @@ spec:
   validations:
     - expression: "false"
       message: "s5n: the login in front of the Gateway is root's; a seedbox namespace may not add, change or remove it"
+---
+# A user's route may not reach the sign-in path.
+#
+# Authelia's access control lets `^/auth([/?].*)?$` through without a login
+# (internal/authelia/config.go, Rules). Gateway API serves the most specific
+# route, not the first one written, so a user's HTTPRoute matching `/auth/x`
+# on their own host would be served instead of root's portal route, and the
+# request would never ask for a login. The chart's own routes are PathPrefix
+# on each app's urlBase and never under /auth; this closes the hole for a
+# route the user writes by hand.
+#
+# A RegularExpression match can reach /auth without spelling it, and so can a
+# percent-encoded path (`/%61uth/x`), so both are refused outright rather than
+# only the literal prefix. `/authx` and `/authority` stay admitted: Gateway
+# API prefixes match whole path segments, and Authelia's rule does not cover
+# them.
+#
+# No params: like the login policy this refuses the write outright, whoever
+# asks, in a bound namespace. Root's own seedbox namespace is unbound.
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: s5n-no-auth-routes
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      # Both versions the Gateway API bundle box installs serves (v1 storage,
+      # v1beta1 served): matching one only would leave the other writable.
+      - apiGroups: ["gateway.networking.k8s.io"]
+        apiVersions: ["v1", "v1beta1"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["httproutes"]
+  validations:
+    # Every rule and every match in it has to pass; a rule with no matches is
+    # a catch-all and has no path to refuse. has() guards the optional fields:
+    # matches, path, path.type and path.value are all optional in the schema,
+    # and path.type defaults to PathPrefix.
+    - expression: >-
+        object.spec.rules.all(r, !has(r.matches) || r.matches.all(m,
+        !has(m.path) || !has(m.path.type) || m.path.type != 'RegularExpression'))
+      message: "s5n: a seedbox route may not use a RegularExpression path: a regex can reach /auth, root's sign-in path"
+    - expression: >-
+        object.spec.rules.all(r, !has(r.matches) || r.matches.all(m,
+        !has(m.path) || !has(m.path.value) ||
+        !((!has(m.path.type) || m.path.type == 'PathPrefix' || m.path.type == 'Exact') &&
+        (m.path.value == '/auth' || m.path.value.startsWith('/auth/')))))
+      message: "s5n: /auth is root's sign-in path; a seedbox route may not match it"
+    - expression: >-
+        object.spec.rules.all(r, !has(r.matches) || r.matches.all(m,
+        !has(m.path) || !has(m.path.value) || !m.path.value.contains('%')))
+      message: "s5n: a seedbox route may not use a percent-encoded path: it can reach /auth, root's sign-in path"

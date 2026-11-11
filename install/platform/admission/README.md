@@ -18,6 +18,15 @@ enforcement on their own. These policies are the enforcement:
   arbitrary address and intercept traffic to it (CVE-2020-8554). `ExternalName`
   is never admitted either, because it is neither ClusterIP nor a type the
   grant can assign.
+- **`s5n-no-auth-routes`** admits an HTTPRoute only when no path match can
+  reach `/auth`, the sign-in path Authelia serves without a login. Gateway API
+  serves the most specific route, so a user's `PathPrefix /auth/x` would win
+  over root's portal route and be served unauthenticated. It refuses a
+  `PathPrefix` or `Exact` path of `/auth` or under it, any
+  `RegularExpression` path (a regex can reach `/auth` without spelling it) and
+  any path containing `%` (a percent-encoded path can too). `/authx` and
+  `/authority` stay admitted: Gateway API matches whole path segments, so
+  neither reaches `/auth`.
 
 Because a policy evaluates the whole Pod, a pod admitted before its namespace
 was bound is held to the list on its next write: if it still runs an unblessed
@@ -30,7 +39,7 @@ tag or digest must follow the repository, so `…/s5n-evil` is not `…/s5n`).
 Printing that list at `box adduser`, before the bindings are applied, is the
 caller it is written for.
 
-Both use `failurePolicy: Fail`: a params object that is missing or a CEL error
+All use `failurePolicy: Fail`: a params object that is missing or a CEL error
 refuses the write rather than admitting it.
 
 ## Where this lives and who installs it
@@ -49,8 +58,9 @@ it prints:
    the blessed repositories, the granted Service type and the torrent nodePort.
    Root owns `s5n-system`; a ConfigMap in the user's own namespace would be
    writable by them and enforce nothing.
-2. two cluster-scoped `ValidatingAdmissionPolicyBinding`s selecting exactly that
-   namespace. Cluster-scoped objects are outside the user's namespace RBAC.
+2. cluster-scoped `ValidatingAdmissionPolicyBinding`s, one per policy,
+   selecting exactly that namespace. Cluster-scoped objects are outside the
+   user's namespace RBAC.
 
 Root's own seedbox gets no binding: this is tenancy, not a cluster-wide image
 policy. An unbound namespace admits what its own RBAC allows.
