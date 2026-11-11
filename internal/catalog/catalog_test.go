@@ -1,6 +1,7 @@
 package catalog
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -34,6 +35,51 @@ const miniManifest = `apps:
         prompt: timezone
         kind: string
         default: Etc/UTC
+`
+
+// brokenManifest breaks several things at once, in two apps: the ordering of
+// its problem list is what TestProblemsComeInFileOrder pins.
+const brokenManifest = `apps:
+  alpha:
+    description: ""
+    instances: true
+    default: true
+    questions:
+      - key: apps.alpha.greeting
+        prompt: ""
+        kind: string
+        default: 7
+      - key: apps.alpha.verbose
+        prompt: log everything
+        kind: bool
+        default: "no"
+      - key: apps.alpha.nonsense
+        prompt: nothing at all
+        kind: string
+      - key: apps.beta.enabled
+        prompt: broken kind
+        kind: whisper
+  beta:
+    description: the second app
+    instances: false
+    questions:
+      - key: apps.beta.greeting
+        prompt: hi
+        kind: string
+      - key: apps.beta.greeting
+        prompt: hi again
+        kind: string
+      - key: gateway.host
+        prompt: host
+        kind: string
+      - key: apps.beta.instances[0].suffix
+        prompt: list entry
+        kind: string
+  gamma:
+    description: not an app
+    instances: false
+    default: false
+    questions: []
 `
 
 func mini(t *testing.T) (values, schema []byte) {
@@ -233,6 +279,55 @@ func TestHostileManifestIsNamed(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestProblemsComeInFileOrder pins the whole problem list for one manifest: the
+// apps in the manifest's order, each app's description, instances and questions
+// in turn, and within a question the prompt, the default, the kind and the key.
+// The table above looks for one problem at a time, so it cannot see a refactor
+// that reorders the checks or rewords a message.
+//
+// The two grant problems are compared by their opening words only: the tail of
+// each is internal/seedbox's own reason for the rule, which its tests pin, so a
+// reworded reason should not fail here.
+func TestProblemsComeInFileOrder(t *testing.T) {
+	values, schema := mini(t)
+	_, err := Parse("catalog.yaml", []byte(brokenManifest), values, schema)
+	if err == nil {
+		t.Fatal("the manifest was accepted")
+	}
+	var listed *Error
+	if !errors.As(err, &listed) {
+		t.Fatalf("error = %T (%v), want a *catalog.Error", err, err)
+	}
+	if listed.Path != "catalog.yaml" {
+		t.Fatalf("path = %q, want catalog.yaml", listed.Path)
+	}
+	want := []string{
+		"apps.gamma: values.yaml has no such app; every entry here must name one",
+		"apps.alpha.description: is empty; init shows it when it asks which apps the box has",
+		"apps.alpha.instances: says the app takes instances, but values.yaml gives it no `instances` list",
+		"apps.alpha.questions[0].prompt: is empty",
+		"apps.alpha.questions[0].default: a string question takes text, not a number",
+		"apps.alpha.questions[1].default: a bool question takes true or false, not text",
+		"apps.alpha.questions[2].key: apps.alpha.nonsense is not a key in values.schema.json",
+		`apps.alpha.questions[3].kind: "whisper" is not a kind box knows (string, secret, bool, transient)`,
+		"apps.beta.instances: values.yaml gives the app an `instances` list, so this must be true",
+		"apps.beta.questions[0].key: apps.beta.greeting is not a key in values.schema.json",
+		"apps.beta.questions[1].key: apps.beta.greeting is asked twice (also questions[0])",
+		"apps.beta.questions[2].key: gateway.host is set by the grant (",
+		"apps.beta.questions[3].key: apps.beta.instances[0].suffix names a list entry; a question answers one key",
+		"apps.beta.questions[3].key: apps.beta.instances[0].suffix is set by the grant (",
+	}
+	if len(listed.Problems) != len(want) {
+		t.Fatalf("problems = %d, want %d:\n%s", len(listed.Problems), len(want), strings.Join(listed.Problems, "\n"))
+	}
+	for i, prefix := range want {
+		if !strings.HasPrefix(listed.Problems[i], prefix) {
+			t.Fatalf("problems[%d] = %q, want it to start with %q\nall:\n%s",
+				i, listed.Problems[i], prefix, strings.Join(listed.Problems, "\n"))
+		}
 	}
 }
 

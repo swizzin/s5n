@@ -223,6 +223,38 @@ func Load(dir string) (*Catalog, error) {
 // schema. Load is Parse over a directory; the split is what lets the tests feed
 // a hostile manifest without writing it into the chart.
 func Parse(path string, raw, values, schema []byte) (*Catalog, error) {
+	m, err := decodeManifest(path, raw)
+	if err != nil {
+		return nil, err
+	}
+	order, err := appOrder(raw)
+	if err != nil {
+		return nil, &Error{Path: path, Problems: []string{err.Error()}}
+	}
+	chartApps, err := valuesApps(values)
+	if err != nil {
+		return nil, fmt.Errorf("%s: values.yaml: %w", path, err)
+	}
+	sch, err := parseSchema(schema)
+	if err != nil {
+		return nil, fmt.Errorf("%s: values.schema.json: %w", path, err)
+	}
+
+	problems := appSetProblems(m, order, chartApps)
+	cat, appProblems := buildApps(m, order, chartApps, sch)
+	problems = append(problems, appProblems...)
+	if len(problems) > 0 {
+		return nil, &Error{Path: path, Problems: problems}
+	}
+	return cat, nil
+}
+
+// decodeManifest decodes the manifest's first document into the shape the file
+// is read as. Both of its refusals are about the file itself, before any entry
+// is looked at, which is why they are their own step: unknown fields are a typo
+// that would otherwise be a silently missing question, and a second document
+// would be ignored by the decoder rather than read.
+func decodeManifest(path string, raw []byte) (*manifest, error) {
 	var m manifest
 	dec := yaml.NewDecoder(bytes.NewReader(raw))
 	dec.KnownFields(true)
@@ -238,51 +270,45 @@ func Parse(path string, raw, values, schema []byte) (*Catalog, error) {
 	if err := dec.Decode(&extra); err == nil {
 		return nil, &Error{Path: path, Problems: []string{"has more than one YAML document"}}
 	}
+	return &m, nil
+}
 
-	order, err := appOrder(raw)
-	if err != nil {
-		return nil, &Error{Path: path, Problems: []string{err.Error()}}
-	}
-
-	chartApps, err := valuesApps(values)
-	if err != nil {
-		return nil, fmt.Errorf("%s: values.yaml: %w", path, err)
-	}
-	sch, err := parseSchema(schema)
-	if err != nil {
-		return nil, fmt.Errorf("%s: values.schema.json: %w", path, err)
-	}
-
+// appSetProblems checks the manifest's app set against the chart's: every
+// manifest entry names an app the chart has, and every app the chart has is in
+// the manifest. A workload nobody can configure is as wrong as a question for
+// an app that does not exist.
+func appSetProblems(m *manifest, order []string, chartApps map[string]chartApp) []string {
 	var problems []string
-	add := func(format string, args ...any) {
-		problems = append(problems, fmt.Sprintf(format, args...))
-	}
-
-	// Every manifest entry names an app the chart has, and every app the chart
-	// has is in the manifest: a workload nobody can configure is as wrong as a
-	// question for an app that does not exist.
 	if len(m.Apps) == 0 {
-		add("names no apps; a chart's catalog describes every app under `apps:` in values.yaml")
+		problems = append(problems, "names no apps; a chart's catalog describes every app under `apps:` in values.yaml")
 	}
 	for _, name := range order {
 		if _, ok := m.Apps[name]; !ok {
 			// appOrder reads the same document, so this cannot happen unless the
 			// file has duplicate `apps:` keys, which yaml refuses first.
-			add("apps.%s: declared twice", name)
+			problems = append(problems, fmt.Sprintf("apps.%s: declared twice", name))
 		}
 	}
 	for _, name := range sortedKeys(m.Apps) {
 		if _, ok := chartApps[name]; !ok {
-			add("apps.%s: values.yaml has no such app; every entry here must name one", name)
+			problems = append(problems, fmt.Sprintf("apps.%s: values.yaml has no such app; every entry here must name one", name))
 		}
 	}
 	for _, name := range sortedKeys(chartApps) {
 		if _, ok := m.Apps[name]; !ok {
-			add("apps.%s: values.yaml has this app but the catalog does not; every app needs exactly one entry", name)
+			problems = append(problems, fmt.Sprintf("apps.%s: values.yaml has this app but the catalog does not; every app needs exactly one entry", name))
 		}
 	}
+	return problems
+}
 
+// buildApps turns the manifest's entries into the catalog in manifest order,
+// collecting every entry's problems. An entry with problems is still built:
+// one run lists everything wrong with the file, and it is the problem list, not
+// the build, that refuses the manifest.
+func buildApps(m *manifest, order []string, chartApps map[string]chartApp, sch *schema) (*Catalog, []string) {
 	cat := &Catalog{byName: make(map[string]int, len(order))}
+	var problems []string
 	seen := map[string]bool{}
 	for _, name := range order {
 		entry, ok := m.Apps[name]
@@ -297,114 +323,136 @@ func Parse(path string, raw, values, schema []byte) (*Catalog, error) {
 			Default:     entry.Default,
 			Questions:   entry.Questions,
 		}
-		if app.Description == "" {
-			add("apps.%s.description: is empty; init shows it when it asks which apps the box has", name)
-		} else if strings.ContainsAny(app.Description, "\n\r") {
-			add("apps.%s.description: must be one line", name)
-		}
-		if app.Instances != chartApps[name].Instances {
-			if app.Instances {
-				add("apps.%s.instances: says the app takes instances, but values.yaml gives it no `instances` list", name)
-			} else {
-				add("apps.%s.instances: values.yaml gives the app an `instances` list, so this must be true", name)
-			}
-		}
-		if problems := validateQuestions(&app, sch); len(problems) > 0 {
-			for _, p := range problems {
-				add("%s", p)
-			}
-		}
+		problems = append(problems, validateApp(&app, chartApps[name], sch)...)
 		cat.byName[name] = len(cat.apps)
 		cat.apps = append(cat.apps, app)
 	}
+	return cat, problems
+}
 
-	if len(problems) > 0 {
-		return nil, &Error{Path: path, Problems: problems}
+// validateApp checks one manifest entry: its description (init shows it), the
+// instances flag against the shape values.yaml gives the app, and every
+// question. The messages name the entry, because that is what a contributor
+// edits.
+func validateApp(app *App, chart chartApp, sch *schema) []string {
+	var problems []string
+	if app.Description == "" {
+		problems = append(problems, fmt.Sprintf("apps.%s.description: is empty; init shows it when it asks which apps the box has", app.Name))
+	} else if strings.ContainsAny(app.Description, "\n\r") {
+		problems = append(problems, fmt.Sprintf("apps.%s.description: must be one line", app.Name))
 	}
-	return cat, nil
+	if app.Instances != chart.Instances {
+		if app.Instances {
+			problems = append(problems, fmt.Sprintf("apps.%s.instances: says the app takes instances, but values.yaml gives it no `instances` list", app.Name))
+		} else {
+			problems = append(problems, fmt.Sprintf("apps.%s.instances: values.yaml gives the app an `instances` list, so this must be true", app.Name))
+		}
+	}
+	return append(problems, validateQuestions(app, sch)...)
 }
 
 // validateQuestions checks one app's questions. Every message names the entry
 // by its position in the file, which is what a contributor edits.
 func validateQuestions(app *App, sch *schema) []string {
 	var problems []string
-	add := func(format string, args ...any) {
-		problems = append(problems, fmt.Sprintf(format, args...))
-	}
 	seen := map[string]int{}
 	for i, q := range app.Questions {
 		where := fmt.Sprintf("apps.%s.questions[%d]", app.Name, i)
 		key := strings.TrimSpace(q.Key)
 		if key == "" {
-			add("%s.key: is empty; it is the values path the answer is written to", where)
+			problems = append(problems, fmt.Sprintf("%s.key: is empty; it is the values path the answer is written to", where))
 			continue
 		}
 		if j, dup := seen[key]; dup {
-			add("%s.key: %s is asked twice (also questions[%d])", where, key, j)
+			problems = append(problems, fmt.Sprintf("%s.key: %s is asked twice (also questions[%d])", where, key, j))
 			continue
 		}
 		seen[key] = i
-		if strings.TrimSpace(q.Prompt) == "" {
-			add("%s.prompt: is empty", where)
-		} else if strings.ContainsAny(q.Prompt, "\n\r") {
-			add("%s.prompt: must be one line", where)
-		}
-		if strings.ContainsAny(q.Help, "\n\r") {
-			add("%s.help: must be one line", where)
-		}
-		switch q.Kind {
-		case KindString, KindSecret, KindTransient:
-			if q.Default != nil {
-				if _, ok := q.Default.(string); !ok {
-					add("%s.default: a %s question takes text, not %s", where, q.Kind, typeName(q.Default))
-				}
-			}
-		case KindBool:
-			if q.Default != nil {
-				if _, ok := q.Default.(bool); !ok {
-					add("%s.default: a bool question takes true or false, not %s", where, typeName(q.Default))
-				}
-			}
-		case "":
-			add("%s.kind: is missing; one of string, secret, bool, transient", where)
-			continue
-		default:
-			add("%s.kind: %q is not a kind box knows (string, secret, bool, transient)", where, q.Kind)
+		problems = append(problems, validateQuestionText(q, where)...)
+		kindProblems, known := validateQuestionKind(q, where)
+		problems = append(problems, kindProblems...)
+		if !known {
 			continue
 		}
+		problems = append(problems, validateQuestionKey(key, where, q.Kind, sch)...)
+	}
+	return problems
+}
 
-		path, err := seedbox.ParsePath(key)
-		if err != nil {
-			add("%s.key: %s: %v", where, key, err)
-			continue
-		}
-		for _, st := range path {
-			if st.IsIndex {
-				add("%s.key: %s names a list entry; a question answers one key", where, key)
-				break
+// validateQuestionText checks the two lines init shows: the prompt it asks and
+// the help under it. Both are one line, because init draws them in a fixed
+// frame.
+func validateQuestionText(q Question, where string) []string {
+	var problems []string
+	if strings.TrimSpace(q.Prompt) == "" {
+		problems = append(problems, fmt.Sprintf("%s.prompt: is empty", where))
+	} else if strings.ContainsAny(q.Prompt, "\n\r") {
+		problems = append(problems, fmt.Sprintf("%s.prompt: must be one line", where))
+	}
+	if strings.ContainsAny(q.Help, "\n\r") {
+		problems = append(problems, fmt.Sprintf("%s.help: must be one line", where))
+	}
+	return problems
+}
+
+// validateQuestionKind checks the kind and the default's type, which the kind
+// decides. known is false for a missing or unknown kind: every rule after it
+// reads the kind, so the caller stops there rather than guess what the
+// contributor meant.
+func validateQuestionKind(q Question, where string) (problems []string, known bool) {
+	switch q.Kind {
+	case KindString, KindSecret, KindTransient:
+		if q.Default != nil {
+			if _, ok := q.Default.(string); !ok {
+				problems = append(problems, fmt.Sprintf("%s.default: a %s question takes text, not %s", where, q.Kind, typeName(q.Default)))
 			}
 		}
-		// The grant is root's: a manifest must never be able to ask for the
-		// domain, a host path, a uid, the namespace or the app list. BoxOnly and
-		// BoxSets are refused with the same rigidity: neither file names a claim.
-		if rule, ok := seedbox.GrantRule(path.Keys()); ok {
-			add("%s.key: %s is set by %s (%s); the grant is box's question, never the catalog's",
-				where, key, setBy(rule), rule.Why)
-			continue
-		}
-		node, err := sch.at(path.Keys())
-		if err != nil {
-			add("%s.key: %s: %v", where, key, err)
-			continue
-		}
-		if node == nil {
-			add("%s.key: %s is not a key in values.schema.json", where, key)
-			continue
-		}
-		if want := schemaType(q.Kind); want != "" {
-			if got, _ := node["type"].(string); got != "" && got != want {
-				add("%s.key: %s is a %s in values.schema.json, so a %s question cannot answer it", where, key, got, q.Kind)
+	case KindBool:
+		if q.Default != nil {
+			if _, ok := q.Default.(bool); !ok {
+				problems = append(problems, fmt.Sprintf("%s.default: a bool question takes true or false, not %s", where, typeName(q.Default)))
 			}
+		}
+	case "":
+		return []string{fmt.Sprintf("%s.kind: is missing; one of string, secret, bool, transient", where)}, false
+	default:
+		return []string{fmt.Sprintf("%s.kind: %q is not a kind box knows (string, secret, bool, transient)", where, q.Kind)}, false
+	}
+	return problems, true
+}
+
+// validateQuestionKey checks the key against the data contract: it must be a
+// values path, not a list entry, not a grant key, described by the chart's own
+// schema, and of the type the kind answers.
+func validateQuestionKey(key, where string, kind Kind, sch *schema) []string {
+	var problems []string
+	path, err := seedbox.ParsePath(key)
+	if err != nil {
+		return []string{fmt.Sprintf("%s.key: %s: %v", where, key, err)}
+	}
+	for _, st := range path {
+		if st.IsIndex {
+			problems = append(problems, fmt.Sprintf("%s.key: %s names a list entry; a question answers one key", where, key))
+			break
+		}
+	}
+	// The grant is root's: a manifest must never be able to ask for the
+	// domain, a host path, a uid, the namespace or the app list. BoxOnly and
+	// BoxSets are refused with the same rigidity: neither file names a claim.
+	if rule, ok := seedbox.GrantRule(path.Keys()); ok {
+		return append(problems, fmt.Sprintf("%s.key: %s is set by %s (%s); the grant is box's question, never the catalog's",
+			where, key, setBy(rule), rule.Why))
+	}
+	node, err := sch.at(path.Keys())
+	if err != nil {
+		return append(problems, fmt.Sprintf("%s.key: %s: %v", where, key, err))
+	}
+	if node == nil {
+		return append(problems, fmt.Sprintf("%s.key: %s is not a key in values.schema.json", where, key))
+	}
+	if want := schemaType(kind); want != "" {
+		if got, _ := node["type"].(string); got != "" && got != want {
+			problems = append(problems, fmt.Sprintf("%s.key: %s is a %s in values.schema.json, so a %s question cannot answer it", where, key, got, kind))
 		}
 	}
 	return problems
