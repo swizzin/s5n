@@ -350,7 +350,7 @@ func (d *Decision) Run(ctx context.Context, opts Options) (Result, error) {
 	// certificate for it can never issue. Both names resolving to nothing is
 	// the test-box case and proceeds self-signed; a real mismatch stops here,
 	// naming the record to add (docs/box.md, "Certificates").
-	appHosts, err := d.appHosts(ctx, domain, domAnswer, text(forced), apps)
+	appHosts, err := appHostsFor(ctx, d.Resolver, d.Catalog, domain, domAnswer, text(forced), "init", apps)
 	if err != nil {
 		return res, err
 	}

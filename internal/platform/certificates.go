@@ -10,6 +10,8 @@ import (
 	"strings"
 	"time"
 
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+
 	"github.com/swizzin/s5n/internal/kube"
 	"github.com/swizzin/s5n/internal/say"
 )
@@ -343,6 +345,64 @@ func (d *CertificateDecision) redirect(ctx context.Context, cl Cluster, name str
 	}
 	step.Done(fmt.Sprintf("applied HTTP->HTTPS redirect for %s (/.well-known/acme-challenge/ stays with the solver)", d.Host))
 	return nil
+}
+
+// HostServed reports whether a host already has the two objects root's per-host
+// step writes: its HTTPS listener on the Gateway and its Certificate. It reads
+// the cluster, never a record box kept, so a listener somebody deleted is
+// missing again and the next run puts it back.
+//
+// The port-80 listener and the Allow are not part of the answer: they exist
+// only to let a certificate issue, and a host whose certificate is Ready but
+// whose challenge listener was removed still serves its app.
+func (k *Kubernetes) HostServed(ctx context.Context, host string) (bool, error) {
+	gw, ok, err := k.Get(ctx, "gateway.networking.k8s.io", "v1", "Gateway", GatewayNamespace, GatewayName)
+	if err != nil {
+		return false, err
+	}
+	if !ok || !hasHTTPSListener(gw, ListenerName(host)) {
+		return false, nil
+	}
+	serves, err := k.Serves(ctx, "cert-manager.io", "v1", "Certificate")
+	if err != nil {
+		return false, err
+	}
+	if !serves {
+		return false, nil
+	}
+	_, ok, err = k.Get(ctx, "cert-manager.io", "v1", "Certificate", GatewayNamespace, CertificateName(host))
+	if err != nil {
+		return false, err
+	}
+	return ok, nil
+}
+
+// hasHTTPSListener reads one listener out of a Gateway document: the host's own
+// TLS terminator, by the name attachHTTPS writes it under.
+func hasHTTPSListener(gateway map[string]any, name string) bool {
+	listeners, _, _ := unstructured.NestedSlice(gateway, "spec", "listeners")
+	for _, raw := range listeners {
+		listener, _ := raw.(map[string]any)
+		if listener["name"] != name {
+			continue
+		}
+		return listener["protocol"] == "HTTPS"
+	}
+	return false
+}
+
+// HostAccess answers whether this identity may write the per-host objects: the
+// Gateway's listeners, the Certificate, its route and its Allow.
+//
+// It is the same list the per-host write preflights (certificateAccess), asked
+// before the step so a user's run stops naming root's command instead of
+// failing on its first write. A denial is an answer, not an error.
+func HostAccess(ctx context.Context, cl Cluster) (bool, error) {
+	denied, err := kube.Denied(ctx, cl, certificateAccess())
+	if err != nil {
+		return false, err
+	}
+	return len(denied) == 0, nil
 }
 
 // certificateAccess is the RBAC the per-host write needs, checked before the

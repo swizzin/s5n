@@ -997,7 +997,7 @@ print("  app routes: %d HTTPRoutes, none pins a sectionName" % len(items))
   # Seerr and Plex are served at seerr.<domain> and plex.<domain>: their own
   # certificate from Pebble, their own listeners, and a route by Host. The
   # final card and the grant are what init decided; these assertions are what
-  # the cluster got.
+  # cluster got.
   log "the app hosts: a certificate and a listener each, and Seerr on its own name"
   for app_host in "plex:${PLEX_HOST}" "seerr:${SEERR_HOST}"; do
     app=${app_host%%:*}; host=${app_host##*:}
@@ -1742,6 +1742,101 @@ EOF
   # and neither apply nor a re-run of init writes it when nothing changed.
   [ "$(sha256sum "$WORK/grant.yaml" | cut -d' ' -f1)" = "$grant_before" ] ||
     { echo "box rewrote the grant"; fail=1; }
+
+  # ---- a host that has neither its listener nor its certificate ---------------
+  # The case the promise is about: the release renders a route on seerr.<domain>
+  # while nothing answers there, so the app is unreachable and nothing says so
+  # (docs/box.md, "No run leaves an app host without its listener"). The box is
+  # put in the state an install without Seerr leaves: the app off, and root's
+  # per-host objects (Certificate, both listeners) gone. The login's rule for
+  # the name stays -- apply writes the host, not the edge's access control, and
+  # that gap is the reason this scenario keeps the rule instead of installing
+  # without Seerr (internal/login is not apply's; init is what writes it).
+  log "turning Seerr off, then removing the host root had written for it"
+  python3 - "$WORK/grant.yaml" <<'PY' || { echo "could not turn Seerr off in the grant"; fail=1; }
+import re, sys
+path = sys.argv[1]
+text = open(path).read()
+updated, count = re.subn(r"(?m)^(  seerr:\n    enabled: )true$", r"\1false", text)
+if count != 1:
+    sys.exit("the grant does not say apps.seerr.enabled: true (%d matches)" % count)
+open(path, "w").write(updated)
+PY
+  if apply "$WORK/apply-off.txt"; then
+    cat "$WORK/apply-off.txt"
+  else
+    cat "$WORK/apply-off.txt"; fail=1
+  fi
+  seerr_label=${SEERR_HOST//./-}
+  seerr_cert=s5n-tls-${seerr_label}
+  $K -n s5n-gateway delete certificate "$seerr_cert" --ignore-not-found >/dev/null || fail=1
+  # Both listeners, by index from the back so the earlier ones keep theirs.
+  listener_patch=$(python3 - "$($K -n s5n-gateway get gateway s5n -o json)" "$seerr_label" <<'PY'
+import json, sys
+gateway = json.loads(sys.argv[1])
+label = sys.argv[2]
+gone = {"https-" + label, "http-" + label}
+print(json.dumps([{"op": "remove", "path": "/spec/listeners/%d" % i}
+                  for i, l in reversed(list(enumerate(gateway["spec"]["listeners"])))
+                  if l["name"] in gone]))
+PY
+) || { echo "could not read the Gateway's listeners"; fail=1; }
+  $K -n s5n-gateway patch gateway s5n --type=json -p "$listener_patch" >/dev/null ||
+    { echo "could not remove ${SEERR_HOST}'s listeners"; fail=1; }
+  if $K -n s5n-gateway get certificate "$seerr_cert" >/dev/null 2>&1; then
+    echo "the Certificate ${seerr_cert} is still there"
+    fail=1
+  fi
+  for gone in "https-${seerr_label}" "http-${seerr_label}"; do
+    still=$($K -n s5n-gateway get gateway s5n \
+      -o jsonpath="{.spec.listeners[?(@.name==\"${gone}\")].protocol}" 2>/dev/null || true)
+    [ -z "$still" ] || { echo "the listener ${gone} is still on the Gateway"; fail=1; }
+  done
+
+  # Root turns the app back on in the grant. There is no `box install` yet, so
+  # this is the only way an app is added to a seedbox.
+  log "box apply: an app host with no listener gets one before the release moves"
+  python3 - "$WORK/grant.yaml" <<'PY' || { echo "could not turn Seerr on in the grant"; fail=1; }
+import re, sys
+path = sys.argv[1]
+text = open(path).read()
+updated, count = re.subn(r"(?m)^(  seerr:\n    enabled: )false$", r"\1true", text)
+if count != 1:
+    sys.exit("the grant does not say apps.seerr.enabled: false (%d matches)" % count)
+open(path, "w").write(updated)
+PY
+  if apply "$WORK/apply-seerr.txt"; then
+    cat "$WORK/apply-seerr.txt"
+  else
+    cat "$WORK/apply-seerr.txt"; fail=1
+  fi
+  grep -qF "Certificate and listener for ${SEERR_HOST}" "$WORK/apply-seerr.txt" ||
+    { echo "apply did not show the certificate it would write for ${SEERR_HOST}"; fail=1; }
+  grep -qF "applied Certificate s5n-gateway/${seerr_cert} (issuer s5n-letsencrypt)" "$WORK/apply-seerr.txt" ||
+    { echo "apply did not write ${seerr_cert} with the production issuer"; fail=1; }
+  # The order is the promise: the host is served before the release that renders
+  # its route moves, so there is never a route on a name nothing answers on.
+  seerr_cert_line=$(grep -n "applied Certificate s5n-gateway/${seerr_cert}" "$WORK/apply-seerr.txt" | head -1 | cut -d: -f1 || true)
+  seerr_helm_line=$(grep -n "applied: s5n revision" "$WORK/apply-seerr.txt" | head -1 | cut -d: -f1 || true)
+  echo "  certificate at line ${seerr_cert_line}, release at line ${seerr_helm_line}"
+  if [ -z "$seerr_cert_line" ] || [ -z "$seerr_helm_line" ] || [ "$seerr_cert_line" -ge "$seerr_helm_line" ]; then
+    echo "the per-host step did not run before the release moved"
+    fail=1
+  fi
+  seerr_port=$($K -n s5n-gateway get gateway s5n \
+    -o jsonpath="{.spec.listeners[?(@.name==\"https-${seerr_label}\")].port}" 2>/dev/null || true)
+  echo "  the listener https-${seerr_label} is on port ${seerr_port}"
+  [ "$seerr_port" = 443 ] || { echo "apply did not add the HTTPS listener for ${SEERR_HOST}"; fail=1; }
+  $K -n s5n-gateway wait --for=condition=Ready "certificate/${seerr_cert}" --timeout=180s ||
+    { echo "the Certificate ${seerr_cert} never became Ready"; fail=1; }
+  # And the app answers through Envoy by Host: the route the release rendered is
+  # now attached to a listener that serves the name.
+  seerr_code=$(curl -sS -L -o "$WORK/seerr-again.html" -w '%{http_code}' \
+    --resolve "${SEERR_HOST}:443:${gw_addr}" --cacert "$WORK/pebble-root.pem" \
+    "https://${SEERR_HOST}/" 2>/dev/null || true)
+  echo "  GET https://${SEERR_HOST}/ after the apply: ${seerr_code}"
+  [ "$seerr_code" = 200 ] || { echo "the app host did not answer after apply served it: ${seerr_code}"; fail=1; }
+  grep -qi '<!doctype html' "$WORK/seerr-again.html" || { echo "the app host served no HTML after apply"; fail=1; }
 
   # ---- the claims outlive the release ----------------------------------------
   # The one destructive command an operator runs is `helm uninstall`: the data

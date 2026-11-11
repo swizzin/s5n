@@ -542,6 +542,11 @@ func runApply(ctx context.Context, args []string) {
 
 	opts := o.options()
 	opts.BoxValues = boxValues(kc)
+	// Root's per-host TLS: a values file that enables an app served at a host
+	// of its own gets that host's listener and Certificate before the release
+	// moves, so no apply leaves the app unreachable (docs/box.md,
+	// "No run leaves an app host without its listener").
+	opts.Hosts = applyHosts{kubeconfig: kc, out: out, resolver: setup.NetResolver{}}
 	res, err := app.Apply(ctx, opts)
 	if err != nil {
 		if errors.Is(err, release.ErrCancelled) {
@@ -759,19 +764,10 @@ func (o *initFlags) run(ctx context.Context, kubeconfig string, yes, plain bool,
 			return err
 		}
 		out.Phase("certificate")
-		for _, h := range res.Hosts {
-			if h.Host == "" || h.Issuer == "" {
-				continue
-			}
-			cert := &platform.CertificateDecision{
-				Host:   h.Host,
-				Issuer: h.Issuer,
-				Open:   func() (platform.CertificateCluster, error) { return platform.NewCluster(kc) },
-				Say:    out,
-			}
-			if _, err := cert.Apply(ctx); err != nil {
-				return err
-			}
+		// The same per-host step apply runs for a host it is about to serve
+		// (setup.ApplyHosts): init decided the names, this writes each one.
+		if err := setup.ApplyHosts(ctx, certificateStep(kc, out), res.Hosts); err != nil {
+			return err
 		}
 	}
 	if res.Domain != "" {
@@ -792,7 +788,7 @@ func (o *initFlags) run(ctx context.Context, kubeconfig string, yes, plain bool,
 		if !h.NoDNS {
 			continue
 		}
-		out.Warn(fmt.Sprintf("%s has no DNS record, so its certificate is self-signed; %s, then run box init again to move it to Let's Encrypt", h.Host, h.Record))
+		out.Warn(setup.NoDNSWarning(h, "init"))
 	}
 	return nil
 }

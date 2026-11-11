@@ -27,6 +27,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/swizzin/s5n/internal/catalog"
 	"github.com/swizzin/s5n/internal/say"
 	"github.com/swizzin/s5n/internal/seedbox"
 	"github.com/swizzin/s5n/internal/wait"
@@ -93,6 +94,32 @@ type Confirmer interface {
 	Ask(question string) (bool, error)
 }
 
+// HostPlan is what apply tells its per-host TLS step. Domain is the box's own
+// host name, the answer every app host has to resolve to; Hosts are the names
+// this run would serve at a host of their own and that have no listener yet;
+// Forced is tls.issuer when the files force one, so the certificate an apply
+// writes names the same issuer init would have chosen.
+type HostPlan struct {
+	Domain string
+	Forced string
+	Hosts  []string
+}
+
+// Hosts is root's per-host TLS step: the listener and Certificate an app
+// served at a name of its own needs (docs/box.md, "No run leaves an app host
+// without its listener").
+//
+// Missing is the read apply makes with its diff, so a host that is missing is
+// work this run shows and does even when the release itself does not change.
+// Ensure is the write, after the confirm and before the release moves: the DNS
+// check, the access question, then one listener and Certificate per name. A
+// stop in either leaves the release and the old routes untouched, which is why
+// the step is an interface with two halves rather than one call at the end.
+type Hosts interface {
+	Missing(ctx context.Context, plan HostPlan) ([]string, error)
+	Ensure(ctx context.Context, plan HostPlan) error
+}
+
 // Options are one `box apply`.
 type Options struct {
 	// Chart is a chart release the caller has already loaded. `box init` sets
@@ -133,6 +160,11 @@ type Options struct {
 	// use: a value that is box's, not the operator's, and that has to be
 	// recomputed on every apply so a re-run is still a no-op.
 	BoxValues func(ctx context.Context) (map[string]any, error)
+	// Hosts is root's per-host TLS step. When it is nil apply does not look
+	// for a host without a listener: `box init` hands over to apply and then
+	// runs the step itself, one host at a time, so the names exist before the
+	// release does. A bare `box apply` sets it, because nothing else would.
+	Hosts Hosts
 }
 
 // ChartRef is the reference the chart source is asked for. loadChart uses it,
@@ -148,6 +180,9 @@ type Result struct {
 	// Host is the domain this release serves, when its values name one.
 	Host    string
 	Changes []seedbox.Change
+	// Hosts are the app hosts this run gave a listener and a Certificate,
+	// because they had neither and the values serve them.
+	Hosts []string
 	// Storage is what box found it had to create, as Plan returned it.
 	Storage []StorageObject
 	// NamespaceCreated says apply created the seedbox's namespace, which only
@@ -304,14 +339,34 @@ func (a *Applier) Apply(ctx context.Context, opts Options) (Result, error) {
 	}
 	res.Storage = plan
 
-	if exists && len(res.Changes) == 0 && len(plan) == 0 && nsp.Exists {
+	// Root's per-host TLS, read here with the diff: an app served at a host of
+	// its own that has no listener yet is a route on a name nothing answers on,
+	// so the step is part of this run's work even when the release itself does
+	// not change (docs/box.md, "No run leaves an app host without its
+	// listener"). The read is the cluster's, not a record box kept.
+	var hostPlan HostPlan
+	if opts.Hosts != nil {
+		hostPlan, err = a.hostPlan(ctx, opts, chart, values)
+		if err != nil {
+			return res, err
+		}
+		res.Hosts = hostPlan.Hosts
+	}
+
+	if exists && len(res.Changes) == 0 && len(plan) == 0 && nsp.Exists && len(hostPlan.Hosts) == 0 {
 		r.Line(fmt.Sprintf("%s in %s: nothing to change", ReleaseName, namespace))
 		return res, nil
 	}
 
 	if exists {
-		r.Line(fmt.Sprintf("%s in %s: %d %s", ReleaseName, namespace, len(res.Changes), plural(len(res.Changes), "change", "changes")))
-		r.Diff(changeItems(res.Changes))
+		if len(res.Changes) > 0 {
+			r.Line(fmt.Sprintf("%s in %s: %d %s", ReleaseName, namespace, len(res.Changes), plural(len(res.Changes), "change", "changes")))
+			r.Diff(changeItems(res.Changes))
+		} else {
+			// The only work this run has is a host without its listener, which
+			// is why the early return above did not take it.
+			r.Line(fmt.Sprintf("%s in %s: the release is unchanged", ReleaseName, namespace))
+		}
 	} else {
 		r.Line(fmt.Sprintf("%s in %s: first install", ReleaseName, namespace))
 		var details []string
@@ -326,6 +381,13 @@ func (a *Applier) Apply(ctx context.Context, opts Options) (Result, error) {
 		}
 	}
 	a.printPlan(r, nsp, plan)
+	if len(hostPlan.Hosts) > 0 {
+		lines := make([]string, 0, len(hostPlan.Hosts))
+		for _, host := range hostPlan.Hosts {
+			lines = append(lines, "Certificate and listener for "+host)
+		}
+		r.List("certificates", lines)
+	}
 
 	ok, err := a.Confirm.Ask(fmt.Sprintf("apply %s in %s?", ReleaseName, namespace))
 	if err != nil {
@@ -347,6 +409,24 @@ func (a *Applier) Apply(ctx context.Context, opts Options) (Result, error) {
 		if err := mergeTransient(values, extra); err != nil {
 			return res, err
 		}
+	}
+
+	// Root's per-host TLS goes before the release moves, and after the confirm
+	// so a "no" writes nothing: a route on a host with no listener is an app
+	// nobody can reach, and a stop here leaves the release and the old routes
+	// exactly as they were. `box update` will call this same step.
+	if len(hostPlan.Hosts) > 0 {
+		if err := opts.Hosts.Ensure(ctx, hostPlan); err != nil {
+			return res, err
+		}
+	}
+
+	// Only the per-host step had work: the release, its namespace and its
+	// storage are all as they were, so this run makes no Helm revision. A
+	// certificate nobody has to renew must not churn the release users roll
+	// back to.
+	if exists && len(res.Changes) == 0 && len(plan) == 0 && nsp.Exists {
+		return res, nil
 	}
 
 	// Everything box can check has been checked: the namespace is there or may
@@ -423,6 +503,65 @@ func (a *Applier) loadChart(ctx context.Context, opts Options) (Chart, error) {
 		return Chart{}, errors.New("no chart source: box reads its chart from the registry")
 	}
 	return a.Charts.Load(ctx, opts.ChartRef())
+}
+
+// hostPlan is the per-host TLS work this apply has: every name the values serve
+// at a host of its own, less the ones the cluster already has a listener and a
+// Certificate for.
+//
+// Which apps get a host is the catalog's (`exposure: host`), so this reads the
+// chart release's manifest the same way init does. A chart that ships no
+// catalog serves no app at a host of its own, and one whose values name no
+// domain cannot name one.
+func (a *Applier) hostPlan(ctx context.Context, opts Options, chart Chart, values map[string]any) (HostPlan, error) {
+	plan := HostPlan{Domain: hostOf(values), Forced: forcedIssuer(values)}
+	hosts, err := hostedHosts(chart, values, plan.Domain)
+	if err != nil {
+		return plan, err
+	}
+	if len(hosts) == 0 {
+		return plan, nil
+	}
+	missing, err := opts.Hosts.Missing(ctx, HostPlan{Domain: plan.Domain, Forced: plan.Forced, Hosts: hosts})
+	if err != nil {
+		return plan, err
+	}
+	plan.Hosts = missing
+	return plan, nil
+}
+
+// hostedHosts is every name the values serve at a host of its own, in catalog
+// order: <app>.<domain> for each enabled app whose entry says `exposure: host`.
+func hostedHosts(chart Chart, values map[string]any, domain string) ([]string, error) {
+	if len(chart.Catalog) == 0 || domain == "" {
+		return nil, nil
+	}
+	cat, err := catalog.Parse(chart.Ref+"/"+catalog.FileName, chart.Catalog, chart.Values, chart.Schema)
+	if err != nil {
+		return nil, err
+	}
+	apps, _ := values["apps"].(map[string]any)
+	var hosts []string
+	for _, name := range cat.Names() {
+		app, ok := cat.App(name)
+		if !ok || app.Exposure != catalog.ExposureHost {
+			continue
+		}
+		entry, _ := apps[name].(map[string]any)
+		if on, _ := entry["enabled"].(bool); !on {
+			continue
+		}
+		hosts = append(hosts, name+"."+domain)
+	}
+	return hosts, nil
+}
+
+// forcedIssuer is tls.issuer as the files left it in the effective document:
+// "" means each name's DNS answer decides.
+func forcedIssuer(values map[string]any) string {
+	tls, _ := values["tls"].(map[string]any)
+	forced, _ := tls["issuer"].(string)
+	return strings.TrimSpace(forced)
 }
 
 // waitReceipt waits for a receipt from this run. A receipt left by an earlier

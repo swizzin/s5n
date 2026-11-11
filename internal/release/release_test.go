@@ -175,6 +175,7 @@ type fakes struct {
 	pathsInNode bool
 	dataPath    string
 	configPath  string
+	hosts       *fakeHosts
 }
 
 func newFakes(t *testing.T) *fakes {
@@ -231,12 +232,16 @@ func newFakes(t *testing.T) *fakes {
 
 func (f *fakes) apply(t *testing.T) (Result, error) {
 	t.Helper()
-	return f.app.Apply(context.Background(), Options{
+	opts := Options{
 		Chart:       testChartPtr(t),
 		GrantPath:   f.grantPath,
 		ValuesPath:  f.values,
 		PathsInNode: f.pathsInNode,
-	})
+	}
+	if f.hosts != nil {
+		opts.Hosts = f.hosts
+	}
+	return f.app.Apply(context.Background(), opts)
 }
 
 // rewrite replaces fixed strings in a file, so a fixture can name paths the

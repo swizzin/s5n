@@ -1,0 +1,11 @@
+# A slice of charts/s5n/catalog.yaml, the same way values.yaml is a slice of the
+# chart's: the three apps the fixture chart carries, and one of them served at a
+# host of its own, so apply's per-host step has a name to find.
+apps:
+  qbittorrent:
+    description: the download client
+  sonarr:
+    description: the television library
+  radarr:
+    description: the film library, served at a name of its own
+    exposure: host

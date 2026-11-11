@@ -28,11 +28,16 @@ type Host struct {
 	Record string
 }
 
-// appHosts resolves every name an enabled app is served at (in catalog order) and checks it
-// answers where the box's domain does. The check is the one thing that stops
-// init for a name: a certificate for a name that does not point at the box can
+// appHostsFor resolves every name an enabled app is served at (in catalog order) and checks
+// it answers where the box's domain does. The check is the one thing that stops
+// a run for a name: a certificate for a name that does not point at the box can
 // never issue, so the run ends naming the record to add instead of leaving a
 // box that is half served.
+//
+// It is one function rather than init's method because apply runs the same
+// decision for a host that has no listener yet (TLSHosts.Ensure): the two
+// commands must not disagree about which name is servable, and command is only
+// the one box command the stop tells the operator to run again.
 //
 // The two empty answers are a match on purpose. A test box with a made-up name
 // resolves nothing, and so does every name under it; that is not a mismatch,
@@ -40,23 +45,23 @@ type Host struct {
 // (docs/box.md, "Which issuer a host gets"). A real mismatch is one name
 // answering and the other not, or two names answering with different
 // addresses.
-func (d *Decision) appHosts(ctx context.Context, domain string, dom hostAnswer, forced string, apps []string) ([]Host, error) {
+func appHostsFor(ctx context.Context, resolver Resolver, cat *catalog.Catalog, domain string, dom hostAnswer, forced, command string, apps []string) ([]Host, error) {
 	var out []Host
 	for _, app := range apps {
-		entry, ok := d.Catalog.App(app)
+		entry, ok := cat.App(app)
 		if !ok || entry.Exposure != catalog.ExposureHost {
 			continue
 		}
 		host := app + "." + domain
-		ans := resolveHost(ctx, d.Resolver, host)
-		if err := appHostProblem(domain, dom, host, ans); err != nil {
+		ans := resolveHost(ctx, resolver, host)
+		if err := appHostProblem(domain, dom, host, ans, command); err != nil {
 			return nil, err
 		}
 		issuer, why := issuerFor(host, ans, forced)
 		noDNS := !ans.resolves() && issuer == IssuerSelfSigned
 		record := ""
 		if noDNS {
-			record = fmt.Sprintf("add either a wildcard *.%s or a record for %s", domain, host)
+			record = appHostRecord(domain, host)
 		}
 		out = append(out, Host{
 			Host:   host,
@@ -75,7 +80,7 @@ func (d *Decision) appHosts(ctx context.Context, domain string, dom hostAnswer, 
 // panels and covers every app, and a per-name record is what an operator who
 // cannot use a wildcard needs, so the choice is theirs and the message never
 // assumes one.
-func appHostProblem(domain string, dom hostAnswer, host string, ans hostAnswer) error {
+func appHostProblem(domain string, dom hostAnswer, host string, ans hostAnswer, command string) error {
 	domOK, appOK := dom.resolves(), ans.resolves()
 	if !domOK && !appOK {
 		return nil
@@ -86,14 +91,14 @@ func appHostProblem(domain string, dom hostAnswer, host string, ans hostAnswer) 
 	wildcard := "*." + domain
 	switch {
 	case domOK && !appOK:
-		return fmt.Errorf("app hosts: %s resolves, but %s does not; add a DNS record for %s (a wildcard %s, or %s), then run box init again",
-			domain, host, host, wildcard, host)
+		return fmt.Errorf("app hosts: %s resolves, but %s does not; add a DNS record for %s (a wildcard %s, or %s), then run box %s again",
+			domain, host, host, wildcard, host, command)
 	case !domOK && appOK:
-		return fmt.Errorf("app hosts: %s resolves, but %s does not; add a DNS record for %s and one for %s (a wildcard %s covers both), then run box init again",
-			host, domain, domain, host, wildcard)
+		return fmt.Errorf("app hosts: %s resolves, but %s does not; add a DNS record for %s and one for %s (a wildcard %s covers both), then run box %s again",
+			host, domain, domain, host, wildcard, command)
 	default:
-		return fmt.Errorf("app hosts: %s resolves to %s, but %s resolves to %s; point %s at the same addresses (a wildcard %s, or %s), then run box init again",
-			host, strings.Join(ans.addresses(), ", "), domain, strings.Join(dom.addresses(), ", "), host, wildcard, host)
+		return fmt.Errorf("app hosts: %s resolves to %s, but %s resolves to %s; point %s at the same addresses (a wildcard %s, or %s), then run box %s again",
+			host, strings.Join(ans.addresses(), ", "), domain, strings.Join(dom.addresses(), ", "), host, wildcard, host, command)
 	}
 }
 
