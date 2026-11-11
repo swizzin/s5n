@@ -113,52 +113,31 @@ func (c *Config) validate() error {
 		return fmt.Errorf("wiring config has nothing enabled")
 	}
 	for i, inst := range c.Instances {
-		switch inst.Kind {
-		case "sonarr", "radarr":
-		default:
-			return fmt.Errorf("instance %d: unknown kind %q", i, inst.Kind)
-		}
-		for field, value := range map[string]string{
-			"name": inst.Name, "url": inst.URL, "apiKeyFile": inst.APIKeyFile,
-			"category": inst.Category, "savePath": inst.SavePath, "rootFolder": inst.RootFolder,
-		} {
-			if value == "" {
-				return fmt.Errorf("instance %q: %s is empty", inst.Name, field)
-			}
+		if err := validateInstance(i, inst); err != nil {
+			return err
 		}
 	}
 	if c.Qbittorrent != nil {
-		for field, value := range map[string]string{
+		if err := requireFields("qbittorrent", map[string]string{
 			"url": c.Qbittorrent.URL, "username": c.Qbittorrent.Username,
 			"passwordFile": c.Qbittorrent.PasswordFile,
-		} {
-			if value == "" {
-				return fmt.Errorf("qbittorrent: %s is empty", field)
-			}
+		}); err != nil {
+			return err
 		}
 	}
 	if c.Prowlarr != nil {
-		for field, value := range map[string]string{
+		if err := requireFields("prowlarr", map[string]string{
 			"url": c.Prowlarr.URL, "selfUrl": c.Prowlarr.SelfURL, "apiKeyFile": c.Prowlarr.APIKeyFile,
-		} {
-			if value == "" {
-				return fmt.Errorf("prowlarr: %s is empty", field)
-			}
+		}); err != nil {
+			return err
 		}
 	}
 	if c.Plex != nil && c.Plex.URL == "" {
 		return fmt.Errorf("plex: url is empty")
 	}
 	if c.Tautulli != nil {
-		for field, value := range map[string]string{
-			"url": c.Tautulli.URL, "apiKeyFile": c.Tautulli.APIKeyFile,
-		} {
-			if value == "" {
-				return fmt.Errorf("tautulli: %s is empty", field)
-			}
-		}
-		if c.Plex == nil {
-			return fmt.Errorf("tautulli is configured but plex is not")
+		if err := validateTautulli(c.Tautulli, c.Plex); err != nil {
+			return err
 		}
 	}
 	if c.Seerr != nil && c.Seerr.URL == "" {
@@ -166,12 +145,58 @@ func (c *Config) validate() error {
 	}
 	// Categories drive qBittorrent save paths; two instances sharing a name but
 	// not a path would fight over the same downloads.
+	return validateCategories(c.Instances)
+}
+
+// validateInstance checks one Arr instance: its kind must be one the wiring
+// job knows how to register, and every field it registers must be set.
+func validateInstance(index int, inst Instance) error {
+	switch inst.Kind {
+	case "sonarr", "radarr":
+	default:
+		return fmt.Errorf("instance %d: unknown kind %q", index, inst.Kind)
+	}
+	return requireFields(fmt.Sprintf("instance %q", inst.Name), map[string]string{
+		"name": inst.Name, "url": inst.URL, "apiKeyFile": inst.APIKeyFile,
+		"category": inst.Category, "savePath": inst.SavePath, "rootFolder": inst.RootFolder,
+	})
+}
+
+// validateTautulli checks the fields the Tautulli steps need, and the one
+// dependency those steps have: the PMS link has no meaning without Plex.
+func validateTautulli(t *TautulliConfig, plex *PlexConfig) error {
+	if err := requireFields("tautulli", map[string]string{
+		"url": t.URL, "apiKeyFile": t.APIKeyFile,
+	}); err != nil {
+		return err
+	}
+	if plex == nil {
+		return fmt.Errorf("tautulli is configured but plex is not")
+	}
+	return nil
+}
+
+// validateCategories refuses one category pointing at two save paths, because
+// both instances would then write into the same downloads.
+func validateCategories(instances []Instance) error {
 	seen := map[string]string{}
-	for _, inst := range c.Instances {
+	for _, inst := range instances {
 		if prev, ok := seen[inst.Category]; ok && prev != inst.SavePath {
 			return fmt.Errorf("category %q is used with two save paths (%s, %s)", inst.Category, prev, inst.SavePath)
 		}
 		seen[inst.Category] = inst.SavePath
+	}
+	return nil
+}
+
+// requireFields reports the first empty field, named with the component it
+// belongs to. The fields are a map because each component's set is written
+// once here, next to the struct it mirrors.
+func requireFields(component string, fields map[string]string) error {
+	for field, value := range fields {
+		if value == "" {
+			return fmt.Errorf("%s: %s is empty", component, field)
+		}
 	}
 	return nil
 }
