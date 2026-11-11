@@ -34,6 +34,17 @@
 #   default   a starting answer; must match the kind
 #   optional  an empty answer is allowed (the app copes without it)
 #
+# An entry also says how the chart serves the app:
+#
+#   exposure: path   under /<name> on the box's own host name (the default)
+#   exposure: host   at <app>.<domain>, with its own listener and certificate,
+#                    for a UI that writes absolute asset paths and so cannot
+#                    live under a prefix. The chart owns this decision; it is
+#                    not a values key, because a user choosing it wrongly is a
+#                    broken UI, not tuning. `box init` resolves each such name
+#                    and checks it answers where the domain does before it
+#                    writes anything for it (docs/box.md, "Certificates").
+#
 # A new *kind* of question is the only catalog change that needs a box release
 # (docs/box.md, "The catalog and box").
 apps:
@@ -72,6 +83,9 @@ apps:
     description: the media server your players talk to
     instances: false
     default: true
+    # Plex's web app writes absolute asset paths (/web/...), so it is served at
+    # plex.<domain> rather than under /plex.
+    exposure: host
     questions:
       - key: secrets.plexClaimToken
         prompt: Plex claim token
@@ -89,6 +103,9 @@ apps:
     description: a request page for the people you share with
     instances: false
     default: true
+    # Same as Plex: Seerr's bundle loads its assets from the site root, so the
+    # path route broke the page and it is served at seerr.<domain>.
+    exposure: host
     questions: []
 
   # Opt-in: a second UI for the same qBittorrent, not something a box should

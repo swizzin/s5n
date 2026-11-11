@@ -19,3 +19,11 @@ apps:
       - key: apps.beta.token
         prompt: beta token
         kind: transient
+  # A plain app served at a host of its own: init resolves gamma.<domain> and
+  # certifies it, and its rules are about the name rather than a path.
+  gamma:
+    description: the app with its own host
+    instances: false
+    default: false
+    exposure: host
+    questions: []

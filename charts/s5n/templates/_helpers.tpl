@@ -146,7 +146,33 @@ that order (wiring.json's instance list is per-Arr work with no cross-entry orde
 {{- toJson $out -}}
 {{- end -}}
 
-{{/* Restricted-profile container security context, shared by every container. */}}
+{{- /*
+s5n.exposure: how the chart serves one app, from the catalog manifest, which
+ships inside the chart and values cannot override. "path" is the default;
+"host" means the app is served at <app>.<domain> with a listener and
+certificate of its own, because its UI writes absolute asset paths. The chart
+owns this, not a values file: an operator choosing it wrongly gets a broken UI,
+not tuning. internal/catalog validates the value box reads; the chart trusts
+the file it ships.
+*/ -}}
+{{- define "s5n.exposure" -}}
+{{- $catalog := .root.Files.Get "catalog.yaml" | fromYaml -}}
+{{- $entry := get $catalog.apps .app | default dict -}}
+{{- default "path" $entry.exposure -}}
+{{- end -}}
+
+{{- /*
+s5n.appHost: the name one app is served on when it has a host of its own,
+<app>.<domain>. A domain is required: a route on a name that is not there would
+serve nothing, so a plain install that leaves gateway.host empty is refused
+with the app named.
+*/ -}}
+{{- define "s5n.appHost" -}}
+{{- $domain := required (printf "gateway.host: apps.%s is served at its own host name (<app>.<domain>), so set gateway.host to the box's domain" .app) .root.Values.gateway.host -}}
+{{- printf "%s.%s" .app $domain -}}
+{{- end -}}
+
+{{- /* Restricted-profile container security context, shared by every container. */}}
 {{- define "s5n.containerSecurity" -}}
 allowPrivilegeEscalation: false
 readOnlyRootFilesystem: true

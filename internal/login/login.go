@@ -174,6 +174,11 @@ type Options struct {
 	// what the access_control rules are derived from, and it is the same
 	// document the release renders, so a 4K instance that exists has rules.
 	Values map[string]any
+	// Hosted are the apps the chart serves at <app>.<domain> instead of a
+	// path. The edge asks Authelia about every listener, so each of those
+	// names needs its rule, and the app's path rule must not exist: the chart
+	// no longer serves the app there.
+	Hosted []string
 }
 
 // Decision is one login install. Open and Storage are called only once the
@@ -359,7 +364,7 @@ func (d *Decision) Apply(ctx context.Context, opts Options) (Result, error) {
 		Host:          opts.Host,
 		Login:         opts.Login,
 		EncryptionKey: key,
-		Rules:         authelia.Rules(opts.Host, opts.Login, authelia.InstancesFromValues(opts.Values)),
+		Rules:         authelia.Rules(opts.Host, opts.Login, authelia.InstancesFromValues(opts.Values), opts.Hosted),
 	})
 	if err != nil {
 		return res, undo(err)

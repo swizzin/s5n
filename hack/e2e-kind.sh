@@ -13,6 +13,13 @@ cd "$(dirname "$0")/.."
 KIND=${KIND:-kind}
 CLUSTER=s5n
 NS=seedbox
+# The box's domain. Plex and Seerr are served at plex.<domain> and
+# seerr.<domain> -- the catalog says so, because their UIs write absolute asset
+# paths -- so a release needs a domain to render at all, and every request
+# through the Gateway names it (the routes are host-matched).
+DOMAIN=${DOMAIN:-box.example.test}
+PLEX_HOST="plex.${DOMAIN}"
+SEERR_HOST="seerr.${DOMAIN}"
 # Envoy Gateway's Helm chart ships its own Gateway API CRDs (crds.enabled: true), so
 # there is no separate standard-install apply here: the chart's experimental channel is
 # the exact set the pinned Envoy Gateway supports, and a separately-pinned channel could
@@ -35,6 +42,7 @@ for pin_key in k0s envoyGateway metallb certManager; do
 done
 ENVOY_GATEWAY_CHART_VERSION=${ENVOY_GATEWAY_CHART_VERSION:-$(pin envoyGateway)}
 METALLB_VERSION=${METALLB_VERSION:-$(v_tag "$(pin metallb)")}
+CERT_MANAGER_VERSION=${CERT_MANAGER_VERSION:-$(pin certManager)}
 
 # Test-only images, pinned by tag and digest. They are not box's to install, so
 # they stay in the scripts rather than the chart's platform.yaml; Renovate
@@ -42,6 +50,8 @@ METALLB_VERSION=${METALLB_VERSION:-$(v_tag "$(pin metallb)")}
 # so a bump to either the tag or the digest is one line.
 CURL_IMAGE=${CURL_IMAGE:-docker.io/curlimages/curl:8.11.1@sha256:c1fe1679c34d9784c1b0d1e5f62ac0a79fca01fb6377cdd33e90473c6f9f9a69}  # renovate: datasource=docker
 BUSYBOX_IMAGE=${BUSYBOX_IMAGE:-docker.io/library/busybox:1.36@sha256:73aaf090f3d85aa34ee199857f03fa3a95c8ede2ffd4cc2cdb5b94e566b11662}    # renovate: datasource=docker
+# Pebble 2.10.1, the ACME test server: the same image hack/e2e-box.sh pins.
+PEBBLE_IMAGE=${PEBBLE_IMAGE:-ghcr.io/letsencrypt/pebble:2.10.1@sha256:ddf230642b1a584f519f32e347de1b05a6e4c1f6c35c1863b33effeab5f78199}  # renovate: datasource=docker
 KEEP=${1:-}
 CTX="kind-${CLUSTER}"
 K="kubectl --context ${CTX}"
@@ -420,7 +430,7 @@ $K -n "$NS" delete deploy unblessed --ignore-not-found >/dev/null
 # release by name rather than install pods that wait for storage forever. A
 # server-side dry run does the cluster's lookups and writes nothing.
 log "asserting a release without its claims is refused at render"
-noclaim=$($HELM install s5n charts/s5n -n "$NS" -f hack/e2e-values.yaml --dry-run=server 2>&1) && {
+noclaim=$($HELM install s5n charts/s5n -n "$NS" -f hack/e2e-values.yaml --set gateway.host="$DOMAIN" --dry-run=server 2>&1) && {
   echo "a release whose claims do not exist rendered"; fail=1; } || true
 if grep -qF 'storage.data.existingClaim: PersistentVolumeClaim "s5n-data" does not exist in namespace "seedbox"' <<<"$noclaim"; then
   echo "  refused: missing claim s5n-data"
@@ -515,6 +525,7 @@ install_release() {
   $HELM upgrade --install s5n charts/s5n -n "$NS" \
     -f hack/e2e-values.yaml \
     -f "$WORK/apps-values.yaml" \
+    --set gateway.host="$DOMAIN" \
     --wait --timeout 15m
 }
 
@@ -593,9 +604,156 @@ done
 [ -n "$GW_ADDR" ] || { echo "Gateway never got an address"; fail=1; }
 echo "Gateway address: ${GW_ADDR}"
 
+# Every request below goes through the Gateway by name, over HTTPS: the chart's
+# routes are host-matched, and once this host has a certificate port 80 only
+# redirects. gw_get is the one way this script talks to an app.
+gw_get() {
+  curl -sS --resolve "${DOMAIN}:443:${GW_ADDR}" --cacert "$WORK/pebble-root.pem" "$@"
+}
+
+# ---- TLS: one certificate per host, Pebble issuing over HTTP-01 --------------
+# Plex and Seerr are served at names of their own (the catalog says so), so this
+# e2e certifies all three hosts the way box does after an apply: Pebble is the
+# ACME server, cert-manager solves HTTP-01 through a host's own port-80
+# listener, and the certificate each listener serves chains to Pebble's CA.
+# hack/issue-cert is the same platform.CertificateDecision box runs; this script
+# installs with Helm, so it has no `box init` to carry the objects.
+patch_coredns() { # patch_coredns <gateway-address> <host>...
+  local addr=$1; shift
+  $K -n kube-system get cm coredns -o jsonpath='{.data.Corefile}' >"$WORK/Corefile" || return 1
+  python3 - "$WORK/Corefile" "$addr" "$@" <<'PYEOF' || return 1
+import sys
+path, addr, hosts = sys.argv[1], sys.argv[2], sys.argv[3:]
+text = open(path).read()
+block = "    hosts {\n"
+for host in hosts:
+    if host in text:
+        continue
+    block += "        " + addr + " " + host + "\n"
+block += "        fallthrough\n    }\n"
+marker = "    forward . /etc/resolv.conf"
+if marker not in text:
+    raise SystemExit("the CoreDNS Corefile has no forward block to patch")
+text = text.replace(marker, block + marker, 1)
+open(path, "w").write(text)
+PYEOF
+  $K -n kube-system create cm coredns --from-file=Corefile="$WORK/Corefile" --dry-run=client -o yaml | $K apply -f - >/dev/null
+  $K -n kube-system rollout restart deploy/coredns >/dev/null
+  $K -n kube-system rollout status deploy/coredns --timeout=120s >/dev/null
+}
+
+install_pebble() {
+  log "Pebble 2.10.1 (the ACME test server) in the cluster, pinned by digest"
+  pebble_node_ip=$($K get node -o jsonpath='{.items[0].status.addresses[?(@.type=="InternalIP")].address}')
+  $K create namespace pebble --dry-run=client -o yaml | $K apply -f - >/dev/null
+  cat <<EOF | $K apply -f - >/dev/null
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: pebble
+  namespace: pebble
+data:
+  pebble-config.json: |
+    {
+      "pebble": {
+        "listenAddress": "0.0.0.0:14000",
+        "managementListenAddress": "0.0.0.0:15000",
+        "certificate": "/test/certs/localhost/cert.pem",
+        "privateKey": "/test/certs/localhost/key.pem",
+        "httpPort": 80,
+        "tlsPort": 5001,
+        "ocspResponderURL": "",
+        "externalAccountBindingRequired": false
+      }
+    }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: pebble
+  namespace: pebble
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: pebble
+  template:
+    metadata:
+      labels:
+        app: pebble
+    spec:
+      containers:
+        - name: pebble
+          image: ${PEBBLE_IMAGE}
+          args: ["-config", "/config/pebble-config.json"]
+          ports:
+            - {containerPort: 14000, name: acme}
+            - {containerPort: 15000, name: management}
+          readinessProbe:
+            tcpSocket: {port: 14000}
+            initialDelaySeconds: 2
+          volumeMounts:
+            - {name: config, mountPath: /config, readOnly: true}
+      volumes:
+        - name: config
+          configMap:
+            name: pebble
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: pebble
+  namespace: pebble
+spec:
+  type: NodePort
+  selector:
+    app: pebble
+  ports:
+    - {name: acme, port: 14000, targetPort: 14000}
+    - {name: management, port: 15000, targetPort: 15000, nodePort: 31500}
+EOF
+  $K -n pebble rollout status deploy/pebble --timeout=180s || { echo "Pebble never rolled out"; fail=1; return 0; }
+  for i in $(seq 1 60); do
+    if curl -k -fsS "https://${pebble_node_ip}:31500/roots/0" -o "$WORK/pebble-root.pem" 2>/dev/null; then
+      break
+    fi
+    if [ "$i" = 60 ]; then
+      echo "Pebble never served its root CA"; fail=1; return 0
+    fi
+    sleep 2
+  done
+  echo "  Pebble root CA in $WORK/pebble-root.pem"
+}
+
+log "Pebble and CoreDNS: the box's names answer where the Gateway is"
+install_pebble
+[ "$fail" = 0 ] || { log "FAIL"; exit 1; }
+patch_coredns "$GW_ADDR" "$DOMAIN" "$PLEX_HOST" "$SEERR_HOST" ||
+  { echo "could not patch CoreDNS for the box's names"; fail=1; }
+
+log "cert-manager ${CERT_MANAGER_VERSION} and root's issuers, pointed at Pebble"
+$HELM upgrade --install cert-manager oci://quay.io/jetstack/charts/cert-manager \
+  --version "$CERT_MANAGER_VERSION" -n cert-manager --create-namespace \
+  --set crds.enabled=true --set config.gatewayAPI.enabled=true --wait --timeout 5m >/dev/null
+$K apply -f install/platform/cert-manager/issuers.yaml >/dev/null
+# The only test-only change to root's issuer: the ACME directory. skipTLSVerify
+# is Pebble's own self-signed management certificate; the production issuer is
+# the box e2e's assertion.
+$K patch clusterissuer s5n-letsencrypt --type=merge \
+  -p '{"spec":{"acme":{"server":"https://pebble.pebble.svc:14000/dir","skipTLSVerify":true}}}' >/dev/null
+
+# The box's own name first: every app path is reached through it, and the
+# chart's routes are host-matched, so there is no plain-HTTP rendering to fall
+# back on.
+for spec in "box:${DOMAIN}" "plex:${PLEX_HOST}" "seerr:${SEERR_HOST}"; do
+  app=${spec%%:*}; host=${spec##*:}
+  log "the ${app} host: certificate and listeners for ${host}"
+  go run ./hack/issue-cert --kubeconfig "$KUBECONFIG" --host "$host" --issuer letsencrypt || fail=1
+done
+
 # Through the Gateway from the host, on its LoadBalancer address.
 for path in /sonarr/ping /radarr/ping /prowlarr/ping; do
-  code=$(curl -s -o /dev/null -w '%{http_code}' "http://${GW_ADDR}${path}")
+  code=$(gw_get -s -o /dev/null -w '%{http_code}' "https://${DOMAIN}${path}")
   echo "GET ${path} via gateway -> ${code}"; [ "$code" = 200 ] || fail=1
 done
 
@@ -606,7 +764,7 @@ done
 for spec in sonarr:api/v3 radarr:api/v3 prowlarr:api/v1; do
   app=${spec%%:*}; api=${spec##*:}
   : >"$WORK/ui-headers"
-  code=$(curl -s -D "$WORK/ui-headers" -o "$WORK/ui-body" -w '%{http_code}' "http://${GW_ADDR}/${app}/" || true)
+  code=$(gw_get -s -D "$WORK/ui-headers" -o "$WORK/ui-body" -w '%{http_code}' "https://${DOMAIN}/${app}/" || true)
   loc=$(grep -i '^location:' "$WORK/ui-headers" | tr -d '\r' | awk '{print $2}' || true)
   echo "GET /${app}/ via gateway -> ${code} location='${loc}'"
   [ "$code" = 200 ] || { echo "/${app}/ did not serve the UI: ${code}"; fail=1; }
@@ -619,35 +777,102 @@ for spec in sonarr:api/v3 radarr:api/v3 prowlarr:api/v1; do
   # The API gate must be untouched: no key is 401, the release Secret's key is
   # 200, and the status body says which method the app actually booted with, so
   # a typo in the env var name cannot pass as "the UI is open anyway".
-  code=$(curl -s -o /dev/null -w '%{http_code}' "http://${GW_ADDR}/${app}/${api}/system/status" || true)
+  code=$(gw_get -s -o /dev/null -w '%{http_code}' "https://${DOMAIN}/${app}/${api}/system/status" || true)
   echo "GET /${app}/${api}/system/status without a key -> ${code} (want 401)"
   [ "$code" = 401 ] || { echo "${app} answered its API without a key: ${code}"; fail=1; }
   apikey=$($K -n "$NS" get secret s5n-keys -o jsonpath="{.data.${app}-apikey}" | base64 -d || true)
-  status=$(curl -s -w '\n%{http_code}' -H "X-Api-Key: ${apikey}" "http://${GW_ADDR}/${app}/${api}/system/status" || true)
+  status=$(gw_get -s -w '\n%{http_code}' -H "X-Api-Key: ${apikey}" "https://${DOMAIN}/${app}/${api}/system/status" || true)
   code=${status##*$'\n'}; body=${status%$'\n'*}
   method=$(printf '%s' "$body" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("authentication"))' 2>/dev/null || true)
   echo "GET /${app}/${api}/system/status with the key -> ${code} authentication=${method}"
   [ "$code" = 200 ] || { echo "${app} refused its own API key: ${code}"; fail=1; }
   [ "$method" = external ] || { echo "${app} is not running External auth: ${method}"; fail=1; }
 done
-code=$(curl -s -o /dev/null -w '%{http_code}' "http://${GW_ADDR}/sonarr/initialize.json" || true)
+code=$(gw_get -s -o /dev/null -w '%{http_code}' "https://${DOMAIN}/sonarr/initialize.json" || true)
 echo "GET /sonarr/initialize.json via gateway -> ${code}"; [ "$code" = 200 ] || fail=1
-code=$(curl -s -o /dev/null -w '%{http_code}' "http://${GW_ADDR}/qbittorrent/")
+code=$(gw_get -s -o /dev/null -w '%{http_code}' "https://${DOMAIN}/qbittorrent/")
 echo "GET /qbittorrent/ via gateway -> ${code}"; [ "$code" = 200 ] || fail=1
+# ---- apps with a host of their own ------------------------------------------
+# Plex and Seerr are not under a path any more. Their route is <app>.<domain>,
+# their own listener serves the certificate Pebble issued for that name, and
+# their UI's absolute asset paths resolve from the site root -- which is the
+# reason they cannot live under a prefix.
+host_get() { # host_get <host> <path> <output-file-or-/dev/null>
+  curl -sS --resolve "${1}:443:${GW_ADDR}" --cacert "$WORK/pebble-root.pem" \
+    -o "$3" -w '%{http_code}' "https://${1}${2}" || true
+}
+for spec in "plex:${PLEX_HOST}" "seerr:${SEERR_HOST}"; do
+  app=${spec%%:*}; host=${spec##*:}
+  label=${host//./-}
+  cert="s5n-tls-${label}"
+  listener=$($K -n s5n-gateway get gateway s5n \
+    -o jsonpath="{.spec.listeners[?(@.name==\"https-${label}\")].tls.certificateRefs[0].name}" || true)
+  http_listener=$($K -n s5n-gateway get gateway s5n \
+    -o jsonpath="{.spec.listeners[?(@.name==\"http-${label}\")].hostname}" || true)
+  route_host=$($K -n "$NS" get httproute "$app" -o jsonpath='{.spec.hostnames[0]}' || true)
+  route_path=$($K -n "$NS" get httproute "$app" -o jsonpath='{.spec.rules[0].matches[0].path.value}' || true)
+  echo "  ${host}: route ${route_host}${route_path}, listener https-${label} -> ${listener}, http-${label} on ${http_listener}"
+  [ "$route_host" = "$host" ] || { echo "the ${app} route is on ${route_host}, want its own host"; fail=1; }
+  [ "$route_path" = / ] || { echo "the ${app} route's path is ${route_path}, want /"; fail=1; }
+  [ "$listener" = "$cert" ] || { echo "the ${app} HTTPS listener references ${listener}, want ${cert}"; fail=1; }
+  [ "$http_listener" = "$host" ] || { echo "the ${app} port-80 listener matches ${http_listener}, want ${host}"; fail=1; }
+  $K -n s5n-gateway wait --for=condition=Ready "certificate/$cert" --timeout=180s ||
+    { echo "the ${app} host's Certificate never became Ready"; fail=1; }
+  cert_issuer=$($K -n s5n-gateway get certificate "$cert" -o jsonpath='{.spec.issuerRef.name}' || true)
+  [ "$cert_issuer" = s5n-letsencrypt ] ||
+    { echo "the ${app} host's Certificate names issuer ${cert_issuer}, want the Pebble-backed production issuer"; fail=1; }
+done
+
 # Plex's /identity answers unauthenticated whether or not it is claimed, and
-# Seerr's /api/v1/settings/public answers before any admin user exists —
-# both are exactly what makes them usable readiness/reachability checks here.
-code=$(curl -s -o /dev/null -w '%{http_code}' "http://${GW_ADDR}/plex/identity")
-echo "GET /plex/identity via gateway -> ${code}"; [ "$code" = 200 ] || fail=1
+# Seerr's /api/v1/settings/public answers before any admin user exists — both
+# are exactly what makes them usable readiness/reachability checks here.
+code=$(host_get "$PLEX_HOST" /identity /dev/null)
+echo "GET https://${PLEX_HOST}/identity -> ${code}"; [ "$code" = 200 ] || fail=1
 # The regression test for the no-auth hole: Envoy connects to Plex from its own
 # pod IP, inside the cluster pod CIDR. If Plex trusted a network range covering
 # that (PLEX_NO_AUTH_NETWORKS), this library call would answer 200 with full
 # admin for anyone who can reach the Gateway. It must be 401.
-code=$(curl -s -o /dev/null -w '%{http_code}' "http://${GW_ADDR}/plex/library/sections")
-echo "GET /plex/library/sections via gateway -> ${code} (want 401)"
+code=$(host_get "$PLEX_HOST" /library/sections /dev/null)
+echo "GET https://${PLEX_HOST}/library/sections -> ${code} (want 401)"
 [ "$code" = 401 ] || { echo "Plex served /library/sections as ${code} through the Gateway: unauthenticated access"; fail=1; }
-code=$(curl -s -o /dev/null -w '%{http_code}' "http://${GW_ADDR}/seerr/api/v1/settings/public")
-echo "GET /seerr/api/v1/settings/public via gateway -> ${code}"; [ "$code" = 200 ] || fail=1
+
+# Seerr's page, its absolute assets, and no path route left behind. Absolute
+# paths are the whole reason for the move: a link to /assets/... only resolves
+# if the UI is served from the site root of its own host.
+# Seerr answers the root with a redirect of its own (to its login or its
+# first-run setup), so the page is fetched the way a browser gets it.
+code=$(curl -sS -L --resolve "${SEERR_HOST}:443:${GW_ADDR}" --cacert "$WORK/pebble-root.pem" \
+  -o "$WORK/seerr.html" -w '%{http_code}' "https://${SEERR_HOST}/" || true)
+echo "GET https://${SEERR_HOST}/ (following Seerr's own redirect) -> ${code}"
+[ "$code" = 200 ] || { echo "Seerr's own host did not serve its UI: ${code}"; fail=1; }
+grep -qi '<!doctype html' "$WORK/seerr.html" || { echo "${SEERR_HOST} answered ${code} without an HTML document"; fail=1; }
+asset=$(grep -oE '(src|href)="/[^"]+\.(js|css)"' "$WORK/seerr.html" | head -1 |
+  sed 's/^[a-z]*="//; s/"$//' || true)
+echo "  asset the page references: ${asset}"
+case "$asset" in
+  "/"*) ;;
+  "") echo "${SEERR_HOST} referenced no script or stylesheet"; fail=1 ;;
+  *) echo "the asset ${asset} is not an absolute path: Seerr is not served from its own root"; fail=1 ;;
+esac
+if [ -n "$asset" ]; then
+  code=$(host_get "$SEERR_HOST" "$asset" /dev/null)
+  echo "GET https://${SEERR_HOST}${asset} -> ${code}"; [ "$code" = 200 ] || fail=1
+fi
+code=$(host_get "$SEERR_HOST" /api/v1/settings/public /dev/null)
+echo "GET https://${SEERR_HOST}/api/v1/settings/public -> ${code}"; [ "$code" = 200 ] || fail=1
+# The old path is gone from the box's own host: a request under /seerr finds no
+# route rather than a redirect or the app.
+code=$(gw_get -s -o /dev/null -w '%{http_code}' "https://${DOMAIN}/seerr/" || true)
+echo "GET https://${DOMAIN}/seerr/ -> ${code} (want 404)"
+[ "$code" = 404 ] || { echo "/seerr still answers ${code} on the box's host: a path route was left behind"; fail=1; }
+
+# Port 80 for the box's own name is a redirect now, and each app host's own
+# port-80 listener exists for the challenge and the redirect.
+for host in "$DOMAIN" "$PLEX_HOST" "$SEERR_HOST"; do
+  code=$(curl -s -o /dev/null -w '%{http_code}' --resolve "${host}:80:${GW_ADDR}" "http://${host}/" || true)
+  echo "GET http://${host}/ -> ${code} (want 301)"
+  [ "$code" = 301 ] || { echo "${host} is not redirecting port 80 to HTTPS"; fail=1; }
+done
 
 # ---- the opt-in apps (apps-values.yaml) ---------------------------------------
 # Each serves itself under its own base path (its baseUrl / BASE_PATH, with no
@@ -657,8 +882,8 @@ echo "GET /seerr/api/v1/settings/public via gateway -> ${code}"; [ "$code" = 200
 # what makes the base-path setting right rather than merely present.
 for app in qui maintainerr; do
   : >"$WORK/${app}-headers"
-  code=$(curl -s -D "$WORK/${app}-headers" -o "$WORK/${app}.html" -w '%{http_code}' \
-    "http://${GW_ADDR}/${app}/" || true)
+  code=$(gw_get -s -D "$WORK/${app}-headers" -o "$WORK/${app}.html" -w '%{http_code}' \
+    "https://${DOMAIN}/${app}/" || true)
   loc=$(grep -i '^location:' "$WORK/${app}-headers" | tr -d '\r' | sed 's/^[Ll]ocation: *//' || true)
   echo "GET /${app}/ via gateway -> ${code} ${loc}"
   [ "$code" = 200 ] || { echo "/${app}/ did not serve its UI: ${code}"; fail=1; }
@@ -673,7 +898,7 @@ for app in qui maintainerr; do
     *) echo "the asset ${asset} is outside /${app}/: the base path did not reach the bundle"; fail=1 ;;
   esac
   if [ -n "$asset" ]; then
-    code=$(curl -s -o /dev/null -w '%{http_code}' "http://${GW_ADDR}${asset}" || true)
+    code=$(gw_get -s -o /dev/null -w '%{http_code}' "https://${DOMAIN}${asset}" || true)
     echo "GET ${asset} via gateway -> ${code}"; [ "$code" = 200 ] || fail=1
   fi
   case "$app" in
@@ -688,7 +913,7 @@ for app in qui maintainerr; do
     maintainerr)
       # BASE_PATH covers every route, health included, so this one is reachable
       # through the Gateway like any other path.
-      code=$(curl -s -o /dev/null -w '%{http_code}' "http://${GW_ADDR}/${app}/api/health/ready" || true)
+      code=$(gw_get -s -o /dev/null -w '%{http_code}' "https://${DOMAIN}/${app}/api/health/ready" || true)
       echo "GET /${app}/api/health/ready via gateway -> ${code}"; [ "$code" = 200 ] || fail=1
       # Its whole state is one directory, and DATA_DIR=/config is what puts it
       # on the chart's config subPath instead of the read-only root: the
@@ -706,8 +931,8 @@ done
 # Held open for 30s here: exit 28 is curl's own --max-time firing, which means
 # the stream outlived the window; anything else is the proxy closing it.
 sse_exit=0
-sse_secs=$(curl -sN --max-time 30 -w '%{time_total}' -o "$WORK/maintainerr-sse.txt" \
-  "http://${GW_ADDR}/maintainerr/api/events/stream") || sse_exit=$?
+sse_secs=$(gw_get -sN --max-time 30 -w '%{time_total}' -o "$WORK/maintainerr-sse.txt" \
+  "https://${DOMAIN}/maintainerr/api/events/stream") || sse_exit=$?
 echo "GET /maintainerr/api/events/stream: curl exit ${sse_exit} after ${sse_secs}s (28 = still open at the 30s cap), $(wc -c <"$WORK/maintainerr-sse.txt") bytes"
 [ "$sse_exit" = 28 ] || { echo "the event stream closed before 30s (curl exit ${sse_exit}): something is timing it out"; fail=1; }
 

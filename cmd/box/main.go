@@ -723,24 +723,30 @@ func (o *initFlags) run(ctx context.Context, kubeconfig string, yes, plain bool,
 	if err != nil {
 		return err
 	}
-	// The release is installed; now the host's TLS. It runs after apply
-	// because the host name only exists once init has written the grant, and
-	// it is harmless when the certificate is already there (the same objects,
-	// server-side applied).
-	if res.Domain != "" && res.Issuer != "" {
+	// The release is installed; now every host's TLS. It runs after apply
+	// because the names only exist once init has written the grant, and it is
+	// harmless when a certificate is already there (the same objects,
+	// server-side applied). init decided one certificate name per app served
+	// at a host of its own, each with its own issuer.
+	if len(res.Hosts) > 0 {
 		kc, err := release.ResolveKubeconfig(kubeconfig, os.Getenv("KUBECONFIG"), bootstrap.FilesystemRecords{Path: bootstrap.RecordPath})
 		if err != nil {
 			return err
 		}
 		out.Phase("certificate")
-		cert := &platform.CertificateDecision{
-			Host:   res.Domain,
-			Issuer: res.Issuer,
-			Open:   func() (platform.CertificateCluster, error) { return platform.NewCluster(kc) },
-			Say:    out,
-		}
-		if _, err := cert.Apply(ctx); err != nil {
-			return err
+		for _, h := range res.Hosts {
+			if h.Host == "" || h.Issuer == "" {
+				continue
+			}
+			cert := &platform.CertificateDecision{
+				Host:   h.Host,
+				Issuer: h.Issuer,
+				Open:   func() (platform.CertificateCluster, error) { return platform.NewCluster(kc) },
+				Say:    out,
+			}
+			if _, err := cert.Apply(ctx); err != nil {
+				return err
+			}
 		}
 	}
 	if res.Domain != "" {
@@ -812,6 +818,7 @@ func loginOptions(chart release.Chart, l setup.Login, pathsInNode bool) login.Op
 		PathsInNode: pathsInNode,
 		Image:       chart.Pins.Authelia,
 		Values:      l.Values,
+		Hosted:      l.Hosted,
 	}
 }
 

@@ -130,10 +130,13 @@ case "$SCENARIO" in
   preinstalled) CLUSTER=s5n-box-lb; DOMAIN=box.internal.example ;;
   foreign-gateway) CLUSTER=s5n-box-gw; DOMAIN=box.example.com ;;
 esac
+# The names the catalog serves at a host of their own (Plex and Seerr): the
+# chart renders their routes there, and box resolves and certifies them.
+PLEX_HOST="plex.${DOMAIN}"
+SEERR_HOST="seerr.${DOMAIN}"
 # The fresh scenario points the production issuer at Pebble; every other
 # scenario keeps Let's Encrypt's directory and never issues from it.
-ACME_ARGS=()
-CTX="kind-${CLUSTER}"
+ACME_ARGS=()CTX="kind-${CLUSTER}"
 K="kubectl --context ${CTX}"
 HELM="helm --kube-context ${CTX}"
 WORK=$(mktemp -d)
@@ -517,19 +520,24 @@ EOF
 # themselves, so the smallest change that makes it point at the Gateway is a
 # CoreDNS hosts entry. Nothing in the chart or box depends on it: this is the
 # test's own DNS.
-patch_coredns() { # patch_coredns <host> <ip>
+patch_coredns() { # patch_coredns <gateway-address> <host>...
+  local addr=$1; shift
   $K -n kube-system get cm coredns -o jsonpath='{.data.Corefile}' >"$WORK/Corefile" || return 1
-  python3 - "$WORK/Corefile" "$1" "$2" <<'PYEOF' || return 1
+  python3 - "$WORK/Corefile" "$addr" "$@" <<'PYEOF' || return 1
 import sys
-path, host, ip = sys.argv[1:4]
+path, addr, hosts = sys.argv[1], sys.argv[2], sys.argv[3:]
 text = open(path).read()
-if host not in text:
-    block = "    hosts {\n        " + ip + " " + host + "\n        fallthrough\n    }\n"
-    marker = "    forward . /etc/resolv.conf"
-    if marker not in text:
-        raise SystemExit("the CoreDNS Corefile has no forward block to patch")
-    text = text.replace(marker, block + marker, 1)
-    open(path, "w").write(text)
+block = "    hosts {\n"
+for host in hosts:
+    if host in text:
+        continue
+    block += "        " + addr + " " + host + "\n"
+block += "        fallthrough\n    }\n"
+marker = "    forward . /etc/resolv.conf"
+if marker not in text:
+    raise SystemExit("the CoreDNS Corefile has no forward block to patch")
+text = text.replace(marker, block + marker, 1)
+open(path, "w").write(text)
 PYEOF
   $K -n kube-system create cm coredns --from-file=Corefile="$WORK/Corefile" --dry-run=client -o yaml | $K apply -f - >/dev/null
   $K -n kube-system rollout restart deploy/coredns >/dev/null
@@ -552,7 +560,11 @@ fresh() {
   # certificate inside this run, so both have to answer before it starts.
   install_pebble
   [ "$fail" = 0 ] || return 0
-  patch_coredns "$DOMAIN" "$node_ip" || { echo "could not patch CoreDNS for ${DOMAIN}"; fail=1; return 0; }
+  # Every name the box serves: its own and each app's own host. init resolves
+  # them and refuses an app name that does not answer where the domain does, so
+  # the app hosts have to be here before bootstrap or it stops on purpose.
+  patch_coredns "$node_ip" "$DOMAIN" "$PLEX_HOST" "$SEERR_HOST" ||
+    { echo "could not patch CoreDNS for the box's names"; fail=1; return 0; }
   ACME_ARGS=(--acme-server "https://pebble.pebble.svc:14000/dir")
 
   log "box bootstrap: the platform layer, then root's first install"
@@ -975,6 +987,80 @@ print("  app routes: %d HTTPRoutes, none pins a sectionName" % len(items))
   [ "$api_code" = 401 ] ||
     { echo "the API without a key answered ${api_code}: it must be Sonarr's own 401, not the login's redirect (the API bypass is missing)"; fail=1; }
   [ "$ping_code" = 200 ] || { echo "/sonarr/ping answered ${ping_code}: the ping bypass is missing"; fail=1; }
+
+  # ---- the apps with a host of their own ------------------------------------
+  # Seerr and Plex are served at seerr.<domain> and plex.<domain>: their own
+  # certificate from Pebble, their own listeners, and a route by Host. The
+  # final card and the grant are what init decided; these assertions are what
+  # the cluster got.
+  log "the app hosts: a certificate and a listener each, and Seerr on its own name"
+  for app_host in "plex:${PLEX_HOST}" "seerr:${SEERR_HOST}"; do
+    app=${app_host%%:*}; host=${app_host##*:}
+    label=${host//./-}
+    cert=s5n-tls-${label}
+    grep -qF "applied Certificate s5n-gateway/${cert} (issuer s5n-letsencrypt)" "$WORK/bootstrap1.txt" ||
+      { echo "box did not apply ${cert} with the production issuer"; fail=1; }
+    $K -n s5n-gateway wait --for=condition=Ready "certificate/$cert" --timeout=180s ||
+      { echo "the ${app} host's Certificate never became Ready"; fail=1; }
+    got_issuer=$($K -n s5n-gateway get certificate "$cert" -o jsonpath='{.spec.issuerRef.name}' || true)
+    [ "$got_issuer" = s5n-letsencrypt ] || { echo "${cert} names issuer ${got_issuer}"; fail=1; }
+    got_secret=$($K -n s5n-gateway get gateway s5n \
+      -o jsonpath="{.spec.listeners[?(@.name==\"https-${label}\")].tls.certificateRefs[0].name}" || true)
+    got_http=$($K -n s5n-gateway get gateway s5n \
+      -o jsonpath="{.spec.listeners[?(@.name==\"http-${label}\")].hostname}" || true)
+    echo "  ${host}: certificate ${cert}, https listener -> ${got_secret}, http listener on ${got_http}"
+    [ "$got_secret" = "$cert" ] || { echo "the ${app} host's HTTPS listener references ${got_secret}"; fail=1; }
+    [ "$got_http" = "$host" ] || { echo "the ${app} host's port-80 listener matches ${got_http}"; fail=1; }
+  done
+
+  # Seerr's page on its own name. The edge posture is the one it has on a path
+  # (a bypass: it signs users in through Plex itself), so an unauthenticated
+  # request gets Seerr's own page and login, not Authelia's portal -- and with
+  # the session cookie from the portal in the jar it still gets the same page,
+  # which is the cookie's domain covering the subdomain.
+  seerr_unauth=$WORK/seerr-unauth.html
+  seerr_code=$(curl -sS -o "$seerr_unauth" -w '%{http_code}' \
+    --resolve "${SEERR_HOST}:443:${gw_addr}" --cacert "$WORK/pebble-root.pem" \
+    "https://${SEERR_HOST}/" 2>/dev/null || true)
+  echo "  GET https://${SEERR_HOST}/ without a session: ${seerr_code}"
+  [ "$seerr_code" = 200 ] || { echo "Seerr's own host answered ${seerr_code}"; fail=1; }
+  grep -qi '<!doctype html' "$seerr_unauth" || { echo "Seerr's host did not serve an HTML page"; fail=1; }
+  seerr_asset=$(grep -oE '(src|href)="/[^"]+\.(js|css)"' "$seerr_unauth" | head -1 | sed 's/^[a-z]*="//; s/"$//' || true)
+  echo "  asset the page references: ${seerr_asset}"
+  case "$seerr_asset" in
+    "/"*) ;;
+    "") echo "Seerr's page referenced no script or stylesheet"; fail=1 ;;
+    *) echo "the asset ${seerr_asset} is not absolute: Seerr is not served from its own root"; fail=1 ;;
+  esac
+  if [ -n "$seerr_asset" ]; then
+    asset_code=$(curl -sS -o /dev/null -w '%{http_code}' \
+      --resolve "${SEERR_HOST}:443:${gw_addr}" --cacert "$WORK/pebble-root.pem" \
+      "https://${SEERR_HOST}${seerr_asset}" 2>/dev/null || true)
+    echo "  GET https://${SEERR_HOST}${seerr_asset}: ${asset_code}"
+    [ "$asset_code" = 200 ] || { echo "Seerr's asset does not resolve on its own host"; fail=1; }
+  fi
+  seerr_authed=$(curl -sS -o "$WORK/seerr-authed.html" -w '%{http_code}' -b "$JAR" \
+    --resolve "${SEERR_HOST}:443:${gw_addr}" --cacert "$WORK/pebble-root.pem" \
+    "https://${SEERR_HOST}/" 2>/dev/null || true)
+  echo "  GET https://${SEERR_HOST}/ with the portal's session cookie: ${seerr_authed}"
+  [ "$seerr_authed" = 200 ] || { echo "Seerr's own host answered ${seerr_authed} with a session cookie"; fail=1; }
+  # The cookie's domain is the box's name, which a browser sends to a subdomain
+  # too; Authelia names one cookie per host, and the app hosts are under it.
+  cookie_domain=$($K -n s5n-system get cm s5n-authelia -o jsonpath='{.data.configuration\.yml}' |
+    python3 -c 'import sys, re; print(re.search(r"- domain: \x27([^\x27]+)\x27", sys.stdin.read()).group(1))' 2>/dev/null || true)
+  echo "  the login's session cookie domain: ${cookie_domain}"
+  [ "$cookie_domain" = "$DOMAIN" ] || { echo "the cookie domain is ${cookie_domain}, want ${DOMAIN} (it covers its subdomains)"; fail=1; }
+  # The old path is gone: no route, so the box's own host answers 404 there.
+  old_path=$(curl -sS -o /dev/null -w '%{http_code}' \
+    --resolve "${DOMAIN}:443:${gw_addr}" --cacert "$WORK/pebble-root.pem" \
+    "https://${DOMAIN}/seerr/" 2>/dev/null || true)
+  echo "  GET https://${DOMAIN}/seerr/ (the old path): ${old_path}"
+  [ "$old_path" = 404 ] || { echo "/seerr still answers ${old_path}: a path route was left behind"; fail=1; }
+  # The card says nothing about missing records: every name answered here.
+  if grep -q "has no DNS record" "$WORK/bootstrap1.txt"; then
+    echo "init printed the no-DNS card line on a host whose names all resolve"
+    fail=1
+  fi
 
   # Path normalisation: Envoy normalises the request path before its filters
   # run (normalize_path is on by default and Envoy Gateway sets it explicitly),
@@ -1919,6 +2005,7 @@ PY
   [ "$(sha256sum "$WORK/values.yaml" | cut -d' ' -f1)" = "$values_before" ] ||
     { echo "the second bootstrap rewrote the values file"; fail=1; }
   [ "$(revision)" = "$rev1" ] || { echo "the second bootstrap created a release revision"; fail=1; }
+
 }
 
 # ---- scenario: foreign-gateway ----------------------------------------------

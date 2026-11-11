@@ -82,6 +82,19 @@ type Question struct {
 // Transient reports whether the answer must not be written to a file.
 func (q Question) Transient() bool { return q.Kind == KindTransient }
 
+// Exposure is how the chart serves an app through the seedbox's Gateway: under
+// a path on the box's own host name, or at a host of its own.
+type Exposure string
+
+const (
+	// ExposurePath is the default: `https://<domain>/<name>`.
+	ExposurePath Exposure = "path"
+	// ExposureHost is `https://<app>.<domain>`, with its own listener and
+	// certificate. An app whose UI writes absolute asset paths cannot live
+	// under a prefix, so the chart serves it at a name of its own.
+	ExposureHost Exposure = "host"
+)
+
 // App is one catalog entry.
 type App struct {
 	// Name is the app's key under `apps:` in values.yaml.
@@ -94,6 +107,8 @@ type App struct {
 	Instances bool `yaml:"instances"`
 	// Default says init preselects the app.
 	Default bool `yaml:"default"`
+	// Exposure is how the chart serves it; empty means ExposurePath.
+	Exposure Exposure `yaml:"exposure"`
 	// Questions are asked in this order, after the app is selected.
 	Questions []Question `yaml:"questions"`
 }
@@ -174,6 +189,7 @@ type manifestApp struct {
 	Description string     `yaml:"description"`
 	Instances   bool       `yaml:"instances"`
 	Default     bool       `yaml:"default"`
+	Exposure    Exposure   `yaml:"exposure"`
 	Questions   []Question `yaml:"questions"`
 }
 
@@ -321,13 +337,47 @@ func buildApps(m *manifest, order []string, chartApps map[string]chartApp, sch *
 			Description: strings.TrimSpace(entry.Description),
 			Instances:   entry.Instances,
 			Default:     entry.Default,
+			Exposure:    entry.Exposure,
 			Questions:   entry.Questions,
 		}
+		problems = append(problems, validateExposure(&app)...)
 		problems = append(problems, validateApp(&app, chartApps[name], sch)...)
 		cat.byName[name] = len(cat.apps)
 		cat.apps = append(cat.apps, app)
 	}
 	return cat, problems
+}
+
+// validateExposure checks how the chart serves the app. An unknown value is a
+// typo that would otherwise render the app's route under a path nobody meant,
+// so it is refused by name like every other manifest mistake. An app that takes
+// instances has no single name to put before the domain, so it cannot take a
+// host of its own.
+func validateExposure(app *App) []string {
+	switch app.Exposure {
+	case "", ExposurePath:
+		app.Exposure = ExposurePath
+		return nil
+	case ExposureHost:
+		if app.Instances {
+			return []string{fmt.Sprintf("apps.%s.exposure: host needs one name, but this app takes instances; serve it under a path", app.Name)}
+		}
+		return nil
+	default:
+		return []string{fmt.Sprintf("apps.%s.exposure: %q is not %s or %s", app.Name, app.Exposure, ExposurePath, ExposureHost)}
+	}
+}
+
+// Hosted returns the apps the chart serves at a host of their own, in manifest
+// order. It is box's list of names to resolve and certify.
+func (c *Catalog) Hosted() []string {
+	var out []string
+	for _, a := range c.apps {
+		if a.Exposure == ExposureHost {
+			out = append(out, a.Name)
+		}
+	}
+	return out
 }
 
 // validateApp checks one manifest entry: its description (init shows it), the

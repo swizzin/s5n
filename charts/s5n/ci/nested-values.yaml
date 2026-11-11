@@ -20,3 +20,8 @@ apps:
     instances:
       - { suffix: "", category: Movies, enabled: true }
       - { suffix: 4k, category: "4K/Movies", enabled: true }
+
+# The box's own name. Plex and Seerr are served at plex.<domain> and
+# seerr.<domain> (the catalog says so), so a render needs the domain.
+gateway:
+  host: box.example.com

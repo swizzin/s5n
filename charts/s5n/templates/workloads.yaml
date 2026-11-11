@@ -9,6 +9,9 @@ values.yaml; this template is the only place a pod spec is written.
 {{- $cfg := $inst.cfg }}
 {{- $ctx := dict "root" $root "inst" $inst }}
 {{- $urlBase := printf "/%s" $inst.name }}
+{{- $exposure := include "s5n.exposure" (dict "root" $root "app" $inst.app) | trim }}
+{{- $appHost := "" }}
+{{- if eq $exposure "host" }}{{ $appHost = include "s5n.appHost" (dict "root" $root "app" $inst.app) | trim }}{{ end }}
 ---
 apiVersion: apps/v1
 kind: StatefulSet
@@ -336,11 +339,18 @@ spec:
       {{- with $root.Values.gateway.parentRef.sectionName }}
       sectionName: {{ . }}
       {{- end }}
+  {{- if eq $exposure "host" }}
+  # This app's UI writes absolute asset paths, so it is served at a name of its
+  # own (the catalog says so) and never under a prefix. The certificate and the
+  # listeners for this name are root's, written from the grant by box.
+  hostnames: [{{ $appHost | quote }}]
+  {{- else }}
   {{- with $root.Values.gateway.host }}
   hostnames: [{{ . | quote }}]
   {{- end }}
+  {{- end }}
   rules:
-    {{- if eq $inst.app "maintainerr" }}
+    {{- if and (eq $exposure "path") (eq $inst.app "maintainerr") }}
     # The live task stream is a Server-Sent Events connection that has to stay
     # open, and Envoy's route timeout defaults to 15s, which would cut it: the
     # UI's log and task views would go quiet with nothing in the logs to say
@@ -361,8 +371,12 @@ spec:
     - matches:
         - path:
             type: PathPrefix
+            {{- if eq $exposure "host" }}
+            value: /
+            {{- else }}
             value: {{ $urlBase }}
-      {{- if $cfg.rewritePath }}
+            {{- end }}
+      {{- if and (eq $exposure "path") $cfg.rewritePath }}
       filters:
         - type: URLRewrite
           urlRewrite:

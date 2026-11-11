@@ -7,39 +7,61 @@
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "puid": { "type": "integer" },
-        "pgid": { "type": "integer" },
-        "tz": { "type": "string" }
+        "puid": {
+          "type": "integer"
+        },
+        "pgid": {
+          "type": "integer"
+        },
+        "tz": {
+          "type": "string"
+        }
       }
     },
     "auth": {
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "edge": { "type": "boolean" }
+        "edge": {
+          "type": "boolean"
+        }
       }
     },
     "storage": {
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "data": { "$ref": "#/definitions/claim" },
-        "config": { "$ref": "#/definitions/claim" }
+        "data": {
+          "$ref": "#/definitions/claim"
+        },
+        "config": {
+          "$ref": "#/definitions/claim"
+        }
       }
     },
     "gateway": {
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "enabled": { "type": "boolean" },
-        "host": { "type": "string" },
+        "enabled": {
+          "type": "boolean"
+        },
+        "host": {
+          "type": "string"
+        },
         "parentRef": {
           "type": "object",
           "additionalProperties": false,
           "properties": {
-            "name": { "type": "string" },
-            "namespace": { "type": "string" },
-            "sectionName": { "type": "string" }
+            "name": {
+              "type": "string"
+            },
+            "namespace": {
+              "type": "string"
+            },
+            "sectionName": {
+              "type": "string"
+            }
           }
         }
       }
@@ -51,33 +73,74 @@
         "alpha": {
           "type": "object",
           "additionalProperties": false,
-          "required": ["enabled"],
+          "required": [
+            "enabled"
+          ],
           "properties": {
-            "enabled": { "type": "boolean" },
-            "greeting": { "type": "string" },
-            "port": { "type": "integer" }
+            "enabled": {
+              "type": "boolean"
+            },
+            "greeting": {
+              "type": "string"
+            },
+            "port": {
+              "type": "integer"
+            }
           }
         },
         "beta": {
           "type": "object",
           "additionalProperties": false,
-          "required": ["enabled"],
+          "required": [
+            "enabled"
+          ],
           "properties": {
-            "enabled": { "type": "boolean" },
-            "token": { "type": "string" },
-            "port": { "type": "integer" },
+            "enabled": {
+              "type": "boolean"
+            },
+            "token": {
+              "type": "string"
+            },
+            "port": {
+              "type": "integer"
+            },
             "instances": {
               "type": "array",
               "items": {
                 "type": "object",
                 "additionalProperties": false,
-                "required": ["suffix", "category", "enabled"],
+                "required": [
+                  "suffix",
+                  "category",
+                  "enabled"
+                ],
                 "properties": {
-                  "suffix": { "type": "string" },
-                  "category": { "type": "string" },
-                  "enabled": { "type": "boolean" }
+                  "suffix": {
+                    "type": "string"
+                  },
+                  "category": {
+                    "type": "string"
+                  },
+                  "enabled": {
+                    "type": "boolean"
+                  }
                 }
               }
+            }
+          }
+        },
+        "gamma": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "enabled"
+          ],
+          "properties": {
+            "enabled": {
+              "type": "boolean"
+            },
+            "port": {
+              "type": "integer"
             }
           }
         }
@@ -88,9 +151,13 @@
     "claim": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["existingClaim"],
+      "required": [
+        "existingClaim"
+      ],
       "properties": {
-        "existingClaim": { "type": "string" }
+        "existingClaim": {
+          "type": "string"
+        }
       }
     }
   }

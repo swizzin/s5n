@@ -19,7 +19,7 @@ func testConfiguration() Configuration {
 		Host:          "box.example.com",
 		Login:         "alice",
 		EncryptionKey: testKey,
-		Rules:         Rules("box.example.com", "alice", InstancesFromValues(fixtureValues())),
+		Rules:         Rules("box.example.com", "alice", InstancesFromValues(fixtureValues()), nil),
 	}
 }
 
@@ -81,7 +81,7 @@ func TestRenderConfigurationFollowsTheHost(t *testing.T) {
 	}
 	c := testConfiguration()
 	c.Host = "other.example.com"
-	c.Rules = Rules(c.Host, c.Login, nil)
+	c.Rules = Rules(c.Host, c.Login, nil, nil)
 	b, err := RenderConfiguration(c)
 	if err != nil {
 		t.Fatal(err)

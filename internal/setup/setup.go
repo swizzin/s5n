@@ -154,6 +154,11 @@ type Result struct {
 	// IssuerLetsEncrypt or IssuerSelfSigned. It is the values file's
 	// tls.issuer when that is set, and otherwise what the domain resolved to.
 	Issuer string
+	// Hosts is every certificate name this run decided, the box's domain
+	// first and then one per app served at a name of its own. Each carries its
+	// own issuer: tls.issuer forces them all, and otherwise each name's own
+	// answer decides.
+	Hosts []Host
 	// GrantChanged and ValuesChanged are the keys spliced, in the order they
 	// were written. A re-run with identical answers leaves both empty.
 	GrantChanged  []string
@@ -188,6 +193,11 @@ type Login struct {
 	Name        string
 	Password    string
 	NewPassword bool
+	// Hosted are the apps the chart serves at a name of their own
+	// (plex.example.com, seerr.example.com). The login's rules need them: the
+	// edge checks every listener, so each app host needs the rule that matches
+	// the login posture the app had on its path.
+	Hosted []string
 	// Values is the document the release will render: chart defaults, then
 	// the user's file, then the grant, read back after init wrote them. The
 	// access_control rules come from its instance list, so the login and the
@@ -273,8 +283,10 @@ func (d *Decision) Run(ctx context.Context, opts Options) (Result, error) {
 	if v, ok := lookupPath(sb.Values.Map(), "tls.issuer"); ok && text(v) != "" {
 		forced = v
 	}
-	issuer, why := chooseIssuer(ctx, d.Resolver, domain, text(forced))
+	domAnswer := resolveHost(ctx, d.Resolver, domain)
+	issuer, why := issuerFor(domain, domAnswer, text(forced))
 	res.Issuer = issuer
+	res.Hosts = []Host{{Host: domain, Issuer: issuer, Why: why, NoDNS: !domAnswer.resolves() && issuer == IssuerSelfSigned}}
 	d.report().Line("tls: " + why)
 	d.step(2, "where should your data and settings live?")
 	dataPath, err := d.askText(textQuestion{
@@ -326,6 +338,20 @@ func (d *Decision) Run(ctx context.Context, opts Options) (Result, error) {
 			d.steps = 5
 			break
 		}
+	}
+
+	// The names the chosen apps are served at, before anything is written for
+	// one: an app's own host has to answer where the domain does, or the
+	// certificate for it can never issue. Both names resolving to nothing is
+	// the test-box case and proceeds self-signed; a real mismatch stops here,
+	// naming the record to add (docs/box.md, "Certificates").
+	appHosts, err := d.appHosts(ctx, domain, domAnswer, text(forced), apps)
+	if err != nil {
+		return res, err
+	}
+	for _, h := range appHosts {
+		res.Hosts = append(res.Hosts, h)
+		d.report().Line("tls: " + h.Why)
 	}
 
 	// The login: one account, asked once. It is its own step because it is the
@@ -442,6 +468,7 @@ func (d *Decision) Run(ctx context.Context, opts Options) (Result, error) {
 			Password:    password,
 			NewPassword: newPassword,
 			Values:      withApps(base, apps, d.Catalog),
+			Hosted:      appHostApps(appHosts),
 		}
 		req.Login = func(ctx context.Context) error { return d.Login(ctx, l) }
 	}

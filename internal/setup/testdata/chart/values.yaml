@@ -37,3 +37,7 @@ apps:
       - suffix: 4k
         category: tv-4k
         enabled: false
+  # Served at gamma.<domain> (the catalog says so): the app-host half of init.
+  gamma:
+    enabled: false
+    port: 7070

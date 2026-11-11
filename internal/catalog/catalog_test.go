@@ -152,6 +152,69 @@ func TestTransientIsASeparateList(t *testing.T) {
 	}
 }
 
+// A manifest that says nothing about exposure serves every app under a path;
+// `host` is kept, and it is what box builds its list of names from.
+func TestExposureDefaultsToPathAndHostIsKept(t *testing.T) {
+	cat, err := parseMini(t, miniManifest)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	for _, name := range cat.Names() {
+		app, _ := cat.App(name)
+		if app.Exposure != ExposurePath {
+			t.Fatalf("apps.%s exposure = %q, want path when the manifest says nothing", name, app.Exposure)
+		}
+	}
+	if got := cat.Hosted(); len(got) != 0 {
+		t.Fatalf("hosted = %v, want none", got)
+	}
+
+	manifest := strings.Replace(miniManifest,
+		"    description: the first app\n",
+		"    description: the first app\n    exposure: host\n", 1)
+	cat, err = parseMini(t, manifest)
+	if err != nil {
+		t.Fatalf("parse with exposure host: %v", err)
+	}
+	alpha, _ := cat.App("alpha")
+	if alpha.Exposure != ExposureHost {
+		t.Fatalf("alpha exposure = %q, want host", alpha.Exposure)
+	}
+	if got := strings.Join(cat.Hosted(), ","); got != "alpha" {
+		t.Fatalf("hosted = %s, want alpha", got)
+	}
+}
+
+// An exposure box does not know is refused by name: it is a typo that would
+// otherwise render the app's route under a path nobody meant.
+func TestUnknownExposureIsNamed(t *testing.T) {
+	manifest := strings.Replace(miniManifest,
+		"    description: the first app\n",
+		"    description: the first app\n    exposure: folder\n", 1)
+	_, err := parseMini(t, manifest)
+	if err == nil {
+		t.Fatal("an unknown exposure was accepted")
+	}
+	if !strings.Contains(err.Error(), `apps.alpha.exposure: "folder" is not path or host`) {
+		t.Fatalf("error = %v, want it to name the entry and both values", err)
+	}
+}
+
+// An app with a host of its own needs one name to put before the domain; the
+// Arrs take instances after the app's name, so the two cannot be combined.
+func TestHostedAppWithInstancesIsRefused(t *testing.T) {
+	manifest := strings.Replace(miniManifest,
+		"    instances: true\n",
+		"    instances: true\n    exposure: host\n", 1)
+	_, err := parseMini(t, manifest)
+	if err == nil {
+		t.Fatal("an app with instances and a host of its own was accepted")
+	}
+	if !strings.Contains(err.Error(), "apps.beta.exposure: host needs one name, but this app takes instances") {
+		t.Fatalf("error = %v, want it to name the entry", err)
+	}
+}
+
 // TestHostileManifestIsNamed: every refusal says which entry is wrong. A
 // manifest is untrusted input to a root process, and "the catalog is broken"
 // would leave the contributor guessing.
@@ -361,6 +424,18 @@ func TestRealChartManifestLoads(t *testing.T) {
 	}
 	if tr[0].Key != "secrets.plexClaimToken" || !tr[0].Optional {
 		t.Fatalf("plex transient question = %+v, want secrets.plexClaimToken, optional", tr[0])
+	}
+	// The two apps whose UI cannot live under a prefix: the chart serves them
+	// at a host of their own, and box is what resolves and certifies those
+	// names.
+	if got := strings.Join(cat.Hosted(), ","); got != "plex,seerr" {
+		t.Fatalf("hosted apps = %s, want plex,seerr", got)
+	}
+	for _, name := range []string{"plex", "seerr"} {
+		app, _ := cat.App(name)
+		if app.Exposure != ExposureHost {
+			t.Fatalf("apps.%s exposure = %q, want host", name, app.Exposure)
+		}
 	}
 	// Everything else must be a stored answer: a transient question is the
 	// exception, and the loader is what keeps it one.

@@ -52,7 +52,7 @@ access_control:
   default_policy: 'deny'
   rules:
 {{- range .Rules }}
-    - domain: ['{{ $.Host }}']
+    - domain: ['{{ .Domain }}']
       policy: '{{ .Policy }}'
 {{- if .Resources }}
       resources:

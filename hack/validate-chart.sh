@@ -8,7 +8,7 @@ cd "$(dirname "$0")/.."
 KUBE=${1:-1.37.0}
 CRDS='https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json'
 
-helm lint charts/s5n --set auth.edge=true
+helm lint charts/s5n --set auth.edge=true --set gateway.host=box.example.com
 
 # auth.edge is the operator's statement that a login sits in front of the
 # release. The chart ships no login, so a render with the key missing and a
@@ -37,7 +37,7 @@ done
 # PLEX_NO_AUTH_NETWORKS containing that range would make the whole internet look
 # like a "local" client: unauthenticated admin of the server. apps.plex.noAuthNetworks
 # is opt-in only, and the default render must not carry the env var at all.
-if helm template t charts/s5n -n seedbox --set auth.edge=true | grep -q 'PLEX_NO_AUTH_NETWORKS'; then
+if helm template t charts/s5n -n seedbox --set auth.edge=true --set gateway.host=box.example.com | grep -q 'PLEX_NO_AUTH_NETWORKS'; then
   echo "default render sets PLEX_NO_AUTH_NETWORKS: Plex would trust the pod network"
   exit 1
 fi
@@ -46,7 +46,7 @@ echo "== default render: no PLEX_NO_AUTH_NETWORKS"
 for values in charts/s5n/ci/*-values.yaml; do
   out=$(mktemp)
   helm template t charts/s5n -n seedbox -f "$values" \
-    --set 'networkPolicy.apiServerCIDRs[0]=10.0.0.1/32' >"$out"
+    --set 'networkPolicy.apiServerCIDRs[0]=10.0.0.1/32' --set gateway.host=box.example.com >"$out"
   count=$(grep -c '^kind: ' "$out" || true)
   echo "== ${values##*/} on ${KUBE}: ${count} objects"
   [ "$count" -gt 0 ] || { echo "render produced no objects"; exit 1; }

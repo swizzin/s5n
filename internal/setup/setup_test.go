@@ -888,6 +888,8 @@ apps:
     enabled: true
   beta:
     enabled: false
+  gamma:
+    enabled: false
 `
 
 // reRunValues is the user's own file: comments and a four-space indent that a
