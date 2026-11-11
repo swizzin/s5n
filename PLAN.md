@@ -337,6 +337,9 @@ Dockerfile               the image the wiring Job and the qBittorrent init conta
   - hardlink proof passes
   - wiring re-run is a no-op (no writes, verified via Arr API diffs)
   - Sonarr can grab a test torrent through Prowlarr → qBittorrent → import as a hardlink
+- the same trigger runs the box e2e (`hack/e2e-box.sh all`) in parallel with it: the same
+  install done through `box bootstrap` instead of Helm, on three kind clusters -- one bare,
+  one with an address layer already in place, one whose Gateway implementation box refuses.
 - Release: a push to `main` whose net change since the last `s5n-v*` tag is only a patch or
   digest bump of `variants.yaml` or `platform.yaml` tags the next chart patch once the
   tests above are green, and publishes the image and chart; any larger change on `main`
