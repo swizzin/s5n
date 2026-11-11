@@ -30,6 +30,12 @@ Each section marks its status:
 - **Dialogs are huh (decided),** behind box's own prompt interface, with box's theme
   on top: its masthead, accent and step header. Where huh can't behave (no terminal,
   `TERM=dumb`), box falls back to plain line prompts. `NO_COLOR` drops the styling.
+  The palette is a theme (`internal/theme`): a pair name (`s5n`, the default, or
+  `swizzin`, `catppuccin`, `solarized`, `gruvbox`, `nord`, `dracula`) follows the
+  terminal's background, dark when the terminal doesn't say, and a variant name
+  (`s5n-light`, `catppuccin-mocha`) pins one. Every variant passes a contrast test.
+  Painting the terminal's own background is a separate opt-in, restored on every exit
+  box can catch; `kill -9` or a dropped connection leaves it behind.
   Choosing another library later means rewriting one adapter, not init.
 - **The whole run is box (decided).** Progress outside a dialog is not raw text either:
   cluster detection, the platform plan, installs and waits, file writes and the apply all
@@ -327,7 +333,8 @@ k0s bump still never merges itself: no CI job boots k0s (the box e2e runs on kin
 a green run has not tested the new release, and the maintainer merges it.
 The download goes to a temporary file beside `/usr/local/bin/k0s` and is hashed while it
 is written; only a match is renamed into place, so an interrupted or tampered download
-never lands where the unit would exec it. Then `k0s install controller --single`, `k0s
+never lands where the unit would exec it. Then `k0s install controller --single
+--config /etc/k0s/k0s.yaml --kubelet-extra-args=--node-ip=<uplink address>`, `k0s
 start`, and box waits until the API answers `/readyz` *and* a node is Ready through
 `/var/lib/k0s/pki/admin.conf`: readyz turns true a moment before the node registers, and
 the decision that follows refuses a cluster that lists no nodes. Only then is the cluster
@@ -337,6 +344,26 @@ place says exactly what is left on the host and the command that removes it
 (`k0s stop; k0s reset`), then stops. box never runs that reset itself: it would also
 destroy a k0s installation box did not make. With the cluster up, bootstrap goes on to the
 platform layer and `init` exactly as it does on a host that already had one.
+
+**The node's address is box's choice (decided).** kube-router's automatic MTU is the
+MTU of the interface that holds the node's primary address, not the smallest on the
+host. Left to itself, kubelet takes the address the node's name resolves to, and k0s
+takes the first non-loopback IPv4 in interface order for the API, so a host already
+running a tailnet or a VPN can register the node on that tunnel. Every pod then gets the
+tunnel's MTU (1280 for Tailscale), and anything tunnelled from a pod fragments every
+packet. So box pins the address when it installs k0s: the source address the kernel
+would use on the default route, given to kubelet as `--node-ip` and written as
+`spec.api.address` in a minimal `/etc/k0s/k0s.yaml`. box never sets an MTU; with the
+node on the uplink, the automatic one is right for ethernet, PPPoE (which counts as an
+uplink, not a tunnel) and whatever a cloud gives.
+- **A default route through a tunnel stops the install,** naming the interface and the
+  MTU every pod would inherit. There is no override.
+- **A `/etc/k0s/k0s.yaml` box didn't write is never overwritten.**
+- **Once the API answers, the Node's address is checked against the pin;** a mismatch
+  fails like any other step after the binary is in place, naming both addresses.
+- **On a cluster box didn't install,** a node address on a tunnel this host holds is one
+  warning line. box doesn't change that cluster.
+- **Only a real host proves it:** kind never boots k0s, so the e2e can't.
 
 **A record is checked, not trusted (decided).** A re-run reads
 `/etc/swizzin/cluster.yaml` for what box decided — which cluster, who owns its
@@ -485,7 +512,19 @@ validated, self-signed otherwise. This is how box would do it.
   DNS-provider credentials, so a wildcard *certificate*, which needs DNS-01, is not
   part of this. Before box writes anything for an app host, it checks that the name
   resolves to the same addresses as the box's domain, and stops naming the record to
-  add when it doesn't, rather than leaving a certificate that can never issue.
+  add when it doesn't, rather than leaving a certificate that can never issue. When
+  neither the domain nor the app name answers (a test box), that counts as a match: the
+  app host is self-signed like the domain, and the final card names its record too.
+  Which apps get a host is the catalog's `exposure: host`, owned by the chart.
+- **An app host is guarded the way its path was.** Each one has its own access-control
+  rule carrying the posture the app had on its path. The one session cookie is set for
+  the box's domain, and the browser sends it to every `<app>.<domain>`.
+- **No run leaves an app host without its listener (decided, not built yet).** The
+  listener and Certificate are root's, made by the same per-host step `init` runs. When
+  root's `apply` or `update` would serve an enabled app on a host that has neither, it
+  runs that step first, DNS check included, before the release moves; a mismatch stops
+  with the record named and the old routes untouched. A user's run that would need one
+  stops and names root's command, because the user can't write a listener.
 - **Tested without the internet.** The e2e runs Pebble (Let's Encrypt's test ACME
   server) in the kind cluster and points a test issuer at it, so HTTP-01 through the
   Gateway is proven on every run. The self-signed path gets its own assertion.
