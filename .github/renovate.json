@@ -60,6 +60,11 @@
       "automerge": false
     },
     {
+      "description": "A k0s bump never merges itself, whatever platform automerge is set to: Renovate bumps the version and cannot write the asset checksums pinned beside it (they are not versions and carry no marker), so its pull request fails CI's `go run ./hack/k0s-sums --check` until a maintainer runs `--write` on the branch and reads what the release publishes. A k0s minor is a Kubernetes minor as well. This rule is explicit so that turning on patch automerge for the other pins -- the rule below, when box's own e2e covers them -- cannot carry k0s with it.",
+      "matchDepNames": ["k0sproject/k0s"],
+      "automerge": false
+    },
+    {
       "description": "DISABLED until CI covers the platform pins. CI runs hack/e2e-kind.sh, which installs Envoy Gateway and MetalLB from these pins and nothing else: k0s (kind stands in for the cluster), cert-manager and the login (authelia) are never installed, so a green run says nothing about them. The rule is written now so it turns on in one line: patch-only, on main, when hack/e2e-box.sh -- which installs the whole platform through box -- runs in CI. The authelia line's digest moves with its tag, so a patch covers it; a minor or major bump (a k0s minor is a Kubernetes minor, MetalLB is still 0.x) always waits for the maintainer.",
       "matchFileNames": ["charts/s5n/platform.yaml"],
       "matchBaseBranches": ["main"],
