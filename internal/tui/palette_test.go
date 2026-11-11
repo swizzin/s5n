@@ -111,13 +111,13 @@ func TestUnknownThemeIsAnErrorWithTheList(t *testing.T) {
 func TestNoColorIgnoresTheTheme(t *testing.T) {
 	calls := fakeBackground(t, false)
 	in, out := terminalFiles(t)
-	u := New(Options{In: in, Out: out, NoColor: true, Theme: "dracula-alucard"})
+	New(Options{In: in, Out: out, NoColor: true, Theme: "dracula-alucard"})
 	if *calls != 0 {
 		t.Fatalf("NO_COLOR asked the terminal for its background %d times", *calls)
 	}
 
 	var buf bytes.Buffer
-	u = New(Options{Out: &buf, NoColor: true, Theme: "dracula"})
+	u := New(Options{Out: &buf, NoColor: true, Theme: "dracula"})
 	u.accessible = true
 	u.Step(1, 2, "what domain will this box answer on?")
 	if _, err := u.Input(setup.Input{Key: "gateway.host", Prompt: "domain", Default: "box.example.com"}); err != nil {

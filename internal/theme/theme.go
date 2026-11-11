@@ -63,6 +63,8 @@ type Theme struct {
 // Comments name the source and the tag each palette was read from, because the
 // values are the only thing that makes a theme recognisable and a hand-edited
 // one is a bug report waiting to happen.
+//
+//nolint:goconst // palette data mirrors the upstream tables; a value repeated across two palettes is a coincidence of those tables, not a shared meaning worth a name.
 var themes = []Theme{
 	{
 		// s5n is ours, from the brand notes: the mark's mint on the mark's
@@ -140,7 +142,7 @@ var themes = []Theme{
 			FG:       "#CDD6F4",
 			Muted:    "#82889F", // overlay1 #7F849C is 4.44:1; lightened to 4.66:1
 			Dim:      "#313244",
-			Accent:   "#CBA6F7", // mauve, as dark as it is: 8.07:1 on base
+			Accent:   "#CBA6F7", // mauve: the accent is picked for distance from fg, not from the theme's name, and this one is 8.07:1 on base
 			Good:     "#A6E3A1",
 			Bad:      "#F38BA8",
 			OnAccent: "#1E1E2E",
@@ -148,7 +150,7 @@ var themes = []Theme{
 		Light: Variant{Name: "latte", Palette: Palette{
 			BG:       "#EFF1F5",
 			FG:       "#4C4F69",
-			Muted:    "#6A6D82", // overlay1 #8C8FA1 is 2.83:1; darkened to 4.50:1, just past subtext0 #6C6F85
+			Muted:    "#6A6D82", // overlay1 #8C8FA1 is 2.83:1; subtext0 #6C6F85 is still 4.37:1, so darkened to 4.50:1
 			Dim:      "#CCD0DA",
 			Accent:   "#8839EF",
 			Good:     "#3F9E2B", // green #40A02B is 2.96:1; darkened to 3.03:1
@@ -180,7 +182,7 @@ var themes = []Theme{
 		Light: Variant{Name: "light", Palette: Palette{
 			BG:       "#FDF6E3",
 			FG:       "#45565C", // base01 #586E75 darkened: 4.99:1 -> 7.11:1
-			Muted:    "#586E75", // base02 is 12.05:1 and reads as text; base00 is 4.13:1
+			Muted:    "#586E75", // base01: 4.99:1; base00 is 4.13:1, and base02 at 12.05:1 reads as text
 			Dim:      "#EEE8D5",
 			Accent:   "#2076B3", // blue #268BD2 darkened: 3.41:1 -> 4.52:1
 			Good:     "#849800", // green #859900 darkened: 2.97:1 -> 3.01:1
@@ -220,7 +222,7 @@ var themes = []Theme{
 		Dark: Variant{Name: "polar-night", Palette: Palette{
 			BG:       "#2E3440", // nord0
 			FG:       "#ECEFF4", // nord6
-			Muted:    "#919CB1", // a grey-blue lifted off nord3 #4C566A (2.4:1); nord9 is the accent's family
+			Muted:    "#919CB1", // nord3 #4C566A is 2.4:1, and nord9 #81A1C1 is the accent's own family: lifted between the two
 			Dim:      "#3B4252", // nord1
 			Accent:   "#88C0D0", // nord8
 			Good:     "#A3BE8C", // nord14

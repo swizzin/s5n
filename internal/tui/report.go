@@ -34,6 +34,9 @@ type ReporterOptions struct {
 	// decides whether it is one. A name that does not resolve is reported by
 	// Err and by the first question asked.
 	Theme string
+	// Background paints the terminal's background with that palette's, for the
+	// whole run. Off by default; see Options.Background.
+	Background bool
 	// Yes answers every confirm without a form, and leaves the same ✓ record
 	// line an answered form would.
 	Yes bool
@@ -87,7 +90,7 @@ func NewReporter(o ReporterOptions) *Reporter {
 	if o.Width <= 0 {
 		o.Width = defaultWidth
 	}
-	ui := New(Options{In: in, Out: out, NoColor: o.NoColor, Width: o.Width, Theme: o.Theme})
+	ui := New(Options{In: in, Out: out, NoColor: o.NoColor, Width: o.Width, Theme: o.Theme, Background: o.Background})
 	r := &Reporter{
 		out:    out,
 		errOut: errOut,
@@ -114,17 +117,30 @@ func (r *Reporter) watchInterrupt() {
 	go func() {
 		select {
 		case <-r.sig:
-			r.mu.Lock()
-			if r.active != nil {
-				r.clearLocked()
-				r.active = nil
-			}
-			_, _ = io.WriteString(r.out, "\n")
-			r.mu.Unlock()
-			os.Exit(130)
+			r.interrupted()
 		case <-r.sigDone:
 		}
 	}()
+}
+
+// exit is os.Exit, replaced in tests: the interrupt path has to put the
+// terminal back before it goes, and nothing else can run after it.
+var exit = os.Exit
+
+// interrupted is the Ctrl-C and SIGTERM path: stop the spinner, leave the
+// cursor on a fresh line, put the terminal's background back and exit. A
+// deferred Close does not run through os.Exit, so the paint is undone by hand
+// here; the deferred one still covers a return, an error and a panic.
+func (r *Reporter) interrupted() {
+	r.mu.Lock()
+	if r.active != nil {
+		r.clearLocked()
+		r.active = nil
+	}
+	_, _ = io.WriteString(r.out, "\n")
+	r.mu.Unlock()
+	r.Close()
+	exit(130)
 }
 
 var _ say.Reporter = (*Reporter)(nil)
@@ -719,8 +735,11 @@ func (r *Reporter) Banner(title, detail string) {
 	r.flushPending()
 }
 
-// Close stops the spinner and the interrupt handler. Safe to call twice.
+// Close stops the spinner and the interrupt handler and puts the terminal's
+// background back if this run painted it. Safe to call twice, and deferred by
+// cmd/box so a return, an error and a panic all restore the terminal.
 func (r *Reporter) Close() {
+	defer r.ui.Close()
 	r.flushPending()
 	r.stopActive()
 	r.mu.Lock()

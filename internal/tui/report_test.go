@@ -13,13 +13,15 @@ import (
 	"github.com/swizzin/s5n/internal/say"
 )
 
-var ansi = regexp.MustCompile(`\x1b\[[0-9;?]*[A-Za-z]`)
+// sgr matches the escape sequences a renderer writes. It is not named ansi:
+// the package of that name is imported here through paint.go.
+var sgr = regexp.MustCompile(`\x1b\[[0-9;?]*[A-Za-z]`)
 
 // strip turns what the live renderer wrote into the lines a terminal would
 // show, without colour or cursor movement.
 func strip(s string) []string {
 	s = strings.ReplaceAll(s, "\r", "\n")
-	s = ansi.ReplaceAllString(s, "")
+	s = sgr.ReplaceAllString(s, "")
 	out := strings.Split(s, "\n")
 	return out
 }

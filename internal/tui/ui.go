@@ -32,6 +32,12 @@ type Options struct {
 	// "catppuccin-mocha") pins one, and empty is s5n. theme.Parse is the
 	// authority on the names; a name it does not know is reported by Err.
 	Theme string
+	// Background paints the terminal's own background with the theme's, for
+	// the whole run, and puts it back on Close. Off by default: it is a change
+	// to the terminal that a kill -9 or a dropped connection leaves behind. It
+	// does nothing under NO_COLOR, which is the terminal asking for no colour
+	// at all.
+	Background bool
 }
 
 // UI is setup.Prompter on huh.
@@ -64,6 +70,11 @@ type UI struct {
 	// so the first question asked is where the operator hears about it,
 	// rather than a run in colours nobody chose.
 	themeErr error
+
+	// painter owns the terminal background for the whole run, when it was
+	// asked for. Every form's view hook and the reporter's lines between
+	// forms go through it, so the run has one ground.
+	painter *painter
 }
 
 // New builds the terminal UI. In and Out default to os.Stdin and os.Stdout.
@@ -99,8 +110,19 @@ func New(o Options) *UI {
 		u.width = defaultWidth
 	}
 	u.chrome.noColor = o.NoColor
+	u.painter = newPainter(out, variant, o.Background && !o.NoColor)
+	// Painted here rather than at the first form: box prints its masthead and
+	// its facts before it asks anything, and those lines are the run too.
+	u.painter.begin()
 	return u
 }
+
+// Close puts the terminal's own background back. It is safe to call twice, and
+// it is meant to be deferred: a defer is what makes the reset happen on a
+// normal return, on an error and on a panic. Ctrl-C and SIGTERM reach the
+// reporter's own handler, which closes before it exits. Nothing can catch
+// kill -9 or a connection that goes away, and those leave the colour behind.
+func (u *UI) Close() { u.painter.reset() }
 
 // Palette is the variant this UI draws with, resolved and in force.
 func (u *UI) Palette() theme.Variant { return u.variant }
@@ -157,6 +179,7 @@ func (u *UI) run(field huh.Field, answered func()) error {
 	form := huh.NewForm(huh.NewGroup(field)).
 		WithTheme(huh.ThemeFunc(func(bool) *huh.Styles { return u.styles })).
 		WithKeyMap(u.keys).
+		WithViewHook(u.painter.hook).
 		WithShowHelp(false).
 		WithInput(u.in).
 		WithOutput(u.out)
@@ -165,6 +188,8 @@ func (u *UI) run(field huh.Field, answered func()) error {
 	}
 	u.begin()
 	err := cancel(form.Run())
+	// The form's own program reset the background on its way out.
+	u.painter.again()
 	if err == nil && answered != nil {
 		answered()
 	}
