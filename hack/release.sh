@@ -171,11 +171,14 @@ step_package_chart() {
   # The package itself lints, reads back, and renders the image this run
   # pushed, by tag and by digest: the archive is the chart that ships.
   # The chart refuses to render without a login in front, so the render
-  # says there is one, as box does.
+  # says there is one, as box does; an app served at its own host name
+  # also needs the domain box serves it at, so gateway.host is the same
+  # fixture the chart's own validation renders with (hack/validate-chart.sh).
   helm lint "$tgz"
   helm show values "$tgz" >/dev/null
   local rendered want
-  rendered=$(helm template release "$tgz" -n seedbox --set auth.edge=true)
+  rendered=$(helm template release "$tgz" -n seedbox \
+    --set auth.edge=true --set gateway.host=box.example.com)
   want="${image}:${VERSION}@${DIGEST}"
   if ! grep -q "$want" <<<"$rendered"; then
     echo "the packaged chart does not render ${want}" >&2

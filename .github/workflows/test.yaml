@@ -1,7 +1,7 @@
-# The test jobs: Go, lint, chart, and the full kind e2e, for one ref. ci.yaml calls this
-# for every PR and push, and again for develop after a release's back-merge. It is
-# its own file because GitHub resolves called workflows before evaluating any
-# `if:`, so a workflow that called itself would recurse to the depth limit.
+# The test jobs: Go, lint, chart, the release rehearsal, and the full kind e2e, for one
+# ref. ci.yaml calls this for every PR and push, and again for develop after a release's
+# back-merge. It is its own file because GitHub resolves called workflows before
+# evaluating any `if:`, so a workflow that called itself would recurse to the depth limit.
 #
 # Actions are pinned by commit; the comment names the tag the commit belongs to.
 name: test
@@ -105,6 +105,38 @@ jobs:
           mkdir -p "$HOME/.local/bin" && tar -xzf kubeconform.tgz -C "$HOME/.local/bin" kubeconform && rm kubeconform.tgz
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
       - run: hack/validate-chart.sh "${{ matrix.kubernetes }}"
+
+  # The release's own steps, on every PR and push. release.yaml's s5n path ran
+  # for the first time at the 0.3.0 tag and had two bugs in it, neither of which
+  # anything else could have caught. This job calls hack/release.sh -- the
+  # scripts the release calls -- through hack/release-rehearsal.sh, rather than
+  # testing a copy of the logic: a copy passes while the release fails.
+  #
+  # No image build here. Both real release runs built the image, and a qemu
+  # arm64 build on every PR costs more than it proves: the packaged chart's
+  # render check (the chart naming the image by tag and digest) is what a
+  # post-push failure would otherwise show up as.
+  release-rehearsal:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.ref || github.sha }}
+          fetch-depth: 0 # every tag: the version check's previous s5n-v* is the question
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      - uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
+        with:
+          version: ${{ env.HELM_VERSION }}
+      - name: install kubeconform
+        run: |
+          curl -fsSLo kubeconform.tgz "https://github.com/yannh/kubeconform/releases/download/${KUBECONFORM_VERSION}/kubeconform-linux-amd64.tar.gz"
+          echo "${KUBECONFORM_SHA256}  kubeconform.tgz" | sha256sum -c -
+          mkdir -p "$HOME/.local/bin" && tar -xzf kubeconform.tgz -C "$HOME/.local/bin" kubeconform && rm kubeconform.tgz
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+      - run: hack/release-rehearsal.sh
 
   e2e-kind:
     needs: [go, chart]
