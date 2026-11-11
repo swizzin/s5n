@@ -15,6 +15,7 @@ import (
 
 	"github.com/swizzin/s5n/internal/say"
 	"github.com/swizzin/s5n/internal/setup"
+	"github.com/swizzin/s5n/internal/theme"
 )
 
 // ReporterOptions is one live reporter: the terminal, whether colour is
@@ -28,6 +29,11 @@ type ReporterOptions struct {
 	Width int
 	// NoColor keeps the layout and drops the colours (NO_COLOR).
 	NoColor bool
+	// Theme names the palette this run draws with; empty is s5n. The name is
+	// cmd/box's to read -- the values' `theme:` key -- and theme.Parse is what
+	// decides whether it is one. A name that does not resolve is reported by
+	// Err and by the first question asked.
+	Theme string
 	// Yes answers every confirm without a form, and leaves the same ✓ record
 	// line an answered form would.
 	Yes bool
@@ -81,7 +87,7 @@ func NewReporter(o ReporterOptions) *Reporter {
 	if o.Width <= 0 {
 		o.Width = defaultWidth
 	}
-	ui := New(Options{In: in, Out: out, NoColor: o.NoColor, Width: o.Width})
+	ui := New(Options{In: in, Out: out, NoColor: o.NoColor, Width: o.Width, Theme: o.Theme})
 	r := &Reporter{
 		out:    out,
 		errOut: errOut,
@@ -122,6 +128,12 @@ func (r *Reporter) watchInterrupt() {
 }
 
 var _ say.Reporter = (*Reporter)(nil)
+
+// Palette is the variant this run draws with.
+func (r *Reporter) Palette() theme.Variant { return r.ui.Palette() }
+
+// Err is a theme name that did not resolve, or nil.
+func (r *Reporter) Err() error { return r.ui.Err() }
 
 // SetYes makes every confirm answer itself, which is what --yes means on a
 // terminal. It is set after the flags are parsed.

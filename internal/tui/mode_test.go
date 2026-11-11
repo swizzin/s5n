@@ -30,7 +30,7 @@ func TestDecide(t *testing.T) {
 }
 
 func TestThemePaintsAndDropsColour(t *testing.T) {
-	styled := theme(false)
+	styled := huhTheme(false)
 	if got := styled.Focused.Title.GetForeground(); got == nil {
 		t.Fatal("the themed title has no colour")
 	}
@@ -41,7 +41,7 @@ func TestThemePaintsAndDropsColour(t *testing.T) {
 		t.Fatal("the focused button has no background: the selected choice must be visible")
 	}
 
-	plain := theme(true)
+	plain := huhTheme(true)
 	if out := plain.Focused.Title.Render("domain"); out != "domain" {
 		t.Fatalf("the plain theme still styles text: %q", out)
 	}

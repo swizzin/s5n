@@ -12,6 +12,7 @@ import (
 	"charm.land/lipgloss/v2"
 
 	"github.com/swizzin/s5n/internal/setup"
+	"github.com/swizzin/s5n/internal/theme"
 )
 
 // Options is one box UI: where its terminal is, and whether colour is allowed.
@@ -26,6 +27,11 @@ type Options struct {
 	// zero (a caller that did not measure) is the narrowest width init
 	// supports, so text still wraps rather than running off the screen.
 	Width int
+	// Theme names the palette to draw with: a pair ("s5n", "catppuccin")
+	// follows the terminal's background, a variant ("s5n-light",
+	// "catppuccin-mocha") pins one, and empty is s5n. theme.Parse is the
+	// authority on the names; a name it does not know is reported by Err.
+	Theme string
 }
 
 // UI is setup.Prompter on huh.
@@ -49,6 +55,15 @@ type UI struct {
 	// empty string without an error, which is why Decide falls back to
 	// setup.LinePrompt instead of huh's accessible mode.
 	accessible bool
+
+	// variant is the colours in force. box resolves it once, when the UI is
+	// built, so a form and the masthead above it cannot disagree.
+	variant theme.Variant
+	// themeErr is a theme name that did not resolve. New has no error to
+	// return -- cmd/box builds the UI in a function that only hands it back --
+	// so the first question asked is where the operator hears about it,
+	// rather than a run in colours nobody chose.
+	themeErr error
 }
 
 // New builds the terminal UI. In and Out default to os.Stdin and os.Stdout.
@@ -61,12 +76,24 @@ func New(o Options) *UI {
 	if out == nil {
 		out = os.Stdout
 	}
+	sel, err := theme.Parse(o.Theme)
+	// A pinned variant is not going to use the answer, so the terminal is not
+	// asked: the query costs up to lipgloss's two-second timeout on a terminal
+	// that does not reply.
+	dark := true
+	if sel.Variant == nil {
+		dark = darkBackground(in, out, o.NoColor)
+	}
+	variant := sel.Pick(dark)
+	use(variant)
 	u := &UI{
-		in:     in,
-		out:    out,
-		styles: theme(o.NoColor),
-		keys:   keyMap(),
-		width:  o.Width,
+		in:       in,
+		out:      out,
+		styles:   huhTheme(o.NoColor),
+		keys:     keyMap(),
+		width:    o.Width,
+		variant:  variant,
+		themeErr: err,
 	}
 	if u.width <= 0 {
 		u.width = defaultWidth
@@ -74,6 +101,12 @@ func New(o Options) *UI {
 	u.chrome.noColor = o.NoColor
 	return u
 }
+
+// Palette is the variant this UI draws with, resolved and in force.
+func (u *UI) Palette() theme.Variant { return u.variant }
+
+// Err is why the UI is not drawing the theme it was asked for, or nil.
+func (u *UI) Err() error { return u.themeErr }
 
 // keyMap is box's keys: huh quits on Ctrl-C only, and box's cancel gesture is
 // Esc anywhere too, the way every other command's is.
@@ -118,6 +151,9 @@ func (u *UI) end() {
 // line that separates it from what comes next, so the record it leaves reads
 // as part of the field rather than as a stray line.
 func (u *UI) run(field huh.Field, answered func()) error {
+	if u.themeErr != nil {
+		return u.themeErr
+	}
 	form := huh.NewForm(huh.NewGroup(field)).
 		WithTheme(huh.ThemeFunc(func(bool) *huh.Styles { return u.styles })).
 		WithKeyMap(u.keys).
@@ -347,6 +383,9 @@ func (u *UI) MultiSelect(f setup.MultiSelect) ([]string, error) {
 // report through ShowPathCheck instead; Note is the general seam, kept so this
 // type is a complete Prompter.
 func (u *UI) Note(text string) error {
+	if u.themeErr != nil {
+		return u.themeErr
+	}
 	u.begin()
 	fmt.Fprintln(u.out, u.chrome.paint(text, inkStyle.Render(text)))
 	u.end()

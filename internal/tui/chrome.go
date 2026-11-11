@@ -12,16 +12,6 @@ import (
 // it fits the narrowest terminal init claims to support.
 const mastheadWidth = 66
 
-var (
-	wordmarkStyle = lipgloss.NewStyle().Foreground(accent).Bold(true)
-	boldInkStyle  = lipgloss.NewStyle().Foreground(ink).Bold(true)
-	inkStyle      = lipgloss.NewStyle().Foreground(ink)
-	mutedStyle    = lipgloss.NewStyle().Foreground(muted)
-	accentStyle   = lipgloss.NewStyle().Foreground(accent)
-	badStyle      = lipgloss.NewStyle().Foreground(bad)
-	goodStyle     = lipgloss.NewStyle().Foreground(good)
-)
-
 // chrome is box's own furniture around huh: the masthead and the step counter.
 // It is kept apart from the forms so the copy and the frame are one place, and
 // so the plain (NO_COLOR) drawing is the same code with the colours dropped.
