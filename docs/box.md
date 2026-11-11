@@ -312,9 +312,10 @@ decision says are missing: Envoy Gateway from its OCI chart (the chart ships the
 API CRDs at the channel the controller is built against), MetalLB in L2 mode with a
 single `/32` pool at the node's primary address, the `GatewayClass` and `Gateway` the
 chart's HTTPRoutes attach to, and the admission policy that enforces the grant. Charts
-are fetched at run time at versions pinned in one place; the manifests box owns are
-compiled in. The plan names every release, version and namespace and asks before the
-first write (`--yes`, or no terminal, is unattended). A release already at its pinned
+are fetched at run time at the versions the chart release pins (see "The platform
+layer"), so bootstrap pulls the release before it installs anything; the manifests box
+owns are compiled in. The plan names every release, version and namespace and asks
+before the first write (`--yes`, or no terminal, is unattended). A release already at its pinned
 version is verified rather than upgraded, so a second bootstrap creates no Helm
 revision; the objects box applies are server-side applies under field manager `box`, so
 re-applying them changes nothing. cert-manager is installed the same way, with the
@@ -469,6 +470,16 @@ leaves it alone. A box older than `min-box` refuses that release until it's upda
 In the other direction, box keeps reading every release back to the oldest
 `upgrade-from` it knows, so a new box never strands an old install.
 
+**No maximum box version (decided).** A chart can't know which future box will break
+it, so it declares no ceiling; each side states only the floor it knows. The chart
+states `min-box`. box states its own floor in code, the oldest release it still reads,
+and raises it when it deletes support for something an old release relies on. The
+platform pins are part of that promise: box's compiled-in manifests must work with the
+platform version every release back to its floor pins. That isn't hypothetical:
+`update` replaces box before it moves the chart, so a new box runs against root's old
+release between those two steps, and for longer when an update rolls back. A release
+older than box's floor is one box will only update.
+
 **box only uses published charts (decided).** It pulls a released chart by version from
 the OCI registry and reads the schema, manifest and annotations from that artifact. It
 never loads `charts/` from its own tree, so a box built from main can't depend on
@@ -483,20 +494,34 @@ republishes the chart.
   chart at `oci://ghcr.io/swizzin/charts/s5n`, with `version` and `appVersion` both
   `<version>`. The chart is packaged after the image is pushed and names that image by
   digest, so a chart can never point at an image other than the one built from its
-  commit. Its GitHub release lists the app images that moved and is never marked latest.
+  commit. Its GitHub release lists the app images and platform pins that moved and is
+  never marked latest.
 - A `box-v<version>` tag publishes box's binaries with a `sha256sums.txt` as assets of a
   GitHub release, which is marked latest, so `releases/latest` always means box.
 
-Nothing is published from a branch push. `main` is what has been released; work lands on
-`develop`, and a feature release merges `develop` into `main` and tags it there.
+Because the platform pins ship in the chart (see "The platform layer"), a platform patch
+is a chart release too, and a `box-v*` release only ever carries box's own code.
 
-**Nightly chart releases (decided).** Renovate bumps the app images in `variants.yaml`
-on both branches. On `main`, a patch or digest bump merges itself as soon as the full e2e
-is green; anything larger waits for the maintainer. There is no waiting period: the
-upstream projects stage their own releases, and holding a build longer adds age, not
-testing. Each night, if `main` has changed since the last `s5n-v*` tag and every change
-since is one of those bumps, a scheduled job raises the chart's patch version and tags
-it. Any other change on `main` waits for a maintainer's release.
+**Branches (decided).** `main` is what has been released; work lands on `develop`. Both
+move by ordinary pull-request merges, not fast-forward only: CI runs on every push to
+`main`, and a release is built from its tagged commit, so a straight line adds nothing.
+A feature release merges `develop` into `main`; once CI is green on `main`, the
+maintainer tags it there. After every release, `main` is merged back into `develop`, so
+`develop`'s e2e always tests the images and pins users are running.
+
+**Automatic chart releases (decided).** Renovate bumps the app images in `variants.yaml`
+on `main` only; `develop` gets them through the back-merge. The platform pins are bumped
+on both branches, so work on `develop` is built and tested against the platform it will
+ship on. On `main`, a patch or digest bump merges itself as soon as the full e2e is
+green; anything larger waits for the maintainer. Renovate groups the bumps that land in
+one window into one pull request. There is no waiting period: the upstream projects
+stage their own releases, and holding a build longer adds age, not testing. On every
+push to `main`, if `main` has changed since the last `s5n-v*` tag and every change since
+is one of those bumps, CI raises the chart's patch version and tags it. Any other change
+on `main` waits for a maintainer's release, and the job names it. There is no off
+switch in the repo: disabling the workflow in GitHub is the kill switch. Nothing is
+released without a previous `s5n-v*` tag to build on, and nothing is published from a
+push to `develop`.
 
 What makes this safe is the e2e plus a rollback that really works. The Arrs migrate
 their databases forward when they start and don't support running an older version
@@ -535,9 +560,10 @@ with the previous chart.
   check.
 
 **What CI proves:** box at HEAD against the newest released chart and the oldest
-release back to its `upgrade-from` floor; the chart at HEAD against the newest released
-box, which must meet its `min-box`. A chart change that needs a newer box but forgets
-to raise `min-box` fails there and not on a user's server. The self-update path gets
+release back to its floor, each on the platform that release pins; the chart at HEAD
+against the newest released box and against the box release its `min-box` names. A
+chart change (a platform bump included) that needs a newer box but forgets to raise
+`min-box` fails there and not on a user's server. The self-update path gets
 its own test: the previous box release updates itself to HEAD and finishes a chart
 update.
 
@@ -649,28 +675,45 @@ The chart pins every image by digest; there's no in-cluster image updater and no
 New images arrive hours after upstream instead of minutes, and a broken upstream image
 fails in CI instead of on a user's box.
 
+**The timer (decided).** box checks for a newer release every 15 minutes, with jitter
+so a fleet doesn't arrive at once. It reads the tag list from ghcr anonymously; no
+token is needed to learn that something moved.
+
+**When an app takes it (decided).** Each catalog app declares an apply policy, and the
+default is to apply as soon as the release is taken. Plex defers while it has active
+streams, and Jellyfin will do the same; the update applies at the first check with
+none. Torrent activity is never a reason to wait: a client is always busy, and there's
+no clean line between busy and idle.
+
 ### The platform layer (decided)
 
-Envoy Gateway, MetalLB and cert-manager follow the same path as the images, at the box
-level instead of the chart level:
+Envoy Gateway, MetalLB, cert-manager, the login and k0s follow the same path as the
+images. Their pins ship in the chart:
 
-1. Renovate opens a pull request when an upstream release lands for a pinned component.
-2. CI runs the full e2e on it. On `main`, a patch bump merges itself as soon as it is green,
-   and the same nightly job tags a `box-v*`
-   patch release when every change since the last one is such a bump. Minor and major
+1. Renovate opens a pull request when an upstream release lands for a pinned component,
+   on `main` and on `develop`.
+2. CI runs the full e2e on it. On `main`, a patch bump merges itself as soon as it is
+   green, and the push cuts a chart patch release like any image bump. Minor and major
    bumps (a k0s minor is a Kubernetes minor; MetalLB is still 0.x) wait for the
    maintainer.
-3. `box update` on its timer upgrades the components box manages, with doctor run
-   before and after. A component in `external` mode is only checked, and status warns
-   when it drifts outside the tested range.
+3. Root's `update` takes the pins from the release it is moving to and upgrades the
+   components box manages before it moves any seedbox, with doctor run before and
+   after. A component in `external` mode is only checked, and status warns when it
+   drifts outside the tested range. A user's `update` never touches the platform and
+   ignores the pins; a seedbox still on an older release runs on the newer platform
+   until it moves.
 
-Every version box installs lives in one file, `install/platform/versions.yaml`: k0s and
-each platform component, with the chart or release it comes from. box embeds it, the
-e2e scripts read it instead of carrying their own copies, and Renovate watches it. That
-way the e2e always tests the versions box ships, and one pull request moves one pin.
-App images stay in the chart's `variants.yaml`, because they ship with chart releases,
-not box releases. Versions that exist only for tests (the foreign Gateway scenario, the
-local registry, Pebble) stay in the scripts, pinned by digest and watched by Renovate too.
+Every version box installs lives in one file, `charts/s5n/platform.yaml`: k0s and each
+platform component, with the chart or release it comes from. box reads it from the
+release it pulled, the same way it reads `variants.yaml`, so bootstrap pulls a release
+before it installs anything. The e2e scripts read the same file instead of carrying
+their own copies, and Renovate watches it. That way the e2e always tests the versions a
+release ships, one pull request moves one pin, and a cert-manager patch never needs a
+new box. What box compiles in are the manifests it writes for those components, which
+is why a pin that needs a manifest change raises `min-box` (see "How box versions
+against the chart"). Versions that exist only for tests (the foreign Gateway scenario,
+the local registry, Pebble) stay in the scripts, pinned by digest and watched by
+Renovate too.
 
 ### The cluster itself (decided)
 
