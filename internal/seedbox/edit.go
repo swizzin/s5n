@@ -579,28 +579,9 @@ func tokenEnd(s []byte, inFlow bool) int {
 	}
 	switch s[0] {
 	case '"':
-		for i := 1; i < len(s); i++ {
-			if s[i] == '\\' {
-				i++
-				continue
-			}
-			if s[i] == '"' {
-				return i + 1
-			}
-		}
-		return 0
+		return doubleQuotedEnd(s)
 	case '\'':
-		for i := 1; i < len(s); i++ {
-			if s[i] != '\'' {
-				continue
-			}
-			if i+1 < len(s) && s[i+1] == '\'' {
-				i++
-				continue
-			}
-			return i + 1
-		}
-		return 0
+		return singleQuotedEnd(s)
 	}
 	for i := 0; i < len(s); i++ {
 		if s[i] == '\n' || s[i] == '\r' {
@@ -614,6 +595,38 @@ func tokenEnd(s []byte, inFlow bool) int {
 		}
 	}
 	return trimTrailing(s)
+}
+
+// doubleQuotedEnd is the offset just past the closing quote of a double-quoted
+// scalar at the start of s, where a backslash escapes the next byte. 0 is an
+// unterminated scalar, which the caller refuses rather than half-replaces.
+func doubleQuotedEnd(s []byte) int {
+	for i := 1; i < len(s); i++ {
+		if s[i] == '\\' {
+			i++
+			continue
+		}
+		if s[i] == '"' {
+			return i + 1
+		}
+	}
+	return 0
+}
+
+// singleQuotedEnd is the same for a single-quoted scalar, where a doubled
+// quote is an escaped quote and a backslash is an ordinary byte.
+func singleQuotedEnd(s []byte) int {
+	for i := 1; i < len(s); i++ {
+		if s[i] != '\'' {
+			continue
+		}
+		if i+1 < len(s) && s[i+1] == '\'' {
+			i++
+			continue
+		}
+		return i + 1
+	}
+	return 0
 }
 
 func trimTrailing(s []byte) int {
