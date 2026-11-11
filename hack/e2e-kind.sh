@@ -472,6 +472,10 @@ spec:
   volumeName: s5n-config
   resources: {requests: {storage: 1Gi}}
 EOF
+# The PV controller binds a pre-bound pair on its next pass, not inside the
+# apply: wait for it, then report each claim's phase (a timeout leaves a phase
+# other than Bound, and the loop fails on it with the claim named).
+$K -n "$NS" wait --for=jsonpath='{.status.phase}'=Bound pvc/s5n-data pvc/s5n-config --timeout=60s >/dev/null 2>&1 || true
 for pvc in s5n-data s5n-config; do
   phase=$($K -n "$NS" get pvc "$pvc" -o jsonpath='{.status.phase}')
   echo "  claim ${pvc}: ${phase}"; [ "$phase" = Bound ] || fail=1
