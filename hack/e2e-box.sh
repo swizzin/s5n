@@ -250,7 +250,7 @@ chmod 600 "$WORK/authelia-password"
 log "preparing host paths inside the node (what box init creates on real hosts)"
 docker exec "${CLUSTER}-control-plane" bash -c '
   mkdir -p /srv/s5n/data \
-           /srv/s5n/config/{qbittorrent,prowlarr,sonarr,sonarr-4k,radarr,radarr-4k,plex,tautulli,seerr}
+           /srv/s5n/config/{qbittorrent,prowlarr,sonarr,sonarr-4k,radarr,radarr-4k,plex,tautulli,seerr,qui}
   chown -R 1000:1000 /srv/s5n'
 
 # The login's own directory, which box init creates on a real host: 0700, owned
@@ -314,7 +314,7 @@ bootstrap() { # bootstrap <output file>
     --grant "$WORK/grant.yaml" --values "$WORK/values.yaml" \
     --namespace "$NS" --domain "$DOMAIN" \
     --data-path /srv/s5n/data --config-path /srv/s5n/config \
-    --apps qbittorrent,sonarr,radarr,prowlarr,plex,tautulli,seerr \
+    --apps qbittorrent,sonarr,radarr,prowlarr,plex,tautulli,seerr,qui \
     --puid 1000 --pgid 1000 \
     --login "$LOGIN" --password-file "$WORK/authelia-password" \
     --paths-in-node --record "$WORK/cluster.yaml" \
@@ -333,7 +333,7 @@ init() { # init <output file>
     --grant "$WORK/grant.yaml" --values "$WORK/values.yaml" \
     --namespace "$NS" --domain "$DOMAIN" \
     --data-path /srv/s5n/data --config-path /srv/s5n/config \
-    --apps qbittorrent,sonarr,radarr,prowlarr,plex,tautulli,seerr \
+    --apps qbittorrent,sonarr,radarr,prowlarr,plex,tautulli,seerr,qui \
     --puid 1000 --pgid 1000 \
     --login "$LOGIN" --password-file "$WORK/authelia-password" \
     --paths-in-node \
@@ -834,6 +834,23 @@ print("  app routes: %d HTTPRoutes, none pins a sectionName" % len(items))
     *"rd="*) ;;
     *) echo "the redirect carries no rd=, so the portal cannot send the browser back"; fail=1 ;;
   esac
+
+  # Every opt-in app is behind the same login, and none of them keeps one of its
+  # own: an unauthenticated request must reach the edge before the app does.
+  for app in qui; do
+    app_headers="$WORK/unauth-${app}-headers.txt"
+    app_code=$(curl -sS -o /dev/null -D "$app_headers" -w '%{http_code}' \
+      --resolve "${DOMAIN}:443:${gw_addr}" --cacert "$WORK/pebble-root.pem" \
+      "https://${DOMAIN}/${app}/" 2>/dev/null || true)
+    app_location=$(grep -i '^location:' "$app_headers" | tr -d '\r' | sed 's/^[Ll]ocation: *//' || true)
+    echo "  GET https://${DOMAIN}/${app}/ without a cookie: ${app_code} -> ${app_location}"
+    [ "$app_code" = 302 ] ||
+      { echo "an unauthenticated /${app}/ answered ${app_code}, not a redirect to the login"; fail=1; }
+    case "$app_location" in
+      "https://${DOMAIN}/auth/"*) ;;
+      *) echo "the /${app}/ redirect does not point at the portal: ${app_location}"; fail=1 ;;
+    esac
+  done
 
   # Port 80: this host's own listener carries no login (the Allow box writes
   # with it), so an app URL gets the 301 to HTTPS -- the behaviour a browser,

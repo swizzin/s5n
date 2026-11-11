@@ -94,7 +94,7 @@ $KIND load docker-image --name "$CLUSTER" "$IMAGE"
 log "preparing host paths inside the node (what box init creates on real hosts)"
 docker exec "${CLUSTER}-control-plane" bash -c '
   mkdir -p /srv/s5n/data \
-           /srv/s5n/config/{qbittorrent,prowlarr,sonarr,sonarr-4k,radarr,radarr-4k,plex,tautulli,seerr}
+           /srv/s5n/config/{qbittorrent,prowlarr,sonarr,sonarr-4k,radarr,radarr-4k,plex,tautulli,seerr,qui}
   chown -R 1000:1000 /srv/s5n'
 
 # Nothing below may prepare the data categories: the wiring Job owns them, and a
@@ -493,6 +493,15 @@ for pvc in s5n-data s5n-config; do
   echo "  claim ${pvc}: ${phase}"; [ "$phase" = Bound ] || fail=1
 done
 
+# The catalog's opt-in apps, switched on for the assertions below. They default
+# off, so a release that installs only the defaults never runs them, and the
+# chart's own e2e is where each one is proven to serve under its own base path.
+cat >"$WORK/apps-values.yaml" <<'EOF'
+apps:
+  qui:
+    enabled: true
+EOF
+
 # The chart under test, with the locally built image instead of the published one.
 install_release() {
   # hack/e2e-values.yaml carries the locally built image and one 4K instance
@@ -503,6 +512,7 @@ install_release() {
   # this, so the path is exercised on every install.
   $HELM upgrade --install s5n charts/s5n -n "$NS" \
     -f hack/e2e-values.yaml \
+    -f "$WORK/apps-values.yaml" \
     --wait --timeout 15m
 }
 
@@ -636,6 +646,42 @@ echo "GET /plex/library/sections via gateway -> ${code} (want 401)"
 [ "$code" = 401 ] || { echo "Plex served /library/sections as ${code} through the Gateway: unauthenticated access"; fail=1; }
 code=$(curl -s -o /dev/null -w '%{http_code}' "http://${GW_ADDR}/seerr/api/v1/settings/public")
 echo "GET /seerr/api/v1/settings/public via gateway -> ${code}"; [ "$code" = 200 ] || fail=1
+
+# ---- the opt-in apps (apps-values.yaml) ---------------------------------------
+# Each serves itself under its own base path (its baseUrl / BASE_PATH, with no
+# rewrite), and none of them keeps a login of its own: the edge is the login,
+# exactly as the Arrs run External. So the HTML must arrive without a redirect,
+# and the asset URLs it builds must resolve through the same prefix — that is
+# what makes the base-path setting right rather than merely present.
+for app in qui; do
+  : >"$WORK/${app}-headers"
+  code=$(curl -s -D "$WORK/${app}-headers" -o "$WORK/${app}.html" -w '%{http_code}' \
+    "http://${GW_ADDR}/${app}/" || true)
+  loc=$(grep -i '^location:' "$WORK/${app}-headers" | tr -d '\r' | sed 's/^[Ll]ocation: *//' || true)
+  echo "GET /${app}/ via gateway -> ${code} ${loc}"
+  [ "$code" = 200 ] || { echo "/${app}/ did not serve its UI: ${code}"; fail=1; }
+  [ -z "$loc" ] || { echo "/${app}/ redirected to ${loc}: the app is asking for a login of its own"; fail=1; }
+  grep -qi '<!doctype html' "$WORK/${app}.html" || { echo "/${app}/ answered ${code} without an HTML document"; fail=1; }
+  asset=$(grep -oE '(src|href)="/[^"]+\.(js|css)"' "$WORK/${app}.html" | head -1 |
+    sed 's/^[a-z]*="//; s/"$//' || true)
+  echo "  asset the page references: ${asset}"
+  case "$asset" in
+    "/${app}/"*) ;;
+    "") echo "/${app}/ referenced no script or stylesheet"; fail=1 ;;
+    *) echo "the asset ${asset} is outside /${app}/: the base path did not reach the bundle"; fail=1 ;;
+  esac
+  if [ -n "$asset" ]; then
+    code=$(curl -s -o /dev/null -w '%{http_code}' "http://${GW_ADDR}${asset}" || true)
+    echo "GET ${asset} via gateway -> ${code}"; [ "$code" = 200 ] || fail=1
+  fi
+done
+# qui's health endpoints are on its root router, outside its base path (only
+# /api and the UI sit under baseUrl), so the Gateway — which routes /qui — must
+# not be used for them: ask the pod, which is exactly what its readinessProbe
+# does. A prefixed /qui/healthz/readiness is the SPA's catch-all, not health.
+code=$($K -n "$NS" exec qui-0 -- curl -s -o /dev/null -w '%{http_code}' \
+  http://127.0.0.1:7476/healthz/readiness || true)
+echo "qui in-pod /healthz/readiness -> ${code}"; [ "$code" = 200 ] || fail=1
 
 # The peers Service is a NodePort on the node's own address (how a single-IP box
 # runs: the Gateway holds the LoadBalancer address, peers use the node port), so a

@@ -120,6 +120,33 @@ spec:
             - name: PLEX_NO_AUTH_NETWORKS
               value: {{ join "," . | quote }}
             {{- end }}
+            {{- else if eq $inst.app "qui" }}
+            - name: QUI__HOST
+              value: 0.0.0.0
+            - name: QUI__PORT
+              value: {{ $cfg.port | quote }}
+            # qui's own baseUrl, not a stripped prefix: it builds its asset URLs
+            # under it, so the route keeps the path and rewritePath stays false.
+            - name: QUI__BASE_URL
+              value: {{ $urlBase | quote }}
+            # qui's login is off, like the Arrs' External scheme: the login is at
+            # the edge (auth.edge), never in the app. Disabling it takes three
+            # settings (internal/domain/config.go at v1.35.0: IsAuthDisabled is
+            # AuthDisabled && IAcknowledgeThisIsABadIdea, and
+            # ValidateAuthDisabledConfig refuses to start without the allowlist).
+            # The allowlist is every address because it can only ever match the
+            # TCP peer: in front of this app that is the Gateway's proxy pod, not
+            # the browser, and NetworkPolicy already admits only the Gateway and
+            # this release. Plex's noAuthNetworks warning is the opposite case --
+            # Plex sits outside the edge, so a range trusted there would open the
+            # server itself to whoever reaches it. A pod that got past the
+            # NetworkPolicy would already be inside the release.
+            - name: QUI__AUTH_DISABLED
+              value: "true"
+            - name: QUI__I_ACKNOWLEDGE_THIS_IS_A_BAD_IDEA
+              value: "true"
+            - name: QUI__AUTH_DISABLED_ALLOWED_CIDRS
+              value: "0.0.0.0/0,::/0"
             {{- end }}
             {{- range $k, $v := $cfg.env }}
             - name: {{ $k }}
@@ -145,6 +172,10 @@ spec:
             {{- if $inst.arr }}
             httpGet:
               path: {{ printf "%s/ping" $urlBase }}
+              port: http
+            {{- else if $path := include "s5n.readinessPath" (dict "app" $inst.app "name" $inst.name) }}
+            httpGet:
+              path: {{ $path }}
               port: http
             {{- else }}
             tcpSocket:

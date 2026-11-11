@@ -369,6 +369,21 @@ func TestRealChartManifestLoads(t *testing.T) {
 			t.Fatalf("apps.%s has %d transient questions; the kind is meant to be rare", app.Name, len(app.Transient()))
 		}
 	}
+	// The opt-in apps: off unless the operator says so, no instances, and
+	// nothing to ask at init. A box that installs the defaults must not get
+	// them, so `default: false` is the assertion that matters most here.
+	for _, name := range []string{"qui"} {
+		app, ok := cat.App(name)
+		if !ok {
+			t.Fatalf("%s is not in the catalog", name)
+		}
+		if app.Default || app.Instances {
+			t.Fatalf("apps.%s = %+v, want an opt-in app with no instances", name, app)
+		}
+		if len(app.Questions) != 0 {
+			t.Fatalf("apps.%s asks %d questions, want none", name, len(app.Questions))
+		}
+	}
 }
 
 func TestLoadNamesAMissingManifest(t *testing.T) {

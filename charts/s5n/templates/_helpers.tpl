@@ -166,3 +166,20 @@ runAsNonRoot: true
 seccompProfile:
   type: RuntimeDefault
 {{- end -}}
+
+{{- /*
+s5n.readinessPath: the path an app's readinessProbe asks for, or "" for an app
+whose readiness stays a TCP connect (the chart's default). Chart-owned, like the
+security contexts: a probe a user can point at any path is a probe that can call
+a dead app Ready.
+
+The paths are the app's own, at the tag variants.yaml pins. qui's is not under
+its baseUrl: it registers /healthz/readiness on the root router and mounts only
+/api and the UI under the prefix (internal/api/server.go), so a prefixed request
+lands on the SPA's catch-all and answers HTML, not health.
+*/ -}}
+{{- define "s5n.readinessPath" -}}
+{{- if eq .app "qui" -}}
+/healthz/readiness
+{{- end -}}
+{{- end -}}

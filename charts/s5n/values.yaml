@@ -248,3 +248,19 @@ apps:
     rewritePath: true
     resources: {}
     env: {}
+
+  # qui is opt-in: it is a second UI for the same qBittorrent, useful once its
+  # cross-seed and automation are wanted. It serves itself under /qui (its own
+  # baseUrl), so the route keeps the prefix instead of stripping it.
+  qui:
+    enabled: false
+    image:
+      # Blessed variant from variants.yaml. The repository comes only from
+      # there; a tag or digest pin here is held within that repository.
+      variant: default
+    port: 7476
+    # qui's baseUrl is set by the chart from the instance name; nothing is
+    # stripped, because the app builds its own asset URLs under the prefix.
+    rewritePath: false
+    resources: {}
+    env: {}

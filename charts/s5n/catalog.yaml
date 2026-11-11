@@ -90,3 +90,11 @@ apps:
     instances: false
     default: true
     questions: []
+
+  # Opt-in: a second UI for the same qBittorrent, not something a box should
+  # have because it installed the defaults.
+  qui:
+    description: cross-seed and automation for qBittorrent, in one page
+    instances: false
+    default: false
+    questions: []

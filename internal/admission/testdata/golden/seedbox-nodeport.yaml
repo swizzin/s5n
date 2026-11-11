@@ -8,7 +8,7 @@ metadata:
     s5n.io/grant: seedbox
 data:
   # Generated from charts/s5n/variants.yaml; edit the chart, not this.
-  blessedRepositories: "ghcr.io/home-operations/plex,ghcr.io/home-operations/prowlarr,ghcr.io/home-operations/qbittorrent,ghcr.io/home-operations/radarr,ghcr.io/home-operations/sonarr,ghcr.io/home-operations/tautulli,ghcr.io/seerr-team/seerr,ghcr.io/swizzin/s5n"
+  blessedRepositories: "ghcr.io/autobrr/qui,ghcr.io/home-operations/plex,ghcr.io/home-operations/prowlarr,ghcr.io/home-operations/qbittorrent,ghcr.io/home-operations/radarr,ghcr.io/home-operations/sonarr,ghcr.io/home-operations/tautulli,ghcr.io/seerr-team/seerr,ghcr.io/swizzin/s5n"
   serviceType: NodePort
   torrentNodePort: "31111"
 

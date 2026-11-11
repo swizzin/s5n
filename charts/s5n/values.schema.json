@@ -354,6 +354,9 @@
         },
         "seerr": {
           "$ref": "#/definitions/simpleApp"
+        },
+        "qui": {
+          "$ref": "#/definitions/simpleApp"
         }
       }
     }
