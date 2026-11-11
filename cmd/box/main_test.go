@@ -29,14 +29,13 @@ func (r *recordingCharts) Load(_ context.Context, ref release.ChartRef) (release
 	return release.Chart{Name: "s5n", Version: testChartVersion}, nil
 }
 
-func parse(t *testing.T, name string, add func(*flag.FlagSet), args ...string) *flag.FlagSet {
+func parse(t *testing.T, name string, add func(*flag.FlagSet), args ...string) {
 	t.Helper()
 	fs := flag.NewFlagSet(name, flag.ContinueOnError)
 	add(fs)
 	if err := fs.Parse(args); err != nil {
 		t.Fatalf("%s: %v", name, err)
 	}
-	return fs
 }
 
 // TestBootstrapAndInitPassTheirChartFlagsToTheSource: bootstrap hands its flags

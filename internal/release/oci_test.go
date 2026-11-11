@@ -65,7 +65,7 @@ func registry(t *testing.T) string {
 
 // pushChart packages charts/s5n from this checkout and pushes it, the way the
 // release workflow does with helm package and helm push.
-func pushChart(t *testing.T, host, repo string) []byte {
+func pushChart(t *testing.T, host string) []byte {
 	t.Helper()
 	data := packageChart(t, filepath.Join("..", "..", "charts", "s5n"))
 	ch, err := loader.LoadArchive(bytes.NewReader(data))
@@ -76,7 +76,7 @@ func pushChart(t *testing.T, host, repo string) []byte {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ref := host + "/" + repo + "/" + ch.Metadata.Name + ":" + ch.Metadata.Version
+	ref := host + "/charts/" + ch.Metadata.Name + ":" + ch.Metadata.Version
 	if _, err := client.Push(data, ref); err != nil {
 		t.Fatalf("push %s: %v", ref, err)
 	}
@@ -137,7 +137,7 @@ func packageChart(t *testing.T, dir string) []byte {
 // test fixture, never a source box installs from.
 func TestOCIRoundTrip(t *testing.T) {
 	host := registry(t)
-	want := pushChart(t, host, "charts")
+	want := pushChart(t, host)
 	pulled, err := (&OCIChart{BoxVersion: "0.0.0"}).Load(context.Background(), ChartRef{
 		Repo:    "oci://" + host + "/charts/s5n",
 		Version: chartVersion(t, want),
@@ -188,7 +188,7 @@ func TestOCIRoundTrip(t *testing.T) {
 // Helm's error chain.
 func TestOCINoPublishedRelease(t *testing.T) {
 	host := registry(t)
-	pushChart(t, host, "charts")
+	pushChart(t, host)
 	_, err := (&OCIChart{BoxVersion: "0.0.0"}).Load(context.Background(), ChartRef{
 		Repo:    "oci://" + host + "/charts/s5n",
 		Version: "9.9.9",
@@ -222,7 +222,7 @@ func TestOCIEmptyRepository(t *testing.T) {
 // why. The skip is on stdout, in box's voice.
 func TestOCIPicksTheNewestReleaseBoxCanUse(t *testing.T) {
 	host := registry(t)
-	pushChart(t, host, "charts")
+	pushChart(t, host)
 
 	// A second release, 0.9.0, whose floor is above this box.
 	data := packageChart(t, filepath.Join("..", "..", "charts", "s5n"))
@@ -231,7 +231,7 @@ func TestOCIPicksTheNewestReleaseBoxCanUse(t *testing.T) {
 		t.Fatal(err)
 	}
 	setChartVersion(t, ch, "0.9.0", "9.9.9")
-	if _, err := pushData(t, host+"/charts/s5n:0.9.0", archiveChart(t, ch)); err != nil {
+	if err := pushData(t, host+"/charts/s5n:0.9.0", archiveChart(t, ch)); err != nil {
 		t.Fatalf("push 0.9.0: %v", err)
 	}
 
@@ -254,14 +254,14 @@ func TestOCIPicksTheNewestReleaseBoxCanUse(t *testing.T) {
 // has a cluster client — so nothing can have been written.
 func TestOCIRefusesAFloorAboveBox(t *testing.T) {
 	host := registry(t)
-	pushChart(t, host, "charts")
+	pushChart(t, host)
 	data := packageChart(t, filepath.Join("..", "..", "charts", "s5n"))
 	ch, err := loader.LoadArchive(bytes.NewReader(data))
 	if err != nil {
 		t.Fatal(err)
 	}
 	setChartVersion(t, ch, "0.4.0", "0.5.0")
-	if _, err := pushData(t, host+"/charts/s5n:0.4.0", archiveChart(t, ch)); err != nil {
+	if err := pushData(t, host+"/charts/s5n:0.4.0", archiveChart(t, ch)); err != nil {
 		t.Fatalf("push 0.4.0: %v", err)
 	}
 
@@ -289,7 +289,7 @@ func TestOCIRefusesAFloorAboveBox(t *testing.T) {
 // compared with a floor. It skips the check and says so exactly once per run.
 func TestOCIDevBoxSkipsTheFloorOnce(t *testing.T) {
 	host := registry(t)
-	pushChart(t, host, "charts")
+	pushChart(t, host)
 	var log bytes.Buffer
 	src := &OCIChart{BoxVersion: DevVersion, Say: &say.Plain{W: &log}}
 	for i := 0; i < 2; i++ {
@@ -363,17 +363,16 @@ func archiveChart(t *testing.T, ch *chartv2.Chart) []byte {
 	return buf.Bytes()
 }
 
-func pushData(t *testing.T, ref string, data []byte) (string, error) {
+func pushData(t *testing.T, ref string, data []byte) error {
 	t.Helper()
 	client, err := helmregistry.NewClient(helmregistry.ClientOptWriter(io.Discard), helmregistry.ClientOptPlainHTTP())
 	if err != nil {
-		return "", err
+		return err
 	}
-	res, err := client.Push(data, ref)
-	if err != nil {
-		return "", err
+	if _, err := client.Push(data, ref); err != nil {
+		return err
 	}
-	return res.Ref, nil
+	return nil
 }
 
 // TestChartRepoRefusesAURL: --chart-repo is an OCI reference; an https URL is
@@ -513,7 +512,7 @@ func treeSnapshot(t *testing.T, root string) string {
 // chart anonymously. Nothing in that tree is read for a secret or written to.
 func TestOCIPullIgnoresTheOperatorsRegistryConfig(t *testing.T) {
 	host := registry(t)
-	want := pushChart(t, host, "charts")
+	want := pushChart(t, host)
 
 	poison := poisonRegistryHome(t)
 	before := treeSnapshot(t, poison)
@@ -539,7 +538,7 @@ func TestOCIPullIgnoresTheOperatorsRegistryConfig(t *testing.T) {
 // to miss on it.
 func TestOCIPullLeavesNoTemporaryHelmHome(t *testing.T) {
 	host := registry(t)
-	want := pushChart(t, host, "charts")
+	want := pushChart(t, host)
 	version := chartVersion(t, want)
 
 	root := t.TempDir()
@@ -632,7 +631,7 @@ func chartRequest(t *testing.T) *http.Request {
 // first install fail right after a bootstrap that survived it.
 func TestOCIPullRetriesATransientRegistryFailure(t *testing.T) {
 	host, failures, served := unhealthyRegistry(t)
-	want := pushChart(t, host, "charts")
+	want := pushChart(t, host)
 	failures.Store(1)
 
 	pulled, err := (&OCIChart{BoxVersion: "0.0.0", Retry: instantRetry(4)}).Load(context.Background(), ChartRef{

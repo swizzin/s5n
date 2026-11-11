@@ -8,10 +8,10 @@ func TestSealWritesApiKeyAndEnablesAPIOnEmptyFile(t *testing.T) {
 		t.Fatal("want changed on an absent file")
 	}
 	doc := parse(out)
-	if v, _ := doc.get("General", "api_key"); v != "s5nseeded00000000000000000000001" {
+	if v := doc.get("General", "api_key"); v != "s5nseeded00000000000000000000001" {
 		t.Fatalf("api_key = %q", v)
 	}
-	if v, _ := doc.get("General", "api_enabled"); v != "1" {
+	if v := doc.get("General", "api_enabled"); v != "1" {
 		t.Fatalf("api_enabled = %q, want 1", v)
 	}
 }
@@ -38,13 +38,13 @@ func TestSealPreservesOtherSettingsAndRepairsDisabledAPI(t *testing.T) {
 		t.Fatal("want changed: api_enabled was 0")
 	}
 	doc := parse(out)
-	if v, _ := doc.get("General", "api_enabled"); v != "1" {
+	if v := doc.get("General", "api_enabled"); v != "1" {
 		t.Fatalf("api_enabled = %q, want repaired to 1", v)
 	}
-	if v, _ := doc.get("General", "cache_images"); v != "1" {
+	if v := doc.get("General", "cache_images"); v != "1" {
 		t.Fatalf("cache_images (untouched) = %q", v)
 	}
-	if v, _ := doc.get("PMS", "pms_ip"); v != "plex" {
+	if v := doc.get("PMS", "pms_ip"); v != "plex" {
 		t.Fatalf("PMS section (untouched) = %q", v)
 	}
 }
@@ -56,7 +56,7 @@ func TestSealRotatesAnExistingDifferentKey(t *testing.T) {
 		t.Fatal("want changed: the key differs")
 	}
 	doc := parse(out)
-	if v, _ := doc.get("General", "api_key"); v != "new-key" {
+	if v := doc.get("General", "api_key"); v != "new-key" {
 		t.Fatalf("api_key = %q, want rotated", v)
 	}
 }

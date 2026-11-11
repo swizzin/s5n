@@ -136,16 +136,16 @@ func readBody(w http.ResponseWriter, r *http.Request) (Item, bool) {
 	return b, true
 }
 
-func newFakeArr(t *testing.T, urlBase string) (*fakeArr, *Arr, *httptest.Server) {
+func newFakeArr(t *testing.T, urlBase string) (*fakeArr, *Arr) {
 	t.Helper()
 	f := &fakeArr{urlBase: urlBase, hardlink: true}
 	srv := httptest.NewServer(f)
 	t.Cleanup(srv.Close)
-	return f, NewArr(Sonarr, "sonarr", srv.URL, urlBase, "test-key"), srv
+	return f, NewArr(Sonarr, "sonarr", srv.URL, urlBase, "test-key")
 }
 
 func TestEnsureDownloadClientIsIdempotent(t *testing.T) {
-	f, arr, _ := newFakeArr(t, "/sonarr")
+	f, arr := newFakeArr(t, "/sonarr")
 	ctx := context.Background()
 	spec := DownloadClientSpec{
 		Name: "qBittorrent", Category: "tv", Host: "qbittorrent", Port: 8080,
@@ -193,7 +193,7 @@ func TestEnsureDownloadClientIsIdempotent(t *testing.T) {
 }
 
 func TestEnsureDownloadClientRepairsDrift(t *testing.T) {
-	f, arr, _ := newFakeArr(t, "/sonarr")
+	f, arr := newFakeArr(t, "/sonarr")
 	ctx := context.Background()
 	spec := DownloadClientSpec{Name: "qBittorrent", Category: "tv", Host: "qbittorrent", Port: 8080, Username: "admin", Password: "hunter2"}
 	first, err := arr.EnsureDownloadClient(ctx, spec, 0)
@@ -220,7 +220,7 @@ func TestEnsureDownloadClientRepairsDrift(t *testing.T) {
 // ensure even though it differs from what Create would have written: the
 // object already exists and is being overlaid, not replaced.
 func TestEnsureDownloadClientSurvivesNonOwnedFieldChange(t *testing.T) {
-	f, arr, _ := newFakeArr(t, "/sonarr")
+	f, arr := newFakeArr(t, "/sonarr")
 	ctx := context.Background()
 	spec := DownloadClientSpec{Name: "qBittorrent", Category: "tv", Host: "qbittorrent", Port: 8080, Username: "admin", Password: "hunter2"}
 	first, err := arr.EnsureDownloadClient(ctx, spec, 0)
@@ -246,7 +246,7 @@ func TestEnsureDownloadClientSurvivesNonOwnedFieldChange(t *testing.T) {
 // A rename in the Sonarr UI must not cause a second client to be created: the
 // recorded id is what makes an object "ours", not its name.
 func TestEnsureDownloadClientFollowsRename(t *testing.T) {
-	f, arr, _ := newFakeArr(t, "/sonarr")
+	f, arr := newFakeArr(t, "/sonarr")
 	ctx := context.Background()
 	spec := DownloadClientSpec{Name: "qBittorrent", Category: "tv", Host: "qbittorrent", Port: 8080, Username: "admin", Password: "hunter2"}
 	first, err := arr.EnsureDownloadClient(ctx, spec, 0)
@@ -275,7 +275,7 @@ func TestEnsureDownloadClientFollowsRename(t *testing.T) {
 // A deleted owned client must be recreated, not silently dropped, and the
 // receipt must be able to say what the old id was.
 func TestEnsureDownloadClientRecreatesWhenDeleted(t *testing.T) {
-	f, arr, _ := newFakeArr(t, "/sonarr")
+	f, arr := newFakeArr(t, "/sonarr")
 	ctx := context.Background()
 	spec := DownloadClientSpec{Name: "qBittorrent", Category: "tv", Host: "qbittorrent", Port: 8080, Username: "admin", Password: "hunter2"}
 	first, err := arr.EnsureDownloadClient(ctx, spec, 0)
@@ -300,7 +300,7 @@ func TestEnsureDownloadClientRecreatesWhenDeleted(t *testing.T) {
 // adopted rather than duplicated, and its id comes back so the caller can
 // record it.
 func TestEnsureDownloadClientAdoptsByNameWithoutOwnedID(t *testing.T) {
-	f, arr, _ := newFakeArr(t, "/sonarr")
+	f, arr := newFakeArr(t, "/sonarr")
 	ctx := context.Background()
 	spec := DownloadClientSpec{Name: "qBittorrent", Category: "tv", Host: "qbittorrent", Port: 8080, Username: "admin", Password: "hunter2"}
 	first, err := arr.EnsureDownloadClient(ctx, spec, 0)
@@ -323,7 +323,7 @@ func TestEnsureDownloadClientAdoptsByNameWithoutOwnedID(t *testing.T) {
 // A second download client the user added by hand is never written to, never
 // tested, and never mistaken for the owned one.
 func TestEnsureDownloadClientNeverTouchesUserAddedSecondClient(t *testing.T) {
-	f, arr, _ := newFakeArr(t, "/sonarr")
+	f, arr := newFakeArr(t, "/sonarr")
 	ctx := context.Background()
 	spec := DownloadClientSpec{Name: "qBittorrent", Category: "tv", Host: "qbittorrent", Port: 8080, Username: "admin", Password: "hunter2"}
 	first, err := arr.EnsureDownloadClient(ctx, spec, 0)
@@ -365,7 +365,7 @@ func TestEnsureDownloadClientNeverTouchesUserAddedSecondClient(t *testing.T) {
 // A masked password must never be written back as if it were the real
 // secret, and it must never appear in the receipt's drift list.
 func TestEnsureDownloadClientNeverLeaksMaskedSecret(t *testing.T) {
-	f, arr, _ := newFakeArr(t, "/sonarr")
+	f, arr := newFakeArr(t, "/sonarr")
 	ctx := context.Background()
 	spec := DownloadClientSpec{Name: "qBittorrent", Category: "tv", Host: "qbittorrent", Port: 8080, Username: "admin", Password: "hunter2"}
 	first, err := arr.EnsureDownloadClient(ctx, spec, 0)
@@ -396,7 +396,7 @@ func TestEnsureDownloadClientNeverLeaksMaskedSecret(t *testing.T) {
 }
 
 func TestEnsureRootFolderAndHardlinks(t *testing.T) {
-	f, arr, _ := newFakeArr(t, "/radarr")
+	f, arr := newFakeArr(t, "/radarr")
 	ctx := context.Background()
 
 	if got, err := arr.EnsureRootFolder(ctx, "/data/media/movies"); err != nil || got != Created {

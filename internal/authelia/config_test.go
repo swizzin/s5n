@@ -10,8 +10,8 @@ import (
 // the Arrs' HD and 4K entries, Prowlarr (an Arr with no instances), the three
 // apps that authenticate their own clients, and qBittorrent, which does not.
 func fixtureValues() map[string]any {
-	app := func(enabled bool, extra map[string]any) map[string]any {
-		out := map[string]any{"enabled": enabled, "port": 1}
+	app := func(extra map[string]any) map[string]any {
+		out := map[string]any{"enabled": true, "port": 1}
 		for k, v := range extra {
 			out[k] = v
 		}
@@ -31,11 +31,11 @@ func fixtureValues() map[string]any {
 		"apps": map[string]any{
 			"sonarr":      arr(true, true),
 			"radarr":      arr(true, false),
-			"prowlarr":    app(true, map[string]any{"envPrefix": "PROWLARR__"}),
-			"plex":        app(true, nil),
-			"seerr":       app(true, nil),
-			"tautulli":    app(true, nil),
-			"qbittorrent": app(true, nil),
+			"prowlarr":    app(map[string]any{"envPrefix": "PROWLARR__"}),
+			"plex":        app(nil),
+			"seerr":       app(nil),
+			"tautulli":    app(nil),
+			"qbittorrent": app(nil),
 		},
 	}
 }

@@ -199,7 +199,7 @@ func (e *Editor) set(p Path, value any) error {
 		return e.appendToMapping(p, cur, rest, value)
 	case yaml.ScalarNode:
 		if isBareNull(cur) && !rest[0].IsIndex {
-			return e.appendUnderKey(p, key, rest, value)
+			return e.appendUnderKey(key, rest, value)
 		}
 		return fmt.Errorf("%s is the value %q, not a mapping; edit the file by hand to turn it into one", Path(p[:depth]), cur.Value)
 	case yaml.SequenceNode:
@@ -268,7 +268,7 @@ func (e *Editor) appendToMapping(p Path, m *yaml.Node, rest Path, value any) err
 
 // appendUnderKey turns "key:" (with nothing under it) into a mapping header and
 // writes the new keys beneath it.
-func (e *Editor) appendUnderKey(p Path, key *yaml.Node, rest Path, value any) error {
+func (e *Editor) appendUnderKey(key *yaml.Node, rest Path, value any) error {
 	lines, err := chainLines(rest, value, key.Column-1+e.indentStep(), e.indentStep())
 	if err != nil {
 		return err
