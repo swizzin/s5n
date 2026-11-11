@@ -195,6 +195,13 @@ own. Users still create their own HTTPRoutes, so the chart is unaffected. Exempt
 in Authelia's own rules, which root owns: paths that check their own key (the Arrs' `/api`,
 and `/ping` for health checks), Plex, Seerr and Tautulli, and the sign-in page itself.
 
+**The sign-in path is root's (decided).** Authelia lets everything under `/auth` through
+without a login, and Gateway API sends a request to the most specific route, so a user's
+route under `/auth` on their own host would be served without one. The grant refuses a
+user's HTTPRoute that matches `/auth` or anything under it. It also refuses regular
+expression and percent-encoded path matches in a user's routes, because those can reach
+`/auth` without spelling it. The chart uses neither.
+
 One listener is left out on purpose: each host's own port-80 listener gets a root-owned
 policy with no login, written with the listener before box asks for the certificate. Only
 root's redirect to HTTPS and cert-manager's challenge route can attach there, so nothing
@@ -783,3 +790,8 @@ reason instead of a stack trace.
   one command that detects the source, since the hard part (rewriting paths in the Arr
   databases, carrying qBittorrent's state) is the same for all of them.
 - Who assigns the torrent port with multiple users (see Scopes).
+- **A user's route under an Arr's `/api` or `/ping`.** Those paths skip the login because
+  the Arr checks its own key, but a user's own HTTPRoute under one of them (a longer
+  prefix, pointing at another app) is the more specific route and is served without a
+  login. The chart's own routes use these paths, so refusing them the way `/auth` is
+  refused would break it.
