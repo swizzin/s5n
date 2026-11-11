@@ -143,7 +143,9 @@ jobs:
               exit 1
             fi
             git fetch --tags --force --quiet
-            prev=$(git tag --list 's5n-v*' | sed 's/^s5n-v//' | grep -vx "$VERSION" | sort -V | tail -1)
+            # grep exits 1 when the new tag is the only one; under pipefail
+            # that would end the step before the check below could say so.
+            prev=$(git tag --list 's5n-v*' | sed 's/^s5n-v//' | { grep -vx "$VERSION" || true; } | sort -V | tail -1)
             if [[ -z "$prev" ]]; then
               echo "no previous s5n-v* tag for ${VERSION} to be one patch above" >&2
               exit 1
@@ -345,7 +347,9 @@ jobs:
           set -euo pipefail
           git fetch --tags --force --quiet
           tag="s5n-v${VERSION}"
-          prev=$(git tag --list 's5n-v*' | grep -vx "$tag" | sort -V | tail -1)
+          # The first s5n-v* tag leaves grep nothing to print, and its exit 1
+          # under pipefail would end the step before the --all branch.
+          prev=$(git tag --list 's5n-v*' | { grep -vx "$tag" || true; } | sort -V | tail -1)
           # Both files, through the same parser the release decision uses, so
           # "moved" means the same thing to the body as to the job that cut the
           # tag. The platform pins ship in the chart, so a pin bump is a chart
