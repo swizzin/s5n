@@ -188,9 +188,10 @@ Read `PLAN.md` first. It is the architecture; this file is how to work in the re
   notice. Not in CI yet.
 - `hack/render-grant/` — `internal/admission` as a command, the e2e's caller until
   `box adduser` exists.
-- `.github/workflows/ci.yaml` — every PR and push to main: gofmt/vet/`go test -race`,
-  `hack/validate-chart.sh` on 1.30/1.34/1.37, then the kind e2e.
-  Actions are pinned by commit SHA.
+- `.github/workflows/ci.yaml` / `test.yaml` — every PR and push to main or develop:
+  gofmt/vet/`go test -race`, golangci-lint over what the branch adds since develop,
+  `hack/validate-chart.sh` on 1.30/1.34/1.37, then the kind e2e. Actions are pinned by
+  commit SHA.
 - `.github/workflows/release.yaml` — a `v*` tag publishes the image (amd64 + arm64,
   digest captured), the chart with that digest stamped into the packaged copy and
   validated before `helm push`, then box's binaries and `sha256sums.txt` as a GitHub
@@ -201,6 +202,7 @@ Read `PLAN.md` first. It is the architecture; this file is how to work in the re
 
 ```sh
 gofmt -l . && go vet ./... && go test ./...
+golangci-lint run ./...       # .golangci.yml; CI fails only on what a branch adds since develop
 hack/validate-chart.sh 1.30.0  # helm lint + kubeconform for every charts/s5n/ci/*-values.yaml
 docker build -t s5n:e2e .     # what the e2e uses
 hack/e2e-kind.sh              # full smoke; needs docker, kind, helm, kubectl
