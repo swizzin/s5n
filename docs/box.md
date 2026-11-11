@@ -675,15 +675,17 @@ The chart pins every image by digest; there's no in-cluster image updater and no
 New images arrive hours after upstream instead of minutes, and a broken upstream image
 fails in CI instead of on a user's box.
 
-**The timer (decided).** box checks for a newer release every 15 minutes, with jitter
-so a fleet doesn't arrive at once. It reads the tag list from ghcr anonymously; no
+**The timer (decided).** box checks for a newer release once an hour by default, with
+jitter so a fleet doesn't arrive at once. The interval is a key in root's config, and
+the timer can be turned off there. It reads the tag list from ghcr anonymously; no
 token is needed to learn that something moved.
 
 **When an app takes it (decided).** Each catalog app declares an apply policy, and the
 default is to apply as soon as the release is taken. Plex defers while it has active
 streams, and Jellyfin will do the same; the update applies at the first check with
-none. Torrent activity is never a reason to wait: a client is always busy, and there's
-no clean line between busy and idle.
+none, so it can wait up to one interval after the last stream ends. Torrent activity
+is never a reason to wait: a client is always busy, and there's no clean line between
+busy and idle.
 
 ### The platform layer (decided)
 
@@ -698,8 +700,13 @@ images. Their pins ship in the chart:
    maintainer.
 3. Root's `update` takes the pins from the release it is moving to and upgrades the
    components box manages before it moves any seedbox, with doctor run before and
-   after. A component in `external` mode is only checked, and status warns when it
-   drifts outside the tested range. A user's `update` never touches the platform and
+   after. A component box doesn't manage (`external`, or `auto` that found the admin's
+   own) is never upgraded; it's probed against the release being moved to before that
+   release is taken (`PLAN.md`, the probes). A failed probe is an error: the release is
+   shown, not taken, and box names the component and what has to change first ("s5n
+   0.5.0 needs Gateway API v1.3 CRDs; this cluster serves v1.2"). A version that passes
+   the probes but differs from the pin is a warning in status and doctor: it works, but
+   it's not what CI tested. A user's `update` never touches the platform and
    ignores the pins; a seedbox still on an older release runs on the newer platform
    until it moves.
 
