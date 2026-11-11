@@ -83,11 +83,8 @@ func ParseUsers(data []byte) (*Users, error) {
 		if current == nil {
 			return nil
 		}
-		if strings.TrimSpace(current.DisplayName) == "" {
-			return fmt.Errorf("%w: user %q has no displayname: Authelia refuses a row without one, and one bad row fails the whole file", ErrUsersFormat, current.Login)
-		}
-		if !DigestPattern.MatchString(current.Password) {
-			return fmt.Errorf("%w: user %q has no argon2 digest: Authelia refuses a row without one, and one bad row fails the whole file", ErrUsersFormat, current.Login)
+		if err := validateUser(*current); err != nil {
+			return err
 		}
 		out.Put(*current)
 		current = nil
@@ -102,40 +99,22 @@ func ParseUsers(data []byte) (*Users, error) {
 		body := strings.TrimSpace(line)
 		switch {
 		case indent == 0:
-			key, rest, ok := strings.Cut(body, ":")
-			if !ok || key != "users" || strings.TrimSpace(strings.TrimPrefix(rest, " ")) != "" {
-				return nil, fmt.Errorf("%w: line %d: the file is one `users:` mapping, one row per login", ErrUsersFormat, i+1)
+			if err := parseUsersKey(body, i+1); err != nil {
+				return nil, err
 			}
 			sawUsers = true
 		case indent == 2:
 			if err := flush(); err != nil {
 				return nil, err
 			}
-			login, rest, ok := strings.Cut(body, ":")
-			login = strings.TrimSpace(login)
-			if !ok || login == "" || strings.TrimSpace(rest) != "" {
-				return nil, fmt.Errorf("%w: line %d: %q is not a login", ErrUsersFormat, i+1, body)
+			row, err := parseLogin(body, i+1)
+			if err != nil {
+				return nil, err
 			}
-			current = &User{Login: unquote(login)}
+			current = row
 		case indent == 4 && current != nil:
-			key, value, ok := strings.Cut(body, ":")
-			if !ok {
-				return nil, fmt.Errorf("%w: line %d: %q is not a field", ErrUsersFormat, i+1, body)
-			}
-			key, value = strings.TrimSpace(key), unquote(strings.TrimSpace(value))
-			switch key {
-			case "displayname":
-				current.DisplayName = value
-			case "password":
-				current.Password = value
-			case "groups":
-				current.Groups = flowList(value)
-			case "email", "disabled":
-				// Accepted and dropped: box writes neither, and Authelia does
-				// not require them for a password login. Dropping one is why
-				// this parser is only for a file box wrote.
-			default:
-				return nil, fmt.Errorf("%w: line %d: field %q is not one box writes", ErrUsersFormat, i+1, key)
+			if err := parseField(current, body, i+1); err != nil {
+				return nil, err
 			}
 		default:
 			return nil, fmt.Errorf("%w: line %d: unexpected indentation", ErrUsersFormat, i+1)
@@ -148,6 +127,62 @@ func ParseUsers(data []byte) (*Users, error) {
 		return nil, fmt.Errorf("%w: no `users:` key", ErrUsersFormat)
 	}
 	return out, nil
+}
+
+// validateUser refuses a row Authelia would reject: one bad row fails the whole
+// file, so a row must carry both fields box writes.
+func validateUser(row User) error {
+	if strings.TrimSpace(row.DisplayName) == "" {
+		return fmt.Errorf("%w: user %q has no displayname: Authelia refuses a row without one, and one bad row fails the whole file", ErrUsersFormat, row.Login)
+	}
+	if !DigestPattern.MatchString(row.Password) {
+		return fmt.Errorf("%w: user %q has no argon2 digest: Authelia refuses a row without one, and one bad row fails the whole file", ErrUsersFormat, row.Login)
+	}
+	return nil
+}
+
+// parseUsersKey reads the file's one top-level key, which must be a bare
+// `users:`.
+func parseUsersKey(body string, lineNo int) error {
+	key, rest, ok := strings.Cut(body, ":")
+	if !ok || key != "users" || strings.TrimSpace(strings.TrimPrefix(rest, " ")) != "" {
+		return fmt.Errorf("%w: line %d: the file is one `users:` mapping, one row per login", ErrUsersFormat, lineNo)
+	}
+	return nil
+}
+
+// parseLogin reads a row header, which is a bare login and nothing else.
+func parseLogin(body string, lineNo int) (*User, error) {
+	login, rest, ok := strings.Cut(body, ":")
+	login = strings.TrimSpace(login)
+	if !ok || login == "" || strings.TrimSpace(rest) != "" {
+		return nil, fmt.Errorf("%w: line %d: %q is not a login", ErrUsersFormat, lineNo, body)
+	}
+	return &User{Login: unquote(login)}, nil
+}
+
+// parseField reads one `key: value` field of the row being read.
+func parseField(current *User, body string, lineNo int) error {
+	key, value, ok := strings.Cut(body, ":")
+	if !ok {
+		return fmt.Errorf("%w: line %d: %q is not a field", ErrUsersFormat, lineNo, body)
+	}
+	key, value = strings.TrimSpace(key), unquote(strings.TrimSpace(value))
+	switch key {
+	case "displayname":
+		current.DisplayName = value
+	case "password":
+		current.Password = value
+	case "groups":
+		current.Groups = flowList(value)
+	case "email", "disabled":
+		// Accepted and dropped: box writes neither, and Authelia does
+		// not require them for a password login. Dropping one is why
+		// this parser is only for a file box wrote.
+	default:
+		return fmt.Errorf("%w: line %d: field %q is not one box writes", ErrUsersFormat, lineNo, key)
+	}
+	return nil
 }
 
 // Render writes the database back.
