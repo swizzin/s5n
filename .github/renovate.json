@@ -3,7 +3,7 @@
   "description": "main is what has been released and develop is where work lands (docs/box.md, \"Where a release lives\"). Renovate feeds the release train: the chart's app images on main only, whose patch and digest bumps merge themselves once CI is green, and the platform pins on both branches, one pull request per pin, whose patch bumps on main merge themselves once CI is green (k0s excepted: no CI job installs it). Nothing merges itself on develop, from any file. The sums bot is listed in gitIgnoredAuthors: it commits k0s's asset checksums onto Renovate's own k0s branch, and without that listing Renovate reads the commit as another author's edit -- it stops committing to the branch, and the pull request is left alone.",
   "extends": ["config:recommended"],
   "baseBranchPatterns": ["main", "develop"],
-  "gitIgnoredAuthors": ["SUMS_BOT_EMAIL_PLACEHOLDER"],
+  "gitIgnoredAuthors": ["355469897+s5n-sums[bot]@users.noreply.github.com"],
   "automerge": false,
   "customManagers": [
     {
