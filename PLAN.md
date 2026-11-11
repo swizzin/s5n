@@ -17,9 +17,10 @@ What carries over from swizzin is the provisioning contract, not the apps:
 
 ## Non-goals for v1 (parked for the enterprise track)
 
-Multi-tenancy, shell pods, SSH routing (sshpiper), per-user ZFS datasets and quotas,
-uid allocation, user namespaces, the Kata tier, bandwidth metering and quotas
-(`s5n-meter`, torrent-only billing with grace ports), abuse controls, billing ledger.
+Multi-tenancy, shell pods, SSH routing (sshpiper), SFTP-only accounts, per-user ZFS
+datasets and quotas, uid allocation, user namespaces, the Kata tier, bandwidth metering
+and quotas (`s5n-meter`, torrent-only billing with grace ports), abuse controls, billing
+ledger.
 
 Also out of v1 entirely: a monitoring stack. s5n ships no Prometheus, Grafana or
 exporters. A user who runs their own can scrape the apps; the chart's only obligation is

@@ -115,6 +115,50 @@ across filesystems, and hardlinks don't cross them.
   point, free space and owner. Unattended runs the same check at the start, with fewer
   guardrails.
 
+### Homes, data paths and SSH (decided)
+
+A user's seedbox files and their home directory are different places, because box hands
+the grant's paths to kubelet as host paths, and mounting a host path follows symlinks on
+the host. A user who owns a directory above their data path can swap the data directory
+for a link to someone else's, and their next pod start mounts it.
+
+- **Every directory above a grant path is root-owned and writable only by root.** box
+  checks this at `init`, `adduser` and `apply` and stops, naming the directory, when it
+  doesn't hold. The leaf itself (`data/`, `config/`) belongs to the seedbox's puid:pgid.
+  Root's own seedbox is exempt, since its user can already become root, which keeps
+  existing installs with data under `/home/<user>` adoptable.
+- **The default is `/srv/s5n/<user>/{data,config}`,** with `/srv/s5n/<user>` owned by
+  `root:<user>` and mode 0750, so other users can't list it. It is only the default:
+  root can give any paths at `init` or `adduser` (a pool, a union filesystem, a dataset
+  per user, config on a separate disk) as long as the rule above holds. Hardlinks only
+  matter inside `data`, so data and config may sit on different filesystems.
+- **A user's puid is their OS uid.** What they see over SSH is what the apps wrote, owned
+  by them.
+- **The home directory is an ordinary home:** dotfiles, `~/.ssh`, the values file and the
+  user's kubeconfig. `adduser` puts `~/data` and `~/config` symlinks in it, so a login
+  lands next to the files. box never reads through those links, and a user who breaks
+  them breaks nothing but the shortcut.
+- **box never follows a symlink when it walks a seedbox's files on the host** (init's
+  report of what a path holds, status, backup), so a link a user plants can't turn a
+  root-run walk into a read of someone else's data.
+
+SSH is the host's business, the way mounts are: box never edits sshd's configuration.
+
+- **Password logins work.** `adduser` asks for one password, or generates one and shows
+  it once, and writes its hash to both the login (argon2id) and `/etc/shadow`. No copy is
+  kept in plain text anywhere. Root's `box chpasswd <user>` sets both again. A user's own
+  `box chpasswd` changes the web login only, since their box can't write `/etc/shadow`;
+  `passwd` changes the SSH one, as on any Linux host.
+- **Keys:** `adduser --ssh-key <file|->` (repeatable) writes `authorized_keys`.
+- **When the host's sshd refuses passwords,** `adduser` says so, names the setting
+  (`PasswordAuthentication`), and points at `--ssh-key`. It doesn't change the setting.
+- **Users join no group with power over the host** (no sudo, no docker, no k0s).
+- **box never asks a user for their current password.** Logging in proved who they are,
+  and their box acts through their namespace kubeconfig (mode 0600 in their home), not
+  through a password.
+- **SFTP-only accounts are not part of v1.** They need sshd configuration, which box
+  doesn't own; they belong with the enterprise track's SSH routing.
+
 ### How a user's box gets its power (proposed)
 
 Without root, a user's box gets a kubeconfig scoped to that user's namespace. Everything
