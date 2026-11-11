@@ -229,7 +229,7 @@ func (d *Decision) useCluster(ctx context.Context, opts Options, kc []byte, path
 	if !ok {
 		return res
 	}
-	return d.finishCluster(ctx, opts, obs, path, source, how)
+	return d.finishCluster(ctx, opts, obs, identityOf(kc), path, source, how)
 }
 
 // clusterProbes is what the probe chain learned about a cluster before any
@@ -275,8 +275,10 @@ func (d *Decision) inspectCluster(ctx context.Context, kc []byte, path, how stri
 }
 
 // finishCluster probes the platform layer of a cluster inspectCluster accepted,
-// then computes the platform decisions and the record.
-func (d *Decision) finishCluster(ctx context.Context, opts Options, obs clusterProbes, path string, source Source, how string) Result {
+// then computes the platform decisions and the record. id is the identity of the
+// cluster the kubeconfig reached, so the record says which cluster it describes
+// and a re-run can refuse the file if it has been repointed since.
+func (d *Decision) finishCluster(ctx context.Context, opts Options, obs clusterProbes, id clusterIdentity, path string, source Source, how string) Result {
 	plat, err := obs.probe.Platform(ctx)
 	if err != nil {
 		return stop(fmt.Sprintf("%s at %s: platform probe: %v", how, path, describeRemote(err)))
@@ -305,6 +307,8 @@ func (d *Decision) finishCluster(ctx context.Context, opts Options, obs clusterP
 	rec := &Record{
 		Source:       source,
 		Kubeconfig:   path,
+		Server:       id.Server,
+		CAHash:       id.CAHash,
 		Distribution: obs.dist,
 		Nodes:        obs.cluster.Nodes,
 		Platform:     opts.Platform,
@@ -330,7 +334,10 @@ func (d *Decision) finishCluster(ctx context.Context, opts Options, obs clusterP
 // A record whose kubeconfig no longer answers stops, naming the record path; it
 // never falls through to the candidate scan and the k0s installer, because an
 // unreachable recorded cluster may still be there and installing over it would
-// destroy a cluster box owns.
+// destroy a cluster box owns. One whose kubeconfig now reaches a different
+// cluster stops before the probe too, naming the recorded and the current
+// server: a file can be repointed, and the record's decisions are no more valid
+// for the cluster behind it than for any other.
 func (d *Decision) useRecord(ctx context.Context, rec *Record) Result {
 	if problem := supportProblem(rec.Distribution, rec.Nodes); problem != "" {
 		return stop(fmt.Sprintf("recorded %s cluster at %s: %s", rec.Source, rec.Kubeconfig, problem))
@@ -345,6 +352,9 @@ func (d *Decision) useRecord(ctx context.Context, rec *Record) Result {
 		return stop(fmt.Sprintf("recorded %s cluster kubeconfig %s: %v", rec.Source, rec.Kubeconfig, err))
 	}
 	how := fmt.Sprintf("recorded %s cluster", rec.Source)
+	if conflict := identityConflict(rec, identityOf(kc), d.Records.RecordPath()); conflict != "" {
+		return stop(conflict)
+	}
 	obs, res, ok := d.inspectCluster(ctx, kc, rec.Kubeconfig, how)
 	if !ok {
 		return res

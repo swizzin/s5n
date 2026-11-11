@@ -16,8 +16,17 @@ import (
 // box-owned schema; box reads it back before any probing on a re-run so the
 // decision short-circuits.
 type Record struct {
-	Source       Source
-	Kubeconfig   string
+	Source     Source
+	Kubeconfig string
+	// Server and CAHash identify the cluster the kubeconfig's current context
+	// reached when this record was written: the API server URL and the sha256
+	// (hex) of the cluster CA bundle. A kubeconfig path is not a cluster, so a
+	// re-run compares the path's current identity before it probes and refuses
+	// one that now reaches another cluster. Both are empty in a record written
+	// before box recorded them; such a record is accepted, never refused for
+	// the missing fields, and the next record box writes carries them.
+	Server       string
+	CAHash       string
 	Distribution Distribution
 	// Nodes is what the run that wrote the record saw. A re-run refuses the
 	// recorded value cheaply before touching the network and then re-probes the
@@ -38,6 +47,12 @@ func encodeRecord(r *Record) []byte {
 	var b strings.Builder
 	fmt.Fprintf(&b, "source: %s\n", r.Source)
 	fmt.Fprintf(&b, "kubeconfig: %q\n", r.Kubeconfig)
+	if r.Server != "" {
+		fmt.Fprintf(&b, "server: %q\n", r.Server)
+	}
+	if r.CAHash != "" {
+		fmt.Fprintf(&b, "caHash: %q\n", r.CAHash)
+	}
 	fmt.Fprintf(&b, "distribution: %s\n", r.Distribution)
 	fmt.Fprintf(&b, "nodes: %d\n", r.Nodes)
 	fmt.Fprintf(&b, "platform:\n")
@@ -80,6 +95,10 @@ func parseRecord(data []byte) (*Record, error) {
 				rec.Source = src
 			case "kubeconfig":
 				rec.Kubeconfig = unquote(val)
+			case "server":
+				rec.Server = unquote(val)
+			case "caHash":
+				rec.CAHash = unquote(val)
 			case "distribution":
 				rec.Distribution = Distribution(unquote(val))
 			case "nodes":
