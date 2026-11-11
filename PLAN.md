@@ -91,8 +91,9 @@ satisfies the LoadBalancer probe, so MetalLB is skipped. `box migrate` runs the 
 
 The chart itself stays platform-agnostic: it emits HTTPRoutes and one LoadBalancer or
 NodePort Service, and never depends on which implementation sits behind them.
-CI runs the chart on kind (vanilla) on every PR and on k0s + k3s nightly. The kind e2e
-installs Envoy Gateway (the chart's own CRDs) and MetalLB L2, then drives the apps
+CI runs the chart on kind (vanilla) on every PR and every push to main or develop, with
+`helm lint` and kubeconform against 1.30, 1.34 and 1.37 beside it. The kind e2e installs
+Envoy Gateway (which brings the Gateway API CRDs) and MetalLB L2, then drives the apps
 through the Gateway's LoadBalancer address.
 
 ### Routing: Gateway API, not Ingress
@@ -321,19 +322,26 @@ internal/wiring/         the wiring reconciler and the receipt it publishes
 internal/qbtconf/        qBittorrent credential hashing and config editing
 install/                 installer script and k0s config fragments
 hack/                    kind config, Envoy Gateway manifest, e2e-kind.sh
-test/e2e/                k0s + k3s end-to-end suites (phase 1+)
 docs/
 Dockerfile               the image the wiring Job and the qBittorrent init container run
 ```
 
 ## CI and acceptance
 
-- Every PR: `helm lint`, kubeconform against the supported minors, chart-testing, Go tests.
-- e2e on kind (every PR) and k0s + k3s (nightly): a clean install with v1 apps, then:
+- Every PR and every push to main or develop: gofmt, `go vet`, `go test -race`,
+  golangci-lint on what the branch adds since develop, and `helm lint` with kubeconform
+  against 1.30, 1.34 and 1.37.
+- e2e on kind on every PR and every push to main or develop: a clean install with v1
+  apps, then:
   - wiring ConfigMap complete
   - hardlink proof passes
   - wiring re-run is a no-op (no writes, verified via Arr API diffs)
   - Sonarr can grab a test torrent through Prowlarr → qBittorrent → import as a hardlink
+- Release: a push to `main` whose net change since the last `s5n-v*` tag is only a patch or
+  digest bump of `variants.yaml` or `platform.yaml` tags the next chart patch once the
+  tests above are green, and publishes the image and chart; any larger change on `main`
+  waits for a maintainer's `s5n-v*` tag, and a `box-v*` tag is the maintainer's alone.
+  Nothing publishes from a push to `develop` or from a pull request.
 - Upgrade e2e: previous chart release → current release with data intact and wiring still
   green.
 - Fresh-VPS smoke test (scheduled): Debian and Ubuntu images, curl → working stack in
@@ -346,7 +354,7 @@ Dockerfile               the image the wiring Job and the qBittorrent init conta
 - Exit: empty chart passes lint, kubeconform and the kind smoke test (`hack/e2e-kind.sh`).
 
 **Phase 1 — chart and wiring for the v1 catalog**
-- Exit: the e2e suite above passes on kind, k0s and k3s, and wiring is idempotent.
+- Exit: the e2e suite above passes on kind, and wiring is idempotent.
 
 **Phase 2 — `box` and the installer**
 - Exit: a fresh VPS goes from curl to a working, wired stack; `install`, `remove`,
