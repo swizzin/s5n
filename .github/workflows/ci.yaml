@@ -1,18 +1,33 @@
-# Every PR and every push to main: Go, chart, and the full kind e2e.
+# Every PR, every push to main or develop, and every call from another workflow:
+# Go, chart, and the full kind e2e. A push to main is also where a chart release
+# is decided, once every test job here is green -- ci.yaml is the gate and the
+# trigger in one file, so no second workflow can drift from it.
+#
 # Actions are pinned by commit; the comment names the tag the commit belongs to.
 name: ci
 
 on:
   pull_request:
   push:
-    branches: [main]
+    branches: [main, develop]
+  workflow_call:
+    inputs:
+      ref:
+        description: "the ref to test: the back-merge after a release calls this with develop"
+        required: true
+        type: string
 
 permissions:
   contents: read
 
+# The group carries the ref under test as well as the caller's: a call runs in
+# the caller's run but tests another ref, and must not queue behind that run.
 concurrency:
-  group: ci-${{ github.ref }}
-  cancel-in-progress: true
+  group: ci-${{ github.ref }}-${{ inputs.ref }}
+  # Only a pull request's older run is wasted by a newer push. A push to main
+  # or develop is never cancelled, because the run a new push would cancel may
+  # be the one cutting the release.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   HELM_VERSION: v4.3.0
@@ -28,6 +43,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.ref || github.sha }}
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
@@ -47,6 +64,8 @@ jobs:
         kubernetes: ["1.30.0", "1.34.0", "1.37.0"]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.ref || github.sha }}
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
@@ -67,6 +86,8 @@ jobs:
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.ref || github.sha }}
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
@@ -81,3 +102,131 @@ jobs:
           chmod +x "$HOME/.local/bin/kind"
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
       - run: hack/e2e-kind.sh
+
+  # ---- release: the decision, and the tag -------------------------------------
+  #
+  # The last job of a push to main, after every test job: the decision is
+  # whether the net change since the last s5n-v* tag is only a patch or digest
+  # bump of charts/s5n/variants.yaml or charts/s5n/platform.yaml, and it lives
+  # in hack/release so it is tested rather than written in YAML. If it says
+  # release, this job tags the pushed commit and the job after it publishes.
+  #
+  # There is no off switch in the repo. To stop releases, disable this workflow
+  # in GitHub's Actions tab: a disabled workflow runs nothing, so no tag is made
+  # and nothing publishes -- a maintainer's tag included, which is what stopping
+  # releases means.
+  release:
+    needs: [go, chart, e2e-kind]
+    # A push to main only. A call inherits the caller's push event and ref, so
+    # the input is what keeps this job out of a workflow_call: the back-merge
+    # passes develop, and a call for main would still be a call.
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && inputs.ref == ''
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # create and push the tag
+    # One release at a time across pushes; a queued push is decided by its own
+    # diff, never by the run ahead of it.
+    concurrency:
+      group: s5n-release
+      cancel-in-progress: false
+    outputs:
+      release: ${{ steps.decide.outputs.release }}
+      version: ${{ steps.decide.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0 # every tag: "since the last s5n-v* one" is the question
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      - name: decide (the diff since the last s5n-v* tag)
+        id: decide
+        run: |
+          set -euo pipefail
+          # stdout is KEY=VALUE for $GITHUB_OUTPUT; the reason goes to stderr,
+          # which is this step's log, and to the output for the next job.
+          go run ./hack/release decide > "${RUNNER_TEMP}/decision.txt"
+          cat "${RUNNER_TEMP}/decision.txt"
+          cat "${RUNNER_TEMP}/decision.txt" >> "$GITHUB_OUTPUT"
+      - name: tag this commit
+        if: steps.decide.outputs.release == 'true'
+        env:
+          VERSION: ${{ steps.decide.outputs.version }}
+        run: |
+          set -euo pipefail
+          tag="s5n-v${VERSION}"
+          # The backstop behind the concurrency group: two quick pushes cannot
+          # cut the same version, and a tag is never moved once it exists.
+          if git rev-parse -q --verify "refs/tags/${tag}" >/dev/null ||
+             git ls-remote --exit-code --tags origin "refs/tags/${tag}" >/dev/null; then
+            echo "::error::${tag} already exists; a release tag is never moved"
+            exit 1
+          fi
+          git tag "$tag"
+          git push origin "refs/tags/${tag}"
+          echo "tagged ${tag} at $(git rev-parse --short HEAD)"
+
+  s5n-release:
+    needs: [release]
+    if: needs.release.outputs.release == 'true'
+    # A tag pushed with GITHUB_TOKEN starts no workflow, so the release is
+    # called, not triggered. release.yaml's jobs run under these permissions.
+    permissions:
+      contents: write
+      packages: write
+    uses: ./.github/workflows/release.yaml
+    with:
+      version: ${{ needs.release.outputs.version }}
+      ref: s5n-v${{ needs.release.outputs.version }}
+
+  # ---- the back-merge: main into develop --------------------------------------
+  #
+  # After every release, so develop's e2e tests the images and pins users are
+  # running. A conflict fails the job and names the files, having pushed
+  # nothing: the maintainer merges by hand.
+  backmerge:
+    needs: [release, s5n-release]
+    if: needs.release.outputs.release == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # push the merge to develop
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: main
+          fetch-depth: 0
+      - name: merge main into develop
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git fetch --quiet origin main develop
+          git checkout --quiet develop
+          if ! git merge --no-edit origin/main; then
+            conflicted=$(git diff --name-only --diff-filter=U)
+            git merge --abort || true
+            if [[ -n "$conflicted" ]]; then
+              echo "::error::merging main into develop conflicts in: ${conflicted//$'\n'/, } -- nothing was pushed; merge by hand"
+            else
+              echo "::error::merging main into develop failed; nothing was pushed"
+            fi
+            exit 1
+          fi
+          git push origin develop
+
+  # A push made with GITHUB_TOKEN starts no workflow, so the merge above runs
+  # nothing on develop by itself: this call is that run. It is ci.yaml called
+  # with develop as the ref, so the same tests that gated the release gate the
+  # branch the next release comes from.
+  ci-on-develop:
+    needs: [backmerge]
+    if: needs.backmerge.result == 'success'
+    # The grant is what ci.yaml declares, not what this call can use: the jobs
+    # it runs are the test jobs, which read, and the release and back-merge jobs
+    # are guarded off in a call and would be the only writers.
+    permissions:
+      contents: write
+      packages: write
+    uses: ./.github/workflows/ci.yaml
+    with:
+      ref: develop
