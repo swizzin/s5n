@@ -3,6 +3,7 @@ package admission
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -212,10 +213,10 @@ func TestBindingsSelectExactlyTheNamespace(t *testing.T) {
 	if name := docs.Params.Metadata.Name; name != "s5n-grant-example-user" {
 		t.Errorf("params name = %q", name)
 	}
-	if len(docs.Bindings) != 2 {
-		t.Fatalf("%d bindings, want 2", len(docs.Bindings))
+	if len(docs.Bindings) != 4 {
+		t.Fatalf("%d bindings, want 4", len(docs.Bindings))
 	}
-	for i, wantPolicy := range []string{"s5n-blessed-images", "s5n-granted-service"} {
+	for i, wantPolicy := range []string{"s5n-blessed-images", "s5n-granted-service", "s5n-no-login-changes", "s5n-no-auth-routes"} {
 		b := docs.Bindings[i]
 		if b.Spec.PolicyName != wantPolicy {
 			t.Errorf("binding %d policy = %q, want %q", i, b.Spec.PolicyName, wantPolicy)
@@ -226,12 +227,22 @@ func TestBindingsSelectExactlyTheNamespace(t *testing.T) {
 		if !reflect.DeepEqual(b.Spec.ValidationActions, []string{"Deny"}) {
 			t.Errorf("binding %s actions = %v", b.Metadata.Name, b.Spec.ValidationActions)
 		}
-		if b.Spec.ParamRef.Name != docs.Params.Metadata.Name || b.Spec.ParamRef.Namespace != ParamsNamespace {
-			t.Errorf("binding %s reads params %s/%s, want %s/%s", b.Metadata.Name,
-				b.Spec.ParamRef.Namespace, b.Spec.ParamRef.Name, ParamsNamespace, docs.Params.Metadata.Name)
-		}
-		if b.Spec.ParamRef.ParameterNotFoundAction != "Deny" {
-			t.Errorf("binding %s admits on missing params", b.Metadata.Name)
+		if wantPolicy == "s5n-no-login-changes" || wantPolicy == "s5n-no-auth-routes" {
+			// Neither policy reads params: binding one to the grant's
+			// ConfigMap would make a rule that needs none depend on one.
+			if b.Spec.ParamRef != nil {
+				t.Errorf("binding %s reads params %+v, but its policy has none", b.Metadata.Name, b.Spec.ParamRef)
+			}
+		} else if b.Spec.ParamRef == nil {
+			t.Errorf("binding %s reads no params; its policy needs the grant's", b.Metadata.Name)
+		} else {
+			if b.Spec.ParamRef.Name != docs.Params.Metadata.Name || b.Spec.ParamRef.Namespace != ParamsNamespace {
+				t.Errorf("binding %s reads params %s/%s, want %s/%s", b.Metadata.Name,
+					b.Spec.ParamRef.Namespace, b.Spec.ParamRef.Name, ParamsNamespace, docs.Params.Metadata.Name)
+			}
+			if b.Spec.ParamRef.ParameterNotFoundAction != "Deny" {
+				t.Errorf("binding %s admits on missing params", b.Metadata.Name)
+			}
 		}
 		exprs := b.Spec.MatchResources.NamespaceSelector.MatchExpressions
 		if len(exprs) != 1 || exprs[0].Key != labelSelectorKey || exprs[0].Operator != "In" ||
@@ -284,4 +295,141 @@ func TestRenderChartKeepsTheBadInputAndTheBadChartApart(t *testing.T) {
 	if want := filepath.Join(chart, "variants.yaml"); !strings.Contains(err.Error(), want) {
 		t.Fatalf("bad variants reported as %v, want it to name %s", err, want)
 	}
+}
+
+// TestTheLoginPolicyIsInTheManifest: the binding this package renders is only
+// enforcement if the policy it names exists and refuses those writes. A rename
+// on either side is a login a namespace can walk around.
+func TestTheLoginPolicyIsInTheManifest(t *testing.T) {
+	documents := decodeAll(t, "policy.yaml", readFixture(t, "../../install/platform/admission/policy.yaml"))
+	var found map[string]any
+	for _, raw := range documents {
+		doc, ok := raw.(map[string]any)
+		if !ok {
+			continue
+		}
+		if doc["kind"] == "ValidatingAdmissionPolicy" && metaName(doc) == "s5n-no-login-changes" {
+			found = doc
+		}
+	}
+	if found == nil {
+		t.Fatal("policy.yaml has no s5n-no-login-changes policy")
+	}
+	spec, _ := found["spec"].(map[string]any)
+	constraints, _ := spec["matchConstraints"].(map[string]any)
+	rules, _ := constraints["resourceRules"].([]any)
+	if len(rules) != 2 {
+		t.Fatalf("the login policy matches %d resource rules, want securitypolicies and gateways", len(rules))
+	}
+	covered := map[string]bool{}
+	for _, raw := range rules {
+		rule, _ := raw.(map[string]any)
+		resources, _ := rule["resources"].([]any)
+		operations, _ := rule["operations"].([]any)
+		for _, r := range resources {
+			covered[fmt.Sprint(r)] = true
+		}
+		for _, op := range operations {
+			switch fmt.Sprint(op) {
+			case "CREATE", "UPDATE", "DELETE":
+			default:
+				t.Errorf("the login policy does not cover %v on %v", op, resources)
+			}
+		}
+	}
+	for _, want := range []string{"securitypolicies", "gateways"} {
+		if !covered[want] {
+			t.Errorf("the login policy does not cover %s", want)
+		}
+	}
+	if _, ok := spec["paramKind"]; ok {
+		t.Error("the login policy declares a paramKind, but the rule reads no params")
+	}
+	validations, _ := spec["validations"].([]any)
+	if len(validations) != 1 {
+		t.Fatalf("validations = %v", validations)
+	}
+	validation, _ := validations[0].(map[string]any)
+	if fmt.Sprint(validation["expression"]) != "false" {
+		t.Errorf("the rule is %v, want an unconditional refusal", validation["expression"])
+	}
+}
+
+// TestTheAuthRoutePolicyIsInTheManifest: the grant's new binding is only
+// enforcement if the policy it names exists, covers every served HTTPRoute
+// version, and refuses the three ways a path can reach /auth without spelling
+// it. Renaming the policy or dropping a version leaves a hole neither the
+// chart nor the renderer would notice.
+func TestTheAuthRoutePolicyIsInTheManifest(t *testing.T) {
+	var found map[string]any
+	for _, raw := range decodeAll(t, "policy.yaml", readFixture(t, "../../install/platform/admission/policy.yaml")) {
+		doc, ok := raw.(map[string]any)
+		if !ok {
+			continue
+		}
+		if doc["kind"] == "ValidatingAdmissionPolicy" && metaName(doc) == "s5n-no-auth-routes" {
+			found = doc
+		}
+	}
+	if found == nil {
+		t.Fatal("policy.yaml has no s5n-no-auth-routes policy")
+	}
+	spec, _ := found["spec"].(map[string]any)
+	if _, ok := spec["paramKind"]; ok {
+		t.Error("the auth-route policy declares a paramKind, but the rule reads no params")
+	}
+	constraints, _ := spec["matchConstraints"].(map[string]any)
+	rules, _ := constraints["resourceRules"].([]any)
+	if len(rules) != 1 {
+		t.Fatalf("the auth-route policy matches %d resource rules, want one", len(rules))
+	}
+	rule, _ := rules[0].(map[string]any)
+	versions := map[string]bool{}
+	for _, v := range rule["apiVersions"].([]any) {
+		versions[fmt.Sprint(v)] = true
+	}
+	// The Gateway API bundle box installs serves v1 and v1beta1; a policy
+	// matching one only leaves the other writable.
+	for _, want := range []string{"v1", "v1beta1"} {
+		if !versions[want] {
+			t.Errorf("the auth-route policy does not match HTTPRoute %s", want)
+		}
+	}
+	operations := map[string]bool{}
+	for _, op := range rule["operations"].([]any) {
+		operations[fmt.Sprint(op)] = true
+	}
+	if !operations["CREATE"] || !operations["UPDATE"] {
+		t.Errorf("the auth-route policy operations = %v, want CREATE and UPDATE", rule["operations"])
+	}
+	if resources := fmt.Sprint(rule["resources"]); resources != "[httproutes]" {
+		t.Errorf("the auth-route policy matches %v, want httproutes only", rule["resources"])
+	}
+	validations, _ := spec["validations"].([]any)
+	if len(validations) != 3 {
+		t.Fatalf("%d validations, want a regex, an /auth and a percent-encoded refusal", len(validations))
+	}
+	var expressions, messages []string
+	for _, raw := range validations {
+		v, _ := raw.(map[string]any)
+		expressions = append(expressions, fmt.Sprint(v["expression"]))
+		messages = append(messages, fmt.Sprint(v["message"]))
+	}
+	joined := strings.Join(expressions, "\n")
+	for _, want := range []string{"PathPrefix", "Exact", "startsWith('/auth/')", "RegularExpression", "contains('%')", "has("} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("the auth-route policy no longer checks %q", want)
+		}
+	}
+	// The message the API server returns is what the e2e asserts; keep it.
+	if !strings.Contains(strings.Join(messages, "\n"), "s5n: /auth is root's sign-in path; a seedbox route may not match it") {
+		t.Errorf("the /auth refusal message changed: %v", messages)
+	}
+}
+
+// metaName is one object's name, for the manifest assertions above.
+func metaName(doc map[string]any) string {
+	meta, _ := doc["metadata"].(map[string]any)
+	name, _ := meta["name"].(string)
+	return name
 }

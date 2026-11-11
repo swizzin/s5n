@@ -7,7 +7,6 @@ import (
 
 	"github.com/Masterminds/semver/v3"
 
-	platformassets "github.com/swizzin/s5n/install/platform"
 	"github.com/swizzin/s5n/internal/bootstrap"
 )
 
@@ -73,10 +72,10 @@ func TestNotAtPin(t *testing.T) {
 // otherwise reach Helm as a chart version nobody publishes.
 func TestEveryPinIsSemver(t *testing.T) {
 	pins := map[string]string{
-		"k0s":          platformassets.Pins.K0s,
-		"envoyGateway": platformassets.Pins.EnvoyGateway,
-		"metallb":      platformassets.Pins.MetalLB,
-		"certManager":  platformassets.Pins.CertManager,
+		"k0s":          pins.K0s,
+		"envoyGateway": pins.EnvoyGateway,
+		"metallb":      pins.MetalLB,
+		"certManager":  pins.CertManager,
 	}
 	for key, pin := range pins {
 		if pin == "" {
@@ -105,9 +104,9 @@ func TestEveryPinIsSemver(t *testing.T) {
 func TestApplyVerifiesAReleaseWhoseVersionCarriesAV(t *testing.T) {
 	f := newFixture()
 	f.rel.versions = map[string]string{
-		"envoy-gateway-system/envoy-gateway": "v" + platformassets.Pins.EnvoyGateway,
-		"cert-manager/cert-manager":          platformassets.Pins.CertManager,
-		"metallb-system/metallb":             "v" + platformassets.Pins.MetalLB,
+		"envoy-gateway-system/envoy-gateway": "v" + pins.EnvoyGateway,
+		"cert-manager/cert-manager":          pins.CertManager,
+		"metallb-system/metallb":             "v" + pins.MetalLB,
 	}
 	f.probe.answers = []GatewayAnswer{{Address: "192.0.2.10"}}
 
@@ -137,7 +136,7 @@ func TestApplyReplacesAnUnreadableVersion(t *testing.T) {
 	}
 	var replaced bool
 	for _, r := range f.rel.installed {
-		if r.Name == MetalLBRelease && r.Version == platformassets.Pins.MetalLB {
+		if r.Name == MetalLBRelease && r.Version == pins.MetalLB {
 			replaced = true
 		}
 	}

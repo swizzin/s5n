@@ -71,7 +71,7 @@ func TestApplyRefusesAnIdentityThatCannotPatch(t *testing.T) {
 // server-side apply. A new entry written as "create" would be the same bug
 // again, one object at a time.
 func TestPreflightAccessAsksWhatApplyNeeds(t *testing.T) {
-	plan, err := BuildPlan(allInstall, "eg", "")
+	plan, err := BuildPlan(pins, allInstall, "eg", "")
 	if err != nil {
 		t.Fatal(err)
 	}

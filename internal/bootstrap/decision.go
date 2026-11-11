@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"path/filepath"
 	"strings"
+
+	"github.com/swizzin/s5n/internal/release"
 )
 
 // Decision runs box bootstrap's cluster detection and platform probes. It
@@ -17,6 +19,14 @@ type Decision struct {
 	Host      Host
 	Records   RecordStore
 	Install   Installer
+	// Pins is the platform pins of the chart release box is installing
+	// (charts/s5n/platform.yaml, read by internal/release). bootstrap installs
+	// k0s at the release's pin, so it pulls the release before it touches the
+	// host. It is a function because the pull is only needed on the one
+	// branch that installs: a host that already has a cluster never asks, and
+	// the caller -- `box bootstrap` hands the same release to init -- loads it
+	// once for the whole command.
+	Pins func(ctx context.Context) (release.Versions, error)
 	// Prompt asks which GatewayClass to use when more than one is Accepted.
 	// Nil means unattended: the decision then refuses and names the setting,
 	// because choosing an implementation is the operator's call, never box's.
@@ -33,9 +43,11 @@ type Options struct {
 	// GatewayClass to use when several are Accepted. Empty lets box use the
 	// only Accepted one, or ask.
 	GatewayClass string
-	// DryRun is box bootstrap --dry-run: probe nothing remote and change
-	// nothing. A clean host gets the install plan printed and stops there,
-	// because the cluster to adopt does not exist and must not be probed.
+	// DryRun is box bootstrap --dry-run: probe no cluster and change
+	// nothing. On a clean host it still reads the chart release, because the
+	// k0s it would print comes from the release's pins. A clean host gets the
+	// install plan printed and stops there, because the cluster to adopt does
+	// not exist and must not be probed.
 	DryRun bool
 }
 
@@ -107,6 +119,15 @@ func (d *Decision) Bootstrap(ctx context.Context, opts Options) (Result, error) 
 		return d.useCluster(ctx, opts, kc, cand.Path, SourceExternal, "cluster on this host"), nil
 	}
 
+	// A cancelled run is not evidence about the host. Probing cut short by a
+	// signal reaches here as a dead candidate ("version: context canceled"),
+	// and the evidence below would read a host with a cluster as either broken
+	// or clean -- the second one installs k0s on it. Report the cancellation
+	// through the error path every failed command already has.
+	if err := ctx.Err(); err != nil {
+		return res, err
+	}
+
 	// 3. Something present but not usable. A distribution-owned kubeconfig that
 	// exists but cannot be used is part of this evidence: the distribution
 	// wrote it when it installed a cluster, so a dead one means that cluster is
@@ -127,8 +148,14 @@ func (d *Decision) Bootstrap(ctx context.Context, opts Options) (Result, error) 
 
 	// 4. A clean host: install k0s, then adopt the cluster box just started.
 	// The plan carries the affirmative choice, so nothing that is not this
-	// branch can reach the installer's download.
-	plan := k0sPlan()
+	// branch can reach the installer's download. Which k0s is the chart
+	// release's pin: bootstrap pulls the release before it touches the host,
+	// so a bump of the pin is a chart release rather than a new box.
+	pins, err := d.platformPins(ctx)
+	if err != nil {
+		return stop(err.Error()), nil
+	}
+	plan := k0sPlan(pins)
 	if err := d.Install.Install(ctx, plan); err != nil {
 		return stop(fmt.Sprintf("k0s install failed: %v", err)), nil
 	}
@@ -140,13 +167,30 @@ func (d *Decision) Bootstrap(ctx context.Context, opts Options) (Result, error) 
 			Distribution: DistK0s,
 			Skips:        skips,
 			Notes:        describeNotes(notes),
-			Reason:       fmt.Sprintf("clean host: k0s %s would be installed (dry run)", k0sVersion),
+			Reason:       fmt.Sprintf("clean host: k0s %s would be installed (dry run)", plan.Version),
 		}, nil
 	}
-	res = d.adoptInstalled(ctx, opts)
+	res = d.adoptInstalled(ctx, opts, plan.Version)
 	res.Skips = skips
 	res.Notes = describeNotes(notes)
 	return res, nil
+}
+
+// platformPins is the release's pins, or the refusal that says what is missing.
+// There is no fallback: a compiled-in version would be a second home for the
+// platform, and this one is the release's.
+func (d *Decision) platformPins(ctx context.Context) (release.Versions, error) {
+	if d.Pins == nil {
+		return release.Versions{}, errors.New("no chart release: bootstrap installs the k0s the release pins, and box was given no way to read it")
+	}
+	pins, err := d.Pins(ctx)
+	if err != nil {
+		return release.Versions{}, fmt.Errorf("the chart release's platform pins: %w", err)
+	}
+	if pins.K0s == "" {
+		return release.Versions{}, errors.New("the chart release pins no k0s version: box installs the k0s its release names in charts/s5n/platform.yaml")
+	}
+	return pins, nil
 }
 
 // adoptInstalled is the second half of the clean-host path. k0s is up, so
@@ -154,7 +198,7 @@ func (d *Decision) Bootstrap(ctx context.Context, opts Options) (Result, error) 
 // distribution, its platform layer and its Gateway class, and only then is it
 // recorded. A cluster box started but cannot reach is never written down as one
 // box manages, and it is never probed for capabilities before it answers.
-func (d *Decision) adoptInstalled(ctx context.Context, opts Options) Result {
+func (d *Decision) adoptInstalled(ctx context.Context, opts Options, k0s string) Result {
 	kc, err := d.Source.Read(K0sAdminConfig)
 	if err != nil {
 		return stop(fmt.Sprintf("read the kubeconfig k0s wrote (%s): %v", K0sAdminConfig, err))
@@ -164,7 +208,7 @@ func (d *Decision) adoptInstalled(ctx context.Context, opts Options) Result {
 		return res
 	}
 	res.Action = ActionInstall
-	res.Reason = fmt.Sprintf("clean host: k0s %s installed; using %s (%s)", k0sVersion, K0sAdminConfig, res.Distribution)
+	res.Reason = fmt.Sprintf("clean host: k0s %s installed; using %s (%s)", k0s, K0sAdminConfig, res.Distribution)
 	res.Platform = freshClusterAddresses(res.Platform)
 	return res
 }
@@ -194,7 +238,7 @@ func (d *Decision) useCluster(ctx context.Context, opts Options, kc []byte, path
 	if !ok {
 		return res
 	}
-	return d.finishCluster(ctx, opts, obs, path, source, how)
+	return d.finishCluster(ctx, opts, obs, identityOf(kc), path, source, how)
 }
 
 // clusterProbes is what the probe chain learned about a cluster before any
@@ -240,8 +284,10 @@ func (d *Decision) inspectCluster(ctx context.Context, kc []byte, path, how stri
 }
 
 // finishCluster probes the platform layer of a cluster inspectCluster accepted,
-// then computes the platform decisions and the record.
-func (d *Decision) finishCluster(ctx context.Context, opts Options, obs clusterProbes, path string, source Source, how string) Result {
+// then computes the platform decisions and the record. id is the identity of the
+// cluster the kubeconfig reached, so the record says which cluster it describes
+// and a re-run can refuse the file if it has been repointed since.
+func (d *Decision) finishCluster(ctx context.Context, opts Options, obs clusterProbes, id clusterIdentity, path string, source Source, how string) Result {
 	plat, err := obs.probe.Platform(ctx)
 	if err != nil {
 		return stop(fmt.Sprintf("%s at %s: platform probe: %v", how, path, describeRemote(err)))
@@ -270,6 +316,8 @@ func (d *Decision) finishCluster(ctx context.Context, opts Options, obs clusterP
 	rec := &Record{
 		Source:       source,
 		Kubeconfig:   path,
+		Server:       id.Server,
+		CAHash:       id.CAHash,
 		Distribution: obs.dist,
 		Nodes:        obs.cluster.Nodes,
 		Platform:     opts.Platform,
@@ -295,7 +343,10 @@ func (d *Decision) finishCluster(ctx context.Context, opts Options, obs clusterP
 // A record whose kubeconfig no longer answers stops, naming the record path; it
 // never falls through to the candidate scan and the k0s installer, because an
 // unreachable recorded cluster may still be there and installing over it would
-// destroy a cluster box owns.
+// destroy a cluster box owns. One whose kubeconfig now reaches a different
+// cluster stops before the probe too, naming the recorded and the current
+// server: a file can be repointed, and the record's decisions are no more valid
+// for the cluster behind it than for any other.
 func (d *Decision) useRecord(ctx context.Context, rec *Record) Result {
 	if problem := supportProblem(rec.Distribution, rec.Nodes); problem != "" {
 		return stop(fmt.Sprintf("recorded %s cluster at %s: %s", rec.Source, rec.Kubeconfig, problem))
@@ -310,6 +361,9 @@ func (d *Decision) useRecord(ctx context.Context, rec *Record) Result {
 		return stop(fmt.Sprintf("recorded %s cluster kubeconfig %s: %v", rec.Source, rec.Kubeconfig, err))
 	}
 	how := fmt.Sprintf("recorded %s cluster", rec.Source)
+	if conflict := identityConflict(rec, identityOf(kc), d.Records.RecordPath()); conflict != "" {
+		return stop(conflict)
+	}
 	obs, res, ok := d.inspectCluster(ctx, kc, rec.Kubeconfig, how)
 	if !ok {
 		return res

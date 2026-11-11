@@ -199,7 +199,7 @@ func (e *Editor) set(p Path, value any) error {
 		return e.appendToMapping(p, cur, rest, value)
 	case yaml.ScalarNode:
 		if isBareNull(cur) && !rest[0].IsIndex {
-			return e.appendUnderKey(p, key, rest, value)
+			return e.appendUnderKey(key, rest, value)
 		}
 		return fmt.Errorf("%s is the value %q, not a mapping; edit the file by hand to turn it into one", Path(p[:depth]), cur.Value)
 	case yaml.SequenceNode:
@@ -268,7 +268,7 @@ func (e *Editor) appendToMapping(p Path, m *yaml.Node, rest Path, value any) err
 
 // appendUnderKey turns "key:" (with nothing under it) into a mapping header and
 // writes the new keys beneath it.
-func (e *Editor) appendUnderKey(p Path, key *yaml.Node, rest Path, value any) error {
+func (e *Editor) appendUnderKey(key *yaml.Node, rest Path, value any) error {
 	lines, err := chainLines(rest, value, key.Column-1+e.indentStep(), e.indentStep())
 	if err != nil {
 		return err
@@ -579,28 +579,9 @@ func tokenEnd(s []byte, inFlow bool) int {
 	}
 	switch s[0] {
 	case '"':
-		for i := 1; i < len(s); i++ {
-			if s[i] == '\\' {
-				i++
-				continue
-			}
-			if s[i] == '"' {
-				return i + 1
-			}
-		}
-		return 0
+		return doubleQuotedEnd(s)
 	case '\'':
-		for i := 1; i < len(s); i++ {
-			if s[i] != '\'' {
-				continue
-			}
-			if i+1 < len(s) && s[i+1] == '\'' {
-				i++
-				continue
-			}
-			return i + 1
-		}
-		return 0
+		return singleQuotedEnd(s)
 	}
 	for i := 0; i < len(s); i++ {
 		if s[i] == '\n' || s[i] == '\r' {
@@ -614,6 +595,38 @@ func tokenEnd(s []byte, inFlow bool) int {
 		}
 	}
 	return trimTrailing(s)
+}
+
+// doubleQuotedEnd is the offset just past the closing quote of a double-quoted
+// scalar at the start of s, where a backslash escapes the next byte. 0 is an
+// unterminated scalar, which the caller refuses rather than half-replaces.
+func doubleQuotedEnd(s []byte) int {
+	for i := 1; i < len(s); i++ {
+		if s[i] == '\\' {
+			i++
+			continue
+		}
+		if s[i] == '"' {
+			return i + 1
+		}
+	}
+	return 0
+}
+
+// singleQuotedEnd is the same for a single-quoted scalar, where a doubled
+// quote is an escaped quote and a backslash is an ordinary byte.
+func singleQuotedEnd(s []byte) int {
+	for i := 1; i < len(s); i++ {
+		if s[i] != '\'' {
+			continue
+		}
+		if i+1 < len(s) && s[i+1] == '\'' {
+			i++
+			continue
+		}
+		return i + 1
+	}
+	return 0
 }
 
 func trimTrailing(s []byte) int {

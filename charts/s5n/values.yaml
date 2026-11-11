@@ -24,8 +24,10 @@ global:
 #
 # The chart creates no storage. Both settings name PersistentVolumeClaims that
 # already exist in the release namespace; the chart mounts them and creates
-# nothing else. There is no host path, storage class or size here: a claim's
-# capacity is its own, and a static claim cannot be resized from values.
+# nothing else. A render that can see the cluster refuses a claim name no object
+# has, rather than installing pods that wait for storage that never arrives.
+# There is no host path, storage class or size here: a claim's capacity is its
+# own, and a static claim cannot be resized from values.
 #
 # box creates the claims (and the static PVs behind them) from the grant's host
 # paths, named per namespace. On a plain `helm install`, create them first:

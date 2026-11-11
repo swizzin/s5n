@@ -3,6 +3,7 @@ One StatefulSet + Service (+ HTTPRoute) per instance. Per-app differences are da
 values.yaml; this template is the only place a pod spec is written.
 */ -}}
 {{- include "s5n.authEdge" . -}}
+{{- include "s5n.claimsExist" . -}}
 {{- $root := . -}}
 {{- range $inst := include "s5n.instances" . | fromJsonArray }}
 {{- $cfg := $inst.cfg }}

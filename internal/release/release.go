@@ -466,6 +466,10 @@ func (a *Applier) waitReceipt(ctx context.Context, client ReleaseClient, since t
 	return Receipt{}, errors.New("the wiring receipt never arrived: the release is installed but its wiring hook has not reported")
 }
 
+// undoTimeout bounds the whole of undo: a few deletes on an answering API server
+// take well under a second.
+const undoTimeout = time.Minute
+
 // undo removes the volumes this run created, after a failure that stopped it
 // before the release existed. A PV is cluster-scoped and reclaim Retain, so one
 // left behind is a volume nobody's release owns; it would make the next apply
@@ -473,10 +477,20 @@ func (a *Applier) waitReceipt(ctx context.Context, client ReleaseClient, since t
 // a volume that was already there is never touched, and neither are the claims,
 // which are namespaced, harmless, and what the next apply binds the recreated
 // volume to. The namespace stays too: it is empty and it is what the box wants.
+//
+// Undo is cleanup, so it does not inherit the cancellation that failed the step:
+// a Ctrl-C during the storage writes or the upgrade is exactly when a volume
+// this run wrote has to come back off, and a Delete sent on the cancelled
+// context would fail and strand it. A second Ctrl-C still ends box, because the
+// first one unregisters the signal handler. Detaching drops the deadline too, so
+// undo carries its own: an API server that stopped answering must not hold the
+// failed run open until someone presses Ctrl-C again.
 func (a *Applier) undo(ctx context.Context, store StorageClient, created []StorageObject, cause error) error {
 	if len(created) == 0 {
 		return cause
 	}
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), undoTimeout)
+	defer cancel()
 	errs := []error{cause}
 	for _, obj := range created {
 		if err := store.Delete(ctx, obj); err != nil {

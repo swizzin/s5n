@@ -19,16 +19,17 @@ NS=seedbox
 # drift from (or conflict with) it.
 #
 # The platform versions are not this script's. Every version box installs lives in
-# install/platform/versions.yaml, and hack/versions prints them from the same bytes box
-# compiles in, so this e2e installs exactly what box installs -- and the host needs no
-# YAML parser. MetalLB's upstream manifest is tagged with a leading "v" while its chart
-# pin has none: the tag is derived from the one pin, never a second copy of it.
+# charts/s5n/platform.yaml, the chart's own file, and hack/versions prints them through
+# the parser box uses, so this e2e installs exactly what the chart release carries -- and
+# the host needs no YAML parser. MetalLB's upstream manifest is tagged with a leading "v"
+# while its chart pin has none: the tag is derived from the one pin, never a second copy
+# of it.
 pins=$(go run ./hack/versions)
 pin() { printf '%s\n' "$pins" | sed -n "s/^$1=//p"; }
 v_tag() { case "$1" in v*) printf '%s' "$1" ;; *) printf 'v%s' "$1" ;; esac; }
 for pin_key in k0s envoyGateway metallb certManager; do
   [ -n "$(pin "$pin_key")" ] || {
-    echo "install/platform/versions.yaml has no ${pin_key} pin"
+    echo "charts/s5n/platform.yaml has no ${pin_key} pin"
     exit 1
   }
 done
@@ -36,7 +37,7 @@ ENVOY_GATEWAY_CHART_VERSION=${ENVOY_GATEWAY_CHART_VERSION:-$(pin envoyGateway)}
 METALLB_VERSION=${METALLB_VERSION:-$(v_tag "$(pin metallb)")}
 
 # Test-only images, pinned by tag and digest. They are not box's to install, so
-# they stay in the scripts rather than install/platform/versions.yaml; Renovate
+# they stay in the scripts rather than the chart's platform.yaml; Renovate
 # watches them here (.github/renovate.json), and the tag stays in the reference
 # so a bump to either the tag or the digest is one line.
 CURL_IMAGE=${CURL_IMAGE:-docker.io/curlimages/curl:8.11.1@sha256:c1fe1679c34d9784c1b0d1e5f62ac0a79fca01fb6377cdd33e90473c6f9f9a69}  # renovate: datasource=docker
@@ -415,6 +416,18 @@ echo "ReplicaSets reporting the denial: ${replica_failure}"
 [ "$replica_failure" -ge 1 ] || fail=1
 $K -n "$NS" delete deploy unblessed --ignore-not-found >/dev/null
 
+# Before the claims exist, a render that can see the cluster must refuse the
+# release by name rather than install pods that wait for storage forever. A
+# server-side dry run does the cluster's lookups and writes nothing.
+log "asserting a release without its claims is refused at render"
+noclaim=$($HELM install s5n charts/s5n -n "$NS" -f hack/e2e-values.yaml --dry-run=server 2>&1) && {
+  echo "a release whose claims do not exist rendered"; fail=1; } || true
+if grep -qF 'storage.data.existingClaim: PersistentVolumeClaim "s5n-data" does not exist in namespace "seedbox"' <<<"$noclaim"; then
+  echo "  refused: missing claim s5n-data"
+else
+  echo "the missing-claim refusal was not printed:"; echo "$noclaim" | tail -5; fail=1
+fi
+
 # The claims, as the plain-helm operator creates them: the chart creates no
 # storage, and its defaults are the names below. A static hostPath PV bound to
 # exactly one claim, and the claim pinned to it, with an empty storageClassName
@@ -471,6 +484,10 @@ spec:
   volumeName: s5n-config
   resources: {requests: {storage: 1Gi}}
 EOF
+# The PV controller binds a pre-bound pair on its next pass, not inside the
+# apply: wait for it, then report each claim's phase (a timeout leaves a phase
+# other than Bound, and the loop fails on it with the claim named).
+$K -n "$NS" wait --for=jsonpath='{.status.phase}'=Bound pvc/s5n-data pvc/s5n-config --timeout=60s >/dev/null 2>&1 || true
 for pvc in s5n-data s5n-config; do
   phase=$($K -n "$NS" get pvc "$pvc" -o jsonpath='{.status.phase}')
   echo "  claim ${pvc}: ${phase}"; [ "$phase" = Bound ] || fail=1

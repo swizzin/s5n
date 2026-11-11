@@ -56,3 +56,38 @@ spec:
         - key: kubernetes.io/metadata.name
           operator: In
           values: ["example-user"]
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: s5n-grant-example-user-login
+  labels:
+    app.kubernetes.io/part-of: s5n
+spec:
+  policyName: s5n-no-login-changes
+  validationActions: ["Deny"]
+  # No paramRef: the login policy is a constant rule, and a binding that
+  # pointed at the grant's ConfigMap would make it depend on one it never reads.
+  matchResources:
+    namespaceSelector:
+      matchExpressions:
+        - key: kubernetes.io/metadata.name
+          operator: In
+          values: ["example-user"]
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: s5n-grant-example-user-auth-route
+  labels:
+    app.kubernetes.io/part-of: s5n
+spec:
+  policyName: s5n-no-auth-routes
+  validationActions: ["Deny"]
+  # No paramRef: the /auth rule is a constant rule too.
+  matchResources:
+    namespaceSelector:
+      matchExpressions:
+        - key: kubernetes.io/metadata.name
+          operator: In
+          values: ["example-user"]

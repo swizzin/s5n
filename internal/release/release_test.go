@@ -84,7 +84,9 @@ type fakeStorage struct {
 	applyErrOn string
 	deleteErr  error
 	deleted    []StorageObject
-	events     *[]string
+	// deleteBounded records, per Delete, whether its context had a deadline.
+	deleteBounded []bool
+	events        *[]string
 }
 
 func (f *fakeStorage) PlanNamespace(context.Context) (NamespacePlan, error) {
@@ -138,7 +140,14 @@ func (f *fakeStorage) Apply(_ context.Context, obj StorageObject) error {
 	return nil
 }
 
-func (f *fakeStorage) Delete(_ context.Context, obj StorageObject) error {
+func (f *fakeStorage) Delete(ctx context.Context, obj StorageObject) error {
+	// A real client's request fails on a cancelled context; a fake that ignored
+	// it would pass an undo that cannot work after Ctrl-C.
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	_, bounded := ctx.Deadline()
+	f.deleteBounded = append(f.deleteBounded, bounded)
 	if f.deleteErr != nil {
 		return f.deleteErr
 	}
@@ -873,5 +882,33 @@ func TestBoxValuesRefusalWritesNothing(t *testing.T) {
 	if f.openCalls != 0 || f.storeOpens != 0 || len(f.rel.upgraded) != 0 || len(f.events) != 0 {
 		t.Fatalf("a derivation refusal touched the cluster: opens=%d stores=%d upgrades=%d events=%v",
 			f.openCalls, f.storeOpens, len(f.rel.upgraded), f.events)
+	}
+}
+
+// Undo is cleanup: a run cancelled after it wrote a volume must still take the
+// volume off, or the next apply refuses over a PV nobody's release owns. The
+// fake fails a Delete on a cancelled context the way a real client does, so
+// this test pins that undo does not hand the cancellation down.
+func TestUndoRunsAfterCancellation(t *testing.T) {
+	f := newFakes(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	pv := StorageObject{Kind: KindPersistentVolume, Name: "seedbox-data"}
+	cause := errors.New("the step was cancelled")
+
+	err := f.app.undo(ctx, f.store, []StorageObject{pv}, cause)
+	if !errors.Is(err, cause) {
+		t.Fatalf("undo = %v, want the original cause", err)
+	}
+	if len(f.store.deleted) != 1 {
+		t.Fatalf("deleted %d volumes with a cancelled context, want the one this run wrote", len(f.store.deleted))
+	}
+	if !strings.Contains(f.out.String(), "removed PersistentVolume seedbox-data") {
+		t.Fatalf("the transcript does not report the removal:\n%s", f.out.String())
+	}
+	// Detaching from the cancellation drops the deadline with it; undo must
+	// carry its own, or a silent API server holds the failed run open.
+	if len(f.store.deleteBounded) != 1 || !f.store.deleteBounded[0] {
+		t.Fatalf("undo's Delete had no deadline: %v", f.store.deleteBounded)
 	}
 }

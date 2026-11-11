@@ -9,9 +9,9 @@ your Linux distribution of choice, applications managed by charts, meaningful ap
 isolation, ease of upgrading _all the things_ and a way back when something breaks.
 
 > [!WARNING]
-> s5n is in early PoC stages. While v0.2.0 is currently public, it's not quite ready for public consumption.
-> It serves plain HTTP only, and most of the day-two commands (`update`,
-> `status`, `backup`, `migrate`, `uninstall`) aren't written yet. Try it on a VM or a
+> s5n is in early PoC stages. While v0.3.0 is currently public, it's not quite ready for public consumption.
+> Most of the day-two commands (`update`, `status`, `backup`, `migrate`, `uninstall`)
+> aren't written yet, and a box has one login for now. Try it on a VM or a
 > spare box, not on the seedbox you depend on. Expect nothing yet. No support, a shifting layout with no migration path, etc.
 > The bar for support will rise once this is my daily driver.
 
@@ -19,6 +19,9 @@ isolation, ease of upgrading _all the things_ and a way back when something brea
 
 - **Managed k0s.** Don't know Kubernetes and don't care? You're in luck, `box` will gladly install k0s for you. Managing and upgrading it, backed by E2E compatibility testing, is *(planned)*.
 - **Unmanaged Kubernetes.** Prefer to have more control over your kubernetes environment? Want to use `kubeadm` or `k3s` instead? Be my guest!
+  box serves everything through Envoy Gateway, so it stops, naming the class, on a cluster
+  whose Gateway API already belongs to something else. On k3s that's the bundled Traefik,
+  and the message says how to turn it off.
 - **A Kubernetes cluster.** Install out-of-scope projects easily in their own namespace, as long as they ship a container image.
 - **One data layout where hardlinks always work.** Every app mounts the same directory
   at `/data`, with `downloads/` and `media/` side by side on one filesystem. Imports are
@@ -30,12 +33,20 @@ isolation, ease of upgrading _all the things_ and a way back when something brea
   running it again changes nothing.
 - **HD and 4K instances.** Sonarr and Radarr can each run a second instance with its
   own categories and library folders.
+- **One login in front of everything.** Sign in once at the gateway and reach
+  qBittorrent, Prowlarr and the Arrs. The apps behind it have no login of their own and
+  are reachable only through the gateway. Plex, Seerr and Tautulli sign in through Plex.
+- **HTTPS by default.** A Let's Encrypt certificate when your name is public, self-signed
+  when it isn't. Port 80 answers the certificate challenge and redirects; nothing is
+  served over plain HTTP.
 - **Hardened by default.** Pod Security `restricted`, read-only root filesystems, every
   capability dropped, default-deny networking with only the flows the apps need, and
   images pinned by digest. From outside, only the web gateway and the torrent port are
   reachable.
-- **Every app at a path under one name:** `http://box.example.com/sonarr`, `/radarr`,
-  `/qbittorrent` and so on, the way swizzin always laid them out. Wildcard DNS for those that don't provide base URL support *(planned)*.
+- **Every app at a path under one name:** `https://box.example.com/sonarr`, `/radarr`,
+  `/qbittorrent` and so on, the way swizzin always laid them out. Apps that can't live
+  under a path (Seerr, Plex's web app) get a name of their own, `seerr.box.example.com`,
+  from a wildcard record or one per app *(planned)*.
 - **Zero obligation to use box:** The charts are freely available and can be used directly with helm in a completely standalone environment.
 
 ## Requirements
@@ -45,7 +56,7 @@ isolation, ease of upgrading _all the things_ and a way back when something brea
 - Local storage
 - Cloud provider support (EKS, GKE, etc) not in scope
 - No bare IP support
-  - Every user requires a DNS name. Ideally with wildcard to support Seerr and Plex gateways *(planned)*
+  - Every user requires a DNS name. Ideally with a wildcard (or one record per app) for Seerr and Plex's web app *(planned)*
 - Runs wherever `k0s`, `k3s` or `kubeadm` runs
 
 ### Hardware
@@ -72,17 +83,21 @@ sudo box bootstrap
    single-node cluster, box uses that instead. It never installs a second one over
    something it finds.
 2. **Installs the platform layer** a bare cluster lacks: the Gateway API, Envoy Gateway,
-   and MetalLB so the gateway gets the server's own address. It checks what's already
-   there first, uses whatever works, and stops with the reason when something would
-   conflict.
+   MetalLB so the gateway gets the server's own address, cert-manager for certificates,
+   and the login (Authelia). It checks what's already there first, uses whatever works,
+   and stops with the reason when something would conflict.
 3. **Runs `box init`,** which asks for your domain, where your data and app settings
-   live, and which apps you want, then installs them.
+   live, which apps you want, and the login's password (leave it empty and box makes
+   one, shown once at the end), then installs them.
 
-Then open `http://<your domain>/sonarr`. The gateway answers only on that name, so
-browsing to the bare IP address gets you nothing. Open port 80 and the torrent port
-(31111 by default) in your firewall.
+Then open `https://<your domain>/sonarr` and sign in with the account you ran `sudo` as.
+The gateway answers only on that name, so browsing to the bare IP address gets you
+nothing. Open ports 80 and 443 and the torrent port (31111 by default) in your firewall:
+until the certificate is issued, port 80 serves only the challenge. A name that isn't
+public gets a self-signed certificate, and your browser will say so.
 
-For an unattended install, every question is also a flag:
+For an unattended install, every question is also a flag. Without `--password-file`,
+box generates the login's password and prints it once:
 
 ```sh
 sudo box bootstrap --yes --domain box.example.com \
@@ -111,7 +126,7 @@ answers filled in.
 The chart works on any conformant Kubernetes 1.30 or newer with plain Helm:
 
 ```sh
-helm install s5n oci://ghcr.io/swizzin/charts/s5n --version 0.2.0 -f values.yaml
+helm install s5n oci://ghcr.io/swizzin/charts/s5n --version 0.3.0 -f values.yaml
 ```
 
 It creates no storage of its own. Bring two claims (`storage.data.existingClaim` and
@@ -133,10 +148,10 @@ ones like `4K/Movies`, are accepted as they are.
 
 ## What's next
 
-Roughly in order: TLS (cert-manager, Let's Encrypt when the name is public, self-signed
-when it isn't), `box status` and `doctor`, `install` and `remove` per app, `update`,
-backup and restore, more users on one server (`adduser`), and `box migrate` to adopt an
-existing bare-metal swizzin install with its Arr databases and torrents intact.
+Roughly in order: `box status` and `doctor`, `install` and `remove` per app, `update`
+(applying the chart releases CI already cuts), backup and restore, more users on one
+server (`adduser`), and `box migrate` to adopt an existing bare-metal swizzin install
+with its Arr databases and torrents intact.
 `PLAN.md` holds the plan. `docs/box.md` describes how box behaves, with each part
 marked decided or proposed.
 
@@ -148,6 +163,7 @@ hack/e2e-box.sh    # the same stack, installed through box bootstrap and init
 hack/grab-test.sh  # against a kept cluster: a real grab, imported as a hardlink
 ```
 
+CI runs both e2e scripts on every pull request and every push to `develop` and `main`.
 The e2e runs the wiring twice and fails if the second run changes anything.
 `grab-test.sh` sends a synthetic torrent from a local mock indexer through Prowlarr,
 Sonarr and qBittorrent, and checks that it lands in the library as a hardlink. It

@@ -1,0 +1,20 @@
+# Captured from Envoy Gateway 1.9.3: `kubectl -n s5n-gateway get
+# securitypolicy s5n-authelia -o yaml`, status only, on a box whose login box
+# had just installed. It is the shape the wait has to read: the policy has no
+# status.conditions, and its acceptance is reported under status.ancestors,
+# keyed by the ancestorRef the policy targets and the controller serving it.
+status:
+  ancestors:
+  - ancestorRef:
+      group: gateway.networking.k8s.io
+      kind: Gateway
+      name: s5n
+      namespace: s5n-gateway
+    conditions:
+    - lastTransitionTime: "2026-11-10T22:32:00Z"
+      message: Policy has been accepted.
+      observedGeneration: 1
+      reason: Accepted
+      status: "True"
+      type: Accepted
+    controllerName: gateway.envoyproxy.io/gatewayclass-controller

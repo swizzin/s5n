@@ -113,7 +113,7 @@ func (r *Reporter) watchInterrupt() {
 				r.clearLocked()
 				r.active = nil
 			}
-			io.WriteString(r.out, "\n")
+			_, _ = io.WriteString(r.out, "\n")
 			r.mu.Unlock()
 			os.Exit(130)
 		case <-r.sigDone:
@@ -533,7 +533,7 @@ func (r *Reporter) emit(text string) {
 	if r.active != nil {
 		r.clearLocked()
 	}
-	io.WriteString(r.out, text)
+	_, _ = io.WriteString(r.out, text)
 	if r.active != nil {
 		r.drawLocked()
 	}
@@ -606,7 +606,7 @@ func (h *liveHandle) finish(mark, text, detail string) {
 			}
 		}
 	}
-	io.WriteString(r.out, b.String())
+	_, _ = io.WriteString(r.out, b.String())
 	r.mu.Unlock()
 }
 

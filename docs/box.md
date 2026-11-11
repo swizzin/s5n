@@ -184,16 +184,30 @@ in a Secret volume. That means exactly one replica, with file watching on, so a 
 change shows up without a restart. Its sign-in page is served at `/auth` on each
 seedbox's own host name, so a seedbox needs one certificate and one cookie domain.
 
-**The login is on root's listener, and users can't take it off (decided).** Each user's
-domain has a Gateway listener that root creates at `adduser`. The SecurityPolicy that
-sends requests to Authelia targets that listener, so every route attached to it is behind
-the login, including any route the user adds later. Envoy Gateway lets a policy on a
-route override the listener's, so the grant denies users any write to SecurityPolicies,
-and to Gateways so a user can't open a listener of their own. Users still create their
-own HTTPRoutes, so the chart is unaffected. Exemptions live in Authelia's own rules, which
-root owns: paths that check their own key (the Arrs' `/api`, and `/ping` for health
-checks), Plex, Seerr and Tautulli, and the sign-in page itself. Each user's domain admits
-only that user.
+**The login is on root's Gateway, and users can't take it off (decided).** The
+SecurityPolicy that sends requests to Authelia targets the `s5n` Gateway itself and lives
+beside it in `s5n-gateway`, so every listener is behind the login unless root says
+otherwise: each host's HTTPS listener, the shared port-80 listener, and any listener added
+later. Every route attached to them is covered, including any route the user adds later.
+Envoy Gateway lets a policy on a route override the Gateway's, so the grant denies users
+any write to SecurityPolicies, and to Gateways so a user can't open a listener of their
+own. Users still create their own HTTPRoutes, so the chart is unaffected. Exemptions live
+in Authelia's own rules, which root owns: paths that check their own key (the Arrs' `/api`,
+and `/ping` for health checks), Plex, Seerr and Tautulli, and the sign-in page itself.
+
+**The sign-in path is root's (decided).** Authelia lets everything under `/auth` through
+without a login, and Gateway API sends a request to the most specific route, so a user's
+route under `/auth` on their own host would be served without one. The grant refuses a
+user's HTTPRoute that matches `/auth` or anything under it. It also refuses regular
+expression and percent-encoded path matches in a user's routes, because those can reach
+`/auth` without spelling it. The chart uses neither.
+
+One listener is left out on purpose: each host's own port-80 listener gets a root-owned
+policy with no login, written with the listener before box asks for the certificate. Only
+root's redirect to HTTPS and cert-manager's challenge route can attach there, so nothing
+opens. It has to be this way: Authelia refuses any plain-HTTP request before it reads its
+rules, so a challenge behind the login would never pass, and a plain `http://` link would
+fail at the login instead of redirecting. Each user's domain admits only that user.
 
 **Sessions live in Authelia's memory (decided).** Authelia keeps sessions in memory unless
 it has Redis, and box doesn't run one. Adding a user changes Authelia's rules, which means
@@ -254,9 +268,19 @@ re-run. The cluster decision is in `PLAN.md`.
 installer. It runs only as root, only after the decision found no usable cluster, and it
 refuses if anything named k0s is already there — the binary, a k0s state directory with
 something in it, its unit, or something listening on 6443 — because that k0s is not
-box's to replace. The release and the sha256 of its asset for this architecture (amd64,
-arm64) are compiled into box, never read from the release: a checksum served beside the
-archive proves only that both came from the same place, and what box writes runs as root.
+box's to replace. The release and the sha256 of its asset for each architecture (amd64,
+arm64) are pinned together in the chart's `platform.yaml`, never read from k0s's release:
+a checksum served beside the archive proves only that both came from the same place, and
+what box writes runs as root. Box can't carry them, because it can't know the sum of a
+release newer than itself. The sums are written in the pull request that moves the pin:
+`.github/workflows/k0s-sums.yaml` runs `go run ./hack/k0s-sums --write` on Renovate's
+branch (it refuses when the asset and k0s's published sum disagree) and commits the two
+lines as the sums bot — a GitHub App whose token, not `GITHUB_TOKEN`, pushes them, because
+a `GITHUB_TOKEN` push starts no workflow and Renovate, which has no post-upgrade hook,
+would wait on a head CI never saw. The bot's email is in `gitIgnoredAuthors`, so Renovate
+still commits to its own branch. CI checks the sums against the published assets, and a
+k0s bump still never merges itself: no CI job boots k0s (the box e2e runs on kind), so
+a green run has not tested the new release, and the maintainer merges it.
 The download goes to a temporary file beside `/usr/local/bin/k0s` and is hashed while it
 is written; only a match is renamed into place, so an interrupted or tampered download
 never lands where the unit would exec it. Then `k0s install controller --single`, `k0s
@@ -298,9 +322,10 @@ decision says are missing: Envoy Gateway from its OCI chart (the chart ships the
 API CRDs at the channel the controller is built against), MetalLB in L2 mode with a
 single `/32` pool at the node's primary address, the `GatewayClass` and `Gateway` the
 chart's HTTPRoutes attach to, and the admission policy that enforces the grant. Charts
-are fetched at run time at versions pinned in one place; the manifests box owns are
-compiled in. The plan names every release, version and namespace and asks before the
-first write (`--yes`, or no terminal, is unattended). A release already at its pinned
+are fetched at run time at the versions the chart release pins (see "The platform
+layer"), so bootstrap pulls the release before it installs anything; the manifests box
+owns are compiled in. The plan names every release, version and namespace and asks
+before the first write (`--yes`, or no terminal, is unattended). A release already at its pinned
 version is verified rather than upgraded, so a second bootstrap creates no Helm
 revision; the objects box applies are server-side applies under field manager `box`, so
 re-applying them changes nothing. cert-manager is installed the same way, with the
@@ -387,20 +412,36 @@ validated, self-signed otherwise. This is how box would do it.
   on the `s5n` Gateway, all written by root
   from the grant's host name. Users never write listeners or Certificates. That keeps
   issuance in root's hands, the way the grant keeps ports and images there.
-- **HTTP stays open for the challenge only.** Once a host's certificate is Ready, box
-  adds that host's two listeners and a redirect route to HTTPS on its port-80 listener.
-  Gateway API's listener isolation sends the host's port-80 requests to that listener
-  and no other, so its app routes answer only on 443, while hosts without a certificate
-  stay on the shared port-80 listener, untouched. The host's listener admits only
-  `s5n-gateway`, so no app route can attach there. The solver's own route for
+- **HTTP stays open for the challenge only.** Before it asks for a host's certificate,
+  box gives the host its own port-80 listener. It admits only `s5n-gateway`, so no app
+  route can attach there, and Gateway API's listener isolation sends the host's port-80
+  requests to it and no other. cert-manager's solver route attaches to it and answers the
+  challenge. Once the certificate is Ready, box adds the HTTPS listener on 443 and a
+  redirect route to HTTPS on the port-80 one; the solver's own route for
   `/.well-known/acme-challenge/` is an exact match and keeps winning, so renewals work.
-  Until the certificate is Ready, box writes no listener and the host stays on HTTP.
+  A host is never served over plain HTTP: until its certificate is Ready it serves only
+  the challenge, and box says so.
 - **Which issuer a host gets.** Each user has a domain, but not every domain is publicly
   resolvable (`box.lan`, a split-horizon name). init resolves the name. A
   public address picks Let's Encrypt; a private address, or no answer, picks
   self-signed, and init says which and why. It doesn't compare the address with the
   node's, because a box behind NAT has a private node address and a public name that
-  still validates. `tls.issuer` in root's values forces either one.
+  still validates. `tls.issuer` in root's values forces either one. A name with no
+  answer is usually a record that doesn't exist yet, so init doesn't stop on it (a test
+  box with a made-up name still installs), but its final card says the name has no DNS
+  record, that the certificate is self-signed because of it, and that running `box init`
+  again once the record exists moves the host to Let's Encrypt. That works because init
+  resolves the name on every run and keeps no earlier answer; the e2e proves the move
+  from a self-signed certificate to an issued one on the same host.
+- **Apps with no base URL get a host of their own.** An app whose UI writes absolute
+  asset paths (Seerr, Plex's web app) breaks under a `/<name>` prefix, so it is served
+  at `<app>.<domain>` instead, with its own listener and certificate the same way as the
+  box's domain. The operator provides the names: one wildcard record (`*.<domain>`) or
+  one record per app, whichever their DNS allows. box doesn't manage DNS and holds no
+  DNS-provider credentials, so a wildcard *certificate*, which needs DNS-01, is not
+  part of this. Before box writes anything for an app host, it checks that the name
+  resolves to the same addresses as the box's domain, and stops naming the record to
+  add when it doesn't, rather than leaving a certificate that can never issue.
 - **Tested without the internet.** The e2e runs Pebble (Let's Encrypt's test ACME
   server) in the kind cluster and points a test issuer at it, so HTTP-01 through the
   Gateway is proven on every run. The self-signed path gets its own assertion.
@@ -454,19 +495,64 @@ leaves it alone. A box older than `min-box` refuses that release until it's upda
 In the other direction, box keeps reading every release back to the oldest
 `upgrade-from` it knows, so a new box never strands an old install.
 
+**No maximum box version (decided).** A chart can't know which future box will break
+it, so it declares no ceiling; each side states only the floor it knows. The chart
+states `min-box`. box states its own floor in code, the oldest release it still reads,
+and raises it when it deletes support for something an old release relies on. The
+platform pins are part of that promise: box's compiled-in manifests must work with the
+platform version every release back to its floor pins. That isn't hypothetical:
+`update` replaces box before it moves the chart, so a new box runs against root's old
+release between those two steps, and for longer when an update rolls back. A release
+older than box's floor is one box will only update.
+
 **box only uses published charts (decided).** It pulls a released chart by version from
 the OCI registry and reads the schema, manifest and annotations from that artifact. It
 never loads `charts/` from its own tree, so a box built from main can't depend on
 templates no user has. box's own tests run against the chart packaged from the same
 commit, the same way: pushed to a local registry and pulled like any release.
 
-**Where a release lives (decided).** A `v<version>` tag publishes everything at once:
-the image at `ghcr.io/swizzin/s5n:<version>`, the chart at
-`oci://ghcr.io/swizzin/charts/s5n` with `version` and `appVersion` both `<version>`, and
-box's binaries with a `sha256sums.txt` as assets of the GitHub release. The chart is
-packaged after the image is pushed and names that image by digest, so a chart can never
-point at an image other than the one built from its commit. Nothing is published from a
-branch push.
+**Where a release lives (decided).** The chart and box release separately, each from
+its own tag family, so a new Sonarr never needs a new box and a box fix never
+republishes the chart.
+
+- An `s5n-v<version>` tag publishes the image at `ghcr.io/swizzin/s5n:<version>` and the
+  chart at `oci://ghcr.io/swizzin/charts/s5n`, with `version` and `appVersion` both
+  `<version>`. The chart is packaged after the image is pushed and names that image by
+  digest, so a chart can never point at an image other than the one built from its
+  commit. Its GitHub release lists the app images and platform pins that moved and is
+  never marked latest.
+- A `box-v<version>` tag publishes box's binaries with a `sha256sums.txt` as assets of a
+  GitHub release, which is marked latest, so `releases/latest` always means box.
+
+Because the platform pins ship in the chart (see "The platform layer"), a platform patch
+is a chart release too, and a `box-v*` release only ever carries box's own code.
+
+**Branches (decided).** `main` is what has been released; work lands on `develop`. Both
+move by ordinary pull-request merges, not fast-forward only: CI runs on every push to
+`main`, and a release is built from its tagged commit, so a straight line adds nothing.
+A feature release merges `develop` into `main`; once CI is green on `main`, the
+maintainer tags it there. After every release, `main` is merged back into `develop`, so
+`develop`'s e2e always tests the images and pins users are running.
+
+**Automatic chart releases (decided).** Renovate bumps the app images in `variants.yaml`
+on `main` only; `develop` gets them through the back-merge. The platform pins are bumped
+on both branches, so work on `develop` is built and tested against the platform it will
+ship on. On `main`, a patch or digest bump merges itself as soon as the full e2e is
+green; anything larger waits for the maintainer. Renovate groups the bumps that land in
+one window into one pull request. There is no waiting period: the upstream projects
+stage their own releases, and holding a build longer adds age, not testing. On every
+push to `main`, if `main` has changed since the last `s5n-v*` tag and every change since
+is one of those bumps, CI raises the chart's patch version and tags it. Any other change
+on `main` waits for a maintainer's release, and the job names it. There is no off
+switch in the repo: disabling the workflow in GitHub is the kill switch. Nothing is
+released without a previous `s5n-v*` tag to build on, and nothing is published from a
+push to `develop`.
+
+What makes this safe is the e2e plus a rollback that really works. The Arrs migrate
+their databases forward when they start and don't support running an older version
+on a newer database, so stepping a chart back is not enough. `update` snapshots each
+app's config before it moves a release, and a rollback restores the snapshot together
+with the previous chart.
 
 **What update does with it:**
 
@@ -499,9 +585,10 @@ branch push.
   check.
 
 **What CI proves:** box at HEAD against the newest released chart and the oldest
-release back to its `upgrade-from` floor; the chart at HEAD against the newest released
-box, which must meet its `min-box`. A chart change that needs a newer box but forgets
-to raise `min-box` fails there and not on a user's server. The self-update path gets
+release back to its floor, each on the platform that release pins; the chart at HEAD
+against the newest released box and against the box release its `min-box` names. A
+chart change (a platform bump included) that needs a newer box but forgets to raise
+`min-box` fails there and not on a user's server. The self-update path gets
 its own test: the previous box release updates itself to HEAD and finishes a chart
 update.
 
@@ -613,24 +700,52 @@ The chart pins every image by digest; there's no in-cluster image updater and no
 New images arrive hours after upstream instead of minutes, and a broken upstream image
 fails in CI instead of on a user's box.
 
+**The timer (decided).** box checks for a newer release once an hour by default, with
+jitter so a fleet doesn't arrive at once. The interval is a key in root's config, and
+the timer can be turned off there. It reads the tag list from ghcr anonymously; no
+token is needed to learn that something moved.
+
+**When an app takes it (decided).** Each catalog app declares an apply policy, and the
+default is to apply as soon as the release is taken. Plex defers while it has active
+streams, and Jellyfin will do the same; the update applies at the first check with
+none, so it can wait up to one interval after the last stream ends. Torrent activity
+is never a reason to wait: a client is always busy, and there's no clean line between
+busy and idle.
+
 ### The platform layer (decided)
 
-Envoy Gateway, MetalLB and cert-manager follow the same path as the images, at the box
-level instead of the chart level:
+Envoy Gateway, MetalLB, cert-manager, the login and k0s follow the same path as the
+images. Their pins ship in the chart:
 
-1. Renovate opens a pull request when an upstream release lands for a pinned component.
-2. CI runs the full e2e on it; a green bump ships in the next box release.
-3. `box update` on its timer upgrades the components box manages, with doctor run
-   before and after. A component in `external` mode is only checked, and status warns
-   when it drifts outside the tested range.
+1. Renovate opens a pull request when an upstream release lands for a pinned component,
+   on `main` and on `develop`.
+2. CI runs the full e2e on it. On `main`, a patch bump merges itself as soon as it is
+   green (k0s excepted until an e2e that boots k0s runs in CI), and the push cuts a chart patch release like any image bump. Minor and major
+   bumps (a k0s minor is a Kubernetes minor; MetalLB is still 0.x) wait for the
+   maintainer.
+3. Root's `update` takes the pins from the release it is moving to and upgrades the
+   components box manages before it moves any seedbox, with doctor run before and
+   after. A component box doesn't manage (`external`, or `auto` that found the admin's
+   own) is never upgraded; it's probed against the release being moved to before that
+   release is taken (`PLAN.md`, the probes). A failed probe is an error: the release is
+   shown, not taken, and box names the component and what has to change first ("s5n
+   0.5.0 needs Gateway API v1.3 CRDs; this cluster serves v1.2"). A version that passes
+   the probes but differs from the pin is a warning in status and doctor: it works, but
+   it's not what CI tested. A user's `update` never touches the platform and
+   ignores the pins; a seedbox still on an older release runs on the newer platform
+   until it moves.
 
-Every version box installs lives in one file, `install/platform/versions.yaml`: k0s and
-each platform component, with the chart or release it comes from. box embeds it, the
-e2e scripts read it instead of carrying their own copies, and Renovate watches it. That
-way the e2e always tests the versions box ships, and one pull request moves one pin.
-App images stay in the chart's `variants.yaml`, because they ship with chart releases,
-not box releases. Versions that exist only for tests (the foreign Gateway scenario, the
-local registry, Pebble) stay in the scripts, pinned by digest and watched by Renovate too.
+Every version box installs lives in one file, `charts/s5n/platform.yaml`: k0s and each
+platform component, with the chart or release it comes from. box reads it from the
+release it pulled, the same way it reads `variants.yaml`, so bootstrap pulls a release
+before it installs anything. The e2e scripts read the same file instead of carrying
+their own copies, and Renovate watches it. That way the e2e always tests the versions a
+release ships, one pull request moves one pin, and a cert-manager patch never needs a
+new box. What box compiles in are the manifests it writes for those components, which
+is why a pin that needs a manifest change raises `min-box` (see "How box versions
+against the chart"). Versions that exist only for tests (the foreign Gateway scenario,
+the local registry, Pebble) stay in the scripts, pinned by digest and watched by
+Renovate too.
 
 ### The cluster itself (decided)
 
@@ -741,12 +856,12 @@ reason instead of a stack trace.
 
 ## Open questions
 
-- **Apps with no base URL** (Seerr/Overseerr, likely Plex's web app). The chart routes
-  them under `/<name>` with a prefix rewrite. That keeps the API answering, which is
-  all the e2e checks, but a UI that writes absolute asset paths breaks under a prefix.
-  The likely fix is a subdomain for those apps (`seerr.<domain>`), which puts more
-  host names in the grant and needs DNS and certificates for each one, or a wildcard.
 - `migrate` sources: bare-metal swizzin, Docker, an existing Kubernetes stack. Proposed:
   one command that detects the source, since the hard part (rewriting paths in the Arr
   databases, carrying qBittorrent's state) is the same for all of them.
 - Who assigns the torrent port with multiple users (see Scopes).
+- **A user's route under an Arr's `/api` or `/ping`.** Those paths skip the login because
+  the Arr checks its own key, but a user's own HTTPRoute under one of them (a longer
+  prefix, pointing at another app) is the more specific route and is served without a
+  login. The chart's own routes use these paths, so refusing them the way `/auth` is
+  refused would break it.

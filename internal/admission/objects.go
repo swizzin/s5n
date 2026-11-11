@@ -9,7 +9,7 @@ import (
 )
 
 // Docs is what one grant renders to, in apply order: the params object, then
-// the binding for the image policy, then the binding for the Service policy.
+// the bindings, one per policy the grant is held to.
 type Docs struct {
 	// Source names the variants file the blessed list came from. It is only
 	// the generated-from note on the first object; empty writes no note.
@@ -56,10 +56,12 @@ type Binding struct {
 // BindingSpec is the subset of a binding's spec this package writes. Anything
 // else would be a selector root did not decide.
 type BindingSpec struct {
-	PolicyName        string         `yaml:"policyName"`
-	ValidationActions []string       `yaml:"validationActions"`
-	ParamRef          ParamRef       `yaml:"paramRef"`
-	MatchResources    MatchResources `yaml:"matchResources"`
+	PolicyName        string   `yaml:"policyName"`
+	ValidationActions []string `yaml:"validationActions"`
+	// ParamRef is nil for a policy that reads no params: the login policy is
+	// a constant rule, so binding it must not point at a ConfigMap.
+	ParamRef       *ParamRef      `yaml:"paramRef,omitempty"`
+	MatchResources MatchResources `yaml:"matchResources"`
 }
 
 // ParamRef says which object is the policy's params. parameterNotFoundAction
@@ -106,7 +108,17 @@ const labelSelectorKey = "kubernetes.io/metadata.name"
 // Split from Render so the shape is testable without re-deriving the list.
 func grantDocs(repos []string, g Grant) Docs {
 	name := "s5n-grant-" + g.Namespace
-	binding := func(bindingName, policy string) Binding {
+	binding := func(bindingName, policy string, withParams bool) Binding {
+		var params *ParamRef
+		if withParams {
+			params = &ParamRef{
+				// The policies that read the grant's params read the one
+				// object; a binding's own name is not it.
+				Name:                    name,
+				Namespace:               ParamsNamespace,
+				ParameterNotFoundAction: "Deny",
+			}
+		}
 		return Binding{
 			APIVersion: "admissionregistration.k8s.io/v1",
 			Kind:       "ValidatingAdmissionPolicyBinding",
@@ -117,13 +129,7 @@ func grantDocs(repos []string, g Grant) Docs {
 			Spec: BindingSpec{
 				PolicyName:        policy,
 				ValidationActions: []string{"Deny"},
-				ParamRef: ParamRef{
-					// Both bindings read the same params object; the service
-					// binding's own name is not it.
-					Name:                    name,
-					Namespace:               ParamsNamespace,
-					ParameterNotFoundAction: "Deny",
-				},
+				ParamRef:          params,
 				MatchResources: MatchResources{
 					NamespaceSelector: LabelSelector{
 						MatchExpressions: []MatchExpression{{
@@ -155,8 +161,16 @@ func grantDocs(repos []string, g Grant) Docs {
 			},
 		},
 		Bindings: []Binding{
-			binding(name, "s5n-blessed-images"),
-			binding(name+"-service", "s5n-granted-service"),
+			binding(name, "s5n-blessed-images", true),
+			binding(name+"-service", "s5n-granted-service", true),
+			// The login is root's, and a namespace-scoped kubeconfig with
+			// namespace-admin rights could otherwise delete or replace the
+			// SecurityPolicy and route around it. The policy needs no params:
+			// it refuses the writes outright.
+			binding(name+"-login", "s5n-no-login-changes", false),
+			// Neither does this one: Authelia serves /auth without a login,
+			// and Gateway API would give a more specific route the request.
+			binding(name+"-auth-route", "s5n-no-auth-routes", false),
 		},
 	}
 }

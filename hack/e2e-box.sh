@@ -36,6 +36,13 @@
 #                 cluster, naming the class and its controller, and write
 #                 nothing: no namespace, no GatewayClass, no record.
 #
+# The login is part of every install: bootstrap puts one Authelia in
+# s5n-system and one SecurityPolicy on the Gateway, root's `box init` creates
+# the one account, and the fresh scenario then proves the whole flow with a
+# cookie jar -- an app path redirects to the portal, the portal takes the
+# password, the jar gets in, and the Arrs' own API keys still answer. The
+# preinstalled scenario proves the same redirect on its own host name.
+#
 # The fresh scenario runs Pebble, Let's Encrypt's test ACME server, inside the
 # cluster and points the production issuer at it, so HTTP-01 through the
 # Gateway is proven on every run: Certificate Ready, HTTPS with Pebble's CA, an
@@ -58,22 +65,27 @@ cd "$(dirname "$0")/.."
 
 KIND=${KIND:-kind}
 NS=seedbox
+# The one account the login admits. A generic name: the repo carries no real
+# one, and the e2e's password is generated per run below.
+LOGIN=alice
 IMAGE=ghcr.io/swizzin/s5n:e2e
 # The platform versions box installs are not this script's: they come from
-# install/platform/versions.yaml, printed by hack/versions from the bytes box
-# compiles in, so the plan box prints is asserted against the pin it printed.
+# charts/s5n/platform.yaml, the file the chart release carries, printed by
+# hack/versions through the parser box uses, so the plan box prints is asserted
+# against the pin the release it pulled names.
 # MetalLB's upstream manifest is tagged with a leading "v" while its chart pin
 # has none, so the tag is derived from the one pin.
 pins=$(go run ./hack/versions)
 pin() { printf '%s\n' "$pins" | sed -n "s/^$1=//p"; }
 v_tag() { case "$1" in v*) printf '%s' "$1" ;; *) printf 'v%s' "$1" ;; esac; }
-for pin_key in k0s envoyGateway metallb certManager; do
+for pin_key in authelia k0s envoyGateway metallb certManager; do
   [ -n "$(pin "$pin_key")" ] || {
-    echo "install/platform/versions.yaml has no ${pin_key} pin"
+    echo "charts/s5n/platform.yaml has no ${pin_key} pin"
     exit 1
   }
 done
 ENVOY_GATEWAY_VERSION=$(pin envoyGateway)
+AUTHELIA_IMAGE=$(pin authelia)
 METALLB_CHART_VERSION=$(pin metallb)
 CERT_MANAGER_VERSION=$(pin certManager)
 METALLB_VERSION=${METALLB_VERSION:-$(v_tag "$(pin metallb)")}
@@ -220,6 +232,15 @@ built=$("$WORK/box" version)
 }
 $KIND get kubeconfig --name "$CLUSTER" >"$WORK/kubeconfig"
 
+# The login's password: generated per run, written where only `box init`
+# reads it (--password-file), and asserted never to appear in box's output.
+# The node's users database is seeded from the same file, because
+# --paths-in-node means the host path is inside the test node and box cannot
+# write there: hack/authelia-users is the same internal/authelia code box uses.
+AUTHELIA_PASSWORD=$(openssl rand -hex 16)
+printf '%s\n' "$AUTHELIA_PASSWORD" >"$WORK/authelia-password"
+chmod 600 "$WORK/authelia-password"
+
 # Only what `box init` creates on a real host, and only because --paths-in-node
 # keeps it from touching this node itself: the two volume roots and one
 # /config/<instance> directory per enabled app (setup.settingsDirs). The data
@@ -231,6 +252,21 @@ docker exec "${CLUSTER}-control-plane" bash -c '
   mkdir -p /srv/s5n/data \
            /srv/s5n/config/{qbittorrent,prowlarr,sonarr,sonarr-4k,radarr,radarr-4k,plex,tautulli,seerr}
   chown -R 1000:1000 /srv/s5n'
+
+# The login's own directory, which box init creates on a real host: 0700, owned
+# by the uid the container runs as (65532). The users database goes in before
+# the install because Authelia will not start without it, and box cannot write
+# into the node -- hack/authelia-users writes the same file from the same
+# package, so the row the login verifies is the row box would have written.
+log "seeding the login's state directory in the node (0700, uid 65532)"
+go run ./hack/authelia-users --login "$LOGIN" --password-file "$WORK/authelia-password" --out "$WORK/users_database.yml"
+docker exec -i "${CLUSTER}-control-plane" bash -c '
+  mkdir -p /var/lib/s5n/authelia
+  cat >/var/lib/s5n/authelia/users_database.yml
+  chown -R 65532:65532 /var/lib/s5n/authelia
+  chmod 700 /var/lib/s5n/authelia
+  chmod 600 /var/lib/s5n/authelia/users_database.yml
+' <"$WORK/users_database.yml"
 
 # Nothing below may prepare the data categories: the wiring Job owns them, and a
 # first install that cannot create its own root folders is the failure this e2e
@@ -280,6 +316,7 @@ bootstrap() { # bootstrap <output file>
     --data-path /srv/s5n/data --config-path /srv/s5n/config \
     --apps qbittorrent,sonarr,radarr,prowlarr,plex,tautulli,seerr \
     --puid 1000 --pgid 1000 \
+    --login "$LOGIN" --password-file "$WORK/authelia-password" \
     --paths-in-node --record "$WORK/cluster.yaml" \
     --kubeconfig "$WORK/kubeconfig" >"$1" 2>&1
 }
@@ -298,6 +335,7 @@ init() { # init <output file>
     --data-path /srv/s5n/data --config-path /srv/s5n/config \
     --apps qbittorrent,sonarr,radarr,prowlarr,plex,tautulli,seerr \
     --puid 1000 --pgid 1000 \
+    --login "$LOGIN" --password-file "$WORK/authelia-password" \
     --paths-in-node \
     --kubeconfig "$WORK/kubeconfig" >"$1" 2>&1
 }
@@ -704,6 +742,248 @@ print("  app routes: %d HTTPRoutes, none pins a sectionName" % len(items))
   grep -qi "^location: https://${DOMAIN}/sonarr/ping" "$WORK/http-headers" ||
     { echo "the redirect does not point at HTTPS"; fail=1; }
 
+  # ---- the login: root's seedbox is behind Authelia --------------------------
+  # The SecurityPolicy targets the Gateway itself, so every listener and every
+  # route asks Authelia first -- including the shared port-80 listener, which is
+  # what keeps an app from ever being served unauthenticated over plain HTTP.
+  # These assertions are the whole flow: redirect, portal, password, cookie,
+  # and the paths that carry their own credentials.
+  log "the login: an unauthenticated app path redirects to the portal"
+  authelia_pod=$($K -n s5n-system get pod -l app.kubernetes.io/name=authelia -o jsonpath='{.items[0].metadata.name}' || true)
+  authelia_uid=$($K -n s5n-system get pod -l app.kubernetes.io/name=authelia -o jsonpath='{.items[0].metadata.uid}' || true)
+  authelia_runas=$($K -n s5n-system get deploy authelia -o jsonpath='{.spec.template.spec.securityContext.runAsUser}' || true)
+  authelia_image=$($K -n s5n-system get deploy authelia -o jsonpath='{.spec.template.spec.containers[0].image}' || true)
+  policy_target=$($K -n s5n-gateway get securitypolicy s5n-authelia -o jsonpath='{.spec.targetRefs[0].kind}/{.spec.targetRefs[0].name}' || true)
+  policy_accepted=$($K -n s5n-gateway get securitypolicy s5n-authelia -o jsonpath='{.status.ancestors[?(@.ancestorRef.name=="s5n")].conditions[?(@.type=="Accepted")].status}' || true)
+  policy_failopen=$($K -n s5n-gateway get securitypolicy s5n-authelia -o jsonpath='{.spec.extAuth.failOpen}' || true)
+  policy_headers=$($K -n s5n-gateway get securitypolicy s5n-authelia -o jsonpath='{.spec.extAuth.headersToExtAuth[*]}' || true)
+  echo "  pod ${authelia_pod} (uid ${authelia_uid}), runAsUser ${authelia_runas}, image ${authelia_image}"
+  echo "  SecurityPolicy -> ${policy_target}, Accepted ${policy_accepted}, failOpen ${policy_failopen}, headers [${policy_headers}]"
+  [ -n "$authelia_pod" ] || { echo "the login has no pod"; fail=1; }
+  [ "$authelia_runas" = 65532 ] || { echo "the login runs as ${authelia_runas}, want 65532"; fail=1; }
+  [ "$authelia_image" = "$AUTHELIA_IMAGE" ] ||
+    { echo "the login runs ${authelia_image}, want the pinned ${AUTHELIA_IMAGE}"; fail=1; }
+  [ "$policy_target" = Gateway/s5n ] ||
+    { echo "the SecurityPolicy targets ${policy_target}, want the Gateway itself"; fail=1; }
+  [ "$policy_accepted" = True ] || { echo "Envoy Gateway never accepted the SecurityPolicy"; fail=1; }
+  [ "$policy_failopen" = false ] || { echo "the SecurityPolicy fails open"; fail=1; }
+  case " ${policy_headers} " in
+    *" cookie "*) ;;
+    *) echo "headersToExtAuth = [${policy_headers}]: without cookie every request is anonymous"; fail=1 ;;
+  esac
+  # The claim and the file: the state is on the host, owned by the login's uid,
+  # and the digest is the one the portal will accept below.
+  for kind in authelia; do
+    pv_phase=$($K get pv s5n-${kind} -o jsonpath='{.status.phase}' || true)
+    pvc_phase=$($K -n s5n-system get pvc s5n-${kind} -o jsonpath='{.status.phase}' || true)
+    pv_path=$($K get pv s5n-${kind} -o jsonpath='{.spec.hostPath.path}' || true)
+    echo "  s5n-${kind}: ${pv_phase} -> ${pvc_phase} (path ${pv_path})"
+    [ "$pv_phase" = Bound ] || fail=1
+    [ "$pvc_phase" = Bound ] || fail=1
+    [ "$pv_path" = /var/lib/s5n/authelia ] || { echo "the login's volume backs ${pv_path}"; fail=1; }
+  done
+  node_owner=$(docker exec "${CLUSTER}-control-plane" stat -c '%u:%g' /var/lib/s5n/authelia 2>/dev/null || echo missing)
+  node_mode=$(docker exec "${CLUSTER}-control-plane" stat -c '%a' /var/lib/s5n/authelia 2>/dev/null || echo missing)
+  echo "  /var/lib/s5n/authelia: owner ${node_owner}, mode ${node_mode}"
+  [ "$node_owner" = 65532:65532 ] || { echo "the login's directory is not owned by its uid"; fail=1; }
+  [ "$node_mode" = 700 ] || { echo "the login's directory is mode ${node_mode}, want 700"; fail=1; }
+  $K -n s5n-system get secret s5n-authelia -o jsonpath='{.data.storage-encryption-key}' >/dev/null 2>&1 ||
+    { echo "the login's storage encryption key is not in s5n-authelia"; fail=1; }
+  # box's own words: it installed the login and reported the policy accepted,
+  # both before the release was written. The step's Label ("installing root's
+  # login") is TUI-only; the plain path prints the Done line, so that is what
+  # the log carries.
+  grep -qF "login ready: s5n-system/authelia, SecurityPolicy s5n-gateway/s5n-authelia accepted" "$WORK/bootstrap1.txt" ||
+    { echo "box did not say it installed the login and accepted its SecurityPolicy"; fail=1; }
+  grep -qF "login: ${LOGIN} at https://${DOMAIN}/auth/" "$WORK/bootstrap1.txt" ||
+    { echo "the final card did not print the login"; fail=1; }
+  if grep -qF "$AUTHELIA_PASSWORD" "$WORK/bootstrap1.txt"; then
+    echo "box printed the password: it is read from --password-file, and the card must not repeat it"
+    fail=1
+  fi
+  # The login is installed before the release: its Done line comes before the
+  # release apply in the transcript. (The step's Label is TUI-only, and the
+  # "first install" line is part of init's plan, printed before any write, so
+  # neither is the thing to look for.)
+  login_line=$(grep -n "login ready:" "$WORK/bootstrap1.txt" | head -1 | cut -d: -f1)
+  release_line=$(grep -n "applied: s5n revision" "$WORK/bootstrap1.txt" | head -1 | cut -d: -f1)
+  echo "  transcript: login at line ${login_line}, release at line ${release_line}"
+  if [ -z "$login_line" ] || [ -z "$release_line" ]; then
+    echo "the transcript does not show both the login and the release"
+    fail=1
+  elif [ "$login_line" -ge "$release_line" ]; then
+    echo "the login was not installed before the release"
+    fail=1
+  fi
+
+  JAR="$WORK/authelia-jar.txt"
+  rm -f "$JAR"
+  unauth_headers="$WORK/unauth-headers.txt"
+  unauth_code=$(curl -sS -o /dev/null -D "$unauth_headers" -w '%{http_code}' \
+    --resolve "${DOMAIN}:443:${gw_addr}" --cacert "$WORK/pebble-root.pem" \
+    "https://${DOMAIN}/sonarr/" 2>"$WORK/unauth.err" || true)
+  unauth_location=$(grep -i '^location:' "$unauth_headers" | tr -d '\r' | sed 's/^[Ll]ocation: *//' || true)
+  echo "  GET https://${DOMAIN}/sonarr/ without a cookie: ${unauth_code} -> ${unauth_location}"
+  [ "$unauth_code" = 302 ] ||
+    { echo "an unauthenticated app path answered ${unauth_code}, not a redirect to the login (sonarr was served open)"; fail=1; }
+  case "$unauth_location" in
+    "https://${DOMAIN}/auth/"*) ;;
+    *) echo "the redirect does not point at the portal: ${unauth_location}"; fail=1 ;;
+  esac
+  case "$unauth_location" in
+    *"rd="*) ;;
+    *) echo "the redirect carries no rd=, so the portal cannot send the browser back"; fail=1 ;;
+  esac
+
+  # Port 80: this host's own listener carries no login (the Allow box writes
+  # with it), so an app URL gets the 301 to HTTPS -- the behaviour a browser,
+  # a bookmark and a renewal need -- and never Sonarr's UI.
+  nl_section=$($K -n s5n-gateway get securitypolicy s5n-no-login-box-example-test -o jsonpath='{.spec.targetRefs[0].sectionName}' || true)
+  nl_action=$($K -n s5n-gateway get securitypolicy s5n-no-login-box-example-test -o jsonpath='{.spec.authorization.defaultAction}' || true)
+  nl_extauth=$($K -n s5n-gateway get securitypolicy s5n-no-login-box-example-test -o jsonpath='{.spec.extAuth}' || true)
+  nl_accepted=$($K -n s5n-gateway get securitypolicy s5n-no-login-box-example-test -o jsonpath='{.status.ancestors[?(@.ancestorRef.sectionName=="http-box-example-test")].conditions[?(@.type=="Accepted")].status}' || true)
+  echo "  port-80 Allow policy: sectionName ${nl_section}, defaultAction ${nl_action}, extAuth [${nl_extauth}], Accepted ${nl_accepted}"
+  [ "$nl_section" = http-box-example-test ] ||
+    { echo "the port-80 Allow targets ${nl_section}, want this host's own listener"; fail=1; }
+  [ "$nl_action" = Allow ] || { echo "the port-80 policy does not allow: ${nl_action}"; fail=1; }
+  [ -z "$nl_extauth" ] || { echo "the port-80 policy still carries extAuth"; fail=1; }
+  [ "$nl_accepted" = True ] || { echo "Envoy Gateway never accepted the port-80 Allow"; fail=1; }
+
+  # Envoy Gateway's own account of the two policies is the proof that the login
+  # was carved out of exactly one listener rather than switched off for the
+  # host: the Gateway-wide policy stays Accepted, and its Overridden condition
+  # names this host's port-80 listener and no HTTPS one.
+  gw_overridden=$($K -n s5n-gateway get securitypolicy s5n-authelia -o jsonpath='{.status.ancestors[?(@.ancestorRef.name=="s5n")].conditions[?(@.type=="Overridden")].status}' || true)
+  gw_override_msg=$($K -n s5n-gateway get securitypolicy s5n-authelia -o jsonpath='{.status.ancestors[?(@.ancestorRef.name=="s5n")].conditions[?(@.type=="Overridden")].message}' || true)
+  echo "  the Gateway-wide login is overridden on: ${gw_override_msg}"
+  [ "$gw_overridden" = True ] ||
+    { echo "Envoy Gateway does not report the Gateway-wide login overridden, so the port-80 Allow is not taking effect"; fail=1; }
+  case "$gw_override_msg" in
+    *"s5n-gateway/s5n/http-box-example-test"*) ;;
+    *) echo "the login is not overridden on s5n-gateway/s5n/http-box-example-test: ${gw_override_msg}"; fail=1 ;;
+  esac
+  case "$gw_override_msg" in
+    *"https-box-example-test"*) echo "the login is overridden on an HTTPS listener too: ${gw_override_msg}"; fail=1 ;;
+  esac
+  http_unauth=$(curl -sS -o "$WORK/port80-body" -D "$WORK/port80-headers" -w '%{http_code}' \
+    --resolve "${DOMAIN}:80:${gw_addr}" "http://${DOMAIN}/sonarr/" 2>/dev/null || true)
+  http_unauth_location=$(grep -i '^location:' "$WORK/port80-headers" | tr -d '\r' | sed 's/^[Ll]ocation: *//' || true)
+  echo "  GET http://${DOMAIN}/sonarr/ (port 80) without a cookie: ${http_unauth} -> ${http_unauth_location}"
+  [ "$http_unauth" = 301 ] ||
+    { echo "port 80 answered ${http_unauth} for an app path: it must redirect to HTTPS, not ask for a login or serve Sonarr"; fail=1; }
+  [ "$http_unauth_location" = "https://${DOMAIN}/sonarr/" ] ||
+    { echo "port 80 redirected to ${http_unauth_location}"; fail=1; }
+  if grep -qi '<title>Sonarr' "$WORK/port80-body"; then
+    echo "port 80 served Sonarr's UI in plaintext"
+    fail=1
+  fi
+
+  # The other half: the shared generic http listener keeps the login, so a host
+  # with no certificate of its own is not served and is not redirected into
+  # someone else's name either. The shared listener has no hostname, so any
+  # Host that this host's listener does not match lands on it. With no route at
+  # all for that Host the router answers 404 -- Envoy Gateway attaches ext_authz
+  # per route, so there is nothing for the login to guard, and nothing of
+  # Sonarr's is served. The assertion below this one adds a route for a
+  # certificate-less host and gets the login's own refusal, which is the half
+  # that matters.
+  shared_code=$(curl -sS -o "$WORK/shared-body" -w '%{http_code}' \
+    --resolve "other.example.test:80:${gw_addr}" "http://other.example.test/sonarr/" 2>/dev/null || true)
+  echo "  GET http://other.example.test/sonarr/ (the shared listener, no certificate): ${shared_code}"
+  case "$shared_code" in
+    404) ;;
+    *) echo "the shared port-80 listener answered ${shared_code} for a host with no route and no certificate: want the router's 404, not an app"; fail=1 ;;
+  esac
+  if grep -qi '<title>Sonarr' "$WORK/shared-body"; then
+    echo "the shared listener served Sonarr to a host with no certificate"
+    fail=1
+  fi
+
+  # The portal is the login page, and its assets resolve under /auth/ (the
+  # server mounts the configured path and the root; the browser only ever uses
+  # the former).
+  portal_code=$(curl -sS -o "$WORK/portal.html" -w '%{http_code}' \
+    --resolve "${DOMAIN}:443:${gw_addr}" --cacert "$WORK/pebble-root.pem" \
+    "https://${DOMAIN}/auth/" 2>"$WORK/portal.err" || true)
+  echo "  GET https://${DOMAIN}/auth/: ${portal_code} ($(wc -c <"$WORK/portal.html" 2>/dev/null || echo 0) bytes)"
+  [ "$portal_code" = 200 ] || { echo "the portal did not answer 200"; fail=1; }
+  grep -q 'manifest.json' "$WORK/portal.html" || { echo "the portal is not Authelia's HTML"; fail=1; }
+  asset_code=$(curl -sS -o /dev/null -w '%{http_code}' \
+    --resolve "${DOMAIN}:443:${gw_addr}" --cacert "$WORK/pebble-root.pem" \
+    "https://${DOMAIN}/auth/manifest.json" 2>/dev/null || true)
+  echo "  GET https://${DOMAIN}/auth/manifest.json: ${asset_code}"
+  [ "$asset_code" = 200 ] || { echo "the portal's assets do not resolve under /auth/"; fail=1; }
+
+  # The password: the digest in the node's users database is the one this
+  # password hashes to, and the portal sets a session cookie for it.
+  login_json=$(printf '{"username":"%s","password":"%s","targetURL":"https://%s/sonarr/"}' \
+    "$LOGIN" "$AUTHELIA_PASSWORD" "$DOMAIN")
+  ff_headers="$WORK/firstfactor-headers.txt"
+  ff_code=$(curl -sS -o "$WORK/firstfactor.json" -D "$ff_headers" -w '%{http_code}' \
+    -c "$JAR" -X POST "https://${DOMAIN}/auth/api/firstfactor" \
+    --resolve "${DOMAIN}:443:${gw_addr}" --cacert "$WORK/pebble-root.pem" \
+    -H 'Content-Type: application/json' --data "$login_json" 2>"$WORK/firstfactor.err" || true)
+  echo "  POST /auth/api/firstfactor: ${ff_code}"
+  [ "$ff_code" = 200 ] || { echo "the login did not accept the password (${ff_code})"; sed -n 1,3p "$WORK/firstfactor.json" || true; fail=1; }
+  grep -qi 'set-cookie: authelia_session=' "$ff_headers" ||
+    { echo "no authelia_session cookie was set"; fail=1; }
+
+  # A wrong password is refused, once: never a retry loop (Authelia bans an
+  # address after a handful of failures, which would fail the rest of this run
+  # for the wrong reason).
+  wrong_code=$(curl -sS -o /dev/null -w '%{http_code}' -X POST "https://${DOMAIN}/auth/api/firstfactor" \
+    --resolve "${DOMAIN}:443:${gw_addr}" --cacert "$WORK/pebble-root.pem" \
+    -H 'Content-Type: application/json' \
+    --data "$(printf '{"username":"%s","password":"not-the-password","targetURL":"https://%s/sonarr/"}' "$LOGIN" "$DOMAIN")" \
+    2>/dev/null || true)
+  echo "  POST /auth/api/firstfactor with a wrong password: ${wrong_code}"
+  [ "$wrong_code" = 401 ] || { echo "a wrong password answered ${wrong_code}, want 401 from the portal"; fail=1; }
+
+  # With the jar: the app itself, and the two prefixes that carry their own
+  # credentials and must never be redirected.
+  authed_code=$(curl -sS -o "$WORK/sonarr-authed.html" -w '%{http_code}' \
+    -b "$JAR" --resolve "${DOMAIN}:443:${gw_addr}" --cacert "$WORK/pebble-root.pem" \
+    "https://${DOMAIN}/sonarr/" 2>/dev/null || true)
+  echo "  GET https://${DOMAIN}/sonarr/ with the session: ${authed_code}"
+  [ "$authed_code" = 200 ] || { echo "the login did not give access to Sonarr (${authed_code})"; fail=1; }
+  grep -qi '<title>Sonarr' "$WORK/sonarr-authed.html" ||
+    { echo "the 200 was not Sonarr's page: the cookie may not be in scope"; fail=1; }
+  api_code=$(curl -sS -o /dev/null -w '%{http_code}' \
+    --resolve "${DOMAIN}:443:${gw_addr}" --cacert "$WORK/pebble-root.pem" \
+    "https://${DOMAIN}/sonarr/api/v3/system/status" 2>/dev/null || true)
+  ping_code=$(curl -sS -o /dev/null -w '%{http_code}' \
+    --resolve "${DOMAIN}:443:${gw_addr}" --cacert "$WORK/pebble-root.pem" \
+    "https://${DOMAIN}/sonarr/ping" 2>/dev/null || true)
+  echo "  without a cookie: /sonarr/api/v3/system/status ${api_code}, /sonarr/ping ${ping_code}"
+  [ "$api_code" = 401 ] ||
+    { echo "the API without a key answered ${api_code}: it must be Sonarr's own 401, not the login's redirect (the API bypass is missing)"; fail=1; }
+  [ "$ping_code" = 200 ] || { echo "/sonarr/ping answered ${ping_code}: the ping bypass is missing"; fail=1; }
+
+  # Path normalisation: Envoy normalises the request path before its filters
+  # run (normalize_path is on by default and Envoy Gateway sets it explicitly),
+  # so /sonarr/api/../ is a request for / -- not the API, and not a bypass.
+  # An escaped dot is not a path separator: %2e%2e stays on the wire and the
+  # API prefix matches. What matters either way is that no app page is served
+  # without the login, so both are asserted against the UI, and the first
+  # against the redirect.
+  dotdot_code=$(curl -sS --path-as-is -o "$WORK/dotdot.html" -D "$WORK/dotdot-headers" -w '%{http_code}' \
+    --resolve "${DOMAIN}:443:${gw_addr}" --cacert "$WORK/pebble-root.pem" \
+    "https://${DOMAIN}/sonarr/api/../" 2>/dev/null || true)
+  escaped_code=$(curl -sS --path-as-is -o "$WORK/escaped.html" -w '%{http_code}' \
+    --resolve "${DOMAIN}:443:${gw_addr}" --cacert "$WORK/pebble-root.pem" \
+    "https://${DOMAIN}/sonarr/api/%2e%2e/" 2>/dev/null || true)
+  echo "  --path-as-is /sonarr/api/../: ${dotdot_code}; /sonarr/api/%2e%2e/: ${escaped_code}"
+  [ "$dotdot_code" = 302 ] ||
+    { echo "/sonarr/api/../ answered ${dotdot_code}: Envoy did not normalise it to /, so the login did not run"; fail=1; }
+  if grep -qi '<title>Sonarr' "$WORK/dotdot.html"; then
+    echo "/sonarr/api/../ served Sonarr's UI"
+    fail=1
+  fi
+  if [ "$escaped_code" = 200 ] && grep -qi '<title>Sonarr' "$WORK/escaped.html"; then
+    echo "/sonarr/api/%2e%2e/ served Sonarr's UI through the API bypass"
+    fail=1
+  fi
+
   # The challenge path is not asserted here: cert-manager's solver HTTPRoute
   # exists only while an order is pending, so after issuance that path is the
   # redirect's. The renewal below observes the solver route while it exists.
@@ -838,7 +1118,194 @@ for r in items:
   [ "$ns_enforce" = restricted ] || { echo "the namespace does not enforce restricted"; fail=1; }
   [ "$ns_audit" = restricted ] || { echo "the namespace does not audit restricted"; fail=1; }
   [ "$ns_warn" = restricted ] || { echo "the namespace does not warn restricted"; fail=1; }
-  [ "$ns_manager" = box ] || { echo "the namespace is not labelled managed-by box"; fail=1; }
+  # ---- admission: a seedbox namespace may not touch the login ----------------
+  # The login lives in s5n-system and the policy on the Gateway, but a
+  # namespace-scoped kubeconfig can still write a SecurityPolicy in its own
+  # namespace -- and Envoy Gateway lets a route-targeted policy override the
+  # Gateway-level one, which is a working bypass. The bindings root creates at
+  # adduser are what refuse it; hack/render-grant is the same renderer box uses.
+  log "admission: the login cannot be removed or overridden from ${NS}"
+  go run ./hack/render-grant charts/s5n "$NS" 31111 NodePort | $K apply -f - >/dev/null
+  $K apply -f - >/dev/null <<EOF
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: box-user
+  namespace: ${NS}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: box-user
+  namespace: ${NS}
+rules:
+  - apiGroups: ["*"]
+    resources: ["*"]
+    verbs: ["*"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: box-user
+  namespace: ${NS}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: box-user
+subjects:
+  - kind: ServiceAccount
+    name: box-user
+    namespace: ${NS}
+EOF
+  SA="system:serviceaccount:${NS}:box-user"
+  denied=""
+  # The object has to be one the API server would otherwise accept: the CRD's
+  # schema is checked before any admission policy, so a fixture missing extAuth's
+  # http block is refused for being malformed and never reaches the policy that
+  # is under test. This one is a working bypass (extAuth to the login, failing
+  # open); only the grant's admission policy stands between a seedbox user and
+  # the login.
+  for i in $(seq 1 30); do
+    if ! $K --as="$SA" -n "$NS" create --dry-run=server -f - >"$WORK/login-deny.txt" 2>&1 <<'EOF'
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: SecurityPolicy
+metadata:
+  name: e2e-bypass
+spec:
+  targetRefs:
+    - group: gateway.networking.k8s.io
+      kind: HTTPRoute
+      name: sonarr
+  extAuth:
+    failOpen: true
+    http:
+      backendRefs:
+        - name: authelia
+          namespace: s5n-system
+          port: 9091
+      path: /api/authz/ext-authz/
+EOF
+    then
+      grep -q "the login in front of the Gateway is root's" "$WORK/login-deny.txt" && { denied=yes; break; }
+    fi
+    sleep 1
+  done
+  echo "  a SecurityPolicy create in ${NS} as the user: ${denied:-allowed}"
+  [ "$denied" = yes ] || {
+    cat "$WORK/login-deny.txt" 2>/dev/null || true
+    echo "a seedbox user could write a SecurityPolicy over the login"
+    fail=1
+  }
+
+  # ---- admission: a route may not reach the sign-in path ---------------------
+  # Authelia serves ^/auth without a login and Gateway API gives the request to
+  # the most specific route, so a user's own HTTPRoute under /auth on their
+  # host would be served unauthenticated. The binding refuses the write.
+  log "admission: a route under /auth cannot be created from ${NS}"
+  # The fixture is a route the API server would otherwise accept: a parentRef
+  # to the Gateway and one backend. The path is the only thing under test.
+  httproute() { # <name> <type> <path>
+    cat <<EOF
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: $1
+spec:
+  parentRefs:
+    - name: s5n
+      namespace: s5n-gateway
+  rules:
+    - matches:
+        - path:
+            type: $2
+            value: "$3"
+      backendRefs:
+        - name: sonarr
+          port: 8989
+EOF
+  }
+  # The binding lands a moment after the grant is applied: a dry-run admitted
+  # while it is still missing is retried, not reported as a pass.
+  deny_route() { # <name> <type> <path> <message> <out>
+    local name=$1 type=$2 path=$3 want=$4 out=$5
+    : >"$out"
+    for _ in $(seq 1 30); do
+      if httproute "$name" "$type" "$path" |
+        $K --as="$SA" -n "$NS" create --dry-run=server -f - >"$out" 2>&1; then
+        sleep 1
+        continue
+      fi
+      grep -q "$want" "$out"
+      return
+    done
+    return 1
+  }
+  allow_route() { # <namespace> <name> <type> <path> <out>
+    httproute "$2" "$3" "$4" |
+      $K --as="$SA" -n "$1" create --dry-run=server -f - >"$5" 2>&1
+  }
+  auth_case() { # <label> <name> <type> <path> <message>
+    if deny_route "$2" "$3" "$4" "$5" "$WORK/auth-$2.txt"; then
+      echo "  $1: denied ($(sed -n 's/.*denied request: //p' "$WORK/auth-$2.txt" | head -1))"
+    else
+      echo "  $1: admitted, or refused for another reason"
+      cat "$WORK/auth-$2.txt" || true
+      fail=1
+    fi
+  }
+  auth_case "PathPrefix /auth/x" e2e-auth-prefix PathPrefix /auth/x \
+    "s5n: /auth is root's sign-in path; a seedbox route may not match it"
+  auth_case "Exact /auth" e2e-auth-exact Exact /auth \
+    "s5n: /auth is root's sign-in path; a seedbox route may not match it"
+  auth_case "RegularExpression /a.th/.*" e2e-auth-regex RegularExpression "/a.th/.*" \
+    "may not use a RegularExpression path"
+  # The CRD allows %61 (it refuses only %2f and dot segments), so this one
+  # reaches the policy; if a future CRD refuses it first, this case says which
+  # layer refused instead of asserting the policy's message.
+  auth_case "PathPrefix /%61uth/x" e2e-auth-percent PathPrefix "/%61uth/x" \
+    "may not use a percent-encoded path"
+  if allow_route "$NS" e2e-auth-neighbour PathPrefix /authx "$WORK/auth-neighbour.txt"; then
+    echo "  PathPrefix /authx: admitted"
+  else
+    echo "  PathPrefix /authx: refused"
+    cat "$WORK/auth-neighbour.txt" || true
+    fail=1
+  fi
+  # The policy is bound to one namespace, not installed cluster-wide: the same
+  # route in a namespace with no binding is admitted.
+  $K create namespace s5n-e2e-unbound --dry-run=client -o yaml | $K apply -f - >/dev/null
+  $K apply -f - >/dev/null <<EOF
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: box-user
+  namespace: s5n-e2e-unbound
+rules:
+  - apiGroups: ["gateway.networking.k8s.io"]
+    resources: ["httproutes"]
+    verbs: ["create"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: box-user
+  namespace: s5n-e2e-unbound
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: box-user
+subjects:
+  - kind: ServiceAccount
+    name: box-user
+    namespace: ${NS}
+EOF
+  if allow_route s5n-e2e-unbound e2e-auth-unbound PathPrefix /auth/x "$WORK/auth-unbound.txt"; then
+    echo "  PathPrefix /auth/x in an unbound namespace: admitted"
+  else
+    echo "  an unbound namespace refused /auth/x: the policy is not scoped"
+    cat "$WORK/auth-unbound.txt" || true
+    fail=1
+  fi
 
   # Zero writes includes the storage: the same resourceVersions after apply 2.
   storage_before=$(storage_state)
@@ -867,7 +1334,7 @@ for r in items:
     echo "l2=$($K -n metallb-system get l2advertisement s5n-l2 -o json | platform_spec)"
     echo "issuer-le=$($K get clusterissuer s5n-letsencrypt -o json | platform_spec)"
     echo "issuer-ss=$($K get clusterissuer s5n-selfsigned -o json | platform_spec)"
-    for p in s5n-blessed-images s5n-granted-service; do
+    for p in s5n-blessed-images s5n-granted-service s5n-no-login-changes s5n-no-auth-routes; do
       echo "vap-${p}=$($K get validatingadmissionpolicy "$p" -o json | platform_spec)"
     done
     echo "s5n-system=$($K get namespace s5n-system -o json | platform_spec)"
@@ -878,9 +1345,10 @@ for r in items:
 
   # The second bootstrap re-applies gateway.yaml under manager box while the
   # Certificate is already Ready, so the TLS half re-applies this host's two
-  # listeners. Under the old design that re-opened the shared listener between
-  # the two writes and served /sonarr/ in plaintext. Poll the app path through
-  # the whole run: every answer must be the redirect, never the app.
+  # listeners and their Allow. Under the old design that re-opened the shared
+  # listener between the two writes and served /sonarr/ in plaintext. Poll the
+  # app path through the whole run: every sample is the 301 to HTTPS, and none
+  # may ever be the app.
   port80_window="$WORK/port80-window.log"
   : >"$port80_window"
   rm -f "$WORK/port80-stop"
@@ -904,11 +1372,11 @@ for r in items:
   wait "$port80_poll" || true
   port80_samples=$(grep -c . "$port80_window" || true)
   port80_200=$(grep -cx 200 "$port80_window" || true)
-  port80_301=$(grep -cx 301 "$port80_window" || true)
+  port80_redirect=$(grep -cx 301 "$port80_window" || true)
   port80_other=$(grep -vxE '301|000' "$port80_window" | grep -c . || true)
-  echo "  port 80 during the second bootstrap: ${port80_samples} samples, ${port80_301} x 301, ${port80_200} x 200, ${port80_other} other"
+  echo "  port 80 during the second bootstrap: ${port80_samples} samples, ${port80_redirect} x 301, ${port80_200} x 200, ${port80_other} other"
   [ "$port80_samples" -gt 0 ] || { echo "the second bootstrap was too quick to sample port 80"; fail=1; }
-  [ "$port80_301" -gt 0 ] || { echo "port 80 never answered 301 during the second bootstrap"; fail=1; }
+  [ "$port80_redirect" -gt 0 ] || { echo "port 80 never redirected an app path during the second bootstrap"; fail=1; }
   if [ "$port80_200" != 0 ]; then
     echo "port 80 served the app in plaintext during the second bootstrap:"
     grep -n '^200$' "$port80_window" | head -5 || true
@@ -943,6 +1411,20 @@ for r in items:
   grep -q "already says this" "$WORK/bootstrap2.txt" || { echo "the second init did not say the grant was already right"; fail=1; }
   grep -q "nothing to change" "$WORK/bootstrap2.txt" || { echo "the second init did not say nothing to change"; fail=1; }
   no_probe_service
+  # The login is a second object set box owns, and it must be as still as the
+  # platform: the second run re-renders the same configuration, the same pod
+  # template annotation, and the same SecurityPolicy. A restarted pod would be
+  # a changed hash, so its uid is the assertion; the session cookie from before
+  # the run is the user-visible half of the same fact.
+  authelia_uid_after=$($K -n s5n-system get pod -l app.kubernetes.io/name=authelia -o jsonpath='{.items[0].metadata.uid}' || true)
+  echo "  login pod uid: ${authelia_uid} -> ${authelia_uid_after}"
+  [ "$authelia_uid_after" = "$authelia_uid" ] ||
+    { echo "the second bootstrap restarted the login (a changed configuration rolls the pod)"; fail=1; }
+  session_after=$(curl -sS -o /dev/null -w '%{http_code}' -b "$JAR" \
+    --resolve "${DOMAIN}:443:${gw_addr}" --cacert "$WORK/pebble-root.pem" \
+    "https://${DOMAIN}/sonarr/" 2>/dev/null || true)
+  echo "  the session from before the second bootstrap: ${session_after}"
+  [ "$session_after" = 200 ] || { echo "the second bootstrap logged everyone out"; fail=1; }
 
   platform_after=$(platform_state)
   if [ "$platform_after" != "$platform_before" ]; then
@@ -967,15 +1449,17 @@ for r in items:
     { echo "the second bootstrap narrowed the shared http listener (from ${http_after})"; fail=1; }
 
   # Which manager owns which listener, read from the Gateway's own
-  # managedFields: box owns the generic http listener and nothing else; the
-  # host's manager owns exactly its http-<host> and https-<host>. No field is
-  # owned by two box managers, so no bootstrap can flip one under the other.
+  # managedFields: box owns the generic http listener and nothing else; this
+  # host's port-80 listener and its HTTPS one have a manager each, so an apply
+  # that names one can never remove the other. No field is owned by two box
+  # managers, so no bootstrap can flip one under the other.
   $K -n s5n-gateway get gateway s5n -o json --show-managed-fields | python3 -c '
 import json, sys
 g = json.load(sys.stdin)
 want = {
     "box": {"http"},
-    "box-tls-box-example-test": {"http-box-example-test", "https-box-example-test"},
+    "box-tls-box-example-test-http": {"http-box-example-test"},
+    "box-tls-box-example-test-https": {"https-box-example-test"},
 }
 got = {}
 for entry in g["metadata"].get("managedFields") or []:
@@ -1002,17 +1486,22 @@ for manager, names in got.items():
 ' || { echo "the Gateway's listeners are not owned one-manager-each"; fail=1; }
 
   # After the re-apply, the app path on this host's port 80 is still the
-  # redirect. A different host name with no certificate still reaches the
-  # generic listener: its route is admitted from the seedbox namespace, and
-  # nothing narrowed the shared listener. (This box's app routes are host-scoped
+  # redirect, and the Allow that makes it work is still there. A different host
+  # name with no certificate still reaches the generic listener, where the login
+  # is: its route attaches there, and Authelia refuses the plain-HTTP target
+  # outright (400, before it reads any rule) -- so not even /ping answers, and
+  # certainly no app. That is what the shared listener is for: a host without a
+  # certificate stays closed on port 80. (This box's app routes are host-scoped
   # to its own domain, so the test writes the route a second, certificate-less
   # box would own.)
   http_code=$(curl -sS -D "$WORK/http-headers2" -o /dev/null -w '%{http_code}' \
     --resolve "${DOMAIN}:80:${gw_addr}" "http://${DOMAIN}/sonarr/" || true)
   echo "  HTTP ${DOMAIN}/sonarr/ after the second bootstrap: ${http_code}"
-  [ "$http_code" = 301 ] || { echo "an app path on port 80 was not redirected after the second bootstrap"; fail=1; }
+  [ "$http_code" = 301 ] || { echo "an app path on port 80 answered ${http_code} after the second bootstrap, want the 301"; fail=1; }
   grep -qi "^location: https://${DOMAIN}/sonarr/" "$WORK/http-headers2" ||
     { echo "the redirect after the second bootstrap does not point at HTTPS"; fail=1; }
+  nl_after=$($K -n s5n-gateway get securitypolicy s5n-no-login-box-example-test -o jsonpath='{.spec.authorization.defaultAction}' 2>/dev/null || true)
+  [ "$nl_after" = Allow ] || { echo "the second bootstrap removed the port-80 Allow"; fail=1; }
   $K apply -f - >/dev/null <<'EOF'
 apiVersion: gateway.networking.k8s.io/v1
 kind: HTTPRoute
@@ -1038,12 +1527,12 @@ EOF
   for i in $(seq 1 30); do
     other_code=$(curl -sS -o /dev/null -w '%{http_code}' \
       --resolve "other.example.test:80:${gw_addr}" "http://other.example.test/sonarr/ping" || true)
-    [ "$other_code" = 200 ] && break
+    [ "$other_code" = 400 ] && break
     sleep 1
   done
   echo "  HTTP other.example.test/sonarr/ping (no certificate): ${other_code}"
-  [ "$other_code" = 200 ] ||
-    { echo "a host with no certificate is not served on plain HTTP by the generic listener"; fail=1; }
+  [ "$other_code" = 400 ] ||
+    { echo "a host with no certificate answered ${other_code} on plain HTTP: the login must refuse its route (400, an http target) rather than serve it"; fail=1; }
   $K -n "$NS" delete httproute e2e-other-host --ignore-not-found >/dev/null || fail=1
   [ "$(sha256sum "$WORK/grant.yaml" | cut -d' ' -f1)" = "$grant_before2" ] ||
     { echo "the second bootstrap rewrote the grant"; fail=1; }
@@ -1334,6 +1823,28 @@ PY
     --resolve "${DOMAIN}:80:${lb_addr}" "http://${DOMAIN}/sonarr/ping" || true)
   echo "  HTTP ${DOMAIN}/sonarr/ping: ${http_code}"
   [ "$http_code" = 301 ] || { echo "an app path on port 80 was not redirected"; fail=1; }
+  # The same on the app root: the host's port-80 listener carries no login, so
+  # the UI path gets the 301 rather than the portal's refusal.
+  http_ui=$(curl -sS -D "$WORK/preinstalled-http-headers" -o /dev/null -w '%{http_code}' \
+    --resolve "${DOMAIN}:80:${lb_addr}" "http://${DOMAIN}/sonarr/" || true)
+  echo "  HTTP ${DOMAIN}/sonarr/: ${http_ui}"
+  [ "$http_ui" = 301 ] || { echo "an app UI path on port 80 answered ${http_ui}, want the 301"; fail=1; }
+  grep -qi "^location: https://${DOMAIN}/sonarr/" "$WORK/preinstalled-http-headers" ||
+    { echo "the port-80 redirect on this host does not point at HTTPS"; fail=1; }
+
+  # Every scenario installs the login, so the app UI is never served to an
+  # unauthenticated request: no cookie means the portal, on this host's own
+  # name and its self-signed certificate.
+  unauth_headers="$WORK/preinstalled-unauth-headers.txt"
+  unauth_code=$(curl -sS -k -o /dev/null -D "$unauth_headers" -w '%{http_code}' \
+    --resolve "${DOMAIN}:443:${lb_addr}" "https://${DOMAIN}/sonarr/" 2>/dev/null || true)
+  unauth_location=$(grep -i '^location:' "$unauth_headers" | tr -d '\r' | sed 's/^[Ll]ocation: *//' || true)
+  echo "  GET https://${DOMAIN}/sonarr/ without a cookie: ${unauth_code} -> ${unauth_location}"
+  [ "$unauth_code" = 302 ] || { echo "an unauthenticated app path answered ${unauth_code}"; fail=1; }
+  case "$unauth_location" in
+    "https://${DOMAIN}/auth/"*) ;;
+    *) echo "the redirect does not point at the portal: ${unauth_location}"; fail=1 ;;
+  esac
 
   $K -n "$NS" wait --for=condition=Ready pod -l 'app.kubernetes.io/instance=s5n,s5n.io/app' --timeout=300s || fail=1
 
@@ -1349,7 +1860,7 @@ PY
     echo "l2=$($K -n metallb-system get l2advertisement pre-existing-l2 -o json | platform_spec)"
     echo "issuer-le=$($K get clusterissuer s5n-letsencrypt -o json | platform_spec)"
     echo "issuer-ss=$($K get clusterissuer s5n-selfsigned -o json | platform_spec)"
-    for p in s5n-blessed-images s5n-granted-service; do
+    for p in s5n-blessed-images s5n-granted-service s5n-no-login-changes s5n-no-auth-routes; do
       echo "vap-${p}=$($K get validatingadmissionpolicy "$p" -o json | platform_spec)"
     done
     echo "s5n-system=$($K get namespace s5n-system -o json | platform_spec)"

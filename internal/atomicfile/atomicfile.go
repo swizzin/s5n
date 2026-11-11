@@ -62,7 +62,9 @@ func Write(path string, data []byte, mode fs.FileMode) error {
 	// The rename is what makes the new bytes visible; it is only durable once
 	// the directory that holds the name is.
 	if d, err := os.Open(dir); err == nil {
-		d.Sync()
+		// A failed directory fsync after a successful rename is deliberately not
+		// reported: the bytes are already in place under the new name.
+		_ = d.Sync()
 		d.Close()
 	}
 	return nil

@@ -43,10 +43,10 @@ const (
 )
 
 // K0sInstaller is the real Installer: it downloads the pinned release, checks
-// it against the checksum compiled into box, writes it to K0sBinaryPath,
-// installs and starts a single-node controller, then waits until the API and a
-// node answer. The zero value is usable; every field exists so a test can
-// replace one piece without a host, a network or a systemd.
+// it against the checksum the chart release pins beside that version, writes it
+// to K0sBinaryPath, installs and starts a single-node controller, then waits
+// until the API and a node answer. The zero value is usable; every field exists
+// so a test can replace one piece without a host, a network or a systemd.
 type K0sInstaller struct {
 	// Say is every progress line the installer writes; k0s's own output never
 	// goes here, it appears only in a failure, quoted under box's message.
@@ -55,11 +55,8 @@ type K0sInstaller struct {
 	Root func() bool
 	// Evidence reports what is already on the host. Default k0sEvidence.
 	Evidence func() []Finding
-	// Release resolves the pin for an architecture. Default k0sReleaseFor;
-	// tests replace it with a checksum they control.
-	Release func(arch string) (k0sRelease, error)
-	Fetch   Downloader
-	Run     Runner
+	Fetch    Downloader
+	Run      Runner
 	// Ready checks the API. Nil means the admin kubeconfig at ConfPath.
 	Ready Readiness
 	// BinPath, StateDir and ConfPath are the install target, k0s's state and
@@ -75,19 +72,24 @@ type K0sInstaller struct {
 // Install is the whole clean-host sequence. Everything that can refuse happens
 // before the first byte is fetched; everything after the binary is in place
 // reports what it left on the host and how to undo it.
+//
+// The plan's checksum is the release's, taken from the chart's platform.yaml by
+// k0sPlan: the pins are the only place a k0s sum is written down, so there is
+// nothing to resolve again here and nothing a second copy could disagree with.
+// A plan that carries no sum is one box cannot verify, and it is refused by
+// architecture before the download.
 func (k K0sInstaller) Install(ctx context.Context, plan InstallPlan) error {
 	arch := plan.Arch
 	if arch == "" {
 		arch = runtime.GOARCH
 	}
-	rel, err := k.releaseFor(arch)
-	if err != nil {
-		return err
+	if plan.Version == "" {
+		return fmt.Errorf("the install plan names no k0s release: box installs the k0s its chart release pins in charts/s5n/platform.yaml")
 	}
-	if plan.Version != rel.Version || (plan.SHA256 != "" && plan.SHA256 != rel.SHA256) {
-		return fmt.Errorf("install plan asks for k0s %s (sha256 %q), but box is pinned to %s (sha256 %s for %s): refusing to install something else",
-			plan.Version, plan.SHA256, rel.Version, rel.SHA256, rel.Arch)
+	if plan.SHA256 == "" {
+		return fmt.Errorf("no checksum for k0s %s on %q: the chart pins one per architecture and this plan carries none for this one, so box cannot verify what it would download", plan.Version, arch)
 	}
+	rel := k0sRelease{Version: plan.Version, Arch: arch, SHA256: plan.SHA256}
 	if why := installRefusal(plan, k.root(), k.evidence()); why != "" {
 		return errors.New(why)
 	}
@@ -245,13 +247,6 @@ func quoteOutput(out []byte) string {
 		lines[i] = "    " + strings.TrimRight(line, "\r")
 	}
 	return strings.Join(lines, "\n")
-}
-
-func (k K0sInstaller) releaseFor(arch string) (k0sRelease, error) {
-	if k.Release != nil {
-		return k.Release(arch)
-	}
-	return k0sReleaseFor(arch)
 }
 
 func (k K0sInstaller) root() bool {

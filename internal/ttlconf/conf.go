@@ -19,8 +19,8 @@ import "strings"
 func Seal(existing []byte, apiKey string) (out []byte, changed bool) {
 	doc := parse(existing)
 	wantAPIEnabled := "1"
-	curKey, _ := doc.get("General", "api_key")
-	curEnabled, _ := doc.get("General", "api_enabled")
+	curKey := doc.get("General", "api_key")
+	curEnabled := doc.get("General", "api_enabled")
 	if curKey == apiKey && curEnabled == wantAPIEnabled {
 		return existing, false
 	}
@@ -70,18 +70,18 @@ func (d *document) find(name string) *section {
 	return nil
 }
 
-func (d *document) get(sectionName, key string) (string, bool) {
+func (d *document) get(sectionName, key string) string {
 	s := d.find(sectionName)
 	if s == nil {
-		return "", false
+		return ""
 	}
 	for _, line := range s.lines {
 		k, v, ok := strings.Cut(line, "=")
 		if ok && strings.TrimSpace(k) == key {
-			return strings.TrimSpace(v), true
+			return strings.TrimSpace(v)
 		}
 	}
-	return "", false
+	return ""
 }
 
 func (d *document) set(sectionName, key, value string) {

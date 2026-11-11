@@ -40,6 +40,16 @@ type Decision struct {
 	// Apply is the hand-over: the same `box apply` a user runs. It is a
 	// function rather than the release package so init does not link Helm.
 	Apply ApplyFunc
+	// Login installs root's login. init calls it from the hook apply runs
+	// after its confirm and before its first write, so a refused confirm never
+	// reaches it and a login that does not come up stops the run before the
+	// release exists.
+	Login LoginFunc
+	// HasLogin answers whether the users database already holds this login.
+	// It is how init tells a first run (an empty password means box makes one)
+	// from a re-run (an empty password keeps the one that is there). Nil
+	// answers false.
+	HasLogin HasLoginFunc
 	// Say is every line init writes. A nil reporter writes nothing; cmd/box
 	// always gives the plain or the live one.
 	Say say.Reporter
@@ -93,6 +103,17 @@ type Options struct {
 	// the unattended form of a question that cannot live in a file.
 	SetTransient map[string]string
 
+	// Login is the account root's login admits (--login). LoginSet says the
+	// flag was given, which is what makes it win over a re-run's grant.
+	Login    string
+	LoginSet bool
+	// DefaultLogin is what a fresh box offers when no flag was given: the
+	// invoking user's account name, which cmd/box reads from the environment.
+	DefaultLogin string
+	// PasswordFile is where the login's password is read from (--password-file,
+	// "-" for stdin). Empty means box asks, or generates one.
+	PasswordFile string
+
 	// Unattended asks nothing: flags and file keys only, and a missing required
 	// answer is an error naming the flag or key.
 	Unattended bool
@@ -113,6 +134,11 @@ type ApplyOptions struct {
 	// TransientKeys are the values paths AfterConfirm answers, so the apply
 	// keeps them out of its diff.
 	TransientKeys []string
+	// Login installs root's login, after the same confirm and before the
+	// first write. It is separate from AfterConfirm because its failure is a
+	// refusal (the release must not exist behind a login nobody can pass),
+	// not an answer to merge.
+	Login func(ctx context.Context) error
 }
 
 // ApplyFunc is one `box apply`.
@@ -134,9 +160,39 @@ type Result struct {
 	ValuesChanged []string
 	// Created are the directories init made, owned by the box's uid:gid.
 	Created []string
+	// Login is the account the login admits, and NewPassword says this run
+	// supplied one. GeneratedPassword is set only when box made it, and the
+	// caller prints it once: it is nowhere on disk.
+	Login             string
+	NewPassword       bool
+	GeneratedPassword string
 	// Applied says the hand-over ran. It does not say the release changed:
 	// apply decides that, and a re-run is a no-op there too.
 	Applied bool
+}
+
+// LoginFunc installs root's login: it is internal/login's Apply, and its
+// options are the four values init decided.
+type LoginFunc func(ctx context.Context, l Login) error
+
+// HasLoginFunc answers whether the users database already has a row. The file
+// lives on the login's claim, so the login package reads it; init only needs
+// the yes or no.
+type HasLoginFunc func(login string) bool
+
+// Login is one login install as init decided it. Password is the plaintext for
+// this run only: the login hashes it and writes the digest, and nothing here
+// is ever written to a file.
+type Login struct {
+	Host        string
+	Name        string
+	Password    string
+	NewPassword bool
+	// Values is the document the release will render: chart defaults, then
+	// the user's file, then the grant, read back after init wrote them. The
+	// access_control rules come from its instance list, so the login and the
+	// release cannot disagree about which URL prefixes exist.
+	Values map[string]any
 }
 
 // report is the one place init writes progress.
@@ -185,13 +241,13 @@ func (d *Decision) Run(ctx context.Context, opts Options) (Result, error) {
 
 	// The grant's questions, in the order docs/box.md lists them.
 	//
-	// The flow has three steps of its own, and a fourth when an app has
+	// The flow has four steps of its own, and a fifth when an app has
 	// questions of its own (the catalog's qBittorrent does). A prompter that
 	// draws a counter is told, and a prompter without one never notices.
-	d.steps = 3
+	d.steps = 4
 	for _, name := range d.appsOn(grantNow, res.ReRun) {
 		if app, ok := d.Catalog.App(name); ok && len(app.Stored()) > 0 {
-			d.steps = 4
+			d.steps = 5
 			break
 		}
 	}
@@ -262,15 +318,29 @@ func (d *Decision) Run(ctx context.Context, opts Options) (Result, error) {
 	if err != nil {
 		return res, d.stop(err)
 	}
-	// The app list decides whether there is a fourth step, so correct the
+	// The app list decides whether there is a fifth step, so correct the
 	// counter before the questions that belong to it.
-	d.steps = 3
+	d.steps = 4
 	for _, name := range apps {
 		if app, ok := d.Catalog.App(name); ok && len(app.Stored()) > 0 {
-			d.steps = 4
+			d.steps = 5
 			break
 		}
 	}
+
+	// The login: one account, asked once. It is its own step because it is the
+	// one answer that is not the seedbox's shape but the identity on it, and
+	// every path in front of the Gateway is admitted only to this user.
+	d.step(4, "who logs in to this box?")
+	loginName, err := d.askLogin(opts, base, grantNow)
+	if err != nil {
+		return res, d.stop(err)
+	}
+	password, newPassword, generated, err := d.askPassword(opts, loginName)
+	if err != nil {
+		return res, d.stop(err)
+	}
+	res.Login, res.NewPassword, res.GeneratedPassword = loginName, newPassword, generated
 
 	// Each selected app's own questions, from the catalog. A transient one is
 	// not asked here: it goes to the apply, after its confirm.
@@ -286,7 +356,7 @@ func (d *Decision) Run(ctx context.Context, opts Options) (Result, error) {
 			continue
 		}
 		if len(app.Stored()) > 0 {
-			d.step(4, "how should "+name+" be set up?")
+			d.step(5, "how should "+name+" be set up?")
 		}
 		for _, q := range app.Stored() {
 			value, err := d.askQuestion(q, base)
@@ -317,6 +387,7 @@ func (d *Decision) Run(ctx context.Context, opts Options) (Result, error) {
 
 	grantAnswers := []answer{
 		{key: "namespace", value: namespace},
+		{key: "login", value: loginName},
 		{key: "global.puid", value: puid},
 		{key: "global.pgid", value: pgid},
 		{key: "storage.data.path", value: dataPath},
@@ -358,6 +429,21 @@ func (d *Decision) Run(ctx context.Context, opts Options) (Result, error) {
 		ValuesPath:    opts.ValuesPath,
 		PathsInNode:   opts.PathsInNode,
 		TransientKeys: transientKeys,
+	}
+	if d.Login != nil {
+		// The rules the login writes are derived from the document the release
+		// will render. Its apps section is the one part init just decided, and
+		// the instances under them are grant keys, so this is the same list the
+		// chart derives -- a 4K instance the operator enabled has its own
+		// rules, and one that is off has none.
+		l := Login{
+			Host:        domain,
+			Name:        loginName,
+			Password:    password,
+			NewPassword: newPassword,
+			Values:      withApps(base, apps, d.Catalog),
+		}
+		req.Login = func(ctx context.Context) error { return d.Login(ctx, l) }
 	}
 	if len(transient) > 0 {
 		req.AfterConfirm = d.transientAsker(transient, opts)

@@ -34,9 +34,9 @@ type fakeTautulli struct {
 	lastForm     url.Values
 }
 
-func newFakeTautulli(t *testing.T, apiKey string) (*fakeTautulli, *httptest.Server) {
+func newFakeTautulli(t *testing.T) (*fakeTautulli, *httptest.Server) {
 	t.Helper()
-	f := &fakeTautulli{apiKey: apiKey, apiEnabled: true}
+	f := &fakeTautulli{apiKey: "test-key", apiEnabled: true}
 	srv := httptest.NewServer(f)
 	t.Cleanup(srv.Close)
 	return f, srv
@@ -140,7 +140,7 @@ func writeTautulliJSON(w http.ResponseWriter, v any) {
 const testPlexToken = "plex-token-abc123"
 
 func TestTautulliWaitReady(t *testing.T) {
-	_, srv := newFakeTautulli(t, "test-key")
+	_, srv := newFakeTautulli(t)
 	tt := NewTautulli(srv.URL, "test-key")
 	if err := tt.WaitReady(context.Background(), 2_000_000_000); err != nil {
 		t.Fatalf("WaitReady: %v", err)
@@ -148,7 +148,7 @@ func TestTautulliWaitReady(t *testing.T) {
 }
 
 func TestTautulliWaitReadyFailsOnBadKey(t *testing.T) {
-	_, srv := newFakeTautulli(t, "test-key")
+	_, srv := newFakeTautulli(t)
 	tt := NewTautulli(srv.URL, "wrong-key")
 	if err := tt.Ping(context.Background()); err == nil {
 		t.Fatal("ping succeeded with the wrong api key")
@@ -156,7 +156,7 @@ func TestTautulliWaitReadyFailsOnBadKey(t *testing.T) {
 }
 
 func TestEnsurePlexConnectionCreatesThenIsIdempotent(t *testing.T) {
-	f, srv := newFakeTautulli(t, "test-key")
+	f, srv := newFakeTautulli(t)
 	tt := NewTautulli(srv.URL, "test-key")
 	ctx := context.Background()
 
@@ -193,7 +193,7 @@ func TestEnsurePlexConnectionCreatesThenIsIdempotent(t *testing.T) {
 }
 
 func TestEnsurePlexConnectionRepairsDrift(t *testing.T) {
-	f, srv := newFakeTautulli(t, "test-key")
+	f, srv := newFakeTautulli(t)
 	tt := NewTautulli(srv.URL, "test-key")
 	ctx := context.Background()
 	if _, err := tt.EnsurePlexConnection(ctx, "plex", 32400, "machine-123", testPlexToken, ""); err != nil {
@@ -215,7 +215,7 @@ func TestEnsurePlexConnectionRepairsDrift(t *testing.T) {
 }
 
 func TestEnsurePlexConnectionFailsWhenIdentityDoesNotMatch(t *testing.T) {
-	f, srv := newFakeTautulli(t, "test-key")
+	f, srv := newFakeTautulli(t)
 	tt := NewTautulli(srv.URL, "test-key")
 	// Simulate Tautulli saving the settings but reaching a different Plex
 	// than the one asked for (e.g. a DNS/host mixup): get_server_identity
@@ -256,7 +256,7 @@ func TestEnsurePlexConnectionFailsWhenIdentityDoesNotMatch(t *testing.T) {
 }
 
 func TestEnsurePlexConnectionSendsPlexToken(t *testing.T) {
-	f, srv := newFakeTautulli(t, "test-key")
+	f, srv := newFakeTautulli(t)
 	tt := NewTautulli(srv.URL, "test-key")
 
 	if _, err := tt.EnsurePlexConnection(context.Background(), "plex", 32400, "machine-123", testPlexToken, ""); err != nil {
@@ -273,7 +273,7 @@ func TestEnsurePlexConnectionSendsPlexToken(t *testing.T) {
 // A rotated token is drift even though host, port and identifier still match:
 // otherwise Tautulli would keep using a token the release no longer has.
 func TestEnsurePlexConnectionRewritesRotatedToken(t *testing.T) {
-	f, srv := newFakeTautulli(t, "test-key")
+	f, srv := newFakeTautulli(t)
 	tt := NewTautulli(srv.URL, "test-key")
 	ctx := context.Background()
 	if _, err := tt.EnsurePlexConnection(ctx, "plex", 32400, "machine-123", testPlexToken, ""); err != nil {
@@ -307,7 +307,7 @@ func TestEnsurePlexConnectionRewritesRotatedToken(t *testing.T) {
 // token last written is then the only evidence the link is current: when it
 // matches, the second run must stay a no-op rather than rewrite every time.
 func TestEnsurePlexConnectionWithheldTokenSameFingerprintStaysUnchanged(t *testing.T) {
-	f, srv := newFakeTautulli(t, "test-key")
+	f, srv := newFakeTautulli(t)
 	tt := NewTautulli(srv.URL, "test-key")
 	ctx := context.Background()
 	if _, err := tt.EnsurePlexConnection(ctx, "plex", 32400, "machine-123", testPlexToken, ""); err != nil {
@@ -332,7 +332,7 @@ func TestEnsurePlexConnectionWithheldTokenSameFingerprintStaysUnchanged(t *testi
 // the Secret rotated while Tautulli hid the stored value: the link must be
 // rewritten with the current token, and the new token must be what is sent.
 func TestEnsurePlexConnectionWithheldTokenRewritesRotatedToken(t *testing.T) {
-	f, srv := newFakeTautulli(t, "test-key")
+	f, srv := newFakeTautulli(t)
 	tt := NewTautulli(srv.URL, "test-key")
 	ctx := context.Background()
 	oldToken := testPlexToken
@@ -365,7 +365,7 @@ func TestEnsurePlexConnectionWithheldTokenRewritesRotatedToken(t *testing.T) {
 // hidden live token is "unknown", not "unchanged": rewrite once so the link is
 // known to be current, then the fingerprint makes the next run a no-op.
 func TestEnsurePlexConnectionWithheldTokenWithoutFingerprintRewritesOnce(t *testing.T) {
-	f, srv := newFakeTautulli(t, "test-key")
+	f, srv := newFakeTautulli(t)
 	tt := NewTautulli(srv.URL, "test-key")
 	ctx := context.Background()
 	if _, err := tt.EnsurePlexConnection(ctx, "plex", 32400, "machine-123", testPlexToken, ""); err != nil {
@@ -395,7 +395,7 @@ func TestEnsurePlexConnectionWithheldTokenWithoutFingerprintRewritesOnce(t *test
 // (the host) so a write happens, then assert the body carried the Secret's
 // token and not the placeholder.
 func TestEnsurePlexConnectionNeverWritesMaskedToken(t *testing.T) {
-	f, srv := newFakeTautulli(t, "test-key")
+	f, srv := newFakeTautulli(t)
 	tt := NewTautulli(srv.URL, "test-key")
 	ctx := context.Background()
 	if _, err := tt.EnsurePlexConnection(ctx, "plex", 32400, "machine-123", testPlexToken, ""); err != nil {
@@ -422,7 +422,7 @@ func TestEnsurePlexConnectionNeverWritesMaskedToken(t *testing.T) {
 // Without a token the client must refuse outright: the only alternative
 // (relying on Plex trusting a network range) is the hole this replaced.
 func TestEnsurePlexConnectionRequiresToken(t *testing.T) {
-	f, srv := newFakeTautulli(t, "test-key")
+	f, srv := newFakeTautulli(t)
 	tt := NewTautulli(srv.URL, "test-key")
 	if _, err := tt.EnsurePlexConnection(context.Background(), "plex", 32400, "machine-123", "  ", ""); err == nil {
 		t.Fatal("ensure succeeded with an empty Plex token")

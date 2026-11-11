@@ -14,13 +14,19 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"os/signal"
+	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
+	"syscall"
 
 	"golang.org/x/term"
 
+	"github.com/swizzin/s5n/internal/authelia"
 	"github.com/swizzin/s5n/internal/bootstrap"
 	"github.com/swizzin/s5n/internal/catalog"
+	"github.com/swizzin/s5n/internal/login"
 	"github.com/swizzin/s5n/internal/platform"
 	"github.com/swizzin/s5n/internal/release"
 	"github.com/swizzin/s5n/internal/say"
@@ -55,21 +61,39 @@ func terminalWidth(f *os.File) int {
 var version = "dev"
 
 func main() {
+	// One context for the whole process. A signal cancels the step in flight
+	// through the error path that step already has, instead of killing box
+	// between a volume and its claim (which is how a first install ends up
+	// half-written and a re-run refuses).
+	ctx, stop := signalContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
 	if len(os.Args) < 2 {
 		usage()
 	}
 	switch os.Args[1] {
 	case "bootstrap":
-		runBootstrap(os.Args[2:])
+		runBootstrap(ctx, os.Args[2:])
 	case "init":
-		runInit(os.Args[2:])
+		runInit(ctx, os.Args[2:])
 	case "apply":
-		runApply(os.Args[2:])
+		runApply(ctx, os.Args[2:])
 	case "version":
 		fmt.Println(version)
 	default:
 		usage()
 	}
+}
+
+// signalContext cancels its context on the first signal, and stops handling
+// signals once it has. signal.NotifyContext leaves the handler registered
+// after the first signal, so a second one is swallowed by a channel nobody
+// reads -- exactly when the operator presses it again because box looks stuck.
+// Unregistering on cancellation restores Go's default behaviour: the second
+// Ctrl-C terminates the process.
+func signalContext(parent context.Context, signals ...os.Signal) (context.Context, context.CancelFunc) {
+	ctx, stop := signal.NotifyContext(parent, signals...)
+	context.AfterFunc(ctx, stop)
+	return ctx, stop
 }
 
 func usage() {
@@ -178,7 +202,51 @@ func (c *chartFlags) load(ctx context.Context, src release.ChartSource) (release
 	return src.Load(ctx, c.ref())
 }
 
-func runBootstrap(args []string) {
+// chartRelease is the one chart release a box command works with, pulled at
+// most once.
+//
+// bootstrap reads the platform pins it installs k0s at, the platform half reads
+// the chart versions it installs, init reads the questions from it and apply
+// installs it. All four are the same release by construction: a bootstrap that
+// pulls its own copy and then hands over to an init that pulls the newest again
+// could settle two different versions, and the platform it installed would be
+// one nobody tested against the seedbox.
+type chartRelease struct {
+	flags *chartFlags
+	out   say.Reporter
+	// source is the registry. Nil means chartSource(out); a test gives the
+	// one source every load of the command must go through.
+	source release.ChartSource
+	once   sync.Once
+	chart  release.Chart
+	err    error
+}
+
+// load is the release the flags name, pulled on the first call and remembered
+// after it. The error is remembered too: a registry that refused once is not
+// asked again in the same run.
+func (c *chartRelease) load(ctx context.Context) (release.Chart, error) {
+	c.once.Do(func() {
+		source := c.source
+		if source == nil {
+			source = chartSource(c.out)
+		}
+		c.chart, c.err = c.flags.load(ctx, source)
+	})
+	return c.chart, c.err
+}
+
+// pins is that release's platform.yaml, the versions everything box installs
+// comes from.
+func (c *chartRelease) pins(ctx context.Context) (release.Versions, error) {
+	chart, err := c.load(ctx)
+	if err != nil {
+		return release.Versions{}, err
+	}
+	return chart.Pins, nil
+}
+
+func runBootstrap(ctx context.Context, args []string) {
 	// The ACME server override is a development and e2e switch, not operator
 	// surface: flag.PrintDefaults lists every registered flag even with an
 	// empty usage, so the only way to keep it off --help is to take it out of
@@ -190,7 +258,7 @@ func runBootstrap(args []string) {
 		os.Exit(2)
 	}
 	fs := flag.NewFlagSet("bootstrap", flag.ExitOnError)
-	dryRun := fs.Bool("dry-run", false, "print the decision and reasons; probe nothing remote, install nothing")
+	dryRun := fs.Bool("dry-run", false, "print the decision and reasons; probe no cluster, install nothing")
 	kubeconfig := fs.String("kubeconfig", "", "explicit kubeconfig to use, or fail with no fallback")
 	recordPath := fs.String("record", bootstrap.RecordPath, "where box records the cluster decision")
 	yes := fs.Bool("yes", false, "confirm the platform and run init without asking")
@@ -204,6 +272,12 @@ func runBootstrap(args []string) {
 
 	out := newOutput(*plain, *yes)
 	defer out.Close()
+
+	// One chart release for the whole command: the k0s bootstrap installs, the
+	// platform layer it applies and root's seedbox init installs all come from
+	// it.
+	charts := &chartRelease{flags: initFlags.chart, out: out}
+	initFlags.charts = charts
 
 	var records bootstrap.RecordStore = bootstrap.FilesystemRecords{Path: *recordPath}
 	if *dryRun {
@@ -232,6 +306,7 @@ func runBootstrap(args []string) {
 
 	d := &bootstrap.Decision{
 		Source: bootstrap.FilesystemSource{},
+		Pins:   charts.pins,
 		NewProber: func(kc []byte) (bootstrap.Prober, error) {
 			return bootstrap.NewHTTPProber(kc, *dryRun)
 		},
@@ -241,7 +316,7 @@ func runBootstrap(args []string) {
 		Prompt:  chooser,
 	}
 
-	res, err := d.Bootstrap(context.Background(), bootstrap.Options{
+	res, err := d.Bootstrap(ctx, bootstrap.Options{
 		Kubeconfig:    *kubeconfig,
 		KubeconfigEnv: os.Getenv("KUBECONFIG"),
 		Platform:      bootstrap.DefaultPlatform(),
@@ -265,8 +340,14 @@ func runBootstrap(args []string) {
 		return
 	}
 
-	ctx := context.Background()
-	if err := applyPlatform(ctx, res.Kubeconfig, res.Platform, res.Gateway.Class, acmeServer, *yes, out); err != nil {
+	// The platform's chart versions are the same release's pins. It is already
+	// loaded on the clean-host path, where bootstrap needed the k0s pin.
+	chart, err := charts.load(ctx)
+	if err != nil {
+		out.Error(err)
+		os.Exit(1)
+	}
+	if err := applyPlatform(ctx, res.Kubeconfig, res.Platform, res.Gateway.Class, acmeServer, chart.Pins, *yes, out); err != nil {
 		if errors.Is(err, platform.ErrCancelled) {
 			os.Exit(1)
 		}
@@ -288,12 +369,13 @@ func runBootstrap(args []string) {
 // applyPlatform applies the platform layer the decision says install. The
 // confirmation is box's existing one: --yes, or no terminal to ask on, is
 // unattended (docs/box.md, "bootstrap and init").
-func applyPlatform(ctx context.Context, kubeconfig string, components []bootstrap.ComponentResult, gatewayClass, acmeServer string, yes bool, out say.Reporter) error {
+func applyPlatform(ctx context.Context, kubeconfig string, components []bootstrap.ComponentResult, gatewayClass, acmeServer string, pins release.Versions, yes bool, out say.Reporter) error {
 	out.Phase("platform")
 	confirm := confirmer(out, yes || !isTerminal(os.Stdin))
 	p := &platform.Decision{
 		GatewayClass: gatewayClass,
 		ACMEServer:   acmeServer,
+		Pins:         pins,
 		Open:         func() (platform.Cluster, error) { return platform.NewCluster(kubeconfig) },
 		Releases:     platform.NewHelm(kubeconfig),
 		// The LoadBalancer question is settled by the Gateway's own status, so
@@ -411,7 +493,7 @@ func (o *applyFlags) options() release.Options {
 	}
 }
 
-func runApply(args []string) {
+func runApply(ctx context.Context, args []string) {
 	fs := flag.NewFlagSet("apply", flag.ExitOnError)
 	o := addApplyFlags(fs)
 	if err := fs.Parse(args); err != nil {
@@ -449,7 +531,7 @@ func runApply(args []string) {
 
 	opts := o.options()
 	opts.BoxValues = boxValues(kc)
-	res, err := app.Apply(context.Background(), opts)
+	res, err := app.Apply(ctx, opts)
 	if err != nil {
 		if errors.Is(err, release.ErrCancelled) {
 			os.Exit(1)
@@ -462,7 +544,7 @@ func runApply(args []string) {
 	}
 }
 
-func runInit(args []string) {
+func runInit(ctx context.Context, args []string) {
 	fs := flag.NewFlagSet("init", flag.ExitOnError)
 	initFlags := addInitFlags(fs)
 	kubeconfig := fs.String("kubeconfig", "", "explicit kubeconfig for the apply this hands over to, or fail with no fallback")
@@ -474,7 +556,7 @@ func runInit(args []string) {
 	}
 	out := newOutput(*plain, *yes)
 	defer out.Close()
-	if err := initFlags.run(context.Background(), *kubeconfig, *yes, *plain, out); err != nil {
+	if err := initFlags.run(ctx, *kubeconfig, *yes, *plain, out); err != nil {
 		if errors.Is(err, release.ErrCancelled) || errors.Is(err, setup.ErrCancelled) {
 			os.Exit(1)
 		}
@@ -496,10 +578,16 @@ type initFlags struct {
 	dataPath    *string
 	configPath  *string
 	apps        *string
+	loginName   *string
+	password    *string
 	puid        *int
 	pgid        *int
 	transient   *transientAnswers
 	pathsInNode *bool
+	// charts is the release to install, when the command already has one:
+	// `box bootstrap` loads it for its k0s pin and hands the same value here,
+	// so bootstrap and init cannot ask the registry for two versions.
+	charts *chartRelease
 }
 
 func addInitFlags(fs *flag.FlagSet) *initFlags {
@@ -515,6 +603,8 @@ func addInitFlags(fs *flag.FlagSet) *initFlags {
 	o.dataPath = fs.String("data-path", "", "the host path downloads and media live on")
 	o.configPath = fs.String("config-path", "", "the host path the apps keep their settings on")
 	o.apps = fs.String("apps", "", "comma separated app names from the chart's catalog")
+	o.loginName = fs.String("login", "", "the account the login page admits (default: $SUDO_USER, else the invoking user)")
+	o.password = fs.String("password-file", "", "read the login's password from this file, or from stdin with - (default: ask, or generate one)")
 	o.puid = fs.Int("puid", defaultPUID(), "uid every file on the data path is owned by (default: $SUDO_UID, else the invoking user, else 1000)")
 	o.pgid = fs.Int("pgid", defaultPGID(), "gid every file on the data path is owned by (default: $SUDO_GID, else the invoking user, else 1000)")
 	o.transient = &transientAnswers{}
@@ -539,7 +629,11 @@ func (o *initFlags) run(ctx context.Context, kubeconfig string, yes, plain bool,
 	// apply at the end, so the release init asked about is the release box
 	// installs.
 	source := chartSource(out)
-	chart, err := o.chart.load(ctx, source)
+	charts := o.charts
+	if charts == nil {
+		charts = &chartRelease{flags: o.chart, out: out}
+	}
+	chart, err := charts.load(ctx)
 	if err != nil {
 		return err
 	}
@@ -570,6 +664,8 @@ func (o *initFlags) run(ctx context.Context, kubeconfig string, yes, plain bool,
 		Catalog:  cat,
 		Say:      out,
 		Resolver: setup.NetResolver{},
+		Login:    loginStep(kubeconfig, *o.pathsInNode, out, chart),
+		HasLogin: hasLogin(*o.pathsInNode),
 		Apply: func(ctx context.Context, req setup.ApplyOptions) error {
 			// The cluster decision belongs to `box bootstrap`; apply reuses it.
 			// It is resolved here, after init has written the files, so a host
@@ -595,7 +691,7 @@ func (o *initFlags) run(ctx context.Context, kubeconfig string, yes, plain bool,
 				GrantPath:     req.GrantPath,
 				ValuesPath:    req.ValuesPath,
 				PathsInNode:   req.PathsInNode,
-				AfterConfirm:  req.AfterConfirm,
+				AfterConfirm:  afterConfirm(req),
 				TransientKeys: req.TransientKeys,
 				BoxValues:     boxValues(kc),
 			})
@@ -617,6 +713,10 @@ func (o *initFlags) run(ctx context.Context, kubeconfig string, yes, plain bool,
 		PUIDSet:      set["puid"],
 		PGIDSet:      set["pgid"],
 		SetTransient: *o.transient,
+		Login:        *o.loginName,
+		LoginSet:     set["login"],
+		DefaultLogin: defaultLogin(),
+		PasswordFile: *o.password,
 		Unattended:   unattended,
 		PathsInNode:  *o.pathsInNode,
 	})
@@ -646,7 +746,108 @@ func (o *initFlags) run(ctx context.Context, kubeconfig string, yes, plain bool,
 	if res.Domain != "" {
 		out.Banner("seedbox ready", res.Domain)
 	}
+	// The login is the one answer a person has to write down: the account, and
+	// a password only when box made it. It is printed here and nowhere else.
+	if res.Login != "" {
+		out.Line("login: " + res.Login + " at https://" + res.Domain + "/auth/")
+	}
+	if res.GeneratedPassword != "" {
+		out.Line("password: " + res.GeneratedPassword + "  (shown once; box keeps only the hash)")
+	}
 	return nil
+}
+
+// afterConfirm is the one hook apply runs after its confirm and before its
+// first write. The login goes first: a release behind a login that is not
+// answering would be served unauthenticated, and a login Envoy Gateway refuses
+// has to stop the run before the apps exist.
+func afterConfirm(req setup.ApplyOptions) func(context.Context) (map[string]any, error) {
+	if req.Login == nil && req.AfterConfirm == nil {
+		return nil
+	}
+	return func(ctx context.Context) (map[string]any, error) {
+		if req.Login != nil {
+			if err := req.Login(ctx); err != nil {
+				return nil, err
+			}
+		}
+		if req.AfterConfirm != nil {
+			return req.AfterConfirm(ctx)
+		}
+		return nil, nil
+	}
+}
+
+// loginStep installs root's login. It resolves the cluster the same way apply
+// and the certificate step do, and it does so inside the hook: a run that is
+// refused at the confirm never opens a client.
+func loginStep(kubeconfig string, pathsInNode bool, out say.Reporter, chart release.Chart) setup.LoginFunc {
+	return func(ctx context.Context, l setup.Login) error {
+		kc, err := release.ResolveKubeconfig(kubeconfig, os.Getenv("KUBECONFIG"), bootstrap.FilesystemRecords{Path: bootstrap.RecordPath})
+		if err != nil {
+			return err
+		}
+		d := &login.Decision{
+			Open:    func() (login.Cluster, error) { return platform.NewCluster(kc) },
+			Storage: func() (release.StorageClient, error) { return release.NewStorage(kc, login.Namespace) },
+			Host:    login.LinuxHost{},
+			Say:     out,
+		}
+		_, err = d.Apply(ctx, loginOptions(chart, l, pathsInNode))
+		return err
+	}
+}
+
+// loginOptions is what installs root's login: the answers init asked for, and
+// the image the chart release pins. The image is the release's, not a constant
+// here, because box writes the login's Deployment itself -- so the pin is the
+// whole reference, tag and digest, and a bump is a chart release rather than a
+// new box.
+func loginOptions(chart release.Chart, l setup.Login, pathsInNode bool) login.Options {
+	return login.Options{
+		Host:        l.Host,
+		Login:       l.Name,
+		Password:    l.Password,
+		NewPassword: l.NewPassword,
+		PathsInNode: pathsInNode,
+		Image:       chart.Pins.Authelia,
+		Values:      l.Values,
+	}
+}
+
+// hasLogin answers whether the users database already holds this account. It
+// is init's first-run-or-re-run question: an empty password keeps an existing
+// row and makes one when there is none. A file inside a test node is not
+// visible from here, which is why the kind e2e always passes --password-file.
+func hasLogin(pathsInNode bool) setup.HasLoginFunc {
+	return func(name string) bool {
+		if pathsInNode {
+			return false
+		}
+		raw, err := os.ReadFile(filepath.Join(authelia.HostPath, authelia.UsersDBFile))
+		if err != nil {
+			return false
+		}
+		db, err := authelia.ParseUsers(raw)
+		if err != nil {
+			return false
+		}
+		_, ok := db.Get(name)
+		return ok
+	}
+}
+
+// defaultLogin is what init offers when no --login was given: the account of
+// the person who ran sudo, because that is whose box this is. A root shell has
+// no such answer and init asks (or refuses, unattended).
+func defaultLogin() string {
+	if user := strings.TrimSpace(os.Getenv("SUDO_USER")); user != "" && user != "root" {
+		return user
+	}
+	if user := strings.TrimSpace(os.Getenv("USER")); user != "" && user != "root" {
+		return user
+	}
+	return ""
 }
 
 // takeDevFlag removes one development-only flag from args before a FlagSet

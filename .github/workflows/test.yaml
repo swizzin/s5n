@@ -1,0 +1,173 @@
+# The test jobs: Go, lint, chart, and the full kind e2e, for one ref. ci.yaml calls this
+# for every PR and push, and again for develop after a release's back-merge. It is
+# its own file because GitHub resolves called workflows before evaluating any
+# `if:`, so a workflow that called itself would recurse to the depth limit.
+#
+# Actions are pinned by commit; the comment names the tag the commit belongs to.
+name: test
+
+on:
+  workflow_call:
+    inputs:
+      ref:
+        description: "the ref to test; empty tests the commit that triggered the caller"
+        required: false
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+
+env:
+  HELM_VERSION: v4.3.0
+  # Tools come from their release binaries, checked against these sha256s, so
+  # the verifiers do not depend on the Go toolchain setup-go pins from go.mod.
+  KUBECONFORM_VERSION: v0.8.0
+  KUBECONFORM_SHA256: 9bc2bffbf71f261128533edaf912153948b7ff238f9a531ae6d34466ec287883 # kubeconform-linux-amd64.tar.gz
+  KIND_VERSION: v0.33.0
+  KIND_SHA256: aee6151561422756b764a4ae28e7f44cda5af5a9eead3cc9985112b1de8d8e0d # kind-linux-amd64
+  # The runner image ships a kubectl of its own choosing; the box e2e pins one
+  # because it patches a Certificate's status subresource and compares the
+  # Gateway's managedFields, both of which need a client near the node's version
+  # (kindest/node is 1.37).
+  KUBECTL_VERSION: v1.37.2
+  KUBECTL_SHA256: c04487523e7aa7d1493f7808174c899db93d7a9cf57531420cd76b9bd415f8f4 # kubectl-linux-amd64
+
+jobs:
+  go:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.ref || github.sha }}
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      - name: gofmt
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then echo "gofmt needed:"; echo "$unformatted"; exit 1; fi
+      - run: go vet ./...
+      - run: go test -race ./...
+      # The k0s checksums charts/s5n/platform.yaml pins are checked against the
+      # release's own assets here, in the job everything else already waits for:
+      # a Renovate k0s pull request bumps a version it cannot write sums for, so
+      # its own branch gets them from .github/workflows/k0s-sums.yaml (the sums
+      # bot, whose App-token push starts this run again), and no e2e is spent on
+      # a pin nobody verified. It downloads both assets (a few hundred MB),
+      # hence its own step.
+      - name: k0s checksums match the release's assets
+        run: go run ./hack/k0s-sums --check
+
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      # The whole history: --new-from-merge-base needs the merge base with
+      # develop, and a depth-1 checkout has none.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.ref || github.sha }}
+          fetch-depth: 0
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      - uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
+        with:
+          version: v2.15.0
+          # The tree predates these linters, and their structural findings are
+          # follow-up cards, so only what this branch adds may fail here. The
+          # action's only-new-issues reads a pull request's patch and does
+          # nothing on a push; --new-from-merge-base is the linter's own filter
+          # and works on both.
+          args: --new-from-merge-base=origin/develop
+
+  chart:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # Oldest supported, middle, newest. Keep in step with AGENTS.md.
+        kubernetes: ["1.30.0", "1.34.0", "1.37.0"]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.ref || github.sha }}
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      - uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
+        with:
+          version: ${{ env.HELM_VERSION }}
+      - name: install kubeconform
+        run: |
+          curl -fsSLo kubeconform.tgz "https://github.com/yannh/kubeconform/releases/download/${KUBECONFORM_VERSION}/kubeconform-linux-amd64.tar.gz"
+          echo "${KUBECONFORM_SHA256}  kubeconform.tgz" | sha256sum -c -
+          mkdir -p "$HOME/.local/bin" && tar -xzf kubeconform.tgz -C "$HOME/.local/bin" kubeconform && rm kubeconform.tgz
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+      - run: hack/validate-chart.sh "${{ matrix.kubernetes }}"
+
+  e2e-kind:
+    needs: [go, chart]
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.ref || github.sha }}
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      - uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
+        with:
+          version: ${{ env.HELM_VERSION }}
+      - name: install kind
+        run: |
+          mkdir -p "$HOME/.local/bin"
+          curl -fsSLo "$HOME/.local/bin/kind" "https://github.com/kubernetes-sigs/kind/releases/download/${KIND_VERSION}/kind-linux-amd64"
+          echo "${KIND_SHA256}  $HOME/.local/bin/kind" | sha256sum -c -
+          chmod +x "$HOME/.local/bin/kind"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+      - run: hack/e2e-kind.sh
+
+  # The other half of the acceptance test: the same install done through
+  # `box bootstrap` instead of Helm, on three kind clusters -- fresh (box
+  # installs the whole platform, then Pebble proves HTTP-01 through the
+  # Gateway), preinstalled (an address layer box must not touch) and
+  # foreign-gateway (a Gateway implementation box refuses, writing nothing).
+  # It is the only test that installs cert-manager and Authelia, and the
+  # platform pins' patch automerge rests on it. It never installs k0s: kind
+  # stands in for the cluster, so k0s bumps are not automerged.
+  #
+  # Beside e2e-kind, not after it: each job gets its own runner, so they share
+  # no docker image tag, cluster name or kubeconfig. (On one machine they
+  # cannot run at once -- both write $HOME/.cache/s5n-e2e/kubeconfig -- which
+  # is why a maintainer runs them one after another by hand.)
+  e2e-box:
+    needs: [go, chart]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.ref || github.sha }}
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      - uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
+        with:
+          version: ${{ env.HELM_VERSION }}
+      - name: install kind
+        run: |
+          mkdir -p "$HOME/.local/bin"
+          curl -fsSLo "$HOME/.local/bin/kind" "https://github.com/kubernetes-sigs/kind/releases/download/${KIND_VERSION}/kind-linux-amd64"
+          echo "${KIND_SHA256}  $HOME/.local/bin/kind" | sha256sum -c -
+          chmod +x "$HOME/.local/bin/kind"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+      - name: install kubectl
+        run: |
+          mkdir -p "$HOME/.local/bin"
+          curl -fsSLo "$HOME/.local/bin/kubectl" "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/amd64/kubectl"
+          echo "${KUBECTL_SHA256}  $HOME/.local/bin/kubectl" | sha256sum -c -
+          chmod +x "$HOME/.local/bin/kubectl"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+      - run: hack/e2e-box.sh all

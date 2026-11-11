@@ -72,6 +72,36 @@ spec, and Pod Security "restricted" still admits every pod.
 {{- end -}}
 
 {{- /*
+s5n.claimsExist: the claims the pods mount must exist before install. The schema
+requires both keys, but a claim name is only a promise: without this check a
+missing claim renders a Pending pod minutes later, far from the values line that
+named it.
+
+The check runs only where a cluster answers. It lists the release namespace's
+claims once: a cluster answers a list with a typed (possibly empty) list even for
+a namespace that does not exist yet, while `lookup` returns an empty map under
+`helm template`, `helm lint` and a client-side dry-run, so those renders are
+unchanged. The list needs only `list persistentvolumeclaims` in the release
+namespace, which any identity that can install the release already has; a
+cluster-scoped read (the Namespace itself) would refuse a namespace-scoped
+kubeconfig with Forbidden. `helm install --create-namespace` into a namespace
+with no claims fails here, as it should: the pods could never start.
+*/ -}}
+{{- define "s5n.claimsExist" -}}
+{{- $found := lookup "v1" "PersistentVolumeClaim" .Release.Namespace "" -}}
+{{- if $found.kind -}}
+{{- $names := list -}}
+{{- range ($found.items | default list) }}{{ $names = append $names .metadata.name }}{{ end -}}
+{{- range $kind := list "data" "config" -}}
+{{- $claim := (index $.Values.storage $kind).existingClaim -}}
+{{- if and $claim (not (has $claim $names)) -}}
+{{- fail (printf "storage.%s.existingClaim: PersistentVolumeClaim %q does not exist in namespace %q; create it before helm install, the chart creates no storage (box does)" $kind $claim $.Release.Namespace) -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+
+{{- /*
 s5n.authEdge: the operator's statement that a login sits in front of this
 release. The chart ships no login of its own and there is no default, so a plain
 install must set auth.edge=true; box always does. False is refused as well: a

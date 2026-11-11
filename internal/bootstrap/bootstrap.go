@@ -75,9 +75,11 @@ type Finding struct {
 
 // InstallPlan is what box installs on a clean host.
 type InstallPlan struct {
-	// Version and SHA256 are the pinned release and its checksum, filled from
-	// the policy in policy.go for this binary's architecture. The installer
-	// re-resolves the pin and refuses a plan that names anything else.
+	// Version and SHA256 are the k0s release the chart pins and the sha256 the
+	// same pins carry beside it, filled from k0sPlan() for this binary's
+	// architecture. They are one pin in one file, so nothing here resolves the
+	// release a second time; the installer refuses a plan that carries no
+	// checksum, and verifies the download against this one.
 	Version string
 	SHA256  string
 	// Arch is the k0s build's GOARCH (amd64 or arm64).

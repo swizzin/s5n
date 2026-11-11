@@ -1,0 +1,29 @@
+version: "2"
+
+linters:
+  # The v2 default set: errcheck, govet, ineffassign, staticcheck, unused.
+  default: standard
+  enable:
+    - dupl
+    - goconst
+    - gocognit
+    - unparam
+  settings:
+    dupl:
+      threshold: 100
+    gocognit:
+      min-complexity: 30
+    goconst:
+      min-len: 3
+      min-occurrences: 3
+  exclusions:
+    # A deferred Close, a write to a terminal and a cleanup remove are deliberately
+    # unchecked: errcheck's own standard set says so, so no `_ =` at each call site.
+    presets:
+      - std-error-handling
+    rules:
+      # Duplication and repeated literals are normal in table-driven tests.
+      - path: _test\.go
+        linters:
+          - dupl
+          - goconst
