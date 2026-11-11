@@ -1,29 +1,25 @@
-// Package platformassets embeds the versions every platform component is
-// installed at. versions.yaml beside this file is the only home for them: box
-// compiles the same bytes in, and the e2e scripts read them through
-// hack/versions (which reads this file's embedded copy), so the platform the
-// e2e accepts is the platform box installs.
-//
-// embed.go lives here rather than in a package directory of its own, because
-// an embed directive cannot reach a sibling tree: the file has to sit in the directory
-// that embeds it, and its path is the one docs/box.md names.
-package platformassets
+package release
 
 import (
 	"bytes"
-	_ "embed"
 	"fmt"
 	"strings"
 
 	utilyaml "k8s.io/apimachinery/pkg/util/yaml"
 )
 
-// File is install/platform/versions.yaml.
-//
-//go:embed versions.yaml
-var File []byte
+// PlatformFile is the chart file every version box installs lives in, at the
+// chart's root beside values.yaml and variants.yaml (docs/box.md, "The platform
+// layer"). It ships inside the release, so box reads it from the chart it
+// pulled: nothing about the platform is compiled into the binary, and one
+// release always installs one platform.
+const PlatformFile = "platform.yaml"
 
-// Versions is one pin per component box installs.
+// Versions is one pin per component box installs. It is the parsed
+// platform.yaml of the chart release in hand, never a global: bootstrap
+// installs k0s at the release's pin, the platform layer installs its charts at
+// the same release's pins, and the login is served at its image, so a chart
+// release and the platform it installs cannot disagree.
 type Versions struct {
 	// Authelia is root's login: an image reference, tag and digest together,
 	// because the login is box's own manifest and never a chart's. It is the
@@ -43,25 +39,15 @@ type Versions struct {
 	CertManager string
 }
 
-// Pins is the parsed file, read once at init. The bytes are compiled in, so a
-// bad file is a bug in the release rather than anything an operator can cause:
-// an init panic names the offending line instead of letting box install an
-// empty version.
-var Pins = mustParse(File)
-
-func mustParse(b []byte) Versions {
-	v, err := parseVersions(b)
-	if err != nil {
-		panic("install/platform/versions.yaml: " + err.Error())
-	}
-	return v
-}
-
-// parseVersions reads the file with the YAML decoder box already uses for the
-// manifests it applies, and accepts exactly the four pins: a typo'd key would
-// otherwise leave a component at the zero value, and box would plan an install
-// of nothing.
-func parseVersions(b []byte) (Versions, error) {
+// ParseVersions reads platform.yaml with the YAML decoder box already uses for
+// the manifests it applies, and accepts exactly the five pins: a typo'd key
+// would otherwise leave a component at the zero value, and box would plan an
+// install of nothing.
+//
+// It is the one parser: a loaded release (chartFrom), hack/versions and the
+// tests all come through here, so the file box installs from and the file the
+// e2e reads cannot disagree about what a pin is.
+func ParseVersions(b []byte) (Versions, error) {
 	var doc map[string]any
 	if err := utilyaml.NewYAMLOrJSONDecoder(bytes.NewReader(b), 4096).Decode(&doc); err != nil {
 		return Versions{}, fmt.Errorf("read: %w", err)
@@ -97,4 +83,21 @@ func parseVersions(b []byte) (Versions, error) {
 		}
 	}
 	return v, nil
+}
+
+// platformPins is a chart release's platform.yaml, read the way every other
+// chart file is read. A release that ships none, or one whose pins are damaged,
+// is refused here, when the release is loaded and long before anything is
+// installed: box has no fallback version to install, because a compiled-in pin
+// would be a second place the platform lives.
+func platformPins(name, version string, file []byte) (Versions, error) {
+	if len(file) == 0 {
+		return Versions{}, fmt.Errorf("chart %s %s has no %s: box reads the platform pins from the release it installs, so it cannot install one that ships none",
+			name, version, PlatformFile)
+	}
+	pins, err := ParseVersions(file)
+	if err != nil {
+		return Versions{}, fmt.Errorf("chart %s %s: %s: %w", name, version, PlatformFile, err)
+	}
+	return pins, nil
 }

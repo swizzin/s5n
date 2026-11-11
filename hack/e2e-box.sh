@@ -70,8 +70,9 @@ NS=seedbox
 LOGIN=alice
 IMAGE=ghcr.io/swizzin/s5n:e2e
 # The platform versions box installs are not this script's: they come from
-# install/platform/versions.yaml, printed by hack/versions from the bytes box
-# compiles in, so the plan box prints is asserted against the pin it printed.
+# charts/s5n/platform.yaml, the file the chart release carries, printed by
+# hack/versions through the parser box uses, so the plan box prints is asserted
+# against the pin the release it pulled names.
 # MetalLB's upstream manifest is tagged with a leading "v" while its chart pin
 # has none, so the tag is derived from the one pin.
 pins=$(go run ./hack/versions)
@@ -79,7 +80,7 @@ pin() { printf '%s\n' "$pins" | sed -n "s/^$1=//p"; }
 v_tag() { case "$1" in v*) printf '%s' "$1" ;; *) printf 'v%s' "$1" ;; esac; }
 for pin_key in authelia k0s envoyGateway metallb certManager; do
   [ -n "$(pin "$pin_key")" ] || {
-    echo "install/platform/versions.yaml has no ${pin_key} pin"
+    echo "charts/s5n/platform.yaml has no ${pin_key} pin"
     exit 1
   }
 done

@@ -8,41 +8,66 @@ import (
 	"strings"
 	"testing"
 
-	platformassets "github.com/swizzin/s5n/install/platform"
+	"github.com/swizzin/s5n/internal/release"
+	"github.com/swizzin/s5n/internal/release/releasetest"
 )
+
+// pins is the platform pins of the chart in this checkout: the k0s the release
+// names, read from charts/s5n/platform.yaml through the parser box uses.
+var pins = releasetest.MustPins()
 
 func TestK0sPinsAreReal(t *testing.T) {
 	if len(k0sSHA256) == 0 {
 		t.Fatal("no k0s checksums pinned")
 	}
-	for arch, sum := range k0sSHA256 {
-		if len(sum) != 64 {
-			t.Errorf("%s: checksum %q is not 64 hex characters", arch, sum)
-		}
-		if _, err := hex.DecodeString(sum); err != nil {
-			t.Errorf("%s: checksum %q is not hex: %v", arch, sum, err)
-		}
-		if sum != strings.ToLower(sum) {
-			t.Errorf("%s: checksum %q must be lowercase, as sha256sums.txt writes it", arch, sum)
-		}
-		rel, err := k0sReleaseFor(arch)
-		if err != nil {
-			t.Fatalf("%s: %v", arch, err)
-		}
-		if rel.Version != platformassets.Pins.K0s {
-			t.Errorf("%s: release version = %q, want the single pin %q", arch, rel.Version, platformassets.Pins.K0s)
+	for version, sums := range k0sSHA256 {
+		for arch, sum := range sums {
+			if len(sum) != 64 {
+				t.Errorf("%s/%s: checksum %q is not 64 hex characters", version, arch, sum)
+			}
+			if _, err := hex.DecodeString(sum); err != nil {
+				t.Errorf("%s/%s: checksum %q is not hex: %v", version, arch, sum, err)
+			}
+			if sum != strings.ToLower(sum) {
+				t.Errorf("%s/%s: checksum %q must be lowercase, as sha256sums.txt writes it", version, arch, sum)
+			}
+			rel, err := k0sReleaseFor(version, arch)
+			if err != nil {
+				t.Fatalf("%s/%s: %v", version, arch, err)
+			}
+			if rel.Version != version {
+				t.Errorf("%s/%s: release version = %q, want %q", version, arch, rel.Version, version)
+			}
 		}
 	}
+	// The chart pins one k0s, and box must carry the sums for it: a release
+	// that bumps the pin without the checksums installs nothing, loudly.
+	if _, ok := k0sSHA256[pins.K0s]; !ok {
+		t.Errorf("the chart pins k0s %s, and box has no checksum for it", pins.K0s)
+	}
 	for _, arch := range []string{"amd64", "arm64"} {
-		if _, ok := k0sSHA256[arch]; !ok {
-			t.Errorf("%s has no pinned checksum; box documents amd64 and arm64 as supported", arch)
+		if _, ok := k0sSHA256[pins.K0s][arch]; !ok {
+			t.Errorf("k0s %s has no checksum for %s; box documents amd64 and arm64 as supported", pins.K0s, arch)
 		}
 	}
 }
 
 func TestK0sReleaseForRefusesUnpinnedArch(t *testing.T) {
-	if _, err := k0sReleaseFor("riscv64"); err == nil {
+	if _, err := k0sReleaseFor(pins.K0s, "riscv64"); err == nil {
 		t.Fatal("an unpinned architecture resolved a release")
+	}
+}
+
+// The version is the chart's, so a chart that pins a k0s this box carries no
+// sum for is refused by name rather than downloaded unchecked: the checksum is
+// the half of that promise box keeps.
+func TestK0sReleaseForRefusesAVersionWithoutAChecksum(t *testing.T) {
+	_, err := k0sReleaseFor("v9.9.9+k0s.9", runtime.GOARCH)
+	if err == nil {
+		t.Fatal("a k0s release with no checksum resolved")
+	}
+	if !strings.Contains(err.Error(), "v9.9.9+k0s.9") || !strings.Contains(err.Error(), "checksum") {
+		t.Fatalf("error = %q, want it to name the release and the missing checksum", err)
 	}
 }
 
@@ -55,9 +80,9 @@ func TestK0sReleaseURL(t *testing.T) {
 }
 
 func TestK0sPlanCarriesThePinAndTheChoice(t *testing.T) {
-	plan := k0sPlan()
-	if plan.Version != platformassets.Pins.K0s {
-		t.Errorf("version = %q, want %q", plan.Version, platformassets.Pins.K0s)
+	plan := k0sPlan(pins)
+	if plan.Version != pins.K0s {
+		t.Errorf("version = %q, want the release's pin %q", plan.Version, pins.K0s)
 	}
 	if !plan.CleanHost {
 		t.Error("a plan built for the clean-host branch must say so")
@@ -65,13 +90,23 @@ func TestK0sPlanCarriesThePinAndTheChoice(t *testing.T) {
 	if plan.Arch != runtime.GOARCH {
 		t.Errorf("arch = %q, want %q", plan.Arch, runtime.GOARCH)
 	}
-	if sum, ok := k0sSHA256[runtime.GOARCH]; ok && plan.SHA256 != sum {
+	if sum, ok := k0sSHA256[pins.K0s][runtime.GOARCH]; ok && plan.SHA256 != sum {
 		t.Errorf("sha256 = %q, want the pin %q", plan.SHA256, sum)
 	}
-	// A plan from a binary with no pin still names the version, so the
-	// installer can refuse it on the architecture rather than on an empty plan.
-	if _, ok := k0sSHA256[runtime.GOARCH]; !ok && plan.SHA256 != "" {
+	// A plan for an architecture box has no sum for still names the version,
+	// so the installer can refuse it there rather than on an empty plan.
+	if _, ok := k0sSHA256[pins.K0s][runtime.GOARCH]; !ok && plan.SHA256 != "" {
 		t.Errorf("no pin for %s but the plan carries %q", runtime.GOARCH, plan.SHA256)
+	}
+
+	// The version is a value passed in, never a constant: a release that pins
+	// another k0s moves the plan with it.
+	other := k0sPlan(release.Versions{K0s: "v9.9.9+k0s.9"})
+	if other.Version != "v9.9.9+k0s.9" {
+		t.Errorf("version = %q, want the release's %q", other.Version, "v9.9.9+k0s.9")
+	}
+	if other.SHA256 != "" {
+		t.Errorf("a k0s box carries no checksum for got one anyway: %q", other.SHA256)
 	}
 }
 
@@ -92,7 +127,7 @@ func TestK0sStatePresent(t *testing.T) {
 }
 
 func TestInstallRefusal(t *testing.T) {
-	clean := InstallPlan{Version: platformassets.Pins.K0s, CleanHost: true}
+	clean := InstallPlan{Version: pins.K0s, CleanHost: true}
 	cases := []struct {
 		name     string
 		plan     InstallPlan
@@ -104,7 +139,7 @@ func TestInstallRefusal(t *testing.T) {
 		{name: "not root", plan: clean, root: false, want: "as root"},
 		{
 			name: "the decision did not choose to install",
-			plan: InstallPlan{Version: platformassets.Pins.K0s},
+			plan: InstallPlan{Version: pins.K0s},
 			root: true,
 			want: "did not choose to install",
 		},

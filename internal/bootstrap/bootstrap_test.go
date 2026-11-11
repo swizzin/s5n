@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	platformassets "github.com/swizzin/s5n/install/platform"
+	"github.com/swizzin/s5n/internal/release"
 )
 
 // ---- fakes ----
@@ -152,12 +152,20 @@ func (f *fakeInstaller) Install(_ context.Context, p InstallPlan) error {
 	return f.err
 }
 
+// releasePins is the chart release a test's bootstrap reads its platform pins
+// from. It is a function because the real one is a pull: the decision only asks
+// on the branch that installs.
+func releasePins(p release.Versions) func(context.Context) (release.Versions, error) {
+	return func(context.Context) (release.Versions, error) { return p, nil }
+}
+
 func newDecision(src *fakeSource, prober *fakeProber, host *fakeHost, recs *fakeRecords, inst *fakeInstaller) *Decision {
 	d := &Decision{
 		Source:  src,
 		Host:    host,
 		Records: recs,
 		Install: inst,
+		Pins:    releasePins(pins),
 	}
 	if prober != nil {
 		d.NewProber = newFakeProber(prober)
@@ -586,8 +594,8 @@ func TestBootstrapContainerRuntimeNotACluster(t *testing.T) {
 
 			switch tc.wantAction {
 			case ActionInstall:
-				if len(inst.plans) != 1 || inst.plans[0].Version != platformassets.Pins.K0s {
-					t.Errorf("installer should get one plan for %s: %v", platformassets.Pins.K0s, inst.plans)
+				if len(inst.plans) != 1 || inst.plans[0].Version != pins.K0s {
+					t.Errorf("installer should get one plan for %s: %v", pins.K0s, inst.plans)
 				}
 				// The plan is all a dry run produces: the cluster it describes
 				// does not exist yet, so nothing can be probed or recorded.
@@ -627,7 +635,7 @@ func TestBootstrapCleanHostInstalls(t *testing.T) {
 		log:        trace,
 	}
 	prober := &fakeProber{
-		version: Version{GitVersion: platformassets.Pins.K0s},
+		version: Version{GitVersion: pins.K0s},
 		cluster: Cluster{Nodes: 1},
 		platform: PlatformProbe{
 			GatewayAPI:   OutcomeAbsent,
@@ -655,10 +663,10 @@ func TestBootstrapCleanHostInstalls(t *testing.T) {
 	if res.Kubeconfig != K0sAdminConfig {
 		t.Errorf("kubeconfig = %q, want %q", res.Kubeconfig, K0sAdminConfig)
 	}
-	if len(inst.plans) != 1 || inst.plans[0].Version != platformassets.Pins.K0s || !inst.plans[0].CleanHost {
-		t.Fatalf("installer should get one clean-host plan for %s: %+v", platformassets.Pins.K0s, inst.plans)
+	if len(inst.plans) != 1 || inst.plans[0].Version != pins.K0s || !inst.plans[0].CleanHost {
+		t.Fatalf("installer should get one clean-host plan for %s: %+v", pins.K0s, inst.plans)
 	}
-	if inst.plans[0].SHA256 != k0sSHA256[inst.plans[0].Arch] {
+	if inst.plans[0].SHA256 != k0sSHA256[inst.plans[0].Version][inst.plans[0].Arch] {
 		t.Errorf("plan carries no pinned checksum: %+v", inst.plans[0])
 	}
 
@@ -956,5 +964,80 @@ func TestFreshClusterAddressesKeepsExternal(t *testing.T) {
 	}
 	if in[0].Action != "verify" {
 		t.Fatal("freshClusterAddresses changed its input")
+	}
+}
+
+// The k0s a clean host gets is the release's pin, never a constant of this box:
+// that is what makes a k0s bump a chart release. The fixture pins a version HEAD
+// does not, so a value read from anywhere but the release fails this test.
+func TestBootstrapInstallsTheK0sTheReleasePins(t *testing.T) {
+	const pinned = "v9.8.0+k0s.1"
+	fixture := release.Versions{
+		Authelia:     "docker.io/example/authelia:1.0.0@sha256:" + strings.Repeat("c", 64),
+		K0s:          pinned,
+		EnvoyGateway: "9.8.0",
+		MetalLB:      "9.8.0",
+		CertManager:  "v9.8.0",
+	}
+	for _, dryRun := range []bool{true, false} {
+		name := "install"
+		if dryRun {
+			name = "dry run"
+		}
+		t.Run(name, func(t *testing.T) {
+			src := &fakeSource{
+				candidates: []Candidate{},
+				files:      map[string][]byte{K0sAdminConfig: []byte("kubeconfig")},
+			}
+			prober := &fakeProber{
+				version: Version{GitVersion: pinned},
+				cluster: Cluster{Nodes: 1},
+				platform: PlatformProbe{
+					GatewayAPI:   OutcomeAbsent,
+					LoadBalancer: OutcomeNotProbed,
+					Gateway:      OutcomeAbsent,
+					CertManager:  OutcomeAbsent,
+				},
+			}
+			inst := &fakeInstaller{}
+			d := newDecision(src, prober, &fakeHost{}, &fakeRecords{}, inst)
+			d.Pins = releasePins(fixture)
+
+			res, err := d.Bootstrap(context.Background(), Options{Platform: DefaultPlatform(), DryRun: dryRun})
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if res.Action != ActionInstall {
+				t.Fatalf("action = %q, want install; reason: %s", res.Action, res.Reason)
+			}
+			if len(inst.plans) != 1 || inst.plans[0].Version != pinned {
+				t.Fatalf("installer got %+v, want one plan for the release's k0s %s", inst.plans, pinned)
+			}
+			if res.Reason == "" || !strings.Contains(res.Reason, pinned) {
+				t.Errorf("reason = %q, want it to name the release's k0s %s", res.Reason, pinned)
+			}
+		})
+	}
+}
+
+// Without a release there is no version to install, and box says so instead of
+// falling back to something compiled in.
+func TestBootstrapRefusesWithoutARelease(t *testing.T) {
+	inst := &fakeInstaller{}
+	d := newDecision(&fakeSource{}, &fakeProber{}, &fakeHost{}, &fakeRecords{}, inst)
+	d.Pins = nil
+
+	res, err := d.Bootstrap(context.Background(), Options{DryRun: true})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if res.Action != ActionStop {
+		t.Fatalf("action = %q, want stop", res.Action)
+	}
+	if !strings.Contains(res.Reason, "no chart release") {
+		t.Errorf("reason = %q, want it to name the missing release", res.Reason)
+	}
+	if len(inst.plans) != 0 {
+		t.Errorf("an install was planned without a release: %+v", inst.plans)
 	}
 }

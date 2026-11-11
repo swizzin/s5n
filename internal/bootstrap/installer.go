@@ -55,9 +55,9 @@ type K0sInstaller struct {
 	Root func() bool
 	// Evidence reports what is already on the host. Default k0sEvidence.
 	Evidence func() []Finding
-	// Release resolves the pin for an architecture. Default k0sReleaseFor;
+	// Release resolves a release and an architecture. Default k0sReleaseFor;
 	// tests replace it with a checksum they control.
-	Release func(arch string) (k0sRelease, error)
+	Release func(version, arch string) (k0sRelease, error)
 	Fetch   Downloader
 	Run     Runner
 	// Ready checks the API. Nil means the admin kubeconfig at ConfPath.
@@ -80,13 +80,13 @@ func (k K0sInstaller) Install(ctx context.Context, plan InstallPlan) error {
 	if arch == "" {
 		arch = runtime.GOARCH
 	}
-	rel, err := k.releaseFor(arch)
+	rel, err := k.releaseFor(plan.Version, arch)
 	if err != nil {
 		return err
 	}
-	if plan.Version != rel.Version || (plan.SHA256 != "" && plan.SHA256 != rel.SHA256) {
-		return fmt.Errorf("install plan asks for k0s %s (sha256 %q), but box is pinned to %s (sha256 %s for %s): refusing to install something else",
-			plan.Version, plan.SHA256, rel.Version, rel.SHA256, rel.Arch)
+	if plan.SHA256 != "" && plan.SHA256 != rel.SHA256 {
+		return fmt.Errorf("install plan asks for k0s %s with sha256 %s, but box's checksum for that release is %s: refusing to install something else",
+			plan.Version, plan.SHA256, rel.SHA256)
 	}
 	if why := installRefusal(plan, k.root(), k.evidence()); why != "" {
 		return errors.New(why)
@@ -247,11 +247,11 @@ func quoteOutput(out []byte) string {
 	return strings.Join(lines, "\n")
 }
 
-func (k K0sInstaller) releaseFor(arch string) (k0sRelease, error) {
+func (k K0sInstaller) releaseFor(version, arch string) (k0sRelease, error) {
 	if k.Release != nil {
-		return k.Release(arch)
+		return k.Release(version, arch)
 	}
-	return k0sReleaseFor(arch)
+	return k0sReleaseFor(version, arch)
 }
 
 func (k K0sInstaller) root() bool {

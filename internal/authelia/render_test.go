@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	platformassets "github.com/swizzin/s5n/install/platform"
+	"github.com/swizzin/s5n/internal/release/releasetest"
 	utilyaml "k8s.io/apimachinery/pkg/util/yaml"
 )
 
@@ -130,7 +130,7 @@ func TestRenderConfigurationHasNoTemplateLeftovers(t *testing.T) {
 // starts. The version is not repeated here: the assertion is on the shape and on
 // the repository, so a Renovate bump of the pin cannot fail this test.
 func TestRenderedDeploymentCarriesThePinnedImage(t *testing.T) {
-	pin := platformassets.Pins.Authelia
+	pin := releasetest.Pins(t).Authelia
 	manifests, err := RenderManifests(Manifests{
 		Namespace:        "s5n-system",
 		GatewayNamespace: "s5n-gateway",

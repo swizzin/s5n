@@ -1,8 +1,10 @@
-# Every version box installs, in one file (docs/box.md, "Updates > the platform
-# layer"). box compiles these bytes in (install/platform/embed.go), hack/versions
-# prints them for hack/e2e-kind.sh and hack/e2e-box.sh, and .github/renovate.json
-# opens one pull request per upstream release -- so the e2e always tests exactly
-# the versions box ships, and a bump is one line in one file.
+# Every version box installs, in one file, shipped inside the chart release
+# (docs/box.md, "The platform layer"). box reads it from the release it pulled,
+# the same way it reads variants.yaml: nothing here is compiled in, so a chart
+# release carries the platform it installs. hack/versions prints these for
+# hack/e2e-kind.sh and hack/e2e-box.sh, and .github/renovate.json opens one pull
+# request per upstream release -- so the e2e always tests exactly the versions a
+# release ships, and a bump is one line in one file.
 #
 # A value is the version exactly as the upstream artefact publishes it: k0s's
 # release tag, the chart's own version, or -- for the login, which box writes

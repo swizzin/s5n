@@ -1,0 +1,9 @@
+# The fixture chart's platform pins. box reads them from the release it pulled,
+# so a chart without this file is refused as it loads; the values are the
+# fixture's, not the real chart's, so a test that leaks a compiled-in pin shows
+# up as a version nothing here names.
+authelia: "docker.io/example/authelia:1.0.0@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+k0s: v1.99.0+k0s.1
+envoyGateway: 9.9.9
+metallb: 9.9.9
+certManager: v9.9.9

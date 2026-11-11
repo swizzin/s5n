@@ -17,10 +17,9 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 
 	"golang.org/x/term"
-
-	platformassets "github.com/swizzin/s5n/install/platform"
 
 	"github.com/swizzin/s5n/internal/authelia"
 	"github.com/swizzin/s5n/internal/bootstrap"
@@ -183,6 +182,50 @@ func (c *chartFlags) load(ctx context.Context, src release.ChartSource) (release
 	return src.Load(ctx, c.ref())
 }
 
+// chartRelease is the one chart release a box command works with, pulled at
+// most once.
+//
+// bootstrap reads the platform pins it installs k0s at, the platform half reads
+// the chart versions it installs, init reads the questions from it and apply
+// installs it. All four are the same release by construction: a bootstrap that
+// pulls its own copy and then hands over to an init that pulls the newest again
+// could settle two different versions, and the platform it installed would be
+// one nobody tested against the seedbox.
+type chartRelease struct {
+	flags *chartFlags
+	out   say.Reporter
+	// source is the registry. Nil means chartSource(out); a test gives the
+	// one source every load of the command must go through.
+	source release.ChartSource
+	once   sync.Once
+	chart  release.Chart
+	err    error
+}
+
+// load is the release the flags name, pulled on the first call and remembered
+// after it. The error is remembered too: a registry that refused once is not
+// asked again in the same run.
+func (c *chartRelease) load(ctx context.Context) (release.Chart, error) {
+	c.once.Do(func() {
+		source := c.source
+		if source == nil {
+			source = chartSource(c.out)
+		}
+		c.chart, c.err = c.flags.load(ctx, source)
+	})
+	return c.chart, c.err
+}
+
+// pins is that release's platform.yaml, the versions everything box installs
+// comes from.
+func (c *chartRelease) pins(ctx context.Context) (release.Versions, error) {
+	chart, err := c.load(ctx)
+	if err != nil {
+		return release.Versions{}, err
+	}
+	return chart.Pins, nil
+}
+
 func runBootstrap(args []string) {
 	// The ACME server override is a development and e2e switch, not operator
 	// surface: flag.PrintDefaults lists every registered flag even with an
@@ -195,7 +238,7 @@ func runBootstrap(args []string) {
 		os.Exit(2)
 	}
 	fs := flag.NewFlagSet("bootstrap", flag.ExitOnError)
-	dryRun := fs.Bool("dry-run", false, "print the decision and reasons; probe nothing remote, install nothing")
+	dryRun := fs.Bool("dry-run", false, "print the decision and reasons; probe no cluster, install nothing")
 	kubeconfig := fs.String("kubeconfig", "", "explicit kubeconfig to use, or fail with no fallback")
 	recordPath := fs.String("record", bootstrap.RecordPath, "where box records the cluster decision")
 	yes := fs.Bool("yes", false, "confirm the platform and run init without asking")
@@ -209,6 +252,12 @@ func runBootstrap(args []string) {
 
 	out := newOutput(*plain, *yes)
 	defer out.Close()
+
+	// One chart release for the whole command: the k0s bootstrap installs, the
+	// platform layer it applies and root's seedbox init installs all come from
+	// it.
+	charts := &chartRelease{flags: initFlags.chart, out: out}
+	initFlags.charts = charts
 
 	var records bootstrap.RecordStore = bootstrap.FilesystemRecords{Path: *recordPath}
 	if *dryRun {
@@ -237,6 +286,7 @@ func runBootstrap(args []string) {
 
 	d := &bootstrap.Decision{
 		Source: bootstrap.FilesystemSource{},
+		Pins:   charts.pins,
 		NewProber: func(kc []byte) (bootstrap.Prober, error) {
 			return bootstrap.NewHTTPProber(kc, *dryRun)
 		},
@@ -271,7 +321,14 @@ func runBootstrap(args []string) {
 	}
 
 	ctx := context.Background()
-	if err := applyPlatform(ctx, res.Kubeconfig, res.Platform, res.Gateway.Class, acmeServer, *yes, out); err != nil {
+	// The platform's chart versions are the same release's pins. It is already
+	// loaded on the clean-host path, where bootstrap needed the k0s pin.
+	chart, err := charts.load(ctx)
+	if err != nil {
+		out.Error(err)
+		os.Exit(1)
+	}
+	if err := applyPlatform(ctx, res.Kubeconfig, res.Platform, res.Gateway.Class, acmeServer, chart.Pins, *yes, out); err != nil {
 		if errors.Is(err, platform.ErrCancelled) {
 			os.Exit(1)
 		}
@@ -293,12 +350,13 @@ func runBootstrap(args []string) {
 // applyPlatform applies the platform layer the decision says install. The
 // confirmation is box's existing one: --yes, or no terminal to ask on, is
 // unattended (docs/box.md, "bootstrap and init").
-func applyPlatform(ctx context.Context, kubeconfig string, components []bootstrap.ComponentResult, gatewayClass, acmeServer string, yes bool, out say.Reporter) error {
+func applyPlatform(ctx context.Context, kubeconfig string, components []bootstrap.ComponentResult, gatewayClass, acmeServer string, pins release.Versions, yes bool, out say.Reporter) error {
 	out.Phase("platform")
 	confirm := confirmer(out, yes || !isTerminal(os.Stdin))
 	p := &platform.Decision{
 		GatewayClass: gatewayClass,
 		ACMEServer:   acmeServer,
+		Pins:         pins,
 		Open:         func() (platform.Cluster, error) { return platform.NewCluster(kubeconfig) },
 		Releases:     platform.NewHelm(kubeconfig),
 		// The LoadBalancer question is settled by the Gateway's own status, so
@@ -507,6 +565,10 @@ type initFlags struct {
 	pgid        *int
 	transient   *transientAnswers
 	pathsInNode *bool
+	// charts is the release to install, when the command already has one:
+	// `box bootstrap` loads it for its k0s pin and hands the same value here,
+	// so bootstrap and init cannot ask the registry for two versions.
+	charts *chartRelease
 }
 
 func addInitFlags(fs *flag.FlagSet) *initFlags {
@@ -548,7 +610,11 @@ func (o *initFlags) run(ctx context.Context, kubeconfig string, yes, plain bool,
 	// apply at the end, so the release init asked about is the release box
 	// installs.
 	source := chartSource(out)
-	chart, err := o.chart.load(ctx, source)
+	charts := o.charts
+	if charts == nil {
+		charts = &chartRelease{flags: o.chart, out: out}
+	}
+	chart, err := charts.load(ctx)
 	if err != nil {
 		return err
 	}
@@ -579,7 +645,7 @@ func (o *initFlags) run(ctx context.Context, kubeconfig string, yes, plain bool,
 		Catalog:  cat,
 		Say:      out,
 		Resolver: setup.NetResolver{},
-		Login:    loginStep(kubeconfig, *o.pathsInNode, out),
+		Login:    loginStep(kubeconfig, *o.pathsInNode, out, chart),
 		HasLogin: hasLogin(*o.pathsInNode),
 		Apply: func(ctx context.Context, req setup.ApplyOptions) error {
 			// The cluster decision belongs to `box bootstrap`; apply reuses it.
@@ -696,7 +762,7 @@ func afterConfirm(req setup.ApplyOptions) func(context.Context) (map[string]any,
 // loginStep installs root's login. It resolves the cluster the same way apply
 // and the certificate step do, and it does so inside the hook: a run that is
 // refused at the confirm never opens a client.
-func loginStep(kubeconfig string, pathsInNode bool, out say.Reporter) setup.LoginFunc {
+func loginStep(kubeconfig string, pathsInNode bool, out say.Reporter, chart release.Chart) setup.LoginFunc {
 	return func(ctx context.Context, l setup.Login) error {
 		kc, err := release.ResolveKubeconfig(kubeconfig, os.Getenv("KUBECONFIG"), bootstrap.FilesystemRecords{Path: bootstrap.RecordPath})
 		if err != nil {
@@ -708,18 +774,25 @@ func loginStep(kubeconfig string, pathsInNode bool, out say.Reporter) setup.Logi
 			Host:    login.LinuxHost{},
 			Say:     out,
 		}
-		_, err = d.Apply(ctx, login.Options{
-			Host:        l.Host,
-			Login:       l.Name,
-			Password:    l.Password,
-			NewPassword: l.NewPassword,
-			PathsInNode: pathsInNode,
-			// The pin comes from install/platform/versions.yaml, the one file
-			// every version box installs lives in.
-			Image:  platformassets.Pins.Authelia,
-			Values: l.Values,
-		})
+		_, err = d.Apply(ctx, loginOptions(chart, l, pathsInNode))
 		return err
+	}
+}
+
+// loginOptions is what installs root's login: the answers init asked for, and
+// the image the chart release pins. The image is the release's, not a constant
+// here, because box writes the login's Deployment itself -- so the pin is the
+// whole reference, tag and digest, and a bump is a chart release rather than a
+// new box.
+func loginOptions(chart release.Chart, l setup.Login, pathsInNode bool) login.Options {
+	return login.Options{
+		Host:        l.Host,
+		Login:       l.Name,
+		Password:    l.Password,
+		NewPassword: l.NewPassword,
+		PathsInNode: pathsInNode,
+		Image:       chart.Pins.Authelia,
+		Values:      l.Values,
 	}
 }
 

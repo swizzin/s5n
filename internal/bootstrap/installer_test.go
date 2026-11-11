@@ -92,8 +92,8 @@ func testInstaller(t *testing.T, payload []byte) (K0sInstaller, *installStubs) {
 	return K0sInstaller{
 		Root:     func() bool { return true },
 		Evidence: func() []Finding { return nil },
-		Release: func(arch string) (k0sRelease, error) {
-			return k0sRelease{Version: testK0sVersion, Arch: arch, SHA256: hex.EncodeToString(sum[:])}, nil
+		Release: func(version, arch string) (k0sRelease, error) {
+			return k0sRelease{Version: version, Arch: arch, SHA256: hex.EncodeToString(sum[:])}, nil
 		},
 		Fetch:    fetch,
 		Run:      stubs.run,
@@ -183,19 +183,24 @@ func TestK0sInstallRefusesBeforeFetch(t *testing.T) {
 			prepare: func(k *K0sInstaller, _ *installStubs) InstallPlan {
 				k.Release = k0sReleaseFor
 				p := testPlan()
+				p.Version = pins.K0s
 				p.Arch = "riscv64"
 				return p
 			},
 			want: `not published for "riscv64"`,
 		},
 		{
-			name: "plan names another version",
-			prepare: func(_ *K0sInstaller, _ *installStubs) InstallPlan {
+			// The plan names the release and the checksum is the compiled-in
+			// one for that release: a k0s box carries no sum for is refused
+			// before the download, whatever asked for it.
+			name: "plan names a release with no checksum",
+			prepare: func(k *K0sInstaller, _ *installStubs) InstallPlan {
+				k.Release = k0sReleaseFor
 				p := testPlan()
 				p.Version = "v0.0.1"
 				return p
 			},
-			want: "refusing to install something else",
+			want: "not a release this box carries a checksum for",
 		},
 		{
 			name: "plan names another checksum",

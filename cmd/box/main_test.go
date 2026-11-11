@@ -10,6 +10,7 @@ import (
 
 	"github.com/swizzin/s5n/internal/release"
 	"github.com/swizzin/s5n/internal/say"
+	"github.com/swizzin/s5n/internal/setup"
 )
 
 const (
@@ -207,4 +208,59 @@ func mustOpen(t *testing.T, path string) *os.File {
 	}
 	t.Cleanup(func() { f.Close() })
 	return f
+}
+
+// The login's image is the chart release's pin. box writes the Deployment
+// itself, so this mapping is the only place the reference is chosen: a chart
+// release that moves the login moves it here, and a constant in this file would
+// fail this test.
+func TestLoginImageComesFromTheChartRelease(t *testing.T) {
+	image := "docker.io/example/authelia:1.0.0@sha256:" + strings.Repeat("e", 64)
+	chart := release.Chart{Name: "s5n", Version: testChartVersion, Pins: release.Versions{Authelia: image}}
+
+	opts := loginOptions(chart, setup.Login{
+		Host:        "box.example.com",
+		Name:        "alice",
+		Password:    "not-a-real-password",
+		NewPassword: true,
+		Values:      map[string]any{"apps": map[string]any{}},
+	}, true)
+
+	if opts.Image != image {
+		t.Fatalf("login image = %q, want the chart release's pin %q", opts.Image, image)
+	}
+	for name, got := range map[string]string{"host": opts.Host, "login": opts.Login, "password": opts.Password} {
+		if got == "" {
+			t.Errorf("%s: the answer init collected was dropped", name)
+		}
+	}
+	if !opts.PathsInNode {
+		t.Error("paths-in-node did not reach the login decision")
+	}
+	if !opts.NewPassword {
+		t.Error("the new-password question did not reach the login decision")
+	}
+}
+
+// One command pulls one release. bootstrap reads the k0s pin, the platform half
+// reads the chart versions and init installs the seedbox from the same value, so
+// the registry must be asked once: a second pull could settle on a newer
+// release than the platform that was just installed.
+func TestOneCommandPullsOneRelease(t *testing.T) {
+	var f *initFlags
+	parse(t, "bootstrap", func(fs *flag.FlagSet) { f = addInitFlags(fs) },
+		"--chart-repo", testChartRepo, "--chart-version", testChartVersion)
+	src := &recordingCharts{}
+	charts := &chartRelease{flags: f.chart, out: &say.Plain{W: io.Discard}, source: src}
+	for range []int{0, 1} { // bootstrap's k0s pin, then the platform's versions
+		if _, err := charts.pins(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := charts.load(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(src.refs) != 1 {
+		t.Fatalf("the chart source was asked %d times, want once: %+v", len(src.refs), src.refs)
+	}
 }

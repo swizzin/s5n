@@ -8,10 +8,17 @@ import (
 	"testing"
 	"time"
 
-	platformassets "github.com/swizzin/s5n/install/platform"
 	"github.com/swizzin/s5n/internal/bootstrap"
+	"github.com/swizzin/s5n/internal/release"
+	"github.com/swizzin/s5n/internal/release/releasetest"
 	"github.com/swizzin/s5n/internal/say"
 )
+
+// pins is the platform pins of the chart in this checkout: the versions box
+// installs, read from charts/s5n/platform.yaml through the parser box uses. A
+// test asserts against these rather than naming a version, so a Renovate bump
+// of the chart's pins cannot fail the suite.
+var pins = releasetest.MustPins()
 
 // trace records the writes in the order they happened. Every assertion about
 // ordering (the Gateway before the question, the question before MetalLB, a
@@ -194,6 +201,7 @@ func newFixture() *fixture {
 	f.probe.tr = f.tr
 	f.d = &Decision{
 		GatewayClass: "eg",
+		Pins:         pins,
 		Open: func() (Cluster, error) {
 			f.opened++
 			return f.cl, nil
@@ -246,11 +254,72 @@ func notProbed(mode bootstrap.PlatformMode) []bootstrap.ComponentResult {
 	}
 }
 
+// The chart versions in the plan are the release's pins, not constants of this
+// package: a platform patch is a chart release, so a release that pins other
+// versions has to move the plan with it. The fixture's versions are not HEAD's,
+// so a value read from anywhere else shows up here.
+func TestBuildPlanInstallsTheChartVersionsFromTheRelease(t *testing.T) {
+	fixture := release.Versions{
+		Authelia:     "docker.io/example/authelia:1.0.0@sha256:" + strings.Repeat("d", 64),
+		K0s:          "v9.8.0+k0s.1",
+		EnvoyGateway: "8.8.8",
+		MetalLB:      "8.8.8",
+		CertManager:  "v8.8.8",
+	}
+	plan, err := BuildPlan(fixture, allInstall, "eg", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]string{
+		EnvoyGatewayRelease: "8.8.8",
+		CertManagerRelease:  "v8.8.8",
+		MetalLBRelease:      "8.8.8",
+	}
+	seen := map[string]bool{}
+	for _, s := range plan.Steps {
+		if s.Kind != StepRelease {
+			continue
+		}
+		wantVersion, ok := want[s.Release.Name]
+		if !ok {
+			t.Errorf("unexpected release %s in the plan", s.Release.Name)
+			continue
+		}
+		seen[s.Release.Name] = true
+		if s.Release.Version != wantVersion {
+			t.Errorf("%s: version = %q, want the release's pin %q", s.Release.Name, s.Release.Version, wantVersion)
+		}
+	}
+	for name := range want {
+		if !seen[name] {
+			t.Errorf("%s: not in the plan at all", name)
+		}
+	}
+
+	// And the chart's own pins build the plan the e2e asserts.
+	shipped, err := BuildPlan(pins, allInstall, "eg", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, s := range shipped.Steps {
+		if s.Kind != StepRelease {
+			continue
+		}
+		if got, want := s.Release.Version, map[string]string{
+			EnvoyGatewayRelease: pins.EnvoyGateway,
+			CertManagerRelease:  pins.CertManager,
+			MetalLBRelease:      pins.MetalLB,
+		}[s.Release.Name]; got != want || want == "" {
+			t.Errorf("%s: version = %q, want the chart's pin %q", s.Release.Name, got, want)
+		}
+	}
+}
+
 // Only an install action becomes a release. A component box uses is never
 // installed or rewritten -- but box's own Gateway is on every path, because
 // the chart's routes name it -- and the tenancy policy always closes the plan.
 func TestBuildPlanInstallsOnlyInstallActions(t *testing.T) {
-	plan, err := BuildPlan(components(map[bootstrap.PlatformComponent]string{
+	plan, err := BuildPlan(pins, components(map[bootstrap.PlatformComponent]string{
 		bootstrap.ComponentGatewayAPI:   "use",
 		bootstrap.ComponentLoadBalancer: "use",
 		bootstrap.ComponentGateway:      "use",
@@ -279,7 +348,7 @@ func TestBuildPlanInstallsOnlyInstallActions(t *testing.T) {
 		t.Fatalf("nothing installs, so nothing is unhandled: %v", plan.NotHandled)
 	}
 
-	plan, err = BuildPlan(allInstall, "eg", "")
+	plan, err = BuildPlan(pins, allInstall, "eg", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -314,7 +383,7 @@ func TestBuildPlanInstallsOnlyInstallActions(t *testing.T) {
 			certManager = &r
 		}
 	}
-	if certManager == nil || certManager.Version != platformassets.Pins.CertManager {
+	if certManager == nil || certManager.Version != pins.CertManager {
 		t.Fatalf("cert-manager was not planned at its pin: %+v", certManager)
 	}
 	crds, _ := certManager.Values["crds"].(map[string]any)
@@ -329,7 +398,7 @@ func TestBuildPlanInstallsOnlyInstallActions(t *testing.T) {
 // the answer is "no address") MetalLB and its pool, then the reachability
 // check. That order is the whole design: the Gateway's own status decides.
 func TestBuildPlanMakesMetalLBConditionalWhenUnprobed(t *testing.T) {
-	plan, err := BuildPlan(notProbed(bootstrap.ModeAuto), "eg", "")
+	plan, err := BuildPlan(pins, notProbed(bootstrap.ModeAuto), "eg", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -379,7 +448,7 @@ func TestBuildPlanAsksAboutTheGatewayItDidNotWrite(t *testing.T) {
 		{Component: bootstrap.ComponentGateway, Action: "use", Outcome: bootstrap.OutcomePresent, Mode: bootstrap.ModeAuto},
 		{Component: bootstrap.ComponentCertManager, Action: "use", Outcome: bootstrap.OutcomePresent, Mode: bootstrap.ModeAuto},
 	}
-	plan, err := BuildPlan(comps, "nginx", "")
+	plan, err := BuildPlan(pins, comps, "nginx", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -409,7 +478,7 @@ func TestBuildPlanAsksAboutTheGatewayItDidNotWrite(t *testing.T) {
 func TestBuildPlanManagedInstallsMetalLBWithoutAQuestion(t *testing.T) {
 	comps := notProbed(bootstrap.ModeManaged)
 	comps[1].Action = "install"
-	plan, err := BuildPlan(comps, "eg", "")
+	plan, err := BuildPlan(pins, comps, "eg", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -437,7 +506,7 @@ func TestBuildPlanManagedInstallsMetalLBWithoutAQuestion(t *testing.T) {
 // external mode writes nothing for the address layer: the Gateway's address
 // verifies the operator's own, and the plan says so with a question.
 func TestBuildPlanExternalVerifiesWithTheGatewayAddress(t *testing.T) {
-	plan, err := BuildPlan(notProbed(bootstrap.ModeExternal), "eg", "")
+	plan, err := BuildPlan(pins, notProbed(bootstrap.ModeExternal), "eg", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -465,7 +534,7 @@ func TestBuildPlanRefusesConflict(t *testing.T) {
 	comps := components(map[bootstrap.PlatformComponent]string{
 		bootstrap.ComponentGateway: "stop",
 	})
-	plan, err := BuildPlan(comps, "eg", "")
+	plan, err := BuildPlan(pins, comps, "eg", "")
 	if err == nil || !strings.Contains(err.Error(), "platform conflict") {
 		t.Fatalf("want a conflict refusal, got %v (%+v)", err, plan)
 	}
@@ -546,9 +615,9 @@ func TestApplyInstallsInOrder(t *testing.T) {
 		t.Fatal(err)
 	}
 	if len(f.rel.installed) != 3 ||
-		f.rel.installed[0].Name != EnvoyGatewayRelease || f.rel.installed[0].Version != platformassets.Pins.EnvoyGateway ||
-		f.rel.installed[1].Name != CertManagerRelease || f.rel.installed[1].Version != platformassets.Pins.CertManager ||
-		f.rel.installed[2].Name != MetalLBRelease || f.rel.installed[2].Version != platformassets.Pins.MetalLB {
+		f.rel.installed[0].Name != EnvoyGatewayRelease || f.rel.installed[0].Version != pins.EnvoyGateway ||
+		f.rel.installed[1].Name != CertManagerRelease || f.rel.installed[1].Version != pins.CertManager ||
+		f.rel.installed[2].Name != MetalLBRelease || f.rel.installed[2].Version != pins.MetalLB {
 		t.Fatalf("releases = %+v", f.rel.installed)
 	}
 	if len(f.cl.writes) != 4 {
@@ -883,7 +952,7 @@ func TestApplyExternalWithAnAddressInstallsTheRest(t *testing.T) {
 // before and never asks whether the Gateway could have done without it.
 func TestApplyVerifiesBoxMetalLBWithoutAsking(t *testing.T) {
 	f := newFixture()
-	f.rel.versions = map[string]string{"metallb-system/metallb": platformassets.Pins.MetalLB}
+	f.rel.versions = map[string]string{"metallb-system/metallb": pins.MetalLB}
 	f.probe.answers = []GatewayAnswer{{Address: "192.0.2.10"}}
 
 	if _, err := f.d.Apply(context.Background(), notProbed(bootstrap.ModeAuto)); err != nil {
@@ -894,7 +963,7 @@ func TestApplyVerifiesBoxMetalLBWithoutAsking(t *testing.T) {
 			t.Fatalf("Helm was called for MetalLB already at its pinned version: %+v", f.rel.installed)
 		}
 	}
-	if !strings.Contains(f.log.String(), "= metallb: already at "+platformassets.Pins.MetalLB) {
+	if !strings.Contains(f.log.String(), "= metallb: already at "+pins.MetalLB) {
 		t.Fatalf("the plan did not verify MetalLB: %q", f.log.String())
 	}
 	if strings.Contains(f.log.String(), "? metallb") {
@@ -917,9 +986,9 @@ func TestApplyVerifiesBoxMetalLBWithoutAsking(t *testing.T) {
 func TestApplyVerifiesPinnedReleases(t *testing.T) {
 	f := newFixture()
 	f.rel.versions = map[string]string{
-		"envoy-gateway-system/envoy-gateway": platformassets.Pins.EnvoyGateway,
-		"cert-manager/cert-manager":          platformassets.Pins.CertManager,
-		"metallb-system/metallb":             platformassets.Pins.MetalLB,
+		"envoy-gateway-system/envoy-gateway": pins.EnvoyGateway,
+		"cert-manager/cert-manager":          pins.CertManager,
+		"metallb-system/metallb":             pins.MetalLB,
 	}
 	f.probe.answers = []GatewayAnswer{{Address: "192.0.2.10"}}
 
@@ -929,7 +998,7 @@ func TestApplyVerifiesPinnedReleases(t *testing.T) {
 	if len(f.rel.installed) != 0 {
 		t.Fatalf("Helm was called for releases already at their pinned version: %+v", f.rel.installed)
 	}
-	if !strings.Contains(f.log.String(), "already at "+platformassets.Pins.EnvoyGateway) {
+	if !strings.Contains(f.log.String(), "already at "+pins.EnvoyGateway) {
 		t.Fatalf("the plan did not say the release is already there: %q", f.log.String())
 	}
 	// Readiness is still checked: a no-op run is verification, not silence.
@@ -968,7 +1037,7 @@ func TestApplyUpgradesAnotherVersion(t *testing.T) {
 func TestApplyRetriesThePool(t *testing.T) {
 	f := newFixture()
 	f.cl.applyErrs = []error{errors.New("no endpoints available for service \"metallb-webhook-service\""), nil}
-	f.rel.versions = map[string]string{"metallb-system/metallb": platformassets.Pins.MetalLB}
+	f.rel.versions = map[string]string{"metallb-system/metallb": pins.MetalLB}
 	f.probe.answers = []GatewayAnswer{{Address: "192.0.2.10"}}
 	f.d.PoolTimeout = time.Second
 	f.d.Poll = time.Millisecond

@@ -67,7 +67,7 @@ func TestCheckMinBox(t *testing.T) {
 func TestACheckoutIsNotExemptFromTheFloor(t *testing.T) {
 	dir := t.TempDir()
 	src := filepath.Join("..", "..", "charts", "s5n")
-	for _, name := range []string{"Chart.yaml", "values.yaml", "values.schema.json"} {
+	for _, name := range []string{"Chart.yaml", "values.yaml", "values.schema.json", "platform.yaml"} {
 		data, err := os.ReadFile(filepath.Join(src, name))
 		if err != nil {
 			t.Fatal(err)

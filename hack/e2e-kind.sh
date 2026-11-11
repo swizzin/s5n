@@ -19,16 +19,17 @@ NS=seedbox
 # drift from (or conflict with) it.
 #
 # The platform versions are not this script's. Every version box installs lives in
-# install/platform/versions.yaml, and hack/versions prints them from the same bytes box
-# compiles in, so this e2e installs exactly what box installs -- and the host needs no
-# YAML parser. MetalLB's upstream manifest is tagged with a leading "v" while its chart
-# pin has none: the tag is derived from the one pin, never a second copy of it.
+# charts/s5n/platform.yaml, the chart's own file, and hack/versions prints them through
+# the parser box uses, so this e2e installs exactly what the chart release carries -- and
+# the host needs no YAML parser. MetalLB's upstream manifest is tagged with a leading "v"
+# while its chart pin has none: the tag is derived from the one pin, never a second copy
+# of it.
 pins=$(go run ./hack/versions)
 pin() { printf '%s\n' "$pins" | sed -n "s/^$1=//p"; }
 v_tag() { case "$1" in v*) printf '%s' "$1" ;; *) printf 'v%s' "$1" ;; esac; }
 for pin_key in k0s envoyGateway metallb certManager; do
   [ -n "$(pin "$pin_key")" ] || {
-    echo "install/platform/versions.yaml has no ${pin_key} pin"
+    echo "charts/s5n/platform.yaml has no ${pin_key} pin"
     exit 1
   }
 done
@@ -36,7 +37,7 @@ ENVOY_GATEWAY_CHART_VERSION=${ENVOY_GATEWAY_CHART_VERSION:-$(pin envoyGateway)}
 METALLB_VERSION=${METALLB_VERSION:-$(v_tag "$(pin metallb)")}
 
 # Test-only images, pinned by tag and digest. They are not box's to install, so
-# they stay in the scripts rather than install/platform/versions.yaml; Renovate
+# they stay in the scripts rather than the chart's platform.yaml; Renovate
 # watches them here (.github/renovate.json), and the tag stays in the reference
 # so a bump to either the tag or the digest is one line.
 CURL_IMAGE=${CURL_IMAGE:-docker.io/curlimages/curl:8.11.1@sha256:c1fe1679c34d9784c1b0d1e5f62ac0a79fca01fb6377cdd33e90473c6f9f9a69}  # renovate: datasource=docker

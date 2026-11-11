@@ -45,6 +45,10 @@ type Chart struct {
 	// when the chart does not ship them.
 	Catalog  []byte
 	Variants []byte
+	// Pins is platform.yaml: every version box installs, from this release.
+	// A release that does not ship it is refused as it loads (platform.go),
+	// so this is never the zero value.
+	Pins Versions
 	// Archive is the packaged chart (.tgz), when it came from a registry.
 	Archive []byte
 }
@@ -98,6 +102,17 @@ func chartFrom(ref string, ch *chartv2.Chart) (Chart, error) {
 	if err != nil {
 		return Chart{}, fmt.Errorf("chart %s: %w", ref, err)
 	}
+	pinsFile, err := chartFile(ch, PlatformFile, MaxChartFile)
+	if err != nil {
+		return Chart{}, fmt.Errorf("chart %s: %w", ref, err)
+	}
+	// The pins are refused here rather than by whoever installs them, so a
+	// release box cannot install is one it also cannot read: bootstrap, init
+	// and apply all see the same refusal, before any of them writes.
+	pins, err := platformPins(ch.Metadata.Name, ch.Metadata.Version, pinsFile)
+	if err != nil {
+		return Chart{}, err
+	}
 	return Chart{
 		Ref:         ref,
 		Name:        ch.Metadata.Name,
@@ -108,6 +123,7 @@ func chartFrom(ref string, ch *chartv2.Chart) (Chart, error) {
 		Schema:      schema,
 		Catalog:     catalogFile,
 		Variants:    variants,
+		Pins:        pins,
 	}, nil
 }
 

@@ -14,8 +14,10 @@
 // (Releases, Cluster, Confirmer), with the Helm SDK and client-go
 // implementations in this package beside it, so the plan, the ordering, the
 // refusal paths and "a refusal writes nothing" are tested from stubs without a
-// cluster. Version pinning lives in one place (the constants below) and box
-// fetches charts at run time; no chart tarball is embedded.
+// cluster. The versions are the chart release's (release.Versions, its
+// platform.yaml) and are passed in; the chart references below are not
+// versions, and box fetches the charts at run time -- no chart tarball is
+// embedded.
 package platform
 
 import (
@@ -24,17 +26,17 @@ import (
 	"fmt"
 	"time"
 
-	platformassets "github.com/swizzin/s5n/install/platform"
 	"github.com/swizzin/s5n/internal/bootstrap"
 	"github.com/swizzin/s5n/internal/kube"
+	"github.com/swizzin/s5n/internal/release"
 	"github.com/swizzin/s5n/internal/say"
 	"github.com/swizzin/s5n/internal/wait"
 )
 
 // The platform releases: where each chart comes from and what box calls the
 // result. The versions themselves are not here -- every version box installs
-// lives in install/platform/versions.yaml, which this package and the e2e read
-// (platformassets.Pins), so a bump moves one line and the e2e tests it.
+// lives in the chart release's platform.yaml (release.Versions), so a bump
+// moves one line of the chart and this package installs it.
 const (
 	// EnvoyGatewayChart is the Envoy Gateway chart, which ships the Gateway
 	// API CRDs at the experimental channel it is built against. The chart owns
@@ -249,6 +251,11 @@ type Decision struct {
 	// Class). The Gateway box applies attaches to it; the GatewayClass itself
 	// is created only when this run installs its implementation.
 	GatewayClass string
+	// Pins is the platform pins of the chart release bootstrap pulled
+	// (release.Versions): the chart versions this plan installs. A plan
+	// cannot be built without them, and they come from the release rather
+	// than from this package, so a platform patch is a chart release.
+	Pins release.Versions
 	// ACMEServer points the s5n-letsencrypt issuer at another ACME directory.
 	// Empty in every real run: the manifest's Let's Encrypt production URL is
 	// the only one box ships. It exists for the e2e's Pebble server, which
@@ -289,7 +296,7 @@ func (d *Decision) report() say.Reporter { return say.Or(d.Say, nil) }
 // Apply plans, asks and applies the platform layer.
 func (d *Decision) Apply(ctx context.Context, components []bootstrap.ComponentResult) (Result, error) {
 	var res Result
-	plan, err := BuildPlan(components, d.GatewayClass, d.ACMEServer)
+	plan, err := BuildPlan(d.Pins, components, d.GatewayClass, d.ACMEServer)
 	if err != nil {
 		return res, err
 	}
@@ -792,7 +799,8 @@ func (d *Decision) printPlan(r say.Reporter, plan Plan) {
 // BuildPlan turns the decision's component results into the ordered list of
 // writes. It is pure: no cluster, no clock. Only `install` produces a release;
 // `use` and `verify` leave an implementation alone, and `stop` refuses the
-// whole run.
+// whole run. pins are the chart release's platform.yaml, so every chart version
+// in the plan is the release's rather than a constant of this package.
 //
 // gatewayClass is the class bootstrap chose (bootstrap.Result.Gateway). The
 // Gateway box owns is written on every run, on that class: the chart's routes
@@ -800,7 +808,7 @@ func (d *Decision) printPlan(r say.Reporter, plan Plan) {
 // implementation or found one. The GatewayClass is written only when box
 // installs Envoy Gateway, because a class someone else's controller serves is
 // the operator's and must not be rewritten.
-func BuildPlan(components []bootstrap.ComponentResult, gatewayClass, acmeServer string) (Plan, error) {
+func BuildPlan(pins release.Versions, components []bootstrap.ComponentResult, gatewayClass, acmeServer string) (Plan, error) {
 	var plan Plan
 	byComponent := make(map[bootstrap.PlatformComponent]bootstrap.ComponentResult, len(components))
 	for _, c := range components {
@@ -831,7 +839,7 @@ func BuildPlan(components []bootstrap.ComponentResult, gatewayClass, acmeServer 
 				Namespace: EnvoyGatewayNamespace,
 				Ref:       EnvoyGatewayRef,
 				Chart:     EnvoyGatewayChart,
-				Version:   platformassets.Pins.EnvoyGateway,
+				Version:   pins.EnvoyGateway,
 			},
 			Wait: []Wait{{Kind: WaitDeployment, Namespace: EnvoyGatewayNamespace, Name: EnvoyGatewayRelease}},
 		})
@@ -852,7 +860,7 @@ func BuildPlan(components []bootstrap.ComponentResult, gatewayClass, acmeServer 
 				Namespace: CertManagerNamespace,
 				Ref:       CertManagerRef,
 				Chart:     CertManagerChart,
-				Version:   platformassets.Pins.CertManager,
+				Version:   pins.CertManager,
 				Values: map[string]any{
 					"crds": map[string]any{"enabled": true},
 					"config": map[string]any{
@@ -879,7 +887,7 @@ func BuildPlan(components []bootstrap.ComponentResult, gatewayClass, acmeServer 
 	// mode owns nothing: the same question verifies the operator's answer.
 	managedLB := lb.Action == actionInstall
 	if managedLB {
-		plan.Steps = append(plan.Steps, metalLBSteps("")...)
+		plan.Steps = append(plan.Steps, metalLBSteps(pins, "")...)
 	}
 
 	// Box's Gateway, on every path. On `use` it is still box's object: the
@@ -923,7 +931,7 @@ func BuildPlan(components []bootstrap.ComponentResult, gatewayClass, acmeServer 
 			Mode:      lb.Mode,
 			What:      fmt.Sprintf("Gateway %s/%s getting an address", GatewayNamespace, GatewayName),
 		})
-		plan.Steps = append(plan.Steps, metalLBSteps(UnlessGatewayAddress)...)
+		plan.Steps = append(plan.Steps, metalLBSteps(pins, UnlessGatewayAddress)...)
 	case actionVerify:
 		// external mode: no MetalLB ever. The question verifies the operator's
 		// address layer against the Gateway box writes on this run.
@@ -974,7 +982,7 @@ func gatewayStepName(class string, withClass bool) string {
 // metalLBSteps are the two writes the address layer needs: MetalLB itself and
 // the pool its speaker advertises. The condition is empty when box owns the
 // layer outright and non-empty when the Gateway may get an address without it.
-func metalLBSteps(unless Condition) []Step {
+func metalLBSteps(pins release.Versions, unless Condition) []Step {
 	return []Step{
 		{
 			Component: bootstrap.ComponentLoadBalancer,
@@ -985,7 +993,7 @@ func metalLBSteps(unless Condition) []Step {
 				Namespace: MetalLBNamespace,
 				Ref:       MetalLBRef,
 				Chart:     MetalLBChart,
-				Version:   platformassets.Pins.MetalLB,
+				Version:   pins.MetalLB,
 			},
 			Wait: []Wait{
 				{Kind: WaitDeployment, Namespace: MetalLBNamespace, Name: MetalLBRelease + "-controller"},

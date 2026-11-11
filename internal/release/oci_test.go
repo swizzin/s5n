@@ -162,6 +162,9 @@ func TestOCIRoundTrip(t *testing.T) {
 	if pulled.Annotations[MinBoxAnnotation] != fromDir.Annotations[MinBoxAnnotation] {
 		t.Fatalf("min-box = %q, want %q", pulled.Annotations[MinBoxAnnotation], fromDir.Annotations[MinBoxAnnotation])
 	}
+	if pulled.Pins != fromDir.Pins {
+		t.Fatalf("pins = %+v, want the directory's %+v", pulled.Pins, fromDir.Pins)
+	}
 	for name, pair := range map[string][2][]byte{
 		"values.yaml":        {pulled.Values, fromDir.Values},
 		"values.schema.json": {pulled.Schema, fromDir.Schema},
