@@ -3,6 +3,9 @@ package setup
 import (
 	"context"
 	"errors"
+	"net"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -110,5 +113,31 @@ func TestChooseIssuerWithoutAResolver(t *testing.T) {
 	issuer, line := chooseIssuer(context.Background(), nil, "box.example.test", "")
 	if issuer != IssuerSelfSigned || !strings.Contains(line, "no DNS resolver") {
 		t.Fatalf("issuer = %q (%s)", issuer, line)
+	}
+}
+
+// The e2e's resolver: a hosts-style file read on every call, so changing the
+// file between two init runs is what a new DNS record looks like, and a name
+// the file does not list is a not-found answer rather than a mismatch.
+func TestFileResolverReadsTheAnswerEveryTime(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "dns")
+	if err := os.WriteFile(path, []byte("# test\n203.0.113.10 box.example.test seerr.box.example.test\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	r := FileResolver{Path: path}
+	addrs, err := r.LookupHost(context.Background(), "seerr.box.example.test")
+	if err != nil || len(addrs) != 1 || addrs[0] != "203.0.113.10" {
+		t.Fatalf("lookup = %v, %v", addrs, err)
+	}
+	if _, err := r.LookupHost(context.Background(), "plex.box.example.test"); err == nil {
+		t.Fatal("a name the file does not list resolved")
+	} else if err.(*net.DNSError) == nil || !err.(*net.DNSError).IsNotFound {
+		t.Fatalf("error = %T %v, want a not-found DNS answer", err, err)
+	}
+	if err := os.WriteFile(path, []byte("198.51.100.4 box.example.test\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if issuer, line := chooseIssuer(context.Background(), r, "seerr.box.example.test", ""); issuer != IssuerSelfSigned || !strings.Contains(line, "does not resolve") {
+		t.Fatalf("a removed record still resolved: %q (%s)", issuer, line)
 	}
 }

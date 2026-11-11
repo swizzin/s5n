@@ -286,7 +286,12 @@ func (d *Decision) Run(ctx context.Context, opts Options) (Result, error) {
 	domAnswer := resolveHost(ctx, d.Resolver, domain)
 	issuer, why := issuerFor(domain, domAnswer, text(forced))
 	res.Issuer = issuer
-	res.Hosts = []Host{{Host: domain, Issuer: issuer, Why: why, NoDNS: !domAnswer.resolves() && issuer == IssuerSelfSigned}}
+	noDNS := !domAnswer.resolves() && issuer == IssuerSelfSigned
+	record := ""
+	if noDNS {
+		record = "add one"
+	}
+	res.Hosts = []Host{{Host: domain, Issuer: issuer, Why: why, NoDNS: noDNS, Record: record}}
 	d.report().Line("tls: " + why)
 	d.step(2, "where should your data and settings live?")
 	dataPath, err := d.askText(textQuestion{

@@ -39,8 +39,8 @@ func TestAppHostAnswersMatchTheDomain(t *testing.T) {
 			if app.Host != "gamma.box.example.com" || app.App != "gamma" {
 				t.Fatalf("hosts[1] = %+v, want gamma's own host", app)
 			}
-			if app.Issuer != IssuerLetsEncrypt || app.NoDNS {
-				t.Fatalf("gamma's host = %+v, want Let's Encrypt", app)
+			if app.Issuer != IssuerLetsEncrypt || app.NoDNS || app.Record != "" {
+				t.Fatalf("gamma's host = %+v, want Let's Encrypt and no record to add", app)
 			}
 			if !strings.Contains(h.out.String(), "gamma.box.example.com resolves to 203.0.113.7: using Let's Encrypt") {
 				t.Fatalf("init did not explain gamma's issuer:\n%s", h.out)
@@ -68,6 +68,13 @@ func TestNoDNSAnywhereProceedsSelfSigned(t *testing.T) {
 		if got.Issuer != IssuerSelfSigned || !got.NoDNS {
 			t.Fatalf("%s = %+v, want self-signed because it has no DNS record", got.Host, got)
 		}
+	}
+	if got := res.Hosts[0].Record; got != "add one" {
+		t.Fatalf("the domain's record = %q", got)
+	}
+	wantRecord := "add either a wildcard *.box.example.com or a record for gamma.box.example.com"
+	if got := res.Hosts[1].Record; got != wantRecord {
+		t.Fatalf("gamma's record = %q, want %q", got, wantRecord)
 	}
 	// It proceeded: the grant was written, with the app on.
 	if !h.exists(h.grantPath) {

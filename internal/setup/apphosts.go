@@ -23,6 +23,9 @@ type Host struct {
 	Issuer string
 	Why    string
 	NoDNS  bool
+	// Record is the fix a NoDNS host names: the DNS record to add, in both
+	// forms for an app host. The final card repeats it.
+	Record string
 }
 
 // appHosts resolves every name an enabled app is served at (in catalog order) and checks it
@@ -50,12 +53,18 @@ func (d *Decision) appHosts(ctx context.Context, domain string, dom hostAnswer, 
 			return nil, err
 		}
 		issuer, why := issuerFor(host, ans, forced)
+		noDNS := !ans.resolves() && issuer == IssuerSelfSigned
+		record := ""
+		if noDNS {
+			record = fmt.Sprintf("add either a wildcard *.%s or a record for %s", domain, host)
+		}
 		out = append(out, Host{
 			Host:   host,
 			App:    app,
 			Issuer: issuer,
 			Why:    why,
-			NoDNS:  !ans.resolves() && issuer == IssuerSelfSigned,
+			NoDNS:  noDNS,
+			Record: record,
 		})
 	}
 	return out, nil

@@ -257,6 +257,15 @@ func runBootstrap(ctx context.Context, args []string) {
 		fmt.Fprintf(os.Stderr, "box: %v\n", err)
 		os.Exit(2)
 	}
+	// The DNS override is the same kind of switch: an e2e cannot write the
+	// test host's /etc/hosts, and moving a name from "no record" to "a public
+	// one" between two runs is exactly what the certificate card and the
+	// self-signed -> issued path have to prove.
+	dnsFile, args, err := takeDevFlag(args, "dns-file")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "box: %v\n", err)
+		os.Exit(2)
+	}
 	fs := flag.NewFlagSet("bootstrap", flag.ExitOnError)
 	dryRun := fs.Bool("dry-run", false, "print the decision and reasons; probe no cluster, install nothing")
 	kubeconfig := fs.String("kubeconfig", "", "explicit kubeconfig to use, or fail with no fallback")
@@ -269,6 +278,8 @@ func runBootstrap(ctx context.Context, args []string) {
 		fmt.Fprintf(os.Stderr, "box: %v\n", err)
 		os.Exit(2)
 	}
+
+	initFlags.dnsFile = dnsFile
 
 	out := newOutput(*plain, *yes)
 	defer out.Close()
@@ -545,6 +556,11 @@ func runApply(ctx context.Context, args []string) {
 }
 
 func runInit(ctx context.Context, args []string) {
+	dnsFile, args, err := takeDevFlag(args, "dns-file")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "box: %v\n", err)
+		os.Exit(2)
+	}
 	fs := flag.NewFlagSet("init", flag.ExitOnError)
 	initFlags := addInitFlags(fs)
 	kubeconfig := fs.String("kubeconfig", "", "explicit kubeconfig for the apply this hands over to, or fail with no fallback")
@@ -554,6 +570,7 @@ func runInit(ctx context.Context, args []string) {
 		fmt.Fprintf(os.Stderr, "box: %v\n", err)
 		os.Exit(2)
 	}
+	initFlags.dnsFile = dnsFile
 	out := newOutput(*plain, *yes)
 	defer out.Close()
 	if err := initFlags.run(ctx, *kubeconfig, *yes, *plain, out); err != nil {
@@ -584,6 +601,10 @@ type initFlags struct {
 	pgid        *int
 	transient   *transientAnswers
 	pathsInNode *bool
+	// dnsFile is the development-only resolver override (--dns-file): a
+	// hosts-style file init resolves through instead of the system resolver.
+	// Empty means the real one.
+	dnsFile string
 	// charts is the release to install, when the command already has one:
 	// `box bootstrap` loads it for its k0s pin and hands the same value here,
 	// so bootstrap and init cannot ask the registry for two versions.
@@ -658,12 +679,16 @@ func (o *initFlags) run(ctx context.Context, kubeconfig string, yes, plain bool,
 	set := map[string]bool{}
 	o.fs.Visit(func(f *flag.Flag) { set[f.Name] = true })
 
+	var resolver setup.Resolver = setup.NetResolver{}
+	if o.dnsFile != "" {
+		resolver = setup.FileResolver{Path: o.dnsFile}
+	}
 	d := &setup.Decision{
 		Host:     setup.LinuxPathHost{},
 		Prompt:   prompt,
 		Catalog:  cat,
 		Say:      out,
-		Resolver: setup.NetResolver{},
+		Resolver: resolver,
 		Login:    loginStep(kubeconfig, *o.pathsInNode, out, chart),
 		HasLogin: hasLogin(*o.pathsInNode),
 		Apply: func(ctx context.Context, req setup.ApplyOptions) error {
@@ -759,6 +784,15 @@ func (o *initFlags) run(ctx context.Context, kubeconfig string, yes, plain bool,
 	}
 	if res.GeneratedPassword != "" {
 		out.Line("password: " + res.GeneratedPassword + "  (shown once; box keeps only the hash)")
+	}
+	// The final card's one warning: a name with no DNS record still installs,
+	// self-signed, and a re-run is what moves it. Named per host, because an
+	// app's name is a record the operator may not have thought about.
+	for _, h := range res.Hosts {
+		if !h.NoDNS {
+			continue
+		}
+		out.Warn(fmt.Sprintf("%s has no DNS record, so its certificate is self-signed; %s, then run box init again to move it to Let's Encrypt", h.Host, h.Record))
 	}
 	return nil
 }

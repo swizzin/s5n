@@ -136,7 +136,12 @@ PLEX_HOST="plex.${DOMAIN}"
 SEERR_HOST="seerr.${DOMAIN}"
 # The fresh scenario points the production issuer at Pebble; every other
 # scenario keeps Let's Encrypt's directory and never issues from it.
-ACME_ARGS=()CTX="kind-${CLUSTER}"
+ACME_ARGS=()
+# The development-only --dns-file override: the e2e's stand-in for the test
+# host's own DNS, which an unprivileged run cannot edit. Empty for every
+# scenario until the one that moves a name from "no record" to a public one.
+DNS_ARGS=()
+CTX="kind-${CLUSTER}"
 K="kubectl --context ${CTX}"
 HELM="helm --kube-context ${CTX}"
 WORK=$(mktemp -d)
@@ -313,7 +318,7 @@ bootstrap() { # bootstrap <output file>
   # No --chart-version: bootstrap takes the default-version path, so the e2e
   # exercises the newest-release selection against a real registry. The chart
   # is the one pushed above; box pulls it over loopback.
-  "$WORK/box" bootstrap --yes --chart-repo "$CHART_REPO" ${ACME_ARGS[@]+"${ACME_ARGS[@]}"} \
+  "$WORK/box" bootstrap --yes --chart-repo "$CHART_REPO" ${ACME_ARGS[@]+"${ACME_ARGS[@]}"} ${DNS_ARGS[@]+"${DNS_ARGS[@]}"} \
     --grant "$WORK/grant.yaml" --values "$WORK/values.yaml" \
     --namespace "$NS" --domain "$DOMAIN" \
     --data-path /srv/s5n/data --config-path /srv/s5n/config \
@@ -332,7 +337,7 @@ init() { # init <output file>
   #
   # --chart-version pins the release to the package pushed above: init reads
   # one chart, and the apply it hands over to installs that same value.
-  "$WORK/box" init --yes --chart-repo "$CHART_REPO" --chart-version "$CHART_VERSION" \
+  "$WORK/box" init --yes --chart-repo "$CHART_REPO" --chart-version "$CHART_VERSION" ${DNS_ARGS[@]+"${DNS_ARGS[@]}"} \
     --grant "$WORK/grant.yaml" --values "$WORK/values.yaml" \
     --namespace "$NS" --domain "$DOMAIN" \
     --data-path /srv/s5n/data --config-path /srv/s5n/config \
@@ -1019,10 +1024,12 @@ print("  app routes: %d HTTPRoutes, none pins a sectionName" % len(items))
   # the session cookie from the portal in the jar it still gets the same page,
   # which is the cookie's domain covering the subdomain.
   seerr_unauth=$WORK/seerr-unauth.html
-  seerr_code=$(curl -sS -o "$seerr_unauth" -w '%{http_code}' \
+  # Seerr answers its root with a redirect of its own (to its login or its
+  # first-run setup), so the page is fetched the way a browser gets it.
+  seerr_code=$(curl -sS -L -o "$seerr_unauth" -w '%{http_code}' \
     --resolve "${SEERR_HOST}:443:${gw_addr}" --cacert "$WORK/pebble-root.pem" \
     "https://${SEERR_HOST}/" 2>/dev/null || true)
-  echo "  GET https://${SEERR_HOST}/ without a session: ${seerr_code}"
+  echo "  GET https://${SEERR_HOST}/ without a session (following Seerr's redirect): ${seerr_code}"
   [ "$seerr_code" = 200 ] || { echo "Seerr's own host answered ${seerr_code}"; fail=1; }
   grep -qi '<!doctype html' "$seerr_unauth" || { echo "Seerr's host did not serve an HTML page"; fail=1; }
   seerr_asset=$(grep -oE '(src|href)="/[^"]+\.(js|css)"' "$seerr_unauth" | head -1 | sed 's/^[a-z]*="//; s/"$//' || true)
@@ -1039,7 +1046,7 @@ print("  app routes: %d HTTPRoutes, none pins a sectionName" % len(items))
     echo "  GET https://${SEERR_HOST}${seerr_asset}: ${asset_code}"
     [ "$asset_code" = 200 ] || { echo "Seerr's asset does not resolve on its own host"; fail=1; }
   fi
-  seerr_authed=$(curl -sS -o "$WORK/seerr-authed.html" -w '%{http_code}' -b "$JAR" \
+  seerr_authed=$(curl -sS -L -o "$WORK/seerr-authed.html" -w '%{http_code}' -b "$JAR" \
     --resolve "${SEERR_HOST}:443:${gw_addr}" --cacert "$WORK/pebble-root.pem" \
     "https://${SEERR_HOST}/" 2>/dev/null || true)
   echo "  GET https://${SEERR_HOST}/ with the portal's session cookie: ${seerr_authed}"
@@ -1118,12 +1125,19 @@ print("  app routes: %d HTTPRoutes, none pins a sectionName" % len(items))
   https_bad=0
   for i in $(seq 1 240); do
     if [ -z "$solver_seen" ]; then
+      # The solver route under renewal is this host's: with more than one
+      # certificate on the box, another host's solver route can be in the same
+      # namespace at the same moment, and its exact path says nothing about
+      # this host's port-80 listeners.
       solver=$($K -n s5n-gateway get httproute -o json 2>/dev/null | python3 -c '
 import json, sys
+domain = sys.argv[1]
 items = json.load(sys.stdin).get("items", [])
 for r in items:
     name = r["metadata"]["name"]
     if not name.startswith("cm-acme-http-solver"):
+        continue
+    if domain not in (r["spec"].get("hostnames") or []):
         continue
     ref = r["spec"]["parentRefs"][0]
     for rule in r["spec"].get("rules", []):
@@ -1132,7 +1146,7 @@ for r in items:
             if path.get("type") == "Exact" and path.get("value", "").startswith("/.well-known/acme-challenge/"):
                 print(name + " " + path["value"] + " " + str(ref.get("sectionName", "")))
                 sys.exit(0)
-' || true)
+' "$DOMAIN" || true)
       if [ -n "$solver" ]; then
         solver_seen=$(echo "$solver" | awk '{print $2}')
         solver_section=$(echo "$solver" | awk '{print $3}')
@@ -2006,6 +2020,80 @@ PY
     { echo "the second bootstrap rewrote the values file"; fail=1; }
   [ "$(revision)" = "$rev1" ] || { echo "the second bootstrap created a release revision"; fail=1; }
 
+  # ---- the no-DNS card, then the move to an issued certificate --------------
+  # Run 1 had no DNS answers at all. init installed self-signed certificates
+  # for the domain and for each app host, and its final card said, per host,
+  # that the name has no record and that a re-run is what moves it. This is the
+  # state a box with a made-up name is in, and it is not a failure.
+  log "the no-DNS final card names every host and its record"
+  cert=s5n-tls-box-internal-example
+  app_cert=s5n-tls-seerr-box-internal-example
+  grep -qF "${DOMAIN} has no DNS record, so its certificate is self-signed; add one, then run box init again to move it to Let's Encrypt" "$WORK/bootstrap1.txt" ||
+    { echo "the final card does not name the domain's missing record"; fail=1; }
+  for host in "$PLEX_HOST" "$SEERR_HOST"; do
+    grep -qF "${host} has no DNS record, so its certificate is self-signed; add either a wildcard *.${DOMAIN} or a record for ${host}, then run box init again to move it to Let's Encrypt" "$WORK/bootstrap1.txt" ||
+      { echo "the final card does not name ${host}'s missing record"; fail=1; }
+  done
+  $K -n s5n-gateway wait --for=condition=Ready "certificate/$app_cert" --timeout=120s ||
+    { echo "the app host's self-signed Certificate never became Ready"; fail=1; }
+  [ "$($K -n s5n-gateway get certificate "$app_cert" -o jsonpath='{.spec.issuerRef.name}')" = s5n-selfsigned ] ||
+    { echo "the app host's Certificate is not self-signed on a box with no records"; fail=1; }
+  old_serial=$(tls_serial "$cert")
+  old_app_serial=$(tls_serial "$app_cert")
+  echo "  self-signed serials: ${DOMAIN} ${old_serial}, ${SEERR_HOST} ${old_app_serial}"
+
+  # The records exist now. --dns-file is the test's own answer for the host's
+  # resolver: the same file for every name, a public address, so init's rule
+  # (public answer -> Let's Encrypt) has something real to decide on. Pebble
+  # and cert-manager resolve the names through CoreDNS, which points at the
+  # Gateway, so the HTTP-01 challenge still arrives on port 80.
+  log "a record exists: init again moves the same hosts to Let's Encrypt"
+  cat >"$WORK/dns" <<EOF
+192.0.2.10 ${DOMAIN} ${PLEX_HOST} ${SEERR_HOST}
+EOF
+  install_pebble
+  [ "$fail" = 0 ] || return 0
+  patch_coredns "$lb_addr" "$DOMAIN" "$PLEX_HOST" "$SEERR_HOST" ||
+    { echo "could not patch CoreDNS for the box's names"; fail=1; }
+  ACME_ARGS=(--acme-server "https://pebble.pebble.svc:14000/dir")
+  DNS_ARGS=(--dns-file "$WORK/dns")
+  log "box bootstrap: the names answer now, so the same certificates are issued"
+  if bootstrap "$WORK/bootstrap3.txt"; then
+    cat "$WORK/bootstrap3.txt"
+  else
+    cat "$WORK/bootstrap3.txt"; fail=1
+  fi
+  for host in "$DOMAIN" "$PLEX_HOST" "$SEERR_HOST"; do
+    grep -qF "tls: ${host} resolves to 192.0.2.10: using Let's Encrypt" "$WORK/bootstrap3.txt" ||
+      { echo "init did not move ${host} to Let's Encrypt"; fail=1; }
+  done
+  if grep -q "has no DNS record" "$WORK/bootstrap3.txt"; then
+    echo "the card still says a name has no record after the record was added"
+    fail=1
+  fi
+  $K -n s5n-gateway wait --for=condition=Ready "certificate/$cert" --timeout=180s ||
+    { echo "the domain's Certificate never became Ready against Pebble"; fail=1; }
+  $K -n s5n-gateway wait --for=condition=Ready "certificate/$app_cert" --timeout=180s ||
+    { echo "the app host's Certificate never became Ready against Pebble"; fail=1; }
+  for name in "$cert" "$app_cert"; do
+    got=$($K -n s5n-gateway get certificate "$name" -o jsonpath='{.spec.issuerRef.name}')
+    [ "$got" = s5n-letsencrypt ] || { echo "${name} still names issuer ${got}"; fail=1; }
+  done
+  new_serial=$(tls_serial "$cert")
+  new_app_serial=$(tls_serial "$app_cert")
+  echo "  issued serials: ${DOMAIN} ${new_serial}, ${SEERR_HOST} ${new_app_serial}"
+  [ -n "$new_serial" ] && [ "$new_serial" != "$old_serial" ] ||
+    { echo "the domain's certificate was not re-issued"; fail=1; }
+  [ -n "$new_app_serial" ] && [ "$new_app_serial" != "$old_app_serial" ] ||
+    { echo "the app host's certificate was not re-issued"; fail=1; }
+  https_code=$(https_get "$lb_addr" /sonarr/ping "$WORK/pebble-root.pem")
+  echo "  HTTPS ${DOMAIN}/sonarr/ping with Pebble's CA: ${https_code}"
+  [ "$https_code" = 200 ] || { echo "HTTPS did not answer 200 with Pebble's CA after the move"; fail=1; }
+  seerr_https=$(curl -sS -L -o /dev/null -w '%{http_code}' \
+    --resolve "${SEERR_HOST}:443:${lb_addr}" --cacert "$WORK/pebble-root.pem" \
+    "https://${SEERR_HOST}/" 2>/dev/null || true)
+  echo "  HTTPS ${SEERR_HOST}/ with Pebble's CA (following Seerr's redirect): ${seerr_https}"
+  [ "$seerr_https" = 200 ] || { echo "the app host did not serve the issued certificate"; fail=1; }
 }
 
 # ---- scenario: foreign-gateway ----------------------------------------------

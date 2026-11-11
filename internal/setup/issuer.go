@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"os"
 	"sort"
 	"strings"
 	"time"
@@ -170,4 +171,43 @@ func issuerFor(host string, ans hostAnswer, forced string) (issuer, line string)
 		return issuer, fmt.Sprintf("%s %s: using Let's Encrypt", host, why)
 	}
 	return issuer, fmt.Sprintf("%s %s: using a self-signed certificate", host, why)
+}
+
+// FileResolver answers from a hosts-style file: one address and one or more
+// names per line, the format every system resolver already reads. It exists
+// because an e2e cannot write /etc/hosts: the test host's own DNS is not the
+// test's to change, and init's certificate decision is exactly what the e2e has
+// to move from "no record" to "a public one" between two runs. A name the file
+// does not list is a not-found answer, the way a resolver answers a name with no
+// record, so init's wording and its decision are the same as on a real host.
+type FileResolver struct{ Path string }
+
+// LookupHost reads the file on every call: a test changes the answer between
+// runs, and init keeps no earlier answer, which is what makes a re-run move a
+// host from self-signed to Let's Encrypt.
+func (f FileResolver) LookupHost(_ context.Context, host string) ([]string, error) {
+	raw, err := os.ReadFile(f.Path)
+	if err != nil {
+		return nil, err
+	}
+	var addrs []string
+	for _, line := range strings.Split(string(raw), "\n") {
+		if i := strings.IndexByte(line, '#'); i >= 0 {
+			line = line[:i]
+		}
+		fields := strings.Fields(line)
+		if len(fields) < 2 {
+			continue
+		}
+		for _, name := range fields[1:] {
+			if strings.EqualFold(name, host) {
+				addrs = append(addrs, fields[0])
+				break
+			}
+		}
+	}
+	if len(addrs) == 0 {
+		return nil, &net.DNSError{Err: "no such host", Name: host, IsNotFound: true}
+	}
+	return addrs, nil
 }
