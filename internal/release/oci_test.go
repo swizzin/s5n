@@ -139,7 +139,10 @@ func packageChart(t *testing.T, dir string) []byte {
 func TestOCIRoundTrip(t *testing.T) {
 	host := registry(t)
 	want := pushChart(t, host)
-	pulled, err := (&OCIChart{BoxVersion: "0.0.0"}).Load(context.Background(), ChartRef{
+	// The box a release ships is built at the chart's own version, so it
+	// meets the chart's min-box; a box older than that is refused, which is
+	// TestCheckMinBox's business, not this test's.
+	pulled, err := (&OCIChart{BoxVersion: chartVersion(t, want)}).Load(context.Background(), ChartRef{
 		Repo:    "oci://" + host + "/charts/s5n",
 		Version: chartVersion(t, want),
 	})
@@ -225,7 +228,9 @@ func TestOCIEmptyRepository(t *testing.T) {
 // why. The skip is on stdout, in box's voice.
 func TestOCIPicksTheNewestReleaseBoxCanUse(t *testing.T) {
 	host := registry(t)
-	pushChart(t, host)
+	// This box is the one the shipped chart was released with, so the shipped
+	// chart is the newest release it can use.
+	box := chartVersion(t, pushChart(t, host))
 
 	// A second release, 0.9.0, whose floor is above this box.
 	data := packageChart(t, filepath.Join("..", "..", "charts", "s5n"))
@@ -239,7 +244,7 @@ func TestOCIPicksTheNewestReleaseBoxCanUse(t *testing.T) {
 	}
 
 	var log bytes.Buffer
-	src := &OCIChart{BoxVersion: "0.1.0", Say: &say.Plain{W: &log}}
+	src := &OCIChart{BoxVersion: box, Say: &say.Plain{W: &log}}
 	got, err := src.Load(context.Background(), ChartRef{Repo: "oci://" + host + "/charts/s5n"})
 	if err != nil {
 		t.Fatalf("pull: %v\n%s", err, log.String())
@@ -520,7 +525,7 @@ func TestOCIPullIgnoresTheOperatorsRegistryConfig(t *testing.T) {
 	poison := poisonRegistryHome(t)
 	before := treeSnapshot(t, poison)
 
-	pulled, err := (&OCIChart{BoxVersion: "0.0.0"}).Load(context.Background(), ChartRef{
+	pulled, err := (&OCIChart{BoxVersion: chartVersion(t, want)}).Load(context.Background(), ChartRef{
 		Repo:    "oci://" + host + "/charts/s5n",
 		Version: chartVersion(t, want),
 	})
@@ -551,7 +556,7 @@ func TestOCIPullLeavesNoTemporaryHelmHome(t *testing.T) {
 	}
 	t.Setenv("TMPDIR", sandbox)
 
-	src := &OCIChart{BoxVersion: "0.0.0"}
+	src := &OCIChart{BoxVersion: version}
 	if _, err := src.Load(context.Background(), ChartRef{Repo: "oci://" + host + "/charts/s5n", Version: version}); err != nil {
 		t.Fatalf("pull: %v", err)
 	}
@@ -637,7 +642,7 @@ func TestOCIPullRetriesATransientRegistryFailure(t *testing.T) {
 	want := pushChart(t, host)
 	failures.Store(1)
 
-	pulled, err := (&OCIChart{BoxVersion: "0.0.0", Retry: instantRetry(4)}).Load(context.Background(), ChartRef{
+	pulled, err := (&OCIChart{BoxVersion: chartVersion(t, want), Retry: instantRetry(4)}).Load(context.Background(), ChartRef{
 		Repo:    "oci://" + host + "/charts/s5n",
 		Version: chartVersion(t, want),
 	})
