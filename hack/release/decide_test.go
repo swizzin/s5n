@@ -41,6 +41,20 @@ metallb: "` + metallb + `"           # renovate: datasource=helm depName=metallb
 `)
 }
 
+// platformWithSums is platform.yaml the way the chart ships it: the k0s line
+// with its two asset checksums under it. The sums are the release's, not a
+// version, so the cases below cover both the bump that moves them with the
+// version and the one that moves them alone.
+func platformWithSums(k0s, amd64, arm64 string) []byte {
+	return []byte(`authelia: "docker.io/authelia/authelia:4.39.28@sha256:` + strings.Repeat("d", 64) + `"  # renovate: datasource=docker depName=authelia/authelia
+k0s: ` + k0s + `       # renovate: datasource=github-releases depName=k0sproject/k0s
+k0sSHA256amd64: "` + amd64 + `"
+k0sSHA256arm64: "` + arm64 + `"
+envoyGateway: "1.9.3"       # renovate: datasource=docker depName=envoyproxy/gateway-helm
+metallb: "0.16.1"           # renovate: datasource=helm depName=metallb registryUrl=https://metallb.github.io/metallb
+`)
+}
+
 // TestDecideRange is the case table: which ranges a push to main may cut a
 // chart release for, and which it must refuse.
 func TestDecideRange(t *testing.T) {
@@ -159,6 +173,57 @@ func TestDecideRange(t *testing.T) {
 			newP:     []byte(strings.Replace(string(platform), "v1.37.2+k0s.1", "v1.38.0+k0s.1", 1)),
 			prev:     "0.2.0",
 			reasonIn: []string{"k0s", "minor bump"},
+		},
+		{
+			// The sums are written in the pull request that moves the pin, and
+			// the bump is counted once: the k0s line is the version, the sums
+			// are of its asset.
+			name:    "a k0s patch that carries its sums releases",
+			changed: []string{platformFile},
+			oldV:    variants, newV: variants,
+			oldP: platformWithSums("v1.37.2+k0s.1", strings.Repeat("1", 64), strings.Repeat("2", 64)),
+			newP: platformWithSums("v1.37.3+k0s.1", strings.Repeat("3", 64), strings.Repeat("4", 64)),
+			prev: "0.2.0", release: true, version: "0.2.1",
+		},
+		{
+			// A patch with stale sums still resolves here: CI's k0s-sums
+			// --check is what fails it, on the pull request, before it merges.
+			name:    "a k0s patch with the old sums still releases",
+			changed: []string{platformFile},
+			oldV:    variants, newV: variants,
+			oldP: platformWithSums("v1.37.2+k0s.1", strings.Repeat("1", 64), strings.Repeat("2", 64)),
+			newP: platformWithSums("v1.37.3+k0s.1", strings.Repeat("1", 64), strings.Repeat("2", 64)),
+			prev: "0.2.0", release: true, version: "0.2.1",
+		},
+		{
+			// A sum describes the release on the k0s line: moving it alone
+			// would leave the file pinning one release's version with another's
+			// checksum, which is an install box refuses on the host.
+			name:    "a checksum that moves without its k0s version does not release",
+			changed: []string{platformFile},
+			oldV:    variants, newV: variants,
+			oldP:     platformWithSums("v1.37.2+k0s.1", strings.Repeat("1", 64), strings.Repeat("2", 64)),
+			newP:     platformWithSums("v1.37.2+k0s.1", strings.Repeat("5", 64), strings.Repeat("2", 64)),
+			prev:     "0.2.0",
+			reasonIn: []string{"k0sSHA256amd64", "the k0s version did not"},
+		},
+		{
+			name:    "a k0s minor that carries its sums does not release",
+			changed: []string{platformFile},
+			oldV:    variants, newV: variants,
+			oldP:     platformWithSums("v1.37.2+k0s.1", strings.Repeat("1", 64), strings.Repeat("2", 64)),
+			newP:     platformWithSums("v1.38.0+k0s.1", strings.Repeat("3", 64), strings.Repeat("4", 64)),
+			prev:     "0.2.0",
+			reasonIn: []string{"k0s", "minor bump"},
+		},
+		{
+			name:    "a checksum added to the file does not release",
+			changed: []string{platformFile},
+			oldV:    variants, newV: variants,
+			oldP:     platformWithSums("v1.37.2+k0s.1", strings.Repeat("1", 64), strings.Repeat("2", 64)),
+			newP:     append(platformWithSums("v1.37.2+k0s.1", strings.Repeat("1", 64), strings.Repeat("2", 64)), []byte("k0sSHA256riscv64: \""+strings.Repeat("6", 64)+"\"\n")...),
+			prev:     "0.2.0",
+			reasonIn: []string{"pin k0sSHA256riscv64 was added"},
 		},
 		{
 			name:    "an added pin does not release",
@@ -311,6 +376,34 @@ func TestMovedPins(t *testing.T) {
 	if strings.Join(got, "\n") != "authelia: 4.39.28 -> 4.39.29" {
 		t.Fatalf("moved pins = %q, want the login's tag move alone", got)
 	}
+
+	// The k0s checksums are not pins of their own: the body names the release
+	// the user gets, and a line of hex under it would say nothing they could
+	// act on.
+	got, err = movedPins(
+		platformWithSums("v1.37.2+k0s.1", strings.Repeat("1", 64), strings.Repeat("2", 64)),
+		platformWithSums("v1.37.3+k0s.1", strings.Repeat("3", 64), strings.Repeat("4", 64)),
+	)
+	if err != nil {
+		t.Fatalf("movedPins: %v", err)
+	}
+	if strings.Join(got, "\n") != "k0s: v1.37.2+k0s.1 -> v1.37.3+k0s.1" {
+		t.Fatalf("moved pins = %q, want the k0s version alone", got)
+	}
+	if all := allPins(mustPins(t, platformWithSums("v1.37.2+k0s.1", strings.Repeat("1", 64), strings.Repeat("2", 64)))); strings.Contains(strings.Join(all, "\n"), "k0sSHA256") {
+		t.Fatalf("allPins = %q, want the checksums left out of a first release's body", all)
+	}
+}
+
+// mustPins parses a platform.yaml the way the decision does, for the tests that
+// read a file rather than a hand-built map.
+func mustPins(t *testing.T, b []byte) map[string]string {
+	t.Helper()
+	pins, err := parsePins(b)
+	if err != nil {
+		t.Fatalf("parsePins: %v", err)
+	}
+	return pins
 }
 
 // TestBody: both sections are in the release's markdown, and an empty one says

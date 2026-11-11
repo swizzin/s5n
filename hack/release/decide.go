@@ -185,8 +185,9 @@ func variantReason(oldApps, newApps map[string]map[string]variant) (int, string)
 }
 
 // parsePins reads charts/s5n/platform.yaml as key -> value. Every value is a
-// scalar: a version, or -- for the login -- a whole image reference. The file
-// is flat, one key per component, with the `# renovate:` marker inline.
+// scalar: a version, -- for the login -- a whole image reference, or a k0s
+// asset checksum. The file is flat, one key per component, with the `# renovate:`
+// marker inline.
 func parsePins(b []byte) (map[string]string, error) {
 	var doc map[string]any
 	if err := yaml.Unmarshal(b, &doc); err != nil {
@@ -210,9 +211,21 @@ func scalar(v any) string {
 	}
 }
 
+// isK0sSumKey reports whether a platform.yaml key pins a k0s asset checksum
+// rather than a version. The sums live in the file beside the version they
+// describe, keyed k0sSHA256<arch> (release.ParseVersions requires them), and
+// they are not versions: a 47de... -> 9f2c... move is not a downgrade, it is
+// another release's bytes.
+func isK0sSumKey(key string) bool {
+	return strings.HasPrefix(key, "k0sSHA256")
+}
+
 // pinReason compares two platform.yaml files the way variantReason compares
 // variants.yaml: how many pins moved, and the reason to refuse when one moved
-// past a patch.
+// past a patch. The checksums are not pins of their own: a k0s bump is counted
+// once, on the k0s line, and the sums that come with it add nothing; sums that
+// move without that line are refused, because they would describe a release the
+// file does not pin.
 func pinReason(oldPins, newPins map[string]string) (int, string) {
 	moved := 0
 	for _, key := range sortedKeys(oldPins, newPins) {
@@ -224,6 +237,15 @@ func pinReason(oldPins, newPins map[string]string) (int, string) {
 		case !inOld:
 			return 0, "pin " + key + " was added"
 		case oldV == newV:
+			continue
+		}
+		if isK0sSumKey(key) {
+			// A checksum is not a version. It describes the k0s release above
+			// it, so it may only move in the commit that moves that line, and
+			// when it does it is not a bump of its own: the k0s line is.
+			if oldPins["k0s"] == newPins["k0s"] {
+				return 0, "pin " + key + " changed and the k0s version did not: the sums are of that release's asset, so they move with the k0s line or not at all"
+			}
 			continue
 		}
 		switch classify(pinVersion(oldV), pinVersion(newV)) {
@@ -467,6 +489,11 @@ func movedPins(oldPlatform, newPlatform []byte) ([]string, error) {
 			moved = append(moved, fmt.Sprintf("%s: removed", key))
 		case oldV == newV:
 			continue
+		case isK0sSumKey(key):
+			// The k0s line above already says which release the user gets,
+			// and the sums are of that release's asset: a line of hex in the
+			// body would say nothing a reader could act on.
+			continue
 		case pinVersion(oldV) == pinVersion(newV):
 			moved = append(moved, fmt.Sprintf("%s: %s digest updated", key, pinVersion(oldV)))
 		default:
@@ -480,6 +507,9 @@ func movedPins(oldPlatform, newPlatform []byte) ([]string, error) {
 func allPins(pins map[string]string) []string {
 	keys := make([]string, 0, len(pins))
 	for k := range pins {
+		if isK0sSumKey(k) {
+			continue // a checksum, not a version: the k0s line is the pin
+		}
 		keys = append(keys, k)
 	}
 	sort.Strings(keys)
