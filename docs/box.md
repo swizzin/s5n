@@ -422,6 +422,15 @@ validated, self-signed otherwise. This is how box would do it.
   self-signed, and init says which and why. It doesn't compare the address with the
   node's, because a box behind NAT has a private node address and a public name that
   still validates. `tls.issuer` in root's values forces either one.
+- **Apps with no base URL get a host of their own.** An app whose UI writes absolute
+  asset paths (Seerr, Plex's web app) breaks under a `/<name>` prefix, so it is served
+  at `<app>.<domain>` instead, with its own listener and certificate the same way as the
+  box's domain. The operator provides the names: one wildcard record (`*.<domain>`) or
+  one record per app, whichever their DNS allows. box doesn't manage DNS and holds no
+  DNS-provider credentials, so a wildcard *certificate*, which needs DNS-01, is not
+  part of this. Before box writes anything for an app host, it checks that the name
+  resolves to the same addresses as the box's domain, and stops naming the record to
+  add when it doesn't, rather than leaving a certificate that can never issue.
 - **Tested without the internet.** The e2e runs Pebble (Let's Encrypt's test ACME
   server) in the kind cluster and points a test issuer at it, so HTTP-01 through the
   Gateway is proven on every run. The self-signed path gets its own assertion.
@@ -836,11 +845,6 @@ reason instead of a stack trace.
 
 ## Open questions
 
-- **Apps with no base URL** (Seerr/Overseerr, likely Plex's web app). The chart routes
-  them under `/<name>` with a prefix rewrite. That keeps the API answering, which is
-  all the e2e checks, but a UI that writes absolute asset paths breaks under a prefix.
-  The likely fix is a subdomain for those apps (`seerr.<domain>`), which puts more
-  host names in the grant and needs DNS and certificates for each one, or a wildcard.
 - `migrate` sources: bare-metal swizzin, Docker, an existing Kubernetes stack. Proposed:
   one command that detects the source, since the hard part (rewriting paths in the Arr
   databases, carrying qBittorrent's state) is the same for all of them.
