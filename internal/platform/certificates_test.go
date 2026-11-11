@@ -3,6 +3,7 @@ package platform
 import (
 	"context"
 	"reflect"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -71,10 +72,11 @@ func (f *fakeCertCluster) Serves(context.Context, string, string, string) (bool,
 }
 
 func TestCertificateNames(t *testing.T) {
+	// Hosts whose flattening loses nothing keep the readable label, so the
+	// names hack/e2e-box.sh asserts on stay put.
 	cases := map[string]string{
 		"box.example.test":  "box-example-test",
 		"Box.Example.Test":  "box-example-test",
-		"box_1.example":     "box-1-example",
 		"a.b.c.example.com": "a-b-c-example-com",
 	}
 	for host, want := range cases {
@@ -99,6 +101,96 @@ func TestCertificateNames(t *testing.T) {
 	}
 	if ListenerPolicyName("box.example.test") != "s5n-no-login-box-example-test" {
 		t.Errorf("ListenerPolicyName = %q", ListenerPolicyName("box.example.test"))
+	}
+}
+
+// hashedLabel recognises the disambiguating suffix a lossy host carries.
+var hashedLabel = regexp.MustCompile(`-[0-9a-f]{8}$`)
+
+// Two hosts that flatten to one label must not share a name: sharing one
+// would let either host's Certificate, listener, SecurityPolicy or field
+// manager overwrite the other's.
+func TestDNSLabelDisambiguatesCollidingHosts(t *testing.T) {
+	longPrefix := strings.Repeat("a", 100)
+	pairs := [][2]string{
+		{"a-b.example.com", "a.b.example.com"},
+		{"*.example.com", "example.com"},
+		{"a--b.example.com", "a-b.example.com"},
+		{longPrefix + "one", longPrefix + "two"},
+	}
+	for _, pair := range pairs {
+		first, second := dnsLabel(pair[0]), dnsLabel(pair[1])
+		if first == second {
+			t.Errorf("dnsLabel(%q) and dnsLabel(%q) are both %q", pair[0], pair[1], first)
+		}
+		for _, host := range pair {
+			label := dnsLabel(host)
+			if len(label) > maxDNSLabel {
+				t.Errorf("dnsLabel(%q) = %q is %d characters", host, label, len(label))
+			}
+			// The readable flattening is kept wherever it fits; the hash is
+			// the only thing the suffix adds.
+			flat := flattenHost(strings.ToLower(host))
+			if room := maxDNSLabel - hostHashLen - 1; len(flat) <= room {
+				if want := flat + label[len(flat):]; label != want {
+					t.Errorf("dnsLabel(%q) = %q, want %q", host, label, want)
+				}
+			}
+		}
+	}
+}
+
+func TestDNSLabelHashedSuffix(t *testing.T) {
+	lossy := []string{
+		"a-b.example.com",
+		"*.example.com",
+		"a--b.example.com",
+		"box_1.example",
+		strings.Repeat("a", 100) + "one",
+	}
+	for _, host := range lossy {
+		label := dnsLabel(host)
+		if !hashedLabel.MatchString(label) {
+			t.Errorf("dnsLabel(%q) = %q, want an 8-hex suffix", host, label)
+		}
+		if len(label) > maxDNSLabel {
+			t.Errorf("dnsLabel(%q) = %q is %d characters", host, label, len(label))
+		}
+		// The hash is of the lowercased host: case variants share one name.
+		if got, want := dnsLabel(strings.ToUpper(host)), label; got != want {
+			t.Errorf("dnsLabel(%q) = %q, dnsLabel(%q) = %q", strings.ToUpper(host), got, host, want)
+		}
+		if got, want := dnsLabel(host), label; got != want {
+			t.Errorf("dnsLabel(%q) is not deterministic: %q then %q", host, got, want)
+		}
+	}
+	// A host longer than the limit keeps the roomiest prefix the suffix
+	// leaves, so the name is exactly the limit rather than shorter.
+	if got := dnsLabel(strings.Repeat("a", 100) + "one"); len(got) != maxDNSLabel {
+		t.Errorf("long host label is %d characters, want %d", len(got), maxDNSLabel)
+	}
+}
+
+// Every name one host gets must differ from the name the same object type
+// gets for a host that flattens to the same readable label, or the two
+// hosts' objects and field managers collide.
+func TestCollidingHostsGetDistinctObjectNames(t *testing.T) {
+	first, second := "a-b.example.com", "a.b.example.com"
+	names := []struct {
+		name string
+		fn   func(string) string
+	}{
+		{"CertificateName", CertificateName},
+		{"ListenerName", ListenerName},
+		{"HTTPListenerName", HTTPListenerName},
+		{"ListenerPolicyName", ListenerPolicyName},
+		{"httpListenerManager", httpListenerManager},
+		{"httpsListenerManager", httpsListenerManager},
+	}
+	for _, n := range names {
+		if n.fn(first) == n.fn(second) {
+			t.Errorf("%s(%q) == %s(%q) == %q", n.name, first, n.name, second, n.fn(first))
+		}
 	}
 }
 
@@ -596,5 +688,18 @@ func TestClusterIssuerName(t *testing.T) {
 	}
 	if _, err := clusterIssuerName("acme"); err == nil {
 		t.Fatal("an unknown issuer was accepted")
+	}
+}
+
+// Every name a host produces is a valid object name, even for a host with
+// nothing readable in it: no leading or trailing hyphen, lowercase
+// alphanumerics and hyphens only.
+func TestHostNamesAreValidObjectNames(t *testing.T) {
+	valid := regexp.MustCompile(`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`)
+	for _, host := range []string{"*", "*.example.com", "-a-.example.com", "box.example.test", strings.Repeat("a-", 80) + "example.com"} {
+		label := dnsLabel(host)
+		if !valid.MatchString(label) || len(label) > maxDNSLabel {
+			t.Errorf("dnsLabel(%q) = %q, not a valid object name of at most %d characters", host, label, maxDNSLabel)
+		}
 	}
 }

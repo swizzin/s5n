@@ -2,8 +2,11 @@ package platform
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
+	"regexp"
 	"strings"
 	"time"
 
@@ -387,12 +390,59 @@ func httpsListenerManager(host string) string {
 	return kube.TLSManagerPrefix + dnsLabel(host) + "-https"
 }
 
+// maxDNSLabel is the longest host label box puts into a name. The objects are
+// DNS subdomains (253) and listener names section names (253); the tightest
+// fit is a field manager (128), which adds `box-tls-` and `-https` around it.
+const maxDNSLabel = 100
+
+// hostHashLen is how many hex characters of a host's digest a lossy label
+// carries. Four bytes make two hosts colliding on the readable prefix
+// vanishingly unlikely, and the object names stay readable.
+const hostHashLen = 8
+
+// plainHost matches the hosts whose flattening is reversible: lowercase
+// alphanumeric labels joined by single dots. A hyphen is excluded on purpose,
+// because a hyphen and a dot flatten to the same character.
+var plainHost = regexp.MustCompile(`^[a-z0-9]+(\.[a-z0-9]+)*$`)
+
 // dnsLabel flattens a host name into characters Kubernetes object names and
 // field managers accept, short enough for both.
+//
+// Flattening alone is lossy: "a-b.example.com" and "a.b.example.com" both
+// become "a-b-example-com", "*" and "_" collapse into hyphens, and a host
+// longer than the limit loses its tail. Two hosts that flatten to one label
+// would share a Certificate, a listener, a SecurityPolicy and a field
+// manager, so whichever applied last would silently own the other's objects.
+//
+// A host whose flattening is unambiguous -- only alphanumeric labels joined by
+// dots, and short enough -- keeps that readable name, so box.example.test is
+// still box-example-test. Every other host gets the same readable prefix, cut
+// to leave room, plus "-" and eight hex characters of the sha256 of the
+// lowercased host. The hash is over the lowercased form so case variants of
+// one host keep one name.
 func dnsLabel(host string) string {
-	host = strings.ToLower(host)
+	lower := strings.ToLower(host)
+	out := flattenHost(lower)
+	if plainHost.MatchString(lower) && len(out) <= maxDNSLabel {
+		return out
+	}
+	sum := sha256.Sum256([]byte(lower))
+	suffix := "-" + hex.EncodeToString(sum[:])[:hostHashLen]
+	if room := maxDNSLabel - len(suffix); len(out) > room {
+		out = strings.TrimRight(out[:room], "-")
+	}
+	// A host with nothing readable in it ("*") leaves only the suffix, and a
+	// name must not start with a hyphen.
+	return strings.TrimLeft(out+suffix, "-")
+}
+
+// flattenHost is the old, lossy naming: every byte outside a DNS label
+// becomes a hyphen, runs collapse and dashes trim. It does not cut to the
+// limit: dnsLabel needs to know whether the readable form fits before it
+// decides, and only the branch that keeps the name may truncate it.
+func flattenHost(lower string) string {
 	var b strings.Builder
-	for _, r := range host {
+	for _, r := range lower {
 		switch {
 		case r >= 'a' && r <= 'z', r >= '0' && r <= '9', r == '-':
 			b.WriteRune(r)
@@ -403,9 +453,6 @@ func dnsLabel(host string) string {
 	out := strings.Trim(b.String(), "-")
 	for strings.Contains(out, "--") {
 		out = strings.ReplaceAll(out, "--", "-")
-	}
-	if len(out) > 100 {
-		out = strings.Trim(out[:100], "-")
 	}
 	return out
 }
