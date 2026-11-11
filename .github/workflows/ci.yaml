@@ -1,7 +1,6 @@
-# Every PR, every push to main or develop, and every call from another workflow:
-# Go, chart, and the full kind e2e. A push to main is also where a chart release
-# is decided, once every test job here is green -- ci.yaml is the gate and the
-# trigger in one file, so no second workflow can drift from it.
+# Every PR and every push to main or develop: the tests (test.yaml), and on a
+# push to main, once they are green, the chart release decision. ci.yaml is the
+# gate and the trigger in one file, so no second workflow can drift from it.
 #
 # Actions are pinned by commit; the comment names the tag the commit belongs to.
 name: ci
@@ -10,98 +9,20 @@ on:
   pull_request:
   push:
     branches: [main, develop]
-  workflow_call:
-    inputs:
-      ref:
-        description: "the ref to test: the back-merge after a release calls this with develop"
-        required: true
-        type: string
 
 permissions:
   contents: read
 
-# The group carries the ref under test as well as the caller's: a call runs in
-# the caller's run but tests another ref, and must not queue behind that run.
 concurrency:
-  group: ci-${{ github.ref }}-${{ inputs.ref }}
+  group: ci-${{ github.ref }}
   # Only a pull request's older run is wasted by a newer push. A push to main
   # or develop is never cancelled, because the run a new push would cancel may
   # be the one cutting the release.
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
-env:
-  HELM_VERSION: v4.3.0
-  # Tools come from their release binaries, checked against these sha256s, so
-  # the verifiers do not depend on the Go toolchain setup-go pins from go.mod.
-  KUBECONFORM_VERSION: v0.8.0
-  KUBECONFORM_SHA256: 9bc2bffbf71f261128533edaf912153948b7ff238f9a531ae6d34466ec287883 # kubeconform-linux-amd64.tar.gz
-  KIND_VERSION: v0.33.0
-  KIND_SHA256: aee6151561422756b764a4ae28e7f44cda5af5a9eead3cc9985112b1de8d8e0d # kind-linux-amd64
-
 jobs:
-  go:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          ref: ${{ inputs.ref || github.sha }}
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
-        with:
-          go-version-file: go.mod
-      - name: gofmt
-        run: |
-          unformatted=$(gofmt -l .)
-          if [ -n "$unformatted" ]; then echo "gofmt needed:"; echo "$unformatted"; exit 1; fi
-      - run: go vet ./...
-      - run: go test -race ./...
-
-  chart:
-    runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        # Oldest supported, middle, newest. Keep in step with AGENTS.md.
-        kubernetes: ["1.30.0", "1.34.0", "1.37.0"]
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          ref: ${{ inputs.ref || github.sha }}
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
-        with:
-          go-version-file: go.mod
-      - uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
-        with:
-          version: ${{ env.HELM_VERSION }}
-      - name: install kubeconform
-        run: |
-          curl -fsSLo kubeconform.tgz "https://github.com/yannh/kubeconform/releases/download/${KUBECONFORM_VERSION}/kubeconform-linux-amd64.tar.gz"
-          echo "${KUBECONFORM_SHA256}  kubeconform.tgz" | sha256sum -c -
-          mkdir -p "$HOME/.local/bin" && tar -xzf kubeconform.tgz -C "$HOME/.local/bin" kubeconform && rm kubeconform.tgz
-          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
-      - run: hack/validate-chart.sh "${{ matrix.kubernetes }}"
-
-  e2e-kind:
-    needs: [go, chart]
-    runs-on: ubuntu-latest
-    timeout-minutes: 45
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          ref: ${{ inputs.ref || github.sha }}
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
-        with:
-          go-version-file: go.mod
-      - uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
-        with:
-          version: ${{ env.HELM_VERSION }}
-      - name: install kind
-        run: |
-          mkdir -p "$HOME/.local/bin"
-          curl -fsSLo "$HOME/.local/bin/kind" "https://github.com/kubernetes-sigs/kind/releases/download/${KIND_VERSION}/kind-linux-amd64"
-          echo "${KIND_SHA256}  $HOME/.local/bin/kind" | sha256sum -c -
-          chmod +x "$HOME/.local/bin/kind"
-          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
-      - run: hack/e2e-kind.sh
+  test:
+    uses: ./.github/workflows/test.yaml
 
   # ---- release: the decision, and the tag -------------------------------------
   #
@@ -116,11 +37,9 @@ jobs:
   # and nothing publishes -- a maintainer's tag included, which is what stopping
   # releases means.
   release:
-    needs: [go, chart, e2e-kind]
-    # A push to main only. A call inherits the caller's push event and ref, so
-    # the input is what keeps this job out of a workflow_call: the back-merge
-    # passes develop, and a call for main would still be a call.
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && inputs.ref == ''
+    needs: [test]
+    # A push to main only.
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     permissions:
       contents: write # create and push the tag
@@ -215,18 +134,11 @@ jobs:
           git push origin develop
 
   # A push made with GITHUB_TOKEN starts no workflow, so the merge above runs
-  # nothing on develop by itself: this call is that run. It is ci.yaml called
-  # with develop as the ref, so the same tests that gated the release gate the
-  # branch the next release comes from.
-  ci-on-develop:
+  # nothing on develop by itself: this call is that run, the same tests that
+  # gated the release, on the branch the next release comes from.
+  test-develop:
     needs: [backmerge]
     if: needs.backmerge.result == 'success'
-    # The grant is what ci.yaml declares, not what this call can use: the jobs
-    # it runs are the test jobs, which read, and the release and back-merge jobs
-    # are guarded off in a call and would be the only writers.
-    permissions:
-      contents: write
-      packages: write
-    uses: ./.github/workflows/ci.yaml
+    uses: ./.github/workflows/test.yaml
     with:
       ref: develop

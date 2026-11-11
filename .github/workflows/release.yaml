@@ -32,7 +32,7 @@
 # Chart.yaml, one patch above the previous s5n-v* tag.
 #
 # Actions are pinned by commit; the comment names the tag the commit belongs to.
-# Tool binaries are fetched and sha256-checked the way ci.yaml does it.
+# Tool binaries are fetched and sha256-checked the way test.yaml does it.
 name: release
 
 on:
