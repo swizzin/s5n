@@ -666,7 +666,7 @@ func TestBootstrapCleanHostInstalls(t *testing.T) {
 	if len(inst.plans) != 1 || inst.plans[0].Version != pins.K0s || !inst.plans[0].CleanHost {
 		t.Fatalf("installer should get one clean-host plan for %s: %+v", pins.K0s, inst.plans)
 	}
-	if inst.plans[0].SHA256 != k0sSHA256[inst.plans[0].Version][inst.plans[0].Arch] {
+	if inst.plans[0].SHA256 != pins.K0sSHA256[inst.plans[0].Arch] {
 		t.Errorf("plan carries no pinned checksum: %+v", inst.plans[0])
 	}
 
@@ -972,9 +972,14 @@ func TestFreshClusterAddressesKeepsExternal(t *testing.T) {
 // does not, so a value read from anywhere but the release fails this test.
 func TestBootstrapInstallsTheK0sTheReleasePins(t *testing.T) {
 	const pinned = "v9.8.0+k0s.1"
+	// The sums are the fixture's too, one per architecture: box installs the
+	// release's pin only with the checksum its pins carry, and this k0s is one
+	// nothing in the binary has ever heard of.
+	fixtureSum := strings.Repeat("7", 64)
 	fixture := release.Versions{
 		Authelia:     "docker.io/example/authelia:1.0.0@sha256:" + strings.Repeat("c", 64),
 		K0s:          pinned,
+		K0sSHA256:    map[string]string{"amd64": fixtureSum, "arm64": fixtureSum},
 		EnvoyGateway: "9.8.0",
 		MetalLB:      "9.8.0",
 		CertManager:  "v9.8.0",
@@ -1012,6 +1017,11 @@ func TestBootstrapInstallsTheK0sTheReleasePins(t *testing.T) {
 			}
 			if len(inst.plans) != 1 || inst.plans[0].Version != pinned {
 				t.Fatalf("installer got %+v, want one plan for the release's k0s %s", inst.plans, pinned)
+			}
+			// The plan carries the sum those pins name, so the installer
+			// verifies exactly the release the fixture release describes.
+			if got := inst.plans[0].SHA256; got != fixtureSum {
+				t.Errorf("install plan checksum = %q, want the release's pinned %q", got, fixtureSum)
 			}
 			if res.Reason == "" || !strings.Contains(res.Reason, pinned) {
 				t.Errorf("reason = %q, want it to name the release's k0s %s", res.Reason, pinned)

@@ -8,19 +8,21 @@ import (
 	"github.com/swizzin/s5n/internal/release"
 )
 
-// This file is box's k0s policy: the checksums of the k0s release box installs,
-// for each architecture, and the conditions under which box may touch a host at
-// all. The release itself is not here: it is the k0s pin of the chart release
-// box pulled (charts/s5n/platform.yaml), so a k0s bump is a chart release and
-// box is not rebuilt for it.
+// This file is box's k0s policy: the conditions under which box may touch a
+// host at all, and the release it installs there, with the checksum of that
+// release's asset. Neither is compiled in: the version is the k0s pin of the
+// chart release box pulled, and its checksums sit beside it in that release's
+// charts/s5n/platform.yaml, so a k0s bump is a chart release and box is not
+// rebuilt for it.
 //
 // It is separate from the sequence in installer.go because every value here is
 // a decision that is expensive to get wrong. The binary box writes runs as root
 // and registers a system service, so the checksum cannot be the one served
 // beside the archive: that only proves both left the same place, not that
-// either is what box intended to run. The sums below come from each release's
-// published sha256sums.txt and were confirmed by hashing the downloaded assets;
-// changing them is a deliberate edit, not something a run can drift into.
+// either is what the release says it is. The pinned sums come from each
+// release's published sha256sums.txt and are checked against the downloaded
+// assets before they land (hack/k0s-sums --check runs in CI), so moving them is
+// a deliberate edit that CI refuses to let go wrong.
 
 const (
 	// K0sBinaryPath is where box puts the single k0s binary, and therefore
@@ -34,23 +36,6 @@ const (
 	k0sReleaseBase = "https://github.com/k0sproject/k0s/releases/download"
 )
 
-// k0sSHA256 is the sha256 of each k0s release box may install, per GOARCH, as
-// published in that release's sha256sums.txt.
-//
-// Which of these is installed is not decided here: bootstrap installs the k0s
-// the chart release pins, so a bump is one line of the chart. The sums stay
-// compiled in, because they are what makes the download of a root-running
-// binary trustworthy: box refuses a release it carries no sum for, and an
-// architecture it carries no sum for, rather than downloading something
-// unchecked. A k0s bump therefore lands as the chart line plus this map, each
-// line copied from that release's own sha256sums.txt after hashing the asset.
-var k0sSHA256 = map[string]map[string]string{
-	"v1.37.2+k0s.1": {
-		"amd64": "4770cf89ff45e43292819f6e3a02a25a453bc750c777f6f7ad2de335f3f41df5",
-		"arm64": "d04426041ef9ac002b957fbf43fc36dd736398147db7589fad53687753bedd52",
-	},
-}
-
 // k0sRelease is one pinned build: the release, the architecture it was built
 // for, and the checksum box requires of it.
 type k0sRelease struct {
@@ -59,22 +44,20 @@ type k0sRelease struct {
 	SHA256  string
 }
 
-// k0sReleaseFor is one release, for one architecture. A version box carries no
-// checksum for is refused by name: installing it unchecked is the one thing
+// k0sReleaseFor is one release, for one architecture, taken from the pins of
+// the release in hand: the version and the sum of its asset are one pin, in one
+// file, so they cannot describe different releases. An architecture the file
+// pins no sum for is refused by name; installing it unchecked is the one thing
 // this file exists to prevent.
-func k0sReleaseFor(version, arch string) (k0sRelease, error) {
-	if version == "" {
+func k0sReleaseFor(pins release.Versions, arch string) (k0sRelease, error) {
+	if pins.K0s == "" {
 		return k0sRelease{}, fmt.Errorf("the chart release pins no k0s version: box installs the k0s its release names in charts/s5n/platform.yaml")
 	}
-	sums, ok := k0sSHA256[version]
-	if !ok {
-		return k0sRelease{}, fmt.Errorf("k0s %s is not a release this box carries a checksum for: box verifies the k0s it installs, so a k0s pinned ahead of box is one a box update has to bring", version)
+	sum, ok := pins.K0sSHA256[arch]
+	if !ok || sum == "" {
+		return k0sRelease{}, fmt.Errorf("k0s %s has no checksum for %q: box installs amd64 or arm64, and verifies the one it installs against the sum the chart pins beside the version", pins.K0s, arch)
 	}
-	sum, ok := sums[arch]
-	if !ok {
-		return k0sRelease{}, fmt.Errorf("k0s %s is not published for %q: box installs amd64 or arm64", version, arch)
-	}
-	return k0sRelease{Version: version, Arch: arch, SHA256: sum}, nil
+	return k0sRelease{Version: pins.K0s, Arch: arch, SHA256: sum}, nil
 }
 
 // URL is the release asset. The tag carries a '+', which a path segment may
@@ -86,12 +69,14 @@ func (r k0sRelease) URL() string {
 
 // k0sPlan is what box records as the install plan on the clean-host branch: the
 // release's pin for this binary's architecture, plus the affirmative install
-// choice that the installer requires. A host with no verified sum still gets a
-// plan naming the release's version; the installer refuses it there, on the
-// architecture or on the missing checksum.
+// choice that the installer requires. The checksum is the one the same pins
+// carry beside the version, so the plan and the file cannot name different
+// releases. A host whose release pins no sum for this architecture still gets a
+// plan naming the version; the installer refuses it there, on the missing sum,
+// before anything is downloaded.
 func k0sPlan(pins release.Versions) InstallPlan {
 	plan := InstallPlan{Version: pins.K0s, Arch: runtime.GOARCH, CleanHost: true}
-	if rel, err := k0sReleaseFor(pins.K0s, runtime.GOARCH); err == nil {
+	if rel, err := k0sReleaseFor(pins, runtime.GOARCH); err == nil {
 		plan.SHA256 = rel.SHA256
 	}
 	return plan

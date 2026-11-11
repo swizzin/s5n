@@ -13,6 +13,18 @@
 # compares the deployed chart version to the pin as semver, which accepts either
 # spelling.
 #
+# k0s's checksums are here too, beside its version, because they are the same
+# pin: what box downloads runs as root, so it must be the release the file
+# names and no other, and a sum kept anywhere else could disagree with the
+# version it sits next to. k0sSHA256amd64 and k0sSHA256arm64 are the sha256 of
+# that release's own asset for each architecture, as its sha256sums.txt
+# publishes them. They are not versions, so they carry no Renovate marker and
+# Renovate never touches them. A k0s bump moves the k0s line and both sums in
+# one pull request: `go run ./hack/k0s-sums --write` reads the pinned release,
+# hashes both assets, checks them against its sha256sums.txt and rewrites the
+# two lines; `go run ./hack/k0s-sums --check` is what CI runs, so a k0s bump
+# whose sums were not written fails until someone does that.
+#
 # The comment on each line is the pin's source, and it is what Renovate reads:
 # datasource and the package name the version comes from. One line, one pin, one
 # bump. The chart/ref names box pulls each chart from are not versions and stay
@@ -22,6 +34,8 @@
 # registry, Pebble) stay in the scripts, pinned by digest.
 authelia: "docker.io/authelia/authelia:4.39.28@sha256:bd97cff4fcbf715b5ff1f9ae286afbe6033afce385302520b0368122d43a6f54"  # renovate: datasource=docker depName=authelia/authelia
 k0s: v1.37.2+k0s.1       # renovate: datasource=github-releases depName=k0sproject/k0s
+k0sSHA256amd64: "4770cf89ff45e43292819f6e3a02a25a453bc750c777f6f7ad2de335f3f41df5"
+k0sSHA256arm64: "d04426041ef9ac002b957fbf43fc36dd736398147db7589fad53687753bedd52"
 envoyGateway: 1.9.3       # renovate: datasource=docker depName=envoyproxy/gateway-helm
 metallb: 0.16.1           # renovate: datasource=helm depName=metallb registryUrl=https://metallb.github.io/metallb
 certManager: v1.21.3      # renovate: datasource=docker depName=jetstack/charts/cert-manager registryUrl=https://quay.io

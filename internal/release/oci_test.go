@@ -15,6 +15,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"strings"
 	"sync/atomic"
@@ -162,7 +163,9 @@ func TestOCIRoundTrip(t *testing.T) {
 	if pulled.Annotations[MinBoxAnnotation] != fromDir.Annotations[MinBoxAnnotation] {
 		t.Fatalf("min-box = %q, want %q", pulled.Annotations[MinBoxAnnotation], fromDir.Annotations[MinBoxAnnotation])
 	}
-	if pulled.Pins != fromDir.Pins {
+	// The pins carry the k0s checksums too, a map, so the comparison is by
+	// value rather than by struct identity.
+	if !reflect.DeepEqual(pulled.Pins, fromDir.Pins) {
 		t.Fatalf("pins = %+v, want the directory's %+v", pulled.Pins, fromDir.Pins)
 	}
 	for name, pair := range map[string][2][]byte{

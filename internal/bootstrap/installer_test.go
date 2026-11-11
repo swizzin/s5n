@@ -87,14 +87,10 @@ func testInstaller(t *testing.T, payload []byte) (K0sInstaller, *installStubs) {
 		run:   &stubRunner{trace: trace, out: map[string]string{}, fail: map[string]error{}},
 		ready: &stubReady{trace: trace},
 	}
-	sum := sha256.Sum256(payload)
 	clock := time.Unix(0, 0)
 	return K0sInstaller{
 		Root:     func() bool { return true },
 		Evidence: func() []Finding { return nil },
-		Release: func(version, arch string) (k0sRelease, error) {
-			return k0sRelease{Version: version, Arch: arch, SHA256: hex.EncodeToString(sum[:])}, nil
-		},
 		Fetch:    fetch,
 		Run:      stubs.run,
 		Ready:    stubs.ready,
@@ -108,11 +104,19 @@ func testInstaller(t *testing.T, payload []byte) (K0sInstaller, *installStubs) {
 	}, stubs
 }
 
-func testPlan() InstallPlan {
-	return InstallPlan{Version: testK0sVersion, Arch: "amd64", CleanHost: true}
+var testPayload = []byte("#!/bin/sh\n# a k0s stand-in\n")
+
+// testSum is the checksum of what the stub serves: the plan carries it the way
+// k0sPlan carries the chart's pin, and the installer verifies the download
+// against it.
+func testSum() string {
+	sum := sha256.Sum256(testPayload)
+	return hex.EncodeToString(sum[:])
 }
 
-var testPayload = []byte("#!/bin/sh\n# a k0s stand-in\n")
+func testPlan() InstallPlan {
+	return InstallPlan{Version: testK0sVersion, Arch: "amd64", SHA256: testSum(), CleanHost: true}
+}
 
 func TestK0sInstallSequence(t *testing.T) {
 	k, stubs := testInstaller(t, testPayload)
@@ -179,37 +183,26 @@ func TestK0sInstallRefusesBeforeFetch(t *testing.T) {
 			want: "k0s is already on this host (state " + K0sStateDir + ")",
 		},
 		{
-			name: "no pin for this architecture",
-			prepare: func(k *K0sInstaller, _ *installStubs) InstallPlan {
-				k.Release = k0sReleaseFor
-				p := testPlan()
-				p.Version = pins.K0s
-				p.Arch = "riscv64"
-				return p
-			},
-			want: `not published for "riscv64"`,
-		},
-		{
-			// The plan names the release and the checksum is the compiled-in
-			// one for that release: a k0s box carries no sum for is refused
-			// before the download, whatever asked for it.
-			name: "plan names a release with no checksum",
-			prepare: func(k *K0sInstaller, _ *installStubs) InstallPlan {
-				k.Release = k0sReleaseFor
-				p := testPlan()
-				p.Version = "v0.0.1"
-				return p
-			},
-			want: "not a release this box carries a checksum for",
-		},
-		{
-			name: "plan names another checksum",
+			// The sum is the pins' and nothing else re-derives it: a plan that
+			// carries none is one box cannot verify, so it is refused by
+			// architecture before the download, whatever asked for it.
+			name: "plan carries no checksum for this architecture",
 			prepare: func(_ *K0sInstaller, _ *installStubs) InstallPlan {
 				p := testPlan()
-				p.SHA256 = strings.Repeat("0", 64)
+				p.Arch = "riscv64"
+				p.SHA256 = ""
 				return p
 			},
-			want: "refusing to install something else",
+			want: `no checksum for k0s ` + testK0sVersion + ` on "riscv64"`,
+		},
+		{
+			name: "plan names no release",
+			prepare: func(_ *K0sInstaller, _ *installStubs) InstallPlan {
+				p := testPlan()
+				p.Version = ""
+				return p
+			},
+			want: "names no k0s release",
 		},
 	}
 	for _, tc := range cases {
@@ -255,7 +248,7 @@ func TestK0sInstallNeverOverwritesAPreExistingBinary(t *testing.T) {
 	}
 }
 
-// A download that does not match the compiled-in checksum is removed, and no
+// A download that does not match the pinned checksum is removed, and no
 // command is ever run against it.
 func TestK0sInstallRejectsBadChecksum(t *testing.T) {
 	k, stubs := testInstaller(t, testPayload)

@@ -29,6 +29,14 @@ type Versions struct {
 	// K0s is the k0s release box installs on a clean host: the release tag,
 	// because that is what its download URL is built from.
 	K0s string
+	// K0sSHA256 is the sha256 of that release's own asset, per GOARCH: what
+	// box downloads onto a clean host and then runs as root. It is keyed by
+	// architecture because that is how box asks -- the installer refuses the
+	// architectures it has no sum for -- so an architecture is one lookup and
+	// not a field every caller has to know exists. Both k0s's architectures
+	// are required: box documents amd64 and arm64, and a file that pinned one
+	// would install the other unchecked.
+	K0sSHA256 map[string]string
 	// EnvoyGateway is the Envoy Gateway chart's version. The chart ships the
 	// Gateway API CRDs box depends on, so its version is the CRD set's too.
 	EnvoyGateway string
@@ -39,10 +47,18 @@ type Versions struct {
 	CertManager string
 }
 
+// k0sSums is every key platform.yaml carries a k0s checksum under, and the
+// architecture that checksum is of. A list rather than a map, so a file that is
+// missing both is refused on a name that does not move between runs.
+var k0sSums = []struct{ Key, Arch string }{
+	{"k0sSHA256amd64", "amd64"},
+	{"k0sSHA256arm64", "arm64"},
+}
+
 // ParseVersions reads platform.yaml with the YAML decoder box already uses for
-// the manifests it applies, and accepts exactly the five pins: a typo'd key
-// would otherwise leave a component at the zero value, and box would plan an
-// install of nothing.
+// the manifests it applies, and accepts exactly the five pins and the two k0s
+// checksums: a typo'd key would otherwise leave a component at the zero value,
+// and box would plan an install of nothing.
 //
 // It is the one parser: a loaded release (chartFrom), hack/versions and the
 // tests all come through here, so the file box installs from and the file the
@@ -77,12 +93,60 @@ func ParseVersions(b []byte) (Versions, error) {
 		}
 		*dst = strings.TrimSpace(value)
 	}
-	for key := range doc {
-		if _, ok := pins[key]; !ok {
-			return Versions{}, fmt.Errorf("unknown key %q: the parser and this file disagree about what box installs", key)
+	// The checksums are not versions and are checked as what they are: a sum
+	// that is not a sha256 verifies nothing, and box would install a root-run
+	// binary against a value no archive can ever match.
+	v.K0sSHA256 = make(map[string]string, len(k0sSums))
+	for _, s := range k0sSums {
+		raw, ok := doc[s.Key]
+		if !ok {
+			return Versions{}, fmt.Errorf("no %q: box verifies the k0s it installs, so the checksum of the release above lives here beside it", s.Key)
 		}
+		value, ok := raw.(string)
+		if !ok {
+			return Versions{}, fmt.Errorf("%q is a %T, not a string: quote it", s.Key, raw)
+		}
+		sum := strings.TrimSpace(value)
+		if !isSHA256(sum) {
+			return Versions{}, fmt.Errorf("%q is %q, not a sha256: 64 lowercase hex characters, as the release's sha256sums.txt writes it", s.Key, sum)
+		}
+		v.K0sSHA256[s.Arch] = sum
+	}
+	for key := range doc {
+		if _, ok := pins[key]; ok {
+			continue
+		}
+		if _, ok := k0sSumFor(key); ok {
+			continue
+		}
+		return Versions{}, fmt.Errorf("unknown key %q: the parser and this file disagree about what box installs", key)
 	}
 	return v, nil
+}
+
+// k0sSumFor is the architecture a platform.yaml key holds a k0s checksum for.
+func k0sSumFor(key string) (arch string, ok bool) {
+	for _, s := range k0sSums {
+		if s.Key == key {
+			return s.Arch, true
+		}
+	}
+	return "", false
+}
+
+// isSHA256 is a checksum as the release publishes it: 64 lowercase hex
+// characters. Uppercase is refused rather than lowercased, so the file stays
+// byte-identical to the sha256sums.txt line a maintainer copies from.
+func isSHA256(s string) bool {
+	if len(s) != 64 {
+		return false
+	}
+	for _, r := range s {
+		if (r < '0' || r > '9') && (r < 'a' || r > 'f') {
+			return false
+		}
+	}
+	return true
 }
 
 // platformPins is a chart release's platform.yaml, read the way every other

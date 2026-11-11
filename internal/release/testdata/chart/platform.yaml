@@ -4,6 +4,8 @@
 # up as a version nothing here names.
 authelia: "docker.io/example/authelia:1.0.0@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 k0s: v1.99.0+k0s.1
+k0sSHA256amd64: "1111111111111111111111111111111111111111111111111111111111111111"
+k0sSHA256arm64: "2222222222222222222222222222222222222222222222222222222222222222"
 envoyGateway: 9.9.9
 metallb: 9.9.9
 certManager: v9.9.9

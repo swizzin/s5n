@@ -13,61 +13,69 @@ import (
 )
 
 // pins is the platform pins of the chart in this checkout: the k0s the release
-// names, read from charts/s5n/platform.yaml through the parser box uses.
+// names and the checksums of its assets, read from charts/s5n/platform.yaml
+// through the parser box uses.
 var pins = releasetest.MustPins()
 
+// The sums the chart pins are the only ones box has: nothing about k0s is
+// compiled in any more, so each architecture's checksum has to be in that file,
+// has to be a sha256, and has to be the one k0sReleaseFor hands the installer.
+// A chart that bumps the k0s line without writing its sums installs nothing,
+// loudly.
 func TestK0sPinsAreReal(t *testing.T) {
-	if len(k0sSHA256) == 0 {
-		t.Fatal("no k0s checksums pinned")
-	}
-	for version, sums := range k0sSHA256 {
-		for arch, sum := range sums {
-			if len(sum) != 64 {
-				t.Errorf("%s/%s: checksum %q is not 64 hex characters", version, arch, sum)
-			}
-			if _, err := hex.DecodeString(sum); err != nil {
-				t.Errorf("%s/%s: checksum %q is not hex: %v", version, arch, sum, err)
-			}
-			if sum != strings.ToLower(sum) {
-				t.Errorf("%s/%s: checksum %q must be lowercase, as sha256sums.txt writes it", version, arch, sum)
-			}
-			rel, err := k0sReleaseFor(version, arch)
-			if err != nil {
-				t.Fatalf("%s/%s: %v", version, arch, err)
-			}
-			if rel.Version != version {
-				t.Errorf("%s/%s: release version = %q, want %q", version, arch, rel.Version, version)
-			}
-		}
-	}
-	// The chart pins one k0s, and box must carry the sums for it: a release
-	// that bumps the pin without the checksums installs nothing, loudly.
-	if _, ok := k0sSHA256[pins.K0s]; !ok {
-		t.Errorf("the chart pins k0s %s, and box has no checksum for it", pins.K0s)
+	if pins.K0s == "" {
+		t.Fatal("the chart pins no k0s version")
 	}
 	for _, arch := range []string{"amd64", "arm64"} {
-		if _, ok := k0sSHA256[pins.K0s][arch]; !ok {
-			t.Errorf("k0s %s has no checksum for %s; box documents amd64 and arm64 as supported", pins.K0s, arch)
+		sum, ok := pins.K0sSHA256[arch]
+		if !ok || sum == "" {
+			t.Fatalf("k0s %s has no checksum for %s: box documents amd64 and arm64 as supported", pins.K0s, arch)
+		}
+		if len(sum) != 64 {
+			t.Errorf("%s: checksum %q is not 64 hex characters", arch, sum)
+		}
+		if _, err := hex.DecodeString(sum); err != nil {
+			t.Errorf("%s: checksum %q is not hex: %v", arch, sum, err)
+		}
+		if sum != strings.ToLower(sum) {
+			t.Errorf("%s: checksum %q must be lowercase, as sha256sums.txt writes it", arch, sum)
+		}
+		rel, err := k0sReleaseFor(pins, arch)
+		if err != nil {
+			t.Fatalf("%s: %v", arch, err)
+		}
+		if rel.Version != pins.K0s || rel.Arch != arch || rel.SHA256 != sum {
+			t.Errorf("k0sReleaseFor(%s) = %+v, want the chart's pin %s with its %s checksum", arch, rel, pins.K0s, arch)
 		}
 	}
 }
 
+// An architecture the file pins no sum for is refused by name, before anything
+// is downloaded: box verifies what it installs, and an unchecked root binary is
+// the one thing this policy exists to prevent.
 func TestK0sReleaseForRefusesUnpinnedArch(t *testing.T) {
-	if _, err := k0sReleaseFor(pins.K0s, "riscv64"); err == nil {
+	_, err := k0sReleaseFor(pins, "riscv64")
+	if err == nil {
 		t.Fatal("an unpinned architecture resolved a release")
+	}
+	if !strings.Contains(err.Error(), `"riscv64"`) || !strings.Contains(err.Error(), "checksum") {
+		t.Fatalf("error = %q, want it to name the architecture and the missing checksum", err)
 	}
 }
 
-// The version is the chart's, so a chart that pins a k0s this box carries no
-// sum for is refused by name rather than downloaded unchecked: the checksum is
-// the half of that promise box keeps.
+// A release with no k0s line is refused too: box has no version to install and
+// no sum to check it against, and inventing either is what the pins replace.
 func TestK0sReleaseForRefusesAVersionWithoutAChecksum(t *testing.T) {
-	_, err := k0sReleaseFor("v9.9.9+k0s.9", runtime.GOARCH)
+	_, err := k0sReleaseFor(release.Versions{K0s: "v9.9.9+k0s.9"}, runtime.GOARCH)
 	if err == nil {
 		t.Fatal("a k0s release with no checksum resolved")
 	}
 	if !strings.Contains(err.Error(), "v9.9.9+k0s.9") || !strings.Contains(err.Error(), "checksum") {
 		t.Fatalf("error = %q, want it to name the release and the missing checksum", err)
+	}
+	_, err = k0sReleaseFor(release.Versions{}, runtime.GOARCH)
+	if err == nil || !strings.Contains(err.Error(), "pins no k0s version") {
+		t.Fatalf("error = %q, want the missing k0s pin named", err)
 	}
 }
 
@@ -90,23 +98,22 @@ func TestK0sPlanCarriesThePinAndTheChoice(t *testing.T) {
 	if plan.Arch != runtime.GOARCH {
 		t.Errorf("arch = %q, want %q", plan.Arch, runtime.GOARCH)
 	}
-	if sum, ok := k0sSHA256[pins.K0s][runtime.GOARCH]; ok && plan.SHA256 != sum {
-		t.Errorf("sha256 = %q, want the pin %q", plan.SHA256, sum)
-	}
-	// A plan for an architecture box has no sum for still names the version,
-	// so the installer can refuse it there rather than on an empty plan.
-	if _, ok := k0sSHA256[pins.K0s][runtime.GOARCH]; !ok && plan.SHA256 != "" {
-		t.Errorf("no pin for %s but the plan carries %q", runtime.GOARCH, plan.SHA256)
+	// The checksum is the one pinned beside the version: the plan is not a
+	// second place a sum could be written, so it cannot disagree with the file.
+	if want := pins.K0sSHA256[runtime.GOARCH]; plan.SHA256 != want {
+		t.Errorf("sha256 = %q, want the pin %q", plan.SHA256, want)
 	}
 
 	// The version is a value passed in, never a constant: a release that pins
-	// another k0s moves the plan with it.
+	// another k0s moves the plan with it. Without a sum in that release the
+	// plan still names the version, so the installer refuses it by name rather
+	// than on an empty plan.
 	other := k0sPlan(release.Versions{K0s: "v9.9.9+k0s.9"})
 	if other.Version != "v9.9.9+k0s.9" {
 		t.Errorf("version = %q, want the release's %q", other.Version, "v9.9.9+k0s.9")
 	}
 	if other.SHA256 != "" {
-		t.Errorf("a k0s box carries no checksum for got one anyway: %q", other.SHA256)
+		t.Errorf("a release with no checksum got one anyway: %q", other.SHA256)
 	}
 }
 
