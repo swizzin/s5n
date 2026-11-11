@@ -183,8 +183,8 @@ func yamlKey(s string) string {
 		return "''"
 	}
 	for _, r := range s {
-		if !(r == '-' || r == '_' || r == '.' || r == '@' ||
-			r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9') {
+		if r != '-' && r != '_' && r != '.' && r != '@' &&
+			(r < 'a' || r > 'z') && (r < 'A' || r > 'Z') && (r < '0' || r > '9') {
 			return yamlScalar(s)
 		}
 	}

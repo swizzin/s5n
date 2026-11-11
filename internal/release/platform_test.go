@@ -215,7 +215,7 @@ func TestAutheliaPinIsAnImageReference(t *testing.T) {
 		t.Errorf("authelia digest %q is not a sha256 hex string", digest)
 	}
 	for _, r := range digest {
-		if !(r >= '0' && r <= '9' || r >= 'a' && r <= 'f') {
+		if (r < '0' || r > '9') && (r < 'a' || r > 'f') {
 			t.Fatalf("authelia digest %q is not lowercase hex", digest)
 		}
 	}

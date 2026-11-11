@@ -63,7 +63,7 @@ func TestRenderConfiguration(t *testing.T) {
 	// answered on the host's port-80 listener, which carries no login.
 	portal := strings.Index(text, `^/auth([/?].*)?$`)
 	login := strings.Index(text, `policy: 'one_factor'`)
-	if !(portal >= 0 && portal < login) {
+	if portal < 0 || portal >= login {
 		t.Errorf("rule order is wrong: portal %d, login %d", portal, login)
 	}
 	if strings.Contains(text, "acme-challenge") {

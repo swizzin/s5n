@@ -47,7 +47,7 @@ func TestReporterReceiptPutsPendingAfterTheCard(t *testing.T) {
 	if card < 0 || finish < 0 || claim < 0 {
 		t.Fatalf("missing a receipt line, a card or the to-finish list:\n%s", strings.Join(lines, "\n"))
 	}
-	if !(finish > card && claim > finish) {
+	if finish <= card || claim <= finish {
 		t.Fatalf("pending rows are not after the card (card %d, heading %d, row %d):\n%s", card, finish, claim, strings.Join(lines, "\n"))
 	}
 	for _, want := range []string{"  ✓ wiring ok", "  ✓ qbittorrent/login  signed in", "  ✓ sonarr/downloadclient  created"} {

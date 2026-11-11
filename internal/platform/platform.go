@@ -629,7 +629,7 @@ func settling(a GatewayAnswer) bool {
 	if a.Address != "" && a.Programmed() {
 		return false
 	}
-	return !(a.Address == "" && a.Reason == gatewayAddressNotAssigned)
+	return a.Address != "" || a.Reason != gatewayAddressNotAssigned
 }
 
 // deferredReason is a reason that says nothing about the address layer: the

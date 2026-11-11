@@ -322,12 +322,12 @@ func TestListenerPolicyFollowsItsListener(t *testing.T) {
 	listenerAt, policyAt := -1, -1
 	for i, docs := range cl.writes {
 		kind, ns, _ := objectMeta(docs[0])
-		switch {
-		case kind == "Gateway":
+		switch kind {
+		case "Gateway":
 			if _, ok := listenersOf(t, docs[0])["http-box-example-test"]; ok && listenerAt < 0 {
 				listenerAt = i
 			}
-		case kind == "SecurityPolicy":
+		case "SecurityPolicy":
 			if ns != GatewayNamespace {
 				t.Fatalf("SecurityPolicy %d is in %s, want %s", i, ns, GatewayNamespace)
 			}
@@ -453,19 +453,19 @@ func TestCertificateNotReadyWritesOnlyPort80(t *testing.T) {
 	}
 	for i, docs := range cl.writes {
 		kind, _, name := objectMeta(docs[0])
-		switch {
-		case kind == "Certificate":
+		switch kind {
+		case "Certificate":
 			if name != "s5n-tls-box-example-test" {
 				t.Fatalf("write %d = %s, want the Certificate", i, name)
 			}
-		case kind == "SecurityPolicy":
+		case "SecurityPolicy":
 			spec, _ := docs[0]["spec"].(map[string]any)
 			refs, _ := spec["targetRefs"].([]any)
 			ref, _ := refs[0].(map[string]any)
 			if ref["sectionName"] != "http-box-example-test" {
 				t.Fatalf("the Allow names %v", ref["sectionName"])
 			}
-		case kind == "Gateway":
+		case "Gateway":
 			got := listenersOf(t, docs[0])
 			if _, ok := got["https-box-example-test"]; ok {
 				t.Fatal("a Certificate that is not Ready wrote an HTTPS listener")
@@ -473,7 +473,7 @@ func TestCertificateNotReadyWritesOnlyPort80(t *testing.T) {
 			if _, ok := got["http-box-example-test"]; !ok || len(got) != 1 {
 				t.Fatalf("write %d carries %v, want only the port-80 listener", i, got)
 			}
-		case kind == "HTTPRoute":
+		case "HTTPRoute":
 			t.Fatal("a Certificate that is not Ready wrote the redirect")
 		default:
 			t.Fatalf("write %d is %s", i, kind)
