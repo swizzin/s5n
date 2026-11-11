@@ -1,4 +1,4 @@
-# The test jobs: Go, chart, and the full kind e2e, for one ref. ci.yaml calls this
+# The test jobs: Go, lint, chart, and the full kind e2e, for one ref. ci.yaml calls this
 # for every PR and push, and again for develop after a release's back-merge. It is
 # its own file because GitHub resolves called workflows before evaluating any
 # `if:`, so a workflow that called itself would recurse to the depth limit.
@@ -43,6 +43,28 @@ jobs:
           if [ -n "$unformatted" ]; then echo "gofmt needed:"; echo "$unformatted"; exit 1; fi
       - run: go vet ./...
       - run: go test -race ./...
+
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      # The whole history: --new-from-merge-base needs the merge base with
+      # develop, and a depth-1 checkout has none.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.ref || github.sha }}
+          fetch-depth: 0
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      - uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
+        with:
+          version: v2.15.0
+          # The tree predates these linters, and their structural findings are
+          # follow-up cards, so only what this branch adds may fail here. The
+          # action's only-new-issues reads a pull request's patch and does
+          # nothing on a push; --new-from-merge-base is the linter's own filter
+          # and works on both.
+          args: --new-from-merge-base=origin/develop
 
   chart:
     runs-on: ubuntu-latest
