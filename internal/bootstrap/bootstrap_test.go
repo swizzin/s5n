@@ -1051,3 +1051,31 @@ func TestBootstrapRefusesWithoutARelease(t *testing.T) {
 		t.Errorf("an install was planned without a release: %+v", inst.plans)
 	}
 }
+
+// A cancellation while probing is not evidence about the host. Ctrl-C cuts the
+// probe short, which reaches bootstrap as a dead candidate: without the guard,
+// a host with a cluster is read as "present but unusable" or, worse, as clean,
+// and k0s is installed on it. The cancellation must surface as the error.
+func TestBootstrapCancelledProbeIsNotCleanHost(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	src := &fakeSource{
+		candidates: []Candidate{{Path: "/candidate.yaml"}},
+		files:      map[string][]byte{"/candidate.yaml": []byte("apiVersion: v1")},
+	}
+	prober := &fakeProber{versionErr: context.Canceled}
+	host := &fakeHost{}
+	inst := &fakeInstaller{}
+	d := newDecision(src, prober, host, &fakeRecords{}, inst)
+
+	_, err := d.Bootstrap(ctx, Options{})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("Bootstrap = %v, want the cancellation", err)
+	}
+	if len(inst.plans) != 0 {
+		t.Fatalf("installer ran on a cancelled run: %+v", inst.plans)
+	}
+	if host.called != 0 {
+		t.Fatal("the host scan ran on a cancelled run: a cancellation reached the evidence")
+	}
+}

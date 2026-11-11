@@ -14,10 +14,12 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 
 	"golang.org/x/term"
 
@@ -59,21 +61,39 @@ func terminalWidth(f *os.File) int {
 var version = "dev"
 
 func main() {
+	// One context for the whole process. A signal cancels the step in flight
+	// through the error path that step already has, instead of killing box
+	// between a volume and its claim (which is how a first install ends up
+	// half-written and a re-run refuses).
+	ctx, stop := signalContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
 	if len(os.Args) < 2 {
 		usage()
 	}
 	switch os.Args[1] {
 	case "bootstrap":
-		runBootstrap(os.Args[2:])
+		runBootstrap(ctx, os.Args[2:])
 	case "init":
-		runInit(os.Args[2:])
+		runInit(ctx, os.Args[2:])
 	case "apply":
-		runApply(os.Args[2:])
+		runApply(ctx, os.Args[2:])
 	case "version":
 		fmt.Println(version)
 	default:
 		usage()
 	}
+}
+
+// signalContext cancels its context on the first signal, and stops handling
+// signals once it has. signal.NotifyContext leaves the handler registered
+// after the first signal, so a second one is swallowed by a channel nobody
+// reads -- exactly when the operator presses it again because box looks stuck.
+// Unregistering on cancellation restores Go's default behaviour: the second
+// Ctrl-C terminates the process.
+func signalContext(parent context.Context, signals ...os.Signal) (context.Context, context.CancelFunc) {
+	ctx, stop := signal.NotifyContext(parent, signals...)
+	context.AfterFunc(ctx, stop)
+	return ctx, stop
 }
 
 func usage() {
@@ -226,7 +246,7 @@ func (c *chartRelease) pins(ctx context.Context) (release.Versions, error) {
 	return chart.Pins, nil
 }
 
-func runBootstrap(args []string) {
+func runBootstrap(ctx context.Context, args []string) {
 	// The ACME server override is a development and e2e switch, not operator
 	// surface: flag.PrintDefaults lists every registered flag even with an
 	// empty usage, so the only way to keep it off --help is to take it out of
@@ -296,7 +316,7 @@ func runBootstrap(args []string) {
 		Prompt:  chooser,
 	}
 
-	res, err := d.Bootstrap(context.Background(), bootstrap.Options{
+	res, err := d.Bootstrap(ctx, bootstrap.Options{
 		Kubeconfig:    *kubeconfig,
 		KubeconfigEnv: os.Getenv("KUBECONFIG"),
 		Platform:      bootstrap.DefaultPlatform(),
@@ -320,7 +340,6 @@ func runBootstrap(args []string) {
 		return
 	}
 
-	ctx := context.Background()
 	// The platform's chart versions are the same release's pins. It is already
 	// loaded on the clean-host path, where bootstrap needed the k0s pin.
 	chart, err := charts.load(ctx)
@@ -474,7 +493,7 @@ func (o *applyFlags) options() release.Options {
 	}
 }
 
-func runApply(args []string) {
+func runApply(ctx context.Context, args []string) {
 	fs := flag.NewFlagSet("apply", flag.ExitOnError)
 	o := addApplyFlags(fs)
 	if err := fs.Parse(args); err != nil {
@@ -512,7 +531,7 @@ func runApply(args []string) {
 
 	opts := o.options()
 	opts.BoxValues = boxValues(kc)
-	res, err := app.Apply(context.Background(), opts)
+	res, err := app.Apply(ctx, opts)
 	if err != nil {
 		if errors.Is(err, release.ErrCancelled) {
 			os.Exit(1)
@@ -525,7 +544,7 @@ func runApply(args []string) {
 	}
 }
 
-func runInit(args []string) {
+func runInit(ctx context.Context, args []string) {
 	fs := flag.NewFlagSet("init", flag.ExitOnError)
 	initFlags := addInitFlags(fs)
 	kubeconfig := fs.String("kubeconfig", "", "explicit kubeconfig for the apply this hands over to, or fail with no fallback")
@@ -537,7 +556,7 @@ func runInit(args []string) {
 	}
 	out := newOutput(*plain, *yes)
 	defer out.Close()
-	if err := initFlags.run(context.Background(), *kubeconfig, *yes, *plain, out); err != nil {
+	if err := initFlags.run(ctx, *kubeconfig, *yes, *plain, out); err != nil {
 		if errors.Is(err, release.ErrCancelled) || errors.Is(err, setup.ErrCancelled) {
 			os.Exit(1)
 		}

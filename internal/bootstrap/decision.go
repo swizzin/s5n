@@ -119,6 +119,15 @@ func (d *Decision) Bootstrap(ctx context.Context, opts Options) (Result, error) 
 		return d.useCluster(ctx, opts, kc, cand.Path, SourceExternal, "cluster on this host"), nil
 	}
 
+	// A cancelled run is not evidence about the host. Probing cut short by a
+	// signal reaches here as a dead candidate ("version: context canceled"),
+	// and the evidence below would read a host with a cluster as either broken
+	// or clean -- the second one installs k0s on it. Report the cancellation
+	// through the error path every failed command already has.
+	if err := ctx.Err(); err != nil {
+		return res, err
+	}
+
 	// 3. Something present but not usable. A distribution-owned kubeconfig that
 	// exists but cannot be used is part of this evidence: the distribution
 	// wrote it when it installed a cluster, so a dead one means that cluster is
