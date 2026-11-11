@@ -426,7 +426,13 @@ validated, self-signed otherwise. This is how box would do it.
   public address picks Let's Encrypt; a private address, or no answer, picks
   self-signed, and init says which and why. It doesn't compare the address with the
   node's, because a box behind NAT has a private node address and a public name that
-  still validates. `tls.issuer` in root's values forces either one.
+  still validates. `tls.issuer` in root's values forces either one. A name with no
+  answer is usually a record that doesn't exist yet, so init doesn't stop on it (a test
+  box with a made-up name still installs), but its final card says the name has no DNS
+  record, that the certificate is self-signed because of it, and that running `box init`
+  again once the record exists moves the host to Let's Encrypt. That works because init
+  resolves the name on every run and keeps no earlier answer; the e2e proves the move
+  from a self-signed certificate to an issued one on the same host.
 - **Apps with no base URL get a host of their own.** An app whose UI writes absolute
   asset paths (Seerr, Plex's web app) breaks under a `/<name>` prefix, so it is served
   at `<app>.<domain>` instead, with its own listener and certificate the same way as the
