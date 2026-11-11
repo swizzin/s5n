@@ -1,10 +1,35 @@
-# One tag publishes everything: the image, the chart that names that image by
-# digest, and box's binaries. A branch push publishes nothing (docs/box.md,
-# "Where a release lives").
+# Two tag families, one workflow (docs/box.md, "Where a release lives").
 #
-# The tag is the version. `v0.3.0` publishes chart 0.3.0 and image 0.3.0, and the
-# job fails if charts/s5n/Chart.yaml says anything else: the maintainer bumps
-# the chart in the commit she tags.
+#   s5n-v<version>  publishes the image ghcr.io/swizzin/s5n:<version> and the
+#                   chart at oci://ghcr.io/swizzin/charts/s5n, version and
+#                   appVersion both <version>, the image named by digest. Its
+#                   GitHub release lists the app images and the platform pins
+#                   that moved since the last s5n-v* tag, and is never marked
+#                   latest.
+#   box-v<version>  publishes box's binaries and sha256sums.txt as the assets of
+#                   a GitHub release marked latest, so releases/latest always
+#                   means box. Only a maintainer's tag cuts one: box's own code
+#                   is released by hand, and a platform patch ships in the
+#                   chart, so there is nothing for a bot to decide.
+#
+# A tag pushed with the default GITHUB_TOKEN starts no workflow, so the job that
+# decides a push to main may release (ci.yaml) cannot reach this one by pushing
+# a tag: it calls this workflow, s5n family only, with the version and the ref
+# to build. Both triggers meet in `route`, the one place the family, the version
+# and the ref are decided; a job for a family whose turn it is not is skipped.
+#
+# There is no off switch in the repo. If releases have to stop, disable this
+# workflow (or ci) in GitHub's Actions tab: a disabled workflow runs nothing, so
+# a maintainer's tag publishes nothing either, which is what a kill switch has
+# to mean.
+#
+# Version rule. A maintainer's tag must equal charts/s5n/Chart.yaml's version
+# and appVersion, exactly as it always has: the chart is bumped in the commit
+# that is tagged. An automatic chart release takes its version from the
+# tag/input and packages with `helm package --version/--app-version`, because
+# the workflow never commits to main: Chart.yaml still carries the previous
+# patch. The automatic version is checked to be the same major.minor as
+# Chart.yaml, one patch above the previous s5n-v* tag.
 #
 # Actions are pinned by commit; the comment names the tag the commit belongs to.
 # Tool binaries are fetched and sha256-checked the way ci.yaml does it.
@@ -12,11 +37,20 @@ name: release
 
 on:
   push:
-    tags: ["v*"]
+    tags: ["s5n-v*", "box-v*"]
+  workflow_call:
+    inputs:
+      version:
+        description: "the chart version to publish, without the s5n-v prefix"
+        required: true
+        type: string
+      ref:
+        description: "the ref to build: the tag the push to main created"
+        required: true
+        type: string
 
 permissions:
-  contents: write
-  packages: write
+  contents: read
 
 concurrency:
   group: release-${{ github.ref }}
@@ -30,45 +64,119 @@ env:
   CHART_REPO: oci://ghcr.io/swizzin/charts
 
 jobs:
-  verify:
+  route:
     runs-on: ubuntu-latest
     outputs:
-      version: ${{ steps.tag.outputs.version }}
+      family: ${{ steps.route.outputs.family }}
+      version: ${{ steps.route.outputs.version }}
+      ref: ${{ steps.route.outputs.ref }}
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: the tag is the chart's version
-        id: tag
+      - name: which family, which version, which ref
+        id: route
         env:
-          TAG: ${{ github.ref_name }}
+          EVENT: ${{ github.event_name }}
+          REF_NAME: ${{ github.ref_name }}
+          REF: ${{ github.ref }}
+          IN_VERSION: ${{ inputs.version }}
+          IN_REF: ${{ inputs.ref }}
         run: |
           set -euo pipefail
-          version="${TAG#v}"
+          if [[ "$EVENT" = workflow_call ]]; then
+            # Only the chart family is ever called: the push to main that
+            # decided to release always cuts s5n-v*.
+            family=s5n
+            version="$IN_VERSION"
+            ref="$IN_REF"
+          else
+            # A tag push: the family is the prefix and the version is what
+            # follows it. v0.2.0 is history and matches neither prefix.
+            case "$REF_NAME" in
+              s5n-v*) family=s5n; version="${REF_NAME#s5n-v}" ;;
+              box-v*) family=box; version="${REF_NAME#box-v}" ;;
+              *) echo "tag ${REF_NAME} is neither s5n-v* nor box-v*" >&2; exit 1 ;;
+            esac
+            ref="$REF"
+          fi
+          case "$family" in
+            s5n|box) ;;
+            *) echo "family '${family}': only s5n or box" >&2; exit 1 ;;
+          esac
           if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+([+-][0-9A-Za-z.-]+)?$ ]]; then
-            echo "tag ${TAG}: a release tag is v<major>.<minor>.<patch>, e.g. v0.3.0" >&2
+            echo "version '${version}': a release version is <major>.<minor>.<patch>" >&2
             exit 1
           fi
+          echo "family=${family} version=${version} ref=${ref}"
+          {
+            echo "family=${family}"
+            echo "version=${version}"
+            echo "ref=${ref}"
+          } >> "$GITHUB_OUTPUT"
+
+  # ---- s5n: the image and the chart -------------------------------------------
+  s5n-verify:
+    needs: route
+    if: needs.route.outputs.family == 's5n'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.route.outputs.ref }}
+          fetch-depth: 0 # tags: the automatic check needs the previous s5n-v*
+      - name: the version is the chart's, or one patch above the last tag
+        env:
+          VERSION: ${{ needs.route.outputs.version }}
+          AUTOMATED: ${{ github.event_name == 'workflow_call' }}
+        run: |
+          set -euo pipefail
           # Only top-level keys: Chart.yaml's annotations and kubeVersion are not
           # this question, and helm is not needed to read one line.
           chart_version=$(awk '/^version:/ { print $2; exit }' charts/s5n/Chart.yaml)
           app_version=$(awk '/^appVersion:/ { print $2; exit }' charts/s5n/Chart.yaml | tr -d '"')
-          if [[ "$chart_version" != "$version" ]]; then
-            echo "charts/s5n/Chart.yaml version is ${chart_version}, but the tag is ${TAG}: bump the chart in the commit you tag" >&2
-            exit 1
+          if [[ "$AUTOMATED" = true ]]; then
+            # The automatic release's version. The workflow never commits the
+            # bump, so Chart.yaml still carries the previous patch: the version
+            # has to be the chart's major.minor, one patch above the last
+            # s5n-v* tag.
+            want_major_minor="${chart_version%.*}"
+            if [[ "${VERSION%.*}" != "$want_major_minor" ]]; then
+              echo "the automatic version ${VERSION} is not ${want_major_minor}.x, charts/s5n/Chart.yaml's major.minor" >&2
+              exit 1
+            fi
+            git fetch --tags --force --quiet
+            prev=$(git tag --list 's5n-v*' | sed 's/^s5n-v//' | grep -vx "$VERSION" | sort -V | tail -1)
+            if [[ -z "$prev" ]]; then
+              echo "no previous s5n-v* tag for ${VERSION} to be one patch above" >&2
+              exit 1
+            fi
+            want="${prev%.*}.$(( ${prev##*.} + 1 ))"
+            if [[ "$VERSION" != "$want" ]]; then
+              echo "the automatic version ${VERSION} is not one patch above ${prev} (want ${want})" >&2
+              exit 1
+            fi
+          else
+            if [[ "$chart_version" != "$VERSION" ]]; then
+              echo "charts/s5n/Chart.yaml version is ${chart_version}, but the tag is s5n-v${VERSION}: bump the chart in the commit you tag" >&2
+              exit 1
+            fi
+            if [[ "$app_version" != "$VERSION" ]]; then
+              echo "charts/s5n/Chart.yaml appVersion is ${app_version}, but the tag is s5n-v${VERSION}: the image tag and the chart's appVersion are the same version" >&2
+              exit 1
+            fi
           fi
-          if [[ "$app_version" != "$version" ]]; then
-            echo "charts/s5n/Chart.yaml appVersion is ${app_version}, but the tag is ${TAG}: the image tag and the chart's appVersion are the same version" >&2
-            exit 1
-          fi
-          echo "releasing ${version}"
-          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          echo "releasing s5n ${VERSION}"
 
-  image:
-    needs: verify
+  s5n-image:
+    needs: [route, s5n-verify]
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
     outputs:
       digest: ${{ steps.build.outputs.digest }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.route.outputs.ref }}
       # arm64 is built on an amd64 runner: qemu runs the Dockerfile's build
       # stage, and Go cross-compiles inside it.
       - uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0
@@ -81,7 +189,7 @@ jobs:
       - name: build and push linux/amd64 and linux/arm64
         id: build
         env:
-          VERSION: ${{ needs.verify.outputs.version }}
+          VERSION: ${{ needs.route.outputs.version }}
         run: |
           set -euo pipefail
           docker buildx build \
@@ -100,18 +208,23 @@ jobs:
           echo "digest=${digest}" >> "$GITHUB_OUTPUT"
       - name: the tag is a two-platform list
         env:
-          VERSION: ${{ needs.verify.outputs.version }}
+          VERSION: ${{ needs.route.outputs.version }}
         run: |
           set -euo pipefail
           out=$(docker buildx imagetools inspect "${IMAGE}:${VERSION}")
           grep -q "linux/amd64" <<<"$out" || { echo "${IMAGE}:${VERSION} has no linux/amd64 image" >&2; exit 1; }
           grep -q "linux/arm64" <<<"$out" || { echo "${IMAGE}:${VERSION} has no linux/arm64 image" >&2; exit 1; }
 
-  chart:
-    needs: [verify, image]
+  s5n-chart:
+    needs: [route, s5n-verify, s5n-image]
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.route.outputs.ref }}
       - uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
         with:
           version: ${{ env.HELM_VERSION }}
@@ -126,8 +239,7 @@ jobs:
       # checkout stays reproducible.
       - name: stamp the image digest into the chart
         env:
-          VERSION: ${{ needs.verify.outputs.version }}
-          DIGEST: ${{ needs.image.outputs.digest }}
+          DIGEST: ${{ needs.s5n-image.outputs.digest }}
         run: |
           set -euo pipefail
           work="${RUNNER_TEMP}/chart"
@@ -172,13 +284,27 @@ jobs:
               sys.exit("variants.yaml: no s5n.default.digest line to stamp")
           open(path, "w").write("".join(out))
           PY
-
-          # The chart's own validation, against the stamped copy: helm lint and
-          # kubeconform for every ci values file. The tree is not what ships;
-          # this copy is.
+      # The chart's own validation, against the stamped copy, then the package
+      # and its push: the tree is not what ships, this copy is. An automated
+      # release takes its version from the tag/input (Chart.yaml still carries
+      # the previous patch, because the workflow never commits to main); a
+      # maintainer's tag already matches Chart.yaml, so helm reads it there.
+      - name: package, lint and push the chart
+        env:
+          VERSION: ${{ needs.route.outputs.version }}
+          DIGEST: ${{ needs.s5n-image.outputs.digest }}
+          AUTOMATED: ${{ github.event_name == 'workflow_call' }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          work="${RUNNER_TEMP}/chart"
           "$work/hack/validate-chart.sh" 1.37.0
-
-          helm package "$work/charts/s5n" --destination "$work/dist"
+          if [[ "$AUTOMATED" = true ]]; then
+            helm package "$work/charts/s5n" --destination "$work/dist" \
+              --version "$VERSION" --app-version "$VERSION"
+          else
+            helm package "$work/charts/s5n" --destination "$work/dist"
+          fi
           tgz="$work/dist/s5n-${VERSION}.tgz"
           test -f "$tgz" || { echo "helm package did not produce $(basename "$tgz")" >&2; exit 1; }
           # The package itself lints, reads back, and renders the image this run
@@ -192,28 +318,73 @@ jobs:
             exit 1
           fi
           echo "packaged $(basename "$tgz") naming ${want}"
-          cp "$tgz" "${RUNNER_TEMP}/chart.tgz"
-      - name: push the chart
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          set -euo pipefail
           echo "${GITHUB_TOKEN}" | helm registry login ghcr.io -u "${GITHUB_ACTOR}" --password-stdin
-          helm push "${RUNNER_TEMP}/chart.tgz" "${CHART_REPO}"
+          helm push "$tgz" "${CHART_REPO}"
 
-  box:
+  s5n-release:
     # The release is the last thing that exists: a chart push that failed must
     # not leave a GitHub release pointing at a tag nothing was published for.
-    needs: [verify, chart]
+    needs: [route, s5n-verify, s5n-chart]
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.route.outputs.ref }}
+          fetch-depth: 0 # tags: the previous s5n-v* is the diff's other side
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      - name: the images and pins that moved since the last s5n-v* tag
+        env:
+          VERSION: ${{ needs.route.outputs.version }}
+        run: |
+          set -euo pipefail
+          git fetch --tags --force --quiet
+          tag="s5n-v${VERSION}"
+          prev=$(git tag --list 's5n-v*' | grep -vx "$tag" | sort -V | tail -1)
+          # Both files, through the same parser the release decision uses, so
+          # "moved" means the same thing to the body as to the job that cut the
+          # tag. The platform pins ship in the chart, so a pin bump is a chart
+          # release and the user has to see which pin their update brings.
+          if [[ -n "$prev" ]]; then
+            go run ./hack/release notes "$prev" "$tag" > "${RUNNER_TEMP}/body.md"
+          else
+            go run ./hack/release notes --all "$tag" > "${RUNNER_TEMP}/body.md"
+          fi
+          cat "${RUNNER_TEMP}/body.md"
+      - name: publish the GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.route.outputs.version }}
+        run: |
+          set -euo pipefail
+          # Never latest: releases/latest means box, so a host's install curl
+          # always fetches a box, never a chart.
+          gh release create "s5n-v${VERSION}" \
+            --title "s5n ${VERSION}" \
+            --notes-file "${RUNNER_TEMP}/body.md" \
+            --latest=false \
+            --verify-tag
+
+  # ---- box: the binaries ------------------------------------------------------
+  box-release:
+    needs: route
+    if: needs.route.outputs.family == 'box'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.route.outputs.ref }}
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
       - name: build box for linux/amd64 and linux/arm64
         env:
-          VERSION: ${{ needs.verify.outputs.version }}
+          VERSION: ${{ needs.route.outputs.version }}
         run: |
           set -euo pipefail
           mkdir -p dist
@@ -226,11 +397,14 @@ jobs:
       - name: publish the GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
-          VERSION: ${{ needs.verify.outputs.version }}
-          TAG: ${{ github.ref_name }}
+          VERSION: ${{ needs.route.outputs.version }}
         run: |
           set -euo pipefail
-          gh release create "$TAG" \
-            --title "s5n ${VERSION}" \
+          # Latest: releases/latest/download/box-linux-<arch> is how README's
+          # install curl finds box, so the newest box must be the newest release.
+          gh release create "box-v${VERSION}" \
+            --title "box ${VERSION}" \
             --generate-notes \
+            --latest=true \
+            --verify-tag \
             dist/box-linux-amd64 dist/box-linux-arm64 dist/sha256sums.txt
