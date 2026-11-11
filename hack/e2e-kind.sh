@@ -416,6 +416,18 @@ echo "ReplicaSets reporting the denial: ${replica_failure}"
 [ "$replica_failure" -ge 1 ] || fail=1
 $K -n "$NS" delete deploy unblessed --ignore-not-found >/dev/null
 
+# Before the claims exist, a render that can see the cluster must refuse the
+# release by name rather than install pods that wait for storage forever. A
+# server-side dry run does the cluster's lookups and writes nothing.
+log "asserting a release without its claims is refused at render"
+noclaim=$($HELM install s5n charts/s5n -n "$NS" -f hack/e2e-values.yaml --dry-run=server 2>&1) && {
+  echo "a release whose claims do not exist rendered"; fail=1; } || true
+if grep -qF 'storage.data.existingClaim: PersistentVolumeClaim "s5n-data" does not exist in namespace "seedbox"' <<<"$noclaim"; then
+  echo "  refused: missing claim s5n-data"
+else
+  echo "the missing-claim refusal was not printed:"; echo "$noclaim" | tail -5; fail=1
+fi
+
 # The claims, as the plain-helm operator creates them: the chart creates no
 # storage, and its defaults are the names below. A static hostPath PV bound to
 # exactly one claim, and the claim pinned to it, with an empty storageClassName
