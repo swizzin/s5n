@@ -309,9 +309,11 @@ jobs:
           test -f "$tgz" || { echo "helm package did not produce $(basename "$tgz")" >&2; exit 1; }
           # The package itself lints, reads back, and renders the image this run
           # pushed, by tag and by digest: the archive is the chart that ships.
+          # The chart refuses to render without a login in front, so the render
+          # says there is one, as box does.
           helm lint "$tgz"
           helm show values "$tgz" >/dev/null
-          rendered=$(helm template release "$tgz" -n seedbox)
+          rendered=$(helm template release "$tgz" -n seedbox --set auth.edge=true)
           want="${IMAGE}:${VERSION}@${DIGEST}"
           if ! grep -q "$want" <<<"$rendered"; then
             echo "the packaged chart does not render ${want}" >&2
