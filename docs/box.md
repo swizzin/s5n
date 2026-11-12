@@ -287,6 +287,15 @@ Proposed:
 - Unattended, a password comes from a file or stdin, never a flag (it would sit in shell
   history and `ps`), and none supplied means a generated one, printed once.
 
+**The sign-in page carries the s5n mark, in root's theme (decided).** Authelia can be
+themed only through its `theme:` and `server.asset_path`, so box draws `logo.png` and
+`favicon.ico` from root's `theme:` and puts them beside the login's configuration. A theme
+pair (`s5n`, the default) gets Authelia's dark page and the pair's dark palette, so the
+mark keeps its real colours; a pinned light variant gets the light page. There is no
+custom CSS, and the sign-in page's Content-Security-Policy is left as Authelia ships it.
+Root's `apply` re-renders the login whenever its configuration or pictures differ, so a
+theme change shows up at once.
+
 ## Commands
 
 Status per command: **D** decided, **P** proposed.
