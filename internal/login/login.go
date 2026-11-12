@@ -360,16 +360,15 @@ func (d *Decision) Apply(ctx context.Context, opts Options) (Result, error) {
 		res.Wrote = true
 	}
 
-	config, err := authelia.RenderConfiguration(authelia.Configuration{
-		Host:          opts.Host,
-		Login:         opts.Login,
-		EncryptionKey: key,
-		Rules:         authelia.Rules(opts.Host, opts.Login, authelia.InstancesFromValues(opts.Values), opts.Hosted),
-	})
+	// One rendering for the whole face of the login: the configuration file
+	// that decides the page's theme, and the mark and favicon that go in it.
+	// The per-host step calls the same function, so init and apply cannot
+	// disagree about either.
+	config, assets, err := renderLogin(opts.Values, opts.Host, opts.Login, key, opts.Hosted)
 	if err != nil {
 		return res, undo(err)
 	}
-	res.ConfigurationChanged, err = d.configurationChanged(ctx, cl, config)
+	res.ConfigurationChanged, err = d.configurationChanged(ctx, cl, config, assets)
 	if err != nil {
 		return res, undo(err)
 	}
@@ -393,7 +392,7 @@ func (d *Decision) Apply(ctx context.Context, opts Options) (Result, error) {
 	if err != nil {
 		return res, undo(err)
 	}
-	docs = append([]map[string]any{configMapDoc(config)}, docs...)
+	docs = append([]map[string]any{configMapDoc(config, assets)}, docs...)
 	// From the first write of the login's own objects on, a failure keeps
 	// everything, the volumes included. Undoing only the volumes would leave a
 	// Deployment waiting on a claim that no longer exists, and the operator
@@ -478,18 +477,13 @@ func (d *Decision) EnsureRules(ctx context.Context, opts RulesOptions) (bool, er
 	if err := kube.Preflight(ctx, cl, rulesAccess()); err != nil {
 		return false, fmt.Errorf("login: %w", err)
 	}
-	config, err := authelia.RenderConfiguration(authelia.Configuration{
-		Host:          opts.Host,
-		Login:         opts.Login,
-		EncryptionKey: key,
-		Rules:         authelia.Rules(opts.Host, opts.Login, authelia.InstancesFromValues(opts.Values), opts.Hosted),
-	})
+	config, assets, err := renderLogin(opts.Values, opts.Host, opts.Login, key, opts.Hosted)
 	if err != nil {
 		return false, err
 	}
 	r := d.report()
 	names := strings.Join(opts.Hosts, ", ")
-	changed, err := d.configurationChanged(ctx, cl, config)
+	changed, err := d.configurationChanged(ctx, cl, config, assets)
 	if err != nil {
 		return false, err
 	}
@@ -518,7 +512,7 @@ func (d *Decision) EnsureRules(ctx context.Context, opts RulesOptions) (bool, er
 	}
 	// The ConfigMap is not part of the manifests template: its content is one
 	// rendered file, and it is written beside the objects that name it.
-	docs = append([]map[string]any{configMapDoc(config)}, docs...)
+	docs = append([]map[string]any{configMapDoc(config, assets)}, docs...)
 
 	step := r.Start(say.Op{Label: "applying the login's rule for " + names})
 	if err := cl.ApplyWith(ctx, kube.FieldManager, docs); err != nil {
@@ -686,10 +680,16 @@ func rulesAccess() []kube.Access {
 	}
 }
 
-// configMapDoc is the configuration's ConfigMap. It is built here rather than
-// templated with the rest because its content is one rendered file, and a
-// template would have to re-indent YAML inside YAML.
-func configMapDoc(configuration []byte) map[string]any {
+// configMapDoc is the login's one ConfigMap: the configuration and, in
+// binaryData, the mark and the favicon. It is built here rather than templated
+// with the rest because its content is a rendered file, and a template would
+// have to re-indent YAML inside YAML.
+//
+// The pictures ride with the configuration because they are mounted at the same
+// path -- server.asset_path is /etc/authelia, where this ConfigMap is already
+// read-only -- so an apply writes the login's whole face as one object, and a
+// pod only ever waits on one ConfigMap to appear.
+func configMapDoc(configuration []byte, assets authelia.Assets) map[string]any {
 	return map[string]any{
 		"apiVersion": "v1",
 		"kind":       "ConfigMap",
@@ -701,14 +701,22 @@ func configMapDoc(configuration []byte) map[string]any {
 				kube.ManagedByLabel: kube.ManagedBy,
 			},
 		},
-		"data": map[string]any{authelia.ConfigFile: string(configuration)},
+		"data":       map[string]any{authelia.ConfigFile: string(configuration)},
+		"binaryData": anyMap(assets.BinaryData()),
 	}
 }
 
-// configurationChanged compares the rendered configuration with the ConfigMap
-// that is there. It is a report, not a decision: the apply is idempotent
-// either way, and the pod template's hash is what makes a change roll the pod.
-func (d *Decision) configurationChanged(ctx context.Context, cl Cluster, configuration []byte) (bool, error) {
+// configurationChanged compares the rendered file and pictures with the
+// ConfigMap that is there. It is a report, not a decision: the apply is
+// idempotent either way, and the pod template's hash is what makes a
+// configuration change roll the pod.
+//
+// The pictures are compared too, and they are the one half that does not need
+// the roll: Authelia stats and serves them from the filesystem on every request
+// (internal/server/template.go:47, internal/middlewares/asset_override.go:24), so
+// a re-rendered logo reaches the browser once the kubelet has updated the
+// mounted ConfigMap -- a minute at most, and no restart.
+func (d *Decision) configurationChanged(ctx context.Context, cl Cluster, configuration []byte, assets authelia.Assets) (bool, error) {
 	doc, found, err := cl.Get(ctx, CoreGroup, "v1", "ConfigMap", Namespace, authelia.ConfigMapName)
 	if err != nil {
 		return false, err
@@ -717,7 +725,63 @@ func (d *Decision) configurationChanged(ctx context.Context, cl Cluster, configu
 		return true, nil
 	}
 	data, _, _ := unstructured.NestedStringMap(doc, "data")
-	return data[authelia.ConfigFile] != string(configuration), nil
+	if data[authelia.ConfigFile] != string(configuration) {
+		return true, nil
+	}
+	binary, _, _ := unstructured.NestedStringMap(doc, "binaryData")
+	for name, want := range assets.BinaryData() {
+		if binary[name] != want {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// anyMap is a string map as the untyped document a server-side apply takes:
+// the API server's JSON form wants the base64 strings, and unstructured's
+// accessors want them under any.
+func anyMap(in map[string]string) map[string]any {
+	out := make(map[string]any, len(in))
+	for k, v := range in {
+		out[k] = v
+	}
+	return out
+}
+
+// renderLogin is the login's one rendering, from the inputs init and the
+// per-host step both hold: the configuration file Authelia starts with, and the
+// mark and favicon mounted beside it. It is one function because the same
+// inputs must produce the same files -- a rule or a theme that depended on
+// which command wrote it would be a second login.
+func renderLogin(values map[string]any, host, name, key string, hosted []string) ([]byte, authelia.Assets, error) {
+	lt, err := authelia.ResolveTheme(themeName(values))
+	if err != nil {
+		return nil, authelia.Assets{}, err
+	}
+	config, err := authelia.RenderConfiguration(authelia.Configuration{
+		Host:          host,
+		Login:         name,
+		EncryptionKey: key,
+		Theme:         lt.Base,
+		AssetPath:     authelia.AssetPath,
+		Rules:         authelia.Rules(host, name, authelia.InstancesFromValues(values), hosted),
+	})
+	if err != nil {
+		return nil, authelia.Assets{}, err
+	}
+	assets, err := authelia.RenderAssets(lt)
+	if err != nil {
+		return nil, authelia.Assets{}, err
+	}
+	return config, assets, nil
+}
+
+// themeName is the values file's top-level `theme:`. The chart defaults it to
+// s5n, so a file that leaves it out is the default rather than a refusal, and an
+// unknown name is refused by ResolveTheme with the list of names that work.
+func themeName(values map[string]any) string {
+	name, _ := values["theme"].(string)
+	return name
 }
 
 // awaitDeployment waits for the pod to answer. A login that is not Ready is a

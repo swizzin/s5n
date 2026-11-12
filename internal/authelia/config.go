@@ -256,14 +256,20 @@ func regexpQuote(s string) string {
 }
 
 // Configuration is what the configuration template needs: the host, the one
-// login, the encryption key from the Secret, and the rules derived from the
-// chart's instances.
+// login, the encryption key from the Secret, the theme the operator chose, and
+// the rules derived from the chart's instances.
 type Configuration struct {
 	Host          string
 	Login         string
 	EncryptionKey string
 	Argon2        Argon2
-	Rules         []Rule
+	// Theme is Authelia's own setting, from ResolveTheme: light or dark.
+	Theme string
+	// AssetPath is the directory the rendered logo.png and favicon.ico are
+	// mounted at: server.asset_path, which is how the login page carries the
+	// mark instead of Authelia's own picture.
+	AssetPath string
+	Rules     []Rule
 }
 
 // ErrConfiguration says the configuration cannot be rendered: box refuses
@@ -285,6 +291,14 @@ func RenderConfiguration(c Configuration) ([]byte, error) {
 	// would be a login that never starts.
 	if len(c.EncryptionKey) < 20 {
 		return nil, fmt.Errorf("%w: the storage encryption key is %d characters, and Authelia requires at least 20", ErrConfiguration, len(c.EncryptionKey))
+	}
+	// A theme Authelia does not know stops its startup, and a seedbox with no
+	// login is every app behind it served by nothing.
+	if !validBase(c.Theme) {
+		return nil, fmt.Errorf("%w: theme %q is not one of %s or %s", ErrConfiguration, c.Theme, BaseLight, BaseDark)
+	}
+	if err := checkAssetPath(c.AssetPath); err != nil {
+		return nil, err
 	}
 	if c.Argon2 == (Argon2{}) {
 		c.Argon2 = DefaultArgon2

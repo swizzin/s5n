@@ -19,6 +19,8 @@ func testConfiguration() Configuration {
 		Host:          "box.example.com",
 		Login:         "alice",
 		EncryptionKey: testKey,
+		Theme:         BaseDark,
+		AssetPath:     AssetPath,
 		Rules:         Rules("box.example.com", "alice", InstancesFromValues(fixtureValues()), nil),
 	}
 }

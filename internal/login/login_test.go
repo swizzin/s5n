@@ -1,9 +1,11 @@
 package login
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"errors"
+	"image/png"
 	"io/fs"
 	"strings"
 	"testing"
@@ -13,6 +15,7 @@ import (
 
 	"github.com/swizzin/s5n/internal/authelia"
 	"github.com/swizzin/s5n/internal/bootstrap"
+	"github.com/swizzin/s5n/internal/brand"
 	"github.com/swizzin/s5n/internal/kube"
 	"github.com/swizzin/s5n/internal/platform"
 	"github.com/swizzin/s5n/internal/release"
@@ -924,5 +927,131 @@ func TestEnsureRulesRefusesAnUnpinnedImage(t *testing.T) {
 	}
 	if len(f.cluster.applied) != 0 {
 		t.Fatal("a refused rule write applied something")
+	}
+}
+
+// ---- the login's face -------------------------------------------------------
+
+// lastOf is the newest applied document of a kind and name: every apply writes
+// the login's ConfigMap again, and a test that applies twice wants the second
+// one rather than the first.
+func lastOf(t *testing.T, docs []map[string]any, kind, ns, name string) map[string]any {
+	t.Helper()
+	for i := len(docs) - 1; i >= 0; i-- {
+		doc := docs[i]
+		k, _ := doc["kind"].(string)
+		meta, _ := doc["metadata"].(map[string]any)
+		n, _ := meta["name"].(string)
+		s, _ := meta["namespace"].(string)
+		if k == kind && n == name && s == ns {
+			return doc
+		}
+	}
+	t.Fatalf("no %s %s/%s among the applied documents", kind, ns, name)
+	return nil
+}
+
+// TestApplyWritesTheMarkAndFavicon: the login page carries box's mark, so the
+// ConfigMap that holds the configuration holds the two files server.asset_path
+// points at -- and the configuration names that path and the mapped theme.
+func TestApplyWritesTheMarkAndFavicon(t *testing.T) {
+	f := newFixture(t)
+	opts := testOptions()
+	opts.PathsInNode = true
+	if _, err := f.decision.Apply(context.Background(), opts); err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	cm := find(t, f.cluster.applied, "ConfigMap", Namespace, authelia.ConfigMapName)
+
+	binary, _, _ := unstructured.NestedStringMap(cm, "binaryData")
+	if len(binary) != 2 {
+		t.Fatalf("binaryData carries %d files: %v", len(binary), binary)
+	}
+	logo, err := base64.StdEncoding.DecodeString(binary[authelia.AssetLogo])
+	if err != nil {
+		t.Fatalf("%s: %v", authelia.AssetLogo, err)
+	}
+	img, err := png.Decode(bytes.NewReader(logo))
+	if err != nil {
+		t.Fatalf("%s is not a PNG: %v", authelia.AssetLogo, err)
+	}
+	if got, want := img.Bounds().Dx(), brand.Cols*authelia.LogoCell; got != want {
+		t.Errorf("the logo is %d px wide, want the mark's %d", got, want)
+	}
+	if _, err := base64.StdEncoding.DecodeString(binary[authelia.AssetFavicon]); err != nil {
+		t.Errorf("%s is not base64: %v", authelia.AssetFavicon, err)
+	}
+
+	configuration := configOf(t, f.cluster.applied)
+	for _, want := range []string{"theme: 'dark'", "asset_path: '" + authelia.AssetPath + "'"} {
+		if !strings.Contains(configuration, want) {
+			t.Errorf("the configuration does not contain %q:\n%s", want, configuration)
+		}
+	}
+}
+
+// TestAThemeChangeRewritesTheMark: the theme is a values key, so changing it
+// changes the configuration and the pictures in one write. A second apply that
+// differs only in the theme has to say so, or the login keeps the old face and
+// the pod keeps the old page.
+func TestAThemeChangeRewritesTheMark(t *testing.T) {
+	f := newFixture(t)
+	opts := testOptions()
+	opts.PathsInNode = true
+	opts.Values = map[string]any{"theme": "s5n", "apps": testValues["apps"]}
+	if _, err := f.decision.Apply(context.Background(), opts); err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	first := find(t, f.cluster.applied, "ConfigMap", Namespace, authelia.ConfigMapName)
+	firstBinary, _, _ := unstructured.NestedStringMap(first, "binaryData")
+
+	opts.Values = map[string]any{"theme": "s5n-light", "apps": testValues["apps"]}
+	res, err := f.decision.Apply(context.Background(), opts)
+	if err != nil {
+		t.Fatalf("second Apply: %v", err)
+	}
+	if !res.ConfigurationChanged {
+		t.Fatal("a theme change was not reported as a change: the pod would not roll and the page would stay s5n's dark")
+	}
+	second := lastOf(t, f.cluster.applied, "ConfigMap", Namespace, authelia.ConfigMapName)
+	secondBinary, _, _ := unstructured.NestedStringMap(second, "binaryData")
+	if firstBinary[authelia.AssetLogo] == secondBinary[authelia.AssetLogo] {
+		t.Fatal("the light theme's logo is the dark theme's: the mark did not follow the palette")
+	}
+	data, _, _ := unstructured.NestedStringMap(second, "data")
+	if got := data[authelia.ConfigFile]; !strings.Contains(got, "theme: 'light'") {
+		t.Errorf("the configuration does not pin the light page:\n%s", got)
+	}
+}
+
+// TestEnsureRulesCarriesTheMark: a rule write re-applies the login's objects
+// from the same template, so it carries the pictures too -- a box whose theme
+// changed and whose only new work is a host's rule still ends up with the
+// right face.
+func TestEnsureRulesCarriesTheMark(t *testing.T) {
+	f := newFixture(t)
+	opts := testOptions()
+	opts.PathsInNode = true
+	opts.Values = map[string]any{"theme": "s5n", "apps": testValues["apps"]}
+	if _, err := f.decision.Apply(context.Background(), opts); err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	rules := ruleOptions()
+	rules.Values = map[string]any{"theme": "s5n-light", "apps": hostedValues()["apps"]}
+	changed, err := f.decision.EnsureRules(context.Background(), rules)
+	if err != nil {
+		t.Fatalf("EnsureRules: %v", err)
+	}
+	if !changed {
+		t.Fatal("the rule write reported no change for a configuration with a new theme")
+	}
+	cm := lastOf(t, f.cluster.applied, "ConfigMap", Namespace, authelia.ConfigMapName)
+	binary, _, _ := unstructured.NestedStringMap(cm, "binaryData")
+	if len(binary) != 2 {
+		t.Fatalf("the rule write applied a ConfigMap with %d pictures", len(binary))
+	}
+	data, _, _ := unstructured.NestedStringMap(cm, "data")
+	if got := data[authelia.ConfigFile]; !strings.Contains(got, "theme: 'light'") {
+		t.Errorf("the rule write did not carry the theme:\n%s", got)
 	}
 }
