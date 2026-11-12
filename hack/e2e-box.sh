@@ -329,7 +329,7 @@ bootstrap() { # bootstrap <output file>
     --kubeconfig "$WORK/kubeconfig" >"$1" 2>&1
 }
 
-init() { # init <output file>
+init() { # init <output file> [extra dev flags]
   # --paths-in-node: the paths are in the kind node's filesystem, not this
   # host's, so init neither reports nor creates them, and apply skips its stat
   # the same way. On a real host init creates them (hack/e2e-box.sh cannot:
@@ -344,7 +344,7 @@ init() { # init <output file>
     --apps qbittorrent,sonarr,radarr,prowlarr,plex,tautulli,seerr,qui,maintainerr \
     --puid 1000 --pgid 1000 \
     --login "$LOGIN" --password-file "$WORK/authelia-password" \
-    --paths-in-node \
+    --paths-in-node "${@:2}" \
     --kubeconfig "$WORK/kubeconfig" >"$1" 2>&1
 }
 
@@ -420,6 +420,16 @@ https_get() { # https_get <address> <path> <ca-file|-> [requests]
     sleep 1
   done
   printf '%s' "$code"
+}
+
+# same_cert is "these two PEM documents hold the same certificate", by
+# fingerprint: box re-encodes the anchor's certificate before it writes it, so
+# a byte comparison would be about whitespace as much as about the certificate.
+same_cert() { # same_cert <pem-a> <pem-b>
+  local a b
+  a=$(printf '%s' "$1" | openssl x509 -noout -fingerprint -sha256 2>/dev/null || true)
+  b=$(printf '%s' "$2" | openssl x509 -noout -fingerprint -sha256 2>/dev/null || true)
+  [ -n "$a" ] && [ "$a" = "$b" ]
 }
 
 # tls_serial prints the serial number of the certificate in a cert-manager
@@ -2059,6 +2069,55 @@ PY
   [ -z "$($K get clusterissuer s5n-letsencrypt -o jsonpath='{.spec.acme.skipTLSVerify}')" ] ||
     { echo "the production issuer skips ACME endpoint verification"; fail=1; }
 
+  # ---- the anchor: the box root travels into the seedbox's namespace ---------
+  # A self-signed host's certificate chains to one root box owns, so root's run
+  # copies that root into the seedbox's namespace: it is what an app which
+  # fetches the login's OIDC documents from its own pod has to trust. The
+  # ConfigMap carries the certificate and nothing else -- never a key.
+  root_crt=$($K -n cert-manager get secret s5n-root-ca -o jsonpath='{.data.tls\.crt}' | base64 -d || true)
+  [ -n "$root_crt" ] || { echo "the box root's Secret cert-manager/s5n-root-ca is empty or missing"; fail=1; }
+  # The issuer the certificate names is a CA over the root, not the bare
+  # self-signed one 0.3.0 shipped: same name, different object.
+  [ "$($K get clusterissuer s5n-selfsigned -o jsonpath='{.spec.ca.secretName}' || true)" = s5n-root-ca ] ||
+    { echo "s5n-selfsigned is not a CA issuer over s5n-root-ca"; fail=1; }
+  anchor=$($K -n "$NS" get configmap s5n-host-ca -o jsonpath='{.data.ca\.crt}' 2>/dev/null || true)
+  [ -n "$anchor" ] || { echo "root's run did not write ConfigMap ${NS}/s5n-host-ca for a self-signed host"; fail=1; }
+  same_cert "$anchor" "$root_crt" ||
+    { echo "s5n-host-ca does not hold the box root's certificate"; fail=1; }
+  anchor_keys=$($K -n "$NS" get configmap s5n-host-ca -o json 2>/dev/null |
+    python3 -c 'import json,sys;print(",".join(sorted(json.load(sys.stdin).get("data",{}).keys())))' || true)
+  [ "$anchor_keys" = ca.crt ] || { echo "s5n-host-ca carries ${anchor_keys}, want the key ca.crt alone"; fail=1; }
+  printf '%s\n' "$anchor" >"$WORK/anchor-ca.pem"
+
+  # The certificate the Gateway serves is the root's child, verified against
+  # that same ConfigMap: the chain is captured the way a client sees it, and
+  # `openssl verify` is the assertion. 0.3.0's shape would pass a naive check --
+  # the leaf was its own CA -- so the leaf is also compared with the root.
+  echo | openssl s_client -connect "${lb_addr}:443" -servername "${DOMAIN}" -showcerts \
+    >"$WORK/served-chain.pem" 2>/dev/null || true
+  awk '/BEGIN CERTIFICATE/{n++} n==1' "$WORK/served-chain.pem" >"$WORK/served-leaf.pem"
+  if [ ! -s "$WORK/served-leaf.pem" ]; then
+    echo "openssl s_client through the Gateway returned no certificate"
+    fail=1
+  else
+    echo "  served: $(openssl x509 -in "$WORK/served-leaf.pem" -noout -subject -issuer 2>/dev/null | tr '\n' ' ')"
+    if openssl verify -CAfile "$WORK/anchor-ca.pem" "$WORK/served-leaf.pem" >"$WORK/verify.txt" 2>&1; then
+      echo "  verify: $(cat "$WORK/verify.txt")"
+    else
+      echo "the certificate ${DOMAIN} serves does not verify against s5n-host-ca"
+      cat "$WORK/verify.txt"
+      fail=1
+    fi
+    if same_cert "$(cat "$WORK/served-leaf.pem")" "$root_crt"; then
+      echo "the served certificate is the root itself, not a leaf signed by it"
+      fail=1
+    fi
+  fi
+  # A client that trusts nothing but the anchor gets the app's own answer.
+  verified_code=$(https_get "$lb_addr" /sonarr/ping "$WORK/anchor-ca.pem" || true)
+  echo "  HTTPS ${DOMAIN}/sonarr/ping with s5n-host-ca as the only anchor: ${verified_code}"
+  [ "$verified_code" = 200 ] || { echo "the host did not answer 200 with s5n-host-ca as the only anchor"; fail=1; }
+
   https_code=$(https_get "$lb_addr" /sonarr/ping -)
   echo "  HTTPS ${DOMAIN}/sonarr/ping (self-signed): ${https_code}"
   [ "$https_code" = 200 ] || { echo "HTTPS did not answer 200 with the self-signed certificate"; fail=1; }
@@ -2146,6 +2205,139 @@ PY
     { echo "the second bootstrap rewrote the values file"; fail=1; }
   [ "$(revision)" = "$rev1" ] || { echo "the second bootstrap created a release revision"; fail=1; }
 
+
+  # ---- a renewal keeps the anchor -------------------------------------------
+  # Force a re-issue with the trigger box itself uses -- the Issuing condition
+  # `cmctl renew` sets -- and prove the anchor did not move. That is the whole
+  # reason for a root: a new leaf, one anchor, and no pod restarted.
+  serial_before_renewal=$(tls_serial "$cert" || true)
+  anchor_rv_before=$($K -n "$NS" get configmap s5n-host-ca -o jsonpath='{.metadata.resourceVersion}' || true)
+  $K -n s5n-gateway get certificate "$cert" -o json | python3 -c '
+import json, sys
+crt = json.load(sys.stdin)
+conds = [c for c in crt["status"].get("conditions", []) if c["type"] != "Issuing"]
+conds.append({"type": "Issuing", "status": "True", "reason": "ManuallyTriggered",
+              "message": "Certificate re-issuance manually triggered",
+              "observedGeneration": crt["metadata"]["generation"],
+              "lastTransitionTime": "2026-01-01T00:00:00Z"})
+print(json.dumps({"status": {"conditions": conds}}))' >"$WORK/cert-status.json"
+  $K -n s5n-gateway patch certificate "$cert" --subresource=status --type=merge \
+    -p "$(cat "$WORK/cert-status.json")" >/dev/null ||
+    { echo "could not set the Issuing condition on ${cert}"; fail=1; }
+  serial_after_renewal=""
+  for i in $(seq 1 60); do
+    serial_after_renewal=$(tls_serial "$cert" || true)
+    [ -n "$serial_after_renewal" ] && [ "$serial_after_renewal" != "$serial_before_renewal" ] && break
+    sleep 2
+  done
+  $K -n s5n-gateway wait --for=condition=Ready "certificate/$cert" --timeout=120s || fail=1
+  [ -n "$serial_after_renewal" ] && [ "$serial_after_renewal" != "$serial_before_renewal" ] ||
+    { echo "the forced renewal did not produce a new serial (was ${serial_before_renewal})"; fail=1; }
+  echo "  renewal serial: ${serial_before_renewal} -> ${serial_after_renewal}"
+  same_cert "$($K -n "$NS" get configmap s5n-host-ca -o jsonpath='{.data.ca\.crt}' || true)" "$anchor" ||
+    { echo "the anchor's certificate changed with the renewal"; fail=1; }
+  [ "$($K -n "$NS" get configmap s5n-host-ca -o jsonpath='{.metadata.resourceVersion}' || true)" = "$anchor_rv_before" ] ||
+    { echo "the anchor ConfigMap was rewritten by a renewal"; fail=1; }
+  # And the Gateway serves the new leaf, still verifying against that anchor.
+  served_serial=""
+  for i in $(seq 1 30); do
+    echo | openssl s_client -connect "${lb_addr}:443" -servername "${DOMAIN}" -showcerts \
+      >"$WORK/renewed-chain.pem" 2>/dev/null || true
+    awk '/BEGIN CERTIFICATE/{n++} n==1' "$WORK/renewed-chain.pem" >"$WORK/renewed-leaf.pem"
+    served_serial=$(openssl x509 -in "$WORK/renewed-leaf.pem" -noout -serial 2>/dev/null | sed 's/^serial=//' || true)
+    [ "$served_serial" = "$serial_after_renewal" ] && break
+    sleep 2
+  done
+  [ "$served_serial" = "$serial_after_renewal" ] ||
+    { echo "the Gateway still serves serial ${served_serial}, want the renewed ${serial_after_renewal}"; fail=1; }
+  openssl verify -CAfile "$WORK/anchor-ca.pem" "$WORK/renewed-leaf.pem" >"$WORK/verify2.txt" 2>&1 ||
+    { echo "the renewed certificate does not verify against the unchanged anchor"; cat "$WORK/verify2.txt"; fail=1; }
+
+  # ---- a record appears before the certificate moves: the anchor stays -------
+  # The window this pins: the operator adds the DNS record and runs `box apply`
+  # before `box init`. The host still serves the certificate init last wrote --
+  # only init's per-host step moves it to Let's Encrypt -- so the anchor has to
+  # stay, or every app that restarts while the certificate is still box's own
+  # stops trusting the login. The anchor followed DNS once: this apply would
+  # have taken it away.
+  log "a public record and an apply: the anchor stays until the certificate moves"
+  cat >"$WORK/dns-window" <<EOF
+192.0.2.10 ${DOMAIN}
+EOF
+  anchor_rv_window=$($K -n "$NS" get configmap s5n-host-ca -o jsonpath='{.metadata.resourceVersion}')
+  if "$WORK/box" apply --yes --chart-repo "$CHART_REPO" --chart-version "$CHART_VERSION" \
+    --grant "$WORK/grant.yaml" --values "$WORK/values.yaml" \
+    --dns-file "$WORK/dns-window" --paths-in-node \
+    --kubeconfig "$WORK/kubeconfig" >"$WORK/apply-dns-window.txt" 2>&1; then
+    cat "$WORK/apply-dns-window.txt"
+  else
+    cat "$WORK/apply-dns-window.txt"; fail=1
+  fi
+  grep -qF "nothing to change" "$WORK/apply-dns-window.txt" ||
+    { echo "the apply over a self-signed host had work to do"; fail=1; }
+  [ "$($K -n s5n-gateway get certificate "$cert" -o jsonpath='{.spec.issuerRef.name}')" = s5n-selfsigned ] ||
+    { echo "the host's Certificate moved to another issuer without init"; fail=1; }
+  same_cert "$($K -n "$NS" get configmap s5n-host-ca -o jsonpath='{.data.ca\.crt}' || true)" "$anchor" ||
+    { echo "a public DNS answer moved the anchor while the host still served box's own certificate"; fail=1; }
+  [ "$($K -n "$NS" get configmap s5n-host-ca -o jsonpath='{.metadata.resourceVersion}')" = "$anchor_rv_window" ] ||
+    { echo "the anchor ConfigMap was rewritten by an apply that saw a public record"; fail=1; }
+  echo "  s5n-host-ca untouched: the certificate is still self-signed"
+
+  # ---- an upgraded box: a leaf from 0.3.0's bare self-signed issuer ----------
+  # 0.3.0 shipped s5n-selfsigned as `selfSigned: {}`, so every host certificate
+  # was its own CA. This block recreates that state BY HAND and nothing in the
+  # product does it: it is the pre-existing box the next bootstrap has to
+  # repair. It is applied under box's own field manager on purpose -- an
+  # installed 0.3.0 box has exactly that, and it is what lets the next apply
+  # take the field away.
+  if $K apply --server-side --field-manager=box --force-conflicts -f - >/dev/null <<'EOF'
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: s5n-selfsigned
+  labels:
+    app.kubernetes.io/part-of: s5n
+    app.kubernetes.io/managed-by: box
+spec:
+  selfSigned: {}
+EOF
+  then :; else echo "could not restore the 0.3.0 self-signed issuer"; fail=1; fi
+  [ -z "$($K get clusterissuer s5n-selfsigned -o jsonpath='{.spec.ca}' || true)" ] ||
+    { echo "the hand-made 0.3.0 issuer still names a CA"; fail=1; }
+  $K -n s5n-gateway delete secret "$cert" --ignore-not-found >/dev/null ||
+    { echo "could not delete the certificate's Secret for the 0.3.0 shape"; fail=1; }
+  serial_old_shape=""
+  for i in $(seq 1 60); do
+    serial_old_shape=$(tls_serial "$cert" || true)
+    [ -n "$serial_old_shape" ] && break
+    sleep 2
+  done
+  $K -n s5n-gateway wait --for=condition=Ready "certificate/$cert" --timeout=180s ||
+    { echo "the 0.3.0-shaped certificate never came back"; fail=1; }
+  old_shape_ca=$($K -n s5n-gateway get secret "$cert" -o jsonpath='{.data.ca\.crt}' | base64 -d || true)
+  old_shape_leaf=$($K -n s5n-gateway get secret "$cert" -o jsonpath='{.data.tls\.crt}' | base64 -d || true)
+  same_cert "$old_shape_ca" "$old_shape_leaf" ||
+    { echo "the hand-made certificate is not its own CA, so this is not the 0.3.0 shape"; fail=1; }
+  echo "  pre-upgrade leaf is its own CA (serial ${serial_old_shape})"
+
+  log "box bootstrap: an upgraded box's host certificate is re-issued from the root"
+  if bootstrap "$WORK/bootstrap-upgrade.txt"; then
+    cat "$WORK/bootstrap-upgrade.txt"
+  else
+    cat "$WORK/bootstrap-upgrade.txt"; fail=1
+  fi
+  grep -qF "re-issued from the box root" "$WORK/bootstrap-upgrade.txt" ||
+    { echo "box did not report re-issuing the host certificate"; fail=1; }
+  [ "$($K get clusterissuer s5n-selfsigned -o jsonpath='{.spec.ca.secretName}' || true)" = s5n-root-ca ] ||
+    { echo "bootstrap did not restore s5n-selfsigned as a CA issuer"; fail=1; }
+  $K -n s5n-gateway wait --for=condition=Ready "certificate/$cert" --timeout=180s || fail=1
+  serial_after_upgrade=$(tls_serial "$cert" || true)
+  [ -n "$serial_after_upgrade" ] && [ "$serial_after_upgrade" != "$serial_old_shape" ] ||
+    { echo "the host certificate was not re-issued after the upgrade (still ${serial_after_upgrade})"; fail=1; }
+  same_cert "$($K -n s5n-gateway get secret "$cert" -o jsonpath='{.data.ca\.crt}' | base64 -d || true)" "$root_crt" ||
+    { echo "the re-issued certificate does not chain to the box root"; fail=1; }
+  echo "  upgraded serial: ${serial_old_shape} -> ${serial_after_upgrade}, chained to s5n-root-ca"
+
   # ---- the no-DNS card, then the move to an issued certificate --------------
   # Run 1 had no DNS answers at all. init installed self-signed certificates
   # for the domain and for each app host, and its final card said, per host,
@@ -2212,6 +2404,37 @@ EOF
     { echo "the domain's certificate was not re-issued"; fail=1; }
   [ -n "$new_app_serial" ] && [ "$new_app_serial" != "$old_app_serial" ] ||
     { echo "the app host's certificate was not re-issued"; fail=1; }
+
+  # The host is publicly trusted now, so there is nothing for a pod to add:
+  # root's run removed the anchor it wrote while the certificate was box's own.
+  if $K -n "$NS" get configmap s5n-host-ca >/dev/null 2>&1; then
+    echo "s5n-host-ca is still in ${NS} after the move to Let's Encrypt"; fail=1
+  else
+    echo "  s5n-host-ca removed: a public root needs no anchor"
+  fi
+
+  # --ca-file is the same writer with another source, for the one mode with
+  # nothing to copy: an ACME certificate has no ca.crt at any point. The e2e
+  # hands box Pebble's root on init -- the run that writes the host's
+  # Certificate, and so the run the anchor follows -- and asserts the ConfigMap,
+  # then an init without the flag takes it away again, so the flag feeds the
+  # product path instead of adding a test-only one. The scenario passes
+  # --ca-file nowhere else: the move above proves the removal, this the file.
+  log "box init --ca-file: an ACME host's anchor comes from the file"
+  if init "$WORK/init-ca.txt" --ca-file "$WORK/pebble-root.pem"; then
+    grep -qF "wrote ConfigMap ${NS}/s5n-host-ca" "$WORK/init-ca.txt" ||
+      { echo "box did not report writing the anchor from --ca-file"; cat "$WORK/init-ca.txt"; fail=1; }
+  else
+    cat "$WORK/init-ca.txt"; fail=1
+  fi
+  same_cert "$($K -n "$NS" get configmap s5n-host-ca -o jsonpath='{.data.ca\.crt}' 2>/dev/null || true)" \
+    "$(cat "$WORK/pebble-root.pem")" ||
+    { echo "--ca-file did not reach ${NS}/s5n-host-ca"; fail=1; }
+  log "box init: an ACME host's anchor goes again"
+  if init "$WORK/init-noca.txt"; then :; else cat "$WORK/init-noca.txt"; fail=1; fi
+  if $K -n "$NS" get configmap s5n-host-ca >/dev/null 2>&1; then
+    echo "the anchor survived an init without --ca-file on an ACME host"; fail=1
+  fi
   https_code=$(https_get "$lb_addr" /sonarr/ping "$WORK/pebble-root.pem")
   echo "  HTTPS ${DOMAIN}/sonarr/ping with Pebble's CA: ${https_code}"
   [ "$https_code" = 200 ] || { echo "HTTPS did not answer 200 with Pebble's CA after the move"; fail=1; }
