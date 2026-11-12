@@ -462,6 +462,12 @@ type RulesOptions struct {
 	// stopped answering for.
 	Namespace string
 	OIDC      []string
+	// Installs says this run installs the login after it has read the cluster:
+	// `box init` does, in the step that runs once the confirm is answered. A
+	// cluster without a login is then work Pending shows rather than the
+	// refusal a later rule write makes, and the render it would compare is
+	// simply not there yet.
+	Installs bool
 }
 
 // EnsureRules writes the login's configuration for the hosts a run is about to
@@ -560,6 +566,16 @@ func (d *Decision) prepare(ctx context.Context, opts RulesOptions, ensure bool) 
 		sec, err = d.readSecret(ctx, cl)
 	} else {
 		sec, err = d.readSecret(ctx, cl)
+		if err != nil {
+			// The run that installs the login installs it after the confirm
+			// (`box init`), so reading a cluster without one is work to show,
+			// not the refusal a rule write makes. Installs says this run is
+			// that one.
+			if opts.Installs && errors.Is(err, ErrNotInstalled) {
+				return cl, none, true, nil
+			}
+			return nil, none, false, err
+		}
 	}
 	if err != nil {
 		return nil, none, false, err

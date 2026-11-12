@@ -63,6 +63,12 @@ type TLSHosts struct {
 	// Forced is tls.issuer as the files say it ("letsencrypt"/"selfsigned"), or
 	// empty to decide from each name's answer.
 	Forced string
+	// Decided is the issuer this run already chose for a name, by host: init
+	// hands over the Hosts it decided, so the step that writes the
+	// Certificate uses the same issuer the plan compared it with. Those names
+	// are not resolved again -- one decision per run -- and a name not here
+	// is decided from its own DNS answer, as a bare apply does.
+	Decided map[string]string
 	// Command is the box command a stop tells the operator to run again, so the
 	// message names a command that exists: "init" or "apply".
 	Command string
@@ -98,11 +104,30 @@ func (t *TLSHosts) Ensure(ctx context.Context, hosts []string) error {
 		return errors.New("no domain: an app host is a name under the box's own")
 	}
 	r := t.report()
-	domAnswer := resolveHost(ctx, t.Resolver, domain)
+	// The box's own name is resolved only for a host this run has not decided
+	// already: init resolved every name before its hand-over, and resolving a
+	// second time could only disagree with the decision the plan showed.
+	var domAnswer hostAnswer
+	domResolved := false
+	dom := func() hostAnswer {
+		if !domResolved {
+			domAnswer = resolveHost(ctx, t.Resolver, domain)
+			domResolved = true
+		}
+		return domAnswer
+	}
 	decided := make([]Host, 0, len(hosts))
 	for _, host := range hosts {
+		if issuer, ok := t.Decided[host]; ok && strings.TrimSpace(issuer) != "" {
+			decided = append(decided, Host{
+				Host:   host,
+				App:    appName(host, domain),
+				Issuer: issuer,
+			})
+			continue
+		}
 		ans := resolveHost(ctx, t.Resolver, host)
-		if err := appHostProblem(domain, domAnswer, host, ans, t.Command); err != nil {
+		if err := appHostProblem(domain, dom(), host, ans, t.Command); err != nil {
 			return err
 		}
 		issuer, why := issuerFor(host, ans, t.Forced)

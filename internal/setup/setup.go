@@ -144,6 +144,12 @@ type ApplyOptions struct {
 	// per-host step writes that Certificate: on a first init there is nothing
 	// in the cluster to read it from.
 	Issuer string
+	// HostIssuers is the issuer init decided for each name it serves, by
+	// host. The apply's plan compares each Certificate that already answers
+	// with its own host's decision, so a name moved to Let's Encrypt by this
+	// run is written even though tls.issuer is empty, and its per-host step
+	// writes that same issuer instead of resolving the name again.
+	HostIssuers map[string]string
 }
 
 // ApplyFunc is one `box apply`.
@@ -471,6 +477,7 @@ func (d *Decision) Run(ctx context.Context, opts Options) (Result, error) {
 		PathsInNode:   opts.PathsInNode,
 		TransientKeys: transientKeys,
 		Issuer:        res.Issuer,
+		HostIssuers:   hostIssuers(res.Hosts),
 	}
 	if d.Login != nil {
 		// The rules the login writes are derived from the document the release

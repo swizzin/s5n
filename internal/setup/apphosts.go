@@ -115,6 +115,20 @@ func sameAddresses(a, b []string) bool {
 	return true
 }
 
+// hostIssuers is the per-name decision init hands its apply: the issuer for
+// each host it decided, so the apply's plan compares every Certificate that
+// already answers with this run's own answer rather than with tls.issuer (which
+// is empty when DNS decided) or with a second resolution.
+func hostIssuers(hosts []Host) map[string]string {
+	out := make(map[string]string, len(hosts))
+	for _, h := range hosts {
+		if h.Host != "" && h.Issuer != "" {
+			out[h.Host] = h.Issuer
+		}
+	}
+	return out
+}
+
 // appHostApps is the catalog names of the apps served at a name of their own,
 // for the caller that only needs to know which apps left the path (the login's
 // rules).

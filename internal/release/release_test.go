@@ -176,6 +176,9 @@ type fakes struct {
 	dataPath    string
 	configPath  string
 	hosts       *fakeHosts
+	// hostIssuers is init's per-name decision, handed to the plan so each
+	// Certificate is compared with the issuer this run would write for it.
+	hostIssuers map[string]string
 	// otherHosts replaces the per-host step with any other value, the way a
 	// user's apply hands apply a step that has no login half.
 	otherHosts Hosts
@@ -183,6 +186,9 @@ type fakes struct {
 	// anchorIssuer is the issuer this run writes the box's own host
 	// Certificate with: init's answer, which the anchor follows.
 	anchorIssuer string
+	// hostsAll is init's apply: every name it decided goes to the per-host
+	// step, served or not.
+	hostsAll bool
 }
 
 func newFakes(t *testing.T) *fakes {
@@ -255,6 +261,8 @@ func (f *fakes) apply(t *testing.T) (Result, error) {
 		opts.Anchor = f.anchor
 	}
 	opts.AnchorIssuer = f.anchorIssuer
+	opts.HostsAll = f.hostsAll
+	opts.HostIssuers = f.hostIssuers
 	return f.app.Apply(context.Background(), opts)
 }
 

@@ -43,6 +43,10 @@ type applyHosts struct {
 	kubeconfig string
 	out        say.Reporter
 	resolver   setup.Resolver
+	// installs says this run installs the login after the confirm: `box init`
+	// does, and its apply plans before that. A cluster without a login is then
+	// a page this run will write, not a refusal.
+	installs bool
 }
 
 // cluster opens the client for one question. It is lazy the way every other
@@ -75,6 +79,40 @@ func (a applyHosts) Missing(ctx context.Context, plan release.HostPlan) ([]strin
 	return missing, nil
 }
 
+// Stale is Missing's other half: the hosts that answer already but whose
+// Certificate is not the one this run would issue -- the issuer changed under
+// it, or a self-signed one is not on the box root. Only a run that owns the
+// whole box asks: `box init` re-issues, a bare apply leaves a served host
+// alone.
+func (a applyHosts) Stale(ctx context.Context, plan release.HostPlan) ([]string, error) {
+	if len(plan.Hosts) == 0 {
+		return nil, nil
+	}
+	cl, err := a.cluster()
+	if err != nil {
+		return nil, err
+	}
+	var stale []string
+	for _, host := range plan.Hosts {
+		// The issuer this run decided for this name. Forced is only the file's
+		// answer, and it is empty on the run whose issuer came from DNS --
+		// the run that can find a Certificate naming an issuer it no longer
+		// wants.
+		want := plan.Issuers[host]
+		if want == "" {
+			want = plan.Forced
+		}
+		needs, err := platform.CertificateNeedsWork(ctx, cl, host, want)
+		if err != nil {
+			return nil, err
+		}
+		if needs {
+			stale = append(stale, host)
+		}
+	}
+	return stale, nil
+}
+
 // Ensure runs the step: every name is DNS-checked against the box's domain
 // before anything is written, then the login's rule for them, then each one's
 // listener and Certificate.
@@ -86,6 +124,7 @@ func (a applyHosts) Ensure(ctx context.Context, plan release.HostPlan) error {
 	step := &setup.TLSHosts{
 		Domain:   plan.Domain,
 		Forced:   plan.Forced,
+		Decided:  plan.Issuers,
 		Command:  "apply",
 		Resolver: a.resolver,
 		Allowed:  func(ctx context.Context) (bool, error) { return platform.HostAccess(ctx, cl) },
@@ -93,7 +132,14 @@ func (a applyHosts) Ensure(ctx context.Context, plan release.HostPlan) error {
 		Rules:    a.rules(cl, plan),
 		Say:      a.out,
 	}
-	return step.Ensure(ctx, plan.Hosts)
+	names := plan.Hosts
+	if len(plan.All) > 0 {
+		// Every name this run decided, not only the ones nothing answers on:
+		// init re-issues a self-signed host under the box root, and that is a
+		// host the plan has nothing new to show for.
+		names = plan.All
+	}
+	return step.Ensure(ctx, names)
 }
 
 // rules is the login's half of the per-host step: the access_control rule for
@@ -146,7 +192,9 @@ func (a applyHosts) Pending(ctx context.Context, plan release.HostPlan) (bool, e
 	if err != nil || !ok {
 		return false, err
 	}
-	return d.Pending(ctx, loginRules(plan))
+	opts := loginRules(plan)
+	opts.Installs = a.installs
+	return d.Pending(ctx, opts)
 }
 
 // Reconcile is the write half, and it applies only when the rendering differs:

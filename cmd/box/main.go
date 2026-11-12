@@ -780,10 +780,31 @@ func (o *initFlags) run(ctx context.Context, kubeconfig string, yes, plain bool,
 				TransientKeys: req.TransientKeys,
 				BoxValues:     boxValues(kc),
 				Anchor:        hostCA(kc, out, o.caFile),
+				// The per-host step, inside the apply: init decided every
+				// name, and this writes each one's listener and Certificate
+				// after the confirm and before the release moves. Running it
+				// afterwards is a deadlock the OIDC clients found: Helm's wait
+				// holds the apply open for an app that cannot start until it
+				// can dial the issuer, and the issuer is served on the 443
+				// listener this step has not written yet.
+				//
+				// installs: init installs the login after the confirm
+				// (req.Login, in afterConfirm below), so the plan may read a
+				// cluster that has none yet and still have something to show.
+				Hosts: applyHosts{kubeconfig: kc, out: out, resolver: resolver, installs: true},
+				// Every name init decided, not only the ones nothing answers
+				// on: re-issuing a self-signed host under the box root is work
+				// an existing host still has.
+				HostsAll: true,
 				// The issuer this run's per-host step writes the box's own
 				// Certificate with: the anchor follows it, and on a first init
 				// there is no Certificate in the cluster to read instead.
 				AnchorIssuer: req.Issuer,
+				// Every name's own decision, so the plan compares each
+				// Certificate that already answers with the issuer this run
+				// will write for it -- not with tls.issuer, which is empty
+				// when DNS decided, and not with a second resolution.
+				HostIssuers: req.HostIssuers,
 			})
 			return err
 		},
@@ -812,23 +833,6 @@ func (o *initFlags) run(ctx context.Context, kubeconfig string, yes, plain bool,
 	})
 	if err != nil {
 		return err
-	}
-	// The release is installed; now every host's TLS. It runs after apply
-	// because the names only exist once init has written the grant, and it is
-	// harmless when a certificate is already there (the same objects,
-	// server-side applied). init decided one certificate name per app served
-	// at a host of its own, each with its own issuer.
-	if len(res.Hosts) > 0 {
-		kc, err := release.ResolveKubeconfig(kubeconfig, os.Getenv("KUBECONFIG"), bootstrap.FilesystemRecords{Path: bootstrap.RecordPath})
-		if err != nil {
-			return err
-		}
-		out.Phase("certificate")
-		// The same per-host step apply runs for a host it is about to serve
-		// (setup.ApplyHosts): init decided the names, this writes each one.
-		if err := setup.ApplyHosts(ctx, certificateStep(kc, out), res.Hosts); err != nil {
-			return err
-		}
 	}
 	if res.Domain != "" {
 		out.Banner("seedbox ready", res.Domain)

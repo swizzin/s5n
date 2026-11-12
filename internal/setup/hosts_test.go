@@ -40,6 +40,48 @@ func hostStep(t *testing.T, r *hostRecorder) (*TLSHosts, *strings.Builder) {
 	}, out
 }
 
+// countingResolver counts how many names a step asked DNS about, so a test can
+// prove a decision taken earlier is not taken again.
+type countingResolver struct{ calls *int }
+
+func (c countingResolver) LookupHost(context.Context, string) ([]string, error) {
+	*c.calls++
+	return nil, nil
+}
+
+// TestTLSHostsWritesTheIssuerTheRunDecided: init decides every name's issuer
+// before it hands over, and its plan compares each existing Certificate with
+// that decision. The step that writes them has to use the same one -- a second
+// DNS answer could disagree with what the operator confirmed -- so a name in
+// Decided is written with that issuer and never resolved again.
+func TestTLSHostsWritesTheIssuerTheRunDecided(t *testing.T) {
+	rec := &hostRecorder{}
+	step, out := hostStep(t, rec)
+	step.Command = "init"
+	step.Decided = map[string]string{
+		"box.example.com":       IssuerLetsEncrypt,
+		"gamma.box.example.com": IssuerSelfSigned,
+	}
+	var calls int
+	step.Resolver = countingResolver{calls: &calls}
+
+	if err := step.Ensure(context.Background(), []string{"box.example.com", "gamma.box.example.com"}); err != nil {
+		t.Fatalf("ensure: %v\n%s", err, out)
+	}
+	if calls != 0 {
+		t.Fatalf("the step resolved %d names, want none: init already decided them", calls)
+	}
+	if len(rec.hosts) != 2 {
+		t.Fatalf("wrote %+v, want both decided hosts", rec.hosts)
+	}
+	if rec.hosts[0].Issuer != IssuerLetsEncrypt || rec.hosts[1].Issuer != IssuerSelfSigned {
+		t.Fatalf("issuers = %q, %q; want this run's decisions", rec.hosts[0].Issuer, rec.hosts[1].Issuer)
+	}
+	if rec.hosts[1].App != "gamma" {
+		t.Fatalf("app = %q, want gamma", rec.hosts[1].App)
+	}
+}
+
 // The apply step with matching answers: both names answered where the domain
 // did, so both are written, each with the issuer its own answer picked.
 func TestTLSHostsWritesEveryNameThatMatchesTheDomain(t *testing.T) {

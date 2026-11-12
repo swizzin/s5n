@@ -3,6 +3,7 @@ package login
 import (
 	"context"
 	"encoding/base64"
+	"errors"
 	"strings"
 	"testing"
 
@@ -557,5 +558,35 @@ func TestPendingAgreesWithReconcile(t *testing.T) {
 	}
 	if wrote || len(f.cluster.applied) != before {
 		t.Fatalf("a second Reconcile wrote %d documents with nothing to change", len(f.cluster.applied)-before)
+	}
+}
+
+// TestAnInstallPlansTheLoginItWrites: init's apply reads the cluster before the
+// login is installed (it is installed after the confirm), so "no login yet" is
+// work that run is about to do. Every other run keeps the refusal: nothing in
+// it would install one, and a plan that promised it would be a lie.
+func TestAnInstallPlansTheLoginItWrites(t *testing.T) {
+	f := newFixture(t) // no login in this cluster yet
+	rules := ruleOptions()
+	rules.Namespace = "seedbox"
+	rules.OIDC = []string{"qui"}
+	rules.Installs = true
+
+	pending, err := f.decision.Pending(context.Background(), rules)
+	if err != nil {
+		t.Fatalf("Pending on the run that installs the login: %v", err)
+	}
+	if !pending {
+		t.Fatal("the install planned no login: the page it writes after the confirm is work this run does")
+	}
+	if len(f.cluster.applied) != 0 {
+		t.Fatalf("Pending wrote %d documents", len(f.cluster.applied))
+	}
+
+	rules.Installs = false
+	if _, err := f.decision.Pending(context.Background(), rules); err == nil {
+		t.Fatal("a run that does not install the login planned one that is not there")
+	} else if !errors.Is(err, ErrNotInstalled) {
+		t.Fatalf("the refusal is not ErrNotInstalled: %v", err)
 	}
 }

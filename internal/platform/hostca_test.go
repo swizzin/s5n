@@ -426,25 +426,35 @@ func TestHostCAWithNoCertificateAndNoWrite(t *testing.T) {
 	}
 }
 
-// TestHostCAPlan: the plan is presence only, so it says what a run will write
-// without reading cert-manager's namespace.
+// TestHostCAPlan: the plan names what a run will write, replace or remove
+// before the confirm. It compares the certificate the run would carry with the
+// one in the ConfigMap, not just whether a ConfigMap is there: a root that
+// moved under the box is a replace, and a presence-only read would skip it.
 func TestHostCAPlan(t *testing.T) {
 	root, _ := testCA(t, "s5n box root")
+	other, _ := testCA(t, "an older root")
 	cases := []struct {
-		name   string
+		name string
+		// issuer and caFile are the run's inputs; caFile, when set, is
+		// written to a temp file and handed over.
 		issuer string
-		caFile string
-		cert   string
-		anchor bool
+		caFile []byte
+		// cert is the issuer the box's Certificate names, when there is one.
+		cert string
+		// anchor is what the ConfigMap already holds: nil for absent.
+		anchor []byte
 		want   string
 	}{
-		{"self-signed, no anchor", "selfsigned", "", "", false, "write the host CA ConfigMap seedbox/" + HostCAName},
-		{"self-signed, anchor there", "selfsigned", "", "", true, ""},
-		{"Let's Encrypt, anchor there", "letsencrypt", "", "", true, "remove the host CA ConfigMap seedbox/" + HostCAName},
-		{"Let's Encrypt, no anchor", "letsencrypt", "", "", false, ""},
-		{"Let's Encrypt with a file, no anchor", "letsencrypt", "/tmp/ca.pem", "", false, "write the host CA ConfigMap seedbox/" + HostCAName},
-		{"the Certificate is self-signed, no anchor", "", "", SelfSignedIssuer, false, "write the host CA ConfigMap seedbox/" + HostCAName},
-		{"the Certificate is Let's Encrypt, anchor there", "", "", LetsEncryptIssuer, true, "remove the host CA ConfigMap seedbox/" + HostCAName},
+		{"self-signed, no anchor", "selfsigned", nil, "", nil, "write the host CA ConfigMap seedbox/" + HostCAName},
+		{"self-signed, anchor there", "selfsigned", nil, "", root, ""},
+		{"self-signed, anchor holds an older root", "selfsigned", nil, "", other, "replace the host CA ConfigMap seedbox/" + HostCAName},
+		{"Let's Encrypt, anchor there", "letsencrypt", nil, "", root, "remove the host CA ConfigMap seedbox/" + HostCAName},
+		{"Let's Encrypt, no anchor", "letsencrypt", nil, "", nil, ""},
+		{"Let's Encrypt with a file, no anchor", "letsencrypt", other, "", nil, "write the host CA ConfigMap seedbox/" + HostCAName},
+		{"Let's Encrypt with a file, anchor holds the root", "letsencrypt", other, "", root, "replace the host CA ConfigMap seedbox/" + HostCAName},
+		{"Let's Encrypt with a file, anchor holds it", "letsencrypt", other, "", other, ""},
+		{"the Certificate is self-signed, no anchor", "", nil, SelfSignedIssuer, nil, "write the host CA ConfigMap seedbox/" + HostCAName},
+		{"the Certificate is Let's Encrypt, anchor there", "", nil, LetsEncryptIssuer, root, "remove the host CA ConfigMap seedbox/" + HostCAName},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -453,10 +463,17 @@ func TestHostCAPlan(t *testing.T) {
 			if tc.cert != "" {
 				cl.certificate(tc.cert)
 			}
-			if tc.anchor {
-				cl.configMap(root)
+			if tc.anchor != nil {
+				cl.configMap(tc.anchor)
 			}
-			got, err := newHostCA(t, cl, tc.issuer, tc.caFile).Plan(context.Background())
+			caFile := ""
+			if tc.caFile != nil {
+				caFile = filepath.Join(t.TempDir(), "ca.pem")
+				if err := os.WriteFile(caFile, tc.caFile, 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			got, err := newHostCA(t, cl, tc.issuer, caFile).Plan(context.Background())
 			if err != nil {
 				t.Fatal(err)
 			}

@@ -102,7 +102,20 @@ type Confirmer interface {
 type HostPlan struct {
 	Domain string
 	Forced string
-	Hosts  []string
+	// Issuers is the issuer this run decided for each name it serves, by
+	// host: init's own answer (setup.Result.Hosts), so the certificate check
+	// compares a host with what this run will write. Forced alone is not
+	// enough: it is empty on the run whose issuer comes from DNS, which is
+	// exactly the run whose decision can differ from the Certificate that is
+	// already there.
+	Issuers map[string]string
+	Hosts   []string
+	// All is every name this run decided, for the runs that own the whole
+	// box: `box init` sets it, and the step writes each name idempotently,
+	// because re-issuing a self-signed host under the box root is work an
+	// already-answering host still has. Hosts stays the plan's list -- the
+	// names nothing answers on -- so a run with nothing new still says so.
+	All []string
 	// Rule is the login's half of the same step: a host is not served without
 	// its access_control rule, and the rule is rendered from the same inputs
 	// init renders it from. It is filled in for Ensure only; Missing is a read
@@ -142,6 +155,33 @@ type HostRule struct {
 type Hosts interface {
 	Missing(ctx context.Context, plan HostPlan) ([]string, error)
 	Ensure(ctx context.Context, plan HostPlan) error
+}
+
+// StaleHosts is the optional half a step that owns the whole box implements:
+// the hosts that answer already but whose Certificate is not the one a run
+// would issue -- an issuer that changed under it, or a self-signed certificate
+// off the box root. `box init` asks; a step that does not implement this is
+// asked only what is missing.
+type StaleHosts interface {
+	Stale(ctx context.Context, plan HostPlan) ([]string, error)
+}
+
+// union is a's names followed by b's, without repeats, in the order they were
+// first named: the plan's host list is a set, and printing one twice would read
+// as two writes.
+func union(a, b []string) []string {
+	seen := make(map[string]bool, len(a)+len(b))
+	out := make([]string, 0, len(a)+len(b))
+	for _, list := range [][]string{a, b} {
+		for _, name := range list {
+			if seen[name] {
+				continue
+			}
+			seen[name] = true
+			out = append(out, name)
+		}
+	}
+	return out
 }
 
 // Login is root's login, reconciled on its own by every apply that has one.
@@ -250,12 +290,28 @@ type Options struct {
 	// use: a value that is box's, not the operator's, and that has to be
 	// recomputed on every apply so a re-run is still a no-op.
 	BoxValues func(ctx context.Context) (map[string]any, error)
+	// HostIssuers is the issuer each host was decided with when the caller
+	// made that decision already (`box init`): host name to tls.issuer
+	// value. The plan compares each Certificate that answers with its own
+	// host's decision, so a name init just decided to move reaches the step
+	// even though tls.issuer is empty. Nil leaves the step to decide from
+	// tls.issuer or each name's DNS answer.
+	HostIssuers map[string]string
+	// HostsAll says the step is handed every host this run decides, not only
+	// the missing ones. `box init` sets it: a host whose listener and rule are
+	// already there still has a Certificate to check, and init is the run that
+	// re-issues a self-signed host under the box root once the name resolves
+	// (ca-issuer's followRoot) and moves it to the production issuer. A bare
+	// `box apply` leaves it false: a host nothing answers on is its work, and
+	// one that answers is not.
+	HostsAll bool
 	// Hosts is root's work outside the release: the per-host TLS step, and --
 	// when the value also implements Login -- the login those hosts and the
-	// portal sign in through. When it is nil apply does neither: `box init`
-	// hands over to apply and then runs both steps itself, so the names and the
-	// login exist before the release does. A bare `box apply` sets it, because
-	// nothing else would.
+	// portal sign in through. Both run after the confirm and before the
+	// release moves, on every run that serves a host: `box init` and a bare
+	// `box apply` alike. Nothing else writes them, and a name reached only
+	// after the release is one Helm's own wait can hang on -- an app that will
+	// not start until it can dial the issuer the host does not answer on yet.
 	Hosts Hosts
 	// Anchor is root's host-CA step: the ConfigMap a self-signed box carries
 	// into its namespace, and the removal of it once the host is publicly
@@ -572,7 +628,7 @@ func (a *Applier) Apply(ctx context.Context, opts Options) (Result, error) {
 	// so a "no" writes nothing: a route on a host with no listener is an app
 	// nobody can reach, and a stop here leaves the release and the old routes
 	// exactly as they were. `box update` will call this same step.
-	if len(hostPlan.Hosts) > 0 {
+	if len(hostPlan.Hosts) > 0 || len(hostPlan.All) > 0 {
 		if err := opts.Hosts.Ensure(ctx, hostPlan); err != nil {
 			return res, err
 		}
@@ -724,16 +780,25 @@ func (a *Applier) loadChart(ctx context.Context, opts Options) (Chart, error) {
 // ships no catalog serves no app at a host of its own, and one whose values
 // name no domain cannot name one.
 func (a *Applier) hostPlan(ctx context.Context, opts Options, chart Chart, sb *seedbox.Seedbox, values map[string]any) (HostPlan, error) {
-	plan := HostPlan{Domain: hostOf(values), Forced: forcedIssuer(values)}
-	hosts, err := hostedHosts(chart, values, plan.Domain)
+	plan := HostPlan{Domain: hostOf(values), Forced: forcedIssuer(values), Issuers: opts.HostIssuers}
+	apps, err := hostedHosts(chart, values, plan.Domain)
 	if err != nil {
 		return plan, err
+	}
+	// The box's own name is a host this run serves, and on a first install it
+	// is the one nothing answers on: without its listener and Certificate the
+	// Gateway has no 443, and every app that dials https://<host>/auth waits on
+	// a name that is not there. Its login rule is the domain's, which init
+	// writes with the page, so it is not a hosted app and hostedApps drops it.
+	hosts := apps
+	if plan.Domain != "" {
+		hosts = append([]string{plan.Domain}, apps...)
 	}
 	// The login's inputs are built whatever the hosts are: a rule write and a
 	// login reconcile render one file, and the reconcile runs on a run with no
 	// host to serve at all.
 	if plan.Domain != "" && len(chart.Catalog) > 0 {
-		rule, err := loginRule(sb, chart, values, hosts, plan.Domain)
+		rule, err := loginRule(sb, chart, values, apps, plan.Domain)
 		if err != nil {
 			return plan, err
 		}
@@ -742,11 +807,27 @@ func (a *Applier) hostPlan(ctx context.Context, opts Options, chart Chart, sb *s
 	if len(hosts) == 0 || opts.Hosts == nil {
 		return plan, nil
 	}
-	missing, err := opts.Hosts.Missing(ctx, HostPlan{Domain: plan.Domain, Forced: plan.Forced, Hosts: hosts})
+	missing, err := opts.Hosts.Missing(ctx, HostPlan{Domain: plan.Domain, Forced: plan.Forced, Issuers: plan.Issuers, Hosts: hosts})
 	if err != nil {
 		return plan, err
 	}
 	plan.Hosts = missing
+	if opts.HostsAll {
+		// Every name this run decided, missing or not: the step is idempotent,
+		// and a host that already answers can still have a Certificate to
+		// follow the box root or to move to another issuer. One whose
+		// Certificate needs that is work, so it is shown with the missing ones
+		// and written before the release; the rest are checked and left alone,
+		// which is what keeps an idempotent run saying "nothing to change".
+		if st, ok := opts.Hosts.(StaleHosts); ok {
+			stale, err := st.Stale(ctx, HostPlan{Domain: plan.Domain, Forced: plan.Forced, Issuers: plan.Issuers, Hosts: hosts})
+			if err != nil {
+				return plan, err
+			}
+			plan.Hosts = union(plan.Hosts, stale)
+		}
+		plan.All = hosts
+	}
 	return plan, nil
 }
 

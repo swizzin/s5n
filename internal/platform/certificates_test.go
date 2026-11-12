@@ -829,3 +829,66 @@ func TestLetsEncryptCertificateIsNotReissued(t *testing.T) {
 		t.Fatalf("an ACME certificate was asked to re-issue: %+v %v", res, cl.statusWrites)
 	}
 }
+
+// TestCertificateNeedsWork: a host that answers already can still hold a
+// certificate this run would not issue -- one the issuer behind it changed
+// under, which cert-manager never re-issues on its own. The read has to say so,
+// or a run that only looks for missing hosts leaves it serving something the
+// anchor does not match.
+func TestCertificateNeedsWork(t *testing.T) {
+	const host = "box.example.test"
+	rootPEM, _ := testCA(t, "the box root")
+	leafPEM, _ := testCA(t, host)
+
+	newCluster := func(issuer string, ca []byte) *fakeHostCACluster {
+		f := newFakeHostCA()
+		f.rootCertificate(rootPEM)
+		f.put("Certificate", GatewayNamespace, CertificateName(host), map[string]any{
+			"metadata": map[string]any{"name": CertificateName(host), "namespace": GatewayNamespace},
+			"spec": map[string]any{
+				"issuerRef":  map[string]any{"name": issuer},
+				"secretName": CertificateName(host),
+			},
+		})
+		f.put("Secret", GatewayNamespace, CertificateName(host), map[string]any{
+			"data": map[string]any{"ca.crt": base64.StdEncoding.EncodeToString(ca)},
+		})
+		return f
+	}
+	ctx := context.Background()
+
+	// 0.3.0's shape: a bare selfSigned certificate, its own ca.crt.
+	stale, err := CertificateNeedsWork(ctx, newCluster(SelfSignedIssuer, leafPEM), host, "")
+	if err != nil {
+		t.Fatalf("CertificateNeedsWork: %v", err)
+	}
+	if !stale {
+		t.Fatal("a certificate signed by something other than the box root was called right")
+	}
+
+	// The same Certificate after the re-issue.
+	stale, err = CertificateNeedsWork(ctx, newCluster(SelfSignedIssuer, rootPEM), host, "")
+	if err != nil {
+		t.Fatalf("CertificateNeedsWork: %v", err)
+	}
+	if stale {
+		t.Fatal("a certificate chained to the box root was called stale")
+	}
+
+	// An issuer this run decided that the Certificate does not name.
+	stale, err = CertificateNeedsWork(ctx, newCluster(SelfSignedIssuer, rootPEM), host, "letsencrypt")
+	if err != nil {
+		t.Fatalf("CertificateNeedsWork: %v", err)
+	}
+	if !stale {
+		t.Fatal("a self-signed certificate was called right on a run that decided Let's Encrypt")
+	}
+
+	// No Certificate at all: HostServed's answer, not this one's.
+	empty := newFakeHostCA()
+	empty.rootCertificate(rootPEM)
+	stale, err = CertificateNeedsWork(ctx, empty, host, "")
+	if err != nil || stale {
+		t.Fatalf("CertificateNeedsWork with no Certificate = %v, %v; want false, nil", stale, err)
+	}
+}

@@ -35,6 +35,13 @@ type fakeHosts struct {
 
 	pendings   []HostPlan
 	reconciled []HostPlan
+	stales     []HostPlan
+	// stale is what Stale answers; staleErr fails it.
+	stale    []string
+	staleErr error
+	// staleFor reads the plan Stale was handed, for the tests that prove the
+	// decision reaches it. It wins over stale when set.
+	staleFor func(HostPlan) []string
 }
 
 func (f *fakeHosts) Pending(_ context.Context, plan HostPlan) (bool, error) {
@@ -79,6 +86,19 @@ func (f *fakeHosts) Missing(_ context.Context, plan HostPlan) ([]string, error) 
 	return f.missing, nil
 }
 
+// Stale is the optional half init asks: hosts that answer already but whose
+// Certificate is not the one this run would issue.
+func (f *fakeHosts) Stale(_ context.Context, plan HostPlan) ([]string, error) {
+	f.stales = append(f.stales, plan)
+	if f.staleErr != nil {
+		return nil, f.staleErr
+	}
+	if f.staleFor != nil {
+		return f.staleFor(plan), nil
+	}
+	return f.stale, nil
+}
+
 func (f *fakeHosts) Ensure(_ context.Context, plan HostPlan) error {
 	if f.ensureErr != nil {
 		return f.ensureErr
@@ -88,6 +108,239 @@ func (f *fakeHosts) Ensure(_ context.Context, plan HostPlan) error {
 		*f.events = append(*f.events, "hosts")
 	}
 	return nil
+}
+
+// TestTheBoxsOwnHostIsServedBeforeTheRelease: the per-host step is the apply's,
+// on init as much as on a bare apply, and the box's own name is one of the
+// hosts it serves. That is not cosmetic: an app that signs in through the login
+// dials https://<host>/auth, the Gateway answers 443 only on a listener with
+// that name's Certificate, and Helm's wait holds the apply open for the app --
+// so a step that ran after the release was a deadlock, not a late write.
+func TestTheBoxsOwnHostIsServedBeforeTheRelease(t *testing.T) {
+	f := newFakes(t)
+	f.hosts = &fakeHosts{
+		missing: []string{"box.example.com", "radarr.box.example.com"},
+		events:  &f.events,
+	}
+
+	res, err := f.apply(t)
+	if err != nil {
+		t.Fatalf("apply: %v\n%s", err, f.out)
+	}
+	if len(f.hosts.asks) != 1 {
+		t.Fatalf("the per-host step was asked %d times, want once", len(f.hosts.asks))
+	}
+	got := f.hosts.asks[0].Hosts
+	if len(got) == 0 || got[0] != "box.example.com" {
+		t.Fatalf("the hosts apply planned = %v, want the box's own name first: the login is served on it", got)
+	}
+	if len(f.hosts.ensured) != 1 {
+		t.Fatalf("the per-host step ran %d times, want once", len(f.hosts.ensured))
+	}
+	if len(res.Hosts) != 2 {
+		t.Fatalf("the result reports %v as the hosts to serve", res.Hosts)
+	}
+	if a, b := eventIndex(f.events, "hosts"), eventIndex(f.events, "helm"); a < 0 || b < 0 || a > b {
+		t.Fatalf("events = %v, want every host served before the release moves: Helm's wait cannot end before its app can dial the issuer", f.events)
+	}
+}
+
+// TestInitPlansAroundTheLoginItInstalls: on a first init nothing in the cluster
+// holds the login yet -- init installs it after the confirm -- so the plan pass
+// must not read one and refuse. It shows the login as work this run does, the
+// login lands after the answer, and the hosts follow it: a host's rule is
+// written into the login, and there is no login to write into before that.
+func TestInitPlansAroundTheLoginItInstalls(t *testing.T) {
+	f := newFakes(t)
+	// The step init hands over: its Pending answers "yes" for a cluster that
+	// has no login yet, because this run installs one.
+	f.hosts = &fakeHosts{
+		missing:      []string{"box.example.com", "radarr.box.example.com"},
+		loginPending: true,
+		events:       &f.events,
+	}
+	// The login install is init's own step, after the confirm: the fake's
+	// ordering marker stands in for it.
+	f.events = append(f.events, "login-install")
+
+	res, err := f.apply(t)
+	if err != nil {
+		t.Fatalf("apply: %v\n%s", err, f.out)
+	}
+	if !res.Login {
+		t.Fatal("the plan did not show the login: this run installs it, and a plan that hides it says the box is ready without one")
+	}
+	if len(f.hosts.pendings) != 1 {
+		t.Fatalf("the login was read %d times, want once: the plan has to ask before it can promise the page", len(f.hosts.pendings))
+	}
+	if len(f.hosts.ensured) != 1 {
+		t.Fatalf("the per-host step ran %d times, want once", len(f.hosts.ensured))
+	}
+	for _, want := range [][2]string{
+		{"login-install", "hosts"},
+		{"hosts", "helm"},
+	} {
+		a, b := eventIndex(f.events, want[0]), eventIndex(f.events, want[1])
+		if a < 0 || b < 0 || a > b {
+			t.Fatalf("events = %v, want %s before %s", f.events, want[0], want[1])
+		}
+	}
+}
+
+// TestInitServesEveryHostItDecided: a second init finds every host answering
+// already, and hands them all to the step anyway. That is not churn: a host
+// issued self-signed before its name resolved has to be re-issued under the box
+// root, and only a run that walks every name can notice. The plan still shows
+// only the missing ones, so a run with nothing new says so, and the release
+// installs after the step either way.
+func TestInitServesEveryHostItDecided(t *testing.T) {
+	f := newFakes(t)
+	enableRadarrInGrant(t, f.grantPath)
+	f.hostsAll = true
+	f.hosts = &fakeHosts{events: &f.events} // nothing is missing
+
+	if _, err := f.apply(t); err != nil {
+		t.Fatalf("apply: %v\n%s", err, f.out)
+	}
+	if len(f.hosts.ensured) != 1 {
+		t.Fatalf("the per-host step ran %d times, want once", len(f.hosts.ensured))
+	}
+	plan := f.hosts.ensured[0]
+	if len(plan.Hosts) != 0 {
+		t.Fatalf("the plan shows %v as work: nothing was missing", plan.Hosts)
+	}
+	if len(plan.All) != 2 || plan.All[0] != "box.example.com" || plan.All[1] != "radarr.box.example.com" {
+		t.Fatalf("the step was handed %v, want every name init decided", plan.All)
+	}
+	if a, b := eventIndex(f.events, "hosts"), eventIndex(f.events, "helm"); a < 0 || b < 0 || a > b {
+		t.Fatalf("events = %v, want the hosts before the release", f.events)
+	}
+}
+
+// TestInitServesAHostWhoseCertificateIsStale: the per-host plan counts a host
+// whose Certificate the issuer changed under as work -- it answers, and with
+// something the box root never signed -- so init writes it, and writes it
+// before the release. The release has nothing to do: a certificate is not a
+// revision.
+func TestInitServesAHostWhoseCertificateIsStale(t *testing.T) {
+	f := newFakes(t)
+	settled(t, f)
+	f.hostsAll = true
+	// Nothing is missing: both hosts answer. One of them is stale.
+	f.hosts = &fakeHosts{stale: []string{"box.example.com"}, events: &f.events}
+
+	res, err := f.apply(t)
+	if err != nil {
+		t.Fatalf("apply: %v\n%s", err, f.out)
+	}
+	if len(f.hosts.stales) != 1 {
+		t.Fatalf("the step was asked about stale certificates %d times, want once", len(f.hosts.stales))
+	}
+	if len(f.hosts.ensured) != 1 {
+		t.Fatalf("the per-host step ran %d times, want once", len(f.hosts.ensured))
+	}
+	if plan := f.hosts.ensured[0]; len(plan.Hosts) != 1 || plan.Hosts[0] != "box.example.com" {
+		t.Fatalf("the step was shown %v, want the host whose certificate is stale", plan.Hosts)
+	}
+	if len(f.hosts.ensured[0].All) != 1 || f.hosts.ensured[0].All[0] != "box.example.com" {
+		t.Fatalf("the step was handed %v as every host, want the one this fixture serves", f.hosts.ensured[0].All)
+	}
+	if res.Applied || f.rel.upgrades != 0 {
+		t.Fatalf("re-issuing a certificate bumped the release (%d upgrades, applied %v)", f.rel.upgrades, res.Applied)
+	}
+	if !strings.Contains(f.out.String(), "box.example.com") {
+		t.Fatalf("the plan did not show the host it is about to re-issue:\n%s", f.out)
+	}
+}
+
+// TestInitReissuesAHostTheDNSDecisionMoved: init decides each name's issuer
+// before it hands over, and that decision -- not tls.issuer, which is empty
+// here because DNS decided -- is what the plan compares an existing Certificate
+// with. A host on s5n-selfsigned that this run would now write with
+// s5n-letsencrypt is plan work, so the confirm shows it and the step re-issues
+// it before the release moves. The anchor follows the same decision: a public
+// certificate needs nothing carried, so its removal is planned too.
+func TestInitReissuesAHostTheDNSDecisionMoved(t *testing.T) {
+	f := newFakes(t)
+	settled(t, f)
+	f.hostsAll = true
+	f.hostIssuers = map[string]string{"box.example.com": "letsencrypt"}
+	f.hosts = &fakeHosts{
+		events: &f.events,
+		staleFor: func(plan HostPlan) []string {
+			if plan.Issuers["box.example.com"] != "letsencrypt" {
+				t.Errorf("the stale read was given issuers %v, want this run's own decision", plan.Issuers)
+			}
+			return []string{"box.example.com"}
+		},
+	}
+	f.anchor = &fakeAnchor{line: "remove the host CA ConfigMap testbox/s5n-host-ca", events: &f.events}
+
+	res, err := f.apply(t)
+	if err != nil {
+		t.Fatalf("apply: %v\n%s", err, f.out)
+	}
+	if len(f.hosts.ensured) != 1 {
+		t.Fatalf("the per-host step ran %d times, want once", len(f.hosts.ensured))
+	}
+	plan := f.hosts.ensured[0]
+	if len(plan.Hosts) != 1 || plan.Hosts[0] != "box.example.com" {
+		t.Fatalf("the step was shown %v, want the host whose issuer moved", plan.Hosts)
+	}
+	if plan.Issuers["box.example.com"] != "letsencrypt" {
+		t.Fatalf("the step was handed issuers %v, want the decision the plan used", plan.Issuers)
+	}
+	if len(res.Hosts) != 1 || res.Hosts[0] != "box.example.com" {
+		t.Fatalf("result hosts = %v, want the moved host", res.Hosts)
+	}
+	out := f.out.String()
+	for _, want := range []string{"Certificate, listener and login rule for box.example.com", "remove the host CA ConfigMap testbox/s5n-host-ca"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("the plan did not show %q:\n%s", want, out)
+		}
+	}
+	if res.Applied || f.rel.upgrades != 0 {
+		t.Fatalf("moving a certificate bumped the release (%d upgrades, applied %v)", f.rel.upgrades, res.Applied)
+	}
+}
+
+// TestAnInitWithEveryHostRightChangesNothing: the same run with nothing stale
+// and nothing missing is the idempotent one -- it says so, and it asks the
+// per-host step nothing.
+func TestAnInitWithEveryHostRightChangesNothing(t *testing.T) {
+	f := newFakes(t)
+	settled(t, f)
+	f.hostsAll = true
+	f.hostIssuers = map[string]string{"box.example.com": "selfsigned"}
+	f.anchorIssuer = "selfsigned"
+	f.hosts = &fakeHosts{events: &f.events}
+	f.anchor = &fakeAnchor{events: &f.events}
+
+	res, err := f.apply(t)
+	if err != nil {
+		t.Fatalf("apply: %v\n%s", err, f.out)
+	}
+	if len(f.hosts.ensured) != 0 {
+		t.Fatalf("the per-host step wrote %v, want nothing", f.hosts.ensured)
+	}
+	if len(f.anchor.ensured) != 0 {
+		t.Fatalf("the anchor step wrote %v, want nothing", f.anchor.ensured)
+	}
+	if len(f.anchor.plans) != 1 {
+		t.Fatalf("the anchor read ran %d times, want once: it is how the plan knows there is nothing to do", len(f.anchor.plans))
+	}
+	if f.anchor.plans[0].Issuer != "selfsigned" {
+		t.Fatalf("the anchor was planned for issuer %q, want this run's decision", f.anchor.plans[0].Issuer)
+	}
+	if len(f.hosts.stales) != 1 {
+		t.Fatalf("the stale read ran %d times, want once: it is how the plan knows there is nothing to do", len(f.hosts.stales))
+	}
+	if res.Applied || f.rel.upgrades != 0 {
+		t.Fatalf("a run with nothing to change made a revision (%d upgrades)", f.rel.upgrades)
+	}
+	if !strings.Contains(f.out.String(), "nothing to change") {
+		t.Fatalf("init did not say there was nothing to change:\n%s", f.out)
+	}
 }
 
 // enableRadarrInGrant is "root edited the grant": the one way an app is
@@ -135,8 +388,10 @@ func TestApplyServesANewAppHostBeforeTheRelease(t *testing.T) {
 	if ask.Domain != "box.example.com" {
 		t.Fatalf("the step was told the domain %q, want the grant's box.example.com", ask.Domain)
 	}
-	if len(ask.Hosts) != 1 || ask.Hosts[0] != "radarr.box.example.com" {
-		t.Fatalf("the step was asked about %v, want the one hosted app's name", ask.Hosts)
+	// The box's own name is planned first: the login is served on it, and its
+	// listener is what answers 443 at all.
+	if len(ask.Hosts) != 2 || ask.Hosts[0] != "box.example.com" || ask.Hosts[1] != "radarr.box.example.com" {
+		t.Fatalf("the step was asked about %v, want the box's own name and the one hosted app's", ask.Hosts)
 	}
 	if len(f.hosts.ensured) != 1 || len(f.hosts.ensured[0].Hosts) != 1 || f.hosts.ensured[0].Hosts[0] != "radarr.box.example.com" {
 		t.Fatalf("the step wrote %v, want radarr's host", f.hosts.ensured)
@@ -193,8 +448,9 @@ func TestApplyLeavesAnAppHostThatIsAlreadyServed(t *testing.T) {
 	}
 }
 
-// No app is served at a host of its own: apply asks the cluster nothing about
-// one, so a chart without a hosted app costs this path nothing.
+// No app is served at a host of its own: the only name apply asks about is the
+// box's own, which the cluster already serves, so a chart without a hosted app
+// costs this path one read and no write.
 func TestApplyAsksAboutNoHostWhenTheAppsStayOnPaths(t *testing.T) {
 	f := newFakes(t)
 	f.hosts = &fakeHosts{events: &f.events}
@@ -202,8 +458,11 @@ func TestApplyAsksAboutNoHostWhenTheAppsStayOnPaths(t *testing.T) {
 	if _, err := f.apply(t); err != nil {
 		t.Fatalf("apply: %v\n%s", err, f.out)
 	}
-	if len(f.hosts.asks) != 0 {
-		t.Fatalf("the step was asked about %v, want nothing", f.hosts.asks)
+	if len(f.hosts.asks) != 1 || len(f.hosts.asks[0].Hosts) != 1 || f.hosts.asks[0].Hosts[0] != "box.example.com" {
+		t.Fatalf("the step was asked about %v, want only the box's own name", f.hosts.asks)
+	}
+	if len(f.hosts.ensured) != 0 || eventIndex(f.events, "hosts") >= 0 {
+		t.Fatalf("the step wrote %v, want nothing: the box's own name is served", f.hosts.ensured)
 	}
 }
 

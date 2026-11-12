@@ -332,6 +332,56 @@ func (d *CertificateDecision) followRoot(ctx context.Context, cl CertificateClus
 	return true, nil
 }
 
+// CertificateNeedsWork reports whether a host's Certificate is there but is not
+// the one this run would issue: a different issuer than the run decided, or a
+// self-signed one whose ca.crt is not the box root.
+//
+// It exists for a host that answers already. A Certificate's name and
+// issuerRef do not change when the issuer behind it changes what it signs with
+// (0.3.0's bare `selfSigned` became a CA over the box root), and cert-manager
+// never re-issues for that: the host is served, by a certificate nothing else
+// chains to. A run that only looked for missing hosts would leave it there.
+func CertificateNeedsWork(ctx context.Context, k objectReader, host, want string) (bool, error) {
+	name := CertificateName(host)
+	obj, ok, err := k.Get(ctx, "cert-manager.io", "v1", "Certificate", GatewayNamespace, name)
+	if err != nil || !ok {
+		return false, err
+	}
+	current, _, _ := unstructured.NestedString(obj, "spec", "issuerRef", "name")
+	if want != "" {
+		issuer, err := clusterIssuerName(want)
+		if err != nil {
+			return false, err
+		}
+		if current != issuer {
+			return true, nil
+		}
+	}
+	if current != SelfSignedIssuer {
+		return false, nil
+	}
+	secretName, _, _ := unstructured.NestedString(obj, "spec", "secretName")
+	if secretName == "" {
+		secretName = name
+	}
+	secret, ok, err := k.Get(ctx, "", "v1", "Secret", GatewayNamespace, secretName)
+	if err != nil || !ok {
+		// No Secret yet: nothing to compare, and the step writes one.
+		return false, err
+	}
+	data, _, _ := unstructured.NestedStringMap(secret, "data")
+	caCert, _ := base64.StdEncoding.DecodeString(data["ca.crt"])
+	root, err := rootCertificate(ctx, k)
+	if err != nil {
+		return false, err
+	}
+	ours, err := signedByRoot(caCert, root)
+	if err != nil {
+		return false, err
+	}
+	return !ours, nil
+}
+
 // triggerIssuing sets the Issuing condition cert-manager's issuing controller
 // acts on. The condition is status, not spec, so it is a status update: the
 // same write cmctl renew makes, with the same reason, which is what makes box's

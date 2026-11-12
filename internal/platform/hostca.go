@@ -201,9 +201,14 @@ func (d *HostCADecision) Apply(ctx context.Context) (HostCAResult, error) {
 }
 
 // Plan is apply's read, before the confirm: the one line a run that has to
-// write or remove the anchor adds to its plan, or "" when the anchor is
-// already what this run would leave. It compares presence, not content -- the
-// write itself is the idempotent one.
+// write, replace or remove the anchor adds to its plan, or "" when the anchor
+// is already what this run would leave.
+//
+// It compares the certificate the run would carry (or its absence) with what
+// the ConfigMap holds, not just whether one is there. A root that moved under
+// the box -- `box init --ca-file` on a test box, or a root re-made by bootstrap
+// -- is a replace the confirm has to show, and a presence-only read would call
+// it "nothing to change" and skip it.
 func (d *HostCADecision) Plan(ctx context.Context) (string, error) {
 	if strings.TrimSpace(d.Namespace) == "" {
 		return "", nil
@@ -219,17 +224,29 @@ func (d *HostCADecision) Plan(ctx context.Context) (string, error) {
 	if source == anchorUnknown {
 		return "", nil
 	}
-	_, present, err := hostCA(ctx, cl, d.Namespace)
+	have, present, err := hostCA(ctx, cl, d.Namespace)
 	if err != nil {
 		return "", err
 	}
-	switch {
-	case source == anchorNothing && present:
-		return "remove the host CA ConfigMap " + d.Namespace + "/" + HostCAName, nil
-	case source != anchorNothing && !present:
+	if source == anchorNothing {
+		if present {
+			return "remove the host CA ConfigMap " + d.Namespace + "/" + HostCAName, nil
+		}
+		return "", nil
+	}
+	if !present {
 		return "write the host CA ConfigMap " + d.Namespace + "/" + HostCAName, nil
 	}
-	return "", nil
+	// The file is only read when there is something to compare it with: a
+	// missing anchor is a write whatever the file holds.
+	want, err := d.certificate(ctx, cl, source)
+	if err != nil {
+		return "", err
+	}
+	if string(have) == string(want) {
+		return "", nil
+	}
+	return "replace the host CA ConfigMap " + d.Namespace + "/" + HostCAName, nil
 }
 
 // source is where the anchor's certificate comes from: the issuer this run

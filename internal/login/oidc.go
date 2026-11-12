@@ -43,6 +43,18 @@ type loginSecret struct {
 	digests map[string]string
 }
 
+// ErrNotInstalled says the login is not in this cluster yet. `box init` is the
+// command that installs it, so a run that installs it -- init's own apply --
+// treats this as work it is about to do, not as the refusal every other run
+// makes.
+var ErrNotInstalled = errors.New("the login is not installed")
+
+// notInstalled is the one refusal, in the one wording: the command that fixes
+// it, and the sentinel a caller can test.
+func notInstalled() error {
+	return fmt.Errorf("%w (%s/%s is missing): run `box init` as root, which installs it and writes its rules", ErrNotInstalled, Namespace, authelia.SecretName)
+}
+
 // readSecret reads the login's Secret. It is the read half: no generation, so a
 // run that may not write the login can still render the configuration it would
 // have.
@@ -52,7 +64,7 @@ func (d *Decision) readSecret(ctx context.Context, cl Cluster) (loginSecret, err
 		return loginSecret{}, err
 	}
 	if !found {
-		return loginSecret{}, fmt.Errorf("the login is not installed (%s/%s is missing): run `box init` as root, which installs it and writes its rules", Namespace, authelia.SecretName)
+		return loginSecret{}, notInstalled()
 	}
 	return parseLoginSecret(doc)
 }
@@ -106,7 +118,7 @@ func (d *Decision) ensureKey(ctx context.Context, cl Cluster, create bool, wantP
 	if !found && !create {
 		// A rule write is not an install: a box with no login is refused, not
 		// given a Secret and a provider nobody asked for.
-		return loginSecret{}, false, fmt.Errorf("the login is not installed (%s/%s is missing): run `box init` as root, which installs it and writes its rules", Namespace, authelia.SecretName)
+		return loginSecret{}, false, notInstalled()
 	}
 	kept := found
 	var sec loginSecret
@@ -181,7 +193,7 @@ func (d *Decision) EnsureClients(ctx context.Context, namespace string, apps []s
 		return false, err
 	}
 	if !found {
-		return false, fmt.Errorf("the login is not installed (%s/%s is missing): run `box init` as root, which installs it and writes its rules", Namespace, authelia.SecretName)
+		return false, notInstalled()
 	}
 	sec, err := parseLoginSecret(doc)
 	if err != nil {
