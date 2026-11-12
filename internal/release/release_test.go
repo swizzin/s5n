@@ -176,6 +176,9 @@ type fakes struct {
 	dataPath    string
 	configPath  string
 	hosts       *fakeHosts
+	// otherHosts replaces the per-host step with any other value, the way a
+	// user's apply hands apply a step that has no login half.
+	otherHosts Hosts
 }
 
 func newFakes(t *testing.T) *fakes {
@@ -240,6 +243,9 @@ func (f *fakes) apply(t *testing.T) (Result, error) {
 	}
 	if f.hosts != nil {
 		opts.Hosts = f.hosts
+	}
+	if f.otherHosts != nil {
+		opts.Hosts = f.otherHosts
 	}
 	return f.app.Apply(context.Background(), opts)
 }

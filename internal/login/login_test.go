@@ -932,10 +932,10 @@ func TestEnsureRulesRefusesAnUnpinnedImage(t *testing.T) {
 
 // ---- the login's face -------------------------------------------------------
 
-// lastOf is the newest applied document of a kind and name: every apply writes
-// the login's ConfigMap again, and a test that applies twice wants the second
-// one rather than the first.
-func lastOf(t *testing.T, docs []map[string]any, kind, ns, name string) map[string]any {
+// lastOf is the newest applied document of a kind and name in the login's
+// namespace: every apply writes the login's ConfigMap again, and a test that
+// applies twice wants the second one rather than the first.
+func lastOf(t *testing.T, docs []map[string]any, kind, name string) map[string]any {
 	t.Helper()
 	for i := len(docs) - 1; i >= 0; i-- {
 		doc := docs[i]
@@ -943,11 +943,11 @@ func lastOf(t *testing.T, docs []map[string]any, kind, ns, name string) map[stri
 		meta, _ := doc["metadata"].(map[string]any)
 		n, _ := meta["name"].(string)
 		s, _ := meta["namespace"].(string)
-		if k == kind && n == name && s == ns {
+		if k == kind && n == name && s == Namespace {
 			return doc
 		}
 	}
-	t.Fatalf("no %s %s/%s among the applied documents", kind, ns, name)
+	t.Fatalf("no %s %s/%s among the applied documents", kind, Namespace, name)
 	return nil
 }
 
@@ -1013,7 +1013,7 @@ func TestAThemeChangeRewritesTheMark(t *testing.T) {
 	if !res.ConfigurationChanged {
 		t.Fatal("a theme change was not reported as a change: the pod would not roll and the page would stay s5n's dark")
 	}
-	second := lastOf(t, f.cluster.applied, "ConfigMap", Namespace, authelia.ConfigMapName)
+	second := lastOf(t, f.cluster.applied, "ConfigMap", authelia.ConfigMapName)
 	secondBinary, _, _ := unstructured.NestedStringMap(second, "binaryData")
 	if firstBinary[authelia.AssetLogo] == secondBinary[authelia.AssetLogo] {
 		t.Fatal("the light theme's logo is the dark theme's: the mark did not follow the palette")
@@ -1045,7 +1045,7 @@ func TestEnsureRulesCarriesTheMark(t *testing.T) {
 	if !changed {
 		t.Fatal("the rule write reported no change for a configuration with a new theme")
 	}
-	cm := lastOf(t, f.cluster.applied, "ConfigMap", Namespace, authelia.ConfigMapName)
+	cm := lastOf(t, f.cluster.applied, "ConfigMap", authelia.ConfigMapName)
 	binary, _, _ := unstructured.NestedStringMap(cm, "binaryData")
 	if len(binary) != 2 {
 		t.Fatalf("the rule write applied a ConfigMap with %d pictures", len(binary))
@@ -1053,5 +1053,160 @@ func TestEnsureRulesCarriesTheMark(t *testing.T) {
 	data, _, _ := unstructured.NestedStringMap(cm, "data")
 	if got := data[authelia.ConfigFile]; !strings.Contains(got, "theme: 'light'") {
 		t.Errorf("the rule write did not carry the theme:\n%s", got)
+	}
+}
+
+// ---- the login's own step ---------------------------------------------------
+
+// initRules is what `box init` installed the login with in these tests, as the
+// rule options the read and the write take: the same host, account, document
+// and image, so "nothing differs" means nothing about the login.
+func initRules(opts Options) RulesOptions {
+	return RulesOptions{
+		Host:   opts.Host,
+		Login:  opts.Login,
+		Hosts:  []string{opts.Host},
+		Image:  opts.Image,
+		Values: opts.Values,
+	}
+}
+
+// TestPendingWritesNothing: the read an apply makes before its confirm renders
+// the login the values name and compares it with the cluster, and writes
+// neither the ConfigMap nor a roll. A read that wrote would be work done before
+// the operator said yes.
+func TestPendingWritesNothing(t *testing.T) {
+	f := newFixture(t)
+	opts := testOptions()
+	opts.PathsInNode = true
+	opts.Values = map[string]any{"theme": "s5n", "apps": testValues["apps"]}
+	if _, err := f.decision.Apply(context.Background(), opts); err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	applied, deploys := len(f.cluster.applied), f.cluster.deploys
+
+	pending, err := f.decision.Pending(context.Background(), initRules(opts))
+	if err != nil {
+		t.Fatalf("Pending: %v", err)
+	}
+	if pending {
+		t.Error("the login the box already has was reported as a change")
+	}
+	if len(f.cluster.applied) != applied || f.cluster.deploys != deploys {
+		t.Fatalf("Pending wrote: %d documents, %d waits", len(f.cluster.applied)-applied, f.cluster.deploys-deploys)
+	}
+
+	// The same box with a different theme: the page is a change, and still no
+	// write.
+	rules := initRules(opts)
+	rules.Values = map[string]any{"theme": "s5n-light", "apps": testValues["apps"]}
+	pending, err = f.decision.Pending(context.Background(), rules)
+	if err != nil {
+		t.Fatalf("Pending: %v", err)
+	}
+	if !pending {
+		t.Fatal("a theme change was not reported: apply would not re-render the page")
+	}
+	if len(f.cluster.applied) != applied || f.cluster.deploys != deploys {
+		t.Fatalf("Pending wrote: %d documents, %d waits", len(f.cluster.applied)-applied, f.cluster.deploys-deploys)
+	}
+}
+
+// TestReconcileWritesThePageOnce: the write half of the same read. A theme
+// change re-renders the configuration and the mark in one apply, rolls the pod
+// through the configuration's hash, and the second run is empty -- which is what
+// keeps an apply with no change from churning the login.
+func TestReconcileWritesThePageOnce(t *testing.T) {
+	f := newFixture(t)
+	opts := testOptions()
+	opts.PathsInNode = true
+	opts.Values = map[string]any{"theme": "s5n", "apps": testValues["apps"]}
+	if _, err := f.decision.Apply(context.Background(), opts); err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	before := lastOf(t, f.cluster.applied, "ConfigMap", authelia.ConfigMapName)
+	beforeBinary, _, _ := unstructured.NestedStringMap(before, "binaryData")
+	applied, deploys := len(f.cluster.applied), f.cluster.deploys
+
+	rules := initRules(opts)
+	rules.Values = map[string]any{"theme": "s5n-light", "apps": testValues["apps"]}
+	changed, err := f.decision.Reconcile(context.Background(), rules)
+	if err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	if !changed {
+		t.Fatal("Reconcile reported no change for a login with a new theme")
+	}
+	if len(f.cluster.applied) == applied {
+		t.Fatal("Reconcile applied nothing")
+	}
+	if f.cluster.deploys == deploys {
+		t.Fatal("the login was not waited for after the page changed")
+	}
+	after := lastOf(t, f.cluster.applied, "ConfigMap", authelia.ConfigMapName)
+	data, _, _ := unstructured.NestedStringMap(after, "data")
+	if got := data[authelia.ConfigFile]; !strings.Contains(got, "theme: 'light'") {
+		t.Errorf("the reconciled configuration does not pin the light page:\n%s", got)
+	}
+	afterBinary, _, _ := unstructured.NestedStringMap(after, "binaryData")
+	if beforeBinary[authelia.AssetLogo] == afterBinary[authelia.AssetLogo] {
+		t.Error("the light page's mark is the dark page's: the pictures did not follow the theme")
+	}
+	// The Deployment the write applied carries the new configuration's hash, or
+	// the running login keeps the old page.
+	deploy := lastOf(t, f.cluster.applied, "Deployment", authelia.ServiceName)
+	annotations, _, _ := unstructured.NestedStringMap(deploy, "spec", "template", "metadata", "annotations")
+	if got := annotations["s5n.io/config-hash"]; got != authelia.ConfigHash([]byte(data[authelia.ConfigFile])) {
+		t.Errorf("pod annotation %q is not the new configuration's hash", got)
+	}
+
+	// Nothing differs now, so the next run is not a write at all.
+	applied, deploys = len(f.cluster.applied), f.cluster.deploys
+	changed, err = f.decision.Reconcile(context.Background(), rules)
+	if err != nil {
+		t.Fatalf("second Reconcile: %v", err)
+	}
+	if changed {
+		t.Error("Reconcile wrote a login that was already up to date")
+	}
+	if len(f.cluster.applied) != applied || f.cluster.deploys != deploys {
+		t.Fatalf("the second Reconcile wrote: %d documents, %d waits", len(f.cluster.applied)-applied, f.cluster.deploys-deploys)
+	}
+}
+
+// TestReconcileWithoutALoginNamesInit: the login's step is not an install
+// either, so a box with no login is refused by the command that makes one.
+func TestReconcileWithoutALoginNamesInit(t *testing.T) {
+	f := newFixture(t)
+	if _, err := f.decision.Reconcile(context.Background(), ruleOptions()); err == nil {
+		t.Fatal("a login page was written into a box with no login")
+	} else if !strings.Contains(err.Error(), "box init") {
+		t.Fatalf("error = %v, want the command that installs the login", err)
+	}
+	if len(f.cluster.applied) != 0 {
+		t.Fatalf("a refused reconcile applied %d documents", len(f.cluster.applied))
+	}
+}
+
+// TestMayWriteIsRoots: the login is one page for the whole host, and only an
+// identity that may apply a ConfigMap in the platform's namespace writes it. A
+// seedbox user's apply is somebody else's configmap, which is why a `theme:` in
+// their values file never reaches the sign-in page.
+func TestMayWriteIsRoots(t *testing.T) {
+	f := newFixture(t)
+	ok, err := MayWrite(context.Background(), f.cluster)
+	if err != nil {
+		t.Fatalf("MayWrite: %v", err)
+	}
+	if !ok {
+		t.Fatal("the identity that installed the login cannot write it")
+	}
+	f.cluster.denied = true
+	ok, err = MayWrite(context.Background(), f.cluster)
+	if err != nil {
+		t.Fatalf("MayWrite: %v", err)
+	}
+	if ok {
+		t.Fatal("an identity the API server denies was told it may write the login")
 	}
 }

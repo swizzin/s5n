@@ -1793,42 +1793,12 @@ PY
     [ -z "$still" ] || { echo "the listener ${gone} is still on the Gateway"; fail=1; }
   done
 
-  # The login's rule goes too, and the pod is rolled onto the rule-less file, so
-  # the login that is actually answering has never heard of the name -- which is
-  # what a box installed without Seerr looks like. Editing the ConfigMap here is
-  # the only way to remove a rule: box always writes the whole configuration.
-  log "removing the login's rule for ${SEERR_HOST}, as a box installed without Seerr has none"
-  $K -n s5n-system get cm s5n-authelia -o jsonpath='{.data.configuration\.yml}' >"$WORK/authelia-unruled.yml" || fail=1
-  python3 - "$WORK/authelia-unruled.yml" "$SEERR_HOST" <<'PY' || { echo "could not remove the login's rule for the app host"; fail=1; }
-import sys
-path, host = sys.argv[1], sys.argv[2]
-lines = open(path).read().splitlines(keepends=True)
-out, dropped, skipping = [], 0, False
-for line in lines:
-    if skipping:
-        # A rule's body: policy, resources and subject are indented under the
-        # "- domain:" line that opened it.
-        if line.startswith("      "):
-            continue
-        skipping = False
-    if line.startswith("    - domain: ") and ("'%s'" % host) in line:
-        skipping, dropped = True, dropped + 1
-        continue
-    out.append(line)
-if dropped != 1:
-    sys.exit("the login's configuration has %d rules for %s, want one" % (dropped, host))
-open(path, "w").write("".join(out))
-PY
-  ruled_before=$(sha256sum "$WORK/authelia-unruled.yml" | cut -d' ' -f1)
-  $K -n s5n-system create configmap s5n-authelia \
-    --from-file=configuration.yml="$WORK/authelia-unruled.yml" \
-    --dry-run=client -o yaml | $K apply -f - >/dev/null ||
-    { echo "could not write the rule-less login configuration"; fail=1; }
-  # The hash is what rolls the pod: without it the running login would still
-  # have the rule, and the apply below would pass for the wrong reason.
-  $K -n s5n-system patch deploy authelia --type=merge \
-    -p "{\"spec\":{\"template\":{\"metadata\":{\"annotations\":{\"s5n.io/config-hash\":\"${ruled_before}\"}}}}}" >/dev/null ||
-    { echo "could not roll the login onto the rule-less configuration"; fail=1; }
+  # The login's rule went with the app: root's apply renders the login's whole
+  # configuration from the values on every run, so turning Seerr off removed its
+  # access_control rule and rolled the login onto the rule-less file. The login
+  # that is answering has never heard of the name -- which is what a box
+  # installed without Seerr looks like -- and box got it there, not this script.
+  log "the apply that turned Seerr off also removed the login's rule for ${SEERR_HOST}"
   $K -n s5n-system rollout status deploy/authelia --timeout=180s >/dev/null ||
     { echo "the login did not come back on the rule-less configuration"; fail=1; }
   authelia_uid_before=$($K -n s5n-system get pod -l app.kubernetes.io/name=authelia -o jsonpath='{.items[0].metadata.uid}' || true)

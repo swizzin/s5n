@@ -124,3 +124,76 @@ func (a applyHosts) rules(cl login.Cluster, plan release.HostPlan) setup.RuleFun
 		return nil
 	}
 }
+
+// Pending reports whether the login's page differs from the cluster's, and
+// Reconcile writes it when it does. They are the release.Login half of this
+// step, and they are separate from Missing and Ensure because none of it is per
+// host: a theme is a new face for one page, not a name that needs a listener, a
+// Certificate and a DNS record.
+//
+// Both are root's. The login serves every seedbox on the host, so it is written
+// once for the host and its theme is root's `theme:`, not a user's: an identity
+// that cannot apply a ConfigMap in the platform's namespace gets no step at all
+// rather than a refusal in the middle of its own apply. That is also why a
+// `theme:` in a user's values file does nothing to the login -- it is the
+// palette that user's own box draws its dialogs in, which box reads from the
+// file it was started with (cmd/box/settings.go), and the chart renders nothing
+// from it.
+func (a applyHosts) Pending(ctx context.Context, plan release.HostPlan) (bool, error) {
+	d, ok, err := a.loginStep(ctx, plan)
+	if err != nil || !ok {
+		return false, err
+	}
+	return d.Pending(ctx, loginRules(plan))
+}
+
+// Reconcile is the write half, and it applies only when the rendering differs:
+// a run whose login is already the one the values name writes nothing and rolls
+// nothing.
+func (a applyHosts) Reconcile(ctx context.Context, plan release.HostPlan) error {
+	d, ok, err := a.loginStep(ctx, plan)
+	if err != nil || !ok {
+		return err
+	}
+	_, err = d.Reconcile(ctx, loginRules(plan))
+	return err
+}
+
+// loginStep is the login as this identity may write it. A box whose values name
+// no domain has no portal to draw, and one whose cluster this identity may not
+// write the login in is not this run's to reconcile.
+func (a applyHosts) loginStep(ctx context.Context, plan release.HostPlan) (*login.Decision, bool, error) {
+	if plan.Domain == "" || plan.Rule.Login == "" {
+		return nil, false, nil
+	}
+	cl, err := a.cluster()
+	if err != nil {
+		return nil, false, err
+	}
+	ok, err := login.MayWrite(ctx, cl)
+	if err != nil {
+		return nil, false, err
+	}
+	if !ok {
+		return nil, false, nil
+	}
+	return &login.Decision{
+		Open: func() (login.Cluster, error) { return cl, nil },
+		Say:  a.out,
+	}, true, nil
+}
+
+// loginRules is what internal/login needs for both halves: the box's domain,
+// the account, the image the Deployment runs and the document the rules come
+// from. Hosts is the names the login's configuration covers, for the one line a
+// rule write prints.
+func loginRules(plan release.HostPlan) login.RulesOptions {
+	return login.RulesOptions{
+		Host:   plan.Domain,
+		Login:  plan.Rule.Login,
+		Hosts:  []string{plan.Domain},
+		Image:  plan.Rule.Image,
+		Values: plan.Rule.Values,
+		Hosted: plan.Rule.Hosted,
+	}
+}

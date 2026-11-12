@@ -138,6 +138,29 @@ type Hosts interface {
 	Ensure(ctx context.Context, plan HostPlan) error
 }
 
+// Login is root's login, reconciled on its own by every apply that has one.
+//
+// The login's configuration carries the `theme:` the values file names -- one
+// page for everyone on the host, in the box's palette -- and the pictures the
+// page is drawn with beside it, so a run whose only change is a theme has to
+// re-render it or the login keeps the old face. That is not per host and must
+// not become one: none of it checks DNS, asks for a Certificate or writes a
+// listener, which is why it is a second interface rather than a third method on
+// Hosts.
+//
+// Pending is the read apply makes with its diff, so a login that differs is
+// work this run shows and does even when the release and every host are as they
+// were. Reconcile is the write, after the confirm and before the release moves,
+// and writes nothing when the cluster already holds the rendering.
+//
+// A user's run has none: the login is root's, and a `theme:` in a user's values
+// file is the palette that user's own box draws with, not the page everyone
+// signs in on.
+type Login interface {
+	Pending(ctx context.Context, plan HostPlan) (bool, error)
+	Reconcile(ctx context.Context, plan HostPlan) error
+}
+
 // Options are one `box apply`.
 type Options struct {
 	// Chart is a chart release the caller has already loaded. `box init` sets
@@ -178,10 +201,12 @@ type Options struct {
 	// use: a value that is box's, not the operator's, and that has to be
 	// recomputed on every apply so a re-run is still a no-op.
 	BoxValues func(ctx context.Context) (map[string]any, error)
-	// Hosts is root's per-host TLS step. When it is nil apply does not look
-	// for a host without a listener: `box init` hands over to apply and then
-	// runs the step itself, one host at a time, so the names exist before the
-	// release does. A bare `box apply` sets it, because nothing else would.
+	// Hosts is root's work outside the release: the per-host TLS step, and --
+	// when the value also implements Login -- the login those hosts and the
+	// portal sign in through. When it is nil apply does neither: `box init`
+	// hands over to apply and then runs both steps itself, so the names and the
+	// login exist before the release does. A bare `box apply` sets it, because
+	// nothing else would.
 	Hosts Hosts
 }
 
@@ -201,6 +226,10 @@ type Result struct {
 	// Hosts are the app hosts this run gave a listener and a Certificate,
 	// because they had neither and the values serve them.
 	Hosts []string
+	// Login says the login's configuration or pictures differed from the
+	// cluster's, so this run re-rendered them. It is not a revision: a theme
+	// the release already holds leaves the release alone.
+	Login bool
 	// Storage is what box found it had to create, as Plan returned it.
 	Storage []StorageObject
 	// NamespaceCreated says apply created the seedbox's namespace, which only
@@ -362,16 +391,33 @@ func (a *Applier) Apply(ctx context.Context, opts Options) (Result, error) {
 	// so the step is part of this run's work even when the release itself does
 	// not change (docs/box.md, "No run leaves an app host without its
 	// listener"). The read is the cluster's, not a record box kept.
+	//
+	// The login is the same value as that step when the step also implements
+	// Login, which root's does: both are root's writes outside the release, and
+	// the login is one page for the whole host rather than a name on it. A value
+	// that does not -- `box init`'s nil, or a step for a user who cannot write
+	// the login at all -- has no login half.
+	login, _ := opts.Hosts.(Login)
 	var hostPlan HostPlan
-	if opts.Hosts != nil {
+	if opts.Hosts != nil || login != nil {
 		hostPlan, err = a.hostPlan(ctx, opts, chart, sb, values)
 		if err != nil {
 			return res, err
 		}
 		res.Hosts = hostPlan.Hosts
 	}
+	// The login, read here with the diff for the same reason: the theme the
+	// values file names is the page everyone signs in on, so a run whose only
+	// work is a re-rendered login is a run with something to do -- and one whose
+	// login is already right is not.
+	if login != nil {
+		res.Login, err = login.Pending(ctx, hostPlan)
+		if err != nil {
+			return res, err
+		}
+	}
 
-	if exists && len(res.Changes) == 0 && len(plan) == 0 && nsp.Exists && len(hostPlan.Hosts) == 0 {
+	if exists && len(res.Changes) == 0 && len(plan) == 0 && nsp.Exists && len(hostPlan.Hosts) == 0 && !res.Login {
 		r.Line(fmt.Sprintf("%s in %s: nothing to change", ReleaseName, namespace))
 		return res, nil
 	}
@@ -381,8 +427,10 @@ func (a *Applier) Apply(ctx context.Context, opts Options) (Result, error) {
 			r.Line(fmt.Sprintf("%s in %s: %d %s", ReleaseName, namespace, len(res.Changes), plural(len(res.Changes), "change", "changes")))
 			r.Diff(changeItems(res.Changes))
 		} else {
-			// The only work this run has is a host without its listener, which
-			// is why the early return above did not take it.
+			// The only work this run has is outside the release -- a host
+			// without its listener, or a login page that is not the one the
+			// values name -- which is why the early return above did not take
+			// it.
 			r.Line(fmt.Sprintf("%s in %s: the release is unchanged", ReleaseName, namespace))
 		}
 	} else {
@@ -405,6 +453,9 @@ func (a *Applier) Apply(ctx context.Context, opts Options) (Result, error) {
 			lines = append(lines, "Certificate, listener and login rule for "+host)
 		}
 		r.List("app hosts", lines)
+	}
+	if res.Login {
+		r.List("login", []string{"the sign-in page's configuration, mark and favicon"})
 	}
 
 	ok, err := a.Confirm.Ask(fmt.Sprintf("apply %s in %s?", ReleaseName, namespace))
@@ -439,10 +490,20 @@ func (a *Applier) Apply(ctx context.Context, opts Options) (Result, error) {
 		}
 	}
 
-	// Only the per-host step had work: the release, its namespace and its
-	// storage are all as they were, so this run makes no Helm revision. A
-	// certificate nobody has to renew must not churn the release users roll
-	// back to.
+	// The login goes after the per-host step, and on its own: a theme is not a
+	// host, so nothing here DNS-checks a name, asks for a Certificate or writes
+	// a listener -- and because the write compares before it applies, the rule
+	// the step above just wrote is not written a second time.
+	if res.Login {
+		if err := login.Reconcile(ctx, hostPlan); err != nil {
+			return res, err
+		}
+	}
+
+	// Only the steps that are not the release had work: the release, its
+	// namespace and its storage are all as they were, so this run makes no Helm
+	// revision. A certificate nobody has to renew, or a login page the release
+	// already names, must not churn the release users roll back to.
 	if exists && len(res.Changes) == 0 && len(plan) == 0 && nsp.Exists {
 		return res, nil
 	}
@@ -523,21 +584,33 @@ func (a *Applier) loadChart(ctx context.Context, opts Options) (Chart, error) {
 	return a.Charts.Load(ctx, opts.ChartRef())
 }
 
-// hostPlan is the per-host TLS work this apply has: every name the values serve
-// at a host of their own, less the ones the cluster already has a listener, a
-// Certificate and a login rule for.
+// hostPlan is the work this apply has outside the release: the per-host TLS a
+// values file's hosted apps need, and the login's rule inputs, which both steps
+// render from.
 //
-// Which apps get a host is the catalog's (`exposure: host`), so this reads the
-// chart release's manifest the same way init does. A chart that ships no
-// catalog serves no app at a host of its own, and one whose values name no
-// domain cannot name one.
+// Every name the values serve at a host of their own, less the ones the cluster
+// already has a listener, a Certificate and a login rule for, is the per-host
+// step's work. Which apps get a host is the catalog's (`exposure: host`), so
+// this reads the chart release's manifest the same way init does. A chart that
+// ships no catalog serves no app at a host of its own, and one whose values
+// name no domain cannot name one.
 func (a *Applier) hostPlan(ctx context.Context, opts Options, chart Chart, sb *seedbox.Seedbox, values map[string]any) (HostPlan, error) {
 	plan := HostPlan{Domain: hostOf(values), Forced: forcedIssuer(values)}
 	hosts, err := hostedHosts(chart, values, plan.Domain)
 	if err != nil {
 		return plan, err
 	}
-	if len(hosts) == 0 {
+	// The login's inputs are built whatever the hosts are: a rule write and a
+	// login reconcile render one file, and the reconcile runs on a run with no
+	// host to serve at all.
+	if plan.Domain != "" && len(chart.Catalog) > 0 {
+		rule, err := loginRule(sb, chart, values, hosts, plan.Domain)
+		if err != nil {
+			return plan, err
+		}
+		plan.Rule = rule
+	}
+	if len(hosts) == 0 || opts.Hosts == nil {
 		return plan, nil
 	}
 	missing, err := opts.Hosts.Missing(ctx, HostPlan{Domain: plan.Domain, Forced: plan.Forced, Hosts: hosts})
@@ -545,23 +618,24 @@ func (a *Applier) hostPlan(ctx context.Context, opts Options, chart Chart, sb *s
 		return plan, err
 	}
 	plan.Hosts = missing
-	if len(missing) == 0 {
-		return plan, nil
-	}
-	// The rule the hosts need is the login's, so its inputs are the grant's
-	// account and the document the release renders: the same two init passes to
-	// internal/login, which is what makes the two commands write one rule.
+	return plan, nil
+}
+
+// loginRule is the login's half of both steps: the grant's account, the
+// document the release renders, the release's own login image, and every app
+// the chart serves at a name of its own. init passes internal/login the same
+// four, which is what makes the two commands write one file.
+func loginRule(sb *seedbox.Seedbox, chart Chart, values map[string]any, hosts []string, domain string) (HostRule, error) {
 	login, err := sb.Login()
 	if err != nil {
-		return plan, err
+		return HostRule{}, err
 	}
-	plan.Rule = HostRule{
+	return HostRule{
 		Login:  login,
-		Hosted: hostedApps(hosts, plan.Domain),
+		Hosted: hostedApps(hosts, domain),
 		Values: values,
 		Image:  chart.Pins.Authelia,
-	}
-	return plan, nil
+	}, nil
 }
 
 // hostedHosts is every name the values serve at a host of its own, in catalog

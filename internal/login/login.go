@@ -460,36 +460,95 @@ type RulesOptions struct {
 // account the box logs in with. A box whose login is not installed has nothing
 // to write a rule into, and the refusal names the command that installs it.
 func (d *Decision) EnsureRules(ctx context.Context, opts RulesOptions) (bool, error) {
-	if err := checkRules(opts); err != nil {
-		return false, err
-	}
-	cl, err := d.Open()
+	cl, files, changed, err := d.prepare(ctx, opts)
 	if err != nil {
 		return false, err
 	}
-	key, err := d.readKey(ctx, cl)
-	if err != nil {
-		return false, err
-	}
-	// The permissions every object below needs, asked before the first write:
-	// a kubeconfig that may write a Gateway's listeners but not the login's
-	// configuration has to be told so here, not half way through.
-	if err := kube.Preflight(ctx, cl, rulesAccess()); err != nil {
-		return false, fmt.Errorf("login: %w", err)
-	}
-	config, assets, err := renderLogin(opts.Values, opts.Host, opts.Login, key, opts.Hosted)
-	if err != nil {
-		return false, err
-	}
-	r := d.report()
 	names := strings.Join(opts.Hosts, ", ")
-	changed, err := d.configurationChanged(ctx, cl, config, assets)
+	if !changed {
+		d.report().Line(fmt.Sprintf("login: the rule for %s is already there", names))
+		return false, nil
+	}
+	return d.write(ctx, cl, opts, files,
+		"applying the login's rule for "+names,
+		fmt.Sprintf("login: the rule for %s is in place", names))
+}
+
+// Pending reports whether the login's configuration or pictures differ from
+// what is in the cluster, and writes nothing. It is EnsureRules' read half, for
+// a caller that has to ask before it does the write: `box apply` shows a
+// re-rendered login in its plan like any other piece of work.
+//
+// It is root's: reading the login's Secret and ConfigMap is the first thing it
+// does, so an identity that cannot write the login is told so here rather than
+// half way through a write.
+func (d *Decision) Pending(ctx context.Context, opts RulesOptions) (bool, error) {
+	_, _, changed, err := d.prepare(ctx, opts)
+	return changed, err
+}
+
+// Reconcile writes the login's configuration and pictures when they differ, and
+// reports whether it wrote. It is the login's own step, separate from the
+// per-host one: a theme change is a new face for the page, not a new host, so
+// it re-renders the whole face and touches no listener, no Certificate and no
+// DNS record.
+//
+// What it writes is exactly what EnsureRules writes -- one ConfigMap and the
+// objects that mount it -- so the two cannot disagree, and a write that changes
+// the configuration rolls the pod through the same annotation.
+func (d *Decision) Reconcile(ctx context.Context, opts RulesOptions) (bool, error) {
+	cl, files, changed, err := d.prepare(ctx, opts)
 	if err != nil {
 		return false, err
 	}
 	if !changed {
-		r.Line(fmt.Sprintf("login: the rule for %s is already there", names))
 		return false, nil
+	}
+	return d.write(ctx, cl, opts, files,
+		"reconciling the login's page",
+		"login: the configuration, mark and favicon are up to date")
+}
+
+// prepare is the read half of both writers: the login's rendering for these
+// options, the cluster it was compared against, and whether it differs.
+func (d *Decision) prepare(ctx context.Context, opts RulesOptions) (Cluster, loginFiles, bool, error) {
+	var none loginFiles
+	if err := checkRules(opts); err != nil {
+		return nil, none, false, err
+	}
+	cl, err := d.Open()
+	if err != nil {
+		return nil, none, false, err
+	}
+	key, err := d.readKey(ctx, cl)
+	if err != nil {
+		return nil, none, false, err
+	}
+	config, assets, err := renderLogin(opts.Values, opts.Host, opts.Login, key, opts.Hosted)
+	if err != nil {
+		return nil, none, false, err
+	}
+	changed, err := d.configurationChanged(ctx, cl, config, assets)
+	if err != nil {
+		return nil, none, false, err
+	}
+	return cl, loginFiles{config: config, assets: assets}, changed, nil
+}
+
+// loginFiles is the login's rendering: the configuration Authelia starts with,
+// and the mark and favicon mounted beside it.
+type loginFiles struct {
+	config []byte
+	assets authelia.Assets
+}
+
+// write applies a rendering that differs and waits for the pod that has to read
+// it. The permissions are asked here, before the first write, so a kubeconfig
+// that may write a Gateway's listeners but not the login's configuration is
+// told so rather than half way through.
+func (d *Decision) write(ctx context.Context, cl Cluster, opts RulesOptions, files loginFiles, label, done string) (bool, error) {
+	if err := kube.Preflight(ctx, cl, rulesAccess()); err != nil {
+		return false, fmt.Errorf("login: %w", err)
 	}
 	manifests, err := authelia.RenderManifests(authelia.Manifests{
 		Namespace:        Namespace,
@@ -501,7 +560,7 @@ func (d *Decision) EnsureRules(ctx context.Context, opts RulesOptions) (bool, er
 		Image:            opts.Image,
 		UID:              authelia.UID,
 		GID:              authelia.GID,
-		ConfigHash:       authelia.ConfigHash(config),
+		ConfigHash:       authelia.ConfigHash(files.config),
 	})
 	if err != nil {
 		return false, err
@@ -512,21 +571,21 @@ func (d *Decision) EnsureRules(ctx context.Context, opts RulesOptions) (bool, er
 	}
 	// The ConfigMap is not part of the manifests template: its content is one
 	// rendered file, and it is written beside the objects that name it.
-	docs = append([]map[string]any{configMapDoc(config, assets)}, docs...)
+	docs = append([]map[string]any{configMapDoc(files.config, files.assets)}, docs...)
 
-	step := r.Start(say.Op{Label: "applying the login's rule for " + names})
+	step := d.report().Start(say.Op{Label: label})
 	if err := cl.ApplyWith(ctx, kube.FieldManager, docs); err != nil {
 		step.Failed(err)
 		return false, fmt.Errorf("login: %w", err)
 	}
 	// The pod that is running still has the old file: the hash is what rolls
-	// it, and a rule the running login has not read is a 403 for the host the
-	// step was called for.
+	// it, and a rule or a page the running login has not read is not the login
+	// that is answering.
 	if err := d.awaitDeployment(ctx, cl); err != nil {
 		step.Failed(err)
 		return true, err
 	}
-	step.Done(fmt.Sprintf("login: the rule for %s is in place", names))
+	step.Done(done)
 	return true, nil
 }
 
@@ -662,6 +721,28 @@ func secretKey(doc map[string]any) (string, error) {
 			Namespace, authelia.SecretName, authelia.EncryptionKeySecretKey)
 	}
 	return string(key), nil
+}
+
+// MayWrite reports whether this identity may write the login at all.
+//
+// It is the question that decides whose the login is. The login serves every
+// seedbox on the host, so it is root's: root's kubeconfig applies a ConfigMap
+// in the platform's namespace, and a seedbox user's does not. A caller that is
+// not root therefore skips the login rather than failing half way through its
+// own apply, and a user's `theme:` never reaches the page everyone signs in on
+// -- it is the palette that user's own box draws its dialogs in.
+func MayWrite(ctx context.Context, cl Cluster) (bool, error) {
+	denied, err := kube.Denied(ctx, cl, []kube.Access{{
+		Verb:      kube.VerbApply,
+		Group:     CoreGroup,
+		Resource:  "configmaps",
+		Namespace: Namespace,
+		What:      "the login's configuration in " + Namespace,
+	}})
+	if err != nil {
+		return false, fmt.Errorf("login: %w", err)
+	}
+	return len(denied) == 0, nil
 }
 
 // rulesAccess is what a rule write needs: the login's own objects -- the
