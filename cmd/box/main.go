@@ -909,6 +909,8 @@ func loginOptions(chart release.Chart, l setup.Login, pathsInNode bool) login.Op
 		Image:       chart.Pins.Authelia,
 		Values:      l.Values,
 		Hosted:      l.Hosted,
+		Namespace:   l.Namespace,
+		OIDC:        l.OIDC,
 	}
 }
 

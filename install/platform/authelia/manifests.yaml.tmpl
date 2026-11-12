@@ -69,6 +69,15 @@ spec:
           args:
             - --config
             - /etc/authelia/configuration.yml
+            {{- if .OIDC }}
+            # The provider's signing material is a second configuration file,
+            # from the login's Secret: Authelia merges them (koanf Merge, maps
+            # deep and lists replaced), and a `jwks[].key` has no `_FILE`
+            # spelling, so a file is the only way it stays out of the
+            # ConfigMap.
+            - --config
+            - {{ .OIDCMount }}/{{ .OIDCFile }}
+            {{- end }}
           ports:
             - name: http
               containerPort: 9091
@@ -103,6 +112,13 @@ spec:
             - name: configuration
               mountPath: /etc/authelia
               readOnly: true
+            {{- if .OIDC }}
+            # One key, one file: the private key of the issuer, mounted where
+            # only this container reads it.
+            - name: oidc
+              mountPath: {{ .OIDCMount }}
+              readOnly: true
+            {{- end }}
             - name: tmp
               mountPath: /tmp
       volumes:
@@ -112,6 +128,21 @@ spec:
         - name: configuration
           configMap:
             name: {{ .ConfigMap }}
+        {{- if .OIDC }}
+        - name: oidc
+          secret:
+            secretName: {{ .Secret }}
+            # A Secret volume's files are root-owned, whatever the pod's user
+            # is, and this container runs as .UID. A 0400 file is one its own
+            # reader cannot open: Authelia exits with "permission denied"
+            # before it ever listens. The volume is read-only and mounted into
+            # the one container that names it, so 0444 admits readers this
+            # container already has.
+            defaultMode: 0444
+            items:
+              - key: {{ .OIDCFile }}
+                path: {{ .OIDCFile }}
+        {{- end }}
         - name: tmp
           emptyDir: {}
 ---

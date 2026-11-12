@@ -6,6 +6,9 @@ apps:
     description: the download client
   sonarr:
     description: the television library
+    # An app that signs in through the login's OIDC provider: apply has to
+    # register its client, in a Secret that lives in the seedbox's namespace.
+    oidc: true
   radarr:
     description: the film library, served at a name of its own
     exposure: host

@@ -28,3 +28,11 @@ var Configuration []byte
 //
 //go:embed manifests.yaml.tmpl
 var Manifests []byte
+
+// OIDC is the `identity_providers` block the configuration carries when a box
+// has an app that signs in through the login. It is a template of its own
+// because it is the one part of the configuration that is a list of decisions
+// about other apps, and it is empty on a box with none.
+//
+//go:embed oidc.yml.tmpl
+var OIDC []byte

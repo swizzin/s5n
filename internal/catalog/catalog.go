@@ -109,6 +109,12 @@ type App struct {
 	Default bool `yaml:"default"`
 	// Exposure is how the chart serves it; empty means ExposurePath.
 	Exposure Exposure `yaml:"exposure"`
+	// OIDC says the app signs in through the login's own OIDC provider: the
+	// chart gives it the issuer and a client secret, and the login registers a
+	// client for it in this box's namespace. It is the chart's decision, not
+	// box's -- a second client later is one entry here and nothing in box
+	// beyond reading this flag.
+	OIDC bool `yaml:"oidc"`
 	// Questions are asked in this order, after the app is selected.
 	Questions []Question `yaml:"questions"`
 }
@@ -147,6 +153,23 @@ type Catalog struct {
 func (c *Catalog) Apps() []App {
 	out := make([]App, len(c.apps))
 	copy(out, c.apps)
+	return out
+}
+
+// OIDCApps is the enabled apps that sign in through the login, in manifest
+// order. enabled is the names init selected; an app the catalog marks and this
+// box did not install is not a client, and a box with none is not a provider.
+func (c *Catalog) OIDCApps(enabled []string) []string {
+	on := make(map[string]bool, len(enabled))
+	for _, name := range enabled {
+		on[name] = true
+	}
+	var out []string
+	for _, app := range c.apps {
+		if app.OIDC && on[app.Name] {
+			out = append(out, app.Name)
+		}
+	}
 	return out
 }
 
@@ -190,6 +213,7 @@ type manifestApp struct {
 	Instances   bool       `yaml:"instances"`
 	Default     bool       `yaml:"default"`
 	Exposure    Exposure   `yaml:"exposure"`
+	OIDC        bool       `yaml:"oidc"`
 	Questions   []Question `yaml:"questions"`
 }
 
@@ -338,6 +362,7 @@ func buildApps(m *manifest, order []string, chartApps map[string]chartApp, sch *
 			Instances:   entry.Instances,
 			Default:     entry.Default,
 			Exposure:    entry.Exposure,
+			OIDC:        entry.OIDC,
 			Questions:   entry.Questions,
 		}
 		problems = append(problems, validateExposure(&app)...)

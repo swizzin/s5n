@@ -208,6 +208,11 @@ type Login struct {
 	// access_control rules come from its instance list, so the login and the
 	// release cannot disagree about which URL prefixes exist.
 	Values map[string]any
+	// Namespace is the seedbox's namespace, half of every OIDC client id.
+	Namespace string
+	// OIDC are the apps that sign in through the login, from the chart's
+	// catalog: a box's first one is what makes it a provider at all.
+	OIDC []string
 }
 
 // report is the one place init writes progress.
@@ -480,6 +485,8 @@ func (d *Decision) Run(ctx context.Context, opts Options) (Result, error) {
 			NewPassword: newPassword,
 			Values:      withApps(base, apps, d.Catalog),
 			Hosted:      appHostApps(appHosts),
+			Namespace:   namespace,
+			OIDC:        d.Catalog.OIDCApps(apps),
 		}
 		req.Login = func(ctx context.Context) error { return d.Login(ctx, l) }
 	}

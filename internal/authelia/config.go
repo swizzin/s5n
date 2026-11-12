@@ -270,6 +270,11 @@ type Configuration struct {
 	// mark instead of Authelia's own picture.
 	AssetPath string
 	Rules     []Rule
+	// OIDC is the identity provider, when this box has an app that signs in
+	// through the login. Nil (or no clients) renders no identity_providers
+	// block at all: Authelia registers no provider routes, and a discovery
+	// request is a 404 rather than an issuer nobody uses.
+	OIDC *OIDC
 }
 
 // ErrConfiguration says the configuration cannot be rendered: box refuses
@@ -306,6 +311,18 @@ func RenderConfiguration(c Configuration) ([]byte, error) {
 	var b strings.Builder
 	if err := configurationTemplate.Execute(&b, c); err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrConfiguration, err)
+	}
+	if c.OIDC != nil && c.OIDC.Enabled() {
+		// The provider's block goes last because it is about the apps rather
+		// than about this host: everything above it is the page, the rules and
+		// the session, and a reader looking for "who may get a token" finds it
+		// at the end rather than in the middle of the cookie settings.
+		block, err := RenderOIDC(*c.OIDC)
+		if err != nil {
+			return nil, fmt.Errorf("%w: %v", ErrConfiguration, err)
+		}
+		b.WriteString("\n")
+		b.Write(block)
 	}
 	return []byte(b.String()), nil
 }

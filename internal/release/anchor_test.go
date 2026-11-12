@@ -47,6 +47,41 @@ func (f *fakeAnchor) Ensure(_ context.Context, plan AnchorPlan) error {
 	return nil
 }
 
+// TestOIDCClientsAreWrittenAfterTheNamespace is the first install's order: the
+// client Secrets live in the seedbox's namespace, which apply creates, so the
+// step that writes them runs after that -- and before the login's configuration
+// (which names the clients) and before Helm. A step that ran earlier would fail
+// with "namespaces \"testbox\" not found" on every first install.
+func TestOIDCClientsAreWrittenAfterTheNamespace(t *testing.T) {
+	f := newFakes(t)
+	f.anchor = &fakeAnchor{
+		line:           "write Secret testbox/s5n-oidc-sonarr",
+		events:         &f.events,
+		namespaceReady: func() bool { return f.store.nsExists },
+	}
+
+	res, err := f.apply(t)
+	if err != nil {
+		t.Fatalf("apply: %v\n%s", err, f.out)
+	}
+	if !res.NamespaceCreated {
+		t.Fatal("the fixture was supposed to be a first install: the namespace was there")
+	}
+	if len(f.anchor.ensured) != 1 {
+		t.Fatalf("anchor wrote %d times, want once", len(f.anchor.ensured))
+	}
+	plan := f.anchor.ensured[0]
+	if len(plan.OIDC) != 1 || plan.OIDC[0] != "sonarr" {
+		t.Fatalf("anchor plan OIDC = %v, want the app the catalog marks: its client Secret is written by the same step", plan.OIDC)
+	}
+	if len(f.anchor.namespaceThere) != 1 || !f.anchor.namespaceThere[0] {
+		t.Fatalf("the anchor step ran before the namespace existed (%v): a client Secret cannot be written there", f.anchor.namespaceThere)
+	}
+	if a, b := eventIndex(f.events, "anchor"), eventIndex(f.events, "helm"); a < 0 || b < 0 || a > b {
+		t.Fatalf("events = %v, want the clients and the anchor before the release", f.events)
+	}
+}
+
 // The anchor is one ConfigMap for the whole seedbox, not a per-host object, and
 // it is written before the release moves: an app that has to verify the login's
 // certificate reads it as its pod starts.

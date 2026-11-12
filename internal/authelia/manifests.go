@@ -95,9 +95,17 @@ type Manifests struct {
 	// Claim, ConfigMap and Image are the names the objects refer to.
 	Claim     string
 	ConfigMap string
-	Image     string
-	UID       int
-	GID       int
+	// Secret is the login's Secret. Its OIDC file is mounted when this box has
+	// a provider; the Deployment never mounts the encryption key.
+	Secret string
+	Image  string
+	UID    int
+	GID    int
+	// OIDC says this box has an app that signs in through the login, so the
+	// provider's file is mounted and passed as a second --config.
+	OIDC      bool
+	OIDCFile  string
+	OIDCMount string
 	// ConfigHash is the sha256 of the rendered configuration, written as a
 	// pod-template annotation so a configuration change rolls the pod.
 	ConfigHash string
@@ -129,6 +137,20 @@ func RenderManifests(m Manifests) ([]byte, error) {
 	} {
 		if strings.TrimSpace(value) == "" {
 			return nil, fmt.Errorf("%w: no %s", ErrManifests, name)
+		}
+	}
+	if m.OIDC {
+		// The provider's file is a Secret the Deployment mounts: with no name
+		// to mount, Authelia starts without the issuer's keys and every token
+		// request fails.
+		for name, value := range map[string]string{
+			"secret":     m.Secret,
+			"oidc file":  m.OIDCFile,
+			"oidc mount": m.OIDCMount,
+		} {
+			if strings.TrimSpace(value) == "" {
+				return nil, fmt.Errorf("%w: no %s, and this box has an OIDC client", ErrManifests, name)
+			}
 		}
 	}
 	if m.UID <= 0 || m.GID <= 0 {

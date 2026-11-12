@@ -118,6 +118,12 @@ type HostRule struct {
 	Login  string
 	Hosted []string
 	Values map[string]any
+	// Namespace is the seedbox's namespace -- half of every OIDC client id --
+	// and OIDC are the apps the catalog says sign in through the login. The
+	// login's configuration is one file: a rule write renders the clients too,
+	// so both halves of the step need the same inputs init had.
+	Namespace string
+	OIDC      []string
 	// Image is the login Deployment's pinned image: the rule write applies the
 	// login's objects from the template init uses, and the image is part of it.
 	Image string
@@ -174,6 +180,12 @@ type AnchorPlan struct {
 	// one the cluster already has.
 	Issuer    string
 	Namespace string
+	// OIDC are the apps that sign in through the login, from the chart's
+	// catalog. Their client Secrets live in this namespace too, and the step
+	// that runs here is the first point in an install where it exists: a first
+	// install's namespace is created by apply, after init has already written
+	// the login.
+	OIDC []string
 }
 
 // Anchor is root's host-CA step: the ConfigMap in the seedbox's namespace that
@@ -476,6 +488,14 @@ func (a *Applier) Apply(ctx context.Context, opts Options) (Result, error) {
 	var anchorLine string
 	anchorPlan := AnchorPlan{Domain: hostOf(values), Issuer: opts.AnchorIssuer, Namespace: namespace}
 	if opts.Anchor != nil && anchorPlan.Domain != "" {
+		// The clients are the catalog's answer, not the login rule's: the
+		// anchor step writes their Secrets on every run that has an anchor,
+		// including one whose login-rule inputs are never built (a value that
+		// is not a Login). A client Secret cannot wait for a host to exist.
+		anchorPlan.OIDC, err = oidcClients(chart, values)
+		if err != nil {
+			return res, err
+		}
 		anchorLine, err = opts.Anchor.Plan(ctx, anchorPlan)
 		if err != nil {
 			return res, err
@@ -558,22 +578,18 @@ func (a *Applier) Apply(ctx context.Context, opts Options) (Result, error) {
 		}
 	}
 
-	// The login goes after the per-host step, and on its own: a theme is not a
-	// host, so nothing here DNS-checks a name, asks for a Certificate or writes
-	// a listener -- and because the write compares before it applies, the rule
-	// the step above just wrote is not written a second time.
-	if res.Login {
-		if err := login.Reconcile(ctx, hostPlan); err != nil {
-			return res, err
-		}
-	}
-
 	// The anchor is written at the first point where the namespace it lives in
 	// is known to exist, and always before the release moves: an app that has
 	// to verify the login's certificate reads the ConfigMap as its pod starts,
 	// and a pod that starts without it crash-loops through Helm's wait. On a
 	// first install that point is just after this run creates the namespace
 	// (below); on every later run it is here.
+	//
+	// The same step writes the OIDC clients' Secrets, which also live in that
+	// namespace -- so the login's configuration, which names those clients, is
+	// written after it rather than before. A run whose anchor step had work to
+	// do therefore reconciles the login even when the login itself read as
+	// unchanged: its client list depends on what that step just wrote.
 	writeAnchor := func() error {
 		if anchorLine == "" {
 			return nil
@@ -584,8 +600,22 @@ func (a *Applier) Apply(ctx context.Context, opts Options) (Result, error) {
 		res.AnchorWrote = true
 		return nil
 	}
+	reconcileLogin := func() error {
+		if login == nil || (!res.Login && anchorLine == "") {
+			return nil
+		}
+		return login.Reconcile(ctx, hostPlan)
+	}
 	if nsp.Exists {
 		if err := writeAnchor(); err != nil {
+			return res, err
+		}
+		// The login goes after the per-host step and after the anchor, and on
+		// its own: a theme is not a host, so nothing here DNS-checks a name,
+		// asks for a Certificate or writes a listener -- and because the write
+		// compares before it applies, the rule the step above just wrote is not
+		// written a second time.
+		if err := reconcileLogin(); err != nil {
 			return res, err
 		}
 	}
@@ -615,9 +645,13 @@ func (a *Applier) Apply(ctx context.Context, opts Options) (Result, error) {
 		}
 		res.NamespaceCreated = true
 		r.Success(fmt.Sprintf("created namespace %s (Pod Security %s)", namespace, podSecurityRestricted))
-		// The anchor is one object in that namespace, so it can only be
-		// written now.
+		// The anchor and the OIDC clients' Secrets are objects in that
+		// namespace, so they can only be written now -- and the login's
+		// configuration, which names those clients, after them.
 		if err := writeAnchor(); err != nil {
+			return res, err
+		}
+		if err := reconcileLogin(); err != nil {
 			return res, err
 		}
 	}
@@ -725,12 +759,38 @@ func loginRule(sb *seedbox.Seedbox, chart Chart, values map[string]any, hosts []
 	if err != nil {
 		return HostRule{}, err
 	}
+	namespace, err := sb.Namespace()
+	if err != nil {
+		return HostRule{}, err
+	}
+	cat, err := catalog.Parse(chart.Ref+"/"+catalog.FileName, chart.Catalog, chart.Values, chart.Schema)
+	if err != nil {
+		return HostRule{}, err
+	}
 	return HostRule{
-		Login:  login,
-		Hosted: hostedApps(hosts, domain),
-		Values: values,
-		Image:  chart.Pins.Authelia,
+		Login:     login,
+		Hosted:    hostedApps(hosts, domain),
+		Values:    values,
+		Image:     chart.Pins.Authelia,
+		Namespace: namespace,
+		OIDC:      cat.OIDCApps(enabledApps(values)),
 	}, nil
+}
+
+// oidcClients is the apps the chart's catalog marks as signing in through the
+// login, in catalog order. It takes the same inputs the client render does and
+// returns the same list, but not the rest of the rule: the anchor step needs
+// only this half, and building the whole rule there would tie the clients to a
+// host name that has nothing to do with them.
+func oidcClients(chart Chart, values map[string]any) ([]string, error) {
+	if len(chart.Catalog) == 0 {
+		return nil, nil
+	}
+	cat, err := catalog.Parse(chart.Ref+"/"+catalog.FileName, chart.Catalog, chart.Values, chart.Schema)
+	if err != nil {
+		return nil, err
+	}
+	return cat.OIDCApps(enabledApps(values)), nil
 }
 
 // hostedHosts is every name the values serve at a host of its own, in catalog

@@ -17,9 +17,6 @@ package login
 
 import (
 	"context"
-	"crypto/rand"
-	"encoding/base64"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -179,6 +176,15 @@ type Options struct {
 	// names needs its rule, and the app's path rule must not exist: the chart
 	// no longer serves the app there.
 	Hosted []string
+	// Namespace is the seedbox's namespace. It is the per-app client Secrets'
+	// home and half of every client id, so an empty one is a refusal: a client
+	// called "-qui" belongs to nobody.
+	Namespace string
+	// OIDC are the apps that sign in through this login, from the chart's
+	// catalog. Each gets a client in this box's own namespace, its own Secret
+	// and its own authorization policy; a box with none has no provider at
+	// all.
+	OIDC []string
 }
 
 // Decision is one login install. Open and Storage are called only once the
@@ -349,9 +355,18 @@ func (d *Decision) Apply(ctx context.Context, opts Options) (Result, error) {
 		r.Line(fmt.Sprintf("users database: %s is inside the test node, so box cannot write it (--paths-in-node)", usersPath))
 	}
 
-	// The Secret: created once, never updated. Reading it is also how the
+	// The Secret: its encryption key created once, never changed, and the
+	// provider's signing material added to it the first time this box has an
+	// app that signs in through the login. Reading it is also how the
 	// configuration gets the key it must encrypt with.
-	key, kept, err := d.encryptionKey(ctx, cl)
+	//
+	// The clients are not made here. An install that writes this Secret runs
+	// before apply has created the seedbox's namespace, and a client is a
+	// Secret in that namespace; login.EnsureClients is the step that runs where
+	// the namespace exists, and the configuration picks its clients up on the
+	// next render.
+	apps := oidcApps(opts.OIDC)
+	sec, kept, err := d.ensureKey(ctx, cl, true, len(apps) > 0)
 	if err != nil {
 		return res, undo(err)
 	}
@@ -359,12 +374,14 @@ func (d *Decision) Apply(ctx context.Context, opts Options) (Result, error) {
 	if !kept {
 		res.Wrote = true
 	}
+	key := sec.key
 
 	// One rendering for the whole face of the login: the configuration file
 	// that decides the page's theme, and the mark and favicon that go in it.
 	// The per-host step calls the same function, so init and apply cannot
 	// disagree about either.
-	config, assets, err := renderLogin(opts.Values, opts.Host, opts.Login, key, opts.Hosted)
+	config, assets, err := renderLogin(opts.Values, opts.Host, opts.Login, key, opts.Hosted,
+		oidcClients(opts.Host, opts.Namespace, opts.Login, apps, sec.digests))
 	if err != nil {
 		return res, undo(err)
 	}
@@ -373,7 +390,13 @@ func (d *Decision) Apply(ctx context.Context, opts Options) (Result, error) {
 		return res, undo(err)
 	}
 
-	manifests, err := authelia.RenderManifests(manifestsFor(opts.Host, opts.Image, authelia.ConfigHash(config)))
+	// The provider is mounted only once it has a client. Authelia refuses the
+	// block with no clients ("identity_providers: oidc: option 'clients' must
+	// have one or more clients configured"), and a first install has none yet:
+	// the client Secrets are the anchor step's write, in the run that creates
+	// the namespace. Until then the login serves the edge with the signing
+	// material sitting unused in its Secret.
+	manifests, err := authelia.RenderManifests(manifestsFor(opts.Host, opts.Image, authelia.ConfigHash(config), len(sec.digests) > 0))
 	if err != nil {
 		return res, undo(err)
 	}
@@ -432,6 +455,13 @@ type RulesOptions struct {
 	// not only the names this run writes, because the configuration is
 	// rewritten whole and a name left out would lose the rule it already had.
 	Hosted []string
+	// Namespace and OIDC are the provider's half of the same configuration: the
+	// seedbox's namespace (half of every client id) and the apps that sign in
+	// through this login. The configuration is one file, so a rule write
+	// renders the clients too and a client left out would be a client Authelia
+	// stopped answering for.
+	Namespace string
+	OIDC      []string
 }
 
 // EnsureRules writes the login's configuration for the hosts a run is about to
@@ -449,7 +479,7 @@ type RulesOptions struct {
 // account the box logs in with. A box whose login is not installed has nothing
 // to write a rule into, and the refusal names the command that installs it.
 func (d *Decision) EnsureRules(ctx context.Context, opts RulesOptions) (bool, error) {
-	cl, files, changed, err := d.prepare(ctx, opts)
+	cl, files, changed, err := d.prepare(ctx, opts, true)
 	if err != nil {
 		return false, err
 	}
@@ -472,7 +502,7 @@ func (d *Decision) EnsureRules(ctx context.Context, opts RulesOptions) (bool, er
 // does, so an identity that cannot write the login is told so here rather than
 // half way through a write.
 func (d *Decision) Pending(ctx context.Context, opts RulesOptions) (bool, error) {
-	_, _, changed, err := d.prepare(ctx, opts)
+	_, _, changed, err := d.prepare(ctx, opts, false)
 	return changed, err
 }
 
@@ -486,7 +516,7 @@ func (d *Decision) Pending(ctx context.Context, opts RulesOptions) (bool, error)
 // objects that mount it -- so the two cannot disagree, and a write that changes
 // the configuration rolls the pod through the same annotation.
 func (d *Decision) Reconcile(ctx context.Context, opts RulesOptions) (bool, error) {
-	cl, files, changed, err := d.prepare(ctx, opts)
+	cl, files, changed, err := d.prepare(ctx, opts, true)
 	if err != nil {
 		return false, err
 	}
@@ -500,7 +530,12 @@ func (d *Decision) Reconcile(ctx context.Context, opts RulesOptions) (bool, erro
 
 // prepare is the read half of both writers: the login's rendering for these
 // options, the cluster it was compared against, and whether it differs.
-func (d *Decision) prepare(ctx context.Context, opts RulesOptions) (Cluster, loginFiles, bool, error) {
+//
+// ensure says this run is going to write, so the provider's material an app
+// needs may be created here -- a box upgraded from before the provider has
+// none, and a rule write is where it gains one. Pending passes false and only
+// reads: a run that may not write the login must not create anything in it.
+func (d *Decision) prepare(ctx context.Context, opts RulesOptions, ensure bool) (Cluster, loginFiles, bool, error) {
 	var none loginFiles
 	if err := checkRules(opts); err != nil {
 		return nil, none, false, err
@@ -509,11 +544,29 @@ func (d *Decision) prepare(ctx context.Context, opts RulesOptions) (Cluster, log
 	if err != nil {
 		return nil, none, false, err
 	}
-	key, err := d.readKey(ctx, cl)
+	apps := oidcApps(opts.OIDC)
+	var sec loginSecret
+	if ensure {
+		sec, _, err = d.ensureKey(ctx, cl, false, len(apps) > 0)
+		if err != nil {
+			return nil, none, false, err
+		}
+		// The clients, when this run is allowed to write them: the seedbox's
+		// namespace exists by the time a rule write happens, and the digest
+		// this writes is what the configuration below is rendered from.
+		if _, err := d.EnsureClients(ctx, opts.Namespace, apps); err != nil {
+			return nil, none, false, err
+		}
+		sec, err = d.readSecret(ctx, cl)
+	} else {
+		sec, err = d.readSecret(ctx, cl)
+	}
 	if err != nil {
 		return nil, none, false, err
 	}
-	config, assets, err := renderLogin(opts.Values, opts.Host, opts.Login, key, opts.Hosted)
+	key := sec.key
+	config, assets, err := renderLogin(opts.Values, opts.Host, opts.Login, key, opts.Hosted,
+		oidcClients(opts.Host, opts.Namespace, opts.Login, apps, sec.digests))
 	if err != nil {
 		return nil, none, false, err
 	}
@@ -521,7 +574,7 @@ func (d *Decision) prepare(ctx context.Context, opts RulesOptions) (Cluster, log
 	if err != nil {
 		return nil, none, false, err
 	}
-	return cl, loginFiles{config: config, assets: assets}, changed, nil
+	return cl, loginFiles{config: config, assets: assets, provider: len(sec.digests) > 0}, changed, nil
 }
 
 // manifestsFor is the login's objects for one host, from the constants this
@@ -529,7 +582,7 @@ func (d *Decision) prepare(ctx context.Context, opts RulesOptions) (Cluster, log
 // every later rule write apply the same set: a second rendering would let an
 // apply downgrade the Deployment (or drop the NetworkPolicy that keeps every
 // pod but the Gateway off the login).
-func manifestsFor(host, image, configHash string) authelia.Manifests {
+func manifestsFor(host, image, configHash string, oidc bool) authelia.Manifests {
 	return authelia.Manifests{
 		Namespace:        Namespace,
 		GatewayNamespace: platform.GatewayNamespace,
@@ -541,7 +594,11 @@ func manifestsFor(host, image, configHash string) authelia.Manifests {
 		Host:           host,
 		Claim:          authelia.ClaimName,
 		ConfigMap:      authelia.ConfigMapName,
+		Secret:         authelia.SecretName,
 		Image:          image,
+		OIDC:           oidc,
+		OIDCFile:       authelia.OIDCFile,
+		OIDCMount:      authelia.OIDCMountPath,
 		UID:            authelia.UID,
 		GID:            authelia.GID,
 		ConfigHash:     configHash,
@@ -553,6 +610,11 @@ func manifestsFor(host, image, configHash string) authelia.Manifests {
 type loginFiles struct {
 	config []byte
 	assets authelia.Assets
+	// provider says the login's Secret holds at least one client, which is
+	// what makes Authelia accept an identity_providers.oidc block at all: it
+	// refuses one with no clients, and a first install has none until apply's
+	// anchor step writes them.
+	provider bool
 }
 
 // write applies a rendering that differs and waits for the pod that has to read
@@ -563,7 +625,7 @@ func (d *Decision) write(ctx context.Context, cl Cluster, opts RulesOptions, fil
 	if err := kube.Preflight(ctx, cl, rulesAccess()); err != nil {
 		return false, fmt.Errorf("login: %w", err)
 	}
-	manifests, err := authelia.RenderManifests(manifestsFor(opts.Host, opts.Image, authelia.ConfigHash(files.config)))
+	manifests, err := authelia.RenderManifests(manifestsFor(opts.Host, opts.Image, authelia.ConfigHash(files.config), files.provider))
 	if err != nil {
 		return false, err
 	}
@@ -606,6 +668,9 @@ func checkRules(opts RulesOptions) error {
 	if !strings.Contains(opts.Image, "@sha256:") {
 		return fmt.Errorf("login: image %q is not pinned by digest", opts.Image)
 	}
+	if len(opts.OIDC) > 0 && strings.TrimSpace(opts.Namespace) == "" {
+		return errors.New("login: an OIDC client's id is <namespace>-<app>, so a box with one needs its namespace")
+	}
 	return nil
 }
 
@@ -618,6 +683,9 @@ func (d *Decision) check(opts Options) error {
 		return errors.New("login: no storage client")
 	case d.Host == nil:
 		return errors.New("login: no host")
+	}
+	if len(opts.OIDC) > 0 && strings.TrimSpace(opts.Namespace) == "" {
+		return errors.New("login: an OIDC client's id is <namespace>-<app>, so a box with one needs its namespace")
 	}
 	if strings.TrimSpace(opts.Host) == "" {
 		return errors.New("login: no host name")
@@ -654,75 +722,6 @@ func accessList() []kube.Access {
 		{Verb: kube.VerbApply, Group: GatewayGroup, Resource: "httproutes", Namespace: Namespace, What: "the portal's HTTPRoute in " + Namespace},
 		{Verb: kube.VerbApply, Group: PolicyGroup, Resource: "securitypolicies", Namespace: platform.GatewayNamespace, What: "SecurityPolicies in " + platform.GatewayNamespace},
 	}
-}
-
-// encryptionKey reads s5n-authelia, creating it once if it is absent.
-func (d *Decision) encryptionKey(ctx context.Context, cl Cluster) (key string, kept bool, err error) {
-	doc, found, err := cl.Get(ctx, CoreGroup, "v1", "Secret", Namespace, authelia.SecretName)
-	if err != nil {
-		return "", false, err
-	}
-	if found {
-		key, err := secretKey(doc)
-		if err != nil {
-			return "", false, err
-		}
-		return key, true, nil
-	}
-	buf := make([]byte, 32)
-	if _, err := rand.Read(buf); err != nil {
-		return "", false, fmt.Errorf("generate the storage encryption key: %w", err)
-	}
-	key = hex.EncodeToString(buf)
-	secret := map[string]any{
-		"apiVersion": "v1",
-		"kind":       "Secret",
-		"metadata": map[string]any{
-			"name":      authelia.SecretName,
-			"namespace": Namespace,
-			"labels": map[string]any{
-				kube.PartOfLabel:    kube.PartOf,
-				kube.ManagedByLabel: kube.ManagedBy,
-			},
-		},
-		"type": "Opaque",
-		"data": map[string]any{
-			authelia.EncryptionKeySecretKey: base64.StdEncoding.EncodeToString([]byte(key)),
-		},
-	}
-	if err := cl.Create(ctx, secret); err != nil {
-		return "", false, fmt.Errorf("create Secret %s/%s: %w", Namespace, authelia.SecretName, err)
-	}
-	d.report().Line(fmt.Sprintf("created Secret %s/%s: its key must be backed up with the claim, and box never changes it", Namespace, authelia.SecretName))
-	return key, false, nil
-}
-
-// readKey is the login's storage encryption key, read and never created: a rule
-// write is not an install, and a box with no login has nothing to write a rule
-// into.
-func (d *Decision) readKey(ctx context.Context, cl Cluster) (string, error) {
-	doc, found, err := cl.Get(ctx, CoreGroup, "v1", "Secret", Namespace, authelia.SecretName)
-	if err != nil {
-		return "", err
-	}
-	if !found {
-		return "", fmt.Errorf("the login is not installed (%s/%s is missing): run `box init` as root, which installs it and writes its rules", Namespace, authelia.SecretName)
-	}
-	return secretKey(doc)
-}
-
-// secretKey is the key out of the Secret's document. The sentence it fails with
-// is the one both callers print: the key is never rotated, so a Secret without
-// a usable one is a restore, not a re-run.
-func secretKey(doc map[string]any) (string, error) {
-	raw, _, _ := unstructured.NestedStringMap(doc, "data")
-	encoded, ok := raw[authelia.EncryptionKeySecretKey]
-	key, decodeErr := base64.StdEncoding.DecodeString(encoded)
-	if !ok || decodeErr != nil || len(key) < 20 {
-		return "", fmt.Errorf("secret %s/%s exists but has no usable %s: box never rotates it, so restore the key from your backup, or delete the Secret and the claim together and start the login again",
-			Namespace, authelia.SecretName, authelia.EncryptionKeySecretKey)
-	}
-	return string(key), nil
 }
 
 // MayWrite reports whether this identity may write the login at all.
@@ -836,7 +835,7 @@ func anyMap(in map[string]string) map[string]any {
 // mark and favicon mounted beside it. It is one function because the same
 // inputs must produce the same files -- a rule or a theme that depended on
 // which command wrote it would be a second login.
-func renderLogin(values map[string]any, host, name, key string, hosted []string) ([]byte, authelia.Assets, error) {
+func renderLogin(values map[string]any, host, name, key string, hosted []string, oidc *authelia.OIDC) ([]byte, authelia.Assets, error) {
 	lt, err := authelia.ResolveTheme(themeName(values))
 	if err != nil {
 		return nil, authelia.Assets{}, err
@@ -848,6 +847,7 @@ func renderLogin(values map[string]any, host, name, key string, hosted []string)
 		Theme:         lt.Base,
 		AssetPath:     authelia.AssetPath,
 		Rules:         authelia.Rules(host, name, authelia.InstancesFromValues(values), hosted),
+		OIDC:          oidc,
 	})
 	if err != nil {
 		return nil, authelia.Assets{}, err

@@ -2,7 +2,10 @@ package main
 
 import (
 	"context"
+	"fmt"
 
+	"github.com/swizzin/s5n/internal/authelia"
+	"github.com/swizzin/s5n/internal/login"
 	"github.com/swizzin/s5n/internal/platform"
 	"github.com/swizzin/s5n/internal/release"
 	"github.com/swizzin/s5n/internal/say"
@@ -43,15 +46,51 @@ func (a hostCAStep) decision(plan release.AnchorPlan) *platform.HostCADecision {
 	}
 }
 
-// Plan is the read apply makes with its diff.
-func (a hostCAStep) Plan(ctx context.Context, plan release.AnchorPlan) (string, error) {
-	return a.decision(plan).Plan(ctx)
+// login is the cluster client the OIDC clients' Secrets are written with: the
+// same kubeconfig, in the seedbox's namespace.
+func (a hostCAStep) login() *login.Decision {
+	return &login.Decision{
+		Open: func() (login.Cluster, error) { return platform.NewCluster(a.kubeconfig) },
+		Say:  a.out,
+	}
 }
 
-// Ensure writes or removes the anchor, after the confirm and before the
-// release moves.
+// Plan is the read apply makes with its diff: the anchor, and the OIDC clients'
+// Secrets this run would write beside it. Both live in the seedbox's namespace,
+// which is why they are one step.
+func (a hostCAStep) Plan(ctx context.Context, plan release.AnchorPlan) (string, error) {
+	line, err := a.decision(plan).Plan(ctx)
+	if err != nil {
+		return "", err
+	}
+	missing, err := a.login().PlanClients(ctx, plan.Namespace, plan.OIDC)
+	if err != nil {
+		return "", err
+	}
+	for _, app := range missing {
+		more := fmt.Sprintf("write Secret %s/%s", plan.Namespace, authelia.OIDCClientSecretName(app))
+		if line == "" {
+			line = more
+		} else {
+			line += "; " + more
+		}
+	}
+	return line, nil
+}
+
+// Ensure writes or removes the anchor, then the OIDC clients' Secrets, after
+// the confirm and before the release moves. The second write is why this is the
+// step for it: the seedbox's namespace exists by now (apply created it), and an
+// app whose client secret is missing does not start -- so a failure here stops
+// the run before Helm, with one sentence, rather than through a crash-loop.
 func (a hostCAStep) Ensure(ctx context.Context, plan release.AnchorPlan) error {
-	_, err := a.decision(plan).Apply(ctx)
+	if _, err := a.decision(plan).Apply(ctx); err != nil {
+		return err
+	}
+	if len(plan.OIDC) == 0 {
+		return nil
+	}
+	_, err := a.login().EnsureClients(ctx, plan.Namespace, plan.OIDC)
 	return err
 }
 

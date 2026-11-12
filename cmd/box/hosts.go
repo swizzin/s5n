@@ -111,12 +111,14 @@ func (a applyHosts) rules(cl login.Cluster, plan release.HostPlan) setup.RuleFun
 			Say:  a.out,
 		}
 		_, err := d.EnsureRules(ctx, login.RulesOptions{
-			Host:   plan.Domain,
-			Login:  plan.Rule.Login,
-			Hosts:  names,
-			Image:  plan.Rule.Image,
-			Values: plan.Rule.Values,
-			Hosted: plan.Rule.Hosted,
+			Host:      plan.Domain,
+			Login:     plan.Rule.Login,
+			Hosts:     names,
+			Image:     plan.Rule.Image,
+			Values:    plan.Rule.Values,
+			Hosted:    plan.Rule.Hosted,
+			Namespace: plan.Rule.Namespace,
+			OIDC:      plan.Rule.OIDC,
 		})
 		if err != nil {
 			return fmt.Errorf("the login's rule for %s: %w", strings.Join(names, ", "), err)
@@ -189,11 +191,13 @@ func (a applyHosts) loginStep(ctx context.Context, plan release.HostPlan) (*logi
 // rule write prints.
 func loginRules(plan release.HostPlan) login.RulesOptions {
 	return login.RulesOptions{
-		Host:   plan.Domain,
-		Login:  plan.Rule.Login,
-		Hosts:  []string{plan.Domain},
-		Image:  plan.Rule.Image,
-		Values: plan.Rule.Values,
-		Hosted: plan.Rule.Hosted,
+		Host:      plan.Domain,
+		Login:     plan.Rule.Login,
+		Hosts:     []string{plan.Domain},
+		Image:     plan.Rule.Image,
+		Values:    plan.Rule.Values,
+		Hosted:    plan.Rule.Hosted,
+		Namespace: plan.Rule.Namespace,
+		OIDC:      plan.Rule.OIDC,
 	}
 }
