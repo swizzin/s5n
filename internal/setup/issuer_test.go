@@ -82,7 +82,7 @@ func TestChooseIssuerResolves(t *testing.T) {
 				addrs: map[string][]string{"box.example.test": tc.addrs},
 				errs:  map[string]error{"box.example.test": tc.err},
 			}
-			issuer, line := chooseIssuer(context.Background(), r, "box.example.test", "")
+			issuer, line := ChooseIssuer(context.Background(), r, "box.example.test", "")
 			if issuer != tc.issuer {
 				t.Fatalf("issuer = %q (%s), want %q", issuer, line, tc.issuer)
 			}
@@ -99,18 +99,18 @@ func TestChooseIssuerResolves(t *testing.T) {
 func TestChooseIssuerForced(t *testing.T) {
 	r := stubResolver{addrs: map[string][]string{"box.example.test": {"203.0.113.10"}}}
 
-	issuer, line := chooseIssuer(context.Background(), r, "box.example.test", IssuerSelfSigned)
+	issuer, line := ChooseIssuer(context.Background(), r, "box.example.test", IssuerSelfSigned)
 	if issuer != IssuerSelfSigned || !strings.Contains(line, "tls.issuer=selfsigned forces") {
 		t.Fatalf("forced selfsigned = %q (%s)", issuer, line)
 	}
-	issuer, line = chooseIssuer(context.Background(), r, "lan.example.test", IssuerLetsEncrypt)
+	issuer, line = ChooseIssuer(context.Background(), r, "lan.example.test", IssuerLetsEncrypt)
 	if issuer != IssuerLetsEncrypt || !strings.Contains(line, "tls.issuer=letsencrypt forces") {
 		t.Fatalf("forced letsencrypt = %q (%s)", issuer, line)
 	}
 }
 
 func TestChooseIssuerWithoutAResolver(t *testing.T) {
-	issuer, line := chooseIssuer(context.Background(), nil, "box.example.test", "")
+	issuer, line := ChooseIssuer(context.Background(), nil, "box.example.test", "")
 	if issuer != IssuerSelfSigned || !strings.Contains(line, "no DNS resolver") {
 		t.Fatalf("issuer = %q (%s)", issuer, line)
 	}
@@ -137,7 +137,7 @@ func TestFileResolverReadsTheAnswerEveryTime(t *testing.T) {
 	if err := os.WriteFile(path, []byte("198.51.100.4 box.example.test\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if issuer, line := chooseIssuer(context.Background(), r, "seerr.box.example.test", ""); issuer != IssuerSelfSigned || !strings.Contains(line, "does not resolve") {
+	if issuer, line := ChooseIssuer(context.Background(), r, "seerr.box.example.test", ""); issuer != IssuerSelfSigned || !strings.Contains(line, "does not resolve") {
 		t.Fatalf("a removed record still resolved: %q (%s)", issuer, line)
 	}
 }

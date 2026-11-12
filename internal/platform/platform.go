@@ -214,6 +214,10 @@ type Cluster interface {
 	Apply(ctx context.Context, docs []map[string]any) error
 	// Await blocks until the object is ready, or the bound expires.
 	Await(ctx context.Context, w Wait) error
+	// CertificateReady answers a Certificate's Ready condition, with
+	// cert-manager's reason when it is not. Bootstrap polls it for the box
+	// root; the per-host step reads it after a wait ran out.
+	CertificateReady(ctx context.Context, namespace, name string) (bool, string, error)
 }
 
 // Releases is the Helm side.
@@ -278,6 +282,10 @@ type Decision struct {
 	// WebhookTimeout bounds how long cert-manager's webhook may refuse the
 	// first ClusterIssuer apply. Zero means two minutes.
 	WebhookTimeout time.Duration
+	// RootTimeout bounds the wait for the box root Certificate to be Ready
+	// before the CA issuer that signs with it is applied. Zero means
+	// RootTimeout (two minutes).
+	RootTimeout time.Duration
 	// Poll is how often a refused pool is retried. Zero means two seconds.
 	Poll time.Duration
 }
@@ -726,19 +734,98 @@ func (d *Decision) applyPool(ctx context.Context, cl Cluster) error {
 
 func (d *Decision) applyIssuers(ctx context.Context, cl Cluster, docs []map[string]any) error {
 	r := d.report()
-	step := r.Start(say.Op{Label: "applying the cert-manager ClusterIssuers"})
+	step := r.Start(say.Op{Label: "applying the cert-manager ClusterIssuers and the box root"})
 	wait := d.WebhookTimeout
 	if wait <= 0 {
 		wait = 2 * time.Minute
 	}
-	if err := d.retryApply(ctx, cl, docs, wait); err != nil {
+	waves, err := splitIssuers(docs)
+	if err != nil {
+		step.Failed(err)
+		return err
+	}
+	if err := d.retryApply(ctx, cl, waves.beforeRoot, wait); err != nil {
 		step.Failed(err)
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
 		return fmt.Errorf("cert-manager's webhook refused its ClusterIssuers for %s: %w (cert-manager is installed; fix the cause and run `box bootstrap` again)", wait, err)
 	}
-	step.Done(fmt.Sprintf("applied ClusterIssuers %s and %s", LetsEncryptIssuer, SelfSignedIssuer))
+	// The root's Certificate is issued by the bootstrap issuer applied above,
+	// and the CA issuer below signs with its Secret. Applying the CA issuer
+	// first would leave it pointing at a Secret that does not exist yet, and
+	// every host's Certificate would wait on a failure that names the Secret
+	// rather than the ordering. So: root Ready, then the issuer that uses it.
+	if err := d.awaitRoot(ctx, cl); err != nil {
+		step.Failed(err)
+		return err
+	}
+	if err := d.retryApply(ctx, cl, waves.ca, wait); err != nil {
+		step.Failed(err)
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		return fmt.Errorf("cert-manager's webhook refused its ClusterIssuers for %s: %w (cert-manager is installed; fix the cause and run `box bootstrap` again)", wait, err)
+	}
+	step.Done(fmt.Sprintf("applied ClusterIssuers %s and %s, and the root they sign with", LetsEncryptIssuer, SelfSignedIssuer))
+	return nil
+}
+
+// RootTimeout is how long the box root Certificate gets to be Ready before
+// bootstrap stops. It is a local signing operation, not an ACME exchange, so
+// the bound is a webhook and a controller catching up, not DNS.
+const RootTimeout = 2 * time.Minute
+
+// awaitRoot waits for the box root Certificate, in the shape every other wait
+// in this package has: poll to the deadline, then branch on what the last
+// attempt said. A Certificate that is not Ready is cert-manager's reason to
+// report -- the root is the one thing a self-signed box can never re-derive
+// from the internet, so guessing at its absence wastes a run that could have
+// said what is wrong.
+func (d *Decision) awaitRoot(ctx context.Context, cl Cluster) error {
+	timeout := d.RootTimeout
+	if timeout <= 0 {
+		timeout = RootTimeout
+	}
+	poll := d.Poll
+	if poll <= 0 {
+		poll = 2 * time.Second
+	}
+	r := d.report()
+	step := r.Start(say.Op{
+		Label:  "waiting for Certificate " + CertManagerNamespace + "/" + RootCertificateName + " to be Ready",
+		Plain:  fmt.Sprintf("waiting up to %s for Certificate %s/%s to be Ready", timeout, CertManagerNamespace, RootCertificateName),
+		Budget: timeout,
+	})
+	reason := ""
+	waited, err := wait.Until(ctx, timeout, poll, func(ctx context.Context) (bool, error) {
+		ready, why, err := cl.CertificateReady(ctx, CertManagerNamespace, RootCertificateName)
+		if err != nil {
+			// A read that fails is not a Certificate that is slow: stop and
+			// say so rather than spending the budget on a broken client.
+			return false, err
+		}
+		if !ready {
+			reason = why
+		}
+		return ready, nil
+	})
+	if err != nil {
+		step.Failed(err)
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		return fmt.Errorf("the box root Certificate %s/%s: %w", CertManagerNamespace, RootCertificateName, err)
+	}
+	if !waited.Done {
+		step.Failed(ErrNotReady)
+		if reason == "" {
+			reason = "cert-manager has not marked it Ready"
+		}
+		return fmt.Errorf("the box root Certificate %s/%s is not Ready after %s (%s): every self-signed host's certificate is issued by it, so box stopped before the CA issuer; run `box bootstrap` again once cert-manager has issued it",
+			CertManagerNamespace, RootCertificateName, timeout, reason)
+	}
+	step.Done(fmt.Sprintf("Certificate %s/%s: Ready", CertManagerNamespace, RootCertificateName))
 	return nil
 }
 

@@ -2,18 +2,21 @@ package platform
 
 import (
 	"context"
+	"encoding/base64"
 	"reflect"
 	"regexp"
 	"strings"
 	"testing"
 	"time"
 
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+
 	"github.com/swizzin/s5n/internal/kube"
 )
 
 // fakeCertCluster is the per-host flow's cluster: one Certificate's status,
-// whether the CRD is served, and a record of every write and its manager in
-// order.
+// whether the CRD is served, the objects box reads by name, and a record of
+// every write and its manager in order.
 type fakeCertCluster struct {
 	ready    bool
 	reason   string
@@ -23,6 +26,24 @@ type fakeCertCluster struct {
 	managers []string
 	allowed  []Access
 	reads    int
+	// objects are what Get answers, by "kind namespace/name".
+	objects map[string]map[string]any
+	// statusWrites records every status update, and onStatus lets a test
+	// answer one the way cert-manager would: with a new Secret.
+	statusWrites []map[string]any
+	onStatus     func(*fakeCertCluster)
+}
+
+func objectKey(kind, namespace, name string) string {
+	return kind + " " + namespace + "/" + name
+}
+
+// put records one object for Get.
+func (f *fakeCertCluster) put(kind, namespace, name string, obj map[string]any) {
+	if f.objects == nil {
+		f.objects = map[string]map[string]any{}
+	}
+	f.objects[objectKey(kind, namespace, name)] = obj
 }
 
 func (f *fakeCertCluster) Allowed(_ context.Context, a Access) (bool, error) {
@@ -69,6 +90,20 @@ func (f *fakeCertCluster) CertificateReady(context.Context, string, string) (boo
 
 func (f *fakeCertCluster) Serves(context.Context, string, string, string) (bool, error) {
 	return f.serves, nil
+}
+
+func (f *fakeCertCluster) Get(_ context.Context, _, _, kind, namespace, name string) (map[string]any, bool, error) {
+	obj, ok := f.objects[objectKey(kind, namespace, name)]
+	return obj, ok, nil
+}
+
+func (f *fakeCertCluster) UpdateStatus(_ context.Context, _, _, kind, namespace string, obj map[string]any) error {
+	f.statusWrites = append(f.statusWrites, obj)
+	f.put(kind, namespace, obj["metadata"].(map[string]any)["name"].(string), obj)
+	if f.onStatus != nil {
+		f.onStatus(f)
+	}
+	return nil
 }
 
 func TestCertificateNames(t *testing.T) {
@@ -701,5 +736,96 @@ func TestHostNamesAreValidObjectNames(t *testing.T) {
 		if !valid.MatchString(label) || len(label) > maxDNSLabel {
 			t.Errorf("dnsLabel(%q) = %q, not a valid object name of at most %d characters", host, label, maxDNSLabel)
 		}
+	}
+}
+
+// secretDoc is a Secret's object as the dynamic client returns it: base64 data.
+func secretDoc(t *testing.T, name, namespace string, kv ...any) map[string]any {
+	t.Helper()
+	data := map[string]any{}
+	for i := 0; i+1 < len(kv); i += 2 {
+		key, _ := kv[i].(string)
+		value, _ := kv[i+1].([]byte)
+		data[key] = base64.StdEncoding.EncodeToString(value)
+	}
+	return map[string]any{
+		"metadata": map[string]any{"name": name, "namespace": namespace},
+		"data":     data,
+	}
+}
+
+// A self-signed host certificate from 0.3.0 chains to itself. Changing the
+// issuer's spec does not make cert-manager re-issue it, so box asks -- with the
+// Issuing condition `cmctl renew` sets -- and reports the new certificate.
+func TestSelfSignedCertificateFollowsTheRoot(t *testing.T) {
+	root, _ := testCA(t, "s5n box root")
+	old, _ := testCA(t, "a bare self-signed leaf")
+	name := CertificateName("box.example.test")
+	cl := &fakeCertCluster{ready: true, serves: true}
+	cl.put("Secret", CertManagerNamespace, RootSecretName, secretDoc(t, RootSecretName, CertManagerNamespace, "tls.crt", root))
+	cl.put("Secret", GatewayNamespace, name, secretDoc(t, name, GatewayNamespace, "ca.crt", old, "tls.crt", []byte("old-leaf")))
+	cl.put("Certificate", GatewayNamespace, name, map[string]any{
+		"metadata": map[string]any{"name": name, "namespace": GatewayNamespace, "generation": int64(7)},
+	})
+	// cert-manager answers the request the way it would: a new leaf, signed by
+	// the root.
+	cl.onStatus = func(f *fakeCertCluster) {
+		f.put("Secret", GatewayNamespace, name, secretDoc(t, name, GatewayNamespace, "ca.crt", root, "tls.crt", []byte("new-leaf")))
+	}
+
+	d := &CertificateDecision{
+		Host:    "box.example.test",
+		Issuer:  SelfSignedIssuer,
+		Open:    func() (CertificateCluster, error) { return cl, nil },
+		Timeout: time.Second,
+	}
+	res, err := d.Apply(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !res.Reissued {
+		t.Fatalf("result = %+v, want a re-issue", res)
+	}
+	if len(cl.statusWrites) != 1 {
+		t.Fatalf("status writes = %d, want one Issuing condition", len(cl.statusWrites))
+	}
+	conditions, _, _ := unstructured.NestedSlice(cl.statusWrites[0], "status", "conditions")
+	if len(conditions) != 1 {
+		t.Fatalf("conditions = %v", conditions)
+	}
+	cond, _ := conditions[0].(map[string]any)
+	if cond["type"] != "Issuing" || cond["status"] != "True" {
+		t.Fatalf("condition = %v, want Issuing=True", cond)
+	}
+	if cond["reason"] != "ManuallyTriggered" {
+		t.Fatalf("reason = %v, want the reason cmctl renew sets", cond["reason"])
+	}
+	if cond["observedGeneration"] != int64(7) {
+		t.Fatalf("observedGeneration = %v, want the Certificate's generation", cond["observedGeneration"])
+	}
+	if !res.HTTPS || !res.Redirect {
+		t.Fatalf("the host was not served after the re-issue: %+v", res)
+	}
+}
+
+// The check is for the self-signed issuer only: an ACME certificate has no
+// ca.crt and nothing in the box's namespace to chain to.
+func TestLetsEncryptCertificateIsNotReissued(t *testing.T) {
+	name := CertificateName("box.example.test")
+	cl := &fakeCertCluster{ready: true, serves: true}
+	cl.put("Secret", GatewayNamespace, name, secretDoc(t, name, GatewayNamespace, "tls.crt", []byte("leaf")))
+
+	d := &CertificateDecision{
+		Host:    "box.example.test",
+		Issuer:  LetsEncryptIssuer,
+		Open:    func() (CertificateCluster, error) { return cl, nil },
+		Timeout: time.Second,
+	}
+	res, err := d.Apply(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Reissued || len(cl.statusWrites) != 0 {
+		t.Fatalf("an ACME certificate was asked to re-issue: %+v %v", res, cl.statusWrites)
 	}
 }

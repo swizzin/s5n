@@ -264,12 +264,12 @@ func runBootstrap(ctx context.Context, args []string) {
 		fmt.Fprintf(os.Stderr, "box: %v\n", err)
 		os.Exit(2)
 	}
-	// --dns-file and --paths-in-node are init's dev switches and come out the
-	// same way: bootstrap runs init in this process, so it accepts them or
-	// the e2e's bootstrap line would be the one place they fail. The DNS
+	// --dns-file, --ca-file and --paths-in-node are init's dev switches and come
+	// out the same way: bootstrap runs init in this process, so it accepts them
+	// or the e2e's bootstrap line would be the one place they fail. The DNS
 	// override exists because an e2e cannot write the test host's /etc/hosts,
-	// and moving a name from "no record" to "a public one" between two runs
-	// is exactly what the certificate card has to prove.
+	// and moving a name from "no record" to "a public one" between two runs is
+	// exactly what the certificate card has to prove.
 	dev, args, err := takeInitDevFlags(args)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "box: %v\n", err)
@@ -520,6 +520,20 @@ func runApply(ctx context.Context, args []string) {
 		fmt.Fprintf(os.Stderr, "box: %v\n", err)
 		os.Exit(2)
 	}
+	// --dns-file is the resolver override for the per-host step: apply
+	// DNS-checks an app host's name against the box's domain before it writes
+	// that host's listener and Certificate, and the e2e's names answer only in
+	// CoreDNS. The anchor takes no DNS answer at all -- it follows the
+	// Certificate the host is served with.
+	dnsFile, args, err := takeDevFlag(args, "dns-file")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "box: %v\n", err)
+		os.Exit(2)
+	}
+	var resolver setup.Resolver = setup.NetResolver{}
+	if dnsFile != "" {
+		resolver = setup.FileResolver{Path: dnsFile}
+	}
 	fs := flag.NewFlagSet("apply", flag.ExitOnError)
 	o := addApplyFlags(fs)
 	if err := fs.Parse(args); err != nil {
@@ -562,7 +576,10 @@ func runApply(ctx context.Context, args []string) {
 	// of its own gets that host's listener and Certificate before the release
 	// moves, so no apply leaves the app unreachable (docs/box.md,
 	// "No run leaves an app host without its listener").
-	opts.Hosts = applyHosts{kubeconfig: kc, out: out, resolver: setup.NetResolver{}}
+	opts.Hosts = applyHosts{kubeconfig: kc, out: out, resolver: resolver}
+	// No host-CA step here: the anchor follows the Certificate the box's host
+	// is served with, and this run neither writes that Certificate nor may read
+	// cert-manager's namespace. `box init` is the run that keeps it right.
 	res, err := app.Apply(ctx, opts)
 	if err != nil {
 		if errors.Is(err, release.ErrCancelled) {
@@ -627,6 +644,12 @@ type initFlags struct {
 	// hosts-style file init resolves through instead of the system resolver.
 	// Empty means the real one.
 	dnsFile string
+	// caFile is the development-only host-CA source (--ca-file): a PEM file
+	// the anchor ConfigMap is written from instead of the box root's Secret.
+	// An ACME-issued certificate has no ca.crt to copy, so an e2e that proves
+	// the anchor with Pebble has to hand box the root it would otherwise read.
+	// Empty means the real source.
+	caFile string
 	// pathsInNode is the development-only storage switch (--paths-in-node):
 	// the paths are inside a test node (kind), not on this host, so init
 	// neither reports nor creates them and the apply it hands over to skips
@@ -668,6 +691,7 @@ func addInitFlags(fs *flag.FlagSet) *initFlags {
 func (o *initFlags) takeDev(d initDevFlags) {
 	o.dnsFile = d.dnsFile
 	o.pathsInNode = d.pathsInNode
+	o.caFile = d.caFile
 }
 
 // run asks a seedbox's questions, writes its two files and hands over to apply.
@@ -755,6 +779,11 @@ func (o *initFlags) run(ctx context.Context, kubeconfig string, yes, plain bool,
 				AfterConfirm:  afterConfirm(req),
 				TransientKeys: req.TransientKeys,
 				BoxValues:     boxValues(kc),
+				Anchor:        hostCA(kc, out, o.caFile),
+				// The issuer this run's per-host step writes the box's own
+				// Certificate with: the anchor follows it, and on a first init
+				// there is no Certificate in the cluster to read instead.
+				AnchorIssuer: req.Issuer,
 			})
 			return err
 		},
@@ -983,14 +1012,16 @@ func takePathsInNode(args []string) (set bool, rest []string, err error) {
 }
 
 // initDevFlags are init's development switches as the command line asked for
-// them: --dns-file's value and --paths-in-node's presence. They are fields on
-// initFlags, never registered with its FlagSet, because flag.PrintDefaults
-// lists every registered flag even with an empty usage and the usage an
-// operator reads must not offer a switch that only works against a test node.
-// bootstrap takes these two plus --acme-server; apply takes the second alone.
+// them: --dns-file's value, --ca-file's value and --paths-in-node's presence.
+// They are fields on initFlags, never registered with its FlagSet, because
+// flag.PrintDefaults lists every registered flag even with an empty usage and
+// the usage an operator reads must not offer a switch that only works against a
+// test node. bootstrap takes these three plus --acme-server; apply takes
+// --dns-file and --paths-in-node, because its per-host step resolves names too.
 type initDevFlags struct {
 	dnsFile     string
 	pathsInNode bool
+	caFile      string
 }
 
 func takeInitDevFlags(args []string) (initDevFlags, []string, error) {
@@ -1000,6 +1031,9 @@ func takeInitDevFlags(args []string) (initDevFlags, []string, error) {
 		return initDevFlags{}, nil, err
 	}
 	if d.pathsInNode, args, err = takePathsInNode(args); err != nil {
+		return initDevFlags{}, nil, err
+	}
+	if d.caFile, args, err = takeDevFlag(args, "ca-file"); err != nil {
 		return initDevFlags{}, nil, err
 	}
 	return d, args, nil

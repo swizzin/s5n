@@ -137,10 +137,15 @@ func resolveHost(ctx context.Context, resolver Resolver, host string) hostAnswer
 	return hostAnswer{addrs: addrs, err: err}
 }
 
-// chooseIssuer is init's answer for one host name: the forced value when
+// ChooseIssuer is init's answer for one host name: the forced value when
 // tls.issuer names one, otherwise what the resolution says. It returns the
 // issuer and the sentence init prints, so the operator sees why.
-func chooseIssuer(ctx context.Context, resolver Resolver, host, forced string) (issuer, line string) {
+//
+// It is exported for root's host-CA step, which is not init but has to agree
+// with it: the anchor a self-signed box carries into its namespace is the
+// certificate of the issuer this returns for the box's own name, and a second
+// implementation of the rule would be a second answer.
+func ChooseIssuer(ctx context.Context, resolver Resolver, host, forced string) (issuer, line string) {
 	return issuerFor(host, resolveHost(ctx, resolver, host), forced)
 }
 

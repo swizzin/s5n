@@ -72,6 +72,14 @@ type fakeCluster struct {
 	allowed       []Access
 	applyErrs     []error
 	tr            *trace
+	// certNotReady is how many Certificate reads still answer "not ready"
+	// before the object is Ready: bootstrap's root is issued a moment after the
+	// webhook that accepts the issuer which signs it.
+	certNotReady int
+	// certReason is what a not-ready Certificate says, and certReads counts the
+	// polls so a test can prove the wait happened rather than fell through.
+	certReason string
+	certReads  int
 }
 
 func (f *fakeCluster) Allowed(_ context.Context, a Access) (bool, error) {
@@ -107,6 +115,16 @@ func (f *fakeCluster) Await(_ context.Context, w Wait) error {
 	f.awaits = append(f.awaits, w)
 	f.tr.add("await:" + w.String())
 	return nil
+}
+
+func (f *fakeCluster) CertificateReady(_ context.Context, _, _ string) (bool, string, error) {
+	f.tr.add("certificate-ready")
+	f.certReads++
+	if f.certNotReady > 0 {
+		f.certNotReady--
+		return false, f.certReason, nil
+	}
+	return true, "", nil
 }
 
 type fakeConfirm struct {
@@ -620,8 +638,8 @@ func TestApplyInstallsInOrder(t *testing.T) {
 		f.rel.installed[2].Name != MetalLBRelease || f.rel.installed[2].Version != pins.MetalLB {
 		t.Fatalf("releases = %+v", f.rel.installed)
 	}
-	if len(f.cl.writes) != 4 {
-		t.Fatalf("applies = %d, want pool, gateway, issuers, policy", len(f.cl.writes))
+	if len(f.cl.writes) != 5 {
+		t.Fatalf("applies = %d, want pool, gateway, the root's wave, the CA issuer, policy", len(f.cl.writes))
 	}
 	if kind, ns, name := objectMeta(f.cl.writes[0][0]); kind != "IPAddressPool" || ns != MetalLBNamespace || name != MetalLBPoolName {
 		t.Fatalf("first apply is %s %s/%s, want the MetalLB pool", kind, ns, name)
@@ -641,8 +659,16 @@ func TestApplyInstallsInOrder(t *testing.T) {
 	if kind, _, name := objectMeta(f.cl.writes[2][0]); kind != "ClusterIssuer" || name != LetsEncryptIssuer {
 		t.Fatalf("third apply starts with %s %s, want the cert-manager issuers", kind, name)
 	}
-	if kind, _, _ := objectMeta(f.cl.writes[3][0]); kind != "Namespace" {
-		t.Fatalf("fourth apply starts with %s, want the policy's namespace", kind)
+	// The root's Certificate rides the same wave as the issuers that make it
+	// possible, and the CA issuer that signs with it is the wave after.
+	if kind, ns, name := objectMeta(f.cl.writes[2][2]); kind != "Certificate" || ns != CertManagerNamespace || name != RootCertificateName {
+		t.Fatalf("the root Certificate is %s %s/%s in the first issuer wave", kind, ns, name)
+	}
+	if kind, _, name := objectMeta(f.cl.writes[3][0]); kind != "ClusterIssuer" || name != SelfSignedIssuer {
+		t.Fatalf("fourth apply starts with %s %s, want the CA issuer after the root", kind, name)
+	}
+	if kind, _, _ := objectMeta(f.cl.writes[4][0]); kind != "Namespace" {
+		t.Fatalf("fifth apply starts with %s, want the policy's namespace", kind)
 	}
 
 	var waits []string
@@ -716,6 +742,8 @@ func TestApplySkipsMetalLBWhenTheGatewayGetsAnAddress(t *testing.T) {
 		"await:Deployment envoy-gateway-system/envoy-gateway",
 		"apply:Namespace",
 		"apply:ClusterIssuer",
+		"certificate-ready",
+		"apply:ClusterIssuer",
 		"address",
 		"address",
 		"reach",
@@ -747,12 +775,12 @@ func TestApplyInstallsMetalLBOnAddressNotAssigned(t *testing.T) {
 	if len(f.rel.installed) != 2 || f.rel.installed[1].Name != MetalLBRelease {
 		t.Fatalf("releases = %+v, want Envoy Gateway then MetalLB", f.rel.installed)
 	}
-	if len(f.cl.writes) != 4 {
-		t.Fatalf("applies = %d, want pool, gateway, issuers, policy", len(f.cl.writes))
+	if len(f.cl.writes) != 5 {
+		t.Fatalf("applies = %d, want pool, gateway, the root's wave, the CA issuer, policy", len(f.cl.writes))
 	}
 	// The Gateway and its issuers are applied before the question, so the
-	// pool is the third write, not the first.
-	if kind, _, name := objectMeta(f.cl.writes[2][0]); kind != "IPAddressPool" || name != MetalLBPoolName {
+	// pool is the fourth write, not the first.
+	if kind, _, name := objectMeta(f.cl.writes[3][0]); kind != "IPAddressPool" || name != MetalLBPoolName {
 		t.Fatalf("the pool was not applied after the Gateway: %s %s", kind, name)
 	}
 	got := f.tr.String()
@@ -761,6 +789,8 @@ func TestApplyInstallsMetalLBOnAddressNotAssigned(t *testing.T) {
 		"install:" + EnvoyGatewayRelease,
 		"await:Deployment envoy-gateway-system/envoy-gateway",
 		"apply:Namespace",
+		"apply:ClusterIssuer",
+		"certificate-ready",
 		"apply:ClusterIssuer",
 		"address",
 		"install:" + MetalLBRelease,
@@ -1045,8 +1075,8 @@ func TestApplyRetriesThePool(t *testing.T) {
 	if _, err := f.d.Apply(context.Background(), allInstall); err != nil {
 		t.Fatal(err)
 	}
-	if len(f.cl.writes) != 4 {
-		t.Fatalf("applies = %d, want the pool retried, then the gateway, issuers and policy", len(f.cl.writes))
+	if len(f.cl.writes) != 5 {
+		t.Fatalf("applies = %d, want the pool retried, then the gateway, the root's wave, the CA issuer and policy", len(f.cl.writes))
 	}
 	if !strings.Contains(f.log.String(), "applied IPAddressPool s5n-pool (192.0.2.10/32)") {
 		t.Fatalf("the pool was not reported: %q", f.log.String())
@@ -1187,23 +1217,24 @@ func TestApplyRefusesAForeignEnvoyBeforeTheConfirm(t *testing.T) {
 	}
 }
 
-// The embedded ClusterIssuers are root's contract: a production ACME issuer
-// that solves HTTP-01 through the s5n Gateway's port-80 listener, and a
-// self-signed issuer for everything that cannot be validated. There is no
-// ACME email: Let's Encrypt stopped sending expiry mail.
+// The embedded issuers are root's contract: a production ACME issuer that
+// solves HTTP-01 through the s5n Gateway's port-80 listener, a bootstrap issuer
+// that signs the box root, the root itself, and the CA issuer every host's
+// certificate names. There is no ACME email: Let's Encrypt stopped sending
+// expiry mail.
 func TestEmbeddedIssuers(t *testing.T) {
 	docs, err := issuerObjects("")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(docs) != 2 {
-		t.Fatalf("issuer manifest has %d documents, want two ClusterIssuers", len(docs))
+	if len(docs) != 4 {
+		t.Fatalf("issuer manifest has %d documents, want two ClusterIssuers, the root Certificate and the CA issuer", len(docs))
 	}
 	byName := map[string]map[string]any{}
 	for _, doc := range docs {
 		kind, _, name := objectMeta(doc)
-		if kind != "ClusterIssuer" {
-			t.Fatalf("%s %s is not a ClusterIssuer", kind, name)
+		if kind != "ClusterIssuer" && kind != "Certificate" {
+			t.Fatalf("%s %s is neither a ClusterIssuer nor a Certificate", kind, name)
 		}
 		byName[name] = doc
 	}
@@ -1238,11 +1269,64 @@ func TestEmbeddedIssuers(t *testing.T) {
 	if _, ok := ref["sectionName"]; ok {
 		t.Fatalf("the solver pins a listener section: %v", ref)
 	}
-	if byName[SelfSignedIssuer] == nil {
+
+	// The bootstrap issuer is the one object still allowed to be self-signed,
+	// and it signs only the root.
+	bootstrap := byName[BootstrapIssuer]
+	if bootstrap == nil {
+		t.Fatalf("no %s", BootstrapIssuer)
+	}
+	if _, ok := bootstrap["spec"].(map[string]any)["selfSigned"]; !ok {
+		t.Fatalf("%s is not self-signed: %v", BootstrapIssuer, bootstrap["spec"])
+	}
+
+	// The root is a CA Certificate in cert-manager -- the namespace a
+	// ClusterIssuer's ca.secretName is read from -- with a long life and a
+	// year's renewal margin, ECDSA P-256, and no key anywhere in this file.
+	root := byName[RootCertificateName]
+	if root == nil {
+		t.Fatalf("no %s", RootCertificateName)
+	}
+	if kind, ns, _ := objectMeta(root); kind != "Certificate" || ns != CertManagerNamespace {
+		t.Fatalf("the root is %s in %q, want a Certificate in %s", kind, ns, CertManagerNamespace)
+	}
+	spec, _ := root["spec"].(map[string]any)
+	if spec["isCA"] != true {
+		t.Fatalf("the root is not a CA: %v", spec)
+	}
+	if spec["secretName"] != RootSecretName {
+		t.Fatalf("the root's secretName = %v, want %s (the name the CA issuer reads)", spec["secretName"], RootSecretName)
+	}
+	if spec["duration"] != "87600h" || spec["renewBefore"] != "8760h" {
+		t.Fatalf("the root lives %v and renews %v before expiry, want ten years and one", spec["duration"], spec["renewBefore"])
+	}
+	key, _ := spec["privateKey"].(map[string]any)
+	if key["algorithm"] != "ECDSA" || key["size"] != float64(256) {
+		t.Fatalf("the root's key = %v, want ECDSA P-256", spec["privateKey"])
+	}
+	// A rotated root key would orphan every anchor copied into a seedbox
+	// namespace the moment the root renews.
+	if key["rotationPolicy"] != "Never" {
+		t.Fatalf("the root's key rotationPolicy = %v, want Never", key["rotationPolicy"])
+	}
+	issuerRef, _ := spec["issuerRef"].(map[string]any)
+	if issuerRef["name"] != BootstrapIssuer || issuerRef["kind"] != "ClusterIssuer" {
+		t.Fatalf("the root is signed by %v, want %s", issuerRef, BootstrapIssuer)
+	}
+
+	// And the issuer every host names is the CA over that root: this is the
+	// name 0.3.0 wrote on every Certificate, so it cannot be renamed.
+	ca := byName[SelfSignedIssuer]
+	if ca == nil {
 		t.Fatalf("no %s", SelfSignedIssuer)
 	}
-	if _, ok := byName[SelfSignedIssuer]["spec"].(map[string]any)["selfSigned"]; !ok {
-		t.Fatalf("%s is not self-signed: %v", SelfSignedIssuer, byName[SelfSignedIssuer]["spec"])
+	caSpec, _ := ca["spec"].(map[string]any)
+	if _, ok := caSpec["selfSigned"]; ok {
+		t.Fatalf("%s is still a bare self-signed issuer: %v", SelfSignedIssuer, caSpec)
+	}
+	caSpecs, _ := caSpec["ca"].(map[string]any)
+	if caSpecs["secretName"] != RootSecretName {
+		t.Fatalf("%s signs with %v, want the box root's Secret %s", SelfSignedIssuer, caSpec["ca"], RootSecretName)
 	}
 }
 
@@ -1284,8 +1368,8 @@ func TestApplyRetriesTheIssuers(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(f.cl.writes) != 4 {
-		t.Fatalf("applies = %d, want the issuers retried, then the policy", len(f.cl.writes))
+	if len(f.cl.writes) != 5 {
+		t.Fatalf("applies = %d, want the root's wave retried, the CA issuer, the gateway and pool, and the policy", len(f.cl.writes))
 	}
 	if !strings.Contains(f.log.String(), "applied ClusterIssuers "+LetsEncryptIssuer) {
 		t.Fatalf("the issuers were not reported: %q", f.log.String())
@@ -1298,5 +1382,62 @@ func TestApplyRetriesTheIssuers(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("the issuers are not in the result: %+v", res.Installed)
+	}
+}
+
+// The root Certificate is issued a moment after the issuer that signs it is
+// accepted, and the CA issuer that signs every host's certificate with it is
+// applied only once it is Ready: an issuer pointing at a Secret that is not
+// there yet would make every host's Certificate wait on the wrong problem.
+func TestApplyWaitsForTheRootBeforeTheCAIssuer(t *testing.T) {
+	f := newFixture()
+	f.probe.answers = []GatewayAnswer{{Address: "192.0.2.10"}}
+	f.cl.certNotReady = 3
+	f.cl.certReason = "IssuerNotReady: the referenced issuer is not ready"
+	f.d.RootTimeout = time.Second
+	f.d.Poll = time.Millisecond
+
+	if _, err := f.d.Apply(context.Background(), allInstall); err != nil {
+		t.Fatal(err)
+	}
+	if f.cl.certReads != 4 {
+		t.Fatalf("the root was polled %d times, want three not-ready answers and one ready", f.cl.certReads)
+	}
+	// The corner of the trace that is the design: every poll, then the CA
+	// issuer. Nothing applies s5n-selfsigned while the root is still issuing.
+	want := "apply:ClusterIssuer" + strings.Repeat(",certificate-ready", 4) + ",apply:ClusterIssuer"
+	if !strings.Contains(f.tr.String(), want) {
+		t.Fatalf("trace = %s\nwant it to contain %s", f.tr.String(), want)
+	}
+}
+
+// A root that never issues is a stop that names cert-manager's reason: without
+// it, every host's certificate is issued by a CA that is not there, and the
+// anchor box would write is not what anything chains to.
+func TestApplyStopsWhenTheRootNeverIssues(t *testing.T) {
+	f := newFixture()
+	f.probe.answers = []GatewayAnswer{{Address: "192.0.2.10"}}
+	f.cl.certNotReady = 1 << 30
+	f.cl.certReason = "IssuerNotReady: the referenced issuer is not ready"
+	f.d.RootTimeout = 30 * time.Millisecond
+	f.d.Poll = time.Millisecond
+
+	_, err := f.d.Apply(context.Background(), allInstall)
+	if err == nil {
+		t.Fatal("box carried on without the box root")
+	}
+	for _, want := range []string{RootCertificateName, "IssuerNotReady", "box bootstrap"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("the refusal does not say %q: %v", want, err)
+		}
+	}
+	// The CA issuer was never applied: an issuer over a missing Secret is the
+	// state box is trying to avoid, not to write.
+	for _, docs := range f.cl.writes {
+		for _, doc := range docs {
+			if kind, _, name := objectMeta(doc); kind == "ClusterIssuer" && name == SelfSignedIssuer {
+				t.Fatal("the CA issuer was applied while the root was not Ready")
+			}
+		}
 	}
 }

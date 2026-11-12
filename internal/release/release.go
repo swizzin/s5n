@@ -161,6 +161,43 @@ type Login interface {
 	Reconcile(ctx context.Context, plan HostPlan) error
 }
 
+// AnchorPlan is what apply tells its host-CA step: the box's own host name, the
+// issuer this run writes that host's Certificate with (empty when this run
+// writes none), and the namespace the anchor is written into.
+type AnchorPlan struct {
+	Domain string
+	// Issuer is the ClusterIssuer this run writes the box's host Certificate
+	// with. On a first init it is the only thing that can be: init decides the
+	// issuer and hands over to apply, and its per-host step writes the
+	// Certificate afterwards, so there is nothing in the cluster to read yet.
+	// Empty means this run writes no Certificate, and the anchor follows the
+	// one the cluster already has.
+	Issuer    string
+	Namespace string
+}
+
+// Anchor is root's host-CA step: the ConfigMap in the seedbox's namespace that
+// carries the box's self-signed root, so an app that signs in through the
+// login's OIDC provider can verify the certificate the box serves
+// (docs/box.md, "Certificates"). A Let's Encrypt box needs nothing carried --
+// its root is in every image -- and the step removes what an earlier
+// self-signed run left.
+//
+// It follows the Certificate the box's host is issued under, not the name's
+// DNS answer: a record that appears does not move the certificate, and an
+// anchor that moved before it would take the login away from every app that
+// restarted in between.
+//
+// Plan is the read apply makes with its diff. Ensure is the write, after the
+// confirm and before the release moves -- an app that has to trust the login
+// needs the anchor when it starts, not after it has crash-looped through
+// Helm's wait. Only `box init` holds one: it is the run that writes the box's
+// own Certificate, so it is the run that knows what the anchor should be.
+type Anchor interface {
+	Plan(ctx context.Context, plan AnchorPlan) (string, error)
+	Ensure(ctx context.Context, plan AnchorPlan) error
+}
+
 // Options are one `box apply`.
 type Options struct {
 	// Chart is a chart release the caller has already loaded. `box init` sets
@@ -208,6 +245,20 @@ type Options struct {
 	// login exist before the release does. A bare `box apply` sets it, because
 	// nothing else would.
 	Hosts Hosts
+	// Anchor is root's host-CA step: the ConfigMap a self-signed box carries
+	// into its namespace, and the removal of it once the host is publicly
+	// trusted. Only `box init` sets it: the anchor follows the Certificate the
+	// box's host is actually served with, and init is the run that writes that
+	// Certificate. A `box apply` does no anchor work at all -- it cannot move a
+	// host from one issuer to another, so it has nothing to follow -- and a
+	// user's apply must not read cert-manager's namespace, let alone write this
+	// ConfigMap.
+	Anchor Anchor
+	// AnchorIssuer is the ClusterIssuer this run writes the box's own host
+	// Certificate with, and so what its host-CA step follows. init sets it to
+	// the issuer its per-host step will write; empty leaves the step reading
+	// the Certificate in the cluster.
+	AnchorIssuer string
 }
 
 // ChartRef is the reference the chart source is asked for. loadChart uses it,
@@ -232,6 +283,8 @@ type Result struct {
 	Login bool
 	// Storage is what box found it had to create, as Plan returned it.
 	Storage []StorageObject
+	// AnchorWrote says this run wrote or removed the host CA ConfigMap.
+	AnchorWrote bool
 	// NamespaceCreated says apply created the seedbox's namespace, which only
 	// happens on a cluster where it is missing and this identity may create
 	// one (root's).
@@ -417,7 +470,19 @@ func (a *Applier) Apply(ctx context.Context, opts Options) (Result, error) {
 		}
 	}
 
-	if exists && len(res.Changes) == 0 && len(plan) == 0 && nsp.Exists && len(hostPlan.Hosts) == 0 && !res.Login {
+	// Root's host CA, read with the diff for the same reason: an anchor that is
+	// missing is a real write this run must make, and a run that only had that
+	// to do must not be reported as "nothing to change".
+	var anchorLine string
+	anchorPlan := AnchorPlan{Domain: hostOf(values), Issuer: opts.AnchorIssuer, Namespace: namespace}
+	if opts.Anchor != nil && anchorPlan.Domain != "" {
+		anchorLine, err = opts.Anchor.Plan(ctx, anchorPlan)
+		if err != nil {
+			return res, err
+		}
+	}
+
+	if exists && len(res.Changes) == 0 && len(plan) == 0 && nsp.Exists && len(hostPlan.Hosts) == 0 && !res.Login && anchorLine == "" {
 		r.Line(fmt.Sprintf("%s in %s: nothing to change", ReleaseName, namespace))
 		return res, nil
 	}
@@ -456,6 +521,9 @@ func (a *Applier) Apply(ctx context.Context, opts Options) (Result, error) {
 	}
 	if res.Login {
 		r.List("login", []string{"the sign-in page's configuration, mark and favicon"})
+	}
+	if anchorLine != "" {
+		r.List("host CA", []string{anchorLine})
 	}
 
 	ok, err := a.Confirm.Ask(fmt.Sprintf("apply %s in %s?", ReleaseName, namespace))
@@ -500,6 +568,28 @@ func (a *Applier) Apply(ctx context.Context, opts Options) (Result, error) {
 		}
 	}
 
+	// The anchor is written at the first point where the namespace it lives in
+	// is known to exist, and always before the release moves: an app that has
+	// to verify the login's certificate reads the ConfigMap as its pod starts,
+	// and a pod that starts without it crash-loops through Helm's wait. On a
+	// first install that point is just after this run creates the namespace
+	// (below); on every later run it is here.
+	writeAnchor := func() error {
+		if anchorLine == "" {
+			return nil
+		}
+		if err := opts.Anchor.Ensure(ctx, anchorPlan); err != nil {
+			return err
+		}
+		res.AnchorWrote = true
+		return nil
+	}
+	if nsp.Exists {
+		if err := writeAnchor(); err != nil {
+			return res, err
+		}
+	}
+
 	// Only the steps that are not the release had work: the release, its
 	// namespace and its storage are all as they were, so this run makes no Helm
 	// revision. A certificate nobody has to renew, or a login page the release
@@ -525,6 +615,11 @@ func (a *Applier) Apply(ctx context.Context, opts Options) (Result, error) {
 		}
 		res.NamespaceCreated = true
 		r.Success(fmt.Sprintf("created namespace %s (Pod Security %s)", namespace, podSecurityRestricted))
+		// The anchor is one object in that namespace, so it can only be
+		// written now.
+		if err := writeAnchor(); err != nil {
+			return res, err
+		}
 	}
 
 	if len(plan) > 0 {

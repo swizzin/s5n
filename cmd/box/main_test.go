@@ -146,7 +146,7 @@ func TestDevFlagsAreNotInAnyHelp(t *testing.T) {
 			fs.SetOutput(&b)
 			fs.PrintDefaults()
 			help := b.String()
-			for _, name := range []string{"acme-server", "dns-file", "paths-in-node"} {
+			for _, name := range []string{"acme-server", "dns-file", "paths-in-node", "ca-file"} {
 				if strings.Contains(help, name) {
 					t.Errorf("%s help lists the dev flag %q:\n%s", cmd.name, name, help)
 				}

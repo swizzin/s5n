@@ -139,6 +139,11 @@ type ApplyOptions struct {
 	// refusal (the release must not exist behind a login nobody can pass),
 	// not an answer to merge.
 	Login func(ctx context.Context) error
+	// Issuer is the ClusterIssuer this run writes the box's own host
+	// Certificate with, for root's host-CA step, which runs before init's
+	// per-host step writes that Certificate: on a first init there is nothing
+	// in the cluster to read it from.
+	Issuer string
 }
 
 // ApplyFunc is one `box apply`.
@@ -460,6 +465,7 @@ func (d *Decision) Run(ctx context.Context, opts Options) (Result, error) {
 		ValuesPath:    opts.ValuesPath,
 		PathsInNode:   opts.PathsInNode,
 		TransientKeys: transientKeys,
+		Issuer:        res.Issuer,
 	}
 	if d.Login != nil {
 		// The rules the login writes are derived from the document the release

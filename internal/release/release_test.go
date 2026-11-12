@@ -179,6 +179,10 @@ type fakes struct {
 	// otherHosts replaces the per-host step with any other value, the way a
 	// user's apply hands apply a step that has no login half.
 	otherHosts Hosts
+	anchor     *fakeAnchor
+	// anchorIssuer is the issuer this run writes the box's own host
+	// Certificate with: init's answer, which the anchor follows.
+	anchorIssuer string
 }
 
 func newFakes(t *testing.T) *fakes {
@@ -247,6 +251,10 @@ func (f *fakes) apply(t *testing.T) (Result, error) {
 	if f.otherHosts != nil {
 		opts.Hosts = f.otherHosts
 	}
+	if f.anchor != nil {
+		opts.Anchor = f.anchor
+	}
+	opts.AnchorIssuer = f.anchorIssuer
 	return f.app.Apply(context.Background(), opts)
 }
 

@@ -208,6 +208,41 @@ func (k *Kubernetes) Create(ctx context.Context, doc map[string]any) error {
 	return nil
 }
 
+// Delete removes one object. A missing object is not an error: every caller
+// removes what it may have written on a previous run, and "it is not there" is
+// the state it wants.
+func (k *Kubernetes) Delete(ctx context.Context, group, version, kind, namespace, name string) error {
+	gvr, err := k.mapping(schema.GroupVersionKind{Group: group, Version: version, Kind: kind})
+	if err != nil {
+		return err
+	}
+	err = k.dyn.Resource(gvr.Resource).Namespace(namespace).Delete(ctx, name, metav1.DeleteOptions{})
+	if apierrors.IsNotFound(err) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("delete %s %s/%s: %w", kind, namespace, name, err)
+	}
+	return nil
+}
+
+// UpdateStatus writes one object's status. box uses it for the one thing a
+// status carries that is a request: cert-manager's Issuing condition, which is
+// how a Certificate is asked to re-issue itself (cmctl renew does the same
+// write). It is separate from Apply because a status subresource rejects an
+// ordinary apply that sets it.
+func (k *Kubernetes) UpdateStatus(ctx context.Context, group, version, kind, namespace string, obj map[string]any) error {
+	gvr, err := k.mapping(schema.GroupVersionKind{Group: group, Version: version, Kind: kind})
+	if err != nil {
+		return err
+	}
+	u := &unstructured.Unstructured{Object: obj}
+	if _, err := k.dyn.Resource(gvr.Resource).Namespace(namespace).UpdateStatus(ctx, u, metav1.UpdateOptions{}); err != nil {
+		return fmt.Errorf("update %s %s/%s status: %w", kind, namespace, u.GetName(), err)
+	}
+	return nil
+}
+
 // NamespaceExists is the one read that decides whether a platform object can
 // be written at all: s5n-system is the admission policy's namespace, so box
 // creates it at bootstrap.
@@ -261,7 +296,7 @@ func PolicyAccepted(status map[string]any, target PolicyTarget) (bool, string) {
 			if cond["type"] != "Accepted" {
 				continue
 			}
-			if cond["status"] == "True" {
+			if cond["status"] == conditionTrue {
 				return true, ""
 			}
 			return false, policyReason(cond)
@@ -348,7 +383,7 @@ func (k *Kubernetes) CertificateReady(ctx context.Context, namespace, name strin
 		if cond["type"] != "Ready" {
 			continue
 		}
-		if cond["status"] == "True" {
+		if cond["status"] == conditionTrue {
 			return true, "", nil
 		}
 		reason, _ := cond["reason"].(string)
@@ -363,6 +398,12 @@ func (k *Kubernetes) CertificateReady(ctx context.Context, namespace, name strin
 	}
 	return false, "cert-manager has not reconciled it yet", nil
 }
+
+// conditionTrue is the API's literal for a condition that holds. Every
+// condition box reads is a string in an unstructured object, so the spelling
+// lives once, here, and the one writer that sets a condition (the Issuing
+// condition box uses to ask for a re-issue) uses it too.
+const conditionTrue = "True"
 
 // ErrNotReady is the deadline answer of a read-only wait: the object is still
 // not ready, which a caller may handle differently from a failed read.

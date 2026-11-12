@@ -73,7 +73,7 @@ type GatewayAnswer struct {
 }
 
 // Programmed reports whether the Gateway says it is ready.
-func (a GatewayAnswer) Programmed() bool { return a.Status == "True" }
+func (a GatewayAnswer) Programmed() bool { return a.Status == conditionTrue }
 
 // ReasonNoGateway is the answer's reason when there is no Gateway at all.
 const ReasonNoGateway = "the Gateway does not exist"
