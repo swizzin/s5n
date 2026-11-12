@@ -30,10 +30,14 @@ Each section marks its status:
 - **Dialogs are huh (decided),** behind box's own prompt interface, with box's theme
   on top: its masthead, accent and step header. Where huh can't behave (no terminal,
   `TERM=dumb`), box falls back to plain line prompts. `NO_COLOR` drops the styling.
-  The palette is a theme (`internal/theme`): a pair name (`s5n`, the default, or
-  `swizzin`, `catppuccin`, `solarized`, `gruvbox`, `nord`, `dracula`) follows the
-  terminal's background, dark when the terminal doesn't say, and a variant name
-  (`s5n-light`, `catppuccin-mocha`) pins one. Every variant passes a contrast test.
+  The palette is a theme (`internal/theme`), chosen by the `theme` key in the values file:
+  a pair name (`s5n`, the default, or `swizzin`, `catppuccin`, `solarized`, `gruvbox`,
+  `nord`, `dracula`) follows the terminal's background, and a variant name (`s5n-light`,
+  `catppuccin-mocha`) pins one. An unknown name stops box before it draws anything and
+  lists the names. Every variant passes a contrast test. box asks the terminal for its
+  background with OSC 11 followed by a device-attributes request every terminal answers,
+  so a terminal with no colour to report (PuTTY, screen, mosh) costs one round trip, not
+  a timeout; one that answers neither is given a second, and the answer is dark.
   Painting the terminal's own background is a separate opt-in, restored on every exit
   box can catch; `kill -9` or a dropped connection leaves it behind.
   Choosing another library later means rewriting one adapter, not init.
@@ -519,12 +523,19 @@ validated, self-signed otherwise. This is how box would do it.
 - **An app host is guarded the way its path was.** Each one has its own access-control
   rule carrying the posture the app had on its path. The one session cookie is set for
   the box's domain, and the browser sends it to every `<app>.<domain>`.
-- **No run leaves an app host without its listener (decided, not built yet).** The
-  listener and Certificate are root's, made by the same per-host step `init` runs. When
-  root's `apply` or `update` would serve an enabled app on a host that has neither, it
-  runs that step first, DNS check included, before the release moves; a mismatch stops
-  with the record named and the old routes untouched. A user's run that would need one
-  stops and names root's command, because the user can't write a listener.
+- **An app host is three objects: its login rule, its listener and its Certificate.**
+  One per-host step writes all three, for `init` and `apply` alike, and a host counts as
+  served only when all three exist: without the rule the login's default deny answers
+  403. The login's configuration is rendered whole from the same inputs `init` uses and
+  applied only when it differs, so a rule never depends on which command wrote it.
+  Adding a rule rolls the login, and its sessions live in memory, so everyone signs in
+  again.
+- **No run leaves an app host unserved (decided).** When root's `apply` would serve an
+  enabled app on a host that is missing any of the three, it runs the per-host step after
+  the confirm and before the release moves, DNS check included; a mismatch stops with the
+  record named and the release untouched. When that's the only work, no new release
+  revision is made. A user's run that would need it stops and names root's command,
+  because a user can't write a listener or the login. `update` will call the same step.
 - **Tested without the internet.** The e2e runs Pebble (Let's Encrypt's test ACME
   server) in the kind cluster and points a test issuer at it, so HTTP-01 through the
   Gateway is proven on every run. The self-signed path gets its own assertion.
