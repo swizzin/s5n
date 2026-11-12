@@ -485,21 +485,29 @@ validated, self-signed otherwise. This is how box would do it.
   has the Gateway HTTP-01 solver, and its controller runs with Gateway API enabled. box
   reads that from the controller's config and never changes another install's flags. One
   that is present but has it switched off stops bootstrap and names the setting.
-- **Issuers are root's.** Two ClusterIssuers box owns: `s5n-letsencrypt` (ACME, HTTP-01
+- **Issuers are root's.** Two ClusterIssuers hosts use: `s5n-letsencrypt` (ACME, HTTP-01
   solver whose HTTPRoute names the `s5n` Gateway but no listener, so it attaches to
   every listener that admits `s5n-gateway`) and
   `s5n-selfsigned`. No ACME email: Let's Encrypt no longer sends expiry mail, so there is
   nothing to ask. `s5n-selfsigned` is a CA issuer, not a bare self-signed one: box keeps
-  one long-lived root certificate in `cert-manager` and signs every self-signed host's
-  certificate from it. A browser still warns, as for any self-signed certificate, but the
+  one long-lived root certificate, `s5n-root-ca` in `cert-manager` (ten years, renewed a
+  year early, its key never rotated), signed by a third issuer, `s5n-bootstrap`, that
+  signs nothing else. Bootstrap waits for the root to be Ready before it writes
+  `s5n-selfsigned`. A browser still warns, as for any self-signed certificate, but the
   root doesn't change when a host's certificate renews, so something inside the cluster
-  can trust it once.
+  can trust it once. A box from before the root (its host certificates their own CA) is
+  repaired by the next bootstrap or init: each self-signed host certificate not signed
+  by the root is re-issued from it, because cert-manager re-issues nothing when only an
+  issuer's spec changes.
 - **Apps that call the login themselves trust the box's root.** An app that signs in
   through the login's OIDC provider fetches the provider's documents from its own pod,
   over HTTPS to the box's own host name. With a Let's Encrypt certificate the image's
-  public roots are enough. Otherwise box copies the root into a ConfigMap in the
-  seedbox's namespace and the chart adds it to those apps' trust store (`SSL_CERT_DIR`,
-  which adds a directory and keeps the image's bundle).
+  public roots are enough. Otherwise root's `init` copies the root into ConfigMap
+  `s5n-host-ca` in the seedbox's namespace, and the chart adds it to those apps' trust
+  store (`SSL_CERT_DIR`, which adds a directory and keeps the image's bundle). The copy
+  follows the issuer the host's certificate is actually issued by, never the name's DNS
+  answer, so a record added before the next `init` leaves both where they are. When the
+  host moves to Let's Encrypt the copy is removed. `apply` never touches it.
 - **Certificates live beside the Gateway.** A listener can only reference a Secret in
   its own namespace without a ReferenceGrant, so each host name gets a `Certificate` in
   `s5n-gateway`, plus an HTTPS listener on 443 and its own host-matched port-80 listener
@@ -557,7 +565,9 @@ validated, self-signed otherwise. This is how box would do it.
   because a user can't write a listener or the login. `update` will call the same step.
 - **Tested without the internet.** The e2e runs Pebble (Let's Encrypt's test ACME
   server) in the kind cluster and points a test issuer at it, so HTTP-01 through the
-  Gateway is proven on every run. The self-signed path gets its own assertion.
+  Gateway is proven on every run. The self-signed path gets its own assertion: the
+  served certificate verifies against `s5n-host-ca` alone, still does after a forced
+  renewal, and a box with host certificates from before the root is re-issued from it.
 
 - **A failed renewal doesn't block `apply`.** It shows in `status` and `doctor`, which
   name the host and cert-manager's reason. `apply` changes the seedbox, not the
