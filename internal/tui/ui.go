@@ -89,8 +89,8 @@ func New(o Options) *UI {
 	}
 	sel, err := theme.Parse(o.Theme)
 	// A pinned variant is not going to use the answer, so the terminal is not
-	// asked: the query costs up to lipgloss's two-second timeout on a terminal
-	// that does not reply.
+	// asked: the query costs up to its one-second cap on a terminal that does
+	// not reply at all.
 	dark := true
 	if sel.Variant == nil {
 		dark = darkBackground(in, out, o.NoColor)

@@ -57,27 +57,28 @@ func use(p theme.Variant) {
 	boldInkStyle = lipgloss.NewStyle().Foreground(ink).Bold(true)
 }
 
-// backgroundQuery is lipgloss's OSC 11 query, with box's own signature so a
-// test can answer it without naming lipgloss's terminal type.
+// backgroundQuery is the terminal-background question, with box's own signature
+// so a test can answer it without naming a terminal type. The implementation is
+// internal/tui's own fenced OSC 11 query (background.go); the seam is here so a
+// test with no terminal does not have to answer a terminal.
 type backgroundQuery func(in, out *os.File) bool
 
 // hasDarkBackground is that query, replaced in tests.
-var hasDarkBackground backgroundQuery = func(in, out *os.File) bool {
-	return lipgloss.HasDarkBackground(in, out)
-}
+var hasDarkBackground backgroundQuery = queryBackground
 
 // darkBackground is the ground box is drawing on.
 //
-// lipgloss asks the terminal for its background colour (OSC 11, with a two
-// second timeout) and answers dark for every spelling of "I don't know": no
-// answer in time -- SSH, a multiplexer that swallows the query, a terminal that
-// never implements it -- a failure to put the terminal in raw mode, or a reply
-// it cannot parse. That is the right way to be wrong here: light text on a
-// light ground is unreadable, a dark palette on a light terminal is only not
-// what was asked for.
+// box asks the terminal for its background colour, fenced by a DA1 request so a
+// terminal that does not answer OSC 11 says so instead of leaving box waiting:
+// a DA1 reply before the colour means dark at once, and the whole query is
+// capped at one second for a terminal that answers neither. Every spelling of
+// "I don't know" -- no terminal, no answer in time, a failure to put the
+// terminal in raw mode, a reply it cannot parse -- is dark. That is the right
+// way to be wrong here: light text on a light ground is unreadable, a dark
+// palette on a light terminal is only not what was asked for.
 //
 // Nothing is asked when the colour is about to be dropped anyway (NO_COLOR), or
-// when the caller's streams are not files box can put in raw mode (a pipe, a
+// when the caller's streams are not terminals box can put in raw mode (a pipe, a
 // buffer in a test).
 func darkBackground(in io.Reader, out io.Writer, noColor bool) bool {
 	if noColor {
