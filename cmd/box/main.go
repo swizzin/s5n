@@ -264,11 +264,13 @@ func runBootstrap(ctx context.Context, args []string) {
 		fmt.Fprintf(os.Stderr, "box: %v\n", err)
 		os.Exit(2)
 	}
-	// The DNS override is the same kind of switch: an e2e cannot write the
-	// test host's /etc/hosts, and moving a name from "no record" to "a public
-	// one" between two runs is exactly what the certificate card and the
-	// self-signed -> issued path have to prove.
-	dnsFile, args, err := takeDevFlag(args, "dns-file")
+	// --dns-file and --paths-in-node are init's dev switches and come out the
+	// same way: bootstrap runs init in this process, so it accepts them or
+	// the e2e's bootstrap line would be the one place they fail. The DNS
+	// override exists because an e2e cannot write the test host's /etc/hosts,
+	// and moving a name from "no record" to "a public one" between two runs
+	// is exactly what the certificate card has to prove.
+	dev, args, err := takeInitDevFlags(args)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "box: %v\n", err)
 		os.Exit(2)
@@ -286,7 +288,7 @@ func runBootstrap(ctx context.Context, args []string) {
 		os.Exit(2)
 	}
 
-	initFlags.dnsFile = dnsFile
+	initFlags.takeDev(dev)
 
 	palette := startupTheme(*initFlags.valuesPath)
 	term := terminalSet(*plain)
@@ -471,11 +473,14 @@ func newPrompt(t tui.Terminal, palette string) setup.Prompter {
 // a value rather than locals in runApply so the mapping from flags to the
 // options the release client receives is testable without a cluster.
 type applyFlags struct {
-	chart       *chartFlags
-	grantPath   *string
-	valuesPath  *string
-	kubeconfig  *string
-	pathsInNode *bool
+	chart      *chartFlags
+	grantPath  *string
+	valuesPath *string
+	kubeconfig *string
+	// pathsInNode is the dev switch (--paths-in-node): not a registered
+	// flag, so apply's --help cannot offer it, and set from
+	// takePathsInNode before the FlagSet parses what is left.
+	pathsInNode bool
 	yes         *bool
 }
 
@@ -488,7 +493,6 @@ func addApplyFlags(fs *flag.FlagSet) *applyFlags {
 	o.grantPath = fs.String("grant", seedbox.GrantPath("root"), "the root-owned grant file")
 	o.valuesPath = fs.String("values", valuesDefault, "the user's values file")
 	o.kubeconfig = fs.String("kubeconfig", "", "explicit kubeconfig to use, or fail with no fallback")
-	o.pathsInNode = fs.Bool("paths-in-node", false, "the grant's storage paths live inside a test node (kind), not on this host: skip the host directory check")
 	o.yes = fs.Bool("yes", false, "apply without asking")
 	return o
 }
@@ -503,17 +507,26 @@ func (o *applyFlags) options() release.Options {
 		ChartVersion: ref.Version,
 		GrantPath:    *o.grantPath,
 		ValuesPath:   *o.valuesPath,
-		PathsInNode:  *o.pathsInNode,
+		PathsInNode:  o.pathsInNode,
 	}
 }
 
 func runApply(ctx context.Context, args []string) {
+	// --paths-in-node is the e2e's switch, not operator surface: it is taken
+	// out of the arguments before the FlagSet sees them so --help cannot
+	// list it. See takePathsInNode.
+	pathsInNode, args, err := takePathsInNode(args)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "box: %v\n", err)
+		os.Exit(2)
+	}
 	fs := flag.NewFlagSet("apply", flag.ExitOnError)
 	o := addApplyFlags(fs)
 	if err := fs.Parse(args); err != nil {
 		fmt.Fprintf(os.Stderr, "box: %v\n", err)
 		os.Exit(2)
 	}
+	o.pathsInNode = pathsInNode
 	if *o.valuesPath == "" {
 		fmt.Fprintln(os.Stderr, "box: no values file: pass --values")
 		os.Exit(2)
@@ -564,7 +577,9 @@ func runApply(ctx context.Context, args []string) {
 }
 
 func runInit(ctx context.Context, args []string) {
-	dnsFile, args, err := takeDevFlag(args, "dns-file")
+	// init's dev switches are stripped before the FlagSet parses: they are
+	// e2e-only, and --help must not offer them. See takeInitDevFlags.
+	dev, args, err := takeInitDevFlags(args)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "box: %v\n", err)
 		os.Exit(2)
@@ -578,7 +593,7 @@ func runInit(ctx context.Context, args []string) {
 		fmt.Fprintf(os.Stderr, "box: %v\n", err)
 		os.Exit(2)
 	}
-	initFlags.dnsFile = dnsFile
+	initFlags.takeDev(dev)
 	out := newOutput(terminalSet(*plain), *yes, startupTheme(*initFlags.valuesPath))
 	defer out.Close()
 	if err := initFlags.run(ctx, *kubeconfig, *yes, *plain, out); err != nil {
@@ -594,25 +609,30 @@ func runInit(ctx context.Context, args []string) {
 // ones and hands them to init for root once the platform is ready, so the two
 // commands cannot drift apart; `box init` on its own parses exactly these.
 type initFlags struct {
-	fs          *flag.FlagSet
-	chart       *chartFlags
-	grantPath   *string
-	valuesPath  *string
-	namespace   *string
-	domain      *string
-	dataPath    *string
-	configPath  *string
-	apps        *string
-	loginName   *string
-	password    *string
-	puid        *int
-	pgid        *int
-	transient   *transientAnswers
-	pathsInNode *bool
+	fs         *flag.FlagSet
+	chart      *chartFlags
+	grantPath  *string
+	valuesPath *string
+	namespace  *string
+	domain     *string
+	dataPath   *string
+	configPath *string
+	apps       *string
+	loginName  *string
+	password   *string
+	puid       *int
+	pgid       *int
+	transient  *transientAnswers
 	// dnsFile is the development-only resolver override (--dns-file): a
 	// hosts-style file init resolves through instead of the system resolver.
 	// Empty means the real one.
 	dnsFile string
+	// pathsInNode is the development-only storage switch (--paths-in-node):
+	// the paths are inside a test node (kind), not on this host, so init
+	// neither reports nor creates them and the apply it hands over to skips
+	// its directory check. A field rather than a registered flag, so
+	// --help cannot offer it. Set from takeInitDevFlags.
+	pathsInNode bool
 	// charts is the release to install, when the command already has one:
 	// `box bootstrap` loads it for its k0s pin and hands the same value here,
 	// so bootstrap and init cannot ask the registry for two versions.
@@ -638,8 +658,16 @@ func addInitFlags(fs *flag.FlagSet) *initFlags {
 	o.pgid = fs.Int("pgid", defaultPGID(), "gid every file on the data path is owned by (default: $SUDO_GID, else the invoking user, else 1000)")
 	o.transient = &transientAnswers{}
 	fs.Var(o.transient, "set-transient", "an answer that lives in no file, as key=value (repeatable), e.g. secrets.plexClaimToken=claim-xxxx")
-	o.pathsInNode = fs.Bool("paths-in-node", false, "the storage paths live inside a test node (kind), not on this host: skip verifying and creating them")
 	return o
+}
+
+// takeDev applies the development switches the command already took out of
+// argv. None of them is registered with o.fs: flag.PrintDefaults lists every
+// registered flag even with an empty usage, so --help would otherwise offer
+// switches that only work against a test node.
+func (o *initFlags) takeDev(d initDevFlags) {
+	o.dnsFile = d.dnsFile
+	o.pathsInNode = d.pathsInNode
 }
 
 // run asks a seedbox's questions, writes its two files and hands over to apply.
@@ -697,8 +725,8 @@ func (o *initFlags) run(ctx context.Context, kubeconfig string, yes, plain bool,
 		Catalog:  cat,
 		Say:      out,
 		Resolver: resolver,
-		Login:    loginStep(kubeconfig, *o.pathsInNode, out, chart),
-		HasLogin: hasLogin(*o.pathsInNode),
+		Login:    loginStep(kubeconfig, o.pathsInNode, out, chart),
+		HasLogin: hasLogin(o.pathsInNode),
 		Apply: func(ctx context.Context, req setup.ApplyOptions) error {
 			// The cluster decision belongs to `box bootstrap`; apply reuses it.
 			// It is resolved here, after init has written the files, so a host
@@ -751,7 +779,7 @@ func (o *initFlags) run(ctx context.Context, kubeconfig string, yes, plain bool,
 		DefaultLogin: defaultLogin(),
 		PasswordFile: *o.password,
 		Unattended:   unattended,
-		PathsInNode:  *o.pathsInNode,
+		PathsInNode:  o.pathsInNode,
 	})
 	if err != nil {
 		return err
@@ -918,6 +946,63 @@ func takeDevFlag(args []string, name string) (value string, rest []string, err e
 		return "", nil, fmt.Errorf("--%s needs a value", name)
 	}
 	return value, rest, nil
+}
+
+// pathsInNodeFlag is the storage switch the kind e2e passes to all three
+// commands: its paths are inside the node, so box skips the checks this host
+// cannot answer.
+const pathsInNodeFlag = "paths-in-node"
+
+// takePathsInNode is takeDevFlag's boolean sibling and the only switch of that
+// shape: a boolean carries its own answer, so the spelling alone means true and
+// there is no value to be missing. Every form a FlagSet would parse is taken
+// out of the arguments -- one dash or two, with `=true`/`=false` or without --
+// because the e2e writes it bare and a caller that spells it any other way must
+// not get "flag provided but not defined" for a switch box accepts. The last one
+// wins, as it does for a registered flag. Taking it out also removes the reason
+// Go's parser stops reading: a stray positional cannot swallow the dev switch
+// that follows it, and box takes no positionals to want it.
+func takePathsInNode(args []string) (set bool, rest []string, err error) {
+	rest = make([]string, 0, len(args))
+	for _, arg := range args {
+		switch {
+		case arg == "--"+pathsInNodeFlag || arg == "-"+pathsInNodeFlag:
+			set = true
+		case strings.HasPrefix(arg, "--"+pathsInNodeFlag+"=") || strings.HasPrefix(arg, "-"+pathsInNodeFlag+"="):
+			value := arg[strings.Index(arg, "=")+1:]
+			b, perr := strconv.ParseBool(value)
+			if perr != nil {
+				return false, nil, fmt.Errorf("--%s wants true or false, not %q", pathsInNodeFlag, value)
+			}
+			set = b
+		default:
+			rest = append(rest, arg)
+		}
+	}
+	return set, rest, nil
+}
+
+// initDevFlags are init's development switches as the command line asked for
+// them: --dns-file's value and --paths-in-node's presence. They are fields on
+// initFlags, never registered with its FlagSet, because flag.PrintDefaults
+// lists every registered flag even with an empty usage and the usage an
+// operator reads must not offer a switch that only works against a test node.
+// bootstrap takes these two plus --acme-server; apply takes the second alone.
+type initDevFlags struct {
+	dnsFile     string
+	pathsInNode bool
+}
+
+func takeInitDevFlags(args []string) (initDevFlags, []string, error) {
+	var d initDevFlags
+	var err error
+	if d.dnsFile, args, err = takeDevFlag(args, "dns-file"); err != nil {
+		return initDevFlags{}, nil, err
+	}
+	if d.pathsInNode, args, err = takePathsInNode(args); err != nil {
+		return initDevFlags{}, nil, err
+	}
+	return d, args, nil
 }
 
 // transientAnswers is a repeatable --set-transient key=value, the unattended
