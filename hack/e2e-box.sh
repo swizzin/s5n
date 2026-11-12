@@ -99,6 +99,9 @@ NGF_VERSION=${NGF_VERSION:-2.8.1}
 # Pebble 2.10.1, the ACME test server the fresh scenario proves HTTP-01
 # against, pinned by tag and digest like every other test image here.
 PEBBLE_IMAGE=${PEBBLE_IMAGE:-ghcr.io/letsencrypt/pebble:2.10.1@sha256:ddf230642b1a584f519f32e347de1b05a6e4c1f6c35c1863b33effeab5f78199}  # renovate: datasource=docker
+# The image the NetworkPolicy probes use: curl, pinned like every other test
+# image here. It is what asks the login directly, which must time out.
+CURL_IMAGE=${CURL_IMAGE:-docker.io/curlimages/curl:8.11.1@sha256:c1fe1679c34d9784c1b0d1e5f62ac0a79fca01fb6377cdd33e90473c6f9f9a69}  # renovate: datasource=docker
 
 KEEP=""
 SCENARIO=all
@@ -1002,6 +1005,29 @@ print("  app routes: %d HTTPRoutes, none pins a sectionName" % len(items))
   [ "$api_code" = 401 ] ||
     { echo "the API without a key answered ${api_code}: it must be Sonarr's own 401, not the login's redirect (the API bypass is missing)"; fail=1; }
   [ "$ping_code" = 200 ] || { echo "/sonarr/ping answered ${ping_code}: the ping bypass is missing"; fail=1; }
+
+  # ---- the login is reachable only through the Gateway ----------------------
+  # Authelia believes X-Forwarded-Proto and X-Forwarded-Host, so a pod that can
+  # call 9091 directly can answer for any host and any scheme -- that was the
+  # measured hole: s5n-system had no NetworkPolicy at all. The probe carries no
+  # release label, so the release's own egress policy does not apply to it: what
+  # it proves is the login's ingress policy, not the release's.
+  log "the login refuses every caller but the Gateway"
+  probe_out=$(timeout 90 $K -n "$NS" run oidc-probe --rm -i --restart=Never \
+    --labels=s5n.io/probe=oidc --image="$CURL_IMAGE" --quiet -- \
+    curl -s -o /dev/null --max-time 5 -w '%{http_code}' \
+    "http://authelia.s5n-system:9091/auth/api/health" 2>&1 || true)
+  echo "  probe (no release label) -> authelia.s5n-system:9091/auth/api/health: ${probe_out:-timed out}"
+  case "$probe_out" in
+    *000*) : ;;
+    200* | *200*) echo "the login answered a pod directly: its ingress policy is missing or admits the wrong peer"; fail=1 ;;
+    "") echo "the probe produced no answer at all, so it proves nothing"; fail=1 ;;
+    *) echo "the probe answered ${probe_out}, which is not a timeout"; fail=1 ;;
+  esac
+  # And the proxy itself is still admitted: the cookie-jar block above logged in
+  # through the Gateway in this same run, so a 000 here with a working login is
+  # the two halves of the policy -- one way in, and that way open.
+  $K -n "$NS" delete pod oidc-probe --ignore-not-found >/dev/null 2>&1 || true
 
   # ---- the apps with a host of their own ------------------------------------
   # Seerr and Plex are served at seerr.<domain> and plex.<domain>: their own

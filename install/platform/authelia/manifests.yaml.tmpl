@@ -115,6 +115,54 @@ spec:
         - name: tmp
           emptyDir: {}
 ---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: authelia
+  namespace: {{ .Namespace }}
+  labels:
+    app.kubernetes.io/name: authelia
+    app.kubernetes.io/part-of: s5n
+    app.kubernetes.io/managed-by: box
+spec:
+  # One way in: the Gateway's proxy pods. Authelia takes the request's scheme
+  # from X-Forwarded-Proto and its host from X-Forwarded-Host, and trusts both,
+  # so a pod that could reach 9091 directly could mint any issuer it liked and
+  # answer ext-authz itself. Envoy is what sets those headers from the listener
+  # (a client's copy is overwritten), so Envoy is the only caller there may be.
+  #
+  # The peer is the proxy Deployment's pods, not its Service: NetworkPolicy is
+  # evaluated after kube-proxy's DNAT, so the source address of a proxied
+  # request is a proxy pod. Envoy Gateway names them app.kubernetes.io/name=envoy
+  # and labels the owning Gateway, which is what keeps a second Gateway's proxy
+  # out. box supports Envoy Gateway only (docs/box.md, "One auth mechanism, no
+  # fallback"), and installs it in standard mode, so the proxy fleet is in the
+  # controller's namespace rather than the Gateway's.
+  #
+  # Kubelet's probes are not named here on purpose: they come from the node, not
+  # from a pod, and both CNIs box runs on admit node-sourced traffic ahead of
+  # policy (kindnet: "Don't process traffic initiated from the root user in the
+  # Node, it can block kubelet probes"; kube-router: a "-m addrtype --src-type
+  # LOCAL ... ACCEPT" rule at the head of every pod's chain). A node rule here
+  # would be a second, wider hole for traffic nobody needs.
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: authelia
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ .ProxyNamespace }}
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: envoy
+              gateway.envoyproxy.io/owning-gateway-name: {{ .Gateway }}
+              gateway.envoyproxy.io/owning-gateway-namespace: {{ .GatewayNamespace }}
+      ports:
+        - port: 9091
+          protocol: TCP
+---
 apiVersion: gateway.networking.k8s.io/v1beta1
 kind: ReferenceGrant
 metadata:

@@ -373,18 +373,7 @@ func (d *Decision) Apply(ctx context.Context, opts Options) (Result, error) {
 		return res, undo(err)
 	}
 
-	manifests, err := authelia.RenderManifests(authelia.Manifests{
-		Namespace:        Namespace,
-		GatewayNamespace: platform.GatewayNamespace,
-		Gateway:          platform.GatewayName,
-		Host:             opts.Host,
-		Claim:            authelia.ClaimName,
-		ConfigMap:        authelia.ConfigMapName,
-		Image:            opts.Image,
-		UID:              authelia.UID,
-		GID:              authelia.GID,
-		ConfigHash:       authelia.ConfigHash(config),
-	})
+	manifests, err := authelia.RenderManifests(manifestsFor(opts.Host, opts.Image, authelia.ConfigHash(config)))
 	if err != nil {
 		return res, undo(err)
 	}
@@ -535,6 +524,30 @@ func (d *Decision) prepare(ctx context.Context, opts RulesOptions) (Cluster, log
 	return cl, loginFiles{config: config, assets: assets}, changed, nil
 }
 
+// manifestsFor is the login's objects for one host, from the constants this
+// package and the platform own. It is one function because init's install and
+// every later rule write apply the same set: a second rendering would let an
+// apply downgrade the Deployment (or drop the NetworkPolicy that keeps every
+// pod but the Gateway off the login).
+func manifestsFor(host, image, configHash string) authelia.Manifests {
+	return authelia.Manifests{
+		Namespace:        Namespace,
+		GatewayNamespace: platform.GatewayNamespace,
+		Gateway:          platform.GatewayName,
+		// Envoy Gateway installs its proxy fleet in the controller's
+		// namespace in standard mode, which is the only mode box installs and
+		// the only implementation it supports.
+		ProxyNamespace: platform.EnvoyGatewayNamespace,
+		Host:           host,
+		Claim:          authelia.ClaimName,
+		ConfigMap:      authelia.ConfigMapName,
+		Image:          image,
+		UID:            authelia.UID,
+		GID:            authelia.GID,
+		ConfigHash:     configHash,
+	}
+}
+
 // loginFiles is the login's rendering: the configuration Authelia starts with,
 // and the mark and favicon mounted beside it.
 type loginFiles struct {
@@ -550,18 +563,7 @@ func (d *Decision) write(ctx context.Context, cl Cluster, opts RulesOptions, fil
 	if err := kube.Preflight(ctx, cl, rulesAccess()); err != nil {
 		return false, fmt.Errorf("login: %w", err)
 	}
-	manifests, err := authelia.RenderManifests(authelia.Manifests{
-		Namespace:        Namespace,
-		GatewayNamespace: platform.GatewayNamespace,
-		Gateway:          platform.GatewayName,
-		Host:             opts.Host,
-		Claim:            authelia.ClaimName,
-		ConfigMap:        authelia.ConfigMapName,
-		Image:            opts.Image,
-		UID:              authelia.UID,
-		GID:              authelia.GID,
-		ConfigHash:       authelia.ConfigHash(files.config),
-	})
+	manifests, err := authelia.RenderManifests(manifestsFor(opts.Host, opts.Image, authelia.ConfigHash(files.config)))
 	if err != nil {
 		return false, err
 	}

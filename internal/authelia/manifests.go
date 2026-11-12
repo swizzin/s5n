@@ -83,6 +83,10 @@ type Manifests struct {
 	// targets and the portal route attaches to.
 	GatewayNamespace string
 	Gateway          string
+	// ProxyNamespace is where the Gateway's proxy pods run. It is the peer
+	// the login's NetworkPolicy admits and nobody else: the proxy is what sets
+	// the headers Authelia trusts, so it is the only caller there may be.
+	ProxyNamespace string
 	// Host is the one name the portal is published on: the hostname of the
 	// HTTPRoute that makes /auth reachable. It is the same name the
 	// configuration's cookie lives on, because the 302 Authelia sends points
@@ -117,6 +121,7 @@ func RenderManifests(m Manifests) ([]byte, error) {
 		"namespace":         m.Namespace,
 		"gateway namespace": m.GatewayNamespace,
 		"gateway":           m.Gateway,
+		"proxy namespace":   m.ProxyNamespace,
 		"host":              m.Host,
 		"claim":             m.Claim,
 		"configmap":         m.ConfigMap,
