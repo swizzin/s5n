@@ -123,6 +123,58 @@ spec:
 {{- end }}
 {{- range $inst := include "s5n.instances" . | fromJsonArray }}
 {{- $ctx := dict "root" $root "inst" $inst }}
+{{- /* An app that signs in through the login's OIDC provider (catalog.yaml's
+`oidc: true`) dials the issuer itself, over the box's own name. That name is a
+hostAliases entry pointing at the Gateway's proxy Service, so the connection
+leaves this pod for a proxy pod in another namespace -- which the release's own
+egress policy denies, along with every RFC1918 range. One rule admits it.
+
+The port is 10443, not 443: NetworkPolicy matches the post-DNAT container port,
+and Envoy Gateway shifts a privileged Service port into an ephemeral one inside
+the pod (its Service is 443 -> 10443). A rule naming 443 silently drops --
+measured, and the reason this comment exists. */}}
+{{- $oidc := and (eq $inst.app "qui") (ne (toString $root.Values.gateway.host) "") }}
+{{- if $oidc }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ $inst.name }}-oidc-egress
+  labels:
+    {{- include "s5n.labels" $root | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "s5n.selector" $ctx | nindent 6 }}
+  policyTypes: [Egress]
+  egress:
+    - to:
+        {{- range $peer := $root.Values.networkPolicy.gatewayFrom }}
+        {{- if hasKey $peer "namespaceSelector" }}
+        - namespaceSelector: {{ toYaml $peer.namespaceSelector | nindent 12 }}
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: envoy
+              gateway.envoyproxy.io/owning-gateway-name: {{ $root.Values.gateway.parentRef.name | quote }}
+              gateway.envoyproxy.io/owning-gateway-namespace: {{ $root.Values.gateway.parentRef.namespace | quote }}
+        {{- end }}
+        {{- end }}
+      ports:
+        - { port: 10443, protocol: TCP }
+    {{- /* A host-networked proxy is reached at its node address over the
+    Gateway's own port: there is no pod to select and no port shift to
+    compensate for. Envoy Gateway is never that, but a hand-written gatewayFrom
+    may be. */}}
+    {{- $blocks := list }}
+    {{- range $peer := $root.Values.networkPolicy.gatewayFrom }}
+    {{- if hasKey $peer "ipBlock" }}{{ $blocks = append $blocks $peer }}{{ end }}
+    {{- end }}
+    {{- with $blocks }}
+    - to: {{ toYaml . | nindent 8 }}
+      ports:
+        - { port: 443, protocol: TCP }
+    {{- end }}
+{{- end }}
 ---
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy

@@ -144,6 +144,12 @@ ACME_ARGS=()
 # host's own DNS, which an unprivileged run cannot edit. Empty for every
 # scenario until the one that moves a name from "no record" to a public one.
 DNS_ARGS=()
+# The development-only --ca-file override: Pebble's root, which an ACME
+# certificate's Secret does not carry, so the anchor ConfigMap box writes for an
+# app that signs in through the login has nowhere else to come from. This is the
+# same writer as a self-signed box's (which reads the box root out of
+# cert-manager), not a second code path.
+CA_ARGS=()
 CTX="kind-${CLUSTER}"
 K="kubectl --context ${CTX}"
 HELM="helm --kube-context ${CTX}"
@@ -321,7 +327,7 @@ bootstrap() { # bootstrap <output file>
   # No --chart-version: bootstrap takes the default-version path, so the e2e
   # exercises the newest-release selection against a real registry. The chart
   # is the one pushed above; box pulls it over loopback.
-  "$WORK/box" bootstrap --yes --chart-repo "$CHART_REPO" ${ACME_ARGS[@]+"${ACME_ARGS[@]}"} ${DNS_ARGS[@]+"${DNS_ARGS[@]}"} \
+  "$WORK/box" bootstrap --yes --chart-repo "$CHART_REPO" ${ACME_ARGS[@]+"${ACME_ARGS[@]}"} ${DNS_ARGS[@]+"${DNS_ARGS[@]}"} ${CA_ARGS[@]+"${CA_ARGS[@]}"} \
     --grant "$WORK/grant.yaml" --values "$WORK/values.yaml" \
     --namespace "$NS" --domain "$DOMAIN" \
     --data-path /srv/s5n/data --config-path /srv/s5n/config \
@@ -340,7 +346,7 @@ init() { # init <output file> [extra dev flags]
   #
   # --chart-version pins the release to the package pushed above: init reads
   # one chart, and the apply it hands over to installs that same value.
-  "$WORK/box" init --yes --chart-repo "$CHART_REPO" --chart-version "$CHART_VERSION" ${DNS_ARGS[@]+"${DNS_ARGS[@]}"} \
+  "$WORK/box" init --yes --chart-repo "$CHART_REPO" --chart-version "$CHART_VERSION" ${DNS_ARGS[@]+"${DNS_ARGS[@]}"} ${CA_ARGS[@]+"${CA_ARGS[@]}"} \
     --grant "$WORK/grant.yaml" --values "$WORK/values.yaml" \
     --namespace "$NS" --domain "$DOMAIN" \
     --data-path /srv/s5n/data --config-path /srv/s5n/config \
@@ -562,6 +568,162 @@ PYEOF
   $K -n kube-system rollout status deploy/coredns --timeout=120s >/dev/null
 }
 
+# ---- the OIDC provider ------------------------------------------------------
+# An app that signs in through the login dials the issuer itself, and the issuer
+# is the URL the browser used: https://<host>/auth. That name resolves nowhere
+# inside a cluster, and the certificate is the box's, so three things have to be
+# right at once -- the pod's alias for the name, the trust root it verifies with,
+# and a NetworkPolicy that lets it reach the proxy -- and qui does not start
+# until all of them are. That is why "Ready on the first install" is the
+# assertion, and the discovery document is the receipt.
+#
+# The client secret is one Secret in this namespace, written once by root; the
+# login keeps only its digest. Both are asserted here against each other.
+assert_oidc() { # assert_oidc <domain>
+  local domain=$1 secret_name proxy_ip alias_ip alias_host issuer client redirect
+  local ssl_dir disc
+  # qui refuses to start until it can read the discovery document, so Ready is
+  # the alias, the trust root and the egress rule proved together -- and on the
+  # first install there is nothing else to prove them with.
+  $K -n "$NS" wait --for=condition=Ready pod/qui-0 --timeout=300s ||
+    { echo "qui-0 never became Ready: it starts only once the issuer answers"; fail=1; }
+  secret_name=$($K -n "$NS" get statefulset qui \
+    -o jsonpath='{.spec.template.spec.volumes[?(@.name=="oidc")].secret.secretName}' 2>/dev/null || true)
+  echo "  qui mounts client secret: ${secret_name:-nothing}"
+  [ "$secret_name" = s5n-oidc-qui ] ||
+    { echo "qui does not mount the client secret box wrote"; fail=1; }
+
+  proxy_ip=$($K -n envoy-gateway-system get service \
+    -l 'app.kubernetes.io/name=envoy,gateway.envoyproxy.io/owning-gateway-name=s5n,gateway.envoyproxy.io/owning-gateway-namespace=s5n-gateway' \
+    -o jsonpath='{.items[0].spec.clusterIP}' 2>/dev/null || true)
+  alias_ip=$($K -n "$NS" get statefulset qui -o jsonpath='{.spec.template.spec.hostAliases[0].ip}' 2>/dev/null || true)
+  alias_host=$($K -n "$NS" get statefulset qui -o jsonpath='{.spec.template.spec.hostAliases[0].hostnames[0]}' 2>/dev/null || true)
+  echo "  qui alias: ${alias_host} -> ${alias_ip} (proxy Service ${proxy_ip})"
+  [ -n "$proxy_ip" ] || { echo "the Gateway's proxy Service has no ClusterIP to alias"; fail=1; }
+  [ "$alias_ip" = "$proxy_ip" ] ||
+    { echo "qui aliases ${alias_ip}, want the proxy Service's ${proxy_ip}"; fail=1; }
+  [ "$alias_host" = "$domain" ] ||
+    { echo "qui aliases ${alias_host}, want the box's own name ${domain}"; fail=1; }
+
+  # box wrote the address into the grant at init: a user's apply renders it and
+  # never reads the Gateway's namespace.
+  local grant_ip
+  grant_ip=$(sed -n 's/^ *gatewayIP: *//p' "$WORK/grant.yaml" | head -1 || true)
+  echo "  grant's gatewayIP: ${grant_ip:-absent}"
+  [ "$grant_ip" = "$proxy_ip" ] ||
+    { echo "the grant records ${grant_ip:-no address}, want the proxy Service's ${proxy_ip}"; fail=1; }
+
+  issuer=$($K -n "$NS" get statefulset qui -o jsonpath='{.spec.template.spec.containers[0].env[?(@.name=="QUI__OIDC_ISSUER")].value}' 2>/dev/null || true)
+  client=$($K -n "$NS" get statefulset qui -o jsonpath='{.spec.template.spec.containers[0].env[?(@.name=="QUI__OIDC_CLIENT_ID")].value}' 2>/dev/null || true)
+  redirect=$($K -n "$NS" get statefulset qui -o jsonpath='{.spec.template.spec.containers[0].env[?(@.name=="QUI__OIDC_REDIRECT_URL")].value}' 2>/dev/null || true)
+  ssl_dir=$($K -n "$NS" get statefulset qui -o jsonpath='{.spec.template.spec.containers[0].env[?(@.name=="SSL_CERT_DIR")].value}' 2>/dev/null || true)
+  echo "  qui: issuer ${issuer}, client ${client}, redirect ${redirect}, SSL_CERT_DIR ${ssl_dir}"
+  [ "$issuer" = "https://${domain}/auth" ] || { echo "qui's issuer is ${issuer}"; fail=1; }
+  [ "$client" = "${NS}-qui" ] || { echo "qui's client id is ${client}"; fail=1; }
+  [ "$redirect" = "https://${domain}/qui/api/auth/oidc/callback" ] ||
+    { echo "qui's redirect URI is ${redirect}: it must be the callback path it builds from its base URL"; fail=1; }
+  [ "$ssl_dir" = /etc/s5n-host-ca ] ||
+    { echo "SSL_CERT_DIR is ${ssl_dir}: the anchor is added to the bundle, never substituted for it"; fail=1; }
+
+  # The two halves agree: the client's digest in the login's configuration is the
+  # one box stored beside the signing material, and the plaintext is in this
+  # namespace.
+  local cm_digest stored_digest plaintext policy
+  cm_digest=$($K -n s5n-system get configmap s5n-authelia -o jsonpath='{.data.configuration\.yml}' 2>/dev/null |
+    sed -n "s/^ *client_secret: '\(.*\)'$/\1/p" | head -1 || true)
+  stored_digest=$($K -n s5n-system get secret s5n-authelia -o jsonpath="{.data.oidc-client-${NS}-qui}" 2>/dev/null | base64 -d || true)
+  plaintext=$($K -n "$NS" get secret s5n-oidc-qui -o jsonpath='{.data.client-secret}' 2>/dev/null | base64 -d || true)
+  echo "  client secret: ${#plaintext} characters in ${NS}/s5n-oidc-qui, digest ${cm_digest:0:24}..."
+  case "$cm_digest" in
+    '$pbkdf2-sha512$310000$'*) : ;;
+    *) echo "the login's client_secret is not a pbkdf2-sha512 digest: ${cm_digest}"; fail=1 ;;
+  esac
+  [ "$cm_digest" = "$stored_digest" ] ||
+    { echo "the configuration's digest and the one stored in the login's Secret differ"; fail=1; }
+  [ "${#plaintext}" -ge 40 ] ||
+    { echo "the client secret in ${NS} is ${#plaintext} characters, want the generated 48"; fail=1; }
+
+  # The signing material is a file in the same Secret, and the configuration
+  # does not carry it.
+  local provider has_hmac
+  provider=$($K -n s5n-system get secret s5n-authelia -o jsonpath='{.data.oidc\.yml}' 2>/dev/null | base64 -d || true)
+  has_hmac=$(printf '%s' "$provider" | grep -c "hmac_secret:" || true)
+  echo "  provider file: ${#provider} bytes, hmac_secret lines ${has_hmac}"
+  [ "$has_hmac" = 1 ] || { echo "the login's Secret carries no oidc.yml with an hmac_secret"; fail=1; }
+  case "$provider" in
+    *"BEGIN RSA PRIVATE KEY"*) : ;;
+    *) echo "the login's Secret carries no RSA signing key"; fail=1 ;;
+  esac
+
+  # The policy is this seedbox's: the client points at it, and it admits only
+  # this box's account.
+  policy=$($K -n s5n-system get configmap s5n-authelia -o jsonpath='{.data.configuration\.yml}' 2>/dev/null ||
+    true)
+  printf '%s' "$policy" | grep -q "authorization_policy: '${NS}'" ||
+    { echo "the client does not name this box's authorization policy"; fail=1; }
+  printf '%s' "$policy" | grep -q "user:${LOGIN}" ||
+    { echo "the policy admits no ${LOGIN}: the rule and the login's account disagree"; fail=1; }
+
+  # The trust anchor, when the box's certificate is not publicly trusted: box
+  # copied the root into this namespace, and the pod mounts it.
+  local anchor
+  anchor=$($K -n "$NS" get configmap s5n-host-ca -o jsonpath='{.data.ca\.crt}' 2>/dev/null || true)
+  if [ -n "$anchor" ]; then
+    printf '%s' "$anchor" | grep -q "BEGIN CERTIFICATE" ||
+      { echo "the anchor ConfigMap carries no certificate"; fail=1; }
+    printf '%s' "$anchor" | grep -q "PRIVATE KEY" &&
+      { echo "the anchor ConfigMap carries a private key"; fail=1; }
+    echo "  anchor: $(printf '%s' "$anchor" | grep -c 'BEGIN CERTIFICATE') certificate(s) in ${NS}/s5n-host-ca"
+  else
+    echo "  anchor: none, and the box's certificate is publicly trusted"
+  fi
+
+  # And the receipt: discovery, from inside the app's own pod, over the box's
+  # own name, trusted by exactly what that pod was given.
+  #
+  # curl here is OpenSSL, and OpenSSL's directory lookup only finds certificates
+  # under their subject-hash names (<hash>.0) -- not ca.crt. So SSL_CERT_DIR,
+  # which the pod inherits and which is exactly right for qui (Go reads every
+  # file in it), trusts nothing in curl: point it at the file instead. A Let's
+  # Encrypt box has no anchor and curl's system bundle is what trusts the issuer.
+  local ca_args=()
+  if [ -n "$anchor" ]; then
+    ca_args=(--cacert /etc/s5n-host-ca/ca.crt)
+  fi
+  disc=$($K -n "$NS" exec qui-0 -- curl -sS --max-time 15 "${ca_args[@]}" \
+    "https://${domain}/auth/.well-known/openid-configuration" 2>"$WORK/oidc-discovery.err" || true)
+  if [ -z "$disc" ]; then
+    echo "qui's pod got no discovery document from https://${domain}/auth: the alias, the anchor or the egress rule is wrong"
+    sed 's/^/    curl: /' "$WORK/oidc-discovery.err" 2>/dev/null || true
+    fail=1
+  else
+    printf '%s' "$disc" >"$WORK/oidc-discovery.json"
+    if python3 -c 'import json, sys
+domain, path = sys.argv[1], sys.argv[2]
+d = json.load(open(path))
+want = "https://%s/auth" % domain
+if d.get("issuer") != want:
+    print("  discovery issuer is %r, want %r" % (d.get("issuer"), want)); sys.exit(1)
+for key in ("authorization_endpoint", "token_endpoint", "jwks_uri", "userinfo_endpoint"):
+    if not d.get(key, "").startswith(want + "/"):
+        print("  %s is %r, want a URL under %r" % (key, d.get(key), want)); sys.exit(1)
+print("  discovery: issuer %s, token %s, jwks %s" % (d["issuer"], d["token_endpoint"], d["jwks_uri"]))' "$domain" "$WORK/oidc-discovery.json"; then
+      :
+    else
+      echo "the discovery document is not the one this box's issuer advertises"
+      fail=1
+    fi
+  fi
+
+  # The egress rule that lets it: the proxy's pods, on the container port Envoy
+  # listens on. 443 here would be a rule that admits nothing (NetworkPolicy is
+  # evaluated after the Service's DNAT).
+  local eg_port
+  eg_port=$($K -n "$NS" get networkpolicy qui-oidc-egress -o jsonpath='{.spec.egress[0].ports[0].port}' 2>/dev/null || true)
+  echo "  qui-oidc-egress port: ${eg_port:-missing}"
+  [ "$eg_port" = 10443 ] || { echo "the OIDC egress rule names ${eg_port:-no port}, want 10443"; fail=1; }
+}
+
 # ---- scenario: fresh --------------------------------------------------------
 fresh() {
   # ---- bootstrap 1: the platform and root's first install -------------------
@@ -578,6 +740,11 @@ fresh() {
   # certificate inside this run, so both have to answer before it starts.
   install_pebble
   [ "$fail" = 0 ] || return 0
+  # Pebble's root is this scenario's anchor: an ACME-issued certificate has no
+  # ca.crt in its Secret, so box is given the root the login's own certificate
+  # chains to. On a real Let's Encrypt box there is nothing to give: the image's
+  # bundle covers it.
+  CA_ARGS=(--ca-file "$WORK/pebble-root.pem")
   # Every name the box serves: its own and each app's own host. init resolves
   # them and refuses an app name that does not answer where the domain does, so
   # the app hosts have to be here before bootstrap or it stops on purpose.
@@ -1013,15 +1180,21 @@ print("  app routes: %d HTTPRoutes, none pins a sectionName" % len(items))
   # release label, so the release's own egress policy does not apply to it: what
   # it proves is the login's ingress policy, not the release's.
   log "the login refuses every caller but the Gateway"
+  # The pod runs under the namespace's Pod Security: a bare `kubectl run` is
+  # refused there (restricted wants runAsNonRoot, no capabilities and a seccomp
+  # profile), and a refusal is not the timeout this probe is about -- so it says
+  # which one happened rather than passing as "no answer".
   probe_out=$(timeout 90 $K -n "$NS" run oidc-probe --rm -i --restart=Never \
-    --labels=s5n.io/probe=oidc --image="$CURL_IMAGE" --quiet -- \
-    curl -s -o /dev/null --max-time 5 -w '%{http_code}' \
-    "http://authelia.s5n-system:9091/auth/api/health" 2>&1 || true)
+    --labels=s5n.io/probe=oidc --image="$CURL_IMAGE" --quiet \
+    --overrides='{"spec":{"securityContext":{"runAsNonRoot":true,"runAsUser":65534,"runAsGroup":65534,"seccompProfile":{"type":"RuntimeDefault"}},"containers":[{"name":"oidc-probe","image":"'"$CURL_IMAGE"'","command":["curl","-s","-o","/dev/null","--max-time","5","-w","%{http_code}","http://authelia.s5n-system:9091/auth/api/health"],"securityContext":{"allowPrivilegeEscalation":false,"capabilities":{"drop":["ALL"]},"runAsNonRoot":true,"runAsUser":65534}}]}}' \
+    2>&1 || true)
   echo "  probe (no release label) -> authelia.s5n-system:9091/auth/api/health: ${probe_out:-timed out}"
   case "$probe_out" in
     *000*) : ;;
     200* | *200*) echo "the login answered a pod directly: its ingress policy is missing or admits the wrong peer"; fail=1 ;;
     "") echo "the probe produced no answer at all, so it proves nothing"; fail=1 ;;
+    *Forbidden* | *violates* | *Invalid*)
+      echo "the probe pod was refused before it ran, so the login was never asked: ${probe_out}"; fail=1 ;;
     *) echo "the probe answered ${probe_out}, which is not a timeout"; fail=1 ;;
   esac
   # And the proxy itself is still admitted: the cookie-jar block above logged in
@@ -1236,6 +1409,9 @@ for r in items:
   [ "$https_code" = 200 ] || { echo "HTTPS did not answer after the renewal"; fail=1; }
 
   $K -n "$NS" wait --for=condition=Ready pod -l 'app.kubernetes.io/instance=s5n,s5n.io/app' --timeout=300s || fail=1
+  # ---- the OIDC provider: qui is Ready on the first install, with the issuer --
+  log "the provider: qui's client, the issuer it dials, and the anchor"
+  assert_oidc "$DOMAIN"
   # ---- storage: box created the claims, and they are bound ----
   for kind in data config; do
     pv=seedbox-s5n-${kind}
@@ -2176,6 +2352,15 @@ PY
 
   $K -n "$NS" wait --for=condition=Ready pod -l 'app.kubernetes.io/instance=s5n,s5n.io/app' --timeout=300s || fail=1
 
+  # ---- the provider, on a self-signed box ----------------------------------
+  # The same app, the same issuer, and this time the anchor is the box's own
+  # root: nothing public signs this host, so root's init copied the root into
+  # the namespace and the pod trusts it with SSL_CERT_DIR. Ready on the first
+  # install is the whole proof -- qui does not start until it can read the
+  # discovery document.
+  log "the provider on a self-signed host: the box root is the anchor"
+  assert_oidc "$DOMAIN"
+
   # ---- a second bootstrap: still nothing installed -------------------------
   # box's MetalLB is still not a release it can see, so the second run asks the
   # same question again and takes the same answer -- without installing
@@ -2397,6 +2582,11 @@ EOF
 EOF
   install_pebble
   [ "$fail" = 0 ] || return 0
+  # Pebble's root is this scenario's anchor: an ACME-issued certificate has no
+  # ca.crt in its Secret, so box is given the root the login's own certificate
+  # chains to. On a real Let's Encrypt box there is nothing to give: the image's
+  # bundle covers it.
+  CA_ARGS=(--ca-file "$WORK/pebble-root.pem")
   patch_coredns "$lb_addr" "$DOMAIN" "$PLEX_HOST" "$SEERR_HOST" ||
     { echo "could not patch CoreDNS for the box's names"; fail=1; }
   ACME_ARGS=(--acme-server "https://pebble.pebble.svc:14000/dir")
@@ -2431,21 +2621,24 @@ EOF
   [ -n "$new_app_serial" ] && [ "$new_app_serial" != "$old_app_serial" ] ||
     { echo "the app host's certificate was not re-issued"; fail=1; }
 
-  # The host is publicly trusted now, so there is nothing for a pod to add:
-  # root's run removed the anchor it wrote while the certificate was box's own.
-  if $K -n "$NS" get configmap s5n-host-ca >/dev/null 2>&1; then
-    echo "s5n-host-ca is still in ${NS} after the move to Let's Encrypt"; fail=1
-  else
-    echo "  s5n-host-ca removed: a public root needs no anchor"
-  fi
+  # The move is the run that writes the host's Certificate with a public
+  # issuer, and --ca-file is what an ACME certificate's anchor has to come
+  # from: its Secret carries no ca.crt. So the anchor is the file's root, not
+  # the box's own -- the root under a certificate that is no longer served
+  # would be an anchor nothing chains to.
+  same_cert "$($K -n "$NS" get configmap s5n-host-ca -o jsonpath='{.data.ca\.crt}' 2>/dev/null || true)" \
+    "$(cat "$WORK/pebble-root.pem")" ||
+    { echo "the anchor after the move is not the one --ca-file gave"; fail=1; }
 
   # --ca-file is the same writer with another source, for the one mode with
   # nothing to copy: an ACME certificate has no ca.crt at any point. The e2e
   # hands box Pebble's root on init -- the run that writes the host's
   # Certificate, and so the run the anchor follows -- and asserts the ConfigMap,
   # then an init without the flag takes it away again, so the flag feeds the
-  # product path instead of adding a test-only one. The scenario passes
-  # --ca-file nowhere else: the move above proves the removal, this the file.
+  # product path instead of adding a test-only one. The ConfigMap is removed
+  # first here, because the move above already wrote this very certificate:
+  # this block is the writer with no anchor to compare against.
+  $K -n "$NS" delete configmap s5n-host-ca --ignore-not-found >/dev/null
   log "box init --ca-file: an ACME host's anchor comes from the file"
   if init "$WORK/init-ca.txt" --ca-file "$WORK/pebble-root.pem"; then
     grep -qF "wrote ConfigMap ${NS}/s5n-host-ca" "$WORK/init-ca.txt" ||
@@ -2457,6 +2650,9 @@ EOF
     "$(cat "$WORK/pebble-root.pem")" ||
     { echo "--ca-file did not reach ${NS}/s5n-host-ca"; fail=1; }
   log "box init: an ACME host's anchor goes again"
+  # Without the dev flag: the move above is the only run that passes it, and
+  # this is the assertion that a public host carries no anchor.
+  CA_ARGS=()
   if init "$WORK/init-noca.txt"; then :; else cat "$WORK/init-noca.txt"; fail=1; fi
   if $K -n "$NS" get configmap s5n-host-ca >/dev/null 2>&1; then
     echo "the anchor survived an init without --ca-file on an ACME host"; fail=1

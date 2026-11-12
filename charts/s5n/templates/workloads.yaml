@@ -10,6 +10,25 @@ values.yaml; this template is the only place a pod spec is written.
 {{- $ctx := dict "root" $root "inst" $inst }}
 {{- $urlBase := printf "/%s" $inst.name }}
 {{- $exposure := include "s5n.exposure" (dict "root" $root "app" $inst.app) | trim }}
+{{- /* An app that signs in through the login's OIDC provider. The catalog says the
+same thing for box (`oidc: true`), which is what registers the client; this is the
+chart's half, and the e2e asserts the two agree.
+
+auth.oidc.gatewayIP is the switch, not the app's name: box writes it at init from
+the Gateway's proxy Service, and it is the one thing an OIDC app cannot do
+without -- its issuer is the box's own HTTPS URL, so without the address the pod
+cannot reach the login and qui refuses to start. A plain `helm install` (and a
+box whose grant predates the provider) has no such value, and gets the app's
+previous configuration: no login in the app, the edge's login in front. That is
+why this is not `oidc: true` alone -- that would crash-loop every helm-only
+install of the catalog file. */}}
+{{- $oidcIP := "" }}
+{{- with $root.Values.auth }}
+{{- with .oidc }}
+{{- $oidcIP = toString (.gatewayIP | default "") }}
+{{- end }}
+{{- end }}
+{{- $oidc := and (eq $inst.app "qui") (ne (toString $root.Values.gateway.host) "") (ne $oidcIP "") }}
 {{- $appHost := "" }}
 {{- if eq $exposure "host" }}{{ $appHost = include "s5n.appHost" (dict "root" $root "app" $inst.app) | trim }}{{ end }}
 ---
@@ -35,6 +54,19 @@ spec:
     spec:
       automountServiceAccountToken: false
       enableServiceLinks: false
+      {{- if $oidc }}
+      # The issuer is the URL the browser used -- https://<host>/auth -- and the
+      # app dials it itself, so the name has to resolve and the certificate has
+      # to verify. It resolves to the Gateway's proxy, which is the only thing
+      # that answers for that name; box reads the address from the cluster and
+      # writes it into the grant, because a user's apply may not read the
+      # Gateway's namespace. A grant from before the provider has none, and the
+      # pod then starts without this: the next root run fills it in.
+      hostAliases:
+        - ip: {{ $oidcIP | quote }}
+          hostnames:
+            - {{ $root.Values.gateway.host | quote }}
+      {{- end }}
       securityContext:
         {{- include "s5n.podSecurity" $root | nindent 8 }}
       {{- if or (eq $inst.app "qbittorrent") (eq $inst.app "tautulli") }}
@@ -132,6 +164,47 @@ spec:
             # under it, so the route keeps the path and rewritePath stays false.
             - name: QUI__BASE_URL
               value: {{ $urlBase | quote }}
+            {{- if $oidc }}
+            # qui signs in through the login's own OIDC provider, so it has a
+            # login of its own after all -- one that resolves to the same
+            # account as the edge. It is not a second auth system: no user, no
+            # password, no reset path lives in qui, only the client id and the
+            # secret Authelia issued it.
+            #
+            # Every name here is qui v1.35.0's own (internal/domain/config.go:79-84,
+            # and each binds to QUI__<NAME> in internal/config/config.go:270-276).
+            # The secret is read from a file, not an env value: it is in the
+            # release's own Secret and a pod's environment is readable by
+            # anything that can describe the pod. bindOrReadFromFile is what
+            # makes QUI__OIDC_CLIENT_SECRET_FILE mean that (config.go:1082-1092).
+            #
+            # DISABLE_BUILT_IN_LOGIN is what makes OIDC the only way in; qui
+            # refuses to start if the issuer cannot be reached, which is why the
+            # route, the trust anchor and the egress rule all have to be right
+            # before it becomes Ready.
+            - name: QUI__OIDC_ENABLED
+              value: "true"
+            - name: QUI__OIDC_ISSUER
+              value: {{ printf "https://%s/auth" $root.Values.gateway.host | quote }}
+            - name: QUI__OIDC_CLIENT_ID
+              value: {{ printf "%s-%s" $root.Release.Namespace $inst.app | quote }}
+            - name: QUI__OIDC_CLIENT_SECRET_FILE
+              value: /etc/s5n-oidc/client-secret
+            - name: QUI__OIDC_REDIRECT_URL
+              value: {{ printf "https://%s%s/api/auth/oidc/callback" $root.Values.gateway.host $urlBase | quote }}
+            - name: QUI__OIDC_DISABLE_BUILT_IN_LOGIN
+              value: "true"
+            # The anchor, when the box's certificate is not publicly trusted:
+            # the login's own root, which box copies into a ConfigMap in this
+            # namespace. SSL_CERT_DIR adds a directory to Go's system pool;
+            # SSL_CERT_FILE would replace the bundle, and then every public
+            # indexer this app talks to would fail its own TLS.
+            #
+            # The ConfigMap is optional because a Let's Encrypt box has none:
+            # the image's bundle already trusts the issuer's chain.
+            - name: SSL_CERT_DIR
+              value: /etc/s5n-host-ca
+            {{- else }}
             # qui's login is off, like the Arrs' External scheme: the login is at
             # the edge (auth.edge), never in the app. Disabling it takes three
             # settings (internal/domain/config.go at v1.35.0: IsAuthDisabled is
@@ -150,6 +223,7 @@ spec:
               value: "true"
             - name: QUI__AUTH_DISABLED_ALLOWED_CIDRS
               value: "0.0.0.0/0,::/0"
+            {{- end }}
             {{- else if eq $inst.app "maintainerr" }}
             - name: UI_HOSTNAME
               value: 0.0.0.0
@@ -235,6 +309,14 @@ spec:
               subPath: {{ $inst.name }}
             - name: tmp
               mountPath: /tmp
+            {{- if $oidc }}
+            - name: oidc
+              mountPath: /etc/s5n-oidc
+              readOnly: true
+            - name: host-ca
+              mountPath: /etc/s5n-host-ca
+              readOnly: true
+            {{- end }}
             {{- if eq $inst.app "plex" }}
             - name: transcode
               mountPath: /transcode
@@ -248,6 +330,24 @@ spec:
             claimName: {{ include "s5n.configClaim" $root }}
         - name: tmp
           emptyDir: {}
+        {{- if $oidc }}
+        # The client secret box wrote into this namespace, created once and
+        # never regenerated: the login holds only its digest.
+        - name: oidc
+          secret:
+            secretName: {{ printf "s5n-oidc-%s" $inst.app }}
+            defaultMode: 0400
+            items:
+              - key: client-secret
+                path: client-secret
+        # Root's anchor, when this box's certificate is not publicly trusted.
+        # optional because a Let's Encrypt box has no ConfigMap and does not
+        # need one; an empty directory is a valid SSL_CERT_DIR.
+        - name: host-ca
+          configMap:
+            name: s5n-host-ca
+            optional: true
+        {{- end }}
         {{- if eq $inst.app "plex" }}
         - name: transcode
           emptyDir: {}

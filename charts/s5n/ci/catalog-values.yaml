@@ -5,6 +5,11 @@
 # never see.
 auth:
   edge: true
+  # box writes this from the grant for an app that speaks OIDC; a plain helm
+  # install sets it to the proxy Service's ClusterIP, which is what the app's
+  # pods reach the login at the box's own name through.
+  oidc:
+    gatewayIP: 10.96.31.116
 
 storage:
   data:

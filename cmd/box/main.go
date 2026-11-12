@@ -744,13 +744,15 @@ func (o *initFlags) run(ctx context.Context, kubeconfig string, yes, plain bool,
 		resolver = setup.FileResolver{Path: o.dnsFile}
 	}
 	d := &setup.Decision{
-		Host:     setup.LinuxPathHost{},
-		Prompt:   prompt,
-		Catalog:  cat,
-		Say:      out,
-		Resolver: resolver,
-		Login:    loginStep(kubeconfig, o.pathsInNode, out, chart),
-		HasLogin: hasLogin(o.pathsInNode),
+		Host:      setup.LinuxPathHost{},
+		Prompt:    prompt,
+		Catalog:   cat,
+		Say:       out,
+		Resolver:  resolver,
+		Login:     loginStep(kubeconfig, o.pathsInNode, out, chart),
+		HasLogin:  hasLogin(o.pathsInNode),
+		GatewayIP: gatewayProxyIP(kubeconfig),
+		Schema:    chart.Schema,
 		Apply: func(ctx context.Context, req setup.ApplyOptions) error {
 			// The cluster decision belongs to `box bootstrap`; apply reuses it.
 			// It is resolved here, after init has written the files, so a host
@@ -875,6 +877,21 @@ func afterConfirm(req setup.ApplyOptions) func(context.Context) (map[string]any,
 			return req.AfterConfirm(ctx)
 		}
 		return nil, nil
+	}
+}
+
+// gatewayProxyIP is the Gateway's proxy address for the grant, read from the
+// cluster by root's run. The kubeconfig is resolved inside the closure because
+// init may be handed none: bootstrap's record answers then, and resolving it
+// here would make `box init` on a host with no cluster fail before its files are
+// written.
+func gatewayProxyIP(kubeconfig string) func(context.Context) (string, error) {
+	return func(ctx context.Context) (string, error) {
+		kc, err := release.ResolveKubeconfig(kubeconfig, os.Getenv("KUBECONFIG"), bootstrap.FilesystemRecords{Path: bootstrap.RecordPath})
+		if err != nil {
+			return "", err
+		}
+		return platform.GatewayProxyIP(ctx, kc)
 	}
 }
 

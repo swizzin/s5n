@@ -108,6 +108,51 @@ func namespacePeer(namespace string) map[string]any {
 	}
 }
 
+// GatewayProxyIP is the ClusterIP of the Service in front of the Gateway's
+// proxy pods: the address an app's pod inside the cluster uses to reach the
+// box's own name, because that name resolves nowhere and the certificate is the
+// box's. docs/box.md, "Apps that call the login themselves".
+//
+// It is found by the labels Envoy Gateway puts on its proxy Service -- the
+// owning Gateway's name and namespace -- rather than through the Gateway's
+// status address. The status address is a LoadBalancer's and is empty until
+// MetalLB has picked one; the ClusterIP exists from the moment the Service does,
+// which is what an install order needs.
+func GatewayProxyIP(ctx context.Context, kubeconfig string) (string, error) {
+	k, err := NewCluster(kubeconfig)
+	if err != nil {
+		return "", err
+	}
+	return k.gatewayProxyIP(ctx)
+}
+
+func (k *Kubernetes) gatewayProxyIP(ctx context.Context) (string, error) {
+	services, err := k.cs.CoreV1().Services(EnvoyGatewayNamespace).List(ctx, metav1.ListOptions{
+		LabelSelector: "app.kubernetes.io/name=envoy,gateway.envoyproxy.io/owning-gateway-name=" + GatewayName +
+			",gateway.envoyproxy.io/owning-gateway-namespace=" + GatewayNamespace,
+	})
+	if err != nil {
+		return "", fmt.Errorf("find the Gateway's proxy Service in %s: %w", EnvoyGatewayNamespace, err)
+	}
+	switch len(services.Items) {
+	case 1:
+		ip := services.Items[0].Spec.ClusterIP
+		if ip == "" || ip == "None" {
+			return "", fmt.Errorf("the Gateway's proxy Service %s/%s has no ClusterIP (%q), so an app pod has no address for the box's own name",
+				EnvoyGatewayNamespace, services.Items[0].Name, ip)
+		}
+		return ip, nil
+	case 0:
+		// Not a refusal: an app that speaks OIDC renders without the address
+		// and the next root run fills it in. The chart's OIDC support is the
+		// reason the value exists, not a reason to stop an install.
+		return "", nil
+	default:
+		return "", fmt.Errorf("%d Services in %s carry the labels of Gateway %s/%s's proxy: box cannot tell which one answers for it",
+			len(services.Items), EnvoyGatewayNamespace, GatewayNamespace, GatewayName)
+	}
+}
+
 // gatewayAddress reads the Gateway box applied; it is the address every later
 // read (and the operator's browser) uses.
 func (k *Kubernetes) gatewayAddress(ctx context.Context, namespace, name string) (string, error) {

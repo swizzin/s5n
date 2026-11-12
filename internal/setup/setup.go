@@ -47,9 +47,17 @@ type Decision struct {
 	Login LoginFunc
 	// HasLogin answers whether the users database already holds this login.
 	// It is how init tells a first run (an empty password means box makes one)
-	// from a re-run (an empty password keeps the one that is there). Nil
-	// answers false.
+	// from a re-run (an empty password keeps the one that is there).
 	HasLogin HasLoginFunc
+	// GatewayIP reads the ClusterIP of the Gateway's proxy Service, which is
+	// how an OIDC app's pod reaches the issuer at the box's own name. It is
+	// read by root's run and written into the grant; a user's apply only
+	// renders what the grant says, because the Gateway's namespace is root's.
+	GatewayIP func(context.Context) (string, error)
+	// Schema is the chart's values.schema.json, so a box installing a release
+	// from before the provider does not write a grant key that release would
+	// refuse.
+	Schema []byte
 	// Say is every line init writes. A nil reporter writes nothing; cmd/box
 	// always gives the plain or the live one.
 	Say say.Reporter
@@ -443,6 +451,30 @@ func (d *Decision) Run(ctx context.Context, opts Options) (Result, error) {
 	}
 	for _, name := range d.Catalog.Names() {
 		grantAnswers = append(grantAnswers, answer{key: "apps." + name + ".enabled", value: contains(apps, name)})
+	}
+	// The Gateway's proxy address, for an app that signs in through the login.
+	// It is written here because init is root's and the read is root's: a
+	// user's apply renders the value from the grant and never touches the
+	// Gateway's namespace. An address that cannot be read yet is not a
+	// failure -- the chart renders the app without it, and the next root run
+	// fills it in -- but it is said out loud, because the app will not start
+	// until it is there.
+	if len(d.Catalog.OIDCApps(apps)) > 0 && d.GatewayIP != nil {
+		declared, err := seedbox.DeclaresOIDCGatewayIP(d.Schema)
+		if err != nil {
+			return res, err
+		}
+		if declared {
+			ip, err := d.GatewayIP(ctx)
+			if err != nil {
+				return res, err
+			}
+			if strings.TrimSpace(ip) == "" {
+				d.report().Warn("the Gateway's proxy Service is not there yet, so the OIDC apps have no address for the box's own name: run `box init` again once `box bootstrap` has installed the Gateway")
+			} else {
+				grantAnswers = append(grantAnswers, answer{key: "auth.oidc.gatewayIP", value: ip})
+			}
+		}
 	}
 
 	res.GrantChanged, res.ValuesChanged, err = d.writeFiles(opts, sb, grantNow, base, grantAnswers, stored)

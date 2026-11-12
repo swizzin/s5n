@@ -96,6 +96,14 @@ var GrantKeys = []Rule{
 	// it from anything in the grant.
 	{Path: "auth.edge", BoxSets: true, Fixed: true, Why: "box puts a login in front of every release, and the chart refuses to render one without it"},
 
+	// The Gateway's proxy address, so an app that speaks OIDC can reach the
+	// issuer at the box's own name. It is box's record rather than a chart
+	// value: a user cannot read the Gateway's namespace, and an app pod that
+	// resolved the name any way but the proxy would fail the certificate
+	// check. Empty on a grant written before the provider existed, and the
+	// chart then renders the app without it.
+	{Path: "auth.oidc.gatewayIP", BoxOnly: true, Why: "the address of the Gateway's proxy, which is how an OIDC app's pod reaches the login at the box's own name"},
+
 	{Path: "global.puid", Why: "the uid every file on the data volume is owned by"},
 	{Path: "global.pgid", Why: "the gid every file on the data volume is owned by"},
 

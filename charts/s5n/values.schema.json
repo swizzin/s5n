@@ -70,6 +70,18 @@
         "edge": {
           "type": "boolean",
           "description": "Must be true. The chart refuses to render when it is missing or false: a release whose admin apps nobody signs in to is not one this chart installs. box sets it."
+        },
+        "oidc": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "How an app in this release reaches the login as an OIDC issuer. The login advertises the URL the browser used (https://<gateway.host>/auth), so an app pod has to reach that name like a browser does: box reads the Gateway's proxy address from the cluster and writes it here, and the chart gives the app's pods a hostAliases entry for it. Absent on a release from before the provider, and the app then renders without it.",
+          "properties": {
+            "gatewayIP": {
+              "type": "string",
+              "minLength": 1,
+              "description": "The ClusterIP of the Service in front of the Gateway's proxy, which is what answers for the box's own name inside the cluster. box writes it from the grant; neither file may set it."
+            }
+          }
         }
       }
     },

@@ -114,6 +114,12 @@ apps:
     description: cross-seed and automation for qBittorrent, in one page
     instances: false
     default: false
+    # qui speaks OIDC, so it signs in through the login's own provider rather
+    # than sitting behind a login it cannot see. The chart is what gives it the
+    # issuer and the client secret; this flag is what makes box register the
+    # client, so a second app that speaks OIDC is one entry here (and the
+    # chart's `oidc:` block beside it) rather than a box release.
+    oidc: true
     questions: []
 
   # Opt-in, and louder so: it deletes media and torrents on rules the operator
