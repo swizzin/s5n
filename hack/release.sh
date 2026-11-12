@@ -7,6 +7,10 @@
 #
 # Usage: hack/release.sh <step> [argument]
 #
+#   route <output>            (IN_VERSION, IN_REF, REF_NAME, REF) which family,
+#                             which version, which ref, and whether this is the
+#                             automatic release; writes them to <output> the way
+#                             the workflow writes $GITHUB_OUTPUT
 #   verify-version            (VERSION, AUTOMATED) the version is the chart's,
 #                             or one patch above the last s5n-v* tag
 #   stamp-digest <workdir>    (DIGEST) copy charts/s5n there and stamp
@@ -25,7 +29,8 @@ set -euo pipefail
 
 usage() {
   cat >&2 <<'USAGE'
-usage: hack/release.sh verify-version
+usage: hack/release.sh route <output>
+       hack/release.sh verify-version
        hack/release.sh stamp-digest <workdir>
        hack/release.sh package-chart <workdir>
        hack/release.sh notes <body.md>
@@ -43,6 +48,52 @@ need_path() {
   /*) ;;
   *) echo "release: $1 needs an absolute path (got '${2:-}')" >&2; exit 2 ;;
   esac
+}
+
+# step_route is release.yaml's first question: a tag push or a call from the
+# push to main, and then which family, which version, which ref. It reads the
+# version input, never github.event_name: a called workflow's `github` context
+# is the caller's, so in the called release event_name is `push` and ref_name
+# is `main`, and a test for workflow_call there is false forever -- route took
+# the tag-push branch on `main` and refused. inputs exist only under
+# workflow_call, so a set version input is the only signal that survives, and
+# it is also what makes the s5n steps automatic.
+step_route() {
+  local out=${1:-}
+  need_path output "$out"
+  local family version ref automated=false
+  if [[ -n "${IN_VERSION:-}" ]]; then
+    # Only the chart family is ever called: the push to main that
+    # decided to release always cuts s5n-v*.
+    family=s5n
+    version="$IN_VERSION"
+    ref="$IN_REF"
+    automated=true
+  else
+    # A tag push: the family is the prefix and the version is what
+    # follows it. v0.2.0 is history and matches neither prefix.
+    case "$REF_NAME" in
+      s5n-v*) family=s5n; version="${REF_NAME#s5n-v}" ;;
+      box-v*) family=box; version="${REF_NAME#box-v}" ;;
+      *) echo "tag ${REF_NAME} is neither s5n-v* nor box-v*" >&2; exit 1 ;;
+    esac
+    ref="$REF"
+  fi
+  case "$family" in
+    s5n|box) ;;
+    *) echo "family '${family}': only s5n or box" >&2; exit 1 ;;
+  esac
+  if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+([+-][0-9A-Za-z.-]+)?$ ]]; then
+    echo "version '${version}': a release version is <major>.<minor>.<patch>" >&2
+    exit 1
+  fi
+  echo "family=${family} version=${version} ref=${ref}"
+  {
+    echo "family=${family}"
+    echo "version=${version}"
+    echo "ref=${ref}"
+    echo "automated=${automated}"
+  } >> "$out"
 }
 
 # step_verify_version is release.yaml's s5n-verify question: a maintainer's tag
@@ -211,6 +262,7 @@ step_notes() {
 }
 
 case "${1:-}" in
+  route) step_route "${2:-}" ;;
   verify-version) step_verify_version ;;
   stamp-digest) step_stamp_digest "${2:-}" ;;
   package-chart) step_package_chart "${2:-}" ;;

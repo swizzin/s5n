@@ -6,6 +6,11 @@
 # so this runs the same code, never a copy of it: a copy passes while the
 # release fails, which is the failure that shipped both bugs.
 #
+# The same goes for the decision in front of those steps: release.yaml is called
+# by ci.yaml, whose `github` context is a push to main, so route decides
+# called-or-tag from the version input and this runs it for both. The
+# automatic path is then driven by route's own output, not a hand-set flag.
+#
 # CI runs it as test.yaml's release-rehearsal job; a maintainer runs it on a
 # checkout. It needs git, go, helm, kubeconform, jq and python3, builds no
 # image and touches no cluster. Tags are made and deleted only in a scratch
@@ -223,6 +228,81 @@ git -C "$clone" commit --quiet -am "rehearsal: appVersion drifts from version"
 expect_fail "version check: a maintainer's tag equal to the version but not appVersion is refused" \
   "charts/s5n/Chart.yaml appVersion is 9.9.9, but the tag is s5n-v${chart_version}: the image tag and the chart's appVersion are the same version" \
   env VERSION="$chart_version" AUTOMATED=false "$clone/hack/release.sh" verify-version
+
+# ---- d. route: a call from ci.yaml, or a tag push ---------------------------
+# release.yaml is called by ci.yaml, and a called workflow's `github` context is
+# the caller's: in that release the event is the push to main and the ref name
+# is `main`, never workflow_call. So nothing in the release may ask the event
+# name which branch it is on -- route asks whether the version input is set,
+# and that input only exists under workflow_call. This section decides the four
+# cases route has met, and then feeds route's own answer into the next two
+# steps, so the automatic path is driven end to end by what route decided
+# rather than by a hand-set AUTOMATED.
+echo "== d. route"
+rclone="$tmp/clone-route"
+git clone --no-local --quiet . "$rclone"
+git -C "$rclone" remote set-url origin "$rclone"
+git -C "$rclone" tag -l 's5n-v*' | xargs -r git -C "$rclone" tag -d >/dev/null
+# The previous release, so the automatic version route reports has a tag to be
+# one patch above.
+git -C "$rclone" tag "s5n-v${chart_version}"
+cp -p "$release" "$rclone/hack/release.sh"
+route_dir="$tmp/route"
+mkdir -p "$route_dir"
+
+called_out="$route_dir/called.out"
+expect_ok "route: the call from ci.yaml is the s5n tag it was told to build" \
+  "family=s5n version=${auto_version} ref=s5n-v${auto_version}" \
+  env IN_VERSION="$auto_version" IN_REF="s5n-v${auto_version}" REF_NAME=main REF=refs/heads/main \
+  "$release" route "$called_out"
+has "route: the call is automated" "$called_out" "automated=true"
+hasnt "route: the call builds the input's ref, not the caller's refs/heads/main" "$called_out" "refs/heads/main"
+
+# The reverse: no version input, so a tag push, even with EVENT saying
+# workflow_call. A step that reads the event name takes the called branch here
+# and finds no version to release.
+tag_out="$route_dir/tag.out"
+expect_ok "route: a maintainer's tag push is s5n at the pushed tag" \
+  "family=s5n version=${chart_version} ref=refs/tags/s5n-v${chart_version}" \
+  env EVENT=workflow_call REF_NAME="s5n-v${chart_version}" REF="refs/tags/s5n-v${chart_version}" \
+  "$release" route "$tag_out"
+has "route: a tag push is not automated" "$tag_out" "automated=false"
+
+box_out="$route_dir/box.out"
+expect_ok "route: a box tag is the box family at the pushed tag" \
+  "family=box version=${chart_version} ref=refs/tags/box-v${chart_version}" \
+  env REF_NAME="box-v${chart_version}" REF="refs/tags/box-v${chart_version}" "$release" route "$box_out"
+has "route: a box tag is not automated" "$box_out" "automated=false"
+
+expect_fail "route: a tag that is neither family is refused" \
+  "tag v0.2.0 is neither s5n-v* nor box-v*" \
+  env REF_NAME=v0.2.0 REF=refs/tags/v0.2.0 "$release" route "$route_dir/neither.out"
+
+expect_fail "route: a version that is not <major>.<minor>.<patch> is refused" \
+  "version '0.3': a release version is <major>.<minor>.<patch>" \
+  env IN_VERSION=0.3 IN_REF=s5n-v0.3 REF_NAME=main REF=refs/heads/main \
+  "$release" route "$route_dir/badversion.out"
+
+# route's answer, read the way the workflow reads its outputs, drives the two
+# steps that used to build AUTOMATED from the event name themselves. If route
+# refused, they run without a version and fail with their own message: the
+# rehearsal reports that, it does not stop here.
+called_version=$(sed -n 's/^version=//p' "$called_out" || true)
+called_automated=$(sed -n 's/^automated=//p' "$called_out" || true)
+expect_ok "route -> verify-version: the automatic version route reported (${called_version}) is one patch above ${chart_version}" \
+  "releasing s5n ${called_version}" \
+  env VERSION="$called_version" AUTOMATED="$called_automated" "$rclone/hack/release.sh" verify-version
+
+work="$tmp/route-chart"
+run env VERSION="$called_version" DIGEST="$digest" AUTOMATED="$called_automated" "$rclone/hack/release.sh" stamp-digest "$work"
+if [ "$rc" -ne 0 ]; then
+  printf '%s\n' "$out" >&2
+  bad "route -> stamp-digest: exit ${rc}"
+fi
+expect_ok "route -> package-chart: the automatic chart is packaged at ${called_version} and renders it" \
+  "packaged s5n-${called_version}.tgz naming ghcr.io/swizzin/s5n:${called_version}@${digest}" \
+  env VERSION="$called_version" DIGEST="$digest" AUTOMATED="$called_automated" \
+  "$rclone/hack/release.sh" package-chart "$work"
 
 if [ "$fail" -ne 0 ]; then
   echo "release-rehearsal: FAILED" >&2

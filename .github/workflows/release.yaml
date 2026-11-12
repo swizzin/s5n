@@ -18,6 +18,15 @@
 # to build. Both triggers meet in `route`, the one place the family, the version
 # and the ref are decided; a job for a family whose turn it is not is skipped.
 #
+# route asks "called or tag push" of the version input, never of the event
+# name. A called workflow's `github` context is the caller's, so in the
+# release ci.yaml calls, the event is a `push` and the ref name `main`: a test
+# for workflow_call here is false forever, and route took the tag-push branch
+# on `main`. inputs exist only under workflow_call, so a set version input is
+# the one signal that survives, and it is also what makes the s5n steps
+# automatic (the version is one patch above the last s5n-v* tag and the chart
+# is packaged --version/--app-version).
+#
 # There is no off switch in the repo. If releases have to stop, disable this
 # workflow (or ci) in GitHub's Actions tab: a disabled workflow runs nothing, so
 # a maintainer's tag publishes nothing either, which is what a kill switch has
@@ -76,47 +85,19 @@ jobs:
       family: ${{ steps.route.outputs.family }}
       version: ${{ steps.route.outputs.version }}
       ref: ${{ steps.route.outputs.ref }}
+      automated: ${{ steps.route.outputs.automated }}
     steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # The check is hack/release.sh's, so test.yaml's rehearsal decides these
+      # same questions with this same code.
       - name: which family, which version, which ref
         id: route
         env:
-          EVENT: ${{ github.event_name }}
           REF_NAME: ${{ github.ref_name }}
           REF: ${{ github.ref }}
           IN_VERSION: ${{ inputs.version }}
           IN_REF: ${{ inputs.ref }}
-        run: |
-          set -euo pipefail
-          if [[ "$EVENT" = workflow_call ]]; then
-            # Only the chart family is ever called: the push to main that
-            # decided to release always cuts s5n-v*.
-            family=s5n
-            version="$IN_VERSION"
-            ref="$IN_REF"
-          else
-            # A tag push: the family is the prefix and the version is what
-            # follows it. v0.2.0 is history and matches neither prefix.
-            case "$REF_NAME" in
-              s5n-v*) family=s5n; version="${REF_NAME#s5n-v}" ;;
-              box-v*) family=box; version="${REF_NAME#box-v}" ;;
-              *) echo "tag ${REF_NAME} is neither s5n-v* nor box-v*" >&2; exit 1 ;;
-            esac
-            ref="$REF"
-          fi
-          case "$family" in
-            s5n|box) ;;
-            *) echo "family '${family}': only s5n or box" >&2; exit 1 ;;
-          esac
-          if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+([+-][0-9A-Za-z.-]+)?$ ]]; then
-            echo "version '${version}': a release version is <major>.<minor>.<patch>" >&2
-            exit 1
-          fi
-          echo "family=${family} version=${version} ref=${ref}"
-          {
-            echo "family=${family}"
-            echo "version=${version}"
-            echo "ref=${ref}"
-          } >> "$GITHUB_OUTPUT"
+        run: hack/release.sh route "$GITHUB_OUTPUT"
 
   # ---- s5n: the image and the chart -------------------------------------------
   s5n-verify:
@@ -131,7 +112,7 @@ jobs:
       - name: the version is the chart's, or one patch above the last tag
         env:
           VERSION: ${{ needs.route.outputs.version }}
-          AUTOMATED: ${{ github.event_name == 'workflow_call' }}
+          AUTOMATED: ${{ needs.route.outputs.automated }}
         run: hack/release.sh verify-version
 
   s5n-image:
@@ -219,7 +200,7 @@ jobs:
         env:
           VERSION: ${{ needs.route.outputs.version }}
           DIGEST: ${{ needs.s5n-image.outputs.digest }}
-          AUTOMATED: ${{ github.event_name == 'workflow_call' }}
+          AUTOMATED: ${{ needs.route.outputs.automated }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
