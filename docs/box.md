@@ -238,6 +238,21 @@ in a Secret volume. That means exactly one replica, with file watching on, so a 
 change shows up without a restart. Its sign-in page is served at `/auth` on each
 seedbox's own host name, so a seedbox needs one certificate and one cookie domain.
 
+**Apps that speak OIDC sign in through the login (decided).** Authelia is also an OIDC
+provider, with issuer `https://<host>/auth`; an app the chart's catalog marks `oidc: true`
+(qui first) has its own login switched to it, so a user still signs in once and the app's
+first visit is a redirect that comes straight back. Each seedbox has its own client per
+app, `<namespace>-<app>`, and its own authorization policy that admits only that seedbox's
+user. root's `init` writes the client secret once into a Secret in the seedbox's
+namespace and only its digest into the login; the provider's signing key is generated
+once and kept beside the login's other key, outside its ConfigMap. The app reaches the
+issuer from its own pod over the box's own HTTPS name: the chart aliases that name to the
+Gateway's proxy Service (an address root's `init` records in the grant), opens egress to
+the proxy alone, and trusts the box's root where the certificate is self-signed. Only the
+Gateway's proxy may reach the login's pod at all. A plain `helm install`, or a grant from
+before the provider, has no recorded address, and the app keeps its own login switched
+off behind the edge's.
+
 **The login is on root's Gateway, and users can't take it off (decided).** The
 SecurityPolicy that sends requests to Authelia targets the `s5n` Gateway itself and lives
 beside it in `s5n-gateway`, so every listener is behind the login unless root says
@@ -557,6 +572,14 @@ validated, self-signed otherwise. This is how box would do it.
   applied only when it differs, so a rule never depends on which command wrote it.
   Adding a rule rolls the login, and its sessions live in memory, so everyone signs in
   again.
+- **A first install serves its hosts before the release (decided).** `init` decides each
+  host's issuer once, then, after the confirm and before the release moves, installs the
+  login, writes the seedbox namespace's own objects and runs the per-host step for every
+  host it decided, so an app that calls the box's own HTTPS name at startup (an OIDC
+  client) finds it there. A host whose certificate is not the one this run decided (an
+  issuer that moved once the name started answering, or a self-signed one not on the box
+  root) counts as work like a missing one; a box where everything is right still says
+  there is nothing to change.
 - **No run leaves an app host unserved (decided).** When root's `apply` would serve an
   enabled app on a host that is missing any of the three, it runs the per-host step after
   the confirm and before the release moves, DNS check included; a mismatch stops with the
