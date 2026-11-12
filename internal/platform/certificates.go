@@ -12,6 +12,7 @@ import (
 
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 
+	"github.com/swizzin/s5n/internal/authelia"
 	"github.com/swizzin/s5n/internal/kube"
 	"github.com/swizzin/s5n/internal/say"
 )
@@ -347,14 +348,20 @@ func (d *CertificateDecision) redirect(ctx context.Context, cl Cluster, name str
 	return nil
 }
 
-// HostServed reports whether a host already has the two objects root's per-host
-// step writes: its HTTPS listener on the Gateway and its Certificate. It reads
-// the cluster, never a record box kept, so a listener somebody deleted is
-// missing again and the next run puts it back.
+// HostServed reports whether a host already has the three objects an app host
+// needs: its HTTPS listener on the Gateway, its Certificate, and the login's
+// access_control rule for the name. It reads the cluster, never a record box
+// kept, so a listener or a rule somebody deleted is missing again and the next
+// run puts it back.
 //
 // The port-80 listener and the Allow are not part of the answer: they exist
 // only to let a certificate issue, and a host whose certificate is Ready but
 // whose challenge listener was removed still serves its app.
+//
+// The rule is: the Gateway asks the login about every listener, and a host with
+// no access_control rule gets default_policy deny -- a 403 nobody can get past.
+// A host with its listener and its certificate but no rule is an app that
+// answers nothing, which is the state this read exists to catch.
 func (k *Kubernetes) HostServed(ctx context.Context, host string) (bool, error) {
 	gw, ok, err := k.Get(ctx, "gateway.networking.k8s.io", "v1", "Gateway", GatewayNamespace, GatewayName)
 	if err != nil {
@@ -371,10 +378,32 @@ func (k *Kubernetes) HostServed(ctx context.Context, host string) (bool, error) 
 		return false, nil
 	}
 	_, ok, err = k.Get(ctx, "cert-manager.io", "v1", "Certificate", GatewayNamespace, CertificateName(host))
+	if err != nil || !ok {
+		return false, err
+	}
+	return k.hostRuled(ctx, host)
+}
+
+// hostRuled reads the login's configuration for one host's rule. A box whose
+// login is not installed yet has no configuration and therefore no rule, which
+// is an answer (the host is not served), not an error.
+func (k *Kubernetes) hostRuled(ctx context.Context, host string) (bool, error) {
+	cm, ok, err := k.Get(ctx, "", "v1", "ConfigMap", authelia.SystemNamespace, authelia.ConfigMapName)
 	if err != nil {
 		return false, err
 	}
-	return ok, nil
+	if !ok {
+		return false, nil
+	}
+	return hasHostRule(cm, host), nil
+}
+
+// hasHostRule reads one host's rule out of the login's ConfigMap document. The
+// configuration is the file the login starts with, so a name with no rule in it
+// is a request the login answers with default_policy deny.
+func hasHostRule(cm map[string]any, host string) bool {
+	data, _, _ := unstructured.NestedStringMap(cm, "data")
+	return authelia.HasRule(data[authelia.ConfigFile], host)
 }
 
 // hasHTTPSListener reads one listener out of a Gateway document: the host's own

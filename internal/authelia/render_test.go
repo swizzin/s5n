@@ -314,3 +314,37 @@ func TestGeneratePassword(t *testing.T) {
 		seen[p] = true
 	}
 }
+
+// TestHasRuleReadsTheRenderedConfiguration: the read that decides whether a host
+// is served asks this file, so it has to find a rule exactly where the template
+// writes one -- and must not answer yes for a name the file never mentions,
+// which is the 403 the per-host step exists to prevent.
+func TestHasRuleReadsTheRenderedConfiguration(t *testing.T) {
+	c := testConfiguration()
+	c.Rules = Rules("box.example.com", "alice", InstancesFromValues(fixtureValues()), []string{"seerr"})
+	rendered, err := RenderConfiguration(c)
+	if err != nil {
+		t.Fatalf("RenderConfiguration: %v", err)
+	}
+	text := string(rendered)
+	for _, host := range []string{"box.example.com", "seerr.box.example.com"} {
+		if !HasRule(text, host) {
+			t.Errorf("no rule for %s in:\n%s", host, text)
+		}
+	}
+	if HasRule(text, "plex.box.example.com") {
+		t.Error("a name the configuration never mentions has a rule")
+	}
+	if HasRule("", "box.example.com") || HasRule("not: [valid", "box.example.com") {
+		t.Error("an empty or unparseable configuration answered a rule")
+	}
+}
+
+// TestHasRuleReadsASingleDomainToo: Authelia accepts one string or a list, and a
+// hand-edited configuration is still the login that is running.
+func TestHasRuleReadsASingleDomainToo(t *testing.T) {
+	configuration := "access_control:\n  default_policy: 'deny'\n  rules:\n    - domain: 'box.example.com'\n      policy: 'one_factor'\n"
+	if !HasRule(configuration, "box.example.com") {
+		t.Fatal("a rule written with one domain string was not found")
+	}
+}

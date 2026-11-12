@@ -103,6 +103,24 @@ type HostPlan struct {
 	Domain string
 	Forced string
 	Hosts  []string
+	// Rule is the login's half of the same step: a host is not served without
+	// its access_control rule, and the rule is rendered from the same inputs
+	// init renders it from. It is filled in for Ensure only; Missing is a read
+	// of the cluster and needs none of it.
+	Rule HostRule
+}
+
+// HostRule is one rule write: who logs in, the document the access_control
+// rules are derived from, and every app the chart serves at a host of its own --
+// the whole list, because the login's configuration is rewritten whole and a
+// name left out would lose the rule it already had.
+type HostRule struct {
+	Login  string
+	Hosted []string
+	Values map[string]any
+	// Image is the login Deployment's pinned image: the rule write applies the
+	// login's objects from the template init uses, and the image is part of it.
+	Image string
 }
 
 // Hosts is root's per-host TLS step: the listener and Certificate an app
@@ -346,7 +364,7 @@ func (a *Applier) Apply(ctx context.Context, opts Options) (Result, error) {
 	// listener"). The read is the cluster's, not a record box kept.
 	var hostPlan HostPlan
 	if opts.Hosts != nil {
-		hostPlan, err = a.hostPlan(ctx, opts, chart, values)
+		hostPlan, err = a.hostPlan(ctx, opts, chart, sb, values)
 		if err != nil {
 			return res, err
 		}
@@ -384,9 +402,9 @@ func (a *Applier) Apply(ctx context.Context, opts Options) (Result, error) {
 	if len(hostPlan.Hosts) > 0 {
 		lines := make([]string, 0, len(hostPlan.Hosts))
 		for _, host := range hostPlan.Hosts {
-			lines = append(lines, "Certificate and listener for "+host)
+			lines = append(lines, "Certificate, listener and login rule for "+host)
 		}
-		r.List("certificates", lines)
+		r.List("app hosts", lines)
 	}
 
 	ok, err := a.Confirm.Ask(fmt.Sprintf("apply %s in %s?", ReleaseName, namespace))
@@ -506,14 +524,14 @@ func (a *Applier) loadChart(ctx context.Context, opts Options) (Chart, error) {
 }
 
 // hostPlan is the per-host TLS work this apply has: every name the values serve
-// at a host of its own, less the ones the cluster already has a listener and a
-// Certificate for.
+// at a host of their own, less the ones the cluster already has a listener, a
+// Certificate and a login rule for.
 //
 // Which apps get a host is the catalog's (`exposure: host`), so this reads the
 // chart release's manifest the same way init does. A chart that ships no
 // catalog serves no app at a host of its own, and one whose values name no
 // domain cannot name one.
-func (a *Applier) hostPlan(ctx context.Context, opts Options, chart Chart, values map[string]any) (HostPlan, error) {
+func (a *Applier) hostPlan(ctx context.Context, opts Options, chart Chart, sb *seedbox.Seedbox, values map[string]any) (HostPlan, error) {
 	plan := HostPlan{Domain: hostOf(values), Forced: forcedIssuer(values)}
 	hosts, err := hostedHosts(chart, values, plan.Domain)
 	if err != nil {
@@ -527,6 +545,22 @@ func (a *Applier) hostPlan(ctx context.Context, opts Options, chart Chart, value
 		return plan, err
 	}
 	plan.Hosts = missing
+	if len(missing) == 0 {
+		return plan, nil
+	}
+	// The rule the hosts need is the login's, so its inputs are the grant's
+	// account and the document the release renders: the same two init passes to
+	// internal/login, which is what makes the two commands write one rule.
+	login, err := sb.Login()
+	if err != nil {
+		return plan, err
+	}
+	plan.Rule = HostRule{
+		Login:  login,
+		Hosted: hostedApps(hosts, plan.Domain),
+		Values: values,
+		Image:  chart.Pins.Authelia,
+	}
 	return plan, nil
 }
 
@@ -554,6 +588,22 @@ func hostedHosts(chart Chart, values map[string]any, domain string) ([]string, e
 		hosts = append(hosts, name+"."+domain)
 	}
 	return hosts, nil
+}
+
+// hostedApps is the app names behind the hosts hostedHosts returns, which is
+// what the login's rules are keyed by: an app served at <app>.<domain> is one
+// app name, and Rules() expects those, not the full names.
+func hostedApps(hosts []string, domain string) []string {
+	suffix := "." + domain
+	out := make([]string, 0, len(hosts))
+	for _, host := range hosts {
+		app := strings.TrimSuffix(host, suffix)
+		if app == host {
+			continue
+		}
+		out = append(out, app)
+	}
+	return out
 }
 
 // forcedIssuer is tls.issuer as the files left it in the effective document:

@@ -29,6 +29,18 @@ func ClaimName(namespace, kind string) string {
 	return namespace + "-s5n-" + kind
 }
 
+// Login is the account root's login admits: the grant's box-only record of who
+// this box belongs to, written once by `box init` and read back on every run.
+// An apply that has a host to serve needs it, because that host's access_control
+// rule admits exactly this account.
+func (s *Seedbox) Login() (string, error) {
+	name, _ := s.Grant.data["login"].(string)
+	if strings.TrimSpace(name) == "" {
+		return "", fmt.Errorf("%s: login is missing; it is the account root's login admits, and an app host cannot be served without its rule: run `box init` as root", s.Grant.Path)
+	}
+	return name, nil
+}
+
 // Namespace is the grant's `namespace` key, which is box's own record and never
 // a chart value. It names the release namespace and every object box creates
 // beside the release, so it is read before anything is sent to Helm.

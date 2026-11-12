@@ -7,6 +7,8 @@ import (
 	"strings"
 	"text/template"
 
+	"go.yaml.in/yaml/v3"
+
 	autheliaassets "github.com/swizzin/s5n/install/platform/authelia"
 )
 
@@ -187,6 +189,56 @@ func Rules(host, login string, instances []Instance, hosted []string) []Rule {
 		rules = append(rules, Rule{Domain: d, Policy: PolicyOneFactor, Subject: login})
 	}
 	return rules
+}
+
+// HasRule reports whether a rendered configuration carries an access_control
+// rule for domain.
+//
+// It reads the file box itself writes, so the shape it parses is the
+// template's: one rule per domain, the domain written as a list. A domain is
+// what the edge asks Authelia about, and a host with no rule falls through to
+// default_policy deny -- a 403 nobody can get past -- which is why the per-host
+// step counts a host as served only when its rule is in this file.
+//
+// A rule with no domain at all is not a match for anything (Authelia refuses
+// the file, so it cannot be serving anyone either), and a domain written as one
+// string rather than a list is read the same way: a hand-edited configuration
+// should answer this question rather than look rule-less.
+func HasRule(configuration, domain string) bool {
+	var doc struct {
+		AccessControl struct {
+			Rules []struct {
+				Domain yaml.Node `yaml:"domain"`
+			} `yaml:"rules"`
+		} `yaml:"access_control"`
+	}
+	if err := yaml.Unmarshal([]byte(configuration), &doc); err != nil {
+		return false
+	}
+	for _, rule := range doc.AccessControl.Rules {
+		for _, d := range domainsOf(rule.Domain) {
+			if strings.EqualFold(d, domain) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// domainsOf is one rule's domain, whether it was written as a list or as a
+// single value.
+func domainsOf(n yaml.Node) []string {
+	switch n.Kind {
+	case yaml.ScalarNode:
+		return []string{n.Value}
+	case yaml.SequenceNode:
+		out := make([]string, 0, len(n.Content))
+		for _, c := range n.Content {
+			out = append(out, c.Value)
+		}
+		return out
+	}
+	return nil
 }
 
 // regexpQuote escapes the characters a URL prefix may hold that a regex reads

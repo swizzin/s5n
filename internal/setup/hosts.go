@@ -14,6 +14,17 @@ import (
 // name, with which issuer, and refuses the names a certificate can never issue.
 type HostFunc func(ctx context.Context, h Host) error
 
+// RuleFunc writes the login's access_control rule for the hosts a step is
+// serving: the third thing an app host needs beside its listener and its
+// Certificate (docs/box.md, "An app host is guarded the way its path was").
+//
+// It is a second function rather than part of HostFunc because the login keeps
+// one configuration for the whole box: the rule write happens once, for every
+// name the step decided, and it is the login's own writer that does it. Nil
+// says the caller has already written the rules -- init installs the login
+// before its per-host step, so the rules for its names exist by then.
+type RuleFunc func(ctx context.Context, hosts []Host) error
+
 // ApplyHosts is the one per-host write both box commands use: every decided
 // host, in order, through one function. init runs it after its hand-over;
 // apply runs it from TLSHosts.Ensure, before the release moves.
@@ -32,10 +43,10 @@ func ApplyHosts(ctx context.Context, apply HostFunc, hosts []Host) error {
 	return nil
 }
 
-// TLSHosts is root's per-host TLS step for names a run is about to serve: an
-// app served at a host of its own gets that host's listener and Certificate
-// before anything else moves (docs/box.md, "No run leaves an app host without
-// its listener").
+// TLSHosts is root's per-host step for names a run is about to serve: an app
+// served at a host of its own gets the login's rule for the name, that host's
+// listener and its Certificate, before anything else moves (docs/box.md, "No
+// run leaves an app host without its listener").
 //
 // It is the same decision init makes for every name, over the same DNS check:
 // a name that does not answer where the box's domain does can never issue, so
@@ -65,6 +76,11 @@ type TLSHosts struct {
 	Allowed func(ctx context.Context) (bool, error)
 	// Apply writes one host.
 	Apply HostFunc
+	// Rules writes the login's rule for the hosts this step serves, once for
+	// all of them and before the first listener: the configuration is one file
+	// for the box, and a stop after it leaves only the rules the next run
+	// rewrites from the same values. Nil skips it.
+	Rules RuleFunc
 	Say   say.Reporter
 }
 
@@ -114,6 +130,15 @@ func (t *TLSHosts) Ensure(ctx context.Context, hosts []string) error {
 		}
 		if !ok {
 			return t.noAccess(hosts)
+		}
+	}
+	// The login's rule is the host's third object, and it is written first: the
+	// configuration is one file for the box, so it is written once for every
+	// name this step decided, and neither a listener nor a certificate is
+	// worth writing for a name the login would refuse with a 403.
+	if t.Rules != nil {
+		if err := t.Rules(ctx, decided); err != nil {
+			return err
 		}
 	}
 	r.Phase("certificate")

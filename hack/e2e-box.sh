@@ -1743,16 +1743,16 @@ EOF
   [ "$(sha256sum "$WORK/grant.yaml" | cut -d' ' -f1)" = "$grant_before" ] ||
     { echo "box rewrote the grant"; fail=1; }
 
-  # ---- a host that has neither its listener nor its certificate ---------------
+  # ---- a host that has none of the three objects it needs ---------------------
   # The case the promise is about: the release renders a route on seerr.<domain>
   # while nothing answers there, so the app is unreachable and nothing says so
   # (docs/box.md, "No run leaves an app host without its listener"). The box is
-  # put in the state an install without Seerr leaves: the app off, and root's
-  # per-host objects (Certificate, both listeners) gone. The login's rule for
-  # the name stays -- apply writes the host, not the edge's access control, and
-  # that gap is the reason this scenario keeps the rule instead of installing
-  # without Seerr (internal/login is not apply's; init is what writes it).
-  log "turning Seerr off, then removing the host root had written for it"
+  # put in the state an install without Seerr leaves: the app off, and all three
+  # of root's per-host objects gone -- the Certificate, both listeners, and the
+  # login's access_control rule for the name. apply has to write the rule as
+  # well: a host with a listener and a Certificate but no rule answers the
+  # login's default deny, which is a 403 nobody can get past.
+  log "turning Seerr off, then removing everything root had written for its host"
   python3 - "$WORK/grant.yaml" <<'PY' || { echo "could not turn Seerr off in the grant"; fail=1; }
 import re, sys
 path = sys.argv[1]
@@ -1793,9 +1793,52 @@ PY
     [ -z "$still" ] || { echo "the listener ${gone} is still on the Gateway"; fail=1; }
   done
 
+  # The login's rule goes too, and the pod is rolled onto the rule-less file, so
+  # the login that is actually answering has never heard of the name -- which is
+  # what a box installed without Seerr looks like. Editing the ConfigMap here is
+  # the only way to remove a rule: box always writes the whole configuration.
+  log "removing the login's rule for ${SEERR_HOST}, as a box installed without Seerr has none"
+  $K -n s5n-system get cm s5n-authelia -o jsonpath='{.data.configuration\.yml}' >"$WORK/authelia-unruled.yml" || fail=1
+  python3 - "$WORK/authelia-unruled.yml" "$SEERR_HOST" <<'PY' || { echo "could not remove the login's rule for the app host"; fail=1; }
+import sys
+path, host = sys.argv[1], sys.argv[2]
+lines = open(path).read().splitlines(keepends=True)
+out, dropped, skipping = [], 0, False
+for line in lines:
+    if skipping:
+        # A rule's body: policy, resources and subject are indented under the
+        # "- domain:" line that opened it.
+        if line.startswith("      "):
+            continue
+        skipping = False
+    if line.startswith("    - domain: ") and ("'%s'" % host) in line:
+        skipping, dropped = True, dropped + 1
+        continue
+    out.append(line)
+if dropped != 1:
+    sys.exit("the login's configuration has %d rules for %s, want one" % (dropped, host))
+open(path, "w").write("".join(out))
+PY
+  ruled_before=$(sha256sum "$WORK/authelia-unruled.yml" | cut -d' ' -f1)
+  $K -n s5n-system create configmap s5n-authelia \
+    --from-file=configuration.yml="$WORK/authelia-unruled.yml" \
+    --dry-run=client -o yaml | $K apply -f - >/dev/null ||
+    { echo "could not write the rule-less login configuration"; fail=1; }
+  # The hash is what rolls the pod: without it the running login would still
+  # have the rule, and the apply below would pass for the wrong reason.
+  $K -n s5n-system patch deploy authelia --type=merge \
+    -p "{\"spec\":{\"template\":{\"metadata\":{\"annotations\":{\"s5n.io/config-hash\":\"${ruled_before}\"}}}}}" >/dev/null ||
+    { echo "could not roll the login onto the rule-less configuration"; fail=1; }
+  $K -n s5n-system rollout status deploy/authelia --timeout=180s >/dev/null ||
+    { echo "the login did not come back on the rule-less configuration"; fail=1; }
+  authelia_uid_before=$($K -n s5n-system get pod -l app.kubernetes.io/name=authelia -o jsonpath='{.items[0].metadata.uid}' || true)
+  still_ruled=$($K -n s5n-system get cm s5n-authelia -o jsonpath='{.data.configuration\.yml}' | grep -cF "'${SEERR_HOST}'" || true)
+  echo "  rules for ${SEERR_HOST} in the login's configuration: ${still_ruled}"
+  [ "$still_ruled" = 0 ] || { echo "the login still has a rule for ${SEERR_HOST}"; fail=1; }
+
   # Root turns the app back on in the grant. There is no `box install` yet, so
   # this is the only way an app is added to a seedbox.
-  log "box apply: an app host with no listener gets one before the release moves"
+  log "box apply: an app host with none of its objects gets all three before the release moves"
   python3 - "$WORK/grant.yaml" <<'PY' || { echo "could not turn Seerr on in the grant"; fail=1; }
 import re, sys
 path = sys.argv[1]
@@ -1810,16 +1853,20 @@ PY
   else
     cat "$WORK/apply-seerr.txt"; fail=1
   fi
-  grep -qF "Certificate and listener for ${SEERR_HOST}" "$WORK/apply-seerr.txt" ||
-    { echo "apply did not show the certificate it would write for ${SEERR_HOST}"; fail=1; }
+  grep -qF "Certificate, listener and login rule for ${SEERR_HOST}" "$WORK/apply-seerr.txt" ||
+    { echo "apply did not show the login rule it would write for ${SEERR_HOST}"; fail=1; }
   grep -qF "applied Certificate s5n-gateway/${seerr_cert} (issuer s5n-letsencrypt)" "$WORK/apply-seerr.txt" ||
     { echo "apply did not write ${seerr_cert} with the production issuer"; fail=1; }
+  grep -qF "login: the rule for ${SEERR_HOST} is in place" "$WORK/apply-seerr.txt" ||
+    { echo "apply did not write the login's rule for ${SEERR_HOST}"; fail=1; }
   # The order is the promise: the host is served before the release that renders
   # its route moves, so there is never a route on a name nothing answers on.
   seerr_cert_line=$(grep -n "applied Certificate s5n-gateway/${seerr_cert}" "$WORK/apply-seerr.txt" | head -1 | cut -d: -f1 || true)
+  seerr_rule_line=$(grep -n "login: the rule for ${SEERR_HOST} is in place" "$WORK/apply-seerr.txt" | head -1 | cut -d: -f1 || true)
   seerr_helm_line=$(grep -n "applied: s5n revision" "$WORK/apply-seerr.txt" | head -1 | cut -d: -f1 || true)
-  echo "  certificate at line ${seerr_cert_line}, release at line ${seerr_helm_line}"
-  if [ -z "$seerr_cert_line" ] || [ -z "$seerr_helm_line" ] || [ "$seerr_cert_line" -ge "$seerr_helm_line" ]; then
+  echo "  login rule at line ${seerr_rule_line}, certificate at line ${seerr_cert_line}, release at line ${seerr_helm_line}"
+  if [ -z "$seerr_rule_line" ] || [ -z "$seerr_cert_line" ] || [ -z "$seerr_helm_line" ] ||
+     [ "$seerr_rule_line" -ge "$seerr_helm_line" ] || [ "$seerr_cert_line" -ge "$seerr_helm_line" ]; then
     echo "the per-host step did not run before the release moved"
     fail=1
   fi
@@ -1829,8 +1876,22 @@ PY
   [ "$seerr_port" = 443 ] || { echo "apply did not add the HTTPS listener for ${SEERR_HOST}"; fail=1; }
   $K -n s5n-gateway wait --for=condition=Ready "certificate/${seerr_cert}" --timeout=180s ||
     { echo "the Certificate ${seerr_cert} never became Ready"; fail=1; }
+  # The rule is in the file the login starts with, and the pod that is answering
+  # is the one that read it: a pod left on the old hash would answer with the old
+  # rules however right the ConfigMap looked.
+  ruled_after=$($K -n s5n-system get cm s5n-authelia -o jsonpath='{.data.configuration\.yml}' | grep -cF -- "- domain: ['${SEERR_HOST}']" || true)
+  echo "  rules for ${SEERR_HOST} in the login's configuration: ${ruled_after}"
+  [ "$ruled_after" = 1 ] || { echo "the login has ${ruled_after} rules for ${SEERR_HOST}, want one"; fail=1; }
+  config_hash=$($K -n s5n-system get cm s5n-authelia -o jsonpath='{.data.configuration\.yml}' | sha256sum | cut -d' ' -f1)
+  pod_hash=$($K -n s5n-system get deploy authelia -o jsonpath='{.spec.template.metadata.annotations.s5n\.io/config-hash}' || true)
+  echo "  configuration hash ${config_hash}, the login's pod template has ${pod_hash}"
+  [ "$pod_hash" = "$config_hash" ] || { echo "the login's pod template hash is not its configuration's: the rule is written but not read"; fail=1; }
+  authelia_uid_after=$($K -n s5n-system get pod -l app.kubernetes.io/name=authelia -o jsonpath='{.items[0].metadata.uid}' || true)
+  [ -n "$authelia_uid_after" ] && [ "$authelia_uid_after" != "$authelia_uid_before" ] ||
+    { echo "the login's pod did not restart onto its new configuration"; fail=1; }
   # And the app answers through Envoy by Host: the route the release rendered is
-  # now attached to a listener that serves the name.
+  # now attached to a listener that serves the name, behind a login that admits
+  # it. Before the rule this was a 403 from the login, which is the whole bug.
   seerr_code=$(curl -sS -L -o "$WORK/seerr-again.html" -w '%{http_code}' \
     --resolve "${SEERR_HOST}:443:${gw_addr}" --cacert "$WORK/pebble-root.pem" \
     "https://${SEERR_HOST}/" 2>/dev/null || true)

@@ -737,3 +737,192 @@ func TestApplyValidatesTheLoginName(t *testing.T) {
 		t.Fatal("Apply accepted a login name with a space in it")
 	}
 }
+
+// ---- the rules one host needs ------------------------------------------------
+
+// hostedValues is testValues with Seerr on: the app served at a name of its own
+// that an apply adds to a box installed without it. Built fresh each call so a
+// test cannot change what the next one sees.
+func hostedValues() map[string]any {
+	return map[string]any{
+		"apps": map[string]any{
+			"sonarr": map[string]any{
+				"enabled":   true,
+				"envPrefix": "SONARR__",
+				"instances": []any{
+					map[string]any{"suffix": "", "enabled": true},
+					map[string]any{"suffix": "4k", "enabled": true},
+				},
+			},
+			"plex":  map[string]any{"enabled": true},
+			"seerr": map[string]any{"enabled": true},
+		},
+	}
+}
+
+// ruleOptions is one rule write for a box served at box.example.com.
+func ruleOptions() RulesOptions {
+	return RulesOptions{
+		Host:   "box.example.com",
+		Login:  "alice",
+		Hosts:  []string{"seerr.box.example.com"},
+		Image:  "authelia/authelia:4.39.28@sha256:" + strings.Repeat("a", 64),
+		Values: hostedValues(),
+		Hosted: []string{"plex", "seerr"},
+	}
+}
+
+// configOf is the configuration.yml in the ConfigMap last applied.
+func configOf(t *testing.T, docs []map[string]any) string {
+	t.Helper()
+	cm := find(t, docs, "ConfigMap", Namespace, authelia.ConfigMapName)
+	data, _, _ := unstructured.NestedStringMap(cm, "data")
+	return data[authelia.ConfigFile]
+}
+
+// TestEnsureRulesWritesTheRuleForANewAppHost: a host with its listener and
+// Certificate but no access_control rule answers the login's default deny, so
+// the rule is written -- and the pod rolls, because the running login has read
+// the old file.
+func TestEnsureRulesWritesTheRuleForANewAppHost(t *testing.T) {
+	f := newFixture(t)
+	// The box as init installed it, without Seerr.
+	opts := testOptions()
+	opts.PathsInNode = true
+	if _, err := f.decision.Apply(context.Background(), opts); err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	before := configOf(t, f.cluster.applied)
+	if strings.Contains(before, "seerr.box.example.com") {
+		t.Fatalf("the fixture's login already has a rule for the app host:\n%s", before)
+	}
+	mark, deploys := len(f.cluster.applied), f.cluster.deploys
+
+	changed, err := f.decision.EnsureRules(context.Background(), ruleOptions())
+	if err != nil {
+		t.Fatalf("EnsureRules: %v", err)
+	}
+	if !changed {
+		t.Fatal("the rule write reported no change")
+	}
+	if len(f.cluster.applied) == mark {
+		t.Fatal("nothing was applied")
+	}
+	after := configOf(t, f.cluster.applied[mark:])
+	if !strings.Contains(after, "- domain: ['seerr.box.example.com']") {
+		t.Fatalf("the configuration has no rule for the app host:\n%s", after)
+	}
+	// The posture the app had on its path: Seerr signs its own users in, so the
+	// whole name bypasses the login exactly as ^/seerr did.
+	if !strings.Contains(after, "- domain: ['seerr.box.example.com']\n      policy: 'bypass'") {
+		t.Fatalf("the app host's rule is not a bypass:\n%s", after)
+	}
+	// The rule the box's own name already had is still there: the configuration
+	// is rewritten whole, and a name left out would lose its rule.
+	if !strings.Contains(after, "user:alice") || !strings.Contains(after, "^/sonarr-4k/api") {
+		t.Fatalf("the rewrite lost the box's own rules:\n%s", after)
+	}
+	deploy := find(t, f.cluster.applied[mark:], "Deployment", Namespace, authelia.ServiceName)
+	annotations, _, _ := unstructured.NestedStringMap(deploy, "spec", "template", "metadata", "annotations")
+	if got := annotations["s5n.io/config-hash"]; got != authelia.ConfigHash([]byte(after)) {
+		t.Fatalf("pod annotation %q is not the new configuration's hash: the running login would keep the old rules", got)
+	}
+	if f.cluster.deploys == deploys {
+		t.Fatal("the login was not waited for after the rule write")
+	}
+}
+
+// keyed is the fixture with a known storage encryption key, so two fixtures in
+// one test render the same configuration: the key is part of it.
+func keyed(f *fixture, enc string) {
+	f.cluster.objects[key("", "Secret", Namespace, authelia.SecretName)] = map[string]any{
+		"apiVersion": "v1",
+		"kind":       "Secret",
+		"metadata":   map[string]any{"name": authelia.SecretName, "namespace": Namespace},
+		"data":       map[string]any{authelia.EncryptionKeySecretKey: base64.StdEncoding.EncodeToString([]byte(enc))},
+	}
+}
+
+// TestEnsureRulesWritesNothingWhenTheRuleIsThere: the configuration is
+// deterministic, so a run whose rules are already in the cluster is not a write
+// and cannot churn the login's pod.
+func TestEnsureRulesWritesNothingWhenTheRuleIsThere(t *testing.T) {
+	f := newFixture(t)
+	opts := testOptions()
+	opts.PathsInNode = true
+	opts.Values = hostedValues()
+	opts.Hosted = []string{"plex", "seerr"}
+	if _, err := f.decision.Apply(context.Background(), opts); err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	applied, deploys := len(f.cluster.applied), f.cluster.deploys
+	changed, err := f.decision.EnsureRules(context.Background(), ruleOptions())
+	if err != nil {
+		t.Fatalf("EnsureRules: %v", err)
+	}
+	if changed {
+		t.Fatal("the run changed a configuration whose rules were already there")
+	}
+	if len(f.cluster.applied) != applied || f.cluster.deploys != deploys {
+		t.Fatalf("the run wrote: %d documents, %d waits", len(f.cluster.applied)-applied, f.cluster.deploys-deploys)
+	}
+}
+
+// TestEnsureRulesRendersWhatInitRenders: init installs the login with its rules
+// and apply adds one host's rule; for the same box the two must write the same
+// file, because both render it from authelia.Rules. Anything else is two
+// spellings of one rule, and the next init would rewrite what apply wrote.
+func TestEnsureRulesRendersWhatInitRenders(t *testing.T) {
+	const key = "0123456789abcdef0123456789abcdef"
+
+	init := newFixture(t)
+	keyed(init, key)
+	opts := testOptions()
+	opts.PathsInNode = true
+	opts.Values = hostedValues()
+	opts.Hosted = []string{"plex", "seerr"}
+	if _, err := init.decision.Apply(context.Background(), opts); err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	fromInit := configOf(t, init.cluster.applied)
+
+	apply := newFixture(t)
+	keyed(apply, key)
+	if _, err := apply.decision.EnsureRules(context.Background(), ruleOptions()); err != nil {
+		t.Fatalf("EnsureRules: %v", err)
+	}
+	fromApply := configOf(t, apply.cluster.applied)
+	if fromApply != fromInit {
+		t.Fatalf("apply wrote a different configuration from init:\n--- init ---\n%s\n--- apply ---\n%s", fromInit, fromApply)
+	}
+}
+
+// TestEnsureRulesWithoutALoginNamesInit: a rule write is not an install, so a
+// box with no login is refused rather than given a second, half-configured one.
+func TestEnsureRulesWithoutALoginNamesInit(t *testing.T) {
+	f := newFixture(t)
+	_, err := f.decision.EnsureRules(context.Background(), ruleOptions())
+	if err == nil {
+		t.Fatal("a rule was written into a box with no login")
+	}
+	if !strings.Contains(err.Error(), "box init") {
+		t.Fatalf("error = %v, want the command that installs the login", err)
+	}
+	if len(f.cluster.applied) != 0 {
+		t.Fatalf("a refused rule write applied %d documents", len(f.cluster.applied))
+	}
+}
+
+// TestEnsureRulesRefusesAnUnpinnedImage: the rule write re-applies the login's
+// objects, so the image it names is pinned by digest like every other write.
+func TestEnsureRulesRefusesAnUnpinnedImage(t *testing.T) {
+	f := newFixture(t)
+	opts := ruleOptions()
+	opts.Image = "authelia/authelia:4.39.28"
+	if _, err := f.decision.EnsureRules(context.Background(), opts); err == nil {
+		t.Fatal("EnsureRules accepted an image that is not pinned by digest")
+	}
+	if len(f.cluster.applied) != 0 {
+		t.Fatal("a refused rule write applied something")
+	}
+}

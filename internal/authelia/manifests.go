@@ -18,6 +18,11 @@ import (
 // all have to name the same objects, and a name derived per host would clone
 // the login once per seedbox on a host that has several.
 const (
+	// SystemNamespace is where the login lives: s5n-system, the platform's own
+	// namespace, beside the admission policy that protects it. It is declared
+	// here so the package that writes the login and the cluster client that
+	// reads its configuration cannot disagree about where it is.
+	SystemNamespace = "s5n-system"
 	// ServiceName is the Service the SecurityPolicy calls. It is also the
 	// Deployment's name.
 	ServiceName = "authelia"

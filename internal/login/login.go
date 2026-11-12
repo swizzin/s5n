@@ -44,7 +44,7 @@ import (
 const (
 	// Namespace is s5n-system: the platform's namespace, so the login is
 	// root's and lives beside the admission policy that protects it.
-	Namespace = "s5n-system"
+	Namespace = authelia.SystemNamespace
 	// PolicyGroup and PolicyVersion are Envoy Gateway's SecurityPolicy, which
 	// is what enforces the login. The version is what EG 1.9.3 serves.
 	PolicyGroup   = "gateway.envoyproxy.io"
@@ -420,6 +420,140 @@ func (d *Decision) Apply(ctx context.Context, opts Options) (Result, error) {
 	return res, nil
 }
 
+// RulesOptions is one access-control write: the inputs init installs the login
+// with, so that an apply writes the rule for a host it is about to serve
+// without inventing a second rendering of the login's configuration.
+type RulesOptions struct {
+	// Host is the box's domain: the cookie's domain, and the name every app
+	// host is a label under.
+	Host string
+	// Login is the one account the rules admit.
+	Login string
+	// Hosts are the names this run is writing, for the one line it prints. They
+	// are not what the configuration is rendered from.
+	Hosts []string
+	// Image is the login Deployment's image, pinned by digest: the rule write
+	// applies the login's objects from the same template init does, and the
+	// image is a part of that template.
+	Image string
+	// Values is the seedbox's merged values: the chart's instance list is what
+	// the rules are derived from, so a 4K instance that exists has its rule and
+	// one that does not is never mentioned.
+	Values map[string]any
+	// Hosted are the apps the chart serves at <app>.<domain> -- the whole list,
+	// not only the names this run writes, because the configuration is
+	// rewritten whole and a name left out would lose the rule it already had.
+	Hosted []string
+}
+
+// EnsureRules writes the login's configuration for the hosts a run is about to
+// serve, and reports whether it changed anything.
+//
+// The login keeps one configuration for the whole box and Authelia reads it
+// once at startup, so this is not a per-host edit: the file is rendered from
+// the same inputs init renders it from (internal/authelia renders both, so the
+// two cannot spell a rule differently), compared with the ConfigMap that is
+// there, and applied only when it differs -- together with the Deployment,
+// whose pod-template hash is what makes the running login read it. A run with
+// nothing to change writes nothing and returns false.
+//
+// It is root's, like the rest of the login: the configuration names the one
+// account the box logs in with. A box whose login is not installed has nothing
+// to write a rule into, and the refusal names the command that installs it.
+func (d *Decision) EnsureRules(ctx context.Context, opts RulesOptions) (bool, error) {
+	if err := checkRules(opts); err != nil {
+		return false, err
+	}
+	cl, err := d.Open()
+	if err != nil {
+		return false, err
+	}
+	key, err := d.readKey(ctx, cl)
+	if err != nil {
+		return false, err
+	}
+	// The permissions every object below needs, asked before the first write:
+	// a kubeconfig that may write a Gateway's listeners but not the login's
+	// configuration has to be told so here, not half way through.
+	if err := kube.Preflight(ctx, cl, rulesAccess()); err != nil {
+		return false, fmt.Errorf("login: %w", err)
+	}
+	config, err := authelia.RenderConfiguration(authelia.Configuration{
+		Host:          opts.Host,
+		Login:         opts.Login,
+		EncryptionKey: key,
+		Rules:         authelia.Rules(opts.Host, opts.Login, authelia.InstancesFromValues(opts.Values), opts.Hosted),
+	})
+	if err != nil {
+		return false, err
+	}
+	r := d.report()
+	names := strings.Join(opts.Hosts, ", ")
+	changed, err := d.configurationChanged(ctx, cl, config)
+	if err != nil {
+		return false, err
+	}
+	if !changed {
+		r.Line(fmt.Sprintf("login: the rule for %s is already there", names))
+		return false, nil
+	}
+	manifests, err := authelia.RenderManifests(authelia.Manifests{
+		Namespace:        Namespace,
+		GatewayNamespace: platform.GatewayNamespace,
+		Gateway:          platform.GatewayName,
+		Host:             opts.Host,
+		Claim:            authelia.ClaimName,
+		ConfigMap:        authelia.ConfigMapName,
+		Image:            opts.Image,
+		UID:              authelia.UID,
+		GID:              authelia.GID,
+		ConfigHash:       authelia.ConfigHash(config),
+	})
+	if err != nil {
+		return false, err
+	}
+	docs, err := platform.ParseManifests(manifests)
+	if err != nil {
+		return false, err
+	}
+	// The ConfigMap is not part of the manifests template: its content is one
+	// rendered file, and it is written beside the objects that name it.
+	docs = append([]map[string]any{configMapDoc(config)}, docs...)
+
+	step := r.Start(say.Op{Label: "applying the login's rule for " + names})
+	if err := cl.ApplyWith(ctx, kube.FieldManager, docs); err != nil {
+		step.Failed(err)
+		return false, fmt.Errorf("login: %w", err)
+	}
+	// The pod that is running still has the old file: the hash is what rolls
+	// it, and a rule the running login has not read is a 403 for the host the
+	// step was called for.
+	if err := d.awaitDeployment(ctx, cl); err != nil {
+		step.Failed(err)
+		return true, err
+	}
+	step.Done(fmt.Sprintf("login: the rule for %s is in place", names))
+	return true, nil
+}
+
+// checkRules refuses a rule write that cannot be rendered, before a client
+// exists.
+func checkRules(opts RulesOptions) error {
+	if strings.TrimSpace(opts.Host) == "" {
+		return errors.New("login: no host name: the rules are per host")
+	}
+	if err := authelia.ValidateLogin(opts.Login); err != nil {
+		return fmt.Errorf("login: %w", err)
+	}
+	if len(opts.Values) == 0 {
+		return errors.New("login: no values: the rules come from the chart's instance list")
+	}
+	if !strings.Contains(opts.Image, "@sha256:") {
+		return fmt.Errorf("login: image %q is not pinned by digest", opts.Image)
+	}
+	return nil
+}
+
 // check refuses what cannot be installed, before a client exists.
 func (d *Decision) check(opts Options) error {
 	switch {
@@ -474,14 +608,11 @@ func (d *Decision) encryptionKey(ctx context.Context, cl Cluster) (key string, k
 		return "", false, err
 	}
 	if found {
-		raw, _, _ := unstructured.NestedStringMap(doc, "data")
-		encoded, ok := raw[authelia.EncryptionKeySecretKey]
-		key, decodeErr := base64.StdEncoding.DecodeString(encoded)
-		if !ok || decodeErr != nil || len(key) < 20 {
-			return "", false, fmt.Errorf("secret %s/%s exists but has no usable %s: box never rotates it, so restore the key from your backup, or delete the Secret and the claim together and start the login again",
-				Namespace, authelia.SecretName, authelia.EncryptionKeySecretKey)
+		key, err := secretKey(doc)
+		if err != nil {
+			return "", false, err
 		}
-		return string(key), true, nil
+		return key, true, nil
 	}
 	buf := make([]byte, 32)
 	if _, err := rand.Read(buf); err != nil {
@@ -509,6 +640,50 @@ func (d *Decision) encryptionKey(ctx context.Context, cl Cluster) (key string, k
 	}
 	d.report().Line(fmt.Sprintf("created Secret %s/%s: its key must be backed up with the claim, and box never changes it", Namespace, authelia.SecretName))
 	return key, false, nil
+}
+
+// readKey is the login's storage encryption key, read and never created: a rule
+// write is not an install, and a box with no login has nothing to write a rule
+// into.
+func (d *Decision) readKey(ctx context.Context, cl Cluster) (string, error) {
+	doc, found, err := cl.Get(ctx, CoreGroup, "v1", "Secret", Namespace, authelia.SecretName)
+	if err != nil {
+		return "", err
+	}
+	if !found {
+		return "", fmt.Errorf("the login is not installed (%s/%s is missing): run `box init` as root, which installs it and writes its rules", Namespace, authelia.SecretName)
+	}
+	return secretKey(doc)
+}
+
+// secretKey is the key out of the Secret's document. The sentence it fails with
+// is the one both callers print: the key is never rotated, so a Secret without
+// a usable one is a restore, not a re-run.
+func secretKey(doc map[string]any) (string, error) {
+	raw, _, _ := unstructured.NestedStringMap(doc, "data")
+	encoded, ok := raw[authelia.EncryptionKeySecretKey]
+	key, decodeErr := base64.StdEncoding.DecodeString(encoded)
+	if !ok || decodeErr != nil || len(key) < 20 {
+		return "", fmt.Errorf("secret %s/%s exists but has no usable %s: box never rotates it, so restore the key from your backup, or delete the Secret and the claim together and start the login again",
+			Namespace, authelia.SecretName, authelia.EncryptionKeySecretKey)
+	}
+	return string(key), nil
+}
+
+// rulesAccess is what a rule write needs: the login's own objects -- the
+// configuration, the Deployment whose pod-template hash rolls it, and the
+// objects the same template renders -- plus the SecurityPolicy in the Gateway's
+// namespace. It is smaller than accessList on purpose: a rule write is not an
+// install, and it creates no volume.
+func rulesAccess() []kube.Access {
+	return []kube.Access{
+		{Verb: kube.VerbApply, Group: CoreGroup, Resource: "configmaps", Namespace: Namespace, What: "ConfigMaps in " + Namespace},
+		{Verb: kube.VerbApply, Group: CoreGroup, Resource: "services", Namespace: Namespace, What: "Services in " + Namespace},
+		{Verb: kube.VerbApply, Group: "apps", Resource: "deployments", Namespace: Namespace, What: "Deployments in " + Namespace},
+		{Verb: kube.VerbApply, Group: GatewayGroup, Resource: "referencegrants", Namespace: Namespace, What: "ReferenceGrants in " + Namespace},
+		{Verb: kube.VerbApply, Group: GatewayGroup, Resource: "httproutes", Namespace: Namespace, What: "the portal's HTTPRoute in " + Namespace},
+		{Verb: kube.VerbApply, Group: PolicyGroup, Resource: "securitypolicies", Namespace: platform.GatewayNamespace, What: "SecurityPolicies in " + platform.GatewayNamespace},
+	}
 }
 
 // configMapDoc is the configuration's ConfigMap. It is built here rather than

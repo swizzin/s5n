@@ -23,7 +23,7 @@ type fakeHosts struct {
 	ensureErr error
 
 	asks    []HostPlan
-	ensured [][]string
+	ensured []HostPlan
 	events  *[]string
 }
 
@@ -39,7 +39,7 @@ func (f *fakeHosts) Ensure(_ context.Context, plan HostPlan) error {
 	if f.ensureErr != nil {
 		return f.ensureErr
 	}
-	f.ensured = append(f.ensured, plan.Hosts)
+	f.ensured = append(f.ensured, plan)
 	if f.events != nil {
 		*f.events = append(*f.events, "hosts")
 	}
@@ -94,8 +94,24 @@ func TestApplyServesANewAppHostBeforeTheRelease(t *testing.T) {
 	if len(ask.Hosts) != 1 || ask.Hosts[0] != "radarr.box.example.com" {
 		t.Fatalf("the step was asked about %v, want the one hosted app's name", ask.Hosts)
 	}
-	if len(f.hosts.ensured) != 1 || len(f.hosts.ensured[0]) != 1 || f.hosts.ensured[0][0] != "radarr.box.example.com" {
+	if len(f.hosts.ensured) != 1 || len(f.hosts.ensured[0].Hosts) != 1 || f.hosts.ensured[0].Hosts[0] != "radarr.box.example.com" {
 		t.Fatalf("the step wrote %v, want radarr's host", f.hosts.ensured)
+	}
+	// The step carries the login's inputs too: a host is served when its rule
+	// exists, and the rule is the one init writes -- the grant's account, the
+	// document the release renders, and the release's own login image.
+	rule := f.hosts.ensured[0].Rule
+	if rule.Login != "alice" {
+		t.Fatalf("the rule names %q, want the grant's login", rule.Login)
+	}
+	if len(rule.Hosted) != 1 || rule.Hosted[0] != "radarr" {
+		t.Fatalf("hosted apps = %v, want radarr", rule.Hosted)
+	}
+	if on, _ := rule.Values["apps"].(map[string]any)["radarr"].(map[string]any)["enabled"].(bool); !on {
+		t.Fatalf("the rule's values do not have radarr enabled: %v", rule.Values["apps"])
+	}
+	if rule.Image != "docker.io/example/authelia:1.0.0@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" {
+		t.Fatalf("the rule write names image %q, want the chart's pin", rule.Image)
 	}
 	if got := res.Hosts; len(got) != 1 || got[0] != "radarr.box.example.com" {
 		t.Fatalf("result hosts = %v, want the name this run served", got)
@@ -107,7 +123,7 @@ func TestApplyServesANewAppHostBeforeTheRelease(t *testing.T) {
 	if f.rel.upgrades != 1 {
 		t.Fatalf("upgrades = %d, want the release moved once", f.rel.upgrades)
 	}
-	if !strings.Contains(f.out.String(), "Certificate and listener for radarr.box.example.com") {
+	if !strings.Contains(f.out.String(), "Certificate, listener and login rule for radarr.box.example.com") {
 		t.Fatalf("the plan did not show the certificate it would write:\n%s", f.out)
 	}
 }
