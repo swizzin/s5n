@@ -480,7 +480,17 @@ validated, self-signed otherwise. This is how box would do it.
   solver whose HTTPRoute names the `s5n` Gateway but no listener, so it attaches to
   every listener that admits `s5n-gateway`) and
   `s5n-selfsigned`. No ACME email: Let's Encrypt no longer sends expiry mail, so there is
-  nothing to ask.
+  nothing to ask. `s5n-selfsigned` is a CA issuer, not a bare self-signed one: box keeps
+  one long-lived root certificate in `cert-manager` and signs every self-signed host's
+  certificate from it. A browser still warns, as for any self-signed certificate, but the
+  root doesn't change when a host's certificate renews, so something inside the cluster
+  can trust it once.
+- **Apps that call the login themselves trust the box's root.** An app that signs in
+  through the login's OIDC provider fetches the provider's documents from its own pod,
+  over HTTPS to the box's own host name. With a Let's Encrypt certificate the image's
+  public roots are enough. Otherwise box copies the root into a ConfigMap in the
+  seedbox's namespace and the chart adds it to those apps' trust store (`SSL_CERT_DIR`,
+  which adds a directory and keeps the image's bundle).
 - **Certificates live beside the Gateway.** A listener can only reference a Secret in
   its own namespace without a ReferenceGrant, so each host name gets a `Certificate` in
   `s5n-gateway`, plus an HTTPS listener on 443 and its own host-matched port-80 listener
