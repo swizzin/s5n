@@ -10,6 +10,33 @@
     "apps"
   ],
   "properties": {
+    "theme": {
+      "type": "string",
+      "description": "The palette `box` draws its dialogs in, read from this file when box starts on the host. The chart renders nothing from it; every name is one internal/theme accepts, and a pair name follows the terminal's background while a variant name pins one.",
+      "enum": [
+        "s5n",
+        "s5n-dark",
+        "s5n-light",
+        "swizzin",
+        "swizzin-darkly",
+        "swizzin-flatly",
+        "catppuccin",
+        "catppuccin-mocha",
+        "catppuccin-latte",
+        "solarized",
+        "solarized-dark",
+        "solarized-light",
+        "gruvbox",
+        "gruvbox-dark",
+        "gruvbox-light",
+        "nord",
+        "nord-polar-night",
+        "nord-snow-storm",
+        "dracula",
+        "dracula-dracula",
+        "dracula-alucard"
+      ]
+    },
     "global": {
       "type": "object",
       "additionalProperties": false,

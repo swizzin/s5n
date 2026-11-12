@@ -116,20 +116,27 @@ func chartSource(r say.Reporter) release.ChartSource {
 	return &release.OCIChart{BoxVersion: version, Say: r}
 }
 
-// newOutput picks the renderer for the whole command. The same tui.Decide that
-// chooses the prompt chooses this: a terminal that can carry a form gets the
-// live reporter, and --plain, TERM=dumb or a piped stdout gets the exact plain
-// transcript. NO_COLOR keeps the live layout without colour.
-func newOutput(plain, yes bool) say.Reporter {
-	plan := tui.Decide(tui.Terminal{
+// terminalSet is this process's own terminal, as tui.Decide reads it. Both the
+// reporter and the prompt are chosen from the same value, so one run cannot end
+// up half live and half plain.
+func terminalSet(plain bool) tui.Terminal {
+	return tui.Terminal{
 		Stdin:   isTerminal(os.Stdin),
 		Stdout:  isTerminal(os.Stdout),
 		TERM:    os.Getenv("TERM"),
 		NoColor: os.Getenv("NO_COLOR") != "",
 		Plain:   plain,
-	})
+	}
+}
+
+// newOutput picks the renderer for the whole command. The same tui.Decide that
+// chooses the prompt chooses this: a terminal that can carry a form gets the
+// live reporter, and --plain, TERM=dumb or a piped stdout gets the exact plain
+// transcript. NO_COLOR keeps the live layout without colour.
+func newOutput(t tui.Terminal, yes bool, palette string) say.Reporter {
+	plan := tui.Decide(t)
 	if plan.Mode == tui.ModeHuh {
-		r := tui.NewReporter(tui.ReporterOptions{Width: terminalWidth(os.Stdout), NoColor: plan.NoColor, Yes: yes})
+		r := tui.NewReporter(tui.ReporterOptions{Width: terminalWidth(os.Stdout), NoColor: plan.NoColor, Yes: yes, Theme: palette})
 		return r
 	}
 	// Output only: a flow that asks builds its own question through
@@ -281,7 +288,9 @@ func runBootstrap(ctx context.Context, args []string) {
 
 	initFlags.dnsFile = dnsFile
 
-	out := newOutput(*plain, *yes)
+	palette := startupTheme(*initFlags.valuesPath)
+	term := terminalSet(*plain)
+	out := newOutput(term, *yes, palette)
 	defer out.Close()
 
 	// One chart release for the whole command: the k0s bootstrap installs, the
@@ -300,7 +309,7 @@ func runBootstrap(ctx context.Context, args []string) {
 	// class unset, and the decision then refuses by naming the setting.
 	var chooser bootstrap.ClassChooser
 	if !*dryRun && !*yes && isTerminal(os.Stdin) {
-		chooser = classChooser{prompt: newPrompt(*plain)}
+		chooser = classChooser{prompt: newPrompt(term, palette)}
 	}
 
 	// A dry run reaches the same clean-host branch as a real run, and the only
@@ -442,16 +451,10 @@ func (c classChooser) ChooseGatewayClass(classes []bootstrap.GatewayClass) (stri
 // newPrompt builds the interactive prompt box uses on a terminal: huh when the
 // terminal can carry a form, the line prompt otherwise. Unattended runs do not
 // call it at all.
-func newPrompt(plain bool) setup.Prompter {
-	plan := tui.Decide(tui.Terminal{
-		Stdin:   isTerminal(os.Stdin),
-		Stdout:  isTerminal(os.Stdout),
-		TERM:    os.Getenv("TERM"),
-		NoColor: os.Getenv("NO_COLOR") != "",
-		Plain:   plain,
-	})
+func newPrompt(t tui.Terminal, palette string) setup.Prompter {
+	plan := tui.Decide(t)
 	if plan.Mode == tui.ModeHuh {
-		return tui.New(tui.Options{In: os.Stdin, Out: os.Stdout, NoColor: plan.NoColor, Width: terminalWidth(os.Stdout)})
+		return tui.New(tui.Options{In: os.Stdin, Out: os.Stdout, NoColor: plan.NoColor, Width: terminalWidth(os.Stdout), Theme: palette})
 	}
 	line := &setup.LinePrompt{In: os.Stdin, Out: os.Stdout}
 	// A secret question is masked on a terminal, and only there: without a
@@ -516,7 +519,7 @@ func runApply(ctx context.Context, args []string) {
 		os.Exit(2)
 	}
 
-	out := newOutput(false, *o.yes)
+	out := newOutput(terminalSet(false), *o.yes, startupTheme(*o.valuesPath))
 	defer out.Close()
 
 	// The cluster decision belongs to `box bootstrap`; apply reuses it and
@@ -576,7 +579,7 @@ func runInit(ctx context.Context, args []string) {
 		os.Exit(2)
 	}
 	initFlags.dnsFile = dnsFile
-	out := newOutput(*plain, *yes)
+	out := newOutput(terminalSet(*plain), *yes, startupTheme(*initFlags.valuesPath))
 	defer out.Close()
 	if err := initFlags.run(ctx, *kubeconfig, *yes, *plain, out); err != nil {
 		if errors.Is(err, release.ErrCancelled) || errors.Is(err, setup.ErrCancelled) {
@@ -679,7 +682,7 @@ func (o *initFlags) run(ctx context.Context, kubeconfig string, yes, plain bool,
 	// one returns an empty secret without a terminal, which would silently
 	// install a box with an empty claim token.
 	unattended := yes || !isTerminal(os.Stdin)
-	prompt := newPrompt(plain)
+	prompt := newPrompt(terminalSet(plain), startupTheme(*o.valuesPath))
 
 	set := map[string]bool{}
 	o.fs.Visit(func(f *flag.Flag) { set[f.Name] = true })

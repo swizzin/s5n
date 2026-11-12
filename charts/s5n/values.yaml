@@ -1,6 +1,13 @@
 # s5n — one release = one namespace = one seedbox.
 # Nothing in this chart may assume it is the only release in the cluster.
 
+# The palette `box` draws its own dialogs in, on the machine that runs it. The
+# chart renders nothing from this key: box reads it from the values file at
+# startup, so the theme a person picks is a file they already edit, not a flag
+# on one command. A pair name follows the terminal's background, a variant name
+# pins one, and values.schema.json lists every name internal/theme accepts.
+theme: s5n
+
 global:
   # One uid/gid for every app, so every file on /data has one owner.
   puid: 1000
