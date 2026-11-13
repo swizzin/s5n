@@ -820,7 +820,7 @@ func (d *Decision) awaitRoot(ctx context.Context, cl Cluster) error {
 	if !waited.Done {
 		step.Failed(ErrNotReady)
 		if reason == "" {
-			reason = "cert-manager has not marked it Ready"
+			reason = certNotReadyReason
 		}
 		return fmt.Errorf("the box root Certificate %s/%s is not Ready after %s (%s): every self-signed host's certificate is issued by it, so box stopped before the CA issuer; run `box bootstrap` again once cert-manager has issued it",
 			CertManagerNamespace, RootCertificateName, timeout, reason)

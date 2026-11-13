@@ -3299,6 +3299,15 @@ EOF
   grep -q "the Gateway already has an address: " "$WORK/bootstrap1.txt" ||
     { echo "the Gateway's own address did not answer the question"; fail=1; }
   grep -q "^wiring ok" "$WORK/bootstrap1.txt" || { echo "box did not report a healthy receipt"; fail=1; }
+  # One wait for the run's Certificates, not one per host: this run decided
+  # every name, and a box whose names cannot issue yet pays one
+  # CertificateTimeout for the run instead of one per name. The Done line says
+  # how many of them came Ready.
+  cert_waits=$(grep -c 'Certificates to be Ready' "$WORK/bootstrap1.txt" || true)
+  [ "$cert_waits" = 1 ] ||
+    { echo "init printed ${cert_waits} Certificate wait lines, want one for the run's hosts"; fail=1; }
+  grep -qE '^[0-9]+ of [0-9]+ Certificates are Ready$' "$WORK/bootstrap1.txt" ||
+    { echo "init's Certificate wait did not say how many of the run's hosts came Ready"; fail=1; }
   # A port in the band was already held by an unrelated Service when box ran,
   # and box must not have picked it -- nor anything else someone else holds.
   assert_torrent_port "the port another Service already held"

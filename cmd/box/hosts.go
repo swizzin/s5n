@@ -12,19 +12,23 @@ import (
 	"github.com/swizzin/s5n/internal/setup"
 )
 
-// certificateStep is one host's TLS: its port-80 listener, its Certificate and,
-// once that is Ready, its HTTPS listener and the redirect. Both box commands
-// write a host through this one function, so init's names and an apply's new
-// app host cannot be served differently.
-func certificateStep(kubeconfig string, out say.Reporter) setup.HostFunc {
-	return func(ctx context.Context, h setup.Host) error {
-		cert := &platform.CertificateDecision{
-			Host:   h.Host,
-			Issuer: h.Issuer,
-			Open:   func() (platform.CertificateCluster, error) { return platform.NewCluster(kubeconfig) },
-			Say:    out,
+// certificateStep is the run's TLS: every host's port-80 listener and
+// Certificate first, one wait for all of them, then the HTTPS listener and the
+// redirect for each host that is Ready. Both box commands write their hosts
+// through this one function, so init's names and an apply's new app host cannot
+// be served differently.
+func certificateStep(kubeconfig string, out say.Reporter) setup.HostsFunc {
+	return func(ctx context.Context, hosts []setup.Host) error {
+		reqs := make([]platform.CertificateRequest, 0, len(hosts))
+		for _, h := range hosts {
+			reqs = append(reqs, platform.CertificateRequest{Host: h.Host, Issuer: h.Issuer})
 		}
-		_, err := cert.Apply(ctx)
+		certs := &platform.Certificates{
+			Hosts: reqs,
+			Open:  func() (platform.CertificateCluster, error) { return platform.NewCluster(kubeconfig) },
+			Say:   out,
+		}
+		_, err := certs.Apply(ctx)
 		return err
 	}
 }
