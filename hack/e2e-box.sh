@@ -468,6 +468,113 @@ tls_serial() { # tls_serial <secret-name>
     sed 's/^serial=//'
 }
 
+# ---- the apps that own their user table --------------------------------------
+# qui and autobrr hand out an API key only to a signed-in session, so the chart
+# generates a password in the release Secret and each app's init container
+# writes it into the app on every start; the wiring Job signs in with it. What
+# that account did is the receipt, but a receipt is the Job's own word, so these
+# read the apps back through their own APIs with the Secret's password -- which
+# is also the proof that a local account and the edge's OIDC provider coexist.
+
+# port_forward opens an API-server tunnel to one app pod and leaves it in
+# PF_PORT (and its process in PF_PID). This is the only way to ask these apps
+# anything directly: their ingress policy admits the Gateway and the wiring Job
+# alone, and the Job's image is distroless (no shell to drive a client with).
+# kubelet's own connection is not a pod's, so no policy applies to it -- and the
+# tunnel arrives on 127.0.0.1, which curl treats as a secure context, so qui's
+# Secure session cookie is replayed here exactly as the Job replays it.
+port_forward() { # port_forward <pod> <container-port>
+  local pod=$1 port=$2 i
+  PF_PORT=$(python3 -c 'import socket
+s = socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1]); s.close()')
+  $K -n "$NS" port-forward "pod/${pod}" "${PF_PORT}:${port}" >"$WORK/pf-${pod}.log" 2>&1 &
+  PF_PID=$!
+  for i in $(seq 1 30); do
+    if curl -sS -o /dev/null --max-time 2 "http://127.0.0.1:${PF_PORT}/" 2>/dev/null; then
+      return 0
+    fi
+    sleep 1
+  done
+  echo "port-forward to ${pod}:${port} never answered"
+  sed 's/^/    /' "$WORK/pf-${pod}.log" 2>/dev/null || true
+  return 1
+}
+
+port_forward_stop() {
+  kill "$PF_PID" 2>/dev/null || true
+  wait "$PF_PID" 2>/dev/null || true
+}
+
+# qui_session signs in over the tunnel and leaves the code in QUI_LOGIN_CODE and
+# the raw cookie in QUI_COOKIE. The cookie is captured from Set-Cookie because
+# qui's is Secure: a jar would refuse it over this http:// socket.
+qui_session() { # qui_session <base-url>
+  local base=$1
+  : >"$WORK/qui-headers"
+  QUI_LOGIN_CODE=$(curl -sS -o "$WORK/qui-login.json" -D "$WORK/qui-headers" -w '%{http_code}' \
+    -X POST "http://127.0.0.1:${PF_PORT}${base}/api/auth/login" \
+    -H 'Content-Type: application/json' \
+    --data "{\"username\":\"${QUI_USER}\",\"password\":\"${QUI_PASSWORD}\"}" 2>/dev/null || true)
+  QUI_COOKIE=$(sed -n 's/^[Ss]et-[Cc]ookie: *\([^;]*\);.*/\1/p' "$WORK/qui-headers" | head -1 || true)
+  QUI_LOGIN_BODY=$(head -c 300 "$WORK/qui-login.json" 2>/dev/null || true)
+}
+
+# qui_change_password turns a fresh session into a password change, the way a
+# person would do it in qui's settings: the old password proves the session, the
+# new one is what the app stores until its pod restarts.
+qui_change_password() { # qui_change_password <base-url> <current> <new>
+  local base=$1 current=$2 next=$3
+  curl -sS -o "$WORK/qui-change.json" -w '%{http_code}' \
+    -X POST "http://127.0.0.1:${PF_PORT}${base}/api/auth/change-password" \
+    -H "Cookie: ${QUI_COOKIE}" -H 'X-Requested-With: XMLHttpRequest' \
+    -H 'Content-Type: application/json' \
+    --data "{\"currentPassword\":\"${current}\",\"newPassword\":\"${next}\"}" 2>/dev/null || true
+}
+
+# autobrr_session signs in over the tunnel with a cookie jar (autobrr's cookie
+# is not Secure) and leaves the code in AUTOBRR_LOGIN_CODE.
+autobrr_session() { # autobrr_session <base-url> <jar>
+  local base=$1 jar=$2
+  AUTOBRR_LOGIN_CODE=$(curl -sS -c "$jar" -o /dev/null -w '%{http_code}' \
+    -X POST "http://127.0.0.1:${PF_PORT}${base}/api/auth/login" \
+    -H 'Content-Type: application/json' \
+    --data "{\"username\":\"${AUTOBRR_USER}\",\"password\":\"${AUTOBRR_PASSWORD}\"}" 2>/dev/null || true)
+}
+
+# rerun_wiring runs the release's wiring Job again without moving the release:
+# the hook Job's own spec, under a name of its own. A helm upgrade would do the
+# same thing but a failed hook leaves the release "failed", which is what the
+# changed-password case is about to make it -- and box refuses to touch a
+# release in that state, which would hide the rest of the run behind it.
+rerun_wiring() { # rerun_wiring <output file>
+  $K -n "$NS" delete job s5n-wiring-rerun --ignore-not-found >/dev/null 2>&1 || true
+  $K -n "$NS" get job s5n-wiring -o json |
+    python3 -c 'import json, sys
+job = json.loads(sys.stdin.read())
+meta = {"name": "s5n-wiring-rerun", "namespace": job["metadata"]["namespace"]}
+if job["metadata"].get("labels"):
+    meta["labels"] = job["metadata"]["labels"]
+out = {"apiVersion": "batch/v1", "kind": "Job", "metadata": meta, "spec": job["spec"]}
+# The selector belongs to the controller: a Job created without one has it
+# filled in, and a copied one would pin the pod template hash it came from.
+out["spec"].pop("selector", None)
+print(json.dumps(out))' 2>/dev/null | $K -n "$NS" apply -f - >"$1" 2>&1 || true
+  # Complete *or* Failed: the changed-password case is deliberately a failing
+  # run, and `kubectl wait --for=condition=complete` would sit there for its
+  # whole timeout waiting for a condition that is never coming.
+  local i state
+  for i in $(seq 1 150); do
+    state=$($K -n "$NS" get job s5n-wiring-rerun \
+      -o jsonpath='{.status.conditions[?(@.type=="Complete")].status}{.status.conditions[?(@.type=="Failed")].status}' \
+      2>/dev/null || true)
+    case "$state" in
+      True* | *True) break ;;
+    esac
+    sleep 2
+  done
+  echo "s5n-wiring-rerun finished: ${state:-no condition}" >>"$1"
+}
+
 # ---- the ACME test server ----------------------------------------------------
 # Pebble is Let's Encrypt's test ACME server: same protocol, no rate limits, and
 # a CA it generates at startup (fetched from its management API). cert-manager
@@ -1181,6 +1288,22 @@ fresh() {
     got=$(docker exec "${CLUSTER}-control-plane" stat -c '%u:%g' "$d" 2>/dev/null || echo missing)
     echo "  ${d}: owner ${got}"
     [ "$got" = 1000:1000 ] || { echo "${d} is not owned by the release's uid:gid"; fail=1; }
+  done
+  # qui and autobrr keep their own user table, so the wiring Job signs in with
+  # the account the chart created and registers their connections: qui's one
+  # instance pointed at qBittorrent, and autobrr's qBittorrent client plus one
+  # per Arr instance. A fresh install creates every one of them; the receipt is
+  # read back through the apps themselves later in this scenario.
+  for step in qui/ready qui/login qui/instance autobrr/ready autobrr/login \
+              autobrr/downloader/qbittorrent autobrr/downloader/sonarr autobrr/downloader/radarr; do
+    res=$(status_field "[s['result'] for s in d['steps'] if s['name']=='$step'][0]" 2>/dev/null || echo missing)
+    detail=$(status_field "[s['detail'] for s in d['steps'] if s['name']=='$step'][0]" 2>/dev/null || echo missing)
+    echo "  ${step}: ${res} ${detail}"
+    [ "$res" = ok ] || { echo "${step} is ${res}: the Job did not register this connection"; fail=1; }
+    case "$step" in
+      qui/ready | autobrr/ready | qui/login | autobrr/login) ;;
+      *) [ "$detail" = created ] || { echo "${step} was ${res} ${detail}, want created on a fresh install"; fail=1; } ;;
+    esac
   done
   # The namespace was box's first write, and the plan said so: the cluster had
   # none of it before this run.
@@ -2438,6 +2561,267 @@ PY
   echo "  GET https://${SEERR_HOST}/ after the apply: ${seerr_code}"
   [ "$seerr_code" = 200 ] || { echo "the app host did not answer after apply served it: ${seerr_code}"; fail=1; }
   grep -qi '<!doctype html' "$WORK/seerr-again.html" || { echo "the app host served no HTML after apply"; fail=1; }
+
+  # ---- qui and autobrr: one account, and what the Job did with it -----------
+  # Both apps keep their own user table and mint an API key only for a session,
+  # so the chart generates a password in the release Secret and each app's init
+  # container writes it into the app on every start. The receipt says the Job
+  # signed in; these assertions ask the apps. Reading them needs the Secret's
+  # password, which is also the proof that the local account and the edge's OIDC
+  # provider coexist: the person signs in through the provider, the Job through
+  # the account.
+  log "qui and autobrr: the account the chart owns, read back through both APIs"
+  read -r QUI_URL QUI_BASE QUI_USER AUTOBRR_URL AUTOBRR_BASE AUTOBRR_USER QBIT_URL <<<"$(
+    $K -n "$NS" get cm s5n-wiring -o jsonpath='{.data.wiring\.json}' |
+      python3 -c 'import json, sys
+cfg = json.load(sys.stdin)
+print(cfg["qui"]["url"], cfg["qui"]["urlBase"], cfg["qui"]["username"],
+      cfg["autobrr"]["url"], cfg["autobrr"]["urlBase"], cfg["autobrr"]["username"],
+      cfg["qbittorrent"]["url"])' 2>/dev/null || true)"
+  [ -n "$QUI_USER" ] && [ -n "$AUTOBRR_USER" ] ||
+    { echo "the wiring config names no qui/autobrr account: the render did not reach the Job"; fail=1; }
+  QUI_PASSWORD=$($K -n "$NS" get secret s5n-keys -o jsonpath='{.data.qui-password}' 2>/dev/null | base64 -d || true)
+  AUTOBRR_PASSWORD=$($K -n "$NS" get secret s5n-keys -o jsonpath='{.data.autobrr-password}' 2>/dev/null | base64 -d || true)
+  QBIT_PASSWORD=$($K -n "$NS" get secret s5n-keys -o jsonpath='{.data.qbittorrent-password}' 2>/dev/null | base64 -d || true)
+  [ ${#QUI_PASSWORD} -ge 8 ] && [ -n "$AUTOBRR_PASSWORD" ] ||
+    { echo "the release Secret carries no account passwords"; fail=1; }
+  echo "  account ${QUI_USER} (${#QUI_PASSWORD} char password), qui ${QUI_URL}${QUI_BASE}, autobrr ${AUTOBRR_URL}${AUTOBRR_BASE}"
+
+  # owned_ids is the record the Job keeps: qui's instance and autobrr's clients
+  # by name. The ids are the whole identity, so a duplicate would show up here.
+  owned_ids() {
+    $K -n "$NS" get cm s5n-wiring -o jsonpath='{.data.owned\.json}' |
+      python3 -c 'import json, sys
+rec = json.load(sys.stdin)
+print("qui=%s" % rec["qui"]["instance"],
+      " ".join("%s=%s" % (k, v) for k, v in sorted(rec["autobrr"]["clients"].items())))' 2>/dev/null || true
+  }
+  ids_before=$(owned_ids)
+  echo "  owned.json: ${ids_before:-none}"
+  case "$ids_before" in
+    qui=0* | "" | *"=0"*) echo "owned.json records no qui instance or autobrr client: ${ids_before}"; fail=1 ;;
+  esac
+
+  # A second run of the same Job must change nothing at all: no created, no
+  # updated, and the same ids -- which is also the proof that neither app grew a
+  # duplicate row (qui has no uniqueness on name or host, autobrr none on name).
+  rerun_wiring "$WORK/rerun-quiet.txt"
+  created=$(status_field 'd["writes"]["created"]' 2>/dev/null || echo missing)
+  updated=$(status_field 'd["writes"]["updated"]' 2>/dev/null || echo missing)
+  ids_after=$(owned_ids)
+  echo "  second run: ${created} created, ${updated} updated; ids ${ids_before} -> ${ids_after}"
+  [ "$created" = 0 ] && [ "$updated" = 0 ] || { echo "an unchanged release wrote ${created} created / ${updated} updated"; fail=1; }
+  [ "$ids_before" = "$ids_after" ] || { echo "the second run recorded different ids"; fail=1; }
+
+  # ---- what qui holds, through its API ---------------------------------------
+  port_forward qui-0 7476 || fail=1
+  qui_session "$QUI_BASE"
+  echo "  qui: POST ${QUI_BASE}/api/auth/login with the Secret's password: ${QUI_LOGIN_CODE}"
+  [ "$QUI_LOGIN_CODE" = 200 ] || { echo "qui refused the account the chart owns: ${QUI_LOGIN_BODY}"; fail=1; }
+  curl -sS -H "Cookie: ${QUI_COOKIE}" "http://127.0.0.1:${PF_PORT}${QUI_BASE}/api/instances/" >"$WORK/qui-instances.json" 2>/dev/null || true
+  qui_id=$(python3 -c 'import json, sys
+try:
+    rows = json.load(open(sys.argv[1]))
+except Exception:
+    rows = []
+print(rows[0]["id"] if len(rows) == 1 else "")' "$WORK/qui-instances.json" 2>/dev/null || true)
+  qui_test=$(curl -sS -X POST -H "Cookie: ${QUI_COOKIE}" -H 'X-Requested-With: XMLHttpRequest' \
+    "http://127.0.0.1:${PF_PORT}${QUI_BASE}/api/instances/${qui_id}/test" 2>/dev/null || true)
+  port_forward_stop
+  echo "  qui instance ${qui_id:-none}, test: ${qui_test:-no answer}"
+  python3 - "$WORK/qui-instances.json" "$QBIT_URL" "$qui_test" <<'PY' || fail=1
+import json, sys
+rows = json.load(open(sys.argv[1], encoding="utf-8"))
+want_host, test_body = sys.argv[2], sys.argv[3]
+if len(rows) != 1:
+    print("  qui holds %d instances, want exactly 1" % len(rows))
+    sys.exit(1)
+row = rows[0]
+print("  qui instance: %s -> %s (local filesystem access %s)" %
+      (row.get("name"), row.get("host"), row.get("hasLocalFilesystemAccess")))
+ok = True
+if row.get("host") != want_host:
+    print("  the instance points at %r, want qBittorrent's %r" % (row.get("host"), want_host))
+    ok = False
+if not row.get("hasLocalFilesystemAccess"):
+    print("  the instance has no local filesystem access: /data is the same mount in both apps")
+    ok = False
+try:
+    tested = json.loads(test_body)
+except Exception:
+    tested = {}
+if not tested.get("connected"):
+    print("  qui's own test does not report a connection: %r" % (test_body,))
+    ok = False
+sys.exit(0 if ok else 1)
+PY
+
+  # ---- what autobrr holds, through its API -----------------------------------
+  port_forward autobrr-0 7474 || fail=1
+  autobrr_session "$AUTOBRR_BASE" "$WORK/autobrr-live.jar"
+  echo "  autobrr: POST ${AUTOBRR_BASE}/api/auth/login with the Secret's password: ${AUTOBRR_LOGIN_CODE}"
+  [ "$AUTOBRR_LOGIN_CODE" = 204 ] || { echo "autobrr refused the account the chart owns (${AUTOBRR_LOGIN_CODE})"; fail=1; }
+  curl -sS -b "$WORK/autobrr-live.jar" "http://127.0.0.1:${PF_PORT}${AUTOBRR_BASE}/api/downloaders" >"$WORK/autobrr-downloaders.json" 2>/dev/null || true
+  autobrr_test=$(curl -sS -o /dev/null -w '%{http_code}' -b "$WORK/autobrr-live.jar" \
+    -X POST "http://127.0.0.1:${PF_PORT}${AUTOBRR_BASE}/api/downloaders/test" \
+    -H 'Content-Type: application/json' \
+    --data "{\"name\":\"qBittorrent\",\"type\":\"QBITTORRENT\",\"enabled\":true,\"host\":\"${QBIT_URL}\",\"username\":\"admin\",\"password\":\"${QBIT_PASSWORD}\",\"settings\":{\"rules\":{\"enabled\":false}}}" 2>/dev/null || true)
+  port_forward_stop
+  echo "  autobrr's qBittorrent client test: ${autobrr_test}"
+  [ "$autobrr_test" = 204 ] || { echo "autobrr could not reach qBittorrent with the client the Job registers (${autobrr_test})"; fail=1; }
+  python3 - "$WORK/autobrr-downloaders.json" "$QBIT_URL" \
+    "$($K -n "$NS" get cm s5n-wiring -o jsonpath='{.data.wiring\.json}')" <<'PY' || fail=1
+import json, sys
+rows = json.load(open(sys.argv[1], encoding="utf-8"))
+qbit_url = sys.argv[2]
+# Every enabled Arr instance is one client, and its host is the address the Arr
+# itself answers on -- the base path included.
+cfg = json.loads(sys.argv[3])
+want = {i["name"]: i["url"].rstrip("/") + i["urlBase"] for i in cfg["instances"]}
+by_name = {}
+for row in rows:
+    by_name.setdefault(row.get("name"), []).append(row)
+print("  autobrr holds: %s" % ", ".join("%s(%s)" % (r["name"], r["type"]) for r in rows))
+ok = True
+qbit = [r for r in rows if r.get("type") == "QBITTORRENT"]
+if len(qbit) != 1:
+    print("  autobrr holds %d qBittorrent clients, want 1" % len(qbit))
+    ok = False
+elif qbit[0].get("host") != qbit_url:
+    print("  the qBittorrent client dials %r, want %r" % (qbit[0].get("host"), qbit_url))
+    ok = False
+if len(rows) != len(want) + 1:
+    print("  autobrr holds %d clients, want %d (qBittorrent + one per Arr)" % (len(rows), len(want) + 1))
+    ok = False
+for name in want:
+    if len(by_name.get(name, [])) != 1:
+        print("  autobrr holds %d clients named %s, want 1" % (len(by_name.get(name, [])), name))
+        ok = False
+for name, host in want.items():
+    if not any(r.get("name") == name and r.get("host") == host for r in rows):
+        print("  no client for %s dials %r: the Arr's base path is part of the host" % (name, host))
+        ok = False
+sys.exit(0 if ok else 1)
+PY
+
+  # ---- rotation: the fingerprint is the only thing that sees it --------------
+  # qui and autobrr never return the stored password, so a rotation in the
+  # release Secret is invisible to a comparison; owned.json's fingerprint is
+  # what turns it into an update. qBittorrent itself takes the new password at
+  # its next start (its init container writes the Secret's value every time).
+  log "rotating the qBittorrent password: exactly the two copies that hold it update"
+  QBIT_PASSWORD=$(openssl rand -hex 12)
+  $K -n "$NS" patch secret s5n-keys --type=merge \
+    -p "{\"data\":{\"qbittorrent-password\":\"$(printf '%s' "$QBIT_PASSWORD" | base64 -w0)\"}}" >/dev/null ||
+    { echo "could not rotate the qBittorrent password in the release Secret"; fail=1; }
+  $K -n "$NS" rollout restart statefulset/qbittorrent >/dev/null
+  $K -n "$NS" rollout status statefulset/qbittorrent --timeout=300s >/dev/null ||
+    { echo "qBittorrent did not come back on the rotated password"; fail=1; }
+  if $HELM upgrade s5n "$CHART_REPO" --version "$CHART_VERSION" -n "$NS" --reuse-values --plain-http \
+      --wait --timeout 15m >"$WORK/upgrade-rotate.txt" 2>&1; then
+    :
+  else
+    echo "the upgrade after the rotation failed"; tail -30 "$WORK/upgrade-rotate.txt"; fail=1
+  fi
+  created=$(status_field 'd["writes"]["created"]' 2>/dev/null || echo missing)
+  updated=$(status_field 'd["writes"]["updated"]' 2>/dev/null || echo missing)
+  echo "  after the rotation: ${created} created, ${updated} updated"
+  [ "$created" = 0 ] && [ "$updated" = 2 ] ||
+    { echo "the rotation wrote ${created} created / ${updated} updated, want exactly the two copies"; fail=1; }
+  for step in qui/instance autobrr/downloader/qbittorrent; do
+    detail=$(status_field "[s['detail'] for s in d['steps'] if s['name']=='$step'][0]" 2>/dev/null || echo missing)
+    echo "  ${step}: ${detail}"
+    [ "$detail" = updated ] || { echo "${step} was ${detail}, want updated after a rotated qBittorrent password"; fail=1; }
+  done
+  for step in autobrr/downloader/sonarr autobrr/downloader/radarr; do
+    detail=$(status_field "[s['detail'] for s in d['steps'] if s['name']=='$step'][0]" 2>/dev/null || echo missing)
+    [ "$detail" = unchanged ] || { echo "${step} was ${detail}, want unchanged: its key did not move"; fail=1; }
+  done
+  # Both copies still work, read back from the apps: the Job's own tests are the
+  # proof it wrote them, these are the proof the apps kept them.
+  port_forward qui-0 7476 || fail=1
+  qui_session "$QUI_BASE"
+  curl -sS -H "Cookie: ${QUI_COOKIE}" "http://127.0.0.1:${PF_PORT}${QUI_BASE}/api/instances/" >"$WORK/qui-instances-rotated.json" 2>/dev/null || true
+  qui_id=$(python3 -c 'import json, sys
+rows = json.load(open(sys.argv[1]))
+print(rows[0]["id"] if len(rows) == 1 else "")' "$WORK/qui-instances-rotated.json" 2>/dev/null || true)
+  qui_test=$(curl -sS -X POST -H "Cookie: ${QUI_COOKIE}" -H 'X-Requested-With: XMLHttpRequest' \
+    "http://127.0.0.1:${PF_PORT}${QUI_BASE}/api/instances/${qui_id}/test" 2>/dev/null || true)
+  port_forward_stop
+  case "$qui_test" in
+    *'"connected":true'*) echo "  qui still reaches qBittorrent on the rotated password: ok" ;;
+    *) echo "qui lost qBittorrent on the rotated password: ${qui_test}"; fail=1 ;;
+  esac
+  port_forward autobrr-0 7474 || fail=1
+  autobrr_session "$AUTOBRR_BASE" "$WORK/autobrr-rotated.jar"
+  autobrr_test=$(curl -sS -o /dev/null -w '%{http_code}' -b "$WORK/autobrr-rotated.jar" \
+    -X POST "http://127.0.0.1:${PF_PORT}${AUTOBRR_BASE}/api/downloaders/test" \
+    -H 'Content-Type: application/json' \
+    --data "{\"name\":\"qBittorrent\",\"type\":\"QBITTORRENT\",\"enabled\":true,\"host\":\"${QBIT_URL}\",\"username\":\"admin\",\"password\":\"${QBIT_PASSWORD}\",\"settings\":{\"rules\":{\"enabled\":false}}}" 2>/dev/null || true)
+  port_forward_stop
+  echo "  autobrr's qBittorrent client on the rotated password: ${autobrr_test}"
+  [ "$autobrr_test" = 204 ] || { echo "autobrr lost qBittorrent on the rotated password (${autobrr_test})"; fail=1; }
+
+  # ---- a password changed inside qui ----------------------------------------
+  # The account belongs to the app, so an operator can change it there; the Job
+  # then cannot sign in until the pod restarts, because that is when the init
+  # container writes the Secret's password back. The receipt must say that in
+  # words and name the command -- not report an HTTP status.
+  log "a password changed inside qui is reported, and a restart puts it back"
+  port_forward qui-0 7476 || fail=1
+  qui_session "$QUI_BASE"
+  [ "$QUI_LOGIN_CODE" = 200 ] || { echo "qui refused the Secret's password before the change (${QUI_LOGIN_CODE})"; fail=1; }
+  QUI_INSIDE_PASSWORD="inside-$(openssl rand -hex 8)"
+  change_code=$(qui_change_password "$QUI_BASE" "$QUI_PASSWORD" "$QUI_INSIDE_PASSWORD")
+  echo "  changed qui's password through its API: ${change_code} $(head -c 120 "$WORK/qui-change.json" 2>/dev/null)"
+  port_forward_stop
+  [ "$change_code" = 200 ] || { echo "qui refused the password change (${change_code})"; fail=1; }
+
+  rerun_wiring "$WORK/rerun-changed.txt"
+  login_result=$(status_field "[s['result'] for s in d['steps'] if s['name']=='qui/login'][0]" 2>/dev/null || echo missing)
+  login_detail=$(status_field "[s['detail'] for s in d['steps'] if s['name']=='qui/login'][0]" 2>/dev/null || echo missing)
+  echo "  qui/login: ${login_result}: ${login_detail}"
+  [ "$login_result" = failed ] ||
+    { echo "the Job signed in although the password was changed inside qui"; fail=1; }
+  case "$login_detail" in
+    *"changed inside the app"*"kubectl rollout restart statefulset/qui"*) ;;
+    *) echo "the receipt does not name the cause and the fix: ${login_detail}"; fail=1 ;;
+  esac
+
+  $K -n "$NS" rollout restart statefulset/qui >/dev/null
+  $K -n "$NS" rollout status statefulset/qui --timeout=300s >/dev/null ||
+    { echo "qui did not come back after the restart"; fail=1; }
+  rerun_wiring "$WORK/rerun-restored.txt"
+  for step in qui/login qui/instance; do
+    res=$(status_field "[s['result'] for s in d['steps'] if s['name']=='$step'][0]" 2>/dev/null || echo missing)
+    echo "  ${step} after the restart: ${res}"
+    [ "$res" = ok ] || { echo "${step} is ${res} after the restart that put the Secret's password back"; fail=1; }
+  done
+  port_forward qui-0 7476 || fail=1
+  qui_session "$QUI_BASE"
+  echo "  qui after the restart: POST login with the Secret's password: ${QUI_LOGIN_CODE}"
+  port_forward_stop
+  [ "$QUI_LOGIN_CODE" = 200 ] ||
+    { echo "the account did not come back to the Secret's password (${QUI_LOGIN_CODE})"; fail=1; }
+
+  # ---- autobrr's onboarding endpoint ----------------------------------------
+  # It was open while autobrr's user table was empty, which is how a stranger
+  # could take the app over; the account the init container writes closes it.
+  # Asked through the Gateway with the edge's session, because that is the only
+  # way in for a person.
+  log "autobrr's onboarding endpoint is refused now that the account exists"
+  portal_login "$WORK/edge-onboard-jar" "$LOGIN" "$AUTHELIA_PASSWORD" "https://${DOMAIN}/autobrr/" "$gw_addr" "$WORK/pebble-root.pem"
+  echo "  portal sign-in for the request: ${PORTAL_CODE}"
+  [ "$PORTAL_CODE" = 200 ] || { echo "the portal refused the box's own account (${PORTAL_CODE})"; fail=1; }
+  onboard_code=$(curl -sS -o "$WORK/onboard.json" -w '%{http_code}' -b "$WORK/edge-onboard-jar" \
+    --resolve "${DOMAIN}:443:${gw_addr}" --cacert "$WORK/pebble-root.pem" \
+    -X POST "https://${DOMAIN}/autobrr/api/auth/onboard" -H 'Content-Type: application/json' \
+    --data '{"username":"intruder","password":"intruder-pass-123"}' 2>/dev/null || true)
+  echo "  POST /autobrr/api/auth/onboard with the edge session: ${onboard_code} $(head -c 160 "$WORK/onboard.json" 2>/dev/null)"
+  [ "$onboard_code" = 503 ] ||
+    { echo "autobrr's onboarding endpoint answered ${onboard_code}: the account that closes it is missing"; fail=1; }
+  grep -q 'onboarding unavailable' "$WORK/onboard.json" ||
+    { echo "the refusal is not autobrr's own onboarding one"; fail=1; }
 
   # ---- the claims outlive the release ----------------------------------------
   # The one destructive command an operator runs is `helm uninstall`: the data

@@ -1018,6 +1018,68 @@ status_field() { # status_field <python expression over `d`>
 arr_port() { $K -n "$NS" get svc "$1" -o jsonpath='{.spec.ports[0].port}'; }
 arr_key() { $K -n "$NS" get secret s5n-keys -o jsonpath="{.data.$1-apikey}" | base64 -d; }
 
+# ---- qui and autobrr: the account the chart owns -----------------------------
+# Both apps hand an API key only to a signed-in session, so the chart generates
+# a password in the release Secret and each app's init container writes it into
+# the app on every start; the wiring Job signs in with it. This install has no
+# OIDC provider, which is the other half of the design: qui runs with its login
+# switched off (its API is then open inside the release) and autobrr keeps the
+# login it cannot turn off, with that account behind it.
+#
+# Reading them from the host needs a tunnel: their ingress policy admits the
+# Gateway and the wiring Job alone, and the Job's image is distroless. A
+# port-forward is the API server talking to kubelet, which no policy applies to,
+# and it arrives on 127.0.0.1 -- a secure context for curl, so qui's Secure
+# session cookie would be replayed if it had one.
+port_forward() { # port_forward <pod> <container-port>
+  local pod=$1 port=$2 i
+  PF_PORT=$(python3 -c 'import socket
+s = socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1]); s.close()')
+  $K -n "$NS" port-forward "pod/${pod}" "${PF_PORT}:${port}" >"$WORK/pf-${pod}.log" 2>&1 &
+  PF_PID=$!
+  for i in $(seq 1 30); do
+    if curl -sS -o /dev/null --max-time 2 "http://127.0.0.1:${PF_PORT}/" 2>/dev/null; then
+      return 0
+    fi
+    sleep 1
+  done
+  echo "port-forward to ${pod}:${port} never answered"
+  sed 's/^/    /' "$WORK/pf-${pod}.log" 2>/dev/null || true
+  return 1
+}
+
+port_forward_stop() {
+  kill "$PF_PID" 2>/dev/null || true
+  wait "$PF_PID" 2>/dev/null || true
+}
+
+# app_snapshot writes what one app holds through its own API: the proof that a
+# second wiring run created no duplicate rows, compared field for field by
+# state-diff.py.
+app_snapshot() { # app_snapshot <dir> <app>
+  local dir=$1 app=$2 base port jar
+  case "$app" in
+    qui)
+      base=/qui
+      port=$(arr_port qui)
+      port_forward qui-0 "$port" || return 1
+      curl -sS "http://127.0.0.1:${PF_PORT}${base}/api/instances/" >"$dir/qui-instances.json" 2>/dev/null || true
+      ;;
+    autobrr)
+      base=/autobrr
+      port=$(arr_port autobrr)
+      jar="$dir/autobrr-jar.txt"
+      port_forward autobrr-0 "$port" || return 1
+      curl -sS -c "$jar" -o /dev/null \
+        -X POST "http://127.0.0.1:${PF_PORT}${base}/api/auth/login" -H 'Content-Type: application/json' \
+        --data "{\"username\":\"${ACCOUNT}\",\"password\":\"${AUTOBRR_PASSWORD}\"}" 2>/dev/null || true
+      curl -sS -b "$jar" "http://127.0.0.1:${PF_PORT}${base}/api/downloaders" >"$dir/autobrr-downloaders.json" 2>/dev/null || true
+      rm -f "$jar"
+      ;;
+  esac
+  port_forward_stop
+}
+
 # Snapshot everything the wiring Job is allowed to change, so a second run can be
 # compared field for field rather than trusted. One file per endpoint; free space is
 # scrubbed by state-diff.py because it moves for reasons that are not configuration.
@@ -1050,7 +1112,22 @@ snapshot() { # snapshot <dir>
   tpw=$($K -n "$NS" get secret s5n-keys -o jsonpath='{.data.tautulli-apikey}' | base64 -d)
   $K -n "$NS" exec tautulli-0 -- curl -s \
     "http://localhost:8181/api/v2?apikey=${tpw}&cmd=get_settings" >"$dir/tautulli-settings.json"
+  # The two apps with their own user table: what the Job registered is an
+  # instance and a set of download clients, so a duplicate row or a rewritten
+  # client shows up in the diff like any Arr's download client would.
+  for app in qui autobrr; do
+    app_snapshot "$dir" "$app" || { echo "could not snapshot ${app}"; fail=1; }
+  done
 }
+
+# The account the chart owns, and its password from the release Secret. Both
+# apps' init containers wrote it into their own user table at start-up.
+wiring_cfg=$($K -n "$NS" get cm s5n-wiring -o jsonpath='{.data.wiring\.json}')
+ACCOUNT=$(printf '%s' "$wiring_cfg" | python3 -c 'import json,sys; print(json.load(sys.stdin)["qui"]["username"])')
+QUI_PASSWORD=$($K -n "$NS" get secret s5n-keys -o jsonpath='{.data.qui-password}' | base64 -d)
+AUTOBRR_PASSWORD=$($K -n "$NS" get secret s5n-keys -o jsonpath='{.data.autobrr-password}' | base64 -d)
+QBIT_PASSWORD=$($K -n "$NS" get secret s5n-keys -o jsonpath='{.data.qbittorrent-password}' | base64 -d)
+echo "the automation account: ${ACCOUNT} (qui ${#QUI_PASSWORD} char password)"
 
 log "wiring run 1: asserts the release is actually connected"
 $K -n "$NS" wait --for=condition=complete job/s5n-wiring --timeout=600s || fail=1
@@ -1069,10 +1146,73 @@ for expected in \
   qbittorrent/data-contract qbittorrent/category/tv qbittorrent/category/movies \
   qbittorrent/category/4K/Movies \
   data/hardlink/tv data/hardlink/movies data/hardlink/4K/Movies \
+  qui/ready qui/login qui/instance \
+  autobrr/ready autobrr/login autobrr/downloader/qbittorrent \
+  autobrr/downloader/sonarr autobrr/downloader/radarr autobrr/downloader/radarr-4k \
   plex/ready tautulli/ready seerr/ready; do
   res=$(status_field "[s['result'] for s in d['steps'] if s['name']=='$expected'][0]" 2>/dev/null || echo missing)
   echo "  ${expected}: ${res}"; [ "$res" = ok ] || fail=1
 done
+
+# What the Job registered, read back through the apps themselves: exactly one
+# qui instance pointed at qBittorrent with local filesystem access, and one
+# autobrr client per Arr instance -- the 4K one included, whose host carries its
+# own base path -- plus qBittorrent, which autobrr is asked to dial.
+port_forward qui-0 "$(arr_port qui)" || fail=1
+curl -sS "http://127.0.0.1:${PF_PORT}/qui/api/instances/" >"$WORK/qui-live.json" 2>/dev/null || true
+port_forward_stop
+port_forward autobrr-0 "$(arr_port autobrr)" || fail=1
+autobrr_login=$(curl -sS -c "$WORK/autobrr-live.jar" -o /dev/null -w '%{http_code}' \
+  -X POST "http://127.0.0.1:${PF_PORT}/autobrr/api/auth/login" -H 'Content-Type: application/json' \
+  --data "{\"username\":\"${ACCOUNT}\",\"password\":\"${AUTOBRR_PASSWORD}\"}" 2>/dev/null || true)
+curl -sS -b "$WORK/autobrr-live.jar" "http://127.0.0.1:${PF_PORT}/autobrr/api/downloaders" >"$WORK/autobrr-live.json" 2>/dev/null || true
+qbit_url=$(printf '%s' "$wiring_cfg" | python3 -c 'import json,sys; print(json.load(sys.stdin)["qbittorrent"]["url"])')
+autobrr_test=$(curl -sS -o /dev/null -w '%{http_code}' -b "$WORK/autobrr-live.jar" \
+  -X POST "http://127.0.0.1:${PF_PORT}/autobrr/api/downloaders/test" -H 'Content-Type: application/json' \
+  --data "{\"name\":\"qBittorrent\",\"type\":\"QBITTORRENT\",\"enabled\":true,\"host\":\"${qbit_url}\",\"username\":\"admin\",\"password\":\"${QBIT_PASSWORD}\",\"settings\":{\"rules\":{\"enabled\":false}}}" 2>/dev/null || true)
+port_forward_stop
+echo "autobrr login: ${autobrr_login}, its qBittorrent client test: ${autobrr_test}"
+[ "$autobrr_login" = 204 ] || { echo "autobrr refused the account the chart owns (${autobrr_login})"; fail=1; }
+[ "$autobrr_test" = 204 ] || { echo "autobrr could not reach qBittorrent with the client the Job registered (${autobrr_test})"; fail=1; }
+python3 - "$WORK/qui-live.json" "$WORK/autobrr-live.json" "$wiring_cfg" <<'PY' || fail=1
+import json, sys
+qui = json.load(open(sys.argv[1], encoding="utf-8"))
+clients = json.load(open(sys.argv[2], encoding="utf-8"))
+cfg = json.loads(sys.argv[3])
+ok = True
+want_qbit = cfg["qbittorrent"]["url"]
+if len(qui) != 1:
+    print("qui holds %d instances, want exactly 1" % len(qui))
+    ok = False
+else:
+    row = qui[0]
+    print("qui instance: %s -> %s (local filesystem access %s)" %
+          (row.get("name"), row.get("host"), row.get("hasLocalFilesystemAccess")))
+    if row.get("host") != want_qbit:
+        print("  it points at %r, want %r" % (row.get("host"), want_qbit))
+        ok = False
+    if not row.get("hasLocalFilesystemAccess"):
+        print("  it has no local filesystem access: /data is the same mount in both apps")
+        ok = False
+want = {i["name"]: i["url"].rstrip("/") + i["urlBase"] for i in cfg["instances"]}
+print("autobrr holds: %s" % ", ".join("%s(%s)" % (c.get("name"), c.get("type")) for c in clients))
+for name, host in want.items():
+    got = [c for c in clients if c.get("name") == name]
+    if len(got) != 1:
+        print("  %s: %d clients, want 1" % (name, len(got)))
+        ok = False
+    elif got[0].get("host") != host:
+        print("  %s dials %r, want the Arr's own address %r" % (name, got[0].get("host"), host))
+        ok = False
+qbit = [c for c in clients if c.get("type") == "QBITTORRENT"]
+if len(qbit) != 1 or qbit[0].get("host") != want_qbit:
+    print("  qBittorrent: %r, want exactly one client at %r" % (qbit, want_qbit))
+    ok = False
+if len(clients) != len(want) + 1:
+    print("  %d clients in total, want %d (qBittorrent + one per Arr instance)" % (len(clients), len(want) + 1))
+    ok = False
+sys.exit(0 if ok else 1)
+PY
 
 # No claim token and no Plex server token are given anywhere in this e2e, so
 # Plex stays unclaimed, Tautulli has nothing to authenticate its PMS link with,
