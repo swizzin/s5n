@@ -194,8 +194,14 @@ the user's own (see Logins). Pod Security `restricted` still does the
 rest. This raises the chart's `kubeVersion` floor to 1.30, where the API is GA.
 
 **Root assigns the torrent port (decided).** It's a port on the node that every seedbox
-shares, so it lives in the grant with the Service type, and `box adduser` picks a free
-one.
+shares, so it lives in the grant with the Service type. `box init` settles it once: a port
+the grant already holds is kept, and so is the one an installed seedbox's peers Service is
+already on; otherwise box picks one at random from the lower band of the NodePort range
+(30000-30085 for the default range), skipping every nodePort a Service in the cluster
+holds. Kubernetes assigns its own nodePorts (a LoadBalancer's, one per listener) from the
+rest of the range and reaches into that band only when the rest is full, so a port there
+isn't taken out from under the box; a fixed port outside it can be, and then every apply
+fails. A band with no free port refuses before any write.
 
 ## Logins (decided, mechanism proposed)
 
