@@ -176,6 +176,9 @@ trap cleanup EXIT
 
 log() { printf '\n==> %s\n' "$*"; }
 fail=0
+# The torrent port the grant records, as the last assert_torrent_port read it:
+# the binding below admits exactly that number.
+TORRENT_PORT=""
 
 # kind writes the cluster's context into KUBECONFIG and makes it the
 # current-context, then `kind delete cluster` drops that context without putting
@@ -503,6 +506,85 @@ s = socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1]); s.clos
 port_forward_stop() {
   kill "$PF_PID" 2>/dev/null || true
   wait "$PF_PID" 2>/dev/null || true
+}
+
+# assert_torrent_port <step> [the port a re-run must still have]
+#
+# box picks the torrent port at init from the band the API server does not
+# assign by itself (Kubernetes' ServiceNodePortStaticSubrange: dynamic
+# allocation starts at the top of the range and only spills into this band once
+# that is full), records it in the grant, and the chart hands the same number to
+# the peers Service and to qBittorrent. A fixed port in the upper part of the
+# range -- the chart's own 31111 -- is one any Service asking for "any free
+# port" can win first, and then every apply of this seedbox fails on the peers
+# Service. So the four things asserted here are: the grant has a port in the
+# band, the Service forwards it, nothing else holds it, and the app announces it.
+assert_torrent_port() { # assert_torrent_port <step> [expected]
+  local step=$1 want=${2:-} port svc_port listen_port others password code
+  port=$(python3 - "$WORK/grant.yaml" <<'PY'
+import sys, yaml
+grant = yaml.safe_load(open(sys.argv[1])) or {}
+torrent = (grant.get("apps") or {}).get("qbittorrent", {}).get("torrent") or {}
+print(torrent.get("port", ""))
+PY
+  ) || true
+  echo "  ${step}: the grant's torrent port is ${port:-absent}"
+  case "$port" in
+    ''|*[!0-9]*) echo "the grant records no torrent port"; fail=1; return 0 ;;
+  esac
+  if [ "$port" -lt 30000 ] || [ "$port" -gt 30085 ]; then
+    echo "the torrent port ${port} is outside the band box picks from (30000-30085)"; fail=1
+  fi
+  if [ -n "$want" ] && [ "$port" != "$want" ]; then
+    echo "the torrent port moved from ${want} to ${port}"; fail=1
+  fi
+  TORRENT_PORT=$port
+  svc_port=$($K -n "$NS" get service qbittorrent-peers -o jsonpath='{.spec.ports[0].nodePort}' 2>/dev/null || true)
+  echo "  ${step}: the peers Service is on ${svc_port}"
+  [ "$svc_port" = "$port" ] ||
+    { echo "the peers Service is on ${svc_port}, the grant says ${port}"; fail=1; }
+  # Nothing else in the cluster holds it: that is what "free when box picked
+  # it" means, and the collision this whole decision exists for.
+  others=$($K get services --all-namespaces -o json | python3 -c '
+import json, sys
+port, ns, name = sys.argv[1], sys.argv[2], sys.argv[3]
+for svc in json.load(sys.stdin)["items"]:
+    meta = svc["metadata"]
+    if meta["namespace"] == ns and meta["name"] == name:
+        continue
+    if any(str(p.get("nodePort", "")) == port for p in svc["spec"].get("ports") or []):
+        print(meta["namespace"] + "/" + meta["name"])
+' "$port" "$NS" qbittorrent-peers || true)
+  [ -z "$others" ] ||
+    { echo "the torrent port ${port} is also held by ${others}"; fail=1; }
+  # And the app itself announces it. The chart hands the value to both sides,
+  # but only qBittorrent's own answer proves it took: its listen port is the
+  # number peers dial, and the Service is only pointing at it.
+  password=$($K -n "$NS" get secret s5n-keys -o jsonpath='{.data.qbittorrent-password}' 2>/dev/null | base64 -d || true)
+  if [ -z "$password" ]; then
+    echo "the release Secret holds no qBittorrent password"; fail=1; return 0
+  fi
+  port_forward qbittorrent-0 8080 || { fail=1; return 0; }
+  : >"$WORK/qbt-port.jar"
+  code=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 15 -c "$WORK/qbt-port.jar" \
+    --data-urlencode "username=admin" --data-urlencode "password=${password}" \
+    "http://127.0.0.1:${PF_PORT}/api/v2/auth/login" || true)
+  listen_port=""
+  # Any 2xx is a sign-in: qBittorrent 5 answers 204 with no body.
+  case "$code" in
+    2??)
+      listen_port=$(curl -sS --max-time 15 -b "$WORK/qbt-port.jar" \
+        "http://127.0.0.1:${PF_PORT}/api/v2/app/preferences" 2>/dev/null |
+        python3 -c 'import json,sys; print(json.load(sys.stdin).get("listen_port",""))' 2>/dev/null || true)
+      ;;
+    *)
+      echo "qBittorrent's API answered ${code:-nothing} to its own password"
+      ;;
+  esac
+  port_forward_stop
+  echo "  ${step}: qBittorrent listens on ${listen_port:-unknown}"
+  [ "$listen_port" = "$port" ] ||
+    { echo "qBittorrent listens on ${listen_port:-unknown}, the grant says ${port}"; fail=1; }
 }
 
 # qui_session signs in over the tunnel and leaves the code in QUI_LOGIN_CODE and
@@ -1285,6 +1367,9 @@ fresh() {
     { echo "box did not pull ${CHART_REPO}:${CHART_VERSION}"; fail=1; }
   grep -q "first install" "$WORK/bootstrap1.txt" || { echo "no 'first install' line"; fail=1; }
   grep -q "^wiring ok" "$WORK/bootstrap1.txt" || { echo "box did not report a healthy receipt"; fail=1; }
+  # The peer port box picked for this cluster, and the three places it has to
+  # agree: the grant, the Service and the app's own preference.
+  assert_torrent_port "first install"
   # The data path was empty before this run: these steps are the wiring Job
   # making both trees itself, before the Arr root-folder steps that need them.
   for d in downloads/tv media/tv downloads/movies media/movies; do
@@ -1944,8 +2029,11 @@ for r in items:
   # namespace -- and Envoy Gateway lets a route-targeted policy override the
   # Gateway-level one, which is a working bypass. The bindings root creates at
   # adduser are what refuse it; hack/render-grant is the same renderer box uses.
+  # The grant's own port, not a number this script picked: the binding has to
+  # admit the peers Service box actually wrote, or every later apply in this
+  # scenario is refused by the policy under test.
   log "admission: the login cannot be removed or overridden from ${NS}"
-  go run ./hack/render-grant charts/s5n "$NS" 31111 NodePort | $K apply -f - >/dev/null
+  go run ./hack/render-grant charts/s5n "$NS" "${TORRENT_PORT:-}" NodePort | $K apply -f - >/dev/null
   $K apply -f - >/dev/null <<EOF
 apiVersion: v1
 kind: ServiceAccount
@@ -2378,6 +2466,9 @@ EOF
   echo "values  ${values_before} -> ${values_after}"
   [ "$grant_before" = "$grant_after" ] || { echo "the second init spliced into the grant"; fail=1; }
   [ "$values_before" = "$values_after" ] || { echo "the second init spliced into the values file"; fail=1; }
+  # And the peer port is where the first run left it: a re-run keeps the
+  # grant's port instead of picking a second one peers are not announcing.
+  assert_torrent_port "after the second init" "$TORRENT_PORT"
   grep -q "already says this" "$WORK/apply2.txt" || { echo "init did not say the grant was already right"; fail=1; }
   grep -q "nothing to change" "$WORK/apply2.txt" || { echo "box did not say nothing to change"; fail=1; }
   rev2=$(revision); secrets2=$(release_secrets)
@@ -3032,6 +3123,28 @@ EOF
   [ -n "$before_addr" ] || { echo "the pre-installed MetalLB did not answer a LoadBalancer Service"; fail=1; }
   echo "  a LoadBalancer answers before box runs: ${before_addr}"
 
+  # ---- a port in box's band, held by someone else -------------------------
+  # The band is where the API server does *not* put its own allocations, so the
+  # only way a port there is taken is a Service that asked for it by number.
+  # box has to see it -- that LIST across namespaces is the whole mechanism --
+  # and pick around it.
+  $K create namespace port-holder --dry-run=client -o yaml | $K apply -f - >/dev/null
+  $K -n port-holder apply -f - >/dev/null <<'EOF'
+apiVersion: v1
+kind: Service
+metadata:
+  name: holder
+spec:
+  type: NodePort
+  ports:
+    - port: 80
+      nodePort: 30000
+EOF
+  held_port=$($K -n port-holder get service holder -o jsonpath='{.spec.ports[0].nodePort}' || true)
+  [ "$held_port" = 30000 ] ||
+    { echo "could not hold nodePort 30000 in another namespace (got ${held_port:-nothing})"; fail=1; }
+  echo "  another namespace holds nodePort 30000 before box runs"
+
   # ---- bootstrap: box must use what answers ---------------------------------
   log "box bootstrap: the Gateway gets an address without MetalLB, so none is installed"
   if bootstrap "$WORK/bootstrap1.txt"; then
@@ -3053,6 +3166,12 @@ EOF
   grep -q "the Gateway already has an address: " "$WORK/bootstrap1.txt" ||
     { echo "the Gateway's own address did not answer the question"; fail=1; }
   grep -q "^wiring ok" "$WORK/bootstrap1.txt" || { echo "box did not report a healthy receipt"; fail=1; }
+  # A port in the band was already held by an unrelated Service when box ran,
+  # and box must not have picked it -- nor anything else someone else holds.
+  assert_torrent_port "the port another Service already held"
+  picked=$TORRENT_PORT
+  [ "$picked" != 30000 ] ||
+    { echo "box picked the nodePort the holder Service was created with"; fail=1; }
 
   # Nothing box owns was installed: no release, no pool, no advertisement, and
   # no probe Service (the Gateway's own status is the probe).
@@ -3244,6 +3363,8 @@ PY
     echo "the second run installed MetalLB"; fail=1
   fi
   grep -q "nothing to change" "$WORK/bootstrap2.txt" || { echo "the second init did not say nothing to change"; fail=1; }
+  # The second run keeps the port the first one recorded.
+  assert_torrent_port "after the second bootstrap" "$TORRENT_PORT"
   [ "$(helm_revision metallb-system)" = 0 ] ||
     { echo "the second run created a metallb Helm release"; fail=1; }
   if $K -n metallb-system get ipaddresspool s5n-pool >/dev/null 2>&1; then
@@ -3514,6 +3635,9 @@ EOF
     "https://${SEERR_HOST}/" 2>/dev/null || true)
   echo "  HTTPS ${SEERR_HOST}/ with Pebble's CA (following Seerr's redirect): ${seerr_https}"
   [ "$seerr_https" = 200 ] || { echo "the app host did not serve the issued certificate"; fail=1; }
+
+  # The holder Service was this scenario's setup, not part of the install.
+  $K delete namespace port-holder --wait=false >/dev/null 2>&1 || true
 }
 
 # ---- scenario: foreign-gateway ----------------------------------------------

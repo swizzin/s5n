@@ -247,7 +247,7 @@ $K -n "$NS" wait --for=condition=Available deploy/unblessed --timeout=180s || fa
 log "bind the policy to ${NS} with the grant as params (root-owned s5n-system)"
 # The renderer is Go and reads the chart's variants.yaml, the same file the
 # templates resolve images from; it is the package box will call.
-go run ./hack/render-grant charts/s5n "$NS" 31111 NodePort | $K apply -f - >/dev/null
+go run ./hack/render-grant charts/s5n "$NS" 30080 NodePort | $K apply -f - >/dev/null
 
 # A binding takes effect a moment after it is created, so wait for a denial
 # instead of sleeping. A dry-run CREATE of a new object is a real admission
@@ -951,22 +951,22 @@ echo "GET /maintainerr/api/events/stream: curl exit ${sse_exit} after ${sse_secs
 
 # The peers Service is a NodePort on the node's own address (how a single-IP box
 # runs: the Gateway holds the LoadBalancer address, peers use the node port), so a
-# TCP connect from the host to <node>:31111 must succeed.
+# TCP connect from the host to <node>:30080 must succeed.
 peer_type=$($K -n "$NS" get svc qbittorrent-peers -o jsonpath='{.spec.type}/{.spec.ports[0].nodePort}')
-echo "peers Service: ${peer_type}"; [ "$peer_type" = NodePort/31111 ] || fail=1
+echo "peers Service: ${peer_type}"; [ "$peer_type" = NodePort/30080 ] || fail=1
 PEER_ADDR=$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "${CLUSTER}-control-plane")
 echo "node address: ${PEER_ADDR}"
 [ -n "$PEER_ADDR" ] || fail=1
 if python3 - "$PEER_ADDR" <<'PY'
 import socket, sys
-s = socket.create_connection((sys.argv[1], 31111), timeout=10)
+s = socket.create_connection((sys.argv[1], 30080), timeout=10)
 s.close()
-print("TCP", sys.argv[1], "31111 -> connected")
+print("TCP", sys.argv[1], "30080 -> connected")
 PY
 then
   :
 else
-  echo "TCP ${PEER_ADDR}:31111 -> REFUSED/TIMEOUT"; fail=1
+  echo "TCP ${PEER_ADDR}:30080 -> REFUSED/TIMEOUT"; fail=1
 fi
 
 # Hardlink invariant: downloads/ and media/ are one filesystem, as seen by an Arr pod.
