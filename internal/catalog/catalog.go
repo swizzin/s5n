@@ -115,6 +115,14 @@ type App struct {
 	// box's -- a second client later is one entry here and nothing in box
 	// beyond reading this flag.
 	OIDC bool `yaml:"oidc"`
+	// Calls lists the in-release apps this one connects to, and it is the only
+	// such list: the chart derives the release's NetworkPolicy from it, each
+	// app's ingress admitting exactly the enabled apps that name it. So the
+	// consequence of a missing entry is a call the callee refuses, which is why
+	// Load checks every name against the catalog and refuses a self-reference.
+	// "sonarr"/"radarr" mean every instance of that Arr. An app that dials
+	// nothing inside the release leaves the list empty.
+	Calls []string `yaml:"calls"`
 	// Questions are asked in this order, after the app is selected.
 	Questions []Question `yaml:"questions"`
 }
@@ -214,6 +222,7 @@ type manifestApp struct {
 	Default     bool       `yaml:"default"`
 	Exposure    Exposure   `yaml:"exposure"`
 	OIDC        bool       `yaml:"oidc"`
+	Calls       []string   `yaml:"calls"`
 	Questions   []Question `yaml:"questions"`
 }
 
@@ -363,10 +372,11 @@ func buildApps(m *manifest, order []string, chartApps map[string]chartApp, sch *
 			Default:     entry.Default,
 			Exposure:    entry.Exposure,
 			OIDC:        entry.OIDC,
+			Calls:       entry.Calls,
 			Questions:   entry.Questions,
 		}
 		problems = append(problems, validateExposure(&app)...)
-		problems = append(problems, validateApp(&app, chartApps[name], sch)...)
+		problems = append(problems, validateApp(&app, chartApps[name], chartApps, sch)...)
 		cat.byName[name] = len(cat.apps)
 		cat.apps = append(cat.apps, app)
 	}
@@ -406,10 +416,10 @@ func (c *Catalog) Hosted() []string {
 }
 
 // validateApp checks one manifest entry: its description (init shows it), the
-// instances flag against the shape values.yaml gives the app, and every
-// question. The messages name the entry, because that is what a contributor
-// edits.
-func validateApp(app *App, chart chartApp, sch *schema) []string {
+// instances flag against the shape values.yaml gives the app, the apps it says
+// it dials, and every question. The messages name the entry, because that is
+// what a contributor edits.
+func validateApp(app *App, chart chartApp, chartApps map[string]chartApp, sch *schema) []string {
 	var problems []string
 	if app.Description == "" {
 		problems = append(problems, fmt.Sprintf("apps.%s.description: is empty; init shows it when it asks which apps the box has", app.Name))
@@ -423,7 +433,43 @@ func validateApp(app *App, chart chartApp, sch *schema) []string {
 			problems = append(problems, fmt.Sprintf("apps.%s.instances: values.yaml gives the app an `instances` list, so this must be true", app.Name))
 		}
 	}
+	problems = append(problems, validateCalls(app, chartApps)...)
 	return append(problems, validateQuestions(app, sch)...)
+}
+
+// validateCalls checks an entry's `calls` list. The chart inverts that list for
+// the release's NetworkPolicy, so a name that is not a catalog app renders a
+// peer selector nothing matches, a self-reference renders an app admitting
+// itself, and a repeat renders the same peer twice: each one is a policy that
+// says something its author did not mean, and each is refused by name here.
+//
+// The names are trimmed in place, so the catalog's App carries what the chart
+// reads from the same file.
+func validateCalls(app *App, chartApps map[string]chartApp) []string {
+	var problems []string
+	seen := map[string]int{}
+	for i, call := range app.Calls {
+		where := fmt.Sprintf("apps.%s.calls[%d]", app.Name, i)
+		name := strings.TrimSpace(call)
+		if name == "" {
+			problems = append(problems, fmt.Sprintf("%s: is empty; name the in-release app it dials, or drop the entry", where))
+			continue
+		}
+		app.Calls[i] = name
+		if name == app.Name {
+			problems = append(problems, fmt.Sprintf("%s: %s cannot call itself; a release's peers are other apps", where, name))
+			continue
+		}
+		if j, dup := seen[name]; dup {
+			problems = append(problems, fmt.Sprintf("%s: %s is listed twice (also calls[%d])", where, name, j))
+			continue
+		}
+		seen[name] = i
+		if _, ok := chartApps[name]; !ok {
+			problems = append(problems, fmt.Sprintf("%s: %q is not an app in this chart's catalog, so nothing would admit the call", where, name))
+		}
+	}
+	return problems
 }
 
 // validateQuestions checks one app's questions. Every message names the entry

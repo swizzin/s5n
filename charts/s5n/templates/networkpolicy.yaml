@@ -1,17 +1,28 @@
 {{- /*
 Default-deny inside the release, then only the flows the stack needs:
   gateway -> every app http
-  sonarr + radarr instances -> qbittorrent, prowlarr
-  prowlarr -> sonarr + radarr instances
-  tautulli, seerr -> plex
+  an app's callers -> that app http, from the catalog's inverted `calls`
   internet -> qbittorrent peer port
   all -> DNS; all -> public internet (indexers, metadata); all -> pods of this release
 Egress to other in-cluster namespaces and RFC1918 ranges is denied except DNS, but is
-unrestricted *within* the release (the blanket podSelector rule below), so Seerr's
-eventual egress to the Arrs needs no extra rule here -- only Plex's ingress does.
+unrestricted *within* the release (the blanket podSelector rule below). So ingress is
+the only side that decides an app-to-app call: a caller's egress needs no rule of its
+own, and the callee's ingress is the whole gate. That makes catalog.yaml's `calls` --
+per app, the in-release apps it dials -- the one statement of the release's internals;
+each app's ingress is that list inverted over the enabled apps, and no template names a
+peer. An app that is switched off admits nothing and is admitted by nothing.
 */ -}}
 {{- if .Values.networkPolicy.enabled }}
 {{- $root := . }}
+{{- /* The catalog's entries and the apps this release switched on: the two halves
+of every ingress peer list below. The catalog ships inside the chart and values
+cannot override it (internal/catalog refuses a manifest that disagrees with
+values.yaml), so this is the same list box validates. */}}
+{{- $catalogApps := (.Files.Get "catalog.yaml" | fromYaml).apps | default dict }}
+{{- $enabledApps := dict }}
+{{- range $app, $cfg := .Values.apps }}
+{{- if and $cfg $cfg.enabled }}{{ $_ := set $enabledApps $app true }}{{ end }}
+{{- end }}
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -193,36 +204,29 @@ spec:
         {{- with $root.Values.networkPolicy.extraHttpFrom }}
         {{- toYaml . | nindent 8 }}
         {{- end }}
-        {{- $peers := list }}
-        {{- if or (eq $inst.app "qbittorrent") (eq $inst.app "prowlarr") }}{{ $peers = list "sonarr" "radarr" }}{{ end }}
-        {{- if $inst.arr }}{{ if ne $inst.app "prowlarr" }}{{ $peers = list "prowlarr" }}{{ end }}{{ end }}
-        {{- /* qui and autobrr both hold their own connection to qBittorrent, and
-        autobrr holds one to every Arr: its download client's own connection
-        test is an Arr API call, made from autobrr's pod, so the Arr's ingress
-        has to admit it. Admitting a peer is not authorization -- the app's own
-        credentials are -- and a release without these apps renders no rule. */}}
-        {{- if eq $inst.app "qbittorrent" }}
-        {{- if and $root.Values.apps.qui $root.Values.apps.qui.enabled }}{{ $peers = append $peers "qui" }}{{ end }}
-        {{- if and $root.Values.apps.autobrr $root.Values.apps.autobrr.enabled }}{{ $peers = append $peers "autobrr" }}{{ end }}
-        {{- end }}
-        {{- if and $inst.arr (ne $inst.app "prowlarr") }}
-        {{- if and $root.Values.apps.autobrr $root.Values.apps.autobrr.enabled }}{{ $peers = append $peers "autobrr" }}{{ end }}
-        {{- end }}
         {{- /*
-        Tautulli and Seerr both attach to Plex (PLAN.md's catalog order); Seerr
-        also reaches the Arrs once a human has signed it in (see
-        internal/wiring's seerr/plex pending step). Egress within the release is
-        already unrestricted (the blanket podSelector rule below), so only the
-        ingress side -- who may call Plex -- needs this. Admitting a peer here
-        is not authorization: Plex still requires its server token, and no
-        network range is trusted for that.
+        Who may call this app: every enabled app whose catalog entry lists it.
+        Inverting the catalog's list is the point, not a convenience. Egress
+        inside the release is wide open (the blanket podSelector rule below), so
+        an ingress list is the only thing that can refuse a call, and one that
+        was written by hand and forgot a caller dropped that caller's requests
+        silently. One list, inverted, cannot disagree with itself: an app that
+        dials a peer says so in the catalog, and the peer's ingress follows from
+        the same sentence.
+
+        Admitting a caller is not authorization: the app's own credentials are
+        (an Arr's API key, Plex's own token). Only enabled apps are read here,
+        so an app that is switched off admits nothing and is admitted by
+        nothing.
         */}}
-        {{- if eq $inst.app "plex" }}{{ $peers = list "tautulli" "seerr" }}{{ end }}
-        {{- range $p := $peers }}
+        {{- range $caller, $on := $enabledApps }}
+        {{- $entry := get $catalogApps $caller | default dict }}
+        {{- if has $inst.app ($entry.calls | default list) }}
         - podSelector:
             matchLabels:
               app.kubernetes.io/instance: {{ $root.Release.Name }}
-              s5n.io/app: {{ $p }}
+              s5n.io/app: {{ $caller }}
+        {{- end }}
         {{- end }}
         {{- /* The wiring Job must reach every app's API to configure it. */}}
         {{- if $root.Values.wiring.enabled }}

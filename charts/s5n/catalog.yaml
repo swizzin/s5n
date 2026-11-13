@@ -45,6 +45,19 @@
 #                    and checks it answers where the domain does before it
 #                    writes anything for it (docs/box.md, "Certificates").
 #
+# An entry also says what the app dials *inside* the release:
+#
+#   calls: [qbittorrent, prowlarr]   the in-release apps it connects to
+#
+# It is the one list for that, and the chart derives the release's NetworkPolicy
+# from it: each app's ingress admits exactly the enabled apps that name it, so an
+# app that is switched off admits nothing and is admitted by nothing. Naming a
+# peer is what opens the peer's ingress; the release's own egress is open either
+# way, so a call this list forgets is refused at the callee and nowhere else.
+# "sonarr"/"radarr" mean every instance of that Arr. An app that calls nothing
+# inside the release omits the key. A name here must be a catalog app, and no
+# app calls itself.
+#
 # A new *kind* of question is the only catalog change that needs a box release
 # (docs/box.md, "The catalog and box").
 apps:
@@ -52,6 +65,8 @@ apps:
     description: the download client; it seeds what the Arrs grab
     instances: false
     default: true
+    # The download client is called, and calls nothing inside the release: its
+    # trackers and RSS feeds are outside it.
     questions:
       - key: apps.qbittorrent.webuiUsername
         prompt: qBittorrent's web login name
@@ -63,6 +78,11 @@ apps:
     description: TV, from the tracker to the library
     instances: true
     default: true
+    # Its download client, and Prowlarr: Prowlarr syncs each indexer into the
+    # Arr with the indexer's base URL rewritten to <prowlarr>/<indexer id>/, so
+    # a search is an HTTP call from the Arr's pod to Prowlarr
+    # (Prowlarr v2.7, src/NzbDrone.Core/Applications/Sonarr/Sonarr.cs).
+    calls: [qbittorrent, prowlarr]
     # An Arr's second instance (an HD and a 4K Sonarr) is a grant decision, not
     # a values question: `box install sonarr --instance 4k` writes it.
     questions: []
@@ -71,18 +91,27 @@ apps:
     description: films, from the tracker to the library
     instances: true
     default: true
+    # The same two as Sonarr, for the same reason
+    # (src/NzbDrone.Core/Applications/Radarr/Radarr.cs).
+    calls: [qbittorrent, prowlarr]
     questions: []
 
   prowlarr:
     description: one indexer list, kept in sync with the Arrs
     instances: false
     default: true
+    # It pushes indexers to the Arrs and tests each application it registers, so
+    # the Arrs are what it dials. It has download clients of its own upstream,
+    # but this chart configures none and nothing grabs through it.
+    calls: [sonarr, radarr]
     questions: []
 
   plex:
     description: the media server your players talk to
     instances: false
     default: true
+    # Plex calls nothing in the release: players are outside it, and Tautulli,
+    # Seerr and Maintainerr are the ones that dial it.
     # Plex's web app writes absolute asset paths (/web/...), so it is served at
     # plex.<domain> rather than under /plex.
     exposure: host
@@ -97,12 +126,18 @@ apps:
     description: watch history and stats for Plex
     instances: false
     default: true
+    # Its PMS link and its history both come from Plex's own API.
+    calls: [plex]
     questions: []
 
   seerr:
     description: a request page for the people you share with
     instances: false
     default: true
+    # Plex for the library and for signing people in, and both Arrs to add what
+    # was requested. The Arrs are the callee side of this: their ingress is what
+    # an unlisted caller never reaches, however open the release's egress is.
+    calls: [plex, sonarr, radarr]
     # Same as Plex: Seerr's bundle loads its assets from the site root, so the
     # path route broke the page and it is served at seerr.<domain>.
     exposure: host
@@ -120,6 +155,8 @@ apps:
     # client, so a second app that speaks OIDC is one entry here (and the
     # chart's `oidc:` block beside it) rather than a box release.
     oidc: true
+    # One qBittorrent, its own instance row.
+    calls: [qbittorrent]
     questions: []
 
   # Opt-in: it watches IRC announces and feeds and hands what it finds to the
@@ -135,6 +172,9 @@ apps:
     # flag is the whole change: the chart wires the issuer, the secret and the
     # trust anchor from it, and box registers the client.
     oidc: true
+    # Its download client, and every Arr its actions push to: autobrr's own
+    # client test is an Arr API call, made from autobrr's pod.
+    calls: [qbittorrent, sonarr, radarr]
     questions: []
 
   # Opt-in, and louder so: it deletes media and torrents on rules the operator
@@ -143,4 +183,10 @@ apps:
     description: deletes what nobody watched, once your rules say so
     instances: false
     default: false
+    # Everything it acts on, and every place a rule is written: Plex and
+    # Tautulli for what was watched, Seerr for what was requested, both Arrs to
+    # delete, qBittorrent to retire a torrent. Each setting is filled in its own
+    # UI (v3.32's servarr, seerr, tautulli and download-client API modules), and
+    # one it cannot reach is a rule that silently never runs.
+    calls: [plex, sonarr, radarr, seerr, tautulli, qbittorrent]
     questions: []

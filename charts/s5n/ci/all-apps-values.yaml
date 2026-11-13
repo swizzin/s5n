@@ -1,0 +1,37 @@
+# Every catalog app enabled at once, with both Arr pairs. The chart's peers
+# inside the release are derived from the catalog's `calls` list, so this is the
+# render that carries every edge at once: a missing one is invisible in a
+# defaults-only render, where half the callers are off.
+auth:
+  edge: true
+  # box writes this from the grant for an app that speaks OIDC; a plain helm
+  # install sets it to the proxy Service's ClusterIP.
+  oidc:
+    gatewayIP: 10.96.31.116
+
+storage:
+  data:
+    existingClaim: box-all-data
+  config:
+    existingClaim: box-all-config
+
+apps:
+  sonarr:
+    instances:
+      - { suffix: "", category: tv, enabled: true }
+      - { suffix: 4k, category: tv-4k, enabled: true }
+  radarr:
+    instances:
+      - { suffix: "", category: movies, enabled: true }
+      - { suffix: 4k, category: movies-4k, enabled: true }
+  qui:
+    enabled: true
+  autobrr:
+    enabled: true
+  maintainerr:
+    enabled: true
+
+# The box's own name. Plex and Seerr are served at plex.<domain> and
+# seerr.<domain> (the catalog says so), so a render needs the domain.
+gateway:
+  host: box.example.com
