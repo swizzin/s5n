@@ -474,6 +474,26 @@ tls_serial() { # tls_serial <secret-name>
     sed 's/^serial=//'
 }
 
+# host_cert is the Certificate (and Secret) name box gives one host: the DNS
+# name flattened into a label, the way internal/platform's CertificateName
+# makes it.
+host_cert() { printf 's5n-tls-%s' "$(printf '%s' "$1" | tr '.' '-')"; }
+
+# A re-run of init on a box whose certificates are already issued is seconds of
+# work: every Certificate it re-applies is Ready for its current generation, so
+# every wait answers on its first read. A step that takes minutes instead means
+# a wait ran out on a name this cluster cannot issue for, which is exactly how
+# this scenario lost 183 s twice while its CoreDNS patch left one name
+# unanswered -- the run stayed green on wall time nobody had explained. The
+# budget is well under CertificateTimeout (3m), so a wait that runs out fails
+# the round instead of passing it.
+INIT_BUDGET=${INIT_BUDGET:-120}
+init_took() { # init_took <label> <seconds>
+  echo "  init ${1}: ${2}s (budget ${INIT_BUDGET}s)"
+  [ "$2" -lt "$INIT_BUDGET" ] ||
+    { echo "init ${1} took ${2}s, over its ${INIT_BUDGET}s budget: a wait ran out on a name that could not issue"; fail=1; }
+}
+
 # ---- the apps that own their user table --------------------------------------
 # qui and autobrr hand out an API key only to a signed-in session, so the chart
 # generates a password in the release Secret and each app's init container
@@ -3715,8 +3735,16 @@ PYCHECK
   # that the name has no record and that a re-run is what moves it. This is the
   # state a box with a made-up name is in, and it is not a failure.
   log "the no-DNS final card names every host and its record"
-  cert=s5n-tls-box-internal-example
-  app_cert=s5n-tls-seerr-box-internal-example
+  cert=$(host_cert "$DOMAIN")
+  app_cert=$(host_cert "$SEERR_HOST")
+  # Every name this scenario installs for, and the Certificate each one is. The
+  # move to the ACME issuer is asserted on all of them, not only the two the
+  # no-DNS card and the sign-in checks happen to name: a name left out of the
+  # cluster's DNS is a certificate that can never issue, and the install stays
+  # green while that host keeps serving its self-signed one.
+  hosts=("$DOMAIN" "$PLEX_HOST" "$SEERR_HOST" "$PBH_HOST")
+  certs=()
+  for host in "${hosts[@]}"; do certs+=("$(host_cert "$host")"); done
   grep -qF "${DOMAIN} has no DNS record, so its certificate is self-signed; add one, then run box init again to move it to Let's Encrypt" "$WORK/bootstrap1.txt" ||
     { echo "the final card does not name the domain's missing record"; fail=1; }
   for host in "$PLEX_HOST" "$SEERR_HOST" "$PBH_HOST"; do
@@ -3730,6 +3758,11 @@ PYCHECK
   old_serial=$(tls_serial "$cert")
   old_app_serial=$(tls_serial "$app_cert")
   echo "  self-signed serials: ${DOMAIN} ${old_serial}, ${SEERR_HOST} ${old_app_serial}"
+  # The serial every name holds before the move, so the assertion after it is
+  # per name: a Certificate that was never re-issued keeps the one it had, and
+  # that is what a name with no answer in the cluster looks like.
+  : >"$WORK/serials-before.txt"
+  for name in "${certs[@]}"; do printf '%s %s\n' "$name" "$(tls_serial "$name")" >>"$WORK/serials-before.txt"; done
 
   # The records exist now. --dns-file is the test's own answer for the host's
   # resolver: the same file for every name, a public address, so init's rule
@@ -3747,7 +3780,12 @@ EOF
   # chains to. On a real Let's Encrypt box there is nothing to give: the image's
   # bundle covers it.
   CA_ARGS=(--ca-file "$WORK/pebble-root.pem")
-  patch_coredns "$lb_addr" "$DOMAIN" "$PLEX_HOST" "$SEERR_HOST" ||
+  # Every name the install serves, not only the two the checks below used to
+  # read. cert-manager's HTTP-01 self-check and Pebble resolve the challenge's
+  # name through this resolver: a name missing here never validates, so its
+  # Certificate never issues and init sits out the whole CertificateTimeout on
+  # it. The fresh scenario patches all of its names for the same reason.
+  patch_coredns "$lb_addr" "${hosts[@]}" ||
     { echo "could not patch CoreDNS for the box's names"; fail=1; }
   ACME_ARGS=(--acme-server "https://pebble.pebble.svc:14000/dir")
   DNS_ARGS=(--dns-file "$WORK/dns")
@@ -3765,21 +3803,31 @@ EOF
     echo "the card still says a name has no record after the record was added"
     fail=1
   fi
-  $K -n s5n-gateway wait --for=condition=Ready "certificate/$cert" --timeout=180s ||
-    { echo "the domain's Certificate never became Ready against Pebble"; fail=1; }
-  $K -n s5n-gateway wait --for=condition=Ready "certificate/$app_cert" --timeout=180s ||
-    { echo "the app host's Certificate never became Ready against Pebble"; fail=1; }
-  for name in "$cert" "$app_cert"; do
+  # Every name the move should have re-issued, not two of them: the Certificate
+  # is Ready when its current generation is the one it issued for (a Ready left
+  # from the previous certificate is what made this look done), it names the
+  # ACME issuer, and the serial in its Secret is not the one it served before.
+  # The serial is polled, because issuance is asynchronous: it is the evidence
+  # that a new certificate exists, not that a condition says so.
+  for name in "${certs[@]}"; do
     got=$($K -n s5n-gateway get certificate "$name" -o jsonpath='{.spec.issuerRef.name}')
     [ "$got" = s5n-letsencrypt ] || { echo "${name} still names issuer ${got}"; fail=1; }
+    was=$(awk -v n="$name" '$1 == n {print $2}' "$WORK/serials-before.txt")
+    new_serial=""
+    for _ in $(seq 1 60); do
+      new_serial=$(tls_serial "$name")
+      [ -n "$new_serial" ] && [ "$new_serial" != "$was" ] && break
+      sleep 2
+    done
+    echo "  ${name}: serial ${was} -> ${new_serial:-none}"
+    if [ -z "$new_serial" ] || [ "$new_serial" = "$was" ]; then
+      echo "the certificate ${name} serves was not re-issued: the name has no answer in the cluster's DNS, so its challenge cannot validate"
+      fail=1
+      continue
+    fi
+    $K -n s5n-gateway wait --for=condition=Ready "certificate/$name" --timeout=60s ||
+      { echo "${name} was re-issued but is not Ready"; fail=1; }
   done
-  new_serial=$(tls_serial "$cert")
-  new_app_serial=$(tls_serial "$app_cert")
-  echo "  issued serials: ${DOMAIN} ${new_serial}, ${SEERR_HOST} ${new_app_serial}"
-  [ -n "$new_serial" ] && [ "$new_serial" != "$old_serial" ] ||
-    { echo "the domain's certificate was not re-issued"; fail=1; }
-  [ -n "$new_app_serial" ] && [ "$new_app_serial" != "$old_app_serial" ] ||
-    { echo "the app host's certificate was not re-issued"; fail=1; }
 
   # The move is the run that writes the host's Certificate with a public
   # issuer, and --ca-file is what an ACME certificate's anchor has to come
@@ -3800,12 +3848,14 @@ EOF
   # this block is the writer with no anchor to compare against.
   $K -n "$NS" delete configmap s5n-host-ca --ignore-not-found >/dev/null
   log "box init --ca-file: an ACME host's anchor comes from the file"
+  started=$(date +%s)
   if init "$WORK/init-ca.txt" --ca-file "$WORK/pebble-root.pem"; then
     grep -qF "wrote ConfigMap ${NS}/s5n-host-ca" "$WORK/init-ca.txt" ||
       { echo "box did not report writing the anchor from --ca-file"; cat "$WORK/init-ca.txt"; fail=1; }
   else
     cat "$WORK/init-ca.txt"; fail=1
   fi
+  init_took "with --ca-file" $(( $(date +%s) - started ))
   same_cert "$($K -n "$NS" get configmap s5n-host-ca -o jsonpath='{.data.ca\.crt}' 2>/dev/null || true)" \
     "$(cat "$WORK/pebble-root.pem")" ||
     { echo "--ca-file did not reach ${NS}/s5n-host-ca"; fail=1; }
@@ -3813,7 +3863,9 @@ EOF
   # Without the dev flag: the move above is the only run that passes it, and
   # this is the assertion that a public host carries no anchor.
   CA_ARGS=()
+  started=$(date +%s)
   if init "$WORK/init-noca.txt"; then :; else cat "$WORK/init-noca.txt"; fail=1; fi
+  init_took "without --ca-file" $(( $(date +%s) - started ))
   if $K -n "$NS" get configmap s5n-host-ca >/dev/null 2>&1; then
     echo "the anchor survived an init without --ca-file on an ACME host"; fail=1
   fi
