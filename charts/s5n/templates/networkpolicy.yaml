@@ -196,6 +196,18 @@ spec:
         {{- $peers := list }}
         {{- if or (eq $inst.app "qbittorrent") (eq $inst.app "prowlarr") }}{{ $peers = list "sonarr" "radarr" }}{{ end }}
         {{- if $inst.arr }}{{ if ne $inst.app "prowlarr" }}{{ $peers = list "prowlarr" }}{{ end }}{{ end }}
+        {{- /* qui and autobrr both hold their own connection to qBittorrent, and
+        autobrr holds one to every Arr: its download client's own connection
+        test is an Arr API call, made from autobrr's pod, so the Arr's ingress
+        has to admit it. Admitting a peer is not authorization -- the app's own
+        credentials are -- and a release without these apps renders no rule. */}}
+        {{- if eq $inst.app "qbittorrent" }}
+        {{- if and $root.Values.apps.qui $root.Values.apps.qui.enabled }}{{ $peers = append $peers "qui" }}{{ end }}
+        {{- if and $root.Values.apps.autobrr $root.Values.apps.autobrr.enabled }}{{ $peers = append $peers "autobrr" }}{{ end }}
+        {{- end }}
+        {{- if and $inst.arr (ne $inst.app "prowlarr") }}
+        {{- if and $root.Values.apps.autobrr $root.Values.apps.autobrr.enabled }}{{ $peers = append $peers "autobrr" }}{{ end }}
+        {{- end }}
         {{- /*
         Tautulli and Seerr both attach to Plex (PLAN.md's catalog order); Seerr
         also reaches the Arrs once a human has signed it in (see
