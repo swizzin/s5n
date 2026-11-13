@@ -12,6 +12,10 @@ on:
 
 permissions:
   contents: read
+  # test.yaml's changes job reads develop's last green run, the base its
+  # documentation-only check diffs against; a called workflow gets no more than
+  # this.
+  actions: read
 
 concurrency:
   group: ci-${{ github.ref }}

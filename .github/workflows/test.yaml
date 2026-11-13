@@ -1,7 +1,9 @@
-# The test jobs: Go, lint, chart, the release rehearsal, and the full kind e2e, for one
-# ref. ci.yaml calls this for every PR and push, and again for develop after a release's
-# back-merge. It is its own file because GitHub resolves called workflows before
-# evaluating any `if:`, so a workflow that called itself would recurse to the depth limit.
+# The test jobs: Go, lint, chart, the release rehearsal, and the two e2e suites (the
+# chart's own install, and box's), for one ref. ci.yaml calls this for every PR and
+# push, and again for develop after a release's back-merge. A push to develop whose
+# whole change is documentation runs the first four and skips the e2e. It is its own
+# file because GitHub resolves called workflows before evaluating any `if:`, so a
+# workflow that called itself would recurse to the depth limit.
 #
 # Actions are pinned by commit; the comment names the tag the commit belongs to.
 name: test
@@ -184,12 +186,95 @@ jobs:
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
       - run: hack/release-rehearsal.sh
 
+  # ---- whether an e2e is worth a runner --------------------------------------
+  #
+  # A push to develop that changed nothing but documentation skips both e2e
+  # jobs, because a documentation commit cannot change what they assert and on
+  # develop that is the common case. Every pull request and every push to main
+  # runs them, and so does the back-merge's call (it passes a ref, and it is a
+  # job inside main's run).
+  #
+  # The diff is against develop's last green run, not github.event.before: a
+  # push to develop cancels the run before it, so the commit it replaced may
+  # never have finished its e2e (or failed it), and a documentation commit on
+  # top must not wave that code through. A green run either ran the e2e or was
+  # itself documentation on top of one that did, so everything since it is what
+  # this push has to answer for.
+  #
+  # The decision is hack/changes, which is tested, and not a `paths:` filter:
+  # a force push, a branch's first push, a rename out of docs/ and an empty diff
+  # all run the e2e, and a workflow cannot test its own `if:`. This job fetches
+  # the whole history because the base is an older commit a shallow checkout
+  # does not have; it compiles one small command and nothing else, so it costs
+  # seconds.
+  #
+  # When the command cannot decide -- the base is not an object here, go run
+  # failed -- the step warns and answers e2e=true. A skipped e2e is an assertion
+  # not held; a wasted runner is minutes.
+  changes:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      actions: read # develop's last green run, the base of the diff
+    outputs:
+      e2e: ${{ steps.changes.outputs.e2e }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.ref || github.sha }}
+          fetch-depth: 0 # github.event.before has to be an object here
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: false # one small command: no entry of its own
+      - name: is the e2e needed
+        id: changes
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HEAD: ${{ github.sha }}
+          REF_INPUT: ${{ inputs.ref }}
+          EVENT_NAME: ${{ github.event_name }}
+          REF: ${{ github.ref }}
+        run: |
+          set -euo pipefail
+          # Only a push to develop may skip. A pull request has no base commit
+          # of its own, a push to main may be cutting a release, and the
+          # back-merge's test-develop call passes a ref and runs in main's run.
+          if [ "$REF_INPUT" != "" ] || [ "$EVENT_NAME" != push ] || [ "$REF" != refs/heads/develop ]; then
+            echo "not a push to develop: everything runs" >&2
+            echo "e2e=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          # The base: the newest push to develop whose whole ci run passed. A
+          # cancelled or failed run is not one, so its commits stay in the diff.
+          if ! base=$(gh api "repos/${GITHUB_REPOSITORY}/actions/workflows/ci.yaml/runs?branch=develop&event=push&status=success&per_page=1" \
+                --jq '.workflow_runs[0].head_sha // empty') || [ -z "$base" ]; then
+            echo "::warning::no green run on develop to diff against; running the e2e"
+            echo "e2e=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "base: ${base}, develop's last green run" >&2
+          # stdout is KEY=VALUE for $GITHUB_OUTPUT; the reason on stderr is this
+          # log, and a command that fails to build or run must not decide.
+          if ! verdict=$(go run ./hack/changes e2e "$base" "$HEAD" 2>"${RUNNER_TEMP}/changes.err"); then
+            sed 's/^/changes: /' "${RUNNER_TEMP}/changes.err" >&2
+            echo "::warning::hack/changes could not decide; running the e2e"
+            echo "e2e=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          sed 's/^/changes: /' "${RUNNER_TEMP}/changes.err" >&2
+          echo "$verdict" | tee -a "$GITHUB_OUTPUT"
+
   # Beside the jobs above, not after them: each e2e builds its own box and its
   # own cluster on its own runner, so a green compile is not a precondition for
   # a cluster to boot -- `needs: [go, chart]` only made every run hold an e2e
-  # runner idle for the 7.4 minutes go takes. A failure in either job still
-  # fails the run, so no assertion is let through.
+  # runner idle for the 7.4 minutes go takes. They wait for `changes` alone,
+  # which is seconds. A failure in either job still fails the run, so no
+  # assertion is let through.
   e2e-kind:
+    needs: [changes]
+    if: needs.changes.outputs.e2e == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
@@ -243,6 +328,8 @@ jobs:
   # the checkout, the tool installs and the cluster it builds before asserting:
   # fresh 10.3 min -> 25, preinstalled 11.1 -> 25, foreign-gateway 1.0 -> 15.
   e2e-box:
+    needs: [changes]
+    if: needs.changes.outputs.e2e == 'true'
     name: e2e-box (${{ matrix.scenario }})
     strategy:
       fail-fast: false
