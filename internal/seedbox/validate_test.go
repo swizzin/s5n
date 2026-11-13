@@ -270,6 +270,18 @@ func TestValidateNamesTheKeyPath(t *testing.T) {
 			msg:  "not a key the chart knows",
 		},
 		{
+			// An app's OIDC client is the catalog's flag, not a values key: a
+			// user cannot make an app a client (or stop it being one) from
+			// their file, because the chart is what wires the issuer, the
+			// secret and the trust anchor into it.
+			name: "an oidc flag in values",
+			mutate: func(m map[string]any) {
+				m["apps"].(map[string]any)["qui"].(map[string]any)["oidc"] = true
+			},
+			want: "apps.qui.oidc",
+			msg:  "not a key the chart knows",
+		},
+		{
 			name: "an app the chart does not have",
 			mutate: func(m map[string]any) {
 				m["apps"].(map[string]any)["plexx"] = map[string]any{"enabled": false}

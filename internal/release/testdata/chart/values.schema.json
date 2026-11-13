@@ -13,6 +13,10 @@
         "tz": { "type": "string" }
       }
     },
+    "theme": {
+      "type": "string",
+      "description": "The palette box draws its dialogs in, and the one the login page is drawn in: a pair name is the dark page, a variant name pins one."
+    },
     "auth": {
       "type": "object",
       "additionalProperties": false,

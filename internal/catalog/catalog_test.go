@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 )
@@ -149,6 +150,69 @@ func TestTransientIsASeparateList(t *testing.T) {
 	tr := beta.Transient()
 	if len(tr) != 1 || tr[0].Key != "global.tz" || !tr[0].Optional {
 		t.Fatalf("transient = %+v", tr)
+	}
+}
+
+// A manifest that says nothing about exposure serves every app under a path;
+// `host` is kept, and it is what box builds its list of names from.
+func TestExposureDefaultsToPathAndHostIsKept(t *testing.T) {
+	cat, err := parseMini(t, miniManifest)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	for _, name := range cat.Names() {
+		app, _ := cat.App(name)
+		if app.Exposure != ExposurePath {
+			t.Fatalf("apps.%s exposure = %q, want path when the manifest says nothing", name, app.Exposure)
+		}
+	}
+	if got := cat.Hosted(); len(got) != 0 {
+		t.Fatalf("hosted = %v, want none", got)
+	}
+
+	manifest := strings.Replace(miniManifest,
+		"    description: the first app\n",
+		"    description: the first app\n    exposure: host\n", 1)
+	cat, err = parseMini(t, manifest)
+	if err != nil {
+		t.Fatalf("parse with exposure host: %v", err)
+	}
+	alpha, _ := cat.App("alpha")
+	if alpha.Exposure != ExposureHost {
+		t.Fatalf("alpha exposure = %q, want host", alpha.Exposure)
+	}
+	if got := strings.Join(cat.Hosted(), ","); got != "alpha" {
+		t.Fatalf("hosted = %s, want alpha", got)
+	}
+}
+
+// An exposure box does not know is refused by name: it is a typo that would
+// otherwise render the app's route under a path nobody meant.
+func TestUnknownExposureIsNamed(t *testing.T) {
+	manifest := strings.Replace(miniManifest,
+		"    description: the first app\n",
+		"    description: the first app\n    exposure: folder\n", 1)
+	_, err := parseMini(t, manifest)
+	if err == nil {
+		t.Fatal("an unknown exposure was accepted")
+	}
+	if !strings.Contains(err.Error(), `apps.alpha.exposure: "folder" is not path or host`) {
+		t.Fatalf("error = %v, want it to name the entry and both values", err)
+	}
+}
+
+// An app with a host of its own needs one name to put before the domain; the
+// Arrs take instances after the app's name, so the two cannot be combined.
+func TestHostedAppWithInstancesIsRefused(t *testing.T) {
+	manifest := strings.Replace(miniManifest,
+		"    instances: true\n",
+		"    instances: true\n    exposure: host\n", 1)
+	_, err := parseMini(t, manifest)
+	if err == nil {
+		t.Fatal("an app with instances and a host of its own was accepted")
+	}
+	if !strings.Contains(err.Error(), "apps.beta.exposure: host needs one name, but this app takes instances") {
+		t.Fatalf("error = %v, want it to name the entry", err)
 	}
 }
 
@@ -347,9 +411,18 @@ func TestRealChartManifestLoads(t *testing.T) {
 			t.Fatalf("apps.%s has no description", app.Name)
 		}
 	}
+	// Nobody logs in to qBittorrent: its WebUI skips the login for the
+	// release's addresses and the edge's login is the one a person uses, so the
+	// manifest asks nothing. The values key stays (the init container still
+	// seals a username), and Load has already checked every question key is a
+	// real schema leaf -- so the check that a question exists is the one that
+	// has to go.
 	qbit, ok := cat.App("qbittorrent")
-	if !ok || len(qbit.Stored()) == 0 {
-		t.Fatalf("qbittorrent = %+v, want at least one stored question", qbit)
+	if !ok {
+		t.Fatal("qbittorrent is not in the catalog")
+	}
+	if got := len(qbit.Stored()) + len(qbit.Transient()); got != 0 {
+		t.Fatalf("qbittorrent asks %d questions, want none", got)
 	}
 	plex, ok := cat.App("plex")
 	if !ok {
@@ -362,11 +435,54 @@ func TestRealChartManifestLoads(t *testing.T) {
 	if tr[0].Key != "secrets.plexClaimToken" || !tr[0].Optional {
 		t.Fatalf("plex transient question = %+v, want secrets.plexClaimToken, optional", tr[0])
 	}
+	// The apps whose UI cannot live under a prefix (an absolute /api path, or
+	// assets built from the site root): the chart serves them at a host of their
+	// own, and box is what resolves and certifies those names.
+	if got := strings.Join(cat.Hosted(), ","); got != "plex,seerr,pbh" {
+		t.Fatalf("hosted apps = %s, want plex,seerr,pbh", got)
+	}
+	for _, name := range []string{"plex", "seerr", "pbh"} {
+		app, _ := cat.App(name)
+		if app.Exposure != ExposureHost {
+			t.Fatalf("apps.%s exposure = %q, want host", name, app.Exposure)
+		}
+	}
 	// Everything else must be a stored answer: a transient question is the
 	// exception, and the loader is what keeps it one.
 	for _, app := range cat.Apps() {
 		if len(app.Transient()) > 1 {
 			t.Fatalf("apps.%s has %d transient questions; the kind is meant to be rare", app.Name, len(app.Transient()))
+		}
+	}
+	// The apps that sign in through the login's provider, in manifest order:
+	// the clients box registers for a box with both installed. A new one is an
+	// entry here, and the chart wires it from the same flag.
+	if got := strings.Join(cat.OIDCApps([]string{"qui", "autobrr", "maintainerr", "sonarr"}), ","); got != "qui,autobrr" {
+		t.Fatalf("OIDC apps = %s, want qui,autobrr (only the catalog's flag makes a client)", got)
+	}
+	for _, name := range []string{"qui", "autobrr"} {
+		app, _ := cat.App(name)
+		if !app.OIDC {
+			t.Fatalf("apps.%s is not an OIDC client", name)
+		}
+	}
+	if app, _ := cat.App("maintainerr"); app.OIDC {
+		t.Fatal("apps.maintainerr is marked as an OIDC client")
+	}
+
+	// The opt-in apps: off unless the operator says so, no instances, and
+	// nothing to ask at init. A box that installs the defaults must not get
+	// them, so `default: false` is the assertion that matters most here.
+	for _, name := range []string{"qui", "autobrr", "maintainerr"} {
+		app, ok := cat.App(name)
+		if !ok {
+			t.Fatalf("%s is not in the catalog", name)
+		}
+		if app.Default || app.Instances {
+			t.Fatalf("apps.%s = %+v, want an opt-in app with no instances", name, app)
+		}
+		if len(app.Questions) != 0 {
+			t.Fatalf("apps.%s asks %d questions, want none", name, len(app.Questions))
 		}
 	}
 }
@@ -420,5 +536,118 @@ func TestRefOutsideTheSchemaIsRefused(t *testing.T) {
 	_, err := Parse("catalog.yaml", []byte(manifest), values, []byte(schema))
 	if err == nil || !strings.Contains(err.Error(), "only follows") {
 		t.Fatalf("error = %v, want a refusal of the external reference", err)
+	}
+}
+
+// TestCallsAreReadAndChecked: `calls` is the list the chart inverts for the
+// release's NetworkPolicy, so every name in it has to be an app this chart
+// actually has -- and an app cannot list itself, nor the same peer twice.
+func TestCallsAreReadAndChecked(t *testing.T) {
+	withCalls := func(calls string) string {
+		return strings.Replace(miniManifest, "    default: true\n    questions:",
+			"    default: true\n    calls: "+calls+"\n    questions:", 1)
+	}
+	cat, err := parseMini(t, withCalls("[beta]"))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	alpha, _ := cat.App("alpha")
+	if got := strings.Join(alpha.Calls, ","); got != "beta" {
+		t.Fatalf("apps.alpha.calls = %q, want beta", got)
+	}
+	if beta, _ := cat.App("beta"); len(beta.Calls) != 0 {
+		t.Fatalf("apps.beta.calls = %v, want none: an omitted list is an app that dials nothing", beta.Calls)
+	}
+
+	cases := []struct {
+		name  string
+		calls string
+		wants []string
+	}{
+		{
+			name:  "an app this chart does not have",
+			calls: "[beta, gamma]",
+			wants: []string{"apps.alpha.calls[1]", "gamma", "not an app"},
+		},
+		{
+			name:  "itself",
+			calls: "[alpha]",
+			wants: []string{"apps.alpha.calls[0]", "cannot call itself"},
+		},
+		{
+			name:  "the same peer twice",
+			calls: "[beta, beta]",
+			wants: []string{"apps.alpha.calls[1]", "listed twice"},
+		},
+		{
+			name:  "an empty name",
+			calls: `[""]`,
+			wants: []string{"apps.alpha.calls[0]", "is empty"},
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			_, err := parseMini(t, withCalls(c.calls))
+			if err == nil {
+				t.Fatalf("calls %s was accepted", c.calls)
+			}
+			for _, want := range c.wants {
+				if !strings.Contains(err.Error(), want) {
+					t.Fatalf("error = %v, want it to name %q", err, want)
+				}
+			}
+		})
+	}
+}
+
+// TestRealChartCallsAreTheReleaseEdges: the catalog's lists are the input the
+// chart's NetworkPolicy is derived from, so this pins the edges that a shipped
+// release got wrong -- Seerr into the Arrs, and everything Maintainerr calls.
+// A name here is also an app that must exist, which is the rule the render
+// depends on.
+func TestRealChartCallsAreTheReleaseEdges(t *testing.T) {
+	cat, err := Load("../../charts/s5n")
+	if err != nil {
+		t.Fatalf("load the chart's catalog: %v", err)
+	}
+	want := map[string]string{
+		"sonarr":      "prowlarr,qbittorrent",
+		"radarr":      "prowlarr,qbittorrent",
+		"prowlarr":    "radarr,sonarr",
+		"tautulli":    "plex",
+		"seerr":       "plex,radarr,sonarr",
+		"qui":         "qbittorrent",
+		"autobrr":     "qbittorrent,radarr,sonarr",
+		"maintainerr": "plex,qbittorrent,radarr,seerr,sonarr,tautulli",
+	}
+	for name, edges := range want {
+		app, ok := cat.App(name)
+		if !ok {
+			t.Fatalf("%s is not in the catalog", name)
+		}
+		got := append([]string(nil), app.Calls...)
+		sort.Strings(got)
+		if strings.Join(got, ",") != edges {
+			t.Fatalf("apps.%s.calls = %v, want %s", name, got, edges)
+		}
+	}
+	// The two apps that are only ever called.
+	for _, name := range []string{"qbittorrent", "plex"} {
+		if app, _ := cat.App(name); len(app.Calls) != 0 {
+			t.Fatalf("apps.%s.calls = %v, want none: it is a callee, not a caller", name, app.Calls)
+		}
+	}
+	// Every name resolves to a catalog app and never to its own entry -- the
+	// same two rules Load enforces, asserted over the shipped file so a future
+	// entry cannot slip past by being valid where nobody looks.
+	for _, app := range cat.Apps() {
+		for _, call := range app.Calls {
+			if call == app.Name {
+				t.Fatalf("apps.%s calls itself", app.Name)
+			}
+			if _, ok := cat.App(call); !ok {
+				t.Fatalf("apps.%s calls %q, which is not a catalog app", app.Name, call)
+			}
+		}
 	}
 }

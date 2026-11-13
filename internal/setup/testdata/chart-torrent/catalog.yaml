@@ -1,0 +1,37 @@
+# testdata/chart's catalog, plus the app whose peer port the grant owns. One
+# stored question and one transient one, so the tests can tell the two paths
+# apart.
+apps:
+  alpha:
+    description: the first app
+    instances: false
+    default: true
+    questions:
+      - key: apps.alpha.greeting
+        prompt: greeting
+        help: what it says first
+        kind: string
+        default: hello
+  beta:
+    description: the second app
+    instances: true
+    default: true
+    questions:
+      - key: apps.beta.token
+        prompt: beta token
+        kind: transient
+  # A plain app served at a host of its own: init resolves gamma.<domain> and
+  # certifies it, and its rules are about the name rather than a path.
+  gamma:
+    description: the app with its own host
+    instances: false
+    default: false
+    exposure: host
+    questions: []
+  # The app whose peer port the grant owns: it asks nothing, so the only thing
+  # init decides about it is the port itself.
+  qbittorrent:
+    description: the app with the peer port
+    instances: false
+    default: false
+    questions: []

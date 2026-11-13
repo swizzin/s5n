@@ -87,8 +87,12 @@ func TestK0sReleaseURL(t *testing.T) {
 	}
 }
 
+// testUplink is the host the plan tests install on: ethernet, 1500, the
+// address a default route would source.
+var testUplink = Uplink{Interface: "eth0", Address: testNodeIP, MTU: 1500}
+
 func TestK0sPlanCarriesThePinAndTheChoice(t *testing.T) {
-	plan := k0sPlan(pins)
+	plan := k0sPlan(pins, testUplink)
 	if plan.Version != pins.K0s {
 		t.Errorf("version = %q, want the release's pin %q", plan.Version, pins.K0s)
 	}
@@ -108,12 +112,40 @@ func TestK0sPlanCarriesThePinAndTheChoice(t *testing.T) {
 	// another k0s moves the plan with it. Without a sum in that release the
 	// plan still names the version, so the installer refuses it by name rather
 	// than on an empty plan.
-	other := k0sPlan(release.Versions{K0s: "v9.9.9+k0s.9"})
+	other := k0sPlan(release.Versions{K0s: "v9.9.9+k0s.9"}, testUplink)
 	if other.Version != "v9.9.9+k0s.9" {
 		t.Errorf("version = %q, want the release's %q", other.Version, "v9.9.9+k0s.9")
 	}
 	if other.SHA256 != "" {
 		t.Errorf("a release with no checksum got one anyway: %q", other.SHA256)
+	}
+
+	// The plan is also where the node identity travels from the decision to
+	// the installer: the address, the link it came from, and the config that
+	// pins the API address to it.
+	if plan.NodeIP != testUplink.Address {
+		t.Errorf("node IP = %q, want the uplink's %q", plan.NodeIP, testUplink.Address)
+	}
+	if plan.Uplink != testUplink {
+		t.Errorf("uplink = %+v, want %+v", plan.Uplink, testUplink)
+	}
+	if plan.ConfigPath != K0sConfigPath {
+		t.Errorf("config path = %q, want %q", plan.ConfigPath, K0sConfigPath)
+	}
+	if got := plan.ConfigText; !strings.Contains(got, "address: "+testUplink.Address) || !strings.Contains(got, "kind: ClusterConfig") {
+		t.Errorf("config text = %q, want a k0s ClusterConfig pinning %s", got, testUplink.Address)
+	}
+}
+
+// A host with no default route has nothing to pin, so the plan names no
+// address and the installer refuses it rather than letting the kubelet choose.
+func TestK0sPlanWithoutAnUplinkPinsNothing(t *testing.T) {
+	plan := k0sPlan(pins, Uplink{})
+	if plan.NodeIP != "" || plan.ConfigText != "" {
+		t.Errorf("plan = %+v, want no node IP and no config", plan)
+	}
+	if why := installRefusal(plan, true, nil); !strings.Contains(why, "this plan pins none") {
+		t.Errorf("refusal = %q, want the missing pin named", why)
 	}
 }
 
@@ -134,7 +166,7 @@ func TestK0sStatePresent(t *testing.T) {
 }
 
 func TestInstallRefusal(t *testing.T) {
-	clean := InstallPlan{Version: pins.K0s, CleanHost: true}
+	clean := InstallPlan{Version: pins.K0s, CleanHost: true, NodeIP: testNodeIP, ConfigText: k0sNodeConfig(testNodeIP)}
 	cases := []struct {
 		name     string
 		plan     InstallPlan
@@ -146,7 +178,7 @@ func TestInstallRefusal(t *testing.T) {
 		{name: "not root", plan: clean, root: false, want: "as root"},
 		{
 			name: "the decision did not choose to install",
-			plan: InstallPlan{Version: pins.K0s},
+			plan: InstallPlan{Version: pins.K0s, NodeIP: testNodeIP, ConfigText: k0sNodeConfig(testNodeIP)},
 			root: true,
 			want: "did not choose to install",
 		},

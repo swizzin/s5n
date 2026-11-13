@@ -17,9 +17,10 @@ What carries over from swizzin is the provisioning contract, not the apps:
 
 ## Non-goals for v1 (parked for the enterprise track)
 
-Multi-tenancy, shell pods, SSH routing (sshpiper), per-user ZFS datasets and quotas,
-uid allocation, user namespaces, the Kata tier, bandwidth metering and quotas
-(`s5n-meter`, torrent-only billing with grace ports), abuse controls, billing ledger.
+Multi-tenancy, shell pods, SSH routing (sshpiper), SFTP-only accounts, per-user ZFS
+datasets and quotas, uid allocation, user namespaces, the Kata tier, bandwidth metering
+and quotas (`s5n-meter`, torrent-only billing with grace ports), abuse controls, billing
+ledger.
 
 Also out of v1 entirely: a monitoring stack. s5n ships no Prometheus, Grafana or
 exporters. A user who runs their own can scrape the apps; the chart's only obligation is
@@ -172,8 +173,10 @@ recorded in the wiring ConfigMap, not by name and not by tag (see AGENTS.md inva
 
 - Arr API keys are injected by env (`SONARR__AUTH__APIKEY`, …), so nothing has to be
   scraped from `config.xml`.
-- The qBittorrent WebUI password is seeded as a PBKDF2 hash by an init container, and one
-  category is created per Arr instance. Save path, temp path and category paths are set
+- The qBittorrent WebUI password is seeded as a PBKDF2 hash by an init container and
+  handed to no app: qBittorrent bypasses its login for private addresses, behind the
+  edge's login and the NetworkPolicy (docs/box.md, Logins). One category is created per
+  Arr instance. Save path, temp path and category paths are set
   through the API and read back, because the image re-applies its own default at runtime.
 - qBittorrent performance settings (send-buffer watermarks, async I/O threads, disk
   queue, disk cache, uTP, preallocation) come in three tiers. Compiled defaults are baked
@@ -291,25 +294,50 @@ puid:pgid, then `box init`. Every step is safe to re-run.
 
 - Pod Security `restricted` on the namespace. Rootless images allow it.
 - `readOnlyRootFilesystem`, all capabilities dropped, seccomp `RuntimeDefault`.
-- Default-deny NetworkPolicy, with only the needed flows allowed
-  (Arr → qBittorrent, Prowlarr ↔ Arr, Seerr → Arr/media, Gateway → app).
+- Default-deny NetworkPolicy, with only the needed flows allowed: every edge the
+  catalog declares in an app's `calls` (inverted into the callee's ingress), plus
+  Gateway → app and the wiring Job.
 - Only the Gateway and the torrent port (a NodePort Service with
   `externalTrafficPolicy: Local`; hostPort is forbidden under `restricted`) are reachable
   from outside.
 - The Gateway is the only address a user ever has to remember. The torrent port is
-  plumbing: `box init` picks a free port in the NodePort range at random, records it in
-  values, and the chart hands the same number to qBittorrent and the Service. Peers learn
+  plumbing: `box init` picks a free port at random from the NodePort range's lower band,
+  which Kubernetes does not auto-assign from, records it in the grant, and the chart
+  hands the same number to qBittorrent and the Service. Peers learn
   it from the tracker announce, so nobody types it. `box migrate` re-randomizes rather
   than carrying an old port across; trackers accept the new one on the next announce.
 - No credentials in values, in the repo, or in the wiring ConfigMap.
 
 ## Catalog
 
-- **v1:** qBittorrent, Sonarr, Radarr (HD and 4K instances), Prowlarr, Plex or Jellyfin,
-  Seerr, Tautulli.
-- **v1.x:** Lidarr, autobrr, qui, Bazarr, Maintainerr, SABnzbd, a Transmission/Deluge
-  alternative, a dashboard.
-- **Excluded:** Readarr (archived June 2025).
+- **v1:** qBittorrent, Sonarr, Radarr (HD and 4K instances), Prowlarr, Plex, Seerr,
+  Tautulli.
+- **v1.x:** most of what comes next waits on something the platform doesn't do yet
+  rather than on the app, so the list is grouped by what each app waits on. New apps
+  are opt-in unless stated otherwise.
+  - *Fits the chart as it is* (a path under the box's name, behind the login): autobrr,
+    qui, Maintainerr, Lidarr, Bazarr (one Sonarr and one Radarr each, so the 4K pair gets
+    a Bazarr of its own), SABnzbd, FileBrowser Quantum, a dashboard.
+  - *A host of its own* (the UI can't live under a path, or its clients and the Arrs
+    can't follow one): PeerBanHelper, The Lounge, Jellyfin. Seerr and Plex's web app move
+    there too.
+  - *A port from outside besides the torrent port*: Deluge and Transmission (their own
+    peer port), Syncthing (22000), ZNC (IRC clients connect to it directly; its web admin
+    fits under a path).
+  - *Hardware transcoding*: a GPU handed to the pod by a device plugin, never a host
+    path, so Pod Security `restricted` still holds. Plex shares it. Jellyfin and Emby
+    transcode in software until then.
+  - *An image s5n builds*: rTorrent with ruTorrent, as one pod of rtorrent, PHP and the
+    web server sharing a socket. rtorrent's RPC runs commands, so it is never a TCP port,
+    and only the Arrs may reach the web server's RPC path.
+  - librrary, from the autobrr team, once it ships.
+- **Excluded:** Readarr (archived June 2025); the original File Browser (archived
+  September 2026; FileBrowser Quantum is its maintained fork); SickGear, SickChill and
+  Medusa (the Arrs cover them); Ombi (Seerr covers Plex, Jellyfin and Emby); Jackett
+  (Prowlarr); NZBGet (SABnzbd covers usenet); Quassel; Resilio Sync (proprietary,
+  amd64 only); Nextcloud, which needs a database, Redis and cron of its own and can't
+  skip a major version while a box updates on its own. Any of these still runs in a
+  namespace of its own beside s5n.
 
 ## Repository layout
 
@@ -398,6 +426,10 @@ Dockerfile               the image the wiring Job and the qBittorrent init conta
 
 - **Name:** decided — `s5n`.
 - **Licence:** decided — GPL-3.0 (`LICENSE`), continuing swizzin's.
+- **A private box:** reaching the box only over Tailscale or WireGuard. That belongs to
+  root's platform layer, not a seedbox (WireGuard needs NET_ADMIN or a kernel module,
+  which Pod Security `restricted` never allows), and Let's Encrypt's HTTP-01 challenge
+  can't reach a box that isn't public, so it needs its own design for certificates.
 - **libtorrent 2.x image:** not built. qBittorrent 5.3 still compiles against either
   branch (`QBT_USES_LIBTORRENT2` guards in `sessionimpl.cpp`) and userdocs publishes
   `release-5.3.0_v1.2.20` and `release-5.3.0_v2.1.2` from the same app version, so it

@@ -444,3 +444,39 @@ func TestWaitReadyRetriesUntilPingSucceeds(t *testing.T) {
 		t.Fatalf("WaitReady: %v", err)
 	}
 }
+
+// qBittorrent's login is bypassed for the release's addresses, so the two
+// credential fields are owned and owned as empty: a client an older install
+// wrote a password into is cleared, and the receipt says the object changed.
+func TestEnsureDownloadClientClearsStoredCredentials(t *testing.T) {
+	f, arr := newFakeArr(t, "/sonarr")
+	ctx := context.Background()
+
+	// What the previous release left behind: a real password in the Arr.
+	old := DownloadClientSpec{Name: "qBittorrent", Category: "tv", Host: "qbittorrent", Port: 8080,
+		Username: "admin", Password: "hunter2"}
+	first, err := arr.EnsureDownloadClient(ctx, old, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.maskedClients()
+
+	empty := DownloadClientSpec{Name: "qBittorrent", Category: "tv", Host: "qbittorrent", Port: 8080}
+	result, err := arr.EnsureDownloadClient(ctx, empty, first.ID)
+	if err != nil {
+		t.Fatalf("ensure with empty credentials: %v", err)
+	}
+	if result.Change != Updated {
+		t.Fatalf("clearing the stored credentials reported %s, want updated", result.Change)
+	}
+	for _, field := range []string{"username", "password"} {
+		if v, _ := f.clients[0].FieldValue(field); v != "" {
+			t.Fatalf("%s = %v, want it cleared", field, v)
+		}
+	}
+	// And once cleared, the same spec is a no-op again.
+	f.maskedClients()
+	if again, err := arr.EnsureDownloadClient(ctx, empty, result.ID); err != nil || again.Change != Unchanged {
+		t.Fatalf("run after clearing = %+v, %v, want unchanged", again, err)
+	}
+}

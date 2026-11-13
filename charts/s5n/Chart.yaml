@@ -2,8 +2,8 @@ apiVersion: v2
 name: s5n
 description: swizzin on Kubernetes — a wired, hardlink-safe seedbox stack in one release
 type: application
-version: 0.3.0
-appVersion: "0.3.0"
+version: 0.4.0
+appVersion: "0.4.0"
 # Distribution-agnostic: vanilla, k0s, k3s, managed. Only a floor, never a ceiling.
 # 1.30 is where ValidatingAdmissionPolicy is GA; the platform layer binds one to
 # every user namespace to enforce the grant.
@@ -19,12 +19,11 @@ keywords: [seedbox, swizzin, sonarr, radarr, prowlarr, qbittorrent]
 # upgraded from, and `box update` steps through the releases between when it is
 # older.
 #
-# 0.3.0 raises both. A box from 0.2.0 doesn't write auth.edge, install the login
-# or read platform.yaml, so it must keep to the 0.2.0 chart rather than be told
-# to set auth.edge itself, which would put every app on the internet without a
-# login. And no 0.2.0 install upgrades in place: the login, TLS and the platform
-# pins all arrived after it and the move was never tested, so a 0.2.0 seedbox is
-# reinstalled.
+# 0.4.0 raises both. A box from 0.3.0 doesn't make the hosts of their own that
+# Seerr, Plex's web app and PeerBanHelper now live on, or the login's OIDC
+# provider and the clients qui and autobrr sign in with, so it keeps to the 0.3.0
+# chart. And no 0.3.0 install upgrades in place: the move was never run against a
+# real 0.3.0 box, so a 0.3.0 seedbox is reinstalled, as a 0.2.0 one was.
 annotations:
-  box.s5n/min-box: "0.3.0"
-  box.s5n/upgrade-from: "0.3.0"
+  box.s5n/min-box: "0.4.0"
+  box.s5n/upgrade-from: "0.4.0"

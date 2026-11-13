@@ -13,6 +13,12 @@ wiring:
     tag: e2e
 
 apps:
+  qbittorrent:
+    torrent:
+      # The band box picks from, spelled out because this e2e installs with
+      # helm and so chooses its own values. A port from the upper part of the
+      # range can be handed to another Service before this one asks for it.
+      port: 30080
   radarr:
     instances:
       - { suffix: "", category: movies, enabled: true }

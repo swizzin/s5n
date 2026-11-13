@@ -12,6 +12,7 @@ import (
 	"charm.land/lipgloss/v2"
 
 	"github.com/swizzin/s5n/internal/setup"
+	"github.com/swizzin/s5n/internal/theme"
 )
 
 // Options is one box UI: where its terminal is, and whether colour is allowed.
@@ -26,6 +27,17 @@ type Options struct {
 	// zero (a caller that did not measure) is the narrowest width init
 	// supports, so text still wraps rather than running off the screen.
 	Width int
+	// Theme names the palette to draw with: a pair ("s5n", "catppuccin")
+	// follows the terminal's background, a variant ("s5n-light",
+	// "catppuccin-mocha") pins one, and empty is s5n. theme.Parse is the
+	// authority on the names; a name it does not know is reported by Err.
+	Theme string
+	// Background paints the terminal's own background with the theme's, for
+	// the whole run, and puts it back on Close. Off by default: it is a change
+	// to the terminal that a kill -9 or a dropped connection leaves behind. It
+	// does nothing under NO_COLOR, which is the terminal asking for no colour
+	// at all.
+	Background bool
 }
 
 // UI is setup.Prompter on huh.
@@ -49,6 +61,20 @@ type UI struct {
 	// empty string without an error, which is why Decide falls back to
 	// setup.LinePrompt instead of huh's accessible mode.
 	accessible bool
+
+	// variant is the colours in force. box resolves it once, when the UI is
+	// built, so a form and the masthead above it cannot disagree.
+	variant theme.Variant
+	// themeErr is a theme name that did not resolve. New has no error to
+	// return -- cmd/box builds the UI in a function that only hands it back --
+	// so the first question asked is where the operator hears about it,
+	// rather than a run in colours nobody chose.
+	themeErr error
+
+	// painter owns the terminal background for the whole run, when it was
+	// asked for. Every form's view hook and the reporter's lines between
+	// forms go through it, so the run has one ground.
+	painter *painter
 }
 
 // New builds the terminal UI. In and Out default to os.Stdin and os.Stdout.
@@ -61,19 +87,48 @@ func New(o Options) *UI {
 	if out == nil {
 		out = os.Stdout
 	}
+	sel, err := theme.Parse(o.Theme)
+	// A pinned variant is not going to use the answer, so the terminal is not
+	// asked: the query costs up to its one-second cap on a terminal that does
+	// not reply at all.
+	dark := true
+	if sel.Variant == nil {
+		dark = darkBackground(in, out, o.NoColor)
+	}
+	variant := sel.Pick(dark)
+	use(variant)
 	u := &UI{
-		in:     in,
-		out:    out,
-		styles: theme(o.NoColor),
-		keys:   keyMap(),
-		width:  o.Width,
+		in:       in,
+		out:      out,
+		styles:   huhTheme(o.NoColor),
+		keys:     keyMap(),
+		width:    o.Width,
+		variant:  variant,
+		themeErr: err,
 	}
 	if u.width <= 0 {
 		u.width = defaultWidth
 	}
 	u.chrome.noColor = o.NoColor
+	u.painter = newPainter(out, variant, o.Background && !o.NoColor)
+	// Painted here rather than at the first form: box prints its masthead and
+	// its facts before it asks anything, and those lines are the run too.
+	u.painter.begin()
 	return u
 }
+
+// Close puts the terminal's own background back. It is safe to call twice, and
+// it is meant to be deferred: a defer is what makes the reset happen on a
+// normal return, on an error and on a panic. Ctrl-C and SIGTERM reach the
+// reporter's own handler, which closes before it exits. Nothing can catch
+// kill -9 or a connection that goes away, and those leave the colour behind.
+func (u *UI) Close() { u.painter.reset() }
+
+// Palette is the variant this UI draws with, resolved and in force.
+func (u *UI) Palette() theme.Variant { return u.variant }
+
+// Err is why the UI is not drawing the theme it was asked for, or nil.
+func (u *UI) Err() error { return u.themeErr }
 
 // keyMap is box's keys: huh quits on Ctrl-C only, and box's cancel gesture is
 // Esc anywhere too, the way every other command's is.
@@ -118,9 +173,13 @@ func (u *UI) end() {
 // line that separates it from what comes next, so the record it leaves reads
 // as part of the field rather than as a stray line.
 func (u *UI) run(field huh.Field, answered func()) error {
+	if u.themeErr != nil {
+		return u.themeErr
+	}
 	form := huh.NewForm(huh.NewGroup(field)).
 		WithTheme(huh.ThemeFunc(func(bool) *huh.Styles { return u.styles })).
 		WithKeyMap(u.keys).
+		WithViewHook(u.painter.hook).
 		WithShowHelp(false).
 		WithInput(u.in).
 		WithOutput(u.out)
@@ -129,6 +188,8 @@ func (u *UI) run(field huh.Field, answered func()) error {
 	}
 	u.begin()
 	err := cancel(form.Run())
+	// The form's own program reset the background on its way out.
+	u.painter.again()
 	if err == nil && answered != nil {
 		answered()
 	}
@@ -347,6 +408,9 @@ func (u *UI) MultiSelect(f setup.MultiSelect) ([]string, error) {
 // report through ShowPathCheck instead; Note is the general seam, kept so this
 // type is a complete Prompter.
 func (u *UI) Note(text string) error {
+	if u.themeErr != nil {
+		return u.themeErr
+	}
 	u.begin()
 	fmt.Fprintln(u.out, u.chrome.paint(text, inkStyle.Render(text)))
 	u.end()

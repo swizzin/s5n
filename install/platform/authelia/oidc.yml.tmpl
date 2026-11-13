@@ -1,0 +1,50 @@
+## Rendered by box: do not edit. The provider's clients, on this box. Every
+## client is one app in one seedbox: its id is <namespace>-<app>, its callback
+## is the one URL the app builds from its own base URL, and its secret is a
+## digest -- the plaintext is in the seedbox's own Secret, where the app reads
+## it and box never does again.
+##
+## `authorization_policies` is what keeps one seedbox's client to its own login:
+## the default is deny, and the one rule admits that seedbox's account at
+## one_factor. A client names its policy, so a token for another box's app is
+## not a token this box's login will issue.
+##
+## `enforce_pkce: public_clients_only` is Authelia's own default and says what
+## it means: a confidential client (qui is one, with a secret) is not required
+## to send PKCE, and a public one would be.
+##
+## No signing material is here. The HMAC key and the RSA key are one file in the
+## login's Secret, mounted beside this configuration and read as a second
+## --config, because Authelia has no file reference for a JWK.
+identity_providers:
+  oidc:
+    enforce_pkce: 'public_clients_only'
+    authorization_policies:
+{{- range .Policies }}
+      {{ .Name }}:
+        default_policy: 'deny'
+        rules:
+          - policy: 'one_factor'
+            subject:
+              - 'user:{{ .Login }}'
+{{- end }}
+    clients:
+{{- range .Clients }}
+      - client_id: '{{ .ID }}'
+        # The consent page names the app, not the client id.
+        client_name: '{{ .Name }}'
+        client_secret: '{{ .Secret }}'
+        redirect_uris:
+{{- range .RedirectURIs }}
+          - '{{ . }}'
+{{- end }}
+        # The secret travels in the Authorization header, URL-encoded as
+        # RFC 6749 requires; that is the method Authelia and every client
+        # library agree on for a confidential client.
+        token_endpoint_auth_method: 'client_secret_basic'
+        scopes: ['openid', 'profile', 'email']
+        # No consent screen: the app is box's own, the login is the edge's, and
+        # a page nobody reads is a page everyone clicks through.
+        consent_mode: 'implicit'
+        authorization_policy: '{{ .Policy }}'
+{{- end }}

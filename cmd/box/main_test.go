@@ -125,16 +125,135 @@ func TestTakeDevFlag(t *testing.T) {
 	}
 }
 
-// TestAcmeServerIsNotInBootstrapHelp: the dev flag is not registered, so the
-// usage a person reads cannot mention it.
-func TestAcmeServerIsNotInBootstrapHelp(t *testing.T) {
-	fs := flag.NewFlagSet("bootstrap", flag.ContinueOnError)
-	fs.String("yes", "", "confirm without asking")
-	var b strings.Builder
-	fs.SetOutput(&b)
-	fs.PrintDefaults()
-	if strings.Contains(b.String(), "acme-server") {
-		t.Fatalf("bootstrap help lists the dev flag:\n%s", b.String())
+// TestDevFlagsAreNotInAnyHelp: the dev switches are e2e-only, so no command's
+// usage may offer them. What could register them are the shared flag sets:
+// bootstrap and init both take addInitFlags, apply takes addApplyFlags, and a
+// registered flag shows in flag.PrintDefaults even with an empty usage. This
+// is the registration the e2e's `--paths-in-node` had in both places.
+func TestDevFlagsAreNotInAnyHelp(t *testing.T) {
+	commands := []struct {
+		name string
+		add  func(*flag.FlagSet)
+	}{
+		{"bootstrap and init", func(fs *flag.FlagSet) { addInitFlags(fs) }},
+		{"apply", func(fs *flag.FlagSet) { addApplyFlags(fs) }},
+	}
+	for _, cmd := range commands {
+		t.Run(cmd.name, func(t *testing.T) {
+			fs := flag.NewFlagSet(cmd.name, flag.ContinueOnError)
+			cmd.add(fs)
+			var b strings.Builder
+			fs.SetOutput(&b)
+			fs.PrintDefaults()
+			help := b.String()
+			for _, name := range []string{"acme-server", "dns-file", "paths-in-node", "ca-file"} {
+				if strings.Contains(help, name) {
+					t.Errorf("%s help lists the dev flag %q:\n%s", cmd.name, name, help)
+				}
+				if fs.Lookup(name) != nil {
+					t.Errorf("%s registers the dev flag %q, which --help prints whatever the usage says", cmd.name, name)
+				}
+			}
+		})
+	}
+}
+
+// TestTakePathsInNode: --paths-in-node carries its own answer, so its spelling is
+// the whole flag. Every form hack/e2e-box.sh writes and every form a FlagSet
+// would have parsed is taken out of the arguments, the rest is left exactly as
+// it was, and a value that is not a boolean is a refusal rather than a silent
+// false -- a mistyped switch must not turn into a skipped path check.
+func TestTakePathsInNode(t *testing.T) {
+	cases := []struct {
+		name string
+		args []string
+		want bool
+		rest []string
+	}{
+		{"absent", []string{"--yes", "--grant", "/tmp/grant.yaml"}, false, []string{"--yes", "--grant", "/tmp/grant.yaml"}},
+		{"double dash", []string{"--yes", "--paths-in-node"}, true, []string{"--yes"}},
+		{"single dash", []string{"-paths-in-node", "--yes"}, true, []string{"--yes"}},
+		{"equals true", []string{"--paths-in-node=true"}, true, nil},
+		{"equals false", []string{"--paths-in-node=false"}, false, nil},
+		{"after a positional", []string{"stray", "--paths-in-node"}, true, []string{"stray"}},
+		{"before a positional", []string{"--paths-in-node", "stray"}, true, []string{"stray"}},
+		{"last one wins", []string{"--paths-in-node", "--paths-in-node=false"}, false, nil},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, rest, err := takePathsInNode(tc.args)
+			if err != nil {
+				t.Fatalf("takePathsInNode: %v", err)
+			}
+			if got != tc.want {
+				t.Fatalf("set = %v, want %v", got, tc.want)
+			}
+			if strings.Join(rest, " ") != strings.Join(tc.rest, " ") {
+				t.Fatalf("rest = %v, want %v", rest, tc.rest)
+			}
+		})
+	}
+	if _, _, err := takePathsInNode([]string{"--paths-in-node=maybe"}); err == nil {
+		t.Fatal("a value that is not a boolean was accepted")
+	}
+}
+
+// TestPathsInNodeReachesTheDecisions: the e2e passes the switch on bootstrap,
+// init and apply, and hack/ cannot change, so each spelling it writes has to
+// arrive where the skip happens -- init's login decision and storage creation,
+// and apply's directory check. The two flag sets are built here the way the
+// commands build them, so a registered flag re-entering one of them, or a
+// stripped switch no longer being applied, fails this test rather than an e2e.
+func TestPathsInNodeReachesTheDecisions(t *testing.T) {
+	spellings := [][]string{
+		{"--paths-in-node"},
+		{"-paths-in-node"},
+		{"--paths-in-node=true"},
+	}
+	chart := release.Chart{Name: "s5n", Version: testChartVersion}
+	login := setup.Login{Host: "box.example.com", Name: "alice", Password: "not-a-real-password"}
+
+	for _, args := range spellings {
+		t.Run(strings.Join(args, " "), func(t *testing.T) {
+			// init and bootstrap: the switch is stripped, the rest is parsed,
+			// and the flags carry it into the login decision.
+			dev, rest, err := takeInitDevFlags(append(append([]string{}, args...), "--domain", "box.example.com"))
+			if err != nil {
+				t.Fatalf("takeInitDevFlags: %v", err)
+			}
+			var initF *initFlags
+			parse(t, "init", func(fs *flag.FlagSet) { initF = addInitFlags(fs) }, rest...)
+			initF.takeDev(dev)
+			if !loginOptions(chart, login, initF.pathsInNode).PathsInNode {
+				t.Errorf("init: %v did not reach the login decision", args)
+			}
+
+			// apply: the same switch, into the options the release client is
+			// handed. The storage check reads Options.PathsInNode.
+			set, rest, err := takePathsInNode(append(append([]string{}, args...), "--values", "/tmp/values.yaml"))
+			if err != nil {
+				t.Fatalf("takePathsInNode: %v", err)
+			}
+			var applyF *applyFlags
+			parse(t, "apply", func(fs *flag.FlagSet) { applyF = addApplyFlags(fs) }, rest...)
+			applyF.pathsInNode = set
+			if !applyF.options().PathsInNode {
+				t.Errorf("apply: %v did not reach the storage decision", args)
+			}
+		})
+	}
+
+	// Without the switch both decisions stay false: an operator's apply must
+	// still stat the directories it is about to write into.
+	var initF *initFlags
+	parse(t, "init", func(fs *flag.FlagSet) { initF = addInitFlags(fs) }, "--domain", "box.example.com")
+	if loginOptions(chart, login, initF.pathsInNode).PathsInNode {
+		t.Error("init skipped the login's storage without being asked to")
+	}
+	var applyF *applyFlags
+	parse(t, "apply", func(fs *flag.FlagSet) { applyF = addApplyFlags(fs) }, "--values", "/tmp/values.yaml")
+	if applyF.options().PathsInNode {
+		t.Error("apply skipped its directory check without being asked to")
 	}
 }
 

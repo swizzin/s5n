@@ -69,6 +69,15 @@ spec:
           args:
             - --config
             - /etc/authelia/configuration.yml
+            {{- if .OIDC }}
+            # The provider's signing material is a second configuration file,
+            # from the login's Secret: Authelia merges them (koanf Merge, maps
+            # deep and lists replaced), and a `jwks[].key` has no `_FILE`
+            # spelling, so a file is the only way it stays out of the
+            # ConfigMap.
+            - --config
+            - {{ .OIDCMount }}/{{ .OIDCFile }}
+            {{- end }}
           ports:
             - name: http
               containerPort: 9091
@@ -103,6 +112,13 @@ spec:
             - name: configuration
               mountPath: /etc/authelia
               readOnly: true
+            {{- if .OIDC }}
+            # One key, one file: the private key of the issuer, mounted where
+            # only this container reads it.
+            - name: oidc
+              mountPath: {{ .OIDCMount }}
+              readOnly: true
+            {{- end }}
             - name: tmp
               mountPath: /tmp
       volumes:
@@ -112,8 +128,71 @@ spec:
         - name: configuration
           configMap:
             name: {{ .ConfigMap }}
+        {{- if .OIDC }}
+        - name: oidc
+          secret:
+            secretName: {{ .Secret }}
+            # A Secret volume's files are root-owned, whatever the pod's user
+            # is, and this container runs as .UID. A 0400 file is one its own
+            # reader cannot open: Authelia exits with "permission denied"
+            # before it ever listens. The volume is read-only and mounted into
+            # the one container that names it, so 0444 admits readers this
+            # container already has.
+            defaultMode: 0444
+            items:
+              - key: {{ .OIDCFile }}
+                path: {{ .OIDCFile }}
+        {{- end }}
         - name: tmp
           emptyDir: {}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: authelia
+  namespace: {{ .Namespace }}
+  labels:
+    app.kubernetes.io/name: authelia
+    app.kubernetes.io/part-of: s5n
+    app.kubernetes.io/managed-by: box
+spec:
+  # One way in: the Gateway's proxy pods. Authelia takes the request's scheme
+  # from X-Forwarded-Proto and its host from X-Forwarded-Host, and trusts both,
+  # so a pod that could reach 9091 directly could mint any issuer it liked and
+  # answer ext-authz itself. Envoy is what sets those headers from the listener
+  # (a client's copy is overwritten), so Envoy is the only caller there may be.
+  #
+  # The peer is the proxy Deployment's pods, not its Service: NetworkPolicy is
+  # evaluated after kube-proxy's DNAT, so the source address of a proxied
+  # request is a proxy pod. Envoy Gateway names them app.kubernetes.io/name=envoy
+  # and labels the owning Gateway, which is what keeps a second Gateway's proxy
+  # out. box supports Envoy Gateway only (docs/box.md, "One auth mechanism, no
+  # fallback"), and installs it in standard mode, so the proxy fleet is in the
+  # controller's namespace rather than the Gateway's.
+  #
+  # Kubelet's probes are not named here on purpose: they come from the node, not
+  # from a pod, and both CNIs box runs on admit node-sourced traffic ahead of
+  # policy (kindnet: "Don't process traffic initiated from the root user in the
+  # Node, it can block kubelet probes"; kube-router: a "-m addrtype --src-type
+  # LOCAL ... ACCEPT" rule at the head of every pod's chain). A node rule here
+  # would be a second, wider hole for traffic nobody needs.
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: authelia
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ .ProxyNamespace }}
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: envoy
+              gateway.envoyproxy.io/owning-gateway-name: {{ .Gateway }}
+              gateway.envoyproxy.io/owning-gateway-namespace: {{ .GatewayNamespace }}
+      ports:
+        - port: 9091
+          protocol: TCP
 ---
 apiVersion: gateway.networking.k8s.io/v1beta1
 kind: ReferenceGrant

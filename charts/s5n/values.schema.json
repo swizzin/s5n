@@ -10,6 +10,33 @@
     "apps"
   ],
   "properties": {
+    "theme": {
+      "type": "string",
+      "description": "The palette `box` draws its dialogs in, read from this file when box starts on the host. The chart renders nothing from it; every name is one internal/theme accepts, and a pair name follows the terminal's background while a variant name pins one.",
+      "enum": [
+        "s5n",
+        "s5n-dark",
+        "s5n-light",
+        "swizzin",
+        "swizzin-darkly",
+        "swizzin-flatly",
+        "catppuccin",
+        "catppuccin-mocha",
+        "catppuccin-latte",
+        "solarized",
+        "solarized-dark",
+        "solarized-light",
+        "gruvbox",
+        "gruvbox-dark",
+        "gruvbox-light",
+        "nord",
+        "nord-polar-night",
+        "nord-snow-storm",
+        "dracula",
+        "dracula-dracula",
+        "dracula-alucard"
+      ]
+    },
     "global": {
       "type": "object",
       "additionalProperties": false,
@@ -43,6 +70,18 @@
         "edge": {
           "type": "boolean",
           "description": "Must be true. The chart refuses to render when it is missing or false: a release whose admin apps nobody signs in to is not one this chart installs. box sets it."
+        },
+        "oidc": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "How an app in this release reaches the login as an OIDC issuer. The login advertises the URL the browser used (https://<gateway.host>/auth), so an app pod has to reach that name like a browser does: box reads the Gateway's proxy address from the cluster and writes it here, and the chart gives the app's pods a hostAliases entry for it. Absent on a release from before the provider, and the app then renders without it.",
+          "properties": {
+            "gatewayIP": {
+              "type": "string",
+              "minLength": 1,
+              "description": "The ClusterIP of the Service in front of the Gateway's proxy, which is what answers for the box's own name inside the cluster. box writes it from the grant; neither file may set it."
+            }
+          }
         }
       }
     },
@@ -353,6 +392,18 @@
           "$ref": "#/definitions/simpleApp"
         },
         "seerr": {
+          "$ref": "#/definitions/simpleApp"
+        },
+        "qui": {
+          "$ref": "#/definitions/simpleApp"
+        },
+        "autobrr": {
+          "$ref": "#/definitions/simpleApp"
+        },
+        "maintainerr": {
+          "$ref": "#/definitions/simpleApp"
+        },
+        "pbh": {
           "$ref": "#/definitions/simpleApp"
         }
       }

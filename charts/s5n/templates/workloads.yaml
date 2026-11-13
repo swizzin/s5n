@@ -9,6 +9,28 @@ values.yaml; this template is the only place a pod spec is written.
 {{- $cfg := $inst.cfg }}
 {{- $ctx := dict "root" $root "inst" $inst }}
 {{- $urlBase := printf "/%s" $inst.name }}
+{{- $exposure := include "s5n.exposure" (dict "root" $root "app" $inst.app) | trim }}
+{{- /* An app that signs in through the login's OIDC provider. The catalog says which
+apps do (`oidc: true`) -- the same flag box reads to register the client -- so this
+is the chart's half of one decision, and the two can never name different apps.
+
+auth.oidc.gatewayIP is the switch, not the app's name: box writes it at init from
+the Gateway's proxy Service, and it is the one thing an OIDC app cannot do
+without -- its issuer is the box's own HTTPS URL, so without the address the pod
+cannot reach the login and qui refuses to start. A plain `helm install` (and a
+box whose grant predates the provider) has no such value, and gets the app's
+previous configuration: no login in the app, the edge's login in front. That is
+why this is not `oidc: true` alone -- that would crash-loop every helm-only
+install of the catalog file. */}}
+{{- $oidcIP := "" }}
+{{- with $root.Values.auth }}
+{{- with .oidc }}
+{{- $oidcIP = toString (.gatewayIP | default "") }}
+{{- end }}
+{{- end }}
+{{- $oidc := and (eq (include "s5n.oidc" (dict "root" $root "app" $inst.app) | trim) "true") (ne (toString $root.Values.gateway.host) "") (ne $oidcIP "") }}
+{{- $appHost := "" }}
+{{- if eq $exposure "host" }}{{ $appHost = include "s5n.appHost" (dict "root" $root "app" $inst.app) | trim }}{{ end }}
 ---
 apiVersion: apps/v1
 kind: StatefulSet
@@ -32,13 +54,28 @@ spec:
     spec:
       automountServiceAccountToken: false
       enableServiceLinks: false
+      {{- if $oidc }}
+      # The issuer is the URL the browser used -- https://<host>/auth -- and the
+      # app dials it itself, so the name has to resolve and the certificate has
+      # to verify. It resolves to the Gateway's proxy, which is the only thing
+      # that answers for that name; box reads the address from the cluster and
+      # writes it into the grant, because a user's apply may not read the
+      # Gateway's namespace. A grant from before the provider has none, and the
+      # pod then starts without this: the next root run fills it in.
+      hostAliases:
+        - ip: {{ $oidcIP | quote }}
+          hostnames:
+            - {{ $root.Values.gateway.host | quote }}
+      {{- end }}
       securityContext:
         {{- include "s5n.podSecurity" $root | nindent 8 }}
-      {{- if or (eq $inst.app "qbittorrent") (eq $inst.app "tautulli") }}
-      # qBittorrent and Tautulli both generate their own WebUI/API credential on
-      # first start and never offer a way to set one from the environment, so
-      # each gets its own init container sealing a known value into its config
-      # file first. Re-running is a no-op once the file already holds it.
+      {{- if or (eq $inst.app "qbittorrent") (eq $inst.app "tautulli") (eq $inst.app "qui") (eq $inst.app "autobrr") (eq $inst.app "pbh") }}
+      # qBittorrent and Tautulli generate their own WebUI/API credential on first
+      # start, and qui and autobrr hand out an API key only to a signed-in
+      # session: none of the four can be given credentials from the environment.
+      # Each gets an init container that seals a known value into its own config
+      # or user table first -- one that runs before the app, on the app's own
+      # config subPath, so the file it edits is the file the app reads.
       initContainers:
         {{- if eq $inst.app "qbittorrent" }}
         - name: webui-credentials
@@ -76,6 +113,126 @@ spec:
             - name: keys
               mountPath: /etc/s5n/keys
               readOnly: true
+        {{- else if eq $inst.app "qui" }}
+        # qui's user table is the only way to an API key: it mints one only for
+        # a signed-in session, so an unattended install needs an account it owns
+        # (docs/box.md, "An app that keeps its own user table has one account box
+        # owns"). Created when it is missing, and set to the release Secret's
+        # password on every start, which is also what puts back a password
+        # changed inside the running app; until the pod restarts the wiring Job
+        # reports that mismatch instead of a generic HTTP error. The password
+        # is read from the mounted key and piped in: a flag would put it in the
+        # pod spec, readable by anything that may describe the pod. A second run
+        # answers "User account already exists" and exits 0.
+        - name: account
+          image: {{ include "s5n.image" (dict "root" $root "app" $inst.app "path" (printf "apps.%s.image" $inst.app) "image" $cfg.image) }}
+          imagePullPolicy: IfNotPresent
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              set -eu
+              password="$(cat /etc/s5n/keys/qui-password)"
+              printf '%s\n' "$password" | /usr/local/bin/qui create-user --config-dir /config --username {{ include "s5n.wiringAccount" $root }}
+              printf '%s\n' "$password" | /usr/local/bin/qui change-password --config-dir /config --username {{ include "s5n.wiringAccount" $root }}
+          securityContext:
+            {{- include "s5n.containerSecurity" $root | nindent 12 }}
+          volumeMounts:
+            - name: config
+              mountPath: /config
+              subPath: {{ $inst.name }}
+            - name: keys
+              mountPath: /etc/s5n/keys
+              readOnly: true
+            - name: tmp
+              mountPath: /tmp
+        {{- else if eq $inst.app "autobrr" }}
+        # autobrr's account, the same arrangement as qui's with one difference:
+        # its create-user exits 1 on a second run instead of answering 0, so the
+        # one sentence "only 1 user account is supported" is what counts as done.
+        # Matching that message (never `|| true`) keeps a real failure -- an
+        # unwritable database, a wrong image -- a failed pod.
+        - name: account
+          image: {{ include "s5n.image" (dict "root" $root "app" $inst.app "path" (printf "apps.%s.image" $inst.app) "image" $cfg.image) }}
+          imagePullPolicy: IfNotPresent
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              set -eu
+              password="$(cat /etc/s5n/keys/autobrr-password)"
+              if ! out="$(printf '%s\n' "$password" | /usr/local/bin/autobrrctl --config /config create-user {{ include "s5n.wiringAccount" $root }} 2>&1)"; then
+                case "$out" in
+                  *"only 1 user account is supported"*)
+                    # The account is already there, which is the normal case from
+                    # the second start on. The sentence is echoed, not swallowed:
+                    # it is the record that the failure was that one and not a
+                    # database that could not be opened.
+                    echo "account already exists (autobrrctl: only 1 user account is supported)"
+                    ;;
+                  *)
+                    printf '%s\n' "$out" >&2
+                    exit 1
+                    ;;
+                esac
+              fi
+              printf '%s\n' "$password" | /usr/local/bin/autobrrctl --config /config change-password {{ include "s5n.wiringAccount" $root }}
+          securityContext:
+            {{- include "s5n.containerSecurity" $root | nindent 12 }}
+          volumeMounts:
+            - name: config
+              mountPath: /config
+              subPath: {{ $inst.name }}
+            - name: keys
+              mountPath: /etc/s5n/keys
+              readOnly: true
+            - name: tmp
+              mountPath: /tmp
+        {{- else if eq $inst.app "pbh" }}
+        # PeerBanHelper's config file, prepared before the app reads it. The
+        # token comes from the environment (PBH_APITOKEN), so the one thing this
+        # file has to say without a person is that this box did not ask for the
+        # app's anonymous usage statistics. Two steps, and the order is what
+        # makes a first start clean:
+        #
+        #   1. no file yet: write the one PBH itself writes on a first start, out
+        #      of the jar the image ships, so the app is configured exactly as it
+        #      would have configured itself and nothing here is a guess;
+        #   2. on every start: set privacy.analytics to false, the app's own
+        #      switch for Sentry, its event POSTs and the analytics script it
+        #      injects into its index page.
+        # Step 2 is not a one-off because PBH's config migrations rewrite blocks
+        # of this file as versions move, and one of them resets this key.
+        - name: config
+          image: {{ include "s5n.image" (dict "root" $root "app" $inst.app "path" (printf "apps.%s.image" $inst.app) "image" $cfg.image) }}
+          imagePullPolicy: IfNotPresent
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              set -eu
+              dir=/config/config
+              file="$dir/config.yml"
+              mkdir -p "$dir"
+              if [ ! -f "$file" ]; then
+                unzip -p /app/PeerBanHelper.jar config.yml > "$file"
+              fi
+              awk '
+                /^privacy:/ { block = 1; print; next }
+                block && /^[^ #]/ { block = 0 }
+                block && /^  analytics:/ { print "  analytics: false"; next }
+                { print }
+              ' "$file" > "$file.new"
+              mv "$file.new" "$file"
+              if ! grep -qx '  analytics: false' "$file"; then
+                echo "config.yml has no privacy.analytics key to switch off" >&2
+                exit 1
+              fi
+          securityContext:
+            {{- include "s5n.containerSecurity" $root | nindent 12 }}
+          volumeMounts:
+            - name: config
+              mountPath: /config
+              subPath: {{ $inst.name }}
+            - name: tmp
+              mountPath: /tmp
         {{- end }}
       {{- end }}
       containers:
@@ -120,6 +277,204 @@ spec:
             - name: PLEX_NO_AUTH_NETWORKS
               value: {{ join "," . | quote }}
             {{- end }}
+            {{- else if eq $inst.app "qui" }}
+            - name: QUI__HOST
+              value: 0.0.0.0
+            - name: QUI__PORT
+              value: {{ $cfg.port | quote }}
+            # qui's own baseUrl, not a stripped prefix: it builds its asset URLs
+            # under it, so the route keeps the path and rewritePath stays false.
+            - name: QUI__BASE_URL
+              value: {{ $urlBase | quote }}
+            {{- if not $oidc }}
+            # qui's login is off, like the Arrs' External scheme: the login is at
+            # the edge (auth.edge), never in the app. The account the init
+            # container creates still exists -- unused while authentication is
+            # disabled, and the one a release that later gains the provider
+            # signs in with. Disabling it takes three
+            # settings (internal/domain/config.go at v1.35.0: IsAuthDisabled is
+            # AuthDisabled && IAcknowledgeThisIsABadIdea, and
+            # ValidateAuthDisabledConfig refuses to start without the allowlist).
+            # The allowlist is every address because it can only ever match the
+            # TCP peer: in front of this app that is the Gateway's proxy pod, not
+            # the browser, and NetworkPolicy already admits only the Gateway and
+            # this release. Plex's noAuthNetworks warning is the opposite case --
+            # Plex sits outside the edge, so a range trusted there would open the
+            # server itself to whoever reaches it. A pod that got past the
+            # NetworkPolicy would already be inside the release.
+            - name: QUI__AUTH_DISABLED
+              value: "true"
+            - name: QUI__I_ACKNOWLEDGE_THIS_IS_A_BAD_IDEA
+              value: "true"
+            - name: QUI__AUTH_DISABLED_ALLOWED_CIDRS
+              value: "0.0.0.0/0,::/0"
+            {{- end }}
+            {{- else if eq $inst.app "autobrr" }}
+            # autobrr reads every setting from its own name in caps
+            # (AUTOBRR__<SETTING>, internal/config/config.go's loadFromEnv at
+            # v1.90.0), and the image ships no config, so these are its whole
+            # first start. The listen address has to be every interface: its
+            # default is 127.0.0.1, which inside a pod is nobody but itself.
+            - name: AUTOBRR__HOST
+              value: 0.0.0.0
+            - name: AUTOBRR__PORT
+              value: {{ $cfg.port | quote }}
+            # Its baseUrl, not a stripped prefix: it builds the UI's asset URLs
+            # under it, so the route keeps the path and rewritePath stays false.
+            # The trailing slash is required, not cosmetic: the server mounts
+            # its routers at the base URL's *string* plus the rest of the path
+            # -- `r.Mount(routeBaseURL, webRouter)` and
+            # `r.Mount(routeBaseURL+"api", apiRouter)` (internal/http/server.go:300-302
+            # at v1.90.0) -- so "/autobrr" puts the API at "/autobrrapi" and
+            # every /autobrr/api path answers 404, including the readiness probe.
+            - name: AUTOBRR__BASE_URL
+              value: {{ printf "%s/" $urlBase | quote }}
+            # Legacy mode rewrites the UI's URLs for a proxy that strips the
+            # prefix. Nothing strips here, so the app writes them itself; the
+            # setting is what picks between the two (added upstream in v1.55.0).
+            - name: AUTOBRR__BASE_URL_MODE_LEGACY
+              value: "false"
+            # Its own update check is a request to GitHub on every start, which
+            # is a phone-home nothing here asked for. The chart moves the image
+            # by digest and the box updates itself; the app never needs to know.
+            - name: AUTOBRR__CHECK_FOR_UPDATES
+              value: "false"
+            {{- with $root.Values.gateway.host }}
+            # The one origin its UI is reached at. The default is "*", which is
+            # every origin; the cookie is scoped to this host either way, and
+            # the docs ask for this once auth is anything but the app's own form.
+            - name: AUTOBRR__CORS_ALLOWED_ORIGINS
+              value: {{ printf "https://%s" . | quote }}
+            {{- end }}
+            {{- else if eq $inst.app "pbh" }}
+            # PeerBanHelper keeps its whole state under `data` in its working
+            # directory (/app/data), and that root is a Java system property
+            # rather than a setting: this points it at the one mount the chart
+            # gives it. The image's entrypoint is a plain `java ...` command
+            # (Dockerfile's ENTRYPOINT at v9.5.4), so nothing in it forwards the
+            # variable -- the JVM reads JAVA_TOOL_OPTIONS itself, which is what
+            # makes this the way in.
+            - name: JAVA_TOOL_OPTIONS
+              value: -Dpbh.datadir=/config
+            # Its WebUI token, from the release Secret. PBH reads it as
+            # `pbh.apiToken`, the switch that wins over config.yml's
+            # server.token (Main.setupHttpServer, ExternalSwitch.parse), so the
+            # app is given its token without anything writing to its config file
+            # and a first start has no OOBE wizard to complete. The variable
+            # name is the switch's own (ExternalSwitch spells a setting as its
+            # name upper-cased, dots and dashes to underscores).
+            - name: PBH_APITOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "s5n.secretName" $root }}
+                  key: pbh-token
+            # One login, not two. PBH's WebUI cannot accept a token the edge
+            # supplies -- its bundle calls /api/... with a token it holds in the
+            # page's memory, and an HTTPRoute filter cannot read a Secret to add
+            # one -- so the app's own login is switched off and the edge's is the
+            # only one (the same arrangement as qui's, and Maintainerr has no
+            # login at all). This switch is the app's own:
+            # `pbh.web.requireLogin`, ExternalSwitch, read by Javalin's auth
+            # gate when a request carries no valid token. The token above is
+            # still set, because an empty one sends PBH into OOBE instead of
+            # serving the API at all.
+            - name: PBH_WEB_REQUIRELOGIN
+              value: "false"
+            {{- else if eq $inst.app "maintainerr" }}
+            - name: UI_HOSTNAME
+              value: 0.0.0.0
+            - name: UI_PORT
+              value: {{ $cfg.port | quote }}
+            # Maintainerr applies its global prefix to every route, health and
+            # API included, so its own BASE_PATH does the work and the route
+            # keeps the prefix.
+            - name: BASE_PATH
+              value: {{ $urlBase | quote }}
+            # One directory holds everything it writes: the SQLite database,
+            # logs, overlays and the UI bundle start.sh stages on every boot.
+            # DATA_DIR moves that directory, so /config (the subPath mount) is
+            # enough and no second mount branch is needed. The staged UI is why
+            # it has to be writable, not merely readable.
+            - name: DATA_DIR
+              value: /config
+            # A weekly usage report to the vendor is not a default anyone here
+            # chose. TELEMETRY=off is the app's own switch, and it wins over the
+            # in-app setting.
+            - name: TELEMETRY
+              value: "off"
+            {{- end }}
+            {{- if $oidc }}
+            {{- $oidcPrefix := upper $inst.app }}
+            # This app signs in through the login's own OIDC provider, so its
+            # page offers a login after all -- one that resolves to the same
+            # person as the edge. That login is the person's: no account of
+            # theirs lives in the app, only the client id and the secret
+            # Authelia issued it.
+            #
+            # One account does live in the app: the automation account the
+            # chart owns (s5n.wiringAccount). Both apps hand an API key only to
+            # a signed-in session, so an unattended install needs an account it
+            # controls -- the init container creates it and re-sets it to the
+            # release Secret's password on every start, and the wiring Job signs
+            # in with it to register the app's connections. It is not offered in
+            # the UI and is not a second way in for a person: what bounds it is
+            # the edge's login in front and the NetworkPolicy, which admits only
+            # the Gateway and the wiring Job to this port.
+            #
+            # The names are the app's own, and both clients that speak OIDC read
+            # them from their own name in caps: QUI__<NAME> at v1.35.0
+            # (internal/config/config.go:270-276, from internal/domain/config.go:79-84)
+            # and AUTOBRR__<NAME> at v1.90.0 (internal/config/config.go:409-432,
+            # from internal/domain/config.go:34-40). So the prefix is the
+            # catalog app's name uppercased, and an app that spells its settings
+            # differently is a chart change that says so -- one the e2e's login
+            # would catch, because a client that cannot read these does not sign
+            # anyone in.
+            #
+            # The secret is read from a file, never an env value: a pod's
+            # environment is readable by anything that may describe the pod.
+            # qui's bindOrReadFromFile is what makes the _FILE spelling mean
+            # that (config.go:1082-1102); autobrr's GetEnvStr looks for the _FILE
+            # name before the plain one, for every setting (config.go:452-468).
+            #
+            # OIDC is the login the app's page offers, and DISABLE_BUILT_IN_LOGIN
+            # is what removes its password form -- in the UI only. Neither app
+            # stops routing its own credential endpoints, and the account above
+            # is the only row either user table has: qui refuses /api/auth/setup
+            # once OIDC is on, so its row can only come from the CLI the init
+            # container runs, and autobrr's onboarding endpoint is refused as
+            # soon as that row exists (it was open only while the table was
+            # empty). What keeps those endpoints from anyone but this seedbox's
+            # user is the edge in front and the NetworkPolicy, not this flag; it
+            # is worth knowing before an OIDC app is ever served without one.
+            #
+            # What an unreachable issuer costs differs: qui will not start,
+            # autobrr starts and retries discovery for about four minutes
+            # (internal/auth/oidc.go:78-96 and 156-167 at v1.90.0), so Ready is
+            # the proof for one and not the other. The e2e's sign-in is the
+            # proof for both.
+            - name: {{ $oidcPrefix }}__OIDC_ENABLED
+              value: "true"
+            - name: {{ $oidcPrefix }}__OIDC_ISSUER
+              value: {{ printf "https://%s/auth" $root.Values.gateway.host | quote }}
+            - name: {{ $oidcPrefix }}__OIDC_CLIENT_ID
+              value: {{ printf "%s-%s" $root.Release.Namespace $inst.app | quote }}
+            - name: {{ $oidcPrefix }}__OIDC_CLIENT_SECRET_FILE
+              value: /etc/s5n-oidc/client-secret
+            - name: {{ $oidcPrefix }}__OIDC_REDIRECT_URL
+              value: {{ printf "https://%s%s/api/auth/oidc/callback" $root.Values.gateway.host $urlBase | quote }}
+            - name: {{ $oidcPrefix }}__OIDC_DISABLE_BUILT_IN_LOGIN
+              value: "true"
+            # The anchor, when the box's certificate is not publicly trusted:
+            # the login's own root, which box copies into a ConfigMap in this
+            # namespace. SSL_CERT_DIR adds a directory to Go's system pool;
+            # SSL_CERT_FILE would replace the bundle, and then every public
+            # indexer this app talks to would fail its own TLS.
+            #
+            # The ConfigMap is optional because a Let's Encrypt box has none:
+            # the image's bundle already trusts the issuer's chain.
+            - name: SSL_CERT_DIR
+              value: /etc/s5n-host-ca
             {{- end }}
             {{- range $k, $v := $cfg.env }}
             - name: {{ $k }}
@@ -145,6 +500,10 @@ spec:
             {{- if $inst.arr }}
             httpGet:
               path: {{ printf "%s/ping" $urlBase }}
+              port: http
+            {{- else if $path := include "s5n.readinessPath" (dict "app" $inst.app "name" $inst.name) }}
+            httpGet:
+              path: {{ $path }}
               port: http
             {{- else }}
             tcpSocket:
@@ -179,6 +538,14 @@ spec:
               subPath: {{ $inst.name }}
             - name: tmp
               mountPath: /tmp
+            {{- if $oidc }}
+            - name: oidc
+              mountPath: /etc/s5n-oidc
+              readOnly: true
+            - name: host-ca
+              mountPath: /etc/s5n-host-ca
+              readOnly: true
+            {{- end }}
             {{- if eq $inst.app "plex" }}
             - name: transcode
               mountPath: /transcode
@@ -192,6 +559,24 @@ spec:
             claimName: {{ include "s5n.configClaim" $root }}
         - name: tmp
           emptyDir: {}
+        {{- if $oidc }}
+        # The client secret box wrote into this namespace, created once and
+        # never regenerated: the login holds only its digest.
+        - name: oidc
+          secret:
+            secretName: {{ printf "s5n-oidc-%s" $inst.app }}
+            defaultMode: 0400
+            items:
+              - key: client-secret
+                path: client-secret
+        # Root's anchor, when this box's certificate is not publicly trusted.
+        # optional because a Let's Encrypt box has no ConfigMap and does not
+        # need one; an empty directory is a valid SSL_CERT_DIR.
+        - name: host-ca
+          configMap:
+            name: s5n-host-ca
+            optional: true
+        {{- end }}
         {{- if eq $inst.app "plex" }}
         - name: transcode
           emptyDir: {}
@@ -212,6 +597,22 @@ spec:
             items:
               - key: tautulli-apikey
                 path: tautulli-apikey
+        {{- else if eq $inst.app "qui" }}
+        - name: keys
+          secret:
+            secretName: {{ include "s5n.secretName" $root }}
+            defaultMode: 0440
+            items:
+              - key: qui-password
+                path: qui-password
+        {{- else if eq $inst.app "autobrr" }}
+        - name: keys
+          secret:
+            secretName: {{ include "s5n.secretName" $root }}
+            defaultMode: 0440
+            items:
+              - key: autobrr-password
+                path: autobrr-password
         {{- end }}
 ---
 apiVersion: v1
@@ -283,15 +684,44 @@ spec:
       {{- with $root.Values.gateway.parentRef.sectionName }}
       sectionName: {{ . }}
       {{- end }}
+  {{- if eq $exposure "host" }}
+  # This app's UI writes absolute asset paths, so it is served at a name of its
+  # own (the catalog says so) and never under a prefix. The certificate and the
+  # listeners for this name are root's, written from the grant by box.
+  hostnames: [{{ $appHost | quote }}]
+  {{- else }}
   {{- with $root.Values.gateway.host }}
   hostnames: [{{ . | quote }}]
   {{- end }}
+  {{- end }}
   rules:
+    {{- if and (eq $exposure "path") (eq $inst.app "maintainerr") }}
+    # The live task stream is a Server-Sent Events connection that has to stay
+    # open, and Envoy's route timeout defaults to 15s, which would cut it: the
+    # UI's log and task views would go quiet with nothing in the logs to say
+    # why. So this one path asks for no request timeout (Gateway API reads "0s"
+    # as "none") and every other path keeps the default. Gateway API sends a
+    # request to the rule with the longest matching path prefix, so the stream
+    # takes this rule and the rest of /maintainerr the one below.
     - matches:
         - path:
             type: PathPrefix
+            value: {{ printf "%s/api/events/stream" $urlBase }}
+      timeouts:
+        request: 0s
+      backendRefs:
+        - name: {{ $inst.name }}
+          port: {{ $cfg.port }}
+    {{- end }}
+    - matches:
+        - path:
+            type: PathPrefix
+            {{- if eq $exposure "host" }}
+            value: /
+            {{- else }}
             value: {{ $urlBase }}
-      {{- if $cfg.rewritePath }}
+            {{- end }}
+      {{- if and (eq $exposure "path") $cfg.rewritePath }}
       filters:
         - type: URLRewrite
           urlRewrite:

@@ -8,6 +8,21 @@ import (
 	"testing"
 )
 
+// TestMain clears every GIT_* the test process inherited before any test runs.
+// Under `git rebase --exec`, or a hook, GIT_DIR and GIT_INDEX_FILE name the
+// outer repository, and every git these tests start -- the fixtures' and the
+// release tool's own -- would follow them out of the fixture directory: `init`
+// re-initialises that repository (core.bare = true), and the fixtures' commits
+// and tags land in it.
+func TestMain(m *testing.M) {
+	for _, kv := range os.Environ() {
+		if k, _, _ := strings.Cut(kv, "="); strings.HasPrefix(k, "GIT_") {
+			_ = os.Unsetenv(k)
+		}
+	}
+	os.Exit(m.Run())
+}
+
 // gitIn runs git in a fixture repository. The environment is pinned so the test
 // does not read the developer's git config and does not need one.
 func gitIn(t *testing.T, dir string, args ...string) {

@@ -163,3 +163,50 @@ users:
 		t.Fatalf("Ready with a token kubeconfig: %v", err)
 	}
 }
+
+// NodeIPs reads the InternalIPs out of the node list, which is what the
+// installer checks the pinned address against; a Hostname address is not one.
+func TestAPIReadinessReadsNodeInternalIPs(t *testing.T) {
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/nodes" {
+			http.NotFound(w, r)
+			return
+		}
+		_, _ = io.WriteString(w, `{"items":[
+			{"status":{"conditions":[{"type":"Ready","status":"True"}],
+			 "addresses":[{"type":"Hostname","address":"node"},
+			 {"type":"InternalIP","address":"192.0.2.10"}]}}]}`)
+	}))
+	defer srv.Close()
+
+	config := fmt.Sprintf(`apiVersion: v1
+kind: Config
+clusters:
+- cluster:
+    insecure-skip-tls-verify: true
+    server: %s
+  name: c
+contexts:
+- context:
+    cluster: c
+    user: u
+  name: ctx
+current-context: ctx
+users:
+- name: u
+  user:
+    token: t
+`, srv.URL)
+	path := filepath.Join(t.TempDir(), "admin.conf")
+	if err := os.WriteFile(path, []byte(config), 0o600); err != nil {
+		t.Fatalf("write kubeconfig: %v", err)
+	}
+
+	ips, err := (APIReadiness{ConfigPath: path}).NodeIPs(context.Background())
+	if err != nil {
+		t.Fatalf("NodeIPs: %v", err)
+	}
+	if len(ips) != 1 || ips[0] != "192.0.2.10" {
+		t.Fatalf("ips = %v, want the one InternalIP", ips)
+	}
+}

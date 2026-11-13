@@ -888,6 +888,8 @@ apps:
     enabled: true
   beta:
     enabled: false
+  gamma:
+    enabled: false
 `
 
 // reRunValues is the user's own file: comments and a four-space indent that a
@@ -954,5 +956,40 @@ func TestIssuerFollowsTheDomain(t *testing.T) {
 	}
 	if !strings.Contains(h.out.String(), "box.example.com resolves to 203.0.113.7: using Let's Encrypt") {
 		t.Fatalf("init did not explain the issuer:\n%s", h.out)
+	}
+}
+
+// TestTheHandOverCarriesEachHostsIssuer: init decides each name's issuer from
+// its own DNS answer, and the apply it hands over compares every Certificate
+// that already answers with that decision. tls.issuer is empty in this run, so
+// the map is the only thing that can carry it -- and the names must be the ones
+// init decided, including an app served at a host of its own.
+func TestTheHandOverCarriesEachHostsIssuer(t *testing.T) {
+	h := newHarness(t)
+	h.decision.Resolver = stubResolver{addrs: map[string][]string{
+		"box.example.com":       {"203.0.113.7"},
+		"gamma.box.example.com": {"203.0.113.7"},
+	}}
+	opts := h.unattended()
+	opts.Apps = []string{"alpha", "gamma"}
+
+	if _, err := h.run(opts); err != nil {
+		t.Fatalf("init: %v\n%s", err, h.out)
+	}
+	if len(h.applied) != 1 {
+		t.Fatalf("the hand-over ran %d times, want once", len(h.applied))
+	}
+	got := h.applied[0].HostIssuers
+	want := map[string]string{
+		"box.example.com":       IssuerLetsEncrypt,
+		"gamma.box.example.com": IssuerLetsEncrypt,
+	}
+	if len(got) != len(want) {
+		t.Fatalf("the apply was handed %v, want %v", got, want)
+	}
+	for host, issuer := range want {
+		if got[host] != issuer {
+			t.Fatalf("issuer for %s = %q, want %q (%v)", host, got[host], issuer, got)
+		}
 	}
 }

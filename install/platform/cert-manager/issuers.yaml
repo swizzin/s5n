@@ -1,6 +1,7 @@
-# cert-manager's two ClusterIssuers, owned by box. They are cluster-scoped
-# because a Certificate in any seedbox namespace may name them, and because a
-# user's box must not be able to replace them.
+# cert-manager's issuers, the box root, and the Certificate that makes it,
+# owned by box. They are cluster-scoped because a Certificate in any seedbox
+# namespace may name them, and because a user's box must not be able to
+# replace them.
 #
 # s5n-letsencrypt solves HTTP-01 through the Gateway box owns: the solver's
 # temporary HTTPRoute attaches to every listener that admits its namespace --
@@ -32,11 +33,70 @@ spec:
               - name: s5n
                 namespace: s5n-gateway
 ---
+# s5n-bootstrap signs exactly one object, the root Certificate below, and
+# nothing a host uses. A self-signed leaf is its own CA, so its issuer's
+# certificate changes at every renewal: anything that pinned it -- an app's
+# trust store, a ConfigMap, an image -- breaks on a schedule, silently, on
+# every box at once. A long-lived root signed once does not.
+#
+# Keeping the bootstrap issuer apart from the CA issuer is what makes that
+# ordering enforceable: the root is Ready before the CA issuer exists, so no
+# host's Certificate can be signed by a CA that is not there yet.
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: s5n-bootstrap
+  labels:
+    app.kubernetes.io/part-of: s5n
+    app.kubernetes.io/managed-by: box
+spec:
+  selfSigned: {}
+---
+# The box's root. It lives in cert-manager, not in s5n-gateway, because a
+# ClusterIssuer's ca.secretName is read from cert-manager's cluster-resource
+# namespace (the chart's --cluster-resource-namespace=$(POD_NAMESPACE), i.e.
+# cert-manager), and because no seedbox namespace and no user may read it.
+#
+# Ten years with a year's renewal margin: a root that outlives the box it was
+# made for, rotated deliberately rather than at some midnight. ECDSA P-256
+# because cert-manager signs with it natively, every client that will ever
+# verify this root supports it, and a smaller key is a smaller thing to keep.
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: s5n-root-ca
+  namespace: cert-manager
+  labels:
+    app.kubernetes.io/part-of: s5n
+    app.kubernetes.io/managed-by: box
+spec:
+  secretName: s5n-root-ca
+  commonName: s5n box root
+  isCA: true
+  duration: 87600h
+  renewBefore: 8760h
+  # The key never rotates: a renewed root keeps the key and name the anchor
+  # copied into each seedbox namespace was made from, so every host certificate
+  # signed after a renewal still verifies against it until the next root run
+  # refreshes the copy. cert-manager's default (Always) would cut that off.
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+    rotationPolicy: Never
+  issuerRef:
+    name: s5n-bootstrap
+    kind: ClusterIssuer
+---
 # s5n-selfsigned is the issuer for a host name that does not resolve to a
-# public address (a LAN name, a split-horizon name, or nothing yet). The
-# certificate is still a real TLS certificate; clients have to be told to trust
-# it (-k, or its CA), which is the honest state of a box nobody can reach from
-# the internet.
+# public address (a LAN name, a split-horizon name, or nothing yet). It is a
+# CA issuer over the root above, not a bare self-signed one, so a host's
+# certificate renews against the same roots. Clients still have to be told to
+# trust it (-k, or the root), which is the honest state of a box nobody can
+# reach from the internet -- but inside the cluster that anchor no longer
+# changes every sixty days.
+#
+# The name is kept: every Certificate box has ever written names it, and a
+# rename would orphan each one.
 apiVersion: cert-manager.io/v1
 kind: ClusterIssuer
 metadata:
@@ -45,4 +105,5 @@ metadata:
     app.kubernetes.io/part-of: s5n
     app.kubernetes.io/managed-by: box
 spec:
-  selfSigned: {}
+  ca:
+    secretName: s5n-root-ca

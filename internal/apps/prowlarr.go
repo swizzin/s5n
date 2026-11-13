@@ -60,7 +60,13 @@ type ApplicationSpec struct {
 // apiKey are overlaid; name, enable, syncLevel, tags and anything else are
 // left exactly as the user set them. A deleted owned application is
 // recreated.
-func (p *Prowlarr) EnsureApplication(ctx context.Context, spec ApplicationSpec, ownedID int) (EnsureResult, error) {
+//
+// apiKey is the Arr's key, copied out of the release Secret, and Prowlarr
+// answers a mask for it rather than the value, so a rotated key is invisible to
+// a field comparison: knownFingerprint is the sha256 of the key last written and
+// proven, and a difference rewrites the application. Prowlarr's own test is what
+// proves the new key before anything is written.
+func (p *Prowlarr) EnsureApplication(ctx context.Context, spec ApplicationSpec, ownedID int, knownFingerprint string) (EnsureResult, error) {
 	var list []Item
 	if err := p.client.Get(ctx, p.api("/applications"), &list); err != nil {
 		return EnsureResult{}, fmt.Errorf("list applications: %w", err)
@@ -79,7 +85,8 @@ func (p *Prowlarr) EnsureApplication(ctx context.Context, spec ApplicationSpec, 
 	if found {
 		desired, drift = overlayOwned(cur, fields)
 		desired["id"] = cur["id"]
-		if len(drift) > 0 {
+		rotated := knownFingerprint != SecretFingerprint(spec.APIKey)
+		if len(drift) > 0 || rotated {
 			change = Updated
 		} else {
 			change = Unchanged

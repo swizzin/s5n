@@ -7,6 +7,10 @@ global:
   pgid: 1000
   tz: Etc/UTC
 
+# The palette box draws its dialogs in and the login is drawn in: box reads it
+# from this file, and the chart renders nothing from it.
+theme: s5n
+
 storage:
   data:
     existingClaim: ""

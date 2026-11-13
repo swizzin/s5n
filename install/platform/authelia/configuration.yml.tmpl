@@ -1,16 +1,29 @@
 ## Rendered by box: do not edit. Every line here is a decision box makes from
-## the grant (the host, the login) or from the chart's own instance list (the
-## paths that carry their own credentials). Change box, not this file.
+## the grant (the host, the login), the values file (the theme) or from the
+## chart's own instance list (the paths that carry their own credentials).
+## Change box, not this file.
 ##
 ## The portal is served on a path of the seedbox's own host name -- no second
 ## name, no second certificate -- and the server mounts it at /auth and at /.
 ## disable_healthcheck is set because the binary's own healthcheck writes into
 ## the image's filesystem, which is read-only here; the /api/health handler the
 ## probes use is still registered.
-theme: 'dark'
+##
+## theme is the values file's theme mapped onto Authelia's own setting: a pair
+## name (s5n) is the dark page, drawn in that pair's dark variant; a pinned
+## light or dark variant pins the page. Authelia's `auto` is never written --
+## the login is one page for everyone on the host, and one picture cannot be
+## legible on both of them.
+theme: '{{ .Theme }}'
 server:
   address: 'tcp://0.0.0.0:9091/auth'
   disable_healthcheck: true
+  # box's mark and favicon, mounted beside this file. The asset handler serves
+  # <asset_path>/logo.png for /static/media/logo.png and <asset_path>/favicon.ico
+  # for /favicon.ico, and falls back to Authelia's own pictures when a file is
+  # absent -- so these two files are the login page's whole face, and the page
+  # re-reads them on every request.
+  asset_path: '{{ .AssetPath }}'
   endpoints:
     authz:
       # Envoy Gateway's extAuth calls this path with the original request path
@@ -52,7 +65,7 @@ access_control:
   default_policy: 'deny'
   rules:
 {{- range .Rules }}
-    - domain: ['{{ $.Host }}']
+    - domain: ['{{ .Domain }}']
       policy: '{{ .Policy }}'
 {{- if .Resources }}
       resources:

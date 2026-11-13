@@ -258,7 +258,7 @@ func TestTooFewNamesTheMinimum(t *testing.T) {
 // modes keep the same alignment; only the colour differs.
 func TestValidationErrorIsIndentedWithTheField(t *testing.T) {
 	for _, plain := range []bool{false, true} {
-		if got := theme(plain).Focused.ErrorMessage.GetPaddingLeft(); got != 2 {
+		if got := huhTheme(plain).Focused.ErrorMessage.GetPaddingLeft(); got != 2 {
 			t.Fatalf("plain=%v: the error is indented %d columns, want the field's 2", plain, got)
 		}
 	}

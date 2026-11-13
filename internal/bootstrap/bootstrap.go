@@ -64,6 +64,11 @@ type Cluster struct {
 	Nodes            int
 	HasKubeadmConfig bool
 	NodeLabels       map[string]string
+	// NodeIPs are the InternalIPs the nodes registered, in the API's order.
+	// They are evidence about the cluster, not about its health: the decision
+	// reads them for the one warning it can give -- a node whose address sits
+	// on a tunnel this host can see (see nodeip.go).
+	NodeIPs []string
 }
 
 // Finding is one piece of evidence that a cluster already exists on this host
@@ -88,6 +93,19 @@ type InstallPlan struct {
 	// chose to install. The installer refuses a plan without it, so an
 	// install cannot happen because a caller took the wrong path by accident.
 	CleanHost bool
+	// NodeIP is the address the node registers with, and Uplink is the link it
+	// came from. box chooses it before the first byte is fetched (see
+	// nodeip.go) and the installer refuses a plan without it: the address is
+	// what kube-router derives every pod's MTU from, so leaving it to the
+	// host is how a node ends up on a tunnel's 1280.
+	NodeIP string
+	Uplink Uplink
+	// ConfigPath and ConfigText are the k0s config the installer writes on the
+	// way in. k0s has no install flag for spec.api.address, so the config is
+	// the only way to pin the API to the same address; the text is built by
+	// k0sPlan so the decision, not the installer, says what it contains.
+	ConfigPath string
+	ConfigText string
 }
 
 // Result is the full decision with its human-readable reasoning.
@@ -105,8 +123,12 @@ type Result struct {
 	Skips []string
 	// Notes records host evidence that is not, by itself, a reason to stop:
 	// a Docker or containerd daemon that no cluster port depends on.
-	Notes  []string
-	Reason string
+	Notes []string
+	// Warnings records what box saw about the cluster that the operator should
+	// know and box will not change: today, a node whose InternalIP sits on a
+	// tunnel this host can see, which gives every pod that tunnel's MTU.
+	Warnings []string
+	Reason   string
 }
 
 // ErrRemoteCluster is returned by a prober that refuses to touch a cluster it
@@ -181,6 +203,10 @@ type Installer interface {
 	Install(ctx context.Context, plan InstallPlan) error
 }
 
+// conditionTrue is a condition's status when it holds: the API spells conditions
+// as strings, and box reads three of them.
+const conditionTrue = "True"
+
 // K0sAdminConfig is where k0s writes the admin kubeconfig box records and uses.
 const K0sAdminConfig = "/var/lib/k0s/pki/admin.conf"
 
@@ -196,6 +222,7 @@ func FormatResult(res Result) string {
 	case ActionStop:
 		writeSkips(&b, res.Skips)
 		writeNotes(&b, res.Notes)
+		writeWarnings(&b, res.Warnings)
 		fmt.Fprintf(&b, "%s\n", res.Reason)
 		return b.String()
 	case ActionInstall:
@@ -204,6 +231,7 @@ func FormatResult(res Result) string {
 		fmt.Fprintf(&b, "kubeconfig: %s\n", res.Kubeconfig)
 		writeSkips(&b, res.Skips)
 		writeNotes(&b, res.Notes)
+		writeWarnings(&b, res.Warnings)
 		fmt.Fprintf(&b, "%s\n", res.Reason)
 		return b.String()
 	}
@@ -213,6 +241,7 @@ func FormatResult(res Result) string {
 	fmt.Fprintf(&b, "distribution: %s\n", res.Distribution)
 	fmt.Fprintf(&b, "nodes: %d\n", res.Nodes)
 	writeSkips(&b, res.Skips)
+	writeWarnings(&b, res.Warnings)
 	if len(res.Platform) > 0 {
 		fmt.Fprintf(&b, "platform:\n")
 		for _, c := range res.Platform {
@@ -251,6 +280,15 @@ func writeNotes(b *strings.Builder, notes []string) {
 	}
 }
 
+// writeWarnings prints what box saw but will not change. A warning is not a
+// note: a note is host evidence that does not matter here, a warning is
+// something wrong the operator has to fix somewhere box does not write.
+func writeWarnings(b *strings.Builder, warnings []string) {
+	for _, w := range warnings {
+		fmt.Fprintf(b, "warning: %s\n", w)
+	}
+}
+
 // ReportResult is FormatResult through the output seam: the same facts, stated
 // as events so a live renderer can lay them out as rows and a wrapped list.
 // Under say.Plain it is byte-for-byte FormatResult, which is what the tests and
@@ -261,6 +299,7 @@ func ReportResult(res Result, r say.Reporter) {
 		r.Fact("decision", string(res.Action))
 		reportSkips(r, res.Skips)
 		reportNotes(r, res.Notes)
+		reportWarnings(r, res.Warnings)
 		r.Line(res.Reason)
 		return
 	case ActionInstall:
@@ -270,6 +309,7 @@ func ReportResult(res Result, r say.Reporter) {
 		r.Fact("kubeconfig", res.Kubeconfig)
 		reportSkips(r, res.Skips)
 		reportNotes(r, res.Notes)
+		reportWarnings(r, res.Warnings)
 		// The facts above already name the source, the distribution and the
 		// kubeconfig; the reason says why, in one muted sentence instead of a
 		// second raw line. The plain transcript is unchanged: Plain.Muted and
@@ -284,6 +324,7 @@ func ReportResult(res Result, r say.Reporter) {
 	r.Fact("distribution", string(res.Distribution))
 	r.Fact("nodes", fmt.Sprintf("%d", res.Nodes))
 	reportSkips(r, res.Skips)
+	reportWarnings(r, res.Warnings)
 	if len(res.Platform) > 0 {
 		rows := make([]string, 0, len(res.Platform))
 		for _, c := range res.Platform {
@@ -315,5 +356,11 @@ func reportSkips(r say.Reporter, skips []string) {
 func reportNotes(r say.Reporter, notes []string) {
 	for _, n := range notes {
 		r.Line("note: " + n)
+	}
+}
+
+func reportWarnings(r say.Reporter, warnings []string) {
+	for _, w := range warnings {
+		r.Warn("warning: " + w)
 	}
 }

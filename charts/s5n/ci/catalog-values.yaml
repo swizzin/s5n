@@ -1,0 +1,33 @@
+# The catalog's opt-in apps, all enabled: their StatefulSets, Services and
+# routes are rendered and validated like every other app's. They default off, so
+# this file is the only render that carries them — including Maintainerr's
+# no-timeout rule for the live event stream and PeerBanHelper's host route and
+# config init container, which kubeconform would otherwise never see.
+auth:
+  edge: true
+  # box writes this from the grant for an app that speaks OIDC; a plain helm
+  # install sets it to the proxy Service's ClusterIP, which is what the app's
+  # pods reach the login at the box's own name through.
+  oidc:
+    gatewayIP: 10.96.31.116
+
+storage:
+  data:
+    existingClaim: box-catalog-data
+  config:
+    existingClaim: box-catalog-config
+
+apps:
+  qui:
+    enabled: true
+  autobrr:
+    enabled: true
+  maintainerr:
+    enabled: true
+  pbh:
+    enabled: true
+
+# The box's own name. Plex and Seerr are served at plex.<domain> and
+# seerr.<domain> (the catalog says so), so a render needs the domain.
+gateway:
+  host: box.example.com

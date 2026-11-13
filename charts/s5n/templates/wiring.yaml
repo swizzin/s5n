@@ -37,10 +37,11 @@ previous run's logs stay readable until then.
       "timeoutSeconds" .Values.wiring.timeoutSeconds
       "instances" $instances }}
 {{- if and .Values.apps.qbittorrent .Values.apps.qbittorrent.enabled }}
+{{- /* The WebUI skips its login for the release's addresses (the init container
+       seals that), so this Job -- like every app that calls it -- carries no
+       credential at all: the URL is the whole entry. */}}
 {{- $_ := set $cfg "qbittorrent" (dict
-      "url" (printf "http://qbittorrent:%v" .Values.apps.qbittorrent.port)
-      "username" (default "admin" .Values.apps.qbittorrent.webuiUsername)
-      "passwordFile" "/etc/s5n/keys/qbittorrent-password") }}
+      "url" (printf "http://qbittorrent:%v" .Values.apps.qbittorrent.port)) }}
 {{- end }}
 {{- if and .Values.apps.prowlarr .Values.apps.prowlarr.enabled }}
 {{- $_ := set $cfg "prowlarr" (dict
@@ -65,6 +66,33 @@ previous run's logs stay readable until then.
 {{- if and .Values.apps.seerr .Values.apps.seerr.enabled }}
 {{- $_ := set $cfg "seerr" (dict
       "url" (printf "http://seerr:%v" .Values.apps.seerr.port)) }}
+{{- end }}
+{{- if and .Values.apps.qui .Values.apps.qui.enabled }}
+{{- /* qui keeps its own user table: the account the chart owns is what this
+       sign-in uses (s5n.wiringAccount), and the password is a file reference
+       into the mounted Secret like every other credential here. */}}
+{{- $_ := set $cfg "qui" (dict
+      "url" (printf "http://qui:%v" .Values.apps.qui.port)
+      "urlBase" "/qui"
+      "username" (include "s5n.wiringAccount" $root | trim)
+      "passwordFile" "/etc/s5n/keys/qui-password") }}
+{{- end }}
+{{- if and .Values.apps.autobrr .Values.apps.autobrr.enabled }}
+{{- /* Same account arrangement as qui's. autobrr's base URL carries a trailing
+       slash in its own setting, but its API routes are mounted under baseUrl
+       plus "/api", so the path this client appends is "/autobrr/api/...". */}}
+{{- $_ := set $cfg "autobrr" (dict
+      "url" (printf "http://autobrr:%v" .Values.apps.autobrr.port)
+      "urlBase" "/autobrr"
+      "username" (include "s5n.wiringAccount" $root | trim)
+      "passwordFile" "/etc/s5n/keys/autobrr-password") }}
+{{- end }}
+{{- if and .Values.apps.pbh .Values.apps.pbh.enabled }}
+{{- /* PBH's downloader is the release's qBittorrent, and the token is the same
+       WebUI token the app was given through its environment. */}}
+{{- $_ := set $cfg "pbh" (dict
+      "url" (printf "http://pbh:%v" .Values.apps.pbh.port)
+      "tokenFile" "/etc/s5n/keys/pbh-token") }}
 {{- end }}
 ---
 apiVersion: v1

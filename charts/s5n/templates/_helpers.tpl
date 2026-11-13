@@ -119,6 +119,23 @@ release whose admin apps nobody signs in to is not a release this chart renders.
 {{- end -}}
 
 {{/*
+s5n.wiringAccount: the one account the wiring Job signs in with, in the apps
+that keep their own user table (qui, autobrr). Both apps hand an API key only to
+a signed-in session, so an unattended install needs an account it owns; the
+chart generates its password in the release Secret and the app's init container
+writes it into the app's own table on every start (docs/box.md, "An app that
+keeps its own user table has one account box owns").
+
+It is one name for both apps because it is one thing -- the automation account,
+not a person -- and because the Job's config, the init container and the
+operator's `kubectl rollout restart` all have to name the same account. `s5n` is
+the product's name, so a row in either app's user list says what it is for.
+*/ -}}
+{{- define "s5n.wiringAccount" -}}
+s5n
+{{- end -}}
+
+{{- /*
 s5n.instances: the flat list of workloads, as JSON, built from the keys under `apps:`.
 Every key there is an app -- values.schema.json rejects anything else -- so a new
 catalog app needs a values entry and its schema definition, never a template edit.
@@ -146,7 +163,47 @@ that order (wiring.json's instance list is per-Arr work with no cross-entry orde
 {{- toJson $out -}}
 {{- end -}}
 
-{{/* Restricted-profile container security context, shared by every container. */}}
+{{- /*
+s5n.exposure: how the chart serves one app, from the catalog manifest, which
+ships inside the chart and values cannot override. "path" is the default;
+"host" means the app is served at <app>.<domain> with a listener and
+certificate of its own, because its UI writes absolute asset paths. The chart
+owns this, not a values file: an operator choosing it wrongly gets a broken UI,
+not tuning. internal/catalog validates the value box reads; the chart trusts
+the file it ships.
+*/ -}}
+{{- define "s5n.exposure" -}}
+{{- $catalog := .root.Files.Get "catalog.yaml" | fromYaml -}}
+{{- $entry := get $catalog.apps .app | default dict -}}
+{{- default "path" $entry.exposure -}}
+{{- end -}}
+
+{{- /*
+s5n.oidc: whether the catalog marks one app as a client of the login's own OIDC
+provider. It is the chart's half of the same flag box reads (`oidc: true` in
+catalog.yaml), and the flag is the whole decision: an app that speaks OIDC is one
+entry there plus its own environment, never a name written into a template.
+"true" or "" -- a template compares it to "true" rather than trusting truthiness,
+because include hands back a string.
+*/ -}}
+{{- define "s5n.oidc" -}}
+{{- $catalog := .root.Files.Get "catalog.yaml" | fromYaml -}}
+{{- $entry := get $catalog.apps .app | default dict -}}
+{{- if $entry.oidc -}}true{{- end -}}
+{{- end -}}
+
+{{- /*
+s5n.appHost: the name one app is served on when it has a host of its own,
+<app>.<domain>. A domain is required: a route on a name that is not there would
+serve nothing, so a plain install that leaves gateway.host empty is refused
+with the app named.
+*/ -}}
+{{- define "s5n.appHost" -}}
+{{- $domain := required (printf "gateway.host: apps.%s is served at its own host name (<app>.<domain>), so set gateway.host to the box's domain" .app) .root.Values.gateway.host -}}
+{{- printf "%s.%s" .app $domain -}}
+{{- end -}}
+
+{{- /* Restricted-profile container security context, shared by every container. */}}
 {{- define "s5n.containerSecurity" -}}
 allowPrivilegeEscalation: false
 readOnlyRootFilesystem: true
@@ -165,4 +222,39 @@ fsGroupChangePolicy: OnRootMismatch
 runAsNonRoot: true
 seccompProfile:
   type: RuntimeDefault
+{{- end -}}
+
+{{- /*
+s5n.readinessPath: the path an app's readinessProbe asks for, or "" for an app
+whose readiness stays a TCP connect (the chart's default). Chart-owned, like the
+security contexts: a probe a user can point at any path is a probe that can call
+a dead app Ready.
+
+The paths are the app's own, at the tag variants.yaml pins. qui's is not under
+its baseUrl: it registers /healthz/readiness on the root router and mounts only
+/api and the UI under the prefix (internal/api/server.go), so a prefixed request
+lands on the SPA's catch-all and answers HTML, not health. autobrr and
+Maintainerr apply their base path to every route, health included: autobrr's is
+/api/healthz/readiness, because at v1.90.0 the whole API router is mounted under
+baseUrl + "/api" (internal/http/server.go:226,302) and the UI's router under the
+base URL alone.
+
+PeerBanHelper has no health path of its own: its index answers 200 for every
+unknown path, so `/` would only prove the listener is up, and a database that
+never loaded still serves the SPA. /api/downloaders is the route the wiring Job
+writes through, and it answers without a token only because the chart switches
+this app's own WebUI login off (catalog: exposure host; the chart sets
+PBH_WEB_REQUIRELOGIN=false). Everything that reaches this port is behind the
+edge's login: the NetworkPolicy admits the Gateway and the wiring Job alone.
+*/ -}}
+{{- define "s5n.readinessPath" -}}
+{{- if eq .app "qui" -}}
+/healthz/readiness
+{{- else if eq .app "autobrr" -}}
+{{ printf "/%s/api/healthz/readiness" .name }}
+{{- else if eq .app "maintainerr" -}}
+{{ printf "/%s/api/health/ready" .name }}
+{{- else if eq .app "pbh" -}}
+/api/downloaders
+{{- end -}}
 {{- end -}}

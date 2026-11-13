@@ -86,6 +86,25 @@ func (s *Seedbox) Effective(c Chart) (map[string]any, error) {
 	if declares {
 		overlay(base, map[string]any{"auth": map[string]any{"edge": true}}, nil)
 	}
+	// The Gateway's proxy address, when the box's grant has one and the chart
+	// declares the key. It is BoxOnly, which overlay() skips by design -- the
+	// grant is box's record and never a chart value -- so it is injected here
+	// instead, the same way auth.edge is: after both files, so no file can
+	// shadow it, and only when the schema has the key, because a chart from
+	// before the provider would refuse the install.
+	declaresIP, err := declaresOIDCGatewayIP(c.Schema)
+	if err != nil {
+		return nil, err
+	}
+	if declaresIP {
+		if ip, ok := s.Grant.data["auth"].(map[string]any); ok {
+			if oidc, ok := ip["oidc"].(map[string]any); ok {
+				if addr, ok := oidc["gatewayIP"].(string); ok && strings.TrimSpace(addr) != "" {
+					setPath(base, []string{"auth", "oidc", "gatewayIP"}, addr)
+				}
+			}
+		}
+	}
 	// The claim names are box's, from the volumes it creates: not the chart's
 	// defaults and not either file. Applied last so nothing can shadow them.
 	overlay(base, claims(vols), nil)
@@ -119,6 +138,59 @@ func declaresAuthEdge(schema []byte) (bool, error) {
 	}
 	_, ok = auth.Properties["edge"]
 	return ok, nil
+}
+
+// declaresOIDCGatewayIP reports whether the chart's schema describes
+// auth.oidc.gatewayIP. Presence is the whole question, exactly as for auth.edge:
+// a chart from before the provider has no such key, and a values document that
+// carried it would be refused by that chart's own schema.
+// DeclaresOIDCGatewayIP reports whether a chart's schema describes the key, for
+// a caller outside this package (init writes the grant key only when it does).
+func DeclaresOIDCGatewayIP(schema []byte) (bool, error) { return declaresOIDCGatewayIP(schema) }
+
+func declaresOIDCGatewayIP(schema []byte) (bool, error) {
+	if len(schema) == 0 {
+		return false, nil
+	}
+	var doc struct {
+		Properties map[string]struct {
+			Properties map[string]struct {
+				Properties map[string]json.RawMessage `json:"properties"`
+			} `json:"properties"`
+		} `json:"properties"`
+	}
+	if err := json.Unmarshal(schema, &doc); err != nil {
+		return false, fmt.Errorf("chart schema: %w", err)
+	}
+	auth, ok := doc.Properties["auth"]
+	if !ok {
+		return false, nil
+	}
+	oidc, ok := auth.Properties["oidc"]
+	if !ok {
+		return false, nil
+	}
+	_, ok = oidc.Properties["gatewayIP"]
+	return ok, nil
+}
+
+// setPath writes one value into the document at the given key path, creating
+// mappings as it goes. It bypasses overlay() deliberately: the keys it writes
+// are box's, and overlay() is the function that keeps box's keys out.
+func setPath(root map[string]any, keys []string, value any) {
+	cur := root
+	for i, k := range keys {
+		if i == len(keys)-1 {
+			cur[k] = value
+			return
+		}
+		next, ok := cur[k].(map[string]any)
+		if !ok {
+			next = map[string]any{}
+			cur[k] = next
+		}
+		cur = next
+	}
 }
 
 // parseChartValues reads a release's values.yaml into the same shape as a user

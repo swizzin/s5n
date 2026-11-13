@@ -17,6 +17,17 @@ import (
 	"strings"
 )
 
+// The field names the component blocks share. Each is both the JSON key the
+// chart writes and the name a validation error prints, so writing it once is
+// what keeps the two in step.
+const (
+	fieldURL          = "url"
+	fieldURLBase      = "urlBase"
+	fieldAPIKeyFile   = "apiKeyFile"
+	fieldPasswordFile = "passwordFile"
+	fieldTokenFile    = "tokenFile"
+)
+
 // Config is rendered by the chart into /etc/s5n/wiring/wiring.json. It contains
 // no secrets: every credential is a file reference into the mounted Secret.
 type Config struct {
@@ -28,7 +39,42 @@ type Config struct {
 	Plex           *PlexConfig     `json:"plex,omitempty"`
 	Tautulli       *TautulliConfig `json:"tautulli,omitempty"`
 	Seerr          *SeerrConfig    `json:"seerr,omitempty"`
+	Qui            *QuiConfig      `json:"qui,omitempty"`
+	Autobrr        *AutobrrConfig  `json:"autobrr,omitempty"`
+	Pbh            *PbhConfig      `json:"pbh,omitempty"`
 	Instances      []Instance      `json:"instances"`
+}
+
+// QuiConfig points at qui's API. PasswordFile is the release Secret's
+// qui-password: the chart generates it once and qui's init container writes it
+// into the app's own user table on every start, so this is the one account the
+// Job signs in with. No API key is minted or stored — qui only issues one to a
+// session, and a session is something this Job can open by itself.
+type QuiConfig struct {
+	URL          string `json:"url"`
+	URLBase      string `json:"urlBase"`
+	Username     string `json:"username"`
+	PasswordFile string `json:"passwordFile"`
+}
+
+// AutobrrConfig points at autobrr's API, with the same account arrangement as
+// qui's: autobrr-password in the release Secret, written into autobrr's own
+// user table by its init container at every start.
+type AutobrrConfig struct {
+	URL          string `json:"url"`
+	URLBase      string `json:"urlBase"`
+	Username     string `json:"username"`
+	PasswordFile string `json:"passwordFile"`
+}
+
+// PbhConfig points at PeerBanHelper's WebAPI. TokenFile is the release Secret's
+// pbh-token, which is PBH's own WebUI token: the chart generates it once and
+// gives the app the same value through its environment, so this Job and the
+// app always agree. It is read from the mount like every other credential, and
+// sent as a Bearer header.
+type PbhConfig struct {
+	URL       string `json:"url"`
+	TokenFile string `json:"tokenFile"`
 }
 
 // PlexConfig points at Plex. There is no API key: /identity answers
@@ -59,11 +105,12 @@ type SeerrConfig struct {
 	URL string `json:"url"`
 }
 
-// QbitConfig points at the qBittorrent WebUI.
+// QbitConfig points at the qBittorrent WebUI. It carries no credential: the
+// WebUI skips its login for the release's addresses (internal/qbtconf seals
+// that; docs/box.md, "Logins"), so this Job talks to it with an empty username
+// and password, like every other app that calls it.
 type QbitConfig struct {
-	URL          string `json:"url"`
-	Username     string `json:"username"`
-	PasswordFile string `json:"passwordFile"`
+	URL string `json:"url"`
 }
 
 // ProwlarrConfig points at Prowlarr. SelfURL is Prowlarr's own address as the
@@ -119,15 +166,14 @@ func (c *Config) validate() error {
 	}
 	if c.Qbittorrent != nil {
 		if err := requireFields("qbittorrent", map[string]string{
-			"url": c.Qbittorrent.URL, "username": c.Qbittorrent.Username,
-			"passwordFile": c.Qbittorrent.PasswordFile,
+			fieldURL: c.Qbittorrent.URL,
 		}); err != nil {
 			return err
 		}
 	}
 	if c.Prowlarr != nil {
 		if err := requireFields("prowlarr", map[string]string{
-			"url": c.Prowlarr.URL, "selfUrl": c.Prowlarr.SelfURL, "apiKeyFile": c.Prowlarr.APIKeyFile,
+			fieldURL: c.Prowlarr.URL, "selfUrl": c.Prowlarr.SelfURL, fieldAPIKeyFile: c.Prowlarr.APIKeyFile,
 		}); err != nil {
 			return err
 		}
@@ -143,6 +189,29 @@ func (c *Config) validate() error {
 	if c.Seerr != nil && c.Seerr.URL == "" {
 		return fmt.Errorf("seerr: url is empty")
 	}
+	if c.Qui != nil {
+		if err := requireFields("qui", map[string]string{
+			fieldURL: c.Qui.URL, fieldURLBase: c.Qui.URLBase, "username": c.Qui.Username,
+			fieldPasswordFile: c.Qui.PasswordFile,
+		}); err != nil {
+			return err
+		}
+	}
+	if c.Autobrr != nil {
+		if err := requireFields("autobrr", map[string]string{
+			fieldURL: c.Autobrr.URL, fieldURLBase: c.Autobrr.URLBase, "username": c.Autobrr.Username,
+			fieldPasswordFile: c.Autobrr.PasswordFile,
+		}); err != nil {
+			return err
+		}
+	}
+	if c.Pbh != nil {
+		if err := requireFields("pbh", map[string]string{
+			fieldURL: c.Pbh.URL, fieldTokenFile: c.Pbh.TokenFile,
+		}); err != nil {
+			return err
+		}
+	}
 	// Categories drive qBittorrent save paths; two instances sharing a name but
 	// not a path would fight over the same downloads.
 	return validateCategories(c.Instances)
@@ -157,7 +226,7 @@ func validateInstance(index int, inst Instance) error {
 		return fmt.Errorf("instance %d: unknown kind %q", index, inst.Kind)
 	}
 	return requireFields(fmt.Sprintf("instance %q", inst.Name), map[string]string{
-		"name": inst.Name, "url": inst.URL, "apiKeyFile": inst.APIKeyFile,
+		"name": inst.Name, "url": inst.URL, fieldAPIKeyFile: inst.APIKeyFile,
 		"category": inst.Category, "savePath": inst.SavePath, "rootFolder": inst.RootFolder,
 	})
 }

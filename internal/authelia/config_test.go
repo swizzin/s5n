@@ -72,19 +72,20 @@ func TestInstancesFromValuesSkipsDisabled(t *testing.T) {
 // so a reordering here is a login that answers its own redirect, or an API
 // client that is asked for a form.
 func TestRulesExact(t *testing.T) {
-	got := Rules("box.example.com", "alice", InstancesFromValues(fixtureValues()))
+	got := Rules("box.example.com", "alice", InstancesFromValues(fixtureValues()), nil)
+	host := "box.example.com"
 	want := []Rule{
-		{Policy: "bypass", Resources: []string{`^/auth([/?].*)?$`}},
-		{Policy: "bypass", Resources: []string{`^/plex([/?].*)?$`}},
-		{Policy: "bypass", Resources: []string{`^/prowlarr/api([/?].*)?$`, `^/prowlarr/ping$`}},
-		{Policy: "bypass", Resources: []string{`^/radarr/api([/?].*)?$`, `^/radarr/ping$`}},
-		{Policy: "bypass", Resources: []string{`^/seerr([/?].*)?$`}},
-		{Policy: "bypass", Resources: []string{`^/sonarr/api([/?].*)?$`, `^/sonarr/ping$`}},
+		{Domain: host, Policy: "bypass", Resources: []string{`^/auth([/?].*)?$`}},
+		{Domain: host, Policy: "bypass", Resources: []string{`^/plex([/?].*)?$`}},
+		{Domain: host, Policy: "bypass", Resources: []string{`^/prowlarr/api([/?].*)?$`, `^/prowlarr/ping$`}},
+		{Domain: host, Policy: "bypass", Resources: []string{`^/radarr/api([/?].*)?$`, `^/radarr/ping$`}},
+		{Domain: host, Policy: "bypass", Resources: []string{`^/seerr([/?].*)?$`}},
+		{Domain: host, Policy: "bypass", Resources: []string{`^/sonarr/api([/?].*)?$`, `^/sonarr/ping$`}},
 		// The 4K instance is its own prefix on the same host, so it needs its
 		// own rules: a rule written for /sonarr does not cover /sonarr-4k.
-		{Policy: "bypass", Resources: []string{`^/sonarr-4k/api([/?].*)?$`, `^/sonarr-4k/ping$`}},
-		{Policy: "bypass", Resources: []string{`^/tautulli([/?].*)?$`}},
-		{Policy: "one_factor", Subject: "alice"},
+		{Domain: host, Policy: "bypass", Resources: []string{`^/sonarr-4k/api([/?].*)?$`, `^/sonarr-4k/ping$`}},
+		{Domain: host, Policy: "bypass", Resources: []string{`^/tautulli([/?].*)?$`}},
+		{Domain: host, Policy: "one_factor", Subject: "alice"},
 	}
 	if !reflect.DeepEqual(got, want) {
 		var b strings.Builder
@@ -99,7 +100,7 @@ func TestRulesExact(t *testing.T) {
 // authenticates browsers and nothing else, and the Arrs reach it over the
 // cluster network, not through the Gateway.
 func TestRulesLeaveQBittorrentBehindTheLogin(t *testing.T) {
-	for _, r := range Rules("box.example.com", "alice", InstancesFromValues(fixtureValues())) {
+	for _, r := range Rules("box.example.com", "alice", InstancesFromValues(fixtureValues()), nil) {
 		for _, resource := range r.Resources {
 			if strings.HasPrefix(resource, `^/qbittorrent`) {
 				t.Fatalf("qBittorrent is exempted from the login by %q", resource)
@@ -111,12 +112,47 @@ func TestRulesLeaveQBittorrentBehindTheLogin(t *testing.T) {
 // A host with no apps still has a login: the portal is always there, and the
 // last rule is the one that matters.
 func TestRulesWithNoApps(t *testing.T) {
-	got := Rules("box.example.com", "alice", nil)
+	got := Rules("box.example.com", "alice", nil, nil)
 	if len(got) != 2 {
 		t.Fatalf("rules = %#v, want the portal and the login", got)
 	}
 	if got[1].Policy != "one_factor" || got[1].Subject != "alice" {
 		t.Fatalf("last rule = %#v", got[1])
+	}
+	if got[1].Domain != "box.example.com" {
+		t.Fatalf("login rule domain = %q, want the box's host", got[1].Domain)
+	}
+}
+
+// An app served at a name of its own leaves its path behind: its rule is the
+// whole <app>.<domain>, and no rule mentions /<app> any more. Authelia checks
+// the request's host, so without the domain rule the name falls into
+// default_policy deny, and without removing the path rule a request under the
+// old path would still be served although the chart no longer routes it.
+func TestRulesFollowAnAppToItsOwnHost(t *testing.T) {
+	got := Rules("box.example.com", "alice", InstancesFromValues(fixtureValues()), []string{"plex", "seerr"})
+	host := "box.example.com"
+	want := []Rule{
+		{Domain: host, Policy: "bypass", Resources: []string{`^/auth([/?].*)?$`}},
+		// Sorted instance order: plex, prowlarr, radarr, seerr, sonarr, ...
+		{Domain: "plex." + host, Policy: "bypass"},
+		{Domain: host, Policy: "bypass", Resources: []string{`^/prowlarr/api([/?].*)?$`, `^/prowlarr/ping$`}},
+		{Domain: host, Policy: "bypass", Resources: []string{`^/radarr/api([/?].*)?$`, `^/radarr/ping$`}},
+		{Domain: "seerr." + host, Policy: "bypass"},
+		{Domain: host, Policy: "bypass", Resources: []string{`^/sonarr/api([/?].*)?$`, `^/sonarr/ping$`}},
+		{Domain: host, Policy: "bypass", Resources: []string{`^/sonarr-4k/api([/?].*)?$`, `^/sonarr-4k/ping$`}},
+		{Domain: host, Policy: "bypass", Resources: []string{`^/tautulli([/?].*)?$`}},
+		{Domain: host, Policy: "one_factor", Subject: "alice"},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("rules = %#v\nwant %#v", got, want)
+	}
+	for _, r := range got {
+		for _, resource := range r.Resources {
+			if strings.HasPrefix(resource, `^/plex`) || strings.HasPrefix(resource, `^/seerr`) {
+				t.Fatalf("a hosted app still has a path rule: %#v", r)
+			}
+		}
 	}
 }
 
@@ -124,7 +160,7 @@ func TestRulesWithNoApps(t *testing.T) {
 // own port-80 listener, which has no login, so a bypass here would be dead
 // config pretending the challenge goes through Authelia.
 func TestRulesMentionNoACMEChallenge(t *testing.T) {
-	for _, r := range Rules("box.example.com", "alice", InstancesFromValues(fixtureValues())) {
+	for _, r := range Rules("box.example.com", "alice", InstancesFromValues(fixtureValues()), nil) {
 		for _, resource := range r.Resources {
 			if strings.Contains(resource, "acme-challenge") || strings.Contains(resource, ".well-known") {
 				t.Fatalf("rule %q still exempts the ACME challenge from the login", resource)

@@ -43,6 +43,12 @@
 # password, the jar gets in, and the Arrs' own API keys still answer. The
 # preinstalled scenario proves the same redirect on its own host name.
 #
+# The OIDC clients are proved the same way, by signing in: the app's own start
+# hands over an authorization URL, Authelia's authorization endpoint answers
+# with a code, the app's callback exchanges it, and an endpoint only the app's
+# session opens names the account. A jar with no cookie, one with the portal's
+# cookie alone, and a second account are the refusals around it.
+#
 # The fresh scenario runs Pebble, Let's Encrypt's test ACME server, inside the
 # cluster and points the production issuer at it, so HTTP-01 through the
 # Gateway is proven on every run: Certificate Ready, HTTPS with Pebble's CA, an
@@ -66,8 +72,10 @@ cd "$(dirname "$0")/.."
 KIND=${KIND:-kind}
 NS=seedbox
 # The one account the login admits. A generic name: the repo carries no real
-# one, and the e2e's password is generated per run below.
+# one, and the e2e's password is generated per run below. The second one exists
+# only to be refused: no rule and no client names it.
 LOGIN=alice
+SECOND_LOGIN=bob
 IMAGE=ghcr.io/swizzin/s5n:e2e
 # The platform versions box installs are not this script's: they come from
 # charts/s5n/platform.yaml, the file the chart release carries, printed by
@@ -99,6 +107,9 @@ NGF_VERSION=${NGF_VERSION:-2.8.1}
 # Pebble 2.10.1, the ACME test server the fresh scenario proves HTTP-01
 # against, pinned by tag and digest like every other test image here.
 PEBBLE_IMAGE=${PEBBLE_IMAGE:-ghcr.io/letsencrypt/pebble:2.10.1@sha256:ddf230642b1a584f519f32e347de1b05a6e4c1f6c35c1863b33effeab5f78199}  # renovate: datasource=docker
+# The image the NetworkPolicy probes use: curl, pinned like every other test
+# image here. It is what asks the login directly, which must time out.
+CURL_IMAGE=${CURL_IMAGE:-docker.io/curlimages/curl:8.11.1@sha256:c1fe1679c34d9784c1b0d1e5f62ac0a79fca01fb6377cdd33e90473c6f9f9a69}  # renovate: datasource=docker
 
 KEEP=""
 SCENARIO=all
@@ -130,9 +141,26 @@ case "$SCENARIO" in
   preinstalled) CLUSTER=s5n-box-lb; DOMAIN=box.internal.example ;;
   foreign-gateway) CLUSTER=s5n-box-gw; DOMAIN=box.example.com ;;
 esac
+# The names the catalog serves at a host of their own (Plex and Seerr): the
+# chart renders their routes there, and box resolves and certifies them.
+PLEX_HOST="plex.${DOMAIN}"
+SEERR_HOST="seerr.${DOMAIN}"
+# PeerBanHelper's page calls /api/... from the site root, so the catalog serves it
+# at a host of its own as well.
+PBH_HOST="pbh.${DOMAIN}"
 # The fresh scenario points the production issuer at Pebble; every other
 # scenario keeps Let's Encrypt's directory and never issues from it.
 ACME_ARGS=()
+# The development-only --dns-file override: the e2e's stand-in for the test
+# host's own DNS, which an unprivileged run cannot edit. Empty for every
+# scenario until the one that moves a name from "no record" to a public one.
+DNS_ARGS=()
+# The development-only --ca-file override: Pebble's root, which an ACME
+# certificate's Secret does not carry, so the anchor ConfigMap box writes for an
+# app that signs in through the login has nowhere else to come from. This is the
+# same writer as a self-signed box's (which reads the box root out of
+# cert-manager), not a second code path.
+CA_ARGS=()
 CTX="kind-${CLUSTER}"
 K="kubectl --context ${CTX}"
 HELM="helm --kube-context ${CTX}"
@@ -151,6 +179,9 @@ trap cleanup EXIT
 
 log() { printf '\n==> %s\n' "$*"; }
 fail=0
+# The torrent port the grant records, as the last assert_torrent_port read it:
+# the binding below admits exactly that number.
+TORRENT_PORT=""
 
 # kind writes the cluster's context into KUBECONFIG and makes it the
 # current-context, then `kind delete cluster` drops that context without putting
@@ -237,9 +268,17 @@ $KIND get kubeconfig --name "$CLUSTER" >"$WORK/kubeconfig"
 # The node's users database is seeded from the same file, because
 # --paths-in-node means the host path is inside the test node and box cannot
 # write there: hack/authelia-users is the same internal/authelia code box uses.
+#
+# A second account exists for the refusal: the provider's authorization policy
+# is one per seedbox and admits user:<LOGIN> alone, so a second row is what
+# proves a client cannot be authorized by someone the box did not name. It
+# never gets a listener, a rule or a client of its own.
 AUTHELIA_PASSWORD=$(openssl rand -hex 16)
 printf '%s\n' "$AUTHELIA_PASSWORD" >"$WORK/authelia-password"
 chmod 600 "$WORK/authelia-password"
+SECOND_PASSWORD=$(openssl rand -hex 16)
+printf '%s\n' "$SECOND_PASSWORD" >"$WORK/second-password"
+chmod 600 "$WORK/second-password"
 
 # Only what `box init` creates on a real host, and only because --paths-in-node
 # keeps it from touching this node itself: the two volume roots and one
@@ -250,7 +289,7 @@ chmod 600 "$WORK/authelia-password"
 log "preparing host paths inside the node (what box init creates on real hosts)"
 docker exec "${CLUSTER}-control-plane" bash -c '
   mkdir -p /srv/s5n/data \
-           /srv/s5n/config/{qbittorrent,prowlarr,sonarr,sonarr-4k,radarr,radarr-4k,plex,tautulli,seerr}
+           /srv/s5n/config/{qbittorrent,prowlarr,sonarr,sonarr-4k,radarr,radarr-4k,plex,tautulli,seerr,qui,autobrr,maintainerr,pbh}
   chown -R 1000:1000 /srv/s5n'
 
 # The login's own directory, which box init creates on a real host: 0700, owned
@@ -259,7 +298,8 @@ docker exec "${CLUSTER}-control-plane" bash -c '
 # into the node -- hack/authelia-users writes the same file from the same
 # package, so the row the login verifies is the row box would have written.
 log "seeding the login's state directory in the node (0700, uid 65532)"
-go run ./hack/authelia-users --login "$LOGIN" --password-file "$WORK/authelia-password" --out "$WORK/users_database.yml"
+go run ./hack/authelia-users --login "$LOGIN" --password-file "$WORK/authelia-password" \
+  --login "$SECOND_LOGIN" --password-file "$WORK/second-password" --out "$WORK/users_database.yml"
 docker exec -i "${CLUSTER}-control-plane" bash -c '
   mkdir -p /var/lib/s5n/authelia
   cat >/var/lib/s5n/authelia/users_database.yml
@@ -310,18 +350,18 @@ bootstrap() { # bootstrap <output file>
   # No --chart-version: bootstrap takes the default-version path, so the e2e
   # exercises the newest-release selection against a real registry. The chart
   # is the one pushed above; box pulls it over loopback.
-  "$WORK/box" bootstrap --yes --chart-repo "$CHART_REPO" ${ACME_ARGS[@]+"${ACME_ARGS[@]}"} \
+  "$WORK/box" bootstrap --yes --chart-repo "$CHART_REPO" ${ACME_ARGS[@]+"${ACME_ARGS[@]}"} ${DNS_ARGS[@]+"${DNS_ARGS[@]}"} ${CA_ARGS[@]+"${CA_ARGS[@]}"} \
     --grant "$WORK/grant.yaml" --values "$WORK/values.yaml" \
     --namespace "$NS" --domain "$DOMAIN" \
     --data-path /srv/s5n/data --config-path /srv/s5n/config \
-    --apps qbittorrent,sonarr,radarr,prowlarr,plex,tautulli,seerr \
+    --apps qbittorrent,sonarr,radarr,prowlarr,plex,tautulli,seerr,qui,autobrr,maintainerr,pbh \
     --puid 1000 --pgid 1000 \
     --login "$LOGIN" --password-file "$WORK/authelia-password" \
     --paths-in-node --record "$WORK/cluster.yaml" \
     --kubeconfig "$WORK/kubeconfig" >"$1" 2>&1
 }
 
-init() { # init <output file>
+init() { # init <output file> [extra dev flags]
   # --paths-in-node: the paths are in the kind node's filesystem, not this
   # host's, so init neither reports nor creates them, and apply skips its stat
   # the same way. On a real host init creates them (hack/e2e-box.sh cannot:
@@ -329,14 +369,14 @@ init() { # init <output file>
   #
   # --chart-version pins the release to the package pushed above: init reads
   # one chart, and the apply it hands over to installs that same value.
-  "$WORK/box" init --yes --chart-repo "$CHART_REPO" --chart-version "$CHART_VERSION" \
+  "$WORK/box" init --yes --chart-repo "$CHART_REPO" --chart-version "$CHART_VERSION" ${DNS_ARGS[@]+"${DNS_ARGS[@]}"} ${CA_ARGS[@]+"${CA_ARGS[@]}"} \
     --grant "$WORK/grant.yaml" --values "$WORK/values.yaml" \
     --namespace "$NS" --domain "$DOMAIN" \
     --data-path /srv/s5n/data --config-path /srv/s5n/config \
-    --apps qbittorrent,sonarr,radarr,prowlarr,plex,tautulli,seerr \
+    --apps qbittorrent,sonarr,radarr,prowlarr,plex,tautulli,seerr,qui,autobrr,maintainerr,pbh \
     --puid 1000 --pgid 1000 \
     --login "$LOGIN" --password-file "$WORK/authelia-password" \
-    --paths-in-node \
+    --paths-in-node "${@:2}" \
     --kubeconfig "$WORK/kubeconfig" >"$1" 2>&1
 }
 
@@ -414,6 +454,16 @@ https_get() { # https_get <address> <path> <ca-file|-> [requests]
   printf '%s' "$code"
 }
 
+# same_cert is "these two PEM documents hold the same certificate", by
+# fingerprint: box re-encodes the anchor's certificate before it writes it, so
+# a byte comparison would be about whitespace as much as about the certificate.
+same_cert() { # same_cert <pem-a> <pem-b>
+  local a b
+  a=$(printf '%s' "$1" | openssl x509 -noout -fingerprint -sha256 2>/dev/null || true)
+  b=$(printf '%s' "$2" | openssl x509 -noout -fingerprint -sha256 2>/dev/null || true)
+  [ -n "$a" ] && [ "$a" = "$b" ]
+}
+
 # tls_serial prints the serial number of the certificate in a cert-manager
 # Secret. A renewal is a new serial; the Secret's UID alone only says it was
 # rewritten.
@@ -422,6 +472,202 @@ tls_serial() { # tls_serial <secret-name>
     base64 -d 2>/dev/null |
     openssl x509 -noout -serial 2>/dev/null |
     sed 's/^serial=//'
+}
+
+# ---- the apps that own their user table --------------------------------------
+# qui and autobrr hand out an API key only to a signed-in session, so the chart
+# generates a password in the release Secret and each app's init container
+# writes it into the app on every start; the wiring Job signs in with it. What
+# that account did is the receipt, but a receipt is the Job's own word, so these
+# read the apps back through their own APIs with the Secret's password -- which
+# is also the proof that a local account and the edge's OIDC provider coexist.
+
+# port_forward opens an API-server tunnel to one app pod and leaves it in
+# PF_PORT (and its process in PF_PID). This is the only way to ask these apps
+# anything directly: their ingress policy admits the Gateway and the wiring Job
+# alone, and the Job's image is distroless (no shell to drive a client with).
+# kubelet's own connection is not a pod's, so no policy applies to it -- and the
+# tunnel arrives on 127.0.0.1, which curl treats as a secure context, so qui's
+# Secure session cookie is replayed here exactly as the Job replays it.
+port_forward() { # port_forward <pod> <container-port>
+  local pod=$1 port=$2 i
+  PF_PORT=$(python3 -c 'import socket
+s = socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1]); s.close()')
+  $K -n "$NS" port-forward "pod/${pod}" "${PF_PORT}:${port}" >"$WORK/pf-${pod}.log" 2>&1 &
+  PF_PID=$!
+  for i in $(seq 1 30); do
+    if curl -sS -o /dev/null --max-time 2 "http://127.0.0.1:${PF_PORT}/" 2>/dev/null; then
+      return 0
+    fi
+    sleep 1
+  done
+  echo "port-forward to ${pod}:${port} never answered"
+  sed 's/^/    /' "$WORK/pf-${pod}.log" 2>/dev/null || true
+  return 1
+}
+
+port_forward_stop() {
+  kill "$PF_PID" 2>/dev/null || true
+  wait "$PF_PID" 2>/dev/null || true
+}
+
+# assert_torrent_port <step> [the port a re-run must still have]
+#
+# box picks the torrent port at init from the band the API server does not
+# assign by itself (Kubernetes' ServiceNodePortStaticSubrange: dynamic
+# allocation starts at the top of the range and only spills into this band once
+# that is full), records it in the grant, and the chart hands the same number to
+# the peers Service and to qBittorrent. A fixed port in the upper part of the
+# range -- the chart's own 31111 -- is one any Service asking for "any free
+# port" can win first, and then every apply of this seedbox fails on the peers
+# Service. So the four things asserted here are: the grant has a port in the
+# band, the Service forwards it, nothing else holds it, and the app announces it.
+assert_torrent_port() { # assert_torrent_port <step> [expected]
+  local step=$1 want=${2:-} port svc_port listen_port others password code
+  port=$(python3 - "$WORK/grant.yaml" <<'PY'
+import sys, yaml
+grant = yaml.safe_load(open(sys.argv[1])) or {}
+torrent = (grant.get("apps") or {}).get("qbittorrent", {}).get("torrent") or {}
+print(torrent.get("port", ""))
+PY
+  ) || true
+  echo "  ${step}: the grant's torrent port is ${port:-absent}"
+  case "$port" in
+    ''|*[!0-9]*) echo "the grant records no torrent port"; fail=1; return 0 ;;
+  esac
+  if [ "$port" -lt 30000 ] || [ "$port" -gt 30085 ]; then
+    echo "the torrent port ${port} is outside the band box picks from (30000-30085)"; fail=1
+  fi
+  if [ -n "$want" ] && [ "$port" != "$want" ]; then
+    echo "the torrent port moved from ${want} to ${port}"; fail=1
+  fi
+  TORRENT_PORT=$port
+  svc_port=$($K -n "$NS" get service qbittorrent-peers -o jsonpath='{.spec.ports[0].nodePort}' 2>/dev/null || true)
+  echo "  ${step}: the peers Service is on ${svc_port}"
+  [ "$svc_port" = "$port" ] ||
+    { echo "the peers Service is on ${svc_port}, the grant says ${port}"; fail=1; }
+  # Nothing else in the cluster holds it: that is what "free when box picked
+  # it" means, and the collision this whole decision exists for.
+  others=$($K get services --all-namespaces -o json | python3 -c '
+import json, sys
+port, ns, name = sys.argv[1], sys.argv[2], sys.argv[3]
+for svc in json.load(sys.stdin)["items"]:
+    meta = svc["metadata"]
+    if meta["namespace"] == ns and meta["name"] == name:
+        continue
+    if any(str(p.get("nodePort", "")) == port for p in svc["spec"].get("ports") or []):
+        print(meta["namespace"] + "/" + meta["name"])
+' "$port" "$NS" qbittorrent-peers || true)
+  [ -z "$others" ] ||
+    { echo "the torrent port ${port} is also held by ${others}"; fail=1; }
+  # And the app itself announces it. The chart hands the value to both sides,
+  # but only qBittorrent's own answer proves it took: its listen port is the
+  # number peers dial, and the Service is only pointing at it.
+  password=$($K -n "$NS" get secret s5n-keys -o jsonpath='{.data.qbittorrent-password}' 2>/dev/null | base64 -d || true)
+  if [ -z "$password" ]; then
+    echo "the release Secret holds no qBittorrent password"; fail=1; return 0
+  fi
+  port_forward qbittorrent-0 8080 || { fail=1; return 0; }
+  : >"$WORK/qbt-port.jar"
+  code=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 15 -c "$WORK/qbt-port.jar" \
+    --data-urlencode "username=admin" --data-urlencode "password=${password}" \
+    "http://127.0.0.1:${PF_PORT}/api/v2/auth/login" || true)
+  listen_port=""
+  # Any 2xx is a sign-in: qBittorrent 5 answers 204 with no body.
+  case "$code" in
+    2??)
+      listen_port=$(curl -sS --max-time 15 -b "$WORK/qbt-port.jar" \
+        "http://127.0.0.1:${PF_PORT}/api/v2/app/preferences" 2>/dev/null |
+        python3 -c 'import json,sys; print(json.load(sys.stdin).get("listen_port",""))' 2>/dev/null || true)
+      ;;
+    *)
+      echo "qBittorrent's API answered ${code:-nothing} to its own password"
+      ;;
+  esac
+  port_forward_stop
+  echo "  ${step}: qBittorrent listens on ${listen_port:-unknown}"
+  [ "$listen_port" = "$port" ] ||
+    { echo "qBittorrent listens on ${listen_port:-unknown}, the grant says ${port}"; fail=1; }
+}
+
+# qui_session signs in over the tunnel and leaves the code in QUI_LOGIN_CODE and
+# the raw cookie in QUI_COOKIE. The cookie is captured from Set-Cookie because
+# qui's is Secure: a jar would refuse it over this http:// socket.
+qui_session() { # qui_session <base-url>
+  local base=$1
+  : >"$WORK/qui-headers"
+  QUI_LOGIN_CODE=$(curl -sS -o "$WORK/qui-login.json" -D "$WORK/qui-headers" -w '%{http_code}' \
+    -X POST "http://127.0.0.1:${PF_PORT}${base}/api/auth/login" \
+    -H 'Content-Type: application/json' \
+    --data "{\"username\":\"${QUI_USER}\",\"password\":\"${QUI_PASSWORD}\"}" 2>/dev/null || true)
+  QUI_COOKIE=$(sed -n 's/^[Ss]et-[Cc]ookie: *\([^;]*\);.*/\1/p' "$WORK/qui-headers" | head -1 || true)
+  QUI_LOGIN_BODY=$(head -c 300 "$WORK/qui-login.json" 2>/dev/null || true)
+}
+
+# qui_change_password turns a fresh session into a password change, the way a
+# person would do it in qui's settings: the old password proves the session, the
+# new one is what the app stores until its pod restarts. qui routes this as a
+# PUT (internal/api/server.go:502), not a POST.
+qui_change_password() { # qui_change_password <base-url> <current> <new>
+  local base=$1 current=$2 next=$3
+  curl -sS -o "$WORK/qui-change.json" -w '%{http_code}' \
+    -X PUT "http://127.0.0.1:${PF_PORT}${base}/api/auth/change-password" \
+    -H "Cookie: ${QUI_COOKIE}" -H 'X-Requested-With: XMLHttpRequest' \
+    -H 'Content-Type: application/json' \
+    --data "{\"currentPassword\":\"${current}\",\"newPassword\":\"${next}\"}" 2>/dev/null || true
+}
+
+# autobrr_session signs in over the tunnel with a cookie jar (autobrr's cookie
+# is not Secure) and leaves the code in AUTOBRR_LOGIN_CODE.
+autobrr_session() { # autobrr_session <base-url> <jar>
+  local base=$1 jar=$2
+  AUTOBRR_LOGIN_CODE=$(curl -sS -c "$jar" -o /dev/null -w '%{http_code}' \
+    -X POST "http://127.0.0.1:${PF_PORT}${base}/api/auth/login" \
+    -H 'Content-Type: application/json' \
+    --data "{\"username\":\"${AUTOBRR_USER}\",\"password\":\"${AUTOBRR_PASSWORD}\"}" 2>/dev/null || true)
+}
+
+# rerun_wiring runs the release's wiring Job again without moving the release:
+# the hook Job's own spec, under a name of its own. A helm upgrade would do the
+# same thing but a failed hook leaves the release "failed", which is what the
+# changed-password case is about to make it -- and box refuses to touch a
+# release in that state, which would hide the rest of the run behind it.
+rerun_wiring() { # rerun_wiring <output file>
+  $K -n "$NS" delete job s5n-wiring-rerun --ignore-not-found >/dev/null 2>&1 || true
+  $K -n "$NS" get job s5n-wiring -o json |
+    python3 -c 'import json, sys
+job = json.loads(sys.stdin.read())
+meta = {"name": "s5n-wiring-rerun", "namespace": job["metadata"]["namespace"]}
+if job["metadata"].get("labels"):
+    meta["labels"] = job["metadata"]["labels"]
+out = {"apiVersion": "batch/v1", "kind": "Job", "metadata": meta, "spec": job["spec"]}
+# The selector belongs to the controller: a Job created without one has it
+# filled in, and a copied one would pin the pod template hash it came from.
+out["spec"].pop("selector", None)
+# The controller writes its own identity into the pod template labels, and a
+# Job refuses a template that carries another Job identity.
+for k in ("batch.kubernetes.io/controller-uid", "controller-uid",
+          "batch.kubernetes.io/job-name", "job-name"):
+    out["spec"]["template"]["metadata"]["labels"].pop(k, None)
+print(json.dumps(out))' 2>/dev/null >"$1.json" || true
+  if ! $K -n "$NS" apply -f "$1.json" >>"$1" 2>&1; then
+    echo "could not create the re-run Job:"; tail -5 "$1"
+    return 1
+  fi
+  # Complete *or* Failed: the changed-password case is deliberately a failing
+  # run, and `kubectl wait --for=condition=complete` would sit there for its
+  # whole timeout waiting for a condition that is never coming.
+  local i state
+  for i in $(seq 1 150); do
+    state=$($K -n "$NS" get job s5n-wiring-rerun \
+      -o jsonpath='{.status.conditions[?(@.type=="Complete")].status}{.status.conditions[?(@.type=="Failed")].status}' \
+      2>/dev/null || true)
+    case "$state" in
+      True* | *True) break ;;
+    esac
+    sleep 2
+  done
+  echo "s5n-wiring-rerun finished: ${state:-no condition}" >>"$1"
 }
 
 # ---- the ACME test server ----------------------------------------------------
@@ -517,23 +763,513 @@ EOF
 # themselves, so the smallest change that makes it point at the Gateway is a
 # CoreDNS hosts entry. Nothing in the chart or box depends on it: this is the
 # test's own DNS.
-patch_coredns() { # patch_coredns <host> <ip>
+patch_coredns() { # patch_coredns <gateway-address> <host>...
+  local addr=$1; shift
   $K -n kube-system get cm coredns -o jsonpath='{.data.Corefile}' >"$WORK/Corefile" || return 1
-  python3 - "$WORK/Corefile" "$1" "$2" <<'PYEOF' || return 1
+  python3 - "$WORK/Corefile" "$addr" "$@" <<'PYEOF' || return 1
 import sys
-path, host, ip = sys.argv[1:4]
+path, addr, hosts = sys.argv[1], sys.argv[2], sys.argv[3:]
 text = open(path).read()
-if host not in text:
-    block = "    hosts {\n        " + ip + " " + host + "\n        fallthrough\n    }\n"
-    marker = "    forward . /etc/resolv.conf"
-    if marker not in text:
-        raise SystemExit("the CoreDNS Corefile has no forward block to patch")
-    text = text.replace(marker, block + marker, 1)
-    open(path, "w").write(text)
+block = "    hosts {\n"
+for host in hosts:
+    if host in text:
+        continue
+    block += "        " + addr + " " + host + "\n"
+block += "        fallthrough\n    }\n"
+marker = "    forward . /etc/resolv.conf"
+if marker not in text:
+    raise SystemExit("the CoreDNS Corefile has no forward block to patch")
+text = text.replace(marker, block + marker, 1)
+open(path, "w").write(text)
 PYEOF
   $K -n kube-system create cm coredns --from-file=Corefile="$WORK/Corefile" --dry-run=client -o yaml | $K apply -f - >/dev/null
   $K -n kube-system rollout restart deploy/coredns >/dev/null
   $K -n kube-system rollout status deploy/coredns --timeout=120s >/dev/null
+}
+
+# ---- the OIDC provider ------------------------------------------------------
+# An app that signs in through the login dials the issuer itself, and the issuer
+# is the URL the browser used: https://<host>/auth. That name resolves nowhere
+# inside a cluster, and the certificate is the box's, so three things have to be
+# right at once -- the pod's alias for the name, the trust root it verifies with,
+# and a NetworkPolicy that lets it reach the proxy.
+#
+# What a client does when one of those is wrong differs, and it is worth knowing
+# which proof you have. qui refuses to start until it can read the discovery
+# document, so Ready is the three of them together. autobrr starts and retries
+# discovery for about four minutes in the background (50 attempts, five seconds
+# apart: internal/auth/oidc.go at v1.90.0), so its Ready says nothing about the
+# issuer -- the sign-in e2e does.
+#
+# The client secret is one Secret in this namespace, written once by root; the
+# login keeps only its digest. Both are asserted here against each other.
+assert_oidc() { # assert_oidc <domain> <app> <environment prefix>
+  local domain=$1 app=$2 prefix=$3
+  local secret_name proxy_ip alias_ip alias_host issuer client redirect ssl_dir disc
+  local grant_ip cm_digest stored_digest plaintext policy provider has_hmac anchor eg_port
+  # The app's own readiness is the alias, the trust root and the egress rule
+  # proved together -- for the client that will not start without them, and as
+  # a first sign that nothing is wrong for the one that starts anyway.
+  $K -n "$NS" wait --for=condition=Ready "pod/${app}-0" --timeout=300s ||
+    { echo "${app}-0 never became Ready"; fail=1; }
+  secret_name=$($K -n "$NS" get statefulset "$app" \
+    -o jsonpath='{.spec.template.spec.volumes[?(@.name=="oidc")].secret.secretName}' 2>/dev/null || true)
+  echo "  ${app} mounts client secret: ${secret_name:-nothing}"
+  [ "$secret_name" = "s5n-oidc-${app}" ] ||
+    { echo "${app} does not mount the client secret box wrote"; fail=1; }
+
+  proxy_ip=$($K -n envoy-gateway-system get service \
+    -l 'app.kubernetes.io/name=envoy,gateway.envoyproxy.io/owning-gateway-name=s5n,gateway.envoyproxy.io/owning-gateway-namespace=s5n-gateway' \
+    -o jsonpath='{.items[0].spec.clusterIP}' 2>/dev/null || true)
+  alias_ip=$($K -n "$NS" get statefulset "$app" -o jsonpath='{.spec.template.spec.hostAliases[0].ip}' 2>/dev/null || true)
+  alias_host=$($K -n "$NS" get statefulset "$app" -o jsonpath='{.spec.template.spec.hostAliases[0].hostnames[0]}' 2>/dev/null || true)
+  echo "  ${app} alias: ${alias_host} -> ${alias_ip} (proxy Service ${proxy_ip})"
+  [ -n "$proxy_ip" ] || { echo "the Gateway's proxy Service has no ClusterIP to alias"; fail=1; }
+  [ "$alias_ip" = "$proxy_ip" ] ||
+    { echo "${app} aliases ${alias_ip}, want the proxy Service's ${proxy_ip}"; fail=1; }
+  [ "$alias_host" = "$domain" ] ||
+    { echo "${app} aliases ${alias_host}, want the box's own name ${domain}"; fail=1; }
+
+  # box wrote the address into the grant at init: a user's apply renders it and
+  # never reads the Gateway's namespace.
+  grant_ip=$(sed -n 's/^ *gatewayIP: *//p' "$WORK/grant.yaml" | head -1 || true)
+  echo "  grant's gatewayIP: ${grant_ip:-absent}"
+  [ "$grant_ip" = "$proxy_ip" ] ||
+    { echo "the grant records ${grant_ip:-no address}, want the proxy Service's ${proxy_ip}"; fail=1; }
+
+  issuer=$($K -n "$NS" get statefulset "$app" -o jsonpath="{.spec.template.spec.containers[0].env[?(@.name==\"${prefix}__OIDC_ISSUER\")].value}" 2>/dev/null || true)
+  client=$($K -n "$NS" get statefulset "$app" -o jsonpath="{.spec.template.spec.containers[0].env[?(@.name==\"${prefix}__OIDC_CLIENT_ID\")].value}" 2>/dev/null || true)
+  redirect=$($K -n "$NS" get statefulset "$app" -o jsonpath="{.spec.template.spec.containers[0].env[?(@.name==\"${prefix}__OIDC_REDIRECT_URL\")].value}" 2>/dev/null || true)
+  ssl_dir=$($K -n "$NS" get statefulset "$app" -o jsonpath='{.spec.template.spec.containers[0].env[?(@.name=="SSL_CERT_DIR")].value}' 2>/dev/null || true)
+  echo "  ${app}: issuer ${issuer}, client ${client}, redirect ${redirect}, SSL_CERT_DIR ${ssl_dir}"
+  [ "$issuer" = "https://${domain}/auth" ] || { echo "${app}'s issuer is ${issuer}"; fail=1; }
+  [ "$client" = "${NS}-${app}" ] || { echo "${app}'s client id is ${client}"; fail=1; }
+  [ "$redirect" = "https://${domain}/${app}/api/auth/oidc/callback" ] ||
+    { echo "${app}'s redirect URI is ${redirect}: it must be the callback path it builds from its base URL"; fail=1; }
+  [ "$ssl_dir" = /etc/s5n-host-ca ] ||
+    { echo "SSL_CERT_DIR is ${ssl_dir}: the anchor is added to the bundle, never substituted for it"; fail=1; }
+
+  # The two halves agree: the client's digest in the login's configuration is the
+  # one box stored beside the signing material, and the plaintext is in this
+  # namespace. The digest is looked up by client id, because a box with two
+  # clients has two of them in the same file.
+  policy=$($K -n s5n-system get configmap s5n-authelia -o jsonpath='{.data.configuration\.yml}' 2>/dev/null || true)
+  cm_digest=$(printf '%s' "$policy" | python3 -c 'import sys, yaml
+conf = yaml.safe_load(sys.stdin.read()) or {}
+for c in conf.get("identity_providers", {}).get("oidc", {}).get("clients", []):
+    if c.get("client_id") == sys.argv[1]:
+        print(c.get("client_secret", ""))
+' "${NS}-${app}" || true)
+  stored_digest=$($K -n s5n-system get secret s5n-authelia -o jsonpath="{.data.oidc-client-${NS}-${app}}" 2>/dev/null | base64 -d || true)
+  plaintext=$($K -n "$NS" get secret "s5n-oidc-${app}" -o jsonpath='{.data.client-secret}' 2>/dev/null | base64 -d || true)
+  echo "  ${app} client secret: ${#plaintext} characters in ${NS}/s5n-oidc-${app}, digest ${cm_digest:0:24}..."
+  case "$cm_digest" in
+    '$pbkdf2-sha512$310000$'*) : ;;
+    *) echo "the login's client_secret for ${app} is not a pbkdf2-sha512 digest: ${cm_digest}"; fail=1 ;;
+  esac
+  [ "$cm_digest" = "$stored_digest" ] ||
+    { echo "the configuration's digest and the one stored in the login's Secret differ for ${app}"; fail=1; }
+  [ "${#plaintext}" -ge 40 ] ||
+    { echo "the client secret in ${NS} is ${#plaintext} characters, want the generated 48"; fail=1; }
+
+  # The signing material is a file in the same Secret, and the configuration
+  # does not carry it.
+  provider=$($K -n s5n-system get secret s5n-authelia -o jsonpath='{.data.oidc\.yml}' 2>/dev/null | base64 -d || true)
+  has_hmac=$(printf '%s' "$provider" | grep -c "hmac_secret:" || true)
+  echo "  provider file: ${#provider} bytes, hmac_secret lines ${has_hmac}"
+  [ "$has_hmac" = 1 ] || { echo "the login's Secret carries no oidc.yml with an hmac_secret"; fail=1; }
+  case "$provider" in
+    *"BEGIN RSA PRIVATE KEY"*) : ;;
+    *) echo "the login's Secret carries no RSA signing key"; fail=1 ;;
+  esac
+
+  # The policy is this seedbox's: the client points at it, and it admits only
+  # this box's account.
+  printf '%s' "$policy" | grep -q "authorization_policy: '${NS}'" ||
+    { echo "${app}'s client does not name this box's authorization policy"; fail=1; }
+  printf '%s' "$policy" | grep -q "user:${LOGIN}" ||
+    { echo "the policy admits no ${LOGIN}: the rule and the login's account disagree"; fail=1; }
+
+  # The trust anchor, when the box's certificate is not publicly trusted: box
+  # copied the root into this namespace, and the pod mounts it.
+  anchor=$($K -n "$NS" get configmap s5n-host-ca -o jsonpath='{.data.ca\.crt}' 2>/dev/null || true)
+  if [ -n "$anchor" ]; then
+    printf '%s' "$anchor" | grep -q "BEGIN CERTIFICATE" ||
+      { echo "the anchor ConfigMap carries no certificate"; fail=1; }
+    printf '%s' "$anchor" | grep -q "PRIVATE KEY" &&
+      { echo "the anchor ConfigMap carries a private key"; fail=1; }
+    echo "  anchor: $(printf '%s' "$anchor" | grep -c 'BEGIN CERTIFICATE') certificate(s) in ${NS}/s5n-host-ca"
+  else
+    echo "  anchor: none, and the box's certificate is publicly trusted"
+  fi
+
+  # And the receipt: discovery, from inside the app's own pod, over the box's
+  # own name, trusted by exactly what that pod was given.
+  #
+  # curl here is OpenSSL, and OpenSSL's directory lookup only finds certificates
+  # under their subject-hash names (<hash>.0) -- not ca.crt. So SSL_CERT_DIR,
+  # which the pod inherits and which is exactly right for a Go client (it reads
+  # every file in it), trusts nothing in curl: point it at the file instead. A
+  # Let's Encrypt box has no anchor and curl's system bundle is what trusts the
+  # issuer.
+  local ca_args=()
+  if [ -n "$anchor" ]; then
+    ca_args=(--cacert /etc/s5n-host-ca/ca.crt)
+  fi
+  disc=$($K -n "$NS" exec "${app}-0" -- curl -sS --max-time 15 "${ca_args[@]}" \
+    "https://${domain}/auth/.well-known/openid-configuration" 2>"$WORK/oidc-discovery.err" || true)
+  if [ -z "$disc" ]; then
+    echo "${app}'s pod got no discovery document from https://${domain}/auth: the alias, the anchor or the egress rule is wrong"
+    sed 's/^/    curl: /' "$WORK/oidc-discovery.err" 2>/dev/null || true
+    fail=1
+  else
+    printf '%s' "$disc" >"$WORK/oidc-discovery.json"
+    if python3 -c 'import json, sys
+domain, path = sys.argv[1], sys.argv[2]
+d = json.load(open(path))
+want = "https://%s/auth" % domain
+if d.get("issuer") != want:
+    print("  discovery issuer is %r, want %r" % (d.get("issuer"), want)); sys.exit(1)
+for key in ("authorization_endpoint", "token_endpoint", "jwks_uri", "userinfo_endpoint"):
+    if not d.get(key, "").startswith(want + "/"):
+        print("  %s is %r, want a URL under %r" % (key, d.get(key), want)); sys.exit(1)
+print("  discovery: issuer %s, token %s, jwks %s" % (d["issuer"], d["token_endpoint"], d["jwks_uri"]))' "$domain" "$WORK/oidc-discovery.json"; then
+      :
+    else
+      echo "the discovery document is not the one this box's issuer advertises"
+      fail=1
+    fi
+  fi
+
+  # The egress rule that lets it: the proxy's pods, on the container port Envoy
+  # listens on. 443 here would be a rule that admits nothing (NetworkPolicy is
+  # evaluated after the Service's DNAT).
+  eg_port=$($K -n "$NS" get networkpolicy "${app}-oidc-egress" -o jsonpath='{.spec.egress[0].ports[0].port}' 2>/dev/null || true)
+  echo "  ${app}-oidc-egress port: ${eg_port:-missing}"
+  [ "$eg_port" = 10443 ] || { echo "the ${app} OIDC egress rule names ${eg_port:-no port}, want 10443"; fail=1; }
+}
+
+# ---- an app's own sign-in: the OIDC round trip, without a browser ----------
+# An app the catalog marks `oidc: true` is a client of the login's own
+# provider, and the round trip belongs to the app: it hands the browser an
+# authorization URL and takes the code back on a callback of its own. The
+# app's own OIDC routes are behind the edge's login like every other path on
+# the host, so a person's visit is two sign-ins that look like one -- the
+# portal first, then the app's silent round trip.
+#
+# This is that visit, with a cookie jar:
+#
+#   1. the app's page without a cookie: the edge redirects to the portal;
+#   2. the portal's first factor, with the target the edge passed;
+#   3. the app's own start, GET <base>/api/auth/oidc/config, whose JSON carries
+#      the authorization URL and which sets the app's state in its session;
+#   4. Authelia's authorization endpoint, and the code it answers with;
+#   5. the callback, which exchanges the code and sets the app's session;
+#   6. an endpoint only that session opens -- and the same endpoint refused
+#      without it, so a 200 cannot come from the edge's login alone.
+#
+# Authelia is asked twice, because the flow has two arms and a browser meets
+# both. With the portal's cookie, the authorization endpoint answers at once:
+# the client's consent is implicit, so no consent page appears, and the code
+# comes back in the redirect that follows. With that one cookie gone -- a
+# browser whose portal session expired while the app page was open -- it
+# answers 303 to its own portal carrying flow=openid_connect&flow_id=<id>, and
+# the first factor is asked with that flow id (internal/handlers/types.go:111,
+# Flow/FlowID; response.go:155-313 is what answers with the URL that resumes
+# the flow). Neither arm is a reachability check.
+#
+# OIDC_JAR is the signed-in jar, for a caller that wants one more thing from
+# the app without signing in again.
+
+# portal_login: one password login at the portal, the way the browser's form
+# does it. <jar> <login> <password> <target url> <address> <ca-file|->; sets
+# PORTAL_CODE and PORTAL_BODY.
+portal_login() {
+  local jar=$1 login=$2 password=$3 target=$4 addr=$5 ca=$6
+  local ca_args=(--cacert "$ca") body
+  [ "$ca" = - ] && ca_args=(-k)
+  body=$(python3 -c 'import json, sys
+print(json.dumps({"username": sys.argv[1], "password": sys.argv[2], "targetURL": sys.argv[3]}))' \
+    "$login" "$password" "$target")
+  PORTAL_CODE=$(curl -sS -o "$WORK/portal-login.json" -w '%{http_code}' \
+    -b "$jar" -c "$jar" -X POST "https://${DOMAIN}/auth/api/firstfactor" \
+    --resolve "${DOMAIN}:443:${addr}" "${ca_args[@]}" \
+    -H 'Content-Type: application/json' --data "$body" 2>"$WORK/portal-login.err" || true)
+  PORTAL_BODY=$(cat "$WORK/portal-login.json" 2>/dev/null || true)
+}
+
+# json_field: one top-level field of a JSON document in a file, or "" -- a body
+# that is not JSON (an HTML error page) answers "" rather than failing the run
+# twice, and an empty value is an assertion the caller makes.
+json_field() { # json_field <file> <dotted.path>
+  python3 -c 'import json, sys
+try:
+    doc = json.load(open(sys.argv[1], encoding="utf-8"))
+    for part in sys.argv[2].split("."):
+        doc = doc[part]
+    print(doc if isinstance(doc, str) else "")
+except Exception:
+    print("")' "$1" "$2" 2>/dev/null || true
+}
+
+# oidc_login <app> <base path> <api path> <address> <ca-file|->
+#
+# The app's whole sign-in as one function, so a second client is one call: the
+# paths differ by the app's base and the endpoint it protects, and nothing else
+# does. It asserts as it goes; fail=1 is the e2e's.
+oidc_login() {
+  local app=$1 base=$2 api=$3 addr=$4 ca=$5
+  local ca_args=(--cacert "$ca")
+  [ "$ca" = - ] && ca_args=(-k)
+  local jar="$WORK/oidc-${app}-jar.txt"
+  local expired="$WORK/oidc-${app}-expired.txt"
+  local edge="$WORK/oidc-${app}-edge.txt"
+  local hdrs="$WORK/oidc-${app}-headers.txt"
+  local url="https://${DOMAIN}${base}"
+  local code location rd auth_url flow_id redirect callback body
+  OIDC_JAR=$jar
+  rm -f "$jar" "$expired" "$edge"
+
+  # 1. The app's page, no cookie: the edge sends the browser to the portal, and
+  #    the portal carries where to come back to.
+  : >"$hdrs"
+  code=$(curl -sS -o /dev/null -D "$hdrs" -w '%{http_code}' \
+    --resolve "${DOMAIN}:443:${addr}" "${ca_args[@]}" "$url/" 2>"$WORK/oidc.err" || true)
+  location=$(sed -n 's/^[Ll]ocation: *//p' "$hdrs" | tr -d '\r' | head -1)
+  echo "  ${app}: GET ${url}/ without a cookie: ${code} -> ${location}"
+  [ "$code" = 302 ] || { echo "the unauthenticated ${base}/ answered ${code}, not the portal's redirect"; fail=1; }
+  case "$location" in
+    "https://${DOMAIN}/auth/"*) : ;;
+    *) echo "the redirect does not point at the portal: ${location}"; fail=1 ;;
+  esac
+  rd=$(printf '%s' "$location" | python3 -c 'import sys, urllib.parse as u
+print(u.parse_qs(u.urlparse(sys.stdin.read()).query).get("rd", [""])[0])' || true)
+  # A portal redirect always carries rd; the app's own page is where init's
+  # target would be if one ever did not.
+  [ -n "$rd" ] || rd="https://${DOMAIN}${base}/"
+
+  # 2. The portal, with the password the run generated.
+  portal_login "$jar" "$LOGIN" "$AUTHELIA_PASSWORD" "$rd" "$addr" "$ca"
+  echo "  ${app}: POST /auth/api/firstfactor: ${PORTAL_CODE}"
+  [ "$PORTAL_CODE" = 200 ] || { echo "the portal refused the box's own account (${PORTAL_CODE})"; fail=1; }
+
+  # 3. The app's own start. Its state lives in the app's session, so the same
+  #    jar has to make the callback.
+  code=$(curl -sS -o "$WORK/oidc-${app}-config.json" -w '%{http_code}' \
+    -b "$jar" -c "$jar" --resolve "${DOMAIN}:443:${addr}" "${ca_args[@]}" \
+    "$url/api/auth/oidc/config" 2>"$WORK/oidc.err" || true)
+  body=$(cat "$WORK/oidc-${app}-config.json" 2>/dev/null || true)
+  auth_url=$(json_field "$WORK/oidc-${app}-config.json" authorizationUrl)
+  echo "  ${app}: GET ${base}/api/auth/oidc/config: ${code}, authorization URL ${auth_url%%\?*}"
+  [ "$code" = 200 ] || { echo "the app's OIDC start answered ${code}"; fail=1; }
+  case "$auth_url" in
+    "https://${DOMAIN}/auth/"*) : ;;
+    *) echo "the authorization URL is not this box's issuer: ${auth_url}"; fail=1 ;;
+  esac
+
+  # 4a. Signed in at the edge already: the authorization endpoint answers with
+  #     the callback and a code, and nothing in between. A consent page here
+  #     would be a page a person has to click, and the client's consent is
+  #     implicit.
+  : >"$hdrs"
+  code=$(curl -sS -o /dev/null -D "$hdrs" -w '%{http_code}' \
+    -b "$jar" -c "$jar" --resolve "${DOMAIN}:443:${addr}" "${ca_args[@]}" \
+    "$auth_url" 2>"$WORK/oidc.err" || true)
+  location=$(sed -n 's/^[Ll]ocation: *//p' "$hdrs" | tr -d '\r' | head -1)
+  echo "  ${app}: the authorization endpoint, signed in: ${code} -> ${location%%\?*}"
+  case "$code" in
+    302 | 303) : ;;
+    *) echo "the authorization endpoint answered ${code} to a signed-in request"; fail=1 ;;
+  esac
+  case "$location" in
+    "https://${DOMAIN}${base}/api/auth/oidc/callback?"*) : ;;
+    *) echo "the authorization endpoint sent the browser to ${location}, not the app's callback"; fail=1 ;;
+  esac
+  case "$location" in
+    *"code="*) : ;;
+    *) echo "the redirect to the callback carries no code"; fail=1 ;;
+  esac
+
+  # 4b. The other arm: the same authorization request from a browser whose
+  #     portal session is gone. The app's session (its state) stays; only the
+  #     login's cookie is dropped.
+  cp "$jar" "$expired"
+  python3 - "$expired" <<'PY'
+import sys
+path = sys.argv[1]
+lines = [l for l in open(path, encoding="utf-8") if "authelia_session" not in l]
+open(path, "w", encoding="utf-8").writelines(lines)
+PY
+  : >"$hdrs"
+  code=$(curl -sS -o /dev/null -D "$hdrs" -w '%{http_code}' \
+    -b "$expired" -c "$expired" --resolve "${DOMAIN}:443:${addr}" "${ca_args[@]}" \
+    "$auth_url" 2>"$WORK/oidc.err" || true)
+  location=$(sed -n 's/^[Ll]ocation: *//p' "$hdrs" | tr -d '\r' | head -1)
+  echo "  ${app}: the authorization endpoint without the portal's cookie: ${code} -> ${location}"
+  [ "$code" = 303 ] ||
+    { echo "an unauthenticated authorization request answered ${code}, want the portal's 303"; fail=1; }
+  case "$location" in
+    *"flow=openid_connect"*) : ;;
+    *) echo "the portal's redirect carries no openid_connect flow: ${location}"; fail=1 ;;
+  esac
+  flow_id=$(printf '%s' "$location" | python3 -c 'import sys, urllib.parse as u
+print(u.parse_qs(u.urlparse(sys.stdin.read()).query).get("flow_id", [""])[0])' || true)
+  echo "  ${app}: portal flow id ${flow_id:-absent}"
+  [ -n "$flow_id" ] || fail=1
+
+  # The portal's first factor for that flow: the flow id is what makes the
+  # answer a URL that resumes the OIDC request instead of the app's page.
+  body=$(python3 -c 'import json, sys
+print(json.dumps({"username": sys.argv[1], "password": sys.argv[2],
+                  "flow": "openid_connect", "flowID": sys.argv[3]}))' \
+    "$LOGIN" "$AUTHELIA_PASSWORD" "$flow_id")
+  code=$(curl -sS -o "$WORK/oidc-${app}-flow.json" -w '%{http_code}' \
+    -b "$expired" -c "$expired" -X POST "https://${DOMAIN}/auth/api/firstfactor" \
+    --resolve "${DOMAIN}:443:${addr}" "${ca_args[@]}" \
+    -H 'Content-Type: application/json' --data "$body" 2>"$WORK/oidc.err" || true)
+  redirect=$(json_field "$WORK/oidc-${app}-flow.json" data.redirect)
+  echo "  ${app}: POST /auth/api/firstfactor with the flow id: ${code}, next ${redirect%%\?*}"
+  [ "$code" = 200 ] || { echo "the portal refused the flow's first factor (${code})"; fail=1; }
+  [ -n "$redirect" ] ||
+    { echo "the portal's first factor answered with no next step: $(head -c 200 "$WORK/oidc-${app}-flow.json" 2>/dev/null)"; fail=1; }
+  case "$redirect" in
+    "https://${DOMAIN}/auth/api/oidc/authorization?"*) : ;;
+    *) echo "the flow's next step is ${redirect}, not the authorization endpoint"; fail=1 ;;
+  esac
+  # A consent step would be the page implicit consent exists to remove.
+  case "$redirect" in
+    *"/oidc/consent"*) echo "the flow asked for consent: ${redirect}"; fail=1 ;;
+  esac
+
+  # 5. Resume the flow: the authorization endpoint issues the code, the app's
+  #    callback redeems it at the token endpoint and opens a session.
+  : >"$hdrs"
+  code=$(curl -sS -o /dev/null -D "$hdrs" -w '%{http_code}' \
+    -b "$expired" -c "$expired" --resolve "${DOMAIN}:443:${addr}" "${ca_args[@]}" \
+    "$redirect" 2>"$WORK/oidc.err" || true)
+  callback=$(sed -n 's/^[Ll]ocation: *//p' "$hdrs" | tr -d '\r' | head -1)
+  echo "  ${app}: the authorization endpoint, resumed: ${code} -> ${callback%%\?*}"
+  case "$code" in
+    302 | 303) : ;;
+    *) echo "resuming the flow answered ${code}"; fail=1 ;;
+  esac
+  case "$callback" in
+    "https://${DOMAIN}${base}/api/auth/oidc/callback?"*) : ;;
+    *) echo "the resumed flow sent the browser to ${callback}, not the app's callback"; fail=1 ;;
+  esac
+  : >"$hdrs"
+  code=$(curl -sS -o /dev/null -D "$hdrs" -w '%{http_code}' \
+    -b "$expired" -c "$expired" --resolve "${DOMAIN}:443:${addr}" "${ca_args[@]}" \
+    "$callback" 2>"$WORK/oidc.err" || true)
+  location=$(sed -n 's/^[Ll]ocation: *//p' "$hdrs" | tr -d '\r' | head -1)
+  echo "  ${app}: GET the callback: ${code} -> ${location}"
+  [ "$code" = 302 ] ||
+    { echo "the callback answered ${code}: the code exchange did not complete"; fail=1; }
+  # Where the app sends the browser after a successful exchange differs: qui
+  # builds it from its redirect URL and answers an absolute one, autobrr
+  # redirects to its own baseUrl, which is a path. Both are inside the app.
+  case "$location" in
+    "https://${DOMAIN}${base}"* | "${base}"*) : ;;
+    *) echo "the callback sent the browser to ${location}, not back into the app"; fail=1 ;;
+  esac
+
+  # 6. An endpoint only the app's own session opens. It answers with the
+  #    account the provider issued the token for, and with the method that
+  #    proves the session came from OIDC and not from a password row.
+  code=$(curl -sS -o "$WORK/oidc-${app}-me.json" -w '%{http_code}' \
+    -b "$expired" --resolve "${DOMAIN}:443:${addr}" "${ca_args[@]}" \
+    "https://${DOMAIN}${api}" 2>"$WORK/oidc.err" || true)
+  body=$(cat "$WORK/oidc-${app}-me.json" 2>/dev/null || true)
+  echo "  ${app}: GET ${api} with the session: ${code} ${body}"
+  [ "$code" = 200 ] || { echo "${api} answered ${code} for a signed-in user"; fail=1; }
+  if ! printf '%s' "$body" | python3 -c 'import json, sys
+d = json.load(sys.stdin)
+want = sys.argv[1]
+bad = [f for f in ("username", "auth_method") if d.get(f) != {"username": want, "auth_method": "oidc"}[f]]
+if bad:
+    print("  the session says %s" % {f: d.get(f) for f in ("username", "auth_method")})
+    sys.exit(1)' "$LOGIN"; then
+    echo "${api} does not identify ${LOGIN} as an OIDC session"
+    fail=1
+  fi
+
+  # And without that session: the edge's login alone is not the app's. This is
+  # the assertion that keeps the 200 above from passing on the portal's cookie.
+  portal_login "$edge" "$LOGIN" "$AUTHELIA_PASSWORD" "https://${DOMAIN}/" "$addr" "$ca"
+  code=$(curl -sS -o /dev/null -w '%{http_code}' -b "$edge" \
+    --resolve "${DOMAIN}:443:${addr}" "${ca_args[@]}" "https://${DOMAIN}${api}" \
+    2>"$WORK/oidc.err" || true)
+  echo "  ${app}: GET ${api} with the portal's cookie and no app session: ${code}"
+  case "$code" in
+    401 | 403) : ;;
+    *) echo "${api} answered ${code} without the app's own session, want 401 or 403"; fail=1 ;;
+  esac
+  # No cookie at all is the edge's redirect, which is a different refusal: the
+  # app is never reached.
+  : >"$hdrs"
+  code=$(curl -sS -o /dev/null -D "$hdrs" -w '%{http_code}' \
+    --resolve "${DOMAIN}:443:${addr}" "${ca_args[@]}" "https://${DOMAIN}${api}" \
+    2>"$WORK/oidc.err" || true)
+  location=$(sed -n 's/^[Ll]ocation: *//p' "$hdrs" | tr -d '\r' | head -1)
+  echo "  ${app}: GET ${api} with no cookie: ${code} -> ${location%%\?*}"
+  [ "$code" = 302 ] ||
+    { echo "${api} answered ${code} with no cookie: the edge's login did not stand in front of it"; fail=1; }
+}
+
+# oidc_refuses_another_login <app> <base> <address> <ca-file|->
+#
+# The client's own authorization policy, which is per seedbox: it admits
+# user:<login> and denies everything else. A second account signs in at the
+# portal -- /auth is the bypass, so anyone in the users database gets that far
+# -- and the authorization endpoint refuses it, before any code exists.
+#
+# The authorization URL is taken with the box's own account because the app's
+# OIDC start sits behind the edge's login: a second account cannot read it, and
+# what it can reach is the portal and the authorization endpoint, which is
+# where the refusal is.
+oidc_refuses_another_login() {
+  local app=$1 base=$2 addr=$3 ca=$4
+  local ca_args=(--cacert "$ca")
+  [ "$ca" = - ] && ca_args=(-k)
+  local jar="$WORK/oidc-${app}-other.txt"
+  local hdrs="$WORK/oidc-${app}-other-headers.txt"
+  local code auth_url location
+  rm -f "$jar"
+  auth_url=$(json_field "$WORK/oidc-${app}-config.json" authorizationUrl)
+  [ -n "$auth_url" ] || { echo "no authorization URL to test the policy with"; fail=1; return 0; }
+  portal_login "$jar" "$SECOND_LOGIN" "$SECOND_PASSWORD" "https://${DOMAIN}/" "$addr" "$ca"
+  echo "  ${app}: ${SECOND_LOGIN} signs in at the portal: ${PORTAL_CODE}"
+  [ "$PORTAL_CODE" = 200 ] ||
+    { echo "the portal refused ${SECOND_LOGIN}'s first factor (${PORTAL_CODE}), so the client's policy was never asked"; fail=1; }
+  code=$(curl -sS -o "$WORK/oidc-${app}-other.json" -D "$hdrs" -w '%{http_code}' \
+    -b "$jar" -c "$jar" --resolve "${DOMAIN}:443:${addr}" "${ca_args[@]}" \
+    "$auth_url" 2>"$WORK/oidc.err" || true)
+  location=$(sed -n 's/^[Ll]ocation: *//p' "$hdrs" | tr -d '\r' | head -1)
+  detail=$(printf '%s' "$location" | python3 -c 'import sys, urllib.parse as u
+q = u.parse_qs(u.urlparse(sys.stdin.read()).query)
+print(q.get("error", [""])[0], "-", q.get("error_description", [""])[0])' || true)
+  echo "  ${app}: ${SECOND_LOGIN} at the authorization endpoint: ${code} (${detail:-no error parameter})"
+  # Refused the OAuth way: the client's callback carries the error, because a
+  # valid redirect URI is where an authorization error belongs. A bare status is
+  # the other shape (a request Authelia will not answer), and either is a
+  # refusal as long as no code exists.
+  case "$code" in
+    302 | 303)
+      case "$location" in
+        "https://${DOMAIN}${base}/api/auth/oidc/callback?"*) : ;;
+        *) echo "${SECOND_LOGIN} was redirected to ${location}, not the app's callback"; fail=1 ;;
+      esac
+      case "$location" in
+        *"error=access_denied"*) : ;;
+        *) echo "${SECOND_LOGIN} was not refused by the client's policy: ${location}"; fail=1 ;;
+      esac
+      ;;
+    400 | 401 | 403) : ;;
+    *) echo "${SECOND_LOGIN} got ${code} from the authorization endpoint, want a refusal"; fail=1 ;;
+  esac
+  case "$location" in
+    *"code="*) echo "${SECOND_LOGIN} was issued a code: the client's policy admits another login"; fail=1 ;;
+  esac
 }
 
 # ---- scenario: fresh --------------------------------------------------------
@@ -552,7 +1288,16 @@ fresh() {
   # certificate inside this run, so both have to answer before it starts.
   install_pebble
   [ "$fail" = 0 ] || return 0
-  patch_coredns "$DOMAIN" "$node_ip" || { echo "could not patch CoreDNS for ${DOMAIN}"; fail=1; return 0; }
+  # Pebble's root is this scenario's anchor: an ACME-issued certificate has no
+  # ca.crt in its Secret, so box is given the root the login's own certificate
+  # chains to. On a real Let's Encrypt box there is nothing to give: the image's
+  # bundle covers it.
+  CA_ARGS=(--ca-file "$WORK/pebble-root.pem")
+  # Every name the box serves: its own and each app's own host. init resolves
+  # them and refuses an app name that does not answer where the domain does, so
+  # the app hosts have to be here before bootstrap or it stops on purpose.
+  patch_coredns "$node_ip" "$DOMAIN" "$PLEX_HOST" "$SEERR_HOST" "$PBH_HOST" ||
+    { echo "could not patch CoreDNS for the box's names"; fail=1; return 0; }
   ACME_ARGS=(--acme-server "https://pebble.pebble.svc:14000/dir")
 
   log "box bootstrap: the platform layer, then root's first install"
@@ -625,6 +1370,9 @@ fresh() {
     { echo "box did not pull ${CHART_REPO}:${CHART_VERSION}"; fail=1; }
   grep -q "first install" "$WORK/bootstrap1.txt" || { echo "no 'first install' line"; fail=1; }
   grep -q "^wiring ok" "$WORK/bootstrap1.txt" || { echo "box did not report a healthy receipt"; fail=1; }
+  # The peer port box picked for this cluster, and the three places it has to
+  # agree: the grant, the Service and the app's own preference.
+  assert_torrent_port "first install"
   # The data path was empty before this run: these steps are the wiring Job
   # making both trees itself, before the Arr root-folder steps that need them.
   for d in downloads/tv media/tv downloads/movies media/movies; do
@@ -638,6 +1386,26 @@ fresh() {
     got=$(docker exec "${CLUSTER}-control-plane" stat -c '%u:%g' "$d" 2>/dev/null || echo missing)
     echo "  ${d}: owner ${got}"
     [ "$got" = 1000:1000 ] || { echo "${d} is not owned by the release's uid:gid"; fail=1; }
+  done
+  # qui and autobrr keep their own user table, so the wiring Job signs in with
+  # the account the chart created and registers their connections: qui's one
+  # instance pointed at qBittorrent, and autobrr's qBittorrent client plus one
+  # per Arr instance. A fresh install creates every one of them; the receipt is
+  # read back through the apps themselves later in this scenario.
+  # PeerBanHelper holds one downloader, and the receipt says so only after PBH's
+  # own status reported it HEALTHY: that is the app's proof it logged in to
+  # qBittorrent with the password the Job wrote.
+  for step in qui/ready qui/login qui/instance autobrr/ready autobrr/login \
+              autobrr/downloader/qbittorrent autobrr/downloader/sonarr autobrr/downloader/radarr \
+              pbh/ready pbh/downloader; do
+    res=$(status_field "[s['result'] for s in d['steps'] if s['name']=='$step'][0]" 2>/dev/null || echo missing)
+    detail=$(status_field "[s['detail'] for s in d['steps'] if s['name']=='$step'][0]" 2>/dev/null || echo missing)
+    echo "  ${step}: ${res} ${detail}"
+    [ "$res" = ok ] || { echo "${step} is ${res}: the Job did not register this connection"; fail=1; }
+    case "$step" in
+      qui/ready | autobrr/ready | qui/login | autobrr/login | pbh/ready) ;;
+      *) [ "$detail" = created ] || { echo "${step} was ${res} ${detail}, want created on a fresh install"; fail=1; } ;;
+    esac
   done
   # The namespace was box's first write, and the plan said so: the cluster had
   # none of it before this run.
@@ -835,6 +1603,44 @@ print("  app routes: %d HTTPRoutes, none pins a sectionName" % len(items))
     *) echo "the redirect carries no rd=, so the portal cannot send the browser back"; fail=1 ;;
   esac
 
+  # Every opt-in app is behind the same login, and none of them keeps one of its
+  # own: an unauthenticated request must reach the edge before the app does.
+  for app in qui autobrr maintainerr; do
+    app_headers="$WORK/unauth-${app}-headers.txt"
+    app_code=$(curl -sS -o /dev/null -D "$app_headers" -w '%{http_code}' \
+      --resolve "${DOMAIN}:443:${gw_addr}" --cacert "$WORK/pebble-root.pem" \
+      "https://${DOMAIN}/${app}/" 2>/dev/null || true)
+    app_location=$(grep -i '^location:' "$app_headers" | tr -d '\r' | sed 's/^[Ll]ocation: *//' || true)
+    echo "  GET https://${DOMAIN}/${app}/ without a cookie: ${app_code} -> ${app_location}"
+    [ "$app_code" = 302 ] ||
+      { echo "an unauthenticated /${app}/ answered ${app_code}, not a redirect to the login"; fail=1; }
+    case "$app_location" in
+      "https://${DOMAIN}/auth/"*) ;;
+      *) echo "the /${app}/ redirect does not point at the portal: ${app_location}"; fail=1 ;;
+    esac
+  done
+
+  # qBittorrent has no bypass at the edge, and its API is no exception: unlike
+  # an Arr's /api, the whole app -- API included -- is behind the login. That is
+  # the property its own bypass rests on, because what reaches the WebUI
+  # unauthenticated is then only Envoy forwarding an admitted request or a pod
+  # the release's NetworkPolicy lets in.
+  for path in /qbittorrent/ /qbittorrent/api/v2/app/version; do
+    qb_headers="$WORK/unauth-qbittorrent-headers.txt"
+    : >"$qb_headers"
+    qb_code=$(curl -sS -o /dev/null -D "$qb_headers" -w '%{http_code}' \
+      --resolve "${DOMAIN}:443:${gw_addr}" --cacert "$WORK/pebble-root.pem" \
+      "https://${DOMAIN}${path}" 2>/dev/null || true)
+    qb_location=$(sed -n 's/^[Ll]ocation: *//p' "$qb_headers" | tr -d '\r' | head -1 || true)
+    echo "  GET https://${DOMAIN}${path} without a cookie: ${qb_code} -> ${qb_location}"
+    [ "$qb_code" = 302 ] ||
+      { echo "an unauthenticated ${path} answered ${qb_code}: qBittorrent is reachable through the edge without a login"; fail=1; }
+    case "$qb_location" in
+      "https://${DOMAIN}/auth/"*) ;;
+      *) echo "the ${path} redirect does not point at the portal: ${qb_location}"; fail=1 ;;
+    esac
+  done
+
   # Port 80: this host's own listener carries no login (the Allow box writes
   # with it), so an app URL gets the 301 to HTTPS -- the behaviour a browser,
   # a bookmark and a renewal need -- and never Sonarr's UI.
@@ -959,6 +1765,179 @@ print("  app routes: %d HTTPRoutes, none pins a sectionName" % len(items))
     { echo "the API without a key answered ${api_code}: it must be Sonarr's own 401, not the login's redirect (the API bypass is missing)"; fail=1; }
   [ "$ping_code" = 200 ] || { echo "/sonarr/ping answered ${ping_code}: the ping bypass is missing"; fail=1; }
 
+  # And with the session, qBittorrent's API answers with no qBittorrent login at
+  # all: the only credential this request carried is the edge's. That is the
+  # whole decision -- one login, and the app behind it needs none of its own.
+  qb_version=$(curl -sS -o "$WORK/qbittorrent-version.txt" -w '%{http_code}' \
+    -b "$JAR" --resolve "${DOMAIN}:443:${gw_addr}" --cacert "$WORK/pebble-root.pem" \
+    "https://${DOMAIN}/qbittorrent/api/v2/app/version" 2>/dev/null || true)
+  echo "  with the session: /qbittorrent/api/v2/app/version ${qb_version} ($(cat "$WORK/qbittorrent-version.txt" 2>/dev/null || true))"
+  [ "$qb_version" = 200 ] ||
+    { echo "qBittorrent's API answered ${qb_version} through the edge with a session: it is asking for a second login"; fail=1; }
+  case "$(cat "$WORK/qbittorrent-version.txt" 2>/dev/null || true)" in
+    v5.*) ;;
+    *) echo "the 200 from qBittorrent's API is not its version string: the WebUI answered a login form instead"; fail=1 ;;
+  esac
+
+  # ---- the login is reachable only through the Gateway ----------------------
+  # Authelia believes X-Forwarded-Proto and X-Forwarded-Host, so a pod that can
+  # call 9091 directly can answer for any host and any scheme -- that was the
+  # measured hole: s5n-system had no NetworkPolicy at all. The probe carries no
+  # release label, so the release's own egress policy does not apply to it: what
+  # it proves is the login's ingress policy, not the release's.
+  log "the login refuses every caller but the Gateway"
+  # The pod runs under the namespace's Pod Security: a bare `kubectl run` is
+  # refused there (restricted wants runAsNonRoot, no capabilities and a seccomp
+  # profile), and a refusal is not the timeout this probe is about -- so it says
+  # which one happened rather than passing as "no answer".
+  probe_out=$(timeout 90 $K -n "$NS" run oidc-probe --rm -i --restart=Never \
+    --labels=s5n.io/probe=oidc --image="$CURL_IMAGE" --quiet \
+    --overrides='{"spec":{"securityContext":{"runAsNonRoot":true,"runAsUser":65534,"runAsGroup":65534,"seccompProfile":{"type":"RuntimeDefault"}},"containers":[{"name":"oidc-probe","image":"'"$CURL_IMAGE"'","command":["curl","-s","-o","/dev/null","--max-time","5","-w","%{http_code}","http://authelia.s5n-system:9091/auth/api/health"],"securityContext":{"allowPrivilegeEscalation":false,"capabilities":{"drop":["ALL"]},"runAsNonRoot":true,"runAsUser":65534}}]}}' \
+    2>&1 || true)
+  echo "  probe (no release label) -> authelia.s5n-system:9091/auth/api/health: ${probe_out:-timed out}"
+  case "$probe_out" in
+    *000*) : ;;
+    200* | *200*) echo "the login answered a pod directly: its ingress policy is missing or admits the wrong peer"; fail=1 ;;
+    "") echo "the probe produced no answer at all, so it proves nothing"; fail=1 ;;
+    *Forbidden* | *violates* | *Invalid*)
+      echo "the probe pod was refused before it ran, so the login was never asked: ${probe_out}"; fail=1 ;;
+    *) echo "the probe answered ${probe_out}, which is not a timeout"; fail=1 ;;
+  esac
+  # And the proxy itself is still admitted: the cookie-jar block above logged in
+  # through the Gateway in this same run, so a 000 here with a working login is
+  # the two halves of the policy -- one way in, and that way open.
+  $K -n "$NS" delete pod oidc-probe --ignore-not-found >/dev/null 2>&1 || true
+
+  # ---- the apps with a host of their own ------------------------------------
+  # Seerr and Plex are served at seerr.<domain> and plex.<domain>: their own
+  # certificate from Pebble, their own listeners, and a route by Host. The
+  # final card and the grant are what init decided; these assertions are what
+  # cluster got.
+  log "the app hosts: a certificate and a listener each, and Seerr on its own name"
+  for app_host in "plex:${PLEX_HOST}" "seerr:${SEERR_HOST}" "pbh:${PBH_HOST}"; do
+    app=${app_host%%:*}; host=${app_host##*:}
+    label=${host//./-}
+    cert=s5n-tls-${label}
+    grep -qF "applied Certificate s5n-gateway/${cert} (issuer s5n-letsencrypt)" "$WORK/bootstrap1.txt" ||
+      { echo "box did not apply ${cert} with the production issuer"; fail=1; }
+    $K -n s5n-gateway wait --for=condition=Ready "certificate/$cert" --timeout=180s ||
+      { echo "the ${app} host's Certificate never became Ready"; fail=1; }
+    got_issuer=$($K -n s5n-gateway get certificate "$cert" -o jsonpath='{.spec.issuerRef.name}' || true)
+    [ "$got_issuer" = s5n-letsencrypt ] || { echo "${cert} names issuer ${got_issuer}"; fail=1; }
+    got_secret=$($K -n s5n-gateway get gateway s5n \
+      -o jsonpath="{.spec.listeners[?(@.name==\"https-${label}\")].tls.certificateRefs[0].name}" || true)
+    got_http=$($K -n s5n-gateway get gateway s5n \
+      -o jsonpath="{.spec.listeners[?(@.name==\"http-${label}\")].hostname}" || true)
+    echo "  ${host}: certificate ${cert}, https listener -> ${got_secret}, http listener on ${got_http}"
+    [ "$got_secret" = "$cert" ] || { echo "the ${app} host's HTTPS listener references ${got_secret}"; fail=1; }
+    [ "$got_http" = "$host" ] || { echo "the ${app} host's port-80 listener matches ${got_http}"; fail=1; }
+  done
+
+  # Seerr's page on its own name. The edge posture is the one it has on a path
+  # (a bypass: it signs users in through Plex itself), so an unauthenticated
+  # request gets Seerr's own page and login, not Authelia's portal -- and with
+  # the session cookie from the portal in the jar it still gets the same page,
+  # which is the cookie's domain covering the subdomain.
+  seerr_unauth=$WORK/seerr-unauth.html
+  # Seerr answers its root with a redirect of its own (to its login or its
+  # first-run setup), so the page is fetched the way a browser gets it.
+  seerr_code=$(curl -sS -L -o "$seerr_unauth" -w '%{http_code}' \
+    --resolve "${SEERR_HOST}:443:${gw_addr}" --cacert "$WORK/pebble-root.pem" \
+    "https://${SEERR_HOST}/" 2>/dev/null || true)
+  echo "  GET https://${SEERR_HOST}/ without a session (following Seerr's redirect): ${seerr_code}"
+  [ "$seerr_code" = 200 ] || { echo "Seerr's own host answered ${seerr_code}"; fail=1; }
+  grep -qi '<!doctype html' "$seerr_unauth" || { echo "Seerr's host did not serve an HTML page"; fail=1; }
+  seerr_asset=$(grep -oE '(src|href)="/[^"]+\.(js|css)"' "$seerr_unauth" | head -1 | sed 's/^[a-z]*="//; s/"$//' || true)
+  echo "  asset the page references: ${seerr_asset}"
+  case "$seerr_asset" in
+    "/"*) ;;
+    "") echo "Seerr's page referenced no script or stylesheet"; fail=1 ;;
+    *) echo "the asset ${seerr_asset} is not absolute: Seerr is not served from its own root"; fail=1 ;;
+  esac
+  if [ -n "$seerr_asset" ]; then
+    asset_code=$(curl -sS -o /dev/null -w '%{http_code}' \
+      --resolve "${SEERR_HOST}:443:${gw_addr}" --cacert "$WORK/pebble-root.pem" \
+      "https://${SEERR_HOST}${seerr_asset}" 2>/dev/null || true)
+    echo "  GET https://${SEERR_HOST}${seerr_asset}: ${asset_code}"
+    [ "$asset_code" = 200 ] || { echo "Seerr's asset does not resolve on its own host"; fail=1; }
+  fi
+  seerr_authed=$(curl -sS -L -o "$WORK/seerr-authed.html" -w '%{http_code}' -b "$JAR" \
+    --resolve "${SEERR_HOST}:443:${gw_addr}" --cacert "$WORK/pebble-root.pem" \
+    "https://${SEERR_HOST}/" 2>/dev/null || true)
+  echo "  GET https://${SEERR_HOST}/ with the portal's session cookie: ${seerr_authed}"
+  [ "$seerr_authed" = 200 ] || { echo "Seerr's own host answered ${seerr_authed} with a session cookie"; fail=1; }
+  # The cookie's domain is the box's name, which a browser sends to a subdomain
+  # too; Authelia names one cookie per host, and the app hosts are under it.
+  cookie_domain=$($K -n s5n-system get cm s5n-authelia -o jsonpath='{.data.configuration\.yml}' |
+    python3 -c 'import sys, re; print(re.search(r"- domain: \x27([^\x27]+)\x27", sys.stdin.read()).group(1))' 2>/dev/null || true)
+  echo "  the login's session cookie domain: ${cookie_domain}"
+  [ "$cookie_domain" = "$DOMAIN" ] || { echo "the cookie domain is ${cookie_domain}, want ${DOMAIN} (it covers its subdomains)"; fail=1; }
+  # ---- PeerBanHelper: one login, and its API behind it -----------------------
+  # The chart switches the app's own WebUI login off: its page sends /api/...
+  # with a token only the browser could hold, so a second password there would be
+  # a form with no way to fill it. The edge's login is therefore the only one,
+  # and these two requests are that decision, measured: without the portal's
+  # cookie the app's page is a redirect to the portal, and with it the app's own
+  # API answers without any credential of PBH's.
+  pbh_headers="$WORK/pbh-unauth-headers.txt"
+  : >"$pbh_headers"
+  pbh_unauth=$(curl -sS -o /dev/null -D "$pbh_headers" -w '%{http_code}' \
+    --resolve "${PBH_HOST}:443:${gw_addr}" --cacert "$WORK/pebble-root.pem" \
+    "https://${PBH_HOST}/" 2>/dev/null || true)
+  pbh_location=$(sed -n 's/^[Ll]ocation: *//p' "$pbh_headers" | tr -d '\r' | head -1)
+  echo "  GET https://${PBH_HOST}/ without a session: ${pbh_unauth} -> ${pbh_location}"
+  [ "$pbh_unauth" = 302 ] ||
+    { echo "PBH's own host answered ${pbh_unauth} without a session: the app is served open"; fail=1; }
+  case "$pbh_location" in
+    "https://${DOMAIN}/auth/"*) ;;
+    *) echo "PBH's redirect does not point at the portal: ${pbh_location}"; fail=1 ;;
+  esac
+  pbh_api=$(curl -sS -o "$WORK/pbh-downloaders.json" -w '%{http_code}' -b "$JAR" \
+    --resolve "${PBH_HOST}:443:${gw_addr}" --cacert "$WORK/pebble-root.pem" \
+    "https://${PBH_HOST}/api/downloaders" 2>/dev/null || true)
+  echo "  GET https://${PBH_HOST}/api/downloaders with the portal's session: ${pbh_api}"
+  [ "$pbh_api" = 200 ] ||
+    { echo "PBH answered the app's own API with ${pbh_api}: it is asking for a second login"; fail=1; }
+  pbh_id=$(python3 -c 'import json,sys
+rows = json.load(open(sys.argv[1], encoding="utf-8"))["data"]
+print(rows[0]["id"] if len(rows) == 1 else "")' "$WORK/pbh-downloaders.json" 2>/dev/null || true)
+  echo "  PBH holds one downloader: ${pbh_id}"
+  [ "$pbh_id" = qbittorrent ] || { echo "PBH holds ${pbh_id}, want the one downloader the Job registers"; fail=1; }
+  # Its config carries no credential either: HEALTHY is PBH's own verdict that
+  # it polls qBittorrent, and this is what it polls with.
+  pbh_status=$(curl -sS -o "$WORK/pbh-status.json" -w '%{http_code}' -b "$JAR" \
+    --resolve "${PBH_HOST}:443:${gw_addr}" --cacert "$WORK/pebble-root.pem" \
+    "https://${PBH_HOST}/api/downloaders/qbittorrent/status" 2>/dev/null || true)
+  echo "  GET https://${PBH_HOST}/api/downloaders/qbittorrent/status: ${pbh_status}"
+  [ "$pbh_status" = 200 ] || { echo "PBH did not answer its own status endpoint (${pbh_status})"; fail=1; }
+  python3 - "$WORK/pbh-status.json" <<'PYPBH' || fail=1
+import json, sys
+status = json.load(open(sys.argv[1], encoding="utf-8"))["data"]
+cfg = status.get("config") or {}
+print("  PBH's downloader: %s, username %r, password %d characters"
+      % (status.get("lastStatus"), cfg.get("username"), len(cfg.get("password") or "")))
+ok = True
+if status.get("lastStatus") != "HEALTHY":
+    print("  PBH is not healthy on qBittorrent: %s" % status.get("lastStatusMessage"))
+    ok = False
+if cfg.get("username") or cfg.get("password"):
+    print("  PBH holds a qBittorrent credential: HEALTHY proves it needs none")
+    ok = False
+sys.exit(0 if ok else 1)
+PYPBH
+
+  # The old path is gone: no route, so the box's own host answers 404 there.
+  old_path=$(curl -sS -o /dev/null -w '%{http_code}' \
+    --resolve "${DOMAIN}:443:${gw_addr}" --cacert "$WORK/pebble-root.pem" \
+    "https://${DOMAIN}/seerr/" 2>/dev/null || true)
+  echo "  GET https://${DOMAIN}/seerr/ (the old path): ${old_path}"
+  [ "$old_path" = 404 ] || { echo "/seerr still answers ${old_path}: a path route was left behind"; fail=1; }
+  # The card says nothing about missing records: every name answered here.
+  if grep -q "has no DNS record" "$WORK/bootstrap1.txt"; then
+    echo "init printed the no-DNS card line on a host whose names all resolve"
+    fail=1
+  fi
+
   # Path normalisation: Envoy normalises the request path before its filters
   # run (normalize_path is on by default and Envoy Gateway sets it explicitly),
   # so /sonarr/api/../ is a request for / -- not the API, and not a bypass.
@@ -1015,12 +1994,19 @@ print("  app routes: %d HTTPRoutes, none pins a sectionName" % len(items))
   https_bad=0
   for i in $(seq 1 240); do
     if [ -z "$solver_seen" ]; then
+      # The solver route under renewal is this host's: with more than one
+      # certificate on the box, another host's solver route can be in the same
+      # namespace at the same moment, and its exact path says nothing about
+      # this host's port-80 listeners.
       solver=$($K -n s5n-gateway get httproute -o json 2>/dev/null | python3 -c '
 import json, sys
+domain = sys.argv[1]
 items = json.load(sys.stdin).get("items", [])
 for r in items:
     name = r["metadata"]["name"]
     if not name.startswith("cm-acme-http-solver"):
+        continue
+    if domain not in (r["spec"].get("hostnames") or []):
         continue
     ref = r["spec"]["parentRefs"][0]
     for rule in r["spec"].get("rules", []):
@@ -1029,7 +2015,7 @@ for r in items:
             if path.get("type") == "Exact" and path.get("value", "").startswith("/.well-known/acme-challenge/"):
                 print(name + " " + path["value"] + " " + str(ref.get("sectionName", "")))
                 sys.exit(0)
-' || true)
+' "$DOMAIN" || true)
       if [ -n "$solver" ]; then
         solver_seen=$(echo "$solver" | awk '{print $2}')
         solver_section=$(echo "$solver" | awk '{print $3}')
@@ -1083,6 +2069,21 @@ for r in items:
   [ "$https_code" = 200 ] || { echo "HTTPS did not answer after the renewal"; fail=1; }
 
   $K -n "$NS" wait --for=condition=Ready pod -l 'app.kubernetes.io/instance=s5n,s5n.io/app' --timeout=300s || fail=1
+  # ---- the OIDC provider: both clients are Ready on the first install --------
+  log "the provider: both clients, the issuer they dial, and the anchor"
+  assert_oidc "$DOMAIN" qui QUI
+  assert_oidc "$DOMAIN" autobrr AUTOBRR
+  # ---- the sign-in itself ----------------------------------------------------
+  # Ready proves a pod read the discovery document -- for the client that will
+  # not start without it. It does not prove anyone can sign in, which is the
+  # thing an operator does, so the flow is run here as a browser runs it, for
+  # both clients; a second account then tries the same flow to show the client's
+  # policy is this seedbox's alone.
+  log "the sign-in: both clients' OIDC round trips, and the client that refuses another login"
+  oidc_login qui /qui /qui/api/auth/me "$gw_addr" "$WORK/pebble-root.pem"
+  oidc_refuses_another_login qui /qui "$gw_addr" "$WORK/pebble-root.pem"
+  oidc_login autobrr /autobrr /autobrr/api/auth/validate "$gw_addr" "$WORK/pebble-root.pem"
+  oidc_refuses_another_login autobrr /autobrr "$gw_addr" "$WORK/pebble-root.pem"
   # ---- storage: box created the claims, and they are bound ----
   for kind in data config; do
     pv=seedbox-s5n-${kind}
@@ -1124,8 +2125,11 @@ for r in items:
   # namespace -- and Envoy Gateway lets a route-targeted policy override the
   # Gateway-level one, which is a working bypass. The bindings root creates at
   # adduser are what refuse it; hack/render-grant is the same renderer box uses.
+  # The grant's own port, not a number this script picked: the binding has to
+  # admit the peers Service box actually wrote, or every later apply in this
+  # scenario is refused by the policy under test.
   log "admission: the login cannot be removed or overridden from ${NS}"
-  go run ./hack/render-grant charts/s5n "$NS" 31111 NodePort | $K apply -f - >/dev/null
+  go run ./hack/render-grant charts/s5n "$NS" "${TORRENT_PORT:-}" NodePort | $K apply -f - >/dev/null
   $K apply -f - >/dev/null <<EOF
 apiVersion: v1
 kind: ServiceAccount
@@ -1558,6 +2562,9 @@ EOF
   echo "values  ${values_before} -> ${values_after}"
   [ "$grant_before" = "$grant_after" ] || { echo "the second init spliced into the grant"; fail=1; }
   [ "$values_before" = "$values_after" ] || { echo "the second init spliced into the values file"; fail=1; }
+  # And the peer port is where the first run left it: a re-run keeps the
+  # grant's port instead of picking a second one peers are not announcing.
+  assert_torrent_port "after the second init" "$TORRENT_PORT"
   grep -q "already says this" "$WORK/apply2.txt" || { echo "init did not say the grant was already right"; fail=1; }
   grep -q "nothing to change" "$WORK/apply2.txt" || { echo "box did not say nothing to change"; fail=1; }
   rev2=$(revision); secrets2=$(release_secrets)
@@ -1625,6 +2632,490 @@ EOF
   # and neither apply nor a re-run of init writes it when nothing changed.
   [ "$(sha256sum "$WORK/grant.yaml" | cut -d' ' -f1)" = "$grant_before" ] ||
     { echo "box rewrote the grant"; fail=1; }
+
+  # ---- a host that has none of the three objects it needs ---------------------
+  # The case the promise is about: the release renders a route on seerr.<domain>
+  # while nothing answers there, so the app is unreachable and nothing says so
+  # (docs/box.md, "No run leaves an app host without its listener"). The box is
+  # put in the state an install without Seerr leaves: the app off, and all three
+  # of root's per-host objects gone -- the Certificate, both listeners, and the
+  # login's access_control rule for the name. apply has to write the rule as
+  # well: a host with a listener and a Certificate but no rule answers the
+  # login's default deny, which is a 403 nobody can get past.
+  log "turning Seerr off, then removing everything root had written for its host"
+  python3 - "$WORK/grant.yaml" <<'PY' || { echo "could not turn Seerr off in the grant"; fail=1; }
+import re, sys
+path = sys.argv[1]
+text = open(path).read()
+updated, count = re.subn(r"(?m)^(  seerr:\n    enabled: )true$", r"\1false", text)
+if count != 1:
+    sys.exit("the grant does not say apps.seerr.enabled: true (%d matches)" % count)
+open(path, "w").write(updated)
+PY
+  if apply "$WORK/apply-off.txt"; then
+    cat "$WORK/apply-off.txt"
+  else
+    cat "$WORK/apply-off.txt"; fail=1
+  fi
+  seerr_label=${SEERR_HOST//./-}
+  seerr_cert=s5n-tls-${seerr_label}
+  $K -n s5n-gateway delete certificate "$seerr_cert" --ignore-not-found >/dev/null || fail=1
+  # Both listeners, by index from the back so the earlier ones keep theirs.
+  listener_patch=$(python3 - "$($K -n s5n-gateway get gateway s5n -o json)" "$seerr_label" <<'PY'
+import json, sys
+gateway = json.loads(sys.argv[1])
+label = sys.argv[2]
+gone = {"https-" + label, "http-" + label}
+print(json.dumps([{"op": "remove", "path": "/spec/listeners/%d" % i}
+                  for i, l in reversed(list(enumerate(gateway["spec"]["listeners"])))
+                  if l["name"] in gone]))
+PY
+) || { echo "could not read the Gateway's listeners"; fail=1; }
+  $K -n s5n-gateway patch gateway s5n --type=json -p "$listener_patch" >/dev/null ||
+    { echo "could not remove ${SEERR_HOST}'s listeners"; fail=1; }
+  if $K -n s5n-gateway get certificate "$seerr_cert" >/dev/null 2>&1; then
+    echo "the Certificate ${seerr_cert} is still there"
+    fail=1
+  fi
+  for gone in "https-${seerr_label}" "http-${seerr_label}"; do
+    still=$($K -n s5n-gateway get gateway s5n \
+      -o jsonpath="{.spec.listeners[?(@.name==\"${gone}\")].protocol}" 2>/dev/null || true)
+    [ -z "$still" ] || { echo "the listener ${gone} is still on the Gateway"; fail=1; }
+  done
+
+  # The login's rule went with the app: root's apply renders the login's whole
+  # configuration from the values on every run, so turning Seerr off removed its
+  # access_control rule and rolled the login onto the rule-less file. The login
+  # that is answering has never heard of the name -- which is what a box
+  # installed without Seerr looks like -- and box got it there, not this script.
+  log "the apply that turned Seerr off also removed the login's rule for ${SEERR_HOST}"
+  $K -n s5n-system rollout status deploy/authelia --timeout=180s >/dev/null ||
+    { echo "the login did not come back on the rule-less configuration"; fail=1; }
+  authelia_uid_before=$($K -n s5n-system get pod -l app.kubernetes.io/name=authelia -o jsonpath='{.items[0].metadata.uid}' || true)
+  still_ruled=$($K -n s5n-system get cm s5n-authelia -o jsonpath='{.data.configuration\.yml}' | grep -cF "'${SEERR_HOST}'" || true)
+  echo "  rules for ${SEERR_HOST} in the login's configuration: ${still_ruled}"
+  [ "$still_ruled" = 0 ] || { echo "the login still has a rule for ${SEERR_HOST}"; fail=1; }
+
+  # Root turns the app back on in the grant. There is no `box install` yet, so
+  # this is the only way an app is added to a seedbox.
+  log "box apply: an app host with none of its objects gets all three before the release moves"
+  python3 - "$WORK/grant.yaml" <<'PY' || { echo "could not turn Seerr on in the grant"; fail=1; }
+import re, sys
+path = sys.argv[1]
+text = open(path).read()
+updated, count = re.subn(r"(?m)^(  seerr:\n    enabled: )false$", r"\1true", text)
+if count != 1:
+    sys.exit("the grant does not say apps.seerr.enabled: false (%d matches)" % count)
+open(path, "w").write(updated)
+PY
+  if apply "$WORK/apply-seerr.txt"; then
+    cat "$WORK/apply-seerr.txt"
+  else
+    cat "$WORK/apply-seerr.txt"; fail=1
+  fi
+  grep -qF "Certificate, listener and login rule for ${SEERR_HOST}" "$WORK/apply-seerr.txt" ||
+    { echo "apply did not show the login rule it would write for ${SEERR_HOST}"; fail=1; }
+  grep -qF "applied Certificate s5n-gateway/${seerr_cert} (issuer s5n-letsencrypt)" "$WORK/apply-seerr.txt" ||
+    { echo "apply did not write ${seerr_cert} with the production issuer"; fail=1; }
+  grep -qF "login: the rule for ${SEERR_HOST} is in place" "$WORK/apply-seerr.txt" ||
+    { echo "apply did not write the login's rule for ${SEERR_HOST}"; fail=1; }
+  # The order is the promise: the host is served before the release that renders
+  # its route moves, so there is never a route on a name nothing answers on.
+  seerr_cert_line=$(grep -n "applied Certificate s5n-gateway/${seerr_cert}" "$WORK/apply-seerr.txt" | head -1 | cut -d: -f1 || true)
+  seerr_rule_line=$(grep -n "login: the rule for ${SEERR_HOST} is in place" "$WORK/apply-seerr.txt" | head -1 | cut -d: -f1 || true)
+  seerr_helm_line=$(grep -n "applied: s5n revision" "$WORK/apply-seerr.txt" | head -1 | cut -d: -f1 || true)
+  echo "  login rule at line ${seerr_rule_line}, certificate at line ${seerr_cert_line}, release at line ${seerr_helm_line}"
+  if [ -z "$seerr_rule_line" ] || [ -z "$seerr_cert_line" ] || [ -z "$seerr_helm_line" ] ||
+     [ "$seerr_rule_line" -ge "$seerr_helm_line" ] || [ "$seerr_cert_line" -ge "$seerr_helm_line" ]; then
+    echo "the per-host step did not run before the release moved"
+    fail=1
+  fi
+  seerr_port=$($K -n s5n-gateway get gateway s5n \
+    -o jsonpath="{.spec.listeners[?(@.name==\"https-${seerr_label}\")].port}" 2>/dev/null || true)
+  echo "  the listener https-${seerr_label} is on port ${seerr_port}"
+  [ "$seerr_port" = 443 ] || { echo "apply did not add the HTTPS listener for ${SEERR_HOST}"; fail=1; }
+  $K -n s5n-gateway wait --for=condition=Ready "certificate/${seerr_cert}" --timeout=180s ||
+    { echo "the Certificate ${seerr_cert} never became Ready"; fail=1; }
+  # The rule is in the file the login starts with, and the pod that is answering
+  # is the one that read it: a pod left on the old hash would answer with the old
+  # rules however right the ConfigMap looked.
+  ruled_after=$($K -n s5n-system get cm s5n-authelia -o jsonpath='{.data.configuration\.yml}' | grep -cF -- "- domain: ['${SEERR_HOST}']" || true)
+  echo "  rules for ${SEERR_HOST} in the login's configuration: ${ruled_after}"
+  [ "$ruled_after" = 1 ] || { echo "the login has ${ruled_after} rules for ${SEERR_HOST}, want one"; fail=1; }
+  config_hash=$($K -n s5n-system get cm s5n-authelia -o jsonpath='{.data.configuration\.yml}' | sha256sum | cut -d' ' -f1)
+  pod_hash=$($K -n s5n-system get deploy authelia -o jsonpath='{.spec.template.metadata.annotations.s5n\.io/config-hash}' || true)
+  echo "  configuration hash ${config_hash}, the login's pod template has ${pod_hash}"
+  [ "$pod_hash" = "$config_hash" ] || { echo "the login's pod template hash is not its configuration's: the rule is written but not read"; fail=1; }
+  authelia_uid_after=$($K -n s5n-system get pod -l app.kubernetes.io/name=authelia -o jsonpath='{.items[0].metadata.uid}' || true)
+  [ -n "$authelia_uid_after" ] && [ "$authelia_uid_after" != "$authelia_uid_before" ] ||
+    { echo "the login's pod did not restart onto its new configuration"; fail=1; }
+  # And the app answers through Envoy by Host: the route the release rendered is
+  # now attached to a listener that serves the name, behind a login that admits
+  # it. Before the rule this was a 403 from the login, which is the whole bug.
+  seerr_code=$(curl -sS -L -o "$WORK/seerr-again.html" -w '%{http_code}' \
+    --resolve "${SEERR_HOST}:443:${gw_addr}" --cacert "$WORK/pebble-root.pem" \
+    "https://${SEERR_HOST}/" 2>/dev/null || true)
+  echo "  GET https://${SEERR_HOST}/ after the apply: ${seerr_code}"
+  [ "$seerr_code" = 200 ] || { echo "the app host did not answer after apply served it: ${seerr_code}"; fail=1; }
+  grep -qi '<!doctype html' "$WORK/seerr-again.html" || { echo "the app host served no HTML after apply"; fail=1; }
+
+  # ---- qui and autobrr: one account, and what the Job did with it -----------
+  # Both apps keep their own user table and mint an API key only for a session,
+  # so the chart generates a password in the release Secret and each app's init
+  # container writes it into the app on every start. The receipt says the Job
+  # signed in; these assertions ask the apps. Reading them needs the Secret's
+  # password, which is also the proof that the local account and the edge's OIDC
+  # provider coexist: the person signs in through the provider, the Job through
+  # the account.
+  log "qui and autobrr: the account the chart owns, read back through both APIs"
+  read -r QUI_URL QUI_BASE QUI_USER AUTOBRR_URL AUTOBRR_BASE AUTOBRR_USER QBIT_URL <<<"$(
+    $K -n "$NS" get cm s5n-wiring -o jsonpath='{.data.wiring\.json}' |
+      python3 -c 'import json, sys
+cfg = json.load(sys.stdin)
+print(cfg["qui"]["url"], cfg["qui"]["urlBase"], cfg["qui"]["username"],
+      cfg["autobrr"]["url"], cfg["autobrr"]["urlBase"], cfg["autobrr"]["username"],
+      cfg["qbittorrent"]["url"])' 2>/dev/null || true)"
+  [ -n "$QUI_USER" ] && [ -n "$AUTOBRR_USER" ] ||
+    { echo "the wiring config names no qui/autobrr account: the render did not reach the Job"; fail=1; }
+  QUI_PASSWORD=$($K -n "$NS" get secret s5n-keys -o jsonpath='{.data.qui-password}' 2>/dev/null | base64 -d || true)
+  AUTOBRR_PASSWORD=$($K -n "$NS" get secret s5n-keys -o jsonpath='{.data.autobrr-password}' 2>/dev/null | base64 -d || true)
+  QBIT_PASSWORD=$($K -n "$NS" get secret s5n-keys -o jsonpath='{.data.qbittorrent-password}' 2>/dev/null | base64 -d || true)
+  [ ${#QUI_PASSWORD} -ge 8 ] && [ -n "$AUTOBRR_PASSWORD" ] ||
+    { echo "the release Secret carries no account passwords"; fail=1; }
+  echo "  account ${QUI_USER} (${#QUI_PASSWORD} char password), qui ${QUI_URL}${QUI_BASE}, autobrr ${AUTOBRR_URL}${AUTOBRR_BASE}"
+
+  # owned_ids is the record the Job keeps: qui's instance, autobrr's clients by
+  # name and PeerBanHelper's downloader id. The ids are the whole identity, so a
+  # duplicate would show up here.
+  owned_ids() {
+    $K -n "$NS" get cm s5n-wiring -o jsonpath='{.data.owned\.json}' |
+      python3 -c 'import json, sys
+rec = json.load(sys.stdin)
+print("qui=%s" % rec["qui"]["instance"],
+      " ".join("%s=%s" % (k, v) for k, v in sorted(rec["autobrr"]["clients"].items())),
+      "pbh=%s" % (rec.get("pbh") or {}).get("downloader", ""))' 2>/dev/null || true
+  }
+  ids_before=$(owned_ids)
+  echo "  owned.json: ${ids_before:-none}"
+  case "$ids_before" in
+    qui=0* | "" | *"=0"*) echo "owned.json records no qui instance or autobrr client: ${ids_before}"; fail=1 ;;
+  esac
+  case "$ids_before" in
+    *"pbh=qbittorrent"*) ;;
+    *) echo "owned.json records no PeerBanHelper downloader: ${ids_before}"; fail=1 ;;
+  esac
+
+  # A second run of the same Job must change nothing at all: no created, no
+  # updated, and the same ids -- which is also the proof that neither app grew a
+  # duplicate row (qui has no uniqueness on name or host, autobrr none on name).
+  rerun_wiring "$WORK/rerun-quiet.txt" || fail=1
+  created=$(status_field 'd["writes"]["created"]' 2>/dev/null || echo missing)
+  updated=$(status_field 'd["writes"]["updated"]' 2>/dev/null || echo missing)
+  ids_after=$(owned_ids)
+  echo "  second run: ${created} created, ${updated} updated; ids ${ids_before} -> ${ids_after}"
+  [ "$created" = 0 ] && [ "$updated" = 0 ] || { echo "an unchanged release wrote ${created} created / ${updated} updated"; fail=1; }
+  [ "$ids_before" = "$ids_after" ] || { echo "the second run recorded different ids"; fail=1; }
+
+  # ---- what qui holds, through its API ---------------------------------------
+  port_forward qui-0 7476 || fail=1
+  qui_session "$QUI_BASE"
+  echo "  qui: POST ${QUI_BASE}/api/auth/login with the Secret's password: ${QUI_LOGIN_CODE}"
+  [ "$QUI_LOGIN_CODE" = 200 ] || { echo "qui refused the account the chart owns: ${QUI_LOGIN_BODY}"; fail=1; }
+  curl -sS -H "Cookie: ${QUI_COOKIE}" "http://127.0.0.1:${PF_PORT}${QUI_BASE}/api/instances/" >"$WORK/qui-instances.json" 2>/dev/null || true
+  qui_id=$(python3 -c 'import json, sys
+try:
+    rows = json.load(open(sys.argv[1]))
+except Exception:
+    rows = []
+print(rows[0]["id"] if len(rows) == 1 else "")' "$WORK/qui-instances.json" 2>/dev/null || true)
+  qui_test=$(curl -sS -X POST -H "Cookie: ${QUI_COOKIE}" -H 'X-Requested-With: XMLHttpRequest' \
+    "http://127.0.0.1:${PF_PORT}${QUI_BASE}/api/instances/${qui_id}/test" 2>/dev/null || true)
+  port_forward_stop
+  echo "  qui instance ${qui_id:-none}, test: ${qui_test:-no answer}"
+  python3 - "$WORK/qui-instances.json" "$QBIT_URL" "$qui_test" <<'PY' || fail=1
+import json, sys
+rows = json.load(open(sys.argv[1], encoding="utf-8"))
+want_host, test_body = sys.argv[2], sys.argv[3]
+if len(rows) != 1:
+    print("  qui holds %d instances, want exactly 1" % len(rows))
+    sys.exit(1)
+row = rows[0]
+print("  qui instance: %s -> %s (local filesystem access %s)" %
+      (row.get("name"), row.get("host"), row.get("hasLocalFilesystemAccess")))
+ok = True
+if row.get("host") != want_host:
+    print("  the instance points at %r, want qBittorrent's %r" % (row.get("host"), want_host))
+    ok = False
+if not row.get("hasLocalFilesystemAccess"):
+    print("  the instance has no local filesystem access: /data is the same mount in both apps")
+    ok = False
+# qBittorrent skips its login for the release's addresses, so the instance the
+# Job registers carries no credential: qui's own test above is the proof it
+# reaches qBittorrent without one.
+if row.get("username") or row.get("password"):
+    print("  the instance holds a qBittorrent credential (%r/%r): none should"
+          % (row.get("username"), row.get("password")))
+    ok = False
+try:
+    tested = json.loads(test_body)
+except Exception:
+    tested = {}
+if not tested.get("connected"):
+    print("  qui's own test does not report a connection: %r" % (test_body,))
+    ok = False
+sys.exit(0 if ok else 1)
+PY
+
+  # ---- what autobrr holds, through its API -----------------------------------
+  port_forward autobrr-0 7474 || fail=1
+  autobrr_session "$AUTOBRR_BASE" "$WORK/autobrr-live.jar"
+  echo "  autobrr: POST ${AUTOBRR_BASE}/api/auth/login with the Secret's password: ${AUTOBRR_LOGIN_CODE}"
+  [ "$AUTOBRR_LOGIN_CODE" = 204 ] || { echo "autobrr refused the account the chart owns (${AUTOBRR_LOGIN_CODE})"; fail=1; }
+  curl -sS -b "$WORK/autobrr-live.jar" "http://127.0.0.1:${PF_PORT}${AUTOBRR_BASE}/api/downloaders" >"$WORK/autobrr-downloaders.json" 2>/dev/null || true
+  autobrr_test=$(curl -sS -o /dev/null -w '%{http_code}' -b "$WORK/autobrr-live.jar" \
+    -X POST "http://127.0.0.1:${PF_PORT}${AUTOBRR_BASE}/api/downloaders/test" \
+    -H 'Content-Type: application/json' \
+    --data "{\"name\":\"qBittorrent\",\"type\":\"QBITTORRENT\",\"enabled\":true,\"host\":\"${QBIT_URL}\",\"username\":\"\",\"password\":\"\",\"settings\":{\"rules\":{\"enabled\":false}}}" 2>/dev/null || true)
+  port_forward_stop
+  echo "  autobrr's qBittorrent client test: ${autobrr_test}"
+  [ "$autobrr_test" = 204 ] || { echo "autobrr could not reach qBittorrent with the client the Job registers (${autobrr_test})"; fail=1; }
+  python3 - "$WORK/autobrr-downloaders.json" "$QBIT_URL" \
+    "$($K -n "$NS" get cm s5n-wiring -o jsonpath='{.data.wiring\.json}')" <<'PY' || fail=1
+import json, sys
+rows = json.load(open(sys.argv[1], encoding="utf-8"))
+qbit_url = sys.argv[2]
+# Every enabled Arr instance is one client, and its host is the address the Arr
+# itself answers on -- the base path included.
+cfg = json.loads(sys.argv[3])
+want = {i["name"]: i["url"].rstrip("/") + i["urlBase"] for i in cfg["instances"]}
+by_name = {}
+for row in rows:
+    by_name.setdefault(row.get("name"), []).append(row)
+print("  autobrr holds: %s" % ", ".join("%s(%s)" % (r["name"], r["type"]) for r in rows))
+ok = True
+qbit = [r for r in rows if r.get("type") == "QBITTORRENT"]
+if len(qbit) != 1:
+    print("  autobrr holds %d qBittorrent clients, want 1" % len(qbit))
+    ok = False
+elif qbit[0].get("host") != qbit_url:
+    print("  the qBittorrent client dials %r, want %r" % (qbit[0].get("host"), qbit_url))
+    ok = False
+if qbit and qbit[0].get("username"):
+    print("  the qBittorrent client holds username %r: qBittorrent needs none" % qbit[0].get("username"))
+    ok = False
+if len(rows) != len(want) + 1:
+    print("  autobrr holds %d clients, want %d (qBittorrent + one per Arr)" % (len(rows), len(want) + 1))
+    ok = False
+for name in want:
+    if len(by_name.get(name, [])) != 1:
+        print("  autobrr holds %d clients named %s, want 1" % (len(by_name.get(name, [])), name))
+        ok = False
+for name, host in want.items():
+    if not any(r.get("name") == name and r.get("host") == host for r in rows):
+        print("  no client for %s dials %r: the Arr's base path is part of the host" % (name, host))
+        ok = False
+sys.exit(0 if ok else 1)
+PY
+
+  # ---- rotating the qBittorrent password: nothing else holds it -------------
+  # The credential is sealed into qBittorrent.conf and given to no app, so a
+  # rotation is qBittorrent's alone: its init container re-seals the Secret's
+  # value at the next start, and the wiring Job -- which reads no qBittorrent
+  # password at all -- rewrites nothing. That is the property this block pins,
+  # and it is why no app has to be stopped for the rotation: nothing polls with
+  # a stale password, so there is no window of refused logins to race.
+  log "rotating the qBittorrent password: nothing but qBittorrent itself holds it"
+  QBIT_PASSWORD=$(openssl rand -hex 12)
+  $K -n "$NS" patch secret s5n-keys --type=merge \
+    -p "{\"data\":{\"qbittorrent-password\":\"$(printf '%s' "$QBIT_PASSWORD" | base64 -w0)\"}}" >/dev/null ||
+    { echo "could not rotate the qBittorrent password in the release Secret"; fail=1; }
+  $K -n "$NS" rollout restart statefulset/qbittorrent >/dev/null
+  $K -n "$NS" rollout status statefulset/qbittorrent --timeout=300s >/dev/null ||
+    { echo "qBittorrent did not come back on the rotated password"; fail=1; }
+  # The init container is what carried the new value into the file, and the
+  # login endpoint is the proof it took (a rotation that never reached the file
+  # would leave the old hash in place and be invisible to every app).
+  port_forward qbittorrent-0 8080 || fail=1
+  : >"$WORK/qbt-rotated.jar"
+  rotated_login=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 15 -c "$WORK/qbt-rotated.jar" \
+    --data-urlencode "username=admin" --data-urlencode "password=${QBIT_PASSWORD}" \
+    "http://127.0.0.1:${PF_PORT}/api/v2/auth/login" 2>/dev/null || true)
+  port_forward_stop
+  case "$rotated_login" in
+    2??) ;;
+    *) echo "qBittorrent refused the rotated password (${rotated_login:-no answer}): the init container did not seal the Secret's new value"; fail=1 ;;
+  esac
+
+  rerun_wiring "$WORK/rerun-rotate.txt" || fail=1
+  created=$(status_field 'd["writes"]["created"]' 2>/dev/null || echo missing)
+  updated=$(status_field 'd["writes"]["updated"]' 2>/dev/null || echo missing)
+  echo "  after the rotation: ${created} created, ${updated} updated"
+  [ "$created" = 0 ] && [ "$updated" = 0 ] ||
+    { echo "the rotation wrote ${created} created / ${updated} updated: something still holds the qBittorrent password"; fail=1; }
+  for step in qui/instance autobrr/downloader/qbittorrent pbh/downloader sonarr/downloadclient radarr/downloadclient; do
+    detail=$(status_field "[s['detail'] for s in d['steps'] if s['name']=='$step'][0]" 2>/dev/null || echo missing)
+    echo "  ${step}: ${detail}"
+    [ "$detail" = unchanged ] || { echo "${step} changed after a qBittorrent password rotation: it holds a copy"; fail=1; }
+  done
+
+  # And every caller still reaches qBittorrent, with the credential it stored
+  # (none) rather than the one the Secret now holds.
+  port_forward qui-0 7476 || fail=1
+  qui_session "$QUI_BASE"
+  curl -sS -H "Cookie: ${QUI_COOKIE}" "http://127.0.0.1:${PF_PORT}${QUI_BASE}/api/instances/" >"$WORK/qui-instances-rotated.json" 2>/dev/null || true
+  qui_id=$(python3 -c 'import json, sys
+rows = json.load(open(sys.argv[1]))
+print(rows[0]["id"] if len(rows) == 1 else "")' "$WORK/qui-instances-rotated.json" 2>/dev/null || true)
+  qui_test=$(curl -sS -X POST -H "Cookie: ${QUI_COOKIE}" -H 'X-Requested-With: XMLHttpRequest' \
+    "http://127.0.0.1:${PF_PORT}${QUI_BASE}/api/instances/${qui_id}/test" 2>/dev/null || true)
+  port_forward_stop
+  case "$qui_test" in
+    *'"connected":true'*) echo "  qui still reaches qBittorrent on the rotated password: ok" ;;
+    *) echo "qui lost qBittorrent on the rotated password: ${qui_test}"; fail=1 ;;
+  esac
+
+  port_forward autobrr-0 7474 || fail=1
+  autobrr_session "$AUTOBRR_BASE" "$WORK/autobrr-rotated.jar"
+  autobrr_test=$(curl -sS -o /dev/null -w '%{http_code}' -b "$WORK/autobrr-rotated.jar" \
+    -X POST "http://127.0.0.1:${PF_PORT}${AUTOBRR_BASE}/api/downloaders/test" \
+    -H 'Content-Type: application/json' \
+    --data "{\"name\":\"qBittorrent\",\"type\":\"QBITTORRENT\",\"enabled\":true,\"host\":\"${QBIT_URL}\",\"username\":\"\",\"password\":\"\",\"settings\":{\"rules\":{\"enabled\":false}}}" 2>/dev/null || true)
+  port_forward_stop
+  echo "  autobrr's qBittorrent client on the rotated password: ${autobrr_test}"
+  [ "$autobrr_test" = 204 ] || { echo "autobrr lost qBittorrent on the rotated password (${autobrr_test})"; fail=1; }
+
+  # The Arrs' copies are the pair that would have gone stale first if anything
+  # still held the password: the client is fetched as the Job wrote it -- empty
+  # credentials -- and Sonarr's own test endpoint decides whether qBittorrent
+  # accepts it.
+  sonarr_key=$($K -n "$NS" get secret s5n-keys -o jsonpath='{.data.sonarr-apikey}' 2>/dev/null | base64 -d || true)
+  [ -n "$sonarr_key" ] || { echo "the release Secret has no sonarr API key"; fail=1; }
+  $K -n "$NS" exec sonarr-0 -- curl -s -H "X-Api-Key: ${sonarr_key}" \
+    "http://localhost:8989/sonarr/api/v3/downloadclient" >"$WORK/sonarr-clients-rotated.json" 2>/dev/null || true
+  if python3 - "$WORK/sonarr-clients-rotated.json" >"$WORK/sonarr-client-test.json" <<'PYSONARR'
+import json, sys
+clients = json.load(open(sys.argv[1], encoding="utf-8"))
+qbit = [c for c in clients if str(c.get("implementation", "")).lower() == "qbittorrent"]
+if len(qbit) != 1:
+    sys.exit("sonarr holds %d qBittorrent clients, want 1" % len(qbit))
+body = qbit[0]
+fields = {f.get("name"): f.get("value") for f in body.get("fields") or []}
+if fields.get("username") or fields.get("password"):
+    sys.exit("sonarr's download client still holds a credential (%r/%r)"
+             % (fields.get("username"), fields.get("password")))
+print(json.dumps(body))
+PYSONARR
+  then
+    sonarr_test=$($K -n "$NS" exec -i sonarr-0 -- curl -s -o /dev/null -w '%{http_code}' \
+      -X POST -H "X-Api-Key: ${sonarr_key}" -H 'Content-Type: application/json' \
+      --data-binary @- "http://localhost:8989/sonarr/api/v3/downloadclient/test" \
+      2>/dev/null <"$WORK/sonarr-client-test.json" || true)
+    echo "  sonarr's qBittorrent client on the rotated password: ${sonarr_test}"
+    case "$sonarr_test" in
+      200 | 201 | 204) ;;
+      *) echo "sonarr could not reach qBittorrent with the client the Job wrote (${sonarr_test})"; fail=1 ;;
+    esac
+  else
+    echo "could not read Sonarr's download clients back: $(head -c 300 "$WORK/sonarr-clients-rotated.json" 2>/dev/null)"
+    fail=1
+  fi
+
+  # autobrr's init container, on a restart: its second create-user run fails
+  # with the one message that means "already there", which is why the script
+  # matches that sentence instead of ignoring the exit code, and the password is
+  # set again after it. Restarted here so the re-run is real.
+  $K -n "$NS" rollout restart statefulset/autobrr >/dev/null
+  $K -n "$NS" rollout status statefulset/autobrr --timeout=300s >/dev/null 2>&1 ||
+    { echo "autobrr did not come back after its restart"; fail=1; }
+  autobrr_init=$($K -n "$NS" logs autobrr-0 -c account 2>/dev/null || true)
+  echo "  autobrr's init container: $(printf '%s' "$autobrr_init" | tr '\n' ' ' | cut -c1-220)"
+  case "$autobrr_init" in
+    *"account already exists (autobrrctl: only 1 user account is supported)"*) ;;
+    *) echo "autobrr's init container did not meet the existing account as expected"; fail=1 ;;
+  esac
+  case "$autobrr_init" in
+    *"successfully updated password for user"*) ;;
+    *) echo "autobrr's init container did not set the Secret's password again"; fail=1 ;;
+  esac
+
+  # ---- a password changed inside qui ----------------------------------------
+  # The account belongs to the app, so an operator can change it there; the Job
+  # then cannot sign in until the pod restarts, because that is when the init
+  # container writes the Secret's password back. The receipt must say that in
+  # words and name the command -- not report an HTTP status.
+  log "a password changed inside qui is reported, and a restart puts it back"
+  port_forward qui-0 7476 || fail=1
+  qui_session "$QUI_BASE"
+  [ "$QUI_LOGIN_CODE" = 200 ] || { echo "qui refused the Secret's password before the change (${QUI_LOGIN_CODE})"; fail=1; }
+  QUI_INSIDE_PASSWORD="inside-$(openssl rand -hex 8)"
+  change_code=$(qui_change_password "$QUI_BASE" "$QUI_PASSWORD" "$QUI_INSIDE_PASSWORD")
+  echo "  changed qui's password through its API: ${change_code} $(head -c 120 "$WORK/qui-change.json" 2>/dev/null)"
+  # The change took, and the Secret's password no longer opens a session: that
+  # is the state the Job has to report, so the assertion below is not vacuous.
+  qui_session "$QUI_BASE"
+  echo "  the Secret's password after the change: ${QUI_LOGIN_CODE} ${QUI_LOGIN_BODY}"
+  port_forward_stop
+  [ "$change_code" = 200 ] || { echo "qui refused the password change (${change_code})"; fail=1; }
+  [ "$QUI_LOGIN_CODE" = 401 ] || { echo "the Secret's password still opens a session after the change (${QUI_LOGIN_CODE})"; fail=1; }
+
+  rerun_wiring "$WORK/rerun-changed.txt" || fail=1
+  login_result=$(status_field "[s['result'] for s in d['steps'] if s['name']=='qui/login'][0]" 2>/dev/null || echo missing)
+  login_detail=$(status_field "[s['detail'] for s in d['steps'] if s['name']=='qui/login'][0]" 2>/dev/null || echo missing)
+  echo "  qui/login: ${login_result}: ${login_detail}"
+  [ "$login_result" = failed ] ||
+    { echo "the Job signed in although the password was changed inside qui"; fail=1; }
+  case "$login_detail" in
+    *"changed inside the app"*"kubectl rollout restart statefulset/qui"*) ;;
+    *) echo "the receipt does not name the cause and the fix: ${login_detail}"; fail=1 ;;
+  esac
+
+  $K -n "$NS" rollout restart statefulset/qui >/dev/null
+  $K -n "$NS" rollout status statefulset/qui --timeout=300s >/dev/null ||
+    { echo "qui did not come back after the restart"; fail=1; }
+  # The init container is what puts the password back, so its log is the
+  # first-hand account: on a re-run it says the account exists and that the
+  # password was set again.
+  qui_init=$($K -n "$NS" logs qui-0 -c account 2>/dev/null || true)
+  echo "  qui's init container: $(printf '%s' "$qui_init" | tr '\n' ' ' | cut -c1-220)"
+  case "$qui_init" in
+    *"User account already exists"*) ;;
+    *) echo "qui's init container did not report the account already existing"; fail=1 ;;
+  esac
+  case "$qui_init" in
+    *"Password changed successfully for user '${QUI_USER}'"*) ;;
+    *) echo "qui's init container did not set the Secret's password again"; fail=1 ;;
+  esac
+  rerun_wiring "$WORK/rerun-restored.txt" || fail=1
+  for step in qui/login qui/instance; do
+    res=$(status_field "[s['result'] for s in d['steps'] if s['name']=='$step'][0]" 2>/dev/null || echo missing)
+    echo "  ${step} after the restart: ${res}"
+    [ "$res" = ok ] || { echo "${step} is ${res} after the restart that put the Secret's password back"; fail=1; }
+  done
+  port_forward qui-0 7476 || fail=1
+  qui_session "$QUI_BASE"
+  echo "  qui after the restart: POST login with the Secret's password: ${QUI_LOGIN_CODE}"
+  port_forward_stop
+  [ "$QUI_LOGIN_CODE" = 200 ] ||
+    { echo "the account did not come back to the Secret's password (${QUI_LOGIN_CODE})"; fail=1; }
+
+  # ---- autobrr's onboarding endpoint ----------------------------------------
+  # It was open while autobrr's user table was empty, which is how a stranger
+  # could take the app over; the account the init container writes closes it.
+  # Asked through the Gateway with the edge's session, because that is the only
+  # way in for a person.
+  log "autobrr's onboarding endpoint is refused now that the account exists"
+  portal_login "$WORK/edge-onboard-jar" "$LOGIN" "$AUTHELIA_PASSWORD" "https://${DOMAIN}/autobrr/" "$gw_addr" "$WORK/pebble-root.pem"
+  echo "  portal sign-in for the request: ${PORTAL_CODE}"
+  [ "$PORTAL_CODE" = 200 ] || { echo "the portal refused the box's own account (${PORTAL_CODE})"; fail=1; }
+  onboard_code=$(curl -sS -o "$WORK/onboard.json" -w '%{http_code}' -b "$WORK/edge-onboard-jar" \
+    --resolve "${DOMAIN}:443:${gw_addr}" --cacert "$WORK/pebble-root.pem" \
+    -X POST "https://${DOMAIN}/autobrr/api/auth/onboard" -H 'Content-Type: application/json' \
+    --data '{"username":"intruder","password":"intruder-pass-123"}' 2>/dev/null || true)
+  echo "  POST /autobrr/api/auth/onboard with the edge session: ${onboard_code} $(head -c 160 "$WORK/onboard.json" 2>/dev/null)"
+  [ "$onboard_code" = 503 ] ||
+    { echo "autobrr's onboarding endpoint answered ${onboard_code}: the account that closes it is missing"; fail=1; }
+  grep -q 'onboarding unavailable' "$WORK/onboard.json" ||
+    { echo "the refusal is not autobrr's own onboarding one"; fail=1; }
 
   # ---- the claims outlive the release ----------------------------------------
   # The one destructive command an operator runs is `helm uninstall`: the data
@@ -1737,6 +3228,28 @@ EOF
   [ -n "$before_addr" ] || { echo "the pre-installed MetalLB did not answer a LoadBalancer Service"; fail=1; }
   echo "  a LoadBalancer answers before box runs: ${before_addr}"
 
+  # ---- a port in box's band, held by someone else -------------------------
+  # The band is where the API server does *not* put its own allocations, so the
+  # only way a port there is taken is a Service that asked for it by number.
+  # box has to see it -- that LIST across namespaces is the whole mechanism --
+  # and pick around it.
+  $K create namespace port-holder --dry-run=client -o yaml | $K apply -f - >/dev/null
+  $K -n port-holder apply -f - >/dev/null <<'EOF'
+apiVersion: v1
+kind: Service
+metadata:
+  name: holder
+spec:
+  type: NodePort
+  ports:
+    - port: 80
+      nodePort: 30000
+EOF
+  held_port=$($K -n port-holder get service holder -o jsonpath='{.spec.ports[0].nodePort}' || true)
+  [ "$held_port" = 30000 ] ||
+    { echo "could not hold nodePort 30000 in another namespace (got ${held_port:-nothing})"; fail=1; }
+  echo "  another namespace holds nodePort 30000 before box runs"
+
   # ---- bootstrap: box must use what answers ---------------------------------
   log "box bootstrap: the Gateway gets an address without MetalLB, so none is installed"
   if bootstrap "$WORK/bootstrap1.txt"; then
@@ -1758,6 +3271,12 @@ EOF
   grep -q "the Gateway already has an address: " "$WORK/bootstrap1.txt" ||
     { echo "the Gateway's own address did not answer the question"; fail=1; }
   grep -q "^wiring ok" "$WORK/bootstrap1.txt" || { echo "box did not report a healthy receipt"; fail=1; }
+  # A port in the band was already held by an unrelated Service when box ran,
+  # and box must not have picked it -- nor anything else someone else holds.
+  assert_torrent_port "the port another Service already held"
+  picked=$TORRENT_PORT
+  [ "$picked" != 30000 ] ||
+    { echo "box picked the nodePort the holder Service was created with"; fail=1; }
 
   # Nothing box owns was installed: no release, no pool, no advertisement, and
   # no probe Service (the Gateway's own status is the probe).
@@ -1816,6 +3335,55 @@ PY
   [ -z "$($K get clusterissuer s5n-letsencrypt -o jsonpath='{.spec.acme.skipTLSVerify}')" ] ||
     { echo "the production issuer skips ACME endpoint verification"; fail=1; }
 
+  # ---- the anchor: the box root travels into the seedbox's namespace ---------
+  # A self-signed host's certificate chains to one root box owns, so root's run
+  # copies that root into the seedbox's namespace: it is what an app which
+  # fetches the login's OIDC documents from its own pod has to trust. The
+  # ConfigMap carries the certificate and nothing else -- never a key.
+  root_crt=$($K -n cert-manager get secret s5n-root-ca -o jsonpath='{.data.tls\.crt}' | base64 -d || true)
+  [ -n "$root_crt" ] || { echo "the box root's Secret cert-manager/s5n-root-ca is empty or missing"; fail=1; }
+  # The issuer the certificate names is a CA over the root, not the bare
+  # self-signed one 0.3.0 shipped: same name, different object.
+  [ "$($K get clusterissuer s5n-selfsigned -o jsonpath='{.spec.ca.secretName}' || true)" = s5n-root-ca ] ||
+    { echo "s5n-selfsigned is not a CA issuer over s5n-root-ca"; fail=1; }
+  anchor=$($K -n "$NS" get configmap s5n-host-ca -o jsonpath='{.data.ca\.crt}' 2>/dev/null || true)
+  [ -n "$anchor" ] || { echo "root's run did not write ConfigMap ${NS}/s5n-host-ca for a self-signed host"; fail=1; }
+  same_cert "$anchor" "$root_crt" ||
+    { echo "s5n-host-ca does not hold the box root's certificate"; fail=1; }
+  anchor_keys=$($K -n "$NS" get configmap s5n-host-ca -o json 2>/dev/null |
+    python3 -c 'import json,sys;print(",".join(sorted(json.load(sys.stdin).get("data",{}).keys())))' || true)
+  [ "$anchor_keys" = ca.crt ] || { echo "s5n-host-ca carries ${anchor_keys}, want the key ca.crt alone"; fail=1; }
+  printf '%s\n' "$anchor" >"$WORK/anchor-ca.pem"
+
+  # The certificate the Gateway serves is the root's child, verified against
+  # that same ConfigMap: the chain is captured the way a client sees it, and
+  # `openssl verify` is the assertion. 0.3.0's shape would pass a naive check --
+  # the leaf was its own CA -- so the leaf is also compared with the root.
+  echo | openssl s_client -connect "${lb_addr}:443" -servername "${DOMAIN}" -showcerts \
+    >"$WORK/served-chain.pem" 2>/dev/null || true
+  awk '/BEGIN CERTIFICATE/{n++} n==1' "$WORK/served-chain.pem" >"$WORK/served-leaf.pem"
+  if [ ! -s "$WORK/served-leaf.pem" ]; then
+    echo "openssl s_client through the Gateway returned no certificate"
+    fail=1
+  else
+    echo "  served: $(openssl x509 -in "$WORK/served-leaf.pem" -noout -subject -issuer 2>/dev/null | tr '\n' ' ')"
+    if openssl verify -CAfile "$WORK/anchor-ca.pem" "$WORK/served-leaf.pem" >"$WORK/verify.txt" 2>&1; then
+      echo "  verify: $(cat "$WORK/verify.txt")"
+    else
+      echo "the certificate ${DOMAIN} serves does not verify against s5n-host-ca"
+      cat "$WORK/verify.txt"
+      fail=1
+    fi
+    if same_cert "$(cat "$WORK/served-leaf.pem")" "$root_crt"; then
+      echo "the served certificate is the root itself, not a leaf signed by it"
+      fail=1
+    fi
+  fi
+  # A client that trusts nothing but the anchor gets the app's own answer.
+  verified_code=$(https_get "$lb_addr" /sonarr/ping "$WORK/anchor-ca.pem" || true)
+  echo "  HTTPS ${DOMAIN}/sonarr/ping with s5n-host-ca as the only anchor: ${verified_code}"
+  [ "$verified_code" = 200 ] || { echo "the host did not answer 200 with s5n-host-ca as the only anchor"; fail=1; }
+
   https_code=$(https_get "$lb_addr" /sonarr/ping -)
   echo "  HTTPS ${DOMAIN}/sonarr/ping (self-signed): ${https_code}"
   [ "$https_code" = 200 ] || { echo "HTTPS did not answer 200 with the self-signed certificate"; fail=1; }
@@ -1847,6 +3415,24 @@ PY
   esac
 
   $K -n "$NS" wait --for=condition=Ready pod -l 'app.kubernetes.io/instance=s5n,s5n.io/app' --timeout=300s || fail=1
+
+  # ---- the provider, on a self-signed box ----------------------------------
+  # The same app, the same issuer, and this time the anchor is the box's own
+  # root: nothing public signs this host, so root's init copied the root into
+  # the namespace and the pod trusts it with SSL_CERT_DIR. Ready on the first
+  # install is the whole proof -- qui does not start until it can read the
+  # discovery document.
+  log "the provider on a self-signed host: the box root is the anchor"
+  assert_oidc "$DOMAIN" qui QUI
+  assert_oidc "$DOMAIN" autobrr AUTOBRR
+  # The same sign-in on a host nothing public signs: the browser's side of it
+  # trusts s5n-host-ca alone, which is what a person's browser does after
+  # importing the box's root.
+  log "the sign-in on a self-signed host: both clients' OIDC round trips"
+  oidc_login qui /qui /qui/api/auth/me "$lb_addr" "$WORK/anchor-ca.pem"
+  oidc_refuses_another_login qui /qui "$lb_addr" "$WORK/anchor-ca.pem"
+  oidc_login autobrr /autobrr /autobrr/api/auth/validate "$lb_addr" "$WORK/anchor-ca.pem"
+  oidc_refuses_another_login autobrr /autobrr "$lb_addr" "$WORK/anchor-ca.pem"
 
   # ---- a second bootstrap: still nothing installed -------------------------
   # box's MetalLB is still not a release it can see, so the second run asks the
@@ -1882,6 +3468,8 @@ PY
     echo "the second run installed MetalLB"; fail=1
   fi
   grep -q "nothing to change" "$WORK/bootstrap2.txt" || { echo "the second init did not say nothing to change"; fail=1; }
+  # The second run keeps the port the first one recorded.
+  assert_torrent_port "after the second bootstrap" "$TORRENT_PORT"
   [ "$(helm_revision metallb-system)" = 0 ] ||
     { echo "the second run created a metallb Helm release"; fail=1; }
   if $K -n metallb-system get ipaddresspool s5n-pool >/dev/null 2>&1; then
@@ -1902,6 +3490,344 @@ PY
   [ "$(sha256sum "$WORK/values.yaml" | cut -d' ' -f1)" = "$values_before" ] ||
     { echo "the second bootstrap rewrote the values file"; fail=1; }
   [ "$(revision)" = "$rev1" ] || { echo "the second bootstrap created a release revision"; fail=1; }
+
+
+  # ---- a renewal keeps the anchor -------------------------------------------
+  # Force a re-issue with the trigger box itself uses -- the Issuing condition
+  # `cmctl renew` sets -- and prove the anchor did not move. That is the whole
+  # reason for a root: a new leaf, one anchor, and no pod restarted.
+  serial_before_renewal=$(tls_serial "$cert" || true)
+  anchor_rv_before=$($K -n "$NS" get configmap s5n-host-ca -o jsonpath='{.metadata.resourceVersion}' || true)
+  $K -n s5n-gateway get certificate "$cert" -o json | python3 -c '
+import json, sys
+crt = json.load(sys.stdin)
+conds = [c for c in crt["status"].get("conditions", []) if c["type"] != "Issuing"]
+conds.append({"type": "Issuing", "status": "True", "reason": "ManuallyTriggered",
+              "message": "Certificate re-issuance manually triggered",
+              "observedGeneration": crt["metadata"]["generation"],
+              "lastTransitionTime": "2026-01-01T00:00:00Z"})
+print(json.dumps({"status": {"conditions": conds}}))' >"$WORK/cert-status.json"
+  $K -n s5n-gateway patch certificate "$cert" --subresource=status --type=merge \
+    -p "$(cat "$WORK/cert-status.json")" >/dev/null ||
+    { echo "could not set the Issuing condition on ${cert}"; fail=1; }
+  serial_after_renewal=""
+  for i in $(seq 1 60); do
+    serial_after_renewal=$(tls_serial "$cert" || true)
+    [ -n "$serial_after_renewal" ] && [ "$serial_after_renewal" != "$serial_before_renewal" ] && break
+    sleep 2
+  done
+  $K -n s5n-gateway wait --for=condition=Ready "certificate/$cert" --timeout=120s || fail=1
+  [ -n "$serial_after_renewal" ] && [ "$serial_after_renewal" != "$serial_before_renewal" ] ||
+    { echo "the forced renewal did not produce a new serial (was ${serial_before_renewal})"; fail=1; }
+  echo "  renewal serial: ${serial_before_renewal} -> ${serial_after_renewal}"
+  same_cert "$($K -n "$NS" get configmap s5n-host-ca -o jsonpath='{.data.ca\.crt}' || true)" "$anchor" ||
+    { echo "the anchor's certificate changed with the renewal"; fail=1; }
+  [ "$($K -n "$NS" get configmap s5n-host-ca -o jsonpath='{.metadata.resourceVersion}' || true)" = "$anchor_rv_before" ] ||
+    { echo "the anchor ConfigMap was rewritten by a renewal"; fail=1; }
+  # And the Gateway serves the new leaf, still verifying against that anchor.
+  served_serial=""
+  for i in $(seq 1 30); do
+    echo | openssl s_client -connect "${lb_addr}:443" -servername "${DOMAIN}" -showcerts \
+      >"$WORK/renewed-chain.pem" 2>/dev/null || true
+    awk '/BEGIN CERTIFICATE/{n++} n==1' "$WORK/renewed-chain.pem" >"$WORK/renewed-leaf.pem"
+    served_serial=$(openssl x509 -in "$WORK/renewed-leaf.pem" -noout -serial 2>/dev/null | sed 's/^serial=//' || true)
+    [ "$served_serial" = "$serial_after_renewal" ] && break
+    sleep 2
+  done
+  [ "$served_serial" = "$serial_after_renewal" ] ||
+    { echo "the Gateway still serves serial ${served_serial}, want the renewed ${serial_after_renewal}"; fail=1; }
+  openssl verify -CAfile "$WORK/anchor-ca.pem" "$WORK/renewed-leaf.pem" >"$WORK/verify2.txt" 2>&1 ||
+    { echo "the renewed certificate does not verify against the unchanged anchor"; cat "$WORK/verify2.txt"; fail=1; }
+
+  # ---- a record appears before the certificate moves: the anchor stays -------
+  # The window this pins: the operator adds the DNS record and runs `box apply`
+  # before `box init`. The host still serves the certificate init last wrote --
+  # only init's per-host step moves it to Let's Encrypt -- so the anchor has to
+  # stay, or every app that restarts while the certificate is still box's own
+  # stops trusting the login. The anchor followed DNS once: this apply would
+  # have taken it away.
+  log "a public record and an apply: the anchor stays until the certificate moves"
+  cat >"$WORK/dns-window" <<EOF
+192.0.2.10 ${DOMAIN} ${PLEX_HOST} ${SEERR_HOST} ${PBH_HOST}
+EOF
+  anchor_rv_window=$($K -n "$NS" get configmap s5n-host-ca -o jsonpath='{.metadata.resourceVersion}')
+  if "$WORK/box" apply --yes --chart-repo "$CHART_REPO" --chart-version "$CHART_VERSION" \
+    --grant "$WORK/grant.yaml" --values "$WORK/values.yaml" \
+    --dns-file "$WORK/dns-window" --paths-in-node \
+    --kubeconfig "$WORK/kubeconfig" >"$WORK/apply-dns-window.txt" 2>&1; then
+    cat "$WORK/apply-dns-window.txt"
+  else
+    cat "$WORK/apply-dns-window.txt"; fail=1
+  fi
+  grep -qF "nothing to change" "$WORK/apply-dns-window.txt" ||
+    { echo "the apply over a self-signed host had work to do"; fail=1; }
+  [ "$($K -n s5n-gateway get certificate "$cert" -o jsonpath='{.spec.issuerRef.name}')" = s5n-selfsigned ] ||
+    { echo "the host's Certificate moved to another issuer without init"; fail=1; }
+  same_cert "$($K -n "$NS" get configmap s5n-host-ca -o jsonpath='{.data.ca\.crt}' || true)" "$anchor" ||
+    { echo "a public DNS answer moved the anchor while the host still served box's own certificate"; fail=1; }
+  [ "$($K -n "$NS" get configmap s5n-host-ca -o jsonpath='{.metadata.resourceVersion}')" = "$anchor_rv_window" ] ||
+    { echo "the anchor ConfigMap was rewritten by an apply that saw a public record"; fail=1; }
+  echo "  s5n-host-ca untouched: the certificate is still self-signed"
+
+  # ---- an upgraded box: a leaf from 0.3.0's bare self-signed issuer ----------
+  # 0.3.0 shipped s5n-selfsigned as `selfSigned: {}`, so every host certificate
+  # was its own CA. This block recreates that state BY HAND and nothing in the
+  # product does it: it is the pre-existing box the next bootstrap has to
+  # repair. It is applied under box's own field manager on purpose -- an
+  # installed 0.3.0 box has exactly that, and it is what lets the next apply
+  # take the field away.
+  if $K apply --server-side --field-manager=box --force-conflicts -f - >/dev/null <<'EOF'
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: s5n-selfsigned
+  labels:
+    app.kubernetes.io/part-of: s5n
+    app.kubernetes.io/managed-by: box
+spec:
+  selfSigned: {}
+EOF
+  then :; else echo "could not restore the 0.3.0 self-signed issuer"; fail=1; fi
+  [ -z "$($K get clusterissuer s5n-selfsigned -o jsonpath='{.spec.ca}' || true)" ] ||
+    { echo "the hand-made 0.3.0 issuer still names a CA"; fail=1; }
+  $K -n s5n-gateway delete secret "$cert" --ignore-not-found >/dev/null ||
+    { echo "could not delete the certificate's Secret for the 0.3.0 shape"; fail=1; }
+  serial_old_shape=""
+  for i in $(seq 1 60); do
+    serial_old_shape=$(tls_serial "$cert" || true)
+    [ -n "$serial_old_shape" ] && break
+    sleep 2
+  done
+  $K -n s5n-gateway wait --for=condition=Ready "certificate/$cert" --timeout=180s ||
+    { echo "the 0.3.0-shaped certificate never came back"; fail=1; }
+  old_shape_ca=$($K -n s5n-gateway get secret "$cert" -o jsonpath='{.data.ca\.crt}' | base64 -d || true)
+  old_shape_leaf=$($K -n s5n-gateway get secret "$cert" -o jsonpath='{.data.tls\.crt}' | base64 -d || true)
+  same_cert "$old_shape_ca" "$old_shape_leaf" ||
+    { echo "the hand-made certificate is not its own CA, so this is not the 0.3.0 shape"; fail=1; }
+  echo "  pre-upgrade leaf is its own CA (serial ${serial_old_shape})"
+
+  log "box bootstrap: an upgraded box's host certificate is re-issued from the root"
+  if bootstrap "$WORK/bootstrap-upgrade.txt"; then
+    cat "$WORK/bootstrap-upgrade.txt"
+  else
+    cat "$WORK/bootstrap-upgrade.txt"; fail=1
+  fi
+  grep -qF "re-issued from the box root" "$WORK/bootstrap-upgrade.txt" ||
+    { echo "box did not report re-issuing the host certificate"; fail=1; }
+  [ "$($K get clusterissuer s5n-selfsigned -o jsonpath='{.spec.ca.secretName}' || true)" = s5n-root-ca ] ||
+    { echo "bootstrap did not restore s5n-selfsigned as a CA issuer"; fail=1; }
+  $K -n s5n-gateway wait --for=condition=Ready "certificate/$cert" --timeout=180s || fail=1
+  serial_after_upgrade=$(tls_serial "$cert" || true)
+  [ -n "$serial_after_upgrade" ] && [ "$serial_after_upgrade" != "$serial_old_shape" ] ||
+    { echo "the host certificate was not re-issued after the upgrade (still ${serial_after_upgrade})"; fail=1; }
+  same_cert "$($K -n s5n-gateway get secret "$cert" -o jsonpath='{.data.ca\.crt}' | base64 -d || true)" "$root_crt" ||
+    { echo "the re-issued certificate does not chain to the box root"; fail=1; }
+  echo "  upgraded serial: ${serial_old_shape} -> ${serial_after_upgrade}, chained to s5n-root-ca"
+
+  # ---- an upgraded box: the Arr's stored qBittorrent password is cleared -----
+  # The previous release's wiring wrote its own copy of the qBittorrent password
+  # into every Arr's download client. Both credential fields are owned, and now
+  # owned as empty, so the next run of the release's own Job clears the stored
+  # copy instead of needing it. The upgrade is measured the only way an API
+  # allows: put a password back through Sonarr's own endpoint (what that install
+  # left behind), run the Job, and read the client again.
+  log "an upgraded box: the Arr's stored qBittorrent password is cleared"
+  sonarr_key=$($K -n "$NS" get secret s5n-keys -o jsonpath='{.data.sonarr-apikey}' 2>/dev/null | base64 -d || true)
+  [ -n "$sonarr_key" ] || { echo "the release Secret has no sonarr API key"; fail=1; }
+  $K -n "$NS" exec sonarr-0 -- curl -s -H "X-Api-Key: ${sonarr_key}" \
+    "http://localhost:8989/sonarr/api/v3/downloadclient" >"$WORK/sonarr-before-upgrade.json" 2>/dev/null || true
+  sonarr_client_id=$(python3 - "$WORK/sonarr-before-upgrade.json" "$WORK/sonarr-with-password.json" <<'PYSEED'
+import json, sys
+clients = json.load(open(sys.argv[1], encoding="utf-8"))
+qbit = [c for c in clients if str(c.get("implementation", "")).lower() == "qbittorrent"]
+if len(qbit) != 1:
+    sys.exit("sonarr holds %d qBittorrent clients, want 1" % len(qbit))
+body = qbit[0]
+for field in body.get("fields") or []:
+    if field.get("name") == "username":
+        field["value"] = "admin"
+    if field.get("name") == "password":
+        field["value"] = "left-over-password"
+with open(sys.argv[2], "w", encoding="utf-8") as out:
+    json.dump(body, out)
+print(body.get("id", ""))
+PYSEED
+  ) || true
+  [ -n "$sonarr_client_id" ] || { echo "could not read Sonarr's qBittorrent client id"; fail=1; }
+  seeded=$($K -n "$NS" exec -i sonarr-0 -- curl -s -o /dev/null -w '%{http_code}' \
+    -X PUT -H "X-Api-Key: ${sonarr_key}" -H 'Content-Type: application/json' \
+    --data-binary @- "http://localhost:8989/sonarr/api/v3/downloadclient/${sonarr_client_id}?forceSave=true" \
+    2>/dev/null <"$WORK/sonarr-with-password.json" || true)
+  echo "  PUT the previous release's credentials back into Sonarr's client ${sonarr_client_id}: ${seeded}"
+  # Sonarr answers 202 Accepted on a download client PUT, not 200.
+  case "$seeded" in
+    200 | 201 | 202 | 204) ;;
+    *) echo "Sonarr refused the seeded download client: ${seeded}"; fail=1 ;;
+  esac
+
+  # What the Arr answers for a *set* privacy field, for the record and for the
+  # assertion below: a set password comes back as its mask. Reading it here is
+  # what makes the empty form after the Job run mean something.
+  $K -n "$NS" exec sonarr-0 -- curl -s -H "X-Api-Key: ${sonarr_key}" \
+    "http://localhost:8989/sonarr/api/v3/downloadclient" >"$WORK/sonarr-seeded.json" 2>/dev/null || true
+  python3 - "$WORK/sonarr-seeded.json" <<'PYSEEDREAD' || fail=1
+import json, sys
+clients = json.load(open(sys.argv[1], encoding="utf-8"))
+qbit = [c for c in clients if str(c.get("implementation", "")).lower() == "qbittorrent"]
+fields = {f.get("name"): f.get("value") for f in (qbit[0].get("fields") or [])} if qbit else {}
+print("  Sonarr's client with the password set: username %r, password %r"
+      % (fields.get("username"), fields.get("password")))
+if not fields.get("password"):
+    sys.exit("the seeded password did not take: the Arr answers %r" % (fields.get("password"),))
+PYSEEDREAD
+
+  rerun_wiring "$WORK/rerun-upgrade.txt" || fail=1
+  upgrade_detail=$(status_field "[s['detail'] for s in d['steps'] if s['name']=='sonarr/downloadclient'][0]" 2>/dev/null || echo missing)
+  echo "  sonarr/downloadclient after the upgrade run: ${upgrade_detail}"
+  [ "$upgrade_detail" = updated ] ||
+    { echo "the Job did not rewrite the Arr's download client: the stored password was left in place"; fail=1; }
+
+  $K -n "$NS" exec sonarr-0 -- curl -s -H "X-Api-Key: ${sonarr_key}" \
+    "http://localhost:8989/sonarr/api/v3/downloadclient" >"$WORK/sonarr-after-upgrade.json" 2>/dev/null || true
+  # What the Arr answers for a privacy field is the point of reading it back: a
+  # set password comes back as its mask, and an empty one as an empty value, so
+  # asserting the empty form is asserting that no plaintext is left.
+  if python3 - "$WORK/sonarr-after-upgrade.json" <<'PYCHECK'
+import json, sys
+clients = json.load(open(sys.argv[1], encoding="utf-8"))
+qbit = [c for c in clients if str(c.get("implementation", "")).lower() == "qbittorrent"]
+if len(qbit) != 1:
+    sys.exit("sonarr holds %d qBittorrent clients, want 1" % len(qbit))
+fields = {f.get("name"): f.get("value") for f in qbit[0].get("fields") or []}
+password = fields.get("password")
+print("  Sonarr's client after the upgrade: username %r, password %r"
+      % (fields.get("username"), password))
+if fields.get("username") or password not in (None, ""):
+    print("  Sonarr still holds a credential: the Job's empty owned fields did not reach it")
+    sys.exit(1)
+sys.exit(0)
+PYCHECK
+  then :; else fail=1; fi
+
+  # ---- the no-DNS card, then the move to an issued certificate --------------
+  # Run 1 had no DNS answers at all. init installed self-signed certificates
+  # for the domain and for each app host, and its final card said, per host,
+  # that the name has no record and that a re-run is what moves it. This is the
+  # state a box with a made-up name is in, and it is not a failure.
+  log "the no-DNS final card names every host and its record"
+  cert=s5n-tls-box-internal-example
+  app_cert=s5n-tls-seerr-box-internal-example
+  grep -qF "${DOMAIN} has no DNS record, so its certificate is self-signed; add one, then run box init again to move it to Let's Encrypt" "$WORK/bootstrap1.txt" ||
+    { echo "the final card does not name the domain's missing record"; fail=1; }
+  for host in "$PLEX_HOST" "$SEERR_HOST" "$PBH_HOST"; do
+    grep -qF "${host} has no DNS record, so its certificate is self-signed; add either a wildcard *.${DOMAIN} or a record for ${host}, then run box init again to move it to Let's Encrypt" "$WORK/bootstrap1.txt" ||
+      { echo "the final card does not name ${host}'s missing record"; fail=1; }
+  done
+  $K -n s5n-gateway wait --for=condition=Ready "certificate/$app_cert" --timeout=120s ||
+    { echo "the app host's self-signed Certificate never became Ready"; fail=1; }
+  [ "$($K -n s5n-gateway get certificate "$app_cert" -o jsonpath='{.spec.issuerRef.name}')" = s5n-selfsigned ] ||
+    { echo "the app host's Certificate is not self-signed on a box with no records"; fail=1; }
+  old_serial=$(tls_serial "$cert")
+  old_app_serial=$(tls_serial "$app_cert")
+  echo "  self-signed serials: ${DOMAIN} ${old_serial}, ${SEERR_HOST} ${old_app_serial}"
+
+  # The records exist now. --dns-file is the test's own answer for the host's
+  # resolver: the same file for every name, a public address, so init's rule
+  # (public answer -> Let's Encrypt) has something real to decide on. Pebble
+  # and cert-manager resolve the names through CoreDNS, which points at the
+  # Gateway, so the HTTP-01 challenge still arrives on port 80.
+  log "a record exists: init again moves the same hosts to Let's Encrypt"
+  cat >"$WORK/dns" <<EOF
+192.0.2.10 ${DOMAIN} ${PLEX_HOST} ${SEERR_HOST} ${PBH_HOST}
+EOF
+  install_pebble
+  [ "$fail" = 0 ] || return 0
+  # Pebble's root is this scenario's anchor: an ACME-issued certificate has no
+  # ca.crt in its Secret, so box is given the root the login's own certificate
+  # chains to. On a real Let's Encrypt box there is nothing to give: the image's
+  # bundle covers it.
+  CA_ARGS=(--ca-file "$WORK/pebble-root.pem")
+  patch_coredns "$lb_addr" "$DOMAIN" "$PLEX_HOST" "$SEERR_HOST" ||
+    { echo "could not patch CoreDNS for the box's names"; fail=1; }
+  ACME_ARGS=(--acme-server "https://pebble.pebble.svc:14000/dir")
+  DNS_ARGS=(--dns-file "$WORK/dns")
+  log "box bootstrap: the names answer now, so the same certificates are issued"
+  if bootstrap "$WORK/bootstrap3.txt"; then
+    cat "$WORK/bootstrap3.txt"
+  else
+    cat "$WORK/bootstrap3.txt"; fail=1
+  fi
+  for host in "$DOMAIN" "$PLEX_HOST" "$SEERR_HOST" "$PBH_HOST"; do
+    grep -qF "tls: ${host} resolves to 192.0.2.10: using Let's Encrypt" "$WORK/bootstrap3.txt" ||
+      { echo "init did not move ${host} to Let's Encrypt"; fail=1; }
+  done
+  if grep -q "has no DNS record" "$WORK/bootstrap3.txt"; then
+    echo "the card still says a name has no record after the record was added"
+    fail=1
+  fi
+  $K -n s5n-gateway wait --for=condition=Ready "certificate/$cert" --timeout=180s ||
+    { echo "the domain's Certificate never became Ready against Pebble"; fail=1; }
+  $K -n s5n-gateway wait --for=condition=Ready "certificate/$app_cert" --timeout=180s ||
+    { echo "the app host's Certificate never became Ready against Pebble"; fail=1; }
+  for name in "$cert" "$app_cert"; do
+    got=$($K -n s5n-gateway get certificate "$name" -o jsonpath='{.spec.issuerRef.name}')
+    [ "$got" = s5n-letsencrypt ] || { echo "${name} still names issuer ${got}"; fail=1; }
+  done
+  new_serial=$(tls_serial "$cert")
+  new_app_serial=$(tls_serial "$app_cert")
+  echo "  issued serials: ${DOMAIN} ${new_serial}, ${SEERR_HOST} ${new_app_serial}"
+  [ -n "$new_serial" ] && [ "$new_serial" != "$old_serial" ] ||
+    { echo "the domain's certificate was not re-issued"; fail=1; }
+  [ -n "$new_app_serial" ] && [ "$new_app_serial" != "$old_app_serial" ] ||
+    { echo "the app host's certificate was not re-issued"; fail=1; }
+
+  # The move is the run that writes the host's Certificate with a public
+  # issuer, and --ca-file is what an ACME certificate's anchor has to come
+  # from: its Secret carries no ca.crt. So the anchor is the file's root, not
+  # the box's own -- the root under a certificate that is no longer served
+  # would be an anchor nothing chains to.
+  same_cert "$($K -n "$NS" get configmap s5n-host-ca -o jsonpath='{.data.ca\.crt}' 2>/dev/null || true)" \
+    "$(cat "$WORK/pebble-root.pem")" ||
+    { echo "the anchor after the move is not the one --ca-file gave"; fail=1; }
+
+  # --ca-file is the same writer with another source, for the one mode with
+  # nothing to copy: an ACME certificate has no ca.crt at any point. The e2e
+  # hands box Pebble's root on init -- the run that writes the host's
+  # Certificate, and so the run the anchor follows -- and asserts the ConfigMap,
+  # then an init without the flag takes it away again, so the flag feeds the
+  # product path instead of adding a test-only one. The ConfigMap is removed
+  # first here, because the move above already wrote this very certificate:
+  # this block is the writer with no anchor to compare against.
+  $K -n "$NS" delete configmap s5n-host-ca --ignore-not-found >/dev/null
+  log "box init --ca-file: an ACME host's anchor comes from the file"
+  if init "$WORK/init-ca.txt" --ca-file "$WORK/pebble-root.pem"; then
+    grep -qF "wrote ConfigMap ${NS}/s5n-host-ca" "$WORK/init-ca.txt" ||
+      { echo "box did not report writing the anchor from --ca-file"; cat "$WORK/init-ca.txt"; fail=1; }
+  else
+    cat "$WORK/init-ca.txt"; fail=1
+  fi
+  same_cert "$($K -n "$NS" get configmap s5n-host-ca -o jsonpath='{.data.ca\.crt}' 2>/dev/null || true)" \
+    "$(cat "$WORK/pebble-root.pem")" ||
+    { echo "--ca-file did not reach ${NS}/s5n-host-ca"; fail=1; }
+  log "box init: an ACME host's anchor goes again"
+  # Without the dev flag: the move above is the only run that passes it, and
+  # this is the assertion that a public host carries no anchor.
+  CA_ARGS=()
+  if init "$WORK/init-noca.txt"; then :; else cat "$WORK/init-noca.txt"; fail=1; fi
+  if $K -n "$NS" get configmap s5n-host-ca >/dev/null 2>&1; then
+    echo "the anchor survived an init without --ca-file on an ACME host"; fail=1
+  fi
+  https_code=$(https_get "$lb_addr" /sonarr/ping "$WORK/pebble-root.pem")
+  echo "  HTTPS ${DOMAIN}/sonarr/ping with Pebble's CA: ${https_code}"
+  [ "$https_code" = 200 ] || { echo "HTTPS did not answer 200 with Pebble's CA after the move"; fail=1; }
+  seerr_https=$(curl -sS -L -o /dev/null -w '%{http_code}' \
+    --resolve "${SEERR_HOST}:443:${lb_addr}" --cacert "$WORK/pebble-root.pem" \
+    "https://${SEERR_HOST}/" 2>/dev/null || true)
+  echo "  HTTPS ${SEERR_HOST}/ with Pebble's CA (following Seerr's redirect): ${seerr_https}"
+  [ "$seerr_https" = 200 ] || { echo "the app host did not serve the issued certificate"; fail=1; }
+
+  # The holder Service was this scenario's setup, not part of the install.
+  $K delete namespace port-holder --wait=false >/dev/null 2>&1 || true
 }
 
 # ---- scenario: foreign-gateway ----------------------------------------------

@@ -30,6 +30,16 @@ Each section marks its status:
 - **Dialogs are huh (decided),** behind box's own prompt interface, with box's theme
   on top: its masthead, accent and step header. Where huh can't behave (no terminal,
   `TERM=dumb`), box falls back to plain line prompts. `NO_COLOR` drops the styling.
+  The palette is a theme (`internal/theme`), chosen by the `theme` key in the values file:
+  a pair name (`s5n`, the default, or `swizzin`, `catppuccin`, `solarized`, `gruvbox`,
+  `nord`, `dracula`) follows the terminal's background, and a variant name (`s5n-light`,
+  `catppuccin-mocha`) pins one. An unknown name stops box before it draws anything and
+  lists the names. Every variant passes a contrast test. box asks the terminal for its
+  background with OSC 11 followed by a device-attributes request every terminal answers,
+  so a terminal with no colour to report (PuTTY, screen, mosh) costs one round trip, not
+  a timeout; one that answers neither is given a second, and the answer is dark.
+  Painting the terminal's own background is a separate opt-in, restored on every exit
+  box can catch; `kill -9` or a dropped connection leaves it behind.
   Choosing another library later means rewriting one adapter, not init.
 - **The whole run is box (decided).** Progress outside a dialog is not raw text either:
   cluster detection, the platform plan, installs and waits, file writes and the apply all
@@ -115,6 +125,50 @@ across filesystems, and hardlinks don't cross them.
   point, free space and owner. Unattended runs the same check at the start, with fewer
   guardrails.
 
+### Homes, data paths and SSH (decided)
+
+A user's seedbox files and their home directory are different places, because box hands
+the grant's paths to kubelet as host paths, and mounting a host path follows symlinks on
+the host. A user who owns a directory above their data path can swap the data directory
+for a link to someone else's, and their next pod start mounts it.
+
+- **Every directory above a grant path is root-owned and writable only by root.** box
+  checks this at `init`, `adduser` and `apply` and stops, naming the directory, when it
+  doesn't hold. The leaf itself (`data/`, `config/`) belongs to the seedbox's puid:pgid.
+  Root's own seedbox is exempt, since its user can already become root, which keeps
+  existing installs with data under `/home/<user>` adoptable.
+- **The default is `/srv/s5n/<user>/{data,config}`,** with `/srv/s5n/<user>` owned by
+  `root:<user>` and mode 0750, so other users can't list it. It is only the default:
+  root can give any paths at `init` or `adduser` (a pool, a union filesystem, a dataset
+  per user, config on a separate disk) as long as the rule above holds. Hardlinks only
+  matter inside `data`, so data and config may sit on different filesystems.
+- **A user's puid is their OS uid.** What they see over SSH is what the apps wrote, owned
+  by them.
+- **The home directory is an ordinary home:** dotfiles, `~/.ssh`, the values file and the
+  user's kubeconfig. `adduser` puts `~/data` and `~/config` symlinks in it, so a login
+  lands next to the files. box never reads through those links, and a user who breaks
+  them breaks nothing but the shortcut.
+- **box never follows a symlink when it walks a seedbox's files on the host** (init's
+  report of what a path holds, status, backup), so a link a user plants can't turn a
+  root-run walk into a read of someone else's data.
+
+SSH is the host's business, the way mounts are: box never edits sshd's configuration.
+
+- **Password logins work.** `adduser` asks for one password, or generates one and shows
+  it once, and writes its hash to both the login (argon2id) and `/etc/shadow`. No copy is
+  kept in plain text anywhere. Root's `box chpasswd <user>` sets both again. A user's own
+  `box chpasswd` changes the web login only, since their box can't write `/etc/shadow`;
+  `passwd` changes the SSH one, as on any Linux host.
+- **Keys:** `adduser --ssh-key <file|->` (repeatable) writes `authorized_keys`.
+- **When the host's sshd refuses passwords,** `adduser` says so, names the setting
+  (`PasswordAuthentication`), and points at `--ssh-key`. It doesn't change the setting.
+- **Users join no group with power over the host** (no sudo, no docker, no k0s).
+- **box never asks a user for their current password.** Logging in proved who they are,
+  and their box acts through their namespace kubeconfig (mode 0600 in their home), not
+  through a password.
+- **SFTP-only accounts are not part of v1.** They need sshd configuration, which box
+  doesn't own; they belong with the enterprise track's SSH routing.
+
 ### How a user's box gets its power (proposed)
 
 Without root, a user's box gets a kubeconfig scoped to that user's namespace. Everything
@@ -140,8 +194,14 @@ the user's own (see Logins). Pod Security `restricted` still does the
 rest. This raises the chart's `kubeVersion` floor to 1.30, where the API is GA.
 
 **Root assigns the torrent port (decided).** It's a port on the node that every seedbox
-shares, so it lives in the grant with the Service type, and `box adduser` picks a free
-one.
+shares, so it lives in the grant with the Service type. `box init` settles it once: a port
+the grant already holds is kept, and so is the one an installed seedbox's peers Service is
+already on; otherwise box picks one at random from the lower band of the NodePort range
+(30000-30085 for the default range), skipping every nodePort a Service in the cluster
+holds. Kubernetes assigns its own nodePorts (a LoadBalancer's, one per listener) from the
+rest of the range and reaches into that band only when the rest is full, so a port there
+isn't taken out from under the box; a fixed port outside it can be, and then every apply
+fails. A band with no free port refuses before any write.
 
 ## Logins (decided, mechanism proposed)
 
@@ -150,7 +210,25 @@ with their account name, and reaches every app that has an admin UI: qBittorrent
 Arrs, Prowlarr, qui. One auth provider checks the login at the Gateway. It is part of the
 platform layer: root's `bootstrap` installs it, and `box adduser` adds the user to it.
 Each user's domain admits only that user. Behind it the apps have no login of their own
-(the Arrs run with `External` authentication) and are reachable only through the Gateway.
+(the Arrs run with `External` authentication, PeerBanHelper with its login switched
+off, qBittorrent with its password bypassed for private addresses) and are reachable
+only through the Gateway.
+
+**qBittorrent skips its password for private addresses (decided).** qBittorrent can't
+switch its login off, so it bypasses it for the private ranges
+(`AuthSubnetWhitelist`: 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 100.64.0.0/10,
+fc00::/7, the same list the release's egress policy treats as internal) and for
+loopback (`kubectl port-forward`). Everything that reaches it is then one of two
+callers: Envoy, which forwards only requests the edge's login has already admitted
+(qBittorrent's paths have no bypass at the edge, unlike an Arr's `/api`), or an app
+the release's NetworkPolicy lets in. That is the same boundary the Arrs sit behind
+with `External`. The apps that call it (the Arrs, qui, autobrr, PeerBanHelper, the
+wiring Job) connect with an empty username and password, so no app's database holds
+a copy of a qBittorrent credential. The init container still seals a generated
+password into `qBittorrent.conf`, so qBittorrent never mints a temporary one and
+prints it to its log, but nothing is given it. `box init` no longer asks for a
+qBittorrent login name; `apps.qbittorrent.webuiUsername` keeps its `admin` default only
+so that existing values still validate.
 
 **One auth mechanism, no fallback (decided).** Wiring a login into each app separately
 would be a second auth system with its own reset path, tests and docs, so box doesn't
@@ -160,8 +238,8 @@ build one. That is why Envoy Gateway is the only Gateway implementation box supp
 a hash and nothing else does. A forgotten password is reset, not recovered. `init` (and
 `adduser`) asks for one; an empty answer means box generates a random one and shows it
 once, at the end of the run, the way swizzin always has. Credentials
-between apps (API keys, the qBittorrent account the Arrs use) are generated, kept in the
-release Secret, and never the person's password.
+between apps (API keys, the qui and autobrr accounts the wiring Job signs in with) are
+generated, kept in the release Secret, and never the person's password.
 
 **Plex, Seerr and Tautulli sign in through Plex (decided).** Players talk to Plex
 directly, and Seerr's users are the Plex server's friends, so these three stay outside
@@ -183,6 +261,43 @@ together on a claim box creates, never in a Secret, because Authelia can't watch
 in a Secret volume. That means exactly one replica, with file watching on, so a password
 change shows up without a restart. Its sign-in page is served at `/auth` on each
 seedbox's own host name, so a seedbox needs one certificate and one cookie domain.
+
+**Apps that speak OIDC sign in through the login (decided).** Authelia is also an OIDC
+provider, with issuer `https://<host>/auth`; an app the chart's catalog marks `oidc: true`
+(qui and autobrr) has its own login switched to it, so a user still signs in once and
+the app's first visit is a redirect that comes straight back. A healthy autobrr proves
+nothing about the provider, since it starts without one and keeps retrying; only a
+sign-in does. Each seedbox has its own client per
+app, `<namespace>-<app>`, and its own authorization policy that admits only that seedbox's
+user. root's `init` writes the client secret once into a Secret in the seedbox's
+namespace and only its digest into the login, and so does root's `apply` when it enables
+an OIDC app whose client doesn't exist yet: the plan counts a missing client as login
+work. A user's `apply` can't write the login, so when the release would mount a client
+Secret that isn't there it stops before the confirm and names `box init` as root. The
+login serves OIDC exactly when its configuration names a client: the same render decides
+the provider block and the Deployment's mount of the signing material, because Authelia
+exits on a provider with no clients. The provider's signing key is generated
+once and kept beside the login's other key, outside its ConfigMap. The app reaches the
+issuer from its own pod over the box's own HTTPS name: the chart aliases that name to the
+Gateway's proxy Service (an address root's `init` records in the grant), opens egress to
+the proxy alone, and trusts the box's root where the certificate is self-signed. Only the
+Gateway's proxy may reach the login's pod at all. A plain `helm install`, or a grant from
+before the provider, has no recorded address, and the app keeps its own login switched
+off behind the edge's.
+
+**An app that keeps its own user table has one account box owns (decided).** qui and autobrr hand out API keys only to a signed-in session, so the wiring Job
+can't be given a key up front. The chart generates a password for each in the release's
+Secret, beside the qBittorrent password and the Arr keys, and box owns the account
+outright: the app's init container creates it if it is missing and sets that password on
+every start, so a password changed inside the app is put back at the next restart, and
+until then the wiring Job's report names the mismatch. The Job signs in with it on every
+run; no API key is minted or kept. Hiding the app's own login form doesn't switch its
+password login off, so this account is reachable only past the edge's login or from the
+wiring Job, which the NetworkPolicy allows. The account is named `s5n` in both apps; it is the
+wiring Job's, not another way in for the person, whose way in is still the provider.
+PeerBanHelper's equivalent is its API token: generated once in the same Secret, handed
+to the app through its environment, and used only by the Job, since the app's own login
+is switched off behind the edge.
 
 **The login is on root's Gateway, and users can't take it off (decided).** The
 SecurityPolicy that sends requests to Authelia targets the `s5n` Gateway itself and lives
@@ -232,6 +347,15 @@ Proposed:
   password never leaves the machine it was typed on.
 - Unattended, a password comes from a file or stdin, never a flag (it would sit in shell
   history and `ps`), and none supplied means a generated one, printed once.
+
+**The sign-in page carries the s5n mark, in root's theme (decided).** Authelia can be
+themed only through its `theme:` and `server.asset_path`, so box draws `logo.png` and
+`favicon.ico` from root's `theme:` and puts them beside the login's configuration. A theme
+pair (`s5n`, the default) gets Authelia's dark page and the pair's dark palette, so the
+mark keeps its real colours; a pinned light variant gets the light page. There is no
+custom CSS, and the sign-in page's Content-Security-Policy is left as Authelia ships it.
+Root's `apply` re-renders the login whenever its configuration or pictures differ, so a
+theme change shows up at once.
 
 ## Commands
 
@@ -283,7 +407,8 @@ k0s bump still never merges itself: no CI job boots k0s (the box e2e runs on kin
 a green run has not tested the new release, and the maintainer merges it.
 The download goes to a temporary file beside `/usr/local/bin/k0s` and is hashed while it
 is written; only a match is renamed into place, so an interrupted or tampered download
-never lands where the unit would exec it. Then `k0s install controller --single`, `k0s
+never lands where the unit would exec it. Then `k0s install controller --single
+--config /etc/k0s/k0s.yaml --kubelet-extra-args=--node-ip=<uplink address>`, `k0s
 start`, and box waits until the API answers `/readyz` *and* a node is Ready through
 `/var/lib/k0s/pki/admin.conf`: readyz turns true a moment before the node registers, and
 the decision that follows refuses a cluster that lists no nodes. Only then is the cluster
@@ -293,6 +418,26 @@ place says exactly what is left on the host and the command that removes it
 (`k0s stop; k0s reset`), then stops. box never runs that reset itself: it would also
 destroy a k0s installation box did not make. With the cluster up, bootstrap goes on to the
 platform layer and `init` exactly as it does on a host that already had one.
+
+**The node's address is box's choice (decided).** kube-router's automatic MTU is the
+MTU of the interface that holds the node's primary address, not the smallest on the
+host. Left to itself, kubelet takes the address the node's name resolves to, and k0s
+takes the first non-loopback IPv4 in interface order for the API, so a host already
+running a tailnet or a VPN can register the node on that tunnel. Every pod then gets the
+tunnel's MTU (1280 for Tailscale), and anything tunnelled from a pod fragments every
+packet. So box pins the address when it installs k0s: the source address the kernel
+would use on the default route, given to kubelet as `--node-ip` and written as
+`spec.api.address` in a minimal `/etc/k0s/k0s.yaml`. box never sets an MTU; with the
+node on the uplink, the automatic one is right for ethernet, PPPoE (which counts as an
+uplink, not a tunnel) and whatever a cloud gives.
+- **A default route through a tunnel stops the install,** naming the interface and the
+  MTU every pod would inherit. There is no override.
+- **A `/etc/k0s/k0s.yaml` box didn't write is never overwritten.**
+- **Once the API answers, the Node's address is checked against the pin;** a mismatch
+  fails like any other step after the binary is in place, naming both addresses.
+- **On a cluster box didn't install,** a node address on a tunnel this host holds is one
+  warning line. box doesn't change that cluster.
+- **Only a real host proves it:** kind never boots k0s, so the e2e can't.
 
 **A record is checked, not trusted (decided).** A re-run reads
 `/etc/swizzin/cluster.yaml` for what box decided — which cluster, who owns its
@@ -401,11 +546,29 @@ validated, self-signed otherwise. This is how box would do it.
   has the Gateway HTTP-01 solver, and its controller runs with Gateway API enabled. box
   reads that from the controller's config and never changes another install's flags. One
   that is present but has it switched off stops bootstrap and names the setting.
-- **Issuers are root's.** Two ClusterIssuers box owns: `s5n-letsencrypt` (ACME, HTTP-01
+- **Issuers are root's.** Two ClusterIssuers hosts use: `s5n-letsencrypt` (ACME, HTTP-01
   solver whose HTTPRoute names the `s5n` Gateway but no listener, so it attaches to
   every listener that admits `s5n-gateway`) and
   `s5n-selfsigned`. No ACME email: Let's Encrypt no longer sends expiry mail, so there is
-  nothing to ask.
+  nothing to ask. `s5n-selfsigned` is a CA issuer, not a bare self-signed one: box keeps
+  one long-lived root certificate, `s5n-root-ca` in `cert-manager` (ten years, renewed a
+  year early, its key never rotated), signed by a third issuer, `s5n-bootstrap`, that
+  signs nothing else. Bootstrap waits for the root to be Ready before it writes
+  `s5n-selfsigned`. A browser still warns, as for any self-signed certificate, but the
+  root doesn't change when a host's certificate renews, so something inside the cluster
+  can trust it once. A box from before the root (its host certificates their own CA) is
+  repaired by the next bootstrap or init: each self-signed host certificate not signed
+  by the root is re-issued from it, because cert-manager re-issues nothing when only an
+  issuer's spec changes.
+- **Apps that call the login themselves trust the box's root.** An app that signs in
+  through the login's OIDC provider fetches the provider's documents from its own pod,
+  over HTTPS to the box's own host name. With a Let's Encrypt certificate the image's
+  public roots are enough. Otherwise root's `init` copies the root into ConfigMap
+  `s5n-host-ca` in the seedbox's namespace, and the chart adds it to those apps' trust
+  store (`SSL_CERT_DIR`, which adds a directory and keeps the image's bundle). The copy
+  follows the issuer the host's certificate is actually issued by, never the name's DNS
+  answer, so a record added before the next `init` leaves both where they are. When the
+  host moves to Let's Encrypt the copy is removed. `apply` never touches it.
 - **Certificates live beside the Gateway.** A listener can only reference a Secret in
   its own namespace without a ReferenceGrant, so each host name gets a `Certificate` in
   `s5n-gateway`, plus an HTTPS listener on 443 and its own host-matched port-80 listener
@@ -434,17 +597,46 @@ validated, self-signed otherwise. This is how box would do it.
   resolves the name on every run and keeps no earlier answer; the e2e proves the move
   from a self-signed certificate to an issued one on the same host.
 - **Apps with no base URL get a host of their own.** An app whose UI writes absolute
-  asset paths (Seerr, Plex's web app) breaks under a `/<name>` prefix, so it is served
+  asset paths (Seerr, Plex's web app, PeerBanHelper) breaks under a `/<name>` prefix, so it is served
   at `<app>.<domain>` instead, with its own listener and certificate the same way as the
   box's domain. The operator provides the names: one wildcard record (`*.<domain>`) or
   one record per app, whichever their DNS allows. box doesn't manage DNS and holds no
   DNS-provider credentials, so a wildcard *certificate*, which needs DNS-01, is not
   part of this. Before box writes anything for an app host, it checks that the name
   resolves to the same addresses as the box's domain, and stops naming the record to
-  add when it doesn't, rather than leaving a certificate that can never issue.
+  add when it doesn't, rather than leaving a certificate that can never issue. When
+  neither the domain nor the app name answers (a test box), that counts as a match: the
+  app host is self-signed like the domain, and the final card names its record too.
+  Which apps get a host is the catalog's `exposure: host`, owned by the chart.
+- **An app host is guarded the way its path was.** Each one has its own access-control
+  rule carrying the posture the app had on its path. The one session cookie is set for
+  the box's domain, and the browser sends it to every `<app>.<domain>`.
+- **An app host is three objects: its login rule, its listener and its Certificate.**
+  One per-host step writes all three, for `init` and `apply` alike, and a host counts as
+  served only when all three exist: without the rule the login's default deny answers
+  403. The login's configuration is rendered whole from the same inputs `init` uses and
+  applied only when it differs, so a rule never depends on which command wrote it.
+  Adding a rule rolls the login, and its sessions live in memory, so everyone signs in
+  again.
+- **A first install serves its hosts before the release (decided).** `init` decides each
+  host's issuer once, then, after the confirm and before the release moves, installs the
+  login, writes the seedbox namespace's own objects and runs the per-host step for every
+  host it decided, so an app that calls the box's own HTTPS name at startup (an OIDC
+  client) finds it there. A host whose certificate is not the one this run decided (an
+  issuer that moved once the name started answering, or a self-signed one not on the box
+  root) counts as work like a missing one; a box where everything is right still says
+  there is nothing to change.
+- **No run leaves an app host unserved (decided).** When root's `apply` would serve an
+  enabled app on a host that is missing any of the three, it runs the per-host step after
+  the confirm and before the release moves, DNS check included; a mismatch stops with the
+  record named and the release untouched. When that's the only work, no new release
+  revision is made. A user's run that would need it stops and names root's command,
+  because a user can't write a listener or the login. `update` will call the same step.
 - **Tested without the internet.** The e2e runs Pebble (Let's Encrypt's test ACME
   server) in the kind cluster and points a test issuer at it, so HTTP-01 through the
-  Gateway is proven on every run. The self-signed path gets its own assertion.
+  Gateway is proven on every run. The self-signed path gets its own assertion: the
+  served certificate verifies against `s5n-host-ca` alone, still does after a forced
+  renewal, and a box with host certificates from before the root is re-issued from it.
 
 - **A failed renewal doesn't block `apply`.** It shows in `status` and `doctor`, which
   name the host and cert-manager's reason. `apply` changes the seedbox, not the

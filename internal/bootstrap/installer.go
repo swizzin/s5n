@@ -10,9 +10,11 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"time"
 
+	"github.com/swizzin/s5n/internal/atomicfile"
 	"github.com/swizzin/s5n/internal/say"
 	"github.com/swizzin/s5n/internal/wait"
 )
@@ -28,10 +30,14 @@ type Runner interface {
 	Run(ctx context.Context, path string, args ...string) ([]byte, error)
 }
 
-// Readiness answers one question: is the API server box just started ready to
-// serve? It is polled, so it must be cheap and must not write anything.
+// Readiness answers the questions box asks of the API server it just started:
+// is it serving, and which address did the node register? It is polled, so it
+// must be cheap and must not write anything.
 type Readiness interface {
 	Ready(ctx context.Context) error
+	// NodeIPs returns the InternalIPs the nodes registered. It is asked once,
+	// after Ready has said yes, to check the node took the address box pinned.
+	NodeIPs(ctx context.Context) ([]string, error)
 }
 
 // The readiness wait. A first start has to bring containerd and the kubelet up
@@ -78,6 +84,12 @@ type K0sInstaller struct {
 // nothing to resolve again here and nothing a second copy could disagree with.
 // A plan that carries no sum is one box cannot verify, and it is refused by
 // architecture before the download.
+//
+// The node's address is pinned twice, because two components choose one
+// independently: --kubelet-extra-args=--node-ip for the Node's InternalIP, and
+// spec.api.address in the config box writes for the API server's own address.
+// Both are the uplink, so the CNI's auto-MTU follows it, and neither is
+// re-derived here -- the plan carries them.
 func (k K0sInstaller) Install(ctx context.Context, plan InstallPlan) error {
 	arch := plan.Arch
 	if arch == "" {
@@ -91,6 +103,10 @@ func (k K0sInstaller) Install(ctx context.Context, plan InstallPlan) error {
 	}
 	rel := k0sRelease{Version: plan.Version, Arch: arch, SHA256: plan.SHA256}
 	if why := installRefusal(plan, k.root(), k.evidence()); why != "" {
+		return errors.New(why)
+	}
+	config := k.configPath(plan)
+	if why := k0sConfigConflict(config, plan.ConfigText); why != "" {
 		return errors.New(why)
 	}
 
@@ -110,18 +126,70 @@ func (k K0sInstaller) Install(ctx context.Context, plan InstallPlan) error {
 	// there now and the one command that removes it. box never runs that
 	// command itself -- `k0s reset` would also remove a k0s box did not
 	// install, and destroying a cluster is the operator's call to see happen.
-	out, err := k.runK0s(ctx, "install", "controller", "--single")
+	if err := k.writeConfig(config, plan.ConfigText); err != nil {
+		return k.leftBehind(plan, "box could not write the k0s config it installs with", nil, err)
+	}
+	out, err := k.runK0s(ctx, installArgs(plan, config)...)
 	if err != nil {
-		return k.leftBehind("k0s could not be installed as a service", out, err)
+		return k.leftBehind(plan, "k0s could not be installed as a service", out, err)
 	}
 	out, err = k.runK0s(ctx, "start")
 	if err != nil {
-		return k.leftBehind("k0s did not start", out, err)
+		return k.leftBehind(plan, "k0s did not start", out, err)
 	}
 	if err := k.waitReady(ctx); err != nil {
-		return k.leftBehind("the cluster API did not answer ready", nil, err)
+		return k.leftBehind(plan, "the cluster API did not answer ready", nil, err)
 	}
-	return nil
+	return k.verifyNodeIP(ctx, plan)
+}
+
+// k0sInstallSubcommand is the k0s subcommand that writes the systemd unit.
+const k0sInstallSubcommand = "install"
+
+// installArgs is the one k0s command the installer runs. `k0s install
+// controller` writes its flags into the systemd unit, so the pin survives
+// reboots and k0s restarts without box being involved again; --kubelet-extra-args
+// is how a kubelet flag reaches k0s's kubelet (k0s v1.37.2+k0s.1,
+// pkg/config/cli.go GetWorkerFlags, and cmd/install/controller.go passes the
+// parsed flags to install.InstallService).
+func installArgs(plan InstallPlan, config string) []string {
+	return []string{
+		k0sInstallSubcommand, "controller", "--single",
+		"--config", config,
+		"--kubelet-extra-args=--node-ip=" + plan.NodeIP,
+	}
+}
+
+// verifyNodeIP reads the Node's InternalIP once the cluster answers, and fails
+// through leftBehind when it is not the address box pinned: a node that took
+// another address took that interface's MTU with it, which is the failure this
+// whole file exists to prevent. Both addresses are named, because the operator
+// needs to see which interface the host chose.
+func (k K0sInstaller) verifyNodeIP(ctx context.Context, plan InstallPlan) error {
+	ips, err := k.ready().NodeIPs(ctx)
+	if err != nil {
+		return k.leftBehind(plan, "box could not read the address the node registered", nil, err)
+	}
+	if slices.Contains(ips, plan.NodeIP) {
+		return nil
+	}
+	got := "no address"
+	if len(ips) > 0 {
+		got = strings.Join(ips, ", ")
+	}
+	return k.leftBehind(plan,
+		fmt.Sprintf("the node registered %s, not %s, the uplink address box pinned", got, plan.NodeIP),
+		nil, errors.New("every pod would take the MTU of the interface behind that address"))
+}
+
+// writeConfig writes the k0s config the install runs with. It is written after
+// the binary and before `k0s install`, so a download that fails leaves the host
+// as it was and a failure after this point names the file.
+func (k K0sInstaller) writeConfig(path, text string) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return fmt.Errorf("create %s: %w", filepath.Dir(path), err)
+	}
+	return atomicfile.Write(path, []byte(text), 0o644)
 }
 
 // writeBinary downloads into a temporary file beside the target and renames it
@@ -224,14 +292,15 @@ func (k K0sInstaller) waitReady(ctx context.Context) error {
 
 // leftBehind is the failure box returns once this run has changed the host: it
 // names what is there now and the one command that undoes it.
-func (k K0sInstaller) leftBehind(what string, out []byte, err error) error {
+func (k K0sInstaller) leftBehind(plan InstallPlan, what string, out []byte, err error) error {
+	config := k.configPath(plan)
 	var b strings.Builder
 	fmt.Fprintf(&b, "%s: %v", what, err)
 	if quoted := quoteOutput(out); quoted != "" {
 		fmt.Fprintf(&b, "\n  k0s said:\n%s", quoted)
 	}
-	fmt.Fprintf(&b, "\n  what is left on this host: the k0s binary at %s and what k0s wrote under %s", k.binPath(), k.stateDir())
-	fmt.Fprintf(&b, "\n  undo it with: k0s stop; k0s reset")
+	fmt.Fprintf(&b, "\n  what is left on this host: the k0s binary at %s, the k0s config that pins the API address at %s, and what k0s wrote under %s", k.binPath(), config, k.stateDir())
+	fmt.Fprintf(&b, "\n  undo it with: k0s stop; k0s reset; rm -f %s", config)
 	return errors.New(b.String())
 }
 
@@ -298,6 +367,15 @@ func (k K0sInstaller) confPath() string {
 	return K0sAdminConfig
 }
 
+// configPath is where the k0s config goes: the plan's path, or k0s's default
+// when a plan carries none (which installRefusal has already refused).
+func (k K0sInstaller) configPath(plan InstallPlan) string {
+	if plan.ConfigPath != "" {
+		return plan.ConfigPath
+	}
+	return K0sConfigPath
+}
+
 // DryRunInstaller prints the plan instead of carrying it out. `box bootstrap
 // --dry-run` reaches the same clean-host branch as a real run, and this is the
 // installer it gets: a dry run probes nothing and writes nothing, so the only
@@ -307,6 +385,11 @@ type DryRunInstaller struct {
 }
 
 // Install prints the planned k0s install.
+//
+// The node identity is part of what it prints: this is the operator's one look
+// at the address the cluster will register with, its interface and that
+// interface's MTU, before anything on the host changes. box sets no MTU; the
+// number is what the CNI will derive once the node is up.
 func (p DryRunInstaller) Install(_ context.Context, plan InstallPlan) error {
 	arch := plan.Arch
 	if arch == "" {
@@ -314,5 +397,8 @@ func (p DryRunInstaller) Install(_ context.Context, plan InstallPlan) error {
 	}
 	r := say.Or(p.Say, nil)
 	r.Line(fmt.Sprintf("box would install k0s %s for %s on this clean host: /usr/local/bin/k0s, install controller --single, start", plan.Version, arch))
+	if plan.NodeIP != "" {
+		r.Line(fmt.Sprintf("box would pin the node IP to %s on %s (MTU %d), and the k0s API address to the same", plan.NodeIP, plan.Uplink.Interface, plan.Uplink.MTU))
+	}
 	return nil
 }

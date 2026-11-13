@@ -3,6 +3,7 @@ package wiring
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/url"
@@ -15,10 +16,10 @@ import (
 
 // Writes counts the application objects the run actually changed: download
 // clients, root folders, hardlink settings, Prowlarr applications, qBittorrent
-// categories and preferences. Directory creation is reported per step
-// (data/dirs/...) instead, because a directory is not an owned object and is
-// made only when it is missing. The e2e asserts that a second run reports zero
-// created and zero updated.
+// categories and preferences, qui's instance and autobrr's download clients.
+// Directory creation is reported per step (data/dirs/...) instead, because a
+// directory is not an owned object and is made only when it is missing. The e2e
+// asserts that a second run reports zero created and zero updated.
 type Writes struct {
 	Created   int `json:"created"`
 	Updated   int `json:"updated"`
@@ -172,7 +173,10 @@ func (r *Runner) ensureResult(res *Result, name string, result apps.EnsureResult
 		res.Writes.Unchanged++
 	}
 	detail := result.Change.String()
-	if result.Recreated {
+	switch {
+	case result.Recreated && result.PreviousStringID != "":
+		detail = fmt.Sprintf("recreated (previous id %s)", result.PreviousStringID)
+	case result.Recreated:
 		detail = fmt.Sprintf("recreated (previous id %d)", result.PreviousID)
 	}
 	step := Step{Name: name, Result: "ok", Detail: detail, Drift: result.Drift}
@@ -257,15 +261,13 @@ func (r *Runner) work(ctx context.Context, res *Result) error {
 		return r.ensure(res, "data/dirs", apps.Unchanged, err)
 	}
 
+	// Every app that calls qBittorrent does so with an empty username and
+	// password: the WebUI skips its login for the release's addresses
+	// (docs/box.md, "Logins"), so no app's database holds a copy of a
+	// credential and there is nothing here to read out of the Secret.
 	var qbit *apps.Qbit
-	var qbitPassword string
 	if c.Qbittorrent != nil {
-		pw, err := ReadSecret(c.Qbittorrent.PasswordFile)
-		if err != nil {
-			return r.ensure(res, "qbittorrent/credentials", apps.Unchanged, err)
-		}
-		qbitPassword = pw
-		qbit = apps.NewQbit(c.Qbittorrent.URL, c.Qbittorrent.Username, qbitPassword)
+		qbit = apps.NewQbit(c.Qbittorrent.URL, "", "")
 		r.logf("waiting for qBittorrent at %s", c.Qbittorrent.URL)
 		if err := qbit.WaitReady(ctx, timeout); err != nil {
 			return r.ensure(res, "qbittorrent/ready", apps.Unchanged, err)
@@ -328,8 +330,12 @@ func (r *Runner) work(ctx context.Context, res *Result) error {
 				Category: inst.Category,
 				Host:     host,
 				Port:     port,
-				Username: c.Qbittorrent.Username,
-				Password: qbitPassword,
+				// Owned, and owned as empty. qBittorrent skips its login for
+				// the release's addresses, so the client needs no credential —
+				// and one an older install stored in this Arr's database is
+				// overwritten here on the next run.
+				Username: "",
+				Password: "",
 			}, owned.ArrDownloadClientID(inst.Name))
 			if err == nil && result.ID != 0 {
 				owned.SetArrDownloadClientID(inst.Name, result.ID)
@@ -375,11 +381,187 @@ func (r *Runner) work(ctx context.Context, res *Result) error {
 				Implementation: impl,
 				BaseURL:        strings.TrimRight(inst.URL, "/") + inst.URLBase,
 				APIKey:         arrKeys[inst.Name],
-			}, owned.ProwlarrApplicationID(inst.Name))
+			}, owned.ProwlarrApplicationID(inst.Name), owned.ProwlarrApplicationFingerprint(inst.Name))
 			if err == nil && result.ID != 0 {
 				owned.SetProwlarrApplicationID(inst.Name, result.ID)
+				// The Arr's key, proven by Prowlarr's own test above: recorded
+				// only now, for the same reason as every other fingerprint.
+				owned.SetProwlarrApplicationFingerprint(inst.Name, apps.SecretFingerprint(arrKeys[inst.Name]))
 			}
 			if err := r.ensureResult(res, "prowlarr/application/"+inst.Name, result, err); err != nil {
+				return err
+			}
+		}
+	}
+
+	// qui and autobrr keep their own user tables, and both hand out an API key
+	// only to a session (docs/box.md, "An app that keeps its own user table has
+	// one account box owns"). The chart gives each a password in the release
+	// Secret and an init container that writes it into the app at every start;
+	// the Job opens a session with it per run and mints nothing. A rejected
+	// login is the one state an operator has to fix by hand, so it is reported
+	// as such rather than as an HTTP status.
+	if c.Qui != nil {
+		password, err := ReadSecret(c.Qui.PasswordFile)
+		if err != nil {
+			return r.ensure(res, "qui/credentials", apps.Unchanged, err)
+		}
+		q := apps.NewQui(c.Qui.URL, c.Qui.URLBase, c.Qui.Username, password)
+		r.logf("waiting for qui at %s%s", c.Qui.URL, c.Qui.URLBase)
+		// qui exits instead of serving when its OIDC issuer is unreachable, so a
+		// timeout here is a configuration error, not a slow start.
+		if err := q.WaitReady(ctx, timeout); err != nil {
+			return r.ensure(res, "qui/ready", apps.Unchanged, err)
+		}
+		r.okStep(res, "qui/ready", c.Qui.URL+c.Qui.URLBase)
+		if err := q.Login(ctx); err != nil {
+			return r.ensure(res, "qui/login", apps.Unchanged, loginFailed(err, "qui"))
+		}
+		r.okStep(res, "qui/login", c.Qui.Username)
+		if c.Qbittorrent == nil {
+			// An instance needs a qBittorrent to point at; without one there is
+			// nothing to register, and saying so beats a step that never runs.
+			if err := r.ensure(res, "qui/instance", apps.Skipped, nil); err != nil {
+				return err
+			}
+		} else {
+			result, err := q.EnsureInstance(ctx, apps.QuiInstanceSpec{
+				Name: "qBittorrent",
+				Host: strings.TrimRight(c.Qbittorrent.URL, "/"),
+				// Owned, and owned as empty: qBittorrent skips its login for
+				// the release's addresses, so qui's instance holds no
+				// credential either.
+				Username: "",
+				Password: "",
+				// /data is mounted at /data in every app and qBittorrent saves
+				// under /data/downloads/<category>, so qui's own path is the
+				// one the apps write: hardlink detection and the orphan scan
+				// work without a second path mapping.
+				HasLocalFilesystemAccess: true,
+			}, owned.QuiInstanceID())
+			if err == nil && result.ID != 0 {
+				owned.SetQuiInstanceID(result.ID)
+			}
+			if err := r.ensureResult(res, "qui/instance", result, err); err != nil {
+				return err
+			}
+		}
+	}
+
+	if c.Autobrr != nil {
+		password, err := ReadSecret(c.Autobrr.PasswordFile)
+		if err != nil {
+			return r.ensure(res, "autobrr/credentials", apps.Unchanged, err)
+		}
+		a := apps.NewAutobrr(c.Autobrr.URL, c.Autobrr.URLBase, c.Autobrr.Username, password)
+		r.logf("waiting for autobrr at %s%s", c.Autobrr.URL, c.Autobrr.URLBase)
+		// autobrr starts with an unreachable OIDC issuer and retries in the
+		// background, so its readiness is only the HTTP API's.
+		if err := a.WaitReady(ctx, timeout); err != nil {
+			return r.ensure(res, "autobrr/ready", apps.Unchanged, err)
+		}
+		r.okStep(res, "autobrr/ready", c.Autobrr.URL+c.Autobrr.URLBase)
+		if err := a.Login(ctx); err != nil {
+			return r.ensure(res, "autobrr/login", apps.Unchanged, loginFailed(err, "autobrr"))
+		}
+		r.okStep(res, "autobrr/login", c.Autobrr.Username)
+		if c.Qbittorrent != nil {
+			result, err := a.EnsureDownloader(ctx, apps.DownloaderSpec{
+				Name: "qBittorrent",
+				Type: "QBITTORRENT",
+				Host: strings.TrimRight(c.Qbittorrent.URL, "/"),
+				// Owned, and owned as empty; autobrr holds no credential for
+				// qBittorrent, which skips its login for the release's
+				// addresses.
+				Username: "",
+				Password: "",
+			}, owned.AutobrrClientID("qBittorrent"), owned.AutobrrClientFingerprint("qBittorrent"))
+			if err == nil && result.ID != 0 {
+				owned.SetAutobrrClientID("qBittorrent", result.ID)
+			}
+			if err := r.ensureResult(res, "autobrr/downloader/qbittorrent", result, err); err != nil {
+				return err
+			}
+		}
+		// One client per Arr instance, HD and 4K alike. The host carries the
+		// Arr's own base path, which autobrr uses verbatim as the Arr's base
+		// URL, and the key is the Arr's own key from the release Secret (the
+		// same one the app was given). Filters and actions are the operator's:
+		// a filter is their indexers, quality and show list, and an action
+		// refers to these clients by id.
+		for _, inst := range c.Instances {
+			var kind string
+			switch apps.Kind(inst.Kind) {
+			case apps.Sonarr:
+				kind = "SONARR"
+			case apps.Radarr:
+				kind = "RADARR"
+			default:
+				return r.ensure(res, "autobrr/downloader/"+inst.Name, apps.Unchanged,
+					fmt.Errorf("instance %q: unknown Arr kind %q has no autobrr download client type", inst.Name, inst.Kind))
+			}
+			result, err := a.EnsureDownloader(ctx, apps.DownloaderSpec{
+				Name:   inst.Name,
+				Type:   kind,
+				Host:   strings.TrimRight(inst.URL, "/") + inst.URLBase,
+				APIKey: arrKeys[inst.Name],
+			}, owned.AutobrrClientID(inst.Name), owned.AutobrrClientFingerprint(inst.Name))
+			if err == nil && result.ID != 0 {
+				owned.SetAutobrrClientID(inst.Name, result.ID)
+				owned.SetAutobrrClientFingerprint(inst.Name, apps.SecretFingerprint(arrKeys[inst.Name]))
+			}
+			if err := r.ensureResult(res, "autobrr/downloader/"+inst.Name, result, err); err != nil {
+				return err
+			}
+		}
+	}
+
+	// PeerBanHelper reads qBittorrent's Web API to find peers to ban, so what it
+	// needs is one downloader holding the same password every other copy has.
+	// Its id is a key in its own config file, not a number, and PBH answers
+	// HEALTHY only once its own poll loop has logged in to qBittorrent with
+	// what was written -- which is what the record waits for.
+	if c.Pbh != nil {
+		token, err := ReadSecret(c.Pbh.TokenFile)
+		if err != nil {
+			return r.ensure(res, "pbh/credentials", apps.Unchanged, err)
+		}
+		p := apps.NewPbh(c.Pbh.URL, token)
+		r.logf("waiting for PeerBanHelper at %s", c.Pbh.URL)
+		if err := p.WaitReady(ctx, timeout); err != nil {
+			return r.ensure(res, "pbh/ready", apps.Unchanged, pbhReady(err))
+		}
+		detail := c.Pbh.URL
+		if version, verr := p.Version(ctx); verr == nil && version != "" {
+			detail = fmt.Sprintf("%s (version=%s)", detail, version)
+		}
+		r.okStep(res, "pbh/ready", detail)
+
+		if c.Qbittorrent == nil {
+			// Nothing to point it at: saying so beats a step that never runs.
+			if err := r.ensure(res, "pbh/downloader", apps.Skipped, nil); err != nil {
+				return err
+			}
+		} else {
+			result, err := p.EnsureDownloader(ctx, apps.PbhDownloaderSpec{
+				ID:       "qbittorrent",
+				Name:     "qBittorrent",
+				Endpoint: strings.TrimRight(c.Qbittorrent.URL, "/"),
+				// Owned, and owned as empty: PBH reads qBittorrent's API
+				// without a login, the same way every other caller does.
+				Username: "",
+				Password: "",
+			}, owned.PbhDownloaderID())
+			if err == nil {
+				var status string
+				if status, err = p.WaitHealthy(ctx, result.StringID, timeout); err != nil {
+					err = fmt.Errorf("pbh downloader %q is %s: %w", result.StringID, status, err)
+				}
+			}
+			if err == nil && result.StringID != "" {
+				owned.SetPbhDownloaderID(result.StringID)
+			}
+			if err := r.ensureResult(res, "pbh/downloader", result, err); err != nil {
 				return err
 			}
 		}
@@ -577,6 +759,32 @@ func Summary(res *Result) string {
 		fmt.Fprintf(&b, "error: %s\n", res.Error)
 	}
 	return b.String()
+}
+
+// pbhReady names the one refusal PBH's own readiness can produce: it answers
+// 403 to everything when the Bearer token is not its WebUI token. The chart
+// gives the app the release Secret's pbh-token through its environment, so the
+// two can only disagree if something else set one of them.
+func pbhReady(err error) error {
+	if !apps.IsForbidden(err) {
+		return err
+	}
+	return fmt.Errorf("%w: PeerBanHelper refused the release Secret's pbh-token, so its WebUI token is something else", err)
+}
+
+// loginFailed turns an app's credential refusal into the sentence an operator
+// can act on. Both apps take their password from the release Secret only when
+// their pod starts, so a password changed inside the running app is not a
+// broken release: it is a pod that has not restarted since. The Job must not
+// restart pods itself (it is a Helm hook, and a restart loop would hide the
+// real cause), so it names the cause and the command.
+func loginFailed(err error, workload string) error {
+	var rejected *apps.LoginRejectedError
+	if !errors.As(err, &rejected) {
+		return err
+	}
+	return fmt.Errorf("%s rejected the account %q: its password was changed inside the app since that pod started, so it no longer matches the release Secret's. Restart it to put the Secret's password back: kubectl rollout restart statefulset/%s",
+		workload, rejected.Username, workload)
 }
 
 // hostPort splits a service URL into the host and port an Arr should dial.

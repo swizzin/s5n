@@ -98,6 +98,12 @@ func (a *Arr) categoryField() string {
 // overlaid (host, port, useSsl, urlBase, username, password, the category
 // field) — name, enable, priority, tags and anything else are left exactly as
 // the user set them. A deleted owned client is recreated.
+//
+// username and password are owned fields that s5n writes empty: qBittorrent's
+// login is bypassed for the release's addresses, so the client carries no
+// credential and an install that stored one has it cleared on the next run.
+// That is why there is no fingerprint to compare here: nothing this client
+// holds can rotate.
 func (a *Arr) EnsureDownloadClient(ctx context.Context, spec DownloadClientSpec, ownedID int) (EnsureResult, error) {
 	list, err := a.downloadClients(ctx)
 	if err != nil {

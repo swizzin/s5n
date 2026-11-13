@@ -13,6 +13,16 @@ cd "$(dirname "$0")/.."
 KIND=${KIND:-kind}
 CLUSTER=s5n
 NS=seedbox
+# The box's domain. Plex and Seerr are served at plex.<domain> and
+# seerr.<domain> -- the catalog says so, because their UIs write absolute asset
+# paths -- so a release needs a domain to render at all, and every request
+# through the Gateway names it (the routes are host-matched).
+DOMAIN=${DOMAIN:-box.example.test}
+PLEX_HOST="plex.${DOMAIN}"
+SEERR_HOST="seerr.${DOMAIN}"
+# PeerBanHelper's WebUI calls /api/... from the site root, so the catalog gives it
+# a host name of its own too.
+PBH_HOST="pbh.${DOMAIN}"
 # Envoy Gateway's Helm chart ships its own Gateway API CRDs (crds.enabled: true), so
 # there is no separate standard-install apply here: the chart's experimental channel is
 # the exact set the pinned Envoy Gateway supports, and a separately-pinned channel could
@@ -35,6 +45,7 @@ for pin_key in k0s envoyGateway metallb certManager; do
 done
 ENVOY_GATEWAY_CHART_VERSION=${ENVOY_GATEWAY_CHART_VERSION:-$(pin envoyGateway)}
 METALLB_VERSION=${METALLB_VERSION:-$(v_tag "$(pin metallb)")}
+CERT_MANAGER_VERSION=${CERT_MANAGER_VERSION:-$(pin certManager)}
 
 # Test-only images, pinned by tag and digest. They are not box's to install, so
 # they stay in the scripts rather than the chart's platform.yaml; Renovate
@@ -42,6 +53,8 @@ METALLB_VERSION=${METALLB_VERSION:-$(v_tag "$(pin metallb)")}
 # so a bump to either the tag or the digest is one line.
 CURL_IMAGE=${CURL_IMAGE:-docker.io/curlimages/curl:8.11.1@sha256:c1fe1679c34d9784c1b0d1e5f62ac0a79fca01fb6377cdd33e90473c6f9f9a69}  # renovate: datasource=docker
 BUSYBOX_IMAGE=${BUSYBOX_IMAGE:-docker.io/library/busybox:1.36@sha256:73aaf090f3d85aa34ee199857f03fa3a95c8ede2ffd4cc2cdb5b94e566b11662}    # renovate: datasource=docker
+# Pebble 2.10.1, the ACME test server: the same image hack/e2e-box.sh pins.
+PEBBLE_IMAGE=${PEBBLE_IMAGE:-ghcr.io/letsencrypt/pebble:2.10.1@sha256:ddf230642b1a584f519f32e347de1b05a6e4c1f6c35c1863b33effeab5f78199}  # renovate: datasource=docker
 KEEP=${1:-}
 CTX="kind-${CLUSTER}"
 K="kubectl --context ${CTX}"
@@ -94,7 +107,7 @@ $KIND load docker-image --name "$CLUSTER" "$IMAGE"
 log "preparing host paths inside the node (what box init creates on real hosts)"
 docker exec "${CLUSTER}-control-plane" bash -c '
   mkdir -p /srv/s5n/data \
-           /srv/s5n/config/{qbittorrent,prowlarr,sonarr,sonarr-4k,radarr,radarr-4k,plex,tautulli,seerr}
+           /srv/s5n/config/{qbittorrent,prowlarr,sonarr,sonarr-4k,radarr,radarr-4k,plex,tautulli,seerr,qui,autobrr,maintainerr,pbh}
   chown -R 1000:1000 /srv/s5n'
 
 # Nothing below may prepare the data categories: the wiring Job owns them, and a
@@ -237,7 +250,7 @@ $K -n "$NS" wait --for=condition=Available deploy/unblessed --timeout=180s || fa
 log "bind the policy to ${NS} with the grant as params (root-owned s5n-system)"
 # The renderer is Go and reads the chart's variants.yaml, the same file the
 # templates resolve images from; it is the package box will call.
-go run ./hack/render-grant charts/s5n "$NS" 31111 NodePort | $K apply -f - >/dev/null
+go run ./hack/render-grant charts/s5n "$NS" 30080 NodePort | $K apply -f - >/dev/null
 
 # A binding takes effect a moment after it is created, so wait for a denial
 # instead of sleeping. A dry-run CREATE of a new object is a real admission
@@ -420,7 +433,7 @@ $K -n "$NS" delete deploy unblessed --ignore-not-found >/dev/null
 # release by name rather than install pods that wait for storage forever. A
 # server-side dry run does the cluster's lookups and writes nothing.
 log "asserting a release without its claims is refused at render"
-noclaim=$($HELM install s5n charts/s5n -n "$NS" -f hack/e2e-values.yaml --dry-run=server 2>&1) && {
+noclaim=$($HELM install s5n charts/s5n -n "$NS" -f hack/e2e-values.yaml --set gateway.host="$DOMAIN" --dry-run=server 2>&1) && {
   echo "a release whose claims do not exist rendered"; fail=1; } || true
 if grep -qF 'storage.data.existingClaim: PersistentVolumeClaim "s5n-data" does not exist in namespace "seedbox"' <<<"$noclaim"; then
   echo "  refused: missing claim s5n-data"
@@ -493,6 +506,21 @@ for pvc in s5n-data s5n-config; do
   echo "  claim ${pvc}: ${phase}"; [ "$phase" = Bound ] || fail=1
 done
 
+# The catalog's opt-in apps, switched on for the assertions below. They default
+# off, so a release that installs only the defaults never runs them, and the
+# chart's own e2e is where each one is proven to serve under its own base path.
+cat >"$WORK/apps-values.yaml" <<'EOF'
+apps:
+  qui:
+    enabled: true
+  autobrr:
+    enabled: true
+  maintainerr:
+    enabled: true
+  pbh:
+    enabled: true
+EOF
+
 # The chart under test, with the locally built image instead of the published one.
 install_release() {
   # hack/e2e-values.yaml carries the locally built image and one 4K instance
@@ -503,6 +531,8 @@ install_release() {
   # this, so the path is exercised on every install.
   $HELM upgrade --install s5n charts/s5n -n "$NS" \
     -f hack/e2e-values.yaml \
+    -f "$WORK/apps-values.yaml" \
+    --set gateway.host="$DOMAIN" \
     --wait --timeout 15m
 }
 
@@ -581,9 +611,156 @@ done
 [ -n "$GW_ADDR" ] || { echo "Gateway never got an address"; fail=1; }
 echo "Gateway address: ${GW_ADDR}"
 
+# Every request below goes through the Gateway by name, over HTTPS: the chart's
+# routes are host-matched, and once this host has a certificate port 80 only
+# redirects. gw_get is the one way this script talks to an app.
+gw_get() {
+  curl -sS --resolve "${DOMAIN}:443:${GW_ADDR}" --cacert "$WORK/pebble-root.pem" "$@"
+}
+
+# ---- TLS: one certificate per host, Pebble issuing over HTTP-01 --------------
+# Plex and Seerr are served at names of their own (the catalog says so), so this
+# e2e certifies all three hosts the way box does after an apply: Pebble is the
+# ACME server, cert-manager solves HTTP-01 through a host's own port-80
+# listener, and the certificate each listener serves chains to Pebble's CA.
+# hack/issue-cert is the same platform.CertificateDecision box runs; this script
+# installs with Helm, so it has no `box init` to carry the objects.
+patch_coredns() { # patch_coredns <gateway-address> <host>...
+  local addr=$1; shift
+  $K -n kube-system get cm coredns -o jsonpath='{.data.Corefile}' >"$WORK/Corefile" || return 1
+  python3 - "$WORK/Corefile" "$addr" "$@" <<'PYEOF' || return 1
+import sys
+path, addr, hosts = sys.argv[1], sys.argv[2], sys.argv[3:]
+text = open(path).read()
+block = "    hosts {\n"
+for host in hosts:
+    if host in text:
+        continue
+    block += "        " + addr + " " + host + "\n"
+block += "        fallthrough\n    }\n"
+marker = "    forward . /etc/resolv.conf"
+if marker not in text:
+    raise SystemExit("the CoreDNS Corefile has no forward block to patch")
+text = text.replace(marker, block + marker, 1)
+open(path, "w").write(text)
+PYEOF
+  $K -n kube-system create cm coredns --from-file=Corefile="$WORK/Corefile" --dry-run=client -o yaml | $K apply -f - >/dev/null
+  $K -n kube-system rollout restart deploy/coredns >/dev/null
+  $K -n kube-system rollout status deploy/coredns --timeout=120s >/dev/null
+}
+
+install_pebble() {
+  log "Pebble 2.10.1 (the ACME test server) in the cluster, pinned by digest"
+  pebble_node_ip=$($K get node -o jsonpath='{.items[0].status.addresses[?(@.type=="InternalIP")].address}')
+  $K create namespace pebble --dry-run=client -o yaml | $K apply -f - >/dev/null
+  cat <<EOF | $K apply -f - >/dev/null
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: pebble
+  namespace: pebble
+data:
+  pebble-config.json: |
+    {
+      "pebble": {
+        "listenAddress": "0.0.0.0:14000",
+        "managementListenAddress": "0.0.0.0:15000",
+        "certificate": "/test/certs/localhost/cert.pem",
+        "privateKey": "/test/certs/localhost/key.pem",
+        "httpPort": 80,
+        "tlsPort": 5001,
+        "ocspResponderURL": "",
+        "externalAccountBindingRequired": false
+      }
+    }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: pebble
+  namespace: pebble
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: pebble
+  template:
+    metadata:
+      labels:
+        app: pebble
+    spec:
+      containers:
+        - name: pebble
+          image: ${PEBBLE_IMAGE}
+          args: ["-config", "/config/pebble-config.json"]
+          ports:
+            - {containerPort: 14000, name: acme}
+            - {containerPort: 15000, name: management}
+          readinessProbe:
+            tcpSocket: {port: 14000}
+            initialDelaySeconds: 2
+          volumeMounts:
+            - {name: config, mountPath: /config, readOnly: true}
+      volumes:
+        - name: config
+          configMap:
+            name: pebble
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: pebble
+  namespace: pebble
+spec:
+  type: NodePort
+  selector:
+    app: pebble
+  ports:
+    - {name: acme, port: 14000, targetPort: 14000}
+    - {name: management, port: 15000, targetPort: 15000, nodePort: 31500}
+EOF
+  $K -n pebble rollout status deploy/pebble --timeout=180s || { echo "Pebble never rolled out"; fail=1; return 0; }
+  for i in $(seq 1 60); do
+    if curl -k -fsS "https://${pebble_node_ip}:31500/roots/0" -o "$WORK/pebble-root.pem" 2>/dev/null; then
+      break
+    fi
+    if [ "$i" = 60 ]; then
+      echo "Pebble never served its root CA"; fail=1; return 0
+    fi
+    sleep 2
+  done
+  echo "  Pebble root CA in $WORK/pebble-root.pem"
+}
+
+log "Pebble and CoreDNS: the box's names answer where the Gateway is"
+install_pebble
+[ "$fail" = 0 ] || { log "FAIL"; exit 1; }
+patch_coredns "$GW_ADDR" "$DOMAIN" "$PLEX_HOST" "$SEERR_HOST" "$PBH_HOST" ||
+  { echo "could not patch CoreDNS for the box's names"; fail=1; }
+
+log "cert-manager ${CERT_MANAGER_VERSION} and root's issuers, pointed at Pebble"
+$HELM upgrade --install cert-manager oci://quay.io/jetstack/charts/cert-manager \
+  --version "$CERT_MANAGER_VERSION" -n cert-manager --create-namespace \
+  --set crds.enabled=true --set config.gatewayAPI.enabled=true --wait --timeout 5m >/dev/null
+$K apply -f install/platform/cert-manager/issuers.yaml >/dev/null
+# The only test-only change to root's issuer: the ACME directory. skipTLSVerify
+# is Pebble's own self-signed management certificate; the production issuer is
+# the box e2e's assertion.
+$K patch clusterissuer s5n-letsencrypt --type=merge \
+  -p '{"spec":{"acme":{"server":"https://pebble.pebble.svc:14000/dir","skipTLSVerify":true}}}' >/dev/null
+
+# The box's own name first: every app path is reached through it, and the
+# chart's routes are host-matched, so there is no plain-HTTP rendering to fall
+# back on.
+for spec in "box:${DOMAIN}" "plex:${PLEX_HOST}" "seerr:${SEERR_HOST}" "pbh:${PBH_HOST}"; do
+  app=${spec%%:*}; host=${spec##*:}
+  log "the ${app} host: certificate and listeners for ${host}"
+  go run ./hack/issue-cert --kubeconfig "$KUBECONFIG" --host "$host" --issuer letsencrypt || fail=1
+done
+
 # Through the Gateway from the host, on its LoadBalancer address.
 for path in /sonarr/ping /radarr/ping /prowlarr/ping; do
-  code=$(curl -s -o /dev/null -w '%{http_code}' "http://${GW_ADDR}${path}")
+  code=$(gw_get -s -o /dev/null -w '%{http_code}' "https://${DOMAIN}${path}")
   echo "GET ${path} via gateway -> ${code}"; [ "$code" = 200 ] || fail=1
 done
 
@@ -594,7 +771,7 @@ done
 for spec in sonarr:api/v3 radarr:api/v3 prowlarr:api/v1; do
   app=${spec%%:*}; api=${spec##*:}
   : >"$WORK/ui-headers"
-  code=$(curl -s -D "$WORK/ui-headers" -o "$WORK/ui-body" -w '%{http_code}' "http://${GW_ADDR}/${app}/" || true)
+  code=$(gw_get -s -D "$WORK/ui-headers" -o "$WORK/ui-body" -w '%{http_code}' "https://${DOMAIN}/${app}/" || true)
   loc=$(grep -i '^location:' "$WORK/ui-headers" | tr -d '\r' | awk '{print $2}' || true)
   echo "GET /${app}/ via gateway -> ${code} location='${loc}'"
   [ "$code" = 200 ] || { echo "/${app}/ did not serve the UI: ${code}"; fail=1; }
@@ -607,54 +784,320 @@ for spec in sonarr:api/v3 radarr:api/v3 prowlarr:api/v1; do
   # The API gate must be untouched: no key is 401, the release Secret's key is
   # 200, and the status body says which method the app actually booted with, so
   # a typo in the env var name cannot pass as "the UI is open anyway".
-  code=$(curl -s -o /dev/null -w '%{http_code}' "http://${GW_ADDR}/${app}/${api}/system/status" || true)
+  code=$(gw_get -s -o /dev/null -w '%{http_code}' "https://${DOMAIN}/${app}/${api}/system/status" || true)
   echo "GET /${app}/${api}/system/status without a key -> ${code} (want 401)"
   [ "$code" = 401 ] || { echo "${app} answered its API without a key: ${code}"; fail=1; }
   apikey=$($K -n "$NS" get secret s5n-keys -o jsonpath="{.data.${app}-apikey}" | base64 -d || true)
-  status=$(curl -s -w '\n%{http_code}' -H "X-Api-Key: ${apikey}" "http://${GW_ADDR}/${app}/${api}/system/status" || true)
+  status=$(gw_get -s -w '\n%{http_code}' -H "X-Api-Key: ${apikey}" "https://${DOMAIN}/${app}/${api}/system/status" || true)
   code=${status##*$'\n'}; body=${status%$'\n'*}
   method=$(printf '%s' "$body" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("authentication"))' 2>/dev/null || true)
   echo "GET /${app}/${api}/system/status with the key -> ${code} authentication=${method}"
   [ "$code" = 200 ] || { echo "${app} refused its own API key: ${code}"; fail=1; }
   [ "$method" = external ] || { echo "${app} is not running External auth: ${method}"; fail=1; }
 done
-code=$(curl -s -o /dev/null -w '%{http_code}' "http://${GW_ADDR}/sonarr/initialize.json" || true)
+code=$(gw_get -s -o /dev/null -w '%{http_code}' "https://${DOMAIN}/sonarr/initialize.json" || true)
 echo "GET /sonarr/initialize.json via gateway -> ${code}"; [ "$code" = 200 ] || fail=1
-code=$(curl -s -o /dev/null -w '%{http_code}' "http://${GW_ADDR}/qbittorrent/")
+code=$(gw_get -s -o /dev/null -w '%{http_code}' "https://${DOMAIN}/qbittorrent/")
 echo "GET /qbittorrent/ via gateway -> ${code}"; [ "$code" = 200 ] || fail=1
+
+# qBittorrent's WebUI skips its login for the private ranges and for loopback
+# (docs/box.md, "Logins"), which is what lets every app that calls it hold no
+# credential. Read that back with no session at all: a 403 here would mean the
+# app is still asking for a password, and then the Arrs, qui, autobrr and
+# PeerBanHelper would each need one again.
+qbit_prefs=$($K -n "$NS" exec qbittorrent-0 -- curl -s http://localhost:8080/api/v2/app/preferences 2>/dev/null || true)
+printf '%s' "$qbit_prefs" >"$WORK/qbittorrent-preferences.json"
+if python3 - "$WORK/qbittorrent-preferences.json" <<'PYPREFS'
+import json, sys
+want = "10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 100.64.0.0/10, fc00::/7"
+try:
+    prefs = json.load(open(sys.argv[1], encoding="utf-8"))
+except Exception as exc:
+    print("  qBittorrent's preferences are not JSON (%s): the WebUI still wants a login" % exc)
+    sys.exit(1)
+ok = True
+print("  bypass_local_auth=%r whitelist_enabled=%r whitelist=%r"
+      % (prefs.get("bypass_local_auth"), prefs.get("bypass_auth_subnet_whitelist_enabled"),
+         prefs.get("bypass_auth_subnet_whitelist")))
+if prefs.get("bypass_local_auth") is not True:
+    print("  loopback still needs a login: kubectl port-forward would ask for one")
+    ok = False
+if prefs.get("bypass_auth_subnet_whitelist_enabled") is not True:
+    print("  the subnet whitelist is off: every pod that calls qBittorrent would need a password")
+    ok = False
+# The API answers the list newline-joined (appcontroller.cpp:362), so it is
+# compared line by line against the five ranges.
+got = [line.strip() for line in str(prefs.get("bypass_auth_subnet_whitelist") or "").split("\n") if line.strip()]
+if ", ".join(got) != want:
+    print("  whitelist = %r, want %r" % (got, want.split(", ")))
+    ok = False
+sys.exit(0 if ok else 1)
+PYPREFS
+then :; else fail=1; fi
+
+# The same three keys in the file on disk, because that is where qBittorrent
+# reads them: the list is a QSettings QStringList, written comma-separated and
+# unquoted (a quoted value reads back as one string, which is one bogus subnet).
+qbit_conf=$($K -n "$NS" exec qbittorrent-0 -- sh -c 'grep -E "^(AuthSubnetWhitelist|AuthSubnetWhitelistEnabled|LocalHostAuth)=" /config/qBittorrent/qBittorrent.conf' 2>/dev/null || true)
+echo "  qBittorrent.conf: $(printf '%s' "$qbit_conf" | tr '\n' ' ')"
+printf '%s\n' "$qbit_conf" | grep -qxF "LocalHostAuth=false" ||
+  { echo "qBittorrent.conf does not skip the login for loopback"; fail=1; }
+printf '%s\n' "$qbit_conf" | grep -qxF "AuthSubnetWhitelistEnabled=true" ||
+  { echo "qBittorrent.conf does not enable the subnet whitelist"; fail=1; }
+printf '%s\n' "$qbit_conf" | grep -qxF "AuthSubnetWhitelist=10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 100.64.0.0/10, fc00::/7" ||
+  { echo "qBittorrent.conf does not carry the five private ranges in QSettings' list form"; fail=1; }
+# ---- apps with a host of their own ------------------------------------------
+# Plex and Seerr are not under a path any more. Their route is <app>.<domain>,
+# their own listener serves the certificate Pebble issued for that name, and
+# their UI's absolute asset paths resolve from the site root -- which is the
+# reason they cannot live under a prefix.
+host_get() { # host_get <host> <path> <output-file-or-/dev/null>
+  curl -sS --resolve "${1}:443:${GW_ADDR}" --cacert "$WORK/pebble-root.pem" \
+    -o "$3" -w '%{http_code}' "https://${1}${2}" || true
+}
+for spec in "plex:${PLEX_HOST}" "seerr:${SEERR_HOST}" "pbh:${PBH_HOST}"; do
+  app=${spec%%:*}; host=${spec##*:}
+  label=${host//./-}
+  cert="s5n-tls-${label}"
+  listener=$($K -n s5n-gateway get gateway s5n \
+    -o jsonpath="{.spec.listeners[?(@.name==\"https-${label}\")].tls.certificateRefs[0].name}" || true)
+  http_listener=$($K -n s5n-gateway get gateway s5n \
+    -o jsonpath="{.spec.listeners[?(@.name==\"http-${label}\")].hostname}" || true)
+  route_host=$($K -n "$NS" get httproute "$app" -o jsonpath='{.spec.hostnames[0]}' || true)
+  route_path=$($K -n "$NS" get httproute "$app" -o jsonpath='{.spec.rules[0].matches[0].path.value}' || true)
+  echo "  ${host}: route ${route_host}${route_path}, listener https-${label} -> ${listener}, http-${label} on ${http_listener}"
+  [ "$route_host" = "$host" ] || { echo "the ${app} route is on ${route_host}, want its own host"; fail=1; }
+  [ "$route_path" = / ] || { echo "the ${app} route's path is ${route_path}, want /"; fail=1; }
+  [ "$listener" = "$cert" ] || { echo "the ${app} HTTPS listener references ${listener}, want ${cert}"; fail=1; }
+  [ "$http_listener" = "$host" ] || { echo "the ${app} port-80 listener matches ${http_listener}, want ${host}"; fail=1; }
+  $K -n s5n-gateway wait --for=condition=Ready "certificate/$cert" --timeout=180s ||
+    { echo "the ${app} host's Certificate never became Ready"; fail=1; }
+  cert_issuer=$($K -n s5n-gateway get certificate "$cert" -o jsonpath='{.spec.issuerRef.name}' || true)
+  [ "$cert_issuer" = s5n-letsencrypt ] ||
+    { echo "the ${app} host's Certificate names issuer ${cert_issuer}, want the Pebble-backed production issuer"; fail=1; }
+done
+
 # Plex's /identity answers unauthenticated whether or not it is claimed, and
-# Seerr's /api/v1/settings/public answers before any admin user exists —
-# both are exactly what makes them usable readiness/reachability checks here.
-code=$(curl -s -o /dev/null -w '%{http_code}' "http://${GW_ADDR}/plex/identity")
-echo "GET /plex/identity via gateway -> ${code}"; [ "$code" = 200 ] || fail=1
+# Seerr's /api/v1/settings/public answers before any admin user exists — both
+# are exactly what makes them usable readiness/reachability checks here.
+code=$(host_get "$PLEX_HOST" /identity /dev/null)
+echo "GET https://${PLEX_HOST}/identity -> ${code}"; [ "$code" = 200 ] || fail=1
 # The regression test for the no-auth hole: Envoy connects to Plex from its own
 # pod IP, inside the cluster pod CIDR. If Plex trusted a network range covering
 # that (PLEX_NO_AUTH_NETWORKS), this library call would answer 200 with full
 # admin for anyone who can reach the Gateway. It must be 401.
-code=$(curl -s -o /dev/null -w '%{http_code}' "http://${GW_ADDR}/plex/library/sections")
-echo "GET /plex/library/sections via gateway -> ${code} (want 401)"
+code=$(host_get "$PLEX_HOST" /library/sections /dev/null)
+echo "GET https://${PLEX_HOST}/library/sections -> ${code} (want 401)"
 [ "$code" = 401 ] || { echo "Plex served /library/sections as ${code} through the Gateway: unauthenticated access"; fail=1; }
-code=$(curl -s -o /dev/null -w '%{http_code}' "http://${GW_ADDR}/seerr/api/v1/settings/public")
-echo "GET /seerr/api/v1/settings/public via gateway -> ${code}"; [ "$code" = 200 ] || fail=1
+
+# Seerr's page, its absolute assets, and no path route left behind. Absolute
+# paths are the whole reason for the move: a link to /assets/... only resolves
+# if the UI is served from the site root of its own host.
+# Seerr answers the root with a redirect of its own (to its login or its
+# first-run setup), so the page is fetched the way a browser gets it.
+code=$(curl -sS -L --resolve "${SEERR_HOST}:443:${GW_ADDR}" --cacert "$WORK/pebble-root.pem" \
+  -o "$WORK/seerr.html" -w '%{http_code}' "https://${SEERR_HOST}/" || true)
+echo "GET https://${SEERR_HOST}/ (following Seerr's own redirect) -> ${code}"
+[ "$code" = 200 ] || { echo "Seerr's own host did not serve its UI: ${code}"; fail=1; }
+grep -qi '<!doctype html' "$WORK/seerr.html" || { echo "${SEERR_HOST} answered ${code} without an HTML document"; fail=1; }
+asset=$(grep -oE '(src|href)="/[^"]+\.(js|css)"' "$WORK/seerr.html" | head -1 |
+  sed 's/^[a-z]*="//; s/"$//' || true)
+echo "  asset the page references: ${asset}"
+case "$asset" in
+  "/"*) ;;
+  "") echo "${SEERR_HOST} referenced no script or stylesheet"; fail=1 ;;
+  *) echo "the asset ${asset} is not an absolute path: Seerr is not served from its own root"; fail=1 ;;
+esac
+if [ -n "$asset" ]; then
+  code=$(host_get "$SEERR_HOST" "$asset" /dev/null)
+  echo "GET https://${SEERR_HOST}${asset} -> ${code}"; [ "$code" = 200 ] || fail=1
+fi
+code=$(host_get "$SEERR_HOST" /api/v1/settings/public /dev/null)
+echo "GET https://${SEERR_HOST}/api/v1/settings/public -> ${code}"; [ "$code" = 200 ] || fail=1
+# The old path is gone from the box's own host: a request under /seerr finds no
+# route rather than a redirect or the app.
+code=$(gw_get -s -o /dev/null -w '%{http_code}' "https://${DOMAIN}/seerr/" || true)
+echo "GET https://${DOMAIN}/seerr/ -> ${code} (want 404)"
+[ "$code" = 404 ] || { echo "/seerr still answers ${code} on the box's host: a path route was left behind"; fail=1; }
+
+# Port 80 for the box's own name is a redirect now, and each app host's own
+# port-80 listener exists for the challenge and the redirect.
+for host in "$DOMAIN" "$PLEX_HOST" "$SEERR_HOST" "$PBH_HOST"; do
+  code=$(curl -s -o /dev/null -w '%{http_code}' --resolve "${host}:80:${GW_ADDR}" "http://${host}/" || true)
+  echo "GET http://${host}/ -> ${code} (want 301)"
+  [ "$code" = 301 ] || { echo "${host} is not redirecting port 80 to HTTPS"; fail=1; }
+done
+
+
+# ---- PeerBanHelper: one login, and a downloader PBH itself proved ------------
+# The app is served from its own host, and its own WebUI login is switched off:
+# the page calls /api/... with a token it holds in the browser, which the edge
+# cannot supply, so the chart turns the app's login off and the edge's is the
+# only one. What makes that safe is the NetworkPolicy: only the Gateway and the
+# wiring Job reach this port, and everything through the Gateway is behind the
+# edge in a real box.
+pbh_token=$($K -n "$NS" get secret s5n-keys -o jsonpath='{.data.pbh-token}' | base64 -d || true)
+[ -n "$pbh_token" ] || { echo "the release Secret has no pbh-token"; fail=1; }
+code=$(host_get "$PBH_HOST" / "$WORK/pbh.html")
+echo "GET https://${PBH_HOST}/ -> ${code}"
+[ "$code" = 200 ] || fail=1
+grep -qi '<!doctype html' "$WORK/pbh.html" || { echo "${PBH_HOST} answered without an HTML document"; fail=1; }
+asset=$(grep -oE '(src|href)="[^"]+\.(js|css)"' "$WORK/pbh.html" | head -1 | sed 's/^[a-z]*="//; s/"$//' || true)
+echo "  asset the page references: ${asset}"
+case "$asset" in
+  ./assets/*) ;;
+  *) echo "the asset ${asset} is not the bundle's own relative path: PBH is not served from its root"; fail=1 ;;
+esac
+
+# The route the app's page calls, with no credential at all: 200 is the one-login
+# decision, and 403 would mean the app is asking for a password of its own.
+code=$(host_get "$PBH_HOST" /api/downloaders /dev/null)
+echo "GET https://${PBH_HOST}/api/downloaders with no token -> ${code}"
+[ "$code" = 200 ] || { echo "PBH refused the request its own page makes: the app is asking for a second password"; fail=1; }
+
+# The wiring Job's downloader, read back through the API with the release
+# Secret's token. HEALTHY is PBH's own verdict that it logged in to qBittorrent
+# with the password that was written; nothing s5n does can fake it.
+code=$(curl -sS -o "$WORK/pbh-status.json" -w '%{http_code}' \
+  -H "Authorization: Bearer ${pbh_token}" --resolve "${PBH_HOST}:443:${GW_ADDR}" \
+  --cacert "$WORK/pebble-root.pem" "https://${PBH_HOST}/api/downloaders/qbittorrent/status" || true)
+echo "GET https://${PBH_HOST}/api/downloaders/qbittorrent/status -> ${code}"
+[ "$code" = 200 ] || fail=1
+qbit_pw=$($K -n "$NS" get secret s5n-keys -o jsonpath='{.data.qbittorrent-password}' | base64 -d || true)
+if python3 - "$WORK/pbh-status.json" >"$WORK/pbh-status.txt" <<'PY'
+import json, sys
+status = json.load(open(sys.argv[1], encoding="utf-8"))["data"]
+cfg = status.get("config") or {}
+ok = True
+print("  lastStatus %s, endpoint %s, username %r, password %d characters"
+      % (status.get("lastStatus"), cfg.get("endpoint"), cfg.get("username"), len(cfg.get("password") or "")))
+if status.get("lastStatus") != "HEALTHY":
+    print("  PBH is not healthy on its qBittorrent: %s" % status.get("lastStatusMessage"))
+    ok = False
+if cfg.get("endpoint") != "http://qbittorrent:8080":
+    print("  PBH dials %r, want the release's own qBittorrent, with no /api/v2" % cfg.get("endpoint"))
+    ok = False
+# Both empty: qBittorrent skips its login for the release's addresses, so no app
+# holds a copy of the credential and PBH dials it without one.
+if cfg.get("username") or cfg.get("password"):
+    print("  PBH holds a qBittorrent credential: nothing should, and HEALTHY proves it needs none")
+    ok = False
+sys.exit(0 if ok else 1)
+PY
+then
+  sed 's/^/  /' "$WORK/pbh-status.txt"
+else
+  sed 's/^/  /' "$WORK/pbh-status.txt"; fail=1
+fi
+
+# The token is a Secret key the app reads through its environment: it must never
+# reach the pod spec, where anything that may describe the pod could read it.
+if $K -n "$NS" get statefulset pbh -o json | grep -qF "$pbh_token"; then
+  echo "PBH's WebUI token is in the pod spec"; fail=1
+fi
+
+# PBH turns qBittorrent's "allow multiple connections from the same IP" off
+# itself on its first successful login (AbstractQbittorrent.updatePreferences at
+# v9.5.4). Asserted here because it is a setting PBH's own peer matching depends
+# on, and a seed that flipped it on would be the chart's fault, not PBH's.
+multi=$($K -n "$NS" exec qbittorrent-0 -- sh -c "curl -s -c /tmp/s5n-multi -o /dev/null -X POST \
+  --data-urlencode 'username=admin' --data-urlencode 'password=${qbit_pw}' \
+  http://localhost:8080/api/v2/auth/login && curl -s -b /tmp/s5n-multi http://localhost:8080/api/v2/app/preferences" 2>/dev/null |
+  python3 -c 'import json,sys; print(json.load(sys.stdin).get("enable_multi_connections_from_same_ip"))' 2>/dev/null || true)
+echo "qBittorrent enable_multi_connections_from_same_ip = ${multi} (PBH turns it off)"
+[ "$multi" = False ] || { echo "qBittorrent still accepts several connections from one IP: PBH cannot tell peers from its own connections"; fail=1; }
+
+# ---- the opt-in apps (apps-values.yaml) ---------------------------------------
+# Each serves itself under its own base path (its baseUrl / BASE_PATH, with no
+# rewrite). qui and Maintainerr keep no login of their own here: the edge is the
+# login, exactly as the Arrs run External. autobrr does, because v1.90.0 has no
+# way to turn its login off and this install gives the release no provider -- a
+# box's init does, and that is what the box e2e signs in to. So the HTML must
+# arrive without a redirect,
+# and the asset URLs it builds must resolve through the same prefix — that is
+# what makes the base-path setting right rather than merely present.
+for app in qui autobrr maintainerr; do
+  : >"$WORK/${app}-headers"
+  code=$(gw_get -s -D "$WORK/${app}-headers" -o "$WORK/${app}.html" -w '%{http_code}' \
+    "https://${DOMAIN}/${app}/" || true)
+  loc=$(grep -i '^location:' "$WORK/${app}-headers" | tr -d '\r' | sed 's/^[Ll]ocation: *//' || true)
+  echo "GET /${app}/ via gateway -> ${code} ${loc}"
+  [ "$code" = 200 ] || { echo "/${app}/ did not serve its UI: ${code}"; fail=1; }
+  [ -z "$loc" ] || { echo "/${app}/ redirected to ${loc}: the app is asking for a login of its own"; fail=1; }
+  grep -qi '<!doctype html' "$WORK/${app}.html" || { echo "/${app}/ answered ${code} without an HTML document"; fail=1; }
+  asset=$(grep -oE '(src|href)="/[^"]+\.(js|css)"' "$WORK/${app}.html" | head -1 |
+    sed 's/^[a-z]*="//; s/"$//' || true)
+  echo "  asset the page references: ${asset}"
+  case "$asset" in
+    "/${app}/"*) ;;
+    "") echo "/${app}/ referenced no script or stylesheet"; fail=1 ;;
+    *) echo "the asset ${asset} is outside /${app}/: the base path did not reach the bundle"; fail=1 ;;
+  esac
+  if [ -n "$asset" ]; then
+    code=$(gw_get -s -o /dev/null -w '%{http_code}' "https://${DOMAIN}${asset}" || true)
+    echo "GET ${asset} via gateway -> ${code}"; [ "$code" = 200 ] || fail=1
+  fi
+  case "$app" in
+    qui)
+      # qui's health endpoints are on its root router, outside its base path
+      # (only /api and the UI sit under baseUrl), so the Gateway — which routes
+      # /qui — must not be used for them: ask the pod, as its readinessProbe
+      # does. A prefixed /qui/healthz/readiness is the SPA's catch-all.
+      code=$($K -n "$NS" exec qui-0 -- curl -s -o /dev/null -w '%{http_code}' \
+        http://127.0.0.1:7476/healthz/readiness || true)
+      echo "GET /${app} in-pod /healthz/readiness -> ${code}"; [ "$code" = 200 ] || fail=1 ;;
+    autobrr)
+      # This install gives the release no provider (a plain helm install sets
+      # auth.edge and nothing else), so autobrr keeps the login it cannot turn
+      # off at v1.90.0: the UI is its own sign-in page behind the edge's, which
+      # is the state a box that never ran init has. Its base path covers every
+      # route, so health answers under the prefix like any other path.
+      code=$(gw_get -s -o /dev/null -w '%{http_code}' "https://${DOMAIN}/${app}/api/healthz/readiness" || true)
+      echo "GET /${app}/api/healthz/readiness via gateway -> ${code}"; [ "$code" = 200 ] || fail=1 ;;
+    maintainerr)
+      # BASE_PATH covers every route, health included, so this one is reachable
+      # through the Gateway like any other path.
+      code=$(gw_get -s -o /dev/null -w '%{http_code}' "https://${DOMAIN}/${app}/api/health/ready" || true)
+      echo "GET /${app}/api/health/ready via gateway -> ${code}"; [ "$code" = 200 ] || fail=1
+      # Its whole state is one directory, and DATA_DIR=/config is what puts it
+      # on the chart's config subPath instead of the read-only root: the
+      # database has to be in the mounted directory, not in the image.
+      state=$($K -n "$NS" exec maintainerr-0 -- ls -1 /config || true)
+      echo "  /config holds: $(echo "$state" | tr '\n' ' ')"
+      grep -qx "maintainerr.sqlite" <<<"$state" ||
+        { echo "maintainerr's database is not on the config mount"; fail=1; } ;;
+  esac
+done
+
+# Maintainerr streams live task progress as Server-Sent Events. Envoy's route
+# timeout defaults to 15s and would cut that stream, leaving the log and task
+# views silently dead, so the chart gives that one path no request timeout.
+# Held open for 30s here: exit 28 is curl's own --max-time firing, which means
+# the stream outlived the window; anything else is the proxy closing it.
+sse_exit=0
+sse_secs=$(gw_get -sN --max-time 30 -w '%{time_total}' -o "$WORK/maintainerr-sse.txt" \
+  "https://${DOMAIN}/maintainerr/api/events/stream") || sse_exit=$?
+echo "GET /maintainerr/api/events/stream: curl exit ${sse_exit} after ${sse_secs}s (28 = still open at the 30s cap), $(wc -c <"$WORK/maintainerr-sse.txt") bytes"
+[ "$sse_exit" = 28 ] || { echo "the event stream closed before 30s (curl exit ${sse_exit}): something is timing it out"; fail=1; }
 
 # The peers Service is a NodePort on the node's own address (how a single-IP box
 # runs: the Gateway holds the LoadBalancer address, peers use the node port), so a
-# TCP connect from the host to <node>:31111 must succeed.
+# TCP connect from the host to <node>:30080 must succeed.
 peer_type=$($K -n "$NS" get svc qbittorrent-peers -o jsonpath='{.spec.type}/{.spec.ports[0].nodePort}')
-echo "peers Service: ${peer_type}"; [ "$peer_type" = NodePort/31111 ] || fail=1
+echo "peers Service: ${peer_type}"; [ "$peer_type" = NodePort/30080 ] || fail=1
 PEER_ADDR=$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "${CLUSTER}-control-plane")
 echo "node address: ${PEER_ADDR}"
 [ -n "$PEER_ADDR" ] || fail=1
 if python3 - "$PEER_ADDR" <<'PY'
 import socket, sys
-s = socket.create_connection((sys.argv[1], 31111), timeout=10)
+s = socket.create_connection((sys.argv[1], 30080), timeout=10)
 s.close()
-print("TCP", sys.argv[1], "31111 -> connected")
+print("TCP", sys.argv[1], "30080 -> connected")
 PY
 then
   :
 else
-  echo "TCP ${PEER_ADDR}:31111 -> REFUSED/TIMEOUT"; fail=1
+  echo "TCP ${PEER_ADDR}:30080 -> REFUSED/TIMEOUT"; fail=1
 fi
 
 # Hardlink invariant: downloads/ and media/ are one filesystem, as seen by an Arr pod.
@@ -697,6 +1140,124 @@ else
   echo "outsider->sonarr: blocked"
 fi
 
+# ---- NetworkPolicy: every declared edge, and one that is not ----------------
+# The peers are derived from the chart's catalog (`calls`), because that is what
+# the release's policies are derived from. A list typed here could agree with
+# the script and still disagree with the release -- which is exactly how a
+# shipped chart came to refuse Seerr's requests to the Arrs while every test in
+# it passed.
+#
+# A probe pod has to run in the release namespace: a NetworkPolicy podSelector
+# peer matches pods in the policy's own namespace, so a pod anywhere else is
+# never the caller it claims to be. That puts it behind Pod Security restricted
+# and the grant's image policy, so its image is the release's own Sonarr image
+# (blessed, and it carries curl). It carries the caller's labels and nothing
+# else, which is the subject of the test: the callee's ingress decides.
+enabled_apps=$($K -n "$NS" get pods -l 's5n.io/app' \
+  -o jsonpath='{range .items[*]}{.metadata.labels.s5n\.io/app}{"\n"}{end}' 2>/dev/null | sort -u | tr '\n' ' ' || true)
+[ -n "${enabled_apps// /}" ] || { echo "no app pods found: the release's edges cannot be derived"; fail=1; }
+PROBE_IMAGE=$($K -n "$NS" get statefulset sonarr -o jsonpath='{.spec.template.spec.containers[0].image}' 2>/dev/null || true)
+[ -n "$PROBE_IMAGE" ] || { echo "no Sonarr image to run the probes with"; fail=1; }
+pairs=$(go run ./hack/appcalls charts/s5n $enabled_apps 2>"$WORK/appcalls.err" || true)
+[ -n "$pairs" ] || { echo "appcalls printed no edges: $(sed 's/^/    /' "$WORK/appcalls.err")"; fail=1; }
+echo "apps with pods: ${enabled_apps}"
+echo "declared edges ($(grep -c . <<<"$pairs")):"
+sed 's/^/  /' <<<"$pairs"
+
+# probe_pod <name> <caller> <callee>...: one pod per caller, dialling each of its
+# callees and printing "<callee> <http code>". A code of 000 is the timeout the
+# policy produces; the callee is never reached, so no status is returned.
+probe_pod() {
+  local name=$1 caller=$2 entries="" callee url
+  shift 2
+  for callee in "$@"; do
+    url="http://${callee}.${NS}:$($K -n "$NS" get svc "$callee" -o jsonpath='{.spec.ports[0].port}')/"
+    entries="${entries} ${callee}=${url}"
+  done
+  $K -n "$NS" delete pod "$name" --ignore-not-found >/dev/null 2>&1
+  $K -n "$NS" create -f - >/dev/null <<EOF
+apiVersion: v1
+kind: Pod
+metadata:
+  name: ${name}
+  labels:
+    app.kubernetes.io/instance: s5n
+    s5n.io/app: ${caller}
+spec:
+  restartPolicy: Never
+  automountServiceAccountToken: false
+  securityContext:
+    runAsUser: 1000
+    runAsGroup: 1000
+    runAsNonRoot: true
+    seccompProfile: {type: RuntimeDefault}
+  containers:
+    - name: probe
+      image: ${PROBE_IMAGE}
+      command: ["/bin/sh", "-c"]
+      args:
+        - |
+          for e in${entries}; do
+            printf '%s %s\n' "\${e%%=*}" "\$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 "\${e#*=}")"
+          done
+      securityContext:
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+        capabilities: {drop: ["ALL"]}
+EOF
+}
+
+probe_wait_read() { # probe_wait_read <name> <log file>
+  local name=$1 out=$2 phase=""
+  for _ in $(seq 1 90); do
+    phase=$($K -n "$NS" get pod "$name" -o jsonpath='{.status.phase}' 2>/dev/null || true)
+    case "$phase" in Succeeded|Failed) break ;; esac
+    sleep 1
+  done
+  $K -n "$NS" logs "$name" >"$out" 2>/dev/null || true
+  [ -s "$out" ] || { echo "${name}: printed nothing (phase ${phase:-unknown})"; fail=1; }
+}
+
+# One pod per caller, all of them at once: a caller with one callee and a caller
+# with six cost the same wall time.
+declare -A callees
+order=""
+while read -r caller callee; do
+  [ -n "$callee" ] || continue
+  [ -n "${callees[$caller]:-}" ] || order="${order} ${caller}"
+  callees[$caller]="${callees[$caller]:-} ${callee}"
+done <<<"$pairs"
+for caller in $order; do
+  probe_pod "np-${caller}" "$caller" ${callees[$caller]}
+done
+for caller in $order; do
+  probe_wait_read "np-${caller}" "$WORK/np-${caller}.txt"
+  while read -r callee code; do
+    [ -n "$callee" ] || continue
+    echo "  ${caller} -> ${callee}: ${code}"
+    case "$code" in
+      ""|000) echo "  ${caller} -> ${callee} was refused by the callee's ingress; the catalog declares it"; fail=1 ;;
+    esac
+  done <"$WORK/np-${caller}.txt"
+  $K -n "$NS" delete pod "np-${caller}" --ignore-not-found >/dev/null 2>&1
+done
+
+# The negative half: an edge nothing declares must time out. tautulli and
+# qBittorrent are both in this release and have no reason to talk, so a probe
+# carrying tautulli's labels gets nothing from qBittorrent's port. If the catalog
+# ever declares it, say so instead of asserting the opposite of the release.
+if grep -qx 'tautulli qbittorrent' <<<"$pairs"; then
+  echo "the catalog declares tautulli -> qbittorrent now: pick another pair for the negative probe"
+  fail=1
+else
+  probe_pod np-undeclared tautulli qbittorrent
+  probe_wait_read np-undeclared "$WORK/np-undeclared.txt"
+  undeclared=$(awk '{print $2}' "$WORK/np-undeclared.txt" 2>/dev/null || true)
+  echo "  tautulli -> qbittorrent (undeclared): ${undeclared:-nothing printed}"
+  [ "$undeclared" = 000 ] || { echo "an edge no app declares answered ${undeclared:-nothing}: the ingress is not enforced"; fail=1; }
+  $K -n "$NS" delete pod np-undeclared --ignore-not-found >/dev/null 2>&1
+fi
+
 # ---- wiring -------------------------------------------------------------------
 status_field() { # status_field <python expression over `d`>
   $K -n "$NS" get cm s5n-wiring -o jsonpath='{.data.status\.json}' |
@@ -705,6 +1266,76 @@ status_field() { # status_field <python expression over `d`>
 
 arr_port() { $K -n "$NS" get svc "$1" -o jsonpath='{.spec.ports[0].port}'; }
 arr_key() { $K -n "$NS" get secret s5n-keys -o jsonpath="{.data.$1-apikey}" | base64 -d; }
+
+# ---- qui and autobrr: the account the chart owns -----------------------------
+# Both apps hand an API key only to a signed-in session, so the chart generates
+# a password in the release Secret and each app's init container writes it into
+# the app on every start; the wiring Job signs in with it. This install has no
+# OIDC provider, which is the other half of the design: qui runs with its login
+# switched off (its API is then open inside the release) and autobrr keeps the
+# login it cannot turn off, with that account behind it.
+#
+# Reading them from the host needs a tunnel: their ingress policy admits the
+# Gateway and the wiring Job alone, and the Job's image is distroless. A
+# port-forward is the API server talking to kubelet, which no policy applies to,
+# and it arrives on 127.0.0.1 -- a secure context for curl, so qui's Secure
+# session cookie would be replayed if it had one.
+port_forward() { # port_forward <pod> <container-port>
+  local pod=$1 port=$2 i
+  PF_PORT=$(python3 -c 'import socket
+s = socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1]); s.close()')
+  $K -n "$NS" port-forward "pod/${pod}" "${PF_PORT}:${port}" >"$WORK/pf-${pod}.log" 2>&1 &
+  PF_PID=$!
+  for i in $(seq 1 30); do
+    if curl -sS -o /dev/null --max-time 2 "http://127.0.0.1:${PF_PORT}/" 2>/dev/null; then
+      return 0
+    fi
+    sleep 1
+  done
+  echo "port-forward to ${pod}:${port} never answered"
+  sed 's/^/    /' "$WORK/pf-${pod}.log" 2>/dev/null || true
+  return 1
+}
+
+port_forward_stop() {
+  kill "$PF_PID" 2>/dev/null || true
+  wait "$PF_PID" 2>/dev/null || true
+}
+
+# app_snapshot writes what one app holds through its own API: the proof that a
+# second wiring run created no duplicate rows, compared field for field by
+# state-diff.py.
+app_snapshot() { # app_snapshot <dir> <app>
+  local dir=$1 app=$2 base port jar
+  case "$app" in
+    qui)
+      base=/qui
+      port=$(arr_port qui)
+      port_forward qui-0 "$port" || return 1
+      curl -sS "http://127.0.0.1:${PF_PORT}${base}/api/instances/" >"$dir/qui-instances.json" 2>/dev/null || true
+      ;;
+    autobrr)
+      base=/autobrr
+      port=$(arr_port autobrr)
+      jar="$dir/autobrr-jar.txt"
+      port_forward autobrr-0 "$port" || return 1
+      curl -sS -c "$jar" -o /dev/null \
+        -X POST "http://127.0.0.1:${PF_PORT}${base}/api/auth/login" -H 'Content-Type: application/json' \
+        --data "{\"username\":\"${ACCOUNT}\",\"password\":\"${AUTOBRR_PASSWORD}\"}" 2>/dev/null || true
+      curl -sS -b "$jar" "http://127.0.0.1:${PF_PORT}${base}/api/downloaders" >"$dir/autobrr-downloaders.json" 2>/dev/null || true
+      rm -f "$jar"
+      ;;
+    pbh)
+      # The downloader the Job owns, which is the only object s5n writes there.
+      # The status endpoint is left out on purpose: it carries live counters that
+      # move for reasons that are not configuration.
+      port=$(arr_port pbh)
+      port_forward pbh-0 "$port" || return 1
+      curl -sS "http://127.0.0.1:${PF_PORT}/api/downloaders" >"$dir/pbh-downloaders.json" 2>/dev/null || true
+      ;;
+  esac
+  port_forward_stop
+}
 
 # Snapshot everything the wiring Job is allowed to change, so a second run can be
 # compared field for field rather than trusted. One file per endpoint; free space is
@@ -738,7 +1369,22 @@ snapshot() { # snapshot <dir>
   tpw=$($K -n "$NS" get secret s5n-keys -o jsonpath='{.data.tautulli-apikey}' | base64 -d)
   $K -n "$NS" exec tautulli-0 -- curl -s \
     "http://localhost:8181/api/v2?apikey=${tpw}&cmd=get_settings" >"$dir/tautulli-settings.json"
+  # The two apps with their own user table: what the Job registered is an
+  # instance and a set of download clients, so a duplicate row or a rewritten
+  # client shows up in the diff like any Arr's download client would.
+  for app in qui autobrr pbh; do
+    app_snapshot "$dir" "$app" || { echo "could not snapshot ${app}"; fail=1; }
+  done
 }
+
+# The account the chart owns, and its password from the release Secret. Both
+# apps' init containers wrote it into their own user table at start-up.
+wiring_cfg=$($K -n "$NS" get cm s5n-wiring -o jsonpath='{.data.wiring\.json}')
+ACCOUNT=$(printf '%s' "$wiring_cfg" | python3 -c 'import json,sys; print(json.load(sys.stdin)["qui"]["username"])')
+QUI_PASSWORD=$($K -n "$NS" get secret s5n-keys -o jsonpath='{.data.qui-password}' | base64 -d)
+AUTOBRR_PASSWORD=$($K -n "$NS" get secret s5n-keys -o jsonpath='{.data.autobrr-password}' | base64 -d)
+QBIT_PASSWORD=$($K -n "$NS" get secret s5n-keys -o jsonpath='{.data.qbittorrent-password}' | base64 -d)
+echo "the automation account: ${ACCOUNT} (qui ${#QUI_PASSWORD} char password)"
 
 log "wiring run 1: asserts the release is actually connected"
 $K -n "$NS" wait --for=condition=complete job/s5n-wiring --timeout=600s || fail=1
@@ -757,10 +1403,74 @@ for expected in \
   qbittorrent/data-contract qbittorrent/category/tv qbittorrent/category/movies \
   qbittorrent/category/4K/Movies \
   data/hardlink/tv data/hardlink/movies data/hardlink/4K/Movies \
+  qui/ready qui/login qui/instance \
+  autobrr/ready autobrr/login autobrr/downloader/qbittorrent \
+  autobrr/downloader/sonarr autobrr/downloader/radarr autobrr/downloader/radarr-4k \
+  pbh/ready pbh/downloader \
   plex/ready tautulli/ready seerr/ready; do
   res=$(status_field "[s['result'] for s in d['steps'] if s['name']=='$expected'][0]" 2>/dev/null || echo missing)
   echo "  ${expected}: ${res}"; [ "$res" = ok ] || fail=1
 done
+
+# What the Job registered, read back through the apps themselves: exactly one
+# qui instance pointed at qBittorrent with local filesystem access, and one
+# autobrr client per Arr instance -- the 4K one included, whose host carries its
+# own base path -- plus qBittorrent, which autobrr is asked to dial.
+port_forward qui-0 "$(arr_port qui)" || fail=1
+curl -sS "http://127.0.0.1:${PF_PORT}/qui/api/instances/" >"$WORK/qui-live.json" 2>/dev/null || true
+port_forward_stop
+port_forward autobrr-0 "$(arr_port autobrr)" || fail=1
+autobrr_login=$(curl -sS -c "$WORK/autobrr-live.jar" -o /dev/null -w '%{http_code}' \
+  -X POST "http://127.0.0.1:${PF_PORT}/autobrr/api/auth/login" -H 'Content-Type: application/json' \
+  --data "{\"username\":\"${ACCOUNT}\",\"password\":\"${AUTOBRR_PASSWORD}\"}" 2>/dev/null || true)
+curl -sS -b "$WORK/autobrr-live.jar" "http://127.0.0.1:${PF_PORT}/autobrr/api/downloaders" >"$WORK/autobrr-live.json" 2>/dev/null || true
+qbit_url=$(printf '%s' "$wiring_cfg" | python3 -c 'import json,sys; print(json.load(sys.stdin)["qbittorrent"]["url"])')
+autobrr_test=$(curl -sS -o /dev/null -w '%{http_code}' -b "$WORK/autobrr-live.jar" \
+  -X POST "http://127.0.0.1:${PF_PORT}/autobrr/api/downloaders/test" -H 'Content-Type: application/json' \
+  --data "{\"name\":\"qBittorrent\",\"type\":\"QBITTORRENT\",\"enabled\":true,\"host\":\"${qbit_url}\",\"username\":\"admin\",\"password\":\"${QBIT_PASSWORD}\",\"settings\":{\"rules\":{\"enabled\":false}}}" 2>/dev/null || true)
+port_forward_stop
+echo "autobrr login: ${autobrr_login}, its qBittorrent client test: ${autobrr_test}"
+[ "$autobrr_login" = 204 ] || { echo "autobrr refused the account the chart owns (${autobrr_login})"; fail=1; }
+[ "$autobrr_test" = 204 ] || { echo "autobrr could not reach qBittorrent with the client the Job registered (${autobrr_test})"; fail=1; }
+python3 - "$WORK/qui-live.json" "$WORK/autobrr-live.json" "$wiring_cfg" <<'PY' || fail=1
+import json, sys
+qui = json.load(open(sys.argv[1], encoding="utf-8"))
+clients = json.load(open(sys.argv[2], encoding="utf-8"))
+cfg = json.loads(sys.argv[3])
+ok = True
+want_qbit = cfg["qbittorrent"]["url"]
+if len(qui) != 1:
+    print("qui holds %d instances, want exactly 1" % len(qui))
+    ok = False
+else:
+    row = qui[0]
+    print("qui instance: %s -> %s (local filesystem access %s)" %
+          (row.get("name"), row.get("host"), row.get("hasLocalFilesystemAccess")))
+    if row.get("host") != want_qbit:
+        print("  it points at %r, want %r" % (row.get("host"), want_qbit))
+        ok = False
+    if not row.get("hasLocalFilesystemAccess"):
+        print("  it has no local filesystem access: /data is the same mount in both apps")
+        ok = False
+want = {i["name"]: i["url"].rstrip("/") + i["urlBase"] for i in cfg["instances"]}
+print("autobrr holds: %s" % ", ".join("%s(%s)" % (c.get("name"), c.get("type")) for c in clients))
+for name, host in want.items():
+    got = [c for c in clients if c.get("name") == name]
+    if len(got) != 1:
+        print("  %s: %d clients, want 1" % (name, len(got)))
+        ok = False
+    elif got[0].get("host") != host:
+        print("  %s dials %r, want the Arr's own address %r" % (name, got[0].get("host"), host))
+        ok = False
+qbit = [c for c in clients if c.get("type") == "QBITTORRENT"]
+if len(qbit) != 1 or qbit[0].get("host") != want_qbit:
+    print("  qBittorrent: %r, want exactly one client at %r" % (qbit, want_qbit))
+    ok = False
+if len(clients) != len(want) + 1:
+    print("  %d clients in total, want %d (qBittorrent + one per Arr instance)" % (len(clients), len(want) + 1))
+    ok = False
+sys.exit(0 if ok else 1)
+PY
 
 # No claim token and no Plex server token are given anywhere in this e2e, so
 # Plex stays unclaimed, Tautulli has nothing to authenticate its PMS link with,

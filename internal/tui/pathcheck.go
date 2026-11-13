@@ -20,6 +20,9 @@ import (
 // letting the terminal wrap them put the continuation at column 0, which read
 // as a new block rather than the end of this one.
 func (u *UI) ShowPathCheck(check setup.PathCheck) error {
+	if u.themeErr != nil {
+		return u.themeErr
+	}
 	u.begin()
 	title := "path check"
 	fmt.Fprintln(u.out, u.chrome.paint("  "+title, accentStyle.Bold(true).Render("  "+title)))

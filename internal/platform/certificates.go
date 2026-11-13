@@ -3,6 +3,7 @@ package platform
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -10,8 +11,12 @@ import (
 	"strings"
 	"time"
 
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+
+	"github.com/swizzin/s5n/internal/authelia"
 	"github.com/swizzin/s5n/internal/kube"
 	"github.com/swizzin/s5n/internal/say"
+	"github.com/swizzin/s5n/internal/wait"
 )
 
 // CertificateTimeout is how long a host's Certificate gets to become Ready
@@ -22,8 +27,9 @@ import (
 const CertificateTimeout = 3 * time.Minute
 
 // CertificateCluster is the cluster client the per-host TLS flow needs beyond
-// the platform writes: a Certificate's status, whether cert-manager is there,
-// and a write under its own field manager.
+// the platform writes: a Certificate's status, whether cert-manager is there, a
+// write under its own field manager, and the two reads the upgrade check needs
+// (the root's Secret and the host's own).
 type CertificateCluster interface {
 	Cluster
 	// CertificateReady answers the Certificate's Ready condition, with
@@ -35,6 +41,11 @@ type CertificateCluster interface {
 	Serves(ctx context.Context, group, version, kind string) (bool, error)
 	// ApplyWith server-side-applies the documents under manager.
 	ApplyWith(ctx context.Context, manager string, docs []map[string]any) error
+	// Get reads one object, or reports that it is not there.
+	Get(ctx context.Context, group, version, kind, namespace, name string) (map[string]any, bool, error)
+	// UpdateStatus writes one object's status. It is how box asks
+	// cert-manager for a new certificate: the Issuing condition is status.
+	UpdateStatus(ctx context.Context, group, version, kind, namespace string, obj map[string]any) error
 }
 
 // CertificateDecision is root's TLS half for one host name: a cert-manager
@@ -79,6 +90,9 @@ type CertificateResult struct {
 	// whose certificate never issues is never served over HTTPS.
 	HTTPS    bool
 	Redirect bool
+	// Reissued says the certificate box found was not signed by the box root
+	// and this run asked cert-manager for a new one.
+	Reissued bool
 }
 
 func (d *CertificateDecision) report() say.Reporter { return say.Or(d.Say, nil) }
@@ -160,6 +174,19 @@ func (d *CertificateDecision) Apply(ctx context.Context) (CertificateResult, err
 	}
 	r.Success(fmt.Sprintf("certificate %s/%s is Ready", GatewayNamespace, res.Name))
 
+	// A self-signed host's certificate has to chain to the box root, or the
+	// anchor box writes into the seedbox's namespace is not the anchor its
+	// applications verify against. cert-manager does not re-issue on its own
+	// when the issuer behind an unchanged issuerRef changes what it signs with,
+	// so box asks (followRoot).
+	if issuer == SelfSignedIssuer {
+		reissued, err := d.followRoot(ctx, cl, res.Name)
+		if err != nil {
+			return res, err
+		}
+		res.Reissued = reissued
+	}
+
 	if err := d.attachHTTPS(ctx, cl, res.Name); err != nil {
 		return res, err
 	}
@@ -200,6 +227,203 @@ func clusterIssuerName(issuer string) (string, error) {
 	default:
 		return "", fmt.Errorf("unknown issuer %q: box installs %s and %s only", issuer, LetsEncryptIssuer, SelfSignedIssuer)
 	}
+}
+
+// followRoot keeps a self-signed host's certificate on the box root.
+//
+// 0.3.0 wrote every host certificate from a bare `selfSigned` ClusterIssuer, so
+// its Secret's ca.crt is the leaf itself. A box upgraded from it keeps the same
+// Certificate -- same name, same secretName, same issuerRef to
+// s5n-selfsigned -- and cert-manager does not re-issue a Certificate because
+// the issuer's spec changed: at v1.21.3 the trigger chain looks at the Secret,
+// the current CertificateRequest and the expiry, never at what the issuer signs
+// with (internal/controller/certificates/policies/policies.go:71-85). Without
+// this, the certificate an upgraded box serves stays self-signed until it
+// expires, and the anchor box writes is not what that certificate chains to.
+//
+// What starts an issuance is the `Issuing` status condition, which is exactly
+// what `cmctl renew` sets (cert-manager/cmctl, pkg/renew/renew.go:217:
+// `apiutil.SetCertificateCondition(crt, crt.Generation, cmapi.CertificateConditionIssuing,
+// cmmeta.ConditionTrue, "ManuallyTriggered", "Certificate re-issuance manually triggered")`),
+// and the certificates-issuing controller acts on it
+// (pkg/controller/certificates/issuing/issuing_controller.go:197-204: with
+// Issuing=True it fetches the next private key and creates the request instead
+// of returning to ensureSecretData). Box sets the same condition, with the same
+// reason, after comparing the two certificates itself (signedByRoot).
+func (d *CertificateDecision) followRoot(ctx context.Context, cl CertificateCluster, name string) (bool, error) {
+	root, err := rootCertificate(ctx, cl)
+	if err != nil {
+		return false, err
+	}
+	secret, ok, err := cl.Get(ctx, "", "v1", "Secret", GatewayNamespace, name)
+	if err != nil {
+		return false, fmt.Errorf("certificate %s/%s: %w", GatewayNamespace, name, err)
+	}
+	if !ok {
+		// No Secret yet: there is nothing to compare, and the next run -- or
+		// this one, a moment later -- writes one from the root anyway.
+		return false, nil
+	}
+	data, _, _ := unstructured.NestedStringMap(secret, "data")
+	caCert, _ := base64.StdEncoding.DecodeString(data["ca.crt"])
+	ours, err := signedByRoot(caCert, root)
+	if err != nil {
+		return false, err
+	}
+	if ours {
+		return false, nil
+	}
+
+	r := d.report()
+	step := r.Start(say.Op{Label: "re-issuing Certificate " + GatewayNamespace + "/" + name + " from the box root"})
+	if err := triggerIssuing(ctx, cl, name); err != nil {
+		step.Failed(err)
+		return false, err
+	}
+	// Wait for the Secret to hold a different certificate: the Certificate's
+	// Ready condition can still say True for the old one while the new request
+	// is in flight, so the evidence has to be the bytes.
+	timeout := d.Timeout
+	if timeout <= 0 {
+		timeout = CertificateTimeout
+	}
+	before := data["tls.crt"]
+	waited, err := wait.Until(ctx, timeout, 2*time.Second, func(ctx context.Context) (bool, error) {
+		obj, ok, err := cl.Get(ctx, "", "v1", "Secret", GatewayNamespace, name)
+		if err != nil {
+			return false, err
+		}
+		if !ok {
+			return false, nil
+		}
+		now, _, _ := unstructured.NestedStringMap(obj, "data")
+		return now["tls.crt"] != before && now["tls.crt"] != "", nil
+	})
+	if err != nil {
+		step.Failed(err)
+		return false, fmt.Errorf("certificate %s/%s: waiting for the re-issue: %w", GatewayNamespace, name, err)
+	}
+	if !waited.Done {
+		step.Failed(ErrNotReady)
+		return false, fmt.Errorf("certificate %s/%s: cert-manager did not replace it within %s after box asked (check `kubectl -n %s describe certificate %s`)",
+			GatewayNamespace, name, timeout, GatewayNamespace, name)
+	}
+	step.Done(fmt.Sprintf("Certificate %s/%s: re-issued from the box root", GatewayNamespace, name))
+
+	// The new certificate should be the root's child now; if cert-manager
+	// answered with something else, say so rather than letting the anchor be
+	// quietly wrong. It is a warning, not a stop: the host is served either
+	// way, and the next run asks again.
+	ready, reason, err := d.awaitCertificate(ctx, cl, name)
+	if err != nil {
+		return true, err
+	}
+	if !ready {
+		r.Warn(fmt.Sprintf("certificate %s/%s was re-issued but is not Ready (%s): %s is still served by the old one until it is", GatewayNamespace, name, reason, d.Host))
+		return true, nil
+	}
+	if obj, ok, err := cl.Get(ctx, "", "v1", "Secret", GatewayNamespace, name); err == nil && ok {
+		now, _, _ := unstructured.NestedStringMap(obj, "data")
+		caCert, _ := base64.StdEncoding.DecodeString(now["ca.crt"])
+		if ours, err := signedByRoot(caCert, root); err == nil && !ours {
+			r.Warn(fmt.Sprintf("certificate %s/%s was re-issued but does not chain to the box root: check that %s is a CA issuer over %s", GatewayNamespace, name, SelfSignedIssuer, RootSecretName))
+		}
+	}
+	return true, nil
+}
+
+// CertificateNeedsWork reports whether a host's Certificate is there but is not
+// the one this run would issue: a different issuer than the run decided, or a
+// self-signed one whose ca.crt is not the box root.
+//
+// It exists for a host that answers already. A Certificate's name and
+// issuerRef do not change when the issuer behind it changes what it signs with
+// (0.3.0's bare `selfSigned` became a CA over the box root), and cert-manager
+// never re-issues for that: the host is served, by a certificate nothing else
+// chains to. A run that only looked for missing hosts would leave it there.
+func CertificateNeedsWork(ctx context.Context, k objectReader, host, want string) (bool, error) {
+	name := CertificateName(host)
+	obj, ok, err := k.Get(ctx, "cert-manager.io", "v1", "Certificate", GatewayNamespace, name)
+	if err != nil || !ok {
+		return false, err
+	}
+	current, _, _ := unstructured.NestedString(obj, "spec", "issuerRef", "name")
+	if want != "" {
+		issuer, err := clusterIssuerName(want)
+		if err != nil {
+			return false, err
+		}
+		if current != issuer {
+			return true, nil
+		}
+	}
+	if current != SelfSignedIssuer {
+		return false, nil
+	}
+	secretName, _, _ := unstructured.NestedString(obj, "spec", "secretName")
+	if secretName == "" {
+		secretName = name
+	}
+	secret, ok, err := k.Get(ctx, "", "v1", "Secret", GatewayNamespace, secretName)
+	if err != nil || !ok {
+		// No Secret yet: nothing to compare, and the step writes one.
+		return false, err
+	}
+	data, _, _ := unstructured.NestedStringMap(secret, "data")
+	caCert, _ := base64.StdEncoding.DecodeString(data["ca.crt"])
+	root, err := rootCertificate(ctx, k)
+	if err != nil {
+		return false, err
+	}
+	ours, err := signedByRoot(caCert, root)
+	if err != nil {
+		return false, err
+	}
+	return !ours, nil
+}
+
+// triggerIssuing sets the Issuing condition cert-manager's issuing controller
+// acts on. The condition is status, not spec, so it is a status update: the
+// same write cmctl renew makes, with the same reason, which is what makes box's
+// re-issue visible in `kubectl describe` as a manual one rather than as
+// cert-manager's own decision.
+func triggerIssuing(ctx context.Context, cl CertificateCluster, name string) error {
+	crt, ok, err := cl.Get(ctx, "cert-manager.io", "v1", "Certificate", GatewayNamespace, name)
+	if err != nil {
+		return fmt.Errorf("certificate %s/%s: %w", GatewayNamespace, name, err)
+	}
+	if !ok {
+		return fmt.Errorf("certificate %s/%s is not there: nothing to re-issue", GatewayNamespace, name)
+	}
+	generation, _, _ := unstructured.NestedInt64(crt, "metadata", "generation")
+	cond := map[string]any{
+		"type":               "Issuing",
+		"status":             conditionTrue,
+		"reason":             "ManuallyTriggered",
+		"message":            "Certificate re-issuance manually triggered",
+		"lastTransitionTime": time.Now().UTC().Format(time.RFC3339),
+		"observedGeneration": generation,
+	}
+	conditions, _, _ := unstructured.NestedSlice(crt, "status", "conditions")
+	replaced := false
+	for i, raw := range conditions {
+		existing, _ := raw.(map[string]any)
+		if existing["type"] != "Issuing" {
+			continue
+		}
+		conditions[i] = cond
+		replaced = true
+	}
+	if !replaced {
+		conditions = append(conditions, cond)
+	}
+	if err := unstructured.SetNestedSlice(crt, conditions, "status", "conditions"); err != nil {
+		return fmt.Errorf("certificate %s/%s: %w", GatewayNamespace, name, err)
+	}
+	if err := cl.UpdateStatus(ctx, "cert-manager.io", "v1", "Certificate", GatewayNamespace, crt); err != nil {
+		return fmt.Errorf("certificate %s/%s: asking cert-manager to re-issue it: %w", GatewayNamespace, name, err)
+	}
+	return nil
 }
 
 // awaitCertificate is the platform's existing wait, with the Certificate's own
@@ -343,6 +567,92 @@ func (d *CertificateDecision) redirect(ctx context.Context, cl Cluster, name str
 	}
 	step.Done(fmt.Sprintf("applied HTTP->HTTPS redirect for %s (/.well-known/acme-challenge/ stays with the solver)", d.Host))
 	return nil
+}
+
+// HostServed reports whether a host already has the three objects an app host
+// needs: its HTTPS listener on the Gateway, its Certificate, and the login's
+// access_control rule for the name. It reads the cluster, never a record box
+// kept, so a listener or a rule somebody deleted is missing again and the next
+// run puts it back.
+//
+// The port-80 listener and the Allow are not part of the answer: they exist
+// only to let a certificate issue, and a host whose certificate is Ready but
+// whose challenge listener was removed still serves its app.
+//
+// The rule is: the Gateway asks the login about every listener, and a host with
+// no access_control rule gets default_policy deny -- a 403 nobody can get past.
+// A host with its listener and its certificate but no rule is an app that
+// answers nothing, which is the state this read exists to catch.
+func (k *Kubernetes) HostServed(ctx context.Context, host string) (bool, error) {
+	gw, ok, err := k.Get(ctx, "gateway.networking.k8s.io", "v1", "Gateway", GatewayNamespace, GatewayName)
+	if err != nil {
+		return false, err
+	}
+	if !ok || !hasHTTPSListener(gw, ListenerName(host)) {
+		return false, nil
+	}
+	serves, err := k.Serves(ctx, "cert-manager.io", "v1", "Certificate")
+	if err != nil {
+		return false, err
+	}
+	if !serves {
+		return false, nil
+	}
+	_, ok, err = k.Get(ctx, "cert-manager.io", "v1", "Certificate", GatewayNamespace, CertificateName(host))
+	if err != nil || !ok {
+		return false, err
+	}
+	return k.hostRuled(ctx, host)
+}
+
+// hostRuled reads the login's configuration for one host's rule. A box whose
+// login is not installed yet has no configuration and therefore no rule, which
+// is an answer (the host is not served), not an error.
+func (k *Kubernetes) hostRuled(ctx context.Context, host string) (bool, error) {
+	cm, ok, err := k.Get(ctx, "", "v1", "ConfigMap", authelia.SystemNamespace, authelia.ConfigMapName)
+	if err != nil {
+		return false, err
+	}
+	if !ok {
+		return false, nil
+	}
+	return hasHostRule(cm, host), nil
+}
+
+// hasHostRule reads one host's rule out of the login's ConfigMap document. The
+// configuration is the file the login starts with, so a name with no rule in it
+// is a request the login answers with default_policy deny.
+func hasHostRule(cm map[string]any, host string) bool {
+	data, _, _ := unstructured.NestedStringMap(cm, "data")
+	return authelia.HasRule(data[authelia.ConfigFile], host)
+}
+
+// hasHTTPSListener reads one listener out of a Gateway document: the host's own
+// TLS terminator, by the name attachHTTPS writes it under.
+func hasHTTPSListener(gateway map[string]any, name string) bool {
+	listeners, _, _ := unstructured.NestedSlice(gateway, "spec", "listeners")
+	for _, raw := range listeners {
+		listener, _ := raw.(map[string]any)
+		if listener["name"] != name {
+			continue
+		}
+		return listener["protocol"] == "HTTPS"
+	}
+	return false
+}
+
+// HostAccess answers whether this identity may write the per-host objects: the
+// Gateway's listeners, the Certificate, its route and its Allow.
+//
+// It is the same list the per-host write preflights (certificateAccess), asked
+// before the step so a user's run stops naming root's command instead of
+// failing on its first write. A denial is an answer, not an error.
+func HostAccess(ctx context.Context, cl Cluster) (bool, error) {
+	denied, err := kube.Denied(ctx, cl, certificateAccess())
+	if err != nil {
+		return false, err
+	}
+	return len(denied) == 0, nil
 }
 
 // certificateAccess is the RBAC the per-host write needs, checked before the

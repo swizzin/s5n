@@ -13,13 +13,15 @@ import (
 	"github.com/swizzin/s5n/internal/say"
 )
 
-var ansi = regexp.MustCompile(`\x1b\[[0-9;?]*[A-Za-z]`)
+// sgr matches the escape sequences a renderer writes. It is not named ansi:
+// the package of that name is imported here through paint.go.
+var sgr = regexp.MustCompile(`\x1b\[[0-9;?]*[A-Za-z]`)
 
 // strip turns what the live renderer wrote into the lines a terminal would
 // show, without colour or cursor movement.
 func strip(s string) []string {
 	s = strings.ReplaceAll(s, "\r", "\n")
-	s = ansi.ReplaceAllString(s, "")
+	s = sgr.ReplaceAllString(s, "")
 	out := strings.Split(s, "\n")
 	return out
 }
@@ -57,9 +59,10 @@ func TestReporterReceiptPutsPendingAfterTheCard(t *testing.T) {
 	}
 }
 
-// Every check mark is one colour: the accent, wherever it is drawn. A ✓ in the
-// plan, a finished step, the chart and the card are the same glyph and the
-// same escape.
+// Every check mark is one colour: the accent of the theme in force, wherever it
+// is drawn. A ✓ in the plan, a finished step, the chart and the card are the
+// same glyph and the same escape. The escape is not written down here: the
+// palette is the theme's, and this is about the reporter using one of it.
 func TestReporterUsesOneCheckColour(t *testing.T) {
 	var buf bytes.Buffer
 	r := NewReporter(ReporterOptions{Out: &buf, Width: 100, Yes: true})
@@ -72,7 +75,10 @@ func TestReporterUsesOneCheckColour(t *testing.T) {
 	r.Close()
 
 	out := buf.String()
-	accent := "38;2;242;166;90"
+	// The escape accentStyle writes in front of its text, so the check
+	// survives any palette: what must not vary is the reporter's choice.
+	painted := accentStyle.Render("✓")
+	accent := painted[:strings.Index(painted, "✓")]
 	total := 0
 	for i := 0; i < len(out); i++ {
 		if !strings.HasPrefix(out[i:], "✓") {

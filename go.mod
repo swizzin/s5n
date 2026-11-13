@@ -4,13 +4,16 @@ go 1.27.0
 
 require (
 	charm.land/bubbles/v2 v2.0.0
+	charm.land/bubbletea/v2 v2.0.2
 	charm.land/huh/v2 v2.0.3
 	charm.land/lipgloss/v2 v2.0.6
 	github.com/Masterminds/semver/v3 v3.5.0
+	github.com/charmbracelet/x/ansi v0.11.8
 	github.com/distribution/distribution/v3 v3.1.1
 	github.com/santhosh-tekuri/jsonschema/v6 v6.0.3
 	go.yaml.in/yaml/v3 v3.0.6
 	golang.org/x/crypto v0.58.0
+	golang.org/x/sys v0.49.0
 	golang.org/x/term v0.47.0
 	golang.org/x/text v0.43.0
 	helm.sh/helm/v4 v4.3.1
@@ -22,7 +25,6 @@ require (
 )
 
 require (
-	charm.land/bubbletea/v2 v2.0.2 // indirect
 	dario.cat/mergo v1.0.1 // indirect
 	github.com/Azure/go-ansiterm v0.0.0-20250102033503-faa5f7b0171c // indirect
 	github.com/BurntSushi/toml v1.6.0 // indirect
@@ -41,7 +43,6 @@ require (
 	github.com/chai2010/gettext-go v1.0.2 // indirect
 	github.com/charmbracelet/colorprofile v0.4.3 // indirect
 	github.com/charmbracelet/ultraviolet v0.0.0-20260811164956-006e29f97886 // indirect
-	github.com/charmbracelet/x/ansi v0.11.8 // indirect
 	github.com/charmbracelet/x/exp/ordered v0.1.0 // indirect
 	github.com/charmbracelet/x/exp/strings v0.0.0-20240722160745-212f7b056ed0 // indirect
 	github.com/charmbracelet/x/term v0.2.2 // indirect
@@ -171,7 +172,6 @@ require (
 	golang.org/x/net v0.62.0 // indirect
 	golang.org/x/oauth2 v0.36.0 // indirect
 	golang.org/x/sync v0.24.0 // indirect
-	golang.org/x/sys v0.49.0 // indirect
 	golang.org/x/time v0.15.0 // indirect
 	google.golang.org/genproto/googleapis/api v0.0.0-20260803160001-6ac0973c030d // indirect
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20260803160001-6ac0973c030d // indirect

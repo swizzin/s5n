@@ -25,8 +25,10 @@ type Qbit struct {
 	password string
 }
 
-// NewQbit builds an authenticated client. qBittorrent has no API key and no URL
-// base; the chart rewrites the /qbittorrent prefix off at the Gateway.
+// NewQbit builds a client. qBittorrent has no API key and no URL base; the
+// chart rewrites the /qbittorrent prefix off at the Gateway. The credentials
+// are empty for s5n's own qBittorrent, whose login is bypassed for the
+// release's addresses; a client built that way never signs in (see Login).
 func NewQbit(baseURL, username, password string) *Qbit {
 	jar, _ := cookiejar.New(nil)
 	c := NewClient(baseURL, &http.Client{Timeout: 60 * time.Second, Jar: jar})
@@ -38,7 +40,16 @@ func NewQbit(baseURL, username, password string) *Qbit {
 // Login authenticates and keeps the session cookie. A wrong password is reported
 // as a credential error, not retried: qBittorrent bans an address after a handful
 // of failures.
+//
+// A client built without a password signs in to nothing: qBittorrent's WebUI
+// skips its login for the private ranges and for loopback, which is the state
+// internal/qbtconf seals (docs/box.md, "Logins"). Posting the empty login form
+// anyway would be a request that can only add to the failed-login count that
+// gets an address banned.
 func (q *Qbit) Login(ctx context.Context) error {
+	if q.password == "" {
+		return nil
+	}
 	form := url.Values{"username": {q.username}, "password": {q.password}}
 	text, err := q.client.PostForm(ctx, "/api/v2/auth/login", form, nil)
 	if err != nil {
@@ -57,12 +68,14 @@ func (q *Qbit) Login(ctx context.Context) error {
 	}
 }
 
-// WaitReady waits for the WebUI to answer, then logs in once. Login is not
-// retried on a credential error: qBittorrent bans the address after a handful of
-// failures, so a wrong secret must fail loudly and immediately.
+// WaitReady waits for the WebUI to answer, then logs in once (a client with no
+// password has nothing to log in to; see Login). Login is not retried on a
+// credential error: qBittorrent bans the address after a handful of failures, so
+// a wrong secret must fail loudly and immediately.
 //
-// The readiness probe accepts any HTTP status: every API endpoint except the login
-// form answers 403 until a session exists, so a 403 is progress, not a failure.
+// The readiness probe accepts any HTTP status: without a session the API answers
+// 403 to every endpoint, and with the login bypassed for the release's
+// addresses it answers 200, so a 403 is progress rather than the failure.
 func (q *Qbit) WaitReady(ctx context.Context, timeout time.Duration) error {
 	err := Retry(ctx, timeout, func(ctx context.Context) error {
 		if err := q.client.AnyStatus(ctx, "/api/v2/app/version"); err != nil {

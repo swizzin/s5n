@@ -64,11 +64,73 @@ var admissionPolicy = admissionassets.Policy
 // directory; issuerObjects points it elsewhere only for a development run.
 var issuerManifest = certmanagerassets.Issuers
 
-// issuerNames is how the plan and the tests name the two issuers.
+// issuerNames is how the plan and the tests name the issuers, the root and the
+// anchor. Every Certificate box writes names SelfSignedIssuer, so the name
+// outlives the change of what it is.
 const (
 	LetsEncryptIssuer = "s5n-letsencrypt"
 	SelfSignedIssuer  = "s5n-selfsigned"
+	// BootstrapIssuer signs the root Certificate and nothing else.
+	BootstrapIssuer = "s5n-bootstrap"
+	// RootCertificateName is the box's root, a Certificate in cert-manager
+	// whose Secret is what the CA issuer signs with.
+	RootCertificateName = "s5n-root-ca"
+	// RootSecretName is that Certificate's Secret: cert-manager's default,
+	// spec.secretName, written in the manifest as the same name.
+	RootSecretName = "s5n-root-ca"
+	// HostCAName is the ConfigMap root's run leaves in a seedbox's namespace
+	// for an app that has to trust the box's own certificate, and HostCAKey is
+	// its one key: the root certificate, never a key.
+	HostCAName = "s5n-host-ca"
+	HostCAKey  = "ca.crt"
 )
+
+// clusterIssuerKind is the kind of the three issuers in roster form.
+const clusterIssuerKind = "ClusterIssuer"
+
+// issuerWaves splits the issuer manifest into the two applies root's step
+// makes: everything the root Certificate needs to exist, and the CA issuer that
+// signs with it. The bootstrap issuer is a ClusterIssuer and the root is a
+// Certificate in cert-manager, so they are two kinds in one wave; what makes
+// the waves matter is the wait between them, not the kinds.
+//
+// Splitting here rather than at plan time keeps one Step and one line of box's
+// output for the whole issuer step, and keeps the ordering next to the reason.
+type issuerWaves struct {
+	// beforeRoot is the Let's Encrypt issuer, the bootstrap issuer and the
+	// root Certificate: the ACME issuer has nothing to wait for, and it is
+	// applied with the rest so one webhook retry covers all of them.
+	beforeRoot []map[string]any
+	// ca is s5n-selfsigned: the issuer every host's Certificate names.
+	ca []map[string]any
+}
+
+// splitIssuers sorts the manifest's documents into the waves, in file order
+// inside each. A document it does not recognise is a manifest box cannot
+// install and is refused rather than applied into the wrong wave.
+func splitIssuers(docs []map[string]any) (issuerWaves, error) {
+	var w issuerWaves
+	for _, doc := range docs {
+		kind, _, name := objectMeta(doc)
+		switch {
+		case kind == clusterIssuerKind && name == SelfSignedIssuer:
+			w.ca = append(w.ca, doc)
+		case kind == clusterIssuerKind && (name == LetsEncryptIssuer || name == BootstrapIssuer):
+			w.beforeRoot = append(w.beforeRoot, doc)
+		case kind == "Certificate" && name == RootCertificateName:
+			w.beforeRoot = append(w.beforeRoot, doc)
+		default:
+			return issuerWaves{}, fmt.Errorf("the cert-manager issuers manifest: %s %s is not one of box's", kind, name)
+		}
+	}
+	if len(w.ca) == 0 {
+		return issuerWaves{}, errors.New("the cert-manager issuers manifest: " + SelfSignedIssuer + " is missing")
+	}
+	if len(w.beforeRoot) < 2 {
+		return issuerWaves{}, errors.New("the cert-manager issuers manifest: the Let's Encrypt issuer, the bootstrap issuer and the root Certificate are not all there")
+	}
+	return w, nil
+}
 
 // issuerObjects is the ClusterIssuers box applies on every run. acmeServer is
 // empty in a real run, which leaves the manifest's Let's Encrypt directory as
@@ -87,7 +149,7 @@ func issuerObjects(acmeServer string) ([]map[string]any, error) {
 	found := false
 	for _, doc := range docs {
 		kind, _, name := objectMeta(doc)
-		if kind != "ClusterIssuer" || name != LetsEncryptIssuer {
+		if kind != clusterIssuerKind || name != LetsEncryptIssuer {
 			continue
 		}
 		spec, _ := doc["spec"].(map[string]any)

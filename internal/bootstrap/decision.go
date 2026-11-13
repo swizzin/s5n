@@ -31,6 +31,10 @@ type Decision struct {
 	// Nil means unattended: the decision then refuses and names the setting,
 	// because choosing an implementation is the operator's call, never box's.
 	Prompt ClassChooser
+	// Net reports this host's default route and interfaces. It is read where
+	// box installs k0s (to pin the node IP) and where box warns about a node
+	// address it can see locally. Nil means the running host; a test fakes it.
+	Net Net
 }
 
 // Options carries the explicit cluster and platform modes from the CLI, plus
@@ -155,7 +159,18 @@ func (d *Decision) Bootstrap(ctx context.Context, opts Options) (Result, error) 
 	if err != nil {
 		return stop(err.Error()), nil
 	}
-	plan := k0sPlan(pins)
+	// The node IP is chosen here, before anything is downloaded: a host whose
+	// default route leaves through a tunnel is refused with the paragraph that
+	// says what a node on it would do, and a host with no default route is
+	// refused because there is nothing to pin.
+	up, err := d.net().Uplink()
+	if err != nil {
+		return stop(fmt.Sprintf("box pins the node IP to this host's uplink before it installs k0s, and cannot find one: %v", err)), nil
+	}
+	if why := tunnelRefusal(up); why != "" {
+		return stop(why), nil
+	}
+	plan := k0sPlan(pins, up)
 	if err := d.Install.Install(ctx, plan); err != nil {
 		return stop(fmt.Sprintf("k0s install failed: %v", err)), nil
 	}
@@ -174,6 +189,14 @@ func (d *Decision) Bootstrap(ctx context.Context, opts Options) (Result, error) 
 	res.Skips = skips
 	res.Notes = describeNotes(notes)
 	return res, nil
+}
+
+// net is the host's routes and links, or the real host's when none was given.
+func (d *Decision) net() Net {
+	if d.Net != nil {
+		return d.Net
+	}
+	return LinuxNet{}
 }
 
 // platformPins is the release's pins, or the refusal that says what is missing.
@@ -300,6 +323,10 @@ func (d *Decision) finishCluster(ctx context.Context, opts Options, obs clusterP
 		Distribution: obs.dist,
 		Nodes:        obs.cluster.Nodes,
 		Platform:     components,
+		// A node whose address box can see on a tunnel of this host is a
+		// warning, not a refusal: the cluster is not box's to change, and the
+		// operator is the one who can pin its kubelet.
+		Warnings: nodeIPWarnings(obs.cluster, d.net()),
 	}
 	if conflict != "" {
 		res.Action = ActionStop

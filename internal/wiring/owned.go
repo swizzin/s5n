@@ -16,6 +16,37 @@ type OwnedRecord struct {
 	Arr      map[string]ArrOwned `json:"arr,omitempty"`
 	Prowlarr ProwlarrOwned       `json:"prowlarr,omitempty"`
 	Tautulli *TautulliOwned      `json:"tautulli,omitempty"`
+	Qui      *QuiOwned           `json:"qui,omitempty"`
+	Autobrr  *AutobrrOwned       `json:"autobrr,omitempty"`
+	Pbh      *PbhOwned           `json:"pbh,omitempty"`
+}
+
+// PbhOwned is what the Job owns in PeerBanHelper: one qBittorrent downloader,
+// recorded by the string id it lives under in PBH's own `client:` config (PBH
+// numbers nothing, and a name is the user's to change). There is no
+// fingerprint beside it: the downloader is written with an empty username and
+// password, so it holds no secret that could rotate.
+type PbhOwned struct {
+	Downloader string `json:"downloader,omitempty"`
+}
+
+// QuiOwned is what the Job owns in qui, an app that keeps its own user table
+// and hands out API keys only to a signed-in session, so its instance can be
+// registered only with the account the chart owns (see docs/box.md, "An app
+// that keeps its own user table has one account box owns"). The instance's
+// qBittorrent login is written empty, so there is no fingerprint beside the id.
+type QuiOwned struct {
+	Instance int `json:"instance,omitempty"`
+}
+
+// AutobrrOwned is what the Job owns in autobrr: one download client per Arr
+// instance plus qBittorrent, each recorded by id (a rename is the user's
+// business) and each with a fingerprint of the secret last written and proven
+// — the qBittorrent password or that Arr's API key, neither of which autobrr
+// returns. A changed fingerprint is a stale copy and gets an update.
+type AutobrrOwned struct {
+	Clients      map[string]int    `json:"clients,omitempty"`
+	Fingerprints map[string]string `json:"fingerprints,omitempty"`
 }
 
 // TautulliOwned is what the Job last wrote into Tautulli that the app will not
@@ -30,14 +61,21 @@ type TautulliOwned struct {
 	PlexTokenFingerprint string `json:"plexTokenFingerprint,omitempty"`
 }
 
-// ArrOwned is what the Job owns on one Arr instance.
+// ArrOwned is what the Job owns on one Arr instance: the download client, by
+// id. Its qBittorrent login is written empty, so the record carries no
+// fingerprint of a credential that no longer exists.
 type ArrOwned struct {
 	DownloadClient int `json:"downloadClient,omitempty"`
 }
 
-// ProwlarrOwned is what the Job owns in Prowlarr.
+// ProwlarrOwned is what the Job owns in Prowlarr: one application per Arr
+// instance, each recorded by id, and the sha256-hex of the Arr API key it was
+// last written and proven with. Prowlarr answers a mask for a stored key, so the
+// fingerprint is what makes a rotated key in the release Secret visible -- the
+// same rule as the qBittorrent password in qui, autobrr and every Arr.
 type ProwlarrOwned struct {
-	Applications map[string]int `json:"applications,omitempty"`
+	Applications map[string]int    `json:"applications,omitempty"`
+	Fingerprints map[string]string `json:"fingerprints,omitempty"`
 }
 
 // NewOwnedRecord returns an empty record ready to be filled in during a run
@@ -47,7 +85,9 @@ func NewOwnedRecord() *OwnedRecord {
 	return &OwnedRecord{
 		Version:  1,
 		Arr:      map[string]ArrOwned{},
-		Prowlarr: ProwlarrOwned{Applications: map[string]int{}},
+		Prowlarr: ProwlarrOwned{Applications: map[string]int{}, Fingerprints: map[string]string{}},
+		Autobrr:  &AutobrrOwned{Clients: map[string]int{}, Fingerprints: map[string]string{}},
+		Pbh:      &PbhOwned{},
 	}
 }
 
@@ -68,6 +108,18 @@ func ParseOwnedRecord(raw []byte) (*OwnedRecord, error) {
 	if rec.Prowlarr.Applications == nil {
 		rec.Prowlarr.Applications = map[string]int{}
 	}
+	if rec.Prowlarr.Fingerprints == nil {
+		rec.Prowlarr.Fingerprints = map[string]string{}
+	}
+	if rec.Autobrr == nil {
+		rec.Autobrr = &AutobrrOwned{}
+	}
+	if rec.Autobrr.Clients == nil {
+		rec.Autobrr.Clients = map[string]int{}
+	}
+	if rec.Autobrr.Fingerprints == nil {
+		rec.Autobrr.Fingerprints = map[string]string{}
+	}
 	return rec, nil
 }
 
@@ -83,7 +135,9 @@ func (o *OwnedRecord) SetArrDownloadClientID(instance string, id int) {
 	if o.Arr == nil {
 		o.Arr = map[string]ArrOwned{}
 	}
-	o.Arr[instance] = ArrOwned{DownloadClient: id}
+	rec := o.Arr[instance]
+	rec.DownloadClient = id
+	o.Arr[instance] = rec
 }
 
 // ProwlarrApplicationID returns the recorded id for an Arr instance's
@@ -93,12 +147,30 @@ func (o *OwnedRecord) ProwlarrApplicationID(instance string) int {
 }
 
 // SetProwlarrApplicationID records the id of the Prowlarr application the Job
-// created or adopted for an Arr instance.
+// created or adopted for an Arr instance, keeping the key fingerprint recorded
+// beside it.
 func (o *OwnedRecord) SetProwlarrApplicationID(instance string, id int) {
 	if o.Prowlarr.Applications == nil {
 		o.Prowlarr.Applications = map[string]int{}
 	}
 	o.Prowlarr.Applications[instance] = id
+}
+
+// ProwlarrApplicationFingerprint returns the fingerprint of the Arr API key the
+// application was last written and proven with, or "" when no successful write
+// is on record.
+func (o *OwnedRecord) ProwlarrApplicationFingerprint(instance string) string {
+	return o.Prowlarr.Fingerprints[instance]
+}
+
+// SetProwlarrApplicationFingerprint records the fingerprint of the Arr API key
+// the Job just wrote into one Prowlarr application and proved with Prowlarr's
+// own test endpoint. Call it only after that succeeded.
+func (o *OwnedRecord) SetProwlarrApplicationFingerprint(instance, fingerprint string) {
+	if o.Prowlarr.Fingerprints == nil {
+		o.Prowlarr.Fingerprints = map[string]string{}
+	}
+	o.Prowlarr.Fingerprints[instance] = fingerprint
 }
 
 // TautulliPlexTokenFingerprint returns the fingerprint of the Plex server token
@@ -119,4 +191,82 @@ func (o *OwnedRecord) SetTautulliPlexTokenFingerprint(fingerprint string) {
 		o.Tautulli = &TautulliOwned{}
 	}
 	o.Tautulli.PlexTokenFingerprint = fingerprint
+}
+
+// QuiInstanceID returns the recorded qui instance id, or 0 when nothing is
+// recorded (a first run, or an install predating this record).
+func (o *OwnedRecord) QuiInstanceID() int {
+	if o.Qui == nil {
+		return 0
+	}
+	return o.Qui.Instance
+}
+
+// SetQuiInstanceID records the id of the instance the Job created or adopted.
+func (o *OwnedRecord) SetQuiInstanceID(id int) {
+	if o.Qui == nil {
+		o.Qui = &QuiOwned{}
+	}
+	o.Qui.Instance = id
+}
+
+// AutobrrClientID returns the recorded id for one autobrr download client, or 0
+// when nothing is recorded.
+func (o *OwnedRecord) AutobrrClientID(name string) int {
+	if o.Autobrr == nil {
+		return 0
+	}
+	return o.Autobrr.Clients[name]
+}
+
+// SetAutobrrClientID records the id of the download client the Job created or
+// adopted under that name.
+func (o *OwnedRecord) SetAutobrrClientID(name string, id int) {
+	if o.Autobrr == nil {
+		o.Autobrr = &AutobrrOwned{}
+	}
+	if o.Autobrr.Clients == nil {
+		o.Autobrr.Clients = map[string]int{}
+	}
+	o.Autobrr.Clients[name] = id
+}
+
+// AutobrrClientFingerprint returns the fingerprint of the secret last written
+// and proven into one autobrr download client, or "" when no successful write
+// is on record.
+func (o *OwnedRecord) AutobrrClientFingerprint(name string) string {
+	if o.Autobrr == nil {
+		return ""
+	}
+	return o.Autobrr.Fingerprints[name]
+}
+
+// SetAutobrrClientFingerprint records the fingerprint of the secret the Job
+// just wrote into one autobrr download client and proved with autobrr's own
+// test. Call it only after that succeeded.
+func (o *OwnedRecord) SetAutobrrClientFingerprint(name, fingerprint string) {
+	if o.Autobrr == nil {
+		o.Autobrr = &AutobrrOwned{}
+	}
+	if o.Autobrr.Fingerprints == nil {
+		o.Autobrr.Fingerprints = map[string]string{}
+	}
+	o.Autobrr.Fingerprints[name] = fingerprint
+}
+
+// PbhDownloaderID returns the recorded downloader id, or "" when nothing is
+// recorded (a first run, or an install predating this record).
+func (o *OwnedRecord) PbhDownloaderID() string {
+	if o.Pbh == nil {
+		return ""
+	}
+	return o.Pbh.Downloader
+}
+
+// SetPbhDownloaderID records the downloader the Job created or adopted.
+func (o *OwnedRecord) SetPbhDownloaderID(id string) {
+	if o.Pbh == nil {
+		o.Pbh = &PbhOwned{}
+	}
+	o.Pbh.Downloader = id
 }

@@ -17,9 +17,6 @@ package login
 
 import (
 	"context"
-	"crypto/rand"
-	"encoding/base64"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -44,7 +41,7 @@ import (
 const (
 	// Namespace is s5n-system: the platform's namespace, so the login is
 	// root's and lives beside the admission policy that protects it.
-	Namespace = "s5n-system"
+	Namespace = authelia.SystemNamespace
 	// PolicyGroup and PolicyVersion are Envoy Gateway's SecurityPolicy, which
 	// is what enforces the login. The version is what EG 1.9.3 serves.
 	PolicyGroup   = "gateway.envoyproxy.io"
@@ -174,6 +171,20 @@ type Options struct {
 	// what the access_control rules are derived from, and it is the same
 	// document the release renders, so a 4K instance that exists has rules.
 	Values map[string]any
+	// Hosted are the apps the chart serves at <app>.<domain> instead of a
+	// path. The edge asks Authelia about every listener, so each of those
+	// names needs its rule, and the app's path rule must not exist: the chart
+	// no longer serves the app there.
+	Hosted []string
+	// Namespace is the seedbox's namespace. It is the per-app client Secrets'
+	// home and half of every client id, so an empty one is a refusal: a client
+	// called "-qui" belongs to nobody.
+	Namespace string
+	// OIDC are the apps that sign in through this login, from the chart's
+	// catalog. Each gets a client in this box's own namespace, its own Secret
+	// and its own authorization policy; a box with none has no provider at
+	// all.
+	OIDC []string
 }
 
 // Decision is one login install. Open and Storage are called only once the
@@ -344,9 +355,18 @@ func (d *Decision) Apply(ctx context.Context, opts Options) (Result, error) {
 		r.Line(fmt.Sprintf("users database: %s is inside the test node, so box cannot write it (--paths-in-node)", usersPath))
 	}
 
-	// The Secret: created once, never updated. Reading it is also how the
+	// The Secret: its encryption key created once, never changed, and the
+	// provider's signing material added to it the first time this box has an
+	// app that signs in through the login. Reading it is also how the
 	// configuration gets the key it must encrypt with.
-	key, kept, err := d.encryptionKey(ctx, cl)
+	//
+	// The clients are not made here. An install that writes this Secret runs
+	// before apply has created the seedbox's namespace, and a client is a
+	// Secret in that namespace; login.EnsureClients is the step that runs where
+	// the namespace exists, and the configuration picks its clients up on the
+	// next render.
+	apps := oidcApps(opts.OIDC)
+	sec, kept, err := d.ensureKey(ctx, cl, true, len(apps) > 0)
 	if err != nil {
 		return res, undo(err)
 	}
@@ -354,33 +374,29 @@ func (d *Decision) Apply(ctx context.Context, opts Options) (Result, error) {
 	if !kept {
 		res.Wrote = true
 	}
+	key := sec.key
 
-	config, err := authelia.RenderConfiguration(authelia.Configuration{
-		Host:          opts.Host,
-		Login:         opts.Login,
-		EncryptionKey: key,
-		Rules:         authelia.Rules(opts.Host, opts.Login, authelia.InstancesFromValues(opts.Values)),
-	})
+	// One rendering for the whole face of the login: the configuration file
+	// that decides the page's theme, and the mark and favicon that go in it.
+	// The per-host step calls the same function, so init and apply cannot
+	// disagree about either.
+	config, assets, err := renderLogin(opts.Values, opts.Host, opts.Login, key, opts.Hosted,
+		oidcClients(opts.Host, opts.Namespace, opts.Login, apps, sec.digests))
 	if err != nil {
 		return res, undo(err)
 	}
-	res.ConfigurationChanged, err = d.configurationChanged(ctx, cl, config)
+	res.ConfigurationChanged, err = d.configurationChanged(ctx, cl, config, assets)
 	if err != nil {
 		return res, undo(err)
 	}
 
-	manifests, err := authelia.RenderManifests(authelia.Manifests{
-		Namespace:        Namespace,
-		GatewayNamespace: platform.GatewayNamespace,
-		Gateway:          platform.GatewayName,
-		Host:             opts.Host,
-		Claim:            authelia.ClaimName,
-		ConfigMap:        authelia.ConfigMapName,
-		Image:            opts.Image,
-		UID:              authelia.UID,
-		GID:              authelia.GID,
-		ConfigHash:       authelia.ConfigHash(config),
-	})
+	// The provider is mounted only once it has a client. Authelia refuses the
+	// block with no clients ("identity_providers: oidc: option 'clients' must
+	// have one or more clients configured"), and a first install has none yet:
+	// the client Secrets are the anchor step's write, in the run that creates
+	// the namespace. Until then the login serves the edge with the signing
+	// material sitting unused in its Secret.
+	manifests, err := authelia.RenderManifests(manifestsFor(opts.Host, opts.Image, authelia.ConfigHash(config), len(sec.digests) > 0))
 	if err != nil {
 		return res, undo(err)
 	}
@@ -388,7 +404,7 @@ func (d *Decision) Apply(ctx context.Context, opts Options) (Result, error) {
 	if err != nil {
 		return res, undo(err)
 	}
-	docs = append([]map[string]any{configMapDoc(config)}, docs...)
+	docs = append([]map[string]any{configMapDoc(config, assets)}, docs...)
 	// From the first write of the login's own objects on, a failure keeps
 	// everything, the volumes included. Undoing only the volumes would leave a
 	// Deployment waiting on a claim that no longer exists, and the operator
@@ -415,6 +431,265 @@ func (d *Decision) Apply(ctx context.Context, opts Options) (Result, error) {
 	return res, nil
 }
 
+// RulesOptions is one access-control write: the inputs init installs the login
+// with, so that an apply writes the rule for a host it is about to serve
+// without inventing a second rendering of the login's configuration.
+type RulesOptions struct {
+	// Host is the box's domain: the cookie's domain, and the name every app
+	// host is a label under.
+	Host string
+	// Login is the one account the rules admit.
+	Login string
+	// Hosts are the names this run is writing, for the one line it prints. They
+	// are not what the configuration is rendered from.
+	Hosts []string
+	// Image is the login Deployment's image, pinned by digest: the rule write
+	// applies the login's objects from the same template init does, and the
+	// image is a part of that template.
+	Image string
+	// Values is the seedbox's merged values: the chart's instance list is what
+	// the rules are derived from, so a 4K instance that exists has its rule and
+	// one that does not is never mentioned.
+	Values map[string]any
+	// Hosted are the apps the chart serves at <app>.<domain> -- the whole list,
+	// not only the names this run writes, because the configuration is
+	// rewritten whole and a name left out would lose the rule it already had.
+	Hosted []string
+	// Namespace and OIDC are the provider's half of the same configuration: the
+	// seedbox's namespace (half of every client id) and the apps that sign in
+	// through this login. The configuration is one file, so a rule write
+	// renders the clients too and a client left out would be a client Authelia
+	// stopped answering for.
+	Namespace string
+	OIDC      []string
+	// Installs says this run installs the login after it has read the cluster:
+	// `box init` does, in the step that runs once the confirm is answered. A
+	// cluster without a login is then work Pending shows rather than the
+	// refusal a later rule write makes, and the render it would compare is
+	// simply not there yet.
+	Installs bool
+}
+
+// EnsureRules writes the login's configuration for the hosts a run is about to
+// serve, and reports whether it changed anything.
+//
+// The login keeps one configuration for the whole box and Authelia reads it
+// once at startup, so this is not a per-host edit: the file is rendered from
+// the same inputs init renders it from (internal/authelia renders both, so the
+// two cannot spell a rule differently), compared with the ConfigMap that is
+// there, and applied only when it differs -- together with the Deployment,
+// whose pod-template hash is what makes the running login read it. A run with
+// nothing to change writes nothing and returns false.
+//
+// It is root's, like the rest of the login: the configuration names the one
+// account the box logs in with. A box whose login is not installed has nothing
+// to write a rule into, and the refusal names the command that installs it.
+func (d *Decision) EnsureRules(ctx context.Context, opts RulesOptions) (bool, error) {
+	cl, files, changed, err := d.prepare(ctx, opts, true)
+	if err != nil {
+		return false, err
+	}
+	names := strings.Join(opts.Hosts, ", ")
+	if !changed {
+		d.report().Line(fmt.Sprintf("login: the rule for %s is already there", names))
+		return false, nil
+	}
+	return d.write(ctx, cl, opts, files,
+		"applying the login's rule for "+names,
+		fmt.Sprintf("login: the rule for %s is in place", names))
+}
+
+// Pending reports whether the login's configuration or pictures differ from
+// what is in the cluster, and writes nothing. It is EnsureRules' read half, for
+// a caller that has to ask before it does the write: `box apply` shows a
+// re-rendered login in its plan like any other piece of work.
+//
+// It is root's: reading the login's Secret and ConfigMap is the first thing it
+// does, so an identity that cannot write the login is told so here rather than
+// half way through a write.
+func (d *Decision) Pending(ctx context.Context, opts RulesOptions) (bool, error) {
+	_, _, changed, err := d.prepare(ctx, opts, false)
+	return changed, err
+}
+
+// Reconcile writes the login's configuration and pictures when they differ, and
+// reports whether it wrote. It is the login's own step, separate from the
+// per-host one: a theme change is a new face for the page, not a new host, so
+// it re-renders the whole face and touches no listener, no Certificate and no
+// DNS record.
+//
+// What it writes is exactly what EnsureRules writes -- one ConfigMap and the
+// objects that mount it -- so the two cannot disagree, and a write that changes
+// the configuration rolls the pod through the same annotation.
+func (d *Decision) Reconcile(ctx context.Context, opts RulesOptions) (bool, error) {
+	cl, files, changed, err := d.prepare(ctx, opts, true)
+	if err != nil {
+		return false, err
+	}
+	if !changed {
+		return false, nil
+	}
+	return d.write(ctx, cl, opts, files,
+		"reconciling the login's page",
+		"login: the configuration, mark and favicon are up to date")
+}
+
+// prepare is the read half of both writers: the login's rendering for these
+// options, the cluster it was compared against, and whether it differs.
+//
+// ensure says this run is going to write, so the provider's material an app
+// needs may be created here -- a box upgraded from before the provider has
+// none, and a rule write is where it gains one. Pending passes false and only
+// reads: a run that may not write the login must not create anything in it.
+func (d *Decision) prepare(ctx context.Context, opts RulesOptions, ensure bool) (Cluster, loginFiles, bool, error) {
+	var none loginFiles
+	if err := checkRules(opts); err != nil {
+		return nil, none, false, err
+	}
+	cl, err := d.Open()
+	if err != nil {
+		return nil, none, false, err
+	}
+	apps := oidcApps(opts.OIDC)
+	var sec loginSecret
+	if ensure {
+		sec, _, err = d.ensureKey(ctx, cl, false, len(apps) > 0)
+		if err != nil {
+			return nil, none, false, err
+		}
+		// The clients, when this run is allowed to write them: the seedbox's
+		// namespace exists by the time a rule write happens, and the digest
+		// this writes is what the configuration below is rendered from.
+		if _, err := d.EnsureClients(ctx, opts.Namespace, apps); err != nil {
+			return nil, none, false, err
+		}
+		sec, err = d.readSecret(ctx, cl)
+	} else {
+		sec, err = d.readSecret(ctx, cl)
+		if err != nil {
+			// The run that installs the login installs it after the confirm
+			// (`box init`), so reading a cluster without one is work to show,
+			// not the refusal a rule write makes. Installs says this run is
+			// that one.
+			if opts.Installs && errors.Is(err, ErrNotInstalled) {
+				return cl, none, true, nil
+			}
+			return nil, none, false, err
+		}
+	}
+	if err != nil {
+		return nil, none, false, err
+	}
+	key := sec.key
+	config, assets, err := renderLogin(opts.Values, opts.Host, opts.Login, key, opts.Hosted,
+		oidcClients(opts.Host, opts.Namespace, opts.Login, apps, sec.digests))
+	if err != nil {
+		return nil, none, false, err
+	}
+	changed, err := d.configurationChanged(ctx, cl, config, assets)
+	if err != nil {
+		return nil, none, false, err
+	}
+	return cl, loginFiles{config: config, assets: assets, provider: len(sec.digests) > 0}, changed, nil
+}
+
+// manifestsFor is the login's objects for one host, from the constants this
+// package and the platform own. It is one function because init's install and
+// every later rule write apply the same set: a second rendering would let an
+// apply downgrade the Deployment (or drop the NetworkPolicy that keeps every
+// pod but the Gateway off the login).
+func manifestsFor(host, image, configHash string, oidc bool) authelia.Manifests {
+	return authelia.Manifests{
+		Namespace:        Namespace,
+		GatewayNamespace: platform.GatewayNamespace,
+		Gateway:          platform.GatewayName,
+		// Envoy Gateway installs its proxy fleet in the controller's
+		// namespace in standard mode, which is the only mode box installs and
+		// the only implementation it supports.
+		ProxyNamespace: platform.EnvoyGatewayNamespace,
+		Host:           host,
+		Claim:          authelia.ClaimName,
+		ConfigMap:      authelia.ConfigMapName,
+		Secret:         authelia.SecretName,
+		Image:          image,
+		OIDC:           oidc,
+		OIDCFile:       authelia.OIDCFile,
+		OIDCMount:      authelia.OIDCMountPath,
+		UID:            authelia.UID,
+		GID:            authelia.GID,
+		ConfigHash:     configHash,
+	}
+}
+
+// loginFiles is the login's rendering: the configuration Authelia starts with,
+// and the mark and favicon mounted beside it.
+type loginFiles struct {
+	config []byte
+	assets authelia.Assets
+	// provider says the login's Secret holds at least one client, which is
+	// what makes Authelia accept an identity_providers.oidc block at all: it
+	// refuses one with no clients, and a first install has none until apply's
+	// anchor step writes them.
+	provider bool
+}
+
+// write applies a rendering that differs and waits for the pod that has to read
+// it. The permissions are asked here, before the first write, so a kubeconfig
+// that may write a Gateway's listeners but not the login's configuration is
+// told so rather than half way through.
+func (d *Decision) write(ctx context.Context, cl Cluster, opts RulesOptions, files loginFiles, label, done string) (bool, error) {
+	if err := kube.Preflight(ctx, cl, rulesAccess()); err != nil {
+		return false, fmt.Errorf("login: %w", err)
+	}
+	manifests, err := authelia.RenderManifests(manifestsFor(opts.Host, opts.Image, authelia.ConfigHash(files.config), files.provider))
+	if err != nil {
+		return false, err
+	}
+	docs, err := platform.ParseManifests(manifests)
+	if err != nil {
+		return false, err
+	}
+	// The ConfigMap is not part of the manifests template: its content is one
+	// rendered file, and it is written beside the objects that name it.
+	docs = append([]map[string]any{configMapDoc(files.config, files.assets)}, docs...)
+
+	step := d.report().Start(say.Op{Label: label})
+	if err := cl.ApplyWith(ctx, kube.FieldManager, docs); err != nil {
+		step.Failed(err)
+		return false, fmt.Errorf("login: %w", err)
+	}
+	// The pod that is running still has the old file: the hash is what rolls
+	// it, and a rule or a page the running login has not read is not the login
+	// that is answering.
+	if err := d.awaitDeployment(ctx, cl); err != nil {
+		step.Failed(err)
+		return true, err
+	}
+	step.Done(done)
+	return true, nil
+}
+
+// checkRules refuses a rule write that cannot be rendered, before a client
+// exists.
+func checkRules(opts RulesOptions) error {
+	if strings.TrimSpace(opts.Host) == "" {
+		return errors.New("login: no host name: the rules are per host")
+	}
+	if err := authelia.ValidateLogin(opts.Login); err != nil {
+		return fmt.Errorf("login: %w", err)
+	}
+	if len(opts.Values) == 0 {
+		return errors.New("login: no values: the rules come from the chart's instance list")
+	}
+	if !strings.Contains(opts.Image, "@sha256:") {
+		return fmt.Errorf("login: image %q is not pinned by digest", opts.Image)
+	}
+	if len(opts.OIDC) > 0 && strings.TrimSpace(opts.Namespace) == "" {
+		return errors.New("login: an OIDC client's id is <namespace>-<app>, so a box with one needs its namespace")
+	}
+	return nil
+}
+
 // check refuses what cannot be installed, before a client exists.
 func (d *Decision) check(opts Options) error {
 	switch {
@@ -424,6 +699,9 @@ func (d *Decision) check(opts Options) error {
 		return errors.New("login: no storage client")
 	case d.Host == nil:
 		return errors.New("login: no host")
+	}
+	if len(opts.OIDC) > 0 && strings.TrimSpace(opts.Namespace) == "" {
+		return errors.New("login: an OIDC client's id is <namespace>-<app>, so a box with one needs its namespace")
 	}
 	if strings.TrimSpace(opts.Host) == "" {
 		return errors.New("login: no host name")
@@ -462,54 +740,54 @@ func accessList() []kube.Access {
 	}
 }
 
-// encryptionKey reads s5n-authelia, creating it once if it is absent.
-func (d *Decision) encryptionKey(ctx context.Context, cl Cluster) (key string, kept bool, err error) {
-	doc, found, err := cl.Get(ctx, CoreGroup, "v1", "Secret", Namespace, authelia.SecretName)
+// MayWrite reports whether this identity may write the login at all.
+//
+// It is the question that decides whose the login is. The login serves every
+// seedbox on the host, so it is root's: root's kubeconfig applies a ConfigMap
+// in the platform's namespace, and a seedbox user's does not. A caller that is
+// not root therefore skips the login rather than failing half way through its
+// own apply, and a user's `theme:` never reaches the page everyone signs in on
+// -- it is the palette that user's own box draws its dialogs in.
+func MayWrite(ctx context.Context, cl Cluster) (bool, error) {
+	denied, err := kube.Denied(ctx, cl, []kube.Access{{
+		Verb:      kube.VerbApply,
+		Group:     CoreGroup,
+		Resource:  "configmaps",
+		Namespace: Namespace,
+		What:      "the login's configuration in " + Namespace,
+	}})
 	if err != nil {
-		return "", false, err
+		return false, fmt.Errorf("login: %w", err)
 	}
-	if found {
-		raw, _, _ := unstructured.NestedStringMap(doc, "data")
-		encoded, ok := raw[authelia.EncryptionKeySecretKey]
-		key, decodeErr := base64.StdEncoding.DecodeString(encoded)
-		if !ok || decodeErr != nil || len(key) < 20 {
-			return "", false, fmt.Errorf("secret %s/%s exists but has no usable %s: box never rotates it, so restore the key from your backup, or delete the Secret and the claim together and start the login again",
-				Namespace, authelia.SecretName, authelia.EncryptionKeySecretKey)
-		}
-		return string(key), true, nil
-	}
-	buf := make([]byte, 32)
-	if _, err := rand.Read(buf); err != nil {
-		return "", false, fmt.Errorf("generate the storage encryption key: %w", err)
-	}
-	key = hex.EncodeToString(buf)
-	secret := map[string]any{
-		"apiVersion": "v1",
-		"kind":       "Secret",
-		"metadata": map[string]any{
-			"name":      authelia.SecretName,
-			"namespace": Namespace,
-			"labels": map[string]any{
-				kube.PartOfLabel:    kube.PartOf,
-				kube.ManagedByLabel: kube.ManagedBy,
-			},
-		},
-		"type": "Opaque",
-		"data": map[string]any{
-			authelia.EncryptionKeySecretKey: base64.StdEncoding.EncodeToString([]byte(key)),
-		},
-	}
-	if err := cl.Create(ctx, secret); err != nil {
-		return "", false, fmt.Errorf("create Secret %s/%s: %w", Namespace, authelia.SecretName, err)
-	}
-	d.report().Line(fmt.Sprintf("created Secret %s/%s: its key must be backed up with the claim, and box never changes it", Namespace, authelia.SecretName))
-	return key, false, nil
+	return len(denied) == 0, nil
 }
 
-// configMapDoc is the configuration's ConfigMap. It is built here rather than
-// templated with the rest because its content is one rendered file, and a
-// template would have to re-indent YAML inside YAML.
-func configMapDoc(configuration []byte) map[string]any {
+// rulesAccess is what a rule write needs: the login's own objects -- the
+// configuration, the Deployment whose pod-template hash rolls it, and the
+// objects the same template renders -- plus the SecurityPolicy in the Gateway's
+// namespace. It is smaller than accessList on purpose: a rule write is not an
+// install, and it creates no volume.
+func rulesAccess() []kube.Access {
+	return []kube.Access{
+		{Verb: kube.VerbApply, Group: CoreGroup, Resource: "configmaps", Namespace: Namespace, What: "ConfigMaps in " + Namespace},
+		{Verb: kube.VerbApply, Group: CoreGroup, Resource: "services", Namespace: Namespace, What: "Services in " + Namespace},
+		{Verb: kube.VerbApply, Group: "apps", Resource: "deployments", Namespace: Namespace, What: "Deployments in " + Namespace},
+		{Verb: kube.VerbApply, Group: GatewayGroup, Resource: "referencegrants", Namespace: Namespace, What: "ReferenceGrants in " + Namespace},
+		{Verb: kube.VerbApply, Group: GatewayGroup, Resource: "httproutes", Namespace: Namespace, What: "the portal's HTTPRoute in " + Namespace},
+		{Verb: kube.VerbApply, Group: PolicyGroup, Resource: "securitypolicies", Namespace: platform.GatewayNamespace, What: "SecurityPolicies in " + platform.GatewayNamespace},
+	}
+}
+
+// configMapDoc is the login's one ConfigMap: the configuration and, in
+// binaryData, the mark and the favicon. It is built here rather than templated
+// with the rest because its content is a rendered file, and a template would
+// have to re-indent YAML inside YAML.
+//
+// The pictures ride with the configuration because they are mounted at the same
+// path -- server.asset_path is /etc/authelia, where this ConfigMap is already
+// read-only -- so an apply writes the login's whole face as one object, and a
+// pod only ever waits on one ConfigMap to appear.
+func configMapDoc(configuration []byte, assets authelia.Assets) map[string]any {
 	return map[string]any{
 		"apiVersion": "v1",
 		"kind":       "ConfigMap",
@@ -521,14 +799,22 @@ func configMapDoc(configuration []byte) map[string]any {
 				kube.ManagedByLabel: kube.ManagedBy,
 			},
 		},
-		"data": map[string]any{authelia.ConfigFile: string(configuration)},
+		"data":       map[string]any{authelia.ConfigFile: string(configuration)},
+		"binaryData": anyMap(assets.BinaryData()),
 	}
 }
 
-// configurationChanged compares the rendered configuration with the ConfigMap
-// that is there. It is a report, not a decision: the apply is idempotent
-// either way, and the pod template's hash is what makes a change roll the pod.
-func (d *Decision) configurationChanged(ctx context.Context, cl Cluster, configuration []byte) (bool, error) {
+// configurationChanged compares the rendered file and pictures with the
+// ConfigMap that is there. It is a report, not a decision: the apply is
+// idempotent either way, and the pod template's hash is what makes a
+// configuration change roll the pod.
+//
+// The pictures are compared too, and they are the one half that does not need
+// the roll: Authelia stats and serves them from the filesystem on every request
+// (internal/server/template.go:47, internal/middlewares/asset_override.go:24), so
+// a re-rendered logo reaches the browser once the kubelet has updated the
+// mounted ConfigMap -- a minute at most, and no restart.
+func (d *Decision) configurationChanged(ctx context.Context, cl Cluster, configuration []byte, assets authelia.Assets) (bool, error) {
 	doc, found, err := cl.Get(ctx, CoreGroup, "v1", "ConfigMap", Namespace, authelia.ConfigMapName)
 	if err != nil {
 		return false, err
@@ -537,7 +823,64 @@ func (d *Decision) configurationChanged(ctx context.Context, cl Cluster, configu
 		return true, nil
 	}
 	data, _, _ := unstructured.NestedStringMap(doc, "data")
-	return data[authelia.ConfigFile] != string(configuration), nil
+	if data[authelia.ConfigFile] != string(configuration) {
+		return true, nil
+	}
+	binary, _, _ := unstructured.NestedStringMap(doc, "binaryData")
+	for name, want := range assets.BinaryData() {
+		if binary[name] != want {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// anyMap is a string map as the untyped document a server-side apply takes:
+// the API server's JSON form wants the base64 strings, and unstructured's
+// accessors want them under any.
+func anyMap(in map[string]string) map[string]any {
+	out := make(map[string]any, len(in))
+	for k, v := range in {
+		out[k] = v
+	}
+	return out
+}
+
+// renderLogin is the login's one rendering, from the inputs init and the
+// per-host step both hold: the configuration file Authelia starts with, and the
+// mark and favicon mounted beside it. It is one function because the same
+// inputs must produce the same files -- a rule or a theme that depended on
+// which command wrote it would be a second login.
+func renderLogin(values map[string]any, host, name, key string, hosted []string, oidc *authelia.OIDC) ([]byte, authelia.Assets, error) {
+	lt, err := authelia.ResolveTheme(themeName(values))
+	if err != nil {
+		return nil, authelia.Assets{}, err
+	}
+	config, err := authelia.RenderConfiguration(authelia.Configuration{
+		Host:          host,
+		Login:         name,
+		EncryptionKey: key,
+		Theme:         lt.Base,
+		AssetPath:     authelia.AssetPath,
+		Rules:         authelia.Rules(host, name, authelia.InstancesFromValues(values), hosted),
+		OIDC:          oidc,
+	})
+	if err != nil {
+		return nil, authelia.Assets{}, err
+	}
+	assets, err := authelia.RenderAssets(lt)
+	if err != nil {
+		return nil, authelia.Assets{}, err
+	}
+	return config, assets, nil
+}
+
+// themeName is the values file's top-level `theme:`. The chart defaults it to
+// s5n, so a file that leaves it out is the default rather than a refusal, and an
+// unknown name is refused by ResolveTheme with the list of names that work.
+func themeName(values map[string]any) string {
+	name, _ := values["theme"].(string)
+	return name
 }
 
 // awaitDeployment waits for the pod to answer. A login that is not Ready is a

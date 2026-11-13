@@ -175,6 +175,20 @@ type fakes struct {
 	pathsInNode bool
 	dataPath    string
 	configPath  string
+	hosts       *fakeHosts
+	// hostIssuers is init's per-name decision, handed to the plan so each
+	// Certificate is compared with the issuer this run would write for it.
+	hostIssuers map[string]string
+	// otherHosts replaces the per-host step with any other value, the way a
+	// user's apply hands apply a step that has no login half.
+	otherHosts Hosts
+	anchor     *fakeAnchor
+	// anchorIssuer is the issuer this run writes the box's own host
+	// Certificate with: init's answer, which the anchor follows.
+	anchorIssuer string
+	// hostsAll is init's apply: every name it decided goes to the per-host
+	// step, served or not.
+	hostsAll bool
 }
 
 func newFakes(t *testing.T) *fakes {
@@ -231,12 +245,25 @@ func newFakes(t *testing.T) *fakes {
 
 func (f *fakes) apply(t *testing.T) (Result, error) {
 	t.Helper()
-	return f.app.Apply(context.Background(), Options{
+	opts := Options{
 		Chart:       testChartPtr(t),
 		GrantPath:   f.grantPath,
 		ValuesPath:  f.values,
 		PathsInNode: f.pathsInNode,
-	})
+	}
+	if f.hosts != nil {
+		opts.Hosts = f.hosts
+	}
+	if f.otherHosts != nil {
+		opts.Hosts = f.otherHosts
+	}
+	if f.anchor != nil {
+		opts.Anchor = f.anchor
+	}
+	opts.AnchorIssuer = f.anchorIssuer
+	opts.HostsAll = f.hostsAll
+	opts.HostIssuers = f.hostIssuers
+	return f.app.Apply(context.Background(), opts)
 }
 
 // rewrite replaces fixed strings in a file, so a fixture can name paths the

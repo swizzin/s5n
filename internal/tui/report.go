@@ -15,6 +15,7 @@ import (
 
 	"github.com/swizzin/s5n/internal/say"
 	"github.com/swizzin/s5n/internal/setup"
+	"github.com/swizzin/s5n/internal/theme"
 )
 
 // ReporterOptions is one live reporter: the terminal, whether colour is
@@ -28,6 +29,14 @@ type ReporterOptions struct {
 	Width int
 	// NoColor keeps the layout and drops the colours (NO_COLOR).
 	NoColor bool
+	// Theme names the palette this run draws with; empty is s5n. The name is
+	// cmd/box's to read -- the values' `theme:` key -- and theme.Parse is what
+	// decides whether it is one. A name that does not resolve is reported by
+	// Err and by the first question asked.
+	Theme string
+	// Background paints the terminal's background with that palette's, for the
+	// whole run. Off by default; see Options.Background.
+	Background bool
 	// Yes answers every confirm without a form, and leaves the same ✓ record
 	// line an answered form would.
 	Yes bool
@@ -81,7 +90,7 @@ func NewReporter(o ReporterOptions) *Reporter {
 	if o.Width <= 0 {
 		o.Width = defaultWidth
 	}
-	ui := New(Options{In: in, Out: out, NoColor: o.NoColor, Width: o.Width})
+	ui := New(Options{In: in, Out: out, NoColor: o.NoColor, Width: o.Width, Theme: o.Theme, Background: o.Background})
 	r := &Reporter{
 		out:    out,
 		errOut: errOut,
@@ -108,20 +117,39 @@ func (r *Reporter) watchInterrupt() {
 	go func() {
 		select {
 		case <-r.sig:
-			r.mu.Lock()
-			if r.active != nil {
-				r.clearLocked()
-				r.active = nil
-			}
-			_, _ = io.WriteString(r.out, "\n")
-			r.mu.Unlock()
-			os.Exit(130)
+			r.interrupted()
 		case <-r.sigDone:
 		}
 	}()
 }
 
+// exit is os.Exit, replaced in tests: the interrupt path has to put the
+// terminal back before it goes, and nothing else can run after it.
+var exit = os.Exit
+
+// interrupted is the Ctrl-C and SIGTERM path: stop the spinner, leave the
+// cursor on a fresh line, put the terminal's background back and exit. A
+// deferred Close does not run through os.Exit, so the paint is undone by hand
+// here; the deferred one still covers a return, an error and a panic.
+func (r *Reporter) interrupted() {
+	r.mu.Lock()
+	if r.active != nil {
+		r.clearLocked()
+		r.active = nil
+	}
+	_, _ = io.WriteString(r.out, "\n")
+	r.mu.Unlock()
+	r.Close()
+	exit(130)
+}
+
 var _ say.Reporter = (*Reporter)(nil)
+
+// Palette is the variant this run draws with.
+func (r *Reporter) Palette() theme.Variant { return r.ui.Palette() }
+
+// Err is a theme name that did not resolve, or nil.
+func (r *Reporter) Err() error { return r.ui.Err() }
 
 // SetYes makes every confirm answer itself, which is what --yes means on a
 // terminal. It is set after the flags are parsed.
@@ -707,8 +735,11 @@ func (r *Reporter) Banner(title, detail string) {
 	r.flushPending()
 }
 
-// Close stops the spinner and the interrupt handler. Safe to call twice.
+// Close stops the spinner and the interrupt handler and puts the terminal's
+// background back if this run painted it. Safe to call twice, and deferred by
+// cmd/box so a return, an error and a panic all restore the terminal.
 func (r *Reporter) Close() {
+	defer r.ui.Close()
 	r.flushPending()
 	r.stopActive()
 	r.mu.Lock()

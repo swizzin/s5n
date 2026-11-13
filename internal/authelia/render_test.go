@@ -19,7 +19,9 @@ func testConfiguration() Configuration {
 		Host:          "box.example.com",
 		Login:         "alice",
 		EncryptionKey: testKey,
-		Rules:         Rules("box.example.com", "alice", InstancesFromValues(fixtureValues())),
+		Theme:         BaseDark,
+		AssetPath:     AssetPath,
+		Rules:         Rules("box.example.com", "alice", InstancesFromValues(fixtureValues()), nil),
 	}
 }
 
@@ -81,7 +83,7 @@ func TestRenderConfigurationFollowsTheHost(t *testing.T) {
 	}
 	c := testConfiguration()
 	c.Host = "other.example.com"
-	c.Rules = Rules(c.Host, c.Login, nil)
+	c.Rules = Rules(c.Host, c.Login, nil, nil)
 	b, err := RenderConfiguration(c)
 	if err != nil {
 		t.Fatal(err)
@@ -135,6 +137,7 @@ func TestRenderedDeploymentCarriesThePinnedImage(t *testing.T) {
 		Namespace:        "s5n-system",
 		GatewayNamespace: "s5n-gateway",
 		Gateway:          "s5n",
+		ProxyNamespace:   "envoy-gateway-system",
 		Host:             "box.example.com",
 		Claim:            ClaimName,
 		ConfigMap:        ConfigMapName,
@@ -190,6 +193,7 @@ func testManifests() Manifests {
 		Namespace:        "s5n-system",
 		GatewayNamespace: "s5n-gateway",
 		Gateway:          "s5n",
+		ProxyNamespace:   "envoy-gateway-system",
 		Host:             "box.example.com",
 		Claim:            ClaimName,
 		ConfigMap:        ConfigMapName,
@@ -282,6 +286,95 @@ func TestRenderManifestsRefusesNoHost(t *testing.T) {
 	}
 }
 
+// TestRenderedLoginIsReachableOnlyThroughTheGateway is the hole the research
+// measured: s5n-system had no NetworkPolicy at all, so any pod in the cluster
+// could call 9091 and forge X-Forwarded-Proto/Host there. The policy admits the
+// Gateway's proxy pods on 9091 and nothing else, and it names the owning
+// Gateway so a second Gateway's proxy does not inherit the admission.
+func TestRenderedLoginIsReachableOnlyThroughTheGateway(t *testing.T) {
+	manifests, err := RenderManifests(testManifests())
+	if err != nil {
+		t.Fatalf("RenderManifests: %v", err)
+	}
+	dec := utilyaml.NewYAMLOrJSONDecoder(bytes.NewReader(manifests), 4096)
+	var policy map[string]any
+	for {
+		var doc map[string]any
+		err := dec.Decode(&doc)
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		if doc["kind"] == "NetworkPolicy" {
+			policy = doc
+		}
+	}
+	if policy == nil {
+		t.Fatal("the login's manifests carry no NetworkPolicy: every pod in the cluster can reach 9091 and forge the headers Authelia trusts")
+	}
+	meta, _ := policy["metadata"].(map[string]any)
+	if meta["namespace"] != "s5n-system" {
+		t.Fatalf("NetworkPolicy namespace = %v, want s5n-system", meta["namespace"])
+	}
+	spec, _ := policy["spec"].(map[string]any)
+	selector, _ := spec["podSelector"].(map[string]any)
+	pods, _ := selector["matchLabels"].(map[string]any)
+	if pods["app.kubernetes.io/name"] != "authelia" {
+		t.Fatalf("podSelector = %v, want the login's own pods", selector)
+	}
+	types, _ := spec["policyTypes"].([]any)
+	if len(types) != 1 || types[0] != "Ingress" {
+		t.Fatalf("policyTypes = %v, want Ingress only: egress is the login's own business", types)
+	}
+	rules, _ := spec["ingress"].([]any)
+	if len(rules) != 1 {
+		t.Fatalf("ingress = %v, want exactly one rule", rules)
+	}
+	rule, _ := rules[0].(map[string]any)
+	from, _ := rule["from"].([]any)
+	if len(from) != 1 {
+		t.Fatalf("from = %v, want the proxy pods alone", from)
+	}
+	peer, _ := from[0].(map[string]any)
+	ns, _ := peer["namespaceSelector"].(map[string]any)
+	nsLabels, _ := ns["matchLabels"].(map[string]any)
+	if nsLabels["kubernetes.io/metadata.name"] != "envoy-gateway-system" {
+		t.Fatalf("namespaceSelector = %v, want the proxy's namespace", nsLabels)
+	}
+	podSel, _ := peer["podSelector"].(map[string]any)
+	podLabels, _ := podSel["matchLabels"].(map[string]any)
+	for label, want := range map[string]any{
+		"app.kubernetes.io/name":                         "envoy",
+		"gateway.envoyproxy.io/owning-gateway-name":      "s5n",
+		"gateway.envoyproxy.io/owning-gateway-namespace": "s5n-gateway",
+	} {
+		if podLabels[label] != want {
+			t.Errorf("podSelector[%s] = %v, want %v", label, podLabels[label], want)
+		}
+	}
+	ports, _ := rule["ports"].([]any)
+	if len(ports) != 1 {
+		t.Fatalf("ports = %v, want the login's one port", ports)
+	}
+	port, _ := ports[0].(map[string]any)
+	if port["port"] != float64(ServicePort) {
+		t.Fatalf("port = %v, want %d", port["port"], ServicePort)
+	}
+}
+
+// A policy with no proxy namespace would name a namespace called "", which the
+// API server accepts and which admits nobody: the login would answer the
+// Gateway with a timeout and the release would never be served.
+func TestRenderManifestsRefusesNoProxyNamespace(t *testing.T) {
+	m := testManifests()
+	m.ProxyNamespace = ""
+	if _, err := RenderManifests(m); err == nil {
+		t.Fatal("the manifests rendered an ingress policy that admits no namespace")
+	}
+}
+
 func TestValidateLogin(t *testing.T) {
 	for _, ok := range []string{"alice", "a.b", "user_1", "a-b", "a@b"} {
 		if err := ValidateLogin(ok); err != nil {
@@ -312,5 +405,39 @@ func TestGeneratePassword(t *testing.T) {
 			t.Fatal("two generated passwords are identical")
 		}
 		seen[p] = true
+	}
+}
+
+// TestHasRuleReadsTheRenderedConfiguration: the read that decides whether a host
+// is served asks this file, so it has to find a rule exactly where the template
+// writes one -- and must not answer yes for a name the file never mentions,
+// which is the 403 the per-host step exists to prevent.
+func TestHasRuleReadsTheRenderedConfiguration(t *testing.T) {
+	c := testConfiguration()
+	c.Rules = Rules("box.example.com", "alice", InstancesFromValues(fixtureValues()), []string{"seerr"})
+	rendered, err := RenderConfiguration(c)
+	if err != nil {
+		t.Fatalf("RenderConfiguration: %v", err)
+	}
+	text := string(rendered)
+	for _, host := range []string{"box.example.com", "seerr.box.example.com"} {
+		if !HasRule(text, host) {
+			t.Errorf("no rule for %s in:\n%s", host, text)
+		}
+	}
+	if HasRule(text, "plex.box.example.com") {
+		t.Error("a name the configuration never mentions has a rule")
+	}
+	if HasRule("", "box.example.com") || HasRule("not: [valid", "box.example.com") {
+		t.Error("an empty or unparseable configuration answered a rule")
+	}
+}
+
+// TestHasRuleReadsASingleDomainToo: Authelia accepts one string or a list, and a
+// hand-edited configuration is still the login that is running.
+func TestHasRuleReadsASingleDomainToo(t *testing.T) {
+	configuration := "access_control:\n  default_policy: 'deny'\n  rules:\n    - domain: 'box.example.com'\n      policy: 'one_factor'\n"
+	if !HasRule(configuration, "box.example.com") {
+		t.Fatal("a rule written with one domain string was not found")
 	}
 }

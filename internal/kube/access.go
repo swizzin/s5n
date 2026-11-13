@@ -24,6 +24,11 @@ const (
 	// patches the Gateway, the Certificate and the HTTPRoute the first one
 	// created, and `box apply` patches the release's objects.
 	VerbApply = "apply"
+	// VerbGet and VerbDelete are reads and removals: box asks about them
+	// before a step that needs one, so a user's run names root's command
+	// instead of failing on its first forbidden call.
+	VerbGet    = "get"
+	VerbDelete = "delete"
 )
 
 // Access is one permission box needs for what it is about to write: may this

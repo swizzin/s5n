@@ -18,6 +18,10 @@ import (
 
 const testK0sVersion = "v9.9.9-test"
 
+// testNodeIP is the uplink address every test plan pins: TEST-NET-1, so no
+// example in this file can be mistaken for a real host's address.
+const testNodeIP = "192.0.2.10"
+
 // The stubs record into one shared trace, so a test can assert the order of
 // the whole sequence and not only its outcome.
 type installStubs struct {
@@ -62,6 +66,11 @@ type stubReady struct {
 	attempts  int
 	failFirst int
 	err       error
+	// nodeIPs is what the stub Node registered. Nil means the address the
+	// plan pinned, so the ordinary sequence verifies; a test that wants a
+	// mismatch sets another one.
+	nodeIPs []string
+	addrErr error
 }
 
 func (s *stubReady) Ready(context.Context) error {
@@ -71,6 +80,17 @@ func (s *stubReady) Ready(context.Context) error {
 		return s.err
 	}
 	return nil
+}
+
+func (s *stubReady) NodeIPs(context.Context) ([]string, error) {
+	*s.trace = append(*s.trace, "nodeips")
+	if s.addrErr != nil {
+		return nil, s.addrErr
+	}
+	if s.nodeIPs == nil {
+		return []string{testNodeIP}, nil
+	}
+	return s.nodeIPs, nil
 }
 
 // testInstaller builds an installer that touches only t.TempDir(): the release
@@ -114,20 +134,59 @@ func testSum() string {
 	return hex.EncodeToString(sum[:])
 }
 
-func testPlan() InstallPlan {
-	return InstallPlan{Version: testK0sVersion, Arch: "amd64", SHA256: testSum(), CleanHost: true}
+// testPlan is the clean-host plan a test installs: the release pin, the node
+// identity box chose on a plain ethernet uplink, and the config box would
+// write -- beside the binary, so the test never touches /etc.
+func testPlan(config string) InstallPlan {
+	return InstallPlan{
+		Version:    testK0sVersion,
+		Arch:       "amd64",
+		SHA256:     testSum(),
+		CleanHost:  true,
+		NodeIP:     testNodeIP,
+		Uplink:     Uplink{Interface: "eth0", Address: testNodeIP, MTU: 1500},
+		ConfigPath: config,
+		ConfigText: k0sNodeConfig(testNodeIP),
+	}
+}
+
+// testConfigPath is where a test's k0s config goes: in the installer's own
+// temporary directory.
+func testConfigPath(k K0sInstaller) string {
+	return filepath.Join(filepath.Dir(k.BinPath), "k0s.yaml")
+}
+
+// testInstallArgs is the one command a plan installs with, spelled out here so
+// a test asserts the literal flags box runs.
+func testInstallArgs(plan InstallPlan) string {
+	return "install controller --single --config " + plan.ConfigPath + " --kubelet-extra-args=--node-ip=" + plan.NodeIP
 }
 
 func TestK0sInstallSequence(t *testing.T) {
 	k, stubs := testInstaller(t, testPayload)
-	if err := k.Install(context.Background(), testPlan()); err != nil {
+	plan := testPlan(testConfigPath(k))
+	if err := k.Install(context.Background(), plan); err != nil {
 		t.Fatalf("install: %v", err)
 	}
 
-	want := []string{"fetch", "run install controller --single", "run start", "ready"}
+	want := []string{"fetch", "run " + testInstallArgs(plan), "run start", "ready", "nodeips"}
 	if strings.Join(*stubs.trace, "|") != strings.Join(want, "|") {
 		t.Fatalf("sequence = %v, want %v", *stubs.trace, want)
 	}
+
+	// The node IP is pinned where the kubelet reads it, with the config that
+	// pins the API address beside it.
+	if !strings.Contains(testInstallArgs(plan), "--kubelet-extra-args=--node-ip="+testNodeIP) {
+		t.Errorf("the install does not pin the node IP: %q", testInstallArgs(plan))
+	}
+	gotConfig, err := os.ReadFile(plan.ConfigPath)
+	if err != nil {
+		t.Fatalf("the k0s config was not written: %v", err)
+	}
+	if string(gotConfig) != plan.ConfigText || !strings.Contains(string(gotConfig), "address: "+testNodeIP) {
+		t.Errorf("config = %q, want the plan's with the API address pinned to %s", gotConfig, testNodeIP)
+	}
+
 	got, err := os.ReadFile(k.BinPath)
 	if err != nil {
 		t.Fatalf("binary not installed: %v", err)
@@ -159,14 +218,14 @@ func TestK0sInstallRefusesBeforeFetch(t *testing.T) {
 			name: "not root",
 			prepare: func(k *K0sInstaller, _ *installStubs) InstallPlan {
 				k.Root = func() bool { return false }
-				return testPlan()
+				return testPlan(testConfigPath(*k))
 			},
 			want: "as root",
 		},
 		{
 			name: "the decision did not choose to install",
-			prepare: func(_ *K0sInstaller, _ *installStubs) InstallPlan {
-				p := testPlan()
+			prepare: func(k *K0sInstaller, _ *installStubs) InstallPlan {
+				p := testPlan(testConfigPath(*k))
 				p.CleanHost = false
 				return p
 			},
@@ -178,7 +237,7 @@ func TestK0sInstallRefusesBeforeFetch(t *testing.T) {
 				k.Evidence = func() []Finding {
 					return []Finding{{Kind: "state", Name: K0sStateDir}}
 				}
-				return testPlan()
+				return testPlan(testConfigPath(*k))
 			},
 			want: "k0s is already on this host (state " + K0sStateDir + ")",
 		},
@@ -187,8 +246,8 @@ func TestK0sInstallRefusesBeforeFetch(t *testing.T) {
 			// carries none is one box cannot verify, so it is refused by
 			// architecture before the download, whatever asked for it.
 			name: "plan carries no checksum for this architecture",
-			prepare: func(_ *K0sInstaller, _ *installStubs) InstallPlan {
-				p := testPlan()
+			prepare: func(k *K0sInstaller, _ *installStubs) InstallPlan {
+				p := testPlan(testConfigPath(*k))
 				p.Arch = "riscv64"
 				p.SHA256 = ""
 				return p
@@ -197,12 +256,57 @@ func TestK0sInstallRefusesBeforeFetch(t *testing.T) {
 		},
 		{
 			name: "plan names no release",
-			prepare: func(_ *K0sInstaller, _ *installStubs) InstallPlan {
-				p := testPlan()
+			prepare: func(k *K0sInstaller, _ *installStubs) InstallPlan {
+				p := testPlan(testConfigPath(*k))
 				p.Version = ""
 				return p
 			},
 			want: "names no k0s release",
+		},
+		{
+			// The address the node registers with is what the CNI's MTU comes
+			// from, so a plan that pins none is refused by architecture rather
+			// than left to the host.
+			name: "plan pins no node IP",
+			prepare: func(k *K0sInstaller, _ *installStubs) InstallPlan {
+				p := testPlan(testConfigPath(*k))
+				p.NodeIP = ""
+				return p
+			},
+			want: "this plan pins none",
+		},
+		{
+			name: "plan carries no k0s config",
+			prepare: func(k *K0sInstaller, _ *installStubs) InstallPlan {
+				p := testPlan(testConfigPath(*k))
+				p.ConfigText = ""
+				return p
+			},
+			want: "this plan carries none",
+		},
+		{
+			name: "the default route leaves through a tunnel",
+			prepare: func(k *K0sInstaller, _ *installStubs) InstallPlan {
+				p := testPlan(testConfigPath(*k))
+				p.Uplink = Uplink{Interface: "tailscale0", Address: "100.64.0.7", MTU: 1280, Tunnel: true}
+				p.NodeIP = p.Uplink.Address
+				return p
+			},
+			want: "leaves through tailscale0, a tunnel with an MTU of 1280",
+		},
+		{
+			// k0s reads this path by default, so a file there is somebody's
+			// decision about the host: box will not install over it.
+			name: "a k0s config box did not write is already there",
+			prepare: func(k *K0sInstaller, _ *installStubs) InstallPlan {
+				p := testPlan(testConfigPath(*k))
+				p.ConfigPath = filepath.Join(t.TempDir(), "k0s.yaml")
+				if err := os.WriteFile(p.ConfigPath, []byte("apiVersion: k0s.k0sproject.io/v1beta1\nkind: ClusterConfig\nspec:\n  api:\n    address: 198.51.100.9\n"), 0o644); err != nil {
+					t.Fatalf("write the pre-existing config: %v", err)
+				}
+				return p
+			},
+			want: "already exists and box did not write it",
 		},
 	}
 	for _, tc := range cases {
@@ -236,7 +340,7 @@ func TestK0sInstallNeverOverwritesAPreExistingBinary(t *testing.T) {
 	}
 	k.Evidence = func() []Finding { return []Finding{{Kind: "binary", Name: k.BinPath}} }
 
-	if err := k.Install(context.Background(), testPlan()); err == nil {
+	if err := k.Install(context.Background(), testPlan(testConfigPath(k))); err == nil {
 		t.Fatal("install succeeded over a pre-existing k0s")
 	}
 	if len(*stubs.trace) != 0 {
@@ -254,7 +358,7 @@ func TestK0sInstallRejectsBadChecksum(t *testing.T) {
 	k, stubs := testInstaller(t, testPayload)
 	k.Fetch = &stubFetcher{trace: stubs.trace, body: []byte("tampered")}
 
-	err := k.Install(context.Background(), testPlan())
+	err := k.Install(context.Background(), testPlan(testConfigPath(k)))
 	if err == nil || !strings.Contains(err.Error(), "refusing to install it") {
 		t.Fatalf("err = %v, want a checksum refusal", err)
 	}
@@ -278,20 +382,21 @@ func TestK0sInstallRejectsBadChecksum(t *testing.T) {
 func TestK0sInstallFailureNamesWhatItLeft(t *testing.T) {
 	cases := []struct {
 		name    string
-		prepare func(*installStubs)
+		prepare func(*K0sInstaller, *installStubs)
 		want    []string
 	}{
 		{
 			name: "k0s could not install the service",
-			prepare: func(s *installStubs) {
-				s.run.fail["install controller --single"] = errors.New("exit status 1")
-				s.run.out["install controller --single"] = "no systemd\n"
+			prepare: func(k *K0sInstaller, s *installStubs) {
+				args := testInstallArgs(testPlan(testConfigPath(*k)))
+				s.run.fail[args] = errors.New("exit status 1")
+				s.run.out[args] = "no systemd\n"
 			},
 			want: []string{"could not be installed as a service", "k0s said:", "    no systemd", "k0s stop; k0s reset"},
 		},
 		{
 			name: "k0s could not start",
-			prepare: func(s *installStubs) {
+			prepare: func(_ *K0sInstaller, s *installStubs) {
 				s.run.fail["start"] = errors.New("exit status 1")
 				s.run.out["start"] = "controller did not come up\n"
 			},
@@ -299,7 +404,7 @@ func TestK0sInstallFailureNamesWhatItLeft(t *testing.T) {
 		},
 		{
 			name: "the API never answered",
-			prepare: func(s *installStubs) {
+			prepare: func(_ *K0sInstaller, s *installStubs) {
 				s.ready.failFirst = 1 << 20
 				s.ready.err = errors.New("connection refused")
 			},
@@ -309,8 +414,8 @@ func TestK0sInstallFailureNamesWhatItLeft(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			k, stubs := testInstaller(t, testPayload)
-			tc.prepare(stubs)
-			err := k.Install(context.Background(), testPlan())
+			tc.prepare(&k, stubs)
+			err := k.Install(context.Background(), testPlan(testConfigPath(k)))
 			if err == nil {
 				t.Fatal("install succeeded, want a failure")
 			}
@@ -319,7 +424,7 @@ func TestK0sInstallFailureNamesWhatItLeft(t *testing.T) {
 					t.Errorf("err = %q, want it to contain %q", err, want)
 				}
 			}
-			for _, want := range []string{k.BinPath, k.StateDir} {
+			for _, want := range []string{k.BinPath, k.StateDir, testConfigPath(k)} {
 				if !strings.Contains(err.Error(), want) {
 					t.Errorf("err = %q, want it to name %s", err, want)
 				}
@@ -346,7 +451,7 @@ func TestK0sInstallWaitStopsAtDeadline(t *testing.T) {
 	stubs.ready.failFirst = 1 << 20
 	stubs.ready.err = errors.New("the node is not Ready yet")
 
-	err := k.Install(context.Background(), testPlan())
+	err := k.Install(context.Background(), testPlan(testConfigPath(k)))
 	if err == nil {
 		t.Fatal("install succeeded, want a readiness failure")
 	}
@@ -364,7 +469,7 @@ func TestK0sInstallDownloadFailureLeavesNoUndoNote(t *testing.T) {
 	k, stubs := testInstaller(t, testPayload)
 	k.Fetch = &stubFetcher{trace: stubs.trace, err: errors.New("dial tcp: network unreachable")}
 
-	err := k.Install(context.Background(), testPlan())
+	err := k.Install(context.Background(), testPlan(testConfigPath(k)))
 	if err == nil {
 		t.Fatal("install succeeded, want a download failure")
 	}
@@ -381,14 +486,37 @@ func TestK0sInstallDownloadFailureLeavesNoUndoNote(t *testing.T) {
 
 func TestDryRunInstallerPrintsThePlan(t *testing.T) {
 	var b strings.Builder
-	plan := InstallPlan{Version: testK0sVersion, Arch: "arm64", CleanHost: true}
+	plan := InstallPlan{
+		Version: testK0sVersion, Arch: "arm64", CleanHost: true,
+		NodeIP:     testNodeIP,
+		Uplink:     Uplink{Interface: "eth0", Address: testNodeIP, MTU: 1500},
+		ConfigPath: "/etc/k0s/k0s.yaml",
+		ConfigText: k0sNodeConfig(testNodeIP),
+	}
 	if err := (DryRunInstaller{Say: &say.Plain{W: &b}}).Install(context.Background(), plan); err != nil {
 		t.Fatal(err)
 	}
 	out := b.String()
-	for _, want := range []string{testK0sVersion, "arm64", "/usr/local/bin/k0s", "install controller --single", "start"} {
+	// The dry run is the operator's one look at the node's identity before
+	// anything changes, so the address, its interface and that interface's MTU
+	// are all in it.
+	for _, want := range []string{testK0sVersion, "arm64", "/usr/local/bin/k0s", "install controller --single", "start",
+		testNodeIP, "eth0", "MTU 1500"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("output %q does not mention %q", out, want)
 		}
+	}
+}
+
+// A k0s config box wrote itself, byte for byte, is reused: that is what a run
+// that failed after writing it leaves, and a second run must be able to finish.
+func TestK0sInstallReusesItsOwnConfig(t *testing.T) {
+	k, _ := testInstaller(t, testPayload)
+	plan := testPlan(testConfigPath(k))
+	if err := os.WriteFile(plan.ConfigPath, []byte(plan.ConfigText), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := k.Install(context.Background(), plan); err != nil {
+		t.Fatalf("install with box's own config in place: %v", err)
 	}
 }

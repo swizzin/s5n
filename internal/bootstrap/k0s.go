@@ -139,13 +139,67 @@ type APIReadiness struct {
 // nodes. The kubeconfig is re-read every attempt because k0s may still be
 // writing its PKI the first time box asks.
 func (a APIReadiness) Ready(ctx context.Context) error {
+	client, base, err := a.client()
+	if err != nil {
+		return err
+	}
+	if err := readyz(ctx, client, base); err != nil {
+		return err
+	}
+	nodes, err := listNodes(ctx, client, base)
+	if err != nil {
+		return err
+	}
+	if len(nodes.Items) == 0 {
+		return fmt.Errorf("no node has registered yet")
+	}
+	for _, item := range nodes.Items {
+		for _, c := range item.Status.Conditions {
+			if c.Type == "Ready" && c.Status == conditionTrue {
+				return nil
+			}
+		}
+	}
+	return fmt.Errorf("the node is not Ready yet")
+}
+
+// NodeIPs reads the InternalIPs the nodes registered. It is asked once, after
+// Ready said yes, to check the node took the address box pinned -- a kubelet
+// that ignored --node-ip would still be Ready, and the failure would only show
+// up later as packets that fragment.
+func (a APIReadiness) NodeIPs(ctx context.Context) ([]string, error) {
+	client, base, err := a.client()
+	if err != nil {
+		return nil, err
+	}
+	nodes, err := listNodes(ctx, client, base)
+	if err != nil {
+		return nil, err
+	}
+	var ips []string
+	for _, item := range nodes.Items {
+		for _, addr := range item.Status.Addresses {
+			if addr.Type == "InternalIP" {
+				ips = append(ips, addr.Address)
+			}
+		}
+	}
+	if len(ips) == 0 {
+		return nil, fmt.Errorf("the node registered no InternalIP")
+	}
+	return ips, nil
+}
+
+// client is one attempt's API client: the admin kubeconfig, read fresh every
+// time, and the base URL it reaches.
+func (a APIReadiness) client() (*http.Client, string, error) {
 	path := a.ConfigPath
 	if path == "" {
 		path = K0sAdminConfig
 	}
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return fmt.Errorf("read %s: %w", path, err)
+		return nil, "", fmt.Errorf("read %s: %w", path, err)
 	}
 	timeout := a.Timeout
 	if timeout <= 0 {
@@ -153,13 +207,41 @@ func (a APIReadiness) Ready(ctx context.Context) error {
 	}
 	client, base, err := kubeClient(data, timeout)
 	if err != nil {
-		return fmt.Errorf("%s: %w", path, err)
+		return nil, "", fmt.Errorf("%s: %w", path, err)
 	}
+	return client, base, nil
+}
 
-	if err := readyz(ctx, client, base); err != nil {
-		return err
+// nodeList is the part of /api/v1/nodes box reads: whether a node is Ready,
+// and the addresses it registered.
+type nodeList struct {
+	Items []struct {
+		Status struct {
+			Conditions []struct {
+				Type   string `json:"type"`
+				Status string `json:"status"`
+			} `json:"conditions"`
+			Addresses []struct {
+				Type    string `json:"type"`
+				Address string `json:"address"`
+			} `json:"addresses"`
+		} `json:"status"`
+	} `json:"items"`
+}
+
+func listNodes(ctx context.Context, client *http.Client, base string) (nodeList, error) {
+	var list nodeList
+	body, status, err := get(ctx, client, base+"/api/v1/nodes")
+	if err != nil {
+		return list, err
 	}
-	return nodeReady(ctx, client, base)
+	if status != http.StatusOK {
+		return list, fmt.Errorf("list nodes: %d: %s", status, firstLine(body))
+	}
+	if err := json.Unmarshal(body, &list); err != nil {
+		return list, fmt.Errorf("list nodes: %w", err)
+	}
+	return list, nil
 }
 
 func readyz(ctx context.Context, client *http.Client, base string) error {
@@ -171,40 +253,6 @@ func readyz(ctx context.Context, client *http.Client, base string) error {
 		return fmt.Errorf("readyz: %d: %s", status, firstLine(body))
 	}
 	return nil
-}
-
-func nodeReady(ctx context.Context, client *http.Client, base string) error {
-	body, status, err := get(ctx, client, base+"/api/v1/nodes")
-	if err != nil {
-		return err
-	}
-	if status != http.StatusOK {
-		return fmt.Errorf("list nodes: %d: %s", status, firstLine(body))
-	}
-	var list struct {
-		Items []struct {
-			Status struct {
-				Conditions []struct {
-					Type   string `json:"type"`
-					Status string `json:"status"`
-				} `json:"conditions"`
-			} `json:"status"`
-		} `json:"items"`
-	}
-	if err := json.Unmarshal(body, &list); err != nil {
-		return fmt.Errorf("list nodes: %w", err)
-	}
-	if len(list.Items) == 0 {
-		return fmt.Errorf("no node has registered yet")
-	}
-	for _, item := range list.Items {
-		for _, c := range item.Status.Conditions {
-			if c.Type == "Ready" && c.Status == "True" {
-				return nil
-			}
-		}
-	}
-	return fmt.Errorf("the node is not Ready yet")
 }
 
 func get(ctx context.Context, client *http.Client, url string) ([]byte, int, error) {

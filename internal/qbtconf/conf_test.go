@@ -82,7 +82,8 @@ func TestSeal(t *testing.T) {
 		"CSRFProtection=false",
 		"HostHeaderValidation=false",
 		"LocalHostAuth=false",
-		"AuthSubnetWhitelistEnabled=false",
+		"AuthSubnetWhitelistEnabled=true",
+		"AuthSubnetWhitelist=" + subnetListValue(),
 		"Port=8080",
 		`Session\DefaultSavePath=/data/downloads`,
 		`Session\UseCategoryPathsInManualMode=true`,
@@ -161,6 +162,100 @@ func TestSealCreatesMissingFile(t *testing.T) {
 	}
 	if !strings.HasPrefix(string(out), "[WebUI]\nUsername=admin\n") {
 		t.Fatalf("unexpected document:\n%s", out)
+	}
+}
+
+// preBypassConfig is a config a box from before the private-range bypass
+// leaves behind: the login is required everywhere, the whitelist is off, and
+// the credential the release Secret still holds is already sealed.
+func preBypassConfig(t *testing.T, password string) (conf []byte, hash string) {
+	t.Helper()
+	hash, err := Hash(password)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return []byte(`[LegalNotice]
+Accepted=true
+
+[Preferences]
+Session\DefaultSavePath=/data/downloads
+Session\TempPath=/data/downloads/temp
+Session\UseCategoryPathsInManualMode=true
+
+[WebUI]
+Address=*
+AuthSubnetWhitelistEnabled=false
+CSRFProtection=false
+HostHeaderValidation=false
+LocalHostAuth=false
+Password_PBKDF2=` + PasswordValue(hash) + `
+Port=8080
+ServerDomains=*
+Username=admin
+`), hash
+}
+
+// The bypass is the release's login story, so sealing any config must leave
+// the three keys exactly as docs/box.md decided: loopback skipped, the private
+// ranges listed, and the list in the form QSettings reads back as a
+// QStringList rather than one quoted string.
+func TestSealBypassesTheLoginForPrivateAddresses(t *testing.T) {
+	const password = "s3cret"
+	want := strings.Join([]string{"10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "100.64.0.0/10", "fc00::/7"}, ", ")
+	if got := subnetListValue(); got != want {
+		t.Fatalf("subnetListValue() = %q, want %q", got, want)
+	}
+
+	old, storedHash := preBypassConfig(t, password)
+	for name, existing := range map[string][]byte{
+		"no file at all":                nil,
+		"a file from before the bypass": old,
+	} {
+		out, changed, err := Seal(existing, "admin", password, 8080)
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if !changed {
+			t.Fatalf("%s: sealing reported no change", name)
+		}
+		doc := string(out)
+		if wantLine := "AuthSubnetWhitelist=" + want; !strings.Contains(doc, wantLine+"\n") {
+			t.Fatalf("%s: sealed config has no unquoted %q:\n%s", name, wantLine, doc)
+		}
+		parsed := Parse(out)
+		for key, wantValue := range map[string]string{
+			"AuthSubnetWhitelistEnabled": "true",
+			"AuthSubnetWhitelist":        want,
+			"LocalHostAuth":              "false",
+		} {
+			if got, ok := parsed.Get("WebUI", key); !ok || got != wantValue {
+				t.Fatalf("%s: WebUI/%s = %q (present %v), want %q", name, key, got, ok, wantValue)
+			}
+		}
+
+		// Sealing is what an init container does on every pod start, so the
+		// second pass over its own output must be a byte-for-byte no-op.
+		again, changed, err := Seal(out, "admin", password, 8080)
+		if err != nil {
+			t.Fatalf("%s: re-seal: %v", name, err)
+		}
+		if changed || string(again) != doc {
+			t.Fatalf("%s: re-sealing rewrote the file (changed=%v)", name, changed)
+		}
+	}
+
+	// The stored credential is reused rather than re-minted: a new salt on
+	// every start would rewrite the file forever.
+	out, _, err := Seal(old, "admin", password, 8080)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stored, ok := Parse(out).Get("WebUI", "Password_PBKDF2")
+	if !ok {
+		t.Fatal("sealed config lost Password_PBKDF2")
+	}
+	if !strings.Contains(stored, storedHash) {
+		t.Fatalf("sealing replaced the stored hash: %q does not carry %q", stored, storedHash)
 	}
 }
 

@@ -18,6 +18,11 @@ import (
 // all have to name the same objects, and a name derived per host would clone
 // the login once per seedbox on a host that has several.
 const (
+	// SystemNamespace is where the login lives: s5n-system, the platform's own
+	// namespace, beside the admission policy that protects it. It is declared
+	// here so the package that writes the login and the cluster client that
+	// reads its configuration cannot disagree about where it is.
+	SystemNamespace = "s5n-system"
 	// ServiceName is the Service the SecurityPolicy calls. It is also the
 	// Deployment's name.
 	ServiceName = "authelia"
@@ -78,6 +83,10 @@ type Manifests struct {
 	// targets and the portal route attaches to.
 	GatewayNamespace string
 	Gateway          string
+	// ProxyNamespace is where the Gateway's proxy pods run. It is the peer
+	// the login's NetworkPolicy admits and nobody else: the proxy is what sets
+	// the headers Authelia trusts, so it is the only caller there may be.
+	ProxyNamespace string
 	// Host is the one name the portal is published on: the hostname of the
 	// HTTPRoute that makes /auth reachable. It is the same name the
 	// configuration's cookie lives on, because the 302 Authelia sends points
@@ -86,9 +95,17 @@ type Manifests struct {
 	// Claim, ConfigMap and Image are the names the objects refer to.
 	Claim     string
 	ConfigMap string
-	Image     string
-	UID       int
-	GID       int
+	// Secret is the login's Secret. Its OIDC file is mounted when this box has
+	// a provider; the Deployment never mounts the encryption key.
+	Secret string
+	Image  string
+	UID    int
+	GID    int
+	// OIDC says this box has an app that signs in through the login, so the
+	// provider's file is mounted and passed as a second --config.
+	OIDC      bool
+	OIDCFile  string
+	OIDCMount string
 	// ConfigHash is the sha256 of the rendered configuration, written as a
 	// pod-template annotation so a configuration change rolls the pod.
 	ConfigHash string
@@ -112,6 +129,7 @@ func RenderManifests(m Manifests) ([]byte, error) {
 		"namespace":         m.Namespace,
 		"gateway namespace": m.GatewayNamespace,
 		"gateway":           m.Gateway,
+		"proxy namespace":   m.ProxyNamespace,
 		"host":              m.Host,
 		"claim":             m.Claim,
 		"configmap":         m.ConfigMap,
@@ -119,6 +137,20 @@ func RenderManifests(m Manifests) ([]byte, error) {
 	} {
 		if strings.TrimSpace(value) == "" {
 			return nil, fmt.Errorf("%w: no %s", ErrManifests, name)
+		}
+	}
+	if m.OIDC {
+		// The provider's file is a Secret the Deployment mounts: with no name
+		// to mount, Authelia starts without the issuer's keys and every token
+		// request fails.
+		for name, value := range map[string]string{
+			"secret":     m.Secret,
+			"oidc file":  m.OIDCFile,
+			"oidc mount": m.OIDCMount,
+		} {
+			if strings.TrimSpace(value) == "" {
+				return nil, fmt.Errorf("%w: no %s, and this box has an OIDC client", ErrManifests, name)
+			}
 		}
 	}
 	if m.UID <= 0 || m.GID <= 0 {

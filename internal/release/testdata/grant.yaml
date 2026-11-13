@@ -2,6 +2,10 @@
 # internal/seedbox/grant.go says the grant owns.
 namespace: testbox
 
+# The account root's login admits. It is the grant's own record, and an app host
+# cannot be served without the access_control rule that names it.
+login: alice
+
 global:
   puid: 1000
   pgid: 1000
