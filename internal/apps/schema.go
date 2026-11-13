@@ -254,12 +254,18 @@ type FieldChange struct {
 // ownership. Drift lists owned fields that were found different on the live
 // object and were restored. Recreated/PreviousID describe a deleted owned
 // object that had to be created again.
+//
+// StringID and PreviousStringID are the same two facts for an app that keys its
+// objects by a name rather than a number (PBH's downloaders are keys in its own
+// config file), so one receipt line can name either.
 type EnsureResult struct {
-	Change     Change
-	ID         int
-	Drift      []FieldChange
-	Recreated  bool
-	PreviousID int
+	Change           Change
+	ID               int
+	StringID         string
+	Drift            []FieldChange
+	Recreated        bool
+	PreviousID       int
+	PreviousStringID string
 }
 
 // ownedField is one field the wiring Job may write on an object it owns.

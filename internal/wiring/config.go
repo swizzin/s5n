@@ -30,6 +30,7 @@ type Config struct {
 	Seerr          *SeerrConfig    `json:"seerr,omitempty"`
 	Qui            *QuiConfig      `json:"qui,omitempty"`
 	Autobrr        *AutobrrConfig  `json:"autobrr,omitempty"`
+	Pbh            *PbhConfig      `json:"pbh,omitempty"`
 	Instances      []Instance      `json:"instances"`
 }
 
@@ -53,6 +54,16 @@ type AutobrrConfig struct {
 	URLBase      string `json:"urlBase"`
 	Username     string `json:"username"`
 	PasswordFile string `json:"passwordFile"`
+}
+
+// PbhConfig points at PeerBanHelper's WebAPI. TokenFile is the release Secret's
+// pbh-token, which is PBH's own WebUI token: the chart generates it once and
+// gives the app the same value through its environment, so this Job and the
+// app always agree. It is read from the mount like every other credential, and
+// sent as a Bearer header.
+type PbhConfig struct {
+	URL       string `json:"url"`
+	TokenFile string `json:"tokenFile"`
 }
 
 // PlexConfig points at Plex. There is no API key: /identity answers
@@ -179,6 +190,13 @@ func (c *Config) validate() error {
 		if err := requireFields("autobrr", map[string]string{
 			"url": c.Autobrr.URL, "urlBase": c.Autobrr.URLBase, "username": c.Autobrr.Username,
 			"passwordFile": c.Autobrr.PasswordFile,
+		}); err != nil {
+			return err
+		}
+	}
+	if c.Pbh != nil {
+		if err := requireFields("pbh", map[string]string{
+			"url": c.Pbh.URL, "tokenFile": c.Pbh.TokenFile,
 		}); err != nil {
 			return err
 		}

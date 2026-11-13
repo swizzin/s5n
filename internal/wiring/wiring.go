@@ -173,7 +173,10 @@ func (r *Runner) ensureResult(res *Result, name string, result apps.EnsureResult
 		res.Writes.Unchanged++
 	}
 	detail := result.Change.String()
-	if result.Recreated {
+	switch {
+	case result.Recreated && result.PreviousStringID != "":
+		detail = fmt.Sprintf("recreated (previous id %s)", result.PreviousStringID)
+	case result.Recreated:
 		detail = fmt.Sprintf("recreated (previous id %d)", result.PreviousID)
 	}
 	step := Step{Name: name, Result: "ok", Detail: detail, Drift: result.Drift}
@@ -514,6 +517,59 @@ func (r *Runner) work(ctx context.Context, res *Result) error {
 		}
 	}
 
+	// PeerBanHelper reads qBittorrent's Web API to find peers to ban, so what it
+	// needs is one downloader holding the same password every other copy has.
+	// Its id is a key in its own config file, not a number, and PBH answers
+	// HEALTHY only once its own poll loop has logged in to qBittorrent with
+	// what was written -- which is what the record waits for.
+	if c.Pbh != nil {
+		token, err := ReadSecret(c.Pbh.TokenFile)
+		if err != nil {
+			return r.ensure(res, "pbh/credentials", apps.Unchanged, err)
+		}
+		p := apps.NewPbh(c.Pbh.URL, token)
+		r.logf("waiting for PeerBanHelper at %s", c.Pbh.URL)
+		if err := p.WaitReady(ctx, timeout); err != nil {
+			return r.ensure(res, "pbh/ready", apps.Unchanged, pbhReady(err))
+		}
+		detail := c.Pbh.URL
+		if version, verr := p.Version(ctx); verr == nil && version != "" {
+			detail = fmt.Sprintf("%s (version=%s)", detail, version)
+		}
+		r.okStep(res, "pbh/ready", detail)
+
+		if c.Qbittorrent == nil {
+			// Nothing to point it at: saying so beats a step that never runs.
+			if err := r.ensure(res, "pbh/downloader", apps.Skipped, nil); err != nil {
+				return err
+			}
+		} else {
+			result, err := p.EnsureDownloader(ctx, apps.PbhDownloaderSpec{
+				ID:       "qbittorrent",
+				Name:     "qBittorrent",
+				Endpoint: strings.TrimRight(c.Qbittorrent.URL, "/"),
+				Username: c.Qbittorrent.Username,
+				Password: qbitPassword,
+			}, owned.PbhDownloaderID(), owned.PbhQbitPasswordFingerprint())
+			if err == nil {
+				var status string
+				if status, err = p.WaitHealthy(ctx, result.StringID, timeout); err != nil {
+					err = fmt.Errorf("pbh downloader %q is %s: %w", result.StringID, status, err)
+				}
+			}
+			if err == nil && result.StringID != "" {
+				owned.SetPbhDownloaderID(result.StringID)
+				// Only after PBH's own status says it logged in with this
+				// password: a fingerprint for a write it never accepted would
+				// hide the next rotation.
+				owned.SetPbhQbitPasswordFingerprint(apps.SecretFingerprint(qbitPassword))
+			}
+			if err := r.ensureResult(res, "pbh/downloader", result, err); err != nil {
+				return err
+			}
+		}
+	}
+
 	// Prove every distinct download/library pair, not just the first. One claim is
 	// not one filesystem: a disk mounted on the host at, say, /data/media/movies-4k
 	// sits inside the claim, passes a tv check, and turns every 4K import into a copy.
@@ -706,6 +762,17 @@ func Summary(res *Result) string {
 		fmt.Fprintf(&b, "error: %s\n", res.Error)
 	}
 	return b.String()
+}
+
+// pbhReady names the one refusal PBH's own readiness can produce: it answers
+// 403 to everything when the Bearer token is not its WebUI token. The chart
+// gives the app the release Secret's pbh-token through its environment, so the
+// two can only disagree if something else set one of them.
+func pbhReady(err error) error {
+	if !apps.IsForbidden(err) {
+		return err
+	}
+	return fmt.Errorf("%w: PeerBanHelper refused the release Secret's pbh-token, so its WebUI token is something else", err)
 }
 
 // loginFailed turns an app's credential refusal into the sentence an operator

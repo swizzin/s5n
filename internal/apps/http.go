@@ -61,6 +61,11 @@ func (e *HTTPError) Error() string {
 // IsNotFound reports whether err is a 404 from this package.
 func IsNotFound(err error) bool { return statusIs(err, http.StatusNotFound) }
 
+// IsForbidden reports whether err is a 403 from this package: the app refusing
+// the credential it was given. A timeout never makes one right, and an app that
+// counts failures (PBH blacklists an address after ten) must not be retried.
+func IsForbidden(err error) bool { return statusIs(err, http.StatusForbidden) }
+
 // IsConflict reports whether err is a 409 from this package.
 func IsConflict(err error) bool { return statusIs(err, http.StatusConflict) }
 

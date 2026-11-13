@@ -248,8 +248,11 @@ func writeJSON(w http.ResponseWriter, v any) {
 }
 
 type harness struct {
-	stack   *fakeStack
-	config  Config
+	stack  *fakeStack
+	config Config
+	// pbh is the PeerBanHelper fake withApps wires, so a test can read what the
+	// Job stored in it.
+	pbh     *fakePbh
 	runner  *Runner
 	dir     string
 	results []map[string]string

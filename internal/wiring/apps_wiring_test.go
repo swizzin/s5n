@@ -153,6 +153,9 @@ func (h *harness) withApps(t *testing.T) *appFakes {
 		PasswordFile: h.write(t, "qui.pw", "qui-pass-123\n")}
 	h.config.Autobrr = &AutobrrConfig{URL: auto.URL, URLBase: "/autobrr", Username: "s5n",
 		PasswordFile: h.write(t, "autobrr.pw", "autobrr-pass-123\n")}
+	// PeerBanHelper holds a copy of the same qBittorrent password, so every test
+	// that rotates it has to see this copy move too.
+	h.withPbh(t)
 	h.runner.Config = h.config
 	return f
 }
@@ -253,8 +256,8 @@ func TestWiringRegistersQuiAndAutobrr(t *testing.T) {
 
 // Rotating the qBittorrent password in the release Secret is visible only
 // through the fingerprints, so exactly the objects that hold a copy are
-// rewritten: qui's instance, autobrr's qBittorrent client, and the download
-// client of every Arr. An Arr never returns that password, so without its own
+// rewritten: qui's instance, autobrr's qBittorrent client, PeerBanHelper's
+// downloader, and the download client of every Arr. An Arr never returns that password, so without its own
 // fingerprint it kept dialling with the old one -- and its connection test only
 // runs at the next wiring pass. The Arr key copies are untouched.
 func TestWiringRewritesEveryCopyWhenTheQbitPasswordRotates(t *testing.T) {
@@ -270,12 +273,12 @@ func TestWiringRewritesEveryCopyWhenTheQbitPasswordRotates(t *testing.T) {
 	if err != nil {
 		t.Fatalf("run after the rotation: %v\n%s", err, Summary(res))
 	}
-	if res.Writes.Updated != 4 {
-		t.Fatalf("updated = %d, want qui/instance, autobrr's qBittorrent client and both Arrs' download clients\n%s",
+	if res.Writes.Updated != 5 {
+		t.Fatalf("updated = %d, want qui/instance, autobrr's qBittorrent client, PeerBanHelper's downloader and both Arrs' download clients\n%s",
 			res.Writes.Updated, Summary(res))
 	}
 	for _, name := range []string{
-		"qui/instance", "autobrr/downloader/qbittorrent",
+		"qui/instance", "autobrr/downloader/qbittorrent", "pbh/downloader",
 		"sonarr/downloadclient", "radarr/downloadclient",
 	} {
 		if step := stepByName(t, res, name); step.Detail != "updated" {
@@ -297,6 +300,9 @@ func TestWiringRewritesEveryCopyWhenTheQbitPasswordRotates(t *testing.T) {
 		if row.Str("name") == "qBittorrent" && row.Str("password") != "rotated-qbit-pass" {
 			t.Fatalf("autobrr holds %q, want the rotated password", row.Str("password"))
 		}
+	}
+	if got := h.pbh.cfg["qbittorrent"].Str("password"); got != "rotated-qbit-pass" {
+		t.Fatalf("PeerBanHelper holds %q, want the rotated password", got)
 	}
 	for _, instance := range []string{"sonarr", "radarr"} {
 		if got, _ := h.stack.clients[instance][0].FieldValue("password"); got != "rotated-qbit-pass" {
