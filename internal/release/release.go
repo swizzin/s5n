@@ -218,6 +218,23 @@ type Login interface {
 	Reconcile(ctx context.Context, plan HostPlan) error
 }
 
+// LoginAccess is the optional question apply asks a login half when the values
+// enable an app that signs in through the login. The chart mounts that app's
+// client Secret whether or not it exists, so a release started without one is a
+// pod that never runs and a Helm wait that times out; only the login's writer
+// can register one.
+//
+// MayWrite is the same question that decides whether a run has a login half at
+// all (login.MayWrite): a seedbox user's kubeconfig cannot apply a ConfigMap in
+// the platform's namespace, so their run can neither write the client nor the
+// digest it needs. ClientRegistered is the read of the app's Secret in the
+// seedbox's namespace, which a user may make. Both are reads, and both happen
+// before the confirm.
+type LoginAccess interface {
+	MayWrite(ctx context.Context) (bool, error)
+	ClientRegistered(ctx context.Context, namespace, app string) (bool, error)
+}
+
 // AnchorPlan is what apply tells its host-CA step: the box's own host name, the
 // issuer this run writes that host's Certificate with (empty when this run
 // writes none), and the namespace the anchor is written into.
@@ -526,6 +543,25 @@ func (a *Applier) Apply(ctx context.Context, opts Options) (Result, error) {
 			namespace, podSecurityRestricted, enforce))
 	}
 
+	// The login, when this run's step has one. It is asked here for the client
+	// a newly enabled app needs -- a refusal beside the namespace's, before
+	// anything is written and before the confirm -- and again with the diff
+	// for the page itself.
+	login, _ := opts.Hosts.(Login)
+	// An app that signs in through the login mounts a client Secret its writer
+	// creates, and the chart mounts it whether or not it is there: a release
+	// started without one is a pod that never runs and a Helm wait that times
+	// out. root's apply registers it, because its login step counts a missing
+	// client as work. A run that cannot write the login -- a seedbox user's
+	// kubeconfig, which reaches neither the platform's namespace nor the
+	// login -- can only stop here and name the command that can
+	// (docs/box.md, "Apps that speak OIDC sign in through the login").
+	if oidcGatewayIP(values) != "" {
+		if err := refuseUnregisteredClient(ctx, login, chart, values, namespace); err != nil {
+			return res, err
+		}
+	}
+
 	client, err := a.Open(namespace)
 	if err != nil {
 		return res, err
@@ -587,10 +623,7 @@ func (a *Applier) Apply(ctx context.Context, opts Options) (Result, error) {
 	//
 	// The login is the same value as that step when the step also implements
 	// Login, which root's does: both are root's writes outside the release, and
-	// the login is one page for the whole host rather than a name on it. A value
-	// that does not -- `box init`'s nil, or a step for a user who cannot write
-	// the login at all -- has no login half.
-	login, _ := opts.Hosts.(Login)
+	// the login is one page for the whole host rather than a name on it.
 	var hostPlan HostPlan
 	if opts.Hosts != nil || login != nil {
 		hostPlan, err = a.hostPlan(ctx, opts, chart, sb, values)
@@ -963,6 +996,62 @@ func oidcClients(chart Chart, values map[string]any) ([]string, error) {
 		return nil, err
 	}
 	return cat.OIDCApps(EnabledApps(values)), nil
+}
+
+// refuseUnregisteredClient is the one sentence a run that cannot write the
+// login gets when the release would start an app whose client the login does
+// not have. It is a read: nothing is written, and it runs before the confirm,
+// so a user's apply never shows a plan it cannot carry out.
+//
+// A step that offers no LoginAccess cannot be asked. Every step box itself
+// hands over implements it (cmd/box), and a user's answers "no" to MayWrite
+// rather than going unasked.
+func refuseUnregisteredClient(ctx context.Context, login Login, chart Chart, values map[string]any, namespace string) error {
+	access, ok := login.(LoginAccess)
+	if !ok {
+		return nil
+	}
+	apps, err := oidcClients(chart, values)
+	if err != nil {
+		return err
+	}
+	if len(apps) == 0 {
+		return nil
+	}
+	may, err := access.MayWrite(ctx)
+	if err != nil {
+		return err
+	}
+	if may {
+		return nil
+	}
+	var missing []string
+	for _, app := range apps {
+		there, err := access.ClientRegistered(ctx, namespace, app)
+		if err != nil {
+			return err
+		}
+		if !there {
+			missing = append(missing, app)
+		}
+	}
+	if len(missing) == 0 {
+		// Every client is already registered -- a re-enable of an app root
+		// turned off keeps its Secret and its digest, so this run works.
+		return nil
+	}
+	return fmt.Errorf("%s signs in through the login and has no client yet, and only root can register one: run `box init` as root for this seedbox, then apply again", strings.Join(missing, ", "))
+}
+
+// oidcGatewayIP is auth.oidc.gatewayIP as the effective values carry it: the
+// grant's record, which seedbox.Effective injects only when the chart declares
+// the key. Empty means the chart renders no OIDC at all -- an app's pod mounts
+// no client Secret, so there is nothing to register and nothing to refuse.
+func oidcGatewayIP(values map[string]any) string {
+	auth, _ := values["auth"].(map[string]any)
+	oidc, _ := auth["oidc"].(map[string]any)
+	ip, _ := oidc["gatewayIP"].(string)
+	return strings.TrimSpace(ip)
 }
 
 // hostedHosts is every name the values serve at a host of its own, in catalog

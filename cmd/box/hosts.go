@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/swizzin/s5n/internal/authelia"
 	"github.com/swizzin/s5n/internal/login"
 	"github.com/swizzin/s5n/internal/platform"
 	"github.com/swizzin/s5n/internal/release"
@@ -237,6 +238,36 @@ func (a applyHosts) loginStep(ctx context.Context, plan release.HostPlan) (*logi
 		Say:  a.out,
 	}, true, nil
 }
+
+// MayWrite is release.LoginAccess' first question for a run that enables an app
+// signing in through the login: the same one that decides whether this run has
+// a login half at all (login.MayWrite). A seedbox user's kubeconfig cannot
+// apply a ConfigMap in the platform's namespace, so it cannot register a client
+// either -- and the release refuses before the confirm rather than letting Helm
+// wait on a pod whose Secret is missing.
+func (a applyHosts) MayWrite(ctx context.Context) (bool, error) {
+	cl, err := a.cluster()
+	if err != nil {
+		return false, err
+	}
+	return login.MayWrite(ctx, cl)
+}
+
+// ClientRegistered reads whether one app's client Secret is in the seedbox's
+// namespace. It is a plain Get, which a user's kubeconfig may make in its own
+// namespace: the refusal needs no permission the box itself does not have.
+func (a applyHosts) ClientRegistered(ctx context.Context, namespace, app string) (bool, error) {
+	cl, err := a.cluster()
+	if err != nil {
+		return false, err
+	}
+	_, found, err := cl.Get(ctx, "", "v1", "Secret", namespace, authelia.OIDCClientSecretName(app))
+	return found, err
+}
+
+// The two answers above are the release's, beside Login: a user's step still
+// gets them, and answers "no" to MayWrite.
+var _ release.LoginAccess = applyHosts{}
 
 // loginRules is what internal/login needs for both halves: the box's domain,
 // the account, the image the Deployment runs and the document the rules come
