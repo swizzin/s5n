@@ -145,6 +145,9 @@ esac
 # chart renders their routes there, and box resolves and certifies them.
 PLEX_HOST="plex.${DOMAIN}"
 SEERR_HOST="seerr.${DOMAIN}"
+# PeerBanHelper's page calls /api/... from the site root, so the catalog serves it
+# at a host of its own as well.
+PBH_HOST="pbh.${DOMAIN}"
 # The fresh scenario points the production issuer at Pebble; every other
 # scenario keeps Let's Encrypt's directory and never issues from it.
 ACME_ARGS=()
@@ -286,7 +289,7 @@ chmod 600 "$WORK/second-password"
 log "preparing host paths inside the node (what box init creates on real hosts)"
 docker exec "${CLUSTER}-control-plane" bash -c '
   mkdir -p /srv/s5n/data \
-           /srv/s5n/config/{qbittorrent,prowlarr,sonarr,sonarr-4k,radarr,radarr-4k,plex,tautulli,seerr,qui,autobrr,maintainerr}
+           /srv/s5n/config/{qbittorrent,prowlarr,sonarr,sonarr-4k,radarr,radarr-4k,plex,tautulli,seerr,qui,autobrr,maintainerr,pbh}
   chown -R 1000:1000 /srv/s5n'
 
 # The login's own directory, which box init creates on a real host: 0700, owned
@@ -351,7 +354,7 @@ bootstrap() { # bootstrap <output file>
     --grant "$WORK/grant.yaml" --values "$WORK/values.yaml" \
     --namespace "$NS" --domain "$DOMAIN" \
     --data-path /srv/s5n/data --config-path /srv/s5n/config \
-    --apps qbittorrent,sonarr,radarr,prowlarr,plex,tautulli,seerr,qui,autobrr,maintainerr \
+    --apps qbittorrent,sonarr,radarr,prowlarr,plex,tautulli,seerr,qui,autobrr,maintainerr,pbh \
     --puid 1000 --pgid 1000 \
     --login "$LOGIN" --password-file "$WORK/authelia-password" \
     --paths-in-node --record "$WORK/cluster.yaml" \
@@ -370,7 +373,7 @@ init() { # init <output file> [extra dev flags]
     --grant "$WORK/grant.yaml" --values "$WORK/values.yaml" \
     --namespace "$NS" --domain "$DOMAIN" \
     --data-path /srv/s5n/data --config-path /srv/s5n/config \
-    --apps qbittorrent,sonarr,radarr,prowlarr,plex,tautulli,seerr,qui,autobrr,maintainerr \
+    --apps qbittorrent,sonarr,radarr,prowlarr,plex,tautulli,seerr,qui,autobrr,maintainerr,pbh \
     --puid 1000 --pgid 1000 \
     --login "$LOGIN" --password-file "$WORK/authelia-password" \
     --paths-in-node "${@:2}" \
@@ -1293,7 +1296,7 @@ fresh() {
   # Every name the box serves: its own and each app's own host. init resolves
   # them and refuses an app name that does not answer where the domain does, so
   # the app hosts have to be here before bootstrap or it stops on purpose.
-  patch_coredns "$node_ip" "$DOMAIN" "$PLEX_HOST" "$SEERR_HOST" ||
+  patch_coredns "$node_ip" "$DOMAIN" "$PLEX_HOST" "$SEERR_HOST" "$PBH_HOST" ||
     { echo "could not patch CoreDNS for the box's names"; fail=1; return 0; }
   ACME_ARGS=(--acme-server "https://pebble.pebble.svc:14000/dir")
 
@@ -1389,14 +1392,18 @@ fresh() {
   # instance pointed at qBittorrent, and autobrr's qBittorrent client plus one
   # per Arr instance. A fresh install creates every one of them; the receipt is
   # read back through the apps themselves later in this scenario.
+  # PeerBanHelper holds one downloader, and the receipt says so only after PBH's
+  # own status reported it HEALTHY: that is the app's proof it logged in to
+  # qBittorrent with the password the Job wrote.
   for step in qui/ready qui/login qui/instance autobrr/ready autobrr/login \
-              autobrr/downloader/qbittorrent autobrr/downloader/sonarr autobrr/downloader/radarr; do
+              autobrr/downloader/qbittorrent autobrr/downloader/sonarr autobrr/downloader/radarr \
+              pbh/ready pbh/downloader; do
     res=$(status_field "[s['result'] for s in d['steps'] if s['name']=='$step'][0]" 2>/dev/null || echo missing)
     detail=$(status_field "[s['detail'] for s in d['steps'] if s['name']=='$step'][0]" 2>/dev/null || echo missing)
     echo "  ${step}: ${res} ${detail}"
     [ "$res" = ok ] || { echo "${step} is ${res}: the Job did not register this connection"; fail=1; }
     case "$step" in
-      qui/ready | autobrr/ready | qui/login | autobrr/login) ;;
+      qui/ready | autobrr/ready | qui/login | autobrr/login | pbh/ready) ;;
       *) [ "$detail" = created ] || { echo "${step} was ${res} ${detail}, want created on a fresh install"; fail=1; } ;;
     esac
   done
@@ -1830,6 +1837,38 @@ print("  app routes: %d HTTPRoutes, none pins a sectionName" % len(items))
     python3 -c 'import sys, re; print(re.search(r"- domain: \x27([^\x27]+)\x27", sys.stdin.read()).group(1))' 2>/dev/null || true)
   echo "  the login's session cookie domain: ${cookie_domain}"
   [ "$cookie_domain" = "$DOMAIN" ] || { echo "the cookie domain is ${cookie_domain}, want ${DOMAIN} (it covers its subdomains)"; fail=1; }
+  # ---- PeerBanHelper: one login, and its API behind it -----------------------
+  # The chart switches the app's own WebUI login off: its page sends /api/...
+  # with a token only the browser could hold, so a second password there would be
+  # a form with no way to fill it. The edge's login is therefore the only one,
+  # and these two requests are that decision, measured: without the portal's
+  # cookie the app's page is a redirect to the portal, and with it the app's own
+  # API answers without any credential of PBH's.
+  pbh_headers="$WORK/pbh-unauth-headers.txt"
+  : >"$pbh_headers"
+  pbh_unauth=$(curl -sS -o /dev/null -D "$pbh_headers" -w '%{http_code}' \
+    --resolve "${PBH_HOST}:443:${gw_addr}" --cacert "$WORK/pebble-root.pem" \
+    "https://${PBH_HOST}/" 2>/dev/null || true)
+  pbh_location=$(sed -n 's/^[Ll]ocation: *//p' "$pbh_headers" | tr -d '\r' | head -1)
+  echo "  GET https://${PBH_HOST}/ without a session: ${pbh_unauth} -> ${pbh_location}"
+  [ "$pbh_unauth" = 302 ] ||
+    { echo "PBH's own host answered ${pbh_unauth} without a session: the app is served open"; fail=1; }
+  case "$pbh_location" in
+    "https://${DOMAIN}/auth/"*) ;;
+    *) echo "PBH's redirect does not point at the portal: ${pbh_location}"; fail=1 ;;
+  esac
+  pbh_api=$(curl -sS -o "$WORK/pbh-downloaders.json" -w '%{http_code}' -b "$JAR" \
+    --resolve "${PBH_HOST}:443:${gw_addr}" --cacert "$WORK/pebble-root.pem" \
+    "https://${PBH_HOST}/api/downloaders" 2>/dev/null || true)
+  echo "  GET https://${PBH_HOST}/api/downloaders with the portal's session: ${pbh_api}"
+  [ "$pbh_api" = 200 ] ||
+    { echo "PBH answered the app's own API with ${pbh_api}: it is asking for a second login"; fail=1; }
+  pbh_id=$(python3 -c 'import json,sys
+rows = json.load(open(sys.argv[1], encoding="utf-8"))["data"]
+print(rows[0]["id"] if len(rows) == 1 else "")' "$WORK/pbh-downloaders.json" 2>/dev/null || true)
+  echo "  PBH holds one downloader: ${pbh_id}"
+  [ "$pbh_id" = qbittorrent ] || { echo "PBH holds ${pbh_id}, want the one downloader the Job registers"; fail=1; }
+
   # The old path is gone: no route, so the box's own host answers 404 there.
   old_path=$(curl -sS -o /dev/null -w '%{http_code}' \
     --resolve "${DOMAIN}:443:${gw_addr}" --cacert "$WORK/pebble-root.pem" \
@@ -2688,19 +2727,25 @@ print(cfg["qui"]["url"], cfg["qui"]["urlBase"], cfg["qui"]["username"],
     { echo "the release Secret carries no account passwords"; fail=1; }
   echo "  account ${QUI_USER} (${#QUI_PASSWORD} char password), qui ${QUI_URL}${QUI_BASE}, autobrr ${AUTOBRR_URL}${AUTOBRR_BASE}"
 
-  # owned_ids is the record the Job keeps: qui's instance and autobrr's clients
-  # by name. The ids are the whole identity, so a duplicate would show up here.
+  # owned_ids is the record the Job keeps: qui's instance, autobrr's clients by
+  # name and PeerBanHelper's downloader id. The ids are the whole identity, so a
+  # duplicate would show up here.
   owned_ids() {
     $K -n "$NS" get cm s5n-wiring -o jsonpath='{.data.owned\.json}' |
       python3 -c 'import json, sys
 rec = json.load(sys.stdin)
 print("qui=%s" % rec["qui"]["instance"],
-      " ".join("%s=%s" % (k, v) for k, v in sorted(rec["autobrr"]["clients"].items())))' 2>/dev/null || true
+      " ".join("%s=%s" % (k, v) for k, v in sorted(rec["autobrr"]["clients"].items())),
+      "pbh=%s" % (rec.get("pbh") or {}).get("downloader", ""))' 2>/dev/null || true
   }
   ids_before=$(owned_ids)
   echo "  owned.json: ${ids_before:-none}"
   case "$ids_before" in
     qui=0* | "" | *"=0"*) echo "owned.json records no qui instance or autobrr client: ${ids_before}"; fail=1 ;;
+  esac
+  case "$ids_before" in
+    *"pbh=qbittorrent"*) ;;
+    *) echo "owned.json records no PeerBanHelper downloader: ${ids_before}"; fail=1 ;;
   esac
 
   # A second run of the same Job must change nothing at all: no created, no
@@ -2826,6 +2871,16 @@ PY
     { echo "could not stop qui for the rotation"; fail=1; }
   $K -n "$NS" wait --for=delete pod/qui-0 --timeout=120s >/dev/null 2>&1 ||
     { echo "qui did not stop for the rotation"; fail=1; }
+  # PeerBanHelper polls the client every five seconds, so it is stopped for the
+  # same reason qui is: the window between qBittorrent coming up on the new
+  # password and the Job rewriting PBH's copy is a window of refused logins, and
+  # qBittorrent bans an address after five of them. PBH backs off on its own
+  # after a failure, which is not something to rely on when the alternative is
+  # one line here.
+  $K -n "$NS" scale statefulset/pbh --replicas=0 >/dev/null ||
+    { echo "could not stop pbh for the rotation"; fail=1; }
+  $K -n "$NS" wait --for=delete pod/pbh-0 --timeout=120s >/dev/null 2>&1 ||
+    { echo "pbh did not stop for the rotation"; fail=1; }
   QBIT_PASSWORD=$(openssl rand -hex 12)
   $K -n "$NS" patch secret s5n-keys --type=merge \
     -p "{\"data\":{\"qbittorrent-password\":\"$(printf '%s' "$QBIT_PASSWORD" | base64 -w0)\"}}" >/dev/null ||
@@ -2836,16 +2891,20 @@ PY
   $K -n "$NS" scale statefulset/qui --replicas=1 >/dev/null
   $K -n "$NS" wait --for=condition=Ready pod/qui-0 --timeout=300s >/dev/null 2>&1 ||
     { echo "qui did not come back after the rotation"; fail=1; }
+  $K -n "$NS" scale statefulset/pbh --replicas=1 >/dev/null
+  $K -n "$NS" wait --for=condition=Ready pod/pbh-0 --timeout=300s >/dev/null 2>&1 ||
+    { echo "pbh did not come back after the rotation"; fail=1; }
   rerun_wiring "$WORK/rerun-rotate.txt" || fail=1
   created=$(status_field 'd["writes"]["created"]' 2>/dev/null || echo missing)
   updated=$(status_field 'd["writes"]["updated"]' 2>/dev/null || echo missing)
   echo "  after the rotation: ${created} created, ${updated} updated"
   # Every copy of the password, and only those: qui's instance, autobrr's
-  # qBittorrent client, and each Arr's download client -- the Arrs are the pair
-  # that had no fingerprint, so before this they kept dialling with the old one.
-  [ "$created" = 0 ] && [ "$updated" = 4 ] ||
+  # qBittorrent client, PeerBanHelper's downloader, and each Arr's download
+  # client -- the Arrs are the pair that had no fingerprint, so before this they
+  # kept dialling with the old one.
+  [ "$created" = 0 ] && [ "$updated" = 5 ] ||
     { echo "the rotation wrote ${created} created / ${updated} updated, want exactly the copies that hold the password"; fail=1; }
-  for step in qui/instance autobrr/downloader/qbittorrent sonarr/downloadclient radarr/downloadclient; do
+  for step in qui/instance autobrr/downloader/qbittorrent pbh/downloader sonarr/downloadclient radarr/downloadclient; do
     detail=$(status_field "[s['detail'] for s in d['steps'] if s['name']=='$step'][0]" 2>/dev/null || echo missing)
     echo "  ${step}: ${detail}"
     [ "$detail" = updated ] || { echo "${step} was ${detail}, want updated after a rotated qBittorrent password"; fail=1; }

@@ -20,6 +20,9 @@ NS=seedbox
 DOMAIN=${DOMAIN:-box.example.test}
 PLEX_HOST="plex.${DOMAIN}"
 SEERR_HOST="seerr.${DOMAIN}"
+# PeerBanHelper's WebUI calls /api/... from the site root, so the catalog gives it
+# a host name of its own too.
+PBH_HOST="pbh.${DOMAIN}"
 # Envoy Gateway's Helm chart ships its own Gateway API CRDs (crds.enabled: true), so
 # there is no separate standard-install apply here: the chart's experimental channel is
 # the exact set the pinned Envoy Gateway supports, and a separately-pinned channel could
@@ -104,7 +107,7 @@ $KIND load docker-image --name "$CLUSTER" "$IMAGE"
 log "preparing host paths inside the node (what box init creates on real hosts)"
 docker exec "${CLUSTER}-control-plane" bash -c '
   mkdir -p /srv/s5n/data \
-           /srv/s5n/config/{qbittorrent,prowlarr,sonarr,sonarr-4k,radarr,radarr-4k,plex,tautulli,seerr,qui,autobrr,maintainerr}
+           /srv/s5n/config/{qbittorrent,prowlarr,sonarr,sonarr-4k,radarr,radarr-4k,plex,tautulli,seerr,qui,autobrr,maintainerr,pbh}
   chown -R 1000:1000 /srv/s5n'
 
 # Nothing below may prepare the data categories: the wiring Job owns them, and a
@@ -514,6 +517,8 @@ apps:
     enabled: true
   maintainerr:
     enabled: true
+  pbh:
+    enabled: true
 EOF
 
 # The chart under test, with the locally built image instead of the published one.
@@ -730,7 +735,7 @@ EOF
 log "Pebble and CoreDNS: the box's names answer where the Gateway is"
 install_pebble
 [ "$fail" = 0 ] || { log "FAIL"; exit 1; }
-patch_coredns "$GW_ADDR" "$DOMAIN" "$PLEX_HOST" "$SEERR_HOST" ||
+patch_coredns "$GW_ADDR" "$DOMAIN" "$PLEX_HOST" "$SEERR_HOST" "$PBH_HOST" ||
   { echo "could not patch CoreDNS for the box's names"; fail=1; }
 
 log "cert-manager ${CERT_MANAGER_VERSION} and root's issuers, pointed at Pebble"
@@ -747,7 +752,7 @@ $K patch clusterissuer s5n-letsencrypt --type=merge \
 # The box's own name first: every app path is reached through it, and the
 # chart's routes are host-matched, so there is no plain-HTTP rendering to fall
 # back on.
-for spec in "box:${DOMAIN}" "plex:${PLEX_HOST}" "seerr:${SEERR_HOST}"; do
+for spec in "box:${DOMAIN}" "plex:${PLEX_HOST}" "seerr:${SEERR_HOST}" "pbh:${PBH_HOST}"; do
   app=${spec%%:*}; host=${spec##*:}
   log "the ${app} host: certificate and listeners for ${host}"
   go run ./hack/issue-cert --kubeconfig "$KUBECONFIG" --host "$host" --issuer letsencrypt || fail=1
@@ -803,7 +808,7 @@ host_get() { # host_get <host> <path> <output-file-or-/dev/null>
   curl -sS --resolve "${1}:443:${GW_ADDR}" --cacert "$WORK/pebble-root.pem" \
     -o "$3" -w '%{http_code}' "https://${1}${2}" || true
 }
-for spec in "plex:${PLEX_HOST}" "seerr:${SEERR_HOST}"; do
+for spec in "plex:${PLEX_HOST}" "seerr:${SEERR_HOST}" "pbh:${PBH_HOST}"; do
   app=${spec%%:*}; host=${spec##*:}
   label=${host//./-}
   cert="s5n-tls-${label}"
@@ -870,11 +875,90 @@ echo "GET https://${DOMAIN}/seerr/ -> ${code} (want 404)"
 
 # Port 80 for the box's own name is a redirect now, and each app host's own
 # port-80 listener exists for the challenge and the redirect.
-for host in "$DOMAIN" "$PLEX_HOST" "$SEERR_HOST"; do
+for host in "$DOMAIN" "$PLEX_HOST" "$SEERR_HOST" "$PBH_HOST"; do
   code=$(curl -s -o /dev/null -w '%{http_code}' --resolve "${host}:80:${GW_ADDR}" "http://${host}/" || true)
   echo "GET http://${host}/ -> ${code} (want 301)"
   [ "$code" = 301 ] || { echo "${host} is not redirecting port 80 to HTTPS"; fail=1; }
 done
+
+
+# ---- PeerBanHelper: one login, and a downloader PBH itself proved ------------
+# The app is served from its own host, and its own WebUI login is switched off:
+# the page calls /api/... with a token it holds in the browser, which the edge
+# cannot supply, so the chart turns the app's login off and the edge's is the
+# only one. What makes that safe is the NetworkPolicy: only the Gateway and the
+# wiring Job reach this port, and everything through the Gateway is behind the
+# edge in a real box.
+pbh_token=$($K -n "$NS" get secret s5n-keys -o jsonpath='{.data.pbh-token}' | base64 -d || true)
+[ -n "$pbh_token" ] || { echo "the release Secret has no pbh-token"; fail=1; }
+code=$(host_get "$PBH_HOST" / "$WORK/pbh.html")
+echo "GET https://${PBH_HOST}/ -> ${code}"
+[ "$code" = 200 ] || fail=1
+grep -qi '<!doctype html' "$WORK/pbh.html" || { echo "${PBH_HOST} answered without an HTML document"; fail=1; }
+asset=$(grep -oE '(src|href)="[^"]+\.(js|css)"' "$WORK/pbh.html" | head -1 | sed 's/^[a-z]*="//; s/"$//' || true)
+echo "  asset the page references: ${asset}"
+case "$asset" in
+  ./assets/*) ;;
+  *) echo "the asset ${asset} is not the bundle's own relative path: PBH is not served from its root"; fail=1 ;;
+esac
+
+# The route the app's page calls, with no credential at all: 200 is the one-login
+# decision, and 403 would mean the app is asking for a password of its own.
+code=$(host_get "$PBH_HOST" /api/downloaders /dev/null)
+echo "GET https://${PBH_HOST}/api/downloaders with no token -> ${code}"
+[ "$code" = 200 ] || { echo "PBH refused the request its own page makes: the app is asking for a second password"; fail=1; }
+
+# The wiring Job's downloader, read back through the API with the release
+# Secret's token. HEALTHY is PBH's own verdict that it logged in to qBittorrent
+# with the password that was written; nothing s5n does can fake it.
+code=$(curl -sS -o "$WORK/pbh-status.json" -w '%{http_code}' \
+  -H "Authorization: Bearer ${pbh_token}" --resolve "${PBH_HOST}:443:${GW_ADDR}" \
+  --cacert "$WORK/pebble-root.pem" "https://${PBH_HOST}/api/downloaders/qbittorrent/status" || true)
+echo "GET https://${PBH_HOST}/api/downloaders/qbittorrent/status -> ${code}"
+[ "$code" = 200 ] || fail=1
+qbit_pw=$($K -n "$NS" get secret s5n-keys -o jsonpath='{.data.qbittorrent-password}' | base64 -d || true)
+if python3 - "$WORK/pbh-status.json" "$qbit_pw" >"$WORK/pbh-status.txt" <<'PY'
+import json, sys
+status = json.load(open(sys.argv[1], encoding="utf-8"))["data"]
+cfg = status.get("config") or {}
+ok = True
+print("  lastStatus %s, endpoint %s, username %s" % (status.get("lastStatus"), cfg.get("endpoint"), cfg.get("username")))
+if status.get("lastStatus") != "HEALTHY":
+    print("  PBH is not healthy on its qBittorrent: %s" % status.get("lastStatusMessage"))
+    ok = False
+if cfg.get("endpoint") != "http://qbittorrent:8080":
+    print("  PBH dials %r, want the release's own qBittorrent, with no /api/v2" % cfg.get("endpoint"))
+    ok = False
+if cfg.get("username") != "admin":
+    print("  PBH logs in as %r, want the chart's webuiUsername" % cfg.get("username"))
+    ok = False
+if cfg.get("password") != sys.argv[2]:
+    print("  PBH holds a password the release Secret does not: a rotation never reached it")
+    ok = False
+sys.exit(0 if ok else 1)
+PY
+then
+  sed 's/^/  /' "$WORK/pbh-status.txt"
+else
+  sed 's/^/  /' "$WORK/pbh-status.txt"; fail=1
+fi
+
+# The token is a Secret key the app reads through its environment: it must never
+# reach the pod spec, where anything that may describe the pod could read it.
+if $K -n "$NS" get statefulset pbh -o json | grep -qF "$pbh_token"; then
+  echo "PBH's WebUI token is in the pod spec"; fail=1
+fi
+
+# PBH turns qBittorrent's "allow multiple connections from the same IP" off
+# itself on its first successful login (AbstractQbittorrent.updatePreferences at
+# v9.5.4). Asserted here because it is a setting PBH's own peer matching depends
+# on, and a seed that flipped it on would be the chart's fault, not PBH's.
+multi=$($K -n "$NS" exec qbittorrent-0 -- sh -c "curl -s -c /tmp/s5n-multi -o /dev/null -X POST \
+  --data-urlencode 'username=admin' --data-urlencode 'password=${qbit_pw}' \
+  http://localhost:8080/api/v2/auth/login && curl -s -b /tmp/s5n-multi http://localhost:8080/api/v2/app/preferences" 2>/dev/null |
+  python3 -c 'import json,sys; print(json.load(sys.stdin).get("enable_multi_connections_from_same_ip"))' 2>/dev/null || true)
+echo "qBittorrent enable_multi_connections_from_same_ip = ${multi} (PBH turns it off)"
+[ "$multi" = False ] || { echo "qBittorrent still accepts several connections from one IP: PBH cannot tell peers from its own connections"; fail=1; }
 
 # ---- the opt-in apps (apps-values.yaml) ---------------------------------------
 # Each serves itself under its own base path (its baseUrl / BASE_PATH, with no
@@ -1194,6 +1278,14 @@ app_snapshot() { # app_snapshot <dir> <app>
       curl -sS -b "$jar" "http://127.0.0.1:${PF_PORT}${base}/api/downloaders" >"$dir/autobrr-downloaders.json" 2>/dev/null || true
       rm -f "$jar"
       ;;
+    pbh)
+      # The downloader the Job owns, which is the only object s5n writes there.
+      # The status endpoint is left out on purpose: it carries live counters that
+      # move for reasons that are not configuration.
+      port=$(arr_port pbh)
+      port_forward pbh-0 "$port" || return 1
+      curl -sS "http://127.0.0.1:${PF_PORT}/api/downloaders" >"$dir/pbh-downloaders.json" 2>/dev/null || true
+      ;;
   esac
   port_forward_stop
 }
@@ -1233,7 +1325,7 @@ snapshot() { # snapshot <dir>
   # The two apps with their own user table: what the Job registered is an
   # instance and a set of download clients, so a duplicate row or a rewritten
   # client shows up in the diff like any Arr's download client would.
-  for app in qui autobrr; do
+  for app in qui autobrr pbh; do
     app_snapshot "$dir" "$app" || { echo "could not snapshot ${app}"; fail=1; }
   done
 }
@@ -1267,6 +1359,7 @@ for expected in \
   qui/ready qui/login qui/instance \
   autobrr/ready autobrr/login autobrr/downloader/qbittorrent \
   autobrr/downloader/sonarr autobrr/downloader/radarr autobrr/downloader/radarr-4k \
+  pbh/ready pbh/downloader \
   plex/ready tautulli/ready seerr/ready; do
   res=$(status_field "[s['result'] for s in d['steps'] if s['name']=='$expected'][0]" 2>/dev/null || echo missing)
   echo "  ${expected}: ${res}"; [ "$res" = ok ] || fail=1
