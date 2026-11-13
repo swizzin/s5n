@@ -443,9 +443,11 @@ func providerEnabled(clients *authelia.OIDC) bool {
 
 // oidcClients is the provider's client list for one seedbox, from what the
 // login's Secret holds: one client per enabled app, each pointing at that
-// seedbox's own authorization policy. An app with no digest yet is left out --
-// the rendering then differs from the cluster's, which is what makes the next
-// write create it rather than silently serve a client Authelia cannot check.
+// seedbox's own authorization policy. An app with no digest yet is left out, so
+// the configuration never names a client Authelia cannot check. That the client
+// is missing is planned where it is known (PlanClients, which Decision.Pending
+// asks) and written where it can be (EnsureClients): the rendering is identical
+// with and without such an app, so a difference here is no signal at all.
 //
 // What it returns is the whole provider decision for this run (providerEnabled):
 // nil means the configuration has no identity_providers block and the

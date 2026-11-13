@@ -520,13 +520,15 @@ func (d *Decision) EnsureRules(ctx context.Context, opts RulesOptions) (bool, er
 }
 
 // Pending reports whether the login's configuration or pictures differ from
-// what is in the cluster, and writes nothing. It is EnsureRules' read half, for
-// a caller that has to ask before it does the write: `box apply` shows a
-// re-rendered login in its plan like any other piece of work.
+// what is in the cluster, or whether an app that signs in through it has no
+// client yet, and writes nothing. It is EnsureRules' read half, for a caller
+// that has to ask before it does the write: `box apply` shows a re-rendered
+// login in its plan like any other piece of work.
 //
 // It is root's: reading the login's Secret and ConfigMap is the first thing it
 // does, so an identity that cannot write the login is told so here rather than
-// half way through a write.
+// half way through a write. The client half reads the seedbox's namespace too,
+// because that is where the Secret a missing client would be written to lives.
 func (d *Decision) Pending(ctx context.Context, opts RulesOptions) (bool, error) {
 	_, _, changed, err := d.prepare(ctx, opts, false)
 	return changed, err
@@ -624,6 +626,24 @@ func (d *Decision) prepare(ctx context.Context, opts RulesOptions, ensure bool) 
 		if err != nil {
 			return nil, none, false, err
 		}
+	}
+	if !changed && !ensure {
+		// The third half is the client the cluster has not got yet. The
+		// rendering above leaves an app with no digest out (oidcClients), so
+		// a run that only enabled one renders exactly what the cluster holds
+		// and would otherwise promise nothing -- while the app's pod waits on
+		// a Secret nobody writes. PlanClients is EnsureClients' read half, and
+		// naming it here is what makes the Reconcile that follows write it
+		// (prepare's ensure branch) before the release moves.
+		//
+		// It reads the app's Secret in the seedbox's namespace, a second
+		// namespace for this read: root has it, and a run that cannot write
+		// the login is never given a login step to ask (cmd/box).
+		planned, err := d.PlanClients(ctx, opts.Namespace, apps)
+		if err != nil {
+			return nil, none, false, err
+		}
+		changed = len(planned) > 0
 	}
 	return cl, loginFiles{config: config, assets: assets, provider: provider}, changed, nil
 }
