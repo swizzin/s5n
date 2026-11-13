@@ -754,9 +754,14 @@ with the previous chart.
   the newest box. The timer does the same, which is why a release that raises
   `min-box` never leaves an unattended box stuck.
 - Self-update rules (proposed):
-  - **Verified before it runs.** The new binary is checked against the release's signed
-    checksum before it replaces anything. It runs as root, so an unverified self-update
-    would be remote code execution as root.
+  - **Verified before it runs (decided).** The new binary is checked against the
+    release's signed checksum before it replaces anything. It runs as root, so an
+    unverified self-update would be remote code execution as root. The signature is
+    ed25519 over the exact bytes of `sha256sums.txt`, published beside it as
+    `sha256sums.txt.sig`, and the public key is compiled into box. No keyserver, no
+    transparency log, no new dependency: the standard library verifies it. A box built
+    without a key refuses to update itself rather than skipping the check, and a
+    release built without the signing secret fails instead of publishing unsigned.
   - **Atomic, with one step back.** Written beside the old binary and renamed over it.
     The previous binary is kept as `box.previous`, and `box update --rollback-box` puts
     it back.
@@ -875,6 +880,37 @@ data. Everything it will change is written down before it changes anything.
   outside the plan's rules: a path prefix the table doesn't cover, a host reference the
   plan never classified. Guided, those become questions; unattended, the refusal names
   each one and the plan key that would settle it.
+- **The path table is per app (proposed).** Each app saw its own paths: an Arr may see
+  the library at `/library` while qBittorrent sees the same downloads at `/downloads`.
+  So the plan maps paths per app, from the mounts discovery found:
+
+  ```yaml
+  version: 1
+  apps:
+    sonarr-4k:                  # box's instance name
+      source: sonarr4k          # the source's name for it
+      config: /srv/apps/sonarr4k  # copied from, never written
+      paths:
+        - from: /library/Downloads
+          to: /data/downloads
+        - from: /library/media
+          to: /data/media
+    qbittorrent:
+      source: qbittorrent
+      config: /srv/apps/qbittorrent
+      paths:
+        - from: /downloads
+          to: /data/downloads
+  ```
+
+  The longest `from` that matches whole path segments wins, so `/downloads2` is not
+  under `/downloads`. A relative path follows its root and is left alone. An absolute
+  path no rule covers stops apply and names the app, the file or table, and the path.
+  Host references, ports and the copy list get their own keys when that work lands.
+- **Every app's stored paths are rewritten, with no exceptions (decided).** Each app
+  gets the `/data` contract and migrate rewrites what it holds: Arr databases and
+  configs, qBittorrent's fastresume files and settings, and Plex's database through the
+  `Plex SQLite` shipped in the pinned Plex image, never stock sqlite.
 
 ## Updates (decided goal, proposed mechanism)
 
@@ -903,6 +939,33 @@ streams, and Jellyfin will do the same; the update applies at the first check wi
 none, so it can wait up to one interval after the last stream ends. Torrent activity
 is never a reason to wait: a client is always busy, and there's no clean line between
 busy and idle.
+
+**Snapshot and rollback (decided for 0.5, mechanism proposed).** An unattended update
+runs over forward-only database migrations, so 0.5 carries a narrow rollback ahead of
+`box backup`. It covers one update step, not disaster recovery.
+
+- **Only what moves is snapshotted.** A database migrates when its image changes, so a
+  step snapshots the apps whose pinned image differs between the installed release's
+  `variants.yaml` and the target's. A step that moves no image takes no snapshot.
+- **What is copied is the chart's to say.** Each catalog entry may name a `snapshot:`
+  list of globs relative to the app's config directory: the databases and the files
+  that point at them (`*.db`, `*.db-wal`, `config.xml`), never caches, logs, media
+  covers or Plex's metadata bundles. An app without the key has nothing to restore.
+- **Consistent, not live.** The moving apps are scaled to zero first, which the image
+  change does anyway, so the copy is taken with no writer. It goes under the config
+  root in `.box/snapshots/<from>-<to>-<time>/<app>/`, on the same filesystem as what it
+  copies.
+- **Rollback is the snapshot plus the previous revision.** When the health or wiring
+  gate fails, the moved apps are scaled to zero, their snapshot files put back (a file
+  the globs match that the snapshot lacks, such as a new `-wal`, is removed), and the
+  release rolled back to the revision it had before the step, which is exactly what was
+  running, values included. The failed release is recorded and the timer won't take it
+  again; a newer release clears that.
+- **Two kept.** After a step passes, each app keeps its two newest snapshots.
+
+**What `status` shows in 0.5 (decided).** The first line only: the installed release, the
+last update and how it ended, the next check, and anything held (the box binary, a
+failed release). The rest of "status and doctor" stays proposed.
 
 ### The platform layer (decided)
 
