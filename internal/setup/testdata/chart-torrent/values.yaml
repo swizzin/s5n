@@ -1,0 +1,52 @@
+# testdata/chart, plus the one app whose peer port is the grant's: the torrent
+# port is picked from the cluster and recorded at init, and these tests are
+# about that decision alone. The app carries no setup questions, so the
+# question order the other fixture proves is unchanged.
+global:
+  puid: 1000
+  pgid: 1000
+  tz: Etc/UTC
+
+storage:
+  data:
+    existingClaim: ""
+  config:
+    existingClaim: ""
+
+gateway:
+  enabled: true
+  host: ""
+  parentRef:
+    name: s5n
+    namespace: s5n-gateway
+    sectionName: ""
+
+apps:
+  alpha:
+    enabled: true
+    greeting: hello
+    port: 8080
+  beta:
+    enabled: true
+    token: ""
+    port: 9090
+    instances:
+      - suffix: ""
+        category: tv
+        enabled: true
+      - suffix: 4k
+        category: tv-4k
+        enabled: false
+  # Served at gamma.<domain> (the catalog says so): the app-host half of init.
+  gamma:
+    enabled: false
+    port: 7070
+  qbittorrent:
+    enabled: false
+    port: 8080
+    torrent:
+      # What a helm-only install gets; box picks its own and records it in the
+      # grant, so this test chart carries the same shape as the real one.
+      port: 31111
+      service:
+        type: NodePort

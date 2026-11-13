@@ -142,6 +142,14 @@ apps:
     rewritePath: true
     torrent:
       # Must equal the externally reachable port so peers are told the right one.
+      #
+      # box does not use this default: `box init` picks a free port in the lower
+      # band of the NodePort range (30000-30085 for the default range) and
+      # records it in the grant, because the band the API server assigns its own
+      # nodePorts from is the upper one -- a fixed 31111 there is a port any
+      # Service asking for "any free port" can win first, and then this Service
+      # is refused for the rest of the install. A hand-picked port belongs in
+      # that lower band for the same reason.
       port: 31111
       service:
         # NodePort on the node's own address, so the peer port shares a single-IP box

@@ -66,6 +66,16 @@ type Decision struct {
 	// "nothing", so the safe issuer is chosen rather than a DNS lookup
 	// invented.
 	Resolver Resolver
+	// NodePorts lists every nodePort the cluster's Services already hold: one
+	// LIST of Services in every namespace, which is a cluster-wide read only
+	// root's kubeconfig may do (k0s's admin.conf is cluster-admin). It is how
+	// the torrent port is picked free on a box that has none yet. Nil means
+	// init cannot read a cluster, and a first install then refuses rather than
+	// guessing a port the API server may already have given away.
+	NodePorts func(ctx context.Context) ([]NodePort, error)
+	// Rand answers a number in [0, n) for the torrent port pick. A field so a
+	// test can pin the answer; nil means crypto/rand.
+	Rand func(n int) int
 
 	// steps is how many steps this run shows, for a prompter that draws a step
 	// counter. It is advice for a UI, never an input: nothing reads it back.
@@ -359,6 +369,14 @@ func (d *Decision) Run(ctx context.Context, opts Options) (Result, error) {
 	if err != nil {
 		return res, d.stop(err)
 	}
+	// The peer port: a port on the node, so root settles it once and the grant
+	// keeps it from then on. It is read here, before any answer is written and
+	// before the questions that depend on the app list, because a cluster with
+	// no free port in the band is a refusal and not a half-finished dialog.
+	port, err := d.torrentPort(ctx, namespace, apps, base, grantNow)
+	if err != nil {
+		return res, err
+	}
 	// The app list decides whether there is a fifth step, so correct the
 	// counter before the questions that belong to it.
 	d.steps = 4
@@ -451,6 +469,11 @@ func (d *Decision) Run(ctx context.Context, opts Options) (Result, error) {
 	}
 	for _, name := range d.Catalog.Names() {
 		grantAnswers = append(grantAnswers, answer{key: "apps." + name + ".enabled", value: contains(apps, name)})
+	}
+	// The peer port last, so the grant reads app by app: what is on, then the
+	// one number that app cannot share with its own settings file.
+	if port != nil {
+		grantAnswers = append(grantAnswers, answer{key: torrentPortKey, value: port})
 	}
 	// The Gateway's proxy address, for an app that signs in through the login.
 	// It is written here because init is root's and the read is root's: a

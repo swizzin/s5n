@@ -585,7 +585,7 @@ func runApply(ctx context.Context, args []string) {
 		if errors.Is(err, release.ErrCancelled) {
 			os.Exit(1)
 		}
-		out.Error(err)
+		out.Error(portRangeHint(err))
 		os.Exit(1)
 	}
 	if res.Host != "" {
@@ -752,6 +752,7 @@ func (o *initFlags) run(ctx context.Context, kubeconfig string, yes, plain bool,
 		Login:     loginStep(kubeconfig, o.pathsInNode, out, chart),
 		HasLogin:  hasLogin(o.pathsInNode),
 		GatewayIP: gatewayProxyIP(kubeconfig),
+		NodePorts: nodePorts(kubeconfig),
 		Schema:    chart.Schema,
 		Apply: func(ctx context.Context, req setup.ApplyOptions) error {
 			// The cluster decision belongs to `box bootstrap`; apply reuses it.
@@ -808,7 +809,7 @@ func (o *initFlags) run(ctx context.Context, kubeconfig string, yes, plain bool,
 				// when DNS decided, and not with a second resolution.
 				HostIssuers: req.HostIssuers,
 			})
-			return err
+			return portRangeHint(err)
 		},
 	}
 
