@@ -246,7 +246,13 @@ nothing about the provider, since it starts without one and keeps retrying; only
 sign-in does. Each seedbox has its own client per
 app, `<namespace>-<app>`, and its own authorization policy that admits only that seedbox's
 user. root's `init` writes the client secret once into a Secret in the seedbox's
-namespace and only its digest into the login; the provider's signing key is generated
+namespace and only its digest into the login, and so does root's `apply` when it enables
+an OIDC app whose client doesn't exist yet: the plan counts a missing client as login
+work. A user's `apply` can't write the login, so when the release would mount a client
+Secret that isn't there it stops before the confirm and names `box init` as root. The
+login serves OIDC exactly when its configuration names a client: the same render decides
+the provider block and the Deployment's mount of the signing material, because Authelia
+exits on a provider with no clients. The provider's signing key is generated
 once and kept beside the login's other key, outside its ConfigMap. The app reaches the
 issuer from its own pod over the box's own HTTPS name: the chart aliases that name to the
 Gateway's proxy Service (an address root's `init` records in the grant), opens egress to
