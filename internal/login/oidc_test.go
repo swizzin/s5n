@@ -590,3 +590,183 @@ func TestAnInstallPlansTheLoginItWrites(t *testing.T) {
 		t.Fatalf("the refusal is not ErrNotInstalled: %v", err)
 	}
 }
+
+// TestTwoClientsGetTheirOwnSecretsAndOnePolicy is the second client: the same
+// machinery, one more Secret in the seedbox's namespace and one more digest in
+// the login's, with ids that name their app. The two plaintexts differ because
+// a copy would let either app present the other's credential at the token
+// endpoint, and both clients name the one policy this seedbox has -- a client
+// pointing anywhere else is a token issued to someone the box did not name.
+func TestTwoClientsGetTheirOwnSecretsAndOnePolicy(t *testing.T) {
+	f := newFixture(t)
+	opts := oidcOptions()
+	opts.OIDC = []string{"qui", "autobrr"}
+	if _, err := f.decision.Apply(context.Background(), opts); err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	planned, err := f.decision.PlanClients(context.Background(), "seedbox", opts.OIDC)
+	if err != nil {
+		t.Fatalf("PlanClients: %v", err)
+	}
+	if strings.Join(planned, ",") != "autobrr,qui" {
+		t.Fatalf("PlanClients = %v, want both clients in catalog order", planned)
+	}
+	if _, err := f.decision.EnsureClients(context.Background(), "seedbox", opts.OIDC); err != nil {
+		t.Fatalf("EnsureClients: %v", err)
+	}
+
+	writes := allWrites(f)
+	qui := clientSecretOf(t, writes, "seedbox", "qui")
+	autobrr := clientSecretOf(t, writes, "seedbox", "autobrr")
+	if len(qui) != authelia.OIDCClientSecretLength || len(autobrr) != authelia.OIDCClientSecretLength {
+		t.Fatalf("the client secrets are %d and %d characters, want %d each", len(qui), len(autobrr), authelia.OIDCClientSecretLength)
+	}
+	if qui == autobrr {
+		t.Fatal("both clients were given the same secret: either app could then sign in as the other")
+	}
+	login := loginSecretData(t, writes)
+	quiDigest := digestOf(t, login, authelia.ClientID("seedbox", "qui"))
+	autobrrDigest := digestOf(t, login, authelia.ClientID("seedbox", "autobrr"))
+	if !authelia.VerifyClientSecret(quiDigest, qui) {
+		t.Fatal("qui's digest does not verify against qui's plaintext")
+	}
+	if !authelia.VerifyClientSecret(autobrrDigest, autobrr) {
+		t.Fatal("autobrr's digest does not verify against autobrr's plaintext")
+	}
+	if authelia.VerifyClientSecret(quiDigest, autobrr) || authelia.VerifyClientSecret(autobrrDigest, qui) {
+		t.Fatal("a client's digest accepts the other client's secret")
+	}
+	if quiDigest == autobrrDigest {
+		t.Fatal("the two digests are identical, so one client's secret is the other's")
+	}
+
+	rules := ruleOptions()
+	rules.Namespace = "seedbox"
+	rules.OIDC = opts.OIDC
+	if _, err := f.decision.EnsureRules(context.Background(), rules); err != nil {
+		t.Fatalf("EnsureRules: %v", err)
+	}
+	config := lastConfig(t, allWrites(f))
+	for _, want := range []string{
+		"      - client_id: 'seedbox-autobrr'",
+		"      - client_id: 'seedbox-qui'",
+		"          - 'https://box.example.com/autobrr/api/auth/oidc/callback'",
+		"          - 'https://box.example.com/qui/api/auth/oidc/callback'",
+		"        client_secret: '" + autobrrDigest + "'",
+		"        client_secret: '" + quiDigest + "'",
+	} {
+		if !strings.Contains(config, want) {
+			t.Errorf("the configuration does not contain %q:\n%s", want, config)
+		}
+	}
+	if n := strings.Count(config, "authorization_policy: 'seedbox'"); n != 2 {
+		t.Errorf("%d clients name the seedbox's policy, want both of them:\n%s", n, config)
+	}
+	// One admitted account in the provider, not one in the file: the
+	// access_control rules name the same person for the host they cover.
+	provider := config[strings.Index(config, "identity_providers:"):]
+	if strings.Count(provider, "user:alice") != 1 {
+		t.Errorf("the provider admits more than one account:\n%s", provider)
+	}
+	if strings.Contains(config, qui) || strings.Contains(config, autobrr) {
+		t.Error("the configuration carries a client's plaintext secret: only digests belong there")
+	}
+}
+
+// TestBothClientsArePlannedOnceAndWrittenOnce is the read and write halves
+// agreeing across two runs of the same inputs -- an apply after a command that
+// changed nothing. Nothing is planned, nothing is written, and neither a
+// secret nor a digest is regenerated: a new digest would change the login's
+// ConfigMap on every apply and roll the login, which drops every session.
+func TestBothClientsArePlannedOnceAndWrittenOnce(t *testing.T) {
+	f := newFixture(t)
+	opts := oidcOptions()
+	opts.OIDC = []string{"qui", "autobrr"}
+	if _, err := f.decision.Apply(context.Background(), opts); err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	wrote, err := f.decision.EnsureClients(context.Background(), "seedbox", opts.OIDC)
+	if err != nil {
+		t.Fatalf("EnsureClients: %v", err)
+	}
+	if !wrote {
+		t.Fatal("the first run wrote nothing, so there was nothing to plan either")
+	}
+	planned, err := f.decision.PlanClients(context.Background(), "seedbox", opts.OIDC)
+	if err != nil {
+		t.Fatalf("PlanClients after the write: %v", err)
+	}
+	if len(planned) != 0 {
+		t.Fatalf("PlanClients still wants %v after the write", planned)
+	}
+	login := loginSecretData(t, allWrites(f))
+	loginBefore := map[string]string{}
+	for k, v := range login {
+		loginBefore[k] = v
+	}
+	quiSecret := clientSecretOf(t, allWrites(f), "seedbox", "qui")
+	autobrrSecret := clientSecretOf(t, allWrites(f), "seedbox", "autobrr")
+
+	before := len(f.cluster.applied)
+	wrote, err = f.decision.EnsureClients(context.Background(), "seedbox", opts.OIDC)
+	if err != nil {
+		t.Fatalf("second EnsureClients: %v", err)
+	}
+	if wrote || len(f.cluster.applied) != before {
+		t.Fatalf("a second run wrote %d documents with both clients already there", len(f.cluster.applied)-before)
+	}
+	if got := clientSecretOf(t, allWrites(f), "seedbox", "qui"); got != quiSecret {
+		t.Error("the second run regenerated qui's secret")
+	}
+	if got := clientSecretOf(t, allWrites(f), "seedbox", "autobrr"); got != autobrrSecret {
+		t.Error("the second run regenerated autobrr's secret")
+	}
+	loginAfter := loginSecretData(t, allWrites(f))
+	for clientID, secret := range map[string]string{
+		authelia.ClientID("seedbox", "qui"):     quiSecret,
+		authelia.ClientID("seedbox", "autobrr"): autobrrSecret,
+	} {
+		key := authelia.OIDCClientDigestKey(clientID)
+		if loginAfter[key] != loginBefore[key] {
+			t.Errorf("%s's digest changed on the second run", clientID)
+		}
+		if !authelia.VerifyClientSecret(digestOf(t, loginAfter, clientID), secret) {
+			t.Errorf("%s's digest no longer verifies against its secret", clientID)
+		}
+	}
+}
+
+// TestTheClientThatIsOffIsNotRegistered: an app the catalog marks but the box
+// did not install is not a client -- no Secret in its namespace, no digest in
+// the login's, and nothing in the provider that would issue a token for it.
+func TestTheClientThatIsOffIsNotRegistered(t *testing.T) {
+	f := newFixture(t)
+	opts := oidcOptions()
+	opts.OIDC = []string{"qui"}
+	if _, err := f.decision.Apply(context.Background(), opts); err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	if _, err := f.decision.EnsureClients(context.Background(), "seedbox", opts.OIDC); err != nil {
+		t.Fatalf("EnsureClients: %v", err)
+	}
+	writes := allWrites(f)
+	for _, doc := range writes {
+		meta, _ := doc["metadata"].(map[string]any)
+		if name, _ := meta["name"].(string); name == authelia.OIDCClientSecretName("autobrr") {
+			t.Fatal("autobrr has a client Secret although this box did not install it")
+		}
+	}
+	if _, ok := loginSecretData(t, writes)[authelia.OIDCClientDigestKey(authelia.ClientID("seedbox", "autobrr"))]; ok {
+		t.Fatal("the login's Secret holds a digest for autobrr although this box did not install it")
+	}
+	rules := ruleOptions()
+	rules.Namespace = "seedbox"
+	rules.OIDC = opts.OIDC
+	if _, err := f.decision.EnsureRules(context.Background(), rules); err != nil {
+		t.Fatalf("EnsureRules: %v", err)
+	}
+	config := lastConfig(t, allWrites(f))
+	if strings.Contains(config, "seedbox-autobrr") {
+		t.Errorf("the provider registers autobrr although this box did not install it:\n%s", config)
+	}
+}

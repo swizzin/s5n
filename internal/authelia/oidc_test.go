@@ -111,6 +111,52 @@ func TestRenderConfigurationCarriesTheProvider(t *testing.T) {
 	}
 }
 
+// TestTwoClientsOfOneSeedboxShareOnePolicy is the second client on the same box:
+// two clients, two digests, two callbacks under their own base paths, and one
+// authorization policy between them -- the seedbox's. A policy per client would
+// be a second place to edit when the account changes, and a policy they do not
+// share would let one app admit someone the other does not.
+func TestTwoClientsOfOneSeedboxShareOnePolicy(t *testing.T) {
+	o := testOIDC()
+	other, err := HashClientSecret("another-client-secret-of-48-chars-abcdefgh")
+	if err != nil {
+		t.Fatalf("HashClientSecret: %v", err)
+	}
+	o.Clients = append(o.Clients, Client{
+		ID:           ClientID("seedbox", "autobrr"),
+		Name:         "autobrr",
+		Secret:       other,
+		RedirectURIs: []string{RedirectURI("box.example.com", "/autobrr")},
+		Policy:       OIDCPolicyName("seedbox"),
+	})
+	got, err := RenderOIDC(o)
+	if err != nil {
+		t.Fatalf("RenderOIDC: %v", err)
+	}
+	text := string(got)
+	for _, want := range []string{
+		"      - client_id: 'seedbox-autobrr'",
+		"      - client_id: 'seedbox-qui'",
+		"        client_name: 'autobrr'",
+		"          - 'https://box.example.com/autobrr/api/auth/oidc/callback'",
+		"          - 'https://box.example.com/qui/api/auth/oidc/callback'",
+		"        client_secret: '" + other + "'",
+	} {
+		if !strings.Contains(text, want) {
+			t.Errorf("the provider block does not contain %q:\n%s", want, text)
+		}
+	}
+	if n := strings.Count(text, "authorization_policy: 'seedbox'"); n != 2 {
+		t.Errorf("%d clients name the seedbox's policy, want 2:\n%s", n, text)
+	}
+	if n := strings.Count(text, "      seedbox:\n"); n != 1 {
+		t.Errorf("%d policies are called seedbox, want one shared by both clients:\n%s", n, text)
+	}
+	if strings.Count(text, "'user:alice'") != 1 {
+		t.Errorf("the policy admits more than one account:\n%s", text)
+	}
+}
+
 // TestEachClientHasItsOwnPolicy is the isolation the design rests on: two
 // seedboxes on one login render two policies and two clients, and neither
 // client points at the other's policy. A shared policy would let one box's

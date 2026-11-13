@@ -793,10 +793,13 @@ print(json.dumps({"username": sys.argv[1], "password": sys.argv[2], "targetURL":
 # json_field: one top-level field of a JSON document in a file, or "" -- a body
 # that is not JSON (an HTML error page) answers "" rather than failing the run
 # twice, and an empty value is an assertion the caller makes.
-json_field() { # json_field <file> <field>
+json_field() { # json_field <file> <dotted.path>
   python3 -c 'import json, sys
 try:
-    print(json.load(open(sys.argv[1], encoding="utf-8")).get(sys.argv[2], ""))
+    doc = json.load(open(sys.argv[1], encoding="utf-8"))
+    for part in sys.argv[2].split("."):
+        doc = doc[part]
+    print(doc if isinstance(doc, str) else "")
 except Exception:
     print("")' "$1" "$2" 2>/dev/null || true
 }
@@ -821,6 +824,7 @@ oidc_login() {
 
   # 1. The app's page, no cookie: the edge sends the browser to the portal, and
   #    the portal carries where to come back to.
+  : >"$hdrs"
   code=$(curl -sS -o /dev/null -D "$hdrs" -w '%{http_code}' \
     --resolve "${DOMAIN}:443:${addr}" "${ca_args[@]}" "$url/" 2>"$WORK/oidc.err" || true)
   location=$(sed -n 's/^[Ll]ocation: *//p' "$hdrs" | tr -d '\r' | head -1)
@@ -859,6 +863,7 @@ print(u.parse_qs(u.urlparse(sys.stdin.read()).query).get("rd", [""])[0])' || tru
   #     the callback and a code, and nothing in between. A consent page here
   #     would be a page a person has to click, and the client's consent is
   #     implicit.
+  : >"$hdrs"
   code=$(curl -sS -o /dev/null -D "$hdrs" -w '%{http_code}' \
     -b "$jar" -c "$jar" --resolve "${DOMAIN}:443:${addr}" "${ca_args[@]}" \
     "$auth_url" 2>"$WORK/oidc.err" || true)
@@ -887,6 +892,7 @@ path = sys.argv[1]
 lines = [l for l in open(path, encoding="utf-8") if "authelia_session" not in l]
 open(path, "w", encoding="utf-8").writelines(lines)
 PY
+  : >"$hdrs"
   code=$(curl -sS -o /dev/null -D "$hdrs" -w '%{http_code}' \
     -b "$expired" -c "$expired" --resolve "${DOMAIN}:443:${addr}" "${ca_args[@]}" \
     "$auth_url" 2>"$WORK/oidc.err" || true)
@@ -913,9 +919,11 @@ print(json.dumps({"username": sys.argv[1], "password": sys.argv[2],
     -b "$expired" -c "$expired" -X POST "https://${DOMAIN}/auth/api/firstfactor" \
     --resolve "${DOMAIN}:443:${addr}" "${ca_args[@]}" \
     -H 'Content-Type: application/json' --data "$body" 2>"$WORK/oidc.err" || true)
-  redirect=$(json_field "$WORK/oidc-${app}-flow.json" redirect)
+  redirect=$(json_field "$WORK/oidc-${app}-flow.json" data.redirect)
   echo "  ${app}: POST /auth/api/firstfactor with the flow id: ${code}, next ${redirect%%\?*}"
   [ "$code" = 200 ] || { echo "the portal refused the flow's first factor (${code})"; fail=1; }
+  [ -n "$redirect" ] ||
+    { echo "the portal's first factor answered with no next step: $(head -c 200 "$WORK/oidc-${app}-flow.json" 2>/dev/null)"; fail=1; }
   case "$redirect" in
     "https://${DOMAIN}/auth/api/oidc/authorization?"*) : ;;
     *) echo "the flow's next step is ${redirect}, not the authorization endpoint"; fail=1 ;;
@@ -927,6 +935,7 @@ print(json.dumps({"username": sys.argv[1], "password": sys.argv[2],
 
   # 5. Resume the flow: the authorization endpoint issues the code, the app's
   #    callback redeems it at the token endpoint and opens a session.
+  : >"$hdrs"
   code=$(curl -sS -o /dev/null -D "$hdrs" -w '%{http_code}' \
     -b "$expired" -c "$expired" --resolve "${DOMAIN}:443:${addr}" "${ca_args[@]}" \
     "$redirect" 2>"$WORK/oidc.err" || true)
@@ -940,6 +949,7 @@ print(json.dumps({"username": sys.argv[1], "password": sys.argv[2],
     "https://${DOMAIN}${base}/api/auth/oidc/callback?"*) : ;;
     *) echo "the resumed flow sent the browser to ${callback}, not the app's callback"; fail=1 ;;
   esac
+  : >"$hdrs"
   code=$(curl -sS -o /dev/null -D "$hdrs" -w '%{http_code}' \
     -b "$expired" -c "$expired" --resolve "${DOMAIN}:443:${addr}" "${ca_args[@]}" \
     "$callback" 2>"$WORK/oidc.err" || true)
@@ -985,6 +995,7 @@ if bad:
   esac
   # No cookie at all is the edge's redirect, which is a different refusal: the
   # app is never reached.
+  : >"$hdrs"
   code=$(curl -sS -o /dev/null -D "$hdrs" -w '%{http_code}' \
     --resolve "${DOMAIN}:443:${addr}" "${ca_args[@]}" "https://${DOMAIN}${api}" \
     2>"$WORK/oidc.err" || true)
@@ -1023,8 +1034,25 @@ oidc_refuses_another_login() {
     -b "$jar" -c "$jar" --resolve "${DOMAIN}:443:${addr}" "${ca_args[@]}" \
     "$auth_url" 2>"$WORK/oidc.err" || true)
   location=$(sed -n 's/^[Ll]ocation: *//p' "$hdrs" | tr -d '\r' | head -1)
-  echo "  ${app}: ${SECOND_LOGIN} at the authorization endpoint: ${code} -> ${location:-no redirect}"
+  detail=$(printf '%s' "$location" | python3 -c 'import sys, urllib.parse as u
+q = u.parse_qs(u.urlparse(sys.stdin.read()).query)
+print(q.get("error", [""])[0], "-", q.get("error_description", [""])[0])' || true)
+  echo "  ${app}: ${SECOND_LOGIN} at the authorization endpoint: ${code} (${detail:-no error parameter})"
+  # Refused the OAuth way: the client's callback carries the error, because a
+  # valid redirect URI is where an authorization error belongs. A bare status is
+  # the other shape (a request Authelia will not answer), and either is a
+  # refusal as long as no code exists.
   case "$code" in
+    302 | 303)
+      case "$location" in
+        "https://${DOMAIN}${base}/api/auth/oidc/callback?"*) : ;;
+        *) echo "${SECOND_LOGIN} was redirected to ${location}, not the app's callback"; fail=1 ;;
+      esac
+      case "$location" in
+        *"error=access_denied"*) : ;;
+        *) echo "${SECOND_LOGIN} was not refused by the client's policy: ${location}"; fail=1 ;;
+      esac
+      ;;
     400 | 401 | 403) : ;;
     *) echo "${SECOND_LOGIN} got ${code} from the authorization endpoint, want a refusal"; fail=1 ;;
   esac
