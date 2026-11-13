@@ -210,7 +210,8 @@ with their account name, and reaches every app that has an admin UI: qBittorrent
 Arrs, Prowlarr, qui. One auth provider checks the login at the Gateway. It is part of the
 platform layer: root's `bootstrap` installs it, and `box adduser` adds the user to it.
 Each user's domain admits only that user. Behind it the apps have no login of their own
-(the Arrs run with `External` authentication) and are reachable only through the Gateway.
+(the Arrs run with `External` authentication, PeerBanHelper with its login switched
+off) and are reachable only through the Gateway.
 
 **One auth mechanism, no fallback (decided).** Wiring a login into each app separately
 would be a second auth system with its own reset path, tests and docs, so box doesn't
@@ -277,6 +278,9 @@ run; no API key is minted or kept. Hiding the app's own login form doesn't switc
 password login off, so this account is reachable only past the edge's login or from the
 wiring Job, which the NetworkPolicy allows. The account is named `s5n` in both apps; it is the
 wiring Job's, not another way in for the person, whose way in is still the provider.
+PeerBanHelper's equivalent is its API token: generated once in the same Secret, handed
+to the app through its environment, and used only by the Job, since the app's own login
+is switched off behind the edge.
 
 **The login is on root's Gateway, and users can't take it off (decided).** The
 SecurityPolicy that sends requests to Authelia targets the `s5n` Gateway itself and lives
@@ -576,7 +580,7 @@ validated, self-signed otherwise. This is how box would do it.
   resolves the name on every run and keeps no earlier answer; the e2e proves the move
   from a self-signed certificate to an issued one on the same host.
 - **Apps with no base URL get a host of their own.** An app whose UI writes absolute
-  asset paths (Seerr, Plex's web app) breaks under a `/<name>` prefix, so it is served
+  asset paths (Seerr, Plex's web app, PeerBanHelper) breaks under a `/<name>` prefix, so it is served
   at `<app>.<domain>` instead, with its own listener and certificate the same way as the
   box's domain. The operator provides the names: one wildcard record (`*.<domain>`) or
   one record per app, whichever their DNS allows. box doesn't manage DNS and holds no
