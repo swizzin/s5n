@@ -252,9 +252,12 @@ func TestWiringRegistersQuiAndAutobrr(t *testing.T) {
 }
 
 // Rotating the qBittorrent password in the release Secret is visible only
-// through the fingerprints, so exactly those two objects are rewritten; the Arr
-// clients, whose keys did not change, are not.
-func TestWiringRewritesQuiAndAutobrrWhenTheQbitPasswordRotates(t *testing.T) {
+// through the fingerprints, so exactly the objects that hold a copy are
+// rewritten: qui's instance, autobrr's qBittorrent client, and the download
+// client of every Arr. An Arr never returns that password, so without its own
+// fingerprint it kept dialling with the old one -- and its connection test only
+// runs at the next wiring pass. The Arr key copies are untouched.
+func TestWiringRewritesEveryCopyWhenTheQbitPasswordRotates(t *testing.T) {
 	h := newHarness(t)
 	f := h.withApps(t)
 	ctx := context.Background()
@@ -267,18 +270,24 @@ func TestWiringRewritesQuiAndAutobrrWhenTheQbitPasswordRotates(t *testing.T) {
 	if err != nil {
 		t.Fatalf("run after the rotation: %v\n%s", err, Summary(res))
 	}
-	if res.Writes.Updated != 2 {
-		t.Fatalf("updated = %d, want exactly qui/instance and autobrr's qBittorrent client\n%s",
+	if res.Writes.Updated != 4 {
+		t.Fatalf("updated = %d, want qui/instance, autobrr's qBittorrent client and both Arrs' download clients\n%s",
 			res.Writes.Updated, Summary(res))
 	}
-	for _, name := range []string{"qui/instance", "autobrr/downloader/qbittorrent"} {
+	for _, name := range []string{
+		"qui/instance", "autobrr/downloader/qbittorrent",
+		"sonarr/downloadclient", "radarr/downloadclient",
+	} {
 		if step := stepByName(t, res, name); step.Detail != "updated" {
 			t.Fatalf("%s = %+v, want updated", name, step)
 		}
 	}
-	for _, name := range []string{"autobrr/downloader/sonarr", "autobrr/downloader/radarr"} {
+	for _, name := range []string{
+		"autobrr/downloader/sonarr", "autobrr/downloader/radarr",
+		"prowlarr/application/sonarr", "prowlarr/application/radarr",
+	} {
 		if step := stepByName(t, res, name); step.Detail != "unchanged" {
-			t.Fatalf("%s = %+v, want unchanged", name, step)
+			t.Fatalf("%s = %+v, want unchanged: its key did not move", name, step)
 		}
 	}
 	if got := f.quiRows[0].Str("password"); got != "rotated-qbit-pass" {
@@ -288,6 +297,25 @@ func TestWiringRewritesQuiAndAutobrrWhenTheQbitPasswordRotates(t *testing.T) {
 		if row.Str("name") == "qBittorrent" && row.Str("password") != "rotated-qbit-pass" {
 			t.Fatalf("autobrr holds %q, want the rotated password", row.Str("password"))
 		}
+	}
+	for _, instance := range []string{"sonarr", "radarr"} {
+		if got, _ := h.stack.clients[instance][0].FieldValue("password"); got != "rotated-qbit-pass" {
+			t.Fatalf("%s's download client holds %v, want the rotated password", instance, got)
+		}
+	}
+
+	// With the new fingerprints on record, the run after the rotation writes
+	// nothing at all.
+	writes := h.stack.count()
+	again, err := h.runner.Run(ctx)
+	if err != nil {
+		t.Fatalf("run after the rotation: %v", err)
+	}
+	if again.Writes.Created != 0 || again.Writes.Updated != 0 {
+		t.Fatalf("a run after the rotation still wrote: %+v\n%s", again.Writes, Summary(again))
+	}
+	if got := h.stack.count(); got != writes {
+		t.Fatalf("a run after the rotation made %d API writes", got-writes)
 	}
 }
 

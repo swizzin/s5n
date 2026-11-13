@@ -57,14 +57,24 @@ type TautulliOwned struct {
 	PlexTokenFingerprint string `json:"plexTokenFingerprint,omitempty"`
 }
 
-// ArrOwned is what the Job owns on one Arr instance.
+// ArrOwned is what the Job owns on one Arr instance. The download client is
+// the only object, and DownloadClientPasswordFingerprint is sha256-hex of the
+// qBittorrent password it was last written and proven with: the Arr answers a
+// mask for that field, so a password rotated in the release Secret is otherwise
+// invisible and the client would keep dialling with the old one.
 type ArrOwned struct {
-	DownloadClient int `json:"downloadClient,omitempty"`
+	DownloadClient                    int    `json:"downloadClient,omitempty"`
+	DownloadClientPasswordFingerprint string `json:"downloadClientPasswordFingerprint,omitempty"`
 }
 
-// ProwlarrOwned is what the Job owns in Prowlarr.
+// ProwlarrOwned is what the Job owns in Prowlarr: one application per Arr
+// instance, each recorded by id, and the sha256-hex of the Arr API key it was
+// last written and proven with. Prowlarr answers a mask for a stored key, so the
+// fingerprint is what makes a rotated key in the release Secret visible -- the
+// same rule as the qBittorrent password in qui, autobrr and every Arr.
 type ProwlarrOwned struct {
-	Applications map[string]int `json:"applications,omitempty"`
+	Applications map[string]int    `json:"applications,omitempty"`
+	Fingerprints map[string]string `json:"fingerprints,omitempty"`
 }
 
 // NewOwnedRecord returns an empty record ready to be filled in during a run
@@ -74,7 +84,7 @@ func NewOwnedRecord() *OwnedRecord {
 	return &OwnedRecord{
 		Version:  1,
 		Arr:      map[string]ArrOwned{},
-		Prowlarr: ProwlarrOwned{Applications: map[string]int{}},
+		Prowlarr: ProwlarrOwned{Applications: map[string]int{}, Fingerprints: map[string]string{}},
 		Autobrr:  &AutobrrOwned{Clients: map[string]int{}, Fingerprints: map[string]string{}},
 	}
 }
@@ -96,6 +106,9 @@ func ParseOwnedRecord(raw []byte) (*OwnedRecord, error) {
 	if rec.Prowlarr.Applications == nil {
 		rec.Prowlarr.Applications = map[string]int{}
 	}
+	if rec.Prowlarr.Fingerprints == nil {
+		rec.Prowlarr.Fingerprints = map[string]string{}
+	}
 	if rec.Autobrr == nil {
 		rec.Autobrr = &AutobrrOwned{}
 	}
@@ -115,12 +128,37 @@ func (o *OwnedRecord) ArrDownloadClientID(instance string) int {
 }
 
 // SetArrDownloadClientID records the id of the download client the Job
-// created or adopted for an Arr instance.
+// created or adopted for an Arr instance, keeping the password fingerprint
+// recorded beside it.
 func (o *OwnedRecord) SetArrDownloadClientID(instance string, id int) {
 	if o.Arr == nil {
 		o.Arr = map[string]ArrOwned{}
 	}
-	o.Arr[instance] = ArrOwned{DownloadClient: id}
+	rec := o.Arr[instance]
+	rec.DownloadClient = id
+	o.Arr[instance] = rec
+}
+
+// ArrDownloadClientPasswordFingerprint returns the fingerprint of the
+// qBittorrent password the Arr's download client was last written and proven
+// with, or "" when no successful write is on record (a first run, or an install
+// predating this record).
+func (o *OwnedRecord) ArrDownloadClientPasswordFingerprint(instance string) string {
+	return o.Arr[instance].DownloadClientPasswordFingerprint
+}
+
+// SetArrDownloadClientPasswordFingerprint records the fingerprint of the
+// qBittorrent password the Job just wrote into one Arr's download client and
+// proved with the Arr's own connection test. Call it only after that succeeded:
+// a fingerprint stored for a write the Arr did not accept would hide the next
+// rotation and leave the client dialling with a password qBittorrent refuses.
+func (o *OwnedRecord) SetArrDownloadClientPasswordFingerprint(instance, fingerprint string) {
+	if o.Arr == nil {
+		o.Arr = map[string]ArrOwned{}
+	}
+	rec := o.Arr[instance]
+	rec.DownloadClientPasswordFingerprint = fingerprint
+	o.Arr[instance] = rec
 }
 
 // ProwlarrApplicationID returns the recorded id for an Arr instance's
@@ -130,12 +168,30 @@ func (o *OwnedRecord) ProwlarrApplicationID(instance string) int {
 }
 
 // SetProwlarrApplicationID records the id of the Prowlarr application the Job
-// created or adopted for an Arr instance.
+// created or adopted for an Arr instance, keeping the key fingerprint recorded
+// beside it.
 func (o *OwnedRecord) SetProwlarrApplicationID(instance string, id int) {
 	if o.Prowlarr.Applications == nil {
 		o.Prowlarr.Applications = map[string]int{}
 	}
 	o.Prowlarr.Applications[instance] = id
+}
+
+// ProwlarrApplicationFingerprint returns the fingerprint of the Arr API key the
+// application was last written and proven with, or "" when no successful write
+// is on record.
+func (o *OwnedRecord) ProwlarrApplicationFingerprint(instance string) string {
+	return o.Prowlarr.Fingerprints[instance]
+}
+
+// SetProwlarrApplicationFingerprint records the fingerprint of the Arr API key
+// the Job just wrote into one Prowlarr application and proved with Prowlarr's
+// own test endpoint. Call it only after that succeeded.
+func (o *OwnedRecord) SetProwlarrApplicationFingerprint(instance, fingerprint string) {
+	if o.Prowlarr.Fingerprints == nil {
+		o.Prowlarr.Fingerprints = map[string]string{}
+	}
+	o.Prowlarr.Fingerprints[instance] = fingerprint
 }
 
 // TautulliPlexTokenFingerprint returns the fingerprint of the Plex server token

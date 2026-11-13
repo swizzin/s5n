@@ -331,9 +331,13 @@ func (r *Runner) work(ctx context.Context, res *Result) error {
 				Port:     port,
 				Username: c.Qbittorrent.Username,
 				Password: qbitPassword,
-			}, owned.ArrDownloadClientID(inst.Name))
+			}, owned.ArrDownloadClientID(inst.Name), owned.ArrDownloadClientPasswordFingerprint(inst.Name))
 			if err == nil && result.ID != 0 {
 				owned.SetArrDownloadClientID(inst.Name, result.ID)
+				// Only after the write and the Arr's own test succeeded: a
+				// fingerprint recorded for an unaccepted write would hide the
+				// next rotation (the Tautulli ordering).
+				owned.SetArrDownloadClientPasswordFingerprint(inst.Name, apps.SecretFingerprint(qbitPassword))
 			}
 			if err := r.ensureResult(res, inst.Name+"/downloadclient", result, err); err != nil {
 				return err
@@ -376,9 +380,12 @@ func (r *Runner) work(ctx context.Context, res *Result) error {
 				Implementation: impl,
 				BaseURL:        strings.TrimRight(inst.URL, "/") + inst.URLBase,
 				APIKey:         arrKeys[inst.Name],
-			}, owned.ProwlarrApplicationID(inst.Name))
+			}, owned.ProwlarrApplicationID(inst.Name), owned.ProwlarrApplicationFingerprint(inst.Name))
 			if err == nil && result.ID != 0 {
 				owned.SetProwlarrApplicationID(inst.Name, result.ID)
+				// The Arr's key, proven by Prowlarr's own test above: recorded
+				// only now, for the same reason as every other fingerprint.
+				owned.SetProwlarrApplicationFingerprint(inst.Name, apps.SecretFingerprint(arrKeys[inst.Name]))
 			}
 			if err := r.ensureResult(res, "prowlarr/application/"+inst.Name, result, err); err != nil {
 				return err

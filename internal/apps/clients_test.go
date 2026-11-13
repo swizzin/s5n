@@ -195,7 +195,7 @@ func TestProwlarrEnsureApplicationIsIdempotent(t *testing.T) {
 	p := NewProwlarr(srv.URL, "/prowlarr", "http://prowlarr:9696/prowlarr", "key")
 	spec := ApplicationSpec{Name: "sonarr", Implementation: "Sonarr", BaseURL: "http://sonarr:8989/sonarr", APIKey: "arrkey"}
 
-	result, err := p.EnsureApplication(ctx, spec, 0)
+	result, err := p.EnsureApplication(ctx, spec, 0, SecretFingerprint(spec.APIKey))
 	if err != nil || result.Change != Created {
 		t.Fatalf("first = %+v, %v", result, err)
 	}
@@ -211,7 +211,7 @@ func TestProwlarrEnsureApplicationIsIdempotent(t *testing.T) {
 
 	// The API masks the key on read; the second run must still be a no-op.
 	f.maskedApps()
-	result, err = p.EnsureApplication(ctx, spec, result.ID)
+	result, err = p.EnsureApplication(ctx, spec, result.ID, SecretFingerprint(spec.APIKey))
 	if err != nil || result.Change != Unchanged {
 		t.Fatalf("second = %+v, %v", result, err)
 	}
@@ -231,14 +231,14 @@ func TestProwlarrEnsureApplicationSurvivesNonOwnedFieldChange(t *testing.T) {
 	ctx := context.Background()
 	p := NewProwlarr(srv.URL, "/prowlarr", "http://prowlarr:9696/prowlarr", "key")
 	spec := ApplicationSpec{Name: "sonarr", Implementation: "Sonarr", BaseURL: "http://sonarr:8989/sonarr", APIKey: "arrkey"}
-	first, err := p.EnsureApplication(ctx, spec, 0)
+	first, err := p.EnsureApplication(ctx, spec, 0, SecretFingerprint(spec.APIKey))
 	if err != nil {
 		t.Fatal(err)
 	}
 	f.apps[0]["syncLevel"] = "addOnly"
 	f.maskedApps()
 
-	if result, err := p.EnsureApplication(ctx, spec, first.ID); err != nil || result.Change != Unchanged {
+	if result, err := p.EnsureApplication(ctx, spec, first.ID, SecretFingerprint(spec.APIKey)); err != nil || result.Change != Unchanged {
 		t.Fatalf("ensure over a non-owned change = %+v, %v; want unchanged", result, err)
 	}
 	if f.apps[0]["syncLevel"] != "addOnly" {
@@ -254,14 +254,14 @@ func TestProwlarrEnsureApplicationRepairsDriftAndReportsIt(t *testing.T) {
 	ctx := context.Background()
 	p := NewProwlarr(srv.URL, "/prowlarr", "http://prowlarr:9696/prowlarr", "key")
 	spec := ApplicationSpec{Name: "sonarr", Implementation: "Sonarr", BaseURL: "http://sonarr:8989/sonarr", APIKey: "arrkey"}
-	first, err := p.EnsureApplication(ctx, spec, 0)
+	first, err := p.EnsureApplication(ctx, spec, 0, SecretFingerprint(spec.APIKey))
 	if err != nil {
 		t.Fatal(err)
 	}
 	f.apps[0].SetField("baseUrl", "http://wrong:8989/sonarr")
 	f.maskedApps()
 
-	result, err := p.EnsureApplication(ctx, spec, first.ID)
+	result, err := p.EnsureApplication(ctx, spec, first.ID, SecretFingerprint(spec.APIKey))
 	if err != nil || result.Change != Updated {
 		t.Fatalf("ensure after drift = %+v, %v; want updated", result, err)
 	}
@@ -282,14 +282,14 @@ func TestProwlarrEnsureApplicationFollowsRename(t *testing.T) {
 	ctx := context.Background()
 	p := NewProwlarr(srv.URL, "/prowlarr", "http://prowlarr:9696/prowlarr", "key")
 	spec := ApplicationSpec{Name: "sonarr", Implementation: "Sonarr", BaseURL: "http://sonarr:8989/sonarr", APIKey: "arrkey"}
-	first, err := p.EnsureApplication(ctx, spec, 0)
+	first, err := p.EnsureApplication(ctx, spec, 0, SecretFingerprint(spec.APIKey))
 	if err != nil {
 		t.Fatal(err)
 	}
 	f.apps[0]["name"] = "sonarr (renamed)"
 	f.maskedApps()
 
-	result, err := p.EnsureApplication(ctx, spec, first.ID)
+	result, err := p.EnsureApplication(ctx, spec, first.ID, SecretFingerprint(spec.APIKey))
 	if err != nil || result.Change != Unchanged {
 		t.Fatalf("ensure after rename = %+v, %v; want unchanged", result, err)
 	}
@@ -306,13 +306,13 @@ func TestProwlarrEnsureApplicationRecreatesWhenDeleted(t *testing.T) {
 	ctx := context.Background()
 	p := NewProwlarr(srv.URL, "/prowlarr", "http://prowlarr:9696/prowlarr", "key")
 	spec := ApplicationSpec{Name: "sonarr", Implementation: "Sonarr", BaseURL: "http://sonarr:8989/sonarr", APIKey: "arrkey"}
-	first, err := p.EnsureApplication(ctx, spec, 0)
+	first, err := p.EnsureApplication(ctx, spec, 0, SecretFingerprint(spec.APIKey))
 	if err != nil {
 		t.Fatal(err)
 	}
 	f.apps = nil
 
-	result, err := p.EnsureApplication(ctx, spec, first.ID)
+	result, err := p.EnsureApplication(ctx, spec, first.ID, SecretFingerprint(spec.APIKey))
 	if err != nil || result.Change != Created || !result.Recreated || result.PreviousID != first.ID {
 		t.Fatalf("recreate after delete = %+v, %v", result, err)
 	}
@@ -350,5 +350,44 @@ func TestQbitSubcategory(t *testing.T) {
 	}
 	if f.writes != 2 {
 		t.Fatalf("writes = %d, want the create and the one repair", f.writes)
+	}
+}
+
+// Prowlarr stores the Arr's API key and answers a mask for it, so a rotated key
+// is invisible to the field comparison: the fingerprint rewrites the
+// application, and Prowlarr's own test proves the new key first.
+func TestProwlarrEnsureApplicationRewritesOnRotatedKey(t *testing.T) {
+	f := &fakeProwlarr{urlBase: "/prowlarr"}
+	srv := httptest.NewServer(f)
+	defer srv.Close()
+
+	ctx := context.Background()
+	p := NewProwlarr(srv.URL, "/prowlarr", "http://prowlarr:9696/prowlarr", "key")
+	spec := ApplicationSpec{Name: "sonarr", Implementation: "Sonarr",
+		BaseURL: "http://sonarr:8989/sonarr", APIKey: "arr-key-old"}
+
+	first, err := p.EnsureApplication(ctx, spec, 0, "")
+	if err != nil || first.Change != Created {
+		t.Fatalf("first = %+v, %v", first, err)
+	}
+	f.maskedApps()
+
+	rotated := spec
+	rotated.APIKey = "arr-key-new"
+	result, err := p.EnsureApplication(ctx, rotated, first.ID, SecretFingerprint(spec.APIKey))
+	if err != nil {
+		t.Fatalf("rotated run: %v", err)
+	}
+	if result.Change != Updated {
+		t.Fatalf("a rotated key reported %s, want updated", result.Change)
+	}
+	if got, _ := f.apps[0].FieldValue("apiKey"); got != "arr-key-new" {
+		t.Fatalf("stored key = %v, want the value the test just proved", got)
+	}
+
+	f.maskedApps()
+	result, err = p.EnsureApplication(ctx, rotated, result.ID, SecretFingerprint(rotated.APIKey))
+	if err != nil || result.Change != Unchanged {
+		t.Fatalf("run after the rotation = %+v, %v, want unchanged", result, err)
 	}
 }

@@ -2730,7 +2730,7 @@ PY
   # The Job is re-run instead of `helm upgrade`: box owns this release's objects
   # with server-side apply under its own field manager, and a Helm upgrade of
   # the same release conflicts on every route it would have to take over.
-  log "rotating the qBittorrent password: exactly the two copies that hold it update"
+  log "rotating the qBittorrent password: every copy that holds it updates"
   $K -n "$NS" scale statefulset/qui --replicas=0 >/dev/null ||
     { echo "could not stop qui for the rotation"; fail=1; }
   $K -n "$NS" wait --for=delete pod/qui-0 --timeout=120s >/dev/null 2>&1 ||
@@ -2749,14 +2749,18 @@ PY
   created=$(status_field 'd["writes"]["created"]' 2>/dev/null || echo missing)
   updated=$(status_field 'd["writes"]["updated"]' 2>/dev/null || echo missing)
   echo "  after the rotation: ${created} created, ${updated} updated"
-  [ "$created" = 0 ] && [ "$updated" = 2 ] ||
-    { echo "the rotation wrote ${created} created / ${updated} updated, want exactly the two copies"; fail=1; }
-  for step in qui/instance autobrr/downloader/qbittorrent; do
+  # Every copy of the password, and only those: qui's instance, autobrr's
+  # qBittorrent client, and each Arr's download client -- the Arrs are the pair
+  # that had no fingerprint, so before this they kept dialling with the old one.
+  [ "$created" = 0 ] && [ "$updated" = 4 ] ||
+    { echo "the rotation wrote ${created} created / ${updated} updated, want exactly the copies that hold the password"; fail=1; }
+  for step in qui/instance autobrr/downloader/qbittorrent sonarr/downloadclient radarr/downloadclient; do
     detail=$(status_field "[s['detail'] for s in d['steps'] if s['name']=='$step'][0]" 2>/dev/null || echo missing)
     echo "  ${step}: ${detail}"
     [ "$detail" = updated ] || { echo "${step} was ${detail}, want updated after a rotated qBittorrent password"; fail=1; }
   done
-  for step in autobrr/downloader/sonarr autobrr/downloader/radarr; do
+  for step in autobrr/downloader/sonarr autobrr/downloader/radarr \
+              prowlarr/application/sonarr prowlarr/application/radarr; do
     detail=$(status_field "[s['detail'] for s in d['steps'] if s['name']=='$step'][0]" 2>/dev/null || echo missing)
     [ "$detail" = unchanged ] || { echo "${step} was ${detail}, want unchanged: its key did not move"; fail=1; }
   done
@@ -2784,6 +2788,41 @@ print(rows[0]["id"] if len(rows) == 1 else "")' "$WORK/qui-instances-rotated.jso
   port_forward_stop
   echo "  autobrr's qBittorrent client on the rotated password: ${autobrr_test}"
   [ "$autobrr_test" = 204 ] || { echo "autobrr lost qBittorrent on the rotated password (${autobrr_test})"; fail=1; }
+
+  # The Arrs' copies are the pair that had no fingerprint, so the proof is
+  # Sonarr's own: it masks the stored password on read, so the client is fetched
+  # and the Secret's new password put back into it -- the body the Job writes --
+  # and Sonarr's test endpoint decides whether qBittorrent accepts it.
+  sonarr_key=$($K -n "$NS" get secret s5n-keys -o jsonpath='{.data.sonarr-apikey}' 2>/dev/null | base64 -d || true)
+  [ -n "$sonarr_key" ] || { echo "the release Secret has no sonarr API key"; fail=1; }
+  $K -n "$NS" exec sonarr-0 -- curl -s -H "X-Api-Key: ${sonarr_key}" \
+    "http://localhost:8989/sonarr/api/v3/downloadclient" >"$WORK/sonarr-clients-rotated.json" 2>/dev/null || true
+  if python3 - "$WORK/sonarr-clients-rotated.json" "$QBIT_PASSWORD" >"$WORK/sonarr-client-test.json" <<'PY'
+import json, sys
+clients = json.load(open(sys.argv[1], encoding="utf-8"))
+qbit = [c for c in clients if str(c.get("implementation", "")).lower() == "qbittorrent"]
+if len(qbit) != 1:
+    sys.exit("sonarr holds %d qBittorrent clients, want 1" % len(qbit))
+body = qbit[0]
+for field in body.get("fields") or []:
+    if field.get("name") == "password":
+        field["value"] = sys.argv[2]
+print(json.dumps(body))
+PY
+  then
+    sonarr_test=$($K -n "$NS" exec -i sonarr-0 -- curl -s -o /dev/null -w '%{http_code}' \
+      -X POST -H "X-Api-Key: ${sonarr_key}" -H 'Content-Type: application/json' \
+      --data-binary @- "http://localhost:8989/sonarr/api/v3/downloadclient/test" \
+      2>/dev/null <"$WORK/sonarr-client-test.json" || true)
+    echo "  sonarr's qBittorrent client test on the rotated password: ${sonarr_test}"
+    case "$sonarr_test" in
+      200 | 201 | 204) ;;
+      *) echo "sonarr could not reach qBittorrent with the client the Job rewrote (${sonarr_test})"; fail=1 ;;
+    esac
+  else
+    echo "could not read Sonarr's download clients back: $(head -c 200 "$WORK/sonarr-clients-rotated.json" 2>/dev/null)"
+    fail=1
+  fi
 
   # autobrr's init container, on a restart: its second create-user run fails
   # with the one message that means "already there", which is why the script
