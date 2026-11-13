@@ -226,7 +226,9 @@ with `External`. The apps that call it (the Arrs, qui, autobrr, PeerBanHelper, t
 wiring Job) connect with an empty username and password, so no app's database holds
 a copy of a qBittorrent credential. The init container still seals a generated
 password into `qBittorrent.conf`, so qBittorrent never mints a temporary one and
-prints it to its log, but nothing is given it.
+prints it to its log, but nothing is given it. `box init` no longer asks for a
+qBittorrent login name; `apps.qbittorrent.webuiUsername` keeps its `admin` default only
+so that existing values still validate.
 
 **One auth mechanism, no fallback (decided).** Wiring a login into each app separately
 would be a second auth system with its own reset path, tests and docs, so box doesn't
