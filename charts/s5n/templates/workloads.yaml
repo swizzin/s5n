@@ -161,7 +161,13 @@ spec:
               password="$(cat /etc/s5n/keys/autobrr-password)"
               if ! out="$(printf '%s\n' "$password" | /usr/local/bin/autobrrctl --config /config create-user {{ include "s5n.wiringAccount" $root }} 2>&1)"; then
                 case "$out" in
-                  *"only 1 user account is supported"*) ;;
+                  *"only 1 user account is supported"*)
+                    # The account is already there, which is the normal case from
+                    # the second start on. The sentence is echoed, not swallowed:
+                    # it is the record that the failure was that one and not a
+                    # database that could not be opened.
+                    echo "account already exists (autobrrctl: only 1 user account is supported)"
+                    ;;
                   *)
                     printf '%s\n' "$out" >&2
                     exit 1
