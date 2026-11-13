@@ -283,7 +283,7 @@ chmod 600 "$WORK/second-password"
 log "preparing host paths inside the node (what box init creates on real hosts)"
 docker exec "${CLUSTER}-control-plane" bash -c '
   mkdir -p /srv/s5n/data \
-           /srv/s5n/config/{qbittorrent,prowlarr,sonarr,sonarr-4k,radarr,radarr-4k,plex,tautulli,seerr,qui,maintainerr}
+           /srv/s5n/config/{qbittorrent,prowlarr,sonarr,sonarr-4k,radarr,radarr-4k,plex,tautulli,seerr,qui,autobrr,maintainerr}
   chown -R 1000:1000 /srv/s5n'
 
 # The login's own directory, which box init creates on a real host: 0700, owned
@@ -348,7 +348,7 @@ bootstrap() { # bootstrap <output file>
     --grant "$WORK/grant.yaml" --values "$WORK/values.yaml" \
     --namespace "$NS" --domain "$DOMAIN" \
     --data-path /srv/s5n/data --config-path /srv/s5n/config \
-    --apps qbittorrent,sonarr,radarr,prowlarr,plex,tautulli,seerr,qui,maintainerr \
+    --apps qbittorrent,sonarr,radarr,prowlarr,plex,tautulli,seerr,qui,autobrr,maintainerr \
     --puid 1000 --pgid 1000 \
     --login "$LOGIN" --password-file "$WORK/authelia-password" \
     --paths-in-node --record "$WORK/cluster.yaml" \
@@ -367,7 +367,7 @@ init() { # init <output file> [extra dev flags]
     --grant "$WORK/grant.yaml" --values "$WORK/values.yaml" \
     --namespace "$NS" --domain "$DOMAIN" \
     --data-path /srv/s5n/data --config-path /srv/s5n/config \
-    --apps qbittorrent,sonarr,radarr,prowlarr,plex,tautulli,seerr,qui,maintainerr \
+    --apps qbittorrent,sonarr,radarr,prowlarr,plex,tautulli,seerr,qui,autobrr,maintainerr \
     --puid 1000 --pgid 1000 \
     --login "$LOGIN" --password-file "$WORK/authelia-password" \
     --paths-in-node "${@:2}" \
@@ -590,79 +590,88 @@ PYEOF
 # is the URL the browser used: https://<host>/auth. That name resolves nowhere
 # inside a cluster, and the certificate is the box's, so three things have to be
 # right at once -- the pod's alias for the name, the trust root it verifies with,
-# and a NetworkPolicy that lets it reach the proxy -- and qui does not start
-# until all of them are. That is why "Ready on the first install" is the
-# assertion, and the discovery document is the receipt.
+# and a NetworkPolicy that lets it reach the proxy.
+#
+# What a client does when one of those is wrong differs, and it is worth knowing
+# which proof you have. qui refuses to start until it can read the discovery
+# document, so Ready is the three of them together. autobrr starts and retries
+# discovery for about four minutes in the background (50 attempts, five seconds
+# apart: internal/auth/oidc.go at v1.90.0), so its Ready says nothing about the
+# issuer -- the sign-in e2e does.
 #
 # The client secret is one Secret in this namespace, written once by root; the
 # login keeps only its digest. Both are asserted here against each other.
-assert_oidc() { # assert_oidc <domain>
-  local domain=$1 secret_name proxy_ip alias_ip alias_host issuer client redirect
-  local ssl_dir disc
-  # qui refuses to start until it can read the discovery document, so Ready is
-  # the alias, the trust root and the egress rule proved together -- and on the
-  # first install there is nothing else to prove them with.
-  $K -n "$NS" wait --for=condition=Ready pod/qui-0 --timeout=300s ||
-    { echo "qui-0 never became Ready: it starts only once the issuer answers"; fail=1; }
-  secret_name=$($K -n "$NS" get statefulset qui \
+assert_oidc() { # assert_oidc <domain> <app> <environment prefix>
+  local domain=$1 app=$2 prefix=$3
+  local secret_name proxy_ip alias_ip alias_host issuer client redirect ssl_dir disc
+  local grant_ip cm_digest stored_digest plaintext policy provider has_hmac anchor eg_port
+  # The app's own readiness is the alias, the trust root and the egress rule
+  # proved together -- for the client that will not start without them, and as
+  # a first sign that nothing is wrong for the one that starts anyway.
+  $K -n "$NS" wait --for=condition=Ready "pod/${app}-0" --timeout=300s ||
+    { echo "${app}-0 never became Ready"; fail=1; }
+  secret_name=$($K -n "$NS" get statefulset "$app" \
     -o jsonpath='{.spec.template.spec.volumes[?(@.name=="oidc")].secret.secretName}' 2>/dev/null || true)
-  echo "  qui mounts client secret: ${secret_name:-nothing}"
-  [ "$secret_name" = s5n-oidc-qui ] ||
-    { echo "qui does not mount the client secret box wrote"; fail=1; }
+  echo "  ${app} mounts client secret: ${secret_name:-nothing}"
+  [ "$secret_name" = "s5n-oidc-${app}" ] ||
+    { echo "${app} does not mount the client secret box wrote"; fail=1; }
 
   proxy_ip=$($K -n envoy-gateway-system get service \
     -l 'app.kubernetes.io/name=envoy,gateway.envoyproxy.io/owning-gateway-name=s5n,gateway.envoyproxy.io/owning-gateway-namespace=s5n-gateway' \
     -o jsonpath='{.items[0].spec.clusterIP}' 2>/dev/null || true)
-  alias_ip=$($K -n "$NS" get statefulset qui -o jsonpath='{.spec.template.spec.hostAliases[0].ip}' 2>/dev/null || true)
-  alias_host=$($K -n "$NS" get statefulset qui -o jsonpath='{.spec.template.spec.hostAliases[0].hostnames[0]}' 2>/dev/null || true)
-  echo "  qui alias: ${alias_host} -> ${alias_ip} (proxy Service ${proxy_ip})"
+  alias_ip=$($K -n "$NS" get statefulset "$app" -o jsonpath='{.spec.template.spec.hostAliases[0].ip}' 2>/dev/null || true)
+  alias_host=$($K -n "$NS" get statefulset "$app" -o jsonpath='{.spec.template.spec.hostAliases[0].hostnames[0]}' 2>/dev/null || true)
+  echo "  ${app} alias: ${alias_host} -> ${alias_ip} (proxy Service ${proxy_ip})"
   [ -n "$proxy_ip" ] || { echo "the Gateway's proxy Service has no ClusterIP to alias"; fail=1; }
   [ "$alias_ip" = "$proxy_ip" ] ||
-    { echo "qui aliases ${alias_ip}, want the proxy Service's ${proxy_ip}"; fail=1; }
+    { echo "${app} aliases ${alias_ip}, want the proxy Service's ${proxy_ip}"; fail=1; }
   [ "$alias_host" = "$domain" ] ||
-    { echo "qui aliases ${alias_host}, want the box's own name ${domain}"; fail=1; }
+    { echo "${app} aliases ${alias_host}, want the box's own name ${domain}"; fail=1; }
 
   # box wrote the address into the grant at init: a user's apply renders it and
   # never reads the Gateway's namespace.
-  local grant_ip
   grant_ip=$(sed -n 's/^ *gatewayIP: *//p' "$WORK/grant.yaml" | head -1 || true)
   echo "  grant's gatewayIP: ${grant_ip:-absent}"
   [ "$grant_ip" = "$proxy_ip" ] ||
     { echo "the grant records ${grant_ip:-no address}, want the proxy Service's ${proxy_ip}"; fail=1; }
 
-  issuer=$($K -n "$NS" get statefulset qui -o jsonpath='{.spec.template.spec.containers[0].env[?(@.name=="QUI__OIDC_ISSUER")].value}' 2>/dev/null || true)
-  client=$($K -n "$NS" get statefulset qui -o jsonpath='{.spec.template.spec.containers[0].env[?(@.name=="QUI__OIDC_CLIENT_ID")].value}' 2>/dev/null || true)
-  redirect=$($K -n "$NS" get statefulset qui -o jsonpath='{.spec.template.spec.containers[0].env[?(@.name=="QUI__OIDC_REDIRECT_URL")].value}' 2>/dev/null || true)
-  ssl_dir=$($K -n "$NS" get statefulset qui -o jsonpath='{.spec.template.spec.containers[0].env[?(@.name=="SSL_CERT_DIR")].value}' 2>/dev/null || true)
-  echo "  qui: issuer ${issuer}, client ${client}, redirect ${redirect}, SSL_CERT_DIR ${ssl_dir}"
-  [ "$issuer" = "https://${domain}/auth" ] || { echo "qui's issuer is ${issuer}"; fail=1; }
-  [ "$client" = "${NS}-qui" ] || { echo "qui's client id is ${client}"; fail=1; }
-  [ "$redirect" = "https://${domain}/qui/api/auth/oidc/callback" ] ||
-    { echo "qui's redirect URI is ${redirect}: it must be the callback path it builds from its base URL"; fail=1; }
+  issuer=$($K -n "$NS" get statefulset "$app" -o jsonpath="{.spec.template.spec.containers[0].env[?(@.name==\"${prefix}__OIDC_ISSUER\")].value}" 2>/dev/null || true)
+  client=$($K -n "$NS" get statefulset "$app" -o jsonpath="{.spec.template.spec.containers[0].env[?(@.name==\"${prefix}__OIDC_CLIENT_ID\")].value}" 2>/dev/null || true)
+  redirect=$($K -n "$NS" get statefulset "$app" -o jsonpath="{.spec.template.spec.containers[0].env[?(@.name==\"${prefix}__OIDC_REDIRECT_URL\")].value}" 2>/dev/null || true)
+  ssl_dir=$($K -n "$NS" get statefulset "$app" -o jsonpath='{.spec.template.spec.containers[0].env[?(@.name=="SSL_CERT_DIR")].value}' 2>/dev/null || true)
+  echo "  ${app}: issuer ${issuer}, client ${client}, redirect ${redirect}, SSL_CERT_DIR ${ssl_dir}"
+  [ "$issuer" = "https://${domain}/auth" ] || { echo "${app}'s issuer is ${issuer}"; fail=1; }
+  [ "$client" = "${NS}-${app}" ] || { echo "${app}'s client id is ${client}"; fail=1; }
+  [ "$redirect" = "https://${domain}/${app}/api/auth/oidc/callback" ] ||
+    { echo "${app}'s redirect URI is ${redirect}: it must be the callback path it builds from its base URL"; fail=1; }
   [ "$ssl_dir" = /etc/s5n-host-ca ] ||
     { echo "SSL_CERT_DIR is ${ssl_dir}: the anchor is added to the bundle, never substituted for it"; fail=1; }
 
   # The two halves agree: the client's digest in the login's configuration is the
   # one box stored beside the signing material, and the plaintext is in this
-  # namespace.
-  local cm_digest stored_digest plaintext policy
-  cm_digest=$($K -n s5n-system get configmap s5n-authelia -o jsonpath='{.data.configuration\.yml}' 2>/dev/null |
-    sed -n "s/^ *client_secret: '\(.*\)'$/\1/p" | head -1 || true)
-  stored_digest=$($K -n s5n-system get secret s5n-authelia -o jsonpath="{.data.oidc-client-${NS}-qui}" 2>/dev/null | base64 -d || true)
-  plaintext=$($K -n "$NS" get secret s5n-oidc-qui -o jsonpath='{.data.client-secret}' 2>/dev/null | base64 -d || true)
-  echo "  client secret: ${#plaintext} characters in ${NS}/s5n-oidc-qui, digest ${cm_digest:0:24}..."
+  # namespace. The digest is looked up by client id, because a box with two
+  # clients has two of them in the same file.
+  policy=$($K -n s5n-system get configmap s5n-authelia -o jsonpath='{.data.configuration\.yml}' 2>/dev/null || true)
+  cm_digest=$(printf '%s' "$policy" | python3 -c 'import sys, yaml
+conf = yaml.safe_load(sys.stdin.read()) or {}
+for c in conf.get("identity_providers", {}).get("oidc", {}).get("clients", []):
+    if c.get("client_id") == sys.argv[1]:
+        print(c.get("client_secret", ""))
+' "${NS}-${app}" || true)
+  stored_digest=$($K -n s5n-system get secret s5n-authelia -o jsonpath="{.data.oidc-client-${NS}-${app}}" 2>/dev/null | base64 -d || true)
+  plaintext=$($K -n "$NS" get secret "s5n-oidc-${app}" -o jsonpath='{.data.client-secret}' 2>/dev/null | base64 -d || true)
+  echo "  ${app} client secret: ${#plaintext} characters in ${NS}/s5n-oidc-${app}, digest ${cm_digest:0:24}..."
   case "$cm_digest" in
     '$pbkdf2-sha512$310000$'*) : ;;
-    *) echo "the login's client_secret is not a pbkdf2-sha512 digest: ${cm_digest}"; fail=1 ;;
+    *) echo "the login's client_secret for ${app} is not a pbkdf2-sha512 digest: ${cm_digest}"; fail=1 ;;
   esac
   [ "$cm_digest" = "$stored_digest" ] ||
-    { echo "the configuration's digest and the one stored in the login's Secret differ"; fail=1; }
+    { echo "the configuration's digest and the one stored in the login's Secret differ for ${app}"; fail=1; }
   [ "${#plaintext}" -ge 40 ] ||
     { echo "the client secret in ${NS} is ${#plaintext} characters, want the generated 48"; fail=1; }
 
   # The signing material is a file in the same Secret, and the configuration
   # does not carry it.
-  local provider has_hmac
   provider=$($K -n s5n-system get secret s5n-authelia -o jsonpath='{.data.oidc\.yml}' 2>/dev/null | base64 -d || true)
   has_hmac=$(printf '%s' "$provider" | grep -c "hmac_secret:" || true)
   echo "  provider file: ${#provider} bytes, hmac_secret lines ${has_hmac}"
@@ -674,16 +683,13 @@ assert_oidc() { # assert_oidc <domain>
 
   # The policy is this seedbox's: the client points at it, and it admits only
   # this box's account.
-  policy=$($K -n s5n-system get configmap s5n-authelia -o jsonpath='{.data.configuration\.yml}' 2>/dev/null ||
-    true)
   printf '%s' "$policy" | grep -q "authorization_policy: '${NS}'" ||
-    { echo "the client does not name this box's authorization policy"; fail=1; }
+    { echo "${app}'s client does not name this box's authorization policy"; fail=1; }
   printf '%s' "$policy" | grep -q "user:${LOGIN}" ||
     { echo "the policy admits no ${LOGIN}: the rule and the login's account disagree"; fail=1; }
 
   # The trust anchor, when the box's certificate is not publicly trusted: box
   # copied the root into this namespace, and the pod mounts it.
-  local anchor
   anchor=$($K -n "$NS" get configmap s5n-host-ca -o jsonpath='{.data.ca\.crt}' 2>/dev/null || true)
   if [ -n "$anchor" ]; then
     printf '%s' "$anchor" | grep -q "BEGIN CERTIFICATE" ||
@@ -700,17 +706,18 @@ assert_oidc() { # assert_oidc <domain>
   #
   # curl here is OpenSSL, and OpenSSL's directory lookup only finds certificates
   # under their subject-hash names (<hash>.0) -- not ca.crt. So SSL_CERT_DIR,
-  # which the pod inherits and which is exactly right for qui (Go reads every
-  # file in it), trusts nothing in curl: point it at the file instead. A Let's
-  # Encrypt box has no anchor and curl's system bundle is what trusts the issuer.
+  # which the pod inherits and which is exactly right for a Go client (it reads
+  # every file in it), trusts nothing in curl: point it at the file instead. A
+  # Let's Encrypt box has no anchor and curl's system bundle is what trusts the
+  # issuer.
   local ca_args=()
   if [ -n "$anchor" ]; then
     ca_args=(--cacert /etc/s5n-host-ca/ca.crt)
   fi
-  disc=$($K -n "$NS" exec qui-0 -- curl -sS --max-time 15 "${ca_args[@]}" \
+  disc=$($K -n "$NS" exec "${app}-0" -- curl -sS --max-time 15 "${ca_args[@]}" \
     "https://${domain}/auth/.well-known/openid-configuration" 2>"$WORK/oidc-discovery.err" || true)
   if [ -z "$disc" ]; then
-    echo "qui's pod got no discovery document from https://${domain}/auth: the alias, the anchor or the egress rule is wrong"
+    echo "${app}'s pod got no discovery document from https://${domain}/auth: the alias, the anchor or the egress rule is wrong"
     sed 's/^/    curl: /' "$WORK/oidc-discovery.err" 2>/dev/null || true
     fail=1
   else
@@ -735,10 +742,9 @@ print("  discovery: issuer %s, token %s, jwks %s" % (d["issuer"], d["token_endpo
   # The egress rule that lets it: the proxy's pods, on the container port Envoy
   # listens on. 443 here would be a rule that admits nothing (NetworkPolicy is
   # evaluated after the Service's DNAT).
-  local eg_port
-  eg_port=$($K -n "$NS" get networkpolicy qui-oidc-egress -o jsonpath='{.spec.egress[0].ports[0].port}' 2>/dev/null || true)
-  echo "  qui-oidc-egress port: ${eg_port:-missing}"
-  [ "$eg_port" = 10443 ] || { echo "the OIDC egress rule names ${eg_port:-no port}, want 10443"; fail=1; }
+  eg_port=$($K -n "$NS" get networkpolicy "${app}-oidc-egress" -o jsonpath='{.spec.egress[0].ports[0].port}' 2>/dev/null || true)
+  echo "  ${app}-oidc-egress port: ${eg_port:-missing}"
+  [ "$eg_port" = 10443 ] || { echo "the ${app} OIDC egress rule names ${eg_port:-no port}, want 10443"; fail=1; }
 }
 
 # ---- an app's own sign-in: the OIDC round trip, without a browser ----------
@@ -957,8 +963,11 @@ print(json.dumps({"username": sys.argv[1], "password": sys.argv[2],
   echo "  ${app}: GET the callback: ${code} -> ${location}"
   [ "$code" = 302 ] ||
     { echo "the callback answered ${code}: the code exchange did not complete"; fail=1; }
+  # Where the app sends the browser after a successful exchange differs: qui
+  # builds it from its redirect URL and answers an absolute one, autobrr
+  # redirects to its own baseUrl, which is a path. Both are inside the app.
   case "$location" in
-    "https://${DOMAIN}${base}"*) : ;;
+    "https://${DOMAIN}${base}"* | "${base}"*) : ;;
     *) echo "the callback sent the browser to ${location}, not back into the app"; fail=1 ;;
   esac
 
@@ -1371,7 +1380,7 @@ print("  app routes: %d HTTPRoutes, none pins a sectionName" % len(items))
 
   # Every opt-in app is behind the same login, and none of them keeps one of its
   # own: an unauthenticated request must reach the edge before the app does.
-  for app in qui maintainerr; do
+  for app in qui autobrr maintainerr; do
     app_headers="$WORK/unauth-${app}-headers.txt"
     app_code=$(curl -sS -o /dev/null -D "$app_headers" -w '%{http_code}' \
       --resolve "${DOMAIN}:443:${gw_addr}" --cacert "$WORK/pebble-root.pem" \
@@ -1746,17 +1755,21 @@ for r in items:
   [ "$https_code" = 200 ] || { echo "HTTPS did not answer after the renewal"; fail=1; }
 
   $K -n "$NS" wait --for=condition=Ready pod -l 'app.kubernetes.io/instance=s5n,s5n.io/app' --timeout=300s || fail=1
-  # ---- the OIDC provider: qui is Ready on the first install, with the issuer --
-  log "the provider: qui's client, the issuer it dials, and the anchor"
-  assert_oidc "$DOMAIN"
+  # ---- the OIDC provider: both clients are Ready on the first install --------
+  log "the provider: both clients, the issuer they dial, and the anchor"
+  assert_oidc "$DOMAIN" qui QUI
+  assert_oidc "$DOMAIN" autobrr AUTOBRR
   # ---- the sign-in itself ----------------------------------------------------
-  # Ready proves the pod read the discovery document. It does not prove anyone
-  # can sign in, which is the thing an operator does, so the flow is run here
-  # as a browser runs it -- and a second account tries the same flow to show
-  # the client's policy is this seedbox's alone.
-  log "the sign-in: qui's OIDC round trip, and the client that refuses another login"
+  # Ready proves a pod read the discovery document -- for the client that will
+  # not start without it. It does not prove anyone can sign in, which is the
+  # thing an operator does, so the flow is run here as a browser runs it, for
+  # both clients; a second account then tries the same flow to show the client's
+  # policy is this seedbox's alone.
+  log "the sign-in: both clients' OIDC round trips, and the client that refuses another login"
   oidc_login qui /qui /qui/api/auth/me "$gw_addr" "$WORK/pebble-root.pem"
   oidc_refuses_another_login qui /qui "$gw_addr" "$WORK/pebble-root.pem"
+  oidc_login autobrr /autobrr /autobrr/api/auth/validate "$gw_addr" "$WORK/pebble-root.pem"
+  oidc_refuses_another_login autobrr /autobrr "$gw_addr" "$WORK/pebble-root.pem"
   # ---- storage: box created the claims, and they are bound ----
   for kind in data config; do
     pv=seedbox-s5n-${kind}
@@ -2704,13 +2717,16 @@ PY
   # install is the whole proof -- qui does not start until it can read the
   # discovery document.
   log "the provider on a self-signed host: the box root is the anchor"
-  assert_oidc "$DOMAIN"
+  assert_oidc "$DOMAIN" qui QUI
+  assert_oidc "$DOMAIN" autobrr AUTOBRR
   # The same sign-in on a host nothing public signs: the browser's side of it
   # trusts s5n-host-ca alone, which is what a person's browser does after
   # importing the box's root.
-  log "the sign-in on a self-signed host: qui's OIDC round trip"
+  log "the sign-in on a self-signed host: both clients' OIDC round trips"
   oidc_login qui /qui /qui/api/auth/me "$lb_addr" "$WORK/anchor-ca.pem"
   oidc_refuses_another_login qui /qui "$lb_addr" "$WORK/anchor-ca.pem"
+  oidc_login autobrr /autobrr /autobrr/api/auth/validate "$lb_addr" "$WORK/anchor-ca.pem"
+  oidc_refuses_another_login autobrr /autobrr "$lb_addr" "$WORK/anchor-ca.pem"
 
   # ---- a second bootstrap: still nothing installed -------------------------
   # box's MetalLB is still not a release it can see, so the second run asks the

@@ -444,6 +444,22 @@ func TestRealChartManifestLoads(t *testing.T) {
 			t.Fatalf("apps.%s has %d transient questions; the kind is meant to be rare", app.Name, len(app.Transient()))
 		}
 	}
+	// The apps that sign in through the login's provider, in manifest order:
+	// the clients box registers for a box with both installed. A new one is an
+	// entry here, and the chart wires it from the same flag.
+	if got := strings.Join(cat.OIDCApps([]string{"qui", "autobrr", "maintainerr", "sonarr"}), ","); got != "qui,autobrr" {
+		t.Fatalf("OIDC apps = %s, want qui,autobrr (only the catalog's flag makes a client)", got)
+	}
+	for _, name := range []string{"qui", "autobrr"} {
+		app, _ := cat.App(name)
+		if !app.OIDC {
+			t.Fatalf("apps.%s is not an OIDC client", name)
+		}
+	}
+	if app, _ := cat.App("maintainerr"); app.OIDC {
+		t.Fatal("apps.maintainerr is marked as an OIDC client")
+	}
+
 	// The opt-in apps: off unless the operator says so, no instances, and
 	// nothing to ask at init. A box that installs the defaults must not get
 	// them, so `default: false` is the assertion that matters most here.

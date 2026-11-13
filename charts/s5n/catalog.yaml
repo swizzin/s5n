@@ -129,6 +129,12 @@ apps:
     description: grabs a release when it is announced, before the feed catches up
     instances: false
     default: false
+    # autobrr speaks OIDC too, and only OIDC: at v1.90.0 it has no way to run
+    # without a login of its own (no authDisabled, no trusted-header mode), so a
+    # box that served it behind the edge alone would ask for two passwords. The
+    # flag is the whole change: the chart wires the issuer, the secret and the
+    # trust anchor from it, and box registers the client.
+    oidc: true
     questions: []
 
   # Opt-in, and louder so: it deletes media and torrents on rules the operator

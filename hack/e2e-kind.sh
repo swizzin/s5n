@@ -104,7 +104,7 @@ $KIND load docker-image --name "$CLUSTER" "$IMAGE"
 log "preparing host paths inside the node (what box init creates on real hosts)"
 docker exec "${CLUSTER}-control-plane" bash -c '
   mkdir -p /srv/s5n/data \
-           /srv/s5n/config/{qbittorrent,prowlarr,sonarr,sonarr-4k,radarr,radarr-4k,plex,tautulli,seerr,qui,maintainerr}
+           /srv/s5n/config/{qbittorrent,prowlarr,sonarr,sonarr-4k,radarr,radarr-4k,plex,tautulli,seerr,qui,autobrr,maintainerr}
   chown -R 1000:1000 /srv/s5n'
 
 # Nothing below may prepare the data categories: the wiring Job owns them, and a
@@ -510,6 +510,8 @@ cat >"$WORK/apps-values.yaml" <<'EOF'
 apps:
   qui:
     enabled: true
+  autobrr:
+    enabled: true
   maintainerr:
     enabled: true
 EOF
@@ -876,11 +878,14 @@ done
 
 # ---- the opt-in apps (apps-values.yaml) ---------------------------------------
 # Each serves itself under its own base path (its baseUrl / BASE_PATH, with no
-# rewrite), and none of them keeps a login of its own: the edge is the login,
-# exactly as the Arrs run External. So the HTML must arrive without a redirect,
+# rewrite). qui and Maintainerr keep no login of their own here: the edge is the
+# login, exactly as the Arrs run External. autobrr does, because v1.90.0 has no
+# way to turn its login off and this install gives the release no provider -- a
+# box's init does, and that is what the box e2e signs in to. So the HTML must
+# arrive without a redirect,
 # and the asset URLs it builds must resolve through the same prefix — that is
 # what makes the base-path setting right rather than merely present.
-for app in qui maintainerr; do
+for app in qui autobrr maintainerr; do
   : >"$WORK/${app}-headers"
   code=$(gw_get -s -D "$WORK/${app}-headers" -o "$WORK/${app}.html" -w '%{http_code}' \
     "https://${DOMAIN}/${app}/" || true)
@@ -910,6 +915,14 @@ for app in qui maintainerr; do
       code=$($K -n "$NS" exec qui-0 -- curl -s -o /dev/null -w '%{http_code}' \
         http://127.0.0.1:7476/healthz/readiness || true)
       echo "GET /${app} in-pod /healthz/readiness -> ${code}"; [ "$code" = 200 ] || fail=1 ;;
+    autobrr)
+      # This install gives the release no provider (a plain helm install sets
+      # auth.edge and nothing else), so autobrr keeps the login it cannot turn
+      # off at v1.90.0: the UI is its own sign-in page behind the edge's, which
+      # is the state a box that never ran init has. Its base path covers every
+      # route, so health answers under the prefix like any other path.
+      code=$(gw_get -s -o /dev/null -w '%{http_code}' "https://${DOMAIN}/${app}/api/healthz/readiness" || true)
+      echo "GET /${app}/api/healthz/readiness via gateway -> ${code}"; [ "$code" = 200 ] || fail=1 ;;
     maintainerr)
       # BASE_PATH covers every route, health included, so this one is reachable
       # through the Gateway like any other path.
