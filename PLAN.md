@@ -173,8 +173,10 @@ recorded in the wiring ConfigMap, not by name and not by tag (see AGENTS.md inva
 
 - Arr API keys are injected by env (`SONARR__AUTH__APIKEY`, …), so nothing has to be
   scraped from `config.xml`.
-- The qBittorrent WebUI password is seeded as a PBKDF2 hash by an init container, and one
-  category is created per Arr instance. Save path, temp path and category paths are set
+- The qBittorrent WebUI password is seeded as a PBKDF2 hash by an init container and
+  handed to no app: qBittorrent bypasses its login for private addresses, behind the
+  edge's login and the NetworkPolicy (docs/box.md, Logins). One category is created per
+  Arr instance. Save path, temp path and category paths are set
   through the API and read back, because the image re-applies its own default at runtime.
 - qBittorrent performance settings (send-buffer watermarks, async I/O threads, disk
   queue, disk cache, uTP, preallocation) come in three tiers. Compiled defaults are baked

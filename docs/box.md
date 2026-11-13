@@ -211,7 +211,22 @@ Arrs, Prowlarr, qui. One auth provider checks the login at the Gateway. It is pa
 platform layer: root's `bootstrap` installs it, and `box adduser` adds the user to it.
 Each user's domain admits only that user. Behind it the apps have no login of their own
 (the Arrs run with `External` authentication, PeerBanHelper with its login switched
-off) and are reachable only through the Gateway.
+off, qBittorrent with its password bypassed for private addresses) and are reachable
+only through the Gateway.
+
+**qBittorrent skips its password for private addresses (decided).** qBittorrent can't
+switch its login off, so it bypasses it for the private ranges
+(`AuthSubnetWhitelist`: 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 100.64.0.0/10,
+fc00::/7, the same list the release's egress policy treats as internal) and for
+loopback (`kubectl port-forward`). Everything that reaches it is then one of two
+callers: Envoy, which forwards only requests the edge's login has already admitted
+(qBittorrent's paths have no bypass at the edge, unlike an Arr's `/api`), or an app
+the release's NetworkPolicy lets in. That is the same boundary the Arrs sit behind
+with `External`. The apps that call it (the Arrs, qui, autobrr, PeerBanHelper, the
+wiring Job) connect with an empty username and password, so no app's database holds
+a copy of a qBittorrent credential. The init container still seals a generated
+password into `qBittorrent.conf`, so qBittorrent never mints a temporary one and
+prints it to its log, but nothing is given it.
 
 **One auth mechanism, no fallback (decided).** Wiring a login into each app separately
 would be a second auth system with its own reset path, tests and docs, so box doesn't
@@ -221,8 +236,8 @@ build one. That is why Envoy Gateway is the only Gateway implementation box supp
 a hash and nothing else does. A forgotten password is reset, not recovered. `init` (and
 `adduser`) asks for one; an empty answer means box generates a random one and shows it
 once, at the end of the run, the way swizzin always has. Credentials
-between apps (API keys, the qBittorrent account the Arrs use) are generated, kept in the
-release Secret, and never the person's password.
+between apps (API keys, the qui and autobrr accounts the wiring Job signs in with) are
+generated, kept in the release Secret, and never the person's password.
 
 **Plex, Seerr and Tautulli sign in through Plex (decided).** Players talk to Plex
 directly, and Seerr's users are the Plex server's friends, so these three stay outside
