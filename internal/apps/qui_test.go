@@ -193,7 +193,7 @@ func TestQuiEnsureInstanceAdoptsByNameAndDoesNotDuplicate(t *testing.T) {
 	res, err := q.EnsureInstance(context.Background(), QuiInstanceSpec{
 		Name: "qBittorrent", Host: "http://qbittorrent:8080", Username: "admin",
 		Password: "qbit-pass", HasLocalFilesystemAccess: true,
-	}, 0, "")
+	}, 0)
 	if err != nil {
 		t.Fatalf("adopt: %v", err)
 	}
@@ -228,12 +228,12 @@ func TestQuiEnsureInstanceIsIdempotent(t *testing.T) {
 	spec := QuiInstanceSpec{Name: "qBittorrent", Host: "http://qbittorrent:8080",
 		Username: "admin", Password: "qbit-pass", HasLocalFilesystemAccess: true}
 
-	res, err := q.EnsureInstance(ctx, spec, 0, "")
+	res, err := q.EnsureInstance(ctx, spec, 0)
 	if err != nil {
 		t.Fatalf("first run: %v", err)
 	}
 	writes := f.writes
-	res, err = q.EnsureInstance(ctx, spec, res.ID, SecretFingerprint("qbit-pass"))
+	res, err = q.EnsureInstance(ctx, spec, res.ID)
 	if err != nil {
 		t.Fatalf("second run: %v", err)
 	}
@@ -251,36 +251,6 @@ func TestQuiEnsureInstanceIsIdempotent(t *testing.T) {
 	}
 }
 
-// A rotated qBittorrent password is invisible in the API's answer, so the
-// fingerprint in owned.json is what makes the instance get rewritten.
-func TestQuiEnsureInstanceRewritesOnRotatedPassword(t *testing.T) {
-	f, q := newQuiFake(t)
-	loginQui(t, q)
-	ctx := context.Background()
-	base := QuiInstanceSpec{Name: "qBittorrent", Host: "http://qbittorrent:8080",
-		Username: "admin", Password: "qbit-old", HasLocalFilesystemAccess: true}
-
-	res, err := q.EnsureInstance(ctx, base, 0, "")
-	if err != nil {
-		t.Fatalf("first run: %v", err)
-	}
-	rotated := base
-	rotated.Password = "qbit-new"
-	res, err = q.EnsureInstance(ctx, rotated, res.ID, SecretFingerprint("qbit-old"))
-	if err != nil {
-		t.Fatalf("rotated run: %v", err)
-	}
-	if res.Change != Updated {
-		t.Fatalf("a rotated password reported %s, want updated", res.Change)
-	}
-	if len(res.Drift) != 0 {
-		t.Fatalf("drift = %+v, want none: only the secret changed", res.Drift)
-	}
-	if len(f.updated) != 1 || f.updated[0].Str("password") != "qbit-new" {
-		t.Fatalf("PUT bodies = %v, want one carrying the new password", f.updated)
-	}
-}
-
 // The create's 201 is not proof: qui tests the connection in a goroutine after
 // it answers, so the client's own test call is what decides.
 func TestQuiEnsureInstanceFailsWhenTheInstanceIsNotConnected(t *testing.T) {
@@ -291,7 +261,7 @@ func TestQuiEnsureInstanceFailsWhenTheInstanceIsNotConnected(t *testing.T) {
 	res, err := q.EnsureInstance(context.Background(), QuiInstanceSpec{
 		Name: "qBittorrent", Host: "http://qbittorrent:8080", Username: "admin",
 		Password: "qbit-pass", HasLocalFilesystemAccess: true,
-	}, 0, "")
+	}, 0)
 	if err == nil {
 		t.Fatal("a created-but-unreachable instance passed")
 	}
@@ -351,7 +321,7 @@ func TestQuiCreateUsesTheReturnedID(t *testing.T) {
 	res, err := q.EnsureInstance(context.Background(), QuiInstanceSpec{
 		Name: "qBittorrent", Host: "http://qbittorrent:8080", Username: "admin",
 		Password: "qbit-pass", HasLocalFilesystemAccess: true,
-	}, 0, "")
+	}, 0)
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}

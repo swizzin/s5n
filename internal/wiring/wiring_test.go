@@ -30,7 +30,7 @@ type fakeStack struct {
 	writes      int
 	tests       int
 	nextID      int
-	loginErr    bool
+	logins      int // requests to /api/v2/auth/login: there should be none
 	prefs       map[string]any
 	ignorePrefs bool   // a qBittorrent that accepts setPreferences and changes nothing
 	linkFail    string // a save path whose hardlink proof fails
@@ -48,11 +48,10 @@ func (f *fakeStack) qbitHandler() http.HandlerFunc {
 		defer f.mu.Unlock()
 		switch r.URL.Path {
 		case "/api/v2/auth/login":
-			if f.loginErr {
-				_, _ = w.Write([]byte("Fails."))
-				return
-			}
-			w.WriteHeader(http.StatusNoContent)
+			// Recorded, not answered: a client with no password must never
+			// send this at all.
+			f.logins++
+			_, _ = w.Write([]byte("Fails."))
 		case "/api/v2/app/version":
 			_, _ = w.Write([]byte("v5.3.0"))
 		case "/api/v2/app/preferences":
@@ -294,7 +293,7 @@ func newHarness(t *testing.T) *harness {
 	data := filepath.Join(dir, "data")
 	h.config = Config{
 		Namespace: "seedbox", ConfigMap: "s5n-wiring", TimeoutSeconds: 10,
-		Qbittorrent: &QbitConfig{URL: qbit.URL, Username: "admin", PasswordFile: write("qbit.pw", "hunter2\n")},
+		Qbittorrent: &QbitConfig{URL: qbit.URL},
 		Prowlarr:    &ProwlarrConfig{URL: prowlarr.URL, URLBase: "/prowlarr", SelfURL: prowlarr.URL + "/prowlarr", APIKeyFile: write("prowlarr.key", "prowlarr-key")},
 		Instances: []Instance{
 			{Name: "sonarr", Kind: "sonarr", URL: sonarr.URL, URLBase: "/sonarr", APIKeyFile: write("sonarr.key", "sonarr-key"),
@@ -397,16 +396,90 @@ func TestWiringIsIdempotent(t *testing.T) {
 
 func TestWiringFailsLoudlyAndStillPublishes(t *testing.T) {
 	h := newHarness(t)
-	h.stack.loginErr = true
+	// A qBittorrent nothing answers on: with the login bypassed, an unreachable
+	// WebUI is the one way this step can fail.
+	h.config.Qbittorrent.URL = "http://127.0.0.1:1"
+	h.config.TimeoutSeconds = 1
+	h.runner.Config = h.config
 	res, err := h.runner.Run(context.Background())
 	if err == nil {
-		t.Fatal("run succeeded with a rejected qBittorrent login")
+		t.Fatal("run succeeded with no qBittorrent answering")
 	}
 	if res.Status != "failed" || !strings.Contains(res.Error, "qbittorrent/ready") {
 		t.Fatalf("receipt = %+v", res)
 	}
 	if len(h.results) != 1 {
 		t.Fatalf("failure receipt not published")
+	}
+}
+
+// The Job has no qBittorrent password to give, so it never posts the login
+// form: qBittorrent skips its login for the release's addresses, and a failed
+// attempt is what gets an address banned.
+func TestWiringNeverPostsTheQbitLogin(t *testing.T) {
+	h := newHarness(t)
+	ctx := context.Background()
+	if _, err := h.runner.Run(ctx); err != nil {
+		t.Fatalf("first run: %v", err)
+	}
+	if _, err := h.runner.Run(ctx); err != nil {
+		t.Fatalf("second run: %v", err)
+	}
+	if h.stack.logins != 0 {
+		t.Fatalf("the Job posted /api/v2/auth/login %d times, want none", h.stack.logins)
+	}
+}
+
+// An install from before the bypass left its own copy of the qBittorrent
+// password in the Arr. Both credential fields are owned, so the next run
+// clears them and the receipt says the client was updated.
+func TestWiringClearsAStoredQbittorrentPassword(t *testing.T) {
+	h := newHarness(t)
+	ctx := context.Background()
+	host, port, err := hostPort(h.config.Qbittorrent.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// What 0.3.0 wrote: a real username and password.
+	h.stack.clients["sonarr"] = []apps.Item{{
+		"id": 7, "name": "qBittorrent", "enable": true, "priority": 1,
+		"fields": []any{
+			map[string]any{"name": "host", "value": host},
+			map[string]any{"name": "port", "value": port},
+			map[string]any{"name": "useSsl", "value": false},
+			map[string]any{"name": "urlBase", "value": ""},
+			map[string]any{"name": "username", "value": "admin"},
+			map[string]any{"name": "password", "value": "hunter2", "privacy": "password"},
+			map[string]any{"name": "tvCategory", "value": "tv"},
+		},
+	}}
+	h.stack.nextID = 7
+
+	res, err := h.runner.Run(ctx)
+	if err != nil {
+		t.Fatalf("run: %v\n%s", err, Summary(res))
+	}
+	step := stepByName(t, res, "sonarr/downloadclient")
+	if step.Result != "ok" || step.Detail != "updated" {
+		t.Fatalf("sonarr/downloadclient = %+v, want updated", step)
+	}
+	if len(step.Drift) != 1 || step.Drift[0].Field != "username" ||
+		step.Drift[0].Old != "admin" || step.Drift[0].New != "" {
+		t.Fatalf("drift = %+v, want the stored username reported as cleared", step.Drift)
+	}
+	client := h.stack.clients["sonarr"][0]
+	if client.Int("id") != 7 {
+		t.Fatalf("the client was recreated (id %d) instead of updated", client.Int("id"))
+	}
+	for _, field := range []string{"username", "password"} {
+		if v, _ := client.FieldValue(field); v != "" {
+			t.Fatalf("%s = %v, want it cleared", field, v)
+		}
+	}
+
+	// Cleared once, it stays cleared without a write.
+	if again, err := h.runner.Run(ctx); err != nil || again.Writes.Updated != 0 {
+		t.Fatalf("run after clearing = %+v, %v, want no writes\n%s", again.Writes, err, Summary(again))
 	}
 }
 
@@ -618,7 +691,7 @@ func TestWiringUnknownProwlarrKindErrors(t *testing.T) {
 
 func TestConfigValidation(t *testing.T) {
 	base := Config{
-		Qbittorrent: &QbitConfig{URL: "http://qbittorrent:8080", Username: "admin", PasswordFile: "/k"},
+		Qbittorrent: &QbitConfig{URL: "http://qbittorrent:8080"},
 		Instances: []Instance{{Name: "sonarr", Kind: "sonarr", URL: "http://sonarr:8989", APIKeyFile: "/k2",
 			Category: "tv", SavePath: "/data/downloads/tv", RootFolder: "/data/media/tv"}},
 	}

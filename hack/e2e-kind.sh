@@ -799,6 +799,53 @@ code=$(gw_get -s -o /dev/null -w '%{http_code}' "https://${DOMAIN}/sonarr/initia
 echo "GET /sonarr/initialize.json via gateway -> ${code}"; [ "$code" = 200 ] || fail=1
 code=$(gw_get -s -o /dev/null -w '%{http_code}' "https://${DOMAIN}/qbittorrent/")
 echo "GET /qbittorrent/ via gateway -> ${code}"; [ "$code" = 200 ] || fail=1
+
+# qBittorrent's WebUI skips its login for the private ranges and for loopback
+# (docs/box.md, "Logins"), which is what lets every app that calls it hold no
+# credential. Read that back with no session at all: a 403 here would mean the
+# app is still asking for a password, and then the Arrs, qui, autobrr and
+# PeerBanHelper would each need one again.
+qbit_prefs=$($K -n "$NS" exec qbittorrent-0 -- curl -s http://localhost:8080/api/v2/app/preferences 2>/dev/null || true)
+printf '%s' "$qbit_prefs" >"$WORK/qbittorrent-preferences.json"
+if python3 - "$WORK/qbittorrent-preferences.json" <<'PYPREFS'
+import json, sys
+want = "10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 100.64.0.0/10, fc00::/7"
+try:
+    prefs = json.load(open(sys.argv[1], encoding="utf-8"))
+except Exception as exc:
+    print("  qBittorrent's preferences are not JSON (%s): the WebUI still wants a login" % exc)
+    sys.exit(1)
+ok = True
+print("  bypass_local_auth=%r whitelist_enabled=%r whitelist=%r"
+      % (prefs.get("bypass_local_auth"), prefs.get("bypass_auth_subnet_whitelist_enabled"),
+         prefs.get("bypass_auth_subnet_whitelist")))
+if prefs.get("bypass_local_auth") is not True:
+    print("  loopback still needs a login: kubectl port-forward would ask for one")
+    ok = False
+if prefs.get("bypass_auth_subnet_whitelist_enabled") is not True:
+    print("  the subnet whitelist is off: every pod that calls qBittorrent would need a password")
+    ok = False
+# The API answers the list newline-joined (appcontroller.cpp:362), so it is
+# compared line by line against the five ranges.
+got = [line.strip() for line in str(prefs.get("bypass_auth_subnet_whitelist") or "").split("\n") if line.strip()]
+if ", ".join(got) != want:
+    print("  whitelist = %r, want %r" % (got, want.split(", ")))
+    ok = False
+sys.exit(0 if ok else 1)
+PYPREFS
+then :; else fail=1; fi
+
+# The same three keys in the file on disk, because that is where qBittorrent
+# reads them: the list is a QSettings QStringList, written comma-separated and
+# unquoted (a quoted value reads back as one string, which is one bogus subnet).
+qbit_conf=$($K -n "$NS" exec qbittorrent-0 -- sh -c 'grep -E "^(AuthSubnetWhitelist|AuthSubnetWhitelistEnabled|LocalHostAuth)=" /config/qBittorrent/qBittorrent.conf' 2>/dev/null || true)
+echo "  qBittorrent.conf: $(printf '%s' "$qbit_conf" | tr '\n' ' ')"
+printf '%s\n' "$qbit_conf" | grep -qxF "LocalHostAuth=false" ||
+  { echo "qBittorrent.conf does not skip the login for loopback"; fail=1; }
+printf '%s\n' "$qbit_conf" | grep -qxF "AuthSubnetWhitelistEnabled=true" ||
+  { echo "qBittorrent.conf does not enable the subnet whitelist"; fail=1; }
+printf '%s\n' "$qbit_conf" | grep -qxF "AuthSubnetWhitelist=10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 100.64.0.0/10, fc00::/7" ||
+  { echo "qBittorrent.conf does not carry the five private ranges in QSettings' list form"; fail=1; }
 # ---- apps with a host of their own ------------------------------------------
 # Plex and Seerr are not under a path any more. Their route is <app>.<domain>,
 # their own listener serves the certificate Pebble issued for that name, and
@@ -917,23 +964,23 @@ code=$(curl -sS -o "$WORK/pbh-status.json" -w '%{http_code}' \
 echo "GET https://${PBH_HOST}/api/downloaders/qbittorrent/status -> ${code}"
 [ "$code" = 200 ] || fail=1
 qbit_pw=$($K -n "$NS" get secret s5n-keys -o jsonpath='{.data.qbittorrent-password}' | base64 -d || true)
-if python3 - "$WORK/pbh-status.json" "$qbit_pw" >"$WORK/pbh-status.txt" <<'PY'
+if python3 - "$WORK/pbh-status.json" >"$WORK/pbh-status.txt" <<'PY'
 import json, sys
 status = json.load(open(sys.argv[1], encoding="utf-8"))["data"]
 cfg = status.get("config") or {}
 ok = True
-print("  lastStatus %s, endpoint %s, username %s" % (status.get("lastStatus"), cfg.get("endpoint"), cfg.get("username")))
+print("  lastStatus %s, endpoint %s, username %r, password %d characters"
+      % (status.get("lastStatus"), cfg.get("endpoint"), cfg.get("username"), len(cfg.get("password") or "")))
 if status.get("lastStatus") != "HEALTHY":
     print("  PBH is not healthy on its qBittorrent: %s" % status.get("lastStatusMessage"))
     ok = False
 if cfg.get("endpoint") != "http://qbittorrent:8080":
     print("  PBH dials %r, want the release's own qBittorrent, with no /api/v2" % cfg.get("endpoint"))
     ok = False
-if cfg.get("username") != "admin":
-    print("  PBH logs in as %r, want the chart's webuiUsername" % cfg.get("username"))
-    ok = False
-if cfg.get("password") != sys.argv[2]:
-    print("  PBH holds a password the release Secret does not: a rotation never reached it")
+# Both empty: qBittorrent skips its login for the release's addresses, so no app
+# holds a copy of the credential and PBH dials it without one.
+if cfg.get("username") or cfg.get("password"):
+    print("  PBH holds a qBittorrent credential: nothing should, and HEALTHY proves it needs none")
     ok = False
 sys.exit(0 if ok else 1)
 PY

@@ -205,12 +205,16 @@ func (a *Autobrr) EnsureDownloader(ctx context.Context, spec DownloaderSpec, own
 }
 
 // downloaderFingerprint is what owned.json records per client: the secret that
-// can rotate under it. An Arr client's API key is the Arr's own key from the
-// release Secret; qBittorrent's client has a password instead. Both are
-// sha256-hex, never the value.
+// can rotate under it. That is an Arr client's API key, the Arr's own key from
+// the release Secret. qBittorrent's client has no secret at all now — its
+// username and password are written empty, because qBittorrent skips its login
+// for the release's addresses — so it answers "" and never counts as rotated.
 func downloaderFingerprint(spec DownloaderSpec) string {
 	if spec.APIKey != "" {
 		return SecretFingerprint(spec.APIKey)
 	}
-	return SecretFingerprint(spec.Password)
+	if spec.Password != "" {
+		return SecretFingerprint(spec.Password)
+	}
+	return ""
 }

@@ -154,7 +154,7 @@ func TestEnsureDownloadClientIsIdempotent(t *testing.T) {
 
 	// ownedID 0: nothing recorded yet, so this both creates and tells the
 	// caller the new id to record.
-	result, err := arr.EnsureDownloadClient(ctx, spec, 0, SecretFingerprint(spec.Password))
+	result, err := arr.EnsureDownloadClient(ctx, spec, 0)
 	if err != nil || result.Change != Created {
 		t.Fatalf("first ensure = %+v, %v; want created", result, err)
 	}
@@ -177,7 +177,7 @@ func TestEnsureDownloadClientIsIdempotent(t *testing.T) {
 
 	// The API never returns the password; the second run must still be a no-op.
 	f.maskedClients()
-	result, err = arr.EnsureDownloadClient(ctx, spec, result.ID, SecretFingerprint(spec.Password))
+	result, err = arr.EnsureDownloadClient(ctx, spec, result.ID)
 	if err != nil || result.Change != Unchanged {
 		t.Fatalf("second ensure = %+v, %v; want unchanged", result, err)
 	}
@@ -196,7 +196,7 @@ func TestEnsureDownloadClientRepairsDrift(t *testing.T) {
 	f, arr := newFakeArr(t, "/sonarr")
 	ctx := context.Background()
 	spec := DownloadClientSpec{Name: "qBittorrent", Category: "tv", Host: "qbittorrent", Port: 8080, Username: "admin", Password: "hunter2"}
-	first, err := arr.EnsureDownloadClient(ctx, spec, 0, SecretFingerprint(spec.Password))
+	first, err := arr.EnsureDownloadClient(ctx, spec, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -204,7 +204,7 @@ func TestEnsureDownloadClientRepairsDrift(t *testing.T) {
 	f.clients[0].SetField("host", "localhost")
 	f.maskedClients()
 
-	result, err := arr.EnsureDownloadClient(ctx, spec, first.ID, SecretFingerprint(spec.Password))
+	result, err := arr.EnsureDownloadClient(ctx, spec, first.ID)
 	if err != nil || result.Change != Updated {
 		t.Fatalf("ensure after drift = %+v, %v; want updated", result, err)
 	}
@@ -223,7 +223,7 @@ func TestEnsureDownloadClientSurvivesNonOwnedFieldChange(t *testing.T) {
 	f, arr := newFakeArr(t, "/sonarr")
 	ctx := context.Background()
 	spec := DownloadClientSpec{Name: "qBittorrent", Category: "tv", Host: "qbittorrent", Port: 8080, Username: "admin", Password: "hunter2"}
-	first, err := arr.EnsureDownloadClient(ctx, spec, 0, SecretFingerprint(spec.Password))
+	first, err := arr.EnsureDownloadClient(ctx, spec, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -232,7 +232,7 @@ func TestEnsureDownloadClientSurvivesNonOwnedFieldChange(t *testing.T) {
 	f.clients[0]["tags"] = []any{"anime"}
 	f.maskedClients()
 
-	if result, err := arr.EnsureDownloadClient(ctx, spec, first.ID, SecretFingerprint(spec.Password)); err != nil || result.Change != Unchanged {
+	if result, err := arr.EnsureDownloadClient(ctx, spec, first.ID); err != nil || result.Change != Unchanged {
 		t.Fatalf("ensure over a non-owned change = %+v, %v; want unchanged", result, err)
 	}
 	if got := f.clients[0].Int("priority"); got != 7 {
@@ -249,7 +249,7 @@ func TestEnsureDownloadClientFollowsRename(t *testing.T) {
 	f, arr := newFakeArr(t, "/sonarr")
 	ctx := context.Background()
 	spec := DownloadClientSpec{Name: "qBittorrent", Category: "tv", Host: "qbittorrent", Port: 8080, Username: "admin", Password: "hunter2"}
-	first, err := arr.EnsureDownloadClient(ctx, spec, 0, SecretFingerprint(spec.Password))
+	first, err := arr.EnsureDownloadClient(ctx, spec, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -257,7 +257,7 @@ func TestEnsureDownloadClientFollowsRename(t *testing.T) {
 	f.clients[0].SetField("tvCategory", "something-else")
 	f.maskedClients()
 
-	result, err := arr.EnsureDownloadClient(ctx, spec, first.ID, SecretFingerprint(spec.Password))
+	result, err := arr.EnsureDownloadClient(ctx, spec, first.ID)
 	if err != nil || result.Change != Updated {
 		t.Fatalf("ensure after rename = %+v, %v; want updated", result, err)
 	}
@@ -278,13 +278,13 @@ func TestEnsureDownloadClientRecreatesWhenDeleted(t *testing.T) {
 	f, arr := newFakeArr(t, "/sonarr")
 	ctx := context.Background()
 	spec := DownloadClientSpec{Name: "qBittorrent", Category: "tv", Host: "qbittorrent", Port: 8080, Username: "admin", Password: "hunter2"}
-	first, err := arr.EnsureDownloadClient(ctx, spec, 0, SecretFingerprint(spec.Password))
+	first, err := arr.EnsureDownloadClient(ctx, spec, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
 	f.clients = nil // the user deleted the client entirely
 
-	result, err := arr.EnsureDownloadClient(ctx, spec, first.ID, SecretFingerprint(spec.Password))
+	result, err := arr.EnsureDownloadClient(ctx, spec, first.ID)
 	if err != nil || result.Change != Created || !result.Recreated || result.PreviousID != first.ID {
 		t.Fatalf("recreate after delete = %+v, %v", result, err)
 	}
@@ -303,7 +303,7 @@ func TestEnsureDownloadClientAdoptsByNameWithoutOwnedID(t *testing.T) {
 	f, arr := newFakeArr(t, "/sonarr")
 	ctx := context.Background()
 	spec := DownloadClientSpec{Name: "qBittorrent", Category: "tv", Host: "qbittorrent", Port: 8080, Username: "admin", Password: "hunter2"}
-	first, err := arr.EnsureDownloadClient(ctx, spec, 0, SecretFingerprint(spec.Password))
+	first, err := arr.EnsureDownloadClient(ctx, spec, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -311,7 +311,7 @@ func TestEnsureDownloadClientAdoptsByNameWithoutOwnedID(t *testing.T) {
 
 	// Simulate a fresh process with no owned.json: ownedID 0 again, against the
 	// very same live client.
-	result, err := arr.EnsureDownloadClient(ctx, spec, 0, SecretFingerprint(spec.Password))
+	result, err := arr.EnsureDownloadClient(ctx, spec, 0)
 	if err != nil || result.Change != Unchanged || result.ID != first.ID {
 		t.Fatalf("adopt by name = %+v, %v; want unchanged with id %d", result, err, first.ID)
 	}
@@ -326,7 +326,7 @@ func TestEnsureDownloadClientNeverTouchesUserAddedSecondClient(t *testing.T) {
 	f, arr := newFakeArr(t, "/sonarr")
 	ctx := context.Background()
 	spec := DownloadClientSpec{Name: "qBittorrent", Category: "tv", Host: "qbittorrent", Port: 8080, Username: "admin", Password: "hunter2"}
-	first, err := arr.EnsureDownloadClient(ctx, spec, 0, SecretFingerprint(spec.Password))
+	first, err := arr.EnsureDownloadClient(ctx, spec, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -342,7 +342,7 @@ func TestEnsureDownloadClientNeverTouchesUserAddedSecondClient(t *testing.T) {
 	}
 	writesBefore, testsBefore := f.writes, f.tests
 
-	if result, err := arr.EnsureDownloadClient(ctx, spec, first.ID, SecretFingerprint(spec.Password)); err != nil || result.Change != Unchanged {
+	if result, err := arr.EnsureDownloadClient(ctx, spec, first.ID); err != nil || result.Change != Unchanged {
 		t.Fatalf("ensure with a user-added client present = %+v, %v", result, err)
 	}
 	if f.writes != writesBefore {
@@ -368,7 +368,7 @@ func TestEnsureDownloadClientNeverLeaksMaskedSecret(t *testing.T) {
 	f, arr := newFakeArr(t, "/sonarr")
 	ctx := context.Background()
 	spec := DownloadClientSpec{Name: "qBittorrent", Category: "tv", Host: "qbittorrent", Port: 8080, Username: "admin", Password: "hunter2"}
-	first, err := arr.EnsureDownloadClient(ctx, spec, 0, SecretFingerprint(spec.Password))
+	first, err := arr.EnsureDownloadClient(ctx, spec, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -376,7 +376,7 @@ func TestEnsureDownloadClientNeverLeaksMaskedSecret(t *testing.T) {
 	// Also drift an owned field so an update (and a PUT body) actually happens.
 	f.clients[0].SetField("host", "localhost")
 
-	result, err := arr.EnsureDownloadClient(ctx, spec, first.ID, SecretFingerprint(spec.Password))
+	result, err := arr.EnsureDownloadClient(ctx, spec, first.ID)
 	if err != nil || result.Change != Updated {
 		t.Fatalf("ensure = %+v, %v", result, err)
 	}
@@ -445,46 +445,38 @@ func TestWaitReadyRetriesUntilPingSucceeds(t *testing.T) {
 	}
 }
 
-// An Arr answers a mask for its download client's password, so the field
-// comparison cannot see a rotation: the fingerprint is what rewrites the client,
-// and the Arr's own test is what proves the new password before the write.
-func TestEnsureDownloadClientRewritesOnRotatedPassword(t *testing.T) {
+// qBittorrent's login is bypassed for the release's addresses, so the two
+// credential fields are owned and owned as empty: a client an older install
+// wrote a password into is cleared, and the receipt says the object changed.
+func TestEnsureDownloadClientClearsStoredCredentials(t *testing.T) {
 	f, arr := newFakeArr(t, "/sonarr")
 	ctx := context.Background()
-	spec := DownloadClientSpec{
-		Name: "qBittorrent", Category: "tv", Host: "qbittorrent", Port: 8080,
-		Username: "admin", Password: "qbit-old",
-	}
 
-	first, err := arr.EnsureDownloadClient(ctx, spec, 0, "")
-	if err != nil || first.Change != Created {
-		t.Fatalf("first = %+v, %v", first, err)
+	// What the previous release left behind: a real password in the Arr.
+	old := DownloadClientSpec{Name: "qBittorrent", Category: "tv", Host: "qbittorrent", Port: 8080,
+		Username: "admin", Password: "hunter2"}
+	first, err := arr.EnsureDownloadClient(ctx, old, 0)
+	if err != nil {
+		t.Fatal(err)
 	}
 	f.maskedClients()
 
-	rotated := spec
-	rotated.Password = "qbit-new"
-	result, err := arr.EnsureDownloadClient(ctx, rotated, first.ID, SecretFingerprint(spec.Password))
+	empty := DownloadClientSpec{Name: "qBittorrent", Category: "tv", Host: "qbittorrent", Port: 8080}
+	result, err := arr.EnsureDownloadClient(ctx, empty, first.ID)
 	if err != nil {
-		t.Fatalf("rotated run: %v", err)
+		t.Fatalf("ensure with empty credentials: %v", err)
 	}
 	if result.Change != Updated {
-		t.Fatalf("a rotated password reported %s, want updated", result.Change)
+		t.Fatalf("clearing the stored credentials reported %s, want updated", result.Change)
 	}
-	if len(result.Drift) != 0 {
-		t.Fatalf("drift = %+v, want none: only the unreadable secret moved", result.Drift)
+	for _, field := range []string{"username", "password"} {
+		if v, _ := f.clients[0].FieldValue(field); v != "" {
+			t.Fatalf("%s = %v, want it cleared", field, v)
+		}
 	}
-	if got, _ := f.clients[0].FieldValue("password"); got != "qbit-new" {
-		t.Fatalf("stored password = %v, want the value the test just proved", got)
-	}
-
-	// With the new fingerprint recorded, the same spec is a no-op again.
+	// And once cleared, the same spec is a no-op again.
 	f.maskedClients()
-	result, err = arr.EnsureDownloadClient(ctx, rotated, result.ID, SecretFingerprint(rotated.Password))
-	if err != nil || result.Change != Unchanged {
-		t.Fatalf("run after the rotation = %+v, %v, want unchanged", result, err)
-	}
-	if got := f.tests; got != 3 {
-		t.Fatalf("tests = %d, want one per run: the test is the proof, never a write", got)
+	if again, err := arr.EnsureDownloadClient(ctx, empty, result.ID); err != nil || again.Change != Unchanged {
+		t.Fatalf("run after clearing = %+v, %v, want unchanged", again, err)
 	}
 }

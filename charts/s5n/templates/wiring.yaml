@@ -37,10 +37,11 @@ previous run's logs stay readable until then.
       "timeoutSeconds" .Values.wiring.timeoutSeconds
       "instances" $instances }}
 {{- if and .Values.apps.qbittorrent .Values.apps.qbittorrent.enabled }}
+{{- /* The WebUI skips its login for the release's addresses (the init container
+       seals that), so this Job -- like every app that calls it -- carries no
+       credential at all: the URL is the whole entry. */}}
 {{- $_ := set $cfg "qbittorrent" (dict
-      "url" (printf "http://qbittorrent:%v" .Values.apps.qbittorrent.port)
-      "username" (default "admin" .Values.apps.qbittorrent.webuiUsername)
-      "passwordFile" "/etc/s5n/keys/qbittorrent-password") }}
+      "url" (printf "http://qbittorrent:%v" .Values.apps.qbittorrent.port)) }}
 {{- end }}
 {{- if and .Values.apps.prowlarr .Values.apps.prowlarr.enabled }}
 {{- $_ := set $cfg "prowlarr" (dict

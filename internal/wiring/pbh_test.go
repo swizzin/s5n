@@ -116,8 +116,8 @@ func (h *harness) withPbh(t *testing.T) *fakePbh {
 }
 
 // PBH holds one qBittorrent downloader, and it is recorded only once PBH's own
-// status says HEALTHY - which is the proof it logged in with the password
-// written. A second run then writes nothing.
+// status says HEALTHY - which is the proof it reached the downloader with the
+// (empty) credentials written. A second run then writes nothing.
 func TestWiringRegistersPbhDownloader(t *testing.T) {
 	h := newHarness(t)
 	f := h.withPbh(t)
@@ -142,16 +142,16 @@ func TestWiringRegistersPbhDownloader(t *testing.T) {
 	if got := stored.Str("endpoint"); got != h.config.Qbittorrent.URL {
 		t.Fatalf("PBH dials %q, want the Job's plain qBittorrent URL %q", got, h.config.Qbittorrent.URL)
 	}
-	if got := stored.Str("password"); got != "hunter2" {
-		t.Fatalf("PBH holds %q, want the release Secret's password", got)
+	if got := stored.Str("username"); got != "" {
+		t.Fatalf("PBH holds username %q, want it empty", got)
+	}
+	if got := stored.Str("password"); got != "" {
+		t.Fatalf("PBH holds a password (%d characters), want it empty", len(got))
 	}
 
 	rec := ownedOf(t, h)
-	if rec.PbhDownloaderID() != "qbittorrent" || rec.PbhQbitPasswordFingerprint() == "" {
+	if rec.PbhDownloaderID() != "qbittorrent" {
 		t.Fatalf("pbh not recorded: %+v", rec.Pbh)
-	}
-	if strings.Contains(h.cmData["owned.json"], "hunter2") {
-		t.Fatal("owned.json carries the qBittorrent password")
 	}
 
 	second, err := h.runner.Run(ctx)
@@ -169,9 +169,8 @@ func TestWiringRegistersPbhDownloader(t *testing.T) {
 	}
 }
 
-// A downloader PBH cannot log in to is a failed step, not a recorded one: the
-// fingerprint must not be written for a write the app never accepted, or the
-// next rotation would be invisible.
+// A downloader PBH cannot reach is a failed step, not a recorded one: the id
+// must not be written for a write the app never accepted.
 func TestWiringPbhWaitsForHealthy(t *testing.T) {
 	h := newHarness(t)
 	f := h.withPbh(t)
@@ -186,8 +185,8 @@ func TestWiringPbhWaitsForHealthy(t *testing.T) {
 	if step.Result != "failed" || !strings.Contains(step.Detail, "login refused") {
 		t.Fatalf("pbh/downloader = %+v, want failed with PBH's message", step)
 	}
-	if got := ownedOf(t, h).PbhQbitPasswordFingerprint(); got != "" {
-		t.Fatalf("a fingerprint was recorded for an unhealthy downloader: %q", got)
+	if got := ownedOf(t, h).PbhDownloaderID(); got != "" {
+		t.Fatalf("a downloader id was recorded for an unhealthy one: %q", got)
 	}
 }
 

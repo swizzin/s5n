@@ -1620,6 +1620,27 @@ print("  app routes: %d HTTPRoutes, none pins a sectionName" % len(items))
     esac
   done
 
+  # qBittorrent has no bypass at the edge, and its API is no exception: unlike
+  # an Arr's /api, the whole app -- API included -- is behind the login. That is
+  # the property its own bypass rests on, because what reaches the WebUI
+  # unauthenticated is then only Envoy forwarding an admitted request or a pod
+  # the release's NetworkPolicy lets in.
+  for path in /qbittorrent/ /qbittorrent/api/v2/app/version; do
+    qb_headers="$WORK/unauth-qbittorrent-headers.txt"
+    : >"$qb_headers"
+    qb_code=$(curl -sS -o /dev/null -D "$qb_headers" -w '%{http_code}' \
+      --resolve "${DOMAIN}:443:${gw_addr}" --cacert "$WORK/pebble-root.pem" \
+      "https://${DOMAIN}${path}" 2>/dev/null || true)
+    qb_location=$(sed -n 's/^[Ll]ocation: *//p' "$qb_headers" | tr -d '\r' | head -1 || true)
+    echo "  GET https://${DOMAIN}${path} without a cookie: ${qb_code} -> ${qb_location}"
+    [ "$qb_code" = 302 ] ||
+      { echo "an unauthenticated ${path} answered ${qb_code}: qBittorrent is reachable through the edge without a login"; fail=1; }
+    case "$qb_location" in
+      "https://${DOMAIN}/auth/"*) ;;
+      *) echo "the ${path} redirect does not point at the portal: ${qb_location}"; fail=1 ;;
+    esac
+  done
+
   # Port 80: this host's own listener carries no login (the Allow box writes
   # with it), so an app URL gets the 301 to HTTPS -- the behaviour a browser,
   # a bookmark and a renewal need -- and never Sonarr's UI.
@@ -1743,6 +1764,20 @@ print("  app routes: %d HTTPRoutes, none pins a sectionName" % len(items))
   [ "$api_code" = 401 ] ||
     { echo "the API without a key answered ${api_code}: it must be Sonarr's own 401, not the login's redirect (the API bypass is missing)"; fail=1; }
   [ "$ping_code" = 200 ] || { echo "/sonarr/ping answered ${ping_code}: the ping bypass is missing"; fail=1; }
+
+  # And with the session, qBittorrent's API answers with no qBittorrent login at
+  # all: the only credential this request carried is the edge's. That is the
+  # whole decision -- one login, and the app behind it needs none of its own.
+  qb_version=$(curl -sS -o "$WORK/qbittorrent-version.txt" -w '%{http_code}' \
+    -b "$JAR" --resolve "${DOMAIN}:443:${gw_addr}" --cacert "$WORK/pebble-root.pem" \
+    "https://${DOMAIN}/qbittorrent/api/v2/app/version" 2>/dev/null || true)
+  echo "  with the session: /qbittorrent/api/v2/app/version ${qb_version} ($(cat "$WORK/qbittorrent-version.txt" 2>/dev/null || true))"
+  [ "$qb_version" = 200 ] ||
+    { echo "qBittorrent's API answered ${qb_version} through the edge with a session: it is asking for a second login"; fail=1; }
+  case "$(cat "$WORK/qbittorrent-version.txt" 2>/dev/null || true)" in
+    v5.*) ;;
+    *) echo "the 200 from qBittorrent's API is not its version string: the WebUI answered a login form instead"; fail=1 ;;
+  esac
 
   # ---- the login is reachable only through the Gateway ----------------------
   # Authelia believes X-Forwarded-Proto and X-Forwarded-Host, so a pod that can
@@ -1868,6 +1903,28 @@ rows = json.load(open(sys.argv[1], encoding="utf-8"))["data"]
 print(rows[0]["id"] if len(rows) == 1 else "")' "$WORK/pbh-downloaders.json" 2>/dev/null || true)
   echo "  PBH holds one downloader: ${pbh_id}"
   [ "$pbh_id" = qbittorrent ] || { echo "PBH holds ${pbh_id}, want the one downloader the Job registers"; fail=1; }
+  # Its config carries no credential either: HEALTHY is PBH's own verdict that
+  # it polls qBittorrent, and this is what it polls with.
+  pbh_status=$(curl -sS -o "$WORK/pbh-status.json" -w '%{http_code}' -b "$JAR" \
+    --resolve "${PBH_HOST}:443:${gw_addr}" --cacert "$WORK/pebble-root.pem" \
+    "https://${PBH_HOST}/api/downloaders/qbittorrent/status" 2>/dev/null || true)
+  echo "  GET https://${PBH_HOST}/api/downloaders/qbittorrent/status: ${pbh_status}"
+  [ "$pbh_status" = 200 ] || { echo "PBH did not answer its own status endpoint (${pbh_status})"; fail=1; }
+  python3 - "$WORK/pbh-status.json" <<'PYPBH' || fail=1
+import json, sys
+status = json.load(open(sys.argv[1], encoding="utf-8"))["data"]
+cfg = status.get("config") or {}
+print("  PBH's downloader: %s, username %r, password %d characters"
+      % (status.get("lastStatus"), cfg.get("username"), len(cfg.get("password") or "")))
+ok = True
+if status.get("lastStatus") != "HEALTHY":
+    print("  PBH is not healthy on qBittorrent: %s" % status.get("lastStatusMessage"))
+    ok = False
+if cfg.get("username") or cfg.get("password"):
+    print("  PBH holds a qBittorrent credential: HEALTHY proves it needs none")
+    ok = False
+sys.exit(0 if ok else 1)
+PYPBH
 
   # The old path is gone: no route, so the box's own host answers 404 there.
   old_path=$(curl -sS -o /dev/null -w '%{http_code}' \
@@ -2792,6 +2849,13 @@ if row.get("host") != want_host:
 if not row.get("hasLocalFilesystemAccess"):
     print("  the instance has no local filesystem access: /data is the same mount in both apps")
     ok = False
+# qBittorrent skips its login for the release's addresses, so the instance the
+# Job registers carries no credential: qui's own test above is the proof it
+# reaches qBittorrent without one.
+if row.get("username") or row.get("password"):
+    print("  the instance holds a qBittorrent credential (%r/%r): none should"
+          % (row.get("username"), row.get("password")))
+    ok = False
 try:
     tested = json.loads(test_body)
 except Exception:
@@ -2811,7 +2875,7 @@ PY
   autobrr_test=$(curl -sS -o /dev/null -w '%{http_code}' -b "$WORK/autobrr-live.jar" \
     -X POST "http://127.0.0.1:${PF_PORT}${AUTOBRR_BASE}/api/downloaders/test" \
     -H 'Content-Type: application/json' \
-    --data "{\"name\":\"qBittorrent\",\"type\":\"QBITTORRENT\",\"enabled\":true,\"host\":\"${QBIT_URL}\",\"username\":\"admin\",\"password\":\"${QBIT_PASSWORD}\",\"settings\":{\"rules\":{\"enabled\":false}}}" 2>/dev/null || true)
+    --data "{\"name\":\"qBittorrent\",\"type\":\"QBITTORRENT\",\"enabled\":true,\"host\":\"${QBIT_URL}\",\"username\":\"\",\"password\":\"\",\"settings\":{\"rules\":{\"enabled\":false}}}" 2>/dev/null || true)
   port_forward_stop
   echo "  autobrr's qBittorrent client test: ${autobrr_test}"
   [ "$autobrr_test" = 204 ] || { echo "autobrr could not reach qBittorrent with the client the Job registers (${autobrr_test})"; fail=1; }
@@ -2836,6 +2900,9 @@ if len(qbit) != 1:
 elif qbit[0].get("host") != qbit_url:
     print("  the qBittorrent client dials %r, want %r" % (qbit[0].get("host"), qbit_url))
     ok = False
+if qbit and qbit[0].get("username"):
+    print("  the qBittorrent client holds username %r: qBittorrent needs none" % qbit[0].get("username"))
+    ok = False
 if len(rows) != len(want) + 1:
     print("  autobrr holds %d clients, want %d (qBittorrent + one per Arr)" % (len(rows), len(want) + 1))
     ok = False
@@ -2850,37 +2917,14 @@ for name, host in want.items():
 sys.exit(0 if ok else 1)
 PY
 
-  # ---- rotation: the fingerprint is the only thing that sees it --------------
-  # qui and autobrr never return the stored password, so a rotation in the
-  # release Secret is invisible to a comparison; owned.json's fingerprint is
-  # what turns it into an update. qBittorrent itself takes the new password at
-  # its next start (its init container writes the Secret's value every time).
-  #
-  # qui is stopped for the rotation, and that is not tidiness: it polls
-  # qBittorrent continuously, so between qBittorrent coming up with a new
-  # password and the Job rewriting qui's copy, qui retries the old one, and
-  # qBittorrent bans an address after five failed logins. An operator rotating a
-  # password quick enough meets the same race; stopping the poller is the way
-  # out of it, and the Job is what puts the new password back.
-  #
-  # The Job is re-run instead of `helm upgrade`: box owns this release's objects
-  # with server-side apply under its own field manager, and a Helm upgrade of
-  # the same release conflicts on every route it would have to take over.
-  log "rotating the qBittorrent password: every copy that holds it updates"
-  $K -n "$NS" scale statefulset/qui --replicas=0 >/dev/null ||
-    { echo "could not stop qui for the rotation"; fail=1; }
-  $K -n "$NS" wait --for=delete pod/qui-0 --timeout=120s >/dev/null 2>&1 ||
-    { echo "qui did not stop for the rotation"; fail=1; }
-  # PeerBanHelper polls the client every five seconds, so it is stopped for the
-  # same reason qui is: the window between qBittorrent coming up on the new
-  # password and the Job rewriting PBH's copy is a window of refused logins, and
-  # qBittorrent bans an address after five of them. PBH backs off on its own
-  # after a failure, which is not something to rely on when the alternative is
-  # one line here.
-  $K -n "$NS" scale statefulset/pbh --replicas=0 >/dev/null ||
-    { echo "could not stop pbh for the rotation"; fail=1; }
-  $K -n "$NS" wait --for=delete pod/pbh-0 --timeout=120s >/dev/null 2>&1 ||
-    { echo "pbh did not stop for the rotation"; fail=1; }
+  # ---- rotating the qBittorrent password: nothing else holds it -------------
+  # The credential is sealed into qBittorrent.conf and given to no app, so a
+  # rotation is qBittorrent's alone: its init container re-seals the Secret's
+  # value at the next start, and the wiring Job -- which reads no qBittorrent
+  # password at all -- rewrites nothing. That is the property this block pins,
+  # and it is why no app has to be stopped for the rotation: nothing polls with
+  # a stale password, so there is no window of refused logins to race.
+  log "rotating the qBittorrent password: nothing but qBittorrent itself holds it"
   QBIT_PASSWORD=$(openssl rand -hex 12)
   $K -n "$NS" patch secret s5n-keys --type=merge \
     -p "{\"data\":{\"qbittorrent-password\":\"$(printf '%s' "$QBIT_PASSWORD" | base64 -w0)\"}}" >/dev/null ||
@@ -2888,34 +2932,34 @@ PY
   $K -n "$NS" rollout restart statefulset/qbittorrent >/dev/null
   $K -n "$NS" rollout status statefulset/qbittorrent --timeout=300s >/dev/null ||
     { echo "qBittorrent did not come back on the rotated password"; fail=1; }
-  $K -n "$NS" scale statefulset/qui --replicas=1 >/dev/null
-  $K -n "$NS" wait --for=condition=Ready pod/qui-0 --timeout=300s >/dev/null 2>&1 ||
-    { echo "qui did not come back after the rotation"; fail=1; }
-  $K -n "$NS" scale statefulset/pbh --replicas=1 >/dev/null
-  $K -n "$NS" wait --for=condition=Ready pod/pbh-0 --timeout=300s >/dev/null 2>&1 ||
-    { echo "pbh did not come back after the rotation"; fail=1; }
+  # The init container is what carried the new value into the file, and the
+  # login endpoint is the proof it took (a rotation that never reached the file
+  # would leave the old hash in place and be invisible to every app).
+  port_forward qbittorrent-0 8080 || fail=1
+  : >"$WORK/qbt-rotated.jar"
+  rotated_login=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 15 -c "$WORK/qbt-rotated.jar" \
+    --data-urlencode "username=admin" --data-urlencode "password=${QBIT_PASSWORD}" \
+    "http://127.0.0.1:${PF_PORT}/api/v2/auth/login" 2>/dev/null || true)
+  port_forward_stop
+  case "$rotated_login" in
+    2??) ;;
+    *) echo "qBittorrent refused the rotated password (${rotated_login:-no answer}): the init container did not seal the Secret's new value"; fail=1 ;;
+  esac
+
   rerun_wiring "$WORK/rerun-rotate.txt" || fail=1
   created=$(status_field 'd["writes"]["created"]' 2>/dev/null || echo missing)
   updated=$(status_field 'd["writes"]["updated"]' 2>/dev/null || echo missing)
   echo "  after the rotation: ${created} created, ${updated} updated"
-  # Every copy of the password, and only those: qui's instance, autobrr's
-  # qBittorrent client, PeerBanHelper's downloader, and each Arr's download
-  # client -- the Arrs are the pair that had no fingerprint, so before this they
-  # kept dialling with the old one.
-  [ "$created" = 0 ] && [ "$updated" = 5 ] ||
-    { echo "the rotation wrote ${created} created / ${updated} updated, want exactly the copies that hold the password"; fail=1; }
+  [ "$created" = 0 ] && [ "$updated" = 0 ] ||
+    { echo "the rotation wrote ${created} created / ${updated} updated: something still holds the qBittorrent password"; fail=1; }
   for step in qui/instance autobrr/downloader/qbittorrent pbh/downloader sonarr/downloadclient radarr/downloadclient; do
     detail=$(status_field "[s['detail'] for s in d['steps'] if s['name']=='$step'][0]" 2>/dev/null || echo missing)
     echo "  ${step}: ${detail}"
-    [ "$detail" = updated ] || { echo "${step} was ${detail}, want updated after a rotated qBittorrent password"; fail=1; }
+    [ "$detail" = unchanged ] || { echo "${step} changed after a qBittorrent password rotation: it holds a copy"; fail=1; }
   done
-  for step in autobrr/downloader/sonarr autobrr/downloader/radarr \
-              prowlarr/application/sonarr prowlarr/application/radarr; do
-    detail=$(status_field "[s['detail'] for s in d['steps'] if s['name']=='$step'][0]" 2>/dev/null || echo missing)
-    [ "$detail" = unchanged ] || { echo "${step} was ${detail}, want unchanged: its key did not move"; fail=1; }
-  done
-  # Both copies still work, read back from the apps: the Job's own tests are the
-  # proof it wrote them, these are the proof the apps kept them.
+
+  # And every caller still reaches qBittorrent, with the credential it stored
+  # (none) rather than the one the Secret now holds.
   port_forward qui-0 7476 || fail=1
   qui_session "$QUI_BASE"
   curl -sS -H "Cookie: ${QUI_COOKIE}" "http://127.0.0.1:${PF_PORT}${QUI_BASE}/api/instances/" >"$WORK/qui-instances-rotated.json" 2>/dev/null || true
@@ -2929,48 +2973,50 @@ print(rows[0]["id"] if len(rows) == 1 else "")' "$WORK/qui-instances-rotated.jso
     *'"connected":true'*) echo "  qui still reaches qBittorrent on the rotated password: ok" ;;
     *) echo "qui lost qBittorrent on the rotated password: ${qui_test}"; fail=1 ;;
   esac
+
   port_forward autobrr-0 7474 || fail=1
   autobrr_session "$AUTOBRR_BASE" "$WORK/autobrr-rotated.jar"
   autobrr_test=$(curl -sS -o /dev/null -w '%{http_code}' -b "$WORK/autobrr-rotated.jar" \
     -X POST "http://127.0.0.1:${PF_PORT}${AUTOBRR_BASE}/api/downloaders/test" \
     -H 'Content-Type: application/json' \
-    --data "{\"name\":\"qBittorrent\",\"type\":\"QBITTORRENT\",\"enabled\":true,\"host\":\"${QBIT_URL}\",\"username\":\"admin\",\"password\":\"${QBIT_PASSWORD}\",\"settings\":{\"rules\":{\"enabled\":false}}}" 2>/dev/null || true)
+    --data "{\"name\":\"qBittorrent\",\"type\":\"QBITTORRENT\",\"enabled\":true,\"host\":\"${QBIT_URL}\",\"username\":\"\",\"password\":\"\",\"settings\":{\"rules\":{\"enabled\":false}}}" 2>/dev/null || true)
   port_forward_stop
   echo "  autobrr's qBittorrent client on the rotated password: ${autobrr_test}"
   [ "$autobrr_test" = 204 ] || { echo "autobrr lost qBittorrent on the rotated password (${autobrr_test})"; fail=1; }
 
-  # The Arrs' copies are the pair that had no fingerprint, so the proof is
-  # Sonarr's own: it masks the stored password on read, so the client is fetched
-  # and the Secret's new password put back into it -- the body the Job writes --
-  # and Sonarr's test endpoint decides whether qBittorrent accepts it.
+  # The Arrs' copies are the pair that would have gone stale first if anything
+  # still held the password: the client is fetched as the Job wrote it -- empty
+  # credentials -- and Sonarr's own test endpoint decides whether qBittorrent
+  # accepts it.
   sonarr_key=$($K -n "$NS" get secret s5n-keys -o jsonpath='{.data.sonarr-apikey}' 2>/dev/null | base64 -d || true)
   [ -n "$sonarr_key" ] || { echo "the release Secret has no sonarr API key"; fail=1; }
   $K -n "$NS" exec sonarr-0 -- curl -s -H "X-Api-Key: ${sonarr_key}" \
     "http://localhost:8989/sonarr/api/v3/downloadclient" >"$WORK/sonarr-clients-rotated.json" 2>/dev/null || true
-  if python3 - "$WORK/sonarr-clients-rotated.json" "$QBIT_PASSWORD" >"$WORK/sonarr-client-test.json" <<'PY'
+  if python3 - "$WORK/sonarr-clients-rotated.json" >"$WORK/sonarr-client-test.json" <<'PYSONARR'
 import json, sys
 clients = json.load(open(sys.argv[1], encoding="utf-8"))
 qbit = [c for c in clients if str(c.get("implementation", "")).lower() == "qbittorrent"]
 if len(qbit) != 1:
     sys.exit("sonarr holds %d qBittorrent clients, want 1" % len(qbit))
 body = qbit[0]
-for field in body.get("fields") or []:
-    if field.get("name") == "password":
-        field["value"] = sys.argv[2]
+fields = {f.get("name"): f.get("value") for f in body.get("fields") or []}
+if fields.get("username") or fields.get("password"):
+    sys.exit("sonarr's download client still holds a credential (%r/%r)"
+             % (fields.get("username"), fields.get("password")))
 print(json.dumps(body))
-PY
+PYSONARR
   then
     sonarr_test=$($K -n "$NS" exec -i sonarr-0 -- curl -s -o /dev/null -w '%{http_code}' \
       -X POST -H "X-Api-Key: ${sonarr_key}" -H 'Content-Type: application/json' \
       --data-binary @- "http://localhost:8989/sonarr/api/v3/downloadclient/test" \
       2>/dev/null <"$WORK/sonarr-client-test.json" || true)
-    echo "  sonarr's qBittorrent client test on the rotated password: ${sonarr_test}"
+    echo "  sonarr's qBittorrent client on the rotated password: ${sonarr_test}"
     case "$sonarr_test" in
       200 | 201 | 204) ;;
-      *) echo "sonarr could not reach qBittorrent with the client the Job rewrote (${sonarr_test})"; fail=1 ;;
+      *) echo "sonarr could not reach qBittorrent with the client the Job wrote (${sonarr_test})"; fail=1 ;;
     esac
   else
-    echo "could not read Sonarr's download clients back: $(head -c 200 "$WORK/sonarr-clients-rotated.json" 2>/dev/null)"
+    echo "could not read Sonarr's download clients back: $(head -c 300 "$WORK/sonarr-clients-rotated.json" 2>/dev/null)"
     fail=1
   fi
 
@@ -3577,6 +3623,91 @@ EOF
   same_cert "$($K -n s5n-gateway get secret "$cert" -o jsonpath='{.data.ca\.crt}' | base64 -d || true)" "$root_crt" ||
     { echo "the re-issued certificate does not chain to the box root"; fail=1; }
   echo "  upgraded serial: ${serial_old_shape} -> ${serial_after_upgrade}, chained to s5n-root-ca"
+
+  # ---- an upgraded box: the Arr's stored qBittorrent password is cleared -----
+  # The previous release's wiring wrote its own copy of the qBittorrent password
+  # into every Arr's download client. Both credential fields are owned, and now
+  # owned as empty, so the next run of the release's own Job clears the stored
+  # copy instead of needing it. The upgrade is measured the only way an API
+  # allows: put a password back through Sonarr's own endpoint (what that install
+  # left behind), run the Job, and read the client again.
+  log "an upgraded box: the Arr's stored qBittorrent password is cleared"
+  sonarr_key=$($K -n "$NS" get secret s5n-keys -o jsonpath='{.data.sonarr-apikey}' 2>/dev/null | base64 -d || true)
+  [ -n "$sonarr_key" ] || { echo "the release Secret has no sonarr API key"; fail=1; }
+  $K -n "$NS" exec sonarr-0 -- curl -s -H "X-Api-Key: ${sonarr_key}" \
+    "http://localhost:8989/sonarr/api/v3/downloadclient" >"$WORK/sonarr-before-upgrade.json" 2>/dev/null || true
+  sonarr_client_id=$(python3 - "$WORK/sonarr-before-upgrade.json" "$WORK/sonarr-with-password.json" <<'PYSEED'
+import json, sys
+clients = json.load(open(sys.argv[1], encoding="utf-8"))
+qbit = [c for c in clients if str(c.get("implementation", "")).lower() == "qbittorrent"]
+if len(qbit) != 1:
+    sys.exit("sonarr holds %d qBittorrent clients, want 1" % len(qbit))
+body = qbit[0]
+for field in body.get("fields") or []:
+    if field.get("name") == "username":
+        field["value"] = "admin"
+    if field.get("name") == "password":
+        field["value"] = "left-over-password"
+with open(sys.argv[2], "w", encoding="utf-8") as out:
+    json.dump(body, out)
+print(body.get("id", ""))
+PYSEED
+  ) || true
+  [ -n "$sonarr_client_id" ] || { echo "could not read Sonarr's qBittorrent client id"; fail=1; }
+  seeded=$($K -n "$NS" exec -i sonarr-0 -- curl -s -o /dev/null -w '%{http_code}' \
+    -X PUT -H "X-Api-Key: ${sonarr_key}" -H 'Content-Type: application/json' \
+    --data-binary @- "http://localhost:8989/sonarr/api/v3/downloadclient/${sonarr_client_id}?forceSave=true" \
+    2>/dev/null <"$WORK/sonarr-with-password.json" || true)
+  echo "  PUT the previous release's credentials back into Sonarr's client ${sonarr_client_id}: ${seeded}"
+  # Sonarr answers 202 Accepted on a download client PUT, not 200.
+  case "$seeded" in
+    200 | 201 | 202 | 204) ;;
+    *) echo "Sonarr refused the seeded download client: ${seeded}"; fail=1 ;;
+  esac
+
+  # What the Arr answers for a *set* privacy field, for the record and for the
+  # assertion below: a set password comes back as its mask. Reading it here is
+  # what makes the empty form after the Job run mean something.
+  $K -n "$NS" exec sonarr-0 -- curl -s -H "X-Api-Key: ${sonarr_key}" \
+    "http://localhost:8989/sonarr/api/v3/downloadclient" >"$WORK/sonarr-seeded.json" 2>/dev/null || true
+  python3 - "$WORK/sonarr-seeded.json" <<'PYSEEDREAD' || fail=1
+import json, sys
+clients = json.load(open(sys.argv[1], encoding="utf-8"))
+qbit = [c for c in clients if str(c.get("implementation", "")).lower() == "qbittorrent"]
+fields = {f.get("name"): f.get("value") for f in (qbit[0].get("fields") or [])} if qbit else {}
+print("  Sonarr's client with the password set: username %r, password %r"
+      % (fields.get("username"), fields.get("password")))
+if not fields.get("password"):
+    sys.exit("the seeded password did not take: the Arr answers %r" % (fields.get("password"),))
+PYSEEDREAD
+
+  rerun_wiring "$WORK/rerun-upgrade.txt" || fail=1
+  upgrade_detail=$(status_field "[s['detail'] for s in d['steps'] if s['name']=='sonarr/downloadclient'][0]" 2>/dev/null || echo missing)
+  echo "  sonarr/downloadclient after the upgrade run: ${upgrade_detail}"
+  [ "$upgrade_detail" = updated ] ||
+    { echo "the Job did not rewrite the Arr's download client: the stored password was left in place"; fail=1; }
+
+  $K -n "$NS" exec sonarr-0 -- curl -s -H "X-Api-Key: ${sonarr_key}" \
+    "http://localhost:8989/sonarr/api/v3/downloadclient" >"$WORK/sonarr-after-upgrade.json" 2>/dev/null || true
+  # What the Arr answers for a privacy field is the point of reading it back: a
+  # set password comes back as its mask, and an empty one as an empty value, so
+  # asserting the empty form is asserting that no plaintext is left.
+  if python3 - "$WORK/sonarr-after-upgrade.json" <<'PYCHECK'
+import json, sys
+clients = json.load(open(sys.argv[1], encoding="utf-8"))
+qbit = [c for c in clients if str(c.get("implementation", "")).lower() == "qbittorrent"]
+if len(qbit) != 1:
+    sys.exit("sonarr holds %d qBittorrent clients, want 1" % len(qbit))
+fields = {f.get("name"): f.get("value") for f in qbit[0].get("fields") or []}
+password = fields.get("password")
+print("  Sonarr's client after the upgrade: username %r, password %r"
+      % (fields.get("username"), password))
+if fields.get("username") or password not in (None, ""):
+    print("  Sonarr still holds a credential: the Job's empty owned fields did not reach it")
+    sys.exit(1)
+sys.exit(0)
+PYCHECK
+  then :; else fail=1; fi
 
   # ---- the no-DNS card, then the move to an issued certificate --------------
   # Run 1 had no DNS answers at all. init installed self-signed certificates

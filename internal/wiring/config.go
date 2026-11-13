@@ -17,6 +17,17 @@ import (
 	"strings"
 )
 
+// The field names the component blocks share. Each is both the JSON key the
+// chart writes and the name a validation error prints, so writing it once is
+// what keeps the two in step.
+const (
+	fieldURL          = "url"
+	fieldURLBase      = "urlBase"
+	fieldAPIKeyFile   = "apiKeyFile"
+	fieldPasswordFile = "passwordFile"
+	fieldTokenFile    = "tokenFile"
+)
+
 // Config is rendered by the chart into /etc/s5n/wiring/wiring.json. It contains
 // no secrets: every credential is a file reference into the mounted Secret.
 type Config struct {
@@ -94,11 +105,12 @@ type SeerrConfig struct {
 	URL string `json:"url"`
 }
 
-// QbitConfig points at the qBittorrent WebUI.
+// QbitConfig points at the qBittorrent WebUI. It carries no credential: the
+// WebUI skips its login for the release's addresses (internal/qbtconf seals
+// that; docs/box.md, "Logins"), so this Job talks to it with an empty username
+// and password, like every other app that calls it.
 type QbitConfig struct {
-	URL          string `json:"url"`
-	Username     string `json:"username"`
-	PasswordFile string `json:"passwordFile"`
+	URL string `json:"url"`
 }
 
 // ProwlarrConfig points at Prowlarr. SelfURL is Prowlarr's own address as the
@@ -154,15 +166,14 @@ func (c *Config) validate() error {
 	}
 	if c.Qbittorrent != nil {
 		if err := requireFields("qbittorrent", map[string]string{
-			"url": c.Qbittorrent.URL, "username": c.Qbittorrent.Username,
-			"passwordFile": c.Qbittorrent.PasswordFile,
+			fieldURL: c.Qbittorrent.URL,
 		}); err != nil {
 			return err
 		}
 	}
 	if c.Prowlarr != nil {
 		if err := requireFields("prowlarr", map[string]string{
-			"url": c.Prowlarr.URL, "selfUrl": c.Prowlarr.SelfURL, "apiKeyFile": c.Prowlarr.APIKeyFile,
+			fieldURL: c.Prowlarr.URL, "selfUrl": c.Prowlarr.SelfURL, fieldAPIKeyFile: c.Prowlarr.APIKeyFile,
 		}); err != nil {
 			return err
 		}
@@ -180,23 +191,23 @@ func (c *Config) validate() error {
 	}
 	if c.Qui != nil {
 		if err := requireFields("qui", map[string]string{
-			"url": c.Qui.URL, "urlBase": c.Qui.URLBase, "username": c.Qui.Username,
-			"passwordFile": c.Qui.PasswordFile,
+			fieldURL: c.Qui.URL, fieldURLBase: c.Qui.URLBase, "username": c.Qui.Username,
+			fieldPasswordFile: c.Qui.PasswordFile,
 		}); err != nil {
 			return err
 		}
 	}
 	if c.Autobrr != nil {
 		if err := requireFields("autobrr", map[string]string{
-			"url": c.Autobrr.URL, "urlBase": c.Autobrr.URLBase, "username": c.Autobrr.Username,
-			"passwordFile": c.Autobrr.PasswordFile,
+			fieldURL: c.Autobrr.URL, fieldURLBase: c.Autobrr.URLBase, "username": c.Autobrr.Username,
+			fieldPasswordFile: c.Autobrr.PasswordFile,
 		}); err != nil {
 			return err
 		}
 	}
 	if c.Pbh != nil {
 		if err := requireFields("pbh", map[string]string{
-			"url": c.Pbh.URL, "tokenFile": c.Pbh.TokenFile,
+			fieldURL: c.Pbh.URL, fieldTokenFile: c.Pbh.TokenFile,
 		}); err != nil {
 			return err
 		}
@@ -215,7 +226,7 @@ func validateInstance(index int, inst Instance) error {
 		return fmt.Errorf("instance %d: unknown kind %q", index, inst.Kind)
 	}
 	return requireFields(fmt.Sprintf("instance %q", inst.Name), map[string]string{
-		"name": inst.Name, "url": inst.URL, "apiKeyFile": inst.APIKeyFile,
+		"name": inst.Name, "url": inst.URL, fieldAPIKeyFile: inst.APIKeyFile,
 		"category": inst.Category, "savePath": inst.SavePath, "rootFolder": inst.RootFolder,
 	})
 }

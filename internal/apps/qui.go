@@ -133,11 +133,11 @@ type QuiInstanceSpec struct {
 //
 // On update the live object is cloned and only the data-contract fields are
 // overlaid (name is left as the user renamed it only on a create: the API
-// requires a name, and the live one is what goes back). qui never returns the
-// stored password, so a rotation of the qBittorrent password in the release
-// Secret is detected by knownFingerprint, the sha256 of the value last written
-// and proven: a difference rewrites the instance (the Tautulli rule).
-func (q *Qui) EnsureInstance(ctx context.Context, spec QuiInstanceSpec, ownedID int, knownFingerprint string) (EnsureResult, error) {
+// requires a name, and the live one is what goes back). Its username and
+// password are written empty, like the Arrs' download clients: qBittorrent's
+// login is bypassed for the release's addresses, so there is no credential to
+// keep in step and none to fingerprint.
+func (q *Qui) EnsureInstance(ctx context.Context, spec QuiInstanceSpec, ownedID int) (EnsureResult, error) {
 	list, err := q.instances(ctx)
 	if err != nil {
 		return EnsureResult{}, fmt.Errorf("list qui instances: %w", err)
@@ -157,8 +157,7 @@ func (q *Qui) EnsureInstance(ctx context.Context, spec QuiInstanceSpec, ownedID 
 	if found {
 		desired, drift = overlayOwned(cur, fields)
 		desired["id"] = cur["id"]
-		rotated := knownFingerprint != SecretFingerprint(spec.Password)
-		if len(drift) > 0 || rotated {
+		if len(drift) > 0 {
 			change = Updated
 		} else {
 			change = Unchanged

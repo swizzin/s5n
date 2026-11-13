@@ -181,7 +181,7 @@ func TestPbhCreatesDownloader(t *testing.T) {
 	f, srv := newFakePbh(t)
 	p := NewPbh(srv.URL, "pbh-token")
 
-	res, err := p.EnsureDownloader(context.Background(), pbhSpec("hunter2"), "", "")
+	res, err := p.EnsureDownloader(context.Background(), pbhSpec("hunter2"), "")
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
@@ -201,20 +201,19 @@ func TestPbhCreatesDownloader(t *testing.T) {
 	}
 }
 
-// A second run with the fingerprint on record writes nothing at all: no second
-// PUT (which PBH would refuse), no PATCH.
+// A second run writes nothing at all: no second PUT (which PBH would refuse),
+// no PATCH.
 func TestPbhEnsureDownloaderIsIdempotent(t *testing.T) {
 	f, srv := newFakePbh(t)
 	p := NewPbh(srv.URL, "pbh-token")
 	ctx := context.Background()
 
 	spec := pbhSpec("hunter2")
-	if _, err := p.EnsureDownloader(ctx, spec, "", ""); err != nil {
+	if _, err := p.EnsureDownloader(ctx, spec, ""); err != nil {
 		t.Fatalf("create: %v", err)
 	}
-	fingerprint := SecretFingerprint(spec.Password)
 
-	res, err := p.EnsureDownloader(ctx, spec, "qbittorrent", fingerprint)
+	res, err := p.EnsureDownloader(ctx, spec, "qbittorrent")
 	if err != nil {
 		t.Fatalf("second ensure: %v", err)
 	}
@@ -226,44 +225,6 @@ func TestPbhEnsureDownloaderIsIdempotent(t *testing.T) {
 	}
 }
 
-// A rotation in the release Secret is invisible in everything PBH returns except
-// the password it echoes - which s5n never reads to compare. The fingerprint is
-// what turns it into an update, and the update is a PATCH carrying the whole
-// stored config.
-func TestPbhEnsureDownloaderFollowsRotation(t *testing.T) {
-	f, srv := newFakePbh(t)
-	p := NewPbh(srv.URL, "pbh-token")
-	ctx := context.Background()
-
-	first := pbhSpec("hunter2")
-	if _, err := p.EnsureDownloader(ctx, first, "", ""); err != nil {
-		t.Fatalf("create: %v", err)
-	}
-	rotated := pbhSpec("rotated-pass")
-	res, err := p.EnsureDownloader(ctx, rotated, "qbittorrent", SecretFingerprint(first.Password))
-	if err != nil {
-		t.Fatalf("rotated ensure: %v", err)
-	}
-	if res.Change != Updated {
-		t.Fatalf("rotated ensure = %+v, want updated", res)
-	}
-	if f.patches != 1 {
-		t.Fatalf("patches = %d, want 1", f.patches)
-	}
-	if got := f.cfg["qbittorrent"].Str("password"); got != "rotated-pass" {
-		t.Fatalf("stored password = %q, want the rotated one", got)
-	}
-
-	// With the new fingerprint on record the run after the rotation is a no-op.
-	again, err := p.EnsureDownloader(ctx, rotated, "qbittorrent", SecretFingerprint(rotated.Password))
-	if err != nil {
-		t.Fatalf("ensure after rotation: %v", err)
-	}
-	if again.Change != Unchanged || f.patches != 1 {
-		t.Fatalf("ensure after rotation = %+v (%d patches), want unchanged", again, f.patches)
-	}
-}
-
 // An update is the stored config with the owned fields overlaid: a name a person
 // changed, and settings s5n has no opinion about, survive it.
 func TestPbhUpdateKeepsFieldsItDoesNotOwn(t *testing.T) {
@@ -272,26 +233,27 @@ func TestPbhUpdateKeepsFieldsItDoesNotOwn(t *testing.T) {
 	ctx := context.Background()
 
 	spec := pbhSpec("hunter2")
-	if _, err := p.EnsureDownloader(ctx, spec, "", ""); err != nil {
+	if _, err := p.EnsureDownloader(ctx, spec, ""); err != nil {
 		t.Fatalf("create: %v", err)
 	}
-	// What a person does in PBH's UI: rename it, pause it, shadow-ban instead.
+	// What a person does in PBH's UI: rename it, pause it, shadow-ban instead,
+	// and point the login at a different user.
 	edited := f.cfg["qbittorrent"].Clone()
 	edited["name"] = "qBit (mine)"
 	edited["paused"] = true
 	edited["useShadowBan"] = true
+	edited["username"] = "someone-else"
 	f.cfg["qbittorrent"] = edited
 
-	rotated := pbhSpec("rotated-pass")
-	if _, err := p.EnsureDownloader(ctx, rotated, "qbittorrent", SecretFingerprint(spec.Password)); err != nil {
-		t.Fatalf("rotated ensure: %v", err)
+	if _, err := p.EnsureDownloader(ctx, spec, "qbittorrent"); err != nil {
+		t.Fatalf("ensure after the edit: %v", err)
 	}
 	stored := f.cfg["qbittorrent"]
 	if stored.Str("name") != "qBit (mine)" || !stored.Bool("paused") || !stored.Bool("useShadowBan") {
 		t.Fatalf("the update overwrote fields s5n does not own: %+v", stored)
 	}
-	if stored.Str("password") != "rotated-pass" {
-		t.Fatalf("the update did not rotate the password: %+v", stored)
+	if stored.Str("username") != "admin" || stored.Str("password") != "hunter2" {
+		t.Fatalf("the update did not restore the owned login: %+v", stored)
 	}
 }
 
@@ -305,13 +267,13 @@ func TestPbhDoesNotDriftOnTheApiEndpoint(t *testing.T) {
 	ctx := context.Background()
 
 	spec := pbhSpec("hunter2")
-	if _, err := p.EnsureDownloader(ctx, spec, "", ""); err != nil {
+	if _, err := p.EnsureDownloader(ctx, spec, ""); err != nil {
 		t.Fatalf("create: %v", err)
 	}
 	if got := f.cfg["qbittorrent"].Str("endpoint"); got != "http://qbittorrent:8080" {
 		t.Fatalf("stored endpoint = %q", got)
 	}
-	res, err := p.EnsureDownloader(ctx, spec, "qbittorrent", SecretFingerprint(spec.Password))
+	res, err := p.EnsureDownloader(ctx, spec, "qbittorrent")
 	if err != nil {
 		t.Fatalf("ensure: %v", err)
 	}
@@ -328,14 +290,14 @@ func TestPbhRestoresDriftedEndpoint(t *testing.T) {
 	ctx := context.Background()
 
 	spec := pbhSpec("hunter2")
-	if _, err := p.EnsureDownloader(ctx, spec, "", ""); err != nil {
+	if _, err := p.EnsureDownloader(ctx, spec, ""); err != nil {
 		t.Fatalf("create: %v", err)
 	}
 	edited := f.cfg["qbittorrent"].Clone()
 	edited["endpoint"] = "http://example.com:9000"
 	f.cfg["qbittorrent"] = edited
 
-	res, err := p.EnsureDownloader(ctx, spec, "qbittorrent", SecretFingerprint(spec.Password))
+	res, err := p.EnsureDownloader(ctx, spec, "qbittorrent")
 	if err != nil {
 		t.Fatalf("ensure: %v", err)
 	}
@@ -354,11 +316,13 @@ func TestPbhAdoptsDownloaderByName(t *testing.T) {
 	p := NewPbh(srv.URL, "pbh-token")
 	ctx := context.Background()
 
-	f.cfg["mine"] = pbhCreateConfig(pbhSpec("old-pass"))
+	adopted := pbhCreateConfig(pbhSpec("old-pass"))
+	adopted["endpoint"] = "http://elsewhere:8080"
+	f.cfg["mine"] = adopted
 	f.order = append(f.order, "mine")
 	f.status["mine"] = "HEALTHY"
 
-	res, err := p.EnsureDownloader(ctx, pbhSpec("hunter2"), "", "")
+	res, err := p.EnsureDownloader(ctx, pbhSpec("hunter2"), "")
 	if err != nil {
 		t.Fatalf("ensure: %v", err)
 	}
@@ -379,7 +343,7 @@ func TestPbhRecreatesADeletedDownloader(t *testing.T) {
 	f, srv := newFakePbh(t)
 	p := NewPbh(srv.URL, "pbh-token")
 
-	res, err := p.EnsureDownloader(context.Background(), pbhSpec("hunter2"), "was-here", "stale")
+	res, err := p.EnsureDownloader(context.Background(), pbhSpec("hunter2"), "was-here")
 	if err != nil {
 		t.Fatalf("ensure: %v", err)
 	}
@@ -399,7 +363,7 @@ func TestPbhReportsA500WithTheAppsMessage(t *testing.T) {
 	f.saveFails = true
 	p := NewPbh(srv.URL, "pbh-token")
 
-	_, err := p.EnsureDownloader(context.Background(), pbhSpec("hunter2"), "", "")
+	_, err := p.EnsureDownloader(context.Background(), pbhSpec("hunter2"), "")
 	if err == nil {
 		t.Fatal("ensure succeeded although PBH answered 500")
 	}
@@ -437,7 +401,7 @@ func TestPbhWaitHealthy(t *testing.T) {
 	p := NewPbh(srv.URL, "pbh-token")
 	ctx := context.Background()
 
-	if _, err := p.EnsureDownloader(ctx, pbhSpec("hunter2"), "", ""); err != nil {
+	if _, err := p.EnsureDownloader(ctx, pbhSpec("hunter2"), ""); err != nil {
 		t.Fatalf("create: %v", err)
 	}
 	f.healthyAfter = 2 // UNKNOWN on the first read, HEALTHY on the second

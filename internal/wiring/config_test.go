@@ -21,7 +21,7 @@ func TestConfigRefusesAnAppItDoesNotWire(t *testing.T) {
 			path := filepath.Join(t.TempDir(), "wiring.json")
 			cfg := `{"namespace":"seedbox","configMap":"s5n-wiring","timeoutSeconds":300,` +
 				`"instances":[],` +
-				`"qbittorrent":{"url":"http://qbittorrent:8080","username":"admin","passwordFile":"/etc/s5n/keys/qbittorrent-password"},` +
+				`"qbittorrent":{"url":"http://qbittorrent:8080"},` +
 				`"` + app + `":{"url":"http://` + app + `:1234"}}`
 			if err := os.WriteFile(path, []byte(cfg), 0o600); err != nil {
 				t.Fatal(err)
@@ -42,7 +42,7 @@ func TestConfigAcceptsQuiAndAutobrr(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "wiring.json")
 	cfg := `{"namespace":"seedbox","configMap":"s5n-wiring","timeoutSeconds":300,` +
 		`"instances":[],` +
-		`"qbittorrent":{"url":"http://qbittorrent:8080","username":"admin","passwordFile":"/etc/s5n/keys/qbittorrent-password"},` +
+		`"qbittorrent":{"url":"http://qbittorrent:8080"},` +
 		`"qui":{"url":"http://qui:7476","urlBase":"/qui","username":"s5n","passwordFile":"/etc/s5n/keys/qui-password"},` +
 		`"autobrr":{"url":"http://autobrr:7474","urlBase":"/autobrr","username":"s5n","passwordFile":"/etc/s5n/keys/autobrr-password"}}`
 	if err := os.WriteFile(path, []byte(cfg), 0o600); err != nil {
@@ -66,5 +66,23 @@ func TestConfigAcceptsQuiAndAutobrr(t *testing.T) {
 		t.Fatal("a qui block with no password file loaded")
 	} else if !strings.Contains(err.Error(), "qui: passwordFile is empty") {
 		t.Fatalf("error = %v, want it to name qui's passwordFile", err)
+	}
+}
+
+// The qBittorrent block carries a URL and nothing else. A render that still
+// passes a credential is refused by name rather than silently ignored: the Job
+// has no password to read, and qBittorrent's own login is bypassed for the
+// release's addresses.
+func TestConfigRefusesAQbitCredential(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "wiring.json")
+	cfg := `{"namespace":"seedbox","configMap":"s5n-wiring","timeoutSeconds":300,"instances":[],` +
+		`"qbittorrent":{"url":"http://qbittorrent:8080","passwordFile":"/etc/s5n/keys/qbittorrent-password"}}`
+	if err := os.WriteFile(path, []byte(cfg), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Load(path); err == nil {
+		t.Fatal("a qBittorrent block with a password file loaded")
+	} else if !strings.Contains(err.Error(), `unknown field "passwordFile"`) {
+		t.Fatalf("error = %v, want an unknown-field refusal naming passwordFile", err)
 	}
 }

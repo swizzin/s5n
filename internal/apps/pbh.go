@@ -200,8 +200,9 @@ type PbhDownloaderSpec struct {
 // pbhDesired is the stored config with only the fields s5n owns overlaid, in
 // the shape PBH's status endpoint reports: everything else (paused, the shadow
 // ban, TLS verification, the ignore-private flag, a name a person renamed)
-// survives an update. The password is a secret field: it is always written and
-// never compared, because a difference is what owned.json's fingerprint says.
+// survives an update. The password is a secret field: it is always written —
+// empty, since qBittorrent skips its login for the release's addresses — and
+// never compared.
 func pbhDesired(live Item, spec PbhDownloaderSpec) (Item, []FieldChange) {
 	desired, drift := overlayOwned(live, []ownedField{
 		{pbhFieldEndpoint, spec.Endpoint, false},
@@ -262,11 +263,11 @@ func locatePbh(list []Item, ownedID, name string) (cur Item, found, recreated bo
 // returns the id it lives under, which the caller records only after
 // WaitHealthy has proven the write.
 //
-// ownedID and knownFingerprint are owned.json's record: the id keeps a rename
-// working, and the sha256 of the password last written and proven is what makes
-// a rotation in the release Secret visible (PBH echoes the stored password, but
-// reading a secret to compare it is exactly what invariant 10 forbids).
-func (p *Pbh) EnsureDownloader(ctx context.Context, spec PbhDownloaderSpec, ownedID, knownFingerprint string) (EnsureResult, error) {
+// ownedID is owned.json's record: it keeps a rename working. There is no
+// fingerprint beside it any more: the downloader's only secret was the
+// qBittorrent password, and that is written empty now that qBittorrent skips
+// its login for the release's addresses.
+func (p *Pbh) EnsureDownloader(ctx context.Context, spec PbhDownloaderSpec, ownedID string) (EnsureResult, error) {
 	list, err := p.Downloaders(ctx)
 	if err != nil {
 		return EnsureResult{}, err
@@ -297,10 +298,9 @@ func (p *Pbh) EnsureDownloader(ctx context.Context, spec PbhDownloaderSpec, owne
 		live = pbhCreateConfig(spec)
 	}
 	desired, drift := pbhDesired(live, spec)
-	rotated := knownFingerprint != SecretFingerprint(spec.Password)
 
 	change := Unchanged
-	if len(drift) > 0 || rotated || missing {
+	if len(drift) > 0 || missing {
 		change = Updated
 	}
 	if change == Updated {

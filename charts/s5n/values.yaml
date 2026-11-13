@@ -136,7 +136,9 @@ apps:
       variant: default
     port: 8080
     # Seeded into qBittorrent.conf by an init container, together with a generated
-    # password from the release Secret. The wiring Job logs in with the same pair.
+    # password from the release Secret. Nobody signs in with it: the WebUI skips
+    # its login for the release's addresses, so this is only the account the
+    # config names, and an existing seedbox's value keeps working.
     webuiUsername: admin
     # qBittorrent has no URL base setting; the route strips the prefix.
     rewritePath: true

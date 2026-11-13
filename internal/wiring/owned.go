@@ -23,32 +23,20 @@ type OwnedRecord struct {
 
 // PbhOwned is what the Job owns in PeerBanHelper: one qBittorrent downloader,
 // recorded by the string id it lives under in PBH's own `client:` config (PBH
-// numbers nothing, and a name is the user's to change), and with the sha256 of
-// the qBittorrent password it was last written and proven with.
-//
-// PBH does echo the stored password back from its status endpoint, which would
-// make a comparison possible -- and is exactly what invariant 10 forbids
-// reading a secret to do. The fingerprint lives here for the same reason it
-// does for qui's and autobrr's copies: a rotation in the release Secret has to
-// be visible without ever handling the value.
+// numbers nothing, and a name is the user's to change). There is no
+// fingerprint beside it: the downloader is written with an empty username and
+// password, so it holds no secret that could rotate.
 type PbhOwned struct {
-	Downloader              string `json:"downloader,omitempty"`
-	QbitPasswordFingerprint string `json:"qbitPasswordFingerprint,omitempty"`
+	Downloader string `json:"downloader,omitempty"`
 }
 
 // QuiOwned is what the Job owns in qui, an app that keeps its own user table
 // and hands out API keys only to a signed-in session, so its instance can be
 // registered only with the account the chart owns (see docs/box.md, "An app
-// that keeps its own user table has one account box owns").
-//
-// QbitPasswordFingerprint is sha256-hex of the qBittorrent password the
-// instance was last written and proven with. qui never returns a stored
-// password, so a password rotated in the release Secret is otherwise
-// invisible: the same rule as Tautulli's Plex token, and the same reason it
-// lives in owned.json (a read error stops the run rather than guessing).
+// that keeps its own user table has one account box owns"). The instance's
+// qBittorrent login is written empty, so there is no fingerprint beside the id.
 type QuiOwned struct {
-	Instance                int    `json:"instance,omitempty"`
-	QbitPasswordFingerprint string `json:"qbitPasswordFingerprint,omitempty"`
+	Instance int `json:"instance,omitempty"`
 }
 
 // AutobrrOwned is what the Job owns in autobrr: one download client per Arr
@@ -73,14 +61,11 @@ type TautulliOwned struct {
 	PlexTokenFingerprint string `json:"plexTokenFingerprint,omitempty"`
 }
 
-// ArrOwned is what the Job owns on one Arr instance. The download client is
-// the only object, and DownloadClientPasswordFingerprint is sha256-hex of the
-// qBittorrent password it was last written and proven with: the Arr answers a
-// mask for that field, so a password rotated in the release Secret is otherwise
-// invisible and the client would keep dialling with the old one.
+// ArrOwned is what the Job owns on one Arr instance: the download client, by
+// id. Its qBittorrent login is written empty, so the record carries no
+// fingerprint of a credential that no longer exists.
 type ArrOwned struct {
-	DownloadClient                    int    `json:"downloadClient,omitempty"`
-	DownloadClientPasswordFingerprint string `json:"downloadClientPasswordFingerprint,omitempty"`
+	DownloadClient int `json:"downloadClient,omitempty"`
 }
 
 // ProwlarrOwned is what the Job owns in Prowlarr: one application per Arr
@@ -145,36 +130,13 @@ func (o *OwnedRecord) ArrDownloadClientID(instance string) int {
 }
 
 // SetArrDownloadClientID records the id of the download client the Job
-// created or adopted for an Arr instance, keeping the password fingerprint
-// recorded beside it.
+// created or adopted for an Arr instance.
 func (o *OwnedRecord) SetArrDownloadClientID(instance string, id int) {
 	if o.Arr == nil {
 		o.Arr = map[string]ArrOwned{}
 	}
 	rec := o.Arr[instance]
 	rec.DownloadClient = id
-	o.Arr[instance] = rec
-}
-
-// ArrDownloadClientPasswordFingerprint returns the fingerprint of the
-// qBittorrent password the Arr's download client was last written and proven
-// with, or "" when no successful write is on record (a first run, or an install
-// predating this record).
-func (o *OwnedRecord) ArrDownloadClientPasswordFingerprint(instance string) string {
-	return o.Arr[instance].DownloadClientPasswordFingerprint
-}
-
-// SetArrDownloadClientPasswordFingerprint records the fingerprint of the
-// qBittorrent password the Job just wrote into one Arr's download client and
-// proved with the Arr's own connection test. Call it only after that succeeded:
-// a fingerprint stored for a write the Arr did not accept would hide the next
-// rotation and leave the client dialling with a password qBittorrent refuses.
-func (o *OwnedRecord) SetArrDownloadClientPasswordFingerprint(instance, fingerprint string) {
-	if o.Arr == nil {
-		o.Arr = map[string]ArrOwned{}
-	}
-	rec := o.Arr[instance]
-	rec.DownloadClientPasswordFingerprint = fingerprint
 	o.Arr[instance] = rec
 }
 
@@ -248,27 +210,6 @@ func (o *OwnedRecord) SetQuiInstanceID(id int) {
 	o.Qui.Instance = id
 }
 
-// QuiQbitPasswordFingerprint returns the fingerprint of the qBittorrent
-// password the instance was last written and proven with, or "" when no
-// successful write is on record (a first run, or an install predating it).
-func (o *OwnedRecord) QuiQbitPasswordFingerprint() string {
-	if o.Qui == nil {
-		return ""
-	}
-	return o.Qui.QbitPasswordFingerprint
-}
-
-// SetQuiQbitPasswordFingerprint records the fingerprint of the qBittorrent
-// password the Job just wrote into qui and proved with qui's own test. Call it
-// only after that succeeded: a fingerprint stored for a write the app did not
-// accept would hide the next rotation.
-func (o *OwnedRecord) SetQuiQbitPasswordFingerprint(fingerprint string) {
-	if o.Qui == nil {
-		o.Qui = &QuiOwned{}
-	}
-	o.Qui.QbitPasswordFingerprint = fingerprint
-}
-
 // AutobrrClientID returns the recorded id for one autobrr download client, or 0
 // when nothing is recorded.
 func (o *OwnedRecord) AutobrrClientID(name string) int {
@@ -328,25 +269,4 @@ func (o *OwnedRecord) SetPbhDownloaderID(id string) {
 		o.Pbh = &PbhOwned{}
 	}
 	o.Pbh.Downloader = id
-}
-
-// PbhQbitPasswordFingerprint returns the fingerprint of the qBittorrent
-// password the downloader was last written and proven with, or "" when no
-// successful write is on record.
-func (o *OwnedRecord) PbhQbitPasswordFingerprint() string {
-	if o.Pbh == nil {
-		return ""
-	}
-	return o.Pbh.QbitPasswordFingerprint
-}
-
-// SetPbhQbitPasswordFingerprint records the fingerprint of the qBittorrent
-// password the Job just wrote into PBH and proved with its own HEALTHY status.
-// Call it only after that: a fingerprint stored for a write PBH never accepted
-// would hide the next rotation and leave PBH dialling with a refused password.
-func (o *OwnedRecord) SetPbhQbitPasswordFingerprint(fingerprint string) {
-	if o.Pbh == nil {
-		o.Pbh = &PbhOwned{}
-	}
-	o.Pbh.QbitPasswordFingerprint = fingerprint
 }

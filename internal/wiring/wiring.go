@@ -261,15 +261,13 @@ func (r *Runner) work(ctx context.Context, res *Result) error {
 		return r.ensure(res, "data/dirs", apps.Unchanged, err)
 	}
 
+	// Every app that calls qBittorrent does so with an empty username and
+	// password: the WebUI skips its login for the release's addresses
+	// (docs/box.md, "Logins"), so no app's database holds a copy of a
+	// credential and there is nothing here to read out of the Secret.
 	var qbit *apps.Qbit
-	var qbitPassword string
 	if c.Qbittorrent != nil {
-		pw, err := ReadSecret(c.Qbittorrent.PasswordFile)
-		if err != nil {
-			return r.ensure(res, "qbittorrent/credentials", apps.Unchanged, err)
-		}
-		qbitPassword = pw
-		qbit = apps.NewQbit(c.Qbittorrent.URL, c.Qbittorrent.Username, qbitPassword)
+		qbit = apps.NewQbit(c.Qbittorrent.URL, "", "")
 		r.logf("waiting for qBittorrent at %s", c.Qbittorrent.URL)
 		if err := qbit.WaitReady(ctx, timeout); err != nil {
 			return r.ensure(res, "qbittorrent/ready", apps.Unchanged, err)
@@ -332,15 +330,15 @@ func (r *Runner) work(ctx context.Context, res *Result) error {
 				Category: inst.Category,
 				Host:     host,
 				Port:     port,
-				Username: c.Qbittorrent.Username,
-				Password: qbitPassword,
-			}, owned.ArrDownloadClientID(inst.Name), owned.ArrDownloadClientPasswordFingerprint(inst.Name))
+				// Owned, and owned as empty. qBittorrent skips its login for
+				// the release's addresses, so the client needs no credential —
+				// and one an older install stored in this Arr's database is
+				// overwritten here on the next run.
+				Username: "",
+				Password: "",
+			}, owned.ArrDownloadClientID(inst.Name))
 			if err == nil && result.ID != 0 {
 				owned.SetArrDownloadClientID(inst.Name, result.ID)
-				// Only after the write and the Arr's own test succeeded: a
-				// fingerprint recorded for an unaccepted write would hide the
-				// next rotation (the Tautulli ordering).
-				owned.SetArrDownloadClientPasswordFingerprint(inst.Name, apps.SecretFingerprint(qbitPassword))
 			}
 			if err := r.ensureResult(res, inst.Name+"/downloadclient", result, err); err != nil {
 				return err
@@ -428,22 +426,21 @@ func (r *Runner) work(ctx context.Context, res *Result) error {
 			}
 		} else {
 			result, err := q.EnsureInstance(ctx, apps.QuiInstanceSpec{
-				Name:     "qBittorrent",
-				Host:     strings.TrimRight(c.Qbittorrent.URL, "/"),
-				Username: c.Qbittorrent.Username,
-				Password: qbitPassword,
+				Name: "qBittorrent",
+				Host: strings.TrimRight(c.Qbittorrent.URL, "/"),
+				// Owned, and owned as empty: qBittorrent skips its login for
+				// the release's addresses, so qui's instance holds no
+				// credential either.
+				Username: "",
+				Password: "",
 				// /data is mounted at /data in every app and qBittorrent saves
 				// under /data/downloads/<category>, so qui's own path is the
 				// one the apps write: hardlink detection and the orphan scan
 				// work without a second path mapping.
 				HasLocalFilesystemAccess: true,
-			}, owned.QuiInstanceID(), owned.QuiQbitPasswordFingerprint())
+			}, owned.QuiInstanceID())
 			if err == nil && result.ID != 0 {
 				owned.SetQuiInstanceID(result.ID)
-				// Only after the write and qui's own test succeeded: a
-				// fingerprint recorded for an unaccepted write would mask the
-				// next rotation.
-				owned.SetQuiQbitPasswordFingerprint(apps.SecretFingerprint(qbitPassword))
 			}
 			if err := r.ensureResult(res, "qui/instance", result, err); err != nil {
 				return err
@@ -470,15 +467,17 @@ func (r *Runner) work(ctx context.Context, res *Result) error {
 		r.okStep(res, "autobrr/login", c.Autobrr.Username)
 		if c.Qbittorrent != nil {
 			result, err := a.EnsureDownloader(ctx, apps.DownloaderSpec{
-				Name:     "qBittorrent",
-				Type:     "QBITTORRENT",
-				Host:     strings.TrimRight(c.Qbittorrent.URL, "/"),
-				Username: c.Qbittorrent.Username,
-				Password: qbitPassword,
+				Name: "qBittorrent",
+				Type: "QBITTORRENT",
+				Host: strings.TrimRight(c.Qbittorrent.URL, "/"),
+				// Owned, and owned as empty; autobrr holds no credential for
+				// qBittorrent, which skips its login for the release's
+				// addresses.
+				Username: "",
+				Password: "",
 			}, owned.AutobrrClientID("qBittorrent"), owned.AutobrrClientFingerprint("qBittorrent"))
 			if err == nil && result.ID != 0 {
 				owned.SetAutobrrClientID("qBittorrent", result.ID)
-				owned.SetAutobrrClientFingerprint("qBittorrent", apps.SecretFingerprint(qbitPassword))
 			}
 			if err := r.ensureResult(res, "autobrr/downloader/qbittorrent", result, err); err != nil {
 				return err
@@ -548,9 +547,11 @@ func (r *Runner) work(ctx context.Context, res *Result) error {
 				ID:       "qbittorrent",
 				Name:     "qBittorrent",
 				Endpoint: strings.TrimRight(c.Qbittorrent.URL, "/"),
-				Username: c.Qbittorrent.Username,
-				Password: qbitPassword,
-			}, owned.PbhDownloaderID(), owned.PbhQbitPasswordFingerprint())
+				// Owned, and owned as empty: PBH reads qBittorrent's API
+				// without a login, the same way every other caller does.
+				Username: "",
+				Password: "",
+			}, owned.PbhDownloaderID())
 			if err == nil {
 				var status string
 				if status, err = p.WaitHealthy(ctx, result.StringID, timeout); err != nil {
@@ -559,10 +560,6 @@ func (r *Runner) work(ctx context.Context, res *Result) error {
 			}
 			if err == nil && result.StringID != "" {
 				owned.SetPbhDownloaderID(result.StringID)
-				// Only after PBH's own status says it logged in with this
-				// password: a fingerprint for a write it never accepted would
-				// hide the next rotation.
-				owned.SetPbhQbitPasswordFingerprint(apps.SecretFingerprint(qbitPassword))
 			}
 			if err := r.ensureResult(res, "pbh/downloader", result, err); err != nil {
 				return err

@@ -99,13 +99,12 @@ func (a *Arr) categoryField() string {
 // field) — name, enable, priority, tags and anything else are left exactly as
 // the user set them. A deleted owned client is recreated.
 //
-// The Arr never returns the stored password, only a mask, so a rotation of the
-// qBittorrent password in the release Secret is invisible to a field
-// comparison. knownFingerprint is the sha256 of the password last written and
-// proven; a difference means the stored copy is stale and the client is
-// rewritten even though every readable field matches. The connection test below
-// is what proves the new one works before it is written.
-func (a *Arr) EnsureDownloadClient(ctx context.Context, spec DownloadClientSpec, ownedID int, knownFingerprint string) (EnsureResult, error) {
+// username and password are owned fields that s5n writes empty: qBittorrent's
+// login is bypassed for the release's addresses, so the client carries no
+// credential and an install that stored one has it cleared on the next run.
+// That is why there is no fingerprint to compare here: nothing this client
+// holds can rotate.
+func (a *Arr) EnsureDownloadClient(ctx context.Context, spec DownloadClientSpec, ownedID int) (EnsureResult, error) {
 	list, err := a.downloadClients(ctx)
 	if err != nil {
 		return EnsureResult{}, fmt.Errorf("list download clients: %w", err)
@@ -128,8 +127,7 @@ func (a *Arr) EnsureDownloadClient(ctx context.Context, spec DownloadClientSpec,
 	if found {
 		desired, drift = overlayOwned(cur, fields)
 		desired["id"] = cur["id"]
-		rotated := knownFingerprint != SecretFingerprint(spec.Password)
-		if len(drift) > 0 || rotated {
+		if len(drift) > 0 {
 			change = Updated
 		} else {
 			change = Unchanged

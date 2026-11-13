@@ -153,8 +153,8 @@ func (h *harness) withApps(t *testing.T) *appFakes {
 		PasswordFile: h.write(t, "qui.pw", "qui-pass-123\n")}
 	h.config.Autobrr = &AutobrrConfig{URL: auto.URL, URLBase: "/autobrr", Username: "s5n",
 		PasswordFile: h.write(t, "autobrr.pw", "autobrr-pass-123\n")}
-	// PeerBanHelper holds a copy of the same qBittorrent password, so every test
-	// that rotates it has to see this copy move too.
+	// PeerBanHelper's downloader is the release's qBittorrent too, and it holds
+	// no more of a credential than the others.
 	h.withPbh(t)
 	h.runner.Config = h.config
 	return f
@@ -218,16 +218,20 @@ func TestWiringRegistersQuiAndAutobrr(t *testing.T) {
 	}
 
 	rec := ownedOf(t, h)
-	if rec.QuiInstanceID() == 0 || rec.QuiQbitPasswordFingerprint() == "" {
+	if rec.QuiInstanceID() == 0 {
 		t.Fatalf("qui not recorded: %+v", rec.Qui)
 	}
-	for _, name := range []string{"qBittorrent", "sonarr", "radarr"} {
+	if rec.AutobrrClientID("qBittorrent") == 0 || rec.AutobrrClientFingerprint("qBittorrent") != "" {
+		t.Fatalf("autobrr's qBittorrent client = id %d, fingerprint %q: the id is owned, no secret is",
+			rec.AutobrrClientID("qBittorrent"), rec.AutobrrClientFingerprint("qBittorrent"))
+	}
+	for _, name := range []string{"sonarr", "radarr"} {
 		if rec.AutobrrClientID(name) == 0 || rec.AutobrrClientFingerprint(name) == "" {
 			t.Fatalf("autobrr client %s not recorded: %+v", name, rec.Autobrr)
 		}
 	}
-	// No secret ever lands in owned.json: only the sha256 of one.
-	if strings.Contains(h.cmData["owned.json"], "hunter2") || strings.Contains(h.cmData["owned.json"], "sonarr-key") {
+	// No secret ever lands in owned.json: only the sha256 of the Arr keys.
+	if strings.Contains(h.cmData["owned.json"], "sonarr-key") {
 		t.Fatal("owned.json carries a secret value")
 	}
 
@@ -254,74 +258,46 @@ func TestWiringRegistersQuiAndAutobrr(t *testing.T) {
 	}
 }
 
-// Rotating the qBittorrent password in the release Secret is visible only
-// through the fingerprints, so exactly the objects that hold a copy are
-// rewritten: qui's instance, autobrr's qBittorrent client, PeerBanHelper's
-// downloader, and the download client of every Arr. An Arr never returns that password, so without its own
-// fingerprint it kept dialling with the old one -- and its connection test only
-// runs at the next wiring pass. The Arr key copies are untouched.
-func TestWiringRewritesEveryCopyWhenTheQbitPasswordRotates(t *testing.T) {
+// qBittorrent skips its login for the release's addresses, so the Job hands
+// every caller an empty username and password. That is the rule this test
+// pins: the five objects that used to hold a copy of the password (the Arrs'
+// download clients, qui's instance, autobrr's qBittorrent client and
+// PeerBanHelper's downloader) hold nothing, and the release Secret's
+// password is read by qBittorrent's own init container alone.
+func TestWiringGivesQbittorrentNoCredentials(t *testing.T) {
 	h := newHarness(t)
 	f := h.withApps(t)
-	ctx := context.Background()
-	if _, err := h.runner.Run(ctx); err != nil {
-		t.Fatal(err)
+	res, err := h.runner.Run(context.Background())
+	if err != nil {
+		t.Fatalf("run: %v\n%s", err, Summary(res))
 	}
 
-	h.write(t, "qbit.pw", "rotated-qbit-pass\n")
-	res, err := h.runner.Run(ctx)
-	if err != nil {
-		t.Fatalf("run after the rotation: %v\n%s", err, Summary(res))
-	}
-	if res.Writes.Updated != 5 {
-		t.Fatalf("updated = %d, want qui/instance, autobrr's qBittorrent client, PeerBanHelper's downloader and both Arrs' download clients\n%s",
-			res.Writes.Updated, Summary(res))
-	}
-	for _, name := range []string{
-		"qui/instance", "autobrr/downloader/qbittorrent", "pbh/downloader",
-		"sonarr/downloadclient", "radarr/downloadclient",
-	} {
-		if step := stepByName(t, res, name); step.Detail != "updated" {
-			t.Fatalf("%s = %+v, want updated", name, step)
+	for _, instance := range []string{"sonarr", "radarr"} {
+		client := h.stack.clients[instance][0]
+		for _, field := range []string{"username", "password"} {
+			if v, _ := client.FieldValue(field); v != "" {
+				t.Fatalf("%s's download client holds %s = %v, want it empty", instance, field, v)
+			}
 		}
 	}
-	for _, name := range []string{
-		"autobrr/downloader/sonarr", "autobrr/downloader/radarr",
-		"prowlarr/application/sonarr", "prowlarr/application/radarr",
-	} {
-		if step := stepByName(t, res, name); step.Detail != "unchanged" {
-			t.Fatalf("%s = %+v, want unchanged: its key did not move", name, step)
-		}
+	if got := f.quiRows[0].Str("username"); got != "" {
+		t.Fatalf("qui's instance holds username %q, want it empty", got)
 	}
-	if got := f.quiRows[0].Str("password"); got != "rotated-qbit-pass" {
-		t.Fatalf("qui holds %q, want the rotated password", got)
+	if got := f.quiRows[0].Str("password"); got != "" {
+		t.Fatalf("qui's instance holds a password, want it empty")
 	}
 	for _, row := range f.autoRows {
-		if row.Str("name") == "qBittorrent" && row.Str("password") != "rotated-qbit-pass" {
-			t.Fatalf("autobrr holds %q, want the rotated password", row.Str("password"))
+		if row.Str("name") != "qBittorrent" {
+			continue
+		}
+		if row.Str("username") != "" || row.Str("password") != "" {
+			t.Fatalf("autobrr's qBittorrent client holds %q/%q, want both empty",
+				row.Str("username"), row.Str("password"))
 		}
 	}
-	if got := h.pbh.cfg["qbittorrent"].Str("password"); got != "rotated-qbit-pass" {
-		t.Fatalf("PeerBanHelper holds %q, want the rotated password", got)
-	}
-	for _, instance := range []string{"sonarr", "radarr"} {
-		if got, _ := h.stack.clients[instance][0].FieldValue("password"); got != "rotated-qbit-pass" {
-			t.Fatalf("%s's download client holds %v, want the rotated password", instance, got)
-		}
-	}
-
-	// With the new fingerprints on record, the run after the rotation writes
-	// nothing at all.
-	writes := h.stack.count()
-	again, err := h.runner.Run(ctx)
-	if err != nil {
-		t.Fatalf("run after the rotation: %v", err)
-	}
-	if again.Writes.Created != 0 || again.Writes.Updated != 0 {
-		t.Fatalf("a run after the rotation still wrote: %+v\n%s", again.Writes, Summary(again))
-	}
-	if got := h.stack.count(); got != writes {
-		t.Fatalf("a run after the rotation made %d API writes", got-writes)
+	if got := h.pbh.cfg["qbittorrent"]; got.Str("username") != "" || got.Str("password") != "" {
+		t.Fatalf("PeerBanHelper's downloader holds %q/%q, want both empty",
+			got.Str("username"), got.Str("password"))
 	}
 }
 
