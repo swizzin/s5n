@@ -521,11 +521,12 @@ qui_session() { # qui_session <base-url>
 
 # qui_change_password turns a fresh session into a password change, the way a
 # person would do it in qui's settings: the old password proves the session, the
-# new one is what the app stores until its pod restarts.
+# new one is what the app stores until its pod restarts. qui routes this as a
+# PUT (internal/api/server.go:502), not a POST.
 qui_change_password() { # qui_change_password <base-url> <current> <new>
   local base=$1 current=$2 next=$3
   curl -sS -o "$WORK/qui-change.json" -w '%{http_code}' \
-    -X POST "http://127.0.0.1:${PF_PORT}${base}/api/auth/change-password" \
+    -X PUT "http://127.0.0.1:${PF_PORT}${base}/api/auth/change-password" \
     -H "Cookie: ${QUI_COOKIE}" -H 'X-Requested-With: XMLHttpRequest' \
     -H 'Content-Type: application/json' \
     --data "{\"currentPassword\":\"${current}\",\"newPassword\":\"${next}\"}" 2>/dev/null || true
@@ -558,7 +559,16 @@ out = {"apiVersion": "batch/v1", "kind": "Job", "metadata": meta, "spec": job["s
 # The selector belongs to the controller: a Job created without one has it
 # filled in, and a copied one would pin the pod template hash it came from.
 out["spec"].pop("selector", None)
-print(json.dumps(out))' 2>/dev/null | $K -n "$NS" apply -f - >"$1" 2>&1 || true
+# The controller writes its own identity into the pod template labels, and a
+# Job refuses a template that carries another Job identity.
+for k in ("batch.kubernetes.io/controller-uid", "controller-uid",
+          "batch.kubernetes.io/job-name", "job-name"):
+    out["spec"]["template"]["metadata"]["labels"].pop(k, None)
+print(json.dumps(out))' 2>/dev/null >"$1.json" || true
+  if ! $K -n "$NS" apply -f "$1.json" >>"$1" 2>&1; then
+    echo "could not create the re-run Job:"; tail -5 "$1"
+    return 1
+  fi
   # Complete *or* Failed: the changed-password case is deliberately a failing
   # run, and `kubectl wait --for=condition=complete` would sit there for its
   # whole timeout waiting for a condition that is never coming.
@@ -2605,7 +2615,7 @@ print("qui=%s" % rec["qui"]["instance"],
   # A second run of the same Job must change nothing at all: no created, no
   # updated, and the same ids -- which is also the proof that neither app grew a
   # duplicate row (qui has no uniqueness on name or host, autobrr none on name).
-  rerun_wiring "$WORK/rerun-quiet.txt"
+  rerun_wiring "$WORK/rerun-quiet.txt" || fail=1
   created=$(status_field 'd["writes"]["created"]' 2>/dev/null || echo missing)
   updated=$(status_field 'd["writes"]["updated"]' 2>/dev/null || echo missing)
   ids_after=$(owned_ids)
@@ -2709,7 +2719,22 @@ PY
   # release Secret is invisible to a comparison; owned.json's fingerprint is
   # what turns it into an update. qBittorrent itself takes the new password at
   # its next start (its init container writes the Secret's value every time).
+  #
+  # qui is stopped for the rotation, and that is not tidiness: it polls
+  # qBittorrent continuously, so between qBittorrent coming up with a new
+  # password and the Job rewriting qui's copy, qui retries the old one, and
+  # qBittorrent bans an address after five failed logins. An operator rotating a
+  # password quick enough meets the same race; stopping the poller is the way
+  # out of it, and the Job is what puts the new password back.
+  #
+  # The Job is re-run instead of `helm upgrade`: box owns this release's objects
+  # with server-side apply under its own field manager, and a Helm upgrade of
+  # the same release conflicts on every route it would have to take over.
   log "rotating the qBittorrent password: exactly the two copies that hold it update"
+  $K -n "$NS" scale statefulset/qui --replicas=0 >/dev/null ||
+    { echo "could not stop qui for the rotation"; fail=1; }
+  $K -n "$NS" wait --for=delete pod/qui-0 --timeout=120s >/dev/null 2>&1 ||
+    { echo "qui did not stop for the rotation"; fail=1; }
   QBIT_PASSWORD=$(openssl rand -hex 12)
   $K -n "$NS" patch secret s5n-keys --type=merge \
     -p "{\"data\":{\"qbittorrent-password\":\"$(printf '%s' "$QBIT_PASSWORD" | base64 -w0)\"}}" >/dev/null ||
@@ -2717,12 +2742,10 @@ PY
   $K -n "$NS" rollout restart statefulset/qbittorrent >/dev/null
   $K -n "$NS" rollout status statefulset/qbittorrent --timeout=300s >/dev/null ||
     { echo "qBittorrent did not come back on the rotated password"; fail=1; }
-  if $HELM upgrade s5n "$CHART_REPO" --version "$CHART_VERSION" -n "$NS" --reuse-values --plain-http \
-      --wait --timeout 15m >"$WORK/upgrade-rotate.txt" 2>&1; then
-    :
-  else
-    echo "the upgrade after the rotation failed"; tail -30 "$WORK/upgrade-rotate.txt"; fail=1
-  fi
+  $K -n "$NS" scale statefulset/qui --replicas=1 >/dev/null
+  $K -n "$NS" wait --for=condition=Ready pod/qui-0 --timeout=300s >/dev/null 2>&1 ||
+    { echo "qui did not come back after the rotation"; fail=1; }
+  rerun_wiring "$WORK/rerun-rotate.txt" || fail=1
   created=$(status_field 'd["writes"]["created"]' 2>/dev/null || echo missing)
   updated=$(status_field 'd["writes"]["updated"]' 2>/dev/null || echo missing)
   echo "  after the rotation: ${created} created, ${updated} updated"
@@ -2762,6 +2785,24 @@ print(rows[0]["id"] if len(rows) == 1 else "")' "$WORK/qui-instances-rotated.jso
   echo "  autobrr's qBittorrent client on the rotated password: ${autobrr_test}"
   [ "$autobrr_test" = 204 ] || { echo "autobrr lost qBittorrent on the rotated password (${autobrr_test})"; fail=1; }
 
+  # autobrr's init container, on a restart: its second create-user run fails
+  # with the one message that means "already there", which is why the script
+  # matches that sentence instead of ignoring the exit code, and the password is
+  # set again after it. Restarted here so the re-run is real.
+  $K -n "$NS" rollout restart statefulset/autobrr >/dev/null
+  $K -n "$NS" rollout status statefulset/autobrr --timeout=300s >/dev/null 2>&1 ||
+    { echo "autobrr did not come back after its restart"; fail=1; }
+  autobrr_init=$($K -n "$NS" logs autobrr-0 -c account 2>/dev/null || true)
+  echo "  autobrr's init container: $(printf '%s' "$autobrr_init" | tr '\n' ' ' | cut -c1-220)"
+  case "$autobrr_init" in
+    *"account already exists (autobrrctl: only 1 user account is supported)"*) ;;
+    *) echo "autobrr's init container did not meet the existing account as expected"; fail=1 ;;
+  esac
+  case "$autobrr_init" in
+    *"successfully updated password for user"*) ;;
+    *) echo "autobrr's init container did not set the Secret's password again"; fail=1 ;;
+  esac
+
   # ---- a password changed inside qui ----------------------------------------
   # The account belongs to the app, so an operator can change it there; the Job
   # then cannot sign in until the pod restarts, because that is when the init
@@ -2774,10 +2815,15 @@ print(rows[0]["id"] if len(rows) == 1 else "")' "$WORK/qui-instances-rotated.jso
   QUI_INSIDE_PASSWORD="inside-$(openssl rand -hex 8)"
   change_code=$(qui_change_password "$QUI_BASE" "$QUI_PASSWORD" "$QUI_INSIDE_PASSWORD")
   echo "  changed qui's password through its API: ${change_code} $(head -c 120 "$WORK/qui-change.json" 2>/dev/null)"
+  # The change took, and the Secret's password no longer opens a session: that
+  # is the state the Job has to report, so the assertion below is not vacuous.
+  qui_session "$QUI_BASE"
+  echo "  the Secret's password after the change: ${QUI_LOGIN_CODE} ${QUI_LOGIN_BODY}"
   port_forward_stop
   [ "$change_code" = 200 ] || { echo "qui refused the password change (${change_code})"; fail=1; }
+  [ "$QUI_LOGIN_CODE" = 401 ] || { echo "the Secret's password still opens a session after the change (${QUI_LOGIN_CODE})"; fail=1; }
 
-  rerun_wiring "$WORK/rerun-changed.txt"
+  rerun_wiring "$WORK/rerun-changed.txt" || fail=1
   login_result=$(status_field "[s['result'] for s in d['steps'] if s['name']=='qui/login'][0]" 2>/dev/null || echo missing)
   login_detail=$(status_field "[s['detail'] for s in d['steps'] if s['name']=='qui/login'][0]" 2>/dev/null || echo missing)
   echo "  qui/login: ${login_result}: ${login_detail}"
@@ -2791,7 +2837,20 @@ print(rows[0]["id"] if len(rows) == 1 else "")' "$WORK/qui-instances-rotated.jso
   $K -n "$NS" rollout restart statefulset/qui >/dev/null
   $K -n "$NS" rollout status statefulset/qui --timeout=300s >/dev/null ||
     { echo "qui did not come back after the restart"; fail=1; }
-  rerun_wiring "$WORK/rerun-restored.txt"
+  # The init container is what puts the password back, so its log is the
+  # first-hand account: on a re-run it says the account exists and that the
+  # password was set again.
+  qui_init=$($K -n "$NS" logs qui-0 -c account 2>/dev/null || true)
+  echo "  qui's init container: $(printf '%s' "$qui_init" | tr '\n' ' ' | cut -c1-220)"
+  case "$qui_init" in
+    *"User account already exists"*) ;;
+    *) echo "qui's init container did not report the account already existing"; fail=1 ;;
+  esac
+  case "$qui_init" in
+    *"Password changed successfully for user '${QUI_USER}'"*) ;;
+    *) echo "qui's init container did not set the Secret's password again"; fail=1 ;;
+  esac
+  rerun_wiring "$WORK/rerun-restored.txt" || fail=1
   for step in qui/login qui/instance; do
     res=$(status_field "[s['result'] for s in d['steps'] if s['name']=='$step'][0]" 2>/dev/null || echo missing)
     echo "  ${step} after the restart: ${res}"
