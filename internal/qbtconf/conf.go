@@ -1,5 +1,6 @@
-// Package qbtconf seeds qBittorrent's WebUI credentials into qBittorrent.conf
-// before the app's first start.
+// Package qbtconf seeds qBittorrent's WebUI section into qBittorrent.conf
+// before the app's first start: the credentials it is given, the data
+// contract's save paths, and the private ranges its login skips.
 //
 // qBittorrent 5 stores the WebUI password as a QSettings QByteArray:
 //
@@ -39,6 +40,33 @@ const (
 	KeyLength  = 64
 	SaltLength = 16
 )
+
+// AuthBypassSubnets is the private address space qBittorrent's WebUI admits
+// without a login. qBittorrent cannot switch its login off, so it skips it for
+// these ranges (and for loopback, below) instead; what arrives is then either
+// Envoy, which forwards only what the edge's login already admitted — the
+// chart's Authelia rules give qBittorrent's paths no bypass, unlike an Arr's
+// /api — or a pod the release's NetworkPolicy lets in. That is the same
+// boundary the Arrs sit behind with External authentication, and it is why no
+// caller has to hold a credential. It is the same list the release's egress
+// policy already treats as internal.
+var authBypassSubnets = []string{
+	"10.0.0.0/8",
+	"172.16.0.0/12",
+	"192.168.0.0/16",
+	"100.64.0.0/10",
+	"fc00::/7",
+}
+
+// subnetListValue renders authBypassSubnets the way QSettings writes a
+// QStringList to an INI file: the elements joined with ", ", unquoted, because
+// Qt only quotes an element containing ';', ',', '=' or a leading/trailing
+// space (qsettings.cpp, iniEscapedStringList/iniEscapedString). Quoting the
+// whole value here would make QSettings read it back as one string, and
+// qBittorrent would then hold a single bogus subnet.
+func subnetListValue() string {
+	return strings.Join(authBypassSubnets, ", ")
+}
 
 // Hash derives the qBittorrent password hash in its on-disk form
 // ("<salt-b64>:<hash-b64>") using a fresh random salt.
@@ -294,12 +322,17 @@ func Seal(existing []byte, username, password string, port int) (out []byte, cha
 		{"WebUI", "Address", "*"},
 		{"WebUI", "Port", strconv.Itoa(port)},
 		{"WebUI", "ServerDomains", "*"},
-		// The release is only reachable through the Gateway (or directly, on the
-		// LAN); a validated Host header would reject the proxy's.
+		// The WebUI answers Envoy, which forwards the request's own Host (the
+		// box's domain), and ServerDomains is "*"; validating the Host here
+		// would only reject a caller the subnet whitelist already admits.
 		{"WebUI", "HostHeaderValidation", "false"},
-		// No localhost bypass: the password is the only way in.
+		// qBittorrent can't switch its login off, so it skips it instead: for
+		// loopback (`kubectl port-forward`) and for the private ranges every
+		// pod and the Gateway sit in. See authBypassSubnets for why that is the
+		// release's boundary and not a second door.
 		{"WebUI", "LocalHostAuth", "false"},
-		{"WebUI", "AuthSubnetWhitelistEnabled", "false"},
+		{"WebUI", "AuthSubnetWhitelistEnabled", "true"},
+		{"WebUI", "AuthSubnetWhitelist", subnetListValue()},
 		// The API is cookie-authenticated; CSRF protection only breaks non-browser
 		// clients, and nothing here is served to a browser we do not control.
 		{"WebUI", "CSRFProtection", "false"},
