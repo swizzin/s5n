@@ -1,0 +1,17 @@
+# Captured from cert-manager v1.21.3: `kubectl -n s5n-gateway get certificate
+# s5n-tls-box-internal-example -o yaml`, status only, on a box whose host had
+# just been re-issued for its current generation. The Ready condition carries
+# the generation it was written for, which is the field the wait has to compare
+# with metadata.generation.
+status:
+  conditions:
+  - lastTransitionTime: "2026-11-13T21:21:13Z"
+    message: Certificate is up to date and has not expired
+    observedGeneration: 2
+    reason: Ready
+    status: "True"
+    type: Ready
+  notAfter: "2027-02-11T21:21:08Z"
+  notBefore: "2026-11-13T21:21:09Z"
+  renewalTime: "2027-01-12T21:21:08Z"
+  revision: 5

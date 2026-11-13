@@ -1,0 +1,25 @@
+# Captured from cert-manager v1.21.3: `kubectl -n s5n-gateway get certificate
+# s5n-tls-pbh-box-internal-example -o yaml`, status only, on a box whose
+# Certificate had been moved to the ACME issuer: the Secret still held the
+# self-signed certificate, so the issuing controller had set Ready=False with
+# Issuing=True and was writing a new request. This is the document a wait reads
+# while a re-issue is in flight.
+status:
+  conditions:
+  - lastTransitionTime: "2026-11-13T21:20:48Z"
+    message: Issuing certificate as Secret was previously issued by "ClusterIssuer.cert-manager.io/s5n-selfsigned"
+    observedGeneration: 2
+    reason: IncorrectIssuer
+    status: "False"
+    type: Ready
+  - lastTransitionTime: "2026-11-13T21:20:48Z"
+    message: Issuing certificate as Secret was previously issued by "ClusterIssuer.cert-manager.io/s5n-selfsigned"
+    observedGeneration: 2
+    reason: IncorrectIssuer
+    status: "True"
+    type: Issuing
+  nextPrivateKeySecretName: s5n-tls-pbh-box-internal-example-cwnsv
+  notAfter: "2027-02-11T21:18:10Z"
+  notBefore: "2026-11-13T21:18:10Z"
+  renewalTime: "2027-01-12T21:18:10Z"
+  revision: 1

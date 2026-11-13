@@ -2,6 +2,7 @@ package platform
 
 import (
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -160,5 +161,88 @@ func TestPolicyAcceptedUsesTheEnvoyGatewayControllerName(t *testing.T) {
 	status := capturedStatus(t)
 	if got, _ := ancestor(t, status)["controllerName"].(string); got != bootstrap.EnvoyGatewayController {
 		t.Fatalf("fixture controller %q, want %q", got, bootstrap.EnvoyGatewayController)
+	}
+}
+
+// capturedCertificateStatus is the status cert-manager wrote for one
+// Certificate, read from a cluster into testdata rather than built here: the
+// question the wait asks is about the document a real controller writes, and a
+// stub written from the same guess as the reader passes both ways.
+func capturedCertificateStatus(t *testing.T, file string) map[string]any {
+	t.Helper()
+	raw, err := os.ReadFile(filepath.Join("testdata", file))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var doc map[string]any
+	if err := utilyaml.Unmarshal(raw, &doc); err != nil {
+		t.Fatalf("fixture: %v", err)
+	}
+	status, _ := doc["status"].(map[string]any)
+	if status == nil {
+		t.Fatalf("fixture carries no status: %v", doc)
+	}
+	return status
+}
+
+// A certificate the controller issued for the generation the object is at:
+// the answer every re-run of init or apply gets for a host that already moved.
+func TestCertificateStatusReadsTheCapturedReady(t *testing.T) {
+	status := capturedCertificateStatus(t, "certificate-ready.yaml")
+	if ready, why := CertificateStatus(status, 2); !ready || why != "" {
+		t.Fatalf("CertificateStatus(captured, 2) = %v, %q, want ready", ready, why)
+	}
+}
+
+// The same document, one generation later: this run's apply moved the issuer,
+// so the Ready=True still describes the certificate the move replaces. Reading
+// it as the answer is how a move is reported done before cert-manager has
+// issued anything -- and the next run then sits out the whole timeout on it.
+func TestCertificateStatusIgnoresAReadyFromAnEarlierGeneration(t *testing.T) {
+	status := capturedCertificateStatus(t, "certificate-ready.yaml")
+	ready, why := CertificateStatus(status, 3)
+	if ready {
+		t.Fatal("a Ready condition written for generation 2 was read as generation 3: the re-issue would be reported done, and the next run would wait the timeout out on it")
+	}
+	if !strings.Contains(why, "generation 3") {
+		t.Fatalf("reason %q does not name the generation that has to be issued", why)
+	}
+}
+
+// The in-flight re-issue, on the captured shape: Ready=False with the reason
+// the operator is given at the deadline, Issuing=True beside it.
+func TestCertificateStatusReadsTheReissueReason(t *testing.T) {
+	status := capturedCertificateStatus(t, "certificate-reissuing.yaml")
+	ready, why := CertificateStatus(status, 2)
+	if ready {
+		t.Fatal("a Certificate whose Secret was issued by another issuer was read as ready")
+	}
+	if !strings.HasPrefix(why, "IncorrectIssuer: Issuing certificate as Secret was previously issued by") {
+		t.Fatalf("reason %q is not cert-manager's IncorrectIssuer sentence", why)
+	}
+}
+
+// cert-manager has stamped observedGeneration on every condition since long
+// before the pinned release, so a condition without one is not a document box
+// meets. Reading it as stale would wait the full timeout on every run against
+// a controller that does not write the field.
+func TestCertificateStatusWithoutObservedGeneration(t *testing.T) {
+	status := map[string]any{"conditions": []any{map[string]any{
+		"type": "Ready", "status": "True", "reason": "Ready", "message": "Certificate is up to date and has not expired",
+	}}}
+	if ready, why := CertificateStatus(status, 7); !ready || why != "" {
+		t.Fatalf("CertificateStatus(no observedGeneration, 7) = %v, %q, want ready", ready, why)
+	}
+}
+
+// No Ready condition is not an answer: a Certificate being written for the
+// first time, or one whose only condition is Issuing, is still being issued.
+func TestCertificateStatusWithoutAReadyCondition(t *testing.T) {
+	if ready, why := CertificateStatus(nil, 1); ready || why == "" {
+		t.Fatalf("CertificateStatus(nil, 1) = %v, %q: no status was read as ready", ready, why)
+	}
+	only := map[string]any{"conditions": []any{map[string]any{"type": "Issuing", "status": "True", "reason": "IncorrectIssuer"}}}
+	if ready, why := CertificateStatus(only, 2); ready || why == "" {
+		t.Fatalf("CertificateStatus(only Issuing, 2) = %v, %q: a certificate with no Ready condition was read as ready", ready, why)
 	}
 }
