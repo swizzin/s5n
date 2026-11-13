@@ -1,6 +1,11 @@
-# s5n
+<h1>
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/brand/s5n-dark.svg">
+    <img alt="s5n" src="docs/brand/s5n-light.svg" width="240">
+  </picture>
+</h1>
 
-[swizzin](https://github.com/swizzin/swizzin) re-imagined for a modern era, powered by Kubernetes. A free, self-hosted seedbox environment: qBittorrent, Prowlarr, Sonarr, Radarr, Plex, Seerr and Tautulli, installed and managed by `box`. Applications wired for minimal config, hardlink-friendly, and locked down by default. Your media server isn't a pet -- stop treating it like one.
+[swizzin](https://github.com/swizzin/swizzin) re-imagined for a modern era, powered by Kubernetes. A free, self-hosted seedbox environment: qBittorrent, Prowlarr, Sonarr, Radarr, Plex, Seerr and Tautulli, plus opt-in autobrr, qui, PeerBanHelper and Maintainerr, installed and managed by `box`. Applications wired for minimal config, hardlink-friendly, and locked down by default. Your media server isn't a pet -- stop treating it like one.
 
 You never type `kubectl`. `box`, your familiar friend since 2017, finds or installs the cluster, asks
 you a few questions, and runs the stack. s5n is built on Kubernetes to address current
@@ -9,44 +14,26 @@ your Linux distribution of choice, applications managed by charts, meaningful ap
 isolation, ease of upgrading _all the things_ and a way back when something breaks.
 
 > [!WARNING]
-> s5n is in early PoC stages. While v0.3.0 is currently public, it's not quite ready for public consumption.
+> s5n is in early PoC stages. While v0.4.0 is currently public, it's not quite ready for public consumption.
 > Most of the day-two commands (`update`, `status`, `backup`, `migrate`, `uninstall`)
-> aren't written yet, and a box has one login for now. Try it on a VM or a
+> aren't written yet, and a box has one user's login for now. Try it on a VM or a
 > spare box, not on the seedbox you depend on. Expect nothing yet. No support, a shifting layout with no migration path, etc.
 > The bar for support will rise once this is my daily driver.
 
 ## What you get
 
 - **Managed k0s.** Don't know Kubernetes and don't care? You're in luck, `box` will gladly install k0s for you. Managing and upgrading it, backed by E2E compatibility testing, is *(planned)*.
-- **Unmanaged Kubernetes.** Prefer to have more control over your kubernetes environment? Want to use `kubeadm` or `k3s` instead? Be my guest!
-  box serves everything through Envoy Gateway, so it stops, naming the class, on a cluster
-  whose Gateway API already belongs to something else. On k3s that's the bundled Traefik,
-  and the message says how to turn it off.
+- **Unmanaged Kubernetes.** Prefer to have more control over your Kubernetes environment? Want to use `kubeadm` or `k3s` instead? Be my guest!
 - **A Kubernetes cluster.** Install out-of-scope projects easily in their own namespace, as long as they ship a container image.
-- **One data layout where hardlinks always work.** Every app mounts the same directory
-  at `/data`, with `downloads/` and `media/` side by side on one filesystem. Imports are
-  hardlinks, never copies, and no app needs a remote path mapping.
-- **Apps that are already talking to each other.** After every install or upgrade a
-  wiring job connects managed aspects of qBittorrent, Prowlarr and the Arrs, points Seerr and Tautulli at
-  them and at Plex, creates the category folders, and proves that a hardlink really
-  works between your download and library paths. It writes only what's missing or incorrect, so
-  running it again changes nothing.
-- **HD and 4K instances.** Sonarr and Radarr can each run a second instance with its
-  own categories and library folders.
-- **One login in front of everything.** Sign in once at the gateway and reach
-  qBittorrent, Prowlarr and the Arrs. The apps behind it have no login of their own and
-  are reachable only through the gateway. Plex, Seerr and Tautulli sign in through Plex.
-- **HTTPS by default.** A Let's Encrypt certificate when your name is public, self-signed
-  when it isn't. Port 80 answers the certificate challenge and redirects; nothing is
-  served over plain HTTP.
-- **Hardened by default.** Pod Security `restricted`, read-only root filesystems, every
-  capability dropped, default-deny networking with only the flows the apps need, and
-  images pinned by digest. From outside, only the web gateway and the torrent port are
-  reachable.
-- **Every app at a path under one name:** `https://box.example.com/sonarr`, `/radarr`,
-  `/qbittorrent` and so on, the way swizzin always laid them out. Apps that can't live
-  under a path (Seerr, Plex's web app) get a name of their own, `seerr.box.example.com`,
-  from a wildcard record or one per app *(planned)*.
+- **Hardlinks that just work.** One data layout for every app: imports are hardlinks, never copies, and no remote path mappings.
+- **Apps that already talk to each other.** qBittorrent, Prowlarr, the Arrs, Seerr and Tautulli come wired together, and box keeps them that way.
+- **Opt-in extras.** qui, autobrr, PeerBanHelper and Maintainerr, off until you ask for them.
+- **HD and 4K.** Sonarr and Radarr can each run a second instance for 4K.
+- **One login in front of everything.** Sign in once at the gateway, with single sign-on for the apps that speak OIDC.
+- **HTTPS by default.** Let's Encrypt when your name is public, one self-signed root to trust when it isn't.
+- **Locked down by default.** Restricted pods, default-deny networking and digest-pinned images. From outside, only the gateway and the torrent port answer.
+- **The swizzin layout.** Every app at `https://box.example.com/<app>`, the way swizzin always laid them out.
+- **Your colours.** Seven themes for box and the sign-in page, s5n mint by default.
 - **Zero obligation to use box:** The charts are freely available and can be used directly with helm in a completely standalone environment.
 
 ## Requirements
@@ -56,7 +43,7 @@ isolation, ease of upgrading _all the things_ and a way back when something brea
 - Local storage
 - Cloud provider support (EKS, GKE, etc) not in scope
 - No bare IP support
-  - Every user requires a DNS name. Ideally with a wildcard (or one record per app) for Seerr and Plex's web app *(planned)*
+  - Every user requires a DNS name, and a record for each app served at its own name (Seerr, Plex's web app, PeerBanHelper); a wildcard covers them all
 - Runs wherever `k0s`, `k3s` or `kubeadm` runs
 
 ### Hardware
@@ -79,29 +66,30 @@ sudo box bootstrap
 `bootstrap` does three things, and every one of them is safe to run again:
 
 1. **Finds a cluster or installs one.** On a clean host it installs a pinned k0s
-   (single node) and waits until it's ready. If the server already runs a usable
-   single-node cluster, box uses that instead. It never installs a second one over
-   something it finds.
+   (single node). If the server already runs a usable single-node cluster, box uses
+   that instead, and never installs a second one over it.
 2. **Installs the platform layer** a bare cluster lacks: the Gateway API, Envoy Gateway,
-   MetalLB so the gateway gets the server's own address, cert-manager for certificates,
-   and the login (Authelia). It checks what's already there first, uses whatever works,
-   and stops with the reason when something would conflict.
-3. **Runs `box init`,** which asks for your domain, where your data and app settings
-   live, which apps you want, and the login's password (leave it empty and box makes
-   one, shown once at the end), then installs them.
+   MetalLB, cert-manager and the login (Authelia). It uses whatever already works, and
+   stops with the reason when something would conflict.
+3. **Runs `box init`,** which asks for your domain, your data and config paths, which
+   apps you want and the login's password (leave it empty and box makes one), then
+   installs them.
 
-Then open `https://<your domain>/sonarr` and sign in with the account you ran `sudo` as.
-The gateway answers only on that name, so browsing to the bare IP address gets you
-nothing. Open ports 80 and 443 and the torrent port (31111 by default) in your firewall:
-until the certificate is issued, port 80 serves only the challenge. A name that isn't
+Then open `https://<your domain>/sonarr` and sign in with the account box asked for (the
+one you ran `sudo` as, by default). The gateway answers only on that name, not the bare
+IP. Open ports 80, 443 and the torrent port box prints at the end. A name that isn't
 public gets a self-signed certificate, and your browser will say so.
 
-For an unattended install, every question is also a flag. Without `--password-file`,
-box generates the login's password and prints it once:
+For an unattended install, every question is a flag or a key in the values file. `--apps`
+is required: a comma separated list of catalog names.
+`--set-transient secrets.plexClaimToken=claim-...` carries the Plex claim token, which
+lives in no file. Without `--password-file`, box generates the login's password and
+prints it once:
 
 ```sh
 sudo box bootstrap --yes --domain box.example.com \
-  --data-path /srv/s5n/data --config-path /srv/s5n/config
+  --data-path /srv/s5n/data --config-path /srv/s5n/config \
+  --apps qbittorrent,sonarr,radarr,prowlarr,plex,tautulli,seerr
 ```
 
 `box bootstrap --dry-run` prints what it would decide, and why, without changing
@@ -112,8 +100,8 @@ anything.
 box keeps two files per seedbox:
 
 - **the grant,** `/etc/swizzin/seedboxes/root.yaml`. Root owns it. It holds what a
-  seedbox is allowed: its namespace, uid and gid, host paths, ports, domain, and which
-  apps are switched on.
+  seedbox is allowed: its namespace, uid and gid, host paths, ports, domain, the login's
+  name, and which apps are switched on.
 - **your values,** `~/.config/box/values.yaml`. Everything else about the apps and how
   they're set up.
 
@@ -126,14 +114,14 @@ answers filled in.
 The chart works on any conformant Kubernetes 1.30 or newer with plain Helm:
 
 ```sh
-helm install s5n oci://ghcr.io/swizzin/charts/s5n --version 0.3.0 -f values.yaml
+helm install s5n oci://ghcr.io/swizzin/charts/s5n --version 0.4.0 -f values.yaml
 ```
 
-It creates no storage of its own. Bring two claims (`storage.data.existingClaim` and
-`storage.config.existingClaim`) and a Gateway for its routes. It ships no login either:
-put one in front at your Gateway and set `auth.edge: true` to say you have, or the chart
-refuses to render. `charts/s5n/values.yaml` documents every key, and `values.schema.json`
-rejects anything it doesn't know.
+Bring two claims (`storage.data.existingClaim` and `storage.config.existingClaim`), a
+Gateway for its routes, and your domain in `gateway.host`. The chart ships no login: put
+one in front at your Gateway and set `auth.edge: true` to say you have, or it refuses to
+render. `charts/s5n/values.yaml` documents every key, and `values.schema.json` rejects
+anything it doesn't know.
 
 ## The data layout
 
@@ -170,6 +158,10 @@ Sonarr and qBittorrent, and checks that it lands in the library as a hardlink. I
 needs TVDB, so it stays out of CI; run it after `hack/e2e-kind.sh --keep`. The e2e
 scripts keep their kubeconfig in `${XDG_CACHE_HOME:-~/.cache}/s5n-e2e/kubeconfig`
 (override with `S5N_E2E_KUBECONFIG`) and never read or write `~/.kube/config`.
+
+The release's own steps are a script too (`hack/release.sh`), and CI rehearses them on
+every pull request, so a bug in the release path fails before a tag rather than after
+one.
 
 `AGENTS.md` is the working brief: the layout of the repo, the rules every change
 follows, and what CI checks.
