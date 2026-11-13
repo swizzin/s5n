@@ -67,12 +67,14 @@ apps:
     default: true
     # The download client is called, and calls nothing inside the release: its
     # trackers and RSS feeds are outside it.
-    questions:
-      - key: apps.qbittorrent.webuiUsername
-        prompt: qBittorrent's web login name
-        help: the password is generated for you and kept in the box's Secret
-        kind: string
-        default: admin
+    #
+    # No questions. Nobody logs in to qBittorrent any more: the WebUI skips its
+    # login for the release's addresses and the edge's login is the one a person
+    # uses, so the account the init container seals needs no answer from them.
+    # The values key stays, with its "admin" default, because the init container
+    # still writes a username into qBittorrent.conf (a chart value an existing
+    # seedbox may already carry; removing it would break its schema).
+    questions: []
 
   sonarr:
     description: TV, from the tracker to the library

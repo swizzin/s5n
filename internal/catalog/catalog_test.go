@@ -411,9 +411,18 @@ func TestRealChartManifestLoads(t *testing.T) {
 			t.Fatalf("apps.%s has no description", app.Name)
 		}
 	}
+	// Nobody logs in to qBittorrent: its WebUI skips the login for the
+	// release's addresses and the edge's login is the one a person uses, so the
+	// manifest asks nothing. The values key stays (the init container still
+	// seals a username), and Load has already checked every question key is a
+	// real schema leaf -- so the check that a question exists is the one that
+	// has to go.
 	qbit, ok := cat.App("qbittorrent")
-	if !ok || len(qbit.Stored()) == 0 {
-		t.Fatalf("qbittorrent = %+v, want at least one stored question", qbit)
+	if !ok {
+		t.Fatal("qbittorrent is not in the catalog")
+	}
+	if got := len(qbit.Stored()) + len(qbit.Transient()); got != 0 {
+		t.Fatalf("qbittorrent asks %d questions, want none", got)
 	}
 	plex, ok := cat.App("plex")
 	if !ok {
