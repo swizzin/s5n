@@ -10,6 +10,8 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 
 	"github.com/swizzin/s5n/internal/authelia"
+	"github.com/swizzin/s5n/internal/kube"
+	"github.com/swizzin/s5n/internal/platform"
 )
 
 // oidcOptions is init's install for a box whose catalog says qui signs in
@@ -537,6 +539,69 @@ func TestTurningTheAppOffAtInitDropsTheProvider(t *testing.T) {
 	}
 	if _, ok := lastLoginSecretData(t, allWrites(f))[authelia.OIDCFile]; !ok {
 		t.Fatal("the install removed the signing material: it is generated once and never rotated")
+	}
+}
+
+// TestPendingHealsADeploymentThatStillMountsTheProvider: the state the old
+// predicate could leave a box in -- the Deployment reads the provider's file,
+// the configuration names no client -- read as "nothing to change" on every
+// run after, because only the ConfigMap was compared. The plan has to see the
+// mount, the write has to drop it, and the run after that has to be quiet
+// again.
+func TestPendingHealsADeploymentThatStillMountsTheProvider(t *testing.T) {
+	f := newFixture(t)
+	ctx := context.Background()
+	// The login as an install with the app off writes it: no client in the
+	// configuration, nothing mounted.
+	off := oidcOptions()
+	off.OIDC = nil
+	if _, err := f.decision.Apply(ctx, off); err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	// Beside it, the Deployment the old predicate wrote there: the same
+	// objects, rendered with the provider mounted.
+	config := lastConfig(t, f.cluster.applied)
+	manifests, err := authelia.RenderManifests(manifestsFor(off.Host, off.Image, authelia.ConfigHash([]byte(config)), true))
+	if err != nil {
+		t.Fatalf("RenderManifests: %v", err)
+	}
+	docs, err := platform.ParseManifests(manifests)
+	if err != nil {
+		t.Fatalf("ParseManifests: %v", err)
+	}
+	if err := f.cluster.ApplyWith(ctx, kube.FieldManager, docs); err != nil {
+		t.Fatalf("writing the Deployment: %v", err)
+	}
+	if args, mount := providerMounted(t, podContainer(t, lastDeploymentOf(t, f.cluster.applied))); !args || !mount {
+		t.Fatalf("the fixture is not in the bad state (args %v, mount %v)", args, mount)
+	}
+
+	rules := initRules(off)
+	rules.Namespace = "seedbox"
+	pending, err := f.decision.Pending(ctx, rules)
+	if err != nil {
+		t.Fatalf("Pending: %v", err)
+	}
+	if !pending {
+		t.Fatal("a Deployment that mounts the provider with no client in its configuration was reported as up to date: nothing would ever heal it")
+	}
+	changed, err := f.decision.Reconcile(ctx, rules)
+	if err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	if !changed {
+		t.Fatal("Reconcile wrote nothing for a login whose Deployment mounts the provider")
+	}
+	c := podContainer(t, lastDeploymentOf(t, f.cluster.applied))
+	if args, mount := providerMounted(t, c); args || mount {
+		t.Fatalf("the healed Deployment still reads the provider (args %v, mount %v)", podArgs(t, c), mount)
+	}
+	pending, err = f.decision.Pending(ctx, rules)
+	if err != nil {
+		t.Fatalf("second Pending: %v", err)
+	}
+	if pending {
+		t.Fatal("the healed login still differs: every later apply would rewrite it")
 	}
 }
 

@@ -51,6 +51,9 @@ const (
 	GatewayVersion = "v1"
 	// CoreGroup is the API group of a Service, a Secret and a ConfigMap.
 	CoreGroup = ""
+	// AppsGroup is the API group of a Deployment, the object the provider's
+	// mount is read from.
+	AppsGroup = "apps"
 )
 
 // Defaults for the two waits. The Deployment wait is bounded like every other
@@ -611,6 +614,17 @@ func (d *Decision) prepare(ctx context.Context, opts RulesOptions, ensure bool) 
 	if err != nil {
 		return nil, none, false, err
 	}
+	if !changed {
+		// The mount is the other half of the same face: a configuration that
+		// is already this run's can sit beside a Deployment that reads signing
+		// material no client names, and only comparing the mount is what
+		// makes that a change. Without it such a box says "nothing to change"
+		// on every later run and is never healed.
+		changed, err = d.providerMountDiffers(ctx, cl, provider)
+		if err != nil {
+			return nil, none, false, err
+		}
+	}
 	return cl, loginFiles{config: config, assets: assets, provider: provider}, changed, nil
 }
 
@@ -754,7 +768,7 @@ func accessList() []kube.Access {
 		{Verb: kube.VerbApply, Group: CoreGroup, Resource: "configmaps", Namespace: Namespace, What: "ConfigMaps in " + Namespace},
 		{Verb: kube.VerbApply, Group: CoreGroup, Resource: "secrets", Namespace: Namespace, What: "Secrets in " + Namespace},
 		{Verb: kube.VerbApply, Group: CoreGroup, Resource: "services", Namespace: Namespace, What: "Services in " + Namespace},
-		{Verb: kube.VerbApply, Group: "apps", Resource: "deployments", Namespace: Namespace, What: "Deployments in " + Namespace},
+		{Verb: kube.VerbApply, Group: AppsGroup, Resource: "deployments", Namespace: Namespace, What: "Deployments in " + Namespace},
 		{Verb: kube.VerbApply, Group: GatewayGroup, Resource: "referencegrants", Namespace: Namespace, What: "ReferenceGrants in " + Namespace},
 		{Verb: kube.VerbApply, Group: GatewayGroup, Resource: "httproutes", Namespace: Namespace, What: "the portal's HTTPRoute in " + Namespace},
 		{Verb: kube.VerbApply, Group: PolicyGroup, Resource: "securitypolicies", Namespace: platform.GatewayNamespace, What: "SecurityPolicies in " + platform.GatewayNamespace},
@@ -792,7 +806,7 @@ func rulesAccess() []kube.Access {
 	return []kube.Access{
 		{Verb: kube.VerbApply, Group: CoreGroup, Resource: "configmaps", Namespace: Namespace, What: "ConfigMaps in " + Namespace},
 		{Verb: kube.VerbApply, Group: CoreGroup, Resource: "services", Namespace: Namespace, What: "Services in " + Namespace},
-		{Verb: kube.VerbApply, Group: "apps", Resource: "deployments", Namespace: Namespace, What: "Deployments in " + Namespace},
+		{Verb: kube.VerbApply, Group: AppsGroup, Resource: "deployments", Namespace: Namespace, What: "Deployments in " + Namespace},
 		{Verb: kube.VerbApply, Group: GatewayGroup, Resource: "referencegrants", Namespace: Namespace, What: "ReferenceGrants in " + Namespace},
 		{Verb: kube.VerbApply, Group: GatewayGroup, Resource: "httproutes", Namespace: Namespace, What: "the portal's HTTPRoute in " + Namespace},
 		{Verb: kube.VerbApply, Group: PolicyGroup, Resource: "securitypolicies", Namespace: platform.GatewayNamespace, What: "SecurityPolicies in " + platform.GatewayNamespace},
@@ -854,6 +868,75 @@ func (d *Decision) configurationChanged(ctx context.Context, cl Cluster, configu
 		}
 	}
 	return false, nil
+}
+
+// providerMountDiffers reports whether the login's Deployment reads the
+// provider's file while the rendering says it must not, or fails to while the
+// rendering says it must. It is the second half of "the login differs".
+//
+// A box installed by a run whose two halves disagreed keeps a Deployment that
+// mounts signing material its configuration names no client for. The
+// configuration there is already right, so a comparison of the ConfigMap alone
+// called that box "nothing to change" every run after, and Authelia exited on
+// the mount each time the pod started. Comparing the mount is what heals it.
+//
+// Only the two fields that carry the decision are read -- the container's
+// second `--config` argument and the volumeMount at OIDCMountPath -- because a
+// whole-object comparison would see everything the API server and the
+// Deployment's controllers write (defaults, resourceVersion, status) and never
+// settle.
+func (d *Decision) providerMountDiffers(ctx context.Context, cl Cluster, want bool) (bool, error) {
+	doc, found, err := cl.Get(ctx, AppsGroup, "v1", "Deployment", Namespace, authelia.ServiceName)
+	if err != nil {
+		return false, err
+	}
+	if !found {
+		// A configuration without its Deployment is not an installed login:
+		// writing the Deployment is this run's work.
+		return true, nil
+	}
+	args, mount := providerInDeployment(doc)
+	return args != want || mount != want, nil
+}
+
+// providerInDeployment is whether a Deployment's pods read the provider's file:
+// a container passing it as the argument after a `--config`, and a volumeMount
+// at the path that file is mounted on. Both are written under one condition in
+// the manifests template, so a Deployment with one and not the other is a
+// hand-edited object and reads as the difference it is.
+func providerInDeployment(doc map[string]any) (args, mount bool) {
+	containers, _, _ := unstructured.NestedSlice(doc, "spec", "template", "spec", "containers")
+	for _, raw := range containers {
+		c, _ := raw.(map[string]any)
+		if c == nil {
+			continue
+		}
+		a, m := providerInContainer(c)
+		args, mount = args || a, mount || m
+	}
+	return args, mount
+}
+
+// providerInContainer is one container's half of it.
+func providerInContainer(c map[string]any) (args, mount bool) {
+	file := authelia.OIDCMountPath + "/" + authelia.OIDCFile
+	raw, _ := c["args"].([]any)
+	prev := ""
+	for _, a := range raw {
+		s, _ := a.(string)
+		if prev == "--config" && s == file {
+			args = true
+		}
+		prev = s
+	}
+	mounts, _ := c["volumeMounts"].([]any)
+	for _, m := range mounts {
+		mm, _ := m.(map[string]any)
+		if mm["mountPath"] == authelia.OIDCMountPath {
+			mount = true
+		}
+	}
+	return args, mount
 }
 
 // anyMap is a string map as the untyped document a server-side apply takes:
