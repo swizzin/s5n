@@ -385,8 +385,15 @@ func (d *Decision) Apply(ctx context.Context, opts Options) (Result, error) {
 	// that decides the page's theme, and the mark and favicon that go in it.
 	// The per-host step calls the same function, so init and apply cannot
 	// disagree about either.
-	config, assets, err := renderLogin(opts.Values, opts.Host, opts.Login, key, opts.Hosted, opts.OwnLogin,
-		oidcClients(opts.Host, opts.Namespace, opts.Login, apps, sec.digests))
+	//
+	// clients is the provider's one decision, and everything below reads it:
+	// the configuration's identity_providers block (renderLogin renders what
+	// it is given) and the Deployment's mount. A stored digest is not that
+	// decision -- a box whose last OIDC app was turned off keeps the signing
+	// material in its Secret, because it is generated once and never rotated,
+	// and has no provider at all.
+	clients := oidcClients(opts.Host, opts.Namespace, opts.Login, apps, sec.digests)
+	config, assets, err := renderLogin(opts.Values, opts.Host, opts.Login, key, opts.Hosted, opts.OwnLogin, clients)
 	if err != nil {
 		return res, undo(err)
 	}
@@ -395,13 +402,13 @@ func (d *Decision) Apply(ctx context.Context, opts Options) (Result, error) {
 		return res, undo(err)
 	}
 
-	// The provider is mounted only once it has a client. Authelia refuses the
-	// block with no clients ("identity_providers: oidc: option 'clients' must
-	// have one or more clients configured"), and a first install has none yet:
-	// the client Secrets are the anchor step's write, in the run that creates
-	// the namespace. Until then the login serves the edge with the signing
-	// material sitting unused in its Secret.
-	manifests, err := authelia.RenderManifests(manifestsFor(opts.Host, opts.Image, authelia.ConfigHash(config), len(sec.digests) > 0))
+	// The provider is mounted exactly when the configuration renders it.
+	// Authelia refuses the block with no clients ("identity_providers: oidc:
+	// option 'clients' must have one or more clients configured"), and a first
+	// install has none yet: the client Secrets are the anchor step's write, in
+	// the run that creates the namespace. Until then the login serves the edge
+	// with the signing material sitting unused in its Secret.
+	manifests, err := authelia.RenderManifests(manifestsFor(opts.Host, opts.Image, authelia.ConfigHash(config), providerEnabled(clients)))
 	if err != nil {
 		return res, undo(err)
 	}
@@ -591,8 +598,12 @@ func (d *Decision) prepare(ctx context.Context, opts RulesOptions, ensure bool) 
 		return nil, none, false, err
 	}
 	key := sec.key
-	config, assets, err := renderLogin(opts.Values, opts.Host, opts.Login, key, opts.Hosted, opts.OwnLogin,
-		oidcClients(opts.Host, opts.Namespace, opts.Login, apps, sec.digests))
+	// The same one decision Apply makes: the clients this rendering names are
+	// what both the configuration's block and the Deployment's mount come
+	// from, so a rule write and an install cannot disagree about the provider.
+	clients := oidcClients(opts.Host, opts.Namespace, opts.Login, apps, sec.digests)
+	provider := providerEnabled(clients)
+	config, assets, err := renderLogin(opts.Values, opts.Host, opts.Login, key, opts.Hosted, opts.OwnLogin, clients)
 	if err != nil {
 		return nil, none, false, err
 	}
@@ -600,7 +611,7 @@ func (d *Decision) prepare(ctx context.Context, opts RulesOptions, ensure bool) 
 	if err != nil {
 		return nil, none, false, err
 	}
-	return cl, loginFiles{config: config, assets: assets, provider: len(sec.digests) > 0}, changed, nil
+	return cl, loginFiles{config: config, assets: assets, provider: provider}, changed, nil
 }
 
 // manifestsFor is the login's objects for one host, from the constants this
@@ -636,10 +647,10 @@ func manifestsFor(host, image, configHash string, oidc bool) authelia.Manifests 
 type loginFiles struct {
 	config []byte
 	assets authelia.Assets
-	// provider says the login's Secret holds at least one client, which is
-	// what makes Authelia accept an identity_providers.oidc block at all: it
-	// refuses one with no clients, and a first install has none until apply's
-	// anchor step writes them.
+	// provider is the rendering's own answer to "is there an identity
+	// provider": the configuration has at least one client, so the Deployment
+	// mounts the login's Secret and passes its file as the second --config
+	// (providerEnabled). It is never read from the digests the Secret holds.
 	provider bool
 }
 

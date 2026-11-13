@@ -492,6 +492,54 @@ func TestTurningTheAppOffRemovesTheClient(t *testing.T) {
 	}
 }
 
+// TestTurningTheAppOffAtInitDropsTheProvider: the same box installed again by
+// `box init` after its only OIDC app was turned off. Apply renders a
+// configuration with no identity_providers block, and the Deployment it writes
+// must not mount the signing material: Authelia exits on a provider with no
+// clients ("option 'clients' must have one or more clients configured"), so a
+// mount left over from the run before takes the whole box's login down. qui's
+// digest is still in the Secret at that point -- the prune is a later step in
+// the same run -- which is why the mount cannot be decided from the digests.
+func TestTurningTheAppOffAtInitDropsTheProvider(t *testing.T) {
+	f := newFixture(t)
+	ctx := context.Background()
+	// The box with qui on: signing material in the Secret, a digest for qui,
+	// and a Deployment that reads the provider.
+	if _, err := f.decision.Apply(ctx, oidcOptions()); err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	if _, err := f.decision.EnsureClients(ctx, "seedbox", []string{"qui"}); err != nil {
+		t.Fatalf("EnsureClients: %v", err)
+	}
+	on := ruleOptions()
+	on.Namespace = "seedbox"
+	on.OIDC = []string{"qui"}
+	if _, err := f.decision.Reconcile(ctx, on); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	if args, mount := providerMounted(t, podContainer(t, lastDeploymentOf(t, f.cluster.applied))); !args || !mount {
+		t.Fatalf("the fixture's login does not read the provider with qui on (args %v, mount %v)", args, mount)
+	}
+
+	// Then qui is turned off and init runs again.
+	off := oidcOptions()
+	off.OIDC = nil
+	if _, err := f.decision.Apply(ctx, off); err != nil {
+		t.Fatalf("second Apply: %v", err)
+	}
+	if config := lastConfig(t, f.cluster.applied); strings.Contains(config, "identity_providers") {
+		t.Fatalf("a box with no OIDC app rendered a provider:\n%s", config)
+	}
+	c := podContainer(t, lastDeploymentOf(t, f.cluster.applied))
+	args, mount := providerMounted(t, c)
+	if args || mount {
+		t.Fatalf("the install mounts the signing material with no client in the configuration (args %v, mount %v): Authelia exits on a provider with no clients, and the box loses its login", podArgs(t, c), mount)
+	}
+	if _, ok := lastLoginSecretData(t, allWrites(f))[authelia.OIDCFile]; !ok {
+		t.Fatal("the install removed the signing material: it is generated once and never rotated")
+	}
+}
+
 // TestPendingCreatesNothing: a run that may not write the login must not create
 // the provider's material either.
 func TestPendingCreatesNothing(t *testing.T) {
