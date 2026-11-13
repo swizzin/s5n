@@ -20,6 +20,8 @@ storage:
 apps:
   qui:
     enabled: true
+  autobrr:
+    enabled: true
   maintainerr:
     enabled: true
 

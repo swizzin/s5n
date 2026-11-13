@@ -272,6 +272,23 @@ apps:
     resources: {}
     env: {}
 
+  # autobrr is opt-in: it watches IRC announces and feeds for releases and hands
+  # them to the download client, and it does nothing until the operator
+  # configures indexers by hand. It serves itself under /autobrr (its own
+  # baseUrl), so the route keeps the prefix instead of stripping it.
+  autobrr:
+    enabled: false
+    image:
+      # Blessed variant from variants.yaml. The repository comes only from
+      # there; a tag or digest pin here is held within that repository.
+      variant: default
+    port: 7474
+    # autobrr's baseUrl is set by the chart from the instance name; nothing is
+    # stripped, because the app builds its own asset URLs under the prefix.
+    rewritePath: false
+    resources: {}
+    env: {}
+
   # Maintainerr is opt-in for the obvious reason: it deletes media, torrents and
   # leftover folders on rules the operator writes, and a box that installed the
   # defaults did not ask for that. It has no login of its own at all, so the edge

@@ -202,12 +202,17 @@ a dead app Ready.
 The paths are the app's own, at the tag variants.yaml pins. qui's is not under
 its baseUrl: it registers /healthz/readiness on the root router and mounts only
 /api and the UI under the prefix (internal/api/server.go), so a prefixed request
-lands on the SPA's catch-all and answers HTML, not health. Maintainerr applies
-BASE_PATH to every route, health included, so that one does sit under the prefix.
+lands on the SPA's catch-all and answers HTML, not health. autobrr and
+Maintainerr apply their base path to every route, health included: autobrr's is
+/api/healthz/readiness, because at v1.90.0 the whole API router is mounted under
+baseUrl + "/api" (internal/http/server.go:226,302) and the UI's router under the
+base URL alone.
 */ -}}
 {{- define "s5n.readinessPath" -}}
 {{- if eq .app "qui" -}}
 /healthz/readiness
+{{- else if eq .app "autobrr" -}}
+{{ printf "/%s/api/healthz/readiness" .name }}
 {{- else if eq .app "maintainerr" -}}
 {{ printf "/%s/api/health/ready" .name }}
 {{- end -}}

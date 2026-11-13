@@ -224,6 +224,39 @@ spec:
             - name: QUI__AUTH_DISABLED_ALLOWED_CIDRS
               value: "0.0.0.0/0,::/0"
             {{- end }}
+            {{- else if eq $inst.app "autobrr" }}
+            # autobrr reads every setting from its own name in caps
+            # (AUTOBRR__<SETTING>, internal/config/config.go's loadFromEnv at
+            # v1.90.0), and the image ships no config, so these are its whole
+            # first start. The listen address has to be every interface: its
+            # default is 127.0.0.1, which inside a pod is nobody but itself.
+            - name: AUTOBRR__HOST
+              value: 0.0.0.0
+            - name: AUTOBRR__PORT
+              value: {{ $cfg.port | quote }}
+            # Its baseUrl, not a stripped prefix: it builds the UI's asset URLs
+            # under it (server.go mounts the API under baseUrl + "/api" and the
+            # web root under baseUrl), so the route keeps the path and
+            # rewritePath stays false.
+            - name: AUTOBRR__BASE_URL
+              value: {{ $urlBase | quote }}
+            # Legacy mode rewrites the UI's URLs for a proxy that strips the
+            # prefix. Nothing strips here, so the app writes them itself; the
+            # setting is what picks between the two (added upstream in v1.55.0).
+            - name: AUTOBRR__BASE_URL_MODE_LEGACY
+              value: "false"
+            # Its own update check is a request to GitHub on every start, which
+            # is a phone-home nothing here asked for. The chart moves the image
+            # by digest and the box updates itself; the app never needs to know.
+            - name: AUTOBRR__CHECK_FOR_UPDATES
+              value: "false"
+            {{- with $root.Values.gateway.host }}
+            # The one origin its UI is reached at. The default is "*", which is
+            # every origin; the cookie is scoped to this host either way, and
+            # the docs ask for this once auth is anything but the app's own form.
+            - name: AUTOBRR__CORS_ALLOWED_ORIGINS
+              value: {{ printf "https://%s" . | quote }}
+            {{- end }}
             {{- else if eq $inst.app "maintainerr" }}
             - name: UI_HOSTNAME
               value: 0.0.0.0

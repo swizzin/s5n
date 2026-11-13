@@ -397,6 +397,9 @@
         "qui": {
           "$ref": "#/definitions/simpleApp"
         },
+        "autobrr": {
+          "$ref": "#/definitions/simpleApp"
+        },
         "maintainerr": {
           "$ref": "#/definitions/simpleApp"
         }

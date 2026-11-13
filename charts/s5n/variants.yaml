@@ -64,6 +64,16 @@ qui:
     tag: "v1.35.0"
     digest: sha256:a5b2f5faf6388cce257137c88e4b189458fd799cf9119ed476c980e5a69341b2
 
+autobrr:
+  default:
+    # Upstream digest pin, not ghcr.io/home-operations: no autobrr image there.
+    # The image declares no USER, so it would run as root without the pod's
+    # security context; it keeps its whole state (config.toml, the SQLite
+    # database and its WAL) under /config.
+    repository: ghcr.io/autobrr/autobrr
+    tag: "v1.90.0"
+    digest: sha256:72bb5fe5e8c73f85660f92502d9015b21b07156495f039b55864633b9f8b7a89
+
 maintainerr:
   default:
     # Upstream digest pin, not ghcr.io/home-operations: no Maintainerr image

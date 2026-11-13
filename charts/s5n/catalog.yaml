@@ -122,6 +122,15 @@ apps:
     oidc: true
     questions: []
 
+  # Opt-in: it watches IRC announces and feeds and hands what it finds to the
+  # download client, and it is idle until the operator configures indexers by
+  # hand -- not something a box should have because it installed the defaults.
+  autobrr:
+    description: grabs a release when it is announced, before the feed catches up
+    instances: false
+    default: false
+    questions: []
+
   # Opt-in, and louder so: it deletes media and torrents on rules the operator
   # writes. Nothing here configures it; it is set up in its own UI.
   maintainerr:
