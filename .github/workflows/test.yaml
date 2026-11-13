@@ -34,6 +34,30 @@ env:
   KUBECTL_SHA256: c04487523e7aa7d1493f7808174c899db93d7a9cf57531420cd76b9bd415f8f4 # kubectl-linux-amd64
 
 jobs:
+  # ---- the compiler cache: one key per family, and why -----------------------
+  #
+  # setup-go's own cache is off everywhere (cache: false) and each compiling
+  # job restores ~/.cache/go-build under a key of its own family. setup-go keys
+  # a cache by the runner, the Go version and go.sum alone, so every job in a
+  # run asks for the same entry -- and the first job to finish saves it. That
+  # was the chart job, which compiles nothing: it stored 7.5 KB under
+  # setup-go-Linux-x64-...-<go.sum hash>, and from then on every job read "Cache
+  # hit occurred on the primary key ..., not saving cache." So go, lint and both
+  # e2e jobs compiled client-go and the Helm SDK from zero on every push: the go
+  # job's 7.3 minutes are almost all of it compiling.
+  #
+  # The family is in the key because the artifacts are not interchangeable:
+  # `go test -race` builds every package with the race detector, a plain build
+  # does not, and the linter typechecks with its own flags, so a job that saved
+  # under another family's key would hand its successor hits it cannot use.
+  #
+  # go.sum and the installed Go version are in the key, so a dependency or
+  # toolchain change rolls every family over; restore-keys then hands the new
+  # key the family's previous entry, which still holds every package that did
+  # not change. Only the compiler's cache is stored, not the module cache: that
+  # is a re-download of a few hundred MB from GitHub's proxy, well under a
+  # minute, and it would double the archive. Three entries per branch that
+  # pushes -- a few hundred MB each -- against the 10 GB a repository gets.
   go:
     runs-on: ubuntu-latest
     steps:
@@ -41,8 +65,15 @@ jobs:
         with:
           ref: ${{ inputs.ref || github.sha }}
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        id: go
         with:
           go-version-file: go.mod
+          cache: false # the step below, under this job's own key
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/go-build
+          key: go-test-${{ runner.os }}-${{ steps.go.outputs.go-version }}-${{ hashFiles('go.mod', 'go.sum') }}
+          restore-keys: go-test-${{ runner.os }}-${{ steps.go.outputs.go-version }}-
       - name: gofmt
         run: |
           unformatted=$(gofmt -l .)
@@ -70,8 +101,15 @@ jobs:
           ref: ${{ inputs.ref || github.sha }}
           fetch-depth: 0
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        id: go
         with:
           go-version-file: go.mod
+          cache: false # the linter's typecheck hits are its own family's
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/go-build
+          key: go-lint-${{ runner.os }}-${{ steps.go.outputs.go-version }}-${{ hashFiles('go.mod', 'go.sum') }}
+          restore-keys: go-lint-${{ runner.os }}-${{ steps.go.outputs.go-version }}-
       - uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
         with:
           version: v2.15.0
@@ -96,6 +134,10 @@ jobs:
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
+          # helm and kubeconform compile nothing of this module, and this job is
+          # the quickest to finish: its empty cache save was the one every other
+          # job then hit, which is why they all built from zero.
+          cache: false
       - uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
         with:
           version: ${{ env.HELM_VERSION }}
@@ -128,6 +170,9 @@ jobs:
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
+          # It builds hack/release -- semver and yaml -- and nothing else of the
+          # module, so it has no build output worth an entry of its own.
+          cache: false
       - uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
         with:
           version: ${{ env.HELM_VERSION }}
@@ -152,8 +197,15 @@ jobs:
         with:
           ref: ${{ inputs.ref || github.sha }}
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        id: go
         with:
           go-version-file: go.mod
+          cache: false # the step below
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/go-build
+          key: go-build-${{ runner.os }}-${{ steps.go.outputs.go-version }}-${{ hashFiles('go.mod', 'go.sum') }}
+          restore-keys: go-build-${{ runner.os }}-${{ steps.go.outputs.go-version }}-
       - uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
         with:
           version: ${{ env.HELM_VERSION }}
@@ -209,8 +261,19 @@ jobs:
         with:
           ref: ${{ inputs.ref || github.sha }}
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        id: go
         with:
           go-version-file: go.mod
+          cache: false # the step below: the three scenarios build the same code
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          # One entry for all four build jobs (e2e-kind and the three scenarios):
+          # they compile the same packages, so whichever finishes first saves it
+          # and the rest read a hit. A save that loses that race is a warning,
+          # not a failure.
+          path: ~/.cache/go-build
+          key: go-build-${{ runner.os }}-${{ steps.go.outputs.go-version }}-${{ hashFiles('go.mod', 'go.sum') }}
+          restore-keys: go-build-${{ runner.os }}-${{ steps.go.outputs.go-version }}-
       - uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
         with:
           version: ${{ env.HELM_VERSION }}
