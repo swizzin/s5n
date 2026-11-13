@@ -43,6 +43,12 @@
 # password, the jar gets in, and the Arrs' own API keys still answer. The
 # preinstalled scenario proves the same redirect on its own host name.
 #
+# The OIDC clients are proved the same way, by signing in: the app's own start
+# hands over an authorization URL, Authelia's authorization endpoint answers
+# with a code, the app's callback exchanges it, and an endpoint only the app's
+# session opens names the account. A jar with no cookie, one with the portal's
+# cookie alone, and a second account are the refusals around it.
+#
 # The fresh scenario runs Pebble, Let's Encrypt's test ACME server, inside the
 # cluster and points the production issuer at it, so HTTP-01 through the
 # Gateway is proven on every run: Certificate Ready, HTTPS with Pebble's CA, an
@@ -66,8 +72,10 @@ cd "$(dirname "$0")/.."
 KIND=${KIND:-kind}
 NS=seedbox
 # The one account the login admits. A generic name: the repo carries no real
-# one, and the e2e's password is generated per run below.
+# one, and the e2e's password is generated per run below. The second one exists
+# only to be refused: no rule and no client names it.
 LOGIN=alice
+SECOND_LOGIN=bob
 IMAGE=ghcr.io/swizzin/s5n:e2e
 # The platform versions box installs are not this script's: they come from
 # charts/s5n/platform.yaml, the file the chart release carries, printed by
@@ -254,9 +262,17 @@ $KIND get kubeconfig --name "$CLUSTER" >"$WORK/kubeconfig"
 # The node's users database is seeded from the same file, because
 # --paths-in-node means the host path is inside the test node and box cannot
 # write there: hack/authelia-users is the same internal/authelia code box uses.
+#
+# A second account exists for the refusal: the provider's authorization policy
+# is one per seedbox and admits user:<LOGIN> alone, so a second row is what
+# proves a client cannot be authorized by someone the box did not name. It
+# never gets a listener, a rule or a client of its own.
 AUTHELIA_PASSWORD=$(openssl rand -hex 16)
 printf '%s\n' "$AUTHELIA_PASSWORD" >"$WORK/authelia-password"
 chmod 600 "$WORK/authelia-password"
+SECOND_PASSWORD=$(openssl rand -hex 16)
+printf '%s\n' "$SECOND_PASSWORD" >"$WORK/second-password"
+chmod 600 "$WORK/second-password"
 
 # Only what `box init` creates on a real host, and only because --paths-in-node
 # keeps it from touching this node itself: the two volume roots and one
@@ -276,7 +292,8 @@ docker exec "${CLUSTER}-control-plane" bash -c '
 # into the node -- hack/authelia-users writes the same file from the same
 # package, so the row the login verifies is the row box would have written.
 log "seeding the login's state directory in the node (0700, uid 65532)"
-go run ./hack/authelia-users --login "$LOGIN" --password-file "$WORK/authelia-password" --out "$WORK/users_database.yml"
+go run ./hack/authelia-users --login "$LOGIN" --password-file "$WORK/authelia-password" \
+  --login "$SECOND_LOGIN" --password-file "$WORK/second-password" --out "$WORK/users_database.yml"
 docker exec -i "${CLUSTER}-control-plane" bash -c '
   mkdir -p /var/lib/s5n/authelia
   cat >/var/lib/s5n/authelia/users_database.yml
@@ -722,6 +739,298 @@ print("  discovery: issuer %s, token %s, jwks %s" % (d["issuer"], d["token_endpo
   eg_port=$($K -n "$NS" get networkpolicy qui-oidc-egress -o jsonpath='{.spec.egress[0].ports[0].port}' 2>/dev/null || true)
   echo "  qui-oidc-egress port: ${eg_port:-missing}"
   [ "$eg_port" = 10443 ] || { echo "the OIDC egress rule names ${eg_port:-no port}, want 10443"; fail=1; }
+}
+
+# ---- an app's own sign-in: the OIDC round trip, without a browser ----------
+# An app the catalog marks `oidc: true` is a client of the login's own
+# provider, and the round trip belongs to the app: it hands the browser an
+# authorization URL and takes the code back on a callback of its own. The
+# app's own OIDC routes are behind the edge's login like every other path on
+# the host, so a person's visit is two sign-ins that look like one -- the
+# portal first, then the app's silent round trip.
+#
+# This is that visit, with a cookie jar:
+#
+#   1. the app's page without a cookie: the edge redirects to the portal;
+#   2. the portal's first factor, with the target the edge passed;
+#   3. the app's own start, GET <base>/api/auth/oidc/config, whose JSON carries
+#      the authorization URL and which sets the app's state in its session;
+#   4. Authelia's authorization endpoint, and the code it answers with;
+#   5. the callback, which exchanges the code and sets the app's session;
+#   6. an endpoint only that session opens -- and the same endpoint refused
+#      without it, so a 200 cannot come from the edge's login alone.
+#
+# Authelia is asked twice, because the flow has two arms and a browser meets
+# both. With the portal's cookie, the authorization endpoint answers at once:
+# the client's consent is implicit, so no consent page appears, and the code
+# comes back in the redirect that follows. With that one cookie gone -- a
+# browser whose portal session expired while the app page was open -- it
+# answers 303 to its own portal carrying flow=openid_connect&flow_id=<id>, and
+# the first factor is asked with that flow id (internal/handlers/types.go:111,
+# Flow/FlowID; response.go:155-313 is what answers with the URL that resumes
+# the flow). Neither arm is a reachability check.
+#
+# OIDC_JAR is the signed-in jar, for a caller that wants one more thing from
+# the app without signing in again.
+
+# portal_login: one password login at the portal, the way the browser's form
+# does it. <jar> <login> <password> <target url> <address> <ca-file|->; sets
+# PORTAL_CODE and PORTAL_BODY.
+portal_login() {
+  local jar=$1 login=$2 password=$3 target=$4 addr=$5 ca=$6
+  local ca_args=(--cacert "$ca") body
+  [ "$ca" = - ] && ca_args=(-k)
+  body=$(python3 -c 'import json, sys
+print(json.dumps({"username": sys.argv[1], "password": sys.argv[2], "targetURL": sys.argv[3]}))' \
+    "$login" "$password" "$target")
+  PORTAL_CODE=$(curl -sS -o "$WORK/portal-login.json" -w '%{http_code}' \
+    -b "$jar" -c "$jar" -X POST "https://${DOMAIN}/auth/api/firstfactor" \
+    --resolve "${DOMAIN}:443:${addr}" "${ca_args[@]}" \
+    -H 'Content-Type: application/json' --data "$body" 2>"$WORK/portal-login.err" || true)
+  PORTAL_BODY=$(cat "$WORK/portal-login.json" 2>/dev/null || true)
+}
+
+# json_field: one top-level field of a JSON document in a file, or "" -- a body
+# that is not JSON (an HTML error page) answers "" rather than failing the run
+# twice, and an empty value is an assertion the caller makes.
+json_field() { # json_field <file> <field>
+  python3 -c 'import json, sys
+try:
+    print(json.load(open(sys.argv[1], encoding="utf-8")).get(sys.argv[2], ""))
+except Exception:
+    print("")' "$1" "$2" 2>/dev/null || true
+}
+
+# oidc_login <app> <base path> <api path> <address> <ca-file|->
+#
+# The app's whole sign-in as one function, so a second client is one call: the
+# paths differ by the app's base and the endpoint it protects, and nothing else
+# does. It asserts as it goes; fail=1 is the e2e's.
+oidc_login() {
+  local app=$1 base=$2 api=$3 addr=$4 ca=$5
+  local ca_args=(--cacert "$ca")
+  [ "$ca" = - ] && ca_args=(-k)
+  local jar="$WORK/oidc-${app}-jar.txt"
+  local expired="$WORK/oidc-${app}-expired.txt"
+  local edge="$WORK/oidc-${app}-edge.txt"
+  local hdrs="$WORK/oidc-${app}-headers.txt"
+  local url="https://${DOMAIN}${base}"
+  local code location rd auth_url flow_id redirect callback body
+  OIDC_JAR=$jar
+  rm -f "$jar" "$expired" "$edge"
+
+  # 1. The app's page, no cookie: the edge sends the browser to the portal, and
+  #    the portal carries where to come back to.
+  code=$(curl -sS -o /dev/null -D "$hdrs" -w '%{http_code}' \
+    --resolve "${DOMAIN}:443:${addr}" "${ca_args[@]}" "$url/" 2>"$WORK/oidc.err" || true)
+  location=$(sed -n 's/^[Ll]ocation: *//p' "$hdrs" | tr -d '\r' | head -1)
+  echo "  ${app}: GET ${url}/ without a cookie: ${code} -> ${location}"
+  [ "$code" = 302 ] || { echo "the unauthenticated ${base}/ answered ${code}, not the portal's redirect"; fail=1; }
+  case "$location" in
+    "https://${DOMAIN}/auth/"*) : ;;
+    *) echo "the redirect does not point at the portal: ${location}"; fail=1 ;;
+  esac
+  rd=$(printf '%s' "$location" | python3 -c 'import sys, urllib.parse as u
+print(u.parse_qs(u.urlparse(sys.stdin.read()).query).get("rd", [""])[0])' || true)
+  # A portal redirect always carries rd; the app's own page is where init's
+  # target would be if one ever did not.
+  [ -n "$rd" ] || rd="https://${DOMAIN}${base}/"
+
+  # 2. The portal, with the password the run generated.
+  portal_login "$jar" "$LOGIN" "$AUTHELIA_PASSWORD" "$rd" "$addr" "$ca"
+  echo "  ${app}: POST /auth/api/firstfactor: ${PORTAL_CODE}"
+  [ "$PORTAL_CODE" = 200 ] || { echo "the portal refused the box's own account (${PORTAL_CODE})"; fail=1; }
+
+  # 3. The app's own start. Its state lives in the app's session, so the same
+  #    jar has to make the callback.
+  code=$(curl -sS -o "$WORK/oidc-${app}-config.json" -w '%{http_code}' \
+    -b "$jar" -c "$jar" --resolve "${DOMAIN}:443:${addr}" "${ca_args[@]}" \
+    "$url/api/auth/oidc/config" 2>"$WORK/oidc.err" || true)
+  body=$(cat "$WORK/oidc-${app}-config.json" 2>/dev/null || true)
+  auth_url=$(json_field "$WORK/oidc-${app}-config.json" authorizationUrl)
+  echo "  ${app}: GET ${base}/api/auth/oidc/config: ${code}, authorization URL ${auth_url%%\?*}"
+  [ "$code" = 200 ] || { echo "the app's OIDC start answered ${code}"; fail=1; }
+  case "$auth_url" in
+    "https://${DOMAIN}/auth/"*) : ;;
+    *) echo "the authorization URL is not this box's issuer: ${auth_url}"; fail=1 ;;
+  esac
+
+  # 4a. Signed in at the edge already: the authorization endpoint answers with
+  #     the callback and a code, and nothing in between. A consent page here
+  #     would be a page a person has to click, and the client's consent is
+  #     implicit.
+  code=$(curl -sS -o /dev/null -D "$hdrs" -w '%{http_code}' \
+    -b "$jar" -c "$jar" --resolve "${DOMAIN}:443:${addr}" "${ca_args[@]}" \
+    "$auth_url" 2>"$WORK/oidc.err" || true)
+  location=$(sed -n 's/^[Ll]ocation: *//p' "$hdrs" | tr -d '\r' | head -1)
+  echo "  ${app}: the authorization endpoint, signed in: ${code} -> ${location%%\?*}"
+  case "$code" in
+    302 | 303) : ;;
+    *) echo "the authorization endpoint answered ${code} to a signed-in request"; fail=1 ;;
+  esac
+  case "$location" in
+    "https://${DOMAIN}${base}/api/auth/oidc/callback?"*) : ;;
+    *) echo "the authorization endpoint sent the browser to ${location}, not the app's callback"; fail=1 ;;
+  esac
+  case "$location" in
+    *"code="*) : ;;
+    *) echo "the redirect to the callback carries no code"; fail=1 ;;
+  esac
+
+  # 4b. The other arm: the same authorization request from a browser whose
+  #     portal session is gone. The app's session (its state) stays; only the
+  #     login's cookie is dropped.
+  cp "$jar" "$expired"
+  python3 - "$expired" <<'PY'
+import sys
+path = sys.argv[1]
+lines = [l for l in open(path, encoding="utf-8") if "authelia_session" not in l]
+open(path, "w", encoding="utf-8").writelines(lines)
+PY
+  code=$(curl -sS -o /dev/null -D "$hdrs" -w '%{http_code}' \
+    -b "$expired" -c "$expired" --resolve "${DOMAIN}:443:${addr}" "${ca_args[@]}" \
+    "$auth_url" 2>"$WORK/oidc.err" || true)
+  location=$(sed -n 's/^[Ll]ocation: *//p' "$hdrs" | tr -d '\r' | head -1)
+  echo "  ${app}: the authorization endpoint without the portal's cookie: ${code} -> ${location}"
+  [ "$code" = 303 ] ||
+    { echo "an unauthenticated authorization request answered ${code}, want the portal's 303"; fail=1; }
+  case "$location" in
+    *"flow=openid_connect"*) : ;;
+    *) echo "the portal's redirect carries no openid_connect flow: ${location}"; fail=1 ;;
+  esac
+  flow_id=$(printf '%s' "$location" | python3 -c 'import sys, urllib.parse as u
+print(u.parse_qs(u.urlparse(sys.stdin.read()).query).get("flow_id", [""])[0])' || true)
+  echo "  ${app}: portal flow id ${flow_id:-absent}"
+  [ -n "$flow_id" ] || fail=1
+
+  # The portal's first factor for that flow: the flow id is what makes the
+  # answer a URL that resumes the OIDC request instead of the app's page.
+  body=$(python3 -c 'import json, sys
+print(json.dumps({"username": sys.argv[1], "password": sys.argv[2],
+                  "flow": "openid_connect", "flowID": sys.argv[3]}))' \
+    "$LOGIN" "$AUTHELIA_PASSWORD" "$flow_id")
+  code=$(curl -sS -o "$WORK/oidc-${app}-flow.json" -w '%{http_code}' \
+    -b "$expired" -c "$expired" -X POST "https://${DOMAIN}/auth/api/firstfactor" \
+    --resolve "${DOMAIN}:443:${addr}" "${ca_args[@]}" \
+    -H 'Content-Type: application/json' --data "$body" 2>"$WORK/oidc.err" || true)
+  redirect=$(json_field "$WORK/oidc-${app}-flow.json" redirect)
+  echo "  ${app}: POST /auth/api/firstfactor with the flow id: ${code}, next ${redirect%%\?*}"
+  [ "$code" = 200 ] || { echo "the portal refused the flow's first factor (${code})"; fail=1; }
+  case "$redirect" in
+    "https://${DOMAIN}/auth/api/oidc/authorization?"*) : ;;
+    *) echo "the flow's next step is ${redirect}, not the authorization endpoint"; fail=1 ;;
+  esac
+  # A consent step would be the page implicit consent exists to remove.
+  case "$redirect" in
+    *"/oidc/consent"*) echo "the flow asked for consent: ${redirect}"; fail=1 ;;
+  esac
+
+  # 5. Resume the flow: the authorization endpoint issues the code, the app's
+  #    callback redeems it at the token endpoint and opens a session.
+  code=$(curl -sS -o /dev/null -D "$hdrs" -w '%{http_code}' \
+    -b "$expired" -c "$expired" --resolve "${DOMAIN}:443:${addr}" "${ca_args[@]}" \
+    "$redirect" 2>"$WORK/oidc.err" || true)
+  callback=$(sed -n 's/^[Ll]ocation: *//p' "$hdrs" | tr -d '\r' | head -1)
+  echo "  ${app}: the authorization endpoint, resumed: ${code} -> ${callback%%\?*}"
+  case "$code" in
+    302 | 303) : ;;
+    *) echo "resuming the flow answered ${code}"; fail=1 ;;
+  esac
+  case "$callback" in
+    "https://${DOMAIN}${base}/api/auth/oidc/callback?"*) : ;;
+    *) echo "the resumed flow sent the browser to ${callback}, not the app's callback"; fail=1 ;;
+  esac
+  code=$(curl -sS -o /dev/null -D "$hdrs" -w '%{http_code}' \
+    -b "$expired" -c "$expired" --resolve "${DOMAIN}:443:${addr}" "${ca_args[@]}" \
+    "$callback" 2>"$WORK/oidc.err" || true)
+  location=$(sed -n 's/^[Ll]ocation: *//p' "$hdrs" | tr -d '\r' | head -1)
+  echo "  ${app}: GET the callback: ${code} -> ${location}"
+  [ "$code" = 302 ] ||
+    { echo "the callback answered ${code}: the code exchange did not complete"; fail=1; }
+  case "$location" in
+    "https://${DOMAIN}${base}"*) : ;;
+    *) echo "the callback sent the browser to ${location}, not back into the app"; fail=1 ;;
+  esac
+
+  # 6. An endpoint only the app's own session opens. It answers with the
+  #    account the provider issued the token for, and with the method that
+  #    proves the session came from OIDC and not from a password row.
+  code=$(curl -sS -o "$WORK/oidc-${app}-me.json" -w '%{http_code}' \
+    -b "$expired" --resolve "${DOMAIN}:443:${addr}" "${ca_args[@]}" \
+    "https://${DOMAIN}${api}" 2>"$WORK/oidc.err" || true)
+  body=$(cat "$WORK/oidc-${app}-me.json" 2>/dev/null || true)
+  echo "  ${app}: GET ${api} with the session: ${code} ${body}"
+  [ "$code" = 200 ] || { echo "${api} answered ${code} for a signed-in user"; fail=1; }
+  if ! printf '%s' "$body" | python3 -c 'import json, sys
+d = json.load(sys.stdin)
+want = sys.argv[1]
+bad = [f for f in ("username", "auth_method") if d.get(f) != {"username": want, "auth_method": "oidc"}[f]]
+if bad:
+    print("  the session says %s" % {f: d.get(f) for f in ("username", "auth_method")})
+    sys.exit(1)' "$LOGIN"; then
+    echo "${api} does not identify ${LOGIN} as an OIDC session"
+    fail=1
+  fi
+
+  # And without that session: the edge's login alone is not the app's. This is
+  # the assertion that keeps the 200 above from passing on the portal's cookie.
+  portal_login "$edge" "$LOGIN" "$AUTHELIA_PASSWORD" "https://${DOMAIN}/" "$addr" "$ca"
+  code=$(curl -sS -o /dev/null -w '%{http_code}' -b "$edge" \
+    --resolve "${DOMAIN}:443:${addr}" "${ca_args[@]}" "https://${DOMAIN}${api}" \
+    2>"$WORK/oidc.err" || true)
+  echo "  ${app}: GET ${api} with the portal's cookie and no app session: ${code}"
+  case "$code" in
+    401 | 403) : ;;
+    *) echo "${api} answered ${code} without the app's own session, want 401 or 403"; fail=1 ;;
+  esac
+  # No cookie at all is the edge's redirect, which is a different refusal: the
+  # app is never reached.
+  code=$(curl -sS -o /dev/null -D "$hdrs" -w '%{http_code}' \
+    --resolve "${DOMAIN}:443:${addr}" "${ca_args[@]}" "https://${DOMAIN}${api}" \
+    2>"$WORK/oidc.err" || true)
+  location=$(sed -n 's/^[Ll]ocation: *//p' "$hdrs" | tr -d '\r' | head -1)
+  echo "  ${app}: GET ${api} with no cookie: ${code} -> ${location%%\?*}"
+  [ "$code" = 302 ] ||
+    { echo "${api} answered ${code} with no cookie: the edge's login did not stand in front of it"; fail=1; }
+}
+
+# oidc_refuses_another_login <app> <base> <address> <ca-file|->
+#
+# The client's own authorization policy, which is per seedbox: it admits
+# user:<login> and denies everything else. A second account signs in at the
+# portal -- /auth is the bypass, so anyone in the users database gets that far
+# -- and the authorization endpoint refuses it, before any code exists.
+#
+# The authorization URL is taken with the box's own account because the app's
+# OIDC start sits behind the edge's login: a second account cannot read it, and
+# what it can reach is the portal and the authorization endpoint, which is
+# where the refusal is.
+oidc_refuses_another_login() {
+  local app=$1 base=$2 addr=$3 ca=$4
+  local ca_args=(--cacert "$ca")
+  [ "$ca" = - ] && ca_args=(-k)
+  local jar="$WORK/oidc-${app}-other.txt"
+  local hdrs="$WORK/oidc-${app}-other-headers.txt"
+  local code auth_url location
+  rm -f "$jar"
+  auth_url=$(json_field "$WORK/oidc-${app}-config.json" authorizationUrl)
+  [ -n "$auth_url" ] || { echo "no authorization URL to test the policy with"; fail=1; return 0; }
+  portal_login "$jar" "$SECOND_LOGIN" "$SECOND_PASSWORD" "https://${DOMAIN}/" "$addr" "$ca"
+  echo "  ${app}: ${SECOND_LOGIN} signs in at the portal: ${PORTAL_CODE}"
+  [ "$PORTAL_CODE" = 200 ] ||
+    { echo "the portal refused ${SECOND_LOGIN}'s first factor (${PORTAL_CODE}), so the client's policy was never asked"; fail=1; }
+  code=$(curl -sS -o "$WORK/oidc-${app}-other.json" -D "$hdrs" -w '%{http_code}' \
+    -b "$jar" -c "$jar" --resolve "${DOMAIN}:443:${addr}" "${ca_args[@]}" \
+    "$auth_url" 2>"$WORK/oidc.err" || true)
+  location=$(sed -n 's/^[Ll]ocation: *//p' "$hdrs" | tr -d '\r' | head -1)
+  echo "  ${app}: ${SECOND_LOGIN} at the authorization endpoint: ${code} -> ${location:-no redirect}"
+  case "$code" in
+    400 | 401 | 403) : ;;
+    *) echo "${SECOND_LOGIN} got ${code} from the authorization endpoint, want a refusal"; fail=1 ;;
+  esac
+  case "$location" in
+    *"code="*) echo "${SECOND_LOGIN} was issued a code: the client's policy admits another login"; fail=1 ;;
+  esac
 }
 
 # ---- scenario: fresh --------------------------------------------------------
@@ -1412,6 +1721,14 @@ for r in items:
   # ---- the OIDC provider: qui is Ready on the first install, with the issuer --
   log "the provider: qui's client, the issuer it dials, and the anchor"
   assert_oidc "$DOMAIN"
+  # ---- the sign-in itself ----------------------------------------------------
+  # Ready proves the pod read the discovery document. It does not prove anyone
+  # can sign in, which is the thing an operator does, so the flow is run here
+  # as a browser runs it -- and a second account tries the same flow to show
+  # the client's policy is this seedbox's alone.
+  log "the sign-in: qui's OIDC round trip, and the client that refuses another login"
+  oidc_login qui /qui /qui/api/auth/me "$gw_addr" "$WORK/pebble-root.pem"
+  oidc_refuses_another_login qui /qui "$gw_addr" "$WORK/pebble-root.pem"
   # ---- storage: box created the claims, and they are bound ----
   for kind in data config; do
     pv=seedbox-s5n-${kind}
@@ -2360,6 +2677,12 @@ PY
   # discovery document.
   log "the provider on a self-signed host: the box root is the anchor"
   assert_oidc "$DOMAIN"
+  # The same sign-in on a host nothing public signs: the browser's side of it
+  # trusts s5n-host-ca alone, which is what a person's browser does after
+  # importing the box's root.
+  log "the sign-in on a self-signed host: qui's OIDC round trip"
+  oidc_login qui /qui /qui/api/auth/me "$lb_addr" "$WORK/anchor-ca.pem"
+  oidc_refuses_another_login qui /qui "$lb_addr" "$WORK/anchor-ca.pem"
 
   # ---- a second bootstrap: still nothing installed -------------------------
   # box's MetalLB is still not a release it can see, so the second run asks the
