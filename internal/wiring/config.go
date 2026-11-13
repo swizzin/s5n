@@ -28,7 +28,31 @@ type Config struct {
 	Plex           *PlexConfig     `json:"plex,omitempty"`
 	Tautulli       *TautulliConfig `json:"tautulli,omitempty"`
 	Seerr          *SeerrConfig    `json:"seerr,omitempty"`
+	Qui            *QuiConfig      `json:"qui,omitempty"`
+	Autobrr        *AutobrrConfig  `json:"autobrr,omitempty"`
 	Instances      []Instance      `json:"instances"`
+}
+
+// QuiConfig points at qui's API. PasswordFile is the release Secret's
+// qui-password: the chart generates it once and qui's init container writes it
+// into the app's own user table on every start, so this is the one account the
+// Job signs in with. No API key is minted or stored — qui only issues one to a
+// session, and a session is something this Job can open by itself.
+type QuiConfig struct {
+	URL          string `json:"url"`
+	URLBase      string `json:"urlBase"`
+	Username     string `json:"username"`
+	PasswordFile string `json:"passwordFile"`
+}
+
+// AutobrrConfig points at autobrr's API, with the same account arrangement as
+// qui's: autobrr-password in the release Secret, written into autobrr's own
+// user table by its init container at every start.
+type AutobrrConfig struct {
+	URL          string `json:"url"`
+	URLBase      string `json:"urlBase"`
+	Username     string `json:"username"`
+	PasswordFile string `json:"passwordFile"`
 }
 
 // PlexConfig points at Plex. There is no API key: /identity answers
@@ -142,6 +166,22 @@ func (c *Config) validate() error {
 	}
 	if c.Seerr != nil && c.Seerr.URL == "" {
 		return fmt.Errorf("seerr: url is empty")
+	}
+	if c.Qui != nil {
+		if err := requireFields("qui", map[string]string{
+			"url": c.Qui.URL, "urlBase": c.Qui.URLBase, "username": c.Qui.Username,
+			"passwordFile": c.Qui.PasswordFile,
+		}); err != nil {
+			return err
+		}
+	}
+	if c.Autobrr != nil {
+		if err := requireFields("autobrr", map[string]string{
+			"url": c.Autobrr.URL, "urlBase": c.Autobrr.URLBase, "username": c.Autobrr.Username,
+			"passwordFile": c.Autobrr.PasswordFile,
+		}); err != nil {
+			return err
+		}
 	}
 	// Categories drive qBittorrent save paths; two instances sharing a name but
 	// not a path would fight over the same downloads.
