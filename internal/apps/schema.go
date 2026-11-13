@@ -44,6 +44,7 @@ type Item map[string]any
 // (the field is absent from the update), so each is written once here rather
 // than at every call site.
 const (
+	fieldName     = "name"
 	fieldHost     = "host"
 	fieldPort     = "port"
 	fieldUsername = "username"

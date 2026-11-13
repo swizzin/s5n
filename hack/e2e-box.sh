@@ -1779,7 +1779,7 @@ print("  app routes: %d HTTPRoutes, none pins a sectionName" % len(items))
   # final card and the grant are what init decided; these assertions are what
   # cluster got.
   log "the app hosts: a certificate and a listener each, and Seerr on its own name"
-  for app_host in "plex:${PLEX_HOST}" "seerr:${SEERR_HOST}"; do
+  for app_host in "plex:${PLEX_HOST}" "seerr:${SEERR_HOST}" "pbh:${PBH_HOST}"; do
     app=${app_host%%:*}; host=${app_host##*:}
     label=${host//./-}
     cert=s5n-tls-${label}
@@ -3502,7 +3502,7 @@ print(json.dumps({"status": {"conditions": conds}}))' >"$WORK/cert-status.json"
   # have taken it away.
   log "a public record and an apply: the anchor stays until the certificate moves"
   cat >"$WORK/dns-window" <<EOF
-192.0.2.10 ${DOMAIN}
+192.0.2.10 ${DOMAIN} ${PLEX_HOST} ${SEERR_HOST} ${PBH_HOST}
 EOF
   anchor_rv_window=$($K -n "$NS" get configmap s5n-host-ca -o jsonpath='{.metadata.resourceVersion}')
   if "$WORK/box" apply --yes --chart-repo "$CHART_REPO" --chart-version "$CHART_VERSION" \
@@ -3588,7 +3588,7 @@ EOF
   app_cert=s5n-tls-seerr-box-internal-example
   grep -qF "${DOMAIN} has no DNS record, so its certificate is self-signed; add one, then run box init again to move it to Let's Encrypt" "$WORK/bootstrap1.txt" ||
     { echo "the final card does not name the domain's missing record"; fail=1; }
-  for host in "$PLEX_HOST" "$SEERR_HOST"; do
+  for host in "$PLEX_HOST" "$SEERR_HOST" "$PBH_HOST"; do
     grep -qF "${host} has no DNS record, so its certificate is self-signed; add either a wildcard *.${DOMAIN} or a record for ${host}, then run box init again to move it to Let's Encrypt" "$WORK/bootstrap1.txt" ||
       { echo "the final card does not name ${host}'s missing record"; fail=1; }
   done
@@ -3607,7 +3607,7 @@ EOF
   # Gateway, so the HTTP-01 challenge still arrives on port 80.
   log "a record exists: init again moves the same hosts to Let's Encrypt"
   cat >"$WORK/dns" <<EOF
-192.0.2.10 ${DOMAIN} ${PLEX_HOST} ${SEERR_HOST}
+192.0.2.10 ${DOMAIN} ${PLEX_HOST} ${SEERR_HOST} ${PBH_HOST}
 EOF
   install_pebble
   [ "$fail" = 0 ] || return 0
@@ -3626,7 +3626,7 @@ EOF
   else
     cat "$WORK/bootstrap3.txt"; fail=1
   fi
-  for host in "$DOMAIN" "$PLEX_HOST" "$SEERR_HOST"; do
+  for host in "$DOMAIN" "$PLEX_HOST" "$SEERR_HOST" "$PBH_HOST"; do
     grep -qF "tls: ${host} resolves to 192.0.2.10: using Let's Encrypt" "$WORK/bootstrap3.txt" ||
       { echo "init did not move ${host} to Let's Encrypt"; fail=1; }
   done

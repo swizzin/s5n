@@ -222,7 +222,7 @@ func pbhDesired(live Item, spec PbhDownloaderSpec) (Item, []FieldChange) {
 func pbhCreateConfig(spec PbhDownloaderSpec) Item {
 	return Item{
 		"type":           "qbittorrent",
-		"name":           spec.Name,
+		fieldName:        spec.Name,
 		pbhFieldEndpoint: spec.Endpoint,
 		fieldUsername:    spec.Username,
 		fieldPassword:    spec.Password,

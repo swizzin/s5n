@@ -40,9 +40,9 @@ type fakePbh struct {
 	saveFails    bool // a save that answers 500 like PBH's own NPE
 }
 
-func newFakePbh(t *testing.T, token string) (*fakePbh, *httptest.Server) {
+func newFakePbh(t *testing.T) (*fakePbh, *httptest.Server) {
 	t.Helper()
-	f := &fakePbh{token: token, cfg: map[string]Item{}, status: map[string]string{}, statusMsg: map[string]string{}}
+	f := &fakePbh{token: "pbh-token", cfg: map[string]Item{}, status: map[string]string{}, statusMsg: map[string]string{}}
 	srv := httptest.NewServer(f)
 	t.Cleanup(srv.Close)
 	return f, srv
@@ -178,7 +178,7 @@ func pbhSpec(password string) PbhDownloaderSpec {
 // needs, and returns the id it lives under: PUT answers 201 with a null body, so
 // the id can only come from what was sent.
 func TestPbhCreatesDownloader(t *testing.T) {
-	f, srv := newFakePbh(t, "pbh-token")
+	f, srv := newFakePbh(t)
 	p := NewPbh(srv.URL, "pbh-token")
 
 	res, err := p.EnsureDownloader(context.Background(), pbhSpec("hunter2"), "", "")
@@ -204,7 +204,7 @@ func TestPbhCreatesDownloader(t *testing.T) {
 // A second run with the fingerprint on record writes nothing at all: no second
 // PUT (which PBH would refuse), no PATCH.
 func TestPbhEnsureDownloaderIsIdempotent(t *testing.T) {
-	f, srv := newFakePbh(t, "pbh-token")
+	f, srv := newFakePbh(t)
 	p := NewPbh(srv.URL, "pbh-token")
 	ctx := context.Background()
 
@@ -231,7 +231,7 @@ func TestPbhEnsureDownloaderIsIdempotent(t *testing.T) {
 // what turns it into an update, and the update is a PATCH carrying the whole
 // stored config.
 func TestPbhEnsureDownloaderFollowsRotation(t *testing.T) {
-	f, srv := newFakePbh(t, "pbh-token")
+	f, srv := newFakePbh(t)
 	p := NewPbh(srv.URL, "pbh-token")
 	ctx := context.Background()
 
@@ -267,7 +267,7 @@ func TestPbhEnsureDownloaderFollowsRotation(t *testing.T) {
 // An update is the stored config with the owned fields overlaid: a name a person
 // changed, and settings s5n has no opinion about, survive it.
 func TestPbhUpdateKeepsFieldsItDoesNotOwn(t *testing.T) {
-	f, srv := newFakePbh(t, "pbh-token")
+	f, srv := newFakePbh(t)
 	p := NewPbh(srv.URL, "pbh-token")
 	ctx := context.Background()
 
@@ -300,7 +300,7 @@ func TestPbhUpdateKeepsFieldsItDoesNotOwn(t *testing.T) {
 // endpoint's config is what the update compares, and an untouched downloader
 // there is unchanged.
 func TestPbhDoesNotDriftOnTheApiEndpoint(t *testing.T) {
-	f, srv := newFakePbh(t, "pbh-token")
+	f, srv := newFakePbh(t)
 	p := NewPbh(srv.URL, "pbh-token")
 	ctx := context.Background()
 
@@ -323,7 +323,7 @@ func TestPbhDoesNotDriftOnTheApiEndpoint(t *testing.T) {
 // Drift on an owned, visible field is restored and reported - the user changed
 // the endpoint in PBH's UI, and the next run puts the data contract back.
 func TestPbhRestoresDriftedEndpoint(t *testing.T) {
-	f, srv := newFakePbh(t, "pbh-token")
+	f, srv := newFakePbh(t)
 	p := NewPbh(srv.URL, "pbh-token")
 	ctx := context.Background()
 
@@ -350,7 +350,7 @@ func TestPbhRestoresDriftedEndpoint(t *testing.T) {
 // A downloader the user added by hand is adopted by name on the first run: PBH
 // refuses a duplicate name, so a blind create would fail instead of taking over.
 func TestPbhAdoptsDownloaderByName(t *testing.T) {
-	f, srv := newFakePbh(t, "pbh-token")
+	f, srv := newFakePbh(t)
 	p := NewPbh(srv.URL, "pbh-token")
 	ctx := context.Background()
 
@@ -376,7 +376,7 @@ func TestPbhAdoptsDownloaderByName(t *testing.T) {
 // A recorded id that is gone means the user deleted it: the run recreates it and
 // says which id disappeared, so the receipt is not silent about it.
 func TestPbhRecreatesADeletedDownloader(t *testing.T) {
-	f, srv := newFakePbh(t, "pbh-token")
+	f, srv := newFakePbh(t)
 	p := NewPbh(srv.URL, "pbh-token")
 
 	res, err := p.EnsureDownloader(context.Background(), pbhSpec("hunter2"), "was-here", "stale")
@@ -395,7 +395,7 @@ func TestPbhRecreatesADeletedDownloader(t *testing.T) {
 // 500 whose body carries the app's sentence, and the client must not read it as
 // a success.
 func TestPbhReportsA500WithTheAppsMessage(t *testing.T) {
-	f, srv := newFakePbh(t, "pbh-token")
+	f, srv := newFakePbh(t)
 	f.saveFails = true
 	p := NewPbh(srv.URL, "pbh-token")
 
@@ -414,7 +414,7 @@ func TestPbhReportsA500WithTheAppsMessage(t *testing.T) {
 // it: PBH blacklists an address for 15 minutes after ten failures on one
 // endpoint, so the wait has to give up after the first one.
 func TestPbhWrongTokenIsRefusedWithoutRetrying(t *testing.T) {
-	f, srv := newFakePbh(t, "pbh-token")
+	f, srv := newFakePbh(t)
 	p := NewPbh(srv.URL, "not-the-token")
 
 	err := p.WaitReady(context.Background(), 30*time.Second)
@@ -433,7 +433,7 @@ func TestPbhWrongTokenIsRefusedWithoutRetrying(t *testing.T) {
 // until its own poll loop has run the status is UNKNOWN, so the wait has to poll
 // rather than read once.
 func TestPbhWaitHealthy(t *testing.T) {
-	f, srv := newFakePbh(t, "pbh-token")
+	f, srv := newFakePbh(t)
 	p := NewPbh(srv.URL, "pbh-token")
 	ctx := context.Background()
 
@@ -465,7 +465,7 @@ func TestPbhWaitHealthy(t *testing.T) {
 // The version in the receipt comes from the manifest the WebUI reads first, and
 // it answers without a token - so a wrong-token pod is still describable.
 func TestPbhVersion(t *testing.T) {
-	_, srv := newFakePbh(t, "pbh-token")
+	_, srv := newFakePbh(t)
 	p := NewPbh(srv.URL, "pbh-token")
 	v, err := p.Version(context.Background())
 	if err != nil {
