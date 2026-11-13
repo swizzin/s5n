@@ -240,8 +240,10 @@ seedbox's own host name, so a seedbox needs one certificate and one cookie domai
 
 **Apps that speak OIDC sign in through the login (decided).** Authelia is also an OIDC
 provider, with issuer `https://<host>/auth`; an app the chart's catalog marks `oidc: true`
-(qui first) has its own login switched to it, so a user still signs in once and the app's
-first visit is a redirect that comes straight back. Each seedbox has its own client per
+(qui and autobrr) has its own login switched to it, so a user still signs in once and
+the app's first visit is a redirect that comes straight back. A healthy autobrr proves
+nothing about the provider, since it starts without one and keeps retrying; only a
+sign-in does. Each seedbox has its own client per
 app, `<namespace>-<app>`, and its own authorization policy that admits only that seedbox's
 user. root's `init` writes the client secret once into a Secret in the seedbox's
 namespace and only its digest into the login; the provider's signing key is generated
