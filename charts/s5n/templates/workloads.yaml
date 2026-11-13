@@ -268,10 +268,21 @@ spec:
             # that (config.go:1082-1102); autobrr's GetEnvStr looks for the _FILE
             # name before the plain one, for every setting (config.go:452-468).
             #
-            # DISABLE_BUILT_IN_LOGIN is what makes OIDC the only way in. What an
-            # unreachable issuer costs differs -- qui will not start, autobrr
-            # starts and retries discovery -- so Ready is the proof for one and
-            # not the other; the e2e's sign-in is the proof for both.
+            # OIDC is the login the app's page offers, and DISABLE_BUILT_IN_LOGIN
+            # is what removes its password form -- in the UI only. Neither app
+            # stops routing its own credential endpoints: qui refuses
+            # /api/auth/setup once OIDC is on, so no local row can be created
+            # there, while autobrr keeps /api/auth/login and its onboarding
+            # path, which stays open while its user table is empty and OIDC
+            # never fills it. What keeps those from anyone but this seedbox's
+            # user is the edge in front, not this flag; it is worth knowing
+            # before an OIDC app is ever served without one.
+            #
+            # What an unreachable issuer costs differs: qui will not start,
+            # autobrr starts and retries discovery for about four minutes
+            # (internal/auth/oidc.go:78-96 and 156-167 at v1.90.0), so Ready is
+            # the proof for one and not the other. The e2e's sign-in is the
+            # proof for both.
             - name: {{ $oidcPrefix }}__OIDC_ENABLED
               value: "true"
             - name: {{ $oidcPrefix }}__OIDC_ISSUER
