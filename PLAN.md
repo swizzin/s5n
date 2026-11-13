@@ -292,8 +292,9 @@ puid:pgid, then `box init`. Every step is safe to re-run.
 
 - Pod Security `restricted` on the namespace. Rootless images allow it.
 - `readOnlyRootFilesystem`, all capabilities dropped, seccomp `RuntimeDefault`.
-- Default-deny NetworkPolicy, with only the needed flows allowed
-  (Arr → qBittorrent, Prowlarr ↔ Arr, Seerr → Arr/media, Gateway → app).
+- Default-deny NetworkPolicy, with only the needed flows allowed: every edge the
+  catalog declares in an app's `calls` (inverted into the callee's ingress), plus
+  Gateway → app and the wiring Job.
 - Only the Gateway and the torrent port (a NodePort Service with
   `externalTrafficPolicy: Local`; hostPort is forbidden under `restricted`) are reachable
   from outside.
