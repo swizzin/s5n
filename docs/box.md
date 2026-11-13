@@ -253,6 +253,17 @@ Gateway's proxy may reach the login's pod at all. A plain `helm install`, or a g
 before the provider, has no recorded address, and the app keeps its own login switched
 off behind the edge's.
 
+**An app that keeps its own user table has one account box owns (decided, not built
+yet).** qui and autobrr hand out API keys only to a signed-in session, so the wiring Job
+can't be given a key up front. The chart generates a password for each in the release's
+Secret, beside the qBittorrent password and the Arr keys, and box owns the account
+outright: the app's init container creates it if it is missing and sets that password on
+every start, so a password changed inside the app is put back at the next restart, and
+until then the wiring Job's report names the mismatch. The Job signs in with it on every
+run; no API key is minted or kept. Hiding the app's own login form doesn't switch its
+password login off, so this account is reachable only past the edge's login or from the
+wiring Job, which the NetworkPolicy allows.
+
 **The login is on root's Gateway, and users can't take it off (decided).** The
 SecurityPolicy that sends requests to Authelia targets the `s5n` Gateway itself and lives
 beside it in `s5n-gateway`, so every listener is behind the login unless root says
