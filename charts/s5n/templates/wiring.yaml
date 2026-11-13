@@ -66,6 +66,26 @@ previous run's logs stay readable until then.
 {{- $_ := set $cfg "seerr" (dict
       "url" (printf "http://seerr:%v" .Values.apps.seerr.port)) }}
 {{- end }}
+{{- if and .Values.apps.qui .Values.apps.qui.enabled }}
+{{- /* qui keeps its own user table: the account the chart owns is what this
+       sign-in uses (s5n.wiringAccount), and the password is a file reference
+       into the mounted Secret like every other credential here. */}}
+{{- $_ := set $cfg "qui" (dict
+      "url" (printf "http://qui:%v" .Values.apps.qui.port)
+      "urlBase" "/qui"
+      "username" (include "s5n.wiringAccount" $root | trim)
+      "passwordFile" "/etc/s5n/keys/qui-password") }}
+{{- end }}
+{{- if and .Values.apps.autobrr .Values.apps.autobrr.enabled }}
+{{- /* Same account arrangement as qui's. autobrr's base URL carries a trailing
+       slash in its own setting, but its API routes are mounted under baseUrl
+       plus "/api", so the path this client appends is "/autobrr/api/...". */}}
+{{- $_ := set $cfg "autobrr" (dict
+      "url" (printf "http://autobrr:%v" .Values.apps.autobrr.port)
+      "urlBase" "/autobrr"
+      "username" (include "s5n.wiringAccount" $root | trim)
+      "passwordFile" "/etc/s5n/keys/autobrr-password") }}
+{{- end }}
 ---
 apiVersion: v1
 kind: ConfigMap

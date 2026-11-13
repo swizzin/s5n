@@ -69,11 +69,13 @@ spec:
       {{- end }}
       securityContext:
         {{- include "s5n.podSecurity" $root | nindent 8 }}
-      {{- if or (eq $inst.app "qbittorrent") (eq $inst.app "tautulli") }}
-      # qBittorrent and Tautulli both generate their own WebUI/API credential on
-      # first start and never offer a way to set one from the environment, so
-      # each gets its own init container sealing a known value into its config
-      # file first. Re-running is a no-op once the file already holds it.
+      {{- if or (eq $inst.app "qbittorrent") (eq $inst.app "tautulli") (eq $inst.app "qui") (eq $inst.app "autobrr") }}
+      # qBittorrent and Tautulli generate their own WebUI/API credential on first
+      # start, and qui and autobrr hand out an API key only to a signed-in
+      # session: none of the four can be given credentials from the environment.
+      # Each gets an init container that seals a known value into its own config
+      # or user table first -- one that runs before the app, on the app's own
+      # config subPath, so the file it edits is the file the app reads.
       initContainers:
         {{- if eq $inst.app "qbittorrent" }}
         - name: webui-credentials
@@ -111,6 +113,73 @@ spec:
             - name: keys
               mountPath: /etc/s5n/keys
               readOnly: true
+        {{- else if eq $inst.app "qui" }}
+        # qui's user table is the only way to an API key: it mints one only for
+        # a signed-in session, so an unattended install needs an account it owns
+        # (docs/box.md, "An app that keeps its own user table has one account box
+        # owns"). Created when it is missing, and set to the release Secret's
+        # password on every start, which is also what puts back a password
+        # changed inside the running app; until the pod restarts the wiring Job
+        # reports that mismatch instead of a generic HTTP error. The password
+        # is read from the mounted key and piped in: a flag would put it in the
+        # pod spec, readable by anything that may describe the pod. A second run
+        # answers "User account already exists" and exits 0.
+        - name: account
+          image: {{ include "s5n.image" (dict "root" $root "app" $inst.app "path" (printf "apps.%s.image" $inst.app) "image" $cfg.image) }}
+          imagePullPolicy: IfNotPresent
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              set -eu
+              password="$(cat /etc/s5n/keys/qui-password)"
+              printf '%s\n' "$password" | /usr/local/bin/qui create-user --config-dir /config --username {{ include "s5n.wiringAccount" $root }}
+              printf '%s\n' "$password" | /usr/local/bin/qui change-password --config-dir /config --username {{ include "s5n.wiringAccount" $root }}
+          securityContext:
+            {{- include "s5n.containerSecurity" $root | nindent 12 }}
+          volumeMounts:
+            - name: config
+              mountPath: /config
+              subPath: {{ $inst.name }}
+            - name: keys
+              mountPath: /etc/s5n/keys
+              readOnly: true
+            - name: tmp
+              mountPath: /tmp
+        {{- else if eq $inst.app "autobrr" }}
+        # autobrr's account, the same arrangement as qui's with one difference:
+        # its create-user exits 1 on a second run instead of answering 0, so the
+        # one sentence "only 1 user account is supported" is what counts as done.
+        # Matching that message (never `|| true`) keeps a real failure -- an
+        # unwritable database, a wrong image -- a failed pod.
+        - name: account
+          image: {{ include "s5n.image" (dict "root" $root "app" $inst.app "path" (printf "apps.%s.image" $inst.app) "image" $cfg.image) }}
+          imagePullPolicy: IfNotPresent
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              set -eu
+              password="$(cat /etc/s5n/keys/autobrr-password)"
+              if ! out="$(printf '%s\n' "$password" | /usr/local/bin/autobrrctl --config /config create-user {{ include "s5n.wiringAccount" $root }} 2>&1)"; then
+                case "$out" in
+                  *"only 1 user account is supported"*) ;;
+                  *)
+                    printf '%s\n' "$out" >&2
+                    exit 1
+                    ;;
+                esac
+              fi
+              printf '%s\n' "$password" | /usr/local/bin/autobrrctl --config /config change-password {{ include "s5n.wiringAccount" $root }}
+          securityContext:
+            {{- include "s5n.containerSecurity" $root | nindent 12 }}
+          volumeMounts:
+            - name: config
+              mountPath: /config
+              subPath: {{ $inst.name }}
+            - name: keys
+              mountPath: /etc/s5n/keys
+              readOnly: true
+            - name: tmp
+              mountPath: /tmp
         {{- end }}
       {{- end }}
       containers:
@@ -166,7 +235,10 @@ spec:
               value: {{ $urlBase | quote }}
             {{- if not $oidc }}
             # qui's login is off, like the Arrs' External scheme: the login is at
-            # the edge (auth.edge), never in the app. Disabling it takes three
+            # the edge (auth.edge), never in the app. The account the init
+            # container creates still exists -- unused while authentication is
+            # disabled, and the one a release that later gains the provider
+            # signs in with. Disabling it takes three
             # settings (internal/domain/config.go at v1.35.0: IsAuthDisabled is
             # AuthDisabled && IAcknowledgeThisIsABadIdea, and
             # ValidateAuthDisabledConfig refuses to start without the allowlist).
@@ -246,11 +318,21 @@ spec:
             {{- end }}
             {{- if $oidc }}
             {{- $oidcPrefix := upper $inst.app }}
-            # This app signs in through the login's own OIDC provider, so it has
-            # a login of its own after all -- one that resolves to the same
-            # account as the edge. It is not a second auth system: no user, no
-            # password, no reset path lives in the app, only the client id and
-            # the secret Authelia issued it.
+            # This app signs in through the login's own OIDC provider, so its
+            # page offers a login after all -- one that resolves to the same
+            # person as the edge. That login is the person's: no account of
+            # theirs lives in the app, only the client id and the secret
+            # Authelia issued it.
+            #
+            # One account does live in the app: the automation account the
+            # chart owns (s5n.wiringAccount). Both apps hand an API key only to
+            # a signed-in session, so an unattended install needs an account it
+            # controls -- the init container creates it and re-sets it to the
+            # release Secret's password on every start, and the wiring Job signs
+            # in with it to register the app's connections. It is not offered in
+            # the UI and is not a second way in for a person: what bounds it is
+            # the edge's login in front and the NetworkPolicy, which admits only
+            # the Gateway and the wiring Job to this port.
             #
             # The names are the app's own, and both clients that speak OIDC read
             # them from their own name in caps: QUI__<NAME> at v1.35.0
@@ -270,13 +352,14 @@ spec:
             #
             # OIDC is the login the app's page offers, and DISABLE_BUILT_IN_LOGIN
             # is what removes its password form -- in the UI only. Neither app
-            # stops routing its own credential endpoints: qui refuses
-            # /api/auth/setup once OIDC is on, so no local row can be created
-            # there, while autobrr keeps /api/auth/login and its onboarding
-            # path, which stays open while its user table is empty and OIDC
-            # never fills it. What keeps those from anyone but this seedbox's
-            # user is the edge in front, not this flag; it is worth knowing
-            # before an OIDC app is ever served without one.
+            # stops routing its own credential endpoints, and the account above
+            # is the only row either user table has: qui refuses /api/auth/setup
+            # once OIDC is on, so its row can only come from the CLI the init
+            # container runs, and autobrr's onboarding endpoint is refused as
+            # soon as that row exists (it was open only while the table was
+            # empty). What keeps those endpoints from anyone but this seedbox's
+            # user is the edge in front and the NetworkPolicy, not this flag; it
+            # is worth knowing before an OIDC app is ever served without one.
             #
             # What an unreachable issuer costs differs: qui will not start,
             # autobrr starts and retries discovery for about four minutes
@@ -427,6 +510,22 @@ spec:
             items:
               - key: tautulli-apikey
                 path: tautulli-apikey
+        {{- else if eq $inst.app "qui" }}
+        - name: keys
+          secret:
+            secretName: {{ include "s5n.secretName" $root }}
+            defaultMode: 0440
+            items:
+              - key: qui-password
+                path: qui-password
+        {{- else if eq $inst.app "autobrr" }}
+        - name: keys
+          secret:
+            secretName: {{ include "s5n.secretName" $root }}
+            defaultMode: 0440
+            items:
+              - key: autobrr-password
+                path: autobrr-password
         {{- end }}
 ---
 apiVersion: v1

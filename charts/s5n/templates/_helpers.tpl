@@ -119,6 +119,23 @@ release whose admin apps nobody signs in to is not a release this chart renders.
 {{- end -}}
 
 {{/*
+s5n.wiringAccount: the one account the wiring Job signs in with, in the apps
+that keep their own user table (qui, autobrr). Both apps hand an API key only to
+a signed-in session, so an unattended install needs an account it owns; the
+chart generates its password in the release Secret and the app's init container
+writes it into the app's own table on every start (docs/box.md, "An app that
+keeps its own user table has one account box owns").
+
+It is one name for both apps because it is one thing -- the automation account,
+not a person -- and because the Job's config, the init container and the
+operator's `kubectl rollout restart` all have to name the same account. `s5n` is
+the product's name, so a row in either app's user list says what it is for.
+*/ -}}
+{{- define "s5n.wiringAccount" -}}
+s5n
+{{- end -}}
+
+{{- /*
 s5n.instances: the flat list of workloads, as JSON, built from the keys under `apps:`.
 Every key there is an app -- values.schema.json rejects anything else -- so a new
 catalog app needs a values entry and its schema definition, never a template edit.
