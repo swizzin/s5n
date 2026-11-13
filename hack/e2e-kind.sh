@@ -1009,6 +1009,124 @@ else
   echo "outsider->sonarr: blocked"
 fi
 
+# ---- NetworkPolicy: every declared edge, and one that is not ----------------
+# The peers are derived from the chart's catalog (`calls`), because that is what
+# the release's policies are derived from. A list typed here could agree with
+# the script and still disagree with the release -- which is exactly how a
+# shipped chart came to refuse Seerr's requests to the Arrs while every test in
+# it passed.
+#
+# A probe pod has to run in the release namespace: a NetworkPolicy podSelector
+# peer matches pods in the policy's own namespace, so a pod anywhere else is
+# never the caller it claims to be. That puts it behind Pod Security restricted
+# and the grant's image policy, so its image is the release's own Sonarr image
+# (blessed, and it carries curl). It carries the caller's labels and nothing
+# else, which is the subject of the test: the callee's ingress decides.
+enabled_apps=$($K -n "$NS" get pods -l 's5n.io/app' \
+  -o jsonpath='{range .items[*]}{.metadata.labels.s5n\.io/app}{"\n"}{end}' 2>/dev/null | sort -u | tr '\n' ' ' || true)
+[ -n "${enabled_apps// /}" ] || { echo "no app pods found: the release's edges cannot be derived"; fail=1; }
+PROBE_IMAGE=$($K -n "$NS" get statefulset sonarr -o jsonpath='{.spec.template.spec.containers[0].image}' 2>/dev/null || true)
+[ -n "$PROBE_IMAGE" ] || { echo "no Sonarr image to run the probes with"; fail=1; }
+pairs=$(go run ./hack/appcalls charts/s5n $enabled_apps 2>"$WORK/appcalls.err" || true)
+[ -n "$pairs" ] || { echo "appcalls printed no edges: $(sed 's/^/    /' "$WORK/appcalls.err")"; fail=1; }
+echo "apps with pods: ${enabled_apps}"
+echo "declared edges ($(grep -c . <<<"$pairs")):"
+sed 's/^/  /' <<<"$pairs"
+
+# probe_pod <name> <caller> <callee>...: one pod per caller, dialling each of its
+# callees and printing "<callee> <http code>". A code of 000 is the timeout the
+# policy produces; the callee is never reached, so no status is returned.
+probe_pod() {
+  local name=$1 caller=$2 entries="" callee url
+  shift 2
+  for callee in "$@"; do
+    url="http://${callee}.${NS}:$($K -n "$NS" get svc "$callee" -o jsonpath='{.spec.ports[0].port}')/"
+    entries="${entries} ${callee}=${url}"
+  done
+  $K -n "$NS" delete pod "$name" --ignore-not-found >/dev/null 2>&1
+  $K -n "$NS" create -f - >/dev/null <<EOF
+apiVersion: v1
+kind: Pod
+metadata:
+  name: ${name}
+  labels:
+    app.kubernetes.io/instance: s5n
+    s5n.io/app: ${caller}
+spec:
+  restartPolicy: Never
+  automountServiceAccountToken: false
+  securityContext:
+    runAsUser: 1000
+    runAsGroup: 1000
+    runAsNonRoot: true
+    seccompProfile: {type: RuntimeDefault}
+  containers:
+    - name: probe
+      image: ${PROBE_IMAGE}
+      command: ["/bin/sh", "-c"]
+      args:
+        - |
+          for e in${entries}; do
+            printf '%s %s\n' "\${e%%=*}" "\$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 "\${e#*=}")"
+          done
+      securityContext:
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+        capabilities: {drop: ["ALL"]}
+EOF
+}
+
+probe_wait_read() { # probe_wait_read <name> <log file>
+  local name=$1 out=$2 phase=""
+  for _ in $(seq 1 90); do
+    phase=$($K -n "$NS" get pod "$name" -o jsonpath='{.status.phase}' 2>/dev/null || true)
+    case "$phase" in Succeeded|Failed) break ;; esac
+    sleep 1
+  done
+  $K -n "$NS" logs "$name" >"$out" 2>/dev/null || true
+  [ -s "$out" ] || { echo "${name}: printed nothing (phase ${phase:-unknown})"; fail=1; }
+}
+
+# One pod per caller, all of them at once: a caller with one callee and a caller
+# with six cost the same wall time.
+declare -A callees
+order=""
+while read -r caller callee; do
+  [ -n "$callee" ] || continue
+  [ -n "${callees[$caller]:-}" ] || order="${order} ${caller}"
+  callees[$caller]="${callees[$caller]:-} ${callee}"
+done <<<"$pairs"
+for caller in $order; do
+  probe_pod "np-${caller}" "$caller" ${callees[$caller]}
+done
+for caller in $order; do
+  probe_wait_read "np-${caller}" "$WORK/np-${caller}.txt"
+  while read -r callee code; do
+    [ -n "$callee" ] || continue
+    echo "  ${caller} -> ${callee}: ${code}"
+    case "$code" in
+      ""|000) echo "  ${caller} -> ${callee} was refused by the callee's ingress; the catalog declares it"; fail=1 ;;
+    esac
+  done <"$WORK/np-${caller}.txt"
+  $K -n "$NS" delete pod "np-${caller}" --ignore-not-found >/dev/null 2>&1
+done
+
+# The negative half: an edge nothing declares must time out. tautulli and
+# qBittorrent are both in this release and have no reason to talk, so a probe
+# carrying tautulli's labels gets nothing from qBittorrent's port. If the catalog
+# ever declares it, say so instead of asserting the opposite of the release.
+if grep -qx 'tautulli qbittorrent' <<<"$pairs"; then
+  echo "the catalog declares tautulli -> qbittorrent now: pick another pair for the negative probe"
+  fail=1
+else
+  probe_pod np-undeclared tautulli qbittorrent
+  probe_wait_read np-undeclared "$WORK/np-undeclared.txt"
+  undeclared=$(awk '{print $2}' "$WORK/np-undeclared.txt" 2>/dev/null || true)
+  echo "  tautulli -> qbittorrent (undeclared): ${undeclared:-nothing printed}"
+  [ "$undeclared" = 000 ] || { echo "an edge no app declares answered ${undeclared:-nothing}: the ingress is not enforced"; fail=1; }
+  $K -n "$NS" delete pod np-undeclared --ignore-not-found >/dev/null 2>&1
+fi
+
 # ---- wiring -------------------------------------------------------------------
 status_field() { # status_field <python expression over `d`>
   $K -n "$NS" get cm s5n-wiring -o jsonpath='{.data.status\.json}' |
