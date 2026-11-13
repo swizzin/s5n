@@ -15,10 +15,17 @@ permissions:
 
 concurrency:
   group: ci-${{ github.ref }}
-  # Only a pull request's older run is wasted by a newer push. A push to main
-  # or develop is never cancelled, because the run a new push would cancel may
-  # be the one cutting the release.
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  # A newer push to the same ref supersedes an older one, so a pull request's
+  # run and a push to develop are both cancelled in progress. develop is safe
+  # to cancel: nothing on it cuts a release. Releases are decided only by a push
+  # to main (the release job's `if:`), and the back-merge's test-develop call
+  # runs inside that main run, under ci-refs/heads/main, so a newer develop
+  # push cannot cancel the tests that gated a release.
+  #
+  # A push to main is never cancelled: that run is the one that may tag and
+  # publish, and cancelling it half way leaves a tag with no image or an image
+  # with no tag.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' || github.ref == 'refs/heads/develop' }}
 
 jobs:
   test:
