@@ -65,7 +65,20 @@ done
 # wiring config. The defaults are the render every plain install gets, so
 # "nothing" here is the difference between a box that was asked for the app and
 # one that was not.
-if helm template t charts/s5n -n seedbox -f charts/s5n/ci/default-values.yaml | grep -qi 'pbh'; then
+#
+# Secret values are random base64 (templates/secret.yaml), and 32 random
+# characters spell "pbh" about once in fifty renders, so they are blanked before
+# the grep. Their keys stay: a pbh key in the Secret is one of the leaks this
+# looks for.
+redact_secret_values() {
+  awk '/^---/ { secret = 0; data = 0 }
+       /^kind: Secret$/ { secret = 1 }
+       /^[^ ]/ { data = 0 }
+       secret && /^(data|stringData):/ { data = 1; print; next }
+       data && /^  [^ ]/ { sub(/:.*/, ": <value>") }
+       { print }'
+}
+if helm template t charts/s5n -n seedbox -f charts/s5n/ci/default-values.yaml | redact_secret_values | grep -qi 'pbh'; then
   echo "the default render mentions pbh: an opt-in app must render nothing when it is off"
   exit 1
 fi
