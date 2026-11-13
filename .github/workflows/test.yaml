@@ -174,10 +174,32 @@ jobs:
   # no docker image tag, cluster name or kubeconfig. (On one machine they
   # cannot run at once -- both write $HOME/.cache/s5n-e2e/kubeconfig -- which
   # is why a maintainer runs them one after another by hand.)
+  #
+  # One job per scenario, because a scenario owns its own kind cluster, registry
+  # container and work directory (hack/e2e-box.sh): on one runner the three are
+  # a queue and the job costs their sum, 24.4 minutes. fail-fast is off so one
+  # scenario's failure does not hide the other two: they disagree about what is
+  # on the cluster before box runs, and a maintainer wants all three verdicts
+  # from one push.
+  #
+  # Each timeout is twice the scenario's observed time rounded up, and covers
+  # the checkout, the tool installs and the cluster it builds before asserting:
+  # fresh 10.3 min -> 25, preinstalled 11.1 -> 25, foreign-gateway 1.0 -> 15.
   e2e-box:
     needs: [go, chart]
+    name: e2e-box (${{ matrix.scenario }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - scenario: fresh
+            timeout: 25
+          - scenario: preinstalled
+            timeout: 25
+          - scenario: foreign-gateway
+            timeout: 15
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: ${{ matrix.timeout }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -202,4 +224,4 @@ jobs:
           echo "${KUBECTL_SHA256}  $HOME/.local/bin/kubectl" | sha256sum -c -
           chmod +x "$HOME/.local/bin/kubectl"
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
-      - run: hack/e2e-box.sh all
+      - run: hack/e2e-box.sh ${{ matrix.scenario }}
