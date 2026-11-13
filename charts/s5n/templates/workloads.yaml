@@ -195,11 +195,15 @@ spec:
             - name: AUTOBRR__PORT
               value: {{ $cfg.port | quote }}
             # Its baseUrl, not a stripped prefix: it builds the UI's asset URLs
-            # under it (server.go mounts the API under baseUrl + "/api" and the
-            # web root under baseUrl), so the route keeps the path and
-            # rewritePath stays false.
+            # under it, so the route keeps the path and rewritePath stays false.
+            # The trailing slash is required, not cosmetic: the server mounts
+            # its routers at the base URL's *string* plus the rest of the path
+            # -- `r.Mount(routeBaseURL, webRouter)` and
+            # `r.Mount(routeBaseURL+"api", apiRouter)` (internal/http/server.go:300-302
+            # at v1.90.0) -- so "/autobrr" puts the API at "/autobrrapi" and
+            # every /autobrr/api path answers 404, including the readiness probe.
             - name: AUTOBRR__BASE_URL
-              value: {{ $urlBase | quote }}
+              value: {{ printf "%s/" $urlBase | quote }}
             # Legacy mode rewrites the UI's URLs for a proxy that strips the
             # prefix. Nothing strips here, so the app writes them itself; the
             # setting is what picks between the two (added upstream in v1.55.0).
