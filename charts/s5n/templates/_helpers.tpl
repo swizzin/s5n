@@ -238,6 +238,14 @@ Maintainerr apply their base path to every route, health included: autobrr's is
 /api/healthz/readiness, because at v1.90.0 the whole API router is mounted under
 baseUrl + "/api" (internal/http/server.go:226,302) and the UI's router under the
 base URL alone.
+
+PeerBanHelper has no health path of its own: its index answers 200 for every
+unknown path, so `/` would only prove the listener is up, and a database that
+never loaded still serves the SPA. /api/downloaders is the route the wiring Job
+writes through, and it answers without a token only because the chart switches
+this app's own WebUI login off (catalog: exposure host; the chart sets
+PBH_WEB_REQUIRELOGIN=false). Everything that reaches this port is behind the
+edge's login: the NetworkPolicy admits the Gateway and the wiring Job alone.
 */ -}}
 {{- define "s5n.readinessPath" -}}
 {{- if eq .app "qui" -}}
@@ -246,5 +254,7 @@ base URL alone.
 {{ printf "/%s/api/healthz/readiness" .name }}
 {{- else if eq .app "maintainerr" -}}
 {{ printf "/%s/api/health/ready" .name }}
+{{- else if eq .app "pbh" -}}
+/api/downloaders
 {{- end -}}
 {{- end -}}

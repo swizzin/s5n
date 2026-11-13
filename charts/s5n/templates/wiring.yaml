@@ -86,6 +86,13 @@ previous run's logs stay readable until then.
       "username" (include "s5n.wiringAccount" $root | trim)
       "passwordFile" "/etc/s5n/keys/autobrr-password") }}
 {{- end }}
+{{- if and .Values.apps.pbh .Values.apps.pbh.enabled }}
+{{- /* PBH's downloader is the release's qBittorrent, and the token is the same
+       WebUI token the app was given through its environment. */}}
+{{- $_ := set $cfg "pbh" (dict
+      "url" (printf "http://pbh:%v" .Values.apps.pbh.port)
+      "tokenFile" "/etc/s5n/keys/pbh-token") }}
+{{- end }}
 ---
 apiVersion: v1
 kind: ConfigMap

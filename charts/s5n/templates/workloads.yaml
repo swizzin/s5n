@@ -69,7 +69,7 @@ spec:
       {{- end }}
       securityContext:
         {{- include "s5n.podSecurity" $root | nindent 8 }}
-      {{- if or (eq $inst.app "qbittorrent") (eq $inst.app "tautulli") (eq $inst.app "qui") (eq $inst.app "autobrr") }}
+      {{- if or (eq $inst.app "qbittorrent") (eq $inst.app "tautulli") (eq $inst.app "qui") (eq $inst.app "autobrr") (eq $inst.app "pbh") }}
       # qBittorrent and Tautulli generate their own WebUI/API credential on first
       # start, and qui and autobrr hand out an API key only to a signed-in
       # session: none of the four can be given credentials from the environment.
@@ -186,6 +186,53 @@ spec:
               readOnly: true
             - name: tmp
               mountPath: /tmp
+        {{- else if eq $inst.app "pbh" }}
+        # PeerBanHelper's config file, prepared before the app reads it. The
+        # token comes from the environment (PBH_APITOKEN), so the one thing this
+        # file has to say without a person is that this box did not ask for the
+        # app's anonymous usage statistics. Two steps, and the order is what
+        # makes a first start clean:
+        #
+        #   1. no file yet: write the one PBH itself writes on a first start, out
+        #      of the jar the image ships, so the app is configured exactly as it
+        #      would have configured itself and nothing here is a guess;
+        #   2. on every start: set privacy.analytics to false, the app's own
+        #      switch for Sentry, its event POSTs and the analytics script it
+        #      injects into its index page.
+        # Step 2 is not a one-off because PBH's config migrations rewrite blocks
+        # of this file as versions move, and one of them resets this key.
+        - name: config
+          image: {{ include "s5n.image" (dict "root" $root "app" $inst.app "path" (printf "apps.%s.image" $inst.app) "image" $cfg.image) }}
+          imagePullPolicy: IfNotPresent
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              set -eu
+              dir=/config/config
+              file="$dir/config.yml"
+              mkdir -p "$dir"
+              if [ ! -f "$file" ]; then
+                unzip -p /app/PeerBanHelper.jar config.yml > "$file"
+              fi
+              awk '
+                /^privacy:/ { block = 1; print; next }
+                block && /^[^ #]/ { block = 0 }
+                block && /^  analytics:/ { print "  analytics: false"; next }
+                { print }
+              ' "$file" > "$file.new"
+              mv "$file.new" "$file"
+              if ! grep -qx '  analytics: false' "$file"; then
+                echo "config.yml has no privacy.analytics key to switch off" >&2
+                exit 1
+              fi
+          securityContext:
+            {{- include "s5n.containerSecurity" $root | nindent 12 }}
+          volumeMounts:
+            - name: config
+              mountPath: /config
+              subPath: {{ $inst.name }}
+            - name: tmp
+              mountPath: /tmp
         {{- end }}
       {{- end }}
       containers:
@@ -299,6 +346,40 @@ spec:
             - name: AUTOBRR__CORS_ALLOWED_ORIGINS
               value: {{ printf "https://%s" . | quote }}
             {{- end }}
+            {{- else if eq $inst.app "pbh" }}
+            # PeerBanHelper keeps its whole state under `data` in its working
+            # directory (/app/data), and that root is a Java system property
+            # rather than a setting: this points it at the one mount the chart
+            # gives it. The image's entrypoint is a plain `java ...` command
+            # (Dockerfile's ENTRYPOINT at v9.5.4), so nothing in it forwards the
+            # variable -- the JVM reads JAVA_TOOL_OPTIONS itself, which is what
+            # makes this the way in.
+            - name: JAVA_TOOL_OPTIONS
+              value: -Dpbh.datadir=/config
+            # Its WebUI token, from the release Secret. PBH reads it as
+            # `pbh.apiToken`, the switch that wins over config.yml's
+            # server.token (Main.setupHttpServer, ExternalSwitch.parse), so the
+            # app is given its token without anything writing to its config file
+            # and a first start has no OOBE wizard to complete. The variable
+            # name is the switch's own (ExternalSwitch spells a setting as its
+            # name upper-cased, dots and dashes to underscores).
+            - name: PBH_APITOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "s5n.secretName" $root }}
+                  key: pbh-token
+            # One login, not two. PBH's WebUI cannot accept a token the edge
+            # supplies -- its bundle calls /api/... with a token it holds in the
+            # page's memory, and an HTTPRoute filter cannot read a Secret to add
+            # one -- so the app's own login is switched off and the edge's is the
+            # only one (the same arrangement as qui's, and Maintainerr has no
+            # login at all). This switch is the app's own:
+            # `pbh.web.requireLogin`, ExternalSwitch, read by Javalin's auth
+            # gate when a request carries no valid token. The token above is
+            # still set, because an empty one sends PBH into OOBE instead of
+            # serving the API at all.
+            - name: PBH_WEB_REQUIRELOGIN
+              value: "false"
             {{- else if eq $inst.app "maintainerr" }}
             - name: UI_HOSTNAME
               value: 0.0.0.0

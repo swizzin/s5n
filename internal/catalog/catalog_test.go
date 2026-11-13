@@ -426,13 +426,13 @@ func TestRealChartManifestLoads(t *testing.T) {
 	if tr[0].Key != "secrets.plexClaimToken" || !tr[0].Optional {
 		t.Fatalf("plex transient question = %+v, want secrets.plexClaimToken, optional", tr[0])
 	}
-	// The two apps whose UI cannot live under a prefix: the chart serves them
-	// at a host of their own, and box is what resolves and certifies those
-	// names.
-	if got := strings.Join(cat.Hosted(), ","); got != "plex,seerr" {
-		t.Fatalf("hosted apps = %s, want plex,seerr", got)
+	// The apps whose UI cannot live under a prefix (an absolute /api path, or
+	// assets built from the site root): the chart serves them at a host of their
+	// own, and box is what resolves and certifies those names.
+	if got := strings.Join(cat.Hosted(), ","); got != "plex,seerr,pbh" {
+		t.Fatalf("hosted apps = %s, want plex,seerr,pbh", got)
 	}
-	for _, name := range []string{"plex", "seerr"} {
+	for _, name := range []string{"plex", "seerr", "pbh"} {
 		app, _ := cat.App(name)
 		if app.Exposure != ExposureHost {
 			t.Fatalf("apps.%s exposure = %q, want host", name, app.Exposure)

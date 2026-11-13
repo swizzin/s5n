@@ -1,8 +1,8 @@
-# The catalog's opt-in apps, both enabled: their StatefulSets, Services and
+# The catalog's opt-in apps, all enabled: their StatefulSets, Services and
 # routes are rendered and validated like every other app's. They default off, so
 # this file is the only render that carries them — including Maintainerr's
-# no-timeout rule for the live event stream, which kubeconform would otherwise
-# never see.
+# no-timeout rule for the live event stream and PeerBanHelper's host route and
+# config init container, which kubeconform would otherwise never see.
 auth:
   edge: true
   # box writes this from the grant for an app that speaks OIDC; a plain helm
@@ -23,6 +23,8 @@ apps:
   autobrr:
     enabled: true
   maintainerr:
+    enabled: true
+  pbh:
     enabled: true
 
 # The box's own name. Plex and Seerr are served at plex.<domain> and

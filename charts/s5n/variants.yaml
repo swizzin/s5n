@@ -82,6 +82,16 @@ maintainerr:
     tag: "3.32.0"
     digest: sha256:5dcd5bef9d49c614bb74453df3da198afc05a38d8e2cd96b3669bc2c76a94112
 
+pbh:
+  default:
+    # Upstream digest pin, not ghcr.io/home-operations: no PeerBanHelper image
+    # there. Its Dockerfile ends USER 0 and keeps its state under /app/data, so
+    # the chart runs it as the seedbox uid and moves the data root to /config
+    # through -Dpbh.datadir; its tags carry the "v".
+    repository: docker.io/ghostchu/peerbanhelper
+    tag: "v9.5.4"
+    digest: sha256:01a8ccab4d007701ecaf9c433e934a323bddd8a1668d3484543be870de8762bf
+
 # The s5n image itself: the wiring Job and the qBittorrent / Tautulli credential
 # init containers. An empty tag means the chart's appVersion, which is the tag
 # this repo publishes the image under.

@@ -402,6 +402,9 @@
         },
         "maintainerr": {
           "$ref": "#/definitions/simpleApp"
+        },
+        "pbh": {
+          "$ref": "#/definitions/simpleApp"
         }
       }
     }

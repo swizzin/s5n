@@ -177,6 +177,23 @@ apps:
     calls: [qbittorrent, sonarr, radarr]
     questions: []
 
+  # Opt-in: an anti-leech firewall for the download client. It reads
+  # qBittorrent's own peer list and tells it to drop the peers its rules
+  # reject, so it starts acting the moment it is connected -- not something a
+  # box should have because it installed the defaults.
+  pbh:
+    description: drops the peers that cheat, leech or misbehave
+    instances: false
+    default: false
+    # Its whole job: read the downloader's peers and drop what its rules ban.
+    # Its GeoIP database and rule subscriptions come from the public internet,
+    # which needs no entry here.
+    calls: [qbittorrent]
+    # Its WebUI fetches /api/... from the site root and builds asset URLs
+    # relative to it, so it needs a host name of its own: pbh.<domain>.
+    exposure: host
+    questions: []
+
   # Opt-in, and louder so: it deletes media and torrents on rules the operator
   # writes. Nothing here configures it; it is set up in its own UI.
   maintainerr:
