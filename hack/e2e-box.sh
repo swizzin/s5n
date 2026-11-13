@@ -173,7 +173,15 @@ cleanup() {
   if [ -n "$REGISTRY" ]; then
     docker rm -f "$REGISTRY" >/dev/null 2>&1 || true
   fi
-  rm -rf "$WORK"
+  # --keep is for reading what a run did: each init's transcript, the bootstrap
+  # transcripts, the box binary that wrote them. The cluster it leaves behind is
+  # worth nothing without those, so the work directory stays with it and its
+  # path is printed. A run without --keep still cleans up after itself.
+  if [ "$KEEP" = --keep ]; then
+    printf '\n==> kept work dir: %s\n' "$WORK"
+  else
+    rm -rf "$WORK"
+  fi
 }
 trap cleanup EXIT
 
