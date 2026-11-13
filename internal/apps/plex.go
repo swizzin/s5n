@@ -2,8 +2,6 @@ package apps
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/xml"
 	"fmt"
 	"io"
@@ -142,6 +140,5 @@ func (p *Plex) VerifyToken(ctx context.Context, token string) error {
 // pushed. The fingerprint makes that comparison possible while the Secret stays
 // the only place the token exists.
 func PlexTokenFingerprint(token string) string {
-	sum := sha256.Sum256([]byte(token))
-	return hex.EncodeToString(sum[:])
+	return SecretFingerprint(token)
 }

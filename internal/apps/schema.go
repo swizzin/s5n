@@ -39,6 +39,17 @@ func (c Change) String() string {
 // can drive the payload.
 type Item map[string]any
 
+// The field names qui's instances and autobrr's download clients share with the
+// Arrs. They are the apps' own API spellings: a wrong one is a silent no-op
+// (the field is absent from the update), so each is written once here rather
+// than at every call site.
+const (
+	fieldHost     = "host"
+	fieldPort     = "port"
+	fieldUsername = "username"
+	fieldPassword = "password"
+)
+
 // Clone deep-copies an Item. Used to turn a schema template into a request body
 // without mutating the cached template.
 func (i Item) Clone() Item {
@@ -92,6 +103,29 @@ func (i Item) FieldValue(name string) (any, bool) {
 		}
 	}
 	return nil, false
+}
+
+// ownedValue reads one owned field from a live object, whichever shape the API
+// returns: an Arr or Prowlarr object carries its settings in a "fields" list,
+// while qui's instances and autobrr's download clients are plain objects.
+func (i Item) ownedValue(name string) (any, bool) {
+	if _, ok := i["fields"].([]any); ok {
+		return i.FieldValue(name)
+	}
+	v, ok := i[name]
+	return v, ok
+}
+
+// setOwned writes one owned field onto an object, in the shape that object uses
+// (see ownedValue). An Arr field the schema no longer has is simply not
+// written, which is how version drift is tolerated; a plain object always takes
+// the key, because its API decodes the struct it is sent.
+func (i Item) setOwned(name string, value any) {
+	if _, ok := i["fields"].([]any); ok {
+		i.SetField(name, value)
+		return
+	}
+	i[name] = value
 }
 
 // SetField sets a named field's value. It returns false when the schema has no
@@ -266,16 +300,19 @@ func locateOwned(list []Item, ownedID int, name string) (cur Item, found, recrea
 // anything a future schema adds — is left exactly as the user last set it.
 // It reports drift for every non-secret owned field whose live value did not
 // already match.
+//
+// The fields go on in the shape the live object uses (ownedValue): an Arr's
+// "fields" list, or a plain key for qui's instances and autobrr's clients.
 func overlayOwned(live Item, fields []ownedField) (Item, []FieldChange) {
 	desired := live.Clone()
 	var drift []FieldChange
 	for _, f := range fields {
 		if !f.secret {
-			if cv, ok := live.FieldValue(f.name); ok && !SameValue(cv, f.value) {
+			if cv, ok := live.ownedValue(f.name); ok && !SameValue(cv, f.value) {
 				drift = append(drift, FieldChange{Field: f.name, Old: formatValue(cv), New: formatValue(f.value)})
 			}
 		}
-		desired.SetField(f.name, f.value)
+		desired.setOwned(f.name, f.value)
 	}
 	return desired, drift
 }
