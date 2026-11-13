@@ -124,7 +124,7 @@ spec:
 {{- range $inst := include "s5n.instances" . | fromJsonArray }}
 {{- $ctx := dict "root" $root "inst" $inst }}
 {{- /* An app that signs in through the login's OIDC provider (catalog.yaml's
-`oidc: true`) dials the issuer itself, over the box's own name. That name is a
+`oidc: true`, read through s5n.oidc) dials the issuer itself, over the box's name. That name is a
 hostAliases entry pointing at the Gateway's proxy Service, so the connection
 leaves this pod for a proxy pod in another namespace -- which the release's own
 egress policy denies, along with every RFC1918 range. One rule admits it.
@@ -133,7 +133,7 @@ The port is 10443, not 443: NetworkPolicy matches the post-DNAT container port,
 and Envoy Gateway shifts a privileged Service port into an ephemeral one inside
 the pod (its Service is 443 -> 10443). A rule naming 443 silently drops --
 measured, and the reason this comment exists. */}}
-{{- $oidc := and (eq $inst.app "qui") (ne (toString $root.Values.gateway.host) "") }}
+{{- $oidc := and (eq (include "s5n.oidc" (dict "root" $root "app" $inst.app) | trim) "true") (ne (toString $root.Values.gateway.host) "") }}
 {{- if $oidc }}
 ---
 apiVersion: networking.k8s.io/v1

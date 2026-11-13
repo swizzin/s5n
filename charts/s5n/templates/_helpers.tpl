@@ -162,6 +162,20 @@ the file it ships.
 {{- end -}}
 
 {{- /*
+s5n.oidc: whether the catalog marks one app as a client of the login's own OIDC
+provider. It is the chart's half of the same flag box reads (`oidc: true` in
+catalog.yaml), and the flag is the whole decision: an app that speaks OIDC is one
+entry there plus its own environment, never a name written into a template.
+"true" or "" -- a template compares it to "true" rather than trusting truthiness,
+because include hands back a string.
+*/ -}}
+{{- define "s5n.oidc" -}}
+{{- $catalog := .root.Files.Get "catalog.yaml" | fromYaml -}}
+{{- $entry := get $catalog.apps .app | default dict -}}
+{{- if $entry.oidc -}}true{{- end -}}
+{{- end -}}
+
+{{- /*
 s5n.appHost: the name one app is served on when it has a host of its own,
 <app>.<domain>. A domain is required: a route on a name that is not there would
 serve nothing, so a plain install that leaves gateway.host empty is refused
