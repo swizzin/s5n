@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"testing"
@@ -257,7 +258,18 @@ func TestRestoreAManifestFromBeforeImages(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	man, err := readManifest(dest)
+	// The manifest is read the way Restore reads it: through a tree on the
+	// config root, which is the only way this package reaches a file under one.
+	root, err := openTree(filepath.Dir(dir))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+	name, err := root.rel(dest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	man, err := readManifest(root, name, dest)
 	if err != nil {
 		t.Fatalf("read: %v", err)
 	}
@@ -389,7 +401,8 @@ func TestTakeRefuses(t *testing.T) {
 		{
 			name: "config directory missing",
 			prepare: func(t *testing.T) (string, []string, string) {
-				return filepath.Join(t.TempDir(), "gone"), globs(), filepath.Join(t.TempDir(), "app")
+				root := t.TempDir()
+				return filepath.Join(root, "gone"), globs(), filepath.Join(root, ".box", "app")
 			},
 			wants: []string{"config directory", "no such file"},
 		},
@@ -822,9 +835,11 @@ func TestMatchesStayInsideTheirDirectory(t *testing.T) {
 		{glob: "db/*/*.db", paths: []string{"db/nested/app.db"}},
 		{glob: "*.nomatch", paths: nil},
 	}
-	for _, tc := range cases {
+	for i, tc := range cases {
 		t.Run(tc.glob, func(t *testing.T) {
-			dest := filepath.Join(t.TempDir(), "app")
+			// Each case's copy goes beside the config directory, inside the
+			// same config root, which is the only place Take writes one.
+			dest := filepath.Join(filepath.Dir(dir), ".box", strconv.Itoa(i), "app")
 			man, err := Take(dir, []string{tc.glob}, dest, images())
 			if tc.paths == nil {
 				if err == nil || !strings.Contains(err.Error(), "nothing matches") {

@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
-	"os"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -76,7 +75,21 @@ func HoldsPath(configRoot string) string {
 // rollback avoided.
 func LoadHolds(configRoot string) ([]Hold, error) {
 	path := HoldsPath(configRoot)
-	data, err := os.ReadFile(path)
+	t, err := openTree(configRoot)
+	if err != nil {
+		// A config root that is not there holds nothing, exactly as a box with
+		// no hold file does.
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("holds %s: %w", path, err)
+	}
+	defer t.Close()
+	name, err := t.rel(path)
+	if err != nil {
+		return nil, fmt.Errorf("holds %s: %w", path, err)
+	}
+	data, err := t.readFile(name)
 	if errors.Is(err, fs.ErrNotExist) {
 		return nil, nil
 	}
@@ -114,17 +127,37 @@ func SaveHolds(configRoot string, holds []Hold) error {
 	if err != nil {
 		return fmt.Errorf("holds %s: %w", path, err)
 	}
+	t, err := openTree(configRoot)
+	if err != nil {
+		return fmt.Errorf("holds %s: %w", path, err)
+	}
+	defer t.Close()
+	name, err := t.rel(path)
+	if err != nil {
+		return fmt.Errorf("holds %s: %w", path, err)
+	}
 	if len(checked) == 0 {
-		if err := os.Remove(path); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		if err := t.remove(name); err != nil && !errors.Is(err, fs.ErrNotExist) {
 			return fmt.Errorf("holds %s: %w", path, err)
 		}
 		return nil
 	}
-	own, err := treeOwnerOf(configRoot)
+	// A link where the hold file goes is a refusal: box writes this file itself,
+	// and the seedbox's user can only have put a link there to point box
+	// somewhere. The rename below would replace the link rather than follow it,
+	// which is safe and still not what the operator asked for.
+	info, err := t.lstat(name)
+	switch {
+	case err == nil && info.Mode()&fs.ModeSymlink != 0:
+		return fmt.Errorf("holds %s: it is a symlink, and box writes the hold file itself; remove it and box will write a new one", path)
+	case err != nil && !errors.Is(err, fs.ErrNotExist):
+		return fmt.Errorf("holds %s: %w", path, err)
+	}
+	own, err := treeOwnerOf(t)
 	if err != nil {
 		return err
 	}
-	if err := makeDir(filepath.Dir(path), own); err != nil {
+	if err := makeDirIn(t, filepath.Dir(name), own); err != nil {
 		return fmt.Errorf("holds %s: %w", path, err)
 	}
 	for i := range checked {
@@ -134,10 +167,10 @@ func SaveHolds(configRoot string, holds []Hold) error {
 	if err != nil {
 		return fmt.Errorf("holds %s: %w", path, err)
 	}
-	if err := atomicfile.Write(path, append(data, '\n'), treeFileMode); err != nil {
+	if err := atomicfile.WriteIn(t.root, name, append(data, '\n'), treeFileMode); err != nil {
 		return fmt.Errorf("holds %s: %w", path, err)
 	}
-	if err := own.own(path); err != nil {
+	if err := own.ownIn(t, name); err != nil {
 		return fmt.Errorf("holds %s: %w", path, err)
 	}
 	return nil

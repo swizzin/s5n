@@ -4,7 +4,6 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
-	"os"
 	"path"
 	"path/filepath"
 	"sort"
@@ -65,6 +64,27 @@ func checkName(name string) error {
 	return nil
 }
 
+// snapshotsTree opens the config root that holds one of box's snapshots roots,
+// and names that root inside it.
+//
+// The tree is opened on the config root rather than on the snapshots root itself,
+// because os.OpenRoot follows the path it is handed: a link planted at
+// .box/snapshots would become the tree's own root, and everything below it would
+// be read and written wherever the link points. Spelled as a name inside the
+// config root, that link is a link out of the tree, which the root refuses.
+func snapshotsTree(snapshots string) (*tree, string, error) {
+	t, err := openTree(filepath.Dir(filepath.Dir(snapshots)))
+	if err != nil {
+		return nil, "", err
+	}
+	name, err := t.rel(snapshots)
+	if err != nil {
+		t.Close()
+		return nil, "", err
+	}
+	return t, name, nil
+}
+
 // Prune keeps the newest keep snapshots of one app and deletes the rest, by the
 // time in the step directory's name (not the manifest's: the directory name is
 // what box chose, and a manifest can be missing while its directory is real).
@@ -80,7 +100,15 @@ func Prune(root, app string, keep int) error {
 	if err := checkName(app); err != nil {
 		return fmt.Errorf("prune: app %q: %w", app, err)
 	}
-	steps, err := os.ReadDir(root)
+	t, snapshots, err := snapshotsTree(root)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil
+		}
+		return fmt.Errorf("prune %s: %w", root, err)
+	}
+	defer t.Close()
+	steps, err := t.readDir(snapshots)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
 			return nil
@@ -100,8 +128,15 @@ func Prune(root, app string, keep int) error {
 		if !ok {
 			continue
 		}
-		if _, err := os.Lstat(filepath.Join(root, e.Name(), app)); err != nil {
-			continue
+		// A step the app has no copy in is not this app's to prune. A step box
+		// could not read at all is an error rather than a skip: "the disk did
+		// not answer" and "there is no copy here" lead to opposite decisions
+		// about what may be deleted.
+		if _, err := t.lstat(path.Join(snapshots, e.Name(), app)); err != nil {
+			if errors.Is(err, fs.ErrNotExist) {
+				continue
+			}
+			return fmt.Errorf("prune %s: %w", t.path(path.Join(snapshots, e.Name())), err)
 		}
 		have = append(have, step{dir: e.Name(), at: at})
 	}
@@ -112,17 +147,17 @@ func Prune(root, app string, keep int) error {
 		return have[i].dir > have[j].dir
 	})
 	for _, s := range have[min(keep, len(have)):] {
-		stepDir := filepath.Join(root, s.dir)
-		if err := os.RemoveAll(filepath.Join(stepDir, app)); err != nil {
-			return fmt.Errorf("prune %s: %w", stepDir, err)
+		stepDir := path.Join(snapshots, s.dir)
+		if err := t.removeAll(path.Join(stepDir, app)); err != nil {
+			return fmt.Errorf("prune %s: %w", t.path(stepDir), err)
 		}
-		rest, err := os.ReadDir(stepDir)
+		rest, err := t.readDir(stepDir)
 		if err != nil {
-			return fmt.Errorf("prune %s: %w", stepDir, err)
+			return fmt.Errorf("prune %s: %w", t.path(stepDir), err)
 		}
 		if len(rest) == 0 {
-			if err := os.Remove(stepDir); err != nil {
-				return fmt.Errorf("prune %s: %w", stepDir, err)
+			if err := t.remove(stepDir); err != nil {
+				return fmt.Errorf("prune %s: %w", t.path(stepDir), err)
 			}
 		}
 	}
@@ -163,7 +198,15 @@ func Newest(root, instance string) (string, Manifest, error) {
 	if err := checkName(instance); err != nil {
 		return "", Manifest{}, fmt.Errorf("snapshot: instance %q: %w", instance, err)
 	}
-	steps, err := os.ReadDir(root)
+	t, snapshots, err := snapshotsTree(root)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return "", Manifest{}, ErrNoSnapshot
+		}
+		return "", Manifest{}, fmt.Errorf("snapshot %s: %w", root, err)
+	}
+	defer t.Close()
+	steps, err := t.readDir(snapshots)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
 			return "", Manifest{}, ErrNoSnapshot
@@ -171,8 +214,11 @@ func Newest(root, instance string) (string, Manifest, error) {
 		return "", Manifest{}, fmt.Errorf("snapshot %s: %w", root, err)
 	}
 	type found struct {
-		dir string
-		at  time.Time
+		// dir names the copy inside the tree; path is where that is on the
+		// host, which is what the caller and the messages use.
+		dir  string
+		path string
+		at   time.Time
 	}
 	var have []found
 	for _, e := range steps {
@@ -183,18 +229,18 @@ func Newest(root, instance string) (string, Manifest, error) {
 		if !ok {
 			continue
 		}
-		dir := filepath.Join(root, e.Name(), instance)
-		info, err := os.Lstat(dir)
+		dir := path.Join(snapshots, e.Name(), instance)
+		info, err := t.lstat(dir)
 		if errors.Is(err, fs.ErrNotExist) {
 			continue
 		}
 		if err != nil {
-			return "", Manifest{}, fmt.Errorf("snapshot %s: %w", dir, err)
+			return "", Manifest{}, fmt.Errorf("snapshot %s: %w", t.path(dir), err)
 		}
 		if !info.IsDir() {
 			continue
 		}
-		have = append(have, found{dir: dir, at: at})
+		have = append(have, found{dir: dir, path: t.path(dir), at: at})
 	}
 	if len(have) == 0 {
 		return "", Manifest{}, ErrNoSnapshot
@@ -203,16 +249,16 @@ func Newest(root, instance string) (string, Manifest, error) {
 		if !have[i].at.Equal(have[j].at) {
 			return have[i].at.After(have[j].at)
 		}
-		return have[i].dir > have[j].dir
+		return have[i].path > have[j].path
 	})
 	// The newest tree that exists is the answer, and a manifest it cannot read
 	// is an error rather than a reason to fall back to an older one: the older
 	// copy holds state the app has already written past.
-	man, err := loadManifest(have[0].dir)
+	man, err := loadManifest(t, have[0].dir)
 	if err != nil {
-		return "", Manifest{}, fmt.Errorf("snapshot %s: %w", have[0].dir, err)
+		return "", Manifest{}, fmt.Errorf("snapshot %s: %w", have[0].path, err)
 	}
-	return have[0].dir, man, nil
+	return have[0].path, man, nil
 }
 
 // StepName is the step a snapshot directory belongs to, as the directory name

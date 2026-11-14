@@ -6,6 +6,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 // dirMode is how box creates the snapshot tree and any config directory a
@@ -37,68 +38,64 @@ type treeOwner struct {
 // config root is theirs -- and otherwise it is whoever box runs as, which is
 // also who creates the files. Nothing here guesses at a user of its own: root
 // has no way to know a seedbox's ids except from what the seedbox already owns.
-func treeOwnerOf(configRoot string) (treeOwner, error) {
+func treeOwnerOf(t *tree) (treeOwner, error) {
 	if os.Geteuid() != 0 {
 		return treeOwner{uid: os.Geteuid(), gid: os.Getegid()}, nil
 	}
-	info, err := os.Stat(configRoot)
+	info, err := t.stat(".")
 	if err != nil {
 		return treeOwner{}, fmt.Errorf("snapshot: %w", err)
 	}
 	uid, gid := owner(info)
 	if uid < 0 || gid < 0 {
-		return treeOwner{}, fmt.Errorf("snapshot %s: cannot read its owner, and the seedbox's own box has to read what box writes below it", configRoot)
+		return treeOwner{}, fmt.Errorf("snapshot %s: cannot read its owner, and the seedbox's own box has to read what box writes below it", t.path("."))
 	}
 	return treeOwner{uid: uid, gid: gid}, nil
 }
 
-// own hands a path box created to the tree's owner. A run that is not root
+// ownIn hands a name box created to the tree's owner. A run that is not root
 // already created it as that user, so there is nothing to change; root created
 // it as root and must hand it over, or the app's user cannot read the copy the
 // restore depends on.
-func (o treeOwner) own(path string) error {
+func (o treeOwner) ownIn(t *tree, name string) error {
 	if os.Geteuid() != 0 {
 		return nil
 	}
-	if err := os.Chown(path, o.uid, o.gid); err != nil {
-		return err
-	}
-	return nil
+	return t.chown(name, o.uid, o.gid)
 }
 
-// makeDir creates dir and every missing parent of it with dirMode, and gives
-// each directory it created to the tree's owner. A directory that is already
-// there is left exactly as it is: the config root and anything beside box's own
-// tree belong to the operator, not to a run that happened to walk past.
+// makeDirIn creates dir inside the tree and every missing parent of it with
+// dirMode, giving each directory it created to the tree's owner. A directory
+// that is already there is left exactly as it is: the config root and anything
+// beside box's own tree belong to the operator, not to a run that happened to
+// walk past.
 //
 // The mode is set explicitly rather than left to the umask, because 0750 is the
 // promise: the seedbox's user reads the tree, and nobody else does.
-func makeDir(dir string, o treeOwner) error {
-	var missing []string
-	for at := dir; ; at = filepath.Dir(at) {
-		if _, err := os.Lstat(at); err == nil {
-			break
-		} else if !errors.Is(err, fs.ErrNotExist) {
-			return err
-		}
-		missing = append(missing, at)
-		if parent := filepath.Dir(at); parent == at {
-			break
-		}
+func makeDirIn(t *tree, dir string, o treeOwner) error {
+	if dir == "." {
+		return nil
 	}
-	for i := len(missing) - 1; i >= 0; i-- {
-		if err := os.Mkdir(missing[i], dirMode); err != nil {
-			// Created between the check and here by someone else: theirs to
-			// own, and not this run's to change.
-			if errors.Is(err, fs.ErrExist) {
-				continue
-			}
+	at := ""
+	for _, seg := range strings.Split(filepath.ToSlash(dir), "/") {
+		if at == "" {
+			at = seg
+		} else {
+			at += "/" + seg
+		}
+		err := t.mkdir(at, dirMode)
+		// Created between the check and here by someone else: theirs to own,
+		// and not this run's to change.
+		if errors.Is(err, fs.ErrExist) {
+			continue
+		}
+		if err != nil {
 			return err
 		}
-		if err := os.Chmod(missing[i], dirMode); err != nil {
+		if err := t.chmod(at, dirMode); err != nil {
 			return err
 		}
-		if err := o.own(missing[i]); err != nil {
+		if err := o.ownIn(t, at); err != nil {
 			return err
 		}
 	}
