@@ -17,12 +17,17 @@ import (
 // Prune reads it back to decide which snapshot is the oldest.
 const stepTimeLayout = "20060102T150405Z"
 
+// boxDir is box's own directory under a config root: the one place an app's
+// config directories are not, so what box writes there is never rendered into a
+// pod and never mounted.
+const boxDir = ".box"
+
 // Root is where a seedbox's snapshots live: <configRoot>/.box/snapshots, beside
 // the app config directories rather than inside one, so no app can see another
 // app's state and an app pointed at its own directory cannot copy the
 // snapshots into itself.
 func Root(configRoot string) string {
-	return filepath.Join(configRoot, ".box", "snapshots")
+	return filepath.Join(configRoot, boxDir, "snapshots")
 }
 
 // Dir names one app's snapshot for one update step:
