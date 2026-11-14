@@ -113,7 +113,7 @@ func runUpdate(ctx context.Context, args []string) {
 		// The step's apply is the update the operator said yes to. The update
 		// asked once, before any step wrote; a second question partway through
 		// a multi-step path would be asking after the box had already moved.
-		Confirm: confirmer(out, true),
+		Confirm: answered{},
 		Say:     out,
 		Open: func(namespace string) (release.ReleaseClient, error) {
 			return updateHelm(kc, namespace)

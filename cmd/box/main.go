@@ -79,6 +79,8 @@ func main() {
 		runApply(ctx, os.Args[2:])
 	case "update":
 		runUpdate(ctx, os.Args[2:])
+	case "rollback":
+		runRollback(ctx, os.Args[2:])
 	case "version":
 		fmt.Println(version)
 	default:
@@ -105,7 +107,8 @@ commands:
   bootstrap   decide which cluster to use, install the platform layer, then run init for root
   init        ask a seedbox's questions, edit its two files, then apply
   apply       install or upgrade root's seedbox from its grant and values
-  update      move the box to a newer chart release, with a snapshot and a rollback
+  update      move the box to a newer chart release, and roll back an app that crashloops
+  rollback    put one app back on the image it ran before an update moved it
   version     print the version box was built from
 `)
 	os.Exit(2)
@@ -182,6 +185,16 @@ func confirmer(out say.Reporter, yes bool) asker {
 	}
 	return p
 }
+
+// answered is the confirm a flow hands an apply it has already asked about: the
+// operator said yes to this run before anything moved, so a second form partway
+// through would be asking after the first step had already written. confirmer
+// cannot be it -- on a terminal it hands back the one live reporter, whose
+// answer is a field the flow's own question sets, so an inner apply would draw
+// the form again.
+type answered struct{}
+
+func (answered) Ask(string) (bool, error) { return true, nil }
 
 // chartFlags are the two flags that name a published release. Every command
 // that loads a chart takes them from here, so bootstrap, init and apply cannot

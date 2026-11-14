@@ -205,6 +205,7 @@ func TestDevFlagsAreNotInAnyHelp(t *testing.T) {
 	}{
 		{"bootstrap and init", func(fs *flag.FlagSet) { addInitFlags(fs) }},
 		{"apply", func(fs *flag.FlagSet) { addApplyFlags(fs) }},
+		{"rollback", func(fs *flag.FlagSet) { addRollbackFlags(fs) }},
 	}
 	for _, cmd := range commands {
 		t.Run(cmd.name, func(t *testing.T) {
