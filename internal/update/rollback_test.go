@@ -153,6 +153,7 @@ func (h *rollbackHarness) newest() *fakeNewest {
 				Taken:   h.now.Add(-72 * time.Hour),
 				Image:   snapshot.ImageRef{Repository: rollbackRepo, Tag: "5.0.0", Digest: digestA},
 				MovedTo: snapshot.ImageRef{Repository: rollbackRepo, Tag: "5.1.0", Digest: digestB},
+				Globs:   []string{"sonarr.db", "sonarr.db-wal"},
 				Files:   []snapshot.File{{Path: "sonarr.db", Size: 4, SHA256: "00"}},
 			},
 		}}},
@@ -488,7 +489,7 @@ func TestRollbackNewestSnapshotsReadsAndRestoresEveryInstance(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if _, err := snapshot.Take(cfg, []string{"sonarr.db"}, dest, images); err != nil {
+		if _, err := snapshot.Take(cfg, []string{"sonarr.db", "sonarr.db-wal"}, dest, images); err != nil {
 			t.Fatal(err)
 		}
 		// What the app wrote on the failed image: a database the restore has
@@ -588,5 +589,49 @@ func TestStepVersions(t *testing.T) {
 		if ok != tc.ok || from != tc.from || to != tc.to {
 			t.Errorf("stepVersions(%q) = %q, %q, %v; want %q, %q, %v", tc.step, from, to, ok, tc.from, tc.to, tc.ok)
 		}
+	}
+}
+
+// TestRollbackRestoresWithTheGlobsTheCopyWasTakenWith: a restore removes every
+// match the copy lacks, so it uses the globs the copy recorded. A catalog that
+// names more files since (here, the settings file) must not make a rollback
+// delete a file the snapshot never held.
+func TestRollbackRestoresWithTheGlobsTheCopyWasTakenWith(t *testing.T) {
+	root := t.TempDir()
+	values := map[string]any{"apps": map[string]any{"sonarr": map[string]any{}}}
+	images := snapshot.Images{
+		Ran:     snapshot.ImageRef{Repository: rollbackRepo, Tag: "5.0.0", Digest: digestA},
+		MovedTo: snapshot.ImageRef{Repository: rollbackRepo, Tag: "5.1.0", Digest: digestB},
+	}
+	cfg := filepath.Join(root, "sonarr")
+	if err := os.MkdirAll(cfg, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cfg, "sonarr.db"), []byte("before"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cfg, "config.xml"), []byte("settings"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	dest, err := snapshot.Dir(root, "0.4.0", "0.5.0", time.Date(2025, 12, 30, 3, 4, 5, 0, time.UTC), "sonarr")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := snapshot.Take(cfg, []string{"*.db"}, dest, images); err != nil {
+		t.Fatal(err)
+	}
+
+	store := &NewestSnapshots{ConfigRoot: root, Values: values}
+	found, err := store.Newest(context.Background(), "sonarr")
+	if err != nil {
+		t.Fatalf("Newest: %v", err)
+	}
+	// The catalog the box installs now also names config.xml.
+	if err := store.Restore(context.Background(), found, []string{"*.db", "*.xml"}); err != nil {
+		t.Fatalf("Restore: %v", err)
+	}
+	got, err := os.ReadFile(filepath.Join(cfg, "config.xml"))
+	if err != nil || string(got) != "settings" {
+		t.Fatalf("config.xml = %q, %v: a rollback removed a file the copy never held", got, err)
 	}
 }

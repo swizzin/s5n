@@ -85,6 +85,12 @@ type Manifest struct {
 	// zero, and a caller decides what that means.
 	Image   ImageRef `json:"image"`
 	MovedTo ImageRef `json:"movedTo"`
+	// Globs are the globs the copy was taken with. A restore of this copy
+	// uses exactly these: it removes every match the copy lacks, and a
+	// catalog that names more files since would have it delete files the
+	// snapshot never held. Empty in a snapshot taken before box recorded
+	// them, and a caller decides what that means.
+	Globs []string `json:"globs,omitempty"`
 	// Files are in path order, so two manifests of the same state compare
 	// equal and a diff of one is readable.
 	Files []File `json:"files"`
@@ -195,6 +201,7 @@ func writeTree(t *tree, app, partial string, globs []string, images Images, own 
 		Taken:   time.Now().UTC(),
 		Image:   images.Ran,
 		MovedTo: images.MovedTo,
+		Globs:   append([]string(nil), globs...),
 		Files:   make([]File, 0, len(entries)),
 	}
 	for _, e := range entries {

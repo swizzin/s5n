@@ -401,11 +401,10 @@ func (r *Rollback) plan(ctx context.Context, opts RollbackOptions) (RollbackResu
 		return res, fmt.Errorf("%s is pinned in your values (%s); remove the pin, or pass --pin to replace it",
 			opts.App, pinLabel(values, opts.App))
 	}
-	globs, err := ChartGlobs(chart)
-	if err != nil {
-		return res, err
-	}
-	res.snaps, res.snap, res.globs = snaps, found, globs[opts.App]
+	// The copy is restored with the globs it was taken with, not with what the
+	// installed release's catalog names now: a restore removes every match the
+	// copy lacks, so a glob added since would delete files it never held.
+	res.snaps, res.snap, res.globs = snaps, found, latest.Manifest.Globs
 	return res, nil
 }
 
@@ -442,6 +441,9 @@ func newestOf(app string, found AppSnapshot) (InstanceSnapshot, error) {
 	}
 	if first.Manifest.Image.IsZero() {
 		return InstanceSnapshot{}, fmt.Errorf("%s's newest snapshot does not record which image wrote it, so box cannot say what to roll back to", app)
+	}
+	if len(first.Manifest.Globs) == 0 {
+		return InstanceSnapshot{}, fmt.Errorf("%s's newest snapshot does not record what it copied, so box cannot restore it without risking files it never held", app)
 	}
 	return first, nil
 }

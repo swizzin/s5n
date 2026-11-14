@@ -229,7 +229,13 @@ func (s *NewestSnapshots) Restore(ctx context.Context, snap AppSnapshot, globs [
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		if err := snapshot.Restore(filepath.Join(s.ConfigRoot, inst.Name), globs, inst.Dir); err != nil {
+		// Each instance is restored with the globs its own copy was taken
+		// with, which is what decides the files a restore may remove.
+		instGlobs := inst.Manifest.Globs
+		if len(instGlobs) == 0 {
+			instGlobs = globs
+		}
+		if err := snapshot.Restore(filepath.Join(s.ConfigRoot, inst.Name), instGlobs, inst.Dir); err != nil {
 			return fmt.Errorf("%s: %w", inst.Name, err)
 		}
 	}
