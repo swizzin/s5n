@@ -265,20 +265,20 @@ func newHarness(t *testing.T) *harness {
 	h.app = &fakeApply{errFor: map[string]error{}, applied: map[string]bool{}, managed: h.rel}
 	h.confirm = &fakeConfirm{answer: true}
 	h.u = &Updater{
-		Charts:      h.charts,
-		Open:        func(string) (Release, error) { return h.rel, nil },
-		Cluster:     h.cluster,
-		Snapshots:   h.snaps,
-		Apply:       h.app.apply,
-		Confirm:     h.confirm,
-		State:       h.state,
-		BoxVersion:  "0.4.0",
-		Say:         &say.Plain{W: h.out},
-		HealthWait:  50 * time.Millisecond,
-		SettleWait:  50 * time.Millisecond,
-		CleanupWait: 50 * time.Millisecond,
-		Poll:        time.Millisecond,
-		Now:         func() time.Time { return h.now },
+		Charts:        h.charts,
+		Open:          func(string) (Release, error) { return h.rel, nil },
+		OpenCluster:   func(string) (Cluster, error) { return h.cluster, nil },
+		OpenSnapshots: func(string) (Snapshotter, error) { return h.snaps, nil },
+		Apply:         h.app.apply,
+		Confirm:       h.confirm,
+		State:         h.state,
+		BoxVersion:    "0.4.0",
+		Say:           &say.Plain{W: h.out},
+		HealthWait:    50 * time.Millisecond,
+		SettleWait:    50 * time.Millisecond,
+		CleanupWait:   50 * time.Millisecond,
+		Poll:          time.Millisecond,
+		Now:           func() time.Time { return h.now },
 	}
 	return h
 }
@@ -618,6 +618,24 @@ func TestNoDeployedReleasePointsAtInit(t *testing.T) {
 	_, err := h.run(t, false)
 	if err == nil || !strings.Contains(err.Error(), "box init") {
 		t.Fatalf("error = %v, want a refusal pointing at box init", err)
+	}
+}
+
+// TestABoxWithoutSnapshotSupportRefusesBeforeItStopsAnything: an image bump
+// over a migrated database cannot be undone without the copy, so box says so
+// before it asks, stops an app or writes anything.
+func TestABoxWithoutSnapshotSupportRefusesBeforeItStopsAnything(t *testing.T) {
+	h := newHarness(t)
+	h.charts.publish("0.4.0", "0.4.0", "0.4.0", digestA)
+	h.charts.publish("0.5.0", "0.4.0", "0.4.0", digestB)
+	h.u.OpenSnapshots = nil
+
+	_, err := h.run(t, false)
+	if err == nil || !strings.Contains(err.Error(), "snapshot support") {
+		t.Fatalf("error = %v, want a refusal naming the missing snapshotter", err)
+	}
+	if h.confirm.asks != 0 || len(h.cluster.scales) != 0 || len(h.app.calls) != 0 {
+		t.Fatalf("refused after asking=%d or writing: scales=%v applies=%d", h.confirm.asks, h.cluster.scales, len(h.app.calls))
 	}
 }
 

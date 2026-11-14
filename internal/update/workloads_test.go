@@ -17,8 +17,8 @@ import (
 
 // statefulSet is one app workload with the labels the chart writes: the
 // release and instance on the object, the app key on the pod template.
-func statefulSet(name, app string, replicas int32, generation, observed int64, ready, updated int32) *appsv1.StatefulSet {
-	one := replicas
+func statefulSet(name, app string, generation, observed int64, ready, updated int32) *appsv1.StatefulSet {
+	one := int32(1)
 	return &appsv1.StatefulSet{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:       name,
@@ -53,9 +53,9 @@ func statefulSet(name, app string, replicas int32, generation, observed int64, r
 // every other app alone.
 func TestScaleCoversEveryInstanceOfOneApp(t *testing.T) {
 	cs := k8sfake.NewClientset(
-		statefulSet("sonarr", "sonarr", 1, 1, 1, 1, 1),
-		statefulSet("sonarr-4k", "sonarr", 1, 1, 1, 1, 1),
-		statefulSet("radarr", "radarr", 1, 1, 1, 1, 1),
+		statefulSet("sonarr", "sonarr", 1, 1, 1, 1),
+		statefulSet("sonarr-4k", "sonarr", 1, 1, 1, 1),
+		statefulSet("radarr", "radarr", 1, 1, 1, 1),
 	)
 	var scaled []string
 	// The fake client does not understand the scale subresource, so the two
@@ -136,11 +136,11 @@ func TestHealthyIsPerGenerationAndReady(t *testing.T) {
 		sets []*appsv1.StatefulSet
 		want bool
 	}{
-		{"all ready", []*appsv1.StatefulSet{statefulSet("sonarr", "sonarr", 1, 2, 2, 1, 1)}, true},
+		{"all ready", []*appsv1.StatefulSet{statefulSet("sonarr", "sonarr", 2, 2, 1, 1)}, true},
 		{"nothing to run", nil, true},
-		{"a pod not ready", []*appsv1.StatefulSet{statefulSet("sonarr", "sonarr", 1, 2, 2, 0, 1)}, false},
-		{"old generation still ready", []*appsv1.StatefulSet{statefulSet("sonarr", "sonarr", 1, 2, 1, 1, 1)}, false},
-		{"not rolled out", []*appsv1.StatefulSet{statefulSet("sonarr", "sonarr", 1, 2, 2, 1, 0)}, false},
+		{"a pod not ready", []*appsv1.StatefulSet{statefulSet("sonarr", "sonarr", 2, 2, 0, 1)}, false},
+		{"old generation still ready", []*appsv1.StatefulSet{statefulSet("sonarr", "sonarr", 2, 1, 1, 1)}, false},
+		{"not rolled out", []*appsv1.StatefulSet{statefulSet("sonarr", "sonarr", 2, 2, 1, 0)}, false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

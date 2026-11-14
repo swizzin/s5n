@@ -74,6 +74,27 @@ func TestApplyPassesItsChartFlagsToTheOptions(t *testing.T) {
 	}
 }
 
+// TestUpdatePassesItsFlagsToTheOptions: update runs apply for every step, so
+// losing a chart, grant or values flag here would install a different release
+// from the one the plan named, or apply somebody else's file.
+func TestUpdatePassesItsFlagsToTheOptions(t *testing.T) {
+	var flags *updateFlags
+	parse(t, "update", func(fs *flag.FlagSet) { flags = addUpdateFlags(fs) },
+		"--chart-repo", testChartRepo, "--chart-version", testChartVersion,
+		"--grant", "/tmp/grant.yaml", "--values", "/tmp/values.yaml", "--check")
+
+	opts := flags.options()
+	if got, want := opts.Apply.ChartRef(), (release.ChartRef{Repo: testChartRepo, Version: testChartVersion}); got != want {
+		t.Fatalf("update asked for %+v, want %+v", got, want)
+	}
+	if opts.Apply.GrantPath != "/tmp/grant.yaml" || opts.Apply.ValuesPath != "/tmp/values.yaml" {
+		t.Fatalf("update would apply %q/%q, want the files it was given", opts.Apply.GrantPath, opts.Apply.ValuesPath)
+	}
+	if !opts.Check {
+		t.Fatal("--check did not reach the options")
+	}
+}
+
 // TestChartFlagsDefaultToTheNewestRelease: with neither flag, the reference is
 // the default repository and no version, which is what makes box pick the
 // newest release it can install. The e2e's bootstrap runs this path.

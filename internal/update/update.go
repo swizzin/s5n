@@ -146,12 +146,16 @@ type Updater struct {
 	Charts ChartSource
 	// Open returns the release handle for the grant's namespace.
 	Open func(namespace string) (Release, error)
-	// Cluster is the release's StatefulSets.
-	Cluster Cluster
-	// Snapshots copies the moving apps' config. A step that moves an image
-	// refuses to run without one: a rollback over a migrated database that
-	// has nothing to restore is not a rollback.
-	Snapshots Snapshotter
+	// OpenCluster returns the release's StatefulSets. The namespace comes from
+	// the grant, so it can only be opened after the files are read; `--check`
+	// never opens it, because planning reads no workload.
+	OpenCluster func(namespace string) (Cluster, error)
+	// OpenSnapshots returns the copy of the moving apps' config for the
+	// grant's namespace. It is opened only when a step moves an image: a
+	// release change that moves no image has nothing to copy, and a box
+	// without a snapshotter still takes those. A step that does move an image
+	// on such a box refuses before it stops anything.
+	OpenSnapshots func(namespace string) (Snapshotter, error)
 	// Apply runs one step.
 	Apply ApplyFunc
 	// Confirm asks the one question, before the first write. Every step's
@@ -229,13 +233,19 @@ func (u *Updater) Run(ctx context.Context, opts Options) (Result, error) {
 	if opts.Check || res.Current {
 		return res, nil
 	}
+	// A box that cannot copy the moving apps cannot undo a step over their
+	// migrated databases, so it says so before asking anything.
+	if aStepMoves(res.Steps) && u.OpenSnapshots == nil {
+		return res, fmt.Errorf("%s needs to snapshot %s to go to %s and this box cannot: update with a box that has snapshot support",
+			res.Name, movingText(res.Steps), res.Target)
+	}
 	if u.Confirm == nil {
 		return res, errors.New("update needs a confirm: it writes to a cluster")
 	}
 	if u.Apply == nil {
 		return res, errors.New("update needs an apply: a step installs its release")
 	}
-	if u.Cluster == nil {
+	if u.OpenCluster == nil {
 		return res, errors.New("update needs a workload client: it stops what it snapshots")
 	}
 	ok, err := u.Confirm.Ask(fmt.Sprintf("update %s from %s to %s?", res.Name, res.Installed, res.Target))
@@ -250,8 +260,19 @@ func (u *Updater) Run(ctx context.Context, opts Options) (Result, error) {
 	if err != nil {
 		return res, err
 	}
+	cluster, err := u.OpenCluster(res.Namespace)
+	if err != nil {
+		return res, err
+	}
+	var snaps Snapshotter
+	if aStepMoves(res.Steps) {
+		snaps, err = u.OpenSnapshots(res.Namespace)
+		if err != nil {
+			return res, err
+		}
+	}
 	for _, step := range res.Steps {
-		if err := u.take(ctx, rel, &res, step, opts.Apply); err != nil {
+		if err := u.take(ctx, rel, cluster, snaps, &res, step, opts.Apply); err != nil {
 			return res, err
 		}
 		res.Taken = append(res.Taken, step.Step)
@@ -320,7 +341,7 @@ func (u *Updater) plan(ctx context.Context, opts Options) (Result, error) {
 		res.Name = release.ReleaseName
 	}
 
-	target, skipped, skips, err := u.target(ctx, opts, installed.ChartVersion, releases, state)
+	target, skipped, skips, err := u.target(ctx, opts, releases, state)
 	if err != nil {
 		return res, err
 	}
@@ -389,7 +410,7 @@ func (u *Updater) plan(ctx context.Context, opts Options) (Result, error) {
 // or the newest published release this box can use. Releases a previous run
 // failed on are passed over with their versions recorded, unless the operator
 // named one, which is the override.
-func (u *Updater) target(ctx context.Context, opts Options, installed string, releases []release.Published, state State) (target string, skipped []string, skips []release.VersionSkip, err error) {
+func (u *Updater) target(ctx context.Context, opts Options, releases []release.Published, state State) (target string, skipped []string, skips []release.VersionSkip, err error) {
 	repo := opts.Apply.ChartRepo
 	if pin := strings.TrimSpace(opts.Apply.ChartVersion); pin != "" {
 		chart, err := u.Charts.Load(ctx, release.ChartRef{Repo: repo, Version: pin})
@@ -475,7 +496,7 @@ func (u *Updater) reportPlan(res Result, check bool) {
 
 // take is one step: stop and snapshot what moves, apply, gate, and either
 // record it or put everything back.
-func (u *Updater) take(ctx context.Context, rel Release, res *Result, step StepPlan, base release.Options) error {
+func (u *Updater) take(ctx context.Context, rel Release, cluster Cluster, snaps Snapshotter, res *Result, step StepPlan, base release.Options) error {
 	r := u.report()
 	handle := r.Start(say.Op{Label: fmt.Sprintf("updating %s to %s", res.Name, step.To)})
 
@@ -494,24 +515,18 @@ func (u *Updater) take(ctx context.Context, rel Release, res *Result, step StepP
 	}
 
 	if len(step.Moving) > 0 {
-		if u.Snapshots == nil {
-			err := fmt.Errorf("update %s to %s: %s moves (%s) and this box cannot snapshot its config, so a failed step could not be undone: update with a box that has snapshot support",
-				res.Name, step.To, plural(len(step.Moving), "app", "apps"), strings.Join(step.Moving, ", "))
-			handle.Failed(err)
-			return err
-		}
-		if err := u.scale(ctx, step.Moving, 0); err != nil {
+		if err := u.scale(ctx, cluster, step.Moving, 0); err != nil {
 			handle.Failed(err)
 			return fmt.Errorf("update %s to %s: stopping %s: %w", res.Name, step.To, strings.Join(step.Moving, ", "), err)
 		}
-		if err := u.waitGone(ctx, step.Moving); err != nil {
+		if err := u.waitGone(ctx, cluster, step.Moving); err != nil {
 			handle.Failed(err)
 			return fmt.Errorf("update %s to %s: waiting for %s to stop: %w", res.Name, step.To, strings.Join(step.Moving, ", "), err)
 		}
-		if err := u.Snapshots.Take(ctx, step.Step, step.Moving); err != nil {
+		if err := snaps.Take(ctx, step.Step, step.Moving); err != nil {
 			// Nothing has been applied, so there is nothing to undo but
 			// the stop itself.
-			u.scaleUp(context.WithoutCancel(ctx), step.Moving)
+			u.scaleUp(context.WithoutCancel(ctx), cluster, step.Moving)
 			handle.Failed(err)
 			return fmt.Errorf("update %s to %s: snapshotting %s: %w", res.Name, step.To, strings.Join(step.Moving, ", "), err)
 		}
@@ -533,17 +548,17 @@ func (u *Updater) take(ctx context.Context, rel Release, res *Result, step StepP
 		}
 	}
 	if err == nil {
-		if herr := u.waitHealthy(ctx, rel); herr != nil {
+		if herr := u.waitHealthy(ctx, rel, cluster); herr != nil {
 			gate, err = "health", herr
 		}
 	}
 	if err != nil {
 		handle.Failed(err)
-		return u.undo(ctx, rel, res, step, before.Revision, applied.Applied, gate, err)
+		return u.undo(ctx, rel, cluster, snaps, res, step, before.Revision, applied.Applied, gate, err)
 	}
 
 	if len(step.Moving) > 0 {
-		if perr := u.Snapshots.Prune(ctx, step.Step, step.Moving); perr != nil {
+		if perr := snaps.Prune(ctx, step.Step, step.Moving); perr != nil {
 			// A snapshot that cannot be pruned is not a failed step: the
 			// release and the box are healthy, and keeping one extra copy
 			// costs disk, not correctness.
@@ -565,17 +580,17 @@ func (u *Updater) take(ctx context.Context, rel Release, res *Result, step StepP
 // A rollback that fails stops here. Box says where the box was left and that
 // it will not retry; it never tries the rollback again, because a second
 // attempt at a half-applied release is another chance to make the state worse.
-func (u *Updater) undo(ctx context.Context, rel Release, res *Result, step StepPlan, revision int, applied bool, gate string, cause error) error {
+func (u *Updater) undo(ctx context.Context, rel Release, cluster Cluster, snaps Snapshotter, res *Result, step StepPlan, revision int, applied bool, gate string, cause error) error {
 	cctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), u.cleanupWait())
 	defer cancel()
 
 	var problems []string
 	restored := false
 	if len(step.Moving) > 0 {
-		if err := u.scale(cctx, step.Moving, 0); err != nil {
+		if err := u.scale(cctx, cluster, step.Moving, 0); err != nil {
 			problems = append(problems, "stopping the apps: "+err.Error())
 		}
-		if err := u.Snapshots.Restore(cctx, step.Step); err != nil {
+		if err := snaps.Restore(cctx, step.Step); err != nil {
 			problems = append(problems, "restoring the snapshot: "+err.Error())
 		} else {
 			restored = true
@@ -584,13 +599,13 @@ func (u *Updater) undo(ctx context.Context, rel Release, res *Result, step StepP
 	if applied {
 		if err := rel.Rollback(cctx, revision); err != nil {
 			problems = append(problems, "rolling the release back: "+err.Error())
-		} else if err := u.waitHealthy(cctx, rel); err != nil {
+		} else if err := u.waitHealthy(cctx, rel, cluster); err != nil {
 			problems = append(problems, "waiting for the rolled-back release: "+err.Error())
 		}
 	} else if len(step.Moving) > 0 {
 		// Helm never moved, so nothing puts the replicas back: this run
 		// stopped the apps itself.
-		if err := u.scale(cctx, step.Moving, 1); err != nil {
+		if err := u.scale(cctx, cluster, step.Moving, 1); err != nil {
 			problems = append(problems, "starting the apps again: "+err.Error())
 		}
 	}
@@ -622,9 +637,9 @@ func restoredText(restored bool) string {
 }
 
 // scale sets every moving app's replicas.
-func (u *Updater) scale(ctx context.Context, apps []string, replicas int32) error {
+func (u *Updater) scale(ctx context.Context, cluster Cluster, apps []string, replicas int32) error {
 	for _, app := range apps {
-		if err := u.Cluster.Scale(ctx, app, replicas); err != nil {
+		if err := cluster.Scale(ctx, app, replicas); err != nil {
 			return fmt.Errorf("%s: %w", app, err)
 		}
 	}
@@ -634,18 +649,18 @@ func (u *Updater) scale(ctx context.Context, apps []string, replicas int32) erro
 // scaleUp starts apps again after a failure that never reached Helm. It is
 // best effort on purpose: the step's own error is the one box reports, and a
 // second failure here would only hide it.
-func (u *Updater) scaleUp(ctx context.Context, apps []string) {
+func (u *Updater) scaleUp(ctx context.Context, cluster Cluster, apps []string) {
 	cctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), u.cleanupWait())
 	defer cancel()
-	_ = u.scale(cctx, apps, 1)
+	_ = u.scale(cctx, cluster, apps, 1)
 }
 
 // waitGone waits for the stopping apps' pods to go, so the snapshot is taken
 // with no writer.
-func (u *Updater) waitGone(ctx context.Context, apps []string) error {
+func (u *Updater) waitGone(ctx context.Context, cluster Cluster, apps []string) error {
 	waited, err := wait.Until(ctx, u.settleWait(), u.poll(), func(ctx context.Context) (bool, error) {
 		for _, app := range apps {
-			gone, err := u.Cluster.Gone(ctx, app)
+			gone, err := cluster.Gone(ctx, app)
 			if err != nil {
 				return false, err
 			}
@@ -666,7 +681,7 @@ func (u *Updater) waitGone(ctx context.Context, apps []string) error {
 
 // waitHealthy is the health gate: Helm's status says deployed, and every
 // StatefulSet of the release is ready on its current generation.
-func (u *Updater) waitHealthy(ctx context.Context, rel Release) error {
+func (u *Updater) waitHealthy(ctx context.Context, rel Release, cluster Cluster) error {
 	waited, err := wait.Until(ctx, u.healthWait(), u.poll(), func(ctx context.Context) (bool, error) {
 		state, err := rel.State(ctx)
 		if err != nil {
@@ -675,7 +690,7 @@ func (u *Updater) waitHealthy(ctx context.Context, rel Release) error {
 		if !state.Exists || !state.Deployed() {
 			return false, nil
 		}
-		return u.Cluster.Healthy(ctx)
+		return cluster.Healthy(ctx)
 	})
 	if err != nil {
 		return err
@@ -767,4 +782,32 @@ func plural(n int, one, many string) string {
 		return fmt.Sprintf("%d %s", n, one)
 	}
 	return fmt.Sprintf("%d %s", n, many)
+}
+
+// aStepMoves reports whether any step copies an app's config, which is what
+// decides whether update needs a snapshotter at all.
+func aStepMoves(steps []StepPlan) bool {
+	for _, step := range steps {
+		if len(step.Moving) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+// movingText names every app the path moves, once, in step order. It is used
+// in the one sentence box says when it cannot snapshot.
+func movingText(steps []StepPlan) string {
+	var apps []string
+	seen := make(map[string]bool)
+	for _, step := range steps {
+		for _, app := range step.Moving {
+			if seen[app] {
+				continue
+			}
+			seen[app] = true
+			apps = append(apps, app)
+		}
+	}
+	return strings.Join(apps, ", ")
 }

@@ -77,6 +77,8 @@ func main() {
 		runInit(ctx, os.Args[2:])
 	case "apply":
 		runApply(ctx, os.Args[2:])
+	case "update":
+		runUpdate(ctx, os.Args[2:])
 	case "version":
 		fmt.Println(version)
 	default:
@@ -103,6 +105,7 @@ commands:
   bootstrap   decide which cluster to use, install the platform layer, then run init for root
   init        ask a seedbox's questions, edit its two files, then apply
   apply       install or upgrade root's seedbox from its grant and values
+  update      move the box to a newer chart release, with a snapshot and a rollback
   version     print the version box was built from
 `)
 	os.Exit(2)

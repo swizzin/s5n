@@ -97,7 +97,7 @@ func (o *OCIChart) Load(ctx context.Context, ref ChartRef) (Chart, error) {
 		if _, err := parseVersion(version); err != nil {
 			return Chart{}, fmt.Errorf("--chart-version %q is not a version: %v", version, err)
 		}
-		chart, err := o.chart(ctx, p, version)
+		chart, err := o.chart(p, version)
 		if err != nil {
 			return Chart{}, err
 		}
@@ -112,7 +112,7 @@ func (o *OCIChart) Load(ctx context.Context, ref ChartRef) (Chart, error) {
 		return Chart{}, o.pullError(p.repo, "", err)
 	}
 	chosen, skipped, err := SelectVersion(tags, o.BoxVersion, func(version string) (string, error) {
-		chart, err := o.chart(ctx, p, version)
+		chart, err := o.chart(p, version)
 		if err != nil {
 			return "", err
 		}
@@ -125,7 +125,7 @@ func (o *OCIChart) Load(ctx context.Context, ref ChartRef) (Chart, error) {
 		o.logf("%s %s is newer but needs box %s; this is box %s, so box installs %s",
 			chartName(p.repo), skip.Version, skip.MinBox, o.BoxVersion, chosen)
 	}
-	return o.chart(ctx, p, chosen)
+	return o.chart(p, chosen)
 }
 
 // Releases lists every release the repository publishes, with the annotations
@@ -154,7 +154,7 @@ func (o *OCIChart) Releases(ctx context.Context, ref ChartRef) ([]Published, err
 		if err != nil || v.Prerelease() != "" {
 			continue
 		}
-		chart, err := o.chart(ctx, p, tag)
+		chart, err := o.chart(p, tag)
 		if err != nil {
 			return nil, err
 		}
@@ -224,7 +224,7 @@ func (o *OCIChart) open(ctx context.Context, ref ChartRef) (*puller, error) {
 
 // chart is one version's chart, pulled at most once per OCIChart. A failed pull
 // is not remembered: the next call asks the registry again.
-func (o *OCIChart) chart(ctx context.Context, p *puller, version string) (Chart, error) {
+func (o *OCIChart) chart(p *puller, version string) (Chart, error) {
 	o.mu.Lock()
 	chart, ok := o.pulled[version]
 	o.mu.Unlock()
