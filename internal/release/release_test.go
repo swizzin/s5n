@@ -22,6 +22,10 @@ type fakeRelease struct {
 	deployedErr error
 	upgradeErr  error
 
+	// chartVersion is the chart release the fake has deployed: what State
+	// reports, and what Upgrade keeps current.
+	chartVersion string
+
 	upgrades int
 	upgraded []map[string]any
 	revision int
@@ -39,7 +43,16 @@ func (f *fakeRelease) Deployed(context.Context) (map[string]any, bool, error) {
 	return f.values, f.exists, nil
 }
 
-func (f *fakeRelease) Upgrade(_ context.Context, _ Chart, values map[string]any) (int, error) {
+// State is what the fake release is deployed as: the chart version the last
+// Upgrade installed, or the one a test pinned to stand for an older release.
+func (f *fakeRelease) State(context.Context) (ReleaseState, error) {
+	if f.deployedErr != nil {
+		return ReleaseState{}, f.deployedErr
+	}
+	return ReleaseState{Exists: f.exists, ChartVersion: f.chartVersion, Revision: f.revision}, nil
+}
+
+func (f *fakeRelease) Upgrade(_ context.Context, chart Chart, values map[string]any) (int, error) {
 	if f.upgradeErr != nil {
 		return 0, f.upgradeErr
 	}
@@ -47,6 +60,7 @@ func (f *fakeRelease) Upgrade(_ context.Context, _ Chart, values map[string]any)
 	f.revision++
 	f.upgraded = append(f.upgraded, values)
 	f.values, f.exists = values, true
+	f.chartVersion = chart.Version
 	if f.events != nil {
 		*f.events = append(*f.events, "helm")
 	}
@@ -189,6 +203,9 @@ type fakes struct {
 	// hostsAll is init's apply: every name it decided goes to the per-host
 	// step, served or not.
 	hostsAll bool
+	// chart is the release this run applies, for a test that stands for a
+	// release other than the fixture: nil is the fixture itself.
+	chart *Chart
 }
 
 func newFakes(t *testing.T) *fakes {
@@ -196,6 +213,10 @@ func newFakes(t *testing.T) *fakes {
 	dir := t.TempDir()
 	f := &fakes{
 		rel: &fakeRelease{
+			// The release Helm has is the chart these tests apply, so an
+			// apply of the same chart is a no-op and one of another version
+			// is a step. A test that stands for an older release sets this.
+			chartVersion: testChart(t).Version,
 			receipt: Receipt{
 				Status:    "ok",
 				StartedAt: time.Now().Add(time.Minute),
@@ -245,8 +266,12 @@ func newFakes(t *testing.T) *fakes {
 
 func (f *fakes) apply(t *testing.T) (Result, error) {
 	t.Helper()
+	chart := testChartPtr(t)
+	if f.chart != nil {
+		chart = f.chart
+	}
 	opts := Options{
-		Chart:       testChartPtr(t),
+		Chart:       chart,
 		GrantPath:   f.grantPath,
 		ValuesPath:  f.values,
 		PathsInNode: f.pathsInNode,
@@ -365,6 +390,45 @@ func TestSecondApplyIsANoOp(t *testing.T) {
 	}
 	if !strings.Contains(f.out.String(), "nothing to change") {
 		t.Fatalf("output does not say nothing to change:\n%s", f.out)
+	}
+}
+
+// TestANewerReleaseWithTheSameValuesIsApplied: every digest bump ships as a new
+// chart release with the values the installed box already has, and installing
+// it is the only thing that moves a pod. Reading that as "nothing to change"
+// left the box on the old release while `box update` reported the new one: the
+// step made no Helm revision, so nothing the step rolled back or health-checked
+// was ever installed.
+func TestANewerReleaseWithTheSameValuesIsApplied(t *testing.T) {
+	f := newFakes(t)
+	if _, err := f.apply(t); err != nil {
+		t.Fatalf("first apply: %v\n%s", err, f.out)
+	}
+	upgrades := f.rel.upgrades
+
+	// The next release: the same chart, another version, which is what a bump
+	// of one image inside variants.yaml publishes.
+	next := testChart(t)
+	next.Version = "0.0.2"
+	f.chart = &next
+	res, err := f.apply(t)
+	if err != nil {
+		t.Fatalf("apply of 0.0.2: %v\n%s", err, f.out)
+	}
+	if got := f.rel.upgrades - upgrades; got != 1 {
+		t.Fatalf("an apply of chart 0.0.2 over 0.0.1 made %d Helm write(s), want 1\n%s", got, f.out)
+	}
+	if !res.Applied {
+		t.Fatalf("result says nothing was applied although the release moved: %+v", res)
+	}
+	if got := f.rel.chartVersion; got != "0.0.2" {
+		t.Fatalf("the release is deployed as %s, want 0.0.2", got)
+	}
+	if !strings.Contains(f.out.String(), "release 0.0.1 -> 0.0.2") {
+		t.Fatalf("box did not say which release it is installing:\n%s", f.out)
+	}
+	if strings.Contains(f.out.String(), "nothing to change") {
+		t.Fatalf("a moved release was reported as nothing to change:\n%s", f.out)
 	}
 }
 

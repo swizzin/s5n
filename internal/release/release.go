@@ -56,6 +56,12 @@ type ReleaseClient interface {
 	// silently install over it.
 	Deployed(ctx context.Context) (values map[string]any, exists bool, err error)
 
+	// State returns the chart release Helm has deployed, which is what tells
+	// this run whether the release it is about to install is the one that is
+	// there. Values are not enough: every digest bump ships as a new release
+	// with the values an installed box already has.
+	State(ctx context.Context) (ReleaseState, error)
+
 	// Upgrade installs the release when it does not exist and upgrades it
 	// when it does, then waits for it, including its wiring hook. It returns
 	// the new revision.
@@ -511,13 +517,27 @@ func (a *Applier) Apply(ctx context.Context, opts Options) (Result, error) {
 	// A release lives in the namespace, so a missing namespace is a missing
 	// release. Asking Helm about it would only report the archive back.
 	var deployed map[string]any
+	var installed ReleaseState
 	exists := false
 	if nsp.Exists {
 		deployed, exists, err = client.Deployed(ctx)
 		if err != nil {
 			return res, err
 		}
+		if exists {
+			installed, err = client.State(ctx)
+			if err != nil {
+				return res, err
+			}
+		}
 	}
+	// The release this run installs is part of the run's work even when the
+	// values are not: every image bump ships as a new chart release with the
+	// values the box already has, and installing it is the only thing that
+	// moves a pod. `box update` hands apply the release it settled on, so an
+	// apply that read the release as unchanged would take no step at all and
+	// leave the box where it was, saying it had updated it.
+	chartMoved := exists && installed.ChartVersion != chart.Version
 	res.FirstInstall = !exists
 	res.Host = hostOf(values)
 	if exists {
@@ -588,16 +608,21 @@ func (a *Applier) Apply(ctx context.Context, opts Options) (Result, error) {
 		}
 	}
 
-	if exists && len(res.Changes) == 0 && len(plan) == 0 && nsp.Exists && len(hostPlan.Hosts) == 0 && !res.Login && anchorLine == "" {
+	if exists && len(res.Changes) == 0 && len(plan) == 0 && nsp.Exists && len(hostPlan.Hosts) == 0 && !res.Login && anchorLine == "" && !chartMoved {
 		r.Line(fmt.Sprintf("%s in %s: nothing to change", ReleaseName, namespace))
 		return res, nil
 	}
 
 	if exists {
-		if len(res.Changes) > 0 {
+		switch {
+		case len(res.Changes) > 0:
 			r.Line(fmt.Sprintf("%s in %s: %d %s", ReleaseName, namespace, len(res.Changes), plural(len(res.Changes), "change", "changes")))
 			r.Diff(changeItems(res.Changes))
-		} else {
+		case chartMoved:
+			// Only the release moved: the values are the ones installed, and
+			// the pins the new chart carries are the whole change.
+			r.Line(fmt.Sprintf("%s in %s: release %s -> %s", ReleaseName, namespace, installed.ChartVersion, chart.Version))
+		default:
 			// The only work this run has is outside the release -- a host
 			// without its listener, or a login page that is not the one the
 			// values name -- which is why the early return above did not take
@@ -710,7 +735,7 @@ func (a *Applier) Apply(ctx context.Context, opts Options) (Result, error) {
 	// namespace and its storage are all as they were, so this run makes no Helm
 	// revision. A certificate nobody has to renew, or a login page the release
 	// already names, must not churn the release users roll back to.
-	if exists && len(res.Changes) == 0 && len(plan) == 0 && nsp.Exists {
+	if exists && len(res.Changes) == 0 && len(plan) == 0 && nsp.Exists && !chartMoved {
 		return res, nil
 	}
 
