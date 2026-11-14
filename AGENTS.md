@@ -120,10 +120,16 @@ Read `PLAN.md` first. It is the architecture; this file is how to work in the re
   pin, and `+k0s.N` build metadata is compared explicitly), so a re-run makes no Helm
   revision. An existing cert-manager is used only when its webhook answers, it is at
   least 1.15 and its controller has Gateway API enabled; one without it stops bootstrap
-  naming the setting. `certificates.go` is root's per-host TLS: a Certificate in
-  `s5n-gateway`, and once it is Ready, field manager `box-tls-<host>` applies listeners
-  `https-<host>` (443) and `http-<host>` (80, routes from `s5n-gateway` only) as a partial
-  Gateway, plus the port-80 redirect. The generic `http` listener is `gateway.yaml`'s
+  naming the setting. `certificates.go` is root's TLS for a run: every decided host's
+  port-80 listener, its no-login Allow and its Certificate in `s5n-gateway` are written
+  first, one wait covers all of them under a single `CertificateTimeout`, then each Ready
+  host gets field manager `box-tls-<host>` listeners `https-<host>` (443) and
+  `http-<host>` (80, routes from `s5n-gateway` only) as a partial Gateway, plus the port-80
+  redirect. A host that is not Ready keeps only port 80 and gets the warning, so a run waits
+  at most one timeout whatever the number of names. Ready means Ready for the Certificate's current
+  generation (`CertificateStatus`): cert-manager leaves the previous certificate's
+  `Ready=True` in place until it reconciles a new spec, so a move to another issuer must
+  not read as done before the new certificate exists. The generic `http` listener is `gateway.yaml`'s
   (manager `box`) and no TLS apply touches it. Every chart fetch (platform or apply)
   runs Helm on a private, empty home: settings
   built as a literal inside a 0700 temp dir removed when the fetch ends. Never
@@ -174,7 +180,9 @@ Read `PLAN.md` first. It is the architecture; this file is how to work in the re
   forced renewal goes through the redirect with a new serial, each listener has one
   owner in managedFields, port 80 is sampled during a second bootstrap, and a host
   with no certificate is still served on plain HTTP), `preinstalled` (MetalLB already
-  there, so box adds none; the self-signed issuer) and `foreign-gateway` (Gateway API
+  there, so box adds none; the self-signed issuer, then the move to the ACME issuer:
+  CoreDNS answers every name it installs, every host's serial must change, and init's two
+  re-runs fail past a budget under `CertificateTimeout`) and `foreign-gateway` (Gateway API
   v1.6.3 + NGINX Gateway Fabric 2.8.1: bootstrap refuses it by class and controller,
   writes nothing, and refuses the same way on a re-run). `fresh` and `preinstalled`
   assert a second `--yes` run changes no Helm revision, spec or label (spec and
@@ -185,13 +193,24 @@ Read `PLAN.md` first. It is the architecture; this file is how to work in the re
   distribution registry container on 127.0.0.1, and pulled by box through
   `--chart-repo`/`--chart-version`; there is no local-chart flag. box under test is
   built with `-X main.version=<chart version>`, and the run fails on the dev-build
-  notice. Not in CI yet.
+  notice. CI runs each scenario as its own job.
 - `hack/render-grant/` — `internal/admission` as a command, the e2e's caller until
   `box adduser` exists.
-- `.github/workflows/ci.yaml` / `test.yaml` — every PR and push to main or develop:
-  gofmt/vet/`go test -race`, golangci-lint over what the branch adds since develop,
-  `hack/validate-chart.sh` on 1.30/1.34/1.37, then the kind e2e. Actions are pinned by
-  commit SHA.
+- `hack/changes/` — whether a push needs the e2e: `changes e2e BASE HEAD` prints
+  `e2e=true|false` with the reason on stderr. It skips only when every changed path is a
+  `.md` or under `docs/`, and runs the e2e on a first push, a force push or an empty diff.
+  CI passes develop's last green run as BASE, never the push's own `before`.
+- `.github/workflows/ci.yaml` / `test.yaml` — every PR and push to main or develop, every
+  job at once: gofmt/vet/`go test -race`, golangci-lint over what the branch adds since
+  develop, `hack/validate-chart.sh` on 1.30/1.34/1.37, the release rehearsal,
+  `hack/e2e-kind.sh`, and `hack/e2e-box.sh` as one job per scenario (`fail-fast: false`).
+  The e2e jobs wait only for `changes`: a push to develop that is documentation only since
+  develop's last green run skips them (`hack/changes`); main, pull requests and the
+  post-release develop run always run everything. A newer push cancels a pull request's or
+  develop's running run, never main's. Each compiling job restores its own Go build cache
+  (`go-test`, `go-lint`, `go-build`); setup-go's cache is off, because it keys on go.sum
+  alone and the first job to finish saved an empty entry every job then hit. Actions are
+  pinned by commit SHA.
 - `.github/workflows/release.yaml` — a `v*` tag publishes the image (amd64 + arm64,
   digest captured), the chart with that digest stamped into the packaged copy and
   validated before `helm push`, then box's binaries and `sha256sums.txt` as a GitHub
@@ -208,6 +227,7 @@ docker build -t s5n:e2e .     # what the e2e uses
 hack/e2e-kind.sh              # full smoke; needs docker, kind, helm, kubectl
 hack/e2e-box.sh [fresh|preinstalled|foreign-gateway|all]  # through box bootstrap; same needs
 go run ./hack/versions        # the platform pins box installs; the e2e reads them here
+go run ./hack/changes e2e <base> <head>  # whether CI would run the e2e for that range
 ```
 
 Run lint + kubeconform against 1.30, 1.34 and 1.37 before every commit. Run the e2e before
@@ -525,6 +545,9 @@ one needs a live `lookup`. The e2e asserts the policy exists in the cluster.
 - Charts publish their own spelling of a version (`1.9.3`, `v1.21.3`). Never compare a
   deployed chart version to a pin with `==`; use `AtPin`. semver's Equal ignores build
   metadata, so `+k0s.N` is compared separately.
+- An e2e that patches CoreDNS names every host the install serves. A name with no answer
+  in the cluster is a certificate that can never issue, and `box init` then spends the
+  whole `CertificateTimeout` on it while the scenario stays green.
 - Never edit a `hack/*.sh` while its e2e is running: bash reads a script as it goes, so
   the run is meaningless. Under `set -euo pipefail` a failing `code=$(curl …)` exits with
   no message; end such captures with `|| true` and assert the captured value.
@@ -538,8 +561,8 @@ left:
 1. A run on a clean VM. The image, the chart and box's binaries are published from
    `v*` tags and pull anonymously, so a host needs no checkout and no side-loaded image.
 
-Then: logins (Authelia on the platform layer, `docs/box.md` "Logins"),
-`hack/e2e-box.sh` in CI, the upgrade e2e, and `adduser`. The product decisions are
+Then: logins (Authelia on the platform layer, `docs/box.md` "Logins"), the upgrade
+e2e, and `adduser`. The product decisions are
 in `docs/box.md`, marked decided, proposed or open.
 
 In parallel, outside this repo: `swizzin/qbittorrent`, the userdocs static recipe plus
