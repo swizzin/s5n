@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/swizzin/s5n/internal/release"
+	"github.com/swizzin/s5n/internal/snapshot"
 )
 
 func TestPlanSteps(t *testing.T) {
@@ -162,6 +163,33 @@ radarr:
 `, sonarrRepo, sonarrDigest))
 }
 
+// variantsBoth digests is the fixture variants.yaml with sonarr and radarr
+// moving independently, for a step that moves two apps and copies only one.
+func variantsBoth(sonarrDigest, radarrDigest string) []byte {
+	return variantsMoving(sonarrDigest, radarrDigest, "7.0.0")
+}
+
+// variantsMoving is variantsBoth with radarr's tag named, so a test that prints
+// an image's label can tell the two sides apart.
+func variantsMoving(sonarrDigest, radarrDigest, radarrTag string) []byte {
+	return []byte(fmt.Sprintf(`qbittorrent:
+  default:
+    repository: registry.example.com/seedbox/qbittorrent
+    tag: "5.3.0"
+    digest: sha256:1111111111111111111111111111111111111111111111111111111111111111
+sonarr:
+  default:
+    repository: registry.example.com/seedbox/sonarr
+    tag: "5.0.0"
+    digest: %s
+radarr:
+  default:
+    repository: registry.example.com/seedbox/radarr
+    tag: "%s"
+    digest: %s
+`, sonarrDigest, radarrTag, radarrDigest))
+}
+
 // TestMovingApps: what a step stops and copies, and what the operator's own pin
 // holds in place. qbittorrent's image never moves and radarr is off, so the
 // only app either list can name is sonarr.
@@ -192,17 +220,24 @@ func TestMovingApps(t *testing.T) {
 `)}
 
 	cases := []struct {
-		name   string
-		from   release.Chart
-		to     release.Chart
-		values map[string]any
-		moving []string
-		held   []string
+		name     string
+		from     release.Chart
+		to       release.Chart
+		values   map[string]any
+		holds    []snapshot.Hold
+		moving   []string
+		held     []string
+		heldBack []string
+		images   map[string]ImageChange
 	}{
 		{
 			name: "no pin moves the app whose chart digest moved",
 			from: old, to: next, values: on(defaultImage),
 			moving: []string{"sonarr"},
+			images: map[string]ImageChange{"sonarr": {
+				Ran:     snapshot.ImageRef{Repository: "registry.example.com/seedbox/sonarr", Tag: "5.0.0", Digest: digestOld},
+				MovedTo: snapshot.ImageRef{Repository: "registry.example.com/seedbox/sonarr", Tag: "5.0.0", Digest: digestNew},
+			}},
 		},
 		{
 			name: "a digest pin holds it",
@@ -238,10 +273,53 @@ func TestMovingApps(t *testing.T) {
 			from: release.Chart{Version: "0.4.0"}, to: release.Chart{Version: "0.5.0"},
 			values: on(defaultImage),
 		},
+		{
+			// The release still pins the image the rollback avoided, so the
+			// app stays where the rollback left it.
+			name: "a rollback hold keeps the app until the release pins another",
+			from: old, to: next, values: on(defaultImage),
+			holds: []snapshot.Hold{{
+				App:      "sonarr",
+				At:       snapshot.ImageRef{Repository: "registry.example.com/seedbox/sonarr", Tag: "5.0.0", Digest: digestOld},
+				Avoiding: snapshot.ImageRef{Repository: "registry.example.com/seedbox/sonarr", Tag: "5.0.0", Digest: digestNew},
+				By:       snapshot.ByUpdate,
+			}},
+			heldBack: []string{"sonarr"},
+		},
+		{
+			// The release pins an image other than the one the rollback
+			// avoided, so the hold has lapsed and the app moves.
+			name: "a rollback hold lapses when the release pins another image",
+			from: old, to: next, values: on(defaultImage),
+			holds: []snapshot.Hold{{
+				App:      "sonarr",
+				At:       snapshot.ImageRef{Repository: "registry.example.com/seedbox/sonarr", Tag: "5.0.0", Digest: digestOld},
+				Avoiding: snapshot.ImageRef{Repository: "registry.example.com/seedbox/sonarr", Tag: "4.9.0", Digest: digestC},
+				By:       snapshot.ByUpdate,
+			}},
+			moving: []string{"sonarr"},
+			images: map[string]ImageChange{"sonarr": {
+				Ran:     snapshot.ImageRef{Repository: "registry.example.com/seedbox/sonarr", Tag: "5.0.0", Digest: digestOld},
+				MovedTo: snapshot.ImageRef{Repository: "registry.example.com/seedbox/sonarr", Tag: "5.0.0", Digest: digestNew},
+			}},
+		},
+		{
+			// A hand pin is the operator's decision; the hold stands aside.
+			name: "a values pin wins over a hold",
+			from: old, to: next,
+			values: on(map[string]any{"variant": "default", "digest": digestOld}),
+			holds: []snapshot.Hold{{
+				App:      "sonarr",
+				At:       snapshot.ImageRef{Repository: "registry.example.com/seedbox/sonarr", Tag: "5.0.0", Digest: digestC},
+				Avoiding: snapshot.ImageRef{Repository: "registry.example.com/seedbox/sonarr", Tag: "5.0.0", Digest: digestNew},
+				By:       snapshot.ByUpdate,
+			}},
+			held: []string{"sonarr"},
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			moving, held, err := movingApps(tc.from, tc.to, tc.values)
+			moving, held, heldBack, images, err := movingApps(tc.from, tc.to, tc.values, tc.holds)
 			if err != nil {
 				t.Fatalf("movingApps: %v", err)
 			}
@@ -250,6 +328,17 @@ func TestMovingApps(t *testing.T) {
 			}
 			if !reflect.DeepEqual(held, tc.held) {
 				t.Fatalf("held = %v, want %v", held, tc.held)
+			}
+			if !reflect.DeepEqual(heldBack, tc.heldBack) {
+				t.Fatalf("heldBack = %v, want %v", heldBack, tc.heldBack)
+			}
+			for _, app := range moving {
+				if _, ok := images[app]; !ok {
+					t.Fatalf("images has no entry for moving app %s: %v", app, images)
+				}
+			}
+			if tc.images != nil && !reflect.DeepEqual(images, tc.images) {
+				t.Fatalf("images = %+v, want %+v", images, tc.images)
 			}
 		})
 	}

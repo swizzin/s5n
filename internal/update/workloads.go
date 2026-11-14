@@ -109,7 +109,8 @@ func (w *Workloads) Gone(ctx context.Context, app string) (bool, error) {
 const crashloopRestarts int32 = 3
 
 // Health is one reading of the release for the health gate: whether it is
-// ready, and which of the apps a step moved keep exiting.
+// ready, which of the apps a step moved keep exiting, and how often each of
+// their containers has restarted.
 type Health struct {
 	// Ready is every StatefulSet of the release rolled out on its current
 	// generation with all its replicas ready and updated. It is the gate's
@@ -118,6 +119,12 @@ type Health struct {
 	// Exiting is the moved apps that keep exiting, sorted by app. They are
 	// the ones box cannot wait out: waiting only adds restarts.
 	Exiting []Exiting
+	// Restarts is the highest restart count of each moved app's container,
+	// across its pods and instances. An app with no pod yet is absent rather
+	// than zero. box reads it once after a failed apply, to tell an image
+	// Helm gave up on from a release that failed for some other reason: a
+	// moved app that restarted at all deserves the health gate's watch.
+	Restarts map[string]int32
 }
 
 // Exiting is one moved app whose container keeps exiting, with the count that
@@ -168,6 +175,7 @@ func (w *Workloads) Health(ctx context.Context, moving []string) (Health, error)
 		}
 	}
 	sort.Slice(health.Exiting, func(i, j int) bool { return health.Exiting[i].App < health.Exiting[j].App })
+	health.Restarts = restarts
 	return health, nil
 }
 

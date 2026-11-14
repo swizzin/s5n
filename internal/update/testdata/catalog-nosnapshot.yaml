@@ -1,0 +1,11 @@
+# The same catalog with sonarr given nothing to copy: its upgrades only add, so a
+# step moves it without a snapshot and never rolls it back.
+apps:
+  qbittorrent:
+    description: torrents
+    snapshot: [qBittorrent/qBittorrent.conf]
+  sonarr:
+    description: TV
+  radarr:
+    description: films
+    snapshot: [radarr.db, radarr.db-wal, radarr.db-shm, config.xml]

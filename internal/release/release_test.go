@@ -912,6 +912,71 @@ func TestBoxValuesRefusalWritesNothing(t *testing.T) {
 	}
 }
 
+// A rollback hold reaches the release through apply: the values Helm gets must
+// name the image the app was rolled back to, or the upgrade would move it off
+// that image again. The callback is handed the seedbox apply already loaded, so
+// it reads the holds file beside the config root the grant names.
+func TestHoldsAreOverlaidOnTheEffectiveValues(t *testing.T) {
+	f := newFakes(t)
+	const digest = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	var got *seedbox.Seedbox
+	_, err := f.app.Apply(context.Background(), Options{
+		Chart:       testChartPtr(t),
+		GrantPath:   f.grantPath,
+		ValuesPath:  f.values,
+		PathsInNode: f.pathsInNode,
+		Holds: func(_ context.Context, sb *seedbox.Seedbox, _ Chart, _ map[string]any) (map[string]any, error) {
+			got = sb
+			return map[string]any{"apps": map[string]any{"sonarr": map[string]any{"image": map[string]any{
+				"digest": digest,
+				"tag":    "4.9.0",
+			}}}}, nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got == nil {
+		t.Fatal("the holds callback did not receive the seedbox apply loaded")
+	}
+	if len(f.rel.upgraded) != 1 {
+		t.Fatalf("upgrades = %d, want one", len(f.rel.upgraded))
+	}
+	apps, _ := f.rel.upgraded[0]["apps"].(map[string]any)
+	sonarr, _ := apps["sonarr"].(map[string]any)
+	image, _ := sonarr["image"].(map[string]any)
+	if image["digest"] != digest || image["tag"] != "4.9.0" {
+		t.Fatalf("apps.sonarr.image = %v, want the held digest and tag", image)
+	}
+	if enabled, _ := sonarr["enabled"].(bool); !enabled {
+		t.Fatal("the overlay dropped the app's other settings")
+	}
+}
+
+// A hold the chart's schema would refuse is a refusal before anything is opened:
+// box installs no release whose held app cannot render.
+func TestAHoldTheSchemaRefusesWritesNothing(t *testing.T) {
+	f := newFakes(t)
+	_, err := f.app.Apply(context.Background(), Options{
+		Chart:       testChartPtr(t),
+		GrantPath:   f.grantPath,
+		ValuesPath:  f.values,
+		PathsInNode: f.pathsInNode,
+		Holds: func(context.Context, *seedbox.Seedbox, Chart, map[string]any) (map[string]any, error) {
+			return map[string]any{"apps": map[string]any{"sonarr": map[string]any{"image": map[string]any{
+				"digest": "not-a-digest",
+			}}}}, nil
+		},
+	})
+	if err == nil {
+		t.Fatal("apply succeeded with a held image the schema refuses")
+	}
+	if f.openCalls != 0 || f.storeOpens != 0 || len(f.rel.upgraded) != 0 || len(f.events) != 0 {
+		t.Fatalf("a hold refusal touched the cluster: opens=%d stores=%d upgrades=%d events=%v",
+			f.openCalls, f.storeOpens, len(f.rel.upgraded), f.events)
+	}
+}
+
 // Undo is cleanup: a run cancelled after it wrote a volume must still take the
 // volume off, or the next apply refuses over a PV nobody's release owns. The
 // fake fails a Delete on a cancelled context the way a real client does, so

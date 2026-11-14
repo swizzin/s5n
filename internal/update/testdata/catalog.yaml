@@ -1,0 +1,13 @@
+# The catalog fixture these tests plan against: one entry per app in
+# chart-values.yaml, each naming the files an image upgrade can rewrite. The
+# plan copies those and refuses to roll back an app without them.
+apps:
+  qbittorrent:
+    description: torrents
+    snapshot: [qBittorrent/qBittorrent.conf]
+  sonarr:
+    description: TV
+    snapshot: [sonarr.db, sonarr.db-wal, sonarr.db-shm, config.xml]
+  radarr:
+    description: films
+    snapshot: [radarr.db, radarr.db-wal, radarr.db-shm, config.xml]

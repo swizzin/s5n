@@ -517,7 +517,7 @@ func (d *Decision) Run(ctx context.Context, opts Options) (Result, error) {
 				dirs = append(dirs, t.path)
 			}
 		}
-		dirs = append(dirs, settingsDirs(configPath, apps, base)...)
+		dirs = append(dirs, SettingsDirs(configPath, apps, base)...)
 		res.Created, err = d.makeDirs(dirs, puid, pgid)
 		if err != nil {
 			return res, err

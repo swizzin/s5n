@@ -273,12 +273,15 @@ func (d *Decision) makeDirs(paths []string, uid, gid int) ([]string, error) {
 	return created, nil
 }
 
-// settingsDirs is the per-instance list under the config path: one directory
+// SettingsDirs is the per-instance list under the config path: one directory
 // per enabled instance, named as the chart names the workload (sonarr,
 // sonarr-4k), because that is the subPath each pod mounts. It reads the
 // instances from the values, which are the grant's, so it agrees with what the
 // chart renders without box knowing which apps are Arrs.
-func settingsDirs(configPath string, apps []string, values map[string]any) []string {
+//
+// init creates these directories and update copies and restores them per
+// instance, so both name them here rather than each deriving a subPath.
+func SettingsDirs(configPath string, apps []string, values map[string]any) []string {
 	var out []string
 	for _, name := range apps {
 		entry, _ := lookupPath(values, "apps."+name)

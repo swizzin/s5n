@@ -79,7 +79,16 @@
         "required": ["enabled"],
         "properties": {
           "enabled": { "type": "boolean" },
-          "port": { "type": "integer" }
+          "port": { "type": "integer" },
+          "image": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "variant": { "type": "string" },
+              "tag": { "type": "string" },
+              "digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" }
+            }
+          }
         }
       }
     }

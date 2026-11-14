@@ -10,6 +10,7 @@ import (
 	"github.com/swizzin/s5n/internal/bootstrap"
 	"github.com/swizzin/s5n/internal/release"
 	"github.com/swizzin/s5n/internal/say"
+	"github.com/swizzin/s5n/internal/seedbox"
 	"github.com/swizzin/s5n/internal/setup"
 	"github.com/swizzin/s5n/internal/update"
 )
@@ -113,11 +114,15 @@ func runUpdate(ctx context.Context, args []string) {
 	// Root's per-host TLS is apply's, so a release whose new image serves an
 	// app at a host of its own gets that host's listener before the pods move.
 	applyOpts.Hosts = applyHosts{kubeconfig: kc, out: out, resolver: resolver}
+	// A step installs the release the plan settled on, and an app a rollback
+	// holds stays on the image it ran: the holds file is overlaid by the same
+	// apply a `box apply` runs, so a step does not undo a rollback.
+	holds := newBoxHolds(out)
+	applyOpts.Holds = holds.values
 
-	// OpenSnapshots is left unset on purpose: the snapshotter is
-	// internal/snapshot's, wired by the lane that lands it. Until then a step
-	// that moves an image refuses before it stops anything, rather than
-	// applying over a database box cannot give the operator a copy of.
+	// OpenSnapshots is the copy of each copying app's config, under the grant's
+	// config root: a step copies it before the release moves so a crashloop or
+	// a later `box rollback` has state to go back to.
 	up := &update.Updater{
 		Charts: charts,
 		Open: func(namespace string) (update.Release, error) {
@@ -126,7 +131,31 @@ func runUpdate(ctx context.Context, args []string) {
 		OpenCluster: func(namespace string) (update.Cluster, error) {
 			return update.NewWorkloads(kc, namespace, release.ReleaseName)
 		},
-		Apply:      app.Apply,
+		OpenSnapshots: func(namespace string, values map[string]any) (update.Snapshotter, error) {
+			sb, err := seedbox.Load(*o.grantPath, *o.valuesPath)
+			if err != nil {
+				return nil, err
+			}
+			root, err := update.ConfigRoot(sb)
+			if err != nil {
+				return nil, err
+			}
+			return &update.ConfigSnapshots{
+				ConfigRoot: root,
+				Values:     values,
+				Globs: func(ctx context.Context, version string) (map[string][]string, error) {
+					ch, err := charts.Load(ctx, release.ChartRef{Repo: applyOpts.ChartRepo, Version: version})
+					if err != nil {
+						return nil, err
+					}
+					return update.ChartGlobs(ch)
+				},
+			}, nil
+		},
+		Apply: func(ctx context.Context, opts release.Options) (release.Result, error) {
+			return applyThenSettle(ctx, app.Apply, opts, holds)
+		},
+		Holds:      update.FileHolds{},
 		Confirm:    confirmer(out, *o.yes),
 		State:      update.FileState{Path: update.FilePath(bootstrap.RecordPath)},
 		BoxVersion: version,

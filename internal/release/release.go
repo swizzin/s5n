@@ -295,6 +295,14 @@ type Options struct {
 	// use: a value that is box's, not the operator's, and that has to be
 	// recomputed on every apply so a re-run is still a no-op.
 	BoxValues func(ctx context.Context) (map[string]any, error)
+	// Holds returns the values that keep an app an update rolled back on its
+	// old image: apps.<app>.image.digest and, when the release named one, the
+	// tag. It is overlaid after BoxValues and checked against the chart's
+	// schema like it, because the release box installs must render the app
+	// the rollback left running. The seedbox is the argument apply loaded, so
+	// a caller reads the holds file beside the config root it names without
+	// loading either file a second time. nil means this box keeps no holds.
+	Holds func(ctx context.Context, sb *seedbox.Seedbox, chart Chart, values map[string]any) (map[string]any, error)
 	// HostIssuers is the issuer each host was decided with when the caller
 	// made that decision already (`box init`): host name to tls.issuer
 	// value. The plan compares each Certificate that answers with its own
@@ -451,6 +459,23 @@ func (a *Applier) Apply(ctx context.Context, opts Options) (Result, error) {
 		overlayTree(values, box)
 		if err := seedbox.Validate(chart.Schema, values); err != nil {
 			return res, err
+		}
+	}
+	// The holds are the box's answer too: an app an update rolled back stays on
+	// the image it ran until a release pins another, and the chart has to
+	// render that image. They can only change a value the schema allows, so a
+	// hold that would not render is a refusal here rather than a failed
+	// upgrade later.
+	if opts.Holds != nil {
+		held, err := opts.Holds(ctx, sb, chart, values)
+		if err != nil {
+			return res, err
+		}
+		if len(held) > 0 {
+			overlayTree(values, held)
+			if err := seedbox.Validate(chart.Schema, values); err != nil {
+				return res, err
+			}
 		}
 	}
 

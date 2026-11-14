@@ -69,8 +69,12 @@ type StepRecord struct {
 	// Moved is the apps whose image the step moved, empty for a step that
 	// moved none.
 	Moved []string `json:"moved,omitempty"`
-	// Gate is the gate that failed: "apply", "wiring" or "health". Empty on
-	// a step that passed.
+	// RolledBack is the apps box put back on the image they ran because the
+	// new one kept exiting. A passing step can carry one: the rollback is
+	// what let the step count as done.
+	RolledBack []string `json:"rolledBack,omitempty"`
+	// Gate is the gate that failed: "apply", "wiring", "health" or
+	// "rollback". Empty on a step that passed.
 	Gate string `json:"gate,omitempty"`
 }
 

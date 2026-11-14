@@ -219,6 +219,13 @@ func TestHealthListsOnlyAnAppThatKeepsExiting(t *testing.T) {
 			if !reflect.DeepEqual(got.Exiting, tc.want) {
 				t.Fatalf("Exiting = %+v, want %+v", got.Exiting, tc.want)
 			}
+			// The count itself is what a failed apply is re-read for: one exit
+			// is the difference between "the image is broken" and "something
+			// else failed", so Health reports it whatever the crashloop
+			// threshold does.
+			if got.Restarts["sonarr"] != tc.restarts {
+				t.Fatalf("Restarts = %+v, want sonarr at %d", got.Restarts, tc.restarts)
+			}
 		})
 	}
 }

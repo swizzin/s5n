@@ -13,12 +13,15 @@ import (
 
 	"github.com/swizzin/s5n/internal/release"
 	"github.com/swizzin/s5n/internal/say"
+	"github.com/swizzin/s5n/internal/snapshot"
 )
 
 const (
 	digestA = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 	digestB = "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
 	digestC = "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+	digestD = "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+	digestE = "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
 )
 
 // fakeCharts is the repository: one chart per version, with the two
@@ -28,6 +31,7 @@ const (
 type fakeCharts struct {
 	values   []byte
 	schema   []byte
+	catalog  []byte
 	charts   map[string]release.Chart
 	releases []release.Published
 	err      error
@@ -53,6 +57,12 @@ func (f *fakeCharts) Releases(context.Context, release.ChartRef) ([]release.Publ
 // publish adds one release. The chart's variant digests are what update
 // compares; sonarrDigest is the one tests move.
 func (f *fakeCharts) publish(version, minBox, upgradeFrom, sonarrDigest string) {
+	f.publishVariants(version, minBox, upgradeFrom, variants(sonarrDigest))
+}
+
+// publishVariants adds one release with an explicit variants.yaml, for the tests
+// whose step moves more than one app.
+func (f *fakeCharts) publishVariants(version, minBox, upgradeFrom string, variants []byte) {
 	f.charts[version] = release.Chart{
 		Name:       "s5n",
 		Version:    version,
@@ -63,7 +73,8 @@ func (f *fakeCharts) publish(version, minBox, upgradeFrom, sonarrDigest string) 
 		},
 		Values:   f.values,
 		Schema:   f.schema,
-		Variants: variants(sonarrDigest),
+		Catalog:  f.catalog,
+		Variants: variants,
 	}
 	f.releases = append(f.releases, release.Published{Version: version, MinBox: minBox, UpgradeFrom: upgradeFrom})
 }
@@ -118,17 +129,24 @@ func (f *fakeRelease) State(context.Context) (release.ReleaseState, error) {
 // exitingFrom makes the gate see a crashloop only from that read on, so a test
 // proves box polls for it rather than assuming it.
 type fakeCluster struct {
-	replicas    map[string]int32
-	pods        map[string]int
-	healthy     bool
-	exiting     []Exiting
-	exitingFrom int
-	healths     int
-	moving      []string
-	neverGone   bool
-	scaleErrs   map[int32]error
-	healthErr   error
-	log         *callLog
+	replicas map[string]int32
+	pods     map[string]int
+	healthy  bool
+	exiting  []Exiting
+	// restarts is each moved app's container restart count, read after a
+	// failed apply to decide whether the step gets the health gate's watch.
+	restarts map[string]int32
+	// exitingFrom reports the crashloop only from that health read on, and
+	// exitingUntil stops reporting it after that read, so a test can let box
+	// roll the app back and pass the second gate.
+	exitingFrom  int
+	exitingUntil int
+	healths      int
+	moving       []string
+	neverGone    bool
+	scaleErrs    map[int32]error
+	healthErr    error
+	log          *callLog
 }
 
 func (f *fakeCluster) Scale(_ context.Context, app string, replicas int32) error {
@@ -161,24 +179,33 @@ func (f *fakeCluster) Health(_ context.Context, moving []string) (Health, error)
 		return Health{}, f.healthErr
 	}
 	if f.exitingFrom > 0 && f.healths < f.exitingFrom {
-		return Health{Ready: f.healthy}, nil
+		return Health{Ready: f.healthy, Restarts: f.restarts}, nil
 	}
-	return Health{Ready: f.healthy, Exiting: f.exiting}, nil
+	if f.exitingUntil > 0 && f.healths > f.exitingUntil {
+		return Health{Ready: f.healthy, Restarts: f.restarts}, nil
+	}
+	return Health{Ready: f.healthy, Exiting: f.exiting, Restarts: f.restarts}, nil
 }
 
-// fakeSnapshots records what was asked, copied and pruned.
+// fakeSnapshots records what was asked, copied, restored and pruned.
 type fakeSnapshots struct {
-	checks   []snapshotCall
-	takes    []snapshotCall
-	prunes   []snapshotCall
-	checkErr error
-	takeErr  error
-	log      *callLog
+	checks     []snapshotCall
+	takes      []snapshotCall
+	restores   []snapshotCall
+	prunes     []snapshotCall
+	checkErr   error
+	takeErr    error
+	restoreErr error
+	log        *callLog
+	// taken is what Take answers: a step directory and one dir per app, so a
+	// test can assert what a rollback records and says.
+	taken Taken
 }
 
 type snapshotCall struct {
-	step Step
-	apps []string
+	step   Step
+	apps   []string
+	images map[string]ImageChange
 }
 
 func (f *fakeSnapshots) Check(_ context.Context, step Step, apps []string) error {
@@ -187,10 +214,19 @@ func (f *fakeSnapshots) Check(_ context.Context, step Step, apps []string) error
 	return f.checkErr
 }
 
-func (f *fakeSnapshots) Take(_ context.Context, step Step, apps []string) error {
+func (f *fakeSnapshots) Take(_ context.Context, step Step, apps []string, images map[string]ImageChange) (Taken, error) {
 	f.log.add("take %s -> %s", step.From, step.To)
-	f.takes = append(f.takes, snapshotCall{step: step, apps: apps})
-	return f.takeErr
+	f.takes = append(f.takes, snapshotCall{step: step, apps: apps, images: images})
+	if f.takeErr != nil {
+		return Taken{}, f.takeErr
+	}
+	return f.taken, nil
+}
+
+func (f *fakeSnapshots) Restore(_ context.Context, step Step, apps []string) error {
+	f.log.add("restore %s -> %s", step.From, step.To)
+	f.restores = append(f.restores, snapshotCall{step: step, apps: apps})
+	return f.restoreErr
 }
 
 func (f *fakeSnapshots) Prune(_ context.Context, step Step, apps []string) error {
@@ -201,34 +237,75 @@ func (f *fakeSnapshots) Prune(_ context.Context, step Step, apps []string) error
 
 // fakeApply stands in for release.Applier.Apply. It moves the fake release's
 // state as a real apply would, so the next step sees the revision and version
-// that really happened.
+// that really happened. errSeq fails the next applies of a version, one error per
+// call, so a test can fail the step's apply and let the rollback's re-apply
+// succeed.
 type fakeApply struct {
-	calls   []release.Options
-	errFor  map[string]error
-	applied map[string]bool
-	managed *fakeRelease
-	nextRev int
-	log     *callLog
+	calls  []release.Options
+	errFor map[string]error
+	errSeq map[string][]error
+	// statusSeq is the release status each apply leaves, one per call; a
+	// missing entry leaves the release deployed. A test uses it to hold Helm on
+	// "failed" while the gate reads the apps.
+	statusSeq []string
+	applied   map[string]bool
+	managed   *fakeRelease
+	nextRev   int
+	log       *callLog
 }
 
 func (f *fakeApply) apply(_ context.Context, opts release.Options) (release.Result, error) {
 	f.log.add("apply %s", opts.ChartVersion)
 	f.calls = append(f.calls, opts)
 	version := opts.ChartVersion
+	err := f.errFor[version]
+	if seq := f.errSeq[version]; len(seq) > 0 {
+		err = seq[0]
+		f.errSeq[version] = seq[1:]
+	}
+	status := "deployed"
+	if len(f.statusSeq) > 0 {
+		status = f.statusSeq[0]
+		f.statusSeq = f.statusSeq[1:]
+	}
 	applied := f.applied[version]
-	if applied || f.errFor[version] == nil {
+	if applied || err == nil {
 		f.nextRev++
 		f.managed.state = release.ReleaseState{
 			Exists:       true,
 			ChartVersion: version,
 			Revision:     f.nextRev,
-			Status:       "deployed",
+			Status:       status,
 		}
 	}
-	if err := f.errFor[version]; err != nil {
+	if err != nil {
 		return release.Result{Applied: applied, Revision: f.nextRev}, err
 	}
 	return release.Result{Applied: true, Revision: f.nextRev}, nil
+}
+
+// fakeHolds is holds.json in memory: the plan reads it and a step that rolls an
+// app back writes it, so a test asserts both the file's content and the order
+// the write took in the step.
+type fakeHolds struct {
+	holds []snapshot.Hold
+	root  string
+	saves int
+	log   *callLog
+}
+
+func (f *fakeHolds) Load(root string) ([]snapshot.Hold, error) {
+	f.root = root
+	f.log.add("holds read")
+	return f.holds, nil
+}
+
+func (f *fakeHolds) Save(root string, holds []snapshot.Hold) error {
+	f.log.add("holds write")
+	f.root = root
+	f.holds = holds
+	f.saves++
+	return nil
 }
 
 // fakeState is update.json in memory.
@@ -273,6 +350,7 @@ type harness struct {
 	cluster *fakeCluster
 	snaps   *fakeSnapshots
 	state   *fakeState
+	holds   *fakeHolds
 	app     *fakeApply
 	confirm *fakeConfirm
 	log     *callLog
@@ -292,6 +370,10 @@ func newHarness(t *testing.T) *harness {
 	if err != nil {
 		t.Fatal(err)
 	}
+	catalog, err := os.ReadFile("testdata/catalog.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
 	h := &harness{
 		log:    &callLog{},
 		out:    &bytes.Buffer{},
@@ -299,23 +381,25 @@ func newHarness(t *testing.T) *harness {
 		grant:  "testdata/grant.yaml",
 		values: "testdata/values.yaml",
 	}
-	h.charts = &fakeCharts{values: values, schema: schema, charts: map[string]release.Chart{}}
+	h.charts = &fakeCharts{values: values, schema: schema, catalog: catalog, charts: map[string]release.Chart{}}
 	h.rel = &fakeRelease{
 		state: release.ReleaseState{Exists: true, ChartVersion: "0.4.0", Revision: 3, Status: "deployed"},
 	}
 	h.cluster = &fakeCluster{replicas: map[string]int32{}, pods: map[string]int{}, healthy: true, log: h.log}
 	h.snaps = &fakeSnapshots{log: h.log}
 	h.state = &fakeState{}
+	h.holds = &fakeHolds{log: h.log}
 	h.app = &fakeApply{errFor: map[string]error{}, applied: map[string]bool{}, managed: h.rel, log: h.log, nextRev: 3}
 	h.confirm = &fakeConfirm{answer: true}
 	h.u = &Updater{
 		Charts:        h.charts,
 		Open:          func(string) (Release, error) { return h.rel, nil },
 		OpenCluster:   func(string) (Cluster, error) { return h.cluster, nil },
-		OpenSnapshots: func(string) (Snapshotter, error) { return h.snaps, nil },
+		OpenSnapshots: func(string, map[string]any) (Snapshotter, error) { return h.snaps, nil },
 		Apply:         h.app.apply,
 		Confirm:       h.confirm,
 		State:         h.state,
+		Holds:         h.holds,
 		BoxVersion:    "0.4.0",
 		Say:           &say.Plain{W: h.out},
 		HealthWait:    50 * time.Millisecond,
@@ -403,11 +487,20 @@ func TestOneStepSnapshotsOnlyTheAppWhoseImageMoved(t *testing.T) {
 	if !reflect.DeepEqual(h.scales(), []string{"sonarr=0"}) {
 		t.Fatalf("scales = %v, want sonarr stopped for the copy", h.scales())
 	}
-	wantTake := snapshotCall{step: Step{From: "0.4.0", To: "0.5.0"}, apps: []string{"sonarr"}}
+	wantTake := snapshotCall{
+		step: Step{From: "0.4.0", To: "0.5.0"},
+		apps: []string{"sonarr"},
+		images: map[string]ImageChange{"sonarr": {
+			Ran:      snapshot.ImageRef{Repository: "registry.example.com/seedbox/sonarr", Tag: "5.0.0", Digest: digestA},
+			MovedTo:  snapshot.ImageRef{Repository: "registry.example.com/seedbox/sonarr", Tag: "5.0.0", Digest: digestB},
+			Snapshot: true,
+		}},
+	}
 	if !reflect.DeepEqual(h.snaps.takes, []snapshotCall{wantTake}) {
 		t.Fatalf("takes = %+v, want %+v", h.snaps.takes, wantTake)
 	}
-	if !reflect.DeepEqual(h.snaps.prunes, []snapshotCall{wantTake}) {
+	wantPrune := snapshotCall{step: wantTake.step, apps: wantTake.apps}
+	if !reflect.DeepEqual(h.snaps.prunes, []snapshotCall{wantPrune}) {
 		t.Fatalf("prunes = %+v, want the step's two kept", h.snaps.prunes)
 	}
 	// The copy is taken with no writer, and the release moves only after it
@@ -431,6 +524,42 @@ func TestOneStepSnapshotsOnlyTheAppWhoseImageMoved(t *testing.T) {
 	}
 	if !strings.Contains(h.out.String(), "s5n 0.4.0 -> 0.5.0 in testbox: 1 step") {
 		t.Fatalf("plan line missing:\n%s", h.out)
+	}
+}
+
+// TestAnAppWithNoSnapshotIsMovedWithoutACopy: the release's catalog says sonarr
+// has nothing an upgrade can rewrite, so the step leaves it running, copies only
+// radarr, and the plan says so after sonarr's name. A copy box never took is a
+// copy box will never restore, so the operator reads it before the step moves.
+func TestAnAppWithNoSnapshotIsMovedWithoutACopy(t *testing.T) {
+	h := newHarness(t)
+	catalog, err := os.ReadFile("testdata/catalog-nosnapshot.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.charts.catalog = catalog
+	h.grant = "testdata/grant-radarr.yaml"
+	h.charts.publishVariants("0.4.0", "0.4.0", "0.4.0", variantsBoth(digestA, digestD))
+	h.charts.publishVariants("0.5.0", "0.4.0", "0.4.0", variantsBoth(digestB, digestE))
+
+	res, err := h.run(t, false)
+	if err != nil {
+		t.Fatalf("update: %v\n%s", err, h.out)
+	}
+	if !reflect.DeepEqual(res.Steps[0].Moving, []string{"radarr", "sonarr"}) {
+		t.Fatalf("moving = %v, want both apps the release moved", res.Steps[0].Moving)
+	}
+	if !reflect.DeepEqual(res.Steps[0].Copied(), []string{"radarr"}) {
+		t.Fatalf("copied = %v, want only radarr: the catalog gives sonarr nothing to copy", res.Steps[0].Copied())
+	}
+	if !reflect.DeepEqual(h.scales(), []string{"radarr=0"}) {
+		t.Fatalf("scales = %v, want only the copied app stopped", h.scales())
+	}
+	if len(h.snaps.takes) != 1 || !reflect.DeepEqual(h.snaps.takes[0].apps, []string{"radarr"}) {
+		t.Fatalf("takes = %+v, want one copy of radarr", h.snaps.takes)
+	}
+	if !strings.Contains(h.out.String(), "(apps: radarr, sonarr (no snapshot))") {
+		t.Fatalf("the plan does not mark sonarr as uncopied:\n%s", h.out)
 	}
 }
 
@@ -493,6 +622,80 @@ func TestAHeldAppIsNamedInThePlan(t *testing.T) {
 	}
 }
 
+// TestARollbackHoldIsNamedInThePlan: an app a rollback holds runs the image the
+// snapshot recorded, not the one the release pins, so nothing of it moves and
+// the plan says why -- and until which release that stays true.
+func TestARollbackHoldIsNamedInThePlan(t *testing.T) {
+	h := newHarness(t)
+	h.charts.publish("0.4.0", "0.4.0", "0.4.0", digestA)
+	h.charts.publish("0.5.0", "0.4.0", "0.4.0", digestB)
+	h.holds.holds = []snapshot.Hold{{
+		App:      "sonarr",
+		At:       snapshot.ImageRef{Repository: "registry.example.com/seedbox/sonarr", Tag: "4.9.0", Digest: digestC},
+		Avoiding: snapshot.ImageRef{Repository: "registry.example.com/seedbox/sonarr", Tag: "5.0.0", Digest: digestB},
+		Snapshot: "0.4.0-0.5.0-20260102T030405Z",
+		Since:    h.now,
+		By:       snapshot.ByUpdate,
+	}}
+
+	res, err := h.run(t, false)
+	if err != nil {
+		t.Fatalf("update: %v\n%s", err, h.out)
+	}
+	if len(res.Steps) != 1 || len(res.Steps[0].Moving) != 0 {
+		t.Fatalf("steps = %+v, want nothing moving: the hold keeps the app on its image", res.Steps)
+	}
+	if !reflect.DeepEqual(res.Steps[0].HeldBack, []string{"sonarr"}) {
+		t.Fatalf("heldBack = %v, want sonarr", res.Steps[0].HeldBack)
+	}
+	if len(h.scales()) != 0 || len(h.snaps.takes) != 0 {
+		t.Fatalf("a held-back app was stopped or copied: scales=%v takes=%+v", h.scales(), h.snaps.takes)
+	}
+	for _, want := range []string{
+		"0.4.0 -> 0.5.0 (no image moves)",
+		"held:",
+		"sonarr: held at 4.9.0 after a rollback, until a release pins something other than 5.0.0",
+	} {
+		if !strings.Contains(h.out.String(), want) {
+			t.Fatalf("plan does not print %q:\n%s", want, h.out)
+		}
+	}
+}
+
+// TestALapsingHoldMovesTheApp: the release pins an image other than the one the
+// rollback avoided, so the hold is over and the app moves -- and is copied --
+// like any other app the step moves.
+func TestALapsingHoldMovesTheApp(t *testing.T) {
+	h := newHarness(t)
+	h.charts.publish("0.4.0", "0.4.0", "0.4.0", digestA)
+	h.charts.publish("0.5.0", "0.4.0", "0.4.0", digestB)
+	h.holds.holds = []snapshot.Hold{{
+		App:      "sonarr",
+		At:       snapshot.ImageRef{Repository: "registry.example.com/seedbox/sonarr", Tag: "4.8.0", Digest: digestA},
+		Avoiding: snapshot.ImageRef{Repository: "registry.example.com/seedbox/sonarr", Tag: "4.9.0", Digest: digestC},
+		Snapshot: "0.4.0-0.5.0-20260102T030405Z",
+		Since:    h.now,
+		By:       snapshot.ByUpdate,
+	}}
+
+	res, err := h.run(t, false)
+	if err != nil {
+		t.Fatalf("update: %v\n%s", err, h.out)
+	}
+	if !reflect.DeepEqual(res.Steps[0].Moving, []string{"sonarr"}) {
+		t.Fatalf("moving = %v, want sonarr: the release pins another image, so the hold has lapsed", res.Steps[0].Moving)
+	}
+	if len(res.Steps[0].HeldBack) != 0 {
+		t.Fatalf("heldBack = %v, want nothing: the hold lapsed at this release", res.Steps[0].HeldBack)
+	}
+	if len(h.snaps.takes) != 1 || !reflect.DeepEqual(h.snaps.takes[0].apps, []string{"sonarr"}) {
+		t.Fatalf("takes = %+v, want the lapsed app copied before it moves", h.snaps.takes)
+	}
+	if strings.Contains(h.out.String(), "after a rollback") {
+		t.Fatalf("the plan still holds an app the release moved past:\n%s", h.out)
+	}
+}
+
 func TestTwoStepsWhenTheTargetCannotFollowTheInstalledRelease(t *testing.T) {
 	h := newHarness(t)
 	h.charts.publish("0.4.0", "0.4.0", "0.4.0", digestA)
@@ -539,11 +742,13 @@ func TestAWiringGateFailureStopsTheUpdate(t *testing.T) {
 	for _, want := range []string{
 		"update s5n to 0.5.0: the wiring gate failed (wiring receipt says failed)",
 		"s5n is on 0.5.0 (revision 4, deployed)",
-		"and was not rolled back",
 	} {
 		if !strings.Contains(err.Error(), want) {
 			t.Fatalf("error %q does not name %q", err, want)
 		}
+	}
+	if strings.Contains(err.Error(), "rolled back") {
+		t.Fatalf("error %q still says box rolled the release back", err)
 	}
 	// Nothing touches the apps after the apply: they are the new release's.
 	if !reflect.DeepEqual(h.scales(), []string{"sonarr=0"}) {
@@ -587,7 +792,7 @@ func TestAHealthGateFailureStopsTheUpdate(t *testing.T) {
 		t.Fatal("a failed health gate reported success")
 	}
 	const want = "update s5n to 0.5.0: the health gate failed (the release is not deployed and healthy after 50ms); " +
-		"s5n is on 0.5.0 (revision 4, deployed) and was not rolled back"
+		"s5n is on 0.5.0 (revision 4, deployed)"
 	if err.Error() != want {
 		t.Fatalf("error = %q, want %q", err, want)
 	}
@@ -596,6 +801,12 @@ func TestAHealthGateFailureStopsTheUpdate(t *testing.T) {
 	}
 	if len(h.snaps.takes) != 1 || len(h.snaps.prunes) != 0 {
 		t.Fatalf("takes = %+v prunes = %+v, want the failed step's snapshot kept", h.snaps.takes, h.snaps.prunes)
+	}
+	// A timeout leaves the app exactly where the step put it: no restore, no
+	// hold, no second apply.
+	if len(h.snaps.restores) != 0 || h.holds.saves != 0 || len(h.app.calls) != 1 {
+		t.Fatalf("restores = %+v holds = %d applies = %d, want nothing touched after a timeout",
+			h.snaps.restores, h.holds.saves, len(h.app.calls))
 	}
 	rec := h.state.state.LastStep
 	if rec == nil || rec.Outcome != OutcomeFailed || rec.Gate != gateHealth {
@@ -606,53 +817,342 @@ func TestAHealthGateFailureStopsTheUpdate(t *testing.T) {
 	}
 }
 
-// TestAnAppThatKeepsExitingEndsTheHealthGateAtOnce: the step's new image exits
-// instead of starting. Box does not spend the health budget on it -- the rest
-// of the release is not even asked to be ready -- and stops the step naming the
-// app and the count, because the image is what has to change.
-func TestAnAppThatKeepsExitingEndsTheHealthGateAtOnce(t *testing.T) {
+// TestACrashloopRollsTheAppBackAndTheUpdateContinues: the step moves two apps,
+// one of them keeps exiting. Box puts only that app back -- stop, wait, restore
+// its copy, hold it, re-apply the same release -- and the step then counts as
+// passed, so the run goes on to the next release.
+func TestACrashloopRollsTheAppBackAndTheUpdateContinues(t *testing.T) {
+	h := newHarness(t)
+	h.grant = "testdata/grant-radarr.yaml"
+	h.charts.publishVariants("0.4.0", "0.4.0", "0.4.0", variantsMoving(digestA, digestD, "7.0.0"))
+	h.charts.publishVariants("0.5.0", "0.4.0", "0.4.0", variantsMoving(digestB, digestE, "7.1.0"))
+	h.charts.publishVariants("0.6.0", "0.4.0", "0.5.0", variantsMoving(digestC, digestE, "7.1.0"))
+	takenAt := h.now
+	h.snaps.taken = Taken{
+		Step: "0.4.0-0.5.0-" + takenAt.Format("20060102T150405Z"),
+		At:   takenAt,
+		Dirs: map[string]string{
+			"radarr": "/srv/s5n/config/.box/snapshots/0.4.0-0.5.0-20260102T030405Z/radarr",
+			"sonarr": "/srv/s5n/config/.box/snapshots/0.4.0-0.5.0-20260102T030405Z/sonarr",
+		},
+	}
+	// radarr exits on the first gate. The rollback brings it back on the image
+	// it ran, and the second gate sees it ready.
+	h.cluster.exiting = []Exiting{{App: "radarr", Restarts: 3}}
+	h.cluster.exitingUntil = 1
+
+	res, err := h.run(t, false)
+	if err != nil {
+		t.Fatalf("update: %v\n%s", err, h.out)
+	}
+	if !reflect.DeepEqual(res.Taken, []Step{{From: "0.4.0", To: "0.5.0"}, {From: "0.5.0", To: "0.6.0"}}) {
+		t.Fatalf("taken = %+v, want both steps: the rollback is what let the first one pass", res.Taken)
+	}
+	if h.rel.state.ChartVersion != "0.6.0" {
+		t.Fatalf("release = %+v, want the run to have gone on to 0.6.0", h.rel.state)
+	}
+
+	// One ordered log across every fake: stop the copies, copy, apply, watch,
+	// then the step-back's own order.
+	h.assertOrder(t,
+		"check 0.4.0 -> 0.5.0", "scale radarr=0", "scale sonarr=0", "gone radarr", "gone sonarr", "take 0.4.0 -> 0.5.0",
+		"apply 0.5.0", "health",
+		"scale radarr=0", "gone radarr", "restore 0.4.0 -> 0.5.0", "holds write", "apply 0.5.0", "health",
+		"apply 0.6.0",
+	)
+	// Only the app that exited was put back; its sibling moved with the
+	// release and stayed there.
+	if want := []string{"radarr=0", "sonarr=0", "radarr=0", "sonarr=0"}; !reflect.DeepEqual(h.scales(), want) {
+		t.Fatalf("scales = %v, want %v: the rollback stops radarr only, and the second step copies sonarr", h.scales(), want)
+	}
+	// One hold, at the image radarr ran, avoiding the one it exited on.
+	if h.holds.saves != 1 || len(h.holds.holds) != 1 {
+		t.Fatalf("holds = %+v (saves %d), want one hold", h.holds.holds, h.holds.saves)
+	}
+	hold := h.holds.holds[0]
+	if hold.App != "radarr" || hold.By != snapshot.ByUpdate {
+		t.Fatalf("hold = %+v, want radarr written by update", hold)
+	}
+	if hold.At.Digest != digestD || hold.Avoiding.Digest != digestE {
+		t.Fatalf("hold = %+v, want the image it ran (%s) and the one it exited on (%s)", hold, digestD, digestE)
+	}
+	if hold.Snapshot != h.snaps.taken.Step || !hold.Since.Equal(h.now) {
+		t.Fatalf("hold = %+v, want this step's copy and now", hold)
+	}
+	if !reflect.DeepEqual(h.snaps.restores[0].apps, []string{"radarr"}) {
+		t.Fatalf("restored %v, want radarr alone", h.snaps.restores[0].apps)
+	}
+	// The re-apply is the same release, so Helm records a deployed revision
+	// and the hold is what renders the old image.
+	if len(h.app.calls) != 3 || h.app.calls[0].ChartVersion != "0.5.0" || h.app.calls[1].ChartVersion != "0.5.0" || h.app.calls[2].ChartVersion != "0.6.0" {
+		t.Fatalf("applies = %+v, want 0.5.0, 0.5.0 again, then 0.6.0", h.app.calls)
+	}
+	for _, want := range []string{
+		"radarr exited 3 times on 7.1.0: rolling it back to 7.0.0",
+		"radarr is back on 7.0.0 with its snapshot from 2026-01-02 03:04 UTC; it stays there until a release pins something other than 7.1.0",
+	} {
+		if !strings.Contains(h.out.String(), want) {
+			t.Fatalf("transcript does not say %q:\n%s", want, h.out)
+		}
+	}
+}
+
+// TestARolledBackStepRecordsTheAppsItPutBack: the step counts as passed and its
+// record says which app was put back, so status and a later run can see it.
+func TestARolledBackStepRecordsTheAppsItPutBack(t *testing.T) {
 	h := newHarness(t)
 	h.charts.publish("0.4.0", "0.4.0", "0.4.0", digestA)
 	h.charts.publish("0.5.0", "0.4.0", "0.4.0", digestB)
-	// An hour would outlast the test several times over: only the reading
-	// that finds the app exiting can end this gate.
-	h.u.HealthWait = time.Hour
-	h.cluster.healthy = false
-	h.cluster.exiting = []Exiting{{App: "sonarr", Restarts: 3}}
-	h.cluster.exitingFrom = 3
-
-	_, err := h.run(t, false)
-	if err == nil {
-		t.Fatal("an app that keeps exiting passed the health gate")
+	h.snaps.taken = Taken{
+		Step: "0.4.0-0.5.0-20260102T030405Z",
+		At:   h.now,
+		Dirs: map[string]string{"sonarr": "/srv/s5n/config/.box/snapshots/0.4.0-0.5.0-20260102T030405Z/sonarr"},
 	}
-	const want = "update s5n to 0.5.0: the health gate failed (sonarr exited 3 times on its new image); " +
-		"s5n is on 0.5.0 (revision 4, deployed) and was not rolled back"
+	h.cluster.exiting = []Exiting{{App: "sonarr", Restarts: 3}}
+	h.cluster.exitingUntil = 1
+
+	res, err := h.run(t, false)
+	if err != nil {
+		t.Fatalf("update: %v\n%s", err, h.out)
+	}
+	if !reflect.DeepEqual(res.Taken, []Step{{From: "0.4.0", To: "0.5.0"}}) {
+		t.Fatalf("taken = %+v, want the step that was rolled back", res.Taken)
+	}
+	rec := h.state.state.LastStep
+	if rec == nil || rec.Outcome != OutcomeOK || rec.To != "0.5.0" {
+		t.Fatalf("LastStep = %+v, want a passing step to 0.5.0", rec)
+	}
+	if !reflect.DeepEqual(rec.RolledBack, []string{"sonarr"}) || rec.Gate != "" {
+		t.Fatalf("LastStep = %+v, want sonarr recorded as rolled back and no gate", rec)
+	}
+	if h.rel.state.ChartVersion != "0.5.0" {
+		t.Fatalf("release = %+v, want the step's release", h.rel.state)
+	}
+}
+
+// TestAnExitingAppWithoutASnapshotStopsTheUpdate: box has nothing to restore, so
+// it does not scale the app or write a hold -- it stops, names the app and its
+// exits, and records the release as failed.
+func TestAnExitingAppWithoutASnapshotStopsTheUpdate(t *testing.T) {
+	h := newHarness(t)
+	catalog, err := os.ReadFile("testdata/catalog-nosnapshot.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.charts.catalog = catalog
+	h.charts.publish("0.4.0", "0.4.0", "0.4.0", digestA)
+	h.charts.publish("0.5.0", "0.4.0", "0.4.0", digestB)
+	h.cluster.exiting = []Exiting{{App: "sonarr", Restarts: 4}}
+
+	_, err = h.run(t, false)
+	if err == nil {
+		t.Fatalf("an exiting app box cannot restore passed the gate:\n%s", h.out)
+	}
+	const want = "update s5n to 0.5.0: the health gate failed (sonarr exited 4 times on its new image); " +
+		"s5n is on 0.5.0 (revision 4, deployed)"
 	if err.Error() != want {
 		t.Fatalf("error = %q, want %q", err, want)
 	}
-	if h.cluster.healths != 3 {
-		t.Fatalf("health was read %d times, want 3: the gate ends as soon as an app is exiting", h.cluster.healths)
+	if len(h.snaps.restores) != 0 || h.holds.saves != 0 {
+		t.Fatalf("restores = %+v holds = %d, want nothing: the app has no copy to restore", h.snaps.restores, h.holds.saves)
 	}
-	if !reflect.DeepEqual(h.cluster.moving, []string{"sonarr"}) {
-		t.Fatalf("health was asked about %v, want the apps the step moved", h.cluster.moving)
-	}
-	// The app is the new release's: nothing is scaled and the copy the
-	// operator was promised is kept.
-	if !reflect.DeepEqual(h.scales(), []string{"sonarr=0"}) {
-		t.Fatalf("scales = %v, want nothing after the apply", h.scales())
-	}
-	if len(h.snaps.takes) != 1 || len(h.snaps.prunes) != 0 {
-		t.Fatalf("takes = %+v prunes = %+v, want the failed step's snapshot kept", h.snaps.takes, h.snaps.prunes)
+	// The app was never stopped: an app with nothing to copy is moved without
+	// being scaled.
+	if len(h.scales()) != 0 {
+		t.Fatalf("scales = %v, want nothing: an uncopied app is not stopped", h.scales())
 	}
 	rec := h.state.state.LastStep
 	if rec == nil || rec.Outcome != OutcomeFailed || rec.Gate != gateHealth {
-		t.Fatalf("LastStep = %+v, want a failed step naming the health gate", rec)
+		t.Fatalf("LastStep = %+v, want a failed health gate", rec)
 	}
-	if rec.Error != want {
-		t.Fatalf("LastStep.Error = %q, want %q", rec.Error, want)
+}
+
+// TestTheGateReadsTheAppsBeforeHelmsStatus: an image that never starts makes
+// Helm's own wait give up, so the release reads failed while the app is
+// crashlooping. The gate has to see the exiting app whatever Helm says, or it
+// would wait out the budget and record a timeout instead of rolling back.
+func TestTheGateReadsTheAppsBeforeHelmsStatus(t *testing.T) {
+	h := newHarness(t)
+	h.charts.publish("0.4.0", "0.4.0", "0.4.0", digestA)
+	h.charts.publish("0.5.0", "0.4.0", "0.4.0", digestB)
+	h.snaps.taken = Taken{
+		Step: "0.4.0-0.5.0-20260102T030405Z",
+		At:   h.now,
+		Dirs: map[string]string{"sonarr": "/srv/s5n/config/.box/snapshots/0.4.0-0.5.0-20260102T030405Z/sonarr"},
+	}
+	// The gate runs while Helm still calls the revision failed: the first apply
+	// leaves the release failed, the rollback's re-apply leaves it deployed.
+	h.app.statusSeq = []string{"failed"}
+	h.cluster.exiting = []Exiting{{App: "sonarr", Restarts: 3}}
+	h.cluster.exitingUntil = 1
+
+	res, err := h.run(t, false)
+	if err != nil {
+		t.Fatalf("update: %v\n%s", err, h.out)
+	}
+	if !reflect.DeepEqual(res.Taken, []Step{{From: "0.4.0", To: "0.5.0"}}) {
+		t.Fatalf("taken = %+v, want the rolled-back step", res.Taken)
+	}
+	if len(h.snaps.restores) != 1 {
+		t.Fatalf("restores = %+v, want the app put back: the gate saw the crashloop although Helm said failed", h.snaps.restores)
+	}
+}
+
+// TestARestoreThatFailsLeavesTheAppStopped: the copy is the one thing box must
+// not get wrong, so a restore that refuses stops the step with the app still
+// scaled to zero and says both things the operator needs: that it is stopped and
+// where its copy is.
+func TestARestoreThatFailsLeavesTheAppStopped(t *testing.T) {
+	h := newHarness(t)
+	h.charts.publish("0.4.0", "0.4.0", "0.4.0", digestA)
+	h.charts.publish("0.5.0", "0.4.0", "0.4.0", digestB)
+	takenAt := h.now
+	h.snaps.taken = Taken{
+		Step: "0.4.0-0.5.0-20260102T030405Z",
+		At:   takenAt,
+		Dirs: map[string]string{"sonarr": "/srv/s5n/config/.box/snapshots/0.4.0-0.5.0-20260102T030405Z/sonarr"},
+	}
+	h.snaps.restoreErr = errors.New("restore: no readable manifest.json, so it is not a snapshot box took")
+	h.cluster.exiting = []Exiting{{App: "sonarr", Restarts: 3}}
+
+	_, err := h.run(t, false)
+	if err == nil {
+		t.Fatal("a failed restore reported success")
+	}
+	const want = "update s5n to 0.5.0: the rollback gate failed (restore: no readable manifest.json, so it is not a snapshot box took); " +
+		"s5n is on 0.5.0 (revision 4, deployed); sonarr is stopped; sonarr's snapshot is at " +
+		"/srv/s5n/config/.box/snapshots/0.4.0-0.5.0-20260102T030405Z/sonarr"
+	if err.Error() != want {
+		t.Fatalf("error = %q, want %q", err, want)
+	}
+	if h.holds.saves != 0 {
+		t.Fatalf("holds written = %d, want none: the app was never put back", h.holds.saves)
+	}
+	rec := h.state.state.LastStep
+	if rec == nil || rec.Gate != gateRollback || rec.Outcome != OutcomeFailed {
+		t.Fatalf("LastStep = %+v, want a failed rollback gate", rec)
+	}
+}
+
+// TestASecondGateThatFailsRecordsTheRollbackGate: the app was restored and held,
+// but it keeps exiting on the image it was put back on. The step stops with the
+// rollback gate, keeps the copy and points the operator at it.
+func TestASecondGateThatFailsRecordsTheRollbackGate(t *testing.T) {
+	h := newHarness(t)
+	h.charts.publish("0.4.0", "0.4.0", "0.4.0", digestA)
+	h.charts.publish("0.5.0", "0.4.0", "0.4.0", digestB)
+	h.snaps.taken = Taken{
+		Step: "0.4.0-0.5.0-20260102T030405Z",
+		At:   h.now,
+		Dirs: map[string]string{"sonarr": "/srv/s5n/config/.box/snapshots/0.4.0-0.5.0-20260102T030405Z/sonarr"},
+	}
+	h.cluster.exiting = []Exiting{{App: "sonarr", Restarts: 3}}
+
+	_, err := h.run(t, false)
+	if err == nil {
+		t.Fatal("a second gate that still sees the app exiting reported success")
+	}
+	const want = "update s5n to 0.5.0: the rollback gate failed (sonarr exited 3 times on its new image); " +
+		"s5n is on 0.5.0 (revision 5, deployed); sonarr's snapshot is at " +
+		"/srv/s5n/config/.box/snapshots/0.4.0-0.5.0-20260102T030405Z/sonarr"
+	if err.Error() != want {
+		t.Fatalf("error = %q, want %q", err, want)
+	}
+	if h.holds.saves != 1 {
+		t.Fatalf("holds written = %d, want the one the rollback made", h.holds.saves)
+	}
+	rec := h.state.state.LastStep
+	if rec == nil || rec.Gate != gateRollback {
+		t.Fatalf("LastStep = %+v, want the rollback gate", rec)
 	}
 	if !reflect.DeepEqual(h.state.state.Failed, []string{"0.5.0"}) {
-		t.Fatalf("Failed = %v, want the release recorded so the timer does not retry it", h.state.state.Failed)
+		t.Fatalf("Failed = %v, want the release recorded", h.state.state.Failed)
+	}
+}
+
+// TestAFailedApplyAtOneRestartRollsBackWhenItReachesThree: Helm's own wait gives
+// up on the first CrashLoopBackOff, so the step's apply is where a never-starting
+// image fails. A moved app that has restarted puts the step into the health
+// gate's watch, which finds the crashloop and rolls the app back.
+func TestAFailedApplyAtOneRestartRollsBackWhenItReachesThree(t *testing.T) {
+	h := newHarness(t)
+	h.charts.publish("0.4.0", "0.4.0", "0.4.0", digestA)
+	h.charts.publish("0.5.0", "0.4.0", "0.4.0", digestB)
+	h.snaps.taken = Taken{
+		Step: "0.4.0-0.5.0-20260102T030405Z",
+		At:   h.now,
+		Dirs: map[string]string{"sonarr": "/srv/s5n/config/.box/snapshots/0.4.0-0.5.0-20260102T030405Z/sonarr"},
+	}
+	h.app.errSeq = map[string][]error{"0.5.0": {errors.New("release s5n failed: pod sonarr is in CrashLoopBackOff")}}
+	h.cluster.restarts = map[string]int32{"sonarr": 1}
+	h.cluster.exiting = []Exiting{{App: "sonarr", Restarts: 3}}
+	h.cluster.exitingFrom = 2
+	h.cluster.exitingUntil = 2
+
+	res, err := h.run(t, false)
+	if err != nil {
+		t.Fatalf("update: %v\n%s", err, h.out)
+	}
+	if !reflect.DeepEqual(res.Taken, []Step{{From: "0.4.0", To: "0.5.0"}}) {
+		t.Fatalf("taken = %+v, want the step that was rolled back", res.Taken)
+	}
+	if len(h.snaps.restores) != 1 || h.holds.saves != 1 {
+		t.Fatalf("restores = %+v holds = %d, want the app put back and held", h.snaps.restores, h.holds.saves)
+	}
+	// The failed apply, the watch's reading, then the re-apply.
+	if len(h.app.calls) != 2 {
+		t.Fatalf("applies = %+v, want the failed one and the re-apply", h.app.calls)
+	}
+}
+
+// TestAFailedApplyThatRecoversReappliesOnce: the moved app restarted once and
+// then came up, so the image was slow rather than broken. Helm's revision never
+// reached deployed, so box applies the same release once more and the normal gate
+// decides.
+func TestAFailedApplyThatRecoversReappliesOnce(t *testing.T) {
+	h := newHarness(t)
+	h.charts.publish("0.4.0", "0.4.0", "0.4.0", digestA)
+	h.charts.publish("0.5.0", "0.4.0", "0.4.0", digestB)
+	h.app.errSeq = map[string][]error{"0.5.0": {errors.New("release s5n failed: pod sonarr was restarted")}}
+	h.cluster.restarts = map[string]int32{"sonarr": 1}
+
+	res, err := h.run(t, false)
+	if err != nil {
+		t.Fatalf("update: %v\n%s", err, h.out)
+	}
+	if !reflect.DeepEqual(res.Taken, []Step{{From: "0.4.0", To: "0.5.0"}}) {
+		t.Fatalf("taken = %+v, want the step", res.Taken)
+	}
+	if len(h.app.calls) != 2 || h.app.calls[0].ChartVersion != "0.5.0" || h.app.calls[1].ChartVersion != "0.5.0" {
+		t.Fatalf("applies = %+v, want 0.5.0 twice: the failed one and the re-run", h.app.calls)
+	}
+	if len(h.snaps.restores) != 0 || h.holds.saves != 0 {
+		t.Fatalf("restores = %+v holds = %d, want nothing rolled back", h.snaps.restores, h.holds.saves)
+	}
+	if h.state.state.LastStep == nil || h.state.state.LastStep.Outcome != OutcomeOK {
+		t.Fatalf("LastStep = %+v, want a passing step", h.state.state.LastStep)
+	}
+}
+
+// TestAFailedApplyWithNoMovedAppRestartingStopsAtTheApplyGate: an apply can fail
+// for reasons that are not the image, and box must not spend the health budget
+// on one. With no moved app restarting, the apply's failure is the answer.
+func TestAFailedApplyWithNoMovedAppRestartingStopsAtTheApplyGate(t *testing.T) {
+	h := newHarness(t)
+	h.charts.publish("0.4.0", "0.4.0", "0.4.0", digestA)
+	h.charts.publish("0.5.0", "0.4.0", "0.4.0", digestB)
+	h.app.errFor["0.5.0"] = errors.New("values file: apps.sonarr.port is not an integer")
+	h.u.HealthWait = time.Hour
+
+	_, err := h.run(t, false)
+	if err == nil {
+		t.Fatal("a failed apply reported success")
+	}
+	if h.cluster.healths != 1 {
+		t.Fatalf("health was read %d times, want one: the apply's cause is read once, not waited out", h.cluster.healths)
+	}
+	if !strings.Contains(err.Error(), "the apply failed (values file: apps.sonarr.port is not an integer)") {
+		t.Fatalf("error = %q, want the apply's own failure", err)
 	}
 }
 
@@ -847,8 +1347,8 @@ func TestAFailedGateThatCannotReadTheStateSaysSo(t *testing.T) {
 	if strings.Contains(err.Error(), "is on 0.5.0") {
 		t.Fatalf("error %q names a release box did not read", err)
 	}
-	if !strings.Contains(err.Error(), "and was not rolled back") {
-		t.Fatalf("error %q does not say the release stays", err)
+	if strings.Contains(err.Error(), "rolled back") {
+		t.Fatalf("error %q still says box rolled the release back", err)
 	}
 }
 

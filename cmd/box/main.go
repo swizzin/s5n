@@ -580,10 +580,15 @@ func runApply(ctx context.Context, args []string) {
 	// moves, so no apply leaves the app unreachable (docs/box.md,
 	// "No run leaves an app host without its listener").
 	opts.Hosts = applyHosts{kubeconfig: kc, out: out, resolver: resolver}
+	// An app an update rolled back stays on the image it ran until a release
+	// pins another: an apply is what renders that hold, and the run that lapses
+	// it says so.
+	holds := newBoxHolds(out)
+	opts.Holds = holds.values
 	// No host-CA step here: the anchor follows the Certificate the box's host
 	// is served with, and this run neither writes that Certificate nor may read
 	// cert-manager's namespace. `box init` is the run that keeps it right.
-	res, err := app.Apply(ctx, opts)
+	res, err := applyThenSettle(ctx, app.Apply, opts, holds)
 	if err != nil {
 		if errors.Is(err, release.ErrCancelled) {
 			os.Exit(1)
@@ -777,7 +782,8 @@ func (o *initFlags) run(ctx context.Context, kubeconfig string, yes, plain bool,
 					return release.NewStorage(kc, namespace)
 				},
 			}
-			_, err = app.Apply(ctx, release.Options{
+			holds := newBoxHolds(out)
+			_, err = applyThenSettle(ctx, app.Apply, release.Options{
 				Chart:         &chart,
 				GrantPath:     req.GrantPath,
 				ValuesPath:    req.ValuesPath,
@@ -785,7 +791,11 @@ func (o *initFlags) run(ctx context.Context, kubeconfig string, yes, plain bool,
 				AfterConfirm:  afterConfirm(req),
 				TransientKeys: req.TransientKeys,
 				BoxValues:     boxValues(kc),
-				Anchor:        hostCA(kc, out, o.caFile),
+				// An app an update rolled back stays on the image it ran: a
+				// re-run of init applies the chart too, and without the hold it
+				// would move that app onto the image its rollback avoided.
+				Holds:  holds.values,
+				Anchor: hostCA(kc, out, o.caFile),
 				// The per-host step, inside the apply: init decided every
 				// name, and this writes each one's listener and Certificate
 				// after the confirm and before the release moves. Running it
@@ -811,7 +821,7 @@ func (o *initFlags) run(ctx context.Context, kubeconfig string, yes, plain bool,
 				// will write for it -- not with tls.issuer, which is empty
 				// when DNS decided, and not with a second resolution.
 				HostIssuers: req.HostIssuers,
-			})
+			}, holds)
 			return portRangeHint(err)
 		},
 	}

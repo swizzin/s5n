@@ -16,13 +16,19 @@
 // snapshot is the only reason going back over a forward-only database is real
 // rather than nominal.
 //
-// box does not go back by itself. A gate that fails stops the update and says
-// where the release is. The health gate does tell the two failures it sees
-// apart: an app a step moved whose container keeps exiting ends the wait at
-// once and is named in the record, while an app that is running and not yet
-// listening is waited for, because an Arr opens its port only after its
-// migration has finished. The only thing this package puts back is the apps a
-// step stopped before the release ever moved.
+// box puts one thing back on its own. A gate that fails stops the update and
+// says where the release is, except for the failure the new image is the cause
+// of: a moved app whose container keeps exiting is scaled to zero, restored from
+// this step's copy, and held on the image it ran, and the step re-applies the
+// same release so the chart renders that image. The rest of the release stays
+// where the step put it. The hold lives beside the snapshots and lapses when a
+// release pins another image, so the app moves again with the release that
+// fixes it. An app the catalog gives nothing to copy is never put back: box has
+// no state to restore, so it stops instead.
+//
+// An app that is running but not yet listening is waited for, because an Arr
+// opens its port only after its migration has finished. A failure before the
+// release ever moved only starts the apps this run stopped.
 //
 // Like internal/release, the decision is made over small interfaces -- a chart
 // source, a release handle, the workload set, a snapshotter, an apply and a
@@ -42,6 +48,7 @@ import (
 	"github.com/swizzin/s5n/internal/release"
 	"github.com/swizzin/s5n/internal/say"
 	"github.com/swizzin/s5n/internal/seedbox"
+	"github.com/swizzin/s5n/internal/snapshot"
 	"github.com/swizzin/s5n/internal/wait"
 )
 
@@ -81,21 +88,44 @@ type Cluster interface {
 	Health(ctx context.Context, moving []string) (Health, error)
 }
 
-// Snapshotter copies the apps a step moves out of the way, so the operator has
-// a copy of whatever the new image migrated and can put it back with a command
-// of their own. internal/snapshot implements it; this package ships only the
-// interface and a test fake, and cmd/box wires the implementation in.
+// Snapshotter copies the apps a step moves out of the way, so box can put one
+// of them back when its new image crashloops, and the operator can always go
+// back by hand with the copy. internal/update's ConfigSnapshots implements it
+// over internal/snapshot; this package ships the interface and a test fake, and
+// cmd/box wires the implementation in.
 type Snapshotter interface {
 	// Check reports whether a copy of these apps can be taken, without
 	// stopping an app or writing a file. A refusal ends the update with
-	// nothing stopped: a box that cannot copy an app has no way to put its
-	// database back, and that is not a step to start.
+	// nothing stopped: a box whose config directory is not where the values
+	// say has no way to put the app's database back, and that is not a step
+	// to start.
 	Check(ctx context.Context, step Step, apps []string) error
 	// Take copies the named apps' config for this step, with the apps
-	// stopped. It must fail rather than leave a partial snapshot.
-	Take(ctx context.Context, step Step, apps []string) error
+	// stopped, and says where it put them. It must fail rather than leave a
+	// partial snapshot. The images are what the manifest records for a later
+	// rollback; a step that cannot name both is refused before anything is
+	// copied.
+	Take(ctx context.Context, step Step, apps []string, images map[string]ImageChange) (Taken, error)
 	// Prune keeps the newest two snapshots per app.
 	Prune(ctx context.Context, step Step, apps []string) error
+	// Restore puts the named apps back to the copy this step took, before the
+	// release moved. It is the one thing box puts back on its own, and only
+	// for apps whose new image kept exiting.
+	Restore(ctx context.Context, step Step, apps []string) error
+}
+
+// Taken is one step's copy: where it is and what it named, which is what the
+// rollback holds record and what box says when an app is put back.
+type Taken struct {
+	// Step is the step directory's name. A hold records it, so a later
+	// rollback finds this step's copies of every app it moved.
+	Step string
+	// At is when the copy was taken, in UTC. box tells the operator how old
+	// the state a rollback restored is.
+	At time.Time
+	// Dirs is each app's copy inside the step directory, for box's sentence
+	// when a rollback fails: the operator needs to know where to look.
+	Dirs map[string]string
 }
 
 // ApplyFunc runs one step's apply. It is release.Applier.Apply in cmd/box: the
@@ -117,12 +147,14 @@ type Options struct {
 
 // The gates one step has to pass, as the record and box's sentence name them.
 // A step fails at exactly one of them: the apply never moved the release, the
-// wiring receipt says the release did not work, or the release never became
-// healthy.
+// wiring receipt says the release did not work, the release never became
+// healthy, or the step-back box tried after a moved app kept exiting did not
+// finish.
 const (
-	gateApply  = "apply"
-	gateWiring = "wiring"
-	gateHealth = "health"
+	gateApply    = "apply"
+	gateWiring   = "wiring"
+	gateHealth   = "health"
+	gateRollback = "rollback"
 )
 
 // GateResult is how one step's health gate ended. It is a value rather than an
@@ -146,14 +178,40 @@ type GateResult struct {
 type StepPlan struct {
 	Step
 	// Moving is the enabled apps whose image (repository and digest) differs
-	// between the two releases. They are the ones scaled down and
-	// snapshotted; a step that moves no image takes no snapshot.
+	// between the two releases. They are the ones the release moves; the
+	// subset the catalog says has state to copy is what a step stops and
+	// snapshots.
 	Moving []string
+	// Images is each moving app's image on either side of the step, which the
+	// snapshot records and a rollback holds. A moving app whose selected
+	// variant is missing on one side has a zero reference there, and the copy
+	// refuses rather than record an image box never saw.
+	Images map[string]ImageChange
 	// Held is the enabled apps the operator's values pin, so they run the
 	// same image on both sides of the step and do not move. A held app is
 	// not stopped, not checked and not copied; the plan names it so the pin
 	// does not read as a release that forgot the app.
 	Held []string
+	// HeldBack is the enabled apps a rollback hold keeps on the image they
+	// ran: the release still pins the image the rollback avoided, so the app
+	// does not move until a release pins something else. Like a values pin,
+	// it is neither stopped nor copied; the plan names it and the image it
+	// waits on.
+	HeldBack []string
+}
+
+// Copied is the moving apps this step stops and snapshots: those whose catalog
+// entry names files an image upgrade can rewrite. A moving app without them is
+// applied without a copy and is never rolled back, because box would have no
+// state to put back.
+func (p StepPlan) Copied() []string {
+	var out []string
+	for _, app := range p.Moving {
+		if p.Images[app].Snapshot {
+			out = append(out, app)
+		}
+	}
+	return out
 }
 
 // Result is what one run decided and did.
@@ -182,10 +240,19 @@ type Result struct {
 	// state is the record this run read and keeps current, carried so a step
 	// does not have to re-read a file it may have written itself.
 	state State
+	// values are the effective values this run planned with, which the
+	// snapshotter needs for the instance names it copies.
+	values map[string]any
 	// pins is the pin each held app is held at, for the plan's held rows: the
 	// values' own label, carried from the plan to the report, which has no
 	// values of its own.
 	pins map[string]string
+	// holds are the rollback holds the plan honoured, by app: the report
+	// names each held app's old and avoided image.
+	holds map[string]snapshot.Hold
+	// configRoot is the grant's config path, where the holds and their
+	// snapshots live. A step that rolls an app back writes its hold there.
+	configRoot string
 }
 
 // Updater is `box update`'s whole decision.
@@ -199,12 +266,13 @@ type Updater struct {
 	// the grant, so it can only be opened after the files are read; `--check`
 	// never opens it, because planning reads no workload.
 	OpenCluster func(namespace string) (Cluster, error)
-	// OpenSnapshots returns the copy of the moving apps' config for the
-	// grant's namespace. It is opened only when a step moves an image: a
-	// release change that moves no image has nothing to copy, and a box
-	// without a snapshotter still takes those. A step that does move an image
+	// OpenSnapshots returns the copy of the copying apps' config for the
+	// grant's namespace, with the effective values this run planned with (the
+	// instance names come from them). It is opened only when a step copies an
+	// image's state: a release change that moves nothing has nothing to copy,
+	// and a box without a snapshotter still takes those. A step that does copy
 	// on such a box refuses before it stops anything.
-	OpenSnapshots func(namespace string) (Snapshotter, error)
+	OpenSnapshots func(namespace string, values map[string]any) (Snapshotter, error)
 	// Apply runs one step.
 	Apply ApplyFunc
 	// Confirm asks the one question, before the first write. Every step's
@@ -214,6 +282,10 @@ type Updater struct {
 	Confirm release.Confirmer
 	// State is update.json.
 	State StateStore
+	// Holds is the record of apps a rollback holds at an older image. The
+	// plan reads it and a step that rolls an app back writes it; nil is a box
+	// that keeps no holds, which is what a test that never rolls back wants.
+	Holds HoldStore
 	// BoxVersion is this binary's version, which every release's min-box is
 	// compared with. "dev" skips the check.
 	BoxVersion string
@@ -291,11 +363,11 @@ func (u *Updater) Run(ctx context.Context, opts Options) (Result, error) {
 	if opts.Check || res.Current {
 		return res, nil
 	}
-	// A box that cannot copy the moving apps gives the operator no way to put
-	// a migrated database back, so it says so before asking anything.
-	if aStepMoves(res.Steps) && u.OpenSnapshots == nil {
+	// A box that cannot copy what a step moves gives the operator no way to
+	// put a migrated database back, so it says so before asking anything.
+	if aStepCopies(res.Steps) && u.OpenSnapshots == nil {
 		return res, fmt.Errorf("%s needs to snapshot %s to go to %s and this box cannot: update with a box that has snapshot support",
-			res.Name, movingText(res.Steps), res.Target)
+			res.Name, copyingText(res.Steps), res.Target)
 	}
 	if u.Confirm == nil {
 		return res, errors.New("update needs a confirm: it writes to a cluster")
@@ -323,14 +395,14 @@ func (u *Updater) Run(ctx context.Context, opts Options) (Result, error) {
 		return res, err
 	}
 	var snaps Snapshotter
-	if aStepMoves(res.Steps) {
-		snaps, err = u.OpenSnapshots(res.Namespace)
+	if aStepCopies(res.Steps) {
+		snaps, err = u.OpenSnapshots(res.Namespace, res.values)
 		if err != nil {
 			return res, err
 		}
 		if snaps == nil {
 			return res, fmt.Errorf("%s needs to snapshot %s to go to %s and this box cannot: update with a box that has snapshot support",
-				res.Name, movingText(res.Steps), res.Target)
+				res.Name, copyingText(res.Steps), res.Target)
 		}
 	}
 	for _, step := range res.Steps {
@@ -366,6 +438,18 @@ func (u *Updater) plan(ctx context.Context, opts Options) (Result, error) {
 		return res, err
 	}
 	res.Namespace = namespace
+	// The config root is where an app's config lives and therefore where a
+	// step copies it and the holds beside those copies live. It is the
+	// grant's path, so it is read here, before any registry round trip.
+	root, err := ConfigRoot(sb)
+	if err != nil {
+		return res, err
+	}
+	res.configRoot = root
+	holds, err := u.loadHolds(root)
+	if err != nil {
+		return res, err
+	}
 	state, err := u.State.Load()
 	if err != nil {
 		return res, err
@@ -462,7 +546,8 @@ func (u *Updater) plan(ctx context.Context, opts Options) (Result, error) {
 	if err != nil {
 		return res, err
 	}
-	res.Steps, res.pins, err = u.stepsPlan(ctx, repo, fromChart, steps, values)
+	res.values = values
+	res.Steps, res.pins, res.holds, err = u.stepsPlan(ctx, repo, fromChart, steps, values, holds)
 	if err != nil {
 		return res, err
 	}
@@ -477,26 +562,42 @@ func (u *Updater) plan(ctx context.Context, opts Options) (Result, error) {
 // stepsPlan loads each step's release and compares its images with the release
 // before it, which is what decides what that step moves and what the operator's
 // pins hold. It also carries each held app's pin label, because the report has
-// no values of its own.
-func (u *Updater) stepsPlan(ctx context.Context, repo string, from release.Chart, steps []Step, values map[string]any) ([]StepPlan, map[string]string, error) {
+// no values of its own, and the target release's catalog, which says what a
+// step can copy: an app the catalog gives no globs is moved without a snapshot.
+func (u *Updater) stepsPlan(ctx context.Context, repo string, from release.Chart, steps []Step, values map[string]any, holds []snapshot.Hold) ([]StepPlan, map[string]string, map[string]snapshot.Hold, error) {
 	var plans []StepPlan
 	pins := make(map[string]string)
+	heldByRollback := make(map[string]snapshot.Hold)
 	for _, s := range steps {
 		to, err := u.Charts.Load(ctx, release.ChartRef{Repo: repo, Version: s.To})
 		if err != nil {
-			return nil, nil, err
+			return nil, nil, nil, err
 		}
-		moving, held, err := movingApps(from, to, values)
+		moving, held, heldBack, images, err := movingApps(from, to, values, holds)
 		if err != nil {
-			return nil, nil, err
+			return nil, nil, nil, err
+		}
+		globs, err := ChartGlobs(to)
+		if err != nil {
+			return nil, nil, nil, err
+		}
+		for _, app := range moving {
+			change := images[app]
+			change.Snapshot = len(globs[app]) > 0
+			images[app] = change
 		}
 		for _, app := range held {
 			pins[app] = pinLabel(values, app)
 		}
-		plans = append(plans, StepPlan{Step: s, Moving: moving, Held: held})
+		for _, app := range heldBack {
+			if h, ok := holdFor(holds, app); ok {
+				heldByRollback[app] = h
+			}
+		}
+		plans = append(plans, StepPlan{Step: s, Moving: moving, Images: images, Held: held, HeldBack: heldBack})
 		from = to
 	}
-	return plans, pins, nil
+	return plans, pins, heldByRollback, nil
 }
 
 // target picks the release this run moves to: the version the operator named,
@@ -568,7 +669,7 @@ func (u *Updater) reportPlan(res Result, check bool) {
 			if len(step.Moving) == 0 {
 				row += " (no image moves)"
 			} else {
-				row += " (apps: " + strings.Join(step.Moving, ", ") + ")"
+				row += " (apps: " + movingNames(step) + ")"
 			}
 			rows = append(rows, row)
 			// A pin the operator set is why an app the chart moved stays
@@ -576,6 +677,14 @@ func (u *Updater) reportPlan(res Result, check bool) {
 			// respects their values and one that looks like it forgot.
 			for _, app := range step.Held {
 				heldRows = append(heldRows, fmt.Sprintf("%s: held at %s by your values", app, res.pins[app]))
+			}
+			// A rollback hold keeps an app on the image it ran until a release
+			// pins another. The plan names the image it waits on, so the row
+			// does not read as a release that forgot the app.
+			for _, app := range step.HeldBack {
+				h := res.holds[app]
+				heldRows = append(heldRows, fmt.Sprintf("%s: held at %s after a rollback, until a release pins something other than %s",
+					app, h.At.Label(), h.Avoiding.Label()))
 			}
 		}
 		r.List("steps", rows)
@@ -619,12 +728,14 @@ func (u *Updater) take(ctx context.Context, rel Release, cluster Cluster, snaps 
 		return err
 	}
 
-	if len(step.Moving) > 0 {
+	copied := step.Copied()
+	var taken Taken
+	if len(copied) > 0 {
 		// Whether the copy can be taken is asked before anything stops, so a
 		// box that cannot copy refuses with nothing down and nothing
 		// recorded: the box refused, not the release.
-		if err := snaps.Check(ctx, step.Step, step.Moving); err != nil {
-			err = fmt.Errorf("update %s to %s: %s cannot be snapshotted: %w", res.Name, step.To, strings.Join(step.Moving, ", "), err)
+		if err := snaps.Check(ctx, step.Step, copied); err != nil {
+			err = fmt.Errorf("update %s to %s: %s cannot be snapshotted: %w", res.Name, step.To, strings.Join(copied, ", "), err)
 			handle.Failed(err)
 			return err
 		}
@@ -632,21 +743,22 @@ func (u *Updater) take(ctx context.Context, rel Release, cluster Cluster, snaps 
 		// stopped apps nothing has asked to move yet -- so it starts them
 		// again and returns the step's error. None of it is a failed
 		// release: the release was never tried.
-		if err := u.scale(ctx, cluster, step.Moving, 0); err != nil {
-			u.scaleUp(ctx, cluster, step.Moving)
-			err = fmt.Errorf("update %s to %s: stopping %s: %w", res.Name, step.To, strings.Join(step.Moving, ", "), err)
+		if err := u.scale(ctx, cluster, copied, 0); err != nil {
+			u.scaleUp(ctx, cluster, copied)
+			err = fmt.Errorf("update %s to %s: stopping %s: %w", res.Name, step.To, strings.Join(copied, ", "), err)
 			handle.Failed(err)
 			return err
 		}
-		if err := u.waitGone(ctx, cluster, step.Moving); err != nil {
-			u.scaleUp(ctx, cluster, step.Moving)
-			err = fmt.Errorf("update %s to %s: waiting for %s to stop: %w", res.Name, step.To, strings.Join(step.Moving, ", "), err)
+		if err := u.waitGone(ctx, cluster, copied); err != nil {
+			u.scaleUp(ctx, cluster, copied)
+			err = fmt.Errorf("update %s to %s: waiting for %s to stop: %w", res.Name, step.To, strings.Join(copied, ", "), err)
 			handle.Failed(err)
 			return err
 		}
-		if err := snaps.Take(ctx, step.Step, step.Moving); err != nil {
-			u.scaleUp(ctx, cluster, step.Moving)
-			err = fmt.Errorf("update %s to %s: snapshotting %s: %w", res.Name, step.To, strings.Join(step.Moving, ", "), err)
+		taken, err = snaps.Take(ctx, step.Step, copied, step.Images)
+		if err != nil {
+			u.scaleUp(ctx, cluster, copied)
+			err = fmt.Errorf("update %s to %s: snapshotting %s: %w", res.Name, step.To, strings.Join(copied, ", "), err)
 			handle.Failed(err)
 			return err
 		}
@@ -657,37 +769,43 @@ func (u *Updater) take(ctx context.Context, rel Release, cluster Cluster, snaps 
 	// left nil so this apply pulls by version exactly as a bare apply would.
 	applyOpts.Chart = nil
 	applyOpts.ChartVersion = step.To
-	applied, err := u.Apply(ctx, applyOpts)
-	gate := ""
-	if err != nil {
-		gate = gateApply
-		if applied.Applied {
-			// Helm moved the release; what failed after that is the wiring
-			// receipt apply waits for.
-			gate = gateWiring
-		}
-	}
-	if err == nil {
-		outcome, herr := u.waitHealthy(ctx, rel, cluster, step.Moving)
-		switch {
-		case herr != nil:
-			gate, err = gateHealth, herr
-		case len(outcome.Exiting) > 0:
-			// An app the step moved that keeps exiting is the one failure
-			// the gate can name rather than wait out: the new image never
-			// got as far as opening its port.
-			gate, err = gateHealth, errors.New(exitingText(outcome.Exiting))
-		case outcome.TimedOut:
-			gate, err = gateHealth, fmt.Errorf("the release is not deployed and healthy after %s", u.healthWait())
-		}
-	}
+	gate, outcome, err := u.applyAndGate(ctx, rel, cluster, step, applyOpts)
 	if err != nil {
 		handle.Failed(err)
-		return u.fail(ctx, rel, cluster, res, step, before.Revision, gate, err)
+		return u.fail(ctx, rel, cluster, res, step, before.Revision, gate, err, "")
 	}
 
-	if len(step.Moving) > 0 {
-		if perr := snaps.Prune(ctx, step.Step, step.Moving); perr != nil {
+	var rolledBack []string
+	if len(outcome.Exiting) > 0 {
+		exiting := outcome.Exiting
+		// Only an app whose config box copied can be put back. One that the
+		// catalog gives nothing to copy stopped the step before the release
+		// moved, and rolling it back now would be a scale-zero with nothing
+		// to restore -- so the failure is the gate's, unchanged.
+		for _, app := range outcome.Exiting {
+			if !step.Images[app.App].Snapshot {
+				err := errors.New(exitingText(exiting))
+				handle.Failed(err)
+				return u.fail(ctx, rel, cluster, res, step, before.Revision, gateHealth, err, "")
+			}
+		}
+		rolledBack, err = u.stepBack(ctx, rel, cluster, snaps, res, step, applyOpts, taken, exiting)
+		if err != nil {
+			handle.Failed(err)
+			tail := ""
+			var failed *rollbackFailure
+			if errors.As(err, &failed) {
+				tail = fmt.Sprintf("; %s's snapshot is at %s", failed.app, failed.dir)
+				if failed.stopped {
+					tail = fmt.Sprintf("; %s is stopped", failed.app) + tail
+				}
+			}
+			return u.fail(ctx, rel, cluster, res, step, before.Revision, gateRollback, err, tail)
+		}
+	}
+
+	if len(copied) > 0 {
+		if perr := snaps.Prune(ctx, step.Step, copied); perr != nil {
 			// A snapshot that cannot be pruned is not a failed step: the
 			// release and the box are healthy, and keeping one extra copy
 			// costs disk, not correctness.
@@ -695,7 +813,7 @@ func (u *Updater) take(ctx context.Context, rel Release, cluster Cluster, snaps 
 		}
 	}
 	handle.Done(fmt.Sprintf("%s is on %s", res.Name, step.To))
-	if err := u.recordOK(res, step, before.Revision); err != nil {
+	if err := u.recordOK(res, step, before.Revision, rolledBack); err != nil {
 		return fmt.Errorf("%s is on %s, but update's record could not be written: %w", res.Name, step.To, err)
 	}
 	return nil
@@ -710,7 +828,11 @@ func (u *Updater) take(ctx context.Context, rel Release, cluster Cluster, snaps 
 // run stopped still down. After a wiring or health gate the new release is
 // what is running, so the apps stay as it left them, and the step's snapshot
 // stays too -- that copy is the operator's way back.
-func (u *Updater) fail(ctx context.Context, rel Release, cluster Cluster, res *Result, step StepPlan, revision int, gate string, cause error) error {
+//
+// tail is the part of the message box can only know after the failure, such as
+// where a failed step-back left an app's snapshot; it goes last, after the
+// release's state, because it is what the operator acts on.
+func (u *Updater) fail(ctx context.Context, rel Release, cluster Cluster, res *Result, step StepPlan, revision int, gate string, cause error, tail string) error {
 	cctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), u.cleanupWait())
 	defer cancel()
 
@@ -719,8 +841,9 @@ func (u *Updater) fail(ctx context.Context, rel Release, cluster Cluster, res *R
 	// Nothing else puts these replicas back when Helm never moved, and a
 	// second failure here belongs in the error rather than in a shrug.
 	var startErr error
-	if gate == gateApply && len(step.Moving) > 0 {
-		if err := u.scale(cctx, cluster, step.Moving, 1); err != nil {
+	copied := step.Copied()
+	if gate == gateApply && len(copied) > 0 {
+		if err := u.scale(cctx, cluster, copied, 1); err != nil {
 			startErr = err
 		}
 	}
@@ -742,12 +865,10 @@ func (u *Updater) fail(ctx context.Context, rel Release, cluster Cluster, res *R
 	default:
 		msg += fmt.Sprintf("; %s is on %s (revision %d, %s)", res.Name, state.ChartVersion, state.Revision, state.Status)
 	}
-	if gate != gateApply {
-		msg += " and was not rolled back"
-	}
 	if startErr != nil {
-		msg += fmt.Sprintf("; starting %s again failed: %v", strings.Join(step.Moving, ", "), startErr)
+		msg += fmt.Sprintf("; starting %s again failed: %v", strings.Join(copied, ", "), startErr)
 	}
+	msg += tail
 	if recordErr := u.recordFailed(res, step, revision, gate, msg); recordErr != nil {
 		return fmt.Errorf("%s; the record could not be written: %w", msg, recordErr)
 	}
@@ -797,15 +918,213 @@ func (u *Updater) waitGone(ctx context.Context, cluster Cluster, apps []string) 
 	return nil
 }
 
+// applyAndGate runs one step's apply and its gate. An apply that returned an
+// error is not taken at face value while a moved app is restarting (see
+// afterFailedApply); everything else is today's flow -- the apply's own failure,
+// its wiring receipt, or the health gate.
+func (u *Updater) applyAndGate(ctx context.Context, rel Release, cluster Cluster, step StepPlan, applyOpts release.Options) (string, GateResult, error) {
+	applied, err := u.Apply(ctx, applyOpts)
+	if err != nil {
+		gate := gateApply
+		if applied.Applied {
+			// Helm moved the release; what failed after that is the wiring
+			// receipt apply waits for.
+			gate = gateWiring
+		}
+		return u.afterFailedApply(ctx, rel, cluster, step, applyOpts, gate, err)
+	}
+	outcome, err := u.waitHealthy(ctx, rel, cluster, step.Moving)
+	if err != nil {
+		return gateHealth, GateResult{}, err
+	}
+	if outcome.TimedOut {
+		return gateHealth, GateResult{}, fmt.Errorf("the release is not deployed and healthy after %s", u.healthWait())
+	}
+	return "", outcome, nil
+}
+
+// afterFailedApply is the second look at a step whose apply failed. Helm's own
+// upgrade wait gives up the moment a pod reports CrashLoopBackOff, which is
+// after the first exit, so a failed apply is where an image that never starts
+// shows up -- not the health gate, which only runs once Helm says deployed. So
+// box reads the moved apps once: if none has restarted, the apply failed for its
+// own reason and is reported as before. If one has, the step goes into the
+// health gate's watch instead:
+//
+//   - an app reaching three exits is the crashloop the step-back handles;
+//   - every moved app running again means the image was merely slow, so the
+//     apply is run once more (Helm records a deployed revision and runs its
+//     hooks) and the normal gate decides;
+//   - the watch running out is an ordinary health-gate failure.
+func (u *Updater) afterFailedApply(ctx context.Context, rel Release, cluster Cluster, step StepPlan, applyOpts release.Options, gate string, cause error) (string, GateResult, error) {
+	if len(step.Moving) == 0 {
+		return gate, GateResult{}, cause
+	}
+	health, err := cluster.Health(ctx, step.Moving)
+	if err != nil {
+		// The apply's own failure is the answer box has; a read that failed
+		// after it does not make the step worse.
+		return gate, GateResult{}, cause
+	}
+	if !anyRestarted(health, step.Moving) {
+		return gate, GateResult{}, cause
+	}
+	outcome, err := u.waitRestarting(ctx, cluster, step.Moving)
+	if err != nil {
+		return gateHealth, GateResult{}, fmt.Errorf("%v (and reading the health after it: %v)", cause, err)
+	}
+	if len(outcome.Exiting) > 0 {
+		return gateHealth, outcome, nil
+	}
+	if outcome.TimedOut {
+		return gateHealth, GateResult{}, fmt.Errorf("the release is not deployed and healthy after %s", u.healthWait())
+	}
+	// Every moved app is running again: the apply failed around a pod Helm
+	// read too early. One more apply records a deployed revision and runs the
+	// hooks; a second failure is an ordinary apply failure.
+	applied, err := u.Apply(ctx, applyOpts)
+	if err != nil {
+		gate := gateApply
+		if applied.Applied {
+			gate = gateWiring
+		}
+		return gate, GateResult{}, err
+	}
+	outcome, err = u.waitHealthy(ctx, rel, cluster, step.Moving)
+	if err != nil {
+		return gateHealth, GateResult{}, err
+	}
+	if outcome.TimedOut {
+		return gateHealth, GateResult{}, fmt.Errorf("the release is not deployed and healthy after %s", u.healthWait())
+	}
+	return "", outcome, nil
+}
+
+// anyRestarted reports whether any moved app's container exited at least once
+// since the step. One exit is enough: the health gate is what tells a slow start
+// from a crashloop, and it costs only a wait.
+func anyRestarted(health Health, moving []string) bool {
+	for _, app := range moving {
+		if health.Restarts[app] >= 1 {
+			return true
+		}
+	}
+	return false
+}
+
+// rollbackFailure is a step-back that did not finish: what failed, and which
+// app's copy box can point the operator at. stopped says the app is still scaled
+// to zero because the restore is what failed.
+type rollbackFailure struct {
+	cause   error
+	app     string
+	dir     string
+	stopped bool
+}
+
+func (f *rollbackFailure) Error() string { return f.cause.Error() }
+
+func (f *rollbackFailure) Unwrap() error { return f.cause }
+
+// stepBack puts the apps whose new image keeps exiting back on the image they
+// ran, and holds them there.
+//
+// The order is the one thing that makes it safe: the apps are stopped before
+// anything is copied over, the copy is verified and restored before the release
+// is re-rendered, and the hold is written before the re-apply, so the chart that
+// renders the rolled-back release names the old image. Nothing else in the
+// release moves: the rest of the step stays where it is.
+func (u *Updater) stepBack(ctx context.Context, rel Release, cluster Cluster, snaps Snapshotter, res *Result, step StepPlan, applyOpts release.Options, taken Taken, exiting []Exiting) ([]string, error) {
+	r := u.report()
+	apps := make([]string, 0, len(exiting))
+	for _, e := range exiting {
+		apps = append(apps, e.App)
+	}
+	// Announced before anything stops, so the operator knows why the app that
+	// just came up is going down again.
+	for _, e := range exiting {
+		change := step.Images[e.App]
+		r.Warn(fmt.Sprintf("%s exited %d times on %s: rolling it back to %s",
+			e.App, e.Restarts, change.MovedTo.Label(), change.Ran.Label()))
+	}
+	if err := u.scale(ctx, cluster, apps, 0); err != nil {
+		return nil, fmt.Errorf("stopping %s: %w", strings.Join(apps, ", "), err)
+	}
+	if err := u.waitGone(ctx, cluster, apps); err != nil {
+		return nil, fmt.Errorf("waiting for %s to stop: %w", strings.Join(apps, ", "), err)
+	}
+	if err := snaps.Restore(ctx, step.Step, apps); err != nil {
+		return nil, &rollbackFailure{cause: err, app: apps[0], dir: taken.Dirs[apps[0]], stopped: true}
+	}
+	if u.Holds == nil {
+		return nil, &rollbackFailure{
+			cause: errors.New("this box keeps no holds, so the app cannot stay on its old image"),
+			app:   apps[0], dir: taken.Dirs[apps[0]],
+		}
+	}
+	holds, err := u.loadHolds(res.configRoot)
+	if err != nil {
+		return nil, &rollbackFailure{cause: err, app: apps[0], dir: taken.Dirs[apps[0]]}
+	}
+	for _, app := range apps {
+		change := step.Images[app]
+		holds = snapshot.WithHold(holds, snapshot.Hold{
+			App:      app,
+			At:       change.Ran,
+			Avoiding: change.MovedTo,
+			Snapshot: taken.Step,
+			Since:    u.now(),
+			By:       snapshot.ByUpdate,
+		})
+		if err := u.Holds.Save(res.configRoot, holds); err != nil {
+			return nil, &rollbackFailure{cause: fmt.Errorf("writing the hold for %s: %w", app, err), app: app, dir: taken.Dirs[app]}
+		}
+	}
+	// The same release, so Helm records a deployed revision and runs its
+	// hooks; the hold is what makes it render the image the app ran.
+	if _, err := u.Apply(ctx, applyOpts); err != nil {
+		return nil, &rollbackFailure{cause: fmt.Errorf("re-applying %s: %w", step.To, err), app: apps[0], dir: taken.Dirs[apps[0]]}
+	}
+	outcome, err := u.waitHealthy(ctx, rel, cluster, step.Moving)
+	if err != nil {
+		return nil, &rollbackFailure{cause: err, app: apps[0], dir: taken.Dirs[apps[0]]}
+	}
+	if len(outcome.Exiting) > 0 {
+		return nil, &rollbackFailure{cause: errors.New(exitingText(outcome.Exiting)), app: apps[0], dir: taken.Dirs[apps[0]]}
+	}
+	if outcome.TimedOut {
+		return nil, &rollbackFailure{
+			cause: fmt.Errorf("the release is not deployed and healthy after %s", u.healthWait()),
+			app:   apps[0], dir: taken.Dirs[apps[0]],
+		}
+	}
+	for _, app := range apps {
+		change := step.Images[app]
+		r.Warn(fmt.Sprintf("%s is back on %s with its snapshot from %s; it stays there until a release pins something other than %s",
+			app, change.Ran.Label(), taken.At.Format("2006-01-02 15:04 UTC"), change.MovedTo.Label()))
+	}
+	return apps, nil
+}
+
 // waitHealthy is the health gate. A moved app that keeps exiting ends it at
 // once: the image is what has to change, and waiting for the rest of the
 // release would only reach the same answer later with more restarts behind it.
-// Otherwise it waits for Helm to say deployed and for every StatefulSet to be
-// ready, because an app that has not opened its port yet may be migrating
-// rather than failing.
+// The apps are read before Helm's status, because an image that never starts
+// makes Helm's own wait give up and the release read as failed, and the
+// crashloop is still the step's to name. Otherwise it waits for Helm to say
+// deployed and for every StatefulSet to be ready, because an app that has not
+// opened its port yet may be migrating rather than failing.
 func (u *Updater) waitHealthy(ctx context.Context, rel Release, cluster Cluster, moving []string) (GateResult, error) {
 	var last Health
 	waited, err := wait.Until(ctx, u.healthWait(), u.poll(), func(ctx context.Context) (bool, error) {
+		health, err := cluster.Health(ctx, moving)
+		if err != nil {
+			return false, err
+		}
+		last = health
+		if len(health.Exiting) > 0 {
+			return true, nil
+		}
 		state, err := rel.State(ctx)
 		if err != nil {
 			return false, err
@@ -813,6 +1132,28 @@ func (u *Updater) waitHealthy(ctx context.Context, rel Release, cluster Cluster,
 		if !state.Exists || !state.Deployed() {
 			return false, nil
 		}
+		return health.Ready, nil
+	})
+	if err != nil {
+		return GateResult{}, err
+	}
+	if len(last.Exiting) > 0 {
+		return GateResult{Exiting: last.Exiting}, nil
+	}
+	if !waited.Done {
+		return GateResult{TimedOut: true}, nil
+	}
+	return GateResult{}, nil
+}
+
+// waitRestarting watches a release whose apply failed while a moved app was
+// restarting: it ends when an app reaches the crashloop count, when every moved
+// app's StatefulSet is ready again, or when the budget runs out. Helm's own
+// status is not read: it says failed until box applies again, and that is exactly
+// what this watch decides.
+func (u *Updater) waitRestarting(ctx context.Context, cluster Cluster, moving []string) (GateResult, error) {
+	var last Health
+	waited, err := wait.Until(ctx, u.healthWait(), u.poll(), func(ctx context.Context) (bool, error) {
 		health, err := cluster.Health(ctx, moving)
 		if err != nil {
 			return false, err
@@ -855,14 +1196,15 @@ func published(releases []release.Published, version string) bool {
 
 // recordOK records a passing step: the box is on step.To, and every release it
 // failed on at or below that version is behind it now.
-func (u *Updater) recordOK(res *Result, step StepPlan, revision int) error {
+func (u *Updater) recordOK(res *Result, step StepPlan, revision int, rolledBack []string) error {
 	res.state.LastStep = &StepRecord{
-		From:     step.From,
-		To:       step.To,
-		At:       u.now(),
-		Outcome:  OutcomeOK,
-		Revision: revision,
-		Moved:    step.Moving,
+		From:       step.From,
+		To:         step.To,
+		At:         u.now(),
+		Outcome:    OutcomeOK,
+		Revision:   revision,
+		Moved:      step.Moving,
+		RolledBack: rolledBack,
 	}
 	res.state.Failed = dropAtOrBelow(res.state.Failed, step.To)
 	return u.State.Save(res.state)
@@ -941,24 +1283,40 @@ func plural(n int, one, many string) string {
 	return fmt.Sprintf("%d %s", n, many)
 }
 
-// aStepMoves reports whether any step copies an app's config, which is what
+// movingNames names the apps a step moves, with "(no snapshot)" after one whose
+// catalog entry has nothing to copy: the copy is what a rollback restores, so an
+// app without one is never rolled back, and the plan should not leave the
+// operator to find that out from a failed step.
+func movingNames(step StepPlan) string {
+	names := make([]string, 0, len(step.Moving))
+	for _, app := range step.Moving {
+		if step.Images[app].Snapshot {
+			names = append(names, app)
+			continue
+		}
+		names = append(names, app+" (no snapshot)")
+	}
+	return strings.Join(names, ", ")
+}
+
+// aStepCopies reports whether any step copies an app's config, which is what
 // decides whether update needs a snapshotter at all.
-func aStepMoves(steps []StepPlan) bool {
+func aStepCopies(steps []StepPlan) bool {
 	for _, step := range steps {
-		if len(step.Moving) > 0 {
+		if len(step.Copied()) > 0 {
 			return true
 		}
 	}
 	return false
 }
 
-// movingText names every app the path moves, once, in step order. It is used
+// copyingText names every app the path copies, once, in step order. It is used
 // in the one sentence box says when it cannot snapshot.
-func movingText(steps []StepPlan) string {
+func copyingText(steps []StepPlan) string {
 	var apps []string
 	seen := make(map[string]bool)
 	for _, step := range steps {
-		for _, app := range step.Moving {
+		for _, app := range step.Copied() {
 			if seen[app] {
 				continue
 			}
