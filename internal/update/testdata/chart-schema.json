@@ -84,7 +84,9 @@
             "type": "object",
             "additionalProperties": false,
             "properties": {
-              "variant": { "type": "string" }
+              "variant": { "type": "string" },
+              "tag": { "type": "string" },
+              "digest": { "type": "string" }
             }
           }
         }

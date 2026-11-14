@@ -432,6 +432,45 @@ func TestAStepThatMovesNoImageTakesNoSnapshot(t *testing.T) {
 	}
 }
 
+// TestAHeldAppIsNamedInThePlan: an app the operator pinned runs the same image
+// on both sides of the step, so nothing of it moves and the plan says why
+// instead of leaving it out.
+func TestAHeldAppIsNamedInThePlan(t *testing.T) {
+	h := newHarness(t)
+	h.values = "testdata/pinned-values.yaml"
+	h.charts.publish("0.4.0", "0.4.0", "0.4.0", digestA)
+	h.charts.publish("0.5.0", "0.4.0", "0.4.0", digestB)
+
+	res, err := h.run(t, false)
+	if err != nil {
+		t.Fatalf("update: %v\n%s", err, h.out)
+	}
+	if len(res.Steps) != 1 {
+		t.Fatalf("steps = %+v, want one", res.Steps)
+	}
+	if len(res.Steps[0].Moving) != 0 {
+		t.Fatalf("moving = %v, want nothing: the pin holds sonarr at the digest it runs", res.Steps[0].Moving)
+	}
+	if !reflect.DeepEqual(res.Steps[0].Held, []string{"sonarr"}) {
+		t.Fatalf("held = %v, want sonarr", res.Steps[0].Held)
+	}
+	if len(h.scales()) != 0 || len(h.snaps.takes) != 0 || len(h.snaps.prunes) != 0 {
+		t.Fatalf("a held app was stopped or copied: scales=%v takes=%+v", h.scales(), h.snaps.takes)
+	}
+	if len(h.app.calls) != 1 || h.app.calls[0].ChartVersion != "0.5.0" {
+		t.Fatalf("applies = %+v, want the release still applied at 0.5.0", h.app.calls)
+	}
+	for _, want := range []string{
+		"0.4.0 -> 0.5.0 (no image moves)",
+		"held:",
+		"sonarr: held at " + digestA + " by your values",
+	} {
+		if !strings.Contains(h.out.String(), want) {
+			t.Fatalf("plan does not print %q:\n%s", want, h.out)
+		}
+	}
+}
+
 func TestTwoStepsWhenTheTargetCannotFollowTheInstalledRelease(t *testing.T) {
 	h := newHarness(t)
 	h.charts.publish("0.4.0", "0.4.0", "0.4.0", digestA)

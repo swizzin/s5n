@@ -163,8 +163,9 @@ func meetsMinBox(r release.Published, boxVersion string) (bool, error) {
 }
 
 // movingApps is the enabled apps whose image moves between two chart releases,
-// sorted. A database migrates when its image changes, so this is exactly the
-// set a step has to snapshot before it installs the new release.
+// sorted, and the apps the operator's values hold in place. A database migrates
+// when its image changes, so Moving is exactly the set a step has to snapshot
+// before it installs the new release.
 //
 // The image is the one values select: apps.<app>.image.variant, "default" when
 // nothing says otherwise. A variant that exists in both releases is compared by
@@ -173,19 +174,27 @@ func meetsMinBox(r release.Published, boxVersion string) (bool, error) {
 // one of the two releases is not moving (there is no install to migrate), and a
 // chart that ships no variants.yaml tells box nothing about images, so it moves
 // nothing.
-func movingApps(from, to release.Chart, values map[string]any) ([]string, error) {
+//
+// A pin in the values -- apps.<app>.image.digest, or a tag without a digest --
+// holds the app at one image whatever the chart published: the chart renders
+// the pinned digest on both sides, or no digest at all when the pin is a tag,
+// so the same bytes run before and after the step. Such an app is Held when it
+// would have moved without the pin, and it is neither stopped nor copied,
+// because nothing of it changes. A pin cannot hold an app whose repository
+// changes between the releases: that is a different image, pinned or not.
+func movingApps(from, to release.Chart, values map[string]any) ([]string, []string, error) {
 	if len(from.Variants) == 0 || len(to.Variants) == 0 {
-		return nil, nil
+		return nil, nil, nil
 	}
 	oldImages, err := admission.Images(from.Variants)
 	if err != nil {
-		return nil, fmt.Errorf("release %s: %w", from.Version, err)
+		return nil, nil, fmt.Errorf("release %s: %w", from.Version, err)
 	}
 	newImages, err := admission.Images(to.Variants)
 	if err != nil {
-		return nil, fmt.Errorf("release %s: %w", to.Version, err)
+		return nil, nil, fmt.Errorf("release %s: %w", to.Version, err)
 	}
-	var moving []string
+	var moving, held []string
 	for _, app := range release.EnabledApps(values) {
 		variant := variantOf(values, app)
 		oldImage, oldOK := oldImages[app][variant]
@@ -194,9 +203,23 @@ func movingApps(from, to release.Chart, values map[string]any) ([]string, error)
 		switch {
 		case oldOK && newOK:
 			// The variant both releases ship: the digest is the image, so a
-			// tag re-pushed to new bytes still reads as a move.
-			if oldImage.Repository != newImage.Repository || oldImage.Digest != newImage.Digest {
+			// tag re-pushed to new bytes still reads as a move. What the
+			// chart did is remembered first, because the pin may hide it.
+			chartMoved := oldImage.Repository != newImage.Repository || oldImage.Digest != newImage.Digest
+			tag, digest := pinOf(values, app)
+			switch {
+			case digest != "":
+				oldImage.Digest, newImage.Digest = digest, digest
+			case tag != "":
+				// A tag pin drops the variant's digest, and box cannot see
+				// whether the two tags are the same bytes.
+				oldImage.Digest, newImage.Digest = "", ""
+			}
+			switch {
+			case oldImage.Repository != newImage.Repository || oldImage.Digest != newImage.Digest:
 				moving = append(moving, app)
+			case chartMoved && (tag != "" || digest != ""):
+				held = append(held, app)
 			}
 		case !oldApp && !newApp:
 			// Neither release ships this app: the values name something the
@@ -204,12 +227,37 @@ func movingApps(from, to release.Chart, values map[string]any) ([]string, error)
 		case oldApp && newApp:
 			// The app exists on both sides but the variant the values select
 			// does not: box cannot tell whether the image moved, so it takes
-			// the safe answer and snapshots.
+			// the safe answer and snapshots. A pin does not change that --
+			// box cannot say what the pin would hold.
 			moving = append(moving, app)
 		}
 	}
 	sort.Strings(moving)
-	return moving, nil
+	sort.Strings(held)
+	return moving, held, nil
+}
+
+// pinOf is the pin the values put on one app's image: the digest when they set
+// one, otherwise the tag, which drops the variant's digest. Values that set
+// neither leave the chart's own pin in place.
+func pinOf(values map[string]any, app string) (tag, digest string) {
+	apps, _ := values["apps"].(map[string]any)
+	entry, _ := apps[app].(map[string]any)
+	image, _ := entry["image"].(map[string]any)
+	digest, _ = image["digest"].(string)
+	tag, _ = image["tag"].(string)
+	return strings.TrimSpace(tag), strings.TrimSpace(digest)
+}
+
+// pinLabel names the pin the values hold an app at, for the plan: the tag when
+// they pin one, else the digest. renderPlan has no values of its own, so the
+// plan carries the labels.
+func pinLabel(values map[string]any, app string) string {
+	tag, digest := pinOf(values, app)
+	if tag != "" {
+		return tag
+	}
+	return digest
 }
 
 func hasApp(images map[string]map[string]admission.Image, app string) bool {

@@ -134,6 +134,12 @@ func TestPlanSteps(t *testing.T) {
 
 // variants is a chart's variants.yaml with one digest per app.
 func variants(sonarrDigest string) []byte {
+	return variantsRepo(sonarrDigest, "registry.example.com/seedbox/sonarr")
+}
+
+// variantsRepo is the same file with sonarr published from another repository,
+// for the case where the chart moves an app and not just its digest.
+func variantsRepo(sonarrDigest, sonarrRepo string) []byte {
 	return []byte(fmt.Sprintf(`qbittorrent:
   default:
     repository: registry.example.com/seedbox/qbittorrent
@@ -141,7 +147,7 @@ func variants(sonarrDigest string) []byte {
     digest: sha256:1111111111111111111111111111111111111111111111111111111111111111
 sonarr:
   default:
-    repository: registry.example.com/seedbox/sonarr
+    repository: %s
     tag: "5.0.0"
     digest: %s
   alt:
@@ -153,60 +159,98 @@ radarr:
     repository: registry.example.com/seedbox/radarr
     tag: "7.0.0"
     digest: sha256:3333333333333333333333333333333333333333333333333333333333333333
-`, sonarrDigest))
+`, sonarrRepo, sonarrDigest))
 }
 
+// TestMovingApps: what a step stops and copies, and what the operator's own pin
+// holds in place. qbittorrent's image never moves and radarr is off, so the
+// only app either list can name is sonarr.
 func TestMovingApps(t *testing.T) {
 	const (
 		digestOld = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 		digestNew = "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
 	)
-	values := map[string]any{"apps": map[string]any{
-		"qbittorrent": map[string]any{"enabled": true},
-		"sonarr":      map[string]any{"enabled": true},
-		"radarr":      map[string]any{"enabled": false},
-	}}
+	// on is the values with every app enabled and sonarr's image as the case
+	// needs it.
+	on := func(sonarrImage map[string]any) map[string]any {
+		return map[string]any{"apps": map[string]any{
+			"qbittorrent": map[string]any{"enabled": true},
+			"sonarr":      map[string]any{"enabled": true, "image": sonarrImage},
+			"radarr":      map[string]any{"enabled": false},
+		}}
+	}
+	defaultImage := map[string]any{"variant": "default"}
 	old := release.Chart{Version: "0.4.0", Variants: variants(digestOld)}
 	next := release.Chart{Version: "0.5.0", Variants: variants(digestNew)}
-
-	moving, err := movingApps(old, next, values)
-	if err != nil {
-		t.Fatalf("movingApps: %v", err)
-	}
-	if !reflect.DeepEqual(moving, []string{"sonarr"}) {
-		t.Fatalf("moving = %v, want only sonarr: qbittorrent's image is unchanged and radarr is off", moving)
-	}
-
-	// The same digest is the same image, whatever the tag says.
-	same, err := movingApps(old, release.Chart{Version: "0.5.1", Variants: variants(digestOld)}, values)
-	if err != nil {
-		t.Fatalf("movingApps: %v", err)
-	}
-	if len(same) != 0 {
-		t.Fatalf("moving = %v with an unchanged image", same)
-	}
-
-	// A variant the values select does not exist in the old release: box
-	// cannot tell, so it snapshots.
-	alt := map[string]any{"apps": map[string]any{
-		"sonarr": map[string]any{"enabled": true, "image": map[string]any{"variant": "alt"}},
-	}}
+	same := release.Chart{Version: "0.5.1", Variants: variants(digestOld)}
+	movedRepo := release.Chart{Version: "0.5.2", Variants: variantsRepo(digestOld, "registry.example.com/seedbox/sonarr-next")}
+	// A variant the values select that the old release does not ship.
 	noOldAlt := release.Chart{Version: "0.4.0", Variants: []byte(`sonarr:
   default:
     repository: registry.example.com/seedbox/sonarr
     digest: sha256:1111111111111111111111111111111111111111111111111111111111111111
 `)}
-	moving, err = movingApps(noOldAlt, next, alt)
-	if err != nil {
-		t.Fatalf("movingApps: %v", err)
-	}
-	if !reflect.DeepEqual(moving, []string{"sonarr"}) {
-		t.Fatalf("moving = %v, want sonarr: the variant it selects is not in the old release", moving)
-	}
 
-	// A chart that ships no variants.yaml says nothing about images.
-	moving, err = movingApps(release.Chart{Version: "0.4.0"}, release.Chart{Version: "0.5.0"}, values)
-	if err != nil || len(moving) != 0 {
-		t.Fatalf("moving = %v, %v with no variants files", moving, err)
+	cases := []struct {
+		name   string
+		from   release.Chart
+		to     release.Chart
+		values map[string]any
+		moving []string
+		held   []string
+	}{
+		{
+			name: "no pin moves the app whose chart digest moved",
+			from: old, to: next, values: on(defaultImage),
+			moving: []string{"sonarr"},
+		},
+		{
+			name: "a digest pin holds it",
+			from: old, to: next,
+			values: on(map[string]any{"variant": "default", "digest": digestOld}),
+			held:   []string{"sonarr"},
+		},
+		{
+			name: "a tag pin holds it",
+			from: old, to: next,
+			values: on(map[string]any{"variant": "default", "tag": "5.0.0"}),
+			held:   []string{"sonarr"},
+		},
+		{
+			name: "a pin does not hold an app whose repository moved",
+			from: old, to: movedRepo,
+			values: on(map[string]any{"variant": "default", "digest": digestOld}),
+			moving: []string{"sonarr"},
+		},
+		{
+			name: "a pin on an app the chart did not move is neither",
+			from: old, to: same,
+			values: on(map[string]any{"variant": "default", "digest": digestOld}),
+		},
+		{
+			name: "a variant box cannot see on both sides still moves, pin or not",
+			from: noOldAlt, to: next,
+			values: on(map[string]any{"variant": "alt", "digest": digestOld}),
+			moving: []string{"sonarr"},
+		},
+		{
+			name: "a chart with no variants.yaml moves nothing",
+			from: release.Chart{Version: "0.4.0"}, to: release.Chart{Version: "0.5.0"},
+			values: on(defaultImage),
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			moving, held, err := movingApps(tc.from, tc.to, tc.values)
+			if err != nil {
+				t.Fatalf("movingApps: %v", err)
+			}
+			if !reflect.DeepEqual(moving, tc.moving) {
+				t.Fatalf("moving = %v, want %v", moving, tc.moving)
+			}
+			if !reflect.DeepEqual(held, tc.held) {
+				t.Fatalf("held = %v, want %v", held, tc.held)
+			}
+		})
 	}
 }

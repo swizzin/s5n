@@ -1,0 +1,7 @@
+# The user's file with one app pinned: sonarr runs the digest they chose,
+# whatever the chart published.
+apps:
+  sonarr:
+    image:
+      variant: default
+      digest: sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa

@@ -115,13 +115,18 @@ const (
 	gateHealth = "health"
 )
 
-// StepPlan is one step and the apps whose image it moves.
+// StepPlan is one step and the apps its image move touches.
 type StepPlan struct {
 	Step
 	// Moving is the enabled apps whose image (repository and digest) differs
 	// between the two releases. They are the ones scaled down and
 	// snapshotted; a step that moves no image takes no snapshot.
 	Moving []string
+	// Held is the enabled apps the operator's values pin, so they run the
+	// same image on both sides of the step and do not move. A held app is
+	// not stopped, not checked and not copied; the plan names it so the pin
+	// does not read as a release that forgot the app.
+	Held []string
 }
 
 // Result is what one run decided and did.
@@ -150,6 +155,10 @@ type Result struct {
 	// state is the record this run read and keeps current, carried so a step
 	// does not have to re-read a file it may have written itself.
 	state State
+	// pins is the pin each held app is held at, for the plan's held rows: the
+	// values' own label, carried from the plan to the report, which has no
+	// values of its own.
+	pins map[string]string
 }
 
 // Updater is `box update`'s whole decision.
@@ -419,18 +428,9 @@ func (u *Updater) plan(ctx context.Context, opts Options) (Result, error) {
 	if err != nil {
 		return res, err
 	}
-	from := fromChart
-	for _, s := range steps {
-		to, err := u.Charts.Load(ctx, release.ChartRef{Repo: repo, Version: s.To})
-		if err != nil {
-			return res, err
-		}
-		moving, err := movingApps(from, to, values)
-		if err != nil {
-			return res, err
-		}
-		res.Steps = append(res.Steps, StepPlan{Step: s, Moving: moving})
-		from = to
+	res.Steps, res.pins, err = u.stepsPlan(ctx, repo, fromChart, steps, values)
+	if err != nil {
+		return res, err
 	}
 
 	res.state.LastCheck = u.now()
@@ -438,6 +438,31 @@ func (u *Updater) plan(ctx context.Context, opts Options) (Result, error) {
 		return res, err
 	}
 	return res, nil
+}
+
+// stepsPlan loads each step's release and compares its images with the release
+// before it, which is what decides what that step moves and what the operator's
+// pins hold. It also carries each held app's pin label, because the report has
+// no values of its own.
+func (u *Updater) stepsPlan(ctx context.Context, repo string, from release.Chart, steps []Step, values map[string]any) ([]StepPlan, map[string]string, error) {
+	var plans []StepPlan
+	pins := make(map[string]string)
+	for _, s := range steps {
+		to, err := u.Charts.Load(ctx, release.ChartRef{Repo: repo, Version: s.To})
+		if err != nil {
+			return nil, nil, err
+		}
+		moving, held, err := movingApps(from, to, values)
+		if err != nil {
+			return nil, nil, err
+		}
+		for _, app := range held {
+			pins[app] = pinLabel(values, app)
+		}
+		plans = append(plans, StepPlan{Step: s, Moving: moving, Held: held})
+		from = to
+	}
+	return plans, pins, nil
 }
 
 // target picks the release this run moves to: the version the operator named,
@@ -503,6 +528,7 @@ func (u *Updater) reportPlan(res Result, check bool) {
 		steps := plural(len(res.Steps), "step", "steps")
 		r.Line(fmt.Sprintf("%s %s -> %s in %s: %s", res.Name, res.Installed, res.Target, res.Namespace, steps))
 		rows := make([]string, 0, len(res.Steps))
+		var heldRows []string
 		for _, step := range res.Steps {
 			row := step.From + " -> " + step.To
 			if len(step.Moving) == 0 {
@@ -511,8 +537,17 @@ func (u *Updater) reportPlan(res Result, check bool) {
 				row += " (apps: " + strings.Join(step.Moving, ", ") + ")"
 			}
 			rows = append(rows, row)
+			// A pin the operator set is why an app the chart moved stays
+			// where it is. Saying so is the difference between a plan that
+			// respects their values and one that looks like it forgot.
+			for _, app := range step.Held {
+				heldRows = append(heldRows, fmt.Sprintf("%s: held at %s by your values", app, res.pins[app]))
+			}
 		}
 		r.List("steps", rows)
+		if len(heldRows) > 0 {
+			r.List("held", heldRows)
+		}
 	}
 	// A release a box cannot take is said out loud even when there is nothing
 	// to do: "s5n 0.6.0 is out and needs a newer box" is the whole reason a
