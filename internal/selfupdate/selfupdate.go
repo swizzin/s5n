@@ -246,11 +246,26 @@ func checkVersion(version string) error {
 // something newer than itself, updating again would replace the binary it is
 // running and re-exec forever.
 func checkLoop(o Options) error {
-	mark := strings.TrimSpace(os.Getenv(ReexecEnv))
-	if mark == "" || mark != strings.TrimSpace(o.Version) {
+	if !Reexecuted(o.Version) {
 		return nil
 	}
+	mark := strings.TrimSpace(os.Getenv(ReexecEnv))
 	return fmt.Errorf("this process is already the box %s an update installed and re-executed (%s=%s), and the release page still names something newer: not updating again in the same run", mark, ReexecEnv, mark)
+}
+
+// Reexecuted reports whether this process is already the version an update
+// installed and re-executed: the mark Reexec leaves in the environment. A caller
+// asks before it offers to update at all, because "the update has already run in
+// this run" is a fact about the run and not a failure to report.
+//
+// A development build never re-executes -- it has no version to compare a
+// release with, so it has none to be marked with -- and an empty or "dev"
+// version is never a re-execution.
+func Reexecuted(version string) bool {
+	if release.IsDevVersion(version) {
+		return false
+	}
+	return strings.TrimSpace(os.Getenv(ReexecEnv)) == strings.TrimSpace(version)
 }
 
 // checkRoot refuses the replacement a user's box cannot make. The binary is
@@ -304,6 +319,16 @@ func executablePath(o Options) (string, error) {
 // ownExecutable is os.Executable. It is a variable so a test can hand the
 // resolver a path of its own, since the test binary is not box.
 var ownExecutable = os.Executable
+
+// ExecutablePath is the binary an update replaces: box's own, with symlinks
+// resolved, unless Options.ExecutablePath names one.
+//
+// Rollback needs it -- it puts the previous binary back over the file that runs,
+// and the link a packaging script installed is not that file -- so it is
+// exported rather than resolved a second way by the caller.
+func ExecutablePath(o Options) (string, error) {
+	return executablePath(o)
+}
 
 // latestVersion reads the newest release's tag from the release page's
 // redirect. GitHub answers /releases/latest with a 302 to the tag, so the tag

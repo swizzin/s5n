@@ -561,6 +561,32 @@ func TestCheckRefusesADevBuild(t *testing.T) {
 	}
 }
 
+func TestReexecutedReportsTheMark(t *testing.T) {
+	// The mark is what stops a re-executed box updating itself again. A caller
+	// asks before it offers an update at all, so the answer has to be right for
+	// the versions that can carry a mark and for the ones that cannot.
+	for _, tc := range []struct {
+		version string
+		mark    string
+		want    bool
+	}{
+		{version: "0.5.0", mark: "0.5.0", want: true},
+		{version: "0.5.0", mark: " 0.5.0\n", want: true},
+		{version: "0.5.0", mark: "0.4.0"},
+		{version: "0.5.0", mark: ""},
+		// A development build has no version to be marked with.
+		{version: "", mark: ""},
+		{version: "dev", mark: "dev"},
+	} {
+		t.Run(tc.version+"|"+tc.mark, func(t *testing.T) {
+			t.Setenv(ReexecEnv, tc.mark)
+			if got := Reexecuted(tc.version); got != tc.want {
+				t.Fatalf("Reexecuted(%q) with %s=%q = %v, want %v", tc.version, ReexecEnv, tc.mark, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestExecutablePathResolvesASymlink(t *testing.T) {
 	// A packaging script may link the command into a bin directory; the file
 	// the link names is the one an update replaces, or the rename would land on

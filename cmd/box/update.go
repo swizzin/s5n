@@ -11,19 +11,22 @@ import (
 	"github.com/swizzin/s5n/internal/release"
 	"github.com/swizzin/s5n/internal/say"
 	"github.com/swizzin/s5n/internal/seedbox"
+	"github.com/swizzin/s5n/internal/selfupdate"
 	"github.com/swizzin/s5n/internal/setup"
 	"github.com/swizzin/s5n/internal/update"
 )
 
 // updateFlags are `box update`'s flags: apply's, because an update ends in
-// applies, plus the two of its own and the record. They are a value rather than
-// locals in runUpdate so the mapping from flags to options is testable without a
-// cluster, the way apply's is.
+// applies, plus the few of their own and the record. They are a value rather
+// than locals in runUpdate so the mapping from flags to options is testable
+// without a cluster, the way apply's is.
 type updateFlags struct {
 	*applyFlags
-	check  *bool
-	plain  *bool
-	record *string
+	check       *bool
+	plain       *bool
+	record      *string
+	holdBox     *bool
+	rollbackBox *bool
 }
 
 func addUpdateFlags(fs *flag.FlagSet) *updateFlags {
@@ -36,7 +39,9 @@ func addUpdateFlags(fs *flag.FlagSet) *updateFlags {
 		// defaults to the same path. apply and rollback take no such flag:
 		// neither writes state, and both get their kubeconfig from a flag or
 		// the environment.
-		record: fs.String("record", bootstrap.RecordPath, "where box recorded the cluster decision; update keeps its own record beside it"),
+		record:      fs.String("record", bootstrap.RecordPath, "where box recorded the cluster decision; update keeps its own record beside it"),
+		holdBox:     fs.Bool("hold-box", false, "take no new box even when a newer one is out: the chart update runs on this one"),
+		rollbackBox: fs.Bool("rollback-box", false, "put back the box an update replaced, and do no chart work (root only)"),
 	}
 }
 
@@ -78,6 +83,19 @@ func (o *updateFlags) runOptions(step release.Options) update.Options {
 	return update.Options{Apply: step, Check: *o.check}
 }
 
+// selfUpdateOptions is what box's own replacement needs from this command: the
+// version it is running, the release page (empty means the published one; a
+// development e2e serves its own), the package that owns the binary if one does,
+// and the hold.
+func (o *updateFlags) selfUpdateOptions(baseURL string) selfupdate.Options {
+	return selfupdate.Options{
+		Version:  version,
+		BaseURL:  baseURL,
+		Packaged: packaged,
+		Hold:     *o.holdBox,
+	}
+}
+
 // updateHelm opens one release handle for an update. Its wait gets the health
 // gate's budget, and it waits only for the release's hooks: the step's health
 // gate is box's, and it is the one that can tell a moved app that keeps exiting
@@ -108,19 +126,26 @@ func updateChartSource(out say.Reporter) *release.OCIChart {
 	return &release.OCIChart{BoxVersion: version, Say: out}
 }
 
-// runUpdate is `box update`: it moves the installed release to a newer one,
-// stepping through the releases the chart's upgrade-from floors require.
+// runUpdate is `box update`: it replaces box when a newer release verifies, then
+// moves the installed release to a newer one, stepping through the releases the
+// chart's upgrade-from floors require.
 func runUpdate(ctx context.Context, args []string) {
-	// The same two dev switches apply takes, stripped before the FlagSet sees
+	// The same dev switches apply takes, stripped before the FlagSet sees
 	// them so --help cannot offer them: --paths-in-node skips the host-path
-	// check for the kind e2e, and --dns-file is the resolver the per-host step
-	// checks an app host's name against.
+	// check for the kind e2e, --dns-file is the resolver the per-host step
+	// checks an app host's name against, and --box-releases is the release page
+	// the self-update e2e serves its own boxes from.
 	pathsInNode, args, err := takePathsInNode(args)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "box: %v\n", err)
 		os.Exit(2)
 	}
 	dnsFile, args, err := takeDevFlag(args, "dns-file")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "box: %v\n", err)
+		os.Exit(2)
+	}
+	boxReleases, args, err := takeDevFlag(args, "box-releases")
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "box: %v\n", err)
 		os.Exit(2)
@@ -137,13 +162,37 @@ func runUpdate(ctx context.Context, args []string) {
 		os.Exit(2)
 	}
 	o.pathsInNode = pathsInNode
+
+	out := newOutput(terminalSet(*o.plain), *o.yes, startupTheme(*o.valuesPath))
+	defer out.Close()
+
+	// box's own replacement comes before any chart work, so the release the
+	// update settles on is one the box that installs it meets min-box for. It
+	// re-executes with this process's own arguments when it installs a newer
+	// box, which is why the chart work below is handed to the run rather than
+	// simply following it.
+	su := newBoxUpdate(out, os.Args[1:], os.Environ(), o.selfUpdateOptions(boxReleases))
+	su.RollbackBox = *o.rollbackBox
+	su.CheckOnly = *o.check
+	run := updateRun{
+		Box:    su,
+		Charts: func(ctx context.Context) { updateCharts(ctx, o, out, resolver) },
+	}
+	if err := run.run(ctx); err != nil {
+		out.Error(err)
+		os.Exit(1)
+	}
+}
+
+// updateCharts is the chart half of `box update`: the release plan, the steps
+// through the floors, and the applies under them. It is a function of its own
+// because the box's replacement comes first and can end the run before any of
+// this -- or hand the process over, so that this runs in the new binary.
+func updateCharts(ctx context.Context, o *updateFlags, out say.Reporter, resolver setup.Resolver) {
 	if *o.valuesPath == "" {
 		fmt.Fprintln(os.Stderr, "box: no values file: pass --values")
 		os.Exit(2)
 	}
-
-	out := newOutput(terminalSet(*o.plain), *o.yes, startupTheme(*o.valuesPath))
-	defer out.Close()
 
 	// The cluster decision belongs to `box bootstrap`; update reuses it the
 	// same way apply does and never probes a cluster of its own.

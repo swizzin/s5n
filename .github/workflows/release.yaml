@@ -262,6 +262,10 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p dist
+          # -X main.packaged is deliberately left unset: the official binary is
+          # not owned by a package manager. A distro package that ships box sets
+          # it to its own manager (apt, dnf, apk), which is what stops that box
+          # from overwriting the file the package owns.
           for arch in amd64 arm64; do
             CGO_ENABLED=0 GOOS=linux GOARCH="$arch" \
               go build -trimpath -ldflags "-s -w -X main.version=${VERSION}" \

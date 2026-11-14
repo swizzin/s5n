@@ -60,6 +60,14 @@ func terminalWidth(f *os.File) int {
 // to meet it.
 var version = "dev"
 
+// packaged names the package manager that installed box, when one did: a build a
+// distro ships passes -X main.packaged=<manager>, and the official binaries
+// leave it empty. A packaged box never replaces its own binary -- the package
+// owns the file, and its next upgrade would undo the replacement or leave the
+// package database describing a file that is not there -- so it names the
+// package command instead.
+var packaged string
+
 func main() {
 	// One context for the whole process. A signal cancels the step in flight
 	// through the error path that step already has, instead of killing box
@@ -107,7 +115,7 @@ commands:
   bootstrap   decide which cluster to use, install the platform layer, then run init for root
   init        ask a seedbox's questions, edit its two files, then apply
   apply       install or upgrade root's seedbox from its grant and values
-  update      move the box to a newer chart release, and roll back an app that crashloops
+  update      replace box when a newer one verifies, then move the seedbox to a newer release
   rollback    put one app back on the image it ran before an update moved it
   version     print the version box was built from
 `)
