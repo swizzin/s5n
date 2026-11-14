@@ -34,9 +34,27 @@ type Helm struct {
 	// Timeout bounds install, upgrade and their wait. Zero means 15 minutes,
 	// which is what hack/e2e-kind.sh gives the wiring Job.
 	Timeout time.Duration
+	// HooksOnly says this handle's upgrade waits for the release's hooks and
+	// not for its resources: the caller gates the release itself. `box update`
+	// sets it, because a step's health gate is the only gate that can tell a
+	// crashlooping pod from a slow migration and put the app back. Helm's own
+	// wait cannot: kstatus reads a crashlooping pod as failed, and Helm drops
+	// failed resources from the wait, so the release's StatefulSet keeps it
+	// waiting until the whole Timeout is gone -- thirty-five minutes of a
+	// broken image before the rollback could start.
+	HooksOnly bool
 
 	cfg *action.Configuration
 	cs  kubernetes.Interface
+}
+
+// waitStrategy is how this handle's install and upgrade wait: for hooks only,
+// or for the release and its hooks.
+func (h *Helm) waitStrategy() helmkube.WaitStrategy {
+	if h.HooksOnly {
+		return helmkube.HookOnlyStrategy
+	}
+	return helmkube.StatusWatcherStrategy
 }
 
 // NewHelm builds the client for one namespace. It does not contact the cluster:
@@ -189,7 +207,7 @@ func (h *Helm) Upgrade(ctx context.Context, chart Chart, values map[string]any) 
 	if exists {
 		up := action.NewUpgrade(h.cfg)
 		up.Namespace = h.Namespace
-		up.WaitStrategy = helmkube.StatusWatcherStrategy
+		up.WaitStrategy = h.waitStrategy()
 		up.WaitForJobs = true
 		up.Timeout = timeout
 		up.Description = "box apply"
@@ -198,7 +216,7 @@ func (h *Helm) Upgrade(ctx context.Context, chart Chart, values map[string]any) 
 		in := action.NewInstall(h.cfg)
 		in.ReleaseName = h.Release
 		in.Namespace = h.Namespace
-		in.WaitStrategy = helmkube.StatusWatcherStrategy
+		in.WaitStrategy = h.waitStrategy()
 		in.WaitForJobs = true
 		in.Timeout = timeout
 		in.Description = "box apply install"

@@ -45,6 +45,10 @@ users:
 // chart's whole thirty-minute startup budget, and Helm's own fifteen-minute
 // default would fail the apply in the middle of it. Update's Helm gets the health
 // gate's budget; `box apply` keeps Helm's default.
+//
+// It also waits for hooks only. Helm's resource wait reads a crashlooping pod as
+// failed and stops waiting on it, so the StatefulSet holds it for the whole
+// budget: the step would never reach the gate that rolls the app back.
 func TestTheUpdatesHelmWaitOutlastsTheStartupBudget(t *testing.T) {
 	kubeconfig := filepath.Join(t.TempDir(), "kubeconfig")
 	if err := os.WriteFile(kubeconfig, []byte(testKubeconfig), 0o600); err != nil {
@@ -57,12 +61,18 @@ func TestTheUpdatesHelmWaitOutlastsTheStartupBudget(t *testing.T) {
 	if h.Timeout != 35*time.Minute {
 		t.Fatalf("update's Helm wait = %v, want the health gate's %v", h.Timeout, update.DefaultHealthWait)
 	}
+	if !h.HooksOnly {
+		t.Fatal("update's Helm waits for the release too: a crashlooping pod holds it for the whole budget")
+	}
 	applied, err := release.NewHelm(kubeconfig, "testbox", release.ReleaseName)
 	if err != nil {
 		t.Fatalf("apply's helm: %v", err)
 	}
 	if applied.Timeout != 0 {
 		t.Fatalf("apply's Helm wait = %v, want Helm's own default", applied.Timeout)
+	}
+	if applied.HooksOnly {
+		t.Fatal("apply's Helm waits for hooks only: nothing else gates the release it installs")
 	}
 }
 

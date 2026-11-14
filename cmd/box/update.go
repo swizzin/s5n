@@ -53,15 +53,24 @@ func (o *updateFlags) options() update.Options {
 }
 
 // updateHelm opens one release handle for an update. Its wait gets the health
-// gate's budget: Helm gives up on a pod reporting CrashLoopBackOff at once, and
-// a migration longer than Helm's own fifteen-minute default would fail the
-// apply before the gate could wait it out. `box apply` keeps that default.
+// gate's budget, and it waits only for the release's hooks: the step's health
+// gate is box's, and it is the one that can tell a moved app that keeps exiting
+// from one that is still starting.
+//
+// Helm's own resource wait cannot make that call. Helm v4's status watcher reads
+// a crashlooping pod as failed and drops failed resources from the wait, so the
+// release's StatefulSet keeps the wait going for the whole budget: a step whose
+// new image exits after three seconds would sit for thirty-five minutes before
+// the gate it is meant to roll back could look. The wiring Job is still waited
+// for, which is the gate's other half, and `box apply` keeps Helm's own wait
+// because nothing else gates it.
 func updateHelm(kubeconfig, namespace string) (*release.Helm, error) {
 	h, err := release.NewHelm(kubeconfig, namespace, release.ReleaseName)
 	if err != nil {
 		return nil, err
 	}
 	h.Timeout = update.DefaultHealthWait
+	h.HooksOnly = true
 	return h, nil
 }
 
