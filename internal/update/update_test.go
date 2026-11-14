@@ -152,17 +152,25 @@ func (f *fakeCluster) Healthy(context.Context) (bool, error) {
 	return f.healthy, f.healthErr
 }
 
-// fakeSnapshots records what was copied and pruned.
+// fakeSnapshots records what was asked, copied and pruned.
 type fakeSnapshots struct {
-	takes   []snapshotCall
-	prunes  []snapshotCall
-	takeErr error
-	log     *callLog
+	checks   []snapshotCall
+	takes    []snapshotCall
+	prunes   []snapshotCall
+	checkErr error
+	takeErr  error
+	log      *callLog
 }
 
 type snapshotCall struct {
 	step Step
 	apps []string
+}
+
+func (f *fakeSnapshots) Check(_ context.Context, step Step, apps []string) error {
+	f.log.add("check %s -> %s", step.From, step.To)
+	f.checks = append(f.checks, snapshotCall{step: step, apps: apps})
+	return f.checkErr
 }
 
 func (f *fakeSnapshots) Take(_ context.Context, step Step, apps []string) error {
@@ -389,8 +397,8 @@ func TestOneStepSnapshotsOnlyTheAppWhoseImageMoved(t *testing.T) {
 		t.Fatalf("prunes = %+v, want the step's two kept", h.snaps.prunes)
 	}
 	// The copy is taken with no writer, and the release moves only after it
-	// exists.
-	h.assertOrder(t, "scale sonarr=0", "gone sonarr", "take 0.4.0 -> 0.5.0", "apply 0.5.0")
+	// exists. Check comes first, before any app is stopped.
+	h.assertOrder(t, "check 0.4.0 -> 0.5.0", "scale sonarr=0", "gone sonarr", "take 0.4.0 -> 0.5.0", "apply 0.5.0")
 	if len(h.app.calls) != 1 || h.app.calls[0].ChartVersion != "0.5.0" {
 		t.Fatalf("applies = %+v, want one at 0.5.0", h.app.calls)
 	}
@@ -692,6 +700,33 @@ func TestPodsThatNeverGoStartTheAppsAgain(t *testing.T) {
 	}
 	if h.state.state.LastStep != nil || len(h.state.state.Failed) != 0 {
 		t.Fatalf("a step that never reached the release was recorded: %+v", h.state.state)
+	}
+}
+
+// TestASnapshotterThatCannotCopyStopsBeforeAnythingStops: box asks whether the
+// copy can be taken first, so a refusal leaves every app running and records
+// nothing -- the box refused, not the release.
+func TestASnapshotterThatCannotCopyStopsBeforeAnythingStops(t *testing.T) {
+	h := newHarness(t)
+	h.charts.publish("0.4.0", "0.4.0", "0.4.0", digestA)
+	h.charts.publish("0.5.0", "0.4.0", "0.4.0", digestB)
+	h.snaps.checkErr = errors.New("no space left for a copy")
+
+	_, err := h.run(t, false)
+	if err == nil {
+		t.Fatal("a box that cannot copy reported success")
+	}
+	if want := "update s5n to 0.5.0: sonarr cannot be snapshotted: no space left for a copy"; !strings.Contains(err.Error(), want) {
+		t.Fatalf("error %q does not say %q", err, want)
+	}
+	if len(h.scales()) != 0 {
+		t.Fatalf("scales = %v, want nothing stopped before the copy was refused", h.scales())
+	}
+	if len(h.snaps.takes) != 0 || len(h.app.calls) != 0 {
+		t.Fatalf("took a copy or applied after the refusal: takes=%+v applies=%d", h.snaps.takes, len(h.app.calls))
+	}
+	if h.state.state.LastStep != nil || len(h.state.state.Failed) != 0 {
+		t.Fatalf("a refusal was recorded as a failed release: %+v", h.state.state)
 	}
 }
 

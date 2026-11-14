@@ -81,6 +81,11 @@ type Cluster interface {
 // of their own. internal/snapshot implements it; this package ships only the
 // interface and a test fake, and cmd/box wires the implementation in.
 type Snapshotter interface {
+	// Check reports whether a copy of these apps can be taken, without
+	// stopping an app or writing a file. A refusal ends the update with
+	// nothing stopped: a box that cannot copy an app has no way to put its
+	// database back, and that is not a step to start.
+	Check(ctx context.Context, step Step, apps []string) error
 	// Take copies the named apps' config for this step, with the apps
 	// stopped. It must fail rather than leave a partial snapshot.
 	Take(ctx context.Context, step Step, apps []string) error
@@ -586,6 +591,14 @@ func (u *Updater) take(ctx context.Context, rel Release, cluster Cluster, snaps 
 	}
 
 	if len(step.Moving) > 0 {
+		// Whether the copy can be taken is asked before anything stops, so a
+		// box that cannot copy refuses with nothing down and nothing
+		// recorded: the box refused, not the release.
+		if err := snaps.Check(ctx, step.Step, step.Moving); err != nil {
+			err = fmt.Errorf("update %s to %s: %s cannot be snapshotted: %w", res.Name, step.To, strings.Join(step.Moving, ", "), err)
+			handle.Failed(err)
+			return err
+		}
 		// Every failure down to the apply is this run's own doing -- it
 		// stopped apps nothing has asked to move yet -- so it starts them
 		// again and returns the step's error. None of it is a failed
