@@ -713,6 +713,126 @@ func TestCallsAreReadAndChecked(t *testing.T) {
 	}
 }
 
+// TestSnapshotGlobsAreReadAndChecked: `snapshot` is what box copies before an
+// update and what a rollback deletes, so a glob that is absolute, walks up, is
+// not clean or is not a pattern is refused at load -- the alternative is a copy
+// that finds nothing or a restore that removes a file outside the app's config
+// directory. The messages are compared whole, because a contributor should be
+// able to act on the line without reading the loader.
+func TestSnapshotGlobsAreReadAndChecked(t *testing.T) {
+	withSnapshot := func(globs string) string {
+		return strings.Replace(miniManifest, "    default: true\n    questions:",
+			"    default: true\n    snapshot: "+globs+"\n    questions:", 1)
+	}
+	cat, err := parseMini(t, withSnapshot("[ app.db , db/db.sqlite3-wal ]"))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	alpha, _ := cat.App("alpha")
+	// The list is trimmed in place, so the copier runs exactly what the loader
+	// checked.
+	if got := strings.Join(alpha.Snapshot, ","); got != "app.db,db/db.sqlite3-wal" {
+		t.Fatalf("apps.alpha.snapshot = %q, want the trimmed list", got)
+	}
+	if beta, _ := cat.App("beta"); len(beta.Snapshot) != 0 {
+		t.Fatalf("apps.beta.snapshot = %v, want none: an omitted key is an app with nothing to restore", beta.Snapshot)
+	}
+
+	cases := []struct {
+		name  string
+		globs string
+		want  string
+	}{
+		{
+			name:  "empty",
+			globs: `[""]`,
+			want:  "apps.alpha.snapshot[0]: is empty; name a file under the app's config directory, or drop the entry",
+		},
+		{
+			name:  "absolute",
+			globs: `[/etc/passwd]`,
+			want:  "apps.alpha.snapshot[0]: /etc/passwd: is absolute; an app's state is somewhere under its config directory",
+		},
+		{
+			name:  "walks up",
+			globs: `[../sonarr/sonarr.db]`,
+			want:  `apps.alpha.snapshot[0]: ../sonarr/sonarr.db: has a ".." segment; a snapshot never leaves the app's config directory`,
+		},
+		{
+			name:  "not clean",
+			globs: `[./app.db]`,
+			want:  `apps.alpha.snapshot[0]: ./app.db: is not a clean relative path (write "app.db")`,
+		},
+		{
+			name:  "not a pattern",
+			globs: `["app[.db"]`,
+			want:  "apps.alpha.snapshot[0]: app[.db: is not a path.Match pattern: syntax error in pattern",
+		},
+		{
+			name:  "twice",
+			globs: `[app.db, app.db]`,
+			want:  "apps.alpha.snapshot[1]: app.db is listed twice (also snapshot[0])",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := parseMini(t, withSnapshot(tc.globs))
+			if err == nil {
+				t.Fatalf("snapshot %s was accepted", tc.globs)
+			}
+			want := "catalog.yaml:\n  " + tc.want
+			if err.Error() != want {
+				t.Fatalf("error =\n%s\nwant\n%s", err, want)
+			}
+		})
+	}
+}
+
+// TestRealChartSnapshots pins what each entry copies. The lists are the chart's
+// statement of what an image upgrade can rewrite beyond going back, so a change
+// is a decision about a rollback: an app added without one, or one whose
+// database moved, fails here rather than shipping a snapshot that restores
+// nothing.
+func TestRealChartSnapshots(t *testing.T) {
+	cat, err := Load("../../charts/s5n")
+	if err != nil {
+		t.Fatalf("load the chart's catalog: %v", err)
+	}
+	want := map[string]string{
+		"qbittorrent": "qBittorrent/qBittorrent.conf",
+		"sonarr":      "sonarr.db,sonarr.db-wal,sonarr.db-shm,config.xml",
+		"radarr":      "radarr.db,radarr.db-wal,radarr.db-shm,config.xml",
+		"prowlarr":    "prowlarr.db,prowlarr.db-wal,prowlarr.db-shm,config.xml",
+		"plex": "Library/Application Support/Plex Media Server/Preferences.xml," +
+			"Library/Application Support/Plex Media Server/Plug-in Support/Databases/com.plexapp.plugins.library.db," +
+			"Library/Application Support/Plex Media Server/Plug-in Support/Databases/com.plexapp.plugins.library.db-wal," +
+			"Library/Application Support/Plex Media Server/Plug-in Support/Databases/com.plexapp.plugins.library.db-shm," +
+			"Library/Application Support/Plex Media Server/Plug-in Support/Databases/com.plexapp.plugins.library.blobs.db," +
+			"Library/Application Support/Plex Media Server/Plug-in Support/Databases/com.plexapp.plugins.library.blobs.db-wal," +
+			"Library/Application Support/Plex Media Server/Plug-in Support/Databases/com.plexapp.plugins.library.blobs.db-shm",
+		"tautulli":    "config.ini,tautulli.db,tautulli.db-wal,tautulli.db-shm",
+		"seerr":       "settings.json,db/db.sqlite3,db/db.sqlite3-wal,db/db.sqlite3-shm",
+		"qui":         "config.toml,qui.db,qui.db-wal,qui.db-shm",
+		"autobrr":     "config.toml,autobrr.db,autobrr.db-wal,autobrr.db-shm",
+		"pbh":         "config.yml,persist/peerbanhelper-nt.db,persist/peerbanhelper-nt.db-wal,persist/peerbanhelper-nt.db-shm",
+		"maintainerr": "maintainerr.sqlite,maintainerr.sqlite-wal,maintainerr.sqlite-shm",
+	}
+	for name, globs := range want {
+		app, ok := cat.App(name)
+		if !ok {
+			t.Fatalf("%s is not in the catalog", name)
+		}
+		if got := strings.Join(app.Snapshot, ","); got != globs {
+			t.Fatalf("apps.%s.snapshot = %s, want %s", name, got, globs)
+		}
+	}
+	for _, app := range cat.Apps() {
+		if _, ok := want[app.Name]; !ok {
+			t.Fatalf("apps.%s has no snapshot list here: decide what an image upgrade can rewrite, add it to the chart and to this table", app.Name)
+		}
+	}
+}
+
 // TestRealChartCallsAreTheReleaseEdges: the catalog's lists are the input the
 // chart's NetworkPolicy is derived from, so this pins the edges that a shipped
 // release got wrong -- Seerr into the Arrs, and everything Maintainerr calls.

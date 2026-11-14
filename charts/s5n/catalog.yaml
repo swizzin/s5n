@@ -69,6 +69,19 @@
 # inside the release omits the key. A name here must be a catalog app, and no
 # app calls itself.
 #
+# An entry also says what an image upgrade can rewrite beyond going back, so a
+# failed update can put it back:
+#
+#   snapshot: [sonarr.db, sonarr.db-wal, sonarr.db-shm, config.xml]
+#
+# A list of globs in path.Match syntax, relative to the app's config directory
+# (the /config mount), each matched against a whole relative path: `*` does not
+# cross a `/`, and there is no `**`. Name the database a migration moves
+# forward, the settings file a new version rewrites, and the SQLite companions
+# (`-wal`, `-shm`) that belong with the database; never a cache, a log, media
+# covers or Plex's metadata bundles. An app without the key has nothing to put
+# back, which is right for one whose upgrades only add.
+#
 # A new *kind* of question is the only catalog change that needs a box release
 # (docs/box.md, "The catalog and box").
 apps:
@@ -85,6 +98,12 @@ apps:
     # The values key stays, with its "admin" default, because the init container
     # still writes a username into qBittorrent.conf (a chart value an existing
     # seedbox may already carry; removing it would break its schema).
+    #
+    # Its own settings upgrade renames and drops keys and records the version it
+    # reached (src/app/upgrade.cpp at release-5.3.0: MIGRATION_VERSION and
+    # handleSettingKeys), so a qBittorrent.conf is not readable by an older
+    # version once a newer one has opened it.
+    snapshot: [qBittorrent/qBittorrent.conf]
     questions: []
 
   sonarr:
@@ -96,6 +115,11 @@ apps:
     # a search is an HTTP call from the Arr's pod to Prowlarr
     # (Prowlarr v2.7, src/NzbDrone.Core/Applications/Sonarr/Sonarr.cs).
     calls: [qbittorrent, prowlarr]
+    # An Arr's database and the config.xml that points at it, with the SQLite
+    # companions a migration writes beside them (PathExtensions.cs at
+    # v5.0.0.2907: the DB constant, GetDatabase and GetConfigPath). The log
+    # database and MediaCover are not state a migration moves.
+    snapshot: [sonarr.db, sonarr.db-wal, sonarr.db-shm, config.xml]
     # An Arr's second instance (an HD and a 4K Sonarr) is a grant decision, not
     # a values question: `box install sonarr --instance 4k` writes it.
     questions: []
@@ -107,6 +131,9 @@ apps:
     # The same two as Sonarr, for the same reason
     # (src/NzbDrone.Core/Applications/Radarr/Radarr.cs).
     calls: [qbittorrent, prowlarr]
+    # The same as Sonarr (PathExtensions.cs at v7.0.0.10815: radarr.db,
+    # config.xml).
+    snapshot: [radarr.db, radarr.db-wal, radarr.db-shm, config.xml]
     questions: []
 
   prowlarr:
@@ -117,6 +144,9 @@ apps:
     # the Arrs are what it dials. It has download clients of its own upstream,
     # but this chart configures none and nothing grabs through it.
     calls: [sonarr, radarr]
+    # The same again (PathExtensions.cs at v2.7.0.5723: prowlarr.db,
+    # config.xml).
+    snapshot: [prowlarr.db, prowlarr.db-wal, prowlarr.db-shm, config.xml]
     questions: []
 
   plex:
@@ -131,6 +161,20 @@ apps:
     # Plex serves its own clients and issues its own token, so a login in front
     # of it would be a password no player asks for.
     login: own
+    # The library database and the blobs beside it, and Preferences.xml, which
+    # is what a Plex upgrade rewrites in a new shape. Its Metadata tree holds
+    # covers, artwork and bundles: Plex rebuilds it, and copying it would mean
+    # copying the whole library directory on every update. The image keeps
+    # Plex's home under Library/Application Support in the claim (its
+    # PLEX_MEDIA_SERVER_APPLICATION_SUPPORT_DIR), not at the top of /config.
+    snapshot:
+      - Library/Application Support/Plex Media Server/Preferences.xml
+      - Library/Application Support/Plex Media Server/Plug-in Support/Databases/com.plexapp.plugins.library.db
+      - Library/Application Support/Plex Media Server/Plug-in Support/Databases/com.plexapp.plugins.library.db-wal
+      - Library/Application Support/Plex Media Server/Plug-in Support/Databases/com.plexapp.plugins.library.db-shm
+      - Library/Application Support/Plex Media Server/Plug-in Support/Databases/com.plexapp.plugins.library.blobs.db
+      - Library/Application Support/Plex Media Server/Plug-in Support/Databases/com.plexapp.plugins.library.blobs.db-wal
+      - Library/Application Support/Plex Media Server/Plug-in Support/Databases/com.plexapp.plugins.library.blobs.db-shm
     questions:
       - key: secrets.plexClaimToken
         prompt: Plex claim token
@@ -146,6 +190,10 @@ apps:
     calls: [plex]
     # It is reached by the same players and apps that reach Plex.
     login: own
+    # Watch history and the config.ini that points at the database
+    # (plexpy/database.py at v2.18.2: FILENAME = "tautulli.db";
+    # plexpy/config.py: FILENAME = "config.ini").
+    snapshot: [config.ini, tautulli.db, tautulli.db-wal, tautulli.db-shm]
     questions: []
 
   seerr:
@@ -161,6 +209,10 @@ apps:
     exposure: host
     # It signs people in with Plex, so a login here would be a second password.
     login: own
+    # Its settings and its database, which Seerr keeps in a subdirectory of the
+    # config directory (server/lib/settings/index.ts and server/datasource.ts at
+    # v3.5.1: settings.json, db/db.sqlite3).
+    snapshot: [settings.json, db/db.sqlite3, db/db.sqlite3-wal, db/db.sqlite3-shm]
     questions: []
 
   # Opt-in: a second UI for the same qBittorrent, not something a box should
@@ -177,6 +229,11 @@ apps:
     oidc: true
     # One qBittorrent, its own instance row.
     calls: [qbittorrent]
+    # Its database and config.toml, which is where its session secret lives: the
+    # credentials it stores in the database are encrypted with that value, so
+    # the pair has to go back together (internal/config/config.go at v1.35.0:
+    # resolveConfigPath and the qui.db path).
+    snapshot: [config.toml, qui.db, qui.db-wal, qui.db-shm]
     questions: []
 
   # Opt-in: it watches IRC announces and feeds and hands what it finds to the
@@ -195,6 +252,10 @@ apps:
     # Its download client, and every Arr its actions push to: autobrr's own
     # client test is an Arr API call, made from autobrr's pod.
     calls: [qbittorrent, sonarr, radarr]
+    # Its SQLite database and config.toml (internal/database/database.go at
+    # v1.90.0: dataSourceName(cfg.ConfigPath, "autobrr.db");
+    # internal/config/config.go: config.toml).
+    snapshot: [config.toml, autobrr.db, autobrr.db-wal, autobrr.db-shm]
     questions: []
 
   # Opt-in: an anti-leech firewall for the download client. It reads
@@ -212,6 +273,12 @@ apps:
     # Its WebUI fetches /api/... from the site root and builds asset URLs
     # relative to it, so it needs a host name of its own: pbh.<domain>.
     exposure: host
+    # config.yml, which PBH's own migrations rewrite in place, and the database
+    # in its persist directory (DatabaseDriverConfig.java and
+    # SQLiteDatabaseDriver.java at v9.5.4, with the default sqlite type in
+    # config.yml). The GeoIP database and the rule subscriptions are downloads
+    # PBH fetches again, and the ban history is a log.
+    snapshot: [config.yml, persist/peerbanhelper-nt.db, persist/peerbanhelper-nt.db-wal, persist/peerbanhelper-nt.db-shm]
     questions: []
 
   # Opt-in, and louder so: it deletes media and torrents on rules the operator
@@ -226,4 +293,9 @@ apps:
     # UI (v3.32's servarr, seerr, tautulli and download-client API modules), and
     # one it cannot reach is a rule that silently never runs.
     calls: [plex, sonarr, radarr, seerr, tautulli, qbittorrent]
+    # Everything it knows is in one SQLite database, at the root of the
+    # directory DATA_DIR moves to /config (apps/server/src/app/config/
+    # dataDir.ts and typeOrmConfig.ts at v3.32.0). The UI bundle it stages
+    # there on every boot and its overlays are rebuilt, not state.
+    snapshot: [maintainerr.sqlite, maintainerr.sqlite-wal, maintainerr.sqlite-shm]
     questions: []

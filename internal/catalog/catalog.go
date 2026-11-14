@@ -17,6 +17,11 @@
 // box's own questions (internal/seedbox's grant rules), because a contributor
 // who could ask for one of them could move a box's data or hand it another
 // box's downloads through a prompt the user thinks is tuning.
+//
+// An entry also names the state an image upgrade can rewrite (`snapshot:`): the
+// files box copies before it moves a release and puts back if the move fails.
+// Those globs decide what a rollback deletes, so they are checked here, with the
+// rule itself living in internal/snapshot beside the code that copies by it.
 package catalog
 
 import (
@@ -31,6 +36,7 @@ import (
 	"go.yaml.in/yaml/v3"
 
 	"github.com/swizzin/s5n/internal/seedbox"
+	"github.com/swizzin/s5n/internal/snapshot"
 )
 
 // FileName is the manifest inside a chart directory, next to values.yaml.
@@ -153,6 +159,13 @@ type App struct {
 	// "sonarr"/"radarr" mean every instance of that Arr. An app that dials
 	// nothing inside the release leaves the list empty.
 	Calls []string `yaml:"calls"`
+	// Snapshot lists the globs, relative to the app's config directory, whose
+	// files an image upgrade can rewrite beyond going back: a database a
+	// migration moved forward, a settings file a new version rewrote, and the
+	// SQLite companions that belong with them. box copies what they match
+	// before an update and puts it back if the update fails, so an app without
+	// an entry has nothing to restore -- right for one whose upgrades only add.
+	Snapshot []string `yaml:"snapshot"`
 	// Questions are asked in this order, after the app is selected.
 	Questions []Question `yaml:"questions"`
 }
@@ -254,6 +267,7 @@ type manifestApp struct {
 	Login       Login      `yaml:"login"`
 	OIDC        bool       `yaml:"oidc"`
 	Calls       []string   `yaml:"calls"`
+	Snapshot    []string   `yaml:"snapshot"`
 	Questions   []Question `yaml:"questions"`
 }
 
@@ -405,6 +419,7 @@ func buildApps(m *manifest, order []string, chartApps map[string]chartApp, sch *
 			Login:       entry.Login,
 			OIDC:        entry.OIDC,
 			Calls:       entry.Calls,
+			Snapshot:    entry.Snapshot,
 			Questions:   entry.Questions,
 		}
 		problems = append(problems, validateExposure(&app)...)
@@ -501,6 +516,7 @@ func validateApp(app *App, chart chartApp, chartApps map[string]chartApp, sch *s
 		}
 	}
 	problems = append(problems, validateCalls(app, chartApps)...)
+	problems = append(problems, validateSnapshot(app)...)
 	return append(problems, validateQuestions(app, sch)...)
 }
 
@@ -534,6 +550,38 @@ func validateCalls(app *App, chartApps map[string]chartApp) []string {
 		seen[name] = i
 		if _, ok := chartApps[name]; !ok {
 			problems = append(problems, fmt.Sprintf("%s: %q is not an app in this chart's catalog, so nothing would admit the call", where, name))
+		}
+	}
+	return problems
+}
+
+// validateSnapshot checks an entry's `snapshot` list: the globs that decide
+// what box copies before an update and what a rollback deletes. One that is
+// absolute, walks up, is not clean or is not a path.Match pattern is refused
+// here, because the alternative is a copy that silently finds nothing or a
+// restore that removes a file outside the app's config directory.
+//
+// The rule is internal/snapshot's, beside the code that copies by it; this adds
+// the entry's location so a contributor sees which glob to edit. The globs are
+// trimmed in place, so the catalog carries what the copier will run.
+func validateSnapshot(app *App) []string {
+	var problems []string
+	seen := map[string]int{}
+	for i, glob := range app.Snapshot {
+		where := fmt.Sprintf("apps.%s.snapshot[%d]", app.Name, i)
+		glob = strings.TrimSpace(glob)
+		app.Snapshot[i] = glob
+		if glob == "" {
+			problems = append(problems, fmt.Sprintf("%s: is empty; name a file under the app's config directory, or drop the entry", where))
+			continue
+		}
+		if j, dup := seen[glob]; dup {
+			problems = append(problems, fmt.Sprintf("%s: %s is listed twice (also snapshot[%d])", where, glob, j))
+			continue
+		}
+		seen[glob] = i
+		if err := snapshot.CheckGlob(glob); err != nil {
+			problems = append(problems, fmt.Sprintf("%s: %s: %v", where, glob, err))
 		}
 	}
 	return problems
