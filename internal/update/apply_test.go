@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -486,5 +487,128 @@ func TestRenderedImageKeepsAPinnedTagWithItsDigest(t *testing.T) {
 	want := snapshot.ImageRef{Repository: sonarrRepo, Tag: "4.9.0", Digest: digestA}
 	if got != want {
 		t.Fatalf("rendered = %+v, want %+v", got, want)
+	}
+}
+
+// TestRollbackPinAfterAnApplySnapshotWritesBothHalves: an apply of a tag-only
+// pin copies what ran and records the digest the pod reported, and a rollback
+// --pin from that copy writes the tag and the digest into the values file --
+// never a tag alone.
+func TestRollbackPinAfterAnApplySnapshotWritesBothHalves(t *testing.T) {
+	root := t.TempDir()
+	dir := filepath.Join(root, "sonarr")
+	if err := os.MkdirAll(dir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"sonarr.db", "config.xml"} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte("state"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	log := &callLog{}
+	cluster := &fakeCluster{replicas: map[string]int32{}, pods: map[string]int{}, healthy: true, log: log}
+	cluster.running = map[string]Running{
+		"sonarr": {
+			Images:  map[string]snapshot.ImageRef{"sonarr": {Repository: sonarrRepo, Tag: "4.9.0"}},
+			Digests: map[string][]string{"sonarr": {digestA}},
+		},
+	}
+	charts := &fakeCharts{charts: map[string]release.Chart{}}
+	valuesBytes, err := os.ReadFile("testdata/chart-values.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	schema, err := os.ReadFile("testdata/chart-schema.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	catalog, err := os.ReadFile("testdata/catalog.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	charts.values, charts.schema, charts.catalog = valuesBytes, schema, catalog
+	charts.publishVariants("0.5.0", "", "", rollbackVariants())
+	chart := charts.charts["0.5.0"]
+
+	// The user's values pin the tag alone -- the case a rollback has to make
+	// exact.
+	values := map[string]any{"apps": map[string]any{
+		"sonarr": map[string]any{"enabled": true, "image": map[string]any{"tag": "5.0.0"}},
+	}}
+	globs := map[string][]string{"sonarr": {"sonarr.db", "config.xml"}}
+	snaps := &ConfigSnapshots{
+		ConfigRoot: root,
+		Values:     values,
+		Globs:      func(context.Context, string) (map[string][]string, error) { return globs, nil },
+		Now:        func() time.Time { return time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC) },
+	}
+	rel := &fakeRelease{state: release.ReleaseState{Exists: true, ChartVersion: "0.5.0", Revision: 1, Status: "deployed"}}
+	step := &ApplySnapshots{
+		OpenRelease:   func(string) (Release, error) { return rel, nil },
+		OpenCluster:   func(string) (Cluster, error) { return cluster, nil },
+		OpenSnapshots: func(string, map[string]any, release.Chart) (Snapshotter, error) { return snaps, nil },
+		SettleWait:    50 * time.Millisecond,
+		CleanupWait:   50 * time.Millisecond,
+		Poll:          time.Millisecond,
+	}
+	plan := release.SnapshotPlan{Namespace: "testbox", Chart: chart, Values: values, ConfigRoot: root}
+	work, err := step.Pending(context.Background(), plan)
+	if err != nil {
+		t.Fatalf("Pending: %v", err)
+	}
+	if len(work.Moves) != 1 || work.Moves[0].Ran.Digest != digestA {
+		t.Fatalf("moves = %+v, want sonarr recorded with the digest its pod reported", work.Moves)
+	}
+	if _, err := step.Take(context.Background(), plan, work); err != nil {
+		t.Fatalf("Take: %v", err)
+	}
+
+	// The copy the apply left is what `box rollback sonarr --pin` reads.
+	valuesPath := filepath.Join(t.TempDir(), "values.yaml")
+	src, err := os.ReadFile("testdata/rollback-values.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(valuesPath, src, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	holds := &fakeHolds{log: log}
+	applied := &fakeApply{errFor: map[string]error{}, applied: map[string]bool{}, managed: rel, log: log, nextRev: 1}
+	rb := &Rollback{
+		Charts:      charts,
+		Open:        func(string) (Release, error) { return rel, nil },
+		OpenCluster: func(string) (Cluster, error) { return cluster, nil },
+		OpenSnapshots: func(string, map[string]any) (Snapshots, error) {
+			return &NewestSnapshots{ConfigRoot: root, Values: values}, nil
+		},
+		Apply:       applied.apply,
+		Holds:       holds,
+		Confirm:     &fakeConfirm{answer: true},
+		Say:         &say.Plain{W: &bytes.Buffer{}},
+		HealthWait:  50 * time.Millisecond,
+		SettleWait:  50 * time.Millisecond,
+		CleanupWait: 50 * time.Millisecond,
+		Poll:        time.Millisecond,
+		Now:         func() time.Time { return time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC) },
+	}
+	if _, err := rb.Run(context.Background(), RollbackOptions{
+		App:   "sonarr",
+		Pin:   true,
+		Apply: release.Options{GrantPath: "testdata/grant.yaml", ValuesPath: valuesPath},
+	}); err != nil {
+		t.Fatalf("rollback --pin: %v", err)
+	}
+
+	sb, err := seedbox.Load("testdata/grant.yaml", valuesPath)
+	if err != nil {
+		t.Fatalf("the pinned values file does not load: %v", err)
+	}
+	merged, err := sb.Merge()
+	if err != nil {
+		t.Fatalf("the pinned values file does not merge: %v", err)
+	}
+	image := merged["apps"].(map[string]any)["sonarr"].(map[string]any)["image"].(map[string]any)
+	if image["tag"] != "4.9.0" || image["digest"] != digestA {
+		t.Fatalf("pinned image = %v, want 4.9.0 at the digest the apply recorded (%s)", image, digestA)
 	}
 }

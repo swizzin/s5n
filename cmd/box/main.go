@@ -609,6 +609,10 @@ func runApply(ctx context.Context, args []string) {
 	// it says so.
 	holds := newBoxHolds(out)
 	opts.Holds = holds.values
+	// A values pin that moves an app's image is stopped and copied before the
+	// release moves, the way a step's is: the copy is what `box rollback`
+	// restores, and an apply has no automatic rollback of its own.
+	opts.Snapshots = applySnapshots(kc)
 	// No host-CA step here: the anchor follows the Certificate the box's host
 	// is served with, and this run neither writes that Certificate nor may read
 	// cert-manager's namespace. `box init` is the run that keeps it right.

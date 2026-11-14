@@ -528,3 +528,34 @@ func TestOneCommandPullsOneRelease(t *testing.T) {
 		t.Fatalf("the chart source was asked %d times, want once: %+v", len(src.refs), src.refs)
 	}
 }
+
+// TestOnlyApplySetsTheSnapshotStep: an apply copies the apps its values pins
+// move, but an update snapshots each step itself and a rollback's apply is the
+// move back. Either one inheriting the step would stop and copy an app twice, or
+// copy it back over the state the rollback is restoring.
+func TestOnlyApplySetsTheSnapshotStep(t *testing.T) {
+	var applyF *applyFlags
+	parse(t, "apply", func(fs *flag.FlagSet) { applyF = addApplyFlags(fs) })
+	if applyF.options().Snapshots != nil {
+		t.Fatal("apply's flags carry a snapshot step: the command that knows the grant sets it")
+	}
+
+	var updateF *updateFlags
+	parse(t, "update", func(fs *flag.FlagSet) { updateF = addUpdateFlags(fs) })
+	if updateF.options().Apply.Snapshots != nil {
+		t.Fatal("update's steps would inherit a snapshot step; each step copies its own")
+	}
+
+	var rollbackF *rollbackFlags
+	parse(t, "rollback", func(fs *flag.FlagSet) { rollbackF = addRollbackFlags(fs) })
+	if rollbackF.options("sonarr").Apply.Snapshots != nil {
+		t.Fatal("a rollback's apply would copy over the snapshot it is restoring")
+	}
+
+	// And the step apply does set is off the package that holds the cluster
+	// client, so cmd/box imports no k8s.io package itself.
+	hook := applySnapshots("")
+	if hook == nil || hook.OpenRelease == nil || hook.OpenCluster == nil || hook.OpenSnapshots == nil {
+		t.Fatalf("apply's snapshot step is incomplete: %+v", hook)
+	}
+}
