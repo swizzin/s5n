@@ -3,6 +3,7 @@ package update
 import (
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -40,11 +41,39 @@ func TestFileStateRoundTripsAndStartsEmpty(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	if !got.LastCheck.Equal(want.LastCheck) || got.LastStep == nil || *got.LastStep != *want.LastStep {
+	if !got.LastCheck.Equal(want.LastCheck) || got.LastStep == nil || !reflect.DeepEqual(*got.LastStep, *want.LastStep) {
 		t.Fatalf("Load = %+v, want %+v", got, want)
 	}
 	if len(got.Failed) != 1 || got.Failed[0] != "0.5.0" {
 		t.Fatalf("Failed = %v, want the recorded version", got.Failed)
+	}
+}
+
+// TestFileStateLoadsARecordFromBeforeRevisionMovedAndGate: the three new step
+// fields are additive, so the record an older box wrote still reads and the
+// release it failed on is still skipped.
+func TestFileStateLoadsARecordFromBeforeRevisionMovedAndGate(t *testing.T) {
+	path := filepath.Join(t.TempDir(), FileName)
+	old := `{
+  "lastCheck": "2026-01-02T03:04:05Z",
+  "lastStep": {"from": "0.4.0", "to": "0.5.0", "at": "2026-01-02T03:04:05Z", "outcome": "failed", "error": "health gate failed"},
+  "failed": ["0.5.0"]
+}`
+	if err := os.WriteFile(path, []byte(old), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	got, err := FileState{Path: path}.Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if got.LastStep == nil || got.LastStep.To != "0.5.0" || got.LastStep.Outcome != OutcomeFailed {
+		t.Fatalf("LastStep = %+v, want the failed step the old record held", got.LastStep)
+	}
+	if got.LastStep.Revision != 0 || got.LastStep.Gate != "" || len(got.LastStep.Moved) != 0 {
+		t.Fatalf("LastStep = %+v, want the zero values the old record implies", got.LastStep)
+	}
+	if len(got.Failed) != 1 || got.Failed[0] != "0.5.0" {
+		t.Fatalf("Failed = %v, want the recorded version kept", got.Failed)
 	}
 }
 

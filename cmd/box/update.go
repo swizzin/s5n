@@ -117,7 +117,7 @@ func runUpdate(ctx context.Context, args []string) {
 	// OpenSnapshots is left unset on purpose: the snapshotter is
 	// internal/snapshot's, wired by the lane that lands it. Until then a step
 	// that moves an image refuses before it stops anything, rather than
-	// applying with no way back.
+	// applying over a database box cannot give the operator a copy of.
 	up := &update.Updater{
 		Charts: charts,
 		Open: func(namespace string) (update.Release, error) {

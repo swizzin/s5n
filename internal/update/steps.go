@@ -12,8 +12,8 @@ import (
 )
 
 // Step is one release-to-release move: the chart version the box is on and the
-// one this step installs. The pair is what a snapshot is named after and what
-// a rollback returns past.
+// one this step installs. The pair names a snapshot, and the step records it as
+// the revision a rollback command returns past.
 type Step struct {
 	From string
 	To   string

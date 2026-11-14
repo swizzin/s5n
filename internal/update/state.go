@@ -22,9 +22,9 @@ const (
 	// OutcomeOK says the step passed both gates and the box is on that
 	// release.
 	OutcomeOK = "ok"
-	// OutcomeFailed says the step did not pass and the box went back to the
-	// release it started from (or, when the rollback failed too, is somewhere
-	// the record's error names).
+	// OutcomeFailed says the step did not pass. The release is wherever the
+	// step left it -- box never moves one back -- and the record's error
+	// names what Helm reported when the step stopped.
 	OutcomeFailed = "failed"
 )
 
@@ -54,14 +54,24 @@ type State struct {
 }
 
 // StepRecord is one attempted step, as `box status` shows it: the versions it
-// moved between, when it stopped, how it ended and, for a failure, the gate
-// and the error in box's own words.
+// moved between, the revision it began at and the apps it moved, when it
+// stopped, how it ended and, for a failure, the gate and the error in box's
+// own words.
 type StepRecord struct {
 	From    string    `json:"from"`
 	To      string    `json:"to"`
 	At      time.Time `json:"at"`
 	Outcome string    `json:"outcome"`
 	Error   string    `json:"error,omitempty"`
+	// Revision is the Helm revision the step began at: where a rollback
+	// command for this step returns to.
+	Revision int `json:"revision,omitempty"`
+	// Moved is the apps whose image the step moved, empty for a step that
+	// moved none.
+	Moved []string `json:"moved,omitempty"`
+	// Gate is the gate that failed: "apply", "wiring" or "health". Empty on
+	// a step that passed.
+	Gate string `json:"gate,omitempty"`
 }
 
 // StateStore is where update's record lives. It is an interface so the flow's
