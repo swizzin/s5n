@@ -694,7 +694,7 @@ and raises it when it deletes support for something an old release relies on. Th
 platform pins are part of that promise: box's compiled-in manifests must work with the
 platform version every release back to its floor pins. That isn't hypothetical:
 `update` replaces box before it moves the chart, so a new box runs against root's old
-release between those two steps, and for longer when a release is rolled back. A release
+release between those two steps, and for longer when the chart step fails. A release
 older than box's floor is one box will only update.
 
 **box only uses published charts (decided).** It pulls a released chart by version from
@@ -740,11 +740,13 @@ switch in the repo: disabling the workflow in GitHub is the kill switch. Nothing
 released without a previous `s5n-v*` tag to build on, and nothing is published from a
 push to `develop`.
 
-What makes this safe is the e2e plus a rollback that really works. The Arrs migrate
-their databases forward when they start and don't support running an older version
-on a newer database, so stepping a chart back is not enough. `update` snapshots each
-app's config before it moves a release, and a rollback restores the snapshot together
-with the previous chart.
+What makes this safe is the e2e first: a bump that breaks on a clean box never becomes
+a release. What the e2e can't see is one box's own data meeting a new image, and that
+is what the per-app rollback under Updates is for. The Arrs migrate their databases
+forward when they start and don't support running an older version on a newer
+database, so putting an app back on its old image is not enough. `update` snapshots an
+app's config before it moves the app's image, and a rollback restores the snapshot
+together with the image the app had.
 
 **What update does with it:**
 
@@ -923,8 +925,8 @@ The chart pins every image by digest; there's no in-cluster image updater and no
 1. Renovate opens a digest bump when an app image publishes.
 2. CI runs the e2e suite on it; a passing bump cuts a chart release automatically.
 3. Each box runs `update` on a timer (on by default). A health check and a wiring check
-   gate each update; a failure stops the update there and is recorded, and rolling back
-   is the operator's command (Phase 3).
+   gate each update. An app that crashloops on its new image is rolled back by box; any
+   other failure stops the update there, is recorded and is announced.
 
 New images arrive hours after upstream instead of minutes, and a broken upstream image
 fails in CI instead of on a user's box.
@@ -943,7 +945,7 @@ busy and idle.
 
 **Snapshot and rollback (decided for 0.5, mechanism proposed).** An unattended update
 runs over forward-only database migrations, so 0.5 carries a narrow rollback ahead of
-`box backup`. It covers one update step, not disaster recovery.
+`box backup`. It covers one app over one update step, not disaster recovery.
 
 - **Only what moves is snapshotted.** A database migrates when its image changes, so a
   step snapshots the apps whose pinned image differs between the installed release's
@@ -957,32 +959,71 @@ runs over forward-only database migrations, so 0.5 carries a narrow rollback ahe
 - **Snapshots can be turned off for an app (decided; where the switch lives is
   proposed).** A copy costs disk, and the app is down while it is made. With snapshots
   off for an app, a step that moves it takes no copy of it and the plan says so. That
-  app can't be rolled back.
+  app can't be rolled back, by box or by hand: if its new image fails, it stays as it
+  is and box says so.
 - **Consistent, not live.** The moving apps are scaled to zero first, which the image
   change does anyway, so the copy is taken with no writer. It goes under the config
   root in `.box/snapshots/<from>-<to>-<time>/<app>/`, on the same filesystem as what it
   copies.
-- **A failed gate stops the update; it doesn't roll back (decided).** When the health
-  or wiring gate fails, box leaves the release where the step put it, records the
-  failed release and says where the box is. The health gate can't tell a slow
-  migration from a failed one, and undoing a migration that was about to finish is
-  worse than waiting for someone to look. The timer won't take the failed release
-  again; a newer release clears that. A step that fails before the release moves only
-  starts the apps it stopped.
-- **Rollback is a command, and only for what has a copy (decided; mechanism
-  proposed).** Nothing but the operator rolls a box back. One app goes back by
-  restoring its snapshot and pinning the image it had, which holds it like any hand
-  pin; removing the pin releases it. The whole release goes back by restoring every
-  app the step moved and returning to the revision before the step, which is exactly
-  what was running, values included. box refuses that when an app the step moved has
-  no snapshot: the old image would start on a migrated database. Either way the apps
-  are stopped, and their pods gone, before a file is put back (a file the globs match
-  that the snapshot lacks, such as a new `-wal`, is removed).
+- **A rollback is per app: its snapshot and the image it had (decided).** Rolling an
+  app back stops it, waits until its pods are gone, restores its snapshot (a file the
+  globs match that the snapshot lacks, such as a new `-wal`, is removed) and holds the
+  app at the image it ran before the step. The rest of the release stays where the
+  step put it. An automatic chart release changes nothing but pins, so the app runs
+  under the template it ran under before. After a maintainer's release the template
+  may have changed, and the old image under it is a combination the e2e hasn't run.
+- **There is no whole-release rollback in 0.5 (decided).** A failure that is the
+  chart's own, in the wiring Job or a template, is the same on every box: the e2e's to
+  catch and a new release's to fix.
+- **An app that crashloops on its new image is rolled back by box (decided; the
+  signal is proposed).** The health gate tells three cases apart. Every app is ready:
+  the step passed. A moved app's container keeps exiting: box rolls that app back, and
+  only that app. A moved app is running but not ready: box waits, because the Arrs
+  open their web port only after their migration has finished; if the wait runs out,
+  box stops, records it and announces it without touching the app. Only an update
+  step rolls back: an app that fails later is announced and left alone, because a
+  restore by then would cost everything it wrote since. Proposed signal: the container
+  has exited three times since the step.
+- **Apps that migrate when they start get a long startup budget (decided; the number
+  is proposed).** The chart's startup probe allows five minutes today, after which the
+  kubelet restarts the container, and a migration that outlasts it would count as a
+  crashloop.
+- **A rollback holds the app until the chart moves past the image it left (decided;
+  where box keeps the hold is proposed).** The hold names the image the app was rolled
+  back from. While the chart still pins that image, the app stays on the old one; when
+  a release pins another, the hold lapses and the app moves with the release. Nothing
+  is written into the values file. Proposed: the hold lives with the seedbox, under
+  `<config root>/.box/` beside the snapshots it refers to, so a user's own rollback
+  can write it.
+- **`box rollback <app>` does the same by hand (decided; the command's shape is
+  proposed).** It is for a fault no gate sees. It uses the app's newest snapshot only
+  and says how old that is before it changes anything, because everything the app
+  wrote since is lost. By default it leaves the same hold, which lapses by itself.
+  Asked to pin, it writes an ordinary pin into values instead, which holds the app
+  until the user removes it, like any hand pin. A pin is an override on whatever
+  release is installed, so the release keeps updating around it. Proposed: `--pin`.
+- **A failure box doesn't roll back stops the update (decided).** A failed apply or
+  wiring gate, a failing app with snapshots off, a rollback that fails itself: box
+  leaves things where they are, records the failed release and says where the box is.
+  The timer won't take the failed release again; a newer release clears that. A step
+  that fails before the release moves only starts the apps it stopped.
 - **Two kept.** After a step passes, each app keeps its two newest snapshots.
+
+**Notices (decided; the hook's shape is proposed).** A box that updates by itself has
+to be able to tell someone who isn't looking. box can post to one address after every
+update step (what moved, from what to what), when a step stops or an app is rolled
+back, and when an app stops being healthy. A notice about an unhealthy app that moved
+recently and has a snapshot names the rollback command; otherwise it names the logs.
+The hook is optional and strongly recommended. A user's hook hears about their own
+seedbox; root's hears about the host and every seedbox on it. Proposed: one URL per
+seedbox in values and one in root's config, posted to as JSON, no mail; `init` asks
+for it; health is read on every timer run and announced when it changes, in either
+direction, not on a schedule.
 
 **What `status` shows in 0.5 (decided).** The first line only: the installed release, the
 last update and how it ended, the next check, and anything held (the box binary, a
-failed release). The rest of "status and doctor" stays proposed.
+failed release, an app rolled back or pinned). The rest of "status and doctor" stays
+proposed.
 
 ### The platform layer (decided)
 
