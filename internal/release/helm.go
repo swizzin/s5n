@@ -14,6 +14,7 @@ import (
 	chartv2 "helm.sh/helm/v4/pkg/chart/v2"
 	helmkube "helm.sh/helm/v4/pkg/kube"
 	helmrelease "helm.sh/helm/v4/pkg/release"
+	"helm.sh/helm/v4/pkg/release/common"
 	v1release "helm.sh/helm/v4/pkg/release/v1"
 	"helm.sh/helm/v4/pkg/storage/driver"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -140,6 +141,13 @@ func (h *Helm) State(_ context.Context) (ReleaseState, error) {
 		return ReleaseState{}, fmt.Errorf("release %s in %s: Helm does not record which chart version it was deployed with", h.Release, h.Namespace)
 	}
 	return state, nil
+}
+
+// Deployed reports whether Helm's status for the release is deployed. An
+// update's health gate waits for this, because a release can be upgraded and
+// then failed by a hook or by a controller retrying its status.
+func (s ReleaseState) Deployed() bool {
+	return s.Status == string(common.StatusDeployed)
 }
 
 // deployedRelease is the release Helm has deployed, or nil when there is none.
