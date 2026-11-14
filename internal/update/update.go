@@ -330,33 +330,13 @@ func (u *Updater) now() time.Time {
 // fifteen-minute default must not fail the apply before this gate can see it.
 const DefaultHealthWait = 35 * time.Minute
 
-func (u *Updater) healthWait() time.Duration {
-	if u.HealthWait > 0 {
-		return u.HealthWait
-	}
-	return DefaultHealthWait
-}
+func (u *Updater) healthWait() time.Duration { return orDuration(u.HealthWait, DefaultHealthWait) }
 
-func (u *Updater) settleWait() time.Duration {
-	if u.SettleWait > 0 {
-		return u.SettleWait
-	}
-	return 5 * time.Minute
-}
+func (u *Updater) settleWait() time.Duration { return orDuration(u.SettleWait, 5*time.Minute) }
 
-func (u *Updater) cleanupWait() time.Duration {
-	if u.CleanupWait > 0 {
-		return u.CleanupWait
-	}
-	return 5 * time.Minute
-}
+func (u *Updater) cleanupWait() time.Duration { return orDuration(u.CleanupWait, 5*time.Minute) }
 
-func (u *Updater) poll() time.Duration {
-	if u.Poll > 0 {
-		return u.Poll
-	}
-	return 2 * time.Second
-}
+func (u *Updater) poll() time.Duration { return orDuration(u.Poll, 2*time.Second) }
 
 // Run plans the update, reports it, asks once, and takes each step in order.
 func (u *Updater) Run(ctx context.Context, opts Options) (Result, error) {
@@ -451,7 +431,7 @@ func (u *Updater) plan(ctx context.Context, opts Options) (Result, error) {
 		return res, err
 	}
 	res.configRoot = root
-	holds, err := u.loadHolds(root)
+	holds, err := loadHolds(u.Holds, root)
 	if err != nil {
 		return res, err
 	}
@@ -748,21 +728,21 @@ func (u *Updater) take(ctx context.Context, rel Release, cluster Cluster, snaps 
 		// stopped apps nothing has asked to move yet -- so it starts them
 		// again and returns the step's error. None of it is a failed
 		// release: the release was never tried.
-		if err := u.scale(ctx, cluster, copied, 0); err != nil {
-			u.scaleUp(ctx, cluster, copied)
+		if err := scaleApps(ctx, cluster, copied, 0); err != nil {
+			u.startAgain(ctx, cluster, copied)
 			err = fmt.Errorf("update %s to %s: stopping %s: %w", res.Name, step.To, strings.Join(copied, ", "), err)
 			handle.Failed(err)
 			return err
 		}
-		if err := u.waitGone(ctx, cluster, copied); err != nil {
-			u.scaleUp(ctx, cluster, copied)
+		if err := waitGone(ctx, cluster, copied, u.settleWait(), u.poll()); err != nil {
+			u.startAgain(ctx, cluster, copied)
 			err = fmt.Errorf("update %s to %s: waiting for %s to stop: %w", res.Name, step.To, strings.Join(copied, ", "), err)
 			handle.Failed(err)
 			return err
 		}
 		taken, err = snaps.Take(ctx, step.Step, copied, step.Images)
 		if err != nil {
-			u.scaleUp(ctx, cluster, copied)
+			u.startAgain(ctx, cluster, copied)
 			err = fmt.Errorf("update %s to %s: snapshotting %s: %w", res.Name, step.To, strings.Join(copied, ", "), err)
 			handle.Failed(err)
 			return err
@@ -848,7 +828,7 @@ func (u *Updater) fail(ctx context.Context, rel Release, cluster Cluster, res *R
 	var startErr error
 	copied := step.Copied()
 	if gate == gateApply && len(copied) > 0 {
-		if err := u.scale(cctx, cluster, copied, 1); err != nil {
+		if err := scaleApps(cctx, cluster, copied, 1); err != nil {
 			startErr = err
 		}
 	}
@@ -880,8 +860,10 @@ func (u *Updater) fail(ctx context.Context, rel Release, cluster Cluster, res *R
 	return errors.New(msg)
 }
 
-// scale sets every moving app's replicas.
-func (u *Updater) scale(ctx context.Context, cluster Cluster, apps []string, replicas int32) error {
+// scaleApps sets every named app's replicas. It is one app's StatefulSets and
+// its instances together, which is what both a step and a hand rollback stop
+// and start.
+func scaleApps(ctx context.Context, cluster Cluster, apps []string, replicas int32) error {
 	for _, app := range apps {
 		if err := cluster.Scale(ctx, app, replicas); err != nil {
 			return fmt.Errorf("%s: %w", app, err)
@@ -890,19 +872,19 @@ func (u *Updater) scale(ctx context.Context, cluster Cluster, apps []string, rep
 	return nil
 }
 
-// scaleUp starts apps again after a failure that never reached Helm. It is
+// startAgain starts apps again after a failure that never reached Helm. It is
 // best effort on purpose: the step's own error is the one box reports, and a
 // second failure here would only hide it.
-func (u *Updater) scaleUp(ctx context.Context, cluster Cluster, apps []string) {
+func (u *Updater) startAgain(ctx context.Context, cluster Cluster, apps []string) {
 	cctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), u.cleanupWait())
 	defer cancel()
-	_ = u.scale(cctx, cluster, apps, 1)
+	_ = scaleApps(cctx, cluster, apps, 1)
 }
 
 // waitGone waits for the stopping apps' pods to go, so the snapshot is taken
-// with no writer.
-func (u *Updater) waitGone(ctx context.Context, cluster Cluster, apps []string) error {
-	waited, err := wait.Until(ctx, u.settleWait(), u.poll(), func(ctx context.Context) (bool, error) {
+// with no writer, and a restore writes into a directory nothing is reading.
+func waitGone(ctx context.Context, cluster Cluster, apps []string, budget, poll time.Duration) error {
+	waited, err := wait.Until(ctx, budget, poll, func(ctx context.Context) (bool, error) {
 		for _, app := range apps {
 			gone, err := cluster.Gone(ctx, app)
 			if err != nil {
@@ -918,7 +900,7 @@ func (u *Updater) waitGone(ctx context.Context, cluster Cluster, apps []string) 
 		return err
 	}
 	if !waited.Done {
-		return fmt.Errorf("pods still running after %s", u.settleWait())
+		return fmt.Errorf("pods still running after %s", budget)
 	}
 	return nil
 }
@@ -938,7 +920,7 @@ func (u *Updater) applyAndGate(ctx context.Context, rel Release, cluster Cluster
 		}
 		return u.afterFailedApply(ctx, rel, cluster, step, applyOpts, gate, err)
 	}
-	outcome, err := u.waitHealthy(ctx, rel, cluster, step.Moving)
+	outcome, err := waitHealthy(ctx, rel, cluster, step.Moving, u.healthWait(), u.poll())
 	if err != nil {
 		return gateHealth, GateResult{}, err
 	}
@@ -995,7 +977,7 @@ func (u *Updater) afterFailedApply(ctx context.Context, rel Release, cluster Clu
 		}
 		return gate, GateResult{}, err
 	}
-	outcome, err = u.waitHealthy(ctx, rel, cluster, step.Moving)
+	outcome, err = waitHealthy(ctx, rel, cluster, step.Moving, u.healthWait(), u.poll())
 	if err != nil {
 		return gateHealth, GateResult{}, err
 	}
@@ -1052,10 +1034,10 @@ func (u *Updater) stepBack(ctx context.Context, rel Release, cluster Cluster, sn
 		r.Warn(fmt.Sprintf("%s exited %d times on %s: rolling it back to %s",
 			e.App, e.Restarts, change.MovedTo.Label(), change.Ran.Label()))
 	}
-	if err := u.scale(ctx, cluster, apps, 0); err != nil {
+	if err := scaleApps(ctx, cluster, apps, 0); err != nil {
 		return nil, fmt.Errorf("stopping %s: %w", strings.Join(apps, ", "), err)
 	}
-	if err := u.waitGone(ctx, cluster, apps); err != nil {
+	if err := waitGone(ctx, cluster, apps, u.settleWait(), u.poll()); err != nil {
 		return nil, fmt.Errorf("waiting for %s to stop: %w", strings.Join(apps, ", "), err)
 	}
 	if err := snaps.Restore(ctx, step.Step, apps); err != nil {
@@ -1067,7 +1049,7 @@ func (u *Updater) stepBack(ctx context.Context, rel Release, cluster Cluster, sn
 			app:   apps[0], dir: taken.Dirs[apps[0]],
 		}
 	}
-	holds, err := u.loadHolds(res.configRoot)
+	holds, err := loadHolds(u.Holds, res.configRoot)
 	if err != nil {
 		return nil, &rollbackFailure{cause: err, app: apps[0], dir: taken.Dirs[apps[0]]}
 	}
@@ -1090,7 +1072,7 @@ func (u *Updater) stepBack(ctx context.Context, rel Release, cluster Cluster, sn
 	if _, err := u.Apply(ctx, applyOpts); err != nil {
 		return nil, &rollbackFailure{cause: fmt.Errorf("re-applying %s: %w", step.To, err), app: apps[0], dir: taken.Dirs[apps[0]]}
 	}
-	outcome, err := u.waitHealthy(ctx, rel, cluster, step.Moving)
+	outcome, err := waitHealthy(ctx, rel, cluster, step.Moving, u.healthWait(), u.poll())
 	if err != nil {
 		return nil, &rollbackFailure{cause: err, app: apps[0], dir: taken.Dirs[apps[0]]}
 	}
@@ -1119,9 +1101,13 @@ func (u *Updater) stepBack(ctx context.Context, rel Release, cluster Cluster, sn
 // crashloop is still the step's to name. Otherwise it waits for Helm to say
 // deployed and for every StatefulSet to be ready, because an app that has not
 // opened its port yet may be migrating rather than failing.
-func (u *Updater) waitHealthy(ctx context.Context, rel Release, cluster Cluster, moving []string) (GateResult, error) {
+//
+// It is one function rather than a method because update's step-back and a hand
+// rollback both end in it, asking the same question: is the app ready, or does
+// it keep exiting?
+func waitHealthy(ctx context.Context, rel Release, cluster Cluster, moving []string, budget, poll time.Duration) (GateResult, error) {
 	var last Health
-	waited, err := wait.Until(ctx, u.healthWait(), u.poll(), func(ctx context.Context) (bool, error) {
+	waited, err := wait.Until(ctx, budget, poll, func(ctx context.Context) (bool, error) {
 		health, err := cluster.Health(ctx, moving)
 		if err != nil {
 			return false, err
@@ -1286,6 +1272,16 @@ func plural(n int, one, many string) string {
 		return fmt.Sprintf("%d %s", n, one)
 	}
 	return fmt.Sprintf("%d %s", n, many)
+}
+
+// orDuration is a configured deadline or its default. Zero is "the caller has
+// no opinion", which is why a test that wants a short wait sets one and the
+// operator's box never does.
+func orDuration(d, def time.Duration) time.Duration {
+	if d > 0 {
+		return d
+	}
+	return def
 }
 
 // movingNames names the apps a step moves, with "(no snapshot)" after one whose

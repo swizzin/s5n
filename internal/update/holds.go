@@ -27,12 +27,12 @@ func ConfigRoot(sb *seedbox.Seedbox) (string, error) {
 	return "", errors.New("the grant names no config volume, so there is nowhere to copy an app's config")
 }
 
-// loadHolds is the box's holds, or none when this Updater keeps no store.
-func (u *Updater) loadHolds(configRoot string) ([]snapshot.Hold, error) {
-	if u.Holds == nil {
+// loadHolds is the box's holds, or none when the caller keeps no store.
+func loadHolds(store HoldStore, configRoot string) ([]snapshot.Hold, error) {
+	if store == nil {
 		return nil, nil
 	}
-	return u.Holds.Load(configRoot)
+	return store.Load(configRoot)
 }
 
 // HoldStore is the record of the apps box is holding at the image they ran
