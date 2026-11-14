@@ -622,8 +622,8 @@ func (a *Applier) Apply(ctx context.Context, opts Options) (Result, error) {
 		return res, err
 	}
 	// init prints the chart before its questions; a bare `box apply` has not
-	// shown anyone which release it is about to install, and "newest this box
-	// can use" is not obvious from the tag it ends up with.
+	// shown anyone which release it installs -- the one the box is on, or on a
+	// first install the newest this box can use, which nothing else names.
 	if opts.Chart == nil && chart.Version != "" {
 		r.Chart(chart.Name, chart.Version, chart.Ref)
 	}

@@ -30,7 +30,7 @@ type updateFlags struct {
 }
 
 func addUpdateFlags(fs *flag.FlagSet) *updateFlags {
-	return &updateFlags{
+	o := &updateFlags{
 		applyFlags: addApplyFlags(fs),
 		check:      fs.Bool("check", false, "show what the box would update to, and write nothing"),
 		plain:      fs.Bool("plain", false, "ask with plain line prompts, even on a terminal (for a flaky terminal or a screen reader)"),
@@ -43,6 +43,13 @@ func addUpdateFlags(fs *flag.FlagSet) *updateFlags {
 		holdBox:     fs.Bool("hold-box", false, "take no new box even when a newer one is out: the chart update runs on this one"),
 		rollbackBox: fs.Bool("rollback-box", false, "put back the box an update replaced, and do no chart work (root only)"),
 	}
+	// --chart-version comes from apply's flag set, where it now means "the
+	// release that is installed". An update's names the release to move to,
+	// so its help is put back to the install wording.
+	if f := fs.Lookup("chart-version"); f != nil {
+		f.Usage = chartVersionInstalls
+	}
+	return o
 }
 
 // statePath is this run's own record: update.json beside the cluster record,

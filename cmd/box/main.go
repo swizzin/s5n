@@ -215,10 +215,22 @@ type chartFlags struct {
 	version *string
 }
 
-func addChartFlags(fs *flag.FlagSet) *chartFlags {
+// --chart-version means two different things, so its help text comes from the
+// command: bootstrap, init and update choose the release to install (or move
+// to), while apply applies the release the box is already on. One flag set
+// serves all of them; a second copy is what would drift.
+const (
+	// chartVersionInstalls is bootstrap's, init's and update's.
+	chartVersionInstalls = "chart release to install (default: the newest released version this box can use)"
+	// chartVersionApplies is apply's: the release is the box's, not the
+	// operator's, to choose (cmd/box/installed.go).
+	chartVersionApplies = "chart release to apply (default: the one installed; the newest this box can use when nothing is installed)"
+)
+
+func addChartFlags(fs *flag.FlagSet, versionUsage string) *chartFlags {
 	return &chartFlags{
 		repo:    fs.String("chart-repo", release.DefaultChartRepo, "OCI reference of the chart repository"),
-		version: fs.String("chart-version", "", "chart release to install (default: the newest released version this box can use)"),
+		version: fs.String("chart-version", "", versionUsage),
 	}
 }
 
@@ -516,7 +528,7 @@ func addApplyFlags(fs *flag.FlagSet) *applyFlags {
 	if home, err := os.UserHomeDir(); err == nil {
 		valuesDefault = seedbox.ValuesPath(home)
 	}
-	o := &applyFlags{chart: addChartFlags(fs)}
+	o := &applyFlags{chart: addChartFlags(fs, chartVersionApplies)}
 	o.grantPath = fs.String("grant", seedbox.GrantPath("root"), "the root-owned grant file")
 	o.valuesPath = fs.String("values", valuesDefault, "the user's values file")
 	o.kubeconfig = fs.String("kubeconfig", "", "explicit kubeconfig to use, or fail with no fallback")
@@ -584,6 +596,31 @@ func runApply(ctx context.Context, args []string) {
 		os.Exit(1)
 	}
 
+	// apply keeps the release the box is on, so it has to read which one that
+	// is before it can say what it installs. The grant names the namespace and
+	// the release lives in it; both are reads, and the apply below loads the
+	// two files again itself, which is the one place that refuses them.
+	sb, err := seedbox.Load(*o.grantPath, *o.valuesPath)
+	if err != nil {
+		out.Error(err)
+		os.Exit(1)
+	}
+	namespace, err := sb.Namespace()
+	if err != nil {
+		out.Error(err)
+		os.Exit(1)
+	}
+	installed, err := release.NewHelm(kc, namespace, release.ReleaseName)
+	if err != nil {
+		out.Error(err)
+		os.Exit(1)
+	}
+	opts, err := applyRelease(ctx, o.options(), installed.State)
+	if err != nil {
+		out.Error(err)
+		os.Exit(1)
+	}
+
 	confirm := confirmer(out, *o.yes)
 	app := &release.Applier{
 		Charts:  chartSource(out),
@@ -597,7 +634,6 @@ func runApply(ctx context.Context, args []string) {
 		},
 	}
 
-	opts := o.options()
 	opts.BoxValues = boxValues(kc)
 	// Root's per-host TLS: a values file that enables an app served at a host
 	// of its own gets that host's listener and Certificate before the release
@@ -703,7 +739,7 @@ func addInitFlags(fs *flag.FlagSet) *initFlags {
 	if home, err := os.UserHomeDir(); err == nil {
 		valuesDefault = seedbox.ValuesPath(home)
 	}
-	o := &initFlags{fs: fs, chart: addChartFlags(fs)}
+	o := &initFlags{fs: fs, chart: addChartFlags(fs, chartVersionInstalls)}
 	o.grantPath = fs.String("grant", seedbox.GrantPath("root"), "the root-owned grant file to write")
 	o.valuesPath = fs.String("values", valuesDefault, "the user's values file to edit")
 	o.namespace = fs.String("namespace", "seedbox", "the box's namespace; a re-run keeps whatever the grant says")

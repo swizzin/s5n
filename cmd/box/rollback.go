@@ -28,9 +28,10 @@ func addRollbackFlags(fs *flag.FlagSet) *rollbackFlags {
 		pin:        fs.Bool("pin", false, "pin the image in your values instead of holding it, so it lasts until you remove the pin"),
 		plain:      fs.Bool("plain", false, "ask with plain line prompts, even on a terminal (for a flaky terminal or a screen reader)"),
 	}
-	// apply's flag says "chart release to install", which a rollback cannot
-	// honour: it applies the release that is installed. --help has to say so,
-	// because the flag is refused rather than ignored.
+	// apply's flag offers the release that is installed, which a rollback
+	// cannot honour either: its apply names the installed release itself, from
+	// the cluster. --help has to say so, because the flag is refused rather
+	// than ignored.
 	if f := fs.Lookup("chart-version"); f != nil {
 		f.Usage = "not used: a rollback applies the release that is installed"
 	}
