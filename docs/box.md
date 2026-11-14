@@ -975,33 +975,31 @@ runs over forward-only database migrations, so 0.5 carries a narrow rollback ahe
 - **There is no whole-release rollback in 0.5 (decided).** A failure that is the
   chart's own, in the wiring Job or a template, is the same on every box: the e2e's to
   catch and a new release's to fix.
-- **An app that crashloops on its new image is rolled back by box (decided; the
-  signal is proposed).** The health gate tells three cases apart. Every app is ready:
-  the step passed. A moved app's container keeps exiting: box rolls that app back, and
-  only that app. A moved app is running but not ready: box waits, because the Arrs
-  open their web port only after their migration has finished; if the wait runs out,
-  box stops, records it and announces it without touching the app. Only an update
-  step rolls back: an app that fails later is announced and left alone, because a
-  restore by then would cost everything it wrote since. Proposed signal: the container
-  has exited three times since the step.
-- **Apps that migrate when they start get a long startup budget (decided; the number
-  is proposed).** The chart's startup probe allows five minutes today, after which the
-  kubelet restarts the container, and a migration that outlasts it would count as a
-  crashloop.
-- **A rollback holds the app until the chart moves past the image it left (decided;
-  where box keeps the hold is proposed).** The hold names the image the app was rolled
-  back from. While the chart still pins that image, the app stays on the old one; when
-  a release pins another, the hold lapses and the app moves with the release. Nothing
-  is written into the values file. Proposed: the hold lives with the seedbox, under
-  `<config root>/.box/` beside the snapshots it refers to, so a user's own rollback
-  can write it.
-- **`box rollback <app>` does the same by hand (decided; the command's shape is
-  proposed).** It is for a fault no gate sees. It uses the app's newest snapshot only
-  and says how old that is before it changes anything, because everything the app
-  wrote since is lost. By default it leaves the same hold, which lapses by itself.
-  Asked to pin, it writes an ordinary pin into values instead, which holds the app
-  until the user removes it, like any hand pin. A pin is an override on whatever
-  release is installed, so the release keeps updating around it. Proposed: `--pin`.
+- **An app that crashloops on its new image is rolled back by box (decided).** The
+  health gate tells three cases apart. Every app is ready: the step passed. A moved
+  app's container keeps exiting: box rolls that app back, and only that app. A moved app
+  is running but not ready: box waits, because the Arrs open their web port only after
+  their migration has finished; if the wait runs out, box stops, records it and
+  announces it without touching the app. Only an update step rolls back: an app that
+  fails later is announced and left alone, because a restore by then would cost
+  everything it wrote since. Keeps exiting means the container has exited three times
+  since the step.
+- **Apps that migrate when they start get thirty minutes to start (decided).** The
+  chart's startup probe allows five minutes today, after which the kubelet restarts
+  the container, and a migration that outlasts it would count as a crashloop.
+- **A rollback holds the app until the chart moves past the image it left (decided).**
+  The hold names the image the app was rolled back from. While the chart still pins that
+  image, the app stays on the old one; when a release pins another, the hold lapses and
+  the app moves with the release. Nothing is written into the values file. The hold
+  lives with the seedbox, under `<config root>/.box/` beside the snapshots it refers to,
+  so a user's own rollback can write it.
+- **`box rollback <app>` does the same by hand (decided).** It is for a fault no gate
+  sees. It uses the app's newest snapshot only and says how old that is before it
+  changes anything, because everything the app wrote since is lost. By default it leaves
+  the same hold, which lapses by itself. With `--pin` it writes an ordinary pin into
+  values instead, which holds the app until the user removes it, like any hand pin. A
+  pin is an override on whatever release is installed, so the release keeps updating
+  around it.
 - **A failure box doesn't roll back stops the update (decided).** A failed apply or
   wiring gate, a failing app with snapshots off, a rollback that fails itself: box
   leaves things where they are, records the failed release and says where the box is.
@@ -1009,16 +1007,16 @@ runs over forward-only database migrations, so 0.5 carries a narrow rollback ahe
   that fails before the release moves only starts the apps it stopped.
 - **Two kept.** After a step passes, each app keeps its two newest snapshots.
 
-**Notices (decided; the hook's shape is proposed).** A box that updates by itself has
+**Notices (decided; what is posted is proposed).** A box that updates by itself has
 to be able to tell someone who isn't looking. box can post to one address after every
 update step (what moved, from what to what), when a step stops or an app is rolled
 back, and when an app stops being healthy. A notice about an unhealthy app that moved
 recently and has a snapshot names the rollback command; otherwise it names the logs.
-The hook is optional and strongly recommended. A user's hook hears about their own
-seedbox; root's hears about the host and every seedbox on it. Proposed: one URL per
-seedbox in values and one in root's config, posted to as JSON, no mail; `init` asks
-for it; health is read on every timer run and announced when it changes, in either
-direction, not on a schedule.
+The hook is optional and strongly recommended: one URL per seedbox in its values, and
+one in root's config. A user's hook hears about their own seedbox; root's hears about
+the host and every seedbox on it. Health is read on every timer run and announced
+when it changes, in either direction, not on a schedule. There is no mail. Proposed:
+the notice is posted as JSON, and `init` asks for the URL.
 
 **What `status` shows in 0.5 (decided).** The first line only: the installed release, the
 last update and how it ended, the next check, and anything held (the box binary, a
