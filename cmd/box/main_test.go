@@ -5,18 +5,65 @@ import (
 	"flag"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/swizzin/s5n/internal/release"
 	"github.com/swizzin/s5n/internal/say"
 	"github.com/swizzin/s5n/internal/setup"
+	"github.com/swizzin/s5n/internal/update"
 )
 
 const (
 	testChartRepo    = "oci://127.0.0.1:5000/charts/s5n"
 	testChartVersion = "1.2.3"
 )
+
+// testKubeconfig is enough for client-go to build a client: box does not contact
+// the cluster when it opens a release handle.
+const testKubeconfig = `apiVersion: v1
+kind: Config
+clusters:
+  - name: test
+    cluster:
+      server: https://127.0.0.1:6443
+contexts:
+  - name: test
+    context:
+      cluster: test
+      user: test
+current-context: test
+users:
+  - name: test
+    user: {}
+`
+
+// TestTheUpdatesHelmWaitOutlastsTheStartupBudget: a migration may run for the
+// chart's whole thirty-minute startup budget, and Helm's own fifteen-minute
+// default would fail the apply in the middle of it. Update's Helm gets the health
+// gate's budget; `box apply` keeps Helm's default.
+func TestTheUpdatesHelmWaitOutlastsTheStartupBudget(t *testing.T) {
+	kubeconfig := filepath.Join(t.TempDir(), "kubeconfig")
+	if err := os.WriteFile(kubeconfig, []byte(testKubeconfig), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	h, err := updateHelm(kubeconfig, "testbox")
+	if err != nil {
+		t.Fatalf("updateHelm: %v", err)
+	}
+	if h.Timeout != 35*time.Minute {
+		t.Fatalf("update's Helm wait = %v, want the health gate's %v", h.Timeout, update.DefaultHealthWait)
+	}
+	applied, err := release.NewHelm(kubeconfig, "testbox", release.ReleaseName)
+	if err != nil {
+		t.Fatalf("apply's helm: %v", err)
+	}
+	if applied.Timeout != 0 {
+		t.Fatalf("apply's Helm wait = %v, want Helm's own default", applied.Timeout)
+	}
+}
 
 // recordingCharts stands in for the registry: it records the reference each
 // command asks for, which is the thing that must not lose a flag.

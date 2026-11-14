@@ -39,6 +39,19 @@ func (o *updateFlags) options() update.Options {
 	return update.Options{Apply: o.applyFlags.options(), Check: *o.check}
 }
 
+// updateHelm opens one release handle for an update. Its wait gets the health
+// gate's budget: Helm gives up on a pod reporting CrashLoopBackOff at once, and
+// a migration longer than Helm's own fifteen-minute default would fail the
+// apply before the gate could wait it out. `box apply` keeps that default.
+func updateHelm(kubeconfig, namespace string) (*release.Helm, error) {
+	h, err := release.NewHelm(kubeconfig, namespace, release.ReleaseName)
+	if err != nil {
+		return nil, err
+	}
+	h.Timeout = update.DefaultHealthWait
+	return h, nil
+}
+
 // updateChartSource is the one chart source an update works with. It is not
 // chartSource's return type widened: this command needs the repository listing
 // as well as a load, and one OCIChart for the command is what makes the release
@@ -103,7 +116,7 @@ func runUpdate(ctx context.Context, args []string) {
 		Confirm: confirmer(out, true),
 		Say:     out,
 		Open: func(namespace string) (release.ReleaseClient, error) {
-			return release.NewHelm(kc, namespace, release.ReleaseName)
+			return updateHelm(kc, namespace)
 		},
 		OpenStorage: func(namespace string) (release.StorageClient, error) {
 			return release.NewStorage(kc, namespace)
@@ -126,7 +139,7 @@ func runUpdate(ctx context.Context, args []string) {
 	up := &update.Updater{
 		Charts: charts,
 		Open: func(namespace string) (update.Release, error) {
-			return release.NewHelm(kc, namespace, release.ReleaseName)
+			return updateHelm(kc, namespace)
 		},
 		OpenCluster: func(namespace string) (update.Cluster, error) {
 			return update.NewWorkloads(kc, namespace, release.ReleaseName)

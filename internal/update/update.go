@@ -320,16 +320,21 @@ func (u *Updater) now() time.Time {
 	return time.Now()
 }
 
+// DefaultHealthWait is the health gate's budget: every app gets thirty minutes
+// to open its port (the chart's startupProbe, 360 failures of 5s), so the gate
+// has to outlast that budget or it would stop an update over a migration the
+// kubelet would have let finish. The margin covers the poll and the last probe.
+//
+// A step's Helm wait uses the same budget (cmd/box sets it): Helm gives up on a
+// pod in CrashLoopBackOff at once, and a migration longer than Helm's own
+// fifteen-minute default must not fail the apply before this gate can see it.
+const DefaultHealthWait = 35 * time.Minute
+
 func (u *Updater) healthWait() time.Duration {
 	if u.HealthWait > 0 {
 		return u.HealthWait
 	}
-	// The chart gives every app thirty minutes to open its port (the
-	// startupProbe's 360 failures of 5s), so the kubelet does not restart a
-	// migration that is still running. The gate has to outlast that budget
-	// or it would stop an update over a migration the kubelet would have let
-	// finish; the margin covers the poll and the last probe.
-	return 35 * time.Minute
+	return DefaultHealthWait
 }
 
 func (u *Updater) settleWait() time.Duration {
