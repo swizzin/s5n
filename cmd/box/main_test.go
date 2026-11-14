@@ -13,6 +13,7 @@ import (
 	"github.com/swizzin/s5n/internal/bootstrap"
 	"github.com/swizzin/s5n/internal/release"
 	"github.com/swizzin/s5n/internal/say"
+	"github.com/swizzin/s5n/internal/seedbox"
 	"github.com/swizzin/s5n/internal/setup"
 	"github.com/swizzin/s5n/internal/update"
 )
@@ -148,6 +149,32 @@ func TestApplyAndRollbackInstallWithTheChartsHooks(t *testing.T) {
 	parse(t, "rollback", func(fs *flag.FlagSet) { rollback = addRollbackFlags(fs) }, "sonarr")
 	if opts := rollback.options("sonarr"); opts.Apply.SkipHooks || opts.Apply.RunHooks {
 		t.Fatalf("box rollback's options = %+v, want the chart's hooks left to the apply", opts.Apply)
+	}
+}
+
+// TestAStepsApplyIsTheOptionsUpdateRuns: every step applies the options built
+// for it -- apply's own plus the claim names, the host work and the hold -- and
+// the run keeps the plan's --check. Handing the Updater apply's bare options
+// instead installs a release the box is not: the chart's default claims, a host
+// with no listener, and the image the rollback avoided, because the hold is what
+// renders the image the app was put back on.
+func TestAStepsApplyIsTheOptionsUpdateRuns(t *testing.T) {
+	var flags *updateFlags
+	parse(t, "update", func(fs *flag.FlagSet) { flags = addUpdateFlags(fs) }, "--check")
+
+	held := func(context.Context, *seedbox.Seedbox, release.Chart, map[string]any) (map[string]any, error) {
+		return nil, nil
+	}
+	step := release.Options{GrantPath: "/tmp/grant.yaml", ValuesPath: "/tmp/values.yaml", Holds: held}
+	run := flags.runOptions(step)
+	if !run.Check {
+		t.Fatal("--check did not reach the options the steps run with")
+	}
+	if run.Apply.GrantPath != "/tmp/grant.yaml" || run.Apply.ValuesPath != "/tmp/values.yaml" {
+		t.Fatalf("the steps would apply %q/%q, want the files this run read", run.Apply.GrantPath, run.Apply.ValuesPath)
+	}
+	if run.Apply.Holds == nil {
+		t.Fatal("the steps run without the holds file: a step would undo the rollback it had just made")
 	}
 }
 

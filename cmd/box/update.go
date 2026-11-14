@@ -52,6 +52,32 @@ func (o *updateFlags) options() update.Options {
 	return update.Options{Apply: o.applyFlags.options(), Check: *o.check}
 }
 
+// stepOptions is what each step's apply runs with: apply's options plus the
+// three values box derives from the cluster -- the claim names, the per-host
+// TLS, and the holds a rollback wrote. The Updater puts each step's release in
+// place of the pin and keeps the rest.
+func (o *updateFlags) stepOptions(kc string, out say.Reporter, resolver setup.Resolver, holds *boxHolds) release.Options {
+	opts := o.applyFlags.options()
+	opts.BoxValues = boxValues(kc)
+	// Root's per-host TLS is apply's, so a release whose new image serves an app
+	// at a host of its own gets that host's listener before the pods move.
+	opts.Hosts = applyHosts{kubeconfig: kc, out: out, resolver: resolver}
+	// An app a rollback holds stays on the image it ran: the holds file is
+	// overlaid by the same apply `box apply` runs, so a step does not undo a
+	// rollback.
+	opts.Holds = holds.values
+	return opts
+}
+
+// runOptions is what `box update` hands the Updater: the options its steps run
+// with, and the plan's own --check. Handing it options() instead would drop the
+// claim names, the host work and the hold, and a step would install a release
+// this box is not: the chart's default claims, a host with no listener, and the
+// image the rollback avoided.
+func (o *updateFlags) runOptions(step release.Options) update.Options {
+	return update.Options{Apply: step, Check: *o.check}
+}
+
 // updateHelm opens one release handle for an update. Its wait gets the health
 // gate's budget, and it waits only for the release's hooks: the step's health
 // gate is box's, and it is the one that can tell a moved app that keeps exiting
@@ -157,16 +183,11 @@ func runUpdate(ctx context.Context, args []string) {
 			},
 		}
 	}
-	applyOpts := o.options().Apply
-	applyOpts.BoxValues = boxValues(kc)
-	// Root's per-host TLS is apply's, so a release whose new image serves an
-	// app at a host of its own gets that host's listener before the pods move.
-	applyOpts.Hosts = applyHosts{kubeconfig: kc, out: out, resolver: resolver}
-	// A step installs the release the plan settled on, and an app a rollback
-	// holds stays on the image it ran: the holds file is overlaid by the same
-	// apply a `box apply` runs, so a step does not undo a rollback.
+	// The options every step applies with: apply's own, plus the three values
+	// box derives from the cluster. The Updater replaces the release with each
+	// step's, and keeps everything else.
 	holds := newBoxHolds(out)
-	applyOpts.Holds = holds.values
+	stepOpts := o.stepOptions(kc, out, resolver, holds)
 
 	// OpenSnapshots is the copy of each copying app's config, under the grant's
 	// config root: a step copies it before the release moves so a crashloop or
@@ -192,7 +213,7 @@ func runUpdate(ctx context.Context, args []string) {
 				ConfigRoot: root,
 				Values:     values,
 				Globs: func(ctx context.Context, version string) (map[string][]string, error) {
-					ch, err := charts.Load(ctx, release.ChartRef{Repo: applyOpts.ChartRepo, Version: version})
+					ch, err := charts.Load(ctx, release.ChartRef{Repo: stepOpts.ChartRepo, Version: version})
 					if err != nil {
 						return nil, err
 					}
@@ -209,7 +230,7 @@ func runUpdate(ctx context.Context, args []string) {
 		BoxVersion: version,
 		Say:        out,
 	}
-	res, err := up.Run(ctx, o.options())
+	res, err := up.Run(ctx, o.runOptions(stepOpts))
 	if err != nil {
 		if errors.Is(err, release.ErrCancelled) {
 			os.Exit(1)
