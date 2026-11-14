@@ -8,10 +8,12 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"sort"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/Masterminds/semver/v3"
 	"helm.sh/helm/v4/pkg/chart/v2/loader"
 	helmregistry "helm.sh/helm/v4/pkg/registry"
 	"oras.land/oras-go/v2/errdef"
@@ -58,6 +60,14 @@ type OCIChart struct {
 	Retry fetch.Policy
 
 	devOnce sync.Once
+
+	// mu guards pulled. `box update` asks for every published release's
+	// annotations to plan its steps and then loads the two it installs; one
+	// pull per version is the whole point, so the cache outlives a single
+	// Load. It never holds a failed pull: a registry that refused once is
+	// asked again by the next call rather than remembered as absent.
+	mu     sync.Mutex
+	pulled map[string]Chart
 }
 
 func (o *OCIChart) logf(format string, args ...any) {
@@ -76,56 +86,18 @@ func (o *OCIChart) logf(format string, args ...any) {
 // attempt (see transport). A cancelled apply therefore stops a pull in flight,
 // and stops the wait between a retried attempt.
 func (o *OCIChart) Load(ctx context.Context, ref ChartRef) (Chart, error) {
-	if err := ctx.Err(); err != nil {
-		return Chart{}, err
-	}
-	repo, base, err := chartRepo(ref.Repo)
+	p, err := o.open(ctx, ref)
 	if err != nil {
 		return Chart{}, err
 	}
-	plain, err := plainHTTPFor(base)
-	if err != nil {
-		return Chart{}, err
-	}
-	// One private Helm home for this pull: its credentials path is inside the
-	// directory box creates, so Helm reads nothing of the operator's, and the
-	// directory is removed before Load returns.
-	env, err := newHelmEnv()
-	if err != nil {
-		return Chart{}, fmt.Errorf("chart registry for %s: %w", repo, err)
-	}
-	defer env.Close()
-	client, err := o.client(ctx, env, plain)
-	if err != nil {
-		return Chart{}, fmt.Errorf("chart registry for %s: %w", repo, err)
-	}
-	if IsDevVersion(o.BoxVersion) {
-		o.devOnce.Do(func() {
-			o.logf("box was built without a version (%s): skipping the chart's %s check", DevVersion, MinBoxAnnotation)
-		})
-	}
-
-	// One pull per version: picking a version reads each candidate's min-box,
-	// and the release it settles on must not be downloaded a second time.
-	loaded := make(map[string]Chart)
-	once := func(version string) (Chart, error) {
-		if ch, ok := loaded[version]; ok {
-			return ch, nil
-		}
-		ch, err := o.pull(client, repo, base, version)
-		if err != nil {
-			return Chart{}, err
-		}
-		loaded[version] = ch
-		return ch, nil
-	}
+	defer p.Close()
 
 	version := strings.TrimSpace(ref.Version)
 	if version != "" {
 		if _, err := parseVersion(version); err != nil {
 			return Chart{}, fmt.Errorf("--chart-version %q is not a version: %v", version, err)
 		}
-		chart, err := once(version)
+		chart, err := o.chart(ctx, p, version)
 		if err != nil {
 			return Chart{}, err
 		}
@@ -135,25 +107,141 @@ func (o *OCIChart) Load(ctx context.Context, ref ChartRef) (Chart, error) {
 		return chart, nil
 	}
 
-	tags, err := client.Tags(base)
+	tags, err := p.client.Tags(p.base)
 	if err != nil {
-		return Chart{}, o.pullError(repo, "", err)
+		return Chart{}, o.pullError(p.repo, "", err)
 	}
-	chosen, skipped, err := selectVersion(tags, o.BoxVersion, func(version string) (string, error) {
-		chart, err := once(version)
+	chosen, skipped, err := SelectVersion(tags, o.BoxVersion, func(version string) (string, error) {
+		chart, err := o.chart(ctx, p, version)
 		if err != nil {
 			return "", err
 		}
 		return strings.TrimSpace(chart.Annotations[MinBoxAnnotation]), nil
-	})
+	}, nil)
 	if err != nil {
-		return Chart{}, o.noVersionError(repo, err)
+		return Chart{}, o.noVersionError(p.repo, err)
 	}
 	for _, skip := range skipped {
 		o.logf("%s %s is newer but needs box %s; this is box %s, so box installs %s",
-			chartName(repo), skip.Version, skip.MinBox, o.BoxVersion, chosen)
+			chartName(p.repo), skip.Version, skip.MinBox, o.BoxVersion, chosen)
 	}
-	return once(chosen)
+	return o.chart(ctx, p, chosen)
+}
+
+// Releases lists every release the repository publishes, with the annotations
+// an update plans with, oldest first.
+//
+// Listing costs a pull per version, because the floors live in Chart.yaml
+// inside the archive and nowhere else. Each pulled chart is cached on this
+// OCIChart, so the release an update settles on is not downloaded again when
+// Load fetches it to install. Tags that are not versions, and prereleases, are
+// left out for the same reason SelectVersion leaves them out: they are not
+// releases box installs unasked.
+func (o *OCIChart) Releases(ctx context.Context, ref ChartRef) ([]Published, error) {
+	p, err := o.open(ctx, ref)
+	if err != nil {
+		return nil, err
+	}
+	defer p.Close()
+
+	tags, err := p.client.Tags(p.base)
+	if err != nil {
+		return nil, o.pullError(p.repo, "", err)
+	}
+	var out []Published
+	for _, tag := range tags {
+		v, err := semver.NewVersion(tag)
+		if err != nil || v.Prerelease() != "" {
+			continue
+		}
+		chart, err := o.chart(ctx, p, tag)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, Published{
+			Version:     tag,
+			MinBox:      strings.TrimSpace(chart.Annotations[MinBoxAnnotation]),
+			UpgradeFrom: strings.TrimSpace(chart.Annotations[UpgradeFromAnnotation]),
+		})
+	}
+	if len(out) == 0 {
+		return nil, o.noVersionError(p.repo, fmt.Errorf("no published release is a version box can read"))
+	}
+	sort.SliceStable(out, func(i, j int) bool {
+		a, _ := semver.NewVersion(out[i].Version)
+		b, _ := semver.NewVersion(out[j].Version)
+		return a.LessThan(b)
+	})
+	return out, nil
+}
+
+// puller is one registry session: the repository in both spellings box needs,
+// the client, and the private Helm home the client's credentials file points
+// into. Close removes the home.
+type puller struct {
+	repo, base string
+	client     *helmregistry.Client
+	env        *helmEnv
+}
+
+func (p *puller) Close() {
+	if p.env != nil {
+		p.env.Close()
+	}
+}
+
+// open validates the repository and builds the client Load and Releases share.
+// The Helm home is private to the call and removed by puller.Close, so nothing
+// of the operator's Helm configuration can redirect or poison a pull.
+func (o *OCIChart) open(ctx context.Context, ref ChartRef) (*puller, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	repo, base, err := chartRepo(ref.Repo)
+	if err != nil {
+		return nil, err
+	}
+	plain, err := plainHTTPFor(base)
+	if err != nil {
+		return nil, err
+	}
+	env, err := newHelmEnv()
+	if err != nil {
+		return nil, fmt.Errorf("chart registry for %s: %w", repo, err)
+	}
+	client, err := o.client(ctx, env, plain)
+	if err != nil {
+		env.Close()
+		return nil, fmt.Errorf("chart registry for %s: %w", repo, err)
+	}
+	if IsDevVersion(o.BoxVersion) {
+		o.devOnce.Do(func() {
+			o.logf("box was built without a version (%s): skipping the chart's %s check", DevVersion, MinBoxAnnotation)
+		})
+	}
+	return &puller{repo: repo, base: base, client: client, env: env}, nil
+}
+
+// chart is one version's chart, pulled at most once per OCIChart. A failed pull
+// is not remembered: the next call asks the registry again.
+func (o *OCIChart) chart(ctx context.Context, p *puller, version string) (Chart, error) {
+	o.mu.Lock()
+	chart, ok := o.pulled[version]
+	o.mu.Unlock()
+	if ok {
+		return chart, nil
+	}
+	chart, err := o.pull(p.client, p.repo, p.base, version)
+	if err != nil {
+		return Chart{}, err
+	}
+	o.mu.Lock()
+	if o.pulled == nil {
+		o.pulled = make(map[string]Chart)
+	}
+	o.pulled[version] = chart
+	o.mu.Unlock()
+	return chart, nil
 }
 
 // client builds the registry client. Helm writes "Pulled: ... Digest: ..." to
