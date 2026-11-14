@@ -30,6 +30,7 @@ import (
 	"github.com/swizzin/s5n/internal/catalog"
 	"github.com/swizzin/s5n/internal/say"
 	"github.com/swizzin/s5n/internal/seedbox"
+	"github.com/swizzin/s5n/internal/snapshot"
 	"github.com/swizzin/s5n/internal/wait"
 )
 
@@ -278,6 +279,97 @@ type Anchor interface {
 	Ensure(ctx context.Context, plan AnchorPlan) error
 }
 
+// Snapshotter is the optional step that copies an app's config before this
+// apply moves the app's image (docs/box.md, "Snapshot and rollback").
+//
+// An update snapshots the apps its steps move; an apply is the other way an
+// image moves, and a values pin -- a tag, a digest, a variant -- moves it over
+// the forward-only migration the same way. Without this step a `box apply`
+// that changed a pin leaves `box rollback` nothing to put back.
+//
+// Pending is the read apply makes with its diff, so the apps it will stop and
+// copy are part of the plan and a copy box cannot take refuses before the
+// question is asked. Take is the write, after the confirm and immediately
+// before the release moves: nothing else this run writes can fail while an app
+// is down. Prune runs once the release is up on the images it moved to, and a
+// copy it cannot prune is a warning rather than a failed apply.
+type Snapshotter interface {
+	Pending(ctx context.Context, plan SnapshotPlan) (SnapshotWork, error)
+	Take(ctx context.Context, plan SnapshotPlan, work SnapshotWork) (SnapshotDirs, error)
+	Prune(ctx context.Context, plan SnapshotPlan, work SnapshotWork) error
+}
+
+// SnapshotPlan is what apply knows when it asks its snapshot step to read the
+// release: the chart it installs and the values it renders, which decide the
+// image each app moves to, and the config root the copies live under.
+type SnapshotPlan struct {
+	// Namespace is the release's, from the grant.
+	Namespace string
+	// Chart is the release this apply installs: its variants are the images
+	// the apps move to, and its catalog says which apps have state to copy.
+	Chart Chart
+	// Values are the final values this apply renders: the two files merged,
+	// then box's own keys, then the holds.
+	Values map[string]any
+	// ConfigRoot is the grant's storage.config.path, under which one
+	// directory per instance holds that instance's /config.
+	ConfigRoot string
+}
+
+// SnapshotMove is one enabled app whose image this apply moves: what it runs
+// in the cluster now and what this apply gives it.
+type SnapshotMove struct {
+	App     string
+	Ran     snapshot.ImageRef
+	MovedTo snapshot.ImageRef
+	// Copied says the release's catalog names files to copy for this app. An
+	// app it names none for moves without a copy and is not stopped, exactly
+	// as an update moves one: box has no state to put back, so it never rolls
+	// it back.
+	Copied bool
+}
+
+// Row is the plan's line for one move. Only the apps a copy would stop are
+// said to be stopped: an app without a catalog entry keeps running through its
+// image change, and the plan has to say that rather than leave it out.
+func (m SnapshotMove) Row() string {
+	if m.Copied {
+		return fmt.Sprintf("%s: stopped and snapshotted before it moves from %s to %s",
+			m.App, m.Ran.Label(), m.MovedTo.Label())
+	}
+	return fmt.Sprintf("%s: moves from %s to %s without a snapshot (nothing to copy)",
+		m.App, m.Ran.Label(), m.MovedTo.Label())
+}
+
+// SnapshotWork is what the snapshot step decided: every app this apply moves,
+// in app order. Every move shares one copy, named with the release the box is
+// on and the one this apply installs.
+type SnapshotWork struct {
+	// From and To name the copy's directory. An apply that only changes values
+	// installs the release it is on, so the two are the same version.
+	From string
+	To   string
+	// Moves is empty for a run that moves no image, which is what keeps an
+	// apply with nothing to show from printing a snapshot section.
+	Moves []SnapshotMove
+}
+
+// Copied is the apps this apply stops and copies, in plan order.
+func (w SnapshotWork) Copied() []string {
+	var out []string
+	for _, m := range w.Moves {
+		if m.Copied {
+			out = append(out, m.App)
+		}
+	}
+	return out
+}
+
+// SnapshotDirs is where Take put each copied app's config, keyed by app: what
+// a failed release says so the operator can run the rollback, and what the
+// prune keeps two of.
+type SnapshotDirs map[string]string
+
 // Options are one `box apply`.
 type Options struct {
 	// Chart is a chart release the caller has already loaded. `box init` sets
@@ -326,6 +418,11 @@ type Options struct {
 	// a caller reads the holds file beside the config root it names without
 	// loading either file a second time. nil means this box keeps no holds.
 	Holds func(ctx context.Context, sb *seedbox.Seedbox, chart Chart, values map[string]any) (map[string]any, error)
+	// Snapshots is the apps this apply stops and copies before it moves their
+	// images. It is nil for every caller that must not take one: `box update`
+	// snapshots each step itself, and a rollback's apply is the move back.
+	// `box apply` is the only command that sets it.
+	Snapshots Snapshotter
 	// HostIssuers is the issuer each host was decided with when the caller
 	// made that decision already (`box init`): host name to tls.issuer
 	// value. The plan compares each Certificate that answers with its own
@@ -668,6 +765,21 @@ func (a *Applier) Apply(ctx context.Context, opts Options) (Result, error) {
 		return res, nil
 	}
 
+	// The apps whose image this apply moves, read with the diff and before the
+	// question: an image change migrates an app's database forward, so the
+	// config it runs on is copied first. Only a run that changes the release can
+	// move an image, which is also what keeps an idempotent apply from reading
+	// the cluster's pods for nothing.
+	snapPlan := SnapshotPlan{Namespace: namespace, Chart: chart, Values: values, ConfigRoot: configRoot(vols)}
+	var snapWork SnapshotWork
+	var snapDirs SnapshotDirs
+	if opts.Snapshots != nil && exists && len(res.Changes) > 0 {
+		snapWork, err = opts.Snapshots.Pending(ctx, snapPlan)
+		if err != nil {
+			return res, err
+		}
+	}
+
 	if exists {
 		switch {
 		case len(res.Changes) > 0:
@@ -715,6 +827,16 @@ func (a *Applier) Apply(ctx context.Context, opts Options) (Result, error) {
 	}
 	if anchorLine != "" {
 		r.List("host CA", []string{anchorLine})
+	}
+	// The apps whose image this run moves, and whether each one is copied
+	// before it moves: an app the catalog gives nothing to copy keeps running
+	// through its change, which the plan says rather than leaving it out.
+	if len(snapWork.Moves) > 0 {
+		lines := make([]string, 0, len(snapWork.Moves))
+		for _, move := range snapWork.Moves {
+			lines = append(lines, move.Row())
+		}
+		r.List("snapshots", lines)
 	}
 
 	ok, err := a.Confirm.Ask(fmt.Sprintf("apply %s in %s?", ReleaseName, namespace))
@@ -842,12 +964,24 @@ func (a *Applier) Apply(ctx context.Context, opts Options) (Result, error) {
 		step.DoneAs("", fmt.Sprintf("wrote %d storage object%s", len(plan), plural(len(plan), "", "s")))
 	}
 
+	// The apps the plan showed stopped are stopped here, immediately before the
+	// release moves: everything else this run writes -- the namespace, the
+	// storage, a host's listener -- has succeeded already, so nothing can fail
+	// between the copy and the upgrade and leave an app down for a reason that
+	// is not its image.
+	if len(snapWork.Copied()) > 0 {
+		snapDirs, err = opts.Snapshots.Take(ctx, snapPlan, snapWork)
+		if err != nil {
+			return res, err
+		}
+	}
+
 	started := time.Now()
 	upgrade := r.Start(say.Op{Label: fmt.Sprintf("installing %s in %s", ReleaseName, namespace)})
 	rev, err := client.Upgrade(ctx, chart, values)
 	if err != nil {
 		upgrade.Failed(err)
-		return res, a.undo(ctx, store, created, err)
+		return res, a.undo(ctx, store, created, withSnapshotDirs(err, snapDirs))
 	}
 	res.Applied = true
 	res.Revision = rev
@@ -873,7 +1007,55 @@ func (a *Applier) Apply(ctx context.Context, opts Options) (Result, error) {
 		}
 		return res, errors.New("wiring failed: the receipt does not say ok")
 	}
+	// The release is up on the images it moved to, so the copies are what a
+	// rollback would restore rather than the state the apps are writing now:
+	// keeping the newest two per app is enough. A copy that cannot be pruned
+	// costs disk, not correctness, and is never an apply's failure.
+	if len(snapDirs) > 0 {
+		if perr := opts.Snapshots.Prune(ctx, snapPlan, snapWork); perr != nil {
+			r.Warn(fmt.Sprintf("keeping the snapshot of %s: %v", strings.Join(sortedKeys(snapDirs), ", "), perr))
+		}
+	}
 	return res, nil
+}
+
+// withSnapshotDirs adds where this run's copies are to a failed upgrade's
+// error. The apps it stopped are still down: the operator has to know the state
+// they had was copied, and the one command that puts it back. It stays one
+// sentence rather than one line per app, because box prints the error on the
+// one line its prefix belongs to.
+func withSnapshotDirs(err error, dirs SnapshotDirs) error {
+	if len(dirs) == 0 {
+		return err
+	}
+	notes := make([]string, 0, len(dirs))
+	for _, app := range sortedKeys(dirs) {
+		notes = append(notes, fmt.Sprintf("the snapshot of %s is in %s; `box rollback %s` puts it back", app, dirs[app], app))
+	}
+	return fmt.Errorf("%w; %s", err, strings.Join(notes, "; "))
+}
+
+// configRoot is the grant's config path: the volume the chart mounts per
+// instance as /config, under which the copies and the holds live.
+func configRoot(vols []seedbox.Volume) string {
+	for _, v := range vols {
+		if v.Kind == "config" {
+			return v.Path
+		}
+	}
+	return ""
+}
+
+// sortedKeys is a snapshot directory map's app names, in app order: box's
+// sentences are read and compared line by line, so their order cannot depend on
+// a map walk.
+func sortedKeys(dirs SnapshotDirs) []string {
+	out := make([]string, 0, len(dirs))
+	for app := range dirs {
+		out = append(out, app)
+	}
+	sort.Strings(out)
+	return out
 }
 
 // loadChart returns the chart this apply installs: the one the caller already

@@ -209,6 +209,9 @@ type fakes struct {
 	// runHooks is Options.RunHooks: the release's hooks are this run's work,
 	// so the apply installs even when nothing about the release changed.
 	runHooks bool
+	// snaps is the snapshot step, when the test is about where in the apply
+	// it runs rather than what it copies.
+	snaps *fakeSnapshots
 }
 
 func newFakes(t *testing.T) *fakes {
@@ -292,6 +295,9 @@ func (f *fakes) apply(t *testing.T) (Result, error) {
 	opts.HostsAll = f.hostsAll
 	opts.HostIssuers = f.hostIssuers
 	opts.RunHooks = f.runHooks
+	if f.snaps != nil {
+		opts.Snapshots = f.snaps
+	}
 	return f.app.Apply(context.Background(), opts)
 }
 
