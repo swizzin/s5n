@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/swizzin/s5n/internal/bootstrap"
 	"github.com/swizzin/s5n/internal/release"
 	"github.com/swizzin/s5n/internal/say"
 	"github.com/swizzin/s5n/internal/setup"
@@ -139,6 +140,26 @@ func TestUpdatePassesItsFlagsToTheOptions(t *testing.T) {
 	}
 	if !opts.Check {
 		t.Fatal("--check did not reach the options")
+	}
+}
+
+// TestUpdateKeepsItsRecordBesideTheClusterRecord: update writes update.json into
+// the directory the cluster decision was recorded in, so --record moves both
+// files together. Without it, a box whose record is not at bootstrap's default
+// path (any box driven from somewhere other than /etc/swizzin) plans the whole
+// update and then fails writing its own bookkeeping, before the first step.
+func TestUpdateKeepsItsRecordBesideTheClusterRecord(t *testing.T) {
+	var defaults *updateFlags
+	parse(t, "update", func(fs *flag.FlagSet) { defaults = addUpdateFlags(fs) })
+	if got, want := defaults.statePath(), update.FilePath(bootstrap.RecordPath); got != want {
+		t.Fatalf("update's record = %s, want %s beside bootstrap's own", got, want)
+	}
+
+	record := filepath.Join(t.TempDir(), "cluster.yaml")
+	var flags *updateFlags
+	parse(t, "update", func(fs *flag.FlagSet) { flags = addUpdateFlags(fs) }, "--record", record)
+	if got, want := flags.statePath(), filepath.Join(filepath.Dir(record), "update.json"); got != want {
+		t.Fatalf("update's record = %s, want %s", got, want)
 	}
 }
 

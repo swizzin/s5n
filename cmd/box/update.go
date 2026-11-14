@@ -16,13 +16,14 @@ import (
 )
 
 // updateFlags are `box update`'s flags: apply's, because an update ends in
-// applies, plus the two of its own. They are a value rather than locals in
-// runUpdate so the mapping from flags to options is testable without a
+// applies, plus the two of its own and the record. They are a value rather than
+// locals in runUpdate so the mapping from flags to options is testable without a
 // cluster, the way apply's is.
 type updateFlags struct {
 	*applyFlags
-	check *bool
-	plain *bool
+	check  *bool
+	plain  *bool
+	record *string
 }
 
 func addUpdateFlags(fs *flag.FlagSet) *updateFlags {
@@ -30,8 +31,20 @@ func addUpdateFlags(fs *flag.FlagSet) *updateFlags {
 		applyFlags: addApplyFlags(fs),
 		check:      fs.Bool("check", false, "show what the box would update to, and write nothing"),
 		plain:      fs.Bool("plain", false, "ask with plain line prompts, even on a terminal (for a flaky terminal or a screen reader)"),
+		// The record is bootstrap's -- the cluster decision update reads and
+		// writes its own state beside -- so it is named the same way and
+		// defaults to the same path. apply and rollback take no such flag:
+		// neither writes state, and both get their kubeconfig from a flag or
+		// the environment.
+		record: fs.String("record", bootstrap.RecordPath, "where box recorded the cluster decision; update keeps its own record beside it"),
 	}
 }
+
+// statePath is this run's own record: update.json beside the cluster record,
+// which is the rule update.FilePath states and the reason --record exists. A
+// box whose record is not at bootstrap's default path would otherwise fail the
+// whole update on its own bookkeeping, after the plan and before any step.
+func (o *updateFlags) statePath() string { return update.FilePath(*o.record) }
 
 // options is what this invocation hands the Updater: every step runs apply
 // with these, with the step's chart version in place of the pin.
@@ -99,7 +112,7 @@ func runUpdate(ctx context.Context, args []string) {
 
 	// The cluster decision belongs to `box bootstrap`; update reuses it the
 	// same way apply does and never probes a cluster of its own.
-	kc, err := release.ResolveKubeconfig(*o.kubeconfig, os.Getenv("KUBECONFIG"), bootstrap.FilesystemRecords{Path: bootstrap.RecordPath})
+	kc, err := release.ResolveKubeconfig(*o.kubeconfig, os.Getenv("KUBECONFIG"), bootstrap.FilesystemRecords{Path: *o.record})
 	if err != nil {
 		out.Error(err)
 		os.Exit(1)
@@ -170,7 +183,7 @@ func runUpdate(ctx context.Context, args []string) {
 		},
 		Holds:      update.FileHolds{},
 		Confirm:    confirmer(out, *o.yes),
-		State:      update.FileState{Path: update.FilePath(bootstrap.RecordPath)},
+		State:      update.FileState{Path: o.statePath()},
 		BoxVersion: version,
 		Say:        out,
 	}
