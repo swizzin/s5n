@@ -762,30 +762,9 @@ func (u *Updater) take(ctx context.Context, rel Release, cluster Cluster, snaps 
 
 	var rolledBack []string
 	if len(outcome.Exiting) > 0 {
-		exiting := outcome.Exiting
-		// Only an app whose config box copied can be put back. One that the
-		// catalog gives nothing to copy stopped the step before the release
-		// moved, and rolling it back now would be a scale-zero with nothing
-		// to restore -- so the failure is the gate's, unchanged.
-		for _, app := range outcome.Exiting {
-			if !step.Images[app.App].Snapshot {
-				err := errors.New(exitingText(exiting))
-				handle.Failed(err)
-				return u.fail(ctx, rel, cluster, res, step, before.Revision, gateHealth, err, "")
-			}
-		}
-		rolledBack, err = u.stepBack(ctx, rel, cluster, snaps, res, step, applyOpts, taken, exiting)
+		rolledBack, err = u.putBack(ctx, rel, cluster, snaps, res, step, applyOpts, taken, outcome.Exiting, before.Revision, handle)
 		if err != nil {
-			handle.Failed(err)
-			tail := ""
-			var failed *rollbackFailure
-			if errors.As(err, &failed) {
-				tail = fmt.Sprintf("; %s's snapshot is at %s", failed.app, failed.dir)
-				if failed.stopped {
-					tail = fmt.Sprintf("; %s is stopped", failed.app) + tail
-				}
-			}
-			return u.fail(ctx, rel, cluster, res, step, before.Revision, gateRollback, err, tail)
+			return err
 		}
 	}
 
@@ -802,6 +781,35 @@ func (u *Updater) take(ctx context.Context, rel Release, cluster Cluster, snaps 
 		return fmt.Errorf("%s is on %s, but update's record could not be written: %w", res.Name, step.To, err)
 	}
 	return nil
+}
+
+// putBack is a step's answer to moved apps that keep exiting: it rolls them
+// back and returns them, or ends the step through fail. Only an app whose
+// config box copied can be put back. One the catalog gives nothing to copy
+// was never stopped or copied, and rolling it back would be a scale-zero with
+// nothing to restore, so the failure is the gate's, unchanged.
+func (u *Updater) putBack(ctx context.Context, rel Release, cluster Cluster, snaps Snapshotter, res *Result, step StepPlan, applyOpts release.Options, taken Taken, exiting []Exiting, revision int, handle say.Handle) ([]string, error) {
+	for _, app := range exiting {
+		if !step.Images[app.App].Snapshot {
+			err := errors.New(exitingText(exiting))
+			handle.Failed(err)
+			return nil, u.fail(ctx, rel, cluster, res, step, revision, gateHealth, err, "")
+		}
+	}
+	rolledBack, err := u.stepBack(ctx, rel, cluster, snaps, res, step, applyOpts, taken, exiting)
+	if err == nil {
+		return rolledBack, nil
+	}
+	handle.Failed(err)
+	tail := ""
+	var failed *rollbackFailure
+	if errors.As(err, &failed) {
+		tail = fmt.Sprintf("; %s's snapshot is at %s", failed.app, failed.dir)
+		if failed.stopped {
+			tail = fmt.Sprintf("; %s is stopped", failed.app) + tail
+		}
+	}
+	return nil, u.fail(ctx, rel, cluster, res, step, revision, gateRollback, err, tail)
 }
 
 // fail ends a step that did not pass. It says where the release is now, in
