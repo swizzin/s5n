@@ -813,6 +813,25 @@ writes the choice into values.
 A digest pinned by hand in values is held: `update` leaves that app where it is and
 says so ("radarr: held at 6.1 by your values"). Removing the pin releases it.
 
+**Digests are box's promise; the chart accepts a tag (decided).** The chart's own pins
+are always a tag and a digest, so a release runs the bytes its e2e tested. A pin in
+values may be a tag alone, the way any chart takes one: the chart renders `repo:tag`
+and refuses nothing, because asking a Helm user for a sha to pin `6.1` is hostile. Such
+a pin is mutable. Each node runs whatever the tag pointed at when it first pulled, and a
+reschedule or an image GC can pull different bytes with no release behind them; that is
+the user's choice. Every pin box writes (`rollback --pin`, a hold) carries the tag and
+the digest together, so box never creates a mutable pin itself. Proposed, not built:
+`status` and `doctor` name a tag-only pin ("radarr: pinned to tag 6.1 without a
+digest; it can change under you"), reading the running digest from the pod's
+`imageID`, since box records none for it; and the chart's `NOTES.txt` names one on
+`helm install`/`upgrade`, without failing.
+
+**The s5n image is the chart's one tag-only pin (proposed).** `variants.yaml` ships
+`s5n` with an empty digest because the image and the chart share a tag and the digest
+does not exist until the image is built. The release workflow should push the image
+first and write its digest into the chart before packaging, so our own pipeline is held
+to the rule above. Due with the next change to `release.yaml`, not on its own.
+
 **A user can't name an image repository (decided).** Today `apps.*.image.*` is a values
 key and the schema accepts any repository, so a user could patch in an arbitrary image.
 The fix: the repository comes only from the chart's variant list. Values choose a
