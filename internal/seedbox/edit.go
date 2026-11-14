@@ -68,6 +68,38 @@ func (s *Seedbox) SetValue(path string, value any) error {
 	return s.edit(s.Values, p, value)
 }
 
+// Edit is one key and the value to write it with, for Editor.SetAll and
+// Seedbox.SetValues.
+type Edit struct {
+	Path  string
+	Value any
+}
+
+// SetValues sets several keys in the user's values file in one write, with the
+// same grant-key refusal SetValue has for one. A caller with two keys that
+// belong together (an app's pinned digest and the tag it was published under)
+// writes them together: two writes leave a moment where the file names a tag
+// and a digest that are not the same image.
+func (s *Seedbox) SetValues(edits []Edit) error {
+	for _, edit := range edits {
+		p, err := ParsePath(edit.Path)
+		if err != nil {
+			return err
+		}
+		if rule, ok := GrantRule(p.Keys()); ok {
+			if rule.BoxSets {
+				return fmt.Errorf("%s is set by box (%s); no file names it", p, rule.Why)
+			}
+			return fmt.Errorf("%s is set by the grant (%s); change it there, as root", p, rule.Why)
+		}
+	}
+	e := s.Values.Editor()
+	if err := e.SetAll(edits); err != nil {
+		return err
+	}
+	return e.Save()
+}
+
 // DeleteGrant removes one key from the grant.
 func (s *Seedbox) DeleteGrant(path string) error {
 	p, err := ParsePath(path)
@@ -122,6 +154,33 @@ func (e *Editor) Set(path string, value any) error {
 	if err := e.verify(p, value); err != nil {
 		e.src = backup
 		return err
+	}
+	return nil
+}
+
+// SetAll sets several keys and leaves the result in the editor, and nothing is
+// written until Save. Each key is applied to the document the one before it
+// produced, because an edit splices by the line and column of the document it
+// parsed: a second key set against the first key's line numbers would land on a
+// line the first had already moved.
+func (e *Editor) SetAll(edits []Edit) error {
+	for _, edit := range edits {
+		p, err := ParsePath(edit.Path)
+		if err != nil {
+			return err
+		}
+		doc, err := parseDoc(e.doc.Path, e.src)
+		if err != nil {
+			return err
+		}
+		step := &Editor{doc: doc, src: e.src}
+		if err := step.set(p, edit.Value); err != nil {
+			return err
+		}
+		if err := step.verify(p, edit.Value); err != nil {
+			return err
+		}
+		e.src = step.src
 	}
 	return nil
 }

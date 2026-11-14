@@ -37,7 +37,9 @@ const (
 // The record lives with the snapshots it refers to rather than in the values
 // file, so a seedbox's own box can write one without a write to the release.
 type Hold struct {
-	// App is the instance name: the config directory's name (sonarr-4k).
+	// App is the app key -- sonarr, not one instance's config directory
+	// (sonarr-4k): the hold overlays apps.<app>.image, which the chart keeps
+	// per app and every instance of it shares.
 	App string `json:"app"`
 	// At is the image the app ran before the step, and Avoiding the image the
 	// step moved it to.

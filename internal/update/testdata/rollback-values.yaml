@@ -1,0 +1,5 @@
+# The user's file: only keys the grant does not own. This one has been tuned by
+# hand, and the comments are the half of it box must not lose.
+wiring:
+  # How long the wiring Job waits for an app before it gives up.
+  timeoutSeconds: 300

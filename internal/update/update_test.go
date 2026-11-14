@@ -335,10 +335,14 @@ type fakeConfirm struct {
 	answer bool
 	err    error
 	asks   int
+	// questions are the words asked, in order, so a test can assert box's
+	// sentence rather than only that something was asked.
+	questions []string
 }
 
-func (f *fakeConfirm) Ask(string) (bool, error) {
+func (f *fakeConfirm) Ask(question string) (bool, error) {
 	f.asks++
+	f.questions = append(f.questions, question)
 	return f.answer, f.err
 }
 

@@ -2,6 +2,7 @@ package update
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -174,4 +175,63 @@ func (s *ConfigSnapshots) now() time.Time {
 		return s.Now().UTC()
 	}
 	return time.Now().UTC()
+}
+
+// NewestSnapshots is Snapshots over a grant's config root: the newest copy of
+// each of an app's instances, which is what a hand rollback reads.
+//
+// It is the other half of ConfigSnapshots, which serves the step: a step
+// restores only the copy it took in this run, because a newer one would roll the
+// app back past state it wrote since. A hand rollback is the operator asking for
+// exactly that, so it reads the newest copy of every instance -- an app is
+// covered only when all of them are.
+type NewestSnapshots struct {
+	// ConfigRoot is the grant's storage.config.path.
+	ConfigRoot string
+	// Values are the effective values this run planned with, which name the
+	// enabled instances.
+	Values map[string]any
+}
+
+// Newest reads the newest snapshot of every instance the values enable, in
+// instance order. An instance no step ever copied comes back with an empty Dir:
+// whether that is a refusal is the caller's question, because box's sentence
+// names the app rather than the directory.
+func (s *NewestSnapshots) Newest(ctx context.Context, app string) (AppSnapshot, error) {
+	out := AppSnapshot{App: app}
+	for _, dir := range setup.SettingsDirs(s.ConfigRoot, []string{app}, s.Values) {
+		if err := ctx.Err(); err != nil {
+			return AppSnapshot{}, err
+		}
+		inst := InstanceSnapshot{Name: filepath.Base(dir)}
+		src, man, err := snapshot.Newest(snapshot.Root(s.ConfigRoot), inst.Name)
+		switch {
+		case errors.Is(err, snapshot.ErrNoSnapshot):
+			out.Instances = append(out.Instances, inst)
+			continue
+		case err != nil:
+			return AppSnapshot{}, err
+		}
+		inst.Dir, inst.Step, inst.Manifest = src, snapshot.StepName(src), man
+		out.Instances = append(out.Instances, inst)
+	}
+	return out, nil
+}
+
+// Restore puts each instance back to the copy this snapshot holds, one file at a
+// time through internal/snapshot, so a crash mid-restore leaves each file either
+// old or new.
+func (s *NewestSnapshots) Restore(ctx context.Context, snap AppSnapshot, globs []string) error {
+	for _, inst := range snap.Instances {
+		if inst.Dir == "" {
+			continue
+		}
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if err := snapshot.Restore(filepath.Join(s.ConfigRoot, inst.Name), globs, inst.Dir); err != nil {
+			return fmt.Errorf("%s: %w", inst.Name, err)
+		}
+	}
+	return nil
 }
