@@ -992,8 +992,10 @@ runs over forward-only database migrations, so 0.5 carries a narrow rollback ahe
   everything it wrote since. Keeps exiting means the container has exited three times
   since the step.
 - **Apps that migrate when they start get thirty minutes to start (decided).** The
-  chart's startup probe allows five minutes today, after which the kubelet restarts
-  the container, and a migration that outlasts it would count as a crashloop.
+  startup probe used to allow five minutes, after which the kubelet restarts the
+  container, and a migration that outlasted it would count as a crashloop. Every app
+  gets the thirty minutes, so neither box nor the chart keeps a list of which apps
+  migrate: the probe only delays the liveness check, and a crash still shows at once.
 - **A rollback holds the app until the chart moves past the image it left (decided).**
   The hold names the image the app was rolled back from. While the chart still pins that
   image, the app stays on the old one; when a release pins another, the hold lapses and

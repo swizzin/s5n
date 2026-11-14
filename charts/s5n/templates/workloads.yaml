@@ -491,11 +491,15 @@ spec:
               containerPort: {{ $cfg.torrent.port }}
               protocol: UDP
             {{- end }}
+          # Thirty minutes to open the port, for every app. An app migrates its
+          # database before it listens, and a migration that outlasted the probe
+          # would be restarted mid-way and read as a crashloop by box update's
+          # gate. A crash still shows at once: the container exits on its own.
           startupProbe:
             tcpSocket:
               port: http
             periodSeconds: 5
-            failureThreshold: 60
+            failureThreshold: 360
           readinessProbe:
             {{- if $inst.arr }}
             httpGet:
