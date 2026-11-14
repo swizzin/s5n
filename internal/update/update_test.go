@@ -112,17 +112,23 @@ func (f *fakeRelease) State(context.Context) (release.ReleaseState, error) {
 	return f.state, nil
 }
 
-// fakeCluster is the release's StatefulSets. Scaling to zero empties the app's
-// pods, which is what the settle wait looks for. scaleErrs fails one replica
-// count, so a test can fail the stop and still have the restart work.
+// fakeCluster is the release's StatefulSets and pods. Scaling to zero empties
+// the app's pods, which is what the settle wait looks for. scaleErrs fails one
+// replica count, so a test can fail the stop and still have the restart work.
+// exitingFrom makes the gate see a crashloop only from that read on, so a test
+// proves box polls for it rather than assuming it.
 type fakeCluster struct {
-	replicas  map[string]int32
-	pods      map[string]int
-	healthy   bool
-	neverGone bool
-	scaleErrs map[int32]error
-	healthErr error
-	log       *callLog
+	replicas    map[string]int32
+	pods        map[string]int
+	healthy     bool
+	exiting     []Exiting
+	exitingFrom int
+	healths     int
+	moving      []string
+	neverGone   bool
+	scaleErrs   map[int32]error
+	healthErr   error
+	log         *callLog
 }
 
 func (f *fakeCluster) Scale(_ context.Context, app string, replicas int32) error {
@@ -147,9 +153,17 @@ func (f *fakeCluster) Gone(_ context.Context, app string) (bool, error) {
 	return f.pods[app] == 0, nil
 }
 
-func (f *fakeCluster) Healthy(context.Context) (bool, error) {
-	f.log.add("healthy")
-	return f.healthy, f.healthErr
+func (f *fakeCluster) Health(_ context.Context, moving []string) (Health, error) {
+	f.log.add("health")
+	f.healths++
+	f.moving = moving
+	if f.healthErr != nil {
+		return Health{}, f.healthErr
+	}
+	if f.exitingFrom > 0 && f.healths < f.exitingFrom {
+		return Health{Ready: f.healthy}, nil
+	}
+	return Health{Ready: f.healthy, Exiting: f.exiting}, nil
 }
 
 // fakeSnapshots records what was asked, copied and pruned.
@@ -572,14 +586,10 @@ func TestAHealthGateFailureStopsTheUpdate(t *testing.T) {
 	if err == nil {
 		t.Fatal("a failed health gate reported success")
 	}
-	for _, want := range []string{
-		"update s5n to 0.5.0: the health gate failed",
-		"s5n is on 0.5.0 (revision 4, deployed)",
-		"and was not rolled back",
-	} {
-		if !strings.Contains(err.Error(), want) {
-			t.Fatalf("error %q does not name %q", err, want)
-		}
+	const want = "update s5n to 0.5.0: the health gate failed (the release is not deployed and healthy after 50ms); " +
+		"s5n is on 0.5.0 (revision 4, deployed) and was not rolled back"
+	if err.Error() != want {
+		t.Fatalf("error = %q, want %q", err, want)
 	}
 	if !reflect.DeepEqual(h.scales(), []string{"sonarr=0"}) {
 		t.Fatalf("scales = %v, want nothing after the apply", h.scales())
@@ -593,6 +603,66 @@ func TestAHealthGateFailureStopsTheUpdate(t *testing.T) {
 	}
 	if !reflect.DeepEqual(h.state.state.Failed, []string{"0.5.0"}) {
 		t.Fatalf("Failed = %v, want the release recorded", h.state.state.Failed)
+	}
+}
+
+// TestAnAppThatKeepsExitingEndsTheHealthGateAtOnce: the step's new image exits
+// instead of starting. Box does not spend the health budget on it -- the rest
+// of the release is not even asked to be ready -- and stops the step naming the
+// app and the count, because the image is what has to change.
+func TestAnAppThatKeepsExitingEndsTheHealthGateAtOnce(t *testing.T) {
+	h := newHarness(t)
+	h.charts.publish("0.4.0", "0.4.0", "0.4.0", digestA)
+	h.charts.publish("0.5.0", "0.4.0", "0.4.0", digestB)
+	// An hour would outlast the test several times over: only the reading
+	// that finds the app exiting can end this gate.
+	h.u.HealthWait = time.Hour
+	h.cluster.healthy = false
+	h.cluster.exiting = []Exiting{{App: "sonarr", Restarts: 3}}
+	h.cluster.exitingFrom = 3
+
+	_, err := h.run(t, false)
+	if err == nil {
+		t.Fatal("an app that keeps exiting passed the health gate")
+	}
+	const want = "update s5n to 0.5.0: the health gate failed (sonarr exited 3 times on its new image); " +
+		"s5n is on 0.5.0 (revision 4, deployed) and was not rolled back"
+	if err.Error() != want {
+		t.Fatalf("error = %q, want %q", err, want)
+	}
+	if h.cluster.healths != 3 {
+		t.Fatalf("health was read %d times, want 3: the gate ends as soon as an app is exiting", h.cluster.healths)
+	}
+	if !reflect.DeepEqual(h.cluster.moving, []string{"sonarr"}) {
+		t.Fatalf("health was asked about %v, want the apps the step moved", h.cluster.moving)
+	}
+	// The app is the new release's: nothing is scaled and the copy the
+	// operator was promised is kept.
+	if !reflect.DeepEqual(h.scales(), []string{"sonarr=0"}) {
+		t.Fatalf("scales = %v, want nothing after the apply", h.scales())
+	}
+	if len(h.snaps.takes) != 1 || len(h.snaps.prunes) != 0 {
+		t.Fatalf("takes = %+v prunes = %+v, want the failed step's snapshot kept", h.snaps.takes, h.snaps.prunes)
+	}
+	rec := h.state.state.LastStep
+	if rec == nil || rec.Outcome != OutcomeFailed || rec.Gate != gateHealth {
+		t.Fatalf("LastStep = %+v, want a failed step naming the health gate", rec)
+	}
+	if rec.Error != want {
+		t.Fatalf("LastStep.Error = %q, want %q", rec.Error, want)
+	}
+	if !reflect.DeepEqual(h.state.state.Failed, []string{"0.5.0"}) {
+		t.Fatalf("Failed = %v, want the release recorded so the timer does not retry it", h.state.state.Failed)
+	}
+}
+
+// TestTheExitingCauseNamesEveryApp: the gate reports every moved app that is
+// exiting, one clause each, so a record naming one app does not hide a second.
+func TestTheExitingCauseNamesEveryApp(t *testing.T) {
+	got := exitingText([]Exiting{{App: "radarr", Restarts: 5}, {App: "sonarr", Restarts: 3}})
+	want := "radarr exited 5 times on its new image; sonarr exited 3 times on its new image"
+	if got != want {
+		t.Fatalf("exitingText = %q, want %q", got, want)
 	}
 }
 

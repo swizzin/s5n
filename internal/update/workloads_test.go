@@ -130,7 +130,38 @@ func TestGoneWaitsForEveryPod(t *testing.T) {
 	}
 }
 
-func TestHealthyIsPerGenerationAndReady(t *testing.T) {
+// containerRestarts is one container of a test pod and how many times it has
+// exited since the step. The first one named is the pod's first container,
+// which is what the fallback reads.
+type containerRestarts struct {
+	name     string
+	restarts int32
+}
+
+// appPod is one pod of an app as the chart's workload leaves it: the release
+// and app labels, a container per name, and the statuses the kubelet reports
+// for them. The app's own container is named after the app key, as
+// workloads.yaml names it.
+func appPod(name, app string, containers ...containerRestarts) *corev1.Pod {
+	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
+		Name:      name,
+		Namespace: "testbox",
+		Labels:    map[string]string{instanceLabel: "s5n", appLabel: app},
+	}}
+	for _, container := range containers {
+		pod.Spec.Containers = append(pod.Spec.Containers, corev1.Container{Name: container.name})
+		pod.Status.ContainerStatuses = append(pod.Status.ContainerStatuses, corev1.ContainerStatus{
+			Name:         container.name,
+			RestartCount: container.restarts,
+		})
+	}
+	return pod
+}
+
+// TestHealthIsPerGenerationAndReady: Ready is the gate's pass, and it is the
+// rule the gate always had -- every StatefulSet on its current generation with
+// all its replicas ready and updated.
+func TestHealthIsPerGenerationAndReady(t *testing.T) {
 	cases := []struct {
 		name string
 		sets []*appsv1.StatefulSet
@@ -150,13 +181,147 @@ func TestHealthyIsPerGenerationAndReady(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			got, err := NewWorkloadsFor("testbox", "s5n", cs).Healthy(context.Background())
+			got, err := NewWorkloadsFor("testbox", "s5n", cs).Health(context.Background(), nil)
 			if err != nil {
-				t.Fatalf("Healthy: %v", err)
+				t.Fatalf("Health: %v", err)
 			}
-			if got != tc.want {
-				t.Fatalf("Healthy = %v, want %v", got, tc.want)
+			if got.Ready != tc.want {
+				t.Fatalf("Ready = %v, want %v", got.Ready, tc.want)
+			}
+			if len(got.Exiting) != 0 {
+				t.Fatalf("Exiting = %+v on a read that was asked about no app", got.Exiting)
 			}
 		})
+	}
+}
+
+// TestHealthListsOnlyAnAppThatKeepsExiting: the third exit since the step is
+// what makes it a crashloop; a first or second one is an app that restarted
+// and then served its port.
+func TestHealthListsOnlyAnAppThatKeepsExiting(t *testing.T) {
+	cases := []struct {
+		name     string
+		restarts int32
+		want     []Exiting
+	}{
+		{"one exit", 1, nil},
+		{"two exits", 2, nil},
+		{"three exits", 3, []Exiting{{App: "sonarr", Restarts: 3}}},
+		{"eight exits", 8, []Exiting{{App: "sonarr", Restarts: 8}}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cs := k8sfake.NewClientset(appPod("sonarr-0", "sonarr", containerRestarts{"sonarr", tc.restarts}))
+			got, err := NewWorkloadsFor("testbox", "s5n", cs).Health(context.Background(), []string{"sonarr"})
+			if err != nil {
+				t.Fatalf("Health: %v", err)
+			}
+			if !reflect.DeepEqual(got.Exiting, tc.want) {
+				t.Fatalf("Exiting = %+v, want %+v", got.Exiting, tc.want)
+			}
+		})
+	}
+}
+
+// TestHealthIgnoresAnAppTheStepDidNotMove: an app that kept its image cannot
+// be this step's fault, whatever its restarts say.
+func TestHealthIgnoresAnAppTheStepDidNotMove(t *testing.T) {
+	cs := k8sfake.NewClientset(
+		appPod("sonarr-0", "sonarr", containerRestarts{"sonarr", 0}),
+		appPod("radarr-0", "radarr", containerRestarts{"radarr", 5}),
+	)
+	got, err := NewWorkloadsFor("testbox", "s5n", cs).Health(context.Background(), []string{"sonarr"})
+	if err != nil {
+		t.Fatalf("Health: %v", err)
+	}
+	if len(got.Exiting) != 0 {
+		t.Fatalf("Exiting = %+v, want nothing: only sonarr moved", got.Exiting)
+	}
+}
+
+// TestHealthCountsAnAppOnceAcrossItsInstances: an Arr's second instance is
+// another pod of the same app, and the count reported is the highest, because
+// one instance crashlooping is the app crashlooping.
+func TestHealthCountsAnAppOnceAcrossItsInstances(t *testing.T) {
+	cs := k8sfake.NewClientset(
+		appPod("sonarr-0", "sonarr", containerRestarts{"sonarr", 4}),
+		appPod("sonarr-4k-0", "sonarr", containerRestarts{"sonarr", 7}),
+	)
+	got, err := NewWorkloadsFor("testbox", "s5n", cs).Health(context.Background(), []string{"sonarr"})
+	if err != nil {
+		t.Fatalf("Health: %v", err)
+	}
+	want := []Exiting{{App: "sonarr", Restarts: 7}}
+	if !reflect.DeepEqual(got.Exiting, want) {
+		t.Fatalf("Exiting = %+v, want %+v", got.Exiting, want)
+	}
+}
+
+// TestHealthIgnoresInitContainers: the chart's init containers are its own
+// wiring and permission steps, not the app. A restart there says nothing about
+// the image the step moved to.
+func TestHealthIgnoresInitContainers(t *testing.T) {
+	pod := appPod("sonarr-0", "sonarr", containerRestarts{"sonarr", 0})
+	pod.Spec.InitContainers = []corev1.Container{{Name: "permissions"}, {Name: "wiring"}}
+	pod.Status.InitContainerStatuses = []corev1.ContainerStatus{
+		{Name: "permissions", RestartCount: 9},
+		{Name: "wiring", RestartCount: 9},
+	}
+	cs := k8sfake.NewClientset(pod)
+	got, err := NewWorkloadsFor("testbox", "s5n", cs).Health(context.Background(), []string{"sonarr"})
+	if err != nil {
+		t.Fatalf("Health: %v", err)
+	}
+	if len(got.Exiting) != 0 {
+		t.Fatalf("Exiting = %+v, want nothing: init containers are the chart's", got.Exiting)
+	}
+}
+
+// TestHealthFallsBackToTheFirstContainer: a chart that names the app's
+// container something else still gets a count, and it is the first container
+// the fallback reads -- not the highest of them, which could be a sidecar.
+func TestHealthFallsBackToTheFirstContainer(t *testing.T) {
+	cs := k8sfake.NewClientset(
+		appPod("sonarr-0", "sonarr",
+			containerRestarts{"server", 3},
+			containerRestarts{"sidecar", 9},
+		),
+		appPod("radarr-0", "radarr",
+			containerRestarts{"server", 9},
+			containerRestarts{"sidecar", 1},
+		),
+	)
+	w := NewWorkloadsFor("testbox", "s5n", cs)
+	got, err := w.Health(context.Background(), []string{"sonarr"})
+	if err != nil {
+		t.Fatalf("Health: %v", err)
+	}
+	if want := []Exiting{{App: "sonarr", Restarts: 3}}; !reflect.DeepEqual(got.Exiting, want) {
+		t.Fatalf("Exiting = %+v, want %+v: the first container is the app's", got.Exiting, want)
+	}
+	// The same pod shape with the first container over the line is listed.
+	got, err = w.Health(context.Background(), []string{"radarr"})
+	if err != nil {
+		t.Fatalf("Health: %v", err)
+	}
+	if want := []Exiting{{App: "radarr", Restarts: 9}}; !reflect.DeepEqual(got.Exiting, want) {
+		t.Fatalf("Exiting = %+v, want %+v", got.Exiting, want)
+	}
+}
+
+// TestHealthSortsTheAppsItNames: two apps exiting are reported in one order,
+// so the sentence and the record read the same on every run.
+func TestHealthSortsTheAppsItNames(t *testing.T) {
+	cs := k8sfake.NewClientset(
+		appPod("sonarr-0", "sonarr", containerRestarts{"sonarr", 3}),
+		appPod("radarr-0", "radarr", containerRestarts{"radarr", 5}),
+	)
+	got, err := NewWorkloadsFor("testbox", "s5n", cs).Health(context.Background(), []string{"sonarr", "radarr"})
+	if err != nil {
+		t.Fatalf("Health: %v", err)
+	}
+	want := []Exiting{{App: "radarr", Restarts: 5}, {App: "sonarr", Restarts: 3}}
+	if !reflect.DeepEqual(got.Exiting, want) {
+		t.Fatalf("Exiting = %+v, want %+v", got.Exiting, want)
 	}
 }

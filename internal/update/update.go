@@ -17,10 +17,12 @@
 // rather than nominal.
 //
 // box does not go back by itself. A gate that fails stops the update and says
-// where the release is, because the health gate cannot tell a slow migration
-// from a failed one and undoing a migration that was about to finish is worse
-// than waiting for someone to look. The only thing this package puts back is
-// the apps a step stopped before the release ever moved.
+// where the release is. The health gate does tell the two failures it sees
+// apart: an app a step moved whose container keeps exiting ends the wait at
+// once and is named in the record, while an app that is running and not yet
+// listening is waited for, because an Arr opens its port only after its
+// migration has finished. The only thing this package puts back is the apps a
+// step stopped before the release ever moved.
 //
 // Like internal/release, the decision is made over small interfaces -- a chart
 // source, a release handle, the workload set, a snapshotter, an apply and a
@@ -59,10 +61,11 @@ type Release interface {
 	State(ctx context.Context) (release.ReleaseState, error)
 }
 
-// Cluster is the release's StatefulSets, as an update writes and reads them.
-// It is one interface rather than three clients because the three questions
-// are one conversation: scale an app down, wait for its pods to go, and later
-// ask whether everything is ready.
+// Cluster is the release's StatefulSets and pods, as an update writes and
+// reads them. It is one interface rather than three clients because the three
+// questions are one conversation: scale an app down, wait for its pods to go,
+// and later ask whether everything is ready and nothing it moved is
+// crashlooping.
 type Cluster interface {
 	// Scale sets the replicas of every StatefulSet of one app -- both Arr
 	// instances included -- in the release's namespace. An app with no
@@ -71,9 +74,11 @@ type Cluster interface {
 	Scale(ctx context.Context, app string, replicas int32) error
 	// Gone reports whether every pod of that app is gone.
 	Gone(ctx context.Context, app string) (bool, error)
-	// Healthy reports whether every StatefulSet of the release is ready and
-	// has rolled out its current generation.
-	Healthy(ctx context.Context) (bool, error)
+	// Health reads the release once: whether every StatefulSet of it is
+	// ready and has rolled out its current generation, and which of the apps
+	// this step moved keep exiting. Only the moved apps are asked about:
+	// an app that kept its image cannot be this step's fault.
+	Health(ctx context.Context, moving []string) (Health, error)
 }
 
 // Snapshotter copies the apps a step moves out of the way, so the operator has
@@ -119,6 +124,23 @@ const (
 	gateWiring = "wiring"
 	gateHealth = "health"
 )
+
+// GateResult is how one step's health gate ended. It is a value rather than an
+// error because the three answers are not one failure: a release that is ready
+// passed, a moved app that keeps exiting is the image's fault and is named as
+// such, and a wait that ran out is an app that is running but not ready, which
+// box leaves where it is. A read that fails is an error on top of it.
+type GateResult struct {
+	// Exiting is the moved apps whose containers keep exiting, sorted by
+	// app. The gate stops on the first reading that finds one, without
+	// waiting for the rest of the release: the answer would only be the same
+	// later, with more restarts behind it.
+	Exiting []Exiting
+	// TimedOut is the wait running out before the release was deployed and
+	// healthy, with no moved app exiting: the apps are running, just not
+	// ready.
+	TimedOut bool
+}
 
 // StepPlan is one step and the apps its image move touches.
 type StepPlan struct {
@@ -646,8 +668,17 @@ func (u *Updater) take(ctx context.Context, rel Release, cluster Cluster, snaps 
 		}
 	}
 	if err == nil {
-		if herr := u.waitHealthy(ctx, rel, cluster); herr != nil {
+		outcome, herr := u.waitHealthy(ctx, rel, cluster, step.Moving)
+		switch {
+		case herr != nil:
 			gate, err = gateHealth, herr
+		case len(outcome.Exiting) > 0:
+			// An app the step moved that keeps exiting is the one failure
+			// the gate can name rather than wait out: the new image never
+			// got as far as opening its port.
+			gate, err = gateHealth, errors.New(exitingText(outcome.Exiting))
+		case outcome.TimedOut:
+			gate, err = gateHealth, fmt.Errorf("the release is not deployed and healthy after %s", u.healthWait())
 		}
 	}
 	if err != nil {
@@ -766,9 +797,14 @@ func (u *Updater) waitGone(ctx context.Context, cluster Cluster, apps []string) 
 	return nil
 }
 
-// waitHealthy is the health gate: Helm's status says deployed, and every
-// StatefulSet of the release is ready on its current generation.
-func (u *Updater) waitHealthy(ctx context.Context, rel Release, cluster Cluster) error {
+// waitHealthy is the health gate. A moved app that keeps exiting ends it at
+// once: the image is what has to change, and waiting for the rest of the
+// release would only reach the same answer later with more restarts behind it.
+// Otherwise it waits for Helm to say deployed and for every StatefulSet to be
+// ready, because an app that has not opened its port yet may be migrating
+// rather than failing.
+func (u *Updater) waitHealthy(ctx context.Context, rel Release, cluster Cluster, moving []string) (GateResult, error) {
+	var last Health
 	waited, err := wait.Until(ctx, u.healthWait(), u.poll(), func(ctx context.Context) (bool, error) {
 		state, err := rel.State(ctx)
 		if err != nil {
@@ -777,15 +813,34 @@ func (u *Updater) waitHealthy(ctx context.Context, rel Release, cluster Cluster)
 		if !state.Exists || !state.Deployed() {
 			return false, nil
 		}
-		return cluster.Healthy(ctx)
+		health, err := cluster.Health(ctx, moving)
+		if err != nil {
+			return false, err
+		}
+		last = health
+		return health.Ready || len(health.Exiting) > 0, nil
 	})
 	if err != nil {
-		return err
+		return GateResult{}, err
+	}
+	if len(last.Exiting) > 0 {
+		return GateResult{Exiting: last.Exiting}, nil
 	}
 	if !waited.Done {
-		return fmt.Errorf("the release is not deployed and healthy after %s", u.healthWait())
+		return GateResult{TimedOut: true}, nil
 	}
-	return nil
+	return GateResult{}, nil
+}
+
+// exitingText is the cause box records when the apps a step moved keep exiting:
+// one clause per app, so the record and the sentence name every one of them and
+// not just the first the gate saw.
+func exitingText(apps []Exiting) string {
+	clauses := make([]string, 0, len(apps))
+	for _, app := range apps {
+		clauses = append(clauses, fmt.Sprintf("%s exited %d times on its new image", app.App, app.Restarts))
+	}
+	return strings.Join(clauses, "; ")
 }
 
 // published reports whether the listing names a version.
