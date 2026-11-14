@@ -130,19 +130,32 @@ func runUpdate(ctx context.Context, args []string) {
 	// One chart source for the plan and every step: the release the plan
 	// settles on is the one each apply installs, pulled once.
 	charts := updateChartSource(out)
-	app := &release.Applier{
-		Charts: charts,
-		// The step's apply is the update the operator said yes to. The update
-		// asked once, before any step wrote; a second question partway through
-		// a multi-step path would be asking after the box had already moved.
-		Confirm: answered{},
-		Say:     out,
-		Open: func(namespace string) (release.ReleaseClient, error) {
-			return updateHelm(kc, namespace)
-		},
-		OpenStorage: func(namespace string) (release.StorageClient, error) {
-			return release.NewStorage(kc, namespace)
-		},
+	// The applier a step's apply runs through. It is built per apply rather
+	// than once, because the release handle a step opens depends on the apply:
+	// the one that moves the release runs no hooks (the step's gate judges the
+	// moved apps first, and the chart's wiring Job cannot pass while one of
+	// them is down), and the one that installs the state that stays runs them.
+	applierFor := func(skipHooks bool) *release.Applier {
+		return &release.Applier{
+			Charts: charts,
+			// The step's apply is the update the operator said yes to. The
+			// update asked once, before any step wrote; a second question
+			// partway through a multi-step path would be asking after the box
+			// had already moved.
+			Confirm: answered{},
+			Say:     out,
+			Open: func(namespace string) (release.ReleaseClient, error) {
+				h, err := updateHelm(kc, namespace)
+				if err != nil {
+					return nil, err
+				}
+				h.SkipHooks = skipHooks
+				return h, nil
+			},
+			OpenStorage: func(namespace string) (release.StorageClient, error) {
+				return release.NewStorage(kc, namespace)
+			},
+		}
 	}
 	applyOpts := o.options().Apply
 	applyOpts.BoxValues = boxValues(kc)
@@ -188,7 +201,7 @@ func runUpdate(ctx context.Context, args []string) {
 			}, nil
 		},
 		Apply: func(ctx context.Context, opts release.Options) (release.Result, error) {
-			return applyThenSettle(ctx, app.Apply, opts, holds)
+			return applyThenSettle(ctx, applierFor(opts.SkipHooks).Apply, opts, holds)
 		},
 		Holds:      update.FileHolds{},
 		Confirm:    confirmer(out, *o.yes),

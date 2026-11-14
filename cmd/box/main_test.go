@@ -132,6 +132,25 @@ func TestApplyPassesItsChartFlagsToTheOptions(t *testing.T) {
 	}
 }
 
+// TestApplyAndRollbackInstallWithTheChartsHooks: moving a release without its
+// hooks is the update step's own order -- its gate reads the moved apps before
+// the chart's wiring Job can pass -- and it belongs to that step alone. `box
+// apply` and `box rollback` install the release with the hooks, because nothing
+// else gates them and the wiring is what makes the release work.
+func TestApplyAndRollbackInstallWithTheChartsHooks(t *testing.T) {
+	var apply *applyFlags
+	parse(t, "apply", func(fs *flag.FlagSet) { apply = addApplyFlags(fs) })
+	if opts := apply.options(); opts.SkipHooks || opts.RunHooks {
+		t.Fatalf("box apply's options = %+v, want the chart's hooks left to the apply", opts)
+	}
+
+	var rollback *rollbackFlags
+	parse(t, "rollback", func(fs *flag.FlagSet) { rollback = addRollbackFlags(fs) }, "sonarr")
+	if opts := rollback.options("sonarr"); opts.Apply.SkipHooks || opts.Apply.RunHooks {
+		t.Fatalf("box rollback's options = %+v, want the chart's hooks left to the apply", opts.Apply)
+	}
+}
+
 // TestUpdatePassesItsFlagsToTheOptions: update runs apply for every step, so
 // losing a chart, grant or values flag here would install a different release
 // from the one the plan named, or apply somebody else's file.

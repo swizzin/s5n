@@ -754,6 +754,13 @@ func (u *Updater) take(ctx context.Context, rel Release, cluster Cluster, snaps 
 	// left nil so this apply pulls by version exactly as a bare apply would.
 	applyOpts.Chart = nil
 	applyOpts.ChartVersion = step.To
+	// This apply moves the release without running the chart's hooks. The
+	// wiring Job waits for every app to answer, and a moved app whose new
+	// image never starts cannot: a hook run here would spend its whole budget
+	// and fail the upgrade, and the step's own gate -- the one that can tell a
+	// crashloop from a slow migration -- would never look. The state that
+	// stays is applied once more, with the hooks on, below.
+	applyOpts.SkipHooks = true
 	gate, outcome, err := u.applyAndGate(ctx, rel, cluster, step, applyOpts)
 	if err != nil {
 		handle.Failed(err)
@@ -762,10 +769,19 @@ func (u *Updater) take(ctx context.Context, rel Release, cluster Cluster, snaps 
 
 	var rolledBack []string
 	if len(outcome.Exiting) > 0 {
+		// putBack's own apply is the hooks-on one: it installs the release
+		// once more with the app held at the image it ran, so the wiring runs
+		// against the images that stay.
 		rolledBack, err = u.putBack(ctx, rel, cluster, snaps, res, step, applyOpts, taken, outcome.Exiting, before.Revision, handle)
 		if err != nil {
 			return err
 		}
+	} else if err := u.wire(ctx, rel, cluster, step, applyOpts); err != nil {
+		// No app was put back, so the hooks-on apply is this one: the same
+		// release, installed again so the wiring runs against the images that
+		// stay.
+		handle.Failed(err)
+		return u.fail(ctx, rel, cluster, res, step, before.Revision, gateWiring, err, "")
 	}
 
 	if len(copied) > 0 {
@@ -779,6 +795,41 @@ func (u *Updater) take(ctx context.Context, rel Release, cluster Cluster, snaps 
 	handle.Done(fmt.Sprintf("%s is on %s", res.Name, step.To))
 	if err := u.recordOK(res, step, before.Revision, rolledBack); err != nil {
 		return fmt.Errorf("%s is on %s, but update's record could not be written: %w", res.Name, step.To, err)
+	}
+	return nil
+}
+
+// wire applies the step's release once more with the chart's hooks on: the one
+// run of the wiring Job a step makes.
+//
+// It is called only when no moved app was put back. A step that rolled one back
+// makes the same apply inside stepBack, with the hold in place, so the wiring
+// runs against the images that stay -- once, not twice, and never against an app
+// box has just declared broken (a wiring Job waits for every app to answer, so
+// it cannot pass while one of them is down).
+//
+// Its failure is the chart's own: the apps are the ones the gate just read as
+// ready, so a wiring Job that cannot finish is the release's, and the step stops
+// where it is.
+func (u *Updater) wire(ctx context.Context, rel Release, cluster Cluster, step StepPlan, applyOpts release.Options) error {
+	wireOpts := applyOpts
+	wireOpts.SkipHooks = false
+	wireOpts.RunHooks = true
+	if _, err := u.Apply(ctx, wireOpts); err != nil {
+		return fmt.Errorf("applying %s with its hooks: %w", step.To, err)
+	}
+	// The hooks have run: the release is read once more, because a Job that
+	// writes what an app reads at start is only worth anything if the app is
+	// still ready after it.
+	outcome, err := waitHealthy(ctx, rel, cluster, step.Moving, u.healthWait(), u.poll())
+	if err != nil {
+		return err
+	}
+	if len(outcome.Exiting) > 0 {
+		return errors.New(exitingText(outcome.Exiting))
+	}
+	if outcome.TimedOut {
+		return fmt.Errorf("the release is not deployed and healthy after %s", u.healthWait())
 	}
 	return nil
 }
@@ -1029,7 +1080,7 @@ func (f *rollbackFailure) Unwrap() error { return f.cause }
 // is re-rendered, and the hold is written before the re-apply, so the chart that
 // renders the rolled-back release names the old image. Nothing else in the
 // release moves: the rest of the step stays where it is.
-func (u *Updater) stepBack(ctx context.Context, rel Release, cluster Cluster, snaps Snapshotter, res *Result, step StepPlan, applyOpts release.Options, taken Taken, exiting []Exiting) ([]string, error) {
+func (u *Updater) stepBack(ctx context.Context, rel Release, cluster Cluster, snaps Snapshotter, res *Result, step StepPlan, stepOpts release.Options, taken Taken, exiting []Exiting) ([]string, error) {
 	r := u.report()
 	apps := make([]string, 0, len(exiting))
 	for _, e := range exiting {
@@ -1076,8 +1127,16 @@ func (u *Updater) stepBack(ctx context.Context, rel Release, cluster Cluster, sn
 		}
 	}
 	// The same release, so Helm records a deployed revision and runs its
-	// hooks; the hold is what makes it render the image the app ran.
-	if _, err := u.Apply(ctx, applyOpts); err != nil {
+	// hooks; the hold is what makes it render the image the app ran. This is
+	// the step's one hooks-on apply: the apply that moved the release ran
+	// without them, because the wiring Job cannot pass while an app box is
+	// about to put back is down. RunHooks is what makes it install at all --
+	// the release is already deployed at this version, so an ordinary apply
+	// would read as nothing to change and no hook would run.
+	wireOpts := stepOpts
+	wireOpts.SkipHooks = false
+	wireOpts.RunHooks = true
+	if _, err := u.Apply(ctx, wireOpts); err != nil {
 		return nil, &rollbackFailure{cause: fmt.Errorf("re-applying %s: %w", step.To, err), app: apps[0], dir: taken.Dirs[apps[0]]}
 	}
 	outcome, err := waitHealthy(ctx, rel, cluster, step.Moving, u.healthWait(), u.poll())

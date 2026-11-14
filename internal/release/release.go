@@ -346,6 +346,22 @@ type Options struct {
 	// the issuer its per-host step will write; empty leaves the step reading
 	// the Certificate in the cluster.
 	AnchorIssuer string
+	// SkipHooks installs the release without running the chart's hooks; the
+	// caller applies the release again with them, once the state that stays is
+	// the one in the cluster. `box update`'s step sets it for the apply that
+	// moves the release: the chart's wiring Job waits for every app to answer,
+	// and an app whose new image never starts cannot, so a hook run there
+	// would spend its whole budget before the step could put the app back. It
+	// is passed to the release client by the caller that opens it, because a
+	// hook run is the release client's wait and not this plan's.
+	SkipHooks bool
+	// RunHooks says the release's hooks are this run's work, so it installs
+	// even when nothing about the release changed. It is how `box update`'s
+	// step makes the one apply that runs the wiring: the release is already
+	// deployed at that version and the values are the ones it has, so an
+	// ordinary apply would answer "nothing to change" and the chart's wiring
+	// Job would never run.
+	RunHooks bool
 }
 
 // ChartRef is the reference the chart source is asked for. loadChart uses it,
@@ -538,6 +554,12 @@ func (a *Applier) Apply(ctx context.Context, opts Options) (Result, error) {
 	// apply that read the release as unchanged would take no step at all and
 	// leave the box where it was, saying it had updated it.
 	chartMoved := exists && installed.ChartVersion != chart.Version
+	// The hooks are work too, and the only work left in the apply that closes
+	// an update step: the step moved the release with them off, so the release
+	// is deployed at this version with these values and the chart's wiring has
+	// still not run. Without this the apply would answer "nothing to change"
+	// and the wiring would never run at all.
+	hooksWait := opts.RunHooks && !opts.SkipHooks
 	res.FirstInstall = !exists
 	res.Host = hostOf(values)
 	if exists {
@@ -608,7 +630,7 @@ func (a *Applier) Apply(ctx context.Context, opts Options) (Result, error) {
 		}
 	}
 
-	if exists && len(res.Changes) == 0 && len(plan) == 0 && nsp.Exists && len(hostPlan.Hosts) == 0 && !res.Login && anchorLine == "" && !chartMoved {
+	if exists && len(res.Changes) == 0 && len(plan) == 0 && nsp.Exists && len(hostPlan.Hosts) == 0 && !res.Login && anchorLine == "" && !chartMoved && !hooksWait {
 		r.Line(fmt.Sprintf("%s in %s: nothing to change", ReleaseName, namespace))
 		return res, nil
 	}
@@ -622,6 +644,11 @@ func (a *Applier) Apply(ctx context.Context, opts Options) (Result, error) {
 			// Only the release moved: the values are the ones installed, and
 			// the pins the new chart carries are the whole change.
 			r.Line(fmt.Sprintf("%s in %s: release %s -> %s", ReleaseName, namespace, installed.ChartVersion, chart.Version))
+		case hooksWait:
+			// The release is the one installed and its values are the ones it
+			// has: what this run has to do is the hook it carries, which the
+			// release was deployed without.
+			r.Line(fmt.Sprintf("%s in %s: release %s, running its hooks", ReleaseName, namespace, chart.Version))
 		default:
 			// The only work this run has is outside the release -- a host
 			// without its listener, or a login page that is not the one the
@@ -735,7 +762,7 @@ func (a *Applier) Apply(ctx context.Context, opts Options) (Result, error) {
 	// namespace and its storage are all as they were, so this run makes no Helm
 	// revision. A certificate nobody has to renew, or a login page the release
 	// already names, must not churn the release users roll back to.
-	if exists && len(res.Changes) == 0 && len(plan) == 0 && nsp.Exists && !chartMoved {
+	if exists && len(res.Changes) == 0 && len(plan) == 0 && nsp.Exists && !chartMoved && !hooksWait {
 		return res, nil
 	}
 
@@ -792,6 +819,14 @@ func (a *Applier) Apply(ctx context.Context, opts Options) (Result, error) {
 	res.Applied = true
 	res.Revision = rev
 	upgrade.Done(fmt.Sprintf("applied: %s revision %d in %s", ReleaseName, rev, namespace))
+
+	// An apply that ran no hooks has no receipt to wait for: the chart's
+	// wiring Job has not run, and its receipt would be the previous release's.
+	// The caller applies the release again with the hooks once it knows which
+	// images stay, and that apply is the one this gate belongs to.
+	if opts.SkipHooks {
+		return res, nil
+	}
 
 	receipt, err := a.waitReceipt(ctx, client, started)
 	if err != nil {

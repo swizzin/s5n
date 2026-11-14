@@ -206,6 +206,9 @@ type fakes struct {
 	// chart is the release this run applies, for a test that stands for a
 	// release other than the fixture: nil is the fixture itself.
 	chart *Chart
+	// runHooks is Options.RunHooks: the release's hooks are this run's work,
+	// so the apply installs even when nothing about the release changed.
+	runHooks bool
 }
 
 func newFakes(t *testing.T) *fakes {
@@ -288,6 +291,7 @@ func (f *fakes) apply(t *testing.T) (Result, error) {
 	opts.AnchorIssuer = f.anchorIssuer
 	opts.HostsAll = f.hostsAll
 	opts.HostIssuers = f.hostIssuers
+	opts.RunHooks = f.runHooks
 	return f.app.Apply(context.Background(), opts)
 }
 
@@ -429,6 +433,38 @@ func TestANewerReleaseWithTheSameValuesIsApplied(t *testing.T) {
 	}
 	if strings.Contains(f.out.String(), "nothing to change") {
 		t.Fatalf("a moved release was reported as nothing to change:\n%s", f.out)
+	}
+}
+
+// TestAnUnchangedReleaseIsInstalledForItsHooks: `box update`'s step moves the
+// release with the chart's hooks off, judges the moved apps, and applies the same
+// release once more with the hooks on. That apply has nothing else to change --
+// the release is deployed at that version and its values are the ones it has --
+// so without RunHooks it reads as "nothing to change" and the chart's wiring Job
+// never runs at all.
+func TestAnUnchangedReleaseIsInstalledForItsHooks(t *testing.T) {
+	f := newFakes(t)
+	if _, err := f.apply(t); err != nil {
+		t.Fatalf("first apply: %v\n%s", err, f.out)
+	}
+	upgrades := f.rel.upgrades
+
+	f.runHooks = true
+	res, err := f.apply(t)
+	if err != nil {
+		t.Fatalf("apply for the hooks: %v\n%s", err, f.out)
+	}
+	if got := f.rel.upgrades - upgrades; got != 1 {
+		t.Fatalf("an apply whose work is the hooks made %d Helm write(s), want 1\n%s", got, f.out)
+	}
+	if !res.Applied {
+		t.Fatalf("result says nothing was applied although the hooks had not run: %+v", res)
+	}
+	if strings.Contains(f.out.String(), "nothing to change") {
+		t.Fatalf("an apply whose work is the hooks was reported as nothing to change:\n%s", f.out)
+	}
+	if !strings.Contains(f.out.String(), "running its hooks") {
+		t.Fatalf("box did not say why it installed an unchanged release:\n%s", f.out)
 	}
 }
 

@@ -255,7 +255,14 @@ type fakeApply struct {
 }
 
 func (f *fakeApply) apply(_ context.Context, opts release.Options) (release.Result, error) {
-	f.log.add("apply %s", opts.ChartVersion)
+	// The log is where the step's order is read: the apply that moves the
+	// release runs without the chart's hooks, and the one that follows the
+	// gate runs them.
+	entry := "apply " + opts.ChartVersion
+	if opts.SkipHooks {
+		entry += " (no hooks)"
+	}
+	f.log.add("%s", entry)
 	f.calls = append(f.calls, opts)
 	version := opts.ChartVersion
 	err := f.errFor[version]
@@ -508,10 +515,19 @@ func TestOneStepSnapshotsOnlyTheAppWhoseImageMoved(t *testing.T) {
 		t.Fatalf("prunes = %+v, want the step's two kept", h.snaps.prunes)
 	}
 	// The copy is taken with no writer, and the release moves only after it
-	// exists. Check comes first, before any app is stopped.
-	h.assertOrder(t, "check 0.4.0 -> 0.5.0", "scale sonarr=0", "gone sonarr", "take 0.4.0 -> 0.5.0", "apply 0.5.0")
-	if len(h.app.calls) != 1 || h.app.calls[0].ChartVersion != "0.5.0" {
-		t.Fatalf("applies = %+v, want one at 0.5.0", h.app.calls)
+	// exists. Check comes first, before any app is stopped; the release moves
+	// without the chart's hooks, the gate reads the apps, and the hooks run
+	// once, after it.
+	h.assertOrder(t, "check 0.4.0 -> 0.5.0", "scale sonarr=0", "gone sonarr", "take 0.4.0 -> 0.5.0",
+		"apply 0.5.0 (no hooks)", "health", "apply 0.5.0")
+	if len(h.app.calls) != 2 || h.app.calls[0].ChartVersion != "0.5.0" || h.app.calls[1].ChartVersion != "0.5.0" {
+		t.Fatalf("applies = %+v, want 0.5.0 without hooks and then with them", h.app.calls)
+	}
+	if !h.app.calls[0].SkipHooks || h.app.calls[1].SkipHooks {
+		t.Fatalf("applies = %+v, want the release moved without its hooks and the state that stays applied with them", h.app.calls)
+	}
+	if !h.app.calls[1].RunHooks {
+		t.Fatalf("applies = %+v, want the closing apply to install for its hooks", h.app.calls)
 	}
 	if h.app.calls[0].GrantPath != h.grant || h.app.calls[0].ValuesPath != h.values {
 		t.Fatalf("the step applied something other than the operator's files: %+v", h.app.calls[0])
@@ -582,8 +598,8 @@ func TestAStepThatMovesNoImageTakesNoSnapshot(t *testing.T) {
 	if len(h.scales()) != 0 || len(h.snaps.takes) != 0 || len(h.snaps.prunes) != 0 {
 		t.Fatalf("an image-only release change snapshotted: scales=%v takes=%+v", h.scales(), h.snaps.takes)
 	}
-	if len(h.app.calls) != 1 {
-		t.Fatalf("applies = %d, want the release still applied", len(h.app.calls))
+	if len(h.app.calls) != 2 {
+		t.Fatalf("applies = %d, want the release moved without hooks and applied once more with them", len(h.app.calls))
 	}
 }
 
@@ -612,8 +628,8 @@ func TestAHeldAppIsNamedInThePlan(t *testing.T) {
 	if len(h.scales()) != 0 || len(h.snaps.takes) != 0 || len(h.snaps.prunes) != 0 {
 		t.Fatalf("a held app was stopped or copied: scales=%v takes=%+v", h.scales(), h.snaps.takes)
 	}
-	if len(h.app.calls) != 1 || h.app.calls[0].ChartVersion != "0.5.0" {
-		t.Fatalf("applies = %+v, want the release still applied at 0.5.0", h.app.calls)
+	if len(h.app.calls) != 2 || h.app.calls[0].ChartVersion != "0.5.0" {
+		t.Fatalf("applies = %+v, want the release applied at 0.5.0 and its hooks run after the gate", h.app.calls)
 	}
 	for _, want := range []string{
 		"0.4.0 -> 0.5.0 (no image moves)",
@@ -714,8 +730,12 @@ func TestTwoStepsWhenTheTargetCannotFollowTheInstalledRelease(t *testing.T) {
 	if !reflect.DeepEqual(res.Taken, want) {
 		t.Fatalf("taken = %+v, want %+v", res.Taken, want)
 	}
-	if len(h.app.calls) != 2 || h.app.calls[0].ChartVersion != "0.5.0" || h.app.calls[1].ChartVersion != "0.6.0" {
-		t.Fatalf("applies = %+v, want one per step in order", h.app.calls)
+	if len(h.app.calls) != 4 || h.app.calls[0].ChartVersion != "0.5.0" || h.app.calls[1].ChartVersion != "0.5.0" ||
+		h.app.calls[2].ChartVersion != "0.6.0" || h.app.calls[3].ChartVersion != "0.6.0" {
+		t.Fatalf("applies = %+v, want each step moved without hooks and then applied with them, in order", h.app.calls)
+	}
+	if h.app.calls[0].SkipHooks == h.app.calls[1].SkipHooks || h.app.calls[2].SkipHooks == h.app.calls[3].SkipHooks {
+		t.Fatalf("applies = %+v, want one hooks-off and one hooks-on apply per step", h.app.calls)
 	}
 	if len(h.snaps.takes) != 2 {
 		t.Fatalf("takes = %+v, want one per step that moves an image", h.snaps.takes)
@@ -728,23 +748,24 @@ func TestTwoStepsWhenTheTargetCannotFollowTheInstalledRelease(t *testing.T) {
 	}
 }
 
-// TestAWiringGateFailureStopsTheUpdate: the release moved and the wiring
-// receipt says it did not work. Box leaves the release where the step put it,
-// leaves the apps as the new release left them, keeps the snapshot and records
-// the failed release.
+// TestAWiringGateFailureStopsTheUpdate: the release moved, the gate passed, and
+// the wiring the closing apply runs says it did not work. Box leaves the release
+// where the step put it, leaves the apps as the new release left them, keeps the
+// snapshot and records the failed release.
 func TestAWiringGateFailureStopsTheUpdate(t *testing.T) {
 	h := newHarness(t)
 	h.charts.publish("0.4.0", "0.4.0", "0.4.0", digestA)
 	h.charts.publish("0.5.0", "0.4.0", "0.4.0", digestB)
-	h.app.applied["0.5.0"] = true
-	h.app.errFor["0.5.0"] = errors.New("wiring receipt says failed")
+	// The apply that moves the release is fine; the one that runs the hooks is
+	// where the receipt says the release did not work.
+	h.app.errSeq = map[string][]error{"0.5.0": {nil, errors.New("wiring receipt says failed")}}
 
 	_, err := h.run(t, false)
 	if err == nil {
 		t.Fatal("a failed wiring gate reported success")
 	}
 	for _, want := range []string{
-		"update s5n to 0.5.0: the wiring gate failed (wiring receipt says failed)",
+		"update s5n to 0.5.0: the wiring gate failed (applying 0.5.0 with its hooks: wiring receipt says failed)",
 		"s5n is on 0.5.0 (revision 4, deployed)",
 	} {
 		if !strings.Contains(err.Error(), want) {
@@ -856,13 +877,14 @@ func TestACrashloopRollsTheAppBackAndTheUpdateContinues(t *testing.T) {
 		t.Fatalf("release = %+v, want the run to have gone on to 0.6.0", h.rel.state)
 	}
 
-	// One ordered log across every fake: stop the copies, copy, apply, watch,
-	// then the step-back's own order.
+	// One ordered log across every fake: stop the copies, copy, apply without
+	// the chart's hooks, watch, then the step-back's own order -- and the
+	// hooks-on apply is the rollback's re-apply, after the restore.
 	h.assertOrder(t,
 		"check 0.4.0 -> 0.5.0", "scale radarr=0", "scale sonarr=0", "gone radarr", "gone sonarr", "take 0.4.0 -> 0.5.0",
-		"apply 0.5.0", "health",
+		"apply 0.5.0 (no hooks)", "health",
 		"scale radarr=0", "gone radarr", "restore 0.4.0 -> 0.5.0", "holds write", "apply 0.5.0", "health",
-		"apply 0.6.0",
+		"apply 0.6.0 (no hooks)", "health", "apply 0.6.0",
 	)
 	// Only the app that exited was put back; its sibling moved with the
 	// release and stayed there.
@@ -887,9 +909,14 @@ func TestACrashloopRollsTheAppBackAndTheUpdateContinues(t *testing.T) {
 		t.Fatalf("restored %v, want radarr alone", h.snaps.restores[0].apps)
 	}
 	// The re-apply is the same release, so Helm records a deployed revision
-	// and the hold is what renders the old image.
-	if len(h.app.calls) != 3 || h.app.calls[0].ChartVersion != "0.5.0" || h.app.calls[1].ChartVersion != "0.5.0" || h.app.calls[2].ChartVersion != "0.6.0" {
-		t.Fatalf("applies = %+v, want 0.5.0, 0.5.0 again, then 0.6.0", h.app.calls)
+	// and the hold is what renders the old image -- and it is the step's one
+	// hooks-on apply. The second step's two follow the same rule.
+	if len(h.app.calls) != 4 || h.app.calls[0].ChartVersion != "0.5.0" || h.app.calls[1].ChartVersion != "0.5.0" ||
+		h.app.calls[2].ChartVersion != "0.6.0" || h.app.calls[3].ChartVersion != "0.6.0" {
+		t.Fatalf("applies = %+v, want 0.5.0 without hooks, 0.5.0 with them, then the same for 0.6.0", h.app.calls)
+	}
+	if !h.app.calls[0].SkipHooks || h.app.calls[1].SkipHooks || !h.app.calls[1].RunHooks {
+		t.Fatalf("applies = %+v, want the first step's hooks run by its rollback's re-apply", h.app.calls)
 	}
 	for _, want := range []string{
 		"radarr exited 3 times on 7.1.0: rolling it back to 7.0.0",
@@ -931,6 +958,72 @@ func TestARolledBackStepRecordsTheAppsItPutBack(t *testing.T) {
 	}
 	if h.rel.state.ChartVersion != "0.5.0" {
 		t.Fatalf("release = %+v, want the step's release", h.rel.state)
+	}
+}
+
+// TestAStepRunsTheWiringOnceAfterTheGate: a step with nothing to roll back still
+// has the chart's wiring to run, and it runs in one apply after the gate. The
+// apply that moves the release runs with the hooks off, because the wiring Job
+// waits for every app to answer and cannot pass while a moved app is still
+// starting; the gate reads the apps; and the same release is applied once more
+// with the hooks on, so the wiring runs against the images that stay.
+func TestAStepRunsTheWiringOnceAfterTheGate(t *testing.T) {
+	h := newHarness(t)
+	h.charts.publish("0.4.0", "0.4.0", "0.4.0", digestA)
+	h.charts.publish("0.5.0", "0.4.0", "0.4.0", digestB)
+
+	if _, err := h.run(t, false); err != nil {
+		t.Fatalf("update: %v\n%s", err, h.out)
+	}
+	h.assertOrder(t, "apply 0.5.0 (no hooks)", "health", "apply 0.5.0", "health")
+	if len(h.app.calls) != 2 {
+		t.Fatalf("applies = %+v, want the release moved and then applied once more for its hooks", h.app.calls)
+	}
+	if !h.app.calls[0].SkipHooks || h.app.calls[1].SkipHooks {
+		t.Fatalf("applies = %+v, want the first without the chart's hooks and the second with them", h.app.calls)
+	}
+	if !h.app.calls[1].RunHooks {
+		t.Fatalf("applies = %+v, want the closing apply to install for its hooks: the release is already deployed at this version", h.app.calls)
+	}
+}
+
+// TestACrashloopingAppIsRestoredBeforeTheHooksRun: the step's one hooks-on apply
+// comes after the restore, never before it. A wiring Job that runs while the app
+// box is putting back is down would wait out its budget and fail, which is the
+// whole reason the apply that moves the release runs without the hooks.
+func TestACrashloopingAppIsRestoredBeforeTheHooksRun(t *testing.T) {
+	h := newHarness(t)
+	h.charts.publish("0.4.0", "0.4.0", "0.4.0", digestA)
+	h.charts.publish("0.5.0", "0.4.0", "0.4.0", digestB)
+	h.snaps.taken = Taken{
+		Step: "0.4.0-0.5.0-20260102T030405Z",
+		At:   h.now,
+		Dirs: map[string]string{"sonarr": "/srv/s5n/config/.box/snapshots/0.4.0-0.5.0-20260102T030405Z/sonarr"},
+	}
+	h.cluster.exiting = []Exiting{{App: "sonarr", Restarts: 3}}
+	h.cluster.exitingUntil = 1
+
+	if _, err := h.run(t, false); err != nil {
+		t.Fatalf("update: %v\n%s", err, h.out)
+	}
+	h.assertOrder(t,
+		"apply 0.5.0 (no hooks)", "health",
+		"scale sonarr=0", "gone sonarr", "restore 0.4.0 -> 0.5.0", "holds write", "apply 0.5.0",
+	)
+	if len(h.app.calls) != 2 {
+		t.Fatalf("applies = %+v, want the release moved and the rollback's one re-apply", h.app.calls)
+	}
+	var wired int
+	for _, call := range h.app.calls {
+		if !call.SkipHooks {
+			wired++
+			if !call.RunHooks {
+				t.Fatalf("applies = %+v, want the only hooks-on apply to be the one that installs for its hooks", h.app.calls)
+			}
+		}
+	}
+	if wired != 1 {
+		t.Fatalf("applies = %+v, want exactly one hooks-on apply: the hold's", h.app.calls)
 	}
 }
 
@@ -1127,8 +1220,13 @@ func TestAFailedApplyThatRecoversReappliesOnce(t *testing.T) {
 	if !reflect.DeepEqual(res.Taken, []Step{{From: "0.4.0", To: "0.5.0"}}) {
 		t.Fatalf("taken = %+v, want the step", res.Taken)
 	}
-	if len(h.app.calls) != 2 || h.app.calls[0].ChartVersion != "0.5.0" || h.app.calls[1].ChartVersion != "0.5.0" {
-		t.Fatalf("applies = %+v, want 0.5.0 twice: the failed one and the re-run", h.app.calls)
+	// The failed apply, the watch's reading, the retry, and the step's one
+	// hooks-on apply.
+	if len(h.app.calls) != 3 || h.app.calls[0].ChartVersion != "0.5.0" || h.app.calls[1].ChartVersion != "0.5.0" || h.app.calls[2].ChartVersion != "0.5.0" {
+		t.Fatalf("applies = %+v, want 0.5.0 three times: the failed one, the re-run, and the hooks", h.app.calls)
+	}
+	if !h.app.calls[0].SkipHooks || !h.app.calls[1].SkipHooks || h.app.calls[2].SkipHooks || !h.app.calls[2].RunHooks {
+		t.Fatalf("applies = %+v, want the retry without hooks and the last one with them", h.app.calls)
 	}
 	if len(h.snaps.restores) != 0 || h.holds.saves != 0 {
 		t.Fatalf("restores = %+v holds = %d, want nothing rolled back", h.snaps.restores, h.holds.saves)
@@ -1523,8 +1621,8 @@ func TestAPinnedPrereleaseIsTheTarget(t *testing.T) {
 	if res.Target != "0.5.0-rc.1" || len(res.Steps) != 1 || res.Steps[0].To != "0.5.0-rc.1" {
 		t.Fatalf("result = %+v, want one step to the pinned prerelease", res)
 	}
-	if len(h.app.calls) != 1 || h.app.calls[0].ChartVersion != "0.5.0-rc.1" {
-		t.Fatalf("applies = %+v, want the prerelease installed", h.app.calls)
+	if len(h.app.calls) != 2 || h.app.calls[0].ChartVersion != "0.5.0-rc.1" || h.app.calls[1].ChartVersion != "0.5.0-rc.1" {
+		t.Fatalf("applies = %+v, want the prerelease installed and its hooks run", h.app.calls)
 	}
 }
 

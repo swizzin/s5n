@@ -43,6 +43,13 @@ type Helm struct {
 	// waiting until the whole Timeout is gone -- thirty-five minutes of a
 	// broken image before the rollback could start.
 	HooksOnly bool
+	// SkipHooks says an upgrade installs the release without running the
+	// chart's hooks: the caller runs them itself, in the apply that installs
+	// the state that stays. `box update`'s step sets it for its first apply --
+	// the chart's wiring Job waits for every app to answer, so a moved app
+	// whose new image never starts cannot let it pass, and the step has to
+	// judge the moved apps before that Job runs at all.
+	SkipHooks bool
 
 	cfg *action.Configuration
 	cs  kubernetes.Interface
@@ -192,6 +199,10 @@ func (h *Helm) deployedRelease() (helmrelease.Releaser, error) {
 // is Helm's Install action rather than Upgrade with Install=true, so the choice
 // is visible in the code and an unexpected existing release cannot be adopted
 // by accident.
+//
+// SkipHooks leaves the chart's hooks for a later apply: Helm would wait for
+// them here, and a hook that cannot finish is a failure of this upgrade, so a
+// caller that has its own gate has to be able to move the release first.
 func (h *Helm) Upgrade(ctx context.Context, chart Chart, values map[string]any) (int, error) {
 	chrt, err := chart.open()
 	if err != nil {
@@ -209,6 +220,7 @@ func (h *Helm) Upgrade(ctx context.Context, chart Chart, values map[string]any) 
 		up.Namespace = h.Namespace
 		up.WaitStrategy = h.waitStrategy()
 		up.WaitForJobs = true
+		up.DisableHooks = h.SkipHooks
 		up.Timeout = timeout
 		up.Description = "box apply"
 		rel, err = up.RunWithContext(ctx, h.Release, chrt, values)
@@ -218,6 +230,7 @@ func (h *Helm) Upgrade(ctx context.Context, chart Chart, values map[string]any) 
 		in.Namespace = h.Namespace
 		in.WaitStrategy = h.waitStrategy()
 		in.WaitForJobs = true
+		in.DisableHooks = h.SkipHooks
 		in.Timeout = timeout
 		in.Description = "box apply install"
 		rel, err = in.RunWithContext(ctx, chrt, values)
