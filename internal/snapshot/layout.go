@@ -137,6 +137,86 @@ func stepTime(name string) (time.Time, bool) {
 	return at, true
 }
 
+// ErrNoSnapshot says a box holds no complete snapshot of an app. It is a
+// sentinel because "there is nothing to roll back to" is a state a caller
+// answers differently from a disk it could not read.
+var ErrNoSnapshot = errors.New("snapshot: there is no snapshot of this app")
+
+// Newest finds the newest complete snapshot of one instance under root and
+// reads its manifest, which is what a rollback needs: the files to put back and
+// the image the app ran when they were copied.
+//
+// The order is the time in the step directory's name, not the manifest's: the
+// directory name is what box chose and it is there even for a tree whose
+// manifest is unreadable. A tree still being built (`<app>.partial`, which Take
+// renames only when it is complete) is not a snapshot of the app, so it is
+// never picked; neither is another instance's copy in the same step.
+//
+// A step directory is left alone unless it is one of box's own names, because
+// the snapshots root sits inside a config root the operator owns.
+func Newest(root, instance string) (string, Manifest, error) {
+	if err := checkName(instance); err != nil {
+		return "", Manifest{}, fmt.Errorf("snapshot: instance %q: %w", instance, err)
+	}
+	steps, err := os.ReadDir(root)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return "", Manifest{}, ErrNoSnapshot
+		}
+		return "", Manifest{}, fmt.Errorf("snapshot %s: %w", root, err)
+	}
+	type found struct {
+		dir string
+		at  time.Time
+	}
+	var have []found
+	for _, e := range steps {
+		if !e.IsDir() {
+			continue
+		}
+		at, ok := stepTime(e.Name())
+		if !ok {
+			continue
+		}
+		dir := filepath.Join(root, e.Name(), instance)
+		info, err := os.Lstat(dir)
+		if errors.Is(err, fs.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return "", Manifest{}, fmt.Errorf("snapshot %s: %w", dir, err)
+		}
+		if !info.IsDir() {
+			continue
+		}
+		have = append(have, found{dir: dir, at: at})
+	}
+	if len(have) == 0 {
+		return "", Manifest{}, ErrNoSnapshot
+	}
+	sort.Slice(have, func(i, j int) bool {
+		if !have[i].at.Equal(have[j].at) {
+			return have[i].at.After(have[j].at)
+		}
+		return have[i].dir > have[j].dir
+	})
+	// The newest tree that exists is the answer, and a manifest it cannot read
+	// is an error rather than a reason to fall back to an older one: the older
+	// copy holds state the app has already written past.
+	man, err := loadManifest(have[0].dir)
+	if err != nil {
+		return "", Manifest{}, fmt.Errorf("snapshot %s: %w", have[0].dir, err)
+	}
+	return have[0].dir, man, nil
+}
+
+// StepName is the step a snapshot directory belongs to, as the directory name
+// that holds it. It is what a hold records, so a caller can find the other
+// app's snapshots taken by the same step.
+func StepName(dir string) string {
+	return filepath.Base(filepath.Dir(dir))
+}
+
 // CheckGlob checks one catalog glob: a relative path, in path.Match syntax,
 // matched against a whole path relative to an app's config directory.
 //

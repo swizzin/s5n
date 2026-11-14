@@ -328,18 +328,30 @@ func Restore(configDir string, globs []string, src string) error {
 	return nil
 }
 
-// readManifest reads a snapshot's manifest. A manifest that lists no files is a
-// refusal rather than an empty restore, because Restore's next step deletes
-// every file the globs match: an unreadable manifest would read as "the app had
-// nothing", which is the one answer that loses data.
-func readManifest(src string) (Manifest, error) {
+// loadManifest reads a snapshot's manifest without deciding whether it holds
+// enough to restore. Newest needs the images a snapshot names even from a step
+// whose copy a restore would refuse, so the "lists no files" rule stays with
+// Restore, which is the only caller it protects.
+func loadManifest(src string) (Manifest, error) {
 	data, err := os.ReadFile(filepath.Join(src, ManifestName))
 	if err != nil {
-		return Manifest{}, fmt.Errorf("restore %s: no readable %s, so it is not a snapshot box took: %w", src, ManifestName, err)
+		return Manifest{}, fmt.Errorf("no readable %s, so it is not a snapshot box took: %w", ManifestName, err)
 	}
 	var man Manifest
 	if err := json.Unmarshal(data, &man); err != nil {
-		return Manifest{}, fmt.Errorf("restore %s: %s: %w", src, ManifestName, err)
+		return Manifest{}, fmt.Errorf("%s: %w", ManifestName, err)
+	}
+	return man, nil
+}
+
+// readManifest reads a snapshot's manifest for a restore. A manifest that lists
+// no files is a refusal rather than an empty restore, because Restore's next
+// step deletes every file the globs match: an unreadable manifest would read as
+// "the app had nothing", which is the one answer that loses data.
+func readManifest(src string) (Manifest, error) {
+	man, err := loadManifest(src)
+	if err != nil {
+		return Manifest{}, fmt.Errorf("restore %s: %w", src, err)
 	}
 	if len(man.Files) == 0 {
 		return Manifest{}, fmt.Errorf("restore %s: %s lists no files; refusing to restore nothing over the app's state", src, ManifestName)

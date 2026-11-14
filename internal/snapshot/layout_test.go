@@ -1,6 +1,7 @@
 package snapshot
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -68,6 +69,142 @@ func TestDirRefusesANameThatIsAPath(t *testing.T) {
 				t.Fatalf("error = %v, want it to name %q", err, tc.wantInError)
 			}
 		})
+	}
+}
+
+// TestNewestPicksTheNewest: three steps for one app, and the answer is the one
+// whose name carries the latest time -- with its own manifest read, not
+// another step's.
+func TestNewestPicksTheNewest(t *testing.T) {
+	configRoot := t.TempDir()
+	app := filepath.Join(configRoot, "sonarr")
+	write(t, filepath.Join(app, "sonarr.db"), "the database", 0o600)
+	at := time.Date(2026, 3, 4, 5, 0, 0, 0, time.UTC)
+	steps := make([]string, 3)
+	for i := range steps {
+		dest, err := Dir(configRoot, "0.4.0", fmt.Sprintf("0.5.%d", i), at.Add(time.Duration(i)*time.Hour), "sonarr")
+		if err != nil {
+			t.Fatalf("dir: %v", err)
+		}
+		steps[i] = dest
+		moved := images().MovedTo
+		moved.Tag = fmt.Sprintf("0.5.%d", i)
+		if _, err := Take(app, []string{"sonarr.db"}, dest, Images{Ran: images().Ran, MovedTo: moved}); err != nil {
+			t.Fatalf("take %d: %v", i, err)
+		}
+	}
+
+	dir, man, err := Newest(Root(configRoot), "sonarr")
+	if err != nil {
+		t.Fatalf("newest: %v", err)
+	}
+	if dir != steps[2] {
+		t.Fatalf("newest = %s, want the latest step %s", dir, steps[2])
+	}
+	if man.App != "sonarr" {
+		t.Fatalf("manifest app = %q, want sonarr", man.App)
+	}
+	if man.MovedTo.Tag != "0.5.2" {
+		t.Fatalf("manifest movedTo = %+v, want the newest step's", man.MovedTo)
+	}
+	if StepName(dir) != filepath.Base(filepath.Dir(steps[2])) {
+		t.Fatalf("StepName(%s) = %q, want the step directory's name", dir, StepName(dir))
+	}
+}
+
+// TestNewestIgnoresAPartialTree: a tree Take is still building (or one whose run
+// died before its rename) is not a snapshot, so the answer is the newest step
+// that is complete. A newer step holding only another app is not this app's
+// either.
+func TestNewestIgnoresAPartialTree(t *testing.T) {
+	configRoot := t.TempDir()
+	app := filepath.Join(configRoot, "sonarr")
+	write(t, filepath.Join(app, "sonarr.db"), "the database", 0o600)
+	at := time.Date(2026, 3, 4, 5, 0, 0, 0, time.UTC)
+	complete, err := Dir(configRoot, "0.4.0", "0.5.0", at, "sonarr")
+	if err != nil {
+		t.Fatalf("dir: %v", err)
+	}
+	if _, err := Take(app, []string{"sonarr.db"}, complete, images()); err != nil {
+		t.Fatalf("take: %v", err)
+	}
+	// The newest step's copy never got past its rename.
+	partial, err := Dir(configRoot, "0.5.0", "0.6.0", at.Add(time.Hour), "sonarr")
+	if err != nil {
+		t.Fatalf("dir: %v", err)
+	}
+	write(t, filepath.Join(partial+".partial", "sonarr.db"), "half a copy", 0o600)
+	// A step after it that only holds another app's snapshot.
+	other, err := Dir(configRoot, "0.6.0", "0.7.0", at.Add(2*time.Hour), "radarr")
+	if err != nil {
+		t.Fatalf("dir: %v", err)
+	}
+	write(t, filepath.Join(other, "radarr.db"), "radarr's database", 0o600)
+
+	dir, man, err := Newest(Root(configRoot), "sonarr")
+	if err != nil {
+		t.Fatalf("newest: %v", err)
+	}
+	if dir != complete {
+		t.Fatalf("newest = %s, want the last complete copy %s", dir, complete)
+	}
+	if man.MovedTo != images().MovedTo {
+		t.Fatalf("manifest movedTo = %+v, want the complete step's", man.MovedTo)
+	}
+}
+
+// TestNewestWithNoSnapshot: a box that has never copied this app is a state, not
+// a failure to read the disk: the caller answers it with its own sentence.
+func TestNewestWithNoSnapshot(t *testing.T) {
+	cases := []struct {
+		name string
+		root func(t *testing.T) string
+	}{
+		{
+			name: "no snapshots root at all",
+			root: func(t *testing.T) string { return filepath.Join(t.TempDir(), "never-updated") },
+		},
+		{
+			name: "steps but none of this app",
+			root: func(t *testing.T) string {
+				configRoot := t.TempDir()
+				dest, err := Dir(configRoot, "0.4.0", "0.5.0", time.Unix(1700000000, 0).UTC(), "radarr")
+				if err != nil {
+					t.Fatalf("dir: %v", err)
+				}
+				write(t, filepath.Join(dest, "radarr.db"), "radarr's database", 0o600)
+				return Root(configRoot)
+			},
+		},
+		{
+			name: "not a step of box's",
+			root: func(t *testing.T) string {
+				root := Root(t.TempDir())
+				write(t, filepath.Join(root, "someone-elses", "sonarr", "sonarr.db"), "not ours", 0o600)
+				return root
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir, man, err := Newest(tc.root(t), "sonarr")
+			if !errors.Is(err, ErrNoSnapshot) {
+				t.Fatalf("error = %v, want ErrNoSnapshot", err)
+			}
+			if dir != "" || !man.Image.IsZero() || len(man.Files) != 0 {
+				t.Fatalf("a missing snapshot returned %q and %+v", dir, man)
+			}
+		})
+	}
+}
+
+// TestNewestRefusesANameThatIsAPath: the instance is a config directory's name
+// and becomes part of a path box reads from.
+func TestNewestRefusesANameThatIsAPath(t *testing.T) {
+	for _, name := range []string{"", ".", "..", "sonarr/4k", `sonarr\4k`} {
+		if _, _, err := Newest(t.TempDir(), name); err == nil {
+			t.Fatalf("Newest accepted the instance %q", name)
+		}
 	}
 }
 
