@@ -635,3 +635,35 @@ func TestRollbackRestoresWithTheGlobsTheCopyWasTakenWith(t *testing.T) {
 		t.Fatalf("config.xml = %q, %v: a rollback removed a file the copy never held", got, err)
 	}
 }
+
+// TestRollbackNamesTheAppNotAnInstance: a rollback is per app, because every
+// instance runs the one image the app pins. An instance name is refused with
+// the app to name instead, and a name the seedbox does not run lists the ones
+// it does.
+func TestRollbackNamesTheAppNotAnInstance(t *testing.T) {
+	values := map[string]any{"apps": map[string]any{
+		"sonarr": map[string]any{"enabled": true, "instances": []any{
+			map[string]any{"enabled": true, "suffix": ""},
+			map[string]any{"enabled": true, "suffix": "4k"},
+		}},
+		"radarr": map[string]any{"enabled": true},
+		"plex":   map[string]any{"enabled": false},
+	}}
+	cases := []struct{ app, want string }{
+		{"sonarr", ""},
+		{"radarr", ""},
+		{"sonarr-4k", "sonarr-4k is an instance of sonarr: every instance of an app runs one image, so `box rollback sonarr` puts all of them back together"},
+		{"plex", "plex is not an app this seedbox runs: box rollback takes an app from your values (radarr, sonarr)"},
+		{"lidarr", "lidarr is not an app this seedbox runs: box rollback takes an app from your values (radarr, sonarr)"},
+	}
+	for _, tc := range cases {
+		err := checkEnabledApp("/srv/s5n/config", values, tc.app)
+		got := ""
+		if err != nil {
+			got = err.Error()
+		}
+		if got != tc.want {
+			t.Errorf("%s: error = %q, want %q", tc.app, got, tc.want)
+		}
+	}
+}

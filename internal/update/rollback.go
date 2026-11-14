@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -13,6 +14,7 @@ import (
 	"github.com/swizzin/s5n/internal/release"
 	"github.com/swizzin/s5n/internal/say"
 	"github.com/swizzin/s5n/internal/seedbox"
+	"github.com/swizzin/s5n/internal/setup"
 	"github.com/swizzin/s5n/internal/snapshot"
 )
 
@@ -351,6 +353,9 @@ func (r *Rollback) plan(ctx context.Context, opts RollbackOptions) (RollbackResu
 	if err != nil {
 		return res, err
 	}
+	if err := checkEnabledApp(root, values, opts.App); err != nil {
+		return res, err
+	}
 	holds, err := loadHolds(r.Holds, root)
 	if err != nil {
 		return res, err
@@ -666,6 +671,27 @@ func sameImage(a, b snapshot.ImageRef) bool {
 		return a.Digest == b.Digest
 	}
 	return a.Tag == b.Tag
+}
+
+// checkEnabledApp refuses a name that is not an app this seedbox runs. An
+// instance name (sonarr-4k) is the likely slip: every instance of an app runs the
+// one image the app pins, so a rollback is per app and puts all of them back
+// together, and the refusal says which app to name.
+func checkEnabledApp(root string, values map[string]any, app string) error {
+	enabled := release.EnabledApps(values)
+	for _, name := range enabled {
+		if name == app {
+			return nil
+		}
+	}
+	for _, name := range enabled {
+		for _, dir := range setup.SettingsDirs(root, []string{name}, values) {
+			if filepath.Base(dir) == app {
+				return fmt.Errorf("%s is an instance of %s: every instance of an app runs one image, so `box rollback %s` puts all of them back together", app, name, name)
+			}
+		}
+	}
+	return fmt.Errorf("%s is not an app this seedbox runs: box rollback takes an app from your values (%s)", app, strings.Join(enabled, ", "))
 }
 
 // checkAppName refuses an app that is not one path element. The app key names a
