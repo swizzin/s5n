@@ -167,6 +167,7 @@ func (a applyHosts) rules(cl login.Cluster, plan release.HostPlan) setup.RuleFun
 			Image:     plan.Rule.Image,
 			Values:    plan.Rule.Values,
 			Hosted:    plan.Rule.Hosted,
+			OwnLogin:  plan.Rule.OwnLogin,
 			Namespace: plan.Rule.Namespace,
 			OIDC:      plan.Rule.OIDC,
 		})
@@ -249,6 +250,7 @@ func loginRules(plan release.HostPlan) login.RulesOptions {
 		Image:     plan.Rule.Image,
 		Values:    plan.Rule.Values,
 		Hosted:    plan.Rule.Hosted,
+		OwnLogin:  plan.Rule.OwnLogin,
 		Namespace: plan.Rule.Namespace,
 		OIDC:      plan.Rule.OIDC,
 	}

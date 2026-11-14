@@ -366,6 +366,7 @@ func TestEnsureRulesRendersTheSameProviderTwice(t *testing.T) {
 	opts := oidcOptions()
 	opts.Values = hostedValues()
 	opts.Hosted = []string{"plex", "seerr"}
+	opts.OwnLogin = []string{"plex", "seerr"}
 	if _, err := f.decision.Apply(context.Background(), opts); err != nil {
 		t.Fatalf("Apply: %v", err)
 	}

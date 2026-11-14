@@ -26,4 +26,7 @@ apps:
     instances: false
     default: false
     exposure: host
+    # It signs its own users in, so the login must be told to leave its host
+    # alone: init carries the catalog's list to the login it installs.
+    login: own
     questions: []

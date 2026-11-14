@@ -227,6 +227,10 @@ type Login struct {
 	// edge checks every listener, so each app host needs the rule that matches
 	// the login posture the app had on its path.
 	Hosted []string
+	// OwnLogin are the apps the chart's catalog says sign their users in
+	// themselves. Their host or path prefix bypasses the login: an app with
+	// its own sign-in behind the login would ask for two passwords.
+	OwnLogin []string
 	// Values is the document the release will render: chart defaults, then
 	// the user's file, then the grant, read back after init wrote them. The
 	// access_control rules come from its instance list, so the login and the
@@ -547,6 +551,7 @@ func (d *Decision) Run(ctx context.Context, opts Options) (Result, error) {
 			NewPassword: newPassword,
 			Values:      withApps(base, apps, d.Catalog),
 			Hosted:      appHostApps(appHosts),
+			OwnLogin:    d.Catalog.SelfAuthenticating(),
 			Namespace:   namespace,
 			OIDC:        d.Catalog.OIDCApps(apps),
 		}

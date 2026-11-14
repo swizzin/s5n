@@ -266,6 +266,9 @@ func testOptions() Options {
 		NewPassword: true,
 		Image:       "authelia/authelia:4.39.28@sha256:" + strings.Repeat("a", 64),
 		Values:      testValues,
+		// The chart's catalog marks Plex as signing its own users in, so the
+		// fixture says so too: its whole path bypasses the login.
+		OwnLogin: []string{"plex"},
 	}
 }
 
@@ -772,6 +775,9 @@ func ruleOptions() RulesOptions {
 		Image:  "authelia/authelia:4.39.28@sha256:" + strings.Repeat("a", 64),
 		Values: hostedValues(),
 		Hosted: []string{"plex", "seerr"},
+		// The same catalog answer the hosted list comes from: both sign their
+		// own users in, so each name is a bypass.
+		OwnLogin: []string{"plex", "seerr"},
 	}
 }
 
@@ -855,6 +861,7 @@ func TestEnsureRulesWritesNothingWhenTheRuleIsThere(t *testing.T) {
 	opts.PathsInNode = true
 	opts.Values = hostedValues()
 	opts.Hosted = []string{"plex", "seerr"}
+	opts.OwnLogin = []string{"plex", "seerr"}
 	if _, err := f.decision.Apply(context.Background(), opts); err != nil {
 		t.Fatalf("Apply: %v", err)
 	}
@@ -884,6 +891,7 @@ func TestEnsureRulesRendersWhatInitRenders(t *testing.T) {
 	opts.PathsInNode = true
 	opts.Values = hostedValues()
 	opts.Hosted = []string{"plex", "seerr"}
+	opts.OwnLogin = []string{"plex", "seerr"}
 	if _, err := init.decision.Apply(context.Background(), opts); err != nil {
 		t.Fatalf("Apply: %v", err)
 	}
@@ -1063,11 +1071,12 @@ func TestEnsureRulesCarriesTheMark(t *testing.T) {
 // and image, so "nothing differs" means nothing about the login.
 func initRules(opts Options) RulesOptions {
 	return RulesOptions{
-		Host:   opts.Host,
-		Login:  opts.Login,
-		Hosts:  []string{opts.Host},
-		Image:  opts.Image,
-		Values: opts.Values,
+		Host:     opts.Host,
+		Login:    opts.Login,
+		Hosts:    []string{opts.Host},
+		Image:    opts.Image,
+		Values:   opts.Values,
+		OwnLogin: opts.OwnLogin,
 	}
 }
 

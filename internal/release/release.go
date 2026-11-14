@@ -130,7 +130,12 @@ type HostPlan struct {
 type HostRule struct {
 	Login  string
 	Hosted []string
-	Values map[string]any
+	// OwnLogin are the apps the catalog says sign their users in themselves:
+	// their host or path prefix bypasses the login. Like Hosted it is the
+	// whole list, so a rewrite of the configuration never puts the login back
+	// in front of an app whose own sign-in is the one people use.
+	OwnLogin []string
+	Values   map[string]any
 	// Namespace is the seedbox's namespace -- half of every OIDC client id --
 	// and OIDC are the apps the catalog says sign in through the login. The
 	// login's configuration is one file: a rule write renders the clients too,
@@ -851,6 +856,7 @@ func loginRule(sb *seedbox.Seedbox, chart Chart, values map[string]any, hosts []
 	return HostRule{
 		Login:     login,
 		Hosted:    hostedApps(hosts, domain),
+		OwnLogin:  cat.SelfAuthenticating(),
 		Values:    values,
 		Image:     chart.Pins.Authelia,
 		Namespace: namespace,

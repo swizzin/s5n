@@ -406,6 +406,11 @@ func TestApplyServesANewAppHostBeforeTheRelease(t *testing.T) {
 	if len(rule.Hosted) != 1 || rule.Hosted[0] != "radarr" {
 		t.Fatalf("hosted apps = %v, want radarr", rule.Hosted)
 	}
+	// The catalog says radarr signs its own users in, and that list reaches the
+	// rule write: the per-host step renders the login from it.
+	if len(rule.OwnLogin) != 1 || rule.OwnLogin[0] != "radarr" {
+		t.Fatalf("own-login apps = %v, want the catalog's radarr", rule.OwnLogin)
+	}
 	if on, _ := rule.Values["apps"].(map[string]any)["radarr"].(map[string]any)["enabled"].(bool); !on {
 		t.Fatalf("the rule's values do not have radarr enabled: %v", rule.Values["apps"])
 	}

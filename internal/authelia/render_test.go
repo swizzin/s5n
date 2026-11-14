@@ -21,7 +21,7 @@ func testConfiguration() Configuration {
 		EncryptionKey: testKey,
 		Theme:         BaseDark,
 		AssetPath:     AssetPath,
-		Rules:         Rules("box.example.com", "alice", InstancesFromValues(fixtureValues()), nil),
+		Rules:         Rules("box.example.com", "alice", InstancesFromValues(fixtureValues()), nil, selfLogin),
 	}
 }
 
@@ -83,7 +83,7 @@ func TestRenderConfigurationFollowsTheHost(t *testing.T) {
 	}
 	c := testConfiguration()
 	c.Host = "other.example.com"
-	c.Rules = Rules(c.Host, c.Login, nil, nil)
+	c.Rules = Rules(c.Host, c.Login, nil, nil, nil)
 	b, err := RenderConfiguration(c)
 	if err != nil {
 		t.Fatal(err)
@@ -414,7 +414,7 @@ func TestGeneratePassword(t *testing.T) {
 // which is the 403 the per-host step exists to prevent.
 func TestHasRuleReadsTheRenderedConfiguration(t *testing.T) {
 	c := testConfiguration()
-	c.Rules = Rules("box.example.com", "alice", InstancesFromValues(fixtureValues()), []string{"seerr"})
+	c.Rules = Rules("box.example.com", "alice", InstancesFromValues(fixtureValues()), []string{"seerr"}, selfLogin)
 	rendered, err := RenderConfiguration(c)
 	if err != nil {
 		t.Fatalf("RenderConfiguration: %v", err)

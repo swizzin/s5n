@@ -176,6 +176,11 @@ type Options struct {
 	// names needs its rule, and the app's path rule must not exist: the chart
 	// no longer serves the app there.
 	Hosted []string
+	// OwnLogin are the apps the chart's catalog says sign their users in
+	// themselves. Their host or path prefix bypasses the login: a second
+	// password in front of an app that already asks for one is a password
+	// nobody is asked for.
+	OwnLogin []string
 	// Namespace is the seedbox's namespace. It is the per-app client Secrets'
 	// home and half of every client id, so an empty one is a refusal: a client
 	// called "-qui" belongs to nobody.
@@ -380,7 +385,7 @@ func (d *Decision) Apply(ctx context.Context, opts Options) (Result, error) {
 	// that decides the page's theme, and the mark and favicon that go in it.
 	// The per-host step calls the same function, so init and apply cannot
 	// disagree about either.
-	config, assets, err := renderLogin(opts.Values, opts.Host, opts.Login, key, opts.Hosted,
+	config, assets, err := renderLogin(opts.Values, opts.Host, opts.Login, key, opts.Hosted, opts.OwnLogin,
 		oidcClients(opts.Host, opts.Namespace, opts.Login, apps, sec.digests))
 	if err != nil {
 		return res, undo(err)
@@ -455,6 +460,11 @@ type RulesOptions struct {
 	// not only the names this run writes, because the configuration is
 	// rewritten whole and a name left out would lose the rule it already had.
 	Hosted []string
+	// OwnLogin are the apps the chart's catalog says sign their users in
+	// themselves -- the whole list for the same reason as Hosted: a name left
+	// out of the rewrite would put the login back in front of an app whose
+	// own sign-in is the one people use.
+	OwnLogin []string
 	// Namespace and OIDC are the provider's half of the same configuration: the
 	// seedbox's namespace (half of every client id) and the apps that sign in
 	// through this login. The configuration is one file, so a rule write
@@ -581,7 +591,7 @@ func (d *Decision) prepare(ctx context.Context, opts RulesOptions, ensure bool) 
 		return nil, none, false, err
 	}
 	key := sec.key
-	config, assets, err := renderLogin(opts.Values, opts.Host, opts.Login, key, opts.Hosted,
+	config, assets, err := renderLogin(opts.Values, opts.Host, opts.Login, key, opts.Hosted, opts.OwnLogin,
 		oidcClients(opts.Host, opts.Namespace, opts.Login, apps, sec.digests))
 	if err != nil {
 		return nil, none, false, err
@@ -851,7 +861,7 @@ func anyMap(in map[string]string) map[string]any {
 // mark and favicon mounted beside it. It is one function because the same
 // inputs must produce the same files -- a rule or a theme that depended on
 // which command wrote it would be a second login.
-func renderLogin(values map[string]any, host, name, key string, hosted []string, oidc *authelia.OIDC) ([]byte, authelia.Assets, error) {
+func renderLogin(values map[string]any, host, name, key string, hosted, ownLogin []string, oidc *authelia.OIDC) ([]byte, authelia.Assets, error) {
 	lt, err := authelia.ResolveTheme(themeName(values))
 	if err != nil {
 		return nil, authelia.Assets{}, err
@@ -862,7 +872,7 @@ func renderLogin(values map[string]any, host, name, key string, hosted []string,
 		EncryptionKey: key,
 		Theme:         lt.Base,
 		AssetPath:     authelia.AssetPath,
-		Rules:         authelia.Rules(host, name, authelia.InstancesFromValues(values), hosted),
+		Rules:         authelia.Rules(host, name, authelia.InstancesFromValues(values), hosted, ownLogin),
 		OIDC:          oidc,
 	})
 	if err != nil {
