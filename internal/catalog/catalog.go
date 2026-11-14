@@ -95,6 +95,32 @@ const (
 	ExposureHost Exposure = "host"
 )
 
+// Login is how a person gets into an app: through the box's one login, or with
+// the app's own sign-in.
+type Login string
+
+const (
+	// LoginPortal is the default: the app sits behind the box's one login, so
+	// the edge asks for a session before it serves anything under it.
+	LoginPortal Login = "portal"
+	// LoginOwn is an app that signs its users in itself, on the name or the
+	// path it is served at. Its host, or its whole path prefix, bypasses the
+	// login: a media server that issues its own tokens, or a tool reached by
+	// the same players and APIs.
+	LoginOwn Login = "own"
+)
+
+// legacyOwnLogin are the apps chart releases published before `login:` carried
+// without saying so: their Plex, Seerr and Tautulli bypassed the login, and a
+// newer box must keep giving them that under those charts. The set is frozen --
+// a new app says `login: own` in the catalog, never here -- and it goes when
+// box's floor passes the first chart release that carries the key.
+var legacyOwnLogin = map[string]bool{
+	"plex":     true,
+	"seerr":    true,
+	"tautulli": true,
+}
+
 // App is one catalog entry.
 type App struct {
 	// Name is the app's key under `apps:` in values.yaml.
@@ -109,6 +135,10 @@ type App struct {
 	Default bool `yaml:"default"`
 	// Exposure is how the chart serves it; empty means ExposurePath.
 	Exposure Exposure `yaml:"exposure"`
+	// Login is how a person gets in: behind the box's one login, or with the
+	// app's own. Empty in the manifest means Load resolves it to LoginPortal,
+	// or to LoginOwn for the few apps a chart older than this key shipped.
+	Login Login `yaml:"login"`
 	// OIDC says the app signs in through the login's own OIDC provider: the
 	// chart gives it the issuer and a client secret, and the login registers a
 	// client for it in this box's namespace. It is the chart's decision, not
@@ -221,6 +251,7 @@ type manifestApp struct {
 	Instances   bool       `yaml:"instances"`
 	Default     bool       `yaml:"default"`
 	Exposure    Exposure   `yaml:"exposure"`
+	Login       Login      `yaml:"login"`
 	OIDC        bool       `yaml:"oidc"`
 	Calls       []string   `yaml:"calls"`
 	Questions   []Question `yaml:"questions"`
@@ -371,11 +402,13 @@ func buildApps(m *manifest, order []string, chartApps map[string]chartApp, sch *
 			Instances:   entry.Instances,
 			Default:     entry.Default,
 			Exposure:    entry.Exposure,
+			Login:       entry.Login,
 			OIDC:        entry.OIDC,
 			Calls:       entry.Calls,
 			Questions:   entry.Questions,
 		}
 		problems = append(problems, validateExposure(&app)...)
+		problems = append(problems, validateLogin(&app)...)
 		problems = append(problems, validateApp(&app, chartApps[name], chartApps, sch)...)
 		cat.byName[name] = len(cat.apps)
 		cat.apps = append(cat.apps, app)
@@ -409,6 +442,40 @@ func (c *Catalog) Hosted() []string {
 	var out []string
 	for _, a := range c.apps {
 		if a.Exposure == ExposureHost {
+			out = append(out, a.Name)
+		}
+	}
+	return out
+}
+
+// validateLogin checks how a person gets into the app, and resolves an absent
+// key: every caller then has an answer, and only the catalog knows that an old
+// chart's Plex, Seerr and Tautulli sign their users in themselves. An explicit
+// value wins over that set, which is how a chart stops marking one of them.
+func validateLogin(app *App) []string {
+	switch app.Login {
+	case "":
+		if legacyOwnLogin[app.Name] {
+			app.Login = LoginOwn
+		} else {
+			app.Login = LoginPortal
+		}
+		return nil
+	case LoginPortal, LoginOwn:
+		return nil
+	default:
+		return []string{fmt.Sprintf("apps.%s.login: %q is not %s or %s", app.Name, app.Login, LoginPortal, LoginOwn)}
+	}
+}
+
+// SelfAuthenticating returns the apps that sign their users in themselves, in
+// manifest order. The login gives each one a bypass instead of the one-factor
+// rule, so a new app with its own sign-in is one manifest key and no box
+// change.
+func (c *Catalog) SelfAuthenticating() []string {
+	var out []string
+	for _, a := range c.apps {
+		if a.Login == LoginOwn {
 			out = append(out, a.Name)
 		}
 	}

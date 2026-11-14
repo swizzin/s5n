@@ -216,6 +216,119 @@ func TestHostedAppWithInstancesIsRefused(t *testing.T) {
 	}
 }
 
+// An entry that says nothing about login sits behind the box's one login, and
+// `login: own` is kept: a caller never sees an empty value either way.
+func TestLoginDefaultsToThePortalAndOwnIsKept(t *testing.T) {
+	cat, err := parseMini(t, miniManifest)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	alpha, _ := cat.App("alpha")
+	if alpha.Login != LoginPortal {
+		t.Fatalf("apps.alpha login = %q, want the portal when the manifest says nothing", alpha.Login)
+	}
+	if got := cat.SelfAuthenticating(); len(got) != 0 {
+		t.Fatalf("self-authenticating = %v, want none", got)
+	}
+
+	own := strings.Replace(miniManifest,
+		"    description: the first app\n",
+		"    description: the first app\n    login: own\n", 1)
+	cat, err = parseMini(t, own)
+	if err != nil {
+		t.Fatalf("parse with login own: %v", err)
+	}
+	if alpha, _ = cat.App("alpha"); alpha.Login != LoginOwn {
+		t.Fatalf("apps.alpha login = %q, want own", alpha.Login)
+	}
+	if beta, _ := cat.App("beta"); beta.Login != LoginPortal {
+		t.Fatalf("apps.beta login = %q, want the portal", beta.Login)
+	}
+	if got := strings.Join(cat.SelfAuthenticating(), ","); got != "alpha" {
+		t.Fatalf("self-authenticating = %s, want alpha", got)
+	}
+
+	portal := strings.Replace(miniManifest,
+		"    description: the first app\n",
+		"    description: the first app\n    login: portal\n", 1)
+	cat, err = parseMini(t, portal)
+	if err != nil {
+		t.Fatalf("parse with login portal: %v", err)
+	}
+	if alpha, _ = cat.App("alpha"); alpha.Login != LoginPortal {
+		t.Fatalf("apps.alpha login = %q, want portal", alpha.Login)
+	}
+}
+
+// A login box does not know is refused by name: it would otherwise decide
+// whether a password stands in front of the app, which is not a typo to guess
+// at.
+func TestUnknownLoginIsNamed(t *testing.T) {
+	manifest := strings.Replace(miniManifest,
+		"    description: the first app\n",
+		"    description: the first app\n    login: sso\n", 1)
+	_, err := parseMini(t, manifest)
+	if err == nil {
+		t.Fatal("an unknown login was accepted")
+	}
+	if !strings.Contains(err.Error(), `apps.alpha.login: "sso" is not portal or own`) {
+		t.Fatalf("error = %v, want it to name the entry and both values", err)
+	}
+}
+
+// realChart is charts/s5n's catalog with the values and schema from the same
+// directory, read the way Load reads them, so a test can parse the chart's own
+// manifest with one thing changed.
+func realChart(t *testing.T) (manifest, values, schema []byte) {
+	t.Helper()
+	read := func(name string) []byte {
+		t.Helper()
+		data, err := os.ReadFile(filepath.Join("../../charts/s5n", name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return data
+	}
+	return read(FileName), read("values.yaml"), read("values.schema.json")
+}
+
+// A chart release published before `login:` carries none, and the Plex, Seerr
+// and Tautulli it shipped still sign their users in themselves: the frozen set
+// in this package is what keeps an older chart's bypass under a newer box.
+func TestLoginAbsentKeepsTheLegacyAppsSelfAuthenticating(t *testing.T) {
+	manifest, values, schema := realChart(t)
+	old := []byte(strings.ReplaceAll(string(manifest), "    login: own\n", ""))
+	if string(old) == string(manifest) {
+		t.Fatal("the chart's catalog carries no `login: own` to strip, so this fixture no longer looks like an older release")
+	}
+	cat, err := Parse("catalog.yaml", old, values, schema)
+	if err != nil {
+		t.Fatalf("parse an older chart's manifest: %v", err)
+	}
+	if got := strings.Join(cat.SelfAuthenticating(), ","); got != "plex,tautulli,seerr" {
+		t.Fatalf("self-authenticating = %s, want plex,tautulli,seerr", got)
+	}
+}
+
+// An explicit value wins over the legacy set: the chart decides, so a later
+// release can bring one of those three behind the login without a box release.
+func TestExplicitPortalBeatsTheLegacyName(t *testing.T) {
+	manifest, values, schema := realChart(t)
+	// Plex is the first `login: own` in the manifest.
+	edited := strings.Replace(string(manifest), "    login: own\n", "    login: portal\n", 1)
+	cat, err := Parse("catalog.yaml", []byte(edited), values, schema)
+	if err != nil {
+		t.Fatalf("parse with plex on the portal: %v", err)
+	}
+	plex, _ := cat.App("plex")
+	if plex.Login != LoginPortal {
+		t.Fatalf("apps.plex login = %q, want the explicit portal", plex.Login)
+	}
+	if got := strings.Join(cat.SelfAuthenticating(), ","); got != "tautulli,seerr" {
+		t.Fatalf("self-authenticating = %s, want tautulli,seerr", got)
+	}
+}
+
 // TestHostileManifestIsNamed: every refusal says which entry is wrong. A
 // manifest is untrusted input to a root process, and "the catalog is broken"
 // would leave the contributor guessing.

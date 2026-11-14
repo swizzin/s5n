@@ -45,6 +45,17 @@
 #                    and checks it answers where the domain does before it
 #                    writes anything for it (docs/box.md, "Certificates").
 #
+# And how a person gets into it:
+#
+#   login: portal    behind the box's one login (the default): the edge asks
+#                    for a session before it serves the app.
+#   login: own       the app signs its users in itself, on whatever name or
+#                    path it is served at, so that host or prefix bypasses the
+#                    login. It is for an app whose clients can't answer a
+#                    login page: a media server serving its own players by
+#                    its own token, or a tool those players and API clients
+#                    reach.
+#
 # An entry also says what the app dials *inside* the release:
 #
 #   calls: [qbittorrent, prowlarr]   the in-release apps it connects to
@@ -117,6 +128,9 @@ apps:
     # Plex's web app writes absolute asset paths (/web/...), so it is served at
     # plex.<domain> rather than under /plex.
     exposure: host
+    # Plex serves its own clients and issues its own token, so a login in front
+    # of it would be a password no player asks for.
+    login: own
     questions:
       - key: secrets.plexClaimToken
         prompt: Plex claim token
@@ -130,6 +144,8 @@ apps:
     default: true
     # Its PMS link and its history both come from Plex's own API.
     calls: [plex]
+    # It is reached by the same players and apps that reach Plex.
+    login: own
     questions: []
 
   seerr:
@@ -143,6 +159,8 @@ apps:
     # Same as Plex: Seerr's bundle loads its assets from the site root, so the
     # path route broke the page and it is served at seerr.<domain>.
     exposure: host
+    # It signs people in with Plex, so a login here would be a second password.
+    login: own
     questions: []
 
   # Opt-in: a second UI for the same qBittorrent, not something a box should
