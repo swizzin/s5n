@@ -327,6 +327,46 @@ func TestMovingApps(t *testing.T) {
 			}},
 			held: []string{"sonarr"},
 		},
+		{
+			// A chart that pins no digest moves an app by its tag: Helm
+			// replaces the pod and the app may migrate, so the step copies it.
+			name:   "a tag-only release that changes the tag moves the app",
+			from:   release.Chart{Version: "0.4.0", Variants: variantsTagOnly("5.0.0")},
+			to:     release.Chart{Version: "0.5.0", Variants: variantsTagOnly("5.0.1")},
+			values: on(defaultImage),
+			moving: []string{"sonarr"},
+			images: map[string]ImageChange{"sonarr": {
+				Ran:     snapshot.ImageRef{Repository: "registry.example.com/seedbox/sonarr", Tag: "5.0.0"},
+				MovedTo: snapshot.ImageRef{Repository: "registry.example.com/seedbox/sonarr", Tag: "5.0.1"},
+			}},
+		},
+		{
+			// The same tag on both sides: nothing moved, and the app is
+			// neither stopped nor copied.
+			name:   "a tag-only release that keeps its tag moves nothing",
+			from:   release.Chart{Version: "0.4.0", Variants: variantsTagOnly("5.0.0")},
+			to:     release.Chart{Version: "0.5.0", Variants: variantsTagOnly("5.0.0")},
+			values: on(defaultImage),
+		},
+		{
+			// A hold taken against a tag-only image lapses on the next tag,
+			// and the app moves from the image the rollback left it on.
+			name:   "a hold on a tag-only image lapses when the release pins another tag",
+			from:   release.Chart{Version: "0.4.0", Variants: variantsTagOnly("5.0.0")},
+			to:     release.Chart{Version: "0.5.0", Variants: variantsTagOnly("5.0.1")},
+			values: on(defaultImage),
+			holds: []snapshot.Hold{{
+				App:      "sonarr",
+				At:       snapshot.ImageRef{Repository: "registry.example.com/seedbox/sonarr", Tag: "4.9.0"},
+				Avoiding: snapshot.ImageRef{Repository: "registry.example.com/seedbox/sonarr", Tag: "5.0.0"},
+				By:       snapshot.ByUpdate,
+			}},
+			moving: []string{"sonarr"},
+			images: map[string]ImageChange{"sonarr": {
+				Ran:     snapshot.ImageRef{Repository: "registry.example.com/seedbox/sonarr", Tag: "4.9.0"},
+				MovedTo: snapshot.ImageRef{Repository: "registry.example.com/seedbox/sonarr", Tag: "5.0.1"},
+			}},
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

@@ -186,8 +186,10 @@ type ImageChange struct {
 //
 // The image is the one values select: apps.<app>.image.variant, "default" when
 // nothing says otherwise. A variant that exists in both releases is compared by
-// repository and digest, never by tag -- the chart pins digest, and a tag that
-// was re-pushed to new bytes is an image change the digest sees. An app in only
+// repository and digest, and by tag when neither release pins a digest: the
+// chart pins digest, so a tag that was re-pushed to new bytes is an image change
+// the digest sees, and a release that pins no digest at all (a locally built
+// image) changes the image by changing the tag. An app in only
 // one of the two releases is not moving (there is no install to migrate), and a
 // chart that ships no variants.yaml tells box nothing about images, so it moves
 // nothing.
@@ -277,7 +279,7 @@ func appDecision(app string, values map[string]any, oldImages, newImages map[str
 // operator's pin is applied first, and a hold only decides when no pin does.
 func shippedMove(app string, values map[string]any, oldImage, newImage admission.Image, holds []snapshot.Hold) (appMove, ImageChange) {
 	// What the chart did is remembered first, because the pin may hide it.
-	chartMoved := oldImage.Repository != newImage.Repository || oldImage.Digest != newImage.Digest
+	chartMoved := imageMoved(oldImage, newImage)
 	tag, digest := pinOf(values, app)
 	pinned := tag != "" || digest != ""
 	switch {
@@ -296,18 +298,31 @@ func shippedMove(app string, values map[string]any, oldImage, newImage admission
 		if !holdLapsed(moved, h) {
 			return moveHeldBack, ImageChange{}
 		}
-		if h.At.Repository != moved.Repository || h.At.Digest != moved.Digest {
+		if !sameImage(h.At, moved) {
 			return moveMoves, ImageChange{Ran: h.At, MovedTo: moved}
 		}
 		return moveNone, ImageChange{}
 	}
-	if oldImage.Repository != newImage.Repository || oldImage.Digest != newImage.Digest {
+	if imageMoved(oldImage, newImage) {
 		return moveMoves, ImageChange{Ran: imageRef(oldImage), MovedTo: imageRef(newImage)}
 	}
 	if chartMoved && pinned {
 		return moveHeld, ImageChange{}
 	}
 	return moveNone, ImageChange{}
+}
+
+// imageMoved reports whether two releases pin different images for one app, by
+// the identity a rollback reads (sameImage): the repository, then the digest
+// when either side has one, then the tag.
+//
+// The tag is the case the digest cannot answer. A release that pins no digest --
+// a locally built image, or a variant released before its first digest pin --
+// moves an app by tag alone: Helm rolls the pod and the app may migrate, so a
+// step that read that as no move would snapshot nothing, roll nothing back, and
+// say "no image moves" about a release that replaced every pod it names.
+func imageMoved(oldImage, newImage admission.Image) bool {
+	return !sameImage(imageRef(oldImage), imageRef(newImage))
 }
 
 // imageRef is the chart's image as the snapshot records it.
