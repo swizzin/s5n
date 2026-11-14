@@ -1051,6 +1051,8 @@ one entry per app:
 
 - name and one-line description;
 - whether it takes multiple instances;
+- how a person gets into it: behind the box's one login (`login: portal`, the default),
+  or signed in by the app itself (`login: own`), which exempts it from the login;
 - its setup questions: prompt, type, default, and the values key each answer goes to.
 
 box reads the manifest from the chart release it's installing and builds its dialogs
