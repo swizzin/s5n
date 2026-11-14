@@ -750,28 +750,37 @@ together with the image the app had.
 
 **What update does with it:**
 
-- **box updates itself first (decided), then re-runs as the new binary (proposed).**
+- **box updates itself first, then re-runs as the new binary (decided).**
   `box update` checks for a newer box before it looks at charts, replaces itself, and
   execs the new binary with the same arguments, so the chart update always runs under
   the newest box. The timer does the same, which is why a release that raises
-  `min-box` never leaves an unattended box stuck.
-- Self-update rules (proposed):
+  `min-box` never leaves an unattended box stuck. A box that can't update itself (the
+  release page is unreachable, the signature doesn't verify, a package owns the
+  binary) says why in one line and runs the chart update itself, with the releases it
+  meets `min-box` for. The one exception is a new binary that installed and then
+  wouldn't start: that run stops, because carrying on would move the seedbox under the
+  box it just replaced.
+- Self-update rules (decided):
   - **Verified before it runs (decided).** The new binary is checked against the
     release's signed checksum before it replaces anything. It runs as root, so an
     unverified self-update would be remote code execution as root. The signature is
-    ed25519 over the exact bytes of `sha256sums.txt`, published beside it as
+    ed25519 over a line naming the release's tag (`s5n box release box-v<version>`)
+    followed by the exact bytes of `sha256sums.txt`, so an older release's signed files
+    served under a newer tag don't verify. It is published beside them as
     `sha256sums.txt.sig`, and the public key is compiled into box. No keyserver, no
     transparency log, no new dependency: the standard library verifies it. A box built
     without a key refuses to update itself rather than skipping the check, and a
-    release built without the signing secret fails instead of publishing unsigned.
+    release built without the signing secret, or with one whose public half isn't the
+    key committed in the repository, fails instead of publishing.
   - **Atomic, with one step back.** Written beside the old binary and renamed over it.
     The previous binary is kept as `box.previous`, and `box update --rollback-box` puts
     it back.
   - **Root only.** The binary is root-owned. A user's `box update` that needs a newer
     box says so and stops: "box 0.4.0 is needed; root's next update brings it".
-  - **Held like a pinned image.** `--hold-box` (or a key in root's config) skips the
-    self-update and says so on every run. A release whose `min-box` a held box doesn't
-    meet is shown, not taken.
+  - **Held like a pinned image.** `--hold-box` skips the self-update and says so on
+    every run. A key in root's config does the same once root's config exists; it
+    arrives with the timer, which keeps its interval there. A release whose `min-box`
+    a held box doesn't meet is shown, not taken.
   - **Package-managed installs defer.** If box came from a distro package, it never
     overwrites itself. It names the package command instead.
 - It picks the newest release this box meets `min-box` for. A newer release that needs
@@ -991,6 +1000,12 @@ runs over forward-only database migrations, so 0.5 carries a narrow rollback ahe
   fails later is announced and left alone, because a restore by then would cost
   everything it wrote since. Keeps exiting means the container has exited three times
   since the step.
+- **Wiring runs once, after the gate (proposed).** The chart's wiring Job runs as a Helm
+  hook and waits for every app, so it can't pass while a moved app keeps exiting, and
+  Helm would wait on it until it failed. A step therefore installs the release with
+  hooks off, the gate judges the moved apps, any that keep exiting are rolled back, and
+  then one apply with hooks on runs the wiring against the images that stay. A wiring
+  failure at that point is the chart's own, and stops the update.
 - **Apps that migrate when they start get thirty minutes to start (decided).** The
   startup probe used to allow five minutes, after which the kubelet restarts the
   container, and a migration that outlasted it would count as a crashloop. Every app
@@ -1182,6 +1197,12 @@ reason instead of a stack trace.
   one command that detects the source, since the hard part (rewriting paths in the Arr
   databases, carrying qBittorrent's state) is the same for all of them.
 - Who assigns the torrent port with multiple users (see Scopes).
+- **A rollback across a repository change.** A hold puts an app back on the tag and
+  digest it ran, under the repository the release pins. A release that moves an app to
+  a different repository therefore can't be rolled back that way: the old digest isn't
+  in the new repository. Proposed: when the release still blesses the old repository
+  as a variant, the hold selects that variant; when it doesn't, the plan says before
+  the step that the app can't be rolled back.
 - **A user's route under an Arr's `/api` or `/ping`.** Those paths skip the login because
   the Arr checks its own key, but a user's own HTTPRoute under one of them (a longer
   prefix, pointing at another app) is the more specific route and is served without a
