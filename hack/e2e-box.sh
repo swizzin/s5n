@@ -13,7 +13,7 @@
 # box pulls it from there with --chart-repo (and --chart-version). box never
 # reads `charts/` from its own tree; the kind cluster never pulls the chart.
 #
-# Three scenarios, three clusters:
+# Four scenarios, four clusters:
 #
 #   fresh         a cluster with nothing installed. The Gateway box applies
 #                 gets no address, so MetalLB and its pool are installed, and
@@ -35,6 +35,17 @@
 #                 through Envoy's SecurityPolicy), so box must refuse that
 #                 cluster, naming the class and its controller, and write
 #                 nothing: no namespace, no GatewayClass, no record.
+#   update        `box update`, on a real cluster, from an installed release to
+#                 one whose new image cannot start. The step takes a copy of
+#                 sonarr's config, moves the release, and puts sonarr back on the
+#                 image it ran when the new one keeps exiting -- while the app
+#                 the same step moved elsewhere stays moved and the release stays
+#                 at the new version. Then a re-apply keeps the hold, a release
+#                 that pins another image lapses it, and `box rollback --pin`
+#                 restores the newest copy into an ordinary values pin. This is
+#                 the only scenario box needs to reach the config it copies, so
+#                 it is the only one whose volume roots are a directory on this
+#                 host, mounted into the node (see VOLUME ROOTS below).
 #
 # The login is part of every install: bootstrap puts one Authelia in
 # s5n-system and one SecurityPolicy on the Gateway, root's `box init` creates
@@ -57,15 +68,15 @@
 # preinstalled scenario's name does not resolve, which proves the self-signed
 # half.
 #
-# Why one script and three clusters instead of a flag inside hack/e2e-kind.sh:
+# Why one script and four clusters instead of a flag inside hack/e2e-kind.sh:
 # the existing e2e is the chart's acceptance test, and its helm install is what
 # proves the chart still installs the way users install it today. These
 # scenarios are about box's decision, share the bootstrap command line, and
-# disagree about what is on the cluster before it runs -- so they cannot share
-# a cluster. `all` runs this script once per scenario, which gives each its own
+# disagree about what is on the cluster before it runs -- so they cannot share a
+# cluster. `all` runs this script once per scenario, which gives each its own
 # work directory, cluster name and exit code.
 #
-# Usage: hack/e2e-box.sh [--keep] [fresh|preinstalled|foreign-gateway|all]   (default: all)
+# Usage: hack/e2e-box.sh [--keep] [fresh|preinstalled|foreign-gateway|update|all]   (default: all)
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -116,13 +127,13 @@ SCENARIO=all
 for arg in "$@"; do
   case "$arg" in
     --keep) KEEP=--keep ;;
-    fresh | preinstalled | foreign-gateway | all) SCENARIO=$arg ;;
+    fresh | preinstalled | foreign-gateway | update | all) SCENARIO=$arg ;;
     -h | --help)
-      sed -n '2,40p' "$0" | sed 's/^# \{0,1\}//'
+      sed -n '2,/^set -euo pipefail/p' "$0" | sed 's/^# \{0,1\}//'
       exit 0
       ;;
     *)
-      echo "unknown argument: $arg (want fresh, preinstalled, foreign-gateway or all)" >&2
+      echo "unknown argument: $arg (want fresh, preinstalled, foreign-gateway, update or all)" >&2
       exit 2
       ;;
   esac
@@ -133,6 +144,7 @@ if [ "$SCENARIO" = all ]; then
   "$0" fresh $KEEP || status=1
   "$0" preinstalled $KEEP || status=1
   "$0" foreign-gateway $KEEP || status=1
+  "$0" update $KEEP || status=1
   exit "$status"
 fi
 
@@ -140,6 +152,7 @@ case "$SCENARIO" in
   fresh) CLUSTER=s5n-box; DOMAIN=box.example.test ;;
   preinstalled) CLUSTER=s5n-box-lb; DOMAIN=box.internal.example ;;
   foreign-gateway) CLUSTER=s5n-box-gw; DOMAIN=box.example.com ;;
+  update) CLUSTER=s5n-box-update; DOMAIN=box.update.example.test ;;
 esac
 # The names the catalog serves at a host of their own (Plex and Seerr): the
 # chart renders their routes there, and box resolves and certifies them.
@@ -167,6 +180,48 @@ HELM="helm --kube-context ${CTX}"
 WORK=$(mktemp -d)
 START=$(date +%s)
 REGISTRY=""
+
+# ---- the seedbox's volume roots --------------------------------------------
+# The two host directories the grant names, and the one thing that differs
+# between the scenarios. Every scenario but update keeps them inside the node,
+# where box cannot reach them: --paths-in-node is how box skips the stat a real
+# host would have passed, and nothing box does touches an app's config.
+#
+# update is the one that needs the opposite. A step copies an app's config,
+# restores it and writes the hold beside the copies -- all of it on the
+# filesystem the seedbox's /config comes from -- so box and the pods have to
+# see one tree. Here the roots are a directory on this host, bind-mounted into
+# the node at the same absolute path: the PV's hostPath, the pod's /config and
+# box's snapshot directory all name it, which is what a real host has.
+DATA_PATH=/srv/s5n/data
+CONFIG_PATH=/srv/s5n/config
+KIND_CONFIG=hack/kind.yaml
+if [ "$SCENARIO" = update ]; then
+  DATA_PATH="$WORK/hostfs/data"
+  CONFIG_PATH="$WORK/hostfs/config"
+  KIND_CONFIG="$WORK/kind.yaml"
+  mkdir -p "$DATA_PATH" "$CONFIG_PATH"
+  # box runs as whoever started the e2e, and the apps run as the grant's
+  # puid:pgid: on a real host box is root and everything below the roots is the
+  # seedbox user's. Here the two are different users, so the roots are writable
+  # by both and a restore can replace a file either of them wrote. Nothing in
+  # the scenario depends on the mode; an unwritable directory would fail the
+  # step with a permission error instead of the behaviour under test.
+  chmod 0777 "$WORK/hostfs" "$DATA_PATH" "$CONFIG_PATH"
+  awk -v mount="$WORK/hostfs" '
+    { print }
+    /^  - role: control-plane$/ {
+      print "    extraMounts:"
+      print "      - hostPath: " mount
+      print "        containerPath: " mount
+      print "        propagation: Bidirectional"
+    }
+  ' hack/kind.yaml >"$KIND_CONFIG"
+  grep -qF "containerPath: ${WORK}/hostfs" "$KIND_CONFIG" || {
+    echo "the kind config for the update scenario has no mount for ${WORK}/hostfs"
+    exit 1
+  }
+fi
 # The registry is a container on this host: it must not outlive the run, even
 # when a scenario fails before its own cleanup.
 cleanup() {
@@ -256,7 +311,7 @@ if $KIND get clusters 2>/dev/null | grep -qx "$CLUSTER"; then
 fi
 
 log "creating kind cluster ${CLUSTER}"
-$KIND create cluster --name "$CLUSTER" --config hack/kind.yaml --wait 120s
+$KIND create cluster --name "$CLUSTER" --config "$KIND_CONFIG" --wait 120s
 
 log "building the s5n image (the wiring Job and the qBittorrent credential seed)"
 docker build -q -t "$IMAGE" .
@@ -294,11 +349,20 @@ chmod 600 "$WORK/second-password"
 # categories are deliberately absent — downloads/<category> and media/<category>
 # are the wiring Job's, and pre-creating them would hide a first install that
 # cannot make the root folders its Arr steps need.
-log "preparing host paths inside the node (what box init creates on real hosts)"
-docker exec "${CLUSTER}-control-plane" bash -c '
-  mkdir -p /srv/s5n/data \
-           /srv/s5n/config/{qbittorrent,prowlarr,sonarr,sonarr-4k,radarr,radarr-4k,plex,tautulli,seerr,qui,autobrr,maintainerr,pbh}
-  chown -R 1000:1000 /srv/s5n'
+log "preparing host paths (what box init creates on real hosts)"
+docker exec "${CLUSTER}-control-plane" bash -c "
+  mkdir -p '$DATA_PATH' \\
+           '$CONFIG_PATH'/{qbittorrent,prowlarr,sonarr,sonarr-4k,radarr,radarr-4k,plex,tautulli,seerr,qui,autobrr,maintainerr,pbh}
+  chown -R 1000:1000 '$DATA_PATH' '$CONFIG_PATH'"
+
+# The update scenario's extra step. Its roots are a host directory mounted into
+# the node, so box -- which runs as whoever started the e2e -- writes its
+# snapshots and its hold into directories the apps own. Group and other get the
+# same rights as the owner: box has to be able to replace a file an app wrote,
+# and an app has to be able to write the config a restore put back.
+if [ "$SCENARIO" = update ]; then
+  docker exec "${CLUSTER}-control-plane" chmod -R a+rwX "$CONFIG_PATH"
+fi
 
 # The login's own directory, which box init creates on a real host: 0700, owned
 # by the uid the container runs as (65532). The users database goes in before
@@ -320,7 +384,7 @@ docker exec -i "${CLUSTER}-control-plane" bash -c '
 # first install that cannot create its own root folders is the failure this e2e
 # is here to catch. A guard rather than a comment, so a pre-create cannot creep
 # back in. Every scenario installs through box, so this holds for all three.
-for d in /srv/s5n/data/downloads /srv/s5n/data/media; do
+for d in "$DATA_PATH/downloads" "$DATA_PATH/media"; do
   if docker exec "${CLUSTER}-control-plane" test -e "$d"; then
     echo "${d} already exists before the install: the e2e prepared a path the wiring Job must create"; fail=1
   fi
@@ -361,7 +425,7 @@ bootstrap() { # bootstrap <output file>
   "$WORK/box" bootstrap --yes --chart-repo "$CHART_REPO" ${ACME_ARGS[@]+"${ACME_ARGS[@]}"} ${DNS_ARGS[@]+"${DNS_ARGS[@]}"} ${CA_ARGS[@]+"${CA_ARGS[@]}"} \
     --grant "$WORK/grant.yaml" --values "$WORK/values.yaml" \
     --namespace "$NS" --domain "$DOMAIN" \
-    --data-path /srv/s5n/data --config-path /srv/s5n/config \
+    --data-path "$DATA_PATH" --config-path "$CONFIG_PATH" \
     --apps qbittorrent,sonarr,radarr,prowlarr,plex,tautulli,seerr,qui,autobrr,maintainerr,pbh \
     --puid 1000 --pgid 1000 \
     --login "$LOGIN" --password-file "$WORK/authelia-password" \
@@ -380,7 +444,7 @@ init() { # init <output file> [extra dev flags]
   "$WORK/box" init --yes --chart-repo "$CHART_REPO" --chart-version "$CHART_VERSION" ${DNS_ARGS[@]+"${DNS_ARGS[@]}"} ${CA_ARGS[@]+"${CA_ARGS[@]}"} \
     --grant "$WORK/grant.yaml" --values "$WORK/values.yaml" \
     --namespace "$NS" --domain "$DOMAIN" \
-    --data-path /srv/s5n/data --config-path /srv/s5n/config \
+    --data-path "$DATA_PATH" --config-path "$CONFIG_PATH" \
     --apps qbittorrent,sonarr,radarr,prowlarr,plex,tautulli,seerr,qui,autobrr,maintainerr,pbh \
     --puid 1000 --pgid 1000 \
     --login "$LOGIN" --password-file "$WORK/authelia-password" \
@@ -3981,10 +4045,424 @@ PY
   [ ! -e "$WORK/cluster.yaml" ] || { echo "the second run wrote the cluster record"; fail=1; }
 }
 
+# ---- scenario: update -------------------------------------------------------
+# `box update` on a real cluster: a step that moves two apps, one of whose new
+# images cannot start. box must put that app back on the image it ran -- its
+# pods gone, its config restored, a hold naming it -- leave the other app moved,
+# leave the release at the new version, and say all of it. Then a re-apply keeps
+# the hold, a release that pins another image lapses it, and `box rollback --pin`
+# restores the newest copy as an ordinary values pin.
+#
+# Three of the images this needs are not in any chart: a sonarr that rewrites a
+# file a snapshot glob names and exits (release B), prowlarr's own image under a
+# new tag (B, the app that must stay moved), and sonarr's own image under a new
+# tag (C, the release that lapses the hold). A built or retagged image has no
+# digest, so those releases pin by tag alone -- the shape a hold and a step both
+# have to read for a tag-only release to move or lapse at all.
+
+# What the two new releases pin. The broken sonarr is built here; the other two
+# are images this cluster already runs, retagged.
+BROKEN_TAG=e2e-broken
+MOVED_TAG=e2e-moved
+RESTORED_TAG=e2e-restored
+# busybox 1.37.0, the base of the image release B ships for sonarr: a shell that
+# rewrites the config and then exits, which is a migration that cannot serve,
+# seen from outside.
+BUSYBOX_VERSION=1.37.0
+BUSYBOX_IMAGE=${BUSYBOX_IMAGE:-busybox:${BUSYBOX_VERSION}@sha256:a7dbc319b1438115a207e11930dc4bb3e643dcb3ec0bdd694bb36cd8fad289ec}  # renovate: datasource=docker
+# The line release A's sonarr carries in config.xml, a file the catalog's
+# snapshot globs name, and the config the failing image replaces that file with:
+# after the step only the copy box took can hold the first and none of the
+# second.
+MARKER='<!-- s5n-e2e-update-marker -->'
+BROKEN_WROTE='s5n-e2e-broken-image-rewrote-this'
+
+# next_patch <version>: the next patch release, which is what a chart whose only
+# change is an app's image is published as.
+next_patch() {
+  python3 -c 'import sys; v = sys.argv[1].split("."); v[-1] = str(int(v[-1]) + 1); print(".".join(v))' "$1"
+}
+
+# variant_pin <app>: "repository tag digest" for one app's default variant, read
+# from this tree's variants.yaml -- the image release A runs. The scenario
+# retags that image and pins the tag, so it reads the pin instead of repeating
+# it: a renamed repository or a bumped tag in the chart is this scenario's input.
+variant_pin() {
+  python3 - "$1" <<'PY'
+import re, sys
+app, cur, pin = sys.argv[1], None, {}
+for line in open("charts/s5n/variants.yaml"):
+    head = re.match(r'^([A-Za-z0-9_.-]+):\s*$', line)
+    if head:
+        cur = head.group(1)
+        continue
+    if cur != app:
+        continue
+    m = re.match(r'^\s+(\w+):\s*"?([^"\s]*)"?\s*$', line)
+    if m:
+        pin.setdefault(m.group(1), m.group(2))
+if not pin.get("repository") or not pin.get("tag"):
+    sys.exit("charts/s5n/variants.yaml names no default image for " + app)
+print(pin["repository"], pin["tag"], pin.get("digest", ""))
+PY
+}
+
+# repin_variant <variants.yaml> <app> <tag>: one app's default variant names a
+# tag inside its own repository and no digest. The repository stays, because a
+# hold puts an app back by the tag and digest a snapshot recorded and the chart
+# is what supplies the repository: a release that moved an app to another
+# repository could not be rolled back at all.
+repin_variant() {
+  python3 - "$1" "$2" "$3" <<'PY'
+import re, sys
+path, app, tag = sys.argv[1], sys.argv[2], sys.argv[3]
+out, cur = [], None
+for line in open(path):
+    head = re.match(r'^([A-Za-z0-9_.-]+):\s*$', line)
+    if head:
+        cur = head.group(1)
+    m = re.match(r'^(\s+)(tag|digest):', line)
+    if cur == app and m:
+        if m.group(2) == "tag":
+            out.append('%stag: "%s"\n' % (m.group(1), tag))
+        continue
+    out.append(line)
+open(path, "w").write("".join(out))
+PY
+}
+
+# update_chart <dest> <version> <app> <tag> [<app> <tag> ...]: this tree's chart
+# at another version, with those apps re-pinned to a tag. It is written into
+# $WORK, so the scenario adds no file to the checkout, and it is published to
+# the same registry the tree's own release went to.
+update_chart() {
+  local dest=$1 version=$2
+  shift 2
+  rm -rf "$dest"
+  cp -R charts/s5n "$dest"
+  sed -i "s/^version: .*/version: ${version}/" "$dest/Chart.yaml"
+  while [ "$#" -gt 0 ]; do
+    repin_variant "$dest/variants.yaml" "$1" "$2"
+    shift 2
+  done
+  helm package "$dest" --destination "$WORK/charts" >/dev/null
+  helm push "$WORK/charts/s5n-${version}.tgz" "oci://127.0.0.1:${REGISTRY_PORT}/charts" --plain-http >/dev/null
+  echo "  published s5n ${version}"
+}
+
+# pod_image <pod>: the image reference the pod's app container runs.
+pod_image() {
+  $K -n "$NS" get pod "$1" -o jsonpath='{.spec.containers[0].image}' 2>/dev/null || true
+}
+
+# wait_image_ready <pod> <image>: a deadline, never a bare sleep. The step that
+# puts an app back re-renders the release and the StatefulSet replaces the pod,
+# so both the image and the readiness arrive after the command that asked.
+wait_image_ready() {
+  local pod=$1 want=$2 got="" ready="" i
+  for i in $(seq 1 150); do
+    got=$(pod_image "$pod") || true
+    ready=$($K -n "$NS" get pod "$pod" -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}' 2>/dev/null) || true
+    if [ "$got" = "$want" ] && [ "$ready" = True ]; then
+      echo "  ${pod} ${got} (${ready})"
+      return 0
+    fi
+    sleep 2
+  done
+  echo "  ${pod}: image ${got:-none}, Ready ${ready:-none}"
+  return 1
+}
+
+# helm_chart_version: the chart version Helm has deployed, as "0.4.1".
+helm_chart_version() {
+  $HELM list -n "$NS" -o json |
+    python3 -c 'import json,sys; r=json.load(sys.stdin); print(r[0]["chart"].split("-",1)[1] if r else "")'
+}
+
+# holds_assert <config root> <app> held|gone <tag> <digest>: the box's own hold
+# file, read the way box reads it. gone means no hold for the app, and no file
+# at all is the same answer.
+holds_assert() {
+  python3 - "$1" "$2" "$3" "$4" "$5" <<'PY'
+import json, os, sys
+root, app, state, tag, digest = sys.argv[1:6]
+path = os.path.join(root, ".box", "holds.json")
+if not os.path.exists(path):
+    if state == "gone":
+        print(f"  {path} is gone: {app} is not held")
+        sys.exit(0)
+    sys.exit(f"no hold file at {path}: {app} is not held")
+holds = json.load(open(path)).get("holds") or []
+mine = [h for h in holds if h.get("app") == app]
+if state == "gone":
+    if mine:
+        sys.exit(f"{path} still holds {app}: {mine}")
+    print(f"  {path} names no hold for {app}")
+    sys.exit(0)
+if len(mine) != 1:
+    sys.exit(f"{path} names {app} {len(mine)} times, want once: {holds}")
+h = mine[0]
+if h["at"].get("tag") != tag or (h["at"].get("digest") or "") != digest:
+    sys.exit(f"{app}'s hold is at {h['at']}, want {tag}@{digest}")
+if h.get("by") != "update":
+    sys.exit(f"{app}'s hold was written by {h.get('by')!r}, want 'update'")
+print(f"  {path}: {app} held at {tag}@{digest}, avoiding {h['avoiding'].get('tag')}")
+PY
+}
+
+update_box() {
+  # ---- release A ------------------------------------------------------------
+  # The tree's chart as it is, installed the way every scenario installs one.
+  log "box bootstrap: the platform layer, then root's first install (release A, ${CHART_VERSION})"
+  if bootstrap "$WORK/bootstrap1.txt"; then
+    cat "$WORK/bootstrap1.txt"
+  else
+    cat "$WORK/bootstrap1.txt"; fail=1; return 0
+  fi
+  grep -qF "chart: s5n ${CHART_VERSION} (${CHART_REPO}:${CHART_VERSION})" "$WORK/bootstrap1.txt" ||
+    { echo "box did not pull ${CHART_REPO}:${CHART_VERSION}"; fail=1; }
+  grep -q "^wiring ok" "$WORK/bootstrap1.txt" ||
+    { echo "box did not report a healthy receipt"; fail=1; }
+  [ "$fail" = 0 ] || return 0
+
+  # ---- the marker, and what both apps run before the update ------------------
+  log "sonarr's config gets a marker only the snapshot can bring back"
+  sonarr_image=$(pod_image sonarr-0) || true
+  prowlarr_image=$(pod_image prowlarr-0) || true
+  if [ -z "$sonarr_image" ] || [ -z "$prowlarr_image" ]; then
+    echo "sonarr-0/prowlarr-0 do not say what they run: '${sonarr_image}' '${prowlarr_image}'"
+    fail=1; return 0
+  fi
+  echo "  sonarr runs ${sonarr_image}"
+  echo "  prowlarr runs ${prowlarr_image}"
+  # Written through the pod, so the file the failing image overwrites is the
+  # file box copies: the same tree, seen from the seedbox's side.
+  $K -n "$NS" exec sonarr-0 -c sonarr -- /bin/sh -c "
+    set -eu
+    grep -qF '$MARKER' /config/config.xml && exit 0
+    sed -i 's#</Config>#    $MARKER\n</Config>#' /config/config.xml
+    grep -qF '$MARKER' /config/config.xml" ||
+    { echo "could not put the marker into sonarr's config through the pod"; fail=1; return 0; }
+  grep -qF "$MARKER" "$CONFIG_PATH/sonarr/config.xml" ||
+    { echo "the marker the pod wrote is not in ${CONFIG_PATH}/sonarr/config.xml: the pod's /config is not the tree box copies"; fail=1; return 0; }
+
+  # ---- release B ------------------------------------------------------------
+  log "release B: sonarr moves to an image that cannot start, prowlarr to another tag"
+  release_b=$(next_patch "$CHART_VERSION") || true
+  release_c=$(next_patch "$release_b") || true
+  sonarr_pin=$(variant_pin sonarr) || true
+  prowlarr_pin=$(variant_pin prowlarr) || true
+  if [ -z "$release_b" ] || [ -z "$release_c" ] || [ -z "$sonarr_pin" ] || [ -z "$prowlarr_pin" ]; then
+    echo "could not read the next two releases ('${release_b}', '${release_c}') or the chart's sonarr/prowlarr pins ('${sonarr_pin}', '${prowlarr_pin}')"
+    fail=1; return 0
+  fi
+  read -r sonarr_repo sonarr_tag sonarr_digest <<<"$sonarr_pin"
+  read -r prowlarr_repo prowlarr_tag prowlarr_digest <<<"$prowlarr_pin"
+
+  # The image release B ships for sonarr: a shell that rewrites config.xml and
+  # exits, so the kubelet restarts it until box calls it a crashloop. Built
+  # here from a pinned busybox rather than published, and loaded into the node
+  # because a kind node cannot reach this host's registry.
+  mkdir -p "$WORK/image"
+  cat >"$WORK/image/Dockerfile" <<EOF
+# busybox ${BUSYBOX_VERSION}, the base of the image release B ships for sonarr.
+FROM ${BUSYBOX_IMAGE}
+COPY entrypoint.sh /entrypoint.sh
+ENTRYPOINT ["/bin/sh", "/entrypoint.sh"]
+EOF
+  cat >"$WORK/image/entrypoint.sh" <<EOF
+#!/bin/sh
+# What a migration that rewrote its config and then could not serve looks like
+# from outside. config.xml is a file the catalog says an upgrade can rewrite, so
+# the copy box took before the step is what holds the state this replaced.
+set -eu
+printf '%s\n' '<Config><System><Version>${BROKEN_WROTE}</Version></System></Config>' >/config/config.xml
+echo "s5n e2e: this image cannot start" >&2
+exit 1
+EOF
+  docker build -q -t "${sonarr_repo}:${BROKEN_TAG}" "$WORK/image" >/dev/null
+  $KIND load docker-image --name "$CLUSTER" "${sonarr_repo}:${BROKEN_TAG}" >/dev/null
+
+  # The app the same step moves and box must leave alone: prowlarr's own image,
+  # retagged, so the release names a tag this cluster already runs.
+  docker pull -q "${prowlarr_repo}:${prowlarr_tag}@${prowlarr_digest}" >/dev/null
+  docker tag "${prowlarr_repo}:${prowlarr_tag}" "${prowlarr_repo}:${MOVED_TAG}"
+  $KIND load docker-image --name "$CLUSTER" "${prowlarr_repo}:${MOVED_TAG}" >/dev/null
+
+  update_chart "$WORK/chart-b" "$release_b" sonarr "$BROKEN_TAG" prowlarr "$MOVED_TAG"
+
+  # ---- the step -------------------------------------------------------------
+  log "box update: the step moves both apps, and box puts sonarr back on the image it ran"
+  update_b_started=$(date -u +%Y-%m-%dT%H:%M:%SZ) || true
+  if "$WORK/box" update --yes --chart-repo "$CHART_REPO" --record "$WORK/cluster.yaml" \
+    --grant "$WORK/grant.yaml" --values "$WORK/values.yaml" --paths-in-node \
+    --kubeconfig "$WORK/kubeconfig" >"$WORK/update-b.txt" 2>&1; then
+    cat "$WORK/update-b.txt"
+  else
+    cat "$WORK/update-b.txt"; fail=1; return 0
+  fi
+
+  # What box says, in the words the step-back and the hold write. The first
+  # sentence is the announcement before anything stops; the second is what it
+  # restored and what the app is now waiting on.
+  grep -Eq "sonarr exited [0-9]+ times on ${BROKEN_TAG}: rolling it back to ${sonarr_tag}" "$WORK/update-b.txt" ||
+    { echo "box did not announce rolling sonarr back from ${BROKEN_TAG} to ${sonarr_tag}:"; grep -i "sonarr" "$WORK/update-b.txt" | head -5; fail=1; }
+  grep -qF "sonarr is back on ${sonarr_tag} with its snapshot from" "$WORK/update-b.txt" ||
+    { echo "box did not say sonarr was back on ${sonarr_tag} with its copy:"; grep -i "back on" "$WORK/update-b.txt" | head -5; fail=1; }
+
+  # What it recorded: the step passed, and the app it put back is in the record
+  # `box status` reads. update.json sits beside the cluster record, which is
+  # what --record names.
+  python3 - "$WORK/update.json" "$release_b" <<'PY' || fail=1
+import json, sys
+path, want = sys.argv[1], sys.argv[2]
+state = json.load(open(path))
+step = state.get("lastStep") or {}
+if step.get("to") != want:
+    sys.exit(f"{path}: the last step went to {step.get('to')!r}, want {want!r}")
+if step.get("outcome") != "ok":
+    sys.exit(f"{path}: the last step ended {step.get('outcome')!r}: {step.get('error')}")
+if step.get("rolledBack") != ["sonarr"]:
+    sys.exit(f"{path}: rolledBack = {step.get('rolledBack')!r}, want ['sonarr']")
+print(f"  update.json: {step.get('from')} -> {step.get('to')} {step.get('outcome')}, rolled back {step.get('rolledBack')}")
+PY
+
+  # Sonarr is on the image release A ran and ready: the pods the failing image
+  # left behind are gone, so this is the old image serving again.
+  wait_image_ready sonarr-0 "$sonarr_image" ||
+    { echo "sonarr-0 is not ready on ${sonarr_image} after the step (it runs $(pod_image sonarr-0 || true))"; fail=1; }
+
+  # Its config is the copy's: the marker exactly once, and nothing the failing
+  # image wrote into the same file.
+  marks=$(grep -cF "$MARKER" "$CONFIG_PATH/sonarr/config.xml" 2>/dev/null) || true
+  [ "$marks" = 1 ] ||
+    { echo "sonarr's config holds the marker ${marks:-no} times, want once: $(grep -c '' "$CONFIG_PATH/sonarr/config.xml" 2>/dev/null || echo unreadable) lines"; fail=1; }
+  if grep -qF "$BROKEN_WROTE" "$CONFIG_PATH/sonarr/config.xml"; then
+    echo "sonarr's config still holds what the failing image wrote: $(grep -F "$BROKEN_WROTE" "$CONFIG_PATH/sonarr/config.xml")"
+    fail=1
+  fi
+
+  # The other app the step moved stayed moved: only the app that kept exiting
+  # was put back.
+  wait_image_ready prowlarr-0 "${prowlarr_repo}:${MOVED_TAG}" ||
+    { echo "prowlarr-0 is not ready on ${prowlarr_repo}:${MOVED_TAG} (it runs $(pod_image prowlarr-0 || true)): the step's other app must stay moved"; fail=1; }
+
+  # The hold: beside the snapshots, under the config root, naming the app and
+  # the image it ran.
+  holds_assert "$CONFIG_PATH" sonarr held "$sonarr_tag" "$sonarr_digest" || fail=1
+
+  # The release itself was not rolled back: Helm is on B.
+  release_chart=$(helm_chart_version) || true
+  [ "$release_chart" = "$release_b" ] ||
+    { echo "the release is on ${release_chart}, want ${release_b}: the step moves the app, not the release"; fail=1; }
+
+  # The wiring ran once, and the run is the rollback's: the step's first apply
+  # is with the chart's hooks off, so the Job Helm created can only be the one
+  # its hooks-on apply made, whose start is after this step began. The times are
+  # printed because the order of the Job and the restore is the thing the step
+  # exists to get right.
+  job_start=$($K -n "$NS" get job s5n-wiring -o jsonpath='{.status.startTime}' 2>/dev/null) || true
+  job_done=$($K -n "$NS" get job s5n-wiring -o jsonpath='{.status.completionTime}' 2>/dev/null) || true
+  pod_start=$($K -n "$NS" get pod sonarr-0 -o jsonpath='{.metadata.creationTimestamp}' 2>/dev/null) || true
+  [ -n "$job_start" ] && [ -n "$job_done" ] ||
+    { echo "the step left no completed wiring Job (start '${job_start}', completion '${job_done}'): the hooks-on apply never ran it"; fail=1; }
+  python3 - "$job_start" "$job_done" "$pod_start" "$update_b_started" <<'PY' || fail=1
+import sys
+from datetime import datetime
+job_start, job_done, pod_start, step = sys.argv[1:5]
+parse = lambda s: datetime.fromisoformat(s.replace("Z", "+00:00"))
+if parse(job_start) < parse(step):
+    sys.exit(f"the wiring Job started {job_start}, before this step began at {step}: it is bootstrap's run, not the step's")
+print(f"  wiring Job {job_start} -> {job_done}; sonarr-0's pod was created {pod_start}")
+PY
+
+  # ---- a re-apply keeps the hold -------------------------------------------
+  # The same release, applied by hand. The hold is box's answer for this app, so
+  # the chart renders the old image for it -- and because that is exactly what
+  # the release is already running, the apply has nothing to write. `box apply`
+  # overlays a hold exactly as a step does.
+  log "box apply: sonarr stays where the rollback left it"
+  if "$WORK/box" apply --yes --chart-repo "$CHART_REPO" --chart-version "$release_b" \
+    --grant "$WORK/grant.yaml" --values "$WORK/values.yaml" --paths-in-node \
+    --kubeconfig "$WORK/kubeconfig" >"$WORK/apply-held.txt" 2>&1; then
+    cat "$WORK/apply-held.txt"
+  else
+    cat "$WORK/apply-held.txt"; fail=1; return 0
+  fi
+  grep -qF "nothing to change" "$WORK/apply-held.txt" ||
+    { echo "the re-apply wrote the release again: the hold did not render the image sonarr runs:"; grep -v "nothing to change" "$WORK/apply-held.txt" | head -5; fail=1; }
+  wait_image_ready sonarr-0 "$sonarr_image" ||
+    { echo "sonarr-0 left ${sonarr_image} on a re-apply (it runs $(pod_image sonarr-0 || true))"; fail=1; }
+  holds_assert "$CONFIG_PATH" sonarr held "$sonarr_tag" "$sonarr_digest" || fail=1
+
+  # ---- release C: the hold lapses ------------------------------------------
+  # Sonarr's next image works, and it is the image it ran in release A under
+  # another tag: what the release pins is no longer what the rollback avoided,
+  # so the hold is over and the app moves with the release again.
+  log "release C: sonarr's image moves again, so the hold lapses"
+  docker tag "${sonarr_repo}:${sonarr_tag}" "${sonarr_repo}:${RESTORED_TAG}"
+  $KIND load docker-image --name "$CLUSTER" "${sonarr_repo}:${RESTORED_TAG}" >/dev/null
+  update_chart "$WORK/chart-c" "$release_c" sonarr "$RESTORED_TAG" prowlarr "$MOVED_TAG"
+  if "$WORK/box" update --yes --chart-repo "$CHART_REPO" --record "$WORK/cluster.yaml" \
+    --grant "$WORK/grant.yaml" --values "$WORK/values.yaml" --paths-in-node \
+    --kubeconfig "$WORK/kubeconfig" >"$WORK/update-c.txt" 2>&1; then
+    cat "$WORK/update-c.txt"
+  else
+    cat "$WORK/update-c.txt"; fail=1; return 0
+  fi
+  grep -qF "sonarr moves with the release again: s5n ${release_c} pins ${RESTORED_TAG}, not ${BROKEN_TAG}" "$WORK/update-c.txt" ||
+    { echo "box did not say the hold lapsed when ${release_c} pinned ${RESTORED_TAG}:"; grep -i "moves with the release again" "$WORK/update-c.txt" | head -3; fail=1; }
+  wait_image_ready sonarr-0 "${sonarr_repo}:${RESTORED_TAG}" ||
+    { echo "sonarr-0 is not ready on ${sonarr_repo}:${RESTORED_TAG} (it runs $(pod_image sonarr-0 || true)): the app must move with the release"; fail=1; }
+  holds_assert "$CONFIG_PATH" sonarr gone "" "" || fail=1
+  release_chart=$(helm_chart_version) || true
+  [ "$release_chart" = "$release_c" ] ||
+    { echo "the release is on ${release_chart}, want ${release_c}"; fail=1; }
+
+  # ---- box rollback sonarr --pin -------------------------------------------
+  # The newest copy is the one the C step took before it moved sonarr: its
+  # manifest names the image the app ran (release A's) and the one the step
+  # moved it to. --pin writes that image into the values file, so the app stays
+  # there until the operator takes the pin out, and no hold is left behind.
+  log "box rollback sonarr --pin: the newest copy, and a pin where a hold would be"
+  if "$WORK/box" rollback sonarr --pin --yes --chart-repo "$CHART_REPO" \
+    --grant "$WORK/grant.yaml" --values "$WORK/values.yaml" --paths-in-node \
+    --kubeconfig "$WORK/kubeconfig" >"$WORK/rollback.txt" 2>&1; then
+    cat "$WORK/rollback.txt"
+  else
+    cat "$WORK/rollback.txt"; fail=1; return 0
+  fi
+  grep -Eq "sonarr's newest snapshot is [0-9]+ minutes? old \(taken .*, before ${release_b} -> ${release_c}\)" "$WORK/rollback.txt" ||
+    { echo "box did not say how old the copy is and which step took it:"; grep -i "newest snapshot" "$WORK/rollback.txt" | head -3; fail=1; }
+  grep -qF "sonarr is on ${sonarr_tag}, pinned in " "$WORK/rollback.txt" ||
+    { echo "box did not report sonarr pinned:"; grep -i "pinned" "$WORK/rollback.txt" | head -3; fail=1; }
+  wait_image_ready sonarr-0 "$sonarr_image" ||
+    { echo "sonarr-0 is not ready on ${sonarr_image} after the rollback (it runs $(pod_image sonarr-0 || true))"; fail=1; }
+
+  # An ordinary pin in the operator's file: the tag and digest the snapshot
+  # recorded, under the app's image key, and no hold where one would be.
+  python3 - "$WORK/values.yaml" "$sonarr_tag" "$sonarr_digest" <<'PY' || fail=1
+import sys
+path, tag, digest = sys.argv[1:4]
+lines = open(path).read().splitlines()
+start = next((i for i, line in enumerate(lines) if line.strip() == "sonarr:"), None)
+if start is None:
+    sys.exit(f"{path} names no sonarr: {lines}")
+block = lines[start:start + 6]
+if not any("image:" in line for line in block):
+    sys.exit(f"{path}: sonarr has no image block: {block}")
+for want in (tag, digest):
+    if not any(want in line for line in block):
+        sys.exit(f"{path}: sonarr's image block does not carry {want}: {block}")
+print(f"  values: apps.sonarr.image carries {tag} and {digest}")
+PY
+  holds_assert "$CONFIG_PATH" sonarr gone "" "" || fail=1
+}
+
 # box is the whole interface: a client-go/klog line such as
 # "I1107 ... warnings.go:107] ..." must never appear in what the operator reads.
 no_klog() {
-  for f in "$WORK"/apply*.txt "$WORK"/bootstrap*.txt; do
+  for f in "$WORK"/apply*.txt "$WORK"/bootstrap*.txt "$WORK"/update-*.txt "$WORK"/rollback.txt; do
     [ -e "$f" ] || continue
     if grep -Eq '^[IWE][0-9]{4} ' "$f"; then
       echo "client-go/klog noise in $(basename "$f"):"
@@ -4011,6 +4489,8 @@ if [ "$SCENARIO" = fresh ]; then
   fresh
 elif [ "$SCENARIO" = preinstalled ]; then
   preinstalled
+elif [ "$SCENARIO" = update ]; then
+  update_box
 else
   foreign_gateway
 fi
@@ -4027,5 +4507,11 @@ fi
 elapsed=$(( $(date +%s) - START ))
 if [ "$fail" = 0 ]; then log "PASS (${SCENARIO})"; else log "FAIL (${SCENARIO})"; fi
 echo "wall time (${SCENARIO}): ${elapsed}s"
+# The update scenario's volume roots are a host directory the seedbox's user
+# writes into, so what the apps left there is not this user's to remove: the
+# tree goes as the node's root, which is also why it goes before the node does.
+if [ "$SCENARIO" = update ] && [ "$KEEP" != --keep ]; then
+  docker exec "${CLUSTER}-control-plane" rm -rf "$WORK/hostfs" >/dev/null 2>&1 || true
+fi
 [ "$KEEP" = --keep ] || $KIND delete cluster --name "$CLUSTER"
 exit "$fail"

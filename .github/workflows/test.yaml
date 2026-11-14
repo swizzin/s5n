@@ -304,10 +304,13 @@ jobs:
       - run: hack/e2e-kind.sh
 
   # The other half of the acceptance test: the same install done through
-  # `box bootstrap` instead of Helm, on three kind clusters -- fresh (box
+  # `box bootstrap` instead of Helm, on four kind clusters -- fresh (box
   # installs the whole platform, then Pebble proves HTTP-01 through the
-  # Gateway), preinstalled (an address layer box must not touch) and
-  # foreign-gateway (a Gateway implementation box refuses, writing nothing).
+  # Gateway), preinstalled (an address layer box must not touch),
+  # foreign-gateway (a Gateway implementation box refuses, writing nothing) and
+  # update (`box update` rolling a crashing app back, keeping the rest of the
+  # release where the step put it, then a hold that lapses and a `box rollback`
+  # that pins).
   # It is the only test that installs cert-manager and Authelia, and the
   # platform pins' patch automerge rests on it. It never installs k0s: kind
   # stands in for the cluster, so k0s bumps are not automerged.
@@ -318,15 +321,18 @@ jobs:
   # is why a maintainer runs them one after another by hand.)
   #
   # One job per scenario, because a scenario owns its own kind cluster, registry
-  # container and work directory (hack/e2e-box.sh): on one runner the three are
-  # a queue and the job costs their sum, 24.4 minutes. fail-fast is off so one
-  # scenario's failure does not hide the other two: they disagree about what is
-  # on the cluster before box runs, and a maintainer wants all three verdicts
+  # container and work directory (hack/e2e-box.sh): on one runner the four are
+  # a queue and the job costs their sum. fail-fast is off so one
+  # scenario's failure does not hide the others: they disagree about what is
+  # on the cluster before box runs, and a maintainer wants every verdict
   # from one push.
   #
   # Each timeout is twice the scenario's observed time rounded up, and covers
   # the checkout, the tool installs and the cluster it builds before asserting:
-  # fresh 10.3 min -> 25, preinstalled 11.1 -> 25, foreign-gateway 1.0 -> 15.
+  # fresh 10.3 min -> 25, preinstalled 11.1 -> 25, foreign-gateway 1.0 -> 15,
+  # update 5.3 -> 15 (three install-and-update rounds of the same stack --
+  # bootstrap, then two releases -- one of them spent waiting for a crashloop
+  # box has to see three exits of).
   e2e-box:
     needs: [changes]
     if: needs.changes.outputs.e2e == 'true'
@@ -340,6 +346,8 @@ jobs:
           - scenario: preinstalled
             timeout: 25
           - scenario: foreign-gateway
+            timeout: 15
+          - scenario: update
             timeout: 15
     runs-on: ubuntu-latest
     timeout-minutes: ${{ matrix.timeout }}
