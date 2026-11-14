@@ -199,7 +199,9 @@ type Updater struct {
 	Say say.Reporter
 
 	// HealthWait bounds the wait for the release and its StatefulSets to be
-	// ready after a step. Zero means five minutes.
+	// ready after a step. Zero means thirty-five minutes: every app gets
+	// thirty minutes to open its port before the kubelet restarts it, so the
+	// gate has to outlast that budget.
 	HealthWait time.Duration
 	// SettleWait bounds the wait for scaled-down pods to go. Zero means five
 	// minutes.
@@ -228,7 +230,12 @@ func (u *Updater) healthWait() time.Duration {
 	if u.HealthWait > 0 {
 		return u.HealthWait
 	}
-	return 5 * time.Minute
+	// The chart gives every app thirty minutes to open its port (the
+	// startupProbe's 360 failures of 5s), so the kubelet does not restart a
+	// migration that is still running. The gate has to outlast that budget
+	// or it would stop an update over a migration the kubelet would have let
+	// finish; the margin covers the poll and the last probe.
+	return 35 * time.Minute
 }
 
 func (u *Updater) settleWait() time.Duration {
