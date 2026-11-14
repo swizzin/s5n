@@ -1004,17 +1004,31 @@ busy and idle.
 
 **Snapshot and rollback (decided for 0.5, mechanism proposed).** An unattended update
 runs over forward-only database migrations, so 0.5 carries a narrow rollback ahead of
-`box backup`. It covers one app over one update step, not disaster recovery.
+`box backup`. It covers one app over one image change box makes, in an `update` step or
+an `apply`, not disaster recovery. A restart that pulls new bytes under a mutable tag is
+not a change box made, and nothing snapshots it.
 
 - **Only what moves is snapshotted.** A database migrates when its image changes, so a
-  step snapshots the apps whose pinned image differs between the installed release's
-  `variants.yaml` and the target's. A step that moves no image takes no snapshot.
+  step snapshots the apps whose rendered image differs: the installed release under the
+  installed values against what is about to be applied. That is the same comparison for
+  `update` (the chart's pins move) and `apply` (a values pin moves, a tag or a digest;
+  decided). A pin that is a tag alone moves when the tag does. A step that moves no image
+  takes no snapshot. An `apply`'s copy is named like a step's, with the installed release
+  on both sides (`<v>-<v>-<time>/`), so rollback finds the newest copy either way. An
+  `apply` has no automatic rollback (decided): whoever runs it is there to run
+  `box rollback`. Whether an app moves is read from what is deployed (its
+  StatefulSet's image) against what this run renders, never from the values file. An
+  app box can't name the exact bytes of (a tag whose pods report no digest, or
+  instances that disagree) moves without a snapshot, and the plan says why before the
+  confirm; an apply is never refused for it, because the apply that pins a digest is
+  the way out (proposed).
 - **What is copied is the chart's to say.** Each catalog entry may name a `snapshot:`
   list of globs relative to the app's config directory: the databases and the files
   that point at them (`*.db`, `*.db-wal`, `config.xml`), never caches, logs, media
   covers or Plex's metadata bundles. An app without the key has nothing to restore.
-- **An app a hand pin holds doesn't move.** Its image is the one values pin, whatever
-  the chart's pin did, so a step neither stops it nor copies it.
+- **An app a hand pin holds doesn't move in an update.** Its image is the one values
+  pin, whatever the chart's pin did, so an `update` step neither stops it nor copies it.
+  An `apply` that changes the pin moves it like any other image change.
 - **Snapshots can be turned off for an app (decided; where the switch lives is
   proposed).** A copy costs disk, and the app is down while it is made. With snapshots
   off for an app, a step that moves it takes no copy of it and the plan says so. That
@@ -1028,9 +1042,10 @@ runs over forward-only database migrations, so 0.5 carries a narrow rollback ahe
   proposed).** The copy and the image that wrote it belong together, and nothing else
   on the box remembers the image once the release has moved. Proposed: each snapshot's
   manifest names the image the app ran when it was copied and the image the step moved
-  it to, both by digest. A rollback reads the first to know what to hold the app at
-  and the second to know what the hold avoids, whether box rolls back in the step or
-  the user does a week later.
+  it to, both by digest. For an app pinned to a tag alone the chart names no digest, so
+  box reads the one the pod ran from its `imageID` (proposed). A rollback reads the
+  first to know what to hold the app at and the second to know what the hold avoids,
+  whether box rolls back in the step or the user does a week later.
 - **A rollback is per app: its snapshot and the image it had (decided).** Rolling an
   app back stops it, waits until its pods are gone, restores its snapshot (a file the
   globs match that the snapshot lacks, such as a new `-wal`, is removed) and holds the
@@ -1074,6 +1089,16 @@ runs over forward-only database migrations, so 0.5 carries a narrow rollback ahe
   values instead, which holds the app until the user removes it, like any hand pin. A
   pin is an override on whatever release is installed, so the release keeps updating
   around it.
+- **A rollback is exact, and it never moves a user's pin forward (decided).** It puts the
+  app on the tag and digest it ran, never a tag alone, so it can't drift. For an app the
+  values pin, a hold can't apply (a pin outranks a hold), so `box rollback` refuses until
+  the user passes `--pin`, which rewrites their pin to the exact image. It stays there
+  until the user changes it: box doesn't
+  know what "next" means for a version someone chose, and won't turn their choice into
+  its own. `status` names the way out ("radarr: pinned to 6.1@sha256:… by a rollback; the
+  chart ships 6.3, remove the pin to follow it"). Where the chart moved the app, the hold
+  is what carries it past the failed version: the next release that pins another digest,
+  a same-tag rebuild included, lapses it and the app tries again, once per release.
 - **A failure box doesn't roll back stops the update (decided).** A failed apply or
   wiring gate, a failing app with snapshots off, a rollback that fails itself: box
   leaves things where they are, records the failed release and says where the box is.
