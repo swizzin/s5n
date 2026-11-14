@@ -965,6 +965,13 @@ runs over forward-only database migrations, so 0.5 carries a narrow rollback ahe
   change does anyway, so the copy is taken with no writer. It goes under the config
   root in `.box/snapshots/<from>-<to>-<time>/<app>/`, on the same filesystem as what it
   copies.
+- **A snapshot records the image it was taken under (decided; the fields are
+  proposed).** The copy and the image that wrote it belong together, and nothing else
+  on the box remembers the image once the release has moved. Proposed: each snapshot's
+  manifest names the image the app ran when it was copied and the image the step moved
+  it to, both by digest. A rollback reads the first to know what to hold the app at
+  and the second to know what the hold avoids, whether box rolls back in the step or
+  the user does a week later.
 - **A rollback is per app: its snapshot and the image it had (decided).** Rolling an
   app back stops it, waits until its pods are gone, restores its snapshot (a file the
   globs match that the snapshot lacks, such as a new `-wal`, is removed) and holds the
