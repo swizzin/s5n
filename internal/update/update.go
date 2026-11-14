@@ -270,6 +270,10 @@ func (u *Updater) Run(ctx context.Context, opts Options) (Result, error) {
 		if err != nil {
 			return res, err
 		}
+		if snaps == nil {
+			return res, fmt.Errorf("%s needs to snapshot %s to go to %s and this box cannot: update with a box that has snapshot support",
+				res.Name, movingText(res.Steps), res.Target)
+		}
 	}
 	for _, step := range res.Steps {
 		if err := u.take(ctx, rel, cluster, snaps, &res, step, opts.Apply); err != nil {
@@ -348,6 +352,21 @@ func (u *Updater) plan(ctx context.Context, opts Options) (Result, error) {
 	res.Target = target
 	res.Skipped = skipped
 	res.Skips = skips
+
+	// A target the operator named can be a release the listing leaves out --
+	// a prerelease, which is only ever taken when it is named. Its floors are
+	// the chart's own annotations, so it is planned with them.
+	if !published(releases, target) {
+		chart, err := u.Charts.Load(ctx, release.ChartRef{Repo: repo, Version: target})
+		if err != nil {
+			return res, err
+		}
+		releases = append(releases, release.Published{
+			Version:     target,
+			MinBox:      strings.TrimSpace(chart.Annotations[release.MinBoxAnnotation]),
+			UpgradeFrom: strings.TrimSpace(chart.Annotations[release.UpgradeFromAnnotation]),
+		})
+	}
 
 	cmp, err := compareVersions(installed.ChartVersion, target)
 	if err != nil {
@@ -484,7 +503,7 @@ func (u *Updater) reportPlan(res Result, check bool) {
 	// to do: "s5n 0.6.0 is out and needs a newer box" is the whole reason a
 	// user reads the output of a current box.
 	for _, skip := range res.Skips {
-		r.Warn(fmt.Sprintf("%s %s is out and needs a newer box (box %s)", res.Name, skip.Version, skip.MinBox))
+		r.Warn(fmt.Sprintf("%s %s is out and needs a newer box: install box %s or newer", res.Name, skip.Version, skip.MinBox))
 	}
 	for _, bad := range res.Skipped {
 		r.Warn(fmt.Sprintf("%s %s failed to update on this box before; box is not taking it again until a newer release is out", res.Name, bad))
@@ -699,6 +718,16 @@ func (u *Updater) waitHealthy(ctx context.Context, rel Release, cluster Cluster)
 		return fmt.Errorf("the release is not deployed and healthy after %s", u.healthWait())
 	}
 	return nil
+}
+
+// published reports whether the listing names a version.
+func published(releases []release.Published, version string) bool {
+	for _, r := range releases {
+		if versionsEqual(r.Version, version) {
+			return true
+		}
+	}
+	return false
 }
 
 // recordOK records a passing step: the box is on step.To, and every release it

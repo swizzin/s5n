@@ -222,8 +222,9 @@ func (o *OCIChart) open(ctx context.Context, ref ChartRef) (*puller, error) {
 	return &puller{repo: repo, base: base, client: client, env: env}, nil
 }
 
-// chart is one version's chart, pulled at most once per OCIChart. A failed pull
-// is not remembered: the next call asks the registry again.
+// chart is one version's chart, pulled at most once per OCIChart. The pull's
+// context rides on the session's transport (see puller), not an argument. A
+// failed pull is not remembered: the next call asks the registry again.
 func (o *OCIChart) chart(p *puller, version string) (Chart, error) {
 	o.mu.Lock()
 	chart, ok := o.pulled[version]

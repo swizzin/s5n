@@ -50,9 +50,12 @@ func planSteps(installed, target, boxVersion string, releases []release.Publishe
 	byVersion := make(map[string]release.Published, len(releases))
 	for _, r := range releases {
 		v, err := semver.NewVersion(r.Version)
-		if err != nil || v.Prerelease() != "" {
+		if err != nil {
 			continue
 		}
+		// Prereleases stay in the index: a prerelease is not a step box
+		// takes unasked, but one the operator named with --chart-version is
+		// the target, and the target has to be found here.
 		byVersion[v.String()] = r
 	}
 

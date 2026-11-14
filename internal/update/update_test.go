@@ -639,6 +639,31 @@ func TestABoxWithoutSnapshotSupportRefusesBeforeItStopsAnything(t *testing.T) {
 	}
 }
 
+// TestAPinnedPrereleaseIsTheTarget: prereleases are not releases box takes
+// unasked, so the listing leaves them out; naming one with --chart-version is
+// the escape hatch, and the plan has to carry its floors even though it is not
+// on the published list.
+func TestAPinnedPrereleaseIsTheTarget(t *testing.T) {
+	h := newHarness(t)
+	h.charts.publish("0.4.0", "0.4.0", "0.4.0", digestA)
+	h.charts.publish("0.5.0-rc.1", "0.4.0", "0.4.0", digestB)
+	// What OCIChart.Releases really returns: no prereleases.
+	h.charts.releases = h.charts.releases[:1]
+
+	res, err := h.u.Run(context.Background(), Options{
+		Apply: release.Options{GrantPath: h.grant, ValuesPath: h.values, ChartVersion: "0.5.0-rc.1"},
+	})
+	if err != nil {
+		t.Fatalf("update to a pinned prerelease: %v\n%s", err, h.out)
+	}
+	if res.Target != "0.5.0-rc.1" || len(res.Steps) != 1 || res.Steps[0].To != "0.5.0-rc.1" {
+		t.Fatalf("result = %+v, want one step to the pinned prerelease", res)
+	}
+	if len(h.app.calls) != 1 || h.app.calls[0].ChartVersion != "0.5.0-rc.1" {
+		t.Fatalf("applies = %+v, want the prerelease installed", h.app.calls)
+	}
+}
+
 func TestAChartVersionOlderThanTheBoxIsRefused(t *testing.T) {
 	h := newHarness(t)
 	h.charts.publish("0.4.0", "0.4.0", "0.4.0", digestA)
