@@ -170,3 +170,180 @@ func assertNoLeftovers(t *testing.T, path string) {
 		t.Fatalf("temporary files left behind: %v", leftovers)
 	}
 }
+
+// openRoot opens dir as the tree WriteIn writes inside, closed with the test.
+func openRoot(t *testing.T, dir string) *os.Root {
+	t.Helper()
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		t.Fatalf("open root: %v", err)
+	}
+	t.Cleanup(func() { _ = root.Close() })
+	return root
+}
+
+// WriteIn is Write for a target inside a tree, and writes exactly what Write
+// writes: the new bytes, the caller's mode, and no temporary file left behind.
+func TestWriteInReplacesTheFileInTheTree(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, ".box", "holds.json")
+	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(`{"holds":[]}`), 0o640); err != nil {
+		t.Fatal(err)
+	}
+
+	root := openRoot(t, dir)
+	if err := WriteIn(root, ".box/holds.json", []byte(`{"holds":[{"app":"sonarr"}]}`), 0o640); err != nil {
+		t.Fatalf("WriteIn: %v", err)
+	}
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if string(got) != `{"holds":[{"app":"sonarr"}]}` {
+		t.Fatalf("file = %q, want the new bytes", got)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0o640 {
+		t.Fatalf("mode = %o, want 640", info.Mode().Perm())
+	}
+	assertNoLeftovers(t, path)
+}
+
+// A missing directory is refused rather than created: the callers that need one
+// create it with their own mode, exactly as they do for Write.
+func TestWriteInRefusesAMissingDirectory(t *testing.T) {
+	dir := t.TempDir()
+	root := openRoot(t, dir)
+	if err := WriteIn(root, "missing/holds.json", []byte("x"), 0o600); err == nil {
+		t.Fatal("WriteIn succeeded into a directory that is not there")
+	}
+	if _, err := os.Lstat(filepath.Join(dir, "missing")); !os.IsNotExist(err) {
+		t.Fatalf("the refused write created a directory: %v", err)
+	}
+}
+
+// A link where the target goes is replaced, never followed: the write lands on
+// the name inside the tree, and the file the link pointed at is not touched.
+// (Following it would put a snapshot restore's bytes, or a hold, in whichever
+// file the seedbox's user chose.)
+func TestWriteInReplacesALinkRatherThanFollowingIt(t *testing.T) {
+	dir := t.TempDir()
+	outside := t.TempDir()
+	secret := filepath.Join(outside, "secret.json")
+	if err := os.WriteFile(secret, []byte("someone else's file"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(secret, filepath.Join(dir, "holds.json")); err != nil {
+		t.Fatal(err)
+	}
+
+	root := openRoot(t, dir)
+	if err := WriteIn(root, "holds.json", []byte(`{"holds":[]}`), 0o640); err != nil {
+		t.Fatalf("WriteIn: %v", err)
+	}
+	body, err := os.ReadFile(secret)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(body) != "someone else's file" {
+		t.Fatalf("the link's target = %q, want it untouched", body)
+	}
+	info, err := os.Lstat(filepath.Join(dir, "holds.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !info.Mode().IsRegular() {
+		t.Fatalf("holds.json = %s, want the write to have replaced the link", info.Mode())
+	}
+	assertNoLeftovers(t, filepath.Join(dir, "holds.json"))
+}
+
+// A directory that a link points out of the tree is a refusal, and nothing is
+// created on either side: the root names the file it was given, and neither the
+// temporary file nor the target exists afterwards.
+func TestWriteInRefusesADirectoryThatLeavesTheTree(t *testing.T) {
+	dir := t.TempDir()
+	outside := t.TempDir()
+	if err := os.Symlink(outside, filepath.Join(dir, "escape")); err != nil {
+		t.Fatal(err)
+	}
+
+	root := openRoot(t, dir)
+	err := WriteIn(root, "escape/holds.json", []byte("x"), 0o640)
+	if err == nil {
+		t.Fatal("WriteIn wrote through a link out of the tree")
+	}
+	if !strings.Contains(err.Error(), "holds.json") {
+		t.Fatalf("err = %v, want it to name the file", err)
+	}
+	entries, readErr := os.ReadDir(outside)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("the refused write left %d entries outside the tree", len(entries))
+	}
+}
+
+// CopyIn is the stream form, and behaves the same way: the content arrives, the
+// file ends at the caller's mode, and a reader that fails partway leaves the
+// target whole rather than truncated.
+func TestCopyInStreamsTheContent(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "sonarr.db")
+	if err := os.WriteFile(path, []byte("the old database"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	root := openRoot(t, dir)
+	if err := CopyIn(root, "sonarr.db", strings.NewReader("the restored database"), 0o640); err != nil {
+		t.Fatalf("CopyIn: %v", err)
+	}
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "the restored database" {
+		t.Fatalf("file = %q, want the new bytes", got)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0o640 {
+		t.Fatalf("mode = %o, want 640", info.Mode().Perm())
+	}
+	assertNoLeftovers(t, path)
+}
+
+// The failure that matters on a restore: a reader that dies mid-copy leaves the
+// file it was replacing exactly as it was, and nothing of the copy behind.
+func TestFailedCopyInLeavesTheTargetWhole(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "sonarr.db")
+	before := []byte("the old database")
+	if err := os.WriteFile(path, before, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	root := openRoot(t, dir)
+	err := CopyIn(root, "sonarr.db", &failingReader{after: 4}, 0o600)
+	if err == nil {
+		t.Fatal("CopyIn reported success after the reader failed")
+	}
+	if !strings.Contains(err.Error(), "sonarr.db") {
+		t.Fatalf("err = %v, want it to name the file", err)
+	}
+	after, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(after) != string(before) {
+		t.Fatalf("the target changed after a failed copy: %q", after)
+	}
+	assertNoLeftovers(t, path)
+}
