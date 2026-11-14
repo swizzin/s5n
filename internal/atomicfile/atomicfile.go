@@ -1,17 +1,21 @@
 // Package atomicfile writes a file so that a crash mid-write leaves the old
 // one whole.
 //
-// Box writes four kinds of file it cannot afford to half-write: a seedbox's
+// Box writes five kinds of file it cannot afford to half-write: a seedbox's
 // grant and values (where a lost edit is a lost grant), the cluster decision it
-// re-reads on every later run, and the two app configs the image seeds
-// credentials into. The robust version was written for the first case and the
-// other three grew their own: a fixed temporary name, which two runs at once
-// would interleave on, and no fsync, which lets the rename reach the directory
-// before the bytes are durable. This is that write once.
+// re-reads on every later run, the two app configs the image seeds credentials
+// into, and an app's database a failed update is putting back. The robust
+// version was written for the first case and the next three grew their own: a
+// fixed temporary name, which two runs at once would interleave on, and no
+// fsync, which lets the rename reach the directory before the bytes are
+// durable. This is that write once, and Copy is the same write for a file too
+// big to hold in memory.
 package atomicfile
 
 import (
+	"bytes"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -30,6 +34,14 @@ var rename = os.Rename
 // The temporary name is random rather than fixed, so two box runs writing one
 // path cannot meet in the middle of a write.
 func Write(path string, data []byte, mode fs.FileMode) error {
+	return Copy(path, bytes.NewReader(data), mode)
+}
+
+// Copy is Write for content that arrives as a stream. A snapshot restore puts
+// an Arr's database back without loading it: an install small enough to run in
+// a gigabyte is exactly where reading a multi-gigabyte file into memory would
+// fail the rollback that was supposed to save it.
+func Copy(path string, src io.Reader, mode fs.FileMode) error {
 	dir := filepath.Dir(path)
 	f, err := os.CreateTemp(dir, "."+filepath.Base(path)+".tmp-")
 	if err != nil {
@@ -41,7 +53,7 @@ func Write(path string, data []byte, mode fs.FileMode) error {
 		os.Remove(tmp)
 		return err
 	}
-	if _, err := f.Write(data); err != nil {
+	if _, err := io.Copy(f, src); err != nil {
 		return fail(fmt.Errorf("write %s: %w", path, err))
 	}
 	if err := f.Sync(); err != nil {

@@ -90,6 +90,74 @@ func TestWriteRefusesAMissingDirectory(t *testing.T) {
 	}
 }
 
+// Copy is Write for a stream, and has to behave the same way: the content
+// arrives, the file ends at the caller's mode, and a reader that fails partway
+// leaves the target whole rather than truncated.
+func TestCopyStreamsTheContent(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "sonarr.db")
+	if err := os.WriteFile(path, []byte("the old database"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := Copy(path, strings.NewReader("the restored database"), 0o640); err != nil {
+		t.Fatalf("Copy: %v", err)
+	}
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "the restored database" {
+		t.Fatalf("file = %q, want the new bytes", got)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0o640 {
+		t.Fatalf("mode = %o, want 640", info.Mode().Perm())
+	}
+	assertNoLeftovers(t, path)
+}
+
+func TestFailedCopyLeavesTheTargetWhole(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "sonarr.db")
+	before := []byte("the old database")
+	if err := os.WriteFile(path, before, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	err := Copy(path, &failingReader{after: 4}, 0o600)
+	if err == nil {
+		t.Fatal("Copy reported success after the reader failed")
+	}
+	if !strings.Contains(err.Error(), path) {
+		t.Fatalf("err = %v, want it to name the file", err)
+	}
+	after, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(after) != string(before) {
+		t.Fatalf("the target changed after a failed copy: %q", after)
+	}
+	assertNoLeftovers(t, path)
+}
+
+// failingReader hands out a few bytes and then fails, which is the shape of a
+// snapshot file disappearing under a restore.
+type failingReader struct {
+	after int
+	sent  int
+}
+
+func (r *failingReader) Read(p []byte) (int, error) {
+	if r.sent >= r.after {
+		return 0, errors.New("the snapshot file went away")
+	}
+	p[0] = 'x'
+	r.sent++
+	return 1, nil
+}
+
 // assertNoLeftovers is the temporary-file check every failure path needs: a
 // refused write leaves nothing of the file it was making.
 func assertNoLeftovers(t *testing.T, path string) {
