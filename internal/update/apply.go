@@ -49,11 +49,12 @@ type ApplySnapshots struct {
 // enabled app whose image in the cluster differs from the one the final values
 // render, and whether the release's catalog gives it files to copy.
 //
-// The old side is read from the cluster, never from the values file or Helm's
-// stored values: state follows the object, and an app whose pods run other
-// bytes than its StatefulSet asks for is exactly what a copy has to record. An
-// app with no StatefulSet here (the values just enabled it) has nothing to
-// migrate and does not move.
+// The comparison is over the reference each instance's StatefulSet asks for,
+// read from the cluster and never from the values file or Helm's stored values:
+// state follows the object. The digest a pod reports is what ran, not what the
+// app asks for, and is read only to name the bytes a copy records -- see
+// decideMove. An app with no StatefulSet here (the values just enabled it) has
+// nothing to migrate and does not move.
 func (s *ApplySnapshots) Pending(ctx context.Context, plan release.SnapshotPlan) (release.SnapshotWork, error) {
 	work := release.SnapshotWork{}
 	done := func(err error) (release.SnapshotWork, error) { return release.SnapshotWork{}, err }
@@ -92,10 +93,6 @@ func (s *ApplySnapshots) Pending(ctx context.Context, plan release.SnapshotPlan)
 		if !ok {
 			continue
 		}
-		ran, err := ranImage(app, run)
-		if err != nil {
-			return done(err)
-		}
 		// The holds are already in the values apply hands over, so the
 		// resolution here is the chart's own: variant, then pin, which is
 		// what the release will render.
@@ -107,15 +104,9 @@ func (s *ApplySnapshots) Pending(ctx context.Context, plan release.SnapshotPlan)
 			// is worse than saying nothing about it.
 			continue
 		}
-		if sameImage(ran, movedTo) {
-			continue
+		if move, moves := decideMove(app, run, movedTo, len(globs[app]) > 0); moves {
+			work.Moves = append(work.Moves, move)
 		}
-		work.Moves = append(work.Moves, release.SnapshotMove{
-			App:     app,
-			Ran:     ran,
-			MovedTo: movedTo,
-			Copied:  len(globs[app]) > 0,
-		})
 	}
 	return work, nil
 }
@@ -198,57 +189,83 @@ func (s *ApplySnapshots) cleanupWait() time.Duration { return orDuration(s.Clean
 
 func (s *ApplySnapshots) poll() time.Duration { return orDuration(s.Poll, 2*time.Second) }
 
-// ranImage is the one image an app runs now: the reference its instances'
-// StatefulSets agree on, and -- when that names no digest -- the digest its
-// pods report, because a tag is mutable and the copy has to name the bytes that
-// wrote it.
+// decideMove is one app's move: whether this apply changes its image at all
+// and, when it does and the catalog names state to copy, the bytes it runs as
+// far as the cluster can name them.
 //
-// Two instances that disagree are a refusal, not a guess: rolling the app back
-// would put both of them on one image, and box cannot say which of the two the
-// operator meant. A hand `kubectl set image` on one instance is how that
-// happens.
-func ranImage(app string, run Running) (snapshot.ImageRef, error) {
-	instances := make([]string, 0, len(run.Images))
-	for instance := range run.Images {
-		instances = append(instances, instance)
-	}
-	sort.Strings(instances)
+// Whether an app moves is decided on the reference its StatefulSets ask for,
+// never on the digest its pods report. A tag-only pin the values did not touch
+// renders the same tag the app already runs, and two digests under that one tag
+// are the same reference however they were pulled; comparing a pod digest there
+// would make an unchanged pin read as a move, and stop the app on every apply
+// that followed. The pod digest is read only once an app has moved and is going
+// to be copied, because the copy has to name the bytes that wrote the state.
+//
+// When those bytes cannot be named -- no pod reports one, its instances report
+// different ones, or its instances run different references -- the app still
+// moves, uncopied: box has nothing it can put back, and a refusal would lock
+// the box out of the apply that pins the digest. The plan says why before the
+// question, and the operator's no is the safeguard.
+func decideMove(app string, run Running, movedTo snapshot.ImageRef, copyable bool) (release.SnapshotMove, bool) {
+	instances := sortedInstances(run.Images)
 	if len(instances) == 0 {
-		return snapshot.ImageRef{}, fmt.Errorf("%s: the release has no StatefulSet of it, so box cannot read the image it runs", app)
+		return release.SnapshotMove{}, false
 	}
-	ref := run.Images[instances[0]]
-	for _, instance := range instances[1:] {
-		if !sameImage(ref, run.Images[instance]) {
-			return snapshot.ImageRef{}, fmt.Errorf("%s: its instances run different images (%s); box cannot say which one a rollback would put back",
-				app, imagePairs(run.Images))
+	moved := false
+	for _, instance := range instances {
+		if !sameImage(run.Images[instance], movedTo) {
+			moved = true
+			break
 		}
 	}
-	if ref.Digest != "" {
-		return ref, nil
+	if !moved {
+		return release.SnapshotMove{}, false
 	}
-	digest, err := ranDigest(app, ref.Tag, instances, run)
-	if err != nil {
-		return snapshot.ImageRef{}, err
+	move := release.SnapshotMove{App: app, Ran: run.Images[instances[0]], MovedTo: movedTo, Copied: copyable}
+	if !copyable {
+		return move, true
 	}
-	ref.Digest = digest
-	return ref, nil
+	// No single reference is what the app runs, so nothing a copy records
+	// could say which image the state belongs to. A hand `kubectl set image`
+	// on one instance is how this happens.
+	for _, instance := range instances[1:] {
+		if !sameImage(move.Ran, run.Images[instance]) {
+			move.Copied = false
+			move.Uncopied = release.UncopiedDifferentImages
+			move.Detail = imagePairs(run.Images)
+			return move, true
+		}
+	}
+	if move.Ran.Digest != "" {
+		return move, true
+	}
+	digest, reason := ranDigest(run, instances)
+	if reason != release.UncopiedNone {
+		move.Copied = false
+		move.Uncopied = reason
+		move.Detail = move.Ran.Tag
+		return move, true
+	}
+	move.Ran.Digest = digest
+	return move, true
 }
 
 // ranDigest is the one digest an app's pods report for a reference that names
-// only a tag.
+// only a tag, or the reason they name none.
 //
-// It refuses when there is no digest to read: an app box cannot say the bytes of
-// would be rolled back onto a tag alone, and a pin box writes always carries the
-// digest. It refuses two digests for the same reason two references are refused.
-func ranDigest(app, tag string, instances []string, run Running) (string, error) {
+// One instance with nothing to say is enough: box can only record the bytes
+// every instance ran, and a pod that is scaled to zero or has not started says
+// nothing. Two digests are the same answer -- the tag covered more than one
+// image while the app ran -- and box cannot pick one. The caller keeps the app
+// uncopied in both cases rather than record a reference a rollback would drift
+// from.
+func ranDigest(run Running, instances []string) (string, release.UncopiedReason) {
 	seen := make(map[string]bool, len(instances))
-	var digest string
-	var pairs []string
+	digest := ""
 	for _, instance := range instances {
 		digests := run.Digests[instance]
 		if len(digests) == 0 {
-			return "", fmt.Errorf("%s: no pod of %s reports the image it runs under tag %s, so box cannot record what it would put back; pin a digest",
-				app, instance, tag)
+			return "", release.UncopiedNoDigest
 		}
 		for _, d := range digests {
 			if seen[d] {
@@ -256,24 +273,30 @@ func ranDigest(app, tag string, instances []string, run Running) (string, error)
 			}
 			seen[d] = true
 			digest = d
-			pairs = append(pairs, instance+" "+d)
 		}
 	}
 	if len(seen) > 1 {
-		return "", fmt.Errorf("%s: its instances run different images under tag %s (%s); pin a digest to choose one",
-			app, tag, strings.Join(pairs, ", "))
+		return "", release.UncopiedDifferentBytes
 	}
-	return digest, nil
+	return digest, release.UncopiedNone
 }
 
-// imagePairs names each instance's reference, in instance order, for a refusal:
-// the operator needs to see which instance is on which image.
-func imagePairs(images map[string]snapshot.ImageRef) string {
+// sortedInstances is an app's StatefulSet names in one order, so the plan reads
+// the same on every run whatever order the cluster listed them in.
+func sortedInstances(images map[string]snapshot.ImageRef) []string {
 	instances := make([]string, 0, len(images))
 	for instance := range images {
 		instances = append(instances, instance)
 	}
 	sort.Strings(instances)
+	return instances
+}
+
+// imagePairs names each instance's reference, in instance order, for a plan row
+// that cannot say what the app runs as one reference: the operator needs to see
+// which instance is on which image.
+func imagePairs(images map[string]snapshot.ImageRef) string {
+	instances := sortedInstances(images)
 	pairs := make([]string, 0, len(instances))
 	for _, instance := range instances {
 		pairs = append(pairs, instance+" "+images[instance].String())

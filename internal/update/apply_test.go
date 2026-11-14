@@ -28,8 +28,8 @@ const (
 )
 
 // applyChart is the release an apply installs: the fixture chart with a
-// variants.yaml whose sonarr digest is the one a test moves to.
-func applyChart(t *testing.T, sonarrDigest string) release.Chart {
+// variants.yaml whose sonarr digest is the one a test moves to (digestB).
+func applyChart(t *testing.T) release.Chart {
 	t.Helper()
 	read := func(name string) []byte {
 		data, err := os.ReadFile("testdata/" + name)
@@ -45,7 +45,7 @@ func applyChart(t *testing.T, sonarrDigest string) release.Chart {
 		Values:     read("chart-values.yaml"),
 		Schema:     read("chart-schema.json"),
 		Catalog:    read("catalog.yaml"),
-		Variants:   variants(sonarrDigest),
+		Variants:   variants(digestB),
 	}
 }
 
@@ -66,7 +66,7 @@ type snapshotHarness struct {
 // chart pinning sonarr's digestB.
 func newSnapshotHarness(t *testing.T) *snapshotHarness {
 	t.Helper()
-	h := &snapshotHarness{log: &callLog{}, chart: applyChart(t, digestB)}
+	h := &snapshotHarness{log: &callLog{}, chart: applyChart(t)}
 	h.cluster = &fakeCluster{replicas: map[string]int32{}, pods: map[string]int{}, healthy: true, log: h.log}
 	h.rel = &fakeRelease{state: release.ReleaseState{Exists: true, ChartVersion: "0.5.0", Revision: 1, Status: "deployed"}}
 	h.snaps = &fakeSnapshots{
@@ -243,10 +243,84 @@ func TestApplySnapshotFirstEnableDoesNotMove(t *testing.T) {
 	}
 }
 
-// TestApplySnapshotRefusesInstancesOnDifferentDigests: one app runs one image,
-// so a rollback would put both instances on one of two. box refuses before
-// anything stops, and names the digests and the pin that would settle it.
-func TestApplySnapshotRefusesInstancesOnDifferentDigests(t *testing.T) {
+// TestApplySnapshotSameTagOnlyPinWithADigestDoesNotMove: the values pin the tag
+// the StatefulSet already asks for, and the digest the pod reports is what
+// those bytes are, not a second reference. Reading it as one made every apply
+// on such a box stop and copy the app.
+func TestApplySnapshotSameTagOnlyPinWithADigestDoesNotMove(t *testing.T) {
+	h := newSnapshotHarness(t)
+	h.cluster.running = map[string]Running{
+		"qbittorrent": runningQBT(),
+		"sonarr": {
+			Images:  map[string]snapshot.ImageRef{"sonarr": {Repository: sonarrRepo, Tag: "4.9.0"}},
+			Digests: map[string][]string{"sonarr": {digestA}},
+		},
+	}
+	work, err := h.hook.Pending(context.Background(), h.plan(applyValues(map[string]any{"tag": "4.9.0"})))
+	if err != nil {
+		t.Fatalf("Pending: %v", err)
+	}
+	if len(work.Moves) != 0 {
+		t.Fatalf("moves = %+v, want none: the pin names the tag the app runs", work.Moves)
+	}
+}
+
+// TestApplySnapshotSameTagOnlyPinWithoutADigestDoesNotMove: a pod that reports
+// nothing does not make an unchanged pin a move either. The digest is only
+// wanted once something is going to be copied.
+func TestApplySnapshotSameTagOnlyPinWithoutADigestDoesNotMove(t *testing.T) {
+	h := newSnapshotHarness(t)
+	h.cluster.running = map[string]Running{
+		"qbittorrent": runningQBT(),
+		"sonarr": {Images: map[string]snapshot.ImageRef{
+			"sonarr": {Repository: sonarrRepo, Tag: "4.9.0"},
+		}},
+	}
+	work, err := h.hook.Pending(context.Background(), h.plan(applyValues(map[string]any{"tag": "4.9.0"})))
+	if err != nil {
+		t.Fatalf("Pending: %v", err)
+	}
+	if len(work.Moves) != 0 {
+		t.Fatalf("moves = %+v, want none: the pin names the tag the app runs", work.Moves)
+	}
+}
+
+// TestApplySnapshotMovesWithoutACopyWhenNoPodReportsTheDigest: the apply that
+// pins a digest is the way out of a tag-only box, so it must not be the one
+// refused. The app moves, uncopied, and the plan says why before the question.
+func TestApplySnapshotMovesWithoutACopyWhenNoPodReportsTheDigest(t *testing.T) {
+	h := newSnapshotHarness(t)
+	h.cluster.running = map[string]Running{
+		"qbittorrent": runningQBT(),
+		"sonarr": {Images: map[string]snapshot.ImageRef{
+			"sonarr": {Repository: sonarrRepo, Tag: "4.9.0"},
+		}},
+	}
+	work, err := h.hook.Pending(context.Background(), h.plan(applyValues(map[string]any{"tag": "5.0.0", "digest": digestB})))
+	if err != nil {
+		t.Fatalf("Pending: %v", err)
+	}
+	if len(work.Moves) != 1 {
+		t.Fatalf("moves = %+v, want sonarr", work.Moves)
+	}
+	move := work.Moves[0]
+	if want := "sonarr: moves from 4.9.0 to 5.0.0 without a snapshot (no pod reports the bytes it runs under tag 4.9.0)"; move.Row() != want {
+		t.Fatalf("row = %q, want %q", move.Row(), want)
+	}
+	if len(work.Copied()) != 0 {
+		t.Fatalf("copied = %v, want none: box cannot name the bytes it would put back", work.Copied())
+	}
+	for _, call := range h.log.calls {
+		if strings.HasPrefix(call, "scale ") {
+			t.Fatalf("an app with no copy to take was stopped: %v", h.log.calls)
+		}
+	}
+}
+
+// TestApplySnapshotMovesWithoutACopyOnDifferentDigests: the tag covered more
+// than one image while the app ran, so no one reference is what it ran. It
+// moves, uncopied, and the plan names the tag the instances disagree under.
+func TestApplySnapshotMovesWithoutACopyOnDifferentDigests(t *testing.T) {
 	h := newSnapshotHarness(t)
 	h.cluster.running = map[string]Running{
 		"qbittorrent": runningQBT(),
@@ -258,38 +332,54 @@ func TestApplySnapshotRefusesInstancesOnDifferentDigests(t *testing.T) {
 			Digests: map[string][]string{"sonarr": {digestA}, "sonarr-4k": {digestB}},
 		},
 	}
-	_, err := h.hook.Pending(context.Background(), h.plan(applyValues(map[string]any{"tag": "5.0.0"})))
-	if err == nil {
-		t.Fatal("Pending accepted two instances on different digests")
+	work, err := h.hook.Pending(context.Background(), h.plan(applyValues(map[string]any{"tag": "5.0.0"})))
+	if err != nil {
+		t.Fatalf("Pending: %v", err)
 	}
-	want := fmt.Sprintf("sonarr: its instances run different images under tag 4.9.0 (sonarr %s, sonarr-4k %s); pin a digest to choose one", digestA, digestB)
-	if err.Error() != want {
-		t.Fatalf("error = %q, want %q", err, want)
+	if len(work.Moves) != 1 {
+		t.Fatalf("moves = %+v, want sonarr", work.Moves)
+	}
+	move := work.Moves[0]
+	if want := "sonarr: moves from 4.9.0 to 5.0.0 without a snapshot (its instances run different bytes under tag 4.9.0)"; move.Row() != want {
+		t.Fatalf("row = %q, want %q", move.Row(), want)
+	}
+	if len(work.Copied()) != 0 {
+		t.Fatalf("copied = %v, want none: the instances report different bytes", work.Copied())
 	}
 	for _, call := range h.log.calls {
-		if strings.HasPrefix(call, "scale ") || strings.HasPrefix(call, "take ") {
-			t.Fatalf("a refusal before the copy touched the cluster: %v", h.log.calls)
+		if strings.HasPrefix(call, "scale ") {
+			t.Fatalf("an app with no copy to take was stopped: %v", h.log.calls)
 		}
 	}
 }
 
-// TestApplySnapshotRefusesATagWithNoDigestToRead: an app whose pods report no
-// image cannot be recorded exactly, and a rollback from a tag alone would drift.
-func TestApplySnapshotRefusesATagWithNoDigestToRead(t *testing.T) {
+// TestApplySnapshotMovesWithoutACopyOnDifferentInstances: one instance's
+// StatefulSet was changed by hand, so no single reference is what the app runs.
+// Any instance the pin moves makes the app move, and the plan shows both.
+func TestApplySnapshotMovesWithoutACopyOnDifferentInstances(t *testing.T) {
 	h := newSnapshotHarness(t)
 	h.cluster.running = map[string]Running{
 		"qbittorrent": runningQBT(),
 		"sonarr": {Images: map[string]snapshot.ImageRef{
-			"sonarr": {Repository: sonarrRepo, Tag: "4.9.0"},
+			"sonarr":    {Repository: sonarrRepo, Tag: "5.0.0", Digest: digestB},
+			"sonarr-4k": {Repository: sonarrRepo, Tag: "4.9.0"},
 		}},
 	}
-	_, err := h.hook.Pending(context.Background(), h.plan(applyValues(map[string]any{"tag": "5.0.0"})))
-	if err == nil {
-		t.Fatal("Pending accepted a tag-only image with no digest to record")
+	work, err := h.hook.Pending(context.Background(), h.plan(applyValues(map[string]any{"tag": "5.0.0", "digest": digestB})))
+	if err != nil {
+		t.Fatalf("Pending: %v", err)
 	}
-	want := "sonarr: no pod of sonarr reports the image it runs under tag 4.9.0, so box cannot record what it would put back; pin a digest"
-	if err.Error() != want {
-		t.Fatalf("error = %q, want %q", err, want)
+	if len(work.Moves) != 1 {
+		t.Fatalf("moves = %+v, want sonarr", work.Moves)
+	}
+	move := work.Moves[0]
+	want := fmt.Sprintf("sonarr: moves to 5.0.0 without a snapshot (its instances run different images: sonarr %s:5.0.0@%s, sonarr-4k %s:4.9.0)",
+		sonarrRepo, digestB, sonarrRepo)
+	if move.Row() != want {
+		t.Fatalf("row = %q, want %q", move.Row(), want)
+	}
+	if len(work.Copied()) != 0 {
+		t.Fatalf("copied = %v, want none: the instances run different images", work.Copied())
 	}
 }
 
@@ -340,6 +430,83 @@ func TestApplySnapshotRefusesBeforeStoppingWhenItCannotCopy(t *testing.T) {
 		if strings.HasPrefix(call, "scale ") {
 			t.Fatalf("the refusal stopped an app: %v", h.log.calls)
 		}
+	}
+}
+
+// TestApplyWithAnUnchangedTagOnlyPinSaysNothingToChange: the box runs the tag
+// its values pin, and a re-apply of those values is the same no-op it always
+// was. The step is wired to a cluster that would report a pod digest, so a
+// comparison that read it would have a move to plan; a run with no change does
+// not even read the cluster's apps.
+func TestApplyWithAnUnchangedTagOnlyPinSaysNothingToChange(t *testing.T) {
+	log := &callLog{}
+	var out bytes.Buffer
+	chart := applyChart(t)
+
+	// The values the box already runs: the fixture values with sonarr pinned
+	// to the tag its StatefulSet asks for.
+	valuesPath := filepath.Join(t.TempDir(), "values.yaml")
+	values, err := os.ReadFile("testdata/values.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	pinned := string(values) + "apps:\n  sonarr:\n    image:\n      tag: \"4.9.0\"\n"
+	if err := os.WriteFile(valuesPath, []byte(pinned), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	sb, err := seedbox.Load("testdata/grant.yaml", valuesPath)
+	if err != nil {
+		t.Fatalf("values: %v", err)
+	}
+	deployed, err := sb.Effective(seedbox.Chart{Values: chart.Values, Schema: chart.Schema})
+	if err != nil {
+		t.Fatalf("effective values: %v", err)
+	}
+
+	cluster := &fakeCluster{replicas: map[string]int32{}, pods: map[string]int{}, healthy: true, log: log}
+	cluster.running = map[string]Running{
+		"qbittorrent": runningQBT(),
+		"sonarr": {
+			Images:  map[string]snapshot.ImageRef{"sonarr": {Repository: sonarrRepo, Tag: "4.9.0"}},
+			Digests: map[string][]string{"sonarr": {digestA}},
+		},
+	}
+	rel := &fakeRelease{state: release.ReleaseState{Exists: true, ChartVersion: "0.5.0", Revision: 1, Status: "deployed"}}
+	step := &ApplySnapshots{
+		OpenRelease:   func(string) (Release, error) { return rel, nil },
+		OpenCluster:   func(string) (Cluster, error) { return cluster, nil },
+		OpenSnapshots: func(string, map[string]any, release.Chart) (Snapshotter, error) { return &fakeSnapshots{log: log}, nil },
+		SettleWait:    50 * time.Millisecond,
+		CleanupWait:   50 * time.Millisecond,
+		Poll:          time.Millisecond,
+	}
+	client := &applyClient{deployed: deployed, log: log}
+	app := &release.Applier{
+		Confirm: loggingConfirm{log: log},
+		Say:     &say.Plain{W: &out},
+		Open:    func(string) (release.ReleaseClient, error) { return client, nil },
+		OpenStorage: func(string) (release.StorageClient, error) {
+			return applyStorage{}, nil
+		},
+	}
+	res, err := app.Apply(context.Background(), release.Options{
+		Chart:       &chart,
+		GrantPath:   "testdata/grant.yaml",
+		ValuesPath:  valuesPath,
+		PathsInNode: true,
+		Snapshots:   step,
+	})
+	if err != nil {
+		t.Fatalf("apply: %v\n%s", err, out.String())
+	}
+	if res.Applied {
+		t.Fatalf("the unchanged apply ran an upgrade:\n%s", out.String())
+	}
+	if !strings.Contains(out.String(), "nothing to change") {
+		t.Fatalf("the unchanged apply did not say nothing to change:\n%s", out.String())
+	}
+	if len(cluster.log.calls) != 0 {
+		t.Fatalf("the unchanged apply read the cluster's apps: %v", cluster.log.calls)
 	}
 }
 
@@ -405,7 +572,7 @@ func (c loggingConfirm) Ask(string) (bool, error) {
 func TestApplyCopiesBeforeTheReleaseMoves(t *testing.T) {
 	log := &callLog{}
 	var out bytes.Buffer
-	hook := &snapshotHarness{log: log, chart: applyChart(t, digestB)}
+	hook := &snapshotHarness{log: log, chart: applyChart(t)}
 	hook.cluster = &fakeCluster{replicas: map[string]int32{}, pods: map[string]int{}, healthy: true, log: log}
 	hook.cluster.running = map[string]Running{
 		"qbittorrent": runningQBT(),
@@ -478,7 +645,7 @@ func TestApplyCopiesBeforeTheReleaseMoves(t *testing.T) {
 // the chart renders both. Reading the variant's tag instead would put a tag in
 // the plan's sentence that the release does not run.
 func TestRenderedImageKeepsAPinnedTagWithItsDigest(t *testing.T) {
-	chart := applyChart(t, digestB)
+	chart := applyChart(t)
 	values := applyValues(map[string]any{"tag": "4.9.0", "digest": digestA})
 	got, ok := renderedImage(chart, values, nil, "sonarr")
 	if !ok {

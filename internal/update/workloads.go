@@ -359,7 +359,7 @@ func parseImage(ref string) snapshot.ImageRef {
 }
 
 // sortedUnique is one instance's reported digests, sorted and without repeats:
-// box's refusal names the pair in the same order on every run, and a pod that
+// box's plan names the pair in the same order on every run, and a pod that
 // restarted onto the same image reports one digest twice.
 func sortedUnique(in []string) []string {
 	sort.Strings(in)

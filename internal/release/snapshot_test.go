@@ -143,6 +143,53 @@ func TestApplyCopiesAMovingAppBeforeTheReleaseMoves(t *testing.T) {
 	}
 }
 
+// The plan's row for a move box cannot copy says what it could not learn, so
+// the operator sees it before the question: an app whose bytes cannot be named
+// still moves, and the row is the safeguard instead of a refusal.
+func TestSnapshotRowForAMoveItCannotCopy(t *testing.T) {
+	ran := snapshot.ImageRef{Repository: "registry.example.com/seedbox/sonarr", Tag: "4.9.0"}
+	movedTo := snapshot.ImageRef{Repository: "registry.example.com/seedbox/sonarr", Tag: "5.0.0", Digest: "sha256:bbbb"}
+	cases := []struct {
+		name string
+		move SnapshotMove
+		want string
+	}{
+		{
+			name: "no digest reported",
+			move: SnapshotMove{App: "sonarr", Ran: ran, MovedTo: movedTo, Uncopied: UncopiedNoDigest, Detail: "4.9.0"},
+			want: "sonarr: moves from 4.9.0 to 5.0.0 without a snapshot (no pod reports the bytes it runs under tag 4.9.0)",
+		},
+		{
+			name: "different bytes under the tag",
+			move: SnapshotMove{App: "sonarr", Ran: ran, MovedTo: movedTo, Uncopied: UncopiedDifferentBytes, Detail: "4.9.0"},
+			want: "sonarr: moves from 4.9.0 to 5.0.0 without a snapshot (its instances run different bytes under tag 4.9.0)",
+		},
+		{
+			name: "different instance references",
+			move: SnapshotMove{App: "sonarr", Ran: ran, MovedTo: movedTo, Uncopied: UncopiedDifferentImages,
+				Detail: "sonarr registry.example.com/seedbox/sonarr:5.0.0@sha256:bbbb, sonarr-4k registry.example.com/seedbox/sonarr:4.9.0"},
+			want: "sonarr: moves to 5.0.0 without a snapshot (its instances run different images: sonarr registry.example.com/seedbox/sonarr:5.0.0@sha256:bbbb, sonarr-4k registry.example.com/seedbox/sonarr:4.9.0)",
+		},
+		{
+			name: "nothing to copy",
+			move: SnapshotMove{App: "sonarr", Ran: ran, MovedTo: movedTo},
+			want: "sonarr: moves from 4.9.0 to 5.0.0 without a snapshot (nothing to copy)",
+		},
+		{
+			name: "copied",
+			move: SnapshotMove{App: "sonarr", Ran: ran, MovedTo: movedTo, Copied: true},
+			want: "sonarr: stopped and snapshotted before it moves from 4.9.0 to 5.0.0",
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := c.move.Row(); got != c.want {
+				t.Fatalf("row = %q, want %q", got, c.want)
+			}
+		})
+	}
+}
+
 // An app the catalog gives nothing to copy moves without one, and the plan says
 // so rather than leaving it out: it is never stopped, and box never rolls it
 // back.

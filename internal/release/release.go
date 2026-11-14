@@ -289,10 +289,13 @@ type Anchor interface {
 //
 // Pending is the read apply makes with its diff, so the apps it will stop and
 // copy are part of the plan and a copy box cannot take refuses before the
-// question is asked. Take is the write, after the confirm and immediately
-// before the release moves: nothing else this run writes can fail while an app
-// is down. Prune runs once the release is up on the images it moved to, and a
-// copy it cannot prune is a warning rather than a failed apply.
+// question is asked. An image box cannot name the bytes of is not a refusal:
+// the move is planned uncopied and its Row says why, because the apply that
+// pins a digest comes through this same step. Take is the write, after the
+// confirm and immediately before the release moves: nothing else this run
+// writes can fail while an app is down. Prune runs once the release is up on
+// the images it moved to, and a copy it cannot prune is a warning rather than a
+// failed apply.
 type Snapshotter interface {
 	Pending(ctx context.Context, plan SnapshotPlan) (SnapshotWork, error)
 	Take(ctx context.Context, plan SnapshotPlan, work SnapshotWork) (SnapshotDirs, error)
@@ -322,17 +325,62 @@ type SnapshotMove struct {
 	App     string
 	Ran     snapshot.ImageRef
 	MovedTo snapshot.ImageRef
-	// Copied says the release's catalog names files to copy for this app. An
-	// app it names none for moves without a copy and is not stopped, exactly
-	// as an update moves one: box has no state to put back, so it never rolls
-	// it back.
+	// Copied says the release's catalog names files to copy for this app and
+	// the bytes it runs can be named, so the app is stopped and its config is
+	// copied. An app without a catalog entry moves without a copy and is not
+	// stopped, exactly as an update moves one: box has no state to put back,
+	// so it never rolls it back. So does an app whose bytes cannot be named,
+	// with Uncopied saying why.
 	Copied bool
+	// Uncopied is why a move the catalog has state for is not copied: the
+	// bytes it runs cannot be named exactly, so the copy could not be put
+	// back. It is the zero value when Copied is true, and for an app the
+	// catalog gives nothing to copy. When its instances' references differ,
+	// Ran is the first instance's, and the row does not print it.
+	Uncopied UncopiedReason
+	// Detail is what Uncopied's sentence needs: the tag both halves of a
+	// tag-only reference share, or the `instance image` pairs of instances
+	// running different images.
+	Detail string
 }
+
+// UncopiedReason is why a moving app gets no copy even though the catalog
+// names state to copy for it.
+type UncopiedReason int
+
+const (
+	// UncopiedNone is a move that is copied, or one with nothing to copy.
+	UncopiedNone UncopiedReason = iota
+	// UncopiedNoDigest is a tag-only reference whose pods report no digest:
+	// the app was never pulled, or none of its pods is up to say what ran.
+	UncopiedNoDigest
+	// UncopiedDifferentBytes is a tag-only reference whose pods report more
+	// than one digest: a tag was re-pushed, or instances pulled at different
+	// times, and box cannot say which bytes wrote the state.
+	UncopiedDifferentBytes
+	// UncopiedDifferentImages is instances whose StatefulSets ask for
+	// different images, so no single reference is what the app runs.
+	UncopiedDifferentImages
+)
 
 // Row is the plan's line for one move. Only the apps a copy would stop are
 // said to be stopped: an app without a catalog entry keeps running through its
-// image change, and the plan has to say that rather than leave it out.
+// image change, and an app whose bytes cannot be named moves the same way, so
+// the plan says so rather than leaving it out -- the operator decides whether
+// to go on, which is what keeps an apply from ever being refused over an
+// image.
 func (m SnapshotMove) Row() string {
+	switch m.Uncopied {
+	case UncopiedNoDigest:
+		return fmt.Sprintf("%s: moves from %s to %s without a snapshot (no pod reports the bytes it runs under tag %s)",
+			m.App, m.Ran.Label(), m.MovedTo.Label(), m.Detail)
+	case UncopiedDifferentBytes:
+		return fmt.Sprintf("%s: moves from %s to %s without a snapshot (its instances run different bytes under tag %s)",
+			m.App, m.Ran.Label(), m.MovedTo.Label(), m.Detail)
+	case UncopiedDifferentImages:
+		return fmt.Sprintf("%s: moves to %s without a snapshot (its instances run different images: %s)",
+			m.App, m.MovedTo.Label(), m.Detail)
+	}
 	if m.Copied {
 		return fmt.Sprintf("%s: stopped and snapshotted before it moves from %s to %s",
 			m.App, m.Ran.Label(), m.MovedTo.Label())
