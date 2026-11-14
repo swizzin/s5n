@@ -146,7 +146,10 @@ type fakeCluster struct {
 	neverGone    bool
 	scaleErrs    map[int32]error
 	healthErr    error
-	log          *callLog
+	// running is what the cluster runs, for a read of each app's image.
+	running    map[string]Running
+	runningErr error
+	log        *callLog
 }
 
 func (f *fakeCluster) Scale(_ context.Context, app string, replicas int32) error {
@@ -185,6 +188,16 @@ func (f *fakeCluster) Health(_ context.Context, moving []string) (Health, error)
 		return Health{Ready: f.healthy, Restarts: f.restarts}, nil
 	}
 	return Health{Ready: f.healthy, Exiting: f.exiting, Restarts: f.restarts}, nil
+}
+
+// Running is the image each app runs, as the test wrote it: what the StatefulSet
+// asks for and what the pods report.
+func (f *fakeCluster) Running(context.Context) (map[string]Running, error) {
+	f.log.add("running")
+	if f.runningErr != nil {
+		return nil, f.runningErr
+	}
+	return f.running, nil
 }
 
 // fakeSnapshots records what was asked, copied, restored and pruned.

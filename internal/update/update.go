@@ -86,6 +86,11 @@ type Cluster interface {
 	// this step moved keep exiting. Only the moved apps are asked about:
 	// an app that kept its image cannot be this step's fault.
 	Health(ctx context.Context, moving []string) (Health, error)
+	// Running reads the image each app runs: the reference its StatefulSets
+	// ask for and the digest its pods report. It is the other half of "what
+	// moves": Helm's stored values are what was asked for, and an apply
+	// compares what runs with what it is about to render.
+	Running(ctx context.Context) (map[string]Running, error)
 }
 
 // Snapshotter copies the apps a step moves out of the way, so box can put one

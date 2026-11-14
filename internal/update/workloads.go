@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"sort"
+	"strings"
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -12,6 +13,7 @@ import (
 	"k8s.io/client-go/kubernetes"
 
 	"github.com/swizzin/s5n/internal/kube"
+	"github.com/swizzin/s5n/internal/snapshot"
 )
 
 const (
@@ -207,22 +209,167 @@ func rolledOut(sets []appsv1.StatefulSet) bool {
 // silence. Init containers are the chart's own (the wiring and permission
 // steps) and are not the app, so their restarts are not counted.
 func appRestarts(pod *corev1.Pod) int32 {
-	if len(pod.Spec.Containers) == 0 {
-		return 0
-	}
-	app := pod.Spec.Containers[0].Name
-	for _, container := range pod.Spec.Containers {
-		if container.Name == pod.Labels[appLabel] {
-			app = container.Name
-			break
-		}
-	}
+	name := appContainer(pod, pod.Labels[appLabel])
 	for _, status := range pod.Status.ContainerStatuses {
-		if status.Name == app {
+		if status.Name == name {
 			return status.RestartCount
 		}
 	}
 	return 0
+}
+
+// appContainer is the pod's app container: the one the chart names after the
+// app key, or the first when the chart names it something else. Init containers
+// are the chart's own and are never the app.
+func appContainer(pod *corev1.Pod, app string) string {
+	if len(pod.Spec.Containers) == 0 {
+		return ""
+	}
+	for _, container := range pod.Spec.Containers {
+		if container.Name == app {
+			return container.Name
+		}
+	}
+	return pod.Spec.Containers[0].Name
+}
+
+// Running is one app as the cluster runs it: the image each instance's
+// StatefulSet asks for, and the digests the pods report for it.
+//
+// Both halves are needed because a values pin may be a tag alone. The chart
+// then names no digest, so the reference says which release of the app was
+// asked for and nothing about the bytes; the bytes are in the pods' imageID,
+// which is what the kubelet pulled.
+type Running struct {
+	// Images is each instance's image as its StatefulSet asks for it, keyed
+	// by the StatefulSet's name. An instance scaled to zero keeps its
+	// StatefulSet, so it is still here.
+	Images map[string]snapshot.ImageRef
+	// Digests is the digest each instance's pods report, sorted and without
+	// repeats. An instance with no pod, or whose container has not started,
+	// has no entry: the caller decides whether that is answerable.
+	Digests map[string][]string
+}
+
+// Running reads every app of the release: the image each of its StatefulSets
+// asks for and, from the pods, the digest that reference resolved to. It is how
+// an apply knows what it moves an app from: the values file and Helm's stored
+// values are what was asked for, never what runs.
+func (w *Workloads) Running(ctx context.Context) (map[string]Running, error) {
+	sets, err := w.statefulSets(ctx)
+	if err != nil {
+		return nil, err
+	}
+	out := make(map[string]Running, len(sets))
+	for i := range sets {
+		app := appOf(&sets[i])
+		if app == "" {
+			continue
+		}
+		run := out[app]
+		if run.Images == nil {
+			run.Images = make(map[string]snapshot.ImageRef, 1)
+		}
+		run.Images[sets[i].Name] = parseImage(containerImage(&sets[i], app))
+		out[app] = run
+	}
+	if len(out) == 0 {
+		return out, nil
+	}
+	pods, err := w.pods(ctx)
+	if err != nil {
+		return nil, err
+	}
+	for i := range pods {
+		// A pod of the wiring Job or of an init container carries the
+		// release label and no app key, and an app whose StatefulSet is gone
+		// is not one this release runs: neither has an image to report.
+		app := pods[i].Labels[appLabel]
+		run, ok := out[app]
+		if !ok {
+			continue
+		}
+		digest := podDigest(&pods[i], app)
+		if digest == "" {
+			continue
+		}
+		if run.Digests == nil {
+			run.Digests = make(map[string][]string, 1)
+		}
+		instance := pods[i].Labels[nameLabel]
+		run.Digests[instance] = append(run.Digests[instance], digest)
+		out[app] = run
+	}
+	for app, run := range out {
+		for instance, digests := range run.Digests {
+			run.Digests[instance] = sortedUnique(digests)
+		}
+		out[app] = run
+	}
+	return out, nil
+}
+
+// containerImage is the image one StatefulSet's app container asks for.
+func containerImage(set *appsv1.StatefulSet, app string) string {
+	containers := set.Spec.Template.Spec.Containers
+	if len(containers) == 0 {
+		return ""
+	}
+	for _, container := range containers {
+		if container.Name == app {
+			return container.Image
+		}
+	}
+	return containers[0].Image
+}
+
+// podDigest is the digest a pod reports for the app container: the part after
+// the `@` in containerStatuses[].imageID. Kubernetes spells it with the
+// repository in front (and, from older runtimes, a `docker-pullable://`
+// scheme), so only the tail is the digest.
+func podDigest(pod *corev1.Pod, app string) string {
+	name := appContainer(pod, app)
+	for _, status := range pod.Status.ContainerStatuses {
+		if status.Name != name {
+			continue
+		}
+		if at := strings.LastIndex(status.ImageID, "@"); at >= 0 {
+			return status.ImageID[at+1:]
+		}
+	}
+	return ""
+}
+
+// parseImage splits an image reference the way Kubernetes spells it --
+// [registry[:port]/]repository[:tag][@digest] -- into the three parts box
+// compares. The tag is the colon after the last slash, because the registry's
+// port is a colon before it.
+func parseImage(ref string) snapshot.ImageRef {
+	out := snapshot.ImageRef{}
+	if at := strings.Index(ref, "@"); at >= 0 {
+		out.Digest = ref[at+1:]
+		ref = ref[:at]
+	}
+	if colon := strings.LastIndex(ref, ":"); colon > strings.LastIndex(ref, "/") {
+		out.Tag = ref[colon+1:]
+		ref = ref[:colon]
+	}
+	out.Repository = ref
+	return out
+}
+
+// sortedUnique is one instance's reported digests, sorted and without repeats:
+// box's refusal names the pair in the same order on every run, and a pod that
+// restarted onto the same image reports one digest twice.
+func sortedUnique(in []string) []string {
+	sort.Strings(in)
+	out := make([]string, 0, len(in))
+	for _, s := range in {
+		if len(out) == 0 || out[len(out)-1] != s {
+			out = append(out, s)
+		}
+	}
+	return out
 }
 
 func (w *Workloads) statefulSets(ctx context.Context) ([]appsv1.StatefulSet, error) {

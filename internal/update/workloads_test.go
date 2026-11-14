@@ -13,6 +13,8 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	k8sfake "k8s.io/client-go/kubernetes/fake"
 	k8stesting "k8s.io/client-go/testing"
+
+	"github.com/swizzin/s5n/internal/snapshot"
 )
 
 // statefulSet is one app workload with the labels the chart writes: the
@@ -330,5 +332,113 @@ func TestHealthSortsTheAppsItNames(t *testing.T) {
 	want := []Exiting{{App: "radarr", Restarts: 5}, {App: "sonarr", Restarts: 3}}
 	if !reflect.DeepEqual(got.Exiting, want) {
 		t.Fatalf("Exiting = %+v, want %+v", got.Exiting, want)
+	}
+}
+
+// runningSet is one app's StatefulSet as the chart renders it: the container is
+// named after the app key, and its image is whatever the values left there.
+func runningSet(name, app, image string) *appsv1.StatefulSet {
+	set := statefulSet(name, app, 1, 1, 1, 1)
+	set.Spec.Template.Spec.Containers = []corev1.Container{{Name: app, Image: image}}
+	return set
+}
+
+// runningPod is one pod of an app with the digest its container reports: the
+// kubelet's imageID, which names the repository the reference was pulled from.
+func runningPod(name, instance, app, imageID string) *corev1.Pod {
+	return &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      name,
+			Namespace: "testbox",
+			Labels: map[string]string{
+				instanceLabel: "s5n",
+				nameLabel:     instance,
+				appLabel:      app,
+			},
+		},
+		Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: app, Image: "ignored"}}},
+		Status: corev1.PodStatus{ContainerStatuses: []corev1.ContainerStatus{
+			{Name: app, ImageID: "registry.example.com/seedbox/" + app + "@" + imageID},
+		}},
+	}
+}
+
+// TestRunningReadsEachInstanceImageAndPodDigest: the reference comes from the
+// StatefulSet and the bytes from the pods, because a values pin may be a tag
+// alone. An instance is its own StatefulSet, and a pod of an app this release
+// does not run is nobody's image.
+func TestRunningReadsEachInstanceImageAndPodDigest(t *testing.T) {
+	cs := k8sfake.NewClientset(
+		runningSet("sonarr", "sonarr", "registry.example.com/seedbox/sonarr:4.9.0"),
+		runningSet("sonarr-4k", "sonarr", "registry.example.com/seedbox/sonarr:4.9.0"),
+		runningSet("radarr", "radarr", "registry.example.com/seedbox/radarr:6.1.0@"+digestA),
+		runningPod("sonarr-0", "sonarr", "sonarr", digestB),
+		runningPod("sonarr-4k-0", "sonarr-4k", "sonarr", digestB),
+		runningPod("radarr-0", "radarr", "radarr", digestA),
+		// The wiring Job carries the release label and no app key, and a pod
+		// of an app whose StatefulSet is gone is not one this release runs.
+		&corev1.Pod{ObjectMeta: metav1.ObjectMeta{
+			Name: "s5n-wiring-x", Namespace: "testbox",
+			Labels: map[string]string{instanceLabel: "s5n"},
+		}},
+	)
+	got, err := NewWorkloadsFor("testbox", "s5n", cs).Running(context.Background())
+	if err != nil {
+		t.Fatalf("Running: %v", err)
+	}
+	sonarr := got["sonarr"]
+	wantSonarr := parseImage("registry.example.com/seedbox/sonarr:4.9.0")
+	for instance, want := range map[string]snapshot.ImageRef{"sonarr": wantSonarr, "sonarr-4k": wantSonarr} {
+		if sonarr.Images[instance] != want {
+			t.Fatalf("sonarr.Images[%s] = %+v, want %+v", instance, sonarr.Images[instance], want)
+		}
+		if ds := sonarr.Digests[instance]; !reflect.DeepEqual(ds, []string{digestB}) {
+			t.Fatalf("sonarr.Digests[%s] = %v, want %s", instance, ds, digestB)
+		}
+	}
+	radarr := got["radarr"]
+	if radarr.Images["radarr"].Digest != digestA || radarr.Images["radarr"].Tag != "6.1.0" {
+		t.Fatalf("radarr image = %+v, want the pinned tag and digest", radarr.Images["radarr"])
+	}
+	if len(got) != 2 {
+		t.Fatalf("Running reported %d apps, want sonarr and radarr: %+v", len(got), got)
+	}
+}
+
+// TestParseImageSplitsARegistryReference covers every shape a chart's variants
+// and a kubelet's imageID put in front of box: the registry's port is a colon
+// before the tag's, so the tag is the colon after the last slash.
+func TestParseImageSplitsARegistryReference(t *testing.T) {
+	cases := []struct {
+		ref  string
+		want snapshot.ImageRef
+	}{
+		{"registry.example.com/seedbox/sonarr:4.9.0", snapshot.ImageRef{Repository: "registry.example.com/seedbox/sonarr", Tag: "4.9.0"}},
+		{"registry.example.com:5000/seedbox/sonarr:4.9.0", snapshot.ImageRef{Repository: "registry.example.com:5000/seedbox/sonarr", Tag: "4.9.0"}},
+		{"registry.example.com/seedbox/sonarr:4.9.0@" + digestA, snapshot.ImageRef{Repository: "registry.example.com/seedbox/sonarr", Tag: "4.9.0", Digest: digestA}},
+		{"registry.example.com/seedbox/sonarr@" + digestA, snapshot.ImageRef{Repository: "registry.example.com/seedbox/sonarr", Digest: digestA}},
+		{"registry.example.com:5000/sonarr", snapshot.ImageRef{Repository: "registry.example.com:5000/sonarr"}},
+		{"sonarr", snapshot.ImageRef{Repository: "sonarr"}},
+		{"", snapshot.ImageRef{}},
+	}
+	for _, tc := range cases {
+		if got := parseImage(tc.ref); got != tc.want {
+			t.Fatalf("parseImage(%q) = %+v, want %+v", tc.ref, got, tc.want)
+		}
+	}
+}
+
+// TestPodDigestAcceptsARuntimeScheme: an older runtime prefixes the imageID with
+// docker-pullable://; the digest is still the part after the @.
+func TestPodDigestAcceptsARuntimeScheme(t *testing.T) {
+	pod := runningPod("sonarr-0", "sonarr", "sonarr", digestC)
+	pod.Status.ContainerStatuses[0].ImageID = "docker-pullable://registry.example.com/seedbox/sonarr@" + digestC
+	if got := podDigest(pod, "sonarr"); got != digestC {
+		t.Fatalf("podDigest = %q, want %q", got, digestC)
+	}
+	// A container that has not started reports no imageID at all.
+	pod.Status.ContainerStatuses[0].ImageID = ""
+	if got := podDigest(pod, "sonarr"); got != "" {
+		t.Fatalf("podDigest on a container that never started = %q, want empty", got)
 	}
 }
