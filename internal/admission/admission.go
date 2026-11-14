@@ -98,14 +98,31 @@ func validDNSLabel(s string) bool {
 	return true
 }
 
-// Repositories is the blessed list: every distinct repository named by the
-// chart's variants.yaml, sorted. This is the only place the list is built, in
-// box as in hack/render-grant, so "blessed by the chart" has one definition.
+// Image is one blessed variant: the repository the chart resolves it to, and
+// the pins inside it. `box update` reads it to tell which enabled apps' images
+// move between two releases -- a database migrates when its image changes, so
+// that answer is what a step snapshots.
+type Image struct {
+	// Repository is the only image the chart can run for this app; values may
+	// not name one (docs/box.md, "Image choice: blessed variants").
+	Repository string
+	// Tag and Digest are the pins inside that repository. The chart pins both,
+	// and a digest bump alone is an image change: that is why update compares
+	// Repository and Digest, never the tag.
+	Tag    string
+	Digest string
+}
+
+// Images is the chart's variants.yaml as its image table: app -> variant ->
+// image. It is the one parse of the file, so the blessed repository list
+// (Repositories), the admission policy's params and `box update`'s moving-app
+// list cannot disagree about what a variant names.
 //
-// A variant that names no repository is skipped; an app or variant that is not
-// a mapping is an error, because that is a chart typo and not a variant without
-// a repository.
-func Repositories(variants []byte) ([]string, error) {
+// An app or variant that is not a mapping is an error, because that is a chart
+// typo and not a variant without an image. A variant that names no repository
+// is kept as-is; Repositories skips it, and update's comparison sees the
+// variant present with an empty image rather than absent.
+func Images(variants []byte) (map[string]map[string]Image, error) {
 	if len(strings.TrimSpace(string(variants))) == 0 {
 		return nil, fmt.Errorf("variants.yaml is empty")
 	}
@@ -116,25 +133,50 @@ func Repositories(variants []byte) ([]string, error) {
 	if len(apps) == 0 {
 		return nil, fmt.Errorf("variants.yaml names no repositories")
 	}
-	seen := make(map[string]bool, len(apps))
-	names := make([]string, 0, len(apps))
+	out := make(map[string]map[string]Image, len(apps))
 	for app, variantsAny := range apps {
 		byName, ok := variantsAny.(map[string]any)
 		if !ok {
 			return nil, fmt.Errorf("variants.yaml: app %q is not a map of variants", app)
 		}
+		images := make(map[string]Image, len(byName))
 		for name, variantAny := range byName {
 			variant, ok := variantAny.(map[string]any)
 			if !ok {
 				return nil, fmt.Errorf("variants.yaml: %s.%s is not a variant", app, name)
 			}
 			repo, _ := variant["repository"].(string)
-			if repo == "" {
+			tag, _ := variant["tag"].(string)
+			digest, _ := variant["digest"].(string)
+			images[name] = Image{Repository: repo, Tag: tag, Digest: digest}
+		}
+		out[app] = images
+	}
+	return out, nil
+}
+
+// Repositories is the blessed list: every distinct repository named by the
+// chart's variants.yaml, sorted. This is the only place the list is built, in
+// box as in hack/render-grant, so "blessed by the chart" has one definition.
+//
+// A variant that names no repository is skipped; an app or variant that is not
+// a mapping is an error, because that is a chart typo and not a variant without
+// a repository.
+func Repositories(variants []byte) ([]string, error) {
+	apps, err := Images(variants)
+	if err != nil {
+		return nil, err
+	}
+	seen := make(map[string]bool, len(apps))
+	var names []string
+	for _, byName := range apps {
+		for _, image := range byName {
+			if image.Repository == "" {
 				continue
 			}
-			if !seen[repo] {
-				seen[repo] = true
-				names = append(names, repo)
+			if !seen[image.Repository] {
+				seen[image.Repository] = true
+				names = append(names, image.Repository)
 			}
 		}
 	}
