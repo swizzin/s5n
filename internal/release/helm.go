@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"helm.sh/helm/v4/pkg/action"
+	chartv2 "helm.sh/helm/v4/pkg/chart/v2"
 	helmkube "helm.sh/helm/v4/pkg/kube"
 	helmrelease "helm.sh/helm/v4/pkg/release"
 	v1release "helm.sh/helm/v4/pkg/release/v1"
@@ -79,31 +80,86 @@ func NewHelm(kubeconfig, namespace, releaseName string) (*Helm, error) {
 // document (chart defaults, the user's values, then the grant), so the diff of
 // a re-apply compares like with like.
 func (h *Helm) Deployed(_ context.Context) (map[string]any, bool, error) {
+	rel, err := h.deployedRelease()
+	if err != nil || rel == nil {
+		return nil, false, err
+	}
+	config, err := configOf(rel)
+	if err != nil {
+		return nil, false, err
+	}
+	if config == nil {
+		config = map[string]any{}
+	}
+	return config, true, nil
+}
+
+// ReleaseState is the deployed release as `box update` reads it: the chart
+// version it is running, the revision a failed step rolls back to, and Helm's
+// own status. Exists is false when no release of box's name is deployed.
+type ReleaseState struct {
+	Exists bool
+	// ChartVersion is the version of the chart the release was deployed with.
+	// It is what an update compares a newer release against, and the revision
+	// is what a failed step returns to.
+	ChartVersion string
+	Revision     int
+	Status       string
+}
+
+// State reads the deployed release's chart version, revision and status
+// without its values. Deployed answers "what did the operator ask for"; this
+// answers "what is running", which is the question an update's target and its
+// rollback both start from.
+func (h *Helm) State(_ context.Context) (ReleaseState, error) {
+	rel, err := h.deployedRelease()
+	if err != nil {
+		return ReleaseState{}, err
+	}
+	if rel == nil {
+		return ReleaseState{}, nil
+	}
+	acc, err := helmrelease.NewAccessor(rel)
+	if err != nil {
+		return ReleaseState{}, fmt.Errorf("read release %s in %s: %w", h.Release, h.Namespace, err)
+	}
+	state := ReleaseState{Exists: true, Revision: acc.Version(), Status: acc.Status()}
+	switch ch := acc.Chart().(type) {
+	case *chartv2.Chart:
+		if ch.Metadata != nil {
+			state.ChartVersion = ch.Metadata.Version
+		}
+	case chartv2.Chart:
+		if ch.Metadata != nil {
+			state.ChartVersion = ch.Metadata.Version
+		}
+	}
+	if state.ChartVersion == "" {
+		// Without it an update cannot say what it is moving from, and
+		// guessing "the newest" would step a box that is already current.
+		return ReleaseState{}, fmt.Errorf("release %s in %s: Helm does not record which chart version it was deployed with", h.Release, h.Namespace)
+	}
+	return state, nil
+}
+
+// deployedRelease is the release Helm has deployed, or nil when there is none.
+// A release of that name in any other state (failed, pending) is an error: it
+// is not a clean slate, and unloading it behind the operator's back is not
+// box's call.
+func (h *Helm) deployedRelease() (helmrelease.Releaser, error) {
 	rel, err := h.cfg.Releases.Deployed(h.Release)
 	if err == nil {
-		config, err := configOf(rel)
-		if err != nil {
-			return nil, false, err
-		}
-		if config == nil {
-			config = map[string]any{}
-		}
-		return config, true, nil
+		return rel, nil
 	}
 	if !errors.Is(err, driver.ErrNoDeployedReleases) && !errors.Is(err, driver.ErrReleaseNotFound) {
-		return nil, false, fmt.Errorf("read release %s in %s: %w", h.Release, h.Namespace, err)
+		return nil, fmt.Errorf("read release %s in %s: %w", h.Release, h.Namespace, err)
 	}
-
-	// Nothing deployed. A release of that name in any other state (failed,
-	// pending) is not a clean slate: Helm would refuse the install with
-	// "cannot re-use a name that is still in use", and uninstalling a failed
-	// release behind the operator's back is not box's call. Say so instead.
 	hist, herr := h.cfg.Releases.History(h.Release)
 	if herr == nil && len(hist) > 0 {
-		return nil, false, fmt.Errorf("a release named %s exists in %s but is not deployed (status %q); fix or remove it with helm, then apply again",
+		return nil, fmt.Errorf("a release named %s exists in %s but is not deployed (status %q); fix or remove it with helm, then apply again",
 			h.Release, h.Namespace, lastStatus(hist))
 	}
-	return nil, false, nil
+	return nil, nil
 }
 
 // Upgrade installs or upgrades the release and waits for it. The install path
@@ -115,10 +171,7 @@ func (h *Helm) Upgrade(ctx context.Context, chart Chart, values map[string]any) 
 	if err != nil {
 		return 0, fmt.Errorf("load chart %s: %w", chart.Ref, err)
 	}
-	timeout := h.Timeout
-	if timeout <= 0 {
-		timeout = 15 * time.Minute
-	}
+	timeout := h.timeout()
 	_, exists, err := h.Deployed(ctx)
 	if err != nil {
 		return 0, err
@@ -151,6 +204,44 @@ func (h *Helm) Upgrade(ctx context.Context, chart Chart, values map[string]any) 
 		return 0, fmt.Errorf("apply %s in %s: %w", h.Release, h.Namespace, err)
 	}
 	return acc.Version(), nil
+}
+
+// Rollback returns the release to an earlier revision and waits for it.
+//
+// It is what a failed update step does, so it takes the revision the step
+// recorded, never "one back": an update can make more than one revision (the
+// per-host and login steps are object writes, not revisions, but a retried
+// apply is), and "one back" could land between them.
+//
+// Helm v4.3.1's rollback takes no context, so box refuses to start one on a
+// cancelled run and bounds it with the same Timeout as an upgrade rather than
+// pretending the context reaches it.
+func (h *Helm) Rollback(ctx context.Context, revision int) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if revision <= 0 {
+		return fmt.Errorf("roll back %s in %s: %d is not a revision box recorded", h.Release, h.Namespace, revision)
+	}
+	rb := action.NewRollback(h.cfg)
+	rb.Version = revision
+	rb.WaitStrategy = helmkube.StatusWatcherStrategy
+	rb.WaitForJobs = true
+	rb.Timeout = h.timeout()
+	rb.Description = "box update rollback"
+	if err := rb.Run(h.Release); err != nil {
+		return fmt.Errorf("roll back %s in %s to revision %d: %w", h.Release, h.Namespace, revision, err)
+	}
+	return nil
+}
+
+// timeout is how long a Helm action may take. Zero is 15 minutes, which is
+// what hack/e2e-kind.sh gives the wiring Job.
+func (h *Helm) timeout() time.Duration {
+	if h.Timeout > 0 {
+		return h.Timeout
+	}
+	return 15 * time.Minute
 }
 
 // Receipt reads the `<release>-wiring` ConfigMap's status.json, which
