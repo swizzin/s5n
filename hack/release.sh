@@ -17,6 +17,9 @@
 #                             s5n.default.digest in the copy's variants.yaml
 #   package-chart <workdir>   (VERSION, DIGEST, AUTOMATED, IMAGE) the chart's
 #                             validation, the package, the lint and the render
+#   sign-sums <dist-dir>      (BOX_SIGNING_KEY, VERSION) sign the box release's
+#                             sha256sums.txt for this version, writing
+#                             sha256sums.txt.sig
 #   notes <body>              (VERSION) write the release body and print it
 #
 # Inputs are the environment variable names release.yaml's steps already set.
@@ -33,6 +36,7 @@ usage: hack/release.sh route <output>
        hack/release.sh verify-version
        hack/release.sh stamp-digest <workdir>
        hack/release.sh package-chart <workdir>
+       hack/release.sh sign-sums <dist-dir>
        hack/release.sh notes <body.md>
 USAGE
   exit 2
@@ -238,6 +242,32 @@ step_package_chart() {
   echo "packaged $(basename "$tgz") naming ${want}"
 }
 
+# step_sign_sums signs the checksums the box release is about to publish. box
+# refuses a release whose signature it cannot verify and never falls back to
+# trusting the checksums alone, so a box release without one reaches no host at
+# all: the step fails before the release exists rather than publishing one
+# nobody can install. It runs here, not in the workflow, so the rehearsal signs
+# with a throwaway key through the same code the release runs.
+#
+# The version is part of what is signed: a signature over the checksums alone is
+# one every release publishing the same binaries could reuse, and an older
+# release's validly signed sums served under this tag are a downgrade.
+step_sign_sums() {
+  local dist=${1:-}
+  need_path dist-dir "$dist"
+  : "${VERSION:?VERSION is unset}"
+  if [[ -z "${BOX_SIGNING_KEY:-}" ]]; then
+    echo "release: BOX_SIGNING_KEY is empty; a box release is signed, so this one must not publish" >&2
+    exit 1
+  fi
+  local sums="$dist/sha256sums.txt"
+  if [[ ! -f "$sums" ]]; then
+    echo "release: ${sums} is not there to sign: build the binaries before signing" >&2
+    exit 1
+  fi
+  go run ./hack/sign sign "$VERSION" "$sums"
+}
+
 # step_notes is release.yaml's release body: the app images and the platform
 # pins that moved since the previous s5n-v* tag, or everything a first tag
 # ships. Both files, through the same parser the release decision uses, so
@@ -266,6 +296,7 @@ case "${1:-}" in
   verify-version) step_verify_version ;;
   stamp-digest) step_stamp_digest "${2:-}" ;;
   package-chart) step_package_chart "${2:-}" ;;
+  sign-sums) step_sign_sums "${2:-}" ;;
   notes) step_notes "${2:-}" ;;
   *) usage ;;
 esac

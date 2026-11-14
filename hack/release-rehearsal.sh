@@ -304,6 +304,119 @@ expect_ok "route -> package-chart: the automatic chart is packaged at ${called_v
   env VERSION="$called_version" DIGEST="$digest" AUTOMATED="$called_automated" \
   "$rclone/hack/release.sh" package-chart "$work"
 
+# ---- e. the signed checksums -------------------------------------------------
+# box runs as root and verifies the signature over sha256sums.txt before it
+# replaces itself, and it refuses a release it cannot verify rather than skipping
+# the check: a box release that ships without a signature reaches no host. So
+# the signing step is a release step like any other, and it is rehearsed like
+# one -- through hack/release.sh, with a throwaway key, verified by the code box
+# actually runs (hack/sign verify imports internal/selfupdate).
+#
+# It signs in a clone, because sign refuses a seed whose public half is not the
+# key committed in internal/selfupdate/signing.pub, and the committed file is
+# empty on purpose. The clone gets this checkout's release.sh, hack/sign and
+# internal/selfupdate, the way the other clones above get release.sh, so a
+# maintainer rehearsing an edit does not rehearse the commit before it.
+echo "== e. the signed checksums"
+sclone="$tmp/clone-sign"
+git clone --no-local --quiet . "$sclone"
+cp -p "$release" "$sclone/hack/release.sh"
+cp -p hack/sign/main.go "$sclone/hack/sign/main.go"
+cp -p internal/selfupdate/*.go "$sclone/internal/selfupdate/"
+
+# signcmd runs hack/sign where the release runs it: from the replica's root, so
+# the signing.pub it reads and the one a box built there would embed are the
+# same file.
+signcmd() {
+  ( cd "$sclone" && go run ./hack/sign "$@" )
+}
+
+dist="$tmp/dist"
+mkdir -p "$dist"
+sums_digest=$(printf 'a%.0s' {1..64})
+printf '%s  box-linux-amd64\n' "$sums_digest" > "$dist/sha256sums.txt"
+box_version=0.5.0
+box_version_next=0.5.1
+published="$sclone/internal/selfupdate/signing.pub"
+key="$tmp/signing.key"
+run signcmd keygen "$key"
+if [ "$rc" -ne 0 ]; then
+  bad "keygen: exit ${rc}: ${out}"
+else
+  # What keygen prints is what the maintainer commits; here it is the release's
+  # own key for the length of this run.
+  printf '%s\n' "$out" > "$tmp/signing.pub"
+  cp "$tmp/signing.pub" "$published"
+  ok "keygen: the throwaway public key is committed in the replica's signing.pub"
+fi
+seed=$(cat "$key" 2>/dev/null || true)
+
+expect_ok "sign-sums signs the checksums the release publishes" "signed sha256sums.txt for box-v${box_version}" \
+  env BOX_SIGNING_KEY="$seed" VERSION="$box_version" "$sclone/hack/release.sh" sign-sums "$dist"
+expect_ok "the signature is one box accepts" "sha256sums.txt: signature ok for box-v${box_version}" \
+  signcmd verify "$box_version" "$dist/sha256sums.txt" "$published"
+expect_fail "sign-sums refuses an empty key instead of publishing an unsigned release" \
+  "BOX_SIGNING_KEY is empty" \
+  env BOX_SIGNING_KEY= VERSION="$box_version" "$sclone/hack/release.sh" sign-sums "$dist"
+
+# F1: the signed message names the release. One release's signed checksums are
+# not another's, even when the bytes are identical, so an older release's
+# signature cannot ride under a newer tag.
+expect_fail "a signature made for box-v${box_version} does not verify as box-v${box_version_next}" \
+  "does not verify" \
+  signcmd verify "$box_version_next" "$dist/sha256sums.txt" "$published"
+
+# F2: a seed whose public half is not the committed key produces boxes that can
+# never verify another release, so signing refuses and names both keys.
+other_key="$tmp/other.key"
+run signcmd keygen "$other_key"
+if [ "$rc" -ne 0 ]; then
+  bad "keygen for the mismatched case: exit ${rc}: ${out}"
+fi
+other_seed=$(cat "$other_key" 2>/dev/null || true)
+expect_fail "sign-sums refuses a seed that is not the committed key's" \
+  "BOX_SIGNING_KEY signs as" \
+  env BOX_SIGNING_KEY="$other_seed" VERSION="$box_version" "$sclone/hack/release.sh" sign-sums "$dist"
+
+# ... and an empty committed key is its own sentence: it is a step not taken, not
+# a wrong key.
+: > "$published"
+expect_fail "sign-sums refuses to sign while signing.pub is empty" \
+  "commit the public key first" \
+  env BOX_SIGNING_KEY="$seed" VERSION="$box_version" "$sclone/hack/release.sh" sign-sums "$dist"
+cp "$tmp/signing.pub" "$published"
+
+# A checksum changed after signing is a different release, and that has to be
+# what the verifier says.
+cp "$dist/sha256sums.txt" "$tmp/tampered.txt"
+cp "$dist/sha256sums.txt.sig" "$tmp/tampered.txt.sig"
+sed -i 's/^a/b/' "$tmp/tampered.txt"
+expect_fail "a checksum edited after signing does not verify" "does not verify" \
+  signcmd verify "$box_version" "$tmp/tampered.txt" "$published"
+
+# The committed file is empty until the maintainer fills it in, and box's build
+# must not need it to be a key: that build is a box which refuses to update
+# itself and says so, not a compile error.
+expect_ok "box builds with the committed signing.pub still empty" "" \
+  go build -o "$tmp/box" ./cmd/box
+
+# Signing is only half of it: the asset has to be uploaded, the secret wired up,
+# and the step given the version it signs for, or every box built from this
+# release is unable to update itself.
+has "release.yaml uploads the signature with the release's other assets" \
+  .github/workflows/release.yaml "dist/sha256sums.txt.sig"
+has "release.yaml gives the signing step the release's secret" \
+  .github/workflows/release.yaml "secrets.BOX_SIGNING_KEY"
+run python3 -c 'import sys
+text = open(sys.argv[1]).read()
+step = text.split("secrets.BOX_SIGNING_KEY", 1)[1].split("hack/release.sh sign-sums", 1)[0]
+sys.exit(0 if "needs.route.outputs.version" in step else 1)' .github/workflows/release.yaml
+if [ "$rc" -eq 0 ]; then
+  ok "release.yaml gives the signing step the version it signs for"
+else
+  bad "release.yaml does not give the signing step needs.route.outputs.version: sign-sums refuses without one"
+fi
+
 if [ "$fail" -ne 0 ]; then
   echo "release-rehearsal: FAILED" >&2
   exit 1

@@ -6,11 +6,12 @@
 #                   GitHub release lists the app images and the platform pins
 #                   that moved since the last s5n-v* tag, and is never marked
 #                   latest.
-#   box-v<version>  publishes box's binaries and sha256sums.txt as the assets of
-#                   a GitHub release marked latest, so releases/latest always
-#                   means box. Only a maintainer's tag cuts one: box's own code
-#                   is released by hand, and a platform patch ships in the
-#                   chart, so there is nothing for a bot to decide.
+#   box-v<version>  publishes box's binaries, sha256sums.txt and the signature
+#                   over it as the assets of a GitHub release marked latest, so
+#                   releases/latest always means box. Only a maintainer's tag
+#                   cuts one: box's own code is released by hand, and a platform
+#                   patch ships in the chart, so there is nothing for a bot to
+#                   decide.
 #
 # A tag pushed with the default GITHUB_TOKEN starts no workflow, so the job that
 # decides a push to main may release (ci.yaml) cannot reach this one by pushing
@@ -267,6 +268,19 @@ jobs:
               -o "dist/box-linux-${arch}" ./cmd/box
           done
           (cd dist && sha256sum box-linux-amd64 box-linux-arm64 > sha256sums.txt && cat sha256sums.txt)
+      - name: sign the checksums
+        env:
+          BOX_SIGNING_KEY: ${{ secrets.BOX_SIGNING_KEY }}
+          VERSION: ${{ needs.route.outputs.version }}
+        run: |
+          set -euo pipefail
+          # box runs as root and verifies this signature before it replaces
+          # itself, and it refuses a release it cannot verify rather than
+          # skipping the check. A box release without the signature is one no
+          # host can install, so a missing secret stops the run here, before the
+          # release exists. The signed message names the tag: an older release's
+          # signed sums served under this one must not verify.
+          hack/release.sh sign-sums "$(pwd)/dist"
       - name: publish the GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -280,4 +294,4 @@ jobs:
             --generate-notes \
             --latest=true \
             --verify-tag \
-            dist/box-linux-amd64 dist/box-linux-arm64 dist/sha256sums.txt
+            dist/box-linux-amd64 dist/box-linux-arm64 dist/sha256sums.txt dist/sha256sums.txt.sig
