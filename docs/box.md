@@ -694,7 +694,7 @@ and raises it when it deletes support for something an old release relies on. Th
 platform pins are part of that promise: box's compiled-in manifests must work with the
 platform version every release back to its floor pins. That isn't hypothetical:
 `update` replaces box before it moves the chart, so a new box runs against root's old
-release between those two steps, and for longer when an update rolls back. A release
+release between those two steps, and for longer when a release is rolled back. A release
 older than box's floor is one box will only update.
 
 **box only uses published charts (decided).** It pulls a released chart by version from
@@ -923,7 +923,8 @@ The chart pins every image by digest; there's no in-cluster image updater and no
 1. Renovate opens a digest bump when an app image publishes.
 2. CI runs the e2e suite on it; a passing bump cuts a chart release automatically.
 3. Each box runs `update` on a timer (on by default). A health check and a wiring check
-   gate each update; a failure rolls back to the previous release (Phase 3).
+   gate each update; a failure stops the update there and is recorded, and rolling back
+   is the operator's command (Phase 3).
 
 New images arrive hours after upstream instead of minutes, and a broken upstream image
 fails in CI instead of on a user's box.
@@ -951,16 +952,32 @@ runs over forward-only database migrations, so 0.5 carries a narrow rollback ahe
   list of globs relative to the app's config directory: the databases and the files
   that point at them (`*.db`, `*.db-wal`, `config.xml`), never caches, logs, media
   covers or Plex's metadata bundles. An app without the key has nothing to restore.
+- **An app a hand pin holds doesn't move.** Its image is the one values pin, whatever
+  the chart's pin did, so a step neither stops it nor copies it.
+- **Snapshots can be turned off for an app (decided; where the switch lives is
+  proposed).** A copy costs disk, and the app is down while it is made. With snapshots
+  off for an app, a step that moves it takes no copy of it and the plan says so. That
+  app can't be rolled back.
 - **Consistent, not live.** The moving apps are scaled to zero first, which the image
   change does anyway, so the copy is taken with no writer. It goes under the config
   root in `.box/snapshots/<from>-<to>-<time>/<app>/`, on the same filesystem as what it
   copies.
-- **Rollback is the snapshot plus the previous revision.** When the health or wiring
-  gate fails, the moved apps are scaled to zero, their snapshot files put back (a file
-  the globs match that the snapshot lacks, such as a new `-wal`, is removed), and the
-  release rolled back to the revision it had before the step, which is exactly what was
-  running, values included. The failed release is recorded and the timer won't take it
-  again; a newer release clears that.
+- **A failed gate stops the update; it doesn't roll back (decided).** When the health
+  or wiring gate fails, box leaves the release where the step put it, records the
+  failed release and says where the box is. The health gate can't tell a slow
+  migration from a failed one, and undoing a migration that was about to finish is
+  worse than waiting for someone to look. The timer won't take the failed release
+  again; a newer release clears that. A step that fails before the release moves only
+  starts the apps it stopped.
+- **Rollback is a command, and only for what has a copy (decided; mechanism
+  proposed).** Nothing but the operator rolls a box back. One app goes back by
+  restoring its snapshot and pinning the image it had, which holds it like any hand
+  pin; removing the pin releases it. The whole release goes back by restoring every
+  app the step moved and returning to the revision before the step, which is exactly
+  what was running, values included. box refuses that when an app the step moved has
+  no snapshot: the old image would start on a migrated database. Either way the apps
+  are stopped, and their pods gone, before a file is put back (a file the globs match
+  that the snapshot lacks, such as a new `-wal`, is removed).
 - **Two kept.** After a step passes, each app keeps its two newest snapshots.
 
 **What `status` shows in 0.5 (decided).** The first line only: the installed release, the
