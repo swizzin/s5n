@@ -44,12 +44,6 @@ import (
 // ManifestName is the file inside a snapshot that records what it holds.
 const ManifestName = "manifest.json"
 
-// dirMode is how box creates the snapshot tree and any config directory a
-// restore has to put back. The snapshots sit under a config root owned by the
-// seedbox's uid, and root writes them: 0750 keeps the snapshot out of the app's
-// reach, so an app cannot corrupt the copy that would restore it.
-const dirMode fs.FileMode = 0o750
-
 // File is one regular file in a snapshot.
 type File struct {
 	// Path is relative to the app's config directory, slash-separated, and is
@@ -126,6 +120,12 @@ func Take(configDir string, globs []string, dest string, images Images) (Manifes
 	} else if !errors.Is(err, fs.ErrNotExist) {
 		return Manifest{}, fmt.Errorf("snapshot %s: %w", dest, err)
 	}
+	// An app's config directory is a direct child of the config root, and that
+	// is what makes its owner the seedbox user's ids.
+	own, err := treeOwnerOf(filepath.Dir(configDir))
+	if err != nil {
+		return Manifest{}, err
+	}
 
 	partial := dest + ".partial"
 	// A partial tree is a snapshot whose run died before the rename. It was
@@ -134,10 +134,10 @@ func Take(configDir string, globs []string, dest string, images Images) (Manifes
 	if err := os.RemoveAll(partial); err != nil {
 		return Manifest{}, fmt.Errorf("snapshot %s: %w", partial, err)
 	}
-	if err := os.MkdirAll(partial, dirMode); err != nil {
+	if err := makeDir(partial, own); err != nil {
 		return Manifest{}, fmt.Errorf("snapshot %s: %w", partial, err)
 	}
-	man, err := writeTree(configDir, globs, partial, images)
+	man, err := writeTree(configDir, globs, partial, images, own)
 	if err != nil {
 		os.RemoveAll(partial)
 		return Manifest{}, err
@@ -152,7 +152,7 @@ func Take(configDir string, globs []string, dest string, images Images) (Manifes
 // writeTree copies the matching files under configDir into partial and writes
 // the manifest there. It is the half of Take that owns the temporary tree, so a
 // failure anywhere in it is cleaned up by the only caller.
-func writeTree(configDir string, globs []string, partial string, images Images) (Manifest, error) {
+func writeTree(configDir string, globs []string, partial string, images Images, own treeOwner) (Manifest, error) {
 	entries, err := matchEntries(configDir, globs)
 	if err != nil {
 		return Manifest{}, err
@@ -177,7 +177,7 @@ func writeTree(configDir string, globs []string, partial string, images Images) 
 		if !e.mode.IsRegular() {
 			return Manifest{}, fmt.Errorf("snapshot %s: %s matches but is not a regular file", configDir, e.path)
 		}
-		f, err := copyFile(configDir, partial, e.path)
+		f, err := copyFile(configDir, partial, e.path, own)
 		if err != nil {
 			return Manifest{}, err
 		}
@@ -190,7 +190,16 @@ func writeTree(configDir string, globs []string, partial string, images Images) 
 	if err != nil {
 		return Manifest{}, fmt.Errorf("snapshot %s: %w", configDir, err)
 	}
-	if err := os.WriteFile(filepath.Join(partial, ManifestName), append(data, '\n'), 0o600); err != nil {
+	name := filepath.Join(partial, ManifestName)
+	// The manifest is box's own file, not a copy, so it is written readable by
+	// the seedbox's user: their box reads it to find what a rollback restores.
+	if err := os.WriteFile(name, append(data, '\n'), treeFileMode); err != nil {
+		return Manifest{}, fmt.Errorf("snapshot %s: %w", configDir, err)
+	}
+	if err := os.Chmod(name, treeFileMode); err != nil {
+		return Manifest{}, fmt.Errorf("snapshot %s: %w", configDir, err)
+	}
+	if err := own.own(name); err != nil {
 		return Manifest{}, fmt.Errorf("snapshot %s: %w", configDir, err)
 	}
 	return man, nil
@@ -200,7 +209,7 @@ func writeTree(configDir string, globs []string, partial string, images Images) 
 // keeping its mode, mtime and (as root) its owner. It streams, because a Plex
 // library database is bigger than the memory of a small box: the hash is
 // computed as the bytes go past.
-func copyFile(configDir, partial, rel string) (File, error) {
+func copyFile(configDir, partial, rel string, own treeOwner) (File, error) {
 	src := filepath.Join(configDir, filepath.FromSlash(rel))
 	info, err := os.Lstat(src)
 	if err != nil {
@@ -212,7 +221,7 @@ func copyFile(configDir, partial, rel string) (File, error) {
 	}
 	defer in.Close()
 	dst := filepath.Join(partial, filepath.FromSlash(rel))
-	if err := os.MkdirAll(filepath.Dir(dst), dirMode); err != nil {
+	if err := makeDir(filepath.Dir(dst), own); err != nil {
 		return File{}, fmt.Errorf("snapshot: %w", err)
 	}
 	// A copy inside the partial tree needs no temporary name of its own: the
@@ -474,9 +483,9 @@ func linkedDir(configDir, rel string) (string, error) {
 }
 
 // makeDirs creates the directories between configDir and a restored file that
-// are missing and (as root) hands each one it made to the file's owner: a
-// directory left as root's would lock the app out of the file inside it. A
-// directory that is already there is the app's, and is left as it is.
+// are missing, at dirMode, and (as root) hands each one it made to the file's
+// owner: a directory left as root's would lock the app out of the file inside
+// it. A directory that is already there is the app's, and is left as it is.
 func makeDirs(configDir, relDir string, uid, gid int) error {
 	if relDir == "." {
 		return nil
@@ -489,6 +498,9 @@ func makeDirs(configDir, relDir string, uid, gid int) error {
 			continue
 		}
 		if err != nil {
+			return err
+		}
+		if err := os.Chmod(at, dirMode); err != nil {
 			return err
 		}
 		if os.Geteuid() == 0 {

@@ -278,6 +278,92 @@ func TestRestoreAManifestFromBeforeImages(t *testing.T) {
 	}
 }
 
+// TestTakeOwnsTheTree: what box creates under a config root belongs to the
+// config root's owner, not to the root process that wrote it, and the manifest
+// is readable by that user. A tree only root could read would make rolling back
+// a seedbox's own app a root command: the seedbox's box runs as its user, reads
+// the copy and writes the hold.
+//
+// A copied file keeps the owner and mode it had, because an app's own files are
+// already the seedbox's and a restore has to put each back as the app wrote it.
+func TestTakeOwnsTheTree(t *testing.T) {
+	configRoot := t.TempDir()
+	app := filepath.Join(configRoot, "sonarr-4k")
+	write(t, filepath.Join(app, "db", "sonarr.db"), "the database", 0o640)
+	if os.Geteuid() == 0 {
+		// The seedbox's own ids, which root can only learn from what the
+		// seedbox owns: the config root is theirs.
+		if err := os.Chown(configRoot, 1234, 1234); err != nil {
+			t.Fatal(err)
+		}
+	}
+	dest, err := Dir(configRoot, "0.4.0", "0.5.0", time.Unix(1700000000, 0).UTC(), "sonarr-4k")
+	if err != nil {
+		t.Fatalf("dir: %v", err)
+	}
+	if _, err := Take(app, []string{"db/sonarr.db"}, dest, images()); err != nil {
+		t.Fatalf("take: %v", err)
+	}
+
+	wantUID, wantGID := os.Geteuid(), os.Getegid()
+	if os.Geteuid() == 0 {
+		wantUID, wantGID = 1234, 1234
+	}
+	for _, dir := range []string{filepath.Join(configRoot, ".box"), Root(configRoot), filepath.Dir(dest), dest, filepath.Join(dest, "db")} {
+		info, err := os.Lstat(dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !info.IsDir() {
+			t.Fatalf("%s is not a directory", dir)
+		}
+		if info.Mode().Perm() != dirMode {
+			t.Fatalf("%s mode = %o, want %o", dir, info.Mode().Perm(), dirMode)
+		}
+		if os.Geteuid() == 0 {
+			uid, gid := owner(info)
+			if uid != wantUID || gid != wantGID {
+				t.Fatalf("%s owned %d:%d, want the config root's %d:%d", dir, uid, gid, wantUID, wantGID)
+			}
+		}
+	}
+	man := filepath.Join(dest, ManifestName)
+	info, err := os.Lstat(man)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != treeFileMode {
+		t.Fatalf("manifest mode = %o, want %o: the seedbox's box reads it", info.Mode().Perm(), treeFileMode)
+	}
+	// The copy is the app's file, not box's: its owner and mode come from the
+	// file it was copied from.
+	copyPath := filepath.Join(dest, "db", "sonarr.db")
+	copied, err := os.Lstat(copyPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	source, err := os.Lstat(filepath.Join(app, "db", "sonarr.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if copied.Mode().Perm() != source.Mode().Perm() {
+		t.Fatalf("copied mode = %o, want the source's %o", copied.Mode().Perm(), source.Mode().Perm())
+	}
+	if gotUID, gotGID := owner(copied); gotUID != ownerUID(source) || gotGID != ownerGID(source) {
+		t.Fatalf("copied file owned %d:%d, want the source's owner", gotUID, gotGID)
+	}
+}
+
+func ownerUID(info os.FileInfo) int {
+	uid, _ := owner(info)
+	return uid
+}
+
+func ownerGID(info os.FileInfo) int {
+	_, gid := owner(info)
+	return gid
+}
+
 func TestTakeRefuses(t *testing.T) {
 	cases := []struct {
 		name    string
