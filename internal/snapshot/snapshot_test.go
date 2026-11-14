@@ -47,6 +47,16 @@ func write(t *testing.T, path, content string, mode os.FileMode) {
 
 func globs() []string { return []string{"config.xml", "app.db", "app.db-wal", "app.db-shm"} }
 
+// images are the pair one step knows about an app: what it ran when the copy
+// was taken and what the step moves it to. The values are invented; none of
+// these tests is about which image, only that the copy names both.
+func images() Images {
+	return Images{
+		Ran:     ImageRef{Repository: "registry.example.com/media/sonarr", Tag: "4.0.14", Digest: "sha256:" + strings.Repeat("a", 64)},
+		MovedTo: ImageRef{Repository: "registry.example.com/media/sonarr", Tag: "4.0.15", Digest: "sha256:" + strings.Repeat("b", 64)},
+	}
+}
+
 // nestedGlobs adds a database one directory down, where some apps keep theirs.
 func nestedGlobs() []string { return append(globs(), "db/db.sqlite3", "db/db.sqlite3-wal") }
 
@@ -54,7 +64,7 @@ func TestTakeCopiesTheMatchingFiles(t *testing.T) {
 	dir := configDir(t)
 	dest := filepath.Join(t.TempDir(), "step", "app")
 
-	man, err := Take(dir, globs(), dest)
+	man, err := Take(dir, globs(), dest, images())
 	if err != nil {
 		t.Fatalf("take: %v", err)
 	}
@@ -121,6 +131,150 @@ func TestTakeCopiesTheMatchingFiles(t *testing.T) {
 	}
 	if len(reread.Files) != len(man.Files) || reread.App != man.App {
 		t.Fatalf("reread manifest = %+v, want %+v", reread, man)
+	}
+}
+
+// TestTakeRecordsTheImages: the copy and the images that produced it belong
+// together, because nothing else on the box remembers them once the release has
+// moved. Both are read back from the file, not from the value Take returned.
+func TestTakeRecordsTheImages(t *testing.T) {
+	dir := configDir(t)
+	dest := filepath.Join(t.TempDir(), "step", "app")
+	want := images()
+
+	man, err := Take(dir, globs(), dest, want)
+	if err != nil {
+		t.Fatalf("take: %v", err)
+	}
+	if man.Image != want.Ran || man.MovedTo != want.MovedTo {
+		t.Fatalf("manifest images = %+v -> %+v, want %+v -> %+v", man.Image, man.MovedTo, want.Ran, want.MovedTo)
+	}
+	data, err := os.ReadFile(filepath.Join(dest, ManifestName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var reread Manifest
+	if err := json.Unmarshal(data, &reread); err != nil {
+		t.Fatalf("manifest: %v", err)
+	}
+	if reread.Image != want.Ran {
+		t.Fatalf("stored image = %+v, want %+v", reread.Image, want.Ran)
+	}
+	if reread.MovedTo != want.MovedTo {
+		t.Fatalf("stored movedTo = %+v, want %+v", reread.MovedTo, want.MovedTo)
+	}
+	// The keys are always written, tag and digest included: a rollback reads
+	// them by name, and one omitted key is a field that silently reads as
+	// empty.
+	for _, key := range []string{`"image"`, `"movedTo"`, `"repository"`, `"tag"`, `"digest"`} {
+		if !strings.Contains(string(data), key) {
+			t.Fatalf("the manifest does not carry %s: %s", key, data)
+		}
+	}
+}
+
+// TestTakeRefusesWithoutBothImages: a copy that names only one of the two
+// images cannot be rolled back, so Take refuses before it creates anything --
+// before it even reads the config directory, which is why the missing-directory
+// case still reports the images.
+func TestTakeRefusesWithoutBothImages(t *testing.T) {
+	ran, moved := images().Ran, images().MovedTo
+	cases := []struct {
+		name   string
+		images Images
+	}{
+		{"nothing at all", Images{}},
+		{"the image it ran is missing", Images{MovedTo: moved}},
+		{"the image it moves to is missing", Images{Ran: ran}},
+		{"the image it ran has no repository", Images{Ran: ImageRef{Tag: "4.0.14"}, MovedTo: moved}},
+		{"the image it moves to has no repository", Images{Ran: ran, MovedTo: ImageRef{Digest: "sha256:" + strings.Repeat("c", 64)}}},
+		{"the image it ran has neither tag nor digest", Images{Ran: ImageRef{Repository: ran.Repository}, MovedTo: moved}},
+		{"the image it moves to has neither tag nor digest", Images{Ran: ran, MovedTo: ImageRef{Repository: moved.Repository}}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := configDir(t)
+			dest := filepath.Join(t.TempDir(), "step", "app")
+			_, err := Take(dir, globs(), dest, tc.images)
+			if err == nil {
+				t.Fatal("the snapshot was taken without both images")
+			}
+			// The sentence is box's, verbatim: it is the one thing the
+			// operator reads when a step cannot say what it is moving from.
+			const want = "snapshot: the image the app ran and the image it moves to are both needed"
+			if err.Error() != want {
+				t.Fatalf("error = %q, want %q", err, want)
+			}
+			for _, p := range []string{dest, dest + ".partial"} {
+				if _, statErr := os.Lstat(p); !os.IsNotExist(statErr) {
+					t.Fatalf("%s exists after the refusal: %v", p, statErr)
+				}
+			}
+			// Nothing was copied: the refusal comes before the tree, so the
+			// rest of the config directory is untouched too.
+			if _, statErr := os.Lstat(filepath.Join(dir, "app.db")); statErr != nil {
+				t.Fatalf("the config directory was touched: %v", statErr)
+			}
+			// And before the config directory is even read: a step that
+			// cannot name its images is refused whether or not the app has
+			// state on disk.
+			_, err = Take(filepath.Join(dir, "gone"), globs(), filepath.Join(t.TempDir(), "app"), tc.images)
+			if err == nil || err.Error() != want {
+				t.Fatalf("error with no config directory = %v, want the images' refusal", err)
+			}
+		})
+	}
+}
+
+// TestRestoreAManifestFromBeforeImages: an update step taken by an older box
+// wrote a manifest with app, taken and files only. It still restores, and the
+// images read back zero, which is the caller's to interpret rather than a
+// reason to refuse a copy that is otherwise intact.
+func TestRestoreAManifestFromBeforeImages(t *testing.T) {
+	dir := configDir(t)
+	dest := filepath.Join(t.TempDir(), "step", "app")
+	if _, err := Take(dir, globs(), dest, images()); err != nil {
+		t.Fatalf("take: %v", err)
+	}
+	// Exactly what the older manifest held: the same object with the two keys
+	// gone, which is what a file written before them reads as.
+	path := filepath.Join(dest, ManifestName)
+	old, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var doc map[string]json.RawMessage
+	if err := json.Unmarshal(old, &doc); err != nil {
+		t.Fatalf("manifest: %v", err)
+	}
+	delete(doc, "image")
+	delete(doc, "movedTo")
+	old, err = json.MarshalIndent(doc, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, append(old, '\n'), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	man, err := readManifest(dest)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if !man.Image.IsZero() || !man.MovedTo.IsZero() {
+		t.Fatalf("a manifest without the keys read as %+v -> %+v, want zero images", man.Image, man.MovedTo)
+	}
+
+	write(t, filepath.Join(dir, "app.db"), "the migrated database", 0o600)
+	if err := Restore(dir, globs(), dest); err != nil {
+		t.Fatalf("restore: %v", err)
+	}
+	body, err := os.ReadFile(filepath.Join(dir, "app.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(body) != "the database" {
+		t.Fatalf("app.db = %q, want the snapshot's copy", body)
 	}
 }
 
@@ -198,7 +352,7 @@ func TestTakeRefuses(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			dir, globs, dest := tc.prepare(t)
-			_, err := Take(dir, globs, dest)
+			_, err := Take(dir, globs, dest, images())
 			if err == nil {
 				t.Fatalf("the snapshot was taken: %s", dest)
 			}
@@ -229,7 +383,7 @@ func TestTakeReplacesAStalePartial(t *testing.T) {
 	dest := filepath.Join(t.TempDir(), "app")
 	write(t, filepath.Join(dest+".partial", "app.db"), "half a copy", 0o600)
 
-	if _, err := Take(dir, globs(), dest); err != nil {
+	if _, err := Take(dir, globs(), dest, images()); err != nil {
 		t.Fatalf("take over a stale partial: %v", err)
 	}
 	body, err := os.ReadFile(filepath.Join(dest, "app.db"))
@@ -252,7 +406,7 @@ func TestRestorePutsEverythingBack(t *testing.T) {
 		}
 	}
 	dest := filepath.Join(t.TempDir(), "step", "app")
-	if _, err := Take(dir, globs(), dest); err != nil {
+	if _, err := Take(dir, globs(), dest, images()); err != nil {
 		t.Fatalf("take: %v", err)
 	}
 
@@ -327,7 +481,7 @@ func TestRestoreRemovesANewWAL(t *testing.T) {
 		t.Fatal(err)
 	}
 	dest := filepath.Join(t.TempDir(), "step", "app")
-	man, err := Take(dir, globs(), dest)
+	man, err := Take(dir, globs(), dest, images())
 	if err != nil {
 		t.Fatalf("take: %v", err)
 	}
@@ -360,7 +514,7 @@ func TestRestoreRemovesANewWAL(t *testing.T) {
 func TestRestoreRefusesATamperedSnapshot(t *testing.T) {
 	dir := configDir(t)
 	dest := filepath.Join(t.TempDir(), "step", "app")
-	if _, err := Take(dir, globs(), dest); err != nil {
+	if _, err := Take(dir, globs(), dest, images()); err != nil {
 		t.Fatalf("take: %v", err)
 	}
 	write(t, filepath.Join(dest, "app.db"), "the databasX", 0o640)
@@ -391,7 +545,7 @@ func TestRestoreRefusesATamperedSnapshot(t *testing.T) {
 func TestRestoreRefusesAManifestPathOutside(t *testing.T) {
 	dir := configDir(t)
 	dest := filepath.Join(t.TempDir(), "step", "app")
-	man, err := Take(dir, globs(), dest)
+	man, err := Take(dir, globs(), dest, images())
 	if err != nil {
 		t.Fatalf("take: %v", err)
 	}
@@ -423,7 +577,7 @@ func TestRestoreRefusesALinkedDirectory(t *testing.T) {
 	dir := configDir(t)
 	write(t, filepath.Join(dir, "db", "db.sqlite3"), "the nested database", 0o640)
 	dest := filepath.Join(t.TempDir(), "step", "app")
-	if _, err := Take(dir, nestedGlobs(), dest); err != nil {
+	if _, err := Take(dir, nestedGlobs(), dest, images()); err != nil {
 		t.Fatalf("take: %v", err)
 	}
 	elsewhere := t.TempDir()
@@ -462,7 +616,7 @@ func TestRestoreRebuildsAMissingDirectory(t *testing.T) {
 	dir := configDir(t)
 	write(t, filepath.Join(dir, "db", "db.sqlite3"), "the nested database", 0o640)
 	dest := filepath.Join(t.TempDir(), "step", "app")
-	if _, err := Take(dir, nestedGlobs(), dest); err != nil {
+	if _, err := Take(dir, nestedGlobs(), dest, images()); err != nil {
 		t.Fatalf("take: %v", err)
 	}
 	if err := os.RemoveAll(filepath.Join(dir, "db")); err != nil {
@@ -523,7 +677,7 @@ func TestTakeDoesNotReadADirectoryNoGlobNames(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = os.Chmod(closed, 0o700) })
-	if _, err := Take(dir, globs(), filepath.Join(t.TempDir(), "app")); err != nil {
+	if _, err := Take(dir, globs(), filepath.Join(t.TempDir(), "app"), images()); err != nil {
 		t.Fatalf("take read a directory no glob names: %v", err)
 	}
 }
@@ -585,7 +739,7 @@ func TestMatchesStayInsideTheirDirectory(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.glob, func(t *testing.T) {
 			dest := filepath.Join(t.TempDir(), "app")
-			man, err := Take(dir, []string{tc.glob}, dest)
+			man, err := Take(dir, []string{tc.glob}, dest, images())
 			if tc.paths == nil {
 				if err == nil || !strings.Contains(err.Error(), "nothing matches") {
 					t.Fatalf("error = %v, want nothing to match", err)

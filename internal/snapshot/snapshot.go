@@ -78,6 +78,13 @@ type Manifest struct {
 	App string `json:"app"`
 	// Taken is when the copy was made, in UTC.
 	Taken time.Time `json:"taken"`
+	// Image is what the app ran when the copy was taken, and MovedTo is what
+	// the step moved it to. They are what a rollback needs and nothing else
+	// keeps: once the release has moved, the box no longer says which image
+	// wrote these files. A snapshot taken before box recorded them has both
+	// zero, and a caller decides what that means.
+	Image   ImageRef `json:"image"`
+	MovedTo ImageRef `json:"movedTo"`
 	// Files are in path order, so two manifests of the same state compare
 	// equal and a diff of one is readable.
 	Files []File `json:"files"`
@@ -88,13 +95,22 @@ type Manifest struct {
 // is built at dest+".partial" and renamed, so dest is either a complete
 // snapshot or absent.
 //
+// The two images are recorded in the manifest before the first file is copied:
+// they are what a rollback reads a week later to know what to hold the app at
+// and what the hold avoids, and neither the step nor the release remembers them
+// once the release has moved. A step that cannot say both is refused before it
+// creates anything.
+//
 // A symlink that matches is a refusal: following it would copy something
 // outside the app's config directory, and a restore would then write through
 // it. So is a symlinked directory a glob names files under: the walk does not
 // follow it, and the snapshot would hold everything except those files. Only
 // regular files are copied, and a glob that matches nothing at all is a refusal
 // too: a snapshot that restores nothing must not look like one that worked.
-func Take(configDir string, globs []string, dest string) (Manifest, error) {
+func Take(configDir string, globs []string, dest string, images Images) (Manifest, error) {
+	if checkImage(images.Ran) != nil || checkImage(images.MovedTo) != nil {
+		return Manifest{}, errors.New("snapshot: the image the app ran and the image it moves to are both needed")
+	}
 	if err := CheckGlobs(globs); err != nil {
 		return Manifest{}, err
 	}
@@ -121,7 +137,7 @@ func Take(configDir string, globs []string, dest string) (Manifest, error) {
 	if err := os.MkdirAll(partial, dirMode); err != nil {
 		return Manifest{}, fmt.Errorf("snapshot %s: %w", partial, err)
 	}
-	man, err := writeTree(configDir, globs, partial)
+	man, err := writeTree(configDir, globs, partial, images)
 	if err != nil {
 		os.RemoveAll(partial)
 		return Manifest{}, err
@@ -136,12 +152,18 @@ func Take(configDir string, globs []string, dest string) (Manifest, error) {
 // writeTree copies the matching files under configDir into partial and writes
 // the manifest there. It is the half of Take that owns the temporary tree, so a
 // failure anywhere in it is cleaned up by the only caller.
-func writeTree(configDir string, globs []string, partial string) (Manifest, error) {
+func writeTree(configDir string, globs []string, partial string, images Images) (Manifest, error) {
 	entries, err := matchEntries(configDir, globs)
 	if err != nil {
 		return Manifest{}, err
 	}
-	man := Manifest{App: filepath.Base(configDir), Taken: time.Now().UTC(), Files: make([]File, 0, len(entries))}
+	man := Manifest{
+		App:     filepath.Base(configDir),
+		Taken:   time.Now().UTC(),
+		Image:   images.Ran,
+		MovedTo: images.MovedTo,
+		Files:   make([]File, 0, len(entries)),
+	}
 	for _, e := range entries {
 		if e.above {
 			return Manifest{}, fmt.Errorf("snapshot %s: %s is a symlink and a glob names files under it; a snapshot copies regular files and never follows a link, so they would be left out", configDir, e.path)
