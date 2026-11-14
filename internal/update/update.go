@@ -936,11 +936,18 @@ func scaleApps(ctx context.Context, cluster Cluster, apps []string, replicas int
 	return nil
 }
 
-// startAgain starts apps again after a failure that never reached Helm. It is
-// best effort on purpose: the step's own error is the one box reports, and a
-// second failure here would only hide it.
+// startAgain starts a step's apps again with the step's cleanup budget.
 func (u *Updater) startAgain(ctx context.Context, cluster Cluster, apps []string) {
-	cctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), u.cleanupWait())
+	startApps(ctx, cluster, apps, u.cleanupWait())
+}
+
+// startApps starts apps again after a failure that never reached the release. It
+// is best effort on purpose: the failure box reports is the one that matters,
+// and a second one here would only hide it. It carries its own deadline because
+// detaching from a cancelled context drops the parent's as well, and an API
+// server that stopped answering must not hold a failed run open.
+func startApps(ctx context.Context, cluster Cluster, apps []string, budget time.Duration) {
+	cctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), budget)
 	defer cancel()
 	_ = scaleApps(cctx, cluster, apps, 1)
 }

@@ -527,12 +527,9 @@ func (r *Rollback) pin(grantPath, valuesPath, app string, image snapshot.ImageRe
 }
 
 // startAgain puts the app back at one replica after a failure that never
-// restored anything. It is best effort: the failure box reports is the one that
-// matters, and a second error here would only hide it.
+// restored anything.
 func (r *Rollback) startAgain(ctx context.Context, cluster Cluster, app string) {
-	cctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), r.cleanupWait())
-	defer cancel()
-	_ = scaleApps(cctx, cluster, []string{app}, 1)
+	startApps(ctx, cluster, []string{app}, r.cleanupWait())
 }
 
 // fail ends a rollback that did not finish. It says what the app is on now --
@@ -648,7 +645,13 @@ func renderedImage(chart release.Chart, values map[string]any, holds []snapshot.
 	tag, digest := pinOf(values, app)
 	switch {
 	case digest != "":
+		// The digest replaces the variant's, and a pinned tag replaces its
+		// tag too: a pin box wrote (a rollback's, a hold's) names both, and
+		// the chart renders both (charts/s5n/templates/_helpers.tpl).
 		ref.Digest = digest
+		if tag != "" {
+			ref.Tag = tag
+		}
 	case tag != "":
 		ref.Tag = tag
 		ref.Digest = ""
