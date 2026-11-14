@@ -84,6 +84,50 @@ func TestHoldValuesLapsesWhenTheReleaseMovesPastIt(t *testing.T) {
 	}
 }
 
+// TestHoldValuesLapsesWhenTheReleasePinsAnotherTag: a release that names an
+// image by tag alone -- a locally built one, which has no digest to pin -- still
+// pins something other than the image the rollback avoided, so the hold lapses.
+// Comparing digests alone left it standing for good, because "" is the digest of
+// every tag-only image: the app would have stayed on its old image while box
+// said it was waiting for an image that release had already moved past.
+func TestHoldValuesLapsesWhenTheReleasePinsAnotherTag(t *testing.T) {
+	hold := heldSonarr()
+	hold.Avoiding = snapshot.ImageRef{Repository: "registry.example.com/seedbox/sonarr", Tag: "5.0.0"}
+	values := map[string]any{"apps": map[string]any{"sonarr": map[string]any{"enabled": true}}}
+	chart := release.Chart{Name: "s5n", Version: "0.5.0", Variants: variantsTagOnly("5.0.1")}
+	overlay, lapsed, err := HoldValues(chart, values, []snapshot.Hold{hold})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(overlay) != 0 {
+		t.Fatalf("overlay = %#v, want none: the release pins another tag", overlay)
+	}
+	if len(lapsed) != 1 || lapsed[0].Hold.App != "sonarr" {
+		t.Fatalf("lapsed = %+v, want sonarr", lapsed)
+	}
+	const want = "sonarr moves with the release again: s5n 0.5.0 pins 5.0.1, not 5.0.0"
+	if lapsed[0].Text != want {
+		t.Fatalf("lapse text = %q, want %q", lapsed[0].Text, want)
+	}
+}
+
+// TestHoldValuesKeepsAReleaseThatPinsTheSameTagOnlyImage: the other half of the
+// tag comparison -- a release whose pin is still the avoided tag names the image
+// the rollback put the app back onto, so the hold stands.
+func TestHoldValuesKeepsAReleaseThatPinsTheSameTagOnlyImage(t *testing.T) {
+	hold := heldSonarr()
+	hold.Avoiding = snapshot.ImageRef{Repository: "registry.example.com/seedbox/sonarr", Tag: "5.0.0"}
+	values := map[string]any{"apps": map[string]any{"sonarr": map[string]any{"enabled": true}}}
+	chart := release.Chart{Name: "s5n", Version: "0.5.0", Variants: variantsTagOnly("5.0.0")}
+	overlay, lapsed, err := HoldValues(chart, values, []snapshot.Hold{hold})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(lapsed) != 0 || len(overlay) != 1 {
+		t.Fatalf("overlay = %#v lapsed = %+v, want the hold kept", overlay, lapsed)
+	}
+}
+
 // TestHoldValuesStandsWhenTheChartSaysNothing: a release box cannot compare the
 // app against is no reason to drop the hold -- the app stays where the rollback
 // left it, and the next release that ships variants decides.

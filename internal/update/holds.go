@@ -72,11 +72,17 @@ func holdFor(holds []snapshot.Hold, app string) (snapshot.Hold, bool) {
 }
 
 // holdLapsed reports whether one release has moved past a hold: it pins, for
-// the app's selected variant, a repository or digest other than the image the
-// rollback avoided. The digest is what the chart pins, so a release that
-// re-pushed the avoided tag to new bytes lapses the hold too.
+// the app's selected variant, an image other than the one the rollback avoided.
+//
+// It is the identity a rollback already uses to answer "the app runs this
+// image" (sameImage): the repository, then the digest when either side has one,
+// then the tag. The tag is the fallback a release that pins no digest leaves --
+// a locally built image, or a variant the chart has not tagged with one yet --
+// and without it such a hold could never lapse: "" equals "" for every tag, so
+// the app would stay on its old image while box went on saying it was waiting
+// for a release that had already moved past it.
 func holdLapsed(pinned snapshot.ImageRef, h snapshot.Hold) bool {
-	return pinned.Repository != h.Avoiding.Repository || pinned.Digest != h.Avoiding.Digest
+	return !sameImage(pinned, h.Avoiding)
 }
 
 // Lapse is one hold a release has moved past, and the sentence box says when it

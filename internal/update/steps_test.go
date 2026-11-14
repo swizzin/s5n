@@ -163,6 +163,17 @@ radarr:
 `, sonarrRepo, sonarrDigest))
 }
 
+// variantsTagOnly is a chart whose sonarr has no digest to pin: the image a
+// release names when it was built here and never pushed, so its tag is the only
+// handle the hold can compare.
+func variantsTagOnly(sonarrTag string) []byte {
+	return []byte(fmt.Sprintf(`sonarr:
+  default:
+    repository: registry.example.com/seedbox/sonarr
+    tag: %q
+`, sonarrTag))
+}
+
 // variantsBoth digests is the fixture variants.yaml with sonarr and radarr
 // moving independently, for a step that moves two apps and copies only one.
 func variantsBoth(sonarrDigest, radarrDigest string) []byte {
