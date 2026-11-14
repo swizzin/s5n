@@ -585,7 +585,7 @@ func (a *Applier) Apply(ctx context.Context, opts Options) (Result, error) {
 		if host := hostOf(values); host != "" {
 			details = append(details, "host: "+host)
 		}
-		if apps := enabledApps(values); len(apps) > 0 {
+		if apps := EnabledApps(values); len(apps) > 0 {
 			details = append(details, "apps: "+strings.Join(apps, ", "))
 		}
 		if len(details) > 0 {
@@ -860,7 +860,7 @@ func loginRule(sb *seedbox.Seedbox, chart Chart, values map[string]any, hosts []
 		Values:    values,
 		Image:     chart.Pins.Authelia,
 		Namespace: namespace,
-		OIDC:      cat.OIDCApps(enabledApps(values)),
+		OIDC:      cat.OIDCApps(EnabledApps(values)),
 	}, nil
 }
 
@@ -877,7 +877,7 @@ func oidcClients(chart Chart, values map[string]any) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	return cat.OIDCApps(enabledApps(values)), nil
+	return cat.OIDCApps(EnabledApps(values)), nil
 }
 
 // hostedHosts is every name the values serve at a host of its own, in catalog
@@ -1067,7 +1067,11 @@ func hostOf(values map[string]any) string {
 	return host
 }
 
-func enabledApps(values map[string]any) []string {
+// EnabledApps is every app the effective values switch on, sorted. It is what
+// the login's clients and hosted hosts are read from in apply, and what
+// `box update` compares two releases' images for: an app the operator turned
+// off has no database to migrate, so it is not a moving app.
+func EnabledApps(values map[string]any) []string {
 	apps, _ := values["apps"].(map[string]any)
 	out := make([]string, 0, len(apps))
 	for name, v := range apps {

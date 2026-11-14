@@ -1,0 +1,59 @@
+# A slice of charts/s5n/values.yaml, kept small: exactly the keys the fixture
+# grant and values file touch, plus one app neither of them mentions (radarr),
+# which is what proves the effective values switch off what the grant never
+# enabled.
+global:
+  puid: 1000
+  pgid: 1000
+  tz: Etc/UTC
+
+# The palette box draws its dialogs in and the login is drawn in: box reads it
+# from this file, and the chart renders nothing from it.
+theme: s5n
+
+storage:
+  data:
+    existingClaim: ""
+    hostPath: /srv/s5n/data
+    size: 1Ti
+  config:
+    existingClaim: ""
+    hostPath: /srv/s5n/config
+    size: 20Gi
+
+gateway:
+  enabled: true
+  host: ""
+  parentRef:
+    name: s5n
+    namespace: s5n-gateway
+    sectionName: ""
+
+networkPolicy:
+  enabled: true
+  gatewayFrom: []
+
+wiring:
+  timeoutSeconds: 300
+
+# The one transient key a chart has today: box init asks for it after the
+# confirm and hands it to that one apply (charts/s5n/catalog.yaml).
+secrets:
+  plexClaimToken: ""
+
+apps:
+  qbittorrent:
+    enabled: true
+    port: 8080
+    image:
+      variant: default
+  sonarr:
+    enabled: true
+    port: 8989
+    image:
+      variant: default
+  radarr:
+    enabled: true
+    port: 7878
+    image:
+      variant: default
