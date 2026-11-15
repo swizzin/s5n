@@ -30,8 +30,13 @@ func (d *Decision) noticePending(opts Options) bool {
 
 // askNoticeURL is the one optional question: a URL, or Enter to skip. It is a
 // Secret because the address can carry the token that makes it work, so it is
-// never echoed and never printed back.
-func (d *Decision) askNoticeURL() (string, error) {
+// never echoed and never printed back. ask is false when this run has nothing to
+// ask, and the answer is empty then.
+func (d *Decision) askNoticeURL(ask bool) (string, error) {
+	if !ask {
+		return "", nil
+	}
+	d.step(d.steps, "where should box post notices?")
 	answer, err := d.Prompt.Secret(Secret{
 		Key:      "notices.url",
 		Prompt:   "Where should box post notices? A URL, or Enter to skip",

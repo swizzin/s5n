@@ -459,13 +459,9 @@ func (d *Decision) Run(ctx context.Context, opts Options) (Result, error) {
 	// Where box tells someone who is not watching what it did. It is asked here,
 	// after the seedbox's own questions, and written with the other answers
 	// below: a cancel before this point writes nothing at all.
-	noticeURL := ""
-	if askNotice {
-		d.step(d.steps, "where should box post notices?")
-		noticeURL, err = d.askNoticeURL()
-		if err != nil {
-			return res, d.stop(err)
-		}
+	noticeURL, err := d.askNoticeURL(askNotice)
+	if err != nil {
+		return res, d.stop(err)
 	}
 
 	transientKeys := make([]string, 0, len(transient))

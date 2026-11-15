@@ -146,12 +146,12 @@ func healthOnly(ctx context.Context, o *updateFlags, out say.Reporter, conf host
 		out.Warn(fmt.Sprintf("not checking on the apps: %v", err))
 		return
 	}
-	boxHealth(ctx, kc, namespace, configRoot, out, conf, o.statePath(), grantDomain(sb)).run(ctx)
+	boxHealth(kc, namespace, configRoot, out, conf, o.statePath(), grantDomain(sb)).run(ctx)
 }
 
 // boxHealth is the health read of one box: the cluster's apps, update.json, and
 // the notices root's config asks for.
-func boxHealth(ctx context.Context, kc, namespace, configRoot string, out say.Reporter, conf hostconf.Config, statePath string, domain string) healthRead {
+func boxHealth(kc, namespace, configRoot string, out say.Reporter, conf hostconf.Config, statePath string, domain string) healthRead {
 	return healthRead{
 		Read: func(ctx context.Context) (map[string]update.AppHealth, error) {
 			w, err := update.NewWorkloads(kc, namespace, release.ReleaseName)

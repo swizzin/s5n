@@ -778,9 +778,9 @@ together with the image the app had.
   - **Root only.** The binary is root-owned. A user's `box update` that needs a newer
     box says so and stops: "box 0.4.0 is needed; root's next update brings it".
   - **Held like a pinned image.** `--hold-box` skips the self-update and says so on
-    every run. A key in root's config does the same once root's config exists; it
-    arrives with the timer, which keeps its interval there. A release whose `min-box`
-    a held box doesn't meet is shown, not taken.
+    every run. `update.hold-box: true` in root's config does the same on every run,
+    the timer's included (decided). A release whose `min-box` a held box doesn't meet
+    is shown, not taken.
   - **Package-managed installs defer.** If box came from a distro package, it never
     overwrites itself. It names the package command instead.
 - It picks the newest release this box meets `min-box` for. A newer release that needs
@@ -995,6 +995,45 @@ jitter so a fleet doesn't arrive at once. The interval is a key in root's config
 the timer can be turned off there. It reads the tag list from ghcr anonymously; no
 token is needed to learn that something moved.
 
+- **Root's config is `/etc/swizzin/box.yaml` (decided).** It sits beside the cluster
+  record, so `--record` moves both, and it is root's alone, mode 0600, because the
+  notice address can carry a token. bootstrap writes it once, on the host that has
+  none, with these keys and comments:
+
+  ```yaml
+  # box's settings for this host. box never rewrites this file; edit it by hand.
+  update:
+    timer: on        # off: no update checks and no health notices
+    interval: 1h     # how often the timer checks for a newer release; 15m at least
+    hold-box: false  # true: take no new box, the same as --hold-box on every run
+  notices:
+    url: ""          # box POSTs a JSON notice here after updates and on health changes
+  ```
+
+  An existing file is never rewritten. Every run parses it strictly: an unknown key, a
+  malformed line or a bad value stops the command, naming the file, the line and the
+  key, because a typo that is silently ignored is a box that quietly stopped updating.
+  A missing file is the defaults. `update.timer: off` is read by the timer's own wake,
+  so it takes effect on the next wake and systemd is never touched.
+- **The unit wakes box every fifteen minutes; box decides whether to check (decided).**
+  Two systemd units: `box-update.service` runs `box update --timer` as root with no
+  timeout (an update can wait out an app's thirty-minute startup budget), for the
+  record, grant and values that install used; `box-update.timer` wakes it 10 minutes
+  after boot, every 15 minutes after that, with up to 10 minutes of jitter.
+  `box update --timer` answers yes and asks nothing. The wake reads the clock
+  `update.json` holds: a check is due when the last one is zero or a whole interval
+  old, so most wakes read health and nothing else, and the check interval is one edit
+  in `box.yaml`. A wake that is not due contacts no registry and replaces no binary.
+  A wake that is due reads health after the check whatever it did, and once: a check
+  that failed leaves the last one unwritten, so every wake would be due again and a
+  registry outage would otherwise silence every health notice while it lasted.
+- **Where box cannot schedule itself, it says so (decided).** The units are installed
+  only when bootstrap runs as root on a host whose systemd is up. Anywhere else --
+  a container, a non-root run -- bootstrap prints one line: box will not check for
+  updates by itself, and `box update --timer` from cron every 15 minutes is the same
+  job. A seedbox that never updates on its own is the failure this exists to prevent,
+  so it is said out loud rather than left to be noticed.
+
 **When an app takes it (decided).** Each catalog app declares an apply policy, and the
 default is to apply as soon as the release is taken. Plex defers while it has active
 streams, and Jellyfin will do the same; the update applies at the first check with
@@ -1110,18 +1149,46 @@ not a change box made, and nothing snapshots it.
 **Notices (decided; what is posted is proposed).** A box that updates by itself has
 to be able to tell someone who isn't looking. box can post to one address after every
 update step (what moved, from what to what), when a step stops or an app is rolled
-back, and when an app stops being healthy. A notice about an unhealthy app that moved
-recently and has a snapshot names the rollback command; otherwise it names the logs.
-The hook is optional and strongly recommended: one URL per seedbox in its values, and
-one in root's config. A user's hook hears about their own seedbox; root's hears about
-the host and every seedbox on it. Health is read on every timer run and announced
-when it changes, in either direction, not on a schedule. There is no mail. Proposed:
-the notice is posted as JSON, and `init` asks for the URL.
+back, and when an app stops being healthy.
 
-**What `status` shows in 0.5 (decided).** The first line only: the installed release, the
-last update and how it ended, the next check, and anything held (the box binary, a
-failed release, an app rolled back or pinned). The rest of "status and doctor" stays
-proposed.
+- **The address is root's, in `notices.url` (decided).** One URL, on the host: a user's
+  own hook arrives with `adduser`, and values hold none in 0.5. `init` asks for it on
+  root's first run -- optional, masked, last -- and writes it into that one line of
+  root's file. No address means no notices, and no error.
+- **What is posted is JSON (decided).** One body per event:
+  `{"event", "box", "seedbox", "from", "to", "apps", "gate", "error", "command",
+  "text", "content"}`. The optional fields are left out when they don't apply. `text`
+  and `content` carry the same one sentence, so Slack and Mattermost (text) and Discord
+  (content) each show box's words rather than a rendering of the fields, and a script
+  reads the fields. An example: `box.example.com: s5n 0.5.1 → 0.5.2 (sonarr 4.0.14 →
+  4.0.15)`. The events are `updated`, `rolled-back`, `stopped`, `unhealthy`, `healthy`.
+- **Health is read on every wake, and only a change is posted (decided).** The first
+  reading on a box that stores none is recorded silently; after that an app whose
+  readiness flips, in either direction, is one notice. A changed reason is not a
+  change. An unhealthy notice names `box rollback <app>` when the app moved in the last
+  step and box has that step's copy of it, and the logs otherwise. There is no `box
+  logs` yet, so the command it names is `kubectl -n <namespace> logs
+  statefulset/<app>`.
+- **Posting never fails an update (decided).** One attempt, ten seconds. A receiver that
+  is down is one warning naming the host box posted to -- never the path or the query,
+  which is the token -- and the update that already happened stays a success.
+
+**What `status` shows in 0.5 (decided).** The first line only, from cheap reads -- no
+registry, so it is quick from a shell prompt. One line, segments joined by ` · `:
+
+1. the installed release, from Helm: `s5n 0.5.1`, or `s5n ? (cluster not reachable)`
+   when the cluster can't be read (the rest of the line still prints). That read has
+   ten seconds: an API server that does not answer in time is the same answer as one
+   that refused, so the one-line command cannot hang;
+2. the last update from `update.json`: `last update 0.5.0 → 0.5.1 Nov 15 03:12 ok`,
+   `... failed (health)`, `... ok, radarr rolled back`, or `last update none`;
+3. the next check: `timer off` (root's config), `timer not installed` (no unit on this
+   host), `next check within 15m` (due or overdue), or `next check ~04:12`;
+4. what's held, left out when nothing is: `held: box, release 0.5.2 (failed), radarr
+   (rolled back from 6.3), sonarr (pinned)`.
+
+`box status` takes `--record`, `--grant`, `--values` and `--kubeconfig`. The rest of
+"status and doctor" stays proposed.
 
 ### The platform layer (decided)
 

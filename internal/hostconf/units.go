@@ -73,10 +73,10 @@ func UnitFiles(boxPath, record, grant, values string) (service, timer []byte) {
 
 	var t strings.Builder
 	t.WriteString("[Unit]\n")
-	t.WriteString(fmt.Sprintf("Description=s5n: wake box every %d minutes to check for a newer release\n", WakeInterval))
+	fmt.Fprintf(&t, "Description=s5n: wake box every %d minutes to check for a newer release\n", WakeInterval)
 	t.WriteString("\n[Timer]\n")
 	t.WriteString("OnBootSec=10min\n")
-	t.WriteString(fmt.Sprintf("OnUnitActiveSec=%dmin\n", WakeInterval))
+	fmt.Fprintf(&t, "OnUnitActiveSec=%dmin\n", WakeInterval)
 	t.WriteString("RandomizedDelaySec=10min\n")
 	t.WriteString("\n[Install]\n")
 	t.WriteString("WantedBy=timers.target\n")

@@ -155,7 +155,6 @@ func parse(path string, data []byte) (Config, error) {
 			return Config{}, fmt.Errorf("%s:%d: malformed line %q", path, n, trimmed)
 		}
 		if !indented {
-			current = ""
 			switch section(key) {
 			case sectionUpdate, sectionNotices:
 				if strings.TrimSpace(value) != "" {

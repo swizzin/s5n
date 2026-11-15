@@ -19,7 +19,6 @@ import (
 type timerState struct {
 	state  update.State
 	saves  int
-	loadOK bool
 	loadIn error
 }
 
