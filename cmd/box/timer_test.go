@@ -249,3 +249,103 @@ func writeHostConf(t *testing.T, data string) string {
 	}
 	return path
 }
+
+// TestTimerUnitsNeverSchedulesOnAHostThatCannotRunIt: the two units are only
+// installed by root on a host whose systemd is up, or into a directory a test
+// names. Everything else gets the one line naming cron.
+func TestTimerUnitsNeverSchedulesOnAHostThatCannotRunIt(t *testing.T) {
+	dir := t.TempDir()
+	for _, c := range []struct {
+		name       string
+		unitDir    string
+		root       bool
+		systemd    bool
+		wantDir    string
+		wantLine   bool
+		wantSystem bool
+	}{
+		{"a test host names the directory", dir, false, false, dir, false, false},
+		{"root on systemd", "", true, true, "", false, true},
+		{"root without systemd", "", true, false, "", true, false},
+		{"a user", "", false, true, "", true, false},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			units, line := timerUnitsFor(c.unitDir, c.root, c.systemd)
+			if c.wantLine {
+				if units != nil {
+					t.Fatal("box scheduled an update on a host that cannot run one")
+				}
+				if line != noTimerLine {
+					t.Fatalf("line = %q, want %q", line, noTimerLine)
+				}
+				return
+			}
+			if line != "" {
+				t.Fatalf("line = %q, want none", line)
+			}
+			du, ok := units.(hostconf.DirUnits)
+			if !ok {
+				t.Fatalf("units = %T, want hostconf.DirUnits", units)
+			}
+			if c.wantSystem {
+				if du.Dir != hostconf.UnitDir || du.EnableWith == nil {
+					t.Fatalf("root on systemd got %+v, want %s with systemctl", du, hostconf.UnitDir)
+				}
+				return
+			}
+			if du.Dir != c.wantDir || du.EnableWith != nil {
+				t.Fatalf("--unit-dir got %+v, want %s and no systemctl", du, c.wantDir)
+			}
+		})
+	}
+}
+
+// TestScheduleUpdatesWritesTheFilesTheRunUsed: the unit's command carries the
+// record, grant and values this run installed, so the timer updates this seedbox
+// and not one a default path happens to name.
+func TestScheduleUpdatesWritesTheFilesTheRunUsed(t *testing.T) {
+	dir := t.TempDir()
+	var buf bytes.Buffer
+	out := &say.Plain{W: &buf}
+	scheduleUpdates(context.Background(), dir, "/work/cluster.yaml", "/work/grant.yaml", "/work/values.yaml", out)
+
+	for _, name := range []string{hostconf.ServiceFile, hostconf.TimerFile} {
+		if _, err := os.Stat(dir + "/" + name); err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+	}
+	service, err := os.ReadFile(dir + "/" + hostconf.ServiceFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"update --timer",
+		"--record /work/cluster.yaml",
+		"--grant /work/grant.yaml",
+		"--values /work/values.yaml",
+	} {
+		if !strings.Contains(string(service), want) {
+			t.Errorf("the service's ExecStart does not carry %q:\n%s", want, service)
+		}
+	}
+	if !strings.Contains(buf.String(), "box checks for a newer release every 15 minutes: box-update.timer") {
+		t.Fatalf("bootstrap did not say what it installed: %q", buf.String())
+	}
+
+	// A second bootstrap changes nothing and says so.
+	buf.Reset()
+	scheduleUpdates(context.Background(), dir, "/work/cluster.yaml", "/work/grant.yaml", "/work/values.yaml", out)
+	if !strings.Contains(buf.String(), "already installed and up to date") {
+		t.Fatalf("a second bootstrap said %q", buf.String())
+	}
+}
+
+// TestScheduleUpdatesSaysCronWhenThereIsNowhereToSchedule is the line that keeps
+// an unschedulable host from being a box nobody updates: it names the command.
+func TestScheduleUpdatesSaysCronWhenThereIsNowhereToSchedule(t *testing.T) {
+	var buf bytes.Buffer
+	scheduleUpdates(context.Background(), "", "c", "g", "v", &say.Plain{W: &buf})
+	if !strings.Contains(buf.String(), "run `box update --timer` from cron every 15 minutes") {
+		t.Fatalf("bootstrap said %q", buf.String())
+	}
+}

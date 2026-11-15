@@ -26,6 +26,7 @@ import (
 	"github.com/swizzin/s5n/internal/authelia"
 	"github.com/swizzin/s5n/internal/bootstrap"
 	"github.com/swizzin/s5n/internal/catalog"
+	"github.com/swizzin/s5n/internal/hostconf"
 	"github.com/swizzin/s5n/internal/login"
 	"github.com/swizzin/s5n/internal/platform"
 	"github.com/swizzin/s5n/internal/release"
@@ -303,6 +304,14 @@ func runBootstrap(ctx context.Context, args []string) {
 		fmt.Fprintf(os.Stderr, "box: %v\n", err)
 		os.Exit(2)
 	}
+	// --unit-dir is the timer's development switch, out of the arguments the same
+	// way: it writes the two unit files into a directory this run names and runs
+	// no systemctl, which is how a test host sees what bootstrap installs.
+	unitDir, args, err := takeDevFlag(args, "unit-dir")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "box: %v\n", err)
+		os.Exit(2)
+	}
 	// --dns-file, --ca-file and --paths-in-node are init's dev switches and come
 	// out the same way: bootstrap runs init in this process, so it accepts them
 	// or the e2e's bootstrap line would be the one place they fail. The DNS
@@ -333,6 +342,17 @@ func runBootstrap(ctx context.Context, args []string) {
 	term := terminalSet(*plain)
 	out := newOutput(term, *yes, palette)
 	defer out.Close()
+
+	// Root's config is read before the cluster decision, from the same flags:
+	// an unknown key, a malformed line or a bad value stops the run naming the
+	// file, the line and the key, so nothing is probed and nothing is written.
+	// A missing file is the defaults -- bootstrap writes it once the platform is
+	// up. A dry run says it the same way, because this comes before the run
+	// knows which kind it is.
+	if _, _, err := hostconf.Load(hostconf.Path(*recordPath)); err != nil {
+		out.Error(err)
+		os.Exit(1)
+	}
 
 	// One chart release for the whole command: the k0s bootstrap installs, the
 	// platform layer it applies and root's seedbox init installs all come from
@@ -415,6 +435,16 @@ func runBootstrap(ctx context.Context, args []string) {
 		out.Error(err)
 		os.Exit(1)
 	}
+	// Root's config is written here, before init, because init asks for the one
+	// answer it holds (the notice address) and every later run reads the rest.
+	// box writes it once: an existing file is root's, and never rewritten.
+	if wrote, err := hostconf.Ensure(hostconf.Path(*recordPath)); err != nil {
+		out.Error(err)
+		os.Exit(1)
+	} else if wrote {
+		out.Muted("wrote " + hostconf.Path(*recordPath) + ": whether this box updates by itself, how often, and where it posts notices")
+	}
+
 	// bootstrap sets the machine up once; init sets up root's seedbox. It runs
 	// here in the same process, over the same cluster, with the flags bootstrap
 	// was given -- and stays runnable on its own (`box init`).
@@ -425,6 +455,10 @@ func runBootstrap(ctx context.Context, args []string) {
 		out.Error(err)
 		os.Exit(1)
 	}
+
+	// The timer comes last: it runs `box update --timer` for the files this run
+	// just installed, so a seedbox that never finished is never on a schedule.
+	scheduleUpdates(ctx, unitDir, *recordPath, *initFlags.grantPath, *initFlags.valuesPath, out)
 }
 
 // applyPlatform applies the platform layer the decision says install. The

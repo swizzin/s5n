@@ -3,6 +3,8 @@ package main
 import (
 	"context"
 	"fmt"
+	"os"
+	"path/filepath"
 	"time"
 
 	"github.com/swizzin/s5n/internal/hostconf"
@@ -80,4 +82,82 @@ func (o *updateFlags) unattended() (yes, plain bool) {
 		return true, true
 	}
 	return *o.yes, *o.plain
+}
+
+// noTimerLine is what bootstrap says on a host where box cannot schedule its own
+// update: one line, naming the command cron would run, because a box that
+// silently never updates is the failure this feature exists to prevent.
+const noTimerLine = "box will not check for updates by itself: run `box update --timer` from cron every 15 minutes"
+
+// systemdRunning says this host's systemd is up: /run/systemd/system exists for
+// as long as it is. root on a host without it (a container, a PID 1 that is not
+// systemd) would get unit files nothing ever reads.
+func systemdRunning() bool {
+	info, err := os.Stat("/run/systemd/system")
+	return err == nil && info.IsDir()
+}
+
+// timerUnits is where bootstrap puts the timer's files on this host, and the one
+// line it says when there is nowhere to put them.
+//
+// --unit-dir is the development switch: the files land in a directory this run
+// names and no systemctl runs at all, because the systemd they are for is not
+// this host's. Otherwise the timer is installed only by root, on a host whose
+// systemd is running -- never by a test, and never by a non-root run.
+func timerUnits(unitDir string) (hostconf.Units, string) {
+	return timerUnitsFor(unitDir, os.Geteuid() == 0, systemdRunning())
+}
+
+// timerUnitsFor is timerUnits over the three facts, so a test covers the root and
+// systemd cases on a host that is neither.
+func timerUnitsFor(unitDir string, root, systemd bool) (hostconf.Units, string) {
+	switch {
+	case unitDir != "":
+		return hostconf.DirUnits{Dir: unitDir}, ""
+	case root && systemd:
+		return hostconf.Systemd(), ""
+	default:
+		return nil, noTimerLine
+	}
+}
+
+// boxPath is the binary the unit runs: this process's, with symlinks resolved,
+// because a unit that runs a link runs whatever it points at next time.
+func boxPath() (string, error) {
+	path, err := os.Executable()
+	if err != nil {
+		return "", fmt.Errorf("find the box binary to schedule: %w", err)
+	}
+	if resolved, err := filepath.EvalSymlinks(path); err == nil {
+		path = resolved
+	}
+	return path, nil
+}
+
+// scheduleUpdates writes the timer's units for the files this run installed, and
+// says what it did. A failure is a warning, not a failed bootstrap: the seedbox
+// is installed and serving, and the line names the cron command that does the
+// same job.
+func scheduleUpdates(ctx context.Context, unitDir, record, grant, values string, out say.Reporter) {
+	units, why := timerUnits(unitDir)
+	if units == nil {
+		out.Warn(why)
+		return
+	}
+	path, err := boxPath()
+	if err != nil {
+		out.Warn(noTimerLine + " (" + err.Error() + ")")
+		return
+	}
+	changed, err := hostconf.Install(ctx, units, path, record, grant, values)
+	if err != nil {
+		out.Warn("box's update timer is not running: " + err.Error())
+		return
+	}
+	if changed {
+		out.Muted(fmt.Sprintf("box checks for a newer release every %d minutes: %s, and update.timer in %s turns that off",
+			hostconf.WakeInterval, hostconf.TimerFile, hostconf.Path(record)))
+		return
+	}
+	out.Muted(fmt.Sprintf("%s is already installed and up to date", hostconf.TimerFile))
 }
