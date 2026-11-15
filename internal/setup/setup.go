@@ -265,6 +265,13 @@ func (d *Decision) Run(ctx context.Context, opts Options) (Result, error) {
 	if err := d.check(); err != nil {
 		return res, err
 	}
+	// Root's config is read first, and strictly: a file init cannot parse stops
+	// the run before its first question, naming the line, so nothing is asked
+	// and nothing is written. init writes one line into that file, and it is
+	// the same read `box update` and `box status` make.
+	if _, _, err := readNotice(opts.NoticePath); err != nil {
+		return res, err
+	}
 	if len(opts.Chart.Values) == 0 || len(opts.Chart.Schema) == 0 {
 		return res, errors.New("no chart: box init asks its questions from the chart release it installs")
 	}
@@ -398,7 +405,12 @@ func (d *Decision) Run(ctx context.Context, opts Options) (Result, error) {
 	// Root's notice address is its own step, and the last one: it is the
 	// host's, not the seedbox's. It is only asked when bootstrap wrote the file
 	// and left the address empty, so a re-run with one set asks nothing.
-	askNotice := d.noticePending(opts) && !opts.Unattended
+	askNotice := false
+	pending, err := d.noticePending(opts)
+	if err != nil {
+		return res, err
+	}
+	askNotice = pending && !opts.Unattended
 	if askNotice {
 		d.steps++
 	}

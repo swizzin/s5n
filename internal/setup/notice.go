@@ -13,19 +13,29 @@ import (
 // with the rest of the answers -- so a cancel before it leaves root's file
 // exactly as bootstrap wrote it.
 
+// readNotice is root's config, read strictly. Every run that reads the file
+// parses it the same way, and init is no exception: an unknown key, a malformed
+// line or a bad value stops the run before its first question, naming the file,
+// the line and the key. A typo that a run asked around would be one that quietly
+// stopped updating.
+func readNotice(path string) (hostconf.Config, bool, error) {
+	if strings.TrimSpace(path) == "" {
+		return hostconf.Defaults(), false, nil
+	}
+	return hostconf.Load(path)
+}
+
 // noticePending reports whether this run has an address to ask for: root's file
-// exists, and it has none. A file box cannot read is not "missing" -- it is
-// root's, and a question cannot fix it, so its own error stops the run later
-// when the file is read.
-func (d *Decision) noticePending(opts Options) bool {
-	if strings.TrimSpace(opts.NoticePath) == "" {
-		return false
+// exists, and it has none.
+func (d *Decision) noticePending(opts Options) (bool, error) {
+	conf, exists, err := readNotice(opts.NoticePath)
+	if err != nil {
+		return false, err
 	}
-	conf, exists, err := hostconf.Load(opts.NoticePath)
-	if err != nil || !exists {
-		return false
+	if !exists {
+		return false, nil
 	}
-	return conf.NoticeURL == ""
+	return conf.NoticeURL == "", nil
 }
 
 // askNoticeURL is the one optional question: a URL, or Enter to skip. It is a

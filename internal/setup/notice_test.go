@@ -181,3 +181,38 @@ func (o Options) unattendedForTest() Options {
 	o.Apps = []string{"alpha"}
 	return o
 }
+
+// TestAFilesTypoStopsInitBeforeTheFirstQuestion: init reads root's config the
+// way every other run does -- strictly -- and stops naming file, line and key,
+// before it asks anything. Nothing is asked, nothing is written: a run that
+// cannot read the file it would write the notice address into has no business
+// asking about anything else first.
+func TestAFilesTypoStopsInitBeforeTheFirstQuestion(t *testing.T) {
+	h := newHarness(t)
+	path := filepath.Join(t.TempDir(), hostconf.FileName)
+	if err := os.WriteFile(path, []byte("update:\n  timmer: on\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	h.prompt.inputs = []string{"box.example.com", "/srv/s5n/data", "/srv/s5n/config"}
+	h.prompt.multis = [][]string{{"alpha"}}
+
+	opts := h.options()
+	opts.NoticePath = path
+	_, err := h.run(opts)
+	if err == nil {
+		t.Fatal("init ran with a config it cannot parse")
+	}
+	if !strings.Contains(err.Error(), `box.yaml:2: unknown key "update.timmer"`) {
+		t.Fatalf("init did not name the file, line and key: %v", err)
+	}
+	if len(h.prompt.events) != 0 {
+		t.Fatalf("init asked %v before refusing root's file", h.prompt.events)
+	}
+	if h.exists(h.grantPath) || h.exists(h.valuesPath) {
+		t.Fatal("init wrote one of the seedbox's files")
+	}
+	// And the file is exactly as it was: init never rewrites it.
+	if got := h.read(path); got != "update:\n  timmer: on\n" {
+		t.Fatalf("init rewrote root's file:\n%s", got)
+	}
+}
