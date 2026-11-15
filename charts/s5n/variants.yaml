@@ -6,7 +6,9 @@
 # apps.<app>.image.variant names one of the variants below. Values may pin a tag
 # or a digest inside that variant's repository, nothing else — the repository
 # comes from here. A variant other than `default` is an alternate build of the
-# same app that the e2e has to test like the default before it ships.
+# same app that the e2e has to test like the default before it ships. There is
+# one exemption and it is named in its own block; there is no general escape
+# hatch.
 #
 # The admission policy's blessed-repository list is generated from this file
 # too (install/platform/admission/), so "blessed by the chart" and "admitted by
@@ -16,6 +18,27 @@ qbittorrent:
     repository: ghcr.io/home-operations/qbittorrent
     tag: "5.3.0"
     digest: sha256:5a858e61f94cf2712391db32ed03556576c700858f3e62c4c6fcde262443ebd8
+  lt1.2:
+    # The project's own static build: qBittorrent on libtorrent 1.2, musl, for
+    # baseline x86-64-v2 and armv8-a. Its layout is the default's (HOME and XDG
+    # under /config, the conf at /config/qBittorrent/qBittorrent.conf, ports from
+    # QBT_WEBUI_PORT and QBT_TORRENTING_PORT), so the chart's one pod spec runs
+    # it unchanged, and a box can switch variants in place. It ships no curl.
+    # The name is the libtorrent line and the build profile, never the version:
+    # the tag pins those, so a later 1.2.21 stays this variant.
+    repository: ghcr.io/swizzin/qbittorrent
+    tag: "5.3.0-lt1.2.20"
+    digest: sha256:b9fbce0d1f44684f6272b39e34e5f24af1ddcc4236d9e2de364dafe6dc403b2e
+  lt1.2-10g-znver3-mimalloc:
+    # The one variant the e2e does not run: it is compiled for AMD Zen 3
+    # (-march=znver3), so on CI's runners and most hosts it dies with SIGILL at
+    # start, and it is amd64 only, so an arm64 node cannot pull it. What tests it
+    # instead: the swizzin/qbittorrent repository's own binary verify and smoke
+    # test, run on a Zen 3 runner before the tag is pushed. Its layout is lt1.2's,
+    # which the e2e does run.
+    repository: ghcr.io/swizzin/qbittorrent
+    tag: "5.3.0-lt1.2.20-10g-znver3-mimalloc"
+    digest: sha256:89a2688b002716cac31259f6bc1b949d34fd7fa62498e96ad24c0308f845060b
 
 sonarr:
   default:
