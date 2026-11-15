@@ -35,13 +35,41 @@ NODE=${NODE:-s5n-control-plane}
 DATA_ROOT=${DATA_ROOT:-/srv/s5n/data}   # the node path behind the release's data PVC
 TVDB_ID=78435                            # Popeye the Sailor (1933), public-domain shorts
 WORK=$(mktemp -d)
-trap 'rm -rf "$WORK"' EXIT
+# The qBittorrent tunnel is a background kubectl, so it goes with the work dir.
+trap 'rm -rf "$WORK"; kill "${PF_PID:-}" 2>/dev/null || true' EXIT
 
 log() { printf '\n==> %s\n' "$*"; }
 die() { printf 'FAIL: %s\n' "$*" >&2; exit 1; }
 
 arr_port() { $K -n "$NS" get svc "$1" -o jsonpath='{.spec.ports[0].port}'; }
 arr_key() { $K -n "$NS" get secret "${RELEASE}-keys" -o jsonpath="{.data.$1-apikey}" | base64 -d; }
+
+# qBittorrent's image ships no curl (charts/s5n/variants.yaml, the lt1.2 build),
+# so its API is read through a tunnel instead of `exec`: the API server relays
+# to kubelet, which no NetworkPolicy applies to. The calls that follow sign in
+# with the release Secret's password and carry the cookie the login answers
+# with; cookies are not port-scoped, so the jar survives one tunnel per call.
+qbit_tunnel() {
+  local i
+  PF_PORT=$(python3 -c 'import socket
+s = socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1]); s.close()')
+  $K -n "$NS" port-forward pod/qbittorrent-0 "${PF_PORT}:8080" >"$WORK/pf-qbittorrent.log" 2>&1 &
+  PF_PID=$!
+  for i in $(seq 1 30); do
+    if curl -sS -o /dev/null --max-time 2 "http://127.0.0.1:${PF_PORT}/" 2>/dev/null; then
+      return 0
+    fi
+    sleep 1
+  done
+  echo "port-forward to qbittorrent-0 never answered"
+  sed 's/^/    /' "$WORK/pf-qbittorrent.log" 2>/dev/null || true
+  return 1
+}
+
+qbit_tunnel_stop() {
+  kill "$PF_PID" 2>/dev/null || true
+  wait "$PF_PID" 2>/dev/null || true
+}
 
 api() { # api <app> <method> <path> [json-body]
   local app=$1 method=$2 path=$3 body=${4:-} port key
@@ -282,16 +310,19 @@ echo "  infohash: ${infohash}"
 log "completing the download the way a real box does: payload on disk, then a recheck"
 
 qpw=$($K -n "$NS" get secret "${RELEASE}-keys" -o jsonpath='{.data.qbittorrent-password}' | base64 -d)
-$K -n "$NS" exec qbittorrent-0 -- sh -c "curl -s -c /tmp/jar -o /dev/null -X POST \
-  --data-urlencode 'username=admin' --data-urlencode 'password=${qpw}' \
-  http://localhost:8080/api/v2/auth/login" || die "qBittorrent login failed"
+qbit_tunnel || die "could not reach qBittorrent"
+curl -s -c "$WORK/qbit-jar" -o /dev/null -X POST \
+  --data-urlencode 'username=admin' --data-urlencode "password=${qpw}" \
+  "http://127.0.0.1:${PF_PORT}/api/v2/auth/login" || die "qBittorrent login failed"
+qbit_tunnel_stop
 
-save_path=$($K -n "$NS" exec qbittorrent-0 -- sh -c \
-  "curl -s -b /tmp/jar http://localhost:8080/api/v2/torrents/info" |
+qbit_tunnel || die "could not reach qBittorrent"
+save_path=$(curl -s -b "$WORK/qbit-jar" "http://127.0.0.1:${PF_PORT}/api/v2/torrents/info" |
   python3 -c "
 import json,sys
 d = json.load(sys.stdin)
 print([t for t in d if t['hash'].lower() == '${infohash}'.lower()][0]['save_path'])")
+qbit_tunnel_stop
 echo "  qBittorrent save path: ${save_path}"
 case "$save_path" in
   /data/*) ;;
@@ -307,8 +338,11 @@ docker cp "$WORK/payload.mkv" "${NODE}:${node_path}"
 docker exec "$NODE" chown 1000:1000 "${node_path}"
 docker exec "$NODE" chmod 664 "${node_path}"
 
-$K -n "$NS" exec qbittorrent-0 -- sh -c "curl -s -b /tmp/jar -o /dev/null -X POST \
-  --data-urlencode 'hashes=${infohash}' http://localhost:8080/api/v2/torrents/recheck" || die "recheck failed"
+qbit_tunnel || die "could not reach qBittorrent"
+curl -s -b "$WORK/qbit-jar" -o /dev/null -X POST \
+  --data-urlencode "hashes=${infohash}" "http://127.0.0.1:${PF_PORT}/api/v2/torrents/recheck" ||
+  { qbit_tunnel_stop; die "recheck failed"; }
+qbit_tunnel_stop
 
 season_dir=$(printf 'Season %d' "$season_number")
 series_dir="/data/media/tv/${series_title}"
