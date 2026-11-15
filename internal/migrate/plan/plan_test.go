@@ -162,8 +162,8 @@ func TestParseRefusals(t *testing.T) {
 		},
 		{
 			name: "an unknown key at the top",
-			src:  "version: 1\napps: {}\nhosts: {}\n",
-			want: "hosts",
+			src:  "version: 1\napps: {}\nports: {}\n",
+			want: "ports",
 		},
 		{
 			name: "an unknown key in an app",

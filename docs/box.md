@@ -917,7 +917,38 @@ data. Everything it will change is written down before it changes anything.
   The longest `from` that matches whole path segments wins, so `/downloads2` is not
   under `/downloads`. A relative path follows its root and is left alone. An absolute
   path no rule covers stops apply and names the app, the file or table, and the path.
-  Host references, ports and the copy list get their own keys when that work lands.
+  Each app also records the namespace it ran in and the ports its own config set:
+  a localhost address another app stored is resolved by its port, and a Service's
+  short name by the namespace of the app that stored it.
+- **Data is adopted by renaming, never by moving (decided).** The plan's `data` key
+  names the directory that becomes the seedbox's data path and the two directories
+  under it that held the downloads and the media. When their names differ from box's
+  (`Downloads` for `downloads`), apply renames them, which keeps every hardlink. They
+  must be single directories directly under the root; anything else is a move, and a
+  move is the operator's to make before apply.
+- **Every other address is classified in the plan (proposed).** `hosts` lists the
+  Services discovery found (`service: <name>.<namespace>`, matched in every form the
+  cluster's DNS answers) and any other address the apps stored (`host:`), each either
+  mapped to a box app (`app:`) or kept as it is (`leave: true`), optionally narrowed to
+  one port.
+
+  ```yaml
+  data:
+    root: /srv/library
+    downloads: Downloads        # renamed to downloads
+    media: media
+  hosts:
+    - service: sonarr.default
+      app: sonarr
+    - host: 192.0.2.10
+      leave: true
+  ```
+- **Every rewriter runs twice (proposed).** apply copies each app's config into a
+  staging directory, then runs every app's check pass, which writes nothing and returns
+  the changes and every gap. Only when no app has a gap does any app's write pass run,
+  and it makes exactly the changes its check reported, in the staged copy. History
+  (records of what happened, never read back to act on) is rewritten where a rule
+  covers it and never stops apply.
 - **Every app's stored paths are rewritten, with no exceptions (decided).** Each app
   gets the `/data` contract and migrate rewrites what it holds: Arr databases and
   configs, qBittorrent's fastresume files and settings, and Plex's database through the

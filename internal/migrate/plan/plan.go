@@ -30,8 +30,15 @@ const Version = 1
 
 // Plan is the whole file.
 type Plan struct {
-	Version int            `yaml:"version"`
-	Apps    map[string]App `yaml:"apps"`
+	Version int `yaml:"version"`
+	// Data is where the source kept its downloads and media, when box adopts
+	// them in place. Absent, apply touches no data.
+	Data *Data `yaml:"data,omitempty"`
+	// Apps is keyed by box's instance name.
+	Apps map[string]App `yaml:"apps"`
+	// Hosts classifies every address one source app stored for another that
+	// is not a localhost address (those are resolved through Apps' ports).
+	Hosts []HostRule `yaml:"hosts,omitempty"`
 }
 
 // App is one app as the source named it and as box will name it. The key it is
@@ -46,6 +53,14 @@ type App struct {
 	// it and never writes it, so the running source stays the rollback until
 	// the operator tears it down.
 	Config string `yaml:"config"`
+	// Namespace is the source namespace the app ran in, which is what a
+	// Service's short name stored in this app's config resolves against.
+	// Empty for a source that is not a cluster.
+	Namespace string `yaml:"namespace,omitempty"`
+	// Ports are the ports this app listened on in the source, as its own
+	// config set them. A localhost address another app stored is resolved to
+	// this app by its port.
+	Ports []int `yaml:"ports,omitempty"`
 	// Paths are this app's path rules.
 	Paths []PathRule `yaml:"paths"`
 }
@@ -131,8 +146,15 @@ func (p *Plan) check() []string {
 				seen[r.From] = true
 			}
 		}
+		for _, port := range app.Ports {
+			if port < 1 || port > 65535 {
+				problems = append(problems, fmt.Sprintf("apps.%s: port %d is not a port", name, port))
+			}
+		}
 		p.Apps[name] = app
 	}
+	problems = append(problems, p.checkData()...)
+	problems = append(problems, p.checkHosts()...)
 	return problems
 }
 
