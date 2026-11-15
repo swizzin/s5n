@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"testing"
 
 	"github.com/swizzin/s5n/internal/migrate/plan"
@@ -312,6 +313,88 @@ func TestRewritesPathsAndConnections(t *testing.T) {
 	if len(rep2.Changes) != 0 {
 		t.Errorf("after Write, Check still reports %v", rep2.Changes)
 	}
+}
+
+// TestDataDirOutsideTheConfigIsAGap: qui's database sits wherever dataDir says.
+// A dataDir no rule covers is a gap in the plan like any other path, and the run
+// stops before it writes.
+func TestDataDirOutsideTheConfigIsAGap(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	config := strings.Replace(configFixture, "#dataDir = \"/var/db/qui\"",
+		"dataDir = \"/mnt/other/qui\"", 1)
+	if err := os.WriteFile(filepath.Join(dir, configName), []byte(config), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, dbName), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	p, err := plan.Parse([]byte(planYAML))
+	if err != nil {
+		t.Fatal(err)
+	}
+	in := rewrite.Input{App: "qui", Dir: dir, Plan: p, Targets: targets()}
+	rep, err := rewriter{}.Check(ctx, in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, u := range rep.Uncovered {
+		if u.Key == "dataDir" && u.Path == "/mnt/other/qui" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("Uncovered = %v, want the data directory", rep.Uncovered)
+	}
+	if _, err := (rewriter{}).Write(ctx, in); err == nil {
+		t.Error("Write ran with an uncovered data directory")
+	}
+}
+
+// TestDataDirInsideTheConfigIsFollowed: a dataDir under the staged config is
+// where the database is, and it moves with the rest.
+func TestDataDirInsideTheConfigIsFollowed(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	config := strings.Replace(configFixture, "#dataDir = \"/var/db/qui\"",
+		"dataDir = \"/srv/apps/qui/state\"", 1)
+	if err := os.WriteFile(filepath.Join(dir, configName), []byte(config), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	state := filepath.Join(dir, "state")
+	if err := os.MkdirAll(state, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	dbFile := filepath.Join(state, dbName)
+	if err := os.WriteFile(dbFile, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	db, err := sqlitedb.OpenReadWrite(ctx, dbFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, dbFixture); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	p, err := plan.Parse([]byte(planYAML))
+	if err != nil {
+		t.Fatal(err)
+	}
+	in := rewrite.Input{App: "qui", Dir: dir, Plan: p, Targets: targets()}
+	rep, err := rewriter{}.Check(ctx, in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range rep.Changes {
+		if c.File == configName && c.Where == "dataDir" && c.What == "path" {
+			return
+		}
+	}
+	t.Fatalf("the dataDir under /config was not rewritten: %v", rep.Changes)
 }
 
 func TestCheckWritesNothing(t *testing.T) {

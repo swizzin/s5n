@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -252,6 +253,35 @@ func TestHistoryPathNeitherBlocksNorRewrites(t *testing.T) {
 	}
 	if got := readColumn(t, in.Dir, "media_request", "rootFolder"); got != "/mnt/other/Requests" {
 		t.Errorf("media_request.rootFolder = %q, want untouched", got)
+	}
+}
+
+// TestMissingBaseURLIsAdded: Seerr's baseUrl is optional, and an Arr the chart
+// serves under /sonarr is unreachable without it. The key is added in the
+// file's own indentation, and the file stays valid JSON.
+func TestMissingBaseURLIsAdded(t *testing.T) {
+	ctx := context.Background()
+	settings := strings.Replace(settingsFixture, "      \"baseUrl\": \"\",\n", "", 1)
+	if settings == settingsFixture {
+		t.Fatal("fixture did not lose its baseUrl")
+	}
+	in := setup(t, settings)
+	if _, err := (rewriter{}).Check(ctx, in); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := (rewriter{}).Write(ctx, in); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(filepath.Join(in.Dir, settingsName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(raw), `"baseUrl": "/radarr"`) {
+		t.Errorf("the radarr entry did not gain its base URL:\n%s", raw)
+	}
+	var doc map[string]any
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		t.Fatalf("the rewritten settings file is not JSON: %v\n%s", err, raw)
 	}
 }
 
