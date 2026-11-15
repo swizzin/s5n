@@ -807,7 +807,7 @@ users, and the chart can't promise anything about an image it hasn't seen.
 
 Instead, the chart lists **blessed variants** per app, such as a qBittorrent build on
 libtorrent 1.2 or 2.x (see `PLAN.md`, open decisions). Each variant is tested by the
-e2e like the default. Proposed command: `box update qbittorrent --variant lt2`, which
+e2e like the default. Proposed command: `box update qbittorrent --variant lt1.2`, which
 writes the choice into values.
 
 A digest pinned by hand in values is held: `update` leaves that app where it is and
@@ -853,6 +853,25 @@ The policy's allowlist is generated from the variant list, never kept by hand. A
 an app already means a values entry and its variants, so it reaches the allowlist with
 no extra step. Anything outside the catalog stays outside a user's namespace, which is
 the decided rule that root decides which apps a user has.
+
+**qBittorrent's own builds (decided).** qBittorrent is the one app where the
+libtorrent line is a real choice, so its list has three entries: `default`
+(home-operations, still the default), `lt1.2`, and `lt1.2-10g-znver3-mimalloc`.
+Both new ones are builds of `ghcr.io/swizzin/qbittorrent`, the project's own image.
+`lt1.2` is the static build on libtorrent 1.2 (musl, baseline x86-64-v2 and
+armv8-a) with the default's layout — `HOME` and `XDG_CONFIG_HOME` at `/config`, the
+conf at `/config/qBittorrent/qBittorrent.conf`, ports from `QBT_WEBUI_PORT` and
+`QBT_TORRENTING_PORT` — so the chart's one pod spec runs it unchanged and a box can
+switch variants in place. A variant name is the libtorrent line plus the build
+profile, never a version: the tag pins those, so a later 1.2.21 keeps the name.
+
+`lt1.2-10g-znver3-mimalloc` is the one exemption from "the e2e tests every
+variant". It is compiled for AMD Zen 3 (`-march=znver3`), so it dies with SIGILL at
+start on CI's runners and most hosts, and it is amd64 only, so an arm64 node cannot
+pull it. What tests it instead is the `swizzin/qbittorrent` repository's own binary
+verify and smoke test, run on a Zen 3 runner before the tag is pushed. Its layout is
+the one `lt1.2` has, which `hack/e2e-kind.sh` runs on every push, so the pod spec is
+proven for both.
 
 ### uninstall (decided)
 
