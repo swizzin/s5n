@@ -113,6 +113,7 @@ func TestParseRefusesBadDataAndHosts(t *testing.T) {
 		{"app and leave", "hosts: [{host: c, app: q, leave: true}]\n", "exactly one of app and leave"},
 		{"neither app nor leave", "hosts: [{host: c}]\n", "exactly one of app and leave"},
 		{"unknown app", "hosts: [{host: c, app: nope}]\n", `app "nope" is not in apps`},
+		{"outside without a namespace", "outside: [unifi]\n", `outside: "unifi" is not <namespace>/<name>`},
 		{"bad host port", "hosts: [{host: c, port: 70000, leave: true}]\n", "port 70000"},
 	}
 	for _, tt := range tests {

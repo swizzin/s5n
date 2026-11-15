@@ -78,6 +78,20 @@ type Report struct {
 	// Notes are things the operator should know that stop nothing: a table
 	// emptied on purpose, an import list's remote filter left alone.
 	Notes []string
+	// Owned are the connections this app holds to another app that the
+	// rewrite pointed at the box. Wiring adopts them by ID on its first run
+	// instead of creating a second one beside each (docs/box.md, "Migrated
+	// connections are adopted by ID").
+	Owned []Owned
+}
+
+// Owned is one adopted connection: a download client or a Prowlarr
+// application, by the ID the app gave it, and the box app it now points at.
+type Owned struct {
+	Kind   string // "downloadclient", "application"
+	ID     int
+	Name   string // as the source named it, kept
+	Target string // box instance name
 }
 
 // Address is a stored host reference no rule covers.

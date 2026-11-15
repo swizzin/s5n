@@ -39,6 +39,10 @@ type Plan struct {
 	// Hosts classifies every address one source app stored for another that
 	// is not a localhost address (those are resolved through Apps' ports).
 	Hosts []HostRule `yaml:"hosts,omitempty"`
+	// Outside are the source's workloads that are not catalog apps, as
+	// <namespace>/<name>. migrate never touches them; they are listed so the
+	// operator sees what has to come back by hand.
+	Outside []string `yaml:"outside,omitempty"`
 }
 
 // App is one app as the source named it and as box will name it. The key it is
@@ -152,6 +156,11 @@ func (p *Plan) check() []string {
 			}
 		}
 		p.Apps[name] = app
+	}
+	for _, o := range p.Outside {
+		if ns, name, ok := strings.Cut(o, "/"); !ok || ns == "" || name == "" || strings.Contains(name, "/") {
+			problems = append(problems, fmt.Sprintf("outside: %q is not <namespace>/<name>", o))
+		}
 	}
 	problems = append(problems, p.checkData()...)
 	problems = append(problems, p.checkHosts()...)
