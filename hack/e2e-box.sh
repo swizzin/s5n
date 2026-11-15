@@ -242,6 +242,11 @@ cleanup() {
   if [ -n "$REGISTRY" ]; then
     docker rm -f "$REGISTRY" >/dev/null 2>&1 || true
   fi
+  # The update scenario's notice receiver, by pid: a run that fails before its
+  # own kill must not leave a listener behind.
+  if [ -n "${NOTICE_PID:-}" ]; then
+    kill "$NOTICE_PID" >/dev/null 2>&1 || true
+  fi
   # --keep is for reading what a run did: each init's transcript, the bootstrap
   # transcripts, the box binary that wrote them. The cluster it leaves behind is
   # worth nothing without those, so the work directory stays with it and its
@@ -436,7 +441,7 @@ bootstrap() { # bootstrap <output file>
   # No --chart-version: bootstrap takes the default-version path, so the e2e
   # exercises the newest-release selection against a real registry. The chart
   # is the one pushed above; box pulls it over loopback.
-  "$WORK/box" bootstrap --yes --chart-repo "$CHART_REPO" ${ACME_ARGS[@]+"${ACME_ARGS[@]}"} ${DNS_ARGS[@]+"${DNS_ARGS[@]}"} ${CA_ARGS[@]+"${CA_ARGS[@]}"} \
+  "$WORK/box" bootstrap --yes --chart-repo "$CHART_REPO" ${ACME_ARGS[@]+"${ACME_ARGS[@]}"} ${DNS_ARGS[@]+"${DNS_ARGS[@]}"} ${CA_ARGS[@]+"${CA_ARGS[@]}"} ${UNIT_ARGS[@]+"${UNIT_ARGS[@]}"} \
     --grant "$WORK/grant.yaml" --values "$WORK/values.yaml" \
     --namespace "$NS" --domain "$DOMAIN" \
     --data-path "$DATA_PATH" --config-path "$CONFIG_PATH" \
@@ -1406,6 +1411,12 @@ print(q.get("error", [""])[0], "-", q.get("error_description", [""])[0])' || tru
 
 # ---- scenario: fresh --------------------------------------------------------
 fresh() {
+  # The timer's two units are written into a directory this run names: the e2e
+  # is not root and this host is not the box, so bootstrap must not touch
+  # systemd (--unit-dir is the development switch: files in a directory, no
+  # systemctl at all).
+  UNIT_ARGS=(--unit-dir "$WORK/units")
+
   # ---- bootstrap 1: the platform and root's first install -------------------
   # The cluster has nothing: no CRDs, no LoadBalancer, no Gateway, no policy. So
   # the decision says "install" for each, and bootstrap must apply all of it
@@ -1543,6 +1554,70 @@ fresh() {
   # none of it before this run.
   grep -qF '+ Namespace seedbox (Pod Security restricted)' "$WORK/bootstrap1.txt" ||
     { echo "the plan did not show the namespace it creates"; fail=1; }
+
+  # ---- root's config, and the timer that makes updates happen ---------------
+  # bootstrap writes root's box.yaml once, beside the cluster record (the same
+  # rule --record follows: move the record and the file moves with it), and
+  # never again: the comments are its documentation and the answers below them
+  # are root's. The mode is the notice address's, which can carry a token.
+  conf="$WORK/box.yaml"
+  [ -f "$conf" ] || { echo "bootstrap wrote no box.yaml beside the record"; fail=1; }
+  cat >"$WORK/box.yaml.expected" <<'EOF'
+# box's settings for this host. box never rewrites this file; edit it by hand.
+update:
+  timer: on        # off: no update checks and no health notices
+  interval: 1h     # how often the timer checks for a newer release; 15m at least
+  hold-box: false  # true: take no new box, the same as --hold-box on every run
+notices:
+  url: ""          # box POSTs a JSON notice here after updates and on health changes
+EOF
+  cmp -s "$WORK/box.yaml.expected" "$conf" ||
+    { echo "box.yaml is not the file bootstrap writes:"; diff "$WORK/box.yaml.expected" "$conf" | head -5; fail=1; }
+  conf_mode=$(stat -c '%a' "$conf" 2>/dev/null || true)
+  [ "$conf_mode" = 600 ] ||
+    { echo "box.yaml is mode ${conf_mode}, want 600: the notice address can carry a token"; fail=1; }
+  conf_sha=$(sha256sum "$conf" | cut -d' ' -f1)
+
+  # The timer is two files box owns, and box wrote them here because this run
+  # named a directory for them. The service is the box under test -- this
+  # process's own binary -- with the three paths this run installed, so a host
+  # with two boxes or two seedboxes updates the one it bootstrapped, and no
+  # timeout, because an update waits out an app's startup budget.
+  units="$WORK/units"
+  for unit in box-update.service box-update.timer; do
+    [ -f "$units/$unit" ] || { echo "bootstrap wrote no ${unit}"; fail=1; continue; }
+    unit_mode=$(stat -c '%a' "$units/$unit" 2>/dev/null || true)
+    [ "$unit_mode" = 644 ] ||
+      { echo "${unit} is mode ${unit_mode}, want 644: systemd reads it, not root alone"; fail=1; }
+  done
+  exec_start=$(sed -n 's/^ExecStart=//p' "$units/box-update.service" 2>/dev/null | sed 's/[[:space:]]*$//' || true)
+  echo "  ExecStart: ${exec_start}"
+  [ "$exec_start" = "${WORK}/box update --timer --record ${WORK}/cluster.yaml --grant ${WORK}/grant.yaml --values ${WORK}/values.yaml" ] ||
+    { echo "box-update.service does not run this box for the files this run installed"; fail=1; }
+  grep -qxF "TimeoutStartSec=0" "$units/box-update.service" 2>/dev/null ||
+    { echo "box-update.service has a start timeout: an update can wait out an app's startup budget"; fail=1; }
+  # The timer wakes box often and box decides what a wake is worth, so the unit
+  # carries no schedule of its own beyond the wake: ten minutes after boot, then
+  # every fifteen, with up to ten minutes of jitter so a fleet does not arrive
+  # at the registry at once.
+  for line in OnBootSec=10min OnUnitActiveSec=15min RandomizedDelaySec=10min WantedBy=timers.target; do
+    grep -qxF "$line" "$units/box-update.timer" 2>/dev/null ||
+      { echo "box-update.timer has no ${line}:"; cat "$units/box-update.timer" 2>/dev/null | head -12; fail=1; }
+  done
+  # What a re-run must not touch: the bytes, and the mtime a rewrite would move
+  # even when the bytes came out the same.
+  unit_state() {
+    for unit in box-update.service box-update.timer; do
+      printf '%s %s %s\n' "$unit" "$(sha256sum "$units/$unit" | cut -d' ' -f1)" "$(stat -c '%y' "$units/$unit")"
+    done
+  }
+  # --unit-dir writes the files and starts nothing: the systemd these are for is
+  # not this host's, and no test may touch it.
+  if grep -q "systemctl" "$WORK/bootstrap1.txt"; then
+    echo "--unit-dir ran systemctl: $(grep -m1 "systemctl" "$WORK/bootstrap1.txt")"; fail=1
+  fi
+  grep -qF "box checks for a newer release every 15 minutes: box-update.timer" "$WORK/bootstrap1.txt" ||
+    { echo "bootstrap did not say what it scheduled"; fail=1; }
 
   # What the install did: MetalLB is a release, its pool is the node's own
   # address as a /32, the Gateway reports that address, and the check box
@@ -2478,6 +2553,7 @@ EOF
   platform_before=$(platform_state)
   grant_before2=$(sha256sum "$WORK/grant.yaml" | cut -d' ' -f1)
   values_before2=$(sha256sum "$WORK/values.yaml" | cut -d' ' -f1)
+  unit_before2=$(unit_state)
 
   # The second bootstrap re-applies gateway.yaml under manager box while the
   # Certificate is already Ready, so the TLS half re-applies this host's two
@@ -2675,6 +2751,25 @@ EOF
   [ "$(sha256sum "$WORK/values.yaml" | cut -d' ' -f1)" = "$values_before2" ] ||
     { echo "the second bootstrap rewrote the values file"; fail=1; }
 
+  # Root's config and the timer's units are box's too, and a re-run of the same
+  # answers must leave both exactly as they were: the file is root's from
+  # bootstrap's write on, and units whose bytes are unchanged are not written
+  # again at all (a rewrite would restart the timer for no reason).
+  [ "$(sha256sum "$conf" | cut -d' ' -f1)" = "$conf_sha" ] ||
+    { echo "the second bootstrap rewrote box.yaml"; fail=1; }
+  unit_after=$(unit_state)
+  if [ "$unit_after" != "$unit_before2" ]; then
+    echo "the second bootstrap rewrote the timer's units"
+    echo "  before: ${unit_before2}"
+    echo "  after:  ${unit_after}"
+    fail=1
+  else
+    echo "the timer's units are untouched: ${unit_after}"
+  fi
+  if grep -q "systemctl" "$WORK/bootstrap2.txt"; then
+    echo "the second bootstrap ran systemctl: $(grep -m1 "systemctl" "$WORK/bootstrap2.txt")"; fail=1
+  fi
+
   # ---- init 2: the same answers ---------------------------------------------
   # Re-running init is the other half of its contract: every question is prefilled
   # from the files, so identical answers splice nothing, and the files must come
@@ -2724,6 +2819,113 @@ EOF
   else
     echo "namespace untouched: ${ns_after}"
   fi
+
+  # ---- the timer's wake: due, then not due, then off -------------------------
+  # One wake of the unit, by hand. Everything about a wake follows from
+  # update.json's last check: the first one on a box that has never checked is
+  # due, and on a box already on the newest release it is a registry listing and
+  # nothing else. The second wake, seconds later, is not due at all.
+  update_state="$WORK/update.json"
+  revision_before_wake=$(revision)
+  last_before=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("lastCheck") or "")' "$update_state" 2>/dev/null || true)
+  echo "  last check before the wake: '${last_before}'"
+  log "box update --timer: a due wake on a box that is already current"
+  if "$WORK/box" update --timer --chart-repo "$CHART_REPO" --record "$WORK/cluster.yaml" \
+    --grant "$WORK/grant.yaml" --values "$WORK/values.yaml" --paths-in-node \
+    --kubeconfig "$WORK/kubeconfig" >"$WORK/update-wake.txt" 2>&1; then
+    cat "$WORK/update-wake.txt"
+  else
+    cat "$WORK/update-wake.txt"; fail=1
+  fi
+  grep -qF "s5n ${CHART_VERSION} in ${NS} is current" "$WORK/update-wake.txt" ||
+    { echo "the due wake did not check the registry and find the box current:"; grep -i "current\|chart" "$WORK/update-wake.txt" | head -5; fail=1; }
+  revision_after_wake=$(revision)
+  [ "$revision_after_wake" = "$revision_before_wake" ] ||
+    { echo "the due wake moved the release to revision ${revision_after_wake} (was ${revision_before_wake})"; fail=1; }
+  last_after=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("lastCheck") or "")' "$update_state") || true
+  echo "  last check after the due wake: '${last_after}'"
+  [ -n "$last_after" ] ||
+    { echo "the due wake did not record when it checked: the next wake would be due again"; fail=1; }
+
+  log "box update --timer: the next wake is not due, so it asks the registry nothing"
+  if "$WORK/box" update --timer --chart-repo "$CHART_REPO" --record "$WORK/cluster.yaml" \
+    --grant "$WORK/grant.yaml" --values "$WORK/values.yaml" --paths-in-node \
+    --kubeconfig "$WORK/kubeconfig" >"$WORK/update-wake2.txt" 2>&1; then
+    cat "$WORK/update-wake2.txt"
+  else
+    cat "$WORK/update-wake2.txt"; fail=1
+  fi
+  if grep -q "^chart: " "$WORK/update-wake2.txt"; then
+    echo "a wake that is not due loaded a chart: it contacted the registry:"; grep "^chart: " "$WORK/update-wake2.txt" | head -3; fail=1
+  fi
+  last_notdue=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("lastCheck") or "")' "$update_state") || true
+  [ "$last_notdue" = "$last_after" ] ||
+    { echo "a wake that is not due moved lastCheck from ${last_after} to ${last_notdue}"; fail=1; }
+  revision_after_wake2=$(revision)
+  [ "$revision_after_wake2" = "$revision_before_wake" ] ||
+    { echo "a wake that is not due moved the release to revision ${revision_after_wake2}"; fail=1; }
+
+  # box status is the one line the four facts are read from. The release, the
+  # last step, when box checks next, and what is held.
+  log "box status: one line, from the files box already wrote"
+  status_line=$("$WORK/box" status --record "$WORK/cluster.yaml" --grant "$WORK/grant.yaml" \
+    --values "$WORK/values.yaml" --kubeconfig "$WORK/kubeconfig" --unit-dir "$units" 2>&1) || true
+  echo "  ${status_line}"
+  case "$status_line" in
+    "s5n ${CHART_VERSION} · "*) ;;
+    *) echo "box status does not start with the release it is on, want 's5n ${CHART_VERSION} · '"; fail=1 ;;
+  esac
+  case "$status_line" in
+    *"next check "*) ;;
+    *) echo "box status does not say when box checks next"; fail=1 ;;
+  esac
+  case "$status_line" in
+    *"last update none"*) ;;
+    *) echo "box status names a last update on a box that has never stepped"; fail=1 ;;
+  esac
+  # The unit is what decides whether box checks at all: no timer file in the
+  # directory status looks in is "timer not installed", and it comes before any
+  # clock time.
+  status_none=$("$WORK/box" status --record "$WORK/cluster.yaml" --grant "$WORK/grant.yaml" \
+    --values "$WORK/values.yaml" --kubeconfig "$WORK/kubeconfig" --unit-dir "$WORK/no-units" 2>&1) || true
+  echo "  ${status_none}"
+  case "$status_none" in
+    *"timer not installed"*) ;;
+    *) echo "box status did not say the timer is not installed where no unit is"; fail=1 ;;
+  esac
+
+  # `update.timer: off` is the switch, and it is an edit in root's file: the
+  # wake obeys it, says where the switch is, writes nothing at all -- and
+  # update.json's bytes are the proof.
+  log "update.timer: off: the wake says so, exits 0, and writes nothing"
+  sed -i 's/^  timer: on  /  timer: off /' "$conf"
+  grep -q "^  timer: off " "$conf" || { echo "could not turn the timer off in ${conf}"; fail=1; }
+  state_before_off=$(sha256sum "$update_state" | cut -d' ' -f1)
+  if "$WORK/box" update --timer --chart-repo "$CHART_REPO" --record "$WORK/cluster.yaml" \
+    --grant "$WORK/grant.yaml" --values "$WORK/values.yaml" --paths-in-node \
+    --kubeconfig "$WORK/kubeconfig" >"$WORK/update-off.txt" 2>&1; then
+    cat "$WORK/update-off.txt"
+  else
+    cat "$WORK/update-off.txt"; echo "a wake with the timer off exited non-zero"; fail=1
+  fi
+  grep -qxF "box does not check for updates by itself: ${conf} says update.timer: off" "$WORK/update-off.txt" ||
+    { echo "the switched-off wake did not say the one line naming the file:"; cat "$WORK/update-off.txt"; fail=1; }
+  [ "$(sha256sum "$update_state" | cut -d' ' -f1)" = "$state_before_off" ] ||
+    { echo "a wake with the timer off wrote update.json"; fail=1; }
+  if grep -q "^chart: " "$WORK/update-off.txt"; then
+    echo "a wake with the timer off contacted the registry"; fail=1
+  fi
+  status_off=$("$WORK/box" status --record "$WORK/cluster.yaml" --grant "$WORK/grant.yaml" \
+    --values "$WORK/values.yaml" --kubeconfig "$WORK/kubeconfig" --unit-dir "$units" 2>&1) || true
+  echo "  ${status_off}"
+  case "$status_off" in
+    *"· timer off") ;;
+    *) echo "box status does not end with 'timer off' while the file says off"; fail=1 ;;
+  esac
+  # Put the switch back: the rest of the scenario is the install's, and root's
+  # file is bootstrap's to leave alone.
+  sed -i 's/^  timer: off /  timer: on  /' "$conf"
+  grep -q "^  timer: on  " "$conf" || { echo "could not put the timer back on in ${conf}"; fail=1; }
 
   # ---- apply 3: one key edited -----------------------------------------------
   log "box apply: one edited value is diffed and applied"
@@ -4271,6 +4473,49 @@ update_box() {
     { echo "box did not report a healthy receipt"; fail=1; }
   [ "$fail" = 0 ] || return 0
 
+  # ---- notices: the receiver box posts to -----------------------------------
+  # box on this host posts to root's address; the pods never do, so a receiver
+  # here is where a step's notices land. It is a stdlib http.server that appends
+  # each body as one line, bound to a port the kernel picks (written where this
+  # script can read it), and it is killed by pid.
+  cat >"$WORK/notice-receiver.py" <<'PY'
+import http.server, os, sys
+port_file, log = sys.argv[1], sys.argv[2]
+
+class Handler(http.server.BaseHTTPRequestHandler):
+    def do_POST(self):
+        body = self.rfile.read(int(self.headers.get("Content-Length") or 0))
+        with open(log, "a") as f:
+            f.write(body.decode("utf-8", "replace") + "\n")
+        self.send_response(204)
+        self.end_headers()
+
+    def log_message(self, *args):
+        pass
+
+server = http.server.HTTPServer(("127.0.0.1", 0), Handler)
+with open(port_file + ".tmp", "w") as f:
+    f.write(str(server.server_port))
+os.replace(port_file + ".tmp", port_file)
+server.serve_forever()
+PY
+  rm -f "$WORK/notice-port" "$WORK/notices.log"
+  python3 "$WORK/notice-receiver.py" "$WORK/notice-port" "$WORK/notices.log" &
+  NOTICE_PID=$!
+  for i in $(seq 1 100); do
+    [ -s "$WORK/notice-port" ] && break
+    sleep 0.1
+  done
+  NOTICE_PORT=$(cat "$WORK/notice-port" 2>/dev/null || true)
+  [ -n "$NOTICE_PORT" ] || { echo "the notice receiver never bound a port"; fail=1; return 0; }
+  echo "  notice receiver on 127.0.0.1:${NOTICE_PORT} (pid ${NOTICE_PID})"
+  # Root's file, edited by hand the way an operator edits it: the address is a
+  # secret with a token in it, and box never writes this line.
+  NOTICE_URL="http://127.0.0.1:${NOTICE_PORT}/hook/T00/s3cret?token=abc"
+  sed -i "s|^  url: \"\".*|  url: \"${NOTICE_URL}\"|" "$WORK/box.yaml"
+  grep -qF "${NOTICE_URL}" "$WORK/box.yaml" ||
+    { echo "could not set notices.url in $WORK/box.yaml"; fail=1; return 0; }
+
   # ---- the marker, and what both apps run before the update ------------------
   log "sonarr's config gets a marker only the snapshot can bring back"
   sonarr_image=$(pod_image sonarr-0) || true
@@ -4400,6 +4645,72 @@ PY
   [ "$release_chart" = "$release_b" ] ||
     { echo "the release is on ${release_chart}, want ${release_b}: the step moves the app, not the release"; fail=1; }
 
+  # ---- what the step told someone who was not looking -----------------------
+  # The step posts a body per thing it did: the app it put back, then the step
+  # itself. The sentence is the same in both fields a webhook reads (Slack's
+  # text, Discord's content), and the fields carry what a script would use.
+  log "notices: the step's updated and rolled-back bodies reached the receiver"
+  python3 - "$WORK/notices.log" "$CHART_VERSION" "$release_b" <<'PY' || fail=1
+import json, sys
+path, frm, to = sys.argv[1:4]
+bodies = [json.loads(line) for line in open(path) if line.strip()]
+if not bodies:
+    sys.exit(f"{path} is empty: the step posted no notice")
+for b in bodies:
+    if not b.get("text") or b.get("text") != b.get("content"):
+        sys.exit("a %s notice's text and content differ: %r vs %r"
+                 % (b.get("event"), b.get("text"), b.get("content")))
+updated = [b for b in bodies if b.get("event") == "updated"]
+if len(updated) != 1:
+    sys.exit("%s holds %d updated notices, want one: %s"
+             % (path, len(updated), [b.get("event") for b in bodies]))
+u = updated[0]
+if (u.get("from"), u.get("to")) != (frm, to):
+    sys.exit("the updated notice moved %r -> %r, want %r -> %r"
+             % (u.get("from"), u.get("to"), frm, to))
+back = [b for b in bodies if b.get("event") == "rolled-back"]
+apps = [a.get("app") for b in back for a in (b.get("apps") or [])]
+if apps != ["sonarr"]:
+    sys.exit("the rolled-back notice names %r, want ['sonarr']: %s" % (apps, back))
+print("  notices: %d posted; updated %s -> %s, rolled back %s"
+      % (len(bodies), u["from"], u["to"], ", ".join(apps)))
+PY
+
+  # The same facts in the one line an operator reads: the step, how it ended
+  # (the app it put back is part of that), and the hold it left.
+  status_line=$("$WORK/box" status --record "$WORK/cluster.yaml" --grant "$WORK/grant.yaml" \
+    --values "$WORK/values.yaml" --kubeconfig "$WORK/kubeconfig" 2>&1) || true
+  echo "  box status: ${status_line}"
+  case "$status_line" in
+    *"last update ${CHART_VERSION} → ${release_b} "*) ;;
+    *) echo "box status does not name the step the update made"; fail=1 ;;
+  esac
+  case "$status_line" in
+    *"ok, sonarr rolled back"*) ;;
+    *) echo "box status does not say the step ended with sonarr put back"; fail=1 ;;
+  esac
+  case "$status_line" in
+    *"held: sonarr (rolled back from ${BROKEN_TAG})"*) ;;
+    *) echo "box status does not name the hold the step wrote"; fail=1 ;;
+  esac
+
+  # ---- the address is a secret ---------------------------------------------
+  # The token in root's address reaches box.yaml and nothing else: no
+  # transcript, no record, no notice. The one file it is allowed to be in is
+  # the file root owns, and that is why it is mode 0600.
+  log "the notice address is in root's file and nowhere else"
+  leaks=$(grep -rlF -e 's3cret' -e 'token=abc' "$WORK" 2>/dev/null | grep -vxF "$WORK/box.yaml" || true)
+  [ -z "$leaks" ] ||
+    { echo "the notice address leaked into:"; echo "${leaks}"; fail=1; }
+
+  # A receiver that is not there is one warning, never a failed update: the
+  # update happened either way. The warning names the address by scheme and
+  # host alone, so the token is still nowhere.
+  log "notices: a closed port is one warning naming the host, and nothing else"
+  kill "$NOTICE_PID" 2>/dev/null || true
+  wait "$NOTICE_PID" 2>/dev/null || true
+  NOTICE_PID=""
+
   # The wiring ran once, and the run is the rollback's: the step's first apply
   # is with the chart's hooks off, so the Job Helm created can only be the one
   # its hooks-on apply made, whose start is after this step began. The times are
@@ -4461,6 +4772,18 @@ PY
   release_chart=$(helm_chart_version) || true
   [ "$release_chart" = "$release_c" ] ||
     { echo "the release is on ${release_chart}, want ${release_c}"; fail=1; }
+
+  # The receiver was killed before this step, so its notice could not be
+  # delivered -- and box says so in one warning that names the address by
+  # scheme and host, never the path or the token in the query.
+  grep -qF "posting a notice: http://127.0.0.1:${NOTICE_PORT}" "$WORK/update-c.txt" ||
+    { echo "box did not warn that the notice could not be delivered, naming the address by host:"; grep -i "notice" "$WORK/update-c.txt" | head -3; fail=1; }
+  if grep -qF -e 's3cret' -e 'token=abc' "$WORK/update-c.txt"; then
+    echo "the undelivered notice printed the address's path and query: $(grep -m1 -F -e 's3cret' -e 'token=abc' "$WORK/update-c.txt")"; fail=1
+  fi
+  leaks=$(grep -rlF -e 's3cret' -e 'token=abc' "$WORK" 2>/dev/null | grep -vxF "$WORK/box.yaml" || true)
+  [ -z "$leaks" ] ||
+    { echo "the notice address leaked into:"; echo "${leaks}"; fail=1; }
 
   # ---- box rollback sonarr --pin -------------------------------------------
   # The newest copy is the one the C step took before it moved sonarr: its
