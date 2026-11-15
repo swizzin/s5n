@@ -309,6 +309,22 @@ else
   grep -q "not blessed by the chart" "$WORK/allow-image.txt" || fail=1
 fi
 
+# The control: the chart blesses two repositories for qBittorrent now, and the
+# params are generated from variants.yaml, so the second one has to reach this
+# namespace or a user's box could not run an image the chart itself ships. The
+# fixture's security context is already admissible, so the repository is the
+# only thing under test; a server-side dry run is a real admission request that
+# creates nothing.
+log "admission: the user can run both blessed qBittorrent repositories"
+sed -e 's/name: unblessed/name: blessed-qbittorrent/' -e 's/app: unblessed/app: blessed-qbittorrent/g' \
+  -e "s#${CURL_IMAGE}#ghcr.io/swizzin/qbittorrent:5.3.0-lt1.2.20@sha256:b9fbce0d1f44684f6272b39e34e5f24af1ddcc4236d9e2de364dafe6dc403b2e#" \
+  "$WORK/unblessed.yaml" >"$WORK/blessed-qbittorrent.yaml"
+if $K --as="$SA" -n "$NS" create --dry-run=server -f "$WORK/blessed-qbittorrent.yaml" >"$WORK/allow-qbittorrent.txt" 2>&1; then
+  echo "the lt1.2 qBittorrent image is admitted"
+else
+  echo "$(cat "$WORK/allow-qbittorrent.txt")"; fail=1
+fi
+
 log "admission: the user can only use the granted nodePort"
 cat >"$WORK/unblessed-svc.yaml" <<'EOF'
 apiVersion: v1
