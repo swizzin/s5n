@@ -37,6 +37,16 @@ apps:
         to: /config/tls
       - from: /library/scripts
         to: /config/scripts
+      # What discovery writes on a second run, when the tree already sits where
+      # box wants it; a check of a migrated copy needs them to be clean.
+      - from: /data/media
+        to: /data/media
+      - from: /data/downloads
+        to: /data/downloads
+      - from: /config/tls
+        to: /config/tls
+      - from: /config/scripts
+        to: /config/scripts
   qbittorrent:
     source: qbittorrent
     config: /srv/apps/qbittorrent
@@ -364,6 +374,9 @@ func TestSonarrRewritesEveryPath(t *testing.T) {
 	}
 	if len(rep2.Changes) != 0 {
 		t.Errorf("second Check still reports changes: %+v", rep2.Changes)
+	}
+	if len(rep2.Unclassified) != 0 || rep2.Blocked() {
+		t.Errorf("second Check blocks on the pass's own work: %v %v", rep2.Uncovered, addressStrings(rep2.Unclassified))
 	}
 }
 
