@@ -155,10 +155,14 @@ func Load(path string) (*Config, error) {
 	return &c, nil
 }
 
+// validate checks the rendered config. An empty app list is valid, and the Job
+// must accept it: a seedbox is installed with apps off (`box init --apps`, which
+// is how `box migrate apply` finds a box whose plan's apps it switches on
+// itself), and a release with no Arr and no qBittorrent has nothing per-app to
+// reconcile. The Job is a Helm hook, so refusing it fails the release and
+// `box apply` waits on a receipt that can never come -- there is no install to
+// repair, only a shape to accept.
 func (c *Config) validate() error {
-	if len(c.Instances) == 0 && c.Qbittorrent == nil {
-		return fmt.Errorf("wiring config has nothing enabled")
-	}
 	for i, inst := range c.Instances {
 		if err := validateInstance(i, inst); err != nil {
 			return err

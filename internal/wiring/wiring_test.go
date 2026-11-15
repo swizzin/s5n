@@ -521,6 +521,59 @@ func TestWiringStopsWhenOwnedRecordCannotBeRead(t *testing.T) {
 	}
 }
 
+// A release with no wired app still gets a receipt, and it says ok: `box apply`
+// waits for one, so a Job that failed the release because it had nothing to do
+// would make a seedbox installed with its apps off impossible -- which is the
+// box `box migrate apply` adopts into.
+func TestWiringWithNoWiredAppReportsOK(t *testing.T) {
+	var published []map[string]string
+	r := &Runner{
+		Config: Config{Namespace: "seedbox", ConfigMap: "s5n-wiring", TimeoutSeconds: 10},
+		Now:    func() time.Time { return time.Unix(0, 0).UTC() },
+		Publish: func(_ context.Context, data map[string]string) error {
+			published = append(published, data)
+			return nil
+		},
+	}
+	res, err := r.Run(context.Background())
+	if err != nil {
+		t.Fatalf("a run with nothing to wire failed: %v", err)
+	}
+	if res.Status != "ok" || res.Error != "" {
+		t.Fatalf("receipt = %+v", res)
+	}
+	if res.Writes != (Writes{}) {
+		t.Fatalf("a run with nothing to wire wrote something: %+v", res.Writes)
+	}
+	if len(res.Hardlinks) != 0 {
+		t.Fatalf("a run with no download/library pair proved something: %+v", res.Hardlinks)
+	}
+	if len(published) != 1 {
+		t.Fatalf("published %d receipts, want one", len(published))
+	}
+	if !strings.Contains(published[0]["summary.txt"], "s5n wiring: ok") {
+		t.Fatalf("summary is not an ok receipt:\n%s", published[0]["summary.txt"])
+	}
+
+	// A Prowlarr is still wired when no Arr and no qBittorrent is: the empty
+	// app list is not a reason to skip an app the config does name.
+	if _, err := Load(writeFile(t, `{"namespace":"seedbox","configMap":"s5n-wiring","timeoutSeconds":10,"instances":[],`+
+		`"prowlarr":{"url":"http://127.0.0.1:1","urlBase":"/prowlarr","selfUrl":"http://127.0.0.1:1/prowlarr",`+
+		`"apiKeyFile":"/missing"}}`)); err != nil {
+		t.Fatalf("a Prowlarr-only release was refused: %v", err)
+	}
+}
+
+// writeFile puts one fixture in a temp file and returns its path.
+func writeFile(t *testing.T, content string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "wiring.json")
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
 // A qBittorrent that answers 200 to setPreferences but keeps its own default must
 // fail the run, not report "updated".
 func TestWiringFailsWhenQbitIgnoresPreferences(t *testing.T) {

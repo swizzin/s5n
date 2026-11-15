@@ -1,0 +1,33 @@
+# A release with no wired app: one app that the wiring Job talks to, and no Arr
+# and no qBittorrent at all. It is the shape `box init --apps prowlarr` installs,
+# and the box `box migrate apply` adopts into -- the plan's apps are off, and the
+# migration switches them on itself. The Job's config then carries no instance
+# and no qBittorrent block, which it has to accept: the Job is the release's
+# Helm hook, so a refusal is an install nobody can finish.
+auth:
+  edge: true
+
+storage:
+  data:
+    existingClaim: box-prowlarr-only-data
+  config:
+    existingClaim: box-prowlarr-only-config
+
+apps:
+  qbittorrent:
+    enabled: false
+  sonarr:
+    enabled: false
+  radarr:
+    enabled: false
+  plex:
+    enabled: false
+  tautulli:
+    enabled: false
+  seerr:
+    enabled: false
+
+# The box's own name. Plex and Seerr are served at plex.<domain> and
+# seerr.<domain> (the catalog says so), so a render needs the domain.
+gateway:
+  host: box.example.com
