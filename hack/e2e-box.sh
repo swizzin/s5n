@@ -42,7 +42,9 @@
 #                 the same step moved elsewhere stays moved and the release stays
 #                 at the new version. Then a re-apply keeps the hold, a release
 #                 that pins another image lapses it, and `box rollback --pin`
-#                 restores the newest copy into an ordinary values pin. This is
+#                 restores the newest copy into an ordinary values pin. Then
+#                 `box apply` refuses to move the release, copies sonarr before
+#                 a values pin moves it, and a rollback restores that copy. This is
 #                 the only scenario box needs to reach the config it copies, so
 #                 it is the only one whose volume roots are a directory on this
 #                 host, mounted into the node (see VOLUME ROOTS below).
@@ -4073,7 +4075,10 @@ PY
 # pods gone, its config restored, a hold naming it -- leave the other app moved,
 # leave the release at the new version, and say all of it. Then a re-apply keeps
 # the hold, a release that pins another image lapses it, and `box rollback --pin`
-# restores the newest copy as an ordinary values pin.
+# restores the newest copy as an ordinary values pin. Last, `box apply` keeps
+# the installed release (refusing one it was not given by `box update`), copies
+# sonarr before a values pin moves it, and `box rollback --pin` restores that
+# copy.
 #
 # Three of the images this needs are not in any chart: a sonarr that rewrites a
 # file a snapshot glob names and exits (release B), prowlarr's own image under a
@@ -4087,6 +4092,9 @@ PY
 BROKEN_TAG=e2e-broken
 MOVED_TAG=e2e-moved
 RESTORED_TAG=e2e-restored
+# What the operator pins sonarr to by hand after the last rollback: sonarr's
+# own image under a new tag, so the app `box apply` moves comes back healthy.
+APPLIED_TAG=e2e-applied
 # busybox 1.37.0, the base of the image release B ships for sonarr: a shell that
 # rewrites the config and then exits, which is a migration that cannot serve,
 # seen from outside.
@@ -4460,7 +4468,120 @@ PY
 
   # An ordinary pin in the operator's file: the tag and digest the snapshot
   # recorded, under the app's image key, and no hold where one would be.
-  python3 - "$WORK/values.yaml" "$sonarr_tag" "$sonarr_digest" <<'PY' || fail=1
+  values_pin_assert "$WORK/values.yaml" "$sonarr_tag" "$sonarr_digest" || fail=1
+  holds_assert "$CONFIG_PATH" sonarr gone "" "" || fail=1
+  [ "$fail" = 0 ] || return 0
+
+  # ---- box apply keeps the installed release -------------------------------
+  # Release D is published and is now the newest this box could use. apply is
+  # not the command that moves a release: naming D is refused before the chart
+  # is loaded, and nothing is written.
+  log "release D is published: box apply refuses to move the release to it"
+  release_d=$(next_patch "$release_c") || true
+  [ -n "$release_d" ] || { echo "could not read the release after ${release_c}"; fail=1; return 0; }
+  update_chart "$WORK/chart-d" "$release_d"
+  revision_before=$(helm_revision "$NS") || true
+  if "$WORK/box" apply --yes --chart-repo "$CHART_REPO" --chart-version "$release_d" \
+    --grant "$WORK/grant.yaml" --values "$WORK/values.yaml" --paths-in-node \
+    --kubeconfig "$WORK/kubeconfig" >"$WORK/apply-release-d.txt" 2>&1; then
+    cat "$WORK/apply-release-d.txt"
+    echo "box apply --chart-version ${release_d} succeeded: only box update may move the release"; fail=1; return 0
+  fi
+  cat "$WORK/apply-release-d.txt"
+  grep -qF "apply keeps the installed release (${release_c}); \`box update\` moves it to ${release_d}" "$WORK/apply-release-d.txt" ||
+    { echo "box did not refuse with the release it keeps and the command that moves it"; fail=1; }
+  revision_after=$(helm_revision "$NS") || true
+  [ "$revision_after" = "$revision_before" ] ||
+    { echo "the refused apply wrote revision ${revision_after} (was ${revision_before})"; fail=1; }
+
+  # ---- box apply: a values pin moves sonarr, and apply copies it first ------
+  # The operator moves sonarr's pin to another tag, with no --chart-version: a
+  # bare apply installs the release the box is on (C), not the newest one (D).
+  # The tag is the bytes sonarr already runs under a new name, so the app comes
+  # back healthy; dropping the digest is still a move (the deployed reference
+  # has one and the pin does not), and a move of a running app is copied first.
+  log "box apply: sonarr's pin moves to ${APPLIED_TAG}, so apply takes a copy first"
+  retag_pinned "$sonarr_repo" "$sonarr_digest" "$APPLIED_TAG" || { fail=1; return 0; }
+  python3 - "$WORK/values.yaml" "$APPLIED_TAG" <<'PY' || { fail=1; return 0; }
+import re, sys
+path, tag = sys.argv[1:3]
+lines = open(path).read().splitlines(keepends=True)
+start = next((i for i, line in enumerate(lines) if line.strip() == "sonarr:"), None)
+if start is None:
+    sys.exit(f"{path} names no sonarr")
+indent = len(lines[start]) - len(lines[start].lstrip())
+out, moved = lines[:start + 1], False
+for i in range(start + 1, len(lines)):
+    line = lines[i]
+    if line.strip() and len(line) - len(line.lstrip()) <= indent:
+        out.extend(lines[i:])
+        break
+    m = re.match(r'^(\s+)(tag|digest):', line)
+    if m and m.group(2) == "digest":
+        continue
+    if m:
+        out.append('%stag: "%s"\n' % (m.group(1), tag))
+        moved = True
+        continue
+    out.append(line)
+if not moved:
+    sys.exit(f"{path}: sonarr has no tag pin to move")
+open(path, "w").write("".join(out))
+print(f"  values: apps.sonarr.image.tag -> {tag}, digest dropped")
+PY
+  grep -qF "$MARKER" "$CONFIG_PATH/sonarr/config.xml" ||
+    { echo "sonarr's config lost the marker before the apply: the copy below would prove nothing"; fail=1; return 0; }
+  if "$WORK/box" apply --yes --chart-repo "$CHART_REPO" \
+    --grant "$WORK/grant.yaml" --values "$WORK/values.yaml" --paths-in-node \
+    --kubeconfig "$WORK/kubeconfig" >"$WORK/apply-pin.txt" 2>&1; then
+    cat "$WORK/apply-pin.txt"
+  else
+    cat "$WORK/apply-pin.txt"; fail=1; return 0
+  fi
+  grep -qF "sonarr: stopped and snapshotted before it moves from ${sonarr_tag} to ${APPLIED_TAG}" "$WORK/apply-pin.txt" ||
+    { echo "apply's plan did not say it copies sonarr before the move:"; grep -i "sonarr" "$WORK/apply-pin.txt" | head -5; fail=1; }
+  wait_image_ready sonarr-0 "${sonarr_repo}:${APPLIED_TAG}" ||
+    { echo "sonarr-0 is not ready on ${sonarr_repo}:${APPLIED_TAG} (it runs $(pod_image sonarr-0 || true))"; fail=1; }
+  release_chart=$(helm_chart_version) || true
+  [ "$release_chart" = "$release_c" ] ||
+    { echo "the release is on ${release_chart} after a bare apply, want ${release_c}: apply moved it"; fail=1; }
+  [ "$fail" = 0 ] || return 0
+
+  # ---- box rollback sonarr --pin: the copy the apply took ------------------
+  # What the new image would have done to the config, done through the pod: the
+  # marker goes. The newest copy is now the apply's, so the rollback names a step
+  # that stayed on one release, and putting it back brings the marker back.
+  log "box rollback sonarr --pin: the copy apply took, back under the old pin"
+  $K -n "$NS" exec sonarr-0 -c sonarr -- /bin/sh -c "
+    set -eu
+    sed -i '\\#$MARKER#d' /config/config.xml
+    ! grep -qF '$MARKER' /config/config.xml" ||
+    { echo "could not take the marker out of sonarr's config through the pod"; fail=1; return 0; }
+  if "$WORK/box" rollback sonarr --pin --yes --chart-repo "$CHART_REPO" \
+    --grant "$WORK/grant.yaml" --values "$WORK/values.yaml" --paths-in-node \
+    --kubeconfig "$WORK/kubeconfig" >"$WORK/rollback-apply.txt" 2>&1; then
+    cat "$WORK/rollback-apply.txt"
+  else
+    cat "$WORK/rollback-apply.txt"; fail=1; return 0
+  fi
+  grep -Eq "sonarr's newest snapshot is [0-9]+ minutes? old \(taken .*, before ${release_c} -> ${release_c}\)" "$WORK/rollback-apply.txt" ||
+    { echo "the rollback did not restore the copy the apply took (a step from ${release_c} to ${release_c}):"; grep -i "newest snapshot" "$WORK/rollback-apply.txt" | head -3; fail=1; }
+  wait_image_ready sonarr-0 "$sonarr_image" ||
+    { echo "sonarr-0 is not ready on ${sonarr_image} after the rollback (it runs $(pod_image sonarr-0 || true))"; fail=1; }
+  grep -qF "$MARKER" "$CONFIG_PATH/sonarr/config.xml" ||
+    { echo "the marker is not back in ${CONFIG_PATH}/sonarr/config.xml: the rollback did not restore the apply's copy"; fail=1; }
+  values_pin_assert "$WORK/values.yaml" "$sonarr_tag" "$sonarr_digest" || fail=1
+  holds_assert "$CONFIG_PATH" sonarr gone "" "" || fail=1
+  release_chart=$(helm_chart_version) || true
+  [ "$release_chart" = "$release_c" ] ||
+    { echo "the release is on ${release_chart} after the rollback, want ${release_c}"; fail=1; }
+}
+
+# values_pin_assert <values file> <tag> <digest>: the operator's file pins the
+# app's image to exactly that tag and digest, the way `box rollback --pin`
+# writes it.
+values_pin_assert() {
+  python3 - "$1" "$2" "$3" <<'PY'
 import sys
 path, tag, digest = sys.argv[1:4]
 lines = open(path).read().splitlines()
@@ -4475,7 +4596,6 @@ for want in (tag, digest):
         sys.exit(f"{path}: sonarr's image block does not carry {want}: {block}")
 print(f"  values: apps.sonarr.image carries {tag} and {digest}")
 PY
-  holds_assert "$CONFIG_PATH" sonarr gone "" "" || fail=1
 }
 
 # box is the whole interface: a client-go/klog line such as
