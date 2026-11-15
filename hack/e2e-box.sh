@@ -871,7 +871,11 @@ spec:
   selector:
     app: pebble
   ports:
-    - {name: acme, port: 14000, targetPort: 14000}
+    # Both are pinned: a NodePort Service with one explicit and one random
+    # nodePort can have the random one allocated on 31500, and the API server
+    # then refuses the second ("provided port is already allocated") -- a
+    # failure that depends on what else the cluster has handed out.
+    - {name: acme, port: 14000, targetPort: 14000, nodePort: 31400}
     - {name: management, port: 15000, targetPort: 15000, nodePort: 31500}
 EOF
   $K -n pebble rollout status deploy/pebble --timeout=180s || { echo "Pebble never rolled out"; fail=1; return 0; }
