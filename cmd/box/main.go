@@ -89,6 +89,8 @@ func main() {
 		runUpdate(ctx, os.Args[2:])
 	case "rollback":
 		runRollback(ctx, os.Args[2:])
+	case "migrate":
+		runMigrate(ctx, os.Args[2:])
 	case "version":
 		fmt.Println(version)
 	default:
@@ -117,6 +119,7 @@ commands:
   apply       install or upgrade root's seedbox from its grant and values
   update      replace box when a newer one verifies, then move the seedbox to a newer release
   rollback    put one app back on the image it ran before an update moved it
+  migrate     adopt an install box did not make: discover writes the plan
   version     print the version box was built from
 `)
 	os.Exit(2)
