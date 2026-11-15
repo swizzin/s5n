@@ -1,47 +1,277 @@
-// Package peerbanhelper is PeerBanHelper's rewriter: it registers `pbh` so
-// apply never meets an app without one, and changes nothing.
+// Package peerbanhelper rewrites PeerBanHelper's own listen settings and the
+// downloaders it holds.
 //
-// PeerBanHelper is the one app in the catalog that stores no path and no
-// connection in any file migrate copies. Its whole state lives under the
-// directory `-Dpbh.datadir` names, and the chart passes `/config`
-// (charts/s5n/templates/workloads.yaml, PBH_DATADIR), which is exactly the
-// staged directory (PBH-BTN/PeerBanHelper@v9.5.4:Main.java:367-378 reads the
-// property and puts `config/`, `persist/`, `logs/` and `plugins/` under it).
-// Its config.yml holds no filesystem path at all: the keys that look like paths
-// are the IP-database *names* and the `database:` block, which holds a host,
-// not a path (src/main/resources/config.yml at v9.5.4). Its downloader
-// connections live in the database, in a module table the app rewrites itself
-// on first start, not in the copied config.
+// Its whole state lives under the directory `-Dpbh.datadir` names, and the chart
+// points that at /config (charts/s5n/templates/workloads.yaml, PBH's
+// JAVA_TOOL_OPTIONS; PBH-BTN/PeerBanHelper@v9.5.4:src/main/java/com/ghostchu/peerbanhelper/Main.java:367-378).
+// The file this package edits is `<datadir>/config/config.yml` (Main.java:373
+// and :414, and the image writes the template there on a first start, :543-548).
 //
-// So the honest answer for pbh is "copied as it is". Registering it anyway is
-// the point: rewrite.For refuses an app with no rewriter, because every app's
-// paths are rewritten with no exceptions, and a copied database under a data
-// root the chart moves to /config needs no rewrite to be right.
+// That file holds no filesystem path: the values that look like paths are the
+// IP-database *names* and the `database:` block, which holds an address, not a
+// path (src/main/resources/config.yml at v9.5.4). What it does hold is the two
+// things a box changes:
+//
+//   - its own listener, under `server:`: `http`, `address` and `prefix` (the
+//     template's own comments: the port, the bind address, and the URL PBH
+//     hands a downloader so it can fetch PBH's blocklist);
+//   - one downloader per id under `client:`, each with a `type` and an
+//     `endpoint` (DownloaderManagerImpl.java:65-91, which reads `client`'s keys
+//     and hands each section to QBittorrent.loadFromConfig;
+//     QBittorrentConfigImpl.java:31-48 reads the keys this package cares about).
+//
+// The chart hands PBH its API token and its "no login at the edge" switch
+// through the environment (PBH_APITOKEN, PBH_WEB_REQUIRELOGIN, workload.yaml),
+// so `server.token` in this file is not migrate's and is left exactly as the
+// source wrote it. Wiring manages the qBittorrent downloader it owns through
+// PBH's WebAPI on every run (internal/apps/pbh.go, EnsureDownloader), so a
+// downloader this pass rewrites is one wiring then adopts by id: the endpoint
+// it writes is the same one this pass wrote, and nothing here fights it.
 package peerbanhelper
 
 import (
 	"context"
+	"fmt"
+	"net"
+	"net/url"
+	"os"
+	"path/filepath"
+	"sort"
+	"strconv"
+	"strings"
 
+	"github.com/swizzin/s5n/internal/atomicfile"
+	"github.com/swizzin/s5n/internal/migrate/plan"
 	"github.com/swizzin/s5n/internal/migrate/rewrite"
 )
 
 func init() { rewrite.Register("pbh", rewriter{}) }
 
+const (
+	// configRel is config.yml inside the directory the app is given as
+	// /config: PBH's own home is `<datadir>/config`.
+	configRel = "config/config.yml"
+
+	sectionServer = "server"
+	keyHTTP       = "http"
+	keyAddress    = "address"
+	keyPrefix     = "prefix"
+
+	sectionClient = "client"
+	keyType       = "type"
+	keyName       = "name"
+	keyEndpoint   = "endpoint"
+
+	// bindAddr is what a pod needs: every container interface. A single-host
+	// install commonly binds 127.0.0.1, which inside a pod is nobody but itself.
+	bindAddr = "0.0.0.0"
+
+	// downloaderKind is what an adopted downloader is filed as in wiring's
+	// ownership record (internal/wiring/owned.go).
+	downloaderKind = "pbh-downloader"
+)
+
 type rewriter struct{}
 
-// Check reads nothing: the note is the whole answer, and it is on Check's
-// report so the plan shows it before anything is copied.
+// Check reads config.yml and reports what it would change, writing nothing.
 func (rewriter) Check(_ context.Context, in rewrite.Input) (rewrite.Report, error) {
-	return rewrite.Report{
-		App: in.App,
-		Notes: []string{
-			"its data directory is the chart's /config (-Dpbh.datadir), " +
-				"and it stores no path of its own: the copied config and database are used as they are",
-		},
-	}, nil
+	return run(in, false)
 }
 
-// Write makes no change, which is exactly what Check reported.
-func (rw rewriter) Write(ctx context.Context, in rewrite.Input) (rewrite.Report, error) {
-	return rw.Check(ctx, in)
+// Write makes exactly the changes Check reported, in the staged copy only.
+func (rewriter) Write(_ context.Context, in rewrite.Input) (rewrite.Report, error) {
+	return run(in, true)
+}
+
+// decision is both passes' work, so Write cannot make a change its Check did not
+// report.
+type decision struct {
+	file  *ymlFile
+	edits []ymlEdit
+	tally tally
+	owned []rewrite.Owned
+}
+
+func run(in rewrite.Input, write bool) (rewrite.Report, error) {
+	rep := rewrite.Report{App: in.App}
+	path := filepath.Join(in.Dir, filepath.FromSlash(configRel))
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			rep.Notes = append(rep.Notes, configRel+" is not in the staged config; PeerBanHelper writes one on its first start")
+			return rep, nil
+		}
+		return rep, fmt.Errorf("peerbanhelper: %w", err)
+	}
+	file, err := parseYAML(raw)
+	if err != nil {
+		return rep, fmt.Errorf("peerbanhelper: %s: %w", configRel, err)
+	}
+	d := &decision{file: file, tally: tally{}}
+	if err := d.listen(in); err != nil {
+		return rep, err
+	}
+	if err := d.downloaders(in, &rep); err != nil {
+		return rep, err
+	}
+	rep.Changes = d.tally.changes()
+	rep.Owned = d.owned
+	sortOwned(rep.Owned)
+	if write && rep.Blocked() {
+		return rep, fmt.Errorf("peerbanhelper: the plan does not settle every path and address; nothing was written")
+	}
+	if !write || len(d.edits) == 0 {
+		return rep, nil
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		return rep, fmt.Errorf("peerbanhelper: %w", err)
+	}
+	if err := atomicfile.Write(path, d.file.apply(d.edits), info.Mode()); err != nil {
+		return rep, fmt.Errorf("peerbanhelper: %w", err)
+	}
+	return rep, nil
+}
+
+// listen makes PBH's own listener the chart's: its port, every interface, and a
+// blocklist URL a downloader inside the release can reach.
+func (d *decision) listen(in rewrite.Input) error {
+	end, ok := in.Targets[in.App]
+	if !ok {
+		return fmt.Errorf("peerbanhelper: the plan has no endpoint for %q", in.App)
+	}
+	keys := []struct {
+		key   string
+		value string
+		what  string
+	}{
+		{keyHTTP, strconv.Itoa(end.Port), "port"},
+		{keyAddress, bindAddr, "bind"},
+		// PBH gives this URL to the downloader it asks to fetch its blocklist,
+		// so it has to be the app's in-cluster address, not the source's
+		// 127.0.0.1 default, which inside another pod is that pod itself.
+		{keyPrefix, "http://" + net.JoinHostPort(end.Host, strconv.Itoa(end.Port)), "url"},
+	}
+	for _, k := range keys {
+		if v, found := d.file.get(sectionServer, k.key); found && v.str == k.value {
+			continue
+		}
+		edit, ok := d.file.set(k.value, sectionServer, k.key)
+		if !ok {
+			return fmt.Errorf("peerbanhelper: %s has no %s section, so its %s cannot be set to the chart's; this is not the config PeerBanHelper writes",
+				configRel, sectionServer, k.key)
+		}
+		d.edits = append(d.edits, edit)
+		d.tally.add(configRel, sectionServer+"/"+k.key, k.what)
+	}
+	return nil
+}
+
+// downloaders points every downloader the plan settles at the box, and reports
+// the ones it does not settle.
+func (d *decision) downloaders(in rewrite.Input, rep *rewrite.Report) error {
+	for _, v := range d.file.values {
+		if len(v.path) != 3 || v.path[0] != sectionClient || v.path[2] != keyEndpoint {
+			continue
+		}
+		id := v.path[1]
+		stored := strings.TrimSpace(v.str)
+		where := sectionClient + "/" + id + "/" + keyEndpoint
+		u, err := url.Parse(stored)
+		if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Hostname() == "" {
+			rep.Notes = append(rep.Notes, fmt.Sprintf("%s %s: %q is not an http URL; left as it is", configRel, where, stored))
+			continue
+		}
+		port := 0
+		if p := u.Port(); p != "" {
+			n, convErr := strconv.Atoi(p)
+			if convErr != nil {
+				rep.Notes = append(rep.Notes, fmt.Sprintf("%s %s: %q names a port that is not a number; left as it is", configRel, where, stored))
+				continue
+			}
+			port = n
+		}
+		res := in.Resolve(u.Hostname(), port)
+		switch res.Verdict {
+		case plan.Leave:
+			continue
+		case plan.Rewrite:
+		default:
+			rep.Unclassified = append(rep.Unclassified, rewrite.Address{
+				App: in.App, File: configRel, Where: where, Host: u.Hostname(), Port: port,
+			})
+			continue
+		}
+		end, ok := in.Targets[res.App]
+		if !ok {
+			return fmt.Errorf("peerbanhelper: %s %s: the plan points %s at %q, which has no endpoint on the box",
+				configRel, where, address(u.Hostname(), port), res.App)
+		}
+		// A downloader's endpoint is the plain address: PBH appends /api/v2
+		// itself, and the loader strips one trailing slash
+		// (QBittorrentConfigImpl.java:33-35).
+		endpoint := "http://" + net.JoinHostPort(end.Host, strconv.Itoa(end.Port)) + strings.TrimSuffix(end.URLBase, "/")
+		if endpoint != stored {
+			edit, ok := d.file.set(endpoint, v.path...)
+			if !ok {
+				return fmt.Errorf("peerbanhelper: %s: cannot set %s", configRel, where)
+			}
+			d.edits = append(d.edits, edit)
+			d.tally.add(configRel, where, "host")
+		}
+		// Only the qBittorrent types are what wiring manages, and only a
+		// downloader the source already had can be adopted: it is filed under
+		// the id PBH stores it under, which is the string key `client:` uses
+		// (docs/box.md, "Migrated connections are adopted by ID").
+		switch strings.ToLower(d.file.str(sectionClient, id, keyType)) {
+		case "qbittorrent", "qbittorrentee":
+			name := d.file.str(sectionClient, id, keyName)
+			if name == "" {
+				name = id
+			}
+			d.owned = append(d.owned, rewrite.Owned{
+				Kind: downloaderKind, StringID: id, Name: name, Target: res.App,
+			})
+		}
+	}
+	return nil
+}
+
+// sortOwned orders adopted connections so a report reads the same twice.
+func sortOwned(owned []rewrite.Owned) {
+	sort.Slice(owned, func(i, j int) bool {
+		if owned[i].Kind != owned[j].Kind {
+			return owned[i].Kind < owned[j].Kind
+		}
+		return owned[i].StringID < owned[j].StringID
+	})
+}
+
+func address(host string, port int) string {
+	if port == 0 {
+		return host
+	}
+	return fmt.Sprintf("%s:%d", host, port)
+}
+
+// tally counts edits by file, key and kind, which is how a plan shows them.
+type tally map[[3]string]int
+
+func (t tally) add(file, where, what string) { t[[3]string{file, where, what}]++ }
+
+func (t tally) changes() []rewrite.Change {
+	out := make([]rewrite.Change, 0, len(t))
+	for k, n := range t {
+		out = append(out, rewrite.Change{File: k[0], Where: k[1], What: k[2], Count: n})
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].File != out[j].File {
+			return out[i].File < out[j].File
+		}
+		if out[i].Where != out[j].Where {
+			return out[i].Where < out[j].Where
+		}
+		return out[i].What < out[j].What
+	})
+	return out
 }
