@@ -4540,6 +4540,8 @@ PY
   fi
   grep -qF "sonarr: stopped and snapshotted before it moves from ${sonarr_tag} to ${APPLIED_TAG}" "$WORK/apply-pin.txt" ||
     { echo "apply's plan did not say it copies sonarr before the move:"; grep -i "sonarr" "$WORK/apply-pin.txt" | head -5; fail=1; }
+  grep -qF "\`box rollback sonarr\` puts it back" "$WORK/apply-pin.txt" ||
+    { echo "apply did not end by saying where the copy is and how to put it back:"; grep -i "snapshot" "$WORK/apply-pin.txt" | head -5; fail=1; }
   wait_image_ready sonarr-0 "${sonarr_repo}:${APPLIED_TAG}" ||
     { echo "sonarr-0 is not ready on ${sonarr_repo}:${APPLIED_TAG} (it runs $(pod_image sonarr-0 || true))"; fail=1; }
   release_chart=$(helm_chart_version) || true

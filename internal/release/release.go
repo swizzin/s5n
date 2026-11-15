@@ -1043,17 +1043,20 @@ func (a *Applier) Apply(ctx context.Context, opts Options) (Result, error) {
 		return res, nil
 	}
 
+	// The release moved, but a wiring that never reports or reports a failure
+	// is the moment the operator reaches for the copy: say where it is there
+	// too, as a failed upgrade does.
 	receipt, err := a.waitReceipt(ctx, client, started)
 	if err != nil {
-		return res, err
+		return res, withSnapshotDirs(err, snapDirs)
 	}
 	res.Receipt = receipt
 	a.printReceipt(r, receipt)
 	if receipt.Status != "ok" {
 		if receipt.Error != "" {
-			return res, fmt.Errorf("wiring failed: %s", receipt.Error)
+			return res, withSnapshotDirs(fmt.Errorf("wiring failed: %s", receipt.Error), snapDirs)
 		}
-		return res, errors.New("wiring failed: the receipt does not say ok")
+		return res, withSnapshotDirs(errors.New("wiring failed: the receipt does not say ok"), snapDirs)
 	}
 	// The release is up on the images it moved to, so the copies are what a
 	// rollback would restore rather than the state the apps are writing now:
@@ -1062,6 +1065,12 @@ func (a *Applier) Apply(ctx context.Context, opts Options) (Result, error) {
 	if len(snapDirs) > 0 {
 		if perr := opts.Snapshots.Prune(ctx, snapPlan, snapWork); perr != nil {
 			r.Warn(fmt.Sprintf("keeping the snapshot of %s: %v", strings.Join(sortedKeys(snapDirs), ", "), perr))
+		}
+		// The copy is the newest one per app, so the prune kept it: the run
+		// ends saying where it is and how to put it back, rather than leaving
+		// the operator to find it when the moved image misbehaves later.
+		for _, note := range snapshotNotes(snapDirs) {
+			r.Line(note)
 		}
 	}
 	return res, nil
@@ -1076,11 +1085,17 @@ func withSnapshotDirs(err error, dirs SnapshotDirs) error {
 	if len(dirs) == 0 {
 		return err
 	}
+	return fmt.Errorf("%w; %s", err, strings.Join(snapshotNotes(dirs), "; "))
+}
+
+// snapshotNotes is one sentence per copied app: where its copy is, and the
+// command that puts it back.
+func snapshotNotes(dirs SnapshotDirs) []string {
 	notes := make([]string, 0, len(dirs))
 	for _, app := range sortedKeys(dirs) {
 		notes = append(notes, fmt.Sprintf("the snapshot of %s is in %s; `box rollback %s` puts it back", app, dirs[app], app))
 	}
-	return fmt.Errorf("%w; %s", err, strings.Join(notes, "; "))
+	return notes
 }
 
 // configRoot is the grant's config path: the volume the chart mounts per

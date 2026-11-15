@@ -5,6 +5,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/swizzin/s5n/internal/snapshot"
 )
@@ -136,6 +137,8 @@ func TestApplyCopiesAMovingAppBeforeTheReleaseMoves(t *testing.T) {
 	out := f.out.String()
 	for _, want := range []string{
 		"snapshots:\n  sonarr: stopped and snapshotted before it moves from 4.9.0 to 5.0.0\n",
+		// After the release is up, the run says where the copy is.
+		"the snapshot of sonarr is in " + snaps.dirs["sonarr"] + "; `box rollback sonarr` puts it back\n",
 	} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("output does not contain %q:\n%s", want, out)
@@ -332,6 +335,25 @@ func TestAFailedUpgradeSaysWhereTheSnapshotIs(t *testing.T) {
 	// never runs: there is nothing newer than it.
 	if len(snaps.prunes) != 0 {
 		t.Fatalf("a failed apply pruned: %+v", snaps.prunes)
+	}
+}
+
+// A release that installs but whose wiring fails leaves the moved apps
+// running on the new image: the error says where the copy is, as a failed
+// upgrade's does.
+func TestAFailedWiringSaysWhereTheSnapshotIs(t *testing.T) {
+	f := installed(t)
+	snaps := f.movingSnapshots()
+	f.writeValues(t, "wiring:\n  timeoutSeconds: 600\n")
+	f.rel.receipt = Receipt{Status: "failed", Error: "sonarr: not ready", StartedAt: time.Now().Add(time.Minute)}
+
+	_, err := f.apply(t)
+	if err == nil {
+		t.Fatal("apply succeeded although the wiring failed")
+	}
+	want := "the snapshot of sonarr is in " + snaps.dirs["sonarr"] + "; `box rollback sonarr` puts it back"
+	if !strings.Contains(err.Error(), "wiring failed: sonarr: not ready") || !strings.Contains(err.Error(), want) {
+		t.Fatalf("error does not say the wiring failed and where the copy is:\n%v", err)
 	}
 }
 

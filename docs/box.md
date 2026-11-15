@@ -1016,7 +1016,8 @@ not a change box made, and nothing snapshots it.
   takes no snapshot. An `apply`'s copy is named like a step's, with the installed release
   on both sides (`<v>-<v>-<time>/`), so rollback finds the newest copy either way. An
   `apply` has no automatic rollback (decided): whoever runs it is there to run
-  `box rollback`. Whether an app moves is read from what is deployed (its
+  `box rollback`, and the apply ends by naming each copy it took and that command,
+  whether it succeeded or not. Whether an app moves is read from what is deployed (its
   StatefulSet's image) against what this run renders, never from the values file. An
   app box can't name the exact bytes of (a tag whose pods report no digest, or
   instances that disagree) moves without a snapshot, and the plan says why before the
