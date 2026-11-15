@@ -235,7 +235,7 @@ func planPlex(in rewrite.Input, f *iniFile, rep *rewrite.Report) ([]edit, error)
 	if host == "" {
 		return nil, nil
 	}
-	res := in.Plan.Resolve(in.App, host, port)
+	res := in.Resolve(host, port)
 	switch res.Verdict {
 	case plan.Leave:
 		// The plan says this address is not the box's; kept as it is.

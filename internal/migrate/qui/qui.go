@@ -557,7 +557,7 @@ func planInterned(ctx context.Context, db *sql.DB, in rewrite.Input, t tally, re
 				return fmt.Errorf("qui: %s.%s: %w", c.table, c.column, err)
 			}
 			where := c.table + "." + c.column
-			res := in.Plan.Resolve(in.App, host, port)
+			res := in.Resolve(host, port)
 			switch res.Verdict {
 			case plan.Rewrite:
 				end, ok := in.Targets[res.App]

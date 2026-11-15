@@ -157,6 +157,12 @@ func TestPlexSQLiteDocker(t *testing.T) {
 // dockerRunner is the real Runner: the pinned image with the staged config at
 // /config, running argv[0] as the container's command. --user keeps the files it
 // writes ours, and -i feeds the SQL in on stdin.
+//
+// The error it returns carries the shell's stderr: `Plex SQLite` explains a
+// refusal ("Error: no such table: ...", "Parse error near line ...") on stderr
+// and exits non-zero, and that sentence is the only useful part of the failure.
+// The shell also prints an error and carries on with the next statement in a
+// script, so stderr is checked even when it exited zero.
 func dockerRunner(dir string) rewrite.Runner {
 	return func(ctx context.Context, app string, argv []string, stdin []byte) ([]byte, error) {
 		if app != "plex" {
@@ -173,16 +179,16 @@ func dockerRunner(dir string) rewrite.Runner {
 		args = append(args, argv[1:]...)
 		cmd := exec.CommandContext(ctx, "docker", args...)
 		cmd.Stdin = bytes.NewReader(stdin)
-		var stderr bytes.Buffer
-		cmd.Stderr = &stderr
-		out, err := cmd.Output()
-		if err != nil {
-			return out, fmt.Errorf("%s %s: %w: %s", argv[0], strings.Join(argv[1:], " "), err, stderr.String())
+		var out, stderr bytes.Buffer
+		cmd.Stdout, cmd.Stderr = &out, &stderr
+		if err := cmd.Run(); err != nil {
+			return out.Bytes(), fmt.Errorf("%s %s: %w: %s",
+				argv[0], strings.Join(argv[1:], " "), err, strings.TrimSpace(stderr.String()))
 		}
-		if stderr.Len() > 0 && bytes.Contains(stderr.Bytes(), []byte("Error")) {
-			return out, fmt.Errorf("%s: %s", strings.Join(argv, " "), stderr.String())
+		if bytes.Contains(stderr.Bytes(), []byte("Error")) {
+			return out.Bytes(), fmt.Errorf("%s: %s", strings.Join(argv, " "), strings.TrimSpace(stderr.String()))
 		}
-		return out, nil
+		return out.Bytes(), nil
 	}
 }
 

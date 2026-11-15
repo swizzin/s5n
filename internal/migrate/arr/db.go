@@ -95,7 +95,7 @@ func (a *analysis) column(ctx context.Context, db *sql.DB, table, column string)
 // value changed. A path no rule covers is recorded as a gap: every column
 // this is called for is one the app reads back to act on a file.
 func (a *analysis) rewritePath(app, where, stored string) (string, bool) {
-	out, ok := a.plan.Rewrite(app, stored)
+	out, ok := a.in.Plan.Rewrite(app, stored)
 	if !ok {
 		a.gap(app, a.file, where, stored)
 		return stored, false
@@ -148,12 +148,12 @@ func (a *analysis) pathMappings(ctx context.Context, db *sql.DB) error {
 		// The two sides are rewritten before either is counted: a row that is
 		// about to be deleted changed nothing, and counting its two paths would
 		// report a write that never happens.
-		remote, remoteOK := a.plan.Rewrite(client, m.remote)
+		remote, remoteOK := a.in.Plan.Rewrite(client, m.remote)
 		if !remoteOK {
 			a.gap(client, a.file, "RemotePathMappings.RemotePath", m.remote)
 			continue
 		}
-		local, localOK := a.plan.Rewrite(a.app, m.local)
+		local, localOK := a.in.Plan.Rewrite(a.app, m.local)
 		if !localOK {
 			a.gap(a.app, a.file, "RemotePathMappings.LocalPath", m.local)
 			continue
@@ -183,13 +183,15 @@ func (a *analysis) pathMappings(ctx context.Context, db *sql.DB) error {
 //
 // The host a mapping stores is the download client's host as the client row
 // stores it (that is how the app matches the two), so a client this pass
-// already pointed at the box answers first. Without one, the plan's host rules
-// answer, and an address no rule settles is reported like any other.
+// already pointed at the box answers first. Without one, in.Resolve answers: the
+// plan's rules, then the box's own endpoints, so a mapping the first pass left
+// pointing at the box reads back settled. An address neither settles is
+// reported like any other.
 func (a *analysis) mappingClient(host string) (string, bool) {
 	if target, ok := a.clientTargets[strings.ToLower(host)]; ok {
 		return target, true
 	}
-	res := a.plan.Resolve(a.app, host, 0)
+	res := a.in.Resolve(host, 0)
 	switch res.Verdict {
 	case plan.Rewrite:
 		return res.App, true
@@ -313,7 +315,7 @@ func (a *analysis) historyData(table string, id int64, data sql.NullString) (str
 		if !ok || stored == "" {
 			continue
 		}
-		out, covered := a.plan.Rewrite(a.app, stored)
+		out, covered := a.in.Plan.Rewrite(a.app, stored)
 		if !covered || out == stored {
 			continue
 		}
@@ -337,7 +339,7 @@ func (a *analysis) historyTitle(table string, title sql.NullString) (string, boo
 	if !title.Valid || title.String == "" {
 		return "", false
 	}
-	out, covered := a.plan.Rewrite(a.app, title.String)
+	out, covered := a.in.Plan.Rewrite(a.app, title.String)
 	if !covered || out == title.String {
 		return "", false
 	}

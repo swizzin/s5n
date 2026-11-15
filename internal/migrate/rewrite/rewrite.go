@@ -20,6 +20,7 @@ import (
 	"context"
 	"fmt"
 	"sort"
+	"strings"
 
 	"github.com/swizzin/s5n/internal/migrate/plan"
 )
@@ -52,8 +53,58 @@ type Input struct {
 	Run Runner
 }
 
-// Runner runs argv in the pinned image of an app with the staged config
-// mounted at /config, and returns its stdout.
+// Resolve settles an address this app stored for another app, and is the one
+// way a rewriter asks. The plan answers first: its host rules and the apps'
+// ports decide. An address the plan does not settle, but that already names one
+// of this run's endpoints, is that app.
+//
+// The second chance is what keeps a rewriter's two passes consistent. A Check
+// that rewrote a connection leaves the box's own host and port in the staged
+// copy, and no source rule names them: the plan describes the install being
+// left behind, not the box. Without this, the Write that follows the very Check
+// that made the rewrite would stop on its own work.
+//
+// The plan still wins wherever it says something, so a host rule the operator
+// wrote is never overridden by an endpoint this run happens to hold.
+func (in Input) Resolve(host string, port int) plan.Resolution {
+	if in.Plan != nil {
+		if res := in.Plan.Resolve(in.App, host, port); res.Verdict != plan.Unclassified {
+			return res
+		}
+	}
+	names := make([]string, 0, len(in.Targets))
+	for name := range in.Targets {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	h := normalizeHost(host)
+	for _, name := range names {
+		ep := in.Targets[name]
+		if ep.Port == port && normalizeHost(ep.Host) == h {
+			return plan.Resolution{Verdict: plan.Rewrite, App: name}
+		}
+	}
+	return plan.Resolution{}
+}
+
+// normalizeHost is the form two stored hosts are compared in: no trailing dot,
+// no IPv6 brackets, lowercase. A host is a DNS name here, and DNS is
+// case-insensitive.
+func normalizeHost(host string) string {
+	return strings.ToLower(strings.TrimSuffix(strings.Trim(host, "[]"), "."))
+}
+
+// Runner runs one tool inside the pinned image of an app with the staged config
+// directory mounted at /config, and returns the tool's stdout.
+//
+// The convention is the container's: argv[0] is the command inside the image
+// (the entrypoint Plex's image ships, for the one rewriter that needs it),
+// argv[1:] are that command's arguments, and the staged directory is at
+// /config, which is where the chart mounts the app's config claim. stdin is the
+// script or data the tool reads, when it takes any. A run that fails returns an
+// error carrying what the tool wrote to stderr: that text is the only account of
+// why the app's own binary refused, and a rewriter passes it on rather than
+// reporting a bare exit status.
 type Runner func(ctx context.Context, app string, argv []string, stdin []byte) ([]byte, error)
 
 // Change is one kind of edit in one place, counted: "sonarr.db Series.Path",
@@ -88,10 +139,17 @@ type Report struct {
 // Owned is one adopted connection: a download client or a Prowlarr
 // application, by the ID the app gave it, and the box app it now points at.
 type Owned struct {
-	Kind   string // "downloadclient", "application"
-	ID     int
-	Name   string // as the source named it, kept
-	Target string // box instance name
+	Kind string // "downloadclient", "application", "pbh-downloader"
+	// ID is the numeric id a database-backed app gave the object.
+	ID int
+	// StringID is the id an app that names its objects with a string stores
+	// instead: PeerBanHelper's downloaders are keys under `client:` in its own
+	// config.yml, and wiring records the one it manages by that string
+	// (internal/wiring/owned.go, PbhDownloaderID). Exactly one of ID and
+	// StringID is set.
+	StringID string
+	Name     string // as the source named it, kept
+	Target   string // box instance name
 }
 
 // Address is a stored host reference no rule covers.

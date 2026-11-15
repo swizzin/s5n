@@ -276,7 +276,7 @@ func planClients(ctx context.Context, db *sql.DB, in rewrite.Input, t tally, rep
 		if p == 0 {
 			p = urlPort
 		}
-		res := in.Plan.Resolve(in.App, name, p)
+		res := in.Resolve(name, p)
 		switch res.Verdict {
 		case plan.Rewrite:
 			end, ok := in.Targets[res.App]

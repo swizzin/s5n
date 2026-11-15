@@ -211,7 +211,7 @@ func planAddress(in rewrite.Input, f *jsonFile, base, hostKey, baseKey string, d
 	}
 	sslNode, haveSSL := f.find(base + "/useSsl")
 
-	res := in.Plan.Resolve(in.App, hostNode.str, port)
+	res := in.Resolve(hostNode.str, port)
 	switch res.Verdict {
 	case plan.Rewrite:
 		end, ok := in.Targets[res.App]
@@ -219,8 +219,10 @@ func planAddress(in rewrite.Input, f *jsonFile, base, hostKey, baseKey string, d
 			return fmt.Errorf("seerr: %s: the plan points %s at %q, which has no endpoint on the box",
 				settingsName, address(hostNode.str, port), res.App)
 		}
-		d.edits = append(d.edits, f.setString(hostNode, end.Host, "host"))
-		d.tally.add(settingsName, base+"/"+hostKey, "host")
+		if hostNode.str != end.Host {
+			d.edits = append(d.edits, f.setString(hostNode, end.Host, "host"))
+			d.tally.add(settingsName, base+"/"+hostKey, "host")
+		}
 		if havePort && portNode.raw != strconv.Itoa(end.Port) {
 			d.edits = append(d.edits, f.setRaw(portNode, strconv.Itoa(end.Port), "port"))
 			d.tally.add(settingsName, base+"/port", "port")

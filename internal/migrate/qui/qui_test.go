@@ -305,13 +305,16 @@ func TestRewritesPathsAndConnections(t *testing.T) {
 		}
 	}
 
-	// A second pass has nothing left to do.
+	// A second pass has nothing left to do, and no address is unclassified.
 	rep2, err := rewriter{}.Check(ctx, in)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(rep2.Changes) != 0 {
 		t.Errorf("after Write, Check still reports %v", rep2.Changes)
+	}
+	if len(rep2.Unclassified) != 0 {
+		t.Errorf("after Write, Check reports unclassified addresses: %v", rep2.Unclassified)
 	}
 }
 

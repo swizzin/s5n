@@ -147,13 +147,17 @@ func TestRewritesPathsAddressesAndListenSettings(t *testing.T) {
 			t.Errorf("%q is not in the rewritten file:\n%s", kept, after)
 		}
 	}
-	// A second pass has nothing left to do.
+	// A second pass has nothing left to do, and no address is unclassified:
+	// PMS_IP now names the box, and in.Resolve knows the box's own endpoints.
 	rep2, err := rewriter{}.Check(context.Background(), in)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(rep2.Changes) != 0 {
 		t.Errorf("after Write, Check still reports %v", rep2.Changes)
+	}
+	if len(rep2.Unclassified) != 0 {
+		t.Errorf("after Write, Check reports unclassified addresses: %v", rep2.Unclassified)
 	}
 }
 

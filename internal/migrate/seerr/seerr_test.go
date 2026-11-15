@@ -222,13 +222,17 @@ func TestRewritesDirectoriesAndConnections(t *testing.T) {
 		t.Errorf("media_request.rootFolder = %q", got)
 	}
 
-	// A second pass has nothing left to do.
+	// A second pass has nothing left to do. No address is unclassified: the
+	// connections now name the box, and in.Resolve knows its own endpoints.
 	rep2, err := rewriter{}.Check(ctx, in)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(rep2.Changes) != 0 {
 		t.Errorf("after Write, Check still reports %v", rep2.Changes)
+	}
+	if len(rep2.Unclassified) != 0 {
+		t.Errorf("after Write, Check reports unclassified addresses: %v", rep2.Unclassified)
 	}
 }
 

@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"net"
 	"net/url"
-	"sort"
 	"strconv"
 	"strings"
 
@@ -406,7 +405,7 @@ func (a *analysis) objectPath(table, where string, f fields, name string) bool {
 		// app is given; a relative one follows the directory it sits under.
 		return false
 	}
-	out, covered := a.plan.Rewrite(table, stored)
+	out, covered := a.in.Plan.Rewrite(table, stored)
 	if !covered {
 		a.gap(table, a.file, where+"."+key, stored)
 		return false
@@ -430,10 +429,10 @@ type address struct {
 // hostPort settles the host and port a provider's settings store.
 //
 // has is false when the blob stores no host at all: a blackhole client has
-// none, and nothing about its address can be wrong. A host with no port lets
-// the plan decide through its host rules, and a localhost one is Unclassified,
-// because the port is the only thing that says which app it was
-// (plan.Resolve).
+// none, and nothing about its address can be wrong. The verdict is in.Resolve's:
+// the plan's rules and the apps' ports decide, and an address the plan does not
+// settle but that already names one of the box's endpoints is that app, which is
+// what a second pass over a copy the first one wrote needs.
 func (a *analysis) hostPort(where string, f fields) (address, bool, error) {
 	hostKey, ok := f.find("host")
 	if !ok {
@@ -449,45 +448,19 @@ func (a *analysis) hostPort(where string, f fields) (address, bool, error) {
 			port = n
 		}
 	}
-	res := a.plan.Resolve(a.app, host, port)
+	res := a.in.Resolve(host, port)
 	switch res.Verdict {
 	case plan.Unclassified:
-		// A host the plan does not settle may still be one this pass wrote:
-		// a localhost address is resolved by its port, so the plan has no rule
-		// for the Service name that replaced it, and a second check of the
-		// rewritten copy would otherwise stop on its own work.
-		if already, ok := a.boxEndpoint(host, port); ok {
-			return already, true, nil
-		}
 		a.unclass = append(a.unclass, rewrite.Address{App: a.app, File: a.file, Where: where + ".host", Host: host, Port: port})
 		return address{verdict: plan.Unclassified, host: host}, true, nil
 	case plan.Leave:
 		return address{verdict: plan.Leave, host: host}, true, nil
 	}
-	ep, ok := a.targets[res.App]
+	ep, ok := a.in.Targets[res.App]
 	if !ok {
 		return address{}, false, fmt.Errorf("%s in %s: the plan maps %s to %s, which this run has no endpoint for", where, a.file, host, res.App)
 	}
 	return address{verdict: plan.Rewrite, target: res.App, host: host, ep: ep}, true, nil
-}
-
-// boxEndpoint reports the box app a stored host and port already name. It is
-// only consulted for an address no rule settles, so a plan's own rule always
-// wins over the endpoints this run happens to hold.
-func (a *analysis) boxEndpoint(host string, port int) (address, bool) {
-	host = strings.TrimSuffix(host, ".")
-	names := make([]string, 0, len(a.targets))
-	for name := range a.targets {
-		names = append(names, name)
-	}
-	sort.Strings(names)
-	for _, name := range names {
-		ep := a.targets[name]
-		if port == ep.Port && strings.EqualFold(host, ep.Host) {
-			return address{verdict: plan.Rewrite, target: name, host: host, ep: ep}, true
-		}
-	}
-	return address{}, false
 }
 
 // pointAt writes the box's address into a provider's settings. HTTPS is off
@@ -531,24 +504,15 @@ func (a *analysis) resolveURL(where, stored string) (newURL, target string, reso
 		}
 		port = n
 	}
-	res := a.plan.Resolve(a.app, u.Hostname(), port)
+	res := a.in.Resolve(u.Hostname(), port)
 	switch res.Verdict {
 	case plan.Unclassified:
-		if already, ok := a.boxEndpoint(u.Hostname(), port); ok {
-			ep := already.ep
-			out := *u
-			out.Scheme = schemeHTTP
-			out.Host = net.JoinHostPort(ep.Host, strconv.Itoa(ep.Port))
-			out.Path = strings.TrimSuffix(ep.URLBase, "/")
-			out.RawPath, out.RawQuery, out.Fragment = "", "", ""
-			return out.String(), already.target, true, nil
-		}
 		a.unclass = append(a.unclass, rewrite.Address{App: a.app, File: a.file, Where: where, Host: u.Hostname(), Port: port})
 		return "", "", false, nil
 	case plan.Leave:
 		return "", "", false, nil
 	}
-	ep, ok := a.targets[res.App]
+	ep, ok := a.in.Targets[res.App]
 	if !ok {
 		return "", "", false, fmt.Errorf("%s in %s: the plan maps %s to %s, which this run has no endpoint for", where, a.file, u.Host, res.App)
 	}

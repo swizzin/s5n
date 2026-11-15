@@ -20,7 +20,7 @@ import (
 // (sonarr@v4.0.14.2938:src/NzbDrone.Core/Configuration/ConfigFileProvider.cs:124-140),
 // so a full XML parse would only add a reformatting risk.
 func (a *analysis) configXML() error {
-	ep, ok := a.targets[a.app]
+	ep, ok := a.in.Targets[a.app]
 	if !ok {
 		return fmt.Errorf("the plan has no endpoint for %s, so its port and URL base cannot be set", a.app)
 	}
@@ -66,7 +66,7 @@ func (a *analysis) configXML() error {
 			continue
 		}
 		value := xmlUnescape(stored)
-		out, covered := a.plan.Rewrite(a.app, value)
+		out, covered := a.in.Plan.Rewrite(a.app, value)
 		if !covered {
 			a.gap(a.app, "config.xml", name, value)
 			continue

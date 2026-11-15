@@ -98,10 +98,9 @@ func (r rewriter) analyse(ctx context.Context, in rewrite.Input, db *sql.DB) (*a
 	a := &analysis{
 		kind:          r.kind,
 		app:           in.App,
+		in:            in,
 		dir:           in.Dir,
 		file:          file,
-		plan:          in.Plan,
-		targets:       in.Targets,
 		changes:       make(map[changeKey]int),
 		clientTargets: make(map[string]string),
 	}
@@ -136,12 +135,12 @@ type analysis struct {
 	kind string
 	// app is the instance name the plan is keyed by and the app whose path
 	// table its own stored paths go through.
-	app     string
-	dir     string
-	file    string // the database's name, relative to dir
-	plan    *plan.Plan
-	targets map[string]rewrite.Endpoint
-
+	app string
+	// in is the whole input: the plan, the endpoints, and Resolve, which is
+	// how this pass settles every address it meets.
+	in       rewrite.Input
+	dir      string
+	file     string // the database's name, relative to dir
 	changes  map[changeKey]int
 	uncover  []plan.Uncovered
 	unclass  []rewrite.Address

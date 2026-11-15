@@ -232,8 +232,13 @@ func readSettings(ctx context.Context, db *sql.DB, t tally) (*settingsRow, error
 	return row, nil
 }
 
-// set is one column's new value, added to the edits when it is present.
+// set is one column's new value. The edit and its count are added only when the
+// column does not already hold it: a second pass over a copy the first one wrote
+// has nothing to report, which is what makes Write's report equal Check's.
 func (r *settingsRow) set(column, value, what string, t tally) {
+	if cur, ok := r.by[column]; ok && cur.Valid && cur.String == value {
+		return
+	}
 	r.by[column] = sql.NullString{String: value, Valid: true}
 	r.edits = append(r.edits, edit{table: "settings", column: column, id: r.id, value: value})
 	t.add("settings."+column, what)
@@ -320,8 +325,10 @@ func arrEdits(ctx context.Context, db *sql.DB, in rewrite.Input, rep *rewrite.Re
 			if !rewriteIt {
 				continue
 			}
-			t.add(table+".url", "url")
-			edits = append(edits, edit{table: table, column: "url", id: id, value: endpointURL(end)})
+			if moved := endpointURL(end); moved != raw {
+				edits = append(edits, edit{table: table, column: "url", id: id, value: moved})
+				t.add(table+".url", "url")
+			}
 		}
 		rows.Close()
 		if err := rows.Err(); err != nil {
@@ -335,7 +342,7 @@ func arrEdits(ctx context.Context, db *sql.DB, in rewrite.Input, rep *rewrite.Re
 // returns the endpoint to point at when the plan rewrites it, and records the
 // address as unclassified when the plan does not settle it.
 func ask(in rewrite.Input, file, where string, rep *rewrite.Report, host string, port int) (rewrite.Endpoint, bool, error) {
-	res := in.Plan.Resolve(in.App, host, port)
+	res := in.Resolve(host, port)
 	switch res.Verdict {
 	case plan.Rewrite:
 		end, ok := in.Targets[res.App]
