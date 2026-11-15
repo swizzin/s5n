@@ -147,7 +147,7 @@ func (c *Cluster) read(ctx context.Context) error {
 		c.wls = append(c.wls, workloadOf("StatefulSet", s.Namespace, s.Name, s.Spec.Template.Labels, s.Spec.Template.Spec, claims))
 	}
 	for _, svc := range svcs {
-		c.svcs = append(c.svcs, Service{Namespace: svc.Namespace, Name: svc.Name, Selector: svc.Spec.Selector})
+		c.svcs = append(c.svcs, serviceOf(svc))
 	}
 	c.raw = raw
 	return nil

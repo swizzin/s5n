@@ -59,6 +59,9 @@ items:
     spec:
       selector:
         app.kubernetes.io/name: plex
+      ports:
+        - port: 80
+          targetPort: 32400
   - apiVersion: v1
     kind: Service
     metadata:
@@ -67,6 +70,9 @@ items:
     spec:
       selector:
         app.kubernetes.io/name: sonarr
+      ports:
+        - port: 80
+          targetPort: http
 `)},
 		"save/c.json":    {Data: []byte(`{"apiVersion":"v1","kind":"ConfigMap","metadata":{"name":"not-a-workload","namespace":"media"}}`)},
 		"save/notes.txt": {Data: []byte("this is not a manifest")},
@@ -86,6 +92,17 @@ items:
 	}
 	if len(svcs) != 2 {
 		t.Fatalf("services: %#v", svcs)
+	}
+	// A saved Service carries the ports it answers on, because a rule is only
+	// made for a port that reaches the app it selects.
+	wantPorts := map[string]ServicePort{
+		"plex":   {Port: 80, TargetPort: 32400},
+		"sonarr": {Port: 80, TargetName: "http"},
+	}
+	for _, svc := range svcs {
+		if len(svc.Ports) != 1 || svc.Ports[0] != wantPorts[svc.Name] {
+			t.Fatalf("service %s ports: %#v, want %#v", svc.Name, svc.Ports, wantPorts[svc.Name])
+		}
 	}
 	raw, err := src.Raw(ctx)
 	if err != nil {

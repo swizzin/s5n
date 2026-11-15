@@ -109,11 +109,28 @@ func (f *fixture) object(t *testing.T, name, doc string) {
 	f.manifests[fmt.Sprintf("manifests/%02d-%s.yaml", f.next, name)] = &fstest.MapFile{Data: []byte(doc)}
 }
 
-// service adds one Service selecting a fixture app by its pod label.
+// servicePort is one port of a fixture Service: the port it answers on and what
+// it forwards to, a container port's number or the name it declares.
+type servicePort struct {
+	port   int
+	target string
+}
+
+// service adds one Service selecting a fixture app by its pod label, on port 80
+// forwarding to the app's named http port.
 func (f *fixture) service(t *testing.T, name, namespace, app string) {
 	t.Helper()
-	f.next++
-	f.manifests[fmt.Sprintf("manifests/%02d-service-%s.yaml", f.next, name)] = &fstest.MapFile{Data: []byte(fmt.Sprintf(`apiVersion: v1
+	f.servicePorts(t, name, namespace, app, servicePort{port: 80, target: "http"})
+}
+
+// servicePorts adds one Service selecting a fixture app, on the ports given.
+func (f *fixture) servicePorts(t *testing.T, name, namespace, app string, ports ...servicePort) {
+	t.Helper()
+	var b strings.Builder
+	for _, p := range ports {
+		fmt.Fprintf(&b, "    - port: %d\n      targetPort: %s\n", p.port, p.target)
+	}
+	f.object(t, "service-"+name, fmt.Sprintf(`apiVersion: v1
 kind: Service
 metadata:
   name: %s
@@ -122,10 +139,7 @@ spec:
   selector:
     app.kubernetes.io/name: %s
   ports:
-    - name: http
-      port: 80
-      targetPort: http
-`, name, namespace, app))}
+%s`, name, namespace, app, b.String()))
 }
 
 // file puts one file on the host, where discovery reads it through ConfigFS.

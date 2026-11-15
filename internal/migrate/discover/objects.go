@@ -8,6 +8,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/util/intstr"
 )
 
 // objects.go is the one place a Kubernetes object becomes what discovery reads
@@ -46,12 +47,48 @@ func containerOf(c corev1.Container) Container {
 	for _, p := range c.Ports {
 		if p.ContainerPort > 0 {
 			out.Ports = append(out.Ports, int(p.ContainerPort))
+			if p.Name != "" {
+				if out.PortNames == nil {
+					out.PortNames = make(map[string]int, len(c.Ports))
+				}
+				out.PortNames[p.Name] = int(p.ContainerPort)
+			}
 		}
 	}
 	for _, m := range c.VolumeMounts {
 		out.Mounts = append(out.Mounts, Mount{Volume: m.Name, Path: m.MountPath})
 	}
 	return out
+}
+
+// serviceOf flattens a Service to what a host rule is made of: where it is,
+// what it selects and the ports it answers on.
+func serviceOf(svc *corev1.Service) Service {
+	out := Service{Namespace: svc.Namespace, Name: svc.Name, Selector: svc.Spec.Selector}
+	for _, p := range svc.Spec.Ports {
+		out.Ports = append(out.Ports, servicePortOf(p))
+	}
+	return out
+}
+
+// servicePortOf keeps one Service port as an app's stored address saw it: the
+// port the address carries, and what it forwards to.
+//
+// A Service that leaves targetPort unset forwards to its own port -- an identity
+// map (k8s.io/api@v0.37.1:core/v1/types.go:6555) -- which the API server
+// defaults but a manifest read off disk does not, so the default is applied here
+// rather than left to which source read the object.
+func servicePortOf(p corev1.ServicePort) ServicePort {
+	sp := ServicePort{Port: int(p.Port)}
+	if p.TargetPort.Type == intstr.String && p.TargetPort.StrVal != "" {
+		sp.TargetName = p.TargetPort.StrVal
+		return sp
+	}
+	sp.TargetPort = int(p.TargetPort.IntVal)
+	if sp.TargetPort == 0 {
+		sp.TargetPort = sp.Port
+	}
+	return sp
 }
 
 // volumeOf says where a pod volume's bytes live. Only two kinds of volume hold a

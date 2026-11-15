@@ -9,6 +9,7 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/client-go/kubernetes/fake"
 
 	"github.com/swizzin/s5n/internal/migrate/plan"
@@ -71,7 +72,13 @@ func TestClusterReadsALiveSource(t *testing.T) {
 	}
 	service := &corev1.Service{
 		ObjectMeta: metav1.ObjectMeta{Name: "sonarr", Namespace: "media"},
-		Spec:       corev1.ServiceSpec{Selector: map[string]string{"app.kubernetes.io/name": "sonarr"}},
+		Spec: corev1.ServiceSpec{
+			Selector: map[string]string{"app.kubernetes.io/name": "sonarr"},
+			// The API server defaults an unset targetPort to the service
+			// port; a live object carries both, and the rule has to keep the
+			// one a stored address uses.
+			Ports: []corev1.ServicePort{{Port: 80, TargetPort: intstr.FromInt32(8989)}},
+		},
 	}
 	pvc := &corev1.PersistentVolumeClaim{
 		ObjectMeta: metav1.ObjectMeta{Name: "library", Namespace: "media"},
@@ -119,7 +126,7 @@ func TestClusterReadsALiveSource(t *testing.T) {
 	if !reflect.DeepEqual(p.Data, &plan.Data{Root: "/srv/library", Downloads: "Downloads", Media: "media"}) {
 		t.Fatalf("data: %#v", p.Data)
 	}
-	if !reflect.DeepEqual(p.Hosts, []plan.HostRule{{Service: "sonarr.media", App: "sonarr"}}) {
+	if !reflect.DeepEqual(p.Hosts, []plan.HostRule{{Service: "sonarr.media", App: "sonarr", Port: 80}}) {
 		t.Fatalf("hosts: %#v", p.Hosts)
 	}
 	roundTrip(t, p)

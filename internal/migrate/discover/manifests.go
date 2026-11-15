@@ -74,7 +74,7 @@ func (d *Directory) Services(ctx context.Context) ([]Service, error) {
 	var out []Service
 	for _, o := range objs {
 		if svc, ok := o.obj.(*corev1.Service); ok {
-			out = append(out, Service{Namespace: svc.Namespace, Name: svc.Name, Selector: svc.Spec.Selector})
+			out = append(out, serviceOf(svc))
 		}
 	}
 	return out, nil

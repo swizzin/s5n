@@ -128,9 +128,9 @@ func TestDiscoverTwoArrs(t *testing.T) {
 			},
 		},
 		Hosts: []plan.HostRule{
-			{Service: "plex.media", App: "plex"},
-			{Service: "qbittorrent.media", App: "qbittorrent"},
-			{Service: "sonarr.media", App: "sonarr"},
+			{Service: "plex.media", App: "plex", Port: 80},
+			{Service: "qbittorrent.media", App: "qbittorrent", Port: 80},
+			{Service: "sonarr.media", App: "sonarr", Port: 80},
 		},
 		Outside: []string{"media/gluetun"},
 	}
@@ -624,6 +624,105 @@ func keys[V any](m map[string]V) []string {
 	}
 	sort.Strings(out)
 	return out
+}
+
+// TestDiscoverSideServiceReachesNoApp: a Service that selects an app's pod is
+// not automatically an address of that app. A metrics Service forwarding to a
+// sidecar's port and one forwarding to the torrent port both select the pod and
+// reach neither app, so a rule for either would rewrite an address that was
+// never the app's -- a stored plex-exporter:9000 into Plex's web endpoint.
+func TestDiscoverSideServiceReachesNoApp(t *testing.T) {
+	f := sourceInstall(t)
+	// Plex's metrics sidecar, and qBittorrent's torrent port: both Services
+	// select the app's pod and forward past every port the app itself serves.
+	f.servicePorts(t, "plex-exporter", "media", "plex", servicePort{port: 9000, target: "9000"})
+	f.servicePorts(t, "qbittorrent-node", "media", "qbittorrent", servicePort{port: 31111, target: "31111"})
+	// A target port naming a container port that does not exist reaches
+	// nothing either.
+	f.servicePorts(t, "plex-metrics", "media", "plex", servicePort{port: 9100, target: "metrics"})
+	// A Service with no ports at all reaches nothing: an ExternalName-style
+	// Service beside the apps, or one an operator added by hand.
+	f.servicePorts(t, "plex-headless", "media", "plex")
+
+	p, rep := f.discover(t)
+	// The apps' own Services are untouched by the fix, and no side Service
+	// earned a rule.
+	want := []plan.HostRule{
+		{Service: "plex.media", App: "plex", Port: 80},
+		{Service: "qbittorrent.media", App: "qbittorrent", Port: 80},
+		{Service: "sonarr.media", App: "sonarr", Port: 80},
+	}
+	if !reflect.DeepEqual(p.Hosts, want) {
+		t.Fatalf("hosts:\n got %#v\nwant %#v", p.Hosts, want)
+	}
+	for _, name := range []string{"plex-exporter", "qbittorrent-node", "plex-metrics", "plex-headless"} {
+		var noted bool
+		for _, n := range rep.Notes {
+			if strings.Contains(n, name+".media") {
+				noted = true
+			}
+		}
+		if !noted {
+			t.Fatalf("the Service %s that reaches no app is not reported: %#v", name, rep.Notes)
+		}
+	}
+	// The note names the ports the Service has, so the operator sees why the
+	// address was left for them to classify.
+	for _, want := range []string{"9000->9000", "31111->31111", "9100->metrics", "declares no ports"} {
+		var noted bool
+		for _, n := range rep.Notes {
+			if strings.Contains(n, want) {
+				noted = true
+			}
+		}
+		if !noted {
+			t.Fatalf("no note says %q: %#v", want, rep.Notes)
+		}
+	}
+}
+
+// TestDiscoverServiceRuleCarriesTheServicePort: a Service on 80 forwarding to
+// 8080 is reached as :80, so that is the port the rule narrows to. A rule on the
+// target port would not match the address any app stored.
+func TestDiscoverServiceRuleCarriesTheServicePort(t *testing.T) {
+	f := sourceInstall(t)
+	f.servicePorts(t, "qbittorrent-web", "media", "qbittorrent", servicePort{port: 80, target: "8080"})
+	p, _ := f.discover(t)
+	var found bool
+	for _, h := range p.Hosts {
+		if h.Service != "qbittorrent-web.media" {
+			continue
+		}
+		found = true
+		if h.App != "qbittorrent" || h.Port != 80 {
+			t.Fatalf("the rule does not carry the Service's port: %#v", h)
+		}
+	}
+	if !found {
+		t.Fatalf("a Service reaching the app got no rule: %#v", p.Hosts)
+	}
+}
+
+// TestDiscoverServiceWithSeveralPortsReachesOne: one Service can answer on more
+// than one port and forward only one of them to the app, so the rule set is per
+// port, not per Service.
+func TestDiscoverServiceWithSeveralPortsReachesOne(t *testing.T) {
+	f := sourceInstall(t)
+	f.servicePorts(t, "plex-all", "media", "plex",
+		servicePort{port: 80, target: "32400"},
+		servicePort{port: 9000, target: "9000"},
+	)
+	p, _ := f.discover(t)
+	want := []plan.HostRule{{Service: "plex-all.media", App: "plex", Port: 80}}
+	var got []plan.HostRule
+	for _, h := range p.Hosts {
+		if h.Service == "plex-all.media" {
+			got = append(got, h)
+		}
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("rules for the Service:\n got %#v\nwant %#v", got, want)
+	}
 }
 
 // TestDiscoverNamespaces: a source install can run beside things the operator

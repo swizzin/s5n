@@ -43,11 +43,14 @@ type Workload struct {
 
 // Container is one container of a workload's pod template.
 type Container struct {
-	Name   string
-	Image  string
-	Env    map[string]string
-	Ports  []int
-	Mounts []Mount
+	Name  string
+	Image string
+	Env   map[string]string
+	Ports []int
+	// PortNames are the ports the container declares a name for, which is what
+	// a Service's targetPort resolves through.
+	PortNames map[string]int
+	Mounts    []Mount
 }
 
 // Mount is one of a container's volumeMounts: the volume it reads and where that
@@ -83,11 +86,48 @@ func (v Volume) String() string {
 }
 
 // Service is one Service of the source cluster, flattened to what a host rule
-// needs: where it is and what it selects.
+// needs: where it is, what it selects and the ports it answers on.
 type Service struct {
 	Namespace string
 	Name      string
 	Selector  map[string]string
+	// Ports are the Service's own ports. A Service beside an app's pod is not
+	// necessarily an address of that app -- a metrics sidecar, the torrent
+	// port -- so a rule is made only for the ports that reach the app.
+	Ports []ServicePort
+}
+
+// ServicePort is one port of a Service: the port it answers on, which is what a
+// stored address carries, and the container port it forwards to.
+type ServicePort struct {
+	// Port is the Service's port: the number another app stored in an address.
+	Port int
+	// TargetPort is the container port it forwards to, and TargetName is the
+	// name the container declares that port under when the Service names it
+	// instead of numbering it. Exactly one is set.
+	TargetPort int
+	TargetName string
+}
+
+// target is the container port this Service port forwards to, as the workload's
+// own pod declares it. A name that no container of the pod declares forwards to
+// nothing, which is what the kubelet does with it too: a named targetPort is
+// looked up in the target pod's container ports
+// (k8s.io/api@v0.37.1:core/v1/types.go:6553).
+func (p ServicePort) target(wl Workload) (int, bool) {
+	if p.TargetName != "" {
+		return wl.portNamed(p.TargetName)
+	}
+	return p.TargetPort, p.TargetPort > 0
+}
+
+// String renders a Service port the way a note says it: what it answers on, and
+// what it forwards to.
+func (p ServicePort) String() string {
+	if p.TargetName != "" {
+		return fmt.Sprintf("%d->%s", p.Port, p.TargetName)
+	}
+	return fmt.Sprintf("%d->%d", p.Port, p.TargetPort)
 }
 
 // Source is what discovery reads. There are two: Cluster, over a live install
@@ -382,6 +422,19 @@ func (c Container) mountAt(dir string) (Mount, bool) {
 		}
 	}
 	return Mount{}, false
+}
+
+// portNamed is a port of the workload's pod by the name its container declares
+// it under. Every container is searched and not just the app's, because a
+// Service's targetPort may name a sidecar's port: that Service then forwards to
+// the sidecar, which is exactly what a rule must not call the app's address.
+func (wl Workload) portNamed(name string) (int, bool) {
+	for _, c := range wl.Containers {
+		if p, ok := c.PortNames[name]; ok {
+			return p, true
+		}
+	}
+	return 0, false
 }
 
 // hostDirOf maps a path inside the container onto the host directory that holds
