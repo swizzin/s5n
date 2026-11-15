@@ -4633,24 +4633,27 @@ PY
 #
 # Then, the way an operator cuts over: stop the source, `box migrate discover`,
 # throw the old cluster away (box never removes one it did not install),
-# `box bootstrap` a fresh one, and `box migrate apply` the plan. The apps must
-# come back healthy on the chart's own images -- which are much newer than the
-# source's, so their real database migrations run on the copied configs -- with
-# their paths rewritten to /data, their API keys unchanged, one download client
-# each, adopted by the id the source had, and the data renamed to box's layout
-# rather than moved.
+# `box bootstrap` a fresh one with the plan's apps off, and `box migrate apply`
+# the plan. The apps must come back healthy on the chart's own images -- which
+# are much newer than the source's, so their real database migrations run on the
+# copied configs -- with their paths rewritten to /data, their API keys
+# unchanged, one download client each, adopted by the id the source had, and the
+# data renamed to box's layout rather than moved.
 #
-# The seedbox the plan is applied into already runs Radarr, and the source's
-# Radarr is its 4K instance. That is the shape the code allows, not a
-# preference: a seedbox box can install has to run an Arr or qBittorrent (the
-# wiring Job refuses a release with neither, internal/wiring/config.go:159), an
-# Arr's wiring run prepares the /data/downloads and /data/media directories the
-# rename needs free, and migrate refuses a plan naming an app the seedbox
-# already runs. So the two apps the seedbox may run are the two the plan must
-# not name, and an instance of one of them is the only way to keep the plan's
-# three rewriters in one run. The two empty category directories box's own
-# Radarr made are removed below, which is what the rename's refusal asks an
-# operator to do.
+# The box the plan is applied into runs Prowlarr and nothing the plan names: a
+# plan cannot name an app the seedbox already runs (`box migrate apply` refuses
+# it), and the migration switches its own apps on from the grant. That box is
+# also the shape the product had to learn to install -- no Arr and no
+# qBittorrent is a release with nothing per-app for the wiring Job, and the Job
+# accepts it and publishes an ok receipt. With no Arr on, the Job has made none
+# of /data's category directories either, so the rename here starts from an
+# absent target; the target a box with an Arr on has already made is the unit
+# tests' (internal/migrate/apply).
+#
+# The login is part of what the migration has to leave right: an Arr's
+# /<urlbase>/api carries its own API key, so the portal must let it through
+# without a session while the Arr's UI still asks for one. The session below is
+# asserted through the Gateway, on the address Envoy answers on.
 #
 # What is deliberately absent: Plex. A Plex library section cannot be created
 # without a plex.tv account (the API needs a server token, and a server token
@@ -4674,11 +4677,11 @@ MIGRATE_RADARR_IMAGE=ghcr.io/home-operations/radarr:5.20.1.9773@sha256:407eb673a
 MIGRATE_LEGACY_NS=legacy
 # qBittorrent's WebUI port, in the source and in the chart's own qBittorrent.
 MIGRATE_QBIT_PORT=8080
-# The source's Radarr instance, as box will name it: the box the plan is applied
-# into already runs the plain one (see above), so this is the 4K instance, and
-# its category is the chart's own for that instance.
-MIGRATE_RADARR_INSTANCE=radarr-4k
-MIGRATE_RADARR_CATEGORY=movies-4k
+# The source's Radarr, as box will name it: the plain instance, which is the one
+# a plan names when the source runs one Radarr. Its category is the chart's own
+# for that instance.
+MIGRATE_RADARR_INSTANCE=radarr
+MIGRATE_RADARR_CATEGORY=movies
 
 # migrate_forward <namespace> <target> <port>: port_forward above, for a
 # namespace other than the seedbox's. The tunnel's port and process land in
@@ -5177,6 +5180,68 @@ print(f"  qbittorrent: saves under {prefs.get('save_path')}, categories {', '.jo
 PY
 }
 
+# migrate_check_login_bypass <instance> <key file>: the login's per-app rules,
+# asked through the Gateway, on the address Envoy answers on. An Arr's API
+# carries its own key, so /<urlbase>/api has to reach the app without a portal
+# session, and the app has to refuse a request that arrives without its key --
+# that second half is what proves the API reached the app rather than being
+# served open. The UI still asks the portal for a session. The rules are
+# generated from the app set, so a rule list written before the migration
+# switched an app on would send the Arr's own integrations to the login page.
+migrate_check_login_bypass() { # migrate_check_login_bypass <instance> <key file>
+  local instance=$1 keyfile=$2 key addr code location no_key ui_code ui_location
+  key=$(cat "$keyfile")
+  addr=$($K -n s5n-gateway get gateway s5n -o jsonpath='{.status.addresses[0].value}' 2>/dev/null || true)
+  if [ -z "$addr" ]; then
+    echo "the Gateway reports no address: ${instance}'s API was asked through no edge"
+    return 1
+  fi
+  # -k: a box with no DNS record is issued the box's own self-signed
+  # certificate, and the fresh scenario is where TLS is asserted. What is under
+  # test here is the route and the login's rule.
+  code=$(curl -sS -o "$WORK/${instance}-api.json" -D "$WORK/${instance}-api.headers" \
+    -w '%{http_code}' --max-time 20 -k --resolve "${DOMAIN}:443:${addr}" \
+    -H "X-Api-Key: ${key}" \
+    "https://${DOMAIN}/${instance}/api/v3/system/status" 2>/dev/null || true)
+  location=$(grep -i '^location:' "$WORK/${instance}-api.headers" 2>/dev/null | tr -d '\r' | sed 's/^[Ll]ocation: *//' || true)
+  if [ "$code" != 200 ] || [ -n "$location" ]; then
+    echo "${instance}'s API answered ${code:-nothing} through the Gateway with its own key${location:+ (-> ${location})}: the login is not letting the app's API through"
+    return 1
+  fi
+  if ! grep -q '"version"' "$WORK/${instance}-api.json"; then
+    echo "${instance}'s API answered 200 through the Gateway without its own status document: $(head -c 120 "$WORK/${instance}-api.json")"
+    return 1
+  fi
+  no_key=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 20 -k \
+    --resolve "${DOMAIN}:443:${addr}" \
+    "https://${DOMAIN}/${instance}/api/v3/system/status" 2>/dev/null || true)
+  # The app's own refusal, not the portal's redirect and not an open API: that
+  # is what says the request reached the app without a session.
+  case "$no_key" in
+    401 | 403) ;;
+    *)
+      echo "${instance}'s API answered ${no_key:-nothing} with no API key: want the app's own refusal, and a 302 would mean the login is still in front of its API"
+      return 1
+      ;;
+  esac
+  ui_code=$(curl -sS -o /dev/null -D "$WORK/${instance}-ui.headers" -w '%{http_code}' \
+    --max-time 20 -k --resolve "${DOMAIN}:443:${addr}" \
+    "https://${DOMAIN}/${instance}/" 2>/dev/null || true)
+  ui_location=$(grep -i '^location:' "$WORK/${instance}-ui.headers" 2>/dev/null | tr -d '\r' | sed 's/^[Ll]ocation: *//' || true)
+  if [ "$ui_code" != 302 ]; then
+    echo "${instance}'s UI answered ${ui_code} with no session, not a redirect to the login: the app is served open"
+    return 1
+  fi
+  case "$ui_location" in
+    "https://${DOMAIN}/auth/"*) ;;
+    *)
+      echo "${instance}'s UI redirect does not point at the portal: ${ui_location}"
+      return 1
+      ;;
+  esac
+  echo "  ${instance}: /${instance}/api answers its own key through the Gateway (200, and ${no_key} without it), the UI still asks the portal"
+}
+
 migrate_box() {
   local src="$WORK/hostfs/legacy" puid pgid plan report app instance folder port category
   local key secret code pin expected revision after
@@ -5320,8 +5385,8 @@ migrate_box() {
   # What `box init` creates on a real host for the apps the seedbox runs
   # (--paths-in-node keeps it from writing into this node). migrate creates the
   # ones it moves, by moving them.
-  mkdir -p "$CONFIG_PATH/prowlarr" "$CONFIG_PATH/radarr"
-  chown "$puid:$pgid" "$CONFIG_PATH" "$CONFIG_PATH/prowlarr" "$CONFIG_PATH/radarr"
+  mkdir -p "$CONFIG_PATH/prowlarr"
+  chown "$puid:$pgid" "$CONFIG_PATH" "$CONFIG_PATH/prowlarr"
 
   # Nothing may have prepared box's data categories: the rename is what creates
   # them, and a `downloads` or `media` that already existed would hide a rename
@@ -5333,12 +5398,12 @@ migrate_box() {
   done
   [ "$fail" = 0 ] || return 0
 
-  log "box bootstrap: the platform layer, then root's first install with the plan's apps left off"
+  log "box bootstrap: the platform layer, then root's first install with the plan's apps off"
   if ! "$WORK/box" bootstrap --yes --chart-repo "$CHART_REPO" \
     --grant "$WORK/grant.yaml" --values "$WORK/values.yaml" \
     --namespace "$NS" --domain "$DOMAIN" \
     --data-path "$DATA_PATH" --config-path "$CONFIG_PATH" \
-    --apps prowlarr,radarr --puid "$puid" --pgid "$pgid" \
+    --apps prowlarr --puid "$puid" --pgid "$pgid" \
     --login "$LOGIN" --password-file "$WORK/authelia-password" \
     --paths-in-node --record "$WORK/cluster.yaml" \
     --kubeconfig "$WORK/kubeconfig" >"$WORK/bootstrap-migrate.txt" 2>&1; then
@@ -5347,27 +5412,32 @@ migrate_box() {
   cat "$WORK/bootstrap-migrate.txt"
   grep -qF "chart: s5n ${CHART_VERSION} (${CHART_REPO}:${CHART_VERSION})" "$WORK/bootstrap-migrate.txt" ||
     { echo "box did not pull ${CHART_REPO}:${CHART_VERSION}"; fail=1; }
+  # A release with no wired app: the only app it runs is Prowlarr, so the Job
+  # has no Arr and no qBittorrent to connect, and it still has to report ok --
+  # the receipt is what `box apply` waits on.
   grep -q "^wiring ok" "$WORK/bootstrap-migrate.txt" ||
     { echo "box did not report a healthy receipt for the box the migration adopts into"; fail=1; }
-  # migrate adopts into an installed seedbox whose plan's apps are off: the two
-  # apps the seedbox does run are on, and the three the plan names are not.
+  $K -n "$NS" get configmap s5n-wiring -o jsonpath='{.data.wiring\.json}' >"$WORK/bootstrap-wiring.json" 2>/dev/null || true
+  python3 - "$WORK/bootstrap-wiring.json" <<'PYWIRING' || fail=1
+import json, sys
+try:
+    cfg = json.load(open(sys.argv[1]))
+except (FileNotFoundError, json.JSONDecodeError):
+    sys.exit(f"{sys.argv[1]} is not the wiring config: the release rendered none")
+if cfg.get("instances"):
+    sys.exit(f"the seedbox was installed with Arr instances {[i.get('name') for i in cfg['instances']]}, want none")
+if "qbittorrent" in cfg:
+    sys.exit("the seedbox was installed with qBittorrent, and the plan migrates it")
+print("  the installed release has no wired app: no Arr instance, no qBittorrent")
+PYWIRING
+  # migrate adopts into an installed seedbox whose plan's apps are off: Prowlarr
+  # is the only app it runs, and none the plan names is installed.
   for instance in sonarr qbittorrent "$MIGRATE_RADARR_INSTANCE"; do
     if $K -n "$NS" get statefulset "$instance" >/dev/null 2>&1; then
       echo "${instance} is installed before the migration: the plan's apps have to be off"; fail=1
     fi
   done
   [ "$fail" = 0 ] || return 0
-
-  # The one directory box's own Radarr made that the rename collides with: the
-  # data contract's category directories, one empty directory under each tree.
-  # migrate refuses to rename over a directory that exists and is not empty
-  # (internal/migrate/apply/apply.go:345-348), which is right for data and is
-  # what an operator's own empty directories would look like too -- so this is
-  # the operator's step the refusal asks for, and it holds nothing: the seedbox's
-  # Radarr has never downloaded.
-  log "emptying the category directories the seedbox's own Radarr made"
-  rmdir "$DATA_PATH/downloads/movies" "$DATA_PATH/media/movies" "$DATA_PATH/downloads" "$DATA_PATH/media" ||
-    { echo "the seedbox's Radarr left something in ${DATA_PATH}/downloads or /media, and the rename cannot proceed"; fail=1; return 0; }
 
   log "box migrate apply: the plan, the configs, the data rename, the keys and the adopted clients"
   if ! "$WORK/box" migrate apply "$plan" --yes --chart-repo "$CHART_REPO" --chart-version "$CHART_VERSION" \
@@ -5471,7 +5541,16 @@ migrate_box() {
     fi
   done
 
-  # ---- assertion 4: the adopted client, and the receipt --------------------
+  # ---- assertion 4: the login's rules follow the app set --------------------
+  # The migration switched these apps on after the login's rules were written,
+  # and the rules are derived from the app list: the apply it hands over to has
+  # to leave them what init would have written for the final set.
+  log "the login: each migrated Arr's API is bypassed through the Gateway, and its UI is not"
+  for instance in sonarr "$MIGRATE_RADARR_INSTANCE"; do
+    migrate_check_login_bypass "$instance" "$WORK/source/${instance}.key" || fail=1
+  done
+
+  # ---- assertion 5: the adopted client, and the receipt --------------------
   log "ownership: the wiring record names the source's download client, and the receipt is ok"
   $K -n "$NS" get configmap s5n-wiring -o jsonpath='{.data.owned\.json}' >"$WORK/owned.json" 2>/dev/null || true
   python3 - "$WORK/owned.json" sonarr "$MIGRATE_RADARR_INSTANCE" \
@@ -5492,7 +5571,7 @@ PY
   [ "$(status_field 'd["status"]')" = ok ] ||
     { echo "the wiring receipt is not ok: $(status_field 'd.get("error")')"; fail=1; }
 
-  # ---- assertion 5: a second apply of the finished plan does nothing -------
+  # ---- assertion 6: a second apply of the finished plan does nothing -------
   # The state record under the config root says every step is done, so the run
   # answers Done without staging again, and the apply it hands over to finds the
   # release already rendering what it would apply. One apply, and then nothing.
