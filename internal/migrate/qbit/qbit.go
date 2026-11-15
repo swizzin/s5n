@@ -28,6 +28,7 @@ import (
 	"github.com/swizzin/s5n/internal/migrate/plan"
 	"github.com/swizzin/s5n/internal/migrate/rewrite"
 	"github.com/swizzin/s5n/internal/migrate/sqlitedb"
+	"github.com/swizzin/s5n/internal/qbtconf"
 )
 
 func init() { rewrite.Register("qbittorrent", rewriter{}) }
@@ -404,7 +405,7 @@ func (a *analysis) confKey(c *conf, k confKey) (bool, error) {
 	where := k.section + " " + k.name
 	switch k.kind {
 	case scalarPath:
-		stored := unquote(value)
+		stored := qbtconf.Unquote(value)
 		if stored == "" {
 			return false, nil
 		}

@@ -2,6 +2,8 @@ package qbit
 
 import (
 	"strings"
+
+	"github.com/swizzin/s5n/internal/qbtconf"
 )
 
 // conf is qBittorrent.conf kept line by line, so every line this pass does not
@@ -94,34 +96,6 @@ func (c *conf) set(section, key, value string) {
 	c.lines = append(c.lines[:at], append([]string{key + "=" + value}, c.lines[at:]...)...)
 }
 
-// unquote reads a QSettings INI value: Qt quotes only what it has to, and
-// escapes a backslash, a quote and a control character inside the quotes.
-func unquote(raw string) string {
-	if len(raw) < 2 || raw[0] != '"' || raw[len(raw)-1] != '"' {
-		return raw
-	}
-	inner := raw[1 : len(raw)-1]
-	var b strings.Builder
-	for i := 0; i < len(inner); i++ {
-		if inner[i] != '\\' || i+1 == len(inner) {
-			b.WriteByte(inner[i])
-			continue
-		}
-		i++
-		switch inner[i] {
-		case 'n':
-			b.WriteByte('\n')
-		case 'r':
-			b.WriteByte('\r')
-		case 't':
-			b.WriteByte('\t')
-		default:
-			b.WriteByte(inner[i])
-		}
-	}
-	return b.String()
-}
-
 // quote renders a path back the way QSettings would: bare when it is safe,
 // quoted (with its escapes) when it holds whitespace, a quote, a backslash or
 // one of the characters that would otherwise read as list syntax
@@ -179,7 +153,7 @@ func splitList(raw string) []string {
 	parts = append(parts, strings.TrimSpace(raw[start:]))
 	out := make([]string, 0, len(parts))
 	for _, part := range parts {
-		out = append(out, unquote(part))
+		out = append(out, qbtconf.Unquote(part))
 	}
 	return out
 }

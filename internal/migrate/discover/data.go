@@ -146,8 +146,12 @@ func (d *discovery) qbtSavePath(qbit *instance) (string, bool, error) {
 			// Pre-4.2, folded forward on first start.
 			{preferencesSection, `Downloads\SavePath`},
 		} {
-			if v, ok := doc.Get(key.section, key.key); ok && strings.TrimSpace(v) != "" {
-				return strings.TrimSpace(v), false, nil
+			// The value as the app reads it: QSettings quotes a path holding
+			// a space or list syntax, and the quotes are not part of the path.
+			if v, ok := doc.Get(key.section, key.key); ok {
+				if p := strings.TrimSpace(qbtconf.Unquote(v)); p != "" {
+					return p, false, nil
+				}
 			}
 		}
 	}

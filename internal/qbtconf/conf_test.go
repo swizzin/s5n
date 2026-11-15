@@ -272,8 +272,8 @@ func TestQuote(t *testing.T) {
 		if got := quote(in); got != want {
 			t.Errorf("quote(%q) = %s, want %s", in, got, want)
 		}
-		if got := unquote(quote(in)); got != in {
-			t.Errorf("unquote(quote(%q)) = %q", in, got)
+		if got := Unquote(quote(in)); got != in {
+			t.Errorf("Unquote(quote(%q)) = %q", in, got)
 		}
 	}
 }

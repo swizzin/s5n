@@ -120,14 +120,35 @@ func quote(v string) string {
 	return `"` + r.Replace(v) + `"`
 }
 
-// unquote reverses quote for the subset QSettings writes.
-func unquote(v string) string {
-	if len(v) < 2 || v[0] != '"' || v[len(v)-1] != '"' {
-		return v
+// Unquote reads a QSettings INI value as the app wrote it: Qt quotes only
+// what it has to, and inside the quotes it escapes a backslash, a quote and a
+// control character. Every reader of a qBittorrent.conf value that is a path
+// or a list goes through this one function, so discovery and the rewriter
+// cannot disagree about what a stored path is.
+func Unquote(raw string) string {
+	if len(raw) < 2 || raw[0] != '"' || raw[len(raw)-1] != '"' {
+		return raw
 	}
-	inner := v[1 : len(v)-1]
-	inner = strings.ReplaceAll(inner, `\"`, `"`)
-	return strings.ReplaceAll(inner, `\\`, `\`)
+	inner := raw[1 : len(raw)-1]
+	var b strings.Builder
+	for i := 0; i < len(inner); i++ {
+		if inner[i] != '\\' || i+1 == len(inner) {
+			b.WriteByte(inner[i])
+			continue
+		}
+		i++
+		switch inner[i] {
+		case 'n':
+			b.WriteByte('\n')
+		case 'r':
+			b.WriteByte('\r')
+		case 't':
+			b.WriteByte('\t')
+		default:
+			b.WriteByte(inner[i])
+		}
+	}
+	return b.String()
 }
 
 // PasswordValue is the exact text to place after "Password_PBKDF2=" so that
@@ -139,7 +160,7 @@ func PasswordValue(hash string) string {
 // ParsePasswordValue extracts the hash from a stored Password_PBKDF2 value,
 // accepting both the quoted @ByteArray form and a bare hash.
 func ParsePasswordValue(value string) (string, error) {
-	v := unquote(strings.TrimSpace(value))
+	v := Unquote(strings.TrimSpace(value))
 	if strings.HasPrefix(v, "@ByteArray(") {
 		if !strings.HasSuffix(v, ")") {
 			return "", fmt.Errorf("malformed @ByteArray value %q", v)

@@ -239,16 +239,12 @@ func TestMigrateDiscoverNeedsADestination(t *testing.T) {
 //
 // qBittorrent's settings are QSettings, and QSettings quotes a value it has to
 // escape: a save path holding a space is written as
-// `Session\DefaultSavePath="/srv/My Downloads"`. Discovery reads that value
-// verbatim, through qbtconf.Parse's Get, and hands the quoted text to the mount
-// lookup, which then covers no host directory and refuses the whole plan with
-// "qBittorrent saves under ... which no host-backed mount covers" -- a message
-// that names neither the quotes nor the file. The rewriter in
-// internal/migrate/qbit unquotes its own values, so a plan that does get built
-// works; it is discovery that cannot build one. Skipped rather than removed, so
-// fixing discover turns this green instead of leaving a dead fixture behind.
+// `Session\DefaultSavePath="/srv/My Downloads"`. Read verbatim, the quoted text
+// covers no host mount and refuses the whole plan with a message that names
+// neither the quotes nor the file. The rewriter in
+// internal/migrate/qbit unquotes its own values, and discovery now reads the
+// value through the same qbtconf.Unquote, so the two agree on the path.
 func TestMigrateDiscoverReadsAQuotedSavePath(t *testing.T) {
-	t.Skip("internal/migrate/discover: data.go:137-162 reads qBittorrent's save path as written, so a QSettings-quoted path (which qBittorrent writes for one holding a space) keeps its quotes and hostDirOf finds no mount; reported, not fixed in this lane")
 	manifests, root := discoverySource(t)
 	// The same source, with the downloads one directory deeper so the path
 	// holds a space, which is what makes QSettings quote it.

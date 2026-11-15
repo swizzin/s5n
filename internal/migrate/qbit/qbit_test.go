@@ -15,6 +15,7 @@ import (
 	"github.com/swizzin/s5n/internal/migrate/plan"
 	"github.com/swizzin/s5n/internal/migrate/rewrite"
 	"github.com/swizzin/s5n/internal/migrate/sqlitedb"
+	"github.com/swizzin/s5n/internal/qbtconf"
 )
 
 // qbitPlan is the plan a discovery run would write for this source: qBittorrent
@@ -569,7 +570,7 @@ func TestEveryPathKeyIsRewritten(t *testing.T) {
 			}
 			continue
 		}
-		if got := unquote(value); got != "/data/downloads/x" {
+		if got := qbtconf.Unquote(value); got != "/data/downloads/x" {
 			t.Errorf("%s %s = %q, want the box's path", k.section, k.name, got)
 		}
 	}
