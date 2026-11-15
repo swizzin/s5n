@@ -720,6 +720,7 @@ func runInit(ctx context.Context, args []string) {
 		os.Exit(2)
 	}
 	initFlags.takeDev(dev)
+	initFlags.recordPath = bootstrap.RecordPath
 	out := newOutput(terminalSet(*plain), *yes, startupTheme(*initFlags.valuesPath))
 	defer out.Close()
 	if err := initFlags.run(ctx, *kubeconfig, *yes, *plain, out); err != nil {
@@ -765,6 +766,11 @@ type initFlags struct {
 	// its directory check. A field rather than a registered flag, so
 	// --help cannot offer it. Set from takeInitDevFlags.
 	pathsInNode bool
+	// recordPath is where bootstrap recorded the cluster decision. init has no
+	// --record flag of its own (it applies through the default), so each caller
+	// sets it: bootstrap passes the flag it was given, and `box init` alone uses
+	// the default. Root's config is read and written beside it.
+	recordPath string
 	// charts is the release to install, when the command already has one:
 	// `box bootstrap` loads it for its k0s pin and hands the same value here,
 	// so bootstrap and init cannot ask the registry for two versions.
@@ -947,6 +953,7 @@ func (o *initFlags) run(ctx context.Context, kubeconfig string, yes, plain bool,
 		PasswordFile: *o.password,
 		Unattended:   unattended,
 		PathsInNode:  o.pathsInNode,
+		NoticePath:   hostconf.Path(o.recordPath),
 	})
 	if err != nil {
 		return err

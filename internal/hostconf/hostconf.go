@@ -236,11 +236,21 @@ func parseURL(v string) (string, error) {
 	if raw == "" {
 		return "", nil
 	}
-	u, err := url.Parse(raw)
-	if err != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") {
-		return "", errors.New("is not an http or https URL")
+	if err := ValidURL(raw); err != nil {
+		return "", err
 	}
 	return raw, nil
+}
+
+// ValidURL is the rule the notice address follows, exported because `box init`
+// asks for it: an empty answer means no notices, and anything else has to be an
+// absolute http or https address whose host a post can reach.
+func ValidURL(raw string) error {
+	u, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") {
+		return errors.New("is not an http or https URL")
+	}
+	return nil
 }
 
 // splitKV splits "key: value" on the first colon, keeping any colon after it:

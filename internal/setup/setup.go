@@ -139,6 +139,11 @@ type Options struct {
 	// this host, so init neither verifies nor creates them. `box apply` has the
 	// same flag for the same reason.
 	PathsInNode bool
+	// NoticePath is root's config, beside the cluster record. When the file is
+	// there and its notice address is empty, init asks for one -- it is the one
+	// answer that belongs to the host rather than to the seedbox. Empty means
+	// this run does not ask (a box whose config bootstrap did not write).
+	NoticePath string
 }
 
 // ApplyOptions is what init hands the applier: the same arguments `box apply`
@@ -390,6 +395,13 @@ func (d *Decision) Run(ctx context.Context, opts Options) (Result, error) {
 			break
 		}
 	}
+	// Root's notice address is its own step, and the last one: it is the
+	// host's, not the seedbox's. It is only asked when bootstrap wrote the file
+	// and left the address empty, so a re-run with one set asks nothing.
+	askNotice := d.noticePending(opts) && !opts.Unattended
+	if askNotice {
+		d.steps++
+	}
 
 	// The names the chosen apps are served at, before anything is written for
 	// one: an app's own host has to answer where the domain does, or the
@@ -441,6 +453,18 @@ func (d *Decision) Run(ctx context.Context, opts Options) (Result, error) {
 				return res, d.stop(err)
 			}
 			stored = append(stored, answer{key: q.Key, value: value})
+		}
+	}
+
+	// Where box tells someone who is not watching what it did. It is asked here,
+	// after the seedbox's own questions, and written with the other answers
+	// below: a cancel before this point writes nothing at all.
+	noticeURL := ""
+	if askNotice {
+		d.step(d.steps, "where should box post notices?")
+		noticeURL, err = d.askNoticeURL()
+		if err != nil {
+			return res, d.stop(err)
 		}
 	}
 
@@ -509,6 +533,11 @@ func (d *Decision) Run(ctx context.Context, opts Options) (Result, error) {
 		return res, err
 	}
 	d.reportWrites(opts, res)
+	if noticeURL != "" {
+		if err := d.writeNoticeURL(opts.NoticePath, noticeURL); err != nil {
+			return res, err
+		}
+	}
 
 	if !opts.PathsInNode {
 		var dirs []string
