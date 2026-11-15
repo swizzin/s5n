@@ -232,3 +232,36 @@ func TestMigrateDiscoverNeedsADestination(t *testing.T) {
 		t.Fatalf("no destination was refused with %v", err)
 	}
 }
+
+// TestMigrateDiscoverReadsAQuotedSavePath is a defect in
+// internal/migrate/discover, kept here as a failing test because that package
+// belongs to another lane and this one may not change it.
+//
+// qBittorrent's settings are QSettings, and QSettings quotes a value it has to
+// escape: a save path holding a space is written as
+// `Session\DefaultSavePath="/srv/My Downloads"`. Discovery reads that value
+// verbatim, through qbtconf.Parse's Get, and hands the quoted text to the mount
+// lookup, which then covers no host directory and refuses the whole plan with
+// "qBittorrent saves under ... which no host-backed mount covers" -- a message
+// that names neither the quotes nor the file. The rewriter in
+// internal/migrate/qbit unquotes its own values, so a plan that does get built
+// works; it is discovery that cannot build one. Skipped rather than removed, so
+// fixing discover turns this green instead of leaving a dead fixture behind.
+func TestMigrateDiscoverReadsAQuotedSavePath(t *testing.T) {
+	t.Skip("internal/migrate/discover: data.go:137-162 reads qBittorrent's save path as written, so a QSettings-quoted path (which qBittorrent writes for one holding a space) keeps its quotes and hostDirOf finds no mount; reported, not fixed in this lane")
+	manifests, root := discoverySource(t)
+	// The same source, with the downloads one directory deeper so the path
+	// holds a space, which is what makes QSettings quote it.
+	moved := filepath.Join(root, "srv", "library", "My Downloads")
+	if err := os.MkdirAll(moved, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	conf := "[BitTorrent]\nSession\\DefaultSavePath=\"/data/My Downloads\"\n\n[WebUI]\nPort=8080\n"
+	if err := os.WriteFile(filepath.Join(root, "srv/apps/qbittorrent/qBittorrent/qBittorrent.conf"), []byte(conf), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	out := filepath.Join(t.TempDir(), "plan")
+	if _, err := migrateDiscover(context.Background(), discoverOptions{Out: out, FromDir: manifests, Root: root}); err != nil {
+		t.Fatalf("discovery refused a save path it should read: %v", err)
+	}
+}
