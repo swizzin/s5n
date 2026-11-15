@@ -67,6 +67,15 @@ func (h *Helm) waitStrategy() helmkube.WaitStrategy {
 // NewHelm builds the client for one namespace. It does not contact the cluster:
 // the Helm configuration is lazy, so constructing it is not a read or a write.
 func NewHelm(kubeconfig, namespace, releaseName string) (*Helm, error) {
+	return NewHelmWithTimeout(kubeconfig, namespace, releaseName, 0)
+}
+
+// NewHelmWithTimeout is NewHelm with client-go's per-request timeout on every
+// client the handle builds. A caller that reads without a wait of its own needs
+// it: `box status` is one line from a shell prompt, and a context deadline
+// bounds nothing inside Helm, whose release storage makes its API calls with
+// context.Background() (see kube.WithRequestTimeout).
+func NewHelmWithTimeout(kubeconfig, namespace, releaseName string, timeout time.Duration) (*Helm, error) {
 	if namespace == "" {
 		return nil, errors.New("no namespace: the grant names the release namespace")
 	}
@@ -79,6 +88,9 @@ func NewHelm(kubeconfig, namespace, releaseName string) (*Helm, error) {
 	// (docs/box.md: box is the whole interface). Helm's own warnings go
 	// through slog and are silenced below.
 	flags := kube.Flags(kubeconfig, namespace)
+	if timeout > 0 {
+		flags = kube.WithRequestTimeout(flags, timeout)
+	}
 
 	cfg := new(action.Configuration)
 	if err := cfg.Init(flags, namespace, "secret"); err != nil {

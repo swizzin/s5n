@@ -3,8 +3,11 @@ package release
 import (
 	"context"
 	"log/slog"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"helm.sh/helm/v4/pkg/action"
 	chartv2 "helm.sh/helm/v4/pkg/chart/v2"
@@ -95,5 +98,56 @@ func TestHelmRollbackRefusesARevisionItCannotTrust(t *testing.T) {
 	cancel()
 	if err := h.Rollback(ctx, 2); err == nil || !strings.Contains(err.Error(), "context canceled") {
 		t.Fatalf("Rollback on a cancelled run = %v, want the cancellation", err)
+	}
+}
+
+// TestNewHelmWithTimeoutBoundsEveryRequest: `box status` reads the deployed
+// release without a wait of its own, and a context deadline bounds nothing
+// inside Helm, whose release storage reads with context.Background(). The
+// handle for that read therefore carries client-go's per-request timeout, and
+// every other handle leaves it at client-go's default.
+func TestNewHelmWithTimeoutBoundsEveryRequest(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "kubeconfig")
+	kubeconfig := `apiVersion: v1
+kind: Config
+current-context: test
+clusters:
+- name: test
+  cluster:
+    server: https://127.0.0.1:6443
+contexts:
+- name: test
+  context:
+    cluster: test
+    user: test
+users:
+- name: test
+  user:
+    token: not-a-real-token
+`
+	if err := os.WriteFile(path, []byte(kubeconfig), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range []struct {
+		name    string
+		timeout time.Duration
+		want    time.Duration
+	}{
+		{"status's bounded read", 10 * time.Second, 10 * time.Second},
+		{"a run with a wait of its own", 0, 0},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			h, err := NewHelmWithTimeout(path, "testbox", ReleaseName, c.timeout)
+			if err != nil {
+				t.Fatal(err)
+			}
+			cfg, err := h.cfg.RESTClientGetter.ToRESTConfig()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if cfg.Timeout != c.want {
+				t.Fatalf("request timeout = %v, want %v", cfg.Timeout, c.want)
+			}
+		})
 	}
 }

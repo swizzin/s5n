@@ -88,6 +88,8 @@ func main() {
 		runApply(ctx, os.Args[2:])
 	case "update":
 		runUpdate(ctx, os.Args[2:])
+	case "status":
+		runStatus(ctx, os.Args[2:])
 	case "rollback":
 		runRollback(ctx, os.Args[2:])
 	case "migrate":
@@ -119,6 +121,7 @@ commands:
   init        ask a seedbox's questions, edit its two files, then apply
   apply       install or upgrade root's seedbox from its grant and values
   update      replace box when a newer one verifies, then move the seedbox to a newer release
+  status      one line: what is running, what the last update did, when box checks again
   rollback    put one app back on the image it ran before an update moved it
   migrate     adopt an install box did not make: discover writes the plan, apply runs it
   version     print the version box was built from
