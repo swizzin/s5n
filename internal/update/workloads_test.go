@@ -363,6 +363,152 @@ func runningPod(name, instance, app, imageID string) *corev1.Pod {
 	}
 }
 
+// readyPod is appPod with the Ready condition a serving app's pod carries; one
+// that is not ready has no condition, which is what a pod that never opened its
+// port looks like.
+func readyPod(name, app string, ready bool, restarts int32) *corev1.Pod {
+	pod := appPod(name, app, containerRestarts{name: app, restarts: restarts})
+	status := corev1.ConditionFalse
+	if ready {
+		status = corev1.ConditionTrue
+	}
+	pod.Status.Conditions = []corev1.PodCondition{{Type: corev1.PodReady, Status: status}}
+	return pod
+}
+
+// TestReadinessIsEveryAppNotOnlyTheMovedOnes is the timer's reading: nothing
+// moved, so every app of the release is asked, and an app that is up is quiet.
+func TestReadinessIsEveryAppNotOnlyTheMovedOnes(t *testing.T) {
+	cs := k8sfake.NewClientset(
+		statefulSet("sonarr", "sonarr", 1, 1, 1, 1),
+		statefulSet("radarr", "radarr", 1, 1, 1, 1),
+		readyPod("sonarr-0", "sonarr", true, 0),
+		readyPod("radarr-0", "radarr", false, 4),
+	)
+	w, err := NewWorkloadsFor("testbox", "s5n", cs).Readiness(context.Background())
+	if err != nil {
+		t.Fatalf("Readiness: %v", err)
+	}
+	want := map[string]AppHealth{
+		"sonarr": {Ready: true},
+		"radarr": {Ready: false, Reason: "restarting, 4 restarts"},
+	}
+	if !reflect.DeepEqual(w, want) {
+		t.Fatalf("Readiness = %+v, want %+v", w, want)
+	}
+}
+
+// TestReadinessSaysWhyAnAppIsNotReady: the reason is what a notice shows in place
+// of a log, so it distinguishes an app that keeps exiting from one that is merely
+// slow.
+func TestReadinessSaysWhyAnAppIsNotReady(t *testing.T) {
+	for _, c := range []struct {
+		name string
+		sets []*appsv1.StatefulSet
+		pods []*corev1.Pod
+		want AppHealth
+	}{
+		{
+			name: "ready",
+			sets: []*appsv1.StatefulSet{statefulSet("sonarr", "sonarr", 1, 1, 1, 1)},
+			pods: []*corev1.Pod{readyPod("sonarr-0", "sonarr", true, 0)},
+			want: AppHealth{Ready: true},
+		},
+		{
+			name: "running but not ready",
+			sets: []*appsv1.StatefulSet{statefulSet("sonarr", "sonarr", 1, 1, 1, 1)},
+			pods: []*corev1.Pod{readyPod("sonarr-0", "sonarr", false, 0)},
+			want: AppHealth{Ready: false, Reason: "not ready"},
+		},
+		{
+			name: "restarting",
+			sets: []*appsv1.StatefulSet{statefulSet("sonarr", "sonarr", 1, 1, 1, 1)},
+			pods: []*corev1.Pod{readyPod("sonarr-0", "sonarr", false, 7)},
+			want: AppHealth{Ready: false, Reason: "restarting, 7 restarts"},
+		},
+		{
+			name: "one restart is named in the singular",
+			sets: []*appsv1.StatefulSet{statefulSet("sonarr", "sonarr", 1, 1, 0, 1)},
+			pods: []*corev1.Pod{readyPod("sonarr-0", "sonarr", false, 1)},
+			want: AppHealth{Ready: false, Reason: "restarting, 1 restart"},
+		},
+		{
+			name: "no pod yet",
+			sets: []*appsv1.StatefulSet{statefulSet("sonarr", "sonarr", 1, 1, 0, 1)},
+			want: AppHealth{Ready: false, Reason: "not ready"},
+		},
+		{
+			name: "a rollout that has not finished is not up",
+			sets: []*appsv1.StatefulSet{statefulSet("sonarr", "sonarr", 2, 1, 1, 0)},
+			pods: []*corev1.Pod{readyPod("sonarr-0", "sonarr", true, 0)},
+			want: AppHealth{Ready: false, Reason: "not ready"},
+		},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			objs := make([]runtime.Object, 0, len(c.sets)+len(c.pods))
+			for _, s := range c.sets {
+				objs = append(objs, s)
+			}
+			for _, p := range c.pods {
+				objs = append(objs, p)
+			}
+			got, err := NewWorkloadsFor("testbox", "s5n", k8sfake.NewClientset(objs...)).Readiness(context.Background())
+			if err != nil {
+				t.Fatalf("Readiness: %v", err)
+			}
+			if !reflect.DeepEqual(got["sonarr"], c.want) {
+				t.Fatalf("sonarr = %+v, want %+v", got["sonarr"], c.want)
+			}
+		})
+	}
+}
+
+// TestReadinessKeepsASecondInstanceWithItsApp: an app's 4K instance is another
+// StatefulSet with the same key, and it has to be up for the app to be.
+func TestReadinessKeepsASecondInstanceWithItsApp(t *testing.T) {
+	cs := k8sfake.NewClientset(
+		statefulSet("radarr", "radarr", 1, 1, 1, 1),
+		statefulSet("radarr-4k", "radarr", 1, 1, 1, 1),
+		readyPod("radarr-0", "radarr", true, 0),
+		readyPod("radarr-4k-0", "radarr", false, 2),
+	)
+	got, err := NewWorkloadsFor("testbox", "s5n", cs).Readiness(context.Background())
+	if err != nil {
+		t.Fatalf("Readiness: %v", err)
+	}
+	if h := got["radarr"]; h.Ready || h.Reason != "restarting, 2 restarts" {
+		t.Fatalf("radarr = %+v, want not ready across both instances", h)
+	}
+}
+
+// TestReadinessAcceptsAnAppScaledToZero: a step scales an app down to copy it,
+// and nothing that should be running is not a fault.
+func TestReadinessAcceptsAnAppScaledToZero(t *testing.T) {
+	set := statefulSet("sonarr", "sonarr", 1, 1, 0, 0)
+	zero := int32(0)
+	set.Spec.Replicas = &zero
+	got, err := NewWorkloadsFor("testbox", "s5n", k8sfake.NewClientset(set)).Readiness(context.Background())
+	if err != nil {
+		t.Fatalf("Readiness: %v", err)
+	}
+	if h := got["sonarr"]; !h.Ready {
+		t.Fatalf("a stopped app reads as %+v, want ready", h)
+	}
+}
+
+// TestRunningReadsEachInstanceImageAndPodDigest pins the other reading beside it:
+// Readiness and Running answer different questions and neither may take the
+// other's shape.
+func TestReadinessIsEmptyOnAReleaseWithNoWorkloads(t *testing.T) {
+	got, err := NewWorkloadsFor("testbox", "s5n", k8sfake.NewClientset()).Readiness(context.Background())
+	if err != nil {
+		t.Fatalf("Readiness: %v", err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("Readiness = %+v, want nothing", got)
+	}
+}
+
 // TestRunningReadsEachInstanceImageAndPodDigest: the reference comes from the
 // StatefulSet and the bytes from the pods, because a values pin may be a tag
 // alone. An instance is its own StatefulSet, and a pod of an app this release

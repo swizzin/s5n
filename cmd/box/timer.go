@@ -32,13 +32,15 @@ type timerRun struct {
 	Now func() time.Time
 	Out say.Reporter
 
-	// Update is the whole update: box's own replacement, then the charts, then
-	// the health read. It runs only when a check is due, so a wake between
-	// checks asks the registry nothing and replaces nothing.
+	// Update is the whole update: box's own replacement and then the charts. It
+	// runs only when a check is due, so a wake between checks asks the registry
+	// nothing and replaces nothing.
 	Update func(context.Context) error
-	// Health is the reading a wake that is not due makes: no registry contact,
-	// no self-update, and LastCheck stays where it was. Nil is a run that only
-	// updates, which is what part of this command's build is.
+	// Health is the reading a wake makes: after Update on a due wake, whatever
+	// Update returned, and alone on a wake that is not due (no registry contact,
+	// no self-update, LastCheck stays where it was). On a due wake that replaced
+	// box, this process never returns and the new binary makes its own reading.
+	// Nil skips it, which is what a caller that only wants the update says.
 	Health func(context.Context)
 }
 
@@ -66,7 +68,17 @@ func (t timerRun) run(ctx context.Context) error {
 		return err
 	}
 	if state.Due(t.now(), t.Conf.Interval) {
-		return t.Update(ctx)
+		// The reading happens whatever the update did, and it happens here
+		// rather than at the end of the chart half: a plan, a registry listing
+		// or a step that stopped returns an error, and a failed check leaves
+		// LastCheck unwritten -- so every wake would be due and fail again, and
+		// a registry outage would silence every health notice for as long as it
+		// lasted. The wake still exits 1; the reading is not its answer.
+		err := t.Update(ctx)
+		if t.Health != nil {
+			t.Health(ctx)
+		}
+		return err
 	}
 	if t.Health != nil {
 		t.Health(ctx)

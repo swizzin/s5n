@@ -63,7 +63,7 @@ func noReexec(t *testing.T) func(string, []string, []string, string) error {
 // the chart work counted.
 func runBox(t *testing.T, b *boxUpdate) (charts int) {
 	t.Helper()
-	err := updateRun{Box: b, Charts: func(context.Context) { charts++ }}.run(context.Background())
+	err := updateRun{Box: b, Charts: func(context.Context) error { charts++; return nil }}.run(context.Background())
 	if err != nil {
 		t.Fatalf("run: %v", err)
 	}
@@ -271,7 +271,7 @@ func TestUpdateStopsWhenTheInstalledBoxWillNotStart(t *testing.T) {
 		},
 	}
 	charts := 0
-	err := updateRun{Box: b, Charts: func(context.Context) { charts++ }}.run(context.Background())
+	err := updateRun{Box: b, Charts: func(context.Context) error { charts++; return nil }}.run(context.Background())
 	if err == nil {
 		t.Fatal("a box that could not start the binary it installed carried on")
 	}
@@ -424,7 +424,7 @@ func TestRollbackBoxNeedsRoot(t *testing.T) {
 			return nil
 		},
 	}
-	err := updateRun{Box: b, Charts: func(context.Context) { t.Error("a refused rollback ran chart work") }}.run(context.Background())
+	err := updateRun{Box: b, Charts: func(context.Context) error { t.Error("a refused rollback ran chart work"); return nil }}.run(context.Background())
 	if err == nil {
 		t.Fatal("--rollback-box ran as a user")
 	}
@@ -444,7 +444,7 @@ func TestRollbackBoxReportsWhatFailed(t *testing.T) {
 			return errors.New("there is no box.previous beside /usr/local/bin/box, so there is no previous box to go back to")
 		},
 	}
-	err := updateRun{Box: b, Charts: func(context.Context) { t.Error("a failed rollback ran chart work") }}.run(context.Background())
+	err := updateRun{Box: b, Charts: func(context.Context) error { t.Error("a failed rollback ran chart work"); return nil }}.run(context.Background())
 	if err == nil || !strings.Contains(err.Error(), "no box.previous") {
 		t.Fatalf("run returned %v, want the rollback's own refusal", err)
 	}

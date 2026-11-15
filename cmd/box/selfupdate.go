@@ -193,9 +193,13 @@ func (b *boxUpdate) updateAsRoot(ctx context.Context) (bool, error) {
 // The order is the point -- the release an update settles on is the one its
 // min-box accepts, which means deciding it with the box that does the work -- so
 // it is one value a test can run with both halves swapped for fakes.
+//
+// The chart half's error comes back rather than ending the process there: the
+// timer's wake reads health after it either way, and the caller is the one place
+// that prints and picks an exit code.
 type updateRun struct {
 	Box    *boxUpdate
-	Charts func(context.Context)
+	Charts func(context.Context) error
 }
 
 func (r updateRun) run(ctx context.Context) error {
@@ -203,6 +207,5 @@ func (r updateRun) run(ctx context.Context) error {
 	if err != nil || !proceed {
 		return err
 	}
-	r.Charts(ctx)
-	return nil
+	return r.Charts(ctx)
 }

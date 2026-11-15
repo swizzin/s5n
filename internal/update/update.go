@@ -287,6 +287,9 @@ type Updater struct {
 	Confirm release.Confirmer
 	// State is update.json.
 	State StateStore
+	// Notify is told what each step did, and told when one stops. Nil posts
+	// nothing, which is a box with no notice address.
+	Notify func(context.Context, Notice)
 	// Holds is the record of apps a rollback holds at an older image. The
 	// plan reads it and a step that rolls an app back writes it; nil is a box
 	// that keeps no holds, which is what a test that never rolls back wants.
@@ -801,6 +804,19 @@ func (u *Updater) take(ctx context.Context, rel Release, cluster Cluster, snaps 
 	if err := u.recordOK(res, step, before.Revision, rolledBack); err != nil {
 		return fmt.Errorf("%s is on %s, but update's record could not be written: %w", res.Name, step.To, err)
 	}
+	// The step is recorded, so it is real: the apps box put back first, because
+	// that is the order they happened in, and then the step itself.
+	for _, app := range rolledBack {
+		change := step.Images[app]
+		u.notify(ctx, Notice{
+			Event: EventRolledBack, Name: res.Name, From: step.From, To: step.To,
+			Apps: []AppChange{{App: app, From: change.Ran.Label(), To: change.MovedTo.Label()}},
+		})
+	}
+	u.notify(ctx, Notice{
+		Event: EventUpdated, Name: res.Name, From: step.From, To: step.To,
+		Apps: movedApps(step, rolledBack),
+	})
 	return nil
 }
 
@@ -921,6 +937,16 @@ func (u *Updater) fail(ctx context.Context, rel Release, cluster Cluster, res *R
 	if recordErr := u.recordFailed(res, step, revision, gate, msg); recordErr != nil {
 		return fmt.Errorf("%s; the record could not be written: %w", msg, recordErr)
 	}
+	// Which release the box is on is Helm's answer, read above: a notice that
+	// guessed would be the one sentence someone acts on.
+	on := ""
+	if stateErr == nil && state.Exists {
+		on = state.ChartVersion
+	}
+	u.notify(ctx, Notice{
+		Event: EventStopped, Name: res.Name, From: step.From, To: step.To,
+		Gate: gate, Error: cause.Error(), On: on,
+	})
 	return errors.New(msg)
 }
 

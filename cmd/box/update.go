@@ -9,6 +9,7 @@ import (
 
 	"github.com/swizzin/s5n/internal/bootstrap"
 	"github.com/swizzin/s5n/internal/hostconf"
+	"github.com/swizzin/s5n/internal/notice"
 	"github.com/swizzin/s5n/internal/release"
 	"github.com/swizzin/s5n/internal/say"
 	"github.com/swizzin/s5n/internal/seedbox"
@@ -172,6 +173,12 @@ func runUpdate(ctx context.Context, args []string) {
 		os.Exit(2)
 	}
 	o.pathsInNode = pathsInNode
+	if *o.valuesPath == "" {
+		// A run with nowhere to read its values from has nothing to update, and
+		// it says so before it replaces box or opens the cluster.
+		fmt.Fprintln(os.Stderr, "box: no values file: pass --values")
+		os.Exit(2)
+	}
 	if *o.timer && *o.check {
 		// A timer run is the unattended update itself; a check writes nothing
 		// and would leave the timer never moving a box.
@@ -198,6 +205,7 @@ func runUpdate(ctx context.Context, args []string) {
 		*o.holdBox = true
 	}
 	if *o.timer {
+		charts := func(ctx context.Context) error { return updateCharts(ctx, o, out, resolver, conf) }
 		t := timerRun{
 			Conf:  conf,
 			Path:  hostconf.Path(*o.record),
@@ -206,9 +214,12 @@ func runUpdate(ctx context.Context, args []string) {
 			Update: func(ctx context.Context) error {
 				return updateRun{
 					Box:    newBoxUpdate(out, os.Args[1:], os.Environ(), o.selfUpdateOptions(boxReleases)),
-					Charts: func(ctx context.Context) { updateCharts(ctx, o, out, resolver) },
+					Charts: charts,
 				}.run(ctx)
 			},
+			// The wake's own reading, made here rather than at the end of the
+			// chart half, so it happens even when that half stopped early.
+			Health: func(ctx context.Context) { healthOnly(ctx, o, out, conf) },
 		}
 		// The self-update's own --rollback-box is not a timer decision: a timer
 		// never puts the previous box back, and the flag is root's hand.
@@ -229,9 +240,14 @@ func runUpdate(ctx context.Context, args []string) {
 	su.CheckOnly = *o.check
 	run := updateRun{
 		Box:    su,
-		Charts: func(ctx context.Context) { updateCharts(ctx, o, out, resolver) },
+		Charts: func(ctx context.Context) error { return updateCharts(ctx, o, out, resolver, conf) },
 	}
 	if err := run.run(ctx); err != nil {
+		if errors.Is(err, release.ErrCancelled) {
+			// A declined question is an answer, not a fault: one exit code and
+			// nothing to explain.
+			os.Exit(1)
+		}
 		out.Error(err)
 		os.Exit(1)
 	}
@@ -241,19 +257,38 @@ func runUpdate(ctx context.Context, args []string) {
 // through the floors, and the applies under them. It is a function of its own
 // because the box's replacement comes first and can end the run before any of
 // this -- or hand the process over, so that this runs in the new binary.
-func updateCharts(ctx context.Context, o *updateFlags, out say.Reporter, resolver setup.Resolver) {
-	if *o.valuesPath == "" {
-		fmt.Fprintln(os.Stderr, "box: no values file: pass --values")
-		os.Exit(2)
-	}
+//
+// It returns its failures instead of ending the process: a timer's wake reads
+// health after this whatever it returned, and the printing and the exit code are
+// runUpdate's, in one place.
+func updateCharts(ctx context.Context, o *updateFlags, out say.Reporter, resolver setup.Resolver, conf hostconf.Config) error {
 	yes, _ := o.unattended()
 
 	// The cluster decision belongs to `box bootstrap`; update reuses it the
 	// same way apply does and never probes a cluster of its own.
 	kc, err := release.ResolveKubeconfig(*o.kubeconfig, os.Getenv("KUBECONFIG"), bootstrap.FilesystemRecords{Path: *o.record})
 	if err != nil {
-		out.Error(err)
-		os.Exit(1)
+		return err
+	}
+
+	// The grant is read here rather than only in the snapshotter, because the
+	// notices need two things from it: the namespace, and the box's own name.
+	sb, err := seedbox.Load(*o.grantPath, *o.valuesPath)
+	if err != nil {
+		return err
+	}
+	namespace, err := sb.Namespace()
+	if err != nil {
+		return err
+	}
+	poster := notice.Poster{URL: conf.NoticeURL}
+	noticeOpts := notice.Options{Box: grantDomain(sb), Seedbox: namespace}
+	post := func(n notice.Notice) {
+		// A notice that cannot be delivered is one line, never a failed update:
+		// the update is the work and the notice is the telling.
+		if err := poster.Post(ctx, n); err != nil {
+			out.Warn(err.Error())
+		}
 	}
 
 	// One chart source for the plan and every step: the release the plan
@@ -327,21 +362,24 @@ func updateCharts(ctx context.Context, o *updateFlags, out say.Reporter, resolve
 		Apply: func(ctx context.Context, opts release.Options) (release.Result, error) {
 			return applyThenSettle(ctx, applierFor(opts.SkipHooks).Apply, opts, holds)
 		},
-		Holds:      update.FileHolds{},
-		Confirm:    confirmer(out, yes),
-		State:      update.FileState{Path: o.statePath()},
+		Holds:   update.FileHolds{},
+		Confirm: confirmer(out, yes),
+		State:   update.FileState{Path: o.statePath()},
+		Notify: func(ctx context.Context, n update.Notice) {
+			post(noticeFrom(noticeOpts, n))
+		},
 		BoxVersion: version,
 		Say:        out,
 	}
 	res, err := up.Run(ctx, o.runOptions(stepOpts))
 	if err != nil {
 		if errors.Is(err, release.ErrCancelled) {
-			os.Exit(1)
+			return err
 		}
-		out.Error(portRangeHint(err))
-		os.Exit(1)
+		return portRangeHint(err)
 	}
 	if !*o.check && !res.Current && len(res.Taken) > 0 {
 		out.Banner("seedbox updated", fmt.Sprintf("%s is on %s", res.Name, res.Target))
 	}
+	return nil
 }

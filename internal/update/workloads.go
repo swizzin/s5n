@@ -191,15 +191,98 @@ func rolledOut(sets []appsv1.StatefulSet) bool {
 		if set.Status.ObservedGeneration < set.Generation {
 			return false
 		}
-		want := int32(1)
-		if set.Spec.Replicas != nil {
-			want = *set.Spec.Replicas
-		}
+		want := replicasOf(set)
 		if set.Status.ReadyReplicas != want || set.Status.UpdatedReplicas != want {
 			return false
 		}
 	}
 	return true
+}
+
+// replicasOf is how many replicas one StatefulSet asks for. A set with no
+// replicas field runs one, which is what the chart leaves when it does not say.
+func replicasOf(set *appsv1.StatefulSet) int32 {
+	if set.Spec.Replicas != nil {
+		return *set.Spec.Replicas
+	}
+	return 1
+}
+
+// Readiness reads every app of the release once, for the timer: whether all of
+// its pods are ready, and a short reason when one is not. It is the same app
+// key the plan and the rollback use, so a reading and a step name an app the
+// same way.
+//
+// This is the "is anything wrong now" question, not the health gate's "did this
+// step break it": nothing moved, so every app is asked about. An app the values
+// disabled has no StatefulSet and is not here at all; one box scaled to zero
+// while it copies has nothing that should be running, so it is ready.
+func (w *Workloads) Readiness(ctx context.Context) (map[string]AppHealth, error) {
+	sets, err := w.statefulSets(ctx)
+	if err != nil {
+		return nil, err
+	}
+	want := make(map[string]int32, len(sets))
+	perApp := make(map[string][]appsv1.StatefulSet, len(sets))
+	for i := range sets {
+		app := appOf(&sets[i])
+		if app == "" {
+			continue
+		}
+		want[app] += replicasOf(&sets[i])
+		perApp[app] = append(perApp[app], sets[i])
+	}
+	out := make(map[string]AppHealth, len(want))
+	if len(want) == 0 {
+		return out, nil
+	}
+	pods, err := w.pods(ctx)
+	if err != nil {
+		return nil, err
+	}
+	ready := make(map[string]int, len(want))
+	restarts := make(map[string]int32, len(want))
+	for i := range pods {
+		app := pods[i].Labels[appLabel]
+		if _, ok := want[app]; !ok {
+			continue
+		}
+		if podReady(&pods[i]) {
+			ready[app]++
+		}
+		if n := appRestarts(&pods[i]); n > restarts[app] {
+			restarts[app] = n
+		}
+	}
+	for app, n := range want {
+		h := AppHealth{}
+		switch {
+		case n == 0:
+			// Nothing should be running: not a fault.
+			h.Ready = true
+		case rolledOut(perApp[app]) && int32(ready[app]) >= n:
+			h.Ready = true
+		case restarts[app] > 0:
+			h.Reason = fmt.Sprintf("restarting, %s", plural(int(restarts[app]), "restart", "restarts"))
+		default:
+			h.Reason = "not ready"
+		}
+		out[app] = h
+	}
+	return out, nil
+}
+
+// podReady is a pod's Ready condition: the app has opened its port.
+func podReady(pod *corev1.Pod) bool {
+	if pod.DeletionTimestamp != nil {
+		return false
+	}
+	for _, c := range pod.Status.Conditions {
+		if c.Type == corev1.PodReady {
+			return c.Status == corev1.ConditionTrue
+		}
+	}
+	return false
 }
 
 // appRestarts is how many times one pod's app container has exited. The chart

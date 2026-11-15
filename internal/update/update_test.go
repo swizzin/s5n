@@ -1654,3 +1654,109 @@ func TestAChartVersionOlderThanTheBoxIsRefused(t *testing.T) {
 		t.Fatalf("applied %d times for a backwards --chart-version", len(h.app.calls))
 	}
 }
+
+// notices records what the run told it: the events a person who is not watching
+// would read, in the order they happened.
+type notices struct{ got []Notice }
+
+func (n *notices) add(ctx context.Context, notice Notice) { n.got = append(n.got, notice) }
+
+// TestAPassingStepNotifiesWhatMoved: the notice a step posts names the releases
+// and every app it moved, with the images on either side -- but not an app it
+// put back, because that app did not stay on the new image.
+func TestAPassingStepNotifiesWhatMoved(t *testing.T) {
+	h := newHarness(t)
+	h.charts.publish("0.4.0", "0.4.0", "0.4.0", digestA)
+	h.charts.publish("0.5.0", "0.4.0", "0.4.0", digestB)
+	seen := &notices{}
+	h.u.Notify = seen.add
+
+	if _, err := h.run(t, false); err != nil {
+		t.Fatalf("update: %v\n%s", err, h.out)
+	}
+	if len(seen.got) != 1 {
+		t.Fatalf("notices = %+v, want one for the step", seen.got)
+	}
+	got := seen.got[0]
+	if got.Event != EventUpdated || got.Name != "s5n" || got.From != "0.4.0" || got.To != "0.5.0" {
+		t.Fatalf("notice = %+v, want the step that passed", got)
+	}
+	if len(got.Apps) != 1 || got.Apps[0].App != "sonarr" || got.Apps[0].From == "" || got.Apps[0].To == "" {
+		t.Fatalf("Apps = %+v, want sonarr with both its images", got.Apps)
+	}
+}
+
+// TestARolledBackAppIsNotifiedBeforeTheStep: the app box put back is its own
+// event, said first, and the step that passed does not claim it moved.
+func TestARolledBackAppIsNotifiedBeforeTheStep(t *testing.T) {
+	h := newHarness(t)
+	h.charts.publish("0.4.0", "0.4.0", "0.4.0", digestA)
+	h.charts.publish("0.5.0", "0.4.0", "0.4.0", digestB)
+	h.snaps.taken = Taken{Step: "0.4.0-0.5.0-20260102T030405Z", At: h.now, Dirs: map[string]string{"sonarr": "/srv/s5n/config/.box/snapshots/0.4.0-0.5.0-20260102T030405Z/sonarr"}}
+	h.cluster.exiting = []Exiting{{App: "sonarr", Restarts: 3}}
+	h.cluster.exitingUntil = 1
+	seen := &notices{}
+	h.u.Notify = seen.add
+
+	if _, err := h.run(t, false); err != nil {
+		t.Fatalf("update: %v\n%s", err, h.out)
+	}
+	if len(seen.got) != 2 {
+		t.Fatalf("notices = %+v, want the rollback and the step", seen.got)
+	}
+	if seen.got[0].Event != EventRolledBack || seen.got[0].Apps[0].App != "sonarr" {
+		t.Fatalf("first notice = %+v, want sonarr rolled back", seen.got[0])
+	}
+	if seen.got[1].Event != EventUpdated {
+		t.Fatalf("second notice = %+v, want the step that passed", seen.got[1])
+	}
+	if len(seen.got[1].Apps) != 0 {
+		t.Fatalf("the step claims it moved %+v, but that app was rolled back", seen.got[1].Apps)
+	}
+}
+
+// TestAFailedStepNotifiesTheGateAndTheRelease: someone who is not watching needs
+// to know where the box was left, so a stopped notice carries the gate, the
+// reason, and what Helm says is deployed now.
+func TestAFailedStepNotifiesTheGateAndTheRelease(t *testing.T) {
+	h := newHarness(t)
+	h.charts.publish("0.4.0", "0.4.0", "0.4.0", digestA)
+	h.charts.publish("0.5.0", "0.4.0", "0.4.0", digestB)
+	h.app.errFor["0.5.0"] = errors.New("helm said no")
+	seen := &notices{}
+	h.u.Notify = seen.add
+
+	if _, err := h.run(t, false); err == nil {
+		t.Fatal("a failed apply passed the update")
+	}
+	if len(seen.got) != 1 {
+		t.Fatalf("notices = %+v, want one for the stop", seen.got)
+	}
+	got := seen.got[0]
+	if got.Event != EventStopped || got.Gate != gateApply || got.From != "0.4.0" || got.To != "0.5.0" {
+		t.Fatalf("notice = %+v, want the apply gate named", got)
+	}
+	if !strings.Contains(got.Error, "helm said no") {
+		t.Fatalf("Error = %q, want what stopped the step", got.Error)
+	}
+	if got.On != "0.4.0" {
+		t.Fatalf("On = %q, want the release Helm still reports", got.On)
+	}
+}
+
+// TestACheckNotifiesNothing: asking what would happen is not something that
+// happened, so nobody is told about it.
+func TestACheckNotifiesNothing(t *testing.T) {
+	h := newHarness(t)
+	h.charts.publish("0.4.0", "0.4.0", "0.4.0", digestA)
+	h.charts.publish("0.5.0", "0.4.0", "0.4.0", digestB)
+	seen := &notices{}
+	h.u.Notify = seen.add
+
+	if _, err := h.run(t, true); err != nil {
+		t.Fatalf("check: %v", err)
+	}
+	if len(seen.got) != 0 {
+		t.Fatalf("a --check posted %+v", seen.got)
+	}
+}

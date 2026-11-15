@@ -140,18 +140,22 @@ func TestTimerDueUpdatesThenReadsHealth(t *testing.T) {
 			if body.updates != 1 {
 				t.Fatalf("updates = %d, want 1", body.updates)
 			}
-			// The update is the chart half, which reads health at its end; the
-			// bare reading a not-due wake makes is not run again here.
-			if body.healths != 0 {
-				t.Fatalf("health reads outside the update = %d, want 0", body.healths)
+			// Once, after the update, and only here: the chart half does not
+			// read health itself, so a wake cannot read it twice.
+			if body.healths != 1 {
+				t.Fatalf("health reads = %d, want 1", body.healths)
 			}
 		})
 	}
 }
 
-// TestTimerStopsWhenTheUpdateFails: an update that returns an error is the
-// wake's answer, and the health read does not paper over it.
-func TestTimerStopsWhenTheUpdateFails(t *testing.T) {
+// TestTimerReadsHealthEvenWhenTheUpdateFails: an update that returns an error
+// is still the wake's answer -- it exits 1 -- but the reading happens first.
+// A registry or release that failed is exactly when an app's readiness is worth
+// someone's attention, and a failed check leaves LastCheck unwritten, so the
+// next wake is due again within minutes: without this read a registry outage
+// would silence every health notice for as long as it lasts.
+func TestTimerReadsHealthEvenWhenTheUpdateFails(t *testing.T) {
 	state := &timerState{}
 	body := &timerBody{updateErr: errors.New("the registry is down")}
 	_, err := body.run(t, timerRun{
@@ -163,8 +167,8 @@ func TestTimerStopsWhenTheUpdateFails(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "the registry is down") {
 		t.Fatalf("run = %v, want the update's error", err)
 	}
-	if body.healths != 0 {
-		t.Fatal("a failed update still read health")
+	if body.updates != 1 || body.healths != 1 {
+		t.Fatalf("a failed due wake ran %d updates and %d health reads, want 1 and 1", body.updates, body.healths)
 	}
 }
 
