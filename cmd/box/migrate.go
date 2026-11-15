@@ -39,13 +39,18 @@ const migrateUsage = `usage: box migrate <command> [flags]
 
 commands:
   discover    read a source install and write the plan migrate applies; changes nothing
+  apply       adopt a source install into this seedbox from a plan
 
 box migrate discover --out <dir> [--from-dir <manifests>] [--kubeconfig <file>] [--namespace <ns> ...] [--root <dir>]
+box migrate apply <plan dir> [--source-root <dir>] [--grant <file>] [--values <file>] [--kubeconfig <file>] [--yes] [--plain] [--chart-repo <ref>] [--chart-version <tag>]
 `
 
-// migrateDiscoverCmd is the half that reads: the dispatch and the usage line
-// spell it once.
-const migrateDiscoverCmd = "discover"
+// The two halves, as names: the dispatch, the usage line and the messages they
+// print all spell them once.
+const (
+	migrateDiscoverCmd = "discover"
+	migrateApplyCmd    = "apply"
+)
 
 func runMigrate(ctx context.Context, args []string) {
 	if len(args) == 0 {
@@ -55,6 +60,8 @@ func runMigrate(ctx context.Context, args []string) {
 	switch args[0] {
 	case migrateDiscoverCmd:
 		runMigrateDiscover(ctx, args[1:])
+	case migrateApplyCmd:
+		runMigrateApply(ctx, args[1:])
 	default:
 		fmt.Fprintf(os.Stderr, "box: migrate has no command %q\n\n%s", args[0], migrateUsage)
 		os.Exit(2)
