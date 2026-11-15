@@ -745,6 +745,34 @@ func TestConfigXMLAddsMissingElements(t *testing.T) {
 	}
 }
 
+func TestConfigXMLTurnsTLSOff(t *testing.T) {
+	dir := t.TempDir()
+	newDB(t, filepath.Join(dir, "sonarr.db"), sonarrSchema()...)
+	writeFile(t, filepath.Join(dir, "config.xml"), "<Config>\n  <EnableSsl>True</EnableSsl>\n  <SslPort>9898</SslPort>\n</Config>")
+	in := input(t, dir, "sonarr", sonarrPlan)
+
+	rep, err := (rewriter{kind: kindSonarr}).Write(context.Background(), in)
+	if err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	conf := readFile(t, filepath.Join(dir, "config.xml"))
+	if !strings.Contains(conf, "<EnableSsl>False</EnableSsl>") || strings.Contains(conf, "<EnableSsl>True</EnableSsl>") {
+		t.Errorf("EnableSsl was not turned off:\n%s", conf)
+	}
+	if !strings.Contains(conf, "<SslPort>9898</SslPort>") {
+		t.Errorf("SslPort changed; only EnableSsl should:\n%s", conf)
+	}
+	found := false
+	for _, c := range rep.Changes {
+		if c.File == "config.xml" && strings.Contains(c.Where, "EnableSsl") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("the report does not name the EnableSsl change: %+v", rep.Changes)
+	}
+}
+
 func TestTornDatabaseRefused(t *testing.T) {
 	dir := t.TempDir()
 	writeFile(t, filepath.Join(dir, "sonarr.db"), "this is not a database")

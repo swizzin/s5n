@@ -39,11 +39,15 @@ func (a *analysis) configXML() error {
 	// The chart's port, bind address and URL base are the ones the app has to
 	// listen on: a source's OIDC or reverse-proxy address is gone, and the
 	// release's Service and probes assume these (docs/box.md, "Ports go to the
-	// chart's defaults").
+	// chart's defaults"). TLS ends at box's gateway and the probes speak plain
+	// HTTP to Port, so an app that served HTTPS itself is turned back to HTTP;
+	// its certificate paths are still rewritten below, and turning it on again
+	// is one setting.
 	for _, e := range []element{
 		{"BindAddress", "*", "bind address"},
 		{"Port", strconv.Itoa(ep.Port), "port"},
 		{"UrlBase", ep.URLBase, "url base"},
+		{"EnableSsl", "False", "tls"},
 	} {
 		want := xmlEscape(e.value)
 		if stored, ok := elementText(raw, e.name); ok && stored == want {
