@@ -41,6 +41,10 @@ import (
 
 func init() { rewrite.Register("plex", rewriter{}) }
 
+// NeedsRunner: Plex's database is written only through the `Plex SQLite` its
+// own image ships (see Input.Run), never through stock SQLite.
+func (rewriter) NeedsRunner() bool { return true }
+
 const (
 	// sqliteBin is Plex's own SQLite shell, beside the server binary in the
 	// pinned image (usr/lib/plexmediaserver/Plex SQLite).

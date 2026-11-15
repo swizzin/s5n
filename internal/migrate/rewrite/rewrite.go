@@ -174,6 +174,14 @@ type Rewriter interface {
 	Write(ctx context.Context, in Input) (Report, error)
 }
 
+// RunnerUser is a rewriter that can only work with Input.Run: its app keeps a
+// format only the app's own image may write. Apply asks before it stages
+// anything, so a run that cannot start images refuses up front instead of
+// stopping halfway through a Check, and apply never has to name the app.
+type RunnerUser interface {
+	NeedsRunner() bool
+}
+
 var registry = map[string]Rewriter{}
 
 // Register files a rewriter under a catalog app name ("sonarr", not

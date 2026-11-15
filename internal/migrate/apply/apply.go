@@ -368,7 +368,7 @@ func preflightApp(p *plan.Plan, env Env, st *State, name string) []string {
 		items = append(items, fmt.Sprintf("apps.%s: %s keeps its API key in its own config, and this run has no release Secret to keep that key in", name, catalog))
 	}
 	if NeedsRunner(catalog) && env.Run == nil {
-		items = append(items, fmt.Sprintf("apps.%s: rewriting Plex's database runs `Plex SQLite` from the pinned image, and this run has no way to start one", name))
+		items = append(items, fmt.Sprintf("apps.%s: %s's rewriter runs a tool from the app's own pinned image, and this run has no way to start one", name, catalog))
 	}
 	src := filepath.Join(env.SourceRoot, app.Config)
 	if !isDir(src) {
@@ -391,11 +391,18 @@ func preflightApp(p *plan.Plan, env Env, st *State, name string) []string {
 	return items
 }
 
-// NeedsRunner reports whether an app's rewriter can only work with a runner
-// (keys.go names the apps this package knows; this is the one whose format only
-// its own image may write, internal/migrate/plex). Preflight refuses a plan
-// naming it on a run that cannot start one, before anything is staged.
-func NeedsRunner(app string) bool { return app == appPlex }
+// NeedsRunner reports whether an app's rewriter can only work with a runner:
+// the rewriter says so itself (rewrite.RunnerUser), so this package names no
+// app. Preflight refuses a plan naming one on a run that cannot start images,
+// before anything is staged.
+func NeedsRunner(app string) bool {
+	r, ok := rewrite.For(app)
+	if !ok {
+		return false
+	}
+	u, ok := r.(rewrite.RunnerUser)
+	return ok && u.NeedsRunner()
+}
 
 // planApps is the plan's instance names, sorted.
 func planApps(p *plan.Plan) []string {
