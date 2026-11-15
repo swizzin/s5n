@@ -551,6 +551,21 @@ tls_serial() { # tls_serial <secret-name>
 # makes it.
 host_cert() { printf 's5n-tls-%s' "$(printf '%s' "$1" | tr '.' '-')"; }
 
+# retag_pinned <repository> <digest> <tag>: give the host's docker the image a
+# release pins (by digest) under another tag, for a release the e2e publishes
+# itself. It pulls by digest first because the image may never have been on
+# this host: the cluster pulled it into the node, not into the host's docker.
+retag_pinned() {
+  if ! docker pull -q "$1@$2" >/dev/null; then
+    echo "pulling $1@$2 failed"
+    return 1
+  fi
+  if ! docker tag "$1@$2" "$1:$3"; then
+    echo "tagging $1@$2 as $1:$3 failed"
+    return 1
+  fi
+}
+
 # A re-run of init on a box whose certificates are already issued is seconds of
 # work: every Certificate it re-applies is Ready for its current generation, so
 # every wait answers on its first read. A step that takes minutes instead means
@@ -4284,9 +4299,11 @@ EOF
   $KIND load docker-image --name "$CLUSTER" "${sonarr_repo}:${BROKEN_TAG}" >/dev/null
 
   # The app the same step moves and box must leave alone: prowlarr's own image,
-  # retagged, so the release names a tag this cluster already runs.
-  docker pull -q "${prowlarr_repo}:${prowlarr_tag}@${prowlarr_digest}" >/dev/null
-  docker tag "${prowlarr_repo}:${prowlarr_tag}" "${prowlarr_repo}:${MOVED_TAG}"
+  # retagged, so the release names a tag this cluster already runs. A pull by
+  # digest stores the image under its digest only, so the retag starts from the
+  # digest: the host's docker has never been told the tag, and on a clean runner
+  # nothing else put it there.
+  retag_pinned "$prowlarr_repo" "$prowlarr_digest" "$MOVED_TAG" || { fail=1; return 0; }
   $KIND load docker-image --name "$CLUSTER" "${prowlarr_repo}:${MOVED_TAG}" >/dev/null
 
   update_chart "$WORK/chart-b" "$release_b" sonarr "$BROKEN_TAG" prowlarr "$MOVED_TAG"
@@ -4400,7 +4417,7 @@ PY
   # another tag: what the release pins is no longer what the rollback avoided,
   # so the hold is over and the app moves with the release again.
   log "release C: sonarr's image moves again, so the hold lapses"
-  docker tag "${sonarr_repo}:${sonarr_tag}" "${sonarr_repo}:${RESTORED_TAG}"
+  retag_pinned "$sonarr_repo" "$sonarr_digest" "$RESTORED_TAG" || { fail=1; return 0; }
   $KIND load docker-image --name "$CLUSTER" "${sonarr_repo}:${RESTORED_TAG}" >/dev/null
   update_chart "$WORK/chart-c" "$release_c" sonarr "$RESTORED_TAG" prowlarr "$MOVED_TAG"
   if "$WORK/box" update --yes --chart-repo "$CHART_REPO" --record "$WORK/cluster.yaml" \

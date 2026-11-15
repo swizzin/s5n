@@ -326,9 +326,13 @@ cp -p internal/selfupdate/*.go "$sclone/internal/selfupdate/"
 
 # signcmd runs hack/sign where the release runs it: from the replica's root, so
 # the signing.pub it reads and the one a box built there would embed are the
-# same file.
+# same file. It is built once rather than run with `go run`: keygen's output is
+# what the rehearsal commits as the replica's key, and on a cold module cache
+# `go run` puts its own "go: downloading" lines into that output.
+signbin="$tmp/sign"
+( cd "$sclone" && go build -o "$signbin" ./hack/sign ) || { echo "building hack/sign failed" >&2; exit 1; }
 signcmd() {
-  ( cd "$sclone" && go run ./hack/sign "$@" )
+  ( cd "$sclone" && "$signbin" "$@" )
 }
 
 dist="$tmp/dist"
