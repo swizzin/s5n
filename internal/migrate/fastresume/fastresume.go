@@ -53,8 +53,11 @@ const resumeExt = ".fastresume"
 const dirPerm fs.FileMode = 0o775
 
 // pathKeys are the resume keys libtorrent and qBittorrent read as an absolute
-// filesystem path.
-var pathKeys = []string{"save_path", "qBt-savePath", "qBt-downloadPath"}
+// filesystem path. part_file_dir is libtorrent 2's own: qBittorrent leaves it
+// empty, but a resume file another client wrote can carry one, and an empty
+// value is left exactly as it is (libtorrent@v2.1.2:src/write_resume_data.cpp:109,
+// src/read_resume_data.cpp:288).
+var pathKeys = []string{"save_path", "qBt-savePath", "qBt-downloadPath", "part_file_dir"}
 
 // Table is the plan's per-app path rules: the app whose files are being
 // rewritten, and the path it stored, mapped to the one it will store. The
@@ -134,9 +137,19 @@ func RewriteDir(src, dst, app string, table Table, opts ...Option) (Report, erro
 // outFile is one file pass two writes: the source's bytes, or a resume file's
 // rewritten ones, under the mode the source file had.
 type outFile struct {
-	name string
-	data []byte
-	mode fs.FileMode
+	name    string
+	data    []byte
+	mode    fs.FileMode
+	changed bool // the bytes differ from what the source held
+}
+
+// resume is one resume file's rewrite: the bytes to write, what changed, and
+// the paths no rule covers. A file with gaps has no bytes: the run refuses
+// rather than write half a rewrite.
+type resume struct {
+	data     []byte
+	rewrites map[string]int
+	gaps     []plan.Uncovered
 }
 
 // read is pass one: every file in src is read, and every resume file decoded
@@ -175,6 +188,7 @@ func read(src, app string, table Table, rep *Report) ([]outFile, []plan.Uncovere
 			gaps = append(gaps, g...)
 			if len(g) == 0 {
 				out.data = data
+				out.changed = !bytes.Equal(data, raw)
 			}
 		} else {
 			// The torrent's metadata, and anything else the client keeps
@@ -191,38 +205,101 @@ func read(src, app string, table Table, rep *Report) ([]outFile, []plan.Uncovere
 // The gaps it finds are returned rather than an error: a file with two unmapped
 // paths is worth reporting once, with the rest of the directory.
 func rewriteFile(name string, raw []byte, app string, table Table, rep *Report) ([]byte, []plan.Uncovered, error) {
-	v, err := bencode.Decode(raw)
+	res, err := rewriteResume(name, raw, app, table)
 	if err != nil {
-		return nil, nil, fmt.Errorf("%s: %w", name, err)
+		return nil, nil, err
 	}
-	if v.Kind != bencode.Dict {
-		return nil, nil, fmt.Errorf("%s: is not a bencoded dictionary", name)
+	if len(res.gaps) > 0 {
+		return nil, res.gaps, nil
 	}
-	r := rewriter{app: app, file: name, table: table, rep: rep}
-	r.paths(&v)
-	if len(r.gaps) > 0 {
-		return nil, r.gaps, nil
+	for key, n := range res.rewrites {
+		rep.Rewrites[key] += n
 	}
-	out, err := bencode.Encode(v)
-	if err != nil {
-		return nil, nil, fmt.Errorf("%s: %w", name, err)
-	}
-	if bytes.Equal(out, raw) {
+	if bytes.Equal(res.data, raw) {
 		rep.Unchanged++
 		return raw, nil, nil
 	}
 	rep.Rewritten++
-	return out, nil, nil
+	return res.data, nil, nil
+}
+
+// rewriteResume is one resume file's rewrite, decoded in memory: the bytes it
+// would become, the keys it changed, and every path no rule covers. A file
+// with gaps has no bytes, because the run refuses rather than write half a
+// rewrite.
+func rewriteResume(name string, raw []byte, app string, table Table) (resume, error) {
+	v, err := bencode.Decode(raw)
+	if err != nil {
+		return resume{}, fmt.Errorf("%s: %w", name, err)
+	}
+	if v.Kind != bencode.Dict {
+		return resume{}, fmt.Errorf("%s: is not a bencoded dictionary", name)
+	}
+	r := rewriter{app: app, file: name, table: table, rewrites: make(map[string]int)}
+	r.paths(&v)
+	res := resume{rewrites: r.rewrites, gaps: r.gaps}
+	if len(r.gaps) > 0 {
+		return res, nil
+	}
+	out, err := bencode.Encode(v)
+	if err != nil {
+		return resume{}, fmt.Errorf("%s: %w", name, err)
+	}
+	res.data = out
+	return res, nil
+}
+
+// Scan reads a resume directory and reports what a rewrite would do, writing
+// nothing: it is the check pass, on the staged copy the app will see.
+//
+// Gaps come back as values rather than as a *plan.UncoveredError, because a
+// rewriter collects them with every other gap it finds before refusing once.
+func Scan(dir, app string, table Table) (Report, []plan.Uncovered, error) {
+	rep := Report{Rewrites: make(map[string]int)}
+	_, gaps, err := read(dir, app, table, &rep)
+	return rep, gaps, err
+}
+
+// Rewrite rewrites a resume directory in place: every file Scan decoded and
+// changed is written through atomicfile, and nothing else is touched. Files
+// that need no change keep their bytes and their mtime, so a second run writes
+// nothing at all.
+func Rewrite(dir, app string, table Table) (Report, []plan.Uncovered, error) {
+	rep := Report{Rewrites: make(map[string]int)}
+	files, gaps, err := read(dir, app, table, &rep)
+	if err != nil || len(gaps) > 0 {
+		return rep, gaps, err
+	}
+	for _, f := range files {
+		if !f.changed {
+			continue
+		}
+		if err := atomicfile.Write(filepath.Join(dir, f.name), f.data, f.mode); err != nil {
+			return rep, nil, err
+		}
+	}
+	return rep, nil, nil
+}
+
+// Blob rewrites one bencoded resume blob in memory, as the SQLite resume store
+// keeps it. name labels the blob where a gap is reported, as a resume file's
+// name does; changed is false when the bytes came back the same.
+func Blob(name string, raw []byte, app string, table Table) (data []byte, rewrites map[string]int, gaps []plan.Uncovered, err error) {
+	res, err := rewriteResume(name, raw, app, table)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	return res.data, res.rewrites, res.gaps, nil
 }
 
 // rewriter maps one resume file's stored paths, remembering the gaps so the
 // run can report all of them at once.
 type rewriter struct {
-	app   string
-	file  string
-	table Table
-	rep   *Report
-	gaps  []plan.Uncovered
+	app      string
+	file     string
+	table    Table
+	rewrites map[string]int
+	gaps     []plan.Uncovered
 }
 
 // paths rewrites every value in the file that holds a path. Everything else is
@@ -262,7 +339,7 @@ func (r *rewriter) value(key, label string, v *bencode.Value) {
 		return
 	}
 	v.Bytes = []byte(out)
-	r.rep.Rewrites[key]++
+	r.rewrites[key]++
 }
 
 // checkDst refuses a destination this run must not write into, before anything

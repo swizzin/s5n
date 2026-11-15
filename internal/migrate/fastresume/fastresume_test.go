@@ -10,6 +10,7 @@ import (
 	"syscall"
 	"testing"
 
+	"github.com/swizzin/s5n/internal/migrate/bencode"
 	"github.com/swizzin/s5n/internal/migrate/plan"
 )
 
@@ -516,4 +517,143 @@ func namesOf(files map[string][]byte) []string {
 		names = append(names, name)
 	}
 	return names
+}
+
+// TestScanWritesNothing is the check pass on the app's own directory: it reads
+// every resume file and leaves every byte where it was.
+func TestScanWritesNothing(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "resume")
+	writeFiles(t, dir, map[string][]byte{
+		"h1.fastresume": lt12Resume("/downloads/Movies", "/downloads/Movies", "/downloads/Movies"),
+		"h1.torrent":    []byte(dict("info", dict("name", bstr("Some.Film.2024.1080p")))),
+	})
+	before := snapshot(t, dir)
+
+	rep, gaps, err := Scan(dir, "qbittorrent", testTable(t))
+	if err != nil {
+		t.Fatalf("Scan: %v", err)
+	}
+	if len(gaps) != 0 {
+		t.Errorf("gaps = %v, want none", gaps)
+	}
+	if rep.Files != 2 || rep.Resume != 1 || rep.Rewritten != 1 {
+		t.Errorf("report = %+v, want one of two files rewritten", rep)
+	}
+	if !reflect.DeepEqual(snapshot(t, dir), before) {
+		t.Error("Scan wrote into the directory it only reads")
+	}
+}
+
+// TestRewriteInPlace rewrites the files that need it and leaves the rest
+// exactly as they were, including the one whose paths are already right.
+func TestRewriteInPlace(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "resume")
+	writeFiles(t, dir, map[string][]byte{
+		"h1.fastresume": lt12Resume("/downloads/Movies", "/downloads/Movies", "/downloads/Movies"),
+		"h2.fastresume": lt12Resume("/data/media/Series", "", "", "rel/name.mkv"),
+		"h1.torrent":    []byte(dict("info", dict("name", bstr("Some.Film.2024.1080p")))),
+	})
+	untouched := snapshot(t, dir)["h2.fastresume"]
+
+	// An identity rule is how a plan says "this tree stays where it is": that
+	// is what makes the second file's paths already right rather than a gap.
+	identity, err := plan.Parse([]byte(`version: 1
+apps:
+  qbittorrent:
+    source: qbittorrent
+    config: /srv/apps/qbittorrent
+    paths:
+      - from: /downloads
+        to: /data/downloads
+      - from: /data/media/Series
+        to: /data/media/Series
+`))
+	if err != nil {
+		t.Fatalf("parse the identity plan: %v", err)
+	}
+
+	rep, gaps, err := Rewrite(dir, "qbittorrent", identity)
+	if err != nil {
+		t.Fatalf("Rewrite: %v", err)
+	}
+	if len(gaps) != 0 {
+		t.Errorf("gaps = %v, want none", gaps)
+	}
+	if rep.Rewritten != 1 || rep.Unchanged != 1 {
+		t.Errorf("report = %+v, want one rewritten and one unchanged", rep)
+	}
+	got := snapshot(t, dir)
+	if !reflect.DeepEqual(got["h2.fastresume"], untouched) {
+		t.Error("a resume file whose paths were already right was rewritten")
+	}
+	want := lt12Resume("/data/downloads/Movies", "/data/downloads/Movies", "/data/downloads/Movies")
+	if !reflect.DeepEqual(got["h1.fastresume"], want) {
+		t.Errorf("h1.fastresume = %q, want %q", got["h1.fastresume"], want)
+	}
+}
+
+// TestRewriteInPlaceRefusesBeforeWriting is the other half of the promise: a
+// directory with one unmapped path is left whole, even the files it could have
+// rewritten.
+func TestRewriteInPlaceRefusesBeforeWriting(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "resume")
+	writeFiles(t, dir, map[string][]byte{
+		"h1.fastresume": lt12Resume("/downloads/Movies", "", ""),
+		"h2.fastresume": lt12Resume("/mnt/outside/Series", "", ""),
+	})
+	before := snapshot(t, dir)
+
+	_, gaps, err := Rewrite(dir, "qbittorrent", testTable(t))
+	if err != nil {
+		t.Fatalf("Rewrite: %v", err)
+	}
+	if len(gaps) != 1 || gaps[0].Path != "/mnt/outside/Series" {
+		t.Fatalf("gaps = %v, want the one outside path", gaps)
+	}
+	if !reflect.DeepEqual(snapshot(t, dir), before) {
+		t.Error("a refused rewrite changed the directory")
+	}
+}
+
+// TestBlob is the SQLite store's half: the same resume data, rewritten in
+// memory, with the key qBittorrent never writes but libtorrent 2 reads.
+func TestBlob(t *testing.T) {
+	raw := []byte(dict(
+		"file-format", bstr("libtorrent resume file"),
+		"file-version", "i1e",
+		"info-hash", bstr(infoHash),
+		"mapped_files", list(bstr("a/relative.name.mkv")),
+		"part_file_dir", bstr("/downloads/.parts"),
+		"qBt-category", bstr("Movies"),
+		"save_path", bstr("/downloads/Movies"),
+	))
+	out, rewrites, gaps, err := Blob("torrents.db", raw, "qbittorrent", testTable(t))
+	if err != nil {
+		t.Fatalf("Blob: %v", err)
+	}
+	if len(gaps) != 0 {
+		t.Errorf("gaps = %v, want none", gaps)
+	}
+	if rewrites["save_path"] != 1 || rewrites["part_file_dir"] != 1 || rewrites["mapped_files"] != 0 {
+		t.Errorf("rewrites = %v, want the two absolute keys and nothing relative", rewrites)
+	}
+	v, err := bencode.Decode(out)
+	if err != nil {
+		t.Fatalf("decoded %q: %v", out, err)
+	}
+	for key, want := range map[string]string{
+		"save_path":     "/data/downloads/Movies",
+		"part_file_dir": "/data/downloads/.parts",
+		"qBt-category":  "Movies",
+		"file-format":   "libtorrent resume file",
+	} {
+		field := v.Lookup(key)
+		if field == nil || string(field.Bytes) != want {
+			t.Errorf("%s = %v, want %q", key, field, want)
+		}
+	}
+	mapped := v.Lookup("mapped_files")
+	if mapped == nil || len(mapped.List) != 1 || string(mapped.List[0].Bytes) != "a/relative.name.mkv" {
+		t.Errorf("mapped_files = %v, want the relative name untouched", mapped)
+	}
 }
