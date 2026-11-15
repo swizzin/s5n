@@ -140,6 +140,34 @@ func TestCopyTreeRefusesWhatCanLeave(t *testing.T) {
 	}
 }
 
+// TestCopyTreeSkipsAKernelLink: the images point their log at the container's
+// own stdout, so every qBittorrent config directory a real host holds carries a
+// link into /proc. That is the pod's plumbing, not a file in the tree: the copy
+// leaves it out and the app writes it again on start. Refusing it made a real
+// qBittorrent install uncopyable, which is how this was found (hack/e2e-box.sh,
+// migrate).
+func TestCopyTreeSkipsAKernelLink(t *testing.T) {
+	src := t.TempDir()
+	writeFile(t, filepath.Join(src, "qBittorrent", "qBittorrent.conf"), "conf", 0o600)
+	logs := filepath.Join(src, "qBittorrent", "logs")
+	if err := os.MkdirAll(logs, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("/proc/self/fd/1", filepath.Join(logs, "qbittorrent.log")); err != nil {
+		t.Fatal(err)
+	}
+	dst := filepath.Join(t.TempDir(), "copy")
+	if _, err := copyTree(dst, src, os.Geteuid(), os.Getegid()); err != nil {
+		t.Fatalf("a config whose log is the container's stdout was refused: %v", err)
+	}
+	if _, err := os.Lstat(filepath.Join(dst, "qBittorrent", "logs", "qbittorrent.log")); !os.IsNotExist(err) {
+		t.Errorf("the copy carries the /proc link (err %v): the app writes it again on start", err)
+	}
+	if _, err := os.Stat(filepath.Join(dst, "qBittorrent", "qBittorrent.conf")); err != nil {
+		t.Errorf("the rest of the tree did not come across: %v", err)
+	}
+}
+
 // TestCopyTreeChownsToTheRelease: every entry belongs to the release's uid, not
 // to whoever ran box.
 func TestCopyTreeChownsToTheRelease(t *testing.T) {

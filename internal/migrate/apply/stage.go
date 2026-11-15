@@ -161,10 +161,20 @@ func copyFile(dst, src string, info fs.FileInfo, uid, gid int) (int64, error) {
 // points inside the directory is rewritten to the relative form, because the
 // tree it names is about to move and the absolute text would still name the
 // source host's path after the move.
+//
+// One link is not a path at all and is left out of the copy: the images point
+// their log at the container's own stdout, so a qBittorrent config directory
+// holds qBittorrent/logs/qbittorrent.log as a link to /proc/self/fd/1. /proc,
+// /dev and /sys are the pod's own kernel filesystems, never somewhere a config
+// tree keeps a file, and the app writes the link again on start. Refusing it
+// made every real qBittorrent install uncopyable (hack/e2e-box.sh, migrate).
 func copyLink(dst, src, root, rel string, uid, gid int) error {
 	target, err := os.Readlink(src)
 	if err != nil {
 		return err
+	}
+	if filepath.IsAbs(target) && kernelPath(target) {
+		return nil
 	}
 	if filepath.IsAbs(target) {
 		inside, err := filepath.Rel(root, filepath.Clean(target))
@@ -188,6 +198,18 @@ func copyLink(dst, src, root, rel string, uid, gid int) error {
 		return fmt.Errorf("own %s: %w", dst, err)
 	}
 	return nil
+}
+
+// kernelPath reports whether an absolute path is inside one of the kernel's own
+// filesystems: the process's plumbing, never a file a config tree holds.
+func kernelPath(p string) bool {
+	clean := filepath.Clean(p)
+	for _, root := range []string{"/proc", "/dev", "/sys"} {
+		if clean == root || strings.HasPrefix(clean, root+string(filepath.Separator)) {
+			return true
+		}
+	}
+	return false
 }
 
 // modeName names a file's type the way a refusal reads it.
