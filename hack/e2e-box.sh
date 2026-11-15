@@ -4696,9 +4696,17 @@ migrate_forward() { # migrate_forward <namespace> <svc/name|pod/name> <port>
 s = socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1]); s.close()')
   $K -n "$ns" port-forward "$target" "${MIGRATE_PF_PORT}:${port}" >"$log" 2>&1 &
   MIGRATE_PF_PID=$!
-  for i in $(seq 1 30); do
+  for i in $(seq 1 60); do
     if curl -sS -o /dev/null --max-time 2 "http://127.0.0.1:${MIGRATE_PF_PORT}/" 2>/dev/null; then
       return 0
+    fi
+    # kubectl port-forward exits on the first connection the pod refuses
+    # ("lost connection to pod"): an app still starting behind a Ready pod
+    # kills the tunnel, and polling a dead tunnel can never succeed. Open it
+    # again on the same port.
+    if ! kill -0 "$MIGRATE_PF_PID" 2>/dev/null; then
+      $K -n "$ns" port-forward "$target" "${MIGRATE_PF_PORT}:${port}" >>"$log" 2>&1 &
+      MIGRATE_PF_PID=$!
     fi
     sleep 1
   done
@@ -4759,6 +4767,13 @@ spec:
           ports:
             - name: http
               containerPort: ${MIGRATE_QBIT_PORT}
+          # Ready means listening: rollout status waits for it, so the seeding
+          # below never meets an app that has not opened its port yet.
+          readinessProbe:
+            tcpSocket:
+              port: http
+            periodSeconds: 2
+            failureThreshold: 150
           volumeMounts:
             - name: config
               mountPath: /config
@@ -4816,6 +4831,13 @@ spec:
           ports:
             - name: http
               containerPort: 8989
+          # Ready means listening: rollout status waits for it, so the seeding
+          # below never meets an app that has not opened its port yet.
+          readinessProbe:
+            tcpSocket:
+              port: http
+            periodSeconds: 2
+            failureThreshold: 150
           volumeMounts:
             - name: config
               mountPath: /config
@@ -4873,6 +4895,13 @@ spec:
           ports:
             - name: http
               containerPort: 7878
+          # Ready means listening: rollout status waits for it, so the seeding
+          # below never meets an app that has not opened its port yet.
+          readinessProbe:
+            tcpSocket:
+              port: http
+            periodSeconds: 2
+            failureThreshold: 150
           volumeMounts:
             - name: config
               mountPath: /config
