@@ -258,7 +258,7 @@ func TestDiscoverConfigMountPerApp(t *testing.T) {
 			{volume: "downloads", path: "/downloads", host: "/srv/library/Downloads"},
 		},
 	})
-	f.file(t, "/srv/apps/pbh/config/config.yml", "server:\n  port: 9898\n")
+	f.file(t, "/srv/apps/pbh/config/config.yml", "server:\n  http: 9898\n")
 
 	p, _ := f.discover(t)
 	seerr, ok := p.Apps["seerr"]
@@ -419,7 +419,7 @@ func TestDiscoverPorts(t *testing.T) {
 		{name: "a Tautulli config in the newer spelling", app: "tautulli", files: map[string]string{"config.ini": "[General]\nHTTP_PORT = 8182\n"}, want: 8182, ok: true},
 		{name: "qui's config.toml", app: "qui", files: map[string]string{"config.toml": "host = \"0.0.0.0\"\nport = 7476\n"}, want: 7476, ok: true},
 		{name: "autobrr's config.toml", app: "autobrr", files: map[string]string{"config.toml": "host = \"0.0.0.0\"\nport = 7474\n"}, want: 7474, ok: true},
-		{name: "PeerBanHelper's config.yml", app: "pbh", files: map[string]string{"config/config.yml": "server:\n  port: 9898\n  address: 0.0.0.0\n"}, want: 9898, ok: true},
+		{name: "PeerBanHelper's config.yml", app: "pbh", files: map[string]string{"config/config.yml": "server:\n  http: 9898\n  address: 0.0.0.0\n"}, want: 9898, ok: true},
 		{name: "Seerr's PORT", app: "seerr", env: map[string]string{"PORT": "5056"}, want: 5056, ok: true},
 		{name: "Seerr's default", app: "seerr", want: 5055, ok: true},
 		{name: "Plex's fixed port", app: "plex", want: 32400, ok: true},
@@ -460,6 +460,102 @@ func TestDiscoverPortFromThePod(t *testing.T) {
 	if len(rep.Notes) != 1 || !strings.Contains(rep.Notes[0], "pod's own") {
 		t.Fatalf("the fallback is not reported: %#v", rep.Notes)
 	}
+}
+
+// TestDiscoverPortFromThePodAndItsService: a pod's declared port can be stale --
+// a real source declared 5006 while the app served 9898, which its Service
+// forwarded to -- so a Service that selects only this app is evidence of the
+// port too, and the note says where each one came from.
+func TestDiscoverPortFromThePodAndItsService(t *testing.T) {
+	f := sourceInstall(t)
+	f.app(t, appSpec{
+		name: "tautulli", image: "linuxserver/tautulli:2.14.6", port: 5006,
+		mounts: []mount{
+			{volume: "config", path: "/config", host: "/srv/apps/tautulli"},
+			{volume: "media", path: "/media", host: "/srv/library/media"},
+		},
+	})
+	f.servicePorts(t, "tautulli-web", "media", "tautulli", servicePort{port: 9898, target: "9898"})
+	p, rep := f.discover(t)
+	if want := []int{5006, 9898}; !reflect.DeepEqual(p.Apps["tautulli"].Ports, want) {
+		t.Fatalf("tautulli ports = %#v, want %#v", p.Apps["tautulli"].Ports, want)
+	}
+	var note string
+	for _, n := range rep.Notes {
+		if strings.Contains(n, "tautulli keeps no port") {
+			note = n
+		}
+	}
+	if note == "" {
+		t.Fatalf("the fallback is not reported: %#v", rep.Notes)
+	}
+	for _, want := range []string{"pod's own (5006)", "tautulli-web.media 9898->9898"} {
+		if !strings.Contains(note, want) {
+			t.Errorf("the note does not say %q: %q", want, note)
+		}
+	}
+}
+
+// TestDiscoverSidecarContainer: the chart's pod carries the app and nothing
+// else, so a second container in a migrated app's pod -- a real source ran a
+// metrics exporter beside Plex -- is left behind and listed as its own outside
+// entry, with the image, rather than disappearing with the pod.
+func TestDiscoverSidecarContainer(t *testing.T) {
+	f := newFixture(t)
+	f.app(t, appSpec{
+		name: "qbittorrent", image: "ghcr.io/home-operations/qbittorrent:5.3.0", port: 8080,
+		mounts: []mount{
+			{volume: "config", path: "/config", host: "/srv/apps/qbittorrent"},
+			{volume: "downloads", path: "/downloads", host: "/srv/library/Downloads"},
+		},
+	})
+	f.file(t, "/srv/apps/qbittorrent/qBittorrent/qBittorrent.conf", "[BitTorrent]\nSession\\DefaultSavePath=/downloads\n")
+	f.object(t, "plex", `apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: plex
+  namespace: media
+spec:
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: plex
+    spec:
+      containers:
+        - name: plex
+          image: linuxserver/plex:1.41.5
+          ports:
+            - name: http
+              containerPort: 32400
+          volumeMounts:
+            - name: config
+              mountPath: /config
+            - name: media
+              mountPath: /media
+        - name: plex-exporter
+          image: docker.io/example/plex-exporter:1.2.3
+          ports:
+            - containerPort: 9000
+      volumes:
+        - name: config
+          hostPath: {path: /srv/apps/plex}
+        - name: media
+          hostPath: {path: /srv/library/media}
+`)
+	p, rep := f.discover(t)
+	if _, ok := p.Apps["plex"]; !ok {
+		t.Fatalf("the app's own container was not migrated: %#v", keys(p.Apps))
+	}
+	if want := []string{"media/plex/plex-exporter"}; !reflect.DeepEqual(p.Outside, want) {
+		t.Fatalf("outside = %#v, want %#v", p.Outside, want)
+	}
+	if len(rep.Skipped) != 1 || rep.Skipped[0].Workload != "media/plex/plex-exporter" {
+		t.Fatalf("Skipped = %#v", rep.Skipped)
+	}
+	if !strings.Contains(rep.Skipped[0].Why, "docker.io/example/plex-exporter:1.2.3") {
+		t.Fatalf("the skip does not name the image it dropped: %q", rep.Skipped[0].Why)
+	}
+	roundTrip(t, p)
 }
 
 // TestDiscoverNoArrNamesItsLibrary: with no Arr in the source, the library is the

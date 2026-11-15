@@ -113,7 +113,9 @@ func TestParseRefusesBadDataAndHosts(t *testing.T) {
 		{"app and leave", "hosts: [{host: c, app: q, leave: true}]\n", "exactly one of app and leave"},
 		{"neither app nor leave", "hosts: [{host: c}]\n", "exactly one of app and leave"},
 		{"unknown app", "hosts: [{host: c, app: nope}]\n", `app "nope" is not in apps`},
-		{"outside without a namespace", "outside: [unifi]\n", `outside: "unifi" is not <namespace>/<name>`},
+		{"outside without a namespace", "outside: [unifi]\n", `outside: "unifi" is not <namespace>/<name> or <namespace>/<name>/<container>`},
+		{"outside with an empty container", "outside: [media/plex/]\n", "outside:"},
+		{"outside with too many parts", "outside: [media/plex/exporter/extra]\n", "outside:"},
 		{"bad host port", "hosts: [{host: c, port: 70000, leave: true}]\n", "port 70000"},
 	}
 	for _, tt := range tests {
@@ -126,5 +128,17 @@ func TestParseRefusesBadDataAndHosts(t *testing.T) {
 	}
 	if _, err := Parse([]byte(base + "    ports: [0]\n")); err == nil || !strings.Contains(err.Error(), "port 0 is not a port") {
 		t.Errorf("app port 0: error = %v", err)
+	}
+}
+
+// TestOutsideNamesWorkloadsAndContainers: an outside entry is a workload, or one
+// container of one -- the sidecar in a catalog app's pod that the chart's pod
+// does not carry -- and both read back from the file.
+func TestOutsideNamesWorkloadsAndContainers(t *testing.T) {
+	p := mustParse(t, "version: 1\napps:\n  q:\n    source: q\n    config: /srv/q\n"+
+		"outside: [media/gluetun, media/plex/plex-exporter]\n")
+	want := []string{"media/gluetun", "media/plex/plex-exporter"}
+	if len(p.Outside) != len(want) || p.Outside[0] != want[0] || p.Outside[1] != want[1] {
+		t.Fatalf("Outside = %v, want %v", p.Outside, want)
 	}
 }

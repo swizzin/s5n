@@ -40,8 +40,10 @@ type Plan struct {
 	// is not a localhost address (those are resolved through Apps' ports).
 	Hosts []HostRule `yaml:"hosts,omitempty"`
 	// Outside are the source's workloads that are not catalog apps, as
-	// <namespace>/<name>. migrate never touches them; they are listed so the
-	// operator sees what has to come back by hand.
+	// <namespace>/<name>, and the containers of a migrated app's pod that the
+	// chart's pod does not carry, as <namespace>/<name>/<container>. migrate
+	// never touches them; they are listed so the operator sees what has to come
+	// back by hand.
 	Outside []string `yaml:"outside,omitempty"`
 }
 
@@ -158,8 +160,12 @@ func (p *Plan) check() []string {
 		p.Apps[name] = app
 	}
 	for _, o := range p.Outside {
-		if ns, name, ok := strings.Cut(o, "/"); !ok || ns == "" || name == "" || strings.Contains(name, "/") {
-			problems = append(problems, fmt.Sprintf("outside: %q is not <namespace>/<name>", o))
+		parts := strings.Split(o, "/")
+		// An outside entry is a workload, or one container of a workload: a
+		// pod a catalog app ran beside a sidecar the chart's pod does not
+		// carry. Nothing else is a thing an operator can bring back by hand.
+		if len(parts) < 2 || len(parts) > 3 || parts[0] == "" || parts[1] == "" || (len(parts) == 3 && parts[2] == "") {
+			problems = append(problems, fmt.Sprintf("outside: %q is not <namespace>/<name> or <namespace>/<name>/<container>", o))
 		}
 	}
 	problems = append(problems, p.checkData()...)

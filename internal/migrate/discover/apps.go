@@ -166,17 +166,73 @@ func (d *discovery) readApp(in *instance) error {
 		return fmt.Errorf("workload %s: %w", workloadID(in.wl), err)
 	}
 	if !ok {
-		ports := dedupe(in.container.Ports)
+		// The pod's own declaration is the weaker answer, and it can be stale:
+		// a source declared 5006 while the app served 9898 and its Service
+		// forwarded there. A Service that selects only this app forwards to a
+		// port the app itself listens behind, so its target port is evidence of
+		// the app's port rather than of the pod spec's age.
+		pod := dedupe(in.container.Ports)
+		fromServices, services := d.selectingTargets(in)
+		ports := dedupe(append(append([]int(nil), pod...), fromServices...))
 		if len(ports) == 0 {
-			return fmt.Errorf("workload %s: neither %s nor the container says which port it listens on, and a localhost address another app stored can only be resolved by its port",
+			return fmt.Errorf("workload %s: neither %s, the container, nor a Service that selects only it says which port it listens on, and a localhost address another app stored can only be resolved by its port",
 				workloadID(in.wl), in.app)
 		}
 		in.ports = ports
-		d.note("%s keeps no port in its config, so its ports are the pod's own (%s)", in.name, joinInts(ports))
+		switch {
+		case len(services) == 0:
+			d.note("%s keeps no port in its config, so its ports are the pod's own (%s)", in.name, joinInts(pod))
+		case len(pod) == 0:
+			d.note("%s keeps no port in its config, so its ports are the target ports of the Services that select only it (%s)",
+				in.name, strings.Join(services, ", "))
+		default:
+			d.note("%s keeps no port in its config, so its ports are the pod's own (%s) and the target ports of the Services that select only it (%s)",
+				in.name, joinInts(pod), strings.Join(services, ", "))
+		}
 		return nil
 	}
 	in.ports = []int{port}
 	return nil
+}
+
+// selectingTargets is what a Service adds to an app whose config names no port:
+// the container ports the Services that select only it forward to, and each
+// Service's own description for the note.
+//
+// Only a Service that selects this app and no other one counts. A Service that
+// selects two apps is an address neither can claim -- the host rules leave it
+// unclassified for the same reason -- and its port would be a guess about which
+// app serves it.
+func (d *discovery) selectingTargets(in *instance) (ports []int, from []string) {
+	for _, svc := range d.svcs {
+		if svc.Namespace != in.wl.Namespace || !d.selectsOnly(svc, in) {
+			continue
+		}
+		for _, sp := range svc.Ports {
+			target, ok := sp.target(in.wl)
+			if !ok || target < 1 {
+				continue
+			}
+			ports = append(ports, target)
+			from = append(from, fmt.Sprintf("%s.%s %s", svc.Name, svc.Namespace, sp))
+		}
+	}
+	sort.Strings(from)
+	return ports, from
+}
+
+// selectsOnly reports whether a Service's selector matches this app's pod and no
+// other instance's.
+func (d *discovery) selectsOnly(svc Service, in *instance) bool {
+	if !selects(svc.Selector, in.wl.Labels) {
+		return false
+	}
+	for _, other := range d.instances {
+		if other != in && selects(svc.Selector, other.wl.Labels) {
+			return false
+		}
+	}
+	return true
 }
 
 // portReader reads one app's listen port out of its own config, as the app
@@ -256,14 +312,16 @@ func tomlConfigPort(_ string, fsys fs.FS, dir string, _ map[string]string) (int,
 	return tomlPort(data, "port")
 }
 
-// peerBanHelperPort is PeerBanHelper's WebUI port, under `server:` in
-// config.yml.
+// peerBanHelperPort is PeerBanHelper's WebUI port, `server.http` in config.yml.
+// The key is `http`, not `port`: the template's block names the listen port
+// there (src/main/resources/config.yml at v9.5.4), and a reader looking for
+// `port` would take the pod's stale declaration instead.
 func peerBanHelperPort(_ string, fsys fs.FS, dir string, _ map[string]string) (int, bool, error) {
 	data, ok, err := readConfigFile(fsys, dir, "config/config.yml")
 	if err != nil || !ok {
 		return 0, false, err
 	}
-	return yamlBlockPort(data, "server", "port")
+	return yamlBlockPort(data, "server", "http")
 }
 
 // seerrPort is Seerr's listen port: PORT, or its default.

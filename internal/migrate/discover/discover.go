@@ -163,8 +163,9 @@ type Options struct {
 // Report is everything the operator should see that the plan does not hold.
 type Report struct {
 	// Skipped are the source's workloads that are not in the plan, with the
-	// reason. They are also the plan's Outside list, which is what apply
-	// prints; the reason is why discovery refused them.
+	// reason, and the containers of a migrated app's pod that the chart's pod
+	// does not carry. They are also the plan's Outside list, which is what
+	// apply prints; the reason is why discovery refused them.
 	Skipped []Skipped
 	// Ignored are the mounts discovery did not turn into a path rule.
 	Ignored []Ignored
@@ -177,9 +178,10 @@ type Report struct {
 	Raw map[string][]byte
 }
 
-// Skipped is one source workload that is not migrated.
+// Skipped is one source workload that is not migrated, or one container of a
+// migrated app's pod that the chart's pod does not carry.
 type Skipped struct {
-	Workload string // <namespace>/<name>
+	Workload string // <namespace>/<name>, or <namespace>/<name>/<container>
 	Why      string
 }
 
@@ -196,8 +198,13 @@ type Ignored struct {
 // discovery is one run's state. The port of every method is that the plan, the
 // report and the refusals are built from the same read of one source.
 type discovery struct {
-	opt       Options
-	rep       Report
+	opt Options
+	rep Report
+	// svcs is the source's Services, kept for the one fallback that needs them:
+	// an app whose config names no port takes the ports a Service that selects
+	// only it forwards to.
+	svcs []Service
+
 	instances []*instance
 }
 
@@ -226,6 +233,7 @@ func Discover(ctx context.Context, src Source, opt Options) (*plan.Plan, Report,
 	if err != nil {
 		return nil, d.rep, fmt.Errorf("read the source's services: %w", err)
 	}
+	d.svcs = svcs
 	if err := d.classify(wls); err != nil {
 		return nil, d.rep, err
 	}
@@ -295,7 +303,9 @@ type instance struct {
 // classify decides which workloads are catalog apps, and what box will call
 // each one. Workloads it does not migrate go to the report and the plan's
 // Outside list: an install commonly runs something box has no app for, and
-// migrating half of it silently is the failure this list exists to prevent.
+// migrating half of it silently is the failure this list exists to prevent. The
+// containers of a migrated app's own pod that the chart's pod cannot carry are
+// listed there too, for the same reason.
 func (d *discovery) classify(wls []Workload) error {
 	byName := make(map[string]*instance, len(wls))
 	for _, wl := range wls {
@@ -315,6 +325,7 @@ func (d *discovery) classify(wls []Workload) error {
 				in.name, workloadID(prev.wl), workloadID(wl))
 		}
 		byName[in.name] = in
+		d.sidecars(wl, in)
 	}
 	for _, in := range byName {
 		d.instances = append(d.instances, in)
@@ -360,6 +371,24 @@ func (wl Workload) catalogContainer() (app string, c Container, other string, ok
 		}
 	}
 	return app, c, "", ok
+}
+
+// sidecars records the pod's other containers. The chart writes one pod spec and
+// it carries the app alone, so a second container -- a real source ran a metrics
+// exporter beside Plex -- has no home after the migration. It is listed as
+// <namespace>/<workload>/<container> so the operator can find what has to come
+// back by hand, and the reason names the image discovery dropped.
+func (d *discovery) sidecars(wl Workload, in *instance) {
+	for _, c := range wl.Containers {
+		if c.Name == in.container.Name {
+			continue
+		}
+		d.rep.Skipped = append(d.rep.Skipped, Skipped{
+			Workload: workloadID(wl) + "/" + c.Name,
+			Why: fmt.Sprintf("its pod's %s container (image %s) is not the app, and the chart's pod carries only %s",
+				c.Name, c.Image, in.app),
+		})
+	}
 }
 
 // workloadID is a workload as a message names it.
