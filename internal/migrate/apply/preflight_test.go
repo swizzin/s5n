@@ -83,6 +83,15 @@ func TestPreflightRefusals(t *testing.T) {
 			want: "is not empty",
 		},
 		{
+			// A file anywhere under the target is the operator's data, however
+			// deep: the box's own directories hold no files at all.
+			name: "the rename target holds a file below a category directory",
+			mutate: func(f *fixture, env *Env) {
+				writeFile(t, filepath.Join(f.dataRoot, "downloads", "movies", "archived.mkv"), "x", 0o600)
+			},
+			want: "is not empty",
+		},
+		{
 			name: "the downloads directory the plan names is gone",
 			mutate: func(f *fixture, env *Env) {
 				if err := os.RemoveAll(filepath.Join(f.dataRoot, "Downloads")); err != nil {
@@ -109,6 +118,24 @@ func TestPreflightRefusals(t *testing.T) {
 			// A preflight writes nothing, and it is called before staging.
 			sameTree(t, "the host", before, hashTree(t, f.root))
 		})
+	}
+}
+
+// TestPreflightAcceptsTheBoxsOwnRenameTarget: the release's wiring Job makes
+// /data/downloads/<category> for every Arr the seedbox runs, so a box that was
+// installed with any Arr on hands migrate a target that exists and holds only
+// empty directories. That is not the operator's data to move: the rename
+// removes it and proceeds.
+func TestPreflightAcceptsTheBoxsOwnRenameTarget(t *testing.T) {
+	f := newFixture(t)
+	for _, dir := range []string{"downloads/movies", "downloads/tv/subdir"} {
+		if err := os.MkdirAll(filepath.Join(f.dataRoot, dir), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	p, raw := f.plan()
+	if err := Preflight(p, raw, f.env(&fakeValues{}, &fakeOwned{}, yes(t, &Summary{}))); err != nil {
+		t.Fatalf("preflight refused the box's own empty category directories: %v", err)
 	}
 }
 

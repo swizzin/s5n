@@ -342,7 +342,11 @@ func preflightData(p *plan.Plan, env Env, st *State) []string {
 		if pair[0] == pair[1] || !exists(to) {
 			continue
 		}
-		if empty, err := emptyDir(to); err != nil || !empty {
+		// The box's own /data/{downloads,media}/<category> directories are
+		// empty, and the rename removes them: only a target with a file
+		// anywhere under it is the operator's data, and moving that by hand is
+		// the refusal's business.
+		if empty, err := emptyTree(to); err != nil || !empty {
 			items = append(items, fmt.Sprintf("data: %s already exists and is not empty, and %s has to become %s: move its contents into %s by hand first",
 				to, pair[0], pair[1], from))
 		}
@@ -652,14 +656,18 @@ func (m *migration) renameData() error {
 			continue
 		}
 		if exists(to) {
-			empty, err := emptyDir(to)
+			// A box's own release makes /data/downloads/<category> for every
+			// Arr it runs, so a target of empty directories is the box's, not
+			// the operator's data: it goes, and the source is renamed into the
+			// name. A target with a file anywhere under it stops the run.
+			empty, err := emptyTree(to)
 			if err != nil {
 				return fmt.Errorf("inspect %s: %w", to, err)
 			}
 			if !empty {
 				return fmt.Errorf("%s appeared while this migration ran and is not empty; what %s has to become is a rename of it, so move that directory's contents into %s by hand", to, pair[0], from)
 			}
-			if err := os.Remove(to); err != nil {
+			if err := removeEmptyTree(to); err != nil {
 				return fmt.Errorf("remove the empty %s: %w", to, err)
 			}
 		}

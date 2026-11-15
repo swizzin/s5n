@@ -241,6 +241,54 @@ func emptyDir(path string) (bool, error) {
 	return len(entries) == 0, nil
 }
 
+// emptyTree reports whether path holds nothing but directories, recursively: no
+// file, symlink or special file anywhere under it. That is a rename target this
+// box made itself -- the wiring Job creates /data/{downloads,media}/<category>
+// for every Arr the release runs (internal/wiring/dirs.go) -- and a target with
+// nothing in it is one the rename may remove. A path that is not there is not
+// empty, like emptyDir: the caller then has nothing to remove and renames into
+// the name.
+func emptyTree(path string) (bool, error) {
+	entries, err := os.ReadDir(path)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return false, nil
+		}
+		return false, err
+	}
+	for _, e := range entries {
+		if !e.IsDir() {
+			return false, nil
+		}
+		ok, err := emptyTree(filepath.Join(path, e.Name()))
+		if err != nil || !ok {
+			return false, err
+		}
+	}
+	return true, nil
+}
+
+// removeEmptyTree removes path and every empty directory under it, and never a
+// file: each removal is os.Remove, which fails on a directory that stopped being
+// empty after emptyTree proved it, so a file that appears in between is an error
+// rather than something deleted. Only an emptyTree caller may pass its answer
+// here.
+func removeEmptyTree(path string) error {
+	entries, err := os.ReadDir(path)
+	if err != nil {
+		return err
+	}
+	for _, e := range entries {
+		if !e.IsDir() {
+			return fmt.Errorf("%s holds %s, which is not a directory", filepath.Join(path, e.Name()), e.Name())
+		}
+		if err := removeEmptyTree(filepath.Join(path, e.Name())); err != nil {
+			return err
+		}
+	}
+	return os.Remove(path)
+}
+
 // isDir reports whether path is a directory, without an error: callers are
 // asking a yes/no question about a path the operator named.
 func isDir(path string) bool {

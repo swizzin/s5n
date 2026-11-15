@@ -278,6 +278,41 @@ func TestRunFinishesAHalfDonePlan(t *testing.T) {
 	}
 }
 
+// TestRunRenamesOverTheBoxsOwnEmptyDirectories is the target a real box hands
+// migrate: the release's wiring Job has already made /data/downloads/<category>
+// for the Arr it runs, so the rename's target is a tree of empty directories. It
+// is not the operator's data -- the rename removes it and renames the source
+// into the name, keeping the source's files as they were.
+func TestRunRenamesOverTheBoxsOwnEmptyDirectories(t *testing.T) {
+	f := newFixture(t)
+	for _, dir := range []string{"downloads/movies", "downloads/tv/subdir"} {
+		if err := os.MkdirAll(filepath.Join(f.dataRoot, dir), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// A download the source still holds: what the rename has to keep.
+	writeFile(t, filepath.Join(f.dataRoot, "Downloads", "Example.Show.S01E01.mkv"), "synthetic episode", 0o644)
+
+	p, raw := f.plan()
+	res, err := Run(context.Background(), p, raw, f.env(&fakeValues{}, &fakeOwned{}, yes(t, &Summary{})))
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if got := strings.Join(res.Renamed, ","); got != "Downloads to downloads" {
+		t.Errorf("renamed %q, want Downloads to downloads", got)
+	}
+	if got := f.readFile("data/downloads/Example.Show.S01E01.mkv"); got != "synthetic episode" {
+		t.Errorf("the renamed tree holds %q, want the source's download", got)
+	}
+	// The box's empty categories went with the target they were in, rather than
+	// being merged into the source's tree.
+	for _, dir := range []string{"downloads/movies", "downloads/tv"} {
+		if exists(filepath.Join(f.dataRoot, dir)) {
+			t.Errorf("%s/downloads/%s survived the rename: the box's empty tree is the target, not its content", f.dataRoot, strings.TrimPrefix(dir, "downloads/"))
+		}
+	}
+}
+
 // TestRunWritesNothingOutsideStagingWhenCheckBlocks pins the promise the whole
 // order exists for: an uncovered path stops the run before its first write.
 func TestRunWritesNothingOutsideStagingWhenCheckBlocks(t *testing.T) {
