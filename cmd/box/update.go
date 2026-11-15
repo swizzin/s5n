@@ -8,6 +8,7 @@ import (
 	"os"
 
 	"github.com/swizzin/s5n/internal/bootstrap"
+	"github.com/swizzin/s5n/internal/hostconf"
 	"github.com/swizzin/s5n/internal/release"
 	"github.com/swizzin/s5n/internal/say"
 	"github.com/swizzin/s5n/internal/seedbox"
@@ -24,6 +25,7 @@ type updateFlags struct {
 	*applyFlags
 	check       *bool
 	plain       *bool
+	timer       *bool
 	record      *string
 	holdBox     *bool
 	rollbackBox *bool
@@ -34,6 +36,7 @@ func addUpdateFlags(fs *flag.FlagSet) *updateFlags {
 		applyFlags: addApplyFlags(fs),
 		check:      fs.Bool("check", false, "show what the box would update to, and write nothing"),
 		plain:      fs.Bool("plain", false, "ask with plain line prompts, even on a terminal (for a flaky terminal or a screen reader)"),
+		timer:      fs.Bool("timer", false, "the run the update timer makes: check when root's config says one is due, and post notices"),
 		// The record is bootstrap's -- the cluster decision update reads and
 		// writes its own state beside -- so it is named the same way and
 		// defaults to the same path. apply and rollback take no such flag:
@@ -169,9 +172,52 @@ func runUpdate(ctx context.Context, args []string) {
 		os.Exit(2)
 	}
 	o.pathsInNode = pathsInNode
+	if *o.timer && *o.check {
+		// A timer run is the unattended update itself; a check writes nothing
+		// and would leave the timer never moving a box.
+		fmt.Fprintln(os.Stderr, "box: --timer runs the update the timer would, so it cannot be a --check")
+		os.Exit(2)
+	}
 
-	out := newOutput(terminalSet(*o.plain), *o.yes, startupTheme(*o.valuesPath))
+	yes, plain := o.unattended()
+	out := newOutput(terminalSet(plain), yes, startupTheme(*o.valuesPath))
 	defer out.Close()
+
+	// Root's config is read by every update, not only the timer's: it says
+	// whether box takes a new box, and a file that does not parse is a refusal
+	// naming the line -- a setting silently ignored is a box that quietly
+	// stopped updating.
+	conf, _, err := hostconf.Load(hostconf.Path(*o.record))
+	if err != nil {
+		out.Error(err)
+		os.Exit(1)
+	}
+	if conf.HoldBox {
+		// The same hold as the flag: one decision in one place, so the timer
+		// and a hand run agree about the box's own version.
+		*o.holdBox = true
+	}
+	if *o.timer {
+		t := timerRun{
+			Conf:  conf,
+			Path:  hostconf.Path(*o.record),
+			State: update.FileState{Path: o.statePath()},
+			Out:   out,
+			Update: func(ctx context.Context) error {
+				return updateRun{
+					Box:    newBoxUpdate(out, os.Args[1:], os.Environ(), o.selfUpdateOptions(boxReleases)),
+					Charts: func(ctx context.Context) { updateCharts(ctx, o, out, resolver) },
+				}.run(ctx)
+			},
+		}
+		// The self-update's own --rollback-box is not a timer decision: a timer
+		// never puts the previous box back, and the flag is root's hand.
+		if err := t.run(ctx); err != nil {
+			out.Error(err)
+			os.Exit(1)
+		}
+		return
+	}
 
 	// box's own replacement comes before any chart work, so the release the
 	// update settles on is one the box that installs it meets min-box for. It
@@ -200,6 +246,7 @@ func updateCharts(ctx context.Context, o *updateFlags, out say.Reporter, resolve
 		fmt.Fprintln(os.Stderr, "box: no values file: pass --values")
 		os.Exit(2)
 	}
+	yes, _ := o.unattended()
 
 	// The cluster decision belongs to `box bootstrap`; update reuses it the
 	// same way apply does and never probes a cluster of its own.
@@ -281,7 +328,7 @@ func updateCharts(ctx context.Context, o *updateFlags, out say.Reporter, resolve
 			return applyThenSettle(ctx, applierFor(opts.SkipHooks).Apply, opts, holds)
 		},
 		Holds:      update.FileHolds{},
-		Confirm:    confirmer(out, *o.yes),
+		Confirm:    confirmer(out, yes),
 		State:      update.FileState{Path: o.statePath()},
 		BoxVersion: version,
 		Say:        out,

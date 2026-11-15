@@ -97,3 +97,51 @@ func TestFilePathIsBesideTheClusterRecord(t *testing.T) {
 		t.Fatalf("FilePath = %q, want %q", got, want)
 	}
 }
+
+// TestFileStateRoundTripsHealth: the timer stores each app's readiness so the
+// next wake can tell a flip from a steady state, and the file is read strictly,
+// so the field has to survive a write and a read.
+func TestFileStateRoundTripsHealth(t *testing.T) {
+	path := filepath.Join(t.TempDir(), FileName)
+	store := FileState{Path: path}
+	want := State{Health: map[string]AppHealth{
+		"sonarr": {Ready: true},
+		"radarr": {Ready: false, Reason: "restarting, 4 restarts"},
+	}}
+	if err := store.Save(want); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	got, err := store.Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if !reflect.DeepEqual(got.Health, want.Health) {
+		t.Fatalf("Health = %+v, want %+v", got.Health, want.Health)
+	}
+}
+
+// TestStateDue: the timer wakes every fifteen minutes and box decides whether a
+// check is due, so this is the whole of "how often does it ask the registry".
+func TestStateDue(t *testing.T) {
+	at := time.Date(2026, 11, 15, 3, 12, 0, 0, time.UTC)
+	for _, c := range []struct {
+		name     string
+		last     time.Time
+		now      time.Time
+		interval time.Duration
+		want     bool
+	}{
+		{"never checked", time.Time{}, at, time.Hour, true},
+		{"half an interval later", at, at.Add(30 * time.Minute), time.Hour, false},
+		{"exactly an interval later", at, at.Add(time.Hour), time.Hour, true},
+		{"overdue", at, at.Add(90 * time.Minute), time.Hour, true},
+		{"a clock that went backwards is not due yet", at, at.Add(-time.Hour), time.Hour, false},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			state := State{LastCheck: c.last}
+			if got := state.Due(c.now, c.interval); got != c.want {
+				t.Fatalf("Due(%v, %v) = %v, want %v", c.now, c.interval, got, c.want)
+			}
+		})
+	}
+}

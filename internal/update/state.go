@@ -51,6 +51,30 @@ type State struct {
 	// the release it reached. `--chart-version` naming one is the operator's
 	// override.
 	Failed []string `json:"failed,omitempty"`
+	// Health is each app's readiness as the timer last read it, keyed by the
+	// app key. A notice is posted when an app's Ready flips against this map,
+	// either way; a reason that changed alone is not a change. The first read
+	// on a box that stores none records it silently, so a box's first wake is
+	// not a page about every app it has.
+	Health map[string]AppHealth `json:"health,omitempty"`
+}
+
+// AppHealth is one app's readiness: Ready, and a short reason when it is not
+// ("restarting, 4 restarts", "not ready"), which is what a notice says instead
+// of a log.
+type AppHealth struct {
+	Ready  bool   `json:"ready"`
+	Reason string `json:"reason,omitempty"`
+}
+
+// Due says whether a wake of the timer has a check to make: a box that has never
+// checked, or one whose last check is a whole interval old. now is the caller's
+// clock, so the answer is tested without waiting.
+func (s State) Due(now time.Time, interval time.Duration) bool {
+	if s.LastCheck.IsZero() || interval <= 0 {
+		return true
+	}
+	return !now.Before(s.LastCheck.Add(interval))
 }
 
 // StepRecord is one attempted step, as `box status` shows it: the versions it
