@@ -62,6 +62,11 @@ func TestTableMatchesTheChart(t *testing.T) {
 		if !strings.Contains(string(workloads), mount) {
 			t.Errorf("%s: discovery reads its config from %s, which the chart does not mount", name, info.config[0])
 		}
+		for _, dir := range info.scratch {
+			if !strings.Contains(string(workloads), "mountPath: "+dir+"\n") {
+				t.Errorf("%s: discovery maps %s onto itself as the chart's scratch directory, which the chart does not mount", name, dir)
+			}
+		}
 	}
 	for name := range catalogApps {
 		if _, ok := catalog.Apps[name]; !ok {

@@ -43,6 +43,11 @@ type appInfo struct {
 	config []string
 	// port reads the port the app listened on from its own config.
 	port portReader
+	// scratch lists the container directories the chart gives the app as
+	// scratch space (an emptyDir), which exist at the same path on the box
+	// whatever the source mounted there. A path the app stored under one is as
+	// good after the move, so discovery maps each onto itself.
+	scratch []string
 	// aliases are the image repository names the same app answers to after its
 	// upstream renamed them, so a source install still carrying the old name is
 	// the app it is rather than a workload box has no use for.
@@ -55,8 +60,10 @@ var catalogApps = map[string]appInfo{
 	"sonarr":      {instances: true, library: true, config: []string{configPath}, port: arrPort},
 	"radarr":      {instances: true, library: true, config: []string{configPath}, port: arrPort},
 	"prowlarr":    {config: []string{configPath}, port: arrPort},
-	"plex":        {config: []string{configPath}, port: plexPort},
-	"tautulli":    {config: []string{configPath}, port: tautulliPort},
+	// Plex's images write the transcoder's directory into Preferences.xml as
+	// /transcode, which the chart mounts as an emptyDir.
+	"plex":     {config: []string{configPath}, port: plexPort, scratch: []string{"/transcode"}},
+	"tautulli": {config: []string{configPath}, port: tautulliPort},
 	// Seerr's images default CONFIG_DIRECTORY to /app/config, and the chart
 	// mounts its claim there (the one app whose config is not /config); the
 	// deployments Seerr documents set it to /config.

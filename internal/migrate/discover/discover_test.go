@@ -124,6 +124,9 @@ func TestDiscoverTwoArrs(t *testing.T) {
 				Paths: []plan.PathRule{
 					{From: "/config", To: "/config"},
 					{From: "/media", To: "/data/media"},
+					// The source's emptyDir is scratch, and the release
+					// mounts the same /transcode.
+					{From: "/transcode", To: "/transcode"},
 				},
 			},
 		},

@@ -87,6 +87,16 @@ func (d *discovery) pathRules(in *instance, data *plan.Data) []plan.PathRule {
 			rules = append(rules, r)
 		}
 	}
+	// The release mounts the app's scratch directories at the same paths, so a
+	// path the app stored under one (Plex's transcoder directory) is a rule onto
+	// itself, not a gap the operator has to settle. A source that kept data
+	// there under the data root already has its rule above, and that one wins.
+	for _, dir := range in.info.scratch {
+		if !seen[dir] {
+			seen[dir] = true
+			rules = append(rules, plan.PathRule{From: dir, To: dir})
+		}
+	}
 	return rules
 }
 
