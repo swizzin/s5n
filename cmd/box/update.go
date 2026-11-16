@@ -168,7 +168,7 @@ func runUpdate(ctx context.Context, args []string) {
 
 	fs := flag.NewFlagSet("update", flag.ExitOnError)
 	o := addUpdateFlags(fs)
-	if err := fs.Parse(args); err != nil {
+	if err := parseNoArgs(fs, "update", args); err != nil {
 		fmt.Fprintf(os.Stderr, "box: %v\n", err)
 		os.Exit(2)
 	}

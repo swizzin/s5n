@@ -334,7 +334,7 @@ func runBootstrap(ctx context.Context, args []string) {
 	plain := fs.Bool("plain", false, "ask init's questions with plain line prompts, even on a terminal (for a flaky terminal or a screen reader)")
 	gatewayClass := fs.String("gateway-class", "", "the Envoy Gateway GatewayClass to use when several are Accepted (platform.gateway.className)")
 	initFlags := addInitFlags(fs)
-	if err := fs.Parse(args); err != nil {
+	if err := parseNoArgs(fs, "bootstrap", args); err != nil {
 		fmt.Fprintf(os.Stderr, "box: %v\n", err)
 		os.Exit(2)
 	}
@@ -612,7 +612,7 @@ func runApply(ctx context.Context, args []string) {
 	}
 	fs := flag.NewFlagSet("apply", flag.ExitOnError)
 	o := addApplyFlags(fs)
-	if err := fs.Parse(args); err != nil {
+	if err := parseNoArgs(fs, "apply", args); err != nil {
 		fmt.Fprintf(os.Stderr, "box: %v\n", err)
 		os.Exit(2)
 	}
@@ -715,7 +715,7 @@ func runInit(ctx context.Context, args []string) {
 	kubeconfig := fs.String("kubeconfig", "", "explicit kubeconfig for the apply this hands over to, or fail with no fallback")
 	yes := fs.Bool("yes", false, "ask nothing: flags and file keys only")
 	plain := fs.Bool("plain", false, "ask with plain line prompts, even on a terminal (for a flaky terminal or a screen reader)")
-	if err := fs.Parse(args); err != nil {
+	if err := parseNoArgs(fs, "init", args); err != nil {
 		fmt.Fprintf(os.Stderr, "box: %v\n", err)
 		os.Exit(2)
 	}

@@ -179,7 +179,7 @@ func runStatus(ctx context.Context, args []string) {
 	}
 	fs := flag.NewFlagSet("status", flag.ExitOnError)
 	o := addStatusFlags(fs)
-	if err := fs.Parse(args); err != nil {
+	if err := parseNoArgs(fs, "status", args); err != nil {
 		fmt.Fprintf(os.Stderr, "box: %v\n", err)
 		os.Exit(2)
 	}
