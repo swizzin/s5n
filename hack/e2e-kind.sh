@@ -47,19 +47,20 @@ ENVOY_GATEWAY_CHART_VERSION=${ENVOY_GATEWAY_CHART_VERSION:-$(pin envoyGateway)}
 METALLB_VERSION=${METALLB_VERSION:-$(v_tag "$(pin metallb)")}
 CERT_MANAGER_VERSION=${CERT_MANAGER_VERSION:-$(pin certManager)}
 
-# The qBittorrent variant this run installs and admits, read from the chart's own
-# file rather than copied here: Renovate bumps this variant in
+# The qBittorrent variants this run installs and admits, read from the chart's own
+# file rather than copied here: Renovate bumps a variant in
 # charts/s5n/variants.yaml only, so a literal here would fail this script on
 # every digest bump.
 # The shape read is the file's fixed one -- repository, tag and digest on three
-# lines inside the `qbittorrent:` block's `lt1.2:` entry -- the same shape the
+# lines inside one entry of the `qbittorrent:` block -- the same shape the
 # Renovate manager's regex relies on, and the reason no YAML parser is needed on
-# the host. `lt1.2-10g-znver3-mimalloc` is a different entry, so the entry name
-# is matched whole.
-variant_field() { # <field> -> the lt1.2 entry's value, quotes stripped
-  awk -v want="$1" '
+# the host. The entry name is matched as a whole line, never as a prefix: `lt1.2`
+# and `lt1.2-10g` are both real entries now, and a prefix match would hand one
+# entry's tag and digest to the other.
+variant_field() { # <entry> <field> -> that entry's value, quotes stripped
+  awk -v entry="$1" -v want="$2" '
     /^[A-Za-z]/ { inqbt = ($0 ~ /^qbittorrent:/); invar = 0; next }
-    inqbt && /^  lt1\.2:[[:space:]]*$/ { invar = 1; next }
+    inqbt && $0 == "  " entry ":" { invar = 1; next }
     inqbt && /^  [^[:space:]]/ { invar = 0 }
     invar && $1 == want ":" {
       line = $0
@@ -70,11 +71,18 @@ variant_field() { # <field> -> the lt1.2 entry's value, quotes stripped
     }
   ' charts/s5n/variants.yaml
 }
-qbit_repository=$(variant_field repository)
-qbit_tag=$(variant_field tag)
-qbit_digest=$(variant_field digest)
+qbit_repository=$(variant_field lt1.2 repository)
+qbit_tag=$(variant_field lt1.2 tag)
+qbit_digest=$(variant_field lt1.2 digest)
 if [ -z "$qbit_repository" ] || [ -z "$qbit_tag" ] || [ -z "$qbit_digest" ]; then
   echo "charts/s5n/variants.yaml: qbittorrent.lt1.2 needs all three of repository, tag and digest (read '${qbit_repository}' '${qbit_tag}' '${qbit_digest}')"
+  exit 1
+fi
+# Two entries that share a prefix must stay two entries: if the reader cannot
+# tell `lt1.2` from `lt1.2-10g`, every assertion below silently tests the wrong
+# build.
+if [ "$(variant_field lt1.2 tag)" = "$(variant_field lt1.2-10g tag)" ]; then
+  echo "charts/s5n/variants.yaml: lt1.2 and lt1.2-10g read back the same entry ('$(variant_field lt1.2 tag)')"
   exit 1
 fi
 # The variant NAMED lt1.2: a values file that falls back to the default, or names
@@ -714,6 +722,90 @@ port_forward_stop() {
   kill "$PF_PID" 2>/dev/null || true
   wait "$PF_PID" 2>/dev/null || true
 }
+
+# ---- the other blessed qBittorrent builds ------------------------------------
+# The chart blesses six qBittorrent images. The lt1.2 one is installed and
+# asserted above; the three below are switched in one at a time, because a
+# variant that is only blessed is a promise the chart makes and nobody keeps.
+# Each is proven three ways: the pod spec names the repository, tag and digest
+# variants.yaml pins; the runtime's imageID carries that digest; and
+# qBittorrent's own buildInfo reports the libtorrent line the variant's name
+# promises, which is what a tag alone cannot say. The znver3 build is the one
+# exemption from this, and its block in variants.yaml says why.
+for spec in lt2.1:2.1. lt1.2-10g:1.2. lt2.1-10g:2.1.; do
+  variant=${spec%%:*}; line=${spec##*:}
+  v_repository=$(variant_field "$variant" repository)
+  v_tag=$(variant_field "$variant" tag)
+  v_digest=$(variant_field "$variant" digest)
+  if [ -z "$v_repository" ] || [ -z "$v_tag" ] || [ -z "$v_digest" ]; then
+    echo "charts/s5n/variants.yaml: qbittorrent.${variant} needs all three of repository, tag and digest (read '${v_repository}' '${v_tag}' '${v_digest}')"
+    fail=1
+    continue
+  fi
+  want="${v_repository}:${v_tag}@${v_digest}"
+  log "qBittorrent variant ${variant}: it rolls, and it reports libtorrent ${line}x"
+  if ! $HELM upgrade s5n charts/s5n -n "$NS" --reuse-values \
+    --set apps.qbittorrent.image.variant="$variant" --wait --timeout 15m \
+    >"$WORK/qbit-${variant}.upgrade" 2>&1; then
+    echo "helm upgrade to the ${variant} variant failed:"
+    sed 's/^/    /' "$WORK/qbit-${variant}.upgrade"
+    fail=1
+    continue
+  fi
+  if ! $K -n "$NS" rollout status statefulset/qbittorrent --timeout=300s; then
+    echo "qbittorrent-0 is not Ready on the ${variant} variant"
+    fail=1
+    continue
+  fi
+  got_spec=$($K -n "$NS" get pod qbittorrent-0 -o jsonpath='{.spec.containers[?(@.name=="qbittorrent")].image}' || true)
+  got_id=$($K -n "$NS" get pod qbittorrent-0 -o jsonpath='{.status.containerStatuses[?(@.name=="qbittorrent")].imageID}' || true)
+  echo "  runs: ${got_spec}"
+  echo "  image: ${got_id}"
+  [ "$got_spec" = "$want" ] ||
+    { echo "qBittorrent on ${variant} is specified as '${got_spec}', want '${want}'"; fail=1; }
+  case "$got_id" in
+    *"${v_digest}"*) ;;
+    *) echo "the running qBittorrent is '${got_id}', not the digest the ${variant} variant pins"; fail=1 ;;
+  esac
+  build_info=""
+  if port_forward qbittorrent-0 8080; then
+    build_info=$(curl -s "http://127.0.0.1:${PF_PORT}/api/v2/app/buildInfo" 2>/dev/null || true)
+  else
+    echo "could not reach qBittorrent to read its buildInfo on the ${variant} variant"
+    fail=1
+  fi
+  port_forward_stop
+  echo "  buildInfo: ${build_info}"
+  # `libtorrent` is the linked library's own version string (1.2.20.0, 2.1.2.0),
+  # and the libtorrent line is the whole point of a variant, so its prefix is
+  # what is asserted, not the string.
+  got_line=$(printf '%s' "$build_info" |
+    python3 -c 'import json,sys; print(json.load(sys.stdin).get("libtorrent", ""))' 2>/dev/null || true)
+  echo "  libtorrent ${got_line:-<not reported>} (want ${line}x)"
+  case "$got_line" in
+    "${line}"*) ;;
+    *) echo "the ${variant} variant reports libtorrent '${got_line}', want ${line}x"; fail=1 ;;
+  esac
+done
+
+# Back to the variant this run installed, and the one every assertion after this
+# point was written for: a kept cluster stays usable by hack/grab-test.sh, and a
+# failure above does not leave the release on a build the rest of the script
+# never expected.
+if $HELM upgrade s5n charts/s5n -n "$NS" --reuse-values \
+  --set apps.qbittorrent.image.variant=lt1.2 --wait --timeout 15m \
+  >"$WORK/qbit-lt1.2.upgrade" 2>&1; then
+  $K -n "$NS" rollout status statefulset/qbittorrent --timeout=300s ||
+    { echo "qbittorrent-0 did not come back up on the lt1.2 variant"; fail=1; }
+  back=$($K -n "$NS" get pod qbittorrent-0 -o jsonpath='{.spec.containers[?(@.name=="qbittorrent")].image}' || true)
+  echo "qBittorrent back on lt1.2: ${back}"
+  [ "$back" = "$QBIT_LT12" ] ||
+    { echo "qBittorrent did not return to the lt1.2 variant ('${back}')"; fail=1; }
+else
+  echo "helm upgrade back to the lt1.2 variant failed:"
+  sed 's/^/    /' "$WORK/qbit-lt1.2.upgrade"
+  fail=1
+fi
 
 # ---- TLS: one certificate per host, Pebble issuing over HTTP-01 --------------
 # Plex and Seerr are served at names of their own (the catalog says so), so this
