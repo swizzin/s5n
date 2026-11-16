@@ -430,10 +430,10 @@ Dockerfile               the image the wiring Job and the qBittorrent init conta
   root's platform layer, not a seedbox (WireGuard needs NET_ADMIN or a kernel module,
   which Pod Security `restricted` never allows), and Let's Encrypt's HTTP-01 challenge
   can't reach a box that isn't public, so it needs its own design for certificates.
-- **libtorrent 2.x image:** built by `swizzin/qbittorrent` as the `lt2.1` line, not
-  blessed in the chart until it is wanted. qBittorrent 5.3 still compiles against
-  either branch (`QBT_USES_LIBTORRENT2` guards in `sessionimpl.cpp`) and userdocs
-  publishes `release-5.3.0_v1.2.20` and `release-5.3.0_v2.1.2` from the same app
-  version, so it would be an image tag axis (`lt2.1`), not a fork. 2.x removes the
+- **libtorrent 2.x image:** decided — built by `swizzin/qbittorrent` as the `lt2.1`
+  line, blessed in the chart as `lt2.1` and `lt2.1-10g`. qBittorrent 5.3 still compiles
+  against either branch (`QBT_USES_LIBTORRENT2` guards in `sessionimpl.cpp`) and
+  userdocs publishes `release-5.3.0_v1.2.20` and `release-5.3.0_v2.1.2` from the same
+  app version, so it is an image tag axis (`lt2.1`), not a fork. 2.x removes the
   disk cache and deprecates the 1.2 cache settings, so 1.2-era cache advice does not
   carry over; the compiled-defaults patch ports by value.

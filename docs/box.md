@@ -855,9 +855,10 @@ no extra step. Anything outside the catalog stays outside a user's namespace, wh
 the decided rule that root decides which apps a user has.
 
 **qBittorrent's own builds (decided).** qBittorrent is the one app where the
-libtorrent line is a real choice, so its list has three entries: `default`
-(home-operations, still the default), `lt1.2`, and `lt1.2-10g-znver3-mimalloc`.
-Both new ones are builds of `ghcr.io/swizzin/qbittorrent`, the project's own image.
+libtorrent line is a real choice, so its list has six entries: `default`
+(home-operations, still the default) and five builds of
+`ghcr.io/swizzin/qbittorrent`, the project's own image — `lt1.2`, `lt1.2-10g`,
+`lt2.1`, `lt2.1-10g` and `lt1.2-10g-znver3-mimalloc`.
 `lt1.2` is the static build on libtorrent 1.2 (musl, baseline x86-64-v2 and
 armv8-a) with the default's layout — `HOME` and `XDG_CONFIG_HOME` at `/config`, the
 conf at `/config/qBittorrent/qBittorrent.conf`, ports from `QBT_WEBUI_PORT` and
@@ -867,6 +868,18 @@ profile, never a version. The tag carries only qBittorrent's version and that li
 (`5.3.0-lt1.2`) — the version is what lets Renovate propose a qBittorrent release —
 and libtorrent's own release is pinned by the digest alone, so a later 1.2.21 is a
 new digest on the same tag and the variant keeps its name.
+
+`lt2.1` is the same build on libtorrent 2.1, which is the other axis a user can
+care about: 2.x keeps no disk cache of its own and maps files instead, and the
+chart sets no cache options, so the same pod spec runs it. `lt1.2-10g` and
+`lt2.1-10g` are those two builds with two larger compiled-in peer buffers for 10
+Gbit links — `max_peer_recv_buffer_size` 4 MiB against the base build's 2 MiB, and
+`send_not_sent_low_watermark` 1 MiB against 512 KiB — and nothing else differs: the
+base builds already carry five tuned defaults of their own, so `-10g` is not stock
+libtorrent plus two values. All four are built for both architectures, and
+`hack/e2e-kind.sh` switches through each one the way it runs `lt1.2`: the pod's own
+image and digest, and qBittorrent's `buildInfo` reporting the libtorrent line, which
+is what a tag alone cannot say.
 
 `lt1.2-10g-znver3-mimalloc` is the one exemption from "the e2e tests every
 variant". It is compiled for AMD Zen 3 (`-march=znver3`), so it dies with SIGILL at

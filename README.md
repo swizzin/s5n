@@ -29,7 +29,7 @@ isolation, ease of upgrading _all the things_ and a way back when something brea
 - **Apps that already talk to each other.** qBittorrent, Prowlarr, the Arrs, Seerr and Tautulli come wired together, and box keeps them that way.
 - **Opt-in extras.** qui, autobrr, PeerBanHelper and Maintainerr, off until you ask for them.
 - **HD and 4K.** Sonarr and Radarr can each run a second instance for 4K.
-- **swizzin's own qBittorrent.** The project's libtorrent 1.2 build, or its 10G build for AMD Zen 3, one line in your values away.
+- **swizzin's own qBittorrent.** The project's builds on libtorrent 1.2 or 2.1, a 10G build of each, and one for AMD Zen 3, one line in your values away.
 - **One login in front of everything.** Sign in once at the gateway, with single sign-on for the apps that speak OIDC.
 - **HTTPS by default.** Let's Encrypt when your name is public, one self-signed root to trust when it isn't.
 - **Locked down by default.** Restricted pods, default-deny networking and digest-pinned images. From outside, only the gateway and the torrent port answer.
@@ -116,9 +116,11 @@ Edit the values file by hand, then run `box apply`. box shows the diff and asks 
 changing anything. Running `box init` again asks the same questions, with your current
 answers filled in.
 
-qBittorrent's build is a values edit too: `apps.qbittorrent.image.variant: lt1.2` swaps
-in swizzin's libtorrent 1.2 build, or `lt1.2-10g-znver3-mimalloc` for the 10G build on
-an AMD Zen 3 machine (amd64 only). `box apply` moves it.
+qBittorrent's build is a values edit too: `apps.qbittorrent.image.variant` picks one
+of swizzin's own — `lt1.2` and `lt2.1` for libtorrent 1.2 or 2.1, `lt1.2-10g` and
+`lt2.1-10g` for the same builds with larger peer buffers on a 10 Gbit link, or
+`lt1.2-10g-znver3-mimalloc` for the 10G build on an AMD Zen 3 machine (amd64 only).
+`box apply` moves it.
 
 ## Keeping it current
 
