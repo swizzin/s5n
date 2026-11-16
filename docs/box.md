@@ -863,7 +863,10 @@ armv8-a) with the default's layout — `HOME` and `XDG_CONFIG_HOME` at `/config`
 conf at `/config/qBittorrent/qBittorrent.conf`, ports from `QBT_WEBUI_PORT` and
 `QBT_TORRENTING_PORT` — so the chart's one pod spec runs it unchanged and a box can
 switch variants in place. A variant name is the libtorrent line plus the build
-profile, never a version: the tag pins those, so a later 1.2.21 keeps the name.
+profile, never a version. The tag carries only qBittorrent's version and that line
+(`5.3.0-lt1.2`) — the version is what lets Renovate propose a qBittorrent release —
+and libtorrent's own release is pinned by the digest alone, so a later 1.2.21 is a
+new digest on the same tag and the variant keeps its name.
 
 `lt1.2-10g-znver3-mimalloc` is the one exemption from "the e2e tests every
 variant". It is compiled for AMD Zen 3 (`-march=znver3`), so it dies with SIGILL at
