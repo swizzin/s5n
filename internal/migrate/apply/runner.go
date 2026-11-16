@@ -106,11 +106,18 @@ func (r *JobRunner) Run(ctx context.Context, app string, argv []string, stdin []
 
 	name := fmt.Sprintf("%s-%d", dnsLabel(app), n)
 	dir := filepath.Join(r.cfg.ConfigRoot, ".box", "migrate", r.cfg.PlanID, runnerDir)
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	if err := os.MkdirAll(dir, 0o770); err != nil {
 		return nil, fmt.Errorf("create %s: %w", dir, err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, name+".in"), stdin, 0o600); err != nil {
+	if err := r.own(dir, 0o770); err != nil {
+		return nil, err
+	}
+	in := filepath.Join(dir, name+".in")
+	if err := os.WriteFile(in, stdin, 0o640); err != nil {
 		return nil, fmt.Errorf("write %s's input: %w", app, err)
+	}
+	if err := r.own(in, 0o640); err != nil {
+		return nil, err
 	}
 
 	job, err := r.start(ctx, app, name, argv)
@@ -120,6 +127,22 @@ func (r *JobRunner) Run(ctx context.Context, app string, argv []string, stdin []
 	}
 	defer r.delete(context.WithoutCancel(ctx), job)
 	return r.collect(ctx, app, name, argv[0], dir, job)
+}
+
+// own hands one entry of the exchange directory to the pod's user. The Job runs
+// as PUID:PGID and box does not -- on the host it is root -- so a directory box
+// created for itself is one the pod cannot write its result into, and an input
+// file it wrote 0600 for itself is one the pod cannot read at all. The mode is
+// the exchange's own contract: the pod writes in the directory, and reads the
+// script it was written.
+func (r *JobRunner) own(path string, mode os.FileMode) error {
+	if err := os.Chmod(path, mode); err != nil {
+		return fmt.Errorf("set the mode of %s: %w", path, err)
+	}
+	if err := os.Chown(path, r.cfg.PUID, r.cfg.PGID); err != nil {
+		return fmt.Errorf("hand %s to the pod's user %d:%d: %w", path, r.cfg.PUID, r.cfg.PGID, err)
+	}
+	return nil
 }
 
 // start creates the Job, and the caller deletes it whatever happens next.

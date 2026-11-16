@@ -6,9 +6,11 @@ package apply
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -36,6 +38,9 @@ type runnerFixture struct {
 	job *batchv1.Job
 	// created is closed once the Job exists, so a test can cancel after it.
 	created chan struct{}
+	// onCreated, when set, runs as the fake Job is created: the moment the
+	// pod would first see the exchange directory and its input file.
+	onCreated func()
 }
 
 // newRunnerFixture builds a runner with a fake cluster whose "pod" answers the
@@ -44,6 +49,14 @@ type runnerFixture struct {
 func newRunnerFixture(t *testing.T, stdout, stderr string, code int) *runnerFixture {
 	t.Helper()
 	root := t.TempDir()
+	// The pod's user, which is not box's on a host. The fixture cannot chown to
+	// a stranger without root, so it takes the invoking user's own ids -- a
+	// supplementary group where there is one, because handing a file to a group
+	// is the part of the transfer a non-root test can still make happen.
+	puid, pgid := os.Geteuid(), os.Getegid()
+	if groups := extraGroups(); len(groups) > 0 {
+		pgid = groups[0]
+	}
 	f := &runnerFixture{
 		t:       t,
 		cs:      fake.NewClientset(),
@@ -56,6 +69,9 @@ func newRunnerFixture(t *testing.T, stdout, stderr string, code int) *runnerFixt
 		job := action.(ktesting.CreateAction).GetObject().(*batchv1.Job)
 		job.Name = job.GenerateName + "abcde"
 		f.job = job.DeepCopy()
+		if f.onCreated != nil {
+			f.onCreated()
+		}
 		f.answer(stdout, stderr, code)
 		close(f.created)
 		return false, nil, nil
@@ -79,12 +95,28 @@ func newRunnerFixture(t *testing.T, stdout, stderr string, code int) *runnerFixt
 		ConfigRoot: root,
 		PlanID:     f.planID,
 		Image:      "ghcr.io/home-operations/plex:1.43.5.11079@sha256:" + strings.Repeat("0", 64),
-		PUID:       1234,
-		PGID:       2345,
+		PUID:       puid,
+		PGID:       pgid,
 		Poll:       time.Millisecond,
 		Timeout:    5 * time.Second,
 	})
 	return f
+}
+
+// extraGroups is the invoking user's groups other than its effective one: a
+// non-root process may only give a file away to a group it belongs to.
+func extraGroups() []int {
+	var out []int
+	groups, err := os.Getgroups()
+	if err != nil {
+		return nil
+	}
+	for _, g := range groups {
+		if g != os.Getegid() {
+			out = append(out, g)
+		}
+	}
+	return out
 }
 
 // answer is the fake pod: for every input file, it writes the output, the error
@@ -120,9 +152,9 @@ func TestRunnerJobSpec(t *testing.T) {
 		t.Errorf("job spec: backoff %d, deadline %d; want 0 and 600", *job.Spec.BackoffLimit, *job.Spec.ActiveDeadlineSeconds)
 	}
 	pod := job.Spec.Template.Spec
-	if pod.SecurityContext.RunAsUser == nil || *pod.SecurityContext.RunAsUser != 1234 ||
-		pod.SecurityContext.RunAsGroup == nil || *pod.SecurityContext.RunAsGroup != 2345 ||
-		pod.SecurityContext.FSGroup == nil || *pod.SecurityContext.FSGroup != 2345 ||
+	if pod.SecurityContext.RunAsUser == nil || *pod.SecurityContext.RunAsUser != int64(f.runner.cfg.PUID) ||
+		pod.SecurityContext.RunAsGroup == nil || *pod.SecurityContext.RunAsGroup != int64(f.runner.cfg.PGID) ||
+		pod.SecurityContext.FSGroup == nil || *pod.SecurityContext.FSGroup != int64(f.runner.cfg.PGID) ||
 		pod.SecurityContext.RunAsNonRoot == nil || !*pod.SecurityContext.RunAsNonRoot ||
 		pod.SecurityContext.SeccompProfile == nil || pod.SecurityContext.SeccompProfile.Type != corev1.SeccompProfileTypeRuntimeDefault {
 		t.Errorf("pod security context is %+v, want the release's uid and gid under the restricted profile", pod.SecurityContext)
@@ -189,6 +221,73 @@ func TestRunnerJobSpec(t *testing.T) {
 	if len(unblessed) != 0 {
 		t.Errorf("the policy would refuse this pod: %v", unblessed)
 	}
+}
+
+// TestRunnerHandsTheExchangeToThePod is the one thing a Job cannot work around:
+// box and the pod are different users. On a host box is root and the Job runs as
+// the seedbox's uid, so an exchange directory box left owned by itself is one
+// the pod cannot write its result into, and an input file written 0600 for box
+// is one it cannot read at all. The modes and the owner are asserted as the pod
+// would find them, at the moment the Job is created.
+func TestRunnerHandsTheExchangeToThePod(t *testing.T) {
+	f := newRunnerFixture(t, "rows", "", 0)
+	var problems []string
+	f.onCreated = func() {
+		info, err := os.Stat(f.dir)
+		if err != nil {
+			problems = append(problems, fmt.Sprintf("the exchange directory: %v", err))
+			return
+		}
+		if info.Mode().Perm() != 0o770 {
+			problems = append(problems, fmt.Sprintf("the exchange directory is %04o, want 0770: the pod writes its result there", info.Mode().Perm()))
+		}
+		if uid, gid, ok := ownerOf(info); !ok || uid != f.runner.cfg.PUID || gid != f.runner.cfg.PGID {
+			problems = append(problems, fmt.Sprintf("the exchange directory is owned by %d:%d, want the pod's %d:%d",
+				uid, gid, f.runner.cfg.PUID, f.runner.cfg.PGID))
+		}
+		entries, err := os.ReadDir(f.dir)
+		if err != nil {
+			problems = append(problems, fmt.Sprintf("read the exchange directory: %v", err))
+			return
+		}
+		found := false
+		for _, e := range entries {
+			if filepath.Ext(e.Name()) != ".in" {
+				continue
+			}
+			found = true
+			info, err := e.Info()
+			if err != nil {
+				problems = append(problems, fmt.Sprintf("%s: %v", e.Name(), err))
+				continue
+			}
+			if info.Mode().Perm() != 0o640 {
+				problems = append(problems, fmt.Sprintf("%s is %04o, want 0640: the pod reads its script there", e.Name(), info.Mode().Perm()))
+			}
+			if uid, gid, ok := ownerOf(info); !ok || uid != f.runner.cfg.PUID || gid != f.runner.cfg.PGID {
+				problems = append(problems, fmt.Sprintf("%s is owned by %d:%d, want the pod's %d:%d",
+					e.Name(), uid, gid, f.runner.cfg.PUID, f.runner.cfg.PGID))
+			}
+		}
+		if !found {
+			problems = append(problems, "the runner left no input file in the exchange directory")
+		}
+	}
+	if _, err := f.runner.Run(context.Background(), "plex", []string{"/usr/lib/plexmediaserver/Plex SQLite", "/config/library.db"}, []byte("SELECT 1;\n")); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	for _, p := range problems {
+		t.Error(p)
+	}
+}
+
+// ownerOf is a file's uid and gid.
+func ownerOf(info os.FileInfo) (uid, gid int, ok bool) {
+	st, ok := info.Sys().(*syscall.Stat_t)
+	if !ok {
+		return 0, 0, false
+	}
+	return int(st.Uid), int(st.Gid), true
 }
 
 func TestRunnerFileProtocol(t *testing.T) {
