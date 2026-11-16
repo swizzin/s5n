@@ -48,14 +48,17 @@
 #                 the only scenario box needs to reach the config it copies, so
 #                 it and migrate are the two whose volume roots are a directory
 #                 on this host, mounted into the node (see VOLUME ROOTS below).
-#   migrate       an install box did not make -- qBittorrent, Sonarr and Radarr
-#                 over plain host directories, seeded through their own APIs --
-#                 taken over by `box migrate discover` and `box migrate apply`
-#                 after the source cluster is thrown away. The apps must come
-#                 back healthy on the chart's images with their paths under
-#                 /data, their API keys unchanged, their download clients
-#                 adopted by the ids the source had, and the data renamed rather
-#                 than moved.
+#   migrate       an install box did not make -- qBittorrent, Sonarr, Radarr and
+#                 Plex over plain host directories, seeded through their own
+#                 APIs (and, for Plex, through its own SQLite on the database it
+#                 built) -- taken over by `box migrate discover` and
+#                 `box migrate apply` after the source cluster is thrown away.
+#                 The apps must come back healthy on the chart's images with
+#                 their paths under /data, their API keys unchanged, their
+#                 download clients adopted by the ids the source had, and the
+#                 data renamed rather than moved. Plex is the one app whose
+#                 database is rewritten by a one-shot Job running its own image
+#                 (see SCENARIO: MIGRATE below).
 #
 # The login is part of every install: bootstrap puts one Authelia in
 # s5n-system and one SecurityPolicy on the Gateway, root's `box init` creates
@@ -4355,6 +4358,13 @@ print(pin["repository"], pin["tag"], pin.get("digest", ""))
 PY
 }
 
+# chart_image <app>: the one image reference the chart's own pin names, in the
+# form both a pod's image and a docker run take.
+chart_image() {
+  variant_pin "$1" |
+    awk '{ if ($3 != "") printf "%s:%s@%s\n", $1, $2, $3; else printf "%s:%s\n", $1, $2 }'
+}
+
 # repin_variant <variants.yaml> <app> <tag>: one app's default variant names a
 # tag inside its own repository and no digest. The repository stays, because a
 # hold puts an app back by the tag and digest a snapshot recorded and the chart
@@ -4978,11 +4988,18 @@ PY
 # without a session while the Arr's UI still asks for one. The session below is
 # asserted through the Gateway, on the address Envoy answers on.
 #
-# What is deliberately absent: Plex. A Plex library section cannot be created
-# without a plex.tv account (the API needs a server token, and a server token
-# needs a claim token issued while signed in), so a Plex source cannot be
-# seeded here and the runner Job a Plex migration needs stays unproven end to
-# end. Also absent: indexers and anything else that needs TVDB/TMDB, because
+# Plex is the one app whose database only its own binary may write (its
+# full-text tables carry tokenizers compiled into Plex's libsqlite3), so the
+# migration rewrites it through `Plex SQLite` in a one-shot Job in the
+# seedbox's namespace. That is what this scenario runs end to end: a source
+# Plex builds its own library database (an empty config is enough -- a section
+# is never created, and a database Plex did not write is one it refuses to
+# open: "no such table: schema_migrations"), the script seeds rows into it with
+# the same shell, the migration rewrites them in a copy, and the release's Plex
+# starts on the copy. What is still not covered: a library that Plex itself
+# made through a plex.tv account -- its sections, its metadata and its scanned
+# directories -- because a server token needs a claim token issued while signed
+# in. Also absent: indexers and anything else that needs TVDB/TMDB, because
 # those are the metadata services the whole e2e suite must not depend on.
 
 # The source's images: the versions the migration code was written against
@@ -4995,6 +5012,12 @@ PY
 MIGRATE_QBITTORRENT_IMAGE=ghcr.io/home-operations/qbittorrent:5.3.0@sha256:5a858e61f94cf2712391db32ed03556576c700858f3e62c4c6fcde262443ebd8
 MIGRATE_SONARR_IMAGE=ghcr.io/home-operations/sonarr:4.0.14.2938@sha256:5126f7ae94745a8e58e6963e1f67e905766c096832eff08b0678355ad0cdecee
 MIGRATE_RADARR_IMAGE=ghcr.io/home-operations/radarr:5.20.1.9773@sha256:407eb673a46134648c991bb7727b1b788897a181eb9234376105dd763c2b8406
+# The source's Plex, and the image the runner Job rewrites the database with.
+# Unlike the three above it is not a version of its own: it is the chart's own
+# pin, read once in migrate_box from charts/s5n/variants.yaml. The same image on
+# purpose -- a rewrite of the database file does not care what the source's
+# version was, and the runner has to run the image the release runs.
+MIGRATE_PLEX_IMAGE=""
 # The source namespace. Not a seedbox: an install box knows nothing about, and
 # Pod Security privileged is what such an install runs under.
 MIGRATE_LEGACY_NS=legacy
@@ -5005,6 +5028,10 @@ MIGRATE_QBIT_PORT=8080
 # for that instance.
 MIGRATE_RADARR_INSTANCE=radarr
 MIGRATE_RADARR_CATEGORY=movies
+# Plex's library database, as both the source and the release see it: the
+# image's PLEX_MEDIA_SERVER_APPLICATION_SUPPORT_DIR is /config/Library/
+# Application Support, and the file lives in the Databases directory there.
+MIGRATE_PLEX_DB="/config/Library/Application Support/Plex Media Server/Plug-in Support/Databases/com.plexapp.plugins.library.db"
 
 # migrate_forward <namespace> <target> <port>: port_forward above, for a
 # namespace other than the seedbox's. The tunnel's port and process land in
@@ -5252,6 +5279,86 @@ spec:
     - name: http
       port: 7878
       targetPort: 7878
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: plex
+  namespace: ${MIGRATE_LEGACY_NS}
+spec:
+  # Plex has to run once, which is the one thing this fixture cannot fake: an
+  # empty config makes it build its own library database, and Plex refuses a
+  # database it did not write ("no such table: schema_migrations"). It starts
+  # unclaimed -- no plex.tv account is involved -- and stops with the others
+  # before the script seeds the rows the migration rewrites.
+  replicas: 1
+  selector:
+    matchLabels:
+      app: plex
+  template:
+    metadata:
+      labels:
+        app: plex
+    spec:
+      # Longer than the others': Plex closes its database on SIGTERM, and the
+      # migration reads it a moment later.
+      terminationGracePeriodSeconds: 30
+      securityContext:
+        runAsUser: ${uid}
+        runAsGroup: ${gid}
+        fsGroup: ${gid}
+      containers:
+        - name: plex
+          image: ${MIGRATE_PLEX_IMAGE}
+          env:
+            - name: TZ
+              value: UTC
+          ports:
+            - name: http
+              containerPort: 32400
+          # /identity answers without a server token. It is what says this start
+          # finished building the database the migration is about: a database
+          # Plex cannot open kills it before it listens at all.
+          readinessProbe:
+            httpGet:
+              path: /identity
+              port: http
+            periodSeconds: 2
+            failureThreshold: 150
+          volumeMounts:
+            - name: config
+              mountPath: /config
+            - name: data
+              mountPath: /data
+            - name: transcode
+              mountPath: /transcode
+      volumes:
+        - name: config
+          hostPath:
+            path: ${src}/var/data/plex
+            type: Directory
+        # The data root itself, which is how a real install mounts it: the
+        # migration's path rules come from this mount, so the library database's
+        # /data/library paths are the source's own.
+        - name: data
+          hostPath:
+            path: ${src}/var/data
+            type: Directory
+        - name: transcode
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: plex
+  namespace: ${MIGRATE_LEGACY_NS}
+spec:
+  selector:
+    app: plex
+  ports:
+    - name: http
+      port: 32400
+      targetPort: 32400
 EOF
 }
 
@@ -5532,6 +5639,218 @@ print(f"  qbittorrent: saves under {prefs.get('save_path')}, categories {', '.jo
 PY
 }
 
+# migrate_plex_sqlite <config dir> <arguments...>: `Plex SQLite` from the
+# release's own pinned image, with a Plex config directory at /config, which is
+# where the image's PLEX_MEDIA_SERVER_APPLICATION_SUPPORT_DIR points. The host's
+# sqlite3 is not an option: Plex's full-text tables carry tokenizers compiled
+# into its own libsqlite3, so a stock shell fails every write that fires a
+# metadata trigger and can never check the file (internal/migrate/plex). -i is
+# the SQL on stdin, and --network none because the shell needs no network.
+migrate_plex_sqlite() { # migrate_plex_sqlite <config dir> <arguments...>
+  local dir=$1
+  shift
+  if [ -z "$MIGRATE_PLEX_IMAGE" ]; then
+    echo "no Plex image: migrate_box reads the chart's pin before it seeds anything"
+    return 1
+  fi
+  docker run --rm -i --user "$(id -u):$(id -g)" \
+    -v "${dir}:/config" --network none \
+    --entrypoint "/usr/lib/plexmediaserver/Plex SQLite" \
+    "$MIGRATE_PLEX_IMAGE" "$@"
+}
+
+# migrate_plex_rows <config dir>: the four columns a migration rewrites, the one
+# it must not, and the two GUIDs whose kind decides that -- read back with Plex's
+# shell, one labelled line per value. Both the seed and the assertion use it, so
+# the fixture and the check cannot disagree about what the database holds.
+migrate_plex_rows() { # migrate_plex_rows <config dir>
+  local dir=$1
+  printf '%s\n' \
+    "SELECT 'root:' || root_path FROM section_locations ORDER BY id;" \
+    "SELECT 'part:' || file FROM media_parts ORDER BY id;" \
+    "SELECT 'stream:' || url FROM media_streams ORDER BY id;" \
+    "SELECT 'guid:' || guid FROM metadata_items ORDER BY id;" \
+    "SELECT 'dir:' || path FROM directories ORDER BY id;" |
+    migrate_plex_sqlite "$dir" "$MIGRATE_PLEX_DB"
+}
+
+# migrate_seed_plex <config dir>: the rows a library holds, added to the database
+# Plex built for itself while the source ran. The schema is Plex's own -- a
+# database this script created would be one Plex refuses to open -- and the rows
+# are plex_docker_test.go's shapes: two section roots, a media part, a file://
+# stream, a file:// GUID beside a plex:// one that must not move, and relative
+# directory paths that must not either. The values name the source's own media
+# mount (/data, the root the Deployment mounts), so the migration has something
+# to rewrite; every one is a file the fixture put on disk.
+migrate_seed_plex() { # migrate_seed_plex <config dir>
+  local dir=$1 got want
+  printf '%s\n' \
+    "INSERT INTO section_locations (id, library_section_id, root_path) VALUES (1, 101, '/data/library/tv');" \
+    "INSERT INTO section_locations (id, library_section_id, root_path) VALUES (2, 102, '/data/library/movies');" \
+    "INSERT INTO media_parts (id, media_item_id, file, size) VALUES (10, 100, '/data/library/movies/Film.2020.mkv', 47);" \
+    "INSERT INTO media_streams (id, media_part_id, url, stream_type_id) VALUES (20, 10, 'file:///data/library/movies/Film.2020.en.srt', 2);" \
+    "INSERT INTO metadata_items (id, guid, title, metadata_type) VALUES (30, 'file:///data/library/movies/12345', 'Film (2020)', 1);" \
+    "INSERT INTO metadata_items (id, guid, title, metadata_type) VALUES (31, 'plex://movie/5d776b9c8b7c2b001f5f8b3a', 'Matched Film', 1);" \
+    "INSERT INTO directories (id, path, parent_directory_id) VALUES (1, '', NULL);" \
+    "INSERT INTO directories (id, path, parent_directory_id) VALUES (2, 'tv', 1);" |
+    migrate_plex_sqlite "$dir" "$MIGRATE_PLEX_DB" -bail >/dev/null || {
+    echo "the source Plex's database would not take the rows a library holds: it has no schema Plex wrote (it builds one on its first start)"
+    return 1
+  }
+  got=$(migrate_plex_rows "$dir") || {
+    echo "the source Plex's database does not read back"
+    return 1
+  }
+  want=$(cat <<'EOF'
+root:/data/library/tv
+root:/data/library/movies
+part:/data/library/movies/Film.2020.mkv
+stream:file:///data/library/movies/Film.2020.en.srt
+guid:file:///data/library/movies/12345
+guid:plex://movie/5d776b9c8b7c2b001f5f8b3a
+dir:
+dir:tv
+EOF
+  )
+  if [ "$got" != "$want" ]; then
+    echo "the source Plex's library database does not hold what the migration is supposed to rewrite:"
+    diff <(printf '%s\n' "$want") <(printf '%s\n' "$got") | sed 's/^/    /' || true
+    return 1
+  fi
+  echo "  source plex: its own schema, with two section roots, a media part, a file:// stream and two GUIDs"
+}
+
+# migrate_check_runner <instance>: the one-shot Job that rewrote an app's own
+# database, from what Kubernetes keeps after box has deleted it. The Job is gone
+# by the time apply returns (internal/migrate/apply deletes it in the run's own
+# defer), so the record of it is the events: the Job controller's SuccessfulCreate
+# means the pod was created, and a pod event (Scheduled, Started, ...) means the
+# API server admitted it. A pod that Pod Security or the image policy refuses
+# never exists and leaves FailedCreate on the Job instead, which is why that
+# reason is a failure here in its own right. Then the assertion that nothing is
+# left behind.
+migrate_check_runner() { # migrate_check_runner <instance>
+  local app=$1 i left
+  $K -n "$NS" get events -o json >"$WORK/runner-events.json" 2>/dev/null || {
+    echo "could not read the events of ${NS}: the runner Job left no record"
+    return 1
+  }
+  python3 - "$app" "$WORK/runner-events.json" <<'PY' || return 1
+import json, sys
+
+app, path = sys.argv[1:3]
+events = json.load(open(path)).get("items", [])
+
+def kind(e):
+    return e.get("involvedObject", {}).get("kind", "")
+
+def name(e):
+    return e.get("involvedObject", {}).get("name", "")
+
+def reason(e):
+    return e.get("reason", "")
+
+def say(e):
+    return f"{kind(e)}/{name(e)} {reason(e)}: {e.get('message', '')}".strip()
+
+jobs = [e for e in events if kind(e) == "Job" and name(e).startswith("s5n-migrate-")]
+pods = [e for e in events if kind(e) == "Pod" and name(e).startswith("s5n-migrate-")]
+refused = [e for e in events if reason(e) == "FailedCreate"]
+if refused:
+    sys.exit("a pod was refused when it was created, so the runner never ran:\n  "
+             + "\n  ".join(say(e) for e in refused))
+if not any(reason(e) == "SuccessfulCreate" for e in jobs):
+    sys.exit(f"no runner Job was created for {app}: no Job event in {path} says SuccessfulCreate")
+created = [reason(e) for e in pods]
+if not any(r in ("Scheduled", "Created", "Pulled", "Started", "Completed") for r in created):
+    sys.exit(f"the runner Job for {app} created no pod: Pod events are {created or 'none'}")
+print(f"  runner: {len(jobs)} Job events ({', '.join(sorted({reason(e) for e in jobs}))}), "
+      f"pod events {', '.join(sorted(set(created)))}, no FailedCreate -- admitted and completed")
+PY
+  # box deletes the Job and its pod in a defer, and a background delete lands a
+  # moment later: the run's own record is what says nothing is left behind.
+  for i in $(seq 1 30); do
+    left=$($K -n "$NS" get jobs,pods -l s5n.io/migrate="$app" -o name 2>/dev/null || true)
+    [ -z "$left" ] && break
+    sleep 2
+  done
+  if [ -n "$left" ]; then
+    echo "the runner left something behind: $(printf '%s' "$left" | tr '\n' ' ')"
+    return 1
+  fi
+}
+
+# migrate_check_plex_db <config dir>: the migrated library database, read with
+# Plex's own shell from the directory the release runs. Every value the plan
+# promised is asserted, including the two it promised to leave: directories.path
+# is relative to the section root and the plex:// GUID is not a filesystem path.
+# integrity_check is Plex's own answer: on a database Plex wrote it always ends
+# on its FTS4 inverted-index sentence (the shell does not implement validating
+# that index), so "ok" and that one sentence are the sound answers, and a page
+# error ("*** in database main ***") is not.
+migrate_check_plex_db() { # migrate_check_plex_db <config dir>
+  local dir=$1 got want check
+  got=$(migrate_plex_rows "$dir") || {
+    echo "the migrated library database cannot be read with Plex's shell"
+    return 1
+  }
+  want=$(cat <<'EOF'
+root:/data/media/tv
+root:/data/media/movies
+part:/data/media/movies/Film.2020.mkv
+stream:file:///data/media/movies/Film.2020.en.srt
+guid:file:///data/media/movies/12345
+guid:plex://movie/5d776b9c8b7c2b001f5f8b3a
+dir:
+dir:tv
+EOF
+  )
+  if [ "$got" != "$want" ]; then
+    echo "the migrated database does not read back the paths the plan promised:"
+    diff <(printf '%s\n' "$want") <(printf '%s\n' "$got") | sed 's/^/    /' || true
+    return 1
+  fi
+  # The rows, so a green log carries the evidence and not only the promise.
+  printf '%s\n' "$got" | sed 's/^/  plex database: /'
+  check=$(printf '%s\n' "PRAGMA integrity_check;" | migrate_plex_sqlite "$dir" "$MIGRATE_PLEX_DB") || {
+    echo "the migrated library database failed its integrity check"
+    return 1
+  }
+  case "$check" in
+    ok)
+      echo "  plex: section roots, media parts, the file:// stream and the file:// GUID under /data/media; the plex:// GUID and directories.path untouched; integrity ok"
+      ;;
+    "unable to validate the inverted index for FTS4 table main.fts4_metadata_titles_icu: SQL logic error")
+      echo "  plex: section roots, media parts, the file:// stream and the file:// GUID under /data/media; the plex:// GUID and directories.path untouched; integrity sound (Plex's own FTS4 note)"
+      ;;
+    *)
+      echo "the migrated library database is not sound: $(printf '%s' "$check" | head -3 | tr '\n' ' ')"
+      return 1
+      ;;
+  esac
+}
+
+# migrate_check_plex_identity: Plex, on the release's own Service, answering on
+# the database the runner rewrote. A TCP Ready would only say something listens;
+# /identity is the server's own document, and it is served without a plex.tv
+# token, so an unclaimed server answers it.
+migrate_check_plex_identity() { # migrate_check_plex_identity
+  local code version
+  migrate_forward "$NS" svc/plex 32400 || return 1
+  code=$(curl -sS -o "$WORK/plex-identity.xml" -w '%{http_code}' --max-time 20 \
+    "http://127.0.0.1:${MIGRATE_PF_PORT}/identity" 2>/dev/null || true)
+  migrate_forward_stop
+  if [ "$code" != 200 ] || ! grep -q 'machineIdentifier="' "$WORK/plex-identity.xml"; then
+    echo "Plex answered ${code:-nothing} on /identity after the migration: it is not serving on the database the runner rewrote"
+    head -c 200 "$WORK/plex-identity.xml" 2>/dev/null | sed 's/^/    /' || true
+    return 1
+  fi
+  # The server's own version lives on the MediaContainer element; the XML
+  # declaration's version="1.0" is the document's, not Plex's.
+  version=$(sed -n '/<MediaContainer/ s/.* version="\([^"]*\)".*/\1/p' "$WORK/plex-identity.xml" | head -1)
+  echo "  plex: /identity answers on the release's Service (${version:-no version in its document})"
+}
+
 # migrate_check_login_bypass <instance> <key file>: the login's per-app rules,
 # asked through the Gateway, on the address Envoy answers on. An Arr's API
 # carries its own key, so /<urlbase>/api has to reach the app without a portal
@@ -5596,12 +5915,22 @@ migrate_check_login_bypass() { # migrate_check_login_bypass <instance> <key file
 
 migrate_box() {
   local src="$WORK/hostfs/legacy" puid pgid plan report app instance folder port category
-  local key secret code pin expected revision after
+  local key secret code pin expected revision after plex_repo plex_tag plex_digest
+  local i left
   puid=$(id -u)
   pgid=$(id -g)
   DATA_PATH="$src/var/data"
   CONFIG_PATH="$WORK/hostfs/config"
   mkdir -p "$WORK/source"
+
+  # The one source image read from the chart rather than pinned here: the
+  # database the migration rewrites must be the one the release's own Plex
+  # binary writes and reads. Read once, into the variable the manifest and the
+  # two docker runs share.
+  pin=$(variant_pin plex) ||
+    { echo "could not read the chart's plex pin from charts/s5n/variants.yaml"; fail=1; return 0; }
+  read -r plex_repo plex_tag plex_digest <<<"$pin"
+  MIGRATE_PLEX_IMAGE="${plex_repo}:${plex_tag}${plex_digest:+@${plex_digest}}"
 
   # The source's tree, as the volumes above name it. The configs sit under the
   # data path the way an older install kept them, the downloads are `Downloads`
@@ -5618,6 +5947,7 @@ migrate_box() {
     mkdir -p '$CONFIG_PATH'
     chown -R '${puid}:${pgid}' '$WORK/hostfs'"
   mkdir -p "$src/var/data/qbittorrent" "$src/var/data/sonarr" "$src/var/data/${MIGRATE_RADARR_INSTANCE}" \
+    "$src/var/data/plex" \
     "$src/var/data/Downloads/tv" "$src/var/data/Downloads/${MIGRATE_RADARR_CATEGORY}" \
     "$src/var/data/library/tv" "$src/var/data/library/${MIGRATE_RADARR_CATEGORY}"
   # One hardlinked pair per category, the way an import leaves them: the same
@@ -5631,9 +5961,13 @@ migrate_box() {
     >"$src/var/data/Downloads/${MIGRATE_RADARR_CATEGORY}/Film.2020.mkv"
   ln -f "$src/var/data/Downloads/${MIGRATE_RADARR_CATEGORY}/Film.2020.mkv" \
     "$src/var/data/library/${MIGRATE_RADARR_CATEGORY}/Film.2020.mkv"
+  # The subtitle sidecar one of the library database's rows points at: the
+  # migration reads it out of media_streams.url and rewrites it with the film.
+  printf 's5n e2e: a subtitle the library database points at\n' \
+    >"$src/var/data/library/${MIGRATE_RADARR_CATEGORY}/Film.2020.en.srt"
   # A marker in each config directory: migrate copies the whole tree, so a file
   # the apps never read has to come across too.
-  for app in qbittorrent sonarr "$MIGRATE_RADARR_INSTANCE"; do
+  for app in qbittorrent sonarr "$MIGRATE_RADARR_INSTANCE" plex; do
     printf 's5n e2e: this config directory was the source install\n' >"$src/var/data/${app}/.s5n-e2e-source"
   done
   MIGRATE_QBIT_PASSWORD=$(openssl rand -hex 16)
@@ -5648,12 +5982,15 @@ migrate_box() {
   grep -qF "containerPath: ${WORK}/hostfs" "$KIND_CONFIG" ||
     { echo "the kind config has no mount for ${WORK}/hostfs: the source's files would be inside the node only"; fail=1; return 0; }
 
-  log "the source install: three apps over host directories, in namespace ${MIGRATE_LEGACY_NS}"
+  log "the source install: four apps over host directories, in namespace ${MIGRATE_LEGACY_NS}"
   migrate_source_manifests "$WORK/source-manifests.yaml" "$src" "$puid" "$pgid"
   if ! $K apply -f "$WORK/source-manifests.yaml" >"$WORK/source-apply.txt" 2>&1; then
     cat "$WORK/source-apply.txt"; fail=1; return 0
   fi
-  for app in qbittorrent sonarr "$MIGRATE_RADARR_INSTANCE"; do
+  # Plex is the slow one: it builds its library database on this first start,
+  # and its readiness is /identity, so rollout status is what says that start
+  # finished. The other three answer as soon as their API is up.
+  for app in qbittorrent sonarr "$MIGRATE_RADARR_INSTANCE" plex; do
     if ! $K -n "$MIGRATE_LEGACY_NS" rollout status "deployment/${app}" --timeout=300s; then
       echo "${app} never became ready in the source install"
       $K -n "$MIGRATE_LEGACY_NS" get pods
@@ -5686,13 +6023,20 @@ migrate_box() {
   # so this wait is what keeps the fixture out of that case.
   log "stopping the source, the way an operator cuts over"
   $K -n "$MIGRATE_LEGACY_NS" scale deployment --all --replicas=0 >/dev/null
-  for app in qbittorrent sonarr "$MIGRATE_RADARR_INSTANCE"; do
+  for app in qbittorrent sonarr "$MIGRATE_RADARR_INSTANCE" plex; do
     $K -n "$MIGRATE_LEGACY_NS" wait --for=delete pod -l "app=${app}" --timeout=180s >/dev/null 2>&1 || true
   done
   [ -f "$src/var/data/qbittorrent/qBittorrent/categories.json" ] ||
     { echo "the source qBittorrent wrote no categories.json: migrate would have no category paths to rewrite"; fail=1; }
   [ "$fail" = 0 ] || return 0
   echo "  the source is stopped, and qBittorrent's categories are on disk"
+
+  # The library database is closed now, which is the only state a migration may
+  # see it in: Plex keeps a connection pool and a -wal beside it, and caches
+  # pages. The rows go in with Plex's own shell, out of the same pinned image
+  # the runner Job will run.
+  log "seeding the source Plex's library database: Plex's own schema, and the rows a library holds"
+  migrate_seed_plex "$src/var/data/plex" || { fail=1; return 0; }
 
   # ---- discovery, then the cutover -----------------------------------------
   plan="$WORK/plan"
@@ -5703,7 +6047,7 @@ migrate_box() {
   fi
   cat "$WORK/migrate-discover.txt"
   report="$plan/report.txt"
-  for instance in qbittorrent sonarr "$MIGRATE_RADARR_INSTANCE"; do
+  for instance in qbittorrent sonarr "$MIGRATE_RADARR_INSTANCE" plex; do
     source=$instance
     [ "$instance" = "$MIGRATE_RADARR_INSTANCE" ] && source=$MIGRATE_RADARR_INSTANCE
     grep -q "^app: ${instance} (from ${source}, config " "$report" ||
@@ -5713,6 +6057,12 @@ migrate_box() {
     { echo "the plan does not name the data root with Downloads and library:"; sed -n '/^data:/p' "$report"; fail=1; }
   grep -q 'service: qbittorrent\.legacy' "$plan/plan.yaml" ||
     { echo "the plan has no host rule for the source's qbittorrent Service"; fail=1; }
+  # The blessed Plex image's entrypoint writes its transcoder directory into
+  # Preferences.xml as /transcode, which no mount of the source gives a rule:
+  # discovery maps it onto itself because the release mounts the same
+  # /transcode, so the plan applies without a hand edit.
+  grep -qF 'from: /transcode' "$plan/plan.yaml" ||
+    { echo "the plan has no rule for Plex's /transcode, and apply refuses a stored path no rule covers"; fail=1; }
   [ "$fail" = 0 ] || return 0
 
   # ---- a fresh cluster, with box's roots bound in --------------------------
@@ -5813,6 +6163,14 @@ PYWIRING
   done
   grep -q "^wiring ok" "$WORK/apply-migrate.txt" ||
     { echo "the apply the migration handed over to did not report a healthy receipt"; fail=1; }
+  # Plex's rows are the ones only the runner Job can have rewritten: every other
+  # app's rewriter edits files, and this one runs `Plex SQLite` in the release's
+  # own image. A count that is off is a Job that read a different database.
+  for column in "section_locations.root_path 2" "media_parts.file 1" "media_streams.url 1" "metadata_items.guid 1"; do
+    grep -qF "plex: Library/Application Support/Plex Media Server/Plug-in Support/Databases/com.plexapp.plugins.library.db ${column%% *} path ${column##* }" \
+      "$WORK/apply-migrate.txt" ||
+      { echo "the plan did not say the runner rewrites Plex's ${column%% *} ${column##* } time(s)"; fail=1; }
+  done
   [ "$fail" = 0 ] || return 0
 
   # ---- assertion 1: healthy, on the chart's own images ---------------------
@@ -5820,14 +6178,46 @@ PYWIRING
   for instance in qbittorrent sonarr "$MIGRATE_RADARR_INSTANCE"; do
     app=$instance
     [ "$instance" = "$MIGRATE_RADARR_INSTANCE" ] && app=radarr
-    pin=$(variant_pin "$app") || { echo "could not read the chart's ${app} pin"; fail=1; return 0; }
-    expected=$(printf '%s' "$pin" | awk '{print $1 ":" $2}')
-    if [ -n "$(printf '%s' "$pin" | awk '{print $3}')" ]; then
-      expected=$(printf '%s' "$pin" | awk '{print $1 ":" $2 "@" $3}')
-    fi
+    expected=$(chart_image "$app") || { echo "could not read the chart's ${app} pin"; fail=1; return 0; }
     wait_image_ready "${instance}-0" "$expected" ||
       { echo "${instance}-0 is not ready on the chart's ${expected} (it runs $(pod_image "${instance}-0" || true))"; fail=1; }
   done
+  [ "$fail" = 0 ] || return 0
+
+  # ---- assertion 1b: Plex, through the runner Job --------------------------
+  # The one app whose database only its own binary may write. What is asserted,
+  # in the order the migration works: the Job ran and was admitted, the database
+  # it left reads back the paths the plan promised, and the release's Plex
+  # starts on it. The database is read with Plex stopped, which is the state the
+  # migration itself needs it in -- so Plex goes down first and comes back after
+  # the read, and its readiness after that is the server opening that file.
+  log "Plex: the runner Job, the database it rewrote, and the server that reads it"
+  migrate_check_runner plex || fail=1
+  $K -n "$NS" scale statefulset plex --replicas=0 >/dev/null ||
+    { echo "could not stop Plex to read the database it was migrated with"; fail=1; return 0; }
+  left=""
+  for i in $(seq 1 90); do
+    left=$($K -n "$NS" get pods -l app.kubernetes.io/name=plex -o name 2>/dev/null || true)
+    if [ -z "$left" ]; then break; fi
+    sleep 2
+  done
+  if [ -n "$left" ]; then
+    echo "Plex is still running (${left}): the database is open and cannot be read"
+    fail=1
+  else
+    migrate_check_plex_db "$CONFIG_PATH/plex" || fail=1
+    # The database names a file now; the rename is what makes it exist.
+    if [ ! -f "$DATA_PATH/media/${MIGRATE_RADARR_CATEGORY}/Film.2020.mkv" ]; then
+      echo "the database's media_parts.file is /data/media/${MIGRATE_RADARR_CATEGORY}/Film.2020.mkv, and ${DATA_PATH}/media/${MIGRATE_RADARR_CATEGORY}/Film.2020.mkv is not there: the rewrite points at nothing"
+      fail=1
+    fi
+    expected=$(chart_image plex) || { echo "could not read the chart's plex pin"; fail=1; return 0; }
+    $K -n "$NS" scale statefulset plex --replicas=1 >/dev/null ||
+      { echo "could not start the migrated Plex"; fail=1; return 0; }
+    wait_image_ready plex-0 "$expected" ||
+      { echo "Plex is not ready on the chart's ${expected} after the migration (it runs $(pod_image plex-0 || true))"; fail=1; }
+    migrate_check_plex_identity || fail=1
+  fi
   [ "$fail" = 0 ] || return 0
 
   # ---- assertion 2: paths --------------------------------------------------
@@ -5865,7 +6255,7 @@ PYWIRING
     [ "${links:-0}" -eq 2 ] ||
       { echo "${DATA_PATH}/downloads/${category}: link count is ${links:-none}, want 2 -- the download and the import it was hardlinked to are not one file any more"; fail=1; }
   done
-  for instance in qbittorrent sonarr "$MIGRATE_RADARR_INSTANCE"; do
+  for instance in qbittorrent sonarr "$MIGRATE_RADARR_INSTANCE" plex; do
     [ -f "$CONFIG_PATH/${instance}/.s5n-e2e-source" ] ||
       { echo "${CONFIG_PATH}/${instance}/ holds no marker: migrate did not copy the whole config directory"; fail=1; }
   done
