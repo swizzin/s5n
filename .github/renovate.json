@@ -49,7 +49,7 @@
       "automerge": true
     },
     {
-      "description": "The qBittorrent build compiled for AMD Zen 3 is the one image the e2e cannot run: it dies with SIGILL on CI's runners and most hosts, and it is amd64 only. So a green run says nothing about its new bytes, and it never merges itself, patch or digest. It gets a pull request of its own: a group merges itself only when every update in it may, so inside the app images group it would hold every other image back. This rule sits after the app images one because the later matching rule wins, and its tag is where the build profile is named (5.3.0-lt1.2.20-10g-znver3-mimalloc).",
+      "description": "The qBittorrent build compiled for AMD Zen 3 is the one image the e2e cannot run: it dies with SIGILL on CI's runners and most hosts, and it is amd64 only. So a green run says nothing about its new bytes, and it never merges itself, patch or digest. It gets a pull request of its own: a group merges itself only when every update in it may, so inside the app images group it would hold every other image back. This rule sits after the app images one because the later matching rule wins, and its tag is where the build profile is named (5.3.0-lt1.2-10g-znver3-mimalloc).",
       "matchFileNames": ["charts/s5n/variants.yaml"],
       "matchCurrentValue": "/-znver3/",
       "groupName": "qBittorrent Zen 3 build",

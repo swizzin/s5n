@@ -24,11 +24,13 @@ qbittorrent:
     # under /config, the conf at /config/qBittorrent/qBittorrent.conf, ports from
     # QBT_WEBUI_PORT and QBT_TORRENTING_PORT), so the chart's one pod spec runs
     # it unchanged, and a box can switch variants in place. It ships no curl.
-    # The name is the libtorrent line and the build profile, never the version:
-    # the tag pins those, so a later 1.2.21 stays this variant.
+    # The name is the libtorrent line and the build profile, never a version. The
+    # tag adds only qBittorrent's version (5.3.0-lt1.2); libtorrent's release is
+    # pinned by the digest alone, so a later 1.2.21 is a new digest on this same
+    # tag and stays this variant.
     repository: ghcr.io/swizzin/qbittorrent
-    tag: "5.3.0-lt1.2.20"
-    digest: sha256:b9fbce0d1f44684f6272b39e34e5f24af1ddcc4236d9e2de364dafe6dc403b2e
+    tag: "5.3.0-lt1.2"
+    digest: sha256:bbfd435b60bd58a79d2f660a60f540e0418ca3d45a490624d3e0ddae62ad7d08
   lt1.2-10g-znver3-mimalloc:
     # The one variant the e2e does not run: it is compiled for AMD Zen 3
     # (-march=znver3), so on CI's runners and most hosts it dies with SIGILL at
@@ -37,8 +39,8 @@ qbittorrent:
     # test, run on a Zen 3 runner before the tag is pushed. Its layout is lt1.2's,
     # which the e2e does run.
     repository: ghcr.io/swizzin/qbittorrent
-    tag: "5.3.0-lt1.2.20-10g-znver3-mimalloc"
-    digest: sha256:89a2688b002716cac31259f6bc1b949d34fd7fa62498e96ad24c0308f845060b
+    tag: "5.3.0-lt1.2-10g-znver3-mimalloc"
+    digest: sha256:c6959055763eec4b2689ae0a11762b6da2cedb4a936985e6b1413b6cba188b46
 
 sonarr:
   default:

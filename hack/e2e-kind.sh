@@ -47,6 +47,40 @@ ENVOY_GATEWAY_CHART_VERSION=${ENVOY_GATEWAY_CHART_VERSION:-$(pin envoyGateway)}
 METALLB_VERSION=${METALLB_VERSION:-$(v_tag "$(pin metallb)")}
 CERT_MANAGER_VERSION=${CERT_MANAGER_VERSION:-$(pin certManager)}
 
+# The qBittorrent variant this run installs and admits, read from the chart's own
+# file rather than copied here: Renovate bumps this variant in
+# charts/s5n/variants.yaml only, so a literal here would fail this script on
+# every digest bump.
+# The shape read is the file's fixed one -- repository, tag and digest on three
+# lines inside the `qbittorrent:` block's `lt1.2:` entry -- the same shape the
+# Renovate manager's regex relies on, and the reason no YAML parser is needed on
+# the host. `lt1.2-10g-znver3-mimalloc` is a different entry, so the entry name
+# is matched whole.
+variant_field() { # <field> -> the lt1.2 entry's value, quotes stripped
+  awk -v want="$1" '
+    /^[A-Za-z]/ { inqbt = ($0 ~ /^qbittorrent:/); invar = 0; next }
+    inqbt && /^  lt1\.2:[[:space:]]*$/ { invar = 1; next }
+    inqbt && /^  [^[:space:]]/ { invar = 0 }
+    invar && $1 == want ":" {
+      line = $0
+      sub(/^[^:]*:[[:space:]]*/, "", line)
+      gsub(/"/, "", line)
+      print line
+      exit
+    }
+  ' charts/s5n/variants.yaml
+}
+qbit_repository=$(variant_field repository)
+qbit_tag=$(variant_field tag)
+qbit_digest=$(variant_field digest)
+if [ -z "$qbit_repository" ] || [ -z "$qbit_tag" ] || [ -z "$qbit_digest" ]; then
+  echo "charts/s5n/variants.yaml: qbittorrent.lt1.2 needs all three of repository, tag and digest (read '${qbit_repository}' '${qbit_tag}' '${qbit_digest}')"
+  exit 1
+fi
+# The variant NAMED lt1.2: a values file that falls back to the default, or names
+# another blessed build, must still fail the assertions below.
+QBIT_LT12="${qbit_repository}:${qbit_tag}@${qbit_digest}"
+
 # Test-only images, pinned by tag and digest. They are not box's to install, so
 # they stay in the scripts rather than the chart's platform.yaml; Renovate
 # watches them here (.github/renovate.json), and the tag stays in the reference
@@ -317,7 +351,7 @@ fi
 # creates nothing.
 log "admission: the user can run both blessed qBittorrent repositories"
 sed -e 's/name: unblessed/name: blessed-qbittorrent/' -e 's/app: unblessed/app: blessed-qbittorrent/g' \
-  -e "s#${CURL_IMAGE}#ghcr.io/swizzin/qbittorrent:5.3.0-lt1.2.20@sha256:b9fbce0d1f44684f6272b39e34e5f24af1ddcc4236d9e2de364dafe6dc403b2e#" \
+  -e "s#${CURL_IMAGE}#${QBIT_LT12}#" \
   "$WORK/unblessed.yaml" >"$WORK/blessed-qbittorrent.yaml"
 if $K --as="$SA" -n "$NS" create --dry-run=server -f "$WORK/blessed-qbittorrent.yaml" >"$WORK/allow-qbittorrent.txt" 2>&1; then
   echo "the lt1.2 qBittorrent image is admitted"
@@ -578,7 +612,7 @@ $K -n "$NS" wait --for=condition=Ready pod -l 'app.kubernetes.io/instance=s5n,s5
 # against the default image. So the pod spec is read back (repository, tag and
 # the digest the variant pins) and the runtime's own imageID has to be that
 # digest, which is what proves the bytes that started.
-qbit_variant='ghcr.io/swizzin/qbittorrent:5.3.0-lt1.2.20@sha256:b9fbce0d1f44684f6272b39e34e5f24af1ddcc4236d9e2de364dafe6dc403b2e'
+qbit_variant=$QBIT_LT12
 qbit_spec=$($K -n "$NS" get pod qbittorrent-0 -o jsonpath='{.spec.containers[?(@.name=="qbittorrent")].image}')
 qbit_id=$($K -n "$NS" get pod qbittorrent-0 -o jsonpath='{.status.containerStatuses[?(@.name=="qbittorrent")].imageID}')
 echo "qBittorrent runs: ${qbit_spec}"
