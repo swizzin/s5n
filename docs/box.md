@@ -694,7 +694,7 @@ and raises it when it deletes support for something an old release relies on. Th
 platform pins are part of that promise: box's compiled-in manifests must work with the
 platform version every release back to its floor pins. That isn't hypothetical:
 `update` replaces box before it moves the chart, so a new box runs against root's old
-release between those two steps, and for longer when an update rolls back. A release
+release between those two steps, and for longer when the chart step fails. A release
 older than box's floor is one box will only update.
 
 **box only uses published charts (decided).** It pulls a released chart by version from
@@ -740,31 +740,47 @@ switch in the repo: disabling the workflow in GitHub is the kill switch. Nothing
 released without a previous `s5n-v*` tag to build on, and nothing is published from a
 push to `develop`.
 
-What makes this safe is the e2e plus a rollback that really works. The Arrs migrate
-their databases forward when they start and don't support running an older version
-on a newer database, so stepping a chart back is not enough. `update` snapshots each
-app's config before it moves a release, and a rollback restores the snapshot together
-with the previous chart.
+What makes this safe is the e2e first: a bump that breaks on a clean box never becomes
+a release. What the e2e can't see is one box's own data meeting a new image, and that
+is what the per-app rollback under Updates is for. The Arrs migrate their databases
+forward when they start and don't support running an older version on a newer
+database, so putting an app back on its old image is not enough. `update` snapshots an
+app's config before it moves the app's image, and a rollback restores the snapshot
+together with the image the app had.
 
 **What update does with it:**
 
-- **box updates itself first (decided), then re-runs as the new binary (proposed).**
+- **box updates itself first, then re-runs as the new binary (decided).**
   `box update` checks for a newer box before it looks at charts, replaces itself, and
   execs the new binary with the same arguments, so the chart update always runs under
   the newest box. The timer does the same, which is why a release that raises
-  `min-box` never leaves an unattended box stuck.
-- Self-update rules (proposed):
-  - **Verified before it runs.** The new binary is checked against the release's signed
-    checksum before it replaces anything. It runs as root, so an unverified self-update
-    would be remote code execution as root.
+  `min-box` never leaves an unattended box stuck. A box that can't update itself (the
+  release page is unreachable, the signature doesn't verify, a package owns the
+  binary) says why in one line and runs the chart update itself, with the releases it
+  meets `min-box` for. The one exception is a new binary that installed and then
+  wouldn't start: that run stops, because carrying on would move the seedbox under the
+  box it just replaced.
+- Self-update rules (decided):
+  - **Verified before it runs (decided).** The new binary is checked against the
+    release's signed checksum before it replaces anything. It runs as root, so an
+    unverified self-update would be remote code execution as root. The signature is
+    ed25519 over a line naming the release's tag (`s5n box release box-v<version>`)
+    followed by the exact bytes of `sha256sums.txt`, so an older release's signed files
+    served under a newer tag don't verify. It is published beside them as
+    `sha256sums.txt.sig`, and the public key is compiled into box. No keyserver, no
+    transparency log, no new dependency: the standard library verifies it. A box built
+    without a key refuses to update itself rather than skipping the check, and a
+    release built without the signing secret, or with one whose public half isn't the
+    key committed in the repository, fails instead of publishing.
   - **Atomic, with one step back.** Written beside the old binary and renamed over it.
     The previous binary is kept as `box.previous`, and `box update --rollback-box` puts
     it back.
   - **Root only.** The binary is root-owned. A user's `box update` that needs a newer
     box says so and stops: "box 0.4.0 is needed; root's next update brings it".
-  - **Held like a pinned image.** `--hold-box` (or a key in root's config) skips the
-    self-update and says so on every run. A release whose `min-box` a held box doesn't
-    meet is shown, not taken.
+  - **Held like a pinned image.** `--hold-box` skips the self-update and says so on
+    every run. `update.hold-box: true` in root's config does the same on every run,
+    the timer's included (decided). A release whose `min-box` a held box doesn't meet
+    is shown, not taken.
   - **Package-managed installs defer.** If box came from a distro package, it never
     overwrites itself. It names the package command instead.
 - It picks the newest release this box meets `min-box` for. A newer release that needs
@@ -791,11 +807,30 @@ users, and the chart can't promise anything about an image it hasn't seen.
 
 Instead, the chart lists **blessed variants** per app, such as a qBittorrent build on
 libtorrent 1.2 or 2.x (see `PLAN.md`, open decisions). Each variant is tested by the
-e2e like the default. Proposed command: `box update qbittorrent --variant lt2`, which
+e2e like the default. Proposed command: `box update qbittorrent --variant lt1.2`, which
 writes the choice into values.
 
 A digest pinned by hand in values is held: `update` leaves that app where it is and
 says so ("radarr: held at 6.1 by your values"). Removing the pin releases it.
+
+**Digests are box's promise; the chart accepts a tag (decided).** The chart's own pins
+are always a tag and a digest, so a release runs the bytes its e2e tested. A pin in
+values may be a tag alone, the way any chart takes one: the chart renders `repo:tag`
+and refuses nothing, because asking a Helm user for a sha to pin `6.1` is hostile. Such
+a pin is mutable. Each node runs whatever the tag pointed at when it first pulled, and a
+reschedule or an image GC can pull different bytes with no release behind them; that is
+the user's choice. Every pin box writes (`rollback --pin`, a hold) carries the tag and
+the digest together, so box never creates a mutable pin itself. Proposed, not built:
+`status` and `doctor` name a tag-only pin ("radarr: pinned to tag 6.1 without a
+digest; it can change under you"), reading the running digest from the pod's
+`imageID`, since box records none for it; and the chart's `NOTES.txt` names one on
+`helm install`/`upgrade`, without failing.
+
+**The s5n image is the chart's one tag-only pin (proposed).** `variants.yaml` ships
+`s5n` with an empty digest because the image and the chart share a tag and the digest
+does not exist until the image is built. The release workflow should push the image
+first and write its digest into the chart before packaging, so our own pipeline is held
+to the rule above. Due with the next change to `release.yaml`, not on its own.
 
 **A user can't name an image repository (decided).** Today `apps.*.image.*` is a values
 key and the schema accepts any repository, so a user could patch in an arbitrary image.
@@ -818,6 +853,41 @@ The policy's allowlist is generated from the variant list, never kept by hand. A
 an app already means a values entry and its variants, so it reaches the allowlist with
 no extra step. Anything outside the catalog stays outside a user's namespace, which is
 the decided rule that root decides which apps a user has.
+
+**qBittorrent's own builds (decided).** qBittorrent is the one app where the
+libtorrent line is a real choice, so its list has six entries: `default`
+(home-operations, still the default) and five builds of
+`ghcr.io/swizzin/qbittorrent`, the project's own image — `lt1.2`, `lt1.2-10g`,
+`lt2.1`, `lt2.1-10g` and `lt1.2-10g-znver3-mimalloc`.
+`lt1.2` is the static build on libtorrent 1.2 (musl, baseline x86-64-v2 and
+armv8-a) with the default's layout — `HOME` and `XDG_CONFIG_HOME` at `/config`, the
+conf at `/config/qBittorrent/qBittorrent.conf`, ports from `QBT_WEBUI_PORT` and
+`QBT_TORRENTING_PORT` — so the chart's one pod spec runs it unchanged and a box can
+switch variants in place. A variant name is the libtorrent line plus the build
+profile, never a version. The tag carries only qBittorrent's version and that line
+(`5.3.0-lt1.2`) — the version is what lets Renovate propose a qBittorrent release —
+and libtorrent's own release is pinned by the digest alone, so a later 1.2.21 is a
+new digest on the same tag and the variant keeps its name.
+
+`lt2.1` is the same build on libtorrent 2.1, which is the other axis a user can
+care about: 2.x keeps no disk cache of its own and maps files instead, and the
+chart sets no cache options, so the same pod spec runs it. `lt1.2-10g` and
+`lt2.1-10g` are those two builds with two larger compiled-in peer buffers for 10
+Gbit links — `max_peer_recv_buffer_size` 4 MiB against the base build's 2 MiB, and
+`send_not_sent_low_watermark` 1 MiB against 512 KiB — and nothing else differs: the
+base builds already carry five tuned defaults of their own, so `-10g` is not stock
+libtorrent plus two values. All four are built for both architectures, and
+`hack/e2e-kind.sh` switches through each one the way it runs `lt1.2`: the pod's own
+image and digest, and qBittorrent's `buildInfo` reporting the libtorrent line, which
+is what a tag alone cannot say.
+
+`lt1.2-10g-znver3-mimalloc` is the one exemption from "the e2e tests every
+variant". It is compiled for AMD Zen 3 (`-march=znver3`), so it dies with SIGILL at
+start on CI's runners and most hosts, and it is amd64 only, so an arm64 node cannot
+pull it. What tests it instead is the `swizzin/qbittorrent` repository's own binary
+verify and smoke test, run on a Zen 3 runner before the tag is pushed. Its layout is
+the one `lt1.2` has, which `hack/e2e-kind.sh` runs on every push, so the pod spec is
+proven for both.
 
 ### uninstall (decided)
 
@@ -875,6 +945,68 @@ data. Everything it will change is written down before it changes anything.
   outside the plan's rules: a path prefix the table doesn't cover, a host reference the
   plan never classified. Guided, those become questions; unattended, the refusal names
   each one and the plan key that would settle it.
+- **The path table is per app (proposed).** Each app saw its own paths: an Arr may see
+  the library at `/library` while qBittorrent sees the same downloads at `/downloads`.
+  So the plan maps paths per app, from the mounts discovery found:
+
+  ```yaml
+  version: 1
+  apps:
+    sonarr-4k:                  # box's instance name
+      source: sonarr4k          # the source's name for it
+      config: /srv/apps/sonarr4k  # copied from, never written
+      paths:
+        - from: /library/Downloads
+          to: /data/downloads
+        - from: /library/media
+          to: /data/media
+    qbittorrent:
+      source: qbittorrent
+      config: /srv/apps/qbittorrent
+      paths:
+        - from: /downloads
+          to: /data/downloads
+  ```
+
+  The longest `from` that matches whole path segments wins, so `/downloads2` is not
+  under `/downloads`. A relative path follows its root and is left alone. An absolute
+  path no rule covers stops apply and names the app, the file or table, and the path.
+  Each app also records the namespace it ran in and the ports its own config set:
+  a localhost address another app stored is resolved by its port, and a Service's
+  short name by the namespace of the app that stored it.
+- **Data is adopted by renaming, never by moving (decided).** The plan's `data` key
+  names the directory that becomes the seedbox's data path and the two directories
+  under it that held the downloads and the media. When their names differ from box's
+  (`Downloads` for `downloads`), apply renames them, which keeps every hardlink. They
+  must be single directories directly under the root; anything else is a move, and a
+  move is the operator's to make before apply.
+- **Every other address is classified in the plan (proposed).** `hosts` lists the
+  Services discovery found (`service: <name>.<namespace>`, matched in every form the
+  cluster's DNS answers) and any other address the apps stored (`host:`), each either
+  mapped to a box app (`app:`) or kept as it is (`leave: true`), optionally narrowed to
+  one port.
+
+  ```yaml
+  data:
+    root: /srv/library
+    downloads: Downloads        # renamed to downloads
+    media: media
+  hosts:
+    - service: sonarr.default
+      app: sonarr
+    - host: 192.0.2.10
+      leave: true
+  ```
+- **Every rewriter runs twice (proposed).** apply copies each app's config into a
+  staging directory, then runs every app's check pass, which writes nothing and returns
+  the changes and every gap. Only when no app has a gap does any app's write pass run,
+  and it makes exactly the changes its check reported, in the staged copy. History
+  (records of what happened, never read back to act on) is rewritten where a rule
+  covers it and never stops apply.
+- **Every app's stored paths are rewritten, with no exceptions (decided).** Each app
+  gets the `/data` contract and migrate rewrites what it holds: Arr databases and
+  configs, qBittorrent's fastresume files and settings, and Plex's database through the
+  `Plex SQLite` shipped in the pinned Plex image, never stock sqlite.
 
 ## Updates (decided goal, proposed mechanism)
 
@@ -887,7 +1019,8 @@ The chart pins every image by digest; there's no in-cluster image updater and no
 1. Renovate opens a digest bump when an app image publishes.
 2. CI runs the e2e suite on it; a passing bump cuts a chart release automatically.
 3. Each box runs `update` on a timer (on by default). A health check and a wiring check
-   gate each update; a failure rolls back to the previous release (Phase 3).
+   gate each update. An app that crashloops on its new image is rolled back by box; any
+   other failure stops the update there, is recorded and is announced.
 
 New images arrive hours after upstream instead of minutes, and a broken upstream image
 fails in CI instead of on a user's box.
@@ -897,12 +1030,200 @@ jitter so a fleet doesn't arrive at once. The interval is a key in root's config
 the timer can be turned off there. It reads the tag list from ghcr anonymously; no
 token is needed to learn that something moved.
 
+- **Root's config is `/etc/swizzin/box.yaml` (decided).** It sits beside the cluster
+  record, so `--record` moves both, and it is root's alone, mode 0600, because the
+  notice address can carry a token. bootstrap writes it once, on the host that has
+  none, with these keys and comments:
+
+  ```yaml
+  # box's settings for this host. box never rewrites this file; edit it by hand.
+  update:
+    timer: on        # off: no update checks and no health notices
+    interval: 1h     # how often the timer checks for a newer release; 15m at least
+    hold-box: false  # true: take no new box, the same as --hold-box on every run
+  notices:
+    url: ""          # box POSTs a JSON notice here after updates and on health changes
+  ```
+
+  An existing file is never rewritten. Every run parses it strictly: an unknown key, a
+  malformed line or a bad value stops the command, naming the file, the line and the
+  key, because a typo that is silently ignored is a box that quietly stopped updating.
+  A missing file is the defaults. `update.timer: off` is read by the timer's own wake,
+  so it takes effect on the next wake and systemd is never touched.
+- **The unit wakes box every fifteen minutes; box decides whether to check (decided).**
+  Two systemd units: `box-update.service` runs `box update --timer` as root with no
+  timeout (an update can wait out an app's thirty-minute startup budget), for the
+  record, grant and values that install used; `box-update.timer` wakes it 10 minutes
+  after boot, every 15 minutes after that, with up to 10 minutes of jitter.
+  `box update --timer` answers yes and asks nothing. The wake reads the clock
+  `update.json` holds: a check is due when the last one is zero or a whole interval
+  old, so most wakes read health and nothing else, and the check interval is one edit
+  in `box.yaml`. A wake that is not due contacts no registry and replaces no binary.
+  A wake that is due reads health after the check whatever it did, and once: a check
+  that failed leaves the last one unwritten, so every wake would be due again and a
+  registry outage would otherwise silence every health notice while it lasted.
+- **Where box cannot schedule itself, it says so (decided).** The units are installed
+  only when bootstrap runs as root on a host whose systemd is up. Anywhere else --
+  a container, a non-root run -- bootstrap prints one line: box will not check for
+  updates by itself, and `box update --timer` from cron every 15 minutes is the same
+  job. A seedbox that never updates on its own is the failure this exists to prevent,
+  so it is said out loud rather than left to be noticed.
+
 **When an app takes it (decided).** Each catalog app declares an apply policy, and the
 default is to apply as soon as the release is taken. Plex defers while it has active
 streams, and Jellyfin will do the same; the update applies at the first check with
 none, so it can wait up to one interval after the last stream ends. Torrent activity
 is never a reason to wait: a client is always busy, and there's no clean line between
 busy and idle.
+
+**Snapshot and rollback (decided for 0.5, mechanism proposed).** An unattended update
+runs over forward-only database migrations, so 0.5 carries a narrow rollback ahead of
+`box backup`. It covers one app over one image change box makes, in an `update` step or
+an `apply`, not disaster recovery. A restart that pulls new bytes under a mutable tag is
+not a change box made, and nothing snapshots it.
+
+- **Only what moves is snapshotted.** A database migrates when its image changes, so a
+  step snapshots the apps whose rendered image differs: the installed release under the
+  installed values against what is about to be applied. That is the same comparison for
+  `update` (the chart's pins move) and `apply` (a values pin moves, a tag or a digest;
+  decided). A pin that is a tag alone moves when the tag does. A step that moves no image
+  takes no snapshot. An `apply`'s copy is named like a step's, with the installed release
+  on both sides (`<v>-<v>-<time>/`), so rollback finds the newest copy either way. An
+  `apply` has no automatic rollback (decided): whoever runs it is there to run
+  `box rollback`, and the apply ends by naming each copy it took and that command,
+  whether it succeeded or not. Whether an app moves is read from what is deployed (its
+  StatefulSet's image) against what this run renders, never from the values file. An
+  app box can't name the exact bytes of (a tag whose pods report no digest, or
+  instances that disagree) moves without a snapshot, and the plan says why before the
+  confirm; an apply is never refused for it, because the apply that pins a digest is
+  the way out (proposed).
+- **What is copied is the chart's to say.** Each catalog entry may name a `snapshot:`
+  list of globs relative to the app's config directory: the databases and the files
+  that point at them (`*.db`, `*.db-wal`, `config.xml`), never caches, logs, media
+  covers or Plex's metadata bundles. An app without the key has nothing to restore.
+- **An app a hand pin holds doesn't move in an update.** Its image is the one values
+  pin, whatever the chart's pin did, so an `update` step neither stops it nor copies it.
+  An `apply` that changes the pin moves it like any other image change.
+- **Snapshots can be turned off for an app (decided; where the switch lives is
+  proposed).** A copy costs disk, and the app is down while it is made. With snapshots
+  off for an app, a step that moves it takes no copy of it and the plan says so. That
+  app can't be rolled back, by box or by hand: if its new image fails, it stays as it
+  is and box says so.
+- **Consistent, not live.** The moving apps are scaled to zero first, which the image
+  change does anyway, so the copy is taken with no writer. It goes under the config
+  root in `.box/snapshots/<from>-<to>-<time>/<app>/`, on the same filesystem as what it
+  copies.
+- **A snapshot records the image it was taken under (decided; the fields are
+  proposed).** The copy and the image that wrote it belong together, and nothing else
+  on the box remembers the image once the release has moved. Proposed: each snapshot's
+  manifest names the image the app ran when it was copied and the image the step moved
+  it to, both by digest. For an app pinned to a tag alone the chart names no digest, so
+  box reads the one the pod ran from its `imageID` (proposed). A rollback reads the
+  first to know what to hold the app at and the second to know what the hold avoids,
+  whether box rolls back in the step or the user does a week later.
+- **A rollback is per app: its snapshot and the image it had (decided).** Rolling an
+  app back stops it, waits until its pods are gone, restores its snapshot (a file the
+  globs match that the snapshot lacks, such as a new `-wal`, is removed) and holds the
+  app at the image it ran before the step. The rest of the release stays where the
+  step put it. An automatic chart release changes nothing but pins, so the app runs
+  under the template it ran under before. After a maintainer's release the template
+  may have changed, and the old image under it is a combination the e2e hasn't run.
+- **There is no whole-release rollback in 0.5 (decided).** A failure that is the
+  chart's own, in the wiring Job or a template, is the same on every box: the e2e's to
+  catch and a new release's to fix.
+- **An app that crashloops on its new image is rolled back by box (decided).** The
+  health gate tells three cases apart. Every app is ready: the step passed. A moved
+  app's container keeps exiting: box rolls that app back, and only that app. A moved app
+  is running but not ready: box waits, because the Arrs open their web port only after
+  their migration has finished; if the wait runs out, box stops, records it and
+  announces it without touching the app. Only an update step rolls back: an app that
+  fails later is announced and left alone, because a restore by then would cost
+  everything it wrote since. Keeps exiting means the container has exited three times
+  since the step.
+- **Wiring runs once, after the gate (proposed).** The chart's wiring Job runs as a Helm
+  hook and waits for every app, so it can't pass while a moved app keeps exiting, and
+  Helm would wait on it until it failed. A step therefore installs the release with
+  hooks off, the gate judges the moved apps, any that keep exiting are rolled back, and
+  then one apply with hooks on runs the wiring against the images that stay. A wiring
+  failure at that point is the chart's own, and stops the update.
+- **Apps that migrate when they start get thirty minutes to start (decided).** The
+  startup probe used to allow five minutes, after which the kubelet restarts the
+  container, and a migration that outlasted it would count as a crashloop. Every app
+  gets the thirty minutes, so neither box nor the chart keeps a list of which apps
+  migrate: the probe only delays the liveness check, and a crash still shows at once.
+- **A rollback holds the app until the chart moves past the image it left (decided).**
+  The hold names the image the app was rolled back from. While the chart still pins that
+  image, the app stays on the old one; when a release pins another, the hold lapses and
+  the app moves with the release. Nothing is written into the values file. The hold
+  lives with the seedbox, under `<config root>/.box/` beside the snapshots it refers to,
+  so a user's own rollback can write it.
+- **`box rollback <app>` does the same by hand (decided).** It is for a fault no gate
+  sees. It uses the app's newest snapshot only and says how old that is before it
+  changes anything, because everything the app wrote since is lost. By default it leaves
+  the same hold, which lapses by itself. With `--pin` it writes an ordinary pin into
+  values instead, which holds the app until the user removes it, like any hand pin. A
+  pin is an override on whatever release is installed, so the release keeps updating
+  around it.
+- **A rollback is exact, and it never moves a user's pin forward (decided).** It puts the
+  app on the tag and digest it ran, never a tag alone, so it can't drift. For an app the
+  values pin, a hold can't apply (a pin outranks a hold), so `box rollback` refuses until
+  the user passes `--pin`, which rewrites their pin to the exact image. It stays there
+  until the user changes it: box doesn't
+  know what "next" means for a version someone chose, and won't turn their choice into
+  its own. `status` names the way out ("radarr: pinned to 6.1@sha256:… by a rollback; the
+  chart ships 6.3, remove the pin to follow it"). Where the chart moved the app, the hold
+  is what carries it past the failed version: the next release that pins another digest,
+  a same-tag rebuild included, lapses it and the app tries again, once per release.
+- **A failure box doesn't roll back stops the update (decided).** A failed apply or
+  wiring gate, a failing app with snapshots off, a rollback that fails itself: box
+  leaves things where they are, records the failed release and says where the box is.
+  The timer won't take the failed release again; a newer release clears that. A step
+  that fails before the release moves only starts the apps it stopped.
+- **Two kept.** After a step passes, each app keeps its two newest snapshots.
+
+**Notices (decided; what is posted is proposed).** A box that updates by itself has
+to be able to tell someone who isn't looking. box can post to one address after every
+update step (what moved, from what to what), when a step stops or an app is rolled
+back, and when an app stops being healthy.
+
+- **The address is root's, in `notices.url` (decided).** One URL, on the host: a user's
+  own hook arrives with `adduser`, and values hold none in 0.5. `init` asks for it on
+  root's first run -- optional, masked, last -- and writes it into that one line of
+  root's file. No address means no notices, and no error.
+- **What is posted is JSON (decided).** One body per event:
+  `{"event", "box", "seedbox", "from", "to", "apps", "gate", "error", "command",
+  "text", "content"}`. The optional fields are left out when they don't apply. `text`
+  and `content` carry the same one sentence, so Slack and Mattermost (text) and Discord
+  (content) each show box's words rather than a rendering of the fields, and a script
+  reads the fields. An example: `box.example.com: s5n 0.5.1 → 0.5.2 (sonarr 4.0.14 →
+  4.0.15)`. The events are `updated`, `rolled-back`, `stopped`, `unhealthy`, `healthy`.
+- **Health is read on every wake, and only a change is posted (decided).** The first
+  reading on a box that stores none is recorded silently; after that an app whose
+  readiness flips, in either direction, is one notice. A changed reason is not a
+  change. An unhealthy notice names `box rollback <app>` when the app moved in the last
+  step and box has that step's copy of it, and the logs otherwise. There is no `box
+  logs` yet, so the command it names is `kubectl -n <namespace> logs
+  statefulset/<app>`.
+- **Posting never fails an update (decided).** One attempt, ten seconds. A receiver that
+  is down is one warning naming the host box posted to -- never the path or the query,
+  which is the token -- and the update that already happened stays a success.
+
+**What `status` shows in 0.5 (decided).** The first line only, from cheap reads -- no
+registry, so it is quick from a shell prompt. One line, segments joined by ` · `:
+
+1. the installed release, from Helm: `s5n 0.5.1`, or `s5n ? (cluster not reachable)`
+   when the cluster can't be read (the rest of the line still prints). That read has
+   ten seconds: an API server that does not answer in time is the same answer as one
+   that refused, so the one-line command cannot hang;
+2. the last update from `update.json`: `last update 0.5.0 → 0.5.1 Nov 15 03:12 ok`,
+   `... failed (health)`, `... ok, radarr rolled back`, or `last update none`;
+3. the next check: `timer off` (root's config), `timer not installed` (no unit on this
+   host), `next check within 15m` (due or overdue), or `next check ~04:12`;
+4. what's held, left out when nothing is: `held: box, release 0.5.2 (failed), radarr
+   (rolled back from 6.3), sonarr (pinned)`.
+
+`box status` takes `--record`, `--grant`, `--values` and `--kubeconfig`. The rest of
+"status and doctor" stays proposed.
 
 ### The platform layer (decided)
 
@@ -988,6 +1309,8 @@ one entry per app:
 
 - name and one-line description;
 - whether it takes multiple instances;
+- how a person gets into it: behind the box's one login (`login: portal`, the default),
+  or signed in by the app itself (`login: own`), which exempts it from the login;
 - its setup questions: prompt, type, default, and the values key each answer goes to.
 
 box reads the manifest from the chart release it's installing and builds its dialogs
@@ -1052,6 +1375,12 @@ reason instead of a stack trace.
   one command that detects the source, since the hard part (rewriting paths in the Arr
   databases, carrying qBittorrent's state) is the same for all of them.
 - Who assigns the torrent port with multiple users (see Scopes).
+- **A rollback across a repository change.** A hold puts an app back on the tag and
+  digest it ran, under the repository the release pins. A release that moves an app to
+  a different repository therefore can't be rolled back that way: the old digest isn't
+  in the new repository. Proposed: when the release still blesses the old repository
+  as a variant, the hold selects that variant; when it doesn't, the plan says before
+  the step that the app can't be rolled back.
 - **A user's route under an Arr's `/api` or `/ping`.** Those paths skip the login because
   the Arr checks its own key, but a user's own HTTPRoute under one of them (a longer
   prefix, pointing at another app) is the more specific route and is served without a

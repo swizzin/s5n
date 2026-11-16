@@ -39,7 +39,7 @@ func (f *fakes) withTransient(t *testing.T, extra map[string]any, events *[]stri
 	return f.app.Apply(context.Background(), opts)
 }
 
-func snapshot(t *testing.T, paths ...string) map[string]string {
+func fileContents(t *testing.T, paths ...string) map[string]string {
 	t.Helper()
 	out := make(map[string]string, len(paths))
 	for _, p := range paths {
@@ -69,7 +69,7 @@ func sameFiles(t *testing.T, before map[string]string) {
 // said yes, reaches the release, and is not written to either file.
 func TestTransientIsAskedAfterTheConfirm(t *testing.T) {
 	f := newFakes(t)
-	before := snapshot(t, f.grantPath, f.values)
+	before := fileContents(t, f.grantPath, f.values)
 	var order []string
 	f.app.Confirm = confirmFunc(func(string) (bool, error) {
 		order = append(order, "confirm")
@@ -138,7 +138,7 @@ func TestTransientIsNeverInALaterDiff(t *testing.T) {
 // answer is still an answer, and the grant is root's whichever way it arrives.
 func TestTransientCannotSetAGrantKey(t *testing.T) {
 	f := newFakes(t)
-	before := snapshot(t, f.grantPath, f.values)
+	before := fileContents(t, f.grantPath, f.values)
 
 	_, err := f.withTransient(t, map[string]any{"gateway.host": "other.example.com"}, nil)
 	if err == nil || !strings.Contains(err.Error(), "set by the grant") {

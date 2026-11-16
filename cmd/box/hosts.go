@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/swizzin/s5n/internal/authelia"
 	"github.com/swizzin/s5n/internal/login"
 	"github.com/swizzin/s5n/internal/platform"
 	"github.com/swizzin/s5n/internal/release"
@@ -12,19 +13,23 @@ import (
 	"github.com/swizzin/s5n/internal/setup"
 )
 
-// certificateStep is one host's TLS: its port-80 listener, its Certificate and,
-// once that is Ready, its HTTPS listener and the redirect. Both box commands
-// write a host through this one function, so init's names and an apply's new
-// app host cannot be served differently.
-func certificateStep(kubeconfig string, out say.Reporter) setup.HostFunc {
-	return func(ctx context.Context, h setup.Host) error {
-		cert := &platform.CertificateDecision{
-			Host:   h.Host,
-			Issuer: h.Issuer,
-			Open:   func() (platform.CertificateCluster, error) { return platform.NewCluster(kubeconfig) },
-			Say:    out,
+// certificateStep is the run's TLS: every host's port-80 listener and
+// Certificate first, one wait for all of them, then the HTTPS listener and the
+// redirect for each host that is Ready. Both box commands write their hosts
+// through this one function, so init's names and an apply's new app host cannot
+// be served differently.
+func certificateStep(kubeconfig string, out say.Reporter) setup.HostsFunc {
+	return func(ctx context.Context, hosts []setup.Host) error {
+		reqs := make([]platform.CertificateRequest, 0, len(hosts))
+		for _, h := range hosts {
+			reqs = append(reqs, platform.CertificateRequest{Host: h.Host, Issuer: h.Issuer})
 		}
-		_, err := cert.Apply(ctx)
+		certs := &platform.Certificates{
+			Hosts: reqs,
+			Open:  func() (platform.CertificateCluster, error) { return platform.NewCluster(kubeconfig) },
+			Say:   out,
+		}
+		_, err := certs.Apply(ctx)
 		return err
 	}
 }
@@ -163,6 +168,7 @@ func (a applyHosts) rules(cl login.Cluster, plan release.HostPlan) setup.RuleFun
 			Image:     plan.Rule.Image,
 			Values:    plan.Rule.Values,
 			Hosted:    plan.Rule.Hosted,
+			OwnLogin:  plan.Rule.OwnLogin,
 			Namespace: plan.Rule.Namespace,
 			OIDC:      plan.Rule.OIDC,
 		})
@@ -233,6 +239,36 @@ func (a applyHosts) loginStep(ctx context.Context, plan release.HostPlan) (*logi
 	}, true, nil
 }
 
+// MayWrite is release.LoginAccess' first question for a run that enables an app
+// signing in through the login: the same one that decides whether this run has
+// a login half at all (login.MayWrite). A seedbox user's kubeconfig cannot
+// apply a ConfigMap in the platform's namespace, so it cannot register a client
+// either -- and the release refuses before the confirm rather than letting Helm
+// wait on a pod whose Secret is missing.
+func (a applyHosts) MayWrite(ctx context.Context) (bool, error) {
+	cl, err := a.cluster()
+	if err != nil {
+		return false, err
+	}
+	return login.MayWrite(ctx, cl)
+}
+
+// ClientRegistered reads whether one app's client Secret is in the seedbox's
+// namespace. It is a plain Get, which a user's kubeconfig may make in its own
+// namespace: the refusal needs no permission the box itself does not have.
+func (a applyHosts) ClientRegistered(ctx context.Context, namespace, app string) (bool, error) {
+	cl, err := a.cluster()
+	if err != nil {
+		return false, err
+	}
+	_, found, err := cl.Get(ctx, "", "v1", "Secret", namespace, authelia.OIDCClientSecretName(app))
+	return found, err
+}
+
+// The two answers above are the release's, beside Login: a user's step still
+// gets them, and answers "no" to MayWrite.
+var _ release.LoginAccess = applyHosts{}
+
 // loginRules is what internal/login needs for both halves: the box's domain,
 // the account, the image the Deployment runs and the document the rules come
 // from. Hosts is the names the login's configuration covers, for the one line a
@@ -245,6 +281,7 @@ func loginRules(plan release.HostPlan) login.RulesOptions {
 		Image:     plan.Rule.Image,
 		Values:    plan.Rule.Values,
 		Hosted:    plan.Rule.Hosted,
+		OwnLogin:  plan.Rule.OwnLogin,
 		Namespace: plan.Rule.Namespace,
 		OIDC:      plan.Rule.OIDC,
 	}

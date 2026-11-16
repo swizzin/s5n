@@ -1,0 +1,9 @@
+# The user's file, with sonarr held at an image by hand: the rollback has to
+# refuse this until the operator either drops the pin or asks box to replace it.
+apps:
+  sonarr:
+    image:
+      tag: "5.0.0"
+
+wiring:
+  timeoutSeconds: 300

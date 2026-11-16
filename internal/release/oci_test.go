@@ -310,6 +310,41 @@ func TestOCIDevBoxSkipsTheFloorOnce(t *testing.T) {
 	}
 }
 
+// TestOCIReleasesListsTheFloorsUpdatePlansWith: `box update` decides its steps
+// from every published release's two annotations, so the listing has to carry
+// them, in semver order, without the tags that are not releases.
+func TestOCIReleasesListsTheFloorsUpdatePlansWith(t *testing.T) {
+	host := registry(t)
+	base := packageChart(t, filepath.Join("..", "..", "charts", "s5n"))
+	for _, rel := range []struct{ version, minBox, upgradeFrom string }{
+		{"0.7.0", "0.4.0", "0.4.0"},
+		{"0.8.0", "0.5.0", "0.7.0"},
+		{"0.9.0-rc.1", "0.4.0", "0.8.0"},
+	} {
+		ch, err := loader.LoadArchive(bytes.NewReader(base))
+		if err != nil {
+			t.Fatal(err)
+		}
+		setChartFloors(t, ch, rel.version, rel.minBox, rel.upgradeFrom)
+		if err := pushData(t, host+"/charts/s5n:"+rel.version, archiveChart(t, ch)); err != nil {
+			t.Fatalf("push %s: %v", rel.version, err)
+		}
+	}
+
+	src := &OCIChart{BoxVersion: "0.4.0"}
+	got, err := src.Releases(context.Background(), ChartRef{Repo: "oci://" + host + "/charts/s5n"})
+	if err != nil {
+		t.Fatalf("Releases: %v", err)
+	}
+	want := []Published{
+		{Version: "0.7.0", MinBox: "0.4.0", UpgradeFrom: "0.4.0"},
+		{Version: "0.8.0", MinBox: "0.5.0", UpgradeFrom: "0.7.0"},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("Releases = %+v, want %+v (prereleases are not releases box installs unasked)", got, want)
+	}
+}
+
 func chartVersion(t *testing.T, data []byte) string {
 	t.Helper()
 	ch, err := loader.LoadArchive(bytes.NewReader(data))
@@ -325,17 +360,31 @@ func chartVersion(t *testing.T, data []byte) string {
 // ships.
 func setChartVersion(t *testing.T, ch *chartv2.Chart, version, minBox string) {
 	t.Helper()
+	setChartFloors(t, ch, version, minBox, "")
+}
+
+// setChartFloors is setChartVersion with upgrade-from as well, which is the
+// annotation `box update` steps through releases with.
+func setChartFloors(t *testing.T, ch *chartv2.Chart, version, minBox, upgradeFrom string) {
+	t.Helper()
+	annotations := "annotations:\n  " + MinBoxAnnotation + ": \"" + minBox + "\"\n"
+	if upgradeFrom != "" {
+		annotations += "  " + UpgradeFromAnnotation + ": \"" + upgradeFrom + "\"\n"
+	}
 	for _, f := range ch.Raw {
 		if f.Name != "Chart.yaml" {
 			continue
 		}
 		text := regexp.MustCompile(`(?m)^version:.*$`).ReplaceAllString(string(f.Data), "version: "+version)
 		text = regexp.MustCompile(`(?m)^appVersion:.*$`).ReplaceAllString(text, `appVersion: "`+version+`"`)
-		text += "annotations:\n  " + MinBoxAnnotation + ": \"" + minBox + "\"\n"
+		text += annotations
 		f.Data = []byte(text)
 		ch.Metadata.Version = version
 		ch.Metadata.AppVersion = version
 		ch.Metadata.Annotations = map[string]string{MinBoxAnnotation: minBox}
+		if upgradeFrom != "" {
+			ch.Metadata.Annotations[UpgradeFromAnnotation] = upgradeFrom
+		}
 		return
 	}
 	t.Fatal("the chart has no Chart.yaml")

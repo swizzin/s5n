@@ -86,3 +86,30 @@ func TestConfigRefusesAQbitCredential(t *testing.T) {
 		t.Fatalf("error = %v, want an unknown-field refusal naming passwordFile", err)
 	}
 }
+
+// A release with no wired app is a shape a seedbox is installed in, not a bad
+// render: `box init --apps` turns every Arr and qBittorrent off, and `box
+// migrate apply` adopts into that box and switches them on itself. The Job has
+// nothing per-app to do there, and the config must load so it can say so.
+func TestConfigAcceptsAReleaseWithNoWiredApp(t *testing.T) {
+	for name, cfg := range map[string]string{
+		// The box `box migrate apply` adopts into: Prowlarr is not part of a
+		// plan, and none of the apps a plan names is on yet.
+		"prowlarr only": `{"namespace":"seedbox","configMap":"s5n-wiring","timeoutSeconds":300,"instances":[],` +
+			`"prowlarr":{"url":"http://prowlarr:9696","urlBase":"/prowlarr","selfUrl":"http://prowlarr:9696/prowlarr",` +
+			`"apiKeyFile":"/etc/s5n/keys/prowlarr-apikey"}}`,
+		// Every app off: nothing at all to reconcile, and the receipt is the
+		// whole of what the Job has to publish.
+		"nothing at all": `{"namespace":"seedbox","configMap":"s5n-wiring","timeoutSeconds":300,"instances":[]}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "wiring.json")
+			if err := os.WriteFile(path, []byte(cfg), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := Load(path); err != nil {
+				t.Fatalf("a release with no wired app was refused: %v", err)
+			}
+		})
+	}
+}

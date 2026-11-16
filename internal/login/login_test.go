@@ -266,6 +266,9 @@ func testOptions() Options {
 		NewPassword: true,
 		Image:       "authelia/authelia:4.39.28@sha256:" + strings.Repeat("a", 64),
 		Values:      testValues,
+		// The chart's catalog marks Plex as signing its own users in, so the
+		// fixture says so too: its whole path bypasses the login.
+		OwnLogin: []string{"plex"},
 	}
 }
 
@@ -772,6 +775,9 @@ func ruleOptions() RulesOptions {
 		Image:  "authelia/authelia:4.39.28@sha256:" + strings.Repeat("a", 64),
 		Values: hostedValues(),
 		Hosted: []string{"plex", "seerr"},
+		// The same catalog answer the hosted list comes from: both sign their
+		// own users in, so each name is a bypass.
+		OwnLogin: []string{"plex", "seerr"},
 	}
 }
 
@@ -855,6 +861,7 @@ func TestEnsureRulesWritesNothingWhenTheRuleIsThere(t *testing.T) {
 	opts.PathsInNode = true
 	opts.Values = hostedValues()
 	opts.Hosted = []string{"plex", "seerr"}
+	opts.OwnLogin = []string{"plex", "seerr"}
 	if _, err := f.decision.Apply(context.Background(), opts); err != nil {
 		t.Fatalf("Apply: %v", err)
 	}
@@ -884,6 +891,7 @@ func TestEnsureRulesRendersWhatInitRenders(t *testing.T) {
 	opts.PathsInNode = true
 	opts.Values = hostedValues()
 	opts.Hosted = []string{"plex", "seerr"}
+	opts.OwnLogin = []string{"plex", "seerr"}
 	if _, err := init.decision.Apply(context.Background(), opts); err != nil {
 		t.Fatalf("Apply: %v", err)
 	}
@@ -897,6 +905,94 @@ func TestEnsureRulesRendersWhatInitRenders(t *testing.T) {
 	fromApply := configOf(t, apply.cluster.applied)
 	if fromApply != fromInit {
 		t.Fatalf("apply wrote a different configuration from init:\n--- init ---\n%s\n--- apply ---\n%s", fromInit, fromApply)
+	}
+}
+
+// appSet is a seedbox's values with the apps a plan migrates, switched on or
+// off: the box `box migrate apply` adopts into renders them off, and the apply
+// it hands over to renders them on, because the migration writes the grant.
+func appSet(on bool) map[string]any {
+	arr := func(prefix string) map[string]any {
+		return map[string]any{
+			"enabled":   on,
+			"envPrefix": prefix,
+			"instances": []any{map[string]any{"suffix": "", "enabled": on}},
+		}
+	}
+	return map[string]any{"apps": map[string]any{
+		"prowlarr":    map[string]any{"enabled": true, "envPrefix": "PROWLARR__"},
+		"qbittorrent": map[string]any{"enabled": on},
+		"sonarr":      arr("SONARR__"),
+		"radarr":      arr("RADARR__"),
+	}}
+}
+
+// TestARunThatSwitchedAppsOnWritesTheirRules: an Arr's /api carries its own key,
+// so the login's rules have to let it through to the app, and the only writer of
+// those rules is the login step every apply runs. `box migrate apply` switches
+// its apps on by writing the grant and then hands over to that same apply, so
+// the file it leaves is init's for the app set the migration leaves behind --
+// otherwise each migrated Arr's integrations are answered by the portal instead
+// of by the app.
+func TestARunThatSwitchedAppsOnWritesTheirRules(t *testing.T) {
+	const key = "0123456789abcdef0123456789abcdef"
+	ctx := context.Background()
+
+	// The box as init installed it: Prowlarr, with every app the plan names off.
+	f := newFixture(t)
+	keyed(f, key)
+	opts := testOptions()
+	opts.PathsInNode = true
+	opts.Values = appSet(false)
+	if _, err := f.decision.Apply(ctx, opts); err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	before := configOf(t, f.cluster.applied)
+	if !strings.Contains(before, "/prowlarr/api") {
+		t.Fatalf("the installed login has no rule for Prowlarr's API:\n%s", before)
+	}
+	if strings.Contains(before, "/sonarr/api") {
+		t.Fatalf("the installed login already has a rule for an app that is off:\n%s", before)
+	}
+
+	// The login step of the apply the migration hands over to, rendered from the
+	// values that switched the plan's apps on.
+	rule := ruleOptions()
+	rule.Values = appSet(true)
+	pending, err := f.decision.Pending(ctx, rule)
+	if err != nil {
+		t.Fatalf("Pending: %v", err)
+	}
+	if !pending {
+		t.Fatal("the login reported nothing to do although the app set it renders from had grown")
+	}
+	mark := len(f.cluster.applied)
+	changed, err := f.decision.EnsureRules(ctx, rule)
+	if err != nil {
+		t.Fatalf("EnsureRules: %v", err)
+	}
+	if !changed {
+		t.Fatal("the rule write reported no change")
+	}
+	after := configOf(t, f.cluster.applied[mark:])
+	for _, want := range []string{"^/sonarr/api", "^/radarr/api"} {
+		if !strings.Contains(after, want) {
+			t.Errorf("the rewritten login has no rule for %q:\n%s", want, after)
+		}
+	}
+
+	// And it is the file init writes for that same app set: one renderer, so a
+	// rule cannot be spelled two ways or generated from a stale app list.
+	init := newFixture(t)
+	keyed(init, key)
+	initOpts := testOptions()
+	initOpts.PathsInNode = true
+	initOpts.Values = appSet(true)
+	if _, err := init.decision.Apply(ctx, initOpts); err != nil {
+		t.Fatalf("Apply (the same app set): %v", err)
+	}
+	if fromInit := configOf(t, init.cluster.applied); after != fromInit {
+		t.Fatalf("the rewrite differs from init's for the same app set:\n--- after the rewrite ---\n%s\n--- init ---\n%s", after, fromInit)
 	}
 }
 
@@ -1063,11 +1159,12 @@ func TestEnsureRulesCarriesTheMark(t *testing.T) {
 // and image, so "nothing differs" means nothing about the login.
 func initRules(opts Options) RulesOptions {
 	return RulesOptions{
-		Host:   opts.Host,
-		Login:  opts.Login,
-		Hosts:  []string{opts.Host},
-		Image:  opts.Image,
-		Values: opts.Values,
+		Host:     opts.Host,
+		Login:    opts.Login,
+		Hosts:    []string{opts.Host},
+		Image:    opts.Image,
+		Values:   opts.Values,
+		OwnLogin: opts.OwnLogin,
 	}
 }
 

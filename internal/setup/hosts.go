@@ -9,16 +9,18 @@ import (
 	"github.com/swizzin/s5n/internal/say"
 )
 
-// HostFunc writes one host's listener and Certificate and waits for it. cmd/box
-// builds it over platform.CertificateDecision; this package only decides which
-// name, with which issuer, and refuses the names a certificate can never issue.
-type HostFunc func(ctx context.Context, h Host) error
+// HostsFunc writes the decided hosts of one run: each host's listener and
+// Certificate first, then one wait over all of them, then the hosts that came
+// Ready. cmd/box builds it over platform.Certificates; this package only
+// decides which names, with which issuer, and refuses the names a certificate
+// can never issue.
+type HostsFunc func(ctx context.Context, hosts []Host) error
 
 // RuleFunc writes the login's access_control rule for the hosts a step is
 // serving: the third thing an app host needs beside its listener and its
 // Certificate (docs/box.md, "An app host is guarded the way its path was").
 //
-// It is a second function rather than part of HostFunc because the login keeps
+// It is a second function rather than part of HostsFunc because the login keeps
 // one configuration for the whole box: the rule write happens once, for every
 // name the step decided, and it is the login's own writer that does it. Nil
 // says the caller has already written the rules -- init installs the login
@@ -26,21 +28,25 @@ type HostFunc func(ctx context.Context, h Host) error
 type RuleFunc func(ctx context.Context, hosts []Host) error
 
 // ApplyHosts is the one per-host write both box commands use: every decided
-// host, in order, through one function. init runs it after its hand-over;
-// apply runs it from TLSHosts.Ensure, before the release moves.
-func ApplyHosts(ctx context.Context, apply HostFunc, hosts []Host) error {
+// host, in order, handed to one function that writes them together. init runs
+// it after its hand-over; apply runs it from TLSHosts.Ensure, before the
+// release moves. A name without a host or an issuer is skipped -- there is
+// nothing a Certificate can be built from.
+func ApplyHosts(ctx context.Context, apply HostsFunc, hosts []Host) error {
 	if apply == nil {
 		return errors.New("no per-host step: box has nothing that writes a listener and a certificate")
 	}
+	decided := make([]Host, 0, len(hosts))
 	for _, h := range hosts {
 		if h.Host == "" || h.Issuer == "" {
 			continue
 		}
-		if err := apply(ctx, h); err != nil {
-			return err
-		}
+		decided = append(decided, h)
 	}
-	return nil
+	if len(decided) == 0 {
+		return nil
+	}
+	return apply(ctx, decided)
 }
 
 // TLSHosts is root's per-host step for names a run is about to serve: an app
@@ -80,8 +86,8 @@ type TLSHosts struct {
 	// that is a stop naming root's command rather than a failed write. Nil
 	// means yes (init runs as root).
 	Allowed func(ctx context.Context) (bool, error)
-	// Apply writes one host.
-	Apply HostFunc
+	// Apply writes every host this step decided, in one run.
+	Apply HostsFunc
 	// Rules writes the login's rule for the hosts this step serves, once for
 	// all of them and before the first listener: the configuration is one file
 	// for the box, and a stop after it leaves only the rules the next run

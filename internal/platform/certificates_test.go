@@ -3,15 +3,19 @@ package platform
 import (
 	"context"
 	"encoding/base64"
+	"errors"
+	"fmt"
 	"reflect"
 	"regexp"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 
 	"github.com/swizzin/s5n/internal/kube"
+	"github.com/swizzin/s5n/internal/say"
 )
 
 // fakeCertCluster is the per-host flow's cluster: one Certificate's status,
@@ -890,5 +894,230 @@ func TestCertificateNeedsWork(t *testing.T) {
 	stale, err = CertificateNeedsWork(ctx, empty, host, "")
 	if err != nil || stale {
 		t.Fatalf("CertificateNeedsWork with no Certificate = %v, %v; want false, nil", stale, err)
+	}
+}
+
+// batchCertCluster is the fake for a run over several names: it answers per
+// Certificate name, and its Await calls only finish once every name's has
+// started. A run that waits on the hosts one after another never gets past the
+// first, so the fake asserts the shape of the wait -- one round over all the
+// names under one budget -- rather than a stopwatch. The five-second fallback
+// is only there to turn a serial run into a failure instead of a hang.
+type batchCertCluster struct {
+	*fakeCertCluster
+	mu      sync.Mutex
+	want    int
+	ready   map[string]bool
+	reason  string
+	awaits  []Wait
+	entered int
+	allIn   chan struct{}
+}
+
+func newBatchCertCluster(want int, ready map[string]bool, reason string) *batchCertCluster {
+	return &batchCertCluster{
+		fakeCertCluster: &fakeCertCluster{serves: true},
+		want:            want,
+		ready:           ready,
+		reason:          reason,
+		allIn:           make(chan struct{}),
+	}
+}
+
+func (f *batchCertCluster) Await(_ context.Context, w Wait) error {
+	f.mu.Lock()
+	f.awaits = append(f.awaits, w)
+	f.entered++
+	if f.entered == f.want {
+		close(f.allIn)
+	}
+	f.mu.Unlock()
+	select {
+	case <-f.allIn:
+	case <-time.After(5 * time.Second):
+		return errors.New("the Certificate waits ran one after another: they never overlapped")
+	}
+	if f.ready[w.Name] {
+		return nil
+	}
+	return fmt.Errorf("%w after %s", ErrNotReady, w.Timeout)
+}
+
+func (f *batchCertCluster) CertificateReady(_ context.Context, _, name string) (bool, string, error) {
+	if f.ready[name] {
+		return true, "", nil
+	}
+	return false, f.reason, nil
+}
+
+// certWaitHosts is four names: one that issues and three that never do.
+func certWaitHosts() []CertificateRequest {
+	return []CertificateRequest{
+		{Host: "box.example.test", Issuer: LetsEncryptIssuer},
+		{Host: "gamma.box.example.test", Issuer: LetsEncryptIssuer},
+		{Host: "movies.example.test", Issuer: LetsEncryptIssuer},
+		{Host: "tv.example.test", Issuer: LetsEncryptIssuer},
+	}
+}
+
+// One wait per run, whatever the number of names. Three of four Certificates
+// never become Ready: every Certificate is written before the wait starts, the
+// wait is one round over all four under one Timeout (the fake's calls overlap,
+// so a per-host wait cannot pass), the Ready host is served, and the other
+// three get the warning and no HTTPS listener, in host order.
+func TestCertificatesWaitOnceForTheRun(t *testing.T) {
+	hosts := certWaitHosts()
+	ready := map[string]bool{CertificateName(hosts[0].Host): true}
+	cl := newBatchCertCluster(len(hosts), ready, "Issuing: waiting for HTTP-01 challenge")
+	var out strings.Builder
+	set := &Certificates{
+		Hosts:   hosts,
+		Open:    func() (CertificateCluster, error) { return cl, nil },
+		Say:     &say.Plain{W: &out, Err: &out},
+		Timeout: 250 * time.Millisecond,
+	}
+	results, err := set.Apply(context.Background())
+	if err != nil {
+		t.Fatalf("apply: %v\n%s", err, out.String())
+	}
+	assertOneRunWait(t, cl, len(hosts), out.String())
+	assertOnlyTheReadyHostIsServed(t, results)
+	assertWarningsInHostOrder(t, out.String(), results[1:])
+	if https, redirects := servesWritten(t, cl); https != 1 || redirects != 1 {
+		t.Fatalf("https listeners = %d, redirects = %d; want only the Ready host's", https, redirects)
+	}
+}
+
+// assertOneRunWait is the shape of the whole run: one Await per host under the
+// one budget, one wait line, and every Certificate applied before it.
+func assertOneRunWait(t *testing.T, cl *batchCertCluster, hosts int, log string) {
+	t.Helper()
+	if len(cl.awaits) != hosts {
+		t.Fatalf("awaits = %d, want one per host (%d): %+v", len(cl.awaits), hosts, cl.awaits)
+	}
+	for _, w := range cl.awaits {
+		if w.Kind != WaitCertificate || w.Timeout != 250*time.Millisecond {
+			t.Fatalf("await = %+v, want the run's one Certificate budget", w)
+		}
+	}
+	if got := strings.Count(log, "Certificates to be Ready"); got != 1 {
+		t.Fatalf("the run printed %d Certificate wait lines, want one:\n%s", got, log)
+	}
+	if want := fmt.Sprintf("waiting up to 250ms for %d Certificates to be Ready", hosts); !strings.Contains(log, want) {
+		t.Fatalf("the wait does not name the run's budget and count:\n%s", log)
+	}
+	if want := fmt.Sprintf("1 of %d Certificates are Ready", hosts); !strings.Contains(log, want) {
+		t.Fatalf("the wait's Done line does not say how many came Ready:\n%s", log)
+	}
+	lastApply := strings.LastIndex(log, "applied Certificate ")
+	if lastApply < 0 || lastApply > strings.Index(log, "Certificates to be Ready") {
+		t.Fatalf("the wait started before every Certificate was applied:\n%s", log)
+	}
+}
+
+// assertOnlyTheReadyHostIsServed is the first result served and the other three
+// left with nothing but the port-80 listener that answers the challenge.
+func assertOnlyTheReadyHostIsServed(t *testing.T, results []CertificateResult) {
+	t.Helper()
+	if !results[0].Ready || !results[0].HTTPS || !results[0].Redirect {
+		t.Fatalf("result 0 = %+v, want the Ready host served", results[0])
+	}
+	for i, res := range results[1:] {
+		if res.Ready || res.HTTPS || res.Redirect {
+			t.Fatalf("result %d = %+v, want nothing served", i+1, res)
+		}
+		if !strings.Contains(res.Reason, "HTTP-01") {
+			t.Fatalf("result %d reason = %q", i+1, res.Reason)
+		}
+	}
+}
+
+// assertWarningsInHostOrder is the per-host sentence for each Certificate that
+// did not issue, printed once and in the order the run decided the hosts.
+func assertWarningsInHostOrder(t *testing.T, log string, results []CertificateResult) {
+	t.Helper()
+	at := -1
+	for _, res := range results {
+		want := fmt.Sprintf("certificate %s/%s is not Ready (Issuing: waiting for HTTP-01 challenge): %s is not served until it is; only the ACME challenge answers on port 80; box retries on the next run", GatewayNamespace, res.Name, res.Host)
+		i := strings.Index(log, want)
+		if i < 0 {
+			t.Fatalf("missing warning for %s:\n%s", res.Host, log)
+		}
+		if i <= at {
+			t.Fatalf("the warning for %s is out of host order:\n%s", res.Host, log)
+		}
+		if strings.Contains(log, "certificate "+GatewayNamespace+"/"+res.Name+" is Ready") {
+			t.Fatalf("a Certificate that never issued was reported Ready:\n%s", log)
+		}
+		at = i
+	}
+}
+
+// servesWritten counts the HTTPS listeners and redirects the run wrote: one of
+// each is one host served.
+func servesWritten(t *testing.T, cl *batchCertCluster) (https, redirects int) {
+	t.Helper()
+	for _, docs := range cl.writes {
+		for _, doc := range docs {
+			kind, _, _ := objectMeta(doc)
+			switch kind {
+			case "Gateway":
+				for name := range listenersOf(t, doc) {
+					if strings.HasPrefix(name, "https-") {
+						https++
+					}
+				}
+			case "HTTPRoute":
+				redirects++
+			}
+		}
+	}
+	return https, redirects
+}
+
+// All Ready on the first read: each Certificate is read once, the run waits no
+// further, and every host is served in host order.
+func TestCertificatesReadyOnTheFirstReadWaitOnce(t *testing.T) {
+	hosts := certWaitHosts()
+	ready := map[string]bool{}
+	for _, h := range hosts {
+		ready[CertificateName(h.Host)] = true
+	}
+	cl := newBatchCertCluster(len(hosts), ready, "")
+	var out strings.Builder
+	set := &Certificates{
+		Hosts:   hosts,
+		Open:    func() (CertificateCluster, error) { return cl, nil },
+		Say:     &say.Plain{W: &out, Err: &out},
+		Timeout: time.Minute,
+	}
+	results, err := set.Apply(context.Background())
+	if err != nil {
+		t.Fatalf("apply: %v\n%s", err, out.String())
+	}
+	if len(cl.awaits) != len(hosts) {
+		t.Fatalf("reads = %d, want one per Certificate (%d): a Ready one answered after the first poll", len(cl.awaits), len(hosts))
+	}
+	log := out.String()
+	if !strings.Contains(log, "4 of 4 Certificates are Ready") {
+		t.Fatalf("the wait's Done line does not say all four came Ready:\n%s", log)
+	}
+	if strings.Contains(log, "is not Ready") {
+		t.Fatalf("a Ready run warned about a Certificate:\n%s", log)
+	}
+	at := -1
+	for i, res := range results {
+		if !res.Ready || !res.HTTPS || !res.Redirect {
+			t.Fatalf("result %d = %+v, want served", i, res)
+		}
+		line := fmt.Sprintf("certificate %s/%s is Ready", GatewayNamespace, res.Name)
+		j := strings.Index(log, line)
+		if j < 0 {
+			t.Fatalf("missing success line for %s:\n%s", res.Host, log)
+		}
+		if j <= at {
+			t.Fatalf("the success lines are out of host order:\n%s", log)
+		}
+		at = j
 	}
 }

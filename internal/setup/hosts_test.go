@@ -20,11 +20,11 @@ type hostRecorder struct {
 	err   error
 }
 
-func (r *hostRecorder) apply(_ context.Context, h Host) error {
+func (r *hostRecorder) apply(_ context.Context, hosts []Host) error {
 	if r.err != nil {
 		return r.err
 	}
-	r.hosts = append(r.hosts, h)
+	r.hosts = append(r.hosts, hosts...)
 	return nil
 }
 
@@ -211,9 +211,9 @@ func TestTLSHostsWritesTheLoginRuleBeforeTheListener(t *testing.T) {
 		ruled = hosts
 		return nil
 	}
-	step.Apply = func(ctx context.Context, h Host) error {
-		order = append(order, "host "+h.Host)
-		return rec.apply(ctx, h)
+	step.Apply = func(ctx context.Context, hosts []Host) error {
+		order = append(order, "host "+hosts[0].Host)
+		return rec.apply(ctx, hosts)
 	}
 	if err := step.Ensure(context.Background(), []string{"gamma.box.example.com"}); err != nil {
 		t.Fatalf("ensure: %v\n%s", err, out)

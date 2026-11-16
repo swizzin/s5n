@@ -26,6 +26,7 @@ import (
 	"github.com/swizzin/s5n/internal/authelia"
 	"github.com/swizzin/s5n/internal/bootstrap"
 	"github.com/swizzin/s5n/internal/catalog"
+	"github.com/swizzin/s5n/internal/hostconf"
 	"github.com/swizzin/s5n/internal/login"
 	"github.com/swizzin/s5n/internal/platform"
 	"github.com/swizzin/s5n/internal/release"
@@ -60,6 +61,14 @@ func terminalWidth(f *os.File) int {
 // to meet it.
 var version = "dev"
 
+// packaged names the package manager that installed box, when one did: a build a
+// distro ships passes -X main.packaged=<manager>, and the official binaries
+// leave it empty. A packaged box never replaces its own binary -- the package
+// owns the file, and its next upgrade would undo the replacement or leave the
+// package database describing a file that is not there -- so it names the
+// package command instead.
+var packaged string
+
 func main() {
 	// One context for the whole process. A signal cancels the step in flight
 	// through the error path that step already has, instead of killing box
@@ -77,6 +86,14 @@ func main() {
 		runInit(ctx, os.Args[2:])
 	case "apply":
 		runApply(ctx, os.Args[2:])
+	case "update":
+		runUpdate(ctx, os.Args[2:])
+	case "status":
+		runStatus(ctx, os.Args[2:])
+	case "rollback":
+		runRollback(ctx, os.Args[2:])
+	case "migrate":
+		runMigrate(ctx, os.Args[2:])
 	case "version":
 		fmt.Println(version)
 	default:
@@ -103,6 +120,10 @@ commands:
   bootstrap   decide which cluster to use, install the platform layer, then run init for root
   init        ask a seedbox's questions, edit its two files, then apply
   apply       install or upgrade root's seedbox from its grant and values
+  update      replace box when a newer one verifies, then move the seedbox to a newer release
+  status      one line: what is running, what the last update did, when box checks again
+  rollback    put one app back on the image it ran before an update moved it
+  migrate     adopt an install box did not make: discover writes the plan, apply runs it
   version     print the version box was built from
 `)
 	os.Exit(2)
@@ -180,6 +201,16 @@ func confirmer(out say.Reporter, yes bool) asker {
 	return p
 }
 
+// answered is the confirm a flow hands an apply it has already asked about: the
+// operator said yes to this run before anything moved, so a second form partway
+// through would be asking after the first step had already written. confirmer
+// cannot be it -- on a terminal it hands back the one live reporter, whose
+// answer is a field the flow's own question sets, so an inner apply would draw
+// the form again.
+type answered struct{}
+
+func (answered) Ask(string) (bool, error) { return true, nil }
+
 // chartFlags are the two flags that name a published release. Every command
 // that loads a chart takes them from here, so bootstrap, init and apply cannot
 // drift into asking for different releases.
@@ -188,10 +219,22 @@ type chartFlags struct {
 	version *string
 }
 
-func addChartFlags(fs *flag.FlagSet) *chartFlags {
+// --chart-version means two different things, so its help text comes from the
+// command: bootstrap, init and update choose the release to install (or move
+// to), while apply applies the release the box is already on. One flag set
+// serves all of them; a second copy is what would drift.
+const (
+	// chartVersionInstalls is bootstrap's, init's and update's.
+	chartVersionInstalls = "chart release to install (default: the newest released version this box can use)"
+	// chartVersionApplies is apply's: the release is the box's, not the
+	// operator's, to choose (cmd/box/installed.go).
+	chartVersionApplies = "chart release to apply (default: the one installed; the newest this box can use when nothing is installed)"
+)
+
+func addChartFlags(fs *flag.FlagSet, versionUsage string) *chartFlags {
 	return &chartFlags{
 		repo:    fs.String("chart-repo", release.DefaultChartRepo, "OCI reference of the chart repository"),
-		version: fs.String("chart-version", "", "chart release to install (default: the newest released version this box can use)"),
+		version: fs.String("chart-version", "", versionUsage),
 	}
 }
 
@@ -264,6 +307,14 @@ func runBootstrap(ctx context.Context, args []string) {
 		fmt.Fprintf(os.Stderr, "box: %v\n", err)
 		os.Exit(2)
 	}
+	// --unit-dir is the timer's development switch, out of the arguments the same
+	// way: it writes the two unit files into a directory this run names and runs
+	// no systemctl, which is how a test host sees what bootstrap installs.
+	unitDir, args, err := takeDevFlag(args, "unit-dir")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "box: %v\n", err)
+		os.Exit(2)
+	}
 	// --dns-file, --ca-file and --paths-in-node are init's dev switches and come
 	// out the same way: bootstrap runs init in this process, so it accepts them
 	// or the e2e's bootstrap line would be the one place they fail. The DNS
@@ -283,7 +334,7 @@ func runBootstrap(ctx context.Context, args []string) {
 	plain := fs.Bool("plain", false, "ask init's questions with plain line prompts, even on a terminal (for a flaky terminal or a screen reader)")
 	gatewayClass := fs.String("gateway-class", "", "the Envoy Gateway GatewayClass to use when several are Accepted (platform.gateway.className)")
 	initFlags := addInitFlags(fs)
-	if err := fs.Parse(args); err != nil {
+	if err := parseNoArgs(fs, "bootstrap", args); err != nil {
 		fmt.Fprintf(os.Stderr, "box: %v\n", err)
 		os.Exit(2)
 	}
@@ -294,6 +345,17 @@ func runBootstrap(ctx context.Context, args []string) {
 	term := terminalSet(*plain)
 	out := newOutput(term, *yes, palette)
 	defer out.Close()
+
+	// Root's config is read before the cluster decision, from the same flags:
+	// an unknown key, a malformed line or a bad value stops the run naming the
+	// file, the line and the key, so nothing is probed and nothing is written.
+	// A missing file is the defaults -- bootstrap writes it once the platform is
+	// up. A dry run says it the same way, because this comes before the run
+	// knows which kind it is.
+	if _, _, err := hostconf.Load(hostconf.Path(*recordPath)); err != nil {
+		out.Error(err)
+		os.Exit(1)
+	}
 
 	// One chart release for the whole command: the k0s bootstrap installs, the
 	// platform layer it applies and root's seedbox init installs all come from
@@ -376,6 +438,16 @@ func runBootstrap(ctx context.Context, args []string) {
 		out.Error(err)
 		os.Exit(1)
 	}
+	// Root's config is written here, before init, because init asks for the one
+	// answer it holds (the notice address) and every later run reads the rest.
+	// box writes it once: an existing file is root's, and never rewritten.
+	if wrote, err := hostconf.Ensure(hostconf.Path(*recordPath)); err != nil {
+		out.Error(err)
+		os.Exit(1)
+	} else if wrote {
+		out.Muted("wrote " + hostconf.Path(*recordPath) + ": whether this box updates by itself, how often, and where it posts notices")
+	}
+
 	// bootstrap sets the machine up once; init sets up root's seedbox. It runs
 	// here in the same process, over the same cluster, with the flags bootstrap
 	// was given -- and stays runnable on its own (`box init`).
@@ -386,6 +458,10 @@ func runBootstrap(ctx context.Context, args []string) {
 		out.Error(err)
 		os.Exit(1)
 	}
+
+	// The timer comes last: it runs `box update --timer` for the files this run
+	// just installed, so a seedbox that never finished is never on a schedule.
+	scheduleUpdates(ctx, unitDir, *recordPath, *initFlags.grantPath, *initFlags.valuesPath, out)
 }
 
 // applyPlatform applies the platform layer the decision says install. The
@@ -489,7 +565,7 @@ func addApplyFlags(fs *flag.FlagSet) *applyFlags {
 	if home, err := os.UserHomeDir(); err == nil {
 		valuesDefault = seedbox.ValuesPath(home)
 	}
-	o := &applyFlags{chart: addChartFlags(fs)}
+	o := &applyFlags{chart: addChartFlags(fs, chartVersionApplies)}
 	o.grantPath = fs.String("grant", seedbox.GrantPath("root"), "the root-owned grant file")
 	o.valuesPath = fs.String("values", valuesDefault, "the user's values file")
 	o.kubeconfig = fs.String("kubeconfig", "", "explicit kubeconfig to use, or fail with no fallback")
@@ -536,7 +612,7 @@ func runApply(ctx context.Context, args []string) {
 	}
 	fs := flag.NewFlagSet("apply", flag.ExitOnError)
 	o := addApplyFlags(fs)
-	if err := fs.Parse(args); err != nil {
+	if err := parseNoArgs(fs, "apply", args); err != nil {
 		fmt.Fprintf(os.Stderr, "box: %v\n", err)
 		os.Exit(2)
 	}
@@ -557,6 +633,31 @@ func runApply(ctx context.Context, args []string) {
 		os.Exit(1)
 	}
 
+	// apply keeps the release the box is on, so it has to read which one that
+	// is before it can say what it installs. The grant names the namespace and
+	// the release lives in it; both are reads, and the apply below loads the
+	// two files again itself, which is the one place that refuses them.
+	sb, err := seedbox.Load(*o.grantPath, *o.valuesPath)
+	if err != nil {
+		out.Error(err)
+		os.Exit(1)
+	}
+	namespace, err := sb.Namespace()
+	if err != nil {
+		out.Error(err)
+		os.Exit(1)
+	}
+	installed, err := release.NewHelm(kc, namespace, release.ReleaseName)
+	if err != nil {
+		out.Error(err)
+		os.Exit(1)
+	}
+	opts, err := applyRelease(ctx, o.options(), installed.State)
+	if err != nil {
+		out.Error(err)
+		os.Exit(1)
+	}
+
 	confirm := confirmer(out, *o.yes)
 	app := &release.Applier{
 		Charts:  chartSource(out),
@@ -570,17 +671,25 @@ func runApply(ctx context.Context, args []string) {
 		},
 	}
 
-	opts := o.options()
 	opts.BoxValues = boxValues(kc)
 	// Root's per-host TLS: a values file that enables an app served at a host
 	// of its own gets that host's listener and Certificate before the release
 	// moves, so no apply leaves the app unreachable (docs/box.md,
 	// "No run leaves an app host without its listener").
 	opts.Hosts = applyHosts{kubeconfig: kc, out: out, resolver: resolver}
+	// An app an update rolled back stays on the image it ran until a release
+	// pins another: an apply is what renders that hold, and the run that lapses
+	// it says so.
+	holds := newBoxHolds(out)
+	opts.Holds = holds.values
+	// A values pin that moves an app's image is stopped and copied before the
+	// release moves, the way a step's is: the copy is what `box rollback`
+	// restores, and an apply has no automatic rollback of its own.
+	opts.Snapshots = applySnapshots(kc)
 	// No host-CA step here: the anchor follows the Certificate the box's host
 	// is served with, and this run neither writes that Certificate nor may read
 	// cert-manager's namespace. `box init` is the run that keeps it right.
-	res, err := app.Apply(ctx, opts)
+	res, err := applyThenSettle(ctx, app.Apply, opts, holds)
 	if err != nil {
 		if errors.Is(err, release.ErrCancelled) {
 			os.Exit(1)
@@ -606,11 +715,12 @@ func runInit(ctx context.Context, args []string) {
 	kubeconfig := fs.String("kubeconfig", "", "explicit kubeconfig for the apply this hands over to, or fail with no fallback")
 	yes := fs.Bool("yes", false, "ask nothing: flags and file keys only")
 	plain := fs.Bool("plain", false, "ask with plain line prompts, even on a terminal (for a flaky terminal or a screen reader)")
-	if err := fs.Parse(args); err != nil {
+	if err := parseNoArgs(fs, "init", args); err != nil {
 		fmt.Fprintf(os.Stderr, "box: %v\n", err)
 		os.Exit(2)
 	}
 	initFlags.takeDev(dev)
+	initFlags.recordPath = bootstrap.RecordPath
 	out := newOutput(terminalSet(*plain), *yes, startupTheme(*initFlags.valuesPath))
 	defer out.Close()
 	if err := initFlags.run(ctx, *kubeconfig, *yes, *plain, out); err != nil {
@@ -656,6 +766,11 @@ type initFlags struct {
 	// its directory check. A field rather than a registered flag, so
 	// --help cannot offer it. Set from takeInitDevFlags.
 	pathsInNode bool
+	// recordPath is where bootstrap recorded the cluster decision. init has no
+	// --record flag of its own (it applies through the default), so each caller
+	// sets it: bootstrap passes the flag it was given, and `box init` alone uses
+	// the default. Root's config is read and written beside it.
+	recordPath string
 	// charts is the release to install, when the command already has one:
 	// `box bootstrap` loads it for its k0s pin and hands the same value here,
 	// so bootstrap and init cannot ask the registry for two versions.
@@ -667,7 +782,7 @@ func addInitFlags(fs *flag.FlagSet) *initFlags {
 	if home, err := os.UserHomeDir(); err == nil {
 		valuesDefault = seedbox.ValuesPath(home)
 	}
-	o := &initFlags{fs: fs, chart: addChartFlags(fs)}
+	o := &initFlags{fs: fs, chart: addChartFlags(fs, chartVersionInstalls)}
 	o.grantPath = fs.String("grant", seedbox.GrantPath("root"), "the root-owned grant file to write")
 	o.valuesPath = fs.String("values", valuesDefault, "the user's values file to edit")
 	o.namespace = fs.String("namespace", "seedbox", "the box's namespace; a re-run keeps whatever the grant says")
@@ -774,7 +889,8 @@ func (o *initFlags) run(ctx context.Context, kubeconfig string, yes, plain bool,
 					return release.NewStorage(kc, namespace)
 				},
 			}
-			_, err = app.Apply(ctx, release.Options{
+			holds := newBoxHolds(out)
+			_, err = applyThenSettle(ctx, app.Apply, release.Options{
 				Chart:         &chart,
 				GrantPath:     req.GrantPath,
 				ValuesPath:    req.ValuesPath,
@@ -782,7 +898,11 @@ func (o *initFlags) run(ctx context.Context, kubeconfig string, yes, plain bool,
 				AfterConfirm:  afterConfirm(req),
 				TransientKeys: req.TransientKeys,
 				BoxValues:     boxValues(kc),
-				Anchor:        hostCA(kc, out, o.caFile),
+				// An app an update rolled back stays on the image it ran: a
+				// re-run of init applies the chart too, and without the hold it
+				// would move that app onto the image its rollback avoided.
+				Holds:  holds.values,
+				Anchor: hostCA(kc, out, o.caFile),
 				// The per-host step, inside the apply: init decided every
 				// name, and this writes each one's listener and Certificate
 				// after the confirm and before the release moves. Running it
@@ -808,7 +928,7 @@ func (o *initFlags) run(ctx context.Context, kubeconfig string, yes, plain bool,
 				// will write for it -- not with tls.issuer, which is empty
 				// when DNS decided, and not with a second resolution.
 				HostIssuers: req.HostIssuers,
-			})
+			}, holds)
 			return portRangeHint(err)
 		},
 	}
@@ -833,6 +953,7 @@ func (o *initFlags) run(ctx context.Context, kubeconfig string, yes, plain bool,
 		PasswordFile: *o.password,
 		Unattended:   unattended,
 		PathsInNode:  o.pathsInNode,
+		NoticePath:   hostconf.Path(o.recordPath),
 	})
 	if err != nil {
 		return err
@@ -931,6 +1052,7 @@ func loginOptions(chart release.Chart, l setup.Login, pathsInNode bool) login.Op
 		Image:       chart.Pins.Authelia,
 		Values:      l.Values,
 		Hosted:      l.Hosted,
+		OwnLogin:    l.OwnLogin,
 		Namespace:   l.Namespace,
 		OIDC:        l.OIDC,
 	}

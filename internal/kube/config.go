@@ -94,6 +94,25 @@ func Flags(path, namespace string) *genericclioptions.ConfigFlags {
 	return flags
 }
 
+// WithRequestTimeout bounds every request the clients built from these flags
+// make: client-go applies rest.Config.Timeout to each request on its own.
+//
+// It is what a caller with no wait of its own has to use. A context deadline
+// reaches nothing here, because Helm's release storage reads with
+// context.Background() (helm.sh/helm/v4/pkg/storage/driver, secrets.Get), so a
+// deadline handed to a Helm method bounds no API call.
+func WithRequestTimeout(flags *genericclioptions.ConfigFlags, timeout time.Duration) *genericclioptions.ConfigFlags {
+	inner := flags.WrapConfigFn
+	flags.WrapConfigFn = func(cfg *rest.Config) *rest.Config {
+		if inner != nil {
+			cfg = inner(cfg)
+		}
+		cfg.Timeout = timeout
+		return cfg
+	}
+	return flags
+}
+
 // quiet installs box's warning policy on one config and returns it.
 //
 // client-go prints the API server's deprecation and admission warnings through

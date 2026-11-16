@@ -128,6 +128,27 @@ func TestRepositoriesDedupesAndSorts(t *testing.T) {
 	}
 }
 
+// TestImagesReadsEveryVariant: the image table `box update` compares two
+// releases with. A tag without a digest is still a variant (the fixture's alt
+// builds carry none), and a repo-less variant stays in the table so update can
+// see the variant is there.
+func TestImagesReadsEveryVariant(t *testing.T) {
+	got, err := Images(readFixture(t, "testdata/charts/dedupe/variants.yaml"))
+	if err != nil {
+		t.Fatalf("images: %v", err)
+	}
+	if v := got["qbittorrent"]["default"]; v.Repository != "registry.example.com/seedbox/qbittorrent" ||
+		v.Tag != "5.3.0" || v.Digest != "sha256:1111111111111111111111111111111111111111111111111111111111111111" {
+		t.Fatalf("qbittorrent.default = %+v", v)
+	}
+	if v := got["radarr"]["alt"]; v.Repository != "registry.example.com/seedbox/arr-alt" || v.Digest != "" {
+		t.Fatalf("radarr.alt = %+v, want its repository with no digest", v)
+	}
+	if len(got) != 3 {
+		t.Fatalf("apps = %d, want 3", len(got))
+	}
+}
+
 func TestRenderRejectsBadInput(t *testing.T) {
 	variants := readFixture(t, "testdata/charts/clusterip/variants.yaml")
 	good := Grant{Namespace: "example-user", TorrentNodePort: 30000, ServiceType: "NodePort"}

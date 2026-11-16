@@ -168,8 +168,9 @@ func RenderManifests(m Manifests) ([]byte, error) {
 
 // ValidateLogin is the shape of the one account box creates: Authelia's file
 // backend keys rows by this name, and a name with whitespace or a colon in it
-// is a row a hand-written file could not express. Plex, the Arrs and the
-// seedbox's own unix account all allow this alphabet.
+// is a row a hand-written file could not express. Every application that signs
+// in with this account, and the seedbox's own unix account, allows this
+// alphabet.
 func ValidateLogin(login string) error {
 	if login == "" {
 		return errors.New("no login name")

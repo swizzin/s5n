@@ -424,11 +424,35 @@ func (d *Decision) clientSecret(ctx context.Context, cl Cluster, namespace, name
 	return string(secret), nil
 }
 
+// providerEnabled is the one predicate for "this login serves an identity
+// provider": the rendering names at least one client, so its signing material
+// is mounted and passed as a second --config. The configuration's
+// identity_providers block and the Deployment's mount are both read from it,
+// because Authelia refuses a block with no clients ("option 'clients' must have
+// one or more clients configured"): a mount without the block is a login that
+// does not start, and a block without the mount is a token Authelia cannot
+// sign.
+//
+// It is deliberately not "the Secret holds a digest". A box whose last OIDC
+// app was turned off keeps its signing material -- it is generated once and
+// never rotated, so a client that comes back must not reissue tokens its app
+// has cached -- and has no provider until an app signs in again.
+func providerEnabled(clients *authelia.OIDC) bool {
+	return clients != nil && clients.Enabled()
+}
+
 // oidcClients is the provider's client list for one seedbox, from what the
 // login's Secret holds: one client per enabled app, each pointing at that
-// seedbox's own authorization policy. An app with no digest yet is left out --
-// the rendering then differs from the cluster's, which is what makes the next
-// write create it rather than silently serve a client Authelia cannot check.
+// seedbox's own authorization policy. An app with no digest yet is left out, so
+// the configuration never names a client Authelia cannot check. That the client
+// is missing is planned where it is known (PlanClients, which Decision.Pending
+// asks) and written where it can be (EnsureClients): the rendering is identical
+// with and without such an app, so a difference here is no signal at all.
+//
+// What it returns is the whole provider decision for this run (providerEnabled):
+// nil means the configuration has no identity_providers block and the
+// Deployment mounts nothing. Callers render the configuration and the manifests
+// from this one value so the two cannot disagree.
 func oidcClients(host, namespace, loginName string, apps []string, digests map[string]string) *authelia.OIDC {
 	if len(apps) == 0 {
 		return nil

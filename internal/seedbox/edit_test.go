@@ -642,3 +642,76 @@ func TestDeleteAListEntry(t *testing.T) {
 		t.Errorf("instances = %v, want one", inst)
 	}
 }
+
+// TestSetValuesWritesEveryKeyInOneWrite: a pin is two keys that belong together
+// (the digest and the tag of one image), and each key is applied to the document
+// the one before it produced -- appending a key moves the lines below it, so a
+// second key set against the first key's line numbers would land in the wrong
+// place.
+func TestSetValuesWritesEveryKeyInOneWrite(t *testing.T) {
+	path := copyFixture(t, "values.yaml")
+	before, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	s, err := Load(fixture(t, "grant.yaml"), path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	const digest = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	err = s.SetValues([]Edit{
+		{Path: "apps.sonarr.image.digest", Value: digest},
+		{Path: "apps.sonarr.image.tag", Value: "5.0.0"},
+	})
+	if err != nil {
+		t.Fatalf("SetValues: %v", err)
+	}
+	after, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read back: %v", err)
+	}
+	oldBlock, newBlock := blockDiff(before, after)
+	if len(oldBlock) != 0 {
+		t.Fatalf("the edit changed %q; writing two new keys must only add lines", oldBlock)
+	}
+	wantAdded := []string{
+		"    image:",
+		"      digest: sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		"      tag: 5.0.0",
+	}
+	if strings.Join(newBlock, "\n") != strings.Join(wantAdded, "\n") {
+		t.Fatalf("the edit added %q, want the image block with both keys", newBlock)
+	}
+
+	// Both keys are what the file says, read back through a fresh load.
+	again, err := Load(fixture(t, "grant.yaml"), path)
+	if err != nil {
+		t.Fatalf("Load after the edit: %v", err)
+	}
+	merged, err := again.Merge()
+	if err != nil {
+		t.Fatalf("Merge: %v", err)
+	}
+	image, ok := merged["apps"].(map[string]any)["sonarr"].(map[string]any)["image"].(map[string]any)
+	if !ok {
+		t.Fatalf("apps.sonarr.image is not in the edited file:\n%s", after)
+	}
+	if image["digest"] != digest || image["tag"] != "5.0.0" {
+		t.Fatalf("image = %v, want the digest and tag this write set", image)
+	}
+
+	// And a grant key is still refused, whatever else the call would write.
+	err = s.SetValues([]Edit{
+		{Path: "apps.sonarr.image.tag", Value: "5.1.0"},
+		{Path: "storage.config.path", Value: "/srv/example/config"},
+	})
+	if err == nil {
+		t.Fatal("SetValues wrote a grant key into the values file")
+	}
+	if !strings.Contains(err.Error(), "storage.config.path") {
+		t.Fatalf("error = %v, want it to name the grant key", err)
+	}
+	if got, _ := os.ReadFile(path); string(got) != string(after) {
+		t.Fatalf("a refused SetValues changed the file:\n%s", got)
+	}
+}

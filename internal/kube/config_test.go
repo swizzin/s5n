@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"k8s.io/client-go/rest"
 )
@@ -117,5 +118,23 @@ func TestConfigExplicitPathMustExist(t *testing.T) {
 	missing := filepath.Join(t.TempDir(), "gone")
 	if _, err := Config(missing); err == nil {
 		t.Fatal("a missing kubeconfig was accepted")
+	}
+}
+
+// TestWithRequestTimeoutBoundsEveryRequest: rest.Config.Timeout is the one bound
+// client-go applies by itself, per request, which is what code that makes its
+// own context needs -- Helm's release storage reads with context.Background().
+// The warning policy survives it: one config carries both.
+func TestWithRequestTimeoutBoundsEveryRequest(t *testing.T) {
+	flags := WithRequestTimeout(Flags(writeKubeconfig(t), "testbox"), 3*time.Second)
+	cfg, err := flags.ToRESTConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Timeout != 3*time.Second {
+		t.Fatalf("timeout = %v, want 3s", cfg.Timeout)
+	}
+	if _, ok := cfg.WarningHandler.(rest.NoWarnings); !ok {
+		t.Fatalf("warning handler = %T, want rest.NoWarnings: the timeout dropped it", cfg.WarningHandler)
 	}
 }

@@ -18,8 +18,8 @@ import (
 // (`/<name>`), and a rule list box typed by hand would drift from the routes
 // the release actually creates.
 type Instance struct {
-	// Name is the workload name -- sonarr, sonarr-4k, plex -- and therefore
-	// the URL prefix.
+	// Name is the workload name -- an app's name, or an Arr's with its
+	// instance suffix -- and therefore the URL prefix.
 	Name string
 	// App is the values key it came from.
 	App string
@@ -88,17 +88,6 @@ func hasEnvPrefix(cfg map[string]any) bool {
 	return ok
 }
 
-// selfAuthenticating are the apps whose whole URL prefix is exempt from the
-// login: Plex serves its own clients and its own token, and Seerr and
-// Tautulli are reached by the same media clients and APIs. Their names are
-// the chart's app keys, not instances -- the prefix still comes from the
-// instance list.
-var selfAuthenticating = map[string]bool{
-	"plex":     true,
-	"seerr":    true,
-	"tautulli": true,
-}
-
 // The three policies a rule can carry. Authelia's own vocabulary: bypass means
 // the request carries its own credential (or the app signs the user in), and
 // one_factor asks the portal for the session with that one user.
@@ -129,7 +118,10 @@ type Rule struct {
 // rule is the whole of <app>.<host> rather than a path on it, because the app
 // is not served under the path any more and a path rule would leave the name
 // with no rule at all (default_policy deny, which is a login nobody can get
-// past).
+// past). ownLogin names the apps the chart's catalog says sign their users in
+// themselves: their whole host or path prefix bypasses the login, because a
+// second password in front of an app that already has one is a password nobody
+// is asked for.
 //
 // The order is the whole design. Authelia takes the first rule that matches, so
 // the portal comes first (the login page has to be reachable by someone who is
@@ -142,7 +134,7 @@ type Rule struct {
 // target before it read any rule ("has an insecure scheme 'http'", 4.39). A
 // bypass here would be dead config that reads as if the challenge could pass
 // through the login.
-func Rules(host, login string, instances []Instance, hosted []string) []Rule {
+func Rules(host, login string, instances []Instance, hosted, ownLogin []string) []Rule {
 	rules := []Rule{
 		// The portal itself. Without this the redirect to /auth/ would be
 		// redirected to /auth/, forever.
@@ -152,18 +144,21 @@ func Rules(host, login string, instances []Instance, hosted []string) []Rule {
 	for _, app := range hosted {
 		ownHost[app] = true
 	}
+	selfAuth := make(map[string]bool, len(ownLogin))
+	for _, app := range ownLogin {
+		selfAuth[app] = true
+	}
 	// loginHosts are the domains the one login has to cover: the box's own,
-	// and any app host whose app is not self-authenticating. Today the hosted
-	// apps are Plex and Seerr, both of which bypass, but a rule derived from
-	// the chart's instances rather than from a name here is what keeps the
-	// next hosted app from falling into default_policy deny.
+	// and any app host the catalog does not mark as signing its users in. A
+	// hosted app without a rule would fall into default_policy deny, which is
+	// a login nobody can get past, so the name is always one or the other.
 	loginHosts := []string{host}
 	for _, inst := range instances {
 		if ownHost[inst.App] {
 			appHost := inst.App + "." + host
-			if selfAuthenticating[inst.App] {
-				// Seerr and Plex sign their users in themselves, on whatever
-				// name they are served at: the whole app host bypasses the
+			if selfAuth[inst.App] {
+				// An app that signs its users in itself does so on whatever
+				// name it is served at: the whole app host bypasses the
 				// login, just as the whole path did.
 				rules = append(rules, Rule{Domain: appHost, Policy: PolicyBypass})
 				continue
@@ -181,7 +176,7 @@ func Rules(host, login string, instances []Instance, hosted []string) []Rule {
 				"^" + prefix + `/api([/?].*)?$`,
 				"^" + prefix + `/ping$`,
 			}})
-		case selfAuthenticating[inst.App]:
+		case selfAuth[inst.App]:
 			rules = append(rules, Rule{Domain: host, Policy: PolicyBypass, Resources: []string{"^" + prefix + `([/?].*)?$`}})
 		}
 	}

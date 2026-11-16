@@ -362,9 +362,10 @@ func (k *Kubernetes) Accepted(ctx context.Context, group, version, kind, namespa
 	return ok, why, nil
 }
 
-// CertificateReady answers a Certificate's Ready condition. A Certificate
-// that is not there yet is not an error: the wait that follows is what gives
-// cert-manager time to write it.
+// CertificateReady answers a Certificate's Ready condition for the generation
+// the object is at (CertificateStatus). A Certificate that is not there yet is
+// not an error: the wait that follows is what gives cert-manager time to write
+// it.
 func (k *Kubernetes) CertificateReady(ctx context.Context, namespace, name string) (bool, string, error) {
 	gvr, err := k.mapping(schema.GroupVersionKind{Group: "cert-manager.io", Version: "v1", Kind: "Certificate"})
 	if err != nil {
@@ -377,26 +378,57 @@ func (k *Kubernetes) CertificateReady(ctx context.Context, namespace, name strin
 	if err != nil {
 		return false, "", fmt.Errorf("read Certificate %s/%s: %w", namespace, name, err)
 	}
-	conditions, _, _ := unstructured.NestedSlice(obj.Object, "status", "conditions")
+	status, _, _ := unstructured.NestedMap(obj.Object, "status")
+	generation, _, _ := unstructured.NestedInt64(obj.Object, "metadata", "generation")
+	ready, reason := CertificateStatus(status, generation)
+	return ready, reason, nil
+}
+
+// CertificateStatus answers whether a Certificate has issued its current
+// generation, with cert-manager's reason when it has not.
+//
+// The generation is the input that makes a move visible. box moves a host by
+// writing a new issuerRef into the Certificate's spec, and that bumps
+// metadata.generation; the Ready condition keeps saying True, and keeps the
+// generation it was written for, until the issuing controller reconciles the
+// new spec and has a certificate for it. A wait that read the condition alone
+// answers Ready for the certificate box is still serving -- the one the move
+// was meant to replace -- so the run reports the move done before cert-manager
+// has asked for anything, writes the host's HTTPS listener behind the old
+// certificate, and the next run sits out the whole CertificateTimeout on the
+// same host. That is exactly what the e2e's ACME move caught: Ready printed at
+// once for a Certificate that was still on the self-signed Secret minutes
+// later.
+//
+// A condition without an observedGeneration is read as current. cert-manager
+// has stamped the field on every condition since long before the pinned
+// release, so a document without it is not one box meets, and treating it as
+// stale would make every wait run its full timeout against a controller that
+// does not write it.
+func CertificateStatus(status map[string]any, generation int64) (bool, string) {
+	conditions, _, _ := unstructured.NestedSlice(status, "conditions")
 	for _, raw := range conditions {
 		cond, _ := raw.(map[string]any)
 		if cond["type"] != "Ready" {
 			continue
 		}
-		if cond["status"] == conditionTrue {
-			return true, "", nil
+		if cond["status"] != conditionTrue {
+			reason, _ := cond["reason"].(string)
+			message, _ := cond["message"].(string)
+			if reason == "" {
+				reason = "not Ready"
+			}
+			if message != "" {
+				reason += ": " + message
+			}
+			return false, reason
 		}
-		reason, _ := cond["reason"].(string)
-		message, _ := cond["message"].(string)
-		if reason == "" {
-			reason = "not Ready"
+		if seen, ok, err := unstructured.NestedInt64(cond, "observedGeneration"); err == nil && ok && seen < generation {
+			return false, fmt.Sprintf("cert-manager has not reconciled generation %d yet (its Ready condition describes generation %d)", generation, seen)
 		}
-		if message != "" {
-			reason += ": " + message
-		}
-		return false, reason, nil
+		return true, ""
 	}
-	return false, "cert-manager has not reconciled it yet", nil
+	return false, "cert-manager has not reconciled it yet"
 }
 
 // conditionTrue is the API's literal for a condition that holds. Every

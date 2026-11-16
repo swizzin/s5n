@@ -30,6 +30,7 @@ import (
 	"github.com/swizzin/s5n/internal/catalog"
 	"github.com/swizzin/s5n/internal/say"
 	"github.com/swizzin/s5n/internal/seedbox"
+	"github.com/swizzin/s5n/internal/snapshot"
 	"github.com/swizzin/s5n/internal/wait"
 )
 
@@ -55,6 +56,12 @@ type ReleaseClient interface {
 	// exists in another state (failed, pending) is an error: box will not
 	// silently install over it.
 	Deployed(ctx context.Context) (values map[string]any, exists bool, err error)
+
+	// State returns the chart release Helm has deployed, which is what tells
+	// this run whether the release it is about to install is the one that is
+	// there. Values are not enough: every digest bump ships as a new release
+	// with the values an installed box already has.
+	State(ctx context.Context) (ReleaseState, error)
 
 	// Upgrade installs the release when it does not exist and upgrades it
 	// when it does, then waits for it, including its wiring hook. It returns
@@ -130,7 +137,12 @@ type HostPlan struct {
 type HostRule struct {
 	Login  string
 	Hosted []string
-	Values map[string]any
+	// OwnLogin are the apps the catalog says sign their users in themselves:
+	// their host or path prefix bypasses the login. Like Hosted it is the
+	// whole list, so a rewrite of the configuration never puts the login back
+	// in front of an app whose own sign-in is the one people use.
+	OwnLogin []string
+	Values   map[string]any
 	// Namespace is the seedbox's namespace -- half of every OIDC client id --
 	// and OIDC are the apps the catalog says sign in through the login. The
 	// login's configuration is one file: a rule write renders the clients too,
@@ -207,6 +219,23 @@ type Login interface {
 	Reconcile(ctx context.Context, plan HostPlan) error
 }
 
+// LoginAccess is the optional question apply asks a login half when the values
+// enable an app that signs in through the login. The chart mounts that app's
+// client Secret whether or not it exists, so a release started without one is a
+// pod that never runs and a Helm wait that times out; only the login's writer
+// can register one.
+//
+// MayWrite is the same question that decides whether a run has a login half at
+// all (login.MayWrite): a seedbox user's kubeconfig cannot apply a ConfigMap in
+// the platform's namespace, so their run can neither write the client nor the
+// digest it needs. ClientRegistered is the read of the app's Secret in the
+// seedbox's namespace, which a user may make. Both are reads, and both happen
+// before the confirm.
+type LoginAccess interface {
+	MayWrite(ctx context.Context) (bool, error)
+	ClientRegistered(ctx context.Context, namespace, app string) (bool, error)
+}
+
 // AnchorPlan is what apply tells its host-CA step: the box's own host name, the
 // issuer this run writes that host's Certificate with (empty when this run
 // writes none), and the namespace the anchor is written into.
@@ -250,6 +279,145 @@ type Anchor interface {
 	Ensure(ctx context.Context, plan AnchorPlan) error
 }
 
+// Snapshotter is the optional step that copies an app's config before this
+// apply moves the app's image (docs/box.md, "Snapshot and rollback").
+//
+// An update snapshots the apps its steps move; an apply is the other way an
+// image moves, and a values pin -- a tag, a digest, a variant -- moves it over
+// the forward-only migration the same way. Without this step a `box apply`
+// that changed a pin leaves `box rollback` nothing to put back.
+//
+// Pending is the read apply makes with its diff, so the apps it will stop and
+// copy are part of the plan and a copy box cannot take refuses before the
+// question is asked. An image box cannot name the bytes of is not a refusal:
+// the move is planned uncopied and its Row says why, because the apply that
+// pins a digest comes through this same step. Take is the write, after the
+// confirm and immediately before the release moves: nothing else this run
+// writes can fail while an app is down. Prune runs once the release is up on
+// the images it moved to, and a copy it cannot prune is a warning rather than a
+// failed apply.
+type Snapshotter interface {
+	Pending(ctx context.Context, plan SnapshotPlan) (SnapshotWork, error)
+	Take(ctx context.Context, plan SnapshotPlan, work SnapshotWork) (SnapshotDirs, error)
+	Prune(ctx context.Context, plan SnapshotPlan, work SnapshotWork) error
+}
+
+// SnapshotPlan is what apply knows when it asks its snapshot step to read the
+// release: the chart it installs and the values it renders, which decide the
+// image each app moves to, and the config root the copies live under.
+type SnapshotPlan struct {
+	// Namespace is the release's, from the grant.
+	Namespace string
+	// Chart is the release this apply installs: its variants are the images
+	// the apps move to, and its catalog says which apps have state to copy.
+	Chart Chart
+	// Values are the final values this apply renders: the two files merged,
+	// then box's own keys, then the holds.
+	Values map[string]any
+	// ConfigRoot is the grant's storage.config.path, under which one
+	// directory per instance holds that instance's /config.
+	ConfigRoot string
+}
+
+// SnapshotMove is one enabled app whose image this apply moves: what it runs
+// in the cluster now and what this apply gives it.
+type SnapshotMove struct {
+	App     string
+	Ran     snapshot.ImageRef
+	MovedTo snapshot.ImageRef
+	// Copied says the release's catalog names files to copy for this app and
+	// the bytes it runs can be named, so the app is stopped and its config is
+	// copied. An app without a catalog entry moves without a copy and is not
+	// stopped, exactly as an update moves one: box has no state to put back,
+	// so it never rolls it back. So does an app whose bytes cannot be named,
+	// with Uncopied saying why.
+	Copied bool
+	// Uncopied is why a move the catalog has state for is not copied: the
+	// bytes it runs cannot be named exactly, so the copy could not be put
+	// back. It is the zero value when Copied is true, and for an app the
+	// catalog gives nothing to copy. When its instances' references differ,
+	// Ran is the first instance's, and the row does not print it.
+	Uncopied UncopiedReason
+	// Detail is what Uncopied's sentence needs: the tag both halves of a
+	// tag-only reference share, or the `instance image` pairs of instances
+	// running different images.
+	Detail string
+}
+
+// UncopiedReason is why a moving app gets no copy even though the catalog
+// names state to copy for it.
+type UncopiedReason int
+
+const (
+	// UncopiedNone is a move that is copied, or one with nothing to copy.
+	UncopiedNone UncopiedReason = iota
+	// UncopiedNoDigest is a tag-only reference whose pods report no digest:
+	// the app was never pulled, or none of its pods is up to say what ran.
+	UncopiedNoDigest
+	// UncopiedDifferentBytes is a tag-only reference whose pods report more
+	// than one digest: a tag was re-pushed, or instances pulled at different
+	// times, and box cannot say which bytes wrote the state.
+	UncopiedDifferentBytes
+	// UncopiedDifferentImages is instances whose StatefulSets ask for
+	// different images, so no single reference is what the app runs.
+	UncopiedDifferentImages
+)
+
+// Row is the plan's line for one move. Only the apps a copy would stop are
+// said to be stopped: an app without a catalog entry keeps running through its
+// image change, and an app whose bytes cannot be named moves the same way, so
+// the plan says so rather than leaving it out -- the operator decides whether
+// to go on, which is what keeps an apply from ever being refused over an
+// image.
+func (m SnapshotMove) Row() string {
+	switch m.Uncopied {
+	case UncopiedNoDigest:
+		return fmt.Sprintf("%s: moves from %s to %s without a snapshot (no pod reports the bytes it runs under tag %s)",
+			m.App, m.Ran.Label(), m.MovedTo.Label(), m.Detail)
+	case UncopiedDifferentBytes:
+		return fmt.Sprintf("%s: moves from %s to %s without a snapshot (its instances run different bytes under tag %s)",
+			m.App, m.Ran.Label(), m.MovedTo.Label(), m.Detail)
+	case UncopiedDifferentImages:
+		return fmt.Sprintf("%s: moves to %s without a snapshot (its instances run different images: %s)",
+			m.App, m.MovedTo.Label(), m.Detail)
+	}
+	if m.Copied {
+		return fmt.Sprintf("%s: stopped and snapshotted before it moves from %s to %s",
+			m.App, m.Ran.Label(), m.MovedTo.Label())
+	}
+	return fmt.Sprintf("%s: moves from %s to %s without a snapshot (nothing to copy)",
+		m.App, m.Ran.Label(), m.MovedTo.Label())
+}
+
+// SnapshotWork is what the snapshot step decided: every app this apply moves,
+// in app order. Every move shares one copy, named with the release the box is
+// on and the one this apply installs.
+type SnapshotWork struct {
+	// From and To name the copy's directory. An apply that only changes values
+	// installs the release it is on, so the two are the same version.
+	From string
+	To   string
+	// Moves is empty for a run that moves no image, which is what keeps an
+	// apply with nothing to show from printing a snapshot section.
+	Moves []SnapshotMove
+}
+
+// Copied is the apps this apply stops and copies, in plan order.
+func (w SnapshotWork) Copied() []string {
+	var out []string
+	for _, m := range w.Moves {
+		if m.Copied {
+			out = append(out, m.App)
+		}
+	}
+	return out
+}
+
+// SnapshotDirs is where Take put each copied app's config, keyed by app: what
+// a failed release says so the operator can run the rollback, and what the
+// prune keeps two of.
+type SnapshotDirs map[string]string
+
 // Options are one `box apply`.
 type Options struct {
 	// Chart is a chart release the caller has already loaded. `box init` sets
@@ -290,6 +458,19 @@ type Options struct {
 	// use: a value that is box's, not the operator's, and that has to be
 	// recomputed on every apply so a re-run is still a no-op.
 	BoxValues func(ctx context.Context) (map[string]any, error)
+	// Holds returns the values that keep an app an update rolled back on its
+	// old image: apps.<app>.image.digest and, when the release named one, the
+	// tag. It is overlaid after BoxValues and checked against the chart's
+	// schema like it, because the release box installs must render the app
+	// the rollback left running. The seedbox is the argument apply loaded, so
+	// a caller reads the holds file beside the config root it names without
+	// loading either file a second time. nil means this box keeps no holds.
+	Holds func(ctx context.Context, sb *seedbox.Seedbox, chart Chart, values map[string]any) (map[string]any, error)
+	// Snapshots is the apps this apply stops and copies before it moves their
+	// images. It is nil for every caller that must not take one: `box update`
+	// snapshots each step itself, and a rollback's apply is the move back.
+	// `box apply` is the only command that sets it.
+	Snapshots Snapshotter
 	// HostIssuers is the issuer each host was decided with when the caller
 	// made that decision already (`box init`): host name to tls.issuer
 	// value. The plan compares each Certificate that answers with its own
@@ -327,6 +508,22 @@ type Options struct {
 	// the issuer its per-host step will write; empty leaves the step reading
 	// the Certificate in the cluster.
 	AnchorIssuer string
+	// SkipHooks installs the release without running the chart's hooks; the
+	// caller applies the release again with them, once the state that stays is
+	// the one in the cluster. `box update`'s step sets it for the apply that
+	// moves the release: the chart's wiring Job waits for every app to answer,
+	// and an app whose new image never starts cannot, so a hook run there
+	// would spend its whole budget before the step could put the app back. It
+	// is passed to the release client by the caller that opens it, because a
+	// hook run is the release client's wait and not this plan's.
+	SkipHooks bool
+	// RunHooks says the release's hooks are this run's work, so it installs
+	// even when nothing about the release changed. It is how `box update`'s
+	// step makes the one apply that runs the wiring: the release is already
+	// deployed at that version and the values are the ones it has, so an
+	// ordinary apply would answer "nothing to change" and the chart's wiring
+	// Job would never run.
+	RunHooks bool
 }
 
 // ChartRef is the reference the chart source is asked for. loadChart uses it,
@@ -425,8 +622,8 @@ func (a *Applier) Apply(ctx context.Context, opts Options) (Result, error) {
 		return res, err
 	}
 	// init prints the chart before its questions; a bare `box apply` has not
-	// shown anyone which release it is about to install, and "newest this box
-	// can use" is not obvious from the tag it ends up with.
+	// shown anyone which release it installs -- the one the box is on, or on a
+	// first install the newest this box can use, which nothing else names.
 	if opts.Chart == nil && chart.Version != "" {
 		r.Chart(chart.Name, chart.Version, chart.Ref)
 	}
@@ -446,6 +643,23 @@ func (a *Applier) Apply(ctx context.Context, opts Options) (Result, error) {
 		overlayTree(values, box)
 		if err := seedbox.Validate(chart.Schema, values); err != nil {
 			return res, err
+		}
+	}
+	// The holds are the box's answer too: an app an update rolled back stays on
+	// the image it ran until a release pins another, and the chart has to
+	// render that image. They can only change a value the schema allows, so a
+	// hold that would not render is a refusal here rather than a failed
+	// upgrade later.
+	if opts.Holds != nil {
+		held, err := opts.Holds(ctx, sb, chart, values)
+		if err != nil {
+			return res, err
+		}
+		if len(held) > 0 {
+			overlayTree(values, held)
+			if err := seedbox.Validate(chart.Schema, values); err != nil {
+				return res, err
+			}
 		}
 	}
 
@@ -474,6 +688,25 @@ func (a *Applier) Apply(ctx context.Context, opts Options) (Result, error) {
 			namespace, podSecurityRestricted, enforce))
 	}
 
+	// The login, when this run's step has one. It is asked here for the client
+	// a newly enabled app needs -- a refusal beside the namespace's, before
+	// anything is written and before the confirm -- and again with the diff
+	// for the page itself.
+	login, _ := opts.Hosts.(Login)
+	// An app that signs in through the login mounts a client Secret its writer
+	// creates, and the chart mounts it whether or not it is there: a release
+	// started without one is a pod that never runs and a Helm wait that times
+	// out. root's apply registers it, because its login step counts a missing
+	// client as work. A run that cannot write the login -- a seedbox user's
+	// kubeconfig, which reaches neither the platform's namespace nor the
+	// login -- can only stop here and name the command that can
+	// (docs/box.md, "Apps that speak OIDC sign in through the login").
+	if oidcGatewayIP(values) != "" {
+		if err := refuseUnregisteredClient(ctx, login, chart, values, namespace); err != nil {
+			return res, err
+		}
+	}
+
 	client, err := a.Open(namespace)
 	if err != nil {
 		return res, err
@@ -481,13 +714,33 @@ func (a *Applier) Apply(ctx context.Context, opts Options) (Result, error) {
 	// A release lives in the namespace, so a missing namespace is a missing
 	// release. Asking Helm about it would only report the archive back.
 	var deployed map[string]any
+	var installed ReleaseState
 	exists := false
 	if nsp.Exists {
 		deployed, exists, err = client.Deployed(ctx)
 		if err != nil {
 			return res, err
 		}
+		if exists {
+			installed, err = client.State(ctx)
+			if err != nil {
+				return res, err
+			}
+		}
 	}
+	// The release this run installs is part of the run's work even when the
+	// values are not: every image bump ships as a new chart release with the
+	// values the box already has, and installing it is the only thing that
+	// moves a pod. `box update` hands apply the release it settled on, so an
+	// apply that read the release as unchanged would take no step at all and
+	// leave the box where it was, saying it had updated it.
+	chartMoved := exists && installed.ChartVersion != chart.Version
+	// The hooks are work too, and the only work left in the apply that closes
+	// an update step: the step moved the release with them off, so the release
+	// is deployed at this version with these values and the chart's wiring has
+	// still not run. Without this the apply would answer "nothing to change"
+	// and the wiring would never run at all.
+	hooksWait := opts.RunHooks && !opts.SkipHooks
 	res.FirstInstall = !exists
 	res.Host = hostOf(values)
 	if exists {
@@ -515,10 +768,7 @@ func (a *Applier) Apply(ctx context.Context, opts Options) (Result, error) {
 	//
 	// The login is the same value as that step when the step also implements
 	// Login, which root's does: both are root's writes outside the release, and
-	// the login is one page for the whole host rather than a name on it. A value
-	// that does not -- `box init`'s nil, or a step for a user who cannot write
-	// the login at all -- has no login half.
-	login, _ := opts.Hosts.(Login)
+	// the login is one page for the whole host rather than a name on it.
 	var hostPlan HostPlan
 	if opts.Hosts != nil || login != nil {
 		hostPlan, err = a.hostPlan(ctx, opts, chart, sb, values)
@@ -558,16 +808,41 @@ func (a *Applier) Apply(ctx context.Context, opts Options) (Result, error) {
 		}
 	}
 
-	if exists && len(res.Changes) == 0 && len(plan) == 0 && nsp.Exists && len(hostPlan.Hosts) == 0 && !res.Login && anchorLine == "" {
+	if exists && len(res.Changes) == 0 && len(plan) == 0 && nsp.Exists && len(hostPlan.Hosts) == 0 && !res.Login && anchorLine == "" && !chartMoved && !hooksWait {
 		r.Line(fmt.Sprintf("%s in %s: nothing to change", ReleaseName, namespace))
 		return res, nil
 	}
 
+	// The apps whose image this apply moves, read with the diff and before the
+	// question: an image change migrates an app's database forward, so the
+	// config it runs on is copied first. Only a run that changes the release can
+	// move an image, which is also what keeps an idempotent apply from reading
+	// the cluster's pods for nothing.
+	snapPlan := SnapshotPlan{Namespace: namespace, Chart: chart, Values: values, ConfigRoot: configRoot(vols)}
+	var snapWork SnapshotWork
+	var snapDirs SnapshotDirs
+	if opts.Snapshots != nil && exists && len(res.Changes) > 0 {
+		snapWork, err = opts.Snapshots.Pending(ctx, snapPlan)
+		if err != nil {
+			return res, err
+		}
+	}
+
 	if exists {
-		if len(res.Changes) > 0 {
+		switch {
+		case len(res.Changes) > 0:
 			r.Line(fmt.Sprintf("%s in %s: %d %s", ReleaseName, namespace, len(res.Changes), plural(len(res.Changes), "change", "changes")))
 			r.Diff(changeItems(res.Changes))
-		} else {
+		case chartMoved:
+			// Only the release moved: the values are the ones installed, and
+			// the pins the new chart carries are the whole change.
+			r.Line(fmt.Sprintf("%s in %s: release %s -> %s", ReleaseName, namespace, installed.ChartVersion, chart.Version))
+		case hooksWait:
+			// The release is the one installed and its values are the ones it
+			// has: what this run has to do is the hook it carries, which the
+			// release was deployed without.
+			r.Line(fmt.Sprintf("%s in %s: release %s, running its hooks", ReleaseName, namespace, chart.Version))
+		default:
 			// The only work this run has is outside the release -- a host
 			// without its listener, or a login page that is not the one the
 			// values name -- which is why the early return above did not take
@@ -580,7 +855,7 @@ func (a *Applier) Apply(ctx context.Context, opts Options) (Result, error) {
 		if host := hostOf(values); host != "" {
 			details = append(details, "host: "+host)
 		}
-		if apps := enabledApps(values); len(apps) > 0 {
+		if apps := EnabledApps(values); len(apps) > 0 {
 			details = append(details, "apps: "+strings.Join(apps, ", "))
 		}
 		if len(details) > 0 {
@@ -600,6 +875,16 @@ func (a *Applier) Apply(ctx context.Context, opts Options) (Result, error) {
 	}
 	if anchorLine != "" {
 		r.List("host CA", []string{anchorLine})
+	}
+	// The apps whose image this run moves, and whether each one is copied
+	// before it moves: an app the catalog gives nothing to copy keeps running
+	// through its change, which the plan says rather than leaving it out.
+	if len(snapWork.Moves) > 0 {
+		lines := make([]string, 0, len(snapWork.Moves))
+		for _, move := range snapWork.Moves {
+			lines = append(lines, move.Row())
+		}
+		r.List("snapshots", lines)
 	}
 
 	ok, err := a.Confirm.Ask(fmt.Sprintf("apply %s in %s?", ReleaseName, namespace))
@@ -680,7 +965,7 @@ func (a *Applier) Apply(ctx context.Context, opts Options) (Result, error) {
 	// namespace and its storage are all as they were, so this run makes no Helm
 	// revision. A certificate nobody has to renew, or a login page the release
 	// already names, must not churn the release users roll back to.
-	if exists && len(res.Changes) == 0 && len(plan) == 0 && nsp.Exists {
+	if exists && len(res.Changes) == 0 && len(plan) == 0 && nsp.Exists && !chartMoved && !hooksWait {
 		return res, nil
 	}
 
@@ -727,30 +1012,113 @@ func (a *Applier) Apply(ctx context.Context, opts Options) (Result, error) {
 		step.DoneAs("", fmt.Sprintf("wrote %d storage object%s", len(plan), plural(len(plan), "", "s")))
 	}
 
+	// The apps the plan showed stopped are stopped here, immediately before the
+	// release moves: everything else this run writes -- the namespace, the
+	// storage, a host's listener -- has succeeded already, so nothing can fail
+	// between the copy and the upgrade and leave an app down for a reason that
+	// is not its image.
+	if len(snapWork.Copied()) > 0 {
+		snapDirs, err = opts.Snapshots.Take(ctx, snapPlan, snapWork)
+		if err != nil {
+			return res, err
+		}
+	}
+
 	started := time.Now()
 	upgrade := r.Start(say.Op{Label: fmt.Sprintf("installing %s in %s", ReleaseName, namespace)})
 	rev, err := client.Upgrade(ctx, chart, values)
 	if err != nil {
 		upgrade.Failed(err)
-		return res, a.undo(ctx, store, created, err)
+		return res, a.undo(ctx, store, created, withSnapshotDirs(err, snapDirs))
 	}
 	res.Applied = true
 	res.Revision = rev
 	upgrade.Done(fmt.Sprintf("applied: %s revision %d in %s", ReleaseName, rev, namespace))
 
+	// An apply that ran no hooks has no receipt to wait for: the chart's
+	// wiring Job has not run, and its receipt would be the previous release's.
+	// The caller applies the release again with the hooks once it knows which
+	// images stay, and that apply is the one this gate belongs to.
+	if opts.SkipHooks {
+		return res, nil
+	}
+
+	// The release moved, but a wiring that never reports or reports a failure
+	// is the moment the operator reaches for the copy: say where it is there
+	// too, as a failed upgrade does.
 	receipt, err := a.waitReceipt(ctx, client, started)
 	if err != nil {
-		return res, err
+		return res, withSnapshotDirs(err, snapDirs)
 	}
 	res.Receipt = receipt
 	a.printReceipt(r, receipt)
 	if receipt.Status != "ok" {
 		if receipt.Error != "" {
-			return res, fmt.Errorf("wiring failed: %s", receipt.Error)
+			return res, withSnapshotDirs(fmt.Errorf("wiring failed: %s", receipt.Error), snapDirs)
 		}
-		return res, errors.New("wiring failed: the receipt does not say ok")
+		return res, withSnapshotDirs(errors.New("wiring failed: the receipt does not say ok"), snapDirs)
+	}
+	// The release is up on the images it moved to, so the copies are what a
+	// rollback would restore rather than the state the apps are writing now:
+	// keeping the newest two per app is enough. A copy that cannot be pruned
+	// costs disk, not correctness, and is never an apply's failure.
+	if len(snapDirs) > 0 {
+		if perr := opts.Snapshots.Prune(ctx, snapPlan, snapWork); perr != nil {
+			r.Warn(fmt.Sprintf("keeping the snapshot of %s: %v", strings.Join(sortedKeys(snapDirs), ", "), perr))
+		}
+		// The copy is the newest one per app, so the prune kept it: the run
+		// ends saying where it is and how to put it back, rather than leaving
+		// the operator to find it when the moved image misbehaves later.
+		for _, note := range snapshotNotes(snapDirs) {
+			r.Line(note)
+		}
 	}
 	return res, nil
+}
+
+// withSnapshotDirs adds where this run's copies are to a failed upgrade's
+// error. The apps it stopped are still down: the operator has to know the state
+// they had was copied, and the one command that puts it back. It stays one
+// sentence rather than one line per app, because box prints the error on the
+// one line its prefix belongs to.
+func withSnapshotDirs(err error, dirs SnapshotDirs) error {
+	if len(dirs) == 0 {
+		return err
+	}
+	return fmt.Errorf("%w; %s", err, strings.Join(snapshotNotes(dirs), "; "))
+}
+
+// snapshotNotes is one sentence per copied app: where its copy is, and the
+// command that puts it back.
+func snapshotNotes(dirs SnapshotDirs) []string {
+	notes := make([]string, 0, len(dirs))
+	for _, app := range sortedKeys(dirs) {
+		notes = append(notes, fmt.Sprintf("the snapshot of %s is in %s; `box rollback %s` puts it back", app, dirs[app], app))
+	}
+	return notes
+}
+
+// configRoot is the grant's config path: the volume the chart mounts per
+// instance as /config, under which the copies and the holds live.
+func configRoot(vols []seedbox.Volume) string {
+	for _, v := range vols {
+		if v.Kind == "config" {
+			return v.Path
+		}
+	}
+	return ""
+}
+
+// sortedKeys is a snapshot directory map's app names, in app order: box's
+// sentences are read and compared line by line, so their order cannot depend on
+// a map walk.
+func sortedKeys(dirs SnapshotDirs) []string {
+	out := make([]string, 0, len(dirs))
+	for app := range dirs {
+		out = append(out, app)
+	}
+	sort.Strings(out)
+	return out
 }
 
 // loadChart returns the chart this apply installs: the one the caller already
@@ -851,10 +1219,11 @@ func loginRule(sb *seedbox.Seedbox, chart Chart, values map[string]any, hosts []
 	return HostRule{
 		Login:     login,
 		Hosted:    hostedApps(hosts, domain),
+		OwnLogin:  cat.SelfAuthenticating(),
 		Values:    values,
 		Image:     chart.Pins.Authelia,
 		Namespace: namespace,
-		OIDC:      cat.OIDCApps(enabledApps(values)),
+		OIDC:      cat.OIDCApps(EnabledApps(values)),
 	}, nil
 }
 
@@ -871,7 +1240,63 @@ func oidcClients(chart Chart, values map[string]any) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	return cat.OIDCApps(enabledApps(values)), nil
+	return cat.OIDCApps(EnabledApps(values)), nil
+}
+
+// refuseUnregisteredClient is the one sentence a run that cannot write the
+// login gets when the release would start an app whose client the login does
+// not have. It is a read: nothing is written, and it runs before the confirm,
+// so a user's apply never shows a plan it cannot carry out.
+//
+// A step that offers no LoginAccess cannot be asked. Every step box itself
+// hands over implements it (cmd/box), and a user's answers "no" to MayWrite
+// rather than going unasked.
+func refuseUnregisteredClient(ctx context.Context, login Login, chart Chart, values map[string]any, namespace string) error {
+	access, ok := login.(LoginAccess)
+	if !ok {
+		return nil
+	}
+	apps, err := oidcClients(chart, values)
+	if err != nil {
+		return err
+	}
+	if len(apps) == 0 {
+		return nil
+	}
+	may, err := access.MayWrite(ctx)
+	if err != nil {
+		return err
+	}
+	if may {
+		return nil
+	}
+	var missing []string
+	for _, app := range apps {
+		there, err := access.ClientRegistered(ctx, namespace, app)
+		if err != nil {
+			return err
+		}
+		if !there {
+			missing = append(missing, app)
+		}
+	}
+	if len(missing) == 0 {
+		// Every client is already registered -- a re-enable of an app root
+		// turned off keeps its Secret and its digest, so this run works.
+		return nil
+	}
+	return fmt.Errorf("%s signs in through the login and has no client yet, and only root can register one: run `box init` as root for this seedbox, then apply again", strings.Join(missing, ", "))
+}
+
+// oidcGatewayIP is auth.oidc.gatewayIP as the effective values carry it: the
+// grant's record, which seedbox.Effective injects only when the chart declares
+// the key. Empty means the chart renders no OIDC at all -- an app's pod mounts
+// no client Secret, so there is nothing to register and nothing to refuse.
+func oidcGatewayIP(values map[string]any) string {
+	auth, _ := values["auth"].(map[string]any)
+	oidc, _ := auth["oidc"].(map[string]any)
+	ip, _ := oidc["gatewayIP"].(string)
+	return strings.TrimSpace(ip)
 }
 
 // hostedHosts is every name the values serve at a host of its own, in catalog
@@ -1061,7 +1486,11 @@ func hostOf(values map[string]any) string {
 	return host
 }
 
-func enabledApps(values map[string]any) []string {
+// EnabledApps is every app the effective values switch on, sorted. It is what
+// the login's clients and hosted hosts are read from in apply, and what
+// `box update` compares two releases' images for: an app the operator turned
+// off has no database to migrate, so it is not a moving app.
+func EnabledApps(values map[string]any) []string {
 	apps, _ := values["apps"].(map[string]any)
 	out := make([]string, 0, len(apps))
 	for name, v := range apps {

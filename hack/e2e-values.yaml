@@ -1,7 +1,9 @@
 # The e2e's own values. The image tag is the locally built one (loaded into
 # kind under the chart's s5n repository); the 4K Radarr instance is enabled with
 # a category an existing seedbox may already use: upper case and one qBittorrent
-# subcategory level. Everything else is the chart's defaults.
+# subcategory level. qBittorrent runs the chart's lt1.2 variant, so this run
+# proves the project's own build and not only the default. Everything else is
+# the chart's defaults.
 #
 # A values file, not --set: --set on one index of a list replaces the whole
 # list, so instances[1] would arrive without its suffix and instances[0] null.
@@ -14,6 +16,9 @@ wiring:
 
 apps:
   qbittorrent:
+    image:
+      # The project's own static build, so this run proves it, not only default.
+      variant: lt1.2
     torrent:
       # The band box picks from, spelled out because this e2e installs with
       # helm and so chooses its own values. A port from the upper part of the

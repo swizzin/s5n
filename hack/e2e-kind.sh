@@ -47,6 +47,48 @@ ENVOY_GATEWAY_CHART_VERSION=${ENVOY_GATEWAY_CHART_VERSION:-$(pin envoyGateway)}
 METALLB_VERSION=${METALLB_VERSION:-$(v_tag "$(pin metallb)")}
 CERT_MANAGER_VERSION=${CERT_MANAGER_VERSION:-$(pin certManager)}
 
+# The qBittorrent variants this run installs and admits, read from the chart's own
+# file rather than copied here: Renovate bumps a variant in
+# charts/s5n/variants.yaml only, so a literal here would fail this script on
+# every digest bump.
+# The shape read is the file's fixed one -- repository, tag and digest on three
+# lines inside one entry of the `qbittorrent:` block -- the same shape the
+# Renovate manager's regex relies on, and the reason no YAML parser is needed on
+# the host. The entry name is matched as a whole line, never as a prefix: `lt1.2`
+# and `lt1.2-10g` are both real entries now, and a prefix match would hand one
+# entry's tag and digest to the other.
+variant_field() { # <entry> <field> -> that entry's value, quotes stripped
+  awk -v entry="$1" -v want="$2" '
+    /^[A-Za-z]/ { inqbt = ($0 ~ /^qbittorrent:/); invar = 0; next }
+    inqbt && $0 == "  " entry ":" { invar = 1; next }
+    inqbt && /^  [^[:space:]]/ { invar = 0 }
+    invar && $1 == want ":" {
+      line = $0
+      sub(/^[^:]*:[[:space:]]*/, "", line)
+      gsub(/"/, "", line)
+      print line
+      exit
+    }
+  ' charts/s5n/variants.yaml
+}
+qbit_repository=$(variant_field lt1.2 repository)
+qbit_tag=$(variant_field lt1.2 tag)
+qbit_digest=$(variant_field lt1.2 digest)
+if [ -z "$qbit_repository" ] || [ -z "$qbit_tag" ] || [ -z "$qbit_digest" ]; then
+  echo "charts/s5n/variants.yaml: qbittorrent.lt1.2 needs all three of repository, tag and digest (read '${qbit_repository}' '${qbit_tag}' '${qbit_digest}')"
+  exit 1
+fi
+# Two entries that share a prefix must stay two entries: if the reader cannot
+# tell `lt1.2` from `lt1.2-10g`, every assertion below silently tests the wrong
+# build.
+if [ "$(variant_field lt1.2 tag)" = "$(variant_field lt1.2-10g tag)" ]; then
+  echo "charts/s5n/variants.yaml: lt1.2 and lt1.2-10g read back the same entry ('$(variant_field lt1.2 tag)')"
+  exit 1
+fi
+# The variant NAMED lt1.2: a values file that falls back to the default, or names
+# another blessed build, must still fail the assertions below.
+QBIT_LT12="${qbit_repository}:${qbit_tag}@${qbit_digest}"
+
 # Test-only images, pinned by tag and digest. They are not box's to install, so
 # they stay in the scripts rather than the chart's platform.yaml; Renovate
 # watches them here (.github/renovate.json), and the tag stays in the reference
@@ -309,6 +351,22 @@ else
   grep -q "not blessed by the chart" "$WORK/allow-image.txt" || fail=1
 fi
 
+# The control: the chart blesses two repositories for qBittorrent now, and the
+# params are generated from variants.yaml, so the second one has to reach this
+# namespace or a user's box could not run an image the chart itself ships. The
+# fixture's security context is already admissible, so the repository is the
+# only thing under test; a server-side dry run is a real admission request that
+# creates nothing.
+log "admission: the user can run both blessed qBittorrent repositories"
+sed -e 's/name: unblessed/name: blessed-qbittorrent/' -e 's/app: unblessed/app: blessed-qbittorrent/g' \
+  -e "s#${CURL_IMAGE}#${QBIT_LT12}#" \
+  "$WORK/unblessed.yaml" >"$WORK/blessed-qbittorrent.yaml"
+if $K --as="$SA" -n "$NS" create --dry-run=server -f "$WORK/blessed-qbittorrent.yaml" >"$WORK/allow-qbittorrent.txt" 2>&1; then
+  echo "the lt1.2 qBittorrent image is admitted"
+else
+  echo "$(cat "$WORK/allow-qbittorrent.txt")"; fail=1
+fi
+
 log "admission: the user can only use the granted nodePort"
 cat >"$WORK/unblessed-svc.yaml" <<'EOF'
 apiVersion: v1
@@ -555,6 +613,25 @@ $K -n "$NS" get pods -o wide
 # which never satisfies Ready.
 $K -n "$NS" wait --for=condition=Ready pod -l 'app.kubernetes.io/instance=s5n,s5n.io/app' --timeout=300s || fail=1
 
+# The variant this run says it tests: hack/e2e-values.yaml selects lt1.2, the
+# project's own static build on libtorrent 1.2. A variant name that does not
+# exist fails the render, but one that names a *different* blessed build -- or a
+# values file that lost the line -- would leave every assertion below green
+# against the default image. So the pod spec is read back (repository, tag and
+# the digest the variant pins) and the runtime's own imageID has to be that
+# digest, which is what proves the bytes that started.
+qbit_variant=$QBIT_LT12
+qbit_spec=$($K -n "$NS" get pod qbittorrent-0 -o jsonpath='{.spec.containers[?(@.name=="qbittorrent")].image}')
+qbit_id=$($K -n "$NS" get pod qbittorrent-0 -o jsonpath='{.status.containerStatuses[?(@.name=="qbittorrent")].imageID}')
+echo "qBittorrent runs: ${qbit_spec}"
+echo "            image: ${qbit_id}"
+[ "$qbit_spec" = "$qbit_variant" ] ||
+  { echo "qBittorrent is specified as ${qbit_spec}, want the lt1.2 variant ${qbit_variant}: hack/e2e-values.yaml did not select it"; fail=1; }
+case "$qbit_id" in
+  *"${qbit_variant##*@}"*) ;;
+  *) echo "the running qBittorrent is ${qbit_id}, not the digest the lt1.2 variant pins"; fail=1 ;;
+esac
+
 # `kubectl debug` adds containers through the pods/ephemeralcontainers
 # subresource: an UPDATE a rule for "pods" does not match. The policy sees the
 # whole Pod there, so the target must already be blessed in every container.
@@ -613,10 +690,122 @@ echo "Gateway address: ${GW_ADDR}"
 
 # Every request below goes through the Gateway by name, over HTTPS: the chart's
 # routes are host-matched, and once this host has a certificate port 80 only
-# redirects. gw_get is the one way this script talks to an app.
+# redirects. gw_get is the one way this script talks to an app through the edge.
 gw_get() {
   curl -sS --resolve "${DOMAIN}:443:${GW_ADDR}" --cacert "$WORK/pebble-root.pem" "$@"
 }
+
+# Reading an app's own API from the host needs a tunnel: most apps' ingress
+# policy admits the Gateway and the wiring Job alone, and the Job's image is
+# distroless. A port-forward is the API server talking to kubelet, which no
+# policy applies to, and it arrives on 127.0.0.1 -- a secure context for curl,
+# so qui's Secure session cookie would be replayed if it had one. It is also the
+# one way to ask qBittorrent: the blessed lt1.2 build ships no curl.
+port_forward() { # port_forward <pod> <container-port>
+  local pod=$1 port=$2 i
+  PF_PORT=$(python3 -c 'import socket
+s = socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1]); s.close()')
+  $K -n "$NS" port-forward "pod/${pod}" "${PF_PORT}:${port}" >"$WORK/pf-${pod}.log" 2>&1 &
+  PF_PID=$!
+  for i in $(seq 1 30); do
+    if curl -sS -o /dev/null --max-time 2 "http://127.0.0.1:${PF_PORT}/" 2>/dev/null; then
+      return 0
+    fi
+    sleep 1
+  done
+  echo "port-forward to ${pod}:${port} never answered"
+  sed 's/^/    /' "$WORK/pf-${pod}.log" 2>/dev/null || true
+  return 1
+}
+
+port_forward_stop() {
+  kill "$PF_PID" 2>/dev/null || true
+  wait "$PF_PID" 2>/dev/null || true
+}
+
+# ---- the other blessed qBittorrent builds ------------------------------------
+# The chart blesses six qBittorrent images. The lt1.2 one is installed and
+# asserted above; the three below are switched in one at a time, because a
+# variant that is only blessed is a promise the chart makes and nobody keeps.
+# Each is proven three ways: the pod spec names the repository, tag and digest
+# variants.yaml pins; the runtime's imageID carries that digest; and
+# qBittorrent's own buildInfo reports the libtorrent line the variant's name
+# promises, which is what a tag alone cannot say. The znver3 build is the one
+# exemption from this, and its block in variants.yaml says why.
+for spec in lt2.1:2.1. lt1.2-10g:1.2. lt2.1-10g:2.1.; do
+  variant=${spec%%:*}; line=${spec##*:}
+  v_repository=$(variant_field "$variant" repository)
+  v_tag=$(variant_field "$variant" tag)
+  v_digest=$(variant_field "$variant" digest)
+  if [ -z "$v_repository" ] || [ -z "$v_tag" ] || [ -z "$v_digest" ]; then
+    echo "charts/s5n/variants.yaml: qbittorrent.${variant} needs all three of repository, tag and digest (read '${v_repository}' '${v_tag}' '${v_digest}')"
+    fail=1
+    continue
+  fi
+  want="${v_repository}:${v_tag}@${v_digest}"
+  log "qBittorrent variant ${variant}: it rolls, and it reports libtorrent ${line}x"
+  if ! $HELM upgrade s5n charts/s5n -n "$NS" --reuse-values \
+    --set apps.qbittorrent.image.variant="$variant" --wait --timeout 15m \
+    >"$WORK/qbit-${variant}.upgrade" 2>&1; then
+    echo "helm upgrade to the ${variant} variant failed:"
+    sed 's/^/    /' "$WORK/qbit-${variant}.upgrade"
+    fail=1
+    continue
+  fi
+  if ! $K -n "$NS" rollout status statefulset/qbittorrent --timeout=300s; then
+    echo "qbittorrent-0 is not Ready on the ${variant} variant"
+    fail=1
+    continue
+  fi
+  got_spec=$($K -n "$NS" get pod qbittorrent-0 -o jsonpath='{.spec.containers[?(@.name=="qbittorrent")].image}' || true)
+  got_id=$($K -n "$NS" get pod qbittorrent-0 -o jsonpath='{.status.containerStatuses[?(@.name=="qbittorrent")].imageID}' || true)
+  echo "  runs: ${got_spec}"
+  echo "  image: ${got_id}"
+  [ "$got_spec" = "$want" ] ||
+    { echo "qBittorrent on ${variant} is specified as '${got_spec}', want '${want}'"; fail=1; }
+  case "$got_id" in
+    *"${v_digest}"*) ;;
+    *) echo "the running qBittorrent is '${got_id}', not the digest the ${variant} variant pins"; fail=1 ;;
+  esac
+  build_info=""
+  if port_forward qbittorrent-0 8080; then
+    build_info=$(curl -s "http://127.0.0.1:${PF_PORT}/api/v2/app/buildInfo" 2>/dev/null || true)
+  else
+    echo "could not reach qBittorrent to read its buildInfo on the ${variant} variant"
+    fail=1
+  fi
+  port_forward_stop
+  echo "  buildInfo: ${build_info}"
+  # `libtorrent` is the linked library's own version string (1.2.20.0, 2.1.2.0),
+  # and the libtorrent line is the whole point of a variant, so its prefix is
+  # what is asserted, not the string.
+  got_line=$(printf '%s' "$build_info" |
+    python3 -c 'import json,sys; print(json.load(sys.stdin).get("libtorrent", ""))' 2>/dev/null || true)
+  echo "  libtorrent ${got_line:-<not reported>} (want ${line}x)"
+  case "$got_line" in
+    "${line}"*) ;;
+    *) echo "the ${variant} variant reports libtorrent '${got_line}', want ${line}x"; fail=1 ;;
+  esac
+done
+
+# Back to the variant this run installed, and the one every assertion after this
+# point was written for: a kept cluster stays usable by hack/grab-test.sh, and a
+# failure above does not leave the release on a build the rest of the script
+# never expected.
+if $HELM upgrade s5n charts/s5n -n "$NS" --reuse-values \
+  --set apps.qbittorrent.image.variant=lt1.2 --wait --timeout 15m \
+  >"$WORK/qbit-lt1.2.upgrade" 2>&1; then
+  $K -n "$NS" rollout status statefulset/qbittorrent --timeout=300s ||
+    { echo "qbittorrent-0 did not come back up on the lt1.2 variant"; fail=1; }
+  back=$($K -n "$NS" get pod qbittorrent-0 -o jsonpath='{.spec.containers[?(@.name=="qbittorrent")].image}' || true)
+  echo "qBittorrent back on lt1.2: ${back}"
+  [ "$back" = "$QBIT_LT12" ] ||
+    { echo "qBittorrent did not return to the lt1.2 variant ('${back}')"; fail=1; }
+else
+  echo "helm upgrade back to the lt1.2 variant failed:"
+  sed 's/^/    /' "$WORK/qbit-lt1.2.upgrade"
+  fail=1
+fi
 
 # ---- TLS: one certificate per host, Pebble issuing over HTTP-01 --------------
 # Plex and Seerr are served at names of their own (the catalog says so), so this
@@ -805,7 +994,16 @@ echo "GET /qbittorrent/ via gateway -> ${code}"; [ "$code" = 200 ] || fail=1
 # credential. Read that back with no session at all: a 403 here would mean the
 # app is still asking for a password, and then the Arrs, qui, autobrr and
 # PeerBanHelper would each need one again.
-qbit_prefs=$($K -n "$NS" exec qbittorrent-0 -- curl -s http://localhost:8080/api/v2/app/preferences 2>/dev/null || true)
+#
+# The request comes over a port-forward, because the blessed lt1.2 build ships
+# no curl. The runtime's port-forward dials localhost inside the pod's network
+# namespace, so qBittorrent sees 127.0.0.1, exactly as the old in-pod curl did:
+# this proves the loopback bypass. The private-range half is the whitelist the
+# conf assertion below reads, and the Arrs' and qui's own calls, which the
+# wiring Job's download-client tests make from their pods.
+port_forward qbittorrent-0 8080 || { echo "could not reach qBittorrent"; fail=1; }
+qbit_prefs=$(curl -s "http://127.0.0.1:${PF_PORT}/api/v2/app/preferences" 2>/dev/null || true)
+port_forward_stop
 printf '%s' "$qbit_prefs" >"$WORK/qbittorrent-preferences.json"
 if python3 - "$WORK/qbittorrent-preferences.json" <<'PYPREFS'
 import json, sys
@@ -999,11 +1197,17 @@ fi
 # PBH turns qBittorrent's "allow multiple connections from the same IP" off
 # itself on its first successful login (AbstractQbittorrent.updatePreferences at
 # v9.5.4). Asserted here because it is a setting PBH's own peer matching depends
-# on, and a seed that flipped it on would be the chart's fault, not PBH's.
-multi=$($K -n "$NS" exec qbittorrent-0 -- sh -c "curl -s -c /tmp/s5n-multi -o /dev/null -X POST \
-  --data-urlencode 'username=admin' --data-urlencode 'password=${qbit_pw}' \
-  http://localhost:8080/api/v2/auth/login && curl -s -b /tmp/s5n-multi http://localhost:8080/api/v2/app/preferences" 2>/dev/null |
+# on, and a seed that flipped it on would be the chart's fault, not PBH's. The
+# two requests are one session -- sign in with the release Secret's password,
+# then read the setting back with the cookie that answered -- over a
+# port-forward, because qBittorrent's own image has no curl.
+port_forward qbittorrent-0 8080 || { echo "could not reach qBittorrent"; fail=1; }
+multi=$(curl -s -c "$WORK/qbittorrent-multi-jar" -o /dev/null -X POST \
+  --data-urlencode 'username=admin' --data-urlencode "password=${qbit_pw}" \
+  "http://127.0.0.1:${PF_PORT}/api/v2/auth/login" &&
+  curl -s -b "$WORK/qbittorrent-multi-jar" "http://127.0.0.1:${PF_PORT}/api/v2/app/preferences" 2>/dev/null |
   python3 -c 'import json,sys; print(json.load(sys.stdin).get("enable_multi_connections_from_same_ip"))' 2>/dev/null || true)
+port_forward_stop
 echo "qBittorrent enable_multi_connections_from_same_ip = ${multi} (PBH turns it off)"
 [ "$multi" = False ] || { echo "qBittorrent still accepts several connections from one IP: PBH cannot tell peers from its own connections"; fail=1; }
 
@@ -1274,33 +1478,6 @@ arr_key() { $K -n "$NS" get secret s5n-keys -o jsonpath="{.data.$1-apikey}" | ba
 # OIDC provider, which is the other half of the design: qui runs with its login
 # switched off (its API is then open inside the release) and autobrr keeps the
 # login it cannot turn off, with that account behind it.
-#
-# Reading them from the host needs a tunnel: their ingress policy admits the
-# Gateway and the wiring Job alone, and the Job's image is distroless. A
-# port-forward is the API server talking to kubelet, which no policy applies to,
-# and it arrives on 127.0.0.1 -- a secure context for curl, so qui's Secure
-# session cookie would be replayed if it had one.
-port_forward() { # port_forward <pod> <container-port>
-  local pod=$1 port=$2 i
-  PF_PORT=$(python3 -c 'import socket
-s = socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1]); s.close()')
-  $K -n "$NS" port-forward "pod/${pod}" "${PF_PORT}:${port}" >"$WORK/pf-${pod}.log" 2>&1 &
-  PF_PID=$!
-  for i in $(seq 1 30); do
-    if curl -sS -o /dev/null --max-time 2 "http://127.0.0.1:${PF_PORT}/" 2>/dev/null; then
-      return 0
-    fi
-    sleep 1
-  done
-  echo "port-forward to ${pod}:${port} never answered"
-  sed 's/^/    /' "$WORK/pf-${pod}.log" 2>/dev/null || true
-  return 1
-}
-
-port_forward_stop() {
-  kill "$PF_PID" 2>/dev/null || true
-  wait "$PF_PID" 2>/dev/null || true
-}
 
 # app_snapshot writes what one app holds through its own API: the proof that a
 # second wiring run created no duplicate rows, compared field for field by
@@ -1354,13 +1531,21 @@ snapshot() { # snapshot <dir>
   $K -n "$NS" exec prowlarr-0 -- curl -s -H "X-Api-Key: $key" \
     "http://localhost:${port}/prowlarr/api/v1/applications" >"$dir/prowlarr-applications.json"
   # qBittorrent categories, using the seeded WebUI credential: this is also the
-  # proof that the hash the init container wrote is one qBittorrent accepts.
+  # proof that the hash the init container wrote is one qBittorrent accepts. The
+  # image has no curl (variants.yaml, lt1.2), so this reads through a tunnel,
+  # signing in with the password and carrying the cookie it answers with.
   local qpw
   qpw=$($K -n "$NS" get secret s5n-keys -o jsonpath='{.data.qbittorrent-password}' | base64 -d)
-  $K -n "$NS" exec qbittorrent-0 -- sh -c "curl -s -c /tmp/s5n-jar -o /dev/null -X POST \
-    --data-urlencode 'username=admin' --data-urlencode 'password=$qpw' \
-    http://localhost:8080/api/v2/auth/login && curl -s -b /tmp/s5n-jar http://localhost:8080/api/v2/torrents/categories" \
-    >"$dir/qbittorrent-categories.json"
+  port_forward qbittorrent-0 8080 || { echo "could not reach qBittorrent"; fail=1; }
+  curl -s -c "$dir/qbittorrent-jar.txt" -o /dev/null -X POST \
+    --data-urlencode 'username=admin' --data-urlencode "password=${qpw}" \
+    "http://127.0.0.1:${PF_PORT}/api/v2/auth/login" 2>/dev/null || true
+  curl -s -b "$dir/qbittorrent-jar.txt" "http://127.0.0.1:${PF_PORT}/api/v2/torrents/categories" \
+    >"$dir/qbittorrent-categories.json" 2>/dev/null || true
+  grep -q '"tv"' "$dir/qbittorrent-categories.json" ||
+    { echo "qBittorrent answered no categories: $(head -c 200 "$dir/qbittorrent-categories.json")"; fail=1; }
+  rm -f "$dir/qbittorrent-jar.txt"
+  port_forward_stop
   # Tautulli's settings, using the seeded api_key: also the proof that the
   # tautulli-config init container's seed is one Tautulli actually accepts. The
   # PMS section is legitimately empty here: this e2e supplies no Plex token, so

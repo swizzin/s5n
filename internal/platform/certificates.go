@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -19,12 +20,17 @@ import (
 	"github.com/swizzin/s5n/internal/wait"
 )
 
-// CertificateTimeout is how long a host's Certificate gets to become Ready
-// before box leaves HTTP alone and says so. The wait is never fatal: a
-// certificate that cannot be issued yet is DNS or an ACME problem, and
-// docs/box.md is explicit that a failed issuance or renewal does not block
-// apply.
+// CertificateTimeout is how long a run's Certificates get to become Ready
+// together before box leaves a host on HTTP and says so. The wait is one per
+// run, whatever the number of hosts: a box whose names cannot be issued yet is
+// slow once, not once per name. It is never fatal: a certificate that cannot be
+// issued yet is DNS or an ACME problem, and docs/box.md is explicit that a
+// failed issuance or renewal does not block apply.
 const CertificateTimeout = 3 * time.Minute
+
+// certNotReadyReason is what box says when cert-manager has no reason of its
+// own for a Certificate that is not Ready.
+const certNotReadyReason = "cert-manager has not marked it Ready"
 
 // CertificateCluster is the cluster client the per-host TLS flow needs beyond
 // the platform writes: a Certificate's status, whether cert-manager is there, a
@@ -99,78 +105,243 @@ func (d *CertificateDecision) report() say.Reporter { return say.Or(d.Say, nil) 
 
 // Apply writes one host's port-80 listener and its Allow, then the
 // Certificate, and -- once the Certificate is Ready -- the HTTPS listener and
-// the redirect.
+// the redirect. It is Certificates over one name: both box commands now write
+// every decided host through the same phases, so a host is never served
+// differently because it happened to be the only one.
 func (d *CertificateDecision) Apply(ctx context.Context) (CertificateResult, error) {
-	res := CertificateResult{Host: d.Host}
-	if err := d.validate(); err != nil {
-		return res, err
+	set := &Certificates{
+		Hosts:   []CertificateRequest{{Host: d.Host, Issuer: d.Issuer}},
+		Open:    d.Open,
+		Say:     d.Say,
+		Timeout: d.Timeout,
 	}
-	issuer, err := clusterIssuerName(d.Issuer)
-	if err != nil {
-		return res, err
-	}
-	res.Issuer = issuer
-	res.Name = CertificateName(d.Host)
+	results, err := set.Apply(ctx)
+	return results[0], err
+}
 
-	r := d.report()
-	cl, err := d.Open()
+// CertificateRequest is one host's half of a run: the name and the issuer this
+// run decided for it.
+type CertificateRequest struct {
+	Host   string
+	Issuer string
+}
+
+// Certificates is root's TLS half for every host of one run. It writes each
+// host's port-80 listener and its Allow and then its Certificate, waits for
+// all of them together under one CertificateTimeout, and then serves each host
+// that came Ready and warns for each one that did not.
+//
+// The single wait is the point: a box whose names cannot issue yet (no DNS, an
+// ACME outage) spends one timeout on the run, not one per name, and says so
+// once. A Certificate that is already Ready answers on the first read and is
+// served after the run's wait, never before: the wait is the run's, not the
+// host's.
+type Certificates struct {
+	Hosts []CertificateRequest
+	// Open builds the cluster client; it is only called when there is a host
+	// to write.
+	Open    func() (CertificateCluster, error)
+	Say     say.Reporter
+	Timeout time.Duration
+}
+
+func (c *Certificates) report() say.Reporter { return say.Or(c.Say, nil) }
+
+// timeout is the budget the run's one wait gets.
+func (c *Certificates) timeout() time.Duration {
+	if c.Timeout > 0 {
+		return c.Timeout
+	}
+	return CertificateTimeout
+}
+
+// Apply runs the three phases in order: every host's Certificate is written
+// first, so cert-manager is working on all of them while the wait runs; then
+// the run waits once; then each Ready host is served. A failure in the write
+// phase stops before the wait and leaves what this run wrote -- a port-80
+// listener and a Certificate answer the challenge on the next run -- the way
+// the per-host flow did. Nothing is rolled back.
+func (c *Certificates) Apply(ctx context.Context) ([]CertificateResult, error) {
+	results := make([]CertificateResult, len(c.Hosts))
+	for i, req := range c.Hosts {
+		results[i] = CertificateResult{Host: req.Host}
+		if err := validateCertificate(req.Host, req.Issuer); err != nil {
+			return results, err
+		}
+		issuer, err := clusterIssuerName(req.Issuer)
+		if err != nil {
+			return results, err
+		}
+		results[i].Issuer = issuer
+		results[i].Name = CertificateName(req.Host)
+	}
+	if len(results) == 0 {
+		return results, nil
+	}
+
+	r := c.report()
+	cl, err := c.Open()
 	if err != nil {
-		return res, err
+		return results, err
 	}
 	serves, err := cl.Serves(ctx, "cert-manager.io", "v1", "Certificate")
 	if err != nil {
-		return res, fmt.Errorf("TLS: %w", err)
+		return results, fmt.Errorf("TLS: %w", err)
 	}
 	if !serves {
-		r.Warn(fmt.Sprintf("cert-manager is not installed in this cluster: %s has no certificate yet; run `box bootstrap`", d.Host))
-		return res, nil
+		for _, res := range results {
+			r.Warn(fmt.Sprintf("cert-manager is not installed in this cluster: %s has no certificate yet; run `box bootstrap`", res.Host))
+		}
+		return results, nil
 	}
 	// The gate before the first write: the objects below are root's, and a
-	// kubeconfig without them must be refused before the Certificate exists.
+	// kubeconfig without them must be refused before any Certificate exists.
 	if err := preflight(ctx, cl, certificateAccess()); err != nil {
-		return res, err
+		return results, err
 	}
 
+	for i := range results {
+		if err := c.stage(ctx, cl, &results[i]); err != nil {
+			return results, err
+		}
+	}
+	if err := c.await(ctx, cl, results); err != nil {
+		return results, err
+	}
+	for i := range results {
+		if err := c.serve(ctx, cl, &results[i]); err != nil {
+			return results, err
+		}
+	}
+	return results, nil
+}
+
+// stage is one host's write half: port 80 without a login, the Allow that
+// keeps the login off it, then the Certificate. Nothing is served here.
+func (c *Certificates) stage(ctx context.Context, cl CertificateCluster, res *CertificateResult) error {
 	// Port 80 first, without a login: the HTTP-01 challenge is a request to
 	// this listener, and Authelia refuses any request whose forwarded scheme
 	// is http before it reads a rule. Ordering the Certificate first (as box
 	// once did) left the challenge on the shared, login-guarded listener and
 	// no certificate could ever issue.
+	d := &CertificateDecision{Host: res.Host, Issuer: res.Issuer, Say: c.Say, Timeout: c.Timeout}
 	if err := d.attachHTTP(ctx, cl); err != nil {
-		return res, err
+		return err
 	}
 	res.Listener = true
 	// The policy names the listener by sectionName, so the listener has to
 	// exist first; and it has to exist before the challenge, or the login
 	// holds the challenge's own request.
 	if err := d.listenerPolicy(ctx, cl); err != nil {
-		return res, err
+		return err
 	}
 	res.Policy = true
 
+	r := c.report()
 	step := r.Start(say.Op{Label: "applying Certificate " + GatewayNamespace + "/" + res.Name})
-	docs, err := ParseManifests(certificateManifest(d.Host, issuer, res.Name))
+	docs, err := ParseManifests(certificateManifest(res.Host, res.Issuer, res.Name))
 	if err != nil {
 		step.Failed(err)
-		return res, fmt.Errorf("certificate for %s: %w", d.Host, err)
+		return fmt.Errorf("certificate for %s: %w", res.Host, err)
 	}
 	if err := cl.Apply(ctx, docs); err != nil {
 		step.Failed(err)
-		return res, fmt.Errorf("certificate for %s: %w", d.Host, err)
+		return fmt.Errorf("certificate for %s: %w", res.Host, err)
 	}
-	step.Done(fmt.Sprintf("applied Certificate %s/%s (issuer %s)", GatewayNamespace, res.Name, issuer))
+	step.Done(fmt.Sprintf("applied Certificate %s/%s (issuer %s)", GatewayNamespace, res.Name, res.Issuer))
+	return nil
+}
 
-	ready, reason, err := d.awaitCertificate(ctx, cl, res.Name)
-	res.Ready, res.Reason = ready, reason
-	if err != nil {
-		return res, err
+// await is the run's one wait: every Certificate it applied, polled together
+// under one budget. One goroutine per name, joined before anything is
+// reported, so a Ready certificate answers at once instead of queueing behind a
+// slower one, the wait ends as soon as all of them are Ready, and the whole run
+// spends at most one timeout. The reporter is only touched from this
+// goroutine.
+func (c *Certificates) await(ctx context.Context, cl CertificateCluster, results []CertificateResult) error {
+	timeout := c.timeout()
+	r := c.report()
+	step := r.Start(waitOp(timeout, results))
+	errs := make([]error, len(results))
+	var wg sync.WaitGroup
+	for i := range results {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			errs[i] = cl.Await(ctx, Wait{Kind: WaitCertificate, Namespace: GatewayNamespace, Name: results[i].Name, Timeout: timeout})
+		}(i)
 	}
-	if !ready {
-		// Port 80 stays as it is -- the listener and its Allow are what let
-		// cert-manager retry -- but the host is not served: there is no
+	wg.Wait()
+
+	ready := 0
+	for i := range results {
+		if err := errs[i]; err != nil {
+			if !errors.Is(err, ErrNotReady) {
+				step.Failed(err)
+				return fmt.Errorf("certificate %s/%s: %w", GatewayNamespace, results[i].Name, err)
+			}
+			// cert-manager's own reason, read once for the operator; a name
+			// that is not Ready at the deadline is the state box reports and
+			// leaves for the next run, not an error.
+			_, reason, readErr := cl.CertificateReady(ctx, GatewayNamespace, results[i].Name)
+			if readErr != nil {
+				step.Failed(readErr)
+				return fmt.Errorf("certificate %s/%s: %w", GatewayNamespace, results[i].Name, readErr)
+			}
+			if reason == "" {
+				reason = certNotReadyReason
+			}
+			results[i].Reason = reason
+			continue
+		}
+		results[i].Ready = true
+		ready++
+	}
+	step.Done(waitDone(ready, results))
+	return nil
+}
+
+// waitOp is the one wait step's screen line. A single host keeps the sentence
+// box has always printed for it; several are named by their count, because the
+// run has one budget for all of them.
+func waitOp(timeout time.Duration, results []CertificateResult) say.Op {
+	if len(results) == 1 {
+		name := GatewayNamespace + "/" + results[0].Name
+		return say.Op{
+			Label:  "waiting for Certificate " + name + " to be Ready",
+			Plain:  fmt.Sprintf("waiting up to %s for Certificate %s to be Ready", timeout, name),
+			Budget: timeout,
+		}
+	}
+	return say.Op{
+		Label:  fmt.Sprintf("waiting for %d Certificates to be Ready", len(results)),
+		Plain:  fmt.Sprintf("waiting up to %s for %d Certificates to be Ready", timeout, len(results)),
+		Budget: timeout,
+	}
+}
+
+// waitDone names how many of the run's Certificates came Ready.
+func waitDone(ready int, results []CertificateResult) string {
+	if len(results) == 1 {
+		if ready == 1 {
+			return fmt.Sprintf("Certificate %s/%s: Ready", GatewayNamespace, results[0].Name)
+		}
+		return ""
+	}
+	return fmt.Sprintf("%d of %d Certificates are Ready", ready, len(results))
+}
+
+// serve is one host's second half, after the run's wait: the success line, the
+// box-root re-issue for a self-signed certificate, then its HTTPS listener and
+// the redirect. A host that is not Ready gets the warning and keeps only port
+// 80: the listener and its Allow are what let cert-manager try again.
+func (c *Certificates) serve(ctx context.Context, cl CertificateCluster, res *CertificateResult) error {
+	r := c.report()
+	if !res.Ready {
+		// Port 80 stays as it is, but the host is not served: there is no
 		// HTTPS listener to serve it and no redirect to send anyone there.
-		r.Warn(fmt.Sprintf("certificate %s/%s is not Ready (%s): %s is not served until it is; only the ACME challenge answers on port 80; box retries on the next run", GatewayNamespace, res.Name, reason, d.Host))
-		return res, nil
+		r.Warn(fmt.Sprintf("certificate %s/%s is not Ready (%s): %s is not served until it is; only the ACME challenge answers on port 80; box retries on the next run", GatewayNamespace, res.Name, res.Reason, res.Host))
+		return nil
 	}
 	r.Success(fmt.Sprintf("certificate %s/%s is Ready", GatewayNamespace, res.Name))
 
@@ -179,34 +350,37 @@ func (d *CertificateDecision) Apply(ctx context.Context) (CertificateResult, err
 	// applications verify against. cert-manager does not re-issue on its own
 	// when the issuer behind an unchanged issuerRef changes what it signs with,
 	// so box asks (followRoot).
-	if issuer == SelfSignedIssuer {
+	d := &CertificateDecision{Host: res.Host, Issuer: res.Issuer, Say: c.Say, Timeout: c.Timeout}
+	if res.Issuer == SelfSignedIssuer {
 		reissued, err := d.followRoot(ctx, cl, res.Name)
 		if err != nil {
-			return res, err
+			return err
 		}
 		res.Reissued = reissued
 	}
 
 	if err := d.attachHTTPS(ctx, cl, res.Name); err != nil {
-		return res, err
+		return err
 	}
 	res.HTTPS = true
 	if err := d.redirect(ctx, cl, res.Name); err != nil {
-		return res, err
+		return err
 	}
 	res.Redirect = true
-	return res, nil
+	return nil
 }
 
-func (d *CertificateDecision) validate() error {
-	host := strings.TrimSpace(d.Host)
-	if host == "" {
+// validateCertificate refuses a name or issuer a Certificate cannot be built
+// from, before this run writes anything.
+func validateCertificate(host, issuer string) error {
+	trimmed := strings.TrimSpace(host)
+	if trimmed == "" {
 		return errors.New("no host name: a certificate is per host name")
 	}
-	if host != d.Host || strings.ContainsAny(host, " /\\:") {
-		return fmt.Errorf("host name %q is not a name box can put on a certificate", d.Host)
+	if trimmed != host || strings.ContainsAny(trimmed, " /\\:") {
+		return fmt.Errorf("host name %q is not a name box can put on a certificate", host)
 	}
-	if _, err := clusterIssuerName(d.Issuer); err != nil {
+	if _, err := clusterIssuerName(issuer); err != nil {
 		return err
 	}
 	return nil
@@ -426,10 +600,11 @@ func triggerIssuing(ctx context.Context, cl CertificateCluster, name string) err
 	return nil
 }
 
-// awaitCertificate is the platform's existing wait, with the Certificate's own
-// shorter bound. A not-Ready answer at the deadline is not an error: it is the
-// state box reports and leaves for the next run, and cert-manager's reason is
-// read once for the operator.
+// awaitCertificate waits for one Certificate, after box asked cert-manager to
+// re-issue it, with the Certificate's own shorter bound. A not-Ready answer at
+// the deadline is not an error: it is the state box reports and leaves for the
+// next run, and cert-manager's reason is read once for the operator. The run's
+// ordinary wait is Certificates.await, which covers every host at once.
 func (d *CertificateDecision) awaitCertificate(ctx context.Context, cl CertificateCluster, name string) (bool, string, error) {
 	timeout := d.Timeout
 	if timeout <= 0 {
@@ -450,7 +625,7 @@ func (d *CertificateDecision) awaitCertificate(ctx context.Context, cl Certifica
 		wait.Done("")
 		_, reason, readErr := cl.CertificateReady(ctx, GatewayNamespace, name)
 		if readErr != nil || reason == "" {
-			reason = "cert-manager has not marked it Ready"
+			reason = certNotReadyReason
 		}
 		return false, reason, nil
 	}

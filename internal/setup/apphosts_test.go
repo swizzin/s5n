@@ -48,6 +48,11 @@ func TestAppHostAnswersMatchTheDomain(t *testing.T) {
 			if len(h.logins) != 1 || strings.Join(h.logins[0].Hosted, ",") != "gamma" {
 				t.Fatalf("the login was not told about gamma's host: %+v", h.logins)
 			}
+			// And the catalog's answer for it: gamma signs its own users in, so
+			// the login bypasses it rather than asking for a second password.
+			if len(h.logins) != 1 || strings.Join(h.logins[0].OwnLogin, ",") != "gamma" {
+				t.Fatalf("the login was not told gamma signs its users in: %+v", h.logins)
+			}
 		})
 	}
 }

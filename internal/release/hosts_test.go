@@ -26,6 +26,15 @@ type fakeHosts struct {
 	ensured []HostPlan
 	events  *[]string
 
+	// mayWrite is LoginAccess' first answer: true for root's step, false for a
+	// seedbox user's, whose kubeconfig cannot write the login at all.
+	mayWrite bool
+	// registered is the client Secret the seedbox's namespace holds, by app
+	// name: the second answer's read.
+	registered map[string]bool
+	// clients records every app ClientRegistered was asked about.
+	clients []string
+
 	// The login's half of the same step, which root's value also implements:
 	// loginPending is what Pending answers, so a fake left at false models a
 	// login that is already the one the values name.
@@ -62,6 +71,19 @@ func (f *fakeHosts) Reconcile(_ context.Context, plan HostPlan) error {
 	}
 	return nil
 }
+
+// MayWrite is LoginAccess' first answer.
+func (f *fakeHosts) MayWrite(context.Context) (bool, error) { return f.mayWrite, nil }
+
+// ClientRegistered is its second: whether the app's Secret is in the
+// namespace. It records the question so a test can prove the refusal read it.
+func (f *fakeHosts) ClientRegistered(_ context.Context, _, app string) (bool, error) {
+	f.clients = append(f.clients, app)
+	return f.registered[app], nil
+}
+
+// The compile-time half: root's step answers both of the release's questions.
+var _ LoginAccess = (*fakeHosts)(nil)
 
 // hostsForUser is the step a user's apply gets: it serves the names it is
 // allowed to, and it has no login half at all -- a seedbox user's kubeconfig
@@ -406,6 +428,11 @@ func TestApplyServesANewAppHostBeforeTheRelease(t *testing.T) {
 	if len(rule.Hosted) != 1 || rule.Hosted[0] != "radarr" {
 		t.Fatalf("hosted apps = %v, want radarr", rule.Hosted)
 	}
+	// The catalog says radarr signs its own users in, and that list reaches the
+	// rule write: the per-host step renders the login from it.
+	if len(rule.OwnLogin) != 1 || rule.OwnLogin[0] != "radarr" {
+		t.Fatalf("own-login apps = %v, want the catalog's radarr", rule.OwnLogin)
+	}
 	if on, _ := rule.Values["apps"].(map[string]any)["radarr"].(map[string]any)["enabled"].(bool); !on {
 		t.Fatalf("the rule's values do not have radarr enabled: %v", rule.Values["apps"])
 	}
@@ -533,6 +560,9 @@ func deployedValues(t *testing.T, f *fakes) map[string]any {
 		t.Fatal(err)
 	}
 	chart := testChart(t)
+	if f.chart != nil {
+		chart = *f.chart
+	}
 	values, err := sb.Effective(seedbox.Chart{Values: chart.Values, Schema: chart.Schema})
 	if err != nil {
 		t.Fatal(err)

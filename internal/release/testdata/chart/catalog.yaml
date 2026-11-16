@@ -12,3 +12,6 @@ apps:
   radarr:
     description: the film library, served at a name of its own
     exposure: host
+    # It signs its own users in, so its host bypasses the login: the rule
+    # write carries this list from the catalog, not from a name in box.
+    login: own

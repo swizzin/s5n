@@ -10,6 +10,8 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 
 	"github.com/swizzin/s5n/internal/authelia"
+	"github.com/swizzin/s5n/internal/kube"
+	"github.com/swizzin/s5n/internal/platform"
 )
 
 // oidcOptions is init's install for a box whose catalog says qui signs in
@@ -107,6 +109,18 @@ func keysOf(m map[string]string) []string {
 		out = append(out, k)
 	}
 	return out
+}
+
+// loginSecretNow is the login's Secret as the fake cluster holds it: the last
+// write, whichever of the fake's two lists it landed in.
+func loginSecretNow(t *testing.T, f *fixture) map[string]string {
+	t.Helper()
+	doc, ok := f.cluster.objects[key("", "Secret", Namespace, authelia.SecretName)]
+	if !ok {
+		t.Fatalf("the cluster holds no Secret %s/%s", Namespace, authelia.SecretName)
+	}
+	data, _, _ := unstructured.NestedStringMap(doc, "data")
+	return data
 }
 
 // deploymentOf is the login's Deployment as the last write left it.
@@ -366,6 +380,7 @@ func TestEnsureRulesRendersTheSameProviderTwice(t *testing.T) {
 	opts := oidcOptions()
 	opts.Values = hostedValues()
 	opts.Hosted = []string{"plex", "seerr"}
+	opts.OwnLogin = []string{"plex", "seerr"}
 	if _, err := f.decision.Apply(context.Background(), opts); err != nil {
 		t.Fatalf("Apply: %v", err)
 	}
@@ -491,6 +506,117 @@ func TestTurningTheAppOffRemovesTheClient(t *testing.T) {
 	}
 }
 
+// TestTurningTheAppOffAtInitDropsTheProvider: the same box installed again by
+// `box init` after its only OIDC app was turned off. Apply renders a
+// configuration with no identity_providers block, and the Deployment it writes
+// must not mount the signing material: Authelia exits on a provider with no
+// clients ("option 'clients' must have one or more clients configured"), so a
+// mount left over from the run before takes the whole box's login down. qui's
+// digest is still in the Secret at that point -- the prune is a later step in
+// the same run -- which is why the mount cannot be decided from the digests.
+func TestTurningTheAppOffAtInitDropsTheProvider(t *testing.T) {
+	f := newFixture(t)
+	ctx := context.Background()
+	// The box with qui on: signing material in the Secret, a digest for qui,
+	// and a Deployment that reads the provider.
+	if _, err := f.decision.Apply(ctx, oidcOptions()); err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	if _, err := f.decision.EnsureClients(ctx, "seedbox", []string{"qui"}); err != nil {
+		t.Fatalf("EnsureClients: %v", err)
+	}
+	on := ruleOptions()
+	on.Namespace = "seedbox"
+	on.OIDC = []string{"qui"}
+	if _, err := f.decision.Reconcile(ctx, on); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	if args, mount := providerMounted(t, podContainer(t, lastDeploymentOf(t, f.cluster.applied))); !args || !mount {
+		t.Fatalf("the fixture's login does not read the provider with qui on (args %v, mount %v)", args, mount)
+	}
+
+	// Then qui is turned off and init runs again.
+	off := oidcOptions()
+	off.OIDC = nil
+	if _, err := f.decision.Apply(ctx, off); err != nil {
+		t.Fatalf("second Apply: %v", err)
+	}
+	if config := lastConfig(t, f.cluster.applied); strings.Contains(config, "identity_providers") {
+		t.Fatalf("a box with no OIDC app rendered a provider:\n%s", config)
+	}
+	c := podContainer(t, lastDeploymentOf(t, f.cluster.applied))
+	args, mount := providerMounted(t, c)
+	if args || mount {
+		t.Fatalf("the install mounts the signing material with no client in the configuration (args %v, mount %v): Authelia exits on a provider with no clients, and the box loses its login", podArgs(t, c), mount)
+	}
+	if _, ok := lastLoginSecretData(t, allWrites(f))[authelia.OIDCFile]; !ok {
+		t.Fatal("the install removed the signing material: it is generated once and never rotated")
+	}
+}
+
+// TestPendingHealsADeploymentThatStillMountsTheProvider: the state the old
+// predicate could leave a box in -- the Deployment reads the provider's file,
+// the configuration names no client -- read as "nothing to change" on every
+// run after, because only the ConfigMap was compared. The plan has to see the
+// mount, the write has to drop it, and the run after that has to be quiet
+// again.
+func TestPendingHealsADeploymentThatStillMountsTheProvider(t *testing.T) {
+	f := newFixture(t)
+	ctx := context.Background()
+	// The login as an install with the app off writes it: no client in the
+	// configuration, nothing mounted.
+	off := oidcOptions()
+	off.OIDC = nil
+	if _, err := f.decision.Apply(ctx, off); err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	// Beside it, the Deployment the old predicate wrote there: the same
+	// objects, rendered with the provider mounted.
+	config := lastConfig(t, f.cluster.applied)
+	manifests, err := authelia.RenderManifests(manifestsFor(off.Host, off.Image, authelia.ConfigHash([]byte(config)), true))
+	if err != nil {
+		t.Fatalf("RenderManifests: %v", err)
+	}
+	docs, err := platform.ParseManifests(manifests)
+	if err != nil {
+		t.Fatalf("ParseManifests: %v", err)
+	}
+	if err := f.cluster.ApplyWith(ctx, kube.FieldManager, docs); err != nil {
+		t.Fatalf("writing the Deployment: %v", err)
+	}
+	if args, mount := providerMounted(t, podContainer(t, lastDeploymentOf(t, f.cluster.applied))); !args || !mount {
+		t.Fatalf("the fixture is not in the bad state (args %v, mount %v)", args, mount)
+	}
+
+	rules := initRules(off)
+	rules.Namespace = "seedbox"
+	pending, err := f.decision.Pending(ctx, rules)
+	if err != nil {
+		t.Fatalf("Pending: %v", err)
+	}
+	if !pending {
+		t.Fatal("a Deployment that mounts the provider with no client in its configuration was reported as up to date: nothing would ever heal it")
+	}
+	changed, err := f.decision.Reconcile(ctx, rules)
+	if err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	if !changed {
+		t.Fatal("Reconcile wrote nothing for a login whose Deployment mounts the provider")
+	}
+	c := podContainer(t, lastDeploymentOf(t, f.cluster.applied))
+	if args, mount := providerMounted(t, c); args || mount {
+		t.Fatalf("the healed Deployment still reads the provider (args %v, mount %v)", podArgs(t, c), mount)
+	}
+	pending, err = f.decision.Pending(ctx, rules)
+	if err != nil {
+		t.Fatalf("second Pending: %v", err)
+	}
+	if pending {
+		t.Fatal("the healed login still differs: every later apply would rewrite it")
+	}
+}
+
 // TestPendingCreatesNothing: a run that may not write the login must not create
 // the provider's material either.
 func TestPendingCreatesNothing(t *testing.T) {
@@ -553,6 +679,92 @@ func TestPendingAgreesWithReconcile(t *testing.T) {
 	}
 	before := len(f.cluster.applied)
 	wrote, err := f.decision.Reconcile(context.Background(), rules)
+	if err != nil {
+		t.Fatalf("second Reconcile: %v", err)
+	}
+	if wrote || len(f.cluster.applied) != before {
+		t.Fatalf("a second Reconcile wrote %d documents with nothing to change", len(f.cluster.applied)-before)
+	}
+}
+
+// TestApplyTurnsAnAppOn: a login that already answers for qui, then a bare
+// apply -- no anchor step, no host to serve -- whose values newly enable
+// autobrr. The rendering leaves an app with no digest out, so it is identical
+// to what the cluster holds; only the plan's client read makes this run's
+// Reconcile write it. Without that, apply answers "nothing to change", the
+// login's configuration never names autobrr, and its pod waits on a Secret
+// nobody writes. The write has to leave both clients in the configuration, and
+// the run after it nothing to change.
+func TestApplyTurnsAnAppOn(t *testing.T) {
+	f := newFixture(t)
+	ctx := context.Background()
+	if _, err := f.decision.Apply(ctx, oidcOptions()); err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	if _, err := f.decision.EnsureClients(ctx, "seedbox", []string{"qui"}); err != nil {
+		t.Fatalf("EnsureClients: %v", err)
+	}
+	rules := ruleOptions()
+	rules.Namespace = "seedbox"
+	rules.OIDC = []string{"qui"}
+	if _, err := f.decision.Reconcile(ctx, rules); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	if pending, err := f.decision.Pending(ctx, rules); err != nil || pending {
+		t.Fatalf("Pending before the app is enabled = %v, %v: want a login that is already the one the values name", pending, err)
+	}
+
+	// autobrr is enabled: this run has a client to register.
+	rules.OIDC = []string{"qui", "autobrr"}
+	pending, err := f.decision.Pending(ctx, rules)
+	if err != nil {
+		t.Fatalf("Pending: %v", err)
+	}
+	if !pending {
+		t.Fatal("Pending with autobrr newly enabled says the login is up to date: apply never reconciles, and autobrr's pod waits on a client Secret nothing writes")
+	}
+	changed, err := f.decision.Reconcile(ctx, rules)
+	if err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	if !changed {
+		t.Fatal("Reconcile wrote nothing for an app that has no client yet")
+	}
+	secret := clientSecretOf(t, allWrites(f), "seedbox", "autobrr")
+	if len(secret) != authelia.OIDCClientSecretLength {
+		t.Fatalf("autobrr's client secret is %d characters, want %d", len(secret), authelia.OIDCClientSecretLength)
+	}
+	digest := digestOf(t, loginSecretNow(t, f), authelia.ClientID("seedbox", "autobrr"))
+	if !authelia.VerifyClientSecret(digest, secret) {
+		t.Fatal("autobrr's digest does not verify against the plaintext in its Secret")
+	}
+	config := lastConfig(t, allWrites(f))
+	for _, want := range []string{
+		"      - client_id: 'seedbox-autobrr'",
+		"      - client_id: 'seedbox-qui'",
+		"          - 'https://box.example.com/autobrr/api/auth/oidc/callback'",
+		"        client_secret: '" + digest + "'",
+	} {
+		if !strings.Contains(config, want) {
+			t.Errorf("the configuration does not contain %q:\n%s", want, config)
+		}
+	}
+	// The provider is mounted now that the configuration names two clients,
+	// and the Deployment the reconcile wrote is the one that carries it.
+	if args, mount := providerMounted(t, podContainer(t, lastDeploymentOf(t, f.cluster.applied))); !args || !mount {
+		t.Fatalf("the Deployment does not read the provider once a client exists (args %v, mount %v)", args, mount)
+	}
+
+	// And the run after it has nothing to change: the plan is the write.
+	pending, err = f.decision.Pending(ctx, rules)
+	if err != nil {
+		t.Fatalf("second Pending: %v", err)
+	}
+	if pending {
+		t.Fatal("the login still says it differs after the client was written: every later apply would rewrite it")
+	}
+	before := len(f.cluster.applied)
+	wrote, err := f.decision.Reconcile(ctx, rules)
 	if err != nil {
 		t.Fatalf("second Reconcile: %v", err)
 	}

@@ -139,6 +139,11 @@ type Options struct {
 	// this host, so init neither verifies nor creates them. `box apply` has the
 	// same flag for the same reason.
 	PathsInNode bool
+	// NoticePath is root's config, beside the cluster record. When the file is
+	// there and its notice address is empty, init asks for one -- it is the one
+	// answer that belongs to the host rather than to the seedbox. Empty means
+	// this run does not ask (a box whose config bootstrap did not write).
+	NoticePath string
 }
 
 // ApplyOptions is what init hands the applier: the same arguments `box apply`
@@ -227,6 +232,10 @@ type Login struct {
 	// edge checks every listener, so each app host needs the rule that matches
 	// the login posture the app had on its path.
 	Hosted []string
+	// OwnLogin are the apps the chart's catalog says sign their users in
+	// themselves. Their host or path prefix bypasses the login: an app with
+	// its own sign-in behind the login would ask for two passwords.
+	OwnLogin []string
 	// Values is the document the release will render: chart defaults, then
 	// the user's file, then the grant, read back after init wrote them. The
 	// access_control rules come from its instance list, so the login and the
@@ -254,6 +263,13 @@ func (d *Decision) stop(err error) error {
 func (d *Decision) Run(ctx context.Context, opts Options) (Result, error) {
 	var res Result
 	if err := d.check(); err != nil {
+		return res, err
+	}
+	// Root's config is read first, and strictly: a file init cannot parse stops
+	// the run before its first question, naming the line, so nothing is asked
+	// and nothing is written. init writes one line into that file, and it is
+	// the same read `box update` and `box status` make.
+	if _, _, err := readNotice(opts.NoticePath); err != nil {
 		return res, err
 	}
 	if len(opts.Chart.Values) == 0 || len(opts.Chart.Schema) == 0 {
@@ -386,6 +402,18 @@ func (d *Decision) Run(ctx context.Context, opts Options) (Result, error) {
 			break
 		}
 	}
+	// Root's notice address is its own step, and the last one: it is the
+	// host's, not the seedbox's. It is only asked when bootstrap wrote the file
+	// and left the address empty, so a re-run with one set asks nothing.
+	askNotice := false
+	pending, err := d.noticePending(opts)
+	if err != nil {
+		return res, err
+	}
+	askNotice = pending && !opts.Unattended
+	if askNotice {
+		d.steps++
+	}
 
 	// The names the chosen apps are served at, before anything is written for
 	// one: an app's own host has to answer where the domain does, or the
@@ -438,6 +466,14 @@ func (d *Decision) Run(ctx context.Context, opts Options) (Result, error) {
 			}
 			stored = append(stored, answer{key: q.Key, value: value})
 		}
+	}
+
+	// Where box tells someone who is not watching what it did. It is asked here,
+	// after the seedbox's own questions, and written with the other answers
+	// below: a cancel before this point writes nothing at all.
+	noticeURL, err := d.askNoticeURL(askNotice)
+	if err != nil {
+		return res, d.stop(err)
 	}
 
 	transientKeys := make([]string, 0, len(transient))
@@ -505,6 +541,11 @@ func (d *Decision) Run(ctx context.Context, opts Options) (Result, error) {
 		return res, err
 	}
 	d.reportWrites(opts, res)
+	if noticeURL != "" {
+		if err := d.writeNoticeURL(opts.NoticePath, noticeURL); err != nil {
+			return res, err
+		}
+	}
 
 	if !opts.PathsInNode {
 		var dirs []string
@@ -513,7 +554,7 @@ func (d *Decision) Run(ctx context.Context, opts Options) (Result, error) {
 				dirs = append(dirs, t.path)
 			}
 		}
-		dirs = append(dirs, settingsDirs(configPath, apps, base)...)
+		dirs = append(dirs, SettingsDirs(configPath, apps, base)...)
 		res.Created, err = d.makeDirs(dirs, puid, pgid)
 		if err != nil {
 			return res, err
@@ -547,6 +588,7 @@ func (d *Decision) Run(ctx context.Context, opts Options) (Result, error) {
 			NewPassword: newPassword,
 			Values:      withApps(base, apps, d.Catalog),
 			Hosted:      appHostApps(appHosts),
+			OwnLogin:    d.Catalog.SelfAuthenticating(),
 			Namespace:   namespace,
 			OIDC:        d.Catalog.OIDCApps(apps),
 		}

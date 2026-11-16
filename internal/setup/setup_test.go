@@ -766,7 +766,7 @@ func TestSettingsDirsFollowTheInstances(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	got := settingsDirs("/srv/s5n/config", []string{"alpha", "beta"}, base)
+	got := SettingsDirs("/srv/s5n/config", []string{"alpha", "beta"}, base)
 	want := "/srv/s5n/config/alpha,/srv/s5n/config/beta"
 	if strings.Join(got, ",") != want {
 		t.Fatalf("settingsDirs = %v, want %s (the disabled 4k instance is not one)", got, want)

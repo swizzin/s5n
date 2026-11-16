@@ -31,6 +31,12 @@ func (r *orderRelease) Deployed(context.Context) (map[string]any, bool, error) {
 	return nil, false, nil
 }
 
+// State: the order test starts on a cluster with no release, so there is no
+// chart version to compare with and the run is the first install.
+func (r *orderRelease) State(context.Context) (release.ReleaseState, error) {
+	return release.ReleaseState{}, nil
+}
+
 func (r *orderRelease) Upgrade(context.Context, release.Chart, map[string]any) (int, error) {
 	*r.events = append(*r.events, "release")
 	r.upgrades++

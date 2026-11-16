@@ -51,6 +51,9 @@ const (
 	GatewayVersion = "v1"
 	// CoreGroup is the API group of a Service, a Secret and a ConfigMap.
 	CoreGroup = ""
+	// AppsGroup is the API group of a Deployment, the object the provider's
+	// mount is read from.
+	AppsGroup = "apps"
 )
 
 // Defaults for the two waits. The Deployment wait is bounded like every other
@@ -176,6 +179,11 @@ type Options struct {
 	// names needs its rule, and the app's path rule must not exist: the chart
 	// no longer serves the app there.
 	Hosted []string
+	// OwnLogin are the apps the chart's catalog says sign their users in
+	// themselves. Their host or path prefix bypasses the login: a second
+	// password in front of an app that already asks for one is a password
+	// nobody is asked for.
+	OwnLogin []string
 	// Namespace is the seedbox's namespace. It is the per-app client Secrets'
 	// home and half of every client id, so an empty one is a refusal: a client
 	// called "-qui" belongs to nobody.
@@ -380,8 +388,15 @@ func (d *Decision) Apply(ctx context.Context, opts Options) (Result, error) {
 	// that decides the page's theme, and the mark and favicon that go in it.
 	// The per-host step calls the same function, so init and apply cannot
 	// disagree about either.
-	config, assets, err := renderLogin(opts.Values, opts.Host, opts.Login, key, opts.Hosted,
-		oidcClients(opts.Host, opts.Namespace, opts.Login, apps, sec.digests))
+	//
+	// clients is the provider's one decision, and everything below reads it:
+	// the configuration's identity_providers block (renderLogin renders what
+	// it is given) and the Deployment's mount. A stored digest is not that
+	// decision -- a box whose last OIDC app was turned off keeps the signing
+	// material in its Secret, because it is generated once and never rotated,
+	// and has no provider at all.
+	clients := oidcClients(opts.Host, opts.Namespace, opts.Login, apps, sec.digests)
+	config, assets, err := renderLogin(opts.Values, opts.Host, opts.Login, key, opts.Hosted, opts.OwnLogin, clients)
 	if err != nil {
 		return res, undo(err)
 	}
@@ -390,13 +405,13 @@ func (d *Decision) Apply(ctx context.Context, opts Options) (Result, error) {
 		return res, undo(err)
 	}
 
-	// The provider is mounted only once it has a client. Authelia refuses the
-	// block with no clients ("identity_providers: oidc: option 'clients' must
-	// have one or more clients configured"), and a first install has none yet:
-	// the client Secrets are the anchor step's write, in the run that creates
-	// the namespace. Until then the login serves the edge with the signing
-	// material sitting unused in its Secret.
-	manifests, err := authelia.RenderManifests(manifestsFor(opts.Host, opts.Image, authelia.ConfigHash(config), len(sec.digests) > 0))
+	// The provider is mounted exactly when the configuration renders it.
+	// Authelia refuses the block with no clients ("identity_providers: oidc:
+	// option 'clients' must have one or more clients configured"), and a first
+	// install has none yet: the client Secrets are the anchor step's write, in
+	// the run that creates the namespace. Until then the login serves the edge
+	// with the signing material sitting unused in its Secret.
+	manifests, err := authelia.RenderManifests(manifestsFor(opts.Host, opts.Image, authelia.ConfigHash(config), providerEnabled(clients)))
 	if err != nil {
 		return res, undo(err)
 	}
@@ -455,6 +470,11 @@ type RulesOptions struct {
 	// not only the names this run writes, because the configuration is
 	// rewritten whole and a name left out would lose the rule it already had.
 	Hosted []string
+	// OwnLogin are the apps the chart's catalog says sign their users in
+	// themselves -- the whole list for the same reason as Hosted: a name left
+	// out of the rewrite would put the login back in front of an app whose
+	// own sign-in is the one people use.
+	OwnLogin []string
 	// Namespace and OIDC are the provider's half of the same configuration: the
 	// seedbox's namespace (half of every client id) and the apps that sign in
 	// through this login. The configuration is one file, so a rule write
@@ -500,13 +520,15 @@ func (d *Decision) EnsureRules(ctx context.Context, opts RulesOptions) (bool, er
 }
 
 // Pending reports whether the login's configuration or pictures differ from
-// what is in the cluster, and writes nothing. It is EnsureRules' read half, for
-// a caller that has to ask before it does the write: `box apply` shows a
-// re-rendered login in its plan like any other piece of work.
+// what is in the cluster, or whether an app that signs in through it has no
+// client yet, and writes nothing. It is EnsureRules' read half, for a caller
+// that has to ask before it does the write: `box apply` shows a re-rendered
+// login in its plan like any other piece of work.
 //
 // It is root's: reading the login's Secret and ConfigMap is the first thing it
 // does, so an identity that cannot write the login is told so here rather than
-// half way through a write.
+// half way through a write. The client half reads the seedbox's namespace too,
+// because that is where the Secret a missing client would be written to lives.
 func (d *Decision) Pending(ctx context.Context, opts RulesOptions) (bool, error) {
 	_, _, changed, err := d.prepare(ctx, opts, false)
 	return changed, err
@@ -581,8 +603,12 @@ func (d *Decision) prepare(ctx context.Context, opts RulesOptions, ensure bool) 
 		return nil, none, false, err
 	}
 	key := sec.key
-	config, assets, err := renderLogin(opts.Values, opts.Host, opts.Login, key, opts.Hosted,
-		oidcClients(opts.Host, opts.Namespace, opts.Login, apps, sec.digests))
+	// The same one decision Apply makes: the clients this rendering names are
+	// what both the configuration's block and the Deployment's mount come
+	// from, so a rule write and an install cannot disagree about the provider.
+	clients := oidcClients(opts.Host, opts.Namespace, opts.Login, apps, sec.digests)
+	provider := providerEnabled(clients)
+	config, assets, err := renderLogin(opts.Values, opts.Host, opts.Login, key, opts.Hosted, opts.OwnLogin, clients)
 	if err != nil {
 		return nil, none, false, err
 	}
@@ -590,7 +616,36 @@ func (d *Decision) prepare(ctx context.Context, opts RulesOptions, ensure bool) 
 	if err != nil {
 		return nil, none, false, err
 	}
-	return cl, loginFiles{config: config, assets: assets, provider: len(sec.digests) > 0}, changed, nil
+	if !changed {
+		// The mount is the other half of the same face: a configuration that
+		// is already this run's can sit beside a Deployment that reads signing
+		// material no client names, and only comparing the mount is what
+		// makes that a change. Without it such a box says "nothing to change"
+		// on every later run and is never healed.
+		changed, err = d.providerMountDiffers(ctx, cl, provider)
+		if err != nil {
+			return nil, none, false, err
+		}
+	}
+	if !changed && !ensure {
+		// The third half is the client the cluster has not got yet. The
+		// rendering above leaves an app with no digest out (oidcClients), so
+		// a run that only enabled one renders exactly what the cluster holds
+		// and would otherwise promise nothing -- while the app's pod waits on
+		// a Secret nobody writes. PlanClients is EnsureClients' read half, and
+		// naming it here is what makes the Reconcile that follows write it
+		// (prepare's ensure branch) before the release moves.
+		//
+		// It reads the app's Secret in the seedbox's namespace, a second
+		// namespace for this read: root has it, and a run that cannot write
+		// the login is never given a login step to ask (cmd/box).
+		planned, err := d.PlanClients(ctx, opts.Namespace, apps)
+		if err != nil {
+			return nil, none, false, err
+		}
+		changed = len(planned) > 0
+	}
+	return cl, loginFiles{config: config, assets: assets, provider: provider}, changed, nil
 }
 
 // manifestsFor is the login's objects for one host, from the constants this
@@ -626,10 +681,10 @@ func manifestsFor(host, image, configHash string, oidc bool) authelia.Manifests 
 type loginFiles struct {
 	config []byte
 	assets authelia.Assets
-	// provider says the login's Secret holds at least one client, which is
-	// what makes Authelia accept an identity_providers.oidc block at all: it
-	// refuses one with no clients, and a first install has none until apply's
-	// anchor step writes them.
+	// provider is the rendering's own answer to "is there an identity
+	// provider": the configuration has at least one client, so the Deployment
+	// mounts the login's Secret and passes its file as the second --config
+	// (providerEnabled). It is never read from the digests the Secret holds.
 	provider bool
 }
 
@@ -733,7 +788,7 @@ func accessList() []kube.Access {
 		{Verb: kube.VerbApply, Group: CoreGroup, Resource: "configmaps", Namespace: Namespace, What: "ConfigMaps in " + Namespace},
 		{Verb: kube.VerbApply, Group: CoreGroup, Resource: "secrets", Namespace: Namespace, What: "Secrets in " + Namespace},
 		{Verb: kube.VerbApply, Group: CoreGroup, Resource: "services", Namespace: Namespace, What: "Services in " + Namespace},
-		{Verb: kube.VerbApply, Group: "apps", Resource: "deployments", Namespace: Namespace, What: "Deployments in " + Namespace},
+		{Verb: kube.VerbApply, Group: AppsGroup, Resource: "deployments", Namespace: Namespace, What: "Deployments in " + Namespace},
 		{Verb: kube.VerbApply, Group: GatewayGroup, Resource: "referencegrants", Namespace: Namespace, What: "ReferenceGrants in " + Namespace},
 		{Verb: kube.VerbApply, Group: GatewayGroup, Resource: "httproutes", Namespace: Namespace, What: "the portal's HTTPRoute in " + Namespace},
 		{Verb: kube.VerbApply, Group: PolicyGroup, Resource: "securitypolicies", Namespace: platform.GatewayNamespace, What: "SecurityPolicies in " + platform.GatewayNamespace},
@@ -771,7 +826,7 @@ func rulesAccess() []kube.Access {
 	return []kube.Access{
 		{Verb: kube.VerbApply, Group: CoreGroup, Resource: "configmaps", Namespace: Namespace, What: "ConfigMaps in " + Namespace},
 		{Verb: kube.VerbApply, Group: CoreGroup, Resource: "services", Namespace: Namespace, What: "Services in " + Namespace},
-		{Verb: kube.VerbApply, Group: "apps", Resource: "deployments", Namespace: Namespace, What: "Deployments in " + Namespace},
+		{Verb: kube.VerbApply, Group: AppsGroup, Resource: "deployments", Namespace: Namespace, What: "Deployments in " + Namespace},
 		{Verb: kube.VerbApply, Group: GatewayGroup, Resource: "referencegrants", Namespace: Namespace, What: "ReferenceGrants in " + Namespace},
 		{Verb: kube.VerbApply, Group: GatewayGroup, Resource: "httproutes", Namespace: Namespace, What: "the portal's HTTPRoute in " + Namespace},
 		{Verb: kube.VerbApply, Group: PolicyGroup, Resource: "securitypolicies", Namespace: platform.GatewayNamespace, What: "SecurityPolicies in " + platform.GatewayNamespace},
@@ -835,6 +890,75 @@ func (d *Decision) configurationChanged(ctx context.Context, cl Cluster, configu
 	return false, nil
 }
 
+// providerMountDiffers reports whether the login's Deployment reads the
+// provider's file while the rendering says it must not, or fails to while the
+// rendering says it must. It is the second half of "the login differs".
+//
+// A box installed by a run whose two halves disagreed keeps a Deployment that
+// mounts signing material its configuration names no client for. The
+// configuration there is already right, so a comparison of the ConfigMap alone
+// called that box "nothing to change" every run after, and Authelia exited on
+// the mount each time the pod started. Comparing the mount is what heals it.
+//
+// Only the two fields that carry the decision are read -- the container's
+// second `--config` argument and the volumeMount at OIDCMountPath -- because a
+// whole-object comparison would see everything the API server and the
+// Deployment's controllers write (defaults, resourceVersion, status) and never
+// settle.
+func (d *Decision) providerMountDiffers(ctx context.Context, cl Cluster, want bool) (bool, error) {
+	doc, found, err := cl.Get(ctx, AppsGroup, "v1", "Deployment", Namespace, authelia.ServiceName)
+	if err != nil {
+		return false, err
+	}
+	if !found {
+		// A configuration without its Deployment is not an installed login:
+		// writing the Deployment is this run's work.
+		return true, nil
+	}
+	args, mount := providerInDeployment(doc)
+	return args != want || mount != want, nil
+}
+
+// providerInDeployment is whether a Deployment's pods read the provider's file:
+// a container passing it as the argument after a `--config`, and a volumeMount
+// at the path that file is mounted on. Both are written under one condition in
+// the manifests template, so a Deployment with one and not the other is a
+// hand-edited object and reads as the difference it is.
+func providerInDeployment(doc map[string]any) (args, mount bool) {
+	containers, _, _ := unstructured.NestedSlice(doc, "spec", "template", "spec", "containers")
+	for _, raw := range containers {
+		c, _ := raw.(map[string]any)
+		if c == nil {
+			continue
+		}
+		a, m := providerInContainer(c)
+		args, mount = args || a, mount || m
+	}
+	return args, mount
+}
+
+// providerInContainer is one container's half of it.
+func providerInContainer(c map[string]any) (args, mount bool) {
+	file := authelia.OIDCMountPath + "/" + authelia.OIDCFile
+	raw, _ := c["args"].([]any)
+	prev := ""
+	for _, a := range raw {
+		s, _ := a.(string)
+		if prev == "--config" && s == file {
+			args = true
+		}
+		prev = s
+	}
+	mounts, _ := c["volumeMounts"].([]any)
+	for _, m := range mounts {
+		mm, _ := m.(map[string]any)
+		if mm["mountPath"] == authelia.OIDCMountPath {
+			mount = true
+		}
+	}
+	return args, mount
+}
+
 // anyMap is a string map as the untyped document a server-side apply takes:
 // the API server's JSON form wants the base64 strings, and unstructured's
 // accessors want them under any.
@@ -851,7 +975,7 @@ func anyMap(in map[string]string) map[string]any {
 // mark and favicon mounted beside it. It is one function because the same
 // inputs must produce the same files -- a rule or a theme that depended on
 // which command wrote it would be a second login.
-func renderLogin(values map[string]any, host, name, key string, hosted []string, oidc *authelia.OIDC) ([]byte, authelia.Assets, error) {
+func renderLogin(values map[string]any, host, name, key string, hosted, ownLogin []string, oidc *authelia.OIDC) ([]byte, authelia.Assets, error) {
 	lt, err := authelia.ResolveTheme(themeName(values))
 	if err != nil {
 		return nil, authelia.Assets{}, err
@@ -862,7 +986,7 @@ func renderLogin(values map[string]any, host, name, key string, hosted []string,
 		EncryptionKey: key,
 		Theme:         lt.Base,
 		AssetPath:     authelia.AssetPath,
-		Rules:         authelia.Rules(host, name, authelia.InstancesFromValues(values), hosted),
+		Rules:         authelia.Rules(host, name, authelia.InstancesFromValues(values), hosted, ownLogin),
 		OIDC:          oidc,
 	})
 	if err != nil {

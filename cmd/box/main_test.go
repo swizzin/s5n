@@ -5,18 +5,77 @@ import (
 	"flag"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/swizzin/s5n/internal/bootstrap"
 	"github.com/swizzin/s5n/internal/release"
 	"github.com/swizzin/s5n/internal/say"
+	"github.com/swizzin/s5n/internal/seedbox"
 	"github.com/swizzin/s5n/internal/setup"
+	"github.com/swizzin/s5n/internal/update"
 )
 
 const (
 	testChartRepo    = "oci://127.0.0.1:5000/charts/s5n"
 	testChartVersion = "1.2.3"
 )
+
+// testKubeconfig is enough for client-go to build a client: box does not contact
+// the cluster when it opens a release handle.
+const testKubeconfig = `apiVersion: v1
+kind: Config
+clusters:
+  - name: test
+    cluster:
+      server: https://127.0.0.1:6443
+contexts:
+  - name: test
+    context:
+      cluster: test
+      user: test
+current-context: test
+users:
+  - name: test
+    user: {}
+`
+
+// TestTheUpdatesHelmWaitOutlastsTheStartupBudget: a migration may run for the
+// chart's whole thirty-minute startup budget, and Helm's own fifteen-minute
+// default would fail the apply in the middle of it. Update's Helm gets the health
+// gate's budget; `box apply` keeps Helm's default.
+//
+// It also waits for hooks only. Helm's resource wait reads a crashlooping pod as
+// failed and stops waiting on it, so the StatefulSet holds it for the whole
+// budget: the step would never reach the gate that rolls the app back.
+func TestTheUpdatesHelmWaitOutlastsTheStartupBudget(t *testing.T) {
+	kubeconfig := filepath.Join(t.TempDir(), "kubeconfig")
+	if err := os.WriteFile(kubeconfig, []byte(testKubeconfig), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	h, err := updateHelm(kubeconfig, "testbox")
+	if err != nil {
+		t.Fatalf("updateHelm: %v", err)
+	}
+	if h.Timeout != 35*time.Minute {
+		t.Fatalf("update's Helm wait = %v, want the health gate's %v", h.Timeout, update.DefaultHealthWait)
+	}
+	if !h.HooksOnly {
+		t.Fatal("update's Helm waits for the release too: a crashlooping pod holds it for the whole budget")
+	}
+	applied, err := release.NewHelm(kubeconfig, "testbox", release.ReleaseName)
+	if err != nil {
+		t.Fatalf("apply's helm: %v", err)
+	}
+	if applied.Timeout != 0 {
+		t.Fatalf("apply's Helm wait = %v, want Helm's own default", applied.Timeout)
+	}
+	if applied.HooksOnly {
+		t.Fatal("apply's Helm waits for hooks only: nothing else gates the release it installs")
+	}
+}
 
 // recordingCharts stands in for the registry: it records the reference each
 // command asks for, which is the thing that must not lose a flag.
@@ -71,6 +130,92 @@ func TestApplyPassesItsChartFlagsToTheOptions(t *testing.T) {
 	want := release.ChartRef{Repo: testChartRepo, Version: testChartVersion}
 	if got := flags.options().ChartRef(); got != want {
 		t.Fatalf("apply asked for %+v, want %+v", got, want)
+	}
+}
+
+// TestApplyAndRollbackInstallWithTheChartsHooks: moving a release without its
+// hooks is the update step's own order -- its gate reads the moved apps before
+// the chart's wiring Job can pass -- and it belongs to that step alone. `box
+// apply` and `box rollback` install the release with the hooks, because nothing
+// else gates them and the wiring is what makes the release work.
+func TestApplyAndRollbackInstallWithTheChartsHooks(t *testing.T) {
+	var apply *applyFlags
+	parse(t, "apply", func(fs *flag.FlagSet) { apply = addApplyFlags(fs) })
+	if opts := apply.options(); opts.SkipHooks || opts.RunHooks {
+		t.Fatalf("box apply's options = %+v, want the chart's hooks left to the apply", opts)
+	}
+
+	var rollback *rollbackFlags
+	parse(t, "rollback", func(fs *flag.FlagSet) { rollback = addRollbackFlags(fs) }, "sonarr")
+	if opts := rollback.options("sonarr"); opts.Apply.SkipHooks || opts.Apply.RunHooks {
+		t.Fatalf("box rollback's options = %+v, want the chart's hooks left to the apply", opts.Apply)
+	}
+}
+
+// TestAStepsApplyIsTheOptionsUpdateRuns: every step applies the options built
+// for it -- apply's own plus the claim names, the host work and the hold -- and
+// the run keeps the plan's --check. Handing the Updater apply's bare options
+// instead installs a release the box is not: the chart's default claims, a host
+// with no listener, and the image the rollback avoided, because the hold is what
+// renders the image the app was put back on.
+func TestAStepsApplyIsTheOptionsUpdateRuns(t *testing.T) {
+	var flags *updateFlags
+	parse(t, "update", func(fs *flag.FlagSet) { flags = addUpdateFlags(fs) }, "--check")
+
+	held := func(context.Context, *seedbox.Seedbox, release.Chart, map[string]any) (map[string]any, error) {
+		return nil, nil
+	}
+	step := release.Options{GrantPath: "/tmp/grant.yaml", ValuesPath: "/tmp/values.yaml", Holds: held}
+	run := flags.runOptions(step)
+	if !run.Check {
+		t.Fatal("--check did not reach the options the steps run with")
+	}
+	if run.Apply.GrantPath != "/tmp/grant.yaml" || run.Apply.ValuesPath != "/tmp/values.yaml" {
+		t.Fatalf("the steps would apply %q/%q, want the files this run read", run.Apply.GrantPath, run.Apply.ValuesPath)
+	}
+	if run.Apply.Holds == nil {
+		t.Fatal("the steps run without the holds file: a step would undo the rollback it had just made")
+	}
+}
+
+// TestUpdatePassesItsFlagsToTheOptions: update runs apply for every step, so
+// losing a chart, grant or values flag here would install a different release
+// from the one the plan named, or apply somebody else's file.
+func TestUpdatePassesItsFlagsToTheOptions(t *testing.T) {
+	var flags *updateFlags
+	parse(t, "update", func(fs *flag.FlagSet) { flags = addUpdateFlags(fs) },
+		"--chart-repo", testChartRepo, "--chart-version", testChartVersion,
+		"--grant", "/tmp/grant.yaml", "--values", "/tmp/values.yaml", "--check")
+
+	opts := flags.options()
+	if got, want := opts.Apply.ChartRef(), (release.ChartRef{Repo: testChartRepo, Version: testChartVersion}); got != want {
+		t.Fatalf("update asked for %+v, want %+v", got, want)
+	}
+	if opts.Apply.GrantPath != "/tmp/grant.yaml" || opts.Apply.ValuesPath != "/tmp/values.yaml" {
+		t.Fatalf("update would apply %q/%q, want the files it was given", opts.Apply.GrantPath, opts.Apply.ValuesPath)
+	}
+	if !opts.Check {
+		t.Fatal("--check did not reach the options")
+	}
+}
+
+// TestUpdateKeepsItsRecordBesideTheClusterRecord: update writes update.json into
+// the directory the cluster decision was recorded in, so --record moves both
+// files together. Without it, a box whose record is not at bootstrap's default
+// path (any box driven from somewhere other than /etc/swizzin) plans the whole
+// update and then fails writing its own bookkeeping, before the first step.
+func TestUpdateKeepsItsRecordBesideTheClusterRecord(t *testing.T) {
+	var defaults *updateFlags
+	parse(t, "update", func(fs *flag.FlagSet) { defaults = addUpdateFlags(fs) })
+	if got, want := defaults.statePath(), update.FilePath(bootstrap.RecordPath); got != want {
+		t.Fatalf("update's record = %s, want %s beside bootstrap's own", got, want)
+	}
+
+	record := filepath.Join(t.TempDir(), "cluster.yaml")
+	var flags *updateFlags
+	parse(t, "update", func(fs *flag.FlagSet) { flags = addUpdateFlags(fs) }, "--record", record)
+	if got, want := flags.statePath(), filepath.Join(filepath.Dir(record), "update.json"); got != want {
+		t.Fatalf("update's record = %s, want %s", got, want)
 	}
 }
 
@@ -137,6 +282,7 @@ func TestDevFlagsAreNotInAnyHelp(t *testing.T) {
 	}{
 		{"bootstrap and init", func(fs *flag.FlagSet) { addInitFlags(fs) }},
 		{"apply", func(fs *flag.FlagSet) { addApplyFlags(fs) }},
+		{"rollback", func(fs *flag.FlagSet) { addRollbackFlags(fs) }},
 	}
 	for _, cmd := range commands {
 		t.Run(cmd.name, func(t *testing.T) {
@@ -380,5 +526,36 @@ func TestOneCommandPullsOneRelease(t *testing.T) {
 	}
 	if len(src.refs) != 1 {
 		t.Fatalf("the chart source was asked %d times, want once: %+v", len(src.refs), src.refs)
+	}
+}
+
+// TestOnlyApplySetsTheSnapshotStep: an apply copies the apps its values pins
+// move, but an update snapshots each step itself and a rollback's apply is the
+// move back. Either one inheriting the step would stop and copy an app twice, or
+// copy it back over the state the rollback is restoring.
+func TestOnlyApplySetsTheSnapshotStep(t *testing.T) {
+	var applyF *applyFlags
+	parse(t, "apply", func(fs *flag.FlagSet) { applyF = addApplyFlags(fs) })
+	if applyF.options().Snapshots != nil {
+		t.Fatal("apply's flags carry a snapshot step: the command that knows the grant sets it")
+	}
+
+	var updateF *updateFlags
+	parse(t, "update", func(fs *flag.FlagSet) { updateF = addUpdateFlags(fs) })
+	if updateF.options().Apply.Snapshots != nil {
+		t.Fatal("update's steps would inherit a snapshot step; each step copies its own")
+	}
+
+	var rollbackF *rollbackFlags
+	parse(t, "rollback", func(fs *flag.FlagSet) { rollbackF = addRollbackFlags(fs) })
+	if rollbackF.options("sonarr").Apply.Snapshots != nil {
+		t.Fatal("a rollback's apply would copy over the snapshot it is restoring")
+	}
+
+	// And the step apply does set is off the package that holds the cluster
+	// client, so cmd/box imports no k8s.io package itself.
+	hook := applySnapshots("")
+	if hook == nil || hook.OpenRelease == nil || hook.OpenCluster == nil || hook.OpenSnapshots == nil {
+		t.Fatalf("apply's snapshot step is incomplete: %+v", hook)
 	}
 }
