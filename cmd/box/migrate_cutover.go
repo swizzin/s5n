@@ -79,7 +79,10 @@ func runMigrateCutover(ctx context.Context, args []string) {
 			os.Exit(1)
 		}
 		if errors.Is(err, errCutoverStopped) {
-			os.Exit(1)
+			// The replace path did what it was asked: the snapshot is written
+			// and the two things left are the operator's. That is a finished
+			// run, not a failed one.
+			os.Exit(0)
 		}
 		if errors.Is(err, apply.ErrCancelled) || errors.Is(err, release.ErrCancelled) {
 			out.Line("oh heck, nvm")
