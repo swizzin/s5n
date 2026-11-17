@@ -210,7 +210,7 @@ func sonarrSchema() []string {
 		`CREATE TABLE RootFolders (Id INTEGER PRIMARY KEY, Path TEXT)`,
 		`CREATE TABLE ImportLists (Id INTEGER PRIMARY KEY, Name TEXT, Implementation TEXT, Settings TEXT, RootFolderPath TEXT)`,
 		`CREATE TABLE RemotePathMappings (Id INTEGER PRIMARY KEY, Host TEXT, RemotePath TEXT, LocalPath TEXT)`,
-		`CREATE TABLE DownloadClients (Id INTEGER PRIMARY KEY, Name TEXT, Implementation TEXT, Settings TEXT)`,
+		`CREATE TABLE DownloadClients (Id INTEGER PRIMARY KEY, Name TEXT, Enable INTEGER, Implementation TEXT, Settings TEXT)`,
 		`CREATE TABLE Notifications (Id INTEGER PRIMARY KEY, Name TEXT, Implementation TEXT, Settings TEXT)`,
 		`CREATE TABLE Config (Id INTEGER PRIMARY KEY, Key TEXT, Value TEXT)`,
 		`CREATE TABLE Commands (Id INTEGER PRIMARY KEY, Name TEXT, Status INTEGER, Body TEXT)`,
@@ -561,7 +561,7 @@ func TestUnclassifiedClientReported(t *testing.T) {
 	dir := t.TempDir()
 	newDB(t, filepath.Join(dir, "sonarr.db"), append(sonarrSchema(),
 		`INSERT INTO DownloadClients (Id, Name, Implementation, Settings) VALUES
-			(1, 'seedbox', 'Transmission', '{"host":"192.0.2.77","port":9091,"useSsl":true,"tvDirectory":"/srv/remote/tv"}')`,
+			(1, 'seedbox', 'QBittorrent', '{"host":"192.0.2.77","port":8080,"useSsl":true,"tvCategory":"tv"}')`,
 	)...)
 	writeFile(t, filepath.Join(dir, "config.xml"), "<Config>\n  <Port>8989</Port>\n</Config>")
 	// The plan from above leaves 192.0.2.50 alone; this client is another
@@ -573,13 +573,89 @@ func TestUnclassifiedClientReported(t *testing.T) {
 		t.Fatalf("Check: %v", err)
 	}
 	want := []rewrite.Address{{
-		App: "sonarr", File: "sonarr.db", Where: "DownloadClients.Settings.host", Host: "192.0.2.77", Port: 9091,
+		App: "sonarr", File: "sonarr.db", Where: "DownloadClients.Settings.host", Host: "192.0.2.77", Port: 8080,
 	}}
 	if !reflect.DeepEqual(rep.Unclassified, want) {
 		t.Errorf("unclassified = %v, want %v", addressStrings(rep.Unclassified), addressStrings(want))
 	}
 	if !rep.Blocked() {
 		t.Error("an address no rule settles did not block the run")
+	}
+}
+
+// TestDisabledClientIsLeft: a client the app never dials is not a gap. Its
+// address stays exactly as it was, the report says so, and the run is not
+// stopped by an address no rule settles.
+func TestDisabledClientIsLeft(t *testing.T) {
+	dir := t.TempDir()
+	newDB(t, filepath.Join(dir, "sonarr.db"), append(sonarrSchema(),
+		`INSERT INTO DownloadClients (Id, Name, Enable, Implementation, Settings) VALUES
+			(1, 'old box', 0, 'QBittorrent', '{"host":"192.0.2.77","port":8080,"useSsl":true,"tvCategory":"tv"}')`,
+	)...)
+	writeFile(t, filepath.Join(dir, "config.xml"), "<Config>\n  <Port>8989</Port>\n</Config>")
+	in := input(t, dir, "sonarr", sonarrPlan)
+
+	rep, err := (rewriter{kind: kindSonarr}).Check(context.Background(), in)
+	if err != nil {
+		t.Fatalf("Check: %v", err)
+	}
+	if rep.Blocked() {
+		t.Fatalf("a disabled client blocked the run: %v", addressStrings(rep.Unclassified))
+	}
+	if len(rep.Left) != 1 || rep.Left[0].What != "192.0.2.77:8080" {
+		t.Fatalf("Left = %+v, want one entry for 192.0.2.77:8080", rep.Left)
+	}
+	if !strings.Contains(rep.Left[0].Why, "switched off") {
+		t.Errorf("why = %q, want it to say the client is switched off", rep.Left[0].Why)
+	}
+	if _, err := (rewriter{kind: kindSonarr}).Write(context.Background(), in); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	if got := setting(t, filepath.Join(dir, "sonarr.db"), "SELECT Settings FROM DownloadClients WHERE Id = 1"); got["host"] != "192.0.2.77" {
+		t.Errorf("a disabled client's row was rewritten: %v", got)
+	}
+}
+
+// TestClientTypeBoxDoesNotRunExistsIsLeft: box runs qBittorrent and nothing
+// else. A client of another type is left exactly as it is and called out,
+// because a rewrite would point it at an app that does not speak its protocol.
+func TestClientTypeBoxDoesNotRunExistsIsLeft(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	newDB(t, filepath.Join(dir, "sonarr.db"), append(sonarrSchema(),
+		`INSERT INTO DownloadClients (Id, Name, Enable, Implementation, Settings) VALUES
+			(1, 'deluge', 1, 'Deluge', '{"host":"192.0.2.77","port":8112,"useSsl":false,"downloadDirectory":"/srv/remote/downloads"}'),
+			(2, 'rtorrent', 0, 'RTorrent', '{"host":"192.0.2.78","port":443,"useSsl":true,"tvDirectory":"/srv/remote/tv"}')`,
+	)...)
+	writeFile(t, filepath.Join(dir, "config.xml"), "<Config>\n  <Port>8989</Port>\n</Config>")
+	in := input(t, dir, "sonarr", sonarrPlan)
+
+	rep, err := (rewriter{kind: kindSonarr}).Check(ctx, in)
+	if err != nil {
+		t.Fatalf("Check: %v", err)
+	}
+	if rep.Blocked() {
+		t.Fatalf("a client type box does not run blocked the run: %v", addressStrings(rep.Unclassified))
+	}
+	var got []string
+	for _, l := range rep.Left {
+		got = append(got, l.What)
+	}
+	if want := []string{"192.0.2.77:8112", "192.0.2.78:443"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("Left = %v, want %v", got, want)
+	}
+	if len(rep.Owned) != 0 {
+		t.Errorf("owned = %v, want none: box does not adopt a client it does not run", rep.Owned)
+	}
+	if _, err := (rewriter{kind: kindSonarr}).Write(ctx, in); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	db := filepath.Join(dir, "sonarr.db")
+	for id, host := range map[int]string{1: "192.0.2.77", 2: "192.0.2.78"} {
+		got := setting(t, db, fmt.Sprintf("SELECT Settings FROM DownloadClients WHERE Id = %d", id))
+		if got["host"] != host {
+			t.Errorf("client %d was rewritten: %v", id, got)
+		}
 	}
 }
 
