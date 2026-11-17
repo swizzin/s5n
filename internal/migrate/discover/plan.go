@@ -357,7 +357,6 @@ func (d *discovery) ingressRules() []plan.HostRule {
 	// host -> app -> the paths that app is served at, so one host serving one
 	// app at several paths is one rule.
 	served := map[string]map[string][]string{}
-	names := map[string]map[string]string{} // host -> app -> ingress for the note
 	for _, ing := range d.ings {
 		if !d.inNamespaces(ing.Namespace) {
 			continue
@@ -374,10 +373,8 @@ func (d *discovery) ingressRules() []plan.HostRule {
 			}
 			if served[rule.Host] == nil {
 				served[rule.Host] = map[string][]string{}
-				names[rule.Host] = map[string]string{}
 			}
 			served[rule.Host][in.name] = append(served[rule.Host][in.name], rule.Path)
-			names[rule.Host][in.name] = ing.Name
 		}
 	}
 	var out []plan.HostRule
@@ -480,10 +477,10 @@ func (d *discovery) ingressOwner(ing Ingress, rule IngressRule) (*instance, bool
 			at, svc.Name, svc.Namespace, ingressPortName(rule))
 		return nil, false
 	}
-	target, ok := port.target(in.wl)
-	if !ok || !hasPort(in.ports, target) {
+	target, reached := port.target(in.wl)
+	if !reached || !hasPort(in.ports, target) {
 		d.note("%s through service %s.%s port %s, which forwards to %s, a port %s does not listen on, so no rule maps it",
-			at, svc.Name, svc.Namespace, port.String(), describeTarget(port, target, ok), in.name)
+			at, svc.Name, svc.Namespace, port.String(), forwarded(port, target, reached), in.name)
 		return nil, false
 	}
 	return in, true
@@ -511,10 +508,11 @@ func ingressPortName(rule IngressRule) string {
 	return strconv.Itoa(rule.Port)
 }
 
-// describeTarget is what a Service port forwards to, as a note says it.
-func describeTarget(port ServicePort, target int, ok bool) string {
-	if !ok {
-		return ingressPortName(IngressRule{PortName: port.TargetName})
+// forwarded is what a Service port forwards to, as a note says it: the name it
+// declares when nothing answers to that name, the port when something does.
+func forwarded(port ServicePort, target int, reached bool) string {
+	if !reached {
+		return port.TargetName
 	}
 	return strconv.Itoa(target)
 }
