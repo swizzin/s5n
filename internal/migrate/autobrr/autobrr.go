@@ -25,6 +25,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"net"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -51,6 +52,10 @@ const (
 	tableClient = "client"
 	keyPort     = "port"
 )
+
+// hostPlusPort are the client types autobrr dials at host plus the port column
+// (internal/domain/downloader.go:234-242 at v1.90.0, BuildLegacyHost).
+var hostPlusPort = map[string]bool{"QBITTORRENT": true, "TRANSMISSION": true}
 
 // actionPaths are the action columns that hold a path, macro-capable
 // (internal/domain/action.go:17-24).
@@ -255,8 +260,19 @@ func planDB(ctx context.Context, in rewrite.Input, t tally, rep *rewrite.Report)
 
 // planClients rewrites the download clients and the Arr connections, which are
 // rows of the same table.
+//
+// The rows are dialled from different columns. qBittorrent and Transmission
+// combine host, port and tls into one URL, appending the port column to whatever
+// host holds (internal/domain/downloader.go:234-281 at v1.90.0), so their port
+// column is part of the address. Every other type is dialled by the host column
+// alone: an Arr's config is built from Hostname: cfg.Host
+// (internal/downloader/service.go:514-515) and the Arr client parses that as a
+// URL and joins /api/v3 onto it (pkg/arr/sonarr/client.go:19-24), so the column
+// holds a whole URL and the port column keeps whatever the form left there
+// (10000), never read. Such a row is resolved on its URL's host and port,
+// rewritten to a URL again, and its port column left exactly as it was.
 func planClients(ctx context.Context, db *sql.DB, in rewrite.Input, t tally, rep *rewrite.Report) ([]dbEdit, error) {
-	rows, err := db.QueryContext(ctx, `SELECT id, host, port, tls FROM client`)
+	rows, err := db.QueryContext(ctx, `SELECT id, type, host, port, tls FROM client`)
 	if err != nil {
 		return nil, fmt.Errorf("autobrr: read client: %w", err)
 	}
@@ -264,17 +280,22 @@ func planClients(ctx context.Context, db *sql.DB, in rewrite.Input, t tally, rep
 	var edits []dbEdit
 	for rows.Next() {
 		var id int64
+		var kind sql.NullString
 		var host string
 		var port, tls sql.NullInt64
-		if err := rows.Scan(&id, &host, &port, &tls); err != nil {
+		if err := rows.Scan(&id, &kind, &host, &port, &tls); err != nil {
 			return nil, fmt.Errorf("autobrr: read client: %w", err)
 		}
-		// host is a bare name with the port in its own column, but an Arr
-		// client entered as a URL keeps it in host.
+		// arr is a row dialled by its host URL alone; a bare host, or a
+		// client that adds the port column to its host, is host and port.
+		arr := strings.Contains(host, "://") && !hostPlusPort[strings.ToUpper(kind.String)]
 		name, urlPort := splitAddress(host)
-		p := int(port.Int64)
-		if p == 0 {
-			p = urlPort
+		p := urlPort
+		if !arr {
+			p = int(port.Int64)
+			if p == 0 {
+				p = urlPort
+			}
 		}
 		res := in.Resolve(name, p)
 		switch res.Verdict {
@@ -284,11 +305,17 @@ func planClients(ctx context.Context, db *sql.DB, in rewrite.Input, t tally, rep
 				return nil, fmt.Errorf("autobrr: client %d: the plan points %s at %q, which has no endpoint on the box",
 					id, name, res.App)
 			}
-			if host != end.Host {
-				edits = append(edits, dbEdit{tableClient, "host", id, end.Host})
+			want := end.Host
+			if arr {
+				// A rewritten Arr row is still the URL autobrr dials: the
+				// box's scheme, Service, port and URL base.
+				want = "http://" + net.JoinHostPort(end.Host, strconv.Itoa(end.Port)) + strings.TrimSuffix(end.URLBase, "/")
+			}
+			if host != want {
+				edits = append(edits, dbEdit{tableClient, "host", id, want})
 				t.add(dbName, tableClient+".host", "host")
 			}
-			if p != end.Port {
+			if !arr && p != end.Port {
 				edits = append(edits, dbEdit{tableClient, keyPort, id, end.Port})
 				t.add(dbName, tableClient+"."+keyPort, "port")
 			}

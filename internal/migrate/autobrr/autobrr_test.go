@@ -145,7 +145,10 @@ func setup(t *testing.T, dbSQL string) rewrite.Input {
 }
 
 func TestRewritesPathsAndConnections(t *testing.T) {
-	in := setup(t, dbFixture)
+	// The Sonarr row is the shape autobrr stores for an Arr: a whole URL in
+	// host, the port column left at the form's 10000. A bare host with the
+	// port in the column is a download client's shape, not an Arr's.
+	in := setup(t, arrFixture())
 	rep, err := rewriter{}.Check(context.Background(), in)
 	if err != nil {
 		t.Fatal(err)
@@ -190,7 +193,9 @@ func TestRewritesPathsAndConnections(t *testing.T) {
 		tls  int
 	}{
 		1: {"qbittorrent", 8080, 0},
-		2: {"sonarr", 8989, 0},
+		// The Arr's address is its host URL, the box's this time; the port
+		// column stays where the form left it, because nothing reads it.
+		2: {"http://sonarr:8989/sonarr", 10000, 0},
 	} {
 		got := clients[id]
 		if got.host != want.host || got.port != want.port || got.tls != want.tls {
