@@ -206,7 +206,8 @@ func (r *Reporter) List(title string, rows []string) {
 
 // Plan is the list box already prints before a confirm, with its marks
 // coloured: + installs, ~ changes, ? depends on an answer, ! is a warning,
-// = verifies and - removes.
+// = verifies and - removes. A component's sub-steps are drawn under it, two
+// columns past its text, with marks of their own.
 func (r *Reporter) Plan(title string, items []say.Item) {
 	r.plan(title, items)
 }
@@ -222,22 +223,34 @@ func (r *Reporter) plan(title string, items []say.Item) {
 		b.WriteString(indent + r.chrome.paint(title, accentStyle.Bold(true).Render(title)) + "\n")
 	}
 	for _, it := range items {
-		mark := string(it.Mark)
-		if mark == "" {
-			mark = "·"
-		}
-		prefix := indent + mark + " "
-		cont := strings.Repeat(" ", lipgloss.Width(prefix))
-		style := r.planStyle(it.Mark)
-		for i, line := range wrapText(it.Text, r.width-lipgloss.Width(prefix)) {
-			if i == 0 {
-				b.WriteString(indent + r.chrome.paint(mark, style.Render(mark)) + " " + r.chrome.paint(line, inkStyle.Render(line)) + "\n")
-				continue
-			}
-			b.WriteString(cont + r.chrome.paint(line, inkStyle.Render(line)) + "\n")
+		r.planItem(&b, indent, it)
+		for _, child := range it.Children {
+			// A child's mark sits past the item's own text: its mark and a
+			// space, then the two columns the indent is.
+			r.planItem(&b, indent+"    ", child)
 		}
 	}
 	r.emit(b.String())
+}
+
+// planItem draws one row of a plan at level: its mark coloured by what it does,
+// its text wrapped under itself. level is where the mark goes, so a child sits
+// two columns past the text of the row above it.
+func (r *Reporter) planItem(b *strings.Builder, level string, it say.Item) {
+	mark := string(it.Mark)
+	if mark == "" {
+		mark = "·"
+	}
+	prefix := level + mark + " "
+	cont := strings.Repeat(" ", lipgloss.Width(prefix))
+	style := r.planStyle(it.Mark)
+	for i, line := range wrapText(it.Text, r.width-lipgloss.Width(prefix)) {
+		if i == 0 {
+			b.WriteString(level + r.chrome.paint(mark, style.Render(mark)) + " " + r.chrome.paint(line, inkStyle.Render(line)) + "\n")
+			continue
+		}
+		b.WriteString(cont + r.chrome.paint(line, inkStyle.Render(line)) + "\n")
+	}
 }
 
 // planStyle colours a plan mark by what it does to the cluster.

@@ -40,9 +40,16 @@ const (
 )
 
 // Item is one row of a plan or a diff.
+//
+// Children are the sub-steps of one row: what a component is made of, printed
+// under it and two columns past where its own text starts. They are one level
+// deep, and a child never has children of its own.
 type Item struct {
 	Mark Mark
 	Text string
+	// Children are the steps that belong to this one, in the order they are
+	// applied. Empty for a row that is a step of its own.
+	Children []Item
 }
 
 // ReceiptRow is one step of the wiring receipt: what was checked, what it cost
@@ -97,7 +104,9 @@ type Reporter interface {
 	// Pending rows wait on a person, so a live renderer may print them after
 	// the final card instead of in place.
 	Receipt(status string, rows []ReceiptRow)
-	// Plan is a titled list of marked items ("" omits the title).
+	// Plan is a titled list of marked items ("" omits the title). An item's
+	// Children are printed under it, indented two columns past where the
+	// item's own text starts, with their own marks.
 	Plan(title string, items []Item)
 	// Diff is a values diff: marked items with no title, printed flush left by
 	// the plain transcript, which is how `box apply` has always printed them.
@@ -191,8 +200,26 @@ func (p *Plain) Plan(title string, items []Item) {
 		fmt.Fprintf(p.out(), "%s:\n", title)
 	}
 	for _, it := range items {
-		fmt.Fprintf(p.out(), "  %s %s\n", it.Mark, it.Text)
+		p.planItem(itemIndent, it)
+		for _, child := range it.Children {
+			p.planItem(childIndent, child)
+		}
 	}
+}
+
+// The plain transcript's plan columns: an item's mark sits two columns in, and
+// a child's two columns past where the item's own text starts -- that is, past
+// the mark and the space after it. Spaces only: this rendering is what screen
+// readers and logged runs read, so there is nothing else to draw with.
+const (
+	itemIndent = "  "
+	// childIndent is an item's mark and space, then the two columns a child is
+	// indented by.
+	childIndent = "      "
+)
+
+func (p *Plain) planItem(level string, it Item) {
+	fmt.Fprintf(p.out(), "%s%s %s\n", level, it.Mark, it.Text)
 }
 
 func (p *Plain) Diff(items []Item) {

@@ -591,10 +591,10 @@ func TestApplyRefusalWritesNothing(t *testing.T) {
 		t.Fatalf("asked %d times, want once", f.confirm.asked)
 	}
 	// The plan was still printed before the question: that is the review.
-	if !strings.Contains(f.log.String(), "envoy-gateway 1.9.3") {
+	if !strings.Contains(f.log.String(), "Envoy Gateway "+pins.EnvoyGateway+" (the front door)") {
 		t.Fatalf("the plan did not name the pinned Envoy Gateway: %q", f.log.String())
 	}
-	if !strings.Contains(f.log.String(), "? metallb 0.16.1 (Helm, metallb-system), unless the Gateway gets an address without it") {
+	if !strings.Contains(f.log.String(), "? MetalLB "+pins.MetalLB+" (the gateway's address), unless the Gateway gets an address without it") {
 		t.Fatalf("the plan did not say MetalLB is conditional: %q", f.log.String())
 	}
 	if !strings.Contains(f.log.String(), "? Gateway s5n-gateway/s5n getting an address") {
@@ -993,10 +993,10 @@ func TestApplyVerifiesBoxMetalLBWithoutAsking(t *testing.T) {
 			t.Fatalf("Helm was called for MetalLB already at its pinned version: %+v", f.rel.installed)
 		}
 	}
-	if !strings.Contains(f.log.String(), "= metallb: already at "+pins.MetalLB) {
+	if !strings.Contains(f.log.String(), "= MetalLB "+pins.MetalLB+" (the gateway's address): installed, verifying") {
 		t.Fatalf("the plan did not verify MetalLB: %q", f.log.String())
 	}
-	if strings.Contains(f.log.String(), "? metallb") {
+	if strings.Contains(f.log.String(), "? MetalLB") {
 		t.Fatalf("a release already deployed was printed as a question: %q", f.log.String())
 	}
 	if strings.Contains(f.log.String(), "getting an address") {
@@ -1057,7 +1057,7 @@ func TestApplyUpgradesAnotherVersion(t *testing.T) {
 	if strings.Join(upgraded, ",") != EnvoyGatewayRelease+","+MetalLBRelease {
 		t.Fatalf("upgrades = %v, want Envoy Gateway and MetalLB", upgraded)
 	}
-	if !strings.Contains(f.log.String(), "~ metallb 0.16.1") {
+	if !strings.Contains(f.log.String(), "~ MetalLB "+pins.MetalLB) {
 		t.Fatalf("the plan did not mark the MetalLB upgrade: %q", f.log.String())
 	}
 }

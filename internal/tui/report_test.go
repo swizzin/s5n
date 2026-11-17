@@ -162,9 +162,22 @@ func TestReporterNeverExceedsWidth(t *testing.T) {
 	r.Fact("kubeconfig", "/home/example/.kube/config")
 	r.List("platform", []string{"gateway-api: auto -> install (no Gateway API CRDs)"})
 	r.Plan("platform plan", []say.Item{
-		{Mark: say.Install, Text: "envoy-gateway 1.9.3 (Helm, envoy-gateway-system)"},
-		{Mark: say.Question, Text: "IPAddressPool s5n-pool (the node's InternalIP as a /32) and L2Advertisement s5n-l2, unless the Gateway gets an address without it"},
-		{Mark: say.Warning, Text: "cert-manager: box does not install it yet; install cert-manager yourself, or set platform.cert-manager.mode=external, and run bootstrap again"},
+		{
+			Mark: say.Install,
+			Text: "Envoy Gateway 1.9.3, the front door every app is reached through",
+			Children: []say.Item{
+				{Mark: say.Install, Text: "the s5n gateway, answering HTTP on 80"},
+				{Mark: say.Question, Text: "Gateway s5n-gateway/s5n getting an address"},
+			},
+		},
+		{
+			Mark: say.Question,
+			Text: "MetalLB 0.16.1, which gives the gateway this node's address, unless the Gateway gets an address without it",
+			Children: []say.Item{
+				{Mark: say.Question, Text: "an address pool holding only this node's IP, announced on the local network"},
+			},
+		},
+		{Mark: say.Warning, Text: "Plex is not installed by this version of box; configure it by hand and run bootstrap again"},
 	})
 	h := r.Start(say.Op{Label: "waiting for the Gateway to report an address", Budget: 15 * time.Second})
 	time.Sleep(120 * time.Millisecond)
@@ -201,6 +214,55 @@ func TestReporterLooksLikeBox(t *testing.T) {
 	for _, want := range []string{"b o x", "s5n · cluster", "✓ platform ready", "✓ install the platform layer?", "seedbox ready", "box.example.com"} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("output is missing %q:\n%s", want, got)
+		}
+	}
+}
+
+// A plan's sub-steps are drawn under the item they configure, two columns past
+// its text, with their own marks and their own wrapping: a child that runs past
+// the terminal keeps starting at its indent, never at column 0.
+func TestReporterPlanIndentsChildren(t *testing.T) {
+	var buf bytes.Buffer
+	r := NewReporter(ReporterOptions{Out: &buf, Width: 80, NoColor: true, Yes: true})
+	r.Plan("platform plan", []say.Item{
+		{
+			Mark: say.Install,
+			Text: "Envoy Gateway 1.9.3, the front door every app is reached through",
+			Children: []say.Item{
+				{Mark: say.Install, Text: "the s5n gateway, answering HTTP on 80"},
+				{Mark: say.Question, Text: "an address pool holding only this node's IP, announced on the local network"},
+			},
+		},
+	})
+	r.Close()
+
+	lines := strip(buf.String())
+	if got := indexOf(lines, "  + Envoy Gateway 1.9.3, the front door every app is reached through"); got < 0 {
+		t.Fatalf("the item is not at box's two columns:\n%s", strings.Join(lines, "\n"))
+	}
+	parent := indexOf(lines, "  + Envoy Gateway 1.9.3, the front door every app is reached through")
+	if indexOf(lines, "      + the s5n gateway, answering HTTP on 80") < parent {
+		t.Fatalf("the first child is not under its item:\n%s", strings.Join(lines, "\n"))
+	}
+	// The long child wraps, and its continuation keeps the child's indent.
+	var wrapped []string
+	for _, line := range lines[parent+1:] {
+		if strings.HasPrefix(line, "      ") {
+			wrapped = append(wrapped, line)
+		}
+	}
+	if len(wrapped) < 3 {
+		t.Fatalf("the two children and their wrapped line are not all indented under the item:\n%s", strings.Join(lines, "\n"))
+	}
+	if !strings.HasPrefix(wrapped[0], "      + ") || !strings.HasPrefix(wrapped[1], "      ? ") {
+		t.Fatalf("a child lost its mark or its indent: %q", wrapped)
+	}
+	if !strings.HasPrefix(wrapped[2], "        ") || strings.TrimSpace(wrapped[2]) != "network" {
+		t.Fatalf("the wrapped child line reads %q:\n%s", wrapped[2], strings.Join(lines, "\n"))
+	}
+	for _, line := range lines {
+		if w := lipgloss.Width(line); w > 80 {
+			t.Fatalf("line is %d columns wide: %q", w, line)
 		}
 	}
 }

@@ -98,3 +98,33 @@ type failingReader struct{}
 func (failingReader) Read([]byte) (int, error) {
 	return 0, errors.New("read from a stdin nobody typed into")
 }
+
+// A plan item's children are printed under it, two columns past where its own
+// text starts, with their own marks -- and with spaces only: the transcript is
+// what a screen reader and a logged run read.
+func TestPlainPlanIndentsChildren(t *testing.T) {
+	var buf strings.Builder
+	p := &Plain{W: &buf}
+	p.Plan("platform plan", []Item{
+		{
+			Mark: Install,
+			Text: "cert-manager v1.21.3, which issues the certificates",
+			Children: []Item{
+				{Mark: Install, Text: "a Let's Encrypt issuer, and a self-signed one"},
+			},
+		},
+		{Mark: Warning, Text: "Plex is not installed by this version of box"},
+	})
+	want := "platform plan:\n" +
+		"  + cert-manager v1.21.3, which issues the certificates\n" +
+		"      + a Let's Encrypt issuer, and a self-signed one\n" +
+		"  ! Plex is not installed by this version of box\n"
+	if got := buf.String(); got != want {
+		t.Fatalf("plan:\n%s\nwant:\n%s", got, want)
+	}
+	for _, r := range buf.String() {
+		if r != '\n' && (r == '│' || r == '├' || r == '└' || r == '─') {
+			t.Fatalf("the plain plan drew a box character: %q", buf.String())
+		}
+	}
+}

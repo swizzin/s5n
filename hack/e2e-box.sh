@@ -1453,27 +1453,27 @@ fresh() {
     cat "$WORK/bootstrap1.txt"; fail=1
   fi
   grep -q "^platform plan:" "$WORK/bootstrap1.txt" || { echo "bootstrap printed no platform plan"; fail=1; }
-  grep -qF "+ envoy-gateway ${ENVOY_GATEWAY_VERSION} (Helm, envoy-gateway-system)" "$WORK/bootstrap1.txt" ||
+  grep -qF "+ Envoy Gateway ${ENVOY_GATEWAY_VERSION} (the front door)" "$WORK/bootstrap1.txt" ||
     { echo "the plan did not install Envoy Gateway at its pinned version"; fail=1; }
-  grep -qF "+ GatewayClass eg and Gateway s5n-gateway/s5n" "$WORK/bootstrap1.txt" ||
+  grep -qF "      + the s5n Gateway, HTTP on :80" "$WORK/bootstrap1.txt" ||
     { echo "the plan did not apply the Gateway before the address layer"; fail=1; }
   grep -qF "? Gateway s5n-gateway/s5n getting an address" "$WORK/bootstrap1.txt" ||
     { echo "the plan did not print the Gateway's address as the question"; fail=1; }
-  grep -qF "? metallb ${METALLB_CHART_VERSION} (Helm, metallb-system), unless the Gateway gets an address without it" "$WORK/bootstrap1.txt" ||
+  grep -qF "? MetalLB ${METALLB_CHART_VERSION} (the gateway's address), unless the Gateway gets an address without it" "$WORK/bootstrap1.txt" ||
     { echo "the plan did not print MetalLB as conditional"; fail=1; }
-  grep -qF "? IPAddressPool s5n-pool" "$WORK/bootstrap1.txt" ||
+  grep -qF "      ? IPAddressPool: this node's IP as a /32, over L2" "$WORK/bootstrap1.txt" ||
     { echo "the plan did not print the MetalLB pool as conditional"; fail=1; }
   grep -qF "the Gateway has no address (AddressNotAssigned) after waiting up to 15s; installing MetalLB" "$WORK/bootstrap1.txt" ||
     { echo "the Gateway's own status did not decide the install"; fail=1; }
   grep -qF "the Gateway answers on " "$WORK/bootstrap1.txt" ||
     { echo "box never checked that the Gateway's address answers from the host"; fail=1; }
   # The first run installs, it does not verify: the cluster had none of it.
-  if grep -q "^  = envoy-gateway" "$WORK/bootstrap1.txt"; then
+  if grep -q "^  = Envoy Gateway" "$WORK/bootstrap1.txt"; then
     echo "bootstrap thought Envoy Gateway was already installed on a fresh cluster"; fail=1
   fi
   # cert-manager is part of the platform layer now: the plan names it at its
   # pin, and the install waits for its controller, webhook and cainjector.
-  grep -qF "+ cert-manager ${CERT_MANAGER_VERSION} (Helm, cert-manager)" "$WORK/bootstrap1.txt" ||
+  grep -qF "+ cert-manager ${CERT_MANAGER_VERSION} (certificates)" "$WORK/bootstrap1.txt" ||
     { echo "the plan did not install cert-manager at its pinned version"; fail=1; }
   $K -n cert-manager rollout status deploy/cert-manager --timeout=180s >/dev/null ||
     { echo "cert-manager's controller never rolled out"; fail=1; }
@@ -1492,7 +1492,7 @@ fresh() {
   # Root's two issuers are applied after the Gateway they solve through. The
   # production one keeps Let's Encrypt's directory: the override is the e2e's
   # own Pebble run, not this scenario.
-  grep -qF "+ ClusterIssuers s5n-letsencrypt and s5n-selfsigned" "$WORK/bootstrap1.txt" ||
+  grep -qF "      + ClusterIssuers: Let's Encrypt, plus self-signed" "$WORK/bootstrap1.txt" ||
     { echo "the plan did not apply root's ClusterIssuers"; fail=1; }
   for issuer in s5n-letsencrypt s5n-selfsigned; do
     $K get clusterissuer "$issuer" >/dev/null 2>&1 ||
@@ -2602,7 +2602,7 @@ EOF
     grep -vxE '301|000' "$port80_window" | sort | uniq -c | head -5 || true
     fail=1
   fi
-  grep -qF "= metallb: already at ${METALLB_CHART_VERSION}" "$WORK/bootstrap2.txt" ||
+  grep -qF "= MetalLB ${METALLB_CHART_VERSION} (the gateway's address): installed, verifying" "$WORK/bootstrap2.txt" ||
     { echo "the second run did not verify MetalLB"; fail=1; }
   # box's own MetalLB is the answer the question would look for, so the second
   # run does not ask it and does not wait for a Gateway it did not write.
@@ -2620,7 +2620,7 @@ EOF
   if grep -qE '^\s+[+~] cert-manager ' "$WORK/bootstrap2.txt"; then
     echo "the second run took the cert-manager release back over"; fail=1
   fi
-  if grep -qE "^\s+[+?] (envoy-gateway|metallb) " "$WORK/bootstrap2.txt"; then
+  if grep -qE "^\s+[+?] (Envoy Gateway|MetalLB) " "$WORK/bootstrap2.txt"; then
     echo "the second run planned an install on an installed platform"; fail=1
   fi
   grep -q "already says this" "$WORK/bootstrap2.txt" || { echo "the second init did not say the grant was already right"; fail=1; }
@@ -3594,7 +3594,7 @@ EOF
   else
     cat "$WORK/bootstrap1.txt"; fail=1
   fi
-  grep -qF "? metallb ${METALLB_CHART_VERSION} (Helm, metallb-system), unless the Gateway gets an address without it" "$WORK/bootstrap1.txt" ||
+  grep -qF "? MetalLB ${METALLB_CHART_VERSION} (the gateway's address), unless the Gateway gets an address without it" "$WORK/bootstrap1.txt" ||
     { echo "the plan did not print MetalLB as conditional"; fail=1; }
   # The plan prints the question on every run -- that is the point of it -- so
   # what must not happen is the answer: no install, and no verification of a

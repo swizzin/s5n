@@ -161,8 +161,14 @@ func (r Release) String() string {
 type Step struct {
 	Component bootstrap.PlatformComponent
 	Kind      StepKind
-	What      string
-	Release   Release
+	// What names the step for the progress and done lines, where exact object
+	// names belong ("applied IPAddressPool s5n-pool ...").
+	What string
+	// Plan is what the printed plan calls the step when What names objects:
+	// the plan says what box does, and the names stay in the lines a person
+	// reads while it happens. Empty means What.
+	Plan    string
+	Release Release
 	// Documents is the objects of a StepManifests step, already parsed and
 	// (for the Gateway) pointed at the chosen GatewayClass. Parsing at plan
 	// time keeps the apply path free of YAML.
@@ -829,60 +835,6 @@ func (d *Decision) awaitRoot(ctx context.Context, cl Cluster) error {
 	return nil
 }
 
-func (d *Decision) printPlan(r say.Reporter, plan Plan) {
-	if len(plan.Steps) == 0 && len(plan.NotHandled) == 0 {
-		return
-	}
-	var items []say.Item
-	for _, s := range plan.Steps {
-		switch s.Kind {
-		case StepRelease:
-			if s.Foreign {
-				// Only a conditional foreign release reaches the plan: the
-				// unconditional one is refused in resolve.
-				items = append(items, say.Item{Mark: say.Question, Text: fmt.Sprintf("%s, %s (a release box did not install already exists; box will not upgrade it)", s.Release, s.Unless)})
-				continue
-			}
-			if AtPin(s.InstalledVersion, s.Release.Version) {
-				items = append(items, say.Item{Mark: say.Verify, Text: fmt.Sprintf("%s: already at %s; verifying", s.Release.Name, s.Release.Version)})
-				continue
-			}
-			// A conditional release is never an upgrade: resolve() drops the
-			// condition as soon as the release is there, so `?` never has to
-			// carry an install-or-upgrade mark.
-			if s.Unless != "" {
-				items = append(items, say.Item{Mark: say.Question, Text: fmt.Sprintf("%s, %s", s.Release, s.Unless)})
-				continue
-			}
-			mark := say.Install
-			text := s.Release.String()
-			if s.InstalledVersion != "" {
-				mark = say.Change
-				// The upgrade is a write, so the plan says what it is
-				// replacing -- including a deployed version box cannot read.
-				if why := notAtPin(s.InstalledVersion, s.Release.Version); why != "" {
-					text += ", " + why
-				}
-			}
-			items = append(items, say.Item{Mark: mark, Text: text})
-		case StepGatewayAddress:
-			// A question the plan cannot answer yet: box finds out after the
-			// Gateway is applied, and the `?` steps below depend on the answer.
-			items = append(items, say.Item{Mark: say.Question, Text: s.What})
-		default:
-			if s.Unless != "" {
-				items = append(items, say.Item{Mark: say.Question, Text: fmt.Sprintf("%s, %s", s.What, s.Unless)})
-				continue
-			}
-			items = append(items, say.Item{Mark: say.Install, Text: s.What})
-		}
-	}
-	for _, line := range plan.NotHandled {
-		items = append(items, say.Item{Mark: say.Warning, Text: line})
-	}
-	r.Plan("platform plan", items)
-}
-
 // BuildPlan turns the decision's component results into the ordered list of
 // writes. It is pure: no cluster, no clock. Only `install` produces a release;
 // `use` and `verify` leave an implementation alone, and `stop` refuses the
@@ -987,6 +939,7 @@ func BuildPlan(pins release.Versions, components []bootstrap.ComponentResult, ga
 		Component: bootstrap.ComponentGateway,
 		Kind:      StepManifests,
 		What:      gatewayStepName(gatewayClass, installEnvoy),
+		Plan:      "the s5n Gateway",
 		Documents: objects,
 	})
 
@@ -1003,6 +956,7 @@ func BuildPlan(pins release.Versions, components []bootstrap.ComponentResult, ga
 		Component: bootstrap.ComponentCertManager,
 		Kind:      StepIssuers,
 		What:      fmt.Sprintf("ClusterIssuers %s and %s", LetsEncryptIssuer, SelfSignedIssuer),
+		Plan:      "ClusterIssuers: Let's Encrypt, plus self-signed",
 		Documents: issuers,
 	})
 
@@ -1037,6 +991,7 @@ func BuildPlan(pins release.Versions, components []bootstrap.ComponentResult, ga
 		Component: bootstrap.ComponentLoadBalancer,
 		Kind:      StepReachable,
 		What:      "the Gateway answering HTTP on 80",
+		Plan:      "HTTP on :80",
 	})
 
 	// The admission policy is the platform layer's tenancy contract: root
@@ -1051,6 +1006,7 @@ func BuildPlan(pins release.Versions, components []bootstrap.ComponentResult, ga
 		Component: bootstrap.ComponentGatewayAPI,
 		Kind:      StepManifests,
 		What:      "ValidatingAdmissionPolicies in s5n-system (the grant, enforced by the cluster)",
+		Plan:      "ValidatingAdmissionPolicies enforcing the grant",
 		Documents: policy,
 	})
 
@@ -1092,6 +1048,7 @@ func metalLBSteps(pins release.Versions, unless Condition) []Step {
 			Kind:      StepPool,
 			Unless:    unless,
 			What:      fmt.Sprintf("IPAddressPool %s (the node's InternalIP as a /32) and L2Advertisement %s", MetalLBPoolName, MetalLBL2Name),
+			Plan:      "IPAddressPool: this node's IP as a /32, over L2",
 		},
 	}
 }
