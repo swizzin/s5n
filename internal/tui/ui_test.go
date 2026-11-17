@@ -502,3 +502,17 @@ func TestMultiSelectRecordsNothingIsAnswered(t *testing.T) {
 		t.Fatalf("the transcript does not record the empty answer:\n%s", text)
 	}
 }
+
+// TestInputRecordsTheFlowsNote: two answers can both look right on their own and
+// mean different things -- the login page's account and the account that owns
+// the files -- so the flow hands the record a note and the transcript keeps it:
+// "login name  liara  (web login)".
+func TestInputRecordsTheFlowsNote(t *testing.T) {
+	u, out := line("liara\n")
+	if _, err := u.Input(setup.Input{Key: "login", Prompt: "login name", Record: "web login"}); err != nil {
+		t.Fatal(err)
+	}
+	if text := stripANSI(out.String()); !strings.Contains(text, "login name  liara  (web login)") {
+		t.Fatalf("the record does not carry the note:\n%s", text)
+	}
+}

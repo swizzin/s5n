@@ -27,9 +27,16 @@ type fakeHost struct {
 	mounts  []Mount
 	free    int64
 
+	// links are paths that are a symlink of their own: Lstat reports them and
+	// never looks at what they point to.
+	links map[string]bool
+
 	mkdirs []string
 	chowns []string
 	reads  []string
+	// readMax is the limit each read was given, in the same order as reads: a
+	// walk shows up here as a read that could have returned everything.
+	readMax []int
 }
 
 func newFakeHost() *fakeHost {
@@ -38,6 +45,7 @@ func newFakeHost() *fakeHost {
 		files:   map[string]int64{},
 		owners:  map[string]owner{},
 		listing: map[string][]DirEntry{},
+		links:   map[string]bool{},
 		mounts:  []Mount{{Major: 8, Minor: 1, Point: "/", FSType: "ext4"}},
 		free:    1600 * 1024 * 1024 * 1024,
 	}
@@ -45,8 +53,10 @@ func newFakeHost() *fakeHost {
 
 func (h *fakeHost) Stat(path string) (FileInfo, error) {
 	if h.dirs[path] {
-		o := h.owners[path]
-		if o == (owner{}) {
+		// An unrecorded owner is an ordinary account. A recorded one is used as
+		// it is, 0:0 included: a root-owned directory has to be expressible.
+		o, ok := h.owners[path]
+		if !ok {
 			o = owner{1000, 1000}
 		}
 		return FileInfo{IsDir: true, Mode: 0o755, UID: o.uid, GID: o.gid}, nil
@@ -55,6 +65,15 @@ func (h *fakeHost) Stat(path string) (FileInfo, error) {
 		return FileInfo{Mode: 0o644}, nil
 	}
 	return FileInfo{}, fs.ErrNotExist
+}
+
+// Lstat is Stat with the link check Stat does not make: a link is reported as
+// itself, with no directory and no contents.
+func (h *fakeHost) Lstat(path string) (FileInfo, error) {
+	if h.links[path] {
+		return FileInfo{Symlink: true, Mode: 0o777}, nil
+	}
+	return h.Stat(path)
 }
 
 func (h *fakeHost) StatFS(string) (FSInfo, error) { return FSInfo{Free: h.free}, nil }
@@ -66,6 +85,7 @@ func (h *fakeHost) ReadDir(path string, max int) ([]DirEntry, bool, error) {
 		return nil, false, fs.ErrNotExist
 	}
 	h.reads = append(h.reads, path)
+	h.readMax = append(h.readMax, max)
 	entries := h.listing[path]
 	more := false
 	if len(entries) > max {
@@ -625,9 +645,16 @@ func TestExistingPathSummaryIsCheapAndBounded(t *testing.T) {
 			t.Fatalf("the report is missing %q:\n%s", want, note)
 		}
 	}
-	// One read per path, and none of them a walk.
-	if len(h.host.reads) != 2 || h.host.reads[0] != "/srv/s5n/data" {
-		t.Fatalf("ReadDir calls = %v, want the two paths once each", h.host.reads)
+	// No read is a walk, and the data path's extra one is the owner probe: the
+	// account the files belong to is decided before the report is drawn, and
+	// "does it hold anything" is one entry, not the tree.
+	if got := strings.Join(h.host.reads, " "); got != "/srv/s5n/data /srv/s5n/data /srv/s5n/config" {
+		t.Fatalf("ReadDir calls = %v, want the owner probe then the two paths", h.host.reads)
+	}
+	for i, max := range h.host.readMax {
+		if max > summaryEntries {
+			t.Fatalf("read %d of %s asked for %d entries: init does not walk the tree", i, h.host.reads[i], max)
+		}
 	}
 
 	// A directory with more names than the cap reports the cap, not a walk.

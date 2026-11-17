@@ -45,6 +45,11 @@ type Decision struct {
 	// reaches it and a login that does not come up stops the run before the
 	// release exists.
 	Login LoginFunc
+	// UserLookup names the OS account behind a uid, when the host has one.
+	// init never creates an account; this only reads the host's own database,
+	// and it is what makes the login's default the account that owns the box's
+	// files rather than whoever ran sudo.
+	UserLookup UserLookupFunc
 	// HasLogin answers whether the users database already holds this login.
 	// It is how init tells a first run (an empty password means box makes one)
 	// from a re-run (an empty password keeps the one that is there).
@@ -214,6 +219,10 @@ type Result struct {
 // options are the four values init decided.
 type LoginFunc func(ctx context.Context, l Login) error
 
+// UserLookupFunc names one OS account by its uid. The second return says the
+// host has an account for it: a uid with no account is not a login name.
+type UserLookupFunc func(uid int) (string, bool)
+
 // HasLoginFunc answers whether the users database already has a row. The file
 // lives on the login's claim, so the login package reads it; init only needs
 // the yes or no.
@@ -294,11 +303,6 @@ func (d *Decision) Run(ctx context.Context, opts Options) (Result, error) {
 	if err != nil {
 		return res, err
 	}
-	puid, pgid, err := d.ids(opts, grantNow, res.ReRun)
-	if err != nil {
-		return res, err
-	}
-
 	// The grant's questions, in the order docs/box.md lists them.
 	//
 	// The flow has four steps of its own, and a fifth when an app has
@@ -364,6 +368,18 @@ func (d *Decision) Run(ctx context.Context, opts Options) (Result, error) {
 	}
 	if err := checkPathPair(dataPath, configPath); err != nil {
 		return res, err
+	}
+
+	// Who the files belong to is settled here, after the data path is known and
+	// before anything is reported about it: a data path that already holds
+	// files names its own owner, and the report below says which ids init is
+	// working with.
+	puid, pgid, err := d.owners(opts, grantNow, res.ReRun, dataPath)
+	if err != nil {
+		return res, d.stop(err)
+	}
+	if !opts.Unattended {
+		d.report().Fact("files", filesLine(d.UserLookup, puid, pgid))
 	}
 
 	// What is at those paths, and whether a missing one may be created. The
@@ -438,7 +454,7 @@ func (d *Decision) Run(ctx context.Context, opts Options) (Result, error) {
 	// one answer that is not the seedbox's shape but the identity on it, and
 	// every path in front of the Gateway is admitted only to this user.
 	d.step(4, "who logs in to this box?")
-	loginName, err := d.askLogin(opts, base, grantNow)
+	loginName, err := d.askLogin(opts, base, grantNow, puid)
 	if err != nil {
 		return res, d.stop(err)
 	}
@@ -695,29 +711,147 @@ func (d *Decision) namespace(opts Options, grantNow map[string]any, reRun bool) 
 	return ns, nil
 }
 
-// ids resolves puid and pgid: the flag when it was given, the grant's value on a
-// re-run, and otherwise what cmd/box derived from the invoking user.
-func (d *Decision) ids(opts Options, grantNow map[string]any, reRun bool) (int, int, error) {
-	puid, pgid := opts.PUID, opts.PGID
+// owners resolves puid and pgid, in the order docs/box.md sets out: the flag
+// when it was given, the grant's value on a re-run, the owner of a data path
+// that already holds files, and only then what cmd/box derived from the invoking
+// user (sudo's ids, else the caller's).
+//
+// The data path comes before sudo's ids because the files are the answer: an
+// install that changed the owner of an existing library would leave the apps
+// unable to write it. It is never read through a symlink.
+func (d *Decision) owners(opts Options, grantNow map[string]any, reRun bool, dataPath string) (int, int, error) {
+	puid, pgid := 0, 0
+	pDone, gDone := false, false
+	if opts.PUIDSet {
+		puid, pDone = opts.PUID, true
+	}
+	if opts.PGIDSet {
+		pgid, gDone = opts.PGID, true
+	}
+	// An installed box keeps its owner: a stray file does not re-chown a release.
 	if reRun {
-		if !opts.PUIDSet {
+		if !pDone {
 			if n, ok := intAt(grantNow, "global.puid"); ok {
-				puid = n
+				puid, pDone = n, true
 			}
 		}
-		if !opts.PGIDSet {
+		if !gDone {
 			if n, ok := intAt(grantNow, "global.pgid"); ok {
-				pgid = n
+				pgid, gDone = n, true
 			}
 		}
 	}
-	if puid <= 0 {
-		return 0, 0, errors.New("--puid is needed: the uid every file on the data path is owned by")
+	if !pDone || !gDone {
+		uid, gid, mine, err := d.dataOwner(dataPath)
+		if err != nil {
+			return 0, 0, err
+		}
+		if mine {
+			if !pDone {
+				puid, pDone = uid, true
+			}
+			if !gDone {
+				pgid, gDone = gid, true
+			}
+		}
 	}
-	if pgid <= 0 {
-		return 0, 0, errors.New("--pgid is needed: the gid every file on the data path is owned by")
+	if !pDone {
+		puid = opts.PUID
+	}
+	if !gDone {
+		pgid = opts.PGID
+	}
+	// Root is never the answer: the apps run unprivileged, and a root-owned data
+	// path is one they could not write. Unattended names the flags; a terminal
+	// asks, because the operator knows whose files those are.
+	if puid <= 0 || pgid <= 0 {
+		if opts.Unattended {
+			return 0, 0, fmt.Errorf("--puid and --pgid are needed: %s is owned by root (0:0), and the apps do not run as root", dataPath)
+		}
+		d.step(2, "who owns the files in "+dataPath+"?")
+		var err error
+		if puid <= 0 {
+			if puid, err = d.askID("global.puid", "file owner uid", "the uid of the account that owns the data path's files"); err != nil {
+				return 0, 0, err
+			}
+		}
+		if pgid <= 0 {
+			if pgid, err = d.askID("global.pgid", "file owner gid", "the gid of that account's group"); err != nil {
+				return 0, 0, err
+			}
+		}
 	}
 	return puid, pgid, nil
+}
+
+// dataOwner is the account that owns the data path, when the path already holds
+// something. A missing path, an empty one, a file and a symlink are all "no
+// data": the first two because nobody owns an empty directory yet, the last
+// because box never reads through a link, and the owner on the other side of one
+// is not the box's answer.
+func (d *Decision) dataOwner(path string) (int, int, bool, error) {
+	info, err := d.Host.Lstat(path)
+	switch {
+	case errors.Is(err, fs.ErrNotExist):
+		return 0, 0, false, nil
+	case err != nil:
+		return 0, 0, false, fmt.Errorf("read %s: %w", path, err)
+	}
+	if info.Symlink {
+		d.report().Warn(fmt.Sprintf("%s is a symlink: box does not read through it, so the owner of what it points at is not used for the box's files", path))
+		return 0, 0, false, nil
+	}
+	if !info.IsDir {
+		return 0, 0, false, nil
+	}
+	entries, _, err := d.Host.ReadDir(path, 1)
+	if err != nil {
+		return 0, 0, false, fmt.Errorf("read %s: %w", path, err)
+	}
+	if len(entries) == 0 {
+		return 0, 0, false, nil
+	}
+	return info.UID, info.GID, true, nil
+}
+
+// askID asks for one id the operator has to name, because the host gave no
+// answer box may use.
+func (d *Decision) askID(key, prompt, help string) (int, error) {
+	answer, err := d.Prompt.Input(Input{Key: key, Prompt: prompt, Help: help, Validate: validID})
+	if err != nil {
+		return 0, err
+	}
+	n, err := strconv.Atoi(strings.TrimSpace(answer))
+	if err != nil || n <= 0 {
+		return 0, fmt.Errorf("%s %q: %w", key, answer, validID(answer))
+	}
+	return n, nil
+}
+
+// validID is one uid or gid: a number, and never 0.
+func validID(v string) error {
+	n, err := strconv.Atoi(strings.TrimSpace(v))
+	if err != nil {
+		return errors.New("a number, the account's id")
+	}
+	if n <= 0 {
+		return errors.New("0 is root, and the apps do not run as root")
+	}
+	return nil
+}
+
+// filesLine is the record line for the account the box's files belong to:
+// "core (uid 1000, gid 1000)", with the name when the host has one.
+func filesLine(lookup UserLookupFunc, puid, pgid int) string {
+	ids := fmt.Sprintf("uid %d, gid %d", puid, pgid)
+	if lookup == nil {
+		return ids
+	}
+	name, ok := lookup(puid)
+	if !ok || strings.TrimSpace(name) == "" {
+		return ids
+	}
+	return name + " (" + ids + ")"
 }
 
 // appsOn is the app list init offers preselected: the grant's on a re-run, the

@@ -258,6 +258,15 @@ func optionLabel(options []setup.Option, value string) string {
 	return value
 }
 
+// noted is an answer with the flow's note beside it, for the one question where
+// the answer alone is ambiguous: "login  liara  (web login)".
+func noted(value, note string) string {
+	if note = strings.TrimSpace(note); note == "" {
+		return value
+	}
+	return value + "  (" + note + ")"
+}
+
 // chosenList is a multi-select answer as its record line shows it. Nothing
 // chosen is said, not left blank: "apps  none" is an answer a person gave, and
 // a record line with no value is one the scrollback drops entirely.
@@ -304,7 +313,7 @@ func (u *UI) Input(f setup.Input) (string, error) {
 	}
 	if err := u.run(field, func() {
 		value = strings.TrimSpace(value)
-		u.record(label(f.Prompt, f.Key), value)
+		u.record(label(f.Prompt, f.Key), noted(value, f.Record))
 		u.chrome.remember(value)
 	}); err != nil {
 		return "", err

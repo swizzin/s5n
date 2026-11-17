@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"os/user"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -800,8 +801,8 @@ func addInitFlags(fs *flag.FlagSet) *initFlags {
 	o.apps = fs.String("apps", "", "comma separated app names from the chart's catalog")
 	o.loginName = fs.String("login", "", "the account the login page admits (default: $SUDO_USER, else the invoking user)")
 	o.password = fs.String("password-file", "", "read the login's password from this file, or from stdin with - (default: ask, or generate one)")
-	o.puid = fs.Int("puid", defaultPUID(), "uid every file on the data path is owned by (default: $SUDO_UID, else the invoking user, else 1000)")
-	o.pgid = fs.Int("pgid", defaultPGID(), "gid every file on the data path is owned by (default: $SUDO_GID, else the invoking user, else 1000)")
+	o.puid = fs.Int("puid", defaultPUID(), "uid every file on the data path is owned by (default: the owner of a data path that already holds files, else $SUDO_UID, else the invoking user, else 1000)")
+	o.pgid = fs.Int("pgid", defaultPGID(), "gid every file on the data path is owned by (default: the group of a data path that already holds files, else $SUDO_GID, else the invoking group, else 1000)")
 	o.transient = &transientAnswers{}
 	fs.Var(o.transient, "set-transient", "an answer that lives in no file, as key=value (repeatable), e.g. secrets.plexClaimToken=claim-xxxx")
 	return o
@@ -873,16 +874,21 @@ func (o *initFlags) run(ctx context.Context, kubeconfig string, yes, plain bool,
 		resolver = setup.FileResolver{Path: o.dnsFile}
 	}
 	d := &setup.Decision{
-		Host:      setup.LinuxPathHost{},
-		Prompt:    prompt,
-		Catalog:   cat,
-		Say:       out,
-		Resolver:  resolver,
-		Login:     loginStep(kubeconfig, o.pathsInNode, out, chart),
-		HasLogin:  hasLogin(o.pathsInNode),
-		GatewayIP: gatewayProxyIP(kubeconfig),
-		NodePorts: nodePorts(kubeconfig),
-		Schema:    chart.Schema,
+		Host:     setup.LinuxPathHost{},
+		Prompt:   prompt,
+		Catalog:  cat,
+		Say:      out,
+		Resolver: resolver,
+		Login:    loginStep(kubeconfig, o.pathsInNode, out, chart),
+		// The web login's default is the account that owns the box's files, so
+		// the name beside "files core (uid 1000, gid 1000)" is "core" unless the
+		// operator says otherwise. This reads the host's account database and
+		// creates nothing.
+		UserLookup: osUserName,
+		HasLogin:   hasLogin(o.pathsInNode),
+		GatewayIP:  gatewayProxyIP(kubeconfig),
+		NodePorts:  nodePorts(kubeconfig),
+		Schema:     chart.Schema,
 		Apply: func(ctx context.Context, req setup.ApplyOptions) error {
 			// The cluster decision belongs to `box bootstrap`; apply reuses it.
 			// It is resolved here, after init has written the files, so a host
@@ -1094,9 +1100,22 @@ func hasLogin(pathsInNode bool) setup.HasLoginFunc {
 	}
 }
 
-// defaultLogin is what init offers when no --login was given: the account of
-// the person who ran sudo, because that is whose box this is. A root shell has
-// no such answer and init asks (or refuses, unattended).
+// osUserName names the OS account behind a uid, by reading the host's own
+// account database. init asks for it once the file owner is settled, to offer
+// the account the files belong to as the login's default; box never creates an
+// account, and a uid with no account is not a name.
+func osUserName(uid int) (string, bool) {
+	u, err := user.LookupId(strconv.Itoa(uid))
+	if err != nil || strings.TrimSpace(u.Username) == "" {
+		return "", false
+	}
+	return u.Username, true
+}
+
+// defaultLogin is what init offers when no --login was given and the file owner
+// has no account of its own: the account of the person who ran sudo, because
+// that is whose box this is. A root shell has no such answer and init asks (or
+// refuses, unattended).
 func defaultLogin() string {
 	if user := strings.TrimSpace(os.Getenv("SUDO_USER")); user != "" && user != "root" {
 		return user

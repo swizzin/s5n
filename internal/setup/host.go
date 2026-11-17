@@ -17,12 +17,21 @@ import (
 // against a fixture instead.
 type LinuxPathHost struct{}
 
-func (LinuxPathHost) Stat(path string) (FileInfo, error) {
-	info, err := os.Stat(path)
+func (LinuxPathHost) Stat(path string) (FileInfo, error) { return statPath(path, false) }
+
+// Lstat is Stat without following a symlink.
+func (LinuxPathHost) Lstat(path string) (FileInfo, error) { return statPath(path, true) }
+
+func statPath(path string, link bool) (FileInfo, error) {
+	stat := os.Stat
+	if link {
+		stat = os.Lstat
+	}
+	info, err := stat(path)
 	if err != nil {
 		return FileInfo{}, err
 	}
-	out := FileInfo{IsDir: info.IsDir(), Mode: info.Mode().Perm()}
+	out := FileInfo{IsDir: info.IsDir(), Symlink: info.Mode()&fs.ModeSymlink != 0, Mode: info.Mode().Perm()}
 	if st, ok := info.Sys().(*syscall.Stat_t); ok {
 		out.UID = int(st.Uid)
 		out.GID = int(st.Gid)

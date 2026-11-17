@@ -20,12 +20,22 @@ import (
 // the two documents init edits.
 
 // askLogin resolves the one account. In an interactive run it is a question
-// the operator can change; unattended, the flag, then the grant, then the
-// invoking user's own account name.
-func (d *Decision) askLogin(opts Options, base, grantNow map[string]any) (string, error) {
+// the operator can change; unattended, the flag, then the grant, then the name
+// of the OS account that owns the box's files (puid), and only then the account
+// of whoever ran the command.
+//
+// The login and the file owner are different things -- one is who the browser
+// admits, the other who the files belong to -- so the default follows the files
+// and the operator can still say otherwise.
+func (d *Decision) askLogin(opts Options, base, grantNow map[string]any, puid int) (string, error) {
 	def := strings.TrimSpace(text(prefill(base, grantNow, "login")))
 	if given := strings.TrimSpace(opts.Login); given != "" {
 		def = given
+	}
+	if def == "" && d.UserLookup != nil {
+		if name, ok := d.UserLookup(puid); ok {
+			def = strings.TrimSpace(name)
+		}
 	}
 	if def == "" {
 		def = strings.TrimSpace(opts.DefaultLogin)
@@ -42,9 +52,10 @@ func (d *Decision) askLogin(opts Options, base, grantNow map[string]any) (string
 	return d.Prompt.Input(Input{
 		Key:      "login",
 		Prompt:   "login name",
-		Help:     "the account this box's login page admits; it is also its unix account name on most boxes",
+		Help:     "the account this box's login page admits; it does not have to be the account that owns the files",
 		Default:  def,
 		Validate: authelia.ValidateLogin,
+		Record:   "web login",
 	})
 }
 
