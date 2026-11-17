@@ -46,8 +46,8 @@ commands:
   cutover     take the final snapshot on the source host, then install or adopt
   apply       install or adopt from a snapshot
 
-box migrate discover [--rehearsal] [--out <file>] [--from-dir <manifests>] [--kubeconfig <file>] [--namespace <ns> ...] [--root <dir>]
-box migrate cutover [--replace-cluster] [--out <file>] [--from-dir <manifests>] [--kubeconfig <file>] [--namespace <ns> ...] [--root <dir>] [--values <file>] [--yes]
+box migrate discover [--rehearsal] [--out <file>] [--from-dir <manifests>] [--kubeconfig <file>] [--namespace <ns> ...] [--root <dir>] [--chart-repo <ref>] [--chart-version <tag>]
+box migrate cutover [--replace-cluster] [--out <file>] [--from-dir <manifests>] [--kubeconfig <file>] [--namespace <ns> ...] [--root <dir>] [--chart-repo <ref>] [--chart-version <tag>] [--values <file>] [--yes]
 box migrate apply [<snapshot>] [--values <file>] [--grant <file>] [--kubeconfig <file>] [--yes] [--plain] [--chart-repo <ref>] [--chart-version <tag>]
 
 A snapshot is one file in ` + bundle.Dir + `/ (or where --out names it). discover writes a
@@ -105,6 +105,14 @@ type discoverOptions struct {
 	Kubeconfig string
 	Namespaces []string
 	Root       string
+	// chart is the release this run installs. The read needs it for the one
+	// thing a source cannot say: which of the chart's blessed variants a
+	// source image already is. cutover points it at its apply's flags, so a
+	// cutover and the install it hands over to name one release.
+	chart *chartFlags
+	// Charts is where that release comes from. Nil means the published
+	// repository; a test hands over a fixed one.
+	Charts release.ChartSource
 	// Rehearsal makes discover's snapshot a rehearsal: the configs are copied
 	// in, and the snapshot may only be applied locked.
 	Rehearsal bool
@@ -138,6 +146,9 @@ func runMigrateDiscover(ctx context.Context, args []string) {
 	fs := flag.NewFlagSet("migrate discover", flag.ExitOnError)
 	o := discoverOptions{Box: version}
 	ns := addDiscoverFlags(fs, &o, "the snapshot file to write (default: "+bundle.Dir+"/migrate-<time>-survey.tar.gz)")
+	// The read needs the release for the blessed variants an image maps onto,
+	// so discover names the chart the same way the install it leads to does.
+	o.chart = addChartFlags(fs, chartVersionInstalls)
 	rehearsal := fs.Bool("rehearsal", false, "copy every planned app's config into the snapshot, so it can be applied as a locked rehearsal")
 	if err := fs.Parse(args); err != nil {
 		fmt.Fprintf(os.Stderr, "box: %v\n", err)
@@ -212,8 +223,18 @@ func readSource(ctx context.Context, o discoverOptions) (migrationRead, error) {
 		return read, err
 	}
 	read.src = src
+	// The blessed variants are the chart's, so the read loads the release it is
+	// writing a plan for. A chart that cannot be read stops the read: a plan
+	// that names no variant would migrate every app onto the chart's default
+	// image without saying so.
+	variants, err := o.variants(ctx)
+	if err != nil {
+		read.text = discoveryReport(nil, read.report, "", err)
+		return read, err
+	}
 	p, rep, derr := discover.Discover(ctx, src, discover.Options{
 		Namespaces: o.Namespaces,
+		Variants:   variants,
 		// The host's filesystem, read-only: every open below is a read.
 		ConfigFS: os.DirFS(root),
 	})
@@ -300,6 +321,27 @@ func discoverSource(o discoverOptions) (discover.Source, error) {
 		return nil, err
 	}
 	return discover.NewCluster(kc, o.Namespaces)
+}
+
+// variants is the chart's variants.yaml: the blessed image list a source image
+// is mapped onto a variant through. It is read from the release this run
+// installs -- parsed by internal/admission, the one parser of that file -- so a
+// plan cannot name a variant the release it is applied onto does not have.
+//
+// A chart without the file is refused rather than read as "no variants": the
+// chart owns the file, and a plan that named no variant would quietly put every
+// app on the chart's default image, which is the silent default migrate exists
+// to avoid.
+func (o discoverOptions) variants(ctx context.Context) ([]byte, error) {
+	charts := &chartRelease{flags: o.chart, source: o.Charts}
+	chart, err := charts.load(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if len(chart.Variants) == 0 {
+		return nil, fmt.Errorf("chart %s ships no variants.yaml, so no source image can be mapped onto one of its blessed variants", chart.Ref)
+	}
+	return chart.Variants, nil
 }
 
 // discoveryReport is report.txt: what the plan holds, and everything discovery

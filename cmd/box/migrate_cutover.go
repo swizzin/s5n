@@ -49,6 +49,10 @@ func runMigrateCutover(ctx context.Context, args []string) {
 	o := cutoverOptions{discoverOptions: discoverOptions{Box: version}}
 	ns := addDiscoverFlags(fs, &o.discoverOptions, "the final snapshot to write (default: "+bundle.Dir+"/migrate-<time>-final.tar.gz)")
 	o.apply = addCutoverApplyFlags(fs, &o.Kubeconfig)
+	// The read and the install name one release: --chart-repo and
+	// --chart-version are apply's flags, and the plan's image variants come
+	// from that same chart.
+	o.chart = o.apply.chart
 	replace := fs.Bool("replace-cluster", false, "stop after the final snapshot, for a host whose cluster box should replace with its own")
 	if err := fs.Parse(args); err != nil {
 		fmt.Fprintf(os.Stderr, "box: %v\n", err)

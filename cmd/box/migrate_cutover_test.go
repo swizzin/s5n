@@ -36,8 +36,9 @@ func recording() (*say.Plain, *bytes.Buffer) {
 
 // cutoverOptionsFor is one cutover of the saved source, writing its snapshots
 // where the test can find them.
-func cutoverOptionsFor(dir string) cutoverOptions {
-	o := cutoverOptions{discoverOptions: discoverOptions{Box: "0.5.0-test"}}
+func cutoverOptionsFor(t *testing.T, dir string) cutoverOptions {
+	t.Helper()
+	o := cutoverOptions{discoverOptions: readOf(t)}
 	o.FromDir = dir
 	o.Root = dir
 	return o
@@ -46,7 +47,7 @@ func cutoverOptionsFor(dir string) cutoverOptions {
 func TestCutoverRefusesWhileAnAppRunsAndWritesTheSurveyFirst(t *testing.T) {
 	manifests, root := discoverySource(t)
 	out := filepath.Join(t.TempDir(), "final.tar.gz")
-	o := cutoverOptionsFor(manifests)
+	o := cutoverOptionsFor(t, manifests)
 	o.Root = root
 	o.Out = out
 	o.Replace = true
@@ -98,7 +99,7 @@ func TestCutoverRefusesWhileAnAppRunsAndWritesTheSurveyFirst(t *testing.T) {
 func TestCutoverWritesTheFinalSnapshotWhenEveryAppStopped(t *testing.T) {
 	manifests, root := discoverySource(t)
 	out := filepath.Join(t.TempDir(), "final.tar.gz")
-	o := cutoverOptionsFor(manifests)
+	o := cutoverOptionsFor(t, manifests)
 	o.Root = root
 	o.Out = out
 	o.Replace = true
@@ -141,7 +142,7 @@ func TestCutoverWritesTheFinalSnapshotWhenEveryAppStopped(t *testing.T) {
 // stopped.
 func TestCutoverRefusesASavedReadForTheStopProof(t *testing.T) {
 	manifests, root := discoverySource(t)
-	o := cutoverOptionsFor(manifests)
+	o := cutoverOptionsFor(t, manifests)
 	o.Root = root
 	o.Out = filepath.Join(t.TempDir(), "final.tar.gz")
 	o.Replace = true

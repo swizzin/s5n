@@ -6097,6 +6097,7 @@ migrate_box() {
   log "box migrate discover --rehearsal, and apply's refusal of it"
   if ! "$WORK/box" migrate discover --rehearsal --out "$rehearsal" \
     --kubeconfig "$WORK/kubeconfig" --namespace "$MIGRATE_LEGACY_NS" --root / \
+    --chart-repo "$CHART_REPO" --chart-version "$CHART_VERSION" \
     >"$WORK/migrate-rehearsal.txt" 2>&1; then
     cat "$WORK/migrate-rehearsal.txt"; fail=1; return 0
   fi
@@ -6113,6 +6114,7 @@ migrate_box() {
   log "box migrate cutover while the source runs: refused, with a survey kept and the stop commands printed"
   if "$WORK/box" migrate cutover --replace-cluster --yes --out "$snapshot" \
     --kubeconfig "$WORK/kubeconfig" --namespace "$MIGRATE_LEGACY_NS" --root / \
+    --chart-repo "$CHART_REPO" --chart-version "$CHART_VERSION" \
     --values "$WORK/values.yaml" --grant "$WORK/grant.yaml" \
     --record "$WORK/cluster.yaml" >"$WORK/cutover-refused.txt" 2>&1; then
     echo "cutover took the final snapshot with the source still running"
@@ -6161,6 +6163,7 @@ migrate_box() {
     local out=$1; shift
     "$WORK/box" migrate cutover --replace-cluster --yes --out "$out" \
       --kubeconfig "$WORK/kubeconfig" --namespace "$MIGRATE_LEGACY_NS" --root / \
+      --chart-repo "$CHART_REPO" --chart-version "$CHART_VERSION" \
       --values "$WORK/values.yaml" --grant "$WORK/grant.yaml" \
       --record "$WORK/cluster.yaml" "$@"
   }

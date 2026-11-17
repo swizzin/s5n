@@ -21,6 +21,7 @@ import (
 	"github.com/swizzin/s5n/internal/migrate/bundle"
 	"github.com/swizzin/s5n/internal/migrate/plan"
 	"github.com/swizzin/s5n/internal/migrate/sqlitedb"
+	"github.com/swizzin/s5n/internal/release"
 )
 
 // sourceManifests is a two-workload source: qBittorrent with the data root
@@ -95,6 +96,47 @@ spec:
             path: /srv/library
 `
 
+// fixedCharts is a chart source with one release behind it: no registry, and
+// the chart's own files.
+type fixedCharts struct {
+	chart release.Chart
+	err   error
+}
+
+func (f fixedCharts) Load(context.Context, release.ChartRef) (release.Chart, error) {
+	return f.chart, f.err
+}
+
+// chartWithVariants is the release a read loads: the chart's own variants.yaml,
+// which is what maps a source image onto one of its blessed variants.
+func chartWithVariants(t *testing.T) release.Chart {
+	t.Helper()
+	raw, err := os.ReadFile(filepath.Join("..", "..", "charts", "s5n", "variants.yaml"))
+	if err != nil {
+		t.Fatalf("read the chart's variants: %v", err)
+	}
+	return release.Chart{
+		Ref:      testChartRepo + ":" + testChartVersion,
+		Name:     "s5n",
+		Version:  testChartVersion,
+		Variants: raw,
+		Values:   []byte("apps: {}\n"),
+		Schema:   []byte("{}"),
+	}
+}
+
+// readOf is what a read of the fixture source is handed: the chart flags every
+// command registers, and the release behind them.
+func readOf(t *testing.T) discoverOptions {
+	t.Helper()
+	repo, version := testChartRepo, testChartVersion
+	return discoverOptions{
+		Box:    testChartVersion,
+		chart:  &chartFlags{repo: &repo, version: &version},
+		Charts: fixedCharts{chart: chartWithVariants(t)},
+	}
+}
+
 // discoverySource builds the two directories the command reads: the saved
 // manifests and a root that holds the source's host paths as a copy.
 func discoverySource(t *testing.T) (manifests, root string) {
@@ -143,7 +185,9 @@ func discoverySource(t *testing.T) (manifests, root string) {
 func TestMigrateDiscoverWritesASurveyThatHoldsNoConfig(t *testing.T) {
 	manifests, root := discoverySource(t)
 	out := filepath.Join(t.TempDir(), "source.tar.gz")
-	text, err := migrateDiscover(context.Background(), discoverOptions{Out: out, FromDir: manifests, Root: root})
+	o := readOf(t)
+	o.Out, o.FromDir, o.Root = out, manifests, root
+	text, err := migrateDiscover(context.Background(), o)
 	if err != nil {
 		t.Fatalf("discover: %v\n%s", err, text)
 	}
@@ -205,7 +249,9 @@ func TestMigrateDiscoverWritesASurveyThatHoldsNoConfig(t *testing.T) {
 func TestMigrateDiscoverRehearsalCarriesEveryConfig(t *testing.T) {
 	manifests, root := discoverySource(t)
 	out := filepath.Join(t.TempDir(), "source.tar.gz")
-	if _, err := migrateDiscover(context.Background(), discoverOptions{Out: out, FromDir: manifests, Root: root, Rehearsal: true}); err != nil {
+	o := readOf(t)
+	o.Out, o.FromDir, o.Root, o.Rehearsal = out, manifests, root, true
+	if _, err := migrateDiscover(context.Background(), o); err != nil {
 		t.Fatalf("discover --rehearsal: %v", err)
 	}
 	opened, err := bundle.Open(out, filepath.Join(t.TempDir(), "open"))
@@ -237,7 +283,9 @@ func TestMigrateDiscoverRefusesToWriteOverASnapshot(t *testing.T) {
 	if err := os.WriteFile(out, []byte("a snapshot that is already there"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	_, err := migrateDiscover(context.Background(), discoverOptions{Out: out, FromDir: manifests, Root: root})
+	o := readOf(t)
+	o.Out, o.FromDir, o.Root = out, manifests, root
+	_, err := migrateDiscover(context.Background(), o)
 	if err == nil || !strings.Contains(err.Error(), "there already") {
 		t.Fatalf("discover over an existing file was refused with %v", err)
 	}
@@ -249,7 +297,9 @@ func TestMigrateDiscoverReportsAPartialRead(t *testing.T) {
 	// in a snapshot.
 	empty := t.TempDir()
 	out := filepath.Join(t.TempDir(), "source.tar.gz")
-	text, err := migrateDiscover(context.Background(), discoverOptions{Out: out, FromDir: empty, Root: empty})
+	o := readOf(t)
+	o.Out, o.FromDir, o.Root = out, empty, empty
+	text, err := migrateDiscover(context.Background(), o)
 	if err == nil {
 		t.Fatal("discovery of an empty directory planned something")
 	}
@@ -304,7 +354,9 @@ func TestMigrateDiscoverReadsAQuotedSavePath(t *testing.T) {
 		t.Fatal(err)
 	}
 	out := filepath.Join(t.TempDir(), "source.tar.gz")
-	if _, err := migrateDiscover(context.Background(), discoverOptions{Out: out, FromDir: manifests, Root: root}); err != nil {
+	o := readOf(t)
+	o.Out, o.FromDir, o.Root = out, manifests, root
+	if _, err := migrateDiscover(context.Background(), o); err != nil {
 		t.Fatalf("discovery refused a save path it should read: %v", err)
 	}
 }
@@ -316,4 +368,61 @@ func sourceKeys[V any](m map[string]V) []string {
 		out = append(out, k)
 	}
 	return out
+}
+
+// TestMigrateDiscoverMapsImagesOntoTheChartsVariants: a read is handed the
+// release's variants.yaml, so a source image the chart ships maps onto that
+// variant in the plan. Without it every app keeps the chart's default image and
+// nothing says so.
+func TestMigrateDiscoverMapsImagesOntoTheChartsVariants(t *testing.T) {
+	manifests, root := discoverySource(t)
+	out := filepath.Join(t.TempDir(), "source.tar.gz")
+	o := readOf(t)
+	o.Out, o.FromDir, o.Root = out, manifests, root
+	text, err := migrateDiscover(context.Background(), o)
+	if err != nil {
+		t.Fatalf("discover: %v\n%s", err, text)
+	}
+	opened, err := bundle.Open(out, filepath.Join(t.TempDir(), "open"))
+	if err != nil {
+		t.Fatalf("the snapshot does not open: %v", err)
+	}
+	p, err := plan.Parse(opened.Plan)
+	if err != nil {
+		t.Fatalf("the plan does not read back: %v", err)
+	}
+	// Both fixture images are exactly what the chart ships, so both map onto
+	// the variant they already are.
+	for _, name := range []string{"qbittorrent", "sonarr"} {
+		app := p.Apps[name]
+		if app.Image == "" {
+			t.Fatalf("the plan has no %s", name)
+		}
+		if app.Variant != "default" {
+			t.Errorf("%s's image %s mapped onto variant %q, want the one the chart ships it as", name, app.Image, app.Variant)
+		}
+	}
+	if strings.Contains(text, "no chart variants") {
+		t.Errorf("the report says the read had no variants, and it was handed the chart's:\n%s", text)
+	}
+}
+
+// TestMigrateDiscoverRefusesAChartWithNoVariants: the file is the chart's, and
+// a read that cannot map an image to a variant would plan a migration that
+// silently keeps the chart's default image for every app.
+func TestMigrateDiscoverRefusesAChartWithNoVariants(t *testing.T) {
+	manifests, root := discoverySource(t)
+	out := filepath.Join(t.TempDir(), "source.tar.gz")
+	o := readOf(t)
+	o.Out, o.FromDir, o.Root = out, manifests, root
+	chart := chartWithVariants(t)
+	chart.Variants = nil
+	o.Charts = fixedCharts{chart: chart}
+	text, err := migrateDiscover(context.Background(), o)
+	if err == nil || !strings.Contains(err.Error(), "variants.yaml") {
+		t.Fatalf("a chart with no variants was accepted: %v\n%s", err, text)
+	}
+	if _, err := os.Stat(out); !os.IsNotExist(err) {
+		t.Errorf("the refused read wrote a snapshot: %v", err)
+	}
 }
