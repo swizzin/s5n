@@ -2,50 +2,59 @@ package main
 
 // migrate.go is `box migrate`: the read half, and the dispatch.
 //
-// `discover` reads an install box did not make and writes the plan apply runs.
-// It changes nothing: the source cluster is listed, the source's host files are
-// read through a filesystem rooted where box thinks the host's / is, and every
-// manifest read is saved beside the plan so the plan can be rebuilt after the
-// source is gone (docs/box.md, "Discovery comes first and writes a plan").
+// `discover` reads an install box did not make and writes a snapshot: the plan
+// apply runs, the source's manifests, the report, and -- when it is rehearsing
+// -- each planned app's config tree. It changes nothing: the source cluster is
+// listed, the source's host files are read through a filesystem rooted where box
+// thinks the host's / is, and every manifest read is kept so the plan can be
+// rebuilt after the source is gone (docs/box.md, "migrate").
 //
-// The plan directory is a document a person reads and edits: plan.yaml in the
-// same shape `internal/migrate/plan` loads, source/ with every manifest the
-// plan was built from, and report.txt with what discovery would not migrate.
+// A snapshot is one file (internal/archive's format, internal/migrate/bundle's
+// shape) in /var/lib/s5n/migrate/, named for the time the source was read and
+// the mode it was read in. A survey holds no configs, so it can be taken at any
+// time on a running source; a rehearsal and a final snapshot carry them.
 
 import (
 	"context"
 	"errors"
 	"flag"
 	"fmt"
-	"io/fs"
 	"os"
 	"path/filepath"
 	"reflect"
 	"sort"
 	"strings"
+	"time"
 
 	"go.yaml.in/yaml/v3" // only cmd/box may import it (AGENTS.md): the plan is a YAML file and cmd/s5n stays stdlib-only
 
+	"github.com/swizzin/s5n/internal/archive"
 	"github.com/swizzin/s5n/internal/bootstrap"
+	"github.com/swizzin/s5n/internal/migrate/bundle"
 	"github.com/swizzin/s5n/internal/migrate/discover"
 	"github.com/swizzin/s5n/internal/migrate/plan"
 	"github.com/swizzin/s5n/internal/release"
+	"github.com/swizzin/s5n/internal/say"
 )
 
 // migrateUsage is what a bad invocation and `box migrate` print. It is the
-// command surface: two halves of one migration, each of which says so in the
-// files it writes or refuses to.
+// command surface: each half of one migration says so in the files it writes or
+// refuses to.
 const migrateUsage = `usage: box migrate <command> [flags]
 
 commands:
-  discover    read a source install and write the plan migrate applies; changes nothing
-  apply       adopt a source install into this seedbox from a plan
+  discover    read a source install and write a survey of it; changes nothing
+  apply       install or adopt from a snapshot
 
-box migrate discover --out <dir> [--from-dir <manifests>] [--kubeconfig <file>] [--namespace <ns> ...] [--root <dir>]
-box migrate apply <plan dir> [--source-root <dir>] [--grant <file>] [--values <file>] [--kubeconfig <file>] [--yes] [--plain] [--chart-repo <ref>] [--chart-version <tag>]
+box migrate discover [--rehearsal] [--out <file>] [--from-dir <manifests>] [--kubeconfig <file>] [--namespace <ns> ...] [--root <dir>]
+box migrate apply [<snapshot>] [--values <file>] [--grant <file>] [--kubeconfig <file>] [--yes] [--plain] [--chart-repo <ref>] [--chart-version <tag>]
+
+A snapshot is one file in ` + bundle.Dir + `/ (or where --out names it). discover writes a
+survey -- the plan, the report and the source's manifests, no configs -- and --rehearsal
+adds the configs a locked rehearsal applies.
 `
 
-// The two halves, as names: the dispatch, the usage line and the messages they
+// The commands, as names: the dispatch, the usage line and the messages they
 // print all spell them once.
 const (
 	migrateDiscoverCmd = "discover"
@@ -82,74 +91,191 @@ func (n *namespaces) Set(v string) error {
 	return nil
 }
 
-// discoverOptions is `box migrate discover`, as flags.
+// discoverOptions is what a read of a source needs: the same flags for discover
+// and cutover, because they read one source the same way.
 type discoverOptions struct {
+	// Out is the snapshot file to write; empty means bundle.Dir with the name
+	// its mode and the time give it.
 	Out        string
 	FromDir    string
 	Kubeconfig string
 	Namespaces []string
 	Root       string
+	// Rehearsal makes discover's snapshot a rehearsal: the configs are copied
+	// in, and the snapshot may only be applied locked.
+	Rehearsal bool
+	// Box is the version that wrote the snapshot, as the manifest records it.
+	Box string
+	// Now is the clock the snapshot's name and manifest come from. Empty means
+	// time.Now: a test that compares two runs' names hands it one.
+	Now func() time.Time
+}
+
+func (o discoverOptions) clock() time.Time {
+	if o.Now != nil {
+		return o.Now()
+	}
+	return time.Now()
+}
+
+// addDiscoverFlags registers what both verbs that read a source take, and
+// returns the repeatable namespace the caller copies out after parsing.
+func addDiscoverFlags(fs *flag.FlagSet, o *discoverOptions, outUsage string) *namespaces {
+	fs.StringVar(&o.Out, "out", "", outUsage)
+	fs.StringVar(&o.FromDir, "from-dir", "", "read the source's manifests from this directory instead of a cluster")
+	fs.StringVar(&o.Kubeconfig, "kubeconfig", "", "explicit kubeconfig for the source cluster, or fail with no fallback")
+	fs.StringVar(&o.Root, "root", "/", "the host root the apps' config directories are read under")
+	var ns namespaces
+	fs.Var(&ns, "namespace", "limit discovery to this source namespace (repeatable; default every namespace)")
+	return &ns
 }
 
 func runMigrateDiscover(ctx context.Context, args []string) {
 	fs := flag.NewFlagSet("migrate discover", flag.ExitOnError)
-	out := fs.String("out", "", "the plan directory to write (created; it has to be empty or absent)")
-	fromDir := fs.String("from-dir", "", "read the source's manifests from this directory instead of a cluster")
-	kubeconfig := fs.String("kubeconfig", "", "explicit kubeconfig for the source cluster, or fail with no fallback")
-	root := fs.String("root", "/", "the host root the apps' config directories are read under")
-	var ns namespaces
-	fs.Var(&ns, "namespace", "limit discovery to this source namespace (repeatable; default every namespace)")
+	o := discoverOptions{Box: version}
+	ns := addDiscoverFlags(fs, &o, "the snapshot file to write (default: "+bundle.Dir+"/migrate-<time>-survey.tar.gz)")
+	rehearsal := fs.Bool("rehearsal", false, "copy every planned app's config into the snapshot, so it can be applied as a locked rehearsal")
 	if err := fs.Parse(args); err != nil {
 		fmt.Fprintf(os.Stderr, "box: %v\n", err)
 		os.Exit(2)
 	}
+	o.Namespaces = *ns
 	if fs.NArg() != 0 {
 		fmt.Fprintf(os.Stderr, "box: migrate discover takes no arguments: %s\n", strings.Join(fs.Args(), " "))
 		os.Exit(2)
 	}
-	opts := discoverOptions{Out: *out, FromDir: *fromDir, Kubeconfig: *kubeconfig, Namespaces: ns, Root: *root}
-	report, err := migrateDiscover(ctx, opts)
-	if report != "" {
-		fmt.Print(report)
+	o.Rehearsal = *rehearsal
+	out := newOutput(terminalSet(false), true, "")
+	defer out.Close()
+	_, text, err := migrateDiscover(ctx, o, out)
+	if text != "" {
+		out.Line(text)
 	}
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "box: %v\n", err)
+		out.Error(err)
 		os.Exit(1)
 	}
 }
 
+// migrationRead is one read of a source: the plan, the bytes it will be written
+// as, what discovery could not migrate, and the text the operator sees.
+type migrationRead struct {
+	plan *plan.Plan
+	// raw is the plan's YAML, which is what a snapshot carries and what apply's
+	// plan id is a digest of.
+	raw    []byte
+	report discover.Report
+	text   string
+}
+
 // migrateDiscover is the command without the exit, so a test drives it. The
-// returned report is the text it printed (and wrote to report.txt), which an
-// error also carries: a run that stopped halfway still has something to say
-// about what it read.
-func migrateDiscover(ctx context.Context, o discoverOptions) (string, error) {
-	if strings.TrimSpace(o.Out) == "" {
-		return "", errors.New("no plan directory: pass --out <dir>")
+// returned text is what it printed (and wrote into the snapshot's report.txt),
+// which an error also carries: a run that stopped halfway still has something
+// to say about what it read.
+func migrateDiscover(ctx context.Context, o discoverOptions, out say.Reporter) (bundle.Written, string, error) {
+	mode := archive.ModeSurvey
+	if o.Rehearsal {
+		mode = archive.ModeRehearsal
 	}
-	if err := planDirReady(o.Out); err != nil {
-		return "", err
+	read, err := readSource(ctx, o)
+	if err != nil {
+		return bundle.Written{}, read.text, err
 	}
+	// The file is named before it is written, so the report inside it can name
+	// it: the operator reads one page that says where the snapshot is.
+	path := snapshotPath(o, mode)
+	read.text = discoveryReport(read.plan, read.report, path, nil)
+	wrote, err := writeSnapshot(path, mode, o, read)
+	if err != nil {
+		return bundle.Written{}, read.text, err
+	}
+	return wrote, read.text, nil
+}
+
+// readSource reads the source and builds the plan. Nothing is written: a run
+// that stops here leaves the source and the host exactly as it was.
+func readSource(ctx context.Context, o discoverOptions) (migrationRead, error) {
+	var read migrationRead
 	root := o.Root
 	if root == "" {
 		root = "/"
 	}
 	src, err := discoverSource(o)
 	if err != nil {
-		return "", err
+		return read, err
 	}
 	p, rep, derr := discover.Discover(ctx, src, discover.Options{
 		Namespaces: o.Namespaces,
 		// The host's filesystem, read-only: every open below is a read.
 		ConfigFS: os.DirFS(root),
 	})
-	text := discoveryReport(p, rep, o.Out, derr)
-	if werr := writePlanDir(o.Out, p, rep, text); werr != nil {
-		return text, errors.Join(derr, werr)
-	}
+	read.plan, read.report = p, rep
 	if derr != nil {
-		return text, derr
+		read.text = discoveryReport(p, rep, "", derr)
+		return read, derr
 	}
-	return text, nil
+	raw, err := yaml.Marshal(p)
+	if err != nil {
+		read.text = discoveryReport(p, rep, "", fmt.Errorf("write the plan: %w", err))
+		return read, err
+	}
+	// A plan box cannot read back is worse than no plan: apply trusts it with
+	// the data root and every instance's config, and a field the encoder
+	// dropped would be a rule that silently does nothing.
+	back, err := plan.Parse(raw)
+	if err != nil {
+		read.text = discoveryReport(p, rep, "", fmt.Errorf("the plan does not read back: %w", err))
+		return read, err
+	}
+	if !reflect.DeepEqual(p, back) {
+		err := errors.New("the plan does not read back as the plan discovery built; this is a bug in box")
+		read.text = discoveryReport(p, rep, "", err)
+		return read, err
+	}
+	read.raw = raw
+	read.text = discoveryReport(p, rep, "", nil)
+	return read, nil
+}
+
+// snapshotPath is where one run writes: --out when the operator named a file,
+// otherwise bundle.Dir under the name its mode and the time give it.
+func snapshotPath(o discoverOptions, mode archive.Mode) string {
+	if strings.TrimSpace(o.Out) != "" {
+		return o.Out
+	}
+	return filepath.Join(bundle.Dir, bundle.FileName(mode, o.clock()))
+}
+
+// writeSnapshot writes one snapshot of a read at path. The configs travel only
+// in a rehearsal or a final snapshot: a survey is the read alone, so it can be
+// taken on a running source without copying a library's worth of config.
+func writeSnapshot(path string, mode archive.Mode, o discoverOptions, read migrationRead) (bundle.Written, error) {
+	s := bundle.Snapshot{
+		Mode:   mode,
+		Plan:   read.raw,
+		Report: []byte(read.text),
+		Source: read.report.Raw,
+		Box:    o.Box,
+		Now:    o.Now,
+	}
+	if mode != archive.ModeSurvey {
+		root := o.Root
+		if root == "" {
+			root = "/"
+		}
+		names := make([]string, 0, len(read.plan.Apps))
+		for name := range read.plan.Apps {
+			names = append(names, name)
+		}
+		sort.Strings(names)
+		for _, name := range names {
+			s.Configs = append(s.Configs, bundle.Config{
+				Instance: name,
+				Dir:      filepath.Join(root, read.plan.Apps[name].Config),
+			})
+		}
+	}
+	return bundle.Write(path, s)
 }
 
 // discoverSource picks what discovery reads: a saved directory when the caller
@@ -168,81 +294,9 @@ func discoverSource(o discoverOptions) (discover.Source, error) {
 	return discover.NewCluster(kc, o.Namespaces)
 }
 
-// planDirReady creates the plan directory, or refuses one that holds something:
-// the directory is the record of one plan, and writing a second into it would
-// leave two plan.yaml files' worth of source manifests with one plan.
-func planDirReady(dir string) error {
-	info, err := os.Stat(dir)
-	if err != nil {
-		if !errors.Is(err, fs.ErrNotExist) {
-			return fmt.Errorf("read %s: %w", dir, err)
-		}
-		if err := os.MkdirAll(dir, 0o700); err != nil {
-			return fmt.Errorf("create %s: %w", dir, err)
-		}
-		return nil
-	}
-	if !info.IsDir() {
-		return fmt.Errorf("%s is not a directory: pass --out with the directory the plan should live in", dir)
-	}
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		return fmt.Errorf("read %s: %w", dir, err)
-	}
-	if len(entries) > 0 {
-		return fmt.Errorf("%s is not empty: a plan directory holds one plan, its source manifests and its report, so write this one somewhere new", dir)
-	}
-	return nil
-}
-
-// writePlanDir writes the plan, the manifests it was built from and the report.
-// Nothing is written when discovery found no plan: a failed run leaves the
-// report alone, so the operator can read what it did find.
-func writePlanDir(dir string, p *plan.Plan, rep discover.Report, text string) error {
-	if err := writeFileMode(filepath.Join(dir, "report.txt"), []byte(text), 0o600); err != nil {
-		return err
-	}
-	if p == nil {
-		return nil
-	}
-	keys := make([]string, 0, len(rep.Raw))
-	for key := range rep.Raw {
-		keys = append(keys, key)
-	}
-	sort.Strings(keys)
-	for _, key := range keys {
-		name := filepath.Join(dir, "source", key+".json")
-		if err := os.MkdirAll(filepath.Dir(name), 0o700); err != nil {
-			return fmt.Errorf("create %s: %w", filepath.Dir(name), err)
-		}
-		if err := writeFileMode(name, rep.Raw[key], 0o600); err != nil {
-			return err
-		}
-	}
-	raw, err := yaml.Marshal(p)
-	if err != nil {
-		return fmt.Errorf("write the plan: %w", err)
-	}
-	name := filepath.Join(dir, "plan.yaml")
-	if err := writeFileMode(name, raw, 0o600); err != nil {
-		return err
-	}
-	// A plan box cannot read back is worse than no plan: apply trusts it with
-	// the data root and every instance's config, and a field the encoder
-	// dropped would be a rule that silently does nothing.
-	back, err := plan.Load(name)
-	if err != nil {
-		return fmt.Errorf("%s does not read back: %w", name, err)
-	}
-	if !reflect.DeepEqual(p, back) {
-		return fmt.Errorf("%s does not read back as the plan discovery built; this is a bug in box", name)
-	}
-	return nil
-}
-
-// writeFileMode writes one file with the mode the plan directory promises: a
-// plan can name a host path, so it is 0600 like the seedbox's own files.
-func writeFileMode(name string, data []byte, mode fs.FileMode) error {
+// writeFileMode writes one file with the mode a snapshot's parts promise: a plan
+// can name a host path, so it is 0600 like the seedbox's own files.
+func writeFileMode(name string, data []byte, mode os.FileMode) error {
 	if err := os.WriteFile(name, data, mode); err != nil {
 		return fmt.Errorf("write %s: %w", name, err)
 	}
@@ -254,10 +308,11 @@ func writeFileMode(name string, data []byte, mode fs.FileMode) error {
 // before apply writes one byte.
 func discoveryReport(p *plan.Plan, rep discover.Report, out string, failure error) string {
 	var b strings.Builder
-	if failure != nil {
+	switch {
+	case failure != nil:
 		fmt.Fprintf(&b, "plan: not written: %v\n", failure)
-	} else {
-		fmt.Fprintf(&b, "plan: %s\n", filepath.Join(out, "plan.yaml"))
+	case out != "":
+		fmt.Fprintf(&b, "plan: %s\n", out)
 	}
 	if p != nil {
 		names := make([]string, 0, len(p.Apps))
