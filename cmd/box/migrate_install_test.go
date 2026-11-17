@@ -119,3 +119,51 @@ func TestInstallAnswersLeaveTheOwnerToHostFoundations(t *testing.T) {
 		}
 	}
 }
+
+// TestMigrationInitTellsInitTheAppsAreComing: init runs here with every app
+// off, because the migration switches on what it moved, so the flags it is
+// given say so -- otherwise a migrating install tells the operator that
+// nothing runs yet, one step before it switches everything on. Everything else
+// is init's own: the plan's answers, and the release this run already loaded.
+func TestMigrationInitTellsInitTheAppsAreComing(t *testing.T) {
+	o, inst := installFlagSet(t)
+	*inst.domain = "box.example.com"
+	*inst.login = "someone"
+	*inst.password = "/run/password"
+	*inst.configPath = "/srv/config"
+	inst.record = new(string)
+	answers, err := installAnswers(o, inst, planWithData())
+	if err != nil {
+		t.Fatalf("installAnswers: %v", err)
+	}
+	charts := &chartRelease{}
+	flags, err := migrationInit(inst, charts, answers)
+	if err != nil {
+		t.Fatalf("migrationInit: %v", err)
+	}
+	if !flags.adopting {
+		t.Error("the migrating init was not told the apps are coming, so it would say nothing runs yet")
+	}
+	if *flags.apps != "none" {
+		t.Errorf("apps = %q, want none: the migration switches on what it moved", *flags.apps)
+	}
+	if *flags.domain != "box.example.com" || *flags.configPath != "/srv/config" {
+		t.Errorf("the plan's answers did not reach init: domain %q, config %q", *flags.domain, *flags.configPath)
+	}
+	if flags.charts != charts {
+		t.Error("the migrating init would pull its own chart, and this run already loaded one")
+	}
+	// A bare init is not adopting into anything: `box init` with every app off
+	// keeps its line.
+	var bare initFlags
+	if bare.adopting {
+		t.Error("a bare init would say nothing about an empty box")
+	}
+	// An answer init's own flags cannot read is still the installer's refusal,
+	// and it names what it was trying to do.
+	if _, err := migrationInit(inst, charts, []string{"--no-such-flag"}); err == nil {
+		t.Fatal("an answer init has no flag for was accepted")
+	} else if !strings.Contains(err.Error(), "init's flags") {
+		t.Errorf("the refusal = %v, want it to say the plan does not read as init's flags", err)
+	}
+}

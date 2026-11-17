@@ -121,15 +121,30 @@ func migrateInstall(ctx context.Context, o *migrateApplyFlags, inst *installFlag
 	// init's own flow, over init's own flags: the answers the plan holds are
 	// parsed as if they had been given on the command line, so init's
 	// first-run-or-re-run logic sees them exactly as it sees an operator's.
-	ifs := flag.NewFlagSet("migrate install", flag.ContinueOnError)
-	iflg := addInitFlags(ifs)
-	iflg.recordPath = *inst.record
-	iflg.charts = charts
-	iflg.takeDev(initDevFlags{pathsInNode: inst.pathsInNode})
-	if err := ifs.Parse(answers); err != nil {
-		return fmt.Errorf("the plan's answers do not read as init's flags: %w", err)
+	iflg, err := migrationInit(inst, charts, answers)
+	if err != nil {
+		return err
 	}
 	return iflg.run(ctx, res.Kubeconfig, *o.yes, *o.plain, out)
+}
+
+// migrationInit is init's flags as a migration runs them: the plan's answers as
+// if they had been typed on the command line, the release this run has already
+// loaded (so bootstrap and init cannot ask the registry for two versions), and
+// the one thing that is this flow's and no one else's -- Adopting. The apps go
+// in off and the migration switches on what it moved, so an empty app list here
+// is a box one step from running, and init says nothing about it.
+func migrationInit(inst *installFlags, charts *chartRelease, answers []string) (*initFlags, error) {
+	fs := flag.NewFlagSet("migrate install", flag.ContinueOnError)
+	iflg := addInitFlags(fs)
+	iflg.recordPath = *inst.record
+	iflg.charts = charts
+	iflg.adopting = true
+	iflg.takeDev(initDevFlags{pathsInNode: inst.pathsInNode})
+	if err := fs.Parse(answers); err != nil {
+		return nil, fmt.Errorf("the plan's answers do not read as init's flags: %w", err)
+	}
+	return iflg, nil
 }
 
 // installAnswers is the plan's answers as init's command line, and the refusal

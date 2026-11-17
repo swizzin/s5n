@@ -140,6 +140,13 @@ type Options struct {
 	// Unattended asks nothing: flags and file keys only, and a missing required
 	// answer is an error naming the flag or key.
 	Unattended bool
+	// Adopting says another flow is running init as one step of its own, and
+	// that the empty app list is deliberate: `box migrate apply` installs a box
+	// with every app off and switches on what it moved once the configs are in
+	// place. The line init prints for an empty box ("nothing runs yet ... add
+	// one with box install") would be wrong there, so this suppresses it and
+	// changes nothing else.
+	Adopting bool
 	// PathsInNode says the storage paths live inside a test node (kind), not on
 	// this host, so init neither verifies nor creates them. `box apply` has the
 	// same flag for the same reason.
@@ -401,9 +408,10 @@ func (d *Decision) Run(ctx context.Context, opts Options) (Result, error) {
 	if err != nil {
 		return res, d.stop(err)
 	}
-	if len(apps) == 0 {
+	if len(apps) == 0 && !opts.Adopting {
 		// Said once, and not asked again: an empty box is a state, and the way
-		// out of it is a command rather than another form.
+		// out of it is a command rather than another form. A migration says
+		// nothing here: it is about to switch the apps it moved on.
 		d.report().Muted("nothing runs yet: this box has no apps. add one with `box install <app>`, or run `box migrate` for an install that already exists")
 	}
 	// The peer port: a port on the node, so root settles it once and the grant

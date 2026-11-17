@@ -181,3 +181,28 @@ func TestLinePromptAcceptsAnEmptyAnswerWhenNothingIsSelected(t *testing.T) {
 		t.Fatalf("MultiSelect = %v, want no apps", got)
 	}
 }
+
+// TestAMigratingInitSaysNothingAboutAnEmptyBox: `box migrate apply` runs init as
+// one step of its own, with every app off on purpose -- the migration switches
+// on what it moved once the configs are in place. The empty-box line is init's
+// for a box nobody is adopting into, so the installer's run passes Adopting and
+// the line is not printed; the grant, the answers and every other line are
+// init's own.
+func TestAMigratingInitSaysNothingAboutAnEmptyBox(t *testing.T) {
+	h := newHarness(t)
+	opts := h.unattended()
+	opts.Apps = []string{"none"}
+	opts.Adopting = true
+
+	res, err := h.run(opts)
+	if err != nil {
+		t.Fatalf("a migrating init with --apps none was refused: %v\n%s", err, h.out)
+	}
+	if !res.Applied {
+		t.Fatal("the migrating init did not hand over to apply")
+	}
+	assertNoApps(t, h.read(h.grantPath))
+	if strings.Contains(h.out.String(), emptyBox) {
+		t.Fatalf("a migrating init told the operator nothing runs yet, and it is about to switch the plan's apps on:\n%s", h.out)
+	}
+}

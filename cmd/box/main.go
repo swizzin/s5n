@@ -775,6 +775,11 @@ type initFlags struct {
 	// its directory check. A field rather than a registered flag, so
 	// --help cannot offer it. Set from takeInitDevFlags.
 	pathsInNode bool
+	// adopting is set by the one flow that runs init as its own step: `box
+	// migrate apply` on a host with no box installs the plan's apps off and
+	// switches them on once their configs are moved, so init must not say
+	// "nothing runs yet" about a box that is one step from running.
+	adopting bool
 	// recordPath is where bootstrap recorded the cluster decision. init has no
 	// --record flag of its own (it applies through the default), so each caller
 	// sets it: bootstrap passes the flag it was given, and `box init` alone uses
@@ -972,6 +977,7 @@ func (o *initFlags) run(ctx context.Context, kubeconfig string, yes, plain bool,
 		DefaultLogin: defaultLogin(),
 		PasswordFile: *o.password,
 		Unattended:   unattended,
+		Adopting:     o.adopting,
 		PathsInNode:  o.pathsInNode,
 		NoticePath:   hostconf.Path(o.recordPath),
 	})
