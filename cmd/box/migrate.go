@@ -34,7 +34,6 @@ import (
 	"github.com/swizzin/s5n/internal/migrate/discover"
 	"github.com/swizzin/s5n/internal/migrate/plan"
 	"github.com/swizzin/s5n/internal/release"
-	"github.com/swizzin/s5n/internal/say"
 )
 
 // migrateUsage is what a bad invocation and `box migrate` print. It is the
@@ -152,7 +151,7 @@ func runMigrateDiscover(ctx context.Context, args []string) {
 	o.Rehearsal = *rehearsal
 	out := newOutput(terminalSet(false), true, "")
 	defer out.Close()
-	_, text, err := migrateDiscover(ctx, o, out)
+	_, text, err := migrateDiscover(ctx, o)
 	if text != "" {
 		out.Line(text)
 	}
@@ -181,7 +180,7 @@ type migrationRead struct {
 // returned text is what it printed (and wrote into the snapshot's report.txt),
 // which an error also carries: a run that stopped halfway still has something
 // to say about what it read.
-func migrateDiscover(ctx context.Context, o discoverOptions, out say.Reporter) (bundle.Written, string, error) {
+func migrateDiscover(ctx context.Context, o discoverOptions) (bundle.Written, string, error) {
 	mode := archive.ModeSurvey
 	if o.Rehearsal {
 		mode = archive.ModeRehearsal
@@ -302,15 +301,6 @@ func discoverSource(o discoverOptions) (discover.Source, error) {
 		return nil, err
 	}
 	return discover.NewCluster(kc, o.Namespaces)
-}
-
-// writeFileMode writes one file with the mode a snapshot's parts promise: a plan
-// can name a host path, so it is 0600 like the seedbox's own files.
-func writeFileMode(name string, data []byte, mode os.FileMode) error {
-	if err := os.WriteFile(name, data, mode); err != nil {
-		return fmt.Errorf("write %s: %w", name, err)
-	}
-	return nil
 }
 
 // discoveryReport is report.txt: what the plan holds, and everything discovery

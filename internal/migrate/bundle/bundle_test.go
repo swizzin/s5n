@@ -193,10 +193,10 @@ func TestNewestSkipsASurvey(t *testing.T) {
 	rehearsal := filepath.Join(dir, "migrate-20261117T110000Z-rehearsal.tar.gz")
 	for _, path := range []string{final, survey, rehearsal} {
 		mode := archive.ModeFinal
-		switch {
-		case path == survey:
+		switch path {
+		case survey:
 			mode = archive.ModeSurvey
-		case path == rehearsal:
+		case rehearsal:
 			mode = archive.ModeRehearsal
 		}
 		if _, err := Write(path, Snapshot{Mode: mode, Plan: []byte(testPlan), Report: []byte(testReport)}); err != nil {

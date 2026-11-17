@@ -62,7 +62,7 @@ func runMigrateCutover(ctx context.Context, args []string) {
 	// --values names one file for both halves: the read writes a plan, the
 	// install applies this file's values, and bootstrap, init and apply all
 	// take it the same way.
-	o.discoverOptions.Kubeconfig = *o.apply.kubeconfig
+	o.Kubeconfig = *o.apply.kubeconfig
 	if fs.NArg() != 0 {
 		fmt.Fprintf(os.Stderr, "box: migrate cutover takes no arguments: %s\n", strings.Join(fs.Args(), " "))
 		os.Exit(2)
@@ -179,7 +179,7 @@ func surveyPath(o cutoverOptions) string {
 // that was just read. A read from a saved directory has no pods behind it, and
 // cutover refuses it: the proof is the whole reason cutover exists.
 func unstopped(ctx context.Context, o cutoverOptions, read migrationRead) ([]discover.Running, error) {
-	if o.discoverOptions.FromDir != "" {
+	if o.FromDir != "" {
 		return nil, fmt.Errorf("cutover proves the source stopped by reading the pods it still has, and --from-dir is a saved read with none: run cutover against the cluster")
 	}
 	return discover.Unstopped(ctx, read.src, read.plan)

@@ -196,7 +196,7 @@ func checkConfigs(configs []Config) error {
 	seen := make(map[string]bool, len(configs))
 	for _, c := range configs {
 		if !instanceName(c.Instance) {
-			return fmt.Errorf("instance %q is not a name a config directory can be filed under: it is one path element, with no slash and no . or ..", c.Instance)
+			return fmt.Errorf("instance %q is not a name a config directory can be filed under: it is one path element, with no slash and no . or .. in it", c.Instance)
 		}
 		if seen[c.Instance] {
 			return fmt.Errorf("instance %q is in the snapshot twice", c.Instance)
