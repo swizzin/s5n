@@ -114,16 +114,11 @@ func (d *discovery) owner() *plan.Owner {
 	return &plan.Owner{UID: users[0].uid, GID: users[0].gid}
 }
 
-// appIDs is the uid:gid one app runs as. A linuxserver image takes the account
-// it writes as from PUID and PGID, which is the only place a source that never
-// set a securityContext says it; anything else is the pod's or the container's
-// own securityContext.
+// appIDs is the uid:gid one app runs as. A pod's securityContext is what the
+// container actually runs as, so it answers first; a linuxserver image with none
+// takes the account it writes as from PUID and PGID, which is the only place a
+// source that never set a securityContext says it.
 func appIDs(in *instance) (uid, gid int, ok bool) {
-	if u, ok := envID(in.container.Env, "PUID"); ok {
-		if g, ok := envID(in.container.Env, "PGID"); ok {
-			return u, g, true
-		}
-	}
 	uid, gid = in.container.RunAsUser, in.container.RunAsGroup
 	if uid < 0 {
 		uid = in.wl.RunAsUser
@@ -131,7 +126,15 @@ func appIDs(in *instance) (uid, gid int, ok bool) {
 	if gid < 0 {
 		gid = in.wl.RunAsGroup
 	}
-	return uid, gid, uid >= 0 && gid >= 0
+	if uid >= 0 && gid >= 0 {
+		return uid, gid, true
+	}
+	if u, ok := envID(in.container.Env, "PUID"); ok {
+		if g, ok := envID(in.container.Env, "PGID"); ok {
+			return u, g, true
+		}
+	}
+	return uid, gid, false
 }
 
 // envID reads one uid or gid out of an environment variable.

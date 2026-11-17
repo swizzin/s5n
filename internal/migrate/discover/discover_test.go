@@ -1612,10 +1612,13 @@ func TestDiscoverSourceHostAndOwner(t *testing.T) {
 
 // TestDiscoverOwnerFromSecurityContext: a source that pins its account in the
 // pod's securityContext says the same thing as one that sets PUID/PGID, and it
-// is the pod-level setting every container of the pod runs as.
+// is the pod-level setting every container of the pod runs as. The
+// securityContext answers first, because that is what the container runs as: a
+// linuxserver image's PUID and PGID are the account it switches to inside.
 func TestDiscoverOwnerFromSecurityContext(t *testing.T) {
 	f := dataSource(t, func(name string, spec *appSpec) {
 		spec.user = &podUser{uid: 1002, gid: 1003}
+		spec.env = map[string]string{"PUID": "0", "PGID": "0"}
 	})
 	f.node(t, "media-host")
 	p, _ := f.discover(t)
