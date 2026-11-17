@@ -165,8 +165,20 @@ func (w *Writer) AddTree(prefix, dir string) ([]Skipped, error) {
 				skipped = append(skipped, *skip)
 			}
 			return nil
+		case info.Mode()&(fs.ModeSocket|fs.ModeNamedPipe) != 0:
+			// A running app keeps its own IPC in its config directory --
+			// qBittorrent's qBittorrent/ipc-socket is one -- and a socket is
+			// not something an archive can carry or a receiving host restore.
+			// The app makes it again when it starts, so it is left out with
+			// the reason, as a link at the pod's stdout is.
+			skipped = append(skipped, Skipped{
+				Path:   name,
+				Target: "",
+				Why:    "it is a " + modeName(info.Mode()) + " the running app made for itself, which an archive cannot carry; the app makes it again when it starts",
+			})
+			return nil
 		}
-		return fmt.Errorf("%s is a %s: an archive carries files, directories and links inside the tree, not devices or sockets",
+		return fmt.Errorf("%s is a %s: an archive carries files, directories and links inside the tree, not devices",
 			p, modeName(info.Mode()))
 	})
 	if err != nil {

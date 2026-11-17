@@ -247,21 +247,44 @@ func TestWriterRefusesALinkThatLeavesTheTree(t *testing.T) {
 	}
 }
 
-func TestWriterRefusesASpecialFile(t *testing.T) {
+// TestWriterLeavesOutASpecialFile: a running app keeps its own IPC in its
+// config directory -- qBittorrent's ipc-socket is one -- and an archive cannot
+// carry a socket or a named pipe. The app makes it again when it starts, so the
+// tree is carried without it and the reason is reported, rather than the whole
+// snapshot being refused while the app is up.
+func TestWriterLeavesOutASpecialFile(t *testing.T) {
 	tree := t.TempDir()
 	if err := syscall.Mkfifo(filepath.Join(tree, "pipe"), 0o600); err != nil {
 		t.Skipf("no fifo on this system: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(tree, "qBittorrent.conf"), []byte("[BitTorrent]\n"), 0o600); err != nil {
+		t.Fatal(err)
 	}
 	path := filepath.Join(t.TempDir(), "source.tar.gz")
 	w, err := Create(path, testManifest(KindBackup, ModeBackup))
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
-	_, err = w.AddTree("config/thing", tree)
-	if err == nil || !strings.Contains(err.Error(), "named pipe") {
+	skipped, err := w.AddTree("config/thing", tree)
+	if err != nil {
 		t.Fatalf("AddTree with a fifo: %v", err)
 	}
-	w.Discard()
+	if err := w.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if len(skipped) != 1 || skipped[0].Path != "config/thing/pipe" || !strings.Contains(skipped[0].Why, "named pipe") {
+		t.Fatalf("the fifo was not reported as left out: %+v", skipped)
+	}
+	m, err := Read(path)
+	if err != nil {
+		t.Fatalf("Read: %v", err)
+	}
+	if _, ok := m.Entries["config/thing/pipe"]; ok {
+		t.Error("the archive carries the named pipe it said it left out")
+	}
+	if _, ok := m.Entries["config/thing/qBittorrent.conf"]; !ok {
+		t.Error("the archive lost the file beside the pipe")
+	}
 }
 
 func TestCreateRefusesAManifestItCannotVouchFor(t *testing.T) {
