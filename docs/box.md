@@ -986,9 +986,11 @@ data. Everything it will change is written down before it changes anything.
   shape. Readers ship Kubernetes, then swizzin classic, then docker.
 - **Images come from the blessed variants (decided).** A source image maps to a variant
   only when it already is one of the chart's blessed variants, same repository and same
-  variant; anything else gets the chart default and a note naming
-  `apps.<app>.image.variant` and the list. The source's own image is never carried, and
-  the admission policy stays the guard.
+  variant, and discovery writes that variant into the plan; anything else gets the chart
+  default and a note naming `apps.<app>.image.variant` and the list. The same Ingress read
+  that resolves an address gives the plan's domain default when the source's host names
+  share one. The source's own image is never carried, and the admission policy stays the
+  guard.
 - **One snapshot per owner (proposed).** discover groups the apps by the user that owns
   their config directories, so a source with several users yields one snapshot each. The
   plan records the owner's uid:gid, and every other snapshot is applied into that user's
@@ -1011,14 +1013,20 @@ data. Everything it will change is written down before it changes anything.
 - **Only local addresses are rewritten (decided).** This covers the connections the apps
   hold to each other: an Arr's download clients, Prowlarr's applications, Seerr's Arr
   servers, and the Arr, qBittorrent and Plex connections in any other catalog app. A
-  connection is rewritten only when it points at localhost (`localhost`, `127.0.0.0/8`, `::1`) or
-  at a name that is plainly inside the source cluster: a Service discovery found there,
-  by its short name or as `<svc>.<ns>`, `<svc>.<ns>.svc` or
-  `<svc>.<ns>.svc.cluster.local`. On localhost, the port says which app it was, from
-  the ports the source's own configs set. Anything else (a LAN or public address, a
-  domain, another machine) is left as it is and listed in the plan, because box can't
-  know what it points at; the plan can map one by hand. Matching discovered Services
-  rather than app names keeps box naming no apps.
+  connection is rewritten when it points at localhost (`localhost`, `127.0.0.0/8`, `::1`),
+  at a name that is plainly inside the source cluster (a Service discovery found, by its
+  short name or as `<svc>.<ns>`, `<svc>.<ns>.svc` or `<svc>.<ns>.svc.cluster.local`), at a
+  Service's cluster address, or at a public host and path an Ingress of the source routes
+  to one of its Services: those three resolve to that Service's app outright (decided Nov
+  17). A pod's address is a hint and never an answer, because it does not survive the move
+  and may be another pod's by the time the plan is applied: an address that matches a pod
+  at discovery becomes a plan entry with a proposed default and a one-line reason saying
+  what box will do and why it is not certain, and every default is called out in the
+  report, in the guided question and in the end-of-run summary, never applied silently. On
+  localhost, the port says which app it was, from the ports the source's own configs set.
+  Anything else (a LAN or public address, a domain, another machine) is left as it is and
+  listed in the plan, because box can't know what it points at; the plan can map one by
+  hand. Matching discovered Services rather than app names keeps box naming no apps.
 - **Migrated connections are adopted by ID (decided).** Wiring adopts the objects it
   finds by name on its first run, so a migrated download client under a different
   name would get a second one created beside it. migrate records the IDs of the
