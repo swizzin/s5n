@@ -470,7 +470,7 @@ func (d *decision) overrideRule(in rewrite.Input, id int64, folder string, named
 	const where = "override_rule.rootFolder"
 	if len(named) == 0 {
 		d.left(rep, where, folder, fmt.Sprintf(
-			"left as it is: this override rule names no Arr, so box cannot tell whose folder %s is", folder))
+			"this override rule names no Arr, so box cannot tell whose folder %s is", folder))
 		return
 	}
 	var parts []string
@@ -518,7 +518,7 @@ func (d *decision) overrideRule(in rewrite.Input, id int64, folder string, named
 		d.tally.add(dbName, where, "path")
 	default:
 		d.left(rep, where, folder, fmt.Sprintf(
-			"left as it is: the Arrs this override rule names do not agree about %s (%s)",
+			"the Arrs this override rule names do not agree about %s (%s)",
 			folder, strings.Join(parts, "; ")))
 	}
 }

@@ -302,8 +302,8 @@ func (a *analysis) downloadClient(p provider) error {
 	if has && !downloadClientsBoxRuns[impl] {
 		a.left = append(a.left, rewrite.Left{
 			File: a.file, Where: where + ".host", What: ad.text(),
-			Why: fmt.Sprintf("left as it is: %q is a %s client and this box runs only qBittorrent, so a rewrite would point it at an app that does not speak its protocol; delete it in %s if you do not need it",
-				p.name, p.implementation, a.app),
+			Why: fmt.Sprintf("%q is a %s client and this box runs only qBittorrent, so a rewrite would point it at an app that does not speak its protocol; delete it in the Arr if you do not need it",
+				p.name, p.implementation),
 		})
 		return nil
 	}
@@ -311,8 +311,8 @@ func (a *analysis) downloadClient(p provider) error {
 		if !p.enabled {
 			a.left = append(a.left, rewrite.Left{
 				File: a.file, Where: where + ".host", What: ad.text(),
-				Why: fmt.Sprintf("left as it is: %q is switched off in %s, so %s is never dialled and nothing is migrated to it",
-					p.name, a.app, ad.text()),
+				Why: fmt.Sprintf("%q is switched off, so %s is never dialled and nothing is migrated to it",
+					p.name, ad.text()),
 			})
 			return nil
 		}
@@ -405,8 +405,8 @@ func (a *analysis) importLists(ctx context.Context, db *sql.DB) error {
 			if !p.enabled {
 				a.left = append(a.left, rewrite.Left{
 					File: a.file, Where: where, What: miss.Text(),
-					Why: fmt.Sprintf("left as it is: %q is not synced by %s, so %s is never dialled and nothing is migrated to it",
-						p.name, a.app, miss.Text()),
+					Why: fmt.Sprintf("%q is not synced, so %s is never dialled and nothing is migrated to it",
+						p.name, miss.Text()),
 				})
 				return nil
 			}
@@ -449,8 +449,8 @@ func (a *analysis) applications(ctx context.Context, db *sql.DB) error {
 				if !p.enabled {
 					a.left = append(a.left, rewrite.Left{
 						File: a.file, Where: where + "." + key, What: miss.Text(),
-						Why: fmt.Sprintf("left as it is: %q has its sync switched off in %s, so %s is never dialled and nothing is indexed through it",
-							p.name, a.app, miss.Text()),
+						Why: fmt.Sprintf("%q has its sync switched off, so %s is never dialled and nothing is indexed through it",
+							p.name, miss.Text()),
 					})
 					continue
 				}

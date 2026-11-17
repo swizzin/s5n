@@ -210,9 +210,9 @@ func (a Address) Text() string {
 }
 
 // Left is one stored value a pass leaves exactly as it is, and why. The why is
-// one line and says what happens to the value, because that is all the operator
-// gets: a disabled download client whose address cannot be placed stays where it
-// is, and saying so is the whole of the decision.
+// one line and is the reason only: it says what the value is and what happens to
+// it, and the caller puts "left as it is" in front of it, because that is the
+// decision rather than part of the reason.
 type Left struct {
 	File  string // relative to Dir
 	Where string // table.column, section/key, JSON pointer
