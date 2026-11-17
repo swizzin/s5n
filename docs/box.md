@@ -988,9 +988,10 @@ data. Everything it will change is written down before it changes anything.
   only when it already is one of the chart's blessed variants, same repository and same
   variant, and discovery writes that variant into the plan; anything else gets the chart
   default and a note naming `apps.<app>.image.variant` and the list. The same Ingress read
-  that resolves an address gives the plan's domain default when the source's host names
-  share one. The source's own image is never carried, and the admission policy stays the
-  guard.
+  that resolves an address gives the plan's domain default: the one name the source's hosts
+  all are — box serves the apps under paths on it, as the source did — or the domain
+  several hosts share. The source's own image is never carried, and the admission policy
+  stays the guard.
 - **One snapshot per owner (proposed).** discover groups the apps by the user that owns
   their config directories, so a source with several users yields one snapshot each. The
   plan records the owner's uid:gid, and every other snapshot is applied into that user's

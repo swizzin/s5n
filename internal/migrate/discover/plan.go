@@ -614,17 +614,18 @@ func (d *discovery) podRules() []plan.HostRule {
 }
 
 // domain is the plan's DNS name default: what the Ingress hosts the source
-// serves its apps at share. It is a default for the run's question and never a
-// question discovery asks, so a source whose names share none -- or a source
-// with one host, which is a host and not a domain -- names none, and the run
-// asks.
+// serves its apps at share. One name is the domain -- box serves the apps under
+// paths on it, as the source did -- and several names give the suffix they
+// share. It is a default for the run's question and never a question discovery
+// asks, so a source whose names share none, or whose one name is not a domain
+// box can serve, names none, and the run asks.
 func (d *discovery) domain() string {
 	domain := domainFrom(d.served)
 	switch {
 	case domain != "" || len(d.served) == 0:
 		return domain
 	case len(d.served) == 1:
-		d.note("the source's Ingress serves %s, one host, which is not a domain: the plan names none and the run asks for it", d.served[0])
+		d.note("the source's Ingress serves %s, which is not a DNS name box can serve: the plan names none and the run asks for it", d.served[0])
 	default:
 		d.note("the source's Ingress serves %s, which share no domain: the plan names none and the run asks for it", strings.Join(d.served, ", "))
 	}
@@ -634,8 +635,10 @@ func (d *discovery) domain() string {
 // domainFrom is the DNS name every one of these hosts shares, when they share
 // one box can serve: the longest run of trailing labels all of them end in, with
 // a name above the hosts. A wildcard names its domain outright (*.example.com is
-// example.com), and one host is not a common domain -- panel.example.com says
-// nothing about whether it is a host under example.com or an apex of its own.
+// example.com), and one name is the domain itself: a source that serves every
+// app on media.example.net, under a path each, is the shape box installs, so
+// that name is what the seedbox is served under. A single name that is not a
+// domain a certificate can name -- "media" -- gives none, and the run asks.
 func domainFrom(hosts []string) string {
 	var names []string
 	wildcards := 0
@@ -651,6 +654,12 @@ func domainFrom(hosts []string) string {
 		}
 		seen[host] = true
 		names = append(names, host)
+	}
+	if len(names) == 1 {
+		if plan.IsDNSName(names[0]) {
+			return names[0]
+		}
+		return ""
 	}
 	common := commonSuffix(names)
 	if len(common) < 2 {

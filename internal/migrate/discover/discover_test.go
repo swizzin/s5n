@@ -1609,19 +1609,29 @@ func TestDiscoverDomainFromIngress(t *testing.T) {
 	roundTrip(t, p)
 }
 
-// TestDiscoverDomainNeedsADomain: one Ingress host is a host, not a domain --
-// box cannot tell panel.example.com from an apex without a public suffix list --
-// so the plan names none and the run asks, saying what it saw.
+// TestDiscoverDomainNeedsADomain: one Ingress host is the domain, because box
+// serves the apps under paths on the one name the source served them on. A
+// single name that is not a domain box can serve names none, and the run asks.
 func TestDiscoverDomainNeedsADomain(t *testing.T) {
 	f := sourceInstall(t)
 	f.ingress(t, "panel", "panel.example.com", "/qbittorrent", "qbittorrent")
+	p, _ := f.discover(t)
+	if p.Domain != "panel.example.com" {
+		t.Fatalf("domain = %q, want the one host the source serves", p.Domain)
+	}
+	roundTrip(t, p)
+
+	// The same one host, with no domain in it: an internal name is not a name
+	// a certificate can be issued for, so the plan names none and says so.
+	f = sourceInstall(t)
+	f.ingress(t, "panel", "media", "/qbittorrent", "qbittorrent")
 	p, rep := f.discover(t)
 	if p.Domain != "" {
-		t.Fatalf("domain = %q, want none from one host", p.Domain)
+		t.Fatalf("domain = %q, want none from a name that is not a domain", p.Domain)
 	}
 	var noted bool
 	for _, n := range rep.Notes {
-		if strings.Contains(n, "panel.example.com, one host, which is not a domain") {
+		if strings.Contains(n, "media, which is not a DNS name box can serve") {
 			noted = true
 		}
 	}
@@ -1630,7 +1640,30 @@ func TestDiscoverDomainNeedsADomain(t *testing.T) {
 	}
 }
 
-// TestDomainFrom: what the source's names share, and what they do not.
+// TestDiscoverDomainNoSharedName: hosts that share only a top-level domain say
+// nothing about what one domain over both would be, so the plan names none and
+// the run asks, saying what it saw.
+func TestDiscoverDomainNoSharedName(t *testing.T) {
+	f := sourceInstall(t)
+	f.ingress(t, "panel", "panel.example.com", "/qbittorrent", "qbittorrent")
+	f.ingress(t, "arrs", "sonarr.example.net", "/", "sonarr")
+	p, rep := f.discover(t)
+	if p.Domain != "" {
+		t.Fatalf("domain = %q, want none from hosts that share only a TLD", p.Domain)
+	}
+	var noted bool
+	for _, n := range rep.Notes {
+		if strings.Contains(n, "sonarr.example.net, which share no domain") {
+			noted = true
+		}
+	}
+	if !noted {
+		t.Fatalf("the missing domain default is not reported: %#v", rep.Notes)
+	}
+}
+
+// TestDomainFrom: what the source's names share, and what they do not. One name
+// is the domain: box serves the apps under paths on it, as the source did.
 func TestDomainFrom(t *testing.T) {
 	tests := []struct {
 		name  string
@@ -1640,13 +1673,14 @@ func TestDomainFrom(t *testing.T) {
 		{"one app host per app", []string{"panel.example.com", "sonarr.example.com"}, "example.com"},
 		{"a host and the apex", []string{"example.com", "panel.example.com"}, "example.com"},
 		{"nothing shared but the top level", []string{"a.example.com", "b.example.net"}, ""},
-		{"one host is a host", []string{"panel.example.com"}, ""},
-		{"one apex says nothing", []string{"example.com"}, ""},
+		{"one host is the domain", []string{"panel.example.com"}, "panel.example.com"},
+		{"one apex is the domain", []string{"example.com"}, "example.com"},
 		{"a wildcard names its domain", []string{"*.example.com"}, "example.com"},
 		{"a wildcard beside a host", []string{"*.example.com", "panel.example.com"}, "example.com"},
 		{"no host at all", nil, ""},
-		{"the same host twice", []string{"panel.example.com", "panel.example.com"}, ""},
+		{"the same host twice is one name", []string{"panel.example.com", "panel.example.com"}, "panel.example.com"},
 		{"a trailing dot and case", []string{"Panel.Example.COM.", "sonarr.example.com"}, "example.com"},
+		{"one name that is not a domain", []string{"media"}, ""},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

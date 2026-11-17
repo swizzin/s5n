@@ -43,10 +43,10 @@ type Plan struct {
 	// them in place. Absent, apply touches no data.
 	Data *Data `yaml:"data,omitempty"`
 	// Domain is the DNS name box will serve this seedbox under, when discovery
-	// could read it from the source: the domain the source's Ingress hosts
-	// share. It is the plan's default for the run's question, never a question
-	// discovery asks, and empty when the source could not say -- which is when
-	// the run asks for it.
+	// could read it from the source: the one name the source's Ingress hosts
+	// all are, or the domain they share. It is the plan's default for the
+	// run's question, never a question discovery asks, and empty when the
+	// source could not say -- which is when the run asks for it.
 	Domain string `yaml:"domain,omitempty"`
 	// Apps is keyed by box's instance name.
 	Apps map[string]App `yaml:"apps"`

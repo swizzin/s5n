@@ -100,15 +100,15 @@ func (p *Plan) checkSource() []string {
 // that would ask with an answer nothing can use.
 func (p *Plan) checkDomain() []string {
 	p.Domain = strings.ToLower(strings.TrimSuffix(strings.TrimSpace(p.Domain), "."))
-	if p.Domain == "" || isDNSName(p.Domain) {
+	if p.Domain == "" || IsDNSName(p.Domain) {
 		return nil
 	}
 	return []string{fmt.Sprintf("domain %q is not a DNS name: name the host box serves the seedbox under, like example.com", p.Domain)}
 }
 
-// isDNSName reports whether d is a name a certificate can be issued for: two
+// IsDNSName reports whether d is a name a certificate can be issued for: two
 // labels or more, each one letters, digits and inner dashes.
-func isDNSName(d string) bool {
+func IsDNSName(d string) bool {
 	labels := strings.Split(d, ".")
 	if len(labels) < 2 {
 		return false
