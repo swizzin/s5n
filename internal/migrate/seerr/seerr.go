@@ -10,7 +10,10 @@
 // `sonarr[].activeAnimeDirectory` (server/lib/settings/index.ts:78, :98). They
 // are not decorative: a request sends one to the Arr as `rootFolderPath`
 // (server/api/servarr/radarr.ts:166,234) and the scanners compare library paths
-// against them. The connections are `hostname`, `port`, `useSsl` and `baseUrl`
+// against them. A root folder is therefore a path in the Arr's filesystem, never
+// one Seerr opens, so this pass resolves each entry's connection first and maps
+// its root folders through that Arr's path table. The connections are
+// `hostname`, `port`, `useSsl` and `baseUrl`
 // on every Arr entry, and `plex.ip`/`port`/`useSsl` and the `tautulli` block
 // (:31-56, :67-78, :130-145); box serves them all on plain HTTP with its own
 // URL base, so a rewritten entry takes the chart's.
@@ -137,7 +140,8 @@ func run(ctx context.Context, in rewrite.Input, write bool) (rewrite.Report, err
 	return rep, nil
 }
 
-// planSettings is settings.json: the root folders, then every connection.
+// planSettings is settings.json: each Arr entry's connection and root folders,
+// then the other two connections.
 func planSettings(in rewrite.Input, f *jsonFile, d *decision, rep *rewrite.Report) error {
 	for _, arr := range []struct {
 		key  string
@@ -151,58 +155,80 @@ func planSettings(in rewrite.Input, f *jsonFile, d *decision, rep *rewrite.Repor
 			if _, ok := f.find(base); !ok {
 				break
 			}
+			// The connection first: which Arr the entry is decides whose path
+			// table its root folders move by.
+			res, err := planArrConnection(in, f, base, d, rep)
+			if err != nil {
+				return err
+			}
 			for _, name := range arr.dirs {
-				n, ok := f.find(base + "/" + name)
+				where := base + "/" + name
+				n, ok := f.find(where)
 				if !ok || n.kind != 's' || strings.TrimSpace(n.str) == "" {
 					continue
 				}
-				moved, covered := in.Plan.Rewrite(in.App, n.str)
-				if !covered {
-					rep.Uncovered = append(rep.Uncovered, plan.Uncovered{
-						App: in.App, File: settingsName, Key: base + "/" + name, Path: n.str,
-					})
-					continue
-				}
-				if moved != n.str {
-					d.edits = append(d.edits, f.setString(n, moved, "path"))
-					d.tally.add(settingsName, base+"/"+name, "path")
-				}
-			}
-			if err := planArrConnection(in, f, base, d, rep); err != nil {
-				return err
+				d.arrRootFolder(in, f, where, n, res, rep)
 			}
 		}
 	}
 
 	// Plex: an address and a port in two fields.
-	if err := planAddress(in, f, "/plex", "ip", "", d, rep); err != nil {
+	if _, err := planAddress(in, f, "/plex", "ip", "", d, rep); err != nil {
 		return err
 	}
 	// Tautulli, when it is configured at all.
 	if _, ok := f.find("/tautulli"); ok {
-		if err := planAddress(in, f, "/tautulli", "hostname", "urlBase", d, rep); err != nil {
+		if _, err := planAddress(in, f, "/tautulli", "hostname", "urlBase", d, rep); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
+// arrRootFolder moves one Arr root folder by that Arr's path table. Seerr never
+// opens the directory: it hands it to the Arr as rootFolderPath
+// (server/api/servarr/radarr.ts:166,234 at v3.5.1), which the Arr resolves in its
+// own filesystem. A leave keeps it as it is (that Arr is outside the box), and
+// an unclassified connection keeps it too: the connection is already reported,
+// and settling it settles its root folder on the next run.
+func (d *decision) arrRootFolder(in rewrite.Input, f *jsonFile, where string, n *jsonNode, res plan.Resolution, rep *rewrite.Report) {
+	if res.Verdict != plan.Rewrite {
+		return
+	}
+	moved, covered := in.Plan.Rewrite(res.App, n.str)
+	if !covered {
+		rep.Uncovered = append(rep.Uncovered, plan.Uncovered{
+			App: res.App, File: settingsName, Key: where, Path: n.str,
+		})
+		return
+	}
+	if moved == n.str {
+		return
+	}
+	d.edits = append(d.edits, f.setString(n, moved, "path"))
+	d.tally.add(settingsName, where, "path")
+}
+
 // planArrConnection rewrites one Arr entry's address, port, TLS flag and URL
-// base. `baseUrl` is optional in Seerr and is what makes an Arr's own prefix
-// (the chart serves each one under /<name>) reachable, so it is added when the
-// chart has one and the file does not.
-func planArrConnection(in rewrite.Input, f *jsonFile, base string, d *decision, rep *rewrite.Report) error {
+// base, and says what its connection resolved to: only a rewritten entry names
+// an Arr whose path table its root folders move by. `baseUrl` is optional in
+// Seerr and is what makes an Arr's own prefix (the chart serves each one under
+// /<name>) reachable, so it is added when the chart has one and the file does
+// not.
+func planArrConnection(in rewrite.Input, f *jsonFile, base string, d *decision, rep *rewrite.Report) (plan.Resolution, error) {
 	return planAddress(in, f, base, "hostname", "baseUrl", d, rep)
 }
 
 // planAddress is the one place a stored connection is resolved: the host field
 // names the host, the port field the port, and the plan settles which app it
 // was. A rewritten connection takes the box's host, port, plain HTTP and the
-// chart's URL base.
-func planAddress(in rewrite.Input, f *jsonFile, base, hostKey, baseKey string, d *decision, rep *rewrite.Report) error {
+// chart's URL base. It returns what it resolved to, so a caller with something
+// else that belongs to the app it named (an Arr's root folders) can ask that
+// app's table next.
+func planAddress(in rewrite.Input, f *jsonFile, base, hostKey, baseKey string, d *decision, rep *rewrite.Report) (plan.Resolution, error) {
 	hostNode, ok := f.find(base + "/" + hostKey)
 	if !ok || hostNode.kind != 's' || strings.TrimSpace(hostNode.str) == "" {
-		return nil
+		return plan.Resolution{}, nil
 	}
 	portNode, havePort := f.find(base + "/port")
 	port := 0
@@ -216,7 +242,7 @@ func planAddress(in rewrite.Input, f *jsonFile, base, hostKey, baseKey string, d
 	case plan.Rewrite:
 		end, ok := in.Targets[res.App]
 		if !ok {
-			return fmt.Errorf("seerr: %s: the plan points %s at %q, which has no endpoint on the box",
+			return res, fmt.Errorf("seerr: %s: the plan points %s at %q, which has no endpoint on the box",
 				settingsName, address(hostNode.str, port), res.App)
 		}
 		if hostNode.str != end.Host {
@@ -240,7 +266,7 @@ func planAddress(in rewrite.Input, f *jsonFile, base, hostKey, baseKey string, d
 			Host: hostNode.str, Port: port,
 		})
 	}
-	return nil
+	return res, nil
 }
 
 // setBaseURL gives one connection the chart's URL base, adding the key when the
@@ -301,6 +327,15 @@ func (e dbEdit) apply(ctx context.Context, tx *sql.Tx) error {
 // migration for the override rule, because a future request would be sent to a
 // directory the Arr does not have; the same gap on a completed request is
 // history and is left alone.
+//
+// These rows name their Arr by id, not by address: Seerr selects an override
+// rule by radarrServiceId or sonarrServiceId (server/lib/overrideRules.ts:39-57
+// at v3.5.1: the `id` of a `radarr[]` or `sonarr[]` entry), and a request
+// records the entry it went to in `serverId` (server/entity/MediaRequest.ts:548).
+// One rule also holds a single rootFolder for both Arrs
+// (server/entity/OverrideRule.ts:36), so a rule set for both has no one Arr
+// whose table its folder could move by, and these columns are checked against
+// Seerr's own table rather than guessed at.
 func planDB(ctx context.Context, in rewrite.Input, d *decision, rep *rewrite.Report) error {
 	path := filepath.Join(in.Dir, filepath.FromSlash(dbName))
 	if _, err := os.Stat(path); err != nil {

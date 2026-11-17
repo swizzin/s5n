@@ -113,12 +113,17 @@ apps:
     source: sonarr
     config: /srv/apps/sonarr
     ports: [8989]
-    paths: []
+    # The root folders Seerr stores for an Arr move by the Arr's own table.
+    paths:
+      - from: /srv/media
+        to: /data/media
   radarr:
     source: radarr
     config: /srv/apps/radarr
     ports: [7878]
-    paths: []
+    paths:
+      - from: /srv/media
+        to: /data/media
   seerr:
     source: seerr
     config: /srv/apps/seerr
@@ -326,6 +331,11 @@ func TestUncoveredSettingsPathBlocks(t *testing.T) {
 	}
 	if len(rep.Uncovered) != 1 || !strings.Contains(rep.Uncovered[0].Key, "activeDirectory") {
 		t.Fatalf("Uncovered = %v", rep.Uncovered)
+	}
+	// The folder is the Arr's, so the gap names the Arr: the plan asks for a
+	// rule in radarr's paths, not in Seerr's.
+	if got := rep.Uncovered[0].App; got != "radarr" {
+		t.Errorf("Uncovered[0].App = %q, want radarr: an Arr root folder moves by the Arr's table", got)
 	}
 }
 
