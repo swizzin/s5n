@@ -1063,3 +1063,148 @@ func TestDiscoverRecordsTheRead(t *testing.T) {
 	}
 	roundTrip(t, p)
 }
+
+// TestDiscoverReadsEveryOwnerlessKind: a catalog app is an app wherever it ran,
+// so discovery reads a DaemonSet, a ReplicaSet nothing owns and a bare Pod the
+// same way it reads a Deployment. The object above them is the workload: a
+// ReplicaSet a Deployment made, and a pod a DaemonSet made, are one app's
+// template twice, so reading them as their own workloads would migrate the app
+// twice and name the second one after a template hash.
+func TestDiscoverReadsEveryOwnerlessKind(t *testing.T) {
+	f := newFixture(t)
+	f.app(t, appSpec{
+		name: "qbittorrent", image: "ghcr.io/home-operations/qbittorrent:5.3.0", port: 8080,
+		mounts: []mount{
+			{volume: "config", path: "/config", host: "/srv/apps/qbittorrent"},
+			{volume: "downloads", path: "/downloads", host: "/srv/library/Downloads"},
+		},
+	})
+	f.file(t, "/srv/apps/qbittorrent/qBittorrent/qBittorrent.conf", "[BitTorrent]\nSession\\DefaultSavePath=/downloads\n")
+	f.app(t, appSpec{
+		name: "sonarr", image: "lscr.io/linuxserver/sonarr:4.0.14", port: 8989,
+		mounts: []mount{
+			{volume: "config", path: "/config", host: "/srv/apps/sonarr"},
+			{volume: "library", path: "/library", host: "/srv/library"},
+		},
+	})
+	f.file(t, "/srv/apps/sonarr/config.xml", "<Config><Port>8989</Port></Config>\n")
+	f.bytes(t, "/srv/apps/sonarr/sonarr.db", arrDB(t, "/library/media/TV"))
+
+	// One app of each kind nothing owns, each with the config its port comes
+	// from.
+	f.app(t, appSpec{
+		kind: "DaemonSet", name: "prowlarr", image: "lscr.io/linuxserver/prowlarr:2.3.0", port: 9696,
+		mounts: []mount{{volume: "config", path: "/config", host: "/srv/apps/prowlarr"}},
+	})
+	f.file(t, "/srv/apps/prowlarr/config.xml", "<Config><Port>9696</Port></Config>\n")
+	f.app(t, appSpec{
+		kind: "ReplicaSet", name: "tautulli", image: "lscr.io/linuxserver/tautulli:2.14.6", port: 8181,
+		mounts: []mount{{volume: "config", path: "/config", host: "/srv/apps/tautulli"}},
+	})
+	f.file(t, "/srv/apps/tautulli/config.ini", "[General]\nhttp_port = 8181\n")
+	f.app(t, appSpec{
+		kind: "Pod", name: "autobrr", image: "ghcr.io/autobrr/autobrr:v1.60.0", port: 7474,
+		mounts: []mount{{volume: "config", path: "/config", host: "/srv/apps/autobrr"}},
+		podIP:  "10.244.0.21",
+	})
+	f.file(t, "/srv/apps/autobrr/config.toml", "port = 7474\n")
+
+	// The same app's own objects, one owner above them each.
+	f.app(t, appSpec{
+		kind: "ReplicaSet", name: "sonarr-5d8f7c", owner: &ownerRef{kind: "Deployment", name: "sonarr"},
+		image: "lscr.io/linuxserver/sonarr:4.0.14", port: 8989,
+		mounts: []mount{{volume: "config", path: "/config", host: "/srv/apps/sonarr"}},
+	})
+	f.pod(t, "prowlarr-x2k9d", "media", map[string]string{"app.kubernetes.io/name": "prowlarr"}, "10.244.0.22",
+		&ownerRef{kind: "DaemonSet", name: "prowlarr"})
+
+	// What a source hands over: the kind, the count and the selector that tell
+	// the next reader which pods are a workload's own.
+	src := NewDirectory(f.manifests)
+	wls, err := src.Workloads(context.Background())
+	if err != nil {
+		t.Fatalf("Workloads: %v", err)
+	}
+	byName := make(map[string]Workload, len(wls))
+	for _, wl := range wls {
+		byName[wl.Name] = wl
+	}
+	for want, kind := range map[string]string{
+		"sonarr": "StatefulSet", "qbittorrent": "StatefulSet",
+		"prowlarr": "DaemonSet", "tautulli": "ReplicaSet", "autobrr": "Pod",
+	} {
+		wl, ok := byName[want]
+		if !ok {
+			t.Fatalf("%s was not read as a workload: %#v", want, keys(byName))
+		}
+		if wl.Kind != kind {
+			t.Errorf("%s kind = %q, want %q", want, wl.Kind, kind)
+		}
+	}
+	if wl := byName["autobrr"]; wl.Replicas != -1 {
+		t.Errorf("a bare Pod asks for a count of %d, want -1: it is the pod", wl.Replicas)
+	}
+	if wl := byName["prowlarr"]; wl.Replicas != -1 {
+		t.Errorf("a DaemonSet asks for a count of %d, want -1: it runs one pod per node", wl.Replicas)
+	}
+	if wl := byName["tautulli"]; wl.Replicas != 1 {
+		t.Errorf("an ownerless ReplicaSet asks for %d replicas, want the one the API defaults", wl.Replicas)
+	}
+	if wl, ok := byName["tautulli"]; !ok || wl.Selector["app.kubernetes.io/name"] != "tautulli" {
+		t.Errorf("tautulli's selector = %#v, want the labels its pods carry", wl.Selector)
+	}
+	// Nothing owned by something above it is a workload of its own.
+	for _, name := range []string{"sonarr-5d8f7c", "prowlarr-x2k9d"} {
+		if _, ok := byName[name]; ok {
+			t.Fatalf("%s is owned by a workload discovery already reads, and it is read again as one", name)
+		}
+	}
+
+	p, rep := f.discover(t)
+	for _, name := range []string{"prowlarr", "tautulli", "autobrr"} {
+		if _, ok := p.Apps[name]; !ok {
+			t.Fatalf("%s is not in the plan: %#v", name, keys(p.Apps))
+		}
+	}
+	// One sonarr, not one per ReplicaSet it once made.
+	for name := range p.Apps {
+		if strings.HasPrefix(name, "sonarr-") {
+			t.Fatalf("%q is a template hash, not an instance: the ReplicaSet is the Deployment's", name)
+		}
+	}
+	for _, s := range rep.Skipped {
+		if strings.Contains(s.Workload, "5d8f7c") || strings.Contains(s.Workload, "x2k9d") {
+			t.Fatalf("an owned object is reported as a workload: %#v", s)
+		}
+	}
+	roundTrip(t, p)
+}
+
+// TestWorkloadOwns is how the next reader proves a workload is stopped: by the
+// pods the source still has. A bare Pod is its own pod, and a pod of another
+// namespace is somebody else's.
+func TestWorkloadOwns(t *testing.T) {
+	templated := Workload{
+		Namespace: "media", Kind: "DaemonSet",
+		Selector: map[string]string{"app.kubernetes.io/name": "prowlarr"},
+	}
+	tests := []struct {
+		name string
+		wl   Workload
+		pod  Pod
+		want bool
+	}{
+		{"its own pod", templated, Pod{Namespace: "media", Labels: map[string]string{"app.kubernetes.io/name": "prowlarr"}}, true},
+		{"another app's pod", templated, Pod{Namespace: "media", Labels: map[string]string{"app.kubernetes.io/name": "sonarr"}}, false},
+		{"a pod of the same name elsewhere", templated, Pod{Namespace: "front", Labels: map[string]string{"app.kubernetes.io/name": "prowlarr"}}, false},
+		{"a bare Pod is its pod", Workload{Namespace: "media", Name: "autobrr", Kind: "Pod"}, Pod{Namespace: "media", Name: "autobrr"}, true},
+		{"a bare Pod's replacement", Workload{Namespace: "media", Name: "autobrr", Kind: "Pod"}, Pod{Namespace: "media", Name: "autobrr-2"}, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := tt.wl.Owns(tt.pod); got != tt.want {
+				t.Fatalf("Owns = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}

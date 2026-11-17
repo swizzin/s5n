@@ -42,64 +42,168 @@ type mount struct {
 type appSpec struct {
 	name      string
 	namespace string
-	image     string
-	port      int
+	// kind is the object discovery reads it from: a StatefulSet when empty, or
+	// a Deployment, a DaemonSet, an ownerless ReplicaSet or a bare Pod.
+	kind  string
+	image string
+	port  int
+	// mounts are host-backed volumes; emptyDirs are the ones that hold nothing
+	// worth migrating.
 	mounts    []mount
-	// emptyDirs are volumes mounted from an emptyDir, for the mounts that hold
-	// nothing worth migrating.
 	emptyDirs []mount
 	// podLabels is what a Service selects by; nil means app.kubernetes.io/name.
 	podLabels map[string]string
+	// replicas is the count the workload asks for, nil for what the API server
+	// defaults (one).
+	replicas *int
+	// owner makes the object a pod template something above it owns, which is
+	// never a workload of its own.
+	owner *ownerRef
+	// podIP is the address the object answered on, written into a pod's status.
+	// A workload's own pods are separate objects (fixture.pod).
+	podIP string
 }
 
-// app adds one app workload, shaped like the chart's own StatefulSet.
+// ownerRef is the object above a fixture workload.
+type ownerRef struct {
+	kind, name string
+}
+
+// app adds one app workload, shaped like the chart's own StatefulSet unless the
+// spec names another kind.
 func (f *fixture) app(t *testing.T, spec appSpec) {
 	t.Helper()
 	if spec.namespace == "" {
 		spec.namespace = "media"
+	}
+	kind := spec.kind
+	if kind == "" {
+		kind = "StatefulSet"
 	}
 	labels := spec.podLabels
 	if labels == nil {
 		labels = map[string]string{"app.kubernetes.io/name": spec.name}
 	}
 	var b strings.Builder
-	fmt.Fprintf(&b, `apiVersion: apps/v1
-kind: StatefulSet
+	fmt.Fprintf(&b, "apiVersion: %s\nkind: %s\nmetadata:\n  name: %s\n  namespace: %s\n",
+		groupOf(kind), kind, spec.name, spec.namespace)
+	if spec.owner != nil {
+		fmt.Fprintf(&b, "  ownerReferences:\n    - apiVersion: apps/v1\n      kind: %s\n      name: %s\n",
+			spec.owner.kind, spec.owner.name)
+	}
+	// A bare Pod is its own template: its labels and its spec are the object's.
+	if kind == "Pod" {
+		fmt.Fprintf(&b, "  labels:\n%s\n", labelsYAML(labels, "    "))
+		b.WriteString("spec:\n")
+		f.writePod(&b, "  ", spec)
+	} else {
+		b.WriteString("spec:\n")
+		if kind == "StatefulSet" {
+			fmt.Fprintf(&b, "  serviceName: %s\n", spec.name)
+		}
+		fmt.Fprintf(&b, "  selector:\n    matchLabels:\n%s\n", labelsYAML(labels, "      "))
+		if spec.replicas != nil {
+			fmt.Fprintf(&b, "  replicas: %d\n", *spec.replicas)
+		}
+		fmt.Fprintf(&b, "  template:\n    metadata:\n      labels:\n%s\n    spec:\n",
+			labelsYAML(labels, "        "))
+		f.writePod(&b, "      ", spec)
+	}
+	if spec.podIP != "" {
+		fmt.Fprintf(&b, "status:\n  podIP: %s\n", spec.podIP)
+	}
+	f.object(t, spec.name, b.String())
+}
+
+// writePod writes the containers and volumes of one pod spec at an indentation.
+func (f *fixture) writePod(b *strings.Builder, indent string, spec appSpec) {
+	fmt.Fprintf(b, "%scontainers:\n%s  - name: %s\n%s    image: %s\n%s    ports:\n%s      - name: http\n%s        containerPort: %d\n%s    volumeMounts:\n",
+		indent, indent, spec.name, indent, spec.image, indent, indent, indent, spec.port, indent)
+	for _, m := range spec.mounts {
+		fmt.Fprintf(b, "%s      - name: %s\n%s        mountPath: %s\n", indent, m.volume, indent, m.path)
+	}
+	for _, m := range spec.emptyDirs {
+		fmt.Fprintf(b, "%s      - name: %s\n%s        mountPath: %s\n", indent, m.volume, indent, m.path)
+	}
+	fmt.Fprintf(b, "%svolumes:\n", indent)
+	for _, m := range spec.mounts {
+		fmt.Fprintf(b, "%s  - name: %s\n%s    hostPath:\n%s      path: %s\n%s      type: Directory\n",
+			indent, m.volume, indent, indent, m.host, indent)
+	}
+	for _, m := range spec.emptyDirs {
+		fmt.Fprintf(b, "%s  - name: %s\n%s    emptyDir: {}\n", indent, m.volume, indent)
+	}
+}
+
+// groupOf is the API group an object's kind is in, as a manifest names it.
+func groupOf(kind string) string {
+	switch kind {
+	case "Pod", "Service", "Node":
+		return "v1"
+	case "Ingress":
+		return "networking.k8s.io/v1"
+	}
+	return "apps/v1"
+}
+
+// pod adds one pod the fixture source holds, owned by the workload at owner
+// unless owner is nil: an owned pod is never a workload of its own, but its
+// address is one discovery reads.
+func (f *fixture) pod(t *testing.T, name, namespace string, labels map[string]string, ip string, owner *ownerRef) {
+	t.Helper()
+	var b strings.Builder
+	fmt.Fprintf(&b, `apiVersion: v1
+kind: Pod
+metadata:
+  name: %s
+  namespace: %s
+  labels:
+%s
+`, name, namespace, labelsYAML(labels, "    "))
+	if owner != nil {
+		fmt.Fprintf(&b, "  ownerReferences:\n    - apiVersion: apps/v1\n      kind: %s\n      name: %s\n", owner.kind, owner.name)
+	}
+	fmt.Fprintf(&b, `spec:
+  containers:
+    - name: %s
+      image: example.com/nothing:1
+status:
+  podIP: %s
+`, name, ip)
+	f.object(t, name, b.String())
+}
+
+// ingress adds one Ingress serving a host and path through a Service.
+func (f *fixture) ingress(t *testing.T, name, namespace, host, path, service string) {
+	t.Helper()
+	f.object(t, "ingress-"+name, fmt.Sprintf(`apiVersion: networking.k8s.io/v1
+kind: Ingress
 metadata:
   name: %s
   namespace: %s
 spec:
-  serviceName: %s
-  selector:
-    matchLabels:
-      app.kubernetes.io/name: %s
-  template:
-    metadata:
-      labels:
-%s
-    spec:
-      containers:
-        - name: %s
-          image: %s
-          ports:
-            - name: http
-              containerPort: %d
-          volumeMounts:
-`, spec.name, spec.namespace, spec.name, spec.name, labelsYAML(labels, "        "), spec.name, spec.image, spec.port)
-	for _, m := range spec.mounts {
-		fmt.Fprintf(&b, "            - name: %s\n              mountPath: %s\n", m.volume, m.path)
-	}
-	for _, m := range spec.emptyDirs {
-		fmt.Fprintf(&b, "            - name: %s\n              mountPath: %s\n", m.volume, m.path)
-	}
-	b.WriteString("      volumes:\n")
-	for _, m := range spec.mounts {
-		fmt.Fprintf(&b, "        - name: %s\n          hostPath:\n            path: %s\n            type: Directory\n", m.volume, m.host)
-	}
-	for _, m := range spec.emptyDirs {
-		fmt.Fprintf(&b, "        - name: %s\n          emptyDir: {}\n", m.volume)
-	}
-	f.object(t, spec.name, b.String())
+  rules:
+    - host: %s
+      http:
+        paths:
+          - path: %s
+            pathType: Prefix
+            backend:
+              service:
+                name: %s
+                port:
+                  number: 80
+`, name, namespace, host, path, service))
+}
+
+// node adds one Node, which is how a single-node source names its host.
+func (f *fixture) node(t *testing.T, name string) {
+	t.Helper()
+	f.object(t, "node-"+name, fmt.Sprintf(`apiVersion: v1
+kind: Node
+metadata:
+  name: %s
+`, name))
 }
 
 // object files one manifest under its own name, so a refusal can name the file

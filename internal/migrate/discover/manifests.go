@@ -13,6 +13,7 @@ import (
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	networkingv1 "k8s.io/api/networking/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	utilyaml "k8s.io/apimachinery/pkg/util/yaml"
 )
@@ -46,23 +47,41 @@ type savedObject struct {
 // discovery at a directory that also holds a backup or a log is not an error.
 func NewDirectory(fsys fs.FS) *Directory { return &Directory{fsys: fsys} }
 
-// Workloads is the saved Deployments and StatefulSets.
+// Workloads is the saved pod templates nothing owns above them, which is the
+// set a live source reads: Deployments, StatefulSets and DaemonSets, and the
+// ReplicaSets and Pods no other saved object owns.
 func (d *Directory) Workloads(ctx context.Context) ([]Workload, error) {
 	objs, err := d.load(ctx)
 	if err != nil {
 		return nil, err
 	}
 	claims := indexSavedClaims(objs)
-	var out []Workload
+	var (
+		deploys    []*appsv1.Deployment
+		stss       []*appsv1.StatefulSet
+		daemonsets []*appsv1.DaemonSet
+		sets       []*appsv1.ReplicaSet
+		barePods   []*corev1.Pod
+	)
 	for _, o := range objs {
 		switch obj := o.obj.(type) {
 		case *appsv1.Deployment:
-			out = append(out, workloadOf("Deployment", obj.Namespace, obj.Name, obj.Spec.Template.Labels, obj.Spec.Template.Spec, claims))
+			deploys = append(deploys, obj)
 		case *appsv1.StatefulSet:
-			out = append(out, workloadOf("StatefulSet", obj.Namespace, obj.Name, obj.Spec.Template.Labels, obj.Spec.Template.Spec, claims))
+			stss = append(stss, obj)
+		case *appsv1.DaemonSet:
+			daemonsets = append(daemonsets, obj)
+		case *appsv1.ReplicaSet:
+			if ownerless(obj.OwnerReferences) {
+				sets = append(sets, obj)
+			}
+		case *corev1.Pod:
+			if ownerless(obj.OwnerReferences) {
+				barePods = append(barePods, obj)
+			}
 		}
 	}
-	return out, nil
+	return workloadsOf(deploys, stss, daemonsets, sets, barePods, claims), nil
 }
 
 // Services is the saved Services.
@@ -71,13 +90,61 @@ func (d *Directory) Services(ctx context.Context) ([]Service, error) {
 	if err != nil {
 		return nil, err
 	}
-	var out []Service
+	var svcs []*corev1.Service
 	for _, o := range objs {
 		if svc, ok := o.obj.(*corev1.Service); ok {
-			out = append(out, serviceOf(svc))
+			svcs = append(svcs, svc)
 		}
 	}
-	return out, nil
+	return servicesOf(svcs), nil
+}
+
+// Ingresses is the saved Ingress rules.
+func (d *Directory) Ingresses(ctx context.Context) ([]Ingress, error) {
+	objs, err := d.load(ctx)
+	if err != nil {
+		return nil, err
+	}
+	var ings []*networkingv1.Ingress
+	for _, o := range objs {
+		if ing, ok := o.obj.(*networkingv1.Ingress); ok {
+			ings = append(ings, ing)
+		}
+	}
+	return ingressesOf(ings), nil
+}
+
+// Pods is every pod the saved source holds. A directory saved without pods
+// answers none, which is a source whose addresses were not exported rather than
+// a source that had no pod.
+func (d *Directory) Pods(ctx context.Context) ([]Pod, error) {
+	objs, err := d.load(ctx)
+	if err != nil {
+		return nil, err
+	}
+	var pods []*corev1.Pod
+	for _, o := range objs {
+		if pod, ok := o.obj.(*corev1.Pod); ok {
+			pods = append(pods, pod)
+		}
+	}
+	return podsOf(pods), nil
+}
+
+// Nodes is the saved Nodes' names: a directory exported without them names no
+// source host, which is what a source cluster with more than one node says too.
+func (d *Directory) Nodes(ctx context.Context) ([]string, error) {
+	objs, err := d.load(ctx)
+	if err != nil {
+		return nil, err
+	}
+	var nodes []*corev1.Node
+	for _, o := range objs {
+		if node, ok := o.obj.(*corev1.Node); ok {
+			nodes = append(nodes, node)
+		}
+	}
+	return nodeNames(nodes), nil
 }
 
 // Raw is every document read, as the plan directory keeps it.

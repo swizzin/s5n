@@ -12,7 +12,7 @@ import (
 
 // plan assembles the whole file: one entry per app with its own path table, the
 // data root, the Services, and the workloads left behind.
-func (d *discovery) plan(data *plan.Data, svcs []Service) *plan.Plan {
+func (d *discovery) plan(data *plan.Data) *plan.Plan {
 	p := &plan.Plan{
 		Version: plan.Version,
 		// Only the cluster reader exists so far, and it is the one that
@@ -25,7 +25,7 @@ func (d *discovery) plan(data *plan.Data, svcs []Service) *plan.Plan {
 		},
 		Data:  data,
 		Apps:  make(map[string]plan.App, len(d.instances)),
-		Hosts: d.hostRules(svcs),
+		Hosts: d.hostRules(),
 	}
 	for _, in := range d.instances {
 		p.Apps[in.name] = plan.App{
@@ -167,14 +167,10 @@ func contractPath(rel string, data *plan.Data) string {
 // install commonly runs a metrics Service beside an app's pod, forwarding to a
 // sidecar's port, and a rule for that would rewrite an address that never was
 // the app's -- a stored plex-exporter:9000 would become Plex's web endpoint.
-func (d *discovery) hostRules(svcs []Service) []plan.HostRule {
-	namespaces := make(map[string]bool, len(d.instances))
-	for _, in := range d.instances {
-		namespaces[in.wl.Namespace] = true
-	}
+func (d *discovery) hostRules() []plan.HostRule {
 	var out []plan.HostRule
-	for _, svc := range svcs {
-		if !namespaces[svc.Namespace] || len(svc.Selector) == 0 {
+	for _, svc := range d.svcs {
+		if !d.inNamespaces(svc.Namespace) || len(svc.Selector) == 0 {
 			continue
 		}
 		var picked []*instance
@@ -207,16 +203,36 @@ func (d *discovery) hostRules(svcs []Service) []plan.HostRule {
 				svc.Name, svc.Namespace, strings.Join(names, " and "))
 		}
 	}
-	sort.Slice(out, func(i, j int) bool {
-		if out[i].Service != out[j].Service {
-			return out[i].Service < out[j].Service
-		}
-		if out[i].App != out[j].App {
-			return out[i].App < out[j].App
-		}
-		return out[i].Port < out[j].Port
-	})
+	sortHostRules(out)
 	return out
+}
+
+// inNamespaces reports whether a source namespace holds one of the planned apps.
+// An object elsewhere cannot be an address one of them stored.
+func (d *discovery) inNamespaces(namespace string) bool {
+	for _, in := range d.instances {
+		if in.wl.Namespace == namespace {
+			return true
+		}
+	}
+	return false
+}
+
+// sortHostRules is the order a plan file is written in: Services first, then the
+// hosts, each by name, with the app and port breaking a tie.
+func sortHostRules(rules []plan.HostRule) {
+	sort.Slice(rules, func(i, j int) bool {
+		a, b := rules[i], rules[j]
+		switch {
+		case a.Service != b.Service:
+			return a.Service < b.Service
+		case a.Host != b.Host:
+			return a.Host < b.Host
+		case a.App != b.App:
+			return a.App < b.App
+		}
+		return a.Port < b.Port
+	})
 }
 
 // reachingRules is the rules one Service that selects one app earns: one per
