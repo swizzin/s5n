@@ -644,7 +644,7 @@ func splitURL(raw string) (string, int, error) {
 	if u.Hostname() == "" {
 		return "", 0, fmt.Errorf("%q is not a URL with a host", raw)
 	}
-	n, _ := strconv.Atoi(u.Port())
+	n := rewrite.URLPort(u)
 	return u.Hostname(), n, nil
 }
 

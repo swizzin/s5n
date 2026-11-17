@@ -2,6 +2,7 @@ package rewrite
 
 import (
 	"context"
+	"net/url"
 	"testing"
 
 	"github.com/swizzin/s5n/internal/migrate/plan"
@@ -38,6 +39,39 @@ func TestBlocked(t *testing.T) {
 	}
 	if !(Report{Unclassified: []Address{{Host: "nas"}}}).Blocked() {
 		t.Error("an unclassified address did not block apply")
+	}
+}
+
+// TestURLPort: a URL addresses the port it names, and otherwise the port its
+// scheme implies. A stored https URL with no port is port 443, which is what
+// the plan settles it by and what a refusal has to print.
+func TestURLPort(t *testing.T) {
+	tests := []struct {
+		raw  string
+		want int
+	}{
+		{"https://qbt.example.org/qbittorrent", 443},
+		{"https://qbt.example.org:/x", 443},
+		{"http://qbt.example.org/x", 80},
+		{"https://qbt.example.org:8443/x", 8443},
+		{"http://192.0.2.10:8080", 8080},
+		{"ftp://qbt.example.org/x", 0},
+	}
+	for _, tt := range tests {
+		t.Run(tt.raw, func(t *testing.T) {
+			u, err := url.Parse(tt.raw)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := URLPort(u); got != tt.want {
+				t.Errorf("URLPort(%q) = %d, want %d", tt.raw, got, tt.want)
+			}
+		})
+	}
+	// url.Parse refuses a malformed port, which URLPort itself never guesses
+	// at either: a URL built without one reads as the scheme's.
+	if got := URLPort(&url.URL{Scheme: "https", Host: "qbt.example.org"}); got != 443 {
+		t.Errorf("URLPort of a hand-built URL = %d, want 443", got)
 	}
 }
 

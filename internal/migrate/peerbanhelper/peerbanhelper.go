@@ -182,14 +182,15 @@ func (d *decision) downloaders(in rewrite.Input, rep *rewrite.Report) error {
 			rep.Notes = append(rep.Notes, fmt.Sprintf("%s %s: %q is not an http URL; left as it is", configRel, where, stored))
 			continue
 		}
-		port := 0
+		// A URL's port is the one it names, or the one its scheme implies: an
+		// https endpoint with no port is 443, which is the port a rule has to
+		// name (and the one a refusal prints).
+		port := rewrite.URLPort(u)
 		if p := u.Port(); p != "" {
-			n, convErr := strconv.Atoi(p)
-			if convErr != nil {
+			if _, convErr := strconv.Atoi(p); convErr != nil {
 				rep.Notes = append(rep.Notes, fmt.Sprintf("%s %s: %q names a port that is not a number; left as it is", configRel, where, stored))
 				continue
 			}
-			port = n
 		}
 		res := in.Resolve(u.Hostname(), port)
 		switch res.Verdict {

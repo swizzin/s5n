@@ -19,7 +19,9 @@ package rewrite
 import (
 	"context"
 	"fmt"
+	"net/url"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/swizzin/s5n/internal/migrate/plan"
@@ -92,6 +94,26 @@ func (in Input) Resolve(host string, port int) plan.Resolution {
 // case-insensitive.
 func normalizeHost(host string) string {
 	return strings.ToLower(strings.TrimSuffix(strings.Trim(host, "[]"), "."))
+}
+
+// URLPort is the port a stored URL addresses: the one it names, or the one its
+// scheme implies when it names none, so https://host/path is port 443 and not
+// 0. The plan settles an address by its port, and the refusal prints it, so an
+// http URL written without one is the port it is actually reached on. A URL of
+// any other scheme is 0. (url.Parse has already refused a malformed port, so
+// the explicit case is a number.)
+func URLPort(u *url.URL) int {
+	if p := u.Port(); p != "" {
+		n, _ := strconv.Atoi(p)
+		return n
+	}
+	switch strings.ToLower(u.Scheme) {
+	case "https":
+		return 443
+	case "http":
+		return 80
+	}
+	return 0
 }
 
 // Runner runs one tool inside the pinned image of an app with the staged config

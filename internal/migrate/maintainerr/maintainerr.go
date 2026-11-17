@@ -382,14 +382,11 @@ func parseURL(raw string) (*url.URL, error) {
 	return u, nil
 }
 
-// portOf is the port a URL names, 0 when it names none (the scheme's default,
-// which a plan rule with no port still matches).
+// portOf is the port a URL names: its explicit one, or the one its scheme
+// implies when it names none (443 for https, 80 for http). A plan rule with no
+// port matches any port either way.
 func portOf(u *url.URL) int {
-	n, err := strconv.Atoi(u.Port())
-	if err != nil {
-		return 0
-	}
-	return n
+	return rewrite.URLPort(u)
 }
 
 // endpointURL is one app's address on the box: plain HTTP, the Service's port,

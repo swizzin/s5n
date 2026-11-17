@@ -365,13 +365,13 @@ func rewriteTemplate(in rewrite.Input, value string) (moved, gap string, covered
 }
 
 // splitAddress separates a stored host from an optional port: autobrr stores
-// the two in their own columns, so a host holding a URL is the exception.
+// the two in their own columns, so a host holding a URL is the exception. A URL
+// with no port is the port its scheme implies (rewrite.URLPort).
 func splitAddress(host string) (string, int) {
 	host = strings.TrimSpace(host)
 	if strings.Contains(host, "://") {
 		if u, err := url.Parse(host); err == nil {
-			n, _ := strconv.Atoi(u.Port())
-			return u.Hostname(), n
+			return u.Hostname(), rewrite.URLPort(u)
 		}
 	}
 	if h, p, ok := strings.Cut(host, ":"); ok {

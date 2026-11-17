@@ -229,7 +229,7 @@ func planPlex(in rewrite.Input, f *iniFile, rep *rewrite.Report) ([]edit, error)
 			return nil, fmt.Errorf("tautulli: %s: %s %q is not a URL: %w", configName, keyPMSURL, urlLine.value, err)
 		}
 		if u.Hostname() != "" {
-			host, port = u.Hostname(), atoi(u.Port())
+			host, port = u.Hostname(), rewrite.URLPort(u)
 		}
 	}
 	if host == "" {

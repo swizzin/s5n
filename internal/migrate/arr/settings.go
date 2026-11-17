@@ -495,14 +495,15 @@ func (a *analysis) resolveURL(where, stored string) (newURL, target string, reso
 		a.notes = append(a.notes, fmt.Sprintf("%s in %s: %q is not an http URL; left as it is", where, a.file, stored))
 		return "", "", false, nil
 	}
-	port := 0
+	// A URL's port is the one it names, or the one its scheme implies: a
+	// stored https URL with no port is port 443, not port 0, and a rule
+	// narrowed to 443 is what settles it.
+	port := rewrite.URLPort(u)
 	if p := u.Port(); p != "" {
-		n, convErr := strconv.Atoi(p)
-		if convErr != nil {
+		if _, convErr := strconv.Atoi(p); convErr != nil {
 			a.notes = append(a.notes, fmt.Sprintf("%s in %s: %q names a port that is not a number; left as it is", where, a.file, stored))
 			return "", "", false, nil
 		}
-		port = n
 	}
 	res := a.in.Resolve(u.Hostname(), port)
 	switch res.Verdict {
