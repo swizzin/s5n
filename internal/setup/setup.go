@@ -385,6 +385,11 @@ func (d *Decision) Run(ctx context.Context, opts Options) (Result, error) {
 	if err != nil {
 		return res, d.stop(err)
 	}
+	if len(apps) == 0 {
+		// Said once, and not asked again: an empty box is a state, and the way
+		// out of it is a command rather than another form.
+		d.report().Muted("nothing runs yet: this box has no apps. add one with `box install <app>`, or run `box migrate` for an install that already exists")
+	}
 	// The peer port: a port on the node, so root settles it once and the grant
 	// keeps it from then on. It is read here, before any answer is written and
 	// before the questions that depend on the app list, because a cluster with
@@ -735,8 +740,17 @@ func (d *Decision) appsOn(grantNow map[string]any, reRun bool) []string {
 	return d.Catalog.Defaults()
 }
 
+// appsNone is the word that answers the app question with nothing: an explicit
+// empty list. `--apps ""` is not it -- an empty flag is a flag nobody filled in
+// -- and neither is leaving the picker's cursor where it started.
+const appsNone = "none"
+
 // askApps resolves the app list: the flag unattended, a multi-select otherwise,
 // preselected from the grant on a re-run and from the catalog on a fresh box.
+//
+// Nothing is a legitimate answer. A box with no apps is a state of its own:
+// apps arrive later with `box install`, or all at once with the install
+// `box migrate apply` adopts into, and that is why the picker's minimum is zero.
 func (d *Decision) askApps(opts Options, grantNow map[string]any, reRun bool) ([]string, error) {
 	names := d.Catalog.Names()
 	options := make([]Option, 0, len(names))
@@ -747,19 +761,40 @@ func (d *Decision) askApps(opts Options, grantNow map[string]any, reRun bool) ([
 
 	current := d.appsOn(grantNow, reRun)
 
-	given := splitApps(opts.Apps)
+	// "none" is the empty list spelled out, so it can never be one of the
+	// answers beside an app: one of the two is not what the operator meant, and
+	// guessing which would install the wrong box.
+	var given []string
+	none := false
+	for _, part := range splitApps(opts.Apps) {
+		if strings.EqualFold(part, appsNone) {
+			none = true
+			continue
+		}
+		given = append(given, part)
+	}
+	if none && len(given) > 0 {
+		return nil, fmt.Errorf("--apps %s: %s is the empty list, so it cannot be one of the apps", strings.Join(splitApps(opts.Apps), ", "), appsNone)
+	}
+
 	if opts.Unattended {
-		if len(given) == 0 {
+		switch {
+		case none:
+			return nil, nil
+		case len(given) == 0:
 			if reRun {
 				return current, nil
 			}
-			return nil, fmt.Errorf("--apps is needed: comma separated app names from %s", strings.Join(names, ", "))
+			return nil, fmt.Errorf("--apps is needed: comma separated app names from %s, or %s for a box with nothing on yet", strings.Join(names, ", "), appsNone)
 		}
 		return checkApps(given, names)
 	}
 
 	selected := current
-	if len(given) > 0 {
+	switch {
+	case none:
+		selected = nil
+	case len(given) > 0:
 		chosen, err := checkApps(given, names)
 		if err != nil {
 			return nil, err
@@ -771,7 +806,7 @@ func (d *Decision) askApps(opts Options, grantNow map[string]any, reRun bool) ([
 		Prompt:   "which apps should this box have",
 		Options:  options,
 		Selected: selected,
-		Min:      1,
+		Min:      0,
 	})
 }
 

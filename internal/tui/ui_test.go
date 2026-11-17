@@ -480,3 +480,25 @@ func contains(list []string, want string) bool {
 	}
 	return false
 }
+
+// TestMultiSelectRecordsNothingIsAnswered: an empty box is an answer the
+// scrollback has to carry. A record line with no value is one the transcript
+// drops, so the picker says the word instead -- "apps  none", the same way the
+// statically drawn screens say it.
+func TestMultiSelectRecordsNothingIsAnswered(t *testing.T) {
+	u, out := line("\n")
+	got, err := u.MultiSelect(setup.MultiSelect{
+		Key:     "apps",
+		Options: []setup.Option{{Value: "sonarr", Label: "sonarr"}},
+		Min:     0,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("answer = %v, want no apps", got)
+	}
+	if text := stripANSI(out.String()); !strings.Contains(text, "apps  none") {
+		t.Fatalf("the transcript does not record the empty answer:\n%s", text)
+	}
+}

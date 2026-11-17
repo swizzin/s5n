@@ -436,6 +436,11 @@ tls:
 EOF
 fi
 
+# APPS is the app list bootstrap and init write into the grant. Every run wants
+# the whole catalog in front of it; the one step that proves a box with nothing
+# on sets it to `none`, the word for the empty list.
+APPS="qbittorrent,sonarr,radarr,prowlarr,plex,tautulli,seerr,qui,autobrr,maintainerr,pbh"
+
 bootstrap() { # bootstrap <output file>
   # The platform and root's seedbox are one command now. --record points the
   # cluster decision at this work directory: on a real host it is
@@ -448,7 +453,7 @@ bootstrap() { # bootstrap <output file>
     --grant "$WORK/grant.yaml" --values "$WORK/values.yaml" \
     --namespace "$NS" --domain "$DOMAIN" \
     --data-path "$DATA_PATH" --config-path "$CONFIG_PATH" \
-    --apps qbittorrent,sonarr,radarr,prowlarr,plex,tautulli,seerr,qui,autobrr,maintainerr,pbh \
+    --apps "$APPS" \
     --puid 1000 --pgid 1000 \
     --login "$LOGIN" --password-file "$WORK/authelia-password" \
     --paths-in-node --record "$WORK/cluster.yaml" \
@@ -467,7 +472,7 @@ init() { # init <output file> [extra dev flags]
     --grant "$WORK/grant.yaml" --values "$WORK/values.yaml" \
     --namespace "$NS" --domain "$DOMAIN" \
     --data-path "$DATA_PATH" --config-path "$CONFIG_PATH" \
-    --apps qbittorrent,sonarr,radarr,prowlarr,plex,tautulli,seerr,qui,autobrr,maintainerr,pbh \
+    --apps "$APPS" \
     --puid 1000 --pgid 1000 \
     --login "$LOGIN" --password-file "$WORK/authelia-password" \
     --paths-in-node "${@:2}" \
@@ -3453,6 +3458,65 @@ PYSONARR
     { echo "autobrr's onboarding endpoint answered ${onboard_code}: the account that closes it is missing"; fail=1; }
   grep -q 'onboarding unavailable' "$WORK/onboard.json" ||
     { echo "the refusal is not autobrr's own onboarding one"; fail=1; }
+
+  # ---- a box with no apps at all --------------------------------------------
+  # An empty box is a state box installs and reports, not a refusal: it is what
+  # `box init --apps none` writes, what the picker leaves when nothing is
+  # ticked, and the box `box migrate apply` adopts into before it switches the
+  # plan's apps on. So every app goes off in one init, and what has to be true
+  # afterwards is that the release is still deployed and the Job still publishes
+  # an ok receipt -- the Job is the release's Helm hook, so a Job that failed on
+  # a config with no app in it would make an empty box uninstallable.
+  log "box init --apps none: every app off is an install, not a refusal"
+  APPS=none
+  if init "$WORK/init-none.txt"; then
+    cat "$WORK/init-none.txt"
+  else
+    cat "$WORK/init-none.txt"; fail=1
+  fi
+  apps_on=$(python3 - "$WORK/grant.yaml" <<'PY' || true
+import sys, yaml
+grant = yaml.safe_load(open(sys.argv[1])) or {}
+print(",".join(n for n, a in (grant.get("apps") or {}).items() if (a or {}).get("enabled")))
+PY
+  )
+  echo "  apps on after --apps none: ${apps_on:-none}"
+  [ -z "$apps_on" ] || { echo "the grant still has ${apps_on} on after --apps none"; fail=1; }
+  grep -qF "nothing runs yet" "$WORK/init-none.txt" ||
+    { echo "init did not say what an empty box is"; fail=1; }
+  # The wiring Job ran inside that apply. Its receipt is the one `box apply`
+  # waits for, and with nothing to wire it says ok and writes nothing.
+  wiring_status=$(status_field 'd["status"]' 2>/dev/null || echo missing)
+  created=$(status_field 'd["writes"]["created"]' 2>/dev/null || echo missing)
+  updated=$(status_field 'd["writes"]["updated"]' 2>/dev/null || echo missing)
+  echo "  receipt after --apps none: ${wiring_status}, created ${created}, updated ${updated}"
+  [ "$wiring_status" = ok ] || { echo "the Job's receipt is ${wiring_status}, want ok: it is the release's hook"; fail=1; }
+  [ "$created" = 0 ] && [ "$updated" = 0 ] ||
+    { echo "a run with no apps created ${created} and updated ${updated} objects"; fail=1; }
+
+  # And nothing of the apps is left running: a release with every app off has a
+  # Secret, a ServiceAccount, the Job and the policies, and no workload.
+  apps_pods() {
+    $K -n "$NS" get pods -o name 2>/dev/null |
+      grep -cE 'pod/(qbittorrent|sonarr|radarr|prowlarr|plex|tautulli|seerr|qui|autobrr|maintainerr|pbh)(-|$)' || true
+  }
+  for i in $(seq 1 120); do
+    [ "$(apps_pods)" = 0 ] && break
+    sleep 2
+  done
+  echo "  app pods after --apps none: $(apps_pods)"
+  [ "$(apps_pods)" = 0 ] ||
+    { echo "the apps are still running after --apps none: $($K -n "$NS" get pods -o name | tr '\n' ' ')"; fail=1; }
+
+  # `box status` is the one line an operator reads, and an empty box is on it:
+  # the release is deployed, so the line names it instead of "?".
+  status_line=$("$WORK/box" status --record "$WORK/cluster.yaml" --grant "$WORK/grant.yaml" \
+    --values "$WORK/values.yaml" --kubeconfig "$WORK/kubeconfig" 2>&1) || { echo "box status failed on an empty box"; fail=1; }
+  echo "  box status: ${status_line}"
+  case "$status_line" in
+    "s5n ${CHART_VERSION} · "*) : ;;
+    *) echo "box status does not report the deployed release on an empty box: ${status_line}"; fail=1 ;;
+  esac
 
   # ---- the claims outlive the release ----------------------------------------
   # The one destructive command an operator runs is `helm uninstall`: the data

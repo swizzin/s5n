@@ -258,6 +258,16 @@ func optionLabel(options []setup.Option, value string) string {
 	return value
 }
 
+// chosenList is a multi-select answer as its record line shows it. Nothing
+// chosen is said, not left blank: "apps  none" is an answer a person gave, and
+// a record line with no value is one the scrollback drops entirely.
+func chosenList(options []setup.Option, values []string) string {
+	if len(values) == 0 {
+		return "none"
+	}
+	return strings.Join(optionLabels(options, values), ", ")
+}
+
 // optionLabels is optionLabel for a multi-select, in the order the answer
 // holds them.
 func optionLabels(options []setup.Option, values []string) []string {
@@ -434,7 +444,7 @@ func (u *UI) MultiSelect(f setup.MultiSelect) ([]string, error) {
 		if strings.TrimSpace(name) == "" {
 			name = f.Prompt
 		}
-		u.record(name, strings.Join(optionLabels(f.Options, value), ", "))
+		u.record(name, chosenList(f.Options, value))
 	}); err != nil {
 		return nil, err
 	}
