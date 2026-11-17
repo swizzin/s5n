@@ -711,6 +711,16 @@ func (d *Decision) namespace(opts Options, grantNow map[string]any, reRun bool) 
 	return ns, nil
 }
 
+// id is one of puid and pgid while it is still being decided: the value, and
+// whether something has already answered for it.
+type id struct {
+	value int
+	set   bool
+}
+
+// take records the answer for this id.
+func (i *id) take(v int) { i.value, i.set = v, true }
+
 // owners resolves puid and pgid, in the order docs/box.md sets out: the flag
 // when it was given, the grant's value on a re-run, the owner of a data path
 // that already holds files, and only then what cmd/box derived from the invoking
@@ -720,65 +730,68 @@ func (d *Decision) namespace(opts Options, grantNow map[string]any, reRun bool) 
 // install that changed the owner of an existing library would leave the apps
 // unable to write it. It is never read through a symlink.
 func (d *Decision) owners(opts Options, grantNow map[string]any, reRun bool, dataPath string) (int, int, error) {
-	puid, pgid := 0, 0
-	pDone, gDone := false, false
+	var puid, pgid id
 	if opts.PUIDSet {
-		puid, pDone = opts.PUID, true
+		puid.take(opts.PUID)
 	}
 	if opts.PGIDSet {
-		pgid, gDone = opts.PGID, true
+		pgid.take(opts.PGID)
 	}
 	// An installed box keeps its owner: a stray file does not re-chown a release.
-	if reRun {
-		if !pDone {
-			if n, ok := intAt(grantNow, "global.puid"); ok {
-				puid, pDone = n, true
-			}
-		}
-		if !gDone {
-			if n, ok := intAt(grantNow, "global.pgid"); ok {
-				pgid, gDone = n, true
-			}
+	if reRun && !puid.set {
+		if v, ok := intAt(grantNow, "global.puid"); ok {
+			puid.take(v)
 		}
 	}
-	if !pDone || !gDone {
-		uid, gid, mine, err := d.dataOwner(dataPath)
+	if reRun && !pgid.set {
+		if v, ok := intAt(grantNow, "global.pgid"); ok {
+			pgid.take(v)
+		}
+	}
+	if !puid.set || !pgid.set {
+		uid, gid, holds, err := d.dataOwner(dataPath)
 		if err != nil {
 			return 0, 0, err
 		}
-		if mine {
-			if !pDone {
-				puid, pDone = uid, true
+		if holds {
+			if !puid.set {
+				puid.take(uid)
 			}
-			if !gDone {
-				pgid, gDone = gid, true
+			if !pgid.set {
+				pgid.take(gid)
 			}
 		}
 	}
-	if !pDone {
-		puid = opts.PUID
+	if !puid.set {
+		puid.take(opts.PUID)
 	}
-	if !gDone {
-		pgid = opts.PGID
+	if !pgid.set {
+		pgid.take(opts.PGID)
 	}
-	// Root is never the answer: the apps run unprivileged, and a root-owned data
-	// path is one they could not write. Unattended names the flags; a terminal
-	// asks, because the operator knows whose files those are.
-	if puid <= 0 || pgid <= 0 {
-		if opts.Unattended {
-			return 0, 0, fmt.Errorf("--puid and --pgid are needed: %s is owned by root (0:0), and the apps do not run as root", dataPath)
+	return d.usableIDs(opts, dataPath, puid.value, pgid.value)
+}
+
+// usableIDs is the last word on the two ids: root is never the answer, because
+// the apps run unprivileged and a root-owned data path is one they could not
+// write. Unattended names the flags; a terminal asks, because the operator knows
+// whose files those are.
+func (d *Decision) usableIDs(opts Options, dataPath string, puid, pgid int) (int, int, error) {
+	if puid > 0 && pgid > 0 {
+		return puid, pgid, nil
+	}
+	if opts.Unattended {
+		return 0, 0, fmt.Errorf("--puid and --pgid are needed: %s is owned by root (0:0), and the apps do not run as root", dataPath)
+	}
+	d.step(2, "who owns the files in "+dataPath+"?")
+	var err error
+	if puid <= 0 {
+		if puid, err = d.askID("global.puid", "file owner uid", "the uid of the account that owns the data path's files"); err != nil {
+			return 0, 0, err
 		}
-		d.step(2, "who owns the files in "+dataPath+"?")
-		var err error
-		if puid <= 0 {
-			if puid, err = d.askID("global.puid", "file owner uid", "the uid of the account that owns the data path's files"); err != nil {
-				return 0, 0, err
-			}
-		}
-		if pgid <= 0 {
-			if pgid, err = d.askID("global.pgid", "file owner gid", "the gid of that account's group"); err != nil {
-				return 0, 0, err
-			}
+	}
+	if pgid <= 0 {
+		if pgid, err = d.askID("global.pgid", "file owner gid", "the gid of that account's group"); err != nil {
+			return 0, 0, err
 		}
 	}
 	return puid, pgid, nil

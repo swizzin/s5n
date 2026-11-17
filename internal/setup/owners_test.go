@@ -12,7 +12,8 @@ import (
 
 // dataWith puts one file in the data path, owned by uid:gid: the state this
 // rule is about (a data path that already holds somebody's files).
-func dataWith(h *fakeHost, path string, uid, gid int) {
+func dataWith(h *fakeHost, uid, gid int) {
+	const path = "/srv/s5n/data"
 	h.listing[path] = []DirEntry{{Name: "downloads", IsDir: true}}
 	h.owners[path] = owner{uid, gid}
 }
@@ -42,7 +43,7 @@ func grantID(t *testing.T, h *harness, key string) int {
 // only the fallback for a path with nothing in it.
 func TestFilesOwnerComesFromTheDataPath(t *testing.T) {
 	h := newHarness(t)
-	dataWith(h.host, "/srv/s5n/data", 1500, 1600)
+	dataWith(h.host, 1500, 1600)
 	opts := h.unattended()
 	opts.Apps = []string{"alpha"}
 	opts.PUID, opts.PGID = 1000, 1000
@@ -81,7 +82,7 @@ func TestFilesOwnerFallsBackToTheInvokingUser(t *testing.T) {
 // files belong to, and that is not a guess box overrides from a directory.
 func TestFilesFlagsBeatTheDataOwner(t *testing.T) {
 	h := newHarness(t)
-	dataWith(h.host, "/srv/s5n/data", 1500, 1600)
+	dataWith(h.host, 1500, 1600)
 	opts := h.unattended()
 	opts.Apps = []string{"alpha"}
 	opts.PUID, opts.PGID, opts.PUIDSet, opts.PGIDSet = 1000, 1000, true, true
@@ -99,7 +100,7 @@ func TestFilesFlagsBeatTheDataOwner(t *testing.T) {
 func TestFilesOwnerOnAReRunIsTheGrants(t *testing.T) {
 	h := newHarness(t)
 	write(t, h.grantPath, reRunGrant)
-	dataWith(h.host, "/srv/s5n/data", 1500, 1600)
+	dataWith(h.host, 1500, 1600)
 	h.prompt.inputs = []string{"old.example.com"}
 	h.prompt.multis = [][]string{{"alpha"}}
 	opts := h.options()
@@ -118,7 +119,7 @@ func TestFilesOwnerOnAReRunIsTheGrants(t *testing.T) {
 // stops and names the flags rather than installing a box that cannot work.
 func TestRootOwnedDataPathIsRefusedUnattended(t *testing.T) {
 	h := newHarness(t)
-	dataWith(h.host, "/srv/s5n/data", 0, 0)
+	dataWith(h.host, 0, 0)
 	opts := h.unattended()
 	opts.Apps = []string{"alpha"}
 	opts.PUID, opts.PGID = 0, 0
@@ -141,7 +142,7 @@ func TestRootOwnedDataPathIsRefusedUnattended(t *testing.T) {
 // whose files those are, so the same state is a question instead of a refusal.
 func TestRootOwnedDataPathAsksForTheOwnerGuided(t *testing.T) {
 	h := newHarness(t)
-	dataWith(h.host, "/srv/s5n/data", 0, 0)
+	dataWith(h.host, 0, 0)
 	h.prompt.inputs = []string{"box.example.com", "/srv/s5n/data", "/srv/s5n/config"}
 	h.prompt.multis = [][]string{{"alpha"}}
 	opts := h.options()

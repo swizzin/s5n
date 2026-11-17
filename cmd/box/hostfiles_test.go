@@ -26,12 +26,12 @@ func oldBox(names ...string) hostDisk {
 	return d
 }
 
-func checkFiles(t *testing.T, d hostDisk, record, grant string) (error, string) {
+func checkFiles(t *testing.T, d hostDisk, record, grant string) (string, error) {
 	t.Helper()
 	var buf bytes.Buffer
 	out := &say.Plain{W: &buf, Err: &buf}
 	err := checkHostFiles(d.stat, record, grant, out)
-	return err, buf.String()
+	return buf.String(), err
 }
 
 // TestHostFilesRefusesAOldBoxOnANewBox: this is the upgrade 0.5 does not
@@ -39,7 +39,7 @@ func checkFiles(t *testing.T, d hostDisk, record, grant string) (error, string) 
 // command before it reads "no record" and decides to install over a box that
 // is already there, and it says the move as a command to check first.
 func TestHostFilesRefusesAOldBoxOnANewBox(t *testing.T) {
-	err, said := checkFiles(t, oldBox("cluster.yaml"), hostroot.RecordPath, seedbox.GrantPath("root"))
+	said, err := checkFiles(t, oldBox("cluster.yaml"), hostroot.RecordPath, seedbox.GrantPath("root"))
 	if err == nil {
 		t.Fatalf("a box with its record at %s was not refused; it said:\n%s", hostroot.LegacyDir, said)
 	}
@@ -59,7 +59,7 @@ func TestHostFilesRefusesAOldBoxOnANewBox(t *testing.T) {
 func TestHostFilesWarnsWhenBothRootsHaveIt(t *testing.T) {
 	d := oldBox("cluster.yaml")
 	d[hostroot.RecordPath] = true
-	err, said := checkFiles(t, d, hostroot.RecordPath, seedbox.GrantPath("root"))
+	said, err := checkFiles(t, d, hostroot.RecordPath, seedbox.GrantPath("root"))
 	if err != nil {
 		t.Fatalf("a moved record was refused: %v", err)
 	}
@@ -74,7 +74,7 @@ func TestHostFilesWarnsWhenBothRootsHaveIt(t *testing.T) {
 // TestHostFilesIsSilentOnAFreshHost: a host box has never run on says nothing
 // about the old root.
 func TestHostFilesIsSilentOnAFreshHost(t *testing.T) {
-	err, said := checkFiles(t, hostDisk{}, hostroot.RecordPath, seedbox.GrantPath("root"))
+	said, err := checkFiles(t, hostDisk{}, hostroot.RecordPath, seedbox.GrantPath("root"))
 	if err != nil || said != "" {
 		t.Fatalf("a fresh host said %q (%v)", said, err)
 	}
@@ -84,7 +84,7 @@ func TestHostFilesIsSilentOnAFreshHost(t *testing.T) {
 // --record and --grant somewhere else is not reading the default root, so an
 // old box on the machine is none of its business.
 func TestHostFilesIgnoresTheRunsOwnPaths(t *testing.T) {
-	err, said := checkFiles(t, oldBox("cluster.yaml", "box.yaml", "seedboxes"), "/srv/e2e/cluster.yaml", "/srv/e2e/root.yaml")
+	said, err := checkFiles(t, oldBox("cluster.yaml", "box.yaml", "seedboxes"), "/srv/e2e/cluster.yaml", "/srv/e2e/root.yaml")
 	if err != nil || said != "" {
 		t.Fatalf("a run with its own paths looked at the default root: %q (%v)", said, err)
 	}
