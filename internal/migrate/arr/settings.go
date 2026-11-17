@@ -186,34 +186,54 @@ func mustJSON(v string) json.RawMessage {
 	return data
 }
 
+// providerEnable is the column each provider table stores "this provider is on"
+// in. An app's definition may compute the flag instead of storing it
+// (NotificationDefinition.Enable is derived from its event flags,
+// sonarr@v4.0.14.2938:src/NzbDrone.Core/Notifications/NotificationDefinition.cs),
+// and then the table has no column and every row is on. The three that do store
+// it: DownloadClients.Enable (ProviderDefinition.Enable,
+// src/NzbDrone.Core/ThingiProvider/ProviderDefinition.cs), an Arr import list's
+// EnableAutomaticAdd (ImportListDefinition.Enable, src/NzbDrone.Core/ImportLists)
+// and a Prowlarr application's SyncLevel (ApplicationDefinition.Enable,
+// prowlarr@v2.7.0.5723:src/NzbDrone.Core/Applications/ApplicationDefinition.cs,
+// Disabled = 0).
+var providerEnable = map[string]string{
+	"DownloadClients": "Enable",
+	"ImportLists":     "EnableAutomaticAdd",
+	"Applications":    "SyncLevel",
+}
+
 // provider is one row of a table that stores a provider's settings as JSON.
 type provider struct {
 	id             int64
 	name           string
 	implementation string
-	// enabled is the row's Enable column. A disabled client is one the app
-	// never dials, so an address it stores that cannot be placed is left alone
-	// rather than made a refusal (DownloadClients.Enable, Applications.Enable,
-	// ImportLists.Enable). A row in a table without one is enabled.
+	// enabled is false for a provider the app never dials, so an address it
+	// stores that cannot be placed is left alone rather than made a refusal. A
+	// row in a table without the flag is on.
 	enabled  bool
 	settings fields
 }
 
 // providerTable reads a provider table. Every one of them has the same four
 // columns this pass needs: the row's id and name, the implementation that
-// decides the settings' shape, and the settings blob. A table that also carries
-// Enable is read with it; Notifications does not, and a row without the flag is
-// one the app dials.
+// decides the settings' shape, and the settings blob. A table that also stores
+// whether the provider is on is read with it (providerEnable); a row without the
+// flag is one the app dials.
 func (a *analysis) providerTable(ctx context.Context, db *sql.DB, table string, visit func(provider) error) error {
-	withEnable, err := hasColumn(ctx, db, table, "Enable")
-	if err != nil {
-		return err
+	withEnable := false
+	if column := providerEnable[table]; column != "" {
+		ok, err := hasColumn(ctx, db, table, column)
+		if err != nil {
+			return err
+		}
+		withEnable = ok
 	}
 	columns := "Id, Name, Implementation, Settings"
 	if withEnable {
-		columns = "Id, Name, Enable, Implementation, Settings"
+		columns = "Id, Name, " + providerEnable[table] + ", Implementation, Settings"
 	}
-	//nolint:gosec // the table name is a constant in this package
+	//nolint:gosec // the table name and the column are constants in this package
 	rows, err := db.QueryContext(ctx, "SELECT "+columns+" FROM "+table)
 	if err != nil {
 		return fmt.Errorf("read %s in %s: %w", table, a.file, err)
@@ -223,9 +243,9 @@ func (a *analysis) providerTable(ctx context.Context, db *sql.DB, table string, 
 		var p provider
 		var implementation, settings sql.NullString
 		if withEnable {
-			var enabled sql.NullBool
+			var enabled sql.NullInt64
 			err = rows.Scan(&p.id, &p.name, &enabled, &implementation, &settings)
-			p.enabled = !enabled.Valid || enabled.Bool
+			p.enabled = !enabled.Valid || enabled.Int64 != 0
 		} else {
 			err = rows.Scan(&p.id, &p.name, &implementation, &settings)
 			p.enabled = true

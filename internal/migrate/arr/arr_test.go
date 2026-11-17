@@ -208,7 +208,7 @@ func sonarrSchema() []string {
 	return []string{
 		`CREATE TABLE Series (Id INTEGER PRIMARY KEY, Path TEXT)`,
 		`CREATE TABLE RootFolders (Id INTEGER PRIMARY KEY, Path TEXT)`,
-		`CREATE TABLE ImportLists (Id INTEGER PRIMARY KEY, Name TEXT, Implementation TEXT, Settings TEXT, RootFolderPath TEXT)`,
+		`CREATE TABLE ImportLists (Id INTEGER PRIMARY KEY, Name TEXT, EnableAutomaticAdd INTEGER, Implementation TEXT, Settings TEXT, RootFolderPath TEXT)`,
 		`CREATE TABLE RemotePathMappings (Id INTEGER PRIMARY KEY, Host TEXT, RemotePath TEXT, LocalPath TEXT)`,
 		`CREATE TABLE DownloadClients (Id INTEGER PRIMARY KEY, Name TEXT, Enable INTEGER, Implementation TEXT, Settings TEXT)`,
 		`CREATE TABLE Notifications (Id INTEGER PRIMARY KEY, Name TEXT, Implementation TEXT, Settings TEXT)`,
@@ -224,7 +224,7 @@ func radarrSchema() []string {
 		`CREATE TABLE Movies (Id INTEGER PRIMARY KEY, Path TEXT)`,
 		`CREATE TABLE Collections (Id INTEGER PRIMARY KEY, RootFolderPath TEXT)`,
 		`CREATE TABLE RootFolders (Id INTEGER PRIMARY KEY, Path TEXT)`,
-		`CREATE TABLE ImportLists (Id INTEGER PRIMARY KEY, Name TEXT, Implementation TEXT, Settings TEXT, RootFolderPath TEXT)`,
+		`CREATE TABLE ImportLists (Id INTEGER PRIMARY KEY, Name TEXT, EnableAutomaticAdd INTEGER, Implementation TEXT, Settings TEXT, RootFolderPath TEXT)`,
 		`CREATE TABLE RemotePathMappings (Id INTEGER PRIMARY KEY, Host TEXT, RemotePath TEXT, LocalPath TEXT)`,
 		`CREATE TABLE DownloadClients (Id INTEGER PRIMARY KEY, Name TEXT, Implementation TEXT, Settings TEXT)`,
 		`CREATE TABLE Notifications (Id INTEGER PRIMARY KEY, Name TEXT, Implementation TEXT, Settings TEXT)`,
@@ -239,7 +239,7 @@ func radarrSchema() []string {
 // path mappings (prowlarr@v2.7.0.5723:src/NzbDrone.Core/Datastore/TableMapping.cs:41-101).
 func prowlarrSchema() []string {
 	return []string{
-		`CREATE TABLE Applications (Id INTEGER PRIMARY KEY, Name TEXT, Implementation TEXT, Settings TEXT)`,
+		`CREATE TABLE Applications (Id INTEGER PRIMARY KEY, Name TEXT, SyncLevel INTEGER, Implementation TEXT, Settings TEXT)`,
 		`CREATE TABLE DownloadClients (Id INTEGER PRIMARY KEY, Name TEXT, Implementation TEXT, Settings TEXT)`,
 		`CREATE TABLE Notifications (Id INTEGER PRIMARY KEY, Name TEXT, Implementation TEXT, Settings TEXT)`,
 		`CREATE TABLE Config (Id INTEGER PRIMARY KEY, Key TEXT, Value TEXT)`,
@@ -614,6 +614,58 @@ func TestDisabledClientIsLeft(t *testing.T) {
 	if got := setting(t, filepath.Join(dir, "sonarr.db"), "SELECT Settings FROM DownloadClients WHERE Id = 1"); got["host"] != "192.0.2.77" {
 		t.Errorf("a disabled client's row was rewritten: %v", got)
 	}
+}
+
+// TestDisabledSyncIsLeft: an import list or a Prowlarr application the app has
+// switched off is never dialled either, and each app stores that flag in its own
+// column (ImportListDefinition.Enable is EnableAutomaticAdd,
+// ApplicationDefinition.Enable is SyncLevel). A base URL nothing settles there is
+// left and called out, not a refusal.
+func TestDisabledSyncIsLeft(t *testing.T) {
+	ctx := context.Background()
+	t.Run("import list", func(t *testing.T) {
+		dir := t.TempDir()
+		newDB(t, filepath.Join(dir, "sonarr.db"), append(sonarrSchema(),
+			`INSERT INTO ImportLists (Id, Name, Implementation, Settings, RootFolderPath, EnableAutomaticAdd) VALUES
+				(1, 'off', 'Sonarr', '{"baseUrl":"http://192.0.2.60:8989","apiKey":"k"}', '', 0),
+				(2, 'on', 'Sonarr', '{"baseUrl":"http://192.0.2.61:8989","apiKey":"k"}', '', 1)`,
+		)...)
+		writeFile(t, filepath.Join(dir, "config.xml"), "<Config>\n  <Port>8989</Port>\n</Config>")
+		in := input(t, dir, "sonarr", sonarrPlan)
+		rep, err := (rewriter{kind: kindSonarr}).Check(ctx, in)
+		if err != nil {
+			t.Fatalf("Check: %v", err)
+		}
+		if len(rep.Left) != 1 || rep.Left[0].What != "192.0.2.60:8989" {
+			t.Errorf("Left = %+v, want the list that is switched off", rep.Left)
+		}
+		if want := []string{"sonarr sonarr.db ImportLists.Settings.baseUrl: 192.0.2.61:8989"}; !reflect.DeepEqual(addressStrings(rep.Unclassified), want) {
+			t.Errorf("unclassified = %v, want %v", addressStrings(rep.Unclassified), want)
+		}
+	})
+	t.Run("prowlarr application", func(t *testing.T) {
+		dir := t.TempDir()
+		newDB(t, filepath.Join(dir, "prowlarr.db"), append(prowlarrSchema(),
+			`INSERT INTO Applications (Id, Name, Implementation, Settings, SyncLevel) VALUES
+				(1, 'off', 'Sonarr', '{"baseUrl":"http://192.0.2.60:8989","prowlarrUrl":"http://192.0.2.60:9696"}', 0),
+				(2, 'on', 'Sonarr', '{"baseUrl":"http://192.0.2.61:8989","prowlarrUrl":"http://192.0.2.61:9696"}', 1)`,
+		)...)
+		writeFile(t, filepath.Join(dir, "config.xml"), "<Config>\n  <Port>9696</Port>\n</Config>")
+		in := input(t, dir, "prowlarr", prowlarrPlan)
+		in.Targets["prowlarr"] = rewrite.Endpoint{Host: "prowlarr", Port: 9696, URLBase: "/prowlarr"}
+		rep, err := (rewriter{kind: kindProwlarr}).Check(ctx, in)
+		if err != nil {
+			t.Fatalf("Check: %v", err)
+		}
+		if len(rep.Left) != 2 {
+			t.Errorf("Left = %+v, want the application's two URLs", rep.Left)
+		}
+		for _, a := range rep.Unclassified {
+			if a.Host != "192.0.2.61" {
+				t.Errorf("unclassified = %v, want only the application that syncs", addressStrings(rep.Unclassified))
+			}
+		}
+	})
 }
 
 // TestClientTypeBoxDoesNotRunExistsIsLeft: box runs qBittorrent and nothing
