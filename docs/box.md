@@ -385,7 +385,7 @@ Status per command: **D** decided, **P** proposed.
 | `box logs <app>` | root, user | the app's logs | D |
 | `box restart <app>` | root, user | restarts one app | P |
 | `box backup` / `restore` | root, user | app configs, qBittorrent state, Arr databases; nothing until configured | D |
-| `box migrate` | root | adopts an existing install | D |
+| `box migrate` | root | adopts an install box didn't make: `discover` reads and plans, `cutover` takes the final snapshot, `apply` installs or adopts from it | D |
 | `box uninstall` | root | removes box from the server | D |
 
 `--user <name>` lets root run any user command against that user's seedbox.
@@ -930,8 +930,71 @@ proven for both.
 `migrate` adopts an install box didn't make: its app configs, its torrent state and its
 data. Everything it will change is written down before it changes anything.
 
-- **Discovery comes first and writes a plan (decided).** migrate reads the source while
-  it is still running: each app's config directory, the paths the apps saw (container
+- **Three verbs (decided).** `box migrate discover [--rehearsal]` reads a source and
+  writes the plan, `box migrate cutover [--replace-cluster]` takes the final snapshot on
+  the source host, and `box migrate apply [file]` installs or adopts from a snapshot.
+  Each of them takes `--values`, and applies exactly that file's values.
+- **One place for snapshots (decided).** They live in `/var/lib/s5n/migrate/`; discover
+  writes there, or where `--out` names, and `box migrate apply` with no file takes the
+  newest snapshot there. A snapshot from another host is the file to pass.
+- **discover only reads, and the apps need not run (decided).** It reads each workload's
+  pod template and the host's files, so it needs the cluster up, never the app: a
+  stopped app is still there to read. Every workload kind with nothing owning it above
+  it is read — Deployment, StatefulSet, DaemonSet, an ownerless ReplicaSet, a bare Pod
+  (the goal is decided; the set of kinds is the mechanism).
+- **Nothing unsettled reaches the install (decided).** discover and cutover run every
+  rewriter's check pass, which writes nothing, against the draft plan. An address or a
+  path that cannot be settled becomes a plan entry with a default and a one-line reason
+  rather than a refusal after install; a guided run asks those questions, an unattended
+  one writes the defaults and says so. apply refuses only for drift: a plan edited by
+  hand, or an adoption into a box that already runs something the plan names.
+- **box never stops or resets a source (decided).** It prints the command for the
+  platform it found — `kubectl scale`, `docker stop`, `systemctl stop`, the reset recipe
+  for a cluster it didn't install — shown as one to double-check, and the operator runs
+  it.
+- **cutover is the window (decided).** It refuses while any planned app still runs: the
+  workload at replicas 0 and no pod left. It writes its read before printing any stop
+  command, so following box's advice is always safe. With no earlier discover it warns
+  and asks whether what it found is everything; with one, it diffs, and an app the
+  earlier read had and this one cannot find stops the cutover.
+- **The source's cluster is kept by default (decided).** A kept cluster is self-managed:
+  box installs onto it, manages none of its version, and the whole cutover runs in one
+  go — platform, install, adoption — with the source's workloads left at 0.
+  `--replace-cluster` asks for box's own k0s instead: cutover stops after the final
+  snapshot with the reset recipe, and `box migrate apply` finishes on the clean host.
+- **apply is the installer on a host with no box (decided).** It runs bootstrap and then
+  init's steps from the plan: the apps, the data root and the owner are the plan's, and
+  only the domain, the login, the password and the config path are asked. On a host
+  that already has a box it adopts into it, which is how one source is migrated per
+  user.
+- **One snapshot file, and it is the backup format (decided).** A snapshot is one tar +
+  gzip archive with a manifest holding a sha256 per entry, so a truncated copy is
+  refused rather than half-applied. `plan.yaml`, `source/`, `report.txt` and `config/`
+  are inside it. It holds secrets — API keys, the Plex token, qBittorrent's password
+  hash — so it is root-only, 0600. `box backup` writes the same file from box itself,
+  and `restore` is `migrate apply` of that snapshot: one format, one apply path.
+- **A rehearsal cannot reach the internet (decided goal, mechanism proposed).**
+  `discover --rehearsal` copies the configs into a snapshot that applies locked: no
+  internet egress, proven from inside the namespace before any app starts, and every
+  torrent started stopped. A rehearsal box is disposable, never renames data, and
+  refuses to apply on the host that holds the source's data.
+- **Every source is detected, and one plan can hold several (decided).** discover runs
+  each reader that finds evidence — a cluster at a known kubeconfig, a docker socket
+  with catalog images running, swizzin's units — and shows what it found. Each app
+  records the source kind it came from, so one plan carries the apps of every platform.
+  One reader per platform: a new platform adds a reader and its e2e, never a new plan
+  shape. Readers ship Kubernetes, then swizzin classic, then docker.
+- **Images come from the blessed variants (decided).** A source image maps to a variant
+  only when it already is one of the chart's blessed variants, same repository and same
+  variant; anything else gets the chart default and a note naming
+  `apps.<app>.image.variant` and the list. The source's own image is never carried, and
+  the admission policy stays the guard.
+- **One snapshot per owner (proposed).** discover groups the apps by the user that owns
+  their config directories, so a source with several users yields one snapshot each. The
+  plan records the owner's uid:gid, and every other snapshot is applied into that user's
+  seedbox with `--user`.
+- **Discovery comes first and writes a plan (decided).** migrate reads the source,
+  running or stopped: each app's config directory, the paths the apps saw (container
   mounts, or the paths the configs themselves name), the categories, and how the apps
   reach each other. It writes this to a plan file and changes nothing. When the source
   has to be torn down before box can install, for example a cluster box will replace
@@ -967,12 +1030,11 @@ data. Everything it will change is written down before it changes anything.
   map, every host reference marked rewritten or left alone, what is copied where, and
   what is not migrated (workloads outside the catalog). Guided, migrate prints the
   changes with counts per file and table and asks once. Unattended,
-  `box migrate --apply <plan> --yes` runs the plan and nothing else. Apply works from
-  the stopped source, which will have moved on since discovery (new torrents, new
-  history), so it recomputes the changes and refuses before its first write if any fall
-  outside the plan's rules: a path prefix the table doesn't cover, a host reference the
-  plan never classified. Guided, those become questions; unattended, the refusal names
-  each one and the plan key that would settle it.
+  `box migrate apply <snapshot> --yes` runs the plan and nothing else. The snapshot
+  carries the configs apply will rewrite, so the checks discover and cutover ran are the
+  checks apply repeats: what apply refuses for is drift — a plan or a config that
+  changed since the snapshot was taken — and it refuses before its first write, naming
+  the app, the file and the plan key that would settle it.
 - **The path table is per app (proposed).** Each app saw its own paths: an Arr may see
   the library at `/library` while qBittorrent sees the same downloads at `/downloads`.
   So the plan maps paths per app, from the mounts discovery found:
@@ -1012,7 +1074,9 @@ data. Everything it will change is written down before it changes anything.
   Services discovery found (`service: <name>.<namespace>`, matched in every form the
   cluster's DNS answers) and any other address the apps stored (`host:`), each either
   mapped to a box app (`app:`) or kept as it is (`leave: true`), optionally narrowed to
-  one port.
+  one port. A rule discover wrote as a default says why, on one line, and marks itself
+  (`why:`, `default: true`); a path rule written the same way carries the same two keys,
+  so every defaulted decision reads as one.
 
   ```yaml
   data:
@@ -1027,10 +1091,12 @@ data. Everything it will change is written down before it changes anything.
   ```
 - **Every rewriter runs twice (proposed).** apply copies each app's config into a
   staging directory, then runs every app's check pass, which writes nothing and returns
-  the changes and every gap. Only when no app has a gap does any app's write pass run,
-  and it makes exactly the changes its check reported, in the staged copy. History
-  (records of what happened, never read back to act on) is rewritten where a rule
-  covers it and never stops apply.
+  the changes and every gap. discover and cutover run that same check pass over the
+  configs before they copy them, which is how a gap becomes a plan entry before the
+  downtime. Only when no app has a gap does any app's write pass run, and it makes
+  exactly the changes its check reported, in the staged copy. History (records of what
+  happened, never read back to act on) is rewritten where a rule covers it and never
+  stops apply.
 - **Every app's stored paths are rewritten, with no exceptions (decided).** Each app
   gets the `/data` contract and migrate rewrites what it holds: Arr databases and
   configs, qBittorrent's fastresume files and settings, and Plex's database through the
@@ -1399,9 +1465,6 @@ reason instead of a stack trace.
 
 ## Open questions
 
-- `migrate` sources: bare-metal swizzin, Docker, an existing Kubernetes stack. Proposed:
-  one command that detects the source, since the hard part (rewriting paths in the Arr
-  databases, carrying qBittorrent's state) is the same for all of them.
 - Who assigns the torrent port with multiple users (see Scopes).
 - **A rollback across a repository change.** A hold puts an app back on the tag and
   digest it ran, under the repository the release pins. A release that moves an app to
