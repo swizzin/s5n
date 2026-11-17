@@ -27,7 +27,7 @@ import (
 func TestRunAdoptsASonarrAndQbittorrent(t *testing.T) {
 	f := newFixture(t)
 	p, raw := f.plan()
-	source := hashTree(t, f.sourceRoot)
+	source := hashTree(t, f.configs)
 
 	values := &fakeValues{}
 	owned := &fakeOwned{}
@@ -38,7 +38,7 @@ func TestRunAdoptsASonarrAndQbittorrent(t *testing.T) {
 	}
 
 	// The source is the rollback: not one byte of it moved.
-	sameTree(t, "the source tree", source, hashTree(t, f.sourceRoot))
+	sameTree(t, "the source tree", source, hashTree(t, f.configs))
 	assertSonarrConfig(t, f)
 	assertQbitConfig(t, f)
 	assertDataRenamed(t, f)
@@ -318,7 +318,7 @@ func TestRunRenamesOverTheBoxsOwnEmptyDirectories(t *testing.T) {
 func TestRunWritesNothingOutsideStagingWhenCheckBlocks(t *testing.T) {
 	f := newFixture(t)
 	// A series outside every rule the plan has.
-	exec(t, filepath.Join(f.sourceRoot, "srv", "apps", "sonarr", "sonarr.db"),
+	exec(t, filepath.Join(f.configs, "sonarr", "sonarr.db"),
 		`UPDATE Series SET Path = '/mnt/elsewhere/Example Show' WHERE Id = 1`)
 	p, raw := f.plan()
 	values := &fakeValues{}
@@ -357,7 +357,7 @@ func TestRunWritesNothingOutsideStagingWhenCheckBlocks(t *testing.T) {
 func TestRunRefusesWhenTheOperatorSaysNo(t *testing.T) {
 	f := newFixture(t)
 	p, raw := f.plan()
-	source := hashTree(t, f.sourceRoot)
+	source := hashTree(t, f.configs)
 	values := &fakeValues{}
 	env := f.env(values, &fakeOwned{}, func(Summary) (bool, error) { return false, nil })
 
@@ -366,7 +366,7 @@ func TestRunRefusesWhenTheOperatorSaysNo(t *testing.T) {
 	} else if !contains(err.Error(), "cancelled") {
 		t.Errorf("the refusal is %q, want one saying cancelled", err)
 	}
-	sameTree(t, "the source tree", source, hashTree(t, f.sourceRoot))
+	sameTree(t, "the source tree", source, hashTree(t, f.configs))
 	if exists(filepath.Join(f.configRoot, "sonarr")) {
 		t.Error("the config was moved although the answer was no")
 	}
@@ -432,7 +432,7 @@ func TestRunRefusesAnOwnedConflict(t *testing.T) {
 func TestRunRefusesAnAppWhoseKeyCannotBeRead(t *testing.T) {
 	f := newFixture(t)
 	// An Arr that has never started has no key yet.
-	writeFile(t, filepath.Join(f.sourceRoot, "srv", "apps", "sonarr", "config.xml"),
+	writeFile(t, filepath.Join(f.configs, "sonarr", "config.xml"),
 		strings.Replace(sonarrConfigXML, "<ApiKey>"+testAPIKey+"</ApiKey>", "<ApiKey></ApiKey>", 1), 0o600)
 	p, raw := f.plan()
 	var shown Summary

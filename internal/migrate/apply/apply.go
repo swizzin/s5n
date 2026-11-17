@@ -46,11 +46,11 @@ type Env struct {
 	// where each instance's directory goes (the claim's subPath), DataRoot is
 	// the tree the release mounts at /data and the one a rename happens in.
 	ConfigRoot, DataRoot string
-	// SourceRoot prefixes every path in the plan when the source's host
-	// directories were copied somewhere else: a plan built from a snapshot is
-	// applied against `<SourceRoot><app.Config>`. Empty means the paths are
-	// the host's own.
-	SourceRoot string
+	// Configs is the directory holding one config tree per planned app, as the
+	// snapshot carries them: `<Configs>/<instance>/` is what this run stages
+	// and rewrites. The plan's own `config:` key is where the source kept it
+	// and is informational: apply never reads the source host.
+	Configs string
 	// PUID and PGID are the values' global.puid and global.pgid: everything
 	// staged is owned by them, because the pod's user is not box's.
 	PUID, PGID int
@@ -374,9 +374,9 @@ func preflightApp(p *plan.Plan, env Env, st *State, name string) []string {
 	if NeedsRunner(catalog) && env.Run == nil {
 		items = append(items, fmt.Sprintf("apps.%s: %s's rewriter runs a tool from the app's own pinned image, and this run has no way to start one", name, catalog))
 	}
-	src := filepath.Join(env.SourceRoot, app.Config)
+	src := filepath.Join(env.Configs, name)
 	if !isDir(src) {
-		items = append(items, fmt.Sprintf("apps.%s: the source config %s is not a directory; the plan says that is where %s kept its settings", name, src, name))
+		items = append(items, fmt.Sprintf("apps.%s: the snapshot holds no config for %s (%s is not a directory); apply rewrites the configs the snapshot carries, and the plan says the source kept them at %s", name, name, src, app.Config))
 	}
 	dst := filepath.Join(env.ConfigRoot, name)
 	if !has(st.Moved, name) {
@@ -432,7 +432,7 @@ func (m *migration) stage(ctx context.Context) error {
 		if err := os.RemoveAll(dst); err != nil {
 			return fmt.Errorf("clear %s: %w", dst, err)
 		}
-		src := filepath.Join(m.env.SourceRoot, m.p.Apps[name].Config)
+		src := filepath.Join(m.env.Configs, name)
 		staged, err := copyTree(dst, src, m.env.PUID, m.env.PGID)
 		if err != nil {
 			return fmt.Errorf("stage %s from %s: %w", name, src, err)

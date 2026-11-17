@@ -69,7 +69,9 @@ type fixture struct {
 	root       string
 	configRoot string
 	dataRoot   string
-	sourceRoot string
+	// configs is the snapshot's config/ directory: one tree per planned app,
+	// which is the only place apply reads an app's config from.
+	configs string
 	// keys is the release Secret every run in this fixture writes to.
 	keys *fakeKeys
 	// doc is the plan's YAML, built by planDoc.
@@ -87,15 +89,15 @@ func newFixture(t *testing.T) *fixture {
 		root:       root,
 		configRoot: filepath.Join(root, "config"),
 		dataRoot:   filepath.Join(root, "data"),
-		sourceRoot: filepath.Join(root, "src"),
+		configs:    filepath.Join(root, "snapshot", "config"),
 		keys:       newFakeKeys(),
 	}
 	for _, dir := range []string{
 		f.configRoot,
 		filepath.Join(f.dataRoot, "Downloads"),
 		filepath.Join(f.dataRoot, "media"),
-		filepath.Join(f.sourceRoot, "srv", "apps", "sonarr"),
-		filepath.Join(f.sourceRoot, "srv", "apps", "qbittorrent", "qBittorrent"),
+		filepath.Join(f.configs, "sonarr"),
+		filepath.Join(f.configs, "qbittorrent", "qBittorrent"),
 	} {
 		if err := os.MkdirAll(dir, 0o755); err != nil {
 			t.Fatal(err)
@@ -110,7 +112,7 @@ func newFixture(t *testing.T) *fixture {
 // writeSonarr builds the Arr's config directory: its database, the config.xml
 // beside it, and a log the migration must carry without reading.
 func (f *fixture) writeSonarr() {
-	dir := filepath.Join(f.sourceRoot, "srv", "apps", "sonarr")
+	dir := filepath.Join(f.configs, "sonarr")
 	writeFile(f.t, filepath.Join(dir, "config.xml"), sonarrConfigXML, 0o600)
 	writeFile(f.t, filepath.Join(dir, "logs", "sonarr.txt"), "13-11-2026 10:00:00|Info|Starting\n", 0o644)
 	newDB(f.t, filepath.Join(dir, "sonarr.db"),
@@ -137,7 +139,7 @@ func (f *fixture) writeSonarr() {
 // writeQbittorrent builds the client's config directory: its settings file and
 // one SQLite resume row, the store qBittorrent 5 writes.
 func (f *fixture) writeQbittorrent() {
-	dir := filepath.Join(f.sourceRoot, "srv", "apps", "qbittorrent")
+	dir := filepath.Join(f.configs, "qbittorrent")
 	writeFile(f.t, filepath.Join(dir, "qBittorrent", "qBittorrent.conf"), qbitConf, 0o600)
 	newDB(f.t, filepath.Join(dir, "qBittorrent", "torrents.db"),
 		`CREATE TABLE torrents (id INTEGER PRIMARY KEY, target_save_path TEXT, download_path TEXT, libtorrent_resume_data BLOB)`,
@@ -205,7 +207,7 @@ func (f *fixture) env(v *fakeValues, o *fakeOwned, ask confirmFunc) Env {
 	return Env{
 		ConfigRoot: f.configRoot,
 		DataRoot:   f.dataRoot,
-		SourceRoot: f.sourceRoot,
+		Configs:    f.configs,
 		PUID:       os.Geteuid(),
 		PGID:       os.Getegid(),
 		Targets:    f.targets(),

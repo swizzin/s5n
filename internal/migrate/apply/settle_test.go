@@ -171,6 +171,21 @@ func (r *rehearsal) settleInput() SettleInput {
 	}
 }
 
+// snapshotConfigs is a snapshot's config/ tree: one directory per planned app,
+// copied from the source the way a snapshot copies it. It is the only place
+// apply reads an app's config from (Env.Configs), so a test that runs apply over
+// a plan settles the source and applies the snapshot.
+func (r *rehearsal) snapshotConfigs() string {
+	r.t.Helper()
+	dir := filepath.Join(r.dir, "snapshot", "config")
+	for app := range r.plan().Apps {
+		if _, err := copyTree(filepath.Join(dir, app), r.path(app), os.Geteuid(), os.Getegid()); err != nil {
+			r.t.Fatalf("copy %s into the snapshot: %v", app, err)
+		}
+	}
+	return dir
+}
+
 // rehearsalCatalog is the chart's apps the fixture uses.
 var rehearsalCatalog = []string{
 	"qbittorrent", "sonarr", "radarr", "prowlarr", "plex", "tautulli",
@@ -598,10 +613,13 @@ func TestApplyWritesWhatSettleCalledOut(t *testing.T) {
 	env := Env{
 		ConfigRoot: r.configRoot,
 		DataRoot:   r.dataRoot,
-		SourceRoot: r.dir,
-		PUID:       os.Geteuid(),
-		PGID:       os.Getegid(),
-		Targets:    rehearsalTargets(),
+		// The configs come out of the snapshot apply runs, never off the
+		// source host: the settled plan is applied over a copy of the tree the
+		// source keeps, which is what a snapshot carries.
+		Configs: r.snapshotConfigs(),
+		PUID:    os.Geteuid(),
+		PGID:    os.Getegid(),
+		Targets: rehearsalTargets(),
 		// Plex's own image is the only thing that may read its database, and
 		// this run has no way to start one. Its config here holds neither the
 		// settings file nor the database, so its check reads nothing.

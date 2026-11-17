@@ -1,13 +1,13 @@
 package main
 
-// migrate_apply.go is the write half: `box migrate apply <plan dir>`.
+// migrate_apply.go is the write half: `box migrate apply [<snapshot>]`.
 //
 // It is the thin layer the design asks for. Everything that can be tested
-// without a cluster is in internal/migrate/apply; this file reads the plan and
-// the seedbox, checks that the release exists, builds the environment apply
-// talks to (the release's ownership record, the grant editor, the Plex runner,
-// the one question) and then hands over to the same apply path `box apply`
-// uses.
+// without a cluster is in internal/migrate/apply; this file opens the snapshot,
+// reads the plan out of it, reads the seedbox, checks that the release exists,
+// builds the environment apply talks to (the release's ownership record, the
+// grant editor, the Plex runner, the one question) and then hands over to the
+// same apply path `box apply` uses.
 //
 // The order matters as much here as in the package: nothing is written until
 // the plan, the two files and the deployed release have all been read.
@@ -28,10 +28,12 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 
+	"github.com/swizzin/s5n/internal/archive"
 	"github.com/swizzin/s5n/internal/bootstrap"
 	"github.com/swizzin/s5n/internal/catalog"
 	"github.com/swizzin/s5n/internal/kube"
 	"github.com/swizzin/s5n/internal/migrate/apply"
+	"github.com/swizzin/s5n/internal/migrate/bundle"
 	"github.com/swizzin/s5n/internal/migrate/plan"
 	"github.com/swizzin/s5n/internal/release"
 	"github.com/swizzin/s5n/internal/say"
@@ -44,14 +46,12 @@ import (
 // this command adds.
 type migrateApplyFlags struct {
 	*applyFlags
-	sourceRoot *string
-	plain      *bool
+	plain *bool
 }
 
 func addMigrateApplyFlags(fs *flag.FlagSet) *migrateApplyFlags {
 	return &migrateApplyFlags{
 		applyFlags: addApplyFlags(fs),
-		sourceRoot: fs.String("source-root", "", "prefix every source path in the plan with this directory (a copy of the source's host directories)"),
 		plain:      fs.Bool("plain", false, "ask with plain line prompts, even on a terminal (for a flaky terminal or a screen reader)"),
 	}
 }
@@ -64,19 +64,19 @@ func runMigrateApply(ctx context.Context, args []string) {
 		os.Exit(2)
 	}
 	// Go's flag package stops at the first argument that is not a flag, and the
-	// plan directory is one: `box migrate apply plan --yes` would otherwise
-	// read --yes as a second argument. So what follows the directory is parsed
-	// as flags, and only the directory itself may be left over.
-	dir := ""
+	// snapshot is one: `box migrate apply <file> --yes` would otherwise read
+	// --yes as a second argument. So what follows the file is parsed as flags,
+	// and only the file itself may be left over.
+	file := ""
 	if rest := fs.Args(); len(rest) > 0 {
-		dir = rest[0]
+		file = rest[0]
 		if err := fs.Parse(rest[1:]); err != nil {
 			fmt.Fprintf(os.Stderr, "box: %v\n", err)
 			os.Exit(2)
 		}
 	}
-	if dir == "" || fs.NArg() != 0 {
-		fmt.Fprintln(os.Stderr, "box: migrate apply takes one plan directory: box migrate apply <dir>")
+	if fs.NArg() != 0 {
+		fmt.Fprintf(os.Stderr, "box: migrate apply takes one snapshot: box migrate apply [<snapshot>]\n")
 		os.Exit(2)
 	}
 	if *o.valuesPath == "" {
@@ -90,7 +90,7 @@ func runMigrateApply(ctx context.Context, args []string) {
 		out.Error(err)
 		os.Exit(1)
 	}
-	if err := migrateApply(ctx, dir, o, out); err != nil {
+	if err := migrateApply(ctx, file, o, out); err != nil {
 		if errors.Is(err, apply.ErrCancelled) || errors.Is(err, release.ErrCancelled) {
 			out.Line("oh heck, nvm")
 			os.Exit(1)
@@ -100,15 +100,67 @@ func runMigrateApply(ctx context.Context, args []string) {
 	}
 }
 
+// openSnapshot finds the snapshot apply runs and extracts it into a private
+// directory. With no file named it is the newest one in bundle.Dir that is not
+// a survey, and the run says which file it read.
+//
+// The mode is what apply is allowed to do: a survey holds no configs, a
+// rehearsal may only be applied locked and that lock lands next, and a final
+// snapshot is the one a real run applies.
+func openSnapshot(file string, out say.Reporter) (*bundle.Opened, func(), error) {
+	if strings.TrimSpace(file) == "" {
+		newest, err := bundle.Newest(bundle.Dir)
+		if err != nil {
+			return nil, func() {}, err
+		}
+		file = newest
+	}
+	dir, err := os.MkdirTemp("", "box-migrate-")
+	if err != nil {
+		return nil, func() {}, fmt.Errorf("a private directory for the snapshot: %w", err)
+	}
+	cleanup := func() { os.RemoveAll(dir) }
+	opened, err := bundle.Open(file, filepath.Join(dir, "snapshot"))
+	if err != nil {
+		cleanup()
+		return nil, func() {}, err
+	}
+	switch opened.Mode {
+	case archive.ModeFinal:
+	case archive.ModeSurvey:
+		cleanup()
+		return nil, func() {}, fmt.Errorf("%s holds no configs: it is a survey of the source, and `box migrate cutover` writes the snapshot apply runs", file)
+	case archive.ModeRehearsal:
+		cleanup()
+		return nil, func() {}, fmt.Errorf("%s is a rehearsal snapshot, and the rehearsal lock lands next: a rehearsal may only be applied with no internet egress and every torrent started stopped, so this box will not apply it until it can do that", file)
+	default:
+		cleanup()
+		return nil, func() {}, fmt.Errorf("%s is a %q snapshot, and apply runs a final one: `box migrate cutover` writes it", file, opened.Mode)
+	}
+	out.Line(fmt.Sprintf("snapshot: %s (%s)", file, opened.Mode))
+	return opened, cleanup, nil
+}
+
 // migrateApply is the command without the exit, so a test can drive its
 // refusals. It returns the error the run stopped on; a cancelled run returns
 // apply.ErrCancelled after saying so in box's own voice.
-func migrateApply(ctx context.Context, dir string, o *migrateApplyFlags, out say.Reporter) error {
-	// Step 0: the plan and the seedbox, before any cluster client exists.
-	p, raw, err := loadPlan(dir)
+//
+// file is the snapshot to run, or empty for the newest one in bundle.Dir. The
+// snapshot is extracted into a private directory for the length of the run and
+// removed when it ends: the configs apply rewrites are its copies, not the
+// source's.
+func migrateApply(ctx context.Context, file string, o *migrateApplyFlags, out say.Reporter) error {
+	opened, cleanup, err := openSnapshot(file, out)
 	if err != nil {
 		return err
 	}
+	defer cleanup()
+	// Step 0: the plan and the seedbox, before any cluster client exists.
+	p, err := loadPlan(opened)
+	if err != nil {
+		return err
+	}
+	raw := opened.Plan
 	sb, err := seedbox.Load(*o.grantPath, *o.valuesPath)
 	if err != nil {
 		return err
@@ -147,7 +199,7 @@ func migrateApply(ctx context.Context, dir string, o *migrateApplyFlags, out say
 	if err != nil {
 		return err
 	}
-	env, err := migrateEnv(p, raw, o, sb, chart, cat, kc, namespace, values, out)
+	env, err := migrateEnv(p, opened, o, sb, chart, cat, kc, namespace, values, out)
 	if err != nil {
 		return err
 	}
@@ -171,25 +223,19 @@ func migrateApply(ctx context.Context, dir string, o *migrateApplyFlags, out say
 	return migrateHandOver(ctx, o, chart, kc, out)
 }
 
-// loadPlan reads the plan and the bytes its id is computed over.
-func loadPlan(dir string) (*plan.Plan, []byte, error) {
-	name := filepath.Join(dir, "plan.yaml")
-	raw, err := os.ReadFile(name)
-	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return nil, nil, fmt.Errorf("%s holds no plan.yaml: pass the directory `box migrate discover --out` wrote", dir)
-		}
-		return nil, nil, fmt.Errorf("read %s: %w", name, err)
-	}
-	p, err := plan.Parse(raw)
+// loadPlan parses the plan the snapshot carries. A plan box cannot read is a
+// refusal that names the snapshot, because that file is what an operator copies
+// between hosts and what a bug report has to name.
+func loadPlan(opened *bundle.Opened) (*plan.Plan, error) {
+	p, err := plan.Parse(opened.Plan)
 	if err != nil {
 		var perr *plan.Error
 		if errors.As(err, &perr) {
-			perr.Path = name
+			perr.Path = opened.Path + ":" + archive.PlanName
 		}
-		return nil, nil, err
+		return nil, err
 	}
-	return p, raw, nil
+	return p, nil
 }
 
 // loadMigrateChart loads the one chart release this command reads and installs.
@@ -200,7 +246,7 @@ func loadMigrateChart(ctx context.Context, o *migrateApplyFlags, out say.Reporte
 }
 
 // migrateEnv builds everything apply touches outside the plan directory.
-func migrateEnv(p *plan.Plan, raw []byte, o *migrateApplyFlags, sb *seedbox.Seedbox, chart release.Chart, cat *catalog.Catalog, kc, namespace string, values map[string]any, out say.Reporter) (apply.Env, error) {
+func migrateEnv(p *plan.Plan, opened *bundle.Opened, o *migrateApplyFlags, sb *seedbox.Seedbox, chart release.Chart, cat *catalog.Catalog, kc, namespace string, values map[string]any, out say.Reporter) (apply.Env, error) {
 	var env apply.Env
 	vols, err := sb.Storage()
 	if err != nil {
@@ -217,7 +263,10 @@ func migrateEnv(p *plan.Plan, raw []byte, o *migrateApplyFlags, sb *seedbox.Seed
 	if env.ConfigRoot == "" || env.DataRoot == "" {
 		return env, errors.New("the grant names no storage paths: box init writes both")
 	}
-	env.SourceRoot = *o.sourceRoot
+	// Every config apply rewrites comes out of the snapshot, one directory per
+	// planned app. An app the plan names and the snapshot does not carry is a
+	// refusal preflight makes, naming the app.
+	env.Configs = filepath.Join(opened.Dir, archive.ConfigPrefix)
 	env.Catalog = cat.Names()
 	// The globals are numbers in the effective document, which is where a
 	// renderer reads them too.
@@ -271,7 +320,7 @@ func migrateEnv(p *plan.Plan, raw []byte, o *migrateApplyFlags, sb *seedbox.Seed
 			Namespace:  namespace,
 			Claim:      claim,
 			ConfigRoot: env.ConfigRoot,
-			PlanID:     apply.PlanID(raw),
+			PlanID:     apply.PlanID(opened.Plan),
 			Image:      image,
 			PUID:       env.PUID,
 			PGID:       env.PGID,

@@ -16,6 +16,8 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes/fake"
 
+	"github.com/swizzin/s5n/internal/archive"
+	"github.com/swizzin/s5n/internal/migrate/bundle"
 	"github.com/swizzin/s5n/internal/seedbox"
 )
 
@@ -103,22 +105,14 @@ apps:
 	}
 }
 
-// TestLoadPlanNamesTheFile: a plan a person edited has to fail with the file it
-// came from, not with a bare parse error.
-func TestLoadPlanNamesTheFile(t *testing.T) {
-	dir := t.TempDir()
-	if _, _, err := loadPlan(dir); err == nil || !strings.Contains(err.Error(), "plan.yaml") {
-		t.Fatalf("an empty plan directory was refused with %v", err)
-	}
-	if err := os.WriteFile(filepath.Join(dir, "plan.yaml"), []byte("version: 3\napps: {}\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	_, _, err := loadPlan(dir)
-	if err == nil {
+// TestLoadPlanNamesTheSnapshot: a plan a person edited has to fail with the
+// snapshot and the entry it came from, not with a bare parse error.
+func TestLoadPlanNamesTheSnapshot(t *testing.T) {
+	snapshot := "/var/lib/s5n/migrate/migrate-20261117T090000Z-final.tar.gz"
+	if _, err := loadPlan(&bundle.Opened{Path: snapshot, Plan: []byte("version: 3\napps: {}\n")}); err == nil {
 		t.Fatal("a plan of another version was accepted")
-	}
-	if !strings.Contains(err.Error(), "plan.yaml") {
-		t.Errorf("the refusal does not name the file: %v", err)
+	} else if !strings.Contains(err.Error(), snapshot+":"+archive.PlanName) {
+		t.Errorf("the refusal does not name the snapshot: %v", err)
 	}
 }
 
