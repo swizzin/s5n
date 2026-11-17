@@ -83,19 +83,22 @@ VALUES (1, 'Save', 'QBITTORRENT', '/srv/apps/autobrr/bin/hook', '/srv/apps/autob
 `
 
 const planYAML = `
-version: 1
+version: 2
 apps:
   qbittorrent:
+    kind: kubernetes
     source: qbittorrent
     config: /srv/apps/qbittorrent
     ports: [8081]
     paths: []
   sonarr:
+    kind: kubernetes
     source: sonarr
     config: /srv/apps/sonarr
     ports: [8989]
     paths: []
   autobrr:
+    kind: kubernetes
     source: autobrr
     config: /srv/apps/autobrr
     paths:

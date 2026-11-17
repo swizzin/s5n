@@ -7,23 +7,26 @@ import (
 
 // hostsPlan is a source where the Arrs and the torrent client ran in one
 // namespace and a Seerr reached them by Service name. Every name is invented.
-const hostsPlan = `version: 1
+const hostsPlan = `version: 2
 data:
   root: /srv/library
   downloads: Downloads
   media: media
 apps:
   qbittorrent:
+    kind: kubernetes
     source: qbittorrent
     config: /srv/apps/qbittorrent
     namespace: media
     ports: [8080]
   sonarr:
+    kind: kubernetes
     source: sonarr
     config: /srv/apps/sonarr
     namespace: media
     ports: [8989]
   seerr:
+    kind: kubernetes
     source: overseerr
     config: /srv/apps/overseerr
     namespace: front
@@ -72,13 +75,15 @@ func TestResolve(t *testing.T) {
 }
 
 func TestResolveRefusesAnAmbiguousLocalPort(t *testing.T) {
-	p := mustParse(t, `version: 1
+	p := mustParse(t, `version: 2
 apps:
   sonarr:
+    kind: kubernetes
     source: sonarr
     config: /srv/sonarr
     ports: [8989]
   sonarr-4k:
+    kind: kubernetes
     source: sonarr4k
     config: /srv/sonarr4k
     ports: [8989]
@@ -97,7 +102,7 @@ func TestDataRenames(t *testing.T) {
 }
 
 func TestParseRefusesBadDataAndHosts(t *testing.T) {
-	base := "version: 1\napps:\n  q:\n    source: q\n    config: /srv/q\n"
+	base := "version: 2\napps:\n  q:\n    kind: kubernetes\n    source: q\n    config: /srv/q\n"
 	tests := []struct{ name, extra, want string }{
 		{"relative root", "data: {root: srv, downloads: d, media: m}\n", `root "srv" is not an absolute path`},
 		{"root is /", "data: {root: /, downloads: d, media: m}\n", "root is /"},
@@ -135,7 +140,7 @@ func TestParseRefusesBadDataAndHosts(t *testing.T) {
 // container of one -- the sidecar in a catalog app's pod that the chart's pod
 // does not carry -- and both read back from the file.
 func TestOutsideNamesWorkloadsAndContainers(t *testing.T) {
-	p := mustParse(t, "version: 1\napps:\n  q:\n    source: q\n    config: /srv/q\n"+
+	p := mustParse(t, "version: 2\napps:\n  q:\n    kind: kubernetes\n    source: q\n    config: /srv/q\n"+
 		"outside: [media/gluetun, media/plex/plex-exporter]\n")
 	want := []string{"media/gluetun", "media/plex/plex-exporter"}
 	if len(p.Outside) != len(want) || p.Outside[0] != want[0] || p.Outside[1] != want[1] {

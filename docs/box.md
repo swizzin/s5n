@@ -1040,18 +1040,28 @@ data. Everything it will change is written down before it changes anything.
   So the plan maps paths per app, from the mounts discovery found:
 
   ```yaml
-  version: 1
+  version: 2
+  source:                             # the install this plan was read from
+    host: media-host                  # as discovery saw it, empty when it can't say
+    taken: 2026-11-16T12:00:00Z       # when the source was read
+    owner: {uid: 1000, gid: 1000}     # who owned the configs and the data
+    kinds: [kubernetes, docker]       # every platform that contributed an app
   apps:
-    sonarr-4k:                  # box's instance name
-      source: sonarr4k          # the source's name for it
-      config: /srv/apps/sonarr4k  # copied from, never written
+    sonarr-4k:                        # box's instance name
+      kind: kubernetes                # the platform it ran on
+      source: sonarr4k                # the source's name for it
+      image: lscr.io/linuxserver/sonarr:4.0.14  # what it ran, for the record
+      config: /srv/apps/sonarr4k      # copied from, never written
       paths:
         - from: /library/Downloads
           to: /data/downloads
         - from: /library/media
           to: /data/media
     qbittorrent:
+      kind: docker
       source: qbittorrent
+      image: ghcr.io/swizzin/qbittorrent:5.3.0-lt1.2
+      variant: lt1.2                  # already one of the chart's blessed builds
       config: /srv/apps/qbittorrent
       paths:
         - from: /downloads
@@ -1063,7 +1073,8 @@ data. Everything it will change is written down before it changes anything.
   path no rule covers stops apply and names the app, the file or table, and the path.
   Each app also records the namespace it ran in and the ports its own config set:
   a localhost address another app stored is resolved by its port, and a Service's
-  short name by the namespace of the app that stored it.
+  short name by the namespace of the app that stored it. An app's `kind` is one of
+  `kubernetes`, `swizzin` or `docker`, and one plan may hold apps from several.
 - **Data is adopted by renaming, never by moving (decided).** The plan's `data` key
   names the directory that becomes the seedbox's data path and the two directories
   under it that held the downloads and the media. When their names differ from box's
@@ -1086,6 +1097,11 @@ data. Everything it will change is written down before it changes anything.
   hosts:
     - service: sonarr.default
       app: sonarr
+    - host: 10.244.0.56
+      port: 32400
+      app: plex
+      why: a pod address that does not survive the move, and only plex answers on 32400
+      default: true
     - host: 192.0.2.10
       leave: true
   ```

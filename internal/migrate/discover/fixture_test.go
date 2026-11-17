@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 	"testing/fstest"
+	"time"
 
 	"go.yaml.in/yaml/v3"
 
@@ -178,8 +179,15 @@ func (f *fixture) tryDiscover(t *testing.T) (*plan.Plan, Report, error) {
 	return Discover(context.Background(), NewDirectory(f.manifests), Options{
 		ConfigFS: f.files,
 		TempDir:  t.TempDir(),
+		// The plan records when the source was read; a whole-plan comparison
+		// needs the clock to be the test's, not the wall's.
+		Now: func() time.Time { return readAt },
 	})
 }
+
+// readAt is the time every fixture discovery says it read its source: the plan
+// is a file, so the one field that would otherwise change every run is fixed.
+var readAt = time.Date(2026, time.November, 16, 12, 0, 0, 0, time.UTC)
 
 // arrDB is an Arr database holding only the table discovery reads: a real SQLite
 // file, because discovery copies it, checks it and queries it.

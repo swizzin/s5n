@@ -163,19 +163,22 @@ INSERT INTO instance_backup_items (id, run_id, archive_rel_path) VALUES (1, 1, '
 `
 
 const planYAML = `
-version: 1
+version: 2
 apps:
   qbittorrent:
+    kind: kubernetes
     source: qbittorrent
     config: /srv/apps/qbittorrent
     ports: [8081]
     paths: []
   sonarr:
+    kind: kubernetes
     source: sonarr
     config: /srv/apps/sonarr
     ports: [8989]
     paths: []
   qui:
+    kind: kubernetes
     source: qui
     config: /srv/apps/qui
     paths:

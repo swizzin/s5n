@@ -250,7 +250,7 @@ func (liar) Write(context.Context, rewrite.Input) (rewrite.Report, error) {
 // the config root.
 func TestRunRefusesAWriteThatDiffersFromItsCheck(t *testing.T) {
 	f := newFixture(t)
-	doc := "version: 1\napps:\n  " + testApp + ":\n    source: " + testApp +
+	doc := "version: 2\napps:\n  " + testApp + ":\n    kind: kubernetes\n    source: " + testApp +
 		"\n    config: /srv/apps/" + testApp + "\n    ports: [9999]\n    paths: []\n"
 	if err := os.MkdirAll(filepath.Join(f.sourceRoot, "srv", "apps", testApp), 0o755); err != nil {
 		t.Fatal(err)

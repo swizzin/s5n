@@ -22,9 +22,10 @@ import (
 // saw its downloads at /downloads and its own config at /config, and one
 // save path had a space in it. The identity rules are what discovery writes on
 // a second run, when the tree already sits where box wants it.
-const qbitPlan = `version: 1
+const qbitPlan = `version: 2
 apps:
   qbittorrent:
+    kind: kubernetes
     source: qbittorrent
     config: /srv/apps/qbittorrent
     ports: [8080]

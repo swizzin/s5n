@@ -15,19 +15,22 @@ import (
 // (server/api/servarr/radarr.ts:166,234). So it moves by the Arr's path rules,
 // and Seerr's own table, which only ever covers Seerr's mounts, is not asked.
 const arrPathsPlan = `
-version: 1
+version: 2
 apps:
   plex:
+    kind: kubernetes
     source: plex
     config: /srv/apps/plex
     ports: [32400]
     paths: []
   tautulli:
+    kind: kubernetes
     source: tautulli
     config: /srv/apps/tautulli
     ports: [8181]
     paths: []
   sonarr:
+    kind: kubernetes
     source: sonarr
     config: /srv/apps/sonarr
     ports: [8989]
@@ -35,6 +38,7 @@ apps:
       - from: /library/media
         to: /data/media
   radarr:
+    kind: kubernetes
     source: radarr
     config: /srv/apps/radarr
     ports: [7878]
@@ -42,6 +46,7 @@ apps:
       - from: /library/media
         to: /data/media
   seerr:
+    kind: kubernetes
     source: seerr
     config: /srv/apps/seerr
     paths:

@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 	"testing/fstest"
+	"time"
 
 	"github.com/swizzin/s5n/internal/migrate/plan"
 )
@@ -87,6 +88,11 @@ func TestDiscoverTwoArrs(t *testing.T) {
 
 	want := &plan.Plan{
 		Version: plan.Version,
+		// The one reader that exists names itself, and says when it read.
+		Source: &plan.Source{
+			Taken: readAt.Format(time.RFC3339),
+			Kinds: []string{plan.Kubernetes},
+		},
 		Data: &plan.Data{
 			Root: "/srv/library",
 			// The source calls it Downloads; apply renames it to the
@@ -97,6 +103,7 @@ func TestDiscoverTwoArrs(t *testing.T) {
 		},
 		Apps: map[string]plan.App{
 			"sonarr": {
+				Kind: plan.Kubernetes, Image: "lscr.io/linuxserver/sonarr:4.0.14",
 				Source: "sonarr", Config: "/srv/apps/sonarr", Namespace: "media", Ports: []int{8989},
 				Paths: []plan.PathRule{
 					{From: "/config", To: "/config"},
@@ -105,6 +112,7 @@ func TestDiscoverTwoArrs(t *testing.T) {
 				},
 			},
 			"sonarr-4k": {
+				Kind: plan.Kubernetes, Image: "lscr.io/linuxserver/sonarr:4.0.14",
 				Source: "sonarr4k", Config: "/srv/apps/sonarr4k", Namespace: "media", Ports: []int{8990},
 				Paths: []plan.PathRule{
 					{From: "/config", To: "/config"},
@@ -113,6 +121,7 @@ func TestDiscoverTwoArrs(t *testing.T) {
 				},
 			},
 			"qbittorrent": {
+				Kind: plan.Kubernetes, Image: "ghcr.io/home-operations/qbittorrent:5.3.0",
 				Source: "qbittorrent", Config: "/srv/apps/qbittorrent", Namespace: "media", Ports: []int{8080},
 				Paths: []plan.PathRule{
 					{From: "/config", To: "/config"},
@@ -120,6 +129,7 @@ func TestDiscoverTwoArrs(t *testing.T) {
 				},
 			},
 			"plex": {
+				Kind: plan.Kubernetes, Image: "linuxserver/plex:1.41.5",
 				Source: "plex", Config: "/srv/apps/plex", Namespace: "media", Ports: []int{32400},
 				Paths: []plan.PathRule{
 					{From: "/config", To: "/config"},
@@ -1003,4 +1013,53 @@ func TestDiscoverNeedsTheHost(t *testing.T) {
 	if _, _, err := Discover(context.Background(), nil, Options{ConfigFS: f.files}); err == nil {
 		t.Fatal("Discover with no source was accepted")
 	}
+}
+
+// TestDiscoverRecordsTheRead: the plan says which platform it read and when,
+// and what image each app ran, so apply and the operator can see where the file
+// came from. The fields this reader cannot answer -- the source host and the
+// owner -- stay empty rather than guessed.
+func TestDiscoverRecordsTheRead(t *testing.T) {
+	f := sourceInstall(t)
+	at := time.Date(2026, time.December, 1, 8, 30, 0, 0, time.UTC)
+	p, _, err := Discover(context.Background(), NewDirectory(f.manifests), Options{
+		ConfigFS: f.files,
+		TempDir:  t.TempDir(),
+		Now:      func() time.Time { return at },
+	})
+	if err != nil {
+		t.Fatalf("Discover: %v", err)
+	}
+	s := p.Source
+	if s == nil {
+		t.Fatal("the plan does not say where it was read from")
+	}
+	if want := at.Format(time.RFC3339); s.Taken != want {
+		t.Errorf("source.taken = %q, want the clock's %q", s.Taken, want)
+	}
+	if len(s.Kinds) != 1 || s.Kinds[0] != plan.Kubernetes {
+		t.Errorf("source.kinds = %v, want the reader that answered", s.Kinds)
+	}
+	if s.Host != "" || s.Owner != nil {
+		t.Errorf("source = %+v, want no host or owner: this reader cannot know them", s)
+	}
+	wantImages := map[string]string{
+		"sonarr":      "lscr.io/linuxserver/sonarr:4.0.14",
+		"sonarr-4k":   "lscr.io/linuxserver/sonarr:4.0.14",
+		"qbittorrent": "ghcr.io/home-operations/qbittorrent:5.3.0",
+		"plex":        "linuxserver/plex:1.41.5",
+	}
+	for name, image := range wantImages {
+		app := p.Apps[name]
+		if app.Kind != plan.Kubernetes {
+			t.Errorf("apps.%s kind = %q, want %q", name, app.Kind, plan.Kubernetes)
+		}
+		if app.Image != image {
+			t.Errorf("apps.%s image = %q, want the source's %q", name, app.Image, image)
+		}
+		if app.Variant != "" {
+			t.Errorf("apps.%s variant = %q, want none: discovery maps no image yet", name, app.Variant)
+		}
+	}
+	roundTrip(t, p)
 }

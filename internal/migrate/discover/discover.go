@@ -25,6 +25,7 @@ import (
 	"path"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/swizzin/s5n/internal/migrate/plan"
 )
@@ -158,6 +159,9 @@ type Options struct {
 	// the system's temporary directory. The source's own file is never opened,
 	// because a read of a running Arr's database can leave a -shm beside it.
 	TempDir string
+	// Now is the clock the plan's `source.taken` comes from. Empty means
+	// time.Now: a test that compares whole plans hands it one.
+	Now func() time.Time
 }
 
 // Report is everything the operator should see that the plan does not hold.
@@ -261,6 +265,14 @@ func Discover(ctx context.Context, src Source, opt Options) (*plan.Plan, Report,
 // note records something the operator should know that stops nothing.
 func (d *discovery) note(format string, args ...any) {
 	d.rep.Notes = append(d.rep.Notes, fmt.Sprintf(format, args...))
+}
+
+// now is when the plan says the source was read.
+func (d *discovery) now() time.Time {
+	if d.opt.Now != nil {
+		return d.opt.Now()
+	}
+	return time.Now()
 }
 
 // inScope says whether a workload is part of this migration: an operator who

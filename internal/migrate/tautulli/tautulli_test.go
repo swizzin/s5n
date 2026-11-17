@@ -48,9 +48,10 @@ NEWSLETTER_TEMPLATES = newsletters
 `
 
 const planYAML = `
-version: 1
+version: 2
 apps:
   plex:
+    kind: kubernetes
     source: plex
     config: /srv/apps/plex
     ports: [32400]
@@ -58,6 +59,7 @@ apps:
       - from: /srv/plex
         to: /config/plex
   tautulli:
+    kind: kubernetes
     source: tautulli
     config: /srv/apps/tautulli
     ports: [8181]

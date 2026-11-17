@@ -149,13 +149,14 @@ func (f *fixture) writeQbittorrent() {
 // library and the downloads as the Arr saw them, the downloads as the client
 // saw them, and the data root the grant names.
 func (f *fixture) planDoc(sonarrConfig, qbitConfig string) string {
-	return fmt.Sprintf(`version: 1
+	return fmt.Sprintf(`version: 2
 data:
   root: %s
   downloads: Downloads
   media: media
 apps:
   sonarr:
+    kind: kubernetes
     source: sonarr
     config: %s
     namespace: media
@@ -166,6 +167,7 @@ apps:
       - from: /library/Downloads
         to: /data/downloads
   qbittorrent:
+    kind: kubernetes
     source: qbittorrent
     config: %s
     namespace: media

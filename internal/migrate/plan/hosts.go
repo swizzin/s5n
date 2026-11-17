@@ -29,6 +29,12 @@ type HostRule struct {
 	App string `yaml:"app,omitempty"`
 	// Leave keeps the address as it is: it points outside the source.
 	Leave bool `yaml:"leave,omitempty"`
+	// Why is one line saying why discovery settled this address this way,
+	// written when the rule is a default rather than the operator's own.
+	Why string `yaml:"why,omitempty"`
+	// Default says discovery chose this rule, and the operator has not
+	// confirmed it. A default without a Why is a decision with no reason.
+	Default bool `yaml:"default,omitempty"`
 }
 
 // Verdict is what Resolve decided about an address.
@@ -138,6 +144,7 @@ func (p *Plan) checkHosts() []string {
 				problems = append(problems, fmt.Sprintf("%s: app %q is not in apps", at, r.App))
 			}
 		}
+		problems = append(problems, whyProblems(at, r.Why, r.Default)...)
 	}
 	return problems
 }

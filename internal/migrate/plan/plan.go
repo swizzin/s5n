@@ -26,11 +26,19 @@ import (
 // Version is the only plan version this box reads. A plan is a promise about
 // what apply will do, so a box that meets a shape it does not know refuses the
 // file rather than applying the half of it that it happens to parse.
-const Version = 1
+//
+// 2 adds the source block, each app's kind, image and variant, and the why and
+// default a rule carries when discovery wrote it as a default. Version 1 plans
+// existed only in test runs: apply refuses one and names the way forward.
+const Version = 2
 
 // Plan is the whole file.
 type Plan struct {
 	Version int `yaml:"version"`
+	// Source is the install the plan was read from: the platform(s) that
+	// contributed an app, when it was read, and who owned what was read.
+	// Absent for a plan written by hand with no source behind it.
+	Source *Source `yaml:"source,omitempty"`
 	// Data is where the source kept its downloads and media, when box adopts
 	// them in place. Absent, apply touches no data.
 	Data *Data `yaml:"data,omitempty"`
@@ -51,10 +59,22 @@ type Plan struct {
 // filed under in Plan.Apps is box's instance name, which is what the chart
 // calls the pod and what every caller passes to Rewrite.
 type App struct {
+	// Kind is the platform the app ran on. One plan can hold apps from
+	// several sources, and each app says which one it came from.
+	Kind string `yaml:"kind"`
 	// Source is the name the app had in the install being migrated: how
 	// discovery found it, and what the operator recognises in the source's own
 	// interface.
 	Source string `yaml:"source"`
+	// Image is the image reference the source ran. It is informational: the
+	// chart's variant is what runs after the migration, and the source's own
+	// image is never carried, because the admission policy is the guard on
+	// what a pod may run.
+	Image string `yaml:"image,omitempty"`
+	// Variant is the blessed variant that image already is, empty when it is
+	// none of them and the chart's default is what runs. A variant is only
+	// ever one of the chart's own (charts/s5n/variants.yaml).
+	Variant string `yaml:"variant,omitempty"`
 	// Config is the directory the app's config is copied from. migrate reads
 	// it and never writes it, so the running source stays the rollback until
 	// the operator tears it down.
@@ -75,6 +95,13 @@ type App struct {
 type PathRule struct {
 	From string `yaml:"from"`
 	To   string `yaml:"to"`
+	// Why is one line saying why discovery settled this mapping for the
+	// operator, written when the rule is a default rather than the operator's
+	// own: the directory it could not place, and what it took instead.
+	Why string `yaml:"why,omitempty"`
+	// Default says discovery chose this rule, and the operator has not
+	// confirmed it. A default without a Why is a decision with no reason.
+	Default bool `yaml:"default,omitempty"`
 }
 
 // Load reads and checks a plan file.
@@ -125,13 +152,20 @@ func Parse(data []byte) (*Plan, error) {
 func (p *Plan) check() []string {
 	var problems []string
 	if p.Version != Version {
-		problems = append(problems, fmt.Sprintf("version %d: this box reads version %d", p.Version, Version))
+		problem := fmt.Sprintf("version %d: this box reads version %d", p.Version, Version)
+		if p.Version < Version {
+			problem += "; an older version is from an older box, so re-run `box migrate discover`"
+		}
+		problems = append(problems, problem)
 	}
+	problems = append(problems, p.checkSource()...)
 	for _, name := range p.appNames() {
 		app := p.Apps[name]
+		problems = append(problems, checkApp(name, app)...)
 		seen := make(map[string]bool, len(app.Paths))
 		for i := range app.Paths {
 			r := &app.Paths[i]
+			at := fmt.Sprintf("apps.%s paths[%d]", name, i)
 			// The rule is about how a path the app itself stored reads now, so
 			// both sides name directories the app saw or will see, and both are
 			// absolute. A relative one could mean either side of the mount.
@@ -151,6 +185,7 @@ func (p *Plan) check() []string {
 				}
 				seen[r.From] = true
 			}
+			problems = append(problems, whyProblems(at, r.Why, r.Default)...)
 		}
 		for _, port := range app.Ports {
 			if port < 1 || port > 65535 {

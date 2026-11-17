@@ -20,9 +20,10 @@ const infoHash = "0123456789abcdefghij"
 // qbtPlan is the table a migrated qBittorrent gets: the source's download root
 // and its Series subdirectory move under box's data contract. Every path in it
 // is invented.
-const qbtPlan = `version: 1
+const qbtPlan = `version: 2
 apps:
   qbittorrent:
+    kind: kubernetes
     source: qbittorrent
     config: /srv/apps/qbittorrent
     paths:
@@ -321,9 +322,10 @@ func TestRewriteDirLeavesAFileThatIsAlreadyRight(t *testing.T) {
 	// discovery, which is the only way a plan can say "this tree stays where it
 	// is": an absolute path no rule mentions is a gap, not a path to leave
 	// alone.
-	identity, err := plan.Parse([]byte(`version: 1
+	identity, err := plan.Parse([]byte(`version: 2
 apps:
   qbittorrent:
+    kind: kubernetes
     source: qbittorrent
     config: /srv/apps/qbittorrent
     paths:
@@ -557,9 +559,10 @@ func TestRewriteInPlace(t *testing.T) {
 
 	// An identity rule is how a plan says "this tree stays where it is": that
 	// is what makes the second file's paths already right rather than a gap.
-	identity, err := plan.Parse([]byte(`version: 1
+	identity, err := plan.Parse([]byte(`version: 2
 apps:
   qbittorrent:
+    kind: kubernetes
     source: qbittorrent
     config: /srv/apps/qbittorrent
     paths:

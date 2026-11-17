@@ -59,39 +59,46 @@ INSERT INTO sonarr_settings (serverName, url, apiKey) VALUES ('Sonarr', 'http://
 `
 
 const planYAML = `
-version: 1
+version: 2
 apps:
   plex:
+    kind: kubernetes
     source: plex
     config: /srv/apps/plex
     ports: [32400]
     paths: []
   seerr:
+    kind: kubernetes
     source: seerr
     config: /srv/apps/seerr
     ports: [5055]
     paths: []
   tautulli:
+    kind: kubernetes
     source: tautulli
     config: /srv/apps/tautulli
     ports: [8181]
     paths: []
   radarr:
+    kind: kubernetes
     source: radarr
     config: /srv/apps/radarr
     ports: [7878]
     paths: []
   sonarr:
+    kind: kubernetes
     source: sonarr
     config: /srv/apps/sonarr
     ports: [8989]
     paths: []
   qbittorrent:
+    kind: kubernetes
     source: qbittorrent
     config: /srv/apps/qbittorrent
     ports: [8081]
     paths: []
   maintainerr:
+    kind: kubernetes
     source: maintainerr
     config: /srv/apps/maintainerr
     paths: []

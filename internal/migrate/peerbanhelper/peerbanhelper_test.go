@@ -59,14 +59,16 @@ client:
     password: synthetic
 `
 
-const planYAML = `version: 1
+const planYAML = `version: 2
 apps:
   pbh:
+    kind: kubernetes
     source: pbh
     config: /srv/apps/pbh
     ports: [8088]
     paths: []
   qbittorrent:
+    kind: kubernetes
     source: qbittorrent
     config: /srv/apps/qbittorrent
     ports: [8080]

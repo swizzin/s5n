@@ -110,7 +110,7 @@ func TestLoadPlanNamesTheFile(t *testing.T) {
 	if _, _, err := loadPlan(dir); err == nil || !strings.Contains(err.Error(), "plan.yaml") {
 		t.Fatalf("an empty plan directory was refused with %v", err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, "plan.yaml"), []byte("version: 2\napps: {}\n"), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "plan.yaml"), []byte("version: 3\napps: {}\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	_, _, err := loadPlan(dir)

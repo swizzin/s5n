@@ -97,19 +97,22 @@ INSERT INTO media_request (id, rootFolder) VALUES (1, '/srv/media/Old Requests')
 `
 
 const planYAML = `
-version: 1
+version: 2
 apps:
   plex:
+    kind: kubernetes
     source: plex
     config: /srv/apps/plex
     ports: [32400]
     paths: []
   tautulli:
+    kind: kubernetes
     source: tautulli
     config: /srv/apps/tautulli
     ports: [8181]
     paths: []
   sonarr:
+    kind: kubernetes
     source: sonarr
     config: /srv/apps/sonarr
     ports: [8989]
@@ -118,6 +121,7 @@ apps:
       - from: /srv/media
         to: /data/media
   radarr:
+    kind: kubernetes
     source: radarr
     config: /srv/apps/radarr
     ports: [7878]
@@ -125,6 +129,7 @@ apps:
       - from: /srv/media
         to: /data/media
   seerr:
+    kind: kubernetes
     source: seerr
     config: /srv/apps/seerr
     paths:

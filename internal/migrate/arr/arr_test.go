@@ -21,9 +21,10 @@ import (
 // library and the downloads sit under /library, qBittorrent sees its downloads
 // at /downloads, and a Plex server answers on 32400. Every path in it is
 // invented.
-const sonarrPlan = `version: 1
+const sonarrPlan = `version: 2
 apps:
   sonarr:
+    kind: kubernetes
     source: sonarr
     config: /srv/apps/sonarr
     namespace: media
@@ -48,6 +49,7 @@ apps:
       - from: /config/scripts
         to: /config/scripts
   qbittorrent:
+    kind: kubernetes
     source: qbittorrent
     config: /srv/apps/qbittorrent
     ports: [8080]
@@ -55,6 +57,7 @@ apps:
       - from: /downloads
         to: /data/downloads
   plex:
+    kind: kubernetes
     source: plex
     config: /srv/apps/plex
     ports: [32400]
@@ -645,9 +648,10 @@ func TestRadarrTables(t *testing.T) {
 
 // prowlarrPlan is the target-side shape §6.2 describes: Prowlarr holds an
 // application to a Sonarr and a download client, and no library.
-const prowlarrPlan = `version: 1
+const prowlarrPlan = `version: 2
 apps:
   prowlarr:
+    kind: kubernetes
     source: prowlarr
     config: /srv/apps/prowlarr
     namespace: media
@@ -656,11 +660,13 @@ apps:
       - from: /library/backups
         to: /config/backups
   sonarr:
+    kind: kubernetes
     source: sonarr
     config: /srv/apps/sonarr
     ports: [8989]
     paths: []
   qbittorrent:
+    kind: kubernetes
     source: qbittorrent
     config: /srv/apps/qbittorrent
     ports: [8080]

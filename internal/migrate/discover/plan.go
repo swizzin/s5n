@@ -5,6 +5,7 @@ import (
 	"path"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/swizzin/s5n/internal/migrate/plan"
 )
@@ -14,13 +15,23 @@ import (
 func (d *discovery) plan(data *plan.Data, svcs []Service) *plan.Plan {
 	p := &plan.Plan{
 		Version: plan.Version,
-		Data:    data,
-		Apps:    make(map[string]plan.App, len(d.instances)),
-		Hosts:   d.hostRules(svcs),
+		// Only the cluster reader exists so far, and it is the one that
+		// answered; a docker or swizzin reader adds its kind here. The host
+		// and the owner are what a reader has to learn before they can be
+		// filled in, so a plan from this box says nothing about them yet.
+		Source: &plan.Source{
+			Taken: d.now().UTC().Format(time.RFC3339),
+			Kinds: []string{plan.Kubernetes},
+		},
+		Data:  data,
+		Apps:  make(map[string]plan.App, len(d.instances)),
+		Hosts: d.hostRules(svcs),
 	}
 	for _, in := range d.instances {
 		p.Apps[in.name] = plan.App{
+			Kind:      plan.Kubernetes,
 			Source:    in.wl.Name,
+			Image:     in.container.Image,
 			Config:    in.configDir,
 			Namespace: in.wl.Namespace,
 			Ports:     in.ports,

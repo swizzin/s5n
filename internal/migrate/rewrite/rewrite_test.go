@@ -80,19 +80,22 @@ func TestURLPort(t *testing.T) {
 // lets a second Check read a copy the first pass rewrote, and lets Write follow
 // the Check that made the rewrite.
 func TestResolveFallsBackToTheBoxEndpoints(t *testing.T) {
-	p, err := plan.Parse([]byte(`version: 1
+	p, err := plan.Parse([]byte(`version: 2
 apps:
   sonarr:
+    kind: kubernetes
     source: sonarr
     config: /srv/apps/sonarr
     ports: [8989]
     paths: []
   qbittorrent:
+    kind: kubernetes
     source: qbittorrent
     config: /srv/apps/qbittorrent
     ports: [8080]
     paths: []
   plex:
+    kind: kubernetes
     source: plex
     config: /srv/apps/plex
     ports: [32400]

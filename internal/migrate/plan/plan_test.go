@@ -11,9 +11,10 @@ import (
 // sourcePlan is a plan for an install whose Arrs saw the library under
 // /library and whose torrent client saw the same files as /downloads, which is
 // the case the table exists for. Every path is invented.
-const sourcePlan = `version: 1
+const sourcePlan = `version: 2
 apps:
   qbittorrent:
+    kind: kubernetes
     source: qbittorrent
     config: /srv/apps/qbittorrent
     paths:
@@ -22,6 +23,7 @@ apps:
       - from: /downloads/Series
         to: /data/media/Series
   sonarr-4k:
+    kind: kubernetes
     source: sonarr4k
     config: /srv/apps/sonarr4k
     paths:
@@ -42,18 +44,20 @@ func mustParse(t *testing.T, src string) *Plan {
 
 func TestRewrite(t *testing.T) {
 	p := mustParse(t, sourcePlan)
-	root := mustParse(t, `version: 1
+	root := mustParse(t, `version: 2
 apps:
   qbittorrent:
+    kind: kubernetes
     source: qbittorrent
     config: /srv/apps/qbittorrent
     paths:
       - from: /
         to: /data
 `)
-	ontoRoot := mustParse(t, `version: 1
+	ontoRoot := mustParse(t, `version: 2
 apps:
   qbittorrent:
+    kind: kubernetes
     source: qbittorrent
     config: /srv/apps/qbittorrent
     paths:
@@ -101,9 +105,10 @@ apps:
 }
 
 func TestParseCleansPaths(t *testing.T) {
-	p := mustParse(t, `version: 1
+	p := mustParse(t, `version: 2
 apps:
   qbittorrent:
+    kind: kubernetes
     source: qbittorrent
     config: /srv/apps/qbittorrent
     paths:
@@ -151,53 +156,58 @@ func TestParseRefusals(t *testing.T) {
 		want string
 	}{
 		{
-			name: "an unknown version",
-			src:  "version: 2\napps: {}\n",
-			want: "version 2: this box reads version 1",
+			name: "a newer version",
+			src:  "version: 3\napps: {}\n",
+			want: "version 3: this box reads version 2",
+		},
+		{
+			name: "a version 1 plan names the way forward",
+			src:  "version: 1\napps: {}\n",
+			want: "re-run `box migrate discover`",
 		},
 		{
 			name: "a missing version",
 			src:  "apps: {}\n",
-			want: "version 0: this box reads version 1",
+			want: "version 0: this box reads version 2",
 		},
 		{
 			name: "an unknown key at the top",
-			src:  "version: 1\napps: {}\nports: {}\n",
+			src:  "version: 2\napps: {}\nports: {}\n",
 			want: "ports",
 		},
 		{
 			name: "an unknown key in an app",
-			src:  "version: 1\napps:\n  q:\n    source: q\n    config: /srv/q\n    path: []\n",
+			src:  "version: 2\napps:\n  q:\n    kind: kubernetes\n    source: q\n    config: /srv/q\n    path: []\n",
 			want: "path",
 		},
 		{
 			name: "an unknown key in a rule",
-			src:  "version: 1\napps:\n  q:\n    source: q\n    config: /srv/q\n    paths:\n      - from: /a\n        to: /b\n        prefix: true\n",
+			src:  "version: 2\napps:\n  q:\n    kind: kubernetes\n    source: q\n    config: /srv/q\n    paths:\n      - from: /a\n        to: /b\n        prefix: true\n",
 			want: "prefix",
 		},
 		{
 			name: "a relative from",
-			src:  "version: 1\napps:\n  q:\n    source: q\n    config: /srv/q\n    paths:\n      - from: downloads\n        to: /data/downloads\n",
+			src:  "version: 2\napps:\n  q:\n    kind: kubernetes\n    source: q\n    config: /srv/q\n    paths:\n      - from: downloads\n        to: /data/downloads\n",
 			want: `apps.q: from "downloads" is not an absolute path`,
 		},
 		{
 			name: "a relative to",
-			src:  "version: 1\napps:\n  q:\n    source: q\n    config: /srv/q\n    paths:\n      - from: /downloads\n        to: data/downloads\n",
+			src:  "version: 2\napps:\n  q:\n    kind: kubernetes\n    source: q\n    config: /srv/q\n    paths:\n      - from: /downloads\n        to: data/downloads\n",
 			want: `apps.q: to "data/downloads" is not an absolute path`,
 		},
 		{
 			name: "an empty from",
-			src:  "version: 1\napps:\n  q:\n    source: q\n    config: /srv/q\n    paths:\n      - from: \"\"\n        to: /data/downloads\n",
+			src:  "version: 2\napps:\n  q:\n    kind: kubernetes\n    source: q\n    config: /srv/q\n    paths:\n      - from: \"\"\n        to: /data/downloads\n",
 			want: `apps.q: from "" is not an absolute path`,
 		},
 		{
 			name: "the same from twice",
-			src:  "version: 1\napps:\n  q:\n    source: q\n    config: /srv/q\n    paths:\n      - from: /downloads\n        to: /a\n      - from: /downloads\n        to: /b\n",
+			src:  "version: 2\napps:\n  q:\n    kind: kubernetes\n    source: q\n    config: /srv/q\n    paths:\n      - from: /downloads\n        to: /a\n      - from: /downloads\n        to: /b\n",
 			want: `apps.q: from "/downloads" appears twice`,
 		},
 		{
 			name: "the same directory spelled twice",
-			src:  "version: 1\napps:\n  q:\n    source: q\n    config: /srv/q\n    paths:\n      - from: /downloads\n        to: /a\n      - from: /downloads/\n        to: /b\n",
+			src:  "version: 2\napps:\n  q:\n    kind: kubernetes\n    source: q\n    config: /srv/q\n    paths:\n      - from: /downloads\n        to: /a\n      - from: /downloads/\n        to: /b\n",
 			want: `apps.q: from "/downloads" appears twice`,
 		},
 		{
@@ -207,12 +217,12 @@ func TestParseRefusals(t *testing.T) {
 		},
 		{
 			name: "a second document",
-			src:  "version: 1\napps: {}\n---\nversion: 1\n",
+			src:  "version: 2\napps: {}\n---\nversion: 2\n",
 			want: "more than one YAML document",
 		},
 		{
 			name: "apps that are not a map",
-			src:  "version: 1\napps: []\n",
+			src:  "version: 2\napps: []\n",
 			want: "cannot unmarshal !!seq",
 		},
 	}
@@ -234,9 +244,10 @@ func TestParseRefusals(t *testing.T) {
 }
 
 func TestParseNamesEveryProblemAtOnce(t *testing.T) {
-	_, err := Parse([]byte(`version: 2
+	_, err := Parse([]byte(`version: 3
 apps:
   q:
+    kind: kubernetes
     source: q
     config: /srv/q
     paths:
@@ -253,7 +264,7 @@ apps:
 	if len(perr.Problems) != 3 {
 		t.Fatalf("problems = %v, want the version and both relative paths", perr.Problems)
 	}
-	for _, want := range []string{"version 2", `from "downloads"`, `to "data/downloads"`} {
+	for _, want := range []string{"version 3", `from "downloads"`, `to "data/downloads"`} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("error = %q, want it to name %q", err, want)
 		}

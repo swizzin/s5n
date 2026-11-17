@@ -39,9 +39,10 @@ const dbRows = `@tables|section_locations
 `
 
 const planYAML = `
-version: 1
+version: 2
 apps:
   plex:
+    kind: kubernetes
     source: plex
     config: /srv/apps/plex
     ports: [32400]

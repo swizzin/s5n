@@ -105,6 +105,7 @@ func TestClusterReadsALiveSource(t *testing.T) {
 	}
 	want := map[string]plan.App{
 		"sonarr": {
+			Kind: plan.Kubernetes, Image: "lscr.io/linuxserver/sonarr:4.0.14",
 			Source: "sonarr", Config: "/srv/apps/sonarr", Namespace: "media", Ports: []int{8989},
 			Paths: []plan.PathRule{
 				{From: "/config", To: "/config"},
@@ -113,6 +114,7 @@ func TestClusterReadsALiveSource(t *testing.T) {
 			},
 		},
 		"qbittorrent": {
+			Kind: plan.Kubernetes, Image: "ghcr.io/home-operations/qbittorrent:5.3.0",
 			Source: "qbittorrent", Config: "/srv/apps/qbittorrent", Namespace: "media", Ports: []int{8080},
 			Paths: []plan.PathRule{
 				{From: "/config", To: "/config"},
