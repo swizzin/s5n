@@ -997,7 +997,10 @@ data. Everything it will change is written down before it changes anything.
 - **Images come from the blessed variants (decided).** A source image maps to a variant
   only when it already is one of the chart's blessed variants, same repository and same
   variant, and discovery writes that variant into the plan; anything else gets the chart
-  default and a note naming `apps.<app>.image.variant` and the list. The same Ingress read
+  default and a note naming `apps.<app>.image.variant` and the list. The list is the
+  chart's, so a read loads the release it is writing a plan for (`--chart-repo`,
+  `--chart-version`, the flags the install takes): a read that cannot load it is refused
+  rather than planning every app onto the default image silently. The same Ingress read
   that resolves an address gives the plan's domain default: the one name the source's hosts
   all are — box serves the apps under paths on it, as the source did — or the domain
   several hosts share. The source's own image is never carried, and the admission policy
