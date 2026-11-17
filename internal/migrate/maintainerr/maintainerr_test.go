@@ -252,6 +252,44 @@ func TestUnclassifiedAddressBlocks(t *testing.T) {
 	}
 }
 
+// TestUnsettledPlexConnectionProposesPlex: plex_hostname/plex_port are
+// Maintainerr's Plex connection by name, so an address nothing settles there can
+// only be the box's Plex. That is a proposal for Settle to write as a default
+// (the address is still reported, and Check still writes nothing); a URL column
+// that names no app in particular proposes nothing.
+func TestUnsettledPlexConnectionProposesPlex(t *testing.T) {
+	ctx := context.Background()
+	in := setup(t)
+	exec(t, in.Dir, `UPDATE settings SET plex_hostname = '192.0.2.56', plex_port = 32400 WHERE id = 1`)
+	rep, err := rewriter{}.Check(ctx, in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := rewrite.Default{
+		Host: "192.0.2.56", Port: 32400, App: "plex",
+		Why: "it is Maintainerr's Plex connection, and this box runs Plex",
+	}
+	if len(rep.Defaults) != 1 || rep.Defaults[0] != want {
+		t.Fatalf("Defaults = %+v, want %+v", rep.Defaults, want)
+	}
+	if len(rep.Unclassified) != 1 {
+		t.Errorf("Unclassified = %v, want the address still reported", rep.Unclassified)
+	}
+
+	// A plan with no Plex has nothing to propose.
+	in = setup(t)
+	delete(in.Plan.Apps, "plex")
+	delete(in.Targets, "plex")
+	exec(t, in.Dir, `UPDATE settings SET plex_hostname = '192.0.2.56' WHERE id = 1`)
+	rep, err = rewriter{}.Check(ctx, in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rep.Defaults) != 0 {
+		t.Errorf("Defaults = %+v, want none without a Plex in the plan", rep.Defaults)
+	}
+}
+
 func TestUnparseableURLIsRefused(t *testing.T) {
 	ctx := context.Background()
 	in := setup(t)

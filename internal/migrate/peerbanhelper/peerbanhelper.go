@@ -69,6 +69,10 @@ const (
 	// downloaderKind is what an adopted downloader is filed as in wiring's
 	// ownership record (internal/wiring/owned.go).
 	downloaderKind = "pbh-downloader"
+
+	// appQBittorrent is the one download client box runs, and so the one app a
+	// downloader of that type can point at on the box.
+	appQBittorrent = "qbittorrent"
 )
 
 type rewriter struct{}
@@ -192,6 +196,7 @@ func (d *decision) downloaders(in rewrite.Input, rep *rewrite.Report) error {
 				continue
 			}
 		}
+		typ := strings.ToLower(d.file.str(sectionClient, id, keyType))
 		res := in.Resolve(u.Hostname(), port)
 		switch res.Verdict {
 		case plan.Leave:
@@ -201,6 +206,16 @@ func (d *decision) downloaders(in rewrite.Input, rep *rewrite.Report) error {
 			rep.Unclassified = append(rep.Unclassified, rewrite.Address{
 				App: in.App, File: configRel, Where: where, Host: u.Hostname(), Port: port,
 			})
+			// The downloader's own type says which app its address can only
+			// mean: box runs one qBittorrent, and a qBittorrent downloader the
+			// plan cannot place can be nothing else. That is a proposal for
+			// Settle to write as a default, never a rewrite here.
+			if d.proposes(in, typ) {
+				rep.Defaults = append(rep.Defaults, rewrite.Default{
+					Host: u.Hostname(), Port: port, App: appQBittorrent,
+					Why: "it is a qBittorrent downloader, and this box runs one qBittorrent",
+				})
+			}
 			continue
 		}
 		end, ok := in.Targets[res.App]
@@ -224,7 +239,7 @@ func (d *decision) downloaders(in rewrite.Input, rep *rewrite.Report) error {
 		// downloader the source already had can be adopted: it is filed under
 		// the id PBH stores it under, which is the string key `client:` uses
 		// (docs/box.md, "Migrated connections are adopted by ID").
-		switch strings.ToLower(d.file.str(sectionClient, id, keyType)) {
+		switch typ {
 		case "qbittorrent", "qbittorrentee":
 			name := d.file.str(sectionClient, id, keyName)
 			if name == "" {
@@ -236,6 +251,21 @@ func (d *decision) downloaders(in rewrite.Input, rep *rewrite.Report) error {
 		}
 	}
 	return nil
+}
+
+// proposes reports whether a downloader of this type can only be the box's
+// qBittorrent, and this plan runs one.
+func (d *decision) proposes(in rewrite.Input, typ string) bool {
+	switch typ {
+	case "qbittorrent", "qbittorrentee":
+	default:
+		return false
+	}
+	if _, ok := in.Plan.Apps[appQBittorrent]; !ok {
+		return false
+	}
+	_, ok := in.Targets[appQBittorrent]
+	return ok
 }
 
 // sortOwned orders adopted connections so a report reads the same twice.

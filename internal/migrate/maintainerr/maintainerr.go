@@ -53,6 +53,9 @@ const (
 	colPlexHost = "plex_hostname"
 	colPlexPort = "plex_port"
 	colPlexSSL  = "plex_ssl"
+	// appPlex is the app those two columns name: Maintainerr's only media
+	// server connection box runs.
+	appPlex = "plex"
 )
 
 // settingsExternal are the media servers box does not migrate, listed in a note
@@ -252,7 +255,10 @@ func (r *settingsRow) plex(in rewrite.Input, rep *rewrite.Report) error {
 		return nil
 	}
 	port, _ := strconv.Atoi(strings.TrimSpace(r.by[colPlexPort].String))
-	end, rewriteIt, err := ask(in, dbName, "settings."+colPlexHost, rep, host.String, port)
+	// These two columns are Maintainerr's Plex connection by name, so an
+	// address nothing settles can only be the box's Plex. That is a proposal
+	// for Settle to write as a default, never a rewrite here.
+	end, rewriteIt, err := ask(in, dbName, "settings."+colPlexHost, rep, host.String, port, appPlex)
 	if err != nil || !rewriteIt {
 		return err
 	}
@@ -278,7 +284,7 @@ func (r *settingsRow) urls(in rewrite.Input, rep *rewrite.Report) error {
 		if err != nil {
 			return fmt.Errorf("maintainerr: settings.%s: %w", column, err)
 		}
-		end, rewriteIt, err := ask(in, dbName, "settings."+column, rep, u.Hostname(), portOf(u))
+		end, rewriteIt, err := ask(in, dbName, "settings."+column, rep, u.Hostname(), portOf(u), "")
 		if err != nil {
 			return err
 		}
@@ -317,7 +323,7 @@ func arrEdits(ctx context.Context, db *sql.DB, in rewrite.Input, rep *rewrite.Re
 				rows.Close()
 				return nil, fmt.Errorf("maintainerr: %s.url: %w", table, err)
 			}
-			end, rewriteIt, err := ask(in, dbName, table+".url", rep, u.Hostname(), portOf(u))
+			end, rewriteIt, err := ask(in, dbName, table+".url", rep, u.Hostname(), portOf(u), "")
 			if err != nil {
 				rows.Close()
 				return nil, err
@@ -341,7 +347,13 @@ func arrEdits(ctx context.Context, db *sql.DB, in rewrite.Input, rep *rewrite.Re
 // ask is the one place this app consults the plan about a stored address. It
 // returns the endpoint to point at when the plan rewrites it, and records the
 // address as unclassified when the plan does not settle it.
-func ask(in rewrite.Input, file, where string, rep *rewrite.Report, host string, port int) (rewrite.Endpoint, bool, error) {
+//
+// propose names the app the column itself fixes, for a column that can only be
+// one app's address (the Plex connection). An address nothing settles there is
+// proposed as a default for Settle to write, so a migration does not leave a
+// connection pointed at an address that will not exist; the proposal is never a
+// rewrite, because Check writes nothing and the plan is the operator's.
+func ask(in rewrite.Input, file, where string, rep *rewrite.Report, host string, port int, propose string) (rewrite.Endpoint, bool, error) {
 	res := in.Resolve(host, port)
 	switch res.Verdict {
 	case plan.Rewrite:
@@ -358,7 +370,25 @@ func ask(in rewrite.Input, file, where string, rep *rewrite.Report, host string,
 	rep.Unclassified = append(rep.Unclassified, rewrite.Address{
 		App: in.App, File: file, Where: where, Host: host, Port: port,
 	})
+	if propose != "" && in.Plan != nil {
+		if _, ok := in.Plan.Apps[propose]; ok {
+			if _, ok := in.Targets[propose]; ok {
+				rep.Defaults = append(rep.Defaults, rewrite.Default{
+					Host: host, Port: port, App: propose,
+					Why: "it is Maintainerr's " + appLabel(propose) + " connection, and this box runs " + appLabel(propose),
+				})
+			}
+		}
+	}
 	return rewrite.Endpoint{}, false, nil
+}
+
+// appLabel is how an app is named in a line an operator reads.
+func appLabel(app string) string {
+	if app == appPlex {
+		return "Plex"
+	}
+	return app
 }
 
 func address(host string, port int) string {

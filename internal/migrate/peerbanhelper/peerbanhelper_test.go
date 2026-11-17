@@ -277,6 +277,45 @@ func TestMissingConfigIsNoted(t *testing.T) {
 	}
 }
 
+// TestUnsettledQbittorrentDownloaderProposesTheBoxsClient: the downloader's own
+// type says which app its address can only mean. Box runs one qBittorrent, so a
+// qBittorrent downloader nothing settles is proposed as that app, for Settle to
+// write as a default; the rewriter still reports the address and writes nothing.
+// A downloader of another type is not proposed.
+func TestUnsettledQbittorrentDownloaderProposesTheBoxsClient(t *testing.T) {
+	ctx := context.Background()
+	in := setup(t)
+	rep, err := rewriter{}.Check(ctx, in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := rewrite.Default{
+		Host: "192.0.2.10", Port: 8081, App: "qbittorrent",
+		Why: "it is a qBittorrent downloader, and this box runs one qBittorrent",
+	}
+	if len(rep.Defaults) != 1 || rep.Defaults[0] != want {
+		t.Fatalf("Defaults = %+v, want %+v", rep.Defaults, want)
+	}
+
+	// A downloader of a type box does not run says nothing about the box.
+	in = setup(t)
+	raw, err := os.ReadFile(filepath.Join(in.Dir, filepath.FromSlash(configRel)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw = []byte(strings.Replace(string(raw), "    type: qbittorrent\n    name: NAS", "    type: transmission\n    name: NAS", 1))
+	if err := os.WriteFile(filepath.Join(in.Dir, filepath.FromSlash(configRel)), raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	rep, err = rewriter{}.Check(ctx, in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rep.Defaults) != 0 {
+		t.Errorf("Defaults = %+v, want none for a downloader box does not run", rep.Defaults)
+	}
+}
+
 // treeHash is every file's name, mode and bytes, so a pass that writes anything
 // at all changes it.
 func treeHash(t *testing.T, dir string) string {
