@@ -346,7 +346,7 @@ func (d *Decision) Run(ctx context.Context, opts Options) (Result, error) {
 	d.step(2, "where should your data and settings live?")
 	dataPath, err := d.askText(textQuestion{
 		key: "storage.data.path", flag: "--data-path",
-		prompt: "data path", help: "where downloads and media live on this host",
+		prompt: "data path", help: "where this user's downloads and media live",
 		value: opts.DataPath, prefill: prefill(base, grantNow, "storage.data.path"),
 		unattended: opts.Unattended, validate: validHostPath,
 	})
@@ -355,7 +355,7 @@ func (d *Decision) Run(ctx context.Context, opts Options) (Result, error) {
 	}
 	configPath, err := d.askText(textQuestion{
 		key: "storage.config.path", flag: "--config-path",
-		prompt: "config path", help: "where the apps keep their settings on this host",
+		prompt: "config path", help: "where this user's apps keep their settings",
 		value: opts.ConfigPath, prefill: prefill(base, grantNow, "storage.config.path"),
 		unattended: opts.Unattended, validate: validHostPath,
 	})
