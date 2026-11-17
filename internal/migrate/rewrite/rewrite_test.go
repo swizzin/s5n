@@ -34,11 +34,27 @@ func TestBlocked(t *testing.T) {
 	if (Report{Notes: []string{"x"}, Changes: []Change{{Count: 1}}}).Blocked() {
 		t.Error("notes and changes blocked apply")
 	}
+	// What a pass leaves on purpose, and what it proposes for an address, are
+	// decisions: neither is a gap, so neither may stop a migration.
+	if (Report{Left: []Left{{What: "192.0.2.10:9091"}}, Defaults: []Default{{Host: "192.0.2.10", Port: 9091}}}).Blocked() {
+		t.Error("a value left on purpose, or a proposed default, blocked apply")
+	}
 	if !(Report{Uncovered: []plan.Uncovered{{Path: "/x"}}}).Blocked() {
 		t.Error("an uncovered path did not block apply")
 	}
 	if !(Report{Unclassified: []Address{{Host: "nas"}}}).Blocked() {
 		t.Error("an unclassified address did not block apply")
+	}
+}
+
+// TestAddressText: the line an operator reads names the address the way the app
+// stored it, including the port only when there is one.
+func TestAddressText(t *testing.T) {
+	if got := (Address{Host: "192.0.2.10", Port: 32400}).Text(); got != "192.0.2.10:32400" {
+		t.Errorf("Text() = %q", got)
+	}
+	if got := (Address{Host: "qbt.example.org"}).Text(); got != "qbt.example.org" {
+		t.Errorf("Text() with no port = %q", got)
 	}
 }
 

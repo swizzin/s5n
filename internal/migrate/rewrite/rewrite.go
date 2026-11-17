@@ -19,6 +19,7 @@ package rewrite
 import (
 	"context"
 	"fmt"
+	"net"
 	"net/url"
 	"sort"
 	"strconv"
@@ -148,6 +149,20 @@ type Report struct {
 	Uncovered []plan.Uncovered
 	// Unclassified are stored addresses no host rule settles.
 	Unclassified []Address
+	// Left are stored values this pass leaves exactly as it is, on purpose,
+	// and why. None of them blocks the run: they are the cases where leaving
+	// is the decision, not a gap in the plan (a client the app never dials, a
+	// client of a type box does not run, a database column that names two apps
+	// at once). The operator is told what happens to each one.
+	Left []Left
+	// Defaults are settlements this pass proposes for an address the plan does
+	// not settle, because the field itself says which app the address can only
+	// mean: a PeerBanHelper downloader of type qBittorrent can only be the
+	// box's qBittorrent, whatever address it stored. A Check writes nothing, so
+	// this is a proposal: Settle turns it into a rule with default and why (see
+	// internal/migrate/apply, settle.go). An address with no proposal here is
+	// left as it is.
+	Defaults []Default
 	// Notes are things the operator should know that stop nothing: a table
 	// emptied on purpose, an import list's remote filter left alone.
 	Notes []string
@@ -183,6 +198,45 @@ type Address struct {
 
 func (a Address) String() string {
 	return fmt.Sprintf("%s %s %s: %s:%d", a.App, a.File, a.Where, a.Host, a.Port)
+}
+
+// Text is the address the way the app stored it, for a line the operator
+// reads: host:port, or the host alone when the app stored no port.
+func (a Address) Text() string {
+	if a.Port == 0 {
+		return a.Host
+	}
+	return net.JoinHostPort(a.Host, strconv.Itoa(a.Port))
+}
+
+// Left is one stored value a pass leaves exactly as it is, and why. The why is
+// one line and says what happens to the value, because that is all the operator
+// gets: a disabled download client whose address cannot be placed stays where it
+// is, and saying so is the whole of the decision.
+type Left struct {
+	File  string // relative to Dir
+	Where string // table.column, section/key, JSON pointer
+	What  string // the stored value, as the app has it
+	Why   string // one line: why it is left, and what happens to it
+}
+
+// Default is one settlement a pass proposes for an address the plan does not
+// settle, because the field it was found in says which app the address can only
+// mean. It is a proposal, not a write: Settle turns it into a host rule with
+// default and why, and apply then makes the rewrite the rule describes.
+//
+// A proposal is only ever made where the app's own field fixes the answer: the
+// type is the app's, not a guess at the address. Nothing else about an
+// unsettled address is a default, and an address no proposal names is left as
+// it is.
+type Default struct {
+	Host string // as the app stored it
+	Port int    // as the app stored it; 0 when it stored none
+	// App is the box instance the address can only mean.
+	App string
+	// Why is one line saying what makes it that app, and is kept as the rule's
+	// own reason.
+	Why string
 }
 
 // Blocked reports whether apply has to stop on this report.
