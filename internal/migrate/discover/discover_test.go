@@ -2,6 +2,7 @@ package discover
 
 import (
 	"context"
+	"fmt"
 	"reflect"
 	"sort"
 	"strings"
@@ -1206,5 +1207,288 @@ func TestWorkloadOwns(t *testing.T) {
 				t.Fatalf("Owns = %v, want %v", got, tt.want)
 			}
 		})
+	}
+}
+
+// TestDiscoverResolvesAnIngressAddress: an app stored a public name and path for
+// another app, and the source's Ingress is what says which app that was. The
+// rule resolves outright -- it is not a guess like a pod's address -- and the why
+// line says what the address becomes and which Ingress path made it that app.
+func TestDiscoverResolvesAnIngressAddress(t *testing.T) {
+	f := sourceInstall(t)
+	f.ingress(t, "panel", "media", "panel.example.com", "/qbittorrent", "qbittorrent")
+
+	p, _ := f.discover(t)
+	want := []plan.HostRule{
+		{Host: "panel.example.com", App: "qbittorrent", Why: "rewrite to qbittorrent: panel.example.com/qbittorrent is its Ingress path"},
+		{Service: "plex.media", App: "plex", Port: 80},
+		{Service: "qbittorrent.media", App: "qbittorrent", Port: 80},
+		{Service: "sonarr.media", App: "sonarr", Port: 80},
+	}
+	if !reflect.DeepEqual(p.Hosts, want) {
+		t.Fatalf("hosts:\n got %#v\nwant %#v", p.Hosts, want)
+	}
+	// apply reads the file, and the address an app stored resolves through it.
+	rp := roundTrip(t, p)
+	if got := rp.Resolve("prowlarr", "panel.example.com", 443); got != (plan.Resolution{Verdict: plan.Rewrite, App: "qbittorrent"}) {
+		t.Fatalf("a stored https://panel.example.com/qbittorrent resolves to %+v, want qbittorrent", got)
+	}
+}
+
+// TestDiscoverIngressHostServingTwoApps: which app a public address meant is the
+// path, and a rule matches a host, so a host that serves two apps maps to
+// neither and the operator hears about it. Apply then lists every address that
+// referred to the host.
+func TestDiscoverIngressHostServingTwoApps(t *testing.T) {
+	f := sourceInstall(t)
+	f.ingress(t, "panel", "media", "panel.example.com", "/qbittorrent", "qbittorrent")
+	f.ingress(t, "arrs", "media", "panel.example.com", "/sonarr", "sonarr")
+
+	p, rep := f.discover(t)
+	for _, h := range p.Hosts {
+		if h.Host == "panel.example.com" {
+			t.Fatalf("a host that serves two apps became a rule: %#v", h)
+		}
+	}
+	want := "ingress host panel.example.com serves qbittorrent at panel.example.com/qbittorrent and sonarr at panel.example.com/sonarr, so no rule maps it and apply will list every address that referred to it"
+	var noted bool
+	for _, n := range rep.Notes {
+		if n == want {
+			noted = true
+		}
+	}
+	if !noted {
+		t.Fatalf("the ambiguous host is not reported as %q: %#v", want, rep.Notes)
+	}
+}
+
+// TestDiscoverIngressReachesNoApp: an Ingress is an address of an app only when
+// its backend Service reaches that app on a port the app itself listens on. A
+// Service it does not have, a backend port it names and the Service does not
+// declare, and a port that forwards to a sidecar all reach no app, so no rule
+// rewrites an address that never was the app's.
+func TestDiscoverIngressReachesNoApp(t *testing.T) {
+	tests := []struct {
+		name string
+		// service is the Ingress backend: the Service name and the port it
+		// names, which is the fixture's 80 unless the test adds its own.
+		backend string
+		port    int
+		want    string
+	}{
+		{name: "a service the source does not have", backend: "gone", port: 80, want: "which the source does not have"},
+		{name: "a port the service does not declare", backend: "plex", port: 8443, want: "which it does not declare"},
+		{name: "a port that forwards to a sidecar", backend: "plex-exporter", port: 9000, want: "does not listen on"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			f := sourceInstall(t)
+			f.servicePorts(t, "plex-exporter", "media", "plex", servicePort{port: 9000, target: "9000"})
+			f.object(t, "ingress-panel", fmt.Sprintf(`apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: panel
+  namespace: media
+spec:
+  rules:
+    - host: panel.example.com
+      http:
+        paths:
+          - path: /plex
+            pathType: Prefix
+            backend:
+              service:
+                name: %s
+                port:
+                  number: %d
+`, tt.backend, tt.port))
+			p, rep := f.discover(t)
+			for _, h := range p.Hosts {
+				if h.Host == "panel.example.com" {
+					t.Fatalf("an Ingress that reaches no app became a rule: %#v", h)
+				}
+			}
+			var noted bool
+			for _, n := range rep.Notes {
+				if strings.Contains(n, "panel.example.com/plex") && strings.Contains(n, tt.want) {
+					noted = true
+				}
+			}
+			if !noted {
+				t.Fatalf("the unreachable Ingress is not reported with %q: %#v", tt.want, rep.Notes)
+			}
+		})
+	}
+}
+
+// TestDiscoverIngressBackendPortByName: an Ingress backend names a Service port
+// as often as it numbers it, and the rule is the same either way.
+func TestDiscoverIngressBackendPortByName(t *testing.T) {
+	f := sourceInstall(t)
+	f.object(t, "qbittorrent-web", `apiVersion: v1
+kind: Service
+metadata:
+  name: qbittorrent-web
+  namespace: media
+spec:
+  selector:
+    app.kubernetes.io/name: qbittorrent
+  ports:
+    - name: web
+      port: 8081
+      targetPort: http
+`)
+	f.object(t, "ingress-panel", `apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: panel
+  namespace: media
+spec:
+  rules:
+    - host: panel.example.com
+      http:
+        paths:
+          - path: /qbt
+            pathType: Prefix
+            backend:
+              service:
+                name: qbittorrent-web
+                port:
+                  name: web
+`)
+	p, _ := f.discover(t)
+	var found bool
+	for _, h := range p.Hosts {
+		if h.Host == "panel.example.com" {
+			found = true
+			if h.App != "qbittorrent" {
+				t.Fatalf("the rule maps %q, want qbittorrent", h.App)
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("an Ingress naming its backend port got no rule: %#v", p.Hosts)
+	}
+}
+
+// TestDiscoverClusterIPRules: an app that stored a Service's cluster address
+// stored an address of that Service's app, and a cluster IP outlives the pods
+// behind it, so it resolves outright -- on the port the address carries.
+func TestDiscoverClusterIPRules(t *testing.T) {
+	f := sourceInstall(t)
+	f.object(t, "sonarr-address", `apiVersion: v1
+kind: Service
+metadata:
+  name: sonarr-address
+  namespace: media
+spec:
+  clusterIP: 10.96.0.14
+  clusterIPs: [10.96.0.14]
+  selector:
+    app.kubernetes.io/name: sonarr
+  ports:
+    - port: 8989
+      targetPort: 8989
+`)
+	p, _ := f.discover(t)
+	want := plan.HostRule{
+		Host: "10.96.0.14", Port: 8989, App: "sonarr",
+		Why: "rewrite to sonarr: 10.96.0.14:8989 is sonarr-address.media's cluster address",
+	}
+	var found bool
+	for _, h := range p.Hosts {
+		if h.Host == "10.96.0.14" {
+			found = true
+			if !reflect.DeepEqual(h, want) {
+				t.Fatalf("the cluster address rule:\n got %#v\nwant %#v", h, want)
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("a Service's cluster address got no rule: %#v", p.Hosts)
+	}
+	// A headless Service has no address of its own, so nothing names one.
+	if strings.Contains(fmt.Sprint(p.Hosts), "None") {
+		t.Fatalf("a headless Service became a rule: %#v", p.Hosts)
+	}
+	roundTrip(t, p)
+}
+
+// TestDiscoverPodIPIsAHint: an address a pod answered on is only a hint. The app
+// that ran there is one box will run, so an address an app stored is worth a
+// default -- but the address does not survive the move and may be another pod's
+// by now, so the rule says so and marks itself a default.
+func TestDiscoverPodIPIsAHint(t *testing.T) {
+	f := sourceInstall(t)
+	f.pod(t, "plex-0", "media", map[string]string{"app.kubernetes.io/name": "plex"}, "10.244.0.56",
+		&ownerRef{kind: "StatefulSet", name: "plex"})
+	p, rep := f.discover(t)
+	want := plan.HostRule{
+		Host: "10.244.0.56", Port: 32400, App: "plex", Default: true,
+		Why: "rewrite to plex: 10.244.0.56:32400 was its pod's address, which does not survive the move and may be another pod's by now",
+	}
+	var found bool
+	for _, h := range p.Hosts {
+		if h.Host == "10.244.0.56" {
+			found = true
+			if !reflect.DeepEqual(h, want) {
+				t.Fatalf("the pod address rule:\n got %#v\nwant %#v", h, want)
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("a pod's address got no hint rule: %#v", p.Hosts)
+	}
+	if len(rep.Notes) != 0 {
+		t.Fatalf("a pod's address should need no note: %#v", rep.Notes)
+	}
+	// The rule is a default with a reason, or the plan refuses it.
+	roundTrip(t, p)
+}
+
+// TestDiscoverPodOwnedByTwoApps: a pod carrying two apps' selectors names
+// neither, because the address could have been either one's.
+func TestDiscoverPodOwnedByTwoApps(t *testing.T) {
+	f := newFixture(t)
+	shared := map[string]string{"app": "media"}
+	for _, spec := range []appSpec{
+		{name: "qbittorrent", image: "ghcr.io/home-operations/qbittorrent:5.3.0", port: 8080, mounts: []mount{
+			{volume: "config", path: "/config", host: "/srv/apps/qbittorrent"},
+			{volume: "downloads", path: "/downloads", host: "/srv/library/Downloads"},
+		}},
+	} {
+		f.app(t, spec)
+	}
+	f.file(t, "/srv/apps/qbittorrent/qBittorrent/qBittorrent.conf", "[BitTorrent]\nSession\\DefaultSavePath=/downloads\n")
+	for _, spec := range []appSpec{
+		{name: "sonarr", image: "lscr.io/linuxserver/sonarr:4.0.14", port: 8989, podLabels: shared, mounts: []mount{
+			{volume: "config", path: "/config", host: "/srv/apps/sonarr"},
+			{volume: "library", path: "/library", host: "/srv/library"},
+		}},
+		{name: "radarr", image: "lscr.io/linuxserver/radarr:5.20.1", port: 7878, podLabels: shared, mounts: []mount{
+			{volume: "config", path: "/config", host: "/srv/apps/radarr"},
+			{volume: "library", path: "/library", host: "/srv/library"},
+		}},
+	} {
+		f.app(t, spec)
+	}
+	f.bytes(t, "/srv/apps/sonarr/sonarr.db", arrDB(t, "/library/media/TV"))
+	f.bytes(t, "/srv/apps/radarr/radarr.db", arrDB(t, "/library/media/Movies"))
+	f.pod(t, "arrs-0", "media", shared, "10.244.0.60", &ownerRef{kind: "StatefulSet", name: "sonarr"})
+
+	p, rep := f.discover(t)
+	for _, h := range p.Hosts {
+		if h.Host == "10.244.0.60" {
+			t.Fatalf("a pod two apps select became a rule: %#v", h)
+		}
+	}
+	var noted bool
+	for _, n := range rep.Notes {
+		if strings.Contains(n, "media/arrs-0") && strings.Contains(n, "radarr and sonarr") {
+			noted = true
+		}
+	}
+	if !noted {
+		t.Fatalf("the ambiguous pod is not reported: %#v", rep.Notes)
 	}
 }
