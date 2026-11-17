@@ -39,7 +39,8 @@ type cutoverOptions struct {
 	// Replace is --replace-cluster: stop after the final snapshot.
 	Replace bool
 	// apply is the second half's flags, shared with `box migrate apply` so a
-	// cutover and an apply of its snapshot cannot take different files.
+	// cutover and an apply of its snapshot cannot take different files -- and
+	// so the answers a host with no box needs are asked for once.
 	apply *migrateApplyFlags
 }
 
@@ -47,7 +48,11 @@ func runMigrateCutover(ctx context.Context, args []string) {
 	fs := flag.NewFlagSet("migrate cutover", flag.ExitOnError)
 	o := cutoverOptions{discoverOptions: discoverOptions{Box: version}}
 	ns := addDiscoverFlags(fs, &o.discoverOptions, "the final snapshot to write (default: "+bundle.Dir+"/migrate-<time>-final.tar.gz)")
-	o.apply = &migrateApplyFlags{applyFlags: addApplyFlags(fs), plain: fs.Bool("plain", false, "ask with plain line prompts, even on a terminal (for a flaky terminal or a screen reader)")}
+	o.apply = &migrateApplyFlags{
+		applyFlags: addApplyFlags(fs),
+		install:    addInstallFlags(fs),
+		plain:      fs.Bool("plain", false, "ask with plain line prompts, even on a terminal (for a flaky terminal or a screen reader)"),
+	}
 	replace := fs.Bool("replace-cluster", false, "stop after the final snapshot, for a host whose cluster box should replace with its own")
 	if err := fs.Parse(args); err != nil {
 		fmt.Fprintf(os.Stderr, "box: %v\n", err)

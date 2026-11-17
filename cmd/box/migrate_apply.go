@@ -46,19 +46,32 @@ import (
 // this command adds.
 type migrateApplyFlags struct {
 	*applyFlags
-	plain *bool
+	// install are the answers a host with no box has to be given; on a host
+	// that already has one they are ignored.
+	install *installFlags
+	plain   *bool
 }
 
 func addMigrateApplyFlags(fs *flag.FlagSet) *migrateApplyFlags {
 	return &migrateApplyFlags{
 		applyFlags: addApplyFlags(fs),
+		install:    addInstallFlags(fs),
 		plain:      fs.Bool("plain", false, "ask with plain line prompts, even on a terminal (for a flaky terminal or a screen reader)"),
 	}
 }
 
 func runMigrateApply(ctx context.Context, args []string) {
+	// --paths-in-node is the e2e's storage switch, taken out of the arguments
+	// before the FlagSet sees them: a host with no box runs init here, and
+	// init's dev switch has to reach it the same way `box bootstrap`'s does.
+	pathsInNode, args, err := takePathsInNode(args)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "box: %v\n", err)
+		os.Exit(2)
+	}
 	fs := flag.NewFlagSet("migrate apply", flag.ExitOnError)
 	o := addMigrateApplyFlags(fs)
+	o.install.pathsInNode = pathsInNode
 	if err := fs.Parse(args); err != nil {
 		fmt.Fprintf(os.Stderr, "box: %v\n", err)
 		os.Exit(2)
@@ -155,12 +168,22 @@ func migrateApply(ctx context.Context, file string, o *migrateApplyFlags, out sa
 		return err
 	}
 	defer cleanup()
-	// Step 0: the plan and the seedbox, before any cluster client exists.
+	// Step 0: the plan, and then the host: a host with no box gets one from
+	// the plan before anything is adopted, and a host with one is adopted into
+	// as it stands.
 	p, err := loadPlan(opened)
 	if err != nil {
 		return err
 	}
 	raw := opened.Plan
+	charts := &chartRelease{flags: o.chart, out: out}
+	if installed, err := boxInstalled(); err != nil {
+		return err
+	} else if !installed {
+		if err := migrateInstall(ctx, o, o.install, p, charts, out); err != nil {
+			return err
+		}
+	}
 	sb, err := seedbox.Load(*o.grantPath, *o.valuesPath)
 	if err != nil {
 		return err
@@ -187,7 +210,7 @@ func migrateApply(ctx context.Context, file string, o *migrateApplyFlags, out sa
 		return fmt.Errorf("migrate adopts into an installed seedbox: %s is not installed in %s. Run `box init` first, with the plan's apps left off", release.ReleaseName, namespace)
 	}
 
-	chart, err := loadMigrateChart(ctx, o, out)
+	chart, err := loadMigrateChart(ctx, charts)
 	if err != nil {
 		return err
 	}
@@ -240,9 +263,10 @@ func loadPlan(opened *bundle.Opened) (*plan.Plan, error) {
 
 // loadMigrateChart loads the one chart release this command reads and installs.
 // It is loaded once and handed to the apply, so the release migrate checks
-// against is the release it installs.
-func loadMigrateChart(ctx context.Context, o *migrateApplyFlags, out say.Reporter) (release.Chart, error) {
-	return o.chart.load(ctx, chartSource(out))
+// against is the release it installs -- and on a host with no box, the release
+// bootstrap and init installed.
+func loadMigrateChart(ctx context.Context, charts *chartRelease) (release.Chart, error) {
+	return charts.load(ctx)
 }
 
 // migrateEnv builds everything apply touches outside the plan directory.
