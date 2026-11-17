@@ -52,6 +52,10 @@ Read `PLAN.md` first. It is the architecture; this file is how to work in the re
   (stat, statfs, mountinfo, mkdir, chown). A re-run asks with the current answers filled
   in and splices only changed keys; nothing is written until the last question; a cancel
   writes nothing and says "oh heck, nvm". `LinePrompt` is init's plain implementation.
+  A box with no apps is an answer: the picker's minimum is zero, `--apps none` is the
+  unattended empty list (`--apps ""` is still "not given" and still refused on a fresh
+  box), init says once that nothing runs yet, and `charts/s5n/ci/no-apps-values.yaml`
+  keeps a zero-app render validated.
 - `internal/say/` — box's one output seam. The flow packages emit events (a phase, a
   plan item, a step that starts and finishes, a timed wait with its budget, a confirm,
   a wiring receipt, a final card) and a reporter decides how they look. `say.Plain` is
@@ -141,7 +145,7 @@ Read `PLAN.md` first. It is the architecture; this file is how to work in the re
   connection, four attempts at 1s/2s/4s, ctx honoured. A 404 or a certificate error is
   the answer on the first try.
 - `internal/hostconf/` — root's config `box.yaml`, beside the record
-  (`/etc/swizzin/box.yaml`, 0600: `update.timer` on|off, `update.interval` 15m or more,
+  (`/etc/s5n/box.yaml`, 0600: `update.timer` on|off, `update.interval` 15m or more,
   default 1h, `update.hold-box`, `notices.url`), and the timer's two systemd units. Stdlib
   only: a hand-written strict two-level parser (an unknown key, a bad value or a repeat stops
   the command naming file, line and key), the template bootstrap writes once and never
@@ -151,6 +155,26 @@ Read `PLAN.md` first. It is the architecture; this file is how to work in the re
   --grant … --values …`, with no chart repo and no dev flags. systemctl runs only as root on
   a host with `/run/systemd/system`; `--unit-dir` (a `takeDevFlag` switch) writes the files
   and runs none; any other host gets one line naming the cron command.
+- `internal/hostroot/` — the one spelling of box's host paths: `Dir` (`/etc/s5n`),
+  `RecordPath`, `ConfigName`, `SeedboxDir`, and `LegacyDir` (`/etc/swizzin`).
+  `bootstrap.RecordPath`, `seedbox.GrantDir` and `hostconf.FileName` come from it. `Look`
+  answers what an old host means: files only at the old root refuse (the `mkdir`/`mv`,
+  checked first), both roots read the new one and name the stale copy once, and a run
+  whose `--record`/`--grant` name another directory is left alone. `cmd/box/hostfiles.go`
+  asks once per process, at the top of bootstrap, init, apply, update, status, rollback
+  and migrate apply.
+- `internal/archive/` — the one snapshot file: tar + gzip, the manifest last with a size
+  and sha256 per entry, 0600, refuses an existing path; `Create` streams a tree in
+  (`AddFile`, `AddTree`, skipped kernel links reported) and `Open` verifies then extracts
+  0700/0600, refusing a missing/truncated archive, an entry the manifest does not name
+  (and vice versa), a bad size/sum, an absolute path, `..`, a link that leaves the tree,
+  a device/fifo/hardlink. Migration snapshots and `box backup` are this file; `restore`
+  is `migrate apply` of one. It is not `internal/snapshot/`, which is the per-app state
+  an image update rewrites.
+- `internal/linktree/` — the one rule for a symlink in a copied config tree: an inside
+  link is carried (an absolute one written relative), a kernel-filesystem link is
+  skipped, one that leaves the tree is refused. `internal/migrate/apply`'s staging copy
+  and `internal/archive` both call it.
 - `internal/notice/` — the one JSON body a notice posts (`text` == `content` == one
   sentence, plus event, box, seedbox, from, to, apps, gate, error, command) and the
   readiness-flip comparison. Stdlib only. `internal/update` fires `Notify` events and builds
@@ -167,7 +191,7 @@ Read `PLAN.md` first. It is the architecture; this file is how to work in the re
   test images in `hack/`, with no automerge.
 - `cmd/box/` — the host CLI. `bootstrap` decides the cluster, installs k0s when there
   is none, applies the platform layer, then runs init for root in the same process
-  with init's flags (`--record` moves the record off `/etc/swizzin/cluster.yaml` for the
+  with init's flags (`--record` moves the record off `/etc/s5n/cluster.yaml` for the
   non-root e2e); `init` asks a seedbox's questions, writes the two files and hands over
   to `apply`; `apply` loads root's grant and values, checks them against the chart's
   schema, diffs against the deployed release, confirms, installs or upgrades release
@@ -204,7 +228,9 @@ Read `PLAN.md` first. It is the architecture; this file is how to work in the re
   assert a second `--yes` run changes no Helm revision, spec or label (spec and
   labels, not resourceVersion: controllers rewrite status). `fresh` also runs init's
   no-op re-run, a one-key `box apply` edit and a `helm uninstall` that keeps the
-  claims. Platform versions come from `hack/versions`. `all` (the default) runs the
+  claims, and ends by turning every app off with `box init --apps none`: the receipt is
+  ok with no writes, no app pod is left, and `box status` still names the deployed
+  release. Platform versions come from `hack/versions`. `all` (the default) runs the
   three and prints each wall time. The chart is packaged from the same commit, pushed to a
   distribution registry container on 127.0.0.1, and pulled by box through
   `--chart-repo`/`--chart-version`; there is no local-chart flag. box under test is
@@ -588,6 +614,12 @@ one needs a live `lookup`. The e2e asserts the policy exists in the cluster.
 - An e2e wait loop checks for a running script with `ps -eo args | grep -E '^bash
   (\./)?hack/e2e'`, never `ps aux | grep '[h]ack/e2e'`: a loop whose own command line names
   `hack/e2e-box.sh` matches itself forever and blocks every other lane's check.
+- puid:pgid are settled inside init, after the data path is asked for: flag, the grant
+  on a re-run, the data path's owner when it holds files, `$SUDO_UID`/`$SUDO_GID`, the
+  invoking user. 0 is refused (asked guided, flags named unattended), a symlinked data
+  path is not read through (counts as no data, with a warning), and the web login
+  defaults to the OS account behind puid. Neither bootstrap nor init creates an OS
+  account; `TestTheHostSeamCannotCreateAnOSUser` pins the seam.
 
 ## Next work
 
