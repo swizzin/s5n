@@ -292,6 +292,64 @@ func TestCreateRefusesAManifestItCannotVouchFor(t *testing.T) {
 	}
 }
 
+// TestASurveyHoldsNoConfigs: a survey is the read `box migrate discover` writes
+// when it is not rehearsing -- the plan, the report and the source's manifests.
+// It is a mode a migration archive may have, and the one thing it may never
+// carry is a config tree, because apply would then have configs a survey is
+// defined not to have.
+func TestASurveyHoldsNoConfigs(t *testing.T) {
+	t.Run("a survey of a plan and a report is an archive", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "survey.tar.gz")
+		w, err := Create(path, testManifest(KindMigrate, ModeSurvey))
+		if err != nil {
+			t.Fatalf("Create: %v", err)
+		}
+		if err := w.AddFile(PlanName, []byte("version: 2\napps: {}\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := w.AddFile(ReportName, []byte("plan: a survey\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := w.AddFile(SourcePrefix+"/deployment-media-sonarr.json", []byte("{}\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := w.Close(); err != nil {
+			t.Fatalf("Close: %v", err)
+		}
+		m, err := Read(path)
+		if err != nil {
+			t.Fatalf("Read: %v", err)
+		}
+		if m.Mode != ModeSurvey {
+			t.Errorf("mode = %q, want %q", m.Mode, ModeSurvey)
+		}
+	})
+
+	t.Run("a survey naming a config is refused", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "survey.tar.gz")
+		w, err := Create(path, testManifest(KindMigrate, ModeSurvey))
+		if err != nil {
+			t.Fatalf("Create: %v", err)
+		}
+		if err := w.AddFile(ConfigPrefix+"/sonarr/config.xml", []byte("<Config/>"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := w.Close(); err != nil {
+			t.Fatalf("Close: %v", err)
+		}
+		if _, err := Read(path); err == nil || !strings.Contains(err.Error(), "a survey holds no configs") {
+			t.Fatalf("Read error = %v, want it to refuse a survey with a config tree in it", err)
+		}
+	})
+
+	t.Run("a backup cannot be a survey", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "backup.tar.gz")
+		if _, err := Create(path, testManifest(KindBackup, ModeSurvey)); err == nil || !strings.Contains(err.Error(), "mode") {
+			t.Fatalf("Create error = %v, want it to refuse a backup in a survey's mode", err)
+		}
+	})
+}
+
 func TestCreateDefaultsTheHeader(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "a.tar.gz")
 	w, err := Create(path, Manifest{Kind: KindMigrate, Mode: ModeRehearsal, Box: testBox})

@@ -43,6 +43,11 @@ const (
 	PlanName = "plan.yaml"
 	// ReportName is what discovery wrote about the source and did not migrate.
 	ReportName = "report.txt"
+	// ConfigPrefix is where each planned app's config tree sits inside an
+	// archive: config/<instance>/. A survey holds none of them.
+	ConfigPrefix = "config"
+	// SourcePrefix is where the manifests discovery read sit: source/.
+	SourcePrefix = "source"
 )
 
 // Kind is what an archive holds.
@@ -67,6 +72,11 @@ const (
 	// ModeFinal copied configs with every planned app stopped. It is the only
 	// kind of migration archive a real run applies.
 	ModeFinal Mode = "final"
+	// ModeSurvey is a read of a source with no configs in it: what
+	// `box migrate discover` writes when it is not rehearsing. It holds the
+	// plan, the report and the manifests discovery read, and nothing apply
+	// could rewrite, so apply refuses it by name rather than half-running.
+	ModeSurvey Mode = "survey"
 	// ModeBackup is a box's own state, taken from a box that is running.
 	ModeBackup Mode = "backup"
 )
@@ -118,15 +128,15 @@ func (m *Manifest) problems() []string {
 		problems = append(problems, fmt.Sprintf("kind %q is not %q or %q", m.Kind, KindMigrate, KindBackup))
 	}
 	switch m.Mode {
-	case ModeRehearsal, ModeFinal, ModeBackup:
+	case ModeRehearsal, ModeFinal, ModeBackup, ModeSurvey:
 	default:
-		problems = append(problems, fmt.Sprintf("mode %q is not %q, %q or %q", m.Mode, ModeRehearsal, ModeFinal, ModeBackup))
+		problems = append(problems, fmt.Sprintf("mode %q is not %q, %q, %q or %q", m.Mode, ModeRehearsal, ModeFinal, ModeBackup, ModeSurvey))
 	}
 	if m.Kind == KindBackup && m.Mode != ModeBackup {
 		problems = append(problems, fmt.Sprintf("a %s archive's mode is %q, not %q", KindBackup, ModeBackup, m.Mode))
 	}
 	if m.Kind == KindMigrate && m.Mode == ModeBackup {
-		problems = append(problems, fmt.Sprintf("a %s archive's mode is %q or %q, not %q", KindMigrate, ModeRehearsal, ModeFinal, ModeBackup))
+		problems = append(problems, fmt.Sprintf("a %s archive's mode is %q, %q or %q, not %q", KindMigrate, ModeRehearsal, ModeFinal, ModeSurvey, ModeBackup))
 	}
 	if _, err := time.Parse(time.RFC3339, m.Created); err != nil {
 		problems = append(problems, fmt.Sprintf("created %q is not a time (RFC3339)", m.Created))
@@ -141,6 +151,9 @@ func (m *Manifest) problems() []string {
 		e := m.Entries[name]
 		if !safeName(name) {
 			problems = append(problems, fmt.Sprintf("entry %q is not a path inside the archive", name))
+		}
+		if m.Mode == ModeSurvey && (name == ConfigPrefix || strings.HasPrefix(name, ConfigPrefix+"/")) {
+			problems = append(problems, fmt.Sprintf("%s: a survey holds no configs, and %s is one", name, name))
 		}
 		if e.Size < 0 {
 			problems = append(problems, fmt.Sprintf("%s: size %d is negative", name, e.Size))
