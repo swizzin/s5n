@@ -52,6 +52,9 @@ const (
 	settingsName = "settings.json"
 	// dbName is the database, relative to the staged /config.
 	dbName = "db/db.sqlite3"
+	// colRootFolder is the column both root-folder tables keep the folder in
+	// (server/entity/OverrideRule.ts:36, MediaRequest.ts:554).
+	colRootFolder = "rootFolder"
 )
 
 type rewriter struct{}
@@ -395,7 +398,7 @@ func planDB(ctx context.Context, in rewrite.Input, d *decision, rep *rewrite.Rep
 // names.
 func (d *decision) overrideRules(ctx context.Context, db *sql.DB, in rewrite.Input, rep *rewrite.Report) error {
 	const table = "override_rule"
-	ok, err := hasColumn(ctx, db, table, "rootFolder")
+	ok, err := hasColumn(ctx, db, table, colRootFolder)
 	if err != nil || !ok {
 		return err
 	}
@@ -514,7 +517,7 @@ func (d *decision) overrideRule(in rewrite.Input, id int64, folder string, named
 		if moved == folder {
 			return
 		}
-		d.dbEdits = append(d.dbEdits, dbEdit{table: "override_rule", column: "rootFolder", id: id, value: moved})
+		d.dbEdits = append(d.dbEdits, dbEdit{table: "override_rule", column: colRootFolder, id: id, value: moved})
 		d.tally.add(dbName, where, "path")
 	default:
 		d.left(rep, where, folder, fmt.Sprintf(
@@ -527,7 +530,7 @@ func (d *decision) overrideRule(in rewrite.Input, id int64, folder string, named
 // Arr it was sent to.
 func (d *decision) requests(ctx context.Context, db *sql.DB, in rewrite.Input) error {
 	const table = "media_request"
-	for _, c := range []string{"type", "serverId", "rootFolder"} {
+	for _, c := range []string{"type", "serverId", colRootFolder} {
 		ok, err := hasColumn(ctx, db, table, c)
 		if err != nil {
 			return err
@@ -583,7 +586,7 @@ func (d *decision) requests(ctx context.Context, db *sql.DB, in rewrite.Input) e
 		if !covered || moved == r.folder {
 			continue
 		}
-		d.dbEdits = append(d.dbEdits, dbEdit{table: table, column: "rootFolder", id: r.id, value: moved})
+		d.dbEdits = append(d.dbEdits, dbEdit{table: table, column: colRootFolder, id: r.id, value: moved})
 		d.tally.add(dbName, table+".rootFolder", "path")
 	}
 	return nil
