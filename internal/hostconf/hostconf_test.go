@@ -37,7 +37,7 @@ notices:
 // is one directory and a second host's is another.
 func TestPathIsBesideTheRecord(t *testing.T) {
 	for _, c := range []struct{ record, want string }{
-		{"/etc/swizzin/cluster.yaml", "/etc/swizzin/box.yaml"},
+		{"/etc/s5n/cluster.yaml", "/etc/s5n/box.yaml"},
 		{"/tmp/run/cluster.yaml", "/tmp/run/box.yaml"},
 		{"cluster.yaml", "box.yaml"},
 	} {

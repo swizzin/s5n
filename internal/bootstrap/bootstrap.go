@@ -12,6 +12,7 @@ import (
 	"io/fs"
 	"strings"
 
+	"github.com/swizzin/s5n/internal/hostroot"
 	"github.com/swizzin/s5n/internal/say"
 )
 
@@ -184,7 +185,7 @@ type Host interface {
 	Present() []Finding
 }
 
-// RecordStore persists /etc/swizzin/cluster.yaml.
+// RecordStore persists box's cluster record, hostroot.RecordPath by default.
 type RecordStore interface {
 	// Load returns (nil, nil) when no record exists. An existing record that
 	// cannot be read is an error: box must not install over what it cannot see.
@@ -211,7 +212,7 @@ const conditionTrue = "True"
 const K0sAdminConfig = "/var/lib/k0s/pki/admin.conf"
 
 // RecordPath is where box records what it decided.
-const RecordPath = "/etc/swizzin/cluster.yaml"
+const RecordPath = hostroot.RecordPath
 
 // FormatResult renders the decision for a human. It is what box bootstrap
 // --dry-run prints.

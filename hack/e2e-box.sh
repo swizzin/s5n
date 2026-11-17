@@ -439,7 +439,7 @@ fi
 bootstrap() { # bootstrap <output file>
   # The platform and root's seedbox are one command now. --record points the
   # cluster decision at this work directory: on a real host it is
-  # /etc/swizzin/cluster.yaml, written by root, and the e2e is not root.
+  # /etc/s5n/cluster.yaml, written by root, and the e2e is not root.
   #
   # No --chart-version: bootstrap takes the default-version path, so the e2e
   # exercises the newest-release selection against a real registry. The chart

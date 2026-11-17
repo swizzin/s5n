@@ -75,7 +75,7 @@ A user's values file can't be applied with root's power. One `storage.data.path`
 pointing at someone else's downloads would end the isolation. So each seedbox is split
 into what root grants and what the user tunes:
 
-- **Grant**, `/etc/swizzin/seedboxes/<user>.yaml`, root-owned: domain, namespace,
+- **Grant**, `/etc/s5n/seedboxes/<user>.yaml`, root-owned: domain, namespace,
   puid/pgid, data and config paths, the apps the user has. Root edits it with
   `box adduser`, `box install` and `box remove`.
 - **Values**, `~<user>/.config/box/values.yaml`, user-owned: everything else the
@@ -440,7 +440,7 @@ uplink, not a tunnel) and whatever a cloud gives.
 - **Only a real host proves it:** kind never boots k0s, so the e2e can't.
 
 **A record is checked, not trusted (decided).** A re-run reads
-`/etc/swizzin/cluster.yaml` for what box decided — which cluster, who owns its
+`/etc/s5n/cluster.yaml` for what box decided — which cluster, who owns its
 lifecycle, the platform modes, the GatewayClass — then probes that cluster again:
 `/version`, the privilege checks, the node count and distribution, and the platform
 layer. Those are the same probes and the same refusals a freshly found cluster gets,
@@ -461,6 +461,15 @@ remote-cluster skip is only a skip. So a second bootstrap
 plans and installs whatever the probe says is missing — Envoy Gateway, the Gateway API
 CRDs, MetalLB and its pool, the admission policy — instead of reporting components it
 never looked at as unknown.
+
+**box's host files are `/etc/s5n` (decided).** The record, root's config and
+`seedboxes/` live beneath `/etc/s5n`, not `/etc/swizzin`: swizzin classic installs
+itself as a git checkout there, so writing into it meant writing into another
+program's repository, and `rm -rf /etc/swizzin` — how swizzin is retired — would have
+taken box's records with it. No command upgrades a 0.4 host: one that still has
+box's files under `/etc/swizzin` and nothing under `/etc/s5n` refuses before it reads
+a record or writes anything, and prints the `mkdir`/`mv` to check and run. A file
+both roots have is read from `/etc/s5n`, and the stale copy is named once.
 
 **What bootstrap installs (decided).** It applies only the platform components the
 decision says are missing: Envoy Gateway from its OCI chart (the chart ships the Gateway
@@ -1030,7 +1039,7 @@ jitter so a fleet doesn't arrive at once. The interval is a key in root's config
 the timer can be turned off there. It reads the tag list from ghcr anonymously; no
 token is needed to learn that something moved.
 
-- **Root's config is `/etc/swizzin/box.yaml` (decided).** It sits beside the cluster
+- **Root's config is `/etc/s5n/box.yaml` (decided).** It sits beside the cluster
   record, so `--record` moves both, and it is root's alone, mode 0600, because the
   notice address can carry a token. bootstrap writes it once, on the host that has
   none, with these keys and comments:

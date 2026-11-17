@@ -69,14 +69,14 @@ func TestTimerOffWritesNothingAndSaysWhere(t *testing.T) {
 	body := &timerBody{}
 	out, err := body.run(t, timerRun{
 		Conf:  hostconf.Config{Timer: false, Interval: time.Hour},
-		Path:  "/etc/swizzin/box.yaml",
+		Path:  "/etc/s5n/box.yaml",
 		State: state,
 		Now:   fixed(at(3, 0)),
 	})
 	if err != nil {
 		t.Fatalf("run: %v", err)
 	}
-	if got, want := strings.TrimSpace(out), "box does not check for updates by itself: /etc/swizzin/box.yaml says update.timer: off"; got != want {
+	if got, want := strings.TrimSpace(out), "box does not check for updates by itself: /etc/s5n/box.yaml says update.timer: off"; got != want {
 		t.Fatalf("output = %q, want %q", got, want)
 	}
 	if body.updates != 0 || body.healths != 0 {

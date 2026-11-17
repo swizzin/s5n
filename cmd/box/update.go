@@ -189,6 +189,10 @@ func runUpdate(ctx context.Context, args []string) {
 	yes, plain := o.unattended()
 	out := newOutput(terminalSet(plain), yes, startupTheme(*o.valuesPath))
 	defer out.Close()
+	if err := hostFiles(out, *o.record, *o.grantPath); err != nil {
+		out.Error(err)
+		os.Exit(1)
+	}
 
 	// Root's config is read by every update, not only the timer's: it says
 	// whether box takes a new box, and a file that does not parse is a refusal

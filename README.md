@@ -106,7 +106,7 @@ anything.
 
 box keeps two files per seedbox:
 
-- **the grant,** `/etc/swizzin/seedboxes/root.yaml`. Root owns it. It holds what a
+- **the grant,** `/etc/s5n/seedboxes/root.yaml`. Root owns it. It holds what a
   seedbox is allowed: its namespace, uid and gid, host paths, ports, domain, the login's
   name, and which apps are switched on.
 - **your values,** `~/.config/box/values.yaml`. Everything else about the apps and how
@@ -129,7 +129,7 @@ of swizzin's own — `lt1.2` and `lt2.1` for libtorrent 1.2 or 2.1, `lt1.2-10g` 
 and writes nothing.
 
 On a host with systemd, bootstrap leaves a timer behind; anywhere else it prints the cron
-line that does the same job. Root's `/etc/swizzin/box.yaml` says whether it runs
+line that does the same job. Root's `/etc/s5n/box.yaml` says whether it runs
 (`update.timer: off` stops it), how often it checks (`update.interval`, an hour by
 default), and where notices go.
 

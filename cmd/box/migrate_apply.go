@@ -86,6 +86,10 @@ func runMigrateApply(ctx context.Context, args []string) {
 
 	out := newOutput(terminalSet(*o.plain), *o.yes, startupTheme(*o.valuesPath))
 	defer out.Close()
+	if err := hostFiles(out, bootstrap.RecordPath, *o.grantPath); err != nil {
+		out.Error(err)
+		os.Exit(1)
+	}
 	if err := migrateApply(ctx, dir, o, out); err != nil {
 		if errors.Is(err, apply.ErrCancelled) || errors.Is(err, release.ErrCancelled) {
 			out.Line("oh heck, nvm")

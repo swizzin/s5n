@@ -202,7 +202,7 @@ func TestUpdatePassesItsFlagsToTheOptions(t *testing.T) {
 // TestUpdateKeepsItsRecordBesideTheClusterRecord: update writes update.json into
 // the directory the cluster decision was recorded in, so --record moves both
 // files together. Without it, a box whose record is not at bootstrap's default
-// path (any box driven from somewhere other than /etc/swizzin) plans the whole
+// path (any box driven from somewhere other than /etc/s5n) plans the whole
 // update and then fails writing its own bookkeeping, before the first step.
 func TestUpdateKeepsItsRecordBesideTheClusterRecord(t *testing.T) {
 	var defaults *updateFlags

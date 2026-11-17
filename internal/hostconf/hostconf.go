@@ -1,4 +1,4 @@
-// Package hostconf is root's config file for the host: /etc/swizzin/box.yaml,
+// Package hostconf is root's config file for the host: /etc/s5n/box.yaml,
 // the one file that decides whether this box updates by itself and where it
 // posts notices.
 //
@@ -26,10 +26,11 @@ import (
 	"time"
 
 	"github.com/swizzin/s5n/internal/atomicfile"
+	"github.com/swizzin/s5n/internal/hostroot"
 )
 
 // FileName is root's config, beside the cluster record.
-const FileName = "box.yaml"
+const FileName = hostroot.ConfigName
 
 // MinInterval is the shortest interval the file accepts. Anything shorter is a
 // busy loop against the registry: a release lands hours after upstream, and the

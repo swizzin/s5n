@@ -345,6 +345,10 @@ func runBootstrap(ctx context.Context, args []string) {
 	term := terminalSet(*plain)
 	out := newOutput(term, *yes, palette)
 	defer out.Close()
+	if err := hostFiles(out, *recordPath, *initFlags.grantPath); err != nil {
+		out.Error(err)
+		os.Exit(1)
+	}
 
 	// Root's config is read before the cluster decision, from the same flags:
 	// an unknown key, a malformed line or a bad value stops the run naming the
@@ -624,6 +628,10 @@ func runApply(ctx context.Context, args []string) {
 
 	out := newOutput(terminalSet(false), *o.yes, startupTheme(*o.valuesPath))
 	defer out.Close()
+	if err := hostFiles(out, bootstrap.RecordPath, *o.grantPath); err != nil {
+		out.Error(err)
+		os.Exit(1)
+	}
 
 	// The cluster decision belongs to `box bootstrap`; apply reuses it and
 	// never probes or re-detects a cluster of its own.
@@ -816,6 +824,12 @@ func (o *initFlags) takeDev(d initDevFlags) {
 func (o *initFlags) run(ctx context.Context, kubeconfig string, yes, plain bool, out say.Reporter) error {
 	if *o.valuesPath == "" {
 		return errors.New("no values file: pass --values")
+	}
+	// Where box keeps its own files comes before the chart or the first
+	// question: a host that still has them where box kept them before 0.5 is
+	// refused, not installed over.
+	if err := hostFiles(out, o.recordPath, *o.grantPath); err != nil {
+		return err
 	}
 
 	// The chart is read before anything is asked: its catalog is where the
