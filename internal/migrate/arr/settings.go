@@ -6,7 +6,6 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
-	"net"
 	"net/url"
 	"strconv"
 	"strings"
@@ -643,7 +642,7 @@ func (a *analysis) resolveURL(where, stored string) (newURL, target string, reso
 			return "", "", false, nil, nil
 		}
 	}
-	res := a.in.Resolve(u.Hostname(), port)
+	res := a.in.ResolveURL(u)
 	switch res.Verdict {
 	case plan.Unclassified:
 		ad := rewrite.Address{App: a.app, File: a.file, Where: where, Host: u.Hostname(), Port: port}
@@ -655,12 +654,8 @@ func (a *analysis) resolveURL(where, stored string) (newURL, target string, reso
 	if !ok {
 		return "", "", false, nil, fmt.Errorf("%s in %s: the plan maps %s to %s, which this run has no endpoint for", where, a.file, u.Host, res.App)
 	}
-	out := *u
-	out.Scheme = schemeHTTP
-	out.Host = net.JoinHostPort(ep.Host, strconv.Itoa(ep.Port))
-	out.Path = strings.TrimSuffix(ep.URLBase, "/")
-	out.RawPath = ""
-	out.RawQuery = ""
-	out.Fragment = ""
-	return out.String(), res.App, true, nil, nil
+	// The box's own address, whole: plain HTTP, the Service, the chart's port
+	// and the chart's URL base. A path the source's URL carried is the source's
+	// shape, and box serves the app under its own base.
+	return ep.URL(), res.App, true, nil, nil
 }

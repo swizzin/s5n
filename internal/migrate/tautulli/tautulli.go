@@ -223,12 +223,16 @@ func planPlex(in rewrite.Input, f *iniFile, rep *rewrite.Report) ([]edit, error)
 	urlLine, haveURL := f.get(sectionPMS, keyPMSURL)
 	host := strings.TrimSpace(ipLine.value)
 	port := atoi(strings.TrimSpace(f.value(sectionPMS, keyPMSPort)))
+	// A URL column is a whole URL, so its path is part of what settles it on a
+	// host that serves several apps; the two columns are a host and a port.
+	var stored *url.URL
 	if host == "" && haveURL {
 		u, err := url.Parse(strings.TrimSpace(urlLine.value))
 		if err != nil {
 			return nil, fmt.Errorf("tautulli: %s: %s %q is not a URL: %w", configName, keyPMSURL, urlLine.value, err)
 		}
 		if u.Hostname() != "" {
+			stored = u
 			host, port = u.Hostname(), rewrite.URLPort(u)
 		}
 	}
@@ -236,6 +240,9 @@ func planPlex(in rewrite.Input, f *iniFile, rep *rewrite.Report) ([]edit, error)
 		return nil, nil
 	}
 	res := in.Resolve(host, port)
+	if stored != nil {
+		res = in.ResolveURL(stored)
+	}
 	switch res.Verdict {
 	case plan.Leave:
 		// The plan says this address is not the box's; kept as it is.
@@ -262,7 +269,7 @@ func planPlex(in rewrite.Input, f *iniFile, rep *rewrite.Report) ([]edit, error)
 		edits = append(edits, edit{line: line.n, value: value, quote: line.quote,
 			where: sectionPMS + "/" + name, what: what})
 	}
-	plexURL := (&url.URL{Scheme: "http", Host: fmt.Sprintf("%s:%d", target.Host, target.Port)}).String()
+	plexURL := target.URL()
 	if haveIP {
 		set(keyPMSIP, target.Host, "host")
 		set(keyPMSPort, strconv.Itoa(target.Port), "port")

@@ -272,6 +272,35 @@ func TestHistoryPathNeitherBlocksNorRewrites(t *testing.T) {
 	if got := readColumn(t, in.Dir, "media_request", "rootFolder"); got != "/mnt/other/Requests" {
 		t.Errorf("media_request.rootFolder = %q, want untouched", got)
 	}
+	// One count line, in the list the operator reads, rather than one per row.
+	var counted []rewrite.Left
+	for _, l := range rep.Left {
+		if strings.Contains(l.What, "past request") {
+			counted = append(counted, l)
+		}
+	}
+	if len(counted) != 1 {
+		t.Fatalf("Left = %+v, want one count line for the requests left", rep.Left)
+	}
+	if counted[0].What != "1 past request" || !strings.Contains(counted[0].Why, "their folders are history") {
+		t.Errorf("the count line = %+v, want \"1 past request\" and why it is left", counted[0])
+	}
+
+	// Several are still one line, counted.
+	exec(t, in.Dir, `INSERT INTO media_request (id, type, serverId, rootFolder) VALUES (2, 'tv', 1, '/mnt/other/Shows'), (3, 'movie', 0, '/mnt/other/Films')`)
+	rep, err = rewriter{}.Check(ctx, in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := ""
+	for _, l := range rep.Left {
+		if strings.Contains(l.What, "past request") {
+			got = l.What
+		}
+	}
+	if got != "3 past requests" {
+		t.Errorf("the count line says %q, want 3 past requests", got)
+	}
 }
 
 // TestMissingBaseURLIsAdded: Seerr's baseUrl is optional, and an Arr the chart

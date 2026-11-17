@@ -53,6 +53,9 @@ const (
 	// bindAddr is what a pod needs; qui's default is localhost, which inside a
 	// pod answers nobody but itself (internal/config/config.go:356).
 	bindAddr = "0.0.0.0"
+	// appQBittorrent is the app qui's instance column names: every instance qui
+	// manages is a qBittorrent.
+	appQBittorrent = "qbittorrent"
 )
 
 // configPaths are config.toml's path keys. backupDir is the one the research
@@ -552,21 +555,22 @@ func planInterned(ctx context.Context, db *sql.DB, in rewrite.Input, t tally, re
 			return fmt.Errorf("qui: read %s.%s: %w", c.table, c.column, err)
 		}
 		for _, r := range found {
-			host, port, err := splitURL(r.value)
+			u, err := parseURL(r.value)
 			if err != nil {
 				return fmt.Errorf("qui: %s.%s: %w", c.table, c.column, err)
 			}
 			where := c.table + "." + c.column
-			res := in.Resolve(host, port)
+			// The stored value is a whole URL, so its path is part of what says
+			// which app it meant on a host that serves several.
+			res := in.ResolveURL(u)
 			switch res.Verdict {
 			case plan.Rewrite:
 				end, ok := in.Targets[res.App]
 				if !ok {
 					return fmt.Errorf("qui: %s: the plan points %s at %q, which has no endpoint on the box",
-						where, address(host, port), res.App)
+						where, address(u.Hostname(), rewrite.URLPort(u)), res.App)
 				}
-				moved := (&url.URL{Scheme: "http",
-					Host: fmt.Sprintf("%s:%d", end.Host, end.Port), Path: end.URLBase}).String()
+				moved := end.URL()
 				if moved == r.value {
 					continue
 				}
@@ -577,8 +581,22 @@ func planInterned(ctx context.Context, db *sql.DB, in rewrite.Input, t tally, re
 			case plan.Leave:
 			default:
 				rep.Unclassified = append(rep.Unclassified, rewrite.Address{
-					App: in.App, File: dbName, Where: where, Host: host, Port: port,
+					App: in.App, File: dbName, Where: where, Host: u.Hostname(), Port: rewrite.URLPort(u),
 				})
+				// qui's instance column is a qBittorrent by name: an address
+				// nothing settles can only be the box's, when there is one.
+				app := appQBittorrent
+				if c.table == "arr_instances" {
+					app = ""
+				}
+				if app != "" {
+					if name, ok := in.Sole(app); ok {
+						rep.Defaults = append(rep.Defaults, rewrite.Default{
+							Host: u.Hostname(), Port: rewrite.URLPort(u), App: name,
+							Why: "it is a qBittorrent instance, and this box runs one qBittorrent",
+						})
+					}
+				}
 			}
 		}
 	}
@@ -634,18 +652,18 @@ func hasColumn(ctx context.Context, db *sql.DB, table, column string) (bool, err
 	return rows.Next(), rows.Err()
 }
 
-// splitURL separates the host and port a stored URL names, so the plan can
-// settle the address.
-func splitURL(raw string) (string, int, error) {
+// parseURL is a stored value as the URL it is. qui writes the instance
+// columns from its UI's URL field, so a value with no scheme is refused rather
+// than guessed at.
+func parseURL(raw string) (*url.URL, error) {
 	u, err := url.Parse(strings.TrimSpace(raw))
 	if err != nil {
-		return "", 0, fmt.Errorf("%q is not a URL: %w", raw, err)
+		return nil, fmt.Errorf("%q is not a URL: %w", raw, err)
 	}
 	if u.Hostname() == "" {
-		return "", 0, fmt.Errorf("%q is not a URL with a host", raw)
+		return nil, fmt.Errorf("%q is not a URL with a host", raw)
 	}
-	n := rewrite.URLPort(u)
-	return u.Hostname(), n, nil
+	return u, nil
 }
 
 func address(host string, port int) string {

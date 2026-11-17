@@ -391,7 +391,7 @@ func planDB(ctx context.Context, in rewrite.Input, d *decision, rep *rewrite.Rep
 	if err := d.overrideRules(ctx, db, in, rep); err != nil {
 		return err
 	}
-	return d.requests(ctx, db, in)
+	return d.requests(ctx, db, in, rep)
 }
 
 // overrideRules moves each override rule's folder through the Arrs the rule
@@ -527,8 +527,10 @@ func (d *decision) overrideRule(in rewrite.Input, id int64, folder string, named
 }
 
 // requests rewrites the root folder each completed request records, through the
-// Arr it was sent to.
-func (d *decision) requests(ctx context.Context, db *sql.DB, in rewrite.Input) error {
+// Arr it was sent to. A request is history: Seerr records where it went and
+// never reads the folder again, so one no rule covers is left exactly as it is,
+// counted once in the report rather than named a gap.
+func (d *decision) requests(ctx context.Context, db *sql.DB, in rewrite.Input, rep *rewrite.Report) error {
 	const table = "media_request"
 	for _, c := range []string{"type", "serverId", colRootFolder} {
 		ok, err := hasColumn(ctx, db, table, c)
@@ -542,6 +544,7 @@ func (d *decision) requests(ctx context.Context, db *sql.DB, in rewrite.Input) e
 			return nil
 		}
 	}
+	history := 0
 	rows, err := db.QueryContext(ctx,
 		fmt.Sprintf(`SELECT id, type, serverId, rootFolder FROM %s WHERE rootFolder IS NOT NULL AND rootFolder <> ''`, table))
 	if err != nil {
@@ -583,13 +586,34 @@ func (d *decision) requests(ctx context.Context, db *sql.DB, in rewrite.Input) e
 			continue
 		}
 		moved, covered := in.Plan.Rewrite(res.App, r.folder)
-		if !covered || moved == r.folder {
+		if !covered {
+			history++
+			continue
+		}
+		if moved == r.folder {
 			continue
 		}
 		d.dbEdits = append(d.dbEdits, dbEdit{table: table, column: colRootFolder, id: r.id, value: moved})
 		d.tally.add(dbName, table+".rootFolder", "path")
 	}
+	if history > 0 {
+		// One count line, not one per row: these are folders Seerr recorded and
+		// never reads again, so leaving them is the decision rather than a gap
+		// in the plan.
+		rep.Left = append(rep.Left, rewrite.Left{
+			File: dbName, Where: table + "." + colRootFolder, What: pastRequests(history),
+			Why: "their folders are history: seerr recorded where each request went and never reads the folder again, so the paths stay as they are",
+		})
+	}
 	return nil
+}
+
+// pastRequests is the count of past requests as a line an operator reads.
+func pastRequests(n int) string {
+	if n == 1 {
+		return "1 past request"
+	}
+	return fmt.Sprintf("%d past requests", n)
 }
 
 // left records one row this pass leaves exactly as it is.

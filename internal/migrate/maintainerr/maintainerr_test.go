@@ -116,6 +116,16 @@ func targets() map[string]rewrite.Endpoint {
 	}
 }
 
+// runs is every instance the fixture plan has of each catalog app: one of
+// each, which is what a proposal needs.
+func runs() map[string][]string {
+	return map[string][]string{
+		"plex": {"plex"}, "seerr": {"seerr"}, "tautulli": {"tautulli"},
+		"radarr": {"radarr"}, "sonarr": {"sonarr"}, "qbittorrent": {"qbittorrent"},
+		"maintainerr": {"maintainerr"},
+	}
+}
+
 // setup builds a staged config with the fixture database and returns the input.
 func setup(t *testing.T) rewrite.Input {
 	t.Helper()
@@ -139,7 +149,7 @@ func setup(t *testing.T) rewrite.Input {
 	if err != nil {
 		t.Fatalf("plan: %v", err)
 	}
-	return rewrite.Input{App: "maintainerr", Dir: dir, Plan: p, Targets: targets()}
+	return rewrite.Input{App: "maintainerr", Dir: dir, Plan: p, Targets: targets(), Runs: runs()}
 }
 
 func TestRewritesEveryConnection(t *testing.T) {
@@ -252,6 +262,86 @@ func TestUnclassifiedAddressBlocks(t *testing.T) {
 	}
 }
 
+// TestDownloadClientProposesQBittorrent: the download client column names the
+// app it dials, so an address nothing settles can only be the box's qBittorrent
+// -- when the box runs exactly one.
+func TestDownloadClientProposesQBittorrent(t *testing.T) {
+	ctx := context.Background()
+	in := setup(t)
+	exec(t, in.Dir, `UPDATE settings SET download_client_url = 'http://192.0.2.9:8080' WHERE id = 1`)
+	rep, err := rewriter{}.Check(ctx, in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := rewrite.Default{
+		Host: "192.0.2.9", Port: 8080, App: "qbittorrent",
+		Why: "it is Maintainerr's qbittorrent connection, and this box runs one qbittorrent",
+	}
+	var got []rewrite.Default
+	for _, d := range rep.Defaults {
+		if d.Host == "192.0.2.9" {
+			got = append(got, d)
+		}
+	}
+	if len(got) != 1 || got[0] != want {
+		t.Fatalf("Defaults = %+v, want %+v", got, want)
+	}
+
+	// Two qBittorrents are two answers: nothing is proposed, and the address is
+	// still called out as left.
+	in = setup(t)
+	in.Runs["qbittorrent"] = []string{"qbittorrent", "qbittorrent-4k"}
+	exec(t, in.Dir, `UPDATE settings SET download_client_url = 'http://192.0.2.9:8080' WHERE id = 1`)
+	rep, err = rewriter{}.Check(ctx, in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, d := range rep.Defaults {
+		if d.Host == "192.0.2.9" {
+			t.Errorf("a download client was proposed with two qBittorrents in the plan: %+v", d)
+		}
+	}
+	found := false
+	for _, a := range rep.Unclassified {
+		if a.Host == "192.0.2.9" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("Unclassified = %v, want the download client still reported", rep.Unclassified)
+	}
+}
+
+// TestURLColumnsResolveByPath: one host serves several apps, so a stored URL's
+// path says which one it meant, and the box's own address replaces the URL --
+// its path included.
+func TestURLColumnsResolveByPath(t *testing.T) {
+	ctx := context.Background()
+	in := setup(t)
+	in.Plan.Hosts = []plan.HostRule{
+		{Host: "panel.example.com", Path: "/qbittorrent", App: "qbittorrent"},
+		{Host: "panel.example.com", Path: "/sonarr", App: "sonarr"},
+	}
+	exec(t, in.Dir, `UPDATE settings SET download_client_url = 'https://panel.example.com/qbittorrent/api' WHERE id = 1;
+		UPDATE sonarr_settings SET url = 'https://panel.example.com/sonarr/api/v3' WHERE id = 1`)
+	rep, err := rewriter{}.Check(ctx, in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rep.Blocked() {
+		t.Fatalf("URLs with paths on a host of paths are not settled: %v %v", rep.Uncovered, rep.Unclassified)
+	}
+	if _, err := (rewriter{}).Write(ctx, in); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	if got := readSettingsRow(t, in.Dir)["download_client_url"]; got != "http://qbittorrent:8080" {
+		t.Errorf("the download client = %q, want the box's qBittorrent", got)
+	}
+	if got := readURL(t, in.Dir, "sonarr_settings"); got != "http://sonarr:8989/sonarr" {
+		t.Errorf("the Sonarr URL = %q, want the box's URL base", got)
+	}
+}
+
 // TestUnsettledPlexConnectionProposesPlex: plex_hostname/plex_port are
 // Maintainerr's Plex connection by name, so an address nothing settles there can
 // only be the box's Plex. That is a proposal for Settle to write as a default
@@ -267,7 +357,7 @@ func TestUnsettledPlexConnectionProposesPlex(t *testing.T) {
 	}
 	want := rewrite.Default{
 		Host: "192.0.2.56", Port: 32400, App: "plex",
-		Why: "it is Maintainerr's Plex connection, and this box runs Plex",
+		Why: "it is Maintainerr's Plex connection, and this box runs one Plex",
 	}
 	if len(rep.Defaults) != 1 || rep.Defaults[0] != want {
 		t.Fatalf("Defaults = %+v, want %+v", rep.Defaults, want)
@@ -280,6 +370,7 @@ func TestUnsettledPlexConnectionProposesPlex(t *testing.T) {
 	in = setup(t)
 	delete(in.Plan.Apps, "plex")
 	delete(in.Targets, "plex")
+	delete(in.Runs, "plex")
 	exec(t, in.Dir, `UPDATE settings SET plex_hostname = '192.0.2.56' WHERE id = 1`)
 	rep, err = rewriter{}.Check(ctx, in)
 	if err != nil {
@@ -287,6 +378,22 @@ func TestUnsettledPlexConnectionProposesPlex(t *testing.T) {
 	}
 	if len(rep.Defaults) != 0 {
 		t.Errorf("Defaults = %+v, want none without a Plex in the plan", rep.Defaults)
+	}
+
+	// Two Plexes are two answers, and an address nothing settles cannot mean
+	// one of them: nothing is proposed, and the address is called out as left.
+	in = setup(t)
+	in.Runs["plex"] = []string{"plex", "plex-4k"}
+	exec(t, in.Dir, `UPDATE settings SET plex_hostname = '192.0.2.56' WHERE id = 1`)
+	rep, err = rewriter{}.Check(ctx, in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rep.Defaults) != 0 {
+		t.Errorf("Defaults = %+v, want none with two Plexes in the plan", rep.Defaults)
+	}
+	if len(rep.Unclassified) != 1 {
+		t.Errorf("Unclassified = %v, want the address still reported", rep.Unclassified)
 	}
 }
 

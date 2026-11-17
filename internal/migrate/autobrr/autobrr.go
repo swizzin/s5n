@@ -314,7 +314,15 @@ func planClients(ctx context.Context, db *sql.DB, in rewrite.Input, t tally, rep
 			label = fmt.Sprintf("client %d", id)
 		}
 		where := tableClient + ".host"
+		// An Arr row stores a whole URL, so its path is part of what settles it
+		// on a host that serves several apps; a client's own row stores a host
+		// and a port, which is all its plan rule needs.
 		res := in.Resolve(clientName, p)
+		if arr {
+			if u, err := url.Parse(strings.TrimSpace(host)); err == nil {
+				res = in.ResolveURL(u)
+			}
+		}
 		// Two rows are left exactly as they are, and called out rather than
 		// refused: a type box does not run, and a client autobrr has switched
 		// off whose address nothing settles. That second one is the ruling's
@@ -346,8 +354,9 @@ func planClients(ctx context.Context, db *sql.DB, in rewrite.Input, t tally, rep
 			want := end.Host
 			if arr {
 				// A rewritten Arr row is still the URL autobrr dials: the
-				// box's scheme, Service, port and URL base.
-				want = "http://" + net.JoinHostPort(end.Host, strconv.Itoa(end.Port)) + strings.TrimSuffix(end.URLBase, "/")
+				// box's scheme, Service, port and URL base. The path the
+				// source stored is the source's shape.
+				want = end.URL()
 			}
 			if host != want {
 				edits = append(edits, dbEdit{tableClient, "host", id, want})
@@ -366,6 +375,17 @@ func planClients(ctx context.Context, db *sql.DB, in rewrite.Input, t tally, rep
 		default:
 			rep.Unclassified = append(rep.Unclassified, rewrite.Address{
 				App: in.App, File: dbName, Where: where, Host: clientName, Port: p,
+			})
+			// A qBittorrent client's own type says which app its address can
+			// only mean; the box runs one of it, or nothing is proposed. The
+			// same for an Arr row, whose type names the Arr it dials.
+			app, ok := clientApp(strings.ToUpper(kind.String))
+			if _, sole := in.Sole(app); !ok || !sole {
+				continue
+			}
+			rep.Defaults = append(rep.Defaults, rewrite.Default{
+				Host: clientName, Port: p, App: app,
+				Why: fmt.Sprintf("it is a %s client, and this box runs one %s", kind.String, app),
 			})
 		}
 	}
@@ -427,6 +447,32 @@ func rewriteTemplate(in rewrite.Input, value string) (moved, gap string, covered
 		return value, value, false
 	}
 	return moved + rest, "", true
+}
+
+// The app names a client row's type maps to: the same catalog names the plan
+// and the chart use.
+const (
+	appQBittorrent = "qbittorrent"
+	appSonarr      = "sonarr"
+	appRadarr      = "radarr"
+	appProwlarr    = "prowlarr"
+)
+
+// clientApp is the app a client row's type names: a qBittorrent client can only
+// be the box's qBittorrent, and an Arr row can only be that Arr. A type box does
+// not run names none, which is the caller's Left case.
+func clientApp(kind string) (string, bool) {
+	switch kind {
+	case "QBITTORRENT", "QBITTORRENTEE":
+		return appQBittorrent, true
+	case "SONARR":
+		return appSonarr, true
+	case "RADARR":
+		return appRadarr, true
+	case "PROWLARR":
+		return appProwlarr, true
+	}
+	return "", false
 }
 
 // splitAddress separates a stored host from an optional port: autobrr stores

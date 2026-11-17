@@ -197,7 +197,7 @@ func (d *decision) downloaders(in rewrite.Input, rep *rewrite.Report) error {
 			}
 		}
 		typ := strings.ToLower(d.file.str(sectionClient, id, keyType))
-		res := in.Resolve(u.Hostname(), port)
+		res := in.ResolveURL(u)
 		switch res.Verdict {
 		case plan.Leave:
 			continue
@@ -210,9 +210,9 @@ func (d *decision) downloaders(in rewrite.Input, rep *rewrite.Report) error {
 			// mean: box runs one qBittorrent, and a qBittorrent downloader the
 			// plan cannot place can be nothing else. That is a proposal for
 			// Settle to write as a default, never a rewrite here.
-			if d.proposes(in, typ) {
+			if name, ok := d.proposes(in, typ); ok {
 				rep.Defaults = append(rep.Defaults, rewrite.Default{
-					Host: u.Hostname(), Port: port, App: appQBittorrent,
+					Host: u.Hostname(), Port: port, App: name,
 					Why: "it is a qBittorrent downloader, and this box runs one qBittorrent",
 				})
 			}
@@ -225,8 +225,9 @@ func (d *decision) downloaders(in rewrite.Input, rep *rewrite.Report) error {
 		}
 		// A downloader's endpoint is the plain address: PBH appends /api/v2
 		// itself, and the loader strips one trailing slash
-		// (QBittorrentConfigImpl.java:33-35).
-		endpoint := "http://" + net.JoinHostPort(end.Host, strconv.Itoa(end.Port)) + strings.TrimSuffix(end.URLBase, "/")
+		// (QBittorrentConfigImpl.java:33-35). The box serves qBittorrent at no
+		// URL base, and a path the source stored is the source's own shape.
+		endpoint := end.URL()
 		if endpoint != stored {
 			edit, ok := d.file.set(endpoint, v.path...)
 			if !ok {
@@ -253,19 +254,17 @@ func (d *decision) downloaders(in rewrite.Input, rep *rewrite.Report) error {
 	return nil
 }
 
-// proposes reports whether a downloader of this type can only be the box's
-// qBittorrent, and this plan runs one.
-func (d *decision) proposes(in rewrite.Input, typ string) bool {
+// proposes is the one qBittorrent a downloader of this type can only be, and
+// whether the box runs exactly one: two instances and an address nothing
+// settles cannot mean one of them, so nothing is proposed and the address is
+// left and called out.
+func (d *decision) proposes(in rewrite.Input, typ string) (string, bool) {
 	switch typ {
 	case "qbittorrent", "qbittorrentee":
 	default:
-		return false
+		return "", false
 	}
-	if _, ok := in.Plan.Apps[appQBittorrent]; !ok {
-		return false
-	}
-	_, ok := in.Targets[appQBittorrent]
-	return ok
+	return in.Sole(appQBittorrent)
 }
 
 // sortOwned orders adopted connections so a report reads the same twice.

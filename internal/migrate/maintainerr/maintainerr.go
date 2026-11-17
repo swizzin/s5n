@@ -45,7 +45,11 @@ const dbName = "maintainerr.sqlite"
 // `applicationUrl` is deliberately absent: it is the address people open
 // Maintainerr at, not one it dials, so it follows the box's edge and not the
 // plan's app table.
-var settingsURLs = []string{"seerr_url", "tautulli_url", "download_client_url"}
+var settingsURLs = []string{"seerr_url", "tautulli_url", colDownloadClient}
+
+// colDownloadClient is the qBittorrent connection: the column names the app, so
+// an address nothing settles can only be the box's qBittorrent.
+const colDownloadClient = "download_client_url"
 
 // settingsPlex is the Plex connection, stored apart because it is a host name
 // and a port rather than a URL.
@@ -56,6 +60,10 @@ const (
 	// appPlex is the app those two columns name: Maintainerr's only media
 	// server connection box runs.
 	appPlex = "plex"
+
+	// appQBittorrent is the download client's app: the one column that can
+	// only be it.
+	appQBittorrent = "qbittorrent"
 )
 
 // settingsExternal are the media servers box does not migrate, listed in a note
@@ -258,7 +266,7 @@ func (r *settingsRow) plex(in rewrite.Input, rep *rewrite.Report) error {
 	// These two columns are Maintainerr's Plex connection by name, so an
 	// address nothing settles can only be the box's Plex. That is a proposal
 	// for Settle to write as a default, never a rewrite here.
-	end, rewriteIt, err := ask(in, dbName, "settings."+colPlexHost, rep, host.String, port, appPlex)
+	end, rewriteIt, err := askHost(in, dbName, "settings."+colPlexHost, rep, host.String, port, appPlex)
 	if err != nil || !rewriteIt {
 		return err
 	}
@@ -273,7 +281,9 @@ func (r *settingsRow) plex(in rewrite.Input, rep *rewrite.Report) error {
 	return nil
 }
 
-// urls is the Seerr, Tautulli and download-client addresses.
+// urls is the Seerr, Tautulli and download-client addresses. A stored URL's
+// path is part of what says which app it meant on a host that serves several,
+// and the box's own address replaces both.
 func (r *settingsRow) urls(in rewrite.Input, rep *rewrite.Report) error {
 	for _, column := range settingsURLs {
 		v, ok := r.by[column]
@@ -284,12 +294,18 @@ func (r *settingsRow) urls(in rewrite.Input, rep *rewrite.Report) error {
 		if err != nil {
 			return fmt.Errorf("maintainerr: settings.%s: %w", column, err)
 		}
-		end, rewriteIt, err := ask(in, dbName, "settings."+column, rep, u.Hostname(), portOf(u), "")
+		propose := ""
+		if column == colDownloadClient {
+			// The download client is the box's qBittorrent by name: an address
+			// nothing settles can only be it, when there is one.
+			propose = appQBittorrent
+		}
+		end, rewriteIt, err := ask(in, dbName, "settings."+column, rep, u, propose)
 		if err != nil {
 			return err
 		}
 		if rewriteIt {
-			r.set(column, endpointURL(end), "url", r.tally)
+			r.set(column, end.URL(), "url", r.tally)
 		}
 	}
 	return nil
@@ -323,7 +339,7 @@ func arrEdits(ctx context.Context, db *sql.DB, in rewrite.Input, rep *rewrite.Re
 				rows.Close()
 				return nil, fmt.Errorf("maintainerr: %s.url: %w", table, err)
 			}
-			end, rewriteIt, err := ask(in, dbName, table+".url", rep, u.Hostname(), portOf(u), "")
+			end, rewriteIt, err := ask(in, dbName, table+".url", rep, u, "")
 			if err != nil {
 				rows.Close()
 				return nil, err
@@ -331,7 +347,7 @@ func arrEdits(ctx context.Context, db *sql.DB, in rewrite.Input, rep *rewrite.Re
 			if !rewriteIt {
 				continue
 			}
-			if moved := endpointURL(end); moved != raw {
+			if moved := end.URL(); moved != raw {
 				edits = append(edits, edit{table: table, column: "url", id: id, value: moved})
 				t.add(table+".url", "url")
 			}
@@ -346,15 +362,28 @@ func arrEdits(ctx context.Context, db *sql.DB, in rewrite.Input, rep *rewrite.Re
 
 // ask is the one place this app consults the plan about a stored address. It
 // returns the endpoint to point at when the plan rewrites it, and records the
-// address as unclassified when the plan does not settle it.
+// address as unclassified when the plan does not settle it. u is the stored
+// value when the column holds a URL, and nil for two columns that hold a host
+// and a port; a URL's path is part of what says which app it meant.
 //
 // propose names the app the column itself fixes, for a column that can only be
-// one app's address (the Plex connection). An address nothing settles there is
-// proposed as a default for Settle to write, so a migration does not leave a
-// connection pointed at an address that will not exist; the proposal is never a
-// rewrite, because Check writes nothing and the plan is the operator's.
-func ask(in rewrite.Input, file, where string, rep *rewrite.Report, host string, port int, propose string) (rewrite.Endpoint, bool, error) {
-	res := in.Resolve(host, port)
+// one app's address (the Plex connection, the download client). An address
+// nothing settles there is proposed as a default for Settle to write, so a
+// migration does not leave a connection pointed at an address that will not
+// exist; the proposal is never a rewrite, because Check writes nothing and the
+// plan is the operator's.
+func ask(in rewrite.Input, file, where string, rep *rewrite.Report, u *url.URL, propose string) (rewrite.Endpoint, bool, error) {
+	return askAddress(in, file, where, rep, in.ResolveURL(u), u.Hostname(), portOf(u), propose)
+}
+
+// askHost is ask for the two columns that store a host and a port instead of a
+// URL: the Plex connection.
+func askHost(in rewrite.Input, file, where string, rep *rewrite.Report, host string, port int, propose string) (rewrite.Endpoint, bool, error) {
+	return askAddress(in, file, where, rep, in.Resolve(host, port), host, port, propose)
+}
+
+// askAddress is ask's body for a call that has already resolved its address.
+func askAddress(in rewrite.Input, file, where string, rep *rewrite.Report, res plan.Resolution, host string, port int, propose string) (rewrite.Endpoint, bool, error) {
 	switch res.Verdict {
 	case plan.Rewrite:
 		end, ok := in.Targets[res.App]
@@ -370,14 +399,15 @@ func ask(in rewrite.Input, file, where string, rep *rewrite.Report, host string,
 	rep.Unclassified = append(rep.Unclassified, rewrite.Address{
 		App: in.App, File: file, Where: where, Host: host, Port: port,
 	})
-	if propose != "" && in.Plan != nil {
-		if _, ok := in.Plan.Apps[propose]; ok {
-			if _, ok := in.Targets[propose]; ok {
-				rep.Defaults = append(rep.Defaults, rewrite.Default{
-					Host: host, Port: port, App: propose,
-					Why: "it is Maintainerr's " + appLabel(propose) + " connection, and this box runs " + appLabel(propose),
-				})
-			}
+	if propose != "" {
+		// The app the column names, and only when the box runs exactly one of
+		// it: two instances and an address nothing settles cannot mean one of
+		// them.
+		if name, ok := in.Sole(propose); ok {
+			rep.Defaults = append(rep.Defaults, rewrite.Default{
+				Host: host, Port: port, App: name,
+				Why: "it is Maintainerr's " + appLabel(propose) + " connection, and this box runs one " + appLabel(propose),
+			})
 		}
 	}
 	return rewrite.Endpoint{}, false, nil
@@ -417,13 +447,6 @@ func parseURL(raw string) (*url.URL, error) {
 // port matches any port either way.
 func portOf(u *url.URL) int {
 	return rewrite.URLPort(u)
-}
-
-// endpointURL is one app's address on the box: plain HTTP, the Service's port,
-// and the chart's URL base for that app.
-func endpointURL(end rewrite.Endpoint) string {
-	u := url.URL{Scheme: "http", Host: fmt.Sprintf("%s:%d", end.Host, end.Port), Path: end.URLBase}
-	return u.String()
 }
 
 // columnsOf is a table's columns, or nothing when the table does not exist. A

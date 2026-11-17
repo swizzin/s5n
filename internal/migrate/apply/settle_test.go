@@ -469,7 +469,7 @@ func TestSettleCallsOutEveryUnsettledValue(t *testing.T) {
 	// reason, in the plan the caller hands on to apply.
 	want := []plan.HostRule{
 		{Host: "10.244.0.56", Port: 32400, App: "plex", Default: true,
-			Why: "rewritten to plex: it is Maintainerr's Plex connection, and this box runs Plex"},
+			Why: "rewritten to plex: it is Maintainerr's Plex connection, and this box runs one Plex"},
 		{Host: "example.com", Port: 443, App: "qbittorrent", Default: true,
 			Why: "rewritten to qbittorrent: it is a qBittorrent downloader, and this box runs one qBittorrent"},
 	}
@@ -495,7 +495,7 @@ func TestSettleCallsOutEveryUnsettledValue(t *testing.T) {
 		"  192.0.2.10:8081 (\"old nas\" is switched off, so 192.0.2.10:8081 is never dialled and nothing is migrated to it)",
 		"    autobrr: autobrr.db client.host",
 		"rewritten to plex:",
-		"  10.244.0.56:32400 (it is Maintainerr's Plex connection, and this box runs Plex)",
+		"  10.244.0.56:32400 (it is Maintainerr's Plex connection, and this box runs one Plex)",
 		"    maintainerr: maintainerr.sqlite settings.plex_hostname",
 		"rewritten to qbittorrent:",
 		"  example.com:443 (it is a qBittorrent downloader, and this box runs one qBittorrent)",
@@ -835,7 +835,7 @@ func TestSummaryNamesEveryDefaultAndLeft(t *testing.T) {
 	}
 	lines := strings.Join(shown.Lines(), "\n")
 	for _, want := range []string{
-		"default: 10.244.0.56:32400 (rewritten to plex: it is Maintainerr's Plex connection, and this box runs Plex)",
+		"default: 10.244.0.56:32400 (rewritten to plex: it is Maintainerr's Plex connection, and this box runs one Plex)",
 		"default: example.com:443 (rewritten to qbittorrent: it is a qBittorrent downloader, and this box runs one qBittorrent)",
 		`sonarr: left as it is: 172.17.0.1:443 ("rTorrent" is a RTorrent client`,
 		`radarr: left as it is: 172.17.0.1:10365 ("Deluge" is a Deluge client`,

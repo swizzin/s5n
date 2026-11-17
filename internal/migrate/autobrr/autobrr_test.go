@@ -144,7 +144,77 @@ func setup(t *testing.T, dbSQL string) rewrite.Input {
 	if err != nil {
 		t.Fatalf("plan: %v", err)
 	}
-	return rewrite.Input{App: "autobrr", Dir: dir, Plan: p, Targets: targets()}
+	return rewrite.Input{App: "autobrr", Dir: dir, Plan: p, Targets: targets(), Runs: runs()}
+}
+
+// TestArrRowResolvesByItsURLPath: an Arr row stores a whole URL, so its path
+// says which app it meant on a host that serves several, and the box's own URL
+// replaces it in the row the operator still sees in autobrr.
+func TestArrRowResolvesByItsURLPath(t *testing.T) {
+	ctx := context.Background()
+	fixture := strings.Replace(dbFixture, "'sonarr.default.svc', 8989, 1",
+		"'https://panel.example.com/sonarr/api', 10000, 1", 1)
+	in := setup(t, fixture)
+	// The source's own Service rule is gone: this host is the source's public
+	// name, and only the paths say which app each address is.
+	in.Plan.Hosts = []plan.HostRule{
+		{Host: "panel.example.com", Path: "/sonarr", App: "sonarr"},
+		{Host: "panel.example.com", Path: "/qbittorrent", App: "qbittorrent"},
+	}
+	rep, err := rewriter{}.Check(ctx, in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rep.Blocked() {
+		t.Fatalf("an Arr URL with a path on a host of paths is not settled: %v %v", rep.Uncovered, rep.Unclassified)
+	}
+	if _, err := (rewriter{}).Write(ctx, in); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	if got := readClients(t, in.Dir)[2].host; got != "http://sonarr:8989/sonarr" {
+		t.Errorf("the Sonarr row = %q, want the box's URL with the source's path dropped", got)
+	}
+}
+
+// runs is every instance the fixture plan has of each catalog app: one of each,
+// which is what a proposal needs.
+func runs() map[string][]string {
+	return map[string][]string{
+		"qbittorrent": {"qbittorrent"}, "sonarr": {"sonarr"}, "autobrr": {"autobrr"},
+	}
+}
+
+// TestUnsettledClientProposesItsApp: a client row's type says which app its
+// address can only mean, so an address nothing settles is proposed as that app
+// when the box runs exactly one of it, and left and called out when it runs two.
+func TestUnsettledClientProposesItsApp(t *testing.T) {
+	ctx := context.Background()
+	in := setup(t, strings.Replace(dbFixture, "'localhost', 8081, 1", "'192.0.2.10', 8081, 1", 1))
+	rep, err := rewriter{}.Check(ctx, in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := rewrite.Default{
+		Host: "192.0.2.10", Port: 8081, App: "qbittorrent",
+		Why: "it is a QBITTORRENT client, and this box runs one qbittorrent",
+	}
+	if len(rep.Defaults) != 1 || rep.Defaults[0] != want {
+		t.Fatalf("Defaults = %+v, want %+v", rep.Defaults, want)
+	}
+
+	// Two qBittorrents: an address nothing settles cannot mean one of them.
+	in = setup(t, strings.Replace(dbFixture, "'localhost', 8081, 1", "'192.0.2.10', 8081, 1", 1))
+	in.Runs["qbittorrent"] = []string{"qbittorrent", "qbittorrent-4k"}
+	rep, err = rewriter{}.Check(ctx, in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rep.Defaults) != 0 {
+		t.Errorf("Defaults = %+v, want none with two qBittorrents in the plan", rep.Defaults)
+	}
+	if len(rep.Unclassified) != 1 {
+		t.Errorf("Unclassified = %v, want the address still reported and left", rep.Unclassified)
+	}
 }
 
 func TestRewritesPathsAndConnections(t *testing.T) {
