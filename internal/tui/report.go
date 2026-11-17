@@ -64,6 +64,11 @@ type Reporter struct {
 	ui     *UI
 	// yes answers every confirm without a form (--yes).
 	yes bool
+	// space is the empty line before every masthead. It is the UI's, because
+	// the sections this reporter draws and the questions that UI asks are one
+	// run and must not stack two gaps between them.
+	space *space
+
 	// pending is the wiring receipt's rows that wait on a person. They are
 	// printed after the success card, because they are what to do next.
 	pending []say.ReceiptRow
@@ -97,6 +102,7 @@ func NewReporter(o ReporterOptions) *Reporter {
 		width:  o.Width,
 		chrome: chrome{noColor: o.NoColor},
 		ui:     ui,
+		space:  ui.space,
 		yes:    o.Yes,
 		closed: false,
 	}
@@ -164,12 +170,13 @@ func (r *Reporter) SetPhase(name string) {
 }
 
 // Phase draws the masthead for a section. The same frame as init's step
-// header, with the section name where "seedbox setup" would be.
+// header, with the section name where "seedbox setup" would be, and the empty
+// line above it that every masthead opens with.
 func (r *Reporter) Phase(name string) {
 	r.chrome.phase = name
 	r.ui.chrome.phase = name
 	r.stopActive()
-	r.emit(r.chrome.phaseHead(name) + "\n\n")
+	r.emit(r.space.outset() + r.chrome.phaseHead(name) + "\n\n")
 }
 
 // Fact is one key and its value: a muted column and an ink value, wrapped
@@ -547,6 +554,7 @@ func (r *Reporter) drawLocked() {
 func (r *Reporter) clearLocked() {
 	if r.active != nil {
 		fmt.Fprint(r.out, "\r\x1b[2K")
+		r.space.cleared()
 	}
 }
 
@@ -575,6 +583,7 @@ func (r *Reporter) emit(text string) {
 		r.clearLocked()
 	}
 	_, _ = io.WriteString(r.out, text)
+	r.space.wrote(text)
 	if r.active != nil {
 		r.drawLocked()
 	}
@@ -648,6 +657,7 @@ func (h *liveHandle) finish(mark, text, detail string) {
 		}
 	}
 	_, _ = io.WriteString(r.out, b.String())
+	r.space.wrote(b.String())
 	r.mu.Unlock()
 }
 

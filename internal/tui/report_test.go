@@ -11,6 +11,7 @@ import (
 	"charm.land/lipgloss/v2"
 
 	"github.com/swizzin/s5n/internal/say"
+	"github.com/swizzin/s5n/internal/setup"
 )
 
 // sgr matches the escape sequences a renderer writes. It is not named ansi:
@@ -263,6 +264,53 @@ func TestReporterPlanIndentsChildren(t *testing.T) {
 	for _, line := range lines {
 		if w := lipgloss.Width(line); w > 80 {
 			t.Fatalf("line is %d columns wide: %q", w, line)
+		}
+	}
+}
+
+// A masthead box opens with exactly one empty line, and never two: the frames a
+// person saw sat directly under the line above them, and a section's own box is
+// the same box the setup questions draw, so the gap is counted once for both.
+func TestEveryMastheadOpensWithOneBlankLine(t *testing.T) {
+	var buf bytes.Buffer
+	r := NewReporter(ReporterOptions{Out: &buf, Width: 100, NoColor: true, Yes: true})
+	r.Phase("cluster")
+	r.Success("clean host: k0s v1.37.2+k0s.1 installed")
+	r.Phase("platform")
+	r.Plan("platform plan", []say.Item{{Mark: say.Install, Text: "MetalLB, which gives the gateway this node's address"}})
+	// Two sections in a row: the second must not stack a second gap.
+	r.Phase("apply")
+	// A finished step, then init's first question: the question's masthead is
+	// the same box as a section's, one line under the step until it opens with
+	// its own gap.
+	r.Chart("s5n", "0.5.0", "oci://ghcr.io/swizzin/charts/s5n:0.5.0")
+	r.ui.accessible = true
+	r.ui.in = strings.NewReader("box.example.com\n")
+	r.ui.Step(1, 4, "what domain will this box answer on?")
+	if _, err := r.ui.Input(setup.Input{Key: "gateway.host", Prompt: "domain"}); err != nil {
+		t.Fatal(err)
+	}
+	r.Close()
+
+	lines := strip(buf.String())
+	var heads []int
+	for i, line := range lines {
+		if strings.HasPrefix(line, "╭") {
+			heads = append(heads, i)
+		}
+	}
+	if len(heads) != 4 {
+		t.Fatalf("%d mastheads, want 4 (cluster, platform, apply, the setup question):\n%s", len(heads), strings.Join(lines, "\n"))
+	}
+	if heads[0] != 0 {
+		t.Fatalf("the first masthead is printed under %q", lines[0])
+	}
+	for _, at := range heads[1:] {
+		if lines[at-1] != "" {
+			t.Fatalf("the masthead at line %d has no empty line above it: %q\n%s", at, lines[at-1], strings.Join(lines, "\n"))
+		}
+		if at >= 2 && lines[at-2] == "" {
+			t.Fatalf("the masthead at line %d has two empty lines above it\n%s", at, strings.Join(lines, "\n"))
 		}
 	}
 }

@@ -56,6 +56,10 @@ type UI struct {
 	// form wraps to it; see wrapText.
 	width int
 
+	// space is the empty line before every masthead, shared with the reporter
+	// this UI belongs to so a run counts its gaps once.
+	space *space
+
 	// accessible is huh's line mode, driven by a scripted reader in tests. box
 	// never selects it: without a terminal huh's own secret field returns an
 	// empty string without an error, which is why Decide falls back to
@@ -110,6 +114,7 @@ func New(o Options) *UI {
 		u.width = defaultWidth
 	}
 	u.chrome.noColor = o.NoColor
+	u.space = &space{}
 	u.painter = newPainter(out, variant, o.Background && !o.NoColor)
 	// Painted here rather than at the first form: box prints its masthead and
 	// its facts before it asks anything, and those lines are the run too.
@@ -155,17 +160,25 @@ func (u *UI) Step(n, total int, question string) {
 // begin prints the chrome above a field and leaves one blank line, so the form
 // is drawn under the masthead rather than against it. A step asked in several
 // fields shows its masthead once: the fields and the path report under it are
-// all the same step.
+// all the same step. The masthead opens with the empty line that separates it
+// from whatever came before (see space.outset).
 func (u *UI) begin() {
-	if head, ok := u.chrome.head(); ok {
-		fmt.Fprintln(u.out, head)
-		fmt.Fprintln(u.out)
+	head, ok := u.chrome.head()
+	if !ok {
+		return
 	}
+	if gap := u.space.outset(); gap != "" {
+		fmt.Fprint(u.out, gap)
+	}
+	fmt.Fprintln(u.out, head)
+	fmt.Fprintln(u.out)
+	u.space.wrote(head + "\n\n")
 }
 
 // end separates one field's output from the next masthead.
 func (u *UI) end() {
 	fmt.Fprintln(u.out)
+	u.space.separator()
 }
 
 // run draws one field as a whole (one-field) form and waits for the answer.
@@ -367,6 +380,39 @@ func (u *UI) Select(f setup.Select) (string, error) {
 	return value, nil
 }
 
+// multiSelectHelp is the hint above the app picker: the keys that move around
+// it and toggle an app.
+const multiSelectHelp = "space toggles · ctrl+a all/none · enter continues"
+
+// pickerField is the app picker: the options with their help column, the keys
+// above them, and a height that holds the whole list.
+//
+// The height is the field's total, not the list's. huh's own doc: "WithHeight
+// sets the total height of the multi-select field. Including padding and help
+// menu heights", and its viewport is that total minus the title and the
+// description. Passing one row per app therefore left the viewport a row short
+// whenever there was a hint: the list scrolled under a static hint while a
+// person moved down it, and bubbletea's inline renderer -- which counts the
+// lines it drew last frame -- left the rows it had not accounted for on screen.
+// That is the repeated hint and the first apps above the list.
+func (u *UI) pickerField(f setup.MultiSelect, keys []huh.Option[string], value *[]string) *huh.MultiSelect[string] {
+	// The hint is wrapped by huh to the field's width less its own two-column
+	// indent, so measuring it that way keeps the height right in a narrow
+	// terminal, where the hint itself takes two rows.
+	hint := wrapText(multiSelectHelp, u.width-2)
+	field := huh.NewMultiSelect[string]().
+		Key(f.Key).
+		Title("").
+		Description(multiSelectHelp).
+		Height(len(keys) + len(hint)).
+		Options(keys...).
+		Value(value)
+	if f.Min > 0 {
+		field = field.Validate(func(v []string) error { return tooFew(f.Min, len(v)) })
+	}
+	return field
+}
+
 // MultiSelect picks any number of options. Selected is what a re-run shows
 // preselected, and Min is the flow's rule, shown in the form rather than
 // decided here.
@@ -380,16 +426,7 @@ func (u *UI) MultiSelect(f setup.MultiSelect) ([]string, error) {
 		keys[i] = keys[i].Selected(picked[keys[i].Value])
 	}
 	value := append([]string(nil), f.Selected...)
-	field := huh.NewMultiSelect[string]().
-		Key(f.Key).
-		Title("").
-		Description("space toggles · ctrl+a all/none · enter continues").
-		Height(len(keys)).
-		Options(keys...).
-		Value(&value)
-	if f.Min > 0 {
-		field = field.Validate(func(v []string) error { return tooFew(f.Min, len(v)) })
-	}
+	field := u.pickerField(f, keys, &value)
 	if err := u.run(field, func() {
 		// The field's own title is empty (the masthead carries the question),
 		// so the record names it by its key: "apps  qbittorrent, sonarr".
