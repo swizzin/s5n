@@ -232,6 +232,19 @@ type Pod struct {
 	Terminating bool
 }
 
+// Node is one node of the source cluster, as far as discovery reads it: its
+// name, which is the host a single-node source ran on, and the kubelet version,
+// which is how a cluster says what installed it (`v1.30.4+k0s.0`,
+// `v1.30.4+k3s1`). The version is what makes `box migrate cutover
+// --replace-cluster` able to print a teardown for the cluster that is actually
+// there instead of one for a distribution it guessed.
+type Node struct {
+	Name string
+	// KubeletVersion is status.nodeInfo.kubeletVersion as the node reports it,
+	// build metadata and all. Empty for a node a saved manifest left it out of.
+	KubeletVersion string
+}
+
 // Source is what discovery reads. There are two: Cluster, over a live install
 // read-only through client-go, and Directory, over manifests saved to disk so a
 // plan can be rebuilt after the source is gone and a test needs no API server.
@@ -249,10 +262,10 @@ type Source interface {
 	// template cannot say: the addresses the app answered on, and whether any
 	// pod of a workload is left.
 	Pods(ctx context.Context) ([]Pod, error)
-	// Nodes are the source cluster's node names. Its error is not fatal: a
+	// Nodes are the source cluster's nodes. Its error is not fatal: a
 	// kubeconfig scoped to a namespace may not read a cluster-scoped object,
 	// and the host a single-node source ran on only decorates the plan.
-	Nodes(ctx context.Context) ([]string, error)
+	Nodes(ctx context.Context) ([]Node, error)
 	Raw(ctx context.Context) (map[string][]byte, error)
 }
 
@@ -331,9 +344,10 @@ type discovery struct {
 	// pods are the pods the source still holds: their addresses are hints, and
 	// a workload's pods are what says it is stopped.
 	pods []Pod
-	// nodes are the source cluster's node names, and nodeErr why there are
-	// none: the host the source ran on is a single node's name.
-	nodes   []string
+	// nodes are the source cluster's nodes, and nodeErr why there are none:
+	// the host the source ran on is a single node's name, and the distribution
+	// that installed it is the marker in its kubelet's version.
+	nodes   []Node
 	nodeErr error
 	// served are the Ingress hosts that reach a planned app, which the plan's
 	// domain default is read from.

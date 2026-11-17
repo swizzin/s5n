@@ -29,7 +29,7 @@ type Cluster struct {
 	svcs   []Service
 	ings   []Ingress
 	pods   []Pod
-	nodes  []string
+	nodes  []Node
 	raw    map[string][]byte
 	err    error
 	// nodeErr is why the nodes could not be read, kept apart from err: a
@@ -99,9 +99,9 @@ func (c *Cluster) Pods(ctx context.Context) ([]Pod, error) {
 	return c.pods, nil
 }
 
-// Nodes is the source cluster's node names, sorted. An error here is not the
+// Nodes is the source cluster's nodes, sorted by name. An error here is not the
 // read failing: see Source.
-func (c *Cluster) Nodes(ctx context.Context) ([]string, error) {
+func (c *Cluster) Nodes(ctx context.Context) ([]Node, error) {
 	if err := c.load(ctx); err != nil {
 		return nil, err
 	}
@@ -182,7 +182,7 @@ func (c *Cluster) read(ctx context.Context) error {
 	c.ings = ingressesOf(objs.ings)
 	c.pods = podsOf(objs.pods)
 	if nodeErr == nil {
-		c.nodes = nodeNames(nodes)
+		c.nodes = nodesOf(nodes)
 	}
 	c.nodeErr = nodeErr
 	c.raw = raw

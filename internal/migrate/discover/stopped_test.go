@@ -29,7 +29,7 @@ func (s stoppedSource) Workloads(context.Context) ([]Workload, error) { return s
 func (s stoppedSource) Services(context.Context) ([]Service, error)   { return nil, nil }
 func (s stoppedSource) Ingresses(context.Context) ([]Ingress, error)  { return nil, nil }
 func (s stoppedSource) Pods(context.Context) ([]Pod, error)           { return s.pods, s.err }
-func (s stoppedSource) Nodes(context.Context) ([]string, error)       { return nil, nil }
+func (s stoppedSource) Nodes(context.Context) ([]Node, error)         { return nil, nil }
 func (s stoppedSource) Raw(context.Context) (map[string][]byte, error) {
 	return nil, nil
 }

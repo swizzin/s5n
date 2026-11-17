@@ -284,13 +284,14 @@ func podIPs(pod *corev1.Pod) []string {
 	return out
 }
 
-// nodeNames is every node's name, which is how a source says what host it ran
-// on: a single-node cluster is named by its one node, and a cluster with more
-// than one names no host at all.
-func nodeNames(nodes []*corev1.Node) []string {
-	out := make([]string, 0, len(nodes))
+// nodesOf flattens the source's Nodes to the two things discovery reads off
+// them: the names, which is how a source says what host it ran on, and the
+// kubelet versions, which is how the teardown a replace cutover prints knows
+// which distribution installed the cluster.
+func nodesOf(nodes []*corev1.Node) []Node {
+	out := make([]Node, 0, len(nodes))
 	for _, node := range nodes {
-		out = append(out, node.Name)
+		out = append(out, Node{Name: node.Name, KubeletVersion: node.Status.NodeInfo.KubeletVersion})
 	}
 	return out
 }
@@ -512,4 +513,14 @@ func record(into map[string][]byte, apiVersion, kind string, objs []any) error {
 		into[objectKey(kind, namespace, name)] = data
 	}
 	return nil
+}
+
+// nodeNames is every node's name, which is what a note about a cluster too big
+// for one host names.
+func nodeNames(nodes []Node) []string {
+	out := make([]string, 0, len(nodes))
+	for _, node := range nodes {
+		out = append(out, node.Name)
+	}
+	return out
 }

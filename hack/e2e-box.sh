@@ -6173,8 +6173,13 @@ migrate_box() {
     cat "$WORK/cutover.txt"; fail=1; return 0
   fi
   cat "$WORK/cutover.txt"
-  grep -q "k0s stop; k0s reset" "$WORK/cutover.txt" ||
-    { echo "the replace path printed no reset recipe to double-check"; fail=1; }
+  # The teardown names the distribution the source's own nodes carry. The
+  # source here is kind's, whose kubelet reports a plain upstream version with
+  # no `+k0s`/`+k3s` marker, so the recipe is the honest one: box cannot tell
+  # how this cluster was installed, and says so instead of printing a k0s reset
+  # for a cluster nobody proved is k0s.
+  grep -q "box can't tell how this cluster was installed" "$WORK/cutover.txt" ||
+    { echo "the replace path printed no teardown the operator can check"; fail=1; }
   grep -qF "box migrate apply ${snapshot}" "$WORK/cutover.txt" ||
     { echo "the replace path did not name the command that finishes the job"; fail=1; }
   [ -f "$snapshot" ] ||

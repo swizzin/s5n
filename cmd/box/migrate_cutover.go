@@ -155,7 +155,11 @@ func cutover(ctx context.Context, o cutoverOptions, out say.Reporter, proof func
 	if o.Replace {
 		out.Phase("replace")
 		out.Line("the final snapshot is taken. This cluster is yours to replace: box does not remove a cluster it did not install.")
-		out.List("to double-check before you run it", resetLines(o))
+		// The teardown names the distribution the source's own nodes carry.
+		// A node list the read could not get is already a report line, and it
+		// leaves the recipe saying box cannot tell rather than guessing.
+		nodes, _ := read.src.Nodes(ctx)
+		out.List("to double-check before you run it", resetLines(o, nodes))
 		out.Line(fmt.Sprintf("then: box migrate apply %s", wrote.Path))
 		return errCutoverStopped
 	}
@@ -218,13 +222,25 @@ func stopLines(running []discover.Running) []string {
 }
 
 // resetLines is the teardown, as the one thing left for the operator to run
-// themselves before `box migrate apply` can install box's own cluster.
-func resetLines(o cutoverOptions) []string {
-	return []string{
-		"k0s stop; k0s reset",
-		"then remove the unit and the binary: systemctl disable --now k0scontroller; rm -f /etc/systemd/system/k0scontroller.service /usr/local/bin/k0s",
-		fmt.Sprintf("the source's manifests are in the snapshot (%s) and its host directories are untouched", filepath.Base(snapshotPath(o.discoverOptions, archive.ModeFinal))),
+// themselves before `box migrate apply` can install box's own cluster. It is
+// the recipe for the distribution the source's nodes say installed it
+// (discover.Distribution): the same command on another distribution removes
+// nothing, so a cluster box cannot place gets a line that says so instead of a
+// teardown for a guess.
+func resetLines(o cutoverOptions, nodes []discover.Node) []string {
+	var lines []string
+	switch discover.Distribution(nodes) {
+	case discover.K0s:
+		lines = []string{
+			"k0s stop; k0s reset",
+			"then remove the unit and the binary: systemctl disable --now k0scontroller; rm -f /etc/systemd/system/k0scontroller.service /usr/local/bin/k0s",
+		}
+	case discover.K3s:
+		lines = []string{"/usr/local/bin/k3s-uninstall.sh, which stops the server and the agent, then removes them and their data"}
+	default:
+		lines = []string{"box can't tell how this cluster was installed: remove it the way it was installed, before anything else uses this host"}
 	}
+	return append(lines, fmt.Sprintf("the source's manifests are in the snapshot (%s) and its host directories are untouched", filepath.Base(snapshotPath(o.discoverOptions, archive.ModeFinal))))
 }
 
 // countApps is "one app" or "3 apps", for a warning.

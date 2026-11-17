@@ -125,9 +125,13 @@ func TestCutoverWritesTheFinalSnapshotWhenEveryAppStopped(t *testing.T) {
 		t.Errorf("the final snapshot carries %d configs, want both apps'", len(opened.Configs))
 	}
 	// The replace path stops after the snapshot with the two things left for
-	// the operator: the reset, to double-check, and the next command.
+	// the operator: the reset, to double-check, and the next command. This
+	// source is a saved directory with no Node objects, so the recipe is the
+	// one that admits box cannot place the cluster rather than a k0s teardown
+	// for a cluster nobody proved is k0s (TestResetRecipeNamesTheSourcesNode
+	// covers the recipes box does know).
 	for _, want := range []string{
-		"k0s stop; k0s reset",
+		"box can't tell how this cluster was installed",
 		"box migrate apply " + out,
 		"box does not remove a cluster it did not install",
 	} {
@@ -150,5 +154,49 @@ func TestCutoverRefusesASavedReadForTheStopProof(t *testing.T) {
 	err := cutover(context.Background(), o, reporter, unstopped)
 	if err == nil || !strings.Contains(err.Error(), "--from-dir") {
 		t.Fatalf("cutover of a saved read = %v, want it to name --from-dir", err)
+	}
+}
+
+// TestResetRecipeNamesTheSourcesNode: the teardown printed for the operator is
+// the one for the distribution the source's own nodes say installed it, and a
+// cluster box cannot place gets a line that says so. The versions are the shapes
+// k0s and k3s write, not a cluster this test ran against.
+func TestResetRecipeNamesTheSourcesNode(t *testing.T) {
+	o := cutoverOptions{discoverOptions: discoverOptions{Out: "/var/lib/s5n/migrate/migrate-20261117T090000Z-final.tar.gz"}}
+	tests := []struct {
+		name  string
+		nodes []discover.Node
+		want  string
+	}{
+		{"k0s", []discover.Node{{Name: "box", KubeletVersion: "v1.34.1+k0s.0"}}, "k0s stop; k0s reset"},
+		{"k3s", []discover.Node{{Name: "box", KubeletVersion: "v1.34.1+k3s1"}}, "/usr/local/bin/k3s-uninstall.sh"},
+		{"no marker", []discover.Node{{Name: "box", KubeletVersion: "v1.34.1"}}, "box can't tell how this cluster was installed"},
+		{"no nodes", nil, "box can't tell how this cluster was installed"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			lines := resetLines(o, tt.nodes)
+			if len(lines) < 2 {
+				t.Fatalf("the recipe is %v, want a teardown and where the manifests are", lines)
+			}
+			if !strings.Contains(lines[0], tt.want) {
+				t.Errorf("teardown = %q, want it to name %q", lines[0], tt.want)
+			}
+			// Whatever the distribution, the last line is the same and is the
+			// one that says the source is still there.
+			if !strings.Contains(lines[len(lines)-1], "manifest") {
+				t.Errorf("the recipe does not say where the source's manifests are: %v", lines)
+			}
+			// And a recipe for one distribution never carries another's
+			// command.
+			for _, line := range lines {
+				if tt.want == "/usr/local/bin/k3s-uninstall.sh" && strings.Contains(line, "k0s ") {
+					t.Errorf("k3s's recipe carries a k0s command: %q", line)
+				}
+				if tt.want == "k0s stop; k0s reset" && strings.Contains(line, "k3s-uninstall") {
+					t.Errorf("k0s's recipe carries a k3s command: %q", line)
+				}
+			}
+		})
 	}
 }

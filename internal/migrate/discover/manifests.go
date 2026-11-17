@@ -131,9 +131,10 @@ func (d *Directory) Pods(ctx context.Context) ([]Pod, error) {
 	return podsOf(pods), nil
 }
 
-// Nodes is the saved Nodes' names: a directory exported without them names no
-// source host, which is what a source cluster with more than one node says too.
-func (d *Directory) Nodes(ctx context.Context) ([]string, error) {
+// Nodes is the saved Nodes: a directory exported without them names no source
+// host, which is what a source cluster with more than one node says too, and
+// names no distribution, which is what a teardown has to admit.
+func (d *Directory) Nodes(ctx context.Context) ([]Node, error) {
 	objs, err := d.load(ctx)
 	if err != nil {
 		return nil, err
@@ -144,7 +145,7 @@ func (d *Directory) Nodes(ctx context.Context) ([]string, error) {
 			nodes = append(nodes, node)
 		}
 	}
-	return nodeNames(nodes), nil
+	return nodesOf(nodes), nil
 }
 
 // Raw is every document read, as the plan directory keeps it.

@@ -62,10 +62,10 @@ func (d *discovery) plan(data *plan.Data) *plan.Plan {
 func (d *discovery) sourceHost() string {
 	switch {
 	case len(d.nodes) == 1:
-		return d.nodes[0]
+		return d.nodes[0].Name
 	case len(d.nodes) > 1:
 		d.note("the source cluster runs on %d nodes (%s), so the plan names no source host",
-			len(d.nodes), strings.Join(d.nodes, ", "))
+			len(d.nodes), strings.Join(nodeNames(d.nodes), ", "))
 	case d.nodeErr != nil:
 		d.note("the source's nodes could not be read (%v), so the plan names no source host", d.nodeErr)
 	}

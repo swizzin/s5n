@@ -957,7 +957,9 @@ data. Everything it will change is written down before it changes anything.
 - **box never stops or resets a source (decided).** It prints the command for the
   platform it found — `kubectl scale`, `docker stop`, `systemctl stop`, the reset recipe
   for a cluster it didn't install — shown as one to double-check, and the operator runs
-  it.
+  it. The reset recipe is for the distribution the source's own nodes name (the marker in
+  each kubelet's version: `+k0s`, `+k3s`); a cluster box cannot place gets a line saying
+  so rather than a teardown that would remove nothing.
 - **cutover is the window (decided).** It refuses while any planned app still runs: the
   workload at replicas 0 and no pod left. It writes its read before printing any stop
   command, so following box's advice is always safe. With no earlier discover it warns
