@@ -57,6 +57,13 @@ const (
 // (internal/domain/downloader.go:234-242 at v1.90.0, BuildLegacyHost).
 var hostPlusPort = map[string]bool{"QBITTORRENT": true, "TRANSMISSION": true}
 
+// typesBoxRuns are the client types this box runs: qBittorrent, and the Arrs
+// that are clients of autobrr in this schema (charts/s5n/catalog.yaml). A row of
+// any other type (Transmission, rTorrent, Deluge, another *arr) is left exactly
+// as it is and called out: rewriting it would point autobrr at an app box does
+// not run, and deleting it is the operator's call, never migrate's.
+var typesBoxRuns = map[string]bool{"QBITTORRENT": true, "SONARR": true, "RADARR": true}
+
 // actionPaths are the action columns that hold a path, macro-capable
 // (internal/domain/action.go:17-24).
 var actionPaths = []string{"exec_cmd", "watch_folder", "save_path", "download_path"}
@@ -271,8 +278,13 @@ func planDB(ctx context.Context, in rewrite.Input, t tally, rep *rewrite.Report)
 // holds a whole URL and the port column keeps whatever the form left there
 // (10000), never read. Such a row is resolved on its URL's host and port,
 // rewritten to a URL again, and its port column left exactly as it was.
+//
+// Two rows are left exactly as they are, and called out rather than refused: a
+// client of a type box does not run (there is nothing in the release for it to
+// talk to), and a client autobrr has switched off (it is never dialled, so an
+// address nothing settles is not a gap).
 func planClients(ctx context.Context, db *sql.DB, in rewrite.Input, t tally, rep *rewrite.Report) ([]dbEdit, error) {
-	rows, err := db.QueryContext(ctx, `SELECT id, type, host, port, tls FROM client`)
+	rows, err := db.QueryContext(ctx, `SELECT id, name, type, host, port, tls, enabled FROM client`)
 	if err != nil {
 		return nil, fmt.Errorf("autobrr: read client: %w", err)
 	}
@@ -280,16 +292,16 @@ func planClients(ctx context.Context, db *sql.DB, in rewrite.Input, t tally, rep
 	var edits []dbEdit
 	for rows.Next() {
 		var id int64
-		var kind sql.NullString
+		var name, kind sql.NullString
 		var host string
-		var port, tls sql.NullInt64
-		if err := rows.Scan(&id, &kind, &host, &port, &tls); err != nil {
+		var port, tls, enabled sql.NullInt64
+		if err := rows.Scan(&id, &name, &kind, &host, &port, &tls, &enabled); err != nil {
 			return nil, fmt.Errorf("autobrr: read client: %w", err)
 		}
 		// arr is a row dialled by its host URL alone; a bare host, or a
 		// client that adds the port column to its host, is host and port.
 		arr := strings.Contains(host, "://") && !hostPlusPort[strings.ToUpper(kind.String)]
-		name, urlPort := splitAddress(host)
+		clientName, urlPort := splitAddress(host)
 		p := urlPort
 		if !arr {
 			p = int(port.Int64)
@@ -297,13 +309,39 @@ func planClients(ctx context.Context, db *sql.DB, in rewrite.Input, t tally, rep
 				p = urlPort
 			}
 		}
-		res := in.Resolve(name, p)
+		label := name.String
+		if label == "" {
+			label = fmt.Sprintf("client %d", id)
+		}
+		where := tableClient + ".host"
+		res := in.Resolve(clientName, p)
+		// Two rows are left exactly as they are, and called out rather than
+		// refused: a type box does not run, and a client autobrr has switched
+		// off whose address nothing settles. That second one is the ruling's
+		// own case: a client nothing dials is not a gap in the plan.
+		off := enabled.Valid && enabled.Int64 == 0
+		switch {
+		case !typesBoxRuns[strings.ToUpper(kind.String)]:
+			rep.Left = append(rep.Left, rewrite.Left{
+				File: dbName, Where: where, What: address(clientName, p),
+				Why: fmt.Sprintf("left as it is: %q is a %s client and this box runs only qBittorrent and the Arrs, so a rewrite would point autobrr at an app that is not there; delete it in autobrr if you do not need it",
+					label, kind.String),
+			})
+			continue
+		case res.Verdict == plan.Unclassified && off:
+			rep.Left = append(rep.Left, rewrite.Left{
+				File: dbName, Where: where, What: address(clientName, p),
+				Why: fmt.Sprintf("left as it is: %q is switched off in autobrr, so %s is never dialled and nothing is migrated to it",
+					label, address(clientName, p)),
+			})
+			continue
+		}
 		switch res.Verdict {
 		case plan.Rewrite:
 			end, ok := in.Targets[res.App]
 			if !ok {
 				return nil, fmt.Errorf("autobrr: client %d: the plan points %s at %q, which has no endpoint on the box",
-					id, name, res.App)
+					id, clientName, res.App)
 			}
 			want := end.Host
 			if arr {
@@ -327,7 +365,7 @@ func planClients(ctx context.Context, db *sql.DB, in rewrite.Input, t tally, rep
 		case plan.Leave:
 		default:
 			rep.Unclassified = append(rep.Unclassified, rewrite.Address{
-				App: in.App, File: dbName, Where: tableClient + ".host", Host: name, Port: p,
+				App: in.App, File: dbName, Where: where, Host: clientName, Port: p,
 			})
 		}
 	}
@@ -407,6 +445,15 @@ func splitAddress(host string) (string, int) {
 		}
 	}
 	return host, 0
+}
+
+// address is a host and port as one line for the operator: host:port, or the
+// host alone when autobrr stored no port.
+func address(host string, port int) string {
+	if port == 0 {
+		return host
+	}
+	return net.JoinHostPort(host, strconv.Itoa(port))
 }
 
 // tally counts edits by file, key and kind, which is how a plan shows them.

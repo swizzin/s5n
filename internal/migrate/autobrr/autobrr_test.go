@@ -299,6 +299,75 @@ func TestMacroOnlyValueIsRelative(t *testing.T) {
 	}
 }
 
+// TestDisabledClientIsLeft: an address no rule settles on a client autobrr has
+// switched off is not a gap. It is left exactly as it is, the report says so,
+// and the run is not stopped.
+func TestDisabledClientIsLeft(t *testing.T) {
+	ctx := context.Background()
+	fixture := strings.Replace(dbFixture, "'localhost', 8081, 1", "'192.0.2.10', 8081, 1", 1)
+	on := setup(t, fixture)
+
+	rep, err := rewriter{}.Check(ctx, on)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rep.Unclassified) != 1 || !rep.Blocked() {
+		t.Fatalf("an enabled client at an address nothing settles = %v, want it reported", rep.Unclassified)
+	}
+
+	off := setup(t, strings.Replace(fixture, "'qBittorrent', 1,", "'qBittorrent', 0,", 1))
+	rep, err = rewriter{}.Check(ctx, off)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rep.Blocked() {
+		t.Fatalf("a disabled client blocked the run: %v", rep.Unclassified)
+	}
+	if len(rep.Left) != 1 || rep.Left[0].What != "192.0.2.10:8081" {
+		t.Fatalf("Left = %+v, want one entry for 192.0.2.10:8081", rep.Left)
+	}
+	if !strings.Contains(rep.Left[0].Why, "switched off") {
+		t.Errorf("why = %q, want it to say the client is switched off", rep.Left[0].Why)
+	}
+	if _, err := (rewriter{}).Write(ctx, off); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	if got := readClients(t, off.Dir)[1]; got.host != "192.0.2.10" {
+		t.Errorf("a disabled client's row was rewritten: %+v", got)
+	}
+}
+
+// TestClientTypeBoxDoesNotRunIsLeft: box runs qBittorrent and the Arrs, and
+// nothing else. Any other row is left and called out, never rewritten and never
+// a refusal: pointing autobrr at an app that is not there is worse than leaving
+// a row the operator can delete.
+func TestClientTypeBoxDoesNotRunIsLeft(t *testing.T) {
+	ctx := context.Background()
+	fixture := strings.Replace(dbFixture,
+		"VALUES (2, 'Sonarr', 1, 'SONARR', 'sonarr.default.svc', 8989, 1);",
+		"VALUES (2, 'Deluge', 1, 'DELUGE', '192.0.2.10', 8112, 0);", 1)
+	in := setup(t, fixture)
+	rep, err := rewriter{}.Check(ctx, in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rep.Blocked() {
+		t.Fatalf("a client of a type box does not run blocked the run: %v", rep.Unclassified)
+	}
+	if len(rep.Left) != 1 || rep.Left[0].What != "192.0.2.10:8112" {
+		t.Fatalf("Left = %+v, want one entry for 192.0.2.10:8112", rep.Left)
+	}
+	if !strings.Contains(rep.Left[0].Why, "DELUGE") {
+		t.Errorf("why = %q, want it to name the client's type", rep.Left[0].Why)
+	}
+	if _, err := (rewriter{}).Write(ctx, in); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	if got := readClients(t, in.Dir)[2]; got.host != "192.0.2.10" || got.port != 8112 {
+		t.Errorf("a client box does not run was rewritten: %+v", got)
+	}
+}
+
 func readConfig(t *testing.T, dir string) map[string]string {
 	t.Helper()
 	raw, err := os.ReadFile(filepath.Join(dir, configName))
