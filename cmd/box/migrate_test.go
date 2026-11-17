@@ -143,7 +143,7 @@ func discoverySource(t *testing.T) (manifests, root string) {
 func TestMigrateDiscoverWritesASurveyThatHoldsNoConfig(t *testing.T) {
 	manifests, root := discoverySource(t)
 	out := filepath.Join(t.TempDir(), "source.tar.gz")
-	_, text, err := migrateDiscover(context.Background(), discoverOptions{Out: out, FromDir: manifests, Root: root})
+	text, err := migrateDiscover(context.Background(), discoverOptions{Out: out, FromDir: manifests, Root: root})
 	if err != nil {
 		t.Fatalf("discover: %v\n%s", err, text)
 	}
@@ -205,7 +205,7 @@ func TestMigrateDiscoverWritesASurveyThatHoldsNoConfig(t *testing.T) {
 func TestMigrateDiscoverRehearsalCarriesEveryConfig(t *testing.T) {
 	manifests, root := discoverySource(t)
 	out := filepath.Join(t.TempDir(), "source.tar.gz")
-	if _, _, err := migrateDiscover(context.Background(), discoverOptions{Out: out, FromDir: manifests, Root: root, Rehearsal: true}); err != nil {
+	if _, err := migrateDiscover(context.Background(), discoverOptions{Out: out, FromDir: manifests, Root: root, Rehearsal: true}); err != nil {
 		t.Fatalf("discover --rehearsal: %v", err)
 	}
 	opened, err := bundle.Open(out, filepath.Join(t.TempDir(), "open"))
@@ -237,7 +237,7 @@ func TestMigrateDiscoverRefusesToWriteOverASnapshot(t *testing.T) {
 	if err := os.WriteFile(out, []byte("a snapshot that is already there"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	_, _, err := migrateDiscover(context.Background(), discoverOptions{Out: out, FromDir: manifests, Root: root})
+	_, err := migrateDiscover(context.Background(), discoverOptions{Out: out, FromDir: manifests, Root: root})
 	if err == nil || !strings.Contains(err.Error(), "there already") {
 		t.Fatalf("discover over an existing file was refused with %v", err)
 	}
@@ -249,7 +249,7 @@ func TestMigrateDiscoverReportsAPartialRead(t *testing.T) {
 	// in a snapshot.
 	empty := t.TempDir()
 	out := filepath.Join(t.TempDir(), "source.tar.gz")
-	_, text, err := migrateDiscover(context.Background(), discoverOptions{Out: out, FromDir: empty, Root: empty})
+	text, err := migrateDiscover(context.Background(), discoverOptions{Out: out, FromDir: empty, Root: empty})
 	if err == nil {
 		t.Fatal("discovery of an empty directory planned something")
 	}
@@ -304,7 +304,7 @@ func TestMigrateDiscoverReadsAQuotedSavePath(t *testing.T) {
 		t.Fatal(err)
 	}
 	out := filepath.Join(t.TempDir(), "source.tar.gz")
-	if _, _, err := migrateDiscover(context.Background(), discoverOptions{Out: out, FromDir: manifests, Root: root}); err != nil {
+	if _, err := migrateDiscover(context.Background(), discoverOptions{Out: out, FromDir: manifests, Root: root}); err != nil {
 		t.Fatalf("discovery refused a save path it should read: %v", err)
 	}
 }

@@ -151,7 +151,7 @@ func runMigrateDiscover(ctx context.Context, args []string) {
 	o.Rehearsal = *rehearsal
 	out := newOutput(terminalSet(false), true, "")
 	defer out.Close()
-	_, text, err := migrateDiscover(ctx, o)
+	text, err := migrateDiscover(ctx, o)
 	if text != "" {
 		out.Line(text)
 	}
@@ -180,24 +180,23 @@ type migrationRead struct {
 // returned text is what it printed (and wrote into the snapshot's report.txt),
 // which an error also carries: a run that stopped halfway still has something
 // to say about what it read.
-func migrateDiscover(ctx context.Context, o discoverOptions) (bundle.Written, string, error) {
+func migrateDiscover(ctx context.Context, o discoverOptions) (string, error) {
 	mode := archive.ModeSurvey
 	if o.Rehearsal {
 		mode = archive.ModeRehearsal
 	}
 	read, err := readSource(ctx, o)
 	if err != nil {
-		return bundle.Written{}, read.text, err
+		return read.text, err
 	}
 	// The file is named before it is written, so the report inside it can name
 	// it: the operator reads one page that says where the snapshot is.
 	path := snapshotPath(o, mode)
 	read.text = discoveryReport(read.plan, read.report, path, nil)
-	wrote, err := writeSnapshot(path, mode, o, read)
-	if err != nil {
-		return bundle.Written{}, read.text, err
+	if _, err := writeSnapshot(path, mode, o, read); err != nil {
+		return read.text, err
 	}
-	return wrote, read.text, nil
+	return read.text, nil
 }
 
 // readSource reads the source and builds the plan. Nothing is written: a run
