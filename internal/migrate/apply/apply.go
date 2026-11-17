@@ -107,6 +107,10 @@ type Summary struct {
 	// Renames are the data directories apply would rename, source to contract
 	// name (plan.Data.Renames).
 	Renames []string
+	// Defaults are the plan's own decisions: the rules discovery wrote and
+	// nobody answered (plan.Defaults). A default is never silent, so the
+	// confirm screen names every one of them.
+	Defaults []string
 	// Outside are the source's workloads box has no app for: they are not
 	// migrated, and the operator brings them back by hand.
 	Outside []string
@@ -118,6 +122,11 @@ type InstanceSummary struct {
 	Staged  Staged
 	Changes []rewrite.Change
 	Notes   []string
+	// Left are the values the app stores and box will not touch, with their
+	// reasons: a client it never dials, a client of a type box does not run,
+	// a folder history never reads again. They stop nothing, so they are
+	// shown before the confirm rather than after the run.
+	Left []rewrite.Left
 	// Enable says this run switches the instance on.
 	Enable bool
 	// Keys are the release Secret's key names for the keys this instance keeps:
@@ -128,7 +137,9 @@ type InstanceSummary struct {
 }
 
 // Lines renders the summary as rows: one per change, note, rename, instance
-// switched on, adopted connection and outside workload, in that order.
+// switched on, adopted connection, default the plan took and outside workload,
+// in that order. What box leaves as it is comes right after the changes, which
+// is where the operator looks for what will not move.
 func (s Summary) Lines() []string {
 	var rows []string
 	for _, in := range s.Instances {
@@ -140,6 +151,11 @@ func (s Summary) Lines() []string {
 		}
 		for _, n := range in.Notes {
 			rows = append(rows, fmt.Sprintf("%s: note: %s", in.App, n))
+		}
+	}
+	for _, in := range s.Instances {
+		for _, l := range in.Left {
+			rows = append(rows, fmt.Sprintf("%s: left as it is: %s (%s)", in.App, l.What, l.Why))
 		}
 	}
 	for _, r := range s.Renames {
@@ -159,6 +175,9 @@ func (s Summary) Lines() []string {
 		for _, o := range in.Owned {
 			rows = append(rows, fmt.Sprintf("%s: adopt %s %q (id %s) for %s", in.App, o.Kind, o.Name, ownedID(o), o.Target))
 		}
+	}
+	for _, d := range s.Defaults {
+		rows = append(rows, "default: "+d)
 	}
 	for _, o := range s.Outside {
 		rows = append(rows, "not migrated: "+o)
@@ -517,6 +536,7 @@ func (m *migration) input(name string) rewrite.Input {
 		Dir:     m.staging(name),
 		Plan:    m.p,
 		Targets: m.env.Targets,
+		Runs:    CatalogRuns(m.p, m.env.Catalog),
 		Run:     m.env.Run,
 	}
 }
@@ -537,7 +557,7 @@ func (m *migration) show() error {
 // summary is the whole change, from the Check reports: nothing here reads a
 // file, so the operator's review is of what apply is about to do.
 func (m *migration) summary() Summary {
-	s := Summary{Outside: append([]string(nil), m.p.Outside...)}
+	s := Summary{Outside: append([]string(nil), m.p.Outside...), Defaults: m.p.Defaults()}
 	if m.p.Data != nil {
 		for _, pair := range m.p.Data.Renames() {
 			if has(m.st.Renamed, pair[0]) {
@@ -552,6 +572,7 @@ func (m *migration) summary() Summary {
 			App:     name,
 			Changes: rep.Changes,
 			Notes:   rep.Notes,
+			Left:    rep.Left,
 			Owned:   rep.Owned,
 			Enable:  !m.alreadyEnabled(name),
 		}

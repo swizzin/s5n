@@ -30,10 +30,14 @@ import (
 
 	"github.com/swizzin/s5n/internal/archive"
 	"github.com/swizzin/s5n/internal/bootstrap"
+	"github.com/swizzin/s5n/internal/catalog"
+	"github.com/swizzin/s5n/internal/migrate/apply"
 	"github.com/swizzin/s5n/internal/migrate/bundle"
 	"github.com/swizzin/s5n/internal/migrate/discover"
 	"github.com/swizzin/s5n/internal/migrate/plan"
 	"github.com/swizzin/s5n/internal/release"
+	"github.com/swizzin/s5n/internal/say"
+	"github.com/swizzin/s5n/internal/setup"
 )
 
 // migrateUsage is what a bad invocation and `box migrate` print. It is the
@@ -121,6 +125,13 @@ type discoverOptions struct {
 	// Now is the clock the snapshot's name and manifest come from. Empty means
 	// time.Now: a test that compares two runs' names hands it one.
 	Now func() time.Time
+	// Prompt asks the defaults Settle took. Nil is an unattended run: every
+	// default is taken and the run says so, through Say. A run with a terminal
+	// on stdin builds one (runMigrateDiscover, runMigrateCutover); a test
+	// hands over its own.
+	Prompt setup.Prompter
+	// Plain is --plain: ask with line prompts even on a terminal.
+	Plain bool
 }
 
 func (o discoverOptions) clock() time.Time {
@@ -150,6 +161,7 @@ func runMigrateDiscover(ctx context.Context, args []string) {
 	// so discover names the chart the same way the install it leads to does.
 	o.chart = addChartFlags(fs, chartVersionInstalls)
 	rehearsal := fs.Bool("rehearsal", false, "copy every planned app's config into the snapshot, so it can be applied as a locked rehearsal")
+	plain := fs.Bool("plain", false, "ask the defaults with plain line prompts, even on a terminal (for a flaky terminal or a screen reader)")
 	if err := fs.Parse(args); err != nil {
 		fmt.Fprintf(os.Stderr, "box: %v\n", err)
 		os.Exit(2)
@@ -160,26 +172,40 @@ func runMigrateDiscover(ctx context.Context, args []string) {
 		os.Exit(2)
 	}
 	o.Rehearsal = *rehearsal
-	out := newOutput(terminalSet(false), true, "")
-	defer out.Close()
-	text, err := migrateDiscover(ctx, o)
-	if text != "" {
-		out.Line(text)
+	o.Plain = *plain
+	if isTerminal(os.Stdin) {
+		// A read with somebody at the terminal asks about the defaults it takes.
+		// Without one it takes them all and says so: a question nobody can
+		// answer is not a question.
+		o.Prompt = newPrompt(terminalSet(o.Plain), startupTheme(""))
 	}
+	out := newOutput(terminalSet(o.Plain), false, "")
+	defer out.Close()
+	text, err := migrateDiscover(ctx, o, out)
 	if err != nil {
+		if text != "" {
+			out.Line(text)
+		}
 		out.Error(err)
 		os.Exit(1)
 	}
 }
 
 // migrationRead is one read of a source: the plan, the bytes it will be written
-// as, what discovery could not migrate, and the text the operator sees.
+// as, what discovery could not migrate, what its checks could not settle, and
+// the text the operator sees.
 type migrationRead struct {
 	plan *plan.Plan
 	// src is what the plan was read from. The stop proof and the reset recipe
 	// ask it the two things a plan cannot hold -- the pods that are left and
 	// the distribution that installed the cluster -- over the same read.
 	src discover.Source
+	// settled is what the checks could not settle, as Settle decided it: the
+	// list report.txt carries and a guided run asks about.
+	settled apply.Settled
+	// chart is the release this read is writing a plan for: its blessed
+	// variants, its catalog and the endpoints its values give every app.
+	chart release.Chart
 	// raw is the plan's YAML, which is what a snapshot carries and what apply's
 	// plan id is a digest of.
 	raw    []byte
@@ -191,7 +217,7 @@ type migrationRead struct {
 // returned text is what it printed (and wrote into the snapshot's report.txt),
 // which an error also carries: a run that stopped halfway still has something
 // to say about what it read.
-func migrateDiscover(ctx context.Context, o discoverOptions) (string, error) {
+func migrateDiscover(ctx context.Context, o discoverOptions, out say.Reporter) (string, error) {
 	mode := archive.ModeSurvey
 	if o.Rehearsal {
 		mode = archive.ModeRehearsal
@@ -200,12 +226,36 @@ func migrateDiscover(ctx context.Context, o discoverOptions) (string, error) {
 	if err != nil {
 		return read.text, err
 	}
+	// Nothing unsettled reaches the install: the checks run here, on the very
+	// bytes the snapshot will carry, and what they cannot settle is asked
+	// about now or written down as a default.
+	if err := settleRead(ctx, o, &read); err != nil {
+		read.text = discoveryReport(read.plan, read.report, "", read.settled, err)
+		return read.text, err
+	}
+	if err := askDefaults(&read, out, o); err != nil {
+		read.text = discoveryReport(read.plan, read.report, "", read.settled, err)
+		return read.text, err
+	}
 	// The file is named before it is written, so the report inside it can name
 	// it: the operator reads one page that says where the snapshot is.
 	path := snapshotPath(o, mode)
-	read.text = discoveryReport(read.plan, read.report, path, nil)
-	if _, err := writeSnapshot(path, mode, o, read); err != nil {
+	if err := encodeRead(&read); err != nil {
+		read.text = discoveryReport(read.plan, read.report, "", read.settled, err)
 		return read.text, err
+	}
+	read.text = discoveryReport(read.plan, read.report, path, read.settled, nil)
+	wrote, err := writeSnapshot(path, mode, o, read)
+	if err != nil {
+		return read.text, err
+	}
+	out.Line(read.text)
+	out.Success("wrote " + wrote.Path + " (" + string(mode) + ")")
+	// The last screen names every default this run took: an address or a path
+	// nobody answered is a decision box made, and the operator leaves the run
+	// knowing which ones those were.
+	if defaults := read.settled.Defaults(); !defaults.Empty() {
+		out.List("defaults taken", defaults.Lines())
 	}
 	return read.text, nil
 }
@@ -227,43 +277,50 @@ func readSource(ctx context.Context, o discoverOptions) (migrationRead, error) {
 	// writing a plan for. A chart that cannot be read stops the read: a plan
 	// that names no variant would migrate every app onto the chart's default
 	// image without saying so.
-	variants, err := o.variants(ctx)
+	chart, err := o.loadChart(ctx)
 	if err != nil {
-		read.text = discoveryReport(nil, read.report, "", err)
+		read.text = discoveryReport(nil, read.report, "", nil, err)
 		return read, err
 	}
+	if len(chart.Variants) == 0 {
+		err := fmt.Errorf("chart %s ships no variants.yaml, so no source image can be mapped onto one of its blessed variants", chart.Ref)
+		read.text = discoveryReport(nil, read.report, "", nil, err)
+		return read, err
+	}
+	read.chart = chart
 	p, rep, derr := discover.Discover(ctx, src, discover.Options{
 		Namespaces: o.Namespaces,
-		Variants:   variants,
+		Variants:   chart.Variants,
 		// The host's filesystem, read-only: every open below is a read.
 		ConfigFS: os.DirFS(root),
 	})
 	read.plan, read.report = p, rep
 	if derr != nil {
-		read.text = discoveryReport(p, rep, "", derr)
+		read.text = discoveryReport(p, rep, "", nil, derr)
 		return read, derr
 	}
-	raw, err := yaml.Marshal(p)
-	if err != nil {
-		read.text = discoveryReport(p, rep, "", fmt.Errorf("write the plan: %w", err))
-		return read, err
-	}
-	// A plan box cannot read back is worse than no plan: apply trusts it with
-	// the data root and every instance's config, and a field the encoder
-	// dropped would be a rule that silently does nothing.
-	back, err := plan.Parse(raw)
-	if err != nil {
-		read.text = discoveryReport(p, rep, "", fmt.Errorf("the plan does not read back: %w", err))
-		return read, err
-	}
-	if !reflect.DeepEqual(p, back) {
-		err := errors.New("the plan does not read back as the plan discovery built; this is a bug in box")
-		read.text = discoveryReport(p, rep, "", err)
-		return read, err
-	}
-	read.raw = raw
-	read.text = discoveryReport(p, rep, "", nil)
 	return read, nil
+}
+
+// settleRead runs every rewriter's check over the configs this read saw and
+// writes what they could not settle into the plan as defaults with reasons. The
+// plan a run writes is Settle's plan: a gap that reached apply would be a
+// refusal after the downtime, and this is where it becomes a decision instead.
+//
+// The checks read the source's own directories, which are the bytes a rehearsal
+// or a final snapshot copies: apply then rewrites a copy of the same config, so
+// the checks it repeats are the checks this run made.
+func settleRead(ctx context.Context, o discoverOptions, read *migrationRead) error {
+	in, err := settleInput(read, o.Root)
+	if err != nil {
+		return err
+	}
+	settledPlan, called, err := apply.Settle(ctx, read.plan, in)
+	if err != nil {
+		return err
+	}
+	read.plan, read.settled = settledPlan, called
+	return nil
 }
 
 // snapshotPath is where one run writes: --out when the operator named a file,
@@ -323,31 +380,103 @@ func discoverSource(o discoverOptions) (discover.Source, error) {
 	return discover.NewCluster(kc, o.Namespaces)
 }
 
-// variants is the chart's variants.yaml: the blessed image list a source image
-// is mapped onto a variant through. It is read from the release this run
-// installs -- parsed by internal/admission, the one parser of that file -- so a
-// plan cannot name a variant the release it is applied onto does not have.
-//
-// A chart without the file is refused rather than read as "no variants": the
-// chart owns the file, and a plan that named no variant would quietly put every
-// app on the chart's default image, which is the silent default migrate exists
-// to avoid.
-func (o discoverOptions) variants(ctx context.Context) ([]byte, error) {
-	charts := &chartRelease{flags: o.chart, source: o.Charts}
-	chart, err := charts.load(ctx)
-	if err != nil {
-		return nil, err
-	}
-	if len(chart.Variants) == 0 {
-		return nil, fmt.Errorf("chart %s ships no variants.yaml, so no source image can be mapped onto one of its blessed variants", chart.Ref)
-	}
-	return chart.Variants, nil
+// loadChart is the release this read writes a plan for: its variants.yaml (the
+// blessed image list a source image is mapped onto a variant through), its
+// catalog, and the values whose ports and URL bases are where the box serves
+// each app. It is parsed by internal/admission and internal/catalog, the one
+// parser of each file, so a plan cannot name a variant or an app the release it
+// is applied onto does not have.
+func (o discoverOptions) loadChart(ctx context.Context) (release.Chart, error) {
+	return (&chartRelease{flags: o.chart, source: o.Charts}).load(ctx)
 }
 
-// discoveryReport is report.txt: what the plan holds, and everything discovery
-// would not migrate. It is printed and kept, so the operator reads one page
-// before apply writes one byte.
-func discoveryReport(p *plan.Plan, rep discover.Report, out string, failure error) string {
+// settleInput is what Settle is handed: this chart's apps, the source
+// directories this read saw, and where the box serves every planned app.
+func settleInput(read *migrationRead, root string) (apply.SettleInput, error) {
+	var in apply.SettleInput
+	chart := read.chart
+	cat, err := catalog.Parse(chart.Ref+"/"+catalog.FileName, chart.Catalog, chart.Values, chart.Schema)
+	if err != nil {
+		return in, err
+	}
+	// The chart's own values: the ports and URL bases this release gives every
+	// app are what a rewritten address points at, and a read on the source host
+	// has no seedbox's files to ask.
+	var chartValues map[string]any
+	if err := yaml.Unmarshal(chart.Values, &chartValues); err != nil {
+		return in, fmt.Errorf("%s: read the chart's values: %w", chart.Ref, err)
+	}
+	targets, err := apply.Targets(chartValues, cat.Names(), sortedKeys(read.plan.Apps))
+	if err != nil {
+		return in, err
+	}
+	if root == "" {
+		root = "/"
+	}
+	return apply.SettleInput{
+		Catalog: cat.Names(),
+		// The source's own directories: a rehearsal and a final snapshot copy
+		// these, so the checks read the bytes apply will rewrite. A survey
+		// copies nothing and still checks, which is what makes a read tell the
+		// operator what apply would have refused.
+		Configs: func(name string) string {
+			config := read.plan.Apps[name].Config
+			if config == "" {
+				return ""
+			}
+			return filepath.Join(root, config)
+		},
+		Targets: targets,
+	}, nil
+}
+
+// askDefaults shows what Settle could not settle and, when there is somebody to
+// ask, has the operator answer each address. Unattended, it takes every default
+// and says so with the same lines: a default is never silent, whichever run
+// takes it.
+func askDefaults(read *migrationRead, out say.Reporter, o discoverOptions) error {
+	if read.settled.Empty() {
+		return nil
+	}
+	asker := &settleAsker{out: out, prompt: o.Prompt, apps: sortedKeys(read.plan.Apps)}
+	if o.Prompt == nil {
+		out.List("nothing else to ask: taking every one of these defaults", read.settled.Lines())
+		return nil
+	}
+	out.List("box cannot settle these by itself: these are the defaults it would take", read.settled.Lines())
+	decided, err := apply.Decide(read.plan, read.settled, asker.ask)
+	if err != nil {
+		return err
+	}
+	read.settled = decided
+	return nil
+}
+
+// encodeRead writes the plan this run will carry, and refuses one that does not
+// read back: apply trusts it with the data root and every instance's config, and
+// a field the encoder dropped would be a rule that silently does nothing.
+func encodeRead(read *migrationRead) error {
+	raw, err := yaml.Marshal(read.plan)
+	if err != nil {
+		return fmt.Errorf("write the plan: %w", err)
+	}
+	back, err := plan.Parse(raw)
+	if err != nil {
+		return fmt.Errorf("the plan does not read back: %w", err)
+	}
+	if !reflect.DeepEqual(read.plan, back) {
+		return errors.New("the plan does not read back as the plan this run built; this is a bug in box")
+	}
+	read.raw = raw
+	return nil
+}
+
+// discoveryReport is report.txt: what the plan holds, everything discovery
+// would not migrate, and every decision box made that the operator did not:
+// what apply will leave as it is, what it points where, and what only apply can
+// check. It is printed and kept, so the operator reads one page before apply
+// writes one byte.
+func discoveryReport(p *plan.Plan, rep discover.Report, out string, settled apply.Settled, failure error) string {
 	var b strings.Builder
 	switch {
 	case failure != nil:
@@ -384,6 +513,15 @@ func discoveryReport(p *plan.Plan, rep discover.Report, out string, failure erro
 		fmt.Fprintf(&b, "%s:\n", s.title)
 		for _, row := range s.rows {
 			fmt.Fprintf(&b, "  %s\n", row)
+		}
+	}
+	// The called-out list, exactly as Settle wrote it: one header per decision,
+	// one line per host or path with its reason, and the places that hold it.
+	if !settled.Empty() {
+		b.WriteString("called out:\n")
+		for _, line := range settled.Lines() {
+			b.WriteString(line)
+			b.WriteString("\n")
 		}
 	}
 	return b.String()

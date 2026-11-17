@@ -49,11 +49,28 @@ type Input struct {
 	Plan *plan.Plan
 	// Targets is every migrated app's endpoint on the box, by instance name.
 	Targets map[string]Endpoint
+	// Runs is every instance the plan has of each app, by catalog app name
+	// ("sonarr" -> [sonarr sonarr-4k]). A rewriter that proposes a settlement
+	// for an address asks Sole with it: an address whose field names one app
+	// can only be settled by itself when the box runs one instance of it.
+	Runs map[string][]string
 	// Run executes a tool inside the app's pinned image with Dir mounted at
 	// /config, for formats only the app's own binary may write (Plex's
 	// database). Nil when the caller can't run images; a rewriter that needs
 	// it returns an error saying so.
 	Run Runner
+}
+
+// Sole is the one instance this box runs of a catalog app, and whether it runs
+// exactly one. It is what a proposal is built on: two qBittorrents and an
+// address nothing settles cannot mean one of them, so the address is left and
+// called out rather than pointed at a guess.
+func (in Input) Sole(app string) (string, bool) {
+	names := in.Runs[app]
+	if len(names) != 1 {
+		return "", false
+	}
+	return names[0], true
 }
 
 // Resolve settles an address this app stored for another app, and is the one
@@ -88,6 +105,49 @@ func (in Input) Resolve(host string, port int) plan.Resolution {
 		}
 	}
 	return plan.Resolution{}
+}
+
+// ResolveURL settles an address this app stored as a URL, with the path it
+// stored when it has one. It is what a rewriter holding a whole URL asks, and
+// it differs from Resolve exactly as plan.ResolveURL does: one host can serve
+// several apps under paths (box's own shape is one name with each app under a
+// path), and the path is then the only thing that says which app an address
+// meant. An address with no path on such a host is not settled by guessing at
+// one of them.
+//
+// The plan answers first, then this run's own endpoints, exactly as Resolve
+// does, so a rewriter's two passes stay consistent.
+func (in Input) ResolveURL(u *url.URL) plan.Resolution {
+	if u == nil {
+		return plan.Resolution{}
+	}
+	port := URLPort(u)
+	if in.Plan != nil {
+		if res := in.Plan.ResolveURL(in.App, u.Hostname(), port, u.EscapedPath()); res.Verdict != plan.Unclassified {
+			return res
+		}
+	}
+	names := make([]string, 0, len(in.Targets))
+	for name := range in.Targets {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	h := normalizeHost(u.Hostname())
+	for _, name := range names {
+		ep := in.Targets[name]
+		if ep.Port == port && normalizeHost(ep.Host) == h {
+			return plan.Resolution{Verdict: plan.Rewrite, App: name}
+		}
+	}
+	return plan.Resolution{}
+}
+
+// URL is the address an app's endpoint answers at: plain HTTP inside the
+// release, the chart's Service and port, and the chart's URL base as the path.
+// A rewriter that stores a URL writes this, which drops whatever path the
+// source's URL had: box serves the app under its own base, not the source's.
+func (e Endpoint) URL() string {
+	return "http://" + net.JoinHostPort(e.Host, strconv.Itoa(e.Port)) + strings.TrimSuffix(e.URLBase, "/")
 }
 
 // normalizeHost is the form two stored hosts are compared in: no trailing dot,

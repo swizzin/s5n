@@ -14,10 +14,12 @@ package apply
 
 import (
 	"fmt"
+	"sort"
 	"strconv"
 	"strings"
 
 	"github.com/swizzin/s5n/internal/admission"
+	"github.com/swizzin/s5n/internal/migrate/plan"
 	"github.com/swizzin/s5n/internal/migrate/rewrite"
 )
 
@@ -75,6 +77,33 @@ func Suffix(instance, app string) string {
 		return ""
 	}
 	return strings.TrimPrefix(instance, app+"-")
+}
+
+// CatalogRuns is every instance the plan has of each catalog app, by catalog
+// app name. It is what a rewriter answers Sole from (internal/migrate/rewrite,
+// Input.Sole): a proposal points an address at an app only when the box runs
+// exactly one instance of it.
+func CatalogRuns(p *plan.Plan, catalog []string) map[string][]string {
+	out := make(map[string][]string, len(p.Apps))
+	for _, name := range sortedPlanApps(p) {
+		app := CatalogApp(name, catalog)
+		if app == "" {
+			continue
+		}
+		out[app] = append(out[app], name)
+	}
+	return out
+}
+
+// sortedPlanApps is a plan's instance names, sorted, so CatalogRuns reads the
+// same way twice.
+func sortedPlanApps(p *plan.Plan) []string {
+	out := make([]string, 0, len(p.Apps))
+	for name := range p.Apps {
+		out = append(out, name)
+	}
+	sort.Strings(out)
+	return out
 }
 
 // Instances is every instance the values switch on, sorted, named the way the

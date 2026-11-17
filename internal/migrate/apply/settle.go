@@ -92,6 +92,18 @@ type SettledItem struct {
 	Why string
 	// Holds is where the value is stored: one entry per app, file and place.
 	Holds []SettledHold
+	// Host and Port are the address a decision is about, as stored: what a
+	// guided run asks about and what the plan's rule matches. Empty for a path
+	// and for a check, which are not addresses.
+	Host string
+	Port int
+	// App is what a rewrite points the value at, and empty for a leave and a
+	// check.
+	App string
+	// Default says box chose this decision. A guided run clears it when the
+	// operator answers, so the summary of defaults taken names only what
+	// nobody looked at.
+	Default bool
 }
 
 // SettledHold is one place one value is stored.
@@ -115,6 +127,24 @@ func (h SettledHold) String() string {
 
 // Empty reports whether Settle called nothing out.
 func (s Settled) Empty() bool { return len(s) == 0 }
+
+// Defaults is the decisions box took without the operator answering: what an
+// unattended run has to name, and what the end of a guided run still lists.
+func (s Settled) Defaults() Settled {
+	var out Settled
+	for _, g := range s {
+		var items []SettledItem
+		for _, it := range g.Items {
+			if it.Default {
+				items = append(items, it)
+			}
+		}
+		if len(items) > 0 {
+			out = append(out, SettledGroup{Action: g.Action, Items: items})
+		}
+	}
+	return out
+}
 
 // Lines is the called-out list as text: one header per decision, then one line
 // per host or path with its reason, then the places that hold it.
@@ -141,23 +171,23 @@ func (s Settled) Lines() []string {
 
 // add files one called-out value under its decision, merging into a line that
 // is already there so the same address in three apps reads once.
-func (s *Settled) add(action, value, why string, holds ...SettledHold) {
+func (s *Settled) add(action string, item SettledItem) {
 	for i := range *s {
 		g := &(*s)[i]
 		if g.Action != action {
 			continue
 		}
 		for j := range g.Items {
-			if g.Items[j].Value != value {
+			if g.Items[j].Value != item.Value {
 				continue
 			}
-			g.Items[j].Holds = append(g.Items[j].Holds, holds...)
+			g.Items[j].Holds = append(g.Items[j].Holds, item.Holds...)
 			return
 		}
-		g.Items = append(g.Items, SettledItem{Value: value, Why: why, Holds: holds})
+		g.Items = append(g.Items, item)
 		return
 	}
-	*s = append(*s, SettledGroup{Action: action, Items: []SettledItem{{Value: value, Why: why, Holds: holds}}})
+	*s = append(*s, SettledGroup{Action: action, Items: []SettledItem{item}})
 }
 
 // sort orders the groups by decision and the values under them, so two runs of
@@ -232,6 +262,7 @@ func copyPlan(p *plan.Plan) *plan.Plan {
 // the plan as it was handed in, so each one sees the same plan and every place
 // an address is stored is reported, whichever app is checked first.
 func (s *settler) checkAll(ctx context.Context) error {
+	runs := CatalogRuns(s.plan, s.in.Catalog)
 	for _, name := range planApps(s.plan) {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -250,8 +281,10 @@ func (s *settler) checkAll(ctx context.Context) error {
 			return fmt.Errorf("settle: apps.%s: the release has no endpoint for it, so the addresses it stores cannot be checked", name)
 		}
 		if NeedsRunner(catalog) && s.in.Run == nil {
-			s.settled.add(actionAtApply, name,
-				"its database is only readable through its own image, and this run has no way to start one")
+			s.settled.add(actionAtApply, SettledItem{
+				Value: name, Default: true,
+				Why: "its database is only readable through its own image, and this run has no way to start one",
+			})
 			continue
 		}
 		src := s.plan.Apps[name].Config
@@ -259,14 +292,22 @@ func (s *settler) checkAll(ctx context.Context) error {
 			src = s.in.Configs(name)
 		}
 		if !isDir(src) {
-			return fmt.Errorf("settle: apps.%s: the source config %s is not a directory; the plan says that is where %s kept its settings",
-				name, src, name)
+			// A read with no source tree behind it (--from-dir, or a survey on
+			// a host that does not hold the configs) has no bytes to check.
+			// That is recorded, not failed: it is what apply checks, and a
+			// survey that refused to be written would be a read with nothing
+			// to show for it.
+			s.settled.add(actionAtApply, SettledItem{
+				Value: name, Default: true,
+				Why: fmt.Sprintf("its config is not at %s on this host, so the addresses and paths it stores are checked at apply", src),
+			})
+			continue
 		}
 		dir := filepath.Join(s.dir, name)
 		if _, err := copyTree(dir, src, os.Geteuid(), os.Getegid()); err != nil {
 			return fmt.Errorf("settle %s from %s: %w", name, src, err)
 		}
-		rep, err := rw.Check(ctx, rewrite.Input{App: name, Dir: dir, Plan: s.plan, Targets: s.in.Targets, Run: s.in.Run})
+		rep, err := rw.Check(ctx, rewrite.Input{App: name, Dir: dir, Plan: s.plan, Targets: s.in.Targets, Runs: runs, Run: s.in.Run})
 		if err != nil {
 			return fmt.Errorf("settle %s: %w", name, err)
 		}
@@ -314,7 +355,10 @@ func (s *settler) settleAddresses() error {
 	// with their reasons.
 	for _, rep := range s.reports {
 		for _, l := range rep.Left {
-			s.settled.add(actionLeave, l.What, l.Why, SettledHold{App: rep.App, File: l.File, Where: l.Where})
+			s.settled.add(actionLeave, SettledItem{
+				Value: l.What, Why: l.Why, Default: true,
+				Holds: []SettledHold{{App: rep.App, File: l.File, Where: l.Where}},
+			})
 		}
 	}
 	for _, key := range order {
@@ -336,7 +380,10 @@ func (s *settler) settleAddresses() error {
 					Host: g.host, Port: g.port, App: app, Default: true,
 					Why: actionRewrite + app + ": " + why,
 				})
-				s.settled.add(actionRewrite+app, text, why, g.holds...)
+				s.settled.add(actionRewrite+app, SettledItem{
+					Value: text, Why: why, Holds: g.holds,
+					Host: g.host, Port: g.port, App: app, Default: true,
+				})
 				continue
 			}
 		}
@@ -348,7 +395,10 @@ func (s *settler) settleAddresses() error {
 			Host: g.host, Port: g.port, Leave: true, Default: true,
 			Why: actionLeave + ": " + why,
 		})
-		s.settled.add(actionLeave, text, why, g.holds...)
+		s.settled.add(actionLeave, SettledItem{
+			Value: text, Why: why, Holds: g.holds,
+			Host: g.host, Port: g.port, Default: true,
+		})
 	}
 	return nil
 }
@@ -394,7 +444,10 @@ func (s *settler) settlePaths() error {
 				})
 				s.plan.Apps[u.App] = app
 			}
-			s.settled.add(actionLeave, dir, why, SettledHold{App: u.App, File: u.File, Where: u.Key})
+			s.settled.add(actionLeave, SettledItem{
+				Value: dir, Why: why, Default: true,
+				Holds: []SettledHold{{App: u.App, File: u.File, Where: u.Key}},
+			})
 		}
 	}
 	return nil

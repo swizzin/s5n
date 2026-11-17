@@ -11,6 +11,7 @@ package main
 
 import (
 	"context"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -22,6 +23,7 @@ import (
 	"github.com/swizzin/s5n/internal/migrate/plan"
 	"github.com/swizzin/s5n/internal/migrate/sqlitedb"
 	"github.com/swizzin/s5n/internal/release"
+	"github.com/swizzin/s5n/internal/say"
 )
 
 // sourceManifests is a two-workload source: qBittorrent with the data root
@@ -107,21 +109,33 @@ func (f fixedCharts) Load(context.Context, release.ChartRef) (release.Chart, err
 	return f.chart, f.err
 }
 
+// quiet is the reporter a test that reads the returned text does not read: the
+// command still says every default out loud, and this is where it goes.
+func quiet(t *testing.T) say.Reporter {
+	t.Helper()
+	return &say.Plain{W: io.Discard}
+}
+
 // chartWithVariants is the release a read loads: the chart's own variants.yaml,
-// which is what maps a source image onto one of its blessed variants.
+// the catalog its apps are named in, and the values whose ports and URL bases
+// are what a settled default points at.
 func chartWithVariants(t *testing.T) release.Chart {
 	t.Helper()
-	raw, err := os.ReadFile(filepath.Join("..", "..", "charts", "s5n", "variants.yaml"))
-	if err != nil {
-		t.Fatalf("read the chart's variants: %v", err)
+	read := func(name string) []byte {
+		raw, err := os.ReadFile(filepath.Join("..", "..", "charts", "s5n", name))
+		if err != nil {
+			t.Fatalf("read the chart's %s: %v", name, err)
+		}
+		return raw
 	}
 	return release.Chart{
 		Ref:      testChartRepo + ":" + testChartVersion,
 		Name:     "s5n",
 		Version:  testChartVersion,
-		Variants: raw,
-		Values:   []byte("apps: {}\n"),
-		Schema:   []byte("{}"),
+		Variants: read("variants.yaml"),
+		Catalog:  read("catalog.yaml"),
+		Values:   read("values.yaml"),
+		Schema:   read("values.schema.json"),
 	}
 }
 
@@ -170,10 +184,21 @@ func discoverySource(t *testing.T) (manifests, root string) {
 		t.Fatal(err)
 	}
 	defer db.Close()
+	// The tables a real Sonarr's database has and its rewriter reads: a
+	// migration checks them, because a plan that could not read them would
+	// refuse at apply instead of here.
 	for _, statement := range []string{
 		`CREATE TABLE RootFolders (Id INTEGER PRIMARY KEY, Path TEXT)`,
 		`INSERT INTO RootFolders (Id, Path) VALUES (1, '/library/media/tv')`,
 		`CREATE TABLE Series (Id INTEGER PRIMARY KEY, Path TEXT)`,
+		`CREATE TABLE ImportLists (Id INTEGER PRIMARY KEY, Name TEXT, Implementation TEXT, Settings TEXT, RootFolderPath TEXT)`,
+		`CREATE TABLE RemotePathMappings (Id INTEGER PRIMARY KEY, Host TEXT, RemotePath TEXT, LocalPath TEXT)`,
+		`CREATE TABLE DownloadClients (Id INTEGER PRIMARY KEY, Name TEXT, Enable INTEGER, Implementation TEXT, Settings TEXT)`,
+		`CREATE TABLE Notifications (Id INTEGER PRIMARY KEY, Name TEXT, Implementation TEXT, Settings TEXT)`,
+		`CREATE TABLE Config (Id INTEGER PRIMARY KEY, Key TEXT, Value TEXT)`,
+		`CREATE TABLE Commands (Id INTEGER PRIMARY KEY, Name TEXT, Status INTEGER, Body TEXT)`,
+		`CREATE TABLE History (Id INTEGER PRIMARY KEY, SourceTitle TEXT, Data TEXT)`,
+		`CREATE TABLE DownloadHistory (Id INTEGER PRIMARY KEY, SourceTitle TEXT, Data TEXT)`,
 	} {
 		if _, err := db.Exec(statement); err != nil {
 			t.Fatalf("%s: %v", statement, err)
@@ -187,7 +212,7 @@ func TestMigrateDiscoverWritesASurveyThatHoldsNoConfig(t *testing.T) {
 	out := filepath.Join(t.TempDir(), "source.tar.gz")
 	o := readOf(t)
 	o.Out, o.FromDir, o.Root = out, manifests, root
-	text, err := migrateDiscover(context.Background(), o)
+	text, err := migrateDiscover(context.Background(), o, quiet(t))
 	if err != nil {
 		t.Fatalf("discover: %v\n%s", err, text)
 	}
@@ -251,7 +276,7 @@ func TestMigrateDiscoverRehearsalCarriesEveryConfig(t *testing.T) {
 	out := filepath.Join(t.TempDir(), "source.tar.gz")
 	o := readOf(t)
 	o.Out, o.FromDir, o.Root, o.Rehearsal = out, manifests, root, true
-	if _, err := migrateDiscover(context.Background(), o); err != nil {
+	if _, err := migrateDiscover(context.Background(), o, quiet(t)); err != nil {
 		t.Fatalf("discover --rehearsal: %v", err)
 	}
 	opened, err := bundle.Open(out, filepath.Join(t.TempDir(), "open"))
@@ -285,7 +310,7 @@ func TestMigrateDiscoverRefusesToWriteOverASnapshot(t *testing.T) {
 	}
 	o := readOf(t)
 	o.Out, o.FromDir, o.Root = out, manifests, root
-	_, err := migrateDiscover(context.Background(), o)
+	_, err := migrateDiscover(context.Background(), o, quiet(t))
 	if err == nil || !strings.Contains(err.Error(), "there already") {
 		t.Fatalf("discover over an existing file was refused with %v", err)
 	}
@@ -299,7 +324,7 @@ func TestMigrateDiscoverReportsAPartialRead(t *testing.T) {
 	out := filepath.Join(t.TempDir(), "source.tar.gz")
 	o := readOf(t)
 	o.Out, o.FromDir, o.Root = out, empty, empty
-	text, err := migrateDiscover(context.Background(), o)
+	text, err := migrateDiscover(context.Background(), o, quiet(t))
 	if err == nil {
 		t.Fatal("discovery of an empty directory planned something")
 	}
@@ -356,7 +381,7 @@ func TestMigrateDiscoverReadsAQuotedSavePath(t *testing.T) {
 	out := filepath.Join(t.TempDir(), "source.tar.gz")
 	o := readOf(t)
 	o.Out, o.FromDir, o.Root = out, manifests, root
-	if _, err := migrateDiscover(context.Background(), o); err != nil {
+	if _, err := migrateDiscover(context.Background(), o, quiet(t)); err != nil {
 		t.Fatalf("discovery refused a save path it should read: %v", err)
 	}
 }
@@ -379,7 +404,7 @@ func TestMigrateDiscoverMapsImagesOntoTheChartsVariants(t *testing.T) {
 	out := filepath.Join(t.TempDir(), "source.tar.gz")
 	o := readOf(t)
 	o.Out, o.FromDir, o.Root = out, manifests, root
-	text, err := migrateDiscover(context.Background(), o)
+	text, err := migrateDiscover(context.Background(), o, quiet(t))
 	if err != nil {
 		t.Fatalf("discover: %v\n%s", err, text)
 	}
@@ -418,7 +443,7 @@ func TestMigrateDiscoverRefusesAChartWithNoVariants(t *testing.T) {
 	chart := chartWithVariants(t)
 	chart.Variants = nil
 	o.Charts = fixedCharts{chart: chart}
-	text, err := migrateDiscover(context.Background(), o)
+	text, err := migrateDiscover(context.Background(), o, quiet(t))
 	if err == nil || !strings.Contains(err.Error(), "variants.yaml") {
 		t.Fatalf("a chart with no variants was accepted: %v\n%s", err, text)
 	}

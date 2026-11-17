@@ -759,6 +759,97 @@ func TestSettleLeavesAnUncoveredPathAsItIs(t *testing.T) {
 	}
 }
 
+// TestSettleRecordsAConfigItCannotRead: a read with no source tree behind it (a
+// survey from saved manifests, or a host that does not hold the configs) has
+// nothing to check, and that is recorded rather than failed. A survey that
+// refused to be written would be a read with nothing to show for it, and the
+// addresses are still checked at apply, where the snapshot's bytes are.
+func TestSettleRecordsAConfigItCannotRead(t *testing.T) {
+	r := newRehearsal(t, rehearsalHosts(false), false)
+	in := r.settleInput()
+	in.Configs = func(app string) string { return filepath.Join(r.dir, "absent", app) }
+
+	settled, called, err := Settle(context.Background(), r.plan(), in)
+	if err != nil {
+		t.Fatalf("Settle refused a read with no source tree: %v", err)
+	}
+	if len(settled.Hosts) != len(r.plan().Hosts) {
+		t.Errorf("Settle wrote %d host rules for configs it never read", len(settled.Hosts)-len(r.plan().Hosts))
+	}
+	atApply := 0
+	for _, g := range called {
+		if g.Action != actionAtApply {
+			continue
+		}
+		atApply += len(g.Items)
+	}
+	if want := len(r.plan().Apps); atApply != want {
+		t.Errorf("%d apps recorded as checked at apply, want %d", atApply, want)
+	}
+	for _, line := range called.Lines() {
+		if strings.Contains(line, "absent") && !strings.Contains(line, "is not at") {
+			t.Errorf("the line does not say the config is not on this host: %q", line)
+		}
+	}
+
+	// And nothing about it is a silent gap: an unattended run names it.
+	if got := called.Defaults().Lines(); len(got) == 0 {
+		t.Fatal("the checks it could not make are not in the defaults taken")
+	}
+}
+
+// TestSummaryNamesEveryDefaultAndLeft: the screen before the one confirm names
+// what the plan decided by itself and what apply will leave exactly as it is.
+// A default is never silent, and neither is a value box refuses to touch.
+func TestSummaryNamesEveryDefaultAndLeft(t *testing.T) {
+	ctx := context.Background()
+	r := newRehearsal(t, rehearsalHosts(true), true)
+	settled, _, err := Settle(ctx, r.plan(), r.settleInput())
+	if err != nil {
+		t.Fatalf("Settle: %v", err)
+	}
+	raw, err := yaml.Marshal(settled)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var shown Summary
+	env := Env{
+		ConfigRoot: r.configRoot,
+		DataRoot:   r.dataRoot,
+		Configs:    r.snapshotConfigs(),
+		PUID:       os.Geteuid(),
+		PGID:       os.Getegid(),
+		Targets:    rehearsalTargets(),
+		Run: func(context.Context, string, []string, []byte) ([]byte, error) {
+			return []byte("@end|1\n"), nil
+		},
+		Enabled: func(string) bool { return false },
+		Owned:   &fakeOwned{},
+		Secret:  newFakeKeys(),
+		Values:  &fakeValues{},
+		Confirm: yes(t, &shown),
+		Catalog: rehearsalCatalog,
+	}
+	if _, err := Run(ctx, settled, raw, env); err != nil {
+		t.Fatalf("apply refused the settled plan: %v", err)
+	}
+	lines := strings.Join(shown.Lines(), "\n")
+	for _, want := range []string{
+		"default: 10.244.0.56:32400 (rewritten to plex: it is Maintainerr's Plex connection, and this box runs Plex)",
+		"default: example.com:443 (rewritten to qbittorrent: it is a qBittorrent downloader, and this box runs one qBittorrent)",
+		`sonarr: left as it is: 172.17.0.1:443 ("rTorrent" is a RTorrent client`,
+		`radarr: left as it is: 172.17.0.1:10365 ("Deluge" is a Deluge client`,
+		`autobrr: left as it is: 192.0.2.10:8081 ("old nas" is switched off`,
+	} {
+		if !strings.Contains(lines, want) {
+			t.Errorf("the summary does not say %q:\n%s", want, lines)
+		}
+	}
+	if len(shown.Defaults) != 2 {
+		t.Errorf("the summary names %d defaults, want the two the plan took", len(shown.Defaults))
+	}
+}
+
 // readMoved reads one file of an app's config after apply moved it into place.
 func (r *rehearsal) readMoved(app, rel string) string {
 	r.t.Helper()

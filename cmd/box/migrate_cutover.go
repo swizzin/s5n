@@ -68,6 +68,13 @@ func runMigrateCutover(ctx context.Context, args []string) {
 		fmt.Fprintln(os.Stderr, "box: no values file: pass --values")
 		os.Exit(2)
 	}
+	// --yes is this verb's "go ahead without asking", and the defaults Settle
+	// takes are part of what it answers. Without it, a terminal on stdin is
+	// asked; a pipe is nobody to ask, and takes them all, saying so.
+	o.Plain = *o.apply.plain
+	if !*o.apply.yes && isTerminal(os.Stdin) {
+		o.Prompt = newPrompt(terminalSet(o.Plain), startupTheme(*o.apply.valuesPath))
+	}
 
 	out := newOutput(terminalSet(*o.apply.plain), *o.apply.yes, startupTheme(*o.apply.valuesPath))
 	defer out.Close()
@@ -122,6 +129,12 @@ func cutover(ctx context.Context, o cutoverOptions, out say.Reporter, proof func
 		}
 		return err
 	}
+	// Every rewriter's check runs before anything is written, so the survey a
+	// refusal keeps carries the plan apply would run, defaults and all.
+	if err := settleRead(ctx, o.discoverOptions, &read); err != nil {
+		out.Line(discoveryReport(read.plan, read.report, "", read.settled, err))
+		return err
+	}
 	running, err := proof(ctx, o, read)
 	if err != nil {
 		return err
@@ -129,6 +142,10 @@ func cutover(ctx context.Context, o cutoverOptions, out say.Reporter, proof func
 	if len(running) > 0 {
 		// The read is saved before any stop command is printed, so following
 		// box's advice is always safe: the next cutover carries this read.
+		if err := encodeRead(&read); err != nil {
+			return errors.Join(errCutoverStillRunning, err)
+		}
+		read.text = discoveryReport(read.plan, read.report, "", read.settled, nil)
 		survey, serr := writeSnapshot(surveyPath(o), archive.ModeSurvey, o.discoverOptions, read)
 		if serr != nil {
 			return errors.Join(errCutoverStillRunning, serr)
@@ -139,9 +156,18 @@ func cutover(ctx context.Context, o cutoverOptions, out say.Reporter, proof func
 		out.Muted("box never stops a source: these are commands to double-check and run yourself.")
 		return errCutoverStillRunning
 	}
+	// The source is stopped, so the run is going ahead: this is where the
+	// operator answers the defaults, and where an unattended run says it took
+	// them all.
+	if err := askDefaults(&read, out, o.discoverOptions); err != nil {
+		return err
+	}
 
 	path := snapshotPath(o.discoverOptions, archive.ModeFinal)
-	read.text = discoveryReport(read.plan, read.report, path, nil)
+	if err := encodeRead(&read); err != nil {
+		return err
+	}
+	read.text = discoveryReport(read.plan, read.report, path, read.settled, nil)
 	wrote, err := writeSnapshot(path, archive.ModeFinal, o.discoverOptions, read)
 	if err != nil {
 		return err
@@ -150,6 +176,12 @@ func cutover(ctx context.Context, o cutoverOptions, out say.Reporter, proof func
 	out.Success("wrote " + wrote.Path + " (final)")
 	for _, s := range wrote.Skipped {
 		out.Muted(fmt.Sprintf("%s: left out of the snapshot: %s", s.Path, s.Why))
+	}
+	// The last screen names every default this run took: an address or a path
+	// nobody answered is a decision box made, and the operator leaves the run
+	// knowing which ones those were.
+	if defaults := read.settled.Defaults(); !defaults.Empty() {
+		out.List("defaults taken", defaults.Lines())
 	}
 
 	if o.Replace {

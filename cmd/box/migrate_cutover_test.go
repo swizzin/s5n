@@ -18,6 +18,7 @@ import (
 	"github.com/swizzin/s5n/internal/archive"
 	"github.com/swizzin/s5n/internal/migrate/bundle"
 	"github.com/swizzin/s5n/internal/migrate/discover"
+	"github.com/swizzin/s5n/internal/migrate/plan"
 	"github.com/swizzin/s5n/internal/say"
 )
 
@@ -138,6 +139,48 @@ func TestCutoverWritesTheFinalSnapshotWhenEveryAppStopped(t *testing.T) {
 		if !strings.Contains(text.String(), want) {
 			t.Errorf("the replace path does not say %q:\n%s", want, text)
 		}
+	}
+}
+
+// TestCutoverCallsOutWhatItCouldNotSettle: the final snapshot is the plan plus
+// the report, so a value the checks could not settle travels with it: the
+// report names it, the plan carries the default, and the run's last screen says
+// the default was taken.
+func TestCutoverCallsOutWhatItCouldNotSettle(t *testing.T) {
+	manifests, root := unsettledSource(t)
+	out := filepath.Join(t.TempDir(), "final.tar.gz")
+	o := cutoverOptionsFor(t, manifests)
+	o.Root = root
+	o.Out = out
+	o.Replace = true
+	reporter, text := recording()
+
+	if err := cutover(context.Background(), o, reporter, proofOf()); !errors.Is(err, errCutoverStopped) {
+		t.Fatalf("cutover = %v, want the replace path's stop", err)
+	}
+	opened, err := bundle.Open(out, filepath.Join(t.TempDir(), "open"))
+	if err != nil {
+		t.Fatalf("the final snapshot does not open: %v", err)
+	}
+	report := string(opened.Report)
+	for _, want := range []string{"called out:", "left as it is:", "/mnt/other/shows"} {
+		if !strings.Contains(report, want) {
+			t.Errorf("the snapshot's report does not say %q:\n%s", want, report)
+		}
+	}
+	p, err := plan.Parse(opened.Plan)
+	if err != nil {
+		t.Fatalf("the plan does not read back: %v", err)
+	}
+	if got := p.Defaults(); len(got) != 1 || !strings.Contains(got[0], "/mnt/other/shows") {
+		t.Errorf("the plan's defaults = %v, want the path nothing covered", got)
+	}
+	// Unattended, the run says what it took: the same lines, as the last thing
+	// on the screen.
+	lines := text.String()
+	last := lines[strings.LastIndex(lines, "defaults taken"):]
+	if !strings.Contains(lines, "taking every one of these defaults") || !strings.Contains(last, "/mnt/other/shows") {
+		t.Errorf("the run does not name the default it took:\n%s", lines)
 	}
 }
 
