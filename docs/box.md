@@ -235,8 +235,8 @@ different things, so `init` offers one and shows the other. The default is the n
 the OS account behind puid, read from the host's own account database, and only then
 the account of whoever ran the command; the answer is editable, and box couples
 nothing else to it. Guided `init` prints both in its record, `files  core  (uid 1000,
-gid 1000)` and `login  liara  (web login)`, so a box where the two differ says so
-instead of looking like a box where they agree. Neither account is created by box.
+gid 1000)` and `login name  liara  (web login)`, so a box where the two differ says
+so instead of looking like a box where they agree. Neither account is created by box.
 
 **One auth mechanism, no fallback (decided).** Wiring a login into each app separately
 would be a second auth system with its own reset path, tests and docs, so box doesn't
