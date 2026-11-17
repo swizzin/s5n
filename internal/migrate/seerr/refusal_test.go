@@ -70,6 +70,10 @@ func TestArrRootFolderMovesByTheArrsRules(t *testing.T) {
 		t.Fatal(err)
 	}
 	in.Plan = p
+	// The database's two root folders are the Arrs' too, so they move by the
+	// same rule the settings' folders do.
+	exec(t, in.Dir, `UPDATE override_rule SET rootFolder = '/library/media/Movies'`)
+	exec(t, in.Dir, `UPDATE media_request SET rootFolder = '/library/media/Old Requests'`)
 
 	rep, err := rewriter{}.Check(ctx, in)
 	if err != nil {
@@ -91,6 +95,14 @@ func TestArrRootFolderMovesByTheArrsRules(t *testing.T) {
 		if !ok || n.str != want {
 			t.Errorf("%s = %q, want %q", ptr, n.str, want)
 		}
+	}
+	// The override rule names radarr #0 and the request went to radarr #0, so
+	// both move through Radarr's table.
+	if got := readColumn(t, in.Dir, "override_rule", "rootFolder"); got != "/data/media/Movies" {
+		t.Errorf("override_rule.rootFolder = %q, want the folder in Radarr's tree", got)
+	}
+	if got := readColumn(t, in.Dir, "media_request", "rootFolder"); got != "/data/media/Old Requests" {
+		t.Errorf("media_request.rootFolder = %q, want the folder in Radarr's tree", got)
 	}
 }
 
