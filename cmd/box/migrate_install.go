@@ -75,7 +75,7 @@ func boxInstalled(recordPath string) (bool, error) {
 // off, from the plan. It returns when init has installed the release, which is
 // the state the adoption then runs against.
 func migrateInstall(ctx context.Context, o *migrateApplyFlags, inst *installFlags, p *plan.Plan, charts *chartRelease, out say.Reporter) error {
-	answers, err := installAnswers(inst, p)
+	answers, err := installAnswers(o, inst, p)
 	if err != nil {
 		return err
 	}
@@ -139,7 +139,7 @@ func migrateInstall(ctx context.Context, o *migrateApplyFlags, inst *installFlag
 // followed by `box init`, which ask their own questions. So each of the four is
 // required, and the refusal names all of the missing ones at once rather than
 // one per run.
-func installAnswers(inst *installFlags, p *plan.Plan) ([]string, error) {
+func installAnswers(o *migrateApplyFlags, inst *installFlags, p *plan.Plan) ([]string, error) {
 	var missing []string
 	if strings.TrimSpace(*inst.domain) == "" {
 		missing = append(missing, "--domain")
@@ -163,6 +163,11 @@ func installAnswers(inst *installFlags, p *plan.Plan) ([]string, error) {
 	answers := []string{
 		"--apps", "none",
 		"--namespace", *inst.namespace,
+		// The two files are the ones this run already has: init writes them,
+		// and the adoption reads them back, so the install and the adoption
+		// cannot end up on different grants.
+		"--grant", *o.grantPath,
+		"--values", *o.valuesPath,
 		"--data-path", p.Data.Root,
 		"--config-path", *inst.configPath,
 		"--domain", *inst.domain,

@@ -26,20 +26,22 @@ func planWithData() *plan.Plan {
 }
 
 // installFlagSet is the four answers a plan cannot hold, all empty: each test
-// fills what it is about.
-func installFlagSet(t *testing.T) *installFlags {
+// fills what it is about. The two files are the ones a run already has.
+func installFlagSet(t *testing.T) (*migrateApplyFlags, *installFlags) {
 	t.Helper()
 	ns := "seedbox"
-	return &installFlags{domain: new(string), login: new(string), password: new(string), configPath: new(string), namespace: &ns}
+	grant, values := "/etc/s5n/seedboxes/root.yaml", "/root/.config/box/values.yaml"
+	o := &migrateApplyFlags{applyFlags: &applyFlags{grantPath: &grant, valuesPath: &values}}
+	return o, &installFlags{domain: new(string), login: new(string), password: new(string), configPath: new(string), namespace: &ns}
 }
 
 func TestInstallAnswersComeFromThePlan(t *testing.T) {
-	inst := installFlagSet(t)
+	o, inst := installFlagSet(t)
 	*inst.domain = "box.example.com"
 	*inst.login = "someone"
 	*inst.password = "/run/password"
 	*inst.configPath = "/srv/config"
-	got, err := installAnswers(inst, planWithData())
+	got, err := installAnswers(o, inst, planWithData())
 	if err != nil {
 		t.Fatalf("installAnswers: %v", err)
 	}
@@ -56,6 +58,8 @@ func TestInstallAnswersComeFromThePlan(t *testing.T) {
 		"--password-file /run/password",
 		"--puid 1000",
 		"--pgid 1000",
+		"--grant /etc/s5n/seedboxes/root.yaml",
+		"--values /root/.config/box/values.yaml",
 	} {
 		if !strings.Contains(joined, want) {
 			t.Errorf("the answers do not carry %q: %v", want, got)
@@ -64,8 +68,8 @@ func TestInstallAnswersComeFromThePlan(t *testing.T) {
 }
 
 func TestInstallAnswersRefuseEveryMissingOneByName(t *testing.T) {
-	inst := installFlagSet(t)
-	_, err := installAnswers(inst, planWithData())
+	o, inst := installFlagSet(t)
+	_, err := installAnswers(o, inst, planWithData())
 	if err == nil {
 		t.Fatal("an install with no domain, login, password or config path was accepted")
 	}
@@ -81,14 +85,14 @@ func TestInstallAnswersRefuseEveryMissingOneByName(t *testing.T) {
 }
 
 func TestInstallAnswersNeedADataRoot(t *testing.T) {
-	inst := installFlagSet(t)
+	o, inst := installFlagSet(t)
 	*inst.domain = "box.example.com"
 	*inst.login = "someone"
 	*inst.password = "/run/password"
 	*inst.configPath = "/srv/config"
 	p := planWithData()
 	p.Data = nil
-	_, err := installAnswers(inst, p)
+	_, err := installAnswers(o, inst, p)
 	if err == nil || !strings.Contains(err.Error(), "data root") {
 		t.Fatalf("a plan with no data root was accepted with %v", err)
 	}
@@ -98,14 +102,14 @@ func TestInstallAnswersNeedADataRoot(t *testing.T) {
 // owner names no uid, so init settles it the way host foundations does rather
 // than being told 0.
 func TestInstallAnswersLeaveTheOwnerToHostFoundations(t *testing.T) {
-	inst := installFlagSet(t)
+	o, inst := installFlagSet(t)
 	*inst.domain = "box.example.com"
 	*inst.login = "someone"
 	*inst.password = "/run/password"
 	*inst.configPath = "/srv/config"
 	p := planWithData()
 	p.Source = nil
-	got, err := installAnswers(inst, p)
+	got, err := installAnswers(o, inst, p)
 	if err != nil {
 		t.Fatalf("installAnswers: %v", err)
 	}
