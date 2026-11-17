@@ -122,13 +122,14 @@ func Write(path string, s Snapshot) (Written, error) {
 		return res, fmt.Errorf("write %s: %w", path, err)
 	}
 	dir := filepath.Dir(path)
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return res, fmt.Errorf("create %s: %w", dir, err)
-	}
-	// MkdirAll leaves an existing directory's mode alone, and a snapshot
-	// directory box made once has to stay 0700: it holds the source's API keys.
-	if err := os.Chmod(dir, 0o700); err != nil {
-		return res, fmt.Errorf("set the mode of %s: %w", dir, err)
+	// The directory is box's to make and to set the mode of; one the operator
+	// named with --out is theirs, and its mode is not box's business.
+	if _, err := os.Lstat(dir); errors.Is(err, fs.ErrNotExist) {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			return res, fmt.Errorf("create %s: %w", dir, err)
+		}
+	} else if err != nil {
+		return res, fmt.Errorf("write %s: %w", path, err)
 	}
 
 	now := time.Now

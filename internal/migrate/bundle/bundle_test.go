@@ -250,6 +250,39 @@ func TestWriteNeverOverwritesASnapshot(t *testing.T) {
 	}
 }
 
+// TestWriteLeavesTheOperatorsDirectoryAlone: --out can name a file in a
+// directory the operator made, and a snapshot's mode is the file's. Changing
+// the mode of a directory box was pointed at would be a change nobody asked for.
+func TestWriteLeavesTheOperatorsDirectoryAlone(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.Chmod(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "migrate-20261117T090000Z-final.tar.gz")
+	if _, err := Write(path, Snapshot{Mode: archive.ModeFinal, Plan: []byte(testPlan)}); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	info, err := os.Stat(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0o755 {
+		t.Errorf("the directory is %04o, want the 0755 it was", info.Mode().Perm())
+	}
+	// A directory box makes itself is 0700: it holds the source's secrets.
+	fresh := filepath.Join(t.TempDir(), "snapshots")
+	if _, err := Write(filepath.Join(fresh, "migrate-20261117T090000Z-final.tar.gz"), Snapshot{Mode: archive.ModeFinal, Plan: []byte(testPlan)}); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	info, err = os.Stat(fresh)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0o700 {
+		t.Errorf("the directory box made is %04o, want 0700", info.Mode().Perm())
+	}
+}
+
 // TestNewestSaysWhenThereIsNone: an empty directory is a refusal that names the
 // two commands that write one, because "apply" with no file is the documented
 // way to finish a cutover.
