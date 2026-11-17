@@ -353,9 +353,12 @@ func clusterIPRules(svc Service, rule plan.HostRule) []plan.HostRule {
 // resolves outright, on whatever port it named: an Ingress is reached the way a
 // browser reaches it, not on the number the Service forwards to.
 //
-// A host that serves two apps maps to neither: which one an address meant is
-// the path, and a rule matches a host, so guessing would point one app's
-// connection at the other.
+// A host that serves one app gets one host-only rule, which answers every path
+// on it. A host that serves several -- box's own shape is one domain with each
+// app under a path -- gets one rule per path, because the path is then the only
+// thing that says which app an address meant. A path two apps are routed at is
+// one address with two answers, so neither is a rule and the operator hears
+// about it.
 func (d *discovery) ingressRules() []plan.HostRule {
 	// host -> app -> the paths that app is served at, so one host serving one
 	// app at several paths is one rule.
@@ -383,28 +386,70 @@ func (d *discovery) ingressRules() []plan.HostRule {
 	var out []plan.HostRule
 	for _, host := range sortedKeysOf(served) {
 		apps := served[host]
-		if len(apps) > 1 {
-			which := make([]string, 0, len(apps))
+		if len(apps) == 1 {
 			for app, paths := range apps {
-				which = append(which, fmt.Sprintf("%s at %s", app, strings.Join(ingressPlaces(host, paths), ", ")))
+				out = append(out, plan.HostRule{
+					Host: host,
+					App:  app,
+					Why:  ingressWhy(app, host, paths),
+				})
 			}
-			sort.Strings(which)
-			d.note("ingress host %s serves %s, so no rule maps it and apply will list every address that referred to it",
-				host, strings.Join(which, " and "))
 			continue
 		}
-		for app, paths := range apps {
-			out = append(out, plan.HostRule{
-				Host: host,
-				App:  app,
-				Why:  ingressWhy(app, host, paths),
-			})
-		}
+		out = append(out, d.ingressPathRules(host, apps)...)
 	}
 	// The same read gives the plan its domain default: the names this seedbox
 	// answers to are the ones the source's own Ingress answers to.
 	d.served = sortedKeysOf(served)
 	return out
+}
+
+// ingressPathRules is one host that serves several apps, as one rule per path. The path
+// is box's own shape -- each app under its own on one name -- so it is what a
+// stored address on that host means. A path two apps are routed at maps to
+// neither: the address has two answers, which is the operator's to settle.
+func (d *discovery) ingressPathRules(host string, apps map[string][]string) []plan.HostRule {
+	claims := map[string][]string{}
+	for _, app := range sortedKeysOf(apps) {
+		for _, path := range apps[app] {
+			p := ingressPath(path)
+			if owners := claims[p]; len(owners) == 0 || owners[len(owners)-1] != app {
+				claims[p] = append(owners, app)
+			}
+		}
+	}
+	var out []plan.HostRule
+	for _, p := range sortedKeysOf(claims) {
+		owners := claims[p]
+		if len(owners) > 1 {
+			d.note("ingress host %s routes %s to %s, so no rule maps it and apply will list every address that referred to it",
+				host, ingressPlaces(host, []string{p})[0], strings.Join(owners, " and "))
+			continue
+		}
+		out = append(out, plan.HostRule{
+			Host: host,
+			Path: p,
+			App:  owners[0],
+			Why:  ingressWhy(owners[0], host, []string{p}),
+		})
+	}
+	return out
+}
+
+// ingressPath is an Ingress path as a rule carries it: one prefix starting with
+// "/", and "/" for the path that covers the whole host.
+func ingressPath(p string) string {
+	p = strings.TrimSpace(p)
+	if p == "" {
+		return "/"
+	}
+	if !strings.HasPrefix(p, "/") {
+		p = "/" + p
+	}
+	if len(p) > 1 {
+		p = strings.TrimSuffix(p, "/")
+	}
+	return p
 }
 
 // ingressWhy is one Ingress rule's reason, one line, saying the action: the
@@ -766,7 +811,8 @@ func sortedKeysOf[V any](m map[string]V) []string {
 }
 
 // sortHostRules is the order a plan file is written in: Services first, then the
-// hosts, each by name, with the app and port breaking a tie.
+// hosts, each by name, with the app and port breaking a tie, and the path last
+// so one host serving an app at several paths reads the same twice.
 func sortHostRules(rules []plan.HostRule) {
 	sort.Slice(rules, func(i, j int) bool {
 		a, b := rules[i], rules[j]
@@ -777,8 +823,10 @@ func sortHostRules(rules []plan.HostRule) {
 			return a.Host < b.Host
 		case a.App != b.App:
 			return a.App < b.App
+		case a.Port != b.Port:
+			return a.Port < b.Port
 		}
-		return a.Port < b.Port
+		return a.Path < b.Path
 	})
 }
 

@@ -1018,7 +1018,11 @@ data. Everything it will change is written down before it changes anything.
   short name or as `<svc>.<ns>`, `<svc>.<ns>.svc` or `<svc>.<ns>.svc.cluster.local`), at a
   Service's cluster address, or at a public host and path an Ingress of the source routes
   to one of its Services: those three resolve to that Service's app outright (decided Nov
-  17). A pod's address is a hint and never an answer, because it does not survive the move
+  17). A host that serves several apps resolves by path — box's own shape is one name with
+  each app under a path — so the app is the one whose Ingress path is the longest prefix of
+  the address, on a path boundary, and an address with no path on such a host is left for
+  the operator rather than pointed at one of them. A pod's address is a hint and never an
+  answer, because it does not survive the move
   and may be another pod's by the time the plan is applied: an address that matches a pod
   at discovery becomes a plan entry with a proposed default and a one-line reason saying
   what box will do and why it is not certain, and every default is called out in the

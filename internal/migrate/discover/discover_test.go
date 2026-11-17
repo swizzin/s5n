@@ -1235,22 +1235,92 @@ func TestDiscoverResolvesAnIngressAddress(t *testing.T) {
 	}
 }
 
-// TestDiscoverIngressHostServingTwoApps: which app a public address meant is the
-// path, and a rule matches a host, so a host that serves two apps maps to
-// neither and the operator hears about it. Apply then lists every address that
-// referred to the host.
-func TestDiscoverIngressHostServingTwoApps(t *testing.T) {
+// TestDiscoverIngressHostServingManyAppsByPath: box's own shape is one name with
+// each app under a path, so a source laid out the same way resolves by path. The
+// host earns one rule per path, and an address on that host resolves to the app
+// whose path it is under -- never to one of them by guesswork, which is what an
+// address with no path would need.
+func TestDiscoverIngressHostServingManyAppsByPath(t *testing.T) {
 	f := sourceInstall(t)
 	f.ingress(t, "panel", "panel.example.com", "/qbittorrent", "qbittorrent")
 	f.ingress(t, "arrs", "panel.example.com", "/sonarr", "sonarr")
 
+	p, _ := f.discover(t)
+	want := []plan.HostRule{
+		{Host: "panel.example.com", Path: "/qbittorrent", App: "qbittorrent", Why: "rewrite to qbittorrent: panel.example.com/qbittorrent is its Ingress path"},
+		{Host: "panel.example.com", Path: "/sonarr", App: "sonarr", Why: "rewrite to sonarr: panel.example.com/sonarr is its Ingress path"},
+		{Service: "plex.media", App: "plex", Port: 80},
+		{Service: "qbittorrent.media", App: "qbittorrent", Port: 80},
+		{Service: "sonarr.media", App: "sonarr", Port: 80},
+	}
+	if !reflect.DeepEqual(p.Hosts, want) {
+		t.Fatalf("hosts:\n got %#v\nwant %#v", p.Hosts, want)
+	}
+	// apply reads the file, and every address on the host resolves through it.
+	rp := roundTrip(t, p)
+	tests := []struct {
+		name, path string
+		want       plan.Resolution
+	}{
+		{"qBittorrent's own path", "/qbittorrent", plan.Resolution{Verdict: plan.Rewrite, App: "qbittorrent"}},
+		{"a request under its path", "/qbittorrent/api/v2/app/version", plan.Resolution{Verdict: plan.Rewrite, App: "qbittorrent"}},
+		{"Sonarr's path", "/sonarr", plan.Resolution{Verdict: plan.Rewrite, App: "sonarr"}},
+		{"a path that only starts like one", "/qbittorrentx", plan.Resolution{}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := rp.ResolveURL("prowlarr", "panel.example.com", 443, tt.path); got != tt.want {
+				t.Errorf("ResolveURL(%q) = %+v, want %+v", tt.path, got, tt.want)
+			}
+		})
+	}
+	if got := rp.Resolve("prowlarr", "panel.example.com", 443); got.Verdict != plan.Unclassified {
+		t.Errorf("Resolve with no path = %+v; a host of paths has no answer without one", got)
+	}
+}
+
+// TestDiscoverIngressDeepestPathWins: a rule for the whole host is the shape a
+// source serves one app at "/" beside another, and it must not swallow the
+// deeper app: the longest path covering an address is the app it meant.
+func TestDiscoverIngressDeepestPathWins(t *testing.T) {
+	f := sourceInstall(t)
+	f.ingress(t, "panel", "panel.example.com", "/", "qbittorrent")
+	f.ingress(t, "arrs", "panel.example.com", "/sonarr", "sonarr")
+
+	p, _ := f.discover(t)
+	rp := roundTrip(t, p)
+	tests := []struct {
+		name, path, app string
+	}{
+		{"the host on its own is the root app", "/", "qbittorrent"},
+		{"a path nobody routes is still the root app", "/unrouted", "qbittorrent"},
+		{"the deeper path wins", "/sonarr/series/4", "sonarr"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			want := plan.Resolution{Verdict: plan.Rewrite, App: tt.app}
+			if got := rp.ResolveURL("prowlarr", "panel.example.com", 443, tt.path); got != want {
+				t.Errorf("ResolveURL(%q) = %+v, want %+v", tt.path, got, want)
+			}
+		})
+	}
+}
+
+// TestDiscoverIngressPathClaimedTwice: two apps routed at one host and path is
+// one address with two answers, so neither is a rule and the operator hears
+// about it. Apply then lists every address that referred to it.
+func TestDiscoverIngressPathClaimedTwice(t *testing.T) {
+	f := sourceInstall(t)
+	f.ingress(t, "panel", "panel.example.com", "/app", "qbittorrent")
+	f.ingress(t, "arrs", "panel.example.com", "/app", "sonarr")
+
 	p, rep := f.discover(t)
 	for _, h := range p.Hosts {
 		if h.Host == "panel.example.com" {
-			t.Fatalf("a host that serves two apps became a rule: %#v", h)
+			t.Fatalf("a path two apps claim became a rule: %#v", h)
 		}
 	}
-	want := "ingress host panel.example.com serves qbittorrent at panel.example.com/qbittorrent and sonarr at panel.example.com/sonarr, so no rule maps it and apply will list every address that referred to it"
+	want := "ingress host panel.example.com routes panel.example.com/app to qbittorrent and sonarr, so no rule maps it and apply will list every address that referred to it"
 	var noted bool
 	for _, n := range rep.Notes {
 		if n == want {
@@ -1258,7 +1328,7 @@ func TestDiscoverIngressHostServingTwoApps(t *testing.T) {
 		}
 	}
 	if !noted {
-		t.Fatalf("the ambiguous host is not reported as %q: %#v", want, rep.Notes)
+		t.Fatalf("the doubly routed path is not reported as %q: %#v", want, rep.Notes)
 	}
 }
 
