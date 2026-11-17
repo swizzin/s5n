@@ -8,31 +8,40 @@ import (
 	"strings"
 	"time"
 
+	"github.com/swizzin/s5n/internal/admission"
 	"github.com/swizzin/s5n/internal/migrate/plan"
 )
 
 // plan assembles the whole file: one entry per app with its own path table, the
-// data root, the Services, and the workloads left behind.
+// data root, the addresses the apps reached each other by, and the workloads
+// left behind.
 func (d *discovery) plan(data *plan.Data) *plan.Plan {
+	// The rules are what the domain default is read from, so they come first:
+	// the hosts an Ingress serves an app at are the names this box will have to
+	// answer to as well.
+	hosts := d.hostRules()
 	p := &plan.Plan{
 		Version: plan.Version,
 		// Only the cluster reader exists so far, and it is the one that
-		// answered; a docker or swizzin reader adds its kind here. The host
-		// and the owner are what a reader has to learn before they can be
-		// filled in, so a plan from this box says nothing about them yet.
+		// answered; a docker or swizzin reader adds its kind here.
 		Source: &plan.Source{
 			Taken: d.now().UTC().Format(time.RFC3339),
 			Kinds: []string{plan.Kubernetes},
+			Host:  d.sourceHost(),
+			Owner: d.owner(),
 		},
-		Data:  data,
-		Apps:  make(map[string]plan.App, len(d.instances)),
-		Hosts: d.hostRules(),
+		Domain: d.domain(),
+		Data:   data,
+		Apps:   make(map[string]plan.App, len(d.instances)),
+		Hosts:  hosts,
 	}
+	variants := d.imageVariants()
 	for _, in := range d.instances {
 		p.Apps[in.name] = plan.App{
 			Kind:      plan.Kubernetes,
 			Source:    in.wl.Name,
 			Image:     in.container.Image,
+			Variant:   d.variant(in, variants),
 			Config:    in.configDir,
 			Namespace: in.wl.Namespace,
 			Ports:     in.ports,
@@ -44,6 +53,98 @@ func (d *discovery) plan(data *plan.Data) *plan.Plan {
 	}
 	sort.Strings(p.Outside)
 	return p
+}
+
+// sourceHost is the host the source ran on: a single-node cluster is named by
+// its one node, and a cluster with more than one -- or one discovery could not
+// read -- names no host at all rather than picking a node that may hold none of
+// the data.
+func (d *discovery) sourceHost() string {
+	switch {
+	case len(d.nodes) == 1:
+		return d.nodes[0]
+	case len(d.nodes) > 1:
+		d.note("the source cluster runs on %d nodes (%s), so the plan names no source host",
+			len(d.nodes), strings.Join(d.nodes, ", "))
+	case d.nodeErr != nil:
+		d.note("the source's nodes could not be read (%v), so the plan names no source host", d.nodeErr)
+	}
+	return ""
+}
+
+// owner is the uid:gid the planned apps run as, when every one of them says the
+// same thing: the plan's answer for who the data root and the configs belong to
+// after the migration. A source whose apps disagree, or one that says nothing
+// (no PUID/PGID in its environment, no securityContext), names no owner and
+// leaves the question to the run.
+func (d *discovery) owner() *plan.Owner {
+	type appUser struct {
+		name     string
+		uid, gid int
+	}
+	users := make([]appUser, 0, len(d.instances))
+	for _, in := range d.instances {
+		uid, gid, ok := appIDs(in)
+		if !ok {
+			d.note("%s's pod names no uid:gid (no PUID/PGID in its environment and no securityContext), so the plan names no owner", in.name)
+			return nil
+		}
+		if uid == 0 {
+			// box never runs an app as root, so root's files are not an owner
+			// it could adopt: the run asks who they should become.
+			d.note("%s's pod runs as root, which box does not, so the plan names no owner", in.name)
+			return nil
+		}
+		users = append(users, appUser{name: in.name, uid: uid, gid: gid})
+	}
+	if len(users) == 0 {
+		return nil
+	}
+	for _, u := range users[1:] {
+		if u.uid == users[0].uid && u.gid == users[0].gid {
+			continue
+		}
+		said := make([]string, len(users))
+		for i, u := range users {
+			said[i] = fmt.Sprintf("%s as %d:%d", u.name, u.uid, u.gid)
+		}
+		d.note("the source's apps run as different users (%s), so the plan names no owner; the run asks for one", strings.Join(said, ", "))
+		return nil
+	}
+	return &plan.Owner{UID: users[0].uid, GID: users[0].gid}
+}
+
+// appIDs is the uid:gid one app runs as. A linuxserver image takes the account
+// it writes as from PUID and PGID, which is the only place a source that never
+// set a securityContext says it; anything else is the pod's or the container's
+// own securityContext.
+func appIDs(in *instance) (uid, gid int, ok bool) {
+	if u, ok := envID(in.container.Env, "PUID"); ok {
+		if g, ok := envID(in.container.Env, "PGID"); ok {
+			return u, g, true
+		}
+	}
+	uid, gid = in.container.RunAsUser, in.container.RunAsGroup
+	if uid < 0 {
+		uid = in.wl.RunAsUser
+	}
+	if gid < 0 {
+		gid = in.wl.RunAsGroup
+	}
+	return uid, gid, uid >= 0 && gid >= 0
+}
+
+// envID reads one uid or gid out of an environment variable.
+func envID(env map[string]string, name string) (int, bool) {
+	v, ok := env[name]
+	if !ok {
+		return 0, false
+	}
+	n, err := strconv.Atoi(strings.TrimSpace(v))
+	if err != nil || n < 0 {
+		return 0, false
+	}
+	return n, true
 }
 
 // pathRules is one app's table: the paths it stored, as it stored them, mapped
@@ -300,6 +401,9 @@ func (d *discovery) ingressRules() []plan.HostRule {
 			})
 		}
 	}
+	// The same read gives the plan its domain default: the names this seedbox
+	// answers to are the ones the source's own Ingress answers to.
+	d.served = sortedKeysOf(served)
 	return out
 }
 
@@ -461,6 +565,193 @@ func (d *discovery) podRules() []plan.HostRule {
 		}
 	}
 	return out
+}
+
+// domain is the plan's DNS name default: what the Ingress hosts the source
+// serves its apps at share. It is a default for the run's question and never a
+// question discovery asks, so a source whose names share none -- or a source
+// with one host, which is a host and not a domain -- names none, and the run
+// asks.
+func (d *discovery) domain() string {
+	domain := domainFrom(d.served)
+	switch {
+	case domain != "" || len(d.served) == 0:
+		return domain
+	case len(d.served) == 1:
+		d.note("the source's Ingress serves %s, one host, which is not a domain: the plan names none and the run asks for it", d.served[0])
+	default:
+		d.note("the source's Ingress serves %s, which share no domain: the plan names none and the run asks for it", strings.Join(d.served, ", "))
+	}
+	return ""
+}
+
+// domainFrom is the DNS name every one of these hosts shares, when they share
+// one box can serve: the longest run of trailing labels all of them end in, with
+// a name above the hosts. A wildcard names its domain outright (*.example.com is
+// example.com), and one host is not a common domain -- panel.example.com says
+// nothing about whether it is a host under example.com or an apex of its own.
+func domainFrom(hosts []string) string {
+	var names []string
+	wildcards := 0
+	seen := make(map[string]bool, len(hosts))
+	for _, host := range hosts {
+		host = strings.ToLower(strings.TrimSuffix(strings.TrimSpace(host), "."))
+		if rest, ok := strings.CutPrefix(host, "*."); ok {
+			wildcards++
+			host = rest
+		}
+		if host == "" || seen[host] {
+			continue
+		}
+		seen[host] = true
+		names = append(names, host)
+	}
+	common := commonSuffix(names)
+	if len(common) < 2 {
+		return ""
+	}
+	if wildcards == 0 {
+		// The shared part has to leave a name above a host: if every host is
+		// only as long as it, the common part is a host's own name rather than
+		// a domain over the hosts.
+		above := false
+		for _, name := range names {
+			if len(strings.Split(name, ".")) > len(common) {
+				above = true
+			}
+		}
+		if !above {
+			return ""
+		}
+	}
+	return strings.Join(common, ".")
+}
+
+// commonSuffix is the longest run of trailing labels every name ends in.
+func commonSuffix(names []string) []string {
+	var common []string
+	for _, name := range names {
+		labels := strings.Split(name, ".")
+		if common == nil {
+			common = labels
+			continue
+		}
+		n := 0
+		for n < len(common) && n < len(labels) && labels[len(labels)-1-n] == common[len(common)-1-n] {
+			n++
+		}
+		common = common[len(common)-n:]
+	}
+	return common
+}
+
+// imageVariants is the chart's variants.yaml as its image table, parsed the one
+// way internal/admission parses it. Nil when the caller gave discovery no chart,
+// or a file box cannot read: nothing is mapped to a variant then, and the report
+// says so once.
+func (d *discovery) imageVariants() map[string]map[string]admission.Image {
+	if d.variantsRead {
+		return d.variants
+	}
+	d.variantsRead = true
+	if len(d.opt.Variants) == 0 {
+		d.note("box was given no chart variants, so no source image is mapped to a variant and every app keeps the chart's default (apps.<app>.image.variant names one)")
+		return nil
+	}
+	images, err := admission.Images(d.opt.Variants)
+	if err != nil {
+		d.note("the chart's variants could not be read (%v), so no source image is mapped to a variant", err)
+		return nil
+	}
+	d.variants = images
+	return images
+}
+
+// variant is the blessed variant a source image already is, and "" when it is
+// none of them.
+//
+// A source image is only ever mapped onto what the chart ships (docs/box.md,
+// "Images come from the blessed variants"): the same repository, and the
+// variant inside it that the digest or the tag names. box never carries the
+// source's image, so an image none of the chart's variants is keeps the chart's
+// default, and the report names the key that would choose another one and the
+// list box would accept.
+func (d *discovery) variant(in *instance, variants map[string]map[string]admission.Image) string {
+	if variants == nil {
+		return ""
+	}
+	byVariant, ok := variants[in.app]
+	if !ok || len(byVariant) == 0 {
+		d.note("the chart blesses no image for %s, so the plan maps %s onto no variant", in.app, in.container.Image)
+		return ""
+	}
+	repo, tag, digest := splitImageRef(in.container.Image)
+	candidates := make([]string, 0, len(byVariant))
+	for name, image := range byVariant {
+		if image.Repository == repo {
+			candidates = append(candidates, name)
+		}
+	}
+	sort.Strings(candidates)
+	switch len(candidates) {
+	case 0:
+		d.note("%s runs %s, which is not one of the chart's blessed variants, so the chart's default runs: apps.%s.image.variant names one of %s",
+			in.name, in.container.Image, in.app, variantList(byVariant))
+		return ""
+	case 1:
+		return candidates[0]
+	}
+	// Several of the chart's variants are the same repository, which is how one
+	// project publishes its builds: the digest and then the tag is what says
+	// which of them the source ran.
+	for _, pick := range []func(admission.Image) bool{
+		func(image admission.Image) bool { return digest != "" && image.Digest == digest },
+		func(image admission.Image) bool { return tag != "" && image.Tag == tag },
+	} {
+		var matching []string
+		for _, name := range candidates {
+			if pick(byVariant[name]) {
+				matching = append(matching, name)
+			}
+		}
+		if len(matching) == 1 {
+			return matching[0]
+		}
+	}
+	d.note("%s runs %s, and %d of the chart's blessed variants share that repository with no tag or digest to tell them apart, so the chart's default runs: apps.%s.image.variant names one of %s",
+		in.name, in.container.Image, len(candidates), in.app, variantList(byVariant))
+	return ""
+}
+
+// splitImageRef splits an image reference into the repository, its tag and its
+// digest. The repository is compared as written: box's variants name their own
+// registry, and a reference to another one is a different image.
+func splitImageRef(image string) (repo, tag, digest string) {
+	repo = image
+	if i := strings.IndexByte(repo, '@'); i >= 0 {
+		repo, digest = repo[:i], repo[i+1:]
+	}
+	// A colon after the last slash is the tag; before it, it is a registry's
+	// port.
+	if i := strings.LastIndexByte(repo, ':'); i >= 0 && !strings.Contains(repo[i:], "/") {
+		repo, tag = repo[:i], repo[i+1:]
+	}
+	return repo, tag, digest
+}
+
+// variantList is one app's blessed variants as a note says them.
+func variantList(byVariant map[string]admission.Image) string {
+	names := sortedKeysOf(byVariant)
+	out := make([]string, len(names))
+	for i, name := range names {
+		image := byVariant[name]
+		ref := image.Repository
+		if image.Tag != "" {
+			ref += ":" + image.Tag
+		}
+		out[i] = fmt.Sprintf("%s (%s)", name, ref)
+	}
+	return strings.Join(out, ", ")
 }
 
 // sortedKeysOf is a map's keys, sorted, so a plan file reads the same twice.

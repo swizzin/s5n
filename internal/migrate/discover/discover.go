@@ -27,7 +27,20 @@ import (
 	"strings"
 	"time"
 
+	"github.com/swizzin/s5n/internal/admission"
 	"github.com/swizzin/s5n/internal/migrate/plan"
+)
+
+// The workload kinds discovery reads, by the name the object carries. A kind is
+// on Workload because everything after the read is kind-neutral -- an app is an
+// app wherever it ran -- and what the kind decides is which pods are the
+// workload's own.
+const (
+	kindDeployment  = "Deployment"
+	kindStatefulSet = "StatefulSet"
+	kindDaemonSet   = "DaemonSet"
+	kindReplicaSet  = "ReplicaSet"
+	kindPod         = "Pod"
 )
 
 // Workload is one pod template the source runs and nothing above it owns, or a
@@ -40,8 +53,8 @@ import (
 type Workload struct {
 	Namespace string
 	Name      string
-	// Kind is the object's Kubernetes kind: Deployment, StatefulSet,
-	// DaemonSet, ReplicaSet or Pod.
+	// Kind is the object's Kubernetes kind: kindDeployment, kindStatefulSet,
+	// kindDaemonSet, kindReplicaSet or kindPod.
 	Kind   string
 	Labels map[string]string
 	// Selector is what this workload's pods carry, which is how a pod the
@@ -71,7 +84,7 @@ func (wl Workload) Owns(p Pod) bool {
 	if p.Namespace != wl.Namespace {
 		return false
 	}
-	if wl.Kind == "Pod" {
+	if wl.Kind == kindPod {
 		return p.Name == wl.Name
 	}
 	return selects(wl.Selector, p.Labels)
@@ -318,6 +331,13 @@ type discovery struct {
 	// none: the host the source ran on is a single node's name.
 	nodes   []string
 	nodeErr error
+	// served are the Ingress hosts that reach a planned app, which the plan's
+	// domain default is read from.
+	served []string
+	// variants is the chart's blessed image list, and variantsRead says the
+	// question has been answered once (nil when there is no chart to read).
+	variants     map[string]map[string]admission.Image
+	variantsRead bool
 
 	instances []*instance
 }

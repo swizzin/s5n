@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"sort"
 	"strings"
 	"testing"
 	"testing/fstest"
@@ -24,6 +25,9 @@ type fixture struct {
 	manifests fstest.MapFS
 	files     fstest.MapFS
 	next      int
+	// variants is the chart's blessed image list, handed to discovery as a
+	// caller with a chart hands it over. Nil is a box given no chart.
+	variants []byte
 }
 
 func newFixture(t *testing.T) *fixture {
@@ -62,7 +66,15 @@ type appSpec struct {
 	// podIP is the address the object answered on, written into a pod's status.
 	// A workload's own pods are separate objects (fixture.pod).
 	podIP string
+	// env is the container's literal environment, where a linuxserver image
+	// takes the account it runs as (PUID, PGID).
+	env map[string]string
+	// user is the pod's securityContext, nil when it names none.
+	user *podUser
 }
+
+// podUser is the uid:gid a fixture pod's securityContext pins.
+type podUser struct{ uid, gid int }
 
 // ownerRef is the object above a fixture workload.
 type ownerRef struct {
@@ -117,8 +129,18 @@ func (f *fixture) app(t *testing.T, spec appSpec) {
 
 // writePod writes the containers and volumes of one pod spec at an indentation.
 func (f *fixture) writePod(b *strings.Builder, indent string, spec appSpec) {
-	fmt.Fprintf(b, "%scontainers:\n%s  - name: %s\n%s    image: %s\n%s    ports:\n%s      - name: http\n%s        containerPort: %d\n%s    volumeMounts:\n",
-		indent, indent, spec.name, indent, spec.image, indent, indent, indent, spec.port, indent)
+	if spec.user != nil {
+		fmt.Fprintf(b, "%ssecurityContext:\n%s  runAsUser: %d\n%s  runAsGroup: %d\n", indent, indent, spec.user.uid, indent, spec.user.gid)
+	}
+	fmt.Fprintf(b, "%scontainers:\n%s  - name: %s\n%s    image: %s\n%s    ports:\n%s      - name: http\n%s        containerPort: %d\n",
+		indent, indent, spec.name, indent, spec.image, indent, indent, indent, spec.port)
+	if len(spec.env) > 0 {
+		fmt.Fprintf(b, "%s    env:\n", indent)
+		for _, name := range sortedStringKeys(spec.env) {
+			fmt.Fprintf(b, "%s      - name: %s\n%s        value: %q\n", indent, name, indent, spec.env[name])
+		}
+	}
+	fmt.Fprintf(b, "%s    volumeMounts:\n", indent)
 	for _, m := range spec.mounts {
 		fmt.Fprintf(b, "%s      - name: %s\n%s        mountPath: %s\n", indent, m.volume, indent, m.path)
 	}
@@ -149,7 +171,8 @@ func groupOf(kind string) string {
 // pod adds one pod the fixture source holds, owned by the workload at owner
 // unless owner is nil: an owned pod is never a workload of its own, but its
 // address is one discovery reads.
-func (f *fixture) pod(t *testing.T, name, namespace string, labels map[string]string, ip string, owner *ownerRef) {
+func (f *fixture) pod(t *testing.T, name string, labels map[string]string, ip string, owner *ownerRef) {
+	namespace := "media"
 	t.Helper()
 	var b strings.Builder
 	fmt.Fprintf(&b, `apiVersion: v1
@@ -174,7 +197,8 @@ status:
 }
 
 // ingress adds one Ingress serving a host and path through a Service.
-func (f *fixture) ingress(t *testing.T, name, namespace, host, path, service string) {
+func (f *fixture) ingress(t *testing.T, name, host, path, service string) {
+	namespace := "media"
 	t.Helper()
 	f.object(t, "ingress-"+name, fmt.Sprintf(`apiVersion: networking.k8s.io/v1
 kind: Ingress
@@ -281,6 +305,7 @@ func (f *fixture) discoverErr(t *testing.T) error {
 func (f *fixture) tryDiscover(t *testing.T) (*plan.Plan, Report, error) {
 	t.Helper()
 	return Discover(context.Background(), NewDirectory(f.manifests), Options{
+		Variants: f.variants,
 		ConfigFS: f.files,
 		TempDir:  t.TempDir(),
 		// The plan records when the source was read; a whole-plan comparison
@@ -362,4 +387,53 @@ func roundTrip(t *testing.T, p *plan.Plan) *plan.Plan {
 		t.Fatalf("the plan changed on the way through the file:\nwrote:\n%s\ngot: %#v", raw, *parsed)
 	}
 	return parsed
+}
+
+// notesWithoutDefaults is a report's notes without the two every fixture earns:
+// its pods name no account, so the plan names no owner, and it is handed no
+// chart, so no source image is mapped to a variant. A test that cares about the
+// other notes asks through this, so a note nothing should need still fails it.
+func notesWithoutDefaults(t *testing.T, rep Report) []string {
+	t.Helper()
+	var out []string
+	for _, n := range rep.Notes {
+		if strings.Contains(n, "names no owner") || strings.Contains(n, "no chart variants") {
+			continue
+		}
+		out = append(out, n)
+	}
+	return out
+}
+
+// chartVariants is the chart's own variants.yaml, which is what a caller hands
+// discovery so a source image can be mapped onto a blessed variant.
+func chartVariants(t *testing.T) []byte {
+	t.Helper()
+	raw, err := os.ReadFile(filepath.Join("..", "..", "..", "charts", "s5n", "variants.yaml"))
+	if err != nil {
+		t.Fatalf("read the chart's variants: %v", err)
+	}
+	return raw
+}
+
+// sortedStringKeys is a map's keys, sorted, so a fixture manifest reads the same
+// twice.
+func sortedStringKeys(m map[string]string) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// planYAML is a plan as the file discovery writes, for a test that has to show
+// one.
+func planYAML(t *testing.T, p *plan.Plan) string {
+	t.Helper()
+	raw, err := yaml.Marshal(p)
+	if err != nil {
+		t.Fatalf("marshal the plan: %v", err)
+	}
+	return string(raw)
 }

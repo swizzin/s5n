@@ -94,6 +94,38 @@ func (p *Plan) checkSource() []string {
 	return problems
 }
 
+// checkDomain enforces that the plan's domain default is a DNS name box can
+// serve: one name, lower-case, with no scheme, port or path in it. It is the
+// plan's default for the run's question, so a value that is not a name is a run
+// that would ask with an answer nothing can use.
+func (p *Plan) checkDomain() []string {
+	p.Domain = strings.ToLower(strings.TrimSuffix(strings.TrimSpace(p.Domain), "."))
+	if p.Domain == "" || isDNSName(p.Domain) {
+		return nil
+	}
+	return []string{fmt.Sprintf("domain %q is not a DNS name: name the host box serves the seedbox under, like example.com", p.Domain)}
+}
+
+// isDNSName reports whether d is a name a certificate can be issued for: two
+// labels or more, each one letters, digits and inner dashes.
+func isDNSName(d string) bool {
+	labels := strings.Split(d, ".")
+	if len(labels) < 2 {
+		return false
+	}
+	for _, label := range labels {
+		if label == "" || len(label) > 63 || strings.HasPrefix(label, "-") || strings.HasSuffix(label, "-") {
+			return false
+		}
+		for _, r := range label {
+			if (r < 'a' || r > 'z') && (r < '0' || r > '9') && r != '-' {
+				return false
+			}
+		}
+	}
+	return true
+}
+
 // checkApp enforces what an app has to say about itself for the rest of the
 // file to mean anything: which platform it ran on, and that a variant names the
 // image it was mapped from.

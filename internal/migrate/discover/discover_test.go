@@ -169,8 +169,8 @@ func TestDiscoverTwoArrs(t *testing.T) {
 	if !strings.Contains(rep.Ignored[0].Why, "/srv/library") {
 		t.Fatalf("the ignored mount does not name the data root: %q", rep.Ignored[0].Why)
 	}
-	if len(rep.Notes) != 0 {
-		t.Fatalf("notes nothing should need: %#v", rep.Notes)
+	if got := notesWithoutDefaults(t, rep); len(got) != 0 {
+		t.Fatalf("notes nothing should need: %#v", got)
 	}
 	if len(rep.Raw) == 0 {
 		t.Fatal("no manifests were recorded for the plan directory")
@@ -471,8 +471,8 @@ func TestDiscoverPortFromThePod(t *testing.T) {
 	if !reflect.DeepEqual(p.Apps["tautulli"].Ports, []int{8181}) {
 		t.Fatalf("tautulli ports: %#v", p.Apps["tautulli"].Ports)
 	}
-	if len(rep.Notes) != 1 || !strings.Contains(rep.Notes[0], "pod's own") {
-		t.Fatalf("the fallback is not reported: %#v", rep.Notes)
+	if got := notesWithoutDefaults(t, rep); len(got) != 1 || !strings.Contains(got[0], "pod's own") {
+		t.Fatalf("the fallback is not reported: %#v", got)
 	}
 }
 
@@ -1116,7 +1116,7 @@ func TestDiscoverReadsEveryOwnerlessKind(t *testing.T) {
 		image: "lscr.io/linuxserver/sonarr:4.0.14", port: 8989,
 		mounts: []mount{{volume: "config", path: "/config", host: "/srv/apps/sonarr"}},
 	})
-	f.pod(t, "prowlarr-x2k9d", "media", map[string]string{"app.kubernetes.io/name": "prowlarr"}, "10.244.0.22",
+	f.pod(t, "prowlarr-x2k9d", map[string]string{"app.kubernetes.io/name": "prowlarr"}, "10.244.0.22",
 		&ownerRef{kind: "DaemonSet", name: "prowlarr"})
 
 	// What a source hands over: the kind, the count and the selector that tell
@@ -1216,7 +1216,7 @@ func TestWorkloadOwns(t *testing.T) {
 // line says what the address becomes and which Ingress path made it that app.
 func TestDiscoverResolvesAnIngressAddress(t *testing.T) {
 	f := sourceInstall(t)
-	f.ingress(t, "panel", "media", "panel.example.com", "/qbittorrent", "qbittorrent")
+	f.ingress(t, "panel", "panel.example.com", "/qbittorrent", "qbittorrent")
 
 	p, _ := f.discover(t)
 	want := []plan.HostRule{
@@ -1241,8 +1241,8 @@ func TestDiscoverResolvesAnIngressAddress(t *testing.T) {
 // referred to the host.
 func TestDiscoverIngressHostServingTwoApps(t *testing.T) {
 	f := sourceInstall(t)
-	f.ingress(t, "panel", "media", "panel.example.com", "/qbittorrent", "qbittorrent")
-	f.ingress(t, "arrs", "media", "panel.example.com", "/sonarr", "sonarr")
+	f.ingress(t, "panel", "panel.example.com", "/qbittorrent", "qbittorrent")
+	f.ingress(t, "arrs", "panel.example.com", "/sonarr", "sonarr")
 
 	p, rep := f.discover(t)
 	for _, h := range p.Hosts {
@@ -1420,7 +1420,7 @@ spec:
 // by now, so the rule says so and marks itself a default.
 func TestDiscoverPodIPIsAHint(t *testing.T) {
 	f := sourceInstall(t)
-	f.pod(t, "plex-0", "media", map[string]string{"app.kubernetes.io/name": "plex"}, "10.244.0.56",
+	f.pod(t, "plex-0", map[string]string{"app.kubernetes.io/name": "plex"}, "10.244.0.56",
 		&ownerRef{kind: "StatefulSet", name: "plex"})
 	p, rep := f.discover(t)
 	want := plan.HostRule{
@@ -1439,8 +1439,8 @@ func TestDiscoverPodIPIsAHint(t *testing.T) {
 	if !found {
 		t.Fatalf("a pod's address got no hint rule: %#v", p.Hosts)
 	}
-	if len(rep.Notes) != 0 {
-		t.Fatalf("a pod's address should need no note: %#v", rep.Notes)
+	if got := notesWithoutDefaults(t, rep); len(got) != 0 {
+		t.Fatalf("a pod's address should need no note: %#v", got)
 	}
 	// The rule is a default with a reason, or the plan refuses it.
 	roundTrip(t, p)
@@ -1474,7 +1474,7 @@ func TestDiscoverPodOwnedByTwoApps(t *testing.T) {
 	}
 	f.bytes(t, "/srv/apps/sonarr/sonarr.db", arrDB(t, "/library/media/TV"))
 	f.bytes(t, "/srv/apps/radarr/radarr.db", arrDB(t, "/library/media/Movies"))
-	f.pod(t, "arrs-0", "media", shared, "10.244.0.60", &ownerRef{kind: "StatefulSet", name: "sonarr"})
+	f.pod(t, "arrs-0", shared, "10.244.0.60", &ownerRef{kind: "StatefulSet", name: "sonarr"})
 
 	p, rep := f.discover(t)
 	for _, h := range p.Hosts {
@@ -1491,4 +1491,403 @@ func TestDiscoverPodOwnedByTwoApps(t *testing.T) {
 	if !noted {
 		t.Fatalf("the ambiguous pod is not reported: %#v", rep.Notes)
 	}
+}
+
+// dataSource is the smallest source discovery can plan: qBittorrent naming the
+// downloads and one Arr naming the library. mut shapes both pods, which is how a
+// test says what account they run as.
+func dataSource(t *testing.T, mut func(name string, spec *appSpec)) *fixture {
+	t.Helper()
+	f := newFixture(t)
+	qbt := appSpec{
+		name: "qbittorrent", image: "ghcr.io/home-operations/qbittorrent:5.3.0", port: 8080,
+		mounts: []mount{
+			{volume: "config", path: "/config", host: "/srv/apps/qbittorrent"},
+			{volume: "downloads", path: "/downloads", host: "/srv/library/Downloads"},
+		},
+	}
+	arr := appSpec{
+		name: "sonarr", image: "lscr.io/linuxserver/sonarr:4.0.14", port: 8989,
+		mounts: []mount{
+			{volume: "config", path: "/config", host: "/srv/apps/sonarr"},
+			{volume: "library", path: "/library", host: "/srv/library"},
+		},
+	}
+	if mut != nil {
+		mut(qbt.name, &qbt)
+		mut(arr.name, &arr)
+	}
+	f.app(t, qbt)
+	f.file(t, "/srv/apps/qbittorrent/qBittorrent/qBittorrent.conf", "[BitTorrent]\nSession\\DefaultSavePath=/downloads\n\n[WebUI]\nPort=8080\n")
+	f.app(t, arr)
+	f.file(t, "/srv/apps/sonarr/config.xml", "<Config><Port>8989</Port></Config>\n")
+	f.bytes(t, "/srv/apps/sonarr/sonarr.db", arrDB(t, "/library/media/TV"))
+	return f
+}
+
+// TestDiscoverDomainFromIngress: the Ingress hosts the source serves its apps at
+// are the names this box will answer to, so their shared domain is the plan's
+// default for the run's domain question. Discovery never asks.
+func TestDiscoverDomainFromIngress(t *testing.T) {
+	f := sourceInstall(t)
+	f.ingress(t, "panel", "panel.example.com", "/qbittorrent", "qbittorrent")
+	f.ingress(t, "arrs", "sonarr.example.com", "/", "sonarr")
+	p, _ := f.discover(t)
+	if p.Domain != "example.com" {
+		t.Fatalf("domain = %q, want the Ingress hosts' common domain example.com", p.Domain)
+	}
+	roundTrip(t, p)
+}
+
+// TestDiscoverDomainNeedsADomain: one Ingress host is a host, not a domain --
+// box cannot tell panel.example.com from an apex without a public suffix list --
+// so the plan names none and the run asks, saying what it saw.
+func TestDiscoverDomainNeedsADomain(t *testing.T) {
+	f := sourceInstall(t)
+	f.ingress(t, "panel", "panel.example.com", "/qbittorrent", "qbittorrent")
+	p, rep := f.discover(t)
+	if p.Domain != "" {
+		t.Fatalf("domain = %q, want none from one host", p.Domain)
+	}
+	var noted bool
+	for _, n := range rep.Notes {
+		if strings.Contains(n, "panel.example.com, one host, which is not a domain") {
+			noted = true
+		}
+	}
+	if !noted {
+		t.Fatalf("the missing domain default is not reported: %#v", rep.Notes)
+	}
+}
+
+// TestDomainFrom: what the source's names share, and what they do not.
+func TestDomainFrom(t *testing.T) {
+	tests := []struct {
+		name  string
+		hosts []string
+		want  string
+	}{
+		{"one app host per app", []string{"panel.example.com", "sonarr.example.com"}, "example.com"},
+		{"a host and the apex", []string{"example.com", "panel.example.com"}, "example.com"},
+		{"nothing shared but the top level", []string{"a.example.com", "b.example.net"}, ""},
+		{"one host is a host", []string{"panel.example.com"}, ""},
+		{"one apex says nothing", []string{"example.com"}, ""},
+		{"a wildcard names its domain", []string{"*.example.com"}, "example.com"},
+		{"a wildcard beside a host", []string{"*.example.com", "panel.example.com"}, "example.com"},
+		{"no host at all", nil, ""},
+		{"the same host twice", []string{"panel.example.com", "panel.example.com"}, ""},
+		{"a trailing dot and case", []string{"Panel.Example.COM.", "sonarr.example.com"}, "example.com"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := domainFrom(tt.hosts); got != tt.want {
+				t.Fatalf("domainFrom(%v) = %q, want %q", tt.hosts, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestDiscoverSourceHostAndOwner: the plan says what host the source ran on (a
+// single node names it) and who its files belong to, when every app agrees --
+// from PUID/PGID, which is where a linuxserver image says it, or from the pod's
+// securityContext.
+func TestDiscoverSourceHostAndOwner(t *testing.T) {
+	image := func(name string, spec *appSpec) {
+		spec.env = map[string]string{"PUID": "1000", "PGID": "1001"}
+	}
+	f := dataSource(t, image)
+	f.node(t, "media-host")
+	p, _ := f.discover(t)
+	if p.Source == nil {
+		t.Fatal("no source block")
+	}
+	if p.Source.Host != "media-host" {
+		t.Errorf("source.host = %q, want the single node's name", p.Source.Host)
+	}
+	if p.Source.Owner == nil || *p.Source.Owner != (plan.Owner{UID: 1000, GID: 1001}) {
+		t.Errorf("source.owner = %#v, want 1000:1001", p.Source.Owner)
+	}
+	roundTrip(t, p)
+}
+
+// TestDiscoverOwnerFromSecurityContext: a source that pins its account in the
+// pod's securityContext says the same thing as one that sets PUID/PGID, and it
+// is the pod-level setting every container of the pod runs as.
+func TestDiscoverOwnerFromSecurityContext(t *testing.T) {
+	f := dataSource(t, func(name string, spec *appSpec) {
+		spec.user = &podUser{uid: 1002, gid: 1003}
+	})
+	f.node(t, "media-host")
+	p, _ := f.discover(t)
+	if p.Source.Owner == nil || *p.Source.Owner != (plan.Owner{UID: 1002, GID: 1003}) {
+		t.Fatalf("source.owner = %#v, want the securityContext's 1002:1003", p.Source.Owner)
+	}
+}
+
+// TestDiscoverOwnerNeedsEveryAppToAgree: an owner the plan cannot stand behind
+// is no owner: apps that disagree, a pod that names no account, and a source
+// that runs as root each leave the plan's answer empty with a line saying so,
+// rather than adopting a media tree for one app and breaking the others.
+func TestDiscoverOwnerNeedsEveryAppToAgree(t *testing.T) {
+	tests := []struct {
+		name string
+		mut  func(name string, spec *appSpec)
+		want string
+	}{
+		{
+			name: "two apps, two accounts",
+			mut: func(name string, spec *appSpec) {
+				if name == "qbittorrent" {
+					spec.env = map[string]string{"PUID": "1000", "PGID": "1001"}
+					return
+				}
+				spec.env = map[string]string{"PUID": "2000", "PGID": "2001"}
+			},
+			want: "qbittorrent as 1000:1001, sonarr as 2000:2001",
+		},
+		{
+			name: "one app says nothing",
+			mut: func(name string, spec *appSpec) {
+				if name == "qbittorrent" {
+					spec.env = map[string]string{"PUID": "1000", "PGID": "1001"}
+				}
+			},
+			want: "sonarr's pod names no uid:gid",
+		},
+		{
+			name: "root, which box does not run",
+			mut: func(name string, spec *appSpec) {
+				spec.env = map[string]string{"PUID": "0", "PGID": "0"}
+			},
+			want: "runs as root",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			f := dataSource(t, tt.mut)
+			p, rep := f.discover(t)
+			if p.Source.Owner != nil {
+				t.Fatalf("source.owner = %#v, want none", p.Source.Owner)
+			}
+			var noted bool
+			for _, n := range rep.Notes {
+				if strings.Contains(n, tt.want) {
+					noted = true
+				}
+			}
+			if !noted {
+				t.Fatalf("no note says %q: %#v", tt.want, rep.Notes)
+			}
+		})
+	}
+}
+
+// TestDiscoverSourceHostNeedsOneNode: a source on several nodes has no single
+// host, so the plan names none and says how many it saw. An empty plan host is a
+// question for the run, not a guess at a node that holds none of the data.
+func TestDiscoverSourceHostNeedsOneNode(t *testing.T) {
+	f := dataSource(t, nil)
+	f.node(t, "node-a")
+	f.node(t, "node-b")
+	p, rep := f.discover(t)
+	if p.Source.Host != "" {
+		t.Fatalf("source.host = %q, want none on a two-node source", p.Source.Host)
+	}
+	var noted bool
+	for _, n := range rep.Notes {
+		if strings.Contains(n, "runs on 2 nodes (node-a, node-b)") {
+			noted = true
+		}
+	}
+	if !noted {
+		t.Fatalf("the missing source host is not reported: %#v", rep.Notes)
+	}
+}
+
+// TestDiscoverMapsOnlyBlessedImageVariants: a source image is mapped onto one of
+// the chart's blessed variants only when it already is one -- the same
+// repository, and the variant in it that its digest then its tag names. Anything
+// else keeps the chart's default, and the note names the key to set and the list
+// box would accept.
+func TestDiscoverMapsOnlyBlessedImageVariants(t *testing.T) {
+	f := dataSource(t, func(name string, spec *appSpec) {
+		switch name {
+		case "qbittorrent":
+			// One of the project's own builds: five of the chart's variants are
+			// this one repository, and the tag says which.
+			spec.image = "ghcr.io/swizzin/qbittorrent:5.3.0-lt2.1"
+		case "sonarr":
+			// The chart's only sonarr variant, one tag older than its pin.
+			spec.image = "ghcr.io/home-operations/sonarr:4.0.14"
+		}
+	})
+	f.variants = chartVariants(t)
+	p, rep := f.discover(t)
+	if got := p.Apps["qbittorrent"].Variant; got != "lt2.1" {
+		t.Errorf("qbittorrent variant = %q, want the build it ran, lt2.1", got)
+	}
+	if got := p.Apps["sonarr"].Variant; got != "default" {
+		t.Errorf("sonarr variant = %q, want the chart's only one", got)
+	}
+	if got := notesWithoutDefaults(t, rep); len(got) != 0 {
+		t.Fatalf("a blessed image needs no note: %#v", got)
+	}
+	roundTrip(t, p)
+
+	// The linuxserver image is none of the chart's: the plan carries no variant
+	// and the note says what to set and what box would accept.
+	other := dataSource(t, func(name string, spec *appSpec) {
+		if name == "sonarr" {
+			spec.image = "lscr.io/linuxserver/sonarr:4.0.14"
+		}
+	})
+	other.variants = chartVariants(t)
+	p, rep = other.discover(t)
+	if got := p.Apps["sonarr"].Variant; got != "" {
+		t.Fatalf("an unblessed image mapped to %q, want no variant", got)
+	}
+	var note string
+	for _, n := range rep.Notes {
+		if strings.Contains(n, "apps.sonarr.image.variant") {
+			note = n
+		}
+	}
+	if !strings.Contains(note, "lscr.io/linuxserver/sonarr:4.0.14") || !strings.Contains(note, "default (ghcr.io/home-operations/sonarr:") {
+		t.Fatalf("the note does not name the image and the blessed list: %q", note)
+	}
+}
+
+// TestDiscoverRefusesToGuessAVariant: a repository several blessed variants
+// share, with neither a digest nor a tag that names one of them, is not mapped:
+// running the wrong libtorrent build is worse than the chart's default.
+func TestDiscoverRefusesToGuessAVariant(t *testing.T) {
+	f := dataSource(t, func(name string, spec *appSpec) {
+		if name == "qbittorrent" {
+			spec.image = "ghcr.io/swizzin/qbittorrent:9.9.9-nothing"
+		}
+	})
+	f.variants = chartVariants(t)
+	p, rep := f.discover(t)
+	if got := p.Apps["qbittorrent"].Variant; got != "" {
+		t.Fatalf("an image none of the variants pins mapped to %q", got)
+	}
+	var noted bool
+	for _, n := range rep.Notes {
+		if strings.Contains(n, "share that repository") && strings.Contains(n, "apps.qbittorrent.image.variant") {
+			noted = true
+		}
+	}
+	if !noted {
+		t.Fatalf("the ambiguous image is not reported: %#v", rep.Notes)
+	}
+}
+
+// TestSplitImageRef: the repository is what a variant names, and a registry's
+// port is not a tag.
+func TestSplitImageRef(t *testing.T) {
+	tests := []struct {
+		image, repo, tag, digest string
+	}{
+		{"ghcr.io/swizzin/qbittorrent:5.3.0-lt2.1", "ghcr.io/swizzin/qbittorrent", "5.3.0-lt2.1", ""},
+		{"ghcr.io/swizzin/qbittorrent@sha256:abc", "ghcr.io/swizzin/qbittorrent", "", "sha256:abc"},
+		{"ghcr.io/swizzin/qbittorrent:5.3.0@sha256:abc", "ghcr.io/swizzin/qbittorrent", "5.3.0", "sha256:abc"},
+		{"registry.example.com:5000/sonarr", "registry.example.com:5000/sonarr", "", ""},
+		{"registry.example.com:5000/sonarr:4.0", "registry.example.com:5000/sonarr", "4.0", ""},
+	}
+	for _, tt := range tests {
+		repo, tag, digest := splitImageRef(tt.image)
+		if repo != tt.repo || tag != tt.tag || digest != tt.digest {
+			t.Errorf("splitImageRef(%q) = %q, %q, %q; want %q, %q, %q",
+				tt.image, repo, tag, digest, tt.repo, tt.tag, tt.digest)
+		}
+	}
+}
+
+// TestDiscoverPlanForASourceWithEveryDefault is the whole read in one plan: a
+// DaemonSet and a bare Pod beside the StatefulSets, an address resolved through
+// an Ingress, a pod address offered as a hint, the domain and the owner the
+// source gives, and an image that is not one of the chart's blessed variants.
+func TestDiscoverPlanForASourceWithEveryDefault(t *testing.T) {
+	f := newFixture(t)
+	account := map[string]string{"PUID": "1000", "PGID": "1000"}
+	f.app(t, appSpec{
+		kind: "DaemonSet", name: "qbittorrent", image: "ghcr.io/home-operations/qbittorrent:5.3.0", port: 8080, env: account,
+		mounts: []mount{
+			{volume: "config", path: "/config", host: "/srv/apps/qbittorrent"},
+			{volume: "downloads", path: "/downloads", host: "/srv/library/Downloads"},
+		},
+	})
+	f.file(t, "/srv/apps/qbittorrent/qBittorrent/qBittorrent.conf", "[BitTorrent]\nSession\\DefaultSavePath=/downloads\n\n[WebUI]\nPort=8080\n")
+	f.app(t, appSpec{
+		name: "sonarr", image: "lscr.io/linuxserver/sonarr:4.0.14", port: 8989, env: account,
+		mounts: []mount{
+			{volume: "config", path: "/config", host: "/srv/apps/sonarr"},
+			{volume: "library", path: "/library", host: "/srv/library"},
+		},
+	})
+	f.file(t, "/srv/apps/sonarr/config.xml", "<Config><Port>8989</Port></Config>\n")
+	f.bytes(t, "/srv/apps/sonarr/sonarr.db", arrDB(t, "/library/media/TV"))
+	f.app(t, appSpec{
+		kind: "Pod", name: "prowlarr", image: "lscr.io/linuxserver/prowlarr:2.3.0", port: 9696, env: account, podIP: "10.244.0.21",
+		mounts: []mount{{volume: "config", path: "/config", host: "/srv/apps/prowlarr"}},
+	})
+	f.file(t, "/srv/apps/prowlarr/config.xml", "<Config><Port>9696</Port></Config>\n")
+	f.app(t, appSpec{
+		name: "plex", image: "linuxserver/plex:1.41.5", port: 32400, env: account,
+		mounts: []mount{
+			{volume: "config", path: "/config", host: "/srv/apps/plex"},
+			{volume: "media", path: "/media", host: "/srv/library/media"},
+		},
+		emptyDirs: []mount{{volume: "transcode", path: "/transcode"}},
+	})
+	// Plex's pod, which is where a stored pod address comes from.
+	f.pod(t, "plex-0", map[string]string{"app.kubernetes.io/name": "plex"}, "10.244.0.56",
+		&ownerRef{kind: "StatefulSet", name: "plex"})
+	f.service(t, "qbittorrent", "media", "qbittorrent")
+	f.service(t, "sonarr", "media", "sonarr")
+	f.ingress(t, "panel", "panel.example.com", "/qbittorrent", "qbittorrent")
+	f.ingress(t, "arrs", "sonarr.example.com", "/", "sonarr")
+	f.node(t, "media-host")
+	f.variants = chartVariants(t)
+
+	p, rep := f.discover(t)
+
+	if p.Domain != "example.com" {
+		t.Errorf("domain = %q, want example.com", p.Domain)
+	}
+	if p.Source.Host != "media-host" || p.Source.Owner == nil || *p.Source.Owner != (plan.Owner{UID: 1000, GID: 1000}) {
+		t.Errorf("source = %+v, want media-host and 1000:1000", p.Source)
+	}
+	if got := p.Apps["sonarr"].Variant; got != "" {
+		t.Errorf("sonarr variant = %q, want none: its image is not one of the chart's", got)
+	}
+	wantRules := map[string]plan.HostRule{
+		"panel.example.com": {Host: "panel.example.com", App: "qbittorrent", Why: "rewrite to qbittorrent: panel.example.com/qbittorrent is its Ingress path"},
+		"10.244.0.56": {Host: "10.244.0.56", Port: 32400, App: "plex", Default: true,
+			Why: "rewrite to plex: 10.244.0.56:32400 was its pod's address, which does not survive the move and may be another pod's by now"},
+	}
+	for _, rule := range p.Hosts {
+		want, ok := wantRules[rule.Host]
+		if !ok {
+			continue
+		}
+		if !reflect.DeepEqual(rule, want) {
+			t.Errorf("rule for %s:\\n got %#v\\nwant %#v", rule.Host, rule, want)
+		}
+		delete(wantRules, rule.Host)
+	}
+	if len(wantRules) != 0 {
+		t.Fatalf("the plan is missing rules for %v", wantRules)
+	}
+	var noted bool
+	for _, n := range rep.Notes {
+		if strings.Contains(n, "apps.sonarr.image.variant") {
+			noted = true
+		}
+	}
+	if !noted {
+		t.Fatalf("the unblessed image is not reported: %#v", rep.Notes)
+	}
+	roundTrip(t, p)
+	t.Logf("plan.yaml:\n%s", planYAML(t, p))
 }

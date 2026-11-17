@@ -48,35 +48,35 @@ func workloadsOf(deploys []*appsv1.Deployment, stss []*appsv1.StatefulSet, daemo
 	var out []Workload
 	for _, d := range deploys {
 		out = append(out, workloadOf(template{
-			kind: "Deployment", namespace: d.Namespace, name: d.Name,
+			kind: kindDeployment, namespace: d.Namespace, name: d.Name,
 			labels: d.Spec.Template.Labels, spec: d.Spec.Template.Spec,
 			selector: selectorOf(d.Spec.Selector), replicas: replicasOf(d.Spec.Replicas),
 		}, claims))
 	}
 	for _, s := range stss {
 		out = append(out, workloadOf(template{
-			kind: "StatefulSet", namespace: s.Namespace, name: s.Name,
+			kind: kindStatefulSet, namespace: s.Namespace, name: s.Name,
 			labels: s.Spec.Template.Labels, spec: s.Spec.Template.Spec,
 			selector: selectorOf(s.Spec.Selector), replicas: replicasOf(s.Spec.Replicas),
 		}, claims))
 	}
 	for _, ds := range daemonsets {
 		out = append(out, workloadOf(template{
-			kind: "DaemonSet", namespace: ds.Namespace, name: ds.Name,
+			kind: kindDaemonSet, namespace: ds.Namespace, name: ds.Name,
 			labels: ds.Spec.Template.Labels, spec: ds.Spec.Template.Spec,
 			selector: selectorOf(ds.Spec.Selector), replicas: -1,
 		}, claims))
 	}
 	for _, rs := range sets {
 		out = append(out, workloadOf(template{
-			kind: "ReplicaSet", namespace: rs.Namespace, name: rs.Name,
+			kind: kindReplicaSet, namespace: rs.Namespace, name: rs.Name,
 			labels: rs.Spec.Template.Labels, spec: rs.Spec.Template.Spec,
 			selector: selectorOf(rs.Spec.Selector), replicas: replicasOf(rs.Spec.Replicas),
 		}, claims))
 	}
 	for _, pod := range pods {
 		out = append(out, workloadOf(template{
-			kind: "Pod", namespace: pod.Namespace, name: pod.Name,
+			kind: kindPod, namespace: pod.Namespace, name: pod.Name,
 			labels: pod.Labels, spec: pod.Spec, replicas: -1,
 		}, claims))
 	}

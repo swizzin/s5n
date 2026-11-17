@@ -239,3 +239,37 @@ apps:
 		t.Errorf("source = %+v, want none", p.Source)
 	}
 }
+
+// TestDomainDefault: the plan carries the domain discovery read off the source's
+// Ingress hosts, normalised to the name box would serve. A value that is not a
+// DNS name is refused, because the plan's default is what the run would offer as
+// its answer.
+func TestDomainDefault(t *testing.T) {
+	p := mustParse(t, `version: 2
+domain: Example.COM.
+apps:
+  sonarr:
+    kind: kubernetes
+    source: sonarr
+    config: /srv/apps/sonarr
+`)
+	if p.Domain != "example.com" {
+		t.Fatalf("domain = %q, want it read as example.com", p.Domain)
+	}
+	for _, bad := range []string{"https://example.com", "example.com/qbittorrent", "example.com:8443", "local", "", "exa mple.com", "example..com", "-example.com"} {
+		if bad == "" {
+			continue
+		}
+		_, err := Parse([]byte(`version: 2
+domain: "` + bad + `"
+apps:
+  sonarr:
+    kind: kubernetes
+    source: sonarr
+    config: /srv/apps/sonarr
+`))
+		if err == nil || !strings.Contains(err.Error(), "is not a DNS name") {
+			t.Errorf("domain %q: %v, want a refusal naming what a DNS name is", bad, err)
+		}
+	}
+}

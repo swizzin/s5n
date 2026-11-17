@@ -128,94 +128,46 @@ func (c *Cluster) load(ctx context.Context) error {
 	return c.err
 }
 
+// readObjects is everything one live read holds, in the order it was read.
+// Discovery asks it the same questions a saved directory answers.
+type readObjects struct {
+	deploys    []*appsv1.Deployment
+	stss       []*appsv1.StatefulSet
+	daemonsets []*appsv1.DaemonSet
+	// sets and barePods are the objects nothing owns: a ReplicaSet a
+	// Deployment made, and a pod any workload made, are read through their
+	// template and never as a workload of their own.
+	sets     []*appsv1.ReplicaSet
+	barePods []*corev1.Pod
+	pods     []*corev1.Pod
+	svcs     []*corev1.Service
+	ings     []*networkingv1.Ingress
+}
+
 func (c *Cluster) read(ctx context.Context) error {
-	raw := map[string][]byte{}
-	var (
-		deploys    []*appsv1.Deployment
-		stss       []*appsv1.StatefulSet
-		daemonsets []*appsv1.DaemonSet
-		// sets and barePods are the objects nothing owns: a ReplicaSet a
-		// Deployment made, and a pod any workload made, are read through their
-		// template and never as a workload of their own.
-		sets     []*appsv1.ReplicaSet
-		barePods []*corev1.Pod
-		pods     []*corev1.Pod
-		svcs     []*corev1.Service
-		ings     []*networkingv1.Ingress
-	)
+	var objs readObjects
 	for _, ns := range c.scope() {
-		list, err := c.cs.AppsV1().Deployments(ns).List(ctx, metav1.ListOptions{})
-		if err != nil {
-			return fmt.Errorf("list deployments in %s: %w", where(ns), err)
-		}
-		for i := range list.Items {
-			deploys = append(deploys, &list.Items[i])
-		}
-		setsList, err := c.cs.AppsV1().StatefulSets(ns).List(ctx, metav1.ListOptions{})
-		if err != nil {
-			return fmt.Errorf("list statefulsets in %s: %w", where(ns), err)
-		}
-		for i := range setsList.Items {
-			stss = append(stss, &setsList.Items[i])
-		}
-		dsList, err := c.cs.AppsV1().DaemonSets(ns).List(ctx, metav1.ListOptions{})
-		if err != nil {
-			return fmt.Errorf("list daemonsets in %s: %w", where(ns), err)
-		}
-		for i := range dsList.Items {
-			daemonsets = append(daemonsets, &dsList.Items[i])
-		}
-		rsList, err := c.cs.AppsV1().ReplicaSets(ns).List(ctx, metav1.ListOptions{})
-		if err != nil {
-			return fmt.Errorf("list replicasets in %s: %w", where(ns), err)
-		}
-		for i := range rsList.Items {
-			if ownerless(rsList.Items[i].OwnerReferences) {
-				sets = append(sets, &rsList.Items[i])
-			}
-		}
-		podList, err := c.cs.CoreV1().Pods(ns).List(ctx, metav1.ListOptions{})
-		if err != nil {
-			return fmt.Errorf("list pods in %s: %w", where(ns), err)
-		}
-		for i := range podList.Items {
-			pod := &podList.Items[i]
-			pods = append(pods, pod)
-			if ownerless(pod.OwnerReferences) {
-				barePods = append(barePods, pod)
-			}
-		}
-		services, err := c.cs.CoreV1().Services(ns).List(ctx, metav1.ListOptions{})
-		if err != nil {
-			return fmt.Errorf("list services in %s: %w", where(ns), err)
-		}
-		for i := range services.Items {
-			svcs = append(svcs, &services.Items[i])
-		}
-		ingresses, err := c.cs.NetworkingV1().Ingresses(ns).List(ctx, metav1.ListOptions{})
-		if err != nil {
-			return fmt.Errorf("list ingresses in %s: %w", where(ns), err)
-		}
-		for i := range ingresses.Items {
-			ings = append(ings, &ingresses.Items[i])
+		if err := c.readNamespace(ctx, ns, &objs); err != nil {
+			return err
 		}
 	}
-	pvcs, pvs, err := c.claims(ctx, deploys, stss, daemonsets, sets, barePods)
+	pvcs, pvs, err := c.claims(ctx, objs)
 	if err != nil {
 		return err
 	}
 	nodes, nodeErr := c.nodeList(ctx)
+	raw := map[string][]byte{}
 	for _, o := range []struct {
 		apiVersion, kind string
 		objs             []any
 	}{
-		{appsV1, "Deployment", anySlice(deploys)},
-		{appsV1, "StatefulSet", anySlice(stss)},
-		{appsV1, "DaemonSet", anySlice(daemonsets)},
-		{appsV1, "ReplicaSet", anySlice(sets)},
-		{"v1", "Pod", anySlice(barePods)},
-		{"v1", "Service", anySlice(svcs)},
-		{networkingV1, "Ingress", anySlice(ings)},
+		{appsV1, kindDeployment, anySlice(objs.deploys)},
+		{appsV1, kindStatefulSet, anySlice(objs.stss)},
+		{appsV1, kindDaemonSet, anySlice(objs.daemonsets)},
+		{appsV1, kindReplicaSet, anySlice(objs.sets)},
+		{"v1", kindPod, anySlice(objs.barePods)},
+		{"v1", "Service", anySlice(objs.svcs)},
+		{networkingV1, "Ingress", anySlice(objs.ings)},
 		{"v1", "PersistentVolumeClaim", anySlice(pvcs)},
 		{"v1", "PersistentVolume", anySlice(pvs)},
 		{"v1", "Node", anySlice(nodes)},
@@ -224,17 +176,78 @@ func (c *Cluster) read(ctx context.Context) error {
 			return err
 		}
 	}
-
 	claims := indexClaims(pvcs, pvs)
-	c.wls = workloadsOf(deploys, stss, daemonsets, sets, barePods, claims)
-	c.svcs = servicesOf(svcs)
-	c.ings = ingressesOf(ings)
-	c.pods = podsOf(pods)
+	c.wls = workloadsOf(objs.deploys, objs.stss, objs.daemonsets, objs.sets, objs.barePods, claims)
+	c.svcs = servicesOf(objs.svcs)
+	c.ings = ingressesOf(objs.ings)
+	c.pods = podsOf(objs.pods)
 	if nodeErr == nil {
 		c.nodes = nodeNames(nodes)
 	}
 	c.nodeErr = nodeErr
 	c.raw = raw
+	return nil
+}
+
+// readNamespace lists every object discovery reads in one namespace. Only the
+// pods a workload made are filtered here: the rest is what the plan is built
+// from, and a list that fails names the namespace it was asked for.
+func (c *Cluster) readNamespace(ctx context.Context, ns string, objs *readObjects) error {
+	deploys, err := c.cs.AppsV1().Deployments(ns).List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return fmt.Errorf("list deployments in %s: %w", where(ns), err)
+	}
+	for i := range deploys.Items {
+		objs.deploys = append(objs.deploys, &deploys.Items[i])
+	}
+	stss, err := c.cs.AppsV1().StatefulSets(ns).List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return fmt.Errorf("list statefulsets in %s: %w", where(ns), err)
+	}
+	for i := range stss.Items {
+		objs.stss = append(objs.stss, &stss.Items[i])
+	}
+	daemonsets, err := c.cs.AppsV1().DaemonSets(ns).List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return fmt.Errorf("list daemonsets in %s: %w", where(ns), err)
+	}
+	for i := range daemonsets.Items {
+		objs.daemonsets = append(objs.daemonsets, &daemonsets.Items[i])
+	}
+	sets, err := c.cs.AppsV1().ReplicaSets(ns).List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return fmt.Errorf("list replicasets in %s: %w", where(ns), err)
+	}
+	for i := range sets.Items {
+		if ownerless(sets.Items[i].OwnerReferences) {
+			objs.sets = append(objs.sets, &sets.Items[i])
+		}
+	}
+	pods, err := c.cs.CoreV1().Pods(ns).List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return fmt.Errorf("list pods in %s: %w", where(ns), err)
+	}
+	for i := range pods.Items {
+		pod := &pods.Items[i]
+		objs.pods = append(objs.pods, pod)
+		if ownerless(pod.OwnerReferences) {
+			objs.barePods = append(objs.barePods, pod)
+		}
+	}
+	svcs, err := c.cs.CoreV1().Services(ns).List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return fmt.Errorf("list services in %s: %w", where(ns), err)
+	}
+	for i := range svcs.Items {
+		objs.svcs = append(objs.svcs, &svcs.Items[i])
+	}
+	ings, err := c.cs.NetworkingV1().Ingresses(ns).List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return fmt.Errorf("list ingresses in %s: %w", where(ns), err)
+	}
+	for i := range ings.Items {
+		objs.ings = append(objs.ings, &ings.Items[i])
+	}
 	return nil
 }
 
@@ -274,21 +287,21 @@ func where(namespace string) string {
 // claims reads the claims and volumes the source's mounts go through, and only
 // when a mount goes through one: a source whose apps all use hostPaths does not
 // need a permission it may not have.
-func (c *Cluster) claims(ctx context.Context, deploys []*appsv1.Deployment, stss []*appsv1.StatefulSet, daemonsets []*appsv1.DaemonSet, sets []*appsv1.ReplicaSet, pods []*corev1.Pod) (pvcs []*corev1.PersistentVolumeClaim, pvs []*corev1.PersistentVolume, err error) {
+func (c *Cluster) claims(ctx context.Context, objs readObjects) (pvcs []*corev1.PersistentVolumeClaim, pvs []*corev1.PersistentVolume, err error) {
 	var specs []corev1.PodSpec
-	for _, d := range deploys {
+	for _, d := range objs.deploys {
 		specs = append(specs, d.Spec.Template.Spec)
 	}
-	for _, s := range stss {
+	for _, s := range objs.stss {
 		specs = append(specs, s.Spec.Template.Spec)
 	}
-	for _, ds := range daemonsets {
+	for _, ds := range objs.daemonsets {
 		specs = append(specs, ds.Spec.Template.Spec)
 	}
-	for _, rs := range sets {
+	for _, rs := range objs.sets {
 		specs = append(specs, rs.Spec.Template.Spec)
 	}
-	for _, pod := range pods {
+	for _, pod := range objs.barePods {
 		specs = append(specs, pod.Spec)
 	}
 	wanted := false
