@@ -167,3 +167,47 @@ func TestMigrationInitTellsInitTheAppsAreComing(t *testing.T) {
 		t.Errorf("the refusal = %v, want it to say the plan does not read as init's flags", err)
 	}
 }
+
+// TestInstallAnswersTakeThePlansOwnerOrNone: the uid:gid the source's files
+// belonged to is the plan's (`source.owner`, which discovery writes when every
+// planned app agrees), and init is handed it as its own flags so the data root
+// and the copied configs keep the owner they had. A plan with no owner names
+// neither flag: init then settles the ids the way it does on any host -- the
+// flag, the data path's owner, $SUDO_UID, the invoking user -- rather than
+// being handed a zero the grant would keep.
+func TestInstallAnswersTakeThePlansOwnerOrNone(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		owner *plan.Owner
+		want  []string
+		not   []string
+	}{
+		{name: "an owner in the plan", owner: &plan.Owner{UID: 1000, GID: 1000}, want: []string{"--puid 1000", "--pgid 1000"}},
+		{name: "no owner in the plan", owner: nil, not: []string{"--puid", "--pgid"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			o, inst := installFlagSet(t)
+			*inst.domain = "box.example.com"
+			*inst.login = "someone"
+			*inst.password = "/run/password"
+			*inst.configPath = "/srv/config"
+			p := planWithData()
+			p.Source.Owner = tc.owner
+			got, err := installAnswers(o, inst, p)
+			if err != nil {
+				t.Fatalf("installAnswers: %v", err)
+			}
+			joined := strings.Join(got, " ")
+			for _, want := range tc.want {
+				if !strings.Contains(joined, want) {
+					t.Errorf("the answers do not carry %q: %v", want, got)
+				}
+			}
+			for _, not := range tc.not {
+				if strings.Contains(joined, not) {
+					t.Errorf("the answers carry %q, and the plan names no owner: %v", not, got)
+				}
+			}
+		})
+	}
+}

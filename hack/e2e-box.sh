@@ -6275,6 +6275,13 @@ migrate_box() {
   # release is ok, which is what `box apply` waits on.
   grep -q "^wiring ok" "$WORK/apply-migrate.txt" ||
     { echo "box did not report a healthy receipt for the box the migration adopts into"; fail=1; }
+  # The owner came from the plan, not from whoever ran box: the source's pods
+  # ran as this user, discovery wrote that into `source.owner`, and the
+  # installer hands it to init as --puid/--pgid.
+  grep -qE "^  puid: ${puid}$" "$WORK/grant.yaml" ||
+    { echo "the grant's puid is not the source's ${puid}:"; grep -n "puid" "$WORK/grant.yaml"; fail=1; }
+  grep -qE "^  pgid: ${pgid}$" "$WORK/grant.yaml" ||
+    { echo "the grant's pgid is not the source's ${pgid}:"; grep -n "pgid" "$WORK/grant.yaml"; fail=1; }
   # No klog line: box sets rest.NoWarnings on every config it hands out, and a
   # client-go deprecation line in this output would be the chart's lookup
   # leaking through a config that does not.
