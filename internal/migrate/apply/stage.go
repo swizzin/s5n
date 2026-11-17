@@ -23,7 +23,8 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
-	"strings"
+
+	"github.com/swizzin/s5n/internal/linktree"
 )
 
 // Staged is what one instance's copy cost: how many files, and how many bytes
@@ -154,7 +155,9 @@ func copyFile(dst, src string, info fs.FileInfo, uid, gid int) (int64, error) {
 }
 
 // copyLink copies one symlink, and refuses one that resolves outside the config
-// directory.
+// directory. The rule itself is internal/linktree's, because a snapshot's
+// config/ tree is copied under the same one: what a staging copy would carry and
+// a snapshot would not (or the other way round) would make the two trees differ.
 //
 // A link is copied as a link: the app reads it the same way, and following it
 // would turn one file into two copies that then drift. An absolute link that
@@ -173,43 +176,20 @@ func copyLink(dst, src, root, rel string, uid, gid int) error {
 	if err != nil {
 		return err
 	}
-	if filepath.IsAbs(target) && kernelPath(target) {
+	res, err := linktree.Resolve(root, rel, target)
+	if err != nil {
+		return err
+	}
+	if res.Skip {
 		return nil
 	}
-	if filepath.IsAbs(target) {
-		inside, err := filepath.Rel(root, filepath.Clean(target))
-		if err != nil || inside == ".." || strings.HasPrefix(inside, ".."+string(filepath.Separator)) {
-			return fmt.Errorf("%s is a link to %s, which is outside the config directory: migrate copies a config tree, so a link that leaves it would name a path the pod cannot see", src, target)
-		}
-		target, err = filepath.Rel(filepath.Dir(rel), inside)
-		if err != nil {
-			return fmt.Errorf("link %s: %w", src, err)
-		}
-	} else {
-		inside := filepath.Clean(filepath.Join(filepath.Dir(rel), target))
-		if inside == ".." || strings.HasPrefix(inside, ".."+string(filepath.Separator)) {
-			return fmt.Errorf("%s is a link to %s, which is outside the config directory: migrate copies a config tree, so a link that leaves it would name a path the pod cannot see", src, target)
-		}
-	}
-	if err := os.Symlink(target, dst); err != nil {
+	if err := os.Symlink(res.Target, dst); err != nil {
 		return fmt.Errorf("link %s: %w", dst, err)
 	}
 	if err := os.Lchown(dst, uid, gid); err != nil {
 		return fmt.Errorf("own %s: %w", dst, err)
 	}
 	return nil
-}
-
-// kernelPath reports whether an absolute path is inside one of the kernel's own
-// filesystems: the process's plumbing, never a file a config tree holds.
-func kernelPath(p string) bool {
-	clean := filepath.Clean(p)
-	for _, root := range []string{"/proc", "/dev", "/sys"} {
-		if clean == root || strings.HasPrefix(clean, root+string(filepath.Separator)) {
-			return true
-		}
-	}
-	return false
 }
 
 // modeName names a file's type the way a refusal reads it.

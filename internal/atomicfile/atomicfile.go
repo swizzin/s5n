@@ -9,7 +9,8 @@
 // fixed temporary name, which two runs at once would interleave on, and no
 // fsync, which lets the rename reach the directory before the bytes are
 // durable. This is that write once, and Copy is the same write for a file too
-// big to hold in memory.
+// big to hold in memory. Create is the same write held open while the caller
+// produces the bytes: a snapshot's archive is a tar + gzip stream, not a buffer.
 //
 // WriteIn and CopyIn are the same write performed through an os.Root, for a
 // target inside a tree someone else can rewrite: the root is what keeps a link
@@ -20,6 +21,7 @@ import (
 	"bytes"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"io/fs"
@@ -165,4 +167,90 @@ func tempName(dir, base string) (string, error) {
 		return "", err
 	}
 	return filepath.Join(dir, "."+base+".tmp-"+hex.EncodeToString(b[:])), nil
+}
+
+// File is a file being written whole, for content that is produced rather than
+// handed over: a snapshot's tar+gzip stream is written by two writers the caller
+// owns, so the write is held open until Commit. It is Copy with the copy's two
+// halves in the caller's hands.
+//
+// The bytes go to a temporary file beside path, as in Copy; Commit fsyncs it,
+// chmods it to mode and renames it into place, and a File that is Discarded --
+// or whose commit fails -- leaves no name behind.
+type File struct {
+	f      *os.File
+	path   string
+	tmp    string
+	mode   fs.FileMode
+	closed bool
+}
+
+// Create starts a file at path, which must not exist yet: a name the caller means
+// to keep -- a snapshot, most of all -- is never overwritten, because the copy
+// under it may be the only one there is. The parent directory must exist.
+func Create(path string, mode fs.FileMode) (*File, error) {
+	switch _, err := os.Lstat(path); {
+	case err == nil:
+		return nil, fmt.Errorf("%s already exists: box does not overwrite one", path)
+	case !errors.Is(err, fs.ErrNotExist):
+		return nil, fmt.Errorf("write %s: %w", path, err)
+	}
+	f, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+".tmp-")
+	if err != nil {
+		return nil, fmt.Errorf("write %s: %w", path, err)
+	}
+	return &File{f: f, path: path, tmp: f.Name(), mode: mode.Perm()}, nil
+}
+
+// Write is the content on its way to the temporary file.
+func (f *File) Write(p []byte) (int, error) {
+	if f.closed {
+		return 0, errors.New("write " + f.path + ": the file is finished")
+	}
+	return f.f.Write(p)
+}
+
+// Commit makes the file appear at its path, whole: the bytes are synced, the
+// name is the caller's mode, and the directory is synced so the rename outlives
+// a crash.
+func (f *File) Commit() error {
+	if f.closed {
+		return errors.New("write " + f.path + ": the file is finished")
+	}
+	fail := func(err error) error {
+		f.Discard()
+		return err
+	}
+	if err := f.f.Sync(); err != nil {
+		return fail(fmt.Errorf("write %s: %w", f.path, err))
+	}
+	if err := f.f.Close(); err != nil {
+		return fail(fmt.Errorf("write %s: %w", f.path, err))
+	}
+	if err := os.Chmod(f.tmp, f.mode); err != nil {
+		return fail(fmt.Errorf("write %s: %w", f.path, err))
+	}
+	if err := rename(f.tmp, f.path); err != nil {
+		return fail(fmt.Errorf("write %s: %w", f.path, err))
+	}
+	f.closed = true
+	if d, err := os.Open(filepath.Dir(f.path)); err == nil {
+		// A failed directory fsync after a successful rename is deliberately not
+		// reported: the bytes are already in place under the new name.
+		_ = d.Sync()
+		d.Close()
+	}
+	return nil
+}
+
+// Discard throws the written bytes away and leaves nothing at path. It is safe
+// after Commit and safe twice; a caller that abandons a File without discarding
+// leaves only the temporary file, whose random name nothing picks up again.
+func (f *File) Discard() {
+	if f.closed {
+		return
+	}
+	f.closed = true
+	f.f.Close()
+	os.Remove(f.tmp)
 }

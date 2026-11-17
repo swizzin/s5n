@@ -347,3 +347,84 @@ func TestFailedCopyInLeavesTheTargetWhole(t *testing.T) {
 	}
 	assertNoLeftovers(t, path)
 }
+
+// Create is the write for content the caller produces in pieces: nothing appears
+// at the path until Commit, and then the whole file does.
+func TestCreateCommitsAWholeFile(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "snapshot.tar.gz")
+	f, err := Create(path, 0o600)
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if _, err := f.Write([]byte("first ")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.Write([]byte("second")); err != nil {
+		t.Fatal(err)
+	}
+	if exists(t, path) {
+		t.Fatal("the file appeared before it was committed")
+	}
+	if err := f.Commit(); err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "first second" {
+		t.Errorf("content = %q, want both writes", got)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0o600 {
+		t.Errorf("mode = %o, want 0600", info.Mode().Perm())
+	}
+	assertNoLeftovers(t, path)
+}
+
+func TestCreateRefusesAnExistingFile(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "snapshot.tar.gz")
+	if err := os.WriteFile(path, []byte("the only copy"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Create(path, 0o600); err == nil {
+		t.Fatal("Create accepted a path that already exists")
+	}
+	got, err := os.ReadFile(path)
+	if err != nil || string(got) != "the only copy" {
+		t.Fatalf("the existing file changed: %q (%v)", got, err)
+	}
+}
+
+func TestDiscardLeavesNothing(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "snapshot.tar.gz")
+	f, err := Create(path, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.Write([]byte("half a snapshot")); err != nil {
+		t.Fatal(err)
+	}
+	f.Discard()
+	f.Discard()
+	if exists(t, path) {
+		t.Fatal("a discarded file left its name behind")
+	}
+	if err := f.Commit(); err == nil {
+		t.Fatal("Commit after Discard was accepted")
+	}
+	assertNoLeftovers(t, path)
+}
+
+// exists is whether anything is at path.
+func exists(t *testing.T, path string) bool {
+	t.Helper()
+	_, err := os.Lstat(path)
+	return err == nil
+}
