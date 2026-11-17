@@ -28,6 +28,7 @@ import (
 	"github.com/swizzin/s5n/internal/migrate/discover"
 	"github.com/swizzin/s5n/internal/release"
 	"github.com/swizzin/s5n/internal/say"
+	"github.com/swizzin/s5n/internal/seedbox"
 )
 
 // cutoverOptions is cutover's flags: everything a read of the source takes, the
@@ -47,11 +48,7 @@ func runMigrateCutover(ctx context.Context, args []string) {
 	fs := flag.NewFlagSet("migrate cutover", flag.ExitOnError)
 	o := cutoverOptions{discoverOptions: discoverOptions{Box: version}}
 	ns := addDiscoverFlags(fs, &o.discoverOptions, "the final snapshot to write (default: "+bundle.Dir+"/migrate-<time>-final.tar.gz)")
-	o.apply = &migrateApplyFlags{
-		applyFlags: addApplyFlags(fs),
-		install:    addInstallFlags(fs),
-		plain:      fs.Bool("plain", false, "ask with plain line prompts, even on a terminal (for a flaky terminal or a screen reader)"),
-	}
+	o.apply = addCutoverApplyFlags(fs, &o.Kubeconfig)
 	replace := fs.Bool("replace-cluster", false, "stop after the final snapshot, for a host whose cluster box should replace with its own")
 	if err := fs.Parse(args); err != nil {
 		fmt.Fprintf(os.Stderr, "box: %v\n", err)
@@ -59,10 +56,6 @@ func runMigrateCutover(ctx context.Context, args []string) {
 	}
 	o.Namespaces = *ns
 	o.Replace = *replace
-	// --values names one file for both halves: the read writes a plan, the
-	// install applies this file's values, and bootstrap, init and apply all
-	// take it the same way.
-	o.Kubeconfig = *o.apply.kubeconfig
 	if fs.NArg() != 0 {
 		fmt.Fprintf(os.Stderr, "box: migrate cutover takes no arguments: %s\n", strings.Join(fs.Args(), " "))
 		os.Exit(2)
@@ -163,6 +156,28 @@ func cutover(ctx context.Context, o cutoverOptions, out say.Reporter, proof func
 	// adoption, so a cutover is one command on a host box may keep.
 	out.Phase("install")
 	return migrateApply(ctx, wrote.Path, o.apply, out)
+}
+
+// addCutoverApplyFlags registers the half of apply's flags a cutover needs and
+// points them at the kubeconfig discover's own flag holds: this verb reads one
+// cluster and installs into the same one, so --kubeconfig means one thing here.
+// The values file is shared the same way -- the read writes a plan, the install
+// applies this file's values, and bootstrap, init and apply all take it alike.
+func addCutoverApplyFlags(fs *flag.FlagSet, kubeconfig *string) *migrateApplyFlags {
+	valuesDefault := ""
+	if home, err := os.UserHomeDir(); err == nil {
+		valuesDefault = seedbox.ValuesPath(home)
+	}
+	o := &migrateApplyFlags{
+		applyFlags: &applyFlags{chart: addChartFlags(fs, chartVersionApplies)},
+		install:    addInstallFlags(fs),
+		plain:      fs.Bool("plain", false, "ask with plain line prompts, even on a terminal (for a flaky terminal or a screen reader)"),
+	}
+	o.grantPath = fs.String("grant", seedbox.GrantPath("root"), "the root-owned grant file")
+	o.valuesPath = fs.String("values", valuesDefault, "the user's values file")
+	o.yes = fs.Bool("yes", false, "apply without asking")
+	o.kubeconfig = kubeconfig
+	return o
 }
 
 // surveyPath is where the read a refusal keeps goes: beside the final snapshot
