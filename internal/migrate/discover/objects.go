@@ -252,17 +252,18 @@ func serviceBackendPort(port networkingv1.ServiceBackendPort) (number int, name 
 	return int(port.Number), port.Name
 }
 
-// podsOf is every pod a source holds, flattened to the two questions discovery
-// asks of one: which addresses it answered on, and whether the workload that
-// made it still has a pod.
+// podsOf is every pod a source holds, flattened to the three questions discovery
+// asks of one: which addresses it answered on, whether it is on its way out, and
+// whether the workload that made it still has a pod.
 func podsOf(pods []*corev1.Pod) []Pod {
 	out := make([]Pod, 0, len(pods))
 	for _, pod := range pods {
 		out = append(out, Pod{
-			Namespace: pod.Namespace,
-			Name:      pod.Name,
-			Labels:    pod.Labels,
-			IPs:       podIPs(pod),
+			Namespace:   pod.Namespace,
+			Name:        pod.Name,
+			Labels:      pod.Labels,
+			IPs:         podIPs(pod),
+			Terminating: pod.DeletionTimestamp != nil,
 		})
 	}
 	return out

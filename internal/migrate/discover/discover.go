@@ -217,15 +217,19 @@ type IngressRule struct {
 	PortName string
 }
 
-// Pod is one pod the source still holds, flattened to the two questions
+// Pod is one pod the source still holds, flattened to the three questions
 // discovery asks it: which addresses it answered on -- an address an app stored
-// may be one of them -- and, with Workload.Owns, whether a workload is stopped.
+// may be one of them -- whether it is on its way out, and, with
+// Workload.Owns, whether a workload is stopped.
 type Pod struct {
 	Namespace string
 	Name      string
 	Labels    map[string]string
 	// IPs are the addresses the pod held, empty for a pod that never ran.
 	IPs []string
+	// Terminating is a pod with a deletion timestamp. It has not exited yet,
+	// so a stop proof counts it as running: the process is still writing.
+	Terminating bool
 }
 
 // Source is what discovery reads. There are two: Cluster, over a live install

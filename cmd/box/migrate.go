@@ -38,26 +38,29 @@ import (
 )
 
 // migrateUsage is what a bad invocation and `box migrate` print. It is the
-// command surface: each half of one migration says so in the files it writes or
-// refuses to.
+// command surface: three halves of one migration, each of which says so in the
+// files it writes or refuses to.
 const migrateUsage = `usage: box migrate <command> [flags]
 
 commands:
   discover    read a source install and write a survey of it; changes nothing
+  cutover     take the final snapshot on the source host, then install or adopt
   apply       install or adopt from a snapshot
 
 box migrate discover [--rehearsal] [--out <file>] [--from-dir <manifests>] [--kubeconfig <file>] [--namespace <ns> ...] [--root <dir>]
+box migrate cutover [--replace-cluster] [--out <file>] [--from-dir <manifests>] [--kubeconfig <file>] [--namespace <ns> ...] [--root <dir>] [--values <file>] [--yes]
 box migrate apply [<snapshot>] [--values <file>] [--grant <file>] [--kubeconfig <file>] [--yes] [--plain] [--chart-repo <ref>] [--chart-version <tag>]
 
 A snapshot is one file in ` + bundle.Dir + `/ (or where --out names it). discover writes a
 survey -- the plan, the report and the source's manifests, no configs -- and --rehearsal
-adds the configs a locked rehearsal applies.
+adds the configs a locked rehearsal applies. cutover writes the final snapshot apply runs.
 `
 
 // The commands, as names: the dispatch, the usage line and the messages they
 // print all spell them once.
 const (
 	migrateDiscoverCmd = "discover"
+	migrateCutoverCmd  = "cutover"
 	migrateApplyCmd    = "apply"
 )
 
@@ -69,6 +72,8 @@ func runMigrate(ctx context.Context, args []string) {
 	switch args[0] {
 	case migrateDiscoverCmd:
 		runMigrateDiscover(ctx, args[1:])
+	case migrateCutoverCmd:
+		runMigrateCutover(ctx, args[1:])
 	case migrateApplyCmd:
 		runMigrateApply(ctx, args[1:])
 	default:
@@ -161,6 +166,10 @@ func runMigrateDiscover(ctx context.Context, args []string) {
 // as, what discovery could not migrate, and the text the operator sees.
 type migrationRead struct {
 	plan *plan.Plan
+	// src is what the plan was read from. The stop proof and the reset recipe
+	// ask it the two things a plan cannot hold -- the pods that are left and
+	// the distribution that installed the cluster -- over the same read.
+	src discover.Source
 	// raw is the plan's YAML, which is what a snapshot carries and what apply's
 	// plan id is a digest of.
 	raw    []byte
@@ -204,6 +213,7 @@ func readSource(ctx context.Context, o discoverOptions) (migrationRead, error) {
 	if err != nil {
 		return read, err
 	}
+	read.src = src
 	p, rep, derr := discover.Discover(ctx, src, discover.Options{
 		Namespaces: o.Namespaces,
 		// The host's filesystem, read-only: every open below is a read.
