@@ -39,6 +39,10 @@ type installFlags struct {
 	password   *string
 	configPath *string
 	namespace  *string
+	// record is where this host records its cluster decision, as
+	// `box bootstrap --record` names it. On a host with no box, migrate writes
+	// it here, and it is the file whose presence means "this host has a box".
+	record *string
 	// pathsInNode is the development-only storage switch (--paths-in-node),
 	// taken out of argv before the flags are parsed: the e2e's paths are inside
 	// its node, so init neither reports nor creates them.
@@ -52,16 +56,17 @@ func addInstallFlags(fs *flag.FlagSet) *installFlags {
 		password:   fs.String("password-file", "", "read the login's password from this file, or from stdin with - (required on a host with no box)"),
 		configPath: fs.String("config-path", "", "the host path the apps keep their settings on (required on a host with no box)"),
 		namespace:  fs.String("box-namespace", "seedbox", "the namespace the seedbox is installed in"),
+		record:     fs.String("record", bootstrap.RecordPath, "where box records the cluster decision"),
 	}
 }
 
 // boxInstalled reports whether this host has a box: a cluster record bootstrap
 // wrote. A record that cannot be read is an error, not "no box": installing over
 // what box cannot see is how a running seedbox gets a second one beside it.
-func boxInstalled() (bool, error) {
-	rec, err := bootstrap.FilesystemRecords{Path: bootstrap.RecordPath}.Load()
+func boxInstalled(recordPath string) (bool, error) {
+	rec, err := bootstrap.FilesystemRecords{Path: recordPath}.Load()
 	if err != nil {
-		return false, fmt.Errorf("read %s: %w", bootstrap.RecordPath, err)
+		return false, fmt.Errorf("read %s: %w", recordPath, err)
 	}
 	return rec != nil, nil
 }
@@ -75,7 +80,7 @@ func migrateInstall(ctx context.Context, o *migrateApplyFlags, inst *installFlag
 		return err
 	}
 	out.Phase("cluster")
-	if _, _, err := hostconf.Load(hostconf.Path(bootstrap.RecordPath)); err != nil {
+	if _, _, err := hostconf.Load(hostconf.Path(*inst.record)); err != nil {
 		return err
 	}
 	charts.out = out
@@ -87,7 +92,7 @@ func migrateInstall(ctx context.Context, o *migrateApplyFlags, inst *installFlag
 			return bootstrap.NewHTTPProber(kc, false)
 		},
 		Host:    bootstrap.LinuxHost{},
-		Records: bootstrap.FilesystemRecords{Path: bootstrap.RecordPath},
+		Records: bootstrap.FilesystemRecords{Path: *inst.record},
 		Install: bootstrap.K0sInstaller{Say: out},
 	}
 	res, err := d.Bootstrap(ctx, bootstrap.Options{
@@ -109,7 +114,7 @@ func migrateInstall(ctx context.Context, o *migrateApplyFlags, inst *installFlag
 	if err := applyPlatform(ctx, res.Kubeconfig, res.Platform, res.Gateway.Class, "", chart.Pins, *o.yes, out); err != nil {
 		return err
 	}
-	if _, err := hostconf.Ensure(hostconf.Path(bootstrap.RecordPath)); err != nil {
+	if _, err := hostconf.Ensure(hostconf.Path(*inst.record)); err != nil {
 		return err
 	}
 
@@ -118,7 +123,7 @@ func migrateInstall(ctx context.Context, o *migrateApplyFlags, inst *installFlag
 	// first-run-or-re-run logic sees them exactly as it sees an operator's.
 	ifs := flag.NewFlagSet("migrate install", flag.ContinueOnError)
 	iflg := addInitFlags(ifs)
-	iflg.recordPath = bootstrap.RecordPath
+	iflg.recordPath = *inst.record
 	iflg.charts = charts
 	iflg.takeDev(initDevFlags{pathsInNode: inst.pathsInNode})
 	if err := ifs.Parse(answers); err != nil {

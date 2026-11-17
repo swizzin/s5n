@@ -935,8 +935,14 @@ data. Everything it will change is written down before it changes anything.
   the source host, and `box migrate apply [file]` installs or adopts from a snapshot.
   Each of them takes `--values`, and applies exactly that file's values.
 - **One place for snapshots (decided).** They live in `/var/lib/s5n/migrate/`; discover
-  writes there, or where `--out` names, and `box migrate apply` with no file takes the
-  newest snapshot there. A snapshot from another host is the file to pass.
+  writes there, or where `--out` names a file, and `box migrate apply` with no file
+  takes the newest snapshot there that is not a survey. A snapshot from another host is
+  the file to pass. A snapshot's name says what it is and when it was taken:
+  `migrate-<UTC yyyymmddThhmmssZ>-<mode>.tar.gz`, so a directory listing reads as the
+  history of a cutover. The modes are `survey` (a read with no configs in it),
+  `rehearsal` (the configs copied from a running source) and `final` (from a stopped
+  one); apply runs a final snapshot, refuses a survey because there is nothing in it to
+  rewrite, and refuses a rehearsal until the lock below is real.
 - **discover only reads, and the apps need not run (decided).** It reads each workload's
   pod template and the host's files, so it needs the cluster up, never the app: a
   stopped app is still there to read. Every workload kind with nothing owning it above
@@ -963,14 +969,16 @@ data. Everything it will change is written down before it changes anything.
   `--replace-cluster` asks for box's own k0s instead: cutover stops after the final
   snapshot with the reset recipe, and `box migrate apply` finishes on the clean host.
 - **apply is the installer on a host with no box (decided).** It runs bootstrap and then
-  init's steps from the plan: the apps, the data root and the owner are the plan's, and
-  only the domain, the login, the password and the config path are asked. On a host
-  that already has a box it adopts into it, which is how one source is migrated per
-  user.
+  init's steps from the plan: the data root and the owner are the plan's, and the apps
+  go in off -- the migration switches on what it moved, because an app started before
+  its config is moved into place would run on an empty one. Only the domain, the login,
+  the password and the config path are asked, or taken from the flags an unattended run
+  gives, which names every one it is missing. On a host that already has a box it
+  adopts into it, which is how one source is migrated per user.
 - **One snapshot file, and it is the backup format (decided).** A snapshot is one tar +
   gzip archive with a manifest holding a sha256 per entry, so a truncated copy is
   refused rather than half-applied. `plan.yaml`, `source/`, `report.txt` and `config/`
-  are inside it. It holds secrets — API keys, the Plex token, qBittorrent's password
+  are inside it, and its mode says which of those apply may run. It holds secrets — API keys, the Plex token, qBittorrent's password
   hash — so it is root-only, 0600. `box backup` writes the same file from box itself,
   and `restore` is `migrate apply` of that snapshot: one format, one apply path.
 - **A rehearsal cannot reach the internet (decided goal, mechanism proposed).**

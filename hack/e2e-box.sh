@@ -5028,21 +5028,24 @@ PY
 # see one tree: that is what makes discovery's read of the source, apply's
 # staging copy and the renames under the data root one filesystem.
 #
-# Then, the way an operator cuts over: stop the source, `box migrate discover`,
-# throw the old cluster away (box never removes one it did not install),
-# `box bootstrap` a fresh one with the plan's apps off, and `box migrate apply`
-# the plan. The apps must come back healthy on the chart's own images -- which
+# Then, the way an operator cuts over: `box migrate cutover` refuses while the
+# source still runs (printing the stop command per app, and keeping the read as
+# a survey), the operator stops it, `box migrate cutover --replace-cluster`
+# writes the final snapshot, the old cluster is thrown away (box never removes
+# one it did not install), and `box migrate apply <snapshot>` takes a host with
+# no box to a running seedbox: bootstrap, the platform, init from the plan, then
+# the adoption -- one command. The apps must come back healthy on the chart's own images -- which
 # are much newer than the source's, so their real database migrations run on the
 # copied configs -- with their paths rewritten to /data, their API keys
 # unchanged, one download client each, adopted by the id the source had, and the
 # data renamed to box's layout rather than moved.
 #
-# The box the plan is applied into runs Prowlarr and nothing the plan names: a
-# plan cannot name an app the seedbox already runs (`box migrate apply` refuses
-# it), and the migration switches its own apps on from the grant. That box is
-# also the shape the product had to learn to install -- no Arr and no
-# qBittorrent is a release with nothing per-app for the wiring Job, and the Job
-# accepts it and publishes an ok receipt. With no Arr on, the Job has made none
+# The box the plan is applied into runs nothing the plan names: a plan cannot
+# name an app the seedbox already runs (`box migrate apply` refuses it), so the
+# installer answers init with the apps off and the migration switches its own on
+# from the grant. That box is also the shape the product had to learn to install
+# -- no Arr and no qBittorrent is a release with nothing per-app for the wiring
+# Job, and the Job accepts it and publishes an ok receipt. With no Arr on, the Job has made none
 # of /data's category directories either, so the rename here starts from an
 # absent target; the target a box with an Arr on has already made is the unit
 # tests' (internal/migrate/apply).
@@ -6081,6 +6084,57 @@ migrate_box() {
   done
   [ "$fail" = 0 ] || return 0
 
+  # ---- a rehearsal snapshot, and the refusal while the source runs ---------
+  # The source is up: the four apps were seeded through their own APIs. A
+  # rehearsal snapshot copies the configs from a running source and may only be
+  # applied locked, which lands next, so apply refuses it by name. A cutover is
+  # the real thing: it refuses while any planned app runs, keeps the read as a
+  # survey first (so following the commands it prints is always safe), and
+  # prints one line per app with the command that stops it. box never stops a
+  # source, so this script is the operator.
+  snapshot="$WORK/final.tar.gz"
+  rehearsal="$WORK/rehearsal.tar.gz"
+  log "box migrate discover --rehearsal, and apply's refusal of it"
+  if ! "$WORK/box" migrate discover --rehearsal --out "$rehearsal" \
+    --kubeconfig "$WORK/kubeconfig" --namespace "$MIGRATE_LEGACY_NS" --root / \
+    >"$WORK/migrate-rehearsal.txt" 2>&1; then
+    cat "$WORK/migrate-rehearsal.txt"; fail=1; return 0
+  fi
+  if "$WORK/box" migrate apply "$rehearsal" --yes \
+    --values "$WORK/values.yaml" --grant "$WORK/grant.yaml" --record "$WORK/cluster.yaml" \
+    --kubeconfig "$WORK/kubeconfig" >"$WORK/apply-rehearsal.txt" 2>&1; then
+    echo "apply accepted a rehearsal snapshot, and a rehearsal may only be applied locked"
+    fail=1
+  else
+    grep -q "the rehearsal lock lands next" "$WORK/apply-rehearsal.txt" ||
+      { echo "apply refused the rehearsal snapshot for another reason:"; cat "$WORK/apply-rehearsal.txt"; fail=1; }
+  fi
+
+  log "box migrate cutover while the source runs: refused, with a survey kept and the stop commands printed"
+  if "$WORK/box" migrate cutover --replace-cluster --yes --out "$snapshot" \
+    --kubeconfig "$WORK/kubeconfig" --namespace "$MIGRATE_LEGACY_NS" --root / \
+    --values "$WORK/values.yaml" --grant "$WORK/grant.yaml" \
+    --record "$WORK/cluster.yaml" >"$WORK/cutover-refused.txt" 2>&1; then
+    echo "cutover took the final snapshot with the source still running"
+    fail=1; return 0
+  fi
+  cat "$WORK/cutover-refused.txt"
+  for instance in qbittorrent sonarr "$MIGRATE_RADARR_INSTANCE" plex; do
+    grep -q "^  ${instance}: .* in ${MIGRATE_LEGACY_NS}/${instance}; kubectl -n ${MIGRATE_LEGACY_NS} scale " \
+      "$WORK/cutover-refused.txt" ||
+      { echo "the refusal does not name ${instance} and the command that stops it"; fail=1; }
+  done
+  grep -q "box never stops a source" "$WORK/cutover-refused.txt" ||
+    { echo "the refusal does not say box never stops a source"; fail=1; }
+  if [ -e "$snapshot" ]; then
+    echo "a refused cutover wrote the final snapshot ${snapshot}"; fail=1
+  fi
+  survey=$(ls "$WORK"/migrate-*-survey.tar.gz 2>/dev/null | head -1) || true
+  if [ -z "${survey:-}" ] || [ ! -f "$survey" ]; then
+    echo "a refused cutover kept no survey: the next cutover would carry nothing"; fail=1
+  fi
+  [ "$fail" = 0 ] || return 0
+
   # The categories have to be on disk before the source stops: qBittorrent keeps
   # them in categories.json beside its config, and migrate rewrites that file. A
   # source still holding them in the pre-5 map is a refusal the rewriter names,
@@ -6102,30 +6156,53 @@ migrate_box() {
   log "seeding the source Plex's library database: Plex's own schema, and the rows a library holds"
   migrate_seed_plex "$src/var/data/plex" || { fail=1; return 0; }
 
-  # ---- discovery, then the cutover -----------------------------------------
-  plan="$WORK/plan"
-  log "box migrate discover: the plan, and the source's manifests beside it"
-  if ! "$WORK/box" migrate discover --out "$plan" --kubeconfig "$WORK/kubeconfig" \
-    --namespace "$MIGRATE_LEGACY_NS" --root / >"$WORK/migrate-discover.txt" 2>&1; then
-    cat "$WORK/migrate-discover.txt"; fail=1; return 0
+  # ---- the final snapshot --------------------------------------------------
+  cutover() { # cutover <out>
+    local out=$1; shift
+    "$WORK/box" migrate cutover --replace-cluster --yes --out "$out" \
+      --kubeconfig "$WORK/kubeconfig" --namespace "$MIGRATE_LEGACY_NS" --root / \
+      --values "$WORK/values.yaml" --grant "$WORK/grant.yaml" \
+      --record "$WORK/cluster.yaml" "$@"
+  }
+
+  log "box migrate cutover --replace-cluster: the final snapshot, the reset recipe, the next command"
+  if ! cutover "$snapshot" >"$WORK/cutover.txt" 2>&1; then
+    cat "$WORK/cutover.txt"; fail=1; return 0
   fi
-  cat "$WORK/migrate-discover.txt"
-  report="$plan/report.txt"
+  cat "$WORK/cutover.txt"
+  grep -q "k0s stop; k0s reset" "$WORK/cutover.txt" ||
+    { echo "the replace path printed no reset recipe to double-check"; fail=1; }
+  grep -qF "box migrate apply ${snapshot}" "$WORK/cutover.txt" ||
+    { echo "the replace path did not name the command that finishes the job"; fail=1; }
+  [ -f "$snapshot" ] ||
+    { echo "cutover took no final snapshot at ${snapshot}"; fail=1; return 0; }
+  # One file, root-only: it holds the source's API keys and Plex's token.
+  [ "$(stat -c '%a' "$snapshot")" = 600 ] ||
+    { echo "the snapshot is $(stat -c '%a' "$snapshot"), want 600"; fail=1; }
+  # The plan, the report, the source's manifests and every config are inside
+  # it: that is what makes one file the whole migration.
+  tar -xzOf "$snapshot" plan.yaml >"$WORK/plan.yaml" 2>/dev/null ||
+    { echo "the snapshot holds no plan.yaml"; fail=1; return 0; }
+  tar -xzOf "$snapshot" report.txt >"$WORK/report.txt" 2>/dev/null ||
+    { echo "the snapshot holds no report.txt"; fail=1; return 0; }
+  report="$WORK/report.txt"
   for instance in qbittorrent sonarr "$MIGRATE_RADARR_INSTANCE" plex; do
     source=$instance
     [ "$instance" = "$MIGRATE_RADARR_INSTANCE" ] && source=$MIGRATE_RADARR_INSTANCE
     grep -q "^app: ${instance} (from ${source}, config " "$report" ||
       { echo "the plan does not name ${instance}, and the source runs it"; fail=1; }
+    tar -tzf "$snapshot" "config/${instance}/" >/dev/null 2>&1 ||
+      { echo "the snapshot carries no config tree for ${instance}"; fail=1; }
   done
   grep -qE "^data: .* \(downloads: Downloads, media: library\)$" "$report" ||
     { echo "the plan does not name the data root with Downloads and library:"; sed -n '/^data:/p' "$report"; fail=1; }
-  grep -q 'service: qbittorrent\.legacy' "$plan/plan.yaml" ||
+  grep -q 'service: qbittorrent\.legacy' "$WORK/plan.yaml" ||
     { echo "the plan has no host rule for the source's qbittorrent Service"; fail=1; }
   # The blessed Plex image's entrypoint writes its transcoder directory into
   # Preferences.xml as /transcode, which no mount of the source gives a rule:
   # discovery maps it onto itself because the release mounts the same
   # /transcode, so the plan applies without a hand edit.
-  grep -qF 'from: /transcode' "$plan/plan.yaml" ||
+  grep -qF 'from: /transcode' "$WORK/plan.yaml" ||
     { echo "the plan has no rule for Plex's /transcode, and apply refuses a stored path no rule covers"; fail=1; }
   [ "$fail" = 0 ] || return 0
 
@@ -6148,11 +6225,10 @@ migrate_box() {
     chmod 700 /var/lib/s5n/authelia
     chmod 600 /var/lib/s5n/authelia/users_database.yml
   ' <"$WORK/users_database.yml"
-  # What `box init` creates on a real host for the apps the seedbox runs
-  # (--paths-in-node keeps it from writing into this node). migrate creates the
-  # ones it moves, by moving them.
-  mkdir -p "$CONFIG_PATH/prowlarr"
-  chown "$puid:$pgid" "$CONFIG_PATH" "$CONFIG_PATH/prowlarr"
+  # What `box init` creates on a real host: the config root, owned by the
+  # seedbox's user. It runs with no app on, so it creates no app directory --
+  # migrate creates the ones it moves, by moving them.
+  chown "$puid:$pgid" "$CONFIG_PATH"
 
   # Nothing may have prepared box's data categories: the rename is what creates
   # them, and a `downloads` or `media` that already existed would hide a rename
@@ -6164,54 +6240,39 @@ migrate_box() {
   done
   [ "$fail" = 0 ] || return 0
 
-  log "box bootstrap: the platform layer, then root's first install with the plan's apps off"
-  if ! "$WORK/box" bootstrap --yes --chart-repo "$CHART_REPO" \
+  # ---- the installer: one command on a host with no box -------------------
+  # This host has no /etc/s5n record and the cluster has no platform: migrate
+  # apply is the installer here. It runs bootstrap's own cluster decision and
+  # platform apply, then init's own flow answered from the plan -- the apps off,
+  # the data root and the owner from the plan -- and asks for only the four a
+  # plan cannot know. Then it adopts, in the same run.
+  log "box migrate apply: the installer on a host with no box, then the adoption"
+  if ! "$WORK/box" migrate apply "$snapshot" --yes --chart-repo "$CHART_REPO" --chart-version "$CHART_VERSION" \
     --grant "$WORK/grant.yaml" --values "$WORK/values.yaml" \
-    --namespace "$NS" --domain "$DOMAIN" \
-    --data-path "$DATA_PATH" --config-path "$CONFIG_PATH" \
-    --apps prowlarr --puid "$puid" --pgid "$pgid" \
-    --login "$LOGIN" --password-file "$WORK/authelia-password" \
-    --paths-in-node --record "$WORK/cluster.yaml" \
-    --kubeconfig "$WORK/kubeconfig" >"$WORK/bootstrap-migrate.txt" 2>&1; then
-    cat "$WORK/bootstrap-migrate.txt"; fail=1; return 0
-  fi
-  cat "$WORK/bootstrap-migrate.txt"
-  grep -qF "chart: s5n ${CHART_VERSION} (${CHART_REPO}:${CHART_VERSION})" "$WORK/bootstrap-migrate.txt" ||
-    { echo "box did not pull ${CHART_REPO}:${CHART_VERSION}"; fail=1; }
-  # A release with no wired app: the only app it runs is Prowlarr, so the Job
-  # has no Arr and no qBittorrent to connect, and it still has to report ok --
-  # the receipt is what `box apply` waits on.
-  grep -q "^wiring ok" "$WORK/bootstrap-migrate.txt" ||
-    { echo "box did not report a healthy receipt for the box the migration adopts into"; fail=1; }
-  $K -n "$NS" get configmap s5n-wiring -o jsonpath='{.data.wiring\.json}' >"$WORK/bootstrap-wiring.json" 2>/dev/null || true
-  python3 - "$WORK/bootstrap-wiring.json" <<'PYWIRING' || fail=1
-import json, sys
-try:
-    cfg = json.load(open(sys.argv[1]))
-except (FileNotFoundError, json.JSONDecodeError):
-    sys.exit(f"{sys.argv[1]} is not the wiring config: the release rendered none")
-if cfg.get("instances"):
-    sys.exit(f"the seedbox was installed with Arr instances {[i.get('name') for i in cfg['instances']]}, want none")
-if "qbittorrent" in cfg:
-    sys.exit("the seedbox was installed with qBittorrent, and the plan migrates it")
-print("  the installed release has no wired app: no Arr instance, no qBittorrent")
-PYWIRING
-  # migrate adopts into an installed seedbox whose plan's apps are off: Prowlarr
-  # is the only app it runs, and none the plan names is installed.
-  for instance in sonarr qbittorrent "$MIGRATE_RADARR_INSTANCE"; do
-    if $K -n "$NS" get statefulset "$instance" >/dev/null 2>&1; then
-      echo "${instance} is installed before the migration: the plan's apps have to be off"; fail=1
-    fi
-  done
-  [ "$fail" = 0 ] || return 0
-
-  log "box migrate apply: the plan, the configs, the data rename, the keys and the adopted clients"
-  if ! "$WORK/box" migrate apply "$plan" --yes --chart-repo "$CHART_REPO" --chart-version "$CHART_VERSION" \
-    --grant "$WORK/grant.yaml" --values "$WORK/values.yaml" \
-    --kubeconfig "$WORK/kubeconfig" >"$WORK/apply-migrate.txt" 2>&1; then
+    --kubeconfig "$WORK/kubeconfig" --record "$WORK/cluster.yaml" \
+    --domain "$DOMAIN" --login "$LOGIN" --password-file "$WORK/authelia-password" \
+    --config-path "$CONFIG_PATH" --box-namespace "$NS" --paths-in-node \
+    >"$WORK/apply-migrate.txt" 2>&1; then
     cat "$WORK/apply-migrate.txt"; fail=1; return 0
   fi
   cat "$WORK/apply-migrate.txt"
+  # The snapshot it read is named, and the chart it installed is the release
+  # this run pulled once for both halves.
+  grep -qF "snapshot: ${snapshot} (final)" "$WORK/apply-migrate.txt" ||
+    { echo "the run did not name the snapshot it read"; fail=1; }
+  grep -qF "chart: s5n ${CHART_VERSION} (${CHART_REPO}:${CHART_VERSION})" "$WORK/apply-migrate.txt" ||
+    { echo "box did not pull ${CHART_REPO}:${CHART_VERSION}"; fail=1; }
+  # The box it installed runs nothing the plan migrates: the apps went in off,
+  # and the adoption is what switches them on. The receipt for that empty
+  # release is ok, which is what `box apply` waits on.
+  grep -q "^wiring ok" "$WORK/apply-migrate.txt" ||
+    { echo "box did not report a healthy receipt for the box the migration adopts into"; fail=1; }
+  # No klog line: box sets rest.NoWarnings on every config it hands out, and a
+  # client-go deprecation line in this output would be the chart's lookup
+  # leaking through a config that does not.
+  if grep -qE '^[IWEF][0-9]{4} ' "$WORK/apply-migrate.txt"; then
+    echo "box printed a klog line:"; grep -E '^[IWEF][0-9]{4} ' "$WORK/apply-migrate.txt" | head -3; fail=1
+  fi
   # What the run said it would do, before it did it. The two renames, the kept
   # keys and the connections adopted by id are the whole point of a migration,
   # and a summary that does not name them is a run that did less.
@@ -6383,9 +6444,12 @@ PY
   # release already rendering what it would apply. One apply, and then nothing.
   log "a second box migrate apply of the finished plan: one apply, nothing else"
   revision=$(helm_revision "$NS") || true
-  if ! "$WORK/box" migrate apply "$plan" --yes --chart-repo "$CHART_REPO" --chart-version "$CHART_VERSION" \
+  if ! "$WORK/box" migrate apply "$snapshot" --yes --chart-repo "$CHART_REPO" --chart-version "$CHART_VERSION" \
     --grant "$WORK/grant.yaml" --values "$WORK/values.yaml" \
-    --kubeconfig "$WORK/kubeconfig" >"$WORK/apply-migrate-again.txt" 2>&1; then
+    --kubeconfig "$WORK/kubeconfig" --record "$WORK/cluster.yaml" \
+    --domain "$DOMAIN" --login "$LOGIN" --password-file "$WORK/authelia-password" \
+    --config-path "$CONFIG_PATH" --box-namespace "$NS" --paths-in-node \
+    >"$WORK/apply-migrate-again.txt" 2>&1; then
     cat "$WORK/apply-migrate-again.txt"; fail=1; return 0
   fi
   cat "$WORK/apply-migrate-again.txt"

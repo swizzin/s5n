@@ -23,7 +23,6 @@ import (
 	"strings"
 
 	"github.com/swizzin/s5n/internal/archive"
-	"github.com/swizzin/s5n/internal/bootstrap"
 	"github.com/swizzin/s5n/internal/migrate/apply"
 	"github.com/swizzin/s5n/internal/migrate/bundle"
 	"github.com/swizzin/s5n/internal/migrate/discover"
@@ -75,7 +74,7 @@ func runMigrateCutover(ctx context.Context, args []string) {
 
 	out := newOutput(terminalSet(*o.apply.plain), *o.apply.yes, startupTheme(*o.apply.valuesPath))
 	defer out.Close()
-	if err := hostFiles(out, bootstrap.RecordPath, *o.apply.grantPath); err != nil {
+	if err := hostFiles(out, *o.apply.install.record, *o.apply.grantPath); err != nil {
 		out.Error(err)
 		os.Exit(1)
 	}

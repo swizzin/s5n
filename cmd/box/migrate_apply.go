@@ -99,7 +99,7 @@ func runMigrateApply(ctx context.Context, args []string) {
 
 	out := newOutput(terminalSet(*o.plain), *o.yes, startupTheme(*o.valuesPath))
 	defer out.Close()
-	if err := hostFiles(out, bootstrap.RecordPath, *o.grantPath); err != nil {
+	if err := hostFiles(out, *o.install.record, *o.grantPath); err != nil {
 		out.Error(err)
 		os.Exit(1)
 	}
@@ -177,7 +177,7 @@ func migrateApply(ctx context.Context, file string, o *migrateApplyFlags, out sa
 	}
 	raw := opened.Plan
 	charts := &chartRelease{flags: o.chart, out: out}
-	if installed, err := boxInstalled(); err != nil {
+	if installed, err := boxInstalled(*o.install.record); err != nil {
 		return err
 	} else if !installed {
 		if err := migrateInstall(ctx, o, o.install, p, charts, out); err != nil {
@@ -192,7 +192,7 @@ func migrateApply(ctx context.Context, file string, o *migrateApplyFlags, out sa
 	if err != nil {
 		return err
 	}
-	kc, err := release.ResolveKubeconfig(*o.kubeconfig, os.Getenv("KUBECONFIG"), bootstrap.FilesystemRecords{Path: bootstrap.RecordPath})
+	kc, err := release.ResolveKubeconfig(*o.kubeconfig, os.Getenv("KUBECONFIG"), bootstrap.FilesystemRecords{Path: *o.install.record})
 	if err != nil {
 		return err
 	}
