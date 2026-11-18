@@ -30,12 +30,11 @@ type Cluster struct {
 	ings   []Ingress
 	pods   []Pod
 	nodes  []Node
-	// blockers is the keep path's pre-flight over this cluster, read with the
-	// same lists discovery reads: what would stop box installing onto a cluster
-	// it did not install (see keep.go).
-	blockers []Blocker
-	raw      map[string][]byte
-	err      error
+	// watched is the part of the keep path's pre-flight the scoped read answers:
+	// the source's workloads an auto-updater is told to watch (see keep.go).
+	watched []Blocker
+	raw     map[string][]byte
+	err     error
 	// nodeErr is why the nodes could not be read, kept apart from err: a
 	// namespace-scoped kubeconfig may not list a cluster-scoped object, and
 	// that is the plan's host missing rather than the read failing.
@@ -185,7 +184,7 @@ func (c *Cluster) read(ctx context.Context) error {
 	c.svcs = servicesOf(objs.svcs)
 	c.ings = ingressesOf(objs.ings)
 	c.pods = podsOf(objs.pods)
-	c.blockers = blockersOf(objs)
+	c.watched = watchedBlockers(objs)
 	if nodeErr == nil {
 		c.nodes = nodesOf(nodes)
 	}

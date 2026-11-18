@@ -29,6 +29,7 @@ import (
 	"strings"
 
 	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
 // Blocker is one thing about a source cluster that stops box installing onto it.
@@ -53,36 +54,91 @@ func (b Blocker) String() string {
 // Blockers is the keep path's pre-flight over a live source. Empty is a cluster
 // box can install onto; anything else is a reason to stop after the final snapshot
 // and to prefer `--replace-cluster`.
+//
+// The node's ports and an updater's own pod belong to the whole cluster, not to
+// the namespaces this read was scoped to, so those are listed across every
+// namespace: an ingress controller lives in its own. Only the annotations are the
+// source's business, and they come from the scoped read.
 func (c *Cluster) Blockers(ctx context.Context) ([]Blocker, error) {
 	if err := c.load(ctx); err != nil {
 		return nil, err
 	}
-	return c.blockers, nil
+	wide, err := c.readWide(ctx)
+	if err != nil {
+		return nil, err
+	}
+	out := append([]Blocker(nil), c.watched...)
+	out = append(out, portBlockers(wide)...)
+	out = append(out, keelBlockers(wide)...)
+	sortBlockers(out)
+	return out, nil
 }
 
-// blockersOf is every blocker one read of a source holds, in one order so two runs
-// over one cluster read the same way.
-func blockersOf(objs readObjects) []Blocker {
-	var out []Blocker
-	out = append(out, portBlockers(objs)...)
-	out = append(out, updaterBlockers(objs)...)
+// readWide lists, across every namespace, what the cluster-wide questions need:
+// the Services and pods that could hold the node's 80/443, and the workloads keel
+// could run as. A kubeconfig that cannot list them is a refusal: bootstrap
+// already requires an admin one for the keep path, and a pre-flight that saw
+// half the cluster would be a guess.
+func (c *Cluster) readWide(ctx context.Context) (readObjects, error) {
+	var objs readObjects
+	svcs, err := c.cs.CoreV1().Services("").List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return objs, fmt.Errorf("list services in every namespace, for what holds the node's 80 and 443: %w", err)
+	}
+	for i := range svcs.Items {
+		objs.svcs = append(objs.svcs, &svcs.Items[i])
+	}
+	pods, err := c.cs.CoreV1().Pods("").List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return objs, fmt.Errorf("list pods in every namespace, for what holds the node's 80 and 443: %w", err)
+	}
+	for i := range pods.Items {
+		objs.pods = append(objs.pods, &pods.Items[i])
+	}
+	deploys, err := c.cs.AppsV1().Deployments("").List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return objs, fmt.Errorf("list deployments in every namespace, for an auto-updater: %w", err)
+	}
+	for i := range deploys.Items {
+		objs.deploys = append(objs.deploys, &deploys.Items[i])
+	}
+	stss, err := c.cs.AppsV1().StatefulSets("").List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return objs, fmt.Errorf("list statefulsets in every namespace, for an auto-updater: %w", err)
+	}
+	for i := range stss.Items {
+		objs.stss = append(objs.stss, &stss.Items[i])
+	}
+	daemonsets, err := c.cs.AppsV1().DaemonSets("").List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return objs, fmt.Errorf("list daemonsets in every namespace, for an auto-updater: %w", err)
+	}
+	for i := range daemonsets.Items {
+		objs.daemonsets = append(objs.daemonsets, &daemonsets.Items[i])
+	}
+	return objs, nil
+}
+
+// sortBlockers puts blockers in one order, so two runs over one cluster read the
+// same way.
+func sortBlockers(out []Blocker) {
 	sort.Slice(out, func(i, j int) bool {
 		if out[i].Where != out[j].Where {
 			return out[i].Where < out[j].Where
 		}
 		return out[i].What < out[j].What
 	})
-	return out
 }
 
 // theirFrontDoor reports whether a port is one box's Gateway needs: 80 for the
 // redirect every host gets, 443 for the certificate.
 func theirFrontDoor(port int32) bool { return port == 80 || port == 443 }
 
-// portBlockers is every Service that already answers on the node's port 80 or 443,
-// and every container that binds one on the host. A Service of type NodePort or
-// LoadBalancer is the cluster's own front door whatever runs behind it, and a
-// hostPort is the same thing written into a pod.
+// portBlockers is everything that already holds the node's port 80 or 443, one
+// line per object: a LoadBalancer Service answering on one (its address may be
+// the node's own), a Service whose node port is one, a container binding one as a
+// hostPort, and a container listening on one on the node's own network. A
+// NodePort Service's in-cluster port is not the node's: its node port is.
 func portBlockers(objs readObjects) []Blocker {
 	var out []Blocker
 	for _, svc := range objs.svcs {
@@ -90,57 +146,87 @@ func portBlockers(objs readObjects) []Blocker {
 			continue
 		}
 		for _, p := range svc.Spec.Ports {
-			if !theirFrontDoor(p.Port) {
+			var why string
+			switch {
+			case svc.Spec.Type == corev1.ServiceTypeLoadBalancer && theirFrontDoor(p.Port):
+				why = fmt.Sprintf("this LoadBalancer Service answers on %d", p.Port)
+			case theirFrontDoor(p.NodePort):
+				why = fmt.Sprintf("this %s Service holds the node's port %d", svc.Spec.Type, p.NodePort)
+			default:
 				continue
 			}
 			out = append(out, Blocker{
 				What:  "ports",
 				Where: svc.Namespace + "/" + svc.Name,
-				Why: fmt.Sprintf("this %s Service answers on %d, and box's Gateway needs the node's 80 and 443",
-					svc.Spec.Type, p.Port),
+				Why:   why + ", and box's Gateway needs the node's 80 and 443",
 				Check: fmt.Sprintf("kubectl -n %s get service %s -o wide", svc.Namespace, svc.Name),
 			})
 			break
 		}
 	}
 	for _, pod := range objs.pods {
-		for _, c := range pod.Spec.Containers {
-			for _, p := range c.Ports {
-				if !theirFrontDoor(p.HostPort) {
-					continue
-				}
-				out = append(out, Blocker{
-					What:  "ports",
-					Where: pod.Namespace + "/" + pod.Name,
-					Why:   fmt.Sprintf("%s binds hostPort %d, and box's Gateway needs the node's 80 and 443", c.Name, p.HostPort),
-					Check: fmt.Sprintf("kubectl -n %s get pod %s -o jsonpath='{.spec.containers[*].ports}'", pod.Namespace, pod.Name),
-				})
-			}
+		if b, ok := podPortBlocker(pod); ok {
+			out = append(out, b)
 		}
 	}
 	return out
+}
+
+// podPortBlocker is the one line a pod gets when one of its containers holds the
+// node's 80 or 443, by hostPort or by listening on the node's own network.
+func podPortBlocker(pod *corev1.Pod) (Blocker, bool) {
+	for _, c := range pod.Spec.Containers {
+		for _, p := range c.Ports {
+			var why string
+			switch {
+			case theirFrontDoor(p.HostPort):
+				why = fmt.Sprintf("%s binds hostPort %d", c.Name, p.HostPort)
+			case pod.Spec.HostNetwork && theirFrontDoor(p.ContainerPort):
+				why = fmt.Sprintf("%s listens on %d on the node's own network", c.Name, p.ContainerPort)
+			default:
+				continue
+			}
+			return Blocker{
+				What:  "ports",
+				Where: pod.Namespace + "/" + pod.Name,
+				Why:   why + ", and box's Gateway needs the node's 80 and 443",
+				Check: fmt.Sprintf("kubectl -n %s get pod %s -o wide", pod.Namespace, pod.Name),
+			}, true
+		}
+	}
+	return Blocker{}, false
 }
 
 // keelAnnotation is what an auto-updater is configured by: keel watches every
 // object carrying it and rewrites that object's image when the registry moves.
 const keelAnnotation = "keel.sh/policy"
 
-// updaterBlockers is every auto-updater watching the source's namespaces. Keel
-// marks what it watches with an annotation and runs as a Deployment, and either is
-// enough: an updater that rewrote the release box installs would be a box whose
-// images nobody chose.
-func updaterBlockers(objs readObjects) []Blocker {
+// watchedBlockers is every workload in the source's namespaces that keel is told
+// to watch. Read from the scoped lists: a workload outside the source is not this
+// migration's business.
+func watchedBlockers(objs readObjects) []Blocker {
 	var out []Blocker
 	for _, wl := range updaterCandidates(objs) {
 		policy := wl.annotations[keelAnnotation]
-		if policy != "" {
-			out = append(out, Blocker{
-				What:  "auto-updater",
-				Where: wl.namespace + "/" + wl.name,
-				Why:   fmt.Sprintf("%s is %q, so keel would rewrite this workload's image under the release box installs", keelAnnotation, policy),
-				Check: fmt.Sprintf("kubectl -n %s get %s %s -o yaml", wl.namespace, wl.kind, wl.name),
-			})
+		if policy == "" {
+			continue
 		}
+		out = append(out, Blocker{
+			What:  "auto-updater",
+			Where: wl.namespace + "/" + wl.name,
+			Why:   fmt.Sprintf("%s is %q, so keel would rewrite this workload's image under the release box installs", keelAnnotation, policy),
+			Check: fmt.Sprintf("kubectl -n %s get %s %s -o yaml", wl.namespace, wl.kind, wl.name),
+		})
+	}
+	return out
+}
+
+// keelBlockers is keel itself, wherever it runs: it usually has a namespace of its
+// own, and an updater that rewrote the release box installs would be a box whose
+// images nobody chose.
+func keelBlockers(objs readObjects) []Blocker {
+	var out []Blocker
+	for _, wl := range updaterCandidates(objs) {
 		for _, image := range wl.images {
 			if !isKeel(image) {
 				continue
@@ -148,7 +234,7 @@ func updaterBlockers(objs readObjects) []Blocker {
 			out = append(out, Blocker{
 				What:  "auto-updater",
 				Where: wl.namespace + "/" + wl.name,
-				Why:   "keel is running in this namespace, and it would rewrite the release box installs",
+				Why:   "keel is running on this cluster, and it would rewrite the release box installs",
 				Check: fmt.Sprintf("kubectl -n %s get %s %s -o wide", wl.namespace, wl.kind, wl.name),
 			})
 			break

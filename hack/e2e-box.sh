@@ -6698,14 +6698,18 @@ migrate_keep_box() {
   # ---- something on the cluster box will not install over -----------------
   # The keep path installs onto a cluster box did not make, so it looks at what is
   # already on it before it does: a Service answering on the node's port 80 or 443
-  # is the source's own front door, and box's Gateway needs those ports. The run
-  # stops after the final snapshot, names the Service with the command to look at
-  # it, and names --replace-cluster as the other road. Nothing on the cluster is
-  # changed: box does not repair a cluster it did not install.
-  log "a Service already holding the node's port 80: the keep path stops, naming it and the other road"
-  $K -n "$MIGRATE_LEGACY_NS" create service nodeport frontdoor --tcp=80:80 --dry-run=client -o yaml |
+  # is the source's own front door, and box's Gateway needs those ports. The
+  # Service sits in a namespace of its own, as an ingress controller does, and the
+  # cutover is scoped to the source's namespace: the node's ports belong to the
+  # whole cluster, so the pre-flight looks past that scope. The run stops after the
+  # final snapshot, names the Service with the command to look at it, and names
+  # --replace-cluster as the other road. Nothing on the cluster is changed: box
+  # does not repair a cluster it did not install.
+  log "a Service in another namespace holding the node's port 80: the keep path stops, naming it and the other road"
+  $K create namespace frontdoor --dry-run=client -o yaml | $K apply -f - >/dev/null &&
+    $K -n frontdoor create service loadbalancer frontdoor --tcp=80:80 --dry-run=client -o yaml |
     $K apply -f - >/dev/null ||
-    { echo "could not put a Service on the source's port 80"; fail=1; return 0; }
+    { echo "could not put a Service on the node's port 80"; fail=1; return 0; }
   # The blocker stops the run by design, so this is a finished run: exit 0, with the
   # snapshot written and the operator's next step named.
   if ! keep_cutover "$WORK/blocked.tar.gz" --no-prior-discover >"$WORK/keep-blocked.txt" 2>&1; then
@@ -6715,8 +6719,8 @@ migrate_keep_box() {
   fi
   cat "$WORK/keep-blocked.txt"
   for want in \
-    "  ${MIGRATE_LEGACY_NS}/frontdoor: this NodePort Service answers on 80" \
-    "check: kubectl -n ${MIGRATE_LEGACY_NS} get service frontdoor -o wide" \
+    "  frontdoor/frontdoor: this LoadBalancer Service answers on 80" \
+    "check: kubectl -n frontdoor get service frontdoor -o wide" \
     "box does not change a cluster it did not install" \
     "--replace-cluster is the other road" \
     "box migrate apply $WORK/blocked.tar.gz"; do
@@ -6731,7 +6735,7 @@ migrate_keep_box() {
     echo "box installed into ${NS} over a blocker it said would stop it"; fail=1
   fi
   # The operator clears it, because box will not.
-  $K -n "$MIGRATE_LEGACY_NS" delete service frontdoor >/dev/null ||
+  $K delete namespace frontdoor --wait=true >/dev/null ||
     { echo "could not remove the blocking Service"; fail=1; return 0; }
   [ "$fail" = 0 ] || return 0
 

@@ -975,9 +975,10 @@ data. Everything it will change is written down before it changes anything.
   go — platform, install, adoption — with the source's workloads left at 0. Before it
   installs, cutover checks three things and stops after the final snapshot naming the
   command that shows each one: bootstrap's own gates over the cluster (a managed control
-  plane, more than one node, an API that does not answer), a Service or a container's
-  hostPort already holding the node's 80/443, and an auto-updater watching the source's
-  namespaces (keel's annotation, or keel itself). box changes nothing on a cluster it did
+  plane, more than one node, an API that does not answer), anything in any namespace
+  already holding the node's 80/443 (a LoadBalancer Service, a node port, a hostPort, a
+  pod on the node's own network), and an auto-updater (keel's annotation on the source's
+  workloads, or keel running anywhere). box changes nothing on a cluster it did
   not install: the operator clears them, or `--replace-cluster` asks for box's own k0s
   instead: cutover stops after the final snapshot with the reset recipe, and
   `box migrate apply` finishes on the clean host.

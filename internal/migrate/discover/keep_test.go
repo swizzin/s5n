@@ -70,7 +70,7 @@ func TestBlockersNameWhatHoldsBoxsPortsAndWhatWouldRewriteIt(t *testing.T) {
 		"kubectl -n kube-system get service traefik -o wide",
 		"media/ingress-bare: ingress binds hostPort 80",
 		`media/sonarr: keel.sh/policy is "force"`,
-		"media/keel: keel is running in this namespace",
+		"media/keel: keel is running on this cluster",
 	} {
 		if !strings.Contains(joined, want) {
 			t.Errorf("the pre-flight does not say %q:\n%s", want, joined)
@@ -127,4 +127,85 @@ func countContaining(lines []string, what string) int {
 		}
 	}
 	return n
+}
+
+// TestBlockersLookPastTheSourcesNamespaces: the node's 80 and 443 belong to the
+// whole cluster, so a read scoped to the source's namespace still finds an ingress
+// controller in its own namespace, a hostNetwork pod listening on 443, a NodePort
+// whose node port is 80, and keel running anywhere. A NodePort Service whose
+// in-cluster port is 80 holds a node port from the 30000s, not 80, so it is not
+// one.
+func TestBlockersLookPastTheSourcesNamespaces(t *testing.T) {
+	ingress := &corev1.Service{
+		ObjectMeta: metav1.ObjectMeta{Name: "ingress-nginx-controller", Namespace: "ingress-nginx"},
+		Spec: corev1.ServiceSpec{
+			Type:  corev1.ServiceTypeLoadBalancer,
+			Ports: []corev1.ServicePort{{Name: "http", Port: 80, NodePort: 31080}},
+		},
+	}
+	lowNodePort := &corev1.Service{
+		ObjectMeta: metav1.ObjectMeta{Name: "edge", Namespace: "edge"},
+		Spec: corev1.ServiceSpec{
+			Type:  corev1.ServiceTypeNodePort,
+			Ports: []corev1.ServicePort{{Port: 8443, NodePort: 443}},
+		},
+	}
+	highNodePort := &corev1.Service{
+		ObjectMeta: metav1.ObjectMeta{Name: "panel", Namespace: "media"},
+		Spec: corev1.ServiceSpec{
+			Type:  corev1.ServiceTypeNodePort,
+			Ports: []corev1.ServicePort{{Port: 80, NodePort: 30080}},
+		},
+	}
+	hostNet := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "traefik-x7k2p", Namespace: "traefik"},
+		Spec: corev1.PodSpec{HostNetwork: true, Containers: []corev1.Container{{
+			Name:  "traefik",
+			Image: "traefik:v3.1",
+			Ports: []corev1.ContainerPort{{ContainerPort: 443}},
+		}}},
+	}
+	keel := &appsv1.Deployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "keel", Namespace: "keel"},
+		Spec: appsv1.DeploymentSpec{Template: corev1.PodTemplateSpec{Spec: corev1.PodSpec{
+			Containers: []corev1.Container{{Name: "keel", Image: "keelhq/keel:0.19.1"}},
+		}}},
+	}
+	// Annotations are about the source's own workloads: one outside its
+	// namespaces is not this migration's business.
+	elsewhere := &appsv1.Deployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "grafana", Namespace: "monitoring",
+			Annotations: map[string]string{"keel.sh/policy": "minor"},
+		},
+		Spec: appsv1.DeploymentSpec{Template: corev1.PodTemplateSpec{Spec: corev1.PodSpec{
+			Containers: []corev1.Container{{Name: "grafana", Image: "grafana/grafana:11.2.0"}},
+		}}},
+	}
+	cs := fake.NewSimpleClientset(ingress, lowNodePort, highNodePort, hostNet, keel, elsewhere)
+	c := NewClusterFor(cs, []string{"media"})
+	blockers, err := c.Blockers(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var lines []string
+	for _, b := range blockers {
+		lines = append(lines, b.String())
+	}
+	joined := strings.Join(lines, "\n")
+	for _, want := range []string{
+		"ingress-nginx/ingress-nginx-controller: this LoadBalancer Service answers on 80",
+		"edge/edge: this NodePort Service holds the node's port 443",
+		"traefik/traefik-x7k2p: traefik listens on 443 on the node's own network",
+		"keel/keel: keel is running on this cluster",
+	} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("the pre-flight does not say %q:\n%s", want, joined)
+		}
+	}
+	for _, not := range []string{"media/panel", "monitoring/grafana"} {
+		if strings.Contains(joined, not) {
+			t.Errorf("the pre-flight names %s, which holds none of box's ports and is not the source's:\n%s", not, joined)
+		}
+	}
 }
