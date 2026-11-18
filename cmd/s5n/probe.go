@@ -14,6 +14,14 @@
 //	3  it behaved the other way
 //	4  the probe could not run at all (bad address, no such host, usage)
 //
+// --settle is for the moment a pod starts. A CNI programs a new pod's policy
+// shortly after the pod exists (kind's kindnet takes about half a second), so a
+// single dial at start-up can open where every later one is denied. With
+// --settle the probe dials until the answer --want names holds settleRun times
+// in a row, and answers the other way only when the deadline passes first. The
+// rehearsal's per-pod gate is this: an init container that holds the app back
+// until its own pod's egress is closed.
+//
 // Splitting "the wrong answer" from "no answer" is what lets box refuse a
 // rehearsal for the right reason: a control pod that cannot run means the proof
 // never happened, which is not the same as a lock that does not hold.
@@ -44,7 +52,7 @@ func runProbe(args []string) error {
 // probeArgs is runProbe without the exit, so a test can drive every answer.
 func probeArgs(args []string, stdout, stderr io.Writer) int {
 	if len(args) == 0 || args[0] != "tcp" {
-		fmt.Fprintln(stderr, "usage: s5n probe tcp --address <host:port> --want open|closed [--timeout 5s]")
+		fmt.Fprintln(stderr, "usage: s5n probe tcp --address <host:port> --want open|closed [--timeout 5s] [--settle 30s]")
 		return exitBroken
 	}
 	fs := flag.NewFlagSet("probe tcp", flag.ContinueOnError)
@@ -52,6 +60,7 @@ func probeArgs(args []string, stdout, stderr io.Writer) int {
 	address := fs.String("address", "", "the host:port to dial")
 	want := fs.String("want", "", "open or closed")
 	timeout := fs.Duration("timeout", 5*time.Second, "how long one connection attempt may take")
+	settle := fs.Duration("settle", 0, "keep dialling until --want holds several times in a row, up to this long (0: one dial)")
 	if err := fs.Parse(args[1:]); err != nil {
 		return exitBroken
 	}
@@ -64,13 +73,49 @@ func probeArgs(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "s5n probe: %v\n", err)
 		return exitBroken
 	}
-	reachable := reachable(*address, *timeout)
+	reachable := settled(*address, *timeout, *settle, wantOpen)
 	if reachable == wantOpen {
 		fmt.Fprintf(stdout, "%s: %s, as asked\n", *address, state(reachable))
 		return exitAsAsked
 	}
 	fmt.Fprintf(stdout, "%s: %s, and --want %s\n", *address, state(reachable), *want)
 	return exitOpposite
+}
+
+// settleRun is how many dials in a row must give the wanted answer before a
+// settling probe believes it, and settleEvery is the pause between them.
+const (
+	settleRun   = 3
+	settleEvery = 500 * time.Millisecond
+)
+
+// settled is the probe's answer: one dial without a settle period, and with one
+// the wanted answer held settleRun times in a row -- or, when the deadline
+// passes first, the other answer.
+func settled(address string, timeout, settle time.Duration, wantOpen bool) bool {
+	got := reachable(address, timeout)
+	if settle <= 0 {
+		return got
+	}
+	deadline := time.Now().Add(settle)
+	run := 0
+	for {
+		if got == wantOpen {
+			run++
+			if run >= settleRun {
+				return got
+			}
+		} else {
+			run = 0
+		}
+		if !time.Now().Before(deadline) {
+			// The deadline passed before the wanted answer held long enough to
+			// believe, which is the other answer.
+			return !wantOpen
+		}
+		time.Sleep(settleEvery)
+		got = reachable(address, timeout)
+	}
 }
 
 // reachable reports whether a TCP connection opened. Any error — refused,
