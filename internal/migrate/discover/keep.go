@@ -5,7 +5,7 @@ package discover
 //
 // Keeping the source's cluster is the default cutover because it destroys
 // nothing, so the one thing it must not do is half-take a cluster somebody else
-// runs. Three things on a source stop it, and box never changes a cluster it did
+// runs. Four things on a source stop it, and box never changes a cluster it did
 // not install: it names each with the command to look at it (box's advice is
 // always one to double-check) and the operator decides.
 //
@@ -15,6 +15,9 @@ package discover
 //   - an auto-updater watching the source's namespaces (keel, by its annotation or
 //     the Deployment itself): it would rewrite the release box installs, which is
 //     the one thing a kept cluster must not do to box's own apps;
+//   - a GitOps controller (Flux, Argo CD) on the cluster or marking the source's
+//     workloads: it puts back what it manages, so a source stopped by hand comes
+//     back up beside box;
 //   - a cluster bootstrap's own gates refuse (a managed control plane, more than
 //     one node, an API that does not answer): that is bootstrap's answer, asked
 //     through bootstrap, not a second copy of the rules.
@@ -70,6 +73,7 @@ func (c *Cluster) Blockers(ctx context.Context) ([]Blocker, error) {
 	out := append([]Blocker(nil), c.watched...)
 	out = append(out, portBlockers(wide)...)
 	out = append(out, keelBlockers(wide)...)
+	out = append(out, gitopsBlockers(wide)...)
 	sortBlockers(out)
 	return out, nil
 }
@@ -202,11 +206,14 @@ func podPortBlocker(pod *corev1.Pod) (Blocker, bool) {
 const keelAnnotation = "keel.sh/policy"
 
 // watchedBlockers is every workload in the source's namespaces that keel is told
-// to watch. Read from the scoped lists: a workload outside the source is not this
+// to watch, or that a GitOps controller manages. Read from the scoped lists: a workload outside the source is not this
 // migration's business.
 func watchedBlockers(objs readObjects) []Blocker {
 	var out []Blocker
 	for _, wl := range updaterCandidates(objs) {
+		if b, ok := gitopsMark(wl); ok {
+			out = append(out, b)
+		}
 		policy := wl.annotations[keelAnnotation]
 		if policy == "" {
 			continue
@@ -243,10 +250,89 @@ func keelBlockers(objs readObjects) []Blocker {
 	return out
 }
 
-// isKeel reports whether an image is keel. The name is the whole test: keel is
-// published under more than one registry, and a repository whose last element is
-// "keel" is the one programme.
-func isKeel(image string) bool {
+// gitopsWhy is what a GitOps controller does to a kept cluster: it puts back what
+// it manages, and a source stopped by hand is the first thing it puts back.
+const gitopsWhy = "it would scale a stopped source back up beside box"
+
+// The GitOps controllers by the name the operator knows them by.
+const (
+	flux   = "Flux"
+	argoCD = "Argo CD"
+)
+
+// gitopsMarks are the marks Flux and Argo CD leave on what they manage: Flux
+// labels every object a Kustomization or HelmRelease applies, and Argo CD tracks
+// by its own label or annotation. Helm's app.kubernetes.io/instance is not one:
+// Argo CD can track by it, but so does every plain Helm release, and a source
+// installed with helm is not managed by anything that will put it back.
+var gitopsMarks = []struct{ key, who string }{
+	{"kustomize.toolkit.fluxcd.io/name", flux},
+	{"helm.toolkit.fluxcd.io/name", flux},
+	{"argocd.argoproj.io/instance", argoCD},
+	{"argocd.argoproj.io/tracking-id", argoCD},
+}
+
+// gitopsMark is the blocker a source workload gets when it carries a GitOps
+// controller's mark, as a label or an annotation.
+func gitopsMark(wl updater) (Blocker, bool) {
+	for _, m := range gitopsMarks {
+		v, ok := wl.labels[m.key]
+		if !ok {
+			v, ok = wl.annotations[m.key]
+		}
+		if !ok {
+			continue
+		}
+		return Blocker{
+			What:  "gitops",
+			Where: wl.namespace + "/" + wl.name,
+			Why:   fmt.Sprintf("%s manages this workload (%s=%s), and %s", m.who, m.key, v, gitopsWhy),
+			Check: fmt.Sprintf("kubectl -n %s get %s %s -o yaml", wl.namespace, wl.kind, wl.name),
+		}, true
+	}
+	return Blocker{}, false
+}
+
+// fluxControllers are the workloads that do the putting back, by the repository
+// their image comes from (Flux publishes one image per controller) or, for Argo
+// CD, whose one image runs every component, by the component's own name.
+var fluxControllers = map[string]bool{"kustomize-controller": true, "helm-controller": true}
+
+// gitopsController names the GitOps controller a workload is, if it is one.
+func gitopsController(wl updater) string {
+	if wl.labels["app.kubernetes.io/name"] == "argocd-application-controller" || wl.name == "argocd-application-controller" {
+		return argoCD
+	}
+	for _, image := range wl.images {
+		if strings.Contains(image, "fluxcd/") && fluxControllers[imageName(image)] {
+			return flux
+		}
+	}
+	return ""
+}
+
+// gitopsBlockers is every GitOps controller on the cluster, wherever it runs: one
+// that manages the source's namespace from a namespace of its own leaves no mark
+// box can be sure to read, so the controller itself is the blocker.
+func gitopsBlockers(objs readObjects) []Blocker {
+	var out []Blocker
+	for _, wl := range updaterCandidates(objs) {
+		who := gitopsController(wl)
+		if who == "" {
+			continue
+		}
+		out = append(out, Blocker{
+			What:  "gitops",
+			Where: wl.namespace + "/" + wl.name,
+			Why:   fmt.Sprintf("%s runs on this cluster, and %s", who, gitopsWhy),
+			Check: fmt.Sprintf("kubectl -n %s get %s %s -o wide", wl.namespace, wl.kind, wl.name),
+		})
+	}
+	return out
+}
+
+// imageName is an image's last path element without its tag or digest.
+func imageName(image string) string {
 	repo := image
 	if i := strings.LastIndex(repo, "/"); i >= 0 {
 		repo = repo[i+1:]
@@ -254,7 +340,14 @@ func isKeel(image string) bool {
 	if i := strings.IndexAny(repo, "@:"); i >= 0 {
 		repo = repo[:i]
 	}
-	return repo == "keel"
+	return repo
+}
+
+// isKeel reports whether an image is keel. The name is the whole test: keel is
+// published under more than one registry, and a repository whose last element is
+// "keel" is the one programme.
+func isKeel(image string) bool {
+	return imageName(image) == "keel"
 }
 
 // updater is one object an auto-updater could be watching or running as.
@@ -262,37 +355,38 @@ type updater struct {
 	namespace   string
 	name        string
 	kind        string
+	labels      map[string]string
 	annotations map[string]string
 	images      []string
 }
 
 // updaterCandidates is every workload a read holds, with what an updater is
-// configured by: the object's own annotations, and the images its pod runs. It is
-// the objects, not the pods they made -- an updater annotates the workload, and a
-// pod carries its owner's annotation second-hand.
+// configured by: the object's own labels and annotations, and the images its pod
+// runs. It is the objects, not the pods they made -- an updater marks the
+// workload, and a pod carries its owner's marks second-hand.
 func updaterCandidates(objs readObjects) []updater {
 	var out []updater
-	add := func(namespace, name, kind string, annotations map[string]string, spec corev1.PodSpec) {
-		u := updater{namespace: namespace, name: name, kind: kind, annotations: annotations}
+	add := func(meta metav1.ObjectMeta, kind string, spec corev1.PodSpec) {
+		u := updater{namespace: meta.Namespace, name: meta.Name, kind: kind, labels: meta.Labels, annotations: meta.Annotations}
 		for _, c := range spec.Containers {
 			u.images = append(u.images, c.Image)
 		}
 		out = append(out, u)
 	}
 	for _, d := range objs.deploys {
-		add(d.Namespace, d.Name, "deployment", d.Annotations, d.Spec.Template.Spec)
+		add(d.ObjectMeta, "deployment", d.Spec.Template.Spec)
 	}
 	for _, s := range objs.stss {
-		add(s.Namespace, s.Name, "statefulset", s.Annotations, s.Spec.Template.Spec)
+		add(s.ObjectMeta, "statefulset", s.Spec.Template.Spec)
 	}
 	for _, ds := range objs.daemonsets {
-		add(ds.Namespace, ds.Name, "daemonset", ds.Annotations, ds.Spec.Template.Spec)
+		add(ds.ObjectMeta, "daemonset", ds.Spec.Template.Spec)
 	}
 	for _, rs := range objs.sets {
-		add(rs.Namespace, rs.Name, "replicaset", rs.Annotations, rs.Spec.Template.Spec)
+		add(rs.ObjectMeta, "replicaset", rs.Spec.Template.Spec)
 	}
 	for _, pod := range objs.barePods {
-		add(pod.Namespace, pod.Name, "pod", pod.Annotations, pod.Spec)
+		add(pod.ObjectMeta, "pod", pod.Spec)
 	}
 	return out
 }

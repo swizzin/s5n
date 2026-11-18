@@ -977,8 +977,10 @@ data. Everything it will change is written down before it changes anything.
   command that shows each one: bootstrap's own gates over the cluster (a managed control
   plane, more than one node, an API that does not answer), anything in any namespace
   already holding the node's 80/443 (a LoadBalancer Service, a node port, a hostPort, a
-  pod on the node's own network), and an auto-updater (keel's annotation on the source's
-  workloads, or keel running anywhere). box changes nothing on a cluster it did
+  pod on the node's own network), an auto-updater (keel's annotation on the source's
+  workloads, or keel running anywhere), and a GitOps controller (Flux or Argo CD running
+  anywhere, or their mark on the source's workloads), which would scale the stopped
+  source back up beside box (decided). box changes nothing on a cluster it did
   not install: the operator clears them, or `--replace-cluster` asks for box's own k0s
   instead: cutover stops after the final snapshot with the reset recipe, and
   `box migrate apply` finishes on the clean host.

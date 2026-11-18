@@ -209,3 +209,71 @@ func TestBlockersLookPastTheSourcesNamespaces(t *testing.T) {
 		}
 	}
 }
+
+// TestBlockersNameAGitOpsController: a GitOps controller puts back what it
+// manages, so a source stopped by hand comes back up beside box. Flux's and Argo
+// CD's controllers are named wherever they run, and so is their mark on a source
+// workload; a workload outside the source with a mark is not this migration's,
+// and Helm's own instance label is not a GitOps mark.
+func TestBlockersNameAGitOpsController(t *testing.T) {
+	deploy := func(ns, name string, labels, annotations map[string]string, image string) *appsv1.Deployment {
+		return &appsv1.Deployment{
+			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns, Labels: labels, Annotations: annotations},
+			Spec: appsv1.DeploymentSpec{Template: corev1.PodTemplateSpec{Spec: corev1.PodSpec{
+				Containers: []corev1.Container{{Name: name, Image: image}},
+			}}},
+		}
+	}
+	flux := deploy("flux-system", "kustomize-controller", nil, nil, "ghcr.io/fluxcd/kustomize-controller:v1.4.0")
+	helmCtl := deploy("flux-system", "helm-controller", nil, nil, "ghcr.io/fluxcd/helm-controller:v1.1.0")
+	argo := &appsv1.StatefulSet{
+		ObjectMeta: metav1.ObjectMeta{Name: "argocd-application-controller", Namespace: "argocd",
+			Labels: map[string]string{"app.kubernetes.io/name": "argocd-application-controller"}},
+		Spec: appsv1.StatefulSetSpec{Template: corev1.PodTemplateSpec{Spec: corev1.PodSpec{
+			Containers: []corev1.Container{{Name: "application-controller", Image: "quay.io/argoproj/argocd:v2.13.1"}},
+		}}},
+	}
+	// The source's own workloads, each managed one way.
+	sonarr := deploy("media", "sonarr", map[string]string{"kustomize.toolkit.fluxcd.io/name": "media"}, nil, "lscr.io/linuxserver/sonarr:4.0.14")
+	radarr := deploy("media", "radarr", nil, map[string]string{"argocd.argoproj.io/tracking-id": "media:apps/Deployment:media/radarr"}, "lscr.io/linuxserver/radarr:5.14.0")
+	plex := deploy("media", "plex", map[string]string{"app.kubernetes.io/instance": "plex", "helm.toolkit.fluxcd.io/name": "plex"}, nil, "lscr.io/linuxserver/plex:1.41.2")
+	helmOnly := deploy("media", "bazarr", map[string]string{"app.kubernetes.io/instance": "bazarr"}, nil, "lscr.io/linuxserver/bazarr:1.4.5")
+	outside := deploy("monitoring", "grafana", map[string]string{"kustomize.toolkit.fluxcd.io/name": "monitoring"}, nil, "grafana/grafana:11.2.0")
+
+	c := NewClusterFor(fake.NewSimpleClientset(flux, helmCtl, argo, sonarr, radarr, plex, helmOnly, outside), []string{"media"})
+	blockers, err := c.Blockers(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var lines []string
+	for _, b := range blockers {
+		lines = append(lines, b.String())
+	}
+	joined := strings.Join(lines, "\n")
+	for _, want := range []string{
+		"flux-system/kustomize-controller: Flux runs on this cluster",
+		"flux-system/helm-controller: Flux runs on this cluster",
+		"argocd/argocd-application-controller: Argo CD runs on this cluster",
+		"kubectl -n argocd get statefulset argocd-application-controller -o wide",
+		"media/sonarr: Flux manages this workload (kustomize.toolkit.fluxcd.io/name=media)",
+		"media/radarr: Argo CD manages this workload (argocd.argoproj.io/tracking-id=",
+		"media/plex: Flux manages this workload (helm.toolkit.fluxcd.io/name=plex)",
+		"would scale a stopped source back up beside box",
+	} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("the pre-flight does not say %q:\n%s", want, joined)
+		}
+	}
+	for _, not := range []string{"media/bazarr", "monitoring/grafana"} {
+		if strings.Contains(joined, not) {
+			t.Errorf("the pre-flight names %s, which no GitOps controller of the source manages:\n%s", not, joined)
+		}
+	}
+	for _, b := range blockers {
+		if strings.HasPrefix(b.Where, "flux-system/") || strings.HasPrefix(b.Where, "argocd/") || b.Where == "media/sonarr" {
+			if b.What != "gitops" {
+				t.Errorf("%s is a %q blocker, want gitops", b.Where, b.What)
+			}
+		}
+	}
+}
