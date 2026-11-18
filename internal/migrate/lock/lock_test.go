@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -24,7 +25,13 @@ type fakePods struct {
 	deleted []string
 	cniPods []string
 	dnsPods []corev1.Pod
-	next    int
+	// dnsServices are kube-system's Services, for DNSTarget.
+	dnsServices []corev1.Service
+	next        int
+}
+
+func (f *fakePods) Services(_ context.Context, _ string) (*corev1.ServiceList, error) {
+	return &corev1.ServiceList{Items: f.dnsServices}, nil
 }
 
 func (f *fakePods) Create(_ context.Context, pod *corev1.Pod) (*corev1.Pod, error) {
@@ -273,28 +280,55 @@ func contains(list []string, want string) bool {
 	return false
 }
 
-// TestDNSTargetIsAReadyCoreDNSPod: the target is a DNS pod's metrics port,
-// which the release's policy denies, and a cluster with no ready DNS pod is a
-// refusal rather than a proof with nothing to dial.
-func TestDNSTargetIsAReadyCoreDNSPod(t *testing.T) {
-	f := &fakePods{}
-	f.dnsPods = []corev1.Pod{
-		{ObjectMeta: metav1.ObjectMeta{Name: "coredns-not-ready", Namespace: "kube-system", Labels: map[string]string{"k8s-app": "kube-dns"}},
-			Status: corev1.PodStatus{Phase: corev1.PodPending}},
-		{ObjectMeta: metav1.ObjectMeta{Name: "coredns-abc", Namespace: "kube-system", Labels: map[string]string{"k8s-app": "kube-dns"}},
-			Status: corev1.PodStatus{Phase: corev1.PodRunning, PodIP: "10.0.0.2"}},
+// TestDNSTargetIsTheDNSServiceMetricsPort: the target is the cluster DNS
+// Service's metrics port. A Service address outlives any one CoreDNS pod, which
+// is what the per-pod gate needs: a pod IP that went away would read as a
+// closed connection and wave an app through. A cluster whose DNS Service has no
+// metrics port, or no DNS Service, is a refusal rather than a proof with
+// nothing to dial.
+func TestDNSTargetIsTheDNSServiceMetricsPort(t *testing.T) {
+	svc := func(name, ip string, ports ...int32) corev1.Service {
+		s := corev1.Service{
+			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "kube-system", Labels: map[string]string{"k8s-app": "kube-dns"}},
+			Spec:       corev1.ServiceSpec{ClusterIP: ip},
+		}
+		for _, p := range ports {
+			s.Spec.Ports = append(s.Spec.Ports, corev1.ServicePort{Port: p})
+		}
+		return s
 	}
+	f := &fakePods{dnsServices: []corev1.Service{svc("kube-dns", "10.96.0.10", 53, 53, 9153)}}
 	got, err := DNSTarget(context.Background(), f)
 	if err != nil {
 		t.Fatalf("DNSTarget: %v", err)
 	}
-	if got.String() != "10.0.0.2:9153" {
-		t.Errorf("target = %s, want the ready pod's metrics port", got)
+	if got.String() != "10.96.0.10:9153" {
+		t.Errorf("target = %s, want the DNS Service's metrics port", got)
+	}
+
+	noMetrics := &fakePods{dnsServices: []corev1.Service{svc("kube-dns", "10.96.0.10", 53)}}
+	if _, err := DNSTarget(context.Background(), noMetrics); err == nil {
+		t.Error("DNSTarget accepted a DNS Service with no metrics port")
+	} else if !strings.Contains(err.Error(), "9153") {
+		t.Errorf("refusal = %v, want it to name the port it looked for", err)
 	}
 
 	if _, err := DNSTarget(context.Background(), &fakePods{}); err == nil {
-		t.Error("DNSTarget accepted a cluster with no DNS pod")
+		t.Error("DNSTarget accepted a cluster with no DNS Service")
 	} else if !strings.Contains(err.Error(), "cannot prove the lock") {
 		t.Errorf("refusal = %v, want it to say the lock cannot be proven", err)
+	}
+}
+
+// TestProbePodsSettle: every probe pod dials with --settle, so a pod whose
+// policy the CNI has not programmed yet is not read as a cluster that ignores
+// policy, and the pod's own lifetime outlasts the settle period.
+func TestProbePodsSettle(t *testing.T) {
+	o := Options{Namespace: "s5n", Release: "s5n", Image: "s5n:test", Target: Target{Host: "10.96.0.10", Port: 9153}, Settle: 20 * time.Second}
+	cmd := strings.Join(probePod(o, "probe", nil, o.Target, "closed").Spec.Containers[0].Command, " ")
+	for _, want := range []string{"--settle 20s", "--want closed", "--address 10.96.0.10:9153", "--timeout 2s"} {
+		if !strings.Contains(cmd, want) {
+			t.Errorf("probe command %q has no %q", cmd, want)
+		}
 	}
 }

@@ -83,8 +83,14 @@ type Options struct {
 	Target Target
 	// Internet is a public address to check as well. A zero port skips it.
 	Internet Target
-	// Timeout bounds each pod, from create to a terminated state.
+	// Timeout bounds each pod, from create to a terminated state. It must
+	// outlast Settle.
 	Timeout time.Duration
+	// Settle is how long a probe pod keeps dialling for its answer to hold
+	// (s5n probe --settle). A CNI programs a new pod's policy a moment after
+	// the pod starts, so one dial at start-up would read an enforcing cluster
+	// as one that ignores the policy. Zero dials once.
+	Settle time.Duration
 	// Poll is how often the pod's status is read.
 	Poll time.Duration
 }
@@ -120,6 +126,7 @@ type pods interface {
 	Get(ctx context.Context, namespace, name string) (*corev1.Pod, error)
 	Delete(ctx context.Context, namespace, name string) error
 	List(ctx context.Context, namespace string) (*corev1.PodList, error)
+	Services(ctx context.Context, namespace string) (*corev1.ServiceList, error)
 }
 
 // Cluster is the clientset adapter.
@@ -143,6 +150,11 @@ func (c Cluster) Delete(ctx context.Context, namespace, name string) error {
 
 func (c Cluster) List(ctx context.Context, namespace string) (*corev1.PodList, error) {
 	return c.Client.CoreV1().Pods(namespace).List(ctx, metav1.ListOptions{})
+}
+
+// Services lists a namespace's Services.
+func (c Cluster) Services(ctx context.Context, namespace string) (*corev1.ServiceList, error) {
+	return c.Client.CoreV1().Services(namespace).List(ctx, metav1.ListOptions{})
 }
 
 // Prove runs the control, the probe and, when asked, the public check.
@@ -244,6 +256,10 @@ func (o Options) check() error {
 	return nil
 }
 
+// dialTimeout is one connection attempt's limit. A denied connection is
+// usually dropped rather than refused, so this is how long each "closed" takes.
+const dialTimeout = 2 * time.Second
+
 // probePod is one probe: the image the release already runs, the Pod Security
 // "restricted" context every app has, and the label that decides whether the
 // release's policy selects it.
@@ -252,9 +268,14 @@ func probePod(o Options, role string, labels map[string]string, target Target, w
 	for k, v := range labels {
 		all[k] = v
 	}
-	timeout := o.Timeout
-	if timeout <= 0 {
-		timeout = 5 * time.Second
+	command := []string{
+		"/usr/local/bin/s5n", "probe", "tcp",
+		"--address", target.String(),
+		"--want", want,
+		"--timeout", dialTimeout.String(),
+	}
+	if o.Settle > 0 {
+		command = append(command, "--settle", o.Settle.String())
 	}
 	return &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
@@ -274,12 +295,7 @@ func probePod(o Options, role string, labels map[string]string, target Target, w
 				Name:            "probe",
 				Image:           o.Image,
 				ImagePullPolicy: corev1.PullIfNotPresent,
-				Command: []string{
-					"/usr/local/bin/s5n", "probe", "tcp",
-					"--address", target.String(),
-					"--want", want,
-					"--timeout", timeout.String(),
-				},
+				Command:         command,
 				SecurityContext: &corev1.SecurityContext{
 					RunAsNonRoot:             ptr.To(true),
 					AllowPrivilegeEscalation: ptr.To(false),
@@ -423,28 +439,35 @@ func cniSuffix(name string) string {
 	return " (" + name + ")"
 }
 
-// dnsPort is the CoreDNS pod's metrics listener. The release's egress policy
-// admits the cluster's DNS pods on 53 only, so it is an address outside the
-// release's namespace that the policy denies and that every cluster box
-// supports runs: a control pod reaches it, a pod the policy selects does not.
+// dnsPort is the cluster DNS Service's metrics port (CoreDNS's prometheus
+// listener, which kubeadm's and k0s's kube-dns Service both expose). The
+// release's egress policy admits the DNS pods on 53 only, so this is an address
+// every cluster has, that answers a pod the policy does not select, and that
+// the lock must deny.
 const dnsPort = 9153
 
-// DNSTarget is the in-cluster address the lock must deny: a ready cluster DNS
-// pod's metrics port. It refuses when the cluster runs none, because a proof
-// with no target is not a proof and box would rather stop than guess.
+// DNSTarget is the in-cluster address the lock must deny: the kube-dns
+// Service's metrics port. The Service's address, not a CoreDNS pod's: the
+// per-pod gate dials it for the life of the box, and a pod IP that went away
+// would read as a closed connection and wave an app through.
 func DNSTarget(ctx context.Context, client pods) (Target, error) {
-	list, err := client.List(ctx, "kube-system")
+	list, err := client.Services(ctx, "kube-system")
 	if err != nil {
-		return Target{}, fmt.Errorf("read the cluster's DNS pods: %w", err)
+		return Target{}, fmt.Errorf("read the cluster's DNS Service: %w", err)
 	}
-	for _, pod := range list.Items {
-		if pod.Labels["k8s-app"] != "kube-dns" && pod.Labels["app.kubernetes.io/name"] != "coredns" {
+	for _, svc := range list.Items {
+		if svc.Labels["k8s-app"] != "kube-dns" && svc.Name != "kube-dns" {
 			continue
 		}
-		if pod.Status.Phase != corev1.PodRunning || pod.Status.PodIP == "" {
+		if svc.Spec.ClusterIP == "" || svc.Spec.ClusterIP == corev1.ClusterIPNone {
 			continue
 		}
-		return Target{Host: pod.Status.PodIP, Port: dnsPort}, nil
+		for _, p := range svc.Spec.Ports {
+			if p.Port == dnsPort {
+				return Target{Host: svc.Spec.ClusterIP, Port: dnsPort}, nil
+			}
+		}
+		return Target{}, fmt.Errorf("the cluster DNS Service kube-system/%s has no port %d: box needs CoreDNS's metrics port as the address the release's egress policy must deny, and without it box cannot prove the lock", svc.Name, dnsPort)
 	}
-	return Target{}, errors.New("this cluster runs no ready CoreDNS pod (k8s-app=kube-dns) in kube-system: box needs its metrics port as the address the release's egress policy must deny, and without one it cannot prove the lock")
+	return Target{}, errors.New("this cluster has no DNS Service (k8s-app=kube-dns) in kube-system: box needs its metrics port as the address the release's egress policy must deny, and without one it cannot prove the lock")
 }

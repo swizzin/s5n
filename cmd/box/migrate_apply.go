@@ -854,8 +854,12 @@ func migrateProveLock(ctx context.Context, cs kubernetes.Interface, chart releas
 		Image:     image,
 		Target:    target,
 		Internet:  rehearsalInternet,
-		Timeout:   30 * time.Second,
-		Poll:      time.Second,
+		// Each probe dials until its answer holds (a CNI programs a new pod's
+		// policy a moment after it starts), so a pod lives up to Settle plus
+		// its start-up.
+		Settle:  20 * time.Second,
+		Timeout: 90 * time.Second,
+		Poll:    time.Second,
 	})
 	if err != nil {
 		h.Failed(err)
