@@ -6695,6 +6695,46 @@ migrate_keep_box() {
   $K -n "$MIGRATE_LEGACY_NS" wait --for=delete pod -l "app=${MIGRATE_RADARR_INSTANCE}" --timeout=180s >/dev/null 2>&1 || true
   [ "$fail" = 0 ] || return 0
 
+  # ---- something on the cluster box will not install over -----------------
+  # The keep path installs onto a cluster box did not make, so it looks at what is
+  # already on it before it does: a Service answering on the node's port 80 or 443
+  # is the source's own front door, and box's Gateway needs those ports. The run
+  # stops after the final snapshot, names the Service with the command to look at
+  # it, and names --replace-cluster as the other road. Nothing on the cluster is
+  # changed: box does not repair a cluster it did not install.
+  log "a Service already holding the node's port 80: the keep path stops, naming it and the other road"
+  $K -n "$MIGRATE_LEGACY_NS" create service nodeport frontdoor --tcp=80:80 --dry-run=client -o yaml |
+    $K apply -f - >/dev/null ||
+    { echo "could not put a Service on the source's port 80"; fail=1; return 0; }
+  # The blocker stops the run by design, so this is a finished run: exit 0, with the
+  # snapshot written and the operator's next step named.
+  if ! keep_cutover "$WORK/blocked.tar.gz" --no-prior-discover >"$WORK/keep-blocked.txt" 2>&1; then
+    cat "$WORK/keep-blocked.txt"
+    echo "a blocker on the cluster failed the run instead of stopping it after the snapshot"
+    fail=1; return 0
+  fi
+  cat "$WORK/keep-blocked.txt"
+  for want in \
+    "  ${MIGRATE_LEGACY_NS}/frontdoor: this NodePort Service answers on 80" \
+    "check: kubectl -n ${MIGRATE_LEGACY_NS} get service frontdoor -o wide" \
+    "box does not change a cluster it did not install" \
+    "--replace-cluster is the other road" \
+    "box migrate apply $WORK/blocked.tar.gz"; do
+    grep -qF -- "$want" "$WORK/keep-blocked.txt" ||
+      { echo "the blocker stop does not say '${want}'"; fail=1; }
+  done
+  # The snapshot it took is what --replace-cluster and the apply that follows need,
+  # and nothing was installed onto the cluster the blocker named.
+  [ -f "$WORK/blocked.tar.gz" ] ||
+    { echo "the blocker stop took no final snapshot"; fail=1; }
+  if $K get namespace "$NS" >/dev/null 2>&1; then
+    echo "box installed into ${NS} over a blocker it said would stop it"; fail=1
+  fi
+  # The operator clears it, because box will not.
+  $K -n "$MIGRATE_LEGACY_NS" delete service frontdoor >/dev/null ||
+    { echo "could not remove the blocking Service"; fail=1; return 0; }
+  [ "$fail" = 0 ] || return 0
+
   # ---- the keep path: one command, onto this cluster ----------------------
   # No --replace-cluster: the cluster the source runs on is the one box installs
   # onto. --no-prior-discover is given because this run's expected answer to the

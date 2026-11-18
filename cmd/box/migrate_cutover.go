@@ -266,7 +266,7 @@ func cutover(ctx context.Context, o cutoverOptions, out say.Reporter, seams cuto
 			for _, b := range blockers {
 				lines = append(lines, b.String())
 			}
-			out.Warn(fmt.Sprintf("%d thing(s) on this cluster stop box installing onto it, and box does not change a cluster it did not install", len(blockers)))
+			out.Warn(blockerWarning(len(blockers)))
 			out.List("check these, and clear each one yourself", lines)
 			out.Line("--replace-cluster is the other road: it stops here, after this snapshot, and `box migrate apply " + wrote.Path + "` installs box's own cluster on that host")
 			return errCutoverBlocked
@@ -359,6 +359,15 @@ func resetLines(o cutoverOptions, nodes []discover.Node) []string {
 		lines = []string{"box can't tell how this cluster was installed: remove it the way it was installed, before anything else uses this host"}
 	}
 	return append(lines, fmt.Sprintf("the source's manifests are in the snapshot (%s) and its host directories are untouched", filepath.Base(snapshotPath(o.discoverOptions, archive.ModeFinal))))
+}
+
+// blockerWarning is the line over the keep path's list: how many things box found,
+// and the rule that keeps box from touching any of them.
+func blockerWarning(n int) string {
+	if n == 1 {
+		return "one thing on this cluster stops box installing onto it, and box does not change a cluster it did not install"
+	}
+	return fmt.Sprintf("%d things on this cluster stop box installing onto it, and box does not change a cluster it did not install", n)
 }
 
 // countApps is "one app" or "3 apps", for a warning.
