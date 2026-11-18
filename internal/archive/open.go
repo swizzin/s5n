@@ -24,11 +24,15 @@ import (
 	"github.com/swizzin/s5n/internal/linktree"
 )
 
-// maxManifest is the largest manifest this box reads. An archive's plan and
-// report live outside it, so a manifest is one line per file it holds; a
-// megabyte is far past any config tree, and a limit is what keeps a crafted
-// archive from asking for memory it could not otherwise get.
-const maxManifest = 1 << 20
+// maxManifest is the largest manifest this box reads. A manifest is one entry
+// per file the archive holds, about 250 bytes each, and a real config tree is
+// thousands of files (a torrent client keeps two per torrent), so a migration
+// snapshot's manifest runs to megabytes. 64 MiB is a quarter of a million
+// files; the limit is what keeps a crafted archive from asking for memory it
+// could not otherwise get, and the writer refuses to write past it (Close), so
+// no archive exists that a box cannot read back. A variable only so a test can
+// reach the refusal without writing that many files.
+var maxManifest int64 = 64 << 20
 
 // Read is what an archive says about itself, without extracting it: the kind, the
 // mode, when and by which box it was written, and the entry per path. A caller

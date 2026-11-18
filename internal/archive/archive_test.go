@@ -1006,3 +1006,76 @@ func TestAddFilesRefusesWhatTheSetCannotCarry(t *testing.T) {
 		}
 	}
 }
+
+// manyFiles builds a config tree the size of a real torrent client's: one
+// resume file and one torrent per hash, thousands of them, so the manifest
+// holds one entry per file and runs to megabytes.
+func manyFiles(t *testing.T, n int) string {
+	t.Helper()
+	tree := t.TempDir()
+	dir := filepath.Join(tree, "qBittorrent", "BT_backup")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < n; i++ {
+		sum := sha256.Sum256([]byte{byte(i), byte(i >> 8), byte(i >> 16)})
+		hash := hex.EncodeToString(sum[:20])
+		for _, ext := range []string{".fastresume", ".torrent"} {
+			if err := os.WriteFile(filepath.Join(dir, hash+ext), nil, 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	return tree
+}
+
+// A real config tree is thousands of files: a qBittorrent with 1500 torrents
+// alone is 3000 entries, and a box must read back the snapshot it wrote of one.
+func TestReadsTheManifestOfAThousandsOfFilesTree(t *testing.T) {
+	tree := manyFiles(t, 4000)
+	path := filepath.Join(t.TempDir(), "rehearsal.tar.gz")
+	w, err := Create(path, testManifest(KindMigrate, ModeRehearsal))
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if _, err := w.AddTree("config/qbittorrent", tree); err != nil {
+		t.Fatalf("AddTree: %v", err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	m, err := Read(path)
+	if err != nil {
+		t.Fatalf("Read refused the archive this box just wrote: %v", err)
+	}
+	if got := len(m.Entries); got < 8000 {
+		t.Fatalf("manifest holds %d entries, want every file", got)
+	}
+	if _, err := Open(path, filepath.Join(t.TempDir(), "extracted")); err != nil {
+		t.Fatalf("Open refused the archive this box just wrote: %v", err)
+	}
+}
+
+// A manifest past what a box reads is refused when it is written, naming how
+// many files it holds, so no archive exists that its own box cannot open.
+func TestCloseRefusesAManifestNoBoxCouldRead(t *testing.T) {
+	old := maxManifest
+	maxManifest = 64 << 10
+	t.Cleanup(func() { maxManifest = old })
+	tree := manyFiles(t, 400)
+	path := filepath.Join(t.TempDir(), "rehearsal.tar.gz")
+	w, err := Create(path, testManifest(KindMigrate, ModeRehearsal))
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if _, err := w.AddTree("config/qbittorrent", tree); err != nil {
+		t.Fatalf("AddTree: %v", err)
+	}
+	err = w.Close()
+	if err == nil || !strings.Contains(err.Error(), "803 entries") {
+		t.Fatalf("Close = %v, want a refusal naming the 803 entries", err)
+	}
+	if _, statErr := os.Stat(path); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("a refused archive left %s behind (%v)", path, statErr)
+	}
+}

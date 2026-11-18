@@ -337,6 +337,12 @@ func (w *Writer) Close() error {
 		return fmt.Errorf("write %s: %w", ManifestName, err)
 	}
 	raw = append(raw, '\n')
+	if int64(len(raw)) > maxManifest {
+		err := fmt.Errorf("the archive holds %d entries, and its %s would be %d bytes, past the %d a box reads: no archive is written that box cannot open",
+			len(w.m.Entries), ManifestName, len(raw), maxManifest)
+		w.fail(err)
+		return err
+	}
 	hdr := &tar.Header{
 		Name:     ManifestName,
 		Mode:     0o600,

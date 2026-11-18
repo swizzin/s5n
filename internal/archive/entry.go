@@ -31,9 +31,13 @@ var ErrNoEntry = errors.New("no such entry")
 // regular file is an answer: a directory, a link or a device is not something
 // this box reads a value out of.
 //
-// The entry is refused past maxManifest bytes, the same cap the manifest has: a
-// value a caller reads whole has to fit in memory, and a crafted archive must not
-// be able to ask for more.
+// The entry is refused past maxEntry bytes: a value a caller reads whole has to
+// fit in memory, and a crafted archive must not be able to ask for more.
+// maxEntry is the largest single entry ReadEntry returns: a plan, a report, one
+// value a caller reads whole. It is not the manifest's cap, which grows with the
+// number of files an archive holds.
+const maxEntry = 1 << 20
+
 func ReadEntry(archive, name string) ([]byte, error) {
 	clean := path.Clean(name)
 	if !safeName(clean) {
@@ -59,10 +63,10 @@ func ReadEntry(archive, name string) ([]byte, error) {
 		if hdr.Typeflag != tar.TypeReg {
 			return nil, fmt.Errorf("%s: %s is not a file", archive, clean)
 		}
-		if hdr.Size < 0 || hdr.Size > maxManifest {
-			return nil, fmt.Errorf("%s: %s is %d bytes, past the %d this box reads", archive, clean, hdr.Size, maxManifest)
+		if hdr.Size < 0 || hdr.Size > maxEntry {
+			return nil, fmt.Errorf("%s: %s is %d bytes, past the %d this box reads", archive, clean, hdr.Size, maxEntry)
 		}
-		raw, err := io.ReadAll(io.LimitReader(tr, maxManifest))
+		raw, err := io.ReadAll(io.LimitReader(tr, maxEntry))
 		if err != nil {
 			return nil, fmt.Errorf("read %s from %s: %w", clean, archive, err)
 		}
