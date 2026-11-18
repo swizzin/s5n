@@ -157,7 +157,7 @@ func checkPriorRead(prior *priorRead, read *migrationRead, o cutoverOptions, out
 		}
 		out.List("an earlier read had these, and this one cannot find them", goneLines(gone))
 		out.Warn(fmt.Sprintf("%s had %s this read cannot find: cutover stops rather than migrate a source that lost one",
-			filepath.Base(prior.path), countApps(len(gone))))
+			filepath.Base(prior.path), appCount(len(gone))))
 		out.Line(surveyLine(kept))
 		out.Muted("box is not the one who deleted them: put each back the way it was and run cutover again, or run `box migrate discover` if they are gone for good.")
 		return errCutoverPrior
@@ -206,6 +206,14 @@ func checkPriorRead(prior *priorRead, read *migrationRead, o cutoverOptions, out
 // noPriorAdvice is the better first step, said once: a read taken while the source
 // is whole is what makes a cutover's diff mean something.
 const noPriorAdvice = "run `box migrate discover` while the source is still whole, then run cutover again: it compares the two reads and stops if an app went missing. `--no-prior-discover` says you know there is nothing earlier to compare against."
+
+// appCount is "1 app" or "3 apps", for a line about how many went missing.
+func appCount(n int) string {
+	if n == 1 {
+		return "one app"
+	}
+	return fmt.Sprintf("%d apps", n)
+}
 
 // surveyLine is where a refusing cutover put the read it kept, and why that
 // matters: the next cutover carries it.

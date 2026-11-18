@@ -6629,7 +6629,7 @@ migrate_keep_box() {
       --values "$WORK/values.yaml" --grant "$WORK/grant.yaml" \
       --record "$WORK/cluster.yaml" \
       --domain "$DOMAIN" --login "$LOGIN" --password-file "$WORK/authelia-password" \
-      --config-path "$CONFIG_PATH" --box-namespace "$NS" "$@"
+      --config-path "$CONFIG_PATH" --box-namespace "$NS" --paths-in-node "$@"
   }
 
   # ---- the first read of a source nothing has read ------------------------
@@ -6709,7 +6709,7 @@ migrate_keep_box() {
   echo "  the keep path (snapshot, platform, install, adoption): $(( $(date +%s) - started ))s"
   # The read on record was diffed, not skipped by the flag, and the app that came
   # back is named as new rather than read as a gap.
-  grep -q "^new since the earlier read (kept)$" "$WORK/keep-cutover.txt" ||
+  grep -q "^new since the earlier read (kept):$" "$WORK/keep-cutover.txt" ||
     { echo "the run did not diff against the read on record:"; grep -n "earlier read" "$WORK/keep-cutover.txt" || true; fail=1; }
   grep -qF "  ${MIGRATE_RADARR_INSTANCE} (from ${MIGRATE_RADARR_INSTANCE}, in ${MIGRATE_LEGACY_NS})" "$WORK/keep-cutover.txt" ||
     { echo "the run does not name the app that is new since the earlier read"; fail=1; }
@@ -6845,7 +6845,7 @@ PY
     --grant "$WORK/grant.yaml" --values "$WORK/values.yaml" \
     --kubeconfig "$WORK/kubeconfig" --record "$WORK/cluster.yaml" \
     --domain "$DOMAIN" --login "$LOGIN" --password-file "$WORK/authelia-password" \
-    --config-path "$CONFIG_PATH" --box-namespace "$NS" \
+    --config-path "$CONFIG_PATH" --box-namespace "$NS" --paths-in-node \
     >"$WORK/keep-apply-again.txt" 2>&1; then
     cat "$WORK/keep-apply-again.txt"; fail=1; return 0
   fi

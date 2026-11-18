@@ -50,10 +50,20 @@ type cutoverOptions struct {
 }
 
 func runMigrateCutover(ctx context.Context, args []string) {
+	// --paths-in-node is the e2e's storage switch, taken out of the arguments
+	// before the FlagSet sees them, exactly as `box migrate apply` takes it: the
+	// keep path hands over to that same install, and the app's directories and the
+	// login's are inside the node there.
+	pathsInNode, args, err := takePathsInNode(args)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "box: %v\n", err)
+		os.Exit(2)
+	}
 	fs := flag.NewFlagSet("migrate cutover", flag.ExitOnError)
 	o := cutoverOptions{discoverOptions: discoverOptions{Box: version}}
 	ns := addDiscoverFlags(fs, &o.discoverOptions, "the final snapshot to write (default: "+bundle.Dir+"/migrate-<time>-final.tar.gz)")
 	o.apply = addCutoverApplyFlags(fs, &o.Kubeconfig)
+	o.apply.install.pathsInNode = pathsInNode
 	// The read and the install name one release: --chart-repo and
 	// --chart-version are apply's flags, and the plan's image variants come
 	// from that same chart.
