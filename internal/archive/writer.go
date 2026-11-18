@@ -18,6 +18,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/swizzin/s5n/internal/atomicfile"
@@ -186,6 +187,123 @@ func (w *Writer) AddTree(prefix, dir string) ([]Skipped, error) {
 		return nil, err
 	}
 	return skipped, nil
+}
+
+// Carried is what AddFiles added: which of the named files went in, which were
+// not there, and which links it left out.
+type Carried struct {
+	// Added are the files it added, by the path they were named by, relative to
+	// the tree.
+	Added []string
+	// Missing are the named files that are not in the tree.
+	Missing []string
+	// Skipped are the links of the set that were left out, with the reason.
+	Skipped []Skipped
+}
+
+// AddFiles adds only the files named, and the directories above them under
+// prefix. It is AddTree's other half, for a tree an archive carries a part of:
+// Plex's Preferences.xml and its databases are the state a migration needs, and
+// its Metadata tree is tens of gigabytes of covers Plex rebuilds from the data
+// it is given.
+//
+// The rules are AddTree's: the same link rule, the same modes, and the same
+// sha256 per entry, so a carried subset is as verifiable as a whole tree. The
+// files are named relative to dir, in slash form.
+//
+// A named file that is not there is returned in Missing and is not an error: a
+// SQLite database's -wal and -shm exist only while a writer has the database
+// open. Which of the set an app cannot do without is the caller's rule, and this
+// is one pass with one answer.
+func (w *Writer) AddFiles(prefix, dir string, files []string) (Carried, error) {
+	var res Carried
+	if err := w.ready(prefix); err != nil {
+		return res, err
+	}
+	if !safeName(prefix) {
+		return res, fmt.Errorf("add %s: a tree's prefix is a path inside the archive", dir)
+	}
+	info, err := os.Lstat(dir)
+	if err != nil {
+		return res, fmt.Errorf("add %s: %w", dir, err)
+	}
+	if !info.IsDir() {
+		return res, fmt.Errorf("add %s: not a directory", dir)
+	}
+	if err := w.addDir(prefix, info); err != nil {
+		return res, err
+	}
+	// made is every directory of the tree already in the archive: a set of files
+	// shares them, and an entry asked for twice is a refusal rather than two.
+	made := map[string]bool{}
+	for _, rel := range files {
+		if !safeName(rel) {
+			return res, fmt.Errorf("%q is not a file inside %s: a carried file is a relative path with no .. in it", rel, dir)
+		}
+		parts := strings.Split(rel, "/")
+		absent := false
+		for i := 1; i < len(parts); i++ {
+			parent := strings.Join(parts[:i], "/")
+			if made[parent] {
+				continue
+			}
+			full := filepath.Join(dir, filepath.FromSlash(parent))
+			pinfo, err := os.Lstat(full)
+			if err != nil {
+				if errors.Is(err, fs.ErrNotExist) {
+					// No directory above it is no file: the two are one answer
+					// to the caller, which is asking what the snapshot has.
+					absent = true
+					break
+				}
+				return res, fmt.Errorf("add %s: %w", full, err)
+			}
+			if !pinfo.IsDir() {
+				return res, fmt.Errorf("add %s: %s is a file, so nothing can be carried under it", full, parent)
+			}
+			if err := w.addDir(path.Join(prefix, parent), pinfo); err != nil {
+				return res, err
+			}
+			made[parent] = true
+		}
+		if absent {
+			res.Missing = append(res.Missing, rel)
+			continue
+		}
+		full := filepath.Join(dir, filepath.FromSlash(rel))
+		info, err := os.Lstat(full)
+		if err != nil {
+			if errors.Is(err, fs.ErrNotExist) {
+				res.Missing = append(res.Missing, rel)
+				continue
+			}
+			return res, fmt.Errorf("add %s: %w", full, err)
+		}
+		name := path.Join(prefix, rel)
+		switch {
+		case info.Mode().IsRegular():
+			if err := w.addFileFrom(name, full, info); err != nil {
+				return res, err
+			}
+			res.Added = append(res.Added, rel)
+		case info.Mode()&fs.ModeSymlink != 0:
+			skip, err := w.addLink(name, full, dir, rel)
+			if err != nil {
+				return res, err
+			}
+			if skip != nil {
+				res.Skipped = append(res.Skipped, *skip)
+				continue
+			}
+			res.Added = append(res.Added, rel)
+		default:
+			if info.IsDir() {
+				return res, fmt.Errorf("%s is a directory: a carried file is a file or a link inside the tree", full)
+			}
+			return res, fmt.Errorf("%s is a %s: a carried file is a file or a link inside the tree", full, modeName(info.Mode()))
+		}
+	}
+	return res, nil
 }
 
 // Close writes the manifest as the archive's last entry and makes the file

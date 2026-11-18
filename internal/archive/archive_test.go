@@ -11,7 +11,9 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"reflect"
 	"runtime"
+	"sort"
 	"strings"
 	"syscall"
 	"testing"
@@ -870,5 +872,137 @@ func TestWriterRefusesNamesThatCollide(t *testing.T) {
 	}
 	if err := w.AddFile("late", []byte("x"), 0o600); err == nil || !strings.Contains(err.Error(), "closed") {
 		t.Errorf("AddFile after Close = %v, want a refusal", err)
+	}
+}
+
+// TestAddFilesCarriesOnlyTheNamedFiles: a tree an archive carries a part of
+// goes in as exactly the files named and the directories above them, so the set
+// is what adders read and what Open puts back. A named file the tree does not
+// have is reported, not refused: a database's -wal exists only while something
+// has it open.
+func TestAddFilesCarriesOnlyTheNamedFiles(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, "Library", "Application Support", "Databases"), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "Library", "Application Support", "Preferences.xml"), []byte("<Preferences/>\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "Library", "Application Support", "Databases", "library.db"), []byte("sqlite\n"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	// The part of the tree a snapshot does not carry: covers and thumbnails the
+	// app rebuilds, and a log at the pod's stdout.
+	if err := os.MkdirAll(filepath.Join(dir, "Metadata", "Posters"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "Metadata", "Posters", "poster.jpg"), []byte("jpeg\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("/proc/self/fd/1", filepath.Join(dir, "Plex Media Server.log")); err != nil {
+		t.Fatal(err)
+	}
+
+	want := []string{
+		"Library/Application Support/Preferences.xml",
+		"Library/Application Support/Databases/library.db",
+		// Named and absent: a -wal beside a database nobody has open.
+		"Library/Application Support/Databases/library.db-wal",
+		// A link at the pod's stdout: inside the listed set, out of the archive.
+		"Plex Media Server.log",
+	}
+	path := filepath.Join(t.TempDir(), "part.tar.gz")
+	w, err := Create(path, testManifest(KindMigrate, ModeFinal))
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	carried, err := w.AddFiles("config/plex", dir, want)
+	if err != nil {
+		t.Fatalf("AddFiles: %v", err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if got := carried.Missing; len(got) != 1 || got[0] != want[2] {
+		t.Errorf("Missing = %v, want just the -wal", got)
+	}
+	if len(carried.Skipped) != 1 || !strings.Contains(carried.Skipped[0].Path, "Plex Media Server.log") {
+		t.Errorf("Skipped = %+v, want the link at the pod's stdout", carried.Skipped)
+	}
+
+	m, err := Read(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got []string
+	for name := range m.Entries {
+		got = append(got, name)
+	}
+	sort.Strings(got)
+	wantEntries := []string{
+		"config/plex",
+		"config/plex/Library",
+		"config/plex/Library/Application Support",
+		"config/plex/Library/Application Support/Databases",
+		"config/plex/Library/Application Support/Databases/library.db",
+		"config/plex/Library/Application Support/Preferences.xml",
+	}
+	if !reflect.DeepEqual(got, wantEntries) {
+		t.Errorf("the archive holds\n  %v\nwant\n  %v", got, wantEntries)
+	}
+	// The directories keep the modes the tree had, and a carried file keeps its
+	// own: the archive's rule, on a subset as on a whole tree.
+	if e := m.lookup("config/plex/Library"); e == nil || e.Mode != "0750" {
+		t.Errorf("config/plex/Library = %+v, want the tree's 0750", e)
+	}
+	if e := m.lookup("config/plex/Library/Application Support/Databases/library.db"); e == nil || e.Mode != "0640" {
+		t.Errorf("the database = %+v, want the tree's 0640", e)
+	}
+
+	// What the set names is what Open puts back: the metadata tree is not in it,
+	// and the absent companion is not a hole extraction complains about.
+	extracted := filepath.Join(t.TempDir(), "out")
+	if _, err := Open(path, extracted); err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(extracted, "config", "plex", "Metadata")); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("the extracted tree holds Metadata: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(extracted, "config", "plex", "Library", "Application Support", "Databases", "library.db")); err != nil {
+		t.Errorf("the extracted tree has no database: %v", err)
+	}
+}
+
+// TestAddFilesRefusesWhatTheSetCannotCarry: a name that is not a file inside the
+// tree, and a listed directory, are refusals rather than an archive with a hole
+// in it.
+func TestAddFilesRefusesWhatTheSetCannotCarry(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, "Databases"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "file"), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	tests := []struct{ name, want string }{
+		{"../escape", "relative path"},
+		{"/etc/passwd", "relative path"},
+		{"./file", "relative path"},
+		{"Databases", "is a directory"},
+		{"file/under", "is a file"},
+	}
+	for _, tt := range tests {
+		path := filepath.Join(t.TempDir(), "bad.tar.gz")
+		w, err := Create(path, testManifest(KindMigrate, ModeFinal))
+		if err != nil {
+			t.Fatalf("Create: %v", err)
+		}
+		if _, err := w.AddFiles("config/app", dir, []string{tt.name}); err == nil || !strings.Contains(err.Error(), tt.want) {
+			t.Errorf("AddFiles(%q) = %v, want it to name %q", tt.name, err, tt.want)
+		}
+		w.Discard()
+		if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+			t.Errorf("a refused AddFiles(%q) left %s behind", tt.name, path)
+		}
 	}
 }
