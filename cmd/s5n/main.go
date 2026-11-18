@@ -30,6 +30,8 @@ func main() {
 		err = runQbtConfig(os.Args[2:])
 	case "tautulli-config":
 		err = runTautulliConfig(os.Args[2:])
+	case "probe":
+		err = runProbe(os.Args[2:])
 	case "version":
 		fmt.Println(version)
 	default:
@@ -48,6 +50,7 @@ commands:
   wiring           connect qBittorrent, the Arrs, Prowlarr, Plex and Tautulli, and prove /data
   qbt-config       seed the qBittorrent WebUI username and password into qBittorrent.conf
   tautulli-config  seed Tautulli's api_key into config.ini
+  probe            dial one address and report whether it opened, for box's lock proof
   version          print the build version
 `)
 	os.Exit(2)
