@@ -229,6 +229,7 @@ func Settle(ctx context.Context, p *plan.Plan, in SettleInput) (*plan.Plan, Sett
 	if err := s.settlePaths(); err != nil {
 		return nil, nil, err
 	}
+	s.settleExisting()
 	s.settled.sort()
 	return s.plan, s.settled, nil
 }
@@ -304,7 +305,7 @@ func (s *settler) checkAll(ctx context.Context) error {
 			continue
 		}
 		dir := filepath.Join(s.dir, name)
-		if _, err := copyTree(dir, src, os.Geteuid(), os.Getegid()); err != nil {
+		if _, err := copyForCheck(dir, src, os.Geteuid(), os.Getegid()); err != nil {
 			return fmt.Errorf("settle %s from %s: %w", name, src, err)
 		}
 		rep, err := rw.Check(ctx, rewrite.Input{App: name, Dir: dir, Plan: s.plan, Targets: s.in.Targets, Runs: runs, Run: s.in.Run})
@@ -451,6 +452,62 @@ func (s *settler) settlePaths() error {
 		}
 	}
 	return nil
+}
+
+// settleExisting calls out the defaults the plan already carried -- an address
+// discovery proposed for one app, a path it left where it was -- so a read
+// reports, and a guided run asks about, every decision the plan was written
+// with, not only the ones this pass made. A default is never silent, whichever
+// step took it.
+//
+// An item this pass already added merges into one line: the value, its reason
+// and every place that holds it read once.
+func (s *settler) settleExisting() {
+	for _, r := range s.plan.Hosts {
+		if !r.Default || r.Host == "" {
+			continue
+		}
+		item := SettledItem{
+			Value: addressText(r.Host, r.Port), Why: ruleReason(r.Why),
+			Host: r.Host, Port: r.Port, Default: true,
+		}
+		if r.Leave {
+			s.settled.add(actionLeave, item)
+			continue
+		}
+		item.App = r.App
+		s.settled.add(actionRewrite+r.App, item)
+	}
+	for _, name := range planApps(s.plan) {
+		for _, r := range s.plan.Apps[name].Paths {
+			if !r.Default {
+				continue
+			}
+			s.settled.add(actionLeave, SettledItem{
+				Value: r.From, Why: ruleReason(r.Why), Default: true,
+			})
+		}
+	}
+}
+
+// ruleReason is a rule's why without the action a rule writes in front of it:
+// discovery and Settle both begin with the decision, and the called-out list
+// already says it in the group's header.
+func ruleReason(why string) string {
+	for _, action := range []string{actionLeave + ": ", "rewrite to "} {
+		if !strings.HasPrefix(why, action) {
+			continue
+		}
+		rest := strings.TrimPrefix(why, action)
+		if action == "rewrite to " {
+			if _, reason, ok := strings.Cut(rest, ": "); ok {
+				return reason
+			}
+			continue
+		}
+		return rest
+	}
+	return why
 }
 
 // addressKey is how two reports' addresses are known to be the same one: DNS

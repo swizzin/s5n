@@ -15,6 +15,7 @@ package apply
 import (
 	"context"
 	"encoding/json"
+	"net"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -752,10 +753,20 @@ func TestSettleLeavesAnUncoveredPathAsItIs(t *testing.T) {
 	if len(twice.Apps["sonarr"].Paths) != len(again.Apps["sonarr"].Paths) {
 		t.Errorf("a second settle added %d path rules", len(twice.Apps["sonarr"].Paths)-len(again.Apps["sonarr"].Paths))
 	}
+	// The rule is a default of the plan now, so it is called out once -- with
+	// the reason it was written with -- and not twice: a default nothing has
+	// answered is still a decision box made.
+	var lines int
 	for _, line := range calledAgain.Lines() {
 		if strings.Contains(line, "/mnt/other/shows") {
-			t.Errorf("a second settle still calls out the path it settled: %q", line)
+			lines++
+			if !strings.Contains(line, "box cannot tell what /mnt/other/shows is") {
+				t.Errorf("the plan's own default is called out as %q", line)
+			}
 		}
+	}
+	if lines != 1 {
+		t.Errorf("the plan's default appears in the called-out list %d times, want once", lines)
 	}
 }
 
@@ -847,6 +858,35 @@ func TestSummaryNamesEveryDefaultAndLeft(t *testing.T) {
 	}
 	if len(shown.Defaults) != 2 {
 		t.Errorf("the summary names %d defaults, want the two the plan took", len(shown.Defaults))
+	}
+}
+
+// TestSettleReadsARunningAppsConfig: a check is taken from a source that may
+// still be running, and a running app's config directory holds what only its own
+// process can use: qBittorrent's ipc-socket. A check reads files, so the socket
+// is left out of its private copy rather than refused -- refusing it stopped a
+// rehearsal of a live source. apply's staging copy still refuses one, because
+// what apply carries becomes the release's config.
+func TestSettleReadsARunningAppsConfig(t *testing.T) {
+	r := newRehearsal(t, rehearsalHosts(false), false)
+	socket := filepath.Join(r.path("qbittorrent"), "qBittorrent", "ipc-socket")
+	ln, err := net.Listen("unix", socket)
+	if err != nil {
+		t.Skipf("this host cannot make a unix socket: %v", err)
+	}
+	defer ln.Close()
+
+	_, called, err := Settle(context.Background(), r.plan(), r.settleInput())
+	if err != nil {
+		t.Fatalf("Settle refused a running source's config: %v", err)
+	}
+	if called.Empty() {
+		t.Error("the fixture called nothing out, so the read did less than it says")
+	}
+
+	// And apply's own copy still refuses what it would carry into the release.
+	if _, err := copyTree(filepath.Join(t.TempDir(), "staged"), r.path("qbittorrent"), os.Geteuid(), os.Getegid()); err == nil {
+		t.Error("the staging copy carried a socket")
 	}
 }
 

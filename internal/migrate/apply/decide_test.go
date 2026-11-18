@@ -24,6 +24,68 @@ func settleFixture(t *testing.T) (*plan.Plan, Settled) {
 	return p, called
 }
 
+// TestDecideAsksAboutThePlansOwnDefaults: a default discovery wrote -- a pod
+// address it proposed for one app -- is a decision the plan already carries, so
+// the read calls it out and a guided run asks about it exactly like the ones the
+// checks made.
+func TestDecideAsksAboutThePlansOwnDefaults(t *testing.T) {
+	r := newRehearsal(t, rehearsalHosts(false)+`  - host: 10.244.0.7
+    port: 8081
+    app: qbittorrent
+    default: true
+    why: "rewrite to qbittorrent: 10.244.0.7:8081 was its pod's address, which does not survive the move"
+`, false)
+	p, called, err := Settle(context.Background(), r.plan(), r.settleInput())
+	if err != nil {
+		t.Fatalf("Settle: %v", err)
+	}
+	// Called out with the action in the header and the reason on the line, not
+	// the action twice.
+	var found *SettledItem
+	for _, g := range called {
+		for i, it := range g.Items {
+			if it.Value == "10.244.0.7:8081" {
+				found = &g.Items[i]
+				if g.Action != actionRewrite+"qbittorrent" {
+					t.Errorf("the plan's default is listed under %q", g.Action)
+				}
+			}
+		}
+	}
+	if found == nil {
+		t.Fatalf("the plan's own default is not called out:\n%s", strings.Join(called.Lines(), "\n"))
+	}
+	if strings.HasPrefix(found.Why, "rewrite to ") {
+		t.Errorf("the reason repeats the action: %q", found.Why)
+	}
+	// And it is a question like any other.
+	var asked []Choice
+	decided, err := Decide(p, called, func(c Choice) (string, error) {
+		asked = append(asked, c)
+		if c.Host == "10.244.0.7" {
+			return "sonarr", nil
+		}
+		return c.App, nil
+	})
+	if err != nil {
+		t.Fatalf("Decide: %v", err)
+	}
+	var got *plan.HostRule
+	for i := range p.Hosts {
+		if p.Hosts[i].Host == "10.244.0.7" {
+			got = &p.Hosts[i]
+		}
+	}
+	if got == nil || got.App != "sonarr" || got.Default {
+		t.Errorf("the answered rule = %+v, want sonarr and the operator's own decision", got)
+	}
+	for _, line := range decided.Defaults().Lines() {
+		if strings.Contains(line, "10.244.0.7") {
+			t.Errorf("the summary still names an answered default: %q", line)
+		}
+	}
+}
+
 // TestDecideWritesTheAnswerIntoThePlan: an address box defaulted to one Arr is
 // pointed at the other when the operator says so, and the rule says who decided.
 func TestDecideWritesTheAnswerIntoThePlan(t *testing.T) {

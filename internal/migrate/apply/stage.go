@@ -45,7 +45,23 @@ type Staged struct {
 // pod's user is not whoever ran box. The directory's own times are set after
 // its children, or writing them would move it again.
 func copyTree(dst, src string, uid, gid int) (Staged, error) {
-	c := &copier{dst: dst, src: src, uid: uid, gid: gid}
+	return copy(dst, src, uid, gid, false)
+}
+
+// copyForCheck copies a config tree for a pass that only reads it (Settle's
+// checks), which is taken from a source that may still be running: a socket or
+// fifo the app holds open is left out rather than refused, because a reader can
+// do nothing with one and a running source always has one (qBittorrent's
+// ipc-socket). A snapshot's own copy applies the same rule, and reports what it
+// left (internal/archive).
+func copyForCheck(dst, src string, uid, gid int) (Staged, error) {
+	return copy(dst, src, uid, gid, true)
+}
+
+// copy is both copies: the same walk, with the kernel's own files either left
+// out or refused.
+func copy(dst, src string, uid, gid int, skipKernel bool) (Staged, error) {
+	c := &copier{dst: dst, src: src, uid: uid, gid: gid, skipKernel: skipKernel}
 	if err := os.MkdirAll(dst, 0o755); err != nil {
 		return Staged{}, fmt.Errorf("create %s: %w", dst, err)
 	}
@@ -75,6 +91,9 @@ type copier struct {
 	uid, gid int
 	st       Staged
 	dirs     []dirTime
+	// skipKernel leaves a device, socket or fifo out instead of refusing it:
+	// only a copy taken from a running source meets one.
+	skipKernel bool
 }
 
 // dirTime is one directory of the copy, and the times it has to end up with.
@@ -121,6 +140,9 @@ func (c *copier) entry(path string, d fs.DirEntry, err error) error {
 		return nil
 	case info.Mode()&fs.ModeSymlink != 0:
 		return copyLink(target, path, c.src, rel, c.uid, c.gid)
+	}
+	if c.skipKernel && info.Mode()&(fs.ModeDevice|fs.ModeCharDevice|fs.ModeSocket|fs.ModeNamedPipe|fs.ModeIrregular) != 0 {
+		return nil
 	}
 	return fmt.Errorf("%s is a %s: migrate copies files, directories and links inside the config directory, not devices or sockets",
 		path, modeName(info.Mode()))
