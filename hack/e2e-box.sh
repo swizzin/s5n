@@ -5126,6 +5126,13 @@ MIGRATE_SOURCE_ACCOUNT=source-login
 # the release's v9.5.4 has to start on it. Pinned by digest like the other old
 # source images, and no renovate comment: a bump would stop exercising that.
 MIGRATE_PBH_IMAGE=ghostchu/peerbanhelper:v7.3.0@sha256:53b3daccaa9e1dfb929540a4ad5026963a054b8af51099fa84860a8a1989e58b
+# The name the source PeerBanHelper's one qBittorrent downloader is keyed by,
+# which is what a v7 config does: it keys each downloader by its name, and PBH's
+# own config migration 32 is what re-keys them to UUIDs and keeps the old key as
+# the `name:`. Deliberately not `qBittorrent`, the name wiring's own downloader
+# has: after the release's migrations the only thing that still ties this
+# downloader to box's qBittorrent is the endpoint the migration pointed at it.
+MIGRATE_PBH_DOWNLOADER=source-qbit
 # The chart's own autobrr and qui, which the source also runs: their account
 # name is what this fixture varies, not their version, so a source of the same
 # version is one the migration reads the same way the release writes it.
@@ -5958,8 +5965,15 @@ migrate_source_account() { # migrate_source_account <app> <name> <password-file>
 # older than the config migration that writes the privacy block back (41), so
 # the file has none. Both are asserted here, because the pbh assertion after the
 # migration only means anything if the fixture really is the shape it claims.
+#
+# The one downloader is the shape a v7 user had as well: a `client:` section
+# keyed by the downloader's name, pointing at the source's qBittorrent, written
+# into the file the way the v7 WebUI writes it (there is no `client:` block in
+# its template at all). The release's own migration 32 re-keys it to a UUID on
+# the start that migrates the file, so what wiring meets is a downloader under
+# an id nobody recorded.
 migrate_source_pbh_config() { # migrate_source_pbh_config <src>
-  local file="$1/var/data/pbh/config/config.yml" i
+  local file="$1/var/data/pbh/config/config.yml" i password
   for i in $(seq 1 150); do
     [ -f "$file" ] && break
     sleep 2
@@ -5971,7 +5985,25 @@ migrate_source_pbh_config() { # migrate_source_pbh_config <src>
     echo "the source PeerBanHelper's config has a privacy block, and the v7 config this fixture runs has none"
     return 1
   fi
-  echo "  pbh: the source's config.yml is config-version 27 with no privacy block, as a v7 wrote it"
+  if grep -q '^client:' "$file"; then
+    echo "the source PeerBanHelper's config already has a client block, and the v7 template writes none"
+    return 1
+  fi
+  password=$(cat "$WORK/source/qbittorrent-password") ||
+    { echo "could not read the source qBittorrent's password"; return 1; }
+  cat >>"$file" <<EOF
+
+client:
+  ${MIGRATE_PBH_DOWNLOADER}:
+    type: qbittorrent
+    name: ${MIGRATE_PBH_DOWNLOADER}
+    endpoint: http://qbittorrent:${MIGRATE_QBIT_PORT}
+    username: admin
+    password: "${password}"
+EOF
+  grep -qx "  ${MIGRATE_PBH_DOWNLOADER}:" "$file" ||
+    { echo "the source PeerBanHelper's config has no ${MIGRATE_PBH_DOWNLOADER} downloader after writing one"; return 1; }
+  echo "  pbh: the source's config.yml is config-version 27 with no privacy block and a downloader keyed ${MIGRATE_PBH_DOWNLOADER}, as a v7 wrote it"
 }
 
 # migrate_check_arr <app> <port> <category> <client id> <key file>: what a
@@ -7087,6 +7119,63 @@ migrate_box() {
   [ "${pbh_version:-0}" -ge 41 ] ||
     { echo "the migrated PeerBanHelper's config is at version ${pbh_version:-none}, and its own migrations did not run"; fail=1; }
   echo "  pbh's config is at version ${pbh_version} and still says analytics: false"
+
+  # ---- the downloader the source's v7 pbh held -----------------------------
+  # The source keyed its one downloader by a name, and the app's own migration
+  # 32 renamed that key to a UUID. The migration could therefore only file the
+  # adoption under the old name, which no longer exists when wiring runs: it has
+  # to find the downloader by the endpoint the migration pointed at the
+  # release's qBittorrent, take it over, and record the id the app really has.
+  # A second downloader for one qBittorrent is what PBH refuses at the create,
+  # and what this would have left behind if it had simply made one.
+  log "PeerBanHelper's downloader: adopted by endpoint, not created again"
+  pbh_result=$(status_field "[s['result'] for s in d['steps'] if s['name']=='pbh/downloader'][0]" 2>/dev/null || true)
+  pbh_detail=$(status_field "[s['detail'] for s in d['steps'] if s['name']=='pbh/downloader'][0]" 2>/dev/null || true)
+  echo "  receipt: pbh/downloader ${pbh_result:-missing} (${pbh_detail:-no detail})"
+  [ "$pbh_result" = ok ] ||
+    { echo "the wiring Job did not take over the source's PeerBanHelper downloader: ${pbh_result:-missing} (${pbh_detail:-no detail})"; fail=1; }
+  case "$pbh_detail" in
+    created | recreated*)
+      echo "wiring created the pbh downloader instead of adopting the one the migration carried: ${pbh_detail}"
+      fail=1
+      ;;
+  esac
+  if migrate_forward "$NS" svc/pbh 9898; then
+    pbh_token=$($K -n "$NS" get secret s5n-keys -o jsonpath='{.data.pbh-token}' 2>/dev/null | base64 -d || true)
+    if [ -z "$pbh_token" ]; then
+      echo "the release Secret holds no PeerBanHelper token"; fail=1
+    else
+      curl -sS --max-time 20 -H "Authorization: Bearer ${pbh_token}" \
+        "http://127.0.0.1:${MIGRATE_PF_PORT}/api/downloaders" \
+        >"$WORK/pbh-downloaders-migrate.json" 2>/dev/null || true
+      # The id the Job recorded, the ids PBH lists, and the endpoint the one it
+      # holds dials: the record has to be the app's own id, there has to be
+      # exactly one row, and it has to be the release's qBittorrent.
+      pbh_row=$(python3 - "$WORK/pbh-downloaders-migrate.json" <<'PY' 2>/dev/null || true
+import json, sys
+rows = (json.load(open(sys.argv[1])).get("data") or [])
+print(len(rows), rows[0]["id"] if len(rows) == 1 else "-", rows[0]["endpoint"] if len(rows) == 1 else "-")
+PY
+      )
+      pbh_owned=$($K -n "$NS" get cm s5n-wiring -o jsonpath='{.data.owned\.json}' 2>/dev/null |
+        python3 -c 'import json,sys; print((json.load(sys.stdin).get("pbh") or {}).get("downloader", ""))' 2>/dev/null || true)
+      read -r pbh_count pbh_id pbh_endpoint <<<"$pbh_row"
+      echo "  PBH holds ${pbh_count:-?} downloader(s): ${pbh_id:-none} -> ${pbh_endpoint:-none} (owned.json: ${pbh_owned:-none})"
+      [ "${pbh_count:-0}" = 1 ] ||
+        { echo "PeerBanHelper holds ${pbh_count:-no} downloaders, want exactly the one the migration carried"; fail=1; }
+      [ -n "$pbh_id" ] && [ "$pbh_id" = "$pbh_owned" ] ||
+        { echo "the Job recorded ${pbh_owned:-no} downloader id, and PeerBanHelper's one downloader is ${pbh_id:-none}"; fail=1; }
+      [ "$pbh_id" != "$MIGRATE_PBH_DOWNLOADER" ] ||
+        { echo "the downloader is still under the source's key ${MIGRATE_PBH_DOWNLOADER}: the app's own re-key did not run"; fail=1; }
+      case "$pbh_endpoint" in
+        "http://qbittorrent:${MIGRATE_QBIT_PORT}/api/v2") ;;
+        *) echo "the downloader dials ${pbh_endpoint:-nothing}, want the release's qBittorrent"; fail=1 ;;
+      esac
+    fi
+    migrate_forward_stop
+  else
+    fail=1
+  fi
   [ "$fail" = 0 ] || return 0
 
   # ---- assertion 1b: Plex, through the runner Job --------------------------
