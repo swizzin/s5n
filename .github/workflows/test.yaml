@@ -321,7 +321,7 @@ jobs:
   # is why a maintainer runs them one after another by hand.)
   #
   # One job per scenario, because a scenario owns its own kind cluster, registry
-  # container and work directory (hack/e2e-box.sh): on one runner the five are
+  # container and work directory (hack/e2e-box.sh): on one runner the six are
   # a queue and the job costs their sum. fail-fast is off so one
   # scenario's failure does not hide the others: they disagree about what is
   # on the cluster before box runs, and a maintainer wants every verdict
@@ -336,7 +336,9 @@ jobs:
   # install that runs Plex once to build its library database, a plan, and a
   # whole bootstrap between them, then the release's Plex on the database a Job
   # rewrote -- plus the Job's image pulled three times, by the source node, the
-  # release node and this host).
+  # release node and this host), migrate-keep 13.0 -> 30 (the same source install,
+  # then the whole platform layer and an install onto the cluster it runs on, and
+  # two rows of cutover refusals before that).
   e2e-box:
     needs: [changes]
     if: needs.changes.outputs.e2e == 'true'
@@ -355,6 +357,8 @@ jobs:
             timeout: 15
           - scenario: migrate
             timeout: 15
+          - scenario: migrate-keep
+            timeout: 30
     runs-on: ubuntu-latest
     timeout-minutes: ${{ matrix.timeout }}
     steps:

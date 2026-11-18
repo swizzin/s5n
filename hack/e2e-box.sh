@@ -46,8 +46,12 @@
 #                 `box apply` refuses to move the release, copies sonarr before
 #                 a values pin moves it, and a rollback restores that copy. This is
 #                 the only scenario box needs to reach the config it copies, so
-#                 it and migrate are the two whose volume roots are a directory
-#                 on this host, mounted into the node (see VOLUME ROOTS below).
+#                 it, migrate and migrate-keep are the three whose volume roots
+#                 are a directory on this host, mounted into the node (see
+#                 VOLUME ROOTS below).
+#   migrate-keep  the same source cut over the other way: box installs onto the
+#                 cluster the source runs on and adopts in place, with the source's
+#                 workloads left at 0 replicas.
 #   migrate       an install box did not make -- qBittorrent, Sonarr, Radarr and
 #                 Plex over plain host directories, seeded through their own
 #                 APIs (and, for Plex, through its own SQLite on the database it
@@ -89,7 +93,7 @@
 # cluster. `all` runs this script once per scenario, which gives each its own
 # work directory, cluster name and exit code.
 #
-# Usage: hack/e2e-box.sh [--keep] [fresh|preinstalled|foreign-gateway|update|migrate|all]   (default: all)
+# Usage: hack/e2e-box.sh [--keep] [fresh|preinstalled|foreign-gateway|update|migrate|migrate-keep|all]   (default: all)
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -140,13 +144,13 @@ SCENARIO=all
 for arg in "$@"; do
   case "$arg" in
     --keep) KEEP=--keep ;;
-    fresh | preinstalled | foreign-gateway | update | migrate | all) SCENARIO=$arg ;;
+    fresh | preinstalled | foreign-gateway | update | migrate | migrate-keep | all) SCENARIO=$arg ;;
     -h | --help)
       sed -n '2,/^set -euo pipefail/p' "$0" | sed 's/^# \{0,1\}//'
       exit 0
       ;;
     *)
-      echo "unknown argument: $arg (want fresh, preinstalled, foreign-gateway, update, migrate or all)" >&2
+      echo "unknown argument: $arg (want fresh, preinstalled, foreign-gateway, update, migrate, migrate-keep or all)" >&2
       exit 2
       ;;
   esac
@@ -159,6 +163,7 @@ if [ "$SCENARIO" = all ]; then
   "$0" foreign-gateway $KEEP || status=1
   "$0" update $KEEP || status=1
   "$0" migrate $KEEP || status=1
+  "$0" migrate-keep $KEEP || status=1
   exit "$status"
 fi
 
@@ -168,6 +173,7 @@ case "$SCENARIO" in
   foreign-gateway) CLUSTER=s5n-box-gw; DOMAIN=box.example.com ;;
   update) CLUSTER=s5n-box-update; DOMAIN=box.update.example.test ;;
   migrate) CLUSTER=s5n-box-migrate; DOMAIN=box.migrate.example.test ;;
+  migrate-keep) CLUSTER=s5n-box-migrate-keep; DOMAIN=box.keep.example.test ;;
 esac
 # The names the catalog serves at a host of their own (Plex and Seerr): the
 # chart renders their routes there, and box resolves and certifies them.
@@ -202,7 +208,7 @@ REGISTRY=""
 # where box cannot reach them: --paths-in-node is how box skips the stat a real
 # host would have passed, and nothing box does touches an app's config.
 #
-# update and migrate are the two that need the opposite. A step copies an app's
+# update, migrate and migrate-keep are the ones that need the opposite. A step copies an app's
 # config, restores it and writes the hold beside the copies -- all of it on the
 # filesystem the seedbox's /config comes from -- so box and the pods have to
 # see one tree; and migrate reads a source install's configs and renames its
@@ -213,7 +219,7 @@ REGISTRY=""
 DATA_PATH=/srv/s5n/data
 CONFIG_PATH=/srv/s5n/config
 KIND_CONFIG=hack/kind.yaml
-if [ "$SCENARIO" = update ] || [ "$SCENARIO" = migrate ]; then
+if [ "$SCENARIO" = update ] || [ "$SCENARIO" = migrate ] || [ "$SCENARIO" = migrate-keep ]; then
   DATA_PATH="$WORK/hostfs/data"
   CONFIG_PATH="$WORK/hostfs/config"
   KIND_CONFIG="$WORK/kind.yaml"
@@ -235,7 +241,7 @@ if [ "$SCENARIO" = update ] || [ "$SCENARIO" = migrate ]; then
     }
   ' hack/kind.yaml >"$KIND_CONFIG"
   grep -qF "containerPath: ${WORK}/hostfs" "$KIND_CONFIG" || {
-    echo "the kind config for the update scenario has no mount for ${WORK}/hostfs"
+    echo "the kind config has no mount for ${WORK}/hostfs"
     exit 1
   }
 fi
@@ -6498,6 +6504,362 @@ PY
 
 # box is the whole interface: a client-go/klog line such as
 # "I1107 ... warnings.go:107] ..." must never appear in what the operator reads.
+# ---- scenario: migrate-keep ------------------------------------------------
+# The same source install as `migrate`, cut over the other way: the source's own
+# cluster is kept.
+#
+# A kept cluster is self-managed: box installs onto the cluster the source already
+# runs on, manages none of its version, and the whole cutover is one command --
+# stop proof, final snapshot, platform layer, install, adoption. The source's
+# workloads stay where they are, at 0 replicas, so rollback is scaling them back
+# up, and box never touches them.
+#
+# What this scenario asserts, in the order a cutover asks it:
+#   - with no earlier read of the source on record, an unattended cutover refuses
+#     rather than migrate a read nothing was compared against, keeps the read as a
+#     survey and names `box migrate discover`;
+#   - an app the earlier read had and this one cannot find stops the run, naming it
+#     (the operator deleted a Deployment, which a read of a running source still
+#     saw and this read cannot);
+#   - an app that came back since the earlier read is listed as new and kept;
+#   - the keep path installs box onto that same cluster and adopts: one seedbox
+#     namespace beside the source's, the configs rewritten in place, the data
+#     renamed rather than moved, the source's API keys and download-client ids
+#     kept, a healthy wiring receipt, and a second apply of the finished plan that
+#     writes nothing.
+#
+# It does not re-assert what `migrate` owns and this path cannot change: the
+# platform install, the login and TLS are `fresh`'s and `preinstalled`'s, and the
+# rows Plex's own binary must rewrite are `migrate`'s. What differs here is where
+# the seedbox lands, and that is what this scenario is about.
+migrate_keep_box() {
+  local src="$WORK/hostfs/legacy" puid pgid app instance folder port category key secret code
+  local expected revision plex_repo plex_tag plex_digest pin snapshot kept started
+  puid=$(id -u)
+  pgid=$(id -g)
+  DATA_PATH="$src/var/data"
+  CONFIG_PATH="$WORK/hostfs/config"
+  mkdir -p "$WORK/source"
+
+  pin=$(variant_pin plex) ||
+    { echo "could not read the chart's plex pin from charts/s5n/variants.yaml"; fail=1; return 0; }
+  read -r plex_repo plex_tag plex_digest <<<"$pin"
+  MIGRATE_PLEX_IMAGE="${plex_repo}:${plex_tag}${plex_digest:+@${plex_digest}}"
+
+  log "the source install's host tree under ${src}"
+  # The preamble prepared box's roots inside the node, on the tree this scenario
+  # shares with it (see VOLUME ROOTS). It goes, so the config root starts as empty
+  # as one `box init` makes, and the tree is this user's: box runs as this user here.
+  docker exec "${CLUSTER}-control-plane" bash -c "
+    rm -rf '$CONFIG_PATH' '$WORK/hostfs/data'
+    mkdir -p '$CONFIG_PATH'
+    chown -R '${puid}:${pgid}' '$WORK/hostfs'"
+  mkdir -p "$src/var/data/qbittorrent" "$src/var/data/sonarr" "$src/var/data/${MIGRATE_RADARR_INSTANCE}" \
+    "$src/var/data/plex" \
+    "$src/var/data/Downloads/tv" "$src/var/data/Downloads/${MIGRATE_RADARR_CATEGORY}" \
+    "$src/var/data/library/tv" "$src/var/data/library/${MIGRATE_RADARR_CATEGORY}"
+  printf 's5n e2e: a downloaded episode, and the import that is the same inode\n' \
+    >"$src/var/data/Downloads/tv/Show.S01E01.mkv"
+  ln -f "$src/var/data/Downloads/tv/Show.S01E01.mkv" "$src/var/data/library/tv/Show.S01E01.mkv"
+  printf 's5n e2e: a downloaded film, and the import that is the same inode\n' \
+    >"$src/var/data/Downloads/${MIGRATE_RADARR_CATEGORY}/Film.2020.mkv"
+  ln -f "$src/var/data/Downloads/${MIGRATE_RADARR_CATEGORY}/Film.2020.mkv" \
+    "$src/var/data/library/${MIGRATE_RADARR_CATEGORY}/Film.2020.mkv"
+  for app in qbittorrent sonarr "$MIGRATE_RADARR_INSTANCE" plex; do
+    printf 's5n e2e: this config directory was the source install\n' >"$src/var/data/${app}/.s5n-e2e-source"
+  done
+  MIGRATE_QBIT_PASSWORD=$(openssl rand -hex 16)
+  printf '%s' "$MIGRATE_QBIT_PASSWORD" >"$WORK/source/qbittorrent-password"
+  chmod 600 "$WORK/source/qbittorrent-password"
+  migrate_legacy_conf "$src/var/data/qbittorrent/qBittorrent/qBittorrent.conf" "$MIGRATE_QBIT_PASSWORD" ||
+    { echo "could not write the source qBittorrent's config"; fail=1; return 0; }
+
+  grep -qF "containerPath: ${WORK}/hostfs" "$KIND_CONFIG" ||
+    { echo "the kind config has no mount for ${WORK}/hostfs: the source's files would be inside the node only"; fail=1; return 0; }
+
+  log "the source install: four apps over host directories, in namespace ${MIGRATE_LEGACY_NS}"
+  migrate_source_manifests "$WORK/source-manifests.yaml" "$src" "$puid" "$pgid"
+  if ! $K apply -f "$WORK/source-manifests.yaml" >"$WORK/source-apply.txt" 2>&1; then
+    cat "$WORK/source-apply.txt"; fail=1; return 0
+  fi
+  for app in qbittorrent sonarr "$MIGRATE_RADARR_INSTANCE" plex; do
+    if ! $K -n "$MIGRATE_LEGACY_NS" rollout status "deployment/${app}" --timeout=300s; then
+      echo "${app} never became ready in the source install"
+      $K -n "$MIGRATE_LEGACY_NS" get pods
+      fail=1; return 0
+    fi
+  done
+
+  log "seeding the source through its own APIs: paths, categories, a root folder and a download client per Arr"
+  if ! migrate_source_qbittorrent "$WORK/source/qbittorrent-password"; then
+    fail=1; return 0
+  fi
+  for instance in sonarr "$MIGRATE_RADARR_INSTANCE"; do
+    case "$instance" in
+      sonarr) port=8989; category=tv; folder=/library/tv ;;
+      *) port=7878; category="$MIGRATE_RADARR_CATEGORY"; folder="/library/${MIGRATE_RADARR_CATEGORY}" ;;
+    esac
+    if ! migrate_source_arr "$instance" "$port" "$category" "$folder" \
+      "$src/var/data/${instance}/config.xml" "$WORK/source/${instance}.key" \
+      "$WORK/source/qbittorrent-password"; then
+      echo "could not seed the source ${instance}"
+      fail=1; return 0
+    fi
+    echo "  ${instance}: root folder ${folder}, download client $(cat "$WORK/source/${instance}.client-id")"
+  done
+  [ "$fail" = 0 ] || return 0
+
+  # The source stops, the way an operator cuts over into a cluster they keep: the
+  # workloads stay, at 0 replicas, so scaling them back up is the rollback.
+  log "stopping the source, and keeping the cluster it runs on"
+  $K -n "$MIGRATE_LEGACY_NS" scale deployment --all --replicas=0 >/dev/null
+  for app in qbittorrent sonarr "$MIGRATE_RADARR_INSTANCE" plex; do
+    $K -n "$MIGRATE_LEGACY_NS" wait --for=delete pod -l "app=${app}" --timeout=180s >/dev/null 2>&1 || true
+  done
+  [ -f "$src/var/data/qbittorrent/qBittorrent/categories.json" ] ||
+    { echo "the source qBittorrent wrote no categories.json: migrate would have no category paths to rewrite"; fail=1; }
+  [ "$fail" = 0 ] || return 0
+
+  keep_cutover() { # keep_cutover <snapshot> <extra arg>...
+    local out=$1
+    shift
+    "$WORK/box" migrate cutover --yes --out "$out" \
+      --kubeconfig "$WORK/kubeconfig" --namespace "$MIGRATE_LEGACY_NS" --root / \
+      --chart-repo "$CHART_REPO" --chart-version "$CHART_VERSION" \
+      --values "$WORK/values.yaml" --grant "$WORK/grant.yaml" \
+      --record "$WORK/cluster.yaml" \
+      --domain "$DOMAIN" --login "$LOGIN" --password-file "$WORK/authelia-password" \
+      --config-path "$CONFIG_PATH" --box-namespace "$NS" "$@"
+  }
+
+  # ---- the first read of a source nothing has read ------------------------
+  # Nothing on record has ever read this source, so an app deleted before now is
+  # invisible to this read. Unattended, box refuses rather than build a plan on a
+  # read nobody compared: it lists what it found, keeps the read as a survey, and
+  # names discover as the better first step.
+  snapshot="$WORK/final-keep.tar.gz"
+  log "cutover with no earlier read: refused, keeping its read and naming box migrate discover"
+  if keep_cutover "$snapshot" >"$WORK/keep-first-read.txt" 2>&1; then
+    echo "cutover took the final snapshot of a source nothing had read before"; fail=1; return 0
+  fi
+  cat "$WORK/keep-first-read.txt"
+  for want in "this is the first read of this source" \
+    "sonarr (from sonarr, in ${MIGRATE_LEGACY_NS})" \
+    "invisible to this read" \
+    "box migrate discover" \
+    "--no-prior-discover"; do
+    grep -qF -- "$want" "$WORK/keep-first-read.txt" ||
+      { echo "the first-read refusal does not say '${want}'"; fail=1; }
+  done
+  [ -e "$snapshot" ] &&
+    { echo "a refused cutover wrote the final snapshot ${snapshot}"; fail=1; }
+  # The read it kept is what the next cutover compares against, so the refusal has
+  # to leave one behind.
+  kept=$(ls "$WORK"/migrate-*-survey.tar.gz 2>/dev/null | head -1) || true
+  [ -n "${kept:-}" ] && [ -f "${kept:-}" ] ||
+    { echo "the first-read refusal kept no survey: nothing would be on record"; fail=1; return 0; }
+  echo "  the read it kept: ${kept}"
+
+  # ---- an app the read of record had, and this one cannot find -------------
+  # The earlier read saw the Radarr; deleting the Deployment is exactly what box
+  # cannot see, and it is why a read of record matters. The run stops naming it,
+  # and keeps this read too.
+  log "deleting the source's Radarr after a read of record: cutover stops naming it"
+  $K -n "$MIGRATE_LEGACY_NS" get deployment "$MIGRATE_RADARR_INSTANCE" -o yaml >"$WORK/radarr-deployment.yaml" ||
+    { echo "could not read the source's Radarr Deployment"; fail=1; return 0; }
+  $K -n "$MIGRATE_LEGACY_NS" delete deployment "$MIGRATE_RADARR_INSTANCE" >/dev/null ||
+    { echo "could not delete the source's Radarr Deployment"; fail=1; return 0; }
+  before=$(ls "$WORK"/migrate-*-survey.tar.gz 2>/dev/null | wc -l) || true
+  if keep_cutover "$snapshot" >"$WORK/keep-diff-stop.txt" 2>&1; then
+    echo "cutover migrated a source that lost an app its earlier read had"; fail=1; return 0
+  fi
+  cat "$WORK/keep-diff-stop.txt"
+  for want in "earlier read: " \
+    "${MIGRATE_RADARR_INSTANCE} (it was ${MIGRATE_RADARR_INSTANCE} in ${MIGRATE_LEGACY_NS})" \
+    "cutover stops rather than migrate a source that lost one"; do
+    grep -qF -- "$want" "$WORK/keep-diff-stop.txt" ||
+      { echo "the diff stop does not say '${want}'"; fail=1; }
+  done
+  [ -e "$snapshot" ] &&
+    { echo "the diff stop wrote the final snapshot ${snapshot}"; fail=1; }
+  after=$(ls "$WORK"/migrate-*-survey.tar.gz 2>/dev/null | wc -l) || true
+  [ "${after:-0}" -gt "${before:-0}" ] ||
+    { echo "the diff stop kept no read of its own (${before} then ${after} surveys)"; fail=1; }
+  [ "$fail" = 0 ] || return 0
+
+  # ---- the app comes back, and is new since the earlier read ---------------
+  log "putting the Radarr back the way the source had it, stopped"
+  $K apply -f "$WORK/radarr-deployment.yaml" >/dev/null ||
+    { echo "could not put the source's Radarr Deployment back"; fail=1; return 0; }
+  $K -n "$MIGRATE_LEGACY_NS" scale deployment "$MIGRATE_RADARR_INSTANCE" --replicas=0 >/dev/null
+  $K -n "$MIGRATE_LEGACY_NS" wait --for=delete pod -l "app=${MIGRATE_RADARR_INSTANCE}" --timeout=180s >/dev/null 2>&1 || true
+  [ "$fail" = 0 ] || return 0
+
+  # ---- the keep path: one command, onto this cluster ----------------------
+  # No --replace-cluster: the cluster the source runs on is the one box installs
+  # onto. --no-prior-discover is given because this run's expected answer to the
+  # first-read question is known either way; the diff still runs, which is what
+  # the "new since the earlier read" line below proves.
+  started=$(date +%s)
+  log "box migrate cutover: the final snapshot, then box onto this cluster and the adoption"
+  if ! keep_cutover "$snapshot" --no-prior-discover >"$WORK/keep-cutover.txt" 2>&1; then
+    cat "$WORK/keep-cutover.txt"; fail=1; return 0
+  fi
+  cat "$WORK/keep-cutover.txt"
+  echo "  the keep path (snapshot, platform, install, adoption): $(( $(date +%s) - started ))s"
+  # The read on record was diffed, not skipped by the flag, and the app that came
+  # back is named as new rather than read as a gap.
+  grep -q "^new since the earlier read (kept)$" "$WORK/keep-cutover.txt" ||
+    { echo "the run did not diff against the read on record:"; grep -n "earlier read" "$WORK/keep-cutover.txt" || true; fail=1; }
+  grep -qF "  ${MIGRATE_RADARR_INSTANCE} (from ${MIGRATE_RADARR_INSTANCE}, in ${MIGRATE_LEGACY_NS})" "$WORK/keep-cutover.txt" ||
+    { echo "the run does not name the app that is new since the earlier read"; fail=1; }
+  # The cluster is the one the source ran on: its workloads are still there, at 0,
+  # which is what makes scaling them back up the rollback.
+  for app in qbittorrent sonarr "$MIGRATE_RADARR_INSTANCE" plex; do
+    replicas=$($K -n "$MIGRATE_LEGACY_NS" get deployment "$app" -o jsonpath='{.spec.replicas}' 2>/dev/null || true)
+    [ "$replicas" = 0 ] ||
+      { echo "the source's ${app} is at ${replicas:-gone} replicas after the cutover: box changed a workload that is not its own"; fail=1; }
+  done
+  grep -q "^wiring ok" "$WORK/keep-cutover.txt" ||
+    { echo "box did not report a healthy receipt for the seedbox it installed beside the source"; fail=1; }
+  # What the migration did, named before it did it: the two renames, the kept keys
+  # and the connections adopted by id.
+  grep -qF "data: rename Downloads to downloads" "$WORK/keep-cutover.txt" ||
+    { echo "the plan did not say it renames Downloads to box's downloads"; fail=1; }
+  grep -qF "data: rename library to media" "$WORK/keep-cutover.txt" ||
+    { echo "the plan did not say it renames library to box's media"; fail=1; }
+  for instance in sonarr "$MIGRATE_RADARR_INSTANCE"; do
+    grep -qF "${instance}: keep its API key (${instance}-apikey)" "$WORK/keep-cutover.txt" ||
+      { echo "the plan did not say it keeps ${instance}'s API key"; fail=1; }
+    grep -qF "${instance}: adopt downloadclient" "$WORK/keep-cutover.txt" ||
+      { echo "the plan did not say it adopts ${instance}'s download client by id"; fail=1; }
+  done
+  [ "$fail" = 0 ] || return 0
+
+  # ---- assertion 1: healthy, on the chart's own images ---------------------
+  log "the migrated apps are ready on the chart's images, beside the source they came from"
+  for instance in qbittorrent sonarr "$MIGRATE_RADARR_INSTANCE"; do
+    app=$instance
+    [ "$instance" = "$MIGRATE_RADARR_INSTANCE" ] && app=radarr
+    expected=$(chart_image "$app") || { echo "could not read the chart's ${app} pin"; fail=1; return 0; }
+    wait_image_ready "${instance}-0" "$expected" ||
+      { echo "${instance}-0 is not ready on the chart's ${expected} (it runs $(pod_image "${instance}-0" || true))"; fail=1; }
+  done
+  [ "$fail" = 0 ] || return 0
+
+  # ---- assertion 2: paths --------------------------------------------------
+  log "paths: the Arrs' root folders, qBittorrent's categories, the renames on disk"
+  for instance in sonarr "$MIGRATE_RADARR_INSTANCE"; do
+    case "$instance" in
+      sonarr) port=8989; category=tv ;;
+      *) port=7878; category="$MIGRATE_RADARR_CATEGORY" ;;
+    esac
+    migrate_check_arr "$instance" "$port" "$category" \
+      "$(cat "$WORK/source/${instance}.client-id")" "$WORK/source/${instance}.key" || fail=1
+  done
+  if migrate_forward "$NS" svc/qbittorrent "$MIGRATE_QBIT_PORT"; then
+    secret=$($K -n "$NS" get secret s5n-keys -o jsonpath='{.data.qbittorrent-password}' 2>/dev/null | base64 -d || true)
+    if [ -z "$secret" ]; then
+      echo "the release Secret holds no qBittorrent password"; fail=1
+    else
+      migrate_check_qbittorrent "$secret" || fail=1
+    fi
+    migrate_forward_stop
+  else
+    fail=1
+  fi
+  for pair in "Downloads downloads" "library media"; do
+    read -r from to <<<"$pair"
+    if [ ! -d "$DATA_PATH/${to}" ]; then
+      echo "the data root has no ${to} directory: the rename of ${from} did not happen"; fail=1
+    fi
+    if [ -e "$DATA_PATH/${from}" ]; then
+      echo "${DATA_PATH}/${from} is still there: the rename left the source's directory behind"; fail=1
+    fi
+  done
+  for category in tv "$MIGRATE_RADARR_CATEGORY"; do
+    links=$(stat -c '%h' "$DATA_PATH/downloads/${category}"/*.mkv 2>/dev/null | head -1) || true
+    [ "${links:-0}" -eq 2 ] ||
+      { echo "${DATA_PATH}/downloads/${category}: link count is ${links:-none}, want 2 -- the download and the import it was hardlinked to are not one file any more"; fail=1; }
+  done
+  for instance in qbittorrent sonarr "$MIGRATE_RADARR_INSTANCE" plex; do
+    [ -f "$CONFIG_PATH/${instance}/.s5n-e2e-source" ] ||
+      { echo "${CONFIG_PATH}/${instance}/ holds no marker: migrate did not copy the whole config directory"; fail=1; }
+  done
+
+  # ---- assertion 3: the keys the source had --------------------------------
+  log "keys: each Arr answers with the API key it had before the migration"
+  for instance in sonarr "$MIGRATE_RADARR_INSTANCE"; do
+    key=$(cat "$WORK/source/${instance}.key")
+    secret=$($K -n "$NS" get secret s5n-keys -o jsonpath="{.data.${instance}-apikey}" 2>/dev/null | base64 -d || true)
+    [ "$secret" = "$key" ] ||
+      { echo "the release Secret's ${instance}-apikey is not the key the source had"; fail=1; }
+    case "$instance" in
+      sonarr) port=8989 ;;
+      *) port=7878 ;;
+    esac
+    if migrate_forward "$NS" "svc/${instance}" "$port"; then
+      code=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 15 -H "X-Api-Key: ${key}" \
+        "http://127.0.0.1:${MIGRATE_PF_PORT}/${instance}/api/v3/system/status" 2>/dev/null || true)
+      migrate_forward_stop
+      [ "$code" = 200 ] ||
+        { echo "${instance} answered ${code:-nothing} to the API key it had before the migration"; fail=1; continue; }
+      echo "  ${instance}: the key from the source is the one in the release Secret, and the app answers it"
+    else
+      fail=1
+    fi
+  done
+  [ "$fail" = 0 ] || return 0
+
+  # ---- assertion 4: the login's rules follow the app set -------------------
+  log "the login: each migrated Arr's API is bypassed through the Gateway, and its UI is not"
+  for instance in sonarr "$MIGRATE_RADARR_INSTANCE"; do
+    migrate_check_login_bypass "$instance" "$WORK/source/${instance}.key" || fail=1
+  done
+
+  # ---- assertion 5: the adopted client, and the receipt --------------------
+  log "ownership: the wiring record names the source's download client, and the receipt is ok"
+  $K -n "$NS" get configmap s5n-wiring -o jsonpath='{.data.owned\.json}' >"$WORK/keep-owned.json" 2>/dev/null || true
+  python3 - "$WORK/keep-owned.json" sonarr "$MIGRATE_RADARR_INSTANCE" \
+    "$(cat "$WORK/source/sonarr.client-id")" "$(cat "$WORK/source/${MIGRATE_RADARR_INSTANCE}.client-id")" <<'PY' || fail=1
+import json, sys
+path, sonarr, radarr, sonarr_id, radarr_id = sys.argv[1:6]
+try:
+    rec = json.load(open(path))
+except (FileNotFoundError, json.JSONDecodeError):
+    sys.exit(f"{path} is not a wiring record: owned.json was not written")
+arr = rec.get("arr") or {}
+for app, want in ((sonarr, sonarr_id), (radarr, radarr_id)):
+    got = (arr.get(app) or {}).get("downloadClient")
+    if str(got) != str(want):
+        sys.exit(f"owned.json records {app}'s download client as {got}, and the source's was {want}")
+print(f"  owned.json: {sonarr} {arr[sonarr]['downloadClient']}, {radarr} {arr[radarr]['downloadClient']} -- the source's ids")
+PY
+  [ "$(status_field 'd["status"]')" = ok ] ||
+    { echo "the wiring receipt is not ok: $(status_field 'd.get("error")')"; fail=1; }
+
+  # ---- assertion 6: a second apply of the finished plan does nothing -------
+  log "a second box migrate apply of the finished plan: one apply, nothing else"
+  revision=$(helm_revision "$NS") || true
+  if ! "$WORK/box" migrate apply "$snapshot" --yes --chart-repo "$CHART_REPO" --chart-version "$CHART_VERSION" \
+    --grant "$WORK/grant.yaml" --values "$WORK/values.yaml" \
+    --kubeconfig "$WORK/kubeconfig" --record "$WORK/cluster.yaml" \
+    --domain "$DOMAIN" --login "$LOGIN" --password-file "$WORK/authelia-password" \
+    --config-path "$CONFIG_PATH" --box-namespace "$NS" \
+    >"$WORK/keep-apply-again.txt" 2>&1; then
+    cat "$WORK/keep-apply-again.txt"; fail=1; return 0
+  fi
+  cat "$WORK/keep-apply-again.txt"
+  grep -qF "s5n in ${NS}: the plan is already applied" "$WORK/keep-apply-again.txt" ||
+    { echo "a second run did not say the plan was already applied:"; grep -v '^$' "$WORK/keep-apply-again.txt" | head -8; fail=1; }
+  grep -qF "nothing to change" "$WORK/keep-apply-again.txt" ||
+    { echo "a second run wrote the release again: the apps it moved already render what it applied"; fail=1; }
+  after=$(helm_revision "$NS") || true
+  [ "$after" = "$revision" ] ||
+    { echo "a second run of the same plan added Helm revision ${after} (was ${revision})"; fail=1; }
+  echo "  the release stayed at revision ${after}"
+}
+
 no_klog() {
   for f in "$WORK"/apply*.txt "$WORK"/bootstrap*.txt "$WORK"/update-*.txt "$WORK"/rollback.txt; do
     [ -e "$f" ] || continue
@@ -6530,6 +6892,8 @@ elif [ "$SCENARIO" = update ]; then
   update_box
 elif [ "$SCENARIO" = migrate ]; then
   migrate_box
+elif [ "$SCENARIO" = migrate-keep ]; then
+  migrate_keep_box
 else
   foreign_gateway
 fi
