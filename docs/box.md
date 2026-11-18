@@ -820,7 +820,7 @@ together with the image the app had.
   old for the installed release refuses to apply rather than writing values it can't
   check.
 
-**Testing a build on a real machine (decided).** The e2e runs on kind, which is not a
+**Testing a build on a real machine (proposed).** The e2e runs on kind, which is not a
 host: no k0s, no disks, nobody answering a question. So before a release is cut, a
 maintainer takes `develop` to a machine running a fresh OS and installs it there the way
 a user does -- `box bootstrap`, then `box migrate apply` -- without tagging or
@@ -844,10 +844,10 @@ Nothing in a dev build is published, and box installs only published charts. So 
 chart is served from a distribution container on the build machine's loopback -- the
 one host box speaks plain HTTP to -- and reaches the test machine through `ssh -R`.
 The image is not pulled at all: it is imported into the node's containerd
-(`k0s ctr -n k8s.io images import`) and the chart's `IfNotPresent` policy uses it. The
-build writes both steps into its `NEXT.txt`, in the order they work in: bootstrap
-installs k0s and the platform layer *before* it asks init's questions, and the release
-itself runs the dev image, so the import happens in that window.
+(`k0s ctr -n k8s.io images import`) and the chart's `IfNotPresent` policy uses it. There
+is no containerd until box has installed k0s, so the build's `NEXT.txt` starts an
+import loop in a second shell before the install: it retries until k0s's containerd
+answers and imports the image ahead of the release that runs it.
 
 This is a rehearsal on real hardware, not a replacement for the e2e: the cluster
 decision, the platform layer and a real disk are what CI cannot reach.

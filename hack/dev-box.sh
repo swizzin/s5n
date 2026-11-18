@@ -27,8 +27,8 @@
 # chart directory: there is no local-chart flag, on purpose.
 #
 # The image cannot be pulled either: ghcr.io/swizzin/s5n:<dev> is not published,
-# so it is imported into the test machine's node by hand. NEXT.txt says where in
-# the install that has to happen.
+# so it is imported into the test machine's node by an import loop NEXT.txt
+# starts before the install.
 #
 # Usage: hack/dev-box.sh build [--out <dir>] [--dirty]
 #        hack/dev-box.sh serve <dir> [--port N]
@@ -225,19 +225,29 @@ otherwise) and it must not be 5000.
 
      sudo ./box bootstrap --dry-run --chart-repo "${CHART_REPO}" --chart-version "${CHART_VERSION}"
 
-   Then install. bootstrap installs k0s and the platform layer, and only then
-   asks init's questions; the release it installs runs
-   ghcr.io/swizzin/s5n:@DEV@ in the wiring Job and in qBittorrent's init
-   container, and nothing publishes that image. So import it into the node in a
-   second shell once bootstrap reports k0s up, before answering init:
+   The release runs ghcr.io/swizzin/s5n:@DEV@ (the wiring Job, qBittorrent's
+   init container, a rehearsal's gate and lock probes), and nothing publishes
+   that image, so it goes into the node's containerd. There is no containerd
+   until box has installed k0s, and box installs the release right after, so
+   start this loop in a second shell BEFORE the install: it retries until k0s's
+   containerd answers and imports the image as soon as it does, ahead of
+   anything that needs it. Leave it running; it exits once the image is in.
 
+     until sudo /usr/local/bin/k0s ctr -n k8s.io images import s5n-image-@DEV@.tar >/dev/null 2>&1; do sleep 5; done; echo "s5n image imported"
+
+   Then install, one of:
+
+     # a fresh box
      sudo ./box bootstrap --chart-repo "${CHART_REPO}" --chart-version "${CHART_VERSION}"
 
-     # second shell, while init is asking:
-     sudo k0s ctr -n k8s.io images import s5n-image-@DEV@.tar
+     # a migration onto this clean host: apply is the installer here (it runs
+     # bootstrap and init itself), so there is no separate bootstrap. Copy the
+     # snapshot over with the other files; it is root-only, keep it 0600.
+     sudo ./box migrate apply <snapshot> --chart-repo "${CHART_REPO}" --chart-version "${CHART_VERSION}"
 
-   The release's pods wait for that image, and an apply that cannot find it
-   leaves the release failed -- and a failed release refuses the next apply.
+   A pod that starts before the import waits in ImagePullBackOff and retries,
+   so a late import still lands while box waits; one that never comes leaves
+   the release failed, and a failed release refuses the next apply.
 
 5. Every later command on the test machine names the same release, with the
    tunnel open:
