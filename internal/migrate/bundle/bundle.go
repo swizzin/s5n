@@ -58,6 +58,22 @@ type Config struct {
 	Instance string
 	// Dir is the source's own directory, read and never written.
 	Dir string
+	// Files are the files a snapshot carries out of Dir, with the directories
+	// above them. Empty means all of Dir: an app whose config is its state as a
+	// whole takes its whole tree, and one that keeps a library's worth of
+	// covers beside the state it needs (Plex) names the state.
+	Files []File
+}
+
+// File is one file a Config carries instead of its whole tree.
+type File struct {
+	// Path is the file, relative to Config.Dir, in slash form.
+	Path string
+	// Required says a snapshot without this file is refused: the app cannot
+	// start on the state it was given without it. The companion files a
+	// database writes beside itself (-wal, -shm) are not required, because
+	// they are there only while something has the database open.
+	Required bool
 }
 
 // Snapshot is what one run writes: the plan, the report, the manifests
@@ -163,12 +179,35 @@ func Write(path string, s Snapshot) (Written, error) {
 		}
 	}
 	for _, c := range s.Configs {
-		skipped, err := w.AddTree(archive.ConfigPrefix+"/"+c.Instance, c.Dir)
+		if len(c.Files) == 0 {
+			skipped, err := w.AddTree(archive.ConfigPrefix+"/"+c.Instance, c.Dir)
+			if err != nil {
+				w.Discard()
+				return res, fmt.Errorf("add %s's config from %s: %w", c.Instance, c.Dir, err)
+			}
+			res.Skipped = append(res.Skipped, skipped...)
+			continue
+		}
+		// A config the snapshot carries a part of: the state the app cannot
+		// rebuild, and the directories above it, and nothing else.
+		names := make([]string, len(c.Files))
+		for i, f := range c.Files {
+			names[i] = f.Path
+		}
+		carried, err := w.AddFiles(archive.ConfigPrefix+"/"+c.Instance, c.Dir, names)
 		if err != nil {
 			w.Discard()
 			return res, fmt.Errorf("add %s's config from %s: %w", c.Instance, c.Dir, err)
 		}
-		res.Skipped = append(res.Skipped, skipped...)
+		res.Skipped = append(res.Skipped, carried.Skipped...)
+		for _, f := range c.Files {
+			if !f.Required || !has(carried.Missing, f.Path) {
+				continue
+			}
+			w.Discard()
+			return res, fmt.Errorf("%s: %s has no %s, and a snapshot of this app carries only the files it names: state the app cannot start without is a refusal, not a snapshot missing it",
+				c.Instance, c.Dir, f.Path)
+		}
 	}
 	if err := w.Close(); err != nil {
 		return res, err
@@ -190,9 +229,10 @@ func writableMode(mode archive.Mode) error {
 }
 
 // checkConfigs refuses a config list a snapshot cannot be built from: a name
-// that is not one directory under config/, the same instance twice, or a
-// directory that is not there. All three are named before the archive is
-// created, so a refusal leaves no file.
+// that is not one directory under config/, the same instance twice, a directory
+// that is not there, a file name that is not a path inside it, or the same file
+// twice. All of them are named before the archive is created, so a refusal
+// leaves no file.
 func checkConfigs(configs []Config) error {
 	seen := make(map[string]bool, len(configs))
 	for _, c := range configs {
@@ -203,6 +243,16 @@ func checkConfigs(configs []Config) error {
 			return fmt.Errorf("instance %q is in the snapshot twice", c.Instance)
 		}
 		seen[c.Instance] = true
+		files := make(map[string]bool, len(c.Files))
+		for _, f := range c.Files {
+			if !filePath(f.Path) {
+				return fmt.Errorf("%s carries %q, which is not a file inside its config directory: a carried file is a relative path, with no . or .. in it", c.Instance, f.Path)
+			}
+			if files[f.Path] {
+				return fmt.Errorf("%s carries %s twice", c.Instance, f.Path)
+			}
+			files[f.Path] = true
+		}
 		info, err := os.Lstat(c.Dir)
 		if err != nil {
 			return fmt.Errorf("%s's config directory %s: %w", c.Instance, c.Dir, err)
@@ -212,6 +262,34 @@ func checkConfigs(configs []Config) error {
 		}
 	}
 	return nil
+}
+
+// filePath reports whether name is one file inside a config directory, in slash
+// form: the thing an archive path may carry under config/<instance>/.
+func filePath(name string) bool {
+	if name == "" || name == "." || path.IsAbs(name) || strings.Contains(name, "\\") {
+		return false
+	}
+	if path.Clean(name) != name {
+		return false
+	}
+	for _, part := range strings.Split(name, "/") {
+		if part == "" || part == ".." {
+			return false
+		}
+	}
+	return true
+}
+
+// has reports whether a list holds a value, in one place so a refusal reads the
+// same as the miss it is about.
+func has(list []string, value string) bool {
+	for _, v := range list {
+		if v == value {
+			return true
+		}
+	}
+	return false
 }
 
 // instanceName reports whether name is one directory name: the thing an archive

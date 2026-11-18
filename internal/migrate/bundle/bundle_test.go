@@ -11,6 +11,8 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -352,4 +354,169 @@ func keys[V any](m map[string]V) []string {
 		out = append(out, k)
 	}
 	return out
+}
+
+// plexTree builds the config directory a real Plex keeps: the two files a
+// migration needs, a -wal beside one database, and the Metadata tree of covers
+// and bundles Plex rebuilds from the data it is given.
+func plexTree(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	server := filepath.Join(dir, "Library", "Application Support", "Plex Media Server")
+	if err := os.MkdirAll(filepath.Join(server, "Plug-in Support", "Databases"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(server, "Preferences.xml"), []byte("<Preferences/>\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	dbs := filepath.Join(server, "Plug-in Support", "Databases")
+	if err := os.WriteFile(filepath.Join(dbs, "com.plexapp.plugins.library.db"), []byte("sqlite\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dbs, "com.plexapp.plugins.library.db-wal"), []byte("wal\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(dir, "Metadata", "Posters"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "Metadata", "Posters", "poster.jpg"), []byte("jpeg\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(dir, "Cache", "PhotoTranscoder"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "Cache", "PhotoTranscoder", "thumb.jpg"), []byte("jpeg\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return dir
+}
+
+// plexCarry is what a snapshot carries out of a Plex config directory: the
+// preferences and the databases, never the metadata tree.
+func plexCarry() []File {
+	const where = "Library/Application Support/Plex Media Server/"
+	return []File{
+		{Path: where + "Preferences.xml", Required: true},
+		{Path: where + "Plug-in Support/Databases/com.plexapp.plugins.library.db", Required: true},
+		{Path: where + "Plug-in Support/Databases/com.plexapp.plugins.library.db-wal"},
+		{Path: where + "Plug-in Support/Databases/com.plexapp.plugins.library.db-shm"},
+	}
+}
+
+// TestASnapshotCarriesOnlyTheFilesAConfigNames: an app whose config holds a
+// library's worth of covers beside the state it needs travels as the state. The
+// archive holds the named files and the directories above them, modes intact,
+// and nothing of Metadata or Cache; a companion a database writes only while
+// it is open may be absent, and the snapshot is still written.
+func TestASnapshotCarriesOnlyTheFilesAConfigNames(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, FileName(archive.ModeFinal, time.Now()))
+	res, err := Write(path, Snapshot{
+		Mode:   archive.ModeFinal,
+		Plan:   []byte(testPlan),
+		Report: []byte(testReport),
+		Configs: []Config{
+			{Instance: "plex", Dir: plexTree(t), Files: plexCarry()},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	if len(res.Skipped) != 0 {
+		t.Errorf("Write skipped %v, and this tree has nothing to skip", res.Skipped)
+	}
+	m, err := archive.Read(path)
+	if err != nil {
+		t.Fatalf("Read: %v", err)
+	}
+	const server = "config/plex/Library/Application Support/Plex Media Server"
+	want := []string{
+		"config/plex",
+		"config/plex/Library",
+		"config/plex/Library/Application Support",
+		server,
+		server + "/Plug-in Support",
+		server + "/Plug-in Support/Databases",
+		server + "/Plug-in Support/Databases/com.plexapp.plugins.library.db",
+		server + "/Plug-in Support/Databases/com.plexapp.plugins.library.db-wal",
+		server + "/Preferences.xml",
+		"plan.yaml",
+		"report.txt",
+	}
+	var got []string
+	for name := range m.Entries {
+		got = append(got, name)
+	}
+	sort.Strings(got)
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("the snapshot holds\n  %s\nwant\n  %s", strings.Join(got, "\n  "), strings.Join(want, "\n  "))
+	}
+	// The state comes back out of it, and what Plex rebuilds does not.
+	opened, err := Open(path, filepath.Join(dir, "open"))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(opened.Configs["plex"], "Library", "Application Support", "Plex Media Server", "Preferences.xml")); err != nil {
+		t.Errorf("the opened snapshot has no Preferences.xml: %v", err)
+	}
+	for _, left := range []string{"Metadata", "Cache"} {
+		if _, err := os.Stat(filepath.Join(opened.Configs["plex"], left)); !errors.Is(err, os.ErrNotExist) {
+			t.Errorf("the opened snapshot holds %s, and Plex rebuilds it: %v", left, err)
+		}
+	}
+}
+
+// TestASnapshotRefusesARequiredFileItCannotCarry: Preferences.xml and the
+// library database are the state Plex cannot start without, so a snapshot
+// missing one is a refusal that names the path, and it leaves no file behind.
+// The -wal and -shm are not required: they exist only while Plex has the
+// database open.
+func TestASnapshotRefusesARequiredFileItCannotCarry(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "a.tar.gz")
+	c := plexCarry()
+	tree := plexTree(t)
+	if err := os.Remove(filepath.Join(tree, "Library", "Application Support", "Plex Media Server", "Preferences.xml")); err != nil {
+		t.Fatal(err)
+	}
+	_, err := Write(path, Snapshot{
+		Mode:    archive.ModeFinal,
+		Plan:    []byte(testPlan),
+		Configs: []Config{{Instance: "plex", Dir: tree, Files: c}},
+	})
+	if err == nil || !strings.Contains(err.Error(), "Preferences.xml") {
+		t.Fatalf("Write error = %v, want it to name the missing Preferences.xml", err)
+	}
+	if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("a refused write left %s behind", path)
+	}
+}
+
+// TestWriteRefusesCarriedFilesThatAreNotInsideTheConfig is checkConfigs' half
+// of the same rule: a name a snapshot carries is one path inside the config
+// directory, and a list cannot name one file twice.
+func TestWriteRefusesCarriedFilesThatAreNotInsideTheConfig(t *testing.T) {
+	tree := tree(t)
+	tests := []struct {
+		name  string
+		files []File
+		want  string
+	}{
+		{"a path out of the tree", []File{{Path: "../etc/passwd"}}, "relative path"},
+		{"an absolute path", []File{{Path: "/etc/passwd"}}, "relative path"},
+		{"a name that is not clean", []File{{Path: "./config.xml"}}, "relative path"},
+		{"the same file twice", []File{{Path: "config.xml"}, {Path: "config.xml"}}, "twice"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "a.tar.gz")
+			_, err := Write(path, Snapshot{Mode: archive.ModeFinal, Plan: []byte(testPlan), Configs: []Config{{Instance: "sonarr", Dir: tree, Files: tt.files}}})
+			if err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("Write error = %v, want it to name %q", err, tt.want)
+			}
+			if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+				t.Errorf("a refused write left %s behind", path)
+			}
+		})
+	}
 }
