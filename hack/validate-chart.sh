@@ -67,6 +67,27 @@ for want in 'name: t-egress' 'name: t-default-deny' 'k8s-app: kube-dns' \
 done
 echo "== rehearsal render: no internet egress, DNS and in-namespace only, policies on"
 
+# Every app pod of a rehearsal box waits, first, until its own pod's egress is
+# closed: a CNI programs a new pod's policy a moment after it starts, and an app
+# that dials out in that moment reaches the internet. One gate per app pod, run
+# before anything else, and a lock with no gate address does not render at all.
+apps=$(grep -c '^kind: StatefulSet' <<<"$locked")
+gates=$(grep -c -- '- name: rehearsal-gate' <<<"$locked")
+[ "$apps" -gt 0 ] && [ "$gates" = "$apps" ] ||
+  { echo "the rehearsal render has ${gates} rehearsal gates for ${apps} app pods"; exit 1; }
+first=$(awk '/^      initContainers:/ {want=1; next} want && /^        - name:/ {print $3; want=0}' <<<"$locked" | grep -c '^rehearsal-gate$')
+[ "$first" = "$apps" ] ||
+  { echo "the rehearsal gate is not the first init container of every app pod (${first} of ${apps})"; exit 1; }
+grep -qF -- '--address=10.96.0.10:9153' <<<"$locked" ||
+  { echo "the rehearsal gate does not dial the grant's address"; exit 1; }
+grep -q 'rehearsal-gate' <<<"$plain" &&
+  { echo "a box that is not a rehearsal renders a rehearsal gate"; exit 1; }
+if helm template t charts/s5n -n seedbox -f charts/s5n/ci/rehearsal-values.yaml \
+     --set 'networkPolicy.apiServerCIDRs[0]=10.0.0.1/32' --set rehearsalGate= >/dev/null 2>&1; then
+  echo "a rehearsal box with no gate address rendered: its apps would start before their policy"; exit 1
+fi
+echo "== rehearsal render: every app pod gated first, on the grant's address; no gate, no render"
+
 for values in charts/s5n/ci/*-values.yaml; do
   out=$(mktemp)
   helm template t charts/s5n -n seedbox -f "$values" \

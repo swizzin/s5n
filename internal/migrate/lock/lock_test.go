@@ -332,3 +332,18 @@ func TestProbePodsSettle(t *testing.T) {
 		}
 	}
 }
+
+// TestParseTargetReadsWhatStringWrites: the grant records the gate as a string
+// and the proof reads it back, so the two must be the same address.
+func TestParseTargetReadsWhatStringWrites(t *testing.T) {
+	want := Target{Host: "10.96.0.10", Port: 9153}
+	got, err := ParseTarget(want.String())
+	if err != nil || got != want {
+		t.Errorf("ParseTarget(%q) = %v, %v; want %v", want.String(), got, err, want)
+	}
+	for _, bad := range []string{"", "10.96.0.10", ":9153", "10.96.0.10:0", "10.96.0.10:x"} {
+		if _, err := ParseTarget(bad); err == nil {
+			t.Errorf("ParseTarget(%q) accepted it", bad)
+		}
+	}
+}

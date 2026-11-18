@@ -60,6 +60,19 @@ type Target struct {
 	Port int
 }
 
+// ParseTarget reads a host:port back, as the grant records it.
+func ParseTarget(s string) (Target, error) {
+	host, port, err := net.SplitHostPort(strings.TrimSpace(s))
+	if err != nil {
+		return Target{}, fmt.Errorf("%q is not host:port: %w", s, err)
+	}
+	n, err := strconv.Atoi(port)
+	if err != nil || n <= 0 || n > 65535 || host == "" {
+		return Target{}, fmt.Errorf("%q is not host:port", s)
+	}
+	return Target{Host: host, Port: n}, nil
+}
+
 // String is the address as the probe takes it.
 func (t Target) String() string {
 	return net.JoinHostPort(t.Host, strconv.Itoa(t.Port))

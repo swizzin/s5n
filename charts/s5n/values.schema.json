@@ -41,6 +41,10 @@
       "type": "boolean",
       "description": "A rehearsal box: no public-internet egress, proven from inside the namespace before any app starts. box sets it in the grant when it applies a rehearsal snapshot, and no file may set it; a rehearsal box is disposable and the real run starts from a final snapshot on a clean host."
     },
+    "rehearsalGate": {
+      "type": "string",
+      "description": "The in-cluster address (host:port) a rehearsal box's apps wait on in an init container until the lock closes it. box writes it into the grant with rehearsal; no file may set it."
+    },
     "global": {
       "type": "object",
       "additionalProperties": false,

@@ -221,6 +221,17 @@ func migrateApply(ctx context.Context, file string, o *migrateApplyFlags, out sa
 		if apps := enabledApps(sb); len(apps) > 0 {
 			return fmt.Errorf("this box already runs %s, and a rehearsal is disposable: it installs its own box on a clean host, so the live box is never locked or touched", strings.Join(apps, ", "))
 		}
+		// The gate's address goes in with the flag: every app pod of a
+		// rehearsal box waits on it until its own policy is in place, and the
+		// proof below dials the same address. It is written first, because a
+		// grant that says rehearsal without a gate renders nothing.
+		gate, err := rehearsalGateAddress(ctx, o)
+		if err != nil {
+			return err
+		}
+		if err := sb.SetGrant("rehearsalGate", gate.String()); err != nil {
+			return fmt.Errorf("record the rehearsal gate in %s: %w", *o.grantPath, err)
+		}
 		if err := sb.SetGrant("rehearsal", true); err != nil {
 			return fmt.Errorf("record the rehearsal lock in %s: %w", *o.grantPath, err)
 		}
@@ -830,6 +841,24 @@ func enabledApps(sb *seedbox.Seedbox) []string {
 	return out
 }
 
+// rehearsalGateAddress is the in-cluster address a rehearsal box's gate and
+// proof dial: the cluster DNS Service's metrics port, which the lock denies.
+func rehearsalGateAddress(ctx context.Context, o *migrateApplyFlags) (lock.Target, error) {
+	kc, err := release.ResolveKubeconfig(*o.kubeconfig, os.Getenv("KUBECONFIG"), bootstrap.FilesystemRecords{Path: *o.install.record})
+	if err != nil {
+		return lock.Target{}, err
+	}
+	cfg, err := kube.Config(kc)
+	if err != nil {
+		return lock.Target{}, fmt.Errorf("kubeconfig %s: %w", kc, err)
+	}
+	cs, err := kubernetes.NewForConfig(cfg)
+	if err != nil {
+		return lock.Target{}, fmt.Errorf("cluster client: %w", err)
+	}
+	return lock.DNSTarget(ctx, lock.Cluster{Client: cs})
+}
+
 // migrateProveLock proves the release's egress lock from inside the namespace,
 // after the release rendered it with every app still off and before the
 // adoption switches one on. It uses the s5n image the release already runs, so
@@ -840,9 +869,10 @@ func migrateProveLock(ctx context.Context, cs kubernetes.Interface, chart releas
 		return err
 	}
 	client := lock.Cluster{Client: cs}
-	target, err := lock.DNSTarget(ctx, client)
+	// The proof dials the address every app's gate will: the one in the grant.
+	target, err := lock.ParseTarget(fmt.Sprint(values["rehearsalGate"]))
 	if err != nil {
-		return err
+		return fmt.Errorf("the rehearsal gate in the grant: %w", err)
 	}
 	h := out.Start(say.Op{
 		Label: "proving the network lock",

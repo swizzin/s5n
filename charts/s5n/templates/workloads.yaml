@@ -69,14 +69,38 @@ spec:
       {{- end }}
       securityContext:
         {{- include "s5n.podSecurity" $root | nindent 8 }}
-      {{- if or (eq $inst.app "qbittorrent") (eq $inst.app "tautulli") (eq $inst.app "qui") (eq $inst.app "autobrr") (eq $inst.app "pbh") }}
-      # qBittorrent and Tautulli generate their own WebUI/API credential on first
-      # start, and qui and autobrr hand out an API key only to a signed-in
-      # session: none of the four can be given credentials from the environment.
-      # Each gets an init container that seals a known value into its own config
-      # or user table first -- one that runs before the app, on the app's own
-      # config subPath, so the file it edits is the file the app reads.
+      {{- $credentialInit := or (eq $inst.app "qbittorrent") (eq $inst.app "tautulli") (eq $inst.app "qui") (eq $inst.app "autobrr") (eq $inst.app "pbh") }}
+      {{- if or $root.Values.rehearsal $credentialInit }}
       initContainers:
+        {{- if $root.Values.rehearsal }}
+        # A rehearsal box's app starts only once its own pod's egress is closed.
+        # A CNI programs a new pod's NetworkPolicy a moment after the pod
+        # starts, and an app that dials out in that moment (an announce, an IRC
+        # join, plex.tv) would reach the internet as the live box. This runs
+        # first, in the app's own network namespace, and waits until an address
+        # the lock denies stops answering; it fails -- and the app never starts
+        # -- if that does not happen. box proved the lock with the same address
+        # before switching any app on, and records it in the grant.
+        - name: rehearsal-gate
+          image: {{ include "s5n.image" (dict "root" $root "app" "s5n" "path" "wiring.image" "image" $root.Values.wiring.image) }}
+          imagePullPolicy: IfNotPresent
+          args:
+            - probe
+            - tcp
+            - --address={{ required "rehearsalGate: a rehearsal box needs the address its apps' gate dials; box writes it into the grant when it applies a rehearsal snapshot" $root.Values.rehearsalGate }}
+            - --want=closed
+            - --timeout=2s
+            - --settle=60s
+          securityContext:
+            {{- include "s5n.containerSecurity" $root | nindent 12 }}
+        {{- end }}
+        {{- if $credentialInit }}
+        # qBittorrent and Tautulli generate their own WebUI/API credential on first
+        # start, and qui and autobrr hand out an API key only to a signed-in
+        # session: none of the four can be given credentials from the environment.
+        # Each gets an init container that seals a known value into its own config
+        # or user table first -- one that runs before the app, on the app's own
+        # config subPath, so the file it edits is the file the app reads.
         {{- if eq $inst.app "qbittorrent" }}
         - name: webui-credentials
           image: {{ include "s5n.image" (dict "root" $root "app" "s5n" "path" "wiring.image" "image" $root.Values.wiring.image) }}
@@ -233,6 +257,7 @@ spec:
               subPath: {{ $inst.name }}
             - name: tmp
               mountPath: /tmp
+        {{- end }}
         {{- end }}
       {{- end }}
       containers:

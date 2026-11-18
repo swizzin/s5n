@@ -126,6 +126,7 @@ var GrantKeys = []Rule{
 	// rehearsal is disposable and the lock is not a setting the operator tunes;
 	// a box with it set refuses a final snapshot instead.
 	{Path: "rehearsal", BoxOnly: true, Why: "a rehearsal box has no internet egress; box sets this when it applies a rehearsal snapshot, and nothing unlocks it"},
+	{Path: "rehearsalGate", BoxOnly: true, Why: "the address a rehearsal box's apps wait on until the lock closes it; box writes it with rehearsal"},
 
 	// gatewayFrom is box's because it is read from the cluster: the namespace
 	// the chosen Gateway implementation's proxy actually runs in. A user who

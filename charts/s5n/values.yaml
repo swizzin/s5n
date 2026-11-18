@@ -78,6 +78,12 @@ gateway:
 # the grant and nothing unlocks it; the value is box's, so no values file may
 # set it. The chart renders nothing else differently.
 rehearsal: false
+# The address every app's rehearsal gate dials (host:port): an in-cluster
+# address the lock denies, which box proves closed before any app starts and
+# writes into the grant with the flag above. Each app pod of a rehearsal box
+# waits in an init container until it stops answering, so no app runs before
+# its own pod's policy is in place. box's, like rehearsal; unused otherwise.
+rehearsalGate: ""
 
 networkPolicy:
   enabled: true

@@ -1008,7 +1008,15 @@ data. Everything it will change is written down before it changes anything.
   release's label that must reach an in-cluster address outside the namespace, and a
   probe pod carrying the release's label that must not; a control that cannot run is a
   refusal saying the proof could not happen, and a probe that succeeds is a refusal
-  naming the cluster's CNI, because a NetworkPolicy is only an instruction to it. The
+  naming the cluster's CNI, because a NetworkPolicy is only an instruction to it. Both
+  dial the cluster DNS Service's metrics port, which the lock denies, and keep dialling
+  until the answer holds: a CNI programs a new pod's policy a moment after the pod
+  starts (on kindnet a pod's first connection gets through), so one dial at start-up
+  proves nothing. The same moment is why every app pod of a rehearsal box first runs
+  a gate, an init container in the app's own network that waits until that address
+  stops answering; the app never starts if it does not. The address is in the grant
+  beside the flag (`rehearsalGate`), and a rehearsal box whose chart cannot lock it,
+  or whose grant has no gate, is refused rather than rendered open. The
   torrents start stopped because the copy has no data to seed and would otherwise
   recheck from zero. A rehearsal renames nothing, refuses to apply on the host that
   holds the source's data, and never applies a final snapshot afterwards.
