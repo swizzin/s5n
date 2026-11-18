@@ -5840,6 +5840,19 @@ migrate_plex_rows() { # migrate_plex_rows <config dir>
     migrate_plex_sqlite "$dir" "$MIGRATE_PLEX_DB"
 }
 
+# migrate_source_plex_covers <config dir>: the parts of a Plex config directory a
+# migration does not carry -- the metadata, artwork and thumbnails Plex rebuilds
+# from the media it is given. Written once the source has stopped, so nothing
+# Plex does at shutdown can prune the fixture, and a snapshot that carries them
+# is a snapshot that carried the library.
+migrate_source_plex_covers() { # migrate_source_plex_covers <config dir>
+  local dir=$1
+  mkdir -p "$dir/Metadata/Posters" "$dir/Cache/PhotoTranscoder" ||
+    { echo "could not write the covers Plex rebuilds under ${dir}"; return 1; }
+  printf 's5n e2e: a poster Plex rebuilds from the library\n' >"$dir/Metadata/Posters/poster.jpg" &&
+    printf 's5n e2e: a thumbnail Plex rebuilds from the library\n' >"$dir/Cache/PhotoTranscoder/thumb.jpg"
+}
+
 # migrate_seed_plex <config dir>: the rows a library holds, added to the database
 # Plex built for itself while the source ran. The schema is Plex's own -- a
 # database this script created would be one Plex refuses to open -- and the rows
@@ -6372,11 +6385,15 @@ migrate_box() {
   # migration reads it out of media_streams.url and rewrites it with the film.
   printf 's5n e2e: a subtitle the library database points at\n' \
     >"$src/var/data/library/${MIGRATE_RADARR_CATEGORY}/Film.2020.en.srt"
-  # A marker in each config directory: migrate copies the whole tree, so a file
-  # the apps never read has to come across too.
-  for app in qbittorrent sonarr "$MIGRATE_RADARR_INSTANCE" plex; do
+  # A marker in each config directory whose whole tree a migration carries: it is
+  # what proves a file the apps never read came across too. Plex's is the one
+  # config a snapshot carries as its state instead -- Preferences.xml and its
+  # databases -- so its marker has to stay behind, and the cover trees it
+  # rebuilds are written below, once the source has stopped.
+  for app in qbittorrent sonarr "$MIGRATE_RADARR_INSTANCE"; do
     printf 's5n e2e: this config directory was the source install\n' >"$src/var/data/${app}/.s5n-e2e-source"
   done
+  printf 's5n e2e: this config directory was the source install\n' >"$src/var/data/plex/.s5n-e2e-source"
   MIGRATE_QBIT_PASSWORD=$(openssl rand -hex 16)
   printf '%s' "$MIGRATE_QBIT_PASSWORD" >"$WORK/source/qbittorrent-password"
   chmod 600 "$WORK/source/qbittorrent-password"
@@ -6512,6 +6529,7 @@ migrate_box() {
   # the runner Job will run.
   log "seeding the source Plex's library database: Plex's own schema, and the rows a library holds"
   migrate_seed_plex "$src/var/data/plex" || { fail=1; return 0; }
+  migrate_source_plex_covers "$src/var/data/plex" || { fail=1; return 0; }
 
   # ---- the final snapshot --------------------------------------------------
   cutover() { # cutover <out>
@@ -6559,6 +6577,39 @@ migrate_box() {
   done
   grep -qE "^data: .* \(downloads: Downloads, media: library\)$" "$report" ||
     { echo "the plan does not name the data root with Downloads and library:"; sed -n '/^data:/p' "$report"; fail=1; }
+  # Plex's snapshot is its state, not its library. The preferences and the
+  # library database are in it -- Plex starts on those and nothing else -- and
+  # the Metadata and Cache trees it rebuilds are not, nor is the whole-tree
+  # marker the other apps carry, because Plex's config is not carried whole.
+  plex_carry="plex: carried Preferences.xml and its databases; Plex rebuilds its metadata, artwork and thumbnails (artwork uploaded by hand is not carried)"
+  tar -tzf "$snapshot" >"$WORK/snapshot-entries.txt" 2>/dev/null ||
+    { echo "the snapshot's entries cannot be listed"; fail=1; return 0; }
+  plex_config="config/plex/Library/Application Support/Plex Media Server"
+  for carried in "${plex_config}/Preferences.xml" \
+                 "${plex_config}/Plug-in Support/Databases/com.plexapp.plugins.library.db"; do
+    grep -qxF "$carried" "$WORK/snapshot-entries.txt" ||
+      { echo "the snapshot carries no ${carried}: Plex has nothing to start on"; fail=1; }
+  done
+  if grep -qE "^config/plex/(Metadata|Cache)(/|$)" "$WORK/snapshot-entries.txt"; then
+    echo "the snapshot carries Plex's Metadata or Cache tree, and Plex rebuilds both:"
+    grep -E "^config/plex/(Metadata|Cache)(/|$)" "$WORK/snapshot-entries.txt" | head -3 | sed 's/^/    /'
+    fail=1
+  fi
+  if grep -qxF "config/plex/.s5n-e2e-source" "$WORK/snapshot-entries.txt"; then
+    echo "the snapshot carries Plex's whole config directory, and a Plex snapshot is its state only"; fail=1
+  fi
+  # Said once, in the report the snapshot holds, and on the screen the run
+  # printed: what a Plex snapshot leaves behind is a decision the operator reads.
+  [ "$(grep -cF "$plex_carry" "$report")" = 1 ] ||
+    { echo "the snapshot's report does not say once what Plex's snapshot leaves behind ($(grep -cF 'plex: carried' "$report" || true) times):"; grep -F "plex: carried" "$report" || true; fail=1; }
+  grep -qF "$plex_carry" "$WORK/cutover.txt" ||
+    { echo "the cutover did not print the line about what Plex's snapshot leaves behind"; fail=1; }
+  # What trimming it is worth on this fixture: the whole config tree the source
+  # wrote, the bytes of it the snapshot carries, and the file itself.
+  plex_tree=$(du -sb "$src/var/data/plex" | cut -f1) || plex_tree=0
+  plex_carried=$(du -cb "${src}/var/data/plex/Library/Application Support/Plex Media Server/Preferences.xml" \
+    "${src}/var/data/plex/Library/Application Support/Plex Media Server/Plug-in Support/Databases/"* 2>/dev/null | tail -1 | cut -f1) || plex_carried=0
+  echo "  plex: ${plex_tree} bytes of config tree, ${plex_carried:-0} of them carried, the snapshot is $(stat -c %s "$snapshot") bytes"
   grep -q 'service: qbittorrent\.legacy' "$WORK/plan.yaml" ||
     { echo "the plan has no host rule for the source's qbittorrent Service"; fail=1; }
   # Nothing unsettled reaches the install, and nothing is silent about it: the
@@ -6659,6 +6710,11 @@ migrate_box() {
     { echo "the run did not name the snapshot it read"; fail=1; }
   grep -qF "chart: s5n ${CHART_VERSION} (${CHART_REPO}:${CHART_VERSION})" "$WORK/apply-migrate.txt" ||
     { echo "box did not pull ${CHART_REPO}:${CHART_VERSION}"; fail=1; }
+  # The confirm says what the snapshot left behind, once: an operator deciding
+  # to copy a Plex config reads that its artwork is not in it.
+  grep -qF "plex: carried Preferences.xml and its databases; Plex rebuilds its metadata, artwork and thumbnails (artwork uploaded by hand is not carried)" \
+    "$WORK/apply-migrate.txt" ||
+    { echo "apply's confirm does not say what Plex's snapshot left behind"; fail=1; }
   # The box it installed runs nothing the plan migrates: the apps went in off,
   # and the adoption is what switches them on. The receipt for that empty
   # release is ok, which is what `box apply` waits on.
@@ -6784,9 +6840,27 @@ migrate_box() {
     [ "${links:-0}" -eq 2 ] ||
       { echo "${DATA_PATH}/downloads/${category}: link count is ${links:-none}, want 2 -- the download and the import it was hardlinked to are not one file any more"; fail=1; }
   done
-  for instance in qbittorrent sonarr "$MIGRATE_RADARR_INSTANCE" plex; do
+  for instance in qbittorrent sonarr "$MIGRATE_RADARR_INSTANCE"; do
     [ -f "$CONFIG_PATH/${instance}/.s5n-e2e-source" ] ||
       { echo "${CONFIG_PATH}/${instance}/ holds no marker: migrate did not copy the whole config directory"; fail=1; }
+  done
+  # Plex's config is its state, so its directory on the box holds the
+  # preferences and the databases and none of the library. Plex serving on those
+  # files is the Plex assertion below, which is what says a trimmed copy is one
+  # it can run. Plex makes its own Metadata and Cache directories when it
+  # starts, so what says the library was not carried is the two cover files this
+  # script put in the source's trees, and the whole-tree marker: Plex never
+  # writes those.
+  plex_home="$CONFIG_PATH/plex/Library/Application Support/Plex Media Server"
+  for carried in "$plex_home/Preferences.xml" \
+                 "$plex_home/Plug-in Support/Databases/com.plexapp.plugins.library.db"; do
+    [ -f "$carried" ] ||
+      { echo "${CONFIG_PATH}/plex/ holds none of the state a Plex snapshot carries (${carried} is not there)"; fail=1; }
+  done
+  for left in ".s5n-e2e-source" "Metadata/Posters/poster.jpg" "Cache/PhotoTranscoder/thumb.jpg"; do
+    if [ -e "$CONFIG_PATH/plex/${left}" ]; then
+      echo "${CONFIG_PATH}/plex/${left} is on the box, and a Plex snapshot carries neither its library nor its whole config tree"; fail=1
+    fi
   done
 
   # ---- assertion 3: the keys the source had --------------------------------
@@ -6930,9 +7004,10 @@ migrate_keep_box() {
     >"$src/var/data/Downloads/${MIGRATE_RADARR_CATEGORY}/Film.2020.mkv"
   ln -f "$src/var/data/Downloads/${MIGRATE_RADARR_CATEGORY}/Film.2020.mkv" \
     "$src/var/data/library/${MIGRATE_RADARR_CATEGORY}/Film.2020.mkv"
-  for app in qbittorrent sonarr "$MIGRATE_RADARR_INSTANCE" plex; do
+  for app in qbittorrent sonarr "$MIGRATE_RADARR_INSTANCE"; do
     printf 's5n e2e: this config directory was the source install\n' >"$src/var/data/${app}/.s5n-e2e-source"
   done
+  printf 's5n e2e: this config directory was the source install\n' >"$src/var/data/plex/.s5n-e2e-source"
   MIGRATE_QBIT_PASSWORD=$(openssl rand -hex 16)
   printf '%s' "$MIGRATE_QBIT_PASSWORD" >"$WORK/source/qbittorrent-password"
   chmod 600 "$WORK/source/qbittorrent-password"
@@ -6984,6 +7059,7 @@ migrate_keep_box() {
   [ -f "$src/var/data/qbittorrent/qBittorrent/categories.json" ] ||
     { echo "the source qBittorrent wrote no categories.json: migrate would have no category paths to rewrite"; fail=1; }
   [ "$fail" = 0 ] || return 0
+  migrate_source_plex_covers "$src/var/data/plex" || { fail=1; return 0; }
 
   keep_cutover() { # keep_cutover <snapshot> <extra arg>...
     local out=$1
@@ -7140,6 +7216,10 @@ migrate_keep_box() {
   done
   grep -q "^wiring ok" "$WORK/keep-cutover.txt" ||
     { echo "box did not report a healthy receipt for the seedbox it installed beside the source"; fail=1; }
+  # Plex's snapshot is its state, and the run says so once, in the report and in
+  # the confirm the operator answers.
+  grep -qF "plex: carried Preferences.xml and its databases" "$WORK/keep-cutover.txt" ||
+    { echo "the keep path does not say what Plex's snapshot leaves behind"; fail=1; }
   # What the migration did, named before it did it: the two renames, the kept keys
   # and the connections adopted by id.
   grep -qF "data: rename Downloads to downloads" "$WORK/keep-cutover.txt" ||
@@ -7200,9 +7280,27 @@ migrate_keep_box() {
     [ "${links:-0}" -eq 2 ] ||
       { echo "${DATA_PATH}/downloads/${category}: link count is ${links:-none}, want 2 -- the download and the import it was hardlinked to are not one file any more"; fail=1; }
   done
-  for instance in qbittorrent sonarr "$MIGRATE_RADARR_INSTANCE" plex; do
+  for instance in qbittorrent sonarr "$MIGRATE_RADARR_INSTANCE"; do
     [ -f "$CONFIG_PATH/${instance}/.s5n-e2e-source" ] ||
       { echo "${CONFIG_PATH}/${instance}/ holds no marker: migrate did not copy the whole config directory"; fail=1; }
+  done
+  # Plex's config is its state, so its directory on the box holds the
+  # preferences and the databases and none of the library. Plex serving on those
+  # files is the Plex assertion below, which is what says a trimmed copy is one
+  # it can run. Plex makes its own Metadata and Cache directories when it
+  # starts, so what says the library was not carried is the two cover files this
+  # script put in the source's trees, and the whole-tree marker: Plex never
+  # writes those.
+  plex_home="$CONFIG_PATH/plex/Library/Application Support/Plex Media Server"
+  for carried in "$plex_home/Preferences.xml" \
+                 "$plex_home/Plug-in Support/Databases/com.plexapp.plugins.library.db"; do
+    [ -f "$carried" ] ||
+      { echo "${CONFIG_PATH}/plex/ holds none of the state a Plex snapshot carries (${carried} is not there)"; fail=1; }
+  done
+  for left in ".s5n-e2e-source" "Metadata/Posters/poster.jpg" "Cache/PhotoTranscoder/thumb.jpg"; do
+    if [ -e "$CONFIG_PATH/plex/${left}" ]; then
+      echo "${CONFIG_PATH}/plex/${left} is on the box, and a Plex snapshot carries neither its library nor its whole config tree"; fail=1
+    fi
   done
 
   # ---- assertion 3: the keys the source had --------------------------------
