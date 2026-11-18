@@ -51,6 +51,12 @@ const (
 	// (internal/database/migrations/sqlite/0_base_schema.sql at v1.90.0).
 	tableClient = "client"
 	keyPort     = "port"
+
+	// tableUsers is autobrr's account table, and keyUsername its one name column
+	// (internal/database/migrations/sqlite/0_base_schema.sql:1-9 at v1.90.0).
+	// autobrr allows exactly one row in it.
+	tableUsers  = "users"
+	keyUsername = "username"
 )
 
 // hostPlusPort are the client types autobrr dials at host plus the port column
@@ -236,7 +242,8 @@ func (e dbEdit) apply(ctx context.Context, db *sql.DB) error {
 	return nil
 }
 
-// planDB is the database: every client's address and every action's path.
+// planDB is the database: every client's address, every action's path, and the
+// one account.
 func planDB(ctx context.Context, in rewrite.Input, t tally, rep *rewrite.Report) ([]dbEdit, error) {
 	path := filepath.Join(in.Dir, dbName)
 	if _, err := os.Stat(path); err != nil {
@@ -262,7 +269,95 @@ func planDB(ctx context.Context, in rewrite.Input, t tally, rep *rewrite.Report)
 	if err != nil {
 		return nil, err
 	}
-	return append(edits, actionEdits...), nil
+	edits = append(edits, actionEdits...)
+	accountEdits, err := planAccounts(ctx, db, rep)
+	if err != nil {
+		return nil, err
+	}
+	return append(edits, accountEdits...), nil
+}
+
+// planAccounts makes the source's one account box's own.
+//
+// autobrr allows exactly one account (internal/user/service.go:51 at v1.90.0),
+// and the chart's init container signs in as s5n.wiringAccount on every start:
+// it creates the account when the table is empty and writes the release
+// Secret's password onto it otherwise. A migrated database therefore has to name
+// its one row that account, or the init's change-password looks for a name the
+// table does not have and the pod never starts. The row keeps its id: it is what
+// the app's own bookkeeping would key by, and nothing in autobrr's schema refers
+// to it in any case (api_key is keyed by its own key and sessions by their own
+// token, 0_base_schema.sql and 26_create_api_key_table.sql at v1.90.0).
+//
+// A table with two rows is not a source this migration understands: autobrr
+// cannot hold two, so picking one of them would drop an account nobody asked it
+// to drop, and the run stops naming the count.
+func planAccounts(ctx context.Context, db *sql.DB, rep *rewrite.Report) ([]dbEdit, error) {
+	empty, err := tableEmpty(ctx, db, tableUsers)
+	if err != nil {
+		return nil, err
+	}
+	if empty {
+		// No table, or a table with no row: the init container creates the
+		// account on the first start, which is the fresh install's path.
+		return nil, nil
+	}
+	rows, err := db.QueryContext(ctx, `SELECT id, username FROM `+tableUsers+` ORDER BY id`)
+	if err != nil {
+		return nil, fmt.Errorf("autobrr: read %s: %w", tableUsers, err)
+	}
+	defer rows.Close()
+	type account struct {
+		id   int64
+		name string
+	}
+	var found []account
+	for rows.Next() {
+		var a account
+		if err := rows.Scan(&a.id, &a.name); err != nil {
+			return nil, fmt.Errorf("autobrr: read %s: %w", tableUsers, err)
+		}
+		found = append(found, a)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("autobrr: read %s: %w", tableUsers, err)
+	}
+	if len(found) > 1 {
+		return nil, fmt.Errorf("autobrr: %s %s holds %d accounts, and autobrr allows one: box owns the account %q, and which of these a source meant is not something this migration can decide",
+			dbName, tableUsers, len(found), rewrite.WiringAccount)
+	}
+	if found[0].name == rewrite.WiringAccount {
+		return nil, nil
+	}
+	rep.Accounts = append(rep.Accounts, rewrite.Account{From: found[0].name, To: rewrite.WiringAccount})
+	return []dbEdit{{tableUsers, keyUsername, found[0].id, rewrite.WiringAccount}}, nil
+}
+
+// tableEmpty reports whether a table exists and holds no row. autobrr's database
+// is the app's own and its migrations run at the app's next start, so a table
+// this version has and an older one did not yet have is a table that is simply
+// not there: the app writes it, empty, before it can hold an account.
+func tableEmpty(ctx context.Context, db *sql.DB, table string) (bool, error) {
+	rows, err := db.QueryContext(ctx, `SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?`, table)
+	if err != nil {
+		return false, fmt.Errorf("autobrr: read %s schema: %w", table, err)
+	}
+	exists := rows.Next()
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return false, fmt.Errorf("autobrr: read %s schema: %w", table, err)
+	}
+	rows.Close()
+	if !exists {
+		return true, nil
+	}
+	rows, err = db.QueryContext(ctx, `SELECT 1 FROM `+table+` LIMIT 1`)
+	if err != nil {
+		return false, fmt.Errorf("autobrr: read %s: %w", table, err)
+	}
+	defer rows.Close()
+	found := rows.Next()
+	return !found, rows.Err()
 }
 
 // planClients rewrites the download clients and the Arr connections, which are

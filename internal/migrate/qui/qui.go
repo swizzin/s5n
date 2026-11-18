@@ -56,6 +56,11 @@ const (
 	// appQBittorrent is the app qui's instance column names: every instance qui
 	// manages is a qBittorrent.
 	appQBittorrent = "qbittorrent"
+
+	// tableUser is qui's account table, one row by the schema's own CHECK
+	// (001_initial_schema.sql:2-9 at v1.35.0), and keyUsername its name column.
+	tableUser   = "user"
+	keyUsername = "username"
 )
 
 // configPaths are config.toml's path keys. backupDir is the one the research
@@ -195,10 +200,73 @@ func decide(ctx context.Context, in rewrite.Input, end rewrite.Endpoint, t tally
 	if err := planInterned(ctx, db, in, t, rep, &w); err != nil {
 		return w, err
 	}
+	if err := planAccounts(ctx, db, rep, &w); err != nil {
+		return w, err
+	}
 	if err := planCaches(ctx, db, t, &w); err != nil {
 		return w, err
 	}
 	return w, nil
+}
+
+// planAccounts makes the source's one account box's own.
+//
+// qui allows exactly one account (001_initial_schema.sql's CHECK (id = 1)), and
+// the chart's init container signs in as s5n.wiringAccount on every start: it
+// creates the account when the table is empty and writes the release Secret's
+// password onto it otherwise. A migrated database therefore has to name its one
+// row that account, or the init's change-password looks for a name the table
+// does not have and the pod never starts. The row keeps its id, which is what
+// the two tables that carry a user_id refer to -- dashboard_settings and
+// filter_views (026 and 085 at v1.35.0, both without a foreign key) -- so the
+// migrated settings stay the one account's. api_keys and sessions carry no user
+// column at all.
+//
+// A table with two rows is not a source this migration understands: qui's own
+// schema refuses the second, so picking one of them would drop an account nobody
+// asked it to drop, and the run stops naming the count.
+func planAccounts(ctx context.Context, db *sql.DB, rep *rewrite.Report, w *work) error {
+	// The table is the app's; a database from before it existed has none, and
+	// then the init container creates the account on the first start.
+	ok, err := hasColumn(ctx, db, tableUser, keyUsername)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return nil
+	}
+	rows, err := db.QueryContext(ctx, `SELECT id, username FROM `+tableUser+` ORDER BY id`)
+	if err != nil {
+		return fmt.Errorf("qui: read %s: %w", tableUser, err)
+	}
+	defer rows.Close()
+	type account struct {
+		id   int64
+		name string
+	}
+	var found []account
+	for rows.Next() {
+		var a account
+		if err := rows.Scan(&a.id, &a.name); err != nil {
+			return fmt.Errorf("qui: read %s: %w", tableUser, err)
+		}
+		found = append(found, a)
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("qui: read %s: %w", tableUser, err)
+	}
+	if len(found) > 1 {
+		return fmt.Errorf("qui: %s %s holds %d accounts, and qui allows one: box owns the account %q, and which of these a source meant is not something this migration can decide",
+			dbName, tableUser, len(found), rewrite.WiringAccount)
+	}
+	if len(found) == 0 || found[0].name == rewrite.WiringAccount {
+		return nil
+	}
+	rep.Accounts = append(rep.Accounts, rewrite.Account{From: found[0].name, To: rewrite.WiringAccount})
+	w.dbEdits = append(w.dbEdits, dbEdit{
+		table: tableUser, column: keyUsername, key: "id", keyID: found[0].id, value: rewrite.WiringAccount,
+	})
+	return nil
 }
 
 // databasePath is where qui keeps qui.db: the config directory unless dataDir

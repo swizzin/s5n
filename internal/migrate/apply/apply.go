@@ -139,6 +139,10 @@ type InstanceSummary struct {
 	// a folder history never reads again. They stop nothing, so they are
 	// shown before the confirm rather than after the run.
 	Left []rewrite.Left
+	// Accounts are the app's own account rows this run renames to box's account
+	// (rewrite.Account): the app's single account, which the init container then
+	// signs in as, so it is box's rather than the source owner's.
+	Accounts []rewrite.Account
 	// Enable says this run switches the instance on.
 	Enable bool
 	// Keys are the release Secret's key names for the keys this instance keeps:
@@ -163,6 +167,9 @@ func (s Summary) Lines() []string {
 		}
 		for _, c := range in.Changes {
 			rows = append(rows, fmt.Sprintf("%s: %s %s %s %d", in.App, c.File, c.Where, c.What, c.Count))
+		}
+		for _, a := range in.Accounts {
+			rows = append(rows, fmt.Sprintf("%s: account %q becomes %s, box's own; sign in through the box login", in.App, a.From, a.To))
 		}
 		for _, n := range in.Notes {
 			rows = append(rows, fmt.Sprintf("%s: note: %s", in.App, n))
@@ -597,12 +604,13 @@ func (m *migration) summary() Summary {
 	for _, name := range planApps(m.p) {
 		rep := m.checks[name]
 		in := InstanceSummary{
-			App:     name,
-			Changes: rep.Changes,
-			Notes:   rep.Notes,
-			Left:    rep.Left,
-			Owned:   rep.Owned,
-			Enable:  !m.alreadyEnabled(name),
+			App:      name,
+			Changes:  rep.Changes,
+			Accounts: rep.Accounts,
+			Notes:    rep.Notes,
+			Left:     rep.Left,
+			Owned:    rep.Owned,
+			Enable:   !m.alreadyEnabled(name),
 		}
 		for _, st := range m.res.Staged {
 			if st.App == name {
@@ -675,6 +683,17 @@ func sameReport(check, write rewrite.Report) (string, bool) {
 	}
 	if check.Stopped != write.Stopped {
 		return fmt.Sprintf("its check counts %d torrents to stop and the write stopped %d", check.Stopped, write.Stopped), false
+	}
+	accounts := func(rs []rewrite.Account) []string {
+		out := make([]string, 0, len(rs))
+		for _, a := range rs {
+			out = append(out, a.From+" -> "+a.To)
+		}
+		sort.Strings(out)
+		return out
+	}
+	if got, want := strings.Join(accounts(write.Accounts), "\n"), strings.Join(accounts(check.Accounts), "\n"); got != want {
+		return "the accounts it renames differ from the ones its check reported", false
 	}
 	return "", true
 }

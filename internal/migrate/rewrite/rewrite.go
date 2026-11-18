@@ -228,6 +228,14 @@ type Report struct {
 	// internal/migrate/apply, settle.go). An address with no proposal here is
 	// left as it is.
 	Defaults []Default
+	// Accounts are the app's own account rows this pass renames to box's
+	// account (WiringAccount). An app that keeps its own user table allows
+	// exactly one account and the chart's init container signs in as box's, so
+	// the source's account becomes that one instead of sitting beside it: the
+	// init then writes the release Secret's password onto it on every start,
+	// as it does on a fresh install, and the person's way in stays the login at
+	// the edge.
+	Accounts []Account
 	// Notes are things the operator should know that stop nothing: a table
 	// emptied on purpose, an import list's remote filter left alone.
 	Notes []string
@@ -307,6 +315,29 @@ type Default struct {
 	// Why is one line saying what makes it that app, and is kept as the rule's
 	// own reason.
 	Why string
+}
+
+// WiringAccount is the one account box owns in an app that keeps its own user
+// table (charts/s5n/templates/_helpers.tpl, s5n.wiringAccount): the chart's init
+// container creates it when it is missing and writes the release Secret's
+// password onto it on every start, and the wiring Job signs in with it. Both
+// apps that have such a table allow exactly one account, so a source's account
+// has to become this one rather than sit beside it: TestWiringAccountIsTheCharts
+// pins the name to the chart's helper.
+const WiringAccount = "s5n"
+
+// Account is one row of an app's own user table that a pass renames to the
+// account box owns. The row keeps its id, so every row the app keys by it stays
+// with it; only the name the source's owner signed in with changes, and the
+// init container puts box's password on the account at the app's next start.
+//
+// The name is the operator's own data on their own screen, so a report prints
+// it: the line says what the account was called and what it is called now.
+type Account struct {
+	// From is the name the source stored.
+	From string
+	// To is the name box's init container signs in as: WiringAccount.
+	To string
 }
 
 // Blocked reports whether apply has to stop on this report.
