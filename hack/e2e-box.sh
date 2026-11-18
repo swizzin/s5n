@@ -6206,6 +6206,24 @@ migrate_box() {
     { echo "the plan does not name the data root with Downloads and library:"; sed -n '/^data:/p' "$report"; fail=1; }
   grep -q 'service: qbittorrent\.legacy' "$WORK/plan.yaml" ||
     { echo "the plan has no host rule for the source's qbittorrent Service"; fail=1; }
+  # Nothing unsettled reaches the install, and nothing is silent about it: the
+  # report the snapshot carries names every decision box made without asking, and
+  # the one check only apply can make -- Plex's database is readable through its
+  # own image alone -- is in it. The cutover ran unattended (--yes), so its last
+  # screen lists every one of those defaults by name.
+  grep -q "^called out:$" "$report" ||
+    { echo "the snapshot's report carries no called-out block"; fail=1; }
+  grep -q "^checked at apply:$" "$report" ||
+    { echo "the report does not name what only apply can check"; sed -n '/^called out:/,$p' "$report"; fail=1; }
+  grep -qE "^  plex \(its database is only readable through its own image" "$report" ||
+    { echo "the report does not call out Plex's database as checked at apply"; fail=1; }
+  grep -q "^defaults taken:$" "$WORK/cutover.txt" ||
+    { echo "the unattended cutover did not name the defaults it took:"; tail -20 "$WORK/cutover.txt"; fail=1; }
+  cutover_tail=$(sed -n '/^defaults taken:$/,$p' "$WORK/cutover.txt") || true
+  case "$cutover_tail" in
+    *"plex (its database is only readable through its own image"*) ;;
+    *) echo "the cutover's list of defaults taken does not name the check it left to apply:"; printf '%s\n' "$cutover_tail"; fail=1 ;;
+  esac
   # The blessed Plex image's entrypoint writes its transcoder directory into
   # Preferences.xml as /transcode, which no mount of the source gives a rule:
   # discovery maps it onto itself because the release mounts the same
