@@ -23,6 +23,7 @@ type fakePods struct {
 	created []*corev1.Pod
 	deleted []string
 	cniPods []string
+	dnsPods []corev1.Pod
 	next    int
 }
 
@@ -65,6 +66,7 @@ func (f *fakePods) List(_ context.Context, namespace string) (*corev1.PodList, e
 	for _, name := range f.cniPods {
 		list.Items = append(list.Items, corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace}})
 	}
+	list.Items = append(list.Items, f.dnsPods...)
 	return list, nil
 }
 
@@ -183,42 +185,49 @@ func TestProbePodsAreTheOnesTheClusterWillAdmit(t *testing.T) {
 		t.Error("the probe pod looks like the wiring Job, whose egress policy admits the API server")
 	}
 	for _, pod := range f.created {
-		spec := pod.Spec
-		if spec.HostNetwork || spec.HostPID || spec.HostIPC {
-			t.Errorf("%s uses a host namespace", pod.Name)
-		}
-		if spec.AutomountServiceAccountToken == nil || *spec.AutomountServiceAccountToken {
-			t.Errorf("%s mounts a service account token", pod.Name)
-		}
-		if spec.RestartPolicy != corev1.RestartPolicyNever {
-			t.Errorf("%s restarts: %s", pod.Name, spec.RestartPolicy)
-		}
-		if len(spec.Containers) != 1 {
-			t.Fatalf("%s runs %d containers", pod.Name, len(spec.Containers))
-		}
-		c := spec.Containers[0]
-		if c.Image != options().Image {
-			t.Errorf("%s image = %q, want the release's own", pod.Name, c.Image)
-		}
-		sc := c.SecurityContext
-		if sc == nil || sc.RunAsNonRoot == nil || !*sc.RunAsNonRoot || sc.AllowPrivilegeEscalation == nil || *sc.AllowPrivilegeEscalation {
-			t.Errorf("%s container security context = %+v", pod.Name, sc)
-		}
-		if sc.Capabilities == nil || len(sc.Capabilities.Drop) != 1 || sc.Capabilities.Drop[0] != "ALL" {
-			t.Errorf("%s drops %v, want ALL", pod.Name, sc.Capabilities)
-		}
-		if sc.SeccompProfile == nil || sc.SeccompProfile.Type != corev1.SeccompProfileTypeRuntimeDefault {
-			t.Errorf("%s seccomp = %+v", pod.Name, sc.SeccompProfile)
-		}
-		if !contains(c.Command, "--want") {
-			t.Errorf("%s command = %v, want the probe's own", pod.Name, c.Command)
-		}
+		assertRestricted(t, pod)
 	}
-	if control.Spec.Containers[0].Command[6] != "open" {
-		t.Errorf("control --want = %q, want open", control.Spec.Containers[0].Command[6])
+	if got := control.Spec.Containers[0].Command[6]; got != "open" {
+		t.Errorf("control --want = %q, want open", got)
 	}
-	if probe.Spec.Containers[0].Command[6] != "closed" {
-		t.Errorf("probe --want = %q, want closed", probe.Spec.Containers[0].Command[6])
+	if got := probe.Spec.Containers[0].Command[6]; got != "closed" {
+		t.Errorf("probe --want = %q, want closed", got)
+	}
+}
+
+// assertRestricted checks one probe pod against Pod Security "restricted" and
+// the blessed-image rule: the namespace a rehearsal runs in enforces both.
+func assertRestricted(t *testing.T, pod *corev1.Pod) {
+	t.Helper()
+	spec := pod.Spec
+	if spec.HostNetwork || spec.HostPID || spec.HostIPC {
+		t.Errorf("%s uses a host namespace", pod.Name)
+	}
+	if spec.AutomountServiceAccountToken == nil || *spec.AutomountServiceAccountToken {
+		t.Errorf("%s mounts a service account token", pod.Name)
+	}
+	if spec.RestartPolicy != corev1.RestartPolicyNever {
+		t.Errorf("%s restarts: %s", pod.Name, spec.RestartPolicy)
+	}
+	if len(spec.Containers) != 1 {
+		t.Fatalf("%s runs %d containers", pod.Name, len(spec.Containers))
+	}
+	c := spec.Containers[0]
+	if c.Image != options().Image {
+		t.Errorf("%s image = %q, want the release's own", pod.Name, c.Image)
+	}
+	sc := c.SecurityContext
+	if sc == nil || sc.RunAsNonRoot == nil || !*sc.RunAsNonRoot || sc.AllowPrivilegeEscalation == nil || *sc.AllowPrivilegeEscalation {
+		t.Errorf("%s container security context = %+v", pod.Name, sc)
+	}
+	if sc.Capabilities == nil || len(sc.Capabilities.Drop) != 1 || sc.Capabilities.Drop[0] != "ALL" {
+		t.Errorf("%s drops %v, want ALL", pod.Name, sc.Capabilities)
+	}
+	if sc.SeccompProfile == nil || sc.SeccompProfile.Type != corev1.SeccompProfileTypeRuntimeDefault {
+		t.Errorf("%s seccomp = %+v", pod.Name, sc.SeccompProfile)
+	}
+	if !contains(c.Command, "--want") {
+		t.Errorf("%s command = %v, want the probe's own", pod.Name, c.Command)
 	}
 }
 
@@ -262,4 +271,30 @@ func contains(list []string, want string) bool {
 		}
 	}
 	return false
+}
+
+// TestDNSTargetIsAReadyCoreDNSPod: the target is a DNS pod's metrics port,
+// which the release's policy denies, and a cluster with no ready DNS pod is a
+// refusal rather than a proof with nothing to dial.
+func TestDNSTargetIsAReadyCoreDNSPod(t *testing.T) {
+	f := &fakePods{}
+	f.dnsPods = []corev1.Pod{
+		{ObjectMeta: metav1.ObjectMeta{Name: "coredns-not-ready", Namespace: "kube-system", Labels: map[string]string{"k8s-app": "kube-dns"}},
+			Status: corev1.PodStatus{Phase: corev1.PodPending}},
+		{ObjectMeta: metav1.ObjectMeta{Name: "coredns-abc", Namespace: "kube-system", Labels: map[string]string{"k8s-app": "kube-dns"}},
+			Status: corev1.PodStatus{Phase: corev1.PodRunning, PodIP: "10.0.0.2"}},
+	}
+	got, err := DNSTarget(context.Background(), f)
+	if err != nil {
+		t.Fatalf("DNSTarget: %v", err)
+	}
+	if got.String() != "10.0.0.2:9153" {
+		t.Errorf("target = %s, want the ready pod's metrics port", got)
+	}
+
+	if _, err := DNSTarget(context.Background(), &fakePods{}); err == nil {
+		t.Error("DNSTarget accepted a cluster with no DNS pod")
+	} else if !strings.Contains(err.Error(), "cannot prove the lock") {
+		t.Errorf("refusal = %v, want it to say the lock cannot be proven", err)
+	}
 }

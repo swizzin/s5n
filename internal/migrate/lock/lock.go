@@ -323,9 +323,7 @@ func runPod(ctx context.Context, client pods, o Options, pod *corev1.Pod) (resul
 	tick := time.NewTicker(poll)
 	defer tick.Stop()
 	for {
-		if exit, done, err := finished(out); err != nil {
-			return result{}, err
-		} else if done {
+		if exit, done := finished(out); done {
 			return result{name: out.Name, exit: exit.code, message: exit.message}, nil
 		}
 		select {
@@ -356,16 +354,16 @@ type exit struct {
 // start (an image that will not pull, a sandbox that cannot be created) is a
 // usable answer here only as a failure: box would otherwise wait a whole
 // timeout for something that will never run.
-func finished(pod *corev1.Pod) (exit, bool, error) {
+func finished(pod *corev1.Pod) (exit, bool) {
 	for _, cs := range pod.Status.ContainerStatuses {
 		if cs.State.Terminated != nil {
-			return exit{code: cs.State.Terminated.ExitCode, message: strings.TrimSpace(cs.State.Terminated.Message)}, true, nil
+			return exit{code: cs.State.Terminated.ExitCode, message: strings.TrimSpace(cs.State.Terminated.Message)}, true
 		}
 		if cs.State.Waiting != nil && permanent(cs.State.Waiting.Reason) {
-			return exit{code: exitBroken, message: cs.State.Waiting.Reason + ": " + cs.State.Waiting.Message}, true, nil
+			return exit{code: exitBroken, message: cs.State.Waiting.Reason + ": " + cs.State.Waiting.Message}, true
 		}
 	}
-	return exit{}, false, nil
+	return exit{}, false
 }
 
 // permanent is a waiting reason that will not clear on its own.
@@ -417,4 +415,30 @@ func cniSuffix(name string) string {
 		return ""
 	}
 	return " (" + name + ")"
+}
+
+// dnsPort is the CoreDNS pod's metrics listener. The release's egress policy
+// admits the cluster's DNS pods on 53 only, so it is an address outside the
+// release's namespace that the policy denies and that every cluster box
+// supports runs: a control pod reaches it, a pod the policy selects does not.
+const dnsPort = 9153
+
+// DNSTarget is the in-cluster address the lock must deny: a ready cluster DNS
+// pod's metrics port. It refuses when the cluster runs none, because a proof
+// with no target is not a proof and box would rather stop than guess.
+func DNSTarget(ctx context.Context, client pods) (Target, error) {
+	list, err := client.List(ctx, "kube-system")
+	if err != nil {
+		return Target{}, fmt.Errorf("read the cluster's DNS pods: %w", err)
+	}
+	for _, pod := range list.Items {
+		if pod.Labels["k8s-app"] != "kube-dns" && pod.Labels["app.kubernetes.io/name"] != "coredns" {
+			continue
+		}
+		if pod.Status.Phase != corev1.PodRunning || pod.Status.PodIP == "" {
+			continue
+		}
+		return Target{Host: pod.Status.PodIP, Port: dnsPort}, nil
+	}
+	return Target{}, errors.New("this cluster runs no ready CoreDNS pod (k8s-app=kube-dns) in kube-system: box needs its metrics port as the address the release's egress policy must deny, and without one it cannot prove the lock")
 }

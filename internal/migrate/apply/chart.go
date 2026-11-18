@@ -283,3 +283,45 @@ func sortStrings(s []string) {
 		}
 	}
 }
+
+// WiringImage resolves the s5n image a release runs its own Job and probe pods
+// with, the way the chart's template does: the blessed variant names the
+// repository, the chart's appVersion is the tag the variant does not carry, and
+// a pinned tag or digest in the values narrows it inside that repository.
+//
+// It exists because the rehearsal's probe pods run the image the release
+// already pulls: a probe is a pod in a seedbox namespace, so it has to be an
+// image the blessed-image policy admits, and the s5n image is the one this box
+// knows the release carries.
+func WiringImage(variants []byte, appVersion string, values map[string]any) (string, error) {
+	images, err := admission.Images(variants)
+	if err != nil {
+		return "", err
+	}
+	wiring, _ := values["wiring"].(map[string]any)
+	pinned, _ := wiring["image"].(map[string]any)
+	variant, _ := pinned["variant"].(string)
+	if variant == "" {
+		variant = "default"
+	}
+	v, ok := images["s5n"][variant]
+	if !ok {
+		return "", fmt.Errorf("s5n: the chart has no %q variant for it", variant)
+	}
+	tag, digest := v.Tag, v.Digest
+	if tag == "" {
+		tag = appVersion
+	}
+	if digestPin, _ := pinned["digest"].(string); digestPin != "" {
+		digest = digestPin
+	} else if tagPin, _ := pinned["tag"].(string); tagPin != "" {
+		tag, digest = tagPin, ""
+	}
+	if v.Repository == "" || tag == "" {
+		return "", fmt.Errorf("s5n: variant %q names no image this box can run", variant)
+	}
+	if digest != "" {
+		return v.Repository + ":" + tag + "@" + digest, nil
+	}
+	return v.Repository + ":" + tag, nil
+}

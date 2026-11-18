@@ -18,6 +18,8 @@ import (
 
 	"github.com/swizzin/s5n/internal/archive"
 	"github.com/swizzin/s5n/internal/migrate/bundle"
+	"github.com/swizzin/s5n/internal/migrate/plan"
+	"github.com/swizzin/s5n/internal/say"
 	"github.com/swizzin/s5n/internal/seedbox"
 )
 
@@ -218,5 +220,131 @@ func TestWiringRecordRoundTrips(t *testing.T) {
 	}
 	if cm.Data["wiring.json"] != "{}" {
 		t.Error("the chart's wiring.json was dropped")
+	}
+}
+
+// TestGrantLocked: a rehearsal box's lock is the grant's flag, and a host with
+// no grant at all is not locked. A final snapshot never applies to a locked
+// box, so reading this correctly is what keeps a disposable rehearsal from
+// becoming a live one.
+func TestGrantLocked(t *testing.T) {
+	dir := t.TempDir()
+	missing := filepath.Join(dir, "absent.yaml")
+	if on, err := grantLocked(missing); err != nil || on {
+		t.Fatalf("grantLocked(absent) = %v, %v; want false, nil", on, err)
+	}
+	locked := filepath.Join(dir, "locked.yaml")
+	if err := os.WriteFile(locked, []byte("namespace: seedbox\nrehearsal: true\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if on, err := grantLocked(locked); err != nil || !on {
+		t.Errorf("grantLocked(locked) = %v, %v; want true, nil", on, err)
+	}
+	open := filepath.Join(dir, "open.yaml")
+	if err := os.WriteFile(open, []byte("namespace: seedbox\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if on, err := grantLocked(open); err != nil || on {
+		t.Errorf("grantLocked(open) = %v, %v; want false, nil", on, err)
+	}
+}
+
+// TestRehearsalSourceHost: a rehearsal must not run on the host that holds the
+// source's data. Both the plan's source host and a non-empty data root say so,
+// and either alone is enough.
+func TestRehearsalSourceHost(t *testing.T) {
+	host, err := os.Hostname()
+	if err != nil {
+		t.Skip("no hostname")
+	}
+	planFor := func(sourceHost, root string) *plan.Plan {
+		var doc string
+		if root != "" {
+			doc = "version: 2\nsource:\n  host: " + sourceHost + "\n  taken: 2026-11-17T00:00:00Z\n  kinds: [kubernetes]\ndata:\n  root: " + root + "\n  downloads: Downloads\n  media: library\napps: {}\n"
+		} else {
+			doc = "version: 2\nsource:\n  host: " + sourceHost + "\n  taken: 2026-11-17T00:00:00Z\n  kinds: [kubernetes]\napps: {}\n"
+		}
+		p, err := plan.Parse([]byte(doc))
+		if err != nil {
+			t.Fatalf("parse plan: %v", err)
+		}
+		return p
+	}
+
+	if err := rehearsalSourceHost(planFor(host, "")); err == nil {
+		t.Fatal("a plan naming this host as its source was accepted")
+	} else if !strings.Contains(err.Error(), "rehearse on another host or VM") {
+		t.Errorf("refusal = %v, want it to name the way forward", err)
+	}
+	if err := rehearsalSourceHost(planFor("elsewhere.example.com", "")); err != nil {
+		t.Errorf("a plan from another host with no data here was refused: %v", err)
+	}
+
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "Downloads"), []byte("data"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := rehearsalSourceHost(planFor("elsewhere.example.com", root)); err == nil {
+		t.Fatal("a non-empty data root on this host was accepted")
+	}
+}
+
+// TestEnabledApps: the refusal for a box that already runs something reads the
+// grant, which is what decides existence, and names every app it found.
+func TestEnabledApps(t *testing.T) {
+	dir := t.TempDir()
+	grant := filepath.Join(dir, "grant.yaml")
+	doc := "namespace: seedbox\ngateway:\n  host: box.example.com\napps:\n  sonarr:\n    enabled: true\n  prowlarr:\n    enabled: false\n  qbittorrent:\n    enabled: true\n"
+	if err := os.WriteFile(grant, []byte(doc), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	sb, err := seedbox.Load(grant, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(enabledApps(sb), ","); got != "qbittorrent,sonarr" {
+		t.Errorf("enabled apps = %q, want qbittorrent,sonarr", got)
+	}
+}
+
+// TestOpenSnapshotTakesARehearsal: apply runs a rehearsal now, so the mode is
+// no longer a refusal; a survey still is, because it holds nothing to rewrite.
+func TestOpenSnapshotTakesARehearsal(t *testing.T) {
+	dir := t.TempDir()
+	planYAML := []byte(`version: 2
+apps:
+  qbittorrent:
+    kind: kubernetes
+    source: qbittorrent
+    config: /srv/apps/qbittorrent
+    paths: []
+`)
+	for _, tc := range []struct {
+		mode archive.Mode
+		ok   bool
+	}{
+		{archive.ModeRehearsal, true},
+		{archive.ModeFinal, true},
+		{archive.ModeSurvey, false},
+	} {
+		path := filepath.Join(dir, string(tc.mode)+".tar.gz")
+		if _, err := bundle.Write(path, bundle.Snapshot{Mode: tc.mode, Plan: planYAML}); err != nil {
+			t.Fatalf("write %s snapshot: %v", tc.mode, err)
+		}
+		opened, cleanup, err := openSnapshot(path, &say.Plain{})
+		cleanup()
+		if tc.ok {
+			if err != nil {
+				t.Errorf("%s: openSnapshot: %v", tc.mode, err)
+				continue
+			}
+			if opened.Mode != tc.mode {
+				t.Errorf("%s: mode = %q", tc.mode, opened.Mode)
+			}
+			continue
+		}
+		if err == nil {
+			t.Errorf("%s: openSnapshot accepted it", tc.mode)
+		}
 	}
 }

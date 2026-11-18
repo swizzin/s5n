@@ -204,15 +204,9 @@ func read(src, app string, table Table, rep *Report, cfg config) ([]outFile, []p
 			}
 			gaps = append(gaps, g...)
 			if len(g) == 0 {
-				if cfg.stop {
-					var stopped bool
-					data, stopped, err = stopBytes(name, data)
-					if err != nil {
-						return nil, nil, err
-					}
-					if stopped {
-						rep.Stopped++
-					}
+				data, err = stoppedData(name, data, cfg, rep)
+				if err != nil {
+					return nil, nil, err
 				}
 				out.data = data
 				out.changed = !bytes.Equal(data, raw)
@@ -231,6 +225,23 @@ func read(src, app string, table Table, rep *Report, cfg config) ([]outFile, []p
 		files = append(files, out)
 	}
 	return files, gaps, nil
+}
+
+// stoppedData marks one decoded resume file stopped when this run is a
+// rehearsal, counting it for the report. A run that is not a rehearsal returns
+// the bytes it was given: the stop is the snapshot's mode, not a setting.
+func stoppedData(name string, data []byte, cfg config, rep *Report) ([]byte, error) {
+	if !cfg.stop {
+		return data, nil
+	}
+	out, stopped, err := stopBytes(name, data)
+	if err != nil {
+		return nil, err
+	}
+	if stopped {
+		rep.Stopped++
+	}
+	return out, nil
 }
 
 // rewriteFile decodes one resume file and returns the bytes pass two writes.

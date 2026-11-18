@@ -294,3 +294,31 @@ func TestIntValue(t *testing.T) {
 		}
 	}
 }
+
+// TestWiringImageIsTheOneTheReleaseRuns: the rehearsal's probe pods run the s5n
+// image the release's own Job runs, resolved the way the chart's template does.
+// The chart's s5n variant carries no tag of its own; the release's appVersion
+// is what fills it, and a pinned tag or digest narrows it inside the repository.
+func TestWiringImageIsTheOneTheReleaseRuns(t *testing.T) {
+	variants := []byte(readChart(t, "variants.yaml"))
+	img, err := WiringImage(variants, "0.5.0", chartValues(t))
+	if err != nil {
+		t.Fatalf("WiringImage: %v", err)
+	}
+	if img != "ghcr.io/swizzin/s5n:0.5.0" {
+		t.Errorf("wiring image = %q, want the blessed repository tagged with the release", img)
+	}
+	pinned := map[string]any{"wiring": map[string]any{"image": map[string]any{
+		"variant": "default", "digest": "sha256:" + strings.Repeat("b", 64),
+	}}}
+	img, err = WiringImage(variants, "0.5.0", pinned)
+	if err != nil {
+		t.Fatalf("WiringImage with a pinned digest: %v", err)
+	}
+	if !strings.HasSuffix(img, "@sha256:"+strings.Repeat("b", 64)) {
+		t.Errorf("a pinned digest does not win: %q", img)
+	}
+	if _, err := WiringImage(variants, "", map[string]any{}); err == nil {
+		t.Error("a release with no appVersion and no tag resolved to an unpullable image")
+	}
+}

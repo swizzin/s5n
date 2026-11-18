@@ -942,7 +942,9 @@ data. Everything it will change is written down before it changes anything.
   history of a cutover. The modes are `survey` (a read with no configs in it),
   `rehearsal` (the configs copied from a running source) and `final` (from a stopped
   one); apply runs a final snapshot, refuses a survey because there is nothing in it to
-  rewrite, and refuses a rehearsal until the lock below is real.
+  rewrite, and runs a rehearsal under the lock below. A box that applied a rehearsal
+  stays locked, so it refuses a final snapshot: the real run starts from a final one on a
+  clean host.
 - **discover only reads, and the apps need not run (decided).** It reads each workload's
   pod template and the host's files, so it needs the cluster up, never the app: a
   stopped app is still there to read. Every workload kind with nothing owning it above
@@ -1000,8 +1002,16 @@ data. Everything it will change is written down before it changes anything.
 - **A rehearsal cannot reach the internet (decided goal, mechanism proposed).**
   `discover --rehearsal` copies the configs into a snapshot that applies locked: no
   internet egress, proven from inside the namespace before any app starts, and every
-  torrent started stopped. A rehearsal box is disposable, never renames data, and
-  refuses to apply on the host that holds the source's data.
+  torrent started stopped. The lock is a grant value (`rehearsal`), so it is in box's
+  own record and every later `box apply` and `box update` renders it; nothing unlocks
+  it, because a rehearsal box is disposable. The proof is a control pod without the
+  release's label that must reach an in-cluster address outside the namespace, and a
+  probe pod carrying the release's label that must not; a control that cannot run is a
+  refusal saying the proof could not happen, and a probe that succeeds is a refusal
+  naming the cluster's CNI, because a NetworkPolicy is only an instruction to it. The
+  torrents start stopped because the copy has no data to seed and would otherwise
+  recheck from zero. A rehearsal renames nothing, refuses to apply on the host that
+  holds the source's data, and never applies a final snapshot afterwards.
 - **Every source is detected, and one plan can hold several (decided).** discover runs
   each reader that finds evidence — a cluster at a known kubeconfig, a docker socket
   with catalog images running, swizzin's units — and shows what it found. Each app
