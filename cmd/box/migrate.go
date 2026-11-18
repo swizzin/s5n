@@ -251,6 +251,11 @@ func migrateDiscover(ctx context.Context, o discoverOptions, out say.Reporter) (
 	// The file is named before it is written, so the report inside it can name
 	// it: the operator reads one page that says where the snapshot is.
 	path := freeSnapshotPath(o, mode)
+	// What the snapshot does not carry is part of that page: Plex's metadata
+	// stays on the source, and the operator reads that once, here.
+	if mode != archive.ModeSurvey {
+		read.report.Notes = append(read.report.Notes, skipLines(read.plan)...)
+	}
 	if err := encodeRead(&read); err != nil {
 		read.text = discoveryReport(read.plan, read.report, "", read.settled, err)
 		return read.text, err
@@ -388,10 +393,20 @@ func writeSnapshot(path string, mode archive.Mode, o discoverOptions, read migra
 		}
 		sort.Strings(names)
 		for _, name := range names {
-			s.Configs = append(s.Configs, bundle.Config{
+			app := bundle.Config{
 				Instance: name,
 				Dir:      filepath.Join(root, read.plan.Apps[name].Config),
-			})
+			}
+			// An app whose config is more than its state (Plex: a library of
+			// covers beside its databases) travels as the files discovery's
+			// table names. Every other app's whole tree goes in.
+			if carry, ok := discover.SnapshotCarry(name); ok {
+				app.Files = make([]bundle.File, len(carry.Files))
+				for i, f := range carry.Files {
+					app.Files[i] = bundle.File{Path: f.Path, Required: f.Required}
+				}
+			}
+			s.Configs = append(s.Configs, app)
 		}
 	}
 	return bundle.Write(path, s)
@@ -558,6 +573,28 @@ func discoveryReport(p *plan.Plan, rep discover.Report, out string, settled appl
 		}
 	}
 	return b.String()
+}
+
+// skipLines is what a read says about the parts of a config its snapshot does
+// not carry: one line per planned app whose config is more than its state, said
+// once, in the report the snapshot holds and on the screen the operator reads.
+// Nothing is said on a survey, which carries no configs at all.
+func skipLines(p *plan.Plan) []string {
+	if p == nil {
+		return nil
+	}
+	names := make([]string, 0, len(p.Apps))
+	for name := range p.Apps {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	var out []string
+	for _, name := range names {
+		if carry, ok := discover.SnapshotCarry(name); ok && carry.Note != "" {
+			out = append(out, carry.Note)
+		}
+	}
+	return out
 }
 
 // skippedRows is what discovery did not migrate, with its reason.

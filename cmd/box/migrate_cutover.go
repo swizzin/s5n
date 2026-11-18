@@ -221,6 +221,9 @@ func cutover(ctx context.Context, o cutoverOptions, out say.Reporter, seams cuto
 	}
 
 	path := freeSnapshotPath(o.discoverOptions, archive.ModeFinal)
+	// What the snapshot does not carry is part of the page: Plex's metadata
+	// stays on the source, and the operator reads that once, here.
+	read.report.Notes = append(read.report.Notes, skipLines(read.plan)...)
 	if err := encodeRead(&read); err != nil {
 		return err
 	}

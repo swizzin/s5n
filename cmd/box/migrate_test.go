@@ -451,3 +451,126 @@ func TestMigrateDiscoverRefusesAChartWithNoVariants(t *testing.T) {
 		t.Errorf("the refused read wrote a snapshot: %v", err)
 	}
 }
+
+// plexSourceTree builds the config directory a source Plex keeps: the two files
+// a migration needs, the companion a database writes while it is open, and the
+// Metadata and Cache trees of covers it rebuilds.
+func plexSourceTree(t *testing.T, root string) string {
+	t.Helper()
+	dir := filepath.Join(root, "srv", "apps", "plex")
+	server := filepath.Join(dir, "Library", "Application Support", "Plex Media Server")
+	dbs := filepath.Join(server, "Plug-in Support", "Databases")
+	for _, d := range []string{dbs, filepath.Join(dir, "Metadata", "Posters"), filepath.Join(dir, "Cache", "PhotoTranscoder")} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for name, body := range map[string]string{
+		filepath.Join(server, "Preferences.xml"):                                  "<Preferences/>\n",
+		filepath.Join(dbs, "com.plexapp.plugins.library.db"):                      "sqlite\n",
+		filepath.Join(dbs, "com.plexapp.plugins.library.db-wal"):                  "wal\n",
+		filepath.Join(dir, "Metadata", "Posters", "poster.jpg"):                   "jpeg\n",
+		filepath.Join(dir, "Cache", "PhotoTranscoder", "thumb.jpg"):               "jpeg\n",
+		filepath.Join(server, "Logs", "..", "Plug-in Support", "caches", "c.bin"): "cache\n",
+	} {
+		if err := os.MkdirAll(filepath.Dir(name), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(name, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return dir
+}
+
+// TestWriteSnapshotCarriesOnlyPlexsState: the snapshot a read writes carries
+// Plex's preferences and databases and the directories above them, and never its
+// Metadata or Cache tree, while every other app's config travels whole. The line
+// saying what was left out is what the report and the confirm read.
+func TestWriteSnapshotCarriesOnlyPlexsState(t *testing.T) {
+	root := t.TempDir()
+	plexSourceTree(t, root)
+	sonarr := filepath.Join(root, "srv", "apps", "sonarr")
+	if err := os.MkdirAll(filepath.Join(sonarr, "logs"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for name, body := range map[string]string{
+		filepath.Join(sonarr, "config.xml"):         "<Config/>\n",
+		filepath.Join(sonarr, "sonarr.db"):          "sqlite\n",
+		filepath.Join(sonarr, "logs", "sonarr.txt"): "starting\n",
+	} {
+		if err := os.WriteFile(name, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	p, err := plan.Parse([]byte(`version: 2
+apps:
+  plex:
+    kind: kubernetes
+    source: plex
+    config: /srv/apps/plex
+    paths: []
+  sonarr:
+    kind: kubernetes
+    source: sonarr
+    config: /srv/apps/sonarr
+    paths: []
+`))
+	if err != nil {
+		t.Fatalf("the fixture plan: %v", err)
+	}
+	path := filepath.Join(t.TempDir(), "final.tar.gz")
+	o := discoverOptions{Root: root, Box: testChartVersion}
+	read := migrationRead{plan: p, text: "plan: the read\n"}
+	if err := encodeRead(&read); err != nil {
+		t.Fatalf("encode the read: %v", err)
+	}
+	if _, err := writeSnapshot(path, archive.ModeFinal, o, read); err != nil {
+		t.Fatalf("write the snapshot: %v", err)
+	}
+	opened, err := bundle.Open(path, filepath.Join(t.TempDir(), "open"))
+	if err != nil {
+		t.Fatalf("the snapshot does not open: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(opened.Configs["plex"], "Library", "Application Support", "Plex Media Server", "Preferences.xml")); err != nil {
+		t.Errorf("the snapshot carries no Preferences.xml: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(opened.Configs["plex"], "Library", "Application Support", "Plex Media Server", "Plug-in Support", "Databases", "com.plexapp.plugins.library.db")); err != nil {
+		t.Errorf("the snapshot carries no library database: %v", err)
+	}
+	for _, left := range []string{"Metadata", "Cache"} {
+		if _, err := os.Stat(filepath.Join(opened.Configs["plex"], left)); !os.IsNotExist(err) {
+			t.Errorf("the snapshot carries Plex's %s tree, and Plex rebuilds it: %v", left, err)
+		}
+	}
+	// The other app's config is its state: an archive that trimmed it would be
+	// one apply could not use.
+	if _, err := os.Stat(filepath.Join(opened.Configs["sonarr"], "logs", "sonarr.txt")); err != nil {
+		t.Errorf("sonarr's whole config did not travel: %v", err)
+	}
+
+	// One line, saying what was left behind: it is the report's, and the
+	// confirm's, and it names only the app whose config is more than its state.
+	lines := skipLines(p)
+	if len(lines) != 1 || !strings.HasPrefix(lines[0], "plex: carried Preferences.xml and its databases;") {
+		t.Fatalf("the read's line about what the snapshot leaves out is %v", lines)
+	}
+	if !strings.Contains(lines[0], "artwork uploaded by hand is not carried") {
+		t.Errorf("the line does not say what the operator must bring back by hand: %q", lines[0])
+	}
+
+	// The confirm says it too, but only for a snapshot that really is trimmed:
+	// one that carried a whole tree is never described as a subset.
+	if got := carriedLines(p, opened); len(got) != 1 || got[0] != lines[0] {
+		t.Errorf("the confirm's line = %v, want the read's one line", got)
+	}
+	if err := os.MkdirAll(filepath.Join(opened.Configs["plex"], "Metadata", "Posters"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(opened.Configs["plex"], "Metadata", "Posters", "poster.jpg"), []byte("jpeg\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got := carriedLines(p, opened); len(got) != 0 {
+		t.Errorf("a snapshot holding the whole Plex tree is described as trimmed: %v", got)
+	}
+}

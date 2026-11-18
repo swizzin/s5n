@@ -3,6 +3,7 @@ package discover
 import (
 	"os"
 	"path/filepath"
+	"reflect"
 	"sort"
 	"strings"
 	"testing"
@@ -72,5 +73,56 @@ func TestTableMatchesTheChart(t *testing.T) {
 		if _, ok := catalog.Apps[name]; !ok {
 			t.Errorf("%s is in discovery's table and not in the chart's catalog", name)
 		}
+	}
+}
+
+// TestSnapshotCarryIsPlexsStateAndNothingElse: a migration copies every planned
+// app's config whole, except Plex's, whose config directory is mostly a library
+// of covers and thumbnails it rebuilds. What Plex's snapshot carries is what it
+// cannot rebuild: Preferences.xml, which holds its own settings, and the library
+// databases -- and the two of those are state a snapshot without refuses.
+// Nothing else in the table trims a tree.
+func TestSnapshotCarryIsPlexsStateAndNothingElse(t *testing.T) {
+	carry, ok := SnapshotCarry("plex")
+	if !ok {
+		t.Fatal("Plex's snapshot is its whole config directory: on a real library that is tens of gigabytes of metadata")
+	}
+	want := []CarryFile{
+		{Path: "Library/Application Support/Plex Media Server/Preferences.xml", Required: true},
+		{Path: "Library/Application Support/Plex Media Server/Plug-in Support/Databases/com.plexapp.plugins.library.db", Required: true},
+		{Path: "Library/Application Support/Plex Media Server/Plug-in Support/Databases/com.plexapp.plugins.library.db-wal"},
+		{Path: "Library/Application Support/Plex Media Server/Plug-in Support/Databases/com.plexapp.plugins.library.db-shm"},
+		{Path: "Library/Application Support/Plex Media Server/Plug-in Support/Databases/com.plexapp.plugins.library.blobs.db"},
+		{Path: "Library/Application Support/Plex Media Server/Plug-in Support/Databases/com.plexapp.plugins.library.blobs.db-wal"},
+		{Path: "Library/Application Support/Plex Media Server/Plug-in Support/Databases/com.plexapp.plugins.library.blobs.db-shm"},
+	}
+	if !reflect.DeepEqual(carry.Files, want) {
+		t.Errorf("Plex's snapshot carries\n  %v\nwant\n  %v", carry.Files, want)
+	}
+	if !strings.HasPrefix(carry.Note, "plex: carried Preferences.xml and its databases; Plex rebuilds its metadata, artwork and thumbnails (artwork uploaded by hand is not carried)") {
+		t.Errorf("the line about what Plex's snapshot leaves behind is %q", carry.Note)
+	}
+	for _, dir := range []string{"Metadata", "Cache"} {
+		for _, f := range carry.Files {
+			if strings.Contains(f.Path, dir) {
+				t.Errorf("Plex's snapshot carries %s, and Plex rebuilds it", f.Path)
+			}
+		}
+	}
+
+	// Every other app's config is its state: an archive that trimmed one would
+	// be one apply could not use.
+	for app := range catalogApps {
+		if app == "plex" {
+			continue
+		}
+		if _, ok := SnapshotCarry(app); ok {
+			t.Errorf("%s's snapshot is trimmed to a file list, and its config is its state", app)
+		}
+	}
+	// An instance is its app's entry, so the list is not lost when an app that
+	// takes several grows one.
+	if _, ok := SnapshotCarry("sonarr-4k"); ok {
+		t.Error("sonarr-4k carries a trimmed list, and sonarr does not")
 	}
 }

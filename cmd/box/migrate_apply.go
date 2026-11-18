@@ -36,6 +36,7 @@ import (
 	"github.com/swizzin/s5n/internal/kube"
 	"github.com/swizzin/s5n/internal/migrate/apply"
 	"github.com/swizzin/s5n/internal/migrate/bundle"
+	"github.com/swizzin/s5n/internal/migrate/discover"
 	"github.com/swizzin/s5n/internal/migrate/lock"
 	"github.com/swizzin/s5n/internal/migrate/plan"
 	"github.com/swizzin/s5n/internal/release"
@@ -275,7 +276,7 @@ func migrateApply(ctx context.Context, file string, o *migrateApplyFlags, out sa
 	if err != nil {
 		return err
 	}
-	env, cs, err := migrateEnv(p, opened, o, sb, chart, cat, kc, namespace, values, rehearsal, out)
+	env, cs, err := migrateEnv(p, opened, o, sb, chart, cat, kc, namespace, values, rehearsal, carriedLines(p, opened), out)
 	if err != nil {
 		return err
 	}
@@ -334,7 +335,7 @@ func loadMigrateChart(ctx context.Context, charts *chartRelease) (release.Chart,
 }
 
 // migrateEnv builds everything apply touches outside the plan directory.
-func migrateEnv(p *plan.Plan, opened *bundle.Opened, o *migrateApplyFlags, sb *seedbox.Seedbox, chart release.Chart, cat *catalog.Catalog, kc, namespace string, values map[string]any, rehearsal bool, out say.Reporter) (apply.Env, kubernetes.Interface, error) {
+func migrateEnv(p *plan.Plan, opened *bundle.Opened, o *migrateApplyFlags, sb *seedbox.Seedbox, chart release.Chart, cat *catalog.Catalog, kc, namespace string, values map[string]any, rehearsal bool, skip []string, out say.Reporter) (apply.Env, kubernetes.Interface, error) {
 	var env apply.Env
 	vols, err := sb.Storage()
 	if err != nil {
@@ -416,18 +417,85 @@ func migrateEnv(p *plan.Plan, opened *bundle.Opened, o *migrateApplyFlags, sb *s
 		env.Run = runner.Run
 	}
 	env.Rehearsal = rehearsal
-	env.Confirm = migrateConfirm(out, *o.yes, namespace, rehearsal)
+	env.Confirm = migrateConfirm(out, *o.yes, namespace, rehearsal, skip)
 	return env, cs, nil
+}
+
+// carriedLines is the confirm's half of the report's line about the part of a
+// config a snapshot does not hold: Plex's metadata is not in it, and the
+// operator reads that before the copy rather than after. It is said only for an
+// app whose extracted config is exactly what discovery's table names, so a
+// snapshot that carried a whole tree is never described as a subset.
+func carriedLines(p *plan.Plan, opened *bundle.Opened) []string {
+	if p == nil {
+		return nil
+	}
+	names := make([]string, 0, len(p.Apps))
+	for name := range p.Apps {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	var out []string
+	for _, name := range names {
+		carry, ok := discover.SnapshotCarry(name)
+		if !ok || carry.Note == "" {
+			continue
+		}
+		if trimmed(opened.Configs[name], carry.Files) {
+			out = append(out, carry.Note)
+		}
+	}
+	return out
+}
+
+// errNotCarried stops trimmed's walk at the first entry of a config directory
+// that a carried set does not name.
+var errNotCarried = errors.New("not part of the snapshot")
+
+// trimmed reports whether dir holds the files a snapshot carries for one app,
+// with the directories above them, and nothing else. It stops at the first
+// entry outside the set, which is what keeps a whole Plex tree cheap to refuse.
+func trimmed(dir string, files []discover.CarryFile) bool {
+	if dir == "" {
+		return false
+	}
+	carried := make(map[string]bool, len(files))
+	for _, f := range files {
+		carried[f.Path] = true
+		for i := strings.LastIndex(f.Path, "/"); i > 0; i = strings.LastIndex(f.Path[:i], "/") {
+			carried[f.Path[:i]] = true
+		}
+	}
+	err := filepath.WalkDir(dir, func(p string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		rel, err := filepath.Rel(dir, p)
+		if err != nil {
+			return err
+		}
+		if rel == "." {
+			return nil
+		}
+		if !carried[filepath.ToSlash(rel)] {
+			return errNotCarried
+		}
+		return nil
+	})
+	return err == nil
 }
 
 // migrateConfirm shows the summary and asks the one question. It is the same
 // confirmer `box apply` asks with, so a terminal gets the live form and a
 // --plain or piped run gets the line prompt; --yes answers without asking, and
 // no terminal without --yes refuses, as apply does.
-func migrateConfirm(out say.Reporter, yes bool, namespace string, rehearsal bool) func(apply.Summary) (bool, error) {
+func migrateConfirm(out say.Reporter, yes bool, namespace string, rehearsal bool, skip []string) func(apply.Summary) (bool, error) {
 	ask := confirmer(out, yes)
 	return func(s apply.Summary) (bool, error) {
-		out.List("this migration", s.Lines())
+		// The summary, then the one line saying what the snapshot does not
+		// hold: a part of a config left behind is a decision the operator
+		// reads before the copy, never a surprise after it.
+		out.List("this migration", append(s.Lines(), skip...))
 		if rehearsal {
 			// The screen a person reads before the first write says what this
 			// box is, not only what moves into it.
