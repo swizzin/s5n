@@ -18,33 +18,39 @@ import (
 // _CONFIG_DEFINITIONS (plexpy/config.py at v2.18.2): one section per group of
 // settings, `key = value`, comments between them, and a quoted value holding a
 // space.
+//
+// Every key is lower case because that is the only spelling Tautulli writes:
+// Config's _define (plexpy/config.py:473) folds each setting's name to
+// `ini_key = name.lower()`, and Config.write() (:528-556) builds the file from
+// those keys. The fixture was all caps before the migration read a real
+// config.ini and found none of it.
 const fixture = `[General]
 # the web server
-HTTP_HOST = 127.0.0.1
-HTTP_PORT = 8181
-HTTP_ROOT = /tautulli
-HTTP_USERNAME = admin
-BACKUP_DIR = /srv/apps/tautulli/backups
-CACHE_DIR = /srv/apps/tautulli/cache
-EXPORT_DIR = /srv/apps/tautulli/exports
-LOG_DIR = "/srv/apps/tautulli/logs"
-GIT_PATH = 
-HTTPS_CERT = /srv/apps/tautulli/server.crt
-HTTPS_CERT_CHAIN = 
-HTTPS_KEY = /srv/apps/tautulli/server.key
+http_host = 127.0.0.1
+http_port = 8181
+http_root = /tautulli
+http_username = admin
+backup_dir = /srv/apps/tautulli/backups
+cache_dir = /srv/apps/tautulli/cache
+export_dir = /srv/apps/tautulli/exports
+log_dir = "/srv/apps/tautulli/logs"
+git_path = 
+https_cert = /srv/apps/tautulli/server.crt
+https_cert_chain = 
+https_key = /srv/apps/tautulli/server.key
 
 [PMS]
-PMS_IP = localhost
-PMS_PORT = 32400
-PMS_SSL = 1
-PMS_URL = https://localhost:32400
-PMS_LOGS_FOLDER = /srv/plex/logs
-PMS_TOKEN = secret-token
+pms_ip = localhost
+pms_port = 32400
+pms_ssl = 1
+pms_url = https://localhost:32400
+pms_logs_folder = /srv/plex/logs
+pms_token = secret-token
 
 [Newsletter]
-NEWSLETTER_DIR = /srv/apps/tautulli/newsletters
-NEWSLETTER_CUSTOM_DIR = /srv/plex/newsletters
-NEWSLETTER_TEMPLATES = newsletters
+newsletter_dir = /srv/apps/tautulli/newsletters
+newsletter_custom_dir = /srv/plex/newsletters
+newsletter_templates = newsletters
 `
 
 const planYAML = `
@@ -77,10 +83,10 @@ func targets() map[string]rewrite.Endpoint {
 	}
 }
 
-func setup(t *testing.T) rewrite.Input {
+func setupFile(t *testing.T, text string) rewrite.Input {
 	t.Helper()
 	dir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(dir, configName), []byte(fixture), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, configName), []byte(text), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	p, err := plan.Parse([]byte(planYAML))
@@ -88,6 +94,49 @@ func setup(t *testing.T) rewrite.Input {
 		t.Fatalf("plan: %v", err)
 	}
 	return rewrite.Input{App: "tautulli", Dir: dir, Plan: p, Targets: targets()}
+}
+
+func setup(t *testing.T) rewrite.Input { t.Helper(); return setupFile(t, fixture) }
+
+// rewritten runs both passes over one config.ini and returns the file as it is
+// afterwards, by section/key as the file spells them.
+func rewritten(t *testing.T, text string) map[string]string {
+	t.Helper()
+	in := setupFile(t, text)
+	ctx := context.Background()
+	if rep, err := (rewriter{}).Check(ctx, in); err != nil {
+		t.Fatal(err)
+	} else if rep.Blocked() {
+		t.Fatalf("Blocked: uncovered %v, unclassified %v", rep.Uncovered, rep.Unclassified)
+	}
+	if _, err := (rewriter{}).Write(ctx, in); err != nil {
+		t.Fatal(err)
+	}
+	return read(t, in.Dir)
+}
+
+// respelled is one config.ini with every key in the other spelling, which is
+// what a file a person hand-edited (or one an older tool wrote) looks like.
+// Tautulli resolves a setting only through its lower-case name, so a file
+// spelled this way is not the setting to Tautulli itself; to a person reading
+// the file, it is the same config, and migrate rewriting nothing there is the
+// failure this package exists to avoid.
+func respelled(ini string) string {
+	var out []string
+	for _, line := range strings.Split(ini, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" || strings.HasPrefix(trimmed, "#") || strings.HasPrefix(trimmed, "[") {
+			out = append(out, line)
+			continue
+		}
+		name, value, ok := strings.Cut(line, "=")
+		if !ok {
+			out = append(out, line)
+			continue
+		}
+		out = append(out, strings.ToUpper(name)+"="+value)
+	}
+	return strings.Join(out, "\n")
 }
 
 func TestRewritesPathsAddressesAndListenSettings(t *testing.T) {
@@ -105,26 +154,26 @@ func TestRewritesPathsAddressesAndListenSettings(t *testing.T) {
 	got := read(t, in.Dir)
 
 	want := map[string]string{
-		"General/HTTP_HOST":                "0.0.0.0",
-		"General/HTTP_PORT":                "8181",
-		"General/HTTP_ROOT":                "",
-		"General/BACKUP_DIR":               "/config/backups",
-		"General/CACHE_DIR":                "/config/cache",
-		"General/EXPORT_DIR":               "/config/exports",
-		"General/LOG_DIR":                  "/config/logs",
-		"General/GIT_PATH":                 "",
-		"General/HTTPS_CERT":               "/config/server.crt",
-		"General/HTTPS_CERT_CHAIN":         "",
-		"General/HTTPS_KEY":                "/config/server.key",
-		"PMS/PMS_IP":                       "plex",
-		"PMS/PMS_PORT":                     "32400",
-		"PMS/PMS_SSL":                      "0",
-		"PMS/PMS_URL":                      "http://plex:32400",
-		"PMS/PMS_LOGS_FOLDER":              "/config/plex/logs",
-		"PMS/PMS_TOKEN":                    "secret-token",
-		"Newsletter/NEWSLETTER_TEMPLATES":  "newsletters",
-		"Newsletter/NEWSLETTER_DIR":        "/config/newsletters",
-		"Newsletter/NEWSLETTER_CUSTOM_DIR": "/config/plex/newsletters",
+		"General/http_host":                "0.0.0.0",
+		"General/http_port":                "8181",
+		"General/http_root":                "",
+		"General/backup_dir":               "/config/backups",
+		"General/cache_dir":                "/config/cache",
+		"General/export_dir":               "/config/exports",
+		"General/log_dir":                  "/config/logs",
+		"General/git_path":                 "",
+		"General/https_cert":               "/config/server.crt",
+		"General/https_cert_chain":         "",
+		"General/https_key":                "/config/server.key",
+		"PMS/pms_ip":                       "plex",
+		"PMS/pms_port":                     "32400",
+		"PMS/pms_ssl":                      "0",
+		"PMS/pms_url":                      "http://plex:32400",
+		"PMS/pms_logs_folder":              "/config/plex/logs",
+		"PMS/pms_token":                    "secret-token",
+		"Newsletter/newsletter_templates":  "newsletters",
+		"Newsletter/newsletter_dir":        "/config/newsletters",
+		"Newsletter/newsletter_custom_dir": "/config/plex/newsletters",
 	}
 	for where, value := range want {
 		if got[where] != value {
@@ -140,9 +189,9 @@ func TestRewritesPathsAddressesAndListenSettings(t *testing.T) {
 	}
 	for _, kept := range []string{
 		"# the web server",
-		"LOG_DIR = \"/config/logs\"\n",
-		"HTTPS_CERT_CHAIN = \n",
-		"HTTP_USERNAME = admin\n",
+		"log_dir = \"/config/logs\"\n",
+		"https_cert_chain = \n",
+		"http_username = admin\n",
 		"[PMS]\n",
 	} {
 		if !strings.Contains(string(after), kept) {
@@ -150,7 +199,7 @@ func TestRewritesPathsAddressesAndListenSettings(t *testing.T) {
 		}
 	}
 	// A second pass has nothing left to do, and no address is unclassified:
-	// PMS_IP now names the box, and in.Resolve knows the box's own endpoints.
+	// pms_ip now names the box, and in.Resolve knows the box's own endpoints.
 	rep2, err := rewriter{}.Check(context.Background(), in)
 	if err != nil {
 		t.Fatal(err)
@@ -160,6 +209,115 @@ func TestRewritesPathsAddressesAndListenSettings(t *testing.T) {
 	}
 	if len(rep2.Unclassified) != 0 {
 		t.Errorf("after Write, Check reports unclassified addresses: %v", rep2.Unclassified)
+	}
+}
+
+// TestReadsEverySpellingOfAKey: the same config with its keys in the other
+// case is rewritten the same way, and the file keeps the spelling it had. A
+// rewrite that renames a key would write a setting the app does not read next
+// to the one it does.
+func TestReadsEverySpellingOfAKey(t *testing.T) {
+	want := map[string]string{
+		"General/http_host":         "0.0.0.0",
+		"General/http_root":         "",
+		"General/backup_dir":        "/config/backups",
+		"General/log_dir":           "/config/logs",
+		"General/https_cert":        "/config/server.crt",
+		"PMS/pms_ip":                "plex",
+		"PMS/pms_ssl":               "0",
+		"PMS/pms_url":               "http://plex:32400",
+		"Newsletter/newsletter_dir": "/config/newsletters",
+	}
+	for _, tt := range []struct {
+		name string
+		text string
+	}{
+		{"lower case, the spelling Tautulli writes", fixture},
+		{"upper case, a file a person hand-edited", respelled(fixture)},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			got := rewritten(t, tt.text)
+			for where, value := range want {
+				v, ok := lookupFold(got, where)
+				if !ok {
+					t.Errorf("%s is not in the rewritten file: %v", where, got)
+					continue
+				}
+				if v != value {
+					t.Errorf("%s = %q, want %q", where, v, value)
+				}
+			}
+		})
+	}
+}
+
+// lookupFold is read()'s map, asked for a section/key without caring how the
+// file spelled it.
+func lookupFold(ini map[string]string, where string) (string, bool) {
+	for k, v := range ini {
+		if strings.EqualFold(k, where) {
+			return v, true
+		}
+	}
+	return "", false
+}
+
+// TestKeepsTheKeySpellingOnDisk: what the two passes above say must hold on the
+// bytes, not only in the parsed view: an upper-case file has upper-case keys
+// after the rewrite and gains none of the lower-case ones.
+func TestKeepsTheKeySpellingOnDisk(t *testing.T) {
+	in := setupFile(t, respelled(fixture))
+	ctx := context.Background()
+	if _, err := (rewriter{}).Write(ctx, in); err != nil {
+		t.Fatal(err)
+	}
+	after, err := os.ReadFile(filepath.Join(in.Dir, configName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"HTTP_ROOT = \n", "PMS_IP = plex\n", "LOG_DIR = \"/config/logs\"\n"} {
+		if !strings.Contains(string(after), want) {
+			t.Errorf("%q is not in the rewritten file:\n%s", want, after)
+		}
+	}
+	if strings.Contains(string(after), "\nhttp_") || strings.Contains(string(after), "\npms_") {
+		t.Errorf("the rewrite added a key in the other spelling:\n%s", after)
+	}
+}
+
+// TestReportNamesTheSpellingTheFileUses: the plan the operator reads names the
+// line the file holds, not this package's spelling of the setting.
+func TestReportNamesTheSpellingTheFileUses(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		text string
+		want []string
+	}{
+		{"lower case", fixture, []string{"General/http_host", "General/http_root", "PMS/pms_url"}},
+		{"upper case", respelled(fixture), []string{"General/HTTP_HOST", "General/HTTP_ROOT", "PMS/PMS_URL"}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			in := setupFile(t, tt.text)
+			rep, err := rewriter{}.Check(context.Background(), in)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var have []string
+			for _, c := range rep.Changes {
+				have = append(have, c.Where)
+			}
+			for _, want := range tt.want {
+				found := false
+				for _, where := range have {
+					if where == want {
+						found = true
+					}
+				}
+				if !found {
+					t.Errorf("the plan does not name %s; it names %v", want, have)
+				}
+			}
+		})
 	}
 }
 
@@ -178,7 +336,7 @@ func TestUncoveredPathBlocks(t *testing.T) {
 	ctx := context.Background()
 	in := setup(t)
 	// A directory outside every rule.
-	patched := strings.Replace(fixture, "CACHE_DIR = /srv/apps/tautulli/cache", "CACHE_DIR = /mnt/other/cache", 1)
+	patched := strings.Replace(fixture, "cache_dir = /srv/apps/tautulli/cache", "cache_dir = /mnt/other/cache", 1)
 	if err := os.WriteFile(filepath.Join(in.Dir, configName), []byte(patched), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -186,7 +344,7 @@ func TestUncoveredPathBlocks(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(rep.Uncovered) != 1 || rep.Uncovered[0].Key != "General/CACHE_DIR" || rep.Uncovered[0].Path != "/mnt/other/cache" {
+	if len(rep.Uncovered) != 1 || rep.Uncovered[0].Key != "General/cache_dir" || rep.Uncovered[0].Path != "/mnt/other/cache" {
 		t.Fatalf("Uncovered = %v", rep.Uncovered)
 	}
 	if !rep.Blocked() {
@@ -200,7 +358,7 @@ func TestUncoveredPathBlocks(t *testing.T) {
 func TestUnclassifiedAddressBlocks(t *testing.T) {
 	ctx := context.Background()
 	in := setup(t)
-	patched := strings.Replace(fixture, "PMS_IP = localhost", "PMS_IP = 192.0.2.10", 1)
+	patched := strings.Replace(fixture, "pms_ip = localhost", "pms_ip = 192.0.2.10", 1)
 	if err := os.WriteFile(filepath.Join(in.Dir, configName), []byte(patched), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -225,7 +383,7 @@ func TestUnclassifiedAddressBlocks(t *testing.T) {
 	}
 	// A Service name resolves through the plan's host rules.
 	in.Plan.Hosts = []plan.HostRule{{Service: "plex.media", App: "plex"}}
-	patched = strings.Replace(fixture, "PMS_IP = localhost", "PMS_IP = plex.media.svc", 1)
+	patched = strings.Replace(fixture, "pms_ip = localhost", "pms_ip = plex.media.svc", 1)
 	if err := os.WriteFile(filepath.Join(in.Dir, configName), []byte(patched), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -239,7 +397,7 @@ func TestUnclassifiedAddressBlocks(t *testing.T) {
 	if _, err := (rewriter{}).Write(ctx, in); err != nil {
 		t.Fatal(err)
 	}
-	if got := read(t, in.Dir)["PMS/PMS_IP"]; got != "plex" {
+	if got := read(t, in.Dir)["PMS/pms_ip"]; got != "plex" {
 		t.Errorf("PMS_IP = %q, want plex", got)
 	}
 }
