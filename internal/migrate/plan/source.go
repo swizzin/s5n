@@ -2,6 +2,7 @@ package plan
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 )
@@ -34,6 +35,12 @@ type Source struct {
 	// Kinds are the platforms that contributed an app to the plan, in the
 	// order they were read: Kubernetes, then swizzin, then docker.
 	Kinds []string `yaml:"kinds"`
+	// Namespaces is the source's scope: the namespaces discovery was told to
+	// read, empty for every one. It is what makes two reads of one host the
+	// same source or not -- a read limited to one namespace is a different
+	// read from one of the whole cluster -- and it is how `box migrate cutover`
+	// finds the earlier read of the source it is cutting over.
+	Namespaces []string `yaml:"namespaces,omitempty"`
 }
 
 // Owner is who a source's files belong to. The data root after a migration is
@@ -91,6 +98,37 @@ func (p *Plan) checkSource() []string {
 			problems = append(problems, fmt.Sprintf("source: owner %d:%d is not a uid:gid", s.Owner.UID, s.Owner.GID))
 		}
 	}
+	problems = append(problems, checkNamespaces(s)...)
+	return problems
+}
+
+// checkNamespaces normalises the source's scope and enforces that it is a list of
+// namespaces: one name each, with no repeats. Sorting it is what makes two reads
+// written in a different --namespace order the same source, which is what a
+// cutover matches an earlier read on.
+func checkNamespaces(s *Source) []string {
+	if len(s.Namespaces) == 0 {
+		s.Namespaces = nil
+		return nil
+	}
+	var problems []string
+	seen := make(map[string]bool, len(s.Namespaces))
+	out := make([]string, 0, len(s.Namespaces))
+	for _, ns := range s.Namespaces {
+		name := strings.TrimSpace(ns)
+		switch {
+		case name == "":
+			problems = append(problems, "source: namespaces holds an empty name; name the namespace, or leave the key out for every one")
+			continue
+		case seen[name]:
+			problems = append(problems, fmt.Sprintf("source: namespace %q appears twice", name))
+			continue
+		}
+		seen[name] = true
+		out = append(out, name)
+	}
+	sort.Strings(out)
+	s.Namespaces = out
 	return problems
 }
 

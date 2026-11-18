@@ -100,11 +100,21 @@ func TestMigrateDiscoverTakesAndNamesEveryDefault(t *testing.T) {
 type fakeSelect struct {
 	answers []string
 	asked   []setup.Select
+	// no makes every Confirm answer no, and confirms is every one it was asked:
+	// a test reads the question and the answer it takes when nothing is typed.
+	no       bool
+	confirms []setup.Confirm
 }
 
 func (f *fakeSelect) Input(setup.Input) (string, error)   { return "", nil }
 func (f *fakeSelect) Secret(setup.Secret) (string, error) { return "", nil }
-func (f *fakeSelect) Confirm(setup.Confirm) (bool, error) { return true, nil }
+func (f *fakeSelect) Confirm(q setup.Confirm) (bool, error) {
+	f.confirms = append(f.confirms, q)
+	if f.no {
+		return false, nil
+	}
+	return true, nil
+}
 func (f *fakeSelect) MultiSelect(setup.MultiSelect) ([]string, error) {
 	return nil, nil
 }

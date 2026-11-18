@@ -962,9 +962,14 @@ data. Everything it will change is written down before it changes anything.
   so rather than a teardown that would remove nothing.
 - **cutover is the window (decided).** It refuses while any planned app still runs: the
   workload at replicas 0 and no pod left. It writes its read before printing any stop
-  command, so following box's advice is always safe. With no earlier discover it warns
-  and asks whether what it found is everything; with one, it diffs, and an app the
-  earlier read had and this one cannot find stops the cutover.
+  command, so following box's advice is always safe. With no earlier discover it lists what
+  it found and asks whether that is everything, unattended refusing unless
+  `--no-prior-discover` and naming `box migrate discover` as the better first step; with
+  one, it diffs, and an app the earlier read had and this one cannot find stops the
+  cutover. The earlier read is the newest snapshot in the directory whose plan names the
+  same source -- the host in its `source` block and the namespaces it was read for -- and
+  the run says which one it compared against. An app this read has and the earlier one did
+  not is new, listed and kept. A read the cutover stops on is kept as a survey either way.
 - **The source's cluster is kept by default (decided).** A kept cluster is self-managed:
   box installs onto it, manages none of its version, and the whole cutover runs in one
   go — platform, install, adoption — with the source's workloads left at 0.

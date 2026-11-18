@@ -38,6 +38,10 @@ type cutoverOptions struct {
 	discoverOptions
 	// Replace is --replace-cluster: stop after the final snapshot.
 	Replace bool
+	// NoPriorDiscover is --no-prior-discover: the operator's word that there is
+	// no earlier read of this source to compare against, so a first read is
+	// enough to cut over from. It skips the warning, never the diff.
+	NoPriorDiscover bool
 	// apply is the second half's flags, shared with `box migrate apply` so a
 	// cutover and an apply of its snapshot cannot take different files -- and
 	// so the answers a host with no box needs are asked for once.
@@ -54,12 +58,14 @@ func runMigrateCutover(ctx context.Context, args []string) {
 	// from that same chart.
 	o.chart = o.apply.chart
 	replace := fs.Bool("replace-cluster", false, "stop after the final snapshot, for a host whose cluster box should replace with its own")
+	noPrior := fs.Bool("no-prior-discover", false, "take the first read of this source as enough to cut over from, without asking whether it was everything")
 	if err := fs.Parse(args); err != nil {
 		fmt.Fprintf(os.Stderr, "box: %v\n", err)
 		os.Exit(2)
 	}
 	o.Namespaces = *ns
 	o.Replace = *replace
+	o.NoPriorDiscover = *noPrior
 	if fs.NArg() != 0 {
 		fmt.Fprintf(os.Stderr, "box: migrate cutover takes no arguments: %s\n", strings.Join(fs.Args(), " "))
 		os.Exit(2)
@@ -87,6 +93,12 @@ func runMigrateCutover(ctx context.Context, args []string) {
 			// The refusal already printed what is running and what stops it:
 			// the commands are the point, and an error line on top of them
 			// would bury them.
+			os.Exit(1)
+		}
+		if errors.Is(err, errCutoverPrior) {
+			// The read already on record stopped it: what it found, where the
+			// survey went and what to do next are all printed, so an error line
+			// on top would only repeat them.
 			os.Exit(1)
 		}
 		if errors.Is(err, errCutoverStopped) {
@@ -117,6 +129,21 @@ func migrateCutover(ctx context.Context, o cutoverOptions, out say.Reporter) err
 	return cutover(ctx, o, out, unstopped)
 }
 
+// keepSurvey writes this read as a survey and returns its file: it is what every
+// refusing cutover does with what it read, so following box's advice is always
+// safe and the next cutover has an earlier read to diff against.
+func keepSurvey(read *migrationRead, o cutoverOptions) (string, error) {
+	if err := encodeRead(read); err != nil {
+		return "", err
+	}
+	read.text = discoveryReport(read.plan, read.report, "", read.settled, nil)
+	survey, err := writeSnapshot(surveyPath(o), archive.ModeSurvey, o.discoverOptions, *read)
+	if err != nil {
+		return "", err
+	}
+	return survey.Path, nil
+}
+
 // cutover is the command with the stop proof as a parameter: the proof reads a
 // live source's pods, so a test hands it an answer instead of a cluster. Every
 // other step is the real one.
@@ -135,6 +162,12 @@ func cutover(ctx context.Context, o cutoverOptions, out say.Reporter, proof func
 		out.Line(discoveryReport(read.plan, read.report, "", read.settled, err))
 		return err
 	}
+	// The read already on record, looked up before this run writes anything: the
+	// question is what box saw last time, not what this run is about to save.
+	prior, err := findPriorRead(priorDir(o), read)
+	if err != nil {
+		return err
+	}
 	running, err := proof(ctx, o, read)
 	if err != nil {
 		return err
@@ -142,19 +175,21 @@ func cutover(ctx context.Context, o cutoverOptions, out say.Reporter, proof func
 	if len(running) > 0 {
 		// The read is saved before any stop command is printed, so following
 		// box's advice is always safe: the next cutover carries this read.
-		if err := encodeRead(&read); err != nil {
+		kept, err := keepSurvey(&read, o)
+		if err != nil {
 			return errors.Join(errCutoverStillRunning, err)
 		}
-		read.text = discoveryReport(read.plan, read.report, "", read.settled, nil)
-		survey, serr := writeSnapshot(surveyPath(o), archive.ModeSurvey, o.discoverOptions, read)
-		if serr != nil {
-			return errors.Join(errCutoverStillRunning, serr)
-		}
 		out.Warn(fmt.Sprintf("%s still running: cutover takes the final snapshot with every planned app stopped", countApps(len(running))))
-		out.Line(fmt.Sprintf("survey: %s (the read is kept, so following the commands below is safe)", survey.Path))
+		out.Line(surveyLine(kept))
 		out.List("stop these, and run cutover again", stopLines(running))
 		out.Muted("box never stops a source: these are commands to double-check and run yourself.")
 		return errCutoverStillRunning
+	}
+	// The source is stopped. What box saw of it before decides whether this read
+	// is enough to migrate from: an app gone missing since then stops the run
+	// here, with this read kept.
+	if err := checkPriorRead(prior, &read, o, out, func() (string, error) { return keepSurvey(&read, o) }); err != nil {
+		return err
 	}
 	// The source is stopped, so the run is going ahead: this is where the
 	// operator answers the defaults, and where an unattended run says it took

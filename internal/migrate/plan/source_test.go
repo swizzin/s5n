@@ -273,3 +273,61 @@ apps:
 		}
 	}
 }
+
+// TestSourceNamespacesAreNormalised: the source's scope is what makes two reads
+// one source, so it is one order with no repeats whatever the file says -- and a
+// list that is not namespaces is refused rather than matched against.
+func TestSourceNamespacesAreNormalised(t *testing.T) {
+	withNamespaces := func(list string) string {
+		return `version: 2
+source:
+  host: media-host.example.test
+  taken: 2026-11-16T12:00:00Z
+  kinds: [kubernetes]
+  namespaces: ` + list + `
+apps:
+  sonarr:
+    kind: kubernetes
+    source: Sonarr
+    config: /srv/apps/sonarr
+    paths: []
+`
+	}
+	p := mustParse(t, withNamespaces("[media, downloads]"))
+	if got := p.Source.Namespaces; len(got) != 2 || got[0] != "downloads" || got[1] != "media" {
+		t.Errorf("namespaces = %v, want them sorted", got)
+	}
+	// The order a file was written in is not a difference between two reads.
+	other := mustParse(t, withNamespaces("[downloads, media]"))
+	if !sameStrings(p.Source.Namespaces, other.Source.Namespaces) {
+		t.Errorf("the same scope in another order read as %v and %v", p.Source.Namespaces, other.Source.Namespaces)
+	}
+	// No list at all is every namespace, and it is not the same as one name.
+	if got := mustParse(t, withNamespaces("[]")).Source.Namespaces; got != nil {
+		t.Errorf("an empty list = %v, want no scope", got)
+	}
+	for _, tt := range []struct{ name, list, want string }{
+		{"a repeat", "[media, media]", `namespace "media" appears twice`},
+		{"an empty name", `[""]`, "namespaces holds an empty name"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := Parse([]byte(withNamespaces(tt.list)))
+			if err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("Parse = %v, want it to say %q", err, tt.want)
+			}
+		})
+	}
+}
+
+// sameStrings is two lists as one, for a test that compares scopes.
+func sameStrings(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}

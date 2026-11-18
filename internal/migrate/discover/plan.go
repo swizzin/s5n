@@ -29,6 +29,10 @@ func (d *discovery) plan(data *plan.Data) *plan.Plan {
 			Kinds: []string{plan.Kubernetes},
 			Host:  d.sourceHost(),
 			Owner: d.owner(),
+			// The scope this read was asked for, which is half of what makes
+			// two reads of one host the same source: a cutover matches its own
+			// read against an earlier one on the host and on this.
+			Namespaces: sortedNamespaces(d.opt.Namespaces),
 		},
 		Domain: d.domain(),
 		Data:   data,
@@ -53,6 +57,24 @@ func (d *discovery) plan(data *plan.Data) *plan.Plan {
 	}
 	sort.Strings(p.Outside)
 	return p
+}
+
+// sortedNamespaces is the run's --namespace list, deduped and in one order: the
+// plan is compared with another read's by its namespaces, so the order the
+// operator typed them in must not make two reads of one source differ.
+func sortedNamespaces(list []string) []string {
+	seen := make(map[string]bool, len(list))
+	var out []string
+	for _, ns := range list {
+		name := strings.TrimSpace(ns)
+		if name == "" || seen[name] {
+			continue
+		}
+		seen[name] = true
+		out = append(out, name)
+	}
+	sort.Strings(out)
+	return out
 }
 
 // sourceHost is the host the source ran on: a single-node cluster is named by

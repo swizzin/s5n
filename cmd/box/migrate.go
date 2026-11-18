@@ -51,12 +51,19 @@ commands:
   apply       install or adopt from a snapshot
 
 box migrate discover [--rehearsal] [--out <file>] [--from-dir <manifests>] [--kubeconfig <file>] [--namespace <ns> ...] [--root <dir>] [--plain] [--chart-repo <ref>] [--chart-version <tag>]
-box migrate cutover [--replace-cluster] [--out <file>] [--from-dir <manifests>] [--kubeconfig <file>] [--namespace <ns> ...] [--root <dir>] [--chart-repo <ref>] [--chart-version <tag>] [--values <file>] [--yes] [--plain]
+box migrate cutover [--replace-cluster] [--no-prior-discover] [--out <file>] [--from-dir <manifests>] [--kubeconfig <file>] [--namespace <ns> ...] [--root <dir>] [--chart-repo <ref>] [--chart-version <tag>] [--values <file>] [--yes] [--plain]
 box migrate apply [<snapshot>] [--values <file>] [--grant <file>] [--kubeconfig <file>] [--yes] [--plain] [--chart-repo <ref>] [--chart-version <tag>]
 
 A snapshot is one file in ` + bundle.Dir + `/ (or where --out names it). discover writes a
 survey -- the plan, the report and the source's manifests, no configs -- and --rehearsal
 adds the configs a locked rehearsal applies. cutover writes the final snapshot apply runs.
+
+cutover compares its read with the newest earlier snapshot of the same source (the host and
+the namespaces in its plan): an app that read had and this one cannot find stops the run,
+and one this read has and that one did not is new and kept. With no earlier read at all it
+lists what it found and asks; unattended, it refuses and names 'box migrate discover', which
+is the read to take while the source is whole. --no-prior-discover answers that question for
+an operator who knows there is nothing earlier to compare against.
 
 Both verbs that read a source run every rewriter's check over the configs they read, so a
 plan carries a rule, with its reason, for everything the configs say and no rule settles:

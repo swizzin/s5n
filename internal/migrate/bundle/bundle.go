@@ -370,16 +370,27 @@ func noSnapshot(dir string, cause error) error {
 // isSnapshotName reports whether a file name is a snapshot's, so a stray file in
 // the directory is left alone rather than parsed.
 func isSnapshotName(name string) bool {
+	_, ok := nameStamp(name)
+	return ok
+}
+
+// nameStamp is the time a snapshot's name carries: when the source was read.
+// isSnapshotName is this, so a name that parses here is a snapshot's and one that
+// does not is left alone.
+func nameStamp(name string) (time.Time, bool) {
 	if !strings.HasPrefix(name, prefix) || !strings.HasSuffix(name, ".tar.gz") {
-		return false
+		return time.Time{}, false
 	}
-	mode := strings.TrimSuffix(strings.TrimPrefix(name, prefix), ".tar.gz")
-	i := strings.LastIndex(mode, "-")
+	rest := strings.TrimSuffix(strings.TrimPrefix(name, prefix), ".tar.gz")
+	i := strings.LastIndex(rest, "-")
 	if i < 0 {
-		return false
+		return time.Time{}, false
 	}
-	_, err := time.Parse(stamp, mode[:i])
-	return err == nil
+	at, err := time.Parse(stamp, rest[:i])
+	if err != nil {
+		return time.Time{}, false
+	}
+	return at, true
 }
 
 // sortedKeys is a map's keys, so a snapshot's entries are added the same way

@@ -104,6 +104,9 @@ func TestCutoverWritesTheFinalSnapshotWhenEveryAppStopped(t *testing.T) {
 	o.Root = root
 	o.Out = out
 	o.Replace = true
+	// These two drive the snapshot itself, not the read on record: the source has
+	// never been read before, and the operator's flag says so.
+	o.NoPriorDiscover = true
 	reporter, text := recording()
 
 	err := cutover(context.Background(), o, reporter, proofOf())
@@ -153,6 +156,7 @@ func TestCutoverCallsOutWhatItCouldNotSettle(t *testing.T) {
 	o.Root = root
 	o.Out = out
 	o.Replace = true
+	o.NoPriorDiscover = true
 	reporter, text := recording()
 
 	if err := cutover(context.Background(), o, reporter, proofOf()); !errors.Is(err, errCutoverStopped) {
