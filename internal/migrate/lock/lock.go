@@ -167,10 +167,12 @@ func Prove(ctx context.Context, client pods, o Options) (Report, error) {
 	}()
 
 	control, err := runPod(ctx, client, o, probePod(o, "control", nil, o.Target, "open"))
+	if control.name != "" {
+		created = append(created, control.name)
+	}
 	if err != nil {
 		return rep, fmt.Errorf("the lock could not be proven: %w", err)
 	}
-	created = append(created, control.name)
 	switch control.exit {
 	case exitAsAsked:
 		rep.ControlReached = true
@@ -182,10 +184,12 @@ func Prove(ctx context.Context, client pods, o Options) (Report, error) {
 	}
 
 	probe, err := runPod(ctx, client, o, probePod(o, "probe", map[string]string{"app.kubernetes.io/instance": o.Release}, o.Target, "closed"))
+	if probe.name != "" {
+		created = append(created, probe.name)
+	}
 	if err != nil {
 		return rep, fmt.Errorf("the lock could not be proven: %w", err)
 	}
-	created = append(created, probe.name)
 	switch probe.exit {
 	case exitAsAsked:
 		// The labelled pod could not reach the target: the policy held.
@@ -202,11 +206,13 @@ func Prove(ctx context.Context, client pods, o Options) (Report, error) {
 	}
 	rep.InternetChecked = true
 	inet, err := runPod(ctx, client, o, probePod(o, "internet", map[string]string{"app.kubernetes.io/instance": o.Release}, o.Internet, "closed"))
+	if inet.name != "" {
+		created = append(created, inet.name)
+	}
 	if err != nil {
 		rep.Note = fmt.Sprintf("the public check did not run (%v); the in-cluster proof above is the one that counts", err)
 		return rep, nil
 	}
-	created = append(created, inet.name)
 	if inet.exit == exitOpposite {
 		rep.InternetReached = true
 		return rep, fmt.Errorf("a pod carrying %s reached the public address %s, so the release's egress policy is not in place and a rehearsal here would reach the internet",
@@ -328,17 +334,17 @@ func runPod(ctx context.Context, client pods, o Options, pod *corev1.Pod) (resul
 		}
 		select {
 		case <-ctx.Done():
-			return result{}, ctx.Err()
+			return result{name: out.Name}, ctx.Err()
 		case <-deadline.C:
-			return result{}, fmt.Errorf("the %s probe pod did not finish within %s", out.Name, timeout+30*time.Second)
+			return result{name: out.Name}, fmt.Errorf("the %s probe pod did not finish within %s", out.Name, timeout+30*time.Second)
 		case <-tick.C:
 		}
 		next, err := client.Get(ctx, o.Namespace, out.Name)
 		if err != nil {
 			if apierrors.IsNotFound(err) {
-				return result{}, fmt.Errorf("the %s probe pod was deleted while box waited for it", out.Name)
+				return result{name: out.Name}, fmt.Errorf("the %s probe pod was deleted while box waited for it", out.Name)
 			}
-			return result{}, fmt.Errorf("read the %s probe pod: %w", out.Name, err)
+			return result{name: out.Name}, fmt.Errorf("read the %s probe pod: %w", out.Name, err)
 		}
 		out = next
 	}
