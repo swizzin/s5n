@@ -5040,7 +5040,18 @@ PY
 # writes the final snapshot, the old cluster is thrown away (box never removes
 # one it did not install), and `box migrate apply <snapshot>` takes a host with
 # no box to a running seedbox: bootstrap, the platform, init from the plan, then
-# the adoption -- one command. The apps must come back healthy on the chart's own images -- which
+# the adoption -- one command.
+#
+# The rehearsal is the other path, and this scenario takes it too: the same
+# snapshot applies locked on a cluster of its own (the source's data moved aside
+# for the run), with the egress policy proven from inside the namespace before
+# any app starts, every torrent stopped, no data renamed, and a second box apply
+# that leaves the lock in place. A rehearsal cannot apply on the host that holds
+# the source's data, which is the refusal this scenario asks for while the
+# source still runs. kind's kindnet enforces egress NetworkPolicy, a moment
+# after a pod starts: the proof and every app's gate wait for that moment.
+#
+# The apps must come back healthy on the chart's own images -- which
 # are much newer than the source's, so their real database migrations run on the
 # copied configs -- with their paths rewritten to /data, their API keys
 # unchanged, one download client each, adopted by the id the source had, and the
@@ -6110,7 +6121,7 @@ spec:
     - name: probe
       image: $IMAGE
       imagePullPolicy: Never
-      command: ["/usr/local/bin/s5n", "probe", "tcp", "--address", "$address", "--want", "$want", "--timeout", "5s"]
+      command: ["/usr/local/bin/s5n", "probe", "tcp", "--address", "$address", "--want", "$want", "--timeout", "2s", "--settle", "20s"]
       securityContext:
         runAsNonRoot: true
         allowPrivilegeEscalation: false
@@ -6184,6 +6195,28 @@ rehearsal_box() {
       grep -n "torrent" "$WORK/apply-rehearsal.txt" || true; return 1; }
   # The two settings the conf carries: what is added later lands stopped, and
   # RSS grabs nothing.
+  # Every app pod started behind its gate: the first init container waited
+  # until the pod's own egress was closed and exited 0, and the address it
+  # dialled is the one the grant records.
+  grep -q '^rehearsalGate: ' "$WORK/rehearsal-grant.yaml" ||
+    { echo "the rehearsal grant records no rehearsalGate"; return 1; }
+  gates=$(kubectl --context "$ctx" -n "$NS" get pods -l app.kubernetes.io/instance=s5n -o json | python3 -c '
+import json, sys
+pods = [p for p in json.load(sys.stdin)["items"] if p["metadata"].get("labels", {}).get("s5n.io/app")]
+bad = []
+for p in pods:
+    inits = p.get("status", {}).get("initContainerStatuses") or []
+    first = inits[0] if inits else {}
+    done = (first.get("state", {}).get("terminated") or {}).get("exitCode")
+    if first.get("name") != "rehearsal-gate" or done != 0:
+        bad.append(p["metadata"]["name"])
+print(len(pods), " ".join(bad))
+' 2>/dev/null || true)
+  case "$gates" in
+    ""|"0 "*|0) echo "the rehearsal runs no app pods to check the gate on"; return 1 ;;
+    *" "?*) echo "app pods that did not pass the rehearsal gate first: ${gates#* }"; return 1 ;;
+  esac
+  echo "  every app pod (${gates% *}) passed its rehearsal gate before the app started"
   conf="$rconfig/qbittorrent/qBittorrent/qBittorrent.conf"
   for want in 'Session\AddTorrentStopped=true' 'AutoDownloader\EnableProcessing=false'; do
     grep -qF -- "$want" "$conf" || { echo "the rehearsal conf has no ${want}"; return 1; }
