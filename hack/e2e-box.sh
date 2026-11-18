@@ -5116,6 +5116,21 @@ MIGRATE_RADARR_CATEGORY=movies
 # image's PLEX_MEDIA_SERVER_APPLICATION_SUPPORT_DIR is /config/Library/
 # Application Support, and the file lives in the Databases directory there.
 MIGRATE_PLEX_DB="/config/Library/Application Support/Plex Media Server/Plug-in Support/Databases/com.plexapp.plugins.library.db"
+# The account name in the source's autobrr and qui. Deliberately not the account
+# box owns (s5n): those two apps allow exactly one account, so a source that ran
+# them has a name of its own, and the migration's job is to make it box's.
+MIGRATE_SOURCE_ACCOUNT=source-login
+# The source's pbh, which is the one app whose version this fixture varies: a
+# config a v7.3.0 wrote has config-version 27 and no `privacy:` block at all
+# (PBH removes that block in config migration 22 and writes it back in 41), and
+# the release's v9.5.4 has to start on it. Pinned by digest like the other old
+# source images, and no renovate comment: a bump would stop exercising that.
+MIGRATE_PBH_IMAGE=ghostchu/peerbanhelper:v7.3.0@sha256:53b3daccaa9e1dfb929540a4ad5026963a054b8af51099fa84860a8a1989e58b
+# The chart's own autobrr and qui, which the source also runs: their account
+# name is what this fixture varies, not their version, so a source of the same
+# version is one the migration reads the same way the release writes it.
+MIGRATE_AUTOBRR_IMAGE=""
+MIGRATE_QUI_IMAGE=""
 
 # migrate_forward <namespace> <target> <port>: port_forward above, for a
 # namespace other than the seedbox's. The tunnel's port and process land in
@@ -5154,13 +5169,21 @@ migrate_forward_stop() {
   wait "$MIGRATE_PF_PID" 2>/dev/null || true
 }
 
-# migrate_source_manifests <file> <src> <uid> <gid>: the source install this
-# script did not install. One Deployment and one Service per app, the configs
-# and the data on the host directories the plan will name, and the images from
-# above. It runs as the uid and gid the box will, so what the apps write is what
-# box can read and what a migrated copy can be owned by.
-migrate_source_manifests() { # migrate_source_manifests <file> <src> <uid> <gid>
-  local file=$1 src=$2 uid=$3 gid=$4
+# migrate_source_manifests <file> <src> <uid> <gid> [with-accounts]: the source
+# install this script did not install. One Deployment and one Service per app,
+# the configs and the data on the host directories the plan will name, and the
+# images from above. It runs as the uid and gid the box will, so what the apps
+# write is what box can read and what a migrated copy can be owned by.
+#
+# with-accounts adds the three apps whose first start box's own init containers
+# write into: autobrr and qui, which keep their own user table and get an account
+# of the source's own name (migrate_source_account makes it with each app's own
+# CLI), and pbh, which writes its config.yml itself (the fixture is a v7.3.0, so
+# what it writes predates the privacy block). The keep scenario runs the four
+# apps this migration always ran: the account and config shapes are this
+# scenario's, which owns the init steps they meet.
+migrate_source_manifests() { # migrate_source_manifests <file> <src> <uid> <gid> [with-accounts]
+  local file=$1 src=$2 uid=$3 gid=$4 more=${5:-}
   cat >"$file" <<EOF
 # The source install: what box finds, not what box makes. Written by
 # hack/e2e-box.sh, applied with kubectl, and thrown away with the cluster.
@@ -5444,6 +5467,189 @@ spec:
       port: 32400
       targetPort: 32400
 EOF
+  [ "$more" = with-accounts ] || return 0
+  # The three apps box's own init containers write into. Each keeps its whole
+  # state under /config, which is the source's own directory on the host, and
+  # none is given a readiness probe: the script asks the app's own CLI and its
+  # own files instead, which is what says the state a migration reads is real.
+  cat >>"$file" <<EOF
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: autobrr
+  namespace: ${MIGRATE_LEGACY_NS}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: autobrr
+  template:
+    metadata:
+      labels:
+        app: autobrr
+    spec:
+      terminationGracePeriodSeconds: 10
+      securityContext:
+        runAsUser: ${uid}
+        runAsGroup: ${gid}
+        fsGroup: ${gid}
+      containers:
+        - name: autobrr
+          image: ${MIGRATE_AUTOBRR_IMAGE}
+          env:
+            - name: TZ
+              value: UTC
+          ports:
+            - name: http
+              containerPort: 7474
+          volumeMounts:
+            - name: config
+              mountPath: /config
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: config
+          hostPath:
+            path: ${src}/var/data/autobrr
+            type: Directory
+        - name: tmp
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: autobrr
+  namespace: ${MIGRATE_LEGACY_NS}
+spec:
+  selector:
+    app: autobrr
+  ports:
+    - name: http
+      port: 7474
+      targetPort: 7474
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: qui
+  namespace: ${MIGRATE_LEGACY_NS}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: qui
+  template:
+    metadata:
+      labels:
+        app: qui
+    spec:
+      terminationGracePeriodSeconds: 10
+      securityContext:
+        runAsUser: ${uid}
+        runAsGroup: ${gid}
+        fsGroup: ${gid}
+      containers:
+        - name: qui
+          image: ${MIGRATE_QUI_IMAGE}
+          env:
+            - name: TZ
+              value: UTC
+          ports:
+            - name: http
+              containerPort: 7476
+          volumeMounts:
+            - name: config
+              mountPath: /config
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: config
+          hostPath:
+            path: ${src}/var/data/qui
+            type: Directory
+        - name: tmp
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: qui
+  namespace: ${MIGRATE_LEGACY_NS}
+spec:
+  selector:
+    app: qui
+  ports:
+    - name: http
+      port: 7476
+      targetPort: 7476
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: pbh
+  namespace: ${MIGRATE_LEGACY_NS}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: pbh
+  template:
+    metadata:
+      labels:
+        app: pbh
+    spec:
+      terminationGracePeriodSeconds: 10
+      securityContext:
+        runAsUser: ${uid}
+        runAsGroup: ${gid}
+        fsGroup: ${gid}
+      containers:
+        - name: pbh
+          image: ${MIGRATE_PBH_IMAGE}
+          env:
+            - name: TZ
+              value: UTC
+            # The same switch the chart gives it: the app's state root is a Java
+            # system property, and its image's entrypoint is a plain java
+            # command that forwards nothing but JAVA_TOOL_OPTIONS.
+            - name: JAVA_TOOL_OPTIONS
+              value: -Dpbh.datadir=/config
+          ports:
+            - name: http
+              containerPort: 9898
+          # Its own template, on the 512Mi the chart gives it: the image's JVM
+          # takes 85% of whatever memory limit it finds, and without one that is
+          # the whole node.
+          resources:
+            limits:
+              memory: 512Mi
+          volumeMounts:
+            - name: config
+              mountPath: /config
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: config
+          hostPath:
+            path: ${src}/var/data/pbh
+            type: Directory
+        - name: tmp
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: pbh
+  namespace: ${MIGRATE_LEGACY_NS}
+spec:
+  selector:
+    app: pbh
+  ports:
+    - name: http
+      port: 9898
+      targetPort: 9898
+EOF
 }
 
 # migrate_legacy_conf <file> <password>: qBittorrent's settings before its first
@@ -5717,6 +5923,55 @@ PY
   migrate_forward_stop
   printf '%s\n' "${out%% *}" >"$keyout"
   printf '%s\n' "${out##* }" >"$WORK/source/${app}.client-id"
+}
+
+# migrate_source_account <app> <name> <password file>: the one account the
+# source's app keeps, made by the app's own CLI inside its own pod, the way a
+# person setting the app up would have made it. autobrr and qui allow exactly one
+# account, and this name is deliberately not box's: what the migration has to do
+# is make it box's.
+migrate_source_account() { # migrate_source_account <app> <name> <password-file>
+  local app=$1 name=$2 pwfile=$3 out="" i
+  for i in $(seq 1 90); do
+    case "$app" in
+      autobrr)
+        out=$(printf '%s\n' "$(cat "$pwfile")" | $K -n "$MIGRATE_LEGACY_NS" exec -i deployment/autobrr -- \
+          /usr/local/bin/autobrrctl --config /config create-user "$name" 2>&1) &&
+          { echo "  ${app}: the source's own CLI made the account ${name}"; return 0; }
+        ;;
+      qui)
+        out=$(printf '%s\n' "$(cat "$pwfile")" | $K -n "$MIGRATE_LEGACY_NS" exec -i deployment/qui -- \
+          /usr/local/bin/qui create-user --config-dir /config --username "$name" 2>&1) &&
+          { echo "  ${app}: the source's own CLI made the account ${name}"; return 0; }
+        ;;
+      *) echo "migrate_source_account: ${app} has no account to make"; return 1 ;;
+    esac
+    sleep 2
+  done
+  echo "could not make the source ${app}'s account: ${out:-no output}"
+  return 1
+}
+
+# migrate_source_pbh_config <src>: the source's PeerBanHelper writes its own
+# config on a first start, out of the jar its own image ships, and that is the
+# config a migration carries. This one is a v7.3.0: config-version 27, which is
+# older than the config migration that writes the privacy block back (41), so
+# the file has none. Both are asserted here, because the pbh assertion after the
+# migration only means anything if the fixture really is the shape it claims.
+migrate_source_pbh_config() { # migrate_source_pbh_config <src>
+  local file="$1/var/data/pbh/config/config.yml" i
+  for i in $(seq 1 150); do
+    [ -f "$file" ] && break
+    sleep 2
+  done
+  [ -f "$file" ] || { echo "the source PeerBanHelper wrote no config.yml"; return 1; }
+  grep -qx 'config-version: 27' "$file" ||
+    { echo "the source PeerBanHelper wrote '$(sed -n '1p' "$file")', want config-version: 27"; return 1; }
+  if grep -q '^privacy:' "$file"; then
+    echo "the source PeerBanHelper's config has a privacy block, and the v7 config this fixture runs has none"
+    return 1
+  fi
+  echo "  pbh: the source's config.yml is config-version 27 with no privacy block, as a v7 wrote it"
 }
 
 # migrate_check_arr <app> <port> <category> <client id> <key file>: what a
@@ -6351,6 +6606,17 @@ migrate_box() {
     { echo "could not read the chart's plex pin from charts/s5n/variants.yaml"; fail=1; return 0; }
   read -r plex_repo plex_tag plex_digest <<<"$pin"
   MIGRATE_PLEX_IMAGE="${plex_repo}:${plex_tag}${plex_digest:+@${plex_digest}}"
+  # The two apps whose account name is what this fixture varies run the chart's
+  # own images in the source too: a version bump is not what the account rewrite
+  # is about, and one image is one pull.
+  pin=$(variant_pin autobrr) ||
+    { echo "could not read the chart's autobrr pin from charts/s5n/variants.yaml"; fail=1; return 0; }
+  read -r app_repo app_tag app_digest <<<"$pin"
+  MIGRATE_AUTOBRR_IMAGE="${app_repo}:${app_tag}${app_digest:+@${app_digest}}"
+  pin=$(variant_pin qui) ||
+    { echo "could not read the chart's qui pin from charts/s5n/variants.yaml"; fail=1; return 0; }
+  read -r app_repo app_tag app_digest <<<"$pin"
+  MIGRATE_QUI_IMAGE="${app_repo}:${app_tag}${app_digest:+@${app_digest}}"
 
   # The source's tree, as the volumes above name it. The configs sit under the
   # data path the way an older install kept them, the downloads are `Downloads`
@@ -6367,7 +6633,7 @@ migrate_box() {
     mkdir -p '$CONFIG_PATH'
     chown -R '${puid}:${pgid}' '$WORK/hostfs'"
   mkdir -p "$src/var/data/qbittorrent" "$src/var/data/sonarr" "$src/var/data/${MIGRATE_RADARR_INSTANCE}" \
-    "$src/var/data/plex" \
+    "$src/var/data/plex" "$src/var/data/autobrr" "$src/var/data/qui" "$src/var/data/pbh" \
     "$src/var/data/Downloads/tv" "$src/var/data/Downloads/${MIGRATE_RADARR_CATEGORY}" \
     "$src/var/data/library/tv" "$src/var/data/library/${MIGRATE_RADARR_CATEGORY}"
   # One hardlinked pair per category, the way an import leaves them: the same
@@ -6390,7 +6656,7 @@ migrate_box() {
   # config a snapshot carries as its state instead -- Preferences.xml and its
   # databases -- so its marker has to stay behind, and the cover trees it
   # rebuilds are written below, once the source has stopped.
-  for app in qbittorrent sonarr "$MIGRATE_RADARR_INSTANCE"; do
+  for app in qbittorrent sonarr "$MIGRATE_RADARR_INSTANCE" autobrr qui pbh; do
     printf 's5n e2e: this config directory was the source install\n' >"$src/var/data/${app}/.s5n-e2e-source"
   done
   printf 's5n e2e: this config directory was the source install\n' >"$src/var/data/plex/.s5n-e2e-source"
@@ -6406,21 +6672,41 @@ migrate_box() {
   grep -qF "containerPath: ${WORK}/hostfs" "$KIND_CONFIG" ||
     { echo "the kind config has no mount for ${WORK}/hostfs: the source's files would be inside the node only"; fail=1; return 0; }
 
-  log "the source install: four apps over host directories, in namespace ${MIGRATE_LEGACY_NS}"
-  migrate_source_manifests "$WORK/source-manifests.yaml" "$src" "$puid" "$pgid"
+  log "the source install: seven apps over host directories, in namespace ${MIGRATE_LEGACY_NS}"
+  migrate_source_manifests "$WORK/source-manifests.yaml" "$src" "$puid" "$pgid" with-accounts
   if ! $K apply -f "$WORK/source-manifests.yaml" >"$WORK/source-apply.txt" 2>&1; then
     cat "$WORK/source-apply.txt"; fail=1; return 0
   fi
   # Plex is the slow one: it builds its library database on this first start,
   # and its readiness is /identity, so rollout status is what says that start
-  # finished. The other three answer as soon as their API is up.
-  for app in qbittorrent sonarr "$MIGRATE_RADARR_INSTANCE" plex; do
+  # finished. The other three answer as soon as their API is up. autobrr, qui
+  # and pbh have no readiness probe here: a source install is not held to a
+  # chart's probes, and what says each of them is really up is what the next
+  # steps ask it through its own CLI and its own files.
+  for app in qbittorrent sonarr "$MIGRATE_RADARR_INSTANCE" plex autobrr qui pbh; do
     if ! $K -n "$MIGRATE_LEGACY_NS" rollout status "deployment/${app}" --timeout=300s; then
       echo "${app} never became ready in the source install"
       $K -n "$MIGRATE_LEGACY_NS" get pods
       fail=1; return 0
     fi
   done
+
+  # The three apps whose state box's own init containers write into start from
+  # what their own versions wrote: an account with the source's own name (not
+  # box's), and for PeerBanHelper the config.yml a v7 left, which has no privacy
+  # block. That is the shape a migrated box brings, and the migration and the
+  # release's inits have to take it as it is.
+  log "the source's own account names, and the config a v7 PeerBanHelper wrote"
+  printf '%s' "$(openssl rand -hex 16)" >"$WORK/source/source-account-password"
+  chmod 600 "$WORK/source/source-account-password"
+  for app in autobrr qui; do
+    if ! migrate_source_account "$app" "$MIGRATE_SOURCE_ACCOUNT" "$WORK/source/source-account-password"; then
+      fail=1; return 0
+    fi
+  done
+  if ! migrate_source_pbh_config "$src"; then
+    fail=1; return 0
+  fi
 
   log "seeding the source through its own APIs: paths, categories, a root folder and a download client per Arr"
   if ! migrate_source_qbittorrent "$WORK/source/qbittorrent-password"; then
@@ -6493,7 +6779,7 @@ migrate_box() {
     fail=1; return 0
   fi
   cat "$WORK/cutover-refused.txt"
-  for instance in qbittorrent sonarr "$MIGRATE_RADARR_INSTANCE" plex; do
+  for instance in qbittorrent sonarr "$MIGRATE_RADARR_INSTANCE" plex autobrr qui pbh; do
     grep -q "^  ${instance}: .* in ${MIGRATE_LEGACY_NS}/${instance}; kubectl -n ${MIGRATE_LEGACY_NS} scale " \
       "$WORK/cutover-refused.txt" ||
       { echo "the refusal does not name ${instance} and the command that stops it"; fail=1; }
@@ -6515,7 +6801,7 @@ migrate_box() {
   # so this wait is what keeps the fixture out of that case.
   log "stopping the source, the way an operator cuts over"
   $K -n "$MIGRATE_LEGACY_NS" scale deployment --all --replicas=0 >/dev/null
-  for app in qbittorrent sonarr "$MIGRATE_RADARR_INSTANCE" plex; do
+  for app in qbittorrent sonarr "$MIGRATE_RADARR_INSTANCE" plex autobrr qui pbh; do
     $K -n "$MIGRATE_LEGACY_NS" wait --for=delete pod -l "app=${app}" --timeout=180s >/dev/null 2>&1 || true
   done
   [ -f "$src/var/data/qbittorrent/qBittorrent/categories.json" ] ||
@@ -6567,7 +6853,7 @@ migrate_box() {
   tar -xzOf "$snapshot" report.txt >"$WORK/report.txt" 2>/dev/null ||
     { echo "the snapshot holds no report.txt"; fail=1; return 0; }
   report="$WORK/report.txt"
-  for instance in qbittorrent sonarr "$MIGRATE_RADARR_INSTANCE" plex; do
+  for instance in qbittorrent sonarr "$MIGRATE_RADARR_INSTANCE" plex autobrr qui pbh; do
     source=$instance
     [ "$instance" = "$MIGRATE_RADARR_INSTANCE" ] && source=$MIGRATE_RADARR_INSTANCE
     grep -q "^app: ${instance} (from ${source}, config " "$report" ||
@@ -6756,17 +7042,51 @@ migrate_box() {
       "$WORK/apply-migrate.txt" ||
       { echo "the plan did not say the runner rewrites Plex's ${column%% *} ${column##* } time(s)"; fail=1; }
   done
+  # autobrr and qui allow exactly one account and box owns it, so a source's
+  # account has to become box's; the confirm says so once per app, with the name
+  # the source used, because that name is the operator's own and it is the one
+  # that stops working.
+  for instance in autobrr qui; do
+    grep -qF "${instance}: account \"${MIGRATE_SOURCE_ACCOUNT}\" becomes s5n, box's own; sign in through the box login" \
+      "$WORK/apply-migrate.txt" ||
+      { echo "the plan did not say ${instance}'s account ${MIGRATE_SOURCE_ACCOUNT} becomes box's own"; fail=1; }
+  done
   [ "$fail" = 0 ] || return 0
 
   # ---- assertion 1: healthy, on the chart's own images ---------------------
   log "the migrated apps are ready on the chart's images"
-  for instance in qbittorrent sonarr "$MIGRATE_RADARR_INSTANCE"; do
+  for instance in qbittorrent sonarr "$MIGRATE_RADARR_INSTANCE" autobrr qui pbh; do
     app=$instance
     [ "$instance" = "$MIGRATE_RADARR_INSTANCE" ] && app=radarr
     expected=$(chart_image "$app") || { echo "could not read the chart's ${app} pin"; fail=1; return 0; }
     wait_image_ready "${instance}-0" "$expected" ||
       { echo "${instance}-0 is not ready on the chart's ${expected} (it runs $(pod_image "${instance}-0" || true))"; fail=1; }
   done
+  [ "$fail" = 0 ] || return 0
+
+  # ---- assertion 1c: the apps box's own init containers write into ---------
+  # A migrated autobrr and qui had an account of their own name, and a migrated
+  # pbh a config written by a version older than its privacy setting. All three
+  # pods being Ready is what says the init containers took those shapes as they
+  # were -- the account one because the app's own login is the init's, the pbh
+  # one because its config gate refuses a file it cannot switch off. What that
+  # readiness means is read back here.
+  log "the migrated accounts signed in, and pbh's analytics switch"
+  for step in autobrr/login qui/login; do
+    result=$(status_field "[s['result'] for s in d['steps'] if s['name'] == '${step}']") || true
+    [ "$result" = "['ok']" ] ||
+      { echo "the wiring Job did not sign in to ${step%%/*}: the receipt says ${result:-nothing}"; fail=1; }
+  done
+  pbh_conf="$CONFIG_PATH/pbh/config/config.yml"
+  grep -qx '  analytics: false' "$pbh_conf" ||
+    { echo "the migrated PeerBanHelper's config does not say analytics: false:"; sed -n '/^privacy:/,+4p' "$pbh_conf"; fail=1; }
+  # And it is not at the source's version any more: the app ran its own config
+  # migrations on the first start, so what the key survived is the migration that
+  # rewrites it, not a file box quietly told the app was newer than it is.
+  pbh_version=$(sed -n 's/^config-version: *//p' "$pbh_conf") || true
+  [ "${pbh_version:-0}" -ge 41 ] ||
+    { echo "the migrated PeerBanHelper's config is at version ${pbh_version:-none}, and its own migrations did not run"; fail=1; }
+  echo "  pbh's config is at version ${pbh_version} and still says analytics: false"
   [ "$fail" = 0 ] || return 0
 
   # ---- assertion 1b: Plex, through the runner Job --------------------------
@@ -6840,7 +7160,7 @@ migrate_box() {
     [ "${links:-0}" -eq 2 ] ||
       { echo "${DATA_PATH}/downloads/${category}: link count is ${links:-none}, want 2 -- the download and the import it was hardlinked to are not one file any more"; fail=1; }
   done
-  for instance in qbittorrent sonarr "$MIGRATE_RADARR_INSTANCE"; do
+  for instance in qbittorrent sonarr "$MIGRATE_RADARR_INSTANCE" autobrr qui pbh; do
     [ -f "$CONFIG_PATH/${instance}/.s5n-e2e-source" ] ||
       { echo "${CONFIG_PATH}/${instance}/ holds no marker: migrate did not copy the whole config directory"; fail=1; }
   done
