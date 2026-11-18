@@ -50,13 +50,17 @@ commands:
   cutover     take the final snapshot on the source host, then install or adopt
   apply       install or adopt from a snapshot
 
-box migrate discover [--rehearsal] [--out <file>] [--from-dir <manifests>] [--kubeconfig <file>] [--namespace <ns> ...] [--root <dir>] [--chart-repo <ref>] [--chart-version <tag>]
-box migrate cutover [--replace-cluster] [--out <file>] [--from-dir <manifests>] [--kubeconfig <file>] [--namespace <ns> ...] [--root <dir>] [--chart-repo <ref>] [--chart-version <tag>] [--values <file>] [--yes]
+box migrate discover [--rehearsal] [--out <file>] [--from-dir <manifests>] [--kubeconfig <file>] [--namespace <ns> ...] [--root <dir>] [--plain] [--chart-repo <ref>] [--chart-version <tag>]
+box migrate cutover [--replace-cluster] [--out <file>] [--from-dir <manifests>] [--kubeconfig <file>] [--namespace <ns> ...] [--root <dir>] [--chart-repo <ref>] [--chart-version <tag>] [--values <file>] [--yes] [--plain]
 box migrate apply [<snapshot>] [--values <file>] [--grant <file>] [--kubeconfig <file>] [--yes] [--plain] [--chart-repo <ref>] [--chart-version <tag>]
 
 A snapshot is one file in ` + bundle.Dir + `/ (or where --out names it). discover writes a
 survey -- the plan, the report and the source's manifests, no configs -- and --rehearsal
 adds the configs a locked rehearsal applies. cutover writes the final snapshot apply runs.
+
+Both verbs that read a source run every rewriter's check over the configs they read, so a
+plan carries a rule, with its reason, for everything the configs say and no rule settles:
+a guided run asks about each one, and an unattended run takes it and says so.
 `
 
 // The commands, as names: the dispatch, the usage line and the messages they

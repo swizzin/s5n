@@ -60,19 +60,15 @@ func (a *settleAsker) ask(c apply.Choice) (string, error) {
 	return "", fmt.Errorf("%s is not an app in this plan", answer)
 }
 
-// question is one address, why box took the decision it did, and where the
-// value is stored: the line the report carries, asked rather than shown.
+// question is one address and why box took the decision it did, on one line:
+// the called-out list above the question names the places that hold it, so the
+// question itself stays short enough for the live form's title.
 func (a *settleAsker) question(c apply.Choice) string {
-	var b strings.Builder
-	b.WriteString(c.Value)
-	if c.Why != "" {
-		b.WriteString(" (" + c.Why + ")")
+	q := c.Value
+	if c.Why != "" && !strings.Contains(c.Why, c.Value) {
+		q += ": " + c.Why
 	}
-	b.WriteString("\nwhat should box do with it?")
-	for _, h := range c.Holds {
-		b.WriteString("\n  " + h.String())
-	}
-	return b.String()
+	return q + " -- leave it as it is, or point it at an app?"
 }
 
 // defaultValue is the value the select starts on: the default box took, so an

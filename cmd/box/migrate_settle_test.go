@@ -190,6 +190,25 @@ func TestMigrateDiscoverAsksAboutAnUnsettledAddress(t *testing.T) {
 	if q.Default != "qbittorrent" {
 		t.Errorf("box's default for a qBittorrent downloader = %q, want qbittorrent", q.Default)
 	}
+	// The default is the first option and says so, and leaving the address is
+	// always one of the answers.
+	if !strings.Contains(q.Options[0].Label, "box's default") {
+		t.Errorf("box's answer is not labelled as the default: %+v", q.Options[0])
+	}
+	var leave bool
+	for _, o := range q.Options {
+		if o.Value == leaveValue && strings.Contains(o.Label, "leave it as it is") {
+			leave = true
+		}
+	}
+	if !leave {
+		t.Errorf("the question does not offer leaving the address alone: %+v", q.Options)
+	}
+	// And the reason is on the question, single-line, rather than a paragraph in
+	// the live form's title.
+	if strings.Contains(q.Prompt, "\n") || !strings.Contains(q.Prompt, "leave it as it is, or point it at an app?") {
+		t.Errorf("the question reads:\n%s", q.Prompt)
+	}
 	opened, err := bundle.Open(out, filepath.Join(t.TempDir(), "open"))
 	if err != nil {
 		t.Fatalf("the snapshot does not open: %v", err)
