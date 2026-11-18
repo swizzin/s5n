@@ -84,6 +84,12 @@ type Env struct {
 	// the plan and applying into a chart that has no such app is a refusal
 	// before the first write rather than a surprise after it.
 	Catalog []string
+	// Rehearsal says this run applies a rehearsal snapshot: the release is
+	// locked (the box's grant carries the flag, so its egress policy has no
+	// internet), the data is neither adopted nor renamed, and a rewriter whose
+	// app would act on the network with nothing else to stop it writes its
+	// state quiet.
+	Rehearsal bool
 }
 
 // OwnedStore and ValuesEditor are the two halves of the seedbox this package
@@ -114,6 +120,12 @@ type Summary struct {
 	// Outside are the source's workloads box has no app for: they are not
 	// migrated, and the operator brings them back by hand.
 	Outside []string
+	// Rehearsal says this run is a rehearsal: nothing leaves the box and no
+	// data is renamed. It is a property of the run, not of the plan.
+	Rehearsal bool
+	// Stopped is how many torrents this run writes stopped, which is the one
+	// change no config file shows.
+	Stopped int
 }
 
 // InstanceSummary is one app's part of the summary.
@@ -142,6 +154,9 @@ type InstanceSummary struct {
 // is where the operator looks for what will not move.
 func (s Summary) Lines() []string {
 	var rows []string
+	if s.Rehearsal {
+		rows = append(rows, "rehearsal: nothing leaves this box, and no data is renamed")
+	}
 	for _, in := range s.Instances {
 		if in.Staged.Files > 0 {
 			rows = append(rows, fmt.Sprintf("%s: copy %d files, %s", in.App, in.Staged.Files, bytesText(in.Staged.Bytes)))
@@ -160,6 +175,9 @@ func (s Summary) Lines() []string {
 	}
 	for _, r := range s.Renames {
 		rows = append(rows, "data: rename "+r)
+	}
+	if s.Stopped > 0 {
+		rows = append(rows, fmt.Sprintf("%d torrents written stopped", s.Stopped))
 	}
 	for _, in := range s.Instances {
 		if in.Enable {
@@ -340,6 +358,13 @@ func Preflight(p *plan.Plan, planBytes []byte, env Env) error {
 func preflightData(p *plan.Plan, env Env, st *State) []string {
 	d := p.Data
 	if d == nil {
+		return nil
+	}
+	if env.Rehearsal {
+		// A rehearsal adopts no data: it never renames, and the copy may not
+		// have the source's tree at all. Torrents start stopped precisely so
+		// that nothing reads it back, and the paths in the configs are still
+		// rewritten to where box would find the data on a real run.
 		return nil
 	}
 	root := path.Clean(env.DataRoot)
@@ -532,12 +557,13 @@ func addressWhere(a rewrite.Address) string {
 // endpoints and the runner.
 func (m *migration) input(name string) rewrite.Input {
 	return rewrite.Input{
-		App:     name,
-		Dir:     m.staging(name),
-		Plan:    m.p,
-		Targets: m.env.Targets,
-		Runs:    CatalogRuns(m.p, m.env.Catalog),
-		Run:     m.env.Run,
+		App:       name,
+		Dir:       m.staging(name),
+		Plan:      m.p,
+		Targets:   m.env.Targets,
+		Runs:      CatalogRuns(m.p, m.env.Catalog),
+		Run:       m.env.Run,
+		Rehearsal: m.env.Rehearsal,
 	}
 }
 
@@ -557,7 +583,7 @@ func (m *migration) show() error {
 // summary is the whole change, from the Check reports: nothing here reads a
 // file, so the operator's review is of what apply is about to do.
 func (m *migration) summary() Summary {
-	s := Summary{Outside: append([]string(nil), m.p.Outside...), Defaults: m.p.Defaults()}
+	s := Summary{Outside: append([]string(nil), m.p.Outside...), Defaults: m.p.Defaults(), Rehearsal: m.env.Rehearsal}
 	if m.p.Data != nil {
 		for _, pair := range m.p.Data.Renames() {
 			if has(m.st.Renamed, pair[0]) {
@@ -587,6 +613,9 @@ func (m *migration) summary() Summary {
 			}
 		}
 		s.Instances = append(s.Instances, in)
+	}
+	for _, rep := range m.checks {
+		s.Stopped += rep.Stopped
 	}
 	return s
 }
@@ -642,6 +671,9 @@ func sameReport(check, write rewrite.Report) (string, bool) {
 	if strings.Join(x, "\n") != strings.Join(y, "\n") {
 		return "the adopted connections differ", false
 	}
+	if check.Stopped != write.Stopped {
+		return fmt.Sprintf("its check counts %d torrents to stop and the write stopped %d", check.Stopped, write.Stopped), false
+	}
 	return "", true
 }
 
@@ -660,7 +692,9 @@ func flattenChanges(changes []rewrite.Change) []string {
 // names box's contract uses. A rename is the only write migrate makes to the
 // data, and it is a rename because that is what keeps the hardlinks.
 func (m *migration) renameData() error {
-	if m.p.Data == nil {
+	if m.p.Data == nil || m.env.Rehearsal {
+		// A rehearsal never renames: the source may be live, and the data may
+		// not even be on this host.
 		return nil
 	}
 	for _, pair := range m.p.Data.Renames() {

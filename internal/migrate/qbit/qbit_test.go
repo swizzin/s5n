@@ -576,3 +576,122 @@ func TestEveryPathKeyIsRewritten(t *testing.T) {
 		}
 	}
 }
+
+// TestRehearsalStopsEveryTorrentAndWritesTheTwoSettings is the one app-specific
+// part of a rehearsal: a copy of a live qBittorrent must come up quiet. Every
+// torrent in both resume stores is marked paused=1/auto_managed=0, and the conf
+// makes anything pushed later land stopped and RSS grab nothing. Check counts
+// the torrents without writing; Write makes the count true.
+func TestRehearsalStopsEveryTorrentAndWritesTheTwoSettings(t *testing.T) {
+	dir := source(t)
+	in := testInput(t, dir)
+	in.Rehearsal = true
+	before := snapshot(t, dir)
+
+	rep, err := (rewriter{}).Check(context.Background(), in)
+	if err != nil {
+		t.Fatalf("Check: %v", err)
+	}
+	if rep.Stopped != 3 {
+		t.Errorf("Check stopped %d torrents, want the one in BT_backup and the two in torrents.db", rep.Stopped)
+	}
+	if !reflect.DeepEqual(snapshot(t, dir), before) {
+		t.Fatal("Check wrote into the config directory it only reads")
+	}
+
+	rep, err = (rewriter{}).Write(context.Background(), in)
+	if err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	if rep.Stopped != 3 {
+		t.Errorf("Write stopped %d torrents, want 3", rep.Stopped)
+	}
+
+	conf := readFile(t, filepath.Join(dir, dirRel, "qBittorrent.conf"))
+	for _, want := range []string{
+		"[BitTorrent]\n",
+		`Session\AddTorrentStopped=true`,
+		"[RSS]\n",
+		`AutoDownloader\EnableProcessing=false`,
+	} {
+		if !strings.Contains(conf, want) {
+			t.Errorf("the rehearsal conf has no %q:\n%s", want, conf)
+		}
+	}
+	// The path rewrites still happened: stopping a torrent does not mean
+	// leaving it pointing at a tree this box does not have.
+	if !strings.Contains(conf, `Session\DefaultSavePath="/data/My Downloads"`) {
+		t.Errorf("the rehearsal conf did not rewrite the save path:\n%s", conf)
+	}
+
+	stopped := func(t *testing.T, raw []byte) {
+		t.Helper()
+		v, err := bencode.Decode(raw)
+		if err != nil {
+			t.Fatalf("decode resume data: %v", err)
+		}
+		if f := v.Lookup("paused"); f == nil || f.Int != 1 {
+			t.Errorf("paused = %v, want 1", f)
+		}
+		if f := v.Lookup("auto_managed"); f == nil || f.Int != 0 {
+			t.Errorf("auto_managed = %v, want 0", f)
+		}
+	}
+	stopped(t, []byte(readFile(t, filepath.Join(dir, dirRel, "BT_backup", "h1.fastresume"))))
+
+	db, err := sqlitedb.OpenReadOnly(context.Background(), filepath.Join(dir, dirRel, "torrents.db"))
+	if err != nil {
+		t.Fatalf("open torrents.db: %v", err)
+	}
+	defer db.Close()
+	rows, err := db.Query("SELECT id, libtorrent_resume_data FROM torrents ORDER BY id")
+	if err != nil {
+		t.Fatalf("read torrents.db: %v", err)
+	}
+	defer rows.Close()
+	seen := 0
+	for rows.Next() {
+		var id int64
+		var blob []byte
+		if err := rows.Scan(&id, &blob); err != nil {
+			t.Fatal(err)
+		}
+		stopped(t, blob)
+		seen++
+	}
+	if seen != 2 {
+		t.Errorf("torrents.db has %d rows, want 2", seen)
+	}
+}
+
+// TestWithoutRehearsalTorrentsKeepTheirState: the lock is the snapshot's mode,
+// not qBittorrent's normal migration. A final run rewrites paths and leaves a
+// seeding torrent seeding.
+func TestWithoutRehearsalTorrentsKeepTheirState(t *testing.T) {
+	dir := source(t)
+	in := testInput(t, dir)
+	rep, err := (rewriter{}).Check(context.Background(), in)
+	if err != nil {
+		t.Fatalf("Check: %v", err)
+	}
+	if rep.Stopped != 0 {
+		t.Errorf("a final run stopped %d torrents", rep.Stopped)
+	}
+	if _, err := (rewriter{}).Write(context.Background(), in); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	conf := readFile(t, filepath.Join(dir, dirRel, "qBittorrent.conf"))
+	for _, unwanted := range []string{"AddTorrentStopped", "EnableProcessing"} {
+		if strings.Contains(conf, unwanted) {
+			t.Errorf("a final run wrote %s into the conf:\n%s", unwanted, conf)
+		}
+	}
+	raw := []byte(readFile(t, filepath.Join(dir, dirRel, "BT_backup", "h1.fastresume")))
+	v, err := bencode.Decode(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if f := v.Lookup("paused"); f != nil {
+		t.Errorf("a final run set paused=%v on a torrent", f.Int)
+	}
+}

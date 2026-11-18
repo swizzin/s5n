@@ -59,6 +59,11 @@ type Input struct {
 	// database). Nil when the caller can't run images; a rewriter that needs
 	// it returns an error saying so.
 	Run Runner
+	// Rehearsal is a copy of a live source applied locked: nothing leaves the
+	// box. A rewriter whose app acts on the network with nothing else to stop
+	// it writes its state quiet here (qBittorrent's torrents start stopped);
+	// every other app is quiet because the release's egress policy is.
+	Rehearsal bool
 }
 
 // Sole is the one instance this box runs of a catalog app, and whether it runs
@@ -231,6 +236,11 @@ type Report struct {
 	// instead of creating a second one beside each (docs/box.md, "Migrated
 	// connections are adopted by ID").
 	Owned []Owned
+	// Stopped is how many stored objects this pass wrote in a stopped state:
+	// a rehearsal's torrents. It is a count of state the app would otherwise
+	// act on, not a change to a stored setting, so it has its own number
+	// rather than a Change row.
+	Stopped int
 }
 
 // Owned is one adopted connection: a download client or a Prowlarr

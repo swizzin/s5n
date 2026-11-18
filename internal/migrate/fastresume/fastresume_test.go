@@ -630,7 +630,7 @@ func TestBlob(t *testing.T) {
 		"qBt-category", bstr("Movies"),
 		"save_path", bstr("/downloads/Movies"),
 	))
-	out, rewrites, gaps, err := Blob("torrents.db", raw, "qbittorrent", testTable(t))
+	out, rewrites, gaps, _, err := Blob("torrents.db", raw, "qbittorrent", testTable(t))
 	if err != nil {
 		t.Fatalf("Blob: %v", err)
 	}
@@ -658,5 +658,146 @@ func TestBlob(t *testing.T) {
 	mapped := v.Lookup("mapped_files")
 	if mapped == nil || len(mapped.List) != 1 || string(mapped.List[0].Bytes) != "a/relative.name.mkv" {
 		t.Errorf("mapped_files = %v, want the relative name untouched", mapped)
+	}
+}
+
+// TestStopMarksEveryTorrentStopped is the rehearsal's app-specific half: a
+// resume file whose paths are already right is still written, because a torrent
+// that is not stopped seeds, rechecks and announces. Both keys are inserted in
+// libtorrent's sorted order when the file does not carry them, and nothing else
+// in the file changes.
+func TestStopMarksEveryTorrentStopped(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "resume")
+	raw := lt12Resume("/data/downloads/Movies", "", "")
+	writeFiles(t, dir, map[string][]byte{"h1.fastresume": raw})
+	// The paths are already right: this pass is only about the torrent's state,
+	// so any other byte changing would be a rewrite it did not report.
+	identity, err := plan.Parse([]byte(`version: 2
+apps:
+  qbittorrent:
+    kind: kubernetes
+    source: qbittorrent
+    config: /srv/apps/qbittorrent
+    paths:
+      - from: /data/downloads
+        to: /data/downloads
+`))
+	if err != nil {
+		t.Fatalf("parse the identity plan: %v", err)
+	}
+
+	rep, gaps, err := Rewrite(dir, "qbittorrent", identity, Stop())
+	if err != nil {
+		t.Fatalf("Rewrite with Stop: %v", err)
+	}
+	if len(gaps) != 0 {
+		t.Errorf("gaps = %v, want none", gaps)
+	}
+	if rep.Stopped != 1 {
+		t.Errorf("report.Stopped = %d, want the one torrent", rep.Stopped)
+	}
+	got, err := os.ReadFile(filepath.Join(dir, "h1.fastresume"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	before, err := bencode.Decode(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	after, err := bencode.Decode(got)
+	if err != nil {
+		t.Fatalf("the stopped file does not decode: %v", err)
+	}
+	for _, key := range []string{keyPaused, keyAutoManaged} {
+		f := after.Lookup(key)
+		want := int64(1)
+		if key == keyAutoManaged {
+			want = 0
+		}
+		if f == nil || f.Kind != bencode.Int || f.Int != want {
+			t.Errorf("%s = %v, want i%de", key, f, want)
+		}
+	}
+	// Every other key is the source's, byte for byte.
+	for _, f := range before.Dict {
+		if string(f.Key) == keyPaused || string(f.Key) == keyAutoManaged {
+			continue
+		}
+		got := after.Lookup(string(f.Key))
+		if got == nil || !reflect.DeepEqual(*got, f.Value) {
+			t.Errorf("%s changed: %v, want %v", f.Key, got, f.Value)
+		}
+	}
+
+	// A second pass finds nothing to stop and writes nothing: a re-run is a
+	// no-op, which is what makes the state file's "done" believable.
+	rep, _, err = Rewrite(dir, "qbittorrent", identity, Stop())
+	if err != nil {
+		t.Fatalf("a second Rewrite with Stop: %v", err)
+	}
+	if rep.Stopped != 0 {
+		t.Errorf("a second pass stopped %d torrents, want 0", rep.Stopped)
+	}
+}
+
+// TestScanWithStopCountsAndWritesNothing: apply runs every Check before any
+// write, and the summary's "N torrents written stopped" comes from that pass.
+// The count has to be the number the Write then changes, without the Check
+// touching the staged copy.
+func TestScanWithStopCountsAndWritesNothing(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "resume")
+	stopped, changed, err := stopBytes("h2.fastresume", lt12Resume("/downloads/Series", "", ""))
+	if err != nil || !changed {
+		t.Fatalf("stopBytes: changed=%v, err=%v", changed, err)
+	}
+	writeFiles(t, dir, map[string][]byte{
+		"h1.fastresume": lt12Resume("/downloads/Movies", "", ""),
+		"h2.fastresume": stopped,
+	})
+	before := snapshot(t, dir)
+
+	rep, gaps, err := Scan(dir, "qbittorrent", testTable(t), Stop())
+	if err != nil {
+		t.Fatalf("Scan with Stop: %v", err)
+	}
+	if len(gaps) != 0 {
+		t.Errorf("gaps = %v, want none", gaps)
+	}
+	if rep.Stopped != 1 {
+		t.Errorf("report.Stopped = %d, want the one torrent not already stopped", rep.Stopped)
+	}
+	if !reflect.DeepEqual(snapshot(t, dir), before) {
+		t.Error("Scan wrote into the directory it only reads")
+	}
+}
+
+// TestStopBlobMarksTheSQLiteResumeDataStopped: qBittorrent 5's torrents.db
+// carries the same bencoded dictionary in libtorrent_resume_data, and a torrent
+// loaded from there has to come up stopped too.
+func TestStopBlobMarksTheSQLiteResumeDataStopped(t *testing.T) {
+	raw := lt2Resume("/downloads/Movies", "", "")
+	out, _, gaps, stopped, err := Blob("torrents.db", raw, "qbittorrent", testTable(t), Stop())
+	if err != nil {
+		t.Fatalf("Blob with Stop: %v", err)
+	}
+	if len(gaps) != 0 {
+		t.Errorf("gaps = %v, want none", gaps)
+	}
+	if !stopped {
+		t.Fatal("Blob reported nothing stopped, and the blob carries no paused=1/auto_managed=0")
+	}
+	v, err := bencode.Decode(out)
+	if err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if f := v.Lookup("paused"); f == nil || f.Int != 1 {
+		t.Errorf("paused = %v, want 1", f)
+	}
+	if f := v.Lookup("auto_managed"); f == nil || f.Int != 0 {
+		t.Errorf("auto_managed = %v, want 0", f)
+	}
+	if f := v.Lookup("save_path"); f == nil || string(f.Bytes) != "/data/downloads/Movies" {
+		t.Errorf("save_path = %v, want the rewritten path", f)
 	}
 }

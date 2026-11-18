@@ -6,6 +6,7 @@ const (
 	sectionBitTorrent  = "BitTorrent"
 	sectionPreferences = "Preferences"
 	sectionWebUI       = "WebUI"
+	sectionRSS         = "RSS"
 	keySavePath        = "save_path"
 	keyDownloadPath    = "download_path"
 )
@@ -89,3 +90,14 @@ const (
 	categoriesKey = `Session\Categories`
 	watchedKey    = `Downloads\ScanDirsV2`
 )
+
+// rehearsalConfKeys are the two settings a rehearsal writes, in the section and
+// key QSettings gives them: a settings key "A/B/C" is section [A], key "B\C".
+// AddTorrentStopped makes everything autobrr and the Arrs push land stopped;
+// EnableProcessing is RSS's own switch, which no other key implies.
+var rehearsalConfKeys = []struct {
+	section, key, value string
+}{
+	{sectionBitTorrent, `Session\AddTorrentStopped`, "true"},
+	{sectionRSS, `AutoDownloader\EnableProcessing`, "false"},
+}

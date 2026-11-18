@@ -496,3 +496,59 @@ func TestAPIKeyReaders(t *testing.T) {
 		t.Errorf("a config.ini with no api_key read %q", key)
 	}
 }
+
+// TestRehearsalRenamesNothingAndStopsTheTorrents is the apply half of the
+// rehearsal lock: the plan's data is not adopted (a different data root is
+// fine, and no rename happens), and qBittorrent comes out with its torrents
+// stopped and the two settings written. The summary says both, because the
+// operator confirmed that summary.
+func TestRehearsalRenamesNothingAndStopsTheTorrents(t *testing.T) {
+	f := newFixture(t)
+	// One torrent, in the state a seeding source would leave it: the stop pass
+	// is what changes it.
+	writeFile(t, filepath.Join(f.configs, "qbittorrent", "qBittorrent", "BT_backup", "h1.fastresume"),
+		"d12:auto_managedi1e6:pausedi0ee", 0o600)
+
+	p, raw := f.plan()
+	var shown Summary
+	env := f.env(&fakeValues{}, &fakeOwned{}, yes(t, &shown))
+	env.Rehearsal = true
+	// A rehearsal host's data root need not be the source's: nothing is
+	// adopted, so the plan's root is not required to exist here.
+	env.DataRoot = filepath.Join(f.root, "elsewhere")
+	if err := os.MkdirAll(env.DataRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	res, err := Run(context.Background(), p, raw, env)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if len(res.Renamed) != 0 {
+		t.Errorf("a rehearsal renamed %v, and it never touches the data", res.Renamed)
+	}
+	if !isDir(filepath.Join(f.dataRoot, "Downloads")) {
+		t.Error("the source's Downloads directory is gone: a rehearsal renamed it")
+	}
+	if exists(filepath.Join(f.dataRoot, "downloads")) {
+		t.Error("the rehearsal made box's downloads directory, which only a rename does")
+	}
+	if shown.Stopped != 1 {
+		t.Errorf("the summary counts %d torrents stopped, want 1", shown.Stopped)
+	}
+	lines := strings.Join(shown.Lines(), "\n")
+	for _, want := range []string{
+		"rehearsal: nothing leaves this box, and no data is renamed",
+		"1 torrents written stopped",
+	} {
+		if !strings.Contains(lines, want) {
+			t.Errorf("the confirm screen has no %q:\n%s", want, lines)
+		}
+	}
+	conf := f.readFile(filepath.Join("config", "qbittorrent", "qBittorrent", "qBittorrent.conf"))
+	for _, want := range []string{`Session\AddTorrentStopped=true`, `AutoDownloader\EnableProcessing=false`} {
+		if !strings.Contains(conf, want) {
+			t.Errorf("the rehearsal conf has no %q:\n%s", want, conf)
+		}
+	}
+}
