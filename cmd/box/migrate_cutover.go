@@ -21,6 +21,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/swizzin/s5n/internal/archive"
 	"github.com/swizzin/s5n/internal/migrate/apply"
@@ -209,7 +210,7 @@ func cutover(ctx context.Context, o cutoverOptions, out say.Reporter, seams cuto
 		return err
 	}
 
-	path := snapshotPath(o.discoverOptions, archive.ModeFinal)
+	path := freeSnapshotPath(o.discoverOptions, archive.ModeFinal)
 	if err := encodeRead(&read); err != nil {
 		return err
 	}
@@ -293,9 +294,19 @@ func addCutoverApplyFlags(fs *flag.FlagSet, kubeconfig *string) *migrateApplyFla
 // otherwise in the snapshot directory under a survey's own name.
 func surveyPath(o cutoverOptions) string {
 	if strings.TrimSpace(o.Out) == "" {
-		return filepath.Join(bundle.Dir, bundle.FileName(archive.ModeSurvey, o.clock()))
+		return freeSnapshotPath(o.discoverOptions, archive.ModeSurvey)
 	}
-	return filepath.Join(filepath.Dir(o.Out), bundle.FileName(archive.ModeSurvey, o.clock()))
+	// The survey goes beside the final snapshot the operator named, and its name
+	// is made free the same way: two refusals in one second are two reads.
+	at := o.clock()
+	dir := filepath.Dir(o.Out)
+	for i := 0; i < 60; i++ {
+		path := filepath.Join(dir, bundle.FileName(archive.ModeSurvey, at.Add(time.Duration(i)*time.Second)))
+		if _, err := os.Lstat(path); errors.Is(err, os.ErrNotExist) {
+			return path
+		}
+	}
+	return filepath.Join(dir, bundle.FileName(archive.ModeSurvey, at))
 }
 
 // unstopped is the stop proof: the source's workloads and pods, over the plan

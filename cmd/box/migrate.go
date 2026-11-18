@@ -250,7 +250,7 @@ func migrateDiscover(ctx context.Context, o discoverOptions, out say.Reporter) (
 	}
 	// The file is named before it is written, so the report inside it can name
 	// it: the operator reads one page that says where the snapshot is.
-	path := snapshotPath(o, mode)
+	path := freeSnapshotPath(o, mode)
 	if err := encodeRead(&read); err != nil {
 		read.text = discoveryReport(read.plan, read.report, "", read.settled, err)
 		return read.text, err
@@ -341,6 +341,28 @@ func snapshotPath(o discoverOptions, mode archive.Mode) string {
 		return o.Out
 	}
 	return filepath.Join(bundle.Dir, bundle.FileName(mode, o.clock()))
+}
+
+// freeSnapshotPath is snapshotPath with the name made free. A snapshot's name
+// carries the second it was taken, and two reads of one source can be taken in one
+// second -- a cutover that refuses twice in a script, or an operator who answers a
+// question and runs it again. The second one is a second later rather than a
+// refusal, because a refusal there would be about the clock and not about the
+// source. A file --out named is the operator's own and is never renamed: writing
+// over their file stays a refusal.
+func freeSnapshotPath(o discoverOptions, mode archive.Mode) string {
+	path := snapshotPath(o, mode)
+	if strings.TrimSpace(o.Out) != "" {
+		return path
+	}
+	at := o.clock()
+	for i := 0; i < 60; i++ {
+		if _, err := os.Lstat(path); errors.Is(err, os.ErrNotExist) {
+			return path
+		}
+		path = filepath.Join(bundle.Dir, bundle.FileName(mode, at.Add(time.Duration(i+1)*time.Second)))
+	}
+	return path
 }
 
 // writeSnapshot writes one snapshot of a read at path. The configs travel only

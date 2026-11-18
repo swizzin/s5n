@@ -18,6 +18,7 @@ import (
 
 	"github.com/swizzin/s5n/internal/archive"
 	"github.com/swizzin/s5n/internal/migrate/bundle"
+	"github.com/swizzin/s5n/internal/migrate/discover"
 	"github.com/swizzin/s5n/internal/migrate/plan"
 )
 
@@ -373,4 +374,43 @@ func nameStampOf(t *testing.T, path string) time.Time {
 	}
 	t.Fatalf("%s is not in its directory", path)
 	return time.Time{}
+}
+
+// TestTwoRefusalsInOneSecondKeepTwoReads: a snapshot's name carries the second it
+// was taken, and two cutovers that refuse in the same second are two reads of the
+// source -- the second is named a second later rather than refused, because a
+// refusal there would be about the clock. Two refusals in one second is what an
+// operator following box's own advice produces: stop the app, run cutover again.
+func TestTwoRefusalsInOneSecondKeepTwoReads(t *testing.T) {
+	manifests, root := discoverySource(t)
+	at := time.Date(2026, 11, 17, 9, 0, 0, 0, time.UTC)
+	o := cutoverOptionsFor(t, manifests)
+	o.Root = root
+	o.Out = filepath.Join(t.TempDir(), "final.tar.gz")
+	o.Now = func() time.Time { return at }
+	running := discover.Running{
+		App: "sonarr", Kind: "Deployment", Namespace: "media", Name: "sonarr",
+		Replicas: 1, Pods: []string{"sonarr-abc"},
+	}
+	for i := 0; i < 2; i++ {
+		reporter, _ := recording()
+		if err := cutover(context.Background(), o, reporter, proofOf(running)); !errors.Is(err, errCutoverStillRunning) {
+			t.Fatalf("cutover %d = %v, want the still-running refusal", i+1, err)
+		}
+	}
+	reads, err := bundle.Reads(filepath.Dir(o.Out))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(reads) != 2 {
+		t.Fatalf("%d reads on record, want both refusals' surveys", len(reads))
+	}
+	for _, r := range reads {
+		if r.Mode != archive.ModeSurvey {
+			t.Errorf("a refusal kept a %q snapshot, want a survey", r.Mode)
+		}
+	}
+	if !reads[0].Taken.After(reads[1].Taken) {
+		t.Errorf("the two reads are named %s and %s, want the second one later", reads[1].Taken, reads[0].Taken)
+	}
 }
