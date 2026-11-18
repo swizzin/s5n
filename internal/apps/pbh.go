@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"strings"
 	"time"
 )
 
@@ -237,26 +238,80 @@ func pbhCreateConfig(spec PbhDownloaderSpec) Item {
 	}
 }
 
-// locatePbh finds the downloader the Job owns, by the same rule the Arr objects
-// use: a recorded id is authoritative (a rename in PBH's UI is the user's
-// business and must not create a second row), and with nothing recorded an
-// existing downloader of the expected name is adopted. PBH refuses a duplicate
-// id or name, so an adopt-by-name create would fail rather than duplicate -
-// which makes adoption the only way a first run can take over a downloader the
-// user added by hand.
-func locatePbh(list []Item, ownedID, name string) (cur Item, found, recreated bool, previousID string) {
+// locatePbh finds the downloader the Job owns:
+//
+//   - a recorded id is authoritative: a rename in PBH's UI is the user's
+//     business and must not create a second row, even when another downloader
+//     points at the same endpoint;
+//   - with the recorded id missing (or nothing recorded), the downloader this
+//     box would own is adopted before one is created. The recorded id can be
+//     stale without anyone deleting anything: PBH's own config migration 32
+//     re-keys every downloader to a generated UUID and keeps the old key as its
+//     name (MainConfigUpdateScript.assignUniqueIdForDownloader at v9.5.4), so a
+//     migration that adopted a pre-UUID source's downloader under the source's
+//     key records an id the app no longer has. The endpoint is what makes two
+//     downloaders the same one for box (the release's qBittorrent, which the pbh
+//     rewriter already wrote), and the name is the fallback;
+//   - only when neither exists was it deleted, so the run recreates it and says
+//     which id disappeared.
+//
+// PBH's own duplicate check is narrower than the endpoint match: registering a
+// downloader is refused when an existing one has the same id or the same name
+// (DownloaderManagerImpl.registerDownloader at v9.5.4, which is what answers
+// "a similar downloader configuration already exists"), and the endpoint is
+// never compared. A create beside a re-keyed copy is therefore allowed by PBH
+// and leaves two downloaders polling one qBittorrent - which is why the
+// endpoint is looked for first, and why two of them are a refusal rather than a
+// pick.
+func locatePbh(list []Item, spec PbhDownloaderSpec, ownedID string) (cur Item, found, recreated bool, previousID string, err error) {
 	if ownedID != "" {
 		for _, item := range list {
 			if item.Str("id") == ownedID {
-				return item, true, false, ""
+				return item, true, false, "", nil
 			}
 		}
-		return nil, false, true, ownedID
 	}
-	if item, ok := FindByName(list, name); ok {
-		return item, true, false, ""
+	switch same := pbhEndpointMatches(list, spec.Endpoint); len(same) {
+	case 0:
+	case 1:
+		return same[0], true, false, "", nil
+	default:
+		return nil, false, false, "", fmt.Errorf("pbh: %d downloaders point at %s (ids %q and %q); remove all but one, this box can own only one",
+			len(same), spec.Endpoint, same[0].Str("id"), same[1].Str("id"))
 	}
-	return nil, false, false, ""
+	if item, ok := FindByName(list, spec.Name); ok {
+		return item, true, false, "", nil
+	}
+	return nil, false, ownedID != "", ownedID, nil
+}
+
+// pbhEndpointMatches returns the downloaders whose endpoint is the one the spec
+// names. The list reports each downloader's *API* endpoint - the configured
+// endpoint with /api/v2 appended (AbstractQbittorrent.java:59,217, and
+// PBHDownloaderController.handleDownloaderList) - while the spec and the status
+// endpoint carry the plain one, so both sides are reduced to it first.
+func pbhEndpointMatches(list []Item, endpoint string) []Item {
+	want := normalizePbhEndpoint(endpoint)
+	var out []Item
+	for _, item := range list {
+		if want != "" && normalizePbhEndpoint(item.Str(pbhFieldEndpoint)) == want {
+			out = append(out, item)
+		}
+	}
+	return out
+}
+
+// normalizePbhEndpoint is the plain http://host:port a downloader is configured
+// with: no API suffix, no trailing slash, scheme and host case-folded (they are
+// the only case-insensitive parts a URL has).
+func normalizePbhEndpoint(endpoint string) string {
+	s := strings.TrimRight(strings.TrimSpace(endpoint), "/")
+	s = strings.TrimRight(strings.TrimSuffix(s, "/api/v2"), "/")
+	u, err := url.Parse(s)
+	if err != nil || u.Host == "" {
+		return s
+	}
+	return strings.ToLower(u.Scheme) + "://" + strings.ToLower(u.Host) + u.Path
 }
 
 // EnsureDownloader makes PBH's qBittorrent downloader match the spec and
@@ -272,7 +327,10 @@ func (p *Pbh) EnsureDownloader(ctx context.Context, spec PbhDownloaderSpec, owne
 	if err != nil {
 		return EnsureResult{}, err
 	}
-	cur, found, recreated, previousID := locatePbh(list, ownedID, spec.Name)
+	cur, found, recreated, previousID, err := locatePbh(list, spec, ownedID)
+	if err != nil {
+		return EnsureResult{}, err
+	}
 
 	if !found {
 		body := map[string]any{"id": spec.ID, "config": pbhCreateConfig(spec)}
