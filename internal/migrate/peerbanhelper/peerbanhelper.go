@@ -240,6 +240,15 @@ func (d *decision) downloaders(in rewrite.Input, rep *rewrite.Report) error {
 		// downloader the source already had can be adopted: it is filed under
 		// the id PBH stores it under, which is the string key `client:` uses
 		// (docs/box.md, "Migrated connections are adopted by ID").
+		//
+		// That id is stale for every config older than PBH's own config
+		// migration 32, which re-keys each downloader to a generated UUID and
+		// keeps the old key as its `name:`
+		// (MainConfigUpdateScript.assignUniqueIdForDownloader at v9.5.4). It is
+		// still the only id this side knows: adopting a source already past 32
+		// records the UUID it will keep, and for an older one wiring adopts the
+		// downloader back by the endpoint this pass wrote (then by its name) and
+		// records the id the app really has. Nothing here can predict the UUID.
 		switch typ {
 		case "qbittorrent", "qbittorrentee":
 			name := d.file.str(sectionClient, id, keyName)
