@@ -6266,10 +6266,28 @@ import json, os, sys
 torrents = json.loads(os.environ["MIGRATE_TORRENTS"] or "[]")
 if len(torrents) != 1:
     sys.exit(f"the rehearsal has {len(torrents)} torrents, want the source's one")
-bad = [t for t in torrents if not str(t.get("state", "")).startswith(("stopped", "paused"))]
+# A rehearsal has no data (it runs where the source's data is not), so a
+# stopped torrent may report missingFiles: qBittorrent leaves such a torrent
+# stopped and it neither announces nor downloads. Anything active is a failure.
+ok = lambda st: st.startswith(("stopped", "paused")) or st == "missingFiles"
+bad = [t for t in torrents if not ok(str(t.get("state", "")))]
 if bad:
     sys.exit("torrents not stopped: " + ", ".join(f"{t.get('name')}={t.get('state')}" for t in bad))
 print(f"  the rehearsal's torrent {torrents[0].get('name')} reports {torrents[0].get('state')}")
+PY
+  # And the record itself says stopped, whatever the data makes of it: box
+  # wrote paused=1 and auto_managed=0 into every resume file.
+  python3 - "$rconfig/qbittorrent/qBittorrent/BT_backup" <<'PY' || { echo "the rehearsal's resume records are not written stopped"; return 1; }
+import os, sys
+d = sys.argv[1]
+files = [f for f in os.listdir(d) if f.endswith(".fastresume")]
+if not files:
+    sys.exit(f"no resume files in {d}")
+for f in files:
+    raw = open(os.path.join(d, f), "rb").read()
+    if b"6:pausedi1e" not in raw or b"12:auto_managedi0e" not in raw:
+        sys.exit(f"{f} is not paused=1 auto_managed=0")
+print(f"  {len(files)} resume record(s) written paused=1 auto_managed=0")
 PY
 
   # The e2e's own proof: a pod carrying the release's label cannot reach a DNS
