@@ -332,11 +332,13 @@ jobs:
   # fresh 10.3 min -> 25, preinstalled 11.1 -> 25, foreign-gateway 1.0 -> 15,
   # update 5.3 -> 15 (three install-and-update rounds of the same stack --
   # bootstrap, then two releases -- one of them spent waiting for a crashloop
-  # box has to see three exits of), migrate 5.0 -> 15 (two clusters: a source
+  # box has to see three exits of), migrate 5.0 -> 30 (three clusters: a source
   # install that runs Plex once to build its library database, a plan, and a
   # whole bootstrap between them, then the release's Plex on the database a Job
-  # rewrote -- plus the Job's image pulled three times, by the source node, the
-  # release node and this host), migrate-keep 13.0 -> 30 (the same source install,
+  # rewrote -- plus the rehearsal's own cluster and its bootstrap, which the
+  # lock is proven on before any app starts -- and the Job's image pulled
+  # three times, by the source node, the release node and this host),
+  # migrate-keep 13.0 -> 30 (the same source install,
   # then the whole platform layer and an install onto the cluster it runs on, and
   # two rows of cutover refusals before that).
   e2e-box:
@@ -356,7 +358,7 @@ jobs:
           - scenario: update
             timeout: 15
           - scenario: migrate
-            timeout: 15
+            timeout: 30
           - scenario: migrate-keep
             timeout: 30
     runs-on: ubuntu-latest

@@ -5525,6 +5525,86 @@ print(f"  source qBittorrent: saves under /downloads, categories {', '.join(sys.
 PY
 }
 
+# migrate_source_torrent <password file>: one torrent in the source
+# qBittorrent, so the rehearsal has something that has to start stopped. It is
+# added through the source's own API from a synthetic single-file torrent (the
+# repository's grab test builds one the same way), the client is restarted so
+# qBittorrent writes its resume data on shutdown, and the API is asked whether
+# the torrent is there and running.
+migrate_source_torrent() { # migrate_source_torrent <password file>
+  local pwfile=$1 base jar code i state
+  local name=s5n-e2e-sample.bin
+  printf 's5n e2e: a synthetic payload for the one torrent\n' >"$WORK/source/$name"
+  python3 hack/make-torrent.py --file "$WORK/source/$name" --name "$name" \
+    --announce http://tracker.example.invalid/announce \
+    --out "$WORK/source/s5n-e2e-sample.torrent" --meta "$WORK/source/s5n-e2e-sample.json" \
+    >/dev/null || { echo "could not build the source's test torrent"; return 1; }
+  mkdir -p "$WORK/hostfs/legacy/var/data/Downloads/tv"
+  cp "$WORK/source/$name" "$WORK/hostfs/legacy/var/data/Downloads/tv/$name"
+
+  base="http://127.0.0.1:${MIGRATE_PF_PORT}"
+  jar="$WORK/source/qbittorrent.jar"
+  migrate_forward "$MIGRATE_LEGACY_NS" svc/qbittorrent "$MIGRATE_QBIT_PORT" || return 1
+  code=$(curl -sS -o /dev/null -w '%{http_code}' -b "$jar" --max-time 30 \
+    -F "torrents=@$WORK/source/s5n-e2e-sample.torrent" \
+    -F "savepath=/downloads/tv" -F "category=tv" -F "paused=false" -F "stopped=false" \
+    "$base/api/v2/torrents/add" 2>/dev/null || true)
+  migrate_forward_stop
+  case "$code" in
+    2??) ;;
+    *) echo "the source qBittorrent answered ${code:-nothing} when the test torrent was added"; return 1 ;;
+  esac
+
+  # qBittorrent writes its resume data when it shuts down, and the snapshot is
+  # of the config directory: a restart is what makes the torrent part of it.
+  $K -n "$MIGRATE_LEGACY_NS" rollout restart deployment/qbittorrent >/dev/null || return 1
+  $K -n "$MIGRATE_LEGACY_NS" rollout status deployment/qbittorrent --timeout=180s >/dev/null || return 1
+
+  # The restart dropped the API session; sign in again on the client that is
+  # now running, and wait until the torrent is there and not stopped.
+  migrate_forward "$MIGRATE_LEGACY_NS" svc/qbittorrent "$MIGRATE_QBIT_PORT" || return 1
+  base="http://127.0.0.1:${MIGRATE_PF_PORT}"
+  code=""
+  for i in $(seq 1 60); do
+    code=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 5 -c "$jar" \
+      --data-urlencode "username=admin" --data-urlencode "password@${pwfile}" \
+      "$base/api/v2/auth/login" 2>/dev/null || true)
+    case "$code" in 2??) break ;; esac
+    sleep 2
+  done
+  case "$code" in
+    2??) ;;
+    *) echo "the source qBittorrent answered ${code:-nothing} to its own login after the restart"; migrate_forward_stop; return 1 ;;
+  esac
+  for i in $(seq 1 30); do
+    curl -sS -b "$jar" --max-time 15 "$base/api/v2/torrents/info" \
+      >"$WORK/source/qbittorrent-torrents.json" 2>/dev/null || true
+    state=$(MIGRATE_NAME="$name" python3 - "$WORK/source/qbittorrent-torrents.json" <<'PY' || true
+import json, os, sys
+try:
+    torrents = json.load(open(sys.argv[1]))
+except Exception:
+    raise SystemExit(1)
+mine = [t for t in torrents if t.get("name") == os.environ["MIGRATE_NAME"]]
+if len(mine) != 1:
+    raise SystemExit(1)
+print(mine[0].get("state", ""))
+PY
+)
+    case "$state" in
+      "" | stopped* | paused*) sleep 2 ;;
+      *) migrate_forward_stop; echo "  the source has one torrent, ${name}: ${state}"
+         # The snapshot copies a live SQLite store: give the client a moment to
+         # finish writing after its own restart.
+         sleep 5
+         return 0 ;;
+    esac
+  done
+  migrate_forward_stop
+  echo "the source never showed its test torrent running (state ${state:-unknown})"
+  return 1
+}
+
 # migrate_source_arr <app> <port> <category> <folder> <config xml> <key file>
 # <password file>: one source Arr's state, through its own API -- a root folder
 # on the source's library mount, and a qBittorrent download client pointing at
@@ -5986,6 +6066,204 @@ migrate_check_login_bypass() { # migrate_check_login_bypass <instance> <key file
   echo "  ${instance}: /${instance}/api answers its own key through the Gateway (200, and ${no_key} without it), the UI still asks the portal"
 }
 
+# rehearsal_cleanup <src>: put the source's tree back and remove the rehearsal
+# cluster and its host files, whatever the run did. The real install that
+# follows adopts the source's data, so the tree must be exactly as it was.
+rehearsal_cleanup() { # rehearsal_cleanup <src>
+  local src=$1
+  "$KIND" delete cluster --name "${CLUSTER}-rehearsal" >/dev/null 2>&1 || true
+  rm -f "$WORK/rehearsal-grant.yaml" "$WORK/rehearsal-values.yaml" \
+        "$WORK/rehearsal-cluster.yaml" "$WORK/rehearsal-kubeconfig" \
+        "$WORK/rehearsal-conf.txt"
+  if [ -d "$WORK/source-data" ]; then
+    rm -rf "$src/var/data"
+    mv "$WORK/source-data" "$src/var/data"
+  fi
+}
+
+# rehearsal_probe <context> <name> <instance: yes|no> <want> <address>: one pod
+# in the rehearsal seedbox's namespace, carrying the release's instance label or
+# not, and the exit code `s5n probe` gave it. The pod is the image the release
+# runs, under the Pod Security restricted context every app has.
+rehearsal_probe() { # rehearsal_probe <context> <name> <yes|no> <open|closed> <address>
+  local ctx=$1 name=$2 instance=$3 want=$4 address=$5 labels code i
+  labels='s5n.io/probe: e2e'
+  [ "$instance" = yes ] && labels='app.kubernetes.io/instance: s5n
+    s5n.io/probe: e2e'
+  cat >"$WORK/$name.yaml" <<EOF
+apiVersion: v1
+kind: Pod
+metadata:
+  name: $name
+  namespace: $NS
+  labels:
+    $labels
+spec:
+  restartPolicy: Never
+  automountServiceAccountToken: false
+  securityContext:
+    runAsNonRoot: true
+    seccompProfile: {type: RuntimeDefault}
+  containers:
+    - name: probe
+      image: $IMAGE
+      imagePullPolicy: Never
+      command: ["/usr/local/bin/s5n", "probe", "tcp", "--address", "$address", "--want", "$want", "--timeout", "5s"]
+      securityContext:
+        runAsNonRoot: true
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+        capabilities: {drop: ["ALL"]}
+        seccompProfile: {type: RuntimeDefault}
+EOF
+  kubectl --context "$ctx" -n "$NS" delete pod "$name" --ignore-not-found >/dev/null 2>&1 || true
+  kubectl --context "$ctx" apply -f "$WORK/$name.yaml" >/dev/null || return 1
+  code=""
+  for i in $(seq 1 60); do
+    code=$(kubectl --context "$ctx" -n "$NS" get pod "$name" \
+      -o jsonpath='{.status.containerStatuses[0].state.terminated.exitCode}' 2>/dev/null || true)
+    [ -n "$code" ] && break
+    sleep 2
+  done
+  if [ "$code" != 0 ]; then
+    echo "the ${name} probe exited ${code:-never} (want ${want} ${address}):"
+    kubectl --context "$ctx" -n "$NS" logs "$name" 2>/dev/null || true
+    kubectl --context "$ctx" -n "$NS" delete pod "$name" --ignore-not-found >/dev/null 2>&1 || true
+    return 1
+  fi
+  kubectl --context "$ctx" -n "$NS" delete pod "$name" --ignore-not-found >/dev/null 2>&1 || true
+  echo "  ${name}: ${address} ${want}, as asked"
+  return 0
+}
+
+# rehearsal_box: apply the rehearsal snapshot on a cluster of its own, then
+# question the result. The caller has moved the source's data aside and restores
+# it after; this function owns nothing outside the rehearsal cluster and the
+# host files it names.
+rehearsal_box() {
+  local rcluster="${CLUSTER}-rehearsal" rconfig="$WORK/hostfs/rehearsal-config" ctx
+  local conf secret code torrents state i dns
+  ctx="kind-${rcluster}"
+  cp "$WORK/values.yaml" "$WORK/rehearsal-values.yaml" || return 1
+  mkdir -p "$rconfig" || return 1
+  chown "$puid:$pgid" "$rconfig" || return 1
+
+  $KIND create cluster --name "$rcluster" --config "$KIND_CONFIG" --wait 120s >/dev/null 2>&1 || {
+    echo "could not create the rehearsal cluster"; return 1; }
+  $KIND load docker-image --name "$rcluster" "$IMAGE" >/dev/null 2>&1 || {
+    echo "could not load the s5n image into the rehearsal cluster"; return 1; }
+  $KIND get kubeconfig --name "$rcluster" >"$WORK/rehearsal-kubeconfig" || return 1
+  docker exec -i "${rcluster}-control-plane" bash -c '
+    mkdir -p /var/lib/s5n/authelia
+    cat >/var/lib/s5n/authelia/users_database.yml
+    chown -R 65532:65532 /var/lib/s5n/authelia
+    chmod 700 /var/lib/s5n/authelia
+    chmod 600 /var/lib/s5n/authelia/users_database.yml
+  ' <"$WORK/users_database.yml" || {
+    echo "could not seed the rehearsal cluster's login state"; return 1; }
+
+  if ! "$WORK/box" migrate apply "$rehearsal" --yes \
+    --chart-repo "$CHART_REPO" --chart-version "$CHART_VERSION" \
+    --grant "$WORK/rehearsal-grant.yaml" --values "$WORK/rehearsal-values.yaml" \
+    --kubeconfig "$WORK/rehearsal-kubeconfig" --record "$WORK/rehearsal-cluster.yaml" \
+    --domain "$DOMAIN" --login "$LOGIN" --password-file "$WORK/authelia-password" \
+    --config-path "$rconfig" --box-namespace "$NS" --paths-in-node \
+    >"$WORK/apply-rehearsal.txt" 2>&1; then
+    cat "$WORK/apply-rehearsal.txt"; return 1
+  fi
+  cat "$WORK/apply-rehearsal.txt"
+  for want in "snapshot: ${rehearsal} (rehearsal)" "rehearsal: nothing leaves this box" \
+              "network lock: proven"; do
+    grep -qF -- "$want" "$WORK/apply-rehearsal.txt" ||
+      { echo "the rehearsal apply has no ${want}"; return 1; }
+  done
+  grep -qE "^1 torrents written stopped$" "$WORK/apply-rehearsal.txt" ||
+    { echo "the rehearsal apply did not count the one torrent it stopped:";
+      grep -n "torrent" "$WORK/apply-rehearsal.txt" || true; return 1; }
+  # The two settings the conf carries: what is added later lands stopped, and
+  # RSS grabs nothing.
+  conf="$rconfig/qbittorrent/qBittorrent/qBittorrent.conf"
+  for want in 'Session\AddTorrentStopped=true' 'AutoDownloader\EnableProcessing=false'; do
+    grep -qF -- "$want" "$conf" || { echo "the rehearsal conf has no ${want}"; return 1; }
+  done
+  # Nothing was renamed: box's names are not the source's, and the tree the run
+  # put aside still holds the hardlinked pair the source had.
+  [ ! -e "$DATA_PATH/Downloads" ] ||
+    { echo "the rehearsal made the source's Downloads name"; return 1; }
+  [ ! -e "$DATA_PATH/library" ] ||
+    { echo "the rehearsal made the source's library name"; return 1; }
+  state=$(stat -c '%h' "$WORK/source-data/Downloads/tv/Show.S01E01.mkv" 2>/dev/null || true)
+  [ "${state:-0}" = 2 ] ||
+    { echo "the rehearsal changed the source's data: link count ${state:-none}, want 2"; return 1; }
+
+  # Every torrent stopped, through the rehearsal qBittorrent's own API.
+  secret=$(kubectl --context "$ctx" -n "$NS" get secret s5n-keys \
+    -o jsonpath='{.data.qbittorrent-password}' 2>/dev/null | base64 -d || true)
+  [ -n "$secret" ] || { echo "the rehearsal release Secret holds no qBittorrent password"; return 1; }
+  # migrate_forward talks to whatever $K points at; the rehearsal is its own
+  # cluster.
+  K="kubectl --context ${ctx}"
+  if ! migrate_forward "$NS" svc/qbittorrent "$MIGRATE_QBIT_PORT"; then
+    K="kubectl --context ${CTX}"; return 1
+  fi
+  code=""
+  for i in $(seq 1 60); do
+    code=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 5 -c "$WORK/rehearsal-cookies" \
+      --data-urlencode "username=admin" --data-urlencode "password=${secret}" \
+      "http://127.0.0.1:${MIGRATE_PF_PORT}/api/v2/auth/login" 2>/dev/null || true)
+    case "$code" in 2??) break ;; esac
+    sleep 2
+  done
+  case "$code" in
+    2??) ;;
+    *) migrate_forward_stop; K="kubectl --context ${CTX}"
+       echo "the rehearsal qBittorrent answered ${code:-nothing} to its own login"; return 1 ;;
+  esac
+  torrents=$(curl -sS -b "$WORK/rehearsal-cookies" --max-time 15 \
+    "http://127.0.0.1:${MIGRATE_PF_PORT}/api/v2/torrents/info" 2>/dev/null || true)
+  migrate_forward_stop
+  K="kubectl --context ${CTX}"
+  MIGRATE_TORRENTS="$torrents" python3 - <<'PY' || { echo "the rehearsal's torrents are not all stopped"; return 1; }
+import json, os, sys
+torrents = json.loads(os.environ["MIGRATE_TORRENTS"] or "[]")
+if len(torrents) != 1:
+    sys.exit(f"the rehearsal has {len(torrents)} torrents, want the source's one")
+bad = [t for t in torrents if not str(t.get("state", "")).startswith(("stopped", "paused"))]
+if bad:
+    sys.exit("torrents not stopped: " + ", ".join(f"{t.get('name')}={t.get('state')}" for t in bad))
+print(f"  the rehearsal's torrent {torrents[0].get('name')} reports {torrents[0].get('state')}")
+PY
+
+  # The e2e's own proof: a pod carrying the release's label cannot reach a DNS
+  # pod's metrics port, and one without it can. Then the public address, which
+  # is closed both when the lock holds and when this host has no internet.
+  dns=$(kubectl --context "$ctx" -n kube-system get pods -l k8s-app=kube-dns \
+    -o jsonpath='{.items[0].status.podIP}' 2>/dev/null || true)
+  [ -n "$dns" ] ||
+    { echo "the rehearsal cluster runs no CoreDNS pod to prove the lock against"; return 1; }
+  rehearsal_probe "$ctx" s5n-e2e-lock-control no open "${dns}:9153" || return 1
+  rehearsal_probe "$ctx" s5n-e2e-lock-probe yes closed "${dns}:9153" || return 1
+  rehearsal_probe "$ctx" s5n-e2e-lock-public yes closed "1.1.1.1:443" || return 1
+
+  # The lock is in box's grant, so an apply that changes nothing must render the
+  # same policy: a rehearsal box cannot be unlocked by using it.
+  if ! "$WORK/box" apply --yes --chart-repo "$CHART_REPO" --chart-version "$CHART_VERSION" \
+    --grant "$WORK/rehearsal-grant.yaml" --values "$WORK/rehearsal-values.yaml" \
+    --kubeconfig "$WORK/rehearsal-kubeconfig" --paths-in-node \
+    >"$WORK/apply-rehearsal-again.txt" 2>&1; then
+    cat "$WORK/apply-rehearsal-again.txt"; return 1
+  fi
+  grep -qF "nothing to change" "$WORK/apply-rehearsal-again.txt" ||
+    { echo "a second box apply on the rehearsal box changed the release:"; cat "$WORK/apply-rehearsal-again.txt"; return 1; }
+  if kubectl --context "$ctx" -n "$NS" get networkpolicy s5n-egress -o yaml 2>/dev/null \
+    | grep -q '0.0.0.0/0'; then
+    echo "a second box apply unlocked the rehearsal box: its egress policy has the internet rule again"
+    return 1
+  fi
+  echo "  a second box apply kept the lock: the release changed nothing and the egress policy has no internet rule"
+  return 0
+}
+
 migrate_box() {
   local src="$WORK/hostfs/legacy" puid pgid plan report app instance folder port category
   local key secret code pin expected revision after plex_repo plex_tag plex_digest
@@ -6090,17 +6368,27 @@ migrate_box() {
   done
   [ "$fail" = 0 ] || return 0
 
-  # ---- a rehearsal snapshot, and the refusal while the source runs ---------
-  # The source is up: the four apps were seeded through their own APIs. A
-  # rehearsal snapshot copies the configs from a running source and may only be
-  # applied locked, which lands next, so apply refuses it by name. A cutover is
-  # the real thing: it refuses while any planned app runs, keeps the read as a
-  # survey first (so following the commands it prints is always safe), and
-  # prints one line per app with the command that stops it. box never stops a
-  # source, so this script is the operator.
+  if ! migrate_source_torrent "$WORK/source/qbittorrent-password"; then
+    fail=1; return 0
+  fi
+  # The four apps write their databases as they run, and the rehearsal snapshot
+  # copies them live: let the last seeding settle first.
+  sleep 10
+
+  # ---- a rehearsal snapshot, and the refusal on the source's own host ------
+  # The source is up: the four apps were seeded through their own APIs, and one
+  # torrent is running. A rehearsal snapshot copies the configs from a running
+  # source. It cannot be applied here, though: this host holds the source's
+  # data, and a locked copy that adopted it would write the live library. That
+  # is the refusal a rehearsal must give on the source's own machine.
+  #
+  # A cutover is the real thing: it refuses while any planned app runs, keeps
+  # the read as a survey first (so following the commands it prints is always
+  # safe), and prints one line per app with the command that stops it. box never
+  # stops a source, so this script is the operator.
   snapshot="$WORK/final.tar.gz"
   rehearsal="$WORK/rehearsal.tar.gz"
-  log "box migrate discover --rehearsal, and apply's refusal of it"
+  log "box migrate discover --rehearsal, and apply's refusal on the source's host"
   if ! "$WORK/box" migrate discover --rehearsal --out "$rehearsal" \
     --kubeconfig "$WORK/kubeconfig" --namespace "$MIGRATE_LEGACY_NS" --root / \
     --chart-repo "$CHART_REPO" --chart-version "$CHART_VERSION" \
@@ -6110,12 +6398,17 @@ migrate_box() {
   if "$WORK/box" migrate apply "$rehearsal" --yes \
     --values "$WORK/values.yaml" --grant "$WORK/grant.yaml" --record "$WORK/cluster.yaml" \
     --kubeconfig "$WORK/kubeconfig" >"$WORK/apply-rehearsal.txt" 2>&1; then
-    echo "apply accepted a rehearsal snapshot, and a rehearsal may only be applied locked"
+    echo "apply accepted a rehearsal snapshot on the host that holds the source's data"
     fail=1
   else
-    grep -q "the rehearsal lock lands next" "$WORK/apply-rehearsal.txt" ||
+    grep -q "this host holds the source's data" "$WORK/apply-rehearsal.txt" ||
       { echo "apply refused the rehearsal snapshot for another reason:"; cat "$WORK/apply-rehearsal.txt"; fail=1; }
+    grep -q "rehearse on another host or VM" "$WORK/apply-rehearsal.txt" ||
+      { echo "the refusal does not name the way forward:"; cat "$WORK/apply-rehearsal.txt"; fail=1; }
   fi
+  # A refusal writes nothing, so there is no record of a box on this host.
+  [ ! -e "$WORK/cluster.yaml" ] ||
+    { echo "the refused rehearsal wrote a cluster record"; fail=1; }
 
   log "box migrate cutover while the source runs: refused, with a survey kept and the stop commands printed"
   if "$WORK/box" migrate cutover --replace-cluster --yes --out "$snapshot" \
@@ -6236,6 +6529,22 @@ migrate_box() {
   # /transcode, so the plan applies without a hand edit.
   grep -qF 'from: /transcode' "$WORK/plan.yaml" ||
     { echo "the plan has no rule for Plex's /transcode, and apply refuses a stored path no rule covers"; fail=1; }
+  [ "$fail" = 0 ] || return 0
+
+  # ---- the rehearsal box: a cluster of its own, the lock, and its proof ----
+  # A rehearsal never adopts data, so the source's tree goes aside for the
+  # length of the run and the data root stays, empty (the PV's hostPath has to
+  # exist inside the node). The rehearsal runs on a cluster of its own -- the
+  # same host, another node name, which is as close as one machine gets to
+  # "another host or VM". It is disposable: the real install below runs on a
+  # fresh cluster after this one is gone, and the source's tree goes back before
+  # that install, which is the run that adopts it.
+  log "the rehearsal box: the source's data aside, its own cluster, the locked apply"
+  mv "$src/var/data" "$WORK/source-data" ||
+    { echo "could not move the source's data aside for the rehearsal"; fail=1; return 0; }
+  mkdir -p "$src/var/data"
+  if ! rehearsal_box; then fail=1; fi
+  rehearsal_cleanup "$src"
   [ "$fail" = 0 ] || return 0
 
   # ---- a fresh cluster, with box's roots bound in --------------------------
