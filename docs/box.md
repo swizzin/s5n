@@ -820,6 +820,38 @@ together with the image the app had.
   old for the installed release refuses to apply rather than writing values it can't
   check.
 
+**Testing a build on a real machine (decided).** The e2e runs on kind, which is not a
+host: no k0s, no disks, nobody answering a question. So before a release is cut, a
+maintainer takes `develop` to a machine running a fresh OS and installs it there the way
+a user does -- `box bootstrap`, then `box migrate apply` -- without tagging or
+publishing anything. `hack/dev-box.sh` packs that build. Its three artifacts have to
+agree on one version, so they are all `<next patch>-dev.<short sha>`:
+
+- `box`, built with `-X main.version`. A build without one is `dev`, and skips the
+  chart's `min-box` check instead of meeting it.
+- the chart, packaged with `version` and `appVersion` both that version. That is also
+  the s5n image's tag: `variants.yaml` leaves `s5n.default.tag` empty, so the chart
+  names `appVersion`.
+- the image, built from the repo's Dockerfile and carried to the test machine as a
+  `docker save` tarball.
+
+The next patch, not this one: `box.s5n/min-box` is the released version, and semver
+puts `0.5.0-dev.x` *below* `0.5.0`, so a dev build of the released version would be
+refused by the chart it had just built. `<next patch>-dev.<sha>` meets the floor and
+still sorts below the release that follows it.
+
+Nothing in a dev build is published, and box installs only published charts. So the
+chart is served from a distribution container on the build machine's loopback -- the
+one host box speaks plain HTTP to -- and reaches the test machine through `ssh -R`.
+The image is not pulled at all: it is imported into the node's containerd
+(`k0s ctr -n k8s.io images import`) and the chart's `IfNotPresent` policy uses it. The
+build writes both steps into its `NEXT.txt`, in the order they work in: bootstrap
+installs k0s and the platform layer *before* it asks init's questions, and the release
+itself runs the dev image, so the import happens in that window.
+
+This is a rehearsal on real hardware, not a replacement for the e2e: the cluster
+decision, the platform layer and a real disk are what CI cannot reach.
+
 **What CI proves:** box at HEAD against the newest released chart and the oldest
 release back to its floor, each on the platform that release pins; the chart at HEAD
 against the newest released box and against the box release its `min-box` names. A
