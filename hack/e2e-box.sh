@@ -7064,6 +7064,12 @@ migrate_box() {
     grep -qF "${instance}: adopt downloadclient" "$WORK/apply-migrate.txt" ||
       { echo "the plan did not say it adopts ${instance}'s download client by id"; fail=1; }
   done
+  # The pbh rewriter files the downloader it finds under the source's key, which
+  # is the id a v7 config stores it under; the record is what wiring then has to
+  # reconcile, so the plan naming it is the other half of the adoption.
+  grep -qF "pbh: adopt pbh-downloader \"${MIGRATE_PBH_DOWNLOADER}\" (id ${MIGRATE_PBH_DOWNLOADER}) for qbittorrent" \
+    "$WORK/apply-migrate.txt" ||
+    { echo "the plan did not say it adopts PeerBanHelper's downloader ${MIGRATE_PBH_DOWNLOADER} by id"; fail=1; }
   grep -q "^wiring ok" "$WORK/apply-migrate.txt" ||
     { echo "the apply the migration handed over to did not report a healthy receipt"; fail=1; }
   # Plex's rows are the ones only the runner Job can have rewritten: every other
