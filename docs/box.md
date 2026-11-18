@@ -1045,6 +1045,25 @@ data. Everything it will change is written down before it changes anything.
   carried)" — and apply's confirm repeats it for a snapshot that really is trimmed. The
   list is box's own, not the catalog's `snapshot:` key, which is what an upgrade may
   rewrite; for qBittorrent that is only its conf, which would lose `BT_backup`.
+- **A migrated app account becomes box's own.** autobrr and qui keep their own user
+  table and allow exactly one account there, and box owns the account the init container
+  creates, sets the release Secret's password on and signs in as (`s5n.wiringAccount`);
+  the person's way in is the login at the edge, never this account. So a source's one
+  account row is renamed to it during apply, keeping its id — autobrr's schema refers to
+  a user row nowhere (`api_key` is keyed by its own key, `sessions` by its own token),
+  and qui's settings tables carry that id — and the app's first start already has the
+  account its init container looks for. The confirm says so once per app, with the name
+  the source used. A database with two rows is refused naming the count: neither app can
+  hold two, so which one a source meant is not something box can decide.
+- **A config from an older app is taken as it is.** box's own init containers run
+  before an app's first start and write into configs a source wrote, which are not the
+  shape the chart's own install makes. A PeerBanHelper config that predates its
+  `privacy` block gets the block, and the app's own config migration — which writes that
+  key from the template inside its jar, where it says `true` — is given a copy of that
+  same template with `false` in it, so the start that migrates the file keeps box's
+  answer instead of running once with analytics on. The copy is made from the jar on
+  every start and every other byte of it is the image's, so no migration is skipped and
+  nothing in the file is box's own invention.
 - **A rehearsal cannot reach the internet (decided goal, mechanism proposed).**
   `discover --rehearsal` copies the configs into a snapshot that applies locked: no
   internet egress, proven from inside the namespace before any app starts, and every
