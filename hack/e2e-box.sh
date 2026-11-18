@@ -6185,12 +6185,15 @@ rehearsal_box() {
     cat "$WORK/apply-rehearsal.txt"; return 1
   fi
   cat "$WORK/apply-rehearsal.txt"
+  if grep -q "data: rename" "$WORK/apply-rehearsal.txt"; then
+    echo "the rehearsal's confirm lists a data rename it does not make"; return 1
+  fi
   for want in "snapshot: ${rehearsal} (rehearsal)" "rehearsal: nothing leaves this box" \
               "network lock: proven"; do
     grep -qF -- "$want" "$WORK/apply-rehearsal.txt" ||
       { echo "the rehearsal apply has no ${want}"; return 1; }
   done
-  grep -qE "^1 torrents written stopped$" "$WORK/apply-rehearsal.txt" ||
+  grep -qE "^ *1 torrents written stopped$" "$WORK/apply-rehearsal.txt" ||
     { echo "the rehearsal apply did not count the one torrent it stopped:";
       grep -n "torrent" "$WORK/apply-rehearsal.txt" || true; return 1; }
   # The two settings the conf carries: what is added later lands stopped, and

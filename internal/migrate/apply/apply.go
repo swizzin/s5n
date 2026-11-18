@@ -584,7 +584,9 @@ func (m *migration) show() error {
 // file, so the operator's review is of what apply is about to do.
 func (m *migration) summary() Summary {
 	s := Summary{Outside: append([]string(nil), m.p.Outside...), Defaults: m.p.Defaults(), Rehearsal: m.env.Rehearsal}
-	if m.p.Data != nil {
+	// A rehearsal renames nothing (renameData), so its summary lists nothing
+	// to rename.
+	if m.p.Data != nil && !m.env.Rehearsal {
 		for _, pair := range m.p.Data.Renames() {
 			if has(m.st.Renamed, pair[0]) {
 				continue

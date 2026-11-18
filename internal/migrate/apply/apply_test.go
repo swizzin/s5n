@@ -545,6 +545,11 @@ func TestRehearsalRenamesNothingAndStopsTheTorrents(t *testing.T) {
 			t.Errorf("the confirm screen has no %q:\n%s", want, lines)
 		}
 	}
+	// The screen that says no data is renamed lists no renames: a row the run
+	// will not do is a contradiction the operator confirms.
+	if strings.Contains(lines, "data: rename") {
+		t.Errorf("a rehearsal's confirm screen lists a rename it will not make:\n%s", lines)
+	}
 	conf := f.readFile(filepath.Join("config", "qbittorrent", "qBittorrent", "qBittorrent.conf"))
 	for _, want := range []string{`Session\AddTorrentStopped=true`, `AutoDownloader\EnableProcessing=false`} {
 		if !strings.Contains(conf, want) {
