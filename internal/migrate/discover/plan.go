@@ -784,6 +784,18 @@ func (d *discovery) variant(in *instance, variants map[string]map[string]admissi
 	for _, pick := range []func(admission.Image) bool{
 		func(image admission.Image) bool { return digest != "" && image.Digest == digest },
 		func(image admission.Image) bool { return tag != "" && image.Tag == tag },
+		func(image admission.Image) bool {
+			if repo != libtorrentRepo || image.Tag == "" {
+				return false
+			}
+			// An older spelling of the same builds: the tag named libtorrent's
+			// patch release (5.3.0-lt1.2.20-10g), and the variant is the line
+			// and the profile (5.3.0-lt1.2-10g), because a later 1.2.21 is a
+			// new digest on that same tag rather than a new variant
+			// (charts/s5n/variants.yaml).
+			line := libtorrentTag(tag)
+			return line != "" && image.Tag == line
+		},
 	} {
 		var matching []string
 		for _, name := range candidates {
@@ -795,9 +807,57 @@ func (d *discovery) variant(in *instance, variants map[string]map[string]admissi
 			return matching[0]
 		}
 	}
-	d.note("%s runs %s, and %d of the chart's blessed variants share that repository with no tag or digest to tell them apart, so the chart's default runs: apps.%s.image.variant names one of %s",
-		in.name, in.container.Image, len(candidates), in.app, variantList(byVariant))
+	// Nothing of the source's is one of them, and the note says what box
+	// compared rather than claiming the variants carry no tag: they do, and the
+	// one the source ran is not any of them.
+	d.note("%s runs %s, and no blessed variant for that repository has its tag or digest (%s), so the chart's default runs: apps.%s.image.variant names one of %s",
+		in.name, in.container.Image, comparedTags(candidates, byVariant), in.app, variantList(byVariant))
 	return ""
+}
+
+// libtorrentRepo is the repository whose tags name libtorrent's build beside
+// qBittorrent's own version (charts/s5n/variants.yaml). It is the only place a
+// tag means more than a version, so it is the only place discovery reads one.
+const libtorrentRepo = "ghcr.io/swizzin/qbittorrent"
+
+// libtorrentTag is the variant tag an image tagged with libtorrent's patch
+// release already is: 5.3.0-lt1.2.20-10g-znver3-mimalloc is
+// 5.3.0-lt1.2-10g-znver3-mimalloc, which is a variant's tag.
+//
+// Empty when the tag names no patch release to strip -- 5.3.0-lt1.2 is already
+// the variant's own tag -- or no libtorrent line at all: box does not guess at
+// what a tag it does not know means.
+func libtorrentTag(tag string) string {
+	i := strings.Index(tag, "-lt")
+	if i < 0 {
+		return ""
+	}
+	head, rest := tag[:i+len("-lt")], tag[i+len("-lt"):]
+	j := 0
+	for j < len(rest) && (rest[j] == '.' || (rest[j] >= '0' && rest[j] <= '9')) {
+		j++
+	}
+	parts := strings.Split(rest[:j], ".")
+	if len(parts) != 3 || parts[0] == "" || parts[1] == "" || parts[2] == "" {
+		return ""
+	}
+	return head + parts[0] + "." + parts[1] + rest[j:]
+}
+
+// comparedTags is the tags of the variants that share the source's repository,
+// as the note that matched none of them says them.
+func comparedTags(candidates []string, byVariant map[string]admission.Image) string {
+	out := make([]string, 0, len(candidates))
+	for _, name := range candidates {
+		image := byVariant[name]
+		switch {
+		case image.Tag != "":
+			out = append(out, image.Tag)
+		case image.Digest != "":
+			out = append(out, image.Digest)
+		}
+	}
+	return strings.Join(out, ", ")
 }
 
 // splitImageRef splits an image reference into the repository, its tag and its

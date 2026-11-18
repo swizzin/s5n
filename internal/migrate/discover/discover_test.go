@@ -1878,14 +1878,101 @@ func TestDiscoverRefusesToGuessAVariant(t *testing.T) {
 	if got := p.Apps["qbittorrent"].Variant; got != "" {
 		t.Fatalf("an image none of the variants pins mapped to %q", got)
 	}
-	var noted bool
+	// The note says what is true: the variants do have tags, and none of them
+	// is the one the source ran.
+	var note string
 	for _, n := range rep.Notes {
-		if strings.Contains(n, "share that repository") && strings.Contains(n, "apps.qbittorrent.image.variant") {
-			noted = true
+		if strings.Contains(n, "apps.qbittorrent.image.variant") {
+			note = n
 		}
 	}
-	if !noted {
-		t.Fatalf("the ambiguous image is not reported: %#v", rep.Notes)
+	if !strings.Contains(note, "no blessed variant for that repository has its tag or digest") {
+		t.Fatalf("the unmatched image is not reported as unmatched: %q", note)
+	}
+	if strings.Contains(note, "no tag or digest to tell them apart") {
+		t.Errorf("the note still says the variants have no tags, and they do: %q", note)
+	}
+	for _, tag := range []string{"5.3.0-lt1.2", "5.3.0-lt1.2-10g", "5.3.0-lt2.1", "5.3.0-lt2.1-10g", "5.3.0-lt1.2-10g-znver3-mimalloc"} {
+		if !strings.Contains(note, tag) {
+			t.Errorf("the note does not name the tag %s it compared: %q", tag, note)
+		}
+	}
+}
+
+// TestDiscoverMapsAPatchReleaseTagOntoItsVariant: the project's builds were
+// once tagged with libtorrent's patch release beside qBittorrent's version
+// (5.3.0-lt1.2.20-10g), and the chart's variants name the libtorrent line and
+// the build profile only (5.3.0-lt1.2-10g), because a later 1.2.21 is a new
+// digest on that same tag. So such an image is that variant. A qBittorrent the
+// chart does not ship is none of them, and the note says which tags were
+// compared.
+func TestDiscoverMapsAPatchReleaseTagOntoItsVariant(t *testing.T) {
+	tests := []struct {
+		image string
+		want  string
+	}{
+		{"ghcr.io/swizzin/qbittorrent:5.3.0-lt1.2.20-10g-znver3-mimalloc", "lt1.2-10g-znver3-mimalloc"},
+		{"ghcr.io/swizzin/qbittorrent:5.3.0-lt1.2.20", "lt1.2"},
+		{"ghcr.io/swizzin/qbittorrent:5.3.0-lt2.1.2", "lt2.1"},
+		{"ghcr.io/swizzin/qbittorrent:5.3.0-lt2.1.20-10g", "lt2.1-10g"},
+		// A qBittorrent release the chart does not carry: the libtorrent line
+		// matches, the version does not, so nothing does.
+		{"ghcr.io/swizzin/qbittorrent:4.6.0-lt1.2.20-10g", ""},
+	}
+	for _, tt := range tests {
+		f := dataSource(t, func(name string, spec *appSpec) {
+			if name == "qbittorrent" {
+				spec.image = tt.image
+			}
+		})
+		f.variants = chartVariants(t)
+		p, rep := f.discover(t)
+		if got := p.Apps["qbittorrent"].Variant; got != tt.want {
+			t.Errorf("%s mapped to variant %q, want %q", tt.image, got, tt.want)
+			continue
+		}
+		if tt.want != "" {
+			for _, n := range rep.Notes {
+				if strings.Contains(n, "image.variant") && strings.Contains(n, "qbittorrent") {
+					t.Errorf("%s is a blessed variant and needs no note: %q", tt.image, n)
+				}
+			}
+			continue
+		}
+		var note string
+		for _, n := range rep.Notes {
+			if strings.Contains(n, "apps.qbittorrent.image.variant") {
+				note = n
+			}
+		}
+		if !strings.Contains(note, "no blessed variant for that repository has its tag or digest") ||
+			!strings.Contains(note, "5.3.0-lt1.2-10g") {
+			t.Errorf("%s has no variant, and the note does not say so and name the tags compared: %q", tt.image, note)
+		}
+	}
+}
+
+// TestLibtorrentTagOnlyStripsAPatchRelease: the mapping is qBittorrent's own
+// repository and libtorrent's patch release, and nothing else: a tag that is
+// already a variant's is left to the exact comparison, and one that names no
+// libtorrent line is not guessed at.
+func TestLibtorrentTagOnlyStripsAPatchRelease(t *testing.T) {
+	tests := []struct{ tag, want string }{
+		{"5.3.0-lt1.2.20-10g-znver3-mimalloc", "5.3.0-lt1.2-10g-znver3-mimalloc"},
+		{"5.3.0-lt1.2.20", "5.3.0-lt1.2"},
+		{"5.3.0-lt2.1.2", "5.3.0-lt2.1"},
+		{"5.3.0-lt1.2", ""},
+		{"5.3.0-lt1.2-10g", ""},
+		{"5.3.0", ""},
+		{"5.3.0-rc1", ""},
+		{"5.3.0-lt1.2.x", ""},
+		{"5.3.0-lt1.2.20.30-10g", ""},
+		{"", ""},
+	}
+	for _, tt := range tests {
+		if got := libtorrentTag(tt.tag); got != tt.want {
+			t.Errorf("libtorrentTag(%q) = %q, want %q", tt.tag, got, tt.want)
+		}
 	}
 }
 
