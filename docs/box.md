@@ -999,6 +999,20 @@ data. Everything it will change is written down before it changes anything.
   are inside it, and its mode says which of those apply may run. It holds secrets — API keys, the Plex token, qBittorrent's password
   hash — so it is root-only, 0600. `box backup` writes the same file from box itself,
   and `restore` is `migrate apply` of that snapshot: one format, one apply path.
+- **A config travels as what the app cannot rebuild (proposed).** Every app's config
+  directory is copied whole — apply rewrites the copy and a file a rewriter never reads
+  still has to come across — except the one whose config is mostly a library: Plex's
+  `Metadata`, `Media` and `Cache` trees are covers, artwork and thumbnails it rebuilds
+  from the media it is given, and on a real library they are tens of gigabytes. Plex's
+  snapshot carries its state instead: `Preferences.xml` and its library databases with
+  the `-wal` and `-shm` a writer leaves beside them. The two state files are required (a
+  snapshot without either is refused, naming the path); the companions are carried when
+  they are there, because a database nobody has open has none. The read says so once, in
+  its report and on the screen — "plex: carried Preferences.xml and its databases; Plex
+  rebuilds its metadata, artwork and thumbnails (artwork uploaded by hand is not
+  carried)" — and apply's confirm repeats it for a snapshot that really is trimmed. The
+  list is box's own, not the catalog's `snapshot:` key, which is what an upgrade may
+  rewrite; for qBittorrent that is only its conf, which would lose `BT_backup`.
 - **A rehearsal cannot reach the internet (decided goal, mechanism proposed).**
   `discover --rehearsal` copies the configs into a snapshot that applies locked: no
   internet egress, proven from inside the namespace before any app starts, and every
@@ -1036,7 +1050,12 @@ data. Everything it will change is written down before it changes anything.
   that resolves an address gives the plan's domain default: the one name the source's hosts
   all are — box serves the apps under paths on it, as the source did — or the domain
   several hosts share. The source's own image is never carried, and the admission policy
-  stays the guard.
+  stays the guard. A tag that names libtorrent's patch release beside qBittorrent's
+  version (`5.3.0-lt1.2.20-10g`) is the variant whose tag is the line and the profile
+  (`5.3.0-lt1.2-10g`), because that is what the chart's variants say a variant is, and
+  the patch release is an older spelling of the same build; the mapping is that one
+  repository's, and a tag no variant has is reported as exactly that, naming the tags
+  box compared.
 - **One snapshot per owner (proposed).** discover groups the apps by the user that owns
   their config directories, so a source with several users yields one snapshot each. The
   plan records the owner's uid:gid, and every other snapshot is applied into that user's
