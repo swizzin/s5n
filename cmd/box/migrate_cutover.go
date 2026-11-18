@@ -101,10 +101,9 @@ func runMigrateCutover(ctx context.Context, args []string) {
 			// on top would only repeat them.
 			os.Exit(1)
 		}
-		if errors.Is(err, errCutoverStopped) {
-			// The replace path did what it was asked: the snapshot is written
-			// and the two things left are the operator's. That is a finished
-			// run, not a failed one.
+		if errors.Is(err, errCutoverStopped) || errors.Is(err, errCutoverBlocked) {
+			// The run did what it was asked: the snapshot is written and the
+			// rest is the operator's. That is a finished run, not a failed one.
 			os.Exit(0)
 		}
 		if errors.Is(err, apply.ErrCancelled) || errors.Is(err, release.ErrCancelled) {
@@ -124,9 +123,22 @@ var errCutoverStillRunning = errors.New("the source is still running")
 // replace path), so the exit is a stop and not a failure of anything.
 var errCutoverStopped = errors.New("stopped after the snapshot")
 
+// errCutoverBlocked says the keep path found something on the source cluster box
+// will not install over, and stopped after the final snapshot. That is a finished
+// run, not a failed one: the other road is the operator's next command.
+var errCutoverBlocked = errors.New("the keep path's pre-flight stopped the cutover")
+
+// cutoverSeams are the two checks that read a live cluster, so a test hands over
+// an answer instead of a cluster: the stop proof, and the keep path's pre-flight.
+// Everything else cutover does is the real one.
+type cutoverSeams struct {
+	proof func(context.Context, cutoverOptions, migrationRead) ([]discover.Running, error)
+	keep  func(context.Context, cutoverOptions, migrationRead) ([]discover.Blocker, error)
+}
+
 // migrateCutover is the command without the exit, so a test drives its refusals.
 func migrateCutover(ctx context.Context, o cutoverOptions, out say.Reporter) error {
-	return cutover(ctx, o, out, unstopped)
+	return cutover(ctx, o, out, cutoverSeams{proof: unstopped, keep: keepBlockers})
 }
 
 // keepSurvey writes this read as a survey and returns its file: it is what every
@@ -144,10 +156,9 @@ func keepSurvey(read *migrationRead, o cutoverOptions) (string, error) {
 	return survey.Path, nil
 }
 
-// cutover is the command with the stop proof as a parameter: the proof reads a
-// live source's pods, so a test hands it an answer instead of a cluster. Every
-// other step is the real one.
-func cutover(ctx context.Context, o cutoverOptions, out say.Reporter, proof func(context.Context, cutoverOptions, migrationRead) ([]discover.Running, error)) error {
+// cutover is the command with its live-cluster checks as parameters, so a test
+// drives every refusal without a cluster. Every other step is the real one.
+func cutover(ctx context.Context, o cutoverOptions, out say.Reporter, seams cutoverSeams) error {
 	out.Phase("cutover")
 	read, err := readSource(ctx, o.discoverOptions)
 	if err != nil {
@@ -168,7 +179,7 @@ func cutover(ctx context.Context, o cutoverOptions, out say.Reporter, proof func
 	if err != nil {
 		return err
 	}
-	running, err := proof(ctx, o, read)
+	running, err := seams.proof(ctx, o, read)
 	if err != nil {
 		return err
 	}
@@ -230,8 +241,27 @@ func cutover(ctx context.Context, o cutoverOptions, out say.Reporter, proof func
 		out.Line(fmt.Sprintf("then: box migrate apply %s", wrote.Path))
 		return errCutoverStopped
 	}
-	// The cluster is kept: the same run continues into the install and the
-	// adoption, so a cutover is one command on a host box may keep.
+	// The cluster is kept by default, so the same run continues into the install
+	// and the adoption. What it must not do first is install over something on a
+	// cluster box did not make: the pre-flight names each of those, and the road
+	// for a cluster that has them.
+	if seams.keep != nil {
+		blockers, err := seams.keep(ctx, o, read)
+		if err != nil {
+			return err
+		}
+		if len(blockers) > 0 {
+			lines := make([]string, 0, len(blockers))
+			for _, b := range blockers {
+				lines = append(lines, b.String())
+			}
+			out.Warn(fmt.Sprintf("%d thing(s) on this cluster stop box installing onto it, and box does not change a cluster it did not install", len(blockers)))
+			out.List("check these, and clear each one yourself", lines)
+			out.Line("--replace-cluster is the other road: it stops here, after this snapshot, and `box migrate apply " + wrote.Path + "` installs box's own cluster on that host")
+			return errCutoverBlocked
+		}
+	}
+
 	out.Phase("install")
 	return migrateApply(ctx, wrote.Path, o.apply, out)
 }

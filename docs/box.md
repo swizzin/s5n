@@ -972,9 +972,15 @@ data. Everything it will change is written down before it changes anything.
   not is new, listed and kept. A read the cutover stops on is kept as a survey either way.
 - **The source's cluster is kept by default (decided).** A kept cluster is self-managed:
   box installs onto it, manages none of its version, and the whole cutover runs in one
-  go — platform, install, adoption — with the source's workloads left at 0.
-  `--replace-cluster` asks for box's own k0s instead: cutover stops after the final
-  snapshot with the reset recipe, and `box migrate apply` finishes on the clean host.
+  go — platform, install, adoption — with the source's workloads left at 0. Before it
+  installs, cutover checks three things and stops after the final snapshot naming the
+  command that shows each one: bootstrap's own gates over the cluster (a managed control
+  plane, more than one node, an API that does not answer), a Service or a container's
+  hostPort already holding the node's 80/443, and an auto-updater watching the source's
+  namespaces (keel's annotation, or keel itself). box changes nothing on a cluster it did
+  not install: the operator clears them, or `--replace-cluster` asks for box's own k0s
+  instead: cutover stops after the final snapshot with the reset recipe, and
+  `box migrate apply` finishes on the clean host.
 - **apply is the installer on a host with no box (decided).** It runs bootstrap and then
   init's steps from the plan: the data root and the owner are the plan's, and the apps
   go in off -- the migration switches on what it moved, because an app started before

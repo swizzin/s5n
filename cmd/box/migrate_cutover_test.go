@@ -22,10 +22,17 @@ import (
 	"github.com/swizzin/s5n/internal/say"
 )
 
-// proofOf answers the stop proof with one fixed answer.
-func proofOf(running ...discover.Running) func(context.Context, cutoverOptions, migrationRead) ([]discover.Running, error) {
-	return func(context.Context, cutoverOptions, migrationRead) ([]discover.Running, error) {
-		return running, nil
+// proofOf answers the two live-cluster checks: the stop proof with one fixed
+// answer, and the keep path's pre-flight with none, so a run that keeps the cluster
+// goes on to the install.
+func proofOf(running ...discover.Running) cutoverSeams {
+	return cutoverSeams{
+		proof: func(context.Context, cutoverOptions, migrationRead) ([]discover.Running, error) {
+			return running, nil
+		},
+		keep: func(context.Context, cutoverOptions, migrationRead) ([]discover.Blocker, error) {
+			return nil, nil
+		},
 	}
 }
 
@@ -198,7 +205,7 @@ func TestCutoverRefusesASavedReadForTheStopProof(t *testing.T) {
 	o.Out = filepath.Join(t.TempDir(), "final.tar.gz")
 	o.Replace = true
 	reporter, _ := recording()
-	err := cutover(context.Background(), o, reporter, unstopped)
+	err := cutover(context.Background(), o, reporter, cutoverSeams{proof: unstopped})
 	if err == nil || !strings.Contains(err.Error(), "--from-dir") {
 		t.Fatalf("cutover of a saved read = %v, want it to name --from-dir", err)
 	}
