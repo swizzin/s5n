@@ -5542,9 +5542,11 @@ migrate_source_torrent() { # migrate_source_torrent <password file>
   mkdir -p "$WORK/hostfs/legacy/var/data/Downloads/tv"
   cp "$WORK/source/$name" "$WORK/hostfs/legacy/var/data/Downloads/tv/$name"
 
+  migrate_forward "$MIGRATE_LEGACY_NS" svc/qbittorrent "$MIGRATE_QBIT_PORT" || return 1
+  # The tunnel's port is chosen inside migrate_forward, so the base address is
+  # built after it: one read before would name the previous tunnel's port.
   base="http://127.0.0.1:${MIGRATE_PF_PORT}"
   jar="$WORK/source/qbittorrent.jar"
-  migrate_forward "$MIGRATE_LEGACY_NS" svc/qbittorrent "$MIGRATE_QBIT_PORT" || return 1
   code=$(curl -sS -o /dev/null -w '%{http_code}' -b "$jar" --max-time 30 \
     -F "torrents=@$WORK/source/s5n-e2e-sample.torrent" \
     -F "savepath=/downloads/tv" -F "category=tv" -F "paused=false" -F "stopped=false" \
