@@ -240,70 +240,85 @@ func (w *Writer) AddFiles(prefix, dir string, files []string) (Carried, error) {
 		if !safeName(rel) {
 			return res, fmt.Errorf("%q is not a file inside %s: a carried file is a relative path with no .. in it", rel, dir)
 		}
-		parts := strings.Split(rel, "/")
-		absent := false
-		for i := 1; i < len(parts); i++ {
-			parent := strings.Join(parts[:i], "/")
-			if made[parent] {
-				continue
-			}
-			full := filepath.Join(dir, filepath.FromSlash(parent))
-			pinfo, err := os.Lstat(full)
-			if err != nil {
-				if errors.Is(err, fs.ErrNotExist) {
-					// No directory above it is no file: the two are one answer
-					// to the caller, which is asking what the snapshot has.
-					absent = true
-					break
-				}
-				return res, fmt.Errorf("add %s: %w", full, err)
-			}
-			if !pinfo.IsDir() {
-				return res, fmt.Errorf("add %s: %s is a file, so nothing can be carried under it", full, parent)
-			}
-			if err := w.addDir(path.Join(prefix, parent), pinfo); err != nil {
-				return res, err
-			}
-			made[parent] = true
-		}
-		if absent {
-			res.Missing = append(res.Missing, rel)
-			continue
-		}
-		full := filepath.Join(dir, filepath.FromSlash(rel))
-		info, err := os.Lstat(full)
-		if err != nil {
-			if errors.Is(err, fs.ErrNotExist) {
-				res.Missing = append(res.Missing, rel)
-				continue
-			}
-			return res, fmt.Errorf("add %s: %w", full, err)
-		}
-		name := path.Join(prefix, rel)
+		skip, added, err := w.addCarried(prefix, dir, rel, made)
 		switch {
-		case info.Mode().IsRegular():
-			if err := w.addFileFrom(name, full, info); err != nil {
-				return res, err
-			}
-			res.Added = append(res.Added, rel)
-		case info.Mode()&fs.ModeSymlink != 0:
-			skip, err := w.addLink(name, full, dir, rel)
-			if err != nil {
-				return res, err
-			}
-			if skip != nil {
-				res.Skipped = append(res.Skipped, *skip)
-				continue
-			}
+		case err != nil:
+			return res, err
+		case skip != nil:
+			res.Skipped = append(res.Skipped, *skip)
+		case added:
 			res.Added = append(res.Added, rel)
 		default:
-			if info.IsDir() {
-				return res, fmt.Errorf("%s is a directory: a carried file is a file or a link inside the tree", full)
-			}
-			return res, fmt.Errorf("%s is a %s: a carried file is a file or a link inside the tree", full, modeName(info.Mode()))
+			res.Missing = append(res.Missing, rel)
 		}
 	}
 	return res, nil
+}
+
+// addCarried adds one named file and the directories above it. A nil skip with
+// added false is the tree not having it.
+func (w *Writer) addCarried(prefix, dir, rel string, made map[string]bool) (skip *Skipped, added bool, err error) {
+	if err := w.addCarryDirs(prefix, dir, rel, made); err != nil {
+		if errors.Is(err, errAbsent) {
+			return nil, false, nil
+		}
+		return nil, false, err
+	}
+	full := filepath.Join(dir, filepath.FromSlash(rel))
+	info, err := os.Lstat(full)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil, false, nil
+		}
+		return nil, false, fmt.Errorf("add %s: %w", full, err)
+	}
+	name := path.Join(prefix, rel)
+	switch {
+	case info.Mode().IsRegular():
+		return nil, true, w.addFileFrom(name, full, info)
+	case info.Mode()&fs.ModeSymlink != 0:
+		skip, err := w.addLink(name, full, dir, rel)
+		if err != nil {
+			return nil, false, err
+		}
+		return skip, skip == nil, nil
+	}
+	if info.IsDir() {
+		return nil, false, fmt.Errorf("%s is a directory: a carried file is a file or a link inside the tree", full)
+	}
+	return nil, false, fmt.Errorf("%s is a %s: a carried file is a file or a link inside the tree", full, modeName(info.Mode()))
+}
+
+// errAbsent is a directory above a carried file not being there, which makes the
+// file absent too: the caller reports it as missing, not as a failure.
+var errAbsent = errors.New("not in the tree")
+
+// addCarryDirs adds the directories above one carried file, once each, so the
+// subset's shape is in the archive before the file that names it.
+func (w *Writer) addCarryDirs(prefix, dir, rel string, made map[string]bool) error {
+	parts := strings.Split(rel, "/")
+	for i := 1; i < len(parts); i++ {
+		parent := strings.Join(parts[:i], "/")
+		if made[parent] {
+			continue
+		}
+		full := filepath.Join(dir, filepath.FromSlash(parent))
+		info, err := os.Lstat(full)
+		if err != nil {
+			if errors.Is(err, fs.ErrNotExist) {
+				return errAbsent
+			}
+			return fmt.Errorf("add %s: %w", full, err)
+		}
+		if !info.IsDir() {
+			return fmt.Errorf("add %s: %s is not a directory, so nothing can be carried under it", full, parent)
+		}
+		if err := w.addDir(path.Join(prefix, parent), info); err != nil {
+			return err
+		}
+		made[parent] = true
+	}
+	return nil
 }
 
 // Close writes the manifest as the archive's last entry and makes the file

@@ -989,7 +989,7 @@ func TestAddFilesRefusesWhatTheSetCannotCarry(t *testing.T) {
 		{"/etc/passwd", "relative path"},
 		{"./file", "relative path"},
 		{"Databases", "is a directory"},
-		{"file/under", "is a file"},
+		{"file/under", "not a directory"},
 	}
 	for _, tt := range tests {
 		path := filepath.Join(t.TempDir(), "bad.tar.gz")
