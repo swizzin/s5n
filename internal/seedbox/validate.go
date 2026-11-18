@@ -105,6 +105,20 @@ func (s *Seedbox) Effective(c Chart) (map[string]any, error) {
 			}
 		}
 	}
+	// rehearsal is box's own record of what kind of box this is. It is BoxOnly,
+	// so overlay() never carries it from the grant, and it is written here the
+	// way the Gateway's address is: only when the chart being installed
+	// declares the key, because an older release has no such value and its
+	// schema would refuse it.
+	declaresRehearsal, err := declaresRehearsal(c.Schema)
+	if err != nil {
+		return nil, err
+	}
+	if declaresRehearsal {
+		if on, ok := s.Grant.data["rehearsal"].(bool); ok && on {
+			base["rehearsal"] = true
+		}
+	}
 	// The claim names are box's, from the volumes it creates: not the chart's
 	// defaults and not either file. Applied last so nothing can shadow them.
 	overlay(base, claims(vols), nil)
@@ -137,6 +151,23 @@ func declaresAuthEdge(schema []byte) (bool, error) {
 		return false, nil
 	}
 	_, ok = auth.Properties["edge"]
+	return ok, nil
+}
+
+// declaresRehearsal reports whether the chart's schema describes the top-level
+// rehearsal flag. Presence is the whole question, as for auth.edge: a release
+// from before the lock has no such key, and writing it would refuse the install.
+func declaresRehearsal(schema []byte) (bool, error) {
+	if len(schema) == 0 {
+		return false, nil
+	}
+	var doc struct {
+		Properties map[string]json.RawMessage `json:"properties"`
+	}
+	if err := json.Unmarshal(schema, &doc); err != nil {
+		return false, fmt.Errorf("chart schema: %w", err)
+	}
+	_, ok := doc.Properties["rehearsal"]
 	return ok, nil
 }
 

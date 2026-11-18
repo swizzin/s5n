@@ -71,6 +71,14 @@ gateway:
   # Public host, e.g. box.example.com. Empty = match any host.
   host: ""
 
+# A rehearsal box: what `box migrate apply` sets on a box built from a rehearsal
+# snapshot, so a copy of a live seedbox's configs cannot run as the live one. It
+# removes the public-internet egress from the release's NetworkPolicy (DNS and
+# this release's own pods remain) and forces the policies on. box writes it in
+# the grant and nothing unlocks it; the value is box's, so no values file may
+# set it. The chart renders nothing else differently.
+rehearsal: false
+
 networkPolicy:
   enabled: true
   # Where Gateway traffic comes from. This default is for a plain `helm install`

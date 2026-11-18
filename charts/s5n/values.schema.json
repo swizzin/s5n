@@ -37,6 +37,10 @@
         "dracula-alucard"
       ]
     },
+    "rehearsal": {
+      "type": "boolean",
+      "description": "A rehearsal box: no public-internet egress, proven from inside the namespace before any app starts. box sets it in the grant when it applies a rehearsal snapshot, and no file may set it; a rehearsal box is disposable and the real run starts from a final snapshot on a clean host."
+    },
     "global": {
       "type": "object",
       "additionalProperties": false,

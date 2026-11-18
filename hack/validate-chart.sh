@@ -43,6 +43,30 @@ if helm template t charts/s5n -n seedbox --set auth.edge=true --set gateway.host
 fi
 echo "== default render: no PLEX_NO_AUTH_NETWORKS"
 
+# A rehearsal box keeps DNS and its own pods as its only egress: the
+# public-internet ipBlocks go, and the policies render even when the grant
+# switched networkPolicy.enabled off. Both halves are asserted, because a lock
+# that renders nothing is a box with no policy at all, and one that keeps the
+# internet rule is a rehearsal announcing to trackers.
+plain=$(helm template t charts/s5n -n seedbox -f charts/s5n/ci/default-values.yaml \
+  --set 'networkPolicy.apiServerCIDRs[0]=10.0.0.1/32')
+grep -q 'cidr: 0.0.0.0/0' <<<"$plain" ||
+  { echo "the default render has no public-internet egress rule: a normal box cannot reach its indexers"; exit 1; }
+locked=$(helm template t charts/s5n -n seedbox -f charts/s5n/ci/rehearsal-values.yaml \
+  --set 'networkPolicy.apiServerCIDRs[0]=10.0.0.1/32')
+grep -q 'cidr: 0.0.0.0/0' <<<"$locked" &&
+  { echo "the rehearsal render keeps the public-internet egress rule: a copy would announce and query as the live box"; exit 1; }
+grep -q 'cidr: ::/0' <<<"$locked" &&
+  { echo "the rehearsal render keeps the IPv6 internet egress rule"; exit 1; }
+# The lock is only a lock if the policy exists: this file sets
+# networkPolicy.enabled false and the render must still carry it.
+for want in 'name: t-egress' 'name: t-default-deny' 'k8s-app: kube-dns' \
+            'name: t-wiring-egress'; do
+  grep -qF -- "$want" <<<"$locked" ||
+    { echo "the rehearsal render has no ${want}"; exit 1; }
+done
+echo "== rehearsal render: no internet egress, DNS and in-namespace only, policies on"
+
 for values in charts/s5n/ci/*-values.yaml; do
   out=$(mktemp)
   helm template t charts/s5n -n seedbox -f "$values" \

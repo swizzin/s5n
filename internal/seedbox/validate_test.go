@@ -460,3 +460,67 @@ func TestCategoryPattern(t *testing.T) {
 		}
 	}
 }
+
+// TestEffectiveTakesTheRehearsalLockFromTheGrant: rehearsal is box's record,
+// not a value. The chart's default is a live box; a grant carrying the lock
+// renders a locked release; and a values file that tries to set either answer
+// is refused, because allowing it would let a user unlock the box box applied.
+func TestEffectiveTakesTheRehearsalLockFromTheGrant(t *testing.T) {
+	s := loadFixture(t, "values.yaml")
+	got, err := s.Effective(realChart(t))
+	if err != nil {
+		t.Fatalf("Effective: %v", err)
+	}
+	if on, _ := got["rehearsal"].(bool); on {
+		t.Error("the effective values lock a box whose grant never asked for a rehearsal")
+	}
+
+	raw, err := os.ReadFile(fixture(t, "grant.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	locked, err := Load(writeTemp(t, "grant.yaml", string(raw)+"\nrehearsal: true\n"), "")
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	got, err = locked.Effective(realChart(t))
+	if err != nil {
+		t.Fatalf("Effective: %v", err)
+	}
+	if on, _ := got["rehearsal"].(bool); !on {
+		t.Error("the grant's rehearsal lock did not reach the release's values")
+	}
+
+	for _, on := range []string{"true", "false"} {
+		s, err := Load(fixture(t, "grant.yaml"), writeTemp(t, "values.yaml", "rehearsal: "+on+"\n"))
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		if _, err := s.Effective(realChart(t)); err == nil {
+			t.Errorf("Effective accepted a values file that sets rehearsal: %s", on)
+		}
+	}
+}
+
+// TestEffectiveOmitsTheLockForAReleaseWithoutIt: box keeps applying to every
+// release back to the oldest it supports, and one from before the lock has no
+// key for it. The 0.2.0 schema sets additionalProperties: false, so writing the
+// key would refuse an otherwise good install.
+func TestEffectiveOmitsTheLockForAReleaseWithoutIt(t *testing.T) {
+	c := chartAt(t, "chart-0.2.0.values.yaml", "chart-0.2.0.schema.json")
+	raw, err := os.ReadFile(fixture(t, "grant.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	s, err := Load(writeTemp(t, "grant.yaml", string(raw)+"\nrehearsal: true\n"), "")
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	got, err := s.Effective(c)
+	if err != nil {
+		t.Fatalf("Effective against the 0.2.0 chart: %v", err)
+	}
+	if _, ok := got["rehearsal"]; ok {
+		t.Error("rehearsal reached a release whose schema has no such key")
+	}
+}

@@ -1,0 +1,18 @@
+# A rehearsal box: the lock `box migrate apply` sets on a box built from a
+# rehearsal snapshot. box writes the flag in the grant and no values file sets
+# it; this render exists so the chart's locked egress policy is validated like
+# every other shape. The only difference from a plain render is the release's
+# egress policy: no public-internet ipBlocks, DNS and this release's own pods
+# remain, and the policies are on even with networkPolicy.enabled false.
+auth:
+  edge: true
+
+rehearsal: true
+
+# The lock forces the policies on, so this file proves it: a grant that switched
+# default-deny off still cannot leave a rehearsal box open.
+networkPolicy:
+  enabled: false
+
+gateway:
+  host: box.example.com
