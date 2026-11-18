@@ -75,6 +75,10 @@ func runMigrateApply(ctx context.Context, args []string) {
 	fs := flag.NewFlagSet("migrate apply", flag.ExitOnError)
 	o := addMigrateApplyFlags(fs)
 	o.install.pathsInNode = pathsInNode
+	// The apply this command hands over to reads the same switch: on a host
+	// whose paths are inside a test node, the second render must not stat them
+	// on the host that does not have them.
+	o.pathsInNode = pathsInNode
 	if err := fs.Parse(args); err != nil {
 		fmt.Fprintf(os.Stderr, "box: %v\n", err)
 		os.Exit(2)
