@@ -55,7 +55,9 @@
 #   migrate       an install box did not make -- qBittorrent, Sonarr, Radarr and
 #                 Plex over plain host directories, seeded through their own
 #                 APIs (and, for Plex, through its own SQLite on the database it
-#                 built) -- taken over by `box migrate discover` and
+#                 built), plus four apps whose own code writes what the migration
+#                 reads (autobrr, qui, pbh, and Tautulli behind a URL root) --
+#                 taken over by `box migrate discover` and
 #                 `box migrate apply` after the source cluster is thrown away.
 #                 The apps must come back healthy on the chart's images with
 #                 their paths under /data, their API keys unchanged, their
@@ -5032,7 +5034,10 @@ PY
 # volumes are host directories bind-mounted into the node at the same absolute
 # path (see VOLUME ROOTS above), so box on this host and the pods in the node
 # see one tree: that is what makes discovery's read of the source, apply's
-# staging copy and the renames under the data root one filesystem.
+# staging copy and the renames under the data root one filesystem. The four apps
+# whose own code writes its first config (autobrr's and qui's accounts, pbh's
+# config.yml, Tautulli's config.ini) run their own image and are set up through
+# their own CLI, files and API, never by this script.
 #
 # Then, the way an operator cuts over: `box migrate cutover` refuses while the
 # source still runs (printing the stop command per app, and keeping the read as
@@ -5138,6 +5143,21 @@ MIGRATE_PBH_DOWNLOADER=source-qbit
 # version is one the migration reads the same way the release writes it.
 MIGRATE_AUTOBRR_IMAGE=""
 MIGRATE_QUI_IMAGE=""
+# The chart's own Tautulli, which the source also runs. Its config.ini is the
+# whole of what the migration reads of it, and that file is the app's own: it is
+# written on the first start from _CONFIG_DEFINITIONS, with every key lower case
+# (plexpy/config.py:473, `ini_key = name.lower()`), which is the shape a real
+# install has and the one the rewriter has to read.
+MIGRATE_TAUTULLI_IMAGE=""
+# Tautulli's URL root in the source, which is what a seedbox behind a
+# path-routing proxy has: the file holds it without a leading slash (the app
+# normalises it when it mounts its routes, webstart.py:216). The chart serves
+# Tautulli at the root and strips the prefix at its route (values.yaml,
+# rewritePath), so the migration has to write the empty one: a config left on
+# this root answers /tautulli/api/v2, and the wiring Job's /api/v2 is a 404.
+MIGRATE_TAUTULLI_ROOT=tautulli
+# Tautulli's own WebUI port, in the source and in the chart's own Tautulli.
+MIGRATE_TAUTULLI_PORT=8181
 
 # migrate_forward <namespace> <target> <port>: port_forward above, for a
 # namespace other than the seedbox's. The tunnel's port and process land in
@@ -5182,13 +5202,15 @@ migrate_forward_stop() {
 # images from above. It runs as the uid and gid the box will, so what the apps
 # write is what box can read and what a migrated copy can be owned by.
 #
-# with-accounts adds the three apps whose first start box's own init containers
+# with-accounts adds the four apps whose first start box's own init containers
 # write into: autobrr and qui, which keep their own user table and get an account
 # of the source's own name (migrate_source_account makes it with each app's own
-# CLI), and pbh, which writes its config.yml itself (the fixture is a v7.3.0, so
-# what it writes predates the privacy block). The keep scenario runs the four
-# apps this migration always ran: the account and config shapes are this
-# scenario's, which owns the init steps they meet.
+# CLI), pbh, which writes its config.yml itself (the fixture is a v7.3.0, so
+# what it writes predates the privacy block), and tautulli, whose config.ini the
+# app writes itself (migrate_source_tautulli, which is the one app this fixture
+# varies the settings of). The keep scenario runs the four apps this migration
+# always ran: the account and config shapes are this scenario's, which owns the
+# init steps they meet.
 migrate_source_manifests() { # migrate_source_manifests <file> <src> <uid> <gid> [with-accounts]
   local file=$1 src=$2 uid=$3 gid=$4 more=${5:-}
   cat >"$file" <<EOF
@@ -5475,10 +5497,12 @@ spec:
       targetPort: 32400
 EOF
   [ "$more" = with-accounts ] || return 0
-  # The three apps box's own init containers write into. Each keeps its whole
+  # The four apps box's own init containers write into. Each keeps its whole
   # state under /config, which is the source's own directory on the host, and
   # none is given a readiness probe: the script asks the app's own CLI and its
   # own files instead, which is what says the state a migration reads is real.
+  # Tautulli's init container writes its API key into the config.ini the app
+  # wrote, which is the file this fixture is about: no script writes it.
   cat >>"$file" <<EOF
 ---
 apiVersion: apps/v1
@@ -5656,6 +5680,66 @@ spec:
     - name: http
       port: 9898
       targetPort: 9898
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: tautulli
+  namespace: ${MIGRATE_LEGACY_NS}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: tautulli
+  template:
+    metadata:
+      labels:
+        app: tautulli
+    spec:
+      terminationGracePeriodSeconds: 10
+      securityContext:
+        runAsUser: ${uid}
+        runAsGroup: ${gid}
+        fsGroup: ${gid}
+      containers:
+        - name: tautulli
+          image: ${MIGRATE_TAUTULLI_IMAGE}
+          env:
+            - name: TZ
+              value: UTC
+          ports:
+            - name: http
+              containerPort: ${MIGRATE_TAUTULLI_PORT}
+          # No readiness probe, like the three above: its URL root moves during
+          # the fixture (migrate_source_tautulli sets it, and the app then
+          # serves everything under it), so a probe on one path would be wrong
+          # for half the run. The script asks the app's own API at the root it
+          # is configured with, which is what says the app and its file agree.
+          volumeMounts:
+            - name: config
+              mountPath: /config
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: config
+          hostPath:
+            path: ${src}/var/data/tautulli
+            type: Directory
+        - name: tmp
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: tautulli
+  namespace: ${MIGRATE_LEGACY_NS}
+spec:
+  selector:
+    app: tautulli
+  ports:
+    - name: http
+      port: ${MIGRATE_TAUTULLI_PORT}
+      targetPort: ${MIGRATE_TAUTULLI_PORT}
 EOF
 }
 
@@ -6004,6 +6088,133 @@ EOF
   grep -qx "  ${MIGRATE_PBH_DOWNLOADER}:" "$file" ||
     { echo "the source PeerBanHelper's config has no ${MIGRATE_PBH_DOWNLOADER} downloader after writing one"; return 1; }
   echo "  pbh: the source's config.yml is config-version 27 with no privacy block and a downloader keyed ${MIGRATE_PBH_DOWNLOADER}, as a v7 wrote it"
+}
+
+# migrate_source_tautulli <src> <key out>: the source's Tautulli writes its own
+# config.ini, and that file is the whole of what a migration reads of it. No
+# line of it is hand-written here: the app writes it on its first start from
+# _CONFIG_DEFINITIONS, with every key lower case (plexpy/config.py:473,
+# `ini_key = name.lower()`, and Config.write() at :528-556), which is the shape
+# a real install has. The fixture is the one the reported failure had, a seedbox
+# behind a path-routing proxy: a URL root, and its Plex entered by hand as a URL
+# (pms_url), which is what leaves the app serving /tautulli/api/v2 and nothing
+# at the root the release's wiring Job asks.
+#
+# The two settings are set the way the app's own settings page leaves them: in
+# the file it wrote, in its spelling, and then the app is restarted onto them.
+# What is asserted is the result, not the file: the app answers its API under
+# the root it is configured with, and no longer at the root.
+migrate_source_tautulli() { # migrate_source_tautulli <src> <key out>
+  local file="$1/var/data/tautulli/config.ini" keyfile=$2
+  local key i code rootcode api setting
+  for i in $(seq 1 150); do
+    [ -s "$file" ] && break
+    sleep 2
+  done
+  [ -s "$file" ] || { echo "the source Tautulli wrote no config.ini"; return 1; }
+  # The shape this fixture exists to be. A key with a capital in it would be one
+  # Tautulli itself never reads (ConfigObj's keys are case-sensitive, and the app
+  # asks for `name.lower()`), so the migration would be counting a setting that
+  # never was one.
+  if sed -n 's/^\([^ ]*\) = .*/\1/p' "$file" | grep -q '[A-Z]'; then
+    echo "the source Tautulli's config.ini has keys with capitals in them, and the app writes and reads lower-case ones only:"
+    sed -n 's/^\([^ ]*\) = .*/\1/p' "$file" | grep '[A-Z]' | head -3 | sed 's/^/    /'
+    return 1
+  fi
+  for setting in http_root http_host http_port pms_ip pms_port pms_ssl pms_url; do
+    grep -qE "^${setting} = " "$file" ||
+      { echo "the source Tautulli's config.ini has no ${setting}"; return 1; }
+  done
+  key=$(sed -n 's/^api_key = *//p' "$file" | head -1) || true
+  [ -n "${key:-}" ] || { echo "the source Tautulli's config.ini holds no api_key"; return 1; }
+  printf '%s' "$key" >"$keyfile"
+  chmod 600 "$keyfile"
+  # Its own API, on the file it just wrote: the app is up and the key is real.
+  code=""
+  for i in $(seq 1 60); do
+    if migrate_forward "$MIGRATE_LEGACY_NS" svc/tautulli "$MIGRATE_TAUTULLI_PORT"; then
+      code=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 5 \
+        "http://127.0.0.1:${MIGRATE_PF_PORT}/api/v2?apikey=${key}&cmd=status" 2>/dev/null || true)
+      migrate_forward_stop
+      case "$code" in 2??) break ;; esac
+    fi
+    sleep 2
+  done
+  case "$code" in
+    2??) ;;
+    *) echo "the source Tautulli answered ${code:-nothing} to its own API key at the root"; return 1 ;;
+  esac
+  # Tautulli writes config.ini back out of its own memory whenever it shuts down
+  # (plexpy/__init__.py:2940, CONFIG.write() in shutdown()), so a setting a
+  # person changes is changed while the app is not running -- which is also the
+  # only state a migration may take a final snapshot of a source in. The pod
+  # goes, the file the app wrote is edited in its own spelling, and the app
+  # starts again on that file.
+  $K -n "$MIGRATE_LEGACY_NS" scale deployment/tautulli --replicas=0 >"$WORK/tautulli-scale.txt" 2>&1 || {
+    echo "could not stop the source Tautulli to write its own settings:"
+    sed 's/^/    /' "$WORK/tautulli-scale.txt"
+    return 1
+  }
+  $K -n "$MIGRATE_LEGACY_NS" wait --for=delete pod -l app=tautulli --timeout=180s >/dev/null 2>&1 || true
+  # What a person setting this app up behind a proxy does. http_root is written
+  # without a leading slash, as the app stores it; pms_url is a whole URL
+  # because the server was entered by hand, and https because that is how a
+  # proxy in front of a Plex server is reached.
+  MIGRATE_TAUTULLI_ROOT="$MIGRATE_TAUTULLI_ROOT" python3 - "$file" <<'PY' || return 1
+import os, re, sys
+path = sys.argv[1]
+with open(path, encoding="utf-8") as fp:
+    raw = fp.read()
+values = {
+    "http_root": os.environ["MIGRATE_TAUTULLI_ROOT"],
+    "pms_ip": "plex",
+    "pms_port": "32400",
+    "pms_ssl": "1",
+    "pms_url": "https://plex:32400",
+}
+for name, value in values.items():
+    pattern = re.compile(r"(?m)^" + name + r"[ \t]*=.*$")
+    if not pattern.search(raw):
+        sys.exit(f"the source Tautulli's config.ini has no {name}")
+    raw = pattern.sub(lambda _m, n=name, v=value: f"{n} = {v}", raw, count=1)
+with open(path, "w", encoding="utf-8") as fp:
+    fp.write(raw)
+PY
+  $K -n "$MIGRATE_LEGACY_NS" scale deployment/tautulli --replicas=1 >"$WORK/tautulli-scale.txt" 2>&1 || {
+    echo "could not start the source Tautulli on the file it wrote:"
+    sed 's/^/    /' "$WORK/tautulli-scale.txt"
+    return 1
+  }
+  code=""
+  rootcode=""
+  for i in $(seq 1 90); do
+    if migrate_forward "$MIGRATE_LEGACY_NS" svc/tautulli "$MIGRATE_TAUTULLI_PORT"; then
+      # The tunnel's port is one migrate_forward chose a moment ago, so it is
+      # read here rather than before the loop.
+      api="http://127.0.0.1:${MIGRATE_PF_PORT}"
+      code=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 5 \
+        "${api}/${MIGRATE_TAUTULLI_ROOT}/api/v2?apikey=${key}&cmd=status" 2>/dev/null || true)
+      rootcode=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 5 \
+        "${api}/api/v2?apikey=${key}&cmd=status" 2>/dev/null || true)
+      migrate_forward_stop
+      case "$code" in 2??) break ;; esac
+    fi
+    sleep 2
+  done
+  case "$code" in
+    2??) ;;
+    *)
+      echo "the source Tautulli did not come back at /${MIGRATE_TAUTULLI_ROOT}/api/v2 (answered ${code:-nothing}, /api/v2 answered ${rootcode:-nothing}, and $(sed -n '/^http_root/p' "$file" | head -1) is what its file says): the URL root is not one the app serves"
+      return 1
+      ;;
+  esac
+  case "$rootcode" in
+    2??)
+      echo "the source Tautulli still answers /api/v2 at the root: the fixture's URL root did not take, so nothing is being migrated"
+      return 1
+      ;;
+  esac
+  echo "  tautulli: config.ini written by the app (lower case), serving /${MIGRATE_TAUTULLI_ROOT}/api/v2 and no longer /api/v2"
 }
 
 # migrate_check_arr <app> <port> <category> <client id> <key file>: what a
@@ -6624,6 +6835,7 @@ migrate_box() {
   local src="$WORK/hostfs/legacy" puid pgid plan report app instance folder port category
   local key secret code pin expected revision after plex_repo plex_tag plex_digest
   local i left
+  local tautulli_conf tautulli_key tautulli_ready tautulli_plex tautulli_detail answer
   puid=$(id -u)
   pgid=$(id -g)
   DATA_PATH="$src/var/data"
@@ -6649,6 +6861,13 @@ migrate_box() {
     { echo "could not read the chart's qui pin from charts/s5n/variants.yaml"; fail=1; return 0; }
   read -r app_repo app_tag app_digest <<<"$pin"
   MIGRATE_QUI_IMAGE="${app_repo}:${app_tag}${app_digest:+@${app_digest}}"
+  # Tautulli's config.ini is the file this fixture is about, so the source runs
+  # the chart's own Tautulli: the app writes that file itself, and this is the
+  # version whose spelling the migration is written against.
+  pin=$(variant_pin tautulli) ||
+    { echo "could not read the chart's tautulli pin from charts/s5n/variants.yaml"; fail=1; return 0; }
+  read -r app_repo app_tag app_digest <<<"$pin"
+  MIGRATE_TAUTULLI_IMAGE="${app_repo}:${app_tag}${app_digest:+@${app_digest}}"
 
   # The source's tree, as the volumes above name it. The configs sit under the
   # data path the way an older install kept them, the downloads are `Downloads`
@@ -6666,6 +6885,7 @@ migrate_box() {
     chown -R '${puid}:${pgid}' '$WORK/hostfs'"
   mkdir -p "$src/var/data/qbittorrent" "$src/var/data/sonarr" "$src/var/data/${MIGRATE_RADARR_INSTANCE}" \
     "$src/var/data/plex" "$src/var/data/autobrr" "$src/var/data/qui" "$src/var/data/pbh" \
+    "$src/var/data/tautulli" \
     "$src/var/data/Downloads/tv" "$src/var/data/Downloads/${MIGRATE_RADARR_CATEGORY}" \
     "$src/var/data/library/tv" "$src/var/data/library/${MIGRATE_RADARR_CATEGORY}"
   # One hardlinked pair per category, the way an import leaves them: the same
@@ -6688,7 +6908,7 @@ migrate_box() {
   # config a snapshot carries as its state instead -- Preferences.xml and its
   # databases -- so its marker has to stay behind, and the cover trees it
   # rebuilds are written below, once the source has stopped.
-  for app in qbittorrent sonarr "$MIGRATE_RADARR_INSTANCE" autobrr qui pbh; do
+  for app in qbittorrent sonarr "$MIGRATE_RADARR_INSTANCE" autobrr qui pbh tautulli; do
     printf 's5n e2e: this config directory was the source install\n' >"$src/var/data/${app}/.s5n-e2e-source"
   done
   printf 's5n e2e: this config directory was the source install\n' >"$src/var/data/plex/.s5n-e2e-source"
@@ -6704,18 +6924,18 @@ migrate_box() {
   grep -qF "containerPath: ${WORK}/hostfs" "$KIND_CONFIG" ||
     { echo "the kind config has no mount for ${WORK}/hostfs: the source's files would be inside the node only"; fail=1; return 0; }
 
-  log "the source install: seven apps over host directories, in namespace ${MIGRATE_LEGACY_NS}"
+  log "the source install: eight apps over host directories, in namespace ${MIGRATE_LEGACY_NS}"
   migrate_source_manifests "$WORK/source-manifests.yaml" "$src" "$puid" "$pgid" with-accounts
   if ! $K apply -f "$WORK/source-manifests.yaml" >"$WORK/source-apply.txt" 2>&1; then
     cat "$WORK/source-apply.txt"; fail=1; return 0
   fi
   # Plex is the slow one: it builds its library database on this first start,
   # and its readiness is /identity, so rollout status is what says that start
-  # finished. The other three answer as soon as their API is up. autobrr, qui
-  # and pbh have no readiness probe here: a source install is not held to a
-  # chart's probes, and what says each of them is really up is what the next
+  # finished. The other three answer as soon as their API is up. autobrr, qui,
+  # pbh and tautulli have no readiness probe here: a source install is not held
+  # to a chart's probes, and what says each of them is really up is what the next
   # steps ask it through its own CLI and its own files.
-  for app in qbittorrent sonarr "$MIGRATE_RADARR_INSTANCE" plex autobrr qui pbh; do
+  for app in qbittorrent sonarr "$MIGRATE_RADARR_INSTANCE" plex autobrr qui pbh tautulli; do
     if ! $K -n "$MIGRATE_LEGACY_NS" rollout status "deployment/${app}" --timeout=300s; then
       echo "${app} never became ready in the source install"
       $K -n "$MIGRATE_LEGACY_NS" get pods
@@ -6723,12 +6943,13 @@ migrate_box() {
     fi
   done
 
-  # The three apps whose state box's own init containers write into start from
-  # what their own versions wrote: an account with the source's own name (not
-  # box's), and for PeerBanHelper the config.yml a v7 left, which has no privacy
-  # block. That is the shape a migrated box brings, and the migration and the
-  # release's inits have to take it as it is.
-  log "the source's own account names, and the config a v7 PeerBanHelper wrote"
+  # The apps whose state box's own init containers write into start from what
+  # their own versions wrote: an account with the source's own name (not box's),
+  # the config.yml a v7 PeerBanHelper left, which has no privacy block, and
+  # Tautulli's own config.ini, behind a URL root. That is the shape a migrated
+  # box brings, and the migration and the release's inits have to take it as it
+  # is.
+  log "the source's own account names, and the configs its apps wrote for themselves"
   printf '%s' "$(openssl rand -hex 16)" >"$WORK/source/source-account-password"
   chmod 600 "$WORK/source/source-account-password"
   for app in autobrr qui; do
@@ -6737,6 +6958,9 @@ migrate_box() {
     fi
   done
   if ! migrate_source_pbh_config "$src"; then
+    fail=1; return 0
+  fi
+  if ! migrate_source_tautulli "$src" "$WORK/source/tautulli.key"; then
     fail=1; return 0
   fi
 
@@ -6811,7 +7035,7 @@ migrate_box() {
     fail=1; return 0
   fi
   cat "$WORK/cutover-refused.txt"
-  for instance in qbittorrent sonarr "$MIGRATE_RADARR_INSTANCE" plex autobrr qui pbh; do
+  for instance in qbittorrent sonarr "$MIGRATE_RADARR_INSTANCE" plex autobrr qui pbh tautulli; do
     grep -q "^  ${instance}: .* in ${MIGRATE_LEGACY_NS}/${instance}; kubectl -n ${MIGRATE_LEGACY_NS} scale " \
       "$WORK/cutover-refused.txt" ||
       { echo "the refusal does not name ${instance} and the command that stops it"; fail=1; }
@@ -6833,7 +7057,7 @@ migrate_box() {
   # so this wait is what keeps the fixture out of that case.
   log "stopping the source, the way an operator cuts over"
   $K -n "$MIGRATE_LEGACY_NS" scale deployment --all --replicas=0 >/dev/null
-  for app in qbittorrent sonarr "$MIGRATE_RADARR_INSTANCE" plex autobrr qui pbh; do
+  for app in qbittorrent sonarr "$MIGRATE_RADARR_INSTANCE" plex autobrr qui pbh tautulli; do
     $K -n "$MIGRATE_LEGACY_NS" wait --for=delete pod -l "app=${app}" --timeout=180s >/dev/null 2>&1 || true
   done
   [ -f "$src/var/data/qbittorrent/qBittorrent/categories.json" ] ||
@@ -6885,7 +7109,7 @@ migrate_box() {
   tar -xzOf "$snapshot" report.txt >"$WORK/report.txt" 2>/dev/null ||
     { echo "the snapshot holds no report.txt"; fail=1; return 0; }
   report="$WORK/report.txt"
-  for instance in qbittorrent sonarr "$MIGRATE_RADARR_INSTANCE" plex autobrr qui pbh; do
+  for instance in qbittorrent sonarr "$MIGRATE_RADARR_INSTANCE" plex autobrr qui pbh tautulli; do
     source=$instance
     [ "$instance" = "$MIGRATE_RADARR_INSTANCE" ] && source=$MIGRATE_RADARR_INSTANCE
     grep -q "^app: ${instance} (from ${source}, config " "$report" ||
@@ -7089,11 +7313,23 @@ migrate_box() {
       "$WORK/apply-migrate.txt" ||
       { echo "the plan did not say ${instance}'s account ${MIGRATE_SOURCE_ACCOUNT} becomes box's own"; fail=1; }
   done
+  # Tautulli's config.ini is rewritten where the app wrote it, and the plan says
+  # so: the URL root the chart does not use (its route strips the prefix), and
+  # the Plex it was entered by hand as. A migration that read none of that file
+  # -- the upper-case lookup the reported failure came from -- listed "copy 6
+  # files" and nothing else.
+  for want in "tautulli: config.ini General/http_root url base 1" \
+              "tautulli: config.ini PMS/pms_ssl tls 1" \
+              "tautulli: config.ini PMS/pms_url url 1" \
+              "tautulli: keep its API key (tautulli-apikey)"; do
+    grep -qF "$want" "$WORK/apply-migrate.txt" ||
+      { echo "the plan does not say \"${want}\":"; grep -F "tautulli:" "$WORK/apply-migrate.txt" || true; fail=1; }
+  done
   [ "$fail" = 0 ] || return 0
 
   # ---- assertion 1: healthy, on the chart's own images ---------------------
   log "the migrated apps are ready on the chart's images"
-  for instance in qbittorrent sonarr "$MIGRATE_RADARR_INSTANCE" autobrr qui pbh; do
+  for instance in qbittorrent sonarr "$MIGRATE_RADARR_INSTANCE" autobrr qui pbh tautulli; do
     app=$instance
     [ "$instance" = "$MIGRATE_RADARR_INSTANCE" ] && app=radarr
     expected=$(chart_image "$app") || { echo "could not read the chart's ${app} pin"; fail=1; return 0; }
@@ -7125,6 +7361,72 @@ migrate_box() {
   [ "${pbh_version:-0}" -ge 41 ] ||
     { echo "the migrated PeerBanHelper's config is at version ${pbh_version:-none}, and its own migrations did not run"; fail=1; }
   echo "  pbh's config is at version ${pbh_version} and still says analytics: false"
+
+  # ---- assertion 1d: Tautulli, on the config its own app wrote --------------
+  # The one app whose settings Tautulli's code folds to a spelling of its own:
+  # every key of config.ini is lower case, so a rewriter looking for HTTP_ROOT
+  # matches nothing on a real install and the URL root stays. What that leaves is
+  # the reported failure -- the app answering /tautulli/api/v2 while the wiring
+  # Job asks /api/v2 -- so what is asserted here is the app's own answer, plus
+  # the file it answers from and the two receipt steps that read it.
+  log "Tautulli: the config.ini the box holds, the API at the root, and the receipt's two steps"
+  tautulli_conf="$CONFIG_PATH/tautulli/config.ini"
+  [ -f "$tautulli_conf" ] || { echo "the box holds no ${tautulli_conf}"; fail=1; }
+  if [ -f "$tautulli_conf" ]; then
+    # Tautulli's own writer would leave an empty value quoted (ConfigObj writes
+    # `""`), so both spellings of "no URL root" pass.
+    grep -qE '^http_root = *("")?$' "$tautulli_conf" ||
+      { echo "the box's Tautulli config.ini does not leave the URL root empty: $(sed -n '/^http_root/p' "$tautulli_conf")"; fail=1; }
+    for want in "pms_ssl = 0" "pms_url = http://plex:32400"; do
+      grep -qx "$want" "$tautulli_conf" ||
+        { echo "the box's Tautulli config.ini has no \"${want}\""; fail=1; }
+    done
+    # The app's spelling, kept: the rewriter edits values, never key names.
+    if sed -n 's/^\([^ ]*\) = .*/\1/p' "$tautulli_conf" | grep -q '[A-Z]'; then
+      echo "the box's Tautulli config.ini gained a key with a capital in it, and the app writes and reads lower-case ones only:"
+      sed -n 's/^\([^ ]*\) = .*/\1/p' "$tautulli_conf" | grep '[A-Z]' | head -3 | sed 's/^/    /'
+      fail=1
+    fi
+  fi
+  # The key it had is the key the release holds and the app answers, at the root
+  # the chart serves it at: the same thing the wiring Job's /api/v2 asks.
+  tautulli_key=$(cat "$WORK/source/tautulli.key")
+  secret=$($K -n "$NS" get secret s5n-keys -o jsonpath='{.data.tautulli-apikey}' 2>/dev/null | base64 -d || true)
+  [ "$secret" = "$tautulli_key" ] ||
+    { echo "the release Secret's tautulli-apikey is not the key the source had"; fail=1; }
+  if migrate_forward "$NS" svc/tautulli "$MIGRATE_TAUTULLI_PORT"; then
+    answer=$(curl -sS --max-time 15 \
+      "http://127.0.0.1:${MIGRATE_PF_PORT}/api/v2?apikey=${tautulli_key}&cmd=status" 2>/dev/null || true)
+    migrate_forward_stop
+    MIGRATE_TAUTULLI_ANSWER="$answer" python3 - <<'PY' || { echo "the migrated Tautulli did not answer its own key at the root of the release"; fail=1; }
+import json, os, sys
+raw = os.environ["MIGRATE_TAUTULLI_ANSWER"]
+try:
+    body = json.loads(raw)["response"]
+except Exception:
+    sys.exit(f"the app answered {raw[:200]!r}, which is not the API's JSON")
+if body.get("result") != "success":
+    sys.exit(f"the app answered result {body.get('result')!r}")
+print("  tautulli: /api/v2 answers the source's key at the root of the release")
+PY
+  else
+    fail=1
+  fi
+  # And the receipt the layout's own Job published: ready where the app answers
+  # now, and the Plex link pending for the one reason a box with no claimed
+  # server has -- no plex-token in the release, so there is nothing to link with.
+  tautulli_ready=$(status_field "[s['result'] for s in d['steps'] if s['name']=='tautulli/ready'][0]" 2>/dev/null || true)
+  tautulli_plex=$(status_field "[s['result'] for s in d['steps'] if s['name']=='tautulli/plex'][0]" 2>/dev/null || true)
+  tautulli_detail=$(status_field "[s['detail'] for s in d['steps'] if s['name']=='tautulli/plex'][0]" 2>/dev/null || true)
+  echo "  receipt: tautulli/ready ${tautulli_ready:-missing}, tautulli/plex ${tautulli_plex:-missing} (${tautulli_detail:-no detail})"
+  [ "$tautulli_ready" = ok ] ||
+    { echo "the receipt's tautulli/ready is ${tautulli_ready:-missing}: the wiring Job did not reach the app where it serves"; fail=1; }
+  [ "$tautulli_plex" = pending ] ||
+    { echo "the receipt's tautulli/plex is ${tautulli_plex:-missing}, want pending: this fixture's Plex is unclaimed"; fail=1; }
+  case "$tautulli_detail" in
+    "no Plex token"*) ;;
+    *) echo "the receipt's tautulli/plex says ${tautulli_detail:-nothing}, want the line about the missing token"; fail=1 ;;
+  esac
 
   # ---- the downloader the source's v7 pbh held -----------------------------
   # The source keyed its one downloader by a name, and the app's own migration
@@ -7255,7 +7557,7 @@ PY
     [ "${links:-0}" -eq 2 ] ||
       { echo "${DATA_PATH}/downloads/${category}: link count is ${links:-none}, want 2 -- the download and the import it was hardlinked to are not one file any more"; fail=1; }
   done
-  for instance in qbittorrent sonarr "$MIGRATE_RADARR_INSTANCE" autobrr qui pbh; do
+  for instance in qbittorrent sonarr "$MIGRATE_RADARR_INSTANCE" autobrr qui pbh tautulli; do
     [ -f "$CONFIG_PATH/${instance}/.s5n-e2e-source" ] ||
       { echo "${CONFIG_PATH}/${instance}/ holds no marker: migrate did not copy the whole config directory"; fail=1; }
   done
