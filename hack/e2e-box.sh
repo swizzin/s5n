@@ -272,6 +272,14 @@ cleanup() {
   if [ "$KEEP" = --keep ]; then
     printf '\n==> kept work dir: %s\n' "$WORK"
   else
+    # The migrate scenarios run box as root and hand the config tree to the
+    # seedbox's user, neither of them this script's user, so part of the work
+    # directory is not this user's to delete. The registry image is already
+    # here and has a shell's rm; root in it removes what this user cannot.
+    if [ -n "${REGISTRY_IMAGE:-}" ] && [ -d "$WORK" ]; then
+      docker run --rm -u 0 -v "$(dirname "$WORK"):/work-parent" --entrypoint /bin/rm \
+        "$REGISTRY_IMAGE" -rf "/work-parent/$(basename "$WORK")" >/dev/null 2>&1 || true
+    fi
     rm -rf "$WORK"
   fi
   printf 'E2E EXIT: %s\n' "$code"
