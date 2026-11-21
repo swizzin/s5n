@@ -1455,10 +1455,13 @@ print(q.get("error", [""])[0], "-", q.get("error_description", [""])[0])' || tru
 # URL root: a route that stripped the prefix sent a signed-in browser to the
 # host's /home, and its logout to the login's own /auth.
 #
-# The header is PeerBanHelper's shape: its UI sends "Authorization: Bearer
-# <token>" on every call, and Authelia's ext-authz used to try a header strategy
-# first and fail the request outright instead of falling through to the cookie
-# (handler_authz.go:303-322 at 4.39.28), so a signed-in person was answered 401.
+# The header is PeerBanHelper's exact shape: its bundle sets
+# "Authorization: Bearer ${authToken}" on every /api call (webui/src/service/
+# utils.ts:20), and with no token in the page's storage that is "Bearer " -- an
+# empty bearer value. Authelia's ext-authz used to try a header strategy first
+# and fail the request outright instead of falling through to the cookie
+# (authorization.go:143-165 rejects an empty bearer, handler_authz.go:303-322
+# returns on the error at 4.39.28), so a signed-in person was answered 401.
 assert_front_door() {
   local addr=$1 ca=$2
   local ca_args=(--cacert "$ca")
@@ -1514,12 +1517,13 @@ assert_front_door() {
     *) echo "/tautulli/ did not render under its prefix: ${final:-nothing}"; fail=1 ;;
   esac
 
-  # And the same request carrying a token of its own -- an app's API token, in
-  # the header a browser sends it for that app -- is the app's redirect again,
-  # not a 401 against a valid session. The cookie is what the edge checks.
+  # And the same request carrying a header credential of its own -- an app's
+  # bundle sending the token it holds, empty because nobody gave it one -- is the
+  # app's redirect again, not a 401 against a valid session. The cookie is what
+  # the edge checks, and it is what a browser has.
   : >"$hdrs"
   code=$(curl -sS -o /dev/null -D "$hdrs" -w '%{http_code}' -b "$jar" \
-    -H 'Authorization: Bearer s5n-not-this-boxs-session' \
+    -H 'Authorization: Bearer ' \
     --resolve "${DOMAIN}:443:${addr}" "${ca_args[@]}" "https://${DOMAIN}/tautulli/" \
     2>"$WORK/front-door.err" || true)
   location=$(sed -n 's/^[Ll]ocation: *//p' "$hdrs" | tr -d '\r' | head -1)

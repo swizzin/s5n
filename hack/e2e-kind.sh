@@ -1274,6 +1274,36 @@ for app in qui autobrr maintainerr; do
   esac
 done
 
+# Tautulli is the app whose prefix is its own setting rather than the route's:
+# the init container seals http_root to /tautulli on every start, because the
+# app builds absolute redirects and asset URLs from it. So its index is a
+# redirect that has to stay inside the prefix (its logout is the one that used
+# to leave it, for the login's own /auth), and the page it lands on has to
+# reference its assets under the same prefix. Nothing here has a login: this
+# install is the chart alone, and the app's own form is sealed off.
+: >"$WORK/tautulli-headers"
+code=$(gw_get -s -D "$WORK/tautulli-headers" -o /dev/null -w '%{http_code}' "https://${DOMAIN}/tautulli/" || true)
+loc=$(grep -i '^location:' "$WORK/tautulli-headers" | tr -d '\r' | sed 's/^[Ll]ocation: *//' || true)
+echo "GET /tautulli/ via gateway -> ${code} ${loc}"
+[ "$code" = 302 ] || { echo "/tautulli/ answered ${code}, want the app's own redirect"; fail=1; }
+case "$loc" in
+  /tautulli/* | "https://${DOMAIN}/tautulli/"*) : ;;
+  *) echo "/tautulli/ redirected to ${loc}, which is outside its prefix: the app's URL root does not know it"; fail=1 ;;
+esac
+code=$(gw_get -s -o "$WORK/tautulli.html" -w '%{http_code}' "https://${DOMAIN}/tautulli/home" || true)
+echo "GET /tautulli/home via gateway -> ${code}"
+[ "$code" = 200 ] || { echo "/tautulli/home did not serve the app's page: ${code}"; fail=1; }
+grep -qi '<!doctype html' "$WORK/tautulli.html" || { echo "/tautulli/home answered ${code} without an HTML document"; fail=1; }
+tasset=$(grep -oE '(src|href)="[^"]+\.(js|css)([?#][^"]*)?"' "$WORK/tautulli.html" | head -1 |
+  sed 's/^[a-z]*="//; s/"$//' || true)
+echo "  asset the page references: ${tasset}"
+case "$tasset" in
+  /tautulli/*) code=$(gw_get -s -o /dev/null -w '%{http_code}' "https://${DOMAIN}${tasset}" || true)
+               echo "GET ${tasset} via gateway -> ${code}"; [ "$code" = 200 ] || fail=1 ;;
+  "") echo "/tautulli/home referenced no script or stylesheet"; fail=1 ;;
+  *) echo "the asset ${tasset} is outside /tautulli/: the URL root did not reach the page"; fail=1 ;;
+esac
+
 # Maintainerr streams live task progress as Server-Sent Events. Envoy's route
 # timeout defaults to 15s and would cut that stream, leaving the log and task
 # views silently dead, so the chart gives that one path no request timeout.
