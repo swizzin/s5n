@@ -1441,6 +1441,98 @@ print(q.get("error", [""])[0], "-", q.get("error_description", [""])[0])' || tru
   esac
 }
 
+# ---- the front door a browser meets -----------------------------------------
+# What an API call never meets, because a browser is not an API client: an app
+# whose redirects leave the prefix it is served under, an app whose own login
+# stands in front of the box's, and a request that carries a header credential
+# of its own while its session cookie is valid.
+#
+# assert_front_door <address> <ca-file|->
+#
+# Tautulli is the app under all three. It is served under /tautulli, its own
+# password form is sealed off (internal/ttlconf: a non-empty http_password is
+# what makes it ask), and every redirect it builds is absolute, from its own
+# URL root: a route that stripped the prefix sent a signed-in browser to the
+# host's /home, and its logout to the login's own /auth.
+#
+# The header is PeerBanHelper's shape: its UI sends "Authorization: Bearer
+# <token>" on every call, and Authelia's ext-authz used to try a header strategy
+# first and fail the request outright instead of falling through to the cookie
+# (handler_authz.go:303-322 at 4.39.28), so a signed-in person was answered 401.
+assert_front_door() {
+  local addr=$1 ca=$2
+  local ca_args=(--cacert "$ca")
+  [ "$ca" = - ] && ca_args=(-k)
+  local jar="$WORK/front-door-jar.txt"
+  local hdrs="$WORK/front-door-headers.txt"
+  local code location final
+
+  # A person signs in at the portal, which is how every page behind the login
+  # is reached; the app path is where they were going.
+  rm -f "$jar"
+  portal_login "$jar" "$LOGIN" "$AUTHELIA_PASSWORD" "https://${DOMAIN}/tautulli/" "$addr" "$ca"
+  echo "  front door: POST /auth/api/firstfactor: ${PORTAL_CODE}"
+  [ "$PORTAL_CODE" = 200 ] ||
+    { echo "the portal refused the box's own account (${PORTAL_CODE})"; fail=1; }
+
+  # Without a cookie the answer is the portal's redirect: the app is behind the
+  # login, and what stands in front of it is root's, not the app's own form.
+  : >"$hdrs"
+  code=$(curl -sS -o /dev/null -D "$hdrs" -w '%{http_code}' \
+    --resolve "${DOMAIN}:443:${addr}" "${ca_args[@]}" "https://${DOMAIN}/tautulli/" \
+    2>"$WORK/front-door.err" || true)
+  location=$(sed -n 's/^[Ll]ocation: *//p' "$hdrs" | tr -d '\r' | head -1)
+  echo "  front door: /tautulli/ with no cookie: ${code} -> ${location%%\?*}"
+  [ "$code" = 302 ] ||
+    { echo "/tautulli/ answered ${code} with no session, want the portal's redirect"; fail=1; }
+  case "$location" in
+    "https://${DOMAIN}/auth/"*) : ;;
+    *) echo "/tautulli/ sent the browser to ${location}, not the portal: the app is not behind the login"; fail=1 ;;
+  esac
+
+  # Signed in, the app's own redirect stays inside the prefix it is served
+  # under, and following it renders the app.
+  : >"$hdrs"
+  code=$(curl -sS -o /dev/null -D "$hdrs" -w '%{http_code}' -b "$jar" -c "$jar" \
+    --resolve "${DOMAIN}:443:${addr}" "${ca_args[@]}" "https://${DOMAIN}/tautulli/" \
+    2>"$WORK/front-door.err" || true)
+  location=$(sed -n 's/^[Ll]ocation: *//p' "$hdrs" | tr -d '\r' | head -1)
+  echo "  front door: /tautulli/ signed in: ${code} -> ${location}"
+  [ "$code" = 302 ] ||
+    { echo "/tautulli/ answered ${code} to a signed-in browser, want the app's own redirect"; fail=1; }
+  case "$location" in
+    "https://${DOMAIN}/tautulli/"* | "/tautulli/"*) : ;;
+    *) echo "/tautulli/ sent the signed-in browser to ${location}: the app does not know the prefix it is served under"; fail=1 ;;
+  esac
+  final=$(curl -sS -o "$WORK/front-door-page.html" -w '%{http_code} %{url_effective}' \
+    -b "$jar" -c "$jar" -L --max-redirs 3 \
+    --resolve "${DOMAIN}:443:${addr}" "${ca_args[@]}" "https://${DOMAIN}/tautulli/" \
+    2>"$WORK/front-door.err" || true)
+  echo "  front door: following it: ${final%% *} at ${final#* }"
+  case "$final" in
+    "200 https://${DOMAIN}/tautulli/"*) : ;;
+    *) echo "/tautulli/ did not render under its prefix: ${final:-nothing}"; fail=1 ;;
+  esac
+
+  # And the same request carrying a token of its own -- an app's API token, in
+  # the header a browser sends it for that app -- is the app's redirect again,
+  # not a 401 against a valid session. The cookie is what the edge checks.
+  : >"$hdrs"
+  code=$(curl -sS -o /dev/null -D "$hdrs" -w '%{http_code}' -b "$jar" \
+    -H 'Authorization: Bearer s5n-not-this-boxs-session' \
+    --resolve "${DOMAIN}:443:${addr}" "${ca_args[@]}" "https://${DOMAIN}/tautulli/" \
+    2>"$WORK/front-door.err" || true)
+  location=$(sed -n 's/^[Ll]ocation: *//p' "$hdrs" | tr -d '\r' | head -1)
+  echo "  front door: /tautulli/ signed in, with a header credential of its own: ${code} -> ${location}"
+  case "$code" in
+    401) echo "/tautulli/ refused a signed-in request because it carried an Authorization header: the edge's authz checks the header instead of the session"; fail=1 ;;
+  esac
+  case "$location" in
+    "https://${DOMAIN}/tautulli/"* | "/tautulli/"*) : ;;
+    *) [ "$code" = 401 ] || { echo "/tautulli/ answered ${code} and sent the browser to ${location}, want the app's redirect"; fail=1; } ;;
+  esac
+}
+
 # ---- scenario: fresh --------------------------------------------------------
 fresh() {
   # The timer's two units are written into a directory this run names: the e2e
@@ -2323,6 +2415,11 @@ for r in items:
   oidc_refuses_another_login qui /qui "$gw_addr" "$WORK/pebble-root.pem"
   oidc_login autobrr /autobrr /autobrr/api/auth/validate "$gw_addr" "$WORK/pebble-root.pem"
   oidc_refuses_another_login autobrr /autobrr "$gw_addr" "$WORK/pebble-root.pem"
+  # ---- the front door a browser meets ---------------------------------------
+  # An API client never sees these: Tautulli's own login, the prefix its
+  # redirects are built from, and a request that carries a header credential.
+  log "the front door: signed in, an app under its prefix, and a header the edge ignores"
+  assert_front_door "$gw_addr" "$WORK/pebble-root.pem"
   # ---- storage: box created the claims, and they are bound ----
   for kind in data config; do
     pv=seedbox-s5n-${kind}
@@ -3867,6 +3964,8 @@ PY
   oidc_refuses_another_login qui /qui "$lb_addr" "$WORK/anchor-ca.pem"
   oidc_login autobrr /autobrr /autobrr/api/auth/validate "$lb_addr" "$WORK/anchor-ca.pem"
   oidc_refuses_another_login autobrr /autobrr "$lb_addr" "$WORK/anchor-ca.pem"
+  log "the front door on a self-signed host: the same three answers"
+  assert_front_door "$lb_addr" "$WORK/anchor-ca.pem"
 
   # ---- a second bootstrap: still nothing installed -------------------------
   # box's MetalLB is still not a release it can see, so the second run asks the
@@ -5168,9 +5267,10 @@ MIGRATE_TAUTULLI_IMAGE=""
 # Tautulli's URL root in the source, which is what a seedbox behind a
 # path-routing proxy has: the file holds it without a leading slash (the app
 # normalises it when it mounts its routes, webstart.py:216). The chart serves
-# Tautulli at the root and strips the prefix at its route (values.yaml,
-# rewritePath), so the migration has to write the empty one: a config left on
-# this root answers /tautulli/api/v2, and the wiring Job's /api/v2 is a 404.
+# Tautulli under the same prefix, with its own http_root sealed to it on every
+# start (internal/ttlconf, values.yaml's rewritePath), so the migration has to
+# write the chart's spelling of it -- a leading slash, this instance's name --
+# and the app answers /tautulli/api/v2 on both sides.
 MIGRATE_TAUTULLI_ROOT=tautulli
 # Tautulli's own WebUI port, in the source and in the chart's own Tautulli.
 MIGRATE_TAUTULLI_PORT=8181
@@ -7503,13 +7603,17 @@ migrate_box() {
       { echo "the plan did not say ${instance}'s account ${MIGRATE_SOURCE_ACCOUNT} becomes box's own"; fail=1; }
   done
   # Tautulli's config.ini is rewritten where the app wrote it, and the plan says
-  # so: the URL root the chart does not use (its route strips the prefix), and
-  # the Plex it was entered by hand as. A migration that read none of that file
-  # -- the upper-case lookup the reported failure came from -- listed "copy 6
-  # files" and nothing else.
+  # so: the URL root (the source's spelling, without a slash, becomes the
+  # chart's), the login the app had of its own (switched off, because the box's
+  # is the one a person uses), and the Plex it was entered by hand as. A
+  # migration that read none of that file -- the upper-case lookup the reported
+  # failure came from -- listed "copy 6 files" and nothing else.
   for want in "tautulli: config.ini General/http_root url base 1" \
+              "tautulli: config.ini General/http_hash_password own login 1" \
+              "tautulli: config.ini General/http_hashed_password own login 1" \
               "tautulli: config.ini PMS/pms_ssl tls 1" \
               "tautulli: config.ini PMS/pms_url url 1" \
+              "tautulli: note: its own login is switched off; you sign in through the box" \
               "tautulli: keep its API key (tautulli-apikey)"; do
     grep -qF "$want" "$WORK/apply-migrate.txt" ||
       { echo "the plan does not say \"${want}\":"; grep -F "tautulli:" "$WORK/apply-migrate.txt" || true; fail=1; }
@@ -7557,18 +7661,25 @@ migrate_box() {
   # ---- assertion 1d: Tautulli, on the config its own app wrote --------------
   # The one app whose settings Tautulli's code folds to a spelling of its own:
   # every key of config.ini is lower case, so a rewriter looking for HTTP_ROOT
-  # matches nothing on a real install and the URL root stays. What that leaves is
-  # the reported failure -- the app answering /tautulli/api/v2 while the wiring
-  # Job asks /api/v2 -- so what is asserted here is the app's own answer, plus
-  # the file it answers from and the two receipt steps that read it.
-  log "Tautulli: the config.ini the box holds, the API at the root, and the receipt's two steps"
+  # matches nothing on a real install. What is asserted here is the app's own
+  # answer under the chart's prefix, the file it answers from (URL root, its own
+  # login off, the Plex link), and the two receipt steps that read it.
+  log "Tautulli: the config.ini the box holds, the API under its prefix, and the receipt's two steps"
   tautulli_conf=$(config_read "$CLUSTER" "$CONFIG_PATH/tautulli/config.ini") || true
   [ -n "$tautulli_conf" ] || { echo "the box holds no ${CONFIG_PATH}/tautulli/config.ini"; fail=1; }
   if [ -n "$tautulli_conf" ]; then
-    # Tautulli's own writer would leave an empty value quoted (ConfigObj writes
-    # `""`), so both spellings of "no URL root" pass.
-    grep -qE '^http_root = *("")?$' <<<"$tautulli_conf" ||
-      { echo "the box's Tautulli config.ini does not leave the URL root empty: $(sed -n '/^http_root/p' <<<"$tautulli_conf")"; fail=1; }
+    # The chart's prefix, written with the slash the chart passes to the init
+    # container, whatever the source's file said.
+    grep -qE '^http_root = *"?/?tautulli"?$' <<<"$tautulli_conf" ||
+      { echo "the box's Tautulli config.ini does not carry the chart's URL root: $(sed -n '/^http_root/p' <<<"$tautulli_conf")"; fail=1; }
+    # Its own login is off: no name, no password, and the two flags that say a
+    # value is a hash are back to their defaults. A source that had one is only
+    # safe because the app no longer asks for it.
+    for want in "^http_username = *(\"\"|'')?$" "^http_password = *(\"\"|'')?$" \
+                "^http_hash_password = *0$" "^http_hashed_password = *0$" "^http_basic_auth = *0$"; do
+      grep -qE "$want" <<<"$tautulli_conf" ||
+        { echo "the box's Tautulli config.ini has not switched its own login off: $(grep -E '^http_(username|password|hash|hashed|basic)' <<<"$tautulli_conf" | tr '\n' ' ')"; fail=1; }
+    done
     for want in "pms_ssl = 0" "pms_url = http://plex:32400"; do
       grep -qx "$want" <<<"$tautulli_conf" ||
         { echo "the box's Tautulli config.ini has no \"${want}\""; fail=1; }
@@ -7580,17 +7691,18 @@ migrate_box() {
       fail=1
     fi
   fi
-  # The key it had is the key the release holds and the app answers, at the root
-  # the chart serves it at: the same thing the wiring Job's /api/v2 asks.
+  # The key it had is the key the release holds and the app answers, under the
+  # prefix the chart serves it at: the same thing the wiring Job's
+  # /tautulli/api/v2 asks.
   tautulli_key=$(cat "$WORK/source/tautulli.key")
   secret=$($K -n "$NS" get secret s5n-keys -o jsonpath='{.data.tautulli-apikey}' 2>/dev/null | base64 -d || true)
   [ "$secret" = "$tautulli_key" ] ||
     { echo "the release Secret's tautulli-apikey is not the key the source had"; fail=1; }
   if migrate_forward "$NS" svc/tautulli "$MIGRATE_TAUTULLI_PORT"; then
     answer=$(curl -sS --max-time 15 \
-      "http://127.0.0.1:${MIGRATE_PF_PORT}/api/v2?apikey=${tautulli_key}&cmd=status" 2>/dev/null || true)
+      "http://127.0.0.1:${MIGRATE_PF_PORT}/tautulli/api/v2?apikey=${tautulli_key}&cmd=status" 2>/dev/null || true)
     migrate_forward_stop
-    MIGRATE_TAUTULLI_ANSWER="$answer" python3 - <<'PY' || { echo "the migrated Tautulli did not answer its own key at the root of the release"; fail=1; }
+    MIGRATE_TAUTULLI_ANSWER="$answer" python3 - <<'PY' || { echo "the migrated Tautulli did not answer its own key under the prefix of the release"; fail=1; }
 import json, os, sys
 raw = os.environ["MIGRATE_TAUTULLI_ANSWER"]
 try:
@@ -7599,7 +7711,7 @@ except Exception:
     sys.exit(f"the app answered {raw[:200]!r}, which is not the API's JSON")
 if body.get("result") != "success":
     sys.exit(f"the app answered result {body.get('result')!r}")
-print("  tautulli: /api/v2 answers the source's key at the root of the release")
+print("  tautulli: /tautulli/api/v2 answers the source's key on the box")
 PY
   else
     fail=1
@@ -7619,6 +7731,20 @@ PY
     "no Plex token"*) ;;
     *) echo "the receipt's tautulli/plex says ${tautulli_detail:-nothing}, want the line about the missing token"; fail=1 ;;
   esac
+
+  # ---- assertion 1e: the front door a browser meets --------------------------
+  # The migration's own box, browsed: Tautulli's UI under its prefix, behind the
+  # box's login, and a request that carries a header credential of its own
+  # answered from the session (assert_front_door). Nothing above reaches it: the
+  # tunnelled API call is the app's, not the edge's.
+  log "the front door of the migrated box: signed in, /tautulli under its prefix"
+  gw_addr=$($K -n s5n-gateway get gateway s5n -o jsonpath='{.status.addresses[0].value}' 2>/dev/null || true)
+  if [ -z "$gw_addr" ]; then
+    echo "the Gateway reports no address, so the front door was never browsed"
+    fail=1
+  else
+    assert_front_door "$gw_addr" -
+  fi
 
   # ---- the downloader the source's v7 pbh held -----------------------------
   # The source keyed its one downloader by a name, and the app's own migration

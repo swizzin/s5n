@@ -1548,13 +1548,14 @@ snapshot() { # snapshot <dir>
   rm -f "$dir/qbittorrent-jar.txt"
   port_forward_stop
   # Tautulli's settings, using the seeded api_key: also the proof that the
-  # tautulli-config init container's seed is one Tautulli actually accepts. The
-  # PMS section is legitimately empty here: this e2e supplies no Plex token, so
-  # the link stays pending rather than being pointed at Plex tokenless.
+  # tautulli-config init container's seed is one Tautulli actually accepts, at
+  # the prefix the same container seals into its http_root. The PMS section is
+  # legitimately empty here: this e2e supplies no Plex token, so the link stays
+  # pending rather than being pointed at Plex tokenless.
   local tpw
   tpw=$($K -n "$NS" get secret s5n-keys -o jsonpath='{.data.tautulli-apikey}' | base64 -d)
   $K -n "$NS" exec tautulli-0 -- curl -s \
-    "http://localhost:8181/api/v2?apikey=${tpw}&cmd=get_settings" >"$dir/tautulli-settings.json"
+    "http://localhost:8181/tautulli/api/v2?apikey=${tpw}&cmd=get_settings" >"$dir/tautulli-settings.json"
   # The two apps with their own user table: what the Job registered is an
   # instance and a set of download clients, so a duplicate row or a rewritten
   # client shows up in the diff like any Arr's download client would.
