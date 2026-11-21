@@ -129,6 +129,11 @@ type Result struct {
 	// know and box will not change: today, a node whose InternalIP sits on a
 	// tunnel this host can see, which gives every pod that tunnel's MTU.
 	Warnings []string
+	// Firewall is what box found about the host's packet filter: whether
+	// firewalld is running, the cluster's pod and service networks the
+	// platform plan will trust, or the warning for a host whose firewall is
+	// not box's to change.
+	Firewall FirewallState
 	Reason   string
 }
 

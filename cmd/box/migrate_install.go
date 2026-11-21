@@ -111,7 +111,7 @@ func migrateInstall(ctx context.Context, o *migrateApplyFlags, inst *installFlag
 	if err != nil {
 		return err
 	}
-	if err := applyPlatform(ctx, res.Kubeconfig, res.Platform, res.Gateway.Class, "", chart.Pins, *o.yes, out); err != nil {
+	if err := applyPlatform(ctx, res.Kubeconfig, res.Platform, res.Gateway.Class, "", chart.Pins, res.Firewall, *o.yes, out); err != nil {
 		return err
 	}
 	if _, err := hostconf.Ensure(hostconf.Path(*inst.record)); err != nil {

@@ -1441,3 +1441,67 @@ func TestApplyStopsWhenTheRootNeverIssues(t *testing.T) {
 		}
 	}
 }
+
+// fakeFirewall records the one host change the plan can make.
+type fakeFirewall struct {
+	cidrs []string
+	err   error
+	tr    *trace
+}
+
+func (f *fakeFirewall) Trust(_ context.Context, cidrs []string) error {
+	if f.err != nil {
+		return f.err
+	}
+	f.cidrs = append([]string(nil), cidrs...)
+	f.tr.add("trust:" + strings.Join(cidrs, ","))
+	return nil
+}
+
+// TestApplyTrustsTheHostsFirewallBeforeAnythingIsInstalled: on a host where box
+// installed k0s and firewalld is running, the cluster's networks enter
+// firewalld's trusted zone first, because every app the platform installs is
+// reached through that host.
+func TestApplyTrustsTheHostsFirewallBeforeAnythingIsInstalled(t *testing.T) {
+	f := newFixture()
+	fw := &fakeFirewall{tr: f.tr}
+	f.d.Firewall = bootstrap.FirewallState{Active: true, CIDRs: []string{"10.244.0.0/16", "10.96.0.0/12"}}
+	f.d.HostFirewall = fw
+	f.probe.answers = []GatewayAnswer{{Address: "192.0.2.10"}}
+
+	res, err := f.d.Apply(context.Background(), allInstall)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := strings.Join(fw.cidrs, ","), "10.244.0.0/16,10.96.0.0/12"; got != want {
+		t.Fatalf("box trusted %q, want %q", got, want)
+	}
+	if f.tr.steps[0] != "confirm" || len(f.tr.steps) < 2 || f.tr.steps[1] != "trust:10.244.0.0/16,10.96.0.0/12" {
+		t.Fatalf("the firewall is not the first write after the confirm: %v", f.tr.steps)
+	}
+	if !strings.Contains(f.log.String(), "+ firewalld's trusted zone: 10.244.0.0/16 and 10.96.0.0/12") {
+		t.Fatalf("the plan does not carry the host line:\n%s", f.log.String())
+	}
+	if !strings.Contains(f.log.String(), "firewalld trusts 10.244.0.0/16 and 10.96.0.0/12") {
+		t.Fatalf("the run does not say what the host now trusts:\n%s", f.log.String())
+	}
+	if len(res.Installed) == 0 || res.Installed[0] != "firewalld's trusted zone" {
+		t.Fatalf("the result does not record the host change: %v", res.Installed)
+	}
+}
+
+// A refused host change stops before a release is installed: a box whose pods
+// cannot reach each other is not one to carry on installing.
+func TestApplyStopsWhenTheFirewallRefuses(t *testing.T) {
+	f := newFixture()
+	f.d.Firewall = bootstrap.FirewallState{Active: true, CIDRs: []string{"10.244.0.0/16"}}
+	f.d.HostFirewall = &fakeFirewall{err: errors.New("firewall-cmd: Authorization failed")}
+
+	_, err := f.d.Apply(context.Background(), allInstall)
+	if err == nil || !strings.Contains(err.Error(), "Authorization failed") {
+		t.Fatalf("want the firewall's refusal, got %v", err)
+	}
+	if len(f.rel.installed) != 0 || len(f.cl.writes) != 0 {
+		t.Fatalf("a refused firewall change still wrote: %d releases, %d applies", len(f.rel.installed), len(f.cl.writes))
+	}
+}

@@ -24,6 +24,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/swizzin/s5n/internal/bootstrap"
@@ -106,6 +107,10 @@ const (
 	StepGatewayAddress StepKind = "gateway-address"
 	// StepReachable is the Gateway's address answering HTTP from this host.
 	StepReachable StepKind = "gateway-reachable"
+	// StepFirewall is the host's packet filter, when box installed k0s on this
+	// host and firewalld is running: the cluster's pod and service networks go
+	// into firewalld's trusted zone before anything is installed behind it.
+	StepFirewall StepKind = "host-firewall"
 )
 
 // WaitKind is what readiness means for one object.
@@ -190,11 +195,21 @@ type Step struct {
 	// install (it carries no ownership label). It is never upgraded; a
 	// conditional step that would have to run stops instead.
 	Foreign bool
+	// CIDRs are the networks a StepFirewall trusts: the cluster's pod and
+	// service networks, read by bootstrap from the k0s config it installed
+	// with.
+	CIDRs []string
 }
 
 // Plan is what bootstrap will apply, in order.
 type Plan struct {
 	Steps []Step
+	// Warnings are what box saw and will not change, printed with the plan
+	// before the confirm so the operator reads them together with what box
+	// does do. Today: a host running firewalld, on a cluster box did not
+	// install, with the two commands that would open its pod and service
+	// networks.
+	Warnings []string
 	// NotHandled names decided installs this version of box does not do, with
 	// the reason. It is printed, never silently dropped.
 	NotHandled []string
@@ -237,6 +252,14 @@ type Releases interface {
 	Install(ctx context.Context, spec Release) error
 }
 
+// Firewall is the host's packet filter, as the one step that changes it needs:
+// the cluster's networks go into firewalld's trusted zone, permanently and in
+// the running configuration (bootstrap.Firewalld). Reading the host's filter is
+// bootstrap's; this package only carries out the step bootstrap planned.
+type Firewall interface {
+	Trust(ctx context.Context, cidrs []string) error
+}
+
 // Confirmer asks the one question before the first write.
 type Confirmer interface {
 	Ask(question string) (bool, error)
@@ -266,6 +289,13 @@ type Decision struct {
 	// cannot be built without them, and they come from the release rather
 	// than from this package, so a platform patch is a chart release.
 	Pins release.Versions
+	// Firewall is what bootstrap found about the host's packet filter
+	// (bootstrap.FirewallState): whether firewalld is running, the networks
+	// box will trust, or the warning for a host box does not change.
+	Firewall bootstrap.FirewallState
+	// HostFirewall is how a StepFirewall is carried out. It is only reached on
+	// a host where box installed k0s; a plan with no such step never uses it.
+	HostFirewall Firewall
 	// ACMEServer points the s5n-letsencrypt issuer at another ACME directory.
 	// Empty in every real run: the manifest's Let's Encrypt production URL is
 	// the only one box ships. It exists for the e2e's Pebble server, which
@@ -314,7 +344,7 @@ func (d *Decision) Apply(ctx context.Context, components []bootstrap.ComponentRe
 	if err != nil {
 		return res, err
 	}
-	res.Plan = plan
+	plan = withFirewall(plan, d.Firewall)
 	res.NotHandled = plan.NotHandled
 
 	if err := d.resolve(ctx, &plan); err != nil {
@@ -409,6 +439,19 @@ func (d *Decision) Apply(ctx context.Context, components []bootstrap.ComponentRe
 				return res, err
 			}
 			res.Installed = append(res.Installed, s.What)
+		case StepFirewall:
+			if d.HostFirewall == nil {
+				return res, errors.New("the plan trusts the cluster's pod and service networks with firewalld, and this run has no way to change the host's firewall")
+			}
+			step := r.Start(say.Op{
+				Label: "trusting firewalld's trusted zone with " + strings.Join(s.CIDRs, " and "),
+			})
+			if err := d.HostFirewall.Trust(ctx, s.CIDRs); err != nil {
+				step.Failed(err)
+				return res, err
+			}
+			step.Done("firewalld trusts " + strings.Join(s.CIDRs, " and "))
+			res.Installed = append(res.Installed, "firewalld's trusted zone")
 		case StepGatewayAddress:
 			answer, err := d.gatewayAddress(ctx, s.Mode)
 			if err != nil {
@@ -1011,6 +1054,37 @@ func BuildPlan(pins release.Versions, components []bootstrap.ComponentResult, ga
 	})
 
 	return plan, nil
+}
+
+// withFirewall is the plan's line about the host's packet filter. It is the
+// plan's first step because everything box installs behind it is reached
+// through the host: on a single-node k0s box, kube-router routes pod-to-pod
+// traffic through the host, so a firewall that does not know the cluster's
+// networks refuses Envoy's dial to an app and every request behind the login
+// fails.
+//
+// Only a host where box installed k0s has networks box may trust: those come
+// from the k0s config box wrote (bootstrap.FirewallState.CIDRs). Everywhere
+// else box does not know them and does not change the host, so the plan
+// carries the warning with the two commands instead, printed before the
+// confirm.
+func withFirewall(plan Plan, fw bootstrap.FirewallState) Plan {
+	if !fw.Active {
+		return plan
+	}
+	if len(fw.CIDRs) > 0 {
+		line := "firewalld's trusted zone: " + strings.Join(fw.CIDRs, " and ")
+		plan.Steps = append([]Step{{
+			Kind:  StepFirewall,
+			What:  line,
+			Plan:  line,
+			CIDRs: append([]string(nil), fw.CIDRs...),
+		}}, plan.Steps...)
+	}
+	if fw.Warning != "" {
+		plan.Warnings = append(plan.Warnings, fw.Warning)
+	}
+	return plan
 }
 
 // gatewayStepName is how the plan names the one manifest step that is now on

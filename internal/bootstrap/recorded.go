@@ -47,6 +47,7 @@ func (d *Decision) finishRecorded(ctx context.Context, obs clusterProbes, rec *R
 		return res
 	}
 	res.Gateway = choice
+	res = d.withFirewall(ctx, res)
 	if rec.Source == SourceK0sManaged {
 		res.Reason = fmt.Sprintf("recorded k0s-managed cluster at %s (%s); k0s is started and upgraded by box update (a later phase), platform re-probed", rec.Kubeconfig, obs.dist)
 	} else {

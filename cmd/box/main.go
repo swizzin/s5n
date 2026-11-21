@@ -436,7 +436,7 @@ func runBootstrap(ctx context.Context, args []string) {
 		out.Error(err)
 		os.Exit(1)
 	}
-	if err := applyPlatform(ctx, res.Kubeconfig, res.Platform, res.Gateway.Class, acmeServer, chart.Pins, *yes, out); err != nil {
+	if err := applyPlatform(ctx, res.Kubeconfig, res.Platform, res.Gateway.Class, acmeServer, chart.Pins, res.Firewall, *yes, out); err != nil {
 		if errors.Is(err, platform.ErrCancelled) {
 			os.Exit(1)
 		}
@@ -472,7 +472,7 @@ func runBootstrap(ctx context.Context, args []string) {
 // applyPlatform applies the platform layer the decision says install. The
 // confirmation is box's existing one: --yes, or no terminal to ask on, is
 // unattended (docs/box.md, "bootstrap and init").
-func applyPlatform(ctx context.Context, kubeconfig string, components []bootstrap.ComponentResult, gatewayClass, acmeServer string, pins release.Versions, yes bool, out say.Reporter) error {
+func applyPlatform(ctx context.Context, kubeconfig string, components []bootstrap.ComponentResult, gatewayClass, acmeServer string, pins release.Versions, firewall bootstrap.FirewallState, yes bool, out say.Reporter) error {
 	out.Phase("platform")
 	confirm := confirmer(out, yes || !isTerminal(os.Stdin))
 	p := &platform.Decision{
@@ -487,6 +487,11 @@ func applyPlatform(ctx context.Context, kubeconfig string, components []bootstra
 		Probe:   func() (platform.GatewayProbe, error) { return platform.NewGatewayProbe(kubeconfig) },
 		Confirm: confirm,
 		Say:     out,
+		// The host's packet filter is the one thing in the plan that is not in
+		// the cluster: bootstrap found it, and only a host box installed k0s
+		// on is changed through it.
+		Firewall:     firewall,
+		HostFirewall: bootstrap.Firewalld{},
 	}
 	_, err := p.Apply(ctx, components)
 	return err

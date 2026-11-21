@@ -160,3 +160,72 @@ func TestPlanPrintsWarningsLast(t *testing.T) {
 		t.Fatalf("the warning is printed more than once:\n%s", text)
 	}
 }
+
+// The host's packet filter comes first: it is the host, not the cluster, and
+// every app behind the platform is reached through it. The two networks are the
+// ones bootstrap read out of the k0s config box wrote, and the plan prints
+// them because they are a change to the host rather than to the cluster.
+func TestPlanTrustsTheClusterNetworksFirst(t *testing.T) {
+	plan, err := BuildPlan(pins, allInstall, "eg", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan = withFirewall(plan, bootstrap.FirewallState{Active: true, CIDRs: []string{"10.244.0.0/16", "10.96.0.0/12"}})
+	if len(plan.Steps) == 0 || plan.Steps[0].Kind != StepFirewall {
+		t.Fatalf("the firewall is not the plan's first step: %+v", plan.Steps[0])
+	}
+	if got := plan.Steps[0].CIDRs; len(got) != 2 || got[0] != "10.244.0.0/16" || got[1] != "10.96.0.0/12" {
+		t.Fatalf("the step trusts %v", got)
+	}
+	text := plainPlan(t, plan)
+	line := "  + firewalld's trusted zone: 10.244.0.0/16 and 10.96.0.0/12\n"
+	if !strings.Contains(text, line) {
+		t.Fatalf("the plan does not say what it does to the host:\n%s", text)
+	}
+	// It is one of box's own lines rather than a component's, so it is printed
+	// with the admission policy and applied before either: the narrative order
+	// is the components', and the plan is not a running order.
+	if strings.Index(text, line) > strings.Index(text, "+ ValidatingAdmissionPolicies") {
+		t.Fatalf("the host's firewall is printed after the policy:\n%s", text)
+	}
+}
+
+// A host whose firewall box will not change gets the two commands as a
+// warning, printed with the plan and before the confirm: box does not know a
+// cluster it did not install's networks, and the operator is the one who can
+// run them.
+func TestPlanWarnsAboutAFirewallBoxDoesNotChange(t *testing.T) {
+	plan, err := BuildPlan(pins, allInstall, "eg", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan = withFirewall(plan, bootstrap.FirewallState{Active: true, Warning: "firewalld is running: firewall-cmd --permanent --zone=trusted --add-source=<podCIDR>"})
+	for _, s := range plan.Steps {
+		if s.Kind == StepFirewall {
+			t.Fatal("a plan with no networks to trust still writes the host's firewall")
+		}
+	}
+	text := plainPlan(t, plan)
+	if !strings.Contains(text, "  ! firewalld is running") {
+		t.Fatalf("the plan does not carry the warning:\n%s", text)
+	}
+	if !strings.HasSuffix(text, "<podCIDR>\n") {
+		t.Fatalf("the warning is not printed where a person acts on it:\n%s", text)
+	}
+}
+
+// A host with no firewalld plans nothing about it, and a plan built without a
+// firewall state is the plan box has always printed.
+func TestPlanSaysNothingAboutAFirewallThatIsNotRunning(t *testing.T) {
+	plan, err := BuildPlan(pins, allInstall, "eg", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	with := withFirewall(plan, bootstrap.FirewallState{})
+	if len(with.Steps) != len(plan.Steps) || len(with.Warnings) != 0 {
+		t.Fatalf("an inactive firewall changed the plan: %d steps, %d warnings", len(with.Steps), len(with.Warnings))
+	}
+	if strings.Contains(plainPlan(t, with), "firewalld") {
+		t.Fatalf("the plan mentions a firewall that is not running:\n%s", plainPlan(t, with))
+	}
+}

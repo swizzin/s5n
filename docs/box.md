@@ -440,12 +440,38 @@ node on the uplink, the automatic one is right for ethernet, PPPoE (which counts
 uplink, not a tunnel) and whatever a cloud gives.
 - **A default route through a tunnel stops the install,** naming the interface and the
   MTU every pod would inherit. There is no override.
-- **A `/etc/k0s/k0s.yaml` box didn't write is never overwritten.**
+- **A `/etc/k0s/k0s.yaml` box didn't write is never overwritten.** It is box's own
+  file, and it carries the two things box cannot leave to k0s: the API address, and the
+  cluster's pod and service networks (the host's firewall rule reads those back out of
+  it rather than holding a second copy).
 - **Once the API answers, the Node's address is checked against the pin;** a mismatch
   fails like any other step after the binary is in place, naming both addresses.
 - **On a cluster box didn't install,** a node address on a tunnel this host holds is one
   warning line. box doesn't change that cluster.
 - **Only a real host proves it:** kind never boots k0s, so the e2e can't.
+
+**Only a cluster box installed gets its host firewall opened (proposed).** A
+Fedora-family host runs firewalld, and its default zone ends the FORWARD chain with a
+reject. That is exactly enough for the traffic kube-proxy DNATs — pod to Service, and a
+Service's traffic from outside — so the apps, the wiring Job and the lock proof all run;
+what it refuses is the traffic kube-router routes pod to pod through the host, which is
+Envoy dialling an app's own pod address, refused at once, and every request behind the
+login answering 403. On a host where box installs k0s, box writes the cluster's pod and
+service networks into the k0s config it installs with (`spec.network`) and adds them to
+firewalld's trusted zone, permanently and in the running configuration, asking first so a
+source that is already there is left alone; the plan says so before the confirm and the
+run says so when it is done. It does not reload the host's firewall: a reload re-reads
+every zone from the permanent configuration and would drop runtime-only changes another
+tool made. On a cluster box did not install, box knows neither network and changes
+nothing: the plan carries a warning, printed before the confirm, with the two commands
+k0s's own documentation names (`firewall-cmd --permanent --zone=trusted
+--add-source=<podCIDR>` and the same for `<serviceCIDR>`), and the operator runs them.
+Nothing else is opened. The Gateway's address and the torrent Service are DNAT'd like any
+other Service, so they pass; a single-node k0s box needs no port opened for its API, its
+kubelet or its etcd, because box and the kubelet reach them over loopback, which
+firewalld's trusted zone already admits. Only a real host proves any of this — kind has
+no firewalld — so the unit tests pin the command sequence, and a VM rehearsal is the
+proof.
 
 **A record is checked, not trusted (decided).** A re-run reads
 `/etc/s5n/cluster.yaml` for what box decided — which cluster, who owns its
@@ -1241,6 +1267,18 @@ data. Everything it will change is written down before it changes anything.
   exactly the changes its check reported, in the staged copy. History (records of what
   happened, never read back to act on) is rewritten where a rule covers it and never
   stops apply.
+- **A migrated config belongs to the seedbox's user, whatever box ran as (proposed).**
+  apply stages each instance owned by `puid:pgid`, and every rewriter writes through an
+  atomic rename — a new file beside the app's, renamed over it — so the files it
+  replaced become the running user's, which on a real host is root's, often 0600. One
+  pass after every rewriter and before anything is moved into place hands every path of
+  every staged instance to `puid:pgid`, links chowned and never followed. It is a
+  whole-tree rule rather than a list of the files today's rewriters write, so a rewriter
+  that replaces or creates one cannot reintroduce it: an app that cannot read its own
+  config either crash-loops (the Arrs' `config.xml`, qBittorrent's conf and its resume
+  records, PeerBanHelper's, qui's and Tautulli's) or, like Seerr, starts anyway and
+  writes its defaults over what the migration carried. A rewritten file keeps the mode
+  its original had, which each rewriter reads before the write.
 - **Every app's stored paths are rewritten, with no exceptions (decided).** Each app
   gets the `/data` contract and migrate rewrites what it holds: Arr databases and
   configs, qBittorrent's fastresume files and settings, and Plex's database through the

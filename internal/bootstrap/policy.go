@@ -5,6 +5,7 @@ import (
 	"net/url"
 	"os"
 	"runtime"
+	"strings"
 
 	"github.com/swizzin/s5n/internal/release"
 )
@@ -38,6 +39,14 @@ const (
 	// the file box writes is the only place the API address is pinned. box
 	// refuses to overwrite one it did not write.
 	K0sConfigPath = "/etc/k0s/k0s.yaml"
+	// k0sPodCIDR and k0sServiceCIDR are the cluster's two networks. They are
+	// written into that config, so the installation and the host's firewall
+	// rule read one copy: k0s's values at the pinned release (pkg/apis/k0s/
+	// v1beta1/network.go, DefaultNetwork: 10.244.0.0/16 and 10.96.0.0/12),
+	// stated here because box writes them, not because box needs them for
+	// anything else.
+	k0sPodCIDR     = "10.244.0.0/16"
+	k0sServiceCIDR = "10.96.0.0/12"
 	// k0sReleaseBase is where the k0s project publishes release assets.
 	k0sReleaseBase = "https://github.com/k0sproject/k0s/releases/download"
 )
@@ -102,23 +111,30 @@ func k0sPlan(pins release.Versions, up Uplink) InstallPlan {
 	return plan
 }
 
-// k0sNodeConfig is the minimal k0s config box installs with. It exists for one
-// field: spec.api.address.
+// k0sNodeConfig is the minimal k0s config box installs with. It exists for two
+// things, and both are values k0s would otherwise choose for the host.
 //
-// Left unset, k0s fills the API address with iface.FirstPublicAddress(), the
-// first non-loopback IPv4 in the kernel's interface order -- whatever
-// net.Interfaces() lists first, which on a host with a tunnel up can be the
-// tunnel (k0s pkg/apis/k0s/v1beta1/api.go setDefaults, and
-// internal/pkg/iface/iface.go). k0s writes that address into the admin
-// kubeconfig box records, and binds the API server to it, so a cluster whose
-// API address sits on a tunnel is only reachable while the tunnel is. There is
-// no `k0s install` flag for it, so the config file is the mechanism; k0s
-// merges this document into its defaults, so nothing else has to be written
-// down.
+// The first is spec.api.address. Left unset, k0s fills it with
+// iface.FirstPublicAddress(), the first non-loopback IPv4 in the kernel's
+// interface order -- whatever net.Interfaces() lists first, which on a host
+// with a tunnel up can be the tunnel (k0s pkg/apis/k0s/v1beta1/api.go
+// setDefaults, and internal/pkg/iface/iface.go). k0s writes that address into
+// the admin kubeconfig box records, and binds the API server to it, so a
+// cluster whose API address sits on a tunnel is only reachable while the tunnel
+// is. There is no `k0s install` flag for it, so the config file is the
+// mechanism; k0s merges this document into its defaults, so nothing else has to
+// be written down.
+//
+// The second is spec.network: the pod and service networks are written here
+// rather than left to k0s's defaults, because the host's firewall rule has to
+// trust the networks the cluster was actually installed with, and a second copy
+// of these numbers anywhere else could disagree with this file. k0sNetworks
+// reads them back out of the text box wrote.
 func k0sNodeConfig(nodeIP string) string {
 	return fmt.Sprintf(`# Written by box when it installed k0s. The API address is pinned to the
 # uplink so it is not whatever address the kernel lists first; the node's
-# own address is pinned with --kubelet-extra-args=--node-ip.
+# own address is pinned with --kubelet-extra-args=--node-ip. The two networks
+# are here so the host's firewall rule trusts what the cluster uses.
 apiVersion: k0s.k0sproject.io/v1beta1
 kind: ClusterConfig
 metadata:
@@ -126,7 +142,50 @@ metadata:
 spec:
   api:
     address: %s
-`, nodeIP)
+  network:
+    podCIDR: %s
+    serviceCIDR: %s
+`, nodeIP, k0sPodCIDR, k0sServiceCIDR)
+}
+
+// k0sNetworks reads the pod and service networks back out of the k0s config box
+// wrote. It is a reader for the one document this package generates, not a YAML
+// parser: it follows the key path spec.network and refuses a file that does not
+// carry both networks, because the file at that path is box's own
+// (k0sConfigConflict refuses one it did not write) and one without them is a
+// host whose firewall box cannot settle.
+func k0sNetworks(config []byte) (pod, service string, err error) {
+	var keys []string
+	var indents []int
+	for _, line := range strings.Split(string(config), "\n") {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+			continue
+		}
+		n := len(line) - len(strings.TrimLeft(line, " \t"))
+		for len(indents) > 0 && indents[len(indents)-1] >= n {
+			indents = indents[:len(indents)-1]
+			keys = keys[:len(keys)-1]
+		}
+		key, value, ok := splitKV(trimmed)
+		if !ok {
+			return "", "", fmt.Errorf("the k0s config has a line that is not a key: %q", trimmed)
+		}
+		switch strings.Join(append(append([]string{}, keys...), key), ".") {
+		case "spec.network.podCIDR":
+			pod = unquote(value)
+		case "spec.network.serviceCIDR":
+			service = unquote(value)
+		}
+		if value == "" {
+			keys = append(keys, key)
+			indents = append(indents, n)
+		}
+	}
+	if pod == "" || service == "" {
+		return "", "", fmt.Errorf("the k0s config carries no podCIDR and serviceCIDR under spec.network, so box does not know which networks to trust")
+	}
+	return pod, service, nil
 }
 
 // installRefusal is the whole "may box touch this host" question, answered

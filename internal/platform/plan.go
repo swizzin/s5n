@@ -143,7 +143,7 @@ func planItems(plan Plan) []say.Item {
 	for _, s := range plan.Steps {
 		b.add(s)
 	}
-	return b.items(plan.NotHandled)
+	return b.items(plan.Warnings, plan.NotHandled)
 }
 
 // printPlan is the plan's own printer: the items planItems built, in order.
@@ -217,8 +217,9 @@ func conditionMark(s Step, g *planGroup) (say.Mark, string) {
 
 // items finishes the plan: the components in their narrative order, each with
 // the sub-steps that configure it, then the lines that stand on their own, then
-// what box will not handle -- the one thing a person has to act on.
-func (b *planBuilder) items(notHandled []string) []say.Item {
+// what box saw and will not change, then what box will not handle -- the two
+// things a person may have to act on.
+func (b *planBuilder) items(warnings, notHandled []string) []say.Item {
 	var items []say.Item
 	for _, c := range planComponents {
 		g, ok := b.groups[c.key]
@@ -241,6 +242,9 @@ func (b *planBuilder) items(notHandled []string) []say.Item {
 		items = append(items, parent)
 	}
 	items = append(items, b.loose...)
+	for _, line := range warnings {
+		items = append(items, say.Item{Mark: say.Warning, Text: line})
+	}
 	for _, line := range notHandled {
 		items = append(items, say.Item{Mark: say.Warning, Text: line})
 	}

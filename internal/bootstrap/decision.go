@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 
@@ -35,6 +36,14 @@ type Decision struct {
 	// box installs k0s (to pin the node IP) and where box warns about a node
 	// address it can see locally. Nil means the running host; a test fakes it.
 	Net Net
+	// Firewall is the host's packet filter. It is read on every path that uses
+	// a cluster, and the platform plan changes it only on a host where box
+	// installed k0s itself. Nil means the running host's (Firewalld).
+	Firewall Firewall
+	// K0sConfigFile is where box reads back the k0s config it installed with,
+	// for the networks the host's firewall has to trust. Empty means
+	// K0sConfigPath; a test points it at its own file.
+	K0sConfigFile string
 }
 
 // Options carries the explicit cluster and platform modes from the CLI, plus
@@ -175,7 +184,7 @@ func (d *Decision) Bootstrap(ctx context.Context, opts Options) (Result, error) 
 		return stop(fmt.Sprintf("k0s install failed: %v", err)), nil
 	}
 	if opts.DryRun {
-		return Result{
+		res := Result{
 			Action:       ActionInstall,
 			Source:       SourceK0sManaged,
 			Kubeconfig:   K0sAdminConfig,
@@ -183,7 +192,18 @@ func (d *Decision) Bootstrap(ctx context.Context, opts Options) (Result, error) 
 			Skips:        skips,
 			Notes:        describeNotes(notes),
 			Reason:       fmt.Sprintf("clean host: k0s %s would be installed (dry run)", plan.Version),
-		}, nil
+		}
+		// A dry run never reaches the platform plan, which is where a real run
+		// says what it will do to the host's firewall, so it says it here: the
+		// networks are the ones the config above carries, and nothing is run.
+		if d.firewall().Running(ctx) {
+			res.Firewall.Active = true
+			if pod, service, err := k0sNetworks([]byte(plan.ConfigText)); err == nil {
+				res.Firewall.CIDRs = []string{pod, service}
+				res.Notes = append(res.Notes, fmt.Sprintf("firewalld is running; the platform plan would add %s and %s to its trusted zone, permanently and now", pod, service))
+			}
+		}
+		return res, nil
 	}
 	res = d.adoptInstalled(ctx, opts, plan.Version)
 	res.Skips = skips
@@ -197,6 +217,50 @@ func (d *Decision) net() Net {
 		return d.Net
 	}
 	return LinuxNet{}
+}
+
+// firewall is the host's packet filter, or the real host's when none was given.
+func (d *Decision) firewall() Firewall {
+	if d.Firewall != nil {
+		return d.Firewall
+	}
+	return Firewalld{}
+}
+
+// withFirewall fills a usable result's firewall half. It is what the platform
+// plan prints before its confirm, and on a cluster box installed k0s itself it
+// is also the one host change the plan may make.
+//
+// Only a cluster box installed has networks box may trust. On a cluster box
+// found or was given, box knows neither its pod nor its service network --
+// guessing at another operator's would be worse than saying so -- so the
+// result carries the two commands and the plan prints them as a warning, and
+// box never touches that host's firewall.
+func (d *Decision) withFirewall(ctx context.Context, res Result) Result {
+	if res.Action == ActionStop || !d.firewall().Running(ctx) {
+		return res
+	}
+	res.Firewall.Active = true
+	if res.Source != SourceK0sManaged {
+		res.Firewall.Warning = firewalldWarning()
+		return res
+	}
+	path := d.K0sConfigFile
+	if path == "" {
+		path = K0sConfigPath
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		res.Firewall.Warning = fmt.Sprintf("firewalld is running and box could not read the k0s config it installed with (%s: %v): add the cluster's pod and service networks to firewalld's trusted zone by hand", path, err)
+		return res
+	}
+	pod, service, err := k0sNetworks(raw)
+	if err != nil {
+		res.Firewall.Warning = fmt.Sprintf("firewalld is running and %s: add the cluster's pod and service networks to firewalld's trusted zone by hand", err)
+		return res
+	}
+	res.Firewall.CIDRs = []string{pod, service}
+	return res
 }
 
 // platformPins is the release's pins, or the refusal that says what is missing.
@@ -355,6 +419,7 @@ func (d *Decision) finishCluster(ctx context.Context, opts Options, obs clusterP
 		res.Reason = fmt.Sprintf("record cluster: %v", err)
 		return res
 	}
+	res = d.withFirewall(ctx, res)
 	res.Reason = fmt.Sprintf("using %s at %s (%s)", source, path, obs.dist)
 	return res
 }
