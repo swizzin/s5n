@@ -5202,8 +5202,17 @@ box_root() { # box_root <node> <box arguments...>
   # are there because Helm reads $DOCKER_CONFIG/config.json when its registry
   # client is built, and there is no home directory in the image to read one
   # from.
+  # The image is empty, and box pulls the platform's charts over TLS: the
+  # host's CA bundle goes in read-only, as the file it resolves to (on some
+  # hosts the bundle path is a symlink into a directory the container lacks).
+  local bundle="" candidate
+  for candidate in /etc/ssl/certs/ca-certificates.crt /etc/pki/tls/certs/ca-bundle.crt /etc/ssl/cert.pem; do
+    if [ -e "$candidate" ]; then bundle=$(readlink -f "$candidate"); break; fi
+  done
+  [ -n "$bundle" ] || { echo "box_root: this host has no CA bundle to give box"; return 1; }
   docker run --rm -u 0 --network host -w "$WORK" \
     -v "${WORK}:${WORK}" --tmpfs /tmp:rw,size=1g \
+    -v "${bundle}:/etc/ssl/certs/ca-certificates.crt:ro" \
     -e HOME=/tmp -e DOCKER_CONFIG=/tmp/.docker \
     "$BOX_ROOT_IMAGE" /box "$@"
 }
