@@ -6795,16 +6795,16 @@ rehearsal_box() {
   ctx="kind-${rcluster}"
   cp "$WORK/values.yaml" "$WORK/rehearsal-values.yaml" || return 1
   mkdir -p "$rconfig" || return 1
-  # What `box init` leaves behind: the config root owned by the seedbox's user.
-  # Only the node's root can hand it to a uid this script is not.
-  node_root "$rcluster" "chown '$puid:$pgid' '$rconfig'" || {
-    echo "could not give the rehearsal's config root to ${puid}:${pgid}"; return 1; }
-
   $KIND create cluster --name "$rcluster" --config "$KIND_CONFIG" --wait 120s >/dev/null 2>&1 || {
     echo "could not create the rehearsal cluster"; return 1; }
   $KIND load docker-image --name "$rcluster" "$IMAGE" >/dev/null 2>&1 || {
     echo "could not load the s5n image into the rehearsal cluster"; return 1; }
   $KIND get kubeconfig --name "$rcluster" >"$WORK/rehearsal-kubeconfig" || return 1
+  # What `box init` leaves behind: the config root owned by the seedbox's user.
+  # Only the node's root can hand it to a uid this script is not, so it waits
+  # for the rehearsal cluster's node to exist.
+  node_root "$rcluster" "chown '$puid:$pgid' '$rconfig'" || {
+    echo "could not give the rehearsal's config root to ${puid}:${pgid}"; return 1; }
   docker exec -i "${rcluster}-control-plane" bash -c '
     mkdir -p /var/lib/s5n/authelia
     cat >/var/lib/s5n/authelia/users_database.yml
