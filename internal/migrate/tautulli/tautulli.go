@@ -1,5 +1,5 @@
-// Package tautulli rewrites the paths and the Plex connection Tautulli stored
-// in its config.ini.
+// Package tautulli rewrites the paths, the Plex connection and the login
+// Tautulli stored in its config.ini.
 //
 // Tautulli keeps everything in one INI file (`config.ini`, plexpy/config.py at
 // v2.18.2: FILENAME = "config.ini") and its database holds no absolute path:
@@ -80,6 +80,28 @@ const (
 	keyHTTPPort = "http_port"
 	keyHTTPRoot = "http_root"
 )
+
+// The keys that make Tautulli ask for its own password. A non-empty
+// http_password is the switch (webstart.py:195-213 at v2.18.2: with one the app
+// registers its auth tool and logs "authentication is enabled"; without one it
+// says "authentication is disabled" and admits everyone), http_basic_auth only
+// picks how it is asked, and the two flags are what make the app hash the value
+// it is given. Behind box the person signs in at the edge once, so these are
+// sealed off exactly as the chart's init container seals them
+// (internal/ttlconf); a source's password would otherwise sit in the file until
+// the first restart put it back, and would be a second password in front of an
+// app nobody should have to sign in to twice.
+var loginOffKeys = []struct {
+	name  string
+	value string
+	quote string
+}{
+	{"http_username", "", `"`},
+	{"http_password", "", `"`},
+	{"http_hash_password", "0", ""},
+	{"http_hashed_password", "0", ""},
+	{"http_basic_auth", "0", ""},
+}
 
 // pathKeys are the keys holding an absolute path, each in its own section
 // (plexpy/config.py:84, :86, :101, :152, :163, :166, :108, :121-123, :53).
@@ -224,7 +246,29 @@ func planEdits(in rewrite.Input, f *iniFile, rep *rewrite.Report) ([]edit, error
 		edits = append(edits, edit{line: line.n, value: e.value, quote: line.quote,
 			where: at(line), what: e.what})
 	}
+
+	// And its own login goes, said out loud: the one the person uses is the
+	// box's, and an app that asks for a second password is a password they were
+	// never given.
+	edits = append(edits, loginOff(f)...)
+	rep.Notes = append(rep.Notes, "its own login is switched off; you sign in through the box")
 	return edits, nil
+}
+
+// loginOff is the edits that switch Tautulli's own web login off. Only the keys
+// the file holds are edited: one that is absent is one the app's defaults answer
+// for, and writing it would be this package inventing a setting.
+func loginOff(f *iniFile) []edit {
+	var edits []edit
+	for _, k := range loginOffKeys {
+		line, ok := f.get(sectionWeb, k.name)
+		if !ok || line.value == k.value {
+			continue
+		}
+		edits = append(edits, edit{line: line.n, value: k.value, quote: k.quote,
+			where: at(line), what: "own login"})
+	}
+	return edits
 }
 
 // at is one line's section/key as the file spells it, which is what a report

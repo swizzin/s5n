@@ -55,11 +55,13 @@ previous run's logs stay readable until then.
       "url" (printf "http://plex:%v" .Values.apps.plex.port)) }}
 {{- end }}
 {{- if and .Values.apps.tautulli .Values.apps.tautulli.enabled }}
-{{- /* plexTokenFile may legitimately not exist yet: the PMS link then reports
-       pending instead of being configured against a Plex that trusts the pod
-       network. */}}
+{{- /* The URL carries the prefix the route keeps: the app's own http_root is
+       sealed to it by the init container, so its API lives at /tautulli/api/v2
+       and the root of the pod's port is only a redirect. plexTokenFile may
+       legitimately not exist yet: the PMS link then reports pending instead of
+       being configured against a Plex that trusts the pod network. */}}
 {{- $_ := set $cfg "tautulli" (dict
-      "url" (printf "http://tautulli:%v" .Values.apps.tautulli.port)
+      "url" (printf "http://tautulli:%v/tautulli" .Values.apps.tautulli.port)
       "apiKeyFile" "/etc/s5n/keys/tautulli-apikey"
       "plexTokenFile" "/etc/s5n/keys/plex-token") }}
 {{- end }}

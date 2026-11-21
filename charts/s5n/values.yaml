@@ -262,10 +262,14 @@ apps:
       # there; a tag or digest pin here is held within that repository.
       variant: default
     port: 8181
-    # Tautulli has a url-base setting (http_root) but wiring it through the same
-    # checkbox-unsafe /configUpdate endpoint used for the Plex link is not worth the
-    # extra risk for v1; the route strips the prefix instead, same as qBittorrent.
-    rewritePath: true
+    # Tautulli keeps its prefix: its own URL-root setting (http_root) is sealed
+    # to this instance's path on every start by the init container, so the app
+    # builds its absolute redirects and asset URLs under /tautulli instead of at
+    # the host's root. Stripping the prefix was the alternative, and it cannot
+    # work: Tautulli answers `/` with a redirect to HTTP_ROOT + "home" and its
+    # logout with HTTP_ROOT + "auth/logout" (plexpy/webserve.py, webstart.py at
+    # v2.18.2), which left the prefix and landed on the login's own /auth.
+    rewritePath: false
     resources: {}
     env: {}
 

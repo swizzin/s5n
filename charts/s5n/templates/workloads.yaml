@@ -128,6 +128,10 @@ spec:
             - tautulli-config
             - --conf=/config/config.ini
             - --api-key-file=/etc/s5n/keys/tautulli-apikey
+            # The prefix the route keeps. The app builds its redirects from it,
+            # so the value and the route have to be one decision: rewritePath is
+            # false for this app in values.yaml.
+            - --http-root={{ $urlBase }}
           securityContext:
             {{- include "s5n.containerSecurity" $root | nindent 12 }}
           volumeMounts:

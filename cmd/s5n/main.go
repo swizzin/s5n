@@ -139,15 +139,18 @@ func runQbtConfig(args []string) error {
 	return nil
 }
 
-// runTautulliConfig is Tautulli's init container: it seeds config.ini's
-// api_key before the app's first start, mirroring runQbtConfig. Tautulli
-// generates its own key only when config.ini has none, so seeding a known
-// one is what lets the wiring Job authenticate to an app it has no other way
-// to read credentials back from (no mount into Tautulli's own /config).
+// runTautulliConfig is Tautulli's init container: it seals config.ini before the
+// app's first start, mirroring runQbtConfig. Tautulli generates its own API key
+// only when config.ini has none, so seeding a known one is what lets the wiring
+// Job authenticate to an app it has no other way to read credentials back from
+// (no mount into Tautulli's own /config). The URL root and the app's own login
+// are re-sealed on every start: box serves Tautulli under a prefix, and the
+// person signs in at the edge (internal/ttlconf).
 func runTautulliConfig(args []string) error {
 	fs := flag.NewFlagSet("tautulli-config", flag.ExitOnError)
 	conf := fs.String("conf", "/config/config.ini", "path to Tautulli's config.ini")
 	apiKeyFile := fs.String("api-key-file", "", "file holding the api_key to seed")
+	httpRoot := fs.String("http-root", "/tautulli", "the URL prefix the app is served under, e.g. /tautulli")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -163,9 +166,9 @@ func runTautulliConfig(args []string) error {
 	if err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("read %s: %w", *conf, err)
 	}
-	out, changed := ttlconf.Seal(existing, apiKey)
+	out, changed := ttlconf.Seal(existing, apiKey, *httpRoot)
 	if !changed {
-		fmt.Printf("tautulli-config: %s already holds the configured api_key\n", *conf)
+		fmt.Printf("tautulli-config: %s already holds the sealed settings\n", *conf)
 		return nil
 	}
 	if err := os.MkdirAll(filepath.Dir(*conf), 0o750); err != nil {
@@ -174,6 +177,6 @@ func runTautulliConfig(args []string) error {
 	if err := atomicfile.Write(*conf, out, 0o600); err != nil {
 		return err
 	}
-	fmt.Printf("tautulli-config: seeded api_key into %s\n", *conf)
+	fmt.Printf("tautulli-config: sealed %s (api_key, http_root %s, its own login off)\n", *conf, *httpRoot)
 	return nil
 }

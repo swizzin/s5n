@@ -28,7 +28,7 @@ const fixture = `[General]
 # the web server
 http_host = 127.0.0.1
 http_port = 8181
-http_root = /tautulli
+http_root = tautulli
 http_username = admin
 backup_dir = /srv/apps/tautulli/backups
 cache_dir = /srv/apps/tautulli/cache
@@ -79,7 +79,7 @@ apps:
 func targets() map[string]rewrite.Endpoint {
 	return map[string]rewrite.Endpoint{
 		"plex":     {Host: "plex", Port: 32400},
-		"tautulli": {Host: "tautulli", Port: 8181},
+		"tautulli": {Host: "tautulli", Port: 8181, URLBase: "/tautulli"},
 	}
 }
 
@@ -156,7 +156,8 @@ func TestRewritesPathsAddressesAndListenSettings(t *testing.T) {
 	want := map[string]string{
 		"General/http_host":                "0.0.0.0",
 		"General/http_port":                "8181",
-		"General/http_root":                "",
+		"General/http_root":                "/tautulli",
+		"General/http_username":            "",
 		"General/backup_dir":               "/config/backups",
 		"General/cache_dir":                "/config/cache",
 		"General/export_dir":               "/config/exports",
@@ -191,7 +192,6 @@ func TestRewritesPathsAddressesAndListenSettings(t *testing.T) {
 		"# the web server",
 		"log_dir = \"/config/logs\"\n",
 		"https_cert_chain = \n",
-		"http_username = admin\n",
 		"[PMS]\n",
 	} {
 		if !strings.Contains(string(after), kept) {
@@ -219,7 +219,7 @@ func TestRewritesPathsAddressesAndListenSettings(t *testing.T) {
 func TestReadsEverySpellingOfAKey(t *testing.T) {
 	want := map[string]string{
 		"General/http_host":         "0.0.0.0",
-		"General/http_root":         "",
+		"General/http_root":         "/tautulli",
 		"General/backup_dir":        "/config/backups",
 		"General/log_dir":           "/config/logs",
 		"General/https_cert":        "/config/server.crt",
@@ -275,7 +275,7 @@ func TestKeepsTheKeySpellingOnDisk(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{"HTTP_ROOT = \n", "PMS_IP = plex\n", "LOG_DIR = \"/config/logs\"\n"} {
+	for _, want := range []string{"HTTP_ROOT = /tautulli\n", "HTTP_USERNAME = \"\"\n", "PMS_IP = plex\n", "LOG_DIR = \"/config/logs\"\n"} {
 		if !strings.Contains(string(after), want) {
 			t.Errorf("%q is not in the rewritten file:\n%s", want, after)
 		}
@@ -452,4 +452,73 @@ func treeHash(t *testing.T, dir string) string {
 		t.Fatal(err)
 	}
 	return hex.EncodeToString(h.Sum(nil))
+}
+
+// withLogin is the fixture with the source's own web login configured, the way
+// an install behind a plain proxy has it: a name, a hashed password and the two
+// flags that tell the app the value is a hash.
+const withLogin = `[General]
+http_host = 127.0.0.1
+http_port = 8181
+http_root = tautulli
+http_username = someone
+http_password = 901fd0ee12ab
+http_hash_password = 1
+http_hashed_password = 1
+http_basic_auth = 1
+
+[PMS]
+pms_ip = localhost
+pms_port = 32400
+pms_ssl = 1
+`
+
+// The app's own login is switched off, and the plan says so: behind box the
+// person signs in at the edge once, so a password the source had is a password
+// nobody will be asked for and nobody can use. What the chart's init container
+// re-seals on every start (internal/ttlconf) has to be true of the migrated file
+// too, or the first restart changes the app's behaviour.
+func TestSwitchesTheAppsOwnLoginOffAndSaysSo(t *testing.T) {
+	in := setupFile(t, withLogin+"\npath_map = /srv/plex=/config/plex\n")
+	rep, err := rewriter{}.Check(context.Background(), in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var said bool
+	for _, n := range rep.Notes {
+		if n == "its own login is switched off; you sign in through the box" {
+			said = true
+		}
+	}
+	if !said {
+		t.Fatalf("the plan does not say the app's own login is off: %v", rep.Notes)
+	}
+	if _, err := (rewriter{}).Write(context.Background(), in); err != nil {
+		t.Fatal(err)
+	}
+	got := read(t, in.Dir)
+	for where, want := range map[string]string{
+		"General/http_username":        "",
+		"General/http_password":        "",
+		"General/http_hash_password":   "0",
+		"General/http_hashed_password": "0",
+		"General/http_basic_auth":      "0",
+		"General/http_root":            "/tautulli",
+	} {
+		if got[where] != want {
+			t.Errorf("%s = %q, want %q", where, got[where], want)
+		}
+	}
+}
+
+// A key the file does not hold is not written: Tautulli's own defaults answer
+// for it, and a migration that invented settings would be writing a config the
+// app never had.
+func TestLoginOffLeavesAbsentKeysAlone(t *testing.T) {
+	got := rewritten(t, "[General]\nhttp_port = 8181\n\n[PMS]\npms_ip = localhost\npms_port = 32400\n")
+	for _, where := range []string{"General/http_username", "General/http_password", "General/http_basic_auth"} {
+		if _, ok := got[where]; ok {
+			t.Errorf("%s was added to a file that did not hold it: %v", where, got)
+		}
+	}
 }

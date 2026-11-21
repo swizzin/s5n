@@ -164,24 +164,26 @@ func EnabledIn(values map[string]any, instance string) bool {
 // urlBase is the URL base the chart gives one app's pod, per instance:
 //
 //	/<instance>   the Arrs (workloads.yaml:248, <PREFIX>__SERVER__URLBASE), qui
-//	              (:287, QUI__BASE_URL) and Maintainerr (:391, BASE_PATH)
+//	              (:287, QUI__BASE_URL), Maintainerr (:391, BASE_PATH) and
+//	              Tautulli, whose own http_root the init container seals to this
+//	              prefix (:123, --http-root)
 //	/<instance>/  autobrr (:330), whose router mounts at base URL *plus* the
 //	              rest of the path, so the trailing slash is what puts its API
 //	              at /autobrr/api
-//	none          qBittorrent, Plex, Tautulli and Seerr, whose route strips the
-//	              prefix instead (values.yaml, rewritePath), and PeerBanHelper,
-//	              which is served at a host of its own with no base path
+//	none          qBittorrent, Plex and Seerr, whose route strips the prefix
+//	              instead (values.yaml, rewritePath), and PeerBanHelper, which
+//	              is served at a host of its own with no base path
 //
 // ok is false for an app this box knows nothing about: guessing "" would hand a
 // rewriter an address that answers at the wrong path, so Targets refuses
 // instead.
 func urlBase(app, instance string) (string, bool) {
 	switch app {
-	case appSonarr, appRadarr, appProwlarr, appQui, appMaintainerr:
+	case appSonarr, appRadarr, appProwlarr, appQui, appMaintainerr, appTautulli:
 		return "/" + instance, true
 	case appAutobrr:
 		return "/" + instance + "/", true
-	case appQBittorrent, appPlex, appTautulli, appSeerr, appPBH:
+	case appQBittorrent, appPlex, appSeerr, appPBH:
 		return "", true
 	}
 	return "", false

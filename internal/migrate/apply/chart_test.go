@@ -132,7 +132,7 @@ func TestURLBasesMatchTheTemplates(t *testing.T) {
 		}
 		switch base {
 		case "/srv":
-			if !strings.Contains(workloads, "__SERVER__URLBASE") && app != "qui" && app != "maintainerr" {
+			if !strings.Contains(workloads, "__SERVER__URLBASE") && app != "qui" && app != "maintainerr" && app != "tautulli" {
 				t.Errorf("%s: the chart gives it /<instance>, and the template does not set a URL base", app)
 			}
 			if app == "qui" && !strings.Contains(workloads, "QUI__BASE_URL") {
@@ -140,6 +140,12 @@ func TestURLBasesMatchTheTemplates(t *testing.T) {
 			}
 			if app == "maintainerr" && !strings.Contains(workloads, "BASE_PATH") {
 				t.Error("maintainerr: the chart gives it /<instance> and the template sets no BASE_PATH")
+			}
+			// Tautulli's base is its own http_root, which the init container
+			// seals on every start: it is a file setting, not an environment
+			// variable, and the route keeps the prefix instead of stripping it.
+			if app == "tautulli" && !strings.Contains(workloads, "--http-root={{ $urlBase }}") {
+				t.Error("tautulli: the chart gives it /<instance>, and the init container does not seal http_root to it")
 			}
 		case "/srv/":
 			// autobrr mounts its router at the base URL's string plus the

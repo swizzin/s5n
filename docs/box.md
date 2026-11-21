@@ -207,12 +207,12 @@ fails. A band with no free port refuses before any write.
 
 **One login per seedbox user, checked at the edge (decided).** A person signs in once,
 with their account name, and reaches every app that has an admin UI: qBittorrent, the
-Arrs, Prowlarr, qui. One auth provider checks the login at the Gateway. It is part of the
+Arrs, Prowlarr, qui, Tautulli. One auth provider checks the login at the Gateway. It is part of the
 platform layer: root's `bootstrap` installs it, and `box adduser` adds the user to it.
 Each user's domain admits only that user. Behind it the apps have no login of their own
-(the Arrs run with `External` authentication, PeerBanHelper with its login switched
-off, qBittorrent with its password bypassed for private addresses) and are reachable
-only through the Gateway.
+(the Arrs run with `External` authentication, Tautulli with its own switched off,
+PeerBanHelper with its login switched off, qBittorrent with its password bypassed for
+private addresses) and are reachable only through the Gateway.
 
 **qBittorrent skips its password for private addresses (decided).** qBittorrent can't
 switch its login off, so it bypasses it for the private ranges
@@ -249,11 +249,21 @@ once, at the end of the run, the way swizzin always has. Credentials
 between apps (API keys, the qui and autobrr accounts the wiring Job signs in with) are
 generated, kept in the release Secret, and never the person's password.
 
-**Plex, Seerr and Tautulli sign in through Plex (decided).** Players talk to Plex
-directly, and Seerr's users are the Plex server's friends, so these three stay outside
+**Plex and Seerr sign in through Plex (decided).** Players talk to Plex
+directly, and Seerr's users are the Plex server's friends, so these two stay outside
 the provider. Skipping the Plex claim at `init` stays allowed, with a warning that
 until the server is claimed, whoever signs in to Seerr first becomes its owner. A
 migrated server that is already claimed needs no warning.
+
+Tautulli used to be the third, with its own Plex-based login on top of the app. That
+login is switched off behind the box's, and box seals it off on every start: a
+non-empty `http_password` is the switch that makes Tautulli ask for a password
+(plexpy/webstart.py at v2.18.2), so the app's init container clears the pair and the
+two flags that hash it, and `migrate` writes the same into a source's file and says
+so in its confirm. It is served under `/tautulli`, and its own URL root is sealed to
+that prefix: the redirects it builds are absolute (`/` to `/home`, a refused request
+to `auth/logout`), so an app that does not know its prefix leaves it -- and lands on
+the box's own `/auth`.
 
 **A plain `helm install` must say who checks the login (decided).** The chart requires an
 explicit `auth.edge: true`, with no default, and refuses to render without it. box sets
@@ -316,7 +326,8 @@ Envoy Gateway lets a policy on a route override the Gateway's, so the grant deni
 any write to SecurityPolicies, and to Gateways so a user can't open a listener of their
 own. Users still create their own HTTPRoutes, so the chart is unaffected. Exemptions live
 in Authelia's own rules, which root owns: paths that check their own key (the Arrs' `/api`,
-and `/ping` for health checks), Plex, Seerr and Tautulli, and the sign-in page itself.
+and `/ping` for health checks), Plex and Seerr (each at a name of its own), and the
+sign-in page itself.
 
 **The sign-in path is root's (decided).** Authelia lets everything under `/auth` through
 without a login, and Gateway API sends a request to the most specific route, so a user's
