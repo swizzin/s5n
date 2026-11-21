@@ -1441,6 +1441,19 @@ print(q.get("error", [""])[0], "-", q.get("error_description", [""])[0])' || tru
   esac
 }
 
+# location_path <location>: the path (and query) of a Location header, whether
+# the app built it absolute or relative. Tautulli's are absolute and carry the
+# scheme it is reached by inside the cluster -- http, since the pod's side of
+# the Gateway is plain HTTP -- which is not the scheme a browser uses to reach
+# the box. Only the path is the edge's and the app's shared business.
+location_path() {
+  case "$1" in
+    *"://"*/*) printf '/%s\n' "${1#*://*/}" ;;
+    *"://"*) printf '/\n' ;;
+    *) printf '%s\n' "$1" ;;
+  esac
+}
+
 # ---- the front door a browser meets -----------------------------------------
 # What an API call never meets, because a browser is not an API client: an app
 # whose redirects leave the prefix it is served under, an app whose own login
@@ -1494,28 +1507,34 @@ assert_front_door() {
   esac
 
   # Signed in, the app's own redirect stays inside the prefix it is served
-  # under, and following it renders the app.
+  # under, and the page it points at renders. Only the redirect's path is the
+  # assertion: Tautulli builds an absolute one from its URL root and the Host it
+  # was asked with, in the scheme it is reached by inside the cluster, so the
+  # page is asked for again on the box's own TLS.
   : >"$hdrs"
   code=$(curl -sS -o /dev/null -D "$hdrs" -w '%{http_code}' -b "$jar" -c "$jar" \
     --resolve "${DOMAIN}:443:${addr}" "${ca_args[@]}" "https://${DOMAIN}/tautulli/" \
     2>"$WORK/front-door.err" || true)
   location=$(sed -n 's/^[Ll]ocation: *//p' "$hdrs" | tr -d '\r' | head -1)
   echo "  front door: /tautulli/ signed in: ${code} -> ${location}"
-  [ "$code" = 302 ] ||
-    { echo "/tautulli/ answered ${code} to a signed-in browser, want the app's own redirect"; fail=1; }
-  case "$location" in
-    "https://${DOMAIN}/tautulli/"* | "/tautulli/"*) : ;;
+  case "$code" in
+    301 | 302 | 303 | 307 | 308) : ;;
+    *) echo "/tautulli/ answered ${code} to a signed-in browser, want the app's own redirect"; fail=1 ;;
+  esac
+  page=$(location_path "$location")
+  case "$page" in
+    /tautulli/*) : ;;
     *) echo "/tautulli/ sent the signed-in browser to ${location}: the app does not know the prefix it is served under"; fail=1 ;;
   esac
-  final=$(curl -sS -o "$WORK/front-door-page.html" -w '%{http_code} %{url_effective}' \
-    -b "$jar" -c "$jar" -L --max-redirs 3 \
-    --resolve "${DOMAIN}:443:${addr}" "${ca_args[@]}" "https://${DOMAIN}/tautulli/" \
-    2>"$WORK/front-door.err" || true)
-  echo "  front door: following it: ${final%% *} at ${final#* }"
-  case "$final" in
-    "200 https://${DOMAIN}/tautulli/"*) : ;;
-    *) echo "/tautulli/ did not render under its prefix: ${final:-nothing}"; fail=1 ;;
-  esac
+  if [ -n "$page" ]; then
+    code=$(curl -sS -o "$WORK/front-door-page.html" -w '%{http_code}' -b "$jar" -c "$jar" \
+      --resolve "${DOMAIN}:443:${addr}" "${ca_args[@]}" "https://${DOMAIN}${page}" \
+      2>"$WORK/front-door.err" || true)
+    echo "  front door: GET ${page} signed in: ${code}"
+    [ "$code" = 200 ] || { echo "${page} did not serve the app's page: ${code}"; fail=1; }
+    grep -qi '<!doctype html' "$WORK/front-door-page.html" ||
+      { echo "${page} answered ${code} without an HTML document"; fail=1; }
+  fi
 
   # And the same request carrying a header credential of its own -- an app's
   # bundle sending the token it holds, empty because nobody gave it one -- is the
@@ -1531,8 +1550,9 @@ assert_front_door() {
   case "$code" in
     401) echo "/tautulli/ refused a signed-in request because it carried an Authorization header: the edge's authz checks the header instead of the session"; fail=1 ;;
   esac
-  case "$location" in
-    "https://${DOMAIN}/tautulli/"* | "/tautulli/"*) : ;;
+  page=$(location_path "$location")
+  case "$page" in
+    /tautulli/*) : ;;
     *) [ "$code" = 401 ] || { echo "/tautulli/ answered ${code} and sent the browser to ${location}, want the app's redirect"; fail=1; } ;;
   esac
 }
