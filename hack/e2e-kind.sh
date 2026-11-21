@@ -105,7 +105,8 @@ HELM="helm --kube-context ${CTX}"
 # the local image by tag instead of pulling the published one.
 IMAGE=ghcr.io/swizzin/s5n:e2e
 WORK=$(mktemp -d)
-trap 'rm -rf "$WORK"' EXIT
+# The last line of every log is the run's own answer, whatever the cleanup says.
+trap 'code=$?; rm -rf "$WORK"; printf "E2E EXIT: %s\n" "$code"' EXIT
 
 log() { printf '\n==> %s\n' "$*"; }
 fail=0

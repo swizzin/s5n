@@ -215,9 +215,9 @@ REGISTRY=""
 # filesystem the seedbox's /config comes from -- so box and the pods have to
 # see one tree; and migrate reads a source install's configs and renames its
 # data, from a box that runs on the host. Here the roots are a directory on this
-# host, bind-mounted into the node at the same absolute path: the PV's hostPath,
-# the pod's /config and box's snapshot directory all name it, which is what a
-# real host has.
+# host, bind-mounted into the node at the same absolute path (with the whole
+# work directory around them, below): the PV's hostPath, the pod's /config and
+# box's snapshot directory all name it, which is what a real host has.
 DATA_PATH=/srv/s5n/data
 CONFIG_PATH=/srv/s5n/config
 KIND_CONFIG=hack/kind.yaml
@@ -233,7 +233,11 @@ if [ "$SCENARIO" = update ] || [ "$SCENARIO" = migrate ] || [ "$SCENARIO" = migr
   # the scenario depends on the mode; an unwritable directory would fail the
   # step with a permission error instead of the behaviour under test.
   chmod 0777 "$WORK/hostfs" "$DATA_PATH" "$CONFIG_PATH"
-  awk -v mount="$WORK/hostfs" '
+  # The whole work directory is mounted at its own path, not just the two roots:
+  # the node's root is the one user that can read a tree the migration left
+  # owned by the seedbox's user (see migrate_box), and it is how this script
+  # hands box's own files back after box ran as root.
+  awk -v mount="$WORK" '
     { print }
     /^  - role: control-plane$/ {
       print "    extraMounts:"
@@ -242,14 +246,17 @@ if [ "$SCENARIO" = update ] || [ "$SCENARIO" = migrate ] || [ "$SCENARIO" = migr
       print "        propagation: Bidirectional"
     }
   ' hack/kind.yaml >"$KIND_CONFIG"
-  grep -qF "containerPath: ${WORK}/hostfs" "$KIND_CONFIG" || {
-    echo "the kind config has no mount for ${WORK}/hostfs"
+  grep -qF "containerPath: ${WORK}" "$KIND_CONFIG" || {
+    echo "the kind config has no mount for ${WORK}"
     exit 1
   }
 fi
 # The registry is a container on this host: it must not outlive the run, even
 # when a scenario fails before its own cleanup.
 cleanup() {
+  # The exit status before anything here runs: the line every log ends with has
+  # to be the scenario's own answer, not the last cleanup command's.
+  local code=$?
   if [ -n "$REGISTRY" ]; then
     docker rm -f "$REGISTRY" >/dev/null 2>&1 || true
   fi
@@ -267,6 +274,7 @@ cleanup() {
   else
     rm -rf "$WORK"
   fi
+  printf 'E2E EXIT: %s\n' "$code"
 }
 trap cleanup EXIT
 
@@ -5159,6 +5167,102 @@ MIGRATE_TAUTULLI_ROOT=tautulli
 # Tautulli's own WebUI port, in the source and in the chart's own Tautulli.
 MIGRATE_TAUTULLI_PORT=8181
 
+# The image box runs in as root, below. A static binary and a distroless base is
+# the whole of it: no shell, nothing installed, and `-u 0` is what makes the
+# binary run as root the way a real host runs it. Built in migrate_box from the
+# binary this script already built.
+BOX_ROOT_IMAGE=s5n-e2e-box-root
+
+# box_root <node> <box arguments...>: box as root, in a container, with the work
+# directory at its own path so every path box was given means the same inside
+# and outside it. --network host is what reaches the local registry and the kind
+# API, both on 127.0.0.1. This is not how box is normally run by the e2e: it is
+# the one thing an unprivileged user cannot do, and `box migrate apply` is where
+# it matters (a rewriter's atomic rename makes the file root's, and only root's
+# box can then hand it to the seedbox's user).
+#
+# The cost is one `docker build` of a two-line image per run and one container
+# start per apply (a second or two each, the image cache making the build cheap);
+# the apply itself is the same work, run by root instead of by this script's user.
+box_root() { # box_root <node> <box arguments...>
+  local node=$1
+  shift
+  # distroless has no /tmp, and Helm's private home, its chart tarballs and the
+  # copy a rewriter's check reads all need one: a tmpfs, since what this run
+  # stages is a handful of small config trees (the migration's own staging goes
+  # under the config root, where the pods can see it). HOME and DOCKER_CONFIG
+  # are there because Helm reads $DOCKER_CONFIG/config.json when its registry
+  # client is built, and there is no home directory in the image to read one
+  # from.
+  docker run --rm -u 0 --network host -w "$WORK" \
+    -v "${WORK}:${WORK}" --tmpfs /tmp:rw,size=1g \
+    -e HOME=/tmp -e DOCKER_CONFIG=/tmp/.docker \
+    "$BOX_ROOT_IMAGE" /box "$@"
+}
+
+# node_root <node> <shell command>: one command as root inside the node, which
+# sees $WORK at its own path. The node's root is the only user here that can
+# read a tree owned by the seedbox's user, and the only one that can chown it.
+node_root() { # node_root <node> <command>
+  docker exec "${1}-control-plane" bash -c "$2"
+}
+
+# config_read <node> <path>: one file under a seedbox's config root, read as the
+# node's root. The migration leaves that tree owned by the seedbox's user and
+# 0600 in places, so this script -- which runs as neither -- reads it the way
+# the app does, through the same tree, rather than asking box to loosen it.
+config_read() { # config_read <node> <path>
+  node_root "$1" "cat '$2'"
+}
+
+# box_files_back <node> <config root>: box ran as root above, the way a real
+# host runs it, so the files it wrote outside the seedbox's own tree -- the
+# grant, the record, its own config, the .box record under the config root --
+# are root's. The rest of this script reads those as the runner and a run
+# without --keep deletes them, so they are handed back here. The seedbox's
+# config tree is deliberately not in the list: whose it is, is what the
+# assertion before this one is about.
+box_files_back() { # box_files_back <node> <config root>
+  node_root "$1" "chown $(id -u):$(id -g) '$WORK'/*.yaml '$WORK'/box.yaml 2>/dev/null || true
+    chown -R $(id -u):$(id -g) '$2/.box' 2>/dev/null || true"
+}
+
+# migrate_assert_ownership <node> <config root> <puid> <pgid>: what a migration
+# has to have left behind. Every path under the config root but box's own
+# staging and record area belongs to the seedbox's user, because box wrote as
+# root: a rewriter's atomic rename makes the file root's, and an app that cannot
+# read it either crash-loops or (Seerr) starts on defaults and writes them over
+# the migrated settings. The second half is the same bug from the app's side:
+# every app pod is Ready, which it can only be if it read the config it was
+# given.
+migrate_assert_ownership() { # migrate_assert_ownership <node> <root> <puid> <pgid>
+  local node=$1 root=$2 uid=$3 gid=$4 bad
+  bad=$(node_root "$node" "find '$root' -mindepth 1 -not -path '$root/.box*' \( ! -uid $uid -o ! -gid $gid \) -print") || {
+    echo "could not read the owner of every path under ${root}"; return 1; }
+  if [ -n "$bad" ]; then
+    echo "these paths under ${root} are not ${uid}:${gid}, the seedbox's user:"
+    printf '%s\n' "$bad" | head -20 | sed 's/^/    /'
+    return 1
+  fi
+  echo "  every path under ${root} but box's own .box belongs to ${uid}:${gid}"
+}
+
+# migrate_assert_ready <context> <app>...: every app pod of a migrated seedbox
+# is Ready. A pod the migration handed root-owned config to fails its first
+# read, so this is the app's own answer about the same bug the ownership check
+# reads off the tree. Plex is not in the list its callers pass for the same
+# reason it is not in the migration's own readiness assertion: its first start
+# rebuilds and re-reads a library, and the scenario holds it to readiness where
+# it also reads its database.
+migrate_assert_ready() { # migrate_assert_ready <context> <app>...
+  local ctx=$1 list
+  shift
+  list=$(printf '%s,' "$@")
+  kubectl --context "$ctx" -n "$NS" wait --for=condition=Ready \
+    pod -l "app.kubernetes.io/instance=s5n,s5n.io/app in (${list%,})" --timeout=600s || return 1
+  echo "  every app pod ($*) is Ready"
+}
+
 # migrate_forward <namespace> <target> <port>: port_forward above, for a
 # namespace other than the seedbox's. The tunnel's port and process land in
 # MIGRATE_PF_PORT and MIGRATE_PF_PID, and a tunnel is the only way to ask either
@@ -6075,6 +6179,12 @@ migrate_source_pbh_config() { # migrate_source_pbh_config <src>
   fi
   password=$(cat "$WORK/source/qbittorrent-password") ||
     { echo "could not read the source qBittorrent's password"; return 1; }
+  # The app wrote this file, so on a host where the fixture runs as the
+  # seedbox's user it belongs to them: this script is not that user, and the one
+  # key it adds is written through the node's root (the file the migration then
+  # reads is the app's own, with one block appended, which is the shape under
+  # test). migrate-keep's tree is this script's, and needs nothing.
+  [ -w "$file" ] || node_root "$CLUSTER" "chmod a+rw '$file'" || return 1
   cat >>"$file" <<EOF
 
 client:
@@ -6156,6 +6266,10 @@ migrate_source_tautulli() { # migrate_source_tautulli <src> <key out>
     return 1
   }
   $K -n "$MIGRATE_LEGACY_NS" wait --for=delete pod -l app=tautulli --timeout=180s >/dev/null 2>&1 || true
+  # The file is the app's, and after the chown above it is the seedbox user's:
+  # this script changes it through the node's root, as a person with root on the
+  # host would (migrate-keep's tree is this script's, which needs nothing).
+  [ -w "$file" ] || node_root "$CLUSTER" "chmod a+rw '$file'" || return 1
   # What a person setting this app up behind a proxy does. http_root is written
   # without a leading slash, as the app stores it; pms_url is a whole URL
   # because the server was entered by hand, and https because that is how a
@@ -6317,7 +6431,10 @@ migrate_plex_sqlite() { # migrate_plex_sqlite <config dir> <arguments...>
     echo "no Plex image: migrate_box reads the chart's pin before it seeds anything"
     return 1
   fi
-  docker run --rm -i --user "$(id -u):$(id -g)" \
+  # The user the shell runs as, which is this script's unless a scenario says
+  # otherwise: a migrated config tree belongs to the seedbox's user, and the
+  # scenario that runs box as root reads and seeds it as root (MIGRATE_PLEX_USER).
+  docker run --rm -i --user "${MIGRATE_PLEX_USER:-$(id -u):$(id -g)}" \
     -v "${dir}:/config" --network none \
     --entrypoint "/usr/lib/plexmediaserver/Plex SQLite" \
     "$MIGRATE_PLEX_IMAGE" "$@"
@@ -6670,7 +6787,10 @@ rehearsal_box() {
   ctx="kind-${rcluster}"
   cp "$WORK/values.yaml" "$WORK/rehearsal-values.yaml" || return 1
   mkdir -p "$rconfig" || return 1
-  chown "$puid:$pgid" "$rconfig" || return 1
+  # What `box init` leaves behind: the config root owned by the seedbox's user.
+  # Only the node's root can hand it to a uid this script is not.
+  node_root "$rcluster" "chown '$puid:$pgid' '$rconfig'" || {
+    echo "could not give the rehearsal's config root to ${puid}:${pgid}"; return 1; }
 
   $KIND create cluster --name "$rcluster" --config "$KIND_CONFIG" --wait 120s >/dev/null 2>&1 || {
     echo "could not create the rehearsal cluster"; return 1; }
@@ -6686,7 +6806,11 @@ rehearsal_box() {
   ' <"$WORK/users_database.yml" || {
     echo "could not seed the rehearsal cluster's login state"; return 1; }
 
-  if ! "$WORK/box" migrate apply "$rehearsal" --yes \
+  # As root, in a container: a rehearsal is still a migration, and a migration
+  # is a copy whose rewriters replace files. Run as this script's user it would
+  # pass while box wrote files nobody else could read, which is what the two
+  # assertions below exist to catch.
+  if ! box_root "$rcluster" migrate apply "$rehearsal" --yes \
     --chart-repo "$CHART_REPO" --chart-version "$CHART_VERSION" \
     --grant "$WORK/rehearsal-grant.yaml" --values "$WORK/rehearsal-values.yaml" \
     --kubeconfig "$WORK/rehearsal-kubeconfig" --record "$WORK/rehearsal-cluster.yaml" \
@@ -6695,6 +6819,10 @@ rehearsal_box() {
     >"$WORK/apply-rehearsal.txt" 2>&1; then
     cat "$WORK/apply-rehearsal.txt"; return 1
   fi
+  migrate_assert_ownership "$rcluster" "$rconfig" "$puid" "$pgid" || return 1
+  migrate_assert_ready "$ctx" qbittorrent sonarr "$MIGRATE_RADARR_INSTANCE" autobrr qui pbh tautulli ||
+    return 1
+  box_files_back "$rcluster" "$rconfig"
   cat "$WORK/apply-rehearsal.txt"
   if grep -q "data: rename" "$WORK/apply-rehearsal.txt"; then
     echo "the rehearsal's confirm lists a data rename it does not make"; return 1
@@ -6731,9 +6859,9 @@ print(len(pods), " ".join(bad))
     *" "?*) echo "app pods that did not pass the rehearsal gate first: ${gates#* }"; return 1 ;;
   esac
   echo "  every app pod (${gates% *}) passed its rehearsal gate before the app started"
-  conf="$rconfig/qbittorrent/qBittorrent/qBittorrent.conf"
+  conf=$(config_read "$rcluster" "$rconfig/qbittorrent/qBittorrent/qBittorrent.conf") || return 1
   for want in 'Session\AddTorrentStopped=true' 'AutoDownloader\EnableProcessing=false'; do
-    grep -qF -- "$want" "$conf" || { echo "the rehearsal conf has no ${want}"; return 1; }
+    grep -qF -- "$want" <<<"$conf" || { echo "the rehearsal conf has no ${want}"; return 1; }
   done
   # Nothing was renamed: box's names are not the source's, and the tree the run
   # put aside still holds the hardlinked pair the source had.
@@ -6787,8 +6915,14 @@ if bad:
 print(f"  the rehearsal's torrent {torrents[0].get('name')} reports {torrents[0].get('state')}")
 PY
   # And the record itself says stopped, whatever the data makes of it: box
-  # wrote paused=1 and auto_managed=0 into every resume file.
-  python3 - "$rconfig/qbittorrent/qBittorrent/BT_backup" <<'PY' || { echo "the rehearsal's resume records are not written stopped"; return 1; }
+  # wrote paused=1 and auto_managed=0 into every resume file. The directory is
+  # copied out as the node's root, because the seedbox's user owns it.
+  rm -rf "$WORK/rehearsal-resume"
+  mkdir -p "$WORK/rehearsal-resume"
+  node_root "$rcluster" "tar -C '$rconfig/qbittorrent/qBittorrent' -cf - BT_backup" \
+    | tar -C "$WORK/rehearsal-resume" -xf - || {
+    echo "could not read the rehearsal's resume records"; return 1; }
+  python3 - "$WORK/rehearsal-resume/BT_backup" <<'PY' || { echo "the rehearsal's resume records are not written stopped"; return 1; }
 import os, sys
 d = sys.argv[1]
 files = [f for f in os.listdir(d) if f.endswith(".fastresume")]
@@ -6836,8 +6970,25 @@ migrate_box() {
   local key secret code pin expected revision after plex_repo plex_tag plex_digest
   local i left
   local tautulli_conf tautulli_key tautulli_ready tautulli_plex tautulli_detail answer
-  puid=$(id -u)
-  pgid=$(id -g)
+  # The seedbox's user, and the point of the root runs below: box writes as
+  # root (as on any real host), the apps run as this uid, and neither is 0 nor
+  # whoever started this script. A file the migration fails to hand over is
+  # therefore owned by something no assertion here accepts, and a test that
+  # passed because box happened to run as the same user cannot happen.
+  puid=4310
+  pgid=4310
+  [ "$puid" != 0 ] && [ "$pgid" != 0 ] && [ "$puid" != "$(id -u)" ] || {
+    echo "the migration's seedbox user ${puid}:${pgid} must be neither root nor this run's user"; fail=1; return 0; }
+  # box as root, in a container: see box_root.
+  mkdir -p "$WORK/boxroot"
+  cp "$WORK/box" "$WORK/boxroot/box" || { echo "could not stage box for the root runs"; fail=1; return 0; }
+  printf 'FROM gcr.io/distroless/static:nonroot\nCOPY box /box\n' >"$WORK/boxroot/Dockerfile"
+  docker build -q -t "$BOX_ROOT_IMAGE" "$WORK/boxroot" >/dev/null || {
+    echo "could not build the image box runs in as root"; fail=1; return 0; }
+  # The one fixture whose files this script writes with the app's own tools
+  # rather than its own shell: Plex's `Plex SQLite` runs as root, because the
+  # database is the seedbox user's and this script is not that user.
+  MIGRATE_PLEX_USER=0:0
   DATA_PATH="$src/var/data"
   CONFIG_PATH="$WORK/hostfs/config"
   mkdir -p "$WORK/source"
@@ -6921,8 +7072,18 @@ migrate_box() {
   # The source cluster is the one this run created, and its volumes are the tree
   # on this host (see VOLUME ROOTS): the plan, box and the pods name one
   # filesystem, which is the only way a migration can read what a pod wrote.
-  grep -qF "containerPath: ${WORK}/hostfs" "$KIND_CONFIG" ||
-    { echo "the kind config has no mount for ${WORK}/hostfs: the source's files would be inside the node only"; fail=1; return 0; }
+  grep -qF "containerPath: ${WORK}" "$KIND_CONFIG" ||
+    { echo "the kind config has no mount for ${WORK}: the source's files would be inside the node only"; fail=1; return 0; }
+
+  # The tree above was written by this script; from here the apps own it, as
+  # they would on a host where the source install created it. Directories stay
+  # writable by everyone and files readable, because this script still writes
+  # into the tree with the apps' own tools (Plex's shell, the pbh config seed)
+  # and runs as neither the owner nor the node's root.
+  node_root "$CLUSTER" "chown -R '$puid:$pgid' '$WORK/hostfs/legacy'
+    find '$WORK/hostfs/legacy' -type d -exec chmod a+rwx {} +
+    find '$WORK/hostfs/legacy' -type f -exec chmod a+r {} +" || {
+    echo "could not give the source tree to ${puid}:${pgid}"; fail=1; return 0; }
 
   log "the source install: eight apps over host directories, in namespace ${MIGRATE_LEGACY_NS}"
   migrate_source_manifests "$WORK/source-manifests.yaml" "$src" "$puid" "$pgid" with-accounts
@@ -7218,7 +7379,8 @@ migrate_box() {
   # What `box init` creates on a real host: the config root, owned by the
   # seedbox's user. It runs with no app on, so it creates no app directory --
   # migrate creates the ones it moves, by moving them.
-  chown "$puid:$pgid" "$CONFIG_PATH"
+  node_root "$CLUSTER" "chown '$puid:$pgid' '$CONFIG_PATH'" || {
+    echo "could not give the config root to ${puid}:${pgid}"; fail=1; return 0; }
 
   # Nothing may have prepared box's data categories: the rename is what creates
   # them, and a `downloads` or `media` that already existed would hide a rename
@@ -7237,7 +7399,10 @@ migrate_box() {
   # the data root and the owner from the plan -- and asks for only the four a
   # plan cannot know. Then it adopts, in the same run.
   log "box migrate apply: the installer on a host with no box, then the adoption"
-  if ! "$WORK/box" migrate apply "$snapshot" --yes --chart-repo "$CHART_REPO" --chart-version "$CHART_VERSION" \
+  # As root, in a container: a real host runs it as root, and that is the whole
+  # difference the assertions after it are about. `box init` would ask the same
+  # questions on a host whose console it owns.
+  if ! box_root "$CLUSTER" migrate apply "$snapshot" --yes --chart-repo "$CHART_REPO" --chart-version "$CHART_VERSION" \
     --grant "$WORK/grant.yaml" --values "$WORK/values.yaml" \
     --kubeconfig "$WORK/kubeconfig" --record "$WORK/cluster.yaml" \
     --domain "$DOMAIN" --login "$LOGIN" --password-file "$WORK/authelia-password" \
@@ -7246,6 +7411,13 @@ migrate_box() {
     cat "$WORK/apply-migrate.txt"; fail=1; return 0
   fi
   cat "$WORK/apply-migrate.txt"
+  # The two halves of the same bug the root run can now show: every path the
+  # migration left in the config root belongs to the seedbox's user, and every
+  # app could read what it was given.
+  migrate_assert_ownership "$CLUSTER" "$CONFIG_PATH" "$puid" "$pgid" || { fail=1; return 0; }
+  migrate_assert_ready "$CTX" qbittorrent sonarr "$MIGRATE_RADARR_INSTANCE" autobrr qui pbh tautulli ||
+    { fail=1; return 0; }
+  box_files_back "$CLUSTER" "$CONFIG_PATH"
   # The snapshot it read is named, and the chart it installed is the release
   # this run pulled once for both halves.
   grep -qF "snapshot: ${snapshot} (final)" "$WORK/apply-migrate.txt" ||
@@ -7351,13 +7523,16 @@ migrate_box() {
     [ "$result" = "['ok']" ] ||
       { echo "the wiring Job did not sign in to ${step%%/*}: the receipt says ${result:-nothing}"; fail=1; }
   done
-  pbh_conf="$CONFIG_PATH/pbh/config/config.yml"
-  grep -qx '  analytics: false' "$pbh_conf" ||
-    { echo "the migrated PeerBanHelper's config does not say analytics: false:"; sed -n '/^privacy:/,+4p' "$pbh_conf"; fail=1; }
+  # The file is the seedbox's user's, so it is read through the node's root:
+  # that it is readable by its owner and no other is the assertion above.
+  pbh_conf=$(config_read "$CLUSTER" "$CONFIG_PATH/pbh/config/config.yml") || {
+    echo "could not read the migrated PeerBanHelper config"; fail=1; }
+  grep -qx '  analytics: false' <<<"$pbh_conf" ||
+    { echo "the migrated PeerBanHelper's config does not say analytics: false:"; sed -n '/^privacy:/,+4p' <<<"$pbh_conf"; fail=1; }
   # And it is not at the source's version any more: the app ran its own config
   # migrations on the first start, so what the key survived is the migration that
   # rewrites it, not a file box quietly told the app was newer than it is.
-  pbh_version=$(sed -n 's/^config-version: *//p' "$pbh_conf") || true
+  pbh_version=$(sed -n 's/^config-version: *//p' <<<"$pbh_conf") || true
   [ "${pbh_version:-0}" -ge 41 ] ||
     { echo "the migrated PeerBanHelper's config is at version ${pbh_version:-none}, and its own migrations did not run"; fail=1; }
   echo "  pbh's config is at version ${pbh_version} and still says analytics: false"
@@ -7370,21 +7545,21 @@ migrate_box() {
   # Job asks /api/v2 -- so what is asserted here is the app's own answer, plus
   # the file it answers from and the two receipt steps that read it.
   log "Tautulli: the config.ini the box holds, the API at the root, and the receipt's two steps"
-  tautulli_conf="$CONFIG_PATH/tautulli/config.ini"
-  [ -f "$tautulli_conf" ] || { echo "the box holds no ${tautulli_conf}"; fail=1; }
-  if [ -f "$tautulli_conf" ]; then
+  tautulli_conf=$(config_read "$CLUSTER" "$CONFIG_PATH/tautulli/config.ini") || true
+  [ -n "$tautulli_conf" ] || { echo "the box holds no ${CONFIG_PATH}/tautulli/config.ini"; fail=1; }
+  if [ -n "$tautulli_conf" ]; then
     # Tautulli's own writer would leave an empty value quoted (ConfigObj writes
     # `""`), so both spellings of "no URL root" pass.
-    grep -qE '^http_root = *("")?$' "$tautulli_conf" ||
-      { echo "the box's Tautulli config.ini does not leave the URL root empty: $(sed -n '/^http_root/p' "$tautulli_conf")"; fail=1; }
+    grep -qE '^http_root = *("")?$' <<<"$tautulli_conf" ||
+      { echo "the box's Tautulli config.ini does not leave the URL root empty: $(sed -n '/^http_root/p' <<<"$tautulli_conf")"; fail=1; }
     for want in "pms_ssl = 0" "pms_url = http://plex:32400"; do
-      grep -qx "$want" "$tautulli_conf" ||
+      grep -qx "$want" <<<"$tautulli_conf" ||
         { echo "the box's Tautulli config.ini has no \"${want}\""; fail=1; }
     done
     # The app's spelling, kept: the rewriter edits values, never key names.
-    if sed -n 's/^\([^ ]*\) = .*/\1/p' "$tautulli_conf" | grep -q '[A-Z]'; then
+    if sed -n 's/^\([^ ]*\) = .*/\1/p' <<<"$tautulli_conf" | grep -q '[A-Z]'; then
       echo "the box's Tautulli config.ini gained a key with a capital in it, and the app writes and reads lower-case ones only:"
-      sed -n 's/^\([^ ]*\) = .*/\1/p' "$tautulli_conf" | grep '[A-Z]' | head -3 | sed 's/^/    /'
+      sed -n 's/^\([^ ]*\) = .*/\1/p' <<<"$tautulli_conf" | grep '[A-Z]' | head -3 | sed 's/^/    /'
       fail=1
     fi
   fi
@@ -7639,7 +7814,9 @@ PY
   # release already rendering what it would apply. One apply, and then nothing.
   log "a second box migrate apply of the finished plan: one apply, nothing else"
   revision=$(helm_revision "$NS") || true
-  if ! "$WORK/box" migrate apply "$snapshot" --yes --chart-repo "$CHART_REPO" --chart-version "$CHART_VERSION" \
+  # Root again: the state record it reads is root's, as every later run of a
+  # real host's migration is.
+  if ! box_root "$CLUSTER" migrate apply "$snapshot" --yes --chart-repo "$CHART_REPO" --chart-version "$CHART_VERSION" \
     --grant "$WORK/grant.yaml" --values "$WORK/values.yaml" \
     --kubeconfig "$WORK/kubeconfig" --record "$WORK/cluster.yaml" \
     --domain "$DOMAIN" --login "$LOGIN" --password-file "$WORK/authelia-password" \
@@ -7647,6 +7824,7 @@ PY
     >"$WORK/apply-migrate-again.txt" 2>&1; then
     cat "$WORK/apply-migrate-again.txt"; fail=1; return 0
   fi
+  box_files_back "$CLUSTER" "$CONFIG_PATH"
   cat "$WORK/apply-migrate-again.txt"
   grep -qF "s5n in ${NS}: the plan is already applied" "$WORK/apply-migrate-again.txt" ||
     { echo "a second run did not say the plan was already applied:"; grep -v '^$' "$WORK/apply-migrate-again.txt" | head -8; fail=1; }
@@ -7731,8 +7909,8 @@ migrate_keep_box() {
   migrate_legacy_conf "$src/var/data/qbittorrent/qBittorrent/qBittorrent.conf" "$MIGRATE_QBIT_PASSWORD" ||
     { echo "could not write the source qBittorrent's config"; fail=1; return 0; }
 
-  grep -qF "containerPath: ${WORK}/hostfs" "$KIND_CONFIG" ||
-    { echo "the kind config has no mount for ${WORK}/hostfs: the source's files would be inside the node only"; fail=1; return 0; }
+  grep -qF "containerPath: ${WORK}" "$KIND_CONFIG" ||
+    { echo "the kind config has no mount for ${WORK}: the source's files would be inside the node only"; fail=1; return 0; }
 
   log "the source install: four apps over host directories, in namespace ${MIGRATE_LEGACY_NS}"
   migrate_source_manifests "$WORK/source-manifests.yaml" "$src" "$puid" "$pgid"
@@ -8143,10 +8321,12 @@ fi
 elapsed=$(( $(date +%s) - START ))
 if [ "$fail" = 0 ]; then log "PASS (${SCENARIO})"; else log "FAIL (${SCENARIO})"; fi
 echo "wall time (${SCENARIO}): ${elapsed}s"
-# The update scenario's volume roots are a host directory the seedbox's user
-# writes into, so what the apps left there is not this user's to remove: the
-# tree goes as the node's root, which is also why it goes before the node does.
-if [ "$SCENARIO" = update ] && [ "$KEEP" != --keep ]; then
+# The update and migrate scenarios' volume roots are host directories the
+# seedbox's user writes into, so what the apps left there is not this user's to
+# remove: the tree goes as the node's root, which is also why it goes before the
+# node does. migrate's config root is 0600 in places once the migration handed
+# it to a user this script is not.
+if { [ "$SCENARIO" = update ] || [ "$SCENARIO" = migrate ]; } && [ "$KEEP" != --keep ]; then
   docker exec "${CLUSTER}-control-plane" rm -rf "$WORK/hostfs" >/dev/null 2>&1 || true
 fi
 [ "$KEEP" = --keep ] || $KIND delete cluster --name "$CLUSTER"
