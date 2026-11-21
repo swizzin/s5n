@@ -547,7 +547,16 @@ func (d *Decision) Run(ctx context.Context, opts Options) (Result, error) {
 	// failure -- the chart renders the app without it, and the next root run
 	// fills it in -- but it is said out loud, because the app will not start
 	// until it is there.
-	if len(d.Catalog.OIDCApps(apps)) > 0 && d.GatewayIP != nil {
+	//
+	// The question is whether this chart serves an app that way, not whether
+	// one of the apps this run switched on does. A migrate install answers init
+	// with every app off and switches the plan's on afterwards, from the grant
+	// (cmd/box/migrate_apply.go), so "an OIDC app is on now" was false on the
+	// one run that had two to install: autobrr and qui rendered without the
+	// alias, their client Secrets went unused, and autobrr showed its own
+	// password form. The address is the box's, not the app's; a box that never
+	// switches one on carries an unused key, and a re-run of init refreshes it.
+	if d.GatewayIP != nil {
 		declared, err := seedbox.DeclaresOIDCGatewayIP(d.Schema)
 		if err != nil {
 			return res, err
@@ -558,7 +567,12 @@ func (d *Decision) Run(ctx context.Context, opts Options) (Result, error) {
 				return res, err
 			}
 			if strings.TrimSpace(ip) == "" {
-				d.report().Warn("the Gateway's proxy Service is not there yet, so the OIDC apps have no address for the box's own name: run `box init` again once `box bootstrap` has installed the Gateway")
+				// Only an app that is on now waits for it: an empty box is not
+				// waiting on anything, and a warning about an app nobody
+				// switched on is noise.
+				if len(d.Catalog.OIDCApps(apps)) > 0 {
+					d.report().Warn("the Gateway's proxy Service is not there yet, so the OIDC apps have no address for the box's own name: run `box init` again once `box bootstrap` has installed the Gateway")
+				}
 			} else {
 				grantAnswers = append(grantAnswers, answer{key: "auth.oidc.gatewayIP", value: ip})
 			}

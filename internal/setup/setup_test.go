@@ -785,6 +785,68 @@ func TestAppsFlagNamesTheCatalog(t *testing.T) {
 	}
 }
 
+// TestTheGatewayAddressIsWrittenWithEveryAppOff: an install that answers init
+// with the apps off still records the Gateway's proxy address, because that is
+// the shape `box migrate apply` installs into -- the plan's apps are switched on
+// afterwards, from the grant -- and an OIDC app that renders without the address
+// has no way to reach the login at the box's own name: qui refuses to start and
+// autobrr shows its own password form. The key is the box's, so the question is
+// what the chart serves, not what is on right now.
+func TestTheGatewayAddressIsWrittenWithEveryAppOff(t *testing.T) {
+	h := newHarness(t)
+	h.decision.GatewayIP = func(context.Context) (string, error) { return "10.96.0.10", nil }
+	h.decision.Schema = chartAt(t, h.chartDir).Schema
+	opts := h.unattended()
+	opts.Apps = []string{"none"}
+	if _, err := h.run(opts); err != nil {
+		t.Fatalf("init: %v\n%s", err, h.out)
+	}
+	grant := h.read(h.grantPath)
+	if !strings.Contains(grant, "gatewayIP: 10.96.0.10") {
+		t.Fatalf("the grant carries no Gateway address, and this chart's OIDC apps need it:\n%s", grant)
+	}
+	// A box with an OIDC app on gets the same write, and the re-run changes
+	// nothing: the address is not a per-app answer.
+	h2 := newHarness(t)
+	h2.decision.GatewayIP = h.decision.GatewayIP
+	h2.decision.Schema = h.decision.Schema
+	on := h2.unattended()
+	on.SetTransient = map[string]string{"apps.beta.token": "tok"}
+	if _, err := h2.run(on); err != nil {
+		t.Fatalf("init with apps on: %v\n%s", err, h2.out)
+	}
+	res, err := h2.run(on)
+	if err != nil {
+		t.Fatalf("second init: %v\n%s", err, h2.out)
+	}
+	if len(res.GrantChanged) != 0 {
+		t.Fatalf("the second run spliced %v", res.GrantChanged)
+	}
+	if !strings.Contains(h2.read(h2.grantPath), "gatewayIP: 10.96.0.10") {
+		t.Fatalf("the re-run lost the Gateway address:\n%s", h2.read(h2.grantPath))
+	}
+}
+
+// A chart that does not declare the key is never given it: box does not invent
+// a values key for a release that has no OIDC app to use it.
+func TestNoGatewayAddressWithoutTheKey(t *testing.T) {
+	h := newHarness(t)
+	called := false
+	h.decision.GatewayIP = func(context.Context) (string, error) { called = true; return "10.96.0.10", nil }
+	h.decision.Schema = []byte(`{"type":"object","properties":{}}`)
+	opts := h.unattended()
+	opts.SetTransient = map[string]string{"apps.beta.token": "tok"}
+	if _, err := h.run(opts); err != nil {
+		t.Fatalf("init: %v\n%s", err, h.out)
+	}
+	if called {
+		t.Fatal("the Gateway was read for a chart that has no auth.oidc.gatewayIP")
+	}
+	if strings.Contains(h.read(h.grantPath), "gatewayIP") {
+		t.Fatalf("a key the chart does not declare was written:\n%s", h.read(h.grantPath))
+	}
+}
+
 // TestSettingsDirsFollowTheInstances: one directory per enabled instance, named
 // as the chart names the workload, because that is the subPath the pod mounts.
 func TestSettingsDirsFollowTheInstances(t *testing.T) {
