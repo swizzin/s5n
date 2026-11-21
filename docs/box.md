@@ -297,8 +297,11 @@ the provider block and the Deployment's mount of the signing material, because A
 exits on a provider with no clients. The provider's signing key is generated
 once and kept beside the login's other key, outside its ConfigMap. The app reaches the
 issuer from its own pod over the box's own HTTPS name: the chart aliases that name to the
-Gateway's proxy Service (an address root's `init` records in the grant), opens egress to
-the proxy alone, and trusts the box's root where the certificate is self-signed. Only the
+Gateway's proxy Service (an address root's `init` records in the grant whenever the
+chart's schema declares the key -- not only when an app that uses it is on, because a
+migrate install answers `init` with the plan's apps off and switches them on afterwards),
+opens egress to the proxy alone, and trusts the box's root where the certificate is
+self-signed. Only the
 Gateway's proxy may reach the login's pod at all. A plain `helm install`, or a grant from
 before the provider, has no recorded address, and the app keeps its own login switched
 off behind the edge's.
