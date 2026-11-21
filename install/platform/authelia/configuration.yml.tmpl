@@ -33,6 +33,23 @@ server:
       # has no gRPC ext_authz implementation.
       ext-authz:
         implementation: 'ExtAuthz'
+        # The session cookie is the only credential this endpoint checks, and
+        # naming it is what makes a request that also carries an Authorization
+        # header work. Envoy forwards that header to the auth server whatever
+        # headersToExtAuth lists (it is one of the connection manager's
+        # defaults), and Authelia tries a header strategy before the cookie one
+        # unless this list says otherwise: a token it cannot parse -- an app's
+        # own API token, which is exactly what PeerBanHelper's UI sends on every
+        # call -- is an error, and the strategy loop returns on an error rather
+        # than falling through to the next strategy (handler_authz.go:303-322 at
+        # 4.39.28). The answer was a 401 to a signed-in browser. Nothing else
+        # needs the header here: every caller that reaches an app with a
+        # credential in a header does so on a bypass rule (an Arr's /api and
+        # /ping, Plex and Seerr under their own names, the portal itself), and a
+        # bypass rule is authorized before any strategy is asked
+        # (handler_authz_util.go:37-40).
+        authn_strategies:
+          - name: 'CookieSession'
 log:
   level: 'info'
 # No self-service: with both flows disabled Authelia registers neither route,
