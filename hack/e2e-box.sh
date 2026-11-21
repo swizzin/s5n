@@ -5175,7 +5175,7 @@ MIGRATE_TAUTULLI_ROOT=tautulli
 # Tautulli's own WebUI port, in the source and in the chart's own Tautulli.
 MIGRATE_TAUTULLI_PORT=8181
 
-# The image box runs in as root, below. A static binary and a distroless base is
+# The image box runs in as root, below. The static binary on an empty base is
 # the whole of it: no shell, nothing installed, and `-u 0` is what makes the
 # binary run as root the way a real host runs it. Built in migrate_box from the
 # binary this script already built.
@@ -5195,7 +5195,7 @@ BOX_ROOT_IMAGE=s5n-e2e-box-root
 box_root() { # box_root <node> <box arguments...>
   local node=$1
   shift
-  # distroless has no /tmp, and Helm's private home, its chart tarballs and the
+  # The image has no /tmp, and Helm's private home, its chart tarballs and the
   # copy a rewriter's check reads all need one: a tmpfs, since what this run
   # stages is a handful of small config trees (the migration's own staging goes
   # under the config root, where the pods can see it). HOME and DOCKER_CONFIG
@@ -6978,25 +6978,25 @@ migrate_box() {
   local key secret code pin expected revision after plex_repo plex_tag plex_digest
   local i left
   local tautulli_conf tautulli_key tautulli_ready tautulli_plex tautulli_detail answer
-  # The seedbox's user, and the point of the root runs below: box writes as
-  # root (as on any real host), the apps run as this uid, and neither is 0 nor
-  # whoever started this script. A file the migration fails to hand over is
-  # therefore owned by something no assertion here accepts, and a test that
-  # passed because box happened to run as the same user cannot happen.
-  puid=4310
-  pgid=4310
-  [ "$puid" != 0 ] && [ "$pgid" != 0 ] && [ "$puid" != "$(id -u)" ] || {
-    echo "the migration's seedbox user ${puid}:${pgid} must be neither root nor this run's user"; fail=1; return 0; }
-  # box as root, in a container: see box_root.
+  # The seedbox's user is this run's user, as in every other scenario, so the
+  # source apps' configs stay readable to the reads below (discover and cutover
+  # run as this user, the way an operator's survey can). What makes the root runs
+  # a test of ownership is box itself: it writes as root, as on any real host, so
+  # a file the migration fails to hand over is root's, and the assertions after
+  # each apply accept nothing but this uid. The user must never be root, or that
+  # check proves nothing.
+  puid=$(id -u)
+  pgid=$(id -g)
+  [ "$puid" != 0 ] && [ "$pgid" != 0 ] || {
+    echo "the migration's seedbox user ${puid}:${pgid} must not be root: box runs as root here"; fail=1; return 0; }
+  # box as root, in a container: see box_root. FROM scratch: box is a static
+  # binary that dials only this host's registry and the kind API, so the image
+  # needs nothing but the binary, and there is no base image to pull or pin.
   mkdir -p "$WORK/boxroot"
   cp "$WORK/box" "$WORK/boxroot/box" || { echo "could not stage box for the root runs"; fail=1; return 0; }
-  printf 'FROM gcr.io/distroless/static:nonroot\nCOPY box /box\n' >"$WORK/boxroot/Dockerfile"
+  printf 'FROM scratch\nCOPY box /box\n' >"$WORK/boxroot/Dockerfile"
   docker build -q -t "$BOX_ROOT_IMAGE" "$WORK/boxroot" >/dev/null || {
     echo "could not build the image box runs in as root"; fail=1; return 0; }
-  # The one fixture whose files this script writes with the app's own tools
-  # rather than its own shell: Plex's `Plex SQLite` runs as root, because the
-  # database is the seedbox user's and this script is not that user.
-  MIGRATE_PLEX_USER=0:0
   DATA_PATH="$src/var/data"
   CONFIG_PATH="$WORK/hostfs/config"
   mkdir -p "$WORK/source"
