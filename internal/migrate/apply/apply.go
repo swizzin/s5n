@@ -54,6 +54,10 @@ type Env struct {
 	// PUID and PGID are the values' global.puid and global.pgid: everything
 	// staged is owned by them, because the pod's user is not box's.
 	PUID, PGID int
+	// Chown hands one path of a staged config tree to the seedbox's user,
+	// never following a link (own.go). Nil means os.Lchown; a test that
+	// cannot change an owner records the calls instead.
+	Chown func(path string, uid, gid int) error
 	// Targets is where every instance answers inside the release (chart.go,
 	// Targets).
 	Targets map[string]rewrite.Endpoint
@@ -309,6 +313,9 @@ func Run(ctx context.Context, p *plan.Plan, planBytes []byte, env Env) (Result, 
 		return m.res, err
 	}
 	if err := m.write(ctx); err != nil {
+		return m.res, err
+	}
+	if err := m.own(); err != nil {
 		return m.res, err
 	}
 	if err := m.renameData(); err != nil {
