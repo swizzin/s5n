@@ -6,8 +6,9 @@
 //
 // Tautulli's own code only generates a key when config.ini has none yet
 // (verified against a live container; see hack/e2e-kind.sh), so seeding it
-// once makes every later start a no-op for the key. The three settings below
-// are re-sealed on every start, because they are box's and not the app's.
+// once makes every later start a no-op for the key. The URL root and the app's
+// own login are re-sealed on every start, because they are box's and not the
+// app's.
 //
 // # The URL root
 //
