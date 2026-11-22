@@ -9,7 +9,9 @@
     {
       "customType": "regex",
       "description": "Every version box installs: charts/s5n/platform.yaml. The pins ship in the chart, so a platform bump is a chart release, and box reads them from the release it pulled. One key per component, and the comment on the line names the datasource and package the version comes from, so a bump is one line in one file and CI's e2e tests exactly what ships. The shape is flat and the marker inline because both readers are then trivial: this regex here, and `sed` in the e2e (no YAML parser on the host). A value may be a whole image reference (`repository:tag@sha256:...`, which is the login's pin), so the digest is captured as currentDigest and the reference without it as currentValue: Renovate then reads both from the one line and bumps them together.",
-      "fileMatch": ["^charts/s5n/platform\\.yaml$"],
+      "managerFilePatterns": [
+        "/^charts/s5n/platform\\.yaml$/"
+      ],
       "matchStrings": [
         "\\n[ \\t]*(?<depKey>[A-Za-z][A-Za-z0-9]*):[ \\t]*\"?(?<currentValue>[^\\s\"#@]+)(?:@(?<currentDigest>sha256:[a-f0-9]{64}))?\"?[ \\t]+# renovate: datasource=(?<datasource>[a-z0-9-]+) depName=(?<depName>[^\\s]+)(?:[ \\t]+registryUrl=(?<registryUrl>[^\\s]+))?"
       ]
@@ -18,7 +20,9 @@
       "customType": "regex",
       "datasourceTemplate": "docker",
       "description": "Every app image the chart blesses: charts/s5n/variants.yaml. The chart owns the file, ships it inside the archive, and generates the admission policy's blessed-repository list from it, so a bump here is how a new app image reaches a seedbox. Renovate's helm-values manager reads only values.yaml, so nothing else watches this file: one app per block, repository/tag/digest on three lines, and the digest is captured too so a tag and its digest move together. The s5n entry does not match: its digest is empty (the chart stamps it at packaging), so it never looks like a sha256 to bump.",
-      "fileMatch": ["^charts/s5n/variants\\.yaml$"],
+      "managerFilePatterns": [
+        "/^charts/s5n/variants\\.yaml$/"
+      ],
       "matchStrings": [
         "repository:[ \\t]*(?<depName>[^\\s#]+)[^\\n]*\\n[ \\t]*tag:[ \\t]*\"?(?<currentValue>[^\"\\n]*)\"?\\n[ \\t]*digest:[ \\t]*\"?(?<currentDigest>sha256:[a-f0-9]{64})\"?"
       ]
@@ -27,7 +31,9 @@
       "customType": "regex",
       "datasourceTemplate": "docker",
       "description": "Test-only images the e2e runs, pinned by tag and digest in the scripts: box never installs them, so they stay where they are used. The `# renovate: datasource=docker` marker is what keeps Renovate off the e2e's own locally built image, which is tagged, never pinned.",
-      "fileMatch": ["^hack/.*\\.sh$"],
+      "managerFilePatterns": [
+        "/^hack/.*\\.sh$/"
+      ],
       "matchStrings": [
         "(?<depName>[a-z0-9][a-z0-9._/-]*):(?<currentValue>[A-Za-z0-9._-]+)@(?<currentDigest>sha256:[a-f0-9]{64})[^\\n]*# renovate: datasource=docker"
       ]
