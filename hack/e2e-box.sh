@@ -7060,7 +7060,9 @@ rehearsal_box() {
     grep -qF -- "$want" "$WORK/apply-rehearsal.txt" ||
       { echo "the rehearsal apply has no ${want}"; return 1; }
   done
-  grep -qE "^  ✓ qbittorrent +.*\b1 torrent stopped" "$WORK/apply-rehearsal.txt" ||
+  # The rehearsal runs with --details, so the count is the per-column list's
+  # line: that list is the whole account the grouped confirm summarises.
+  grep -qE "^ *1 torrents written stopped$" "$WORK/apply-rehearsal.txt" ||
     { echo "the rehearsal apply did not count the one torrent it stopped:";
       grep -n "torrent" "$WORK/apply-rehearsal.txt" || true; return 1; }
   # The two settings the conf carries: what is added later lands stopped, and
