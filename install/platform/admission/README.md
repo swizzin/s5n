@@ -83,5 +83,5 @@ Until `box` exists, the e2e is the caller:
 
 ```sh
 kubectl apply -f install/platform/admission/policy.yaml
-go run ./hack/render-grant charts/s5n seedbox 31111 NodePort | kubectl apply -f -
+go run ./hack/render-grant charts/s5n s5n-alice 31111 NodePort | kubectl apply -f -
 ```

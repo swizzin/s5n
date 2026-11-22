@@ -61,6 +61,14 @@ One user gets one seedbox: their own apps, their own downloads and their own con
 isolated from everyone else's. Multi-user stays barebones: no quotas, billing,
 panels or other enterprise features.
 
+- **A seedbox's namespace is `s5n-<login>`.** Root's own too: login `alice` lands
+  in `s5n-alice`, beside box's own `s5n-system` and `s5n-gateway`, so a second
+  user is another `s5n-<login>`. `--namespace` on a first run still wins, and a
+  re-run keeps the grant's namespace, so a box installed before this rule keeps
+  the namespace it has. A login that would collide with box's own namespaces
+  (`system`, `gateway`) or that does not make a DNS-1123 label after the prefix
+  (length included) is refused where the login is given.
+
 **Each user needs a domain (decided).** A bare IP can't be served, because routing and
 certificates are per host name.
 

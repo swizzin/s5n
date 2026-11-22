@@ -403,6 +403,105 @@ func TestFirstRunAsksTheQuestionsInOrder(t *testing.T) {
 // changed. The rest of both files must come out byte for byte, comments and odd
 // indentation included, and a second run with the same answers must not write at
 // all.
+// TestTheSeedboxNamespaceFollowsTheLogin: a first run with no --namespace puts
+// the box in s5n-<login>, root's own included, beside box's s5n-system and
+// s5n-gateway.
+func TestTheSeedboxNamespaceFollowsTheLogin(t *testing.T) {
+	h := newHarness(t)
+	h.prompt.inputs = []string{"box.example.com", "/srv/s5n/data", "/srv/s5n/config"}
+	h.prompt.multis = [][]string{{"alpha"}}
+	opts := h.options()
+	opts.Namespace = ""
+	opts.Login = "alice"
+
+	if _, err := h.run(opts); err != nil {
+		t.Fatalf("init: %v\n%s", err, h.out)
+	}
+	if grant := h.read(h.grantPath); !strings.Contains(grant, "namespace: s5n-alice") {
+		t.Fatalf("the grant does not put alice's box in s5n-alice:\n%s", grant)
+	}
+}
+
+// An explicit --namespace still wins on a first run: the login only decides the
+// default.
+func TestAnExplicitNamespaceWinsOnAFirstRun(t *testing.T) {
+	h := newHarness(t)
+	h.prompt.inputs = []string{"box.example.com", "/srv/s5n/data", "/srv/s5n/config"}
+	h.prompt.multis = [][]string{{"alpha"}}
+	opts := h.options()
+	opts.Namespace = "s5n-other"
+	opts.Login = "alice"
+
+	if _, err := h.run(opts); err != nil {
+		t.Fatalf("init: %v\n%s", err, h.out)
+	}
+	if grant := h.read(h.grantPath); !strings.Contains(grant, "namespace: s5n-other") {
+		t.Fatalf("the grant does not keep the explicit namespace:\n%s", grant)
+	}
+}
+
+// A re-run reads the grant's namespace: a box installed before the s5n-<login>
+// default keeps `seedbox` whatever this run's flag or login says.
+func TestAReRunKeepsTheGrantsNamespace(t *testing.T) {
+	h := newHarness(t)
+	write(t, h.grantPath, reRunGrant)
+	write(t, h.valuesPath, reRunValues)
+	h.prompt.inputs = []string{"old.example.com"}
+	opts := h.options()
+	opts.Namespace = "s5n-other"
+
+	res, err := h.run(opts)
+	if err != nil {
+		t.Fatalf("init: %v\n%s", err, h.out)
+	}
+	if !res.ReRun {
+		t.Fatal("an existing grant was treated as a fresh host")
+	}
+	for _, key := range res.GrantChanged {
+		if key == "namespace" {
+			t.Fatalf("the re-run rewrote the namespace: %v", res.GrantChanged)
+		}
+	}
+	if grant := h.read(h.grantPath); !strings.Contains(grant, "namespace: seedbox") {
+		t.Fatalf("the re-run changed the namespace:\n%s", grant)
+	}
+}
+
+// TestLoginsThatCannotBeASeedboxAreRefused: the namespace is s5n-<login>, so a
+// login box's own namespaces belong to, or one that does not make a DNS-1123
+// label after the prefix, is refused when it is given -- naming the login and
+// why.
+func TestLoginsThatCannotBeASeedboxAreRefused(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		login string
+		want  []string
+	}{
+		{"box's own system namespace", "system", []string{`login "system"`, "s5n-system", "box's own"}},
+		{"box's own gateway namespace", "gateway", []string{`login "gateway"`, "s5n-gateway", "box's own"}},
+		{"not a label", "alice@example.com", []string{`login "alice@example.com"`, "s5n-alice@example.com", "lowercase letters, digits and dashes"}},
+		{"too long", strings.Repeat("a", 60), []string{"s5n-", "at most 63 characters"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newHarness(t)
+			opts := h.unattended()
+			opts.Login = tc.login
+			_, err := h.run(opts)
+			if err == nil {
+				t.Fatalf("login %q was accepted", tc.login)
+			}
+			for _, want := range tc.want {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("the refusal does not say %q: %v", want, err)
+				}
+			}
+			if h.exists(h.grantPath) || h.exists(h.valuesPath) {
+				t.Fatal("a refused login wrote a file")
+			}
+		})
+	}
+}
+
 func TestReRunSplicesOnlyTheChangedKey(t *testing.T) {
 	h := newHarness(t)
 	write(t, h.grantPath, reRunGrant)

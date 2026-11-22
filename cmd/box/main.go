@@ -804,7 +804,7 @@ func addInitFlags(fs *flag.FlagSet) *initFlags {
 	o := &initFlags{fs: fs, chart: addChartFlags(fs, chartVersionInstalls)}
 	o.grantPath = fs.String("grant", seedbox.GrantPath("root"), "the root-owned grant file to write")
 	o.valuesPath = fs.String("values", valuesDefault, "the user's values file to edit")
-	o.namespace = fs.String("namespace", "seedbox", "the box's namespace; a re-run keeps whatever the grant says")
+	o.namespace = fs.String("namespace", "", "the box's namespace (default s5n-<login>); a re-run keeps whatever the grant says")
 	o.domain = fs.String("domain", "", "the domain this box is reached at, e.g. box.example.com")
 	o.dataPath = fs.String("data-path", "", "the host path downloads and media live on")
 	o.configPath = fs.String("config-path", "", "the host path the apps keep their settings on")

@@ -306,10 +306,6 @@ func (d *Decision) Run(ctx context.Context, opts Options) (Result, error) {
 	}
 	grantNow := sb.Grant.Map()
 
-	namespace, err := d.namespace(opts, grantNow, res.ReRun)
-	if err != nil {
-		return res, err
-	}
 	// The grant's questions, in the order docs/box.md lists them.
 	//
 	// The flow has four steps of its own, and a fifth when an app has
@@ -414,14 +410,6 @@ func (d *Decision) Run(ctx context.Context, opts Options) (Result, error) {
 		// nothing here: it is about to switch the apps it moved on.
 		d.report().Muted("nothing runs yet: this box has no apps. add one with `box install <app>`, or run `box migrate` for an install that already exists")
 	}
-	// The peer port: a port on the node, so root settles it once and the grant
-	// keeps it from then on. It is read here, before any answer is written and
-	// before the questions that depend on the app list, because a cluster with
-	// no free port in the band is a refusal and not a half-finished dialog.
-	port, err := d.torrentPort(ctx, namespace, apps, base, grantNow)
-	if err != nil {
-		return res, err
-	}
 	// The app list decides whether there is a fifth step, so correct the
 	// counter before the questions that belong to it.
 	d.steps = 4
@@ -471,6 +459,23 @@ func (d *Decision) Run(ctx context.Context, opts Options) (Result, error) {
 		return res, d.stop(err)
 	}
 	res.Login, res.NewPassword, res.GeneratedPassword = loginName, newPassword, generated
+
+	// The namespace follows the login: a seedbox's is s5n-<login>, beside box's
+	// own s5n-system and s5n-gateway. A re-run keeps the grant's, so a box that
+	// already has `seedbox` keeps it whatever this run's login is, and an
+	// explicit --namespace still wins on a first run.
+	namespace, err := d.namespace(opts, grantNow, res.ReRun, loginName)
+	if err != nil {
+		return res, err
+	}
+	// The peer port: a port on the node, so root settles it once and the grant
+	// keeps it from then on. It is read here, before any answer is written and
+	// before the questions that depend on the app list, because a cluster with
+	// no free port in the band is a refusal and not a half-finished dialog.
+	port, err := d.torrentPort(ctx, namespace, apps, base, grantNow)
+	if err != nil {
+		return res, err
+	}
 
 	// Each selected app's own questions, from the catalog. A transient one is
 	// not asked here: it goes to the apply, after its confirm.
@@ -714,8 +719,10 @@ func (d *Decision) askText(q textQuestion) (string, error) {
 
 // namespace resolves the one grant key that is not a question. A seedbox's
 // namespace is its identity -- claim names and storage are derived from it -- so
-// a re-run never changes it, whatever the flag says.
-func (d *Decision) namespace(opts Options, grantNow map[string]any, reRun bool) (string, error) {
+// a re-run never changes it, whatever the flag says. A first run takes the flag
+// when it was given, and otherwise derives s5n-<login>: every seedbox gets one,
+// root's included, beside box's own s5n-system and s5n-gateway.
+func (d *Decision) namespace(opts Options, grantNow map[string]any, reRun bool, login string) (string, error) {
 	if reRun {
 		if ns, ok := lookupPath(grantNow, "namespace"); ok {
 			if s, ok := ns.(string); ok && strings.TrimSpace(s) != "" {
@@ -725,10 +732,10 @@ func (d *Decision) namespace(opts Options, grantNow map[string]any, reRun bool) 
 	}
 	ns := strings.TrimSpace(opts.Namespace)
 	if ns == "" {
-		return "", errors.New("namespace is needed: pass --namespace")
+		ns = SeedboxNamespace(login)
 	}
 	if err := validNamespace(ns); err != nil {
-		return "", fmt.Errorf("--namespace %q: %w", ns, err)
+		return "", fmt.Errorf("namespace %q: %w", ns, err)
 	}
 	return ns, nil
 }
@@ -1437,8 +1444,15 @@ func validHostPath(v string) error {
 }
 
 // validNamespace is the shape a Kubernetes namespace name has to have, said
-// without Kubernetes words.
+// without Kubernetes words: a DNS-1123 label, which is also what a node port's
+// Kubernetes rules and a Service's DNS name need it to be.
 func validNamespace(v string) error {
+	if v == "" {
+		return errors.New("a seedbox name cannot be empty")
+	}
+	if len(v) > 63 {
+		return fmt.Errorf("a seedbox name is at most 63 characters, and this one is %d", len(v))
+	}
 	for i, r := range v {
 		lower := r >= 'a' && r <= 'z'
 		digit := r >= '0' && r <= '9'

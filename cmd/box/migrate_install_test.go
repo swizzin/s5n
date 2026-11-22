@@ -84,6 +84,44 @@ func TestInstallAnswersRefuseEveryMissingOneByName(t *testing.T) {
 	}
 }
 
+func TestInstallAnswersLeaveTheNamespaceToTheLogin(t *testing.T) {
+	o, inst := installFlagSet(t)
+	*inst.domain = "box.example.com"
+	*inst.login = "alice"
+	*inst.password = "/run/password"
+	*inst.configPath = "/srv/config"
+	empty := ""
+	inst.namespace = &empty
+	got, err := installAnswers(o, inst, planWithData())
+	if err != nil {
+		t.Fatalf("installAnswers: %v", err)
+	}
+	for _, arg := range got {
+		if arg == "--namespace" {
+			t.Fatalf("the answers name a namespace box was not given: %v", got)
+		}
+	}
+}
+
+func TestInstallAnswersRefuseALoginThatCannotBeASeedbox(t *testing.T) {
+	for _, login := range []string{"system", "gateway", "alice@example.com"} {
+		t.Run(login, func(t *testing.T) {
+			o, inst := installFlagSet(t)
+			*inst.domain = "box.example.com"
+			*inst.login = login
+			*inst.password = "/run/password"
+			*inst.configPath = "/srv/config"
+			_, err := installAnswers(o, inst, planWithData())
+			if err == nil {
+				t.Fatalf("login %q was accepted", login)
+			}
+			if !strings.Contains(err.Error(), login) {
+				t.Errorf("the refusal does not name %q: %v", login, err)
+			}
+		})
+	}
+}
+
 func TestInstallAnswersNeedADataRoot(t *testing.T) {
 	o, inst := installFlagSet(t)
 	*inst.domain = "box.example.com"

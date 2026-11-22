@@ -29,6 +29,7 @@ import (
 	"github.com/swizzin/s5n/internal/hostconf"
 	"github.com/swizzin/s5n/internal/migrate/plan"
 	"github.com/swizzin/s5n/internal/say"
+	"github.com/swizzin/s5n/internal/setup"
 )
 
 // installFlags are the answers a host with no box still has to be given: the
@@ -55,7 +56,7 @@ func addInstallFlags(fs *flag.FlagSet) *installFlags {
 		login:      fs.String("login", "", "the account the login page admits (required on a host with no box)"),
 		password:   fs.String("password-file", "", "read the login's password from this file, or from stdin with - (required on a host with no box)"),
 		configPath: fs.String("config-path", "", "the host path the apps keep their settings on (required on a host with no box)"),
-		namespace:  fs.String("box-namespace", "seedbox", "the namespace the seedbox is installed in"),
+		namespace:  fs.String("box-namespace", "", "the namespace the seedbox is installed in (default s5n-<login> from --login)"),
 		record:     fs.String("record", bootstrap.RecordPath, "where box records the cluster decision"),
 	}
 }
@@ -171,13 +172,18 @@ func installAnswers(o *migrateApplyFlags, inst *installFlags, p *plan.Plan) ([]s
 	if len(missing) > 0 {
 		return nil, fmt.Errorf("this host has no box, so migrate installs one: it needs %s, the answers a plan cannot hold", strings.Join(missing, ", "))
 	}
+	// The login decides the seedbox's namespace (s5n-<login>), so it is checked
+	// here, before bootstrap installs anything: a name that could never be a
+	// namespace is a refusal, not a seedbox box cannot create.
+	if err := setup.ValidateLogin(*inst.login); err != nil {
+		return nil, err
+	}
 	if p.Data == nil || strings.TrimSpace(p.Data.Root) == "" {
 		return nil, errors.New("the plan names no data root, and a host with no box has no storage to adopt into: `box migrate cutover` writes a plan with one")
 	}
 	// The apps go in off; the migration switches on what it moved.
 	answers := []string{
 		"--apps", "none",
-		"--namespace", *inst.namespace,
 		// The two files are the ones this run already has: init writes them,
 		// and the adoption reads them back, so the install and the adoption
 		// cannot end up on different grants.
@@ -188,6 +194,11 @@ func installAnswers(o *migrateApplyFlags, inst *installFlags, p *plan.Plan) ([]s
 		"--domain", *inst.domain,
 		"--login", *inst.login,
 		"--password-file", *inst.password,
+	}
+	// --box-namespace is passed only when it was given: with none, init derives
+	// the seedbox's namespace from the login, the same way `box init` does.
+	if ns := strings.TrimSpace(*inst.namespace); ns != "" {
+		answers = append(answers, "--namespace", ns)
 	}
 	// The owner is the plan's when the source recorded one: the copied configs
 	// are owned by the uid that owned them, and so is the data. Otherwise init
