@@ -149,8 +149,10 @@ func TestTLSHostsProceedsSelfSignedWhenNothingResolves(t *testing.T) {
 	if got.Record != wantRecord {
 		t.Fatalf("record = %q, want %q", got.Record, wantRecord)
 	}
-	wantLine := "gamma.box.example.com has no DNS record, so its certificate is self-signed; " + wantRecord +
-		", then run box apply again to move it to Let's Encrypt"
+	// One sentence, naming the host, in the words box has always used: the
+	// record to add and the command that moves it once the record exists.
+	wantLine := "gamma.box.example.com has no DNS record, so its certificate is self-signed; " +
+		"add a record for it, then run box apply again to move it to Let's Encrypt"
 	if !strings.Contains(out.String(), wantLine) {
 		t.Fatalf("apply did not explain the self-signed certificate:\n%s", out)
 	}
@@ -287,5 +289,31 @@ func TestApplyHostsSkipsNamesWithoutAnIssuer(t *testing.T) {
 	}
 	if err := ApplyHosts(context.Background(), nil, []Host{{Host: "gamma.box.example.com", Issuer: IssuerSelfSigned}}); err == nil {
 		t.Fatal("a step with nothing to write a host with was accepted")
+	}
+}
+
+// TestOneDNSWarningNamesEveryHost: a run whose names have no records says so
+// once, naming all of them, instead of printing the same sentence per host.
+func TestOneDNSWarningNamesEveryHost(t *testing.T) {
+	rec := &hostRecorder{}
+	step, out := hostStep(t, rec)
+	hosts := []string{"gamma.box.example.com", "delta.box.example.com", "epsilon.box.example.com"}
+	if err := step.Ensure(context.Background(), hosts); err != nil {
+		t.Fatalf("ensure: %v\n%s", err, out)
+	}
+	if got := strings.Count(out.String(), "has no DNS record"); got > 0 {
+		t.Fatalf("a run with several host names printed the warning in the singular %d time(s):\n%s", got, out)
+	}
+	if got := strings.Count(out.String(), "have no DNS record"); got != 1 {
+		t.Fatalf("the warning is printed %d times, want one for the whole run:\n%s", got, out)
+	}
+	want := "gamma.box.example.com, delta.box.example.com and epsilon.box.example.com have no DNS record, so their certificates are self-signed; add a record for each, then run box apply again to move them to Let's Encrypt"
+	if !strings.Contains(out.String(), want) {
+		t.Fatalf("the one warning does not name every host:\n%s", out)
+	}
+	// And nothing was answered per host: every name is written once, in one
+	// step, exactly as before.
+	if len(rec.hosts) != len(hosts) {
+		t.Fatalf("wrote %d hosts, want all %d", len(rec.hosts), len(hosts))
 	}
 }

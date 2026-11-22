@@ -213,7 +213,39 @@ func (c *Certificates) Apply(ctx context.Context) ([]CertificateResult, error) {
 			return results, err
 		}
 	}
+	c.reportHosts(results)
 	return results, nil
+}
+
+// reportHosts closes the run with one row per name: what that host is served
+// as. The per-object lines -- a listener, a policy, a Certificate, a redirect
+// each -- are progress the live renderer already showed, and a run writing
+// four hosts printed twenty of them after the last thing a person cares about.
+func (c *Certificates) reportHosts(results []CertificateResult) {
+	rows := make([]say.TableRow, 0, len(results))
+	for _, res := range results {
+		switch {
+		case res.Ready:
+			rows = append(rows, say.TableRow{Glyph: "✓", Name: res.Host, Facts: []string{"https (" + issuerLabel(res.Issuer) + ")"}})
+		case res.Reason != "":
+			rows = append(rows, say.TableRow{Glyph: "!", Name: res.Host, Facts: []string{"http only: certificate not Ready (" + res.Reason + "); box retries on the next run"}})
+		default:
+			rows = append(rows, say.TableRow{Glyph: "·", Name: res.Host, Facts: []string{"not served yet"}})
+		}
+	}
+	c.report().Table("front door", rows)
+}
+
+// issuerLabel is the ClusterIssuer a person reads: the object name is root's
+// spelling, and "Let's Encrypt" is what an operator knows it as.
+func issuerLabel(issuer string) string {
+	switch issuer {
+	case LetsEncryptIssuer, "letsencrypt":
+		return "Let's Encrypt"
+	case SelfSignedIssuer, "selfsigned":
+		return "self-signed"
+	}
+	return issuer
 }
 
 // stage is one host's write half: port 80 without a login, the Allow that
@@ -248,7 +280,7 @@ func (c *Certificates) stage(ctx context.Context, cl CertificateCluster, res *Ce
 		step.Failed(err)
 		return fmt.Errorf("certificate for %s: %w", res.Host, err)
 	}
-	step.Done(fmt.Sprintf("applied Certificate %s/%s (issuer %s)", GatewayNamespace, res.Name, res.Issuer))
+	step.Done("")
 	return nil
 }
 
@@ -331,19 +363,17 @@ func waitDone(ready int, results []CertificateResult) string {
 	return fmt.Sprintf("%d of %d Certificates are Ready", ready, len(results))
 }
 
-// serve is one host's second half, after the run's wait: the success line, the
-// box-root re-issue for a self-signed certificate, then its HTTPS listener and
-// the redirect. A host that is not Ready gets the warning and keeps only port
-// 80: the listener and its Allow are what let cert-manager try again.
+// serve is one host's second half, after the run's wait: the box-root re-issue
+// for a self-signed certificate, then its HTTPS listener and the redirect. A
+// host that is not Ready keeps only port 80 -- the listener and its Allow are
+// what let cert-manager try again -- and the run's host row says so.
 func (c *Certificates) serve(ctx context.Context, cl CertificateCluster, res *CertificateResult) error {
-	r := c.report()
 	if !res.Ready {
 		// Port 80 stays as it is, but the host is not served: there is no
 		// HTTPS listener to serve it and no redirect to send anyone there.
-		r.Warn(fmt.Sprintf("certificate %s/%s is not Ready (%s): %s is not served until it is; only the ACME challenge answers on port 80; box retries on the next run", GatewayNamespace, res.Name, res.Reason, res.Host))
+		// The run's host row says which host and why.
 		return nil
 	}
-	r.Success(fmt.Sprintf("certificate %s/%s is Ready", GatewayNamespace, res.Name))
 
 	// A self-signed host's certificate has to chain to the box root, or the
 	// anchor box writes into the seedbox's namespace is not the anchor its
@@ -658,7 +688,7 @@ func (d *CertificateDecision) attachHTTP(ctx context.Context, cl CertificateClus
 		step.Failed(err)
 		return fmt.Errorf("HTTP listener for %s: %w", host, err)
 	}
-	step.Done(fmt.Sprintf("applied listener %s on %s", HTTPListenerName(host), host))
+	step.Done("")
 	return nil
 }
 
@@ -685,7 +715,7 @@ func (d *CertificateDecision) attachHTTPS(ctx context.Context, cl CertificateClu
 		step.Failed(err)
 		return fmt.Errorf("HTTPS listener for %s: %w", host, err)
 	}
-	step.Done(fmt.Sprintf("applied listener %s on %s", ListenerName(host), host))
+	step.Done("")
 	return nil
 }
 
@@ -722,7 +752,7 @@ func (d *CertificateDecision) listenerPolicy(ctx context.Context, cl Certificate
 		step.Failed(err)
 		return fmt.Errorf("login-free listener policy for %s: %w", d.Host, err)
 	}
-	step.Done(fmt.Sprintf("applied SecurityPolicy %s/%s: no login on %s", GatewayNamespace, ListenerPolicyName(d.Host), HTTPListenerName(d.Host)))
+	step.Done("")
 	return nil
 }
 
@@ -740,7 +770,7 @@ func (d *CertificateDecision) redirect(ctx context.Context, cl Cluster, name str
 		step.Failed(err)
 		return fmt.Errorf("redirect for %s: %w", d.Host, err)
 	}
-	step.Done(fmt.Sprintf("applied HTTP->HTTPS redirect for %s (/.well-known/acme-challenge/ stays with the solver)", d.Host))
+	step.Done("")
 	return nil
 }
 

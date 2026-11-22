@@ -327,9 +327,25 @@ run; no API key is minted or kept. Hiding the app's own login form doesn't switc
 password login off, so this account is reachable only past the edge's login or from the
 wiring Job, which the NetworkPolicy allows. The account is named `s5n` in both apps; it is the
 wiring Job's, not another way in for the person, whose way in is still the provider.
-PeerBanHelper's equivalent is its API token: generated once in the same Secret, handed
-to the app through its environment, and used only by the Job, since the app's own login
-is switched off behind the edge.
+PeerBanHelper's token is that app's version of the same trade. It is generated once in
+the release Secret and handed to the app through its environment, and it is load-bearing
+twice over even though nobody signs in with it: PBH reads it as its own `pbh.apiToken`,
+and a blank one sends the app into its first-run wizard instead of serving the API (and
+while it is uninitialised, `/api/oobe/*` is open). It is not a check the app makes: with
+`pbh.web.requireLogin=false` the switch is off before PBH reads a token at all, so a
+request carrying no token -- or the wrong one -- is let through, and nothing would
+notice the Secret and the app disagreeing. What keeps PBH's API from anyone but this
+seedbox's user is the edge in front and the NetworkPolicy, not the token; the wiring
+Job is the only client that carries it. Readiness depends on the same switch: the probe
+asks the app's API, which answers without a credential only because the login is off.
+
+A browser that was ever given PBH's token keeps it in `localStorage` (a `?token=` link,
+or the form), and PBH counts every failed login against the caller's network: three per
+page load trip its 15-minute lockout, after which every request answers 429 and a
+working box looks like a routing fault. The cure is the browser's own: clear the site's
+data for the app's host (or open it in a private window). The token the form asks for is
+the release Secret's `pbh-token`, which is not something a person should have to
+re-enter.
 
 **The login is on root's Gateway, and users can't take it off (decided).** The
 SecurityPolicy that sends requests to Authelia targets the `s5n` Gateway itself and lives

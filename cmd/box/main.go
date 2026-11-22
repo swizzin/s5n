@@ -1004,11 +1004,8 @@ func (o *initFlags) run(ctx context.Context, kubeconfig string, yes, plain bool,
 	// The final card's one warning: a name with no DNS record still installs,
 	// self-signed, and a re-run is what moves it. Named per host, because an
 	// app's name is a record the operator may not have thought about.
-	for _, h := range res.Hosts {
-		if !h.NoDNS {
-			continue
-		}
-		out.Warn(setup.NoDNSWarning(h, "init"))
+	if warning, ok := setup.NoDNSWarning(res.Hosts, "init"); ok {
+		out.Warn(warning)
 	}
 	return nil
 }

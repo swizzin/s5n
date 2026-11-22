@@ -1812,8 +1812,9 @@ EOF
   cert=s5n-tls-box-example-test
   grep -qF "tls: tls.issuer=letsencrypt forces Let's Encrypt" "$WORK/bootstrap1.txt" ||
     { echo "init did not say the issuer was forced"; fail=1; }
-  grep -qF "applied Certificate s5n-gateway/${cert} (issuer s5n-letsencrypt)" "$WORK/bootstrap1.txt" ||
-    { echo "box did not apply the certificate with the production issuer"; fail=1; }
+  grep -qE "^  ✓ ${DOMAIN} +https \\(Let's Encrypt\\)" "$WORK/bootstrap1.txt" ||
+    { echo "box did not serve the box's own host from Let's Encrypt:";
+      grep -E "front door|${DOMAIN}" "$WORK/bootstrap1.txt" | tail -3; fail=1; }
   $K -n s5n-gateway wait --for=condition=Ready "certificate/$cert" --timeout=180s ||
     { echo "the Certificate never became Ready"; fail=1; }
   cert_issuer=$($K -n s5n-gateway get certificate "$cert" -o jsonpath='{.spec.issuerRef.name}')
@@ -2191,8 +2192,8 @@ print("  app routes: %d HTTPRoutes, none pins a sectionName" % len(items))
     app=${app_host%%:*}; host=${app_host##*:}
     label=${host//./-}
     cert=s5n-tls-${label}
-    grep -qF "applied Certificate s5n-gateway/${cert} (issuer s5n-letsencrypt)" "$WORK/bootstrap1.txt" ||
-      { echo "box did not apply ${cert} with the production issuer"; fail=1; }
+    grep -qE "^  ✓ ${host} +https \\(Let's Encrypt\\)" "$WORK/bootstrap1.txt" ||
+      { echo "box did not serve ${host} from Let's Encrypt"; fail=1; }
     $K -n s5n-gateway wait --for=condition=Ready "certificate/$cert" --timeout=180s ||
       { echo "the ${app} host's Certificate never became Ready"; fail=1; }
     got_issuer=$($K -n s5n-gateway get certificate "$cert" -o jsonpath='{.spec.issuerRef.name}' || true)
@@ -2271,6 +2272,19 @@ print("  app routes: %d HTTPRoutes, none pins a sectionName" % len(items))
   echo "  GET https://${PBH_HOST}/api/downloaders with the portal's session: ${pbh_api}"
   [ "$pbh_api" = 200 ] ||
     { echo "PBH answered the app's own API with ${pbh_api}: it is asking for a second login"; fail=1; }
+  # The call its page makes as it loads, and the one whose 401 renders PBH's
+  # token form: a fresh browser holds no token, so it posts an empty one. 200
+  # is the dialog not appearing; with the app's login switched off PBH says so
+  # in its own words, and that message is what says the switch is the reason.
+  pbh_login=$(curl -sS -o "$WORK/pbh-login.json" -w '%{http_code}' -b "$JAR" \
+    -X POST -H 'Content-Type: application/json' -d '{"token":""}' \
+    --resolve "${PBH_HOST}:443:${gw_addr}" --cacert "$WORK/pebble-root.pem" \
+    "https://${PBH_HOST}/api/auth/login" 2>/dev/null || true)
+  echo "  POST https://${PBH_HOST}/api/auth/login with the portal's session: ${pbh_login} $(head -c 120 "$WORK/pbh-login.json" 2>/dev/null || true)"
+  [ "$pbh_login" = 200 ] ||
+    { echo "PBH answered the page's first call with ${pbh_login}: a browser shows its token dialog"; fail=1; }
+  grep -qi "Skipping WebUI login" "$WORK/pbh-login.json" ||
+    { echo "PBH's login answered 200 without saying the switch skipped it, so it may be a different 200: $(head -c 200 "$WORK/pbh-login.json")"; fail=1; }
   pbh_id=$(python3 -c 'import json,sys
 rows = json.load(open(sys.argv[1], encoding="utf-8"))["data"]
 print(rows[0]["id"] if len(rows) == 1 else "")' "$WORK/pbh-downloaders.json" 2>/dev/null || true)
@@ -3220,13 +3234,13 @@ PY
   fi
   grep -qF "Certificate, listener and login rule for ${SEERR_HOST}" "$WORK/apply-seerr.txt" ||
     { echo "apply did not show the login rule it would write for ${SEERR_HOST}"; fail=1; }
-  grep -qF "applied Certificate s5n-gateway/${seerr_cert} (issuer s5n-letsencrypt)" "$WORK/apply-seerr.txt" ||
-    { echo "apply did not write ${seerr_cert} with the production issuer"; fail=1; }
+  grep -qE "^  ✓ ${SEERR_HOST} +https \\(Let's Encrypt\\)" "$WORK/apply-seerr.txt" ||
+    { echo "apply did not serve ${SEERR_HOST} from Let's Encrypt"; fail=1; }
   grep -qF "login: the rule for ${SEERR_HOST} is in place" "$WORK/apply-seerr.txt" ||
     { echo "apply did not write the login's rule for ${SEERR_HOST}"; fail=1; }
   # The order is the promise: the host is served before the release that renders
   # its route moves, so there is never a route on a name nothing answers on.
-  seerr_cert_line=$(grep -n "applied Certificate s5n-gateway/${seerr_cert}" "$WORK/apply-seerr.txt" | head -1 | cut -d: -f1 || true)
+  seerr_cert_line=$(grep -nE "^  ✓ ${SEERR_HOST} +https" "$WORK/apply-seerr.txt" | head -1 | cut -d: -f1 || true)
   seerr_rule_line=$(grep -n "login: the rule for ${SEERR_HOST} is in place" "$WORK/apply-seerr.txt" | head -1 | cut -d: -f1 || true)
   seerr_helm_line=$(grep -n "applied: s5n revision" "$WORK/apply-seerr.txt" | head -1 | cut -d: -f1 || true)
   echo "  login rule at line ${seerr_rule_line}, certificate at line ${seerr_cert_line}, release at line ${seerr_helm_line}"
@@ -4300,12 +4314,21 @@ PYCHECK
   hosts=("$DOMAIN" "$PLEX_HOST" "$SEERR_HOST" "$PBH_HOST")
   certs=()
   for host in "${hosts[@]}"; do certs+=("$(host_cert "$host")"); done
-  grep -qF "${DOMAIN} has no DNS record, so its certificate is self-signed; add one, then run box init again to move it to Let's Encrypt" "$WORK/bootstrap1.txt" ||
-    { echo "the final card does not name the domain's missing record"; fail=1; }
-  for host in "$PLEX_HOST" "$SEERR_HOST" "$PBH_HOST"; do
-    grep -qF "${host} has no DNS record, so its certificate is self-signed; add either a wildcard *.${DOMAIN} or a record for ${host}, then run box init again to move it to Let's Encrypt" "$WORK/bootstrap1.txt" ||
-      { echo "the final card does not name ${host}'s missing record"; fail=1; }
+  no_dns_lines=$(grep -c "have no DNS record" "$WORK/bootstrap1.txt" || true)
+  [ "$no_dns_lines" = 1 ] ||
+    { echo "the final card prints ${no_dns_lines:-no} no-DNS lines, want one naming every host:";
+      grep "no DNS record" "$WORK/bootstrap1.txt" || true; fail=1; }
+  no_dns_line=$(grep "have no DNS record" "$WORK/bootstrap1.txt" | head -1 || true)
+  for host in "${hosts[@]}"; do
+    case "$no_dns_line" in
+      *"$host"*) ;;
+      *) echo "the one no-DNS line does not name ${host}: ${no_dns_line}"; fail=1 ;;
+    esac
   done
+  case "$no_dns_line" in
+    *"add a record for each"*) ;;
+    *) echo "the no-DNS line does not say what to add: ${no_dns_line}"; fail=1 ;;
+  esac
   $K -n s5n-gateway wait --for=condition=Ready "certificate/$app_cert" --timeout=120s ||
     { echo "the app host's self-signed Certificate never became Ready"; fail=1; }
   [ "$($K -n s5n-gateway get certificate "$app_cert" -o jsonpath='{.spec.issuerRef.name}')" = s5n-selfsigned ] ||

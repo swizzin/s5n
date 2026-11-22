@@ -445,15 +445,20 @@ spec:
                   name: {{ include "s5n.secretName" $root }}
                   key: pbh-token
             # One login, not two. PBH's WebUI cannot accept a token the edge
-            # supplies -- its bundle calls /api/... with a token it holds in the
-            # page's memory, and an HTTPRoute filter cannot read a Secret to add
-            # one -- so the app's own login is switched off and the edge's is the
-            # only one (the same arrangement as qui's, and Maintainerr has no
-            # login at all). This switch is the app's own:
+            # supplies: its login handler reads the token from the request BODY
+            # (PBHAuthenticateController.handleLogin), which is what its page
+            # posts, so no header an HTTPRoute filter injects can answer the
+            # login -- and Envoy Gateway 1.9.3's route credentialInjection,
+            # which can read a Secret and set an Authorization header, cannot
+            # reach a JSON field. With this switch off no header is checked at
+            # all, so injecting one would add a Secret to every request's path
+            # for no change in who gets in. The app's own login is switched off
+            # and the edge's is the only one (the same arrangement as qui's,
+            # and Maintainerr has no login at all). The switch is the app's own:
             # `pbh.web.requireLogin`, ExternalSwitch, read by Javalin's auth
-            # gate when a request carries no valid token. The token above is
-            # still set, because an empty one sends PBH into OOBE instead of
-            # serving the API at all.
+            # gate before the body when a request carries no valid token. The
+            # token above is still set, because an empty one sends PBH into
+            # OOBE instead of serving the API at all.
             - name: PBH_WEB_REQUIRELOGIN
               value: "false"
             {{- else if eq $inst.app "maintainerr" }}
