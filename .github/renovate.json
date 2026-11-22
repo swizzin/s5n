@@ -5,6 +5,8 @@
   "baseBranchPatterns": ["main", "develop"],
   "gitIgnoredAuthors": ["355469897+s5n-sums[bot]@users.noreply.github.com"],
   "automerge": false,
+  "prHourlyLimit": 0,
+  "prConcurrentLimit": 0,
   "customManagers": [
     {
       "customType": "regex",
@@ -95,6 +97,11 @@
       "description": "A test-only image in hack/ changes what the e2e runs, never what box ships: it is never automerged, whatever a preset later says.",
       "matchFileNames": ["hack/**"],
       "automerge": false
+    },
+    {
+      "description": "No hourly limit anywhere (the top-level 0s replace config:recommended's two an hour): main takes only the chart's pins, which are what users run, and its patch bumps merge themselves once CI is green, so holding them back buys nothing. develop takes everything else -- Go modules, GitHub Actions, the test images -- which can arrive twenty at once, and every pull request runs the full e2e, so at most five are open there at a time: the next opens as one merges or closes.",
+      "matchBaseBranches": ["develop"],
+      "prConcurrentLimit": 5
     },
     {
       "description": "Nothing ever merges itself on develop, from any file, whatever a rule above says: develop is where a change is read before it is released. This rule is last so it wins.",
