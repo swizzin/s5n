@@ -149,6 +149,33 @@ func joinInstance(app, suffix string) string {
 	return app + "-" + suffix
 }
 
+// Categories is every instance's library directory, by box's instance name:
+// the `category` the values give it. It is every entry of an app that takes
+// instances, on or off, because a migration switches its own instances on after
+// the read: the plan has to name the directory the release will lay out, and
+// that is the one its values already say.
+func Categories(values map[string]any) map[string]string {
+	apps, _ := values["apps"].(map[string]any)
+	out := map[string]string{}
+	for app, raw := range apps {
+		entry, _ := raw.(map[string]any)
+		list, takesInstances := entry["instances"].([]any)
+		if !takesInstances {
+			continue
+		}
+		for _, raw := range list {
+			inst, _ := raw.(map[string]any)
+			suffix, _ := inst["suffix"].(string)
+			category, _ := inst["category"].(string)
+			if category == "" {
+				continue
+			}
+			out[joinInstance(app, suffix)] = category
+		}
+	}
+	return out
+}
+
 // EnabledIn reports whether the values switch one instance on. Every instance
 // of an app has to exist as an entry *and* be enabled: an app that is on with
 // its 4K entry off runs one Sonarr, not two.

@@ -37,6 +37,7 @@ import (
 	"github.com/swizzin/s5n/internal/migrate/plan"
 	"github.com/swizzin/s5n/internal/release"
 	"github.com/swizzin/s5n/internal/say"
+	"github.com/swizzin/s5n/internal/seedbox"
 	"github.com/swizzin/s5n/internal/setup"
 )
 
@@ -136,6 +137,11 @@ type discoverOptions struct {
 	// Now is the clock the snapshot's name and manifest come from. Empty means
 	// time.Now: a test that compares two runs' names hands it one.
 	Now func() time.Time
+	// ValuesPath is the values file this read is for, when it has one: the
+	// categories the plan renames the library onto are the ones the release
+	// will render, so cutover hands over the file it installs from. Empty is a
+	// read with the chart's own values: discover names no file.
+	ValuesPath string
 	// Prompt asks the defaults Settle took. Nil is an unattended run: every
 	// default is taken and the run says so, through Say. A run with a terminal
 	// on stdin builds one (runMigrateDiscover, runMigrateCutover); a test
@@ -304,9 +310,17 @@ func readSource(ctx context.Context, o discoverOptions) (migrationRead, error) {
 		return read, err
 	}
 	read.chart = chart
+	// The library's directories are box's categories, and the categories are
+	// the values', so the read asks the release what it would render.
+	categories, err := readCategories(o, chart)
+	if err != nil {
+		read.text = discoveryReport(nil, read.report, "", nil, err)
+		return read, err
+	}
 	p, rep, derr := discover.Discover(ctx, src, discover.Options{
 		Namespaces: o.Namespaces,
 		Variants:   chart.Variants,
+		Categories: categories,
 		// The host's filesystem, read-only: every open below is a read.
 		ConfigFS: os.DirFS(root),
 	})
@@ -316,6 +330,21 @@ func readSource(ctx context.Context, o discoverOptions) (migrationRead, error) {
 		return read, derr
 	}
 	return read, nil
+}
+
+// readCategories is the directory each instance's library is laid out in, from
+// the values this read is for: the file cutover was given, or the chart's own.
+//
+// A read that cannot work them out is refused rather than continued: every
+// library directory would keep the source's name, and the Arrs would be wired
+// with a second root folder beside it -- which is the migration this mapping
+// exists to make unnecessary.
+func readCategories(o discoverOptions, chart release.Chart) (map[string]string, error) {
+	values, err := seedbox.Pending(seedbox.Chart{Values: chart.Values, Schema: chart.Schema}, o.ValuesPath)
+	if err != nil {
+		return nil, fmt.Errorf("the values this read is for name no categories: %w", err)
+	}
+	return apply.Categories(values), nil
 }
 
 // settleRead runs every rewriter's check over the configs this read saw and

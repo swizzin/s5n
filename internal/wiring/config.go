@@ -109,8 +109,14 @@ type SeerrConfig struct {
 // WebUI skips its login for the release's addresses (internal/qbtconf seals
 // that; docs/box.md, "Logins"), so this Job talks to it with an empty username
 // and password, like every other app that calls it.
+//
+// SavePath is the downloads root the data contract gives qBittorrent
+// (/data/downloads). A category with no save path of its own downloads into
+// <SavePath>/<category>, which is what a migrated category has and what makes
+// it already right.
 type QbitConfig struct {
-	URL string `json:"url"`
+	URL      string `json:"url"`
+	SavePath string `json:"savePath"`
 }
 
 // ProwlarrConfig points at Prowlarr. SelfURL is Prowlarr's own address as the
@@ -123,15 +129,22 @@ type ProwlarrConfig struct {
 }
 
 // Instance is one Arr instance (sonarr, sonarr-4k, radarr, ...).
+//
+// Category is the directory box lays this instance's library out in
+// (/data/media/<category>), and DownloadCategory is the qBittorrent category it
+// downloads into (/data/downloads/<downloadCategory>). They are the same value
+// on a fresh box; a migrated one keeps the source's download category, because
+// its torrents are already in that directory and box never moves them.
 type Instance struct {
-	Name       string `json:"name"`
-	Kind       string `json:"kind"`
-	URL        string `json:"url"`
-	URLBase    string `json:"urlBase"`
-	APIKeyFile string `json:"apiKeyFile"`
-	Category   string `json:"category"`
-	SavePath   string `json:"savePath"`
-	RootFolder string `json:"rootFolder"`
+	Name             string `json:"name"`
+	Kind             string `json:"kind"`
+	URL              string `json:"url"`
+	URLBase          string `json:"urlBase"`
+	APIKeyFile       string `json:"apiKeyFile"`
+	Category         string `json:"category"`
+	DownloadCategory string `json:"downloadCategory"`
+	SavePath         string `json:"savePath"`
+	RootFolder       string `json:"rootFolder"`
 }
 
 // Load reads and validates the rendered config.
@@ -148,6 +161,14 @@ func Load(path string) (*Config, error) {
 	}
 	if c.TimeoutSeconds <= 0 {
 		c.TimeoutSeconds = 300
+	}
+	// A release from before the download category existed, or a hand-written
+	// config, downloads into the directory its library is in: the one value is
+	// both.
+	for i := range c.Instances {
+		if c.Instances[i].DownloadCategory == "" {
+			c.Instances[i].DownloadCategory = c.Instances[i].Category
+		}
 	}
 	if err := c.validate(); err != nil {
 		return nil, err
@@ -221,6 +242,16 @@ func (c *Config) validate() error {
 	return validateCategories(c.Instances)
 }
 
+// downloadCategory is the qBittorrent category an instance downloads into: its
+// own, or the directory its library is in for a release from before the two
+// were told apart.
+func downloadCategory(inst Instance) string {
+	if inst.DownloadCategory != "" {
+		return inst.DownloadCategory
+	}
+	return inst.Category
+}
+
 // validateInstance checks one Arr instance: its kind must be one the wiring
 // job knows how to register, and every field it registers must be set.
 func validateInstance(index int, inst Instance) error {
@@ -249,15 +280,15 @@ func validateTautulli(t *TautulliConfig, plex *PlexConfig) error {
 	return nil
 }
 
-// validateCategories refuses one category pointing at two save paths, because
-// both instances would then write into the same downloads.
+// validateCategories refuses one download category pointing at two save paths,
+// because both instances would then write into the same downloads.
 func validateCategories(instances []Instance) error {
 	seen := map[string]string{}
 	for _, inst := range instances {
-		if prev, ok := seen[inst.Category]; ok && prev != inst.SavePath {
-			return fmt.Errorf("category %q is used with two save paths (%s, %s)", inst.Category, prev, inst.SavePath)
+		if prev, ok := seen[inst.DownloadCategory]; ok && prev != inst.SavePath {
+			return fmt.Errorf("category %q is used with two save paths (%s, %s)", inst.DownloadCategory, prev, inst.SavePath)
 		}
-		seen[inst.Category] = inst.SavePath
+		seen[inst.DownloadCategory] = inst.SavePath
 	}
 	return nil
 }

@@ -191,6 +191,10 @@ apps:
     port: 8989
     envPrefix: SONARR
     instances:
+      # category is the directory under /data/media this instance's library
+      # lives in, and under /data/downloads what it downloads into. A migrated
+      # box sets downloadCategory to the category the source's torrents are
+      # already in (Movies, 4K/TV); the library still moves to category.
       - suffix: ""
         category: tv
         enabled: true

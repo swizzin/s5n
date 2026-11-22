@@ -287,14 +287,19 @@ func (r *Runner) work(ctx context.Context, res *Result) error {
 			return err
 		}
 
+		// One category per download directory, named the way the instance's
+		// torrents are: a migrated box keeps the source's name, and its own
+		// library category is never created in qBittorrent because nothing
+		// would download into it.
 		seen := map[string]bool{}
 		for _, inst := range c.Instances {
-			if seen[inst.Category] {
+			category := downloadCategory(inst)
+			if seen[category] {
 				continue
 			}
-			seen[inst.Category] = true
-			change, err := qbit.EnsureCategory(ctx, inst.Category, inst.SavePath)
-			if err := r.ensure(res, "qbittorrent/category/"+inst.Category, change, err); err != nil {
+			seen[category] = true
+			change, err := qbit.EnsureCategory(ctx, category, inst.SavePath, c.Qbittorrent.SavePath)
+			if err := r.ensure(res, "qbittorrent/category/"+category, change, err); err != nil {
 				return err
 			}
 		}
@@ -326,8 +331,10 @@ func (r *Runner) work(ctx context.Context, res *Result) error {
 
 		if qbit != nil {
 			result, err := arr.EnsureDownloadClient(ctx, apps.DownloadClientSpec{
-				Name:     "qBittorrent",
-				Category: inst.Category,
+				Name: "qBittorrent",
+				// The directory the instance's torrents are in, which a
+				// migrated box keeps.
+				Category: downloadCategory(inst),
 				Host:     host,
 				Port:     port,
 				// Owned, and owned as empty. qBittorrent skips its login for

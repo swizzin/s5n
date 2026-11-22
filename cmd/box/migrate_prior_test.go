@@ -274,6 +274,9 @@ func TestCutoverKeepsAnAppNewSinceTheEarlierRead(t *testing.T) {
 				delete(p.Apps, name)
 			}
 		}
+		// And with them the library mapping, whose every directory became a
+		// category of an app that read does not have.
+		p.Data.Folders = nil
 	})
 	writePrior(t, dir, time.Now().Add(-time.Hour), earlier)
 

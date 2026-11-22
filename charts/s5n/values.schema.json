@@ -559,7 +559,12 @@
               "category": {
                 "type": "string",
                 "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*(/[A-Za-z0-9][A-Za-z0-9._-]*)?$",
-                "description": "One name for the qBittorrent category and both /data subdirectories. Letters, digits, '.', '_' and '-' per segment, with at most one '/' for a qBittorrent subcategory (4K/Movies); the parent directory is created too."
+                "description": "The directory this instance's library lives in under /data/media, and its download directory unless downloadCategory says otherwise. Letters, digits, '.', '_' and '-' per segment, with at most one '/' for a subcategory (4K/Movies); the parent directory is created too."
+              },
+              "downloadCategory": {
+                "type": "string",
+                "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*(/[A-Za-z0-9][A-Za-z0-9._-]*)?$",
+                "description": "The qBittorrent category this instance downloads into, and the /data/downloads directory behind it. Defaults to category; a migrated box keeps the source's own, because its torrents are already there."
               },
               "enabled": {
                 "type": "boolean"

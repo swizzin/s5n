@@ -68,6 +68,7 @@ func runMigrateCutover(ctx context.Context, args []string) {
 	// --chart-version are apply's flags, and the plan's image variants come
 	// from that same chart.
 	o.chart = o.apply.chart
+	o.ValuesPath = *o.apply.valuesPath
 	replace := fs.Bool("replace-cluster", false, "stop after the final snapshot, for a host whose cluster box should replace with its own")
 	noPrior := fs.Bool("no-prior-discover", false, "take the first read of this source as enough to cut over from, without asking whether it was everything")
 	if err := fs.Parse(args); err != nil {

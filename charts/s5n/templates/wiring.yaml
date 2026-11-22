@@ -26,7 +26,8 @@ previous run's logs stay readable until then.
       "urlBase" (printf "/%s" $inst.name)
       "apiKeyFile" (printf "/etc/s5n/keys/%s-apikey" $inst.name)
       "category" $inst.category
-      "savePath" (printf "/data/downloads/%s" $inst.category)
+      "downloadCategory" $inst.downloadCategory
+      "savePath" (printf "/data/downloads/%s" $inst.downloadCategory)
       "rootFolder" (printf "/data/media/%s" $inst.category)) }}
 {{- end }}
 {{- end }}
@@ -40,8 +41,12 @@ previous run's logs stay readable until then.
 {{- /* The WebUI skips its login for the release's addresses (the init container
        seals that), so this Job -- like every app that calls it -- carries no
        credential at all: the URL is the whole entry. */}}
+{{- /* savePath is the data contract's downloads root, which a category with
+       no save path of its own downloads into: a migrated category is that
+       shape, and the Job must leave it alone. */}}
 {{- $_ := set $cfg "qbittorrent" (dict
-      "url" (printf "http://qbittorrent:%v" .Values.apps.qbittorrent.port)) }}
+      "url" (printf "http://qbittorrent:%v" .Values.apps.qbittorrent.port)
+      "savePath" "/data/downloads") }}
 {{- end }}
 {{- if and .Values.apps.prowlarr .Values.apps.prowlarr.enabled }}
 {{- $_ := set $cfg "prowlarr" (dict

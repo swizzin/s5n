@@ -115,8 +115,12 @@ type Env struct {
 // and for an app that takes instances an entry in apps.<app>.instances. Both
 // are grant keys (internal/seedbox/grant.go), so the implementation writes the
 // grant, not the user's values file.
+//
+// downloadCategory is the qBittorrent category the instance's torrents are
+// already in (plan.App.DownloadCategory), empty when the source said nothing
+// about it: the instance then downloads into its own category.
 type ValuesEditor interface {
-	Enable(instance string) error
+	Enable(instance, downloadCategory string) error
 }
 
 // Summary is everything the operator sees before anything moves.
@@ -1075,7 +1079,7 @@ func (m *migration) enable() error {
 		if m.alreadyEnabled(name) {
 			continue
 		}
-		if err := m.env.Values.Enable(name); err != nil {
+		if err := m.env.Values.Enable(name, m.p.Apps[name].DownloadCategory); err != nil {
 			return fmt.Errorf("enable %s: %w", name, err)
 		}
 		m.res.Enabled = append(m.res.Enabled, name)

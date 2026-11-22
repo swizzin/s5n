@@ -758,7 +758,7 @@ type grantEditor struct {
 	values  map[string]any
 }
 
-func (g *grantEditor) Enable(instance string) error {
+func (g *grantEditor) Enable(instance, downloadCategory string) error {
 	app := apply.CatalogApp(instance, g.catalog)
 	if app == "" {
 		return fmt.Errorf("%s: no app in the chart's catalog is named that", instance)
@@ -778,7 +778,7 @@ func (g *grantEditor) Enable(instance string) error {
 			// writes it whole, with this instance on.
 			edits = append(edits, seedbox.Edit{
 				Path:  "apps." + app + ".instances",
-				Value: switchOn(defaults, suffix, app),
+				Value: switchOn(defaults, suffix, app, downloadCategory),
 			})
 		default:
 			if index, _ := findInstance(own, suffix); index >= 0 {
@@ -786,13 +786,25 @@ func (g *grantEditor) Enable(instance string) error {
 					Path:  fmt.Sprintf("apps.%s.instances[%d].enabled", app, index),
 					Value: true,
 				})
+				// The category the torrents are in, when it is not the
+				// directory the library is renamed onto.
+				if downloadCategory != "" {
+					edits = append(edits, seedbox.Edit{
+						Path:  fmt.Sprintf("apps.%s.instances[%d].downloadCategory", app, index),
+						Value: downloadCategory,
+					})
+				}
 			} else {
 				// An instance the grant's list does not carry: box init adds
-				// one by appending, and the entry has the three keys the
-				// schema requires.
+				// one by appending, and the entry has the keys the schema
+				// requires.
+				entry := map[string]any{"suffix": suffix, "category": categoryFor(app, suffix), "enabled": true}
+				if downloadCategory != "" {
+					entry["downloadCategory"] = downloadCategory
+				}
 				edits = append(edits, seedbox.Edit{
 					Path:  fmt.Sprintf("apps.%s.instances[%d]", app, len(own)),
-					Value: map[string]any{"suffix": suffix, "category": categoryFor(app, suffix), "enabled": true},
+					Value: entry,
 				})
 			}
 		}
@@ -842,7 +854,7 @@ func findInstance(list []any, suffix string) (int, string) {
 
 // switchOn is a list of instances with one suffix switched on, adding the entry
 // when the list does not carry it.
-func switchOn(list []any, suffix, app string) []any {
+func switchOn(list []any, suffix, app, downloadCategory string) []any {
 	out := make([]any, 0, len(list)+1)
 	found := false
 	for _, raw := range list {
@@ -852,11 +864,21 @@ func switchOn(list []any, suffix, app string) []any {
 			found = true
 			entry = cloneEntry(entry)
 			entry["enabled"] = true
+			if downloadCategory != "" {
+				// The category the instance's torrents are already in. It is
+				// not the directory the library is renamed onto, so the two
+				// keys disagree on a migrated box and agree on a fresh one.
+				entry["downloadCategory"] = downloadCategory
+			}
 		}
 		out = append(out, entry)
 	}
 	if !found {
-		out = append(out, map[string]any{"suffix": suffix, "category": categoryFor(app, suffix), "enabled": true})
+		entry := map[string]any{"suffix": suffix, "category": categoryFor(app, suffix), "enabled": true}
+		if downloadCategory != "" {
+			entry["downloadCategory"] = downloadCategory
+		}
+		out = append(out, entry)
 	}
 	return out
 }

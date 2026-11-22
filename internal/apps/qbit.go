@@ -194,20 +194,34 @@ func (q *Qbit) Categories(ctx context.Context) (map[string]Category, error) {
 // what makes imports hardlink instead of copy, so a wrong one is repaired rather
 // than tolerated.
 //
+// A category with no save path of its own is not wrong: qBittorrent downloads it
+// into <defaultSavePath>/<name>, which is the same directory when the wanted
+// path is exactly that. A migrated box's categories are all of that shape,
+// because the source stored none, and rewriting one would move where its
+// torrents live for no reason. defaultSavePath is the downloads root the data
+// contract gives qBittorrent; empty means no such allowance.
+//
 // A name may be one qBittorrent subcategory ("4K/Movies"). qBittorrent 5.3
 // accepts that shape — its isValidCategoryName refuses only backslashes and empty
 // segments — and creates the parent category ("4K") itself. There is no
 // subcategories preference to set: 5.2 removed the switch 5.0 and 5.1 had
 // (default off), and the explicit save path written here is what the data
 // contract relies on either way.
-func (q *Qbit) EnsureCategory(ctx context.Context, name, savePath string) (Change, error) {
+func (q *Qbit) EnsureCategory(ctx context.Context, name, savePath, defaultSavePath string) (Change, error) {
 	cats, err := q.Categories(ctx)
 	if err != nil {
 		return Unchanged, fmt.Errorf("list categories: %w", err)
 	}
 	cur, ok := cats[name]
-	if ok && strings.TrimRight(cur.SavePath, "/") == strings.TrimRight(savePath, "/") {
-		return Unchanged, nil
+	if ok {
+		live := strings.TrimRight(cur.SavePath, "/")
+		want := strings.TrimRight(savePath, "/")
+		if live == want {
+			return Unchanged, nil
+		}
+		if live == "" && defaultSavePath != "" && want == strings.TrimRight(defaultSavePath, "/")+"/"+name {
+			return Unchanged, nil
+		}
 	}
 	action := "createCategory"
 	change := Created

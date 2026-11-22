@@ -240,7 +240,7 @@ type fakeValues struct {
 	failed bool
 }
 
-func (f *fakeValues) Enable(instance string) error {
+func (f *fakeValues) Enable(instance, downloadCategory string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.fail != nil {

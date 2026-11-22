@@ -59,12 +59,12 @@ apps:
 	ed := &grantEditor{sb: sb, catalog: []string{"sonarr", "qbittorrent"}, values: values}
 
 	// An entry the chart's list carries is switched on where it sits.
-	if err := ed.Enable("sonarr-4k"); err != nil {
+	if err := ed.Enable("sonarr-4k", ""); err != nil {
 		t.Fatalf("enable: %v", err)
 	}
 	// One it does not carry is appended, with the instance's own name as its
 	// category.
-	if err := ed.Enable("sonarr-1080"); err != nil {
+	if err := ed.Enable("sonarr-1080", ""); err != nil {
 		t.Fatalf("enable a new instance: %v", err)
 	}
 	raw, err := os.ReadFile(grantPath)
@@ -138,7 +138,7 @@ func TestGrantEditorWritesTheListWhenTheGrantHasNone(t *testing.T) {
 		},
 	}}}
 	ed := &grantEditor{sb: sb, catalog: []string{"sonarr"}, values: values}
-	if err := ed.Enable("sonarr-4k"); err != nil {
+	if err := ed.Enable("sonarr-4k", ""); err != nil {
 		t.Fatalf("enable: %v", err)
 	}
 	back, err := seedbox.Load(grantPath, filepath.Join(dir, "values.yaml"))
@@ -346,5 +346,66 @@ apps:
 		if err == nil {
 			t.Errorf("%s: openSnapshot accepted it", tc.mode)
 		}
+	}
+}
+
+// TestGrantEditorKeepsTheMigratedDownloadCategory: a migrated instance's library
+// directory is box's own (tv), and the category its torrents are in is the
+// source's (TV). The switch-on writes both, so the release renders a root folder
+// at /data/media/tv and a qBittorrent category TV whose save path is where the
+// torrents already are.
+func TestGrantEditorKeepsTheMigratedDownloadCategory(t *testing.T) {
+	dir := t.TempDir()
+	grantPath := filepath.Join(dir, "root.yaml")
+	if err := os.WriteFile(grantPath, []byte("apps:\n  sonarr:\n    enabled: false\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	sb, err := seedbox.Load(grantPath, filepath.Join(dir, "values.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	values := map[string]any{"apps": map[string]any{"sonarr": map[string]any{
+		"instances": []any{
+			map[string]any{"suffix": "", "category": "tv", "enabled": false},
+			map[string]any{"suffix": "4k", "category": "tv-4k", "enabled": false},
+		},
+	}}}
+	ed := &grantEditor{sb: sb, catalog: []string{"sonarr"}, values: values}
+	if err := ed.Enable("sonarr", "TV"); err != nil {
+		t.Fatalf("enable: %v", err)
+	}
+	back, err := seedbox.Load(grantPath, filepath.Join(dir, "values.yaml"))
+	if err != nil {
+		t.Fatalf("the edited grant does not load: %v", err)
+	}
+	apps, _ := back.Grant.Map()["apps"].(map[string]any)
+	list, _ := apps["sonarr"].(map[string]any)["instances"].([]any)
+	entry, _ := list[0].(map[string]any)
+	if got := entry["downloadCategory"]; got != "TV" {
+		t.Errorf("the instance's downloadCategory is %v, want the source's TV", got)
+	}
+	if got := entry["category"]; got != "tv" {
+		t.Errorf("the instance's category is %v, want box's tv: the library is renamed onto it", got)
+	}
+	if on, _ := entry["enabled"].(bool); !on {
+		t.Error("the instance is off")
+	}
+	if got := list[1].(map[string]any)["downloadCategory"]; got != nil {
+		t.Errorf("the instance the plan does not name was given a downloadCategory: %v", got)
+	}
+
+	// A grant that already carries its own list takes the same key, on the
+	// entry the plan names.
+	if err := ed.Enable("sonarr-4k", "4K/TV"); err != nil {
+		t.Fatalf("enable the second: %v", err)
+	}
+	back, err = seedbox.Load(grantPath, filepath.Join(dir, "values.yaml"))
+	if err != nil {
+		t.Fatalf("the edited grant does not load: %v", err)
+	}
+	apps, _ = back.Grant.Map()["apps"].(map[string]any)
+	list, _ = apps["sonarr"].(map[string]any)["instances"].([]any)
+	if got := list[1].(map[string]any)["downloadCategory"]; got != "4K/TV" {
+		t.Errorf("the second instance's downloadCategory is %v, want 4K/TV", got)
 	}
 }
