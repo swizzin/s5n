@@ -322,6 +322,8 @@ func locateOwned(list []Item, ownedID int, name string) (cur Item, found, recrea
 // pick: the Arr allows both, nothing says which one the operator means, and
 // adopting one would leave the other downloading into a directory box never
 // wires.
+//
+//nolint:dupl // qui's instance and an Arr's client are different types with the same rules; sharing the body would mean sharing their specs too.
 func locateArrClient(list []Item, spec DownloadClientSpec, ownedID int) (cur Item, found, recreated bool, previousID int, err error) {
 	if ownedID != 0 {
 		for _, item := range list {

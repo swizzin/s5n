@@ -153,33 +153,8 @@ func (p *Plan) checkFolders() []string {
 	seenTo := make(map[string]bool, len(d.Folders))
 	for i := range d.Folders {
 		f := &d.Folders[i]
-		at := fmt.Sprintf("data.folders[%d]", i)
 		f.From, f.To = path.Clean(f.From), path.Clean(f.To)
-		for _, side := range []struct{ key, val string }{{"from", f.From}, {"to", f.To}} {
-			switch {
-			case side.val == "" || side.val == ".":
-				problems = append(problems, fmt.Sprintf("%s: %s is missing; name the directory under the media directory", at, side.key))
-			case path.IsAbs(side.val) || strings.HasPrefix(side.val, ".."):
-				problems = append(problems, fmt.Sprintf("%s: %s %q must be a directory under the media directory", at, side.key, side.val))
-			}
-		}
-		if f.From != "" {
-			if seenFrom[f.From] {
-				problems = append(problems, fmt.Sprintf("%s: from %q appears twice", at, f.From))
-			}
-			seenFrom[f.From] = true
-		}
-		if f.To != "" {
-			if seenTo[f.To] {
-				problems = append(problems, fmt.Sprintf("%s: two source directories become %q; one category is one directory", at, f.To))
-			}
-			seenTo[f.To] = true
-			if !p.hasCategory(f.To) {
-				problems = append(problems, fmt.Sprintf("%s: to %q is no app's category in this plan (it has %s), so nothing would be wired to it",
-					at, f.To, orNone(p.categories())))
-			}
-		}
-		problems = append(problems, whyProblems(at, f.Why, f.Default)...)
+		problems = append(problems, p.checkFolder(i, f, seenFrom, seenTo)...)
 	}
 	// A directory inside another one is two renames that cannot both happen:
 	// moving the outer one first carries the inner one with it, and the inner
@@ -196,6 +171,39 @@ func (p *Plan) checkFolders() []string {
 		}
 	}
 	return problems
+}
+
+// checkFolder is one entry's half of checkFolders: its two sides are plain
+// directories under the media directory, it is the only entry for each, and the
+// category it becomes is one an app in the plan has.
+func (p *Plan) checkFolder(i int, f *MediaFolder, seenFrom, seenTo map[string]bool) []string {
+	at := fmt.Sprintf("data.folders[%d]", i)
+	var problems []string
+	for _, side := range []struct{ key, val string }{{"from", f.From}, {"to", f.To}} {
+		switch {
+		case side.val == "" || side.val == ".":
+			problems = append(problems, fmt.Sprintf("%s: %s is missing; name the directory under the media directory", at, side.key))
+		case path.IsAbs(side.val) || strings.HasPrefix(side.val, ".."):
+			problems = append(problems, fmt.Sprintf("%s: %s %q must be a directory under the media directory", at, side.key, side.val))
+		}
+	}
+	if f.From != "" {
+		if seenFrom[f.From] {
+			problems = append(problems, fmt.Sprintf("%s: from %q appears twice", at, f.From))
+		}
+		seenFrom[f.From] = true
+	}
+	if f.To != "" {
+		if seenTo[f.To] {
+			problems = append(problems, fmt.Sprintf("%s: two source directories become %q; one category is one directory", at, f.To))
+		}
+		seenTo[f.To] = true
+		if !p.hasCategory(f.To) {
+			problems = append(problems, fmt.Sprintf("%s: to %q is no app's category in this plan (it has %s), so nothing would be wired to it",
+				at, f.To, orNone(p.categories())))
+		}
+	}
+	return append(problems, whyProblems(at, f.Why, f.Default)...)
 }
 
 // hasCategory reports whether one of the plan's apps keeps its library in this

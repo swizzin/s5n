@@ -14,6 +14,12 @@ import (
 	"github.com/swizzin/s5n/internal/apps"
 )
 
+// qbitClientName is what every app's own connection to qBittorrent is called:
+// the Arr's download client, qui's instance, autobrr's downloader and PBH's
+// downloader. It is the name the source's installs most often use, and the one
+// the Job writes when it creates the object itself.
+const qbitClientName = "qBittorrent"
+
 // Writes counts the application objects the run actually changed: download
 // clients, root folders, hardlink settings, Prowlarr applications, qBittorrent
 // categories and preferences, qui's instance and autobrr's download clients.
@@ -331,7 +337,7 @@ func (r *Runner) work(ctx context.Context, res *Result) error {
 
 		if qbit != nil {
 			result, err := arr.EnsureDownloadClient(ctx, apps.DownloadClientSpec{
-				Name: "qBittorrent",
+				Name: qbitClientName,
 				// The directory the instance's torrents are in, which a
 				// migrated box keeps.
 				Category: downloadCategory(inst),
@@ -433,7 +439,7 @@ func (r *Runner) work(ctx context.Context, res *Result) error {
 			}
 		} else {
 			result, err := q.EnsureInstance(ctx, apps.QuiInstanceSpec{
-				Name: "qBittorrent",
+				Name: qbitClientName,
 				Host: strings.TrimRight(c.Qbittorrent.URL, "/"),
 				// Owned, and owned as empty: qBittorrent skips its login for
 				// the release's addresses, so qui's instance holds no
@@ -474,7 +480,7 @@ func (r *Runner) work(ctx context.Context, res *Result) error {
 		r.okStep(res, "autobrr/login", c.Autobrr.Username)
 		if c.Qbittorrent != nil {
 			result, err := a.EnsureDownloader(ctx, apps.DownloaderSpec{
-				Name: "qBittorrent",
+				Name: qbitClientName,
 				Type: "QBITTORRENT",
 				Host: strings.TrimRight(c.Qbittorrent.URL, "/"),
 				// Owned, and owned as empty; autobrr holds no credential for
@@ -482,9 +488,9 @@ func (r *Runner) work(ctx context.Context, res *Result) error {
 				// addresses.
 				Username: "",
 				Password: "",
-			}, owned.AutobrrClientID("qBittorrent"), owned.AutobrrClientFingerprint("qBittorrent"))
+			}, owned.AutobrrClientID(qbitClientName), owned.AutobrrClientFingerprint(qbitClientName))
 			if err == nil && result.ID != 0 {
-				owned.SetAutobrrClientID("qBittorrent", result.ID)
+				owned.SetAutobrrClientID(qbitClientName, result.ID)
 			}
 			if err := r.ensureResult(res, "autobrr/downloader/qbittorrent", result, err); err != nil {
 				return err
@@ -552,7 +558,7 @@ func (r *Runner) work(ctx context.Context, res *Result) error {
 		} else {
 			result, err := p.EnsureDownloader(ctx, apps.PbhDownloaderSpec{
 				ID:       "qbittorrent",
-				Name:     "qBittorrent",
+				Name:     qbitClientName,
 				Endpoint: strings.TrimRight(c.Qbittorrent.URL, "/"),
 				// Owned, and owned as empty: PBH reads qBittorrent's API
 				// without a login, the same way every other caller does.

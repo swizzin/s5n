@@ -25,7 +25,7 @@ func categories() map[string]string {
 func arrInstall(t *testing.T) *fixture {
 	t.Helper()
 	f := newFixture(t)
-	arr := func(name string, port int, folder, hostConfig string) {
+	arr := func(name string, port int, hostConfig string) {
 		f.app(t, appSpec{
 			name: name, image: "lscr.io/linuxserver/" + strings.Split(name, "-")[0] + ":1", port: port,
 			mounts: []mount{
@@ -38,19 +38,19 @@ func arrInstall(t *testing.T) *fixture {
 		})
 		f.file(t, hostConfig+"/config.xml", "<Config><Port>"+strconv.Itoa(port)+"</Port></Config>\n")
 	}
-	arr("sonarr", 8989, "/library/TV", "/srv/apps/sonarr")
+	arr("sonarr", 8989, "/srv/apps/sonarr")
 	f.bytes(t, "/srv/apps/sonarr/sonarr.db", arrDBWith(t, []string{"/library/TV"}, []clientRow{
 		{implementation: "QBittorrent", enabled: true, category: "TV"},
 	}))
-	arr("sonarr-4k", 8990, "/library/4K/TV", "/srv/apps/sonarr-4k")
+	arr("sonarr-4k", 8990, "/srv/apps/sonarr-4k")
 	f.bytes(t, "/srv/apps/sonarr-4k/sonarr.db", arrDBWith(t, []string{"/library/4K/TV"}, []clientRow{
 		{implementation: "QBittorrent", enabled: true, category: "4K/TV"},
 	}))
-	arr("radarr", 7878, "/library/Movies", "/srv/apps/radarr")
+	arr("radarr", 7878, "/srv/apps/radarr")
 	f.bytes(t, "/srv/apps/radarr/radarr.db", arrDBWith(t, []string{"/library/Movies"}, []clientRow{
 		{implementation: "QBittorrent", enabled: true, category: "Movies"},
 	}))
-	arr("radarr-4k", 7879, "/library/4K/Movies", "/srv/apps/radarr-4k")
+	arr("radarr-4k", 7879, "/srv/apps/radarr-4k")
 	f.bytes(t, "/srv/apps/radarr-4k/radarr.db", arrDBWith(t, []string{"/library/4K/Movies"}, []clientRow{
 		{implementation: "QBittorrent", enabled: true, category: "4K/Movies"},
 	}))

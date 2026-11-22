@@ -484,18 +484,18 @@ func TestEnsureDownloadClientClearsStoredCredentials(t *testing.T) {
 // migratedClient is a download client the way a source install left one: the
 // operator's own name, the release's qBittorrent as its host, an enabled
 // qBittorrent client with a category and the credential it had.
-func migratedClient(id int, name, host, category, username, password string) Item {
+func migratedClient(id int, name string) Item {
 	return Item{
 		"id": id, "name": name, "implementation": "QBittorrent", "enable": true,
 		"protocol": "torrent", "priority": 1, "tags": []any{},
 		"fields": []any{
-			map[string]any{"name": "host", "value": host},
+			map[string]any{"name": "host", "value": "qbittorrent"},
 			map[string]any{"name": "port", "value": float64(8080)},
 			map[string]any{"name": "useSsl", "value": false},
 			map[string]any{"name": "urlBase", "value": ""},
-			map[string]any{"name": "username", "value": username},
-			map[string]any{"name": "password", "value": password},
-			map[string]any{"name": "movieCategory", "value": category},
+			map[string]any{"name": "username", "value": "admin"},
+			map[string]any{"name": "password", "value": "hunter2"},
+			map[string]any{"name": "movieCategory", "value": "Movies"},
 		},
 	}
 }
@@ -506,7 +506,7 @@ func migratedClient(id int, name, host, category, username, password string) Ite
 // than a second client created beside it.
 func TestEnsureDownloadClientAdoptsTheMigratedClientByHost(t *testing.T) {
 	f, arr := newFakeArr(t, "/radarr")
-	f.clients = []Item{migratedClient(7, "qBT", "qbittorrent", "Movies", "admin", "hunter2")}
+	f.clients = []Item{migratedClient(7, "qBT")}
 	ctx := context.Background()
 	spec := DownloadClientSpec{Name: "qBittorrent", Category: "Movies", Host: "qbittorrent", Port: 8080}
 
@@ -540,8 +540,8 @@ func TestEnsureDownloadClientAdoptsTheMigratedClientByHost(t *testing.T) {
 func TestEnsureDownloadClientRefusesTwoClientsAtOneHost(t *testing.T) {
 	f, arr := newFakeArr(t, "/radarr")
 	f.clients = []Item{
-		migratedClient(7, "qBT", "qbittorrent", "Movies", "admin", "hunter2"),
-		migratedClient(9, "the other one", "qbittorrent", "Movies", "admin", "hunter2"),
+		migratedClient(7, "qBT"),
+		migratedClient(9, "the other one"),
 	}
 	ctx := context.Background()
 	spec := DownloadClientSpec{Name: "qBittorrent", Category: "Movies", Host: "qbittorrent", Port: 8080}
@@ -566,8 +566,8 @@ func TestEnsureDownloadClientRefusesTwoClientsAtOneHost(t *testing.T) {
 func TestEnsureDownloadClientOwnedIDWinsOverTwoAtTheHost(t *testing.T) {
 	f, arr := newFakeArr(t, "/radarr")
 	f.clients = []Item{
-		migratedClient(7, "qBT", "qbittorrent", "Movies", "admin", "hunter2"),
-		migratedClient(9, "the other one", "qbittorrent", "Movies", "admin", "hunter2"),
+		migratedClient(7, "qBT"),
+		migratedClient(9, "the other one"),
 	}
 	ctx := context.Background()
 	spec := DownloadClientSpec{Name: "qBittorrent", Category: "Movies", Host: "qbittorrent", Port: 8080}
@@ -588,9 +588,9 @@ func TestEnsureDownloadClientOwnedIDWinsOverTwoAtTheHost(t *testing.T) {
 // client of another type, at the same address is not the one box owns.
 func TestEnsureDownloadClientIgnoresAClientBoxDoesNotDial(t *testing.T) {
 	f, arr := newFakeArr(t, "/radarr")
-	disabled := migratedClient(7, "qBT", "qbittorrent", "Movies", "admin", "hunter2")
+	disabled := migratedClient(7, "qBT")
 	disabled["enable"] = false
-	transmission := migratedClient(8, "the source's transmission", "qbittorrent", "Movies", "admin", "hunter2")
+	transmission := migratedClient(8, "the source's transmission")
 	transmission["implementation"] = "Transmission"
 	f.clients = []Item{disabled, transmission}
 	ctx := context.Background()
