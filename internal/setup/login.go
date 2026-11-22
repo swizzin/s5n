@@ -81,6 +81,17 @@ func (d *Decision) askLogin(opts Options, base, grantNow map[string]any, puid in
 	if def == "" {
 		def = strings.TrimSpace(opts.DefaultLogin)
 	}
+	// A flow that runs init on a host with no box holds this answer already: it
+	// asked for it before anything was installed, or was given it. It is a
+	// decision, not a starting answer, so it is used as it is and the question
+	// is not asked again.
+	if opts.Adopting && strings.TrimSpace(opts.Login) != "" {
+		given := strings.TrimSpace(opts.Login)
+		if err := validate(given); err != nil {
+			return "", fmt.Errorf("--login %q: %w", given, err)
+		}
+		return given, nil
+	}
 	if opts.Unattended {
 		if def == "" {
 			return "", errors.New("--login is needed: the account the login page admits")

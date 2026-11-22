@@ -53,10 +53,10 @@ type installFlags struct {
 
 func addInstallFlags(fs *flag.FlagSet) *installFlags {
 	return &installFlags{
-		domain:     fs.String("domain", "", "the domain this box is reached at, e.g. box.example.com (required on a host with no box)"),
-		login:      fs.String("login", "", "the account the login page admits (required on a host with no box)"),
-		password:   fs.String("password-file", "", "read the login's password from this file, or from stdin with - (required on a host with no box)"),
-		configPath: fs.String("config-path", "", "the host path the apps keep their settings on (required on a host with no box)"),
+		domain:     fs.String("domain", "", "the domain this box is reached at, e.g. box.example.com (asked on a terminal, required without --yes)"),
+		login:      fs.String("login", "", "the account the login page admits (asked on a terminal, required without --yes)"),
+		password:   fs.String("password-file", "", "read the login's password from this file, or from stdin with - (asked on a terminal, required without --yes)"),
+		configPath: fs.String("config-path", "", "the host path the apps keep their settings on (asked on a terminal, required without --yes)"),
 		namespace:  fs.String("box-namespace", "", "the namespace the seedbox is installed in (default s5n-<login> from --login)"),
 		record:     fs.String("record", bootstrap.RecordPath, "where box records the cluster decision"),
 	}
@@ -77,7 +77,11 @@ func boxInstalled(recordPath string) (bool, error) {
 // off, from the plan. It returns when init has installed the release, which is
 // the state the adoption then runs against.
 func migrateInstall(ctx context.Context, o *migrateApplyFlags, inst *installFlags, p *plan.Plan, charts *chartRelease, out say.Reporter) error {
-	answers, err := installAnswers(o, inst, p)
+	// A guided run is one with a terminal to ask on and no --yes: the same rule
+	// init uses to decide whether it asks. Its four own answers that this run
+	// does not have are init's questions, so they are not a refusal here.
+	guided := !*o.yes && isTerminal(os.Stdin)
+	answers, err := installAnswers(o, inst, p, guided)
 	if err != nil {
 		return err
 	}
@@ -149,14 +153,18 @@ func migrationInit(inst *installFlags, charts *chartRelease, answers []string) (
 	return iflg, nil
 }
 
-// installAnswers is the plan's answers as init's command line, and the refusal
-// that names the four a plan cannot know when they were not given.
+// installAnswers is the plan's answers as init's command line, and, on an
+// unattended run, the refusal that names the four a plan cannot know when they
+// were not given.
 //
-// Unattended is the only way this runs: a guided install is `box bootstrap`
-// followed by `box init`, which ask their own questions. So each of the four is
-// required, and the refusal names all of the missing ones at once rather than
-// one per run.
-func installAnswers(o *migrateApplyFlags, inst *installFlags, p *plan.Plan) ([]string, error) {
+// A guided run (a terminal, no --yes) asks only what it lacks: each of the four
+// that was not given is simply left off, and init asks for it with its own
+// question, its own help text and its own validation. Everything the plan does
+// hold -- the data root, the app list, the owner -- is handed over as an answer,
+// so init asks none of those (setup.Options.Adopting). An unattended run has
+// nobody to ask, so a missing one is a refusal naming every one at once rather
+// than one per run.
+func installAnswers(o *migrateApplyFlags, inst *installFlags, p *plan.Plan, guided bool) ([]string, error) {
 	var missing []string
 	if strings.TrimSpace(*inst.domain) == "" {
 		missing = append(missing, "--domain")
@@ -170,19 +178,23 @@ func installAnswers(o *migrateApplyFlags, inst *installFlags, p *plan.Plan) ([]s
 	if strings.TrimSpace(*inst.configPath) == "" {
 		missing = append(missing, "--config-path")
 	}
-	if len(missing) > 0 {
+	if len(missing) > 0 && !guided {
 		return nil, fmt.Errorf("this host has no box, so migrate installs one: it needs %s, the answers a plan cannot hold", strings.Join(missing, ", "))
 	}
-	// The login decides the seedbox's namespace (s5n-<login>), so it is checked
-	// here, before bootstrap installs anything: a name that could never be a
-	// namespace is a refusal, not a seedbox box cannot create.
+	// The login decides the seedbox's namespace (s5n-<login>), so a given one is
+	// checked here, before bootstrap installs anything: a name that could never
+	// be a namespace is a refusal, not a seedbox box cannot create. A login this
+	// run has to ask for is checked by init's own question, which is the same
+	// rule.
 	// With --box-namespace given, the login names nothing but the account.
-	validate := setup.ValidateLogin
-	if strings.TrimSpace(*inst.namespace) != "" {
-		validate = authelia.ValidateLogin
-	}
-	if err := validate(*inst.login); err != nil {
-		return nil, err
+	if login := strings.TrimSpace(*inst.login); login != "" {
+		validate := setup.ValidateLogin
+		if strings.TrimSpace(*inst.namespace) != "" {
+			validate = authelia.ValidateLogin
+		}
+		if err := validate(login); err != nil {
+			return nil, err
+		}
 	}
 	if p.Data == nil || strings.TrimSpace(p.Data.Root) == "" {
 		return nil, errors.New("the plan names no data root, and a host with no box has no storage to adopt into: `box migrate cutover` writes a plan with one")
@@ -196,10 +208,22 @@ func installAnswers(o *migrateApplyFlags, inst *installFlags, p *plan.Plan) ([]s
 		"--grant", *o.grantPath,
 		"--values", *o.valuesPath,
 		"--data-path", p.Data.Root,
-		"--config-path", *inst.configPath,
-		"--domain", *inst.domain,
-		"--login", *inst.login,
-		"--password-file", *inst.password,
+	}
+	// The four a plan cannot know are passed only when this run has them: one
+	// that is missing is init's own question on a terminal, and the refusal
+	// above on an unattended run.
+	for _, given := range []struct {
+		flag  string
+		value string
+	}{
+		{"--domain", *inst.domain},
+		{"--login", *inst.login},
+		{"--password-file", *inst.password},
+		{"--config-path", *inst.configPath},
+	} {
+		if v := strings.TrimSpace(given.value); v != "" {
+			answers = append(answers, given.flag, v)
+		}
 	}
 	// --box-namespace is passed only when it was given: with none, init derives
 	// the seedbox's namespace from the login, the same way `box init` does.

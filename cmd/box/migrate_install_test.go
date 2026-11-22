@@ -41,7 +41,7 @@ func TestInstallAnswersComeFromThePlan(t *testing.T) {
 	*inst.login = "someone"
 	*inst.password = "/run/password"
 	*inst.configPath = "/srv/config"
-	got, err := installAnswers(o, inst, planWithData())
+	got, err := installAnswers(o, inst, planWithData(), false)
 	if err != nil {
 		t.Fatalf("installAnswers: %v", err)
 	}
@@ -69,7 +69,7 @@ func TestInstallAnswersComeFromThePlan(t *testing.T) {
 
 func TestInstallAnswersRefuseEveryMissingOneByName(t *testing.T) {
 	o, inst := installFlagSet(t)
-	_, err := installAnswers(o, inst, planWithData())
+	_, err := installAnswers(o, inst, planWithData(), false)
 	if err == nil {
 		t.Fatal("an install with no domain, login, password or config path was accepted")
 	}
@@ -92,7 +92,7 @@ func TestInstallAnswersLeaveTheNamespaceToTheLogin(t *testing.T) {
 	*inst.configPath = "/srv/config"
 	empty := ""
 	inst.namespace = &empty
-	got, err := installAnswers(o, inst, planWithData())
+	got, err := installAnswers(o, inst, planWithData(), false)
 	if err != nil {
 		t.Fatalf("installAnswers: %v", err)
 	}
@@ -112,7 +112,7 @@ func TestInstallAnswersRefuseALoginThatCannotBeASeedbox(t *testing.T) {
 			*inst.login = login
 			*inst.password = "/run/password"
 			*inst.configPath = "/srv/config"
-			_, err := installAnswers(o, inst, planWithData())
+			_, err := installAnswers(o, inst, planWithData(), false)
 			if err == nil {
 				t.Fatalf("login %q was accepted", login)
 			}
@@ -133,7 +133,7 @@ func TestInstallAnswersTakeAnyLoginWithAnExplicitNamespace(t *testing.T) {
 	*inst.login = "Alice.B"
 	*inst.password = "/run/password"
 	*inst.configPath = "/srv/config"
-	if _, err := installAnswers(o, inst, planWithData()); err != nil {
+	if _, err := installAnswers(o, inst, planWithData(), false); err != nil {
 		t.Fatalf("login Alice.B with --box-namespace was refused: %v", err)
 	}
 }
@@ -146,7 +146,7 @@ func TestInstallAnswersNeedADataRoot(t *testing.T) {
 	*inst.configPath = "/srv/config"
 	p := planWithData()
 	p.Data = nil
-	_, err := installAnswers(o, inst, p)
+	_, err := installAnswers(o, inst, p, false)
 	if err == nil || !strings.Contains(err.Error(), "data root") {
 		t.Fatalf("a plan with no data root was accepted with %v", err)
 	}
@@ -163,7 +163,7 @@ func TestInstallAnswersLeaveTheOwnerToHostFoundations(t *testing.T) {
 	*inst.configPath = "/srv/config"
 	p := planWithData()
 	p.Source = nil
-	got, err := installAnswers(o, inst, p)
+	got, err := installAnswers(o, inst, p, false)
 	if err != nil {
 		t.Fatalf("installAnswers: %v", err)
 	}
@@ -186,7 +186,7 @@ func TestMigrationInitTellsInitTheAppsAreComing(t *testing.T) {
 	*inst.password = "/run/password"
 	*inst.configPath = "/srv/config"
 	inst.record = new(string)
-	answers, err := installAnswers(o, inst, planWithData())
+	answers, err := installAnswers(o, inst, planWithData(), false)
 	if err != nil {
 		t.Fatalf("installAnswers: %v", err)
 	}
@@ -247,7 +247,7 @@ func TestInstallAnswersTakeThePlansOwnerOrNone(t *testing.T) {
 			*inst.configPath = "/srv/config"
 			p := planWithData()
 			p.Source.Owner = tc.owner
-			got, err := installAnswers(o, inst, p)
+			got, err := installAnswers(o, inst, p, false)
 			if err != nil {
 				t.Fatalf("installAnswers: %v", err)
 			}
@@ -263,5 +263,42 @@ func TestInstallAnswersTakeThePlansOwnerOrNone(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestInstallAnswersAskOnlyWhatTheRunLacks: on a terminal without --yes the
+// four answers a plan cannot hold are init's own questions, so the ones this
+// run has are handed over and the ones it does not are simply left off. The
+// old refusal named all four on a terminal, which is the run a person on a
+// console actually makes.
+func TestInstallAnswersAskOnlyWhatTheRunLacks(t *testing.T) {
+	o, inst := installFlagSet(t)
+	*inst.login = "someone"
+	*inst.password = "/run/password"
+	*inst.configPath = "/srv/config"
+	got, err := installAnswers(o, inst, planWithData(), true)
+	if err != nil {
+		t.Fatalf("a guided run with two answers left for init was refused: %v", err)
+	}
+	joined := strings.Join(got, " ")
+	for _, want := range []string{"--login someone", "--password-file /run/password", "--config-path /srv/config"} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("the answers do not carry %q: %v", want, got)
+		}
+	}
+	if strings.Contains(joined, "--domain") {
+		t.Errorf("the answers carry a --domain this run was not given, so init would not ask for it: %v", got)
+	}
+}
+
+// TestInstallAnswersRefuseAnEmptyGuidedRun: guided asks for what is missing and
+// still refuses the one thing no question can supply -- the plan's data root.
+func TestInstallAnswersRefuseAPlanWithNoDataRootEvenGuided(t *testing.T) {
+	o, inst := installFlagSet(t)
+	p := planWithData()
+	p.Data = nil
+	_, err := installAnswers(o, inst, p, true)
+	if err == nil || !strings.Contains(err.Error(), "data root") {
+		t.Fatalf("a guided run accepted a plan with no data root: %v", err)
 	}
 }

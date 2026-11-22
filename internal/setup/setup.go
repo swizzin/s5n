@@ -144,8 +144,16 @@ type Options struct {
 	// that the empty app list is deliberate: `box migrate apply` installs a box
 	// with every app off and switches on what it moved once the configs are in
 	// place. The line init prints for an empty box ("nothing runs yet ... add
-	// one with box install") would be wrong there, so this suppresses it and
-	// changes nothing else.
+	// one with box install") would be wrong there, so this suppresses it.
+	//
+	// It also makes every answer that flow already holds a decision rather than
+	// a default: the data root and the app list come from the plan, so neither
+	// is asked, and a flag that was given is used as it is instead of being
+	// offered back as a starting answer. A run that was given all four of its
+	// own answers asks nothing at all; one missing is asked with init's own
+	// question, which is what makes a guided migration on a host with no box
+	// ask only for what it lacks. The notice address belongs to bootstrap's
+	// host, not to this install, so it is not asked here either.
 	Adopting bool
 	// PathsInNode says the storage paths live inside a test node (kind), not on
 	// this host, so init neither verifies nor creates them. `box apply` has the
@@ -323,7 +331,7 @@ func (d *Decision) Run(ctx context.Context, opts Options) (Result, error) {
 		key: "gateway.host", flag: "--domain",
 		prompt: "domain", help: "the name this box is reached at, e.g. box.example.com",
 		value: opts.Domain, prefill: prefill(base, grantNow, "gateway.host"),
-		unattended: opts.Unattended, validate: validDomain,
+		unattended: opts.Unattended, decided: opts.Adopting, validate: validDomain,
 	})
 	if err != nil {
 		return res, d.stop(err)
@@ -355,7 +363,7 @@ func (d *Decision) Run(ctx context.Context, opts Options) (Result, error) {
 		key: "storage.data.path", flag: "--data-path",
 		prompt: "data path", help: "where this user's downloads and media live",
 		value: opts.DataPath, prefill: prefill(base, grantNow, "storage.data.path"),
-		unattended: opts.Unattended, validate: validHostPath,
+		unattended: opts.Unattended, decided: opts.Adopting, validate: validHostPath,
 	})
 	if err != nil {
 		return res, d.stop(err)
@@ -364,7 +372,7 @@ func (d *Decision) Run(ctx context.Context, opts Options) (Result, error) {
 		key: "storage.config.path", flag: "--config-path",
 		prompt: "config path", help: "where this user's apps keep their settings",
 		value: opts.ConfigPath, prefill: prefill(base, grantNow, "storage.config.path"),
-		unattended: opts.Unattended, validate: validHostPath,
+		unattended: opts.Unattended, decided: opts.Adopting && strings.TrimSpace(opts.ConfigPath) != "", validate: validHostPath,
 	})
 	if err != nil {
 		return res, d.stop(err)
@@ -427,7 +435,7 @@ func (d *Decision) Run(ctx context.Context, opts Options) (Result, error) {
 	if err != nil {
 		return res, err
 	}
-	askNotice = pending && !opts.Unattended
+	askNotice = pending && !opts.Unattended && !opts.Adopting
 	if askNotice {
 		d.steps++
 	}
@@ -690,11 +698,28 @@ type textQuestion struct {
 	value      string
 	prefill    any
 	unattended bool
-	validate   func(string) error
+	// decided says this answer is already known: the flow that runs init (a
+	// migration, whose plan holds the data root) answers it, so init uses it as
+	// it is and never offers it back as a prompt's starting answer. An empty
+	// one is a refusal naming the flag rather than a question, because the
+	// flow that decided it is the one that has to supply it.
+	decided  bool
+	validate func(string) error
 }
 
 func (d *Decision) askText(q textQuestion) (string, error) {
 	given := strings.TrimSpace(q.value)
+	if q.decided {
+		if given == "" {
+			return "", fmt.Errorf("%s is needed: pass %s", q.key, q.flag)
+		}
+		if q.validate != nil {
+			if err := q.validate(given); err != nil {
+				return "", fmt.Errorf("%s %q: %w", q.flag, given, err)
+			}
+		}
+		return given, nil
+	}
 	if q.unattended {
 		if given == "" {
 			return "", fmt.Errorf("%s is needed: pass %s", q.key, q.flag)
@@ -939,8 +964,13 @@ func (d *Decision) appsOn(grantNow map[string]any, reRun bool) []string {
 // -- and neither is leaving the picker's cursor where it started.
 const appsNone = "none"
 
-// askApps resolves the app list: the flag unattended, a multi-select otherwise,
+// AskApps resolves the app list: the flag, a multi-select otherwise,
 // preselected from the grant on a re-run and from the catalog on a fresh box.
+// There is no multi-select when another flow runs init: a migration's plan
+// decides every app, and it hands init the list (`--apps none`) because the
+// migration switches on what it moved at its end. The picker never appears
+// there, which is also why `--apps` is required rather than optional on that
+// path.
 //
 // Nothing is a legitimate answer. A box with no apps is a state of its own:
 // apps arrive later with `box install`, or all at once with the install
@@ -971,7 +1001,7 @@ func (d *Decision) askApps(opts Options, grantNow map[string]any, reRun bool) ([
 		return nil, fmt.Errorf("--apps %s: %s is the empty list, so it cannot be one of the apps", strings.Join(splitApps(opts.Apps), ", "), appsNone)
 	}
 
-	if opts.Unattended {
+	if opts.Unattended || opts.Adopting {
 		switch {
 		case none:
 			return nil, nil
