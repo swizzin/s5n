@@ -1558,3 +1558,24 @@ func TestThePlanIsTheCallers(t *testing.T) {
 		}
 	}
 }
+
+// MetalLB is installed for its L2 announcement only: box writes an
+// IPAddressPool and an L2Advertisement and never a BGP peer. The chart's
+// frr-k8s backend (on by default since 0.15) is BGP's, so it is switched off
+// rather than installed and waited on for nothing.
+func TestMetalLBIsInstalledWithoutItsBGPBackend(t *testing.T) {
+	var got *Release
+	for _, s := range metalLBSteps(pins, "") {
+		if s.Kind == StepRelease && s.Release.Name == MetalLBRelease {
+			r := s.Release
+			got = &r
+		}
+	}
+	if got == nil {
+		t.Fatal("no MetalLB release step")
+	}
+	frr, _ := got.Values["frrk8s"].(map[string]any)
+	if enabled, ok := frr["enabled"].(bool); !ok || enabled {
+		t.Fatalf("MetalLB values = %v, want frrk8s.enabled false", got.Values)
+	}
+}

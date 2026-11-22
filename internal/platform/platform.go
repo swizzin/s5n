@@ -1134,6 +1134,15 @@ func metalLBSteps(pins release.Versions, unless Condition) []Step {
 				Ref:       MetalLBRef,
 				Chart:     MetalLBChart,
 				Version:   pins.MetalLB,
+				// box announces the Gateway's address over L2 (the pool and
+				// L2Advertisement below) and never peers over BGP. The
+				// chart's frr-k8s backend, on by default since 0.15, is
+				// BGP's: a DaemonSet, a webhook and a status cleaner the
+				// install would wait on for nothing, and the slowest part of
+				// it on a loaded host. The speaker's own L2 needs none of it.
+				Values: map[string]any{
+					"frrk8s": map[string]any{"enabled": false},
+				},
 			},
 			Wait: []Wait{
 				{Kind: WaitDeployment, Namespace: MetalLBNamespace, Name: MetalLBRelease + "-controller"},
