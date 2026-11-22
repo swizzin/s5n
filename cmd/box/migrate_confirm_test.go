@@ -68,7 +68,8 @@ func migratingSummary() apply.Summary {
 
 // TestOneConfirmForTheWholeRun: a guided run is asked once, and the platform
 // plan is the first thing in that question -- not a question of its own and not
-// printed outside it.
+// printed outside it. The first line says nothing has been installed yet, which
+// is what makes the answer the whole run's.
 func TestOneConfirmForTheWholeRun(t *testing.T) {
 	var out bytes.Buffer
 	ask := &countingAsker{}
@@ -88,6 +89,12 @@ func TestOneConfirmForTheWholeRun(t *testing.T) {
 		t.Errorf("question = %q, want %q", ask.questions[0], want)
 	}
 	printed := out.String()
+	// The screen says the run has not written anything yet, before it shows
+	// what the yes installs.
+	lead := strings.Index(printed, "nothing is installed yet")
+	if lead < 0 {
+		t.Fatalf("the confirm does not say the run has installed nothing yet:\n%s", printed)
+	}
 	planAt := strings.Index(printed, "platform:")
 	migrationAt := strings.Index(printed, "1 app\n")
 	if planAt < 0 {
@@ -96,8 +103,8 @@ func TestOneConfirmForTheWholeRun(t *testing.T) {
 	if migrationAt < 0 {
 		t.Fatalf("the one confirm does not show the migration:\n%s", printed)
 	}
-	if planAt > migrationAt {
-		t.Fatalf("the platform plan is not shown first:\n%s", printed)
+	if lead > planAt || planAt > migrationAt {
+		t.Fatalf("the platform plan is not shown first, after the lead line:\n%s", printed)
 	}
 	// The platform plan is the plan's own items, not a summary of them.
 	if !strings.Contains(printed, "Envoy Gateway 1.9.3 (the front door)") {
@@ -114,7 +121,8 @@ func TestOneConfirmForTheWholeRun(t *testing.T) {
 }
 
 // TestTheOneConfirmWithoutAPlatform: a run that adopted into an existing box
-// installed no platform, so the question shows only the migration.
+// installed no platform, so the question shows only the migration -- and does not
+// claim it is about to install anything.
 func TestTheOneConfirmWithoutAPlatform(t *testing.T) {
 	var out bytes.Buffer
 	ask := &countingAsker{}
@@ -128,6 +136,87 @@ func TestTheOneConfirmWithoutAPlatform(t *testing.T) {
 	}
 	if strings.Contains(out.String(), "platform:") {
 		t.Errorf("a run that installed no platform shows a platform block:\n%s", out.String())
+	}
+	if strings.Contains(out.String(), "nothing is installed yet") {
+		t.Errorf("a run that installed nothing says it is about to install something:\n%s", out.String())
+	}
+}
+
+// TestTheAgreedSummaryIsNotAskedAgain: on a host that had no box the question was
+// asked before anything was installed, so the run that follows holds itself to
+// that answer. It asks nothing, it refuses a summary that is not the one agreed
+// to, and it fills in the rows the question deferred.
+func TestTheAgreedSummaryIsNotAskedAgain(t *testing.T) {
+	agreed := apply.Summary{
+		Instances: []apply.InstanceSummary{
+			{App: "plex", Staged: apply.Staged{App: "plex", Files: 7, Bytes: 2 << 20}, Deferred: "its databases are checked once Plex's image runs", Enable: true},
+			{App: "sonarr", Staged: apply.Staged{App: "sonarr", Files: 12, Bytes: 5 << 20}, Enable: true},
+		},
+	}
+	// What the run after the install shows: Plex's check has run, and it found
+	// paths; nothing else moved.
+	now := agreed
+	now.Instances = append([]apply.InstanceSummary(nil), agreed.Instances...)
+	for i := range now.Instances {
+		if now.Instances[i].App != "plex" {
+			continue
+		}
+		now.Instances[i].Deferred = ""
+		now.Instances[i].Changes = []rewrite.Change{{File: "library.db", Where: "section_locations.root_path", What: "path", Count: 8264}}
+	}
+
+	var out bytes.Buffer
+	ok, err := migrateAgreed(&say.Plain{W: &out}, agreed)(now)
+	if err != nil {
+		t.Fatalf("the run after the install was refused: %v", err)
+	}
+	if !ok {
+		t.Fatal("the run after the install answered no")
+	}
+	printed := out.String()
+	if !strings.Contains(printed, "checked after the install") || !strings.Contains(printed, "8,264 paths") {
+		t.Errorf("the row the question deferred is not filled in after the check:\n%s", printed)
+	}
+	// No question: this confirmer is not given one, and a run that asked again
+	// would have to be. What it must not do is print a second summary.
+	if strings.Contains(printed, "move these into") {
+		t.Errorf("the run asked the question it had already been answered:\n%s", printed)
+	}
+
+	// One rewrite more anywhere else, and the run stops rather than doing what
+	// nobody was shown.
+	differed := now
+	differed.Instances = append([]apply.InstanceSummary(nil), now.Instances...)
+	for i := range differed.Instances {
+		if differed.Instances[i].App != "sonarr" {
+			continue
+		}
+		differed.Instances[i].Changes = []rewrite.Change{{File: "config.xml", Where: "UrlBase", What: "url base", Count: 1}}
+	}
+	if ok, err := migrateAgreed(&say.Plain{W: &bytes.Buffer{}}, agreed)(differed); err == nil || ok {
+		t.Fatalf("a run that would do more than it showed was allowed: ok=%v err=%v", ok, err)
+	} else if !strings.Contains(err.Error(), "nothing of the snapshot has been moved") {
+		t.Errorf("the refusal does not say what state the host is in: %v", err)
+	}
+}
+
+// TestAHostWithABoxAsksInsideTheRun: nothing was agreed to before an install that
+// did not happen, so the run asks its one question itself -- after every check,
+// including the one Plex's image makes (internal/migrate/apply proves the order;
+// this is the choice between the two).
+func TestAHostWithABoxAsksInsideTheRun(t *testing.T) {
+	grant, values := "/etc/s5n/seedboxes/root.yaml", "/root/.config/box/values.yaml"
+	o := &migrateApplyFlags{applyFlags: &applyFlags{grantPath: &grant, valuesPath: &values, yes: new(bool)}, details: new(bool)}
+	// No terminal and no --yes: the asking form refuses rather than answering.
+	ask := migrateAnswer(&say.Plain{W: &bytes.Buffer{}}, o, "seedbox", false, nil)
+	if _, err := ask(migratingSummary()); err == nil || !strings.Contains(err.Error(), "--yes") {
+		t.Fatalf("a host with a box did not ask: %v", err)
+	}
+	// A run that agreed before installing does not.
+	agreed := migratingSummary()
+	ask = migrateAnswer(&say.Plain{W: &bytes.Buffer{}}, o, "seedbox", false, &agreed)
+	if ok, err := ask(agreed); err != nil || !ok {
+		t.Fatalf("a run that already agreed asked again: %v %v", ok, err)
 	}
 }
 

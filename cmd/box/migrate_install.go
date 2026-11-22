@@ -22,15 +22,22 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 
+	"github.com/swizzin/s5n/internal/archive"
 	"github.com/swizzin/s5n/internal/authelia"
 	"github.com/swizzin/s5n/internal/bootstrap"
+	"github.com/swizzin/s5n/internal/catalog"
 	"github.com/swizzin/s5n/internal/hostconf"
+	"github.com/swizzin/s5n/internal/migrate/apply"
+	"github.com/swizzin/s5n/internal/migrate/bundle"
 	"github.com/swizzin/s5n/internal/migrate/plan"
 	"github.com/swizzin/s5n/internal/platform"
+	"github.com/swizzin/s5n/internal/release"
 	"github.com/swizzin/s5n/internal/say"
+	"github.com/swizzin/s5n/internal/seedbox"
 	"github.com/swizzin/s5n/internal/setup"
 )
 
@@ -74,27 +81,155 @@ func boxInstalled(recordPath string) (bool, error) {
 	return rec != nil, nil
 }
 
+// installGuided says this run can ask: a terminal to ask on and no --yes. It is
+// the rule init uses to decide whether it asks, and the pre-install pass has to
+// ask it the same way, because the answers the plan cannot hold are init's own
+// questions.
+func installGuided(o *migrateApplyFlags) bool { return !*o.yes && isTerminal(os.Stdin) }
+
+// installTarget is the box this run installs, as the question names it: the
+// namespace the flags decide, or the empty string when init will ask for the
+// login that names it. An empty answer is a question about "this box" rather
+// than a guess at a namespace the install has not chosen yet.
+func installTarget(inst *installFlags) string {
+	if ns := strings.TrimSpace(*inst.namespace); ns != "" {
+		return ns
+	}
+	login := strings.TrimSpace(*inst.login)
+	if login == "" {
+		return ""
+	}
+	ns, err := setup.NamespaceFor(login)
+	if err != nil {
+		// A login that cannot name a namespace is init's own refusal, asked
+		// where it belongs; this run's question does not need it.
+		return ""
+	}
+	return ns
+}
+
+// migrateInstallSteps is the half of `box migrate apply` a host with no box runs
+// before it adopts anything: the pre-install pass that decides what the run
+// would do, and the install that does it once the question is answered. They are
+// fields so a test can watch the order -- the one question comes before either
+// of them writes anything -- without a host, a cluster or a registry.
+type migrateInstallSteps struct {
+	// survey is the pre-install pass: the migration's summary from the snapshot,
+	// and the platform plan this run would install.
+	survey func(ctx context.Context) (apply.Summary, *platform.Plan, error)
+	// install is bootstrap, the platform and init: a host with no box becomes
+	// one, with the release's apps off.
+	install func(ctx context.Context) error
+}
+
+// beforeInstall is the order the whole run exists for: decide, show, ask -- and
+// only after the answer install anything. It returns the summary the operator
+// agreed to, which the adoption is then held to.
+func (s migrateInstallSteps) beforeInstall(ctx context.Context, ask asker, details bool, target string, rehearsal bool, out say.Reporter) (*apply.Summary, error) {
+	summary, plat, err := s.survey(ctx)
+	if err != nil {
+		return nil, err
+	}
+	ok, err := migrateConfirm(out, ask, target, rehearsal, details, plat)(summary)
+	if err != nil {
+		return nil, err
+	}
+	if !ok {
+		return nil, apply.ErrCancelled
+	}
+	if err := s.install(ctx); err != nil {
+		return nil, err
+	}
+	return &summary, nil
+}
+
+// migrationSteps builds the pre-install half for one run: the summary from the
+// snapshot's plan and the release's files, and the install from the plan's
+// answers.
+func migrationStepsWith(ctx context.Context, o *migrateApplyFlags, inst *installFlags, p *plan.Plan, opened *bundle.Opened, raw []byte, charts *chartRelease, chart release.Chart, cat *catalog.Catalog, rehearsal bool, out say.Reporter) (migrateInstallSteps, error) {
+	// The answers a plan cannot hold come first: they are the cheapest refusal
+	// (a flag this run was not given) and nothing else here can run without them.
+	answers, err := installAnswers(o, inst, p, installGuided(o))
+	if err != nil {
+		return migrateInstallSteps{}, err
+	}
+	// The platform this run would install, decided without installing it: a
+	// cluster box would create, or the one it found, probed read-only. It comes
+	// before the snapshot is staged, so a platform this host cannot have is a
+	// refusal before anything is copied.
+	plat, class, err := migratePlatform(ctx, o, inst, charts, chart, out)
+	if err != nil {
+		return migrateInstallSteps{}, err
+	}
+	return migrateInstallSteps{
+		survey: func(ctx context.Context) (apply.Summary, *platform.Plan, error) {
+			summary, err := migrateSurvey(ctx, o, p, opened, raw, chart, cat, rehearsal)
+			return summary, plat, err
+		},
+		install: func(ctx context.Context) error {
+			return migrateInstall(ctx, o, inst, charts, answers, class, out)
+		},
+	}, nil
+}
+
 // migrateInstall takes a host with no box to one with a seedbox whose apps are
 // off, from the plan. It returns when init has installed the release, which is
-// the state the adoption then runs against, and the platform plan, which the
-// migration's one confirm shows first.
-func migrateInstall(ctx context.Context, o *migrateApplyFlags, inst *installFlags, p *plan.Plan, charts *chartRelease, out say.Reporter) (platform.Plan, error) {
-	var applied platform.Plan
-	// A guided run is one with a terminal to ask on and no --yes: the same rule
-	// init uses to decide whether it asks. Its four own answers that this run
-	// does not have are init's questions, so they are not a refusal here.
-	guided := !*o.yes && isTerminal(os.Stdin)
-	answers, err := installAnswers(o, inst, p, guided)
-	if err != nil {
-		return applied, err
-	}
+// the state the adoption then runs against.
+//
+// class is the GatewayClass the pre-install pass chose. It is handed back in, so
+// the second decision does not ask a question the first one already answered: the
+// two runs have to settle on one class, and choosing it twice is how a box's
+// routes move.
+func migrateInstall(ctx context.Context, o *migrateApplyFlags, inst *installFlags, charts *chartRelease, answers []string, class string, out say.Reporter) error {
 	out.Phase("cluster")
 	if _, _, err := hostconf.Load(hostconf.Path(*inst.record)); err != nil {
-		return applied, err
+		return err
 	}
 	charts.out = out
 
-	d := &bootstrap.Decision{
+	d := migrationDecision(o, inst, charts, out)
+	res, err := d.Bootstrap(ctx, bootstrap.Options{
+		Kubeconfig:    *o.kubeconfig,
+		KubeconfigEnv: os.Getenv("KUBECONFIG"),
+		Platform:      bootstrap.DefaultPlatform(),
+		GatewayClass:  class,
+	})
+	if err != nil {
+		return err
+	}
+	bootstrap.ReportResult(res, out)
+	if res.Action == bootstrap.ActionStop {
+		return errors.New("bootstrap stopped, so there is no cluster to install into")
+	}
+	chart, err := charts.load(ctx)
+	if err != nil {
+		return err
+	}
+	// The platform was the first half of the one confirm: it is not asked about
+	// here, and its plan is not printed here either, because the question came
+	// before anything was installed and showed it then.
+	if _, err := applyPlatform(ctx, res.Kubeconfig, res.Platform, res.Gateway.Class, "", chart.Pins, res.Firewall, answered{}, true, out); err != nil {
+		return err
+	}
+	if _, err := hostconf.Ensure(hostconf.Path(*inst.record)); err != nil {
+		return err
+	}
+
+	// init's own flow, over init's own flags: the answers the plan holds are
+	// parsed as if they had been given on the command line, so init's
+	// first-run-or-re-run logic sees them exactly as it sees an operator's.
+	iflg, err := migrationInit(inst, charts, answers)
+	if err != nil {
+		return err
+	}
+	return iflg.run(ctx, res.Kubeconfig, *o.yes, *o.plain, out)
+}
+
+// migrationDecision is box bootstrap's own decision, built from this run's flags:
+// the same one `box bootstrap` makes, so a migrate install cannot pick a cluster
+// or a platform the other command would not.
+func migrationDecision(o *migrateApplyFlags, inst *installFlags, charts *chartRelease, out say.Reporter) *bootstrap.Decision {
+	return &bootstrap.Decision{
 		Source: bootstrap.FilesystemSource{},
 		Pins:   charts.pins,
 		NewProber: func(kc []byte) (bootstrap.Prober, error) {
@@ -104,41 +239,84 @@ func migrateInstall(ctx context.Context, o *migrateApplyFlags, inst *installFlag
 		Records: bootstrap.FilesystemRecords{Path: *inst.record},
 		Install: bootstrap.K0sInstaller{Say: out},
 	}
+}
+
+// migratePlatform is the platform plan this run would install, decided without
+// installing anything: bootstrap's own cluster decision in preview mode (it
+// writes no k0s, no cluster record and no firewall change), turned into the plan
+// the migration's one confirm shows first.
+//
+// The class comes back with it because the install settles on it again: asking
+// the operator twice for one decision, or letting the two runs choose different
+// classes, is how a box's routes move.
+func migratePlatform(ctx context.Context, o *migrateApplyFlags, inst *installFlags, charts *chartRelease, chart release.Chart, out say.Reporter) (*platform.Plan, string, error) {
+	d := migrationDecision(o, inst, charts, out)
 	res, err := d.Bootstrap(ctx, bootstrap.Options{
 		Kubeconfig:    *o.kubeconfig,
 		KubeconfigEnv: os.Getenv("KUBECONFIG"),
 		Platform:      bootstrap.DefaultPlatform(),
+		Preview:       true,
 	})
 	if err != nil {
-		return applied, err
+		return nil, "", err
 	}
-	bootstrap.ReportResult(res, out)
 	if res.Action == bootstrap.ActionStop {
-		return applied, errors.New("bootstrap stopped, so there is no cluster to install into")
+		return nil, "", errors.New(res.Reason)
 	}
-	chart, err := charts.load(ctx)
+	plan, err := platform.Preview(chart.Pins, res.Platform, res.Gateway.Class, "", res.Firewall)
 	if err != nil {
-		return applied, err
+		return nil, "", err
 	}
-	// The platform is the first half of the one confirm: it is not asked about
-	// here, and its plan is not printed here either, because the migration's
-	// confirm shows it first and asks once for the whole run.
-	applied, err = applyPlatform(ctx, res.Kubeconfig, res.Platform, res.Gateway.Class, "", chart.Pins, res.Firewall, answered{}, true, out)
-	if err != nil {
-		return applied, err
-	}
-	if _, err := hostconf.Ensure(hostconf.Path(*inst.record)); err != nil {
-		return applied, err
-	}
+	return &plan, res.Gateway.Class, nil
+}
 
-	// init's own flow, over init's own flags: the answers the plan holds are
-	// parsed as if they had been given on the command line, so init's
-	// first-run-or-re-run logic sees them exactly as it sees an operator's.
-	iflg, err := migrationInit(inst, charts, answers)
+// migrateSurvey is the pre-install pass: the migration's summary, from the same
+// plan and the same snapshot a run after the install reads, and from the values
+// the chart and the user's file already hold.
+//
+// It stages into a private directory it removes, so nothing of this pass stays on
+// the host: the run's own state directory under the config root is not created
+// until the answer is yes.
+func migrateSurvey(ctx context.Context, o *migrateApplyFlags, p *plan.Plan, opened *bundle.Opened, raw []byte, chart release.Chart, cat *catalog.Catalog, rehearsal bool) (apply.Summary, error) {
+	dir, err := os.MkdirTemp("", "box-migrate-survey-")
 	if err != nil {
-		return applied, err
+		return apply.Summary{}, fmt.Errorf("a private directory for the pre-install pass: %w", err)
 	}
-	return applied, iflg.run(ctx, res.Kubeconfig, *o.yes, *o.plain, out)
+	defer os.RemoveAll(dir)
+	values, err := seedbox.Pending(seedbox.Chart{Values: chart.Values, Schema: chart.Schema}, *o.valuesPath)
+	if err != nil {
+		return apply.Summary{}, err
+	}
+	env, err := surveyEnv(p, opened, cat, values, rehearsal, dir)
+	if err != nil {
+		return apply.Summary{}, err
+	}
+	return apply.Survey(ctx, p, raw, env)
+}
+
+// surveyEnv is the environment the pre-install pass runs with: the plan, the
+// snapshot's configs, the values the chart and the user's file hold, and none of
+// the cluster. The config root is the caller's private directory, which is why
+// nothing here is owned as the seedbox's user: what this pass stages is measured
+// and thrown away.
+func surveyEnv(p *plan.Plan, opened *bundle.Opened, cat *catalog.Catalog, values map[string]any, rehearsal bool, configRoot string) (apply.Env, error) {
+	var env apply.Env
+	env.ConfigRoot = configRoot
+	if p.Data != nil {
+		env.DataRoot = p.Data.Root
+	}
+	env.Configs = filepath.Join(opened.Dir, archive.ConfigPrefix)
+	env.Catalog = cat.Names()
+	targets, err := apply.Targets(values, env.Catalog, sortedKeys(p.Apps))
+	if err != nil {
+		return env, err
+	}
+	env.Targets = targets
+	// Nothing is installed, so nothing is on: every planned instance is one this
+	// run switches on.
+	env.Enabled = func(string) bool { return false }
+	env.Rehearsal = rehearsal
+	return env, nil
 }
 
 // migrationInit is init's flags as a migration runs them: the plan's answers as

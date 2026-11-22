@@ -209,18 +209,35 @@ func migrateApply(ctx context.Context, file string, o *migrateApplyFlags, out sa
 	}
 	raw := opened.Plan
 	charts := &chartRelease{flags: o.chart, out: out}
-	// plat is the platform this run installed, on a host that had none: its
-	// plan is shown first in the migration's one confirm, because that confirm
-	// is the whole run's (no separate "install the platform layer?").
-	var plat *platform.Plan
-	if installed, err := boxInstalled(*o.install.record); err != nil {
+	// installed says this host has no box, so this run is the installer: it
+	// shows the whole run once and then does it, in that order. agreed is what
+	// the operator said yes to -- nil on a host that already has a box, where
+	// the one question is asked inside apply.Run after every check, as it always
+	// was.
+	installed, err := boxInstalled(*o.install.record)
+	if err != nil {
 		return err
-	} else if !installed {
-		applied, err := migrateInstall(ctx, o, o.install, p, charts, out)
+	}
+	// The release is read once, for both halves: the pre-install pass needs its
+	// values and ports, and the adoption installs this same chart.
+	chart, err := loadMigrateChart(ctx, charts)
+	if err != nil {
+		return err
+	}
+	cat, err := catalog.Parse(chart.Ref+"/"+catalog.FileName, chart.Catalog, chart.Values, chart.Schema)
+	if err != nil {
+		return err
+	}
+	var agreed *apply.Summary
+	if !installed {
+		steps, err := migrationStepsWith(ctx, o, o.install, p, opened, raw, charts, chart, cat, rehearsal, out)
 		if err != nil {
 			return err
 		}
-		plat = &applied
+		agreed, err = steps.beforeInstall(ctx, confirmer(out, *o.yes), *o.details, installTarget(o.install), rehearsal, out)
+		if err != nil {
+			return err
+		}
 	}
 	sb, err := seedbox.Load(*o.grantPath, *o.valuesPath)
 	if err != nil {
@@ -275,19 +292,11 @@ func migrateApply(ctx context.Context, file string, o *migrateApplyFlags, out sa
 		return fmt.Errorf("migrate adopts into an installed seedbox: %s is not installed in %s. Run `box init` first, with the plan's apps left off", release.ReleaseName, namespace)
 	}
 
-	chart, err := loadMigrateChart(ctx, charts)
-	if err != nil {
-		return err
-	}
-	cat, err := catalog.Parse(chart.Ref+"/"+catalog.FileName, chart.Catalog, chart.Values, chart.Schema)
-	if err != nil {
-		return err
-	}
 	values, err := sb.Effective(seedbox.Chart{Values: chart.Values, Schema: chart.Schema})
 	if err != nil {
 		return err
 	}
-	env, cs, err := migrateEnv(p, opened, o, sb, chart, cat, kc, namespace, values, rehearsal, carriedNotes(p, opened), plat, out)
+	env, cs, err := migrateEnv(p, opened, o, sb, chart, cat, kc, namespace, values, rehearsal, carriedNotes(p, opened), agreed, out)
 	if err != nil {
 		return err
 	}
@@ -308,6 +317,12 @@ func migrateApply(ctx context.Context, file string, o *migrateApplyFlags, out sa
 		out.Line(note)
 	}
 	if err != nil {
+		if agreed != nil && apply.StoppedBeforeWrite(err) {
+			// The install this run was told to make is done, and its checks
+			// stopped the migration before anything of the snapshot moved: a
+			// person has to know both, and what running it again does.
+			return fmt.Errorf("%w\n\nthe box is installed and nothing of the snapshot has been moved into it: fix what this names, then run this again -- the next run finds a box already, so it asks its one question after these checks and carries on from here", err)
+		}
 		return err
 	}
 	if res.Done {
@@ -346,7 +361,7 @@ func loadMigrateChart(ctx context.Context, charts *chartRelease) (release.Chart,
 }
 
 // migrateEnv builds everything apply touches outside the plan directory.
-func migrateEnv(p *plan.Plan, opened *bundle.Opened, o *migrateApplyFlags, sb *seedbox.Seedbox, chart release.Chart, cat *catalog.Catalog, kc, namespace string, values map[string]any, rehearsal bool, carried []apply.Carried, plat *platform.Plan, out say.Reporter) (apply.Env, kubernetes.Interface, error) {
+func migrateEnv(p *plan.Plan, opened *bundle.Opened, o *migrateApplyFlags, sb *seedbox.Seedbox, chart release.Chart, cat *catalog.Catalog, kc, namespace string, values map[string]any, rehearsal bool, carried []apply.Carried, agreed *apply.Summary, out say.Reporter) (apply.Env, kubernetes.Interface, error) {
 	var env apply.Env
 	vols, err := sb.Storage()
 	if err != nil {
@@ -429,8 +444,20 @@ func migrateEnv(p *plan.Plan, opened *bundle.Opened, o *migrateApplyFlags, sb *s
 	}
 	env.Rehearsal = rehearsal
 	env.Carried = carried
-	env.Confirm = migrateConfirm(out, confirmer(out, *o.yes), namespace, rehearsal, *o.details, plat)
+	env.Confirm = migrateAnswer(out, o, namespace, rehearsal, agreed)
 	return env, cs, nil
+}
+
+// migrateAnswer is the confirm a run uses. On a host that had no box the question
+// was asked before anything was installed, so this run asks nothing and holds
+// itself to the answer instead. On a host that already had one there is nothing
+// to agree to beforehand, and the question is asked here, inside the run, after
+// every app's Check -- Plex's included.
+func migrateAnswer(out say.Reporter, o *migrateApplyFlags, namespace string, rehearsal bool, agreed *apply.Summary) func(apply.Summary) (bool, error) {
+	if agreed != nil {
+		return migrateAgreed(out, *agreed)
+	}
+	return migrateConfirm(out, confirmer(out, *o.yes), namespace, rehearsal, *o.details, nil)
 }
 
 // carriedNotes is the confirm's half of the report's line about the part of a
@@ -506,13 +533,18 @@ func trimmed(dir string, files []discover.CarryFile) bool {
 // --plain or piped run gets the line prompt; --yes answers without asking, and
 // no terminal without --yes refuses, as apply does.
 //
-// It is the run's only question. On a host that had no box, the platform this
-// run installed is part of it, shown first: a run that asked "install the
-// platform layer?" and then "move these into ...?" was two questions about one
-// decision.
+// It is the run's only question. On a host with no box it comes before anything
+// is installed, so the platform this run would install is part of it, shown
+// first, and the first line says so: a person deciding to install a cluster and
+// a platform layer has to read that from the screen, not from the order of the
+// output. A run that asked "install the platform layer?" and then "move these
+// into ...?" was two questions about one decision, and the second one came after
+// both.
 func migrateConfirm(out say.Reporter, ask asker, namespace string, rehearsal bool, details bool, plat *platform.Plan) func(apply.Summary) (bool, error) {
+	target := confirmTarget(namespace)
 	return func(s apply.Summary) (bool, error) {
 		if plat != nil {
+			out.Muted("nothing is installed yet: this run installs the cluster and the platform layer, writes the box, and then moves the snapshot into it")
 			if items := plat.Items(); len(items) > 0 {
 				out.Plan("platform", items)
 			}
@@ -540,9 +572,41 @@ func migrateConfirm(out say.Reporter, ask asker, namespace string, rehearsal boo
 				"nothing leaves this box: no internet egress, and the release's own pods only",
 				"every torrent starts stopped, and no data is renamed",
 			})
-			return ask.Ask(fmt.Sprintf("rehearse these into %s?", namespace))
+			return ask.Ask(fmt.Sprintf("rehearse these into %s?", target))
 		}
-		return ask.Ask(fmt.Sprintf("move these into %s?", namespace))
+		return ask.Ask(fmt.Sprintf("move these into %s?", target))
+	}
+}
+
+// confirmTarget is the box a question names: the namespace it will have, or "this
+// box" when the install has not been told one yet -- a guided run asks for the
+// login, and the login is what names it.
+func confirmTarget(namespace string) string {
+	if ns := strings.TrimSpace(namespace); ns != "" {
+		return ns
+	}
+	return "this box"
+}
+
+// migrateAgreed is the answer a host with no box already gave: the confirm that
+// does not ask, and refuses a summary that is not the one the operator agreed to.
+//
+// Both runs read the same snapshot and the same plan, so they have to produce
+// the same summary. The one thing that differs is the rows the pre-install pass
+// could not check, and apply.Summary.Holds ignores exactly those. Anything else
+// is a fault, and a run that would do what nobody was shown stops instead.
+func migrateAgreed(out say.Reporter, agreed apply.Summary) func(apply.Summary) (bool, error) {
+	return func(s apply.Summary) (bool, error) {
+		if why := s.Holds(agreed); why != "" {
+			return false, fmt.Errorf("this run would not do what it asked about, and nothing of the snapshot has been moved: %s. The snapshot was read twice from the same file and the plan is the same, so this is a fault in box, not something to answer differently", why)
+		}
+		// The rows the question could not fill in are filled in here: the check
+		// it said would happen once the app's image ran has just run, and what
+		// it found belongs where the operator read the promise.
+		if rows := s.CheckedRows(agreed); len(rows) > 0 {
+			out.Table("checked after the install", rows)
+		}
+		return true, nil
 	}
 }
 

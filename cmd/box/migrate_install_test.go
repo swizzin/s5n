@@ -302,3 +302,29 @@ func TestInstallAnswersRefuseAPlanWithNoDataRootEvenGuided(t *testing.T) {
 		t.Fatalf("a guided run accepted a plan with no data root: %v", err)
 	}
 }
+
+// TestInstallTargetNamesTheBoxTheFlagsDecide: the question a host with no box
+// asks names the namespace the install will have -- the flag, or the one init
+// derives from the login. A guided run with neither has not chosen it yet, and
+// the question says "this box" rather than inventing a name.
+func TestInstallTargetNamesTheBoxTheFlagsDecide(t *testing.T) {
+	_, inst := installFlagSet(t)
+	if got := installTarget(inst); got != "seedbox" {
+		t.Errorf("with --box-namespace, the target is %q, want seedbox", got)
+	}
+	inst.namespace = new(string)
+	*inst.login = "alice"
+	if got := installTarget(inst); got != "s5n-alice" {
+		t.Errorf("with --login alice, the target is %q, want the namespace it names", got)
+	}
+	if got := confirmTarget(installTarget(inst)); got != "s5n-alice" {
+		t.Errorf("the question names %q, want s5n-alice", got)
+	}
+	*inst.login = ""
+	if got := installTarget(inst); got != "" {
+		t.Errorf("with no login, the target is %q, and init has not chosen a namespace", got)
+	}
+	if got := confirmTarget(installTarget(inst)); got != "this box" {
+		t.Errorf("the question with no namespace reads %q, want it to name the box it is about", got)
+	}
+}

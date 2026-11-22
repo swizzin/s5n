@@ -1,0 +1,226 @@
+package main
+
+// migrate_order_test.go proves the order `box migrate apply` takes on a host with
+// no box: the whole run is decided and shown first, the one question is asked,
+// and only then is anything installed. It is the one thing about this command
+// that no single step can show: a run that installed the cluster, the platform
+// and the empty release before asking left a host nobody agreed to when the
+// answer was no.
+//
+// The survey is driven twice: once with a fake, to read the order of the calls,
+// and once with the real pre-install pass, to prove what it does is confined to a
+// directory it removes.
+
+import (
+	"bytes"
+	"context"
+	"errors"
+	"io/fs"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+
+	"github.com/swizzin/s5n/internal/archive"
+	"github.com/swizzin/s5n/internal/catalog"
+	"github.com/swizzin/s5n/internal/migrate/apply"
+	"github.com/swizzin/s5n/internal/migrate/bundle"
+	"github.com/swizzin/s5n/internal/migrate/plan"
+	"github.com/swizzin/s5n/internal/platform"
+	"github.com/swizzin/s5n/internal/say"
+)
+
+// stepAsker answers the one question and records where in the run it happened.
+type stepAsker struct {
+	order []string
+	yes   bool
+	asked []string
+}
+
+func (a *stepAsker) Ask(question string) (bool, error) {
+	a.order = append(a.order, "ask")
+	a.asked = append(a.asked, question)
+	return a.yes, nil
+}
+
+// TestTheQuestionComesBeforeAnythingIsInstalled: the pre-install pass, then the
+// question, then the install -- and the answer is what decides whether the
+// install happens at all.
+func TestTheQuestionComesBeforeAnythingIsInstalled(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		yes      bool
+		want     []string
+		canceled bool
+	}{
+		{name: "yes", yes: true, want: []string{"survey", "ask", "install"}},
+		{name: "no", yes: false, want: []string{"survey", "ask"}, canceled: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ask := &stepAsker{yes: tc.yes}
+			installed := 0
+			steps := migrateInstallSteps{
+				survey: func(context.Context) (apply.Summary, *platform.Plan, error) {
+					ask.order = append(ask.order, "survey")
+					return migrationSummaryForOrder(), nil, nil
+				},
+				install: func(context.Context) error {
+					installed++
+					ask.order = append(ask.order, "install")
+					return nil
+				},
+			}
+			var out bytes.Buffer
+			agreed, err := steps.beforeInstall(context.Background(), ask, false, "s5n-alice", false, &say.Plain{W: &out})
+			if tc.canceled {
+				if !errors.Is(err, apply.ErrCancelled) {
+					t.Fatalf("answering no = %v, want a cancellation", err)
+				}
+				if agreed != nil {
+					t.Error("a cancelled run handed back a summary it never agreed to")
+				}
+				if installed != 0 {
+					t.Error("answering no installed something")
+				}
+			} else {
+				if err != nil {
+					t.Fatalf("beforeInstall: %v", err)
+				}
+				if agreed == nil {
+					t.Error("the run installed without recording what was agreed to")
+				}
+			}
+			if got := strings.Join(ask.order, " "); got != strings.Join(tc.want, " ") {
+				t.Errorf("the run went %q, want %q", got, strings.Join(tc.want, " "))
+			}
+			if len(ask.asked) != 1 {
+				t.Fatalf("the run asked %d questions (%v), want one", len(ask.asked), ask.asked)
+			}
+			if want := "move these into s5n-alice?"; ask.asked[0] != want {
+				t.Errorf("the question = %q, want %q", ask.asked[0], want)
+			}
+		})
+	}
+}
+
+// migrationSummaryForOrder is a summary with one app, which is all the order test
+// reads.
+func migrationSummaryForOrder() apply.Summary {
+	return apply.Summary{Instances: []apply.InstanceSummary{{
+		App:    "sonarr",
+		Staged: apply.Staged{App: "sonarr", Files: 3, Bytes: 1024},
+		Enable: true,
+	}}}
+}
+
+// TestThePreInstallPassWritesOnlyWhereItIsThrownAway: the real pass, over a real
+// snapshot, against a config root and a grant path that must survive it
+// untouched. The run's state directory under the config root is the adoption's,
+// and it is not created until the answer is yes.
+func TestThePreInstallPassWritesOnlyWhereItIsThrownAway(t *testing.T) {
+	snapshot := preInstallSnapshot(t)
+	p, raw, opened := snapshot.plan(t)
+	chart := chartWithVariants(t)
+	cat, err := catalog.Parse(chart.Ref+"/"+catalog.FileName, chart.Catalog, chart.Values, chart.Schema)
+	if err != nil {
+		t.Fatalf("parse the chart's catalog: %v", err)
+	}
+	grantPath := filepath.Join(t.TempDir(), "grant.yaml")
+	configRoot := t.TempDir()
+	valuesPath := filepath.Join(t.TempDir(), "values.yaml")
+	o := &migrateApplyFlags{applyFlags: &applyFlags{grantPath: &grantPath, valuesPath: &valuesPath}}
+
+	summary, err := migrateSurvey(context.Background(), o, p, opened, raw, chart, cat, false)
+	if err != nil {
+		t.Fatalf("migrateSurvey: %v", err)
+	}
+	if len(summary.Instances) != 1 || summary.Instances[0].App != "qbittorrent" {
+		t.Fatalf("the summary is %+v, want one qbittorrent row", summary.Instances)
+	}
+	if summary.Instances[0].Staged.Files == 0 {
+		t.Error("the summary counts no staged files, so the copy did not run")
+	}
+	// Answering no from here installs nothing and leaves both paths alone.
+	installed := false
+	steps := migrateInstallSteps{
+		survey: func(context.Context) (apply.Summary, *platform.Plan, error) {
+			return summary, nil, nil
+		},
+		install: func(context.Context) error {
+			installed = true
+			return nil
+		},
+	}
+	if _, err := steps.beforeInstall(context.Background(), &stepAsker{}, false, "", false, &say.Plain{W: &bytes.Buffer{}}); !errors.Is(err, apply.ErrCancelled) {
+		t.Fatalf("answering no = %v, want a cancellation", err)
+	}
+	if installed {
+		t.Error("answering no installed something")
+	}
+	if _, err := os.Stat(grantPath); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("the pre-install pass or the answer wrote a grant at %s", grantPath)
+	}
+	entries, err := os.ReadDir(configRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		t.Errorf("the config root holds %d entries after a run that was answered no, want none", len(entries))
+	}
+}
+
+// snapshotFixture is a snapshot with one app's config in it, laid out the way
+// bundle.Open leaves one: the plan at the root, and <Dir>/config/<instance>/.
+type snapshotFixture struct {
+	dir      string
+	dataRoot string
+	app      string
+	config   string
+}
+
+func preInstallSnapshot(t *testing.T) *snapshotFixture {
+	t.Helper()
+	s := &snapshotFixture{dir: t.TempDir(), dataRoot: t.TempDir(), app: "qbittorrent"}
+	for _, dir := range []string{filepath.Join(s.dataRoot, "Downloads"), filepath.Join(s.dataRoot, "media"), filepath.Join(s.dir, archive.ConfigPrefix, s.app, "qBittorrent")} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	s.config = "[BitTorrent]\nSession\\DefaultSavePath=/downloads\n\n[WebUI]\nPort=8080\n"
+	if err := os.WriteFile(filepath.Join(s.dir, archive.ConfigPrefix, s.app, "qBittorrent", "qBittorrent.conf"), []byte(s.config), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return s
+}
+
+// plan is the snapshot as openSnapshot would return it.
+func (s *snapshotFixture) plan(t *testing.T) (*plan.Plan, []byte, *bundle.Opened) {
+	t.Helper()
+	raw := []byte(`version: 2
+data:
+  root: ` + s.dataRoot + `
+  downloads: Downloads
+  media: media
+apps:
+  qbittorrent:
+    kind: kubernetes
+    source: qbittorrent
+    config: /srv/apps/qbittorrent
+    namespace: media
+    ports: [8080]
+    paths:
+      - from: /downloads
+        to: /data/downloads
+`)
+	p, err := plan.Parse(raw)
+	if err != nil {
+		t.Fatalf("parse the plan: %v", err)
+	}
+	return p, raw, &bundle.Opened{
+		Path:    "snapshot.tar.gz",
+		Dir:     s.dir,
+		Mode:    archive.ModeFinal,
+		Plan:    raw,
+		Configs: map[string]string{s.app: s.app},
+	}
+}
