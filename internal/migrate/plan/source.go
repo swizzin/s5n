@@ -178,7 +178,36 @@ func checkApp(name string, app App) []string {
 	if app.Variant != "" && app.Image == "" {
 		problems = append(problems, fmt.Sprintf("apps.%s: variant %q is a mapping from an image, and image is empty", name, app.Variant))
 	}
+	for _, c := range []struct{ key, val string }{{"category", app.Category}, {"downloadCategory", app.DownloadCategory}} {
+		if c.val == "" {
+			continue
+		}
+		if why := categoryProblem(c.val); why != "" {
+			problems = append(problems, fmt.Sprintf("apps.%s: %s %q %s", name, c.key, c.val, why))
+		}
+	}
 	return problems
+}
+
+// categoryProblem says why a value cannot be a category, or "" when it can: a
+// category is one directory name, or a subcategory's two (4K/Movies), and it
+// is a path segment on a filesystem box lays out itself.
+func categoryProblem(v string) string {
+	if strings.ContainsAny(v, "\\\r\n") {
+		return "has a backslash or a newline in it"
+	}
+	if strings.HasPrefix(v, "/") || strings.HasSuffix(v, "/") {
+		return "must not start or end with /"
+	}
+	for _, segment := range strings.Split(v, "/") {
+		if segment == "" {
+			return "has an empty segment"
+		}
+		if segment == "." || segment == ".." {
+			return "is not a directory name"
+		}
+	}
+	return ""
 }
 
 // whyProblems enforces what a rule's reason is: one line, and present whenever

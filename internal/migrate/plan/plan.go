@@ -93,6 +93,17 @@ type App struct {
 	// config set them. A localhost address another app stored is resolved to
 	// this app by its port.
 	Ports []int `yaml:"ports,omitempty"`
+	// Category is the directory under /data/media box lays this instance's
+	// library out in, as the chart's values name it: `movies` for radarr,
+	// `movies-4k` for radarr-4k. Empty for an app that keeps no library, and
+	// for a read that had no chart to ask.
+	Category string `yaml:"category,omitempty"`
+	// DownloadCategory is the qBittorrent category this instance's downloads
+	// are in, as the source's own download client named it: `Movies`,
+	// `4K/TV`. A migrated box keeps it, because the torrents are already in
+	// that directory and box never moves them; empty means the source said
+	// nothing (or said nothing useful), and box's own category is the answer.
+	DownloadCategory string `yaml:"downloadCategory,omitempty"`
 	// Paths are this app's path rules.
 	Paths []PathRule `yaml:"paths"`
 }
