@@ -3,6 +3,7 @@ package discover
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -28,6 +29,9 @@ import (
 // two have to be two directories directly under one parent, or a download and
 // the copy imported from it cannot share an inode -- which is the one thing this
 // migration exists to keep.
+//
+// The library's own directories are the categories box's release lays out, so
+// the same read maps each Arr's root folder onto the one its instance has.
 func (d *discovery) findData(ctx context.Context) (*plan.Data, error) {
 	qbit := d.byApp("qbittorrent")
 	if qbit == nil {
@@ -50,7 +54,11 @@ func (d *discovery) findData(ctx context.Context) (*plan.Data, error) {
 		return nil, fmt.Errorf("qBittorrent downloads into %s, which has no parent directory to be the data root", downloadsHost)
 	}
 
-	mediaHosts, err := d.mediaDirs(ctx, root, downloadsHost)
+	placed, err := d.rootFolderPaths(ctx)
+	if err != nil {
+		return nil, err
+	}
+	mediaHosts, err := d.mediaDirs(root, downloadsHost, placed)
 	if err != nil {
 		return nil, err
 	}
@@ -59,11 +67,115 @@ func (d *discovery) findData(ctx context.Context) (*plan.Data, error) {
 		return nil, err
 	}
 	data := &plan.Data{Root: root, Downloads: path.Base(downloadsHost), Media: media}
+	data.Folders = d.mediaFolders(root, media, placed)
 	if data.Downloads == data.Media {
 		return nil, movedByHand(root, downloadsHost, mediaHosts,
 			fmt.Sprintf("the downloads and the library are both under %s", path.Join(root, media)))
 	}
 	return data, nil
+}
+
+// placed is one root folder as the app saw it and as it is on this host.
+type placed struct {
+	// instance is the box instance whose database named it.
+	instance string
+	// container is the directory inside the app's pod.
+	container string
+	// host is the directory behind the app's library mount.
+	host string
+}
+
+// rootFolderPaths is every library instance's root folders, as the app saw
+// them and as they are on this host. They are read once, here, because two
+// things need the same list: the directory the library lives in, and the
+// category each instance's library becomes.
+func (d *discovery) rootFolderPaths(ctx context.Context) ([]placed, error) {
+	var out []placed
+	for _, in := range d.instances {
+		if !in.info.library {
+			continue
+		}
+		folders, category, err := d.readLibrary(ctx, in)
+		if err != nil {
+			return nil, err
+		}
+		in.downloadCategory = category
+		for _, folder := range folders {
+			host, ok := in.wl.hostDirOf(in.container, folder)
+			if !ok {
+				return nil, fmt.Errorf("%s root folder %s is not under a host-backed mount of %s: discovery cannot tell where the library is",
+					in.name, folder, workloadID(in.wl))
+			}
+			out = append(out, placed{instance: in.name, container: folder, host: host})
+		}
+	}
+	return out, nil
+}
+
+// mediaFolders is the plan's library mapping: one entry per instance, from the
+// directory the source's library keeps that instance's media in to the category
+// box's own release does.
+//
+// One root folder under the library per instance is the normal case. Two is a
+// decision rather than a guess: the first in name order is taken, marked as a
+// default with the reason, and a guided run shows it. A root folder somewhere
+// else is not this library at all -- it is left where it is, and the Arr keeps
+// it beside the category box adds.
+func (d *discovery) mediaFolders(root, media string, placed []placed) []plan.MediaFolder {
+	library := path.Join(root, media)
+	byInstance := map[string][]string{}
+	for _, p := range placed {
+		rel, ok := trimDir(p.host, library)
+		if !ok || rel == "" {
+			d.note("%s keeps its root folder %s outside %s, so it is not renamed: box adds /data/media/%s beside it",
+				p.instance, p.container, library, d.categoryOf(p.instance))
+			continue
+		}
+		byInstance[p.instance] = append(byInstance[p.instance], rel)
+	}
+	if len(d.opt.Categories) == 0 {
+		d.note("box was given no chart categories, so every library directory keeps the name the source gave it")
+		return nil
+	}
+	var out []plan.MediaFolder
+	taken := map[string]bool{}
+	for _, in := range d.instances {
+		rels := byInstance[in.name]
+		if len(rels) == 0 {
+			continue
+		}
+		sort.Strings(rels)
+		category := d.categoryOf(in.name)
+		if category == "" {
+			d.note("box's values name no category for %s, so %s keeps the name the source gave it", in.name, rels[0])
+			continue
+		}
+		folder := plan.MediaFolder{From: rels[0], To: category}
+		if len(rels) > 1 {
+			folder.Default = true
+			folder.Why = fmt.Sprintf("rewrite to %s: %s keeps two or more root folders under %s (%s), and the first is the one that becomes its category",
+				category, in.name, library, strings.Join(rels, ", "))
+			d.note("%s keeps two root folders under %s (%s), so only %s becomes %s and the rest keep their names",
+				in.name, library, strings.Join(rels, ", "), rels[0], category)
+		}
+		if taken[folder.From] {
+			// Two instances keeping one directory is one directory: it can
+			// only become one category, and the second Arr keeps it as it is.
+			d.note("%s keeps the same root folder as another instance (%s), so %s is not renamed again",
+				in.name, path.Join(library, folder.From), folder.From)
+			continue
+		}
+		taken[folder.From] = true
+		out = append(out, folder)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].From < out[j].From })
+	return out
+}
+
+// categoryOf is the directory box's values give one instance, empty when the
+// chart named none.
+func (d *discovery) categoryOf(instance string) string {
+	return d.opt.Categories[instance]
 }
 
 // mediaName is the one directory under the data root the Arrs' root folders live
@@ -163,28 +275,21 @@ func (d *discovery) qbtSavePath(qbit *instance) (string, bool, error) {
 	return "", false, fmt.Errorf("qBittorrent's config names no save path and %s mounts nothing at /downloads: discovery cannot tell where the downloads are", workloadID(qbit.wl))
 }
 
-// mediaDirs is the host directories the Arrs keep their root folders in. Without
-// an Arr to ask (a source whose Arrs are elsewhere), the only other thing that
-// can say is the mounts themselves: one directory beside the downloads, under
-// the same root, and nothing else. That is reported, because it is a shape
-// rather than a setting.
-func (d *discovery) mediaDirs(ctx context.Context, root, downloadsHost string) ([]string, error) {
+// mediaDirs is the host directories the Arrs keep their root folders in, as far
+// as they are under the data root. Without an Arr to ask (a source whose Arrs
+// are elsewhere), the only other thing that can say is the mounts themselves:
+// one directory beside the downloads, under the same root, and nothing else.
+// That is reported, because it is a shape rather than a setting.
+//
+// A root folder outside the root is not part of this library: box adopts the
+// data where it is, and a library on another filesystem cannot share an inode
+// with the download it came from. It is left where it is, and the mapping says
+// so once.
+func (d *discovery) mediaDirs(root, downloadsHost string, placed []placed) ([]string, error) {
 	var out []string
-	for _, in := range d.instances {
-		if !in.info.library {
-			continue
-		}
-		folders, err := d.rootFolders(ctx, in)
-		if err != nil {
-			return nil, err
-		}
-		for _, folder := range folders {
-			host, ok := in.wl.hostDirOf(in.container, folder)
-			if !ok {
-				return nil, fmt.Errorf("%s root folder %s is not under a host-backed mount of %s: discovery cannot tell where the library is",
-					in.name, folder, workloadID(in.wl))
-			}
-			out = append(out, host)
+	for _, p := range placed {
+		if rel, ok := trimDir(p.host, root); ok && rel != "" {
+			out = append(out, p.host)
 		}
 	}
 	if len(out) > 0 {
@@ -205,7 +310,7 @@ func (d *discovery) mediaDirs(ctx context.Context, root, downloadsHost string) (
 	}
 	if len(siblings) == 1 {
 		for _, host := range siblings {
-			d.note("no Arr is in the source to name its root folders, so the library is taken as %s, the one directory beside the downloads under %s", host, root)
+			d.note("no Arr root folder names the library, so it is taken as %s, the one directory beside the downloads under %s", host, root)
 			return []string{host}, nil
 		}
 	}
@@ -215,48 +320,67 @@ func (d *discovery) mediaDirs(ctx context.Context, root, downloadsHost string) (
 	}
 	sort.Strings(names)
 	if len(names) == 0 {
+		if len(placed) > 0 {
+			return nil, fmt.Errorf("every Arr root folder is outside %s (%s), so discovery cannot tell which directory under it is the library",
+				root, strings.Join(placedHosts(placed), ", "))
+		}
 		return nil, fmt.Errorf("no Arr is in the source to name its root folders, and no mount sits beside %s under %s", downloadsHost, root)
 	}
 	return nil, fmt.Errorf("no Arr is in the source to name its root folders, and the directories beside %s under %s are %s, so discovery cannot tell which one is the library",
 		downloadsHost, root, strings.Join(names, ", "))
 }
 
-// rootFolders reads an Arr's root folders out of its database. The database is
-// copied first: discovery changes nothing in the source, and a read of a live
-// SQLite file can leave a -shm or a checkpoint behind. The copy is checked with
-// SQLite's own integrity check, because a copy taken between two of the app's
-// writes is torn and its rows would be a wrong answer rather than a stale one.
-func (d *discovery) rootFolders(ctx context.Context, in *instance) ([]string, error) {
+// placedHosts is every root folder's host directory, for a refusal that names
+// what it found.
+func placedHosts(placed []placed) []string {
+	out := make([]string, len(placed))
+	for i, p := range placed {
+		out[i] = p.host
+	}
+	return out
+}
+
+// readLibrary reads an Arr's root folders and the category its download client
+// uses, out of its database. The database is copied first: discovery changes
+// nothing in the source, and a read of a live SQLite file can leave a -shm or a
+// checkpoint behind. The copy is checked with SQLite's own integrity check,
+// because a copy taken between two of the app's writes is torn and its rows
+// would be a wrong answer rather than a stale one.
+func (d *discovery) readLibrary(ctx context.Context, in *instance) ([]string, string, error) {
 	dbName := in.app + ".db"
 	tmp, err := os.MkdirTemp(d.opt.TempDir, "discover-")
 	if err != nil {
-		return nil, fmt.Errorf("copy %s's database: %w", in.name, err)
+		return nil, "", fmt.Errorf("copy %s's database: %w", in.name, err)
 	}
 	defer os.RemoveAll(tmp)
 	copyPath := filepath.Join(tmp, dbName)
 	if err := copyDatabase(d.opt.ConfigFS, in.configDir, dbName, copyPath); err != nil {
-		return nil, fmt.Errorf("%s keeps no %s under %s: discovery reads its root folders from it (%w)", in.name, dbName, in.configDir, err)
+		return nil, "", fmt.Errorf("%s keeps no %s under %s: discovery reads its root folders from it (%w)", in.name, dbName, in.configDir, err)
 	}
 	db, err := sqlitedb.OpenReadOnly(ctx, copyPath)
 	if err != nil {
-		return nil, fmt.Errorf("%s's database: %w", in.name, err)
+		return nil, "", fmt.Errorf("%s's database: %w", in.name, err)
 	}
 	defer db.Close()
 	problems, err := sqlitedb.IntegrityCheck(ctx, db)
 	if err != nil {
-		return nil, fmt.Errorf("check %s's database copy: %w", in.name, err)
+		return nil, "", fmt.Errorf("check %s's database copy: %w", in.name, err)
 	}
 	if len(problems) > 0 {
-		return nil, fmt.Errorf("the copy of %s's database is torn (%s): stop the app and run discovery again", in.name, strings.Join(problems, "; "))
+		return nil, "", fmt.Errorf("the copy of %s's database is torn (%s): stop the app and run discovery again", in.name, strings.Join(problems, "; "))
 	}
 	folders, err := queryRootFolders(ctx, db)
 	if err != nil {
-		return nil, fmt.Errorf("%s's %s: %w", in.name, dbName, err)
+		return nil, "", fmt.Errorf("%s's %s: %w", in.name, dbName, err)
 	}
 	if len(folders) == 0 {
-		return nil, fmt.Errorf("%s has no root folder: a plan needs the directory its library lives in, so add one in the app and run discovery again", in.name)
+		return nil, "", fmt.Errorf("%s has no root folder: a plan needs the directory its library lives in, so add one in the app and run discovery again", in.name)
 	}
-	return folders, nil
+	category, err := queryDownloadCategory(ctx, db, in.app)
+	if err != nil {
+		return nil, "", fmt.Errorf("%s's %s: %w", in.name, dbName, err)
+	}
+	return folders, category, nil
 }
 
 // queryRootFolders reads the one table discovery needs: the Arr's root folders,
@@ -279,6 +403,90 @@ func queryRootFolders(ctx context.Context, db *sql.DB) ([]string, error) {
 		}
 	}
 	return out, rows.Err()
+}
+
+// queryDownloadCategory reads the category the Arr's own download client
+// downloads into: the one enabled qBittorrent client's category, because that
+// is the directory the app's torrents are in and a migrated box never moves
+// them.
+//
+// The category is a field of the client's settings, and which of the two a
+// client has is its own: a Sonarr client stores tvCategory, a Radarr one
+// movieCategory (Download/Clients/QBittorrent/QBittorrentSettings.cs at the
+// versions this package names). A client that names no category downloads into
+// the client's save path with no category at all, and that is no answer: the
+// caller then keeps box's own.
+func queryDownloadCategory(ctx context.Context, db *sql.DB, app string) (string, error) {
+	found, err := hasTable(ctx, db, "DownloadClients")
+	if err != nil || !found {
+		return "", err
+	}
+	rows, err := db.QueryContext(ctx, `SELECT "Id", "Enable", "Implementation", "Settings" FROM "DownloadClients" ORDER BY "Id"`)
+	if err != nil {
+		return "", err
+	}
+	defer rows.Close()
+	category := ""
+	seen := 0
+	for rows.Next() {
+		var id int64
+		var enable sql.NullInt64
+		var implementation, settings sql.NullString
+		if err := rows.Scan(&id, &enable, &implementation, &settings); err != nil {
+			return "", err
+		}
+		if !strings.EqualFold(implementation.String, "QBittorrent") {
+			continue
+		}
+		if enable.Valid && enable.Int64 == 0 {
+			continue
+		}
+		seen++
+		if seen > 1 {
+			// Two enabled clients are two directories, and box wires one:
+			// the first the app has is the one it was set up with.
+			continue
+		}
+		category = settingsCategory(settings.String, app)
+	}
+	return category, rows.Err()
+}
+
+// settingsCategory is the category one client's settings name, read out of the
+// JSON blob the Arr stores it in. The key is camel-cased on disk whatever the
+// class calls it, so it is matched without case.
+func settingsCategory(settings, app string) string {
+	if strings.TrimSpace(settings) == "" {
+		return ""
+	}
+	var f map[string]any
+	if err := json.Unmarshal([]byte(settings), &f); err != nil {
+		return ""
+	}
+	key := "tvCategory"
+	if app == "radarr" {
+		key = "movieCategory"
+	}
+	for k, v := range f {
+		if !strings.EqualFold(k, key) {
+			continue
+		}
+		s, _ := v.(string)
+		return strings.TrimSpace(s)
+	}
+	return ""
+}
+
+// hasTable reports whether a database has a table of that name. A schema is the
+// app's, not this package's: a synthetic one, and an app before it wrote its
+// first client, have none.
+func hasTable(ctx context.Context, db *sql.DB, name string) (bool, error) {
+	rows, err := db.QueryContext(ctx, `SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?`, name)
+	if err != nil {
+		return false, err
+	}
+	defer rows.Close()
+	return rows.Next(), rows.Err()
 }
 
 // copyDatabase copies a SQLite database and the two companion files a WAL-mode

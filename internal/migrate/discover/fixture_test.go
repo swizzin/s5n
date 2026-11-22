@@ -28,6 +28,10 @@ type fixture struct {
 	// variants is the chart's blessed image list, handed to discovery as a
 	// caller with a chart hands it over. Nil is a box given no chart.
 	variants []byte
+	// categories is the chart's directory for each instance, handed over with
+	// the variants. Nil is a read that could not ask the chart what box would
+	// call a library directory.
+	categories map[string]string
 }
 
 func newFixture(t *testing.T) *fixture {
@@ -305,9 +309,10 @@ func (f *fixture) discoverErr(t *testing.T) error {
 func (f *fixture) tryDiscover(t *testing.T) (*plan.Plan, Report, error) {
 	t.Helper()
 	return Discover(context.Background(), NewDirectory(f.manifests), Options{
-		Variants: f.variants,
-		ConfigFS: f.files,
-		TempDir:  t.TempDir(),
+		Variants:   f.variants,
+		Categories: f.categories,
+		ConfigFS:   f.files,
+		TempDir:    t.TempDir(),
 		// The plan records when the source was read; a whole-plan comparison
 		// needs the clock to be the test's, not the wall's.
 		Now: func() time.Time { return readAt },
@@ -321,6 +326,13 @@ var readAt = time.Date(2026, time.November, 16, 12, 0, 0, 0, time.UTC)
 // arrDB is an Arr database holding only the table discovery reads: a real SQLite
 // file, because discovery copies it, checks it and queries it.
 func arrDB(t *testing.T, folders ...string) []byte {
+	t.Helper()
+	return arrDBWith(t, folders, nil)
+}
+
+// arrDBWith is arrDB with the source's download clients: the rows that say
+// which category each instance downloads into.
+func arrDBWith(t *testing.T, folders []string, clients []clientRow) []byte {
 	t.Helper()
 	name := filepath.Join(t.TempDir(), "app.db")
 	if err := os.WriteFile(name, nil, 0o600); err != nil {
@@ -337,6 +349,25 @@ func arrDB(t *testing.T, folders ...string) []byte {
 	for _, folder := range folders {
 		if _, err := db.ExecContext(ctx, `INSERT INTO "RootFolders" ("Path") VALUES (?)`, folder); err != nil {
 			t.Fatalf("insert root folder: %v", err)
+		}
+	}
+	if clients != nil {
+		// The shape a real Arr writes: the settings are a JSON text column,
+		// and the category's key is the implementation's own.
+		if _, err := db.ExecContext(ctx, `CREATE TABLE "DownloadClients" ("Id" INTEGER PRIMARY KEY, "Enable" INTEGER NOT NULL, "Name" TEXT NOT NULL, "Implementation" TEXT NOT NULL, "Settings" TEXT NOT NULL)`); err != nil {
+			t.Fatalf("create download clients: %v", err)
+		}
+		for i, c := range clients {
+			enabled := 0
+			if c.enabled {
+				enabled = 1
+			}
+			settings := fmt.Sprintf(`{"host":"qbittorrent","port":8080,"tvCategory":"%s","movieCategory":"%s"}`, c.category, c.category)
+			if _, err := db.ExecContext(ctx,
+				`INSERT INTO "DownloadClients" ("Id", "Enable", "Name", "Implementation", "Settings") VALUES (?, ?, ?, ?, ?)`,
+				i+1, enabled, "the operator's own name", c.implementation, settings); err != nil {
+				t.Fatalf("insert download client: %v", err)
+			}
 		}
 	}
 	if err := db.Close(); err != nil {
@@ -389,15 +420,17 @@ func roundTrip(t *testing.T, p *plan.Plan) *plan.Plan {
 	return parsed
 }
 
-// notesWithoutDefaults is a report's notes without the two every fixture earns:
-// its pods name no account, so the plan names no owner, and it is handed no
-// chart, so no source image is mapped to a variant. A test that cares about the
+// notesWithoutDefaults is a report's notes without the three every fixture
+// earns: its pods name no account, so the plan names no owner; it is handed no
+// chart, so no source image is mapped to a variant; and with no chart it has no
+// categories either, so no library directory is renamed. A test that cares about the
 // other notes asks through this, so a note nothing should need still fails it.
 func notesWithoutDefaults(t *testing.T, rep Report) []string {
 	t.Helper()
 	var out []string
 	for _, n := range rep.Notes {
-		if strings.Contains(n, "names no owner") || strings.Contains(n, "no chart variants") {
+		if strings.Contains(n, "names no owner") || strings.Contains(n, "no chart variants") ||
+			strings.Contains(n, "no chart categories") {
 			continue
 		}
 		out = append(out, n)

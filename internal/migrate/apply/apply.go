@@ -126,6 +126,10 @@ type Summary struct {
 	// Renames are the data directories apply would rename, source to contract
 	// name (plan.Data.Renames).
 	Renames []string
+	// MediaRenames are the library's own directories, source to the box
+	// category they become (plan.Data.MediaRenames): the directories a person
+	// sees in the Arrs, Plex and Seerr.
+	MediaRenames []string
 	// Defaults are the plan's own decisions: the rules discovery wrote and
 	// nobody answered (plan.Defaults). A default is never silent, so the
 	// confirm screen names every one of them.
@@ -221,6 +225,9 @@ func (s Summary) Lines() []string {
 	}
 	for _, r := range s.Renames {
 		rows = append(rows, "data: rename "+r)
+	}
+	for _, r := range s.MediaRenames {
+		rows = append(rows, "data: rename media/"+r)
 	}
 	if s.Stopped > 0 {
 		rows = append(rows, fmt.Sprintf("%d torrents written stopped", s.Stopped))
@@ -457,6 +464,31 @@ func preflightData(p *plan.Plan, env Env, st *State) []string {
 				to, pair[0], pair[1], from))
 		}
 	}
+	// The library's own directories: one rename each, inside the media
+	// directory, which moves this run carried out or not.
+	for _, pair := range d.MediaRenames() {
+		if has(st.Renamed, mediaKey(pair[0])) {
+			continue
+		}
+		from, to, ok := mediaRename(env.DataRoot, d, pair)
+		if !ok {
+			if exists(to) {
+				// A rename an earlier run made without recording it.
+				continue
+			}
+			problems := fmt.Sprintf("data: %s is not a directory: the plan says %s becomes media/%s, so name the directory the source's library has",
+				from, pair[0], pair[1])
+			items = append(items, problems)
+			continue
+		}
+		if !exists(to) {
+			continue
+		}
+		if empty, err := emptyTree(to); err != nil || !empty {
+			items = append(items, fmt.Sprintf("data: %s already exists and is not empty, and %s has to become %s: move its contents into %s by hand first",
+				to, from, to, from))
+		}
+	}
 	return items
 }
 
@@ -681,6 +713,12 @@ func (m *migration) summary() Summary {
 			}
 			s.Renames = append(s.Renames, pair[0]+" to "+pair[1])
 		}
+		for _, pair := range m.p.Data.MediaRenames() {
+			if has(m.st.Renamed, mediaKey(pair[0])) {
+				continue
+			}
+			s.MediaRenames = append(s.MediaRenames, pair[0]+" to "+pair[1])
+		}
 	}
 	for _, name := range planApps(m.p) {
 		rep := m.checks[name]
@@ -812,8 +850,9 @@ func flattenChanges(changes []rewrite.Change) []string {
 }
 
 // renameData is step 6: the two directories under the data root, renamed to the
-// names box's contract uses. A rename is the only write migrate makes to the
-// data, and it is a rename because that is what keeps the hardlinks.
+// names box's contract uses, and then the library's own directories, renamed to
+// the categories the release lays out. A rename is the only write migrate makes
+// to the data, and it is a rename because that is what keeps the hardlinks.
 func (m *migration) renameData() error {
 	if m.p.Data == nil || m.env.Rehearsal {
 		// A rehearsal never renames: the source may be live, and the data may
@@ -838,15 +877,8 @@ func (m *migration) renameData() error {
 			// Arr it runs, so a target of empty directories is the box's, not
 			// the operator's data: it goes, and the source is renamed into the
 			// name. A target with a file anywhere under it stops the run.
-			empty, err := emptyTree(to)
-			if err != nil {
-				return fmt.Errorf("inspect %s: %w", to, err)
-			}
-			if !empty {
-				return fmt.Errorf("%s appeared while this migration ran and is not empty; what %s has to become is a rename of it, so move that directory's contents into %s by hand", to, pair[0], from)
-			}
-			if err := removeEmptyTree(to); err != nil {
-				return fmt.Errorf("remove the empty %s: %w", to, err)
+			if err := m.removeEmptyTarget(to); err != nil {
+				return err
 			}
 		}
 		if err := os.Rename(from, to); err != nil {
@@ -857,7 +889,96 @@ func (m *migration) renameData() error {
 		}
 		m.res.Renamed = append(m.res.Renamed, pair[0]+" to "+pair[1])
 	}
+	return m.renameLibrary()
+}
+
+// renameLibrary is the second half of step 6: every directory the source kept an
+// instance's library in becomes the category box's release uses, inside the
+// library's own directory.
+//
+// They come after the two contract renames, so whichever name the source gave
+// the library, the folders move in the one box gives it. A parent a rename
+// emptied -- the source's 4K/ holding 4K/Movies and 4K/TV -- goes too, and only
+// when it is empty.
+func (m *migration) renameLibrary() error {
+	var parents []string
+	for _, pair := range m.p.Data.MediaRenames() {
+		key := mediaKey(pair[0])
+		if has(m.st.Renamed, key) {
+			continue
+		}
+		from, to, ok := mediaRename(m.env.DataRoot, m.p.Data, pair)
+		if !ok {
+			if exists(to) {
+				// A rename an earlier run made without recording it: the
+				// target is what this step leaves behind.
+				if err := m.recordRenamed(key); err != nil {
+					return err
+				}
+				continue
+			}
+			return fmt.Errorf("%s is not a directory, and the plan says %s becomes media/%s", from, pair[0], pair[1])
+		}
+		if exists(to) {
+			if err := m.removeEmptyTarget(to); err != nil {
+				return err
+			}
+		}
+		if err := os.Rename(from, to); err != nil {
+			return fmt.Errorf("rename %s to %s: %w", from, to, err)
+		}
+		if err := m.recordRenamed(key); err != nil {
+			return err
+		}
+		m.res.Renamed = append(m.res.Renamed, "media/"+pair[0]+" to media/"+pair[1])
+		if parent := filepath.Dir(from); parent != filepath.Dir(to) {
+			parents = append(parents, parent)
+		}
+	}
+	// Deepest first, so 4K/Movies and 4K/TV leaving 4K empty removes it once.
+	sort.Slice(parents, func(i, j int) bool { return len(parents[i]) > len(parents[j]) })
+	for _, parent := range parents {
+		empty, err := emptyDir(parent)
+		if err != nil || !empty {
+			continue
+		}
+		_ = os.Remove(parent)
+	}
 	return nil
+}
+
+// removeEmptyTarget removes a rename's target when it holds nothing but empty
+// directories, which is what a box's own release leaves behind, and refuses one
+// that holds a file.
+func (m *migration) removeEmptyTarget(to string) error {
+	empty, err := emptyTree(to)
+	if err != nil {
+		return fmt.Errorf("inspect %s: %w", to, err)
+	}
+	if !empty {
+		return fmt.Errorf("%s appeared while this migration ran and is not empty; what has to become a rename of another directory, so move that directory's contents elsewhere by hand", to)
+	}
+	if err := removeEmptyTree(to); err != nil {
+		return fmt.Errorf("remove the empty %s: %w", to, err)
+	}
+	return nil
+}
+
+// mediaKey is a library rename's name in the state record: the library
+// directory's own path, so it can never collide with a contract directory's.
+func mediaKey(from string) string { return plan.MediaDir + "/" + from }
+
+// mediaRename is one library directory as apply moves it: the directory the
+// source has, and the one box's category is, in the library's directory --
+// whichever name this run gives that directory, which is the source's until the
+// rename of step 6 above has run.
+func mediaRename(dataRoot string, d *plan.Data, pair [2]string) (from, to string, ok bool) {
+	base := filepath.Join(dataRoot, plan.MediaDir)
+	if !isDir(filepath.Join(base, pair[0])) {
+		base = filepath.Join(dataRoot, d.Media)
+	}
+	from = filepath.Join(base, pair[0])
+	return from, filepath.Join(base, pair[1]), isDir(from)
 }
 
 // recordRenamed writes one rename into the state before the next step starts.

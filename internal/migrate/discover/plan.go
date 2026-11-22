@@ -42,14 +42,16 @@ func (d *discovery) plan(data *plan.Data) *plan.Plan {
 	variants := d.imageVariants()
 	for _, in := range d.instances {
 		p.Apps[in.name] = plan.App{
-			Kind:      plan.Kubernetes,
-			Source:    in.wl.Name,
-			Image:     in.container.Image,
-			Variant:   d.variant(in, variants),
-			Config:    in.configDir,
-			Namespace: in.wl.Namespace,
-			Ports:     in.ports,
-			Paths:     d.pathRules(in, data),
+			Kind:             plan.Kubernetes,
+			Source:           in.wl.Name,
+			Image:            in.container.Image,
+			Variant:          d.variant(in, variants),
+			Config:           in.configDir,
+			Namespace:        in.wl.Namespace,
+			Ports:            in.ports,
+			Category:         d.categoryOf(in.name),
+			DownloadCategory: in.downloadCategory,
+			Paths:            d.pathRules(in, data),
 		}
 	}
 	for _, s := range d.rep.Skipped {
@@ -243,24 +245,44 @@ func (d *discovery) pathRules(in *instance, data *plan.Data) []plan.PathRule {
 //
 // A mount of the root itself is the whole data directory under another name, so
 // the app saw both of the contract's directories: the rules name each of them
-// under that mount. A mount of one of them, or of something below one, is one
-// rule, and its target is what apply's renames leave behind -- a source whose
-// downloads are in Downloads/ files under /data/downloads/ once apply has
-// renamed the directory.
+// under that mount, and every library directory mapped onto a box category. A
+// mount of one of them, or of something below one, is one rule, and its target
+// is what apply's renames leave behind -- a source whose downloads are in
+// Downloads/ files under /data/downloads/ once apply has renamed the directory.
 func mountRules(mountPath, rel string, data *plan.Data) []plan.PathRule {
 	if rel == "" {
-		return []plan.PathRule{
+		return append([]plan.PathRule{
 			{From: path.Join(mountPath, data.Downloads), To: "/data/" + plan.DownloadsDir},
 			{From: path.Join(mountPath, data.Media), To: "/data/" + plan.MediaDir},
-		}
+		}, folderRules(path.Join(mountPath, data.Media), data)...)
+	}
+	if rel == data.Media {
+		return append([]plan.PathRule{
+			{From: mountPath, To: "/data/" + plan.MediaDir},
+		}, folderRules(mountPath, data)...)
 	}
 	return []plan.PathRule{{From: mountPath, To: contractPath(rel, data)}}
+}
+
+// folderRules is every library directory under mediaPath, mapped onto the
+// category it becomes. A directory already named as its category needs no rule:
+// the media directory's own rule covers it.
+func folderRules(mediaPath string, data *plan.Data) []plan.PathRule {
+	out := make([]plan.PathRule, 0, len(data.Folders))
+	for _, f := range data.Folders {
+		if f.From == f.To {
+			continue
+		}
+		out = append(out, plan.PathRule{From: path.Join(mediaPath, f.From), To: path.Join("/data/"+plan.MediaDir, f.To)})
+	}
+	return out
 }
 
 // contractPath maps a path relative to the data root onto the path the app will
 // see, as apply's renames leave it: the downloads directory is called
 // /data/downloads whatever the source called it, and everything below it keeps
-// its name.
+// its name -- except the library's own directories, which are the categories
+// box lays out.
 func contractPath(rel string, data *plan.Data) string {
 	for _, d := range []struct{ from, to string }{
 		{data.Downloads, plan.DownloadsDir},
@@ -270,10 +292,24 @@ func contractPath(rel string, data *plan.Data) string {
 			return "/data/" + d.to
 		}
 		if rest, ok := strings.CutPrefix(rel, d.from+"/"); ok {
-			return "/data/" + d.to + "/" + rest
+			return "/data/" + d.to + folderRest(rest, data)
 		}
 	}
 	return "/data/" + rel
+}
+
+// folderRest maps what is left of a path under the media directory onto the
+// category it became, and leaves everything else as it was.
+func folderRest(rest string, data *plan.Data) string {
+	for _, f := range data.Folders {
+		if rest == f.From {
+			return "/" + f.To
+		}
+		if tail, ok := strings.CutPrefix(rest, f.From+"/"); ok {
+			return "/" + f.To + "/" + tail
+		}
+	}
+	return "/" + rest
 }
 
 // hostRules classifies every address the source's apps reached each other by.

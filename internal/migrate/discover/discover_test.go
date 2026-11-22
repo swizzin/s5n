@@ -180,18 +180,19 @@ func TestDiscoverTwoArrs(t *testing.T) {
 	}
 }
 
-// TestDiscoverRefusesDataToMove is the one layout box cannot adopt: the library
-// and the downloads are not two directories under one parent, so a rename can no
-// longer keep the inode a download and its import share.
-func TestDiscoverRefusesDataToMove(t *testing.T) {
+// TestDiscoverRefusesTwoLibraries is the one layout box cannot adopt: the Arrs'
+// root folders sit under two different directories of the data root, so nothing
+// says which one is the library -- and a library renamed into the wrong parent
+// is a move of the operator's own tree.
+func TestDiscoverRefusesTwoLibraries(t *testing.T) {
 	f := sourceInstall(t)
-	// The same Sonarr, with its library on a different filesystem from the
-	// downloads.
+	// The same Sonarr, with its library in a directory of its own beside the
+	// one the other Arr's root folder names.
 	f.app(t, appSpec{
 		name: "radarr", image: "lscr.io/linuxserver/radarr:5.20.1", port: 7878,
 		mounts: []mount{
 			{volume: "config", path: "/config", host: "/srv/apps/radarr"},
-			{volume: "library", path: "/library", host: "/srv/media"},
+			{volume: "library", path: "/library", host: "/srv/library/films"},
 		},
 	})
 	f.file(t, "/srv/apps/radarr/config.xml", "<Config><Port>7878</Port></Config>\n")
@@ -202,10 +203,37 @@ func TestDiscoverRefusesDataToMove(t *testing.T) {
 	if !strings.Contains(msg, "moved by hand") {
 		t.Fatalf("the refusal does not say the data has to move: %v", err)
 	}
-	for _, want := range []string{"/srv/library", "/srv/media/movies"} {
+	for _, want := range []string{"/srv/library", "media", "films"} {
 		if !strings.Contains(msg, want) {
 			t.Fatalf("the refusal does not name %s: %v", want, err)
 		}
+	}
+}
+
+// TestDiscoverLeavesALibraryOnAnotherFilesystem: a root folder outside the data
+// root is not the library box adopts -- a rename cannot cross filesystems, so a
+// move is the operator's -- and it is reported rather than refused.
+func TestDiscoverLeavesALibraryOnAnotherFilesystem(t *testing.T) {
+	f := sourceInstall(t)
+	f.app(t, appSpec{
+		name: "radarr", image: "lscr.io/linuxserver/radarr:5.20.1", port: 7878,
+		mounts: []mount{
+			{volume: "config", path: "/config", host: "/srv/apps/radarr"},
+			{volume: "library", path: "/library", host: "/srv/media"},
+		},
+	})
+	f.file(t, "/srv/apps/radarr/config.xml", "<Config><Port>7878</Port></Config>\n")
+	f.bytes(t, "/srv/apps/radarr/radarr.db", arrDB(t, "/library/movies"))
+
+	p, rep := f.discover(t)
+	if p.Data.Media != "media" {
+		t.Fatalf("the library is %q, want the directory the other Arrs' root folders name", p.Data.Media)
+	}
+	if len(p.Data.Folders) != 0 {
+		t.Fatalf("a library on another filesystem was mapped: %#v", p.Data.Folders)
+	}
+	if !mentions(rep.Notes, "/srv/apps/radarr") && !mentions(rep.Notes, "/library/movies") {
+		t.Fatalf("the notes do not name the root folder left alone: %#v", rep.Notes)
 	}
 }
 

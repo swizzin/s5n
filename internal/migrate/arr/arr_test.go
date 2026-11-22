@@ -1030,3 +1030,52 @@ func TestEveryDownloadClientPathField(t *testing.T) {
 		}
 	}
 }
+
+// TestSonarrFollowsTheLibrarysCategory: a migrated library is renamed onto box's
+// own category, so the root folder the source had becomes /data/media/<category>
+// and every series under it moves with it. That is what makes wiring's root
+// folder step find the folder it expects instead of adding a second one.
+func TestSonarrFollowsTheLibrarysCategory(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "config.xml"), sonarrConfig())
+	newDB(t, filepath.Join(dir, "sonarr.db"),
+		`CREATE TABLE Series (Id INTEGER PRIMARY KEY, Path TEXT)`,
+		`INSERT INTO Series (Id, Path) VALUES (1, '/library/TV/Night Shift')`,
+		`CREATE TABLE RootFolders (Id INTEGER PRIMARY KEY, Path TEXT)`,
+		`INSERT INTO RootFolders (Id, Path) VALUES (1, '/library/TV')`,
+		`CREATE TABLE ImportLists (Id INTEGER PRIMARY KEY, Name TEXT, RootFolderPath TEXT, Implementation TEXT, Settings TEXT)`,
+		`CREATE TABLE RemotePathMappings (Id INTEGER PRIMARY KEY, Host TEXT, RemotePath TEXT, LocalPath TEXT)`,
+		`CREATE TABLE DownloadClients (Id INTEGER PRIMARY KEY, Name TEXT, Implementation TEXT, Settings TEXT)`,
+		`CREATE TABLE Notifications (Id INTEGER PRIMARY KEY, Name TEXT, Implementation TEXT, Settings TEXT)`,
+		`CREATE TABLE Config (Id INTEGER PRIMARY KEY, Key TEXT, Value TEXT)`,
+		`CREATE TABLE Commands (Id INTEGER PRIMARY KEY, Name TEXT, Status INTEGER, Body TEXT)`,
+		`CREATE TABLE History (Id INTEGER PRIMARY KEY, Data TEXT, SourceTitle TEXT)`,
+		`CREATE TABLE DownloadHistory (Id INTEGER PRIMARY KEY, Data TEXT, SourceTitle TEXT)`,
+	)
+	// The plan discovery writes once the library has been mapped onto the
+	// category the instance has: a rule for the directory itself, more
+	// specific than the library's, and one for everything else under it.
+	const mapped = `version: 2
+apps:
+  sonarr:
+    kind: kubernetes
+    source: sonarr
+    config: /srv/apps/sonarr
+    category: tv
+    paths:
+      - from: /library/TV
+        to: /data/media/tv
+      - from: /library
+        to: /data/media
+`
+	in := input(t, dir, "sonarr", mapped)
+	if _, err := (rewriter{kind: kindSonarr}).Write(context.Background(), in); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	if got := query(t, filepath.Join(dir, "sonarr.db"), `SELECT Path FROM RootFolders`)[0][0]; got != "/data/media/tv" {
+		t.Errorf("root folder = %q, want /data/media/tv: wiring adds its own when the migrated one is not there", got)
+	}
+	if got := query(t, filepath.Join(dir, "sonarr.db"), `SELECT Path FROM Series`)[0][0]; got != "/data/media/tv/Night Shift" {
+		t.Errorf("series path = %q, want /data/media/tv/Night Shift", got)
+	}
+}

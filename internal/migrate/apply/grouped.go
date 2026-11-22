@@ -163,17 +163,31 @@ func (s Summary) CheckedRows(agreed Summary) []say.TableRow {
 }
 
 // dataRows is what the run does to the data root: the two directories renamed
-// to box's names. A rehearsal renames nothing and has no row.
+// to box's names, and the library's own directories renamed to the categories
+// that hold them. A rehearsal renames nothing and has no row.
 func (s Summary) dataRows() []say.TableRow {
-	if len(s.Renames) == 0 {
+	if len(s.Renames) == 0 && len(s.MediaRenames) == 0 {
 		return nil
 	}
-	facts := make([]string, 0, len(s.Renames))
+	facts := make([]string, 0, len(s.Renames)+1)
 	for _, r := range s.Renames {
-		facts = append(facts, strings.Replace(r, " to ", " → ", 1))
+		facts = append(facts, arrow(r))
+	}
+	if len(s.MediaRenames) > 0 {
+		// The library reads as one line: these are the directories a person
+		// sees in every app, and they all become box's own names together.
+		pairs := make([]string, 0, len(s.MediaRenames))
+		for _, r := range s.MediaRenames {
+			pairs = append(pairs, arrow(r))
+		}
+		facts = append(facts, "media: "+strings.Join(pairs, " · "))
 	}
 	return []say.TableRow{{Glyph: "✓", Name: "data", Facts: facts}}
 }
+
+// arrow is one rename as a person reads it: "Downloads to downloads" is
+// "Downloads → downloads".
+func arrow(rename string) string { return strings.Replace(rename, " to ", " → ", 1) }
 
 // needsYou groups every value left as it is by the reason it is left: the apps
 // that share the reason are named together, and the values themselves are what

@@ -280,6 +280,12 @@ type Options struct {
 	// way internal/admission reads it). Nil when the caller has no chart to
 	// hand over, which maps nothing and says so.
 	Variants []byte
+	// Categories is the directory box's values lay each instance's library out
+	// in, by box's instance name (charts/s5n/values.yaml, an instance's
+	// `category`). It is what the source's library directories are renamed
+	// onto and what every app that stored one is rewritten to. Nil when the
+	// caller has no chart: nothing is renamed then, and the report says so.
+	Categories map[string]string
 	// ConfigFS is the host's filesystem rooted at its /, read-only. Discovery
 	// opens each app's config directory and the Arrs' databases through it and
 	// writes nothing anywhere. It is required: the mounts name host
@@ -476,6 +482,10 @@ type instance struct {
 	configDir   string
 	// ports are the ports the app listened on in the source.
 	ports []int
+	// downloadCategory is the qBittorrent category this app's own download
+	// client uses, read from its database: the directory its torrents are in,
+	// which a migrated box keeps.
+	downloadCategory string
 }
 
 // classify decides which workloads are catalog apps, and what box will call
