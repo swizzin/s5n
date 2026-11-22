@@ -5292,6 +5292,12 @@ MIGRATE_PLEX_IMAGE=""
 MIGRATE_LEGACY_NS=legacy
 # qBittorrent's WebUI port, in the source and in the chart's own qBittorrent.
 MIGRATE_QBIT_PORT=8080
+# The peer port the source's qBittorrent announces. The migrate scenario writes
+# the default 6881, which is outside the NodePort range, so the install has to
+# pick one from the band; the keep scenario writes this one, in the band and
+# free, so the install keeps the source's own number instead. Both scenarios
+# assert which of the two happened.
+MIGRATE_SOURCE_TORRENT_PORT=30077
 # The source's Radarr, as box will name it: the plain instance, which is the one
 # a plan names when the source runs one Radarr. Its category is the chart's own
 # for that instance -- and so is the library directory the migration renames
@@ -6204,14 +6210,19 @@ spec:
 EOF
 }
 
-# migrate_legacy_conf <file> <password>: qBittorrent's settings before its first
-# start. The image only generates this file when it is absent, so an install
-# that has not run yet needs the WebUI section written: a login the Arrs can use
-# from their own pods (no local-host-only shortcut), and nothing else. Every
-# path it stores after that is written by the app itself through its own API,
-# which is the shape a migrated config has.
-migrate_legacy_conf() { # migrate_legacy_conf <file> <password>
-  local file=$1 password=$2 hash
+# migrate_legacy_conf <file> <password> [peer port]: qBittorrent's settings
+# before its first start. The image only generates this file when it is absent,
+# so an install that has not run yet needs the WebUI section written: a login
+# the Arrs can use from their own pods (no local-host-only shortcut), and
+# nothing else. Every path it stores after that is written by the app itself
+# through its own API, which is the shape a migrated config has.
+#
+# The peer port is the fixture's: 6881 unless the caller names one, which is
+# outside the NodePort range, so a migrate install has to pick a band port for
+# the box. A caller names a band port to prove the other half -- the install
+# keeping the number the source announced.
+migrate_legacy_conf() { # migrate_legacy_conf <file> <password> [peer port]
+  local file=$1 password=$2 torrent_port=${3:-6881} hash
   hash=$(MIGRATE_PASSWORD="$password" python3 - <<'PY'
 # qBittorrent 5's WebUI password: PBKDF2-HMAC-SHA512(password, salt 16 B,
 # 100 000 iterations, 64 B), stored as "<salt-b64>:<hash-b64>" in a Qt
@@ -6225,7 +6236,7 @@ PY
   mkdir -p "$(dirname "$file")"
   cat >"$file" <<EOF
 [BitTorrent]
-Session\\Port=6881
+Session\\Port=${torrent_port}
 
 [LegalNotice]
 Accepted=true
@@ -7902,6 +7913,17 @@ migrate_box() {
   migrate_assert_ready "$CTX" qbittorrent $MIGRATE_ARRS autobrr qui pbh tautulli ||
     { fail=1; return 0; }
   box_files_back "$CLUSTER" "$CONFIG_PATH"
+  # The torrent port. The box went in with every app off, and qBittorrent is
+  # switched on afterwards, so the install had to decide the port for the app
+  # the plan brings. The source announced 6881, outside the NodePort range, so
+  # the number is one box picked for the band -- and the app's own preferences
+  # must report it even though the config the migration wrote says 6881: the
+  # chart's QBT_TORRENTING_PORT is what the image reads at every start.
+  log "the torrent port: the install picked one for the band, and qBittorrent announces it"
+  grep -qE '^torrent port: [0-9]+ \(picked' "$WORK/apply-migrate.txt" ||
+    { echo "the migrate install did not say it picked a torrent port:";
+      grep -i 'torrent port' "$WORK/apply-migrate.txt" || true; fail=1; }
+  assert_torrent_port "the migrate install"
   # The snapshot it read is named, and the chart it installed is the release
   # this run pulled once for both halves.
   grep -qF "snapshot: ${snapshot} (final)" "$WORK/apply-migrate.txt" ||
@@ -8420,6 +8442,9 @@ PY
   [ "$after" = "$revision" ] ||
     { echo "a second run of the same plan added Helm revision ${after} (was ${revision})"; fail=1; }
   echo "  the release stayed at revision ${after}"
+  # And the port did not move: the grant is where the decision lives, so a run
+  # that installs nothing new must not re-pick one peers are already announcing.
+  assert_torrent_port "after a second migrate apply" "$TORRENT_PORT"
 }
 
 # box is the whole interface: a client-go/klog line such as
@@ -8493,7 +8518,10 @@ migrate_keep_box() {
   MIGRATE_QBIT_PASSWORD=$(openssl rand -hex 16)
   printf '%s' "$MIGRATE_QBIT_PASSWORD" >"$WORK/source/qbittorrent-password"
   chmod 600 "$WORK/source/qbittorrent-password"
-  migrate_legacy_conf "$src/var/data/qbittorrent/qBittorrent/qBittorrent.conf" "$MIGRATE_QBIT_PASSWORD" ||
+  # The source announces a port this cluster can hold, so the install keeps it
+  # instead of picking one for the band: the half `migrate` cannot show.
+  migrate_legacy_conf "$src/var/data/qbittorrent/qBittorrent/qBittorrent.conf" "$MIGRATE_QBIT_PASSWORD" \
+    "$MIGRATE_SOURCE_TORRENT_PORT" ||
     { echo "could not write the source qBittorrent's config"; fail=1; return 0; }
 
   grep -qF "containerPath: ${WORK}" "$KIND_CONFIG" ||
@@ -8722,6 +8750,15 @@ migrate_keep_box() {
       { echo "${instance}-0 is not ready on the chart's ${expected} (it runs $(pod_image "${instance}-0" || true))"; fail=1; }
   done
   [ "$fail" = 0 ] || return 0
+  # The torrent port is the source's own, kept: it is in this cluster's NodePort
+  # range and no Service held it when the install decided, so peers that learned
+  # the number from a tracker -- and any forward the operator set -- keep
+  # working, and qBittorrent announces the same number.
+  log "the torrent port: the install kept the ${MIGRATE_SOURCE_TORRENT_PORT} the source announced"
+  grep -qF "torrent port: ${MIGRATE_SOURCE_TORRENT_PORT} (the source's, kept)" "$WORK/keep-cutover.txt" ||
+    { echo "the keep install did not keep the source's torrent port ${MIGRATE_SOURCE_TORRENT_PORT}:";
+      grep -i 'torrent port' "$WORK/keep-cutover.txt" || true; fail=1; }
+  assert_torrent_port "the keep install" "$MIGRATE_SOURCE_TORRENT_PORT"
 
   # ---- assertion 2: paths --------------------------------------------------
   log "paths: the Arrs' root folders, qBittorrent's categories, the renames on disk"
