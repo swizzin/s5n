@@ -142,11 +142,25 @@ func TestThePreInstallPassWritesOnlyWhereItIsThrownAway(t *testing.T) {
 	if err != nil {
 		t.Fatalf("migrateSurvey: %v", err)
 	}
-	if len(summary.Instances) != 1 || summary.Instances[0].App != "qbittorrent" {
-		t.Fatalf("the summary is %+v, want one qbittorrent row", summary.Instances)
+	byApp := map[string]apply.InstanceSummary{}
+	for _, in := range summary.Instances {
+		byApp[in.App] = in
 	}
-	if summary.Instances[0].Staged.Files == 0 {
-		t.Error("the summary counts no staged files, so the copy did not run")
+	client, ok := byApp["qbittorrent"]
+	if !ok {
+		t.Fatalf("the summary has no qbittorrent row: %+v", summary.Instances)
+	}
+	if client.Staged.Files == 0 || len(client.Changes) == 0 {
+		t.Errorf("the client's row counts %d files and %d changes: its check did not run", client.Staged.Files, len(client.Changes))
+	}
+	// Plex's row is the one the pass cannot check, and the note about what its
+	// snapshot does not carry is on the same summary: both come from the
+	// snapshot, and the run after the install shows the same two.
+	if plex := byApp["plex"]; plex.Deferred == "" || plex.Staged.Files == 0 {
+		t.Errorf("Plex's row is %+v, want a deferred check and a staged copy", plex)
+	}
+	if len(summary.Carried) != 1 || summary.Carried[0].App != "plex" || !strings.Contains(summary.Carried[0].Note, "carried Preferences.xml") {
+		t.Errorf("the summary's notes about what the snapshot does not hold are %+v, want Plex's", summary.Carried)
 	}
 	// Answering no from here installs nothing and leaves both paths alone.
 	installed := false
@@ -177,39 +191,61 @@ func TestThePreInstallPassWritesOnlyWhereItIsThrownAway(t *testing.T) {
 	}
 }
 
-// snapshotFixture is a snapshot with one app's config in it, laid out the way
-// bundle.Open leaves one: the plan at the root, and <Dir>/config/<instance>/.
+// snapshotFixture is a snapshot laid out the way bundle.Open leaves one: the
+// plan at the root, and <Dir>/config/<instance>/ per planned app. It holds the
+// two apps the pre-install pass treats differently: one whose rewriter reads
+// files, and Plex, whose config is the trimmed set a snapshot carries and whose
+// check runs its own image.
 type snapshotFixture struct {
 	dir      string
 	dataRoot string
-	app      string
-	config   string
+	doc      string
+	configs  map[string]string
 }
 
 func preInstallSnapshot(t *testing.T) *snapshotFixture {
 	t.Helper()
-	s := &snapshotFixture{dir: t.TempDir(), dataRoot: t.TempDir(), app: "qbittorrent"}
-	for _, dir := range []string{filepath.Join(s.dataRoot, "Downloads"), filepath.Join(s.dataRoot, "media"), filepath.Join(s.dir, archive.ConfigPrefix, s.app, "qBittorrent")} {
+	s := &snapshotFixture{dir: t.TempDir(), dataRoot: t.TempDir(), configs: map[string]string{}}
+	plexHome := filepath.Join(s.dir, archive.ConfigPrefix, "plex", "Library", "Application Support", "Plex Media Server")
+	for _, dir := range []string{
+		filepath.Join(s.dataRoot, "Downloads"),
+		filepath.Join(s.dataRoot, "media"),
+		filepath.Join(s.dir, archive.ConfigPrefix, "qbittorrent", "qBittorrent"),
+		plexHome,
+		filepath.Join(plexHome, "Plug-in Support", "Databases"),
+	} {
 		if err := os.MkdirAll(dir, 0o755); err != nil {
 			t.Fatal(err)
 		}
 	}
-	s.config = "[BitTorrent]\nSession\\DefaultSavePath=/downloads\n\n[WebUI]\nPort=8080\n"
-	if err := os.WriteFile(filepath.Join(s.dir, archive.ConfigPrefix, s.app, "qBittorrent", "qBittorrent.conf"), []byte(s.config), 0o600); err != nil {
-		t.Fatal(err)
+	write := func(rel, content string) {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(s.dir, archive.ConfigPrefix, rel), []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
 	}
-	return s
-}
-
-// plan is the snapshot as openSnapshot would return it.
-func (s *snapshotFixture) plan(t *testing.T) (*plan.Plan, []byte, *bundle.Opened) {
-	t.Helper()
-	raw := []byte(`version: 2
+	write("qbittorrent/qBittorrent/qBittorrent.conf", "[BitTorrent]\nSession\\DefaultSavePath=/downloads\n\n[WebUI]\nPort=8080\n")
+	// Plex's snapshot carries its state and nothing else: the note the confirm
+	// shows comes from exactly this set.
+	write("plex/Library/Application Support/Plex Media Server/Preferences.xml", `<?xml version="1.0" encoding="utf-8"?>`+"\n"+`<Preferences MachineIdentifier="synthetic-machine" />`+"\n")
+	write("plex/Library/Application Support/Plex Media Server/Plug-in Support/Databases/com.plexapp.plugins.library.db", "")
+	s.configs["qbittorrent"] = filepath.Join(s.dir, archive.ConfigPrefix, "qbittorrent")
+	s.configs["plex"] = filepath.Join(s.dir, archive.ConfigPrefix, "plex")
+	s.doc = `version: 2
 data:
   root: ` + s.dataRoot + `
   downloads: Downloads
   media: media
 apps:
+  plex:
+    kind: kubernetes
+    source: plex
+    config: /srv/apps/plex
+    namespace: media
+    ports: [32400]
+    paths:
+      - from: /srv/apps/plex
+        to: /config
   qbittorrent:
     kind: kubernetes
     source: qbittorrent
@@ -219,7 +255,14 @@ apps:
     paths:
       - from: /downloads
         to: /data/downloads
-`)
+`
+	return s
+}
+
+// plan is the snapshot as openSnapshot would return it.
+func (s *snapshotFixture) plan(t *testing.T) (*plan.Plan, []byte, *bundle.Opened) {
+	t.Helper()
+	raw := []byte(s.doc)
 	p, err := plan.Parse(raw)
 	if err != nil {
 		t.Fatalf("parse the plan: %v", err)
@@ -229,6 +272,6 @@ apps:
 		Dir:     s.dir,
 		Mode:    archive.ModeFinal,
 		Plan:    raw,
-		Configs: map[string]string{s.app: s.app},
+		Configs: s.configs,
 	}
 }
