@@ -436,7 +436,7 @@ func runBootstrap(ctx context.Context, args []string) {
 		out.Error(err)
 		os.Exit(1)
 	}
-	if _, err := applyPlatform(ctx, res.Kubeconfig, res.Platform, res.Gateway.Class, acmeServer, chart.Pins, res.Firewall, confirmer(out, *yes || !isTerminal(os.Stdin)), false, out); err != nil {
+	if err := applyPlatform(ctx, res.Kubeconfig, res.Platform, res.Gateway.Class, acmeServer, chart.Pins, res.Firewall, confirmer(out, *yes || !isTerminal(os.Stdin)), false, out); err != nil {
 		if errors.Is(err, platform.ErrCancelled) {
 			os.Exit(1)
 		}
@@ -469,11 +469,11 @@ func runBootstrap(ctx context.Context, args []string) {
 	scheduleUpdates(ctx, unitDir, *recordPath, *initFlags.grantPath, *initFlags.valuesPath, out)
 }
 
-// applyPlatform applies the platform layer the decision says install, and
-// returns the plan it applied. confirm is the one question, and holdPlan says
-// this package keeps quiet about the plan because the caller shows it in its
-// own confirm -- a migration asks once, for the platform and its apps together.
-func applyPlatform(ctx context.Context, kubeconfig string, components []bootstrap.ComponentResult, gatewayClass, acmeServer string, pins release.Versions, firewall bootstrap.FirewallState, confirm platform.Confirmer, holdPlan bool, out say.Reporter) (platform.Plan, error) {
+// applyPlatform applies the platform layer the decision says install. confirm is
+// the one question, and holdPlan says this package keeps quiet about the plan
+// because the caller showed it in its own confirm -- a migration asks once, for
+// the platform and its apps together, before it installs any of it.
+func applyPlatform(ctx context.Context, kubeconfig string, components []bootstrap.ComponentResult, gatewayClass, acmeServer string, pins release.Versions, firewall bootstrap.FirewallState, confirm platform.Confirmer, holdPlan bool, out say.Reporter) error {
 	out.Phase("platform")
 	p := &platform.Decision{
 		GatewayClass: gatewayClass,
@@ -494,8 +494,8 @@ func applyPlatform(ctx context.Context, kubeconfig string, components []bootstra
 		HostFirewall:   bootstrap.Firewalld{},
 		CallerConfirms: holdPlan,
 	}
-	res, err := p.Apply(ctx, components)
-	return res.Plan, err
+	_, err := p.Apply(ctx, components)
+	return err
 }
 
 // boxValues is what `box apply` reads from the cluster rather than from either

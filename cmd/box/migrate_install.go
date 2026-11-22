@@ -187,7 +187,7 @@ func migrateInstall(ctx context.Context, o *migrateApplyFlags, inst *installFlag
 	}
 	charts.out = out
 
-	d := migrationDecision(o, inst, charts, out)
+	d := migrationDecision(inst, charts, out)
 	res, err := d.Bootstrap(ctx, bootstrap.Options{
 		Kubeconfig:    *o.kubeconfig,
 		KubeconfigEnv: os.Getenv("KUBECONFIG"),
@@ -208,7 +208,7 @@ func migrateInstall(ctx context.Context, o *migrateApplyFlags, inst *installFlag
 	// The platform was the first half of the one confirm: it is not asked about
 	// here, and its plan is not printed here either, because the question came
 	// before anything was installed and showed it then.
-	if _, err := applyPlatform(ctx, res.Kubeconfig, res.Platform, res.Gateway.Class, "", chart.Pins, res.Firewall, answered{}, true, out); err != nil {
+	if err := applyPlatform(ctx, res.Kubeconfig, res.Platform, res.Gateway.Class, "", chart.Pins, res.Firewall, answered{}, true, out); err != nil {
 		return err
 	}
 	if _, err := hostconf.Ensure(hostconf.Path(*inst.record)); err != nil {
@@ -228,7 +228,7 @@ func migrateInstall(ctx context.Context, o *migrateApplyFlags, inst *installFlag
 // migrationDecision is box bootstrap's own decision, built from this run's flags:
 // the same one `box bootstrap` makes, so a migrate install cannot pick a cluster
 // or a platform the other command would not.
-func migrationDecision(o *migrateApplyFlags, inst *installFlags, charts *chartRelease, out say.Reporter) *bootstrap.Decision {
+func migrationDecision(inst *installFlags, charts *chartRelease, out say.Reporter) *bootstrap.Decision {
 	return &bootstrap.Decision{
 		Source: bootstrap.FilesystemSource{},
 		Pins:   charts.pins,
@@ -250,7 +250,7 @@ func migrationDecision(o *migrateApplyFlags, inst *installFlags, charts *chartRe
 // the operator twice for one decision, or letting the two runs choose different
 // classes, is how a box's routes move.
 func migratePlatform(ctx context.Context, o *migrateApplyFlags, inst *installFlags, charts *chartRelease, chart release.Chart, out say.Reporter) (*platform.Plan, string, error) {
-	d := migrationDecision(o, inst, charts, out)
+	d := migrationDecision(inst, charts, out)
 	res, err := d.Bootstrap(ctx, bootstrap.Options{
 		Kubeconfig:    *o.kubeconfig,
 		KubeconfigEnv: os.Getenv("KUBECONFIG"),

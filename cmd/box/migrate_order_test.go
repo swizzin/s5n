@@ -50,48 +50,19 @@ func TestTheQuestionComesBeforeAnythingIsInstalled(t *testing.T) {
 	for _, tc := range []struct {
 		name     string
 		yes      bool
-		want     []string
+		want     string
 		canceled bool
 	}{
-		{name: "yes", yes: true, want: []string{"survey", "ask", "install"}},
-		{name: "no", yes: false, want: []string{"survey", "ask"}, canceled: true},
+		{name: "yes", yes: true, want: "survey ask install"},
+		{name: "no", yes: false, want: "survey ask", canceled: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			ask := &stepAsker{yes: tc.yes}
-			installed := 0
-			steps := migrateInstallSteps{
-				survey: func(context.Context) (apply.Summary, *platform.Plan, error) {
-					ask.order = append(ask.order, "survey")
-					return migrationSummaryForOrder(), nil, nil
-				},
-				install: func(context.Context) error {
-					installed++
-					ask.order = append(ask.order, "install")
-					return nil
-				},
-			}
-			var out bytes.Buffer
-			agreed, err := steps.beforeInstall(context.Background(), ask, false, "s5n-alice", false, &say.Plain{W: &out})
-			if tc.canceled {
-				if !errors.Is(err, apply.ErrCancelled) {
-					t.Fatalf("answering no = %v, want a cancellation", err)
-				}
-				if agreed != nil {
-					t.Error("a cancelled run handed back a summary it never agreed to")
-				}
-				if installed != 0 {
-					t.Error("answering no installed something")
-				}
-			} else {
-				if err != nil {
-					t.Fatalf("beforeInstall: %v", err)
-				}
-				if agreed == nil {
-					t.Error("the run installed without recording what was agreed to")
-				}
-			}
-			if got := strings.Join(ask.order, " "); got != strings.Join(tc.want, " ") {
-				t.Errorf("the run went %q, want %q", got, strings.Join(tc.want, " "))
+			steps := recordingSteps(ask)
+			agreed, err := steps.beforeInstall(context.Background(), ask, false, "s5n-alice", false, &say.Plain{W: &bytes.Buffer{}})
+			assertRunOutcome(t, err, agreed, tc.canceled)
+			if got := strings.Join(ask.order, " "); got != tc.want {
+				t.Errorf("the run went %q, want %q", got, tc.want)
 			}
 			if len(ask.asked) != 1 {
 				t.Fatalf("the run asked %d questions (%v), want one", len(ask.asked), ask.asked)
@@ -100,6 +71,43 @@ func TestTheQuestionComesBeforeAnythingIsInstalled(t *testing.T) {
 				t.Errorf("the question = %q, want %q", ask.asked[0], want)
 			}
 		})
+	}
+}
+
+// recordingSteps is a run whose two halves record themselves in the asker's
+// order, so the test reads one list.
+func recordingSteps(ask *stepAsker) migrateInstallSteps {
+	return migrateInstallSteps{
+		survey: func(context.Context) (apply.Summary, *platform.Plan, error) {
+			ask.order = append(ask.order, "survey")
+			return migrationSummaryForOrder(), nil, nil
+		},
+		install: func(context.Context) error {
+			ask.order = append(ask.order, "install")
+			return nil
+		},
+	}
+}
+
+// assertRunOutcome is the answer's half: a cancelled run hands nothing back and
+// installs nothing (the order list has no "install" in it), and a yes hands back
+// the summary it installed against.
+func assertRunOutcome(t *testing.T, err error, agreed *apply.Summary, canceled bool) {
+	t.Helper()
+	if !canceled {
+		if err != nil {
+			t.Fatalf("beforeInstall: %v", err)
+		}
+		if agreed == nil {
+			t.Error("the run installed without recording what was agreed to")
+		}
+		return
+	}
+	if !errors.Is(err, apply.ErrCancelled) {
+		t.Fatalf("answering no = %v, want a cancellation", err)
+	}
+	if agreed != nil {
+		t.Error("a cancelled run handed back a summary it never agreed to")
 	}
 }
 
