@@ -177,6 +177,13 @@ case "$SCENARIO" in
   migrate) CLUSTER=s5n-box-migrate; DOMAIN=box.migrate.example.test ;;
   migrate-keep) CLUSTER=s5n-box-migrate-keep; DOMAIN=box.keep.example.test ;;
 esac
+# The fresh scenario is the one that proves the namespace a first run derives
+# from its login: it passes no --namespace, and the box has to land in
+# s5n-<login>. The other scenarios keep an explicit namespace, which still wins
+# (and keeps their assertions on the namespace they have always used).
+if [ "$SCENARIO" = fresh ]; then
+  NS="s5n-${LOGIN}"
+fi
 # The names the catalog serves at a host of their own (Plex and Seerr): the
 # chart renders their routes there, and box resolves and certifies them.
 PLEX_HOST="plex.${DOMAIN}"
@@ -473,9 +480,14 @@ bootstrap() { # bootstrap <output file>
   # No --chart-version: bootstrap takes the default-version path, so the e2e
   # exercises the newest-release selection against a real registry. The chart
   # is the one pushed above; box pulls it over loopback.
+  #
+  # The fresh scenario passes no --namespace, so box derives it from the login
+  # (s5n-<login>); every other scenario names its own.
+  local ns_args=()
+  [ "$SCENARIO" = fresh ] || ns_args=(--namespace "$NS")
   "$WORK/box" bootstrap --yes --chart-repo "$CHART_REPO" ${ACME_ARGS[@]+"${ACME_ARGS[@]}"} ${DNS_ARGS[@]+"${DNS_ARGS[@]}"} ${CA_ARGS[@]+"${CA_ARGS[@]}"} ${UNIT_ARGS[@]+"${UNIT_ARGS[@]}"} \
     --grant "$WORK/grant.yaml" --values "$WORK/values.yaml" \
-    --namespace "$NS" --domain "$DOMAIN" \
+    ${ns_args[@]+"${ns_args[@]}"} --domain "$DOMAIN" \
     --data-path "$DATA_PATH" --config-path "$CONFIG_PATH" \
     --apps "$APPS" \
     --puid 1000 --pgid 1000 \
@@ -492,9 +504,11 @@ init() { # init <output file> [extra dev flags]
   #
   # --chart-version pins the release to the package pushed above: init reads
   # one chart, and the apply it hands over to installs that same value.
+  local ns_args=()
+  [ "$SCENARIO" = fresh ] || ns_args=(--namespace "$NS")
   "$WORK/box" init --yes --chart-repo "$CHART_REPO" --chart-version "$CHART_VERSION" ${DNS_ARGS[@]+"${DNS_ARGS[@]}"} ${CA_ARGS[@]+"${CA_ARGS[@]}"} \
     --grant "$WORK/grant.yaml" --values "$WORK/values.yaml" \
-    --namespace "$NS" --domain "$DOMAIN" \
+    ${ns_args[@]+"${ns_args[@]}"} --domain "$DOMAIN" \
     --data-path "$DATA_PATH" --config-path "$CONFIG_PATH" \
     --apps "$APPS" \
     --puid 1000 --pgid 1000 \
@@ -517,8 +531,8 @@ apply() { # apply <output file>
 # apply that touches any of them shows up as a changed number, and the claims
 # are not release objects so Helm's revision cannot prove anything about them.
 storage_state() {
-  $K get pv seedbox-s5n-data seedbox-s5n-config -o jsonpath='{range .items[*]}{.metadata.name}={.metadata.resourceVersion} {end}'
-  $K -n "$NS" get pvc seedbox-s5n-data seedbox-s5n-config -o jsonpath='{range .items[*]}{.metadata.name}={.metadata.resourceVersion} {end}'
+  $K get pv ${NS}-s5n-data ${NS}-s5n-config -o jsonpath='{range .items[*]}{.metadata.name}={.metadata.resourceVersion} {end}'
+  $K -n "$NS" get pvc ${NS}-s5n-data ${NS}-s5n-config -o jsonpath='{range .items[*]}{.metadata.name}={.metadata.resourceVersion} {end}'
 }
 
 revision() {
@@ -1699,9 +1713,13 @@ fresh() {
     esac
   done
   # The namespace was box's first write, and the plan said so: the cluster had
-  # none of it before this run.
-  grep -qF '+ Namespace seedbox (Pod Security restricted)' "$WORK/bootstrap1.txt" ||
+  # none of it before this run. It is s5n-<login>: this scenario passed no
+  # --namespace, so the derivation from the login is what put it here.
+  grep -qF "+ Namespace ${NS} (Pod Security restricted)" "$WORK/bootstrap1.txt" ||
     { echo "the plan did not show the namespace it creates"; fail=1; }
+  [ "$(sed -n 's/^namespace: *//p' "$WORK/grant.yaml")" = "$NS" ] ||
+    { echo "the grant's namespace is not ${NS} (s5n-<login>):"; grep -n '^namespace:' "$WORK/grant.yaml"; fail=1; }
+  echo "  the grant's namespace is ${NS}, which no flag named"
 
   # ---- root's config, and the timer that makes updates happen ---------------
   # bootstrap writes root's box.yaml once, beside the cluster record (the same
@@ -2446,7 +2464,7 @@ for r in items:
   assert_front_door "$gw_addr" "$WORK/pebble-root.pem"
   # ---- storage: box created the claims, and they are bound ----
   for kind in data config; do
-    pv=seedbox-s5n-${kind}
+    pv=${NS}-s5n-${kind}
     pvc=$pv
     pv_phase=$($K get pv "$pv" -o jsonpath='{.status.phase}')
     pvc_phase=$($K -n "$NS" get pvc "$pvc" -o jsonpath='{.status.phase}')
@@ -2465,8 +2483,8 @@ for r in items:
     [ "$pvc_volume" = "$pv" ] || fail=1
     [ -z "$pvc_class" ] || fail=1
   done
-  [ "$($K get pv seedbox-s5n-data -o jsonpath='{.spec.hostPath.path}')" = /srv/s5n/data ] || fail=1
-  [ "$($K get pv seedbox-s5n-config -o jsonpath='{.spec.hostPath.path}')" = /srv/s5n/config ] || fail=1
+  [ "$($K get pv ${NS}-s5n-data -o jsonpath='{.spec.hostPath.path}')" = /srv/s5n/data ] || fail=1
+  [ "$($K get pv ${NS}-s5n-config -o jsonpath='{.spec.hostPath.path}')" = /srv/s5n/config ] || fail=1
 
   # ---- the namespace: box created it, at restricted ----
   # init owns the namespace on a fresh cluster now, so it is what proves the
@@ -2867,12 +2885,12 @@ for manager, names in got.items():
     { echo "the redirect after the second bootstrap does not point at HTTPS"; fail=1; }
   nl_after=$($K -n s5n-gateway get securitypolicy s5n-no-login-box-example-test -o jsonpath='{.spec.authorization.defaultAction}' 2>/dev/null || true)
   [ "$nl_after" = Allow ] || { echo "the second bootstrap removed the port-80 Allow"; fail=1; }
-  $K apply -f - >/dev/null <<'EOF'
+  $K apply -f - >/dev/null <<EOF
 apiVersion: gateway.networking.k8s.io/v1
 kind: HTTPRoute
 metadata:
   name: e2e-other-host
-  namespace: seedbox
+  namespace: ${NS}
 spec:
   parentRefs:
     - name: s5n
@@ -3671,7 +3689,7 @@ PY
   log "helm uninstall keeps the claims and their volumes"
   $HELM uninstall s5n -n "$NS" >/dev/null 2>&1 || { echo "helm uninstall failed"; fail=1; }
   for kind in data config; do
-    pv=seedbox-s5n-${kind}
+    pv=${NS}-s5n-${kind}
     $K get pv "$pv" >/dev/null 2>&1 || { echo "helm uninstall deleted ${pv}"; fail=1; }
     $K -n "$NS" get pvc "$pv" >/dev/null 2>&1 || { echo "helm uninstall deleted claim ${pv}"; fail=1; }
     echo "  ${pv}: PV and claim still there"
