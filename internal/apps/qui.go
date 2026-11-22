@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 )
@@ -127,9 +128,13 @@ type QuiInstanceSpec struct {
 // ownedID, when nonzero, is the id the Job recorded the last time it created or
 // adopted this instance: only an id match counts as "ours", so a rename in
 // qui's UI is the user's business and never creates a duplicate. A zero ownedID
-// means nothing is recorded yet, so an existing instance with the expected name
-// is adopted instead -- qui has no uniqueness on name or host, so a blind
-// create would add a second row beside it.
+// means nothing is recorded yet, so an existing instance at the spec's host is
+// adopted instead -- the shape a migration leaves behind, and the reason this
+// looks at the host before the name. qui has no uniqueness on name or host, so
+// a blind create would add a second row beside it.
+//
+// An adopted instance keeps its name: it is the operator's, chosen in qui's own
+// UI or brought over from their old install, and box has no reason to change it.
 //
 // On update the live object is cloned and only the data-contract fields are
 // overlaid (name is left as the user renamed it only on a create: the API
@@ -142,7 +147,10 @@ func (q *Qui) EnsureInstance(ctx context.Context, spec QuiInstanceSpec, ownedID 
 	if err != nil {
 		return EnsureResult{}, fmt.Errorf("list qui instances: %w", err)
 	}
-	cur, found, recreated, previousID := locateOwned(list, ownedID, spec.Name)
+	cur, found, recreated, previousID, err := locateQui(list, spec, ownedID)
+	if err != nil {
+		return EnsureResult{}, err
+	}
 
 	fields := []ownedField{
 		{fieldHost, spec.Host, false},
@@ -191,6 +199,84 @@ func (q *Qui) EnsureInstance(ctx context.Context, spec QuiInstanceSpec, ownedID 
 		return EnsureResult{Change: change, ID: id, Drift: drift, Recreated: recreated, PreviousID: previousID}, err
 	}
 	return EnsureResult{Change: change, ID: id, Drift: drift, Recreated: recreated, PreviousID: previousID}, nil
+}
+
+// locateQui finds the qBittorrent instance the Job owns:
+//
+//   - a recorded id is authoritative: a rename in qui's UI is the user's
+//     business and must not create a second row, even when another instance
+//     points at the same host;
+//   - with nothing recorded, the instance this box would own is adopted before
+//     one is created. On a migrated box there is no record yet (owned.json is
+//     box's own file, and the migration did not write one), and the source's
+//     qui usually had one instance under the operator's own name -- which the
+//     migration's rewriter has already pointed at the release's qBittorrent.
+//     The host is what makes two instances the same one for box, and the name
+//     is the fallback for a box that ran wiring before it recorded anything;
+//   - only when neither exists was it deleted, so the run creates one and says
+//     which id disappeared.
+//
+// Two instances at the same host are a refusal rather than a pick: qui allows
+// both (it has no uniqueness on name or host), and nothing says which history
+// is the one to keep.
+func locateQui(list []Item, spec QuiInstanceSpec, ownedID int) (cur Item, found, recreated bool, previousID int, err error) {
+	if ownedID != 0 {
+		for _, item := range list {
+			if item.Int("id") == ownedID {
+				return item, true, false, 0, nil
+			}
+		}
+		return nil, false, true, ownedID, nil
+	}
+	switch same := quiHostMatches(list, spec.Host); len(same) {
+	case 0:
+	case 1:
+		return same[0], true, false, 0, nil
+	default:
+		return nil, false, false, 0, fmt.Errorf("qui: %d instances point at %s (ids %d and %d); remove all but one, this box can own only one",
+			len(same), spec.Host, same[0].Int("id"), same[1].Int("id"))
+	}
+	if item, ok := FindByName(list, spec.Name); ok {
+		return item, true, false, 0, nil
+	}
+	return nil, false, false, 0, nil
+}
+
+// quiHostMatches returns the instances whose host is the one the spec names.
+// The comparison is in qui's own stored form (normalizeQuiHost), because the
+// list reports exactly what its store kept.
+func quiHostMatches(list []Item, host string) []Item {
+	want := normalizeQuiHost(host)
+	if want == "" {
+		return nil
+	}
+	var out []Item
+	for _, item := range list {
+		if normalizeQuiHost(item.Str(fieldHost)) == want {
+			out = append(out, item)
+		}
+	}
+	return out
+}
+
+// normalizeQuiHost is the form qui itself stores and reports a host in: its
+// store trims the answer, adds http:// when the operator typed no scheme, and
+// re-serialises the parsed URL (models.validateAndNormalizeHost at v1.35.0).
+// A trailing slash is dropped on both sides: a base URL with one is the same
+// qBittorrent as without, and qBittorrent appends its own API path either way.
+func normalizeQuiHost(raw string) string {
+	s := strings.TrimSpace(raw)
+	if s == "" {
+		return ""
+	}
+	if !strings.Contains(s, "://") {
+		s = "http://" + s
+	}
+	u, err := url.Parse(s)
+	if err != nil || u.Host == "" {
+		return strings.TrimRight(s, "/")
+	}
+	return strings.TrimRight(u.String(), "/")
 }
 
 // TestInstance asks qui to dial the instance now. It answers 200 with
