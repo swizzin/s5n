@@ -695,3 +695,73 @@ func TestWithoutRehearsalTorrentsKeepTheirState(t *testing.T) {
 		t.Errorf("a final run set paused=%v on a torrent", f.Int)
 	}
 }
+
+// TorrentPort is the port the source's qBittorrent announced to peers: a
+// migrated box keeps it when the cluster can use it, because trackers and any
+// port forward the operator set already point at that number. qBittorrent 5
+// keeps it in [BitTorrent] Session\Port; an install that upgraded in place, or
+// whose conf qBittorrent 4 wrote, carries [Preferences]
+// Connection\PortRangeMin instead, and the live key is the one the app reads
+// when both are there (5.3.0's own default file carries the old key as well).
+func TestTorrentPortReadsTheSourcesListenPort(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		conf string
+		want int
+		ok   bool
+	}{
+		{
+			name: "qBittorrent 5's session key",
+			conf: "[BitTorrent]\nSession\\Port=51413\n",
+			want: 51413, ok: true,
+		},
+		{
+			name: "the older Preferences key",
+			conf: "[Preferences]\nConnection\\PortRangeMin=6881\n",
+			want: 6881, ok: true,
+		},
+		{
+			name: "both, and the session key is the live one",
+			conf: "[BitTorrent]\nSession\\Port=51413\n\n[Preferences]\nConnection\\PortRangeMin=6881\n",
+			want: 51413, ok: true,
+		},
+		{
+			name: "neither, as a conf the app never wrote",
+			conf: "[WebUI]\nPort=8080\n",
+		},
+		{
+			name: "a value that is not a port",
+			conf: "[BitTorrent]\nSession\\Port=torrents\n",
+		},
+		{
+			name: "a port above the range",
+			conf: "[BitTorrent]\nSession\\Port=70000\n",
+		},
+		{
+			name: "no config at all",
+			conf: "",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			if tc.conf != "" {
+				writeFile(t, filepath.Join(dir, dirRel, "qBittorrent.conf"), tc.conf)
+			}
+			got, ok := TorrentPort(dir)
+			if ok != tc.ok || got != tc.want {
+				t.Fatalf("TorrentPort = %d, %v; want %d, %v", got, ok, tc.want, tc.ok)
+			}
+		})
+	}
+}
+
+// A config in the layout migrate refuses says nothing about a port either: the
+// rewriter stops the run before any of this is written, and a port read out of
+// a directory shape box does not produce would be a guess.
+func TestTorrentPortNothingInTheOlderLayout(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "config", "qBittorrent.conf"), "[BitTorrent]\nSession\\Port=51413\n")
+	if port, ok := TorrentPort(dir); ok {
+		t.Fatalf("an older layout reported port %d, want none", port)
+	}
+}

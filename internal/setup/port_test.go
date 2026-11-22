@@ -394,3 +394,127 @@ apps:
     torrent:
       port: 30042
 `
+
+// migratingOptions is the shape `box migrate apply` gives init on a host with no
+// box: every app off (the migration switches on what it moved), the plan's
+// answers already given, and the apps the plan will switch on named beside them.
+func migratingOptions(h *harness, switchesOn ...string) Options {
+	opts := h.unattended()
+	opts.Apps = []string{"none"}
+	opts.Adopting = true
+	opts.SwitchesOn = switchesOn
+	return opts
+}
+
+// The migrate install answers init with `--apps none`, and the migration
+// switches the plan's apps on after the configs are in place. The peer port is
+// decided for the box that is coming, not for the app list this one run has:
+// otherwise a migrated box keeps the chart's fixed 31111 for good, the port in
+// the upper band a LoadBalancer Service already took.
+func TestTorrentPortIsDecidedForTheAppsAPlanBrings(t *testing.T) {
+	h := torrentHarness(t, []NodePort{
+		{Port: 30000, Service: "envoy-gateway-system/envoy"},
+		{Port: 31111, Service: "envoy-gateway-system/envoy"},
+	})
+	res, err := h.run(migratingOptions(h, "alpha", torrentApp))
+	if err != nil {
+		t.Fatalf("a migrating init: %v\n%s", err, h.out)
+	}
+	if !contains(res.GrantChanged, torrentPortKey) {
+		t.Fatalf("grant keys changed = %v, want %s", res.GrantChanged, torrentPortKey)
+	}
+	// 30000 is held, so the band's first free port is 30001, and every app the
+	// run installed is off.
+	grant := h.read(h.grantPath)
+	if !strings.Contains(grant, "torrent:\n      port: 30001") {
+		t.Fatalf("the grant does not record the port the plan's qBittorrent will use:\n%s", grant)
+	}
+	if !strings.Contains(grant, "qbittorrent:\n    enabled: false") {
+		t.Fatalf("the box did not go in with qBittorrent off:\n%s", grant)
+	}
+	if got := h.out.String(); !strings.Contains(got, "torrent port: 30001 (picked") {
+		t.Fatalf("the migrating init did not say it picked a port:\n%s", got)
+	}
+}
+
+// A plan without qBittorrent has no peer port to decide, and init writes none:
+// nothing would listen on it, so nothing may hold it either.
+func TestTorrentPortUnaskedWhenThePlanBringsNoQbittorrent(t *testing.T) {
+	h := torrentHarness(t, nil)
+	h.decision.NodePorts = func(context.Context) ([]NodePort, error) {
+		t.Fatal("the cluster was read for a plan with no qBittorrent")
+		return nil, nil
+	}
+	if _, err := h.run(migratingOptions(h, "alpha")); err != nil {
+		t.Fatalf("a migrating init with no qBittorrent in the plan: %v\n%s", err, h.out)
+	}
+	if strings.Contains(h.read(h.grantPath), torrentPortKey) {
+		t.Fatalf("the grant holds a peer port for a plan without qBittorrent:\n%s", h.read(h.grantPath))
+	}
+}
+
+// The source's own peer port is preferred when this cluster can use it: peers
+// learned it from the tracker and any port forward the operator set points at
+// it, so a migration that moved it would drop every connection until the next
+// announce. It is kept only when it lies in this cluster's NodePort range and
+// no Service holds it.
+func TestTorrentPortKeepsTheSourcesPortWhenThisClusterCanUseIt(t *testing.T) {
+	h := torrentHarness(t, []NodePort{{Port: 30000, Service: "other/svc"}})
+	opts := migratingOptions(h, torrentApp)
+	opts.TorrentPort = 30047
+
+	if _, err := h.run(opts); err != nil {
+		t.Fatalf("a migrating init with the source's port: %v\n%s", err, h.out)
+	}
+	if grant := h.read(h.grantPath); !strings.Contains(grant, "torrent:\n      port: 30047") {
+		t.Fatalf("the grant does not keep the source's port:\n%s", grant)
+	}
+	if got := h.out.String(); !strings.Contains(got, "torrent port: 30047 (the source's, kept)") {
+		t.Fatalf("init did not say it kept the source's port:\n%s", got)
+	}
+}
+
+// The source's port is a hint, not an answer. One outside this cluster's
+// NodePort range cannot be a Service's, and one a Service already holds cannot
+// be this box's: both are picked for fresh, from the band, and init says so.
+func TestTorrentPortPicksWhenTheSourcesPortCannotBeUsed(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		port  int
+		held  []NodePort
+		want  int
+		avoid int
+	}{
+		{
+			name: "the source listened outside the NodePort range",
+			port: 6881,
+			want: 30000,
+		},
+		{
+			name: "the source's port is already a Service's",
+			port: 30047,
+			held: []NodePort{{Port: 30047, Service: "other/svc"}},
+			want: 30000,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := torrentHarness(t, tc.held)
+			opts := migratingOptions(h, torrentApp)
+			opts.TorrentPort = tc.port
+
+			if _, err := h.run(opts); err != nil {
+				t.Fatalf("a migrating init: %v\n%s", err, h.out)
+			}
+			if grant := h.read(h.grantPath); !strings.Contains(grant, fmt.Sprintf("torrent:\n      port: %d", tc.want)) {
+				t.Fatalf("the grant does not record the port box picked (%d):\n%s", tc.want, grant)
+			}
+			got := h.out.String()
+			if !strings.Contains(got, fmt.Sprintf("torrent port: %d (picked", tc.want)) {
+				t.Fatalf("init did not say it picked %d:\n%s", tc.want, got)
+			}
+			if strings.Contains(got, "(the source's, kept)") {
+				t.Fatalf("init said it kept a port it could not use:\n%s", got)
+			}
+		})
+	}
+}

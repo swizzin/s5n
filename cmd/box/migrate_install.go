@@ -34,6 +34,7 @@ import (
 	"github.com/swizzin/s5n/internal/migrate/apply"
 	"github.com/swizzin/s5n/internal/migrate/bundle"
 	"github.com/swizzin/s5n/internal/migrate/plan"
+	"github.com/swizzin/s5n/internal/migrate/qbit"
 	"github.com/swizzin/s5n/internal/platform"
 	"github.com/swizzin/s5n/internal/release"
 	"github.com/swizzin/s5n/internal/say"
@@ -156,6 +157,12 @@ func migrationStepsWith(ctx context.Context, o *migrateApplyFlags, inst *install
 	if err != nil {
 		return migrateInstallSteps{}, err
 	}
+	// The apps the plan will switch on, and the peer port its qBittorrent
+	// announced: both are the box's rather than this run's app list, and both
+	// are read before the install so a snapshot that names them cannot change
+	// what init decided afterwards.
+	switchesOn := sortedKeys(p.Apps)
+	sourcePort := sourceTorrentPort(p, opened)
 	// The platform this run would install, decided without installing it: a
 	// cluster box would create, or the one it found, probed read-only. It comes
 	// before the snapshot is staged, so a platform this host cannot have is a
@@ -170,10 +177,29 @@ func migrationStepsWith(ctx context.Context, o *migrateApplyFlags, inst *install
 			return summary, preview.plan, err
 		},
 		install: func(ctx context.Context) error {
-			return migrateInstall(ctx, o, inst, charts, answers, preview.class, out)
+			return migrateInstall(ctx, o, inst, charts, answers, switchesOn, sourcePort, preview.class, out)
 		},
 		lead: confirmLead(preview.cluster),
 	}, nil
+}
+
+// sourceTorrentPort is the port the source's qBittorrent announced to peers, as
+// the snapshot's copy of its config holds it, or 0 when the plan has none or
+// the snapshot carries no config for it. A migrated box keeps it when this
+// cluster can use it, so trackers and any forward the operator set go on
+// working; the number is read from the snapshot rather than the source's own
+// directory because a snapshot applied on another host has only the copy.
+func sourceTorrentPort(p *plan.Plan, opened *bundle.Opened) int {
+	for _, instance := range sortedKeys(p.Apps) {
+		dir, ok := opened.Configs[instance]
+		if !ok {
+			continue
+		}
+		if port, ok := qbit.TorrentPort(dir); ok {
+			return port
+		}
+	}
+	return 0
 }
 
 // migrateInstall takes a host with no box to one with a seedbox whose apps are
@@ -183,8 +209,9 @@ func migrationStepsWith(ctx context.Context, o *migrateApplyFlags, inst *install
 // class is the GatewayClass the pre-install pass chose. It is handed back in, so
 // the second decision does not ask a question the first one already answered: the
 // two runs have to settle on one class, and choosing it twice is how a box's
-// routes move.
-func migrateInstall(ctx context.Context, o *migrateApplyFlags, inst *installFlags, charts *chartRelease, answers []string, class string, out say.Reporter) error {
+// routes move. switchesOn and sourcePort are init's torrent-port decision: the
+// plan's apps and the port their qBittorrent comes from.
+func migrateInstall(ctx context.Context, o *migrateApplyFlags, inst *installFlags, charts *chartRelease, answers []string, switchesOn []string, sourcePort int, class string, out say.Reporter) error {
 	out.Phase("cluster")
 	if _, _, err := hostconf.Load(hostconf.Path(*inst.record)); err != nil {
 		return err
@@ -222,7 +249,7 @@ func migrateInstall(ctx context.Context, o *migrateApplyFlags, inst *installFlag
 	// init's own flow, over init's own flags: the answers the plan holds are
 	// parsed as if they had been given on the command line, so init's
 	// first-run-or-re-run logic sees them exactly as it sees an operator's.
-	iflg, err := migrationInit(inst, charts, answers)
+	iflg, err := migrationInit(inst, charts, answers, switchesOn, sourcePort)
 	if err != nil {
 		return err
 	}
@@ -345,15 +372,18 @@ func surveyEnv(p *plan.Plan, opened *bundle.Opened, cat *catalog.Catalog, values
 // migrationInit is init's flags as a migration runs them: the plan's answers as
 // if they had been typed on the command line, the release this run has already
 // loaded (so bootstrap and init cannot ask the registry for two versions), and
-// the one thing that is this flow's and no one else's -- Adopting. The apps go
-// in off and the migration switches on what it moved, so an empty app list here
-// is a box one step from running, and init says nothing about it.
-func migrationInit(inst *installFlags, charts *chartRelease, answers []string) (*initFlags, error) {
+// the two things that are this flow's and no one else's -- Adopting, and the
+// apps the plan will switch on plus the peer port its qBittorrent announced.
+// The apps go in off and the migration switches on what it moved, so an empty
+// app list here is a box one step from running, and init says nothing about it.
+func migrationInit(inst *installFlags, charts *chartRelease, answers []string, switchesOn []string, sourcePort int) (*initFlags, error) {
 	fs := flag.NewFlagSet("migrate install", flag.ContinueOnError)
 	iflg := addInitFlags(fs)
 	iflg.recordPath = *inst.record
 	iflg.charts = charts
 	iflg.adopting = true
+	iflg.switchesOn = switchesOn
+	iflg.sourceTorrentPort = sourcePort
 	iflg.takeDev(initDevFlags{pathsInNode: inst.pathsInNode})
 	if err := fs.Parse(answers); err != nil {
 		return nil, fmt.Errorf("the plan's answers do not read as init's flags: %w", err)

@@ -94,6 +94,42 @@ func exists(path string) bool {
 	return err == nil
 }
 
+// TorrentPort reads the port the source's qBittorrent announced to peers, or
+// says it named none. qBittorrent 5 keeps it at [BitTorrent] Session\Port, and
+// a conf that upgraded in place -- or that qBittorrent 4 wrote -- carries
+// [Preferences] Connection\PortRangeMin for the same setting; the session key
+// is the live one when both are there.
+//
+// A directory in the layout this package refuses names no port: the rewriter
+// stops the run before anything is written, and a number read out of a shape
+// box does not produce would be a guess.
+func TorrentPort(dir string) (int, bool) {
+	lay, err := findLayout(dir)
+	if err != nil {
+		return 0, false
+	}
+	raw, err := os.ReadFile(lay.conf)
+	if err != nil {
+		return 0, false
+	}
+	c := parseConf(raw)
+	for _, k := range []struct{ section, name string }{
+		{sectionBitTorrent, keySessionPort},
+		{sectionPreferences, keyLegacyPortRangeMin},
+	} {
+		value, ok := c.get(k.section, k.name)
+		if !ok {
+			continue
+		}
+		port, err := strconv.Atoi(strings.TrimSpace(value))
+		if err != nil || port <= 0 || port > 65535 {
+			return 0, false
+		}
+		return port, true
+	}
+	return 0, false
+}
+
 func isDir(path string) (bool, error) {
 	info, err := os.Stat(path)
 	switch {

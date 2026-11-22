@@ -6,9 +6,13 @@ package main
 // Nothing here touches a host: installAnswers is the whole decision.
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/swizzin/s5n/internal/archive"
+	"github.com/swizzin/s5n/internal/migrate/bundle"
 	"github.com/swizzin/s5n/internal/migrate/plan"
 )
 
@@ -191,7 +195,7 @@ func TestMigrationInitTellsInitTheAppsAreComing(t *testing.T) {
 		t.Fatalf("installAnswers: %v", err)
 	}
 	charts := &chartRelease{}
-	flags, err := migrationInit(inst, charts, answers)
+	flags, err := migrationInit(inst, charts, answers, nil, 0)
 	if err != nil {
 		t.Fatalf("migrationInit: %v", err)
 	}
@@ -215,7 +219,7 @@ func TestMigrationInitTellsInitTheAppsAreComing(t *testing.T) {
 	}
 	// An answer init's own flags cannot read is still the installer's refusal,
 	// and it names what it was trying to do.
-	if _, err := migrationInit(inst, charts, []string{"--no-such-flag"}); err == nil {
+	if _, err := migrationInit(inst, charts, []string{"--no-such-flag"}, nil, 0); err == nil {
 		t.Fatal("an answer init has no flag for was accepted")
 	} else if !strings.Contains(err.Error(), "init's flags") {
 		t.Errorf("the refusal = %v, want it to say the plan does not read as init's flags", err)
@@ -326,5 +330,80 @@ func TestInstallTargetNamesTheBoxTheFlagsDecide(t *testing.T) {
 	}
 	if got := confirmTarget(installTarget(inst)); got != "this box" {
 		t.Errorf("the question with no namespace reads %q, want it to name the box it is about", got)
+	}
+}
+
+// planWithQbittorrent is planWithData plus the app whose peer port the install
+// has to decide: the migration switches it on after the configs are in place.
+func planWithQbittorrent() *plan.Plan {
+	p := planWithData()
+	p.Apps["qbittorrent"] = plan.App{Kind: "kubernetes", Source: "qbittorrent", Config: "/srv/apps/qbittorrent", Namespace: "media"}
+	return p
+}
+
+// TestMigrationInitTellsInitWhatThePlanWillSwitchOn: init installs the box with
+// every app off, and the migration switches the plan's apps on afterwards. The
+// torrent port belongs to the box qBittorrent is coming to, so init has to know
+// the plan's apps as well as its own empty --apps, or a migrated box keeps the
+// chart's fixed port for good.
+func TestMigrationInitTellsInitWhatThePlanWillSwitchOn(t *testing.T) {
+	o, inst := installFlagSet(t)
+	*inst.domain = "box.example.com"
+	*inst.login = "someone"
+	*inst.password = "/run/password"
+	*inst.configPath = "/srv/config"
+	inst.record = new(string)
+	answers, err := installAnswers(o, inst, planWithQbittorrent(), false)
+	if err != nil {
+		t.Fatalf("installAnswers: %v", err)
+	}
+	flags, err := migrationInit(inst, &chartRelease{}, answers, []string{"qbittorrent", "sonarr"}, 30047)
+	if err != nil {
+		t.Fatalf("migrationInit: %v", err)
+	}
+	if *flags.apps != "none" {
+		t.Errorf("apps = %q, want none", *flags.apps)
+	}
+	if got := strings.Join(flags.switchesOn, ","); got != "qbittorrent,sonarr" {
+		t.Errorf("the apps the plan switches on = %q, want qbittorrent and sonarr", got)
+	}
+	if flags.sourceTorrentPort != 30047 {
+		t.Errorf("the source's torrent port = %d, want 30047", flags.sourceTorrentPort)
+	}
+}
+
+// TestSourceTorrentPortReadsTheSnapshotsQbittorrent: the port comes from the
+// copy the snapshot carries, because a snapshot applied on another host has no
+// access to the source's own config directory. The plan's other apps hold no
+// qBittorrent config, so they say nothing rather than stopping the install.
+func TestSourceTorrentPortReadsTheSnapshotsQbittorrent(t *testing.T) {
+	dir := t.TempDir()
+	opened := &bundle.Opened{Dir: dir, Configs: map[string]string{}}
+	for _, instance := range []string{"sonarr", "qbittorrent"} {
+		at := filepath.Join(dir, archive.ConfigPrefix, instance)
+		opened.Configs[instance] = at
+		if err := os.MkdirAll(at, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	conf := filepath.Join(opened.Configs["qbittorrent"], "qBittorrent", "qBittorrent.conf")
+	if err := os.MkdirAll(filepath.Dir(conf), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(conf, []byte("[BitTorrent]\nSession\\Port=30047\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := sourceTorrentPort(planWithQbittorrent(), opened); got != 30047 {
+		t.Errorf("sourceTorrentPort = %d, want the source's 30047", got)
+	}
+	// A plan without qBittorrent has no peer port to keep.
+	if got := sourceTorrentPort(planWithData(), opened); got != 0 {
+		t.Errorf("sourceTorrentPort without qBittorrent in the plan = %d, want 0", got)
+	}
+	// A snapshot with no config for it says nothing rather than guessing.
+	empty := &bundle.Opened{Dir: dir, Configs: map[string]string{}}
+	if got := sourceTorrentPort(planWithQbittorrent(), empty); got != 0 {
+		t.Errorf("sourceTorrentPort with no config in the snapshot = %d, want 0", got)
 	}
 }

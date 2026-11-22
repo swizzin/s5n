@@ -116,6 +116,19 @@ type Options struct {
 	// Apps is the grant's app list, by catalog name ("sonarr", not
 	// "sonarr-4k": instances are root's, through `box install`).
 	Apps []string
+	// SwitchesOn are the apps another flow turns on after this install, by
+	// instance name: `box migrate apply` installs the box with every app off
+	// and switches the plan's on once their configs are in place, so a
+	// decision that belongs to the box and not to this run's app list -- the
+	// torrent port -- is still decided for it. It never becomes the app list
+	// init writes: Apps is.
+	SwitchesOn []string
+	// TorrentPort is the peer port the source install's qBittorrent announced,
+	// when a migration read one from its config. init keeps it if this cluster
+	// can use it (it is in the NodePort range and no Service holds it), because
+	// trackers and any forward the operator set already point at it, and picks
+	// one from the band otherwise. Zero means the source named none.
+	TorrentPort int
 	// PUID and PGID are the ids every file on the data path is owned by.
 	// PUIDSet and PGIDSet say the operator named them, so they win over a
 	// re-run's grant; without them the grant's own values do.
@@ -480,7 +493,7 @@ func (d *Decision) Run(ctx context.Context, opts Options) (Result, error) {
 	// keeps it from then on. It is read before any answer is written, because a
 	// cluster with no free port in the band is a refusal and not a
 	// half-finished dialog.
-	port, err := d.torrentPort(ctx, namespace, apps, base, grantNow)
+	port, err := d.torrentPort(ctx, namespace, apps, base, grantNow, opts)
 	if err != nil {
 		return res, err
 	}

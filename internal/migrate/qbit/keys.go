@@ -9,6 +9,13 @@ const (
 	sectionRSS         = "RSS"
 	keySavePath        = "save_path"
 	keyDownloadPath    = "download_path"
+
+	// keySessionPort is where qBittorrent 5 keeps the port it announces to
+	// peers, and keyLegacyPortRangeMin the spelling every version keeps (and
+	// 5.3.0's own default file still carries) for the same setting: the session
+	// key is the live one when a conf has both.
+	keySessionPort        = `Session\Port`
+	keyLegacyPortRangeMin = `Connection\PortRangeMin`
 )
 
 // valueKind is how a key's value holds its paths.

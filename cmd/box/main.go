@@ -786,6 +786,15 @@ type initFlags struct {
 	// switches them on once their configs are moved, so init must not say
 	// "nothing runs yet" about a box that is one step from running.
 	adopting bool
+	// switchesOn are the apps that flow turns on after this install, by
+	// instance name. init installs them off, so a decision that belongs to the
+	// box rather than to the app list this run writes -- the torrent port -- is
+	// still decided for them.
+	switchesOn []string
+	// sourceTorrentPort is the peer port the source install's qBittorrent
+	// announced, when a migration read one from the snapshot. init keeps it
+	// when this cluster can use it; zero means the source named none.
+	sourceTorrentPort int
 	// recordPath is where bootstrap recorded the cluster decision. init has no
 	// --record flag of its own (it applies through the default), so each caller
 	// sets it: bootstrap passes the flag it was given, and `box init` alone uses
@@ -984,6 +993,8 @@ func (o *initFlags) run(ctx context.Context, kubeconfig string, yes, plain bool,
 		PasswordFile: *o.password,
 		Unattended:   unattended,
 		Adopting:     o.adopting,
+		SwitchesOn:   o.switchesOn,
+		TorrentPort:  o.sourceTorrentPort,
 		PathsInNode:  o.pathsInNode,
 		NoticePath:   hostconf.Path(o.recordPath),
 	})

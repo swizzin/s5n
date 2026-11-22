@@ -212,7 +212,11 @@ already on; otherwise box picks one at random from the lower band of the NodePor
 holds. Kubernetes assigns its own nodePorts (a LoadBalancer's, one per listener) from the
 rest of the range and reaches into that band only when the rest is full, so a port there
 isn't taken out from under the box; a fixed port outside it can be, and then every apply
-fails. A band with no free port refuses before any write.
+fails. A band with no free port refuses before any write. A migrate install decides it
+too, though it installs with every app off (the plan's qBittorrent is switched on
+afterwards): the source's own peer port is kept when it lies in this cluster's NodePort
+range and no Service holds it, because trackers and any forward the operator set already
+point at it, and one is picked for the band otherwise. The line init prints says which.
 
 ## Logins (decided, mechanism proposed)
 
@@ -1096,6 +1100,8 @@ data. Everything it will change is written down before it changes anything.
   not have: an answer a flag or the plan already holds is not a question, and the app
   picker never appears, because the plan decides every app. On a host that already has
   a box it adopts into it, which is how one source is migrated per user.
+  The torrent port is decided for the box rather than for the app list this run writes,
+  and the source's own peer port is kept when this cluster can use it.
   The install is what the run's one answer buys, so it comes after that answer: on a
   host with no box the run decides what it would install and what it would move first,
   asks, and only then installs. An answer of no leaves the host as it was -- no k0s, no
