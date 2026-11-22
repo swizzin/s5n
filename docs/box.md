@@ -830,7 +830,9 @@ one window into one pull request. There is no waiting period: the upstream proje
 stage their own releases, and holding a build longer adds age, not testing. On every
 push to `main`, if `main` has changed since the last `s5n-v*` tag and every change since
 is one of those bumps, CI raises the chart's patch version and tags it. Any other change
-on `main` waits for a maintainer's release, and the job names it. There is no off
+on `main` waits for a maintainer's release, and the job names it — except Renovate's own
+config (`.github/renovate.json`), which Renovate reads from `main` and nothing ships, so
+tuning Renovate never holds a release (nor makes one). There is no off
 switch in the repo: disabling the workflow in GitHub is the kill switch. Nothing is
 released without a previous `s5n-v*` tag to build on, and nothing is published from a
 push to `develop`.
