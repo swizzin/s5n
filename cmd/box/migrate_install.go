@@ -159,8 +159,8 @@ func migrationStepsWith(ctx context.Context, o *migrateApplyFlags, inst *install
 	}
 	// The apps the plan will switch on, and the peer port its qBittorrent
 	// announced: both are the box's rather than this run's app list, and both
-	// are read before the install so a snapshot that names them cannot change
-	// what init decided afterwards.
+	// are read once here, before the install, so the install and the adoption
+	// cannot disagree about them.
 	switchesOn := sortedKeys(p.Apps)
 	sourcePort := sourceTorrentPort(p, opened)
 	// The platform this run would install, decided without installing it: a
