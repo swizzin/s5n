@@ -118,3 +118,97 @@ func readSettings(t *testing.T, dir string) *jsonFile {
 	}
 	return f
 }
+
+// TestArrRootFolderFollowsTheLibrarysCategory: a migrated library directory is
+// renamed onto the Arr's category, so the folder Seerr hands the Arr as
+// rootFolderPath is the one the Arr will actually have -- /data/media/movies,
+// not the source's Movies.
+func TestArrRootFolderFollowsTheLibrarysCategory(t *testing.T) {
+	ctx := context.Background()
+	settings := strings.NewReplacer(
+		`"/srv/media/Movies"`, `"/library/Movies"`,
+		`"/srv/media/TV"`, `"/library/TV"`,
+		`"/srv/media/Anime"`, `"/library/Anime"`,
+	).Replace(settingsFixture)
+	in := setup(t, settings)
+	p, err := plan.Parse([]byte(`
+version: 2
+data:
+  root: /srv/library
+  downloads: Downloads
+  media: library
+  folders:
+    - {from: Movies, to: movies}
+    - {from: TV, to: tv}
+apps:
+  plex:
+    kind: kubernetes
+    source: plex
+    config: /srv/apps/plex
+    ports: [32400]
+    paths: []
+  tautulli:
+    kind: kubernetes
+    source: tautulli
+    config: /srv/apps/tautulli
+    ports: [8181]
+    paths: []
+  sonarr:
+    kind: kubernetes
+    source: sonarr
+    config: /srv/apps/sonarr
+    category: tv
+    ports: [8989]
+    paths:
+      - from: /library/TV
+        to: /data/media/tv
+      - from: /library
+        to: /data/media
+  radarr:
+    kind: kubernetes
+    source: radarr
+    config: /srv/apps/radarr
+    category: movies
+    ports: [7878]
+    paths:
+      - from: /library/Movies
+        to: /data/media/movies
+      - from: /library
+        to: /data/media
+  seerr:
+    kind: kubernetes
+    source: seerr
+    config: /srv/apps/seerr
+    paths:
+      - from: /srv/media
+        to: /data/media
+hosts:
+  - service: sonarr.default
+    app: sonarr
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	in.Plan = p
+	exec(t, in.Dir, `UPDATE override_rule SET rootFolder = '/library/Movies'`)
+	exec(t, in.Dir, `UPDATE media_request SET rootFolder = '/library/Movies'`)
+	if _, err := (rewriter{}).Write(ctx, in); err != nil {
+		t.Fatal(err)
+	}
+	f := readSettings(t, in.Dir)
+	for ptr, want := range map[string]string{
+		"/sonarr/0/activeDirectory": "/data/media/tv",
+		"/radarr/0/activeDirectory": "/data/media/movies",
+	} {
+		n, ok := f.find(ptr)
+		if !ok || n.str != want {
+			t.Errorf("%s = %q, want %q", ptr, n.str, want)
+		}
+	}
+	if got := readColumn(t, in.Dir, "override_rule", "rootFolder"); got != "/data/media/movies" {
+		t.Errorf("override_rule.rootFolder = %q, want the Arr's category", got)
+	}
+	if got := readColumn(t, in.Dir, "media_request", "rootFolder"); got != "/data/media/movies" {
+		t.Errorf("media_request.rootFolder = %q, want the Arr's category", got)
+	}
+}
