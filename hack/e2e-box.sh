@@ -5294,9 +5294,47 @@ MIGRATE_LEGACY_NS=legacy
 MIGRATE_QBIT_PORT=8080
 # The source's Radarr, as box will name it: the plain instance, which is the one
 # a plan names when the source runs one Radarr. Its category is the chart's own
-# for that instance.
+# for that instance -- and so is the library directory the migration renames
+# onto it, because the source kept that instance's films under `Movies`.
 MIGRATE_RADARR_INSTANCE=radarr
 MIGRATE_RADARR_CATEGORY=movies
+# The 4K instances beside them: the same apps, a second instance each, kept in a
+# subdirectory of the library (4K/Movies) and downloaded into a qBittorrent
+# subcategory (4K/Movies). One source, four instances, four library directories
+# the migration has to map onto the four categories box's values name.
+MIGRATE_SONARR_4K_INSTANCE=sonarr-4k
+MIGRATE_RADARR_4K_INSTANCE=radarr-4k
+MIGRATE_ARRS="sonarr radarr sonarr-4k radarr-4k"
+# The qBittorrent category each instance downloads into, in the source and after
+# the migration: the torrents are already in these directories, so box keeps
+# them and only the library is renamed.
+MIGRATE_DOWNLOAD_CATEGORIES="TV Movies 4K/TV 4K/Movies"
+
+# release_port <instance>: the port the release serves one Arr instance on. It is
+# the chart's own port for the app, and every instance of that app shares it: an
+# instance is a StatefulSet of its own, not a second port on one pod.
+release_port() {
+  case "${1%%-*}" in
+    sonarr) echo 8989 ;;
+    radarr) echo 7878 ;;
+    *) echo "release_port: ${1} is not an Arr" >&2; return 1 ;;
+  esac
+}
+
+# arr_facts <instance>: the four things this script has to know about one source
+# Arr, set in ARR_PORT (the port it answers on in the source), ARR_DOWNLOAD (the
+# qBittorrent category its torrents are in), ARR_FOLDER (the directory its
+# library is in, as the source named it) and ARR_CATEGORY (the directory box
+# renames it onto: the category the chart's values give that instance).
+arr_facts() {
+  case "$1" in
+    sonarr)    ARR_PORT=8989; ARR_DOWNLOAD=TV;        ARR_FOLDER=/library/TV;        ARR_CATEGORY=tv ;;
+    radarr)    ARR_PORT=7878; ARR_DOWNLOAD=Movies;    ARR_FOLDER=/library/Movies;    ARR_CATEGORY=movies ;;
+    sonarr-4k) ARR_PORT=8990; ARR_DOWNLOAD=4K/TV;     ARR_FOLDER=/library/4K/TV;     ARR_CATEGORY=tv-4k ;;
+    radarr-4k) ARR_PORT=7879; ARR_DOWNLOAD=4K/Movies; ARR_FOLDER=/library/4K/Movies; ARR_CATEGORY=movies-4k ;;
+    *) echo "arr_facts: unknown instance ${1}" >&2; return 1 ;;
+  esac
+}
 # Plex's library database, as both the source and the release see it: the
 # image's PLEX_MEDIA_SERVER_APPLICATION_SUPPORT_DIR is /config/Library/
 # Application Support, and the file lives in the Databases directory there.
@@ -5711,6 +5749,137 @@ spec:
 apiVersion: apps/v1
 kind: Deployment
 metadata:
+  name: ${MIGRATE_SONARR_4K_INSTANCE}
+  namespace: ${MIGRATE_LEGACY_NS}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: ${MIGRATE_SONARR_4K_INSTANCE}
+  template:
+    metadata:
+      labels:
+        app: ${MIGRATE_SONARR_4K_INSTANCE}
+    spec:
+      terminationGracePeriodSeconds: 10
+      securityContext:
+        runAsUser: ${uid}
+        runAsGroup: ${gid}
+        fsGroup: ${gid}
+      containers:
+        - name: sonarr
+          image: ${MIGRATE_SONARR_IMAGE}
+          env:
+            - name: TZ
+              value: UTC
+            # The second instance listens on a port of its own: two Arrs of one
+            # app in one namespace are two pods, and the migration reads each
+            # one's port from the environment it was given.
+            - name: SONARR__SERVER__PORT
+              value: "8990"
+          ports:
+            - name: http
+              containerPort: 8990
+          readinessProbe:
+            tcpSocket:
+              port: http
+            periodSeconds: 2
+            failureThreshold: 150
+          volumeMounts:
+            - name: config
+              mountPath: /config
+            - name: library
+              mountPath: /library
+      volumes:
+        - name: config
+          hostPath:
+            path: ${src}/var/data/${MIGRATE_SONARR_4K_INSTANCE}
+            type: Directory
+        - name: library
+          hostPath:
+            path: ${src}/var/data/library
+            type: Directory
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ${MIGRATE_SONARR_4K_INSTANCE}
+  namespace: ${MIGRATE_LEGACY_NS}
+spec:
+  selector:
+    app: ${MIGRATE_SONARR_4K_INSTANCE}
+  ports:
+    - name: http
+      port: 8990
+      targetPort: 8990
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ${MIGRATE_RADARR_4K_INSTANCE}
+  namespace: ${MIGRATE_LEGACY_NS}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: ${MIGRATE_RADARR_4K_INSTANCE}
+  template:
+    metadata:
+      labels:
+        app: ${MIGRATE_RADARR_4K_INSTANCE}
+    spec:
+      terminationGracePeriodSeconds: 10
+      securityContext:
+        runAsUser: ${uid}
+        runAsGroup: ${gid}
+        fsGroup: ${gid}
+      containers:
+        - name: radarr
+          image: ${MIGRATE_RADARR_IMAGE}
+          env:
+            - name: TZ
+              value: UTC
+            - name: RADARR__SERVER__PORT
+              value: "7879"
+          ports:
+            - name: http
+              containerPort: 7879
+          readinessProbe:
+            tcpSocket:
+              port: http
+            periodSeconds: 2
+            failureThreshold: 150
+          volumeMounts:
+            - name: config
+              mountPath: /config
+            - name: library
+              mountPath: /library
+      volumes:
+        - name: config
+          hostPath:
+            path: ${src}/var/data/${MIGRATE_RADARR_4K_INSTANCE}
+            type: Directory
+        - name: library
+          hostPath:
+            path: ${src}/var/data/library
+            type: Directory
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ${MIGRATE_RADARR_4K_INSTANCE}
+  namespace: ${MIGRATE_LEGACY_NS}
+spec:
+  selector:
+    app: ${MIGRATE_RADARR_4K_INSTANCE}
+  ports:
+    - name: http
+      port: 7879
+      targetPort: 7879
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
   name: plex
   namespace: ${MIGRATE_LEGACY_NS}
 spec:
@@ -6067,6 +6236,12 @@ Port=${MIGRATE_QBIT_PORT}
 ServerDomains=*
 HostHeaderValidation=false
 LocalHostAuth=false
+# The private ranges, the way a seedbox behind a proxy whitelists its own LAN:
+# the source's Arrs call this WebUI from their pods, and the release's own
+# qBittorrent admits the same ranges (internal/qbtconf seals them), which is
+# what lets a migrated download client carry no credential at all.
+AuthSubnetWhitelistEnabled=true
+AuthSubnetWhitelist=10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16
 CSRFProtection=false
 Username=admin
 Password_PBKDF2="@ByteArray(${hash})"
@@ -6103,25 +6278,30 @@ migrate_source_qbittorrent() { # migrate_source_qbittorrent <password file>
   curl -sS -o /dev/null -b "$jar" --max-time 15 \
     --data-urlencode 'json={"save_path": "/downloads", "temp_path": "/downloads"}' \
     "$base/api/v2/app/setPreferences" || true
-  for category in tv "$MIGRATE_RADARR_CATEGORY"; do
+  # A category with no save path of its own downloads into the client's save
+  # path plus the category's name, which is what a real source's categories are
+  # and what a migrated box must leave alone.
+  for category in $MIGRATE_DOWNLOAD_CATEGORIES; do
     curl -sS -o /dev/null -b "$jar" --max-time 15 \
-      --data "category=${category}" --data-urlencode "savePath=/downloads/${category}" \
+      --data "category=${category}" --data-urlencode "savePath=" \
       "$base/api/v2/torrents/createCategory" || true
   done
   curl -sS -b "$jar" --max-time 15 "$base/api/v2/app/preferences" >"$WORK/source/qbittorrent-preferences.json" 2>/dev/null || true
   curl -sS -b "$jar" --max-time 15 "$base/api/v2/torrents/categories" >"$WORK/source/qbittorrent-categories.json" 2>/dev/null || true
   migrate_forward_stop
   python3 - "$WORK/source/qbittorrent-preferences.json" "$WORK/source/qbittorrent-categories.json" \
-    tv "$MIGRATE_RADARR_CATEGORY" <<'PY'
+    $MIGRATE_DOWNLOAD_CATEGORIES <<'PY'
 import json, sys
 prefs = json.load(open(sys.argv[1]))
 cats = json.load(open(sys.argv[2]))
 if prefs.get("save_path") != "/downloads" or prefs.get("temp_path") != "/downloads":
     sys.exit(f"the source qBittorrent saves under {prefs.get('save_path')!r}/{prefs.get('temp_path')!r}, want /downloads")
 for name in sys.argv[3:]:
-    if (cats.get(name) or {}).get("savePath") != f"/downloads/{name}":
-        sys.exit(f"the source qBittorrent category {name} is {cats.get(name)!r}, want /downloads/{name}")
-print(f"  source qBittorrent: saves under /downloads, categories {', '.join(sys.argv[3:])} under /downloads/<name>")
+    if name not in cats:
+        sys.exit(f"the source qBittorrent has no category {name}: {sorted(cats)}")
+    if (cats.get(name) or {}).get("savePath"):
+        sys.exit(f"the source qBittorrent category {name} saves under {(cats[name] or {}).get('savePath')!r}, want none of its own")
+print(f"  source qBittorrent: saves under /downloads, categories {', '.join(sys.argv[3:])} with no save path of their own")
 PY
 }
 
@@ -6139,8 +6319,8 @@ migrate_source_torrent() { # migrate_source_torrent <password file>
     --announce http://tracker.example.invalid/announce \
     --out "$WORK/source/s5n-e2e-sample.torrent" --meta "$WORK/source/s5n-e2e-sample.json" \
     >/dev/null || { echo "could not build the source's test torrent"; return 1; }
-  mkdir -p "$WORK/hostfs/legacy/var/data/Downloads/tv"
-  cp "$WORK/source/$name" "$WORK/hostfs/legacy/var/data/Downloads/tv/$name"
+  mkdir -p "$WORK/hostfs/legacy/var/data/Downloads/Movies"
+  cp "$WORK/source/$name" "$WORK/hostfs/legacy/var/data/Downloads/Movies/$name"
 
   migrate_forward "$MIGRATE_LEGACY_NS" svc/qbittorrent "$MIGRATE_QBIT_PORT" || return 1
   # The tunnel's port is chosen inside migrate_forward, so the base address is
@@ -6149,7 +6329,7 @@ migrate_source_torrent() { # migrate_source_torrent <password file>
   jar="$WORK/source/qbittorrent.jar"
   code=$(curl -sS -o /dev/null -w '%{http_code}' -b "$jar" --max-time 30 \
     -F "torrents=@$WORK/source/s5n-e2e-sample.torrent" \
-    -F "savepath=/downloads/tv" -F "category=tv" -F "paused=false" -F "stopped=false" \
+    -F "savepath=/downloads/Movies" -F "category=Movies" -F "paused=false" -F "stopped=false" \
     "$base/api/v2/torrents/add" 2>/dev/null || true)
   migrate_forward_stop
   case "$code" in
@@ -6253,8 +6433,12 @@ def api(path, body=None, method="GET"):
     headers = {"Content-Type": "application/json", "X-Api-Key": key}
     data = None if body is None else json.dumps(body).encode()
     request = urllib.request.Request(base + path, data=data, headers=headers, method=method)
-    with urllib.request.urlopen(request, timeout=30) as resp:
-        raw = resp.read()
+    try:
+        with urllib.request.urlopen(request, timeout=30) as resp:
+            raw = resp.read()
+    except urllib.error.HTTPError as err:
+        detail = err.read().decode("utf-8", "replace")[:600]
+        sys.exit(f"{method} {path} answered {err.code}: {detail}")
     return json.loads(raw) if raw.strip() else None
 
 for _ in range(180):
@@ -6285,10 +6469,12 @@ for field in impl.get("fields") or []:
         item["value"] = False
     elif name == "urlbase":
         item["value"] = ""
-    elif name == "username":
-        item["value"] = "admin"
-    elif name == "password":
-        item["value"] = password
+    elif name == "username" or name == "password":
+        # No credential, exactly as the release's own qBittorrent is used: it
+        # admits the private ranges without a login, and box's client carries
+        # none, so a source that matches it is one a migration can adopt as it
+        # is.
+        item["value"] = ""
     elif name in ("tvcategory", "moviecategory"):
         item["value"] = category
         category_field = field["name"]
@@ -6296,7 +6482,10 @@ for field in impl.get("fields") or []:
 if not category_field:
     sys.exit("the app's qBittorrent settings have no category field")
 body = {k: impl.get(k) for k in ("implementation", "implementationName", "configContract", "protocol", "priority", "enable")}
-body.update({"name": "qBittorrent", "fields": fields, "tags": []})
+body["enable"] = True
+# Deliberately not box's name for it: a migrated client has the operator's own
+# name, which is why the wiring Job adopts it by the qBittorrent it points at.
+body.update({"name": "qBT", "fields": fields, "tags": []})
 created = api("/api/v3/downloadclient?forceSave=true", body, "POST")
 if not created or not created.get("id"):
     sys.exit(f"the app did not return the download client it created: {created!r}")
@@ -6564,14 +6753,14 @@ PY
 # the root folder under box's library, and exactly one qBittorrent download
 # client, the source's by id, pointing at the release's qBittorrent and carrying
 # the category its root folder is under.
-migrate_check_arr() { # migrate_check_arr <app> <port> <category> <client id> <key file>
-  local app=$1 port=$2 category=$3 client=$4 keyfile=$5 rc
+migrate_check_arr() { # migrate_check_arr <app> <port> <category> <download category> <client id> <key file>
+  local app=$1 port=$2 category=$3 download=$4 client=$5 keyfile=$6 rc
   migrate_forward "$NS" "svc/${app}" "$port" || return 1
   python3 - "http://127.0.0.1:${MIGRATE_PF_PORT}/${app}" "$(cat "$keyfile")" \
-    "$category" "$client" "$app" <<'PY'
+    "$category" "$download" "$client" "$app" <<'PY'
 import json, sys, urllib.request
 
-base, key, category, want_id, app = sys.argv[1:6]
+base, key, category, download, want_id, app = sys.argv[1:7]
 
 def api(path):
     request = urllib.request.Request(base + path, headers={"X-Api-Key": key})
@@ -6584,22 +6773,27 @@ want_root = "/data/media/" + category
 if folders != [want_root]:
     sys.exit(f"{app}'s root folders are {folders}, want [{want_root}]")
 
+want_path = want_root + "/" + app + ".mkv"
+if not folders:
+    sys.exit(f"{app} lists no root folder")
 clients = api("/api/v3/downloadclient")
 if len(clients) != 1:
     sys.exit(f"{app} has {len(clients)} download clients ({[c.get('name') for c in clients]}), want exactly the one it was migrated with")
 client = clients[0]
 if int(client.get("id") or 0) != int(want_id):
     sys.exit(f"{app}'s download client is id {client.get('id')}, and the source's was {want_id}: wiring created a second one instead of adopting the one the migration rewrote")
+if client.get("name") != "qBT":
+    sys.exit(f"{app}'s download client is named {client.get('name')!r}, want the operator's own qBT: the name is theirs and is never rewritten")
 fields = {f["name"]: f.get("value") for f in client.get("fields") or []}
 if fields.get("host") != "qbittorrent":
     sys.exit(f"{app}'s download client points at {fields.get('host')!r}, want the release's qbittorrent Service")
 if str(fields.get("port")) != "8080":
     sys.exit(f"{app}'s download client points at port {fields.get('port')!r}, want 8080")
-if (fields.get("tvCategory") or fields.get("movieCategory")) != category:
-    sys.exit(f"{app}'s download client downloads into {fields!r}, want category {category!r}")
+if (fields.get("tvCategory") or fields.get("movieCategory")) != download:
+    sys.exit(f"{app}'s download client downloads into {fields!r}, want the category its torrents are in ({download!r}), not the library's ({category!r})")
 if fields.get("useSsl") not in (False, None):
     sys.exit(f"{app}'s download client still asks for TLS: {fields.get('useSsl')!r}")
-print(f"  {app}: root folder {want_root}, one download client (id {client.get('id')}) at qbittorrent:8080, category {category}")
+print(f"  {app}: root folder {want_root} (its file {want_path}), one download client named qBT (id {client.get('id')}) at qbittorrent:8080, download category {download}")
 PY
   rc=$?
   migrate_forward_stop
@@ -6628,20 +6822,36 @@ migrate_check_qbittorrent() { # migrate_check_qbittorrent <password>
   esac
   curl -sS -b "$jar" --max-time 15 "$base/api/v2/app/preferences" >"$WORK/qbittorrent-preferences.json" 2>/dev/null || true
   curl -sS -b "$jar" --max-time 15 "$base/api/v2/torrents/categories" >"$WORK/qbittorrent-categories.json" 2>/dev/null || true
+  curl -sS -b "$jar" --max-time 15 "$base/api/v2/torrents/info" >"$WORK/qbittorrent-torrents.json" 2>/dev/null || true
   python3 - "$WORK/qbittorrent-preferences.json" "$WORK/qbittorrent-categories.json" \
-    tv "$MIGRATE_RADARR_CATEGORY" <<'PY'
+    "$WORK/qbittorrent-torrents.json" $MIGRATE_DOWNLOAD_CATEGORIES <<'PY'
 import json, sys
 prefs = json.load(open(sys.argv[1]))
 cats = json.load(open(sys.argv[2]))
+torrents = json.load(open(sys.argv[3]))
+wanted = sys.argv[4:]
 if prefs.get("save_path") != "/data/downloads":
     sys.exit(f"the migrated qBittorrent saves under {prefs.get('save_path')!r}, want /data/downloads")
 if not str(prefs.get("temp_path") or "").startswith("/data/downloads"):
     sys.exit(f"the migrated qBittorrent keeps partial files under {prefs.get('temp_path')!r}, want a directory under /data/downloads")
-for name in sys.argv[3:]:
+# The download tree is not touched: the source's categories are still the only
+# ones, none of them gained a save path of its own, and nothing box lays its
+# library out in was created here to download into nothing.
+source = json.load(open(sys.argv[3].replace("qbittorrent-torrents", "source/qbittorrent-categories")))
+if sorted(cats) != sorted(source):
+    sys.exit(f"the migrated qBittorrent's categories are {sorted(cats)}, want exactly the source's {sorted(source)}")
+for name in wanted:
     save = (cats.get(name) or {}).get("savePath")
-    if save != f"/data/downloads/{name}":
-        sys.exit(f"the migrated qBittorrent category {name} saves under {save!r}, want /data/downloads/{name}")
-print(f"  qbittorrent: saves under {prefs.get('save_path')}, categories {', '.join(sorted(cats))} under /data/downloads/<name>")
+    if save:
+        sys.exit(f"the migrated qBittorrent category {name} gained a save path ({save!r}): it had none, and its torrents are in /data/downloads/{name}")
+mine = [t for t in torrents if t.get("name") == "s5n-e2e-sample.bin"]
+if len(mine) != 1:
+    sys.exit(f"the migrated qBittorrent holds {len(mine)} of the source's torrent, want 1")
+if mine[0].get("category") != "Movies":
+    sys.exit(f"the migrated torrent is in category {mine[0].get('category')!r}, want the one it was in (Movies)")
+if mine[0].get("save_path") != "/data/downloads/Movies":
+    sys.exit(f"the migrated torrent saves under {mine[0].get('save_path')!r}, want /data/downloads/Movies")
+print(f"  qbittorrent: saves under {prefs.get('save_path')}, categories {', '.join(sorted(cats))} with no save path of their own, the torrent still in Movies under /data/downloads/Movies")
 PY
 }
 
@@ -6707,14 +6917,14 @@ migrate_source_plex_covers() { # migrate_source_plex_covers <config dir>
 migrate_seed_plex() { # migrate_seed_plex <config dir>
   local dir=$1 got want
   printf '%s\n' \
-    "INSERT INTO section_locations (id, library_section_id, root_path) VALUES (1, 101, '/data/library/tv');" \
-    "INSERT INTO section_locations (id, library_section_id, root_path) VALUES (2, 102, '/data/library/movies');" \
-    "INSERT INTO media_parts (id, media_item_id, file, size) VALUES (10, 100, '/data/library/movies/Film.2020.mkv', 47);" \
-    "INSERT INTO media_streams (id, media_part_id, url, stream_type_id) VALUES (20, 10, 'file:///data/library/movies/Film.2020.en.srt', 2);" \
-    "INSERT INTO metadata_items (id, guid, title, metadata_type) VALUES (30, 'file:///data/library/movies/12345', 'Film (2020)', 1);" \
+    "INSERT INTO section_locations (id, library_section_id, root_path) VALUES (1, 101, '/data/library/TV');" \
+    "INSERT INTO section_locations (id, library_section_id, root_path) VALUES (2, 102, '/data/library/Movies');" \
+    "INSERT INTO media_parts (id, media_item_id, file, size) VALUES (10, 100, '/data/library/Movies/radarr.mkv', 47);" \
+    "INSERT INTO media_streams (id, media_part_id, url, stream_type_id) VALUES (20, 10, 'file:///data/library/Movies/radarr.en.srt', 2);" \
+    "INSERT INTO metadata_items (id, guid, title, metadata_type) VALUES (30, 'file:///data/library/Movies/12345', 'Film (2020)', 1);" \
     "INSERT INTO metadata_items (id, guid, title, metadata_type) VALUES (31, 'plex://movie/5d776b9c8b7c2b001f5f8b3a', 'Matched Film', 1);" \
     "INSERT INTO directories (id, path, parent_directory_id) VALUES (1, '', NULL);" \
-    "INSERT INTO directories (id, path, parent_directory_id) VALUES (2, 'tv', 1);" |
+    "INSERT INTO directories (id, path, parent_directory_id) VALUES (2, 'TV', 1);" |
     migrate_plex_sqlite "$dir" "$MIGRATE_PLEX_DB" -bail >/dev/null || {
     echo "the source Plex's database would not take the rows a library holds: it has no schema Plex wrote (it builds one on its first start)"
     return 1
@@ -6724,14 +6934,14 @@ migrate_seed_plex() { # migrate_seed_plex <config dir>
     return 1
   }
   want=$(cat <<'EOF'
-root:/data/library/tv
-root:/data/library/movies
-part:/data/library/movies/Film.2020.mkv
-stream:file:///data/library/movies/Film.2020.en.srt
-guid:file:///data/library/movies/12345
+root:/data/library/TV
+root:/data/library/Movies
+part:/data/library/Movies/radarr.mkv
+stream:file:///data/library/Movies/radarr.en.srt
+guid:file:///data/library/Movies/12345
 guid:plex://movie/5d776b9c8b7c2b001f5f8b3a
 dir:
-dir:tv
+dir:TV
 EOF
   )
   if [ "$got" != "$want" ]; then
@@ -6819,17 +7029,25 @@ migrate_check_plex_db() { # migrate_check_plex_db <config dir>
   want=$(cat <<'EOF'
 root:/data/media/tv
 root:/data/media/movies
-part:/data/media/movies/Film.2020.mkv
-stream:file:///data/media/movies/Film.2020.en.srt
+part:/data/media/movies/radarr.mkv
+stream:file:///data/media/movies/radarr.en.srt
 guid:file:///data/media/movies/12345
 guid:plex://movie/5d776b9c8b7c2b001f5f8b3a
 dir:
-dir:tv
+dir:TV
 EOF
   )
   if [ "$got" != "$want" ]; then
     echo "the migrated database does not read back the paths the plan promised:"
     diff <(printf '%s\n' "$want") <(printf '%s\n' "$got") | sed 's/^/    /' || true
+    return 1
+  fi
+  # The library's own directories are renamed onto the categories box lays out,
+  # so the section that named the source's Movies is the one box's movies
+  # directory is.
+  if ! printf '%s\n' "$got" | grep -qx 'root:/data/media/movies'; then
+    echo "Plex's section on the source's Movies is not /data/media/movies after the migration:"
+    printf '%s\n' "$got" | sed 's/^/    /'
     return 1
   fi
   # The rows, so a green log carries the evidence and not only the promise.
@@ -7048,7 +7266,7 @@ rehearsal_box() {
     cat "$WORK/apply-rehearsal.txt"; return 1
   fi
   migrate_assert_ownership "$rcluster" "$rconfig" "$puid" "$pgid" || return 1
-  migrate_assert_ready "$ctx" qbittorrent sonarr "$MIGRATE_RADARR_INSTANCE" autobrr qui pbh tautulli ||
+  migrate_assert_ready "$ctx" qbittorrent $MIGRATE_ARRS autobrr qui pbh tautulli ||
     return 1
   box_files_back "$rcluster" "$rconfig"
   cat "$WORK/apply-rehearsal.txt"
@@ -7099,7 +7317,7 @@ print(len(pods), " ".join(bad))
     { echo "the rehearsal made the source's Downloads name"; return 1; }
   [ ! -e "$DATA_PATH/library" ] ||
     { echo "the rehearsal made the source's library name"; return 1; }
-  state=$(stat -c '%h' "$WORK/source-data/Downloads/tv/Show.S01E01.mkv" 2>/dev/null || true)
+  state=$(stat -c '%h' "$WORK/source-data/Downloads/Movies/${MIGRATE_RADARR_INSTANCE}.mkv" 2>/dev/null || true)
   [ "${state:-0}" = 2 ] ||
     { echo "the rehearsal changed the source's data: link count ${state:-none}, want 2"; return 1; }
 
@@ -7265,31 +7483,36 @@ migrate_box() {
     mkdir -p '$CONFIG_PATH'
     chown -R '${puid}:${pgid}' '$WORK/hostfs'"
   mkdir -p "$src/var/data/qbittorrent" "$src/var/data/sonarr" "$src/var/data/${MIGRATE_RADARR_INSTANCE}" \
+    "$src/var/data/${MIGRATE_SONARR_4K_INSTANCE}" "$src/var/data/${MIGRATE_RADARR_4K_INSTANCE}" \
     "$src/var/data/plex" "$src/var/data/autobrr" "$src/var/data/qui" "$src/var/data/pbh" \
-    "$src/var/data/tautulli" \
-    "$src/var/data/Downloads/tv" "$src/var/data/Downloads/${MIGRATE_RADARR_CATEGORY}" \
-    "$src/var/data/library/tv" "$src/var/data/library/${MIGRATE_RADARR_CATEGORY}"
-  # One hardlinked pair per category, the way an import leaves them: the same
-  # file under Downloads and under library. A rename keeps one inode; a move
-  # between filesystems or a copy does not. The link count after the migration
-  # is the proof that the data was adopted in place.
-  printf 's5n e2e: a downloaded episode, and the import that is the same inode\n' \
-    >"$src/var/data/Downloads/tv/Show.S01E01.mkv"
-  ln -f "$src/var/data/Downloads/tv/Show.S01E01.mkv" "$src/var/data/library/tv/Show.S01E01.mkv"
-  printf 's5n e2e: a downloaded film, and the import that is the same inode\n' \
-    >"$src/var/data/Downloads/${MIGRATE_RADARR_CATEGORY}/Film.2020.mkv"
-  ln -f "$src/var/data/Downloads/${MIGRATE_RADARR_CATEGORY}/Film.2020.mkv" \
-    "$src/var/data/library/${MIGRATE_RADARR_CATEGORY}/Film.2020.mkv"
+    "$src/var/data/tautulli"
+  # The downloads and the library, named after what each instance collects: the
+  # 4K ones in a subdirectory of their own. Neither tree is box's layout, which
+  # is what the migration has to fix -- the library by renaming, the downloads
+  # by leaving them exactly where they are.
+  for instance in $MIGRATE_ARRS; do
+    arr_facts "$instance" || { fail=1; return 0; }
+    folder=${ARR_FOLDER#/library/}
+    mkdir -p "$src/var/data/Downloads/${ARR_DOWNLOAD}" "$src/var/data/library/${folder}"
+    # One hardlinked pair per instance, the way an import leaves them: the same
+    # file under Downloads and under library. A rename keeps one inode; a move
+    # between filesystems or a copy does not. The link count after the migration
+    # is the proof that the data was adopted in place.
+    printf 's5n e2e: a downloaded file, and the import that is the same inode\n' \
+      >"$src/var/data/Downloads/${ARR_DOWNLOAD}/${instance}.mkv"
+    ln -f "$src/var/data/Downloads/${ARR_DOWNLOAD}/${instance}.mkv" \
+      "$src/var/data/library/${folder}/${instance}.mkv"
+  done
   # The subtitle sidecar one of the library database's rows points at: the
   # migration reads it out of media_streams.url and rewrites it with the film.
   printf 's5n e2e: a subtitle the library database points at\n' \
-    >"$src/var/data/library/${MIGRATE_RADARR_CATEGORY}/Film.2020.en.srt"
+    >"$src/var/data/library/Movies/${MIGRATE_RADARR_INSTANCE}.en.srt"
   # A marker in each config directory whose whole tree a migration carries: it is
   # what proves a file the apps never read came across too. Plex's is the one
   # config a snapshot carries as its state instead -- Preferences.xml and its
   # databases -- so its marker has to stay behind, and the cover trees it
   # rebuilds are written below, once the source has stopped.
-  for app in qbittorrent sonarr "$MIGRATE_RADARR_INSTANCE" autobrr qui pbh tautulli; do
+  for app in qbittorrent $MIGRATE_ARRS autobrr qui pbh tautulli; do
     printf 's5n e2e: this config directory was the source install\n' >"$src/var/data/${app}/.s5n-e2e-source"
   done
   printf 's5n e2e: this config directory was the source install\n' >"$src/var/data/plex/.s5n-e2e-source"
@@ -7326,7 +7549,7 @@ migrate_box() {
   # pbh and tautulli have no readiness probe here: a source install is not held
   # to a chart's probes, and what says each of them is really up is what the next
   # steps ask it through its own CLI and its own files.
-  for app in qbittorrent sonarr "$MIGRATE_RADARR_INSTANCE" plex autobrr qui pbh tautulli; do
+  for app in qbittorrent $MIGRATE_ARRS plex autobrr qui pbh tautulli; do
     if ! $K -n "$MIGRATE_LEGACY_NS" rollout status "deployment/${app}" --timeout=300s; then
       echo "${app} never became ready in the source install"
       $K -n "$MIGRATE_LEGACY_NS" get pods
@@ -7360,22 +7583,19 @@ migrate_box() {
     fail=1; return 0
   fi
 
-  log "seeding the source through its own APIs: paths, categories, a root folder and a download client per Arr"
+  log "seeding the source through its own APIs: four Arrs, their root folders and one download client each"
   if ! migrate_source_qbittorrent "$WORK/source/qbittorrent-password"; then
     fail=1; return 0
   fi
-  for instance in sonarr "$MIGRATE_RADARR_INSTANCE"; do
-    case "$instance" in
-      sonarr) port=8989; category=tv; folder=/library/tv ;;
-      *) port=7878; category="$MIGRATE_RADARR_CATEGORY"; folder="/library/${MIGRATE_RADARR_CATEGORY}" ;;
-    esac
-    if ! migrate_source_arr "$instance" "$port" "$category" "$folder" \
+  for instance in $MIGRATE_ARRS; do
+    arr_facts "$instance" || { fail=1; return 0; }
+    if ! migrate_source_arr "$instance" "$ARR_PORT" "$ARR_DOWNLOAD" "$ARR_FOLDER" \
       "$src/var/data/${instance}/config.xml" "$WORK/source/${instance}.key" \
       "$WORK/source/qbittorrent-password"; then
       echo "could not seed the source ${instance}"
       fail=1; return 0
     fi
-    echo "  ${instance}: root folder ${folder}, download client $(cat "$WORK/source/${instance}.client-id")"
+    echo "  ${instance}: root folder ${ARR_FOLDER}, download category ${ARR_DOWNLOAD}, download client $(cat "$WORK/source/${instance}.client-id")"
   done
   [ "$fail" = 0 ] || return 0
 
@@ -7431,7 +7651,7 @@ migrate_box() {
     fail=1; return 0
   fi
   cat "$WORK/cutover-refused.txt"
-  for instance in qbittorrent sonarr "$MIGRATE_RADARR_INSTANCE" plex autobrr qui pbh tautulli; do
+  for instance in qbittorrent $MIGRATE_ARRS plex autobrr qui pbh tautulli; do
     grep -q "^  ${instance}: .* in ${MIGRATE_LEGACY_NS}/${instance}; kubectl -n ${MIGRATE_LEGACY_NS} scale " \
       "$WORK/cutover-refused.txt" ||
       { echo "the refusal does not name ${instance} and the command that stops it"; fail=1; }
@@ -7453,7 +7673,7 @@ migrate_box() {
   # so this wait is what keeps the fixture out of that case.
   log "stopping the source, the way an operator cuts over"
   $K -n "$MIGRATE_LEGACY_NS" scale deployment --all --replicas=0 >/dev/null
-  for app in qbittorrent sonarr "$MIGRATE_RADARR_INSTANCE" plex autobrr qui pbh tautulli; do
+  for app in qbittorrent $MIGRATE_ARRS plex autobrr qui pbh tautulli; do
     $K -n "$MIGRATE_LEGACY_NS" wait --for=delete pod -l "app=${app}" --timeout=180s >/dev/null 2>&1 || true
   done
   [ -f "$src/var/data/qbittorrent/qBittorrent/categories.json" ] ||
@@ -7505,9 +7725,8 @@ migrate_box() {
   tar -xzOf "$snapshot" report.txt >"$WORK/report.txt" 2>/dev/null ||
     { echo "the snapshot holds no report.txt"; fail=1; return 0; }
   report="$WORK/report.txt"
-  for instance in qbittorrent sonarr "$MIGRATE_RADARR_INSTANCE" plex autobrr qui pbh tautulli; do
+  for instance in qbittorrent $MIGRATE_ARRS plex autobrr qui pbh tautulli; do
     source=$instance
-    [ "$instance" = "$MIGRATE_RADARR_INSTANCE" ] && source=$MIGRATE_RADARR_INSTANCE
     grep -q "^app: ${instance} (from ${source}, config " "$report" ||
       { echo "the plan does not name ${instance}, and the source runs it"; fail=1; }
     tar -tzf "$snapshot" "config/${instance}/" >/dev/null 2>&1 ||
@@ -7674,7 +7893,7 @@ migrate_box() {
   # migration left in the config root belongs to the seedbox's user, and every
   # app could read what it was given.
   migrate_assert_ownership "$CLUSTER" "$CONFIG_PATH" "$puid" "$pgid" || { fail=1; return 0; }
-  migrate_assert_ready "$CTX" qbittorrent sonarr "$MIGRATE_RADARR_INSTANCE" autobrr qui pbh tautulli ||
+  migrate_assert_ready "$CTX" qbittorrent $MIGRATE_ARRS autobrr qui pbh tautulli ||
     { fail=1; return 0; }
   box_files_back "$CLUSTER" "$CONFIG_PATH"
   # The snapshot it read is named, and the chart it installed is the release
@@ -7709,9 +7928,11 @@ migrate_box() {
   # What the run said it would do, before it did it. The two renames, the kept
   # keys and the connections adopted by id are the whole point of a migration,
   # and a summary that does not name them is a run that did less.
-  grep -qE "^  ✓ data +Downloads → downloads · library → media" "$WORK/apply-migrate.txt" ||
-    { echo "the plan did not say it renames the source's two data directories"; fail=1; }
-  for instance in sonarr "$MIGRATE_RADARR_INSTANCE"; do
+  grep -qE "^  ✓ data +Downloads → downloads · library → media · media: 4K/Movies → movies-4k · 4K/TV → tv-4k · Movies → movies · TV → tv$" \
+    "$WORK/apply-migrate.txt" ||
+    { echo "the plan does not say it renames the source's two data directories and the library's own:";
+      grep -E "^  ✓ data" "$WORK/apply-migrate.txt" || true; fail=1; }
+  for instance in $MIGRATE_ARRS; do
     grep -qE "^  ✓ ${instance} +.*keeps its API key" "$WORK/apply-migrate.txt" ||
       { echo "the plan did not say it keeps ${instance}'s API key"; fail=1; }
     grep -qE "^  ✓ ${instance} +.*keeps download client \"" "$WORK/apply-migrate.txt" ||
@@ -7821,9 +8042,8 @@ PY
 
   # ---- assertion 1: healthy, on the chart's own images ---------------------
   log "the migrated apps are ready on the chart's images"
-  for instance in qbittorrent sonarr "$MIGRATE_RADARR_INSTANCE" autobrr qui pbh tautulli; do
-    app=$instance
-    [ "$instance" = "$MIGRATE_RADARR_INSTANCE" ] && app=radarr
+  for instance in qbittorrent $MIGRATE_ARRS autobrr qui pbh tautulli; do
+    app=${instance%%-*}
     expected=$(chart_image "$app") || { echo "could not read the chart's ${app} pin"; fail=1; return 0; }
     wait_image_ready "${instance}-0" "$expected" ||
       { echo "${instance}-0 is not ready on the chart's ${expected} (it runs $(pod_image "${instance}-0" || true))"; fail=1; }
@@ -8026,8 +8246,8 @@ PY
   else
     migrate_check_plex_db "$CONFIG_PATH/plex" || fail=1
     # The database names a file now; the rename is what makes it exist.
-    if [ ! -f "$DATA_PATH/media/${MIGRATE_RADARR_CATEGORY}/Film.2020.mkv" ]; then
-      echo "the database's media_parts.file is /data/media/${MIGRATE_RADARR_CATEGORY}/Film.2020.mkv, and ${DATA_PATH}/media/${MIGRATE_RADARR_CATEGORY}/Film.2020.mkv is not there: the rewrite points at nothing"
+    if [ ! -f "$DATA_PATH/media/${MIGRATE_RADARR_CATEGORY}/${MIGRATE_RADARR_INSTANCE}.mkv" ]; then
+      echo "the database's media_parts.file is /data/media/${MIGRATE_RADARR_CATEGORY}/${MIGRATE_RADARR_INSTANCE}.mkv, and ${DATA_PATH}/media/${MIGRATE_RADARR_CATEGORY}/${MIGRATE_RADARR_INSTANCE}.mkv is not there: the rewrite points at nothing"
       fail=1
     fi
     expected=$(chart_image plex) || { echo "could not read the chart's plex pin"; fail=1; return 0; }
@@ -8041,12 +8261,9 @@ PY
 
   # ---- assertion 2: paths --------------------------------------------------
   log "paths: the Arrs' root folders, qBittorrent's categories, the renames on disk"
-  for instance in sonarr "$MIGRATE_RADARR_INSTANCE"; do
-    case "$instance" in
-      sonarr) port=8989; category=tv ;;
-      *) port=7878; category="$MIGRATE_RADARR_CATEGORY" ;;
-    esac
-    migrate_check_arr "$instance" "$port" "$category" \
+  for instance in $MIGRATE_ARRS; do
+    arr_facts "$instance" || { fail=1; return 0; }
+    migrate_check_arr "$instance" "$(release_port "$instance")" "$ARR_CATEGORY" "$ARR_DOWNLOAD" \
       "$(cat "$WORK/source/${instance}.client-id")" "$WORK/source/${instance}.key" || fail=1
   done
   if migrate_forward "$NS" svc/qbittorrent "$MIGRATE_QBIT_PORT"; then
@@ -8069,12 +8286,38 @@ PY
       echo "${DATA_PATH}/${from} is still there: the rename left the source's directory behind"; fail=1
     fi
   done
-  for category in tv "$MIGRATE_RADARR_CATEGORY"; do
-    links=$(stat -c '%h' "$DATA_PATH/downloads/${category}"/*.mkv 2>/dev/null | head -1) || true
+  for instance in $MIGRATE_ARRS; do
+    arr_facts "$instance" || { fail=1; return 0; }
+    links=$(stat -c '%h' "$DATA_PATH/downloads/${ARR_DOWNLOAD}/${instance}.mkv" 2>/dev/null | head -1) || true
     [ "${links:-0}" -eq 2 ] ||
-      { echo "${DATA_PATH}/downloads/${category}: link count is ${links:-none}, want 2 -- the download and the import it was hardlinked to are not one file any more"; fail=1; }
+      { echo "${DATA_PATH}/downloads/${ARR_DOWNLOAD}/${instance}.mkv: link count is ${links:-none}, want 2 -- the download and the import it was hardlinked to are not one file any more"; fail=1; }
+    # The library's own directory was renamed onto the instance's category,
+    # with what was in it; the download category kept its name and its
+    # directory, which is where the torrents are.
+    if [ ! -f "$DATA_PATH/media/${ARR_CATEGORY}/${instance}.mkv" ]; then
+      echo "${DATA_PATH}/media/${ARR_CATEGORY}/${instance}.mkv is not there: the library directory ${ARR_FOLDER#/library/} was not renamed onto the instance's category"
+      fail=1
+    fi
+    if [ ! -f "$DATA_PATH/downloads/${ARR_DOWNLOAD}/${instance}.mkv" ]; then
+      echo "${DATA_PATH}/downloads/${ARR_DOWNLOAD}/${instance}.mkv is not there: the download tree was touched"
+      fail=1
+    fi
   done
-  for instance in qbittorrent sonarr "$MIGRATE_RADARR_INSTANCE" autobrr qui pbh tautulli; do
+  for instance in $MIGRATE_ARRS; do
+    arr_facts "$instance" || { fail=1; return 0; }
+    source=${ARR_FOLDER#/library/}
+    if [ "$source" != "$ARR_CATEGORY" ] && [ -e "$DATA_PATH/media/${source}" ]; then
+      echo "${DATA_PATH}/media/${source} is still there, and the migration was supposed to rename it onto ${ARR_CATEGORY}"
+      fail=1
+    fi
+  done
+  # The 4K parent the two nested directories were moved out of: emptied, and so
+  # removed, while anything the operator left beside them would have kept it.
+  if [ -e "$DATA_PATH/media/4K" ]; then
+    echo "${DATA_PATH}/media/4K is still there: the renames left an empty parent behind"
+    fail=1
+  fi
+  for instance in qbittorrent $MIGRATE_ARRS autobrr qui pbh tautulli; do
     [ -f "$CONFIG_PATH/${instance}/.s5n-e2e-source" ] ||
       { echo "${CONFIG_PATH}/${instance}/ holds no marker: migrate did not copy the whole config directory"; fail=1; }
   done
@@ -8099,16 +8342,12 @@ PY
 
   # ---- assertion 3: the keys the source had --------------------------------
   log "keys: each Arr answers with the API key it had before the migration"
-  for instance in sonarr "$MIGRATE_RADARR_INSTANCE"; do
+  for instance in $MIGRATE_ARRS; do
     key=$(cat "$WORK/source/${instance}.key")
     secret=$($K -n "$NS" get secret s5n-keys -o jsonpath="{.data.${instance}-apikey}" 2>/dev/null | base64 -d || true)
     [ "$secret" = "$key" ] ||
       { echo "the release Secret's ${instance}-apikey is not the key the source had"; fail=1; }
-    case "$instance" in
-      sonarr) port=8989 ;;
-      *) port=7878 ;;
-    esac
-    if migrate_forward "$NS" "svc/${instance}" "$port"; then
+    if migrate_forward "$NS" "svc/${instance}" "$(release_port "$instance")"; then
       code=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 15 -H "X-Api-Key: ${key}" \
         "http://127.0.0.1:${MIGRATE_PF_PORT}/${instance}/api/v3/system/status" 2>/dev/null || true)
       migrate_forward_stop
@@ -8125,28 +8364,27 @@ PY
   # and the rules are derived from the app list: the apply it hands over to has
   # to leave them what init would have written for the final set.
   log "the login: each migrated Arr's API is bypassed through the Gateway, and its UI is not"
-  for instance in sonarr "$MIGRATE_RADARR_INSTANCE"; do
+  for instance in $MIGRATE_ARRS; do
     migrate_check_login_bypass "$instance" "$WORK/source/${instance}.key" || fail=1
   done
 
   # ---- assertion 5: the adopted client, and the receipt --------------------
   log "ownership: the wiring record names the source's download client, and the receipt is ok"
   $K -n "$NS" get configmap s5n-wiring -o jsonpath='{.data.owned\.json}' >"$WORK/owned.json" 2>/dev/null || true
-  python3 - "$WORK/owned.json" sonarr "$MIGRATE_RADARR_INSTANCE" \
-    "$(cat "$WORK/source/sonarr.client-id")" "$(cat "$WORK/source/${MIGRATE_RADARR_INSTANCE}.client-id")" <<'PY' || fail=1
+  for instance in $MIGRATE_ARRS; do
+    python3 - "$WORK/owned.json" "$instance" "$(cat "$WORK/source/${instance}.client-id")" <<'PY' || fail=1
 import json, sys
-path, sonarr, radarr, sonarr_id, radarr_id = sys.argv[1:6]
+path, app, want = sys.argv[1:4]
 try:
     rec = json.load(open(path))
 except (FileNotFoundError, json.JSONDecodeError):
     sys.exit(f"{path} is not a wiring record: owned.json was not written")
-arr = rec.get("arr") or {}
-for app, want in ((sonarr, sonarr_id), (radarr, radarr_id)):
-    got = (arr.get(app) or {}).get("downloadClient")
-    if str(got) != str(want):
-        sys.exit(f"owned.json records {app}'s download client as {got}, and the source's was {want}")
-print(f"  owned.json: {sonarr} {arr[sonarr]['downloadClient']}, {radarr} {arr[radarr]['downloadClient']} -- the source's ids")
+got = ((rec.get("arr") or {}).get(app) or {}).get("downloadClient")
+if str(got) != str(want):
+    sys.exit(f"owned.json records {app}'s download client as {got}, and the source's was {want}")
+print(f"  owned.json: {app} {got} -- the source's id")
 PY
+  done
   [ "$(status_field 'd["status"]')" = ok ] ||
     { echo "the wiring receipt is not ok: $(status_field 'd.get("error")')"; fail=1; }
 
@@ -8231,17 +8469,18 @@ migrate_keep_box() {
     mkdir -p '$CONFIG_PATH'
     chown -R '${puid}:${pgid}' '$WORK/hostfs'"
   mkdir -p "$src/var/data/qbittorrent" "$src/var/data/sonarr" "$src/var/data/${MIGRATE_RADARR_INSTANCE}" \
-    "$src/var/data/plex" \
-    "$src/var/data/Downloads/tv" "$src/var/data/Downloads/${MIGRATE_RADARR_CATEGORY}" \
-    "$src/var/data/library/tv" "$src/var/data/library/${MIGRATE_RADARR_CATEGORY}"
-  printf 's5n e2e: a downloaded episode, and the import that is the same inode\n' \
-    >"$src/var/data/Downloads/tv/Show.S01E01.mkv"
-  ln -f "$src/var/data/Downloads/tv/Show.S01E01.mkv" "$src/var/data/library/tv/Show.S01E01.mkv"
-  printf 's5n e2e: a downloaded film, and the import that is the same inode\n' \
-    >"$src/var/data/Downloads/${MIGRATE_RADARR_CATEGORY}/Film.2020.mkv"
-  ln -f "$src/var/data/Downloads/${MIGRATE_RADARR_CATEGORY}/Film.2020.mkv" \
-    "$src/var/data/library/${MIGRATE_RADARR_CATEGORY}/Film.2020.mkv"
-  for app in qbittorrent sonarr "$MIGRATE_RADARR_INSTANCE"; do
+    "$src/var/data/${MIGRATE_SONARR_4K_INSTANCE}" "$src/var/data/${MIGRATE_RADARR_4K_INSTANCE}" \
+    "$src/var/data/plex"
+  for instance in $MIGRATE_ARRS; do
+    arr_facts "$instance" || { fail=1; return 0; }
+    folder=${ARR_FOLDER#/library/}
+    mkdir -p "$src/var/data/Downloads/${ARR_DOWNLOAD}" "$src/var/data/library/${folder}"
+    printf 's5n e2e: a downloaded file, and the import that is the same inode\n' \
+      >"$src/var/data/Downloads/${ARR_DOWNLOAD}/${instance}.mkv"
+    ln -f "$src/var/data/Downloads/${ARR_DOWNLOAD}/${instance}.mkv" \
+      "$src/var/data/library/${folder}/${instance}.mkv"
+  done
+  for app in qbittorrent $MIGRATE_ARRS; do
     printf 's5n e2e: this config directory was the source install\n' >"$src/var/data/${app}/.s5n-e2e-source"
   done
   printf 's5n e2e: this config directory was the source install\n' >"$src/var/data/plex/.s5n-e2e-source"
@@ -8259,7 +8498,7 @@ migrate_keep_box() {
   if ! $K apply -f "$WORK/source-manifests.yaml" >"$WORK/source-apply.txt" 2>&1; then
     cat "$WORK/source-apply.txt"; fail=1; return 0
   fi
-  for app in qbittorrent sonarr "$MIGRATE_RADARR_INSTANCE" plex; do
+  for app in qbittorrent $MIGRATE_ARRS plex; do
     if ! $K -n "$MIGRATE_LEGACY_NS" rollout status "deployment/${app}" --timeout=300s; then
       echo "${app} never became ready in the source install"
       $K -n "$MIGRATE_LEGACY_NS" get pods
@@ -8267,22 +8506,19 @@ migrate_keep_box() {
     fi
   done
 
-  log "seeding the source through its own APIs: paths, categories, a root folder and a download client per Arr"
+  log "seeding the source through its own APIs: four Arrs, their root folders and one download client each"
   if ! migrate_source_qbittorrent "$WORK/source/qbittorrent-password"; then
     fail=1; return 0
   fi
-  for instance in sonarr "$MIGRATE_RADARR_INSTANCE"; do
-    case "$instance" in
-      sonarr) port=8989; category=tv; folder=/library/tv ;;
-      *) port=7878; category="$MIGRATE_RADARR_CATEGORY"; folder="/library/${MIGRATE_RADARR_CATEGORY}" ;;
-    esac
-    if ! migrate_source_arr "$instance" "$port" "$category" "$folder" \
+  for instance in $MIGRATE_ARRS; do
+    arr_facts "$instance" || { fail=1; return 0; }
+    if ! migrate_source_arr "$instance" "$ARR_PORT" "$ARR_DOWNLOAD" "$ARR_FOLDER" \
       "$src/var/data/${instance}/config.xml" "$WORK/source/${instance}.key" \
       "$WORK/source/qbittorrent-password"; then
       echo "could not seed the source ${instance}"
       fail=1; return 0
     fi
-    echo "  ${instance}: root folder ${folder}, download client $(cat "$WORK/source/${instance}.client-id")"
+    echo "  ${instance}: root folder ${ARR_FOLDER}, download category ${ARR_DOWNLOAD}, download client $(cat "$WORK/source/${instance}.client-id")"
   done
   [ "$fail" = 0 ] || return 0
 
@@ -8290,7 +8526,7 @@ migrate_keep_box() {
   # workloads stay, at 0 replicas, so scaling them back up is the rollback.
   log "stopping the source, and keeping the cluster it runs on"
   $K -n "$MIGRATE_LEGACY_NS" scale deployment --all --replicas=0 >/dev/null
-  for app in qbittorrent sonarr "$MIGRATE_RADARR_INSTANCE" plex; do
+  for app in qbittorrent $MIGRATE_ARRS plex; do
     $K -n "$MIGRATE_LEGACY_NS" wait --for=delete pod -l "app=${app}" --timeout=180s >/dev/null 2>&1 || true
   done
   [ -f "$src/var/data/qbittorrent/qBittorrent/categories.json" ] ||
@@ -8446,7 +8682,7 @@ migrate_keep_box() {
     { echo "the run does not name the app that is new since the earlier read"; fail=1; }
   # The cluster is the one the source ran on: its workloads are still there, at 0,
   # which is what makes scaling them back up the rollback.
-  for app in qbittorrent sonarr "$MIGRATE_RADARR_INSTANCE" plex; do
+  for app in qbittorrent $MIGRATE_ARRS plex; do
     replicas=$($K -n "$MIGRATE_LEGACY_NS" get deployment "$app" -o jsonpath='{.spec.replicas}' 2>/dev/null || true)
     [ "$replicas" = 0 ] ||
       { echo "the source's ${app} is at ${replicas:-gone} replicas after the cutover: box changed a workload that is not its own"; fail=1; }
@@ -8459,9 +8695,11 @@ migrate_keep_box() {
     { echo "the keep path does not say what Plex's snapshot leaves behind"; fail=1; }
   # What the migration did, named before it did it: the two renames, the kept keys
   # and the connections adopted by id.
-  grep -qE "^  ✓ data +Downloads → downloads · library → media" "$WORK/keep-cutover.txt" ||
-    { echo "the plan did not say it renames the source's two data directories"; fail=1; }
-  for instance in sonarr "$MIGRATE_RADARR_INSTANCE"; do
+  grep -qE "^  ✓ data +Downloads → downloads · library → media · media: 4K/Movies → movies-4k · 4K/TV → tv-4k · Movies → movies · TV → tv$" \
+    "$WORK/keep-cutover.txt" ||
+    { echo "the plan does not say it renames the source's two data directories and the library's own:";
+      grep -E "^  ✓ data" "$WORK/keep-cutover.txt" || true; fail=1; }
+  for instance in $MIGRATE_ARRS; do
     grep -qE "^  ✓ ${instance} +.*keeps its API key" "$WORK/keep-cutover.txt" ||
       { echo "the plan did not say it keeps ${instance}'s API key"; fail=1; }
     grep -qE "^  ✓ ${instance} +.*keeps download client \"" "$WORK/keep-cutover.txt" ||
@@ -8471,9 +8709,8 @@ migrate_keep_box() {
 
   # ---- assertion 1: healthy, on the chart's own images ---------------------
   log "the migrated apps are ready on the chart's images, beside the source they came from"
-  for instance in qbittorrent sonarr "$MIGRATE_RADARR_INSTANCE"; do
-    app=$instance
-    [ "$instance" = "$MIGRATE_RADARR_INSTANCE" ] && app=radarr
+  for instance in qbittorrent $MIGRATE_ARRS; do
+    app=${instance%%-*}
     expected=$(chart_image "$app") || { echo "could not read the chart's ${app} pin"; fail=1; return 0; }
     wait_image_ready "${instance}-0" "$expected" ||
       { echo "${instance}-0 is not ready on the chart's ${expected} (it runs $(pod_image "${instance}-0" || true))"; fail=1; }
@@ -8482,12 +8719,9 @@ migrate_keep_box() {
 
   # ---- assertion 2: paths --------------------------------------------------
   log "paths: the Arrs' root folders, qBittorrent's categories, the renames on disk"
-  for instance in sonarr "$MIGRATE_RADARR_INSTANCE"; do
-    case "$instance" in
-      sonarr) port=8989; category=tv ;;
-      *) port=7878; category="$MIGRATE_RADARR_CATEGORY" ;;
-    esac
-    migrate_check_arr "$instance" "$port" "$category" \
+  for instance in $MIGRATE_ARRS; do
+    arr_facts "$instance" || { fail=1; return 0; }
+    migrate_check_arr "$instance" "$(release_port "$instance")" "$ARR_CATEGORY" "$ARR_DOWNLOAD" \
       "$(cat "$WORK/source/${instance}.client-id")" "$WORK/source/${instance}.key" || fail=1
   done
   if migrate_forward "$NS" svc/qbittorrent "$MIGRATE_QBIT_PORT"; then
@@ -8510,12 +8744,38 @@ migrate_keep_box() {
       echo "${DATA_PATH}/${from} is still there: the rename left the source's directory behind"; fail=1
     fi
   done
-  for category in tv "$MIGRATE_RADARR_CATEGORY"; do
-    links=$(stat -c '%h' "$DATA_PATH/downloads/${category}"/*.mkv 2>/dev/null | head -1) || true
+  for instance in $MIGRATE_ARRS; do
+    arr_facts "$instance" || { fail=1; return 0; }
+    links=$(stat -c '%h' "$DATA_PATH/downloads/${ARR_DOWNLOAD}/${instance}.mkv" 2>/dev/null | head -1) || true
     [ "${links:-0}" -eq 2 ] ||
-      { echo "${DATA_PATH}/downloads/${category}: link count is ${links:-none}, want 2 -- the download and the import it was hardlinked to are not one file any more"; fail=1; }
+      { echo "${DATA_PATH}/downloads/${ARR_DOWNLOAD}/${instance}.mkv: link count is ${links:-none}, want 2 -- the download and the import it was hardlinked to are not one file any more"; fail=1; }
+    # The library's own directory was renamed onto the instance's category,
+    # with what was in it; the download category kept its name and its
+    # directory, which is where the torrents are.
+    if [ ! -f "$DATA_PATH/media/${ARR_CATEGORY}/${instance}.mkv" ]; then
+      echo "${DATA_PATH}/media/${ARR_CATEGORY}/${instance}.mkv is not there: the library directory ${ARR_FOLDER#/library/} was not renamed onto the instance's category"
+      fail=1
+    fi
+    if [ ! -f "$DATA_PATH/downloads/${ARR_DOWNLOAD}/${instance}.mkv" ]; then
+      echo "${DATA_PATH}/downloads/${ARR_DOWNLOAD}/${instance}.mkv is not there: the download tree was touched"
+      fail=1
+    fi
   done
-  for instance in qbittorrent sonarr "$MIGRATE_RADARR_INSTANCE"; do
+  for instance in $MIGRATE_ARRS; do
+    arr_facts "$instance" || { fail=1; return 0; }
+    source=${ARR_FOLDER#/library/}
+    if [ "$source" != "$ARR_CATEGORY" ] && [ -e "$DATA_PATH/media/${source}" ]; then
+      echo "${DATA_PATH}/media/${source} is still there, and the migration was supposed to rename it onto ${ARR_CATEGORY}"
+      fail=1
+    fi
+  done
+  # The 4K parent the two nested directories were moved out of: emptied, and so
+  # removed, while anything the operator left beside them would have kept it.
+  if [ -e "$DATA_PATH/media/4K" ]; then
+    echo "${DATA_PATH}/media/4K is still there: the renames left an empty parent behind"
+    fail=1
+  fi
+  for instance in qbittorrent $MIGRATE_ARRS; do
     [ -f "$CONFIG_PATH/${instance}/.s5n-e2e-source" ] ||
       { echo "${CONFIG_PATH}/${instance}/ holds no marker: migrate did not copy the whole config directory"; fail=1; }
   done
@@ -8540,16 +8800,12 @@ migrate_keep_box() {
 
   # ---- assertion 3: the keys the source had --------------------------------
   log "keys: each Arr answers with the API key it had before the migration"
-  for instance in sonarr "$MIGRATE_RADARR_INSTANCE"; do
+  for instance in $MIGRATE_ARRS; do
     key=$(cat "$WORK/source/${instance}.key")
     secret=$($K -n "$NS" get secret s5n-keys -o jsonpath="{.data.${instance}-apikey}" 2>/dev/null | base64 -d || true)
     [ "$secret" = "$key" ] ||
       { echo "the release Secret's ${instance}-apikey is not the key the source had"; fail=1; }
-    case "$instance" in
-      sonarr) port=8989 ;;
-      *) port=7878 ;;
-    esac
-    if migrate_forward "$NS" "svc/${instance}" "$port"; then
+    if migrate_forward "$NS" "svc/${instance}" "$(release_port "$instance")"; then
       code=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 15 -H "X-Api-Key: ${key}" \
         "http://127.0.0.1:${MIGRATE_PF_PORT}/${instance}/api/v3/system/status" 2>/dev/null || true)
       migrate_forward_stop
@@ -8564,28 +8820,27 @@ migrate_keep_box() {
 
   # ---- assertion 4: the login's rules follow the app set -------------------
   log "the login: each migrated Arr's API is bypassed through the Gateway, and its UI is not"
-  for instance in sonarr "$MIGRATE_RADARR_INSTANCE"; do
+  for instance in $MIGRATE_ARRS; do
     migrate_check_login_bypass "$instance" "$WORK/source/${instance}.key" || fail=1
   done
 
   # ---- assertion 5: the adopted client, and the receipt --------------------
   log "ownership: the wiring record names the source's download client, and the receipt is ok"
   $K -n "$NS" get configmap s5n-wiring -o jsonpath='{.data.owned\.json}' >"$WORK/keep-owned.json" 2>/dev/null || true
-  python3 - "$WORK/keep-owned.json" sonarr "$MIGRATE_RADARR_INSTANCE" \
-    "$(cat "$WORK/source/sonarr.client-id")" "$(cat "$WORK/source/${MIGRATE_RADARR_INSTANCE}.client-id")" <<'PY' || fail=1
+  for instance in $MIGRATE_ARRS; do
+    python3 - "$WORK/keep-owned.json" "$instance" "$(cat "$WORK/source/${instance}.client-id")" <<'PY' || fail=1
 import json, sys
-path, sonarr, radarr, sonarr_id, radarr_id = sys.argv[1:6]
+path, app, want = sys.argv[1:4]
 try:
     rec = json.load(open(path))
 except (FileNotFoundError, json.JSONDecodeError):
     sys.exit(f"{path} is not a wiring record: owned.json was not written")
-arr = rec.get("arr") or {}
-for app, want in ((sonarr, sonarr_id), (radarr, radarr_id)):
-    got = (arr.get(app) or {}).get("downloadClient")
-    if str(got) != str(want):
-        sys.exit(f"owned.json records {app}'s download client as {got}, and the source's was {want}")
-print(f"  owned.json: {sonarr} {arr[sonarr]['downloadClient']}, {radarr} {arr[radarr]['downloadClient']} -- the source's ids")
+got = ((rec.get("arr") or {}).get(app) or {}).get("downloadClient")
+if str(got) != str(want):
+    sys.exit(f"owned.json records {app}'s download client as {got}, and the source's was {want}")
+print(f"  owned.json: {app} {got} -- the source's id")
 PY
+  done
   [ "$(status_field 'd["status"]')" = ok ] ||
     { echo "the wiring receipt is not ok: $(status_field 'd.get("error")')"; fail=1; }
 

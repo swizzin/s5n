@@ -52,6 +52,17 @@ func (p *Plan) DefaultRules() []Default {
 			out = append(out, Default{What: name + ": " + r.From, Why: r.Why, Kind: "path"})
 		}
 	}
+	// A library directory discovery had to choose between is a default too: it
+	// is a rename of the operator's own data, and the reason says which
+	// directory it took and which it did not.
+	if p.Data != nil {
+		for _, f := range p.Data.Folders {
+			if !f.Default {
+				continue
+			}
+			out = append(out, Default{What: "media/" + f.From, Why: f.Why, Kind: "folder"})
+		}
+	}
 	return out
 }
 

@@ -1216,8 +1216,21 @@ data. Everything it will change is written down before it changes anything.
 - **Configs are copied, data is adopted (proposed).** Configs are copied into box's
   config root and rewritten there, so the source stays as the rollback. Data never
   moves, so hardlinks survive.
-- **Existing category names are kept (decided).** The chart accepts the names a source
-  already uses (`Movies`, `4K/Movies`); migrate renames nothing.
+- **Existing download category names are kept (decided).** The chart accepts the names a
+  source already uses (`Movies`, `4K/Movies`), and qBittorrent's download tree is never
+  touched: its categories, its torrents, their save paths and the category directories
+  under `downloads` stay exactly as the source had them (only the root's `Downloads` →
+  `downloads` rename, as before). A migrated instance's `downloadCategory` value is the
+  category its torrents are in, so wiring wires that one and creates no other.
+- **The library ends up in box's layout.** What a person sees is box's own names, on a
+  fresh box and on a migrated one alike: the source's library directories are mapped onto
+  the categories the release lays out (`Movies` → `movies`, `4K/TV` → `tv-4k`), apply
+  renames them inside the library, and the Arrs' root folders and everything under them,
+  Plex's section locations and every other app that stored one are rewritten to follow.
+  Discovery reads each Arr's root folders to build the mapping; one root folder under the
+  library per instance is the normal case, and more than one — or one outside it — is a
+  default with a one-line reason rather than a guess. A source already in box's layout
+  maps each directory onto itself and the run renames nothing.
 - **Ports go to the chart's defaults (decided).** Port changes are what broke moving a
   swizzin box. Copied configs get the chart's ports, bind addresses and URL bases, and
   references between the apps are rewritten to match.
@@ -1247,7 +1260,11 @@ data. Everything it will change is written down before it changes anything.
   name would get a second one created beside it. migrate records the IDs of the
   connections it rewrote (download clients, Prowlarr's applications) in wiring's
   ownership record, and wiring takes them over by ID: the client the source already
-  had becomes the one box manages.
+  had becomes the one box manages. With nothing recorded — the first run after a
+  migration — an Arr's client is adopted by the qBittorrent it points at before its
+  name is tried, because a source's client is named by its operator (`qBT`) and the
+  host is what makes it the release's own; two enabled qBittorrent clients at that
+  host are refused, naming both, rather than one picked.
 - **Shown before it's done; unattended runs only what was shown (decided goal,
   mechanism proposed).** The plan holds the rules: the path rewrite table, the port
   map, every host reference marked rewritten or left alone, what is copied where, and
@@ -1269,16 +1286,29 @@ data. Everything it will change is written down before it changes anything.
     taken: 2026-11-16T12:00:00Z       # when the source was read
     owner: {uid: 1000, gid: 1000}     # who owned the configs and the data
     kinds: [kubernetes, docker]       # every platform that contributed an app
+  data:
+    root: /srv/library                # becomes the seedbox's data path
+    downloads: Downloads              # renamed to downloads
+    media: media                      # already the contract's name
+    folders:                          # the library's directories, and what each
+      - from: Movies                  # becomes: one of the apps' categories
+        to: movies
+      - from: 4K/TV
+        to: tv-4k
   apps:
     sonarr-4k:                        # box's instance name
       kind: kubernetes                # the platform it ran on
       source: sonarr4k                # the source's name for it
       image: lscr.io/linuxserver/sonarr:4.0.14  # what it ran, for the record
       config: /srv/apps/sonarr4k      # copied from, never written
+      category: tv-4k                 # the directory box lays its library out in
+      downloadCategory: 4K/TV         # the category its torrents are already in
       paths:
         - from: /library/Downloads
           to: /data/downloads
-        - from: /library/media
+        - from: /library/4K/TV
+          to: /data/media/tv-4k       # the folder rule, more specific than the
+        - from: /library/media        # library's own
           to: /data/media
     qbittorrent:
       kind: docker
@@ -1290,6 +1320,11 @@ data. Everything it will change is written down before it changes anything.
         - from: /downloads
           to: /data/downloads
   ```
+
+  A folder rule is a rename apply makes and a rule every app that stored the old
+  directory follows, so the Arrs, Plex and Seerr all end up naming the one box lays
+  out. `to` is a category one of the plan's apps has: two directories becoming one,
+  one directory named twice, and a category no instance has are all refused.
 
   The longest `from` that matches whole path segments wins, so `/downloads2` is not
   under `/downloads`. A relative path follows its root and is left alone. An absolute
@@ -1303,7 +1338,12 @@ data. Everything it will change is written down before it changes anything.
   under it that held the downloads and the media. When their names differ from box's
   (`Downloads` for `downloads`), apply renames them, which keeps every hardlink. They
   must be single directories directly under the root; anything else is a move, and a
-  move is the operator's to make before apply.
+  move is the operator's to make before apply. The same holds one level down:
+  `data.folders` names each library directory and the category it becomes, and apply
+  renames those inside the library after the two above, removing a parent they emptied
+  (`4K/`). A target that holds a file is refused before anything moves, naming both
+  directories; a rename an earlier run made but did not record is taken as done; a
+  rehearsal renames nothing.
 - **Every other address is classified in the plan (proposed).** `hosts` lists the
   Services discovery found (`service: <name>.<namespace>`, matched in every form the
   cluster's DNS answers) and any other address the apps stored (`host:`), each either
