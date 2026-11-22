@@ -290,7 +290,7 @@ log "scenario ${SCENARIO}: kubeconfig ${KUBECONFIG} (~/.kube/config is not used)
 # also the only host box speaks plain HTTP to (loopback registries). The kind
 # cluster never pulls the chart: box runs on the host.
 # distribution v3.1.2, pinned by tag and digest like every other test image.
-REGISTRY_IMAGE=registry:3@sha256:38907510915c3f1604c7e83d6ab602ab3020d092f73bdaed8696773693ff768c  # renovate: datasource=docker
+REGISTRY_IMAGE=registry:3@sha256:82f6ff4a7f982960c8aa51617fea3aabc485df6e55cce80d22deb1de36f1bc3c  # renovate: datasource=docker
 REGISTRY=s5n-e2e-registry-${SCENARIO}
 log "OCI registry (distribution 3.1.2) on 127.0.0.1 only (container ${REGISTRY})"
 docker rm -f "$REGISTRY" >/dev/null 2>&1 || true
