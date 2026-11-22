@@ -61,9 +61,9 @@ func Survey(ctx context.Context, p *plan.Plan, planBytes []byte, env Env) (Summa
 	return m.summary(), nil
 }
 
-// Deferred is the row's sentence about a check this pass could not make, and ""
-// for an app it checked. It is on the summary so the same row reads the same way
-// in the grouped screen, the plain list and the report of what was shown.
+// deferredSentence is the row's sentence about a check a pass could not make, and
+// the sentence is on the summary (InstanceSummary.Deferred) so the same row reads
+// the same way in the grouped screen and the plain list.
 func deferredSentence(app string) string {
 	if app == appPlex {
 		// Plex is the app whose config is a database only Plex's own binary may
@@ -103,7 +103,7 @@ func (s Summary) Holds(agreed Summary) string {
 		case i >= len(was):
 			return fmt.Sprintf("the run would also %s", now[i])
 		case was[i] != now[i]:
-			return fmt.Sprintf("it agreed to %q and this run would %q", was[i], now[i])
+			return fmt.Sprintf("the summary that was agreed to says %q and this run would say %q", was[i], now[i])
 		}
 	}
 	return ""
