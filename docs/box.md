@@ -1090,8 +1090,17 @@ data. Everything it will change is written down before it changes anything.
   go in off -- the migration switches on what it moved, because an app started before
   its config is moved into place would run on an empty one. Only the domain, the login,
   the password and the config path are asked, or taken from the flags an unattended run
-  gives, which names every one it is missing. On a host that already has a box it
-  adopts into it, which is how one source is migrated per user.
+  gives, which names every one it is missing. A guided run asks only the ones it does
+  not have: an answer a flag or the plan already holds is not a question, and the app
+  picker never appears, because the plan decides every app. On a host that already has
+  a box it adopts into it, which is how one source is migrated per user.
+- **One run, one confirm.** Everything a migration does is reviewed once, in one
+  question: the platform the installer puts on a host with none (its plan first), then
+  one row per app with what it carries and what changes, the data directories it
+  renames, what needs the operator, the notes, and what is not coming. `--details`
+  prints every rewrite column by column instead; the snapshot's `report.txt` holds it
+  whole either way, and the wiring receipt keeps per-object detail behind the receipt
+  itself.
 - **One snapshot file, and it is the backup format (decided).** A snapshot is one tar +
   gzip archive with a manifest holding a sha256 per entry, so a truncated copy is
   refused rather than half-applied. `plan.yaml`, `source/`, `report.txt` and `config/`
