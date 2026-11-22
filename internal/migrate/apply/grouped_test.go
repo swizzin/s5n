@@ -176,3 +176,15 @@ func TestAFinalRunHasNoRehearsalLead(t *testing.T) {
 		t.Errorf("a final run says it is a rehearsal:\n%s", got)
 	}
 }
+
+// TestANoteTheConfirmShowedIsNotPrintedAgain: the Write pass reports the same
+// notes its Check did, and the confirm already showed those once. Only a note
+// nobody could see before the write belongs after the run.
+func TestANoteTheConfirmShowedIsNotPrintedAgain(t *testing.T) {
+	shown := []string{"its own login is switched off; you sign in through the box"}
+	wrote := append(append([]string(nil), shown...), "one table was emptied on purpose")
+	got := appendNotes(nil, wrote, shown)
+	if len(got) != 1 || got[0] != "one table was emptied on purpose" {
+		t.Fatalf("notes after the run = %v, want only the one the confirm had not shown", got)
+	}
+}

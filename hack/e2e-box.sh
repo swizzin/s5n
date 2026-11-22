@@ -2320,7 +2320,7 @@ PYPBH
   echo "  GET https://${DOMAIN}/seerr/ (the old path): ${old_path}"
   [ "$old_path" = 404 ] || { echo "/seerr still answers ${old_path}: a path route was left behind"; fail=1; }
   # The card says nothing about missing records: every name answered here.
-  if grep -q "has no DNS record" "$WORK/bootstrap1.txt"; then
+  if grep -qE "has no DNS record|have no DNS record" "$WORK/bootstrap1.txt"; then
     echo "init printed the no-DNS card line on a host whose names all resolve"
     fail=1
   fi
@@ -4377,7 +4377,7 @@ EOF
     grep -qF "tls: ${host} resolves to 192.0.2.10: using Let's Encrypt" "$WORK/bootstrap3.txt" ||
       { echo "init did not move ${host} to Let's Encrypt"; fail=1; }
   done
-  if grep -q "has no DNS record" "$WORK/bootstrap3.txt"; then
+  if grep -qE "has no DNS record|have no DNS record" "$WORK/bootstrap3.txt"; then
     echo "the card still says a name has no record after the record was added"
     fail=1
   fi
@@ -7704,11 +7704,13 @@ migrate_box() {
   # Plex's rows are the ones only the runner Job can have rewritten: every other
   # app's rewriter edits files, and this one runs `Plex SQLite` in the release's
   # own image. A count that is off is a Job that read a different database.
-  for column in "section_locations.root_path 2" "media_parts.file 1" "media_streams.url 1" "metadata_items.guid 1"; do
-    grep -qF "plex: Library/Application Support/Plex Media Server/Plug-in Support/Databases/com.plexapp.plugins.library.db ${column%% *} path ${column##* }" \
-      "$WORK/apply-rehearsal.txt" ||
-      { echo "the plan did not say the runner rewrites Plex's ${column%% *} ${column##* } time(s)"; fail=1; }
-  done
+  # Plex's rows are the ones only the runner Job can have rewritten: every other
+  # app's rewriter edits files, and this one runs `Plex SQLite` in the release's
+  # own image. The confirm's row counts them all as paths; which column and how
+  # many times is the snapshot's report and --details, and the database itself
+  # is read back below.
+  grep -qE "^  ✓ plex +[0-9.]+ (KiB|MiB|GiB) · [1-9][0-9,]* paths" "$WORK/apply-migrate.txt" ||
+    { echo "the plan's Plex row does not count the paths the runner rewrote:"; grep -E "plex" "$WORK/apply-migrate.txt" | head -5; fail=1; }
   # autobrr and qui allow exactly one account and box owns it, so a source's
   # account has to become box's; the confirm says so once per app, with the name
   # the source used, because that name is the operator's own and it is the one

@@ -688,9 +688,26 @@ func (m *migration) write(ctx context.Context) error {
 			return fmt.Errorf("%s: the write pass changed something its check did not report (%s); nothing else has been rewritten, so the staged copy in %s can be looked at",
 				name, why, m.staging(name))
 		}
-		m.res.Notes = append(m.res.Notes, rep.Notes...)
+		m.res.Notes = appendNotes(m.res.Notes, rep.Notes, m.checks[name].Notes)
 	}
 	return nil
+}
+
+// appendNotes adds the notes a Write pass reported and its Check did not: a
+// note the confirm already showed, with the app it belongs to, is not printed
+// again after the run, and a note only the write could know is.
+func appendNotes(into, wrote, checked []string) []string {
+	shown := make(map[string]bool, len(checked))
+	for _, note := range checked {
+		shown[note] = true
+	}
+	for _, note := range wrote {
+		if shown[note] {
+			continue
+		}
+		into = append(into, note)
+	}
+	return into
 }
 
 // sameReport compares a Check and a Write report: the same changes, counted the
