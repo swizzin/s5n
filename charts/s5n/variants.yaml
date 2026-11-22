@@ -68,14 +68,14 @@ qbittorrent:
 sonarr:
   default:
     repository: ghcr.io/home-operations/sonarr
-    tag: "5.0.0.2907"
-    digest: sha256:75866f930b8e49c0acfc965c8ace0429231cdc69e2e4b287eb51443aa3249d86
+    tag: "5.0.0.2997"
+    digest: sha256:05acf764e72fa458b5edf236771d7a08d1f120fce509d4fb8a4e799fae29fda7
 
 radarr:
   default:
     repository: ghcr.io/home-operations/radarr
-    tag: "7.0.0.10815"
-    digest: sha256:c044b4df8e7b2546ef389481626a56fabe291575ff2d65481b1555432d6161ff
+    tag: "7.0.3.10918"
+    digest: sha256:55d3cf8a4c4c531bb8b5c1ba88eb270d4435e01e228fbdb16cdfc910a17e3b06
 
 prowlarr:
   default:
@@ -100,8 +100,8 @@ seerr:
     # Upstream digest pin, not ghcr.io/home-operations: that catalog has no Seerr
     # image. Its Dockerfile ends USER node:node (uid 1000) and exposes 5055.
     repository: ghcr.io/seerr-team/seerr
-    tag: "v3.5.1"
-    digest: sha256:d8fab675b55ad293ded98fd71efcfd46054cbad9746534ae1cc4794a88c0b3be
+    tag: "v3.5.2"
+    digest: sha256:aadee014b40e28cf9aa4928bc9d1183a6eb08f8c44d543cddc9efdcb16549be2
 
 qui:
   default:
