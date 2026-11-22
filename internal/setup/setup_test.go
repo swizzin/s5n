@@ -502,6 +502,26 @@ func TestLoginsThatCannotBeASeedboxAreRefused(t *testing.T) {
 	}
 }
 
+// An explicit namespace is a DNS-1123 label too, length included: the same rule
+// a login-derived one has to pass.
+func TestAnExplicitNamespaceIsHeldToALabel(t *testing.T) {
+	h := newHarness(t)
+	opts := h.unattended()
+	opts.Namespace = strings.Repeat("a", 64)
+	_, err := h.run(opts)
+	if err == nil {
+		t.Fatal("a 64-character --namespace was accepted")
+	}
+	for _, want := range []string{"--namespace", "at most 63 characters"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("the refusal does not say %q: %v", want, err)
+		}
+	}
+	if h.exists(h.grantPath) || h.exists(h.valuesPath) {
+		t.Fatal("a refused namespace wrote a file")
+	}
+}
+
 func TestReRunSplicesOnlyTheChangedKey(t *testing.T) {
 	h := newHarness(t)
 	write(t, h.grantPath, reRunGrant)

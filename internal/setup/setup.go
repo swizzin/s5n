@@ -469,9 +469,9 @@ func (d *Decision) Run(ctx context.Context, opts Options) (Result, error) {
 		return res, err
 	}
 	// The peer port: a port on the node, so root settles it once and the grant
-	// keeps it from then on. It is read here, before any answer is written and
-	// before the questions that depend on the app list, because a cluster with
-	// no free port in the band is a refusal and not a half-finished dialog.
+	// keeps it from then on. It is read before any answer is written, because a
+	// cluster with no free port in the band is a refusal and not a
+	// half-finished dialog.
 	port, err := d.torrentPort(ctx, namespace, apps, base, grantNow)
 	if err != nil {
 		return res, err
@@ -731,11 +731,15 @@ func (d *Decision) namespace(opts Options, grantNow map[string]any, reRun bool, 
 		}
 	}
 	ns := strings.TrimSpace(opts.Namespace)
-	if ns == "" {
-		ns = SeedboxNamespace(login)
+	if ns != "" {
+		if err := validNamespace(ns); err != nil {
+			return "", fmt.Errorf("--namespace %q: %w", ns, err)
+		}
+		return ns, nil
 	}
+	ns = SeedboxNamespace(login)
 	if err := validNamespace(ns); err != nil {
-		return "", fmt.Errorf("namespace %q: %w", ns, err)
+		return "", fmt.Errorf("login %q: a seedbox's namespace is s5n-<login>, and %q is not one: %w", login, ns, err)
 	}
 	return ns, nil
 }
