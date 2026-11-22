@@ -137,8 +137,8 @@ pbh:
     # the chart runs it as the seedbox uid and moves the data root to /config
     # through -Dpbh.datadir; its tags carry the "v".
     repository: docker.io/ghostchu/peerbanhelper
-    tag: "v9.5.4"
-    digest: sha256:01a8ccab4d007701ecaf9c433e934a323bddd8a1668d3484543be870de8762bf
+    tag: "v9.6.0"
+    digest: sha256:f6ecf393e90bfe3ae9db318e4cf4eedd3e2a6503e811c18c176c71a1bedf83c0
 
 # The s5n image itself: the wiring Job and the qBittorrent / Tautulli credential
 # init containers. An empty tag means the chart's appVersion, which is the tag
