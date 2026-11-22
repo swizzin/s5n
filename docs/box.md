@@ -1222,7 +1222,7 @@ data. Everything it will change is written down before it changes anything.
   under `downloads` stay exactly as the source had them (only the root's `Downloads` →
   `downloads` rename, as before). A migrated instance's `downloadCategory` value is the
   category its torrents are in, so wiring wires that one and creates no other.
-- **The library ends up in box's layout.** What a person sees is box's own names, on a
+- **The library ends up in box's layout (decided).** What a person sees is box's own names, on a
   fresh box and on a migrated one alike: the source's library directories are mapped onto
   the categories the release lays out (`Movies` → `movies`, `4K/TV` → `tv-4k`), apply
   renames them inside the library, and the Arrs' root folders and everything under them,
@@ -1306,7 +1306,7 @@ data. Everything it will change is written down before it changes anything.
       paths:
         - from: /library/Downloads
           to: /data/downloads
-        - from: /library/4K/TV
+        - from: /library/media/4K/TV
           to: /data/media/tv-4k       # the folder rule, more specific than the
         - from: /library/media        # library's own
           to: /data/media
