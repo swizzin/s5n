@@ -98,6 +98,11 @@ type Env struct {
 	// config, built by the caller that opened it: the confirm shows each once,
 	// with the app it belongs to.
 	Carried []Carried
+	// deferred is Survey's mode, set by Survey itself and never by a caller: an
+	// app whose rewriter needs its own image (NeedsRunner) is checked after the
+	// install instead, because this pass runs before there is a box to run one
+	// in. Its row carries the sentence (InstanceSummary.Deferred).
+	deferred bool
 }
 
 // OwnedStore and ValuesEditor are the two halves of the seedbox this package
@@ -173,6 +178,11 @@ type InstanceSummary struct {
 	// Stopped is how many of this app's stored objects this run writes stopped:
 	// a rehearsal's torrents.
 	Stopped int
+	// Deferred is the sentence a pre-install pass left on this row instead of a
+	// check: the app's config is checked once its image runs, after the install.
+	// It is empty for every app the pass checked, and for every row a run after
+	// the install shows.
+	Deferred string
 }
 
 // Lines renders the summary as rows: one per change, note, rename, instance
@@ -187,6 +197,9 @@ func (s Summary) Lines() []string {
 	for _, in := range s.Instances {
 		if in.Staged.Files > 0 {
 			rows = append(rows, fmt.Sprintf("%s: copy %d files, %s", in.App, in.Staged.Files, bytesText(in.Staged.Bytes)))
+		}
+		if in.Deferred != "" {
+			rows = append(rows, fmt.Sprintf("%s: %s", in.App, in.Deferred))
 		}
 		for _, c := range in.Changes {
 			rows = append(rows, fmt.Sprintf("%s: %s %s %s %d", in.App, c.File, c.Where, c.What, c.Count))
@@ -289,6 +302,9 @@ type migration struct {
 	res Result
 	// checks is every app's Check report, which the Write pass is held to.
 	checks map[string]rewrite.Report
+	// deferred are the apps a Survey pass could not check: their rewriter runs
+	// the app's own image, and this pass runs before the box that has one.
+	deferred map[string]bool
 	// keys are the API keys read out of the staged copies, waiting for step 8,
 	// and keyNames is the same set as names for the summary.
 	keys     []keptKey
@@ -303,7 +319,7 @@ func Run(ctx context.Context, p *plan.Plan, planBytes []byte, env Env) (Result, 
 	if env.Confirm == nil {
 		return res, errors.New("no confirm: migrate shows every change and asks once before it writes, so a run without a way to ask is not a run")
 	}
-	m := &migration{p: p, env: env, id: PlanID(planBytes), checks: map[string]rewrite.Report{}}
+	m := &migration{p: p, env: env, id: PlanID(planBytes), checks: map[string]rewrite.Report{}, deferred: map[string]bool{}}
 	m.res.PlanID = m.id
 	if err := Preflight(p, planBytes, env); err != nil {
 		return res, err
@@ -357,6 +373,16 @@ func Run(ctx context.Context, p *plan.Plan, planBytes []byte, env Env) (Result, 
 	}
 	m.cleanStaging()
 	return m.res, nil
+}
+
+// StoppedBeforeWrite reports whether an error is one Run returns before its first
+// write outside the staging tree: a preflight refusal, or a Check that found
+// something the plan does not settle. A caller that installed a box first says so
+// only with this, because "nothing has been moved" is what it tells the operator,
+// and it is only true here.
+func StoppedBeforeWrite(err error) bool {
+	var p *problems
+	return errors.As(err, &p)
 }
 
 // Preflight is step 1: every problem the plan and the seedbox have together,
@@ -448,10 +474,10 @@ func preflightApp(p *plan.Plan, env Env, st *State, name string) []string {
 		items = append(items, fmt.Sprintf("apps.%s: this box has no rewriter for %s, so its config cannot be rewritten (it has %s); a plan naming an app box cannot read cannot be applied",
 			name, catalog, strings.Join(rewrite.Apps(), ", ")))
 	}
-	if _, ok := keyed(catalog); ok && env.Secret == nil {
+	if _, ok := keyed(catalog); ok && env.Secret == nil && !env.deferred {
 		items = append(items, fmt.Sprintf("apps.%s: %s keeps its API key in its own config, and this run has no release Secret to keep that key in", name, catalog))
 	}
-	if NeedsRunner(catalog) && env.Run == nil {
+	if NeedsRunner(catalog) && env.Run == nil && !env.deferred {
 		items = append(items, fmt.Sprintf("apps.%s: %s's rewriter runs a tool from the app's own pinned image, and this run has no way to start one", name, catalog))
 	}
 	src := filepath.Join(env.Configs, name)
@@ -513,7 +539,7 @@ func (m *migration) stage(ctx context.Context) error {
 			return fmt.Errorf("clear %s: %w", dst, err)
 		}
 		src := filepath.Join(m.env.Configs, name)
-		staged, err := copyTree(dst, src, m.env.PUID, m.env.PGID)
+		staged, err := m.copyInto(dst, src)
 		if err != nil {
 			return fmt.Errorf("stage %s from %s: %w", name, src, err)
 		}
@@ -523,10 +549,23 @@ func (m *migration) stage(ctx context.Context) error {
 	return nil
 }
 
+// copyInto is the copy one pass makes: a run stages what the release will run
+// and owns it as the seedbox's user; a Survey pass only measures the same bytes,
+// and the tree it counts is thrown away.
+func (m *migration) copyInto(dst, src string) (Staged, error) {
+	if m.env.deferred {
+		return measureTree(dst, src)
+	}
+	return copyTree(dst, src, m.env.PUID, m.env.PGID)
+}
+
 // staging is one instance's staged config directory.
 func (m *migration) staging(name string) string { return filepath.Join(m.dir, name) }
 
-// check is step 3: every app's Check pass, all of them, before any Write.
+// check is step 3: every app's Check pass, all of them, before any Write. A
+// Survey pass (before the install) leaves the apps whose rewriter runs the app's
+// own image to the run after it; every other app is checked here exactly as it
+// is there.
 func (m *migration) check(ctx context.Context) error {
 	var items []string
 	for _, name := range planApps(m.p) {
@@ -537,6 +576,13 @@ func (m *migration) check(ctx context.Context) error {
 		rw, ok := rewrite.For(app)
 		if !ok {
 			return fmt.Errorf("apps.%s: no rewriter for %s", name, app)
+		}
+		if m.env.deferred && NeedsRunner(app) {
+			// The check is a query through the app's pinned image, and there is
+			// no release to run one in yet: the row says so, and Run makes it
+			// before anything of the snapshot moves.
+			m.deferred[name] = true
+			continue
 		}
 		rep, err := rw.Check(ctx, m.input(name))
 		if err != nil {
@@ -647,6 +693,9 @@ func (m *migration) summary() Summary {
 			Owned:    rep.Owned,
 			Stopped:  rep.Stopped,
 			Enable:   !m.alreadyEnabled(name),
+		}
+		if m.deferred[name] {
+			in.Deferred = deferredSentence(CatalogApp(name, m.env.Catalog))
 		}
 		for _, st := range m.res.Staged {
 			if st.App == name {

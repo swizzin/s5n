@@ -74,11 +74,15 @@ func (s Summary) appRows() []say.TableRow {
 
 // appFacts is one app's row: carried size, the counts of what changes, then the
 // things that are not a count -- an account renamed, a connection kept, its own
-// key kept, torrents stopped.
+// key kept, torrents stopped, and the check a pre-install pass left to the run
+// after the install.
 func appFacts(in InstanceSummary) []string {
 	var facts []string
 	if in.Staged.Files > 0 {
 		facts = append(facts, bytesText(in.Staged.Bytes))
+	}
+	if in.Deferred != "" {
+		facts = append(facts, in.Deferred)
 	}
 	facts = append(facts, changeFacts(in.Changes)...)
 	for _, a := range in.Accounts {
@@ -136,6 +140,26 @@ func ownedPhrase(o rewrite.Owned) string {
 		kind = "downloader"
 	}
 	return fmt.Sprintf("%s %q", kind, o.Name)
+}
+
+// CheckedRows is the rows an agreement left to this run, now that its checks
+// have run: one row per app whose check the question deferred, in the shape the
+// confirm showed it. The question said the app's databases would be checked once
+// its image ran; this is what that check found, said in the same place.
+func (s Summary) CheckedRows(agreed Summary) []say.TableRow {
+	var rows []say.TableRow
+	for _, was := range agreed.Instances {
+		if was.Deferred == "" {
+			continue
+		}
+		for _, now := range s.Instances {
+			if now.App != was.App {
+				continue
+			}
+			rows = append(rows, say.TableRow{Glyph: "✓", Name: now.App, Facts: appFacts(now)})
+		}
+	}
+	return rows
 }
 
 // dataRows is what the run does to the data root: the two directories renamed
