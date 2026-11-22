@@ -5278,6 +5278,12 @@ MIGRATE_RADARR_CATEGORY=movies
 # image's PLEX_MEDIA_SERVER_APPLICATION_SUPPORT_DIR is /config/Library/
 # Application Support, and the file lives in the Databases directory there.
 MIGRATE_PLEX_DB="/config/Library/Application Support/Plex Media Server/Plug-in Support/Databases/com.plexapp.plugins.library.db"
+# The source qui's one qBittorrent instance, under a name of the operator's
+# own. Deliberately not `qBittorrent`, the name wiring writes: a migration has
+# to adopt the row the operator made, not create a second one beside it. Its
+# id is kept so the run after the migration can prove this exact row was
+# adopted.
+MIGRATE_QUI_INSTANCE=home-qbit
 # The account name in the source's autobrr and qui. Deliberately not the account
 # box owns (s5n): those two apps allow exactly one account, so a source that ran
 # them has a name of its own, and the migration's job is to make it box's.
@@ -6306,6 +6312,46 @@ migrate_source_account() { # migrate_source_account <app> <name> <password-file>
   return 1
 }
 
+# migrate_source_qui_instance <name> <host>: the qBittorrent instance the
+# source's qui holds, made through qui's own API with the source's own account
+# -- the way a person would have made it. Its id goes to
+# $WORK/source/qui-instance-id so the run after the migration can prove this
+# exact row was adopted.
+migrate_source_qui_instance() { # migrate_source_qui_instance <name> <host>
+  local name=$1 host=$2 password code cookie body id
+  password=$(cat "$WORK/source/source-account-password") || return 1
+  migrate_forward "$MIGRATE_LEGACY_NS" svc/qui 7476 || return 1
+  : >"$WORK/source-qui-headers"
+  code=$(curl -sS -o "$WORK/source-qui-login.json" -D "$WORK/source-qui-headers" -w '%{http_code}' \
+    -X POST -H 'Content-Type: application/json' \
+    --data "$(python3 -c 'import json,sys; print(json.dumps({"username": sys.argv[1], "password": sys.argv[2]}))' \
+      "$MIGRATE_SOURCE_ACCOUNT" "$password")" \
+    "http://127.0.0.1:${MIGRATE_PF_PORT}/api/auth/login" 2>/dev/null || true)
+  cookie=$(sed -n 's/^[Ss]et-[Cc]ookie: *\([^;]*\);.*/\1/p' "$WORK/source-qui-headers" | head -1 || true)
+  if [ "$code" != 200 ] || [ -z "$cookie" ]; then
+    echo "the source qui refused ${MIGRATE_SOURCE_ACCOUNT} (${code:-no answer})"
+    migrate_forward_stop
+    return 1
+  fi
+  body=$(python3 -c 'import json,sys
+print(json.dumps({"name": sys.argv[1], "host": sys.argv[2], "username": "", "password": "",
+                  "hasLocalFilesystemAccess": True}))' "$name" "$host")
+  code=$(curl -sS -o "$WORK/source-qui-instance.json" -w '%{http_code}' \
+    -X POST -H "Cookie: ${cookie}" -H 'X-Requested-With: XMLHttpRequest' \
+    -H 'Content-Type: application/json' --data "$body" \
+    "http://127.0.0.1:${MIGRATE_PF_PORT}/api/instances/" 2>/dev/null || true)
+  migrate_forward_stop
+  id=$(python3 -c 'import json,sys
+print(json.load(open(sys.argv[1])).get("id", ""))' "$WORK/source-qui-instance.json" 2>/dev/null || true)
+  if [ "$code" != 201 ] || [ -z "$id" ]; then
+    echo "the source qui did not accept the instance ${name} (${code:-no answer})"
+    head -c 300 "$WORK/source-qui-instance.json" 2>/dev/null || true
+    return 1
+  fi
+  printf '%s\n' "$id" >"$WORK/source/qui-instance-id"
+  echo "  qui: one qBittorrent instance, ${name} -> ${host} (id ${id})"
+}
+
 # migrate_source_pbh_config <src>: the source's PeerBanHelper writes its own
 # config on a first start, out of the jar its own image ships, and that is the
 # config a migration carries. This one is a v7.3.0: config-version 27, which is
@@ -7277,6 +7323,11 @@ migrate_box() {
       fail=1; return 0
     fi
   done
+  # The source's qui keeps one qBittorrent instance, under the operator's own
+  # name: the row a migration has to adopt rather than duplicate.
+  if ! migrate_source_qui_instance "$MIGRATE_QUI_INSTANCE" "http://qbittorrent:${MIGRATE_QBIT_PORT}"; then
+    fail=1; return 0
+  fi
   if ! migrate_source_pbh_config "$src"; then
     fail=1; return 0
   fi
@@ -7661,6 +7712,58 @@ migrate_box() {
       { echo "the plan does not say \"${want}\":"; grep -F "tautulli:" "$WORK/apply-migrate.txt" || true; fail=1; }
   done
   [ "$fail" = 0 ] || return 0
+
+  # ---- assertion 1b: qui's one qBittorrent instance, adopted ----------------
+  # The source's qui held one instance under the operator's own name, and the
+  # migration pointed it at the release's qBittorrent. wiring must adopt that
+  # row -- the id owned.json records is the source's -- and not create a second
+  # one, which qui would happily accept: it has no uniqueness on name or host.
+  log "qui: the source's one qBittorrent instance, adopted and left as it was"
+  qui_result=$(status_field "[s['result'] for s in d['steps'] if s['name']=='qui/instance'][0]" 2>/dev/null || echo missing)
+  qui_detail=$(status_field "[s['detail'] for s in d['steps'] if s['name']=='qui/instance'][0]" 2>/dev/null || echo missing)
+  echo "  qui/instance: ${qui_result} ${qui_detail}"
+  [ "$qui_result" = ok ] ||
+    { echo "the wiring Job did not settle qui's instance (${qui_result} ${qui_detail})"; fail=1; }
+  case "$qui_detail" in
+    updated | unchanged) ;;
+    *) echo "qui/instance was ${qui_result} ${qui_detail}, want the source's instance adopted, not created"; fail=1 ;;
+  esac
+  qui_source_id=$(cat "$WORK/source/qui-instance-id") || true
+  qui_owned=$($K -n "$NS" get cm s5n-wiring -o jsonpath='{.data.owned\.json}' 2>/dev/null |
+    python3 -c 'import json,sys; print(json.load(sys.stdin)["qui"]["instance"])' 2>/dev/null || true)
+  [ -n "$qui_source_id" ] && [ "$qui_owned" = "$qui_source_id" ] ||
+    { echo "owned.json records qui instance ${qui_owned:-nothing}, want the source's ${qui_source_id:-unknown}"; fail=1; }
+  # The app's own list is the other half: one row, the release's qBittorrent,
+  # still under the name the operator chose.
+  QUI_BASE=/qui QUI_USER=s5n QBIT_URL=""
+  read -r QUI_BASE QUI_USER QBIT_URL <<<"$(
+    $K -n "$NS" get cm s5n-wiring -o jsonpath='{.data.wiring\.json}' |
+      python3 -c 'import json, sys
+cfg = json.load(sys.stdin)
+print(cfg["qui"]["urlBase"], cfg["qui"]["username"], cfg["qbittorrent"]["url"])' 2>/dev/null || true)" || true
+  QUI_PASSWORD=$($K -n "$NS" get secret s5n-keys -o jsonpath='{.data.qui-password}' 2>/dev/null | base64 -d || true)
+  port_forward qui-0 7476 || fail=1
+  qui_session "$QUI_BASE"
+  curl -sS -H "Cookie: ${QUI_COOKIE}" "http://127.0.0.1:${PF_PORT}${QUI_BASE}/api/instances/" >"$WORK/qui-instances-migrate.json" 2>/dev/null || true
+  port_forward_stop
+  echo "  qui: POST ${QUI_BASE}/api/auth/login with the Secret's password: ${QUI_LOGIN_CODE}"
+  [ "$QUI_LOGIN_CODE" = 200 ] ||
+    { echo "qui refused the account box owns: $(head -c 200 "$WORK/qui-login.json" 2>/dev/null || true)"; fail=1; }
+  python3 - "$WORK/qui-instances-migrate.json" "${QBIT_URL%/}" "$MIGRATE_QUI_INSTANCE" <<'PY' || fail=1
+import json, sys
+rows = json.load(open(sys.argv[1]))
+want_host, want_name = sys.argv[2], sys.argv[3]
+print("  qui holds %d instances, want exactly 1" % len(rows))
+if len(rows) != 1:
+    sys.exit(1)
+row = rows[0]
+print("  qui instance %s: %r -> %s (local filesystem access %s)"
+      % (row.get("id"), row.get("name"), row.get("host"), row.get("hasLocalFilesystemAccess")))
+if row.get("host") != want_host:
+    sys.exit("  its host is %r, want the release's qBittorrent %r" % (row.get("host"), want_host))
+if row.get("name") != want_name:
+    sys.exit("  its name is %r, want the source's %r" % (row.get("name"), want_name))
+PY
 
   # ---- assertion 1: healthy, on the chart's own images ---------------------
   log "the migrated apps are ready on the chart's images"
