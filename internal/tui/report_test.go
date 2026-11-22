@@ -314,3 +314,41 @@ func TestEveryMastheadOpensWithOneBlankLine(t *testing.T) {
 		}
 	}
 }
+
+// The live reporter draws a table as the transcript does, plus colour: a titled
+// block with the glyph, the padded name and the facts wrapped under themselves.
+func TestReporterTable(t *testing.T) {
+	var buf bytes.Buffer
+	r := NewReporter(ReporterOptions{Out: &buf, Width: 60, NoColor: true, Yes: true})
+	r.Table("2 apps", []say.TableRow{
+		{Glyph: "✓", Name: "sonarr", Facts: []string{"5.2 MiB", "1,562 paths"}},
+		{Glyph: "✓", Name: "qbittorrent", Facts: []string{"571.0 MiB"}},
+	})
+	r.Close()
+
+	lines := strip(buf.String())
+	for _, want := range []string{"2 apps", "  ✓ sonarr       5.2 MiB · 1,562 paths", "  ✓ qbittorrent  571.0 MiB"} {
+		if indexOf(lines, want) < 0 {
+			t.Fatalf("table is missing %q:\n%s", want, strings.Join(lines, "\n"))
+		}
+	}
+}
+
+// A long fact wraps under the facts column and not under the name, so the name
+// column stays a column.
+func TestReporterTableWrapsUnderTheFacts(t *testing.T) {
+	var buf bytes.Buffer
+	r := NewReporter(ReporterOptions{Out: &buf, Width: 40, NoColor: true, Yes: true})
+	r.Table("", []say.TableRow{{Glyph: "!", Name: "sonarr, radarr", Facts: []string{strings.Repeat("word ", 12)}}})
+	r.Close()
+
+	lines := strip(buf.String())
+	first := indexPrefix(lines, "  ! sonarr, radarr  word")
+	if first < 0 {
+		t.Fatalf("the row did not start with its name and the first fact:\n%s", strings.Join(lines, "\n"))
+	}
+	wrapped := indexPrefix(lines, "                    word")
+	if wrapped < 0 {
+		t.Fatalf("the fact did not wrap under the facts column:\n%s", strings.Join(lines, "\n"))
+	}
+}

@@ -561,8 +561,8 @@ apps:
 
 	// The confirm says it too, but only for a snapshot that really is trimmed:
 	// one that carried a whole tree is never described as a subset.
-	if got := carriedLines(p, opened); len(got) != 1 || got[0] != lines[0] {
-		t.Errorf("the confirm's line = %v, want the read's one line", got)
+	if got := carriedNotes(p, opened); len(got) != 1 || got[0].App != "plex" || got[0].Note != strings.TrimPrefix(lines[0], "plex: ") {
+		t.Errorf("the confirm's line = %v, want the read's one line with the app it belongs to", got)
 	}
 	if err := os.MkdirAll(filepath.Join(opened.Configs["plex"], "Metadata", "Posters"), 0o755); err != nil {
 		t.Fatal(err)
@@ -570,7 +570,7 @@ apps:
 	if err := os.WriteFile(filepath.Join(opened.Configs["plex"], "Metadata", "Posters", "poster.jpg"), []byte("jpeg\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if got := carriedLines(p, opened); len(got) != 0 {
+	if got := carriedNotes(p, opened); len(got) != 0 {
 		t.Errorf("a snapshot holding the whole Plex tree is described as trimmed: %v", got)
 	}
 }

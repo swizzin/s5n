@@ -224,6 +224,71 @@ func (r *Reporter) Plan(title string, items []say.Item) {
 // renderer keeps its one block at box's two columns.
 func (r *Reporter) Diff(items []say.Item) { r.plan("", items) }
 
+// Table is a titled block of rows in two columns: the glyph in its status
+// colour, the name in ink, and the facts joined with a middle dot and wrapped
+// under themselves. The name column is as wide as the longest name that fits,
+// so a block reads as a table and a host name that would push everything off
+// the edge takes its own line.
+func (r *Reporter) Table(title string, rows []say.TableRow) {
+	if len(rows) == 0 {
+		return
+	}
+	var b strings.Builder
+	if title != "" {
+		b.WriteString(r.chrome.paint(title, accentStyle.Bold(true).Render(title)) + "\n")
+	}
+	nameWidth := 0
+	for _, row := range rows {
+		if w := lipgloss.Width(row.Name); w > nameWidth {
+			nameWidth = w
+		}
+	}
+	const nameMax = 24
+	if nameWidth > nameMax {
+		nameWidth = nameMax
+	}
+	for _, row := range rows {
+		glyph := row.Glyph
+		if glyph == "" {
+			glyph = "·"
+		}
+		facts := strings.Join(row.Facts, " · ")
+		prefix := indent + glyph + " "
+		if row.Name == "" {
+			for i, line := range wrapText(facts, r.width-lipgloss.Width(prefix)) {
+				if i == 0 {
+					b.WriteString(indent + r.chrome.paint(glyph, glyphStyle(glyph).Render(glyph)) + " " + r.chrome.paint(line, inkStyle.Render(line)) + "\n")
+					continue
+				}
+				b.WriteString(strings.Repeat(" ", lipgloss.Width(prefix)) + r.chrome.paint(line, inkStyle.Render(line)) + "\n")
+			}
+			continue
+		}
+		// A name longer than the column keeps its line to itself, with the
+		// facts under it: a table whose names push the facts off the edge is
+		// not a table any more.
+		if lipgloss.Width(row.Name) > nameWidth {
+			b.WriteString(indent + r.chrome.paint(glyph, glyphStyle(glyph).Render(glyph)) + " " + r.chrome.paint(row.Name, inkStyle.Render(row.Name)) + "\n")
+			pad := indent + "  "
+			for _, line := range wrapText(facts, r.width-lipgloss.Width(pad)) {
+				b.WriteString(pad + r.chrome.paint(line, mutedStyle.Render(line)) + "\n")
+			}
+			continue
+		}
+		pad := indent + strings.Repeat(" ", lipgloss.Width(glyph)+1+nameWidth+2)
+		for i, line := range wrapText(facts, r.width-lipgloss.Width(pad)) {
+			if i == 0 {
+				b.WriteString(indent + r.chrome.paint(glyph, glyphStyle(glyph).Render(glyph)) + " ")
+				b.WriteString(r.chrome.paint(fmt.Sprintf("%-*s", nameWidth, row.Name), inkStyle.Render(row.Name)))
+				b.WriteString("  " + r.chrome.paint(line, mutedStyle.Render(line)) + "\n")
+				continue
+			}
+			b.WriteString(pad + r.chrome.paint(line, mutedStyle.Render(line)) + "\n")
+		}
+	}
+	r.emit(b.String())
+}
+
 func (r *Reporter) plan(title string, items []say.Item) {
 	var b strings.Builder
 	if title != "" {

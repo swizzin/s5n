@@ -55,6 +55,9 @@ type migrateApplyFlags struct {
 	// that already has one they are ignored.
 	install *installFlags
 	plain   *bool
+	// details prints every rewrite, column by column, instead of the grouped
+	// summary. The whole list is in the snapshot's report.txt either way.
+	details *bool
 }
 
 func addMigrateApplyFlags(fs *flag.FlagSet) *migrateApplyFlags {
@@ -62,6 +65,7 @@ func addMigrateApplyFlags(fs *flag.FlagSet) *migrateApplyFlags {
 		applyFlags: addApplyFlags(fs),
 		install:    addInstallFlags(fs),
 		plain:      fs.Bool("plain", false, "ask with plain line prompts, even on a terminal (for a flaky terminal or a screen reader)"),
+		details:    fs.Bool("details", false, "print every rewrite, column by column, instead of the grouped summary"),
 	}
 }
 
@@ -283,7 +287,7 @@ func migrateApply(ctx context.Context, file string, o *migrateApplyFlags, out sa
 	if err != nil {
 		return err
 	}
-	env, cs, err := migrateEnv(p, opened, o, sb, chart, cat, kc, namespace, values, rehearsal, carriedLines(p, opened), plat, out)
+	env, cs, err := migrateEnv(p, opened, o, sb, chart, cat, kc, namespace, values, rehearsal, carriedNotes(p, opened), plat, out)
 	if err != nil {
 		return err
 	}
@@ -342,7 +346,7 @@ func loadMigrateChart(ctx context.Context, charts *chartRelease) (release.Chart,
 }
 
 // migrateEnv builds everything apply touches outside the plan directory.
-func migrateEnv(p *plan.Plan, opened *bundle.Opened, o *migrateApplyFlags, sb *seedbox.Seedbox, chart release.Chart, cat *catalog.Catalog, kc, namespace string, values map[string]any, rehearsal bool, skip []string, plat *platform.Plan, out say.Reporter) (apply.Env, kubernetes.Interface, error) {
+func migrateEnv(p *plan.Plan, opened *bundle.Opened, o *migrateApplyFlags, sb *seedbox.Seedbox, chart release.Chart, cat *catalog.Catalog, kc, namespace string, values map[string]any, rehearsal bool, carried []apply.Carried, plat *platform.Plan, out say.Reporter) (apply.Env, kubernetes.Interface, error) {
 	var env apply.Env
 	vols, err := sb.Storage()
 	if err != nil {
@@ -424,16 +428,20 @@ func migrateEnv(p *plan.Plan, opened *bundle.Opened, o *migrateApplyFlags, sb *s
 		env.Run = runner.Run
 	}
 	env.Rehearsal = rehearsal
-	env.Confirm = migrateConfirm(out, confirmer(out, *o.yes), namespace, rehearsal, skip, plat)
+	env.Carried = carried
+	env.Confirm = migrateConfirm(out, confirmer(out, *o.yes), namespace, rehearsal, *o.details, plat)
 	return env, cs, nil
 }
 
-// carriedLines is the confirm's half of the report's line about the part of a
+// carriedNotes is the confirm's half of the report's line about the part of a
 // config a snapshot does not hold: Plex's metadata is not in it, and the
 // operator reads that before the copy rather than after. It is said only for an
 // app whose extracted config is exactly what discovery's table names, so a
 // snapshot that carried a whole tree is never described as a subset.
-func carriedLines(p *plan.Plan, opened *bundle.Opened) []string {
+//
+// The note comes with the app it belongs to: the confirm shows it once, named,
+// and its line does not repeat the app's name twice.
+func carriedNotes(p *plan.Plan, opened *bundle.Opened) []apply.Carried {
 	if p == nil {
 		return nil
 	}
@@ -442,14 +450,15 @@ func carriedLines(p *plan.Plan, opened *bundle.Opened) []string {
 		names = append(names, name)
 	}
 	sort.Strings(names)
-	var out []string
+	var out []apply.Carried
 	for _, name := range names {
 		carry, ok := discover.SnapshotCarry(name)
 		if !ok || carry.Note == "" {
 			continue
 		}
 		if trimmed(opened.Configs[name], carry.Files) {
-			out = append(out, carry.Note)
+			note := strings.TrimSpace(strings.TrimPrefix(carry.Note, name+": "))
+			out = append(out, apply.Carried{App: name, Note: note})
 		}
 	}
 	return out
@@ -501,17 +510,29 @@ func trimmed(dir string, files []discover.CarryFile) bool {
 // run installed is part of it, shown first: a run that asked "install the
 // platform layer?" and then "move these into ...?" was two questions about one
 // decision.
-func migrateConfirm(out say.Reporter, ask asker, namespace string, rehearsal bool, skip []string, plat *platform.Plan) func(apply.Summary) (bool, error) {
+func migrateConfirm(out say.Reporter, ask asker, namespace string, rehearsal bool, details bool, plat *platform.Plan) func(apply.Summary) (bool, error) {
 	return func(s apply.Summary) (bool, error) {
 		if plat != nil {
 			if items := plat.Items(); len(items) > 0 {
 				out.Plan("platform", items)
 			}
 		}
-		// The summary, then the one line saying what the snapshot does not
-		// hold: a part of a config left behind is a decision the operator
-		// reads before the copy, never a surprise after it.
-		out.List("this migration", append(s.Lines(), skip...))
+		if details {
+			// Every rewrite, column by column: the list report.txt holds, for
+			// the operator who wants to check one row before saying yes.
+			out.List("this migration", s.Lines())
+		} else {
+			g := s.Grouped()
+			if g.Lead != "" {
+				out.Muted(g.Lead)
+			}
+			for _, block := range g.Blocks {
+				out.Table(block.Title, block.Rows)
+			}
+			if g.Footer != "" {
+				out.Muted(g.Footer)
+			}
+		}
 		if rehearsal {
 			// The screen a person reads before the first write says what this
 			// box is, not only what moves into it.

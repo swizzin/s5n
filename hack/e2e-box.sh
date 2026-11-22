@@ -7015,7 +7015,7 @@ rehearsal_box() {
   # is a copy whose rewriters replace files. Run as this script's user it would
   # pass while box wrote files nobody else could read, which is what the two
   # assertions below exist to catch.
-  if ! box_root "$rcluster" migrate apply "$rehearsal" --yes \
+  if ! box_root "$rcluster" migrate apply "$rehearsal" --yes --details \
     --chart-repo "$CHART_REPO" --chart-version "$CHART_VERSION" \
     --grant "$WORK/rehearsal-grant.yaml" --values "$WORK/rehearsal-values.yaml" \
     --kubeconfig "$WORK/rehearsal-kubeconfig" --record "$WORK/rehearsal-cluster.yaml" \
@@ -7037,7 +7037,7 @@ rehearsal_box() {
     grep -qF -- "$want" "$WORK/apply-rehearsal.txt" ||
       { echo "the rehearsal apply has no ${want}"; return 1; }
   done
-  grep -qE "^ *1 torrents written stopped$" "$WORK/apply-rehearsal.txt" ||
+  grep -qE "^  ✓ qbittorrent +.*\b1 torrent stopped" "$WORK/apply-rehearsal.txt" ||
     { echo "the rehearsal apply did not count the one torrent it stopped:";
       grep -n "torrent" "$WORK/apply-rehearsal.txt" || true; return 1; }
   # The two settings the conf carries: what is added later lands stopped, and
@@ -7636,7 +7636,7 @@ migrate_box() {
     { echo "box did not pull ${CHART_REPO}:${CHART_VERSION}"; fail=1; }
   # The confirm says what the snapshot left behind, once: an operator deciding
   # to copy a Plex config reads that its artwork is not in it.
-  grep -qF "plex: carried Preferences.xml and its databases; Plex rebuilds its metadata, artwork and thumbnails (artwork uploaded by hand is not carried)" \
+  grep -qE "^  · plex +carried Preferences.xml and its databases; Plex rebuilds its metadata, artwork and thumbnails \(artwork uploaded by hand is not carried\)" \
     "$WORK/apply-migrate.txt" ||
     { echo "apply's confirm does not say what Plex's snapshot left behind"; fail=1; }
   # The box it installed runs nothing the plan migrates: the apps went in off,
@@ -7660,20 +7660,18 @@ migrate_box() {
   # What the run said it would do, before it did it. The two renames, the kept
   # keys and the connections adopted by id are the whole point of a migration,
   # and a summary that does not name them is a run that did less.
-  grep -qF "data: rename Downloads to downloads" "$WORK/apply-migrate.txt" ||
-    { echo "the plan did not say it renames Downloads to box's downloads"; fail=1; }
-  grep -qF "data: rename library to media" "$WORK/apply-migrate.txt" ||
-    { echo "the plan did not say it renames library to box's media"; fail=1; }
+  grep -qE "^  ✓ data +Downloads → downloads · library → media" "$WORK/apply-migrate.txt" ||
+    { echo "the plan did not say it renames the source's two data directories"; fail=1; }
   for instance in sonarr "$MIGRATE_RADARR_INSTANCE"; do
-    grep -qF "${instance}: keep its API key (${instance}-apikey)" "$WORK/apply-migrate.txt" ||
+    grep -qE "^  ✓ ${instance} +.*keeps its API key" "$WORK/apply-migrate.txt" ||
       { echo "the plan did not say it keeps ${instance}'s API key"; fail=1; }
-    grep -qF "${instance}: adopt downloadclient" "$WORK/apply-migrate.txt" ||
+    grep -qE "^  ✓ ${instance} +.*keeps download client \"" "$WORK/apply-migrate.txt" ||
       { echo "the plan did not say it adopts ${instance}'s download client by id"; fail=1; }
   done
   # The pbh rewriter files the downloader it finds under the source's key, which
   # is the id a v7 config stores it under; the record is what wiring then has to
   # reconcile, so the plan naming it is the other half of the adoption.
-  grep -qF "pbh: adopt pbh-downloader \"${MIGRATE_PBH_DOWNLOADER}\" (id ${MIGRATE_PBH_DOWNLOADER}) for qbittorrent" \
+  grep -qE "^  ✓ pbh +.*keeps downloader \"${MIGRATE_PBH_DOWNLOADER}\"" \
     "$WORK/apply-migrate.txt" ||
     { echo "the plan did not say it adopts PeerBanHelper's downloader ${MIGRATE_PBH_DOWNLOADER} by id"; fail=1; }
   grep -q "^wiring ok" "$WORK/apply-migrate.txt" ||
@@ -7683,7 +7681,7 @@ migrate_box() {
   # own image. A count that is off is a Job that read a different database.
   for column in "section_locations.root_path 2" "media_parts.file 1" "media_streams.url 1" "metadata_items.guid 1"; do
     grep -qF "plex: Library/Application Support/Plex Media Server/Plug-in Support/Databases/com.plexapp.plugins.library.db ${column%% *} path ${column##* }" \
-      "$WORK/apply-migrate.txt" ||
+      "$WORK/apply-rehearsal.txt" ||
       { echo "the plan did not say the runner rewrites Plex's ${column%% *} ${column##* } time(s)"; fail=1; }
   done
   # autobrr and qui allow exactly one account and box owns it, so a source's
@@ -7691,7 +7689,7 @@ migrate_box() {
   # the source used, because that name is the operator's own and it is the one
   # that stops working.
   for instance in autobrr qui; do
-    grep -qF "${instance}: account \"${MIGRATE_SOURCE_ACCOUNT}\" becomes s5n, box's own; sign in through the box login" \
+    grep -qE "^  ✓ ${instance} +.*account \"${MIGRATE_SOURCE_ACCOUNT}\" becomes s5n" \
       "$WORK/apply-migrate.txt" ||
       { echo "the plan did not say ${instance}'s account ${MIGRATE_SOURCE_ACCOUNT} becomes box's own"; fail=1; }
   done
@@ -7705,12 +7703,17 @@ migrate_box() {
               "tautulli: config.ini General/http_hash_password own login 1" \
               "tautulli: config.ini General/http_hashed_password own login 1" \
               "tautulli: config.ini PMS/pms_ssl tls 1" \
-              "tautulli: config.ini PMS/pms_url url 1" \
-              "tautulli: note: its own login is switched off; you sign in through the box" \
-              "tautulli: keep its API key (tautulli-apikey)"; do
-    grep -qF "$want" "$WORK/apply-migrate.txt" ||
-      { echo "the plan does not say \"${want}\":"; grep -F "tautulli:" "$WORK/apply-migrate.txt" || true; fail=1; }
+              "tautulli: config.ini PMS/pms_url url 1"; do
+    grep -qF "$want" "$WORK/apply-rehearsal.txt" ||
+      { echo "the plan does not say \"${want}\":"; grep -F "tautulli:" "$WORK/apply-rehearsal.txt" || true; fail=1; }
   done
+  # The note is the app's, said once, and the key is a fact on its row.
+  grep -qE "^  · tautulli +its own login is switched off; you sign in through the box" \
+    "$WORK/apply-migrate.txt" ||
+    { echo "the plan does not say tautulli's own login is switched off:";
+      grep -F "tautulli" "$WORK/apply-migrate.txt" || true; fail=1; }
+  grep -qE "^  ✓ tautulli +.*keeps its API key" "$WORK/apply-migrate.txt" ||
+    { echo "the plan does not say tautulli keeps its API key"; fail=1; }
   [ "$fail" = 0 ] || return 0
 
   # ---- assertion 1b: qui's one qBittorrent instance, adopted ----------------
@@ -8401,18 +8404,16 @@ migrate_keep_box() {
     { echo "box did not report a healthy receipt for the seedbox it installed beside the source"; fail=1; }
   # Plex's snapshot is its state, and the run says so once, in the report and in
   # the confirm the operator answers.
-  grep -qF "plex: carried Preferences.xml and its databases" "$WORK/keep-cutover.txt" ||
+  grep -qF "carried Preferences.xml and its databases" "$WORK/keep-cutover.txt" ||
     { echo "the keep path does not say what Plex's snapshot leaves behind"; fail=1; }
   # What the migration did, named before it did it: the two renames, the kept keys
   # and the connections adopted by id.
-  grep -qF "data: rename Downloads to downloads" "$WORK/keep-cutover.txt" ||
-    { echo "the plan did not say it renames Downloads to box's downloads"; fail=1; }
-  grep -qF "data: rename library to media" "$WORK/keep-cutover.txt" ||
-    { echo "the plan did not say it renames library to box's media"; fail=1; }
+  grep -qE "^  ✓ data +Downloads → downloads · library → media" "$WORK/keep-cutover.txt" ||
+    { echo "the plan did not say it renames the source's two data directories"; fail=1; }
   for instance in sonarr "$MIGRATE_RADARR_INSTANCE"; do
-    grep -qF "${instance}: keep its API key (${instance}-apikey)" "$WORK/keep-cutover.txt" ||
+    grep -qE "^  ✓ ${instance} +.*keeps its API key" "$WORK/keep-cutover.txt" ||
       { echo "the plan did not say it keeps ${instance}'s API key"; fail=1; }
-    grep -qF "${instance}: adopt downloadclient" "$WORK/keep-cutover.txt" ||
+    grep -qE "^  ✓ ${instance} +.*keeps download client \"" "$WORK/keep-cutover.txt" ||
       { echo "the plan did not say it adopts ${instance}'s download client by id"; fail=1; }
   done
   [ "$fail" = 0 ] || return 0

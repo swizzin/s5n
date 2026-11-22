@@ -62,6 +62,17 @@ type ReceiptRow struct {
 	Detail string
 }
 
+// TableRow is one row of a table: a status glyph, a name and the facts that
+// belong to it, laid out in columns. The glyph is the row's own -- ✓ for
+// something carried, ! for something a person has to do, · for a note -- and an
+// empty one prints as ·. An empty name prints the facts alone on the glyph's
+// line.
+type TableRow struct {
+	Glyph string
+	Name  string
+	Facts []string
+}
+
 // Op is one step that starts and then finishes.
 //
 // Label is the present-tense line a live renderer animates; Plain is the line
@@ -108,6 +119,12 @@ type Reporter interface {
 	// Children are printed under it, indented two columns past where the
 	// item's own text starts, with their own marks.
 	Plan(title string, items []Item)
+	// Table is a titled block of rows laid out in columns ("" omits the
+	// title): a glyph, a name, and the row's facts joined with a middle dot in
+	// the column after the names. The name column is as wide as the longest
+	// name in the block, so one block reads as a table and two blocks do not
+	// line up with each other.
+	Table(title string, rows []TableRow)
 	// Diff is a values diff: marked items with no title, printed flush left by
 	// the plain transcript, which is how `box apply` has always printed them.
 	Diff(items []Item)
@@ -225,6 +242,40 @@ func (p *Plain) planItem(level string, it Item) {
 func (p *Plain) Diff(items []Item) {
 	for _, it := range items {
 		fmt.Fprintf(p.out(), "%s %s\n", it.Mark, it.Text)
+	}
+}
+
+// Table is the transcript's table: two columns, the name padded to the widest
+// name in the block, and the facts after it joined with a middle dot. Nothing
+// is wrapped: a logged run and a golden test read the same bytes whatever the
+// terminal was.
+func (p *Plain) Table(title string, rows []TableRow) {
+	if len(rows) == 0 {
+		return
+	}
+	if title != "" {
+		fmt.Fprintf(p.out(), "%s\n", title)
+	}
+	nameWidth := 0
+	for _, r := range rows {
+		if w := len(r.Name); w > nameWidth {
+			nameWidth = w
+		}
+	}
+	for _, r := range rows {
+		glyph := r.Glyph
+		if glyph == "" {
+			glyph = "·"
+		}
+		facts := strings.Join(r.Facts, " · ")
+		switch {
+		case r.Name == "":
+			fmt.Fprintf(p.out(), "  %s %s\n", glyph, facts)
+		case facts == "":
+			fmt.Fprintf(p.out(), "  %s %s\n", glyph, r.Name)
+		default:
+			fmt.Fprintf(p.out(), "  %s %-*s  %s\n", glyph, nameWidth, r.Name, facts)
+		}
 	}
 }
 

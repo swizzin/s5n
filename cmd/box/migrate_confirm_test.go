@@ -71,7 +71,7 @@ func migratingSummary() apply.Summary {
 func TestOneConfirmForTheWholeRun(t *testing.T) {
 	var out bytes.Buffer
 	ask := &countingAsker{}
-	confirm := migrateConfirm(&say.Plain{W: &out}, ask, "s5n-alice", false, nil, installedPlatform(t))
+	confirm := migrateConfirm(&say.Plain{W: &out}, ask, "s5n-alice", false, false, installedPlatform(t))
 
 	ok, err := confirm(migratingSummary())
 	if err != nil {
@@ -88,7 +88,7 @@ func TestOneConfirmForTheWholeRun(t *testing.T) {
 	}
 	printed := out.String()
 	planAt := strings.Index(printed, "platform:")
-	migrationAt := strings.Index(printed, "this migration:")
+	migrationAt := strings.Index(printed, "1 app\n")
 	if planAt < 0 {
 		t.Fatalf("the one confirm does not show the platform plan:\n%s", printed)
 	}
@@ -107,7 +107,7 @@ func TestOneConfirmForTheWholeRun(t *testing.T) {
 	if strings.Contains(printed, "platform plan:") {
 		t.Errorf("the platform plan is printed with its own heading, which is the block the confirm replaced:\n%s", printed)
 	}
-	if !strings.Contains(printed, "sonarr: copy 12 files, 5.0 MiB") || !strings.Contains(printed, "data: rename Downloads to downloads") {
+	if !strings.Contains(printed, "sonarr") || !strings.Contains(printed, "Downloads → downloads") {
 		t.Errorf("the migration summary did not reach the one confirm:\n%s", printed)
 	}
 }
@@ -117,7 +117,7 @@ func TestOneConfirmForTheWholeRun(t *testing.T) {
 func TestTheOneConfirmWithoutAPlatform(t *testing.T) {
 	var out bytes.Buffer
 	ask := &countingAsker{}
-	confirm := migrateConfirm(&say.Plain{W: &out}, ask, "seedbox", false, nil, nil)
+	confirm := migrateConfirm(&say.Plain{W: &out}, ask, "seedbox", false, false, nil)
 
 	if _, err := confirm(migratingSummary()); err != nil {
 		t.Fatalf("confirm: %v", err)

@@ -94,6 +94,10 @@ type Env struct {
 	// app would act on the network with nothing else to stop it writes its
 	// state quiet.
 	Rehearsal bool
+	// Carried are the notes about what a snapshot does not hold of an app's
+	// config, built by the caller that opened it: the confirm shows each once,
+	// with the app it belongs to.
+	Carried []Carried
 }
 
 // OwnedStore and ValuesEditor are the two halves of the seedbox this package
@@ -130,6 +134,18 @@ type Summary struct {
 	// Stopped is how many torrents this run writes stopped, which is the one
 	// change no config file shows.
 	Stopped int
+	// DefaultRules are the plan's own decisions in a form a grouped screen can
+	// count them by: Defaults is the same list as the lines a report prints.
+	DefaultRules []plan.Default
+	// Carried are the notes about the part of a config a snapshot does not
+	// hold, in the app's own words: Plex's is preferences and databases only.
+	Carried []Carried
+}
+
+// Carried is one app's note about what the snapshot did not carry.
+type Carried struct {
+	App  string
+	Note string
 }
 
 // InstanceSummary is one app's part of the summary.
@@ -154,6 +170,9 @@ type InstanceSummary struct {
 	Keys []string
 	// Owned are the connections that will be adopted by id.
 	Owned []rewrite.Owned
+	// Stopped is how many of this app's stored objects this run writes stopped:
+	// a rehearsal's torrents.
+	Stopped int
 }
 
 // Lines renders the summary as rows: one per change, note, rename, instance
@@ -178,6 +197,9 @@ func (s Summary) Lines() []string {
 		for _, n := range in.Notes {
 			rows = append(rows, fmt.Sprintf("%s: note: %s", in.App, n))
 		}
+	}
+	for _, c := range s.Carried {
+		rows = append(rows, c.App+": "+c.Note)
 	}
 	for _, in := range s.Instances {
 		for _, l := range in.Left {
@@ -597,7 +619,13 @@ func (m *migration) show() error {
 // summary is the whole change, from the Check reports: nothing here reads a
 // file, so the operator's review is of what apply is about to do.
 func (m *migration) summary() Summary {
-	s := Summary{Outside: append([]string(nil), m.p.Outside...), Defaults: m.p.Defaults(), Rehearsal: m.env.Rehearsal}
+	s := Summary{
+		Outside:      append([]string(nil), m.p.Outside...),
+		Defaults:     m.p.Defaults(),
+		DefaultRules: m.p.DefaultRules(),
+		Carried:      append([]Carried(nil), m.env.Carried...),
+		Rehearsal:    m.env.Rehearsal,
+	}
 	// A rehearsal renames nothing (renameData), so its summary lists nothing
 	// to rename.
 	if m.p.Data != nil && !m.env.Rehearsal {
@@ -617,6 +645,7 @@ func (m *migration) summary() Summary {
 			Notes:    rep.Notes,
 			Left:     rep.Left,
 			Owned:    rep.Owned,
+			Stopped:  rep.Stopped,
 			Enable:   !m.alreadyEnabled(name),
 		}
 		for _, st := range m.res.Staged {
