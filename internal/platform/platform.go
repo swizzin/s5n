@@ -887,6 +887,20 @@ func (d *Decision) awaitRoot(ctx context.Context, cl Cluster) error {
 	return nil
 }
 
+// Preview is the platform plan for a cluster whose layer is not applied yet,
+// built before anything is written so a flow can show it before its one
+// question: the same BuildPlan Apply calls, plus the firewall line bootstrap
+// found. It does not resolve the plan against the cluster (which reads deployed
+// releases to say install or verify), because the decision it is built from is
+// the probe's own answer: nothing is there, so every step is an install.
+func Preview(pins release.Versions, components []bootstrap.ComponentResult, class, acmeServer string, firewall bootstrap.FirewallState) (Plan, error) {
+	plan, err := BuildPlan(pins, components, class, acmeServer)
+	if err != nil {
+		return plan, err
+	}
+	return withFirewall(plan, firewall), nil
+}
+
 // BuildPlan turns the decision's component results into the ordered list of
 // writes. It is pure: no cluster, no clock. Only `install` produces a release;
 // `use` and `verify` leave an implementation alone, and `stop` refuses the

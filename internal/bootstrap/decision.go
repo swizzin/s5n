@@ -62,6 +62,16 @@ type Options struct {
 	// install plan printed and stops there, because the cluster to adopt does
 	// not exist and must not be probed.
 	DryRun bool
+	// Preview decides which cluster box would use and what it would install on
+	// it, and writes nothing: no k0s, no cluster record, no change to the
+	// host's firewall. It is what a flow whose one question comes before its
+	// first write asks first; the run then decides again for real, and only
+	// what the preview showed is installed.
+	//
+	// A record is the one write it must not make: a record is what makes a host
+	// "have a box", so writing one before the question would leave a host whose
+	// answer was no looking installed.
+	Preview bool
 }
 
 // Bootstrap decides which cluster to use, in PLAN.md's fixed order, and never
@@ -180,6 +190,26 @@ func (d *Decision) Bootstrap(ctx context.Context, opts Options) (Result, error) 
 		return stop(why), nil
 	}
 	plan := k0sPlan(pins, up)
+	if opts.Preview {
+		// Nothing is downloaded, run or recorded: the question this preview
+		// exists for has not been answered, and a host whose answer is no has to
+		// be exactly as it was. The platform decision is the one a cluster box
+		// just started will give -- nothing on it, and no address layer -- so it
+		// can be made without the cluster.
+		res := Result{
+			Action:       ActionInstall,
+			Source:       SourceK0sManaged,
+			Kubeconfig:   K0sAdminConfig,
+			Distribution: DistK0s,
+			Platform:     previewComponents(opts.Platform),
+			Gateway:      GatewayChoice{Class: EnvoyGatewayClass, ControllerName: EnvoyGatewayController, BoxInstalls: true},
+			Skips:        skips,
+			Notes:        describeNotes(notes),
+			Reason:       fmt.Sprintf("clean host: k0s %s and the platform layer would be installed here", plan.Version),
+		}
+		res = d.withPlanFirewall(ctx, res, plan.ConfigText)
+		return res, nil
+	}
 	if err := d.Install.Install(ctx, plan); err != nil {
 		return stop(fmt.Sprintf("k0s install failed: %v", err)), nil
 	}
@@ -263,6 +293,24 @@ func (d *Decision) withFirewall(ctx context.Context, res Result) Result {
 	return res
 }
 
+// withPlanFirewall is withFirewall for a cluster that does not exist yet: the
+// networks are the ones the k0s config box would install with, which is the same
+// text the cluster then runs on. A preview reads the host's filter and changes
+// nothing -- the platform plan is what changes it, after the answer.
+func (d *Decision) withPlanFirewall(ctx context.Context, res Result, configText string) Result {
+	if !d.firewall().Running(ctx) {
+		return res
+	}
+	res.Firewall.Active = true
+	pod, service, err := k0sNetworks([]byte(configText))
+	if err != nil {
+		res.Firewall.Warning = fmt.Sprintf("firewalld is running and the k0s config box would install with cannot be read back (%v): add the cluster's pod and service networks to firewalld's trusted zone by hand", err)
+		return res
+	}
+	res.Firewall.CIDRs = []string{pod, service}
+	return res
+}
+
 // platformPins is the release's pins, or the refusal that says what is missing.
 // There is no fallback: a compiled-in version would be a second home for the
 // platform, and this one is the release's.
@@ -316,6 +364,23 @@ func freshClusterAddresses(components []ComponentResult) []ComponentResult {
 		}
 	}
 	return out
+}
+
+// previewComponents is the platform decision for a cluster box would create: a
+// fresh k0s has nothing on it, so every capability is absent, and the one a
+// read-only probe cannot settle -- the address layer -- is installed rather
+// than asked, exactly as adoptInstalled settles it once the cluster answers.
+// It is the same decision code, given the only probe outcome a cluster that does
+// not exist yet can have.
+func previewComponents(cfg PlatformConfig) []ComponentResult {
+	empty := PlatformProbe{
+		GatewayAPI:   OutcomeAbsent,
+		LoadBalancer: OutcomeAbsent,
+		Gateway:      OutcomeAbsent,
+		CertManager:  OutcomeAbsent,
+	}
+	components, _ := decidePlatform(cfg, empty)
+	return freshClusterAddresses(components)
 }
 
 // useCluster validates an existing cluster and, when it is usable, probes the
@@ -404,6 +469,15 @@ func (d *Decision) finishCluster(ctx context.Context, opts Options, obs clusterP
 		return res
 	}
 	res.Gateway = choice
+	if opts.Preview {
+		// The decision, not a record of it: this run only shows what it would
+		// do, and a record written here would make a host whose answer is no
+		// look like one box installed. The firewall is read, never changed --
+		// the plan is what changes it.
+		res = d.withFirewall(ctx, res)
+		res.Reason = fmt.Sprintf("%s at %s (%s): box would install the platform layer here", how, path, obs.dist)
+		return res
+	}
 	rec := &Record{
 		Source:       source,
 		Kubeconfig:   path,

@@ -54,6 +54,30 @@ func Base(c Chart) (map[string]any, error) {
 	return base, nil
 }
 
+// Pending is the values a chart would render for a box whose grant is not
+// written yet: the chart's defaults with the user's values over them, and no
+// grant at all. It is what a flow can show before the box exists -- `box migrate
+// apply` decides what the whole run will do before it installs anything, and the
+// summary it shows must read the values the same way the run after the install
+// will -- and it is deliberately not checked against the schema: the files box
+// installs are validated when they are loaded, and a preview must not refuse a
+// box the install would have made.
+func Pending(c Chart, valuesPath string) (map[string]any, error) {
+	base, err := Base(c)
+	if err != nil {
+		return nil, err
+	}
+	values, err := LoadValues(valuesPath)
+	if err != nil {
+		return nil, err
+	}
+	overlay(base, values.data, nil)
+	if _, ok := base["apps"]; !ok {
+		base["apps"] = map[string]any{}
+	}
+	return base, nil
+}
+
 // Effective returns the values the chart would actually render for this
 // seedbox: Base, then the user's values, then the grant.
 func (s *Seedbox) Effective(c Chart) (map[string]any, error) {
