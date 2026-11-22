@@ -480,3 +480,130 @@ func TestEnsureDownloadClientClearsStoredCredentials(t *testing.T) {
 		t.Fatalf("run after clearing = %+v, %v, want unchanged", again, err)
 	}
 }
+
+// migratedClient is a download client the way a source install left one: the
+// operator's own name, the release's qBittorrent as its host, an enabled
+// qBittorrent client with a category and the credential it had.
+func migratedClient(id int, name, host, category, username, password string) Item {
+	return Item{
+		"id": id, "name": name, "implementation": "QBittorrent", "enable": true,
+		"protocol": "torrent", "priority": 1, "tags": []any{},
+		"fields": []any{
+			map[string]any{"name": "host", "value": host},
+			map[string]any{"name": "port", "value": float64(8080)},
+			map[string]any{"name": "useSsl", "value": false},
+			map[string]any{"name": "urlBase", "value": ""},
+			map[string]any{"name": "username", "value": username},
+			map[string]any{"name": "password", "value": password},
+			map[string]any{"name": "movieCategory", "value": category},
+		},
+	}
+}
+
+// TestEnsureDownloadClientAdoptsTheMigratedClientByHost: a source's client has
+// the operator's name, so the name cannot find it. The host is what says it is
+// the release's qBittorrent, so it is adopted -- with its name kept -- rather
+// than a second client created beside it.
+func TestEnsureDownloadClientAdoptsTheMigratedClientByHost(t *testing.T) {
+	f, arr := newFakeArr(t, "/radarr")
+	f.clients = []Item{migratedClient(7, "qBT", "qbittorrent", "Movies", "admin", "hunter2")}
+	ctx := context.Background()
+	spec := DownloadClientSpec{Name: "qBittorrent", Category: "Movies", Host: "qbittorrent", Port: 8080}
+
+	result, err := arr.EnsureDownloadClient(ctx, spec, 0)
+	if err != nil {
+		t.Fatalf("EnsureDownloadClient: %v", err)
+	}
+	if len(f.clients) != 1 {
+		t.Fatalf("the migrated client got a second one beside it: %d clients", len(f.clients))
+	}
+	if result.ID != 7 {
+		t.Errorf("adopted id %d, want the migrated client's 7", result.ID)
+	}
+	if result.Change != Updated {
+		t.Errorf("first run = %s, want updated: the credential the source stored is cleared", result.Change)
+	}
+	if f.clients[0]["name"] != "qBT" {
+		t.Errorf("the operator's name was overwritten with %v", f.clients[0]["name"])
+	}
+	// The second run is a no-op: the client is now box's, and nothing about it
+	// changes again.
+	second, err := arr.EnsureDownloadClient(ctx, spec, result.ID)
+	if err != nil || second.Change != Unchanged {
+		t.Fatalf("second run = %+v, %v; want unchanged", second, err)
+	}
+}
+
+// TestEnsureDownloadClientRefusesTwoClientsAtOneHost: two enabled qBittorrent
+// clients at the release's own qBittorrent are two rows box cannot choose
+// between, and picking one would leave the other downloading into nothing.
+func TestEnsureDownloadClientRefusesTwoClientsAtOneHost(t *testing.T) {
+	f, arr := newFakeArr(t, "/radarr")
+	f.clients = []Item{
+		migratedClient(7, "qBT", "qbittorrent", "Movies", "admin", "hunter2"),
+		migratedClient(9, "the other one", "qbittorrent", "Movies", "admin", "hunter2"),
+	}
+	ctx := context.Background()
+	spec := DownloadClientSpec{Name: "qBittorrent", Category: "Movies", Host: "qbittorrent", Port: 8080}
+
+	result, err := arr.EnsureDownloadClient(ctx, spec, 0)
+	if err == nil {
+		t.Fatalf("two clients at %s were accepted: %+v", spec.Host, result)
+	}
+	for _, want := range []string{"7", "9", spec.Host} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("the refusal does not name %q: %v", want, err)
+		}
+	}
+	if f.writes != 0 {
+		t.Errorf("the refused run wrote %d times", f.writes)
+	}
+}
+
+// TestEnsureDownloadClientOwnedIDWinsOverTwoAtTheHost: once box owns one of
+// them, the recorded id is the answer even when a second client shares the
+// host: a rename in the Arr's UI is the operator's business, not a refusal.
+func TestEnsureDownloadClientOwnedIDWinsOverTwoAtTheHost(t *testing.T) {
+	f, arr := newFakeArr(t, "/radarr")
+	f.clients = []Item{
+		migratedClient(7, "qBT", "qbittorrent", "Movies", "admin", "hunter2"),
+		migratedClient(9, "the other one", "qbittorrent", "Movies", "admin", "hunter2"),
+	}
+	ctx := context.Background()
+	spec := DownloadClientSpec{Name: "qBittorrent", Category: "Movies", Host: "qbittorrent", Port: 8080}
+
+	result, err := arr.EnsureDownloadClient(ctx, spec, 7)
+	if err != nil {
+		t.Fatalf("the recorded id was refused: %v", err)
+	}
+	if result.ID != 7 {
+		t.Fatalf("adopted id %d, want the recorded 7", result.ID)
+	}
+	if len(f.clients) != 2 {
+		t.Fatalf("the run touched the second client: %d clients", len(f.clients))
+	}
+}
+
+// TestEnsureDownloadClientIgnoresAClientBoxDoesNotDial: a disabled client, or a
+// client of another type, at the same address is not the one box owns.
+func TestEnsureDownloadClientIgnoresAClientBoxDoesNotDial(t *testing.T) {
+	f, arr := newFakeArr(t, "/radarr")
+	disabled := migratedClient(7, "qBT", "qbittorrent", "Movies", "admin", "hunter2")
+	disabled["enable"] = false
+	transmission := migratedClient(8, "the source's transmission", "qbittorrent", "Movies", "admin", "hunter2")
+	transmission["implementation"] = "Transmission"
+	f.clients = []Item{disabled, transmission}
+	ctx := context.Background()
+	spec := DownloadClientSpec{Name: "qBittorrent", Category: "Movies", Host: "qbittorrent", Port: 8080}
+
+	result, err := arr.EnsureDownloadClient(ctx, spec, 0)
+	if err != nil {
+		t.Fatalf("EnsureDownloadClient: %v", err)
+	}
+	if result.Change != Created {
+		t.Fatalf("a disabled client and another type were adopted: %+v", result)
+	}
+	if len(f.clients) != 3 {
+		t.Fatalf("clients = %d, want the two the operator has plus box's own", len(f.clients))
+	}
+}
