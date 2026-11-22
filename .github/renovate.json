@@ -1,10 +1,13 @@
 {
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
-  "description": "main is what has been released and develop is where work lands (docs/box.md, \"Where a release lives\"). Renovate feeds the release train, and main takes nothing else: the chart's app images on main only, whose patch and digest bumps merge themselves once CI is green, and the platform pins on both branches, one pull request per pin, whose patch bumps on main merge themselves once CI is green (k0s excepted: no CI job installs it). Nothing merges itself on develop, from any file. The sums bot is listed in gitIgnoredAuthors: it commits k0s's asset checksums onto Renovate's own k0s branch, and without that listing Renovate reads the commit as another author's edit -- it stops committing to the branch, and the pull request is left alone.",
+  "description": "main is what has been released and develop is where work lands (docs/box.md, \"Where a release lives\"). Renovate feeds the release train, and main takes nothing else: the chart's app images on main only, whose patch and digest bumps merge themselves once CI is green, and the platform pins on both branches, one pull request per pin, whose patch bumps on main merge themselves once CI is green (k0s excepted: no CI job installs it). Nothing merges itself on develop, from any file. What merges itself is merged by Renovate, not GitHub's auto-merge (platformAutomerge off): neither branch requires a status check, so GitHub would merge the moment a pull request is mergeable, before CI has run, where Renovate merges only once every check on the branch is green. The sums bot is listed in gitIgnoredAuthors: it commits k0s's asset checksums onto Renovate's own k0s branch, and without that listing Renovate reads the commit as another author's edit -- it stops committing to the branch, and the pull request is left alone.",
   "extends": ["config:recommended"],
   "baseBranchPatterns": ["main", "develop"],
   "gitIgnoredAuthors": ["355469897+s5n-sums[bot]@users.noreply.github.com"],
   "automerge": false,
+  "platformAutomerge": false,
+  "prHourlyLimit": 0,
+  "prConcurrentLimit": 0,
   "customManagers": [
     {
       "customType": "regex",
@@ -95,6 +98,11 @@
       "description": "A test-only image in hack/ changes what the e2e runs, never what box ships: it is never automerged, whatever a preset later says.",
       "matchFileNames": ["hack/**"],
       "automerge": false
+    },
+    {
+      "description": "No hourly limit anywhere (the top-level 0s replace config:recommended's two an hour): main takes only the chart's pins, which are what users run, and its patch bumps merge themselves once CI is green, so holding them back buys nothing. develop takes everything else -- Go modules, GitHub Actions, the test images -- which can arrive twenty at once, and every pull request runs the full e2e, so at most five are open there at a time: the next opens as one merges or closes.",
+      "matchBaseBranches": ["develop"],
+      "prConcurrentLimit": 5
     },
     {
       "description": "Nothing ever merges itself on develop, from any file, whatever a rule above says: develop is where a change is read before it is released. This rule is last so it wins.",
