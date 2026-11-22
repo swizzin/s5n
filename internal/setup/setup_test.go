@@ -485,6 +485,7 @@ func TestLoginsThatCannotBeASeedboxAreRefused(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			h := newHarness(t)
 			opts := h.unattended()
+			opts.Namespace = "" // a first run that derives it, which is when the login names it
 			opts.Login = tc.login
 			_, err := h.run(opts)
 			if err == nil {
@@ -500,6 +501,45 @@ func TestLoginsThatCannotBeASeedboxAreRefused(t *testing.T) {
 			}
 		})
 	}
+}
+
+// The namespace rule applies only where a namespace is derived from the
+// login. A box that already has a grant keeps its namespace, so a login
+// Authelia accepts -- capitals, a dot, an @ -- is still its login on a re-run,
+// and an explicit --namespace on a first run takes the login's place in the
+// name. Refusing either would lock out a box that has always worked.
+func TestALoginOnlyHasToMakeANamespaceWhenItMakesOne(t *testing.T) {
+	t.Run("a re-run keeps a grant's login and namespace", func(t *testing.T) {
+		h := newHarness(t)
+		write(t, h.grantPath, strings.Replace(reRunGrant, "login: alice", "login: Alice.B", 1))
+		write(t, h.valuesPath, reRunValues)
+		opts := h.unattended()
+		opts.Login = "Alice.B"
+		opts.SetTransient = map[string]string{"apps.beta.token": "tok-unattended"}
+		res, err := h.run(opts)
+		if err != nil {
+			t.Fatalf("a re-run with an existing login was refused: %v\n%s", err, h.out)
+		}
+		if !res.ReRun {
+			t.Fatal("an existing grant was treated as a fresh host")
+		}
+		if grant := h.read(h.grantPath); !strings.Contains(grant, "namespace: seedbox") {
+			t.Fatalf("the re-run changed the namespace:\n%s", grant)
+		}
+	})
+	t.Run("a first run with --namespace takes any login Authelia takes", func(t *testing.T) {
+		h := newHarness(t)
+		opts := h.unattended()
+		opts.Login = "Alice.B"
+		opts.Namespace = "s5n-alice"
+		opts.SetTransient = map[string]string{"apps.beta.token": "tok-unattended"}
+		if _, err := h.run(opts); err != nil {
+			t.Fatalf("a login with an explicit namespace was refused: %v\n%s", err, h.out)
+		}
+		if grant := h.read(h.grantPath); !strings.Contains(grant, "namespace: s5n-alice") {
+			t.Fatalf("the grant does not carry the explicit namespace:\n%s", grant)
+		}
+	})
 }
 
 // An explicit namespace is a DNS-1123 label too, length included: the same rule

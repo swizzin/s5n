@@ -450,7 +450,7 @@ func (d *Decision) Run(ctx context.Context, opts Options) (Result, error) {
 	// one answer that is not the seedbox's shape but the identity on it, and
 	// every path in front of the Gateway is admitted only to this user.
 	d.step(4, "who logs in to this box?")
-	loginName, err := d.askLogin(opts, base, grantNow, puid)
+	loginName, err := d.askLogin(opts, base, grantNow, puid, derivesNamespace(opts, grantNow, res.ReRun))
 	if err != nil {
 		return res, d.stop(err)
 	}
@@ -723,12 +723,8 @@ func (d *Decision) askText(q textQuestion) (string, error) {
 // when it was given, and otherwise derives s5n-<login>: every seedbox gets one,
 // root's included, beside box's own s5n-system and s5n-gateway.
 func (d *Decision) namespace(opts Options, grantNow map[string]any, reRun bool, login string) (string, error) {
-	if reRun {
-		if ns, ok := lookupPath(grantNow, "namespace"); ok {
-			if s, ok := ns.(string); ok && strings.TrimSpace(s) != "" {
-				return s, nil
-			}
-		}
+	if ns, ok := grantNamespace(grantNow, reRun); ok {
+		return ns, nil
 	}
 	ns := strings.TrimSpace(opts.Namespace)
 	if ns != "" {
@@ -737,11 +733,29 @@ func (d *Decision) namespace(opts Options, grantNow map[string]any, reRun bool, 
 		}
 		return ns, nil
 	}
-	ns = SeedboxNamespace(login)
-	if err := validNamespace(ns); err != nil {
-		return "", fmt.Errorf("login %q: a seedbox's namespace is s5n-<login>, and %q is not one: %w", login, ns, err)
+	return NamespaceFor(login)
+}
+
+// grantNamespace is the namespace a re-run keeps: the grant's, when it names one.
+func grantNamespace(grantNow map[string]any, reRun bool) (string, bool) {
+	if !reRun {
+		return "", false
 	}
-	return ns, nil
+	if ns, ok := lookupPath(grantNow, "namespace"); ok {
+		if s, ok := ns.(string); ok && strings.TrimSpace(s) != "" {
+			return s, true
+		}
+	}
+	return "", false
+}
+
+// derivesNamespace says whether this run names the namespace from the login:
+// not when a re-run keeps the grant's, and not when --namespace names it.
+func derivesNamespace(opts Options, grantNow map[string]any, reRun bool) bool {
+	if _, ok := grantNamespace(grantNow, reRun); ok {
+		return false
+	}
+	return strings.TrimSpace(opts.Namespace) == ""
 }
 
 // id is one of puid and pgid while it is still being decided: the value, and

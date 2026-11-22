@@ -108,6 +108,7 @@ func TestInstallAnswersRefuseALoginThatCannotBeASeedbox(t *testing.T) {
 		t.Run(login, func(t *testing.T) {
 			o, inst := installFlagSet(t)
 			*inst.domain = "box.example.com"
+			*inst.namespace = "" // no --box-namespace: the login names it
 			*inst.login = login
 			*inst.password = "/run/password"
 			*inst.configPath = "/srv/config"
@@ -119,6 +120,21 @@ func TestInstallAnswersRefuseALoginThatCannotBeASeedbox(t *testing.T) {
 				t.Errorf("the refusal does not name %q: %v", login, err)
 			}
 		})
+	}
+}
+
+// With --box-namespace given the login names nothing but the account, so any
+// login Authelia accepts goes through: the namespace rule is the derived
+// namespace's, not the account's.
+func TestInstallAnswersTakeAnyLoginWithAnExplicitNamespace(t *testing.T) {
+	o, inst := installFlagSet(t)
+	*inst.domain = "box.example.com"
+	*inst.namespace = "s5n-alice"
+	*inst.login = "Alice.B"
+	*inst.password = "/run/password"
+	*inst.configPath = "/srv/config"
+	if _, err := installAnswers(o, inst, planWithData()); err != nil {
+		t.Fatalf("login Alice.B with --box-namespace was refused: %v", err)
 	}
 }
 

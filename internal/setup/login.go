@@ -25,24 +25,33 @@ import (
 // second user is another s5n-<login>.
 func SeedboxNamespace(login string) string { return "s5n-" + login }
 
-// ValidateLogin is the whole rule for a login name: Authelia's own login shape,
-// and that the login makes a seedbox namespace box can create. It is checked
-// where the login is given, whether the operator typed it or passed --login, so
-// a name that could never be a seedbox's namespace is refused before box has
-// written anything.
+// NamespaceFor is the namespace a login's seedbox gets, refused when the login
+// cannot make one: box's own namespaces are not a seedbox's, and the name has to
+// be a DNS-1123 label after the prefix. It is asked only where box derives a
+// namespace from the login -- a first run with no --namespace -- because a box
+// that already has a grant keeps the grant's namespace whatever its login is.
+func NamespaceFor(login string) (string, error) {
+	ns := SeedboxNamespace(login)
+	switch ns {
+	case "s5n-system", "s5n-gateway":
+		return "", fmt.Errorf("login %q: a seedbox's namespace is s5n-<login>, and %s is box's own", login, ns)
+	}
+	if err := validNamespace(ns); err != nil {
+		return "", fmt.Errorf("login %q: a seedbox's namespace is s5n-<login>, and %q is not one: %w", login, ns, err)
+	}
+	return ns, nil
+}
+
+// ValidateLogin is the whole rule for a login that names its seedbox: Authelia's
+// own login shape, and that the login makes a namespace box can create. Where
+// the namespace does not come from the login (a re-run keeps the grant's, and an
+// explicit --namespace names it), only Authelia's shape applies: see askLogin.
 func ValidateLogin(login string) error {
 	if err := authelia.ValidateLogin(login); err != nil {
 		return err
 	}
-	ns := SeedboxNamespace(login)
-	switch ns {
-	case "s5n-system", "s5n-gateway":
-		return fmt.Errorf("login %q: a seedbox's namespace is s5n-<login>, and %s is box's own", login, ns)
-	}
-	if err := validNamespace(ns); err != nil {
-		return fmt.Errorf("login %q: a seedbox's namespace is s5n-<login>, and %q is not one: %w", login, ns, err)
-	}
-	return nil
+	_, err := NamespaceFor(login)
+	return err
 }
 
 // askLogin resolves the one account. In an interactive run it is a question
@@ -53,7 +62,13 @@ func ValidateLogin(login string) error {
 // The login and the file owner are different things -- one is who the browser
 // admits, the other who the files belong to -- so the default follows the files
 // and the operator can still say otherwise.
-func (d *Decision) askLogin(opts Options, base, grantNow map[string]any, puid int) (string, error) {
+func (d *Decision) askLogin(opts Options, base, grantNow map[string]any, puid int, derives bool) (string, error) {
+	// The login names the seedbox's namespace only when this run derives one;
+	// otherwise it is only Authelia's account, held to Authelia's shape.
+	validate := authelia.ValidateLogin
+	if derives {
+		validate = ValidateLogin
+	}
 	def := strings.TrimSpace(text(prefill(base, grantNow, "login")))
 	if given := strings.TrimSpace(opts.Login); given != "" {
 		def = given
@@ -70,7 +85,7 @@ func (d *Decision) askLogin(opts Options, base, grantNow map[string]any, puid in
 		if def == "" {
 			return "", errors.New("--login is needed: the account the login page admits")
 		}
-		if err := ValidateLogin(def); err != nil {
+		if err := validate(def); err != nil {
 			return "", fmt.Errorf("--login %q: %w", def, err)
 		}
 		return def, nil
@@ -80,7 +95,7 @@ func (d *Decision) askLogin(opts Options, base, grantNow map[string]any, puid in
 		Prompt:   "login name",
 		Help:     "the account this box's login page admits; it does not have to be the account that owns the files",
 		Default:  def,
-		Validate: ValidateLogin,
+		Validate: validate,
 		Record:   "web login",
 	})
 }

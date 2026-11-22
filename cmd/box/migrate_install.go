@@ -25,6 +25,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/swizzin/s5n/internal/authelia"
 	"github.com/swizzin/s5n/internal/bootstrap"
 	"github.com/swizzin/s5n/internal/hostconf"
 	"github.com/swizzin/s5n/internal/migrate/plan"
@@ -175,7 +176,12 @@ func installAnswers(o *migrateApplyFlags, inst *installFlags, p *plan.Plan) ([]s
 	// The login decides the seedbox's namespace (s5n-<login>), so it is checked
 	// here, before bootstrap installs anything: a name that could never be a
 	// namespace is a refusal, not a seedbox box cannot create.
-	if err := setup.ValidateLogin(*inst.login); err != nil {
+	// With --box-namespace given, the login names nothing but the account.
+	validate := setup.ValidateLogin
+	if strings.TrimSpace(*inst.namespace) != "" {
+		validate = authelia.ValidateLogin
+	}
+	if err := validate(*inst.login); err != nil {
 		return nil, err
 	}
 	if p.Data == nil || strings.TrimSpace(p.Data.Root) == "" {
