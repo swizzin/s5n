@@ -6825,10 +6825,11 @@ migrate_check_qbittorrent() { # migrate_check_qbittorrent <password>
   curl -sS -b "$jar" --max-time 15 "$base/api/v2/torrents/info" >"$WORK/qbittorrent-torrents.json" 2>/dev/null || true
   python3 - "$WORK/qbittorrent-preferences.json" "$WORK/qbittorrent-categories.json" \
     "$WORK/qbittorrent-torrents.json" $MIGRATE_DOWNLOAD_CATEGORIES <<'PY'
-import json, sys
+import json, os, sys
 prefs = json.load(open(sys.argv[1]))
 cats = json.load(open(sys.argv[2]))
-torrents = json.load(open(sys.argv[3]))
+torrents_file = sys.argv[3]
+torrents = json.load(open(torrents_file))
 wanted = sys.argv[4:]
 if prefs.get("save_path") != "/data/downloads":
     sys.exit(f"the migrated qBittorrent saves under {prefs.get('save_path')!r}, want /data/downloads")
@@ -6837,21 +6838,26 @@ if not str(prefs.get("temp_path") or "").startswith("/data/downloads"):
 # The download tree is not touched: the source's categories are still the only
 # ones, none of them gained a save path of its own, and nothing box lays its
 # library out in was created here to download into nothing.
-source = json.load(open(sys.argv[3].replace("qbittorrent-torrents", "source/qbittorrent-categories")))
+source = json.load(open(torrents_file.replace("qbittorrent-torrents", "source/qbittorrent-categories")))
 if sorted(cats) != sorted(source):
     sys.exit(f"the migrated qBittorrent's categories are {sorted(cats)}, want exactly the source's {sorted(source)}")
 for name in wanted:
     save = (cats.get(name) or {}).get("savePath")
     if save:
         sys.exit(f"the migrated qBittorrent category {name} gained a save path ({save!r}): it had none, and its torrents are in /data/downloads/{name}")
-mine = [t for t in torrents if t.get("name") == "s5n-e2e-sample.bin"]
-if len(mine) != 1:
-    sys.exit(f"the migrated qBittorrent holds {len(mine)} of the source's torrent, want 1")
-if mine[0].get("category") != "Movies":
-    sys.exit(f"the migrated torrent is in category {mine[0].get('category')!r}, want the one it was in (Movies)")
-if mine[0].get("save_path") != "/data/downloads/Movies":
-    sys.exit(f"the migrated torrent saves under {mine[0].get('save_path')!r}, want /data/downloads/Movies")
-print(f"  qbittorrent: saves under {prefs.get('save_path')}, categories {', '.join(sorted(cats))} with no save path of their own, the torrent still in Movies under /data/downloads/Movies")
+# A torrent, when the source seeded one: the keep path seeds none, and the
+# migrate path's one is the proof that a download keeps its directory.
+note = "the source seeded no torrent here"
+if os.path.exists(torrents_file.replace("qbittorrent-torrents", "source/qbittorrent-torrents")):
+    mine = [t for t in torrents if t.get("name") == "s5n-e2e-sample.bin"]
+    if len(mine) != 1:
+        sys.exit(f"the migrated qBittorrent holds {len(mine)} of the source's torrent, want 1")
+    if mine[0].get("category") != "Movies":
+        sys.exit(f"the migrated torrent is in category {mine[0].get('category')!r}, want the one it was in (Movies)")
+    if mine[0].get("save_path") != "/data/downloads/Movies":
+        sys.exit(f"the migrated torrent saves under {mine[0].get('save_path')!r}, want /data/downloads/Movies")
+    note = "the torrent still in Movies under /data/downloads/Movies"
+print(f"  qbittorrent: saves under {prefs.get('save_path')}, categories {', '.join(sorted(cats))} with no save path of their own, {note}")
 PY
 }
 
