@@ -294,6 +294,7 @@ func addCutoverApplyFlags(fs *flag.FlagSet, kubeconfig *string) *migrateApplyFla
 		applyFlags: &applyFlags{chart: addChartFlags(fs, chartVersionApplies)},
 		install:    addInstallFlags(fs),
 		plain:      fs.Bool("plain", false, "ask with plain line prompts, even on a terminal (for a flaky terminal or a screen reader)"),
+		details:    fs.Bool("details", false, "print every rewrite, column by column, instead of the grouped summary"),
 	}
 	o.grantPath = fs.String("grant", seedbox.GrantPath("root"), "the root-owned grant file")
 	o.valuesPath = fs.String("values", valuesDefault, "the user's values file")

@@ -8,6 +8,7 @@ package main
 
 import (
 	"bytes"
+	"flag"
 	"strings"
 	"testing"
 
@@ -140,5 +141,21 @@ func TestTheMigratingInitCannotAskItsOwnRelease(t *testing.T) {
 	}
 	if _, ok := initApplyConfirmer(false, &say.Plain{W: &bytes.Buffer{}}, true).(answered); ok {
 		t.Fatal("a plain `box init --yes` was handed the migration's already-answered confirmer")
+	}
+}
+
+// TestEveryPathThatBuildsTheApplyFlagsHasTheDetailsSwitch: a cutover that
+// keeps its cluster continues into `migrate apply`, and it builds its own copy
+// of that command's flags. A switch missing there is a nil dereference in the
+// confirm on the one path a keep-cluster cutover takes.
+func TestEveryPathThatBuildsTheApplyFlagsHasTheDetailsSwitch(t *testing.T) {
+	fs := flag.NewFlagSet("cutover apply", flag.ContinueOnError)
+	kubeconfig := ""
+	o := addCutoverApplyFlags(fs, &kubeconfig)
+	if o.details == nil {
+		t.Fatal("the cutover's apply flags have no --details switch, so its confirm dereferences nil")
+	}
+	if *o.details {
+		t.Error("--details is on by default")
 	}
 }
