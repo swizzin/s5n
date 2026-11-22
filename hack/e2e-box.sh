@@ -7646,6 +7646,30 @@ migrate_box() {
     cat "$WORK/apply-migrate.txt"; fail=1; return 0
   fi
   cat "$WORK/apply-migrate.txt"
+  # The one confirm comes before anything is installed: the line that says the
+  # run has not written anything yet, and the summary the answer applies to, are
+  # both above bootstrap's own decision and the chart init pulled. The order is
+  # the point: this host had no box, and an answer of no has to leave it with no
+  # cluster, no platform and no grant.
+  confirm_at=$(grep -n '^nothing is installed yet: this run installs' "$WORK/apply-migrate.txt" | head -1 | cut -d: -f1) || true
+  install_at=$(grep -nE '^(decision|chart): ' "$WORK/apply-migrate.txt" | head -1 | cut -d: -f1) || true
+  if [ -z "$confirm_at" ]; then
+    echo "the confirm does not say the run has installed nothing yet"; fail=1
+  elif [ -z "$install_at" ]; then
+    echo "the run recorded no install at all, so its order cannot be read"; fail=1
+  elif [ "$confirm_at" -ge "$install_at" ]; then
+    echo "the confirm is not before the install (confirm line ${confirm_at}, first install line ${install_at})"; fail=1
+  fi
+  # Plex is the one app whose check runs its own image, and there is no box to run
+  # one in until the install: its row says so, above the install, and the row the
+  # check then fills in is below it. Both are the same operator's reading of the
+  # same run.
+  grep -qE "^  ✓ plex +[0-9.]+ (KiB|MiB|GiB) · its databases are checked once Plex's image runs" \
+    "$WORK/apply-migrate.txt" ||
+    { echo "the confirm does not say when Plex's databases are checked";
+      grep -E "plex" "$WORK/apply-migrate.txt" | head -5; fail=1; }
+  grep -qE "^checked after the install$" "$WORK/apply-migrate.txt" ||
+    { echo "the run does not report the check the confirm deferred"; fail=1; }
   # The two halves of the same bug the root run can now show: every path the
   # migration left in the config root belongs to the seedbox's user, and every
   # app could read what it was given.

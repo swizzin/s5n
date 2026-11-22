@@ -1094,6 +1094,13 @@ data. Everything it will change is written down before it changes anything.
   not have: an answer a flag or the plan already holds is not a question, and the app
   picker never appears, because the plan decides every app. On a host that already has
   a box it adopts into it, which is how one source is migrated per user.
+  The install is what the run's one answer buys, so it comes after that answer: on a
+  host with no box the run decides what it would install and what it would move first,
+  asks, and only then installs. An answer of no leaves the host as it was -- no k0s, no
+  platform, no firewall change, no grant and no values file, and nothing under the
+  config root, because the pre-install pass stages into a directory it removes -- and
+  a cluster record is written only once box actually owns the cluster, because a record
+  is what makes a host "have a box".
 - **One run, one confirm.** Everything a migration does is reviewed once, in one
   question: the platform the installer puts on a host with none (its plan first), then
   one row per app with what it carries and what changes, the data directories it
@@ -1101,6 +1108,16 @@ data. Everything it will change is written down before it changes anything.
   prints every rewrite column by column instead; the snapshot's `report.txt` holds it
   whole either way, and the wiring receipt keeps per-object detail behind the receipt
   itself.
+  On a host with no box the question comes before anything is installed, so the
+  platform plan is the plan this run would apply, decided from a read-only pass and
+  shown first. Plex is the one app whose check runs its own image, and there is no box
+  to run one in before the install: its row says its databases are checked once Plex's
+  image runs, and after the install its check runs before any app is switched on. A
+  blocker there stops the run with the box installed and nothing of the snapshot moved,
+  saying so and what running it again does; a clean one carries on without asking
+  again. The summary the adoption is held to is the one that was shown -- the same
+  snapshot and plan read twice -- and a difference anywhere but Plex's filled-in row is
+  refused rather than done.
 - **One snapshot file, and it is the backup format (decided).** A snapshot is one tar +
   gzip archive with a manifest holding a sha256 per entry, so a truncated copy is
   refused rather than half-applied. `plan.yaml`, `source/`, `report.txt` and `config/`
