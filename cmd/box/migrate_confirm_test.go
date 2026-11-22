@@ -73,7 +73,7 @@ func migratingSummary() apply.Summary {
 func TestOneConfirmForTheWholeRun(t *testing.T) {
 	var out bytes.Buffer
 	ask := &countingAsker{}
-	confirm := migrateConfirm(&say.Plain{W: &out}, ask, "s5n-alice", false, false, installedPlatform(t))
+	confirm := migrateConfirm(&say.Plain{W: &out}, ask, "s5n-alice", false, false, installedPlatform(t), confirmLead(true))
 
 	ok, err := confirm(migratingSummary())
 	if err != nil {
@@ -126,7 +126,7 @@ func TestOneConfirmForTheWholeRun(t *testing.T) {
 func TestTheOneConfirmWithoutAPlatform(t *testing.T) {
 	var out bytes.Buffer
 	ask := &countingAsker{}
-	confirm := migrateConfirm(&say.Plain{W: &out}, ask, "seedbox", false, false, nil)
+	confirm := migrateConfirm(&say.Plain{W: &out}, ask, "seedbox", false, false, nil, "")
 
 	if _, err := confirm(migratingSummary()); err != nil {
 		t.Fatalf("confirm: %v", err)
@@ -197,6 +197,25 @@ func TestTheAgreedSummaryIsNotAskedAgain(t *testing.T) {
 		t.Fatalf("a run that would do more than it showed was allowed: ok=%v err=%v", ok, err)
 	} else if !strings.Contains(err.Error(), "nothing of the snapshot has been moved") {
 		t.Errorf("the refusal does not say what state the host is in: %v", err)
+	}
+}
+
+// TestTheQuestionNamesOnlyWhatThisRunInstalls: a host with no cluster is told the
+// answer installs one; a host whose cluster is already there is told the platform
+// layer and the box, which is the whole of what box would do to it.
+func TestTheQuestionNamesOnlyWhatThisRunInstalls(t *testing.T) {
+	if got := confirmLead(true); !strings.Contains(got, "installs the cluster and the platform layer") {
+		t.Errorf("a clean host's lead says %q, want it to name the cluster", got)
+	}
+	if got := confirmLead(false); strings.Contains(got, "cluster") {
+		t.Errorf("a host that already has a cluster is promised one: %q", got)
+	} else if !strings.Contains(got, "installs the platform layer") {
+		t.Errorf("the lead says %q, want it to name what this run does install", got)
+	}
+	for _, installs := range []bool{true, false} {
+		if !strings.HasPrefix(confirmLead(installs), "nothing is installed yet") {
+			t.Errorf("the lead does not say the run has written anything yet: %q", confirmLead(installs))
+		}
 	}
 }
 

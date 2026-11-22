@@ -120,6 +120,9 @@ type migrateInstallSteps struct {
 	// install is bootstrap, the platform and init: a host with no box becomes
 	// one, with the release's apps off.
 	install func(ctx context.Context) error
+	// lead is the confirm's first line: what a yes installs, named only as far
+	// as this host has it to install.
+	lead string
 }
 
 // beforeInstall is the order the whole run exists for: decide, show, ask -- and
@@ -130,7 +133,7 @@ func (s migrateInstallSteps) beforeInstall(ctx context.Context, ask asker, detai
 	if err != nil {
 		return nil, err
 	}
-	ok, err := migrateConfirm(out, ask, target, rehearsal, details, plat)(summary)
+	ok, err := migrateConfirm(out, ask, target, rehearsal, details, plat, s.lead)(summary)
 	if err != nil {
 		return nil, err
 	}
@@ -157,18 +160,19 @@ func migrationStepsWith(ctx context.Context, o *migrateApplyFlags, inst *install
 	// cluster box would create, or the one it found, probed read-only. It comes
 	// before the snapshot is staged, so a platform this host cannot have is a
 	// refusal before anything is copied.
-	plat, class, err := migratePlatform(ctx, o, inst, charts, chart, out)
+	preview, err := migratePlatform(ctx, o, inst, charts, chart, out)
 	if err != nil {
 		return migrateInstallSteps{}, err
 	}
 	return migrateInstallSteps{
 		survey: func(ctx context.Context) (apply.Summary, *platform.Plan, error) {
 			summary, err := migrateSurvey(ctx, o, p, opened, raw, chart, cat, rehearsal)
-			return summary, plat, err
+			return summary, preview.plan, err
 		},
 		install: func(ctx context.Context) error {
-			return migrateInstall(ctx, o, inst, charts, answers, class, out)
+			return migrateInstall(ctx, o, inst, charts, answers, preview.class, out)
 		},
+		lead: confirmLead(preview.cluster),
 	}, nil
 }
 
@@ -249,7 +253,7 @@ func migrationDecision(inst *installFlags, charts *chartRelease, out say.Reporte
 // The class comes back with it because the install settles on it again: asking
 // the operator twice for one decision, or letting the two runs choose different
 // classes, is how a box's routes move.
-func migratePlatform(ctx context.Context, o *migrateApplyFlags, inst *installFlags, charts *chartRelease, chart release.Chart, out say.Reporter) (*platform.Plan, string, error) {
+func migratePlatform(ctx context.Context, o *migrateApplyFlags, inst *installFlags, charts *chartRelease, chart release.Chart, out say.Reporter) (platformPreview, error) {
 	d := migrationDecision(inst, charts, out)
 	res, err := d.Bootstrap(ctx, bootstrap.Options{
 		Kubeconfig:    *o.kubeconfig,
@@ -258,16 +262,30 @@ func migratePlatform(ctx context.Context, o *migrateApplyFlags, inst *installFla
 		Preview:       true,
 	})
 	if err != nil {
-		return nil, "", err
+		return platformPreview{}, err
 	}
 	if res.Action == bootstrap.ActionStop {
-		return nil, "", errors.New(res.Reason)
+		return platformPreview{}, errors.New(res.Reason)
 	}
 	plan, err := platform.Preview(chart.Pins, res.Platform, res.Gateway.Class, "", res.Firewall)
 	if err != nil {
-		return nil, "", err
+		return platformPreview{}, err
 	}
-	return &plan, res.Gateway.Class, nil
+	return platformPreview{
+		plan:    &plan,
+		class:   res.Gateway.Class,
+		cluster: res.Action == bootstrap.ActionInstall,
+	}, nil
+}
+
+// platformPreview is what the read-only decision settles for the run that
+// follows it: the plan it would apply, the class the second decision has to
+// arrive at again, and whether the cluster is this run's to install.
+type platformPreview struct {
+	plan  *platform.Plan
+	class string
+	// cluster says box installs k0s on this host: it has no cluster of its own.
+	cluster bool
 }
 
 // migrateSurvey is the pre-install pass: the migration's summary, from the same

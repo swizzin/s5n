@@ -457,7 +457,7 @@ func migrateAnswer(out say.Reporter, o *migrateApplyFlags, namespace string, reh
 	if agreed != nil {
 		return migrateAgreed(out, *agreed)
 	}
-	return migrateConfirm(out, confirmer(out, *o.yes), namespace, rehearsal, *o.details, nil)
+	return migrateConfirm(out, confirmer(out, *o.yes), namespace, rehearsal, *o.details, nil, "")
 }
 
 // carriedNotes is the confirm's half of the report's line about the part of a
@@ -540,11 +540,13 @@ func trimmed(dir string, files []discover.CarryFile) bool {
 // output. A run that asked "install the platform layer?" and then "move these
 // into ...?" was two questions about one decision, and the second one came after
 // both.
-func migrateConfirm(out say.Reporter, ask asker, namespace string, rehearsal bool, details bool, plat *platform.Plan) func(apply.Summary) (bool, error) {
+func migrateConfirm(out say.Reporter, ask asker, namespace string, rehearsal bool, details bool, plat *platform.Plan, lead string) func(apply.Summary) (bool, error) {
 	target := confirmTarget(namespace)
 	return func(s apply.Summary) (bool, error) {
 		if plat != nil {
-			out.Muted("nothing is installed yet: this run installs the cluster and the platform layer, writes the box, and then moves the snapshot into it")
+			if lead != "" {
+				out.Muted(lead)
+			}
 			if items := plat.Items(); len(items) > 0 {
 				out.Plan("platform", items)
 			}
@@ -576,6 +578,17 @@ func migrateConfirm(out say.Reporter, ask asker, namespace string, rehearsal boo
 		}
 		return ask.Ask(fmt.Sprintf("move these into %s?", target))
 	}
+}
+
+// confirmLead is the first line of the one question on a host with no box: what
+// the answer buys, before any of it exists. The cluster is named only when box
+// installs it -- a host that already has one gets the platform layer and the box,
+// and promising a cluster there would be a promise about something already there.
+func confirmLead(installsCluster bool) string {
+	if installsCluster {
+		return "nothing is installed yet: this run installs the cluster and the platform layer, writes the box, and then moves the snapshot into it"
+	}
+	return "nothing is installed yet: this run installs the platform layer, writes the box, and then moves the snapshot into it"
 }
 
 // confirmTarget is the box a question names: the namespace it will have, or "this
