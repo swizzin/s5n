@@ -39,6 +39,7 @@ import (
 	"github.com/swizzin/s5n/internal/migrate/discover"
 	"github.com/swizzin/s5n/internal/migrate/lock"
 	"github.com/swizzin/s5n/internal/migrate/plan"
+	"github.com/swizzin/s5n/internal/platform"
 	"github.com/swizzin/s5n/internal/release"
 	"github.com/swizzin/s5n/internal/say"
 	"github.com/swizzin/s5n/internal/seedbox"
@@ -204,12 +205,18 @@ func migrateApply(ctx context.Context, file string, o *migrateApplyFlags, out sa
 	}
 	raw := opened.Plan
 	charts := &chartRelease{flags: o.chart, out: out}
+	// plat is the platform this run installed, on a host that had none: its
+	// plan is shown first in the migration's one confirm, because that confirm
+	// is the whole run's (no separate "install the platform layer?").
+	var plat *platform.Plan
 	if installed, err := boxInstalled(*o.install.record); err != nil {
 		return err
 	} else if !installed {
-		if err := migrateInstall(ctx, o, o.install, p, charts, out); err != nil {
+		applied, err := migrateInstall(ctx, o, o.install, p, charts, out)
+		if err != nil {
 			return err
 		}
+		plat = &applied
 	}
 	sb, err := seedbox.Load(*o.grantPath, *o.valuesPath)
 	if err != nil {
@@ -276,7 +283,7 @@ func migrateApply(ctx context.Context, file string, o *migrateApplyFlags, out sa
 	if err != nil {
 		return err
 	}
-	env, cs, err := migrateEnv(p, opened, o, sb, chart, cat, kc, namespace, values, rehearsal, carriedLines(p, opened), out)
+	env, cs, err := migrateEnv(p, opened, o, sb, chart, cat, kc, namespace, values, rehearsal, carriedLines(p, opened), plat, out)
 	if err != nil {
 		return err
 	}
@@ -335,7 +342,7 @@ func loadMigrateChart(ctx context.Context, charts *chartRelease) (release.Chart,
 }
 
 // migrateEnv builds everything apply touches outside the plan directory.
-func migrateEnv(p *plan.Plan, opened *bundle.Opened, o *migrateApplyFlags, sb *seedbox.Seedbox, chart release.Chart, cat *catalog.Catalog, kc, namespace string, values map[string]any, rehearsal bool, skip []string, out say.Reporter) (apply.Env, kubernetes.Interface, error) {
+func migrateEnv(p *plan.Plan, opened *bundle.Opened, o *migrateApplyFlags, sb *seedbox.Seedbox, chart release.Chart, cat *catalog.Catalog, kc, namespace string, values map[string]any, rehearsal bool, skip []string, plat *platform.Plan, out say.Reporter) (apply.Env, kubernetes.Interface, error) {
 	var env apply.Env
 	vols, err := sb.Storage()
 	if err != nil {
@@ -417,7 +424,7 @@ func migrateEnv(p *plan.Plan, opened *bundle.Opened, o *migrateApplyFlags, sb *s
 		env.Run = runner.Run
 	}
 	env.Rehearsal = rehearsal
-	env.Confirm = migrateConfirm(out, *o.yes, namespace, rehearsal, skip)
+	env.Confirm = migrateConfirm(out, confirmer(out, *o.yes), namespace, rehearsal, skip, plat)
 	return env, cs, nil
 }
 
@@ -489,9 +496,18 @@ func trimmed(dir string, files []discover.CarryFile) bool {
 // confirmer `box apply` asks with, so a terminal gets the live form and a
 // --plain or piped run gets the line prompt; --yes answers without asking, and
 // no terminal without --yes refuses, as apply does.
-func migrateConfirm(out say.Reporter, yes bool, namespace string, rehearsal bool, skip []string) func(apply.Summary) (bool, error) {
-	ask := confirmer(out, yes)
+//
+// It is the run's only question. On a host that had no box, the platform this
+// run installed is part of it, shown first: a run that asked "install the
+// platform layer?" and then "move these into ...?" was two questions about one
+// decision.
+func migrateConfirm(out say.Reporter, ask asker, namespace string, rehearsal bool, skip []string, plat *platform.Plan) func(apply.Summary) (bool, error) {
 	return func(s apply.Summary) (bool, error) {
+		if plat != nil {
+			if items := plat.Items(); len(items) > 0 {
+				out.Plan("platform", items)
+			}
+		}
 		// The summary, then the one line saying what the snapshot does not
 		// hold: a part of a config left behind is a decision the operator
 		// reads before the copy, never a surprise after it.

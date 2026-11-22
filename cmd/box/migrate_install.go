@@ -29,6 +29,7 @@ import (
 	"github.com/swizzin/s5n/internal/bootstrap"
 	"github.com/swizzin/s5n/internal/hostconf"
 	"github.com/swizzin/s5n/internal/migrate/plan"
+	"github.com/swizzin/s5n/internal/platform"
 	"github.com/swizzin/s5n/internal/say"
 	"github.com/swizzin/s5n/internal/setup"
 )
@@ -75,19 +76,21 @@ func boxInstalled(recordPath string) (bool, error) {
 
 // migrateInstall takes a host with no box to one with a seedbox whose apps are
 // off, from the plan. It returns when init has installed the release, which is
-// the state the adoption then runs against.
-func migrateInstall(ctx context.Context, o *migrateApplyFlags, inst *installFlags, p *plan.Plan, charts *chartRelease, out say.Reporter) error {
+// the state the adoption then runs against, and the platform plan, which the
+// migration's one confirm shows first.
+func migrateInstall(ctx context.Context, o *migrateApplyFlags, inst *installFlags, p *plan.Plan, charts *chartRelease, out say.Reporter) (platform.Plan, error) {
+	var applied platform.Plan
 	// A guided run is one with a terminal to ask on and no --yes: the same rule
 	// init uses to decide whether it asks. Its four own answers that this run
 	// does not have are init's questions, so they are not a refusal here.
 	guided := !*o.yes && isTerminal(os.Stdin)
 	answers, err := installAnswers(o, inst, p, guided)
 	if err != nil {
-		return err
+		return applied, err
 	}
 	out.Phase("cluster")
 	if _, _, err := hostconf.Load(hostconf.Path(*inst.record)); err != nil {
-		return err
+		return applied, err
 	}
 	charts.out = out
 
@@ -107,21 +110,25 @@ func migrateInstall(ctx context.Context, o *migrateApplyFlags, inst *installFlag
 		Platform:      bootstrap.DefaultPlatform(),
 	})
 	if err != nil {
-		return err
+		return applied, err
 	}
 	bootstrap.ReportResult(res, out)
 	if res.Action == bootstrap.ActionStop {
-		return errors.New("bootstrap stopped, so there is no cluster to install into")
+		return applied, errors.New("bootstrap stopped, so there is no cluster to install into")
 	}
 	chart, err := charts.load(ctx)
 	if err != nil {
-		return err
+		return applied, err
 	}
-	if err := applyPlatform(ctx, res.Kubeconfig, res.Platform, res.Gateway.Class, "", chart.Pins, res.Firewall, *o.yes, out); err != nil {
-		return err
+	// The platform is the first half of the one confirm: it is not asked about
+	// here, and its plan is not printed here either, because the migration's
+	// confirm shows it first and asks once for the whole run.
+	applied, err = applyPlatform(ctx, res.Kubeconfig, res.Platform, res.Gateway.Class, "", chart.Pins, res.Firewall, answered{}, true, out)
+	if err != nil {
+		return applied, err
 	}
 	if _, err := hostconf.Ensure(hostconf.Path(*inst.record)); err != nil {
-		return err
+		return applied, err
 	}
 
 	// init's own flow, over init's own flags: the answers the plan holds are
@@ -129,9 +136,9 @@ func migrateInstall(ctx context.Context, o *migrateApplyFlags, inst *installFlag
 	// first-run-or-re-run logic sees them exactly as it sees an operator's.
 	iflg, err := migrationInit(inst, charts, answers)
 	if err != nil {
-		return err
+		return applied, err
 	}
-	return iflg.run(ctx, res.Kubeconfig, *o.yes, *o.plain, out)
+	return applied, iflg.run(ctx, res.Kubeconfig, *o.yes, *o.plain, out)
 }
 
 // migrationInit is init's flags as a migration runs them: the plan's answers as

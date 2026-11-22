@@ -302,6 +302,11 @@ type Decision struct {
 	// cannot be reached at the production URL and whose own certificate is
 	// self-signed.
 	ACMEServer string
+	// CallerConfirms says the flow that runs this plan shows it and asks the
+	// one question itself, so this package does neither: a migration puts the
+	// platform plan first in its single confirm, and asking here as well is
+	// the second form that run exists to remove.
+	CallerConfirms bool
 
 	// AddressTimeout is how long the Gateway gets to say it has no address
 	// before MetalLB is installed. Zero means AddressTimeout (15s).
@@ -352,7 +357,9 @@ func (d *Decision) Apply(ctx context.Context, components []bootstrap.ComponentRe
 	}
 	res.Plan = plan
 	r := d.report()
-	d.printPlan(r, plan)
+	if !d.CallerConfirms {
+		d.printPlan(r, plan)
+	}
 
 	if len(plan.Steps) == 0 {
 		return res, nil
@@ -370,13 +377,15 @@ func (d *Decision) Apply(ctx context.Context, components []bootstrap.ComponentRe
 		return res, err
 	}
 
-	ok, err := d.Confirm.Ask("install the platform layer?")
-	if err != nil {
-		return res, err
-	}
-	if !ok {
-		r.Line("oh heck, nvm")
-		return res, ErrCancelled
+	if !d.CallerConfirms {
+		ok, err := d.Confirm.Ask("install the platform layer?")
+		if err != nil {
+			return res, err
+		}
+		if !ok {
+			r.Line("oh heck, nvm")
+			return res, ErrCancelled
+		}
 	}
 
 	// answered is what the plan's question found, once it has been asked. It

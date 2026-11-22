@@ -1505,3 +1505,56 @@ func TestApplyStopsWhenTheFirewallRefuses(t *testing.T) {
 		t.Fatalf("a refused firewall change still wrote: %d releases, %d applies", len(f.rel.installed), len(f.cl.writes))
 	}
 }
+
+// TestACallerThatShowsThePlanIsNotAsked: a migration asks once for the whole
+// run, and shows the platform plan inside that question. This package then both
+// stays quiet about the plan and takes no answer of its own -- the contrast is
+// the same fixture with CallerShowsPlan off, which is every other caller and
+// asks its own question with the plan above it.
+func TestACallerThatShowsThePlanIsNotAsked(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		caller  bool
+		asks    int
+		printed bool
+	}{
+		{name: "the caller shows the plan", caller: true, asks: 0, printed: false},
+		{name: "this package shows the plan", caller: false, asks: 1, printed: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newFixture()
+			f.probe.answers = []GatewayAnswer{{Address: "192.0.2.10"}}
+			f.d.CallerConfirms = tc.caller
+			if _, err := f.d.Apply(context.Background(), allInstall); err != nil {
+				t.Fatalf("Apply: %v", err)
+			}
+			if f.confirm.asked != tc.asks {
+				t.Errorf("asked %d questions, want %d", f.confirm.asked, tc.asks)
+			}
+			if got := strings.Contains(f.log.String(), "platform plan:"); got != tc.printed {
+				t.Errorf("the plan is printed = %t, want %t:\n%s", got, tc.printed, f.log)
+			}
+		})
+	}
+}
+
+// TestThePlanIsTheCallers: the items the caller shows are the plan's own, so a
+// confirm cannot drift from what this package would have printed.
+func TestThePlanIsTheCallers(t *testing.T) {
+	plan, err := BuildPlan(pins, allInstall, "eg", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	f := newFixture()
+	f.d.printPlan(f.d.Say, plan)
+	printed := strings.Join(strings.Split(f.log.String(), "\n"), "\n")
+	items := plan.Items()
+	if len(items) == 0 {
+		t.Fatal("the plan has no items")
+	}
+	for _, it := range items {
+		if !strings.Contains(printed, it.Text) {
+			t.Errorf("the plan's item %q is not in what the printer wrote:\n%s", it.Text, printed)
+		}
+	}
+}

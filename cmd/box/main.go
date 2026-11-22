@@ -436,7 +436,7 @@ func runBootstrap(ctx context.Context, args []string) {
 		out.Error(err)
 		os.Exit(1)
 	}
-	if err := applyPlatform(ctx, res.Kubeconfig, res.Platform, res.Gateway.Class, acmeServer, chart.Pins, res.Firewall, *yes, out); err != nil {
+	if _, err := applyPlatform(ctx, res.Kubeconfig, res.Platform, res.Gateway.Class, acmeServer, chart.Pins, res.Firewall, confirmer(out, *yes || !isTerminal(os.Stdin)), false, out); err != nil {
 		if errors.Is(err, platform.ErrCancelled) {
 			os.Exit(1)
 		}
@@ -469,12 +469,12 @@ func runBootstrap(ctx context.Context, args []string) {
 	scheduleUpdates(ctx, unitDir, *recordPath, *initFlags.grantPath, *initFlags.valuesPath, out)
 }
 
-// applyPlatform applies the platform layer the decision says install. The
-// confirmation is box's existing one: --yes, or no terminal to ask on, is
-// unattended (docs/box.md, "bootstrap and init").
-func applyPlatform(ctx context.Context, kubeconfig string, components []bootstrap.ComponentResult, gatewayClass, acmeServer string, pins release.Versions, firewall bootstrap.FirewallState, yes bool, out say.Reporter) error {
+// applyPlatform applies the platform layer the decision says install, and
+// returns the plan it applied. confirm is the one question, and holdPlan says
+// this package keeps quiet about the plan because the caller shows it in its
+// own confirm -- a migration asks once, for the platform and its apps together.
+func applyPlatform(ctx context.Context, kubeconfig string, components []bootstrap.ComponentResult, gatewayClass, acmeServer string, pins release.Versions, firewall bootstrap.FirewallState, confirm platform.Confirmer, holdPlan bool, out say.Reporter) (platform.Plan, error) {
 	out.Phase("platform")
-	confirm := confirmer(out, yes || !isTerminal(os.Stdin))
 	p := &platform.Decision{
 		GatewayClass: gatewayClass,
 		ACMEServer:   acmeServer,
@@ -490,11 +490,12 @@ func applyPlatform(ctx context.Context, kubeconfig string, components []bootstra
 		// The host's packet filter is the one thing in the plan that is not in
 		// the cluster: bootstrap found it, and only a host box installed k0s
 		// on is changed through it.
-		Firewall:     firewall,
-		HostFirewall: bootstrap.Firewalld{},
+		Firewall:       firewall,
+		HostFirewall:   bootstrap.Firewalld{},
+		CallerConfirms: holdPlan,
 	}
-	_, err := p.Apply(ctx, components)
-	return err
+	res, err := p.Apply(ctx, components)
+	return res.Plan, err
 }
 
 // boxValues is what `box apply` reads from the cluster rather than from either
@@ -907,7 +908,7 @@ func (o *initFlags) run(ctx context.Context, kubeconfig string, yes, plain bool,
 			if err != nil {
 				return err
 			}
-			confirm := confirmer(out, yes)
+			confirm := initApplyConfirmer(o.adopting, out, yes)
 			app := &release.Applier{
 				Charts:  source,
 				Confirm: confirm,
@@ -1010,6 +1011,19 @@ func (o *initFlags) run(ctx context.Context, kubeconfig string, yes, plain bool,
 		out.Warn(setup.NoDNSWarning(h, "init"))
 	}
 	return nil
+}
+
+// initApplyConfirmer is what init's hand-over asks its release question with.
+// It is init's own question on a box a person installed, and no question at
+// all when another flow runs init as one step: a migration asks once, at its
+// own confirm, which covers the empty release this install writes and the apps
+// it is about to move. A second form there would ask after the first step had
+// already written.
+func initApplyConfirmer(adopting bool, out say.Reporter, yes bool) asker {
+	if adopting {
+		return answered{}
+	}
+	return confirmer(out, yes)
 }
 
 // afterConfirm is the one hook apply runs after its confirm and before its

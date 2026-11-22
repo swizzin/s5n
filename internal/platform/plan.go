@@ -155,6 +155,11 @@ func (d *Decision) printPlan(r say.Reporter, plan Plan) {
 	r.Plan("platform plan", items)
 }
 
+// Items is the plan as a reader sees it, for a flow that shows the platform
+// plan inside its own confirm instead of letting this package print it
+// (Decision.CallerShowsPlan).
+func (p Plan) Items() []say.Item { return planItems(p) }
+
 // group is the component's builder, made on first use.
 func (b *planBuilder) group(key string) *planGroup {
 	if g, ok := b.groups[key]; ok {
