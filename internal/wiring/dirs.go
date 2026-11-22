@@ -40,15 +40,17 @@ func EnsureDataDirs(instances []Instance) ([]DirResult, error) {
 	var out []DirResult
 	seen := map[string]bool{}
 	for _, inst := range instances {
-		for _, d := range []struct{ tree, path string }{
-			{"downloads", inst.SavePath},
-			{"media", inst.RootFolder},
+		// The directory each tree is named after: the library's category, and
+		// the download category, which a migrated box keeps from its source.
+		for _, d := range []struct{ tree, name, path string }{
+			{"downloads", downloadCategory(inst), inst.SavePath},
+			{"media", inst.Category, inst.RootFolder},
 		} {
 			if seen[d.path] {
 				continue
 			}
 			seen[d.path] = true
-			res := DirResult{Name: "data/dirs/" + d.tree + "/" + inst.Category, Path: d.path}
+			res := DirResult{Name: "data/dirs/" + d.tree + "/" + d.name, Path: d.path}
 			info, err := os.Stat(d.path)
 			switch {
 			case err == nil && !info.IsDir():

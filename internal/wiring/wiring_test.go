@@ -798,6 +798,17 @@ func TestWiringKeepsAMigratedDownloadCategory(t *testing.T) {
 	if len(res.Hardlinks) == 0 || !strings.HasSuffix(res.Hardlinks[0].Source, "/downloads/TV") {
 		t.Errorf("the hardlink proof ran on %+v, want the downloads category TV", res.Hardlinks)
 	}
+	// The receipt names the directories it made by the name each is: the
+	// download tree's category, not the library's.
+	var made []string
+	for _, step := range res.Steps {
+		if strings.HasPrefix(step.Name, "data/dirs/downloads/") {
+			made = append(made, step.Name)
+		}
+	}
+	if strings.Join(made, " ") != "data/dirs/downloads/TV data/dirs/downloads/movies" {
+		t.Errorf("the receipt's download directories are %v, want the download categories TV and movies", made)
+	}
 	if h.stack.count() == writesBefore {
 		t.Error("the run wrote nothing at all")
 	}
