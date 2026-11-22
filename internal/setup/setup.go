@@ -331,7 +331,7 @@ func (d *Decision) Run(ctx context.Context, opts Options) (Result, error) {
 		key: "gateway.host", flag: "--domain",
 		prompt: "domain", help: "the name this box is reached at, e.g. box.example.com",
 		value: opts.Domain, prefill: prefill(base, grantNow, "gateway.host"),
-		unattended: opts.Unattended, decided: opts.Adopting, validate: validDomain,
+		unattended: opts.Unattended, decided: opts.Adopting && strings.TrimSpace(opts.Domain) != "", validate: validDomain,
 	})
 	if err != nil {
 		return res, d.stop(err)

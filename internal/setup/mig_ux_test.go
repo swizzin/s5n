@@ -123,3 +123,26 @@ func TestAGuidedMigrationRefusesWithoutThePlansDataRoot(t *testing.T) {
 		}
 	}
 }
+
+// TestAGuidedMigrationAsksForTheDomainItWasNotGiven: a missing domain is init's
+// own question, with its own help line, and the answer goes into the grant. The
+// plan decides no domain, so this is the one the person must supply.
+func TestAGuidedMigrationAsksForItsMissingDomain(t *testing.T) {
+	h := newHarness(t)
+	opts := h.migrating(map[string]string{
+		"login":    "alice",
+		"password": h.passwordFile(t),
+		"config":   "/srv/s5n/config",
+	})
+	h.prompt.inputs = []string{"box.example.com"}
+
+	if _, err := h.run(opts); err != nil {
+		t.Fatalf("a guided migration with no domain was refused instead of asked: %v\n%s", err, h.out)
+	}
+	if got, want := strings.Join(h.prompt.events, ","), "input:gateway.host"; got != want {
+		t.Fatalf("questions were %s, want just the domain", got)
+	}
+	if !strings.Contains(h.read(h.grantPath), "host: box.example.com") {
+		t.Errorf("the answered domain did not reach the grant:\n%s", h.read(h.grantPath))
+	}
+}
