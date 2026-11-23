@@ -33,21 +33,32 @@ server:
       # has no gRPC ext_authz implementation.
       ext-authz:
         implementation: 'ExtAuthz'
-        # The session cookie is the only credential this endpoint checks, and
-        # naming it is what makes a request that also carries an Authorization
-        # header work. Envoy forwards that header to the auth server whatever
-        # headersToExtAuth lists (it is one of the connection manager's
-        # defaults), and Authelia tries a header strategy before the cookie one
-        # unless this list says otherwise: a token it cannot parse -- an app's
-        # own API token, which is exactly what PeerBanHelper's UI sends on every
-        # call -- is an error, and the strategy loop returns on an error rather
-        # than falling through to the next strategy (handler_authz.go:303-322 at
-        # 4.39.28). The answer was a 401 to a signed-in browser. Nothing else
-        # needs the header here: every caller that reaches an app with a
-        # credential in a header does so on a bypass rule (an Arr's /api and
-        # /ping, Plex and Seerr under their own names, the portal itself), and a
-        # bypass rule is authorized before any strategy is asked
-        # (handler_authz_util.go:37-40).
+        # The session cookie is the only credential this endpoint checks.
+        # Authelia's own default for this endpoint is a header strategy first
+        # (HeaderAuthorization, scheme basic) and the cookie second
+        # (internal/configuration/schema/server.go's ServerEndpointsAuthz
+        # default at 4.39.28), and the strategy loop returns on an error instead
+        # of trying the next one (internal/handlers/handler_authz.go:303-322).
+        # Envoy forwards a request's own Authorization header to the auth
+        # server whatever headersToExtAuth lists (it is one of the connection
+        # manager's defaults), so a signed-in browser of an app that sends a
+        # token of its own depends on what that strategy makes of it. Measured
+        # against the pinned image: a well-formed token that this provider did
+        # not issue is not an error -- 4.39.28 returns errTokenIntent, the
+        # header strategy swallows it, and the cookie is tried -- but an empty
+        # one, `Authorization: Bearer `, which is exactly what a page holding
+        # no token sends (PeerBanHelper's webui does, on every call), fails to
+        # parse and the whole request is answered 401 with a valid session
+        # right there. That was the shape a person hit on a real box.
+        #
+        # Naming the cookie strategy is therefore not about which header is
+        # likelier: it is the only way no header can decide whether a signed-in
+        # person is let in, whatever the app sends and whatever a later
+        # Authelia makes of it. Nothing else needs a header here -- every caller
+        # that reaches an app with a credential in a header does so on a bypass
+        # rule (an Arr's /api and /ping, Plex and Seerr under their own names,
+        # the portal itself), and a bypass rule is authorized before any
+        # strategy is asked (handler_authz_util.go:37-40).
         authn_strategies:
           - name: 'CookieSession'
 log:

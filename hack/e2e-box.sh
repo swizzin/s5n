@@ -1499,11 +1499,13 @@ location_path() {
 #
 # The header is PeerBanHelper's exact shape: its bundle sets
 # "Authorization: Bearer ${authToken}" on every /api call (webui/src/service/
-# utils.ts:20), and with no token in the page's storage that is "Bearer " -- an
-# empty bearer value. Authelia's ext-authz used to try a header strategy first
-# and fail the request outright instead of falling through to the cookie
-# (authorization.go:143-165 rejects an empty bearer, handler_authz.go:303-322
-# returns on the error at 4.39.28), so a signed-in person was answered 401.
+# utils.ts:20). With no token in the page's storage that is "Bearer " -- an
+# empty bearer value, which Authelia 4.39.28 fails to parse before it ever looks
+# at the cookie, so the whole request was answered 401 with a valid session
+# right there (measured against the pinned image: the empty value is the one
+# that fails; a well-formed token of another provider's is swallowed as an
+# errTokenIntent and the cookie is tried). The endpoint now names
+# CookieSession as its only strategy, and a header cannot decide anything.
 assert_front_door() {
   local addr=$1 ca=$2
   local ca_args=(--cacert "$ca")
@@ -1953,6 +1955,20 @@ print("  app routes: %d HTTPRoutes, none pins a sectionName" % len(items))
     *" cookie "*) ;;
     *) echo "headersToExtAuth = [${policy_headers}]: without cookie every request is anonymous"; fail=1 ;;
   esac
+  # The endpoint asks for the session cookie and nothing else. No header an app
+  # sends can then decide whether a signed-in person is let in -- an empty
+  # `Authorization: Bearer ` from a page holding no token used to be a 401 here,
+  # with a valid session right beside it (measured against the pinned image; the
+  # reasoning is in install/platform/authelia/configuration.yml.tmpl).
+  authz_strategies=$($K -n s5n-system get cm s5n-authelia -o json 2>/dev/null |
+    python3 -c 'import json, sys, yaml
+data = (json.load(sys.stdin).get("data") or {}).get("configuration.yml", "")
+conf = yaml.safe_load(data) or {}
+endpoint = ((conf.get("server") or {}).get("endpoints") or {}).get("authz", {}).get("ext-authz") or {}
+print(",".join(s.get("name", "?") for s in endpoint.get("authn_strategies") or []))' 2>/dev/null || true)
+  echo "  ext-authz asks for: ${authz_strategies:-nothing}"
+  [ "$authz_strategies" = CookieSession ] ||
+    { echo "the login's ext-authz endpoint asks for ${authz_strategies:-no strategy at all}: a header an app sends could decide who is let in"; fail=1; }
   # The claim and the file: the state is on the host, owned by the login's uid,
   # and the digest is the one the portal will accept below.
   for kind in authelia; do
@@ -2312,6 +2328,30 @@ print("  app routes: %d HTTPRoutes, none pins a sectionName" % len(items))
   echo "  GET https://${PBH_HOST}/api/downloaders with the portal's session: ${pbh_api}"
   [ "$pbh_api" = 200 ] ||
     { echo "PBH answered the app's own API with ${pbh_api}: it is asking for a second login"; fail=1; }
+  # The page in a browser that has been there before holds a token of PBH's and
+  # sends it on every call as `Authorization: Bearer ...`; the same call with a
+  # token this box never issued, and the portal's session beside it, is the
+  # app's answer -- not a redirect to the login and not a 401. The cookie is the
+  # only credential the edge checks; a header of the app's own must never lock
+  # a signed-in person out of the app.
+  pbh_stale=$(curl -sS -o "$WORK/pbh-stale.json" -w '%{http_code}' -b "$JAR" \
+    -H 'Authorization: Bearer stale-token-from-a-browser' \
+    --resolve "${PBH_HOST}:443:${gw_addr}" --cacert "$WORK/pebble-root.pem" \
+    "https://${PBH_HOST}/api/downloaders" 2>/dev/null || true)
+  echo "  GET https://${PBH_HOST}/api/downloaders with the session and a stale Bearer: ${pbh_stale}"
+  [ "$pbh_stale" = 200 ] ||
+    { echo "PBH answered a signed-in request carrying its own stale token with ${pbh_stale}: the edge is reading the header instead of the session"; fail=1; }
+  python3 - "$WORK/pbh-stale.json" <<'PYSTALE' || fail=1
+import json, sys
+try:
+    rows = json.load(open(sys.argv[1], encoding="utf-8"))["data"]
+except Exception as exc:
+    print("  the 200 is not PBH's downloader list: %s" % exc)
+    sys.exit(1)
+if len(rows) != 1 or rows[0].get("id") != "qbittorrent":
+    print("  the 200 is not PBH's answer: %r" % (rows,))
+    sys.exit(1)
+PYSTALE
   # The call its page makes as it loads, and the one whose 401 renders PBH's
   # token form: a fresh browser holds no token, so it posts an empty one. 200
   # is the dialog not appearing; with the app's login switched off PBH says so

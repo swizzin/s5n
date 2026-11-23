@@ -361,7 +361,11 @@ Job is the only client that carries it. Readiness depends on the same switch: th
 asks the app's API, which answers without a credential only because the login is off.
 
 A browser that was ever given PBH's token keeps it in `localStorage` (a `?token=` link,
-or the form), and PBH counts every failed login against the caller's network: three per
+or the form), along with the API endpoint it was pointed at: a stale or bogus endpoint
+(a port on `127.0.0.1`, say) makes the page ask for one in a popup and answer
+"unable to parse", which is the same stored state and the same cure -- neither is
+something the box can fix from the server. And PBH counts every failed login against
+the caller's network: three per
 page load trip its 15-minute lockout, after which every request answers 429 and a
 working box looks like a routing fault. The cure is the browser's own: clear the site's
 data for the app's host (or open it in a private window). The token the form asks for is
