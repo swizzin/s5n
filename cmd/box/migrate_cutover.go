@@ -59,11 +59,20 @@ func runMigrateCutover(ctx context.Context, args []string) {
 		fmt.Fprintf(os.Stderr, "box: %v\n", err)
 		os.Exit(2)
 	}
+	// --unit-dir is bootstrap's timer switch: the keep path can install a box on
+	// a host with none, and the timer that install writes lands in the directory
+	// this run names.
+	unitDir, args, err := takeDevFlag(args, "unit-dir")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "box: %v\n", err)
+		os.Exit(2)
+	}
 	fs := flag.NewFlagSet("migrate cutover", flag.ExitOnError)
 	o := cutoverOptions{discoverOptions: discoverOptions{Box: version}}
 	ns := addDiscoverFlags(fs, &o.discoverOptions, "the final snapshot to write (default: "+bundle.Dir+"/migrate-<time>-final.tar.gz)")
 	o.apply = addCutoverApplyFlags(fs, &o.Kubeconfig)
 	o.apply.install.pathsInNode = pathsInNode
+	o.apply.install.unitDir = unitDir
 	// The read and the install name one release: --chart-repo and
 	// --chart-version are apply's flags, and the plan's image variants come
 	// from that same chart.

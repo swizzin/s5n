@@ -58,6 +58,11 @@ type installFlags struct {
 	// taken out of argv before the flags are parsed: the e2e's paths are inside
 	// its node, so init neither reports nor creates them.
 	pathsInNode bool
+	// unitDir is the timer's development switch (--unit-dir), taken out of argv
+	// the same way `box bootstrap` takes it: the two unit files land in a
+	// directory this run names and no systemctl runs, because the systemd they
+	// are for is not this host's.
+	unitDir string
 }
 
 func addInstallFlags(fs *flag.FlagSet) *installFlags {
@@ -204,7 +209,8 @@ func sourceTorrentPort(p *plan.Plan, opened *bundle.Opened) int {
 
 // migrateInstall takes a host with no box to one with a seedbox whose apps are
 // off, from the plan. It returns when init has installed the release, which is
-// the state the adoption then runs against.
+// the state the adoption then runs against -- and, last, when the update timer
+// for the files it installed is written, the way bootstrap ends.
 //
 // class is the GatewayClass the pre-install pass chose. It is handed back in, so
 // the second decision does not ask a question the first one already answered: the
@@ -253,7 +259,48 @@ func migrateInstall(ctx context.Context, o *migrateApplyFlags, inst *installFlag
 	if err != nil {
 		return err
 	}
-	return iflg.run(ctx, res.Kubeconfig, *o.yes, *o.plain, out)
+	finish := installFinish{
+		adopt:    func(ctx context.Context) error { return iflg.run(ctx, res.Kubeconfig, *o.yes, *o.plain, out) },
+		schedule: scheduleUpdates,
+	}
+	return finish.run(ctx, inst, iflg, out)
+}
+
+// scheduler writes the update timer's two units for the files an install used.
+// It is bootstrap's own scheduleUpdates, and a field only so a test can watch
+// what the install hands it and when.
+type scheduler func(ctx context.Context, unitDir, record, grant, values string, out say.Reporter)
+
+// installFinish is the last step of a host with no box: init's own flow over the
+// plan's answers, and then -- exactly as bootstrap puts it last -- the timer for
+// the files this run installed.
+//
+// The order is the point twice over. A box whose install never finished is never
+// on a schedule, so a failing adoption schedules nothing; and the timer has to
+// run after init wrote the grant and values, because the units it writes name
+// them.
+//
+// adopt and schedule are fields so a test drives both without a cluster, a host
+// or a systemd.
+type installFinish struct {
+	// adopt is init's flow: the seedbox's questions answered from the plan, its
+	// two files written, and the release installed with the apps off.
+	adopt func(context.Context) error
+	// schedule writes the timer's units for the record this run kept and the
+	// grant and values it installed from.
+	schedule scheduler
+}
+
+// run is init's flow and then the timer, for the same three files `box
+// bootstrap` names: the record this host kept, and the grant and values this run
+// installed from. The timer's own failure is a warning the scheduler says, not
+// the install's: the seedbox is installed and serving either way.
+func (f installFinish) run(ctx context.Context, inst *installFlags, iflg *initFlags, out say.Reporter) error {
+	if err := f.adopt(ctx); err != nil {
+		return err
+	}
+	f.schedule(ctx, inst.unitDir, *inst.record, *iflg.grantPath, *iflg.valuesPath, out)
+	return nil
 }
 
 // migrationDecision is box bootstrap's own decision, built from this run's flags:
