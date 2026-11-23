@@ -26,7 +26,10 @@ type appFakes struct {
 	quiWrites  int
 	autoWrites int
 	quiLogin   int // status the login answers with; 0 is 200
-	autoLogin  int
+	autoLogin  int // status the login answers with; 0 is 204
+	// autoLoginBody is the message autobrr's refusal carries, which is what
+	// separates a bad password from a login the app's auth mode does not offer.
+	autoLoginBody string
 }
 
 func (f *appFakes) quiHandler() http.HandlerFunc {
@@ -90,8 +93,12 @@ func (f *appFakes) autobrrHandler() http.HandlerFunc {
 		switch {
 		case path == "/api/auth/login":
 			if f.autoLogin != 0 {
+				body := "could not login: bad credentials"
+				if f.autoLoginBody != "" {
+					body = f.autoLoginBody
+				}
 				w.WriteHeader(f.autoLogin)
-				writeJSON(w, map[string]string{"message": "could not login: bad credentials"})
+				writeJSON(w, map[string]string{"message": body})
 				return
 			}
 			http.SetCookie(w, &http.Cookie{Name: "autobrr_user_session", Value: "test", Path: "/autobrr/"})
@@ -342,6 +349,46 @@ func TestWiringNamesAChangedAutobrrPassword(t *testing.T) {
 	step := stepByName(t, res, "autobrr/login")
 	if step.Result != "failed" || !strings.Contains(step.Detail, "kubectl rollout restart statefulset/autobrr") {
 		t.Fatalf("autobrr/login = %+v", step)
+	}
+}
+
+// autobrr v1.91 refuses the password login itself when OIDC is on with the
+// built-in login switched off ("password login is unavailable in oidc
+// authentication mode", internal/http/auth.go:122-126 at v1.91.1), and the
+// wiring Job's account then never signs in, so no downloader is registered. The
+// receipt has to say that: a restart would not put a password nobody changed
+// back, and an operator told to run one would look for the wrong fault.
+func TestWiringNamesAnAppThatRefusesItsOwnPasswordLogin(t *testing.T) {
+	h := newHarness(t)
+	f := h.withApps(t)
+	f.autoLogin = http.StatusForbidden
+	f.autoLoginBody = "password login is unavailable in oidc authentication mode"
+
+	res, err := h.runner.Run(context.Background())
+	if err == nil {
+		t.Fatalf("run succeeded with autobrr refusing its own login\n%s", Summary(res))
+	}
+	step := stepByName(t, res, "autobrr/login")
+	if step.Result != "failed" {
+		t.Fatalf("autobrr/login = %+v, want failed", step)
+	}
+	if strings.Contains(step.Detail, "changed inside the app") {
+		t.Fatalf("autobrr/login detail = %q, want the auth mode named rather than a changed password", step.Detail)
+	}
+	for _, want := range []string{"autobrr", "own password login", "oidc"} {
+		if !strings.Contains(step.Detail, want) {
+			t.Fatalf("autobrr/login detail = %q, want it to contain %q", step.Detail, want)
+		}
+	}
+	if f.autoWrites != 0 {
+		t.Fatalf("a refused login still wrote %d clients", f.autoWrites)
+	}
+	// And the step it would have reached never ran, so the receipt is honest
+	// about what did not happen.
+	for _, s := range res.Steps {
+		if s.Name == "autobrr/downloader/qbittorrent" {
+			t.Fatalf("a downloader step ran after a refused login: %+v", s)
+		}
 	}
 }
 

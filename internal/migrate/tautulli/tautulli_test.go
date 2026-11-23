@@ -522,3 +522,26 @@ func TestLoginOffLeavesAbsentKeysAlone(t *testing.T) {
 		}
 	}
 }
+
+// Tautulli 2.19's two switches are the other half of "its own login is off": a
+// file at 2.19 that a migration takes over holds them at the install defaults,
+// which mint a password for a wizard that never finished and refuse every
+// request a reverse proxy forwarded. A source on the same version as the chart
+// is what the fixture runs, so the file migrate reads is a 2.19 file.
+func TestSwitchesTheTwoSwitches219AddedToKeepTheLoginOff(t *testing.T) {
+	got := rewritten(t, "[General]\nhttp_port = 8181\nfirst_run_complete = 0\n"+
+		"http_password = \"\"\n\n[PMS]\npms_ip = localhost\npms_port = 32400\n\n"+
+		"[Advanced]\nallow_public_no_password = 0\nconfig_version = 23\n")
+	for where, want := range map[string]string{
+		"General/first_run_complete":        "1",
+		"Advanced/allow_public_no_password": "1",
+	} {
+		if got[where] != want {
+			t.Errorf("%s = %q, want %q", where, got[where], want)
+		}
+	}
+	// The app's own neighbours in both sections are the app's.
+	if got["Advanced/config_version"] != "23" {
+		t.Errorf("Advanced/config_version = %q, want it left alone", got["Advanced/config_version"])
+	}
+}

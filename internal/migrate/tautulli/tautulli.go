@@ -70,15 +70,16 @@ const bindAddr = "0.0.0.0"
 // setting under (Config._define's `ini_key = name.lower()`, :473); the lookup
 // in ini.go accepts any spelling and every report names the one the file holds.
 const (
-	sectionPMS  = "PMS"
-	sectionWeb  = "General"
-	keyPMSIP    = "pms_ip"
-	keyPMSPort  = "pms_port"
-	keyPMSSSL   = "pms_ssl"
-	keyPMSURL   = "pms_url"
-	keyHTTPHost = "http_host"
-	keyHTTPPort = "http_port"
-	keyHTTPRoot = "http_root"
+	sectionPMS      = "PMS"
+	sectionWeb      = "General"
+	sectionAdvanced = "Advanced"
+	keyPMSIP        = "pms_ip"
+	keyPMSPort      = "pms_port"
+	keyPMSSSL       = "pms_ssl"
+	keyPMSURL       = "pms_url"
+	keyHTTPHost     = "http_host"
+	keyHTTPPort     = "http_port"
+	keyHTTPRoot     = "http_root"
 )
 
 // The keys that make Tautulli ask for its own password. A non-empty
@@ -91,16 +92,30 @@ const (
 // (internal/ttlconf); a source's password would otherwise sit in the file until
 // the first restart put it back, and would be a second password in front of an
 // app nobody should have to sign in to twice.
+//
+// 2.19 added the two keys below them, and an empty password is not enough on its
+// own any more: a start where the setup wizard never finished mints a random
+// password (plexpy/__init__.py:3121-3145 at v2.19.1, generate_first_run_password
+// -- which first_run_complete is what stops), and without a password the app
+// refuses every request a reverse proxy forwarded (webstart.py:406-441,
+// no_password_gate -- which allow_public_no_password is what stops) as well as
+// minting one on a config that upgrades to 2.19 with none (config.py:796-800).
+// So the migrated file says what the chart's init container will say on the next
+// start, rather than waiting for it: first_run_complete in [General], and the
+// gate's switch in [Advanced], the section _CONFIG_DEFINITIONS gives each.
 var loginOffKeys = []struct {
-	name  string
-	value string
-	quote string
+	section string
+	name    string
+	value   string
+	quote   string
 }{
-	{"http_username", "", `"`},
-	{"http_password", "", `"`},
-	{"http_hash_password", "0", ""},
-	{"http_hashed_password", "0", ""},
-	{"http_basic_auth", "0", ""},
+	{sectionWeb, "http_username", "", `"`},
+	{sectionWeb, "http_password", "", `"`},
+	{sectionWeb, "http_hash_password", "0", ""},
+	{sectionWeb, "http_hashed_password", "0", ""},
+	{sectionWeb, "http_basic_auth", "0", ""},
+	{sectionWeb, "first_run_complete", "1", ""},
+	{sectionAdvanced, "allow_public_no_password", "1", ""},
 }
 
 // pathKeys are the keys holding an absolute path, each in its own section
@@ -257,11 +272,13 @@ func planEdits(in rewrite.Input, f *iniFile, rep *rewrite.Report) ([]edit, error
 
 // loginOff is the edits that switch Tautulli's own web login off. Only the keys
 // the file holds are edited: one that is absent is one the app's defaults answer
-// for, and writing it would be this package inventing a setting.
+// for, and writing it would be this package inventing a setting. A config.ini
+// Tautulli wrote itself holds all of them -- Config.write() builds the file from
+// _CONFIG_DEFINITIONS -- which is the only kind of file a migration reads.
 func loginOff(f *iniFile) []edit {
 	var edits []edit
 	for _, k := range loginOffKeys {
-		line, ok := f.get(sectionWeb, k.name)
+		line, ok := f.get(k.section, k.name)
 		if !ok || line.value == k.value {
 			continue
 		}

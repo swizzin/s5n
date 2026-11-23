@@ -1215,9 +1215,9 @@ echo "qBittorrent enable_multi_connections_from_same_ip = ${multi} (PBH turns it
 # ---- the opt-in apps (apps-values.yaml) ---------------------------------------
 # Each serves itself under its own base path (its baseUrl / BASE_PATH, with no
 # rewrite). qui and Maintainerr keep no login of their own here: the edge is the
-# login, exactly as the Arrs run External. autobrr does, because v1.90.0 has no
-# way to turn its login off and this install gives the release no provider -- a
-# box's init does, and that is what the box e2e signs in to. So the HTML must
+# login, exactly as the Arrs run External. autobrr does, because this install
+# gives the release no provider, so its own password login stays on (a box's init
+# gives it one, and that is what the box e2e signs in to). So the HTML must
 # arrive without a redirect,
 # and the asset URLs it builds must resolve through the same prefix — that is
 # what makes the base-path setting right rather than merely present.
@@ -1253,10 +1253,10 @@ for app in qui autobrr maintainerr; do
       echo "GET /${app} in-pod /healthz/readiness -> ${code}"; [ "$code" = 200 ] || fail=1 ;;
     autobrr)
       # This install gives the release no provider (a plain helm install sets
-      # auth.edge and nothing else), so autobrr keeps the login it cannot turn
-      # off at v1.90.0: the UI is its own sign-in page behind the edge's, which
-      # is the state a box that never ran init has. Its base path covers every
-      # route, so health answers under the prefix like any other path.
+      # auth.edge and nothing else), so autobrr keeps its own login: the UI is
+      # its sign-in page behind the edge's, which is the state a box that never
+      # ran init has. Its base path covers every route, so health answers under
+      # the prefix like any other path.
       code=$(gw_get -s -o /dev/null -w '%{http_code}' "https://${DOMAIN}/${app}/api/healthz/readiness" || true)
       echo "GET /${app}/api/healthz/readiness via gateway -> ${code}"; [ "$code" = 200 ] || fail=1 ;;
     maintainerr)
@@ -1300,11 +1300,23 @@ case "$tpath" in
   /tautulli/*) : ;;
   *) echo "/tautulli/ redirected to ${loc}, which is outside its prefix: the app's URL root does not know it"; fail=1 ;;
 esac
+# Not its own login: box seals Tautulli's web login off on every start
+# (internal/ttlconf), and this install has no edge login in front of it, so a
+# redirect into the app's auth paths is the app asking for a password nobody was
+# given. Tautulli 2.19 does that from a password it mints itself, or refuses the
+# Gateway's forwarded request outright, unless the seal's two switches are set.
+case "$tpath" in
+  */auth/* | */auth) echo "/tautulli/ redirected to ${loc}: the app's own login is on, and nothing in front of it is box's"; fail=1 ;;
+esac
 if [ -n "$tpath" ]; then
   code=$(gw_get -s -o "$WORK/tautulli.html" -w '%{http_code}' "https://${DOMAIN}${tpath}" || true)
   echo "GET ${tpath} via gateway -> ${code}"
   [ "$code" = 200 ] || { echo "${tpath} did not serve the app's page: ${code}"; fail=1; }
   grep -qi '<!doctype html' "$WORK/tautulli.html" || { echo "${tpath} answered ${code} without an HTML document"; fail=1; }
+  if grep -q 'id="login-form"' "$WORK/tautulli.html"; then
+    echo "${tpath} served Tautulli's own login form: internal/ttlconf did not keep its login off"
+    fail=1
+  fi
 fi
 tasset=$(grep -oE '(src|href)="[^"]+\.(js|css)([?#][^"]*)?"' "$WORK/tautulli.html" | head -1 |
   sed 's/^[a-z]*="//; s/"$//' || true)

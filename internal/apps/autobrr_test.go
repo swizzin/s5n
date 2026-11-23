@@ -15,13 +15,14 @@ import (
 // GET masks both secrets as "<redacted>", POST accepts a duplicate name, and PUT
 // is a whole-row replace that wipes a password or API key it is not sent.
 type autobrrFake struct {
-	mu      sync.Mutex
-	rows    []Item
-	nextID  int
-	writes  int
-	tests   int
-	testErr bool
-	login   int // the status /api/auth/login answers with
+	mu        sync.Mutex
+	rows      []Item
+	nextID    int
+	writes    int
+	tests     int
+	testErr   bool
+	login     int    // the status /api/auth/login answers with
+	loginBody string // the body it answers that status with, when set
 }
 
 func (f *autobrrFake) handler() http.HandlerFunc {
@@ -35,6 +36,11 @@ func (f *autobrrFake) handler() http.HandlerFunc {
 			}
 			if f.login == http.StatusNoContent {
 				http.SetCookie(w, &http.Cookie{Name: "autobrr_user_session", Value: "sess-1", Path: "/autobrr/"})
+			}
+			if f.loginBody != "" {
+				w.WriteHeader(f.login)
+				writeJSON(w, map[string]string{"message": f.loginBody})
+				return
 			}
 			w.WriteHeader(f.login)
 		case r.URL.Path == "/autobrr/api/healthz/readiness":
@@ -314,6 +320,52 @@ func TestAutobrrLoginRejectsCredentials(t *testing.T) {
 	if rej.App != "autobrr" || rej.Username != "s5n" {
 		t.Fatalf("rejection = %+v", rej)
 	}
+}
+
+// autobrr v1.91.0 answers 403 to POST /api/auth/login when OIDC is on and the
+// built-in login is switched off (internal/http/auth.go:122-126 at v1.91.1:
+// "password login is unavailable in oidc authentication mode"), and that is not
+// the account's password having changed: it is the app's auth mode, which box's
+// chart decides. The two must not be the same error, because only one of them is
+// fixed by restarting the pod.
+func TestAutobrrLoginTellsAnAuthModeRefusalFromABadPassword(t *testing.T) {
+	f, a := newAutobrrFake(t)
+	f.login = http.StatusForbidden
+	f.loginBody = "password login is unavailable in oidc authentication mode"
+	err := a.Login(context.Background())
+	if err == nil {
+		t.Fatal("a refused password login reported success")
+	}
+	var rej *LoginRejectedError
+	if asLoginRejected(err, &rej) {
+		t.Fatalf("the auth mode's refusal was reported as %v, want the app's configuration named instead", rej)
+	}
+	var unavailable *LoginUnavailableError
+	if !asLoginUnavailable(err, &unavailable) {
+		t.Fatalf("error = %v (%T), want a LoginUnavailableError", err, err)
+	}
+	if unavailable.App != "autobrr" || unavailable.Mode != "oidc" {
+		t.Fatalf("refusal = %+v, want autobrr in oidc mode", unavailable)
+	}
+	if msg := err.Error(); !strings.Contains(msg, "autobrr") || !strings.Contains(msg, "oidc") {
+		t.Fatalf("error = %q, want it to name the app and the mode", msg)
+	}
+}
+
+// asLoginUnavailable is asLoginRejected's twin, for the same reason.
+func asLoginUnavailable(err error, target **LoginUnavailableError) bool {
+	for err != nil {
+		if u, ok := err.(*LoginUnavailableError); ok {
+			*target = u
+			return true
+		}
+		w, ok := err.(interface{ Unwrap() error })
+		if !ok {
+			return false
+		}
+		err = w.Unwrap()
+	}
+	return false
 }
 
 // asLoginRejected is errors.As specialised for the tests here, so each app's

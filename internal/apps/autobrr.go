@@ -2,6 +2,7 @@ package apps
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/cookiejar"
@@ -59,7 +60,9 @@ func (a *Autobrr) WaitReady(ctx context.Context, timeout time.Duration) error {
 
 // Login opens the session. autobrr answers 403 for bad credentials (not 401),
 // so the status alone cannot classify the failure; the body is what separates a
-// rejection from any other 4xx.
+// rejection from the app's auth mode not offering a password login at all
+// (v1.91.0, where the switch that only hid the form started refusing the
+// endpoint).
 func (a *Autobrr) Login(ctx context.Context) error {
 	var out Item
 	err := a.client.Post(ctx, a.api("/auth/login"), map[string]string{
@@ -70,9 +73,32 @@ func (a *Autobrr) Login(ctx context.Context) error {
 		return nil
 	}
 	if he, ok := err.(*HTTPError); ok && (he.Status == http.StatusForbidden || he.Status == http.StatusUnauthorized) {
+		if mode := loginUnavailableMode(he.Body); mode != "" {
+			return &LoginUnavailableError{App: "autobrr", Mode: mode}
+		}
 		return &LoginRejectedError{App: "autobrr", Username: a.username}
 	}
 	return err
+}
+
+// loginUnavailableMode reads the auth mode out of autobrr's own refusal of a
+// password login, or "" when the body says something else. The sentence is
+// internal/http/auth.go's at v1.91.1: "password login is unavailable in %s
+// authentication mode" in the API's {"message": ...} envelope.
+func loginUnavailableMode(body string) string {
+	var out struct {
+		Message string `json:"message"`
+	}
+	if json.Unmarshal([]byte(body), &out) != nil {
+		return ""
+	}
+	const prefix = "password login is unavailable in "
+	const suffix = " authentication mode"
+	msg := strings.TrimSpace(out.Message)
+	if !strings.HasPrefix(msg, prefix) || !strings.HasSuffix(msg, suffix) {
+		return ""
+	}
+	return strings.TrimSuffix(strings.TrimPrefix(msg, prefix), suffix)
 }
 
 func (a *Autobrr) Downloaders(ctx context.Context) ([]Item, error) {

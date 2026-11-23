@@ -518,16 +518,30 @@ spec:
             # that (config.go:1082-1102); autobrr's GetEnvStr looks for the _FILE
             # name before the plain one, for every setting (config.go:452-468).
             #
-            # OIDC is the login the app's page offers, and DISABLE_BUILT_IN_LOGIN
-            # is what removes its password form -- in the UI only. Neither app
-            # stops routing its own credential endpoints, and the account above
-            # is the only row either user table has: qui refuses /api/auth/setup
-            # once OIDC is on, so its row can only come from the CLI the init
-            # container runs, and autobrr's onboarding endpoint is refused as
-            # soon as that row exists (it was open only while the table was
-            # empty). What keeps those endpoints from anyone but this seedbox's
-            # user is the edge in front and the NetworkPolicy, not this flag; it
-            # is worth knowing before an OIDC app is ever served without one.
+            # OIDC is the login the app's page offers. Neither app stops routing
+            # its own credential endpoints, and the account above is the only row
+            # either user table has: qui refuses /api/auth/setup once OIDC is on,
+            # so its row can only come from the CLI the init container runs, and
+            # autobrr's onboarding endpoint is refused as soon as that row exists
+            # (it was open only while the table was empty). What keeps those
+            # endpoints from anyone but this seedbox's user is the edge in front
+            # and the NetworkPolicy, not this flag; it is worth knowing before an
+            # OIDC app is ever served without one.
+            #
+            # autobrr 1.91 resolves its auth mode and capabilities in one place
+            # (internal/domain/config.go's AuthCapabilities at v1.91.1) and
+            # refuses the password login outright when the built-in login is
+            # switched off: POST /api/auth/login answers 403 "password login is
+            # unavailable in oidc authentication mode"
+            # (internal/http/auth.go:122-126). Until 1.90 the switch only hid the
+            # form in the UI, so the wiring Job's account could still sign in;
+            # from 1.91 that account has no way in at all and no downloader is
+            # ever registered. So the built-in login STAYS ON for autobrr -- the
+            # account remains the wiring Job's, past the edge and the
+            # NetworkPolicy -- and its own 1.91 setting, automatic OIDC login
+            # (OIDCAutoRedirect, the login page sends the browser to the provider
+            # itself), is what keeps the form from being offered. qui answers a
+            # password login in its own code and needs neither.
             #
             # What an unreachable issuer costs differs: qui will not start,
             # autobrr starts and retries discovery for about four minutes
@@ -544,8 +558,15 @@ spec:
               value: /etc/s5n-oidc/client-secret
             - name: {{ $oidcPrefix }}__OIDC_REDIRECT_URL
               value: {{ printf "https://%s%s/api/auth/oidc/callback" $root.Values.gateway.host $urlBase | quote }}
+            {{- if eq $inst.app "autobrr" }}
+            - name: AUTOBRR__OIDC_DISABLE_BUILT_IN_LOGIN
+              value: "false"
+            - name: AUTOBRR__OIDC_AUTO_REDIRECT
+              value: "true"
+            {{- else }}
             - name: {{ $oidcPrefix }}__OIDC_DISABLE_BUILT_IN_LOGIN
               value: "true"
+            {{- end }}
             # The anchor, when the box's certificate is not publicly trusted:
             # the login's own root, which box copies into a ConfigMap in this
             # namespace. SSL_CERT_DIR adds a directory to Go's system pool;

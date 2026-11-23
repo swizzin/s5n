@@ -22,32 +22,60 @@
 // # Its own login
 //
 // A non-empty http_password is the switch that turns Tautulli's web login on
-// (webstart.py:195-213: with a password it registers the auth tool and logs
-// "authentication is enabled"; without one it logs "authentication is disabled"
-// and admits everyone). Behind box the person signs in at the edge once, so the
-// app's own login is a second password nobody should be asked for: every start
-// clears the pair and the two hash flags, which is what keeps a value the app or
-// a person wrote back -- the settings page can set one -- from coming alive
-// again on the next restart. http_basic_auth only chooses *how* the login is
-// asked (basic instead of a form); it is cleared with the rest so the app never
-// has half of a login configured.
+// (webstart.py:195-213 at v2.18.2: with a password it registers the auth tool
+// and logs "authentication is enabled"; without one it logs "authentication is
+// disabled" and admits everyone). Behind box the person signs in at the edge
+// once, so the app's own login is a second password nobody should be asked for:
+// every start clears the pair and the two hash flags, which is what keeps a
+// value the app or a person wrote back -- the settings page can set one -- from
+// coming alive again on the next restart. http_basic_auth only chooses *how* the
+// login is asked (basic instead of a form); it is cleared with the rest so the
+// app never has half of a login configured.
+//
+// Tautulli 2.19 closed both holes an empty password left, and this package seals
+// those too:
+//
+//   - A start where the setup wizard never finished mints a random password and
+//     logs it ("Setup wizard login", plexpy/__init__.py:3121-3145 at v2.19.1,
+//     generate_first_run_password). A box is not an unfinished install -- the
+//     wiring Job is what configures Plex, through the app's API -- so
+//     first_run_complete is set, which is also what makes that function return
+//     without writing one, and what serves /home instead of the wizard.
+//   - Without a password, 2.19 refuses every client outside the local network
+//     *and* every request that arrived through a reverse proxy
+//     (webstart.py:406-441, no_password_gate: the proxy's own address is local,
+//     but Envoy sends X-Forwarded-For and this app's own proxy setting is off,
+//     so the request is refused). allow_public_no_password is that gate's switch
+//     and says what box means: the login in front of this app is the edge's, and
+//     the release's NetworkPolicy is what bounds who reaches the port at all --
+//     the same trade as qBittorrent's private-subnet bypass. It lives in the
+//     [Advanced] section, because _CONFIG_DEFINITIONS gives it that one and
+//     Tautulli reads a setting under the section and the name it was defined
+//     with. It is load-bearing twice, because the same key is what keeps a config
+//     upgrading to 2.19 from minting a password on the way (config.py:796-800).
 package ttlconf
 
 import "strings"
 
-// The [General] keys this package owns, all spelled the way Tautulli writes and
-// reads them: Config._define folds every setting to ini_key = name.lower()
-// (plexpy/config.py:473), and ConfigObj itself is case-sensitive.
+// The keys this package owns, all spelled the way Tautulli writes and reads
+// them: Config._define folds every setting to ini_key = name.lower()
+// (plexpy/config.py:473), and ConfigObj itself is case-sensitive. The section is
+// the one _CONFIG_DEFINITIONS gives the setting (`GENERAL` for most of them,
+// `Advanced` for allow_public_no_password): _define passes the section through
+// untouched, so a key written in the wrong one is a setting the app never reads.
 const (
-	sectionGeneral = "General"
-	keyAPIKey      = "api_key"
-	keyAPIEnabled  = "api_enabled"
-	keyHTTPRoot    = "http_root"
-	keyHTTPUser    = "http_username"
-	keyHTTPPass    = "http_password"
-	keyHTTPHashPW  = "http_hash_password"
-	keyHTTPHashed  = "http_hashed_password"
-	keyHTTPBasic   = "http_basic_auth"
+	sectionGeneral  = "General"
+	sectionAdvanced = "Advanced"
+	keyAPIKey       = "api_key"
+	keyAPIEnabled   = "api_enabled"
+	keyHTTPRoot     = "http_root"
+	keyHTTPUser     = "http_username"
+	keyHTTPPass     = "http_password"
+	keyHTTPHashPW   = "http_hash_password"
+	keyHTTPHashed   = "http_hashed_password"
+	keyHTTPBasic    = "http_basic_auth"
+	keyFirstRun     = "first_run_complete"
+	keyPublicNoPW   = "allow_public_no_password"
 )
 
 // empty is an empty string as ConfigObj writes it: the quotes are what tells
@@ -61,19 +89,26 @@ const empty = `""`
 // nothing.
 func Seal(existing []byte, apiKey, httpRoot string) (out []byte, changed bool) {
 	doc := parse(existing)
-	want := []struct{ key, value string }{
-		{keyAPIKey, apiKey},
-		{keyAPIEnabled, "1"},
-		{keyHTTPRoot, httpRoot},
-		{keyHTTPUser, empty},
-		{keyHTTPPass, empty},
-		{keyHTTPHashPW, "0"},
-		{keyHTTPHashed, "0"},
-		{keyHTTPBasic, "0"},
+	want := []struct{ section, key, value string }{
+		{sectionGeneral, keyAPIKey, apiKey},
+		{sectionGeneral, keyAPIEnabled, "1"},
+		{sectionGeneral, keyHTTPRoot, httpRoot},
+		{sectionGeneral, keyHTTPUser, empty},
+		{sectionGeneral, keyHTTPPass, empty},
+		{sectionGeneral, keyHTTPHashPW, "0"},
+		{sectionGeneral, keyHTTPHashed, "0"},
+		{sectionGeneral, keyHTTPBasic, "0"},
+		// The two switches 2.19 put in front of an empty password; see the
+		// package comment. first_run_complete is what stops the app minting a
+		// password for an install it thinks unfinished, and
+		// allow_public_no_password is what keeps its local-network-only gate off
+		// the Gateway's requests.
+		{sectionGeneral, keyFirstRun, "1"},
+		{sectionAdvanced, keyPublicNoPW, "1"},
 	}
 	differs := false
 	for _, w := range want {
-		if doc.get(sectionGeneral, w.key) != w.value {
+		if doc.get(w.section, w.key) != w.value {
 			differs = true
 			break
 		}
@@ -82,7 +117,7 @@ func Seal(existing []byte, apiKey, httpRoot string) (out []byte, changed bool) {
 		return existing, false
 	}
 	for _, w := range want {
-		doc.set(sectionGeneral, w.key, w.value)
+		doc.set(w.section, w.key, w.value)
 	}
 	return doc.render(), true
 }
