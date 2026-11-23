@@ -71,8 +71,13 @@ previous run's logs stay readable until then.
       "plexTokenFile" "/etc/s5n/keys/plex-token") }}
 {{- end }}
 {{- if and .Values.apps.seerr .Values.apps.seerr.enabled }}
+{{- /* The publicUrl is where a person opens Seerr, not where this Job dials it:
+       Seerr's bundle loads its assets from the site root, so the chart serves it
+       at <app>.<domain> (catalog.yaml's exposure), and the one row that asks a
+       human to sign in there has to name that address rather than the Service. */}}
 {{- $_ := set $cfg "seerr" (dict
-      "url" (printf "http://seerr:%v" .Values.apps.seerr.port)) }}
+      "url" (printf "http://seerr:%v" .Values.apps.seerr.port)
+      "publicUrl" (include "s5n.appHost" (dict "root" . "app" "seerr") | trim)) }}
 {{- end }}
 {{- if and .Values.apps.qui .Values.apps.qui.enabled }}
 {{- /* qui keeps its own user table: the account the chart owns is what this

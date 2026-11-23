@@ -3509,6 +3509,56 @@ print("qui=%s" % rec["qui"]["instance"],
   [ "$created" = 0 ] && [ "$updated" = 0 ] || { echo "an unchanged release wrote ${created} created / ${updated} updated"; fail=1; }
   [ "$ids_before" = "$ids_after" ] || { echo "the second run recorded different ids"; fail=1; }
 
+  # ---- Seerr's row: the address it names, and the box with no to-do -----------
+  # Seerr's bundle loads its assets from the site root, so the chart serves it at
+  # seerr.<domain> with a listener of its own: the one row that asks a human to
+  # sign in there has to name that address, never the /seerr path an older
+  # release routed it under. And the row is a to-do only for a Seerr with no
+  # admin: a migrated Seerr carries its admin in the settings its snapshot took,
+  # and prints nothing at all.
+  log "Seerr's row: the address it names, and the box whose Seerr already has an admin"
+  seerr_row=$(status_field "[s['result'] for s in d['steps'] if s['name']=='seerr/plex'][0]" 2>/dev/null || true)
+  seerr_detail=$(status_field "[s['detail'] for s in d['steps'] if s['name']=='seerr/plex'][0]" 2>/dev/null || true)
+  echo "  receipt: seerr/plex ${seerr_row:-missing} (${seerr_detail:-no detail})"
+  [ "$seerr_row" = pending ] ||
+    { echo "the receipt's seerr/plex is ${seerr_row:-missing}, want pending: nothing has signed in to this Seerr"; fail=1; }
+  [ "$seerr_detail" = "Seerr has no admin account yet: sign in once at ${SEERR_HOST} with Plex to let the wiring Job take over" ] ||
+    { echo "the receipt's seerr/plex says ${seerr_detail:-nothing}, want the row that names ${SEERR_HOST}"; fail=1; }
+  # Seerr's own settings.json is the only record of whether an admin exists, so
+  # this writes the flag a migration would have carried and restarts the app on
+  # it -- the state every migrated Seerr is in.
+  docker exec -i "${CLUSTER}-control-plane" cat "$CONFIG_PATH/seerr/settings.json" >"$WORK/seerr-settings.json" 2>/dev/null ||
+    { echo "the release's Seerr wrote no settings.json"; fail=1; }
+  python3 - "$WORK/seerr-settings.json" <<'PY' || fail=1
+import json, sys
+path = sys.argv[1]
+settings = json.load(open(path, encoding="utf-8"))
+settings.setdefault("public", {})["initialized"] = True
+with open(path, "w", encoding="utf-8") as f:
+    json.dump(settings, f, indent=2)
+print("  seerr: its settings.json now says initialized, as a migrated Seerr's does")
+PY
+  docker exec -i "${CLUSTER}-control-plane" bash -c "
+    cat >'$CONFIG_PATH/seerr/settings.json'
+    chown 1000:1000 '$CONFIG_PATH/seerr/settings.json'" <"$WORK/seerr-settings.json" ||
+    { echo "could not put the migrated Seerr settings in place"; fail=1; }
+  $K -n "$NS" rollout restart statefulset/seerr >/dev/null
+  $K -n "$NS" rollout status statefulset/seerr --timeout=300s >/dev/null ||
+    { echo "Seerr did not come back on the migrated settings"; fail=1; }
+  rerun_wiring "$WORK/rerun-seerr.txt" || fail=1
+  seerr_after=$(status_field "[s['result'] for s in d['steps'] if s['name']=='seerr/plex'][0]" 2>/dev/null || true)
+  after_detail=$(status_field "[s['detail'] for s in d['steps'] if s['name']=='seerr/ready'][0]" 2>/dev/null || true)
+  echo "  after the migrated settings: seerr/ready ${after_detail:-missing}, seerr/plex ${seerr_after:-absent}"
+  [ -z "$seerr_after" ] ||
+    { echo "the receipt still prints a seerr/plex row (${seerr_after}) for a Seerr that has its admin"; fail=1; }
+  [ -n "$after_detail" ] ||
+    { echo "the second run did not reach Seerr at all: the row went because the app was skipped, not because it has an admin"; fail=1; }
+  created=$(status_field 'd["writes"]["created"]' 2>/dev/null || echo missing)
+  updated=$(status_field 'd["writes"]["updated"]' 2>/dev/null || echo missing)
+  echo "  that run: ${created} created, ${updated} updated"
+  [ "$created" = 0 ] && [ "$updated" = 0 ] ||
+    { echo "a Seerr that only reports its admin made the Job write ${created} created / ${updated} updated"; fail=1; }
+
   # ---- what qui holds, through its API ---------------------------------------
   port_forward qui-0 7476 || fail=1
   qui_session "$QUI_BASE"

@@ -100,9 +100,16 @@ type TautulliConfig struct {
 // SeerrConfig points at Seerr. There is no API key here either: every
 // settings endpoint needs an authenticated admin session the wiring Job
 // cannot create (see internal/apps.Seerr), so this is only ever used to wait
-// for readiness before reporting the media rows pending.
+// for readiness and to read whether an admin exists at all.
+//
+// PublicURL is the address a person opens Seerr at, which is not this URL:
+// Seerr's bundle loads its assets from the site root, so the chart serves it at
+// <app>.<domain> with a listener of its own (catalog.yaml's `exposure: host`).
+// The receipt's one row that asks a human to sign in there names this, never
+// the in-cluster Service.
 type SeerrConfig struct {
-	URL string `json:"url"`
+	URL       string `json:"url"`
+	PublicURL string `json:"publicUrl"`
 }
 
 // QbitConfig points at the qBittorrent WebUI. It carries no credential: the
@@ -211,8 +218,12 @@ func (c *Config) validate() error {
 			return err
 		}
 	}
-	if c.Seerr != nil && c.Seerr.URL == "" {
-		return fmt.Errorf("seerr: url is empty")
+	if c.Seerr != nil {
+		if err := requireFields("seerr", map[string]string{
+			fieldURL: c.Seerr.URL, "publicUrl": c.Seerr.PublicURL,
+		}); err != nil {
+			return err
+		}
 	}
 	if c.Qui != nil {
 		if err := requireFields("qui", map[string]string{

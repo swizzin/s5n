@@ -704,16 +704,25 @@ func (r *Runner) work(ctx context.Context, res *Result) error {
 			return r.ensure(res, "seerr/ready", apps.Unchanged, err)
 		}
 		r.okStep(res, "seerr/ready", c.Seerr.URL)
+		public, err := seerr.Settings(ctx)
+		if err != nil {
+			return r.ensure(res, "seerr/settings", apps.Unchanged, err)
+		}
 		// Every settings endpoint in Seerr needs an authenticated admin
 		// session, and the only way to create its first admin user is an
 		// interactive Plex (or Jellyfin) OAuth sign-in through a browser — a
 		// claim token does not help, because it authenticates the Plex
-		// *server* to plex.tv, not a plex.tv *account* into Seerr. This is
-		// always pending until a human signs in once, regardless of Plex's
-		// claim state.
-		res.Steps = append(res.Steps, Step{Name: "seerr/plex", Result: "pending",
-			Detail: "Seerr has no admin account yet: sign in once at /seerr with Plex to let the wiring Job take over"})
-		r.logf("  %-38s pending: needs one interactive Plex sign-in", "seerr/plex")
+		// *server* to plex.tv, not a plex.tv *account* into Seerr. So the
+		// question this run can answer is only whether an admin exists:
+		// Seerr's own `initialized` says so, and a migrated Seerr brings its
+		// admin — and its API key — in the settings its snapshot carried.
+		// There is nothing left to ask of a box whose Seerr is set up, so
+		// that box prints no row at all rather than a to-do it cannot do.
+		if !public.Initialized {
+			res.Steps = append(res.Steps, Step{Name: "seerr/plex", Result: "pending",
+				Detail: fmt.Sprintf("Seerr has no admin account yet: sign in once at %s with Plex to let the wiring Job take over", c.Seerr.PublicURL)})
+			r.logf("  %-38s pending: needs one interactive Plex sign-in", "seerr/plex")
+		}
 	}
 
 	if r.Publish != nil {

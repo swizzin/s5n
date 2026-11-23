@@ -273,7 +273,12 @@ generated, kept in the release Secret, and never the person's password.
 directly, and Seerr's users are the Plex server's friends, so these two stay outside
 the provider. Skipping the Plex claim at `init` stays allowed, with a warning that
 until the server is claimed, whoever signs in to Seerr first becomes its owner. A
-migrated server that is already claimed needs no warning.
+migrated server that is already claimed needs no warning. Seerr's first admin is that
+one interactive sign-in and nothing in a release can create it, so the wiring Job's
+receipt asks for it only where there is none: it reads Seerr's own `initialized`
+flag, prints no row on a box whose Seerr already has its admin (a migrated one does,
+from the settings its snapshot carried), and names `seerr.<domain>` — never a
+`/seerr` path — as the address to sign in at.
 
 Tautulli used to be the third, with its own Plex-based login on top of the app. That
 login is switched off behind the box's, and box seals it off on every start: a

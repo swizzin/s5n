@@ -1746,6 +1746,14 @@ for pending in plex/claim tautulli/plex seerr/plex; do
   echo "  ${pending}: ${res} (expected pending: no Plex token in this e2e)"
   [ "$res" = pending ] || fail=1
 done
+# Seerr is served at its own host, not under a /seerr path, so that is the
+# address the one row asking a human to sign in has to name.
+seerr_row=$(status_field "[s['detail'] for s in d['steps'] if s['name']=='seerr/plex'][0]" 2>/dev/null || echo missing)
+echo "  seerr/plex detail: ${seerr_row}"
+case "$seerr_row" in
+  *" sign in once at seerr.${DOMAIN} "*) ;;
+  *) echo "the seerr/plex row does not name seerr.${DOMAIN}: ${seerr_row}"; fail=1 ;;
+esac
 claimed=$(status_field "[s['detail'] for s in d['steps'] if s['name']=='plex/ready'][0]")
 echo "  plex/ready detail: ${claimed}"
 case "$claimed" in *claimed=false*) ;; *) echo "expected an unclaimed Plex in this e2e"; fail=1 ;; esac

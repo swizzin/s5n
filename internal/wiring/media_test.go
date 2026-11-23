@@ -48,6 +48,14 @@ type fakeMediaStack struct {
 	tokenFile string
 
 	seerrUp bool
+	// initialized is Seerr's own "an admin exists" flag, which a migrated
+	// Seerr brings in the settings its snapshot carried.
+	initialized bool
+	// seerrReads counts the public-settings calls, and seerrFailFrom makes
+	// every call from that number on answer 503: a Seerr that passes
+	// readiness and then refuses the read is one the run cannot report on.
+	seerrReads    int
+	seerrFailFrom int
 }
 
 func (f *fakeMediaStack) plexHandler() http.HandlerFunc {
@@ -149,11 +157,12 @@ func (f *fakeMediaStack) seerrHandler() http.HandlerFunc {
 			http.Error(w, "unexpected "+r.URL.Path, http.StatusNotFound)
 			return
 		}
-		if !f.seerrUp {
+		f.seerrReads++
+		if !f.seerrUp || (f.seerrFailFrom > 0 && f.seerrReads >= f.seerrFailFrom) {
 			http.Error(w, "starting", http.StatusServiceUnavailable)
 			return
 		}
-		writeJSONAny(w, map[string]any{"initialized": false})
+		writeJSONAny(w, map[string]any{"initialized": f.initialized})
 	}
 }
 
@@ -166,6 +175,10 @@ func writeJSONAny(w http.ResponseWriter, v any) {
 // release Secret's plex-token key, standing in for a token taken from a
 // claimed server.
 const mediaPlexToken = "plex-token-abc123"
+
+// mediaSeerrPublicURL is the address the harness's Seerr is served at, as the
+// chart renders it: <app>.<domain>, never the Service the Job dials.
+const mediaSeerrPublicURL = "seerr.example.test"
 
 // newMediaHarness builds a Runner wired to fake Plex, Tautulli and Seerr
 // servers only (no qBittorrent/Arr/Prowlarr), so the media steps can be
@@ -199,7 +212,7 @@ func newMediaHarness(t *testing.T, claimed bool) (*Runner, *fakeMediaStack) {
 		TimeoutSeconds: 10,
 		Plex:           &PlexConfig{URL: plex.URL},
 		Tautulli:       &TautulliConfig{URL: tautulli.URL, APIKeyFile: apiKeyFile, PlexTokenFile: plexTokenFile},
-		Seerr:          &SeerrConfig{URL: seerr.URL},
+		Seerr:          &SeerrConfig{URL: seerr.URL, PublicURL: mediaSeerrPublicURL},
 	}
 	runner := &Runner{
 		Config: cfg,
