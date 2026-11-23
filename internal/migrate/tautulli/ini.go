@@ -101,11 +101,33 @@ func (f *iniFile) parseLine(n, start, end int, section *string) error {
 // get is the first line holding section/key. ConfigObj would keep the last
 // duplicate; a file migrate copies should not have one, and editing the first
 // is the one a human reading top-down sees.
+//
+// The name is matched without caring about case, the way Tautulli's setting
+// names are: Config folds every setting to `ini_key = name.lower()`
+// (plexpy/config.py:473) and reads it back under that lower-case name, so a
+// config.ini it wrote is all lower case -- the spelling this package's names
+// use. An exact match wins over a fold, because ConfigObj's keys are
+// case-sensitive: in a file holding both spellings, the lower-case line is the
+// setting Tautulli reads and the other one is a key it keeps without ever
+// using, and a rewrite of the unused one would leave the real setting alone.
+// The section is matched exactly: Tautulli's sections are the literals
+// _CONFIG_DEFINITIONS gives (_define passes `section` through untouched), so a
+// `[GENERAL]` block is a different section to it and to ConfigObj.
 func (f *iniFile) get(section, name string) (iniLine, bool) {
-	for _, l := range f.lines {
-		if l.section == section && l.key == name {
+	var folded *iniLine
+	for i, l := range f.lines {
+		if l.section != section {
+			continue
+		}
+		if l.key == name {
 			return l, true
 		}
+		if folded == nil && strings.EqualFold(l.key, name) {
+			folded = &f.lines[i]
+		}
+	}
+	if folded != nil {
+		return *folded, true
 	}
 	return iniLine{}, false
 }

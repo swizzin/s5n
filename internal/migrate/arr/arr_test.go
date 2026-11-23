@@ -21,9 +21,10 @@ import (
 // library and the downloads sit under /library, qBittorrent sees its downloads
 // at /downloads, and a Plex server answers on 32400. Every path in it is
 // invented.
-const sonarrPlan = `version: 1
+const sonarrPlan = `version: 2
 apps:
   sonarr:
+    kind: kubernetes
     source: sonarr
     config: /srv/apps/sonarr
     namespace: media
@@ -48,6 +49,7 @@ apps:
       - from: /config/scripts
         to: /config/scripts
   qbittorrent:
+    kind: kubernetes
     source: qbittorrent
     config: /srv/apps/qbittorrent
     ports: [8080]
@@ -55,6 +57,7 @@ apps:
       - from: /downloads
         to: /data/downloads
   plex:
+    kind: kubernetes
     source: plex
     config: /srv/apps/plex
     ports: [32400]
@@ -205,9 +208,9 @@ func sonarrSchema() []string {
 	return []string{
 		`CREATE TABLE Series (Id INTEGER PRIMARY KEY, Path TEXT)`,
 		`CREATE TABLE RootFolders (Id INTEGER PRIMARY KEY, Path TEXT)`,
-		`CREATE TABLE ImportLists (Id INTEGER PRIMARY KEY, Name TEXT, Implementation TEXT, Settings TEXT, RootFolderPath TEXT)`,
+		`CREATE TABLE ImportLists (Id INTEGER PRIMARY KEY, Name TEXT, EnableAutomaticAdd INTEGER, Implementation TEXT, Settings TEXT, RootFolderPath TEXT)`,
 		`CREATE TABLE RemotePathMappings (Id INTEGER PRIMARY KEY, Host TEXT, RemotePath TEXT, LocalPath TEXT)`,
-		`CREATE TABLE DownloadClients (Id INTEGER PRIMARY KEY, Name TEXT, Implementation TEXT, Settings TEXT)`,
+		`CREATE TABLE DownloadClients (Id INTEGER PRIMARY KEY, Name TEXT, Enable INTEGER, Implementation TEXT, Settings TEXT)`,
 		`CREATE TABLE Notifications (Id INTEGER PRIMARY KEY, Name TEXT, Implementation TEXT, Settings TEXT)`,
 		`CREATE TABLE Config (Id INTEGER PRIMARY KEY, Key TEXT, Value TEXT)`,
 		`CREATE TABLE Commands (Id INTEGER PRIMARY KEY, Name TEXT, Status INTEGER, Body TEXT)`,
@@ -221,7 +224,7 @@ func radarrSchema() []string {
 		`CREATE TABLE Movies (Id INTEGER PRIMARY KEY, Path TEXT)`,
 		`CREATE TABLE Collections (Id INTEGER PRIMARY KEY, RootFolderPath TEXT)`,
 		`CREATE TABLE RootFolders (Id INTEGER PRIMARY KEY, Path TEXT)`,
-		`CREATE TABLE ImportLists (Id INTEGER PRIMARY KEY, Name TEXT, Implementation TEXT, Settings TEXT, RootFolderPath TEXT)`,
+		`CREATE TABLE ImportLists (Id INTEGER PRIMARY KEY, Name TEXT, EnableAutomaticAdd INTEGER, Implementation TEXT, Settings TEXT, RootFolderPath TEXT)`,
 		`CREATE TABLE RemotePathMappings (Id INTEGER PRIMARY KEY, Host TEXT, RemotePath TEXT, LocalPath TEXT)`,
 		`CREATE TABLE DownloadClients (Id INTEGER PRIMARY KEY, Name TEXT, Implementation TEXT, Settings TEXT)`,
 		`CREATE TABLE Notifications (Id INTEGER PRIMARY KEY, Name TEXT, Implementation TEXT, Settings TEXT)`,
@@ -236,7 +239,7 @@ func radarrSchema() []string {
 // path mappings (prowlarr@v2.7.0.5723:src/NzbDrone.Core/Datastore/TableMapping.cs:41-101).
 func prowlarrSchema() []string {
 	return []string{
-		`CREATE TABLE Applications (Id INTEGER PRIMARY KEY, Name TEXT, Implementation TEXT, Settings TEXT)`,
+		`CREATE TABLE Applications (Id INTEGER PRIMARY KEY, Name TEXT, SyncLevel INTEGER, Implementation TEXT, Settings TEXT)`,
 		`CREATE TABLE DownloadClients (Id INTEGER PRIMARY KEY, Name TEXT, Implementation TEXT, Settings TEXT)`,
 		`CREATE TABLE Notifications (Id INTEGER PRIMARY KEY, Name TEXT, Implementation TEXT, Settings TEXT)`,
 		`CREATE TABLE Config (Id INTEGER PRIMARY KEY, Key TEXT, Value TEXT)`,
@@ -558,7 +561,7 @@ func TestUnclassifiedClientReported(t *testing.T) {
 	dir := t.TempDir()
 	newDB(t, filepath.Join(dir, "sonarr.db"), append(sonarrSchema(),
 		`INSERT INTO DownloadClients (Id, Name, Implementation, Settings) VALUES
-			(1, 'seedbox', 'Transmission', '{"host":"192.0.2.77","port":9091,"useSsl":true,"tvDirectory":"/srv/remote/tv"}')`,
+			(1, 'seedbox', 'QBittorrent', '{"host":"192.0.2.77","port":8080,"useSsl":true,"tvCategory":"tv"}')`,
 	)...)
 	writeFile(t, filepath.Join(dir, "config.xml"), "<Config>\n  <Port>8989</Port>\n</Config>")
 	// The plan from above leaves 192.0.2.50 alone; this client is another
@@ -570,13 +573,141 @@ func TestUnclassifiedClientReported(t *testing.T) {
 		t.Fatalf("Check: %v", err)
 	}
 	want := []rewrite.Address{{
-		App: "sonarr", File: "sonarr.db", Where: "DownloadClients.Settings.host", Host: "192.0.2.77", Port: 9091,
+		App: "sonarr", File: "sonarr.db", Where: "DownloadClients.Settings.host", Host: "192.0.2.77", Port: 8080,
 	}}
 	if !reflect.DeepEqual(rep.Unclassified, want) {
 		t.Errorf("unclassified = %v, want %v", addressStrings(rep.Unclassified), addressStrings(want))
 	}
 	if !rep.Blocked() {
 		t.Error("an address no rule settles did not block the run")
+	}
+}
+
+// TestDisabledClientIsLeft: a client the app never dials is not a gap. Its
+// address stays exactly as it was, the report says so, and the run is not
+// stopped by an address no rule settles.
+func TestDisabledClientIsLeft(t *testing.T) {
+	dir := t.TempDir()
+	newDB(t, filepath.Join(dir, "sonarr.db"), append(sonarrSchema(),
+		`INSERT INTO DownloadClients (Id, Name, Enable, Implementation, Settings) VALUES
+			(1, 'old box', 0, 'QBittorrent', '{"host":"192.0.2.77","port":8080,"useSsl":true,"tvCategory":"tv"}')`,
+	)...)
+	writeFile(t, filepath.Join(dir, "config.xml"), "<Config>\n  <Port>8989</Port>\n</Config>")
+	in := input(t, dir, "sonarr", sonarrPlan)
+
+	rep, err := (rewriter{kind: kindSonarr}).Check(context.Background(), in)
+	if err != nil {
+		t.Fatalf("Check: %v", err)
+	}
+	if rep.Blocked() {
+		t.Fatalf("a disabled client blocked the run: %v", addressStrings(rep.Unclassified))
+	}
+	if len(rep.Left) != 1 || rep.Left[0].What != "192.0.2.77:8080" {
+		t.Fatalf("Left = %+v, want one entry for 192.0.2.77:8080", rep.Left)
+	}
+	if !strings.Contains(rep.Left[0].Why, "switched off") {
+		t.Errorf("why = %q, want it to say the client is switched off", rep.Left[0].Why)
+	}
+	if _, err := (rewriter{kind: kindSonarr}).Write(context.Background(), in); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	if got := setting(t, filepath.Join(dir, "sonarr.db"), "SELECT Settings FROM DownloadClients WHERE Id = 1"); got["host"] != "192.0.2.77" {
+		t.Errorf("a disabled client's row was rewritten: %v", got)
+	}
+}
+
+// TestDisabledSyncIsLeft: an import list or a Prowlarr application the app has
+// switched off is never dialled either, and each app stores that flag in its own
+// column (ImportListDefinition.Enable is EnableAutomaticAdd,
+// ApplicationDefinition.Enable is SyncLevel). A base URL nothing settles there is
+// left and called out, not a refusal.
+func TestDisabledSyncIsLeft(t *testing.T) {
+	ctx := context.Background()
+	t.Run("import list", func(t *testing.T) {
+		dir := t.TempDir()
+		newDB(t, filepath.Join(dir, "sonarr.db"), append(sonarrSchema(),
+			`INSERT INTO ImportLists (Id, Name, Implementation, Settings, RootFolderPath, EnableAutomaticAdd) VALUES
+				(1, 'off', 'Sonarr', '{"baseUrl":"http://192.0.2.60:8989","apiKey":"k"}', '', 0),
+				(2, 'on', 'Sonarr', '{"baseUrl":"http://192.0.2.61:8989","apiKey":"k"}', '', 1)`,
+		)...)
+		writeFile(t, filepath.Join(dir, "config.xml"), "<Config>\n  <Port>8989</Port>\n</Config>")
+		in := input(t, dir, "sonarr", sonarrPlan)
+		rep, err := (rewriter{kind: kindSonarr}).Check(ctx, in)
+		if err != nil {
+			t.Fatalf("Check: %v", err)
+		}
+		if len(rep.Left) != 1 || rep.Left[0].What != "192.0.2.60:8989" {
+			t.Errorf("Left = %+v, want the list that is switched off", rep.Left)
+		}
+		if want := []string{"sonarr sonarr.db ImportLists.Settings.baseUrl: 192.0.2.61:8989"}; !reflect.DeepEqual(addressStrings(rep.Unclassified), want) {
+			t.Errorf("unclassified = %v, want %v", addressStrings(rep.Unclassified), want)
+		}
+	})
+	t.Run("prowlarr application", func(t *testing.T) {
+		dir := t.TempDir()
+		newDB(t, filepath.Join(dir, "prowlarr.db"), append(prowlarrSchema(),
+			`INSERT INTO Applications (Id, Name, Implementation, Settings, SyncLevel) VALUES
+				(1, 'off', 'Sonarr', '{"baseUrl":"http://192.0.2.60:8989","prowlarrUrl":"http://192.0.2.60:9696"}', 0),
+				(2, 'on', 'Sonarr', '{"baseUrl":"http://192.0.2.61:8989","prowlarrUrl":"http://192.0.2.61:9696"}', 1)`,
+		)...)
+		writeFile(t, filepath.Join(dir, "config.xml"), "<Config>\n  <Port>9696</Port>\n</Config>")
+		in := input(t, dir, "prowlarr", prowlarrPlan)
+		in.Targets["prowlarr"] = rewrite.Endpoint{Host: "prowlarr", Port: 9696, URLBase: "/prowlarr"}
+		rep, err := (rewriter{kind: kindProwlarr}).Check(ctx, in)
+		if err != nil {
+			t.Fatalf("Check: %v", err)
+		}
+		if len(rep.Left) != 2 {
+			t.Errorf("Left = %+v, want the application's two URLs", rep.Left)
+		}
+		for _, a := range rep.Unclassified {
+			if a.Host != "192.0.2.61" {
+				t.Errorf("unclassified = %v, want only the application that syncs", addressStrings(rep.Unclassified))
+			}
+		}
+	})
+}
+
+// TestClientTypeBoxDoesNotRunExistsIsLeft: box runs qBittorrent and nothing
+// else. A client of another type is left exactly as it is and called out,
+// because a rewrite would point it at an app that does not speak its protocol.
+func TestClientTypeBoxDoesNotRunExistsIsLeft(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	newDB(t, filepath.Join(dir, "sonarr.db"), append(sonarrSchema(),
+		`INSERT INTO DownloadClients (Id, Name, Enable, Implementation, Settings) VALUES
+			(1, 'deluge', 1, 'Deluge', '{"host":"192.0.2.77","port":8112,"useSsl":false,"downloadDirectory":"/srv/remote/downloads"}'),
+			(2, 'rtorrent', 0, 'RTorrent', '{"host":"192.0.2.78","port":443,"useSsl":true,"tvDirectory":"/srv/remote/tv"}')`,
+	)...)
+	writeFile(t, filepath.Join(dir, "config.xml"), "<Config>\n  <Port>8989</Port>\n</Config>")
+	in := input(t, dir, "sonarr", sonarrPlan)
+
+	rep, err := (rewriter{kind: kindSonarr}).Check(ctx, in)
+	if err != nil {
+		t.Fatalf("Check: %v", err)
+	}
+	if rep.Blocked() {
+		t.Fatalf("a client type box does not run blocked the run: %v", addressStrings(rep.Unclassified))
+	}
+	var got []string
+	for _, l := range rep.Left {
+		got = append(got, l.What)
+	}
+	if want := []string{"192.0.2.77:8112", "192.0.2.78:443"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("Left = %v, want %v", got, want)
+	}
+	if len(rep.Owned) != 0 {
+		t.Errorf("owned = %v, want none: box does not adopt a client it does not run", rep.Owned)
+	}
+	if _, err := (rewriter{kind: kindSonarr}).Write(ctx, in); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	db := filepath.Join(dir, "sonarr.db")
+	for id, host := range map[int]string{1: "192.0.2.77", 2: "192.0.2.78"} {
+		got := setting(t, db, fmt.Sprintf("SELECT Settings FROM DownloadClients WHERE Id = %d", id))
+		if got["host"] != host {
+			t.Errorf("client %d was rewritten: %v", id, got)
+		}
 	}
 }
 
@@ -645,9 +776,10 @@ func TestRadarrTables(t *testing.T) {
 
 // prowlarrPlan is the target-side shape §6.2 describes: Prowlarr holds an
 // application to a Sonarr and a download client, and no library.
-const prowlarrPlan = `version: 1
+const prowlarrPlan = `version: 2
 apps:
   prowlarr:
+    kind: kubernetes
     source: prowlarr
     config: /srv/apps/prowlarr
     namespace: media
@@ -656,11 +788,13 @@ apps:
       - from: /library/backups
         to: /config/backups
   sonarr:
+    kind: kubernetes
     source: sonarr
     config: /srv/apps/sonarr
     ports: [8989]
     paths: []
   qbittorrent:
+    kind: kubernetes
     source: qbittorrent
     config: /srv/apps/qbittorrent
     ports: [8080]
@@ -894,5 +1028,54 @@ func TestEveryDownloadClientPathField(t *testing.T) {
 				t.Errorf("client %d %s = %v, want the box's path", id, key, settings[key])
 			}
 		}
+	}
+}
+
+// TestSonarrFollowsTheLibrarysCategory: a migrated library is renamed onto box's
+// own category, so the root folder the source had becomes /data/media/<category>
+// and every series under it moves with it. That is what makes wiring's root
+// folder step find the folder it expects instead of adding a second one.
+func TestSonarrFollowsTheLibrarysCategory(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "config.xml"), sonarrConfig())
+	newDB(t, filepath.Join(dir, "sonarr.db"),
+		`CREATE TABLE Series (Id INTEGER PRIMARY KEY, Path TEXT)`,
+		`INSERT INTO Series (Id, Path) VALUES (1, '/library/TV/Night Shift')`,
+		`CREATE TABLE RootFolders (Id INTEGER PRIMARY KEY, Path TEXT)`,
+		`INSERT INTO RootFolders (Id, Path) VALUES (1, '/library/TV')`,
+		`CREATE TABLE ImportLists (Id INTEGER PRIMARY KEY, Name TEXT, RootFolderPath TEXT, Implementation TEXT, Settings TEXT)`,
+		`CREATE TABLE RemotePathMappings (Id INTEGER PRIMARY KEY, Host TEXT, RemotePath TEXT, LocalPath TEXT)`,
+		`CREATE TABLE DownloadClients (Id INTEGER PRIMARY KEY, Name TEXT, Implementation TEXT, Settings TEXT)`,
+		`CREATE TABLE Notifications (Id INTEGER PRIMARY KEY, Name TEXT, Implementation TEXT, Settings TEXT)`,
+		`CREATE TABLE Config (Id INTEGER PRIMARY KEY, Key TEXT, Value TEXT)`,
+		`CREATE TABLE Commands (Id INTEGER PRIMARY KEY, Name TEXT, Status INTEGER, Body TEXT)`,
+		`CREATE TABLE History (Id INTEGER PRIMARY KEY, Data TEXT, SourceTitle TEXT)`,
+		`CREATE TABLE DownloadHistory (Id INTEGER PRIMARY KEY, Data TEXT, SourceTitle TEXT)`,
+	)
+	// The plan discovery writes once the library has been mapped onto the
+	// category the instance has: a rule for the directory itself, more
+	// specific than the library's, and one for everything else under it.
+	const mapped = `version: 2
+apps:
+  sonarr:
+    kind: kubernetes
+    source: sonarr
+    config: /srv/apps/sonarr
+    category: tv
+    paths:
+      - from: /library/TV
+        to: /data/media/tv
+      - from: /library
+        to: /data/media
+`
+	in := input(t, dir, "sonarr", mapped)
+	if _, err := (rewriter{kind: kindSonarr}).Write(context.Background(), in); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	if got := query(t, filepath.Join(dir, "sonarr.db"), `SELECT Path FROM RootFolders`)[0][0]; got != "/data/media/tv" {
+		t.Errorf("root folder = %q, want /data/media/tv: wiring adds its own when the migrated one is not there", got)
+	}
+	if got := query(t, filepath.Join(dir, "sonarr.db"), `SELECT Path FROM Series`)[0][0]; got != "/data/media/tv/Night Shift" {
+		t.Errorf("series path = %q, want /data/media/tv/Night Shift", got)
 	}
 }

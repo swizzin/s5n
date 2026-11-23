@@ -173,10 +173,8 @@ func (t *TLSHosts) Ensure(ctx context.Context, hosts []string) error {
 		}
 	}
 	r.Phase("certificate")
-	for _, h := range decided {
-		if h.NoDNS {
-			r.Warn(NoDNSWarning(h, t.Command))
-		}
+	if warning, ok := NoDNSWarning(decided, t.Command); ok {
+		r.Warn(warning)
 	}
 	return ApplyHosts(ctx, t.Apply, decided)
 }
@@ -188,12 +186,39 @@ func (t *TLSHosts) noAccess(hosts []string) error {
 	return fmt.Errorf("%s has no listener yet, and only root can write one: run `box init` as root for this seedbox, then apply again", strings.Join(hosts, ", "))
 }
 
-// NoDNSWarning is the one sentence a host with no DNS record gets: why its
-// certificate is self-signed, the record to add, and the command that moves it
-// once the record exists. init's final card and apply's step print the same
-// words, because they are the same fact.
-func NoDNSWarning(h Host, command string) string {
-	return fmt.Sprintf("%s has no DNS record, so its certificate is self-signed; %s, then run box %s again to move it to Let's Encrypt", h.Host, h.Record, command)
+// NoDNSWarning is the one sentence a run whose names have no DNS record gets:
+// every name that is missing one, why those certificates are self-signed, and
+// the command that moves them once the records exist. init's final card and
+// apply's step print the same words, because they are the same fact; a run
+// that asked per host printed the same sentence once per name.
+func NoDNSWarning(hosts []Host, command string) (string, bool) {
+	var names []string
+	for _, h := range hosts {
+		if h.NoDNS && strings.TrimSpace(h.Host) != "" {
+			names = append(names, h.Host)
+		}
+	}
+	if len(names) == 0 {
+		return "", false
+	}
+	joined := joinNames(names)
+	if len(names) == 1 {
+		return fmt.Sprintf("%s has no DNS record, so its certificate is self-signed; add a record for it, then run box %s again to move it to Let's Encrypt", joined, command), true
+	}
+	return fmt.Sprintf("%s have no DNS record, so their certificates are self-signed; add a record for each, then run box %s again to move them to Let's Encrypt", joined, command), true
+}
+
+// joinNames is "a", "a and b", "a, b and c": the way a sentence lists names.
+func joinNames(names []string) string {
+	switch len(names) {
+	case 0:
+		return ""
+	case 1:
+		return names[0]
+	case 2:
+		return names[0] + " and " + names[1]
+	}
+	return strings.Join(names[:len(names)-1], ", ") + " and " + names[len(names)-1]
 }
 
 // appName is the app a host belongs to, for a name under domain: gamma for

@@ -132,7 +132,7 @@ func TestURLBasesMatchTheTemplates(t *testing.T) {
 		}
 		switch base {
 		case "/srv":
-			if !strings.Contains(workloads, "__SERVER__URLBASE") && app != "qui" && app != "maintainerr" {
+			if !strings.Contains(workloads, "__SERVER__URLBASE") && app != "qui" && app != "maintainerr" && app != "tautulli" {
 				t.Errorf("%s: the chart gives it /<instance>, and the template does not set a URL base", app)
 			}
 			if app == "qui" && !strings.Contains(workloads, "QUI__BASE_URL") {
@@ -140,6 +140,12 @@ func TestURLBasesMatchTheTemplates(t *testing.T) {
 			}
 			if app == "maintainerr" && !strings.Contains(workloads, "BASE_PATH") {
 				t.Error("maintainerr: the chart gives it /<instance> and the template sets no BASE_PATH")
+			}
+			// Tautulli's base is its own http_root, which the init container
+			// seals on every start: it is a file setting, not an environment
+			// variable, and the route keeps the prefix instead of stripping it.
+			if app == "tautulli" && !strings.Contains(workloads, "--http-root={{ $urlBase }}") {
+				t.Error("tautulli: the chart gives it /<instance>, and the init container does not seal http_root to it")
 			}
 		case "/srv/":
 			// autobrr mounts its router at the base URL's string plus the
@@ -292,5 +298,33 @@ func TestIntValue(t *testing.T) {
 		if got != tc.want || ok != tc.ok {
 			t.Errorf("intValue(%v) = %d, %v; want %d, %v", tc.in, got, ok, tc.want, tc.ok)
 		}
+	}
+}
+
+// TestWiringImageIsTheOneTheReleaseRuns: the rehearsal's probe pods run the s5n
+// image the release's own Job runs, resolved the way the chart's template does.
+// The chart's s5n variant carries no tag of its own; the release's appVersion
+// is what fills it, and a pinned tag or digest narrows it inside the repository.
+func TestWiringImageIsTheOneTheReleaseRuns(t *testing.T) {
+	variants := []byte(readChart(t, "variants.yaml"))
+	img, err := WiringImage(variants, "0.5.0", chartValues(t))
+	if err != nil {
+		t.Fatalf("WiringImage: %v", err)
+	}
+	if img != "ghcr.io/swizzin/s5n:0.5.0" {
+		t.Errorf("wiring image = %q, want the blessed repository tagged with the release", img)
+	}
+	pinned := map[string]any{"wiring": map[string]any{"image": map[string]any{
+		"variant": "default", "digest": "sha256:" + strings.Repeat("b", 64),
+	}}}
+	img, err = WiringImage(variants, "0.5.0", pinned)
+	if err != nil {
+		t.Fatalf("WiringImage with a pinned digest: %v", err)
+	}
+	if !strings.HasSuffix(img, "@sha256:"+strings.Repeat("b", 64)) {
+		t.Errorf("a pinned digest does not win: %q", img)
+	}
+	if _, err := WiringImage(variants, "", map[string]any{}); err == nil {
+		t.Error("a release with no appVersion and no tag resolved to an unpullable image")
 	}
 }

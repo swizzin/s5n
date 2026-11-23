@@ -480,3 +480,39 @@ func contains(list []string, want string) bool {
 	}
 	return false
 }
+
+// TestMultiSelectRecordsNothingIsAnswered: an empty box is an answer the
+// scrollback has to carry. A record line with no value is one the transcript
+// drops, so the picker says the word instead -- "apps  none", the same way the
+// statically drawn screens say it.
+func TestMultiSelectRecordsNothingIsAnswered(t *testing.T) {
+	u, out := line("\n")
+	got, err := u.MultiSelect(setup.MultiSelect{
+		Key:     "apps",
+		Options: []setup.Option{{Value: "sonarr", Label: "sonarr"}},
+		Min:     0,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("answer = %v, want no apps", got)
+	}
+	if text := stripANSI(out.String()); !strings.Contains(text, "apps  none") {
+		t.Fatalf("the transcript does not record the empty answer:\n%s", text)
+	}
+}
+
+// TestInputRecordsTheFlowsNote: two answers can both look right on their own and
+// mean different things -- the login page's account and the account that owns
+// the files -- so the flow hands the record a note and the transcript keeps it:
+// "login name  liara  (web login)".
+func TestInputRecordsTheFlowsNote(t *testing.T) {
+	u, out := line("liara\n")
+	if _, err := u.Input(setup.Input{Key: "login", Prompt: "login name", Record: "web login"}); err != nil {
+		t.Fatal(err)
+	}
+	if text := stripANSI(out.String()); !strings.Contains(text, "login name  liara  (web login)") {
+		t.Fatalf("the record does not carry the note:\n%s", text)
+	}
+}

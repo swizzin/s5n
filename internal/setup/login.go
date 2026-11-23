@@ -19,22 +19,84 @@ import (
 // all: it is used once, hashed, and never written to a file, a log or either of
 // the two documents init edits.
 
+// SeedboxNamespace is the namespace a login's seedbox gets: s5n-<login>, beside
+// box's own s5n-system and s5n-gateway (docs/box.md, "Scopes: root and users").
+// Root's own seedbox is not special: login alice lands in s5n-alice, and a
+// second user is another s5n-<login>.
+func SeedboxNamespace(login string) string { return "s5n-" + login }
+
+// NamespaceFor is the namespace a login's seedbox gets, refused when the login
+// cannot make one: box's own namespaces are not a seedbox's, and the name has to
+// be a DNS-1123 label after the prefix. It is asked only where box derives a
+// namespace from the login -- a first run with no --namespace -- because a box
+// that already has a grant keeps the grant's namespace whatever its login is.
+func NamespaceFor(login string) (string, error) {
+	ns := SeedboxNamespace(login)
+	switch ns {
+	case "s5n-system", "s5n-gateway":
+		return "", fmt.Errorf("login %q: a seedbox's namespace is s5n-<login>, and %s is box's own", login, ns)
+	}
+	if err := validNamespace(ns); err != nil {
+		return "", fmt.Errorf("login %q: a seedbox's namespace is s5n-<login>, and %q is not one: %w", login, ns, err)
+	}
+	return ns, nil
+}
+
+// ValidateLogin is the whole rule for a login that names its seedbox: Authelia's
+// own login shape, and that the login makes a namespace box can create. Where
+// the namespace does not come from the login (a re-run keeps the grant's, and an
+// explicit --namespace names it), only Authelia's shape applies: see askLogin.
+func ValidateLogin(login string) error {
+	if err := authelia.ValidateLogin(login); err != nil {
+		return err
+	}
+	_, err := NamespaceFor(login)
+	return err
+}
+
 // askLogin resolves the one account. In an interactive run it is a question
-// the operator can change; unattended, the flag, then the grant, then the
-// invoking user's own account name.
-func (d *Decision) askLogin(opts Options, base, grantNow map[string]any) (string, error) {
+// the operator can change; unattended, the flag, then the grant, then the name
+// of the OS account that owns the box's files (puid), and only then the account
+// of whoever ran the command.
+//
+// The login and the file owner are different things -- one is who the browser
+// admits, the other who the files belong to -- so the default follows the files
+// and the operator can still say otherwise.
+func (d *Decision) askLogin(opts Options, base, grantNow map[string]any, puid int, derives bool) (string, error) {
+	// The login names the seedbox's namespace only when this run derives one;
+	// otherwise it is only Authelia's account, held to Authelia's shape.
+	validate := authelia.ValidateLogin
+	if derives {
+		validate = ValidateLogin
+	}
 	def := strings.TrimSpace(text(prefill(base, grantNow, "login")))
 	if given := strings.TrimSpace(opts.Login); given != "" {
 		def = given
 	}
+	if def == "" && d.UserLookup != nil {
+		if name, ok := d.UserLookup(puid); ok {
+			def = strings.TrimSpace(name)
+		}
+	}
 	if def == "" {
 		def = strings.TrimSpace(opts.DefaultLogin)
+	}
+	// A flow that runs init on a host with no box holds this answer already: it
+	// asked for it before anything was installed, or was given it. It is a
+	// decision, not a starting answer, so it is used as it is and the question
+	// is not asked again.
+	if opts.Adopting && strings.TrimSpace(opts.Login) != "" {
+		given := strings.TrimSpace(opts.Login)
+		if err := validate(given); err != nil {
+			return "", fmt.Errorf("--login %q: %w", given, err)
+		}
+		return given, nil
 	}
 	if opts.Unattended {
 		if def == "" {
 			return "", errors.New("--login is needed: the account the login page admits")
 		}
-		if err := authelia.ValidateLogin(def); err != nil {
+		if err := validate(def); err != nil {
 			return "", fmt.Errorf("--login %q: %w", def, err)
 		}
 		return def, nil
@@ -42,9 +104,10 @@ func (d *Decision) askLogin(opts Options, base, grantNow map[string]any) (string
 	return d.Prompt.Input(Input{
 		Key:      "login",
 		Prompt:   "login name",
-		Help:     "the account this box's login page admits; it is also its unix account name on most boxes",
+		Help:     "the account this box's login page admits; it does not have to be the account that owns the files",
 		Default:  def,
-		Validate: authelia.ValidateLogin,
+		Validate: validate,
+		Record:   "web login",
 	})
 }
 

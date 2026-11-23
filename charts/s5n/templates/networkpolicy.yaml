@@ -11,8 +11,18 @@ own, and the callee's ingress is the whole gate. That makes catalog.yaml's `call
 per app, the in-release apps it dials -- the one statement of the release's internals;
 each app's ingress is that list inverted over the enabled apps, and no template names a
 peer. An app that is switched off admits nothing and is admitted by nothing.
+
+A rehearsal box (`.Values.rehearsal`, which box sets in the grant and no file may set)
+keeps every rule below except the public-internet ipBlocks: DNS and this release's own
+pods are the only egress. That is what lets a copy of a live seedbox's configs run
+beside the live box without announcing to trackers, joining IRC, querying indexers with
+its keys or reaching plex.tv. It cannot stop what a policy someone else adds to the
+namespace admits, and it cannot stop a CNI that does not enforce egress at all; that is
+why `box migrate apply` proves the lock from inside the namespace before any app starts.
+The wiring Job's API-server rule and an OIDC app's route to the box's own Gateway proxy
+are kept: both are this cluster, not the internet.
 */ -}}
-{{- if .Values.networkPolicy.enabled }}
+{{- if or .Values.rehearsal .Values.networkPolicy.enabled }}
 {{- $root := . }}
 {{- /* The catalog's entries and the apps this release switched on: the two halves
 of every ingress peer list below. The catalog ships inside the chart and values
@@ -55,6 +65,7 @@ spec:
       ports:
         - { port: 53, protocol: UDP }
         - { port: 53, protocol: TCP }
+    {{- if not .Values.rehearsal }}
     - to:
         - ipBlock:
             cidr: 0.0.0.0/0
@@ -62,6 +73,7 @@ spec:
         - ipBlock:
             cidr: ::/0
             except: ["fc00::/7"]
+    {{- end }}
     - to:
         - podSelector:
             matchLabels:

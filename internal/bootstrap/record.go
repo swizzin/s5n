@@ -12,7 +12,7 @@ import (
 	"github.com/swizzin/s5n/internal/atomicfile"
 )
 
-// Record is the persisted /etc/swizzin/cluster.yaml. It is written in a fixed,
+// Record is the persisted cluster record (hostroot.RecordPath). It is written in a fixed,
 // box-owned schema; box reads it back before any probing on a re-run so the
 // decision short-circuits.
 type Record struct {

@@ -94,6 +94,42 @@ func exists(path string) bool {
 	return err == nil
 }
 
+// TorrentPort reads the port the source's qBittorrent announced to peers, or
+// says it named none. qBittorrent 5 keeps it at [BitTorrent] Session\Port, and
+// a conf that upgraded in place -- or that qBittorrent 4 wrote -- carries
+// [Preferences] Connection\PortRangeMin for the same setting; the session key
+// is the live one when both are there.
+//
+// A directory in the layout this package refuses names no port: the rewriter
+// stops the run before anything is written, and a number read out of a shape
+// box does not produce would be a guess.
+func TorrentPort(dir string) (int, bool) {
+	lay, err := findLayout(dir)
+	if err != nil {
+		return 0, false
+	}
+	raw, err := os.ReadFile(lay.conf)
+	if err != nil {
+		return 0, false
+	}
+	c := parseConf(raw)
+	for _, k := range []struct{ section, name string }{
+		{sectionBitTorrent, keySessionPort},
+		{sectionPreferences, keyLegacyPortRangeMin},
+	} {
+		value, ok := c.get(k.section, k.name)
+		if !ok {
+			continue
+		}
+		port, err := strconv.Atoi(strings.TrimSpace(value))
+		if err != nil || port <= 0 || port > 65535 {
+			return 0, false
+		}
+		return port, true
+	}
+	return 0, false
+}
+
 func isDir(path string) (bool, error) {
 	info, err := os.Stat(path)
 	switch {
@@ -197,6 +233,9 @@ type analysis struct {
 	dbEdits  []dbEdit
 	legacy   bool
 	resume   bool
+	// stopped counts the torrents this pass wrote in a stopped state: a
+	// rehearsal's only app-specific quieting (resumeData, resumeColumns).
+	stopped int
 }
 
 func analyse(ctx context.Context, in rewrite.Input, lay layout, db *sql.DB) (*analysis, error) {
@@ -237,7 +276,7 @@ func (a *analysis) path(file, where, stored string, live bool) (string, bool) {
 }
 
 func (a *analysis) report() rewrite.Report {
-	rep := rewrite.Report{App: a.in.App, Uncovered: a.uncover, Notes: a.notes}
+	rep := rewrite.Report{App: a.in.App, Uncovered: a.uncover, Notes: a.notes, Stopped: a.stopped}
 	for k, n := range a.changes {
 		rep.Changes = append(rep.Changes, rewrite.Change{File: k.file, Where: k.where, What: k.what, Count: n})
 	}
@@ -288,7 +327,7 @@ func (a *analysis) apply(ctx context.Context) error {
 		}
 	}
 	if a.legacy {
-		if _, gaps, err := fastresume.Rewrite(a.lay.legacy, a.in.App, a.in.Plan); err != nil {
+		if _, gaps, err := fastresume.Rewrite(a.lay.legacy, a.in.App, a.in.Plan, a.resumeOptions()...); err != nil {
 			return fmt.Errorf("rewrite %s: %w", legacyRel, err)
 		} else if len(gaps) > 0 {
 			return &plan.UncoveredError{Paths: gaps}
@@ -389,6 +428,21 @@ func (a *analysis) confFile() error {
 		a.change(confRel, sectionWebUI+" Port", "port")
 		changed = true
 	}
+	// A rehearsal's two settings, and they are settings rather than a rewrite:
+	// anything autobrr and the Arrs add from here on lands stopped, and RSS
+	// rules grab nothing. Both are read at start, so they have to be in the
+	// file before the app's first run.
+	if a.in.Rehearsal {
+		for _, k := range rehearsalConfKeys {
+			where := k.section + " " + k.key
+			if stored, ok := c.get(k.section, k.key); ok && stored == k.value {
+				continue
+			}
+			c.set(k.section, k.key, k.value)
+			a.change(confRel, where, "rehearsal")
+			changed = true
+		}
+	}
 	if !changed {
 		return nil
 	}
@@ -473,7 +527,7 @@ func (a *analysis) resumeData(ctx context.Context) error {
 	a.legacy = legacy
 	a.resume = exists(a.lay.resume)
 	if legacy {
-		rep, gaps, err := fastresume.Scan(a.lay.legacy, a.in.App, a.in.Plan)
+		rep, gaps, err := fastresume.Scan(a.lay.legacy, a.in.App, a.in.Plan, a.resumeOptions()...)
 		if err != nil {
 			return fmt.Errorf("read %s: %w", legacyRel, err)
 		}
@@ -484,6 +538,7 @@ func (a *analysis) resumeData(ctx context.Context) error {
 		for key, n := range rep.Rewrites {
 			a.changes[changeKey{file: legacyRel, where: "BT_backup." + key, what: "path"}] += n
 		}
+		a.stopped += rep.Stopped
 	}
 	if a.resume {
 		if err := a.resumeStore(ctx); err != nil {
@@ -548,9 +603,12 @@ func (a *analysis) resumeColumns(id int64, save, download sql.NullString, blob [
 	if len(blob) == 0 {
 		return nil
 	}
-	data, rewrites, gaps, err := fastresume.Blob(resumeRel, blob, a.in.App, a.in.Plan)
+	data, rewrites, gaps, stopped, err := fastresume.Blob(resumeRel, blob, a.in.App, a.in.Plan, a.resumeOptions()...)
 	if err != nil {
 		return fmt.Errorf("%s row %d: %w", resumeRel, id, err)
+	}
+	if stopped {
+		a.stopped++
 	}
 	for _, g := range gaps {
 		g.Key = "libtorrent_resume_data " + g.Key
@@ -561,6 +619,16 @@ func (a *analysis) resumeColumns(id int64, save, download sql.NullString, blob [
 	}
 	if len(gaps) == 0 && !bytes.Equal(data, blob) {
 		a.dbEdits = append(a.dbEdits, dbEdit{column: "libtorrent_resume_data", value: data, id: id})
+	}
+	return nil
+}
+
+// resumeOptions is what every resume-store pass is told: a rehearsal stops the
+// torrents as well as rewriting their paths, so both stores come out stopped
+// whether the source kept one or both.
+func (a *analysis) resumeOptions() []fastresume.Option {
+	if a.in.Rehearsal {
+		return []fastresume.Option{fastresume.Stop()}
 	}
 	return nil
 }

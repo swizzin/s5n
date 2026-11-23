@@ -12,6 +12,7 @@ import (
 	"io/fs"
 	"strings"
 
+	"github.com/swizzin/s5n/internal/hostroot"
 	"github.com/swizzin/s5n/internal/say"
 )
 
@@ -128,6 +129,11 @@ type Result struct {
 	// know and box will not change: today, a node whose InternalIP sits on a
 	// tunnel this host can see, which gives every pod that tunnel's MTU.
 	Warnings []string
+	// Firewall is what box found about the host's packet filter: whether
+	// firewalld is running, the cluster's pod and service networks the
+	// platform plan will trust, or the warning for a host whose firewall is
+	// not box's to change.
+	Firewall FirewallState
 	Reason   string
 }
 
@@ -184,7 +190,7 @@ type Host interface {
 	Present() []Finding
 }
 
-// RecordStore persists /etc/swizzin/cluster.yaml.
+// RecordStore persists box's cluster record, hostroot.RecordPath by default.
 type RecordStore interface {
 	// Load returns (nil, nil) when no record exists. An existing record that
 	// cannot be read is an error: box must not install over what it cannot see.
@@ -211,7 +217,7 @@ const conditionTrue = "True"
 const K0sAdminConfig = "/var/lib/k0s/pki/admin.conf"
 
 // RecordPath is where box records what it decided.
-const RecordPath = "/etc/swizzin/cluster.yaml"
+const RecordPath = hostroot.RecordPath
 
 // FormatResult renders the decision for a human. It is what box bootstrap
 // --dry-run prints.

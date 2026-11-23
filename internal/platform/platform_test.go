@@ -591,10 +591,10 @@ func TestApplyRefusalWritesNothing(t *testing.T) {
 		t.Fatalf("asked %d times, want once", f.confirm.asked)
 	}
 	// The plan was still printed before the question: that is the review.
-	if !strings.Contains(f.log.String(), "envoy-gateway 1.9.3") {
+	if !strings.Contains(f.log.String(), "Envoy Gateway "+pins.EnvoyGateway+" (the front door)") {
 		t.Fatalf("the plan did not name the pinned Envoy Gateway: %q", f.log.String())
 	}
-	if !strings.Contains(f.log.String(), "? metallb 0.16.1 (Helm, metallb-system), unless the Gateway gets an address without it") {
+	if !strings.Contains(f.log.String(), "? MetalLB "+pins.MetalLB+" (the gateway's address), unless the Gateway gets an address without it") {
 		t.Fatalf("the plan did not say MetalLB is conditional: %q", f.log.String())
 	}
 	if !strings.Contains(f.log.String(), "? Gateway s5n-gateway/s5n getting an address") {
@@ -993,10 +993,10 @@ func TestApplyVerifiesBoxMetalLBWithoutAsking(t *testing.T) {
 			t.Fatalf("Helm was called for MetalLB already at its pinned version: %+v", f.rel.installed)
 		}
 	}
-	if !strings.Contains(f.log.String(), "= metallb: already at "+pins.MetalLB) {
+	if !strings.Contains(f.log.String(), "= MetalLB "+pins.MetalLB+" (the gateway's address): installed, verifying") {
 		t.Fatalf("the plan did not verify MetalLB: %q", f.log.String())
 	}
-	if strings.Contains(f.log.String(), "? metallb") {
+	if strings.Contains(f.log.String(), "? MetalLB") {
 		t.Fatalf("a release already deployed was printed as a question: %q", f.log.String())
 	}
 	if strings.Contains(f.log.String(), "getting an address") {
@@ -1057,7 +1057,7 @@ func TestApplyUpgradesAnotherVersion(t *testing.T) {
 	if strings.Join(upgraded, ",") != EnvoyGatewayRelease+","+MetalLBRelease {
 		t.Fatalf("upgrades = %v, want Envoy Gateway and MetalLB", upgraded)
 	}
-	if !strings.Contains(f.log.String(), "~ metallb 0.16.1") {
+	if !strings.Contains(f.log.String(), "~ MetalLB "+pins.MetalLB) {
 		t.Fatalf("the plan did not mark the MetalLB upgrade: %q", f.log.String())
 	}
 }
@@ -1439,5 +1439,143 @@ func TestApplyStopsWhenTheRootNeverIssues(t *testing.T) {
 				t.Fatal("the CA issuer was applied while the root was not Ready")
 			}
 		}
+	}
+}
+
+// fakeFirewall records the one host change the plan can make.
+type fakeFirewall struct {
+	cidrs []string
+	err   error
+	tr    *trace
+}
+
+func (f *fakeFirewall) Trust(_ context.Context, cidrs []string) error {
+	if f.err != nil {
+		return f.err
+	}
+	f.cidrs = append([]string(nil), cidrs...)
+	f.tr.add("trust:" + strings.Join(cidrs, ","))
+	return nil
+}
+
+// TestApplyTrustsTheHostsFirewallBeforeAnythingIsInstalled: on a host where box
+// installed k0s and firewalld is running, the cluster's networks enter
+// firewalld's trusted zone first, because every app the platform installs is
+// reached through that host.
+func TestApplyTrustsTheHostsFirewallBeforeAnythingIsInstalled(t *testing.T) {
+	f := newFixture()
+	fw := &fakeFirewall{tr: f.tr}
+	f.d.Firewall = bootstrap.FirewallState{Active: true, CIDRs: []string{"10.244.0.0/16", "10.96.0.0/12"}}
+	f.d.HostFirewall = fw
+	f.probe.answers = []GatewayAnswer{{Address: "192.0.2.10"}}
+
+	res, err := f.d.Apply(context.Background(), allInstall)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := strings.Join(fw.cidrs, ","), "10.244.0.0/16,10.96.0.0/12"; got != want {
+		t.Fatalf("box trusted %q, want %q", got, want)
+	}
+	if f.tr.steps[0] != "confirm" || len(f.tr.steps) < 2 || f.tr.steps[1] != "trust:10.244.0.0/16,10.96.0.0/12" {
+		t.Fatalf("the firewall is not the first write after the confirm: %v", f.tr.steps)
+	}
+	if !strings.Contains(f.log.String(), "+ firewalld's trusted zone: 10.244.0.0/16 and 10.96.0.0/12") {
+		t.Fatalf("the plan does not carry the host line:\n%s", f.log.String())
+	}
+	if !strings.Contains(f.log.String(), "firewalld trusts 10.244.0.0/16 and 10.96.0.0/12") {
+		t.Fatalf("the run does not say what the host now trusts:\n%s", f.log.String())
+	}
+	if len(res.Installed) == 0 || res.Installed[0] != "firewalld's trusted zone" {
+		t.Fatalf("the result does not record the host change: %v", res.Installed)
+	}
+}
+
+// A refused host change stops before a release is installed: a box whose pods
+// cannot reach each other is not one to carry on installing.
+func TestApplyStopsWhenTheFirewallRefuses(t *testing.T) {
+	f := newFixture()
+	f.d.Firewall = bootstrap.FirewallState{Active: true, CIDRs: []string{"10.244.0.0/16"}}
+	f.d.HostFirewall = &fakeFirewall{err: errors.New("firewall-cmd: Authorization failed")}
+
+	_, err := f.d.Apply(context.Background(), allInstall)
+	if err == nil || !strings.Contains(err.Error(), "Authorization failed") {
+		t.Fatalf("want the firewall's refusal, got %v", err)
+	}
+	if len(f.rel.installed) != 0 || len(f.cl.writes) != 0 {
+		t.Fatalf("a refused firewall change still wrote: %d releases, %d applies", len(f.rel.installed), len(f.cl.writes))
+	}
+}
+
+// TestACallerThatShowsThePlanIsNotAsked: a migration asks once for the whole
+// run, and shows the platform plan inside that question. This package then both
+// stays quiet about the plan and takes no answer of its own -- the contrast is
+// the same fixture with CallerShowsPlan off, which is every other caller and
+// asks its own question with the plan above it.
+func TestACallerThatShowsThePlanIsNotAsked(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		caller  bool
+		asks    int
+		printed bool
+	}{
+		{name: "the caller shows the plan", caller: true, asks: 0, printed: false},
+		{name: "this package shows the plan", caller: false, asks: 1, printed: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newFixture()
+			f.probe.answers = []GatewayAnswer{{Address: "192.0.2.10"}}
+			f.d.CallerConfirms = tc.caller
+			if _, err := f.d.Apply(context.Background(), allInstall); err != nil {
+				t.Fatalf("Apply: %v", err)
+			}
+			if f.confirm.asked != tc.asks {
+				t.Errorf("asked %d questions, want %d", f.confirm.asked, tc.asks)
+			}
+			if got := strings.Contains(f.log.String(), "platform plan:"); got != tc.printed {
+				t.Errorf("the plan is printed = %t, want %t:\n%s", got, tc.printed, f.log)
+			}
+		})
+	}
+}
+
+// TestThePlanIsTheCallers: the items the caller shows are the plan's own, so a
+// confirm cannot drift from what this package would have printed.
+func TestThePlanIsTheCallers(t *testing.T) {
+	plan, err := BuildPlan(pins, allInstall, "eg", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	f := newFixture()
+	f.d.printPlan(f.d.Say, plan)
+	printed := strings.Join(strings.Split(f.log.String(), "\n"), "\n")
+	items := plan.Items()
+	if len(items) == 0 {
+		t.Fatal("the plan has no items")
+	}
+	for _, it := range items {
+		if !strings.Contains(printed, it.Text) {
+			t.Errorf("the plan's item %q is not in what the printer wrote:\n%s", it.Text, printed)
+		}
+	}
+}
+
+// MetalLB is installed for its L2 announcement only: box writes an
+// IPAddressPool and an L2Advertisement and never a BGP peer. The chart's
+// frr-k8s backend (on by default since 0.15) is BGP's, so it is switched off
+// rather than installed and waited on for nothing.
+func TestMetalLBIsInstalledWithoutItsBGPBackend(t *testing.T) {
+	var got *Release
+	for _, s := range metalLBSteps(pins, "") {
+		if s.Kind == StepRelease && s.Release.Name == MetalLBRelease {
+			r := s.Release
+			got = &r
+		}
+	}
+	if got == nil {
+		t.Fatal("no MetalLB release step")
+	}
+	frr, _ := got.Values["frrk8s"].(map[string]any)
+	if enabled, ok := frr["enabled"].(bool); !ok || enabled {
+		t.Fatalf("MetalLB values = %v, want frrk8s.enabled false", got.Values)
 	}
 }

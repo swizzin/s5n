@@ -1,6 +1,7 @@
 package say
 
 import (
+	"bytes"
 	"errors"
 	"io"
 	"strings"
@@ -97,4 +98,76 @@ type failingReader struct{}
 
 func (failingReader) Read([]byte) (int, error) {
 	return 0, errors.New("read from a stdin nobody typed into")
+}
+
+// A plan item's children are printed under it, two columns past where its own
+// text starts, with their own marks -- and with spaces only: the transcript is
+// what a screen reader and a logged run read.
+func TestPlainPlanIndentsChildren(t *testing.T) {
+	var buf strings.Builder
+	p := &Plain{W: &buf}
+	p.Plan("platform plan", []Item{
+		{
+			Mark: Install,
+			Text: "cert-manager v1.21.3, which issues the certificates",
+			Children: []Item{
+				{Mark: Install, Text: "a Let's Encrypt issuer, and a self-signed one"},
+			},
+		},
+		{Mark: Warning, Text: "Plex is not installed by this version of box"},
+	})
+	want := "platform plan:\n" +
+		"  + cert-manager v1.21.3, which issues the certificates\n" +
+		"      + a Let's Encrypt issuer, and a self-signed one\n" +
+		"  ! Plex is not installed by this version of box\n"
+	if got := buf.String(); got != want {
+		t.Fatalf("plan:\n%s\nwant:\n%s", got, want)
+	}
+	for _, r := range buf.String() {
+		if r != '\n' && (r == '│' || r == '├' || r == '└' || r == '─') {
+			t.Fatalf("the plain plan drew a box character: %q", buf.String())
+		}
+	}
+}
+
+// Table is a block of rows in two columns: the glyph, the name, and the facts
+// joined with a middle dot. The transcript is a golden test's and a log's, so
+// nothing in it depends on a terminal's width.
+func TestPlainTable(t *testing.T) {
+	var buf bytes.Buffer
+	p := &Plain{W: &buf}
+	p.Table("2 apps", []TableRow{
+		{Glyph: "✓", Name: "sonarr", Facts: []string{"5.2 MiB", "1,562 paths"}},
+		{Glyph: "✓", Name: "qbittorrent", Facts: []string{"571.0 MiB"}},
+		{Glyph: "·", Name: "", Facts: []string{"a line with no name"}},
+	})
+	want := "2 apps\n" +
+		"  ✓ sonarr       5.2 MiB · 1,562 paths\n" +
+		"  ✓ qbittorrent  571.0 MiB\n" +
+		"  · a line with no name\n"
+	if got := buf.String(); got != want {
+		t.Fatalf("table is:\n%s\nwant:\n%s", got, want)
+	}
+}
+
+// A row with no glyph is a note, and a row with no facts is a name: neither is
+// an empty line a reader has to guess at.
+func TestPlainTableDefaultsTheGlyph(t *testing.T) {
+	var buf bytes.Buffer
+	p := &Plain{W: &buf}
+	p.Table("", []TableRow{{Name: "a note"}, {Name: "another", Facts: []string{"with a fact"}}})
+	want := "  · a note\n  · another  with a fact\n"
+	if got := buf.String(); got != want {
+		t.Fatalf("table is:\n%s\nwant:\n%s", got, want)
+	}
+}
+
+// An empty block prints nothing, not a heading over no rows.
+func TestPlainTableWithNoRows(t *testing.T) {
+	var buf bytes.Buffer
+	p := &Plain{W: &buf}
+	p.Table("needs you", nil)
+	if buf.Len() != 0 {
+		t.Fatalf("an empty table printed %q", buf.String())
+	}
 }

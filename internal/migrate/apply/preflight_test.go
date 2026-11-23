@@ -46,11 +46,26 @@ func TestPreflightRefusals(t *testing.T) {
 		{
 			name: "the source config is gone",
 			mutate: func(f *fixture, env *Env) {
-				if err := os.RemoveAll(filepath.Join(f.sourceRoot, "srv", "apps", "sonarr")); err != nil {
+				if err := os.RemoveAll(filepath.Join(f.configs, "sonarr")); err != nil {
 					panic(err)
 				}
 			},
 			want: "is not a directory",
+		},
+		{
+			// The plan's `config:` is where the source kept the app's settings,
+			// and apply never reads it: the snapshot is the only place configs
+			// come from, so a source host that is still mounted changes nothing.
+			name: "the plan names a source path the snapshot does not carry",
+			mutate: func(f *fixture, env *Env) {
+				// A directory at exactly the path the plan names, and no config
+				// for the app in the snapshot.
+				writeFile(t, filepath.Join(f.root, "srv", "apps", "sonarr", "config.xml"), sonarrConfigXML, 0o600)
+				if err := os.RemoveAll(filepath.Join(f.configs, "sonarr")); err != nil {
+					panic(err)
+				}
+			},
+			want: "the snapshot holds no config for sonarr",
 		},
 		{
 			name: "the app is not in the chart's catalog",
@@ -250,9 +265,9 @@ func (liar) Write(context.Context, rewrite.Input) (rewrite.Report, error) {
 // the config root.
 func TestRunRefusesAWriteThatDiffersFromItsCheck(t *testing.T) {
 	f := newFixture(t)
-	doc := "version: 1\napps:\n  " + testApp + ":\n    source: " + testApp +
+	doc := "version: 2\napps:\n  " + testApp + ":\n    kind: kubernetes\n    source: " + testApp +
 		"\n    config: /srv/apps/" + testApp + "\n    ports: [9999]\n    paths: []\n"
-	if err := os.MkdirAll(filepath.Join(f.sourceRoot, "srv", "apps", testApp), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Join(f.configs, testApp), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	p, err := plan.Parse([]byte(doc))

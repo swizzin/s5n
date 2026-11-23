@@ -28,6 +28,16 @@ var releasedFiles = map[string]bool{
 	platformFile: true,
 }
 
+// inertFiles change on main without changing what a release is: Renovate reads
+// its config from main and nothing ships it, so a pull request that tunes
+// Renovate does not hold every automatic release after it until a maintainer
+// tags one. It is not a release on its own either: something in the two files
+// above still has to move. A workflow is not inert, because it decides what
+// the release job does.
+var inertFiles = map[string]bool{
+	".github/renovate.json": true,
+}
+
 // Decision is the verdict for the range since the last s5n-v* tag.
 type Decision struct {
 	// Release is whether the push may cut a chart release.
@@ -63,7 +73,7 @@ func decideRange(changed []string, oldVariants, newVariants, oldPlatform, newPla
 	}
 	var other []string
 	for _, path := range changed {
-		if !releasedFiles[path] {
+		if !releasedFiles[path] && !inertFiles[path] {
 			other = append(other, path)
 		}
 	}

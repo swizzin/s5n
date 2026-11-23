@@ -184,6 +184,10 @@ func runStatus(ctx context.Context, args []string) {
 		os.Exit(2)
 	}
 	out := &say.Plain{W: os.Stdout, Err: os.Stderr}
+	if err := hostFiles(out, *o.record, *o.grantPath); err != nil {
+		out.Error(err)
+		os.Exit(1)
+	}
 
 	facts, err := readStatus(ctx, o, unitDir)
 	if err != nil {

@@ -83,19 +83,22 @@ VALUES (1, 'Save', 'QBITTORRENT', '/srv/apps/autobrr/bin/hook', '/srv/apps/autob
 `
 
 const planYAML = `
-version: 1
+version: 2
 apps:
   qbittorrent:
+    kind: kubernetes
     source: qbittorrent
     config: /srv/apps/qbittorrent
     ports: [8081]
     paths: []
   sonarr:
+    kind: kubernetes
     source: sonarr
     config: /srv/apps/sonarr
     ports: [8989]
     paths: []
   autobrr:
+    kind: kubernetes
     source: autobrr
     config: /srv/apps/autobrr
     paths:
@@ -141,11 +144,84 @@ func setup(t *testing.T, dbSQL string) rewrite.Input {
 	if err != nil {
 		t.Fatalf("plan: %v", err)
 	}
-	return rewrite.Input{App: "autobrr", Dir: dir, Plan: p, Targets: targets()}
+	return rewrite.Input{App: "autobrr", Dir: dir, Plan: p, Targets: targets(), Runs: runs()}
+}
+
+// TestArrRowResolvesByItsURLPath: an Arr row stores a whole URL, so its path
+// says which app it meant on a host that serves several, and the box's own URL
+// replaces it in the row the operator still sees in autobrr.
+func TestArrRowResolvesByItsURLPath(t *testing.T) {
+	ctx := context.Background()
+	fixture := strings.Replace(dbFixture, "'sonarr.default.svc', 8989, 1",
+		"'https://panel.example.com/sonarr/api', 10000, 1", 1)
+	in := setup(t, fixture)
+	// The source's own Service rule is gone: this host is the source's public
+	// name, and only the paths say which app each address is.
+	in.Plan.Hosts = []plan.HostRule{
+		{Host: "panel.example.com", Path: "/sonarr", App: "sonarr"},
+		{Host: "panel.example.com", Path: "/qbittorrent", App: "qbittorrent"},
+	}
+	rep, err := rewriter{}.Check(ctx, in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rep.Blocked() {
+		t.Fatalf("an Arr URL with a path on a host of paths is not settled: %v %v", rep.Uncovered, rep.Unclassified)
+	}
+	if _, err := (rewriter{}).Write(ctx, in); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	if got := readClients(t, in.Dir)[2].host; got != "http://sonarr:8989/sonarr" {
+		t.Errorf("the Sonarr row = %q, want the box's URL with the source's path dropped", got)
+	}
+}
+
+// runs is every instance the fixture plan has of each catalog app: one of each,
+// which is what a proposal needs.
+func runs() map[string][]string {
+	return map[string][]string{
+		"qbittorrent": {"qbittorrent"}, "sonarr": {"sonarr"}, "autobrr": {"autobrr"},
+	}
+}
+
+// TestUnsettledClientProposesItsApp: a client row's type says which app its
+// address can only mean, so an address nothing settles is proposed as that app
+// when the box runs exactly one of it, and left and called out when it runs two.
+func TestUnsettledClientProposesItsApp(t *testing.T) {
+	ctx := context.Background()
+	in := setup(t, strings.Replace(dbFixture, "'localhost', 8081, 1", "'192.0.2.10', 8081, 1", 1))
+	rep, err := rewriter{}.Check(ctx, in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := rewrite.Default{
+		Host: "192.0.2.10", Port: 8081, App: "qbittorrent",
+		Why: "it is a QBITTORRENT client, and this box runs one qbittorrent",
+	}
+	if len(rep.Defaults) != 1 || rep.Defaults[0] != want {
+		t.Fatalf("Defaults = %+v, want %+v", rep.Defaults, want)
+	}
+
+	// Two qBittorrents: an address nothing settles cannot mean one of them.
+	in = setup(t, strings.Replace(dbFixture, "'localhost', 8081, 1", "'192.0.2.10', 8081, 1", 1))
+	in.Runs["qbittorrent"] = []string{"qbittorrent", "qbittorrent-4k"}
+	rep, err = rewriter{}.Check(ctx, in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rep.Defaults) != 0 {
+		t.Errorf("Defaults = %+v, want none with two qBittorrents in the plan", rep.Defaults)
+	}
+	if len(rep.Unclassified) != 1 {
+		t.Errorf("Unclassified = %v, want the address still reported and left", rep.Unclassified)
+	}
 }
 
 func TestRewritesPathsAndConnections(t *testing.T) {
-	in := setup(t, dbFixture)
+	// The Sonarr row is the shape autobrr stores for an Arr: a whole URL in
+	// host, the port column left at the form's 10000. A bare host with the
+	// port in the column is a download client's shape, not an Arr's.
+	in := setup(t, arrFixture())
 	rep, err := rewriter{}.Check(context.Background(), in)
 	if err != nil {
 		t.Fatal(err)
@@ -190,7 +266,9 @@ func TestRewritesPathsAndConnections(t *testing.T) {
 		tls  int
 	}{
 		1: {"qbittorrent", 8080, 0},
-		2: {"sonarr", 8989, 0},
+		// The Arr's address is its host URL, the box's this time; the port
+		// column stays where the form left it, because nothing reads it.
+		2: {"http://sonarr:8989/sonarr", 10000, 0},
 	} {
 		got := clients[id]
 		if got.host != want.host || got.port != want.port || got.tls != want.tls {
@@ -288,6 +366,75 @@ func TestMacroOnlyValueIsRelative(t *testing.T) {
 	}
 	if rep.Blocked() {
 		t.Errorf("a macro-only save path was treated as a path: %v", rep.Uncovered)
+	}
+}
+
+// TestDisabledClientIsLeft: an address no rule settles on a client autobrr has
+// switched off is not a gap. It is left exactly as it is, the report says so,
+// and the run is not stopped.
+func TestDisabledClientIsLeft(t *testing.T) {
+	ctx := context.Background()
+	fixture := strings.Replace(dbFixture, "'localhost', 8081, 1", "'192.0.2.10', 8081, 1", 1)
+	on := setup(t, fixture)
+
+	rep, err := rewriter{}.Check(ctx, on)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rep.Unclassified) != 1 || !rep.Blocked() {
+		t.Fatalf("an enabled client at an address nothing settles = %v, want it reported", rep.Unclassified)
+	}
+
+	off := setup(t, strings.Replace(fixture, "'qBittorrent', 1,", "'qBittorrent', 0,", 1))
+	rep, err = rewriter{}.Check(ctx, off)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rep.Blocked() {
+		t.Fatalf("a disabled client blocked the run: %v", rep.Unclassified)
+	}
+	if len(rep.Left) != 1 || rep.Left[0].What != "192.0.2.10:8081" {
+		t.Fatalf("Left = %+v, want one entry for 192.0.2.10:8081", rep.Left)
+	}
+	if !strings.Contains(rep.Left[0].Why, "switched off") {
+		t.Errorf("why = %q, want it to say the client is switched off", rep.Left[0].Why)
+	}
+	if _, err := (rewriter{}).Write(ctx, off); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	if got := readClients(t, off.Dir)[1]; got.host != "192.0.2.10" {
+		t.Errorf("a disabled client's row was rewritten: %+v", got)
+	}
+}
+
+// TestClientTypeBoxDoesNotRunIsLeft: box runs qBittorrent and the Arrs, and
+// nothing else. Any other row is left and called out, never rewritten and never
+// a refusal: pointing autobrr at an app that is not there is worse than leaving
+// a row the operator can delete.
+func TestClientTypeBoxDoesNotRunIsLeft(t *testing.T) {
+	ctx := context.Background()
+	fixture := strings.Replace(dbFixture,
+		"VALUES (2, 'Sonarr', 1, 'SONARR', 'sonarr.default.svc', 8989, 1);",
+		"VALUES (2, 'Deluge', 1, 'DELUGE', '192.0.2.10', 8112, 0);", 1)
+	in := setup(t, fixture)
+	rep, err := rewriter{}.Check(ctx, in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rep.Blocked() {
+		t.Fatalf("a client of a type box does not run blocked the run: %v", rep.Unclassified)
+	}
+	if len(rep.Left) != 1 || rep.Left[0].What != "192.0.2.10:8112" {
+		t.Fatalf("Left = %+v, want one entry for 192.0.2.10:8112", rep.Left)
+	}
+	if !strings.Contains(rep.Left[0].Why, "DELUGE") {
+		t.Errorf("why = %q, want it to name the client's type", rep.Left[0].Why)
+	}
+	if _, err := (rewriter{}).Write(ctx, in); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	if got := readClients(t, in.Dir)[2]; got.host != "192.0.2.10" || got.port != 8112 {
+		t.Errorf("a client box does not run was rewritten: %+v", got)
 	}
 }
 

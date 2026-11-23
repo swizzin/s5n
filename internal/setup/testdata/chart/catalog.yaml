@@ -5,6 +5,9 @@ apps:
     description: the first app
     instances: false
     default: true
+    # It signs in through the login's provider: init writes the Gateway's
+    # address into the grant for it, and registers its client.
+    oidc: true
     questions:
       - key: apps.alpha.greeting
         prompt: greeting

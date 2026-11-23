@@ -1,0 +1,224 @@
+package plan
+
+import (
+	"fmt"
+	"sort"
+	"strings"
+	"time"
+)
+
+// The platforms a plan can name, for the whole plan and for each app. One plan
+// can hold apps from several of them, so the source block says which ones
+// contributed and every app says which one it came from.
+const (
+	Kubernetes = "kubernetes"
+	Docker     = "docker"
+	Swizzin    = "swizzin"
+)
+
+// Source is the install the plan was read from: for the operator, and for what
+// apply checks about the host it is about to write on. Nothing here is a rule;
+// the apps and their path tables are what apply acts on.
+type Source struct {
+	// Host is the source host's name as discovery saw it. Empty when it could
+	// not say (a plan rebuilt from saved manifests), which is not the same as
+	// a host named nothing.
+	Host string `yaml:"host,omitempty"`
+	// Taken is when the source was read, RFC3339 in UTC. A snapshot taken
+	// before a cutover is only the source's last state if it was taken after
+	// the apps stopped, so the time is what a reader checks it against.
+	Taken string `yaml:"taken"`
+	// Owner is the uid:gid that owned the apps' config directories and their
+	// data. Absent when discovery could not read it; root is uid 0, so absent
+	// is not the default.
+	Owner *Owner `yaml:"owner,omitempty"`
+	// Kinds are the platforms that contributed an app to the plan, in the
+	// order they were read: Kubernetes, then swizzin, then docker.
+	Kinds []string `yaml:"kinds"`
+	// Namespaces is the source's scope: the namespaces discovery was told to
+	// read, empty for every one. It is what makes two reads of one host the
+	// same source or not -- a read limited to one namespace is a different
+	// read from one of the whole cluster -- and it is how `box migrate cutover`
+	// finds the earlier read of the source it is cutting over.
+	Namespaces []string `yaml:"namespaces,omitempty"`
+}
+
+// Owner is who a source's files belong to. The data root after a migration is
+// owned by this account, and apply refuses a data root another user owns rather
+// than chowning a media tree.
+type Owner struct {
+	UID int `yaml:"uid"`
+	GID int `yaml:"gid"`
+}
+
+// kindList is the platforms a plan can name, as a refusal lists them.
+func kindList() string { return Kubernetes + ", " + Swizzin + " or " + Docker }
+
+// knownKind reports whether k names a platform a plan can hold apps from.
+func knownKind(k string) bool {
+	switch k {
+	case Kubernetes, Docker, Swizzin:
+		return true
+	}
+	return false
+}
+
+// checkSource enforces that the source block says what it claims: a time that
+// is a time, and the platforms that were actually read.
+func (p *Plan) checkSource() []string {
+	s := p.Source
+	if s == nil {
+		return nil
+	}
+	var problems []string
+	if strings.ContainsAny(s.Host, "\r\n") {
+		problems = append(problems, fmt.Sprintf("source: host %q must be one line", s.Host))
+	}
+	if s.Taken == "" {
+		problems = append(problems, "source: taken is missing; it is when the source was read, as RFC3339")
+	} else if _, err := time.Parse(time.RFC3339, s.Taken); err != nil {
+		problems = append(problems, fmt.Sprintf("source: taken %q is not a time (RFC3339, e.g. 2026-11-16T12:00:00Z)", s.Taken))
+	}
+	if len(s.Kinds) == 0 {
+		problems = append(problems, "source: kinds is empty; name every platform that contributed an app")
+	}
+	seen := make(map[string]bool, len(s.Kinds))
+	for _, k := range s.Kinds {
+		if !knownKind(k) {
+			problems = append(problems, fmt.Sprintf("source: kind %q is not one of %s", k, kindList()))
+			continue
+		}
+		if seen[k] {
+			problems = append(problems, fmt.Sprintf("source: kind %q appears twice", k))
+		}
+		seen[k] = true
+	}
+	if s.Owner != nil {
+		if s.Owner.UID < 0 || s.Owner.GID < 0 {
+			problems = append(problems, fmt.Sprintf("source: owner %d:%d is not a uid:gid", s.Owner.UID, s.Owner.GID))
+		}
+	}
+	problems = append(problems, checkNamespaces(s)...)
+	return problems
+}
+
+// checkNamespaces normalises the source's scope and enforces that it is a list of
+// namespaces: one name each, with no repeats. Sorting it is what makes two reads
+// written in a different --namespace order the same source, which is what a
+// cutover matches an earlier read on.
+func checkNamespaces(s *Source) []string {
+	if len(s.Namespaces) == 0 {
+		s.Namespaces = nil
+		return nil
+	}
+	var problems []string
+	seen := make(map[string]bool, len(s.Namespaces))
+	out := make([]string, 0, len(s.Namespaces))
+	for _, ns := range s.Namespaces {
+		name := strings.TrimSpace(ns)
+		switch {
+		case name == "":
+			problems = append(problems, "source: namespaces holds an empty name; name the namespace, or leave the key out for every one")
+			continue
+		case seen[name]:
+			problems = append(problems, fmt.Sprintf("source: namespace %q appears twice", name))
+			continue
+		}
+		seen[name] = true
+		out = append(out, name)
+	}
+	sort.Strings(out)
+	s.Namespaces = out
+	return problems
+}
+
+// checkDomain enforces that the plan's domain default is a DNS name box can
+// serve: one name, lower-case, with no scheme, port or path in it. It is the
+// plan's default for the run's question, so a value that is not a name is a run
+// that would ask with an answer nothing can use.
+func (p *Plan) checkDomain() []string {
+	p.Domain = strings.ToLower(strings.TrimSuffix(strings.TrimSpace(p.Domain), "."))
+	if p.Domain == "" || IsDNSName(p.Domain) {
+		return nil
+	}
+	return []string{fmt.Sprintf("domain %q is not a DNS name: name the host box serves the seedbox under, like example.com", p.Domain)}
+}
+
+// IsDNSName reports whether d is a name a certificate can be issued for: two
+// labels or more, each one letters, digits and inner dashes.
+func IsDNSName(d string) bool {
+	labels := strings.Split(d, ".")
+	if len(labels) < 2 {
+		return false
+	}
+	for _, label := range labels {
+		if label == "" || len(label) > 63 || strings.HasPrefix(label, "-") || strings.HasSuffix(label, "-") {
+			return false
+		}
+		for _, r := range label {
+			if (r < 'a' || r > 'z') && (r < '0' || r > '9') && r != '-' {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+// checkApp enforces what an app has to say about itself for the rest of the
+// file to mean anything: which platform it ran on, and that a variant names the
+// image it was mapped from.
+func checkApp(name string, app App) []string {
+	var problems []string
+	switch {
+	case app.Kind == "":
+		problems = append(problems, fmt.Sprintf("apps.%s: kind is missing; it is one of %s", name, kindList()))
+	case !knownKind(app.Kind):
+		problems = append(problems, fmt.Sprintf("apps.%s: kind %q is not one of %s", name, app.Kind, kindList()))
+	}
+	if app.Variant != "" && app.Image == "" {
+		problems = append(problems, fmt.Sprintf("apps.%s: variant %q is a mapping from an image, and image is empty", name, app.Variant))
+	}
+	for _, c := range []struct{ key, val string }{{"category", app.Category}, {"downloadCategory", app.DownloadCategory}} {
+		if c.val == "" {
+			continue
+		}
+		if why := categoryProblem(c.val); why != "" {
+			problems = append(problems, fmt.Sprintf("apps.%s: %s %q %s", name, c.key, c.val, why))
+		}
+	}
+	return problems
+}
+
+// categoryProblem says why a value cannot be a category, or "" when it can: a
+// category is one directory name, or a subcategory's two (4K/Movies), and it
+// is a path segment on a filesystem box lays out itself.
+func categoryProblem(v string) string {
+	if strings.ContainsAny(v, "\\\r\n") {
+		return "has a backslash or a newline in it"
+	}
+	if strings.HasPrefix(v, "/") || strings.HasSuffix(v, "/") {
+		return "must not start or end with /"
+	}
+	for _, segment := range strings.Split(v, "/") {
+		if segment == "" {
+			return "has an empty segment"
+		}
+		if segment == "." || segment == ".." {
+			return "is not a directory name"
+		}
+	}
+	return ""
+}
+
+// whyProblems enforces what a rule's reason is: one line, and present whenever
+// the rule is a default discovery chose rather than the operator's own.
+func whyProblems(at, why string, def bool) []string {
+	var problems []string
+	if strings.ContainsAny(why, "\r\n") {
+		problems = append(problems, fmt.Sprintf("%s: why %q must be one line", at, why))
+	}
+	if def && strings.TrimSpace(why) == "" {
+		problems = append(problems, fmt.Sprintf("%s: default: true needs a why saying what discovery could not settle", at))
+	}
+	return problems
+}

@@ -74,6 +74,7 @@ type Report struct {
 	Copied    int            // files copied through without being decoded
 	Rewritten int            // resume files whose bytes changed
 	Unchanged int            // resume files written through as they were
+	Stopped   int            // torrents this run marked stopped (Stop)
 	Rewrites  map[string]int // path rewrites per resume key
 }
 
@@ -82,12 +83,28 @@ type Option func(*config)
 
 type config struct {
 	dryRun bool
+	// stop marks every torrent stopped as well as rewriting its paths: what a
+	// rehearsal does so a copy cannot seed, recheck or fetch metadata.
+	stop bool
 }
 
 // DryRun computes the report and writes nothing, not even the destination
 // directory, which is ignored.
 func DryRun() Option {
 	return func(c *config) { c.dryRun = true }
+}
+
+// Stop marks every torrent in the run stopped: paused=1 and auto_managed=0,
+// which qBittorrent 5.3 reads as a stopped torrent
+// (bencoderesumedatastorage.cpp:360). It is the one app-specific half of a
+// rehearsal's lock: with the data absent or shared, a running torrent would
+// recheck to 0% and churn the disk, and a seeding one would announce.
+//
+// It is the same pass as the path rewrite, so a resume file is decoded, both
+// edits made and it is written once; every key this package does not name comes
+// back byte for byte.
+func Stop() Option {
+	return func(c *config) { c.stop = true }
 }
 
 // RewriteDir copies src into dst, rewriting the paths in every resume file
@@ -115,7 +132,7 @@ func RewriteDir(src, dst, app string, table Table, opts ...Option) (Report, erro
 			return rep, err
 		}
 	}
-	files, gaps, err := read(src, app, table, &rep)
+	files, gaps, err := read(src, app, table, &rep, cfg)
 	if err != nil {
 		return rep, err
 	}
@@ -155,7 +172,7 @@ type resume struct {
 // read is pass one: every file in src is read, and every resume file decoded
 // and rewritten in memory. Gaps come back rather than an error, because the
 // caller reports them all together once the directory has been read.
-func read(src, app string, table Table, rep *Report) ([]outFile, []plan.Uncovered, error) {
+func read(src, app string, table Table, rep *Report, cfg config) ([]outFile, []plan.Uncovered, error) {
 	entries, err := os.ReadDir(src)
 	if err != nil {
 		return nil, nil, fmt.Errorf("read %s: %w", src, err)
@@ -187,8 +204,17 @@ func read(src, app string, table Table, rep *Report) ([]outFile, []plan.Uncovere
 			}
 			gaps = append(gaps, g...)
 			if len(g) == 0 {
+				data, err = stoppedData(name, data, cfg, rep)
+				if err != nil {
+					return nil, nil, err
+				}
 				out.data = data
 				out.changed = !bytes.Equal(data, raw)
+				if out.changed {
+					rep.Rewritten++
+				} else {
+					rep.Unchanged++
+				}
 			}
 		} else {
 			// The torrent's metadata, and anything else the client keeps
@@ -199,6 +225,23 @@ func read(src, app string, table Table, rep *Report) ([]outFile, []plan.Uncovere
 		files = append(files, out)
 	}
 	return files, gaps, nil
+}
+
+// stoppedData marks one decoded resume file stopped when this run is a
+// rehearsal, counting it for the report. A run that is not a rehearsal returns
+// the bytes it was given: the stop is the snapshot's mode, not a setting.
+func stoppedData(name string, data []byte, cfg config, rep *Report) ([]byte, error) {
+	if !cfg.stop {
+		return data, nil
+	}
+	out, stopped, err := stopBytes(name, data)
+	if err != nil {
+		return nil, err
+	}
+	if stopped {
+		rep.Stopped++
+	}
+	return out, nil
 }
 
 // rewriteFile decodes one resume file and returns the bytes pass two writes.
@@ -215,11 +258,6 @@ func rewriteFile(name string, raw []byte, app string, table Table, rep *Report) 
 	for key, n := range res.rewrites {
 		rep.Rewrites[key] += n
 	}
-	if bytes.Equal(res.data, raw) {
-		rep.Unchanged++
-		return raw, nil, nil
-	}
-	rep.Rewritten++
 	return res.data, nil, nil
 }
 
@@ -254,9 +292,13 @@ func rewriteResume(name string, raw []byte, app string, table Table) (resume, er
 //
 // Gaps come back as values rather than as a *plan.UncoveredError, because a
 // rewriter collects them with every other gap it finds before refusing once.
-func Scan(dir, app string, table Table) (Report, []plan.Uncovered, error) {
+func Scan(dir, app string, table Table, opts ...Option) (Report, []plan.Uncovered, error) {
+	var cfg config
+	for _, o := range opts {
+		o(&cfg)
+	}
 	rep := Report{Rewrites: make(map[string]int)}
-	_, gaps, err := read(dir, app, table, &rep)
+	_, gaps, err := read(dir, app, table, &rep, cfg)
 	return rep, gaps, err
 }
 
@@ -264,9 +306,13 @@ func Scan(dir, app string, table Table) (Report, []plan.Uncovered, error) {
 // changed is written through atomicfile, and nothing else is touched. Files
 // that need no change keep their bytes and their mtime, so a second run writes
 // nothing at all.
-func Rewrite(dir, app string, table Table) (Report, []plan.Uncovered, error) {
+func Rewrite(dir, app string, table Table, opts ...Option) (Report, []plan.Uncovered, error) {
+	var cfg config
+	for _, o := range opts {
+		o(&cfg)
+	}
 	rep := Report{Rewrites: make(map[string]int)}
-	files, gaps, err := read(dir, app, table, &rep)
+	files, gaps, err := read(dir, app, table, &rep, cfg)
 	if err != nil || len(gaps) > 0 {
 		return rep, gaps, err
 	}
@@ -284,12 +330,93 @@ func Rewrite(dir, app string, table Table) (Report, []plan.Uncovered, error) {
 // Blob rewrites one bencoded resume blob in memory, as the SQLite resume store
 // keeps it. name labels the blob where a gap is reported, as a resume file's
 // name does; changed is false when the bytes came back the same.
-func Blob(name string, raw []byte, app string, table Table) (data []byte, rewrites map[string]int, gaps []plan.Uncovered, err error) {
+func Blob(name string, raw []byte, app string, table Table, opts ...Option) (data []byte, rewrites map[string]int, gaps []plan.Uncovered, stopped bool, err error) {
+	var cfg config
+	for _, o := range opts {
+		o(&cfg)
+	}
 	res, err := rewriteResume(name, raw, app, table)
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, nil, nil, false, err
 	}
-	return res.data, res.rewrites, res.gaps, nil
+	if len(res.gaps) > 0 || !cfg.stop {
+		return res.data, res.rewrites, res.gaps, false, nil
+	}
+	data, stopped, err = stopBytes(name, res.data)
+	if err != nil {
+		return nil, nil, nil, false, err
+	}
+	return data, res.rewrites, nil, stopped, nil
+}
+
+// stopKeys are the two resume keys qBittorrent 5.3 reads as a stopped torrent:
+// paused=1 from libtorrent 1.2's resume format, and auto_managed=0 so the queue
+// does not start it again. libtorrent 2 carries the same two keys for
+// qBittorrent's benefit.
+const (
+	keyPaused      = "paused"
+	keyAutoManaged = "auto_managed"
+)
+
+// stopBytes marks one resume file, or one bencoded resume blob, stopped.
+// Everything else in it is left exactly as it was: the same round-trip promise
+// as the path rewrite, made by the same encoder.
+func stopBytes(name string, raw []byte) ([]byte, bool, error) {
+	v, err := bencode.Decode(raw)
+	if err != nil {
+		return nil, false, fmt.Errorf("%s: %w", name, err)
+	}
+	if v.Kind != bencode.Dict {
+		return nil, false, fmt.Errorf("%s: is not a bencoded dictionary", name)
+	}
+	changed := false
+	for _, want := range []struct {
+		key   string
+		value int64
+	}{{keyPaused, 1}, {keyAutoManaged, 0}} {
+		got, err := setInt(&v, want.key, want.value)
+		if err != nil {
+			return nil, false, fmt.Errorf("%s: %w", name, err)
+		}
+		changed = changed || got
+	}
+	if !changed {
+		return raw, false, nil
+	}
+	out, err := bencode.Encode(v)
+	if err != nil {
+		return nil, false, fmt.Errorf("%s: %w", name, err)
+	}
+	return out, true, nil
+}
+
+// setInt writes one integer into a dictionary, inserting the key in its sorted
+// position when the file does not carry it. libtorrent writes both keys, but a
+// resume file another client wrote may not, and a missing key is not a reason
+// to leave a torrent running.
+func setInt(v *bencode.Value, key string, want int64) (bool, error) {
+	if f := v.Lookup(key); f != nil {
+		if f.Kind != bencode.Int {
+			return false, fmt.Errorf("%s is not an integer", key)
+		}
+		if f.Int == want {
+			return false, nil
+		}
+		f.Int = want
+		return true, nil
+	}
+	k := []byte(key)
+	at := len(v.Dict)
+	for i := range v.Dict {
+		if bytes.Compare(v.Dict[i].Key, k) > 0 {
+			at = i
+			break
+		}
+	}
+	v.Dict = append(v.Dict, bencode.Field{})
+	copy(v.Dict[at+1:], v.Dict[at:])
+	v.Dict[at] = bencode.Field{Key: k, Value: bencode.Value{Kind: bencode.Int, Int: want}}
+	return true, nil
 }
 
 // rewriter maps one resume file's stored paths, remembering the gaps so the

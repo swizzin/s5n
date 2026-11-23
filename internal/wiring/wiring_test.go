@@ -758,3 +758,58 @@ func TestConfigValidation(t *testing.T) {
 		t.Fatal("two save paths for one category accepted")
 	}
 }
+
+// TestWiringKeepsAMigratedDownloadCategory: a migrated Arr downloads into the
+// category its torrents are already in, which is not the directory box lays its
+// library out in. The client keeps that category, qBittorrent's own category is
+// left exactly as it is -- an empty save path means the downloads root plus the
+// category's name, so it is already right -- and no category box would not use
+// is created.
+func TestWiringKeepsAMigratedDownloadCategory(t *testing.T) {
+	h := newHarness(t)
+	inst := &h.runner.Config.Instances[0]
+	inst.DownloadCategory = "TV"
+	inst.SavePath = filepath.Join(h.dir, "data", "downloads", "TV")
+	// The chart's own downloads root, which a category with no save path of
+	// its own downloads into.
+	h.runner.Config.Qbittorrent.SavePath = filepath.Join(h.dir, "data", "downloads")
+	// The source's category: qBittorrent's own, with the save path a migrated
+	// category has -- none at all, which means the downloads root.
+	h.stack.cats["TV"] = ""
+	writesBefore := h.stack.count()
+
+	res, err := h.runner.Run(context.Background())
+	if err != nil {
+		t.Fatalf("run: %v\n%s", err, Summary(res))
+	}
+	if _, ok := h.stack.cats["tv"]; ok {
+		t.Error("box created its own tv category on a box that downloads into TV: nothing would use it")
+	}
+	if got := h.stack.cats["TV"]; got != "" {
+		t.Errorf("the migrated category's save path was rewritten to %q; an empty one is the downloads root plus the name", got)
+	}
+	clients := h.stack.clients["sonarr"]
+	if len(clients) != 1 {
+		t.Fatalf("sonarr has %d download clients, want 1", len(clients))
+	}
+	if v, _ := clients[0].FieldValue("tvCategory"); v != "TV" {
+		t.Errorf("the client's category is %v, want the migrated TV", v)
+	}
+	if len(res.Hardlinks) == 0 || !strings.HasSuffix(res.Hardlinks[0].Source, "/downloads/TV") {
+		t.Errorf("the hardlink proof ran on %+v, want the downloads category TV", res.Hardlinks)
+	}
+	// The receipt names the directories it made by the name each is: the
+	// download tree's category, not the library's.
+	var made []string
+	for _, step := range res.Steps {
+		if strings.HasPrefix(step.Name, "data/dirs/downloads/") {
+			made = append(made, step.Name)
+		}
+	}
+	if strings.Join(made, " ") != "data/dirs/downloads/TV data/dirs/downloads/movies" {
+		t.Errorf("the receipt's download directories are %v, want the download categories TV and movies", made)
+	}
+	if h.stack.count() == writesBefore {
+		t.Error("the run wrote nothing at all")
+	}
+}

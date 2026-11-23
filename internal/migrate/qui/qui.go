@@ -53,6 +53,14 @@ const (
 	// bindAddr is what a pod needs; qui's default is localhost, which inside a
 	// pod answers nobody but itself (internal/config/config.go:356).
 	bindAddr = "0.0.0.0"
+	// appQBittorrent is the app qui's instance column names: every instance qui
+	// manages is a qBittorrent.
+	appQBittorrent = "qbittorrent"
+
+	// tableUser is qui's account table, one row by the schema's own CHECK
+	// (001_initial_schema.sql:2-9 at v1.35.0), and keyUsername its name column.
+	tableUser   = "user"
+	keyUsername = "username"
 )
 
 // configPaths are config.toml's path keys. backupDir is the one the research
@@ -192,10 +200,73 @@ func decide(ctx context.Context, in rewrite.Input, end rewrite.Endpoint, t tally
 	if err := planInterned(ctx, db, in, t, rep, &w); err != nil {
 		return w, err
 	}
+	if err := planAccounts(ctx, db, rep, &w); err != nil {
+		return w, err
+	}
 	if err := planCaches(ctx, db, t, &w); err != nil {
 		return w, err
 	}
 	return w, nil
+}
+
+// planAccounts makes the source's one account box's own.
+//
+// qui allows exactly one account (001_initial_schema.sql's CHECK (id = 1)), and
+// the chart's init container signs in as s5n.wiringAccount on every start: it
+// creates the account when the table is empty and writes the release Secret's
+// password onto it otherwise. A migrated database therefore has to name its one
+// row that account, or the init's change-password looks for a name the table
+// does not have and the pod never starts. The row keeps its id, which is what
+// the two tables that carry a user_id refer to -- dashboard_settings and
+// filter_views (026 and 085 at v1.35.0, both without a foreign key) -- so the
+// migrated settings stay the one account's. api_keys and sessions carry no user
+// column at all.
+//
+// A table with two rows is not a source this migration understands: qui's own
+// schema refuses the second, so picking one of them would drop an account nobody
+// asked it to drop, and the run stops naming the count.
+func planAccounts(ctx context.Context, db *sql.DB, rep *rewrite.Report, w *work) error {
+	// The table is the app's; a database from before it existed has none, and
+	// then the init container creates the account on the first start.
+	ok, err := hasColumn(ctx, db, tableUser, keyUsername)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return nil
+	}
+	rows, err := db.QueryContext(ctx, `SELECT id, username FROM `+tableUser+` ORDER BY id`)
+	if err != nil {
+		return fmt.Errorf("qui: read %s: %w", tableUser, err)
+	}
+	defer rows.Close()
+	type account struct {
+		id   int64
+		name string
+	}
+	var found []account
+	for rows.Next() {
+		var a account
+		if err := rows.Scan(&a.id, &a.name); err != nil {
+			return fmt.Errorf("qui: read %s: %w", tableUser, err)
+		}
+		found = append(found, a)
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("qui: read %s: %w", tableUser, err)
+	}
+	if len(found) > 1 {
+		return fmt.Errorf("qui: %s %s holds %d accounts, and qui allows one: box owns the account %q, and which of these a source meant is not something this migration can decide",
+			dbName, tableUser, len(found), rewrite.WiringAccount)
+	}
+	if len(found) == 0 || found[0].name == rewrite.WiringAccount {
+		return nil
+	}
+	rep.Accounts = append(rep.Accounts, rewrite.Account{From: found[0].name, To: rewrite.WiringAccount})
+	w.dbEdits = append(w.dbEdits, dbEdit{
+		table: tableUser, column: keyUsername, key: "id", keyID: found[0].id, value: rewrite.WiringAccount,
+	})
+	return nil
 }
 
 // databasePath is where qui keeps qui.db: the config directory unless dataDir
@@ -552,21 +623,22 @@ func planInterned(ctx context.Context, db *sql.DB, in rewrite.Input, t tally, re
 			return fmt.Errorf("qui: read %s.%s: %w", c.table, c.column, err)
 		}
 		for _, r := range found {
-			host, port, err := splitURL(r.value)
+			u, err := parseURL(r.value)
 			if err != nil {
 				return fmt.Errorf("qui: %s.%s: %w", c.table, c.column, err)
 			}
 			where := c.table + "." + c.column
-			res := in.Resolve(host, port)
+			// The stored value is a whole URL, so its path is part of what says
+			// which app it meant on a host that serves several.
+			res := in.ResolveURL(u)
 			switch res.Verdict {
 			case plan.Rewrite:
 				end, ok := in.Targets[res.App]
 				if !ok {
 					return fmt.Errorf("qui: %s: the plan points %s at %q, which has no endpoint on the box",
-						where, address(host, port), res.App)
+						where, address(u.Hostname(), rewrite.URLPort(u)), res.App)
 				}
-				moved := (&url.URL{Scheme: "http",
-					Host: fmt.Sprintf("%s:%d", end.Host, end.Port), Path: end.URLBase}).String()
+				moved := end.URL()
 				if moved == r.value {
 					continue
 				}
@@ -577,8 +649,22 @@ func planInterned(ctx context.Context, db *sql.DB, in rewrite.Input, t tally, re
 			case plan.Leave:
 			default:
 				rep.Unclassified = append(rep.Unclassified, rewrite.Address{
-					App: in.App, File: dbName, Where: where, Host: host, Port: port,
+					App: in.App, File: dbName, Where: where, Host: u.Hostname(), Port: rewrite.URLPort(u),
 				})
+				// qui's instance column is a qBittorrent by name: an address
+				// nothing settles can only be the box's, when there is one.
+				app := appQBittorrent
+				if c.table == "arr_instances" {
+					app = ""
+				}
+				if app != "" {
+					if name, ok := in.Sole(app); ok {
+						rep.Defaults = append(rep.Defaults, rewrite.Default{
+							Host: u.Hostname(), Port: rewrite.URLPort(u), App: name,
+							Why: "it is a qBittorrent instance, and this box runs one qBittorrent",
+						})
+					}
+				}
 			}
 		}
 	}
@@ -634,18 +720,18 @@ func hasColumn(ctx context.Context, db *sql.DB, table, column string) (bool, err
 	return rows.Next(), rows.Err()
 }
 
-// splitURL separates the host and port a stored URL names, so the plan can
-// settle the address.
-func splitURL(raw string) (string, int, error) {
+// parseURL is a stored value as the URL it is. qui writes the instance
+// columns from its UI's URL field, so a value with no scheme is refused rather
+// than guessed at.
+func parseURL(raw string) (*url.URL, error) {
 	u, err := url.Parse(strings.TrimSpace(raw))
 	if err != nil {
-		return "", 0, fmt.Errorf("%q is not a URL: %w", raw, err)
+		return nil, fmt.Errorf("%q is not a URL: %w", raw, err)
 	}
 	if u.Hostname() == "" {
-		return "", 0, fmt.Errorf("%q is not a URL with a host", raw)
+		return nil, fmt.Errorf("%q is not a URL with a host", raw)
 	}
-	n, _ := strconv.Atoi(u.Port())
-	return u.Hostname(), n, nil
+	return u, nil
 }
 
 func address(host string, port int) string {

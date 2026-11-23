@@ -167,17 +167,26 @@ func (p *LinePrompt) MultiSelect(f MultiSelect) ([]string, error) {
 		}
 		p.printf("  %2d) [%s] %s%s\n", i+1, mark, o.Label, helpSuffix(o.Help))
 	}
+	hint := "numbers, comma separated; enter keeps them"
+	if f.Min == 0 {
+		hint += ", or none for no apps"
+	}
 	for {
-		p.printf("%s (numbers, comma separated; enter keeps them): ", f.Prompt)
+		p.printf("%s (%s): ", f.Prompt, hint)
 		line, err := p.readLine()
 		if err != nil {
 			return nil, err
 		}
 		answer := strings.TrimSpace(line)
 		var picked []string
-		if answer == "" {
+		switch {
+		case answer == "":
 			picked = append(picked, f.Selected...)
-		} else {
+		case f.Min == 0 && strings.EqualFold(answer, "none"):
+			// A list that may be empty needs a word for it: this prompt has no
+			// toggle, and "enter keeps them" cannot untick what is there.
+			picked = nil
+		default:
 			seen := map[string]bool{}
 			bad := ""
 			for _, part := range strings.FieldsFunc(answer, func(r rune) bool { return r == ',' || r == ' ' || r == '\t' }) {

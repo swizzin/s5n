@@ -297,9 +297,11 @@ func realChart(t *testing.T) (manifest, values, schema []byte) {
 // in this package is what keeps an older chart's bypass under a newer box.
 func TestLoginAbsentKeepsTheLegacyAppsSelfAuthenticating(t *testing.T) {
 	manifest, values, schema := realChart(t)
-	old := []byte(strings.ReplaceAll(string(manifest), "    login: own\n", ""))
+	// Both spellings go: a release that predates the key carries neither, and
+	// the one this chart writes for Tautulli is a value like any other.
+	old := []byte(strings.NewReplacer("    login: own\n", "", "    login: portal\n", "").Replace(string(manifest)))
 	if string(old) == string(manifest) {
-		t.Fatal("the chart's catalog carries no `login: own` to strip, so this fixture no longer looks like an older release")
+		t.Fatal("the chart's catalog carries no `login:` key to strip, so this fixture no longer looks like an older release")
 	}
 	cat, err := Parse("catalog.yaml", old, values, schema)
 	if err != nil {
@@ -312,6 +314,7 @@ func TestLoginAbsentKeepsTheLegacyAppsSelfAuthenticating(t *testing.T) {
 
 // An explicit value wins over the legacy set: the chart decides, so a later
 // release can bring one of those three behind the login without a box release.
+// Tautulli is that case in this chart's own catalog; Seerr is the one left.
 func TestExplicitPortalBeatsTheLegacyName(t *testing.T) {
 	manifest, values, schema := realChart(t)
 	// Plex is the first `login: own` in the manifest.
@@ -324,8 +327,29 @@ func TestExplicitPortalBeatsTheLegacyName(t *testing.T) {
 	if plex.Login != LoginPortal {
 		t.Fatalf("apps.plex login = %q, want the explicit portal", plex.Login)
 	}
-	if got := strings.Join(cat.SelfAuthenticating(), ","); got != "tautulli,seerr" {
-		t.Fatalf("self-authenticating = %s, want tautulli,seerr", got)
+	if got := strings.Join(cat.SelfAuthenticating(), ","); got != "seerr" {
+		t.Fatalf("self-authenticating = %s, want seerr", got)
+	}
+}
+
+// The chart's own catalog serves Tautulli behind the box's login. Its name is
+// in the legacy set, so an entry that simply dropped the key would read as
+// `login: own` and undo the decision: the value has to be written out.
+func TestTheChartsTautulliIsBehindThePortal(t *testing.T) {
+	manifest, values, schema := realChart(t)
+	cat, err := Parse("catalog.yaml", manifest, values, schema)
+	if err != nil {
+		t.Fatalf("parse the chart's catalog: %v", err)
+	}
+	tautulli, ok := cat.App("tautulli")
+	if !ok {
+		t.Fatal("the chart's catalog has no tautulli")
+	}
+	if tautulli.Login != LoginPortal {
+		t.Fatalf("apps.tautulli login = %q, want the box's portal (an absent value means own for that name)", tautulli.Login)
+	}
+	if strings.Contains(strings.Join(cat.SelfAuthenticating(), ","), "tautulli") {
+		t.Fatalf("tautulli is still self-authenticating: %v", cat.SelfAuthenticating())
 	}
 }
 

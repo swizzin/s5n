@@ -27,7 +27,7 @@ import (
 func TestRunAdoptsASonarrAndQbittorrent(t *testing.T) {
 	f := newFixture(t)
 	p, raw := f.plan()
-	source := hashTree(t, f.sourceRoot)
+	source := hashTree(t, f.configs)
 
 	values := &fakeValues{}
 	owned := &fakeOwned{}
@@ -38,7 +38,7 @@ func TestRunAdoptsASonarrAndQbittorrent(t *testing.T) {
 	}
 
 	// The source is the rollback: not one byte of it moved.
-	sameTree(t, "the source tree", source, hashTree(t, f.sourceRoot))
+	sameTree(t, "the source tree", source, hashTree(t, f.configs))
 	assertSonarrConfig(t, f)
 	assertQbitConfig(t, f)
 	assertDataRenamed(t, f)
@@ -318,7 +318,7 @@ func TestRunRenamesOverTheBoxsOwnEmptyDirectories(t *testing.T) {
 func TestRunWritesNothingOutsideStagingWhenCheckBlocks(t *testing.T) {
 	f := newFixture(t)
 	// A series outside every rule the plan has.
-	exec(t, filepath.Join(f.sourceRoot, "srv", "apps", "sonarr", "sonarr.db"),
+	exec(t, filepath.Join(f.configs, "sonarr", "sonarr.db"),
 		`UPDATE Series SET Path = '/mnt/elsewhere/Example Show' WHERE Id = 1`)
 	p, raw := f.plan()
 	values := &fakeValues{}
@@ -357,7 +357,7 @@ func TestRunWritesNothingOutsideStagingWhenCheckBlocks(t *testing.T) {
 func TestRunRefusesWhenTheOperatorSaysNo(t *testing.T) {
 	f := newFixture(t)
 	p, raw := f.plan()
-	source := hashTree(t, f.sourceRoot)
+	source := hashTree(t, f.configs)
 	values := &fakeValues{}
 	env := f.env(values, &fakeOwned{}, func(Summary) (bool, error) { return false, nil })
 
@@ -366,7 +366,7 @@ func TestRunRefusesWhenTheOperatorSaysNo(t *testing.T) {
 	} else if !contains(err.Error(), "cancelled") {
 		t.Errorf("the refusal is %q, want one saying cancelled", err)
 	}
-	sameTree(t, "the source tree", source, hashTree(t, f.sourceRoot))
+	sameTree(t, "the source tree", source, hashTree(t, f.configs))
 	if exists(filepath.Join(f.configRoot, "sonarr")) {
 		t.Error("the config was moved although the answer was no")
 	}
@@ -432,7 +432,7 @@ func TestRunRefusesAnOwnedConflict(t *testing.T) {
 func TestRunRefusesAnAppWhoseKeyCannotBeRead(t *testing.T) {
 	f := newFixture(t)
 	// An Arr that has never started has no key yet.
-	writeFile(t, filepath.Join(f.sourceRoot, "srv", "apps", "sonarr", "config.xml"),
+	writeFile(t, filepath.Join(f.configs, "sonarr", "config.xml"),
 		strings.Replace(sonarrConfigXML, "<ApiKey>"+testAPIKey+"</ApiKey>", "<ApiKey></ApiKey>", 1), 0o600)
 	p, raw := f.plan()
 	var shown Summary
@@ -494,5 +494,66 @@ func TestAPIKeyReaders(t *testing.T) {
 	}
 	if key, ok, _ := iniAPIKey([]byte("[General]\nhttp_port = 8181\n")); ok || key != "" {
 		t.Errorf("a config.ini with no api_key read %q", key)
+	}
+}
+
+// TestRehearsalRenamesNothingAndStopsTheTorrents is the apply half of the
+// rehearsal lock: the plan's data is not adopted (a different data root is
+// fine, and no rename happens), and qBittorrent comes out with its torrents
+// stopped and the two settings written. The summary says both, because the
+// operator confirmed that summary.
+func TestRehearsalRenamesNothingAndStopsTheTorrents(t *testing.T) {
+	f := newFixture(t)
+	// One torrent, in the state a seeding source would leave it: the stop pass
+	// is what changes it.
+	writeFile(t, filepath.Join(f.configs, "qbittorrent", "qBittorrent", "BT_backup", "h1.fastresume"),
+		"d12:auto_managedi1e6:pausedi0ee", 0o600)
+
+	p, raw := f.plan()
+	var shown Summary
+	env := f.env(&fakeValues{}, &fakeOwned{}, yes(t, &shown))
+	env.Rehearsal = true
+	// A rehearsal host's data root need not be the source's: nothing is
+	// adopted, so the plan's root is not required to exist here.
+	env.DataRoot = filepath.Join(f.root, "elsewhere")
+	if err := os.MkdirAll(env.DataRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	res, err := Run(context.Background(), p, raw, env)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if len(res.Renamed) != 0 {
+		t.Errorf("a rehearsal renamed %v, and it never touches the data", res.Renamed)
+	}
+	if !isDir(filepath.Join(f.dataRoot, "Downloads")) {
+		t.Error("the source's Downloads directory is gone: a rehearsal renamed it")
+	}
+	if exists(filepath.Join(f.dataRoot, "downloads")) {
+		t.Error("the rehearsal made box's downloads directory, which only a rename does")
+	}
+	if shown.Stopped != 1 {
+		t.Errorf("the summary counts %d torrents stopped, want 1", shown.Stopped)
+	}
+	lines := strings.Join(shown.Lines(), "\n")
+	for _, want := range []string{
+		"rehearsal: nothing leaves this box, and no data is renamed",
+		"1 torrents written stopped",
+	} {
+		if !strings.Contains(lines, want) {
+			t.Errorf("the confirm screen has no %q:\n%s", want, lines)
+		}
+	}
+	// The screen that says no data is renamed lists no renames: a row the run
+	// will not do is a contradiction the operator confirms.
+	if strings.Contains(lines, "data: rename") {
+		t.Errorf("a rehearsal's confirm screen lists a rename it will not make:\n%s", lines)
+	}
+	conf := f.readFile(filepath.Join("config", "qbittorrent", "qBittorrent", "qBittorrent.conf"))
+	for _, want := range []string{`Session\AddTorrentStopped=true`, `AutoDownloader\EnableProcessing=false`} {
+		if !strings.Contains(conf, want) {
+			t.Errorf("the rehearsal conf has no %q:\n%s", want, conf)
+		}
 	}
 }

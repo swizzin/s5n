@@ -188,8 +188,13 @@ apps:
     default: true
     # Its PMS link and its history both come from Plex's own API.
     calls: [plex]
-    # It is reached by the same players and apps that reach Plex.
-    login: own
+    # It is behind the box's one login: `login: portal` is written out because
+    # the name is in box's frozen legacy set, and an absent value there means
+    # "own" for a chart that predates the key. Its own web login is switched off
+    # by the app's init container (internal/ttlconf: a non-empty http_password
+    # is what makes Tautulli ask for a password), and it is served under
+    # /tautulli rather than at a name of its own.
+    login: portal
     # Watch history and the config.ini that points at the database
     # (plexpy/database.py at v2.18.2: FILENAME = "tautulli.db";
     # plexpy/config.py: FILENAME = "config.ini").

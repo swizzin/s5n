@@ -219,6 +219,143 @@ func TestQuiEnsureInstanceAdoptsByNameAndDoesNotDuplicate(t *testing.T) {
 	}
 }
 
+// A migrated box's qui holds the source's own instance, named by the operator,
+// already pointing at the release's qBittorrent: wiring must adopt it, record
+// its id and leave the name alone. Creating one would leave two rows polling
+// the same qBittorrent.
+func TestQuiEnsureInstanceAdoptsByHostAndKeepsTheOperatorsName(t *testing.T) {
+	f, q := newQuiFake(t)
+	loginQui(t, q)
+	f.rows = []Item{{
+		"id": 7, "name": "source-qbit", "host": "http://qbittorrent:8080",
+		"username": "", "hasLocalFilesystemAccess": true, "connected": false,
+	}}
+
+	res, err := q.EnsureInstance(context.Background(), QuiInstanceSpec{
+		Name: "qBittorrent", Host: "http://qbittorrent:8080", Username: "",
+		Password: "", HasLocalFilesystemAccess: true,
+	}, 0)
+	if err != nil {
+		t.Fatalf("adopt: %v", err)
+	}
+	if res.Change != Unchanged || res.ID != 7 {
+		t.Fatalf("adopt = %+v, want unchanged on the source's id 7", res)
+	}
+	if len(f.created) != 0 {
+		t.Fatal("adoption created a second instance")
+	}
+	if len(f.rows) != 1 || f.rows[0].Str("name") != "source-qbit" {
+		t.Fatalf("rows = %v, want the operator's one instance under their own name", f.rows)
+	}
+	if f.tested != 1 {
+		t.Fatalf("tests = %d, want the adopted instance proved once", f.tested)
+	}
+}
+
+// The host is compared in qui's own stored form: the operator may have typed a
+// trailing slash in qui's UI, and that is still the release's qBittorrent.
+func TestQuiEnsureInstanceAdoptsAHostWithATrailingSlash(t *testing.T) {
+	f, q := newQuiFake(t)
+	loginQui(t, q)
+	f.rows = []Item{{
+		"id": 4, "name": "mine", "host": "http://qbittorrent:8080/",
+		"username": "", "hasLocalFilesystemAccess": true,
+	}}
+
+	res, err := q.EnsureInstance(context.Background(), QuiInstanceSpec{
+		Name: "qBittorrent", Host: "http://qbittorrent:8080", Username: "",
+		HasLocalFilesystemAccess: true,
+	}, 0)
+	if err != nil {
+		t.Fatalf("adopt: %v", err)
+	}
+	if res.ID != 4 {
+		t.Fatalf("adopt = %+v, want the instance at the same host", res)
+	}
+	if res.Change != Updated {
+		t.Fatalf("change = %s, want the host written in the spec's spelling", res.Change)
+	}
+	if len(f.created) != 0 || len(f.rows) != 1 {
+		t.Fatalf("rows = %v (created %d), want the one instance adopted", f.rows, len(f.created))
+	}
+}
+
+// Nothing recorded and nothing at the host or name: first run, so create.
+func TestQuiEnsureInstanceCreatesWhenNothingIsThere(t *testing.T) {
+	f, q := newQuiFake(t)
+	loginQui(t, q)
+
+	res, err := q.EnsureInstance(context.Background(), QuiInstanceSpec{
+		Name: "qBittorrent", Host: "http://qbittorrent:8080", Username: "",
+		HasLocalFilesystemAccess: true,
+	}, 0)
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if res.Change != Created || res.ID != 1 {
+		t.Fatalf("create = %+v, want created id 1", res)
+	}
+	if len(f.created) != 1 || len(f.rows) != 1 {
+		t.Fatalf("created %d rows, hold %d", len(f.created), len(f.rows))
+	}
+}
+
+// Two instances at the release's qBittorrent: qui allows both, and nothing
+// says which history to keep, so the run refuses and writes nothing.
+func TestQuiEnsureInstanceRefusesTwoAtTheHost(t *testing.T) {
+	f, q := newQuiFake(t)
+	loginQui(t, q)
+	f.rows = []Item{
+		{"id": 4, "name": "mine", "host": "http://qbittorrent:8080", "username": ""},
+		{"id": 9, "name": "qBittorrent", "host": "http://qbittorrent:8080/", "username": ""},
+	}
+
+	_, err := q.EnsureInstance(context.Background(), QuiInstanceSpec{
+		Name: "qBittorrent", Host: "http://qbittorrent:8080", Username: "",
+		HasLocalFilesystemAccess: true,
+	}, 0)
+	if err == nil {
+		t.Fatal("two instances at the same qBittorrent passed")
+	}
+	for _, want := range []string{"ids 4 and 9", "http://qbittorrent:8080"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("error = %v, want it to name %q", err, want)
+		}
+	}
+	if f.writes != 0 || len(f.created) != 0 || len(f.updated) != 0 {
+		t.Fatalf("a refusal wrote: %d writes, %d creates, %d updates", f.writes, len(f.created), len(f.updated))
+	}
+}
+
+// The recorded id is authoritative even when another instance is at the same
+// host: a rename in qui's UI, or a second one the operator made, does not move
+// which row box owns.
+func TestQuiEnsureInstanceOwnedIDWinsOverAHostMatch(t *testing.T) {
+	f, q := newQuiFake(t)
+	loginQui(t, q)
+	f.rows = []Item{
+		{"id": 3, "name": "mine", "host": "http://elsewhere:8080", "username": ""},
+		{"id": 9, "name": "qBittorrent", "host": "http://qbittorrent:8080", "username": ""},
+	}
+
+	res, err := q.EnsureInstance(context.Background(), QuiInstanceSpec{
+		Name: "qBittorrent", Host: "http://qbittorrent:8080", Username: "",
+		HasLocalFilesystemAccess: true,
+	}, 3)
+	if err != nil {
+		t.Fatalf("adopt the recorded id: %v", err)
+	}
+	if res.ID != 3 || res.Change != Updated {
+		t.Fatalf("result = %+v, want the recorded id 3 updated", res)
+	}
+	if len(f.created) != 0 || len(f.rows) != 2 {
+		t.Fatalf("created %d rows, hold %d; the recorded id must not create another", len(f.created), len(f.rows))
+	}
+	if got := f.rows[0].Str("host"); got != "http://qbittorrent:8080" {
+		t.Fatalf("recorded instance host = %q, want the spec's", got)
+	}
+}
+
 // A second run on the recorded id and fingerprint writes nothing and still
 // proves the instance with qui's own test.
 func TestQuiEnsureInstanceIsIdempotent(t *testing.T) {

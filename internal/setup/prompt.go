@@ -66,6 +66,11 @@ type Input struct {
 	Help     string
 	Default  string
 	Validate func(string) error
+	// Record is a note a prompter that keeps a transcript shows beside the
+	// answer, in parentheses: "web login" for the login, so the recorded line
+	// says which of the two accounts it is. A prompter that prints one line per
+	// question (LinePrompt) has no record to annotate and ignores it.
+	Record string
 }
 
 // Secret is one line that must not be echoed. Optional allows an empty answer;
@@ -123,6 +128,11 @@ type PathHost interface {
 	// Stat reports one path. A missing path is fs.ErrNotExist, not an error
 	// worth failing on: init's job is to notice it.
 	Stat(path string) (FileInfo, error)
+	// Lstat reports one path without following a symlink: box never reads
+	// through a link when it walks a seedbox's files (docs/box.md, "Homes,
+	// data paths and SSH"), so the owner of what a link points at is never
+	// taken for the owner of the box's files.
+	Lstat(path string) (FileInfo, error)
 	// StatFS reports the free space of the filesystem holding path.
 	StatFS(path string) (FSInfo, error)
 	// MountInfo lists the host's mounts, the way /proc/self/mountinfo does.
@@ -138,12 +148,15 @@ type PathHost interface {
 }
 
 // FileInfo is what init needs from a stat: enough to say whether the path is a
-// directory and who owns it.
+// directory, whether it is a link and who owns it.
 type FileInfo struct {
 	IsDir bool
-	Mode  fs.FileMode
-	UID   int
-	GID   int
+	// Symlink is set by Lstat for a path that is itself a link. Stat follows
+	// links and never sets it.
+	Symlink bool
+	Mode    fs.FileMode
+	UID     int
+	GID     int
 }
 
 // FSInfo is the free space of one filesystem.

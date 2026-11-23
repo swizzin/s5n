@@ -39,9 +39,10 @@ const dbRows = `@tables|section_locations
 `
 
 const planYAML = `
-version: 1
+version: 2
 apps:
   plex:
+    kind: kubernetes
     source: plex
     config: /srv/apps/plex
     ports: [32400]
@@ -352,4 +353,77 @@ func treeHash(t *testing.T, dir string) string {
 		t.Fatal(err)
 	}
 	return hex.EncodeToString(h.Sum(nil))
+}
+
+// TestFollowsTheLibrarysCategory: the section roots and every file under them
+// follow the library directory the source named onto the category box lays out,
+// because the plan's rule for that directory is more specific than the
+// library's.
+func TestFollowsTheLibrarysCategory(t *testing.T) {
+	dir := t.TempDir()
+	home := filepath.Join(dir, filepath.FromSlash(supportDir))
+	if err := os.MkdirAll(filepath.Join(home, filepath.FromSlash("Plug-in Support/Databases")), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(home, prefsName), []byte(prefsFixture), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(home, filepath.FromSlash(dbRel)), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	p, err := plan.Parse([]byte(`version: 2
+data:
+  root: /srv
+  downloads: Downloads
+  media: media
+  folders:
+    - {from: Movies, to: movies}
+apps:
+  plex:
+    kind: kubernetes
+    source: plex
+    config: /srv/apps/plex
+    paths:
+      - from: /srv/apps/plex
+        to: /config
+      - from: /srv/plex
+        to: /config/plex
+      - from: /srv/media/Movies
+        to: /data/media/movies
+      - from: /srv/media
+        to: /data/media
+  radarr:
+    kind: kubernetes
+    source: radarr
+    config: /srv/apps/radarr
+    category: movies
+    paths: []
+`))
+	if err != nil {
+		t.Fatalf("plan: %v", err)
+	}
+	runner := &fakeRunner{rows: dbRows}
+	in := rewrite.Input{
+		App: "plex", Dir: dir, Plan: p,
+		Targets: map[string]rewrite.Endpoint{"plex": {Host: "plex", Port: 32400}},
+		Run:     runner.run,
+	}
+	if _, err := (rewriter{}).Write(context.Background(), in); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	if len(runner.writes) != 1 {
+		t.Fatalf("Write ran %d scripts, want 1", len(runner.writes))
+	}
+	script := string(runner.writes[0])
+	for _, want := range []string{
+		"UPDATE section_locations SET root_path = '/data/media/movies' WHERE id = 1;",
+		"UPDATE media_parts SET file = '/data/media/movies/Example Film (2020)/Example Film (2020).mkv' WHERE id = 10;",
+		// The section the source named TV keeps its directory: only the one
+		// the plan maps is renamed.
+		"UPDATE section_locations SET root_path = '/data/media/TV' WHERE id = 2;",
+	} {
+		if !strings.Contains(script, want) {
+			t.Errorf("the write script is missing %q:\n%s", want, script)
+		}
+	}
 }

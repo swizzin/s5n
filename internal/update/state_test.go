@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/swizzin/s5n/internal/hostroot"
 )
 
 func TestFileStateRoundTripsAndStartsEmpty(t *testing.T) {
@@ -92,8 +94,8 @@ func TestFileStateRefusesAnUnknownField(t *testing.T) {
 }
 
 func TestFilePathIsBesideTheClusterRecord(t *testing.T) {
-	got := FilePath("/etc/swizzin/cluster.yaml")
-	if want := "/etc/swizzin/" + FileName; got != want {
+	got := FilePath(hostroot.RecordPath)
+	if want := hostroot.Dir + "/" + FileName; got != want {
 		t.Fatalf("FilePath = %q, want %q", got, want)
 	}
 }

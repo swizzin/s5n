@@ -138,13 +138,21 @@ func pickRandom(n int) int {
 // write. It keeps what the grant already says and only picks for a box that has
 // no port yet: a working port is never moved, because peers learned it from the
 // tracker and a new number drops every connection until the next announce.
-func (d *Decision) torrentPort(ctx context.Context, namespace string, apps []string, base, grantNow map[string]any) (any, error) {
+//
+// The app that holds the port is the box's, not this run's: a migrate install
+// answers init with every app off and switches the plan's on afterwards, so
+// opts.SwitchesOn is read beside apps.
+func (d *Decision) torrentPort(ctx context.Context, namespace string, apps []string, base, grantNow map[string]any, opts Options) (any, error) {
 	if _, declared := lookupPath(base, torrentPortKey); !declared {
 		// A chart release from before the peer port, or without qBittorrent:
 		// there is no key to decide.
 		return nil, nil
 	}
-	if !contains(apps, torrentApp) {
+	running := apps
+	if len(opts.SwitchesOn) > 0 {
+		running = append(append([]string{}, apps...), opts.SwitchesOn...)
+	}
+	if !contains(running, torrentApp) {
 		return nil, nil
 	}
 	if port, ok := intAt(grantNow, torrentPortKey); ok && port > 0 {
@@ -164,6 +172,15 @@ func (d *Decision) torrentPort(ctx context.Context, namespace string, apps []str
 		d.report().Line(fmt.Sprintf("torrent port: %d (already this seedbox's; kept)", port))
 		return port, nil
 	}
+	// A migrated box's peers, and any forward the operator set, already point
+	// at the port the source announced. Keep it when a Service could hold it
+	// here and nothing does: the whole NodePort range is the test, not the band
+	// box picks from, because this number was not picked on this cluster and
+	// moving it is exactly what costs the connections.
+	if port := opts.TorrentPort; port >= nodePortRangeStart && port <= nodePortRangeEnd && !portHeld(port, held) {
+		d.report().Line(fmt.Sprintf("torrent port: %d (the source's, kept)", port))
+		return port, nil
+	}
 	lo, hi := staticBand(nodePortRangeStart, nodePortRangeEnd)
 	randInt := d.Rand
 	if randInt == nil {
@@ -173,6 +190,16 @@ func (d *Decision) torrentPort(ctx context.Context, namespace string, apps []str
 	if err != nil {
 		return nil, err
 	}
-	d.report().Line(fmt.Sprintf("torrent port: %d (free on this node; peers learn it from the tracker)", port))
+	d.report().Line(fmt.Sprintf("torrent port: %d (picked; peers learn it from the tracker)", port))
 	return port, nil
+}
+
+// portHeld reports whether a Service in the cluster already holds port.
+func portHeld(port int, held []NodePort) bool {
+	for _, h := range held {
+		if h.Port == port {
+			return true
+		}
+	}
+	return false
 }

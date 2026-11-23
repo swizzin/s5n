@@ -63,7 +63,7 @@ const (
 	// created by box, owned by UID and mode 0700. It sits under /var/lib
 	// rather than /etc because it is state (a SQLite database that changes on
 	// every login), not configuration -- box's only other host state is
-	// /etc/swizzin/cluster.yaml, which is root's record of a decision.
+	// /etc/s5n/cluster.yaml, which is root's record of a decision.
 	HostPath = "/var/lib/s5n/authelia"
 	// ServerPath is where the configuration is mounted inside the pod. It is
 	// not /config: /config is the claim, and a ConfigMap mounted over it

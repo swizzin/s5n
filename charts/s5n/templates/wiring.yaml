@@ -26,7 +26,8 @@ previous run's logs stay readable until then.
       "urlBase" (printf "/%s" $inst.name)
       "apiKeyFile" (printf "/etc/s5n/keys/%s-apikey" $inst.name)
       "category" $inst.category
-      "savePath" (printf "/data/downloads/%s" $inst.category)
+      "downloadCategory" $inst.downloadCategory
+      "savePath" (printf "/data/downloads/%s" $inst.downloadCategory)
       "rootFolder" (printf "/data/media/%s" $inst.category)) }}
 {{- end }}
 {{- end }}
@@ -40,8 +41,12 @@ previous run's logs stay readable until then.
 {{- /* The WebUI skips its login for the release's addresses (the init container
        seals that), so this Job -- like every app that calls it -- carries no
        credential at all: the URL is the whole entry. */}}
+{{- /* savePath is the data contract's downloads root, which a category with
+       no save path of its own downloads into: a migrated category is that
+       shape, and the Job must leave it alone. */}}
 {{- $_ := set $cfg "qbittorrent" (dict
-      "url" (printf "http://qbittorrent:%v" .Values.apps.qbittorrent.port)) }}
+      "url" (printf "http://qbittorrent:%v" .Values.apps.qbittorrent.port)
+      "savePath" "/data/downloads") }}
 {{- end }}
 {{- if and .Values.apps.prowlarr .Values.apps.prowlarr.enabled }}
 {{- $_ := set $cfg "prowlarr" (dict
@@ -55,11 +60,13 @@ previous run's logs stay readable until then.
       "url" (printf "http://plex:%v" .Values.apps.plex.port)) }}
 {{- end }}
 {{- if and .Values.apps.tautulli .Values.apps.tautulli.enabled }}
-{{- /* plexTokenFile may legitimately not exist yet: the PMS link then reports
-       pending instead of being configured against a Plex that trusts the pod
-       network. */}}
+{{- /* The URL carries the prefix the route keeps: the app's own http_root is
+       sealed to it by the init container, so its API lives at /tautulli/api/v2
+       and the root of the pod's port is only a redirect. plexTokenFile may
+       legitimately not exist yet: the PMS link then reports pending instead of
+       being configured against a Plex that trusts the pod network. */}}
 {{- $_ := set $cfg "tautulli" (dict
-      "url" (printf "http://tautulli:%v" .Values.apps.tautulli.port)
+      "url" (printf "http://tautulli:%v/tautulli" .Values.apps.tautulli.port)
       "apiKeyFile" "/etc/s5n/keys/tautulli-apikey"
       "plexTokenFile" "/etc/s5n/keys/plex-token") }}
 {{- end }}

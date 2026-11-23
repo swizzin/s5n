@@ -61,6 +61,17 @@ One user gets one seedbox: their own apps, their own downloads and their own con
 isolated from everyone else's. Multi-user stays barebones: no quotas, billing,
 panels or other enterprise features.
 
+**A seedbox's namespace is `s5n-<login>` (decided).** Root's own too: login `alice`
+lands in `s5n-alice`, beside box's own `s5n-system` and `s5n-gateway`, so a second
+user is another `s5n-<login>`. `--namespace` on a first run still wins, and a re-run
+keeps the grant's namespace, so a box installed before this rule keeps the
+namespace it has. When box derives the namespace from the login (a first run with
+no `--namespace`), a login that would collide with box's own namespaces (`system`,
+`gateway`) or that does not make a DNS-1123 label after the prefix (length
+included) is refused where the login is given. Anywhere else the login is only
+the account and is held to the account's own shape, so an existing box's login
+keeps working.
+
 **Each user needs a domain (decided).** A bare IP can't be served, because routing and
 certificates are per host name.
 
@@ -75,7 +86,7 @@ A user's values file can't be applied with root's power. One `storage.data.path`
 pointing at someone else's downloads would end the isolation. So each seedbox is split
 into what root grants and what the user tunes:
 
-- **Grant**, `/etc/swizzin/seedboxes/<user>.yaml`, root-owned: domain, namespace,
+- **Grant**, `/etc/s5n/seedboxes/<user>.yaml`, root-owned: domain, namespace,
   puid/pgid, data and config paths, the apps the user has. Root edits it with
   `box adduser`, `box install` and `box remove`.
 - **Values**, `~<user>/.config/box/values.yaml`, user-owned: everything else the
@@ -201,18 +212,22 @@ already on; otherwise box picks one at random from the lower band of the NodePor
 holds. Kubernetes assigns its own nodePorts (a LoadBalancer's, one per listener) from the
 rest of the range and reaches into that band only when the rest is full, so a port there
 isn't taken out from under the box; a fixed port outside it can be, and then every apply
-fails. A band with no free port refuses before any write.
+fails. A band with no free port refuses before any write. A migrate install decides it
+too, though it installs with every app off (the plan's qBittorrent is switched on
+afterwards): the source's own peer port is kept when it lies in this cluster's NodePort
+range and no Service holds it, because trackers and any forward the operator set already
+point at it, and one is picked for the band otherwise. The line init prints says which.
 
 ## Logins (decided, mechanism proposed)
 
 **One login per seedbox user, checked at the edge (decided).** A person signs in once,
 with their account name, and reaches every app that has an admin UI: qBittorrent, the
-Arrs, Prowlarr, qui. One auth provider checks the login at the Gateway. It is part of the
+Arrs, Prowlarr, qui, Tautulli. One auth provider checks the login at the Gateway. It is part of the
 platform layer: root's `bootstrap` installs it, and `box adduser` adds the user to it.
 Each user's domain admits only that user. Behind it the apps have no login of their own
-(the Arrs run with `External` authentication, PeerBanHelper with its login switched
-off, qBittorrent with its password bypassed for private addresses) and are reachable
-only through the Gateway.
+(the Arrs run with `External` authentication, Tautulli with its own switched off,
+PeerBanHelper with its login switched off, qBittorrent with its password bypassed for
+private addresses) and are reachable only through the Gateway.
 
 **qBittorrent skips its password for private addresses (decided).** qBittorrent can't
 switch its login off, so it bypasses it for the private ranges
@@ -230,6 +245,14 @@ prints it to its log, but nothing is given it. `box init` no longer asks for a
 qBittorrent login name; `apps.qbittorrent.webuiUsername` keeps its `admin` default only
 so that existing values still validate.
 
+**Who the login is (proposed).** The web login and the account that owns the files are
+different things, so `init` offers one and shows the other. The default is the name of
+the OS account behind puid, read from the host's own account database, and only then
+the account of whoever ran the command; the answer is editable, and box couples
+nothing else to it. Guided `init` prints both in its record, `files  core  (uid 1000,
+gid 1000)` and `login name  liara  (web login)`, so a box where the two differ says
+so instead of looking like a box where they agree. Neither account is created by box.
+
 **One auth mechanism, no fallback (decided).** Wiring a login into each app separately
 would be a second auth system with its own reset path, tests and docs, so box doesn't
 build one. That is why Envoy Gateway is the only Gateway implementation box supports.
@@ -241,11 +264,21 @@ once, at the end of the run, the way swizzin always has. Credentials
 between apps (API keys, the qui and autobrr accounts the wiring Job signs in with) are
 generated, kept in the release Secret, and never the person's password.
 
-**Plex, Seerr and Tautulli sign in through Plex (decided).** Players talk to Plex
-directly, and Seerr's users are the Plex server's friends, so these three stay outside
+**Plex and Seerr sign in through Plex (decided).** Players talk to Plex
+directly, and Seerr's users are the Plex server's friends, so these two stay outside
 the provider. Skipping the Plex claim at `init` stays allowed, with a warning that
 until the server is claimed, whoever signs in to Seerr first becomes its owner. A
 migrated server that is already claimed needs no warning.
+
+Tautulli used to be the third, with its own Plex-based login on top of the app. That
+login is switched off behind the box's, and box seals it off on every start: a
+non-empty `http_password` is the switch that makes Tautulli ask for a password
+(plexpy/webstart.py at v2.18.2), so the app's init container clears the pair and the
+two flags that hash it, and `migrate` writes the same into a source's file and says
+so in its confirm. It is served under `/tautulli`, and its own URL root is sealed to
+that prefix: the redirects it builds are absolute (`/` to `/home`, a refused request
+to `auth/logout`), so an app that does not know its prefix leaves it -- and lands on
+the box's own `/auth`.
 
 **A plain `helm install` must say who checks the login (decided).** The chart requires an
 explicit `auth.edge: true`, with no default, and refuses to render without it. box sets
@@ -279,8 +312,11 @@ the provider block and the Deployment's mount of the signing material, because A
 exits on a provider with no clients. The provider's signing key is generated
 once and kept beside the login's other key, outside its ConfigMap. The app reaches the
 issuer from its own pod over the box's own HTTPS name: the chart aliases that name to the
-Gateway's proxy Service (an address root's `init` records in the grant), opens egress to
-the proxy alone, and trusts the box's root where the certificate is self-signed. Only the
+Gateway's proxy Service (an address root's `init` records in the grant whenever the
+chart's schema declares the key -- not only when an app that uses it is on, because a
+migrate install answers `init` with the plan's apps off and switches them on afterwards),
+opens egress to the proxy alone, and trusts the box's root where the certificate is
+self-signed. Only the
 Gateway's proxy may reach the login's pod at all. A plain `helm install`, or a grant from
 before the provider, has no recorded address, and the app keeps its own login switched
 off behind the edge's.
@@ -295,9 +331,25 @@ run; no API key is minted or kept. Hiding the app's own login form doesn't switc
 password login off, so this account is reachable only past the edge's login or from the
 wiring Job, which the NetworkPolicy allows. The account is named `s5n` in both apps; it is the
 wiring Job's, not another way in for the person, whose way in is still the provider.
-PeerBanHelper's equivalent is its API token: generated once in the same Secret, handed
-to the app through its environment, and used only by the Job, since the app's own login
-is switched off behind the edge.
+PeerBanHelper's token is that app's version of the same trade. It is generated once in
+the release Secret and handed to the app through its environment, and it is load-bearing
+twice over even though nobody signs in with it: PBH reads it as its own `pbh.apiToken`,
+and a blank one sends the app into its first-run wizard instead of serving the API (and
+while it is uninitialised, `/api/oobe/*` is open). It is not a check the app makes: with
+`pbh.web.requireLogin=false` the switch is off before PBH reads a token at all, so a
+request carrying no token -- or the wrong one -- is let through, and nothing would
+notice the Secret and the app disagreeing. What keeps PBH's API from anyone but this
+seedbox's user is the edge in front and the NetworkPolicy, not the token; the wiring
+Job is the only client that carries it. Readiness depends on the same switch: the probe
+asks the app's API, which answers without a credential only because the login is off.
+
+A browser that was ever given PBH's token keeps it in `localStorage` (a `?token=` link,
+or the form), and PBH counts every failed login against the caller's network: three per
+page load trip its 15-minute lockout, after which every request answers 429 and a
+working box looks like a routing fault. The cure is the browser's own: clear the site's
+data for the app's host (or open it in a private window). The token the form asks for is
+the release Secret's `pbh-token`, which is not something a person should have to
+re-enter.
 
 **The login is on root's Gateway, and users can't take it off (decided).** The
 SecurityPolicy that sends requests to Authelia targets the `s5n` Gateway itself and lives
@@ -308,7 +360,8 @@ Envoy Gateway lets a policy on a route override the Gateway's, so the grant deni
 any write to SecurityPolicies, and to Gateways so a user can't open a listener of their
 own. Users still create their own HTTPRoutes, so the chart is unaffected. Exemptions live
 in Authelia's own rules, which root owns: paths that check their own key (the Arrs' `/api`,
-and `/ping` for health checks), Plex, Seerr and Tautulli, and the sign-in page itself.
+and `/ping` for health checks), Plex and Seerr (each at a name of its own), and the
+sign-in page itself.
 
 **The sign-in path is root's (decided).** Authelia lets everything under `/auth` through
 without a login, and Gateway API sends a request to the most specific route, so a user's
@@ -377,7 +430,7 @@ Status per command: **D** decided, **P** proposed.
 | `box logs <app>` | root, user | the app's logs | D |
 | `box restart <app>` | root, user | restarts one app | P |
 | `box backup` / `restore` | root, user | app configs, qBittorrent state, Arr databases; nothing until configured | D |
-| `box migrate` | root | adopts an existing install | D |
+| `box migrate` | root | adopts an install box didn't make: `discover` reads and plans, `cutover` takes the final snapshot, `apply` installs or adopts from it | D |
 | `box uninstall` | root | removes box from the server | D |
 
 `--user <name>` lets root run any user command against that user's seedbox.
@@ -432,15 +485,41 @@ node on the uplink, the automatic one is right for ethernet, PPPoE (which counts
 uplink, not a tunnel) and whatever a cloud gives.
 - **A default route through a tunnel stops the install,** naming the interface and the
   MTU every pod would inherit. There is no override.
-- **A `/etc/k0s/k0s.yaml` box didn't write is never overwritten.**
+- **A `/etc/k0s/k0s.yaml` box didn't write is never overwritten.** It is box's own
+  file, and it carries the two things box cannot leave to k0s: the API address, and the
+  cluster's pod and service networks (the host's firewall rule reads those back out of
+  it rather than holding a second copy).
 - **Once the API answers, the Node's address is checked against the pin;** a mismatch
   fails like any other step after the binary is in place, naming both addresses.
 - **On a cluster box didn't install,** a node address on a tunnel this host holds is one
   warning line. box doesn't change that cluster.
 - **Only a real host proves it:** kind never boots k0s, so the e2e can't.
 
+**Only a cluster box installed gets its host firewall opened (proposed).** A
+Fedora-family host runs firewalld, and its default zone ends the FORWARD chain with a
+reject. That is exactly enough for the traffic kube-proxy DNATs — pod to Service, and a
+Service's traffic from outside — so the apps, the wiring Job and the lock proof all run;
+what it refuses is the traffic kube-router routes pod to pod through the host, which is
+Envoy dialling an app's own pod address, refused at once, and every request behind the
+login answering 403. On a host where box installs k0s, box writes the cluster's pod and
+service networks into the k0s config it installs with (`spec.network`) and adds them to
+firewalld's trusted zone, permanently and in the running configuration, asking first so a
+source that is already there is left alone; the plan says so before the confirm and the
+run says so when it is done. It does not reload the host's firewall: a reload re-reads
+every zone from the permanent configuration and would drop runtime-only changes another
+tool made. On a cluster box did not install, box knows neither network and changes
+nothing: the plan carries a warning, printed before the confirm, with the two commands
+k0s's own documentation names (`firewall-cmd --permanent --zone=trusted
+--add-source=<podCIDR>` and the same for `<serviceCIDR>`), and the operator runs them.
+Nothing else is opened. The Gateway's address and the torrent Service are DNAT'd like any
+other Service, so they pass; a single-node k0s box needs no port opened for its API, its
+kubelet or its etcd, because box and the kubelet reach them over loopback, which
+firewalld's trusted zone already admits. Only a real host proves any of this — kind has
+no firewalld — so the unit tests pin the command sequence, and a VM rehearsal is the
+proof.
+
 **A record is checked, not trusted (decided).** A re-run reads
-`/etc/swizzin/cluster.yaml` for what box decided — which cluster, who owns its
+`/etc/s5n/cluster.yaml` for what box decided — which cluster, who owns its
 lifecycle, the platform modes, the GatewayClass — then probes that cluster again:
 `/version`, the privilege checks, the node count and distribution, and the platform
 layer. Those are the same probes and the same refusals a freshly found cluster gets,
@@ -461,6 +540,15 @@ remote-cluster skip is only a skip. So a second bootstrap
 plans and installs whatever the probe says is missing — Envoy Gateway, the Gateway API
 CRDs, MetalLB and its pool, the admission policy — instead of reporting components it
 never looked at as unknown.
+
+**box's host files are `/etc/s5n` (decided).** The record, root's config and
+`seedboxes/` live beneath `/etc/s5n`, not `/etc/swizzin`: swizzin classic installs
+itself as a git checkout there, so writing into it meant writing into another
+program's repository, and `rm -rf /etc/swizzin` — how swizzin is retired — would have
+taken box's records with it. No command upgrades a 0.4 host: one that still has
+box's files under `/etc/swizzin` and nothing under `/etc/s5n` refuses before it reads
+a record or writes anything, and prints the `mkdir`/`mv` to check and run. A file
+both roots have is read from `/etc/s5n`, and the stale copy is named once.
 
 **What bootstrap installs (decided).** It applies only the platform components the
 decision says are missing: Envoy Gateway from its OCI chart (the chart ships the Gateway
@@ -534,6 +622,17 @@ What `init` does (decided):
 - **Unattended.** Every question is a flag or a file key. With `--yes`, or when there's
   no terminal, `init` asks nothing. A missing required answer is an error that names
   the flag or key to set.
+- **Who owns the files (proposed).** Neither `bootstrap` nor `init` creates an OS
+  account: the files belong to an account that already exists, and `adduser` is the
+  only command that makes one. puid:pgid are settled after the data path is known, in
+  this order: `--puid`/`--pgid`; the grant's values on a re-run (an installed box keeps
+  its owner, whatever a directory now says); the owner of the data path when it already
+  holds files, because an install that changed the owner of an existing library would
+  leave the apps unable to write it; `$SUDO_UID`/`$SUDO_GID`; the invoking user. Root is
+  never the answer: a uid or gid of 0 stops the run, with the flags named when
+  unattended and a question for the owner on a terminal. A data path that is itself a
+  symlink is not read through (above, "Homes, data paths and SSH"), so the account on
+  the other side of the link is never taken for the box's: box says so and falls back.
 
 ### Certificates (decided)
 
@@ -735,7 +834,9 @@ one window into one pull request. There is no waiting period: the upstream proje
 stage their own releases, and holding a build longer adds age, not testing. On every
 push to `main`, if `main` has changed since the last `s5n-v*` tag and every change since
 is one of those bumps, CI raises the chart's patch version and tags it. Any other change
-on `main` waits for a maintainer's release, and the job names it. There is no off
+on `main` waits for a maintainer's release, and the job names it — except Renovate's own
+config (`.github/renovate.json`), which Renovate reads from `main` and nothing ships, so
+tuning Renovate never holds a release (nor makes one). There is no off
 switch in the repo: disabling the workflow in GitHub is the kill switch. Nothing is
 released without a previous `s5n-v*` tag to build on, and nothing is published from a
 push to `develop`.
@@ -791,6 +892,38 @@ together with the image the app had.
 - `apply` re-reads the annotations of the release already installed. A box that's too
   old for the installed release refuses to apply rather than writing values it can't
   check.
+
+**Testing a build on a real machine (proposed).** The e2e runs on kind, which is not a
+host: no k0s, no disks, nobody answering a question. So before a release is cut, a
+maintainer takes `develop` to a machine running a fresh OS and installs it there the way
+a user does -- `box bootstrap`, then `box migrate apply` -- without tagging or
+publishing anything. `hack/dev-box.sh` packs that build. Its three artifacts have to
+agree on one version, so they are all `<next patch>-dev.<short sha>`:
+
+- `box`, built with `-X main.version`. A build without one is `dev`, and skips the
+  chart's `min-box` check instead of meeting it.
+- the chart, packaged with `version` and `appVersion` both that version. That is also
+  the s5n image's tag: `variants.yaml` leaves `s5n.default.tag` empty, so the chart
+  names `appVersion`.
+- the image, built from the repo's Dockerfile and carried to the test machine as a
+  `docker save` tarball.
+
+The next patch, not this one: `box.s5n/min-box` is the released version, and semver
+puts `0.5.0-dev.x` *below* `0.5.0`, so a dev build of the released version would be
+refused by the chart it had just built. `<next patch>-dev.<sha>` meets the floor and
+still sorts below the release that follows it.
+
+Nothing in a dev build is published, and box installs only published charts. So the
+chart is served from a distribution container on the build machine's loopback -- the
+one host box speaks plain HTTP to -- and reaches the test machine through `ssh -R`.
+The image is not pulled at all: it is imported into the node's containerd
+(`k0s ctr -n k8s.io images import`) and the chart's `IfNotPresent` policy uses it. There
+is no containerd until box has installed k0s, so the build's `NEXT.txt` starts an
+import loop in a second shell before the install: it retries until k0s's containerd
+answers and imports the image ahead of the release that runs it.
+
+This is a rehearsal on real hardware, not a replacement for the e2e: the cluster
+decision, the platform layer and a real disk are what CI cannot reach.
 
 **What CI proves:** box at HEAD against the newest released chart and the oldest
 release back to its floor, each on the platform that release pins; the chart at HEAD
@@ -902,8 +1035,185 @@ proven for both.
 `migrate` adopts an install box didn't make: its app configs, its torrent state and its
 data. Everything it will change is written down before it changes anything.
 
-- **Discovery comes first and writes a plan (decided).** migrate reads the source while
-  it is still running: each app's config directory, the paths the apps saw (container
+- **Three verbs (decided).** `box migrate discover [--rehearsal]` reads a source and
+  writes the plan, `box migrate cutover [--replace-cluster]` takes the final snapshot on
+  the source host, and `box migrate apply [file]` installs or adopts from a snapshot.
+  Each of them takes `--values`, and applies exactly that file's values.
+- **One place for snapshots (decided).** They live in `/var/lib/s5n/migrate/`; discover
+  writes there, or where `--out` names a file, and `box migrate apply` with no file
+  takes the newest snapshot there that is not a survey. A snapshot from another host is
+  the file to pass. A snapshot's name says what it is and when it was taken:
+  `migrate-<UTC yyyymmddThhmmssZ>-<mode>.tar.gz`, so a directory listing reads as the
+  history of a cutover. The modes are `survey` (a read with no configs in it),
+  `rehearsal` (the configs copied from a running source) and `final` (from a stopped
+  one); apply runs a final snapshot, refuses a survey because there is nothing in it to
+  rewrite, and runs a rehearsal under the lock below. A box that applied a rehearsal
+  stays locked, so it refuses a final snapshot: the real run starts from a final one on a
+  clean host.
+- **discover only reads, and the apps need not run (decided).** It reads each workload's
+  pod template and the host's files, so it needs the cluster up, never the app: a
+  stopped app is still there to read. Every workload kind with nothing owning it above
+  it is read — Deployment, StatefulSet, DaemonSet, an ownerless ReplicaSet, a bare Pod
+  (the goal is decided; the set of kinds is the mechanism).
+- **Nothing unsettled reaches the install (decided).** discover and cutover run every
+  rewriter's check pass, which writes nothing, against the draft plan. An address or a
+  path that cannot be settled becomes a plan entry with a default and a one-line reason
+  rather than a refusal after install; a guided run asks those questions, an unattended
+  one writes the defaults and says so. apply refuses only for drift: a plan edited by
+  hand, or an adoption into a box that already runs something the plan names.
+- **box never stops or resets a source (decided).** It prints the command for the
+  platform it found — `kubectl scale`, `docker stop`, `systemctl stop`, the reset recipe
+  for a cluster it didn't install — shown as one to double-check, and the operator runs
+  it. The reset recipe is for the distribution the source's own nodes name (the marker in
+  each kubelet's version: `+k0s`, `+k3s`); a cluster box cannot place gets a line saying
+  so rather than a teardown that would remove nothing.
+- **cutover is the window (decided).** It refuses while any planned app still runs: the
+  workload at replicas 0 and no pod left. It writes its read before printing any stop
+  command, so following box's advice is always safe. With no earlier discover it lists what
+  it found and asks whether that is everything, unattended refusing unless
+  `--no-prior-discover` and naming `box migrate discover` as the better first step; with
+  one, it diffs, and an app the earlier read had and this one cannot find stops the
+  cutover. The earlier read is the newest snapshot in the directory whose plan names the
+  same source -- the host in its `source` block and the namespaces it was read for -- and
+  the run says which one it compared against. An app this read has and the earlier one did
+  not is new, listed and kept. A read the cutover stops on is kept as a survey either way.
+- **The source's cluster is kept by default (decided).** A kept cluster is self-managed:
+  box installs onto it, manages none of its version, and the whole cutover runs in one
+  go — platform, install, adoption — with the source's workloads left at 0. Before it
+  installs, cutover checks three things and stops after the final snapshot naming the
+  command that shows each one: bootstrap's own gates over the cluster (a managed control
+  plane, more than one node, an API that does not answer), anything in any namespace
+  already holding the node's 80/443 (a LoadBalancer Service, a node port, a hostPort, a
+  pod on the node's own network), an auto-updater (keel's annotation on the source's
+  workloads, or keel running anywhere), and a GitOps controller (Flux or Argo CD running
+  anywhere, or their mark on the source's workloads), which would scale the stopped
+  source back up beside box (decided). box changes nothing on a cluster it did
+  not install: the operator clears them, or `--replace-cluster` asks for box's own k0s
+  instead: cutover stops after the final snapshot with the reset recipe, and
+  `box migrate apply` finishes on the clean host.
+- **apply is the installer on a host with no box (decided).** It runs bootstrap and then
+  init's steps from the plan: the data root and the owner are the plan's, and the apps
+  go in off -- the migration switches on what it moved, because an app started before
+  its config is moved into place would run on an empty one. Only the domain, the login,
+  the password and the config path are asked, or taken from the flags an unattended run
+  gives, which names every one it is missing. A guided run asks only the ones it does
+  not have: an answer a flag or the plan already holds is not a question, and the app
+  picker never appears, because the plan decides every app. On a host that already has
+  a box it adopts into it, which is how one source is migrated per user.
+  The torrent port is decided for the box rather than for the app list this run writes,
+  and the source's own peer port is kept when this cluster can use it.
+  The install is what the run's one answer buys, so it comes after that answer: on a
+  host with no box the run decides what it would install and what it would move first,
+  asks, and only then installs. An answer of no leaves the host as it was -- no k0s, no
+  platform, no firewall change, no grant and no values file, and nothing under the
+  config root, because the pre-install pass stages into a directory it removes -- and
+  a cluster record is written only once box actually owns the cluster, because a record
+  is what makes a host "have a box".
+- **One run, one confirm.** Everything a migration does is reviewed once, in one
+  question: the platform the installer puts on a host with none (its plan first), then
+  one row per app with what it carries and what changes, the data directories it
+  renames, what needs the operator, the notes, and what is not coming. `--details`
+  prints every rewrite column by column instead; the snapshot's `report.txt` holds it
+  whole either way, and the wiring receipt keeps per-object detail behind the receipt
+  itself.
+  On a host with no box the question comes before anything is installed, so the
+  platform plan is the plan this run would apply, decided from a read-only pass and
+  shown first. Plex is the one app whose check runs its own image, and there is no box
+  to run one in before the install: its row says its databases are checked once Plex's
+  image runs, and after the install its check runs before any app is switched on. A
+  blocker there stops the run with the box installed and nothing of the snapshot moved,
+  saying so and what running it again does; a clean one carries on without asking
+  again. The summary the adoption is held to is the one that was shown -- the same
+  snapshot and plan read twice -- and a difference anywhere but Plex's filled-in row is
+  refused rather than done.
+- **One snapshot file, and it is the backup format (decided).** A snapshot is one tar +
+  gzip archive with a manifest holding a sha256 per entry, so a truncated copy is
+  refused rather than half-applied. `plan.yaml`, `source/`, `report.txt` and `config/`
+  are inside it, and its mode says which of those apply may run. It holds secrets — API keys, the Plex token, qBittorrent's password
+  hash — so it is root-only, 0600. `box backup` writes the same file from box itself,
+  and `restore` is `migrate apply` of that snapshot: one format, one apply path.
+- **A config travels as what the app cannot rebuild (proposed).** Every app's config
+  directory is copied whole — apply rewrites the copy and a file a rewriter never reads
+  still has to come across — except the one whose config is mostly a library: Plex's
+  `Metadata`, `Media` and `Cache` trees are covers, artwork and thumbnails it rebuilds
+  from the media it is given, and on a real library they are tens of gigabytes. Plex's
+  snapshot carries its state instead: `Preferences.xml` and its library databases with
+  the `-wal` and `-shm` a writer leaves beside them. The two state files are required (a
+  snapshot without either is refused, naming the path); the companions are carried when
+  they are there, because a database nobody has open has none. The read says so once, in
+  its report and on the screen — "plex: carried Preferences.xml and its databases; Plex
+  rebuilds its metadata, artwork and thumbnails (artwork uploaded by hand is not
+  carried)" — and apply's confirm repeats it for a snapshot that really is trimmed. The
+  list is box's own, not the catalog's `snapshot:` key, which is what an upgrade may
+  rewrite; for qBittorrent that is only its conf, which would lose `BT_backup`.
+- **A migrated app account becomes box's own.** autobrr and qui keep their own user
+  table and allow exactly one account there, and box owns the account the init container
+  creates, sets the release Secret's password on and signs in as (`s5n.wiringAccount`);
+  the person's way in is the login at the edge, never this account. So a source's one
+  account row is renamed to it during apply, keeping its id — autobrr's schema refers to
+  a user row nowhere (`api_key` is keyed by its own key, `sessions` by its own token),
+  and qui's settings tables carry that id — and the app's first start already has the
+  account its init container looks for. The confirm says so once per app, with the name
+  the source used. A database with two rows is refused naming the count: neither app can
+  hold two, so which one a source meant is not something box can decide.
+- **A config from an older app is taken as it is.** box's own init containers run
+  before an app's first start and write into configs a source wrote, which are not the
+  shape the chart's own install makes. A PeerBanHelper config that predates its
+  `privacy` block gets the block, and the app's own config migration — which writes that
+  key from the template inside its jar, where it says `true` — is given a copy of that
+  same template with `false` in it, so the start that migrates the file keeps box's
+  answer instead of running once with analytics on. The copy is made from the jar on
+  every start and every other byte of it is the image's, so no migration is skipped and
+  nothing in the file is box's own invention.
+- **A rehearsal cannot reach the internet (decided goal, mechanism proposed).**
+  `discover --rehearsal` copies the configs into a snapshot that applies locked: no
+  internet egress, proven from inside the namespace before any app starts, and every
+  torrent started stopped. The lock is a grant value (`rehearsal`), so it is in box's
+  own record and every later `box apply` and `box update` renders it; nothing unlocks
+  it, because a rehearsal box is disposable. The proof is a control pod without the
+  release's label that must reach an in-cluster address outside the namespace, and a
+  probe pod carrying the release's label that must not; a control that cannot run is a
+  refusal saying the proof could not happen, and a probe that succeeds is a refusal
+  naming the cluster's CNI, because a NetworkPolicy is only an instruction to it. Both
+  dial the cluster DNS Service's metrics port, which the lock denies, and keep dialling
+  until the answer holds: a CNI programs a new pod's policy a moment after the pod
+  starts (on kindnet a pod's first connection gets through), so one dial at start-up
+  proves nothing. The same moment is why every app pod of a rehearsal box first runs
+  a gate, an init container in the app's own network that waits until that address
+  stops answering; the app never starts if it does not. The address is in the grant
+  beside the flag (`rehearsalGate`), and a rehearsal box whose chart cannot lock it,
+  or whose grant has no gate, is refused rather than rendered open. The
+  torrents start stopped because the copy has no data to seed and would otherwise
+  recheck from zero. A rehearsal renames nothing, refuses to apply on the host that
+  holds the source's data, and never applies a final snapshot afterwards.
+- **Every source is detected, and one plan can hold several (decided).** discover runs
+  each reader that finds evidence — a cluster at a known kubeconfig, a docker socket
+  with catalog images running, swizzin's units — and shows what it found. Each app
+  records the source kind it came from, so one plan carries the apps of every platform.
+  One reader per platform: a new platform adds a reader and its e2e, never a new plan
+  shape. Readers ship Kubernetes, then swizzin classic, then docker.
+- **Images come from the blessed variants (decided).** A source image maps to a variant
+  only when it already is one of the chart's blessed variants, same repository and same
+  variant, and discovery writes that variant into the plan; anything else gets the chart
+  default and a note naming `apps.<app>.image.variant` and the list. The list is the
+  chart's, so a read loads the release it is writing a plan for (`--chart-repo`,
+  `--chart-version`, the flags the install takes): a read that cannot load it is refused
+  rather than planning every app onto the default image silently. The same Ingress read
+  that resolves an address gives the plan's domain default: the one name the source's hosts
+  all are — box serves the apps under paths on it, as the source did — or the domain
+  several hosts share. The source's own image is never carried, and the admission policy
+  stays the guard. A tag that names libtorrent's patch release beside qBittorrent's
+  version (`5.3.0-lt1.2.20-10g`) is the variant whose tag is the line and the profile
+  (`5.3.0-lt1.2-10g`), because that is what the chart's variants say a variant is, and
+  the patch release is an older spelling of the same build; the mapping is that one
+  repository's, and a tag no variant has is reported as exactly that, naming the tags
+  box compared.
+- **One snapshot per owner (proposed).** discover groups the apps by the user that owns
+  their config directories, so a source with several users yields one snapshot each. The
+  plan records the owner's uid:gid, and every other snapshot is applied into that user's
+  seedbox with `--user`.
+- **Discovery comes first and writes a plan (decided).** migrate reads the source,
+  running or stopped: each app's config directory, the paths the apps saw (container
   mounts, or the paths the configs themselves name), the categories, and how the apps
   reach each other. It writes this to a plan file and changes nothing. When the source
   has to be torn down before box can install, for example a cluster box will replace
@@ -912,79 +1222,141 @@ data. Everything it will change is written down before it changes anything.
 - **Configs are copied, data is adopted (proposed).** Configs are copied into box's
   config root and rewritten there, so the source stays as the rollback. Data never
   moves, so hardlinks survive.
-- **Existing category names are kept (decided).** The chart accepts the names a source
-  already uses (`Movies`, `4K/Movies`); migrate renames nothing.
+- **Existing download category names are kept (decided).** The chart accepts the names a
+  source already uses (`Movies`, `4K/Movies`), and qBittorrent's download tree is never
+  touched: its categories, its torrents, their save paths and the category directories
+  under `downloads` stay exactly as the source had them (only the root's `Downloads` →
+  `downloads` rename, as before). A migrated instance's `downloadCategory` value is the
+  category its torrents are in, so wiring wires that one and creates no other.
+- **The library ends up in box's layout (decided).** What a person sees is box's own names, on a
+  fresh box and on a migrated one alike: the source's library directories are mapped onto
+  the categories the release lays out (`Movies` → `movies`, `4K/TV` → `tv-4k`), apply
+  renames them inside the library, and the Arrs' root folders and everything under them,
+  Plex's section locations and every other app that stored one are rewritten to follow.
+  Discovery reads each Arr's root folders to build the mapping; one root folder under the
+  library per instance is the normal case, and more than one — or one outside it — is a
+  default with a one-line reason rather than a guess. A source already in box's layout
+  maps each directory onto itself and the run renames nothing.
 - **Ports go to the chart's defaults (decided).** Port changes are what broke moving a
   swizzin box. Copied configs get the chart's ports, bind addresses and URL bases, and
   references between the apps are rewritten to match.
 - **Only local addresses are rewritten (decided).** This covers the connections the apps
   hold to each other: an Arr's download clients, Prowlarr's applications, Seerr's Arr
   servers, and the Arr, qBittorrent and Plex connections in any other catalog app. A
-  connection is rewritten only when it points at localhost (`localhost`, `127.0.0.0/8`, `::1`) or
-  at a name that is plainly inside the source cluster: a Service discovery found there,
-  by its short name or as `<svc>.<ns>`, `<svc>.<ns>.svc` or
-  `<svc>.<ns>.svc.cluster.local`. On localhost, the port says which app it was, from
-  the ports the source's own configs set. Anything else (a LAN or public address, a
-  domain, another machine) is left as it is and listed in the plan, because box can't
-  know what it points at; the plan can map one by hand. Matching discovered Services
-  rather than app names keeps box naming no apps.
+  connection is rewritten when it points at localhost (`localhost`, `127.0.0.0/8`, `::1`),
+  at a name that is plainly inside the source cluster (a Service discovery found, by its
+  short name or as `<svc>.<ns>`, `<svc>.<ns>.svc` or `<svc>.<ns>.svc.cluster.local`), at a
+  Service's cluster address, or at a public host and path an Ingress of the source routes
+  to one of its Services: those three resolve to that Service's app outright (decided Nov
+  17). A host that serves several apps resolves by path — box's own shape is one name with
+  each app under a path — so the app is the one whose Ingress path is the longest prefix of
+  the address, on a path boundary, and an address with no path on such a host is left for
+  the operator rather than pointed at one of them. A pod's address is a hint and never an
+  answer, because it does not survive the move
+  and may be another pod's by the time the plan is applied: an address that matches a pod
+  at discovery becomes a plan entry with a proposed default and a one-line reason saying
+  what box will do and why it is not certain, and every default is called out in the
+  report, in the guided question and in the end-of-run summary, never applied silently. On
+  localhost, the port says which app it was, from the ports the source's own configs set.
+  Anything else (a LAN or public address, a domain, another machine) is left as it is and
+  listed in the plan, because box can't know what it points at; the plan can map one by
+  hand. Matching discovered Services rather than app names keeps box naming no apps.
 - **Migrated connections are adopted by ID (decided).** Wiring adopts the objects it
   finds by name on its first run, so a migrated download client under a different
   name would get a second one created beside it. migrate records the IDs of the
   connections it rewrote (download clients, Prowlarr's applications) in wiring's
   ownership record, and wiring takes them over by ID: the client the source already
-  had becomes the one box manages.
+  had becomes the one box manages. With nothing recorded — the first run after a
+  migration — an Arr's client is adopted by the qBittorrent it points at before its
+  name is tried, because a source's client is named by its operator (`qBT`) and the
+  host is what makes it the release's own; two enabled qBittorrent clients at that
+  host are refused, naming both, rather than one picked.
 - **Shown before it's done; unattended runs only what was shown (decided goal,
   mechanism proposed).** The plan holds the rules: the path rewrite table, the port
   map, every host reference marked rewritten or left alone, what is copied where, and
   what is not migrated (workloads outside the catalog). Guided, migrate prints the
   changes with counts per file and table and asks once. Unattended,
-  `box migrate --apply <plan> --yes` runs the plan and nothing else. Apply works from
-  the stopped source, which will have moved on since discovery (new torrents, new
-  history), so it recomputes the changes and refuses before its first write if any fall
-  outside the plan's rules: a path prefix the table doesn't cover, a host reference the
-  plan never classified. Guided, those become questions; unattended, the refusal names
-  each one and the plan key that would settle it.
+  `box migrate apply <snapshot> --yes` runs the plan and nothing else. The snapshot
+  carries the configs apply will rewrite, so the checks discover and cutover ran are the
+  checks apply repeats: what apply refuses for is drift — a plan or a config that
+  changed since the snapshot was taken — and it refuses before its first write, naming
+  the app, the file and the plan key that would settle it.
 - **The path table is per app (proposed).** Each app saw its own paths: an Arr may see
   the library at `/library` while qBittorrent sees the same downloads at `/downloads`.
   So the plan maps paths per app, from the mounts discovery found:
 
   ```yaml
-  version: 1
+  version: 2
+  source:                             # the install this plan was read from
+    host: media-host                  # as discovery saw it, empty when it can't say
+    taken: 2026-11-16T12:00:00Z       # when the source was read
+    owner: {uid: 1000, gid: 1000}     # who owned the configs and the data
+    kinds: [kubernetes, docker]       # every platform that contributed an app
+  data:
+    root: /srv/library                # becomes the seedbox's data path
+    downloads: Downloads              # renamed to downloads
+    media: media                      # already the contract's name
+    folders:                          # the library's directories, and what each
+      - from: Movies                  # becomes: one of the apps' categories
+        to: movies
+      - from: 4K/TV
+        to: tv-4k
   apps:
-    sonarr-4k:                  # box's instance name
-      source: sonarr4k          # the source's name for it
-      config: /srv/apps/sonarr4k  # copied from, never written
+    sonarr-4k:                        # box's instance name
+      kind: kubernetes                # the platform it ran on
+      source: sonarr4k                # the source's name for it
+      image: lscr.io/linuxserver/sonarr:4.0.14  # what it ran, for the record
+      config: /srv/apps/sonarr4k      # copied from, never written
+      category: tv-4k                 # the directory box lays its library out in
+      downloadCategory: 4K/TV         # the category its torrents are already in
       paths:
         - from: /library/Downloads
           to: /data/downloads
-        - from: /library/media
+        - from: /library/media/4K/TV
+          to: /data/media/tv-4k       # the folder rule, more specific than the
+        - from: /library/media        # library's own
           to: /data/media
     qbittorrent:
+      kind: docker
       source: qbittorrent
+      image: ghcr.io/swizzin/qbittorrent:5.3.0-lt1.2
+      variant: lt1.2                  # already one of the chart's blessed builds
       config: /srv/apps/qbittorrent
       paths:
         - from: /downloads
           to: /data/downloads
   ```
 
+  A folder rule is a rename apply makes and a rule every app that stored the old
+  directory follows, so the Arrs, Plex and Seerr all end up naming the one box lays
+  out. `to` is a category one of the plan's apps has: two directories becoming one,
+  one directory named twice, and a category no instance has are all refused.
+
   The longest `from` that matches whole path segments wins, so `/downloads2` is not
   under `/downloads`. A relative path follows its root and is left alone. An absolute
   path no rule covers stops apply and names the app, the file or table, and the path.
   Each app also records the namespace it ran in and the ports its own config set:
   a localhost address another app stored is resolved by its port, and a Service's
-  short name by the namespace of the app that stored it.
+  short name by the namespace of the app that stored it. An app's `kind` is one of
+  `kubernetes`, `swizzin` or `docker`, and one plan may hold apps from several.
 - **Data is adopted by renaming, never by moving (decided).** The plan's `data` key
   names the directory that becomes the seedbox's data path and the two directories
   under it that held the downloads and the media. When their names differ from box's
   (`Downloads` for `downloads`), apply renames them, which keeps every hardlink. They
   must be single directories directly under the root; anything else is a move, and a
-  move is the operator's to make before apply.
+  move is the operator's to make before apply. The same holds one level down:
+  `data.folders` names each library directory and the category it becomes, and apply
+  renames those inside the library after the two above, removing a parent they emptied
+  (`4K/`). A target that holds a file is refused before anything moves, naming both
+  directories; a rename an earlier run made but did not record is taken as done; a
+  rehearsal renames nothing.
 - **Every other address is classified in the plan (proposed).** `hosts` lists the
   Services discovery found (`service: <name>.<namespace>`, matched in every form the
   cluster's DNS answers) and any other address the apps stored (`host:`), each either
   mapped to a box app (`app:`) or kept as it is (`leave: true`), optionally narrowed to
-  one port.
+  one port. A rule discover wrote as a default says why, on one line, and marks itself
+  (`why:`, `default: true`); a path rule written the same way carries the same two keys,
+  so every defaulted decision reads as one.
 
   ```yaml
   data:
@@ -994,15 +1366,34 @@ data. Everything it will change is written down before it changes anything.
   hosts:
     - service: sonarr.default
       app: sonarr
+    - host: 10.244.0.56
+      port: 32400
+      app: plex
+      why: a pod address that does not survive the move, and only plex answers on 32400
+      default: true
     - host: 192.0.2.10
       leave: true
   ```
 - **Every rewriter runs twice (proposed).** apply copies each app's config into a
   staging directory, then runs every app's check pass, which writes nothing and returns
-  the changes and every gap. Only when no app has a gap does any app's write pass run,
-  and it makes exactly the changes its check reported, in the staged copy. History
-  (records of what happened, never read back to act on) is rewritten where a rule
-  covers it and never stops apply.
+  the changes and every gap. discover and cutover run that same check pass over the
+  configs before they copy them, which is how a gap becomes a plan entry before the
+  downtime. Only when no app has a gap does any app's write pass run, and it makes
+  exactly the changes its check reported, in the staged copy. History (records of what
+  happened, never read back to act on) is rewritten where a rule covers it and never
+  stops apply.
+- **A migrated config belongs to the seedbox's user, whatever box ran as (proposed).**
+  apply stages each instance owned by `puid:pgid`, and every rewriter writes through an
+  atomic rename — a new file beside the app's, renamed over it — so the files it
+  replaced become the running user's, which on a real host is root's, often 0600. One
+  pass after every rewriter and before anything is moved into place hands every path of
+  every staged instance to `puid:pgid`, links chowned and never followed. It is a
+  whole-tree rule rather than a list of the files today's rewriters write, so a rewriter
+  that replaces or creates one cannot reintroduce it: an app that cannot read its own
+  config either crash-loops (the Arrs' `config.xml`, qBittorrent's conf and its resume
+  records, PeerBanHelper's, qui's and Tautulli's) or, like Seerr, starts anyway and
+  writes its defaults over what the migration carried. A rewritten file keeps the mode
+  its original had, which each rewriter reads before the write.
 - **Every app's stored paths are rewritten, with no exceptions (decided).** Each app
   gets the `/data` contract and migrate rewrites what it holds: Arr databases and
   configs, qBittorrent's fastresume files and settings, and Plex's database through the
@@ -1030,7 +1421,7 @@ jitter so a fleet doesn't arrive at once. The interval is a key in root's config
 the timer can be turned off there. It reads the tag list from ghcr anonymously; no
 token is needed to learn that something moved.
 
-- **Root's config is `/etc/swizzin/box.yaml` (decided).** It sits beside the cluster
+- **Root's config is `/etc/s5n/box.yaml` (decided).** It sits beside the cluster
   record, so `--record` moves both, and it is root's alone, mode 0600, because the
   notice address can carry a token. bootstrap writes it once, on the host that has
   none, with these keys and comments:
@@ -1371,9 +1762,6 @@ reason instead of a stack trace.
 
 ## Open questions
 
-- `migrate` sources: bare-metal swizzin, Docker, an existing Kubernetes stack. Proposed:
-  one command that detects the source, since the hard part (rewriting paths in the Arr
-  databases, carrying qBittorrent's state) is the same for all of them.
 - Who assigns the torrent port with multiple users (see Scopes).
 - **A rollback across a repository change.** A hold puts an app back on the tag and
   digest it ran, under the repository the release pins. A release that moves an app to

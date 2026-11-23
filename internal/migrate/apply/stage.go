@@ -23,7 +23,8 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
-	"strings"
+
+	"github.com/swizzin/s5n/internal/linktree"
 )
 
 // Staged is what one instance's copy cost: how many files, and how many bytes
@@ -44,7 +45,31 @@ type Staged struct {
 // pod's user is not whoever ran box. The directory's own times are set after
 // its children, or writing them would move it again.
 func copyTree(dst, src string, uid, gid int) (Staged, error) {
-	c := &copier{dst: dst, src: src, uid: uid, gid: gid}
+	return copy(dst, src, uid, gid, false, true)
+}
+
+// copyForCheck copies a config tree for a pass that only reads it (Settle's
+// checks), which is taken from a source that may still be running: a socket or
+// fifo the app holds open is left out rather than refused, because a reader can
+// do nothing with one and a running source always has one (qBittorrent's
+// ipc-socket). A snapshot's own copy applies the same rule, and reports what it
+// left (internal/archive).
+func copyForCheck(dst, src string, uid, gid int) (Staged, error) {
+	return copy(dst, src, uid, gid, true, true)
+}
+
+// measureTree copies src into dst for a pass that only measures it: the copy is
+// thrown away, so nothing is handed to the seedbox's user and no owner is
+// needed. It is what the summary before an install counts, and the one
+// difference from what that run then stages.
+func measureTree(dst, src string) (Staged, error) {
+	return copy(dst, src, 0, 0, false, false)
+}
+
+// copy is every copy: the same walk, with the kernel's own files either left out
+// or refused, and with or without an owner.
+func copy(dst, src string, uid, gid int, skipKernel, own bool) (Staged, error) {
+	c := &copier{dst: dst, src: src, uid: uid, gid: gid, skipKernel: skipKernel, own: own}
 	if err := os.MkdirAll(dst, 0o755); err != nil {
 		return Staged{}, fmt.Errorf("create %s: %w", dst, err)
 	}
@@ -52,7 +77,7 @@ func copyTree(dst, src string, uid, gid int) (Staged, error) {
 		return c.st, err
 	}
 	for _, m := range c.dirs {
-		if err := os.Chown(m.path, uid, gid); err != nil {
+		if err := c.chown(m.path, false); err != nil {
 			return c.st, fmt.Errorf("own %s: %w", m.path, err)
 		}
 		if err := os.Chmod(m.path, m.info.Mode().Perm()); err != nil {
@@ -67,6 +92,19 @@ func copyTree(dst, src string, uid, gid int) (Staged, error) {
 	return c.st, nil
 }
 
+// chown hands one entry of the copy to the seedbox's user, and does nothing at
+// all when this copy has no owner (measureTree). link is a symlink, which is
+// owned with Lchown so the copy never follows it.
+func (c *copier) chown(path string, link bool) error {
+	if !c.own {
+		return nil
+	}
+	if link {
+		return os.Lchown(path, c.uid, c.gid)
+	}
+	return os.Chown(path, c.uid, c.gid)
+}
+
 // copier is one walk's state: where the copy goes, who owns it, and the
 // directories whose mtime has to wait for their children.
 type copier struct {
@@ -74,6 +112,11 @@ type copier struct {
 	uid, gid int
 	st       Staged
 	dirs     []dirTime
+	// skipKernel leaves a device, socket or fifo out instead of refusing it:
+	// only a copy taken from a running source meets one.
+	skipKernel bool
+	// own is false for a copy nobody keeps: measureTree's.
+	own bool
 }
 
 // dirTime is one directory of the copy, and the times it has to end up with.
@@ -111,7 +154,7 @@ func (c *copier) entry(path string, d fs.DirEntry, err error) error {
 		c.dirs = append(c.dirs, dirTime{target, info})
 		return nil
 	case info.Mode().IsRegular():
-		n, err := copyFile(target, path, info, c.uid, c.gid)
+		n, err := c.copyFile(target, path, info)
 		if err != nil {
 			return err
 		}
@@ -119,7 +162,10 @@ func (c *copier) entry(path string, d fs.DirEntry, err error) error {
 		c.st.Bytes += n
 		return nil
 	case info.Mode()&fs.ModeSymlink != 0:
-		return copyLink(target, path, c.src, rel, c.uid, c.gid)
+		return c.copyLink(target, path, rel)
+	}
+	if c.skipKernel && info.Mode()&(fs.ModeDevice|fs.ModeCharDevice|fs.ModeSocket|fs.ModeNamedPipe|fs.ModeIrregular) != 0 {
+		return nil
 	}
 	return fmt.Errorf("%s is a %s: migrate copies files, directories and links inside the config directory, not devices or sockets",
 		path, modeName(info.Mode()))
@@ -127,7 +173,7 @@ func (c *copier) entry(path string, d fs.DirEntry, err error) error {
 
 // copyFile copies one regular file, preserving its mode and mtime and owning it
 // as the release's uid. It returns the bytes written.
-func copyFile(dst, src string, info fs.FileInfo, uid, gid int) (int64, error) {
+func (c *copier) copyFile(dst, src string, info fs.FileInfo) (int64, error) {
 	in, err := os.Open(src)
 	if err != nil {
 		return 0, err
@@ -144,7 +190,7 @@ func copyFile(dst, src string, info fs.FileInfo, uid, gid int) (int64, error) {
 	if err != nil {
 		return n, fmt.Errorf("copy %s: %w", src, err)
 	}
-	if err := os.Chown(dst, uid, gid); err != nil {
+	if err := c.chown(dst, false); err != nil {
 		return n, fmt.Errorf("own %s: %w", dst, err)
 	}
 	if err := os.Chtimes(dst, info.ModTime(), info.ModTime()); err != nil {
@@ -154,7 +200,9 @@ func copyFile(dst, src string, info fs.FileInfo, uid, gid int) (int64, error) {
 }
 
 // copyLink copies one symlink, and refuses one that resolves outside the config
-// directory.
+// directory. The rule itself is internal/linktree's, because a snapshot's
+// config/ tree is copied under the same one: what a staging copy would carry and
+// a snapshot would not (or the other way round) would make the two trees differ.
 //
 // A link is copied as a link: the app reads it the same way, and following it
 // would turn one file into two copies that then drift. An absolute link that
@@ -168,48 +216,25 @@ func copyFile(dst, src string, info fs.FileInfo, uid, gid int) (int64, error) {
 // /dev and /sys are the pod's own kernel filesystems, never somewhere a config
 // tree keeps a file, and the app writes the link again on start. Refusing it
 // made every real qBittorrent install uncopyable (hack/e2e-box.sh, migrate).
-func copyLink(dst, src, root, rel string, uid, gid int) error {
+func (c *copier) copyLink(dst, src, rel string) error {
 	target, err := os.Readlink(src)
 	if err != nil {
 		return err
 	}
-	if filepath.IsAbs(target) && kernelPath(target) {
+	res, err := linktree.Resolve(c.src, rel, target)
+	if err != nil {
+		return err
+	}
+	if res.Skip {
 		return nil
 	}
-	if filepath.IsAbs(target) {
-		inside, err := filepath.Rel(root, filepath.Clean(target))
-		if err != nil || inside == ".." || strings.HasPrefix(inside, ".."+string(filepath.Separator)) {
-			return fmt.Errorf("%s is a link to %s, which is outside the config directory: migrate copies a config tree, so a link that leaves it would name a path the pod cannot see", src, target)
-		}
-		target, err = filepath.Rel(filepath.Dir(rel), inside)
-		if err != nil {
-			return fmt.Errorf("link %s: %w", src, err)
-		}
-	} else {
-		inside := filepath.Clean(filepath.Join(filepath.Dir(rel), target))
-		if inside == ".." || strings.HasPrefix(inside, ".."+string(filepath.Separator)) {
-			return fmt.Errorf("%s is a link to %s, which is outside the config directory: migrate copies a config tree, so a link that leaves it would name a path the pod cannot see", src, target)
-		}
-	}
-	if err := os.Symlink(target, dst); err != nil {
+	if err := os.Symlink(res.Target, dst); err != nil {
 		return fmt.Errorf("link %s: %w", dst, err)
 	}
-	if err := os.Lchown(dst, uid, gid); err != nil {
+	if err := c.chown(dst, true); err != nil {
 		return fmt.Errorf("own %s: %w", dst, err)
 	}
 	return nil
-}
-
-// kernelPath reports whether an absolute path is inside one of the kernel's own
-// filesystems: the process's plumbing, never a file a config tree holds.
-func kernelPath(p string) bool {
-	clean := filepath.Clean(p)
-	for _, root := range []string{"/proc", "/dev", "/sys"} {
-		if clean == root || strings.HasPrefix(clean, root+string(filepath.Separator)) {
-			return true
-		}
-	}
-	return false
 }
 
 // modeName names a file's type the way a refusal reads it.

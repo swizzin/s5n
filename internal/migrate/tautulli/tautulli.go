@@ -1,5 +1,5 @@
-// Package tautulli rewrites the paths and the Plex connection Tautulli stored
-// in its config.ini.
+// Package tautulli rewrites the paths, the Plex connection and the login
+// Tautulli stored in its config.ini.
 //
 // Tautulli keeps everything in one INI file (`config.ini`, plexpy/config.py at
 // v2.18.2: FILENAME = "config.ini") and its database holds no absolute path:
@@ -8,14 +8,24 @@
 // column. So the file is the whole job.
 //
 // The set of keys is Tautulli's own: it rewrites exactly this list when its data
-// directory moves (plexpy/__init__.py:160-170 assigns HTTPS_CERT,
-// HTTPS_CERT_CHAIN, HTTPS_KEY, LOG_DIR, BACKUP_DIR, CACHE_DIR, EXPORT_DIR and
-// NEWSLETTER_DIR relative to the new DATA_DIR), which is the app itself saying
-// these values are absolute paths. GIT_PATH, NEWSLETTER_CUSTOM_DIR and
-// PMS_LOGS_FOLDER are paths by declaration (plexpy/config.py:108, :163, :53).
+// directory moves (plexpy/__init__.py:160-170 assigns https_cert,
+// https_cert_chain, https_key, log_dir, backup_dir, cache_dir, export_dir and
+// newsletter_dir relative to the new DATA_DIR), which is the app itself saying
+// these values are absolute paths. git_path, newsletter_custom_dir and
+// pms_logs_folder are paths by declaration (plexpy/config.py:108, :163, :53).
 // A key is edited in the section _CONFIG_DEFINITIONS gives it and nowhere else,
 // because ConfigObj would read the same name in another section as a different
 // setting.
+//
+// The spelling is lower case, because that is the only spelling Tautulli writes
+// and the only one it reads: Config._define folds each setting to
+// `ini_key = name.lower()` (plexpy/config.py:473) and looks it up under that
+// name, Config.write() builds the file from those keys (:528-556), and ConfigObj
+// itself is case-sensitive (lib/configobj/__init__.py's Section.__getitem__ is
+// dict's). The lookup accepts a key in any spelling and edits the line where it
+// stands, so a file a person hand-edited is rewritten too and nothing is
+// renamed: a rename would write a setting the app does not read. Sections are
+// not folded, by Tautulli or here: _define passes the section through untouched.
 //
 // Lines are edited in place: only the value after `=` changes, so comments,
 // ordering and every key migrate does not own survive byte for byte.
@@ -55,33 +65,58 @@ const configName = "config.ini"
 const bindAddr = "0.0.0.0"
 
 // The Plex connection and the listen settings, with the sections
-// _CONFIG_DEFINITIONS puts them in (plexpy/config.py:48-61, :127-136).
+// _CONFIG_DEFINITIONS puts them in (plexpy/config.py:48-61, :127-136). The names
+// are lower case because that is the spelling Tautulli writes and reads a
+// setting under (Config._define's `ini_key = name.lower()`, :473); the lookup
+// in ini.go accepts any spelling and every report names the one the file holds.
 const (
 	sectionPMS  = "PMS"
 	sectionWeb  = "General"
-	keyPMSIP    = "PMS_IP"
-	keyPMSPort  = "PMS_PORT"
-	keyPMSSSL   = "PMS_SSL"
-	keyPMSURL   = "PMS_URL"
-	keyHTTPHost = "HTTP_HOST"
-	keyHTTPPort = "HTTP_PORT"
-	keyHTTPRoot = "HTTP_ROOT"
+	keyPMSIP    = "pms_ip"
+	keyPMSPort  = "pms_port"
+	keyPMSSSL   = "pms_ssl"
+	keyPMSURL   = "pms_url"
+	keyHTTPHost = "http_host"
+	keyHTTPPort = "http_port"
+	keyHTTPRoot = "http_root"
 )
+
+// The keys that make Tautulli ask for its own password. A non-empty
+// http_password is the switch (webstart.py:195-213 at v2.18.2: with one the app
+// registers its auth tool and logs "authentication is enabled"; without one it
+// says "authentication is disabled" and admits everyone), http_basic_auth only
+// picks how it is asked, and the two flags are what make the app hash the value
+// it is given. Behind box the person signs in at the edge once, so these are
+// sealed off exactly as the chart's init container seals them
+// (internal/ttlconf); a source's password would otherwise sit in the file until
+// the first restart put it back, and would be a second password in front of an
+// app nobody should have to sign in to twice.
+var loginOffKeys = []struct {
+	name  string
+	value string
+	quote string
+}{
+	{"http_username", "", `"`},
+	{"http_password", "", `"`},
+	{"http_hash_password", "0", ""},
+	{"http_hashed_password", "0", ""},
+	{"http_basic_auth", "0", ""},
+}
 
 // pathKeys are the keys holding an absolute path, each in its own section
 // (plexpy/config.py:84, :86, :101, :152, :163, :166, :108, :121-123, :53).
 var pathKeys = []key{
-	{sectionWeb, "BACKUP_DIR"},
-	{sectionWeb, "CACHE_DIR"},
-	{sectionWeb, "EXPORT_DIR"},
-	{sectionWeb, "LOG_DIR"},
-	{sectionWeb, "GIT_PATH"},
-	{sectionWeb, "HTTPS_CERT"},
-	{sectionWeb, "HTTPS_CERT_CHAIN"},
-	{sectionWeb, "HTTPS_KEY"},
-	{"Newsletter", "NEWSLETTER_DIR"},
-	{"Newsletter", "NEWSLETTER_CUSTOM_DIR"},
-	{sectionPMS, "PMS_LOGS_FOLDER"},
+	{sectionWeb, "backup_dir"},
+	{sectionWeb, "cache_dir"},
+	{sectionWeb, "export_dir"},
+	{sectionWeb, "log_dir"},
+	{sectionWeb, "git_path"},
+	{sectionWeb, "https_cert"},
+	{sectionWeb, "https_cert_chain"},
+	{sectionWeb, "https_key"},
+	{"Newsletter", "newsletter_dir"},
+	{"Newsletter", "newsletter_custom_dir"},
+	{sectionPMS, "pms_logs_folder"},
 }
 
 type key struct{ section, name string }
@@ -178,13 +213,13 @@ func planEdits(in rewrite.Input, f *iniFile, rep *rewrite.Report) ([]edit, error
 		moved, covered := in.Plan.Rewrite(in.App, line.value)
 		if !covered {
 			rep.Uncovered = append(rep.Uncovered, plan.Uncovered{
-				App: in.App, File: configName, Key: k.section + "/" + k.name, Path: line.value,
+				App: in.App, File: configName, Key: at(line), Path: line.value,
 			})
 			continue
 		}
 		if moved != line.value {
 			edits = append(edits, edit{line: line.n, value: moved, quote: line.quote,
-				where: k.section + "/" + k.name, what: "path"})
+				where: at(line), what: "path"})
 		}
 	}
 
@@ -209,13 +244,40 @@ func planEdits(in rewrite.Input, f *iniFile, rep *rewrite.Report) ([]edit, error
 			continue
 		}
 		edits = append(edits, edit{line: line.n, value: e.value, quote: line.quote,
-			where: sectionWeb + "/" + e.name, what: e.what})
+			where: at(line), what: e.what})
 	}
+
+	// And its own login goes, said out loud: the one the person uses is the
+	// box's, and an app that asks for a second password is a password they were
+	// never given.
+	edits = append(edits, loginOff(f)...)
+	rep.Notes = append(rep.Notes, "its own login is switched off; you sign in through the box")
 	return edits, nil
 }
 
-// planPlex is the Plex connection. PMS_IP holds the host and PMS_PORT the port;
-// PMS_URL is the same address as a URL, set when the server was entered by hand
+// loginOff is the edits that switch Tautulli's own web login off. Only the keys
+// the file holds are edited: one that is absent is one the app's defaults answer
+// for, and writing it would be this package inventing a setting.
+func loginOff(f *iniFile) []edit {
+	var edits []edit
+	for _, k := range loginOffKeys {
+		line, ok := f.get(sectionWeb, k.name)
+		if !ok || line.value == k.value {
+			continue
+		}
+		edits = append(edits, edit{line: line.n, value: k.value, quote: k.quote,
+			where: at(line), what: "own login"})
+	}
+	return edits
+}
+
+// at is one line's section/key as the file spells it, which is what a report
+// names: a plan that said General/HTTP_ROOT for a file holding
+// General/http_root would name a line the operator cannot find.
+func at(line iniLine) string { return line.section + "/" + line.key }
+
+// planPlex is the Plex connection. pms_ip holds the host and pms_port the port;
+// pms_url is the same address as a URL, set when the server was entered by hand
 // (plexpy/webserve.py:359 reads `PMS_URL_OVERRIDE or PMS_URL`), so it moves with
 // them or a stale URL wins over the right host.
 func planPlex(in rewrite.Input, f *iniFile, rep *rewrite.Report) ([]edit, error) {
@@ -223,27 +285,40 @@ func planPlex(in rewrite.Input, f *iniFile, rep *rewrite.Report) ([]edit, error)
 	urlLine, haveURL := f.get(sectionPMS, keyPMSURL)
 	host := strings.TrimSpace(ipLine.value)
 	port := atoi(strings.TrimSpace(f.value(sectionPMS, keyPMSPort)))
+	// A URL column is a whole URL, so its path is part of what settles it on a
+	// host that serves several apps; the two columns are a host and a port.
+	var stored *url.URL
 	if host == "" && haveURL {
 		u, err := url.Parse(strings.TrimSpace(urlLine.value))
 		if err != nil {
 			return nil, fmt.Errorf("tautulli: %s: %s %q is not a URL: %w", configName, keyPMSURL, urlLine.value, err)
 		}
 		if u.Hostname() != "" {
-			host, port = u.Hostname(), atoi(u.Port())
+			stored = u
+			host, port = u.Hostname(), rewrite.URLPort(u)
 		}
 	}
 	if host == "" {
 		return nil, nil
 	}
 	res := in.Resolve(host, port)
+	if stored != nil {
+		res = in.ResolveURL(stored)
+	}
 	switch res.Verdict {
 	case plan.Leave:
 		// The plan says this address is not the box's; kept as it is.
 		return nil, nil
 	case plan.Rewrite:
 	default:
+		where := sectionPMS + "/" + keyPMSIP
+		if haveIP {
+			where = at(ipLine)
+		} else if haveURL {
+			where = at(urlLine)
+		}
 		rep.Unclassified = append(rep.Unclassified, rewrite.Address{
-			App: in.App, File: configName, Where: sectionPMS + "/" + keyPMSIP,
+			App: in.App, File: configName, Where: where,
 			Host: host, Port: port,
 		})
 		return nil, nil
@@ -260,9 +335,9 @@ func planPlex(in rewrite.Input, f *iniFile, rep *rewrite.Report) ([]edit, error)
 			return
 		}
 		edits = append(edits, edit{line: line.n, value: value, quote: line.quote,
-			where: sectionPMS + "/" + name, what: what})
+			where: at(line), what: what})
 	}
-	plexURL := (&url.URL{Scheme: "http", Host: fmt.Sprintf("%s:%d", target.Host, target.Port)}).String()
+	plexURL := target.URL()
 	if haveIP {
 		set(keyPMSIP, target.Host, "host")
 		set(keyPMSPort, strconv.Itoa(target.Port), "port")

@@ -1009,10 +1009,23 @@ func assertOneRunWait(t *testing.T, cl *batchCertCluster, hosts int, log string)
 	if want := fmt.Sprintf("1 of %d Certificates are Ready", hosts); !strings.Contains(log, want) {
 		t.Fatalf("the wait's Done line does not say how many came Ready:\n%s", log)
 	}
-	lastApply := strings.LastIndex(log, "applied Certificate ")
-	if lastApply < 0 || lastApply > strings.Index(log, "Certificates to be Ready") {
-		t.Fatalf("the wait started before every Certificate was applied:\n%s", log)
+	// The host rows close the run: they are printed after the wait and after
+	// each Ready host was served, never before.
+	waitAt := strings.Index(log, "Certificates to be Ready")
+	rowsAt := strings.Index(log, "front door\n")
+	if rowsAt < 0 || waitAt < 0 || rowsAt < waitAt {
+		t.Fatalf("the host rows are not the run's last block:\n%s", log)
 	}
+}
+
+// hostRow is the one line the run printed for a host, with its glyph.
+func hostRow(log, glyph, host string) string {
+	for _, line := range strings.Split(log, "\n") {
+		if strings.HasPrefix(line, "  "+glyph+" "+host) {
+			return line
+		}
+	}
+	return ""
 }
 
 // assertOnlyTheReadyHostIsServed is the first result served and the other three
@@ -1038,16 +1051,19 @@ func assertWarningsInHostOrder(t *testing.T, log string, results []CertificateRe
 	t.Helper()
 	at := -1
 	for _, res := range results {
-		want := fmt.Sprintf("certificate %s/%s is not Ready (Issuing: waiting for HTTP-01 challenge): %s is not served until it is; only the ACME challenge answers on port 80; box retries on the next run", GatewayNamespace, res.Name, res.Host)
-		i := strings.Index(log, want)
-		if i < 0 {
-			t.Fatalf("missing warning for %s:\n%s", res.Host, log)
+		row := hostRow(log, "!", res.Host)
+		if row == "" {
+			t.Fatalf("missing the host row for %s:\n%s", res.Host, log)
 		}
+		if !strings.Contains(row, "http only: certificate not Ready (Issuing: waiting for HTTP-01 challenge)") {
+			t.Fatalf("the host row for %s does not say why it is not served: %q", res.Host, row)
+		}
+		i := strings.Index(log, row)
 		if i <= at {
-			t.Fatalf("the warning for %s is out of host order:\n%s", res.Host, log)
+			t.Fatalf("the host row for %s is out of host order:\n%s", res.Host, log)
 		}
-		if strings.Contains(log, "certificate "+GatewayNamespace+"/"+res.Name+" is Ready") {
-			t.Fatalf("a Certificate that never issued was reported Ready:\n%s", log)
+		if hostRow(log, "✓", res.Host) != "" {
+			t.Fatalf("a host that never issued was reported served:\n%s", log)
 		}
 		at = i
 	}
@@ -1110,13 +1126,13 @@ func TestCertificatesReadyOnTheFirstReadWaitOnce(t *testing.T) {
 		if !res.Ready || !res.HTTPS || !res.Redirect {
 			t.Fatalf("result %d = %+v, want served", i, res)
 		}
-		line := fmt.Sprintf("certificate %s/%s is Ready", GatewayNamespace, res.Name)
-		j := strings.Index(log, line)
-		if j < 0 {
-			t.Fatalf("missing success line for %s:\n%s", res.Host, log)
+		line := hostRow(log, "✓", res.Host)
+		if !strings.Contains(line, "https (Let's Encrypt)") {
+			t.Fatalf("the host row for %s is %q, want it served by Let's Encrypt:\n%s", res.Host, line, log)
 		}
+		j := strings.Index(log, line)
 		if j <= at {
-			t.Fatalf("the success lines are out of host order:\n%s", log)
+			t.Fatalf("the host rows are out of host order:\n%s", log)
 		}
 		at = j
 	}

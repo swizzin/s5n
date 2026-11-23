@@ -152,7 +152,8 @@ that order (wiring.json's instance list is per-Arr work with no cross-entry orde
       {{- range $i := $cfg.instances -}}
         {{- if $i.enabled -}}
           {{- $name := ternary $app (printf "%s-%s" $app $i.suffix) (empty $i.suffix) -}}
-          {{- $out = append $out (dict "name" $name "app" $app "cfg" $cfg "category" $i.category "arr" true) -}}
+          {{- $out = append $out (dict "name" $name "app" $app "cfg" $cfg "category" $i.category
+                "downloadCategory" (default $i.category $i.downloadCategory) "arr" true) -}}
         {{- end -}}
       {{- end -}}
     {{- else -}}

@@ -1,0 +1,47 @@
+# A box with no apps at all: every catalog app off, nothing to wire, nothing to
+# serve but the box's own name. It is the shape `box init` writes when the
+# picker leaves nothing ticked (or `--apps none` unattended), and the box
+# `box migrate apply` adopts into before it switches the plan's apps on: apps
+# arrive later with `box install`, so the render has to be a working release
+# with nothing in it.
+#
+# The wiring Job is still a Helm hook here. It finds no instance and no
+# Prowlarr, publishes an ok receipt and writes nothing, which is what keeps a
+# zero-app seedbox installable.
+auth:
+  edge: true
+
+storage:
+  data:
+    existingClaim: box-no-apps-data
+  config:
+    existingClaim: box-no-apps-config
+
+apps:
+  qbittorrent:
+    enabled: false
+  sonarr:
+    enabled: false
+  radarr:
+    enabled: false
+  prowlarr:
+    enabled: false
+  plex:
+    enabled: false
+  tautulli:
+    enabled: false
+  seerr:
+    enabled: false
+  qui:
+    enabled: false
+  autobrr:
+    enabled: false
+  pbh:
+    enabled: false
+  maintainerr:
+    enabled: false
+
+# The box's own name. It is still the one thing a release serves: the login and
+# the Gateway answer there whether any app is on or not.
+gateway:
+  host: box.example.com

@@ -19,7 +19,10 @@ package rewrite
 import (
 	"context"
 	"fmt"
+	"net"
+	"net/url"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/swizzin/s5n/internal/migrate/plan"
@@ -46,11 +49,33 @@ type Input struct {
 	Plan *plan.Plan
 	// Targets is every migrated app's endpoint on the box, by instance name.
 	Targets map[string]Endpoint
+	// Runs is every instance the plan has of each app, by catalog app name
+	// ("sonarr" -> [sonarr sonarr-4k]). A rewriter that proposes a settlement
+	// for an address asks Sole with it: an address whose field names one app
+	// can only be settled by itself when the box runs one instance of it.
+	Runs map[string][]string
 	// Run executes a tool inside the app's pinned image with Dir mounted at
 	// /config, for formats only the app's own binary may write (Plex's
 	// database). Nil when the caller can't run images; a rewriter that needs
 	// it returns an error saying so.
 	Run Runner
+	// Rehearsal is a copy of a live source applied locked: nothing leaves the
+	// box. A rewriter whose app acts on the network with nothing else to stop
+	// it writes its state quiet here (qBittorrent's torrents start stopped);
+	// every other app is quiet because the release's egress policy is.
+	Rehearsal bool
+}
+
+// Sole is the one instance this box runs of a catalog app, and whether it runs
+// exactly one. It is what a proposal is built on: two qBittorrents and an
+// address nothing settles cannot mean one of them, so the address is left and
+// called out rather than pointed at a guess.
+func (in Input) Sole(app string) (string, bool) {
+	names := in.Runs[app]
+	if len(names) != 1 {
+		return "", false
+	}
+	return names[0], true
 }
 
 // Resolve settles an address this app stored for another app, and is the one
@@ -87,11 +112,74 @@ func (in Input) Resolve(host string, port int) plan.Resolution {
 	return plan.Resolution{}
 }
 
+// ResolveURL settles an address this app stored as a URL, with the path it
+// stored when it has one. It is what a rewriter holding a whole URL asks, and
+// it differs from Resolve exactly as plan.ResolveURL does: one host can serve
+// several apps under paths (box's own shape is one name with each app under a
+// path), and the path is then the only thing that says which app an address
+// meant. An address with no path on such a host is not settled by guessing at
+// one of them.
+//
+// The plan answers first, then this run's own endpoints, exactly as Resolve
+// does, so a rewriter's two passes stay consistent.
+func (in Input) ResolveURL(u *url.URL) plan.Resolution {
+	if u == nil {
+		return plan.Resolution{}
+	}
+	port := URLPort(u)
+	if in.Plan != nil {
+		if res := in.Plan.ResolveURL(in.App, u.Hostname(), port, u.EscapedPath()); res.Verdict != plan.Unclassified {
+			return res
+		}
+	}
+	names := make([]string, 0, len(in.Targets))
+	for name := range in.Targets {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	h := normalizeHost(u.Hostname())
+	for _, name := range names {
+		ep := in.Targets[name]
+		if ep.Port == port && normalizeHost(ep.Host) == h {
+			return plan.Resolution{Verdict: plan.Rewrite, App: name}
+		}
+	}
+	return plan.Resolution{}
+}
+
+// URL is the address an app's endpoint answers at: plain HTTP inside the
+// release, the chart's Service and port, and the chart's URL base as the path.
+// A rewriter that stores a URL writes this, which drops whatever path the
+// source's URL had: box serves the app under its own base, not the source's.
+func (e Endpoint) URL() string {
+	return "http://" + net.JoinHostPort(e.Host, strconv.Itoa(e.Port)) + strings.TrimSuffix(e.URLBase, "/")
+}
+
 // normalizeHost is the form two stored hosts are compared in: no trailing dot,
 // no IPv6 brackets, lowercase. A host is a DNS name here, and DNS is
 // case-insensitive.
 func normalizeHost(host string) string {
 	return strings.ToLower(strings.TrimSuffix(strings.Trim(host, "[]"), "."))
+}
+
+// URLPort is the port a stored URL addresses: the one it names, or the one its
+// scheme implies when it names none, so https://host/path is port 443 and not
+// 0. The plan settles an address by its port, and the refusal prints it, so an
+// http URL written without one is the port it is actually reached on. A URL of
+// any other scheme is 0. (url.Parse has already refused a malformed port, so
+// the explicit case is a number.)
+func URLPort(u *url.URL) int {
+	if p := u.Port(); p != "" {
+		n, _ := strconv.Atoi(p)
+		return n
+	}
+	switch strings.ToLower(u.Scheme) {
+	case "https":
+		return 443
+	case "http":
+		return 80
+	}
+	return 0
 }
 
 // Runner runs one tool inside the pinned image of an app with the staged config
@@ -126,6 +214,28 @@ type Report struct {
 	Uncovered []plan.Uncovered
 	// Unclassified are stored addresses no host rule settles.
 	Unclassified []Address
+	// Left are stored values this pass leaves exactly as it is, on purpose,
+	// and why. None of them blocks the run: they are the cases where leaving
+	// is the decision, not a gap in the plan (a client the app never dials, a
+	// client of a type box does not run, a database column that names two apps
+	// at once). The operator is told what happens to each one.
+	Left []Left
+	// Defaults are settlements this pass proposes for an address the plan does
+	// not settle, because the field itself says which app the address can only
+	// mean: a PeerBanHelper downloader of type qBittorrent can only be the
+	// box's qBittorrent, whatever address it stored. A Check writes nothing, so
+	// this is a proposal: Settle turns it into a rule with default and why (see
+	// internal/migrate/apply, settle.go). An address with no proposal here is
+	// left as it is.
+	Defaults []Default
+	// Accounts are the app's own account rows this pass renames to box's
+	// account (WiringAccount). An app that keeps its own user table allows
+	// exactly one account and the chart's init container signs in as box's, so
+	// the source's account becomes that one instead of sitting beside it: the
+	// init then writes the release Secret's password onto it on every start,
+	// as it does on a fresh install, and the person's way in stays the login at
+	// the edge.
+	Accounts []Account
 	// Notes are things the operator should know that stop nothing: a table
 	// emptied on purpose, an import list's remote filter left alone.
 	Notes []string
@@ -134,6 +244,11 @@ type Report struct {
 	// instead of creating a second one beside each (docs/box.md, "Migrated
 	// connections are adopted by ID").
 	Owned []Owned
+	// Stopped is how many stored objects this pass wrote in a stopped state:
+	// a rehearsal's torrents. It is a count of state the app would otherwise
+	// act on, not a change to a stored setting, so it has its own number
+	// rather than a Change row.
+	Stopped int
 }
 
 // Owned is one adopted connection: a download client or a Prowlarr
@@ -161,6 +276,68 @@ type Address struct {
 
 func (a Address) String() string {
 	return fmt.Sprintf("%s %s %s: %s:%d", a.App, a.File, a.Where, a.Host, a.Port)
+}
+
+// Text is the address the way the app stored it, for a line the operator
+// reads: host:port, or the host alone when the app stored no port.
+func (a Address) Text() string {
+	if a.Port == 0 {
+		return a.Host
+	}
+	return net.JoinHostPort(a.Host, strconv.Itoa(a.Port))
+}
+
+// Left is one stored value a pass leaves exactly as it is, and why. The why is
+// one line and is the reason only: it says what the value is and what happens to
+// it, and the caller puts "left as it is" in front of it, because that is the
+// decision rather than part of the reason.
+type Left struct {
+	File  string // relative to Dir
+	Where string // table.column, section/key, JSON pointer
+	What  string // the stored value, as the app has it
+	Why   string // one line: why it is left, and what happens to it
+}
+
+// Default is one settlement a pass proposes for an address the plan does not
+// settle, because the field it was found in says which app the address can only
+// mean. It is a proposal, not a write: Settle turns it into a host rule with
+// default and why, and apply then makes the rewrite the rule describes.
+//
+// A proposal is only ever made where the app's own field fixes the answer: the
+// type is the app's, not a guess at the address. Nothing else about an
+// unsettled address is a default, and an address no proposal names is left as
+// it is.
+type Default struct {
+	Host string // as the app stored it
+	Port int    // as the app stored it; 0 when it stored none
+	// App is the box instance the address can only mean.
+	App string
+	// Why is one line saying what makes it that app, and is kept as the rule's
+	// own reason.
+	Why string
+}
+
+// WiringAccount is the one account box owns in an app that keeps its own user
+// table (charts/s5n/templates/_helpers.tpl, s5n.wiringAccount): the chart's init
+// container creates it when it is missing and writes the release Secret's
+// password onto it on every start, and the wiring Job signs in with it. Both
+// apps that have such a table allow exactly one account, so a source's account
+// has to become this one rather than sit beside it: TestWiringAccountIsTheCharts
+// pins the name to the chart's helper.
+const WiringAccount = "s5n"
+
+// Account is one row of an app's own user table that a pass renames to the
+// account box owns. The row keeps its id, so every row the app keys by it stays
+// with it; only the name the source's owner signed in with changes, and the
+// init container puts box's password on the account at the app's next start.
+//
+// The name is the operator's own data on their own screen, so a report prints
+// it: the line says what the account was called and what it is called now.
+type Account struct {
+	// From is the name the source stored.
+	From string
+	// To is the name box's init container signs in as: WiringAccount.
+	To string
 }
 
 // Blocked reports whether apply has to stop on this report.

@@ -22,9 +22,10 @@ import (
 // saw its downloads at /downloads and its own config at /config, and one
 // save path had a space in it. The identity rules are what discovery writes on
 // a second run, when the tree already sits where box wants it.
-const qbitPlan = `version: 1
+const qbitPlan = `version: 2
 apps:
   qbittorrent:
+    kind: kubernetes
     source: qbittorrent
     config: /srv/apps/qbittorrent
     ports: [8080]
@@ -573,5 +574,194 @@ func TestEveryPathKeyIsRewritten(t *testing.T) {
 		if got := qbtconf.Unquote(value); got != "/data/downloads/x" {
 			t.Errorf("%s %s = %q, want the box's path", k.section, k.name, got)
 		}
+	}
+}
+
+// TestRehearsalStopsEveryTorrentAndWritesTheTwoSettings is the one app-specific
+// part of a rehearsal: a copy of a live qBittorrent must come up quiet. Every
+// torrent in both resume stores is marked paused=1/auto_managed=0, and the conf
+// makes anything pushed later land stopped and RSS grab nothing. Check counts
+// the torrents without writing; Write makes the count true.
+func TestRehearsalStopsEveryTorrentAndWritesTheTwoSettings(t *testing.T) {
+	dir := source(t)
+	in := testInput(t, dir)
+	in.Rehearsal = true
+	before := snapshot(t, dir)
+
+	rep, err := (rewriter{}).Check(context.Background(), in)
+	if err != nil {
+		t.Fatalf("Check: %v", err)
+	}
+	if rep.Stopped != 3 {
+		t.Errorf("Check stopped %d torrents, want the one in BT_backup and the two in torrents.db", rep.Stopped)
+	}
+	if !reflect.DeepEqual(snapshot(t, dir), before) {
+		t.Fatal("Check wrote into the config directory it only reads")
+	}
+
+	rep, err = (rewriter{}).Write(context.Background(), in)
+	if err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	if rep.Stopped != 3 {
+		t.Errorf("Write stopped %d torrents, want 3", rep.Stopped)
+	}
+
+	conf := readFile(t, filepath.Join(dir, dirRel, "qBittorrent.conf"))
+	for _, want := range []string{
+		"[BitTorrent]\n",
+		`Session\AddTorrentStopped=true`,
+		"[RSS]\n",
+		`AutoDownloader\EnableProcessing=false`,
+	} {
+		if !strings.Contains(conf, want) {
+			t.Errorf("the rehearsal conf has no %q:\n%s", want, conf)
+		}
+	}
+	// The path rewrites still happened: stopping a torrent does not mean
+	// leaving it pointing at a tree this box does not have.
+	if !strings.Contains(conf, `Session\DefaultSavePath="/data/My Downloads"`) {
+		t.Errorf("the rehearsal conf did not rewrite the save path:\n%s", conf)
+	}
+
+	stopped := func(t *testing.T, raw []byte) {
+		t.Helper()
+		v, err := bencode.Decode(raw)
+		if err != nil {
+			t.Fatalf("decode resume data: %v", err)
+		}
+		if f := v.Lookup("paused"); f == nil || f.Int != 1 {
+			t.Errorf("paused = %v, want 1", f)
+		}
+		if f := v.Lookup("auto_managed"); f == nil || f.Int != 0 {
+			t.Errorf("auto_managed = %v, want 0", f)
+		}
+	}
+	stopped(t, []byte(readFile(t, filepath.Join(dir, dirRel, "BT_backup", "h1.fastresume"))))
+
+	db, err := sqlitedb.OpenReadOnly(context.Background(), filepath.Join(dir, dirRel, "torrents.db"))
+	if err != nil {
+		t.Fatalf("open torrents.db: %v", err)
+	}
+	defer db.Close()
+	rows, err := db.Query("SELECT id, libtorrent_resume_data FROM torrents ORDER BY id")
+	if err != nil {
+		t.Fatalf("read torrents.db: %v", err)
+	}
+	defer rows.Close()
+	seen := 0
+	for rows.Next() {
+		var id int64
+		var blob []byte
+		if err := rows.Scan(&id, &blob); err != nil {
+			t.Fatal(err)
+		}
+		stopped(t, blob)
+		seen++
+	}
+	if seen != 2 {
+		t.Errorf("torrents.db has %d rows, want 2", seen)
+	}
+}
+
+// TestWithoutRehearsalTorrentsKeepTheirState: the lock is the snapshot's mode,
+// not qBittorrent's normal migration. A final run rewrites paths and leaves a
+// seeding torrent seeding.
+func TestWithoutRehearsalTorrentsKeepTheirState(t *testing.T) {
+	dir := source(t)
+	in := testInput(t, dir)
+	rep, err := (rewriter{}).Check(context.Background(), in)
+	if err != nil {
+		t.Fatalf("Check: %v", err)
+	}
+	if rep.Stopped != 0 {
+		t.Errorf("a final run stopped %d torrents", rep.Stopped)
+	}
+	if _, err := (rewriter{}).Write(context.Background(), in); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	conf := readFile(t, filepath.Join(dir, dirRel, "qBittorrent.conf"))
+	for _, unwanted := range []string{"AddTorrentStopped", "EnableProcessing"} {
+		if strings.Contains(conf, unwanted) {
+			t.Errorf("a final run wrote %s into the conf:\n%s", unwanted, conf)
+		}
+	}
+	raw := []byte(readFile(t, filepath.Join(dir, dirRel, "BT_backup", "h1.fastresume")))
+	v, err := bencode.Decode(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if f := v.Lookup("paused"); f != nil {
+		t.Errorf("a final run set paused=%v on a torrent", f.Int)
+	}
+}
+
+// TorrentPort is the port the source's qBittorrent announced to peers: a
+// migrated box keeps it when the cluster can use it, because trackers and any
+// port forward the operator set already point at that number. qBittorrent 5
+// keeps it in [BitTorrent] Session\Port; an install that upgraded in place, or
+// whose conf qBittorrent 4 wrote, carries [Preferences]
+// Connection\PortRangeMin instead, and the live key is the one the app reads
+// when both are there (5.3.0's own default file carries the old key as well).
+func TestTorrentPortReadsTheSourcesListenPort(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		conf string
+		want int
+		ok   bool
+	}{
+		{
+			name: "qBittorrent 5's session key",
+			conf: "[BitTorrent]\nSession\\Port=51413\n",
+			want: 51413, ok: true,
+		},
+		{
+			name: "the older Preferences key",
+			conf: "[Preferences]\nConnection\\PortRangeMin=6881\n",
+			want: 6881, ok: true,
+		},
+		{
+			name: "both, and the session key is the live one",
+			conf: "[BitTorrent]\nSession\\Port=51413\n\n[Preferences]\nConnection\\PortRangeMin=6881\n",
+			want: 51413, ok: true,
+		},
+		{
+			name: "neither, as a conf the app never wrote",
+			conf: "[WebUI]\nPort=8080\n",
+		},
+		{
+			name: "a value that is not a port",
+			conf: "[BitTorrent]\nSession\\Port=torrents\n",
+		},
+		{
+			name: "a port above the range",
+			conf: "[BitTorrent]\nSession\\Port=70000\n",
+		},
+		{
+			name: "no config at all",
+			conf: "",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			if tc.conf != "" {
+				writeFile(t, filepath.Join(dir, dirRel, "qBittorrent.conf"), tc.conf)
+			}
+			got, ok := TorrentPort(dir)
+			if ok != tc.ok || got != tc.want {
+				t.Fatalf("TorrentPort = %d, %v; want %d, %v", got, ok, tc.want, tc.ok)
+			}
+		})
+	}
+}
+
+// A config in the layout migrate refuses says nothing about a port either: the
+// rewriter stops the run before any of this is written, and a port read out of
+// a directory shape box does not produce would be a guess.
+func TestTorrentPortNothingInTheOlderLayout(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "config", "qBittorrent.conf"), "[BitTorrent]\nSession\\Port=51413\n")
+	if port, ok := TorrentPort(dir); ok {
+		t.Fatalf("an older layout reported port %d, want none", port)
 	}
 }

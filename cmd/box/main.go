@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"os/user"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -345,6 +346,10 @@ func runBootstrap(ctx context.Context, args []string) {
 	term := terminalSet(*plain)
 	out := newOutput(term, *yes, palette)
 	defer out.Close()
+	if err := hostFiles(out, *recordPath, *initFlags.grantPath); err != nil {
+		out.Error(err)
+		os.Exit(1)
+	}
 
 	// Root's config is read before the cluster decision, from the same flags:
 	// an unknown key, a malformed line or a bad value stops the run naming the
@@ -431,7 +436,7 @@ func runBootstrap(ctx context.Context, args []string) {
 		out.Error(err)
 		os.Exit(1)
 	}
-	if err := applyPlatform(ctx, res.Kubeconfig, res.Platform, res.Gateway.Class, acmeServer, chart.Pins, *yes, out); err != nil {
+	if err := applyPlatform(ctx, res.Kubeconfig, res.Platform, res.Gateway.Class, acmeServer, chart.Pins, res.Firewall, confirmer(out, *yes || !isTerminal(os.Stdin)), false, out); err != nil {
 		if errors.Is(err, platform.ErrCancelled) {
 			os.Exit(1)
 		}
@@ -464,12 +469,12 @@ func runBootstrap(ctx context.Context, args []string) {
 	scheduleUpdates(ctx, unitDir, *recordPath, *initFlags.grantPath, *initFlags.valuesPath, out)
 }
 
-// applyPlatform applies the platform layer the decision says install. The
-// confirmation is box's existing one: --yes, or no terminal to ask on, is
-// unattended (docs/box.md, "bootstrap and init").
-func applyPlatform(ctx context.Context, kubeconfig string, components []bootstrap.ComponentResult, gatewayClass, acmeServer string, pins release.Versions, yes bool, out say.Reporter) error {
+// applyPlatform applies the platform layer the decision says install. confirm is
+// the one question, and holdPlan says this package keeps quiet about the plan
+// because the caller showed it in its own confirm -- a migration asks once, for
+// the platform and its apps together, before it installs any of it.
+func applyPlatform(ctx context.Context, kubeconfig string, components []bootstrap.ComponentResult, gatewayClass, acmeServer string, pins release.Versions, firewall bootstrap.FirewallState, confirm platform.Confirmer, holdPlan bool, out say.Reporter) error {
 	out.Phase("platform")
-	confirm := confirmer(out, yes || !isTerminal(os.Stdin))
 	p := &platform.Decision{
 		GatewayClass: gatewayClass,
 		ACMEServer:   acmeServer,
@@ -482,6 +487,12 @@ func applyPlatform(ctx context.Context, kubeconfig string, components []bootstra
 		Probe:   func() (platform.GatewayProbe, error) { return platform.NewGatewayProbe(kubeconfig) },
 		Confirm: confirm,
 		Say:     out,
+		// The host's packet filter is the one thing in the plan that is not in
+		// the cluster: bootstrap found it, and only a host box installed k0s
+		// on is changed through it.
+		Firewall:       firewall,
+		HostFirewall:   bootstrap.Firewalld{},
+		CallerConfirms: holdPlan,
 	}
 	_, err := p.Apply(ctx, components)
 	return err
@@ -624,6 +635,10 @@ func runApply(ctx context.Context, args []string) {
 
 	out := newOutput(terminalSet(false), *o.yes, startupTheme(*o.valuesPath))
 	defer out.Close()
+	if err := hostFiles(out, bootstrap.RecordPath, *o.grantPath); err != nil {
+		out.Error(err)
+		os.Exit(1)
+	}
 
 	// The cluster decision belongs to `box bootstrap`; apply reuses it and
 	// never probes or re-detects a cluster of its own.
@@ -766,6 +781,20 @@ type initFlags struct {
 	// its directory check. A field rather than a registered flag, so
 	// --help cannot offer it. Set from takeInitDevFlags.
 	pathsInNode bool
+	// adopting is set by the one flow that runs init as its own step: `box
+	// migrate apply` on a host with no box installs the plan's apps off and
+	// switches them on once their configs are moved, so init must not say
+	// "nothing runs yet" about a box that is one step from running.
+	adopting bool
+	// switchesOn are the apps that flow turns on after this install, by
+	// instance name. init installs them off, so a decision that belongs to the
+	// box rather than to the app list this run writes -- the torrent port -- is
+	// still decided for them.
+	switchesOn []string
+	// sourceTorrentPort is the peer port the source install's qBittorrent
+	// announced, when a migration read one from the snapshot. init keeps it
+	// when this cluster can use it; zero means the source named none.
+	sourceTorrentPort int
 	// recordPath is where bootstrap recorded the cluster decision. init has no
 	// --record flag of its own (it applies through the default), so each caller
 	// sets it: bootstrap passes the flag it was given, and `box init` alone uses
@@ -785,15 +814,15 @@ func addInitFlags(fs *flag.FlagSet) *initFlags {
 	o := &initFlags{fs: fs, chart: addChartFlags(fs, chartVersionInstalls)}
 	o.grantPath = fs.String("grant", seedbox.GrantPath("root"), "the root-owned grant file to write")
 	o.valuesPath = fs.String("values", valuesDefault, "the user's values file to edit")
-	o.namespace = fs.String("namespace", "seedbox", "the box's namespace; a re-run keeps whatever the grant says")
+	o.namespace = fs.String("namespace", "", "the box's namespace (default s5n-<login>); a re-run keeps whatever the grant says")
 	o.domain = fs.String("domain", "", "the domain this box is reached at, e.g. box.example.com")
 	o.dataPath = fs.String("data-path", "", "the host path downloads and media live on")
 	o.configPath = fs.String("config-path", "", "the host path the apps keep their settings on")
 	o.apps = fs.String("apps", "", "comma separated app names from the chart's catalog")
 	o.loginName = fs.String("login", "", "the account the login page admits (default: $SUDO_USER, else the invoking user)")
 	o.password = fs.String("password-file", "", "read the login's password from this file, or from stdin with - (default: ask, or generate one)")
-	o.puid = fs.Int("puid", defaultPUID(), "uid every file on the data path is owned by (default: $SUDO_UID, else the invoking user, else 1000)")
-	o.pgid = fs.Int("pgid", defaultPGID(), "gid every file on the data path is owned by (default: $SUDO_GID, else the invoking user, else 1000)")
+	o.puid = fs.Int("puid", defaultPUID(), "uid every file on the data path is owned by (default: the owner of a data path that already holds files, else $SUDO_UID, else the invoking user, else 1000)")
+	o.pgid = fs.Int("pgid", defaultPGID(), "gid every file on the data path is owned by (default: the group of a data path that already holds files, else $SUDO_GID, else the invoking group, else 1000)")
 	o.transient = &transientAnswers{}
 	fs.Var(o.transient, "set-transient", "an answer that lives in no file, as key=value (repeatable), e.g. secrets.plexClaimToken=claim-xxxx")
 	return o
@@ -816,6 +845,12 @@ func (o *initFlags) takeDev(d initDevFlags) {
 func (o *initFlags) run(ctx context.Context, kubeconfig string, yes, plain bool, out say.Reporter) error {
 	if *o.valuesPath == "" {
 		return errors.New("no values file: pass --values")
+	}
+	// Where box keeps its own files comes before the chart or the first
+	// question: a host that still has them where box kept them before 0.5 is
+	// refused, not installed over.
+	if err := hostFiles(out, o.recordPath, *o.grantPath); err != nil {
+		return err
 	}
 
 	// The chart is read before anything is asked: its catalog is where the
@@ -859,16 +894,21 @@ func (o *initFlags) run(ctx context.Context, kubeconfig string, yes, plain bool,
 		resolver = setup.FileResolver{Path: o.dnsFile}
 	}
 	d := &setup.Decision{
-		Host:      setup.LinuxPathHost{},
-		Prompt:    prompt,
-		Catalog:   cat,
-		Say:       out,
-		Resolver:  resolver,
-		Login:     loginStep(kubeconfig, o.pathsInNode, out, chart),
-		HasLogin:  hasLogin(o.pathsInNode),
-		GatewayIP: gatewayProxyIP(kubeconfig),
-		NodePorts: nodePorts(kubeconfig),
-		Schema:    chart.Schema,
+		Host:     setup.LinuxPathHost{},
+		Prompt:   prompt,
+		Catalog:  cat,
+		Say:      out,
+		Resolver: resolver,
+		Login:    loginStep(kubeconfig, o.pathsInNode, out, chart),
+		// The web login's default is the account that owns the box's files, so
+		// the name beside "files core (uid 1000, gid 1000)" is "core" unless the
+		// operator says otherwise. This reads the host's account database and
+		// creates nothing.
+		UserLookup: osUserName,
+		HasLogin:   hasLogin(o.pathsInNode),
+		GatewayIP:  gatewayProxyIP(kubeconfig),
+		NodePorts:  nodePorts(kubeconfig),
+		Schema:     chart.Schema,
 		Apply: func(ctx context.Context, req setup.ApplyOptions) error {
 			// The cluster decision belongs to `box bootstrap`; apply reuses it.
 			// It is resolved here, after init has written the files, so a host
@@ -877,7 +917,7 @@ func (o *initFlags) run(ctx context.Context, kubeconfig string, yes, plain bool,
 			if err != nil {
 				return err
 			}
-			confirm := confirmer(out, yes)
+			confirm := initApplyConfirmer(o.adopting, out, yes)
 			app := &release.Applier{
 				Charts:  source,
 				Confirm: confirm,
@@ -952,6 +992,9 @@ func (o *initFlags) run(ctx context.Context, kubeconfig string, yes, plain bool,
 		DefaultLogin: defaultLogin(),
 		PasswordFile: *o.password,
 		Unattended:   unattended,
+		Adopting:     o.adopting,
+		SwitchesOn:   o.switchesOn,
+		TorrentPort:  o.sourceTorrentPort,
 		PathsInNode:  o.pathsInNode,
 		NoticePath:   hostconf.Path(o.recordPath),
 	})
@@ -972,13 +1015,23 @@ func (o *initFlags) run(ctx context.Context, kubeconfig string, yes, plain bool,
 	// The final card's one warning: a name with no DNS record still installs,
 	// self-signed, and a re-run is what moves it. Named per host, because an
 	// app's name is a record the operator may not have thought about.
-	for _, h := range res.Hosts {
-		if !h.NoDNS {
-			continue
-		}
-		out.Warn(setup.NoDNSWarning(h, "init"))
+	if warning, ok := setup.NoDNSWarning(res.Hosts, "init"); ok {
+		out.Warn(warning)
 	}
 	return nil
+}
+
+// initApplyConfirmer is what init's hand-over asks its release question with.
+// It is init's own question on a box a person installed, and no question at
+// all when another flow runs init as one step: a migration asks once, at its
+// own confirm, which covers the empty release this install writes and the apps
+// it is about to move. A second form there would ask after the first step had
+// already written.
+func initApplyConfirmer(adopting bool, out say.Reporter, yes bool) asker {
+	if adopting {
+		return answered{}
+	}
+	return confirmer(out, yes)
 }
 
 // afterConfirm is the one hook apply runs after its confirm and before its
@@ -1080,9 +1133,22 @@ func hasLogin(pathsInNode bool) setup.HasLoginFunc {
 	}
 }
 
-// defaultLogin is what init offers when no --login was given: the account of
-// the person who ran sudo, because that is whose box this is. A root shell has
-// no such answer and init asks (or refuses, unattended).
+// osUserName names the OS account behind a uid, by reading the host's own
+// account database. init asks for it once the file owner is settled, to offer
+// the account the files belong to as the login's default; box never creates an
+// account, and a uid with no account is not a name.
+func osUserName(uid int) (string, bool) {
+	u, err := user.LookupId(strconv.Itoa(uid))
+	if err != nil || strings.TrimSpace(u.Username) == "" {
+		return "", false
+	}
+	return u.Username, true
+}
+
+// defaultLogin is what init offers when no --login was given and the file owner
+// has no account of its own: the account of the person who ran sudo, because
+// that is whose box this is. A root shell has no such answer and init asks (or
+// refuses, unattended).
 func defaultLogin() string {
 	if user := strings.TrimSpace(os.Getenv("SUDO_USER")); user != "" && user != "root" {
 		return user

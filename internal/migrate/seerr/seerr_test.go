@@ -64,7 +64,7 @@ const settingsFixture = `{
   ],
   "sonarr": [
     {
-      "id": 0,
+      "id": 1,
       "name": "Sonarr",
       "hostname": "sonarr.default.svc",
       "port": 8989,
@@ -79,47 +79,61 @@ const settingsFixture = `{
 `
 
 // dbFixture is the two root-folder columns, shaped after the TypeORM entities
-// (server/entity/OverrideRule.ts and MediaRequest.ts at v3.5.1: the column
-// keeps its property name, the table is the class name snake_cased).
+// (server/entity/OverrideRule.ts:14-19,36 and MediaRequest.ts:548,554 at
+// v3.5.1: the column keeps its property name, the table is the class name
+// snake_cased). A rule may name one Arr or both, and a request names the one it
+// was sent to.
 const dbFixture = `
 CREATE TABLE override_rule (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    radarrRootFolder varchar,
-    sonarrRootFolder varchar,
+    radarrServiceId integer,
+    sonarrServiceId integer,
     rootFolder varchar
 );
 CREATE TABLE media_request (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
+    type varchar,
+    serverId integer,
     rootFolder varchar
 );
-INSERT INTO override_rule (id, rootFolder) VALUES (1, '/srv/media/Movies');
-INSERT INTO media_request (id, rootFolder) VALUES (1, '/srv/media/Old Requests');
+INSERT INTO override_rule (id, radarrServiceId, sonarrServiceId, rootFolder) VALUES (1, 0, NULL, '/srv/media/Movies');
+INSERT INTO media_request (id, type, serverId, rootFolder) VALUES (1, 'movie', 0, '/srv/media/Old Requests');
 `
 
 const planYAML = `
-version: 1
+version: 2
 apps:
   plex:
+    kind: kubernetes
     source: plex
     config: /srv/apps/plex
     ports: [32400]
     paths: []
   tautulli:
+    kind: kubernetes
     source: tautulli
     config: /srv/apps/tautulli
     ports: [8181]
     paths: []
   sonarr:
+    kind: kubernetes
     source: sonarr
     config: /srv/apps/sonarr
     ports: [8989]
-    paths: []
+    # The root folders Seerr stores for an Arr move by the Arr's own table.
+    paths:
+      - from: /srv/media
+        to: /data/media
   radarr:
+    kind: kubernetes
     source: radarr
     config: /srv/apps/radarr
     ports: [7878]
-    paths: []
+    paths:
+      - from: /srv/media
+        to: /data/media
   seerr:
+    kind: kubernetes
     source: seerr
     config: /srv/apps/seerr
     paths:
@@ -258,6 +272,35 @@ func TestHistoryPathNeitherBlocksNorRewrites(t *testing.T) {
 	if got := readColumn(t, in.Dir, "media_request", "rootFolder"); got != "/mnt/other/Requests" {
 		t.Errorf("media_request.rootFolder = %q, want untouched", got)
 	}
+	// One count line, in the list the operator reads, rather than one per row.
+	var counted []rewrite.Left
+	for _, l := range rep.Left {
+		if strings.Contains(l.What, "past request") {
+			counted = append(counted, l)
+		}
+	}
+	if len(counted) != 1 {
+		t.Fatalf("Left = %+v, want one count line for the requests left", rep.Left)
+	}
+	if counted[0].What != "1 past request" || !strings.Contains(counted[0].Why, "their folders are history") {
+		t.Errorf("the count line = %+v, want \"1 past request\" and why it is left", counted[0])
+	}
+
+	// Several are still one line, counted.
+	exec(t, in.Dir, `INSERT INTO media_request (id, type, serverId, rootFolder) VALUES (2, 'tv', 1, '/mnt/other/Shows'), (3, 'movie', 0, '/mnt/other/Films')`)
+	rep, err = rewriter{}.Check(ctx, in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := ""
+	for _, l := range rep.Left {
+		if strings.Contains(l.What, "past request") {
+			got = l.What
+		}
+	}
+	if got != "3 past requests" {
+		t.Errorf("the count line says %q, want 3 past requests", got)
+	}
 }
 
 // TestMissingBaseURLIsAdded: Seerr's baseUrl is optional, and an Arr the chart
@@ -327,6 +370,11 @@ func TestUncoveredSettingsPathBlocks(t *testing.T) {
 	if len(rep.Uncovered) != 1 || !strings.Contains(rep.Uncovered[0].Key, "activeDirectory") {
 		t.Fatalf("Uncovered = %v", rep.Uncovered)
 	}
+	// The folder is the Arr's, so the gap names the Arr: the plan asks for a
+	// rule in radarr's paths, not in Seerr's.
+	if got := rep.Uncovered[0].App; got != "radarr" {
+		t.Errorf("Uncovered[0].App = %q, want radarr: an Arr root folder moves by the Arr's table", got)
+	}
 }
 
 func TestUnclassifiedAddressBlocks(t *testing.T) {
@@ -364,6 +412,121 @@ func TestServiceNameConnection(t *testing.T) {
 	}
 	if rep.Blocked() {
 		t.Fatalf("the Service name was not settled: %v", rep.Unclassified)
+	}
+}
+
+// TestOverrideRuleNamesBothArrsAndTheyAgree: one rootFolder column is shared by
+// both Arrs a rule names (server/entity/OverrideRule.ts:14-19,36 at v3.5.1), so
+// it is written when both Arrs make the same path of it.
+func TestOverrideRuleNamesBothArrsAndTheyAgree(t *testing.T) {
+	ctx := context.Background()
+	in := setup(t, settingsFixture)
+	exec(t, in.Dir, `UPDATE override_rule SET radarrServiceId = 0, sonarrServiceId = 1, rootFolder = '/srv/media/Shared'`)
+
+	rep, err := rewriter{}.Check(ctx, in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rep.Blocked() {
+		t.Fatalf("a rule both Arrs agree on blocked the run: %v %v", rep.Uncovered, rep.Unclassified)
+	}
+	if len(rep.Left) != 0 {
+		t.Errorf("Left = %+v, want none: both Arrs give the same folder", rep.Left)
+	}
+	if _, err := (rewriter{}).Write(ctx, in); err != nil {
+		t.Fatal(err)
+	}
+	if got := readColumn(t, in.Dir, "override_rule", "rootFolder"); got != "/data/media/Shared" {
+		t.Errorf("override_rule.rootFolder = %q, want /data/media/Shared", got)
+	}
+}
+
+// TestOverrideRuleBothArrsDisagreeIsLeft: the two Arrs put their libraries in
+// different places, so one column cannot be right for both. The rule stays
+// exactly as it is and the report says what each Arr makes of it: that is a
+// decision the operator sees, not a refusal.
+func TestOverrideRuleBothArrsDisagreeIsLeft(t *testing.T) {
+	ctx := context.Background()
+	in := setup(t, settingsFixture)
+	exec(t, in.Dir, `UPDATE override_rule SET radarrServiceId = 0, sonarrServiceId = 1, rootFolder = '/srv/media/Shared'`)
+	// Sonarr's library is somewhere else than Radarr's, and both tables still
+	// cover the paths Seerr stores for them.
+	in.Plan.Apps["sonarr"] = plan.App{
+		Kind: plan.Kubernetes, Source: "sonarr", Config: "/srv/apps/sonarr",
+		Ports: []int{8989},
+		Paths: []plan.PathRule{{From: "/srv/media", To: "/data/tv"}},
+	}
+
+	rep, err := rewriter{}.Check(ctx, in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rep.Blocked() {
+		t.Fatalf("a rule the Arrs disagree about blocked the run: %v %v", rep.Uncovered, rep.Unclassified)
+	}
+	if len(rep.Left) != 1 || rep.Left[0].What != "/srv/media/Shared" {
+		t.Fatalf("Left = %+v, want one entry for /srv/media/Shared", rep.Left)
+	}
+	if !strings.Contains(rep.Left[0].Why, "do not agree") {
+		t.Errorf("why = %q, want it to say the Arrs disagree", rep.Left[0].Why)
+	}
+	if _, err := (rewriter{}).Write(ctx, in); err != nil {
+		t.Fatal(err)
+	}
+	if got := readColumn(t, in.Dir, "override_rule", "rootFolder"); got != "/srv/media/Shared" {
+		t.Errorf("override_rule.rootFolder = %q, want it left as it was", got)
+	}
+}
+
+// TestOverrideRuleWithNoArrIsCalledOut: a rule that names no Arr cannot be
+// placed in anyone's filesystem, so it is left and called out.
+func TestOverrideRuleWithNoArrIsCalledOut(t *testing.T) {
+	ctx := context.Background()
+	in := setup(t, settingsFixture)
+	exec(t, in.Dir, `UPDATE override_rule SET radarrServiceId = NULL, sonarrServiceId = NULL`)
+
+	rep, err := rewriter{}.Check(ctx, in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rep.Blocked() {
+		t.Fatalf("a rule naming no Arr blocked the run: %v", rep.Uncovered)
+	}
+	if len(rep.Left) != 1 || !strings.Contains(rep.Left[0].Why, "names no Arr") {
+		t.Fatalf("Left = %+v, want one entry saying the rule names no Arr", rep.Left)
+	}
+}
+
+// TestMediaRequestMovesByTheArrItWasSentTo: a request records the Arr it went
+// to (MediaRequest.ts:548: type and serverId), and its root folder is that Arr's
+// path.
+func TestMediaRequestMovesByTheArrItWasSentTo(t *testing.T) {
+	ctx := context.Background()
+	in := setup(t, settingsFixture)
+	exec(t, in.Dir, `INSERT INTO media_request (id, type, serverId, rootFolder) VALUES (2, 'tv', 1, '/srv/media/TV')`)
+	// Seerr's own table knows nothing about the library: only the Arrs' rules
+	// can move these.
+	in.Plan.Apps["seerr"] = plan.App{Kind: plan.Kubernetes, Source: "seerr", Config: "/srv/apps/seerr"}
+
+	if _, err := (rewriter{}).Check(ctx, in); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := (rewriter{}).Write(ctx, in); err != nil {
+		t.Fatal(err)
+	}
+	db, err := sqlitedb.OpenReadOnly(ctx, filepath.Join(in.Dir, filepath.FromSlash(dbName)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	for id, want := range map[int]string{1: "/data/media/Old Requests", 2: "/data/media/TV"} {
+		var got string
+		if err := db.QueryRowContext(ctx, `SELECT rootFolder FROM media_request WHERE id = ?`, id).Scan(&got); err != nil {
+			t.Fatal(err)
+		}
+		if got != want {
+			t.Errorf("media_request %d = %q, want %q", id, got, want)
+		}
 	}
 }
 

@@ -6,7 +6,6 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
-	"net"
 	"net/url"
 	"strconv"
 	"strings"
@@ -59,6 +58,14 @@ var downloadClientsKnown = map[string]bool{
 	"hadouken": true, "nzbget": true, "nzbvortex": true, "qbittorrent": true,
 	"sabnzbd": true, "utorrent": true, "vuze": true,
 }
+
+// downloadClientsBoxRuns are the download clients this box runs: qBittorrent,
+// and only qBittorrent (charts/s5n/catalog.yaml). Every other implementation a
+// source Arr holds is a client of a type box does not run, and its connection is
+// left exactly as it is and called out: rewriting it would point that client at
+// an app that does not speak its protocol, and deleting it is the operator's
+// call, never migrate's.
+var downloadClientsBoxRuns = map[string]bool{"qbittorrent": true}
 
 // notificationTargets are the notifications whose settings name another
 // machine on the source: a media server box may run, or the same one under a
@@ -178,20 +185,55 @@ func mustJSON(v string) json.RawMessage {
 	return data
 }
 
+// providerEnable is the column each provider table stores "this provider is on"
+// in. An app's definition may compute the flag instead of storing it
+// (NotificationDefinition.Enable is derived from its event flags,
+// sonarr@v4.0.14.2938:src/NzbDrone.Core/Notifications/NotificationDefinition.cs),
+// and then the table has no column and every row is on. The three that do store
+// it: DownloadClients.Enable (ProviderDefinition.Enable,
+// src/NzbDrone.Core/ThingiProvider/ProviderDefinition.cs), an Arr import list's
+// EnableAutomaticAdd (ImportListDefinition.Enable, src/NzbDrone.Core/ImportLists)
+// and a Prowlarr application's SyncLevel (ApplicationDefinition.Enable,
+// prowlarr@v2.7.0.5723:src/NzbDrone.Core/Applications/ApplicationDefinition.cs,
+// Disabled = 0).
+var providerEnable = map[string]string{
+	"DownloadClients": "Enable",
+	"ImportLists":     "EnableAutomaticAdd",
+	"Applications":    "SyncLevel",
+}
+
 // provider is one row of a table that stores a provider's settings as JSON.
 type provider struct {
 	id             int64
 	name           string
 	implementation string
-	settings       fields
+	// enabled is false for a provider the app never dials, so an address it
+	// stores that cannot be placed is left alone rather than made a refusal. A
+	// row in a table without the flag is on.
+	enabled  bool
+	settings fields
 }
 
 // providerTable reads a provider table. Every one of them has the same four
 // columns this pass needs: the row's id and name, the implementation that
-// decides the settings' shape, and the settings blob.
+// decides the settings' shape, and the settings blob. A table that also stores
+// whether the provider is on is read with it (providerEnable); a row without the
+// flag is one the app dials.
 func (a *analysis) providerTable(ctx context.Context, db *sql.DB, table string, visit func(provider) error) error {
-	//nolint:gosec // the table name is a constant in this package
-	rows, err := db.QueryContext(ctx, "SELECT Id, Name, Implementation, Settings FROM "+table)
+	withEnable := false
+	if column := providerEnable[table]; column != "" {
+		ok, err := hasColumn(ctx, db, table, column)
+		if err != nil {
+			return err
+		}
+		withEnable = ok
+	}
+	columns := "Id, Name, Implementation, Settings"
+	if withEnable {
+		columns = "Id, Name, " + providerEnable[table] + ", Implementation, Settings"
+	}
+	//nolint:gosec // the table name and the column are constants in this package
+	rows, err := db.QueryContext(ctx, "SELECT "+columns+" FROM "+table)
 	if err != nil {
 		return fmt.Errorf("read %s in %s: %w", table, a.file, err)
 	}
@@ -199,7 +241,15 @@ func (a *analysis) providerTable(ctx context.Context, db *sql.DB, table string, 
 	for rows.Next() {
 		var p provider
 		var implementation, settings sql.NullString
-		if err := rows.Scan(&p.id, &p.name, &implementation, &settings); err != nil {
+		if withEnable {
+			var enabled sql.NullInt64
+			err = rows.Scan(&p.id, &p.name, &enabled, &implementation, &settings)
+			p.enabled = !enabled.Valid || enabled.Int64 != 0
+		} else {
+			err = rows.Scan(&p.id, &p.name, &implementation, &settings)
+			p.enabled = true
+		}
+		if err != nil {
 			return fmt.Errorf("read %s in %s: %w", table, a.file, err)
 		}
 		p.implementation = implementation.String
@@ -213,6 +263,18 @@ func (a *analysis) providerTable(ctx context.Context, db *sql.DB, table string, 
 		}
 	}
 	return rows.Err()
+}
+
+// hasColumn reports whether a table the database has carries a column of that
+// name. A schema is the app's, not this package's: versions differ, and a
+// synthetic one omits what a real app always writes.
+func hasColumn(ctx context.Context, db *sql.DB, table, column string) (bool, error) {
+	rows, err := db.QueryContext(ctx, `SELECT 1 FROM pragma_table_info(?) WHERE name = ?`, table, column)
+	if err != nil {
+		return false, fmt.Errorf("read %s schema: %w", table, err)
+	}
+	defer rows.Close()
+	return rows.Next(), rows.Err()
 }
 
 // providers rewrites what the apps' settings rows say about paths and about
@@ -243,11 +305,38 @@ func (a *analysis) downloadClients(ctx context.Context, db *sql.DB) error {
 // this app's filesystem, so its paths go through this app's table. A client
 // that is left where it is keeps its own paths as well: rewriting them with
 // this app's table would tell that machine about a directory it does not have.
+//
+// Two clients are never rewritten and never a refusal, because neither one can
+// be wrong: one this box does not run (nothing in the release speaks its
+// protocol), and a disabled one whose address cannot be placed (the app never
+// dials it). Both are left exactly as they are, with the reason, in the report's
+// Left list.
 func (a *analysis) downloadClient(p provider) error {
 	const where = "DownloadClients.Settings"
 	ad, has, err := a.hostPort(where, p.settings)
 	if err != nil {
 		return err
+	}
+	impl := strings.ToLower(p.implementation)
+	if has && !downloadClientsBoxRuns[impl] {
+		a.left = append(a.left, rewrite.Left{
+			File: a.file, Where: where + ".host", What: ad.text(),
+			Why: fmt.Sprintf("%q is a %s client and this box runs only qBittorrent, so a rewrite would point it at an app that does not speak its protocol; delete it in the Arr if you do not need it",
+				p.name, p.implementation),
+		})
+		return nil
+	}
+	if has && ad.verdict == plan.Unclassified {
+		if !p.enabled {
+			a.left = append(a.left, rewrite.Left{
+				File: a.file, Where: where + ".host", What: ad.text(),
+				Why: fmt.Sprintf("%q is switched off, so %s is never dialled and nothing is migrated to it",
+					p.name, ad.text()),
+			})
+			return nil
+		}
+		a.unclass = append(a.unclass, ad.address(a.app, a.file, where+".host"))
+		return nil
 	}
 	if has && ad.verdict != plan.Rewrite {
 		return nil
@@ -259,12 +348,12 @@ func (a *analysis) downloadClient(p provider) error {
 		a.clientTargets[strings.ToLower(ad.host)] = ad.target
 		changed = a.pointAt(where, p.settings, ad)
 	}
-	for _, key := range downloadPaths[strings.ToLower(p.implementation)] {
+	for _, key := range downloadPaths[impl] {
 		if a.objectPath(table, where, p.settings, key) {
 			changed = true
 		}
 	}
-	if !has && !downloadClientsKnown[strings.ToLower(p.implementation)] {
+	if !has && !downloadClientsKnown[impl] {
 		a.notes = append(a.notes, fmt.Sprintf(
 			"%s: download client %q is a type this tool does not know; its settings were not searched for paths",
 			p.name, p.implementation))
@@ -299,7 +388,10 @@ func (a *analysis) notification(p provider) error {
 		if err != nil {
 			return err
 		}
-		if has && ad.verdict == plan.Rewrite {
+		switch {
+		case has && ad.verdict == plan.Unclassified:
+			a.unclass = append(a.unclass, ad.address(a.app, a.file, where+".host"))
+		case has && ad.verdict == plan.Rewrite:
 			if a.pointAt(where, p.settings, ad) {
 				changed = true
 			}
@@ -312,7 +404,7 @@ func (a *analysis) notification(p provider) error {
 // the remote server's address in baseUrl and its folders in RootFolderPaths;
 // the folders are a filter over the *other* server's filesystem and are left
 // alone, because rewriting them would silently disable the filter
-// (research: §2.2, §5.5).
+// (research: §2.2, §5.5). A list the app does not sync is left where it is.
 func (a *analysis) importLists(ctx context.Context, db *sql.DB) error {
 	return a.providerTable(ctx, db, "ImportLists", func(p provider) error {
 		const where = "ImportLists.Settings.baseUrl"
@@ -324,9 +416,24 @@ func (a *analysis) importLists(ctx context.Context, db *sql.DB) error {
 		if !ok || stored == "" {
 			return nil
 		}
-		out, _, resolved, err := a.resolveURL(where, stored)
-		if err != nil || !resolved || out == stored {
+		out, _, resolved, miss, err := a.resolveURL(where, stored)
+		if err != nil {
 			return err
+		}
+		if miss != nil {
+			if !p.enabled {
+				a.left = append(a.left, rewrite.Left{
+					File: a.file, Where: where, What: miss.Text(),
+					Why: fmt.Sprintf("%q is not synced, so %s is never dialled and nothing is migrated to it",
+						p.name, miss.Text()),
+				})
+				return nil
+			}
+			a.unclass = append(a.unclass, *miss)
+			return nil
+		}
+		if !resolved || out == stored {
+			return nil
 		}
 		p.settings[key] = mustJSON(out)
 		a.add(a.file, "ImportLists.Settings", "host")
@@ -338,6 +445,7 @@ func (a *analysis) importLists(ctx context.Context, db *sql.DB) error {
 // Arr at (baseUrl) and the URL the Arr reaches Prowlarr at (prowlarrUrl).
 // Prowlarr's application settings hold no filesystem path
 // (prowlarr@v2.7.0.5723:src/NzbDrone.Core/Applications/Sonarr/SonarrSettings.cs:32-35).
+// An application whose sync is off is left where it is.
 func (a *analysis) applications(ctx context.Context, db *sql.DB) error {
 	return a.providerTable(ctx, db, "Applications", func(p provider) error {
 		const where = "Applications.Settings"
@@ -352,9 +460,21 @@ func (a *analysis) applications(ctx context.Context, db *sql.DB) error {
 			if !ok || stored == "" {
 				continue
 			}
-			out, app, resolved, err := a.resolveURL(where+"."+key, stored)
+			out, app, resolved, miss, err := a.resolveURL(where+"."+key, stored)
 			if err != nil {
 				return err
+			}
+			if miss != nil {
+				if !p.enabled {
+					a.left = append(a.left, rewrite.Left{
+						File: a.file, Where: where + "." + key, What: miss.Text(),
+						Why: fmt.Sprintf("%q has its sync switched off, so %s is never dialled and nothing is indexed through it",
+							p.name, miss.Text()),
+					})
+					continue
+				}
+				a.unclass = append(a.unclass, *miss)
+				continue
 			}
 			if !resolved {
 				continue
@@ -423,7 +543,21 @@ type address struct {
 	verdict plan.Verdict
 	target  string // the box instance the address now means
 	host    string // the host as stored, which is also the name a mapping uses
+	port    int    // the port as stored, 0 when the settings hold none
 	ep      rewrite.Endpoint
+}
+
+// text is the address as the app stored it, for a line the operator reads.
+func (ad address) text() string {
+	if ad.port == 0 {
+		return ad.host
+	}
+	return fmt.Sprintf("%s:%d", ad.host, ad.port)
+}
+
+// address is the report entry for an address the plan does not settle.
+func (ad address) address(app, file, where string) rewrite.Address {
+	return rewrite.Address{App: app, File: file, Where: where, Host: ad.host, Port: ad.port}
 }
 
 // hostPort settles the host and port a provider's settings store.
@@ -432,7 +566,9 @@ type address struct {
 // none, and nothing about its address can be wrong. The verdict is in.Resolve's:
 // the plan's rules and the apps' ports decide, and an address the plan does not
 // settle but that already names one of the box's endpoints is that app, which is
-// what a second pass over a copy the first one wrote needs.
+// what a second pass over a copy the first one wrote needs. Recording an
+// unclassified address is the caller's: one client is never dialled, so its
+// address is left instead of reported.
 func (a *analysis) hostPort(where string, f fields) (address, bool, error) {
 	hostKey, ok := f.find("host")
 	if !ok {
@@ -451,16 +587,15 @@ func (a *analysis) hostPort(where string, f fields) (address, bool, error) {
 	res := a.in.Resolve(host, port)
 	switch res.Verdict {
 	case plan.Unclassified:
-		a.unclass = append(a.unclass, rewrite.Address{App: a.app, File: a.file, Where: where + ".host", Host: host, Port: port})
-		return address{verdict: plan.Unclassified, host: host}, true, nil
+		return address{verdict: plan.Unclassified, host: host, port: port}, true, nil
 	case plan.Leave:
-		return address{verdict: plan.Leave, host: host}, true, nil
+		return address{verdict: plan.Leave, host: host, port: port}, true, nil
 	}
 	ep, ok := a.in.Targets[res.App]
 	if !ok {
 		return address{}, false, fmt.Errorf("%s in %s: the plan maps %s to %s, which this run has no endpoint for", where, a.file, host, res.App)
 	}
-	return address{verdict: plan.Rewrite, target: res.App, host: host, ep: ep}, true, nil
+	return address{verdict: plan.Rewrite, target: res.App, host: host, port: port, ep: ep}, true, nil
 }
 
 // pointAt writes the box's address into a provider's settings. HTTPS is off
@@ -487,41 +622,40 @@ func (a *analysis) pointAt(where string, f fields, ad address) bool {
 }
 
 // resolveURL settles a stored URL that names another app and returns the URL
-// the box serves it at. resolved is false when the plan leaves the address
-// alone or reports it; target is the box instance for a rewritten URL.
-func (a *analysis) resolveURL(where, stored string) (newURL, target string, resolved bool, err error) {
+// the box serves it at. resolved is false when the plan leaves the address alone
+// or notes the value is not a URL at all; miss is the address when the plan does
+// not settle it, for the caller to report or leave. target is the box instance
+// for a rewritten URL.
+func (a *analysis) resolveURL(where, stored string) (newURL, target string, resolved bool, miss *rewrite.Address, err error) {
 	u, perr := url.Parse(stored)
 	if perr != nil || (u.Scheme != schemeHTTP && u.Scheme != "https") || u.Hostname() == "" {
 		a.notes = append(a.notes, fmt.Sprintf("%s in %s: %q is not an http URL; left as it is", where, a.file, stored))
-		return "", "", false, nil
+		return "", "", false, nil, nil
 	}
-	port := 0
+	// A URL's port is the one it names, or the one its scheme implies: a
+	// stored https URL with no port is port 443, not port 0, and a rule
+	// narrowed to 443 is what settles it.
+	port := rewrite.URLPort(u)
 	if p := u.Port(); p != "" {
-		n, convErr := strconv.Atoi(p)
-		if convErr != nil {
+		if _, convErr := strconv.Atoi(p); convErr != nil {
 			a.notes = append(a.notes, fmt.Sprintf("%s in %s: %q names a port that is not a number; left as it is", where, a.file, stored))
-			return "", "", false, nil
+			return "", "", false, nil, nil
 		}
-		port = n
 	}
-	res := a.in.Resolve(u.Hostname(), port)
+	res := a.in.ResolveURL(u)
 	switch res.Verdict {
 	case plan.Unclassified:
-		a.unclass = append(a.unclass, rewrite.Address{App: a.app, File: a.file, Where: where, Host: u.Hostname(), Port: port})
-		return "", "", false, nil
+		ad := rewrite.Address{App: a.app, File: a.file, Where: where, Host: u.Hostname(), Port: port}
+		return "", "", false, &ad, nil
 	case plan.Leave:
-		return "", "", false, nil
+		return "", "", false, nil, nil
 	}
 	ep, ok := a.in.Targets[res.App]
 	if !ok {
-		return "", "", false, fmt.Errorf("%s in %s: the plan maps %s to %s, which this run has no endpoint for", where, a.file, u.Host, res.App)
+		return "", "", false, nil, fmt.Errorf("%s in %s: the plan maps %s to %s, which this run has no endpoint for", where, a.file, u.Host, res.App)
 	}
-	out := *u
-	out.Scheme = schemeHTTP
-	out.Host = net.JoinHostPort(ep.Host, strconv.Itoa(ep.Port))
-	out.Path = strings.TrimSuffix(ep.URLBase, "/")
-	out.RawPath = ""
-	out.RawQuery = ""
-	out.Fragment = ""
-	return out.String(), res.App, true, nil
+	// The box's own address, whole: plain HTTP, the Service, the chart's port
+	// and the chart's URL base. A path the source's URL carried is the source's
+	// shape, and box serves the app under its own base.
+	return ep.URL(), res.App, true, nil, nil
 }

@@ -71,6 +71,20 @@ gateway:
   # Public host, e.g. box.example.com. Empty = match any host.
   host: ""
 
+# A rehearsal box: what `box migrate apply` sets on a box built from a rehearsal
+# snapshot, so a copy of a live seedbox's configs cannot run as the live one. It
+# removes the public-internet egress from the release's NetworkPolicy (DNS and
+# this release's own pods remain) and forces the policies on. box writes it in
+# the grant and nothing unlocks it; the value is box's, so no values file may
+# set it. The chart renders nothing else differently.
+rehearsal: false
+# The address every app's rehearsal gate dials (host:port): an in-cluster
+# address the lock denies, which box proves closed before any app starts and
+# writes into the grant with the flag above. Each app pod of a rehearsal box
+# waits in an init container until it stops answering, so no app runs before
+# its own pod's policy is in place. box's, like rehearsal; unused otherwise.
+rehearsalGate: ""
+
 networkPolicy:
   enabled: true
   # Where Gateway traffic comes from. This default is for a plain `helm install`
@@ -177,6 +191,10 @@ apps:
     port: 8989
     envPrefix: SONARR
     instances:
+      # category is the directory under /data/media this instance's library
+      # lives in, and under /data/downloads what it downloads into. A migrated
+      # box sets downloadCategory to the category the source's torrents are
+      # already in (Movies, 4K/TV); the library still moves to category.
       - suffix: ""
         category: tv
         enabled: true
@@ -248,10 +266,14 @@ apps:
       # there; a tag or digest pin here is held within that repository.
       variant: default
     port: 8181
-    # Tautulli has a url-base setting (http_root) but wiring it through the same
-    # checkbox-unsafe /configUpdate endpoint used for the Plex link is not worth the
-    # extra risk for v1; the route strips the prefix instead, same as qBittorrent.
-    rewritePath: true
+    # Tautulli keeps its prefix: its own URL-root setting (http_root) is sealed
+    # to this instance's path on every start by the init container, so the app
+    # builds its absolute redirects and asset URLs under /tautulli instead of at
+    # the host's root. Stripping the prefix was the alternative, and it cannot
+    # work: Tautulli answers `/` with a redirect to HTTP_ROOT + "home" and its
+    # logout with HTTP_ROOT + "auth/logout" (plexpy/webserve.py, webstart.py at
+    # v2.18.2), which left the prefix and landed on the login's own /auth.
+    rewritePath: false
     resources: {}
     env: {}
 

@@ -91,8 +91,9 @@ func (a *Arr) categoryField() string {
 // created or adopted this client: only an id match counts as "ours", so a
 // rename in the Sonarr/Radarr UI is the user's business and never creates a
 // duplicate. A zero ownedID means nothing is recorded (first run, or an
-// owned.json the Job could not read), so an existing client named spec.Name is
-// adopted instead.
+// owned.json the Job could not read), so the enabled qBittorrent client
+// pointing at the release's own qBittorrent is adopted (locateArrClient), and
+// a client named spec.Name is the fallback.
 //
 // On update the live object is cloned and only the data-contract fields are
 // overlaid (host, port, useSsl, urlBase, username, password, the category
@@ -109,7 +110,10 @@ func (a *Arr) EnsureDownloadClient(ctx context.Context, spec DownloadClientSpec,
 	if err != nil {
 		return EnsureResult{}, fmt.Errorf("list download clients: %w", err)
 	}
-	cur, found, recreated, previousID := locateOwned(list, ownedID, spec.Name)
+	cur, found, recreated, previousID, err := locateArrClient(list, spec, ownedID)
+	if err != nil {
+		return EnsureResult{}, err
+	}
 
 	fields := []ownedField{
 		{"host", spec.Host, false},

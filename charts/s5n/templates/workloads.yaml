@@ -69,14 +69,38 @@ spec:
       {{- end }}
       securityContext:
         {{- include "s5n.podSecurity" $root | nindent 8 }}
-      {{- if or (eq $inst.app "qbittorrent") (eq $inst.app "tautulli") (eq $inst.app "qui") (eq $inst.app "autobrr") (eq $inst.app "pbh") }}
-      # qBittorrent and Tautulli generate their own WebUI/API credential on first
-      # start, and qui and autobrr hand out an API key only to a signed-in
-      # session: none of the four can be given credentials from the environment.
-      # Each gets an init container that seals a known value into its own config
-      # or user table first -- one that runs before the app, on the app's own
-      # config subPath, so the file it edits is the file the app reads.
+      {{- $credentialInit := or (eq $inst.app "qbittorrent") (eq $inst.app "tautulli") (eq $inst.app "qui") (eq $inst.app "autobrr") (eq $inst.app "pbh") }}
+      {{- if or $root.Values.rehearsal $credentialInit }}
       initContainers:
+        {{- if $root.Values.rehearsal }}
+        # A rehearsal box's app starts only once its own pod's egress is closed.
+        # A CNI programs a new pod's NetworkPolicy a moment after the pod
+        # starts, and an app that dials out in that moment (an announce, an IRC
+        # join, plex.tv) would reach the internet as the live box. This runs
+        # first, in the app's own network namespace, and waits until an address
+        # the lock denies stops answering; it fails -- and the app never starts
+        # -- if that does not happen. box proved the lock with the same address
+        # before switching any app on, and records it in the grant.
+        - name: rehearsal-gate
+          image: {{ include "s5n.image" (dict "root" $root "app" "s5n" "path" "wiring.image" "image" $root.Values.wiring.image) }}
+          imagePullPolicy: IfNotPresent
+          args:
+            - probe
+            - tcp
+            - --address={{ required "rehearsalGate: a rehearsal box needs the address its apps' gate dials; box writes it into the grant when it applies a rehearsal snapshot" $root.Values.rehearsalGate }}
+            - --want=closed
+            - --timeout=2s
+            - --settle=60s
+          securityContext:
+            {{- include "s5n.containerSecurity" $root | nindent 12 }}
+        {{- end }}
+        {{- if $credentialInit }}
+        # qBittorrent and Tautulli generate their own WebUI/API credential on first
+        # start, and qui and autobrr hand out an API key only to a signed-in
+        # session: none of the four can be given credentials from the environment.
+        # Each gets an init container that seals a known value into its own config
+        # or user table first -- one that runs before the app, on the app's own
+        # config subPath, so the file it edits is the file the app reads.
         {{- if eq $inst.app "qbittorrent" }}
         - name: webui-credentials
           image: {{ include "s5n.image" (dict "root" $root "app" "s5n" "path" "wiring.image" "image" $root.Values.wiring.image) }}
@@ -104,6 +128,10 @@ spec:
             - tautulli-config
             - --conf=/config/config.ini
             - --api-key-file=/etc/s5n/keys/tautulli-apikey
+            # The prefix the route keeps. The app builds its redirects from it,
+            # so the value and the route have to be one decision: rewritePath is
+            # false for this app in values.yaml.
+            - --http-root={{ $urlBase }}
           securityContext:
             {{- include "s5n.containerSecurity" $root | nindent 12 }}
           volumeMounts:
@@ -190,17 +218,41 @@ spec:
         # PeerBanHelper's config file, prepared before the app reads it. The
         # token comes from the environment (PBH_APITOKEN), so the one thing this
         # file has to say without a person is that this box did not ask for the
-        # app's anonymous usage statistics. Two steps, and the order is what
+        # app's anonymous usage statistics. Three steps, and the order is what
         # makes a first start clean:
         #
         #   1. no file yet: write the one PBH itself writes on a first start, out
         #      of the jar the image ships, so the app is configured exactly as it
         #      would have configured itself and nothing here is a guess;
-        #   2. on every start: set privacy.analytics to false, the app's own
-        #      switch for Sentry, its event POSTs and the analytics script it
-        #      injects into its index page.
+        #   2. on every start: privacy.analytics false, the app's own switch for
+        #      Sentry, its event POSTs and the analytics script it injects into
+        #      its index page. A config that has no `privacy:` block at all --
+        #      one a PeerBanHelper older than its own migration 41 wrote, which
+        #      is exactly what a migrated box brings -- gets the block, so the
+        #      file says what this box decided rather than what the app defaults
+        #      to when the key is missing;
+        #   3. the image's own template, one key changed, where the app's config
+        #      migration reads it -- the paragraph after this list is why.
         # Step 2 is not a one-off because PBH's config migrations rewrite blocks
         # of this file as versions move, and one of them resets this key.
+        #
+        # Step 3 is that migration, made to keep this key. PBH's config update
+        # script 41 does `privacy.analytics = <the template in its own jar>`
+        # unconditionally (MainConfigUpdateScript.java at v9.5.4), and the jar's
+        # template says true: a config older than 41 -- anything a v7 or v8 wrote
+        # -- would have this box's false overwritten with true on the start that
+        # migrates it, and the app would then run one start with analytics on,
+        # before this container could put it back. Raising the config's
+        # `config-version` past 41 would skip that script, and eleven real config
+        # migrations with it (a proxy setting whose meaning changed, downloader
+        # ids, the ban-remapping block): not a trade this chart can make. So the
+        # key's only writer is given this box's answer instead: a copy of the
+        # image's own template, one value changed and every other byte the
+        # image's, appended to the JVM's boot class path. The class loader looks
+        # there before the jar, so every migration sees the same template with
+        # `analytics: false`, and nothing else in the file is ours. Copied out of
+        # the jar on every start, so an image bump carries its own template and
+        # this can never drift from it.
         - name: config
           image: {{ include "s5n.image" (dict "root" $root "app" $inst.app "path" (printf "apps.%s.image" $inst.app) "image" $cfg.image) }}
           imagePullPolicy: IfNotPresent
@@ -210,21 +262,44 @@ spec:
               set -eu
               dir=/config/config
               file="$dir/config.yml"
-              mkdir -p "$dir"
+              # template is the jar's config.yml with this box's one answer in
+              # it: the app's own config migration reads it, so it must be the
+              # image's own file and not a second copy of its settings.
+              template=/tmp/pbh-config
+              # off_analytics <file>: the privacy block's one key, false.
+              off_analytics() {
+                awk '
+                  /^privacy:/ { block = 1; print; next }
+                  block && /^[^ #]/ { block = 0 }
+                  block && /^  analytics:/ { print "  analytics: false"; next }
+                  { print }
+                ' "$1" > "$1.new"
+                mv "$1.new" "$1"
+              }
+              # with_privacy <file>: the block a config older than PBH's own
+              # migration 41 does not have.
+              with_privacy() {
+                if ! grep -q '^privacy:' "$1"; then
+                  printf '\nprivacy:\n  analytics: false\n' >> "$1"
+                fi
+              }
+              mkdir -p "$dir" "$template"
               if [ ! -f "$file" ]; then
                 unzip -p /app/PeerBanHelper.jar config.yml > "$file"
               fi
-              awk '
-                /^privacy:/ { block = 1; print; next }
-                block && /^[^ #]/ { block = 0 }
-                block && /^  analytics:/ { print "  analytics: false"; next }
-                { print }
-              ' "$file" > "$file.new"
-              mv "$file.new" "$file"
-              if ! grep -qx '  analytics: false' "$file"; then
-                echo "config.yml has no privacy.analytics key to switch off" >&2
-                exit 1
-              fi
+              with_privacy "$file"
+              off_analytics "$file"
+              unzip -p /app/PeerBanHelper.jar config.yml > "$template/config.yml"
+              with_privacy "$template/config.yml"
+              off_analytics "$template/config.yml"
+              # Both files are the promise: the one the app reads now, and the
+              # one its migration reads on the start that rewrites it.
+              for checked in "$file" "$template/config.yml"; do
+                if ! grep -qx '  analytics: false' "$checked"; then
+                  echo "$checked has no privacy.analytics key to switch off" >&2
+                  exit 1
+                fi
+              done
           securityContext:
             {{- include "s5n.containerSecurity" $root | nindent 12 }}
           volumeMounts:
@@ -233,6 +308,7 @@ spec:
               subPath: {{ $inst.name }}
             - name: tmp
               mountPath: /tmp
+        {{- end }}
         {{- end }}
       {{- end }}
       containers:
@@ -355,7 +431,7 @@ spec:
             # variable -- the JVM reads JAVA_TOOL_OPTIONS itself, which is what
             # makes this the way in.
             - name: JAVA_TOOL_OPTIONS
-              value: -Dpbh.datadir=/config
+              value: -Dpbh.datadir=/config -Xbootclasspath/a:/tmp/pbh-config
             # Its WebUI token, from the release Secret. PBH reads it as
             # `pbh.apiToken`, the switch that wins over config.yml's
             # server.token (Main.setupHttpServer, ExternalSwitch.parse), so the
@@ -369,15 +445,20 @@ spec:
                   name: {{ include "s5n.secretName" $root }}
                   key: pbh-token
             # One login, not two. PBH's WebUI cannot accept a token the edge
-            # supplies -- its bundle calls /api/... with a token it holds in the
-            # page's memory, and an HTTPRoute filter cannot read a Secret to add
-            # one -- so the app's own login is switched off and the edge's is the
-            # only one (the same arrangement as qui's, and Maintainerr has no
-            # login at all). This switch is the app's own:
+            # supplies: its login handler reads the token from the request BODY
+            # (PBHAuthenticateController.handleLogin), which is what its page
+            # posts, so no header an HTTPRoute filter injects can answer the
+            # login -- and Envoy Gateway 1.9.3's route credentialInjection,
+            # which can read a Secret and set an Authorization header, cannot
+            # reach a JSON field. With this switch off no header is checked at
+            # all, so injecting one would add a Secret to every request's path
+            # for no change in who gets in. The app's own login is switched off
+            # and the edge's is the only one (the same arrangement as qui's,
+            # and Maintainerr has no login at all). The switch is the app's own:
             # `pbh.web.requireLogin`, ExternalSwitch, read by Javalin's auth
-            # gate when a request carries no valid token. The token above is
-            # still set, because an empty one sends PBH into OOBE instead of
-            # serving the API at all.
+            # gate before the body when a request carries no valid token. The
+            # token above is still set, because an empty one sends PBH into
+            # OOBE instead of serving the API at all.
             - name: PBH_WEB_REQUIRELOGIN
               value: "false"
             {{- else if eq $inst.app "maintainerr" }}

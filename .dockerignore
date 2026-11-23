@@ -1,6 +1,7 @@
 .git
 .github
 charts
+dist
 hack
 reports
 *.md

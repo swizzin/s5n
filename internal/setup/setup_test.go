@@ -27,9 +27,16 @@ type fakeHost struct {
 	mounts  []Mount
 	free    int64
 
+	// links are paths that are a symlink of their own: Lstat reports them and
+	// never looks at what they point to.
+	links map[string]bool
+
 	mkdirs []string
 	chowns []string
 	reads  []string
+	// readMax is the limit each read was given, in the same order as reads: a
+	// walk shows up here as a read that could have returned everything.
+	readMax []int
 }
 
 func newFakeHost() *fakeHost {
@@ -38,6 +45,7 @@ func newFakeHost() *fakeHost {
 		files:   map[string]int64{},
 		owners:  map[string]owner{},
 		listing: map[string][]DirEntry{},
+		links:   map[string]bool{},
 		mounts:  []Mount{{Major: 8, Minor: 1, Point: "/", FSType: "ext4"}},
 		free:    1600 * 1024 * 1024 * 1024,
 	}
@@ -45,8 +53,10 @@ func newFakeHost() *fakeHost {
 
 func (h *fakeHost) Stat(path string) (FileInfo, error) {
 	if h.dirs[path] {
-		o := h.owners[path]
-		if o == (owner{}) {
+		// An unrecorded owner is an ordinary account. A recorded one is used as
+		// it is, 0:0 included: a root-owned directory has to be expressible.
+		o, ok := h.owners[path]
+		if !ok {
 			o = owner{1000, 1000}
 		}
 		return FileInfo{IsDir: true, Mode: 0o755, UID: o.uid, GID: o.gid}, nil
@@ -55,6 +65,15 @@ func (h *fakeHost) Stat(path string) (FileInfo, error) {
 		return FileInfo{Mode: 0o644}, nil
 	}
 	return FileInfo{}, fs.ErrNotExist
+}
+
+// Lstat is Stat with the link check Stat does not make: a link is reported as
+// itself, with no directory and no contents.
+func (h *fakeHost) Lstat(path string) (FileInfo, error) {
+	if h.links[path] {
+		return FileInfo{Symlink: true, Mode: 0o777}, nil
+	}
+	return h.Stat(path)
 }
 
 func (h *fakeHost) StatFS(string) (FSInfo, error) { return FSInfo{Free: h.free}, nil }
@@ -66,6 +85,7 @@ func (h *fakeHost) ReadDir(path string, max int) ([]DirEntry, bool, error) {
 		return nil, false, fs.ErrNotExist
 	}
 	h.reads = append(h.reads, path)
+	h.readMax = append(h.readMax, max)
 	entries := h.listing[path]
 	more := false
 	if len(entries) > max {
@@ -383,6 +403,165 @@ func TestFirstRunAsksTheQuestionsInOrder(t *testing.T) {
 // changed. The rest of both files must come out byte for byte, comments and odd
 // indentation included, and a second run with the same answers must not write at
 // all.
+// TestTheSeedboxNamespaceFollowsTheLogin: a first run with no --namespace puts
+// the box in s5n-<login>, root's own included, beside box's s5n-system and
+// s5n-gateway.
+func TestTheSeedboxNamespaceFollowsTheLogin(t *testing.T) {
+	h := newHarness(t)
+	h.prompt.inputs = []string{"box.example.com", "/srv/s5n/data", "/srv/s5n/config"}
+	h.prompt.multis = [][]string{{"alpha"}}
+	opts := h.options()
+	opts.Namespace = ""
+	opts.Login = "alice"
+
+	if _, err := h.run(opts); err != nil {
+		t.Fatalf("init: %v\n%s", err, h.out)
+	}
+	if grant := h.read(h.grantPath); !strings.Contains(grant, "namespace: s5n-alice") {
+		t.Fatalf("the grant does not put alice's box in s5n-alice:\n%s", grant)
+	}
+}
+
+// An explicit --namespace still wins on a first run: the login only decides the
+// default.
+func TestAnExplicitNamespaceWinsOnAFirstRun(t *testing.T) {
+	h := newHarness(t)
+	h.prompt.inputs = []string{"box.example.com", "/srv/s5n/data", "/srv/s5n/config"}
+	h.prompt.multis = [][]string{{"alpha"}}
+	opts := h.options()
+	opts.Namespace = "s5n-other"
+	opts.Login = "alice"
+
+	if _, err := h.run(opts); err != nil {
+		t.Fatalf("init: %v\n%s", err, h.out)
+	}
+	if grant := h.read(h.grantPath); !strings.Contains(grant, "namespace: s5n-other") {
+		t.Fatalf("the grant does not keep the explicit namespace:\n%s", grant)
+	}
+}
+
+// A re-run reads the grant's namespace: a box installed before the s5n-<login>
+// default keeps `seedbox` whatever this run's flag or login says.
+func TestAReRunKeepsTheGrantsNamespace(t *testing.T) {
+	h := newHarness(t)
+	write(t, h.grantPath, reRunGrant)
+	write(t, h.valuesPath, reRunValues)
+	h.prompt.inputs = []string{"old.example.com"}
+	opts := h.options()
+	opts.Namespace = "s5n-other"
+
+	res, err := h.run(opts)
+	if err != nil {
+		t.Fatalf("init: %v\n%s", err, h.out)
+	}
+	if !res.ReRun {
+		t.Fatal("an existing grant was treated as a fresh host")
+	}
+	for _, key := range res.GrantChanged {
+		if key == "namespace" {
+			t.Fatalf("the re-run rewrote the namespace: %v", res.GrantChanged)
+		}
+	}
+	if grant := h.read(h.grantPath); !strings.Contains(grant, "namespace: seedbox") {
+		t.Fatalf("the re-run changed the namespace:\n%s", grant)
+	}
+}
+
+// TestLoginsThatCannotBeASeedboxAreRefused: the namespace is s5n-<login>, so a
+// login box's own namespaces belong to, or one that does not make a DNS-1123
+// label after the prefix, is refused when it is given -- naming the login and
+// why.
+func TestLoginsThatCannotBeASeedboxAreRefused(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		login string
+		want  []string
+	}{
+		{"box's own system namespace", "system", []string{`login "system"`, "s5n-system", "box's own"}},
+		{"box's own gateway namespace", "gateway", []string{`login "gateway"`, "s5n-gateway", "box's own"}},
+		{"not a label", "alice@example.com", []string{`login "alice@example.com"`, "s5n-alice@example.com", "lowercase letters, digits and dashes"}},
+		{"too long", strings.Repeat("a", 60), []string{"s5n-", "at most 63 characters"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newHarness(t)
+			opts := h.unattended()
+			opts.Namespace = "" // a first run that derives it, which is when the login names it
+			opts.Login = tc.login
+			_, err := h.run(opts)
+			if err == nil {
+				t.Fatalf("login %q was accepted", tc.login)
+			}
+			for _, want := range tc.want {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("the refusal does not say %q: %v", want, err)
+				}
+			}
+			if h.exists(h.grantPath) || h.exists(h.valuesPath) {
+				t.Fatal("a refused login wrote a file")
+			}
+		})
+	}
+}
+
+// The namespace rule applies only where a namespace is derived from the
+// login. A box that already has a grant keeps its namespace, so a login
+// Authelia accepts -- capitals, a dot, an @ -- is still its login on a re-run,
+// and an explicit --namespace on a first run takes the login's place in the
+// name. Refusing either would lock out a box that has always worked.
+func TestALoginOnlyHasToMakeANamespaceWhenItMakesOne(t *testing.T) {
+	t.Run("a re-run keeps a grant's login and namespace", func(t *testing.T) {
+		h := newHarness(t)
+		write(t, h.grantPath, strings.Replace(reRunGrant, "login: alice", "login: Alice.B", 1))
+		write(t, h.valuesPath, reRunValues)
+		opts := h.unattended()
+		opts.Login = "Alice.B"
+		opts.SetTransient = map[string]string{"apps.beta.token": "tok-unattended"}
+		res, err := h.run(opts)
+		if err != nil {
+			t.Fatalf("a re-run with an existing login was refused: %v\n%s", err, h.out)
+		}
+		if !res.ReRun {
+			t.Fatal("an existing grant was treated as a fresh host")
+		}
+		if grant := h.read(h.grantPath); !strings.Contains(grant, "namespace: seedbox") {
+			t.Fatalf("the re-run changed the namespace:\n%s", grant)
+		}
+	})
+	t.Run("a first run with --namespace takes any login Authelia takes", func(t *testing.T) {
+		h := newHarness(t)
+		opts := h.unattended()
+		opts.Login = "Alice.B"
+		opts.Namespace = "s5n-alice"
+		opts.SetTransient = map[string]string{"apps.beta.token": "tok-unattended"}
+		if _, err := h.run(opts); err != nil {
+			t.Fatalf("a login with an explicit namespace was refused: %v\n%s", err, h.out)
+		}
+		if grant := h.read(h.grantPath); !strings.Contains(grant, "namespace: s5n-alice") {
+			t.Fatalf("the grant does not carry the explicit namespace:\n%s", grant)
+		}
+	})
+}
+
+// An explicit namespace is a DNS-1123 label too, length included: the same rule
+// a login-derived one has to pass.
+func TestAnExplicitNamespaceIsHeldToALabel(t *testing.T) {
+	h := newHarness(t)
+	opts := h.unattended()
+	opts.Namespace = strings.Repeat("a", 64)
+	_, err := h.run(opts)
+	if err == nil {
+		t.Fatal("a 64-character --namespace was accepted")
+	}
+	for _, want := range []string{"--namespace", "at most 63 characters"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("the refusal does not say %q: %v", want, err)
+		}
+	}
+	if h.exists(h.grantPath) || h.exists(h.valuesPath) {
+		t.Fatal("a refused namespace wrote a file")
+	}
+}
+
 func TestReRunSplicesOnlyTheChangedKey(t *testing.T) {
 	h := newHarness(t)
 	write(t, h.grantPath, reRunGrant)
@@ -625,9 +804,16 @@ func TestExistingPathSummaryIsCheapAndBounded(t *testing.T) {
 			t.Fatalf("the report is missing %q:\n%s", want, note)
 		}
 	}
-	// One read per path, and none of them a walk.
-	if len(h.host.reads) != 2 || h.host.reads[0] != "/srv/s5n/data" {
-		t.Fatalf("ReadDir calls = %v, want the two paths once each", h.host.reads)
+	// No read is a walk, and the data path's extra one is the owner probe: the
+	// account the files belong to is decided before the report is drawn, and
+	// "does it hold anything" is one entry, not the tree.
+	if got := strings.Join(h.host.reads, " "); got != "/srv/s5n/data /srv/s5n/data /srv/s5n/config" {
+		t.Fatalf("ReadDir calls = %v, want the owner probe then the two paths", h.host.reads)
+	}
+	for i, max := range h.host.readMax {
+		if max > summaryEntries {
+			t.Fatalf("read %d of %s asked for %d entries: init does not walk the tree", i, h.host.reads[i], max)
+		}
 	}
 
 	// A directory with more names than the cap reports the cap, not a walk.
@@ -755,6 +941,68 @@ func TestAppsFlagNamesTheCatalog(t *testing.T) {
 	_, err := h.run(opts)
 	if err == nil || !strings.Contains(err.Error(), "gamms") || !strings.Contains(err.Error(), "alpha, beta") {
 		t.Fatalf("error = %v, want the bad name and the catalog's list", err)
+	}
+}
+
+// TestTheGatewayAddressIsWrittenWithEveryAppOff: an install that answers init
+// with the apps off still records the Gateway's proxy address, because that is
+// the shape `box migrate apply` installs into -- the plan's apps are switched on
+// afterwards, from the grant -- and an OIDC app that renders without the address
+// has no way to reach the login at the box's own name: qui refuses to start and
+// autobrr shows its own password form. The key is the box's, so the question is
+// what the chart serves, not what is on right now.
+func TestTheGatewayAddressIsWrittenWithEveryAppOff(t *testing.T) {
+	h := newHarness(t)
+	h.decision.GatewayIP = func(context.Context) (string, error) { return "10.96.0.10", nil }
+	h.decision.Schema = chartAt(t, h.chartDir).Schema
+	opts := h.unattended()
+	opts.Apps = []string{"none"}
+	if _, err := h.run(opts); err != nil {
+		t.Fatalf("init: %v\n%s", err, h.out)
+	}
+	grant := h.read(h.grantPath)
+	if !strings.Contains(grant, "gatewayIP: 10.96.0.10") {
+		t.Fatalf("the grant carries no Gateway address, and this chart's OIDC apps need it:\n%s", grant)
+	}
+	// A box with an OIDC app on gets the same write, and the re-run changes
+	// nothing: the address is not a per-app answer.
+	h2 := newHarness(t)
+	h2.decision.GatewayIP = h.decision.GatewayIP
+	h2.decision.Schema = h.decision.Schema
+	on := h2.unattended()
+	on.SetTransient = map[string]string{"apps.beta.token": "tok"}
+	if _, err := h2.run(on); err != nil {
+		t.Fatalf("init with apps on: %v\n%s", err, h2.out)
+	}
+	res, err := h2.run(on)
+	if err != nil {
+		t.Fatalf("second init: %v\n%s", err, h2.out)
+	}
+	if len(res.GrantChanged) != 0 {
+		t.Fatalf("the second run spliced %v", res.GrantChanged)
+	}
+	if !strings.Contains(h2.read(h2.grantPath), "gatewayIP: 10.96.0.10") {
+		t.Fatalf("the re-run lost the Gateway address:\n%s", h2.read(h2.grantPath))
+	}
+}
+
+// A chart that does not declare the key is never given it: box does not invent
+// a values key for a release that has no OIDC app to use it.
+func TestNoGatewayAddressWithoutTheKey(t *testing.T) {
+	h := newHarness(t)
+	called := false
+	h.decision.GatewayIP = func(context.Context) (string, error) { called = true; return "10.96.0.10", nil }
+	h.decision.Schema = []byte(`{"type":"object","properties":{}}`)
+	opts := h.unattended()
+	opts.SetTransient = map[string]string{"apps.beta.token": "tok"}
+	if _, err := h.run(opts); err != nil {
+		t.Fatalf("init: %v\n%s", err, h.out)
+	}
+	if called {
+		t.Fatal("the Gateway was read for a chart that has no auth.oidc.gatewayIP")
+	}
+	if strings.Contains(h.read(h.grantPath), "gatewayIP") {
+		t.Fatalf("a key the chart does not declare was written:\n%s", h.read(h.grantPath))
 	}
 }
 

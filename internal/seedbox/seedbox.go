@@ -1,5 +1,5 @@
 // Package seedbox owns the two files that define one seedbox: the root-owned
-// grant in /etc/swizzin/seedboxes/<user>.yaml and the user-owned values file in
+// grant in /etc/s5n/seedboxes/<user>.yaml and the user-owned values file in
 // ~<user>/.config/box/values.yaml.
 //
 // Why two files: a user's values file is applied with root's power, so one
@@ -28,11 +28,13 @@ import (
 	"time"
 
 	"go.yaml.in/yaml/v3"
+
+	"github.com/swizzin/s5n/internal/hostroot"
 )
 
 // GrantDir holds one grant per user, root-owned and root-written (docs/box.md,
 // "Two files per seedbox").
-const GrantDir = "/etc/swizzin/seedboxes"
+const GrantDir = hostroot.SeedboxDir
 
 // GrantPath is the grant file for a user.
 func GrantPath(user string) string {

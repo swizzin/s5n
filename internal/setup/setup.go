@@ -45,6 +45,11 @@ type Decision struct {
 	// reaches it and a login that does not come up stops the run before the
 	// release exists.
 	Login LoginFunc
+	// UserLookup names the OS account behind a uid, when the host has one.
+	// init never creates an account; this only reads the host's own database,
+	// and it is what makes the login's default the account that owns the box's
+	// files rather than whoever ran sudo.
+	UserLookup UserLookupFunc
 	// HasLogin answers whether the users database already holds this login.
 	// It is how init tells a first run (an empty password means box makes one)
 	// from a re-run (an empty password keeps the one that is there).
@@ -111,6 +116,19 @@ type Options struct {
 	// Apps is the grant's app list, by catalog name ("sonarr", not
 	// "sonarr-4k": instances are root's, through `box install`).
 	Apps []string
+	// SwitchesOn are the apps another flow turns on after this install, by
+	// instance name: `box migrate apply` installs the box with every app off
+	// and switches the plan's on once their configs are in place, so a
+	// decision that belongs to the box and not to this run's app list -- the
+	// torrent port -- is still decided for it. It never becomes the app list
+	// init writes: Apps is.
+	SwitchesOn []string
+	// TorrentPort is the peer port the source install's qBittorrent announced,
+	// when a migration read one from its config. init keeps it if this cluster
+	// can use it (it is in the NodePort range and no Service holds it), because
+	// trackers and any forward the operator set already point at it, and picks
+	// one from the band otherwise. Zero means the source named none.
+	TorrentPort int
 	// PUID and PGID are the ids every file on the data path is owned by.
 	// PUIDSet and PGIDSet say the operator named them, so they win over a
 	// re-run's grant; without them the grant's own values do.
@@ -135,6 +153,21 @@ type Options struct {
 	// Unattended asks nothing: flags and file keys only, and a missing required
 	// answer is an error naming the flag or key.
 	Unattended bool
+	// Adopting says another flow is running init as one step of its own, and
+	// that the empty app list is deliberate: `box migrate apply` installs a box
+	// with every app off and switches on what it moved once the configs are in
+	// place. The line init prints for an empty box ("nothing runs yet ... add
+	// one with box install") would be wrong there, so this suppresses it.
+	//
+	// It also makes every answer that flow already holds a decision rather than
+	// a default: the data root and the app list come from the plan, so neither
+	// is asked, and a flag that was given is used as it is instead of being
+	// offered back as a starting answer. A run that was given all four of its
+	// own answers asks nothing at all; one missing is asked with init's own
+	// question, which is what makes a guided migration on a host with no box
+	// ask only for what it lacks. The notice address belongs to bootstrap's
+	// host, not to this install, so it is not asked here either.
+	Adopting bool
 	// PathsInNode says the storage paths live inside a test node (kind), not on
 	// this host, so init neither verifies nor creates them. `box apply` has the
 	// same flag for the same reason.
@@ -214,6 +247,10 @@ type Result struct {
 // options are the four values init decided.
 type LoginFunc func(ctx context.Context, l Login) error
 
+// UserLookupFunc names one OS account by its uid. The second return says the
+// host has an account for it: a uid with no account is not a login name.
+type UserLookupFunc func(uid int) (string, bool)
+
 // HasLoginFunc answers whether the users database already has a row. The file
 // lives on the login's claim, so the login package reads it; init only needs
 // the yes or no.
@@ -290,15 +327,6 @@ func (d *Decision) Run(ctx context.Context, opts Options) (Result, error) {
 	}
 	grantNow := sb.Grant.Map()
 
-	namespace, err := d.namespace(opts, grantNow, res.ReRun)
-	if err != nil {
-		return res, err
-	}
-	puid, pgid, err := d.ids(opts, grantNow, res.ReRun)
-	if err != nil {
-		return res, err
-	}
-
 	// The grant's questions, in the order docs/box.md lists them.
 	//
 	// The flow has four steps of its own, and a fifth when an app has
@@ -316,7 +344,7 @@ func (d *Decision) Run(ctx context.Context, opts Options) (Result, error) {
 		key: "gateway.host", flag: "--domain",
 		prompt: "domain", help: "the name this box is reached at, e.g. box.example.com",
 		value: opts.Domain, prefill: prefill(base, grantNow, "gateway.host"),
-		unattended: opts.Unattended, validate: validDomain,
+		unattended: opts.Unattended, decided: opts.Adopting && strings.TrimSpace(opts.Domain) != "", validate: validDomain,
 	})
 	if err != nil {
 		return res, d.stop(err)
@@ -346,24 +374,36 @@ func (d *Decision) Run(ctx context.Context, opts Options) (Result, error) {
 	d.step(2, "where should your data and settings live?")
 	dataPath, err := d.askText(textQuestion{
 		key: "storage.data.path", flag: "--data-path",
-		prompt: "data path", help: "where downloads and media live on this host",
+		prompt: "data path", help: "where this user's downloads and media live",
 		value: opts.DataPath, prefill: prefill(base, grantNow, "storage.data.path"),
-		unattended: opts.Unattended, validate: validHostPath,
+		unattended: opts.Unattended, decided: opts.Adopting, validate: validHostPath,
 	})
 	if err != nil {
 		return res, d.stop(err)
 	}
 	configPath, err := d.askText(textQuestion{
 		key: "storage.config.path", flag: "--config-path",
-		prompt: "config path", help: "where the apps keep their settings on this host",
+		prompt: "config path", help: "where this user's apps keep their settings",
 		value: opts.ConfigPath, prefill: prefill(base, grantNow, "storage.config.path"),
-		unattended: opts.Unattended, validate: validHostPath,
+		unattended: opts.Unattended, decided: opts.Adopting && strings.TrimSpace(opts.ConfigPath) != "", validate: validHostPath,
 	})
 	if err != nil {
 		return res, d.stop(err)
 	}
 	if err := checkPathPair(dataPath, configPath); err != nil {
 		return res, err
+	}
+
+	// Who the files belong to is settled here, after the data path is known and
+	// before anything is reported about it: a data path that already holds
+	// files names its own owner, and the report below says which ids init is
+	// working with.
+	puid, pgid, err := d.owners(opts, grantNow, res.ReRun, dataPath)
+	if err != nil {
+		return res, d.stop(err)
+	}
+	if !opts.Unattended {
+		d.report().Fact("files", filesLine(d.UserLookup, puid, pgid))
 	}
 
 	// What is at those paths, and whether a missing one may be created. The
@@ -385,13 +425,11 @@ func (d *Decision) Run(ctx context.Context, opts Options) (Result, error) {
 	if err != nil {
 		return res, d.stop(err)
 	}
-	// The peer port: a port on the node, so root settles it once and the grant
-	// keeps it from then on. It is read here, before any answer is written and
-	// before the questions that depend on the app list, because a cluster with
-	// no free port in the band is a refusal and not a half-finished dialog.
-	port, err := d.torrentPort(ctx, namespace, apps, base, grantNow)
-	if err != nil {
-		return res, err
+	if len(apps) == 0 && !opts.Adopting {
+		// Said once, and not asked again: an empty box is a state, and the way
+		// out of it is a command rather than another form. A migration says
+		// nothing here: it is about to switch the apps it moved on.
+		d.report().Muted("nothing runs yet: this box has no apps. add one with `box install <app>`, or run `box migrate` for an install that already exists")
 	}
 	// The app list decides whether there is a fifth step, so correct the
 	// counter before the questions that belong to it.
@@ -410,7 +448,7 @@ func (d *Decision) Run(ctx context.Context, opts Options) (Result, error) {
 	if err != nil {
 		return res, err
 	}
-	askNotice = pending && !opts.Unattended
+	askNotice = pending && !opts.Unattended && !opts.Adopting
 	if askNotice {
 		d.steps++
 	}
@@ -433,7 +471,7 @@ func (d *Decision) Run(ctx context.Context, opts Options) (Result, error) {
 	// one answer that is not the seedbox's shape but the identity on it, and
 	// every path in front of the Gateway is admitted only to this user.
 	d.step(4, "who logs in to this box?")
-	loginName, err := d.askLogin(opts, base, grantNow)
+	loginName, err := d.askLogin(opts, base, grantNow, puid, derivesNamespace(opts, grantNow, res.ReRun))
 	if err != nil {
 		return res, d.stop(err)
 	}
@@ -442,6 +480,23 @@ func (d *Decision) Run(ctx context.Context, opts Options) (Result, error) {
 		return res, d.stop(err)
 	}
 	res.Login, res.NewPassword, res.GeneratedPassword = loginName, newPassword, generated
+
+	// The namespace follows the login: a seedbox's is s5n-<login>, beside box's
+	// own s5n-system and s5n-gateway. A re-run keeps the grant's, so a box that
+	// already has `seedbox` keeps it whatever this run's login is, and an
+	// explicit --namespace still wins on a first run.
+	namespace, err := d.namespace(opts, grantNow, res.ReRun, loginName)
+	if err != nil {
+		return res, err
+	}
+	// The peer port: a port on the node, so root settles it once and the grant
+	// keeps it from then on. It is read before any answer is written, because a
+	// cluster with no free port in the band is a refusal and not a
+	// half-finished dialog.
+	port, err := d.torrentPort(ctx, namespace, apps, base, grantNow, opts)
+	if err != nil {
+		return res, err
+	}
 
 	// Each selected app's own questions, from the catalog. A transient one is
 	// not asked here: it goes to the apply, after its confirm.
@@ -518,7 +573,16 @@ func (d *Decision) Run(ctx context.Context, opts Options) (Result, error) {
 	// failure -- the chart renders the app without it, and the next root run
 	// fills it in -- but it is said out loud, because the app will not start
 	// until it is there.
-	if len(d.Catalog.OIDCApps(apps)) > 0 && d.GatewayIP != nil {
+	//
+	// The question is whether this chart serves an app that way, not whether
+	// one of the apps this run switched on does. A migrate install answers init
+	// with every app off and switches the plan's on afterwards, from the grant
+	// (cmd/box/migrate_apply.go), so "an OIDC app is on now" was false on the
+	// one run that had two to install: autobrr and qui rendered without the
+	// alias, their client Secrets went unused, and autobrr showed its own
+	// password form. The address is the box's, not the app's; a box that never
+	// switches one on carries an unused key, and a re-run of init refreshes it.
+	if d.GatewayIP != nil {
 		declared, err := seedbox.DeclaresOIDCGatewayIP(d.Schema)
 		if err != nil {
 			return res, err
@@ -529,7 +593,12 @@ func (d *Decision) Run(ctx context.Context, opts Options) (Result, error) {
 				return res, err
 			}
 			if strings.TrimSpace(ip) == "" {
-				d.report().Warn("the Gateway's proxy Service is not there yet, so the OIDC apps have no address for the box's own name: run `box init` again once `box bootstrap` has installed the Gateway")
+				// Only an app that is on now waits for it: an empty box is not
+				// waiting on anything, and a warning about an app nobody
+				// switched on is noise.
+				if len(d.Catalog.OIDCApps(apps)) > 0 {
+					d.report().Warn("the Gateway's proxy Service is not there yet, so the OIDC apps have no address for the box's own name: run `box init` again once `box bootstrap` has installed the Gateway")
+				}
 			} else {
 				grantAnswers = append(grantAnswers, answer{key: "auth.oidc.gatewayIP", value: ip})
 			}
@@ -642,11 +711,28 @@ type textQuestion struct {
 	value      string
 	prefill    any
 	unattended bool
-	validate   func(string) error
+	// decided says this answer is already known: the flow that runs init (a
+	// migration, whose plan holds the data root) answers it, so init uses it as
+	// it is and never offers it back as a prompt's starting answer. An empty
+	// one is a refusal naming the flag rather than a question, because the
+	// flow that decided it is the one that has to supply it.
+	decided  bool
+	validate func(string) error
 }
 
 func (d *Decision) askText(q textQuestion) (string, error) {
 	given := strings.TrimSpace(q.value)
+	if q.decided {
+		if given == "" {
+			return "", fmt.Errorf("%s is needed: pass %s", q.key, q.flag)
+		}
+		if q.validate != nil {
+			if err := q.validate(given); err != nil {
+				return "", fmt.Errorf("%s %q: %w", q.flag, given, err)
+			}
+		}
+		return given, nil
+	}
 	if q.unattended {
 		if given == "" {
 			return "", fmt.Errorf("%s is needed: pass %s", q.key, q.flag)
@@ -671,48 +757,199 @@ func (d *Decision) askText(q textQuestion) (string, error) {
 
 // namespace resolves the one grant key that is not a question. A seedbox's
 // namespace is its identity -- claim names and storage are derived from it -- so
-// a re-run never changes it, whatever the flag says.
-func (d *Decision) namespace(opts Options, grantNow map[string]any, reRun bool) (string, error) {
-	if reRun {
-		if ns, ok := lookupPath(grantNow, "namespace"); ok {
-			if s, ok := ns.(string); ok && strings.TrimSpace(s) != "" {
-				return s, nil
-			}
-		}
+// a re-run never changes it, whatever the flag says. A first run takes the flag
+// when it was given, and otherwise derives s5n-<login>: every seedbox gets one,
+// root's included, beside box's own s5n-system and s5n-gateway.
+func (d *Decision) namespace(opts Options, grantNow map[string]any, reRun bool, login string) (string, error) {
+	if ns, ok := grantNamespace(grantNow, reRun); ok {
+		return ns, nil
 	}
 	ns := strings.TrimSpace(opts.Namespace)
-	if ns == "" {
-		return "", errors.New("namespace is needed: pass --namespace")
+	if ns != "" {
+		if err := validNamespace(ns); err != nil {
+			return "", fmt.Errorf("--namespace %q: %w", ns, err)
+		}
+		return ns, nil
 	}
-	if err := validNamespace(ns); err != nil {
-		return "", fmt.Errorf("--namespace %q: %w", ns, err)
-	}
-	return ns, nil
+	return NamespaceFor(login)
 }
 
-// ids resolves puid and pgid: the flag when it was given, the grant's value on a
-// re-run, and otherwise what cmd/box derived from the invoking user.
-func (d *Decision) ids(opts Options, grantNow map[string]any, reRun bool) (int, int, error) {
-	puid, pgid := opts.PUID, opts.PGID
-	if reRun {
-		if !opts.PUIDSet {
-			if n, ok := intAt(grantNow, "global.puid"); ok {
-				puid = n
-			}
+// grantNamespace is the namespace a re-run keeps: the grant's, when it names one.
+func grantNamespace(grantNow map[string]any, reRun bool) (string, bool) {
+	if !reRun {
+		return "", false
+	}
+	if ns, ok := lookupPath(grantNow, "namespace"); ok {
+		if s, ok := ns.(string); ok && strings.TrimSpace(s) != "" {
+			return s, true
 		}
-		if !opts.PGIDSet {
-			if n, ok := intAt(grantNow, "global.pgid"); ok {
-				pgid = n
+	}
+	return "", false
+}
+
+// derivesNamespace says whether this run names the namespace from the login:
+// not when a re-run keeps the grant's, and not when --namespace names it.
+func derivesNamespace(opts Options, grantNow map[string]any, reRun bool) bool {
+	if _, ok := grantNamespace(grantNow, reRun); ok {
+		return false
+	}
+	return strings.TrimSpace(opts.Namespace) == ""
+}
+
+// id is one of puid and pgid while it is still being decided: the value, and
+// whether something has already answered for it.
+type id struct {
+	value int
+	set   bool
+}
+
+// take records the answer for this id.
+func (i *id) take(v int) { i.value, i.set = v, true }
+
+// owners resolves puid and pgid, in the order docs/box.md sets out: the flag
+// when it was given, the grant's value on a re-run, the owner of a data path
+// that already holds files, and only then what cmd/box derived from the invoking
+// user (sudo's ids, else the caller's).
+//
+// The data path comes before sudo's ids because the files are the answer: an
+// install that changed the owner of an existing library would leave the apps
+// unable to write it. It is never read through a symlink.
+func (d *Decision) owners(opts Options, grantNow map[string]any, reRun bool, dataPath string) (int, int, error) {
+	var puid, pgid id
+	if opts.PUIDSet {
+		puid.take(opts.PUID)
+	}
+	if opts.PGIDSet {
+		pgid.take(opts.PGID)
+	}
+	// An installed box keeps its owner: a stray file does not re-chown a release.
+	if reRun && !puid.set {
+		if v, ok := intAt(grantNow, "global.puid"); ok {
+			puid.take(v)
+		}
+	}
+	if reRun && !pgid.set {
+		if v, ok := intAt(grantNow, "global.pgid"); ok {
+			pgid.take(v)
+		}
+	}
+	if !puid.set || !pgid.set {
+		uid, gid, holds, err := d.dataOwner(dataPath)
+		if err != nil {
+			return 0, 0, err
+		}
+		if holds {
+			if !puid.set {
+				puid.take(uid)
+			}
+			if !pgid.set {
+				pgid.take(gid)
 			}
 		}
 	}
+	if !puid.set {
+		puid.take(opts.PUID)
+	}
+	if !pgid.set {
+		pgid.take(opts.PGID)
+	}
+	return d.usableIDs(opts, dataPath, puid.value, pgid.value)
+}
+
+// usableIDs is the last word on the two ids: root is never the answer, because
+// the apps run unprivileged and a root-owned data path is one they could not
+// write. Unattended names the flags; a terminal asks, because the operator knows
+// whose files those are.
+func (d *Decision) usableIDs(opts Options, dataPath string, puid, pgid int) (int, int, error) {
+	if puid > 0 && pgid > 0 {
+		return puid, pgid, nil
+	}
+	if opts.Unattended {
+		return 0, 0, fmt.Errorf("--puid and --pgid are needed: %s is owned by root (0:0), and the apps do not run as root", dataPath)
+	}
+	d.step(2, "who owns the files in "+dataPath+"?")
+	var err error
 	if puid <= 0 {
-		return 0, 0, errors.New("--puid is needed: the uid every file on the data path is owned by")
+		if puid, err = d.askID("global.puid", "file owner uid", "the uid of the account that owns the data path's files"); err != nil {
+			return 0, 0, err
+		}
 	}
 	if pgid <= 0 {
-		return 0, 0, errors.New("--pgid is needed: the gid every file on the data path is owned by")
+		if pgid, err = d.askID("global.pgid", "file owner gid", "the gid of that account's group"); err != nil {
+			return 0, 0, err
+		}
 	}
 	return puid, pgid, nil
+}
+
+// dataOwner is the account that owns the data path, when the path already holds
+// something. A missing path, an empty one, a file and a symlink are all "no
+// data": the first two because nobody owns an empty directory yet, the last
+// because box never reads through a link, and the owner on the other side of one
+// is not the box's answer.
+func (d *Decision) dataOwner(path string) (int, int, bool, error) {
+	info, err := d.Host.Lstat(path)
+	switch {
+	case errors.Is(err, fs.ErrNotExist):
+		return 0, 0, false, nil
+	case err != nil:
+		return 0, 0, false, fmt.Errorf("read %s: %w", path, err)
+	}
+	if info.Symlink {
+		d.report().Warn(fmt.Sprintf("%s is a symlink: box does not read through it, so the owner of what it points at is not used for the box's files", path))
+		return 0, 0, false, nil
+	}
+	if !info.IsDir {
+		return 0, 0, false, nil
+	}
+	entries, _, err := d.Host.ReadDir(path, 1)
+	if err != nil {
+		return 0, 0, false, fmt.Errorf("read %s: %w", path, err)
+	}
+	if len(entries) == 0 {
+		return 0, 0, false, nil
+	}
+	return info.UID, info.GID, true, nil
+}
+
+// askID asks for one id the operator has to name, because the host gave no
+// answer box may use.
+func (d *Decision) askID(key, prompt, help string) (int, error) {
+	answer, err := d.Prompt.Input(Input{Key: key, Prompt: prompt, Help: help, Validate: validID})
+	if err != nil {
+		return 0, err
+	}
+	n, err := strconv.Atoi(strings.TrimSpace(answer))
+	if err != nil || n <= 0 {
+		return 0, fmt.Errorf("%s %q: %w", key, answer, validID(answer))
+	}
+	return n, nil
+}
+
+// validID is one uid or gid: a number, and never 0.
+func validID(v string) error {
+	n, err := strconv.Atoi(strings.TrimSpace(v))
+	if err != nil {
+		return errors.New("a number, the account's id")
+	}
+	if n <= 0 {
+		return errors.New("0 is root, and the apps do not run as root")
+	}
+	return nil
+}
+
+// filesLine is the record line for the account the box's files belong to:
+// "core (uid 1000, gid 1000)", with the name when the host has one.
+func filesLine(lookup UserLookupFunc, puid, pgid int) string {
+	ids := fmt.Sprintf("uid %d, gid %d", puid, pgid)
+	if lookup == nil {
+		return ids
+	}
+	name, ok := lookup(puid)
+	if !ok || strings.TrimSpace(name) == "" {
+		return ids
+	}
+	return name + " (" + ids + ")"
 }
 
 // appsOn is the app list init offers preselected: the grant's on a re-run, the
@@ -735,8 +972,22 @@ func (d *Decision) appsOn(grantNow map[string]any, reRun bool) []string {
 	return d.Catalog.Defaults()
 }
 
-// askApps resolves the app list: the flag unattended, a multi-select otherwise,
+// appsNone is the word that answers the app question with nothing: an explicit
+// empty list. `--apps ""` is not it -- an empty flag is a flag nobody filled in
+// -- and neither is leaving the picker's cursor where it started.
+const appsNone = "none"
+
+// AskApps resolves the app list: the flag, a multi-select otherwise,
 // preselected from the grant on a re-run and from the catalog on a fresh box.
+// There is no multi-select when another flow runs init: a migration's plan
+// decides every app, and it hands init the list (`--apps none`) because the
+// migration switches on what it moved at its end. The picker never appears
+// there, which is also why `--apps` is required rather than optional on that
+// path.
+//
+// Nothing is a legitimate answer. A box with no apps is a state of its own:
+// apps arrive later with `box install`, or all at once with the install
+// `box migrate apply` adopts into, and that is why the picker's minimum is zero.
 func (d *Decision) askApps(opts Options, grantNow map[string]any, reRun bool) ([]string, error) {
 	names := d.Catalog.Names()
 	options := make([]Option, 0, len(names))
@@ -747,19 +998,40 @@ func (d *Decision) askApps(opts Options, grantNow map[string]any, reRun bool) ([
 
 	current := d.appsOn(grantNow, reRun)
 
-	given := splitApps(opts.Apps)
-	if opts.Unattended {
-		if len(given) == 0 {
+	// "none" is the empty list spelled out, so it can never be one of the
+	// answers beside an app: one of the two is not what the operator meant, and
+	// guessing which would install the wrong box.
+	var given []string
+	none := false
+	for _, part := range splitApps(opts.Apps) {
+		if strings.EqualFold(part, appsNone) {
+			none = true
+			continue
+		}
+		given = append(given, part)
+	}
+	if none && len(given) > 0 {
+		return nil, fmt.Errorf("--apps %s: %s is the empty list, so it cannot be one of the apps", strings.Join(splitApps(opts.Apps), ", "), appsNone)
+	}
+
+	if opts.Unattended || opts.Adopting {
+		switch {
+		case none:
+			return nil, nil
+		case len(given) == 0:
 			if reRun {
 				return current, nil
 			}
-			return nil, fmt.Errorf("--apps is needed: comma separated app names from %s", strings.Join(names, ", "))
+			return nil, fmt.Errorf("--apps is needed: comma separated app names from %s, or %s for a box with nothing on yet", strings.Join(names, ", "), appsNone)
 		}
 		return checkApps(given, names)
 	}
 
 	selected := current
-	if len(given) > 0 {
+	switch {
+	case none:
+		selected = nil
+	case len(given) > 0:
 		chosen, err := checkApps(given, names)
 		if err != nil {
 			return nil, err
@@ -771,7 +1043,7 @@ func (d *Decision) askApps(opts Options, grantNow map[string]any, reRun bool) ([
 		Prompt:   "which apps should this box have",
 		Options:  options,
 		Selected: selected,
-		Min:      1,
+		Min:      0,
 	})
 }
 
@@ -1233,8 +1505,15 @@ func validHostPath(v string) error {
 }
 
 // validNamespace is the shape a Kubernetes namespace name has to have, said
-// without Kubernetes words.
+// without Kubernetes words: a DNS-1123 label, which is also what a node port's
+// Kubernetes rules and a Service's DNS name need it to be.
 func validNamespace(v string) error {
+	if v == "" {
+		return errors.New("a seedbox name cannot be empty")
+	}
+	if len(v) > 63 {
+		return fmt.Errorf("a seedbox name is at most 63 characters, and this one is %d", len(v))
+	}
 	for i, r := range v {
 		lower := r >= 'a' && r <= 'z'
 		digit := r >= '0' && r <= '9'

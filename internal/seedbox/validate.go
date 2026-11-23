@@ -54,6 +54,30 @@ func Base(c Chart) (map[string]any, error) {
 	return base, nil
 }
 
+// Pending is the values a chart would render for a box whose grant is not
+// written yet: the chart's defaults with the user's values over them, and no
+// grant at all. It is what a flow can show before the box exists -- `box migrate
+// apply` decides what the whole run will do before it installs anything, and the
+// summary it shows must read the values the same way the run after the install
+// will -- and it is deliberately not checked against the schema: the files box
+// installs are validated when they are loaded, and a preview must not refuse a
+// box the install would have made.
+func Pending(c Chart, valuesPath string) (map[string]any, error) {
+	base, err := Base(c)
+	if err != nil {
+		return nil, err
+	}
+	values, err := LoadValues(valuesPath)
+	if err != nil {
+		return nil, err
+	}
+	overlay(base, values.data, nil)
+	if _, ok := base["apps"]; !ok {
+		base["apps"] = map[string]any{}
+	}
+	return base, nil
+}
+
 // Effective returns the values the chart would actually render for this
 // seedbox: Base, then the user's values, then the grant.
 func (s *Seedbox) Effective(c Chart) (map[string]any, error) {
@@ -105,6 +129,28 @@ func (s *Seedbox) Effective(c Chart) (map[string]any, error) {
 			}
 		}
 	}
+	// rehearsal is box's own record of what kind of box this is, and
+	// rehearsalGate the address each app's gate dials. Both are BoxOnly, so
+	// overlay() never carries them from the grant; they are written here the
+	// way the Gateway's address is. Unlike that address, the lock fails
+	// closed: a rehearsal box rendered by a chart from before the lock, or
+	// without its gate, would reach the internet as the live box, so that is a
+	// refusal rather than a quietly dropped key.
+	if on, _ := s.Grant.data["rehearsal"].(bool); on {
+		declares, err := declaresRehearsal(c.Schema)
+		if err != nil {
+			return nil, err
+		}
+		if !declares {
+			return nil, errors.New("this box is a rehearsal box, and the chart being installed cannot lock it (it has no rehearsal value): a rehearsal box runs only on a chart that keeps it off the internet")
+		}
+		gate, _ := s.Grant.data["rehearsalGate"].(string)
+		if strings.TrimSpace(gate) == "" {
+			return nil, errors.New("this box is a rehearsal box and its grant has no rehearsalGate, the address each app waits on until the lock closes it: box writes it when it applies a rehearsal snapshot, so apply that snapshot again rather than run its apps ungated")
+		}
+		base["rehearsal"] = true
+		base["rehearsalGate"] = gate
+	}
 	// The claim names are box's, from the volumes it creates: not the chart's
 	// defaults and not either file. Applied last so nothing can shadow them.
 	overlay(base, claims(vols), nil)
@@ -138,6 +184,24 @@ func declaresAuthEdge(schema []byte) (bool, error) {
 	}
 	_, ok = auth.Properties["edge"]
 	return ok, nil
+}
+
+// declaresRehearsal reports whether the chart's schema describes the top-level
+// rehearsal flag and its gate address. A release from before the lock has
+// neither, and Effective refuses to render a rehearsal box with it.
+func declaresRehearsal(schema []byte) (bool, error) {
+	if len(schema) == 0 {
+		return false, nil
+	}
+	var doc struct {
+		Properties map[string]json.RawMessage `json:"properties"`
+	}
+	if err := json.Unmarshal(schema, &doc); err != nil {
+		return false, fmt.Errorf("chart schema: %w", err)
+	}
+	_, flag := doc.Properties["rehearsal"]
+	_, gate := doc.Properties["rehearsalGate"]
+	return flag && gate, nil
 }
 
 // declaresOIDCGatewayIP reports whether the chart's schema describes

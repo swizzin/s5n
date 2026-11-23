@@ -43,6 +43,51 @@ if helm template t charts/s5n -n seedbox --set auth.edge=true --set gateway.host
 fi
 echo "== default render: no PLEX_NO_AUTH_NETWORKS"
 
+# A rehearsal box keeps DNS and its own pods as its only egress: the
+# public-internet ipBlocks go, and the policies render even when the grant
+# switched networkPolicy.enabled off. Both halves are asserted, because a lock
+# that renders nothing is a box with no policy at all, and one that keeps the
+# internet rule is a rehearsal announcing to trackers.
+plain=$(helm template t charts/s5n -n seedbox -f charts/s5n/ci/default-values.yaml \
+  --set 'networkPolicy.apiServerCIDRs[0]=10.0.0.1/32')
+grep -q 'cidr: 0.0.0.0/0' <<<"$plain" ||
+  { echo "the default render has no public-internet egress rule: a normal box cannot reach its indexers"; exit 1; }
+locked=$(helm template t charts/s5n -n seedbox -f charts/s5n/ci/rehearsal-values.yaml \
+  --set 'networkPolicy.apiServerCIDRs[0]=10.0.0.1/32')
+grep -q 'cidr: 0.0.0.0/0' <<<"$locked" &&
+  { echo "the rehearsal render keeps the public-internet egress rule: a copy would announce and query as the live box"; exit 1; }
+grep -q 'cidr: ::/0' <<<"$locked" &&
+  { echo "the rehearsal render keeps the IPv6 internet egress rule"; exit 1; }
+# The lock is only a lock if the policy exists: this file sets
+# networkPolicy.enabled false and the render must still carry it.
+for want in 'name: t-egress' 'name: t-default-deny' 'k8s-app: kube-dns' \
+            'name: t-wiring-egress'; do
+  grep -qF -- "$want" <<<"$locked" ||
+    { echo "the rehearsal render has no ${want}"; exit 1; }
+done
+echo "== rehearsal render: no internet egress, DNS and in-namespace only, policies on"
+
+# Every app pod of a rehearsal box waits, first, until its own pod's egress is
+# closed: a CNI programs a new pod's policy a moment after it starts, and an app
+# that dials out in that moment reaches the internet. One gate per app pod, run
+# before anything else, and a lock with no gate address does not render at all.
+apps=$(grep -c '^kind: StatefulSet' <<<"$locked")
+gates=$(grep -c -- '- name: rehearsal-gate' <<<"$locked")
+[ "$apps" -gt 0 ] && [ "$gates" = "$apps" ] ||
+  { echo "the rehearsal render has ${gates} rehearsal gates for ${apps} app pods"; exit 1; }
+first=$(awk '/^      initContainers:/ {want=1; next} want && /^        - name:/ {print $3; want=0}' <<<"$locked" | grep -c '^rehearsal-gate$')
+[ "$first" = "$apps" ] ||
+  { echo "the rehearsal gate is not the first init container of every app pod (${first} of ${apps})"; exit 1; }
+grep -qF -- '--address=10.96.0.10:9153' <<<"$locked" ||
+  { echo "the rehearsal gate does not dial the grant's address"; exit 1; }
+grep -q 'rehearsal-gate' <<<"$plain" &&
+  { echo "a box that is not a rehearsal renders a rehearsal gate"; exit 1; }
+if helm template t charts/s5n -n seedbox -f charts/s5n/ci/rehearsal-values.yaml \
+     --set 'networkPolicy.apiServerCIDRs[0]=10.0.0.1/32' --set rehearsalGate= >/dev/null 2>&1; then
+  echo "a rehearsal box with no gate address rendered: its apps would start before their policy"; exit 1
+fi
+echo "== rehearsal render: every app pod gated first, on the grant's address; no gate, no render"
+
 for values in charts/s5n/ci/*-values.yaml; do
   out=$(mktemp)
   helm template t charts/s5n -n seedbox -f "$values" \

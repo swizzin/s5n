@@ -6,8 +6,16 @@ const (
 	sectionBitTorrent  = "BitTorrent"
 	sectionPreferences = "Preferences"
 	sectionWebUI       = "WebUI"
+	sectionRSS         = "RSS"
 	keySavePath        = "save_path"
 	keyDownloadPath    = "download_path"
+
+	// keySessionPort is where qBittorrent 5 keeps the port it announces to
+	// peers, and keyLegacyPortRangeMin the spelling every version keeps (and
+	// 5.3.0's own default file still carries) for the same setting: the session
+	// key is the live one when a conf has both.
+	keySessionPort        = `Session\Port`
+	keyLegacyPortRangeMin = `Connection\PortRangeMin`
 )
 
 // valueKind is how a key's value holds its paths.
@@ -89,3 +97,14 @@ const (
 	categoriesKey = `Session\Categories`
 	watchedKey    = `Downloads\ScanDirsV2`
 )
+
+// rehearsalConfKeys are the two settings a rehearsal writes, in the section and
+// key QSettings gives them: a settings key "A/B/C" is section [A], key "B\C".
+// AddTorrentStopped makes everything autobrr and the Arrs push land stopped;
+// EnableProcessing is RSS's own switch, which no other key implies.
+var rehearsalConfKeys = []struct {
+	section, key, value string
+}{
+	{sectionBitTorrent, `Session\AddTorrentStopped`, "true"},
+	{sectionRSS, `AutoDownloader\EnableProcessing`, "false"},
+}

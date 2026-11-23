@@ -174,6 +174,14 @@ func pbhSpec(password string) PbhDownloaderSpec {
 	}
 }
 
+// pbhWiringSpec is the same downloader as the Job writes it: no login at all,
+// because qBittorrent skips its authentication for the release's own addresses.
+func pbhWiringSpec() PbhDownloaderSpec {
+	spec := pbhSpec("")
+	spec.Username = ""
+	return spec
+}
+
 // A first run creates the downloader with the whole config PBH's own class
 // needs, and returns the id it lives under: PUT answers 201 with a null body, so
 // the id can only come from what was sent.
@@ -334,6 +342,140 @@ func TestPbhAdoptsDownloaderByName(t *testing.T) {
 	}
 	if got := f.cfg["mine"].Str("password"); got != "hunter2" {
 		t.Fatalf("adopted downloader holds %q", got)
+	}
+}
+
+// PeerBanHelper's own config migration 32 re-keys every downloader to a UUID and
+// keeps the old key as its name (MainConfigUpdateScript.assignUniqueIdForDownloader),
+// so an id a migration adopted from a pre-UUID source is stale by the time
+// wiring runs. The downloader is still the one this box would own - it points at
+// the release's qBittorrent - so the run takes it over rather than creating a
+// second one for the same endpoint, and the id it returns is the real one.
+func TestPbhAdoptsTheReKeyedDownloader(t *testing.T) {
+	f, srv := newFakePbh(t)
+	p := NewPbh(srv.URL, "pbh-token")
+	ctx := context.Background()
+
+	const uuid = "772230f0-0000-4000-8000-000000000000"
+	migrated := pbhCreateConfig(pbhSpec("source-pass"))
+	migrated["name"] = "source-qbit"
+	f.cfg[uuid] = migrated
+	f.order = append(f.order, uuid)
+	f.status[uuid] = "HEALTHY"
+
+	res, err := p.EnsureDownloader(ctx, pbhWiringSpec(), "source-qbit")
+	if err != nil {
+		t.Fatalf("ensure: %v", err)
+	}
+	if res.Change != Updated || res.StringID != uuid || res.Recreated {
+		t.Fatalf("result = %+v, want an update of the downloader under %s", res, uuid)
+	}
+	if f.puts != 0 || f.patches != 1 {
+		t.Fatalf("adoption made %d PUTs and %d PATCHes, want 0 and 1", f.puts, f.patches)
+	}
+	if got := f.cfg[uuid].Str("endpoint"); got != "http://qbittorrent:8080" {
+		t.Fatalf("adopted downloader dials %q", got)
+	}
+
+	// The caller records what the call returned, so the next run is addressed
+	// by the id PBH really stores and has nothing left to do.
+	again, err := p.EnsureDownloader(ctx, pbhWiringSpec(), uuid)
+	if err != nil {
+		t.Fatalf("second ensure: %v", err)
+	}
+	if again.Change != Unchanged || again.StringID != uuid {
+		t.Fatalf("second ensure = %+v, want unchanged under %s", again, uuid)
+	}
+	if f.puts != 0 || f.patches != 1 {
+		t.Fatalf("after recording the new id PBH saw %d PUTs and %d PATCHes, want 0 and 1", f.puts, f.patches)
+	}
+}
+
+// The endpoint is the first thing to look for, and the name is the fallback: a
+// downloader whose endpoint nothing settled still answers to the name box's
+// downloader has, and PBH's own duplicate check would refuse the create.
+func TestPbhAdoptsTheDownloaderWithTheSpecsName(t *testing.T) {
+	f, srv := newFakePbh(t)
+	p := NewPbh(srv.URL, "pbh-token")
+	ctx := context.Background()
+
+	adopted := pbhCreateConfig(pbhSpec("old-pass"))
+	adopted["endpoint"] = "http://elsewhere:8080"
+	f.cfg["renamed"] = adopted
+	f.order = append(f.order, "renamed")
+	f.status["renamed"] = "HEALTHY"
+
+	res, err := p.EnsureDownloader(ctx, pbhWiringSpec(), "stale-id")
+	if err != nil {
+		t.Fatalf("ensure: %v", err)
+	}
+	if res.Change != Updated || res.StringID != "renamed" || res.Recreated {
+		t.Fatalf("result = %+v, want an update of the downloader named qBittorrent", res)
+	}
+	if f.puts != 0 || f.patches != 1 {
+		t.Fatalf("adoption made %d PUTs and %d PATCHes, want 0 and 1", f.puts, f.patches)
+	}
+	if got := f.cfg["renamed"].Str("endpoint"); got != "http://qbittorrent:8080" {
+		t.Fatalf("adopted downloader dials %q, want the data contract's", got)
+	}
+}
+
+// Two downloaders on the same endpoint: there is no way to tell which one the
+// box should own, and picking one would silently retire the other's history. It
+// is a refusal that names both, not a guess.
+func TestPbhRefusesTwoDownloadersAtTheSameEndpoint(t *testing.T) {
+	f, srv := newFakePbh(t)
+	p := NewPbh(srv.URL, "pbh-token")
+
+	for _, id := range []string{"first", "second"} {
+		cfg := pbhCreateConfig(pbhSpec("source-pass"))
+		cfg["name"] = id
+		f.cfg[id] = cfg
+		f.order = append(f.order, id)
+		f.status[id] = "HEALTHY"
+	}
+
+	_, err := p.EnsureDownloader(context.Background(), pbhWiringSpec(), "stale-id")
+	if err == nil {
+		t.Fatal("ensure picked one of two downloaders on the same endpoint")
+	}
+	for _, want := range []string{"first", "second"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("error = %v, want it to name %q", err, want)
+		}
+	}
+	if f.puts != 0 || f.patches != 0 {
+		t.Fatalf("the refusal wrote: %d PUTs, %d PATCHes", f.puts, f.patches)
+	}
+}
+
+// A recorded id is still authoritative: a second downloader on the same endpoint
+// does not turn the owned one into a refusal, because the record already says
+// which one is box's.
+func TestPbhOwnedIDWinsOverTheEndpoint(t *testing.T) {
+	f, srv := newFakePbh(t)
+	p := NewPbh(srv.URL, "pbh-token")
+	ctx := context.Background()
+
+	owned := pbhCreateConfig(pbhWiringSpec())
+	f.cfg["mine"] = owned
+	f.order = append(f.order, "mine")
+	f.status["mine"] = "HEALTHY"
+	other := pbhCreateConfig(pbhSpec("source-pass"))
+	other["name"] = "someone-else"
+	f.cfg["theirs"] = other
+	f.order = append(f.order, "theirs")
+	f.status["theirs"] = "HEALTHY"
+
+	res, err := p.EnsureDownloader(ctx, pbhWiringSpec(), "mine")
+	if err != nil {
+		t.Fatalf("ensure: %v", err)
+	}
+	if res.Change != Unchanged || res.StringID != "mine" {
+		t.Fatalf("result = %+v, want the owned downloader untouched", res)
+	}
+	if f.puts != 0 || f.patches != 0 {
+		t.Fatalf("ensure wrote: %d PUTs, %d PATCHes", f.puts, f.patches)
 	}
 }
 

@@ -52,6 +52,10 @@ Read `PLAN.md` first. It is the architecture; this file is how to work in the re
   (stat, statfs, mountinfo, mkdir, chown). A re-run asks with the current answers filled
   in and splices only changed keys; nothing is written until the last question; a cancel
   writes nothing and says "oh heck, nvm". `LinePrompt` is init's plain implementation.
+  A box with no apps is an answer: the picker's minimum is zero, `--apps none` is the
+  unattended empty list (`--apps ""` is still "not given" and still refused on a fresh
+  box), init says once that nothing runs yet, and `charts/s5n/ci/no-apps-values.yaml`
+  keeps a zero-app render validated.
 - `internal/say/` — box's one output seam. The flow packages emit events (a phase, a
   plan item, a step that starts and finishes, a timed wait with its budget, a confirm,
   a wiring receipt, a final card) and a reporter decides how they look. `say.Plain` is
@@ -141,7 +145,7 @@ Read `PLAN.md` first. It is the architecture; this file is how to work in the re
   connection, four attempts at 1s/2s/4s, ctx honoured. A 404 or a certificate error is
   the answer on the first try.
 - `internal/hostconf/` — root's config `box.yaml`, beside the record
-  (`/etc/swizzin/box.yaml`, 0600: `update.timer` on|off, `update.interval` 15m or more,
+  (`/etc/s5n/box.yaml`, 0600: `update.timer` on|off, `update.interval` 15m or more,
   default 1h, `update.hold-box`, `notices.url`), and the timer's two systemd units. Stdlib
   only: a hand-written strict two-level parser (an unknown key, a bad value or a repeat stops
   the command naming file, line and key), the template bootstrap writes once and never
@@ -151,6 +155,65 @@ Read `PLAN.md` first. It is the architecture; this file is how to work in the re
   --grant … --values …`, with no chart repo and no dev flags. systemctl runs only as root on
   a host with `/run/systemd/system`; `--unit-dir` (a `takeDevFlag` switch) writes the files
   and runs none; any other host gets one line naming the cron command.
+- `internal/hostroot/` — the one spelling of box's host paths: `Dir` (`/etc/s5n`),
+  `RecordPath`, `ConfigName`, `SeedboxDir`, and `LegacyDir` (`/etc/swizzin`).
+  `bootstrap.RecordPath`, `seedbox.GrantDir` and `hostconf.FileName` come from it. `Look`
+  answers what an old host means: files only at the old root refuse (the `mkdir`/`mv`,
+  checked first), both roots read the new one and name the stale copy once, and a run
+  whose `--record`/`--grant` name another directory is left alone. `cmd/box/hostfiles.go`
+  asks once per process, at the top of bootstrap, init, apply, update, status, rollback
+  and migrate apply.
+- `internal/archive/` — the one snapshot file: tar + gzip, the manifest last with a size
+  and sha256 per entry, 0600, refuses an existing path; `Create` streams a tree in
+  (`AddFile`, `AddTree`, skipped kernel links and a running app's own socket or fifo
+  reported) and `Open` verifies then extracts
+  0700/0600, refusing a missing/truncated archive, an entry the manifest does not name
+  (and vice versa), a bad size/sum, an absolute path, `..`, a link that leaves the tree,
+  a device/fifo/hardlink/socket. Its mode says what apply may do with it: `survey` (plan +
+  report + source, no `config/`), `rehearsal`, `final`. Migration snapshots and `box backup`
+  are this file; `restore`
+  is `migrate apply` of one. It is not `internal/snapshot/`, which is the per-app state
+  an image update rewrites.
+- `internal/linktree/` — the one rule for a symlink in a copied config tree: an inside
+  link is carried (an absolute one written relative), a kernel-filesystem link is
+  skipped, one that leaves the tree is refused. `internal/migrate/apply`'s staging copy
+  and `internal/archive` both call it.
+- `internal/migrate/bundle/` — the shape inside a migrate snapshot (plan.yaml, report.txt,
+  source/, config/<instance>/): `migrate-<UTC yyyymmddThhmmssZ>-<mode>.tar.gz` in
+  `/var/lib/s5n/migrate/` (0700, box-made only), never written over; `Newest` is what apply
+  picks with no file named (surveys skipped).
+- `internal/migrate/discover/` — the read half of `box migrate`. It reads every pod template
+  nothing owns above it (Deployment, StatefulSet, DaemonSet, an ownerless ReplicaSet, a bare
+  Pod) from a live cluster or from saved manifests, and each app's config and data root off
+  the host through a read-only `fs.FS`, and it writes the plan's defaults: the addresses the
+  apps reached each other by (Services in every DNS form, a Service's cluster addresses, an
+  Ingress host and path; a host serving several apps resolves by the longest path prefix),
+  the domain (the one Ingress name, or the domain several share), the blessed variant a
+  source image already is (`Options.Variants` is the chart's variants.yaml, parsed by
+  `internal/admission`, never a second list), a single node's name as `source.host`, and the
+  uid:gid every planned app agrees on as `source.owner`. `Source.Pods` and `Nodes` (with the
+  kubelet version) are what `stopped.go` and cutover's reset recipe read; there is no second
+  pod lister. It opens no app's stored config: the rewriters do that, on a staged copy.
+- `internal/migrate/rewrite/` — the contract between migrate and the per-app rewriters.
+  `Check` writes nothing and `Write` makes exactly what the `Check` before it reported.
+  `Uncovered`/`Unclassified` are gaps and block; `Left` is a decision that blocks nothing
+  (a disabled client, a client of a type box does not run, a database column that names two
+  apps), carrying the reason only; `Defaults` is a proposal for the one app a field can only
+  mean (a PeerBanHelper qBittorrent downloader is the box's qBittorrent). Only `apply.Settle`
+  turns those into plan rules.
+- `internal/migrate/apply/settle.go` — the read-only pass before an install: every rewriter's
+  `Check` over a private copy of each app's config, and a new plan in which every value the
+  checks did not settle is a rule with `default: true` and a one-line `why` naming the action.
+  A rewrite is written only where a rewriter's `Defaults` names the app; everywhere else the
+  rule is an identity, "left as it is". `Settled` is the called-out list, grouped by decision
+  (`Lines()` is the report.txt block). A hand-written rule is never edited or shadowed, and
+  the caller's plan is never modified. `discover` and `cutover` run it over the source's own
+  config directories before they write a snapshot, so the plan they write is Settle's plan;
+  every default the plan carries (discovery's pod-address rules too) is called out, a guided
+  run asks about each address (`Decide` writes the answer in; a path default is shown but
+  not asked, identity being its only answer), and an unattended run takes them all and lists
+  them as its last screen. `plan.Defaults()` is what `box migrate apply`'s confirm shows,
+  with each rewriter's `Left` lines.
 - `internal/notice/` — the one JSON body a notice posts (`text` == `content` == one
   sentence, plus event, box, seedbox, from, to, apps, gate, error, command) and the
   readiness-flip comparison. Stdlib only. `internal/update` fires `Notify` events and builds
@@ -167,11 +230,22 @@ Read `PLAN.md` first. It is the architecture; this file is how to work in the re
   test images in `hack/`, with no automerge.
 - `cmd/box/` — the host CLI. `bootstrap` decides the cluster, installs k0s when there
   is none, applies the platform layer, then runs init for root in the same process
-  with init's flags (`--record` moves the record off `/etc/swizzin/cluster.yaml` for the
+  with init's flags (`--record` moves the record off `/etc/s5n/cluster.yaml` for the
   non-root e2e); `init` asks a seedbox's questions, writes the two files and hands over
   to `apply`; `apply` loads root's grant and values, checks them against the chart's
   schema, diffs against the deployed release, confirms, installs or upgrades release
-  `s5n` in the grant's namespace, and prints the wiring receipt.
+  `s5n` in the grant's namespace, and prints the wiring receipt. `migrate` is three verbs
+  over one snapshot: `discover` writes a survey (or `--rehearsal`, with configs) and changes
+  nothing; `cutover` proves every planned app stopped (`discover/stopped.go`: no replicas and
+  no pod left, Terminating counts as running), writing a survey first when it refuses, then
+  writes the final snapshot and either continues into the install or, with
+  `--replace-cluster`, stops with the source distribution's reset and the next command;
+  `apply [<snapshot>]` runs a final snapshot, and on a host with no `/etc/s5n` record it is
+  the installer: bootstrap, the platform, then init answered from the plan (`--apps none`,
+  the data root, the owner; `setup.Options.Adopting` keeps init's empty-box line quiet) with
+  only the domain, the login, the password and the config path from flags
+  (`--box-namespace` names the target). Every verb takes `--values`; discover and cutover
+  load the chart (the blessed variants are the chart's).
 - `Dockerfile` — static binary on distroless; the image the wiring Job and the
   qBittorrent init container run.
 - `hack/grab-test.sh` — the end-to-end grab: a local mock indexer (`hack/mock-indexer.py`,
@@ -204,7 +278,9 @@ Read `PLAN.md` first. It is the architecture; this file is how to work in the re
   assert a second `--yes` run changes no Helm revision, spec or label (spec and
   labels, not resourceVersion: controllers rewrite status). `fresh` also runs init's
   no-op re-run, a one-key `box apply` edit and a `helm uninstall` that keeps the
-  claims. Platform versions come from `hack/versions`. `all` (the default) runs the
+  claims, and ends by turning every app off with `box init --apps none`: the receipt is
+  ok with no writes, no app pod is left, and `box status` still names the deployed
+  release. Platform versions come from `hack/versions`. `all` (the default) runs the
   three and prints each wall time. The chart is packaged from the same commit, pushed to a
   distribution registry container on 127.0.0.1, and pulled by box through
   `--chart-repo`/`--chart-version`; there is no local-chart flag. box under test is
@@ -588,6 +664,32 @@ one needs a live `lookup`. The e2e asserts the policy exists in the cluster.
 - An e2e wait loop checks for a running script with `ps -eo args | grep -E '^bash
   (\./)?hack/e2e'`, never `ps aux | grep '[h]ack/e2e'`: a loop whose own command line names
   `hack/e2e-box.sh` matches itself forever and blocks every other lane's check.
+- puid:pgid are settled inside init, after the data path is asked for: flag, the grant
+  on a re-run, the data path's owner when it holds files, `$SUDO_UID`/`$SUDO_GID`, the
+  invoking user. 0 is refused (asked guided, flags named unattended), a symlinked data
+  path is not read through (counts as no data, with a warning), and the web login
+  defaults to the OS account behind puid. Neither bootstrap nor init creates an OS
+  account; `TestTheHostSeamCannotCreateAnOSUser` pins the seam.
+- A stored pod address is a hint, never an answer: discover writes it with `default: true`
+  and a `why` saying the action, narrowed to the app's own ports. Every default the plan
+  carries has a reason; apply never acts on one silently.
+- A localhost address is settled by the apps' ports and never by a rule (`plan.checkHosts`
+  refuses one), so `Settle` stops and names it when the ports do not settle it.
+- An Arr stores "this provider is on" in a different column per table:
+  `DownloadClients.Enable`, an import list's `EnableAutomaticAdd`, a Prowlarr application's
+  `SyncLevel`; Notifications store none. Off with an unsettled address = left, never refused.
+- Seerr root folders move by the Arr they belong to: `override_rule` by
+  `radarrServiceId`/`sonarrServiceId` (written only when every named Arr agrees),
+  `media_request` by `type`+`serverId`.
+- A live app keeps IPC in its config dir (qBittorrent's `ipc-socket`): `AddTree` and
+  `apply.copyForCheck` leave a socket or fifo out and report it, because a rehearsal and a
+  check are taken from a running source; `copyTree`, which stages what lands in the
+  release, still refuses one.
+- A rewriter that reads a URL asks `Input.ResolveURL` and writes `Endpoint.URL()`: one name
+  can serve several apps under paths, and box's URL base replaces the path the source stored.
+- A proposal (`Report.Defaults`) names an app only when the plan has exactly one instance of
+  it (`Input.Sole`); two instances leave the address called out as left.
+- `--out` names a file; a snapshot's directory is 0700 only when box made it.
 
 ## Next work
 

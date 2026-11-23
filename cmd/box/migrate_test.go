@@ -3,21 +3,27 @@ package main
 // migrate_test.go drives `box migrate discover` over a saved manifest set and a
 // copy of the source's host directories: no cluster, no API server.
 //
-// What it pins is the plan directory: plan.yaml must be a file the plan loader
-// reads back as the same plan (apply trusts it with the data root), the source
-// manifests must be kept beside it so the plan can be rebuilt after the source
-// is gone, and a directory that already holds something must be refused rather
-// than mixed with a second plan.
+// What it pins is the snapshot: a survey holds the plan, the report and the
+// source's manifests and no config at all, --rehearsal adds one config
+// directory per planned app, the plan is one `plan.Load` reads back as the same
+// plan (apply trusts it with the data root), and the report the command prints
+// is the report inside the file, naming that file.
 
 import (
 	"context"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/swizzin/s5n/internal/archive"
+	"github.com/swizzin/s5n/internal/migrate/bundle"
 	"github.com/swizzin/s5n/internal/migrate/plan"
 	"github.com/swizzin/s5n/internal/migrate/sqlitedb"
+	"github.com/swizzin/s5n/internal/release"
+	"github.com/swizzin/s5n/internal/say"
 )
 
 // sourceManifests is a two-workload source: qBittorrent with the data root
@@ -92,6 +98,59 @@ spec:
             path: /srv/library
 `
 
+// fixedCharts is a chart source with one release behind it: no registry, and
+// the chart's own files.
+type fixedCharts struct {
+	chart release.Chart
+	err   error
+}
+
+func (f fixedCharts) Load(context.Context, release.ChartRef) (release.Chart, error) {
+	return f.chart, f.err
+}
+
+// quiet is the reporter a test that reads the returned text does not read: the
+// command still says every default out loud, and this is where it goes.
+func quiet(t *testing.T) say.Reporter {
+	t.Helper()
+	return &say.Plain{W: io.Discard}
+}
+
+// chartWithVariants is the release a read loads: the chart's own variants.yaml,
+// the catalog its apps are named in, and the values whose ports and URL bases
+// are what a settled default points at.
+func chartWithVariants(t *testing.T) release.Chart {
+	t.Helper()
+	read := func(name string) []byte {
+		raw, err := os.ReadFile(filepath.Join("..", "..", "charts", "s5n", name))
+		if err != nil {
+			t.Fatalf("read the chart's %s: %v", name, err)
+		}
+		return raw
+	}
+	return release.Chart{
+		Ref:      testChartRepo + ":" + testChartVersion,
+		Name:     "s5n",
+		Version:  testChartVersion,
+		Variants: read("variants.yaml"),
+		Catalog:  read("catalog.yaml"),
+		Values:   read("values.yaml"),
+		Schema:   read("values.schema.json"),
+	}
+}
+
+// readOf is what a read of the fixture source is handed: the chart flags every
+// command registers, and the release behind them.
+func readOf(t *testing.T) discoverOptions {
+	t.Helper()
+	repo, version := testChartRepo, testChartVersion
+	return discoverOptions{
+		Box:    testChartVersion,
+		chart:  &chartFlags{repo: &repo, version: &version},
+		Charts: fixedCharts{chart: chartWithVariants(t)},
+	}
+}
+
 // discoverySource builds the two directories the command reads: the saved
 // manifests and a root that holds the source's host paths as a copy.
 func discoverySource(t *testing.T) (manifests, root string) {
@@ -125,10 +184,21 @@ func discoverySource(t *testing.T) (manifests, root string) {
 		t.Fatal(err)
 	}
 	defer db.Close()
+	// The tables a real Sonarr's database has and its rewriter reads: a
+	// migration checks them, because a plan that could not read them would
+	// refuse at apply instead of here.
 	for _, statement := range []string{
 		`CREATE TABLE RootFolders (Id INTEGER PRIMARY KEY, Path TEXT)`,
 		`INSERT INTO RootFolders (Id, Path) VALUES (1, '/library/media/tv')`,
 		`CREATE TABLE Series (Id INTEGER PRIMARY KEY, Path TEXT)`,
+		`CREATE TABLE ImportLists (Id INTEGER PRIMARY KEY, Name TEXT, Implementation TEXT, Settings TEXT, RootFolderPath TEXT)`,
+		`CREATE TABLE RemotePathMappings (Id INTEGER PRIMARY KEY, Host TEXT, RemotePath TEXT, LocalPath TEXT)`,
+		`CREATE TABLE DownloadClients (Id INTEGER PRIMARY KEY, Name TEXT, Enable INTEGER, Implementation TEXT, Settings TEXT)`,
+		`CREATE TABLE Notifications (Id INTEGER PRIMARY KEY, Name TEXT, Implementation TEXT, Settings TEXT)`,
+		`CREATE TABLE Config (Id INTEGER PRIMARY KEY, Key TEXT, Value TEXT)`,
+		`CREATE TABLE Commands (Id INTEGER PRIMARY KEY, Name TEXT, Status INTEGER, Body TEXT)`,
+		`CREATE TABLE History (Id INTEGER PRIMARY KEY, SourceTitle TEXT, Data TEXT)`,
+		`CREATE TABLE DownloadHistory (Id INTEGER PRIMARY KEY, SourceTitle TEXT, Data TEXT)`,
 	} {
 		if _, err := db.Exec(statement); err != nil {
 			t.Fatalf("%s: %v", statement, err)
@@ -137,99 +207,151 @@ func discoverySource(t *testing.T) (manifests, root string) {
 	return manifests, root
 }
 
-func TestMigrateDiscoverWritesAPlanThatReadsBack(t *testing.T) {
+func TestMigrateDiscoverWritesASurveyThatHoldsNoConfig(t *testing.T) {
 	manifests, root := discoverySource(t)
-	out := filepath.Join(t.TempDir(), "plan")
-	text, err := migrateDiscover(context.Background(), discoverOptions{Out: out, FromDir: manifests, Root: root})
+	out := filepath.Join(t.TempDir(), "source.tar.gz")
+	o := readOf(t)
+	o.Out, o.FromDir, o.Root = out, manifests, root
+	text, err := migrateDiscover(context.Background(), o, quiet(t))
 	if err != nil {
 		t.Fatalf("discover: %v\n%s", err, text)
 	}
 
-	p, err := plan.Load(filepath.Join(out, "plan.yaml"))
+	m, err := archive.Read(out)
+	if err != nil {
+		t.Fatalf("the snapshot does not read: %v", err)
+	}
+	if m.Mode != archive.ModeSurvey {
+		t.Errorf("mode = %q, want %q: a plain discover copies no configs", m.Mode, archive.ModeSurvey)
+	}
+	if m.Kind != archive.KindMigrate {
+		t.Errorf("kind = %q, want %q", m.Kind, archive.KindMigrate)
+	}
+	info, err := os.Stat(out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0o600 {
+		t.Errorf("the snapshot is %04o, want 0600: it holds the source's API keys", info.Mode().Perm())
+	}
+
+	opened, err := bundle.Open(out, filepath.Join(t.TempDir(), "open"))
+	if err != nil {
+		t.Fatalf("the snapshot does not open: %v", err)
+	}
+	if len(opened.Configs) != 0 {
+		t.Errorf("the survey carries configs %v, and a survey carries none", opened.Configs)
+	}
+	p, err := plan.Parse(opened.Plan)
 	if err != nil {
 		t.Fatalf("the plan does not read back: %v", err)
 	}
-	if p.Data == nil {
-		t.Fatal("the plan adopts no data")
-	}
-	if p.Data.Root != "/srv/library" || p.Data.Downloads != "Downloads" || p.Data.Media != "media" {
+	if p.Data == nil || p.Data.Root != "/srv/library" || p.Data.Downloads != "Downloads" || p.Data.Media != "media" {
 		t.Errorf("data = %+v, want /srv/library with Downloads and media", p.Data)
 	}
 	for _, name := range []string{"qbittorrent", "sonarr"} {
-		app, ok := p.Apps[name]
-		if !ok {
-			t.Fatalf("the plan has no %s", name)
-		}
-		if app.Config == "" {
-			t.Errorf("%s: the plan names no config directory", name)
+		if _, ok := p.Apps[name]; !ok {
+			t.Errorf("the plan has no %s", name)
 		}
 	}
-	// The manifests the plan was built from are beside it, under the key
+	// The manifests the plan was built from are inside it, under the key
 	// discovery files them by.
-	if _, err := os.Stat(filepath.Join(out, "source", "StatefulSet", "media", "sonarr.json")); err != nil {
-		t.Errorf("the source manifest is not kept beside the plan: %v", err)
+	if _, ok := opened.Source["StatefulSet/media/sonarr"]; !ok {
+		t.Errorf("the source's manifests are not in the snapshot: %v", sourceKeys(opened.Source))
 	}
-	// The modes are the plan directory's promise: a plan names a host path.
-	for _, name := range []string{"plan.yaml", "report.txt"} {
-		info, err := os.Stat(filepath.Join(out, name))
-		if err != nil {
-			t.Fatal(err)
-		}
-		if info.Mode().Perm() != 0o600 {
-			t.Errorf("%s is %o, want 600", name, info.Mode().Perm())
-		}
-	}
-	// The report says what the plan holds, in the same text the command
-	// printed.
-	for _, want := range []string{"plan: " + filepath.Join(out, "plan.yaml"), "app: sonarr", "data: /srv/library"} {
+	// The report says where the snapshot is and what the plan holds, and the
+	// text the command printed is the text inside the file.
+	for _, want := range []string{"plan: " + out, "app: sonarr", "data: /srv/library"} {
 		if !strings.Contains(text, want) {
 			t.Errorf("the report does not say %q:\n%s", want, text)
 		}
 	}
-	saved, err := os.ReadFile(filepath.Join(out, "report.txt"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if string(saved) != text {
-		t.Error("report.txt differs from the text the command printed")
+	if string(opened.Report) != text {
+		t.Errorf("the snapshot's report differs from what the command printed:\n%s", opened.Report)
 	}
 }
 
-func TestMigrateDiscoverRefusesANonEmptyOut(t *testing.T) {
+func TestMigrateDiscoverRehearsalCarriesEveryConfig(t *testing.T) {
 	manifests, root := discoverySource(t)
-	out := t.TempDir()
-	if err := os.WriteFile(filepath.Join(out, "something.txt"), []byte("x"), 0o600); err != nil {
+	out := filepath.Join(t.TempDir(), "source.tar.gz")
+	o := readOf(t)
+	o.Out, o.FromDir, o.Root, o.Rehearsal = out, manifests, root, true
+	if _, err := migrateDiscover(context.Background(), o, quiet(t)); err != nil {
+		t.Fatalf("discover --rehearsal: %v", err)
+	}
+	opened, err := bundle.Open(out, filepath.Join(t.TempDir(), "open"))
+	if err != nil {
+		t.Fatalf("the snapshot does not open: %v", err)
+	}
+	if opened.Mode != archive.ModeRehearsal {
+		t.Fatalf("mode = %q, want %q", opened.Mode, archive.ModeRehearsal)
+	}
+	for _, name := range []string{"qbittorrent", "sonarr"} {
+		dir, ok := opened.Configs[name]
+		if !ok {
+			t.Fatalf("the rehearsal carries no config for %s: %v", name, sourceKeys(opened.Configs))
+		}
+		if _, err := os.Stat(dir); err != nil {
+			t.Errorf("%s's config is not a directory in the snapshot: %v", name, err)
+		}
+	}
+	// The Arr's whole tree travels, its database included: apply rewrites the
+	// copy, and a file it never reads has to come across too.
+	if _, err := os.Stat(filepath.Join(opened.Configs["sonarr"], "sonarr.db")); err != nil {
+		t.Errorf("the rehearsal does not carry sonarr's database: %v", err)
+	}
+}
+
+func TestMigrateDiscoverRefusesToWriteOverASnapshot(t *testing.T) {
+	manifests, root := discoverySource(t)
+	out := filepath.Join(t.TempDir(), "source.tar.gz")
+	if err := os.WriteFile(out, []byte("a snapshot that is already there"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	_, err := migrateDiscover(context.Background(), discoverOptions{Out: out, FromDir: manifests, Root: root})
-	if err == nil {
-		t.Fatal("the command wrote into a directory that already held something")
-	}
-	if !strings.Contains(err.Error(), "is not empty") {
-		t.Errorf("the refusal is %q", err)
+	o := readOf(t)
+	o.Out, o.FromDir, o.Root = out, manifests, root
+	_, err := migrateDiscover(context.Background(), o, quiet(t))
+	if err == nil || !strings.Contains(err.Error(), "there already") {
+		t.Fatalf("discover over an existing file was refused with %v", err)
 	}
 }
 
 func TestMigrateDiscoverReportsAPartialRead(t *testing.T) {
 	// No manifests at all: discovery cannot read a source, and the report says
-	// so while the command fails.
+	// so while the command fails. Nothing is written: there is no plan to put
+	// in a snapshot.
 	empty := t.TempDir()
-	out := filepath.Join(t.TempDir(), "plan")
-	text, err := migrateDiscover(context.Background(), discoverOptions{Out: out, FromDir: empty, Root: empty})
+	out := filepath.Join(t.TempDir(), "source.tar.gz")
+	o := readOf(t)
+	o.Out, o.FromDir, o.Root = out, empty, empty
+	text, err := migrateDiscover(context.Background(), o, quiet(t))
 	if err == nil {
 		t.Fatal("discovery of an empty directory planned something")
 	}
 	if !strings.Contains(text, "plan: not written") {
 		t.Errorf("the partial report does not say the plan was not written:\n%s", text)
 	}
-	if _, err := os.Stat(filepath.Join(out, "report.txt")); err != nil {
-		t.Errorf("the partial report was not kept: %v", err)
+	if _, err := os.Stat(out); !os.IsNotExist(err) {
+		t.Errorf("a failed read left a snapshot behind: %v", err)
 	}
 }
 
-func TestMigrateDiscoverNeedsADestination(t *testing.T) {
-	if _, err := migrateDiscover(context.Background(), discoverOptions{}); err == nil || !strings.Contains(err.Error(), "--out") {
-		t.Fatalf("no destination was refused with %v", err)
+// TestMigrateDiscoverDefaultsToTheSnapshotDirectory: with no --out the snapshot
+// goes where apply looks for it, under a name that says when it was taken and
+// what it is.
+func TestMigrateDiscoverDefaultsToTheSnapshotDirectory(t *testing.T) {
+	at := time.Date(2026, 11, 17, 9, 5, 3, 0, time.UTC)
+	o := discoverOptions{Now: func() time.Time { return at }}
+	if got, want := snapshotPath(o, archive.ModeSurvey), filepath.Join(bundle.Dir, "migrate-20261117T090503Z-survey.tar.gz"); got != want {
+		t.Errorf("survey path = %q, want %q", got, want)
+	}
+	if got, want := snapshotPath(o, archive.ModeFinal), filepath.Join(bundle.Dir, "migrate-20261117T090503Z-final.tar.gz"); got != want {
+		t.Errorf("final path = %q, want %q", got, want)
+	}
+	// --out wins, because a snapshot from another host is the file to pass.
+	o.Out = "/media/usb/source.tar.gz"
+	if got := snapshotPath(o, archive.ModeFinal); got != o.Out {
+		t.Errorf("--out was ignored: %q", got)
 	}
 }
 
@@ -256,8 +378,199 @@ func TestMigrateDiscoverReadsAQuotedSavePath(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(root, "srv/apps/qbittorrent/qBittorrent/qBittorrent.conf"), []byte(conf), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	out := filepath.Join(t.TempDir(), "plan")
-	if _, err := migrateDiscover(context.Background(), discoverOptions{Out: out, FromDir: manifests, Root: root}); err != nil {
+	out := filepath.Join(t.TempDir(), "source.tar.gz")
+	o := readOf(t)
+	o.Out, o.FromDir, o.Root = out, manifests, root
+	if _, err := migrateDiscover(context.Background(), o, quiet(t)); err != nil {
 		t.Fatalf("discovery refused a save path it should read: %v", err)
+	}
+}
+
+// sourceKeys is a map's keys, for a failure message.
+func sourceKeys[V any](m map[string]V) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	return out
+}
+
+// TestMigrateDiscoverMapsImagesOntoTheChartsVariants: a read is handed the
+// release's variants.yaml, so a source image the chart ships maps onto that
+// variant in the plan. Without it every app keeps the chart's default image and
+// nothing says so.
+func TestMigrateDiscoverMapsImagesOntoTheChartsVariants(t *testing.T) {
+	manifests, root := discoverySource(t)
+	out := filepath.Join(t.TempDir(), "source.tar.gz")
+	o := readOf(t)
+	o.Out, o.FromDir, o.Root = out, manifests, root
+	text, err := migrateDiscover(context.Background(), o, quiet(t))
+	if err != nil {
+		t.Fatalf("discover: %v\n%s", err, text)
+	}
+	opened, err := bundle.Open(out, filepath.Join(t.TempDir(), "open"))
+	if err != nil {
+		t.Fatalf("the snapshot does not open: %v", err)
+	}
+	p, err := plan.Parse(opened.Plan)
+	if err != nil {
+		t.Fatalf("the plan does not read back: %v", err)
+	}
+	// Both fixture images are exactly what the chart ships, so both map onto
+	// the variant they already are.
+	for _, name := range []string{"qbittorrent", "sonarr"} {
+		app := p.Apps[name]
+		if app.Image == "" {
+			t.Fatalf("the plan has no %s", name)
+		}
+		if app.Variant != "default" {
+			t.Errorf("%s's image %s mapped onto variant %q, want the one the chart ships it as", name, app.Image, app.Variant)
+		}
+	}
+	if strings.Contains(text, "no chart variants") {
+		t.Errorf("the report says the read had no variants, and it was handed the chart's:\n%s", text)
+	}
+}
+
+// TestMigrateDiscoverRefusesAChartWithNoVariants: the file is the chart's, and
+// a read that cannot map an image to a variant would plan a migration that
+// silently keeps the chart's default image for every app.
+func TestMigrateDiscoverRefusesAChartWithNoVariants(t *testing.T) {
+	manifests, root := discoverySource(t)
+	out := filepath.Join(t.TempDir(), "source.tar.gz")
+	o := readOf(t)
+	o.Out, o.FromDir, o.Root = out, manifests, root
+	chart := chartWithVariants(t)
+	chart.Variants = nil
+	o.Charts = fixedCharts{chart: chart}
+	text, err := migrateDiscover(context.Background(), o, quiet(t))
+	if err == nil || !strings.Contains(err.Error(), "variants.yaml") {
+		t.Fatalf("a chart with no variants was accepted: %v\n%s", err, text)
+	}
+	if _, err := os.Stat(out); !os.IsNotExist(err) {
+		t.Errorf("the refused read wrote a snapshot: %v", err)
+	}
+}
+
+// plexSourceTree builds the config directory a source Plex keeps: the two files
+// a migration needs, the companion a database writes while it is open, and the
+// Metadata and Cache trees of covers it rebuilds.
+func plexSourceTree(t *testing.T, root string) string {
+	t.Helper()
+	dir := filepath.Join(root, "srv", "apps", "plex")
+	server := filepath.Join(dir, "Library", "Application Support", "Plex Media Server")
+	dbs := filepath.Join(server, "Plug-in Support", "Databases")
+	for _, d := range []string{dbs, filepath.Join(dir, "Metadata", "Posters"), filepath.Join(dir, "Cache", "PhotoTranscoder")} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for name, body := range map[string]string{
+		filepath.Join(server, "Preferences.xml"):                                  "<Preferences/>\n",
+		filepath.Join(dbs, "com.plexapp.plugins.library.db"):                      "sqlite\n",
+		filepath.Join(dbs, "com.plexapp.plugins.library.db-wal"):                  "wal\n",
+		filepath.Join(dir, "Metadata", "Posters", "poster.jpg"):                   "jpeg\n",
+		filepath.Join(dir, "Cache", "PhotoTranscoder", "thumb.jpg"):               "jpeg\n",
+		filepath.Join(server, "Logs", "..", "Plug-in Support", "caches", "c.bin"): "cache\n",
+	} {
+		if err := os.MkdirAll(filepath.Dir(name), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(name, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return dir
+}
+
+// TestWriteSnapshotCarriesOnlyPlexsState: the snapshot a read writes carries
+// Plex's preferences and databases and the directories above them, and never its
+// Metadata or Cache tree, while every other app's config travels whole. The line
+// saying what was left out is what the report and the confirm read.
+func TestWriteSnapshotCarriesOnlyPlexsState(t *testing.T) {
+	root := t.TempDir()
+	plexSourceTree(t, root)
+	sonarr := filepath.Join(root, "srv", "apps", "sonarr")
+	if err := os.MkdirAll(filepath.Join(sonarr, "logs"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for name, body := range map[string]string{
+		filepath.Join(sonarr, "config.xml"):         "<Config/>\n",
+		filepath.Join(sonarr, "sonarr.db"):          "sqlite\n",
+		filepath.Join(sonarr, "logs", "sonarr.txt"): "starting\n",
+	} {
+		if err := os.WriteFile(name, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	p, err := plan.Parse([]byte(`version: 2
+apps:
+  plex:
+    kind: kubernetes
+    source: plex
+    config: /srv/apps/plex
+    paths: []
+  sonarr:
+    kind: kubernetes
+    source: sonarr
+    config: /srv/apps/sonarr
+    paths: []
+`))
+	if err != nil {
+		t.Fatalf("the fixture plan: %v", err)
+	}
+	path := filepath.Join(t.TempDir(), "final.tar.gz")
+	o := discoverOptions{Root: root, Box: testChartVersion}
+	read := migrationRead{plan: p, text: "plan: the read\n"}
+	if err := encodeRead(&read); err != nil {
+		t.Fatalf("encode the read: %v", err)
+	}
+	if _, err := writeSnapshot(path, archive.ModeFinal, o, read); err != nil {
+		t.Fatalf("write the snapshot: %v", err)
+	}
+	opened, err := bundle.Open(path, filepath.Join(t.TempDir(), "open"))
+	if err != nil {
+		t.Fatalf("the snapshot does not open: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(opened.Configs["plex"], "Library", "Application Support", "Plex Media Server", "Preferences.xml")); err != nil {
+		t.Errorf("the snapshot carries no Preferences.xml: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(opened.Configs["plex"], "Library", "Application Support", "Plex Media Server", "Plug-in Support", "Databases", "com.plexapp.plugins.library.db")); err != nil {
+		t.Errorf("the snapshot carries no library database: %v", err)
+	}
+	for _, left := range []string{"Metadata", "Cache"} {
+		if _, err := os.Stat(filepath.Join(opened.Configs["plex"], left)); !os.IsNotExist(err) {
+			t.Errorf("the snapshot carries Plex's %s tree, and Plex rebuilds it: %v", left, err)
+		}
+	}
+	// The other app's config is its state: an archive that trimmed it would be
+	// one apply could not use.
+	if _, err := os.Stat(filepath.Join(opened.Configs["sonarr"], "logs", "sonarr.txt")); err != nil {
+		t.Errorf("sonarr's whole config did not travel: %v", err)
+	}
+
+	// One line, saying what was left behind: it is the report's, and the
+	// confirm's, and it names only the app whose config is more than its state.
+	lines := skipLines(p)
+	if len(lines) != 1 || !strings.HasPrefix(lines[0], "plex: carried Preferences.xml and its databases;") {
+		t.Fatalf("the read's line about what the snapshot leaves out is %v", lines)
+	}
+	if !strings.Contains(lines[0], "artwork uploaded by hand is not carried") {
+		t.Errorf("the line does not say what the operator must bring back by hand: %q", lines[0])
+	}
+
+	// The confirm says it too, but only for a snapshot that really is trimmed:
+	// one that carried a whole tree is never described as a subset.
+	if got := carriedNotes(p, opened); len(got) != 1 || got[0].App != "plex" || got[0].Note != strings.TrimPrefix(lines[0], "plex: ") {
+		t.Errorf("the confirm's line = %v, want the read's one line with the app it belongs to", got)
+	}
+	if err := os.MkdirAll(filepath.Join(opened.Configs["plex"], "Metadata", "Posters"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(opened.Configs["plex"], "Metadata", "Posters", "poster.jpg"), []byte("jpeg\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got := carriedNotes(p, opened); len(got) != 0 {
+		t.Errorf("a snapshot holding the whole Plex tree is described as trimmed: %v", got)
 	}
 }

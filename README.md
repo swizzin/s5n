@@ -14,7 +14,7 @@ your Linux distribution of choice, applications managed by charts, meaningful ap
 isolation, ease of upgrading _all the things_ and a way back when something breaks.
 
 > [!WARNING]
-> s5n is in early PoC stages. While v0.5.0 is currently public, it's not quite ready for public consumption.
+> s5n is in early PoC stages. While v0.6.0 is currently public, it's not quite ready for public consumption.
 > Some of the day-two commands (`backup`, `uninstall`) aren't written yet, and a box has
 > one user's login for now. Try it on a VM or a spare box, not on the seedbox you depend on.
 > Expect nothing yet. No support, a shifting layout with no migration path, etc.
@@ -30,7 +30,7 @@ isolation, ease of upgrading _all the things_ and a way back when something brea
 - **Opt-in extras.** qui, autobrr, PeerBanHelper and Maintainerr, off until you ask for them.
 - **HD and 4K.** Sonarr and Radarr can each run a second instance for 4K.
 - **swizzin's own qBittorrent.** The project's builds on libtorrent 1.2 or 2.1, a 10G build of each, and one for AMD Zen 3, one line in your values away.
-- **One login in front of everything.** Sign in once at the gateway, with single sign-on for the apps that speak OIDC.
+- **One login in front of everything.** Sign in once at the gateway for qBittorrent, the Arrs, Prowlarr, Tautulli, autobrr and qui, with Tautulli's and PeerBanHelper's own logins switched off behind it, and a sign-in that lasts a week (an idle hour still ends it).
 - **HTTPS by default.** Let's Encrypt when your name is public, one self-signed root to trust when it isn't.
 - **Locked down by default.** Restricted pods, default-deny networking and digest-pinned images. From outside, only the gateway and the torrent port answer.
 - **The swizzin layout.** Every app at `https://box.example.com/<app>`, the way swizzin always laid them out.
@@ -38,7 +38,8 @@ isolation, ease of upgrading _all the things_ and a way back when something brea
 - **Updates that arrive on their own.** box checks for a new release every hour, moves your seedbox to it and tells you what changed.
 - **A way back.** An app that won't start after an update is put back the way it was, and `box rollback <app>` does the same when something breaks later.
 - **Notices where you already are.** Updates, rollbacks and apps that stop being healthy go to one URL you give box -- Slack, Discord, anything that takes JSON.
-- **Adopt what you already run.** `box migrate` puts a Kubernetes install box didn't make onto a box seedbox, leaving the data where it is so every hardlink survives.
+- **Your install, moved over.** `box migrate` takes a seedbox you already run on Kubernetes and puts it on box in one guided run, keeping its settings, connections, torrents and Plex's state, and asking one question before anything is installed.
+- **Try the move first.** A rehearsal applies a copy of the source's settings to a throwaway box with no internet and every torrent stopped, so you can watch the migration work before you commit to it.
 - **Zero obligation to use box:** The charts are freely available and can be used directly with helm in a completely standalone environment.
 
 ## Requirements
@@ -49,6 +50,7 @@ isolation, ease of upgrading _all the things_ and a way back when something brea
 - Cloud provider support (EKS, GKE, etc) not in scope
 - No bare IP support
   - Every user requires a DNS name, and a record for each app served at its own name (Seerr, Plex's web app, PeerBanHelper); a wildcard covers them all
+- Hosts running firewalld (the Fedora family) work out of the box: when box installs the cluster, it lets the cluster's own networks through the firewall. On a cluster you already run, it prints the commands instead of guessing at its networks.
 - Runs wherever `k0s`, `k3s` or `kubeadm` runs
 
 ### Hardware
@@ -80,15 +82,19 @@ sudo box bootstrap
    apps you want, the login's password (leave it empty and box makes one) and where box
    should post notices, then installs them.
 
-0.5.0 doesn't upgrade a 0.4.0 box: install it again.
+0.6.0 doesn't upgrade a 0.5.0 box: install it again.
 
 Then open `https://<your domain>/sonarr` and sign in with the account box asked for (the
 one you ran `sudo` as, by default). The gateway answers only on that name, not the bare
 IP. Open ports 80, 443 and the torrent port box prints at the end. A name that isn't
 public gets a self-signed certificate, and your browser will say so.
 
+Your seedbox gets a namespace of its own, `s5n-<login>` by default, which is what will let a
+second person on the same server have one beside yours.
+
 For an unattended install, every question is a flag or a key in the values file. `--apps`
-is required: a comma separated list of catalog names.
+is required: a comma separated list of catalog names, or `none` for a box with nothing on
+it yet.
 `--set-transient secrets.plexClaimToken=claim-...` carries the Plex claim token, which
 lives in no file. Without `--password-file`, box generates the login's password and
 prints it once:
@@ -106,7 +112,7 @@ anything.
 
 box keeps two files per seedbox:
 
-- **the grant,** `/etc/swizzin/seedboxes/root.yaml`. Root owns it. It holds what a
+- **the grant,** `/etc/s5n/seedboxes/root.yaml`. Root owns it. It holds what a
   seedbox is allowed: its namespace, uid and gid, host paths, ports, domain, the login's
   name, and which apps are switched on.
 - **your values,** `~/.config/box/values.yaml`. Everything else about the apps and how
@@ -129,7 +135,7 @@ of swizzin's own — `lt1.2` and `lt2.1` for libtorrent 1.2 or 2.1, `lt1.2-10g` 
 and writes nothing.
 
 On a host with systemd, bootstrap leaves a timer behind; anywhere else it prints the cron
-line that does the same job. Root's `/etc/swizzin/box.yaml` says whether it runs
+line that does the same job. Root's `/etc/s5n/box.yaml` says whether it runs
 (`update.timer: off` stops it), how often it checks (`update.interval`, an hour by
 default), and where notices go.
 
@@ -152,25 +158,72 @@ sentence. `box init` asks for the address; leave it empty and there are no notic
 
 ## Coming from another install
 
-`box migrate` takes a Kubernetes install box didn't make and puts its apps on a box
-seedbox: their settings are copied and rewritten for box's paths and ports, their data is
-adopted where it is so every hardlink survives, and the connections between them are
-pointed at the box.
+`box migrate` takes a seedbox you already run on Kubernetes -- your own manifests or another
+chart -- and puts its apps on a box, in one guided run. Their
+settings and connections are rewritten to the box's, their data stays where it is so every
+hardlink survives, and the library moves into box's layout with every app following it.
+Downloads are never moved.
 
-It is two runs. `box migrate discover --out plan/` reads the source cluster (or the
-manifests you saved from it) and writes the plan without changing anything; read the
-plan, and edit a rule if a path or a host needs one. `box migrate apply plan/` does what
-the plan says, after showing you the changes.
+**Read the source.** `sudo box migrate discover` reads the cluster, or the manifests you
+saved from it (`--from-dir`), and writes one snapshot: every app it found, the paths and
+addresses they use, and what it would change. Where it can only guess -- an address that
+was a pod's, a library directory two apps saw differently -- it proposes a value, says why,
+and asks. Nothing is stopped, and nothing outside the snapshot is written.
 
-qBittorrent, the Arrs, Plex, Seerr, Tautulli, qui, autobrr, PeerBanHelper and Maintainerr
-are all covered. Anything else the source runs is left alone and listed in the report.
+**Stop it, then cut over.** box prints the command to stop the source on the platform it
+found, and never stops it itself. When the apps are down, `sudo box migrate cutover` takes
+the final snapshot; it refuses while anything it plans to move still runs, so a cutover that
+starts has nothing left to overwrite. On the source's own cluster it then installs, with the
+source's apps left stopped. `--replace-cluster` is the other road: the run stops after the
+snapshot with the command that wipes the source's cluster, and `sudo box migrate apply`
+finishes on the clean host.
+
+**Install.** On a host with no box, `box migrate apply` is the installer: it asks only for
+the domain, the login, the password and where config should live -- or takes all four as
+flags -- and everything else comes from the snapshot. On a host that already has a box, it
+adopts the snapshot into it. With no file named it takes the newest snapshot in
+`/var/lib/s5n/migrate/`; a snapshot from another host is the file you carry over and pass.
+
+Everything a migration does is shown once, in one question, before anything changes: the
+platform a bare host gets, then a row per app with what it carries and what changes, the
+directories it renames, and what needs you. Answer no and the host is left exactly as it
+was -- no cluster, no platform, no files. The snapshot holds the whole report either way,
+and `--details` prints every change column by column.
+
+**Try it first.** `box migrate discover --rehearsal` adds a copy of the source's settings to
+the snapshot, and applying it on a throwaway host of its own gives a locked box: it reaches
+no internet, every torrent starts stopped, and no data is renamed. It is how you watch the
+migration work before the real one; a rehearsal box is disposable, and the real run starts
+from a final snapshot on a clean host.
+
+What a migration keeps:
+
+- **Every app's settings and connections.** API keys stay as they are, and the apps find each
+  other at the box's addresses -- an Arr's download clients, Prowlarr's applications, Seerr's
+  servers -- with the clients the source already had taken over rather than duplicated.
+- **Plex's own state.** Its preferences, libraries and watch history come across; its
+  metadata, artwork and thumbnails are rebuilt from the media. Artwork uploaded by hand is
+  not carried.
+- **Your torrents, where they are.** qBittorrent's torrents and the categories they are in
+  are kept, and downloads are not moved, so seeding carries on from the same files and every
+  import is still a hardlink.
+- **Your library, in box's layout.** The source's library directories become box's own
+  (`Movies` becomes `media/movies`, `4K/TV` becomes `tv-4k`), renamed in place so hardlinks
+  survive, with the Arrs' root folders, Plex's libraries and Seerr's root folders following
+  them.
+- **Your apps' own accounts.** autobrr's and qui's single account becomes box's own, so you
+  sign in through the box's login rather than the password you had.
+
+qBittorrent, Sonarr, Radarr, Prowlarr, Plex, Seerr, Tautulli, autobrr, qui, PeerBanHelper and
+Maintainerr are all covered. Anything else the source runs is left alone and listed in the
+report.
 
 ## Using the chart without box
 
 The chart works on any conformant Kubernetes 1.30 or newer with plain Helm:
 
 ```sh
-helm install s5n oci://ghcr.io/swizzin/charts/s5n --version 0.5.0 -f values.yaml
+helm install s5n oci://ghcr.io/swizzin/charts/s5n --version 0.6.0 -f values.yaml
 ```
 
 Bring two claims (`storage.data.existingClaim` and `storage.config.existingClaim`), a
@@ -193,8 +246,9 @@ ones like `4K/Movies`, are accepted as they are.
 ## What's next
 
 Roughly in order: `box doctor`, the slow probes behind `status`, `install` and `remove`
-per app, backup and restore, more users on one server (`adduser`), and `box migrate` from
-a Docker or a bare-metal swizzin install, not only a Kubernetes one.
+per app, backup and restore (on the same snapshot a migration writes), more users on one
+server (`adduser`), `box migrate` from a Docker or a bare-metal swizzin install, and
+`box uninstall`.
 `PLAN.md` holds the plan. `docs/box.md` describes how box behaves, with each part
 marked decided or proposed.
 
@@ -202,15 +256,18 @@ marked decided or proposed.
 
 ```sh
 hack/e2e-kind.sh   # the chart: build, install everything on kind, assert, tear down
-hack/e2e-box.sh    # the same stack through box: fresh, preinstalled, foreign-gateway, update, migrate
+hack/e2e-box.sh    # the same stack through box: fresh, preinstalled, foreign-gateway,
+                   # update, migrate, migrate-keep
 hack/grab-test.sh  # against a kept cluster: a real grab, imported as a hardlink
 ```
 
-CI runs both e2e scripts on every pull request and every push to `develop` and `main`.
+CI runs both e2e scripts on every pull request and every push to `main`; a push to
+`develop` runs them too unless everything it changed is documentation.
 The e2e runs the wiring twice and fails if the second run changes anything. The `update`
 scenario moves a box to a later release and watches a crashlooping app get put back;
-`migrate` takes an install box didn't make onto a box, rewriting every path and
-connection. `grab-test.sh` sends a synthetic torrent from a local mock indexer through
+`migrate` takes an install box didn't make onto a box after the source's cluster is thrown
+away, and `migrate-keep` installs onto the source's own cluster with its apps left stopped.
+`grab-test.sh` sends a synthetic torrent from a local mock indexer through
 Prowlarr, Sonarr and qBittorrent, and checks that it lands in the library as a hardlink.
 It needs TVDB, so it stays out of CI; run it after `hack/e2e-kind.sh --keep`. The e2e
 scripts keep their kubeconfig in `${XDG_CACHE_HOME:-~/.cache}/s5n-e2e/kubeconfig`

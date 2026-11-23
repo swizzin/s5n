@@ -105,7 +105,8 @@ HELM="helm --kube-context ${CTX}"
 # the local image by tag instead of pulling the published one.
 IMAGE=ghcr.io/swizzin/s5n:e2e
 WORK=$(mktemp -d)
-trap 'rm -rf "$WORK"' EXIT
+# The last line of every log is the run's own answer, whatever the cleanup says.
+trap 'code=$?; rm -rf "$WORK"; printf "E2E EXIT: %s\n" "$code"' EXIT
 
 log() { printf '\n==> %s\n' "$*"; }
 fail=0
@@ -1273,6 +1274,48 @@ for app in qui autobrr maintainerr; do
   esac
 done
 
+# Tautulli is the app whose prefix is its own setting rather than the route's:
+# the init container seals http_root to /tautulli on every start, because the
+# app builds absolute redirects and asset URLs from it. So its index is a
+# redirect that has to stay inside the prefix (its logout is the one that used
+# to leave it, for the login's own /auth), and the page it lands on has to
+# reference its assets under the same prefix. Nothing here has a login: this
+# install is the chart alone, and the app's own form is sealed off.
+: >"$WORK/tautulli-headers"
+code=$(gw_get -s -D "$WORK/tautulli-headers" -o /dev/null -w '%{http_code}' "https://${DOMAIN}/tautulli/" || true)
+loc=$(grep -i '^location:' "$WORK/tautulli-headers" | tr -d '\r' | sed 's/^[Ll]ocation: *//' || true)
+echo "GET /tautulli/ via gateway -> ${code} ${loc}"
+case "$code" in
+  301 | 302 | 303 | 307 | 308) : ;;
+  *) echo "/tautulli/ answered ${code}, want the app's own redirect"; fail=1 ;;
+esac
+# The redirect is absolute and in the scheme the pod is reached by (http), so
+# the path is what is checked, and the page is asked for over the box's TLS.
+case "$loc" in
+  *"://"*/*) tpath="/${loc#*://*/}" ;;
+  *"://"*) tpath="/" ;;
+  *) tpath=$loc ;;
+esac
+case "$tpath" in
+  /tautulli/*) : ;;
+  *) echo "/tautulli/ redirected to ${loc}, which is outside its prefix: the app's URL root does not know it"; fail=1 ;;
+esac
+if [ -n "$tpath" ]; then
+  code=$(gw_get -s -o "$WORK/tautulli.html" -w '%{http_code}' "https://${DOMAIN}${tpath}" || true)
+  echo "GET ${tpath} via gateway -> ${code}"
+  [ "$code" = 200 ] || { echo "${tpath} did not serve the app's page: ${code}"; fail=1; }
+  grep -qi '<!doctype html' "$WORK/tautulli.html" || { echo "${tpath} answered ${code} without an HTML document"; fail=1; }
+fi
+tasset=$(grep -oE '(src|href)="[^"]+\.(js|css)([?#][^"]*)?"' "$WORK/tautulli.html" | head -1 |
+  sed 's/^[a-z]*="//; s/"$//' || true)
+echo "  asset the page references: ${tasset}"
+case "$tasset" in
+  /tautulli/*) code=$(gw_get -s -o /dev/null -w '%{http_code}' "https://${DOMAIN}${tasset}" || true)
+               echo "GET ${tasset} via gateway -> ${code}"; [ "$code" = 200 ] || fail=1 ;;
+  "") echo "the app's page referenced no script or stylesheet"; fail=1 ;;
+  *) echo "the asset ${tasset} is outside /tautulli/: the URL root did not reach the page"; fail=1 ;;
+esac
+
 # Maintainerr streams live task progress as Server-Sent Events. Envoy's route
 # timeout defaults to 15s and would cut that stream, leaving the log and task
 # views silently dead, so the chart gives that one path no request timeout.
@@ -1547,13 +1590,14 @@ snapshot() { # snapshot <dir>
   rm -f "$dir/qbittorrent-jar.txt"
   port_forward_stop
   # Tautulli's settings, using the seeded api_key: also the proof that the
-  # tautulli-config init container's seed is one Tautulli actually accepts. The
-  # PMS section is legitimately empty here: this e2e supplies no Plex token, so
-  # the link stays pending rather than being pointed at Plex tokenless.
+  # tautulli-config init container's seed is one Tautulli actually accepts, at
+  # the prefix the same container seals into its http_root. The PMS section is
+  # legitimately empty here: this e2e supplies no Plex token, so the link stays
+  # pending rather than being pointed at Plex tokenless.
   local tpw
   tpw=$($K -n "$NS" get secret s5n-keys -o jsonpath='{.data.tautulli-apikey}' | base64 -d)
   $K -n "$NS" exec tautulli-0 -- curl -s \
-    "http://localhost:8181/api/v2?apikey=${tpw}&cmd=get_settings" >"$dir/tautulli-settings.json"
+    "http://localhost:8181/tautulli/api/v2?apikey=${tpw}&cmd=get_settings" >"$dir/tautulli-settings.json"
   # The two apps with their own user table: what the Job registered is an
   # instance and a set of download clients, so a duplicate row or a rewritten
   # client shows up in the diff like any Arr's download client would.

@@ -85,16 +85,16 @@ func TestQbitLoginAndCategories(t *testing.T) {
 		t.Fatalf("WaitReady: %v", err)
 	}
 
-	if got, err := q.EnsureCategory(ctx, "tv", "/data/downloads/tv"); err != nil || got != Created {
+	if got, err := q.EnsureCategory(ctx, "tv", "/data/downloads/tv", "/data/downloads"); err != nil || got != Created {
 		t.Fatalf("create = %v, %v", got, err)
 	}
-	if got, err := q.EnsureCategory(ctx, "tv", "/data/downloads/tv"); err != nil || got != Unchanged {
+	if got, err := q.EnsureCategory(ctx, "tv", "/data/downloads/tv", "/data/downloads"); err != nil || got != Unchanged {
 		t.Fatalf("second = %v, %v", got, err)
 	}
 	if f.writes != 1 {
 		t.Fatalf("second run wrote: %d writes", f.writes)
 	}
-	if got, err := q.EnsureCategory(ctx, "tv", "/mnt/elsewhere"); err != nil || got != Updated {
+	if got, err := q.EnsureCategory(ctx, "tv", "/mnt/elsewhere", "/data/downloads"); err != nil || got != Updated {
 		t.Fatalf("repair = %v, %v", got, err)
 	}
 	if f.cats["tv"] != "/mnt/elsewhere" {
@@ -336,16 +336,16 @@ func TestQbitSubcategory(t *testing.T) {
 	}
 
 	name, path := "4K/Movies", "/data/downloads/4K/Movies"
-	if got, err := q.EnsureCategory(ctx, name, path); err != nil || got != Created {
+	if got, err := q.EnsureCategory(ctx, name, path, "/data/downloads"); err != nil || got != Created {
 		t.Fatalf("create = %v, %v", got, err)
 	}
 	if f.cats[name] != path {
 		t.Fatalf("category %q = %q, want %q", name, f.cats[name], path)
 	}
-	if got, err := q.EnsureCategory(ctx, name, path+"/"); err != nil || got != Unchanged {
+	if got, err := q.EnsureCategory(ctx, name, path+"/", "/data/downloads"); err != nil || got != Unchanged {
 		t.Fatalf("second = %v, %v (a trailing slash is the same path)", got, err)
 	}
-	if got, err := q.EnsureCategory(ctx, name, "/data/downloads/elsewhere"); err != nil || got != Updated {
+	if got, err := q.EnsureCategory(ctx, name, "/data/downloads/elsewhere", "/data/downloads"); err != nil || got != Updated {
 		t.Fatalf("repair = %v, %v", got, err)
 	}
 	if f.writes != 2 {

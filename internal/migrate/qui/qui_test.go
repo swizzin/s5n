@@ -163,19 +163,22 @@ INSERT INTO instance_backup_items (id, run_id, archive_rel_path) VALUES (1, 1, '
 `
 
 const planYAML = `
-version: 1
+version: 2
 apps:
   qbittorrent:
+    kind: kubernetes
     source: qbittorrent
     config: /srv/apps/qbittorrent
     ports: [8081]
     paths: []
   sonarr:
+    kind: kubernetes
     source: sonarr
     config: /srv/apps/sonarr
     ports: [8989]
     paths: []
   qui:
+    kind: kubernetes
     source: qui
     config: /srv/apps/qui
     paths:
@@ -223,7 +226,51 @@ func setup(t *testing.T) rewrite.Input {
 	if err != nil {
 		t.Fatalf("plan: %v", err)
 	}
-	return rewrite.Input{App: "qui", Dir: dir, Plan: p, Targets: targets()}
+	return rewrite.Input{App: "qui", Dir: dir, Plan: p, Targets: targets(), Runs: runs()}
+}
+
+// runs is every instance the fixture plan has of each catalog app: one of each,
+// which is what a proposal needs.
+func runs() map[string][]string {
+	return map[string][]string{
+		"qbittorrent": {"qbittorrent"}, "sonarr": {"sonarr"}, "qui": {"qui"},
+	}
+}
+
+// TestUnsettledInstanceProposesTheBoxsQBittorrent: qui's instance column is a
+// qBittorrent, so an address nothing settles there can only be the box's, when
+// the box runs exactly one. Two instances and nothing is proposed.
+func TestUnsettledInstanceProposesTheBoxsQBittorrent(t *testing.T) {
+	ctx := context.Background()
+	in := setup(t)
+	exec(t, in.Dir, `INSERT INTO string_pool (value) VALUES ('http://192.0.2.10:8081');
+		UPDATE instances SET host_id = (SELECT id FROM string_pool WHERE value = 'http://192.0.2.10:8081') WHERE id = 1;`)
+	rep, err := rewriter{}.Check(ctx, in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := rewrite.Default{
+		Host: "192.0.2.10", Port: 8081, App: "qbittorrent",
+		Why: "it is a qBittorrent instance, and this box runs one qBittorrent",
+	}
+	if len(rep.Defaults) != 1 || rep.Defaults[0] != want {
+		t.Fatalf("Defaults = %+v, want %+v", rep.Defaults, want)
+	}
+
+	in = setup(t)
+	in.Runs["qbittorrent"] = []string{"qbittorrent", "qbittorrent-4k"}
+	exec(t, in.Dir, `INSERT INTO string_pool (value) VALUES ('http://192.0.2.10:8081');
+		UPDATE instances SET host_id = (SELECT id FROM string_pool WHERE value = 'http://192.0.2.10:8081') WHERE id = 1;`)
+	rep, err = rewriter{}.Check(ctx, in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rep.Defaults) != 0 {
+		t.Errorf("Defaults = %+v, want none with two qBittorrents in the plan", rep.Defaults)
+	}
+	if len(rep.Unclassified) != 1 {
+		t.Errorf("Unclassified = %v, want the address still reported and left", rep.Unclassified)
+	}
 }
 
 func TestRewritesPathsAndConnections(t *testing.T) {
@@ -408,6 +455,38 @@ func TestCheckWritesNothing(t *testing.T) {
 	}
 	if after := treeHash(t, in.Dir); after != before {
 		t.Errorf("Check changed the config: %s -> %s", before, after)
+	}
+}
+
+// TestInstanceURLResolvesByItsPath: an instance's host column is a whole URL, so
+// its path says which app it is on a host that serves several, and the box's own
+// address replaces the URL the source stored -- its path included.
+func TestInstanceURLResolvesByItsPath(t *testing.T) {
+	ctx := context.Background()
+	in := setup(t)
+	in.Plan, _ = plan.Parse([]byte(planYAML + `  - host: panel.example.com
+    path: /qbittorrent
+    app: qbittorrent
+  - host: panel.example.com
+    path: /qui
+    app: qui
+`))
+	// The instance's own path under the app's: coverage is what settles it, and
+	// the rest of the stored path is the source's shape.
+	exec(t, in.Dir, `INSERT INTO string_pool (value) VALUES ('https://panel.example.com/qbittorrent/torrents');
+		UPDATE instances SET host_id = (SELECT id FROM string_pool WHERE value = 'https://panel.example.com/qbittorrent/torrents') WHERE id = 1;`)
+	rep, err := rewriter{}.Check(ctx, in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rep.Blocked() {
+		t.Fatalf("an instance URL with a path on a host of paths is not settled: %v %v", rep.Uncovered, rep.Unclassified)
+	}
+	if _, err := (rewriter{}).Write(ctx, in); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	if got := query(t, in.Dir)["instances.host"]; got != "http://qbittorrent:8080" {
+		t.Errorf("the instance's host = %q, want the box's qBittorrent with the source's path dropped", got)
 	}
 }
 

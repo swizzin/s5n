@@ -155,6 +155,33 @@ func TestTautulliWaitReadyFailsOnBadKey(t *testing.T) {
 	}
 }
 
+// The chart serves Tautulli under /tautulli and seals its own http_root to that
+// prefix, so the URL the Job is given carries it (charts/s5n/templates/
+// wiring.yaml) and every request has to land under it: the app's API is at
+// /tautulli/api/v2, and the root of the port answers with a redirect instead.
+func TestTautulliAsksUnderThePrefixItIsServedAt(t *testing.T) {
+	var paths []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		paths = append(paths, r.URL.Path)
+		if r.URL.Path != "/tautulli/api/v2" {
+			http.NotFound(w, r)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"response": map[string]any{"result": "success", "message": "Ok"},
+		})
+	}))
+	defer srv.Close()
+
+	tt := NewTautulli(srv.URL+"/tautulli", "test-key")
+	if err := tt.Ping(context.Background()); err != nil {
+		t.Fatalf("Ping: %v", err)
+	}
+	if len(paths) != 1 || paths[0] != "/tautulli/api/v2" {
+		t.Fatalf("the client asked %v, want one request to /tautulli/api/v2", paths)
+	}
+}
+
 func TestEnsurePlexConnectionCreatesThenIsIdempotent(t *testing.T) {
 	f, srv := newFakeTautulli(t)
 	tt := NewTautulli(srv.URL, "test-key")

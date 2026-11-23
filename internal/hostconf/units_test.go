@@ -12,8 +12,8 @@ import (
 // watches, so its command line, its timeout and the timer's wake schedule are
 // the whole behaviour of the feature.
 func TestUnitFiles(t *testing.T) {
-	service, timer := UnitFiles("/usr/local/bin/box", "/etc/swizzin/cluster.yaml",
-		"/etc/swizzin/seedboxes/root.yaml", "/root/.config/box/values.yaml")
+	service, timer := UnitFiles("/usr/local/bin/box", "/etc/s5n/cluster.yaml",
+		"/etc/s5n/seedboxes/root.yaml", "/root/.config/box/values.yaml")
 	wantService := `[Unit]
 Description=s5n: check for a newer release
 Wants=network-online.target
@@ -23,7 +23,7 @@ After=network-online.target
 Type=oneshot
 # An update can wait out an app's thirty-minute startup budget.
 TimeoutStartSec=0
-ExecStart=/usr/local/bin/box update --timer --record /etc/swizzin/cluster.yaml --grant /etc/swizzin/seedboxes/root.yaml --values /root/.config/box/values.yaml 
+ExecStart=/usr/local/bin/box update --timer --record /etc/s5n/cluster.yaml --grant /etc/s5n/seedboxes/root.yaml --values /root/.config/box/values.yaml 
 `
 	if string(service) != wantService {
 		t.Fatalf("service unit:\n--- got ---\n%s\n--- want ---\n%s", service, wantService)
@@ -47,7 +47,7 @@ WantedBy=timers.target
 // TestUnitFilesQuoteAPathWithSpaces: ExecStart is split on whitespace, so a box
 // in a directory with a space in its name would be started as two commands.
 func TestUnitFilesQuoteAPathWithSpaces(t *testing.T) {
-	service, _ := UnitFiles("/opt/my box/box", "/etc/swizzin/cluster.yaml", "/etc/swizzin/root.yaml", "/root/values.yaml")
+	service, _ := UnitFiles("/opt/my box/box", "/etc/s5n/cluster.yaml", "/etc/s5n/root.yaml", "/root/values.yaml")
 	if !strings.Contains(string(service), `ExecStart="/opt/my box/box" update --timer `) {
 		t.Fatalf("the path with a space was not quoted:\n%s", service)
 	}
@@ -78,7 +78,7 @@ func (f *fakeUnits) Enable(context.Context) error {
 // timer, and a re-run whose bytes are the same does neither.
 func TestInstallWritesThenEnables(t *testing.T) {
 	f := &fakeUnits{}
-	changed, err := Install(context.Background(), f, "/usr/local/bin/box", "/etc/swizzin/cluster.yaml", "/etc/swizzin/root.yaml", "/root/values.yaml")
+	changed, err := Install(context.Background(), f, "/usr/local/bin/box", "/etc/s5n/cluster.yaml", "/etc/s5n/root.yaml", "/root/values.yaml")
 	if err != nil {
 		t.Fatalf("Install: %v", err)
 	}
@@ -94,7 +94,7 @@ func TestInstallWritesThenEnables(t *testing.T) {
 
 	// The same bytes again: nothing written, so nothing to reload.
 	f.same = true
-	changed, err = Install(context.Background(), f, "/usr/local/bin/box", "/etc/swizzin/cluster.yaml", "/etc/swizzin/root.yaml", "/root/values.yaml")
+	changed, err = Install(context.Background(), f, "/usr/local/bin/box", "/etc/s5n/cluster.yaml", "/etc/s5n/root.yaml", "/root/values.yaml")
 	if err != nil {
 		t.Fatalf("second Install: %v", err)
 	}
@@ -121,7 +121,7 @@ func TestInstallReportsAFailedEnable(t *testing.T) {
 func TestDirUnitsWriteModeAndSkipUnchanged(t *testing.T) {
 	dir := t.TempDir()
 	u := DirUnits{Dir: dir}
-	service, timer := UnitFiles("/usr/local/bin/box", "/etc/swizzin/cluster.yaml", "/etc/swizzin/root.yaml", "/root/values.yaml")
+	service, timer := UnitFiles("/usr/local/bin/box", "/etc/s5n/cluster.yaml", "/etc/s5n/root.yaml", "/root/values.yaml")
 
 	changed, err := u.Install(service, timer)
 	if err != nil {

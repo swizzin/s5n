@@ -39,8 +39,9 @@ jobs:
   #
   # The last job of a push to main, after every test job: the decision is
   # whether the net change since the last s5n-v* tag is only a patch or digest
-  # bump of charts/s5n/variants.yaml or charts/s5n/platform.yaml, and it lives
-  # in hack/release so it is tested rather than written in YAML. If it says
+  # bump of charts/s5n/variants.yaml or charts/s5n/platform.yaml (Renovate's
+  # own config aside: nothing ships it), and it lives in hack/release so it is
+  # tested rather than written in YAML. If it says
   # release, this job tags the pushed commit and the job after it publishes.
   #
   # There is no off switch in the repo. To stop releases, disable this workflow

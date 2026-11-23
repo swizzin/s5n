@@ -2,8 +2,8 @@ apiVersion: v2
 name: s5n
 description: swizzin on Kubernetes — a wired, hardlink-safe seedbox stack in one release
 type: application
-version: 0.5.0
-appVersion: "0.5.0"
+version: 0.6.0
+appVersion: "0.6.0"
 # Distribution-agnostic: vanilla, k0s, k3s, managed. Only a floor, never a ceiling.
 # 1.30 is where ValidatingAdmissionPolicy is GA; the platform layer binds one to
 # every user namespace to enforce the grant.
@@ -19,12 +19,13 @@ keywords: [seedbox, swizzin, sonarr, radarr, prowlarr, qbittorrent]
 # upgraded from, and `box update` steps through the releases between when it is
 # older.
 #
-# 0.5.0 raises both. The catalog now says which files an image upgrade can
-# rewrite (`snapshot:`, what a rollback puts back) and whether an app signs its
-# own users in (`login:`), and a box from 0.4.0 reads the catalog strictly: it
-# refuses the file over those keys, so it keeps to the 0.4.0 chart. And no 0.4.0
-# install upgrades in place: none exists to move, and the move was never run, so
-# a 0.4.0 seedbox is reinstalled.
+# 0.6.0 raises both. box renders the login itself (install/platform/authelia),
+# and this chart counts on 0.6.0's: one that checks only the session cookie, so a
+# token an app's page sends (PeerBanHelper's) no longer locks a signed-in person
+# out, and Tautulli now sits behind it (`login: portal`) with its own login off.
+# A 0.5.0 box would render the older login in front of this chart, so it keeps
+# to the 0.5.0 chart. And no 0.5.0 install is upgraded in place: no e2e upgrades
+# a real 0.5.0 box and chart, so a 0.5.0 seedbox is reinstalled.
 annotations:
-  box.s5n/min-box: "0.5.0"
-  box.s5n/upgrade-from: "0.5.0"
+  box.s5n/min-box: "0.6.0"
+  box.s5n/upgrade-from: "0.6.0"

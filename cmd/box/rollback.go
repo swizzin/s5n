@@ -97,6 +97,10 @@ func runRollback(ctx context.Context, args []string) {
 
 	out := newOutput(terminalSet(*o.plain), *o.yes, startupTheme(*o.valuesPath))
 	defer out.Close()
+	if err := hostFiles(out, bootstrap.RecordPath, *o.grantPath); err != nil {
+		out.Error(err)
+		os.Exit(1)
+	}
 
 	// The cluster decision belongs to `box bootstrap`; a rollback reuses it the
 	// same way apply does and never probes a cluster of its own.

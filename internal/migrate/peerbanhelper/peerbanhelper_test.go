@@ -59,14 +59,16 @@ client:
     password: synthetic
 `
 
-const planYAML = `version: 1
+const planYAML = `version: 2
 apps:
   pbh:
+    kind: kubernetes
     source: pbh
     config: /srv/apps/pbh
     ports: [8088]
     paths: []
   qbittorrent:
+    kind: kubernetes
     source: qbittorrent
     config: /srv/apps/qbittorrent
     ports: [8080]
@@ -93,7 +95,15 @@ func setup(t *testing.T) rewrite.Input {
 	if err != nil {
 		t.Fatalf("plan: %v", err)
 	}
-	return rewrite.Input{App: "pbh", Dir: dir, Plan: p, Targets: targets()}
+	return rewrite.Input{App: "pbh", Dir: dir, Plan: p, Targets: targets(), Runs: runs()}
+}
+
+// runs is every instance the fixture plan has of each catalog app: one of each,
+// which is what a proposal needs.
+func runs() map[string][]string {
+	return map[string][]string{
+		"qbittorrent": {"qbittorrent"}, "sonarr": {"sonarr"}, "radarr": {"radarr"},
+	}
 }
 
 // TestRegistered keeps apply from meeting an app with no rewriter: every app
@@ -272,6 +282,124 @@ func TestMissingConfigIsNoted(t *testing.T) {
 	}
 	if len(rep.Notes) != 1 || !strings.Contains(rep.Notes[0], configRel) {
 		t.Errorf("Notes = %v, want the missing file named", rep.Notes)
+	}
+}
+
+// TestStoredURLResolvesByItsPath: one host serves several apps, so a downloader
+// endpoint on such a host is the app whose path covers it. The box's own
+// address replaces the whole URL, the source's path included.
+func TestStoredURLResolvesByItsPath(t *testing.T) {
+	ctx := context.Background()
+	in := setup(t)
+	in.Plan = mustPlan(t, strings.Replace(planYAML, "apps:", `hosts:
+  - host: panel.example.com
+    path: /qbittorrent
+    app: qbittorrent
+  - host: panel.example.com
+    path: /pbh
+    app: pbh
+apps:`, 1))
+	raw, err := os.ReadFile(filepath.Join(in.Dir, filepath.FromSlash(configRel)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The same downloader, on the name that serves both apps, with a path of
+	// its own under the app's: the path says which app, and the trailing
+	// directory is the source's shape, not the box's.
+	raw = []byte(strings.Replace(string(raw), "endpoint: http://localhost:8080",
+		"endpoint: https://panel.example.com/qbittorrent/admin", 1))
+	raw = []byte(strings.Replace(string(raw), "endpoint: http://192.0.2.10:8081",
+		"endpoint: https://panel.example.com/qbittorrent/nas", 1))
+	if err := os.WriteFile(filepath.Join(in.Dir, filepath.FromSlash(configRel)), raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	rep, err := rewriter{}.Check(ctx, in)
+	if err != nil {
+		t.Fatalf("Check: %v", err)
+	}
+	if len(rep.Unclassified) != 0 {
+		t.Fatalf("an address with a path on a host of paths is not settled: %v", rep.Unclassified)
+	}
+	if len(rep.Defaults) != 0 {
+		t.Errorf("Defaults = %+v, want none: the path settled them outright", rep.Defaults)
+	}
+	got, err := rewriter{}.Write(ctx, in)
+	if err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	if len(got.Changes) == 0 {
+		t.Fatal("nothing was rewritten")
+	}
+	written, err := os.ReadFile(filepath.Join(in.Dir, filepath.FromSlash(configRel)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(written), "endpoint: http://qbittorrent:8080\n") {
+		t.Errorf("the downloader does not point at the box's qBittorrent:\n%s", written)
+	}
+}
+
+// mustPlan parses a plan a test wrote, and fails the test rather than returning.
+func mustPlan(t *testing.T, doc string) *plan.Plan {
+	t.Helper()
+	p, err := plan.Parse([]byte(doc))
+	if err != nil {
+		t.Fatalf("plan: %v", err)
+	}
+	return p
+}
+
+// TestUnsettledQbittorrentDownloaderProposesTheBoxsClient: the downloader's own
+// type says which app its address can only mean. Box runs one qBittorrent, so a
+// qBittorrent downloader nothing settles is proposed as that app, for Settle to
+// write as a default; the rewriter still reports the address and writes nothing.
+// A downloader of another type is not proposed.
+func TestUnsettledQbittorrentDownloaderProposesTheBoxsClient(t *testing.T) {
+	ctx := context.Background()
+	in := setup(t)
+	rep, err := rewriter{}.Check(ctx, in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := rewrite.Default{
+		Host: "192.0.2.10", Port: 8081, App: "qbittorrent",
+		Why: "it is a qBittorrent downloader, and this box runs one qBittorrent",
+	}
+	if len(rep.Defaults) != 1 || rep.Defaults[0] != want {
+		t.Fatalf("Defaults = %+v, want %+v", rep.Defaults, want)
+	}
+
+	// A downloader of a type box does not run says nothing about the box.
+	in = setup(t)
+	raw, err := os.ReadFile(filepath.Join(in.Dir, filepath.FromSlash(configRel)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw = []byte(strings.Replace(string(raw), "    type: qbittorrent\n    name: NAS", "    type: transmission\n    name: NAS", 1))
+	if err := os.WriteFile(filepath.Join(in.Dir, filepath.FromSlash(configRel)), raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	rep, err = rewriter{}.Check(ctx, in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rep.Defaults) != 0 {
+		t.Errorf("Defaults = %+v, want none for a downloader box does not run", rep.Defaults)
+	}
+
+	// Two qBittorrents are two answers, and an address nothing settles cannot
+	// mean one of them: nothing is proposed, and the address stays called out.
+	in = setup(t)
+	in.Runs["qbittorrent"] = []string{"qbittorrent", "qbittorrent-4k"}
+	rep, err = rewriter{}.Check(ctx, in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rep.Defaults) != 0 {
+		t.Errorf("Defaults = %+v, want none with two qBittorrents in the plan", rep.Defaults)
+	}
+	if len(rep.Unclassified) != 1 {
+		t.Errorf("Unclassified = %v, want the address still reported and left", rep.Unclassified)
 	}
 }
 

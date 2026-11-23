@@ -25,20 +25,69 @@ import (
 	"path"
 	"sort"
 	"strings"
+	"time"
 
+	"github.com/swizzin/s5n/internal/admission"
 	"github.com/swizzin/s5n/internal/migrate/plan"
 )
 
-// Workload is one Deployment or StatefulSet, flattened to what discovery reads:
-// the pod template's labels, which a Service selects by, its containers, and the
-// volumes their mounts name.
+// The workload kinds discovery reads, by the name the object carries. A kind is
+// on Workload because everything after the read is kind-neutral -- an app is an
+// app wherever it ran -- and what the kind decides is which pods are the
+// workload's own.
+const (
+	kindDeployment  = "Deployment"
+	kindStatefulSet = "StatefulSet"
+	kindDaemonSet   = "DaemonSet"
+	kindReplicaSet  = "ReplicaSet"
+	kindPod         = "Pod"
+)
+
+// Workload is one pod template the source runs and nothing above it owns, or a
+// bare Pod, flattened to what discovery reads: the pod template's labels, which
+// a Service selects by, its containers, and the volumes their mounts name.
+//
+// The kind is on it because discovery reads every one: a Deployment, a
+// StatefulSet, a DaemonSet, a ReplicaSet nothing owns, and a Pod nothing owns.
+// Everything after the read is kind-neutral -- an app is an app wherever it ran.
 type Workload struct {
-	Namespace  string
-	Name       string
-	Kind       string // "Deployment" or "StatefulSet"
-	Labels     map[string]string
+	Namespace string
+	Name      string
+	// Kind is the object's Kubernetes kind: kindDeployment, kindStatefulSet,
+	// kindDaemonSet, kindReplicaSet or kindPod.
+	Kind   string
+	Labels map[string]string
+	// Selector is what this workload's pods carry, which is how a pod the
+	// source still holds is known to be one of its replicas. For a bare Pod it
+	// is the pod's own labels, because that pod is itself.
+	Selector map[string]string
+	// Replicas is how many replicas the workload asks for, -1 for a kind with
+	// no count of its own: a DaemonSet runs one pod per node, and a bare Pod is
+	// the pod. With the pods the source still holds (Owns), it is what says a
+	// workload is stopped.
+	Replicas int
+	// RunAsUser and RunAsGroup are the pod's securityContext as the source
+	// wrote it, -1 when it pins neither. RunAsGroup is the pod's runAsGroup, or
+	// its fsGroup when that is unset: the group a container is given is the one
+	// it writes files as.
+	RunAsUser  int
+	RunAsGroup int
 	Containers []Container
 	Volumes    map[string]Volume
+}
+
+// Owns reports whether one of the source's pods is a replica of this workload:
+// a pod carrying its selector in its namespace, or, for a bare Pod, that pod
+// itself. A pod that is terminating is still a pod -- the kubelet has it until
+// it is gone -- so a caller proving a workload stopped counts it.
+func (wl Workload) Owns(p Pod) bool {
+	if p.Namespace != wl.Namespace {
+		return false
+	}
+	if wl.Kind == kindPod {
+		return p.Name == wl.Name
+	}
+	return selects(wl.Selector, p.Labels)
 }
 
 // Container is one container of a workload's pod template.
@@ -51,6 +100,10 @@ type Container struct {
 	// a Service's targetPort resolves through.
 	PortNames map[string]int
 	Mounts    []Mount
+	// RunAsUser and RunAsGroup are the container's own securityContext, -1 when
+	// it pins neither: a pod-level setting is Workload's.
+	RunAsUser  int
+	RunAsGroup int
 }
 
 // Mount is one of a container's volumeMounts: the volume it reads and where that
@@ -86,7 +139,8 @@ func (v Volume) String() string {
 }
 
 // Service is one Service of the source cluster, flattened to what a host rule
-// needs: where it is, what it selects and the ports it answers on.
+// needs: where it is, what it selects, the ports it answers on and the addresses
+// it answers at.
 type Service struct {
 	Namespace string
 	Name      string
@@ -95,11 +149,18 @@ type Service struct {
 	// necessarily an address of that app -- a metrics sidecar, the torrent
 	// port -- so a rule is made only for the ports that reach the app.
 	Ports []ServicePort
+	// ClusterIPs are the addresses the Service answers at, its cluster IP and
+	// any others the cluster gave it. An app that stored one of these stored an
+	// address of this Service, which is why it resolves outright.
+	ClusterIPs []string
 }
 
 // ServicePort is one port of a Service: the port it answers on, which is what a
 // stored address carries, and the container port it forwards to.
 type ServicePort struct {
+	// Name is what the Service calls this port, which is how an Ingress rule's
+	// backend names it. Empty for an unnamed port.
+	Name string
 	// Port is the Service's port: the number another app stored in an address.
 	Port int
 	// TargetPort is the container port it forwards to, and TargetName is the
@@ -130,6 +191,60 @@ func (p ServicePort) String() string {
 	return fmt.Sprintf("%d->%d", p.Port, p.TargetPort)
 }
 
+// Ingress is one Ingress of the source, flattened to what a host rule needs: the
+// public names and paths it serves, and the Service behind each.
+type Ingress struct {
+	Namespace string
+	Name      string
+	Rules     []IngressRule
+}
+
+// IngressRule is one public address of the source: a host and path an Ingress
+// serves, and the Service it hands that path to. An app that stored the address
+// reached that Service's app, whatever port it named, because an Ingress is
+// reached the way a browser reaches it.
+type IngressRule struct {
+	Host string
+	// Path is the path the rule matches, as the Ingress writes it: "/" for the
+	// whole host, "/qbittorrent" for a prefix.
+	Path string
+	// Service is the name of the backend Service, in the Ingress's namespace.
+	Service string
+	// Port is the backend port's number, and PortName is the name the Service's
+	// own port is declared under, when the Ingress names it that way instead.
+	// Exactly one is set, as a ServicePort's target is.
+	Port     int
+	PortName string
+}
+
+// Pod is one pod the source still holds, flattened to the three questions
+// discovery asks it: which addresses it answered on -- an address an app stored
+// may be one of them -- whether it is on its way out, and, with
+// Workload.Owns, whether a workload is stopped.
+type Pod struct {
+	Namespace string
+	Name      string
+	Labels    map[string]string
+	// IPs are the addresses the pod held, empty for a pod that never ran.
+	IPs []string
+	// Terminating is a pod with a deletion timestamp. It has not exited yet,
+	// so a stop proof counts it as running: the process is still writing.
+	Terminating bool
+}
+
+// Node is one node of the source cluster, as far as discovery reads it: its
+// name, which is the host a single-node source ran on, and the kubelet version,
+// which is how a cluster says what installed it (`v1.30.4+k0s.0`,
+// `v1.30.4+k3s1`). The version is what makes `box migrate cutover
+// --replace-cluster` able to print a teardown for the cluster that is actually
+// there instead of one for a distribution it guessed.
+type Node struct {
+	Name string
+	// KubeletVersion is status.nodeInfo.kubeletVersion as the node reports it,
+	// build metadata and all. Empty for a node a saved manifest left it out of.
+	KubeletVersion string
+}
+
 // Source is what discovery reads. There are two: Cluster, over a live install
 // read-only through client-go, and Directory, over manifests saved to disk so a
 // plan can be rebuilt after the source is gone and a test needs no API server.
@@ -140,6 +255,17 @@ func (p ServicePort) String() string {
 type Source interface {
 	Workloads(ctx context.Context) ([]Workload, error)
 	Services(ctx context.Context) ([]Service, error)
+	// Ingresses are the source's public addresses, which is how a stored
+	// address that named a public host resolves to the app behind it.
+	Ingresses(ctx context.Context) ([]Ingress, error)
+	// Pods are the pods the source still has, for the two things a workload's
+	// template cannot say: the addresses the app answered on, and whether any
+	// pod of a workload is left.
+	Pods(ctx context.Context) ([]Pod, error)
+	// Nodes are the source cluster's nodes. Its error is not fatal: a
+	// kubeconfig scoped to a namespace may not read a cluster-scoped object,
+	// and the host a single-node source ran on only decorates the plan.
+	Nodes(ctx context.Context) ([]Node, error)
 	Raw(ctx context.Context) (map[string][]byte, error)
 }
 
@@ -149,6 +275,17 @@ type Options struct {
 	// every namespace. A workload outside them is neither migrated nor
 	// reported: the operator said it is not part of this migration.
 	Namespaces []string
+	// Variants is the chart's variants.yaml: the blessed image list a source
+	// image is mapped to a variant through (charts/s5n/variants.yaml, read the
+	// way internal/admission reads it). Nil when the caller has no chart to
+	// hand over, which maps nothing and says so.
+	Variants []byte
+	// Categories is the directory box's values lay each instance's library out
+	// in, by box's instance name (charts/s5n/values.yaml, an instance's
+	// `category`). It is what the source's library directories are renamed
+	// onto and what every app that stored one is rewritten to. Nil when the
+	// caller has no chart: nothing is renamed then, and the report says so.
+	Categories map[string]string
 	// ConfigFS is the host's filesystem rooted at its /, read-only. Discovery
 	// opens each app's config directory and the Arrs' databases through it and
 	// writes nothing anywhere. It is required: the mounts name host
@@ -158,6 +295,9 @@ type Options struct {
 	// the system's temporary directory. The source's own file is never opened,
 	// because a read of a running Arr's database can leave a -shm beside it.
 	TempDir string
+	// Now is the clock the plan's `source.taken` comes from. Empty means
+	// time.Now: a test that compares whole plans hands it one.
+	Now func() time.Time
 }
 
 // Report is everything the operator should see that the plan does not hold.
@@ -200,10 +340,28 @@ type Ignored struct {
 type discovery struct {
 	opt Options
 	rep Report
-	// svcs is the source's Services, kept for the one fallback that needs them:
-	// an app whose config names no port takes the ports a Service that selects
-	// only it forwards to.
+	// svcs is the source's Services, kept for the fallback that needs them (an
+	// app whose config names no port takes the ports a Service that selects
+	// only it forwards to) and for the rules a Service's own addresses earn.
 	svcs []Service
+	// ings are the source's Ingress rules, which turn a public address into an
+	// app and give the plan its domain default.
+	ings []Ingress
+	// pods are the pods the source still holds: their addresses are hints, and
+	// a workload's pods are what says it is stopped.
+	pods []Pod
+	// nodes are the source cluster's nodes, and nodeErr why there are none:
+	// the host the source ran on is a single node's name, and the distribution
+	// that installed it is the marker in its kubelet's version.
+	nodes   []Node
+	nodeErr error
+	// served are the Ingress hosts that reach a planned app, which the plan's
+	// domain default is read from.
+	served []string
+	// variants is the chart's blessed image list, and variantsRead says the
+	// question has been answered once (nil when there is no chart to read).
+	variants     map[string]map[string]admission.Image
+	variantsRead bool
 
 	instances []*instance
 }
@@ -234,6 +392,24 @@ func Discover(ctx context.Context, src Source, opt Options) (*plan.Plan, Report,
 		return nil, d.rep, fmt.Errorf("read the source's services: %w", err)
 	}
 	d.svcs = svcs
+	ings, err := src.Ingresses(ctx)
+	if err != nil {
+		return nil, d.rep, fmt.Errorf("read the source's ingress rules: %w", err)
+	}
+	d.ings = ings
+	pods, err := src.Pods(ctx)
+	if err != nil {
+		return nil, d.rep, fmt.Errorf("read the source's pods: %w", err)
+	}
+	d.pods = pods
+	// The node list is the one read discovery can do without: a kubeconfig
+	// scoped to a namespace may not read a cluster-scoped object, and the host
+	// only decorates the plan, so its failure is a line in the report.
+	if nodes, err := src.Nodes(ctx); err != nil {
+		d.nodeErr = err
+	} else {
+		d.nodes = nodes
+	}
 	if err := d.classify(wls); err != nil {
 		return nil, d.rep, err
 	}
@@ -249,7 +425,7 @@ func Discover(ctx context.Context, src Source, opt Options) (*plan.Plan, Report,
 	if err != nil {
 		return nil, d.rep, err
 	}
-	p := d.plan(data, svcs)
+	p := d.plan(data)
 	raw, err := src.Raw(ctx)
 	if err != nil {
 		return nil, d.rep, fmt.Errorf("read the source's manifests: %w", err)
@@ -261,6 +437,14 @@ func Discover(ctx context.Context, src Source, opt Options) (*plan.Plan, Report,
 // note records something the operator should know that stops nothing.
 func (d *discovery) note(format string, args ...any) {
 	d.rep.Notes = append(d.rep.Notes, fmt.Sprintf(format, args...))
+}
+
+// now is when the plan says the source was read.
+func (d *discovery) now() time.Time {
+	if d.opt.Now != nil {
+		return d.opt.Now()
+	}
+	return time.Now()
 }
 
 // inScope says whether a workload is part of this migration: an operator who
@@ -298,6 +482,10 @@ type instance struct {
 	configDir   string
 	// ports are the ports the app listened on in the source.
 	ports []int
+	// downloadCategory is the qBittorrent category this app's own download
+	// client uses, read from its database: the directory its torrents are in,
+	// which a migrated box keeps.
+	downloadCategory string
 }
 
 // classify decides which workloads are catalog apps, and what box will call

@@ -14,10 +14,12 @@ package apply
 
 import (
 	"fmt"
+	"sort"
 	"strconv"
 	"strings"
 
 	"github.com/swizzin/s5n/internal/admission"
+	"github.com/swizzin/s5n/internal/migrate/plan"
 	"github.com/swizzin/s5n/internal/migrate/rewrite"
 )
 
@@ -77,6 +79,33 @@ func Suffix(instance, app string) string {
 	return strings.TrimPrefix(instance, app+"-")
 }
 
+// CatalogRuns is every instance the plan has of each catalog app, by catalog
+// app name. It is what a rewriter answers Sole from (internal/migrate/rewrite,
+// Input.Sole): a proposal points an address at an app only when the box runs
+// exactly one instance of it.
+func CatalogRuns(p *plan.Plan, catalog []string) map[string][]string {
+	out := make(map[string][]string, len(p.Apps))
+	for _, name := range sortedPlanApps(p) {
+		app := CatalogApp(name, catalog)
+		if app == "" {
+			continue
+		}
+		out[app] = append(out[app], name)
+	}
+	return out
+}
+
+// sortedPlanApps is a plan's instance names, sorted, so CatalogRuns reads the
+// same way twice.
+func sortedPlanApps(p *plan.Plan) []string {
+	out := make([]string, 0, len(p.Apps))
+	for name := range p.Apps {
+		out = append(out, name)
+	}
+	sort.Strings(out)
+	return out
+}
+
 // Instances is every instance the values switch on, sorted, named the way the
 // chart names it: the app itself, or `<app>-<suffix>` for an entry under an
 // app that takes instances.
@@ -120,6 +149,33 @@ func joinInstance(app, suffix string) string {
 	return app + "-" + suffix
 }
 
+// Categories is every instance's library directory, by box's instance name:
+// the `category` the values give it. It is every entry of an app that takes
+// instances, on or off, because a migration switches its own instances on after
+// the read: the plan has to name the directory the release will lay out, and
+// that is the one its values already say.
+func Categories(values map[string]any) map[string]string {
+	apps, _ := values["apps"].(map[string]any)
+	out := map[string]string{}
+	for app, raw := range apps {
+		entry, _ := raw.(map[string]any)
+		list, takesInstances := entry["instances"].([]any)
+		if !takesInstances {
+			continue
+		}
+		for _, raw := range list {
+			inst, _ := raw.(map[string]any)
+			suffix, _ := inst["suffix"].(string)
+			category, _ := inst["category"].(string)
+			if category == "" {
+				continue
+			}
+			out[joinInstance(app, suffix)] = category
+		}
+	}
+	return out
+}
+
 // EnabledIn reports whether the values switch one instance on. Every instance
 // of an app has to exist as an entry *and* be enabled: an app that is on with
 // its 4K entry off runs one Sonarr, not two.
@@ -135,24 +191,26 @@ func EnabledIn(values map[string]any, instance string) bool {
 // urlBase is the URL base the chart gives one app's pod, per instance:
 //
 //	/<instance>   the Arrs (workloads.yaml:248, <PREFIX>__SERVER__URLBASE), qui
-//	              (:287, QUI__BASE_URL) and Maintainerr (:391, BASE_PATH)
+//	              (:287, QUI__BASE_URL), Maintainerr (:391, BASE_PATH) and
+//	              Tautulli, whose own http_root the init container seals to this
+//	              prefix (:123, --http-root)
 //	/<instance>/  autobrr (:330), whose router mounts at base URL *plus* the
 //	              rest of the path, so the trailing slash is what puts its API
 //	              at /autobrr/api
-//	none          qBittorrent, Plex, Tautulli and Seerr, whose route strips the
-//	              prefix instead (values.yaml, rewritePath), and PeerBanHelper,
-//	              which is served at a host of its own with no base path
+//	none          qBittorrent, Plex and Seerr, whose route strips the prefix
+//	              instead (values.yaml, rewritePath), and PeerBanHelper, which
+//	              is served at a host of its own with no base path
 //
 // ok is false for an app this box knows nothing about: guessing "" would hand a
 // rewriter an address that answers at the wrong path, so Targets refuses
 // instead.
 func urlBase(app, instance string) (string, bool) {
 	switch app {
-	case appSonarr, appRadarr, appProwlarr, appQui, appMaintainerr:
+	case appSonarr, appRadarr, appProwlarr, appQui, appMaintainerr, appTautulli:
 		return "/" + instance, true
 	case appAutobrr:
 		return "/" + instance + "/", true
-	case appQBittorrent, appPlex, appTautulli, appSeerr, appPBH:
+	case appQBittorrent, appPlex, appSeerr, appPBH:
 		return "", true
 	}
 	return "", false
@@ -253,4 +311,46 @@ func sortStrings(s []string) {
 			s[j], s[j-1] = s[j-1], s[j]
 		}
 	}
+}
+
+// WiringImage resolves the s5n image a release runs its own Job and probe pods
+// with, the way the chart's template does: the blessed variant names the
+// repository, the chart's appVersion is the tag the variant does not carry, and
+// a pinned tag or digest in the values narrows it inside that repository.
+//
+// It exists because the rehearsal's probe pods run the image the release
+// already pulls: a probe is a pod in a seedbox namespace, so it has to be an
+// image the blessed-image policy admits, and the s5n image is the one this box
+// knows the release carries.
+func WiringImage(variants []byte, appVersion string, values map[string]any) (string, error) {
+	images, err := admission.Images(variants)
+	if err != nil {
+		return "", err
+	}
+	wiring, _ := values["wiring"].(map[string]any)
+	pinned, _ := wiring["image"].(map[string]any)
+	variant, _ := pinned["variant"].(string)
+	if variant == "" {
+		variant = "default"
+	}
+	v, ok := images["s5n"][variant]
+	if !ok {
+		return "", fmt.Errorf("s5n: the chart has no %q variant for it", variant)
+	}
+	tag, digest := v.Tag, v.Digest
+	if tag == "" {
+		tag = appVersion
+	}
+	if digestPin, _ := pinned["digest"].(string); digestPin != "" {
+		digest = digestPin
+	} else if tagPin, _ := pinned["tag"].(string); tagPin != "" {
+		tag, digest = tagPin, ""
+	}
+	if v.Repository == "" || tag == "" {
+		return "", fmt.Errorf("s5n: variant %q names no image this box can run", variant)
+	}
+	if digest != "" {
+		return v.Repository + ":" + tag + "@" + digest, nil
+	}
+	return v.Repository + ":" + tag, nil
 }

@@ -14,7 +14,7 @@ import (
 func TestSaveStateRoundTrips(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "nested", "dir")
 	want := &State{
-		Plan:    PlanDigest([]byte("version: 1\napps: {}\n")),
+		Plan:    PlanDigest([]byte("version: 2\napps: {}\n")),
 		Renamed: []string{"Downloads"},
 		Moved:   []string{"sonarr"},
 		Owned:   true,
@@ -58,14 +58,14 @@ func TestLoadStateRefusesAHalfWrittenRecord(t *testing.T) {
 // TestPlanIDIsTheFirstTwelveHex pins the directory name the design names, so a
 // plan's staging directory is predictable from the file.
 func TestPlanIDIsTheFirstTwelveHex(t *testing.T) {
-	id := PlanID([]byte("version: 1\napps: {}\n"))
+	id := PlanID([]byte("version: 2\napps: {}\n"))
 	if len(id) != 12 {
 		t.Errorf("plan id %q is %d characters, want 12", id, len(id))
 	}
-	if id != PlanDigest([]byte("version: 1\napps: {}\n"))[:12] {
+	if id != PlanDigest([]byte("version: 2\napps: {}\n"))[:12] {
 		t.Error("the id is not the digest's first twelve characters")
 	}
-	if id == PlanID([]byte("version: 1\napps: {}\n\n")) {
+	if id == PlanID([]byte("version: 2\napps: {}\n\n")) {
 		t.Error("two plans with different bytes share an id")
 	}
 }

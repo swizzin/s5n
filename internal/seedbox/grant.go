@@ -119,6 +119,15 @@ var GrantKeys = []Rule{
 	{Path: "gateway.parentRef.sectionName", Why: "the listener root opened for this box"},
 
 	{Path: "networkPolicy.enabled", Why: "the default-deny that keeps one box off another"},
+	// rehearsal is box's own record of what kind of box this is, never a chart
+	// value a file sets: box writes it into the grant when it applies a
+	// rehearsal snapshot and reads it back on every later apply and update, so
+	// the lock is sticky. BoxOnly rather than grant-and-visible because a
+	// rehearsal is disposable and the lock is not a setting the operator tunes;
+	// a box with it set refuses a final snapshot instead.
+	{Path: "rehearsal", BoxOnly: true, Why: "a rehearsal box has no internet egress; box sets this when it applies a rehearsal snapshot, and nothing unlocks it"},
+	{Path: "rehearsalGate", BoxOnly: true, Why: "the address a rehearsal box's apps wait on until the lock closes it; box writes it with rehearsal"},
+
 	// gatewayFrom is box's because it is read from the cluster: the namespace
 	// the chosen Gateway implementation's proxy actually runs in. A user who
 	// could set it could widen their apps to whatever namespace they named,

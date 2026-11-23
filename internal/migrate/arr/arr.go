@@ -144,6 +144,7 @@ type analysis struct {
 	changes  map[changeKey]int
 	uncover  []plan.Uncovered
 	unclass  []rewrite.Address
+	left     []rewrite.Left
 	notes    []string
 	owned    []rewrite.Owned
 	edits    []edit
@@ -177,6 +178,7 @@ func (a *analysis) report() rewrite.Report {
 		App:          a.app,
 		Uncovered:    a.uncover,
 		Unclassified: a.unclass,
+		Left:         a.left,
 		Notes:        a.notes,
 		Owned:        a.owned,
 	}

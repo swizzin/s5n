@@ -24,6 +24,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/swizzin/s5n/internal/bootstrap"
@@ -106,6 +107,10 @@ const (
 	StepGatewayAddress StepKind = "gateway-address"
 	// StepReachable is the Gateway's address answering HTTP from this host.
 	StepReachable StepKind = "gateway-reachable"
+	// StepFirewall is the host's packet filter, when box installed k0s on this
+	// host and firewalld is running: the cluster's pod and service networks go
+	// into firewalld's trusted zone before anything is installed behind it.
+	StepFirewall StepKind = "host-firewall"
 )
 
 // WaitKind is what readiness means for one object.
@@ -161,8 +166,14 @@ func (r Release) String() string {
 type Step struct {
 	Component bootstrap.PlatformComponent
 	Kind      StepKind
-	What      string
-	Release   Release
+	// What names the step for the progress and done lines, where exact object
+	// names belong ("applied IPAddressPool s5n-pool ...").
+	What string
+	// Plan is what the printed plan calls the step when What names objects:
+	// the plan says what box does, and the names stay in the lines a person
+	// reads while it happens. Empty means What.
+	Plan    string
+	Release Release
 	// Documents is the objects of a StepManifests step, already parsed and
 	// (for the Gateway) pointed at the chosen GatewayClass. Parsing at plan
 	// time keeps the apply path free of YAML.
@@ -184,11 +195,21 @@ type Step struct {
 	// install (it carries no ownership label). It is never upgraded; a
 	// conditional step that would have to run stops instead.
 	Foreign bool
+	// CIDRs are the networks a StepFirewall trusts: the cluster's pod and
+	// service networks, read by bootstrap from the k0s config it installed
+	// with.
+	CIDRs []string
 }
 
 // Plan is what bootstrap will apply, in order.
 type Plan struct {
 	Steps []Step
+	// Warnings are what box saw and will not change, printed with the plan
+	// before the confirm so the operator reads them together with what box
+	// does do. Today: a host running firewalld, on a cluster box did not
+	// install, with the two commands that would open its pod and service
+	// networks.
+	Warnings []string
 	// NotHandled names decided installs this version of box does not do, with
 	// the reason. It is printed, never silently dropped.
 	NotHandled []string
@@ -231,6 +252,14 @@ type Releases interface {
 	Install(ctx context.Context, spec Release) error
 }
 
+// Firewall is the host's packet filter, as the one step that changes it needs:
+// the cluster's networks go into firewalld's trusted zone, permanently and in
+// the running configuration (bootstrap.Firewalld). Reading the host's filter is
+// bootstrap's; this package only carries out the step bootstrap planned.
+type Firewall interface {
+	Trust(ctx context.Context, cidrs []string) error
+}
+
 // Confirmer asks the one question before the first write.
 type Confirmer interface {
 	Ask(question string) (bool, error)
@@ -260,12 +289,24 @@ type Decision struct {
 	// cannot be built without them, and they come from the release rather
 	// than from this package, so a platform patch is a chart release.
 	Pins release.Versions
+	// Firewall is what bootstrap found about the host's packet filter
+	// (bootstrap.FirewallState): whether firewalld is running, the networks
+	// box will trust, or the warning for a host box does not change.
+	Firewall bootstrap.FirewallState
+	// HostFirewall is how a StepFirewall is carried out. It is only reached on
+	// a host where box installed k0s; a plan with no such step never uses it.
+	HostFirewall Firewall
 	// ACMEServer points the s5n-letsencrypt issuer at another ACME directory.
 	// Empty in every real run: the manifest's Let's Encrypt production URL is
 	// the only one box ships. It exists for the e2e's Pebble server, which
 	// cannot be reached at the production URL and whose own certificate is
 	// self-signed.
 	ACMEServer string
+	// CallerConfirms says the flow that runs this plan shows it and asks the
+	// one question itself, so this package does neither: a migration puts the
+	// platform plan first in its single confirm, and asking here as well is
+	// the second form that run exists to remove.
+	CallerConfirms bool
 
 	// AddressTimeout is how long the Gateway gets to say it has no address
 	// before MetalLB is installed. Zero means AddressTimeout (15s).
@@ -308,7 +349,7 @@ func (d *Decision) Apply(ctx context.Context, components []bootstrap.ComponentRe
 	if err != nil {
 		return res, err
 	}
-	res.Plan = plan
+	plan = withFirewall(plan, d.Firewall)
 	res.NotHandled = plan.NotHandled
 
 	if err := d.resolve(ctx, &plan); err != nil {
@@ -316,7 +357,9 @@ func (d *Decision) Apply(ctx context.Context, components []bootstrap.ComponentRe
 	}
 	res.Plan = plan
 	r := d.report()
-	d.printPlan(r, plan)
+	if !d.CallerConfirms {
+		d.printPlan(r, plan)
+	}
 
 	if len(plan.Steps) == 0 {
 		return res, nil
@@ -334,13 +377,15 @@ func (d *Decision) Apply(ctx context.Context, components []bootstrap.ComponentRe
 		return res, err
 	}
 
-	ok, err := d.Confirm.Ask("install the platform layer?")
-	if err != nil {
-		return res, err
-	}
-	if !ok {
-		r.Line("oh heck, nvm")
-		return res, ErrCancelled
+	if !d.CallerConfirms {
+		ok, err := d.Confirm.Ask("install the platform layer?")
+		if err != nil {
+			return res, err
+		}
+		if !ok {
+			r.Line("oh heck, nvm")
+			return res, ErrCancelled
+		}
 	}
 
 	// answered is what the plan's question found, once it has been asked. It
@@ -403,6 +448,19 @@ func (d *Decision) Apply(ctx context.Context, components []bootstrap.ComponentRe
 				return res, err
 			}
 			res.Installed = append(res.Installed, s.What)
+		case StepFirewall:
+			if d.HostFirewall == nil {
+				return res, errors.New("the plan trusts the cluster's pod and service networks with firewalld, and this run has no way to change the host's firewall")
+			}
+			step := r.Start(say.Op{
+				Label: "trusting firewalld's trusted zone with " + strings.Join(s.CIDRs, " and "),
+			})
+			if err := d.HostFirewall.Trust(ctx, s.CIDRs); err != nil {
+				step.Failed(err)
+				return res, err
+			}
+			step.Done("firewalld trusts " + strings.Join(s.CIDRs, " and "))
+			res.Installed = append(res.Installed, "firewalld's trusted zone")
 		case StepGatewayAddress:
 			answer, err := d.gatewayAddress(ctx, s.Mode)
 			if err != nil {
@@ -829,58 +887,18 @@ func (d *Decision) awaitRoot(ctx context.Context, cl Cluster) error {
 	return nil
 }
 
-func (d *Decision) printPlan(r say.Reporter, plan Plan) {
-	if len(plan.Steps) == 0 && len(plan.NotHandled) == 0 {
-		return
+// Preview is the platform plan for a cluster whose layer is not applied yet,
+// built before anything is written so a flow can show it before its one
+// question: the same BuildPlan Apply calls, plus the firewall line bootstrap
+// found. It does not resolve the plan against the cluster (which reads deployed
+// releases to say install or verify), because the decision it is built from is
+// the probe's own answer: nothing is there, so every step is an install.
+func Preview(pins release.Versions, components []bootstrap.ComponentResult, class, acmeServer string, firewall bootstrap.FirewallState) (Plan, error) {
+	plan, err := BuildPlan(pins, components, class, acmeServer)
+	if err != nil {
+		return plan, err
 	}
-	var items []say.Item
-	for _, s := range plan.Steps {
-		switch s.Kind {
-		case StepRelease:
-			if s.Foreign {
-				// Only a conditional foreign release reaches the plan: the
-				// unconditional one is refused in resolve.
-				items = append(items, say.Item{Mark: say.Question, Text: fmt.Sprintf("%s, %s (a release box did not install already exists; box will not upgrade it)", s.Release, s.Unless)})
-				continue
-			}
-			if AtPin(s.InstalledVersion, s.Release.Version) {
-				items = append(items, say.Item{Mark: say.Verify, Text: fmt.Sprintf("%s: already at %s; verifying", s.Release.Name, s.Release.Version)})
-				continue
-			}
-			// A conditional release is never an upgrade: resolve() drops the
-			// condition as soon as the release is there, so `?` never has to
-			// carry an install-or-upgrade mark.
-			if s.Unless != "" {
-				items = append(items, say.Item{Mark: say.Question, Text: fmt.Sprintf("%s, %s", s.Release, s.Unless)})
-				continue
-			}
-			mark := say.Install
-			text := s.Release.String()
-			if s.InstalledVersion != "" {
-				mark = say.Change
-				// The upgrade is a write, so the plan says what it is
-				// replacing -- including a deployed version box cannot read.
-				if why := notAtPin(s.InstalledVersion, s.Release.Version); why != "" {
-					text += ", " + why
-				}
-			}
-			items = append(items, say.Item{Mark: mark, Text: text})
-		case StepGatewayAddress:
-			// A question the plan cannot answer yet: box finds out after the
-			// Gateway is applied, and the `?` steps below depend on the answer.
-			items = append(items, say.Item{Mark: say.Question, Text: s.What})
-		default:
-			if s.Unless != "" {
-				items = append(items, say.Item{Mark: say.Question, Text: fmt.Sprintf("%s, %s", s.What, s.Unless)})
-				continue
-			}
-			items = append(items, say.Item{Mark: say.Install, Text: s.What})
-		}
-	}
-	for _, line := range plan.NotHandled {
-		items = append(items, say.Item{Mark: say.Warning, Text: line})
-	}
-	r.Plan("platform plan", items)
+	return withFirewall(plan, firewall), nil
 }
 
 // BuildPlan turns the decision's component results into the ordered list of
@@ -987,6 +1005,7 @@ func BuildPlan(pins release.Versions, components []bootstrap.ComponentResult, ga
 		Component: bootstrap.ComponentGateway,
 		Kind:      StepManifests,
 		What:      gatewayStepName(gatewayClass, installEnvoy),
+		Plan:      "the s5n Gateway",
 		Documents: objects,
 	})
 
@@ -1003,6 +1022,7 @@ func BuildPlan(pins release.Versions, components []bootstrap.ComponentResult, ga
 		Component: bootstrap.ComponentCertManager,
 		Kind:      StepIssuers,
 		What:      fmt.Sprintf("ClusterIssuers %s and %s", LetsEncryptIssuer, SelfSignedIssuer),
+		Plan:      "ClusterIssuers: Let's Encrypt, plus self-signed",
 		Documents: issuers,
 	})
 
@@ -1037,6 +1057,7 @@ func BuildPlan(pins release.Versions, components []bootstrap.ComponentResult, ga
 		Component: bootstrap.ComponentLoadBalancer,
 		Kind:      StepReachable,
 		What:      "the Gateway answering HTTP on 80",
+		Plan:      "HTTP on :80",
 	})
 
 	// The admission policy is the platform layer's tenancy contract: root
@@ -1051,10 +1072,42 @@ func BuildPlan(pins release.Versions, components []bootstrap.ComponentResult, ga
 		Component: bootstrap.ComponentGatewayAPI,
 		Kind:      StepManifests,
 		What:      "ValidatingAdmissionPolicies in s5n-system (the grant, enforced by the cluster)",
+		Plan:      "ValidatingAdmissionPolicies enforcing the grant",
 		Documents: policy,
 	})
 
 	return plan, nil
+}
+
+// withFirewall is the plan's line about the host's packet filter. It is the
+// plan's first step because everything box installs behind it is reached
+// through the host: on a single-node k0s box, kube-router routes pod-to-pod
+// traffic through the host, so a firewall that does not know the cluster's
+// networks refuses Envoy's dial to an app and every request behind the login
+// fails.
+//
+// Only a host where box installed k0s has networks box may trust: those come
+// from the k0s config box wrote (bootstrap.FirewallState.CIDRs). Everywhere
+// else box does not know them and does not change the host, so the plan
+// carries the warning with the two commands instead, printed before the
+// confirm.
+func withFirewall(plan Plan, fw bootstrap.FirewallState) Plan {
+	if !fw.Active {
+		return plan
+	}
+	if len(fw.CIDRs) > 0 {
+		line := "firewalld's trusted zone: " + strings.Join(fw.CIDRs, " and ")
+		plan.Steps = append([]Step{{
+			Kind:  StepFirewall,
+			What:  line,
+			Plan:  line,
+			CIDRs: append([]string(nil), fw.CIDRs...),
+		}}, plan.Steps...)
+	}
+	if fw.Warning != "" {
+		plan.Warnings = append(plan.Warnings, fw.Warning)
+	}
+	return plan
 }
 
 // gatewayStepName is how the plan names the one manifest step that is now on
@@ -1081,6 +1134,15 @@ func metalLBSteps(pins release.Versions, unless Condition) []Step {
 				Ref:       MetalLBRef,
 				Chart:     MetalLBChart,
 				Version:   pins.MetalLB,
+				// box announces the Gateway's address over L2 (the pool and
+				// L2Advertisement below) and never peers over BGP. The
+				// chart's frr-k8s backend, on by default since 0.15, is
+				// BGP's: a DaemonSet, a webhook and a status cleaner the
+				// install would wait on for nothing, and the slowest part of
+				// it on a loaded host. The speaker's own L2 needs none of it.
+				Values: map[string]any{
+					"frrk8s": map[string]any{"enabled": false},
+				},
 			},
 			Wait: []Wait{
 				{Kind: WaitDeployment, Namespace: MetalLBNamespace, Name: MetalLBRelease + "-controller"},
@@ -1092,6 +1154,7 @@ func metalLBSteps(pins release.Versions, unless Condition) []Step {
 			Kind:      StepPool,
 			Unless:    unless,
 			What:      fmt.Sprintf("IPAddressPool %s (the node's InternalIP as a /32) and L2Advertisement %s", MetalLBPoolName, MetalLBL2Name),
+			Plan:      "IPAddressPool: this node's IP as a /32, over L2",
 		},
 	}
 }

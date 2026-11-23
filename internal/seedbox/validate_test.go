@@ -460,3 +460,89 @@ func TestCategoryPattern(t *testing.T) {
 		}
 	}
 }
+
+// TestEffectiveTakesTheRehearsalLockFromTheGrant: rehearsal is box's record,
+// not a value. The chart's default is a live box; a grant carrying the lock
+// renders a locked release; and a values file that tries to set either answer
+// is refused, because allowing it would let a user unlock the box box applied.
+func TestEffectiveTakesTheRehearsalLockFromTheGrant(t *testing.T) {
+	s := loadFixture(t, "values.yaml")
+	got, err := s.Effective(realChart(t))
+	if err != nil {
+		t.Fatalf("Effective: %v", err)
+	}
+	if on, _ := got["rehearsal"].(bool); on {
+		t.Error("the effective values lock a box whose grant never asked for a rehearsal")
+	}
+
+	raw, err := os.ReadFile(fixture(t, "grant.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	locked, err := Load(writeTemp(t, "grant.yaml", string(raw)+"\nrehearsal: true\nrehearsalGate: 10.96.0.10:9153\n"), "")
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	got, err = locked.Effective(realChart(t))
+	if err != nil {
+		t.Fatalf("Effective: %v", err)
+	}
+	if on, _ := got["rehearsal"].(bool); !on {
+		t.Error("the grant's rehearsal lock did not reach the release's values")
+	}
+	if gate, _ := got["rehearsalGate"].(string); gate != "10.96.0.10:9153" {
+		t.Errorf("rehearsalGate = %q, want the grant's address", gate)
+	}
+
+	// A lock with no gate address would start each app before its pod's
+	// policy is in place: refused, never rendered without the gate.
+	gateless, err := Load(writeTemp(t, "grant.yaml", string(raw)+"\nrehearsal: true\n"), "")
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if _, err := gateless.Effective(realChart(t)); err == nil || !strings.Contains(err.Error(), "rehearsalGate") {
+		t.Errorf("Effective of a locked grant with no gate = %v, want a refusal naming rehearsalGate", err)
+	}
+
+	for _, on := range []string{"true", "false"} {
+		s, err := Load(fixture(t, "grant.yaml"), writeTemp(t, "values.yaml", "rehearsal: "+on+"\n"))
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		if _, err := s.Effective(realChart(t)); err == nil {
+			t.Errorf("Effective accepted a values file that sets rehearsal: %s", on)
+		}
+	}
+}
+
+// TestEffectiveRefusesTheLockOnAReleaseWithoutIt: a release from before the lock
+// has no key for it, and rendering a rehearsal box with that chart would give it
+// the internet back. The lock fails closed: box refuses the install rather than
+// drop the flag, because a rehearsal box is never one that can reach out.
+func TestEffectiveRefusesTheLockOnAReleaseWithoutIt(t *testing.T) {
+	c := chartAt(t, "chart-0.2.0.values.yaml", "chart-0.2.0.schema.json")
+	raw, err := os.ReadFile(fixture(t, "grant.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	s, err := Load(writeTemp(t, "grant.yaml", string(raw)+"\nrehearsal: true\nrehearsalGate: 10.96.0.10:9153\n"), "")
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	_, err = s.Effective(c)
+	if err == nil {
+		t.Fatal("Effective rendered a rehearsal box with a chart that cannot lock it")
+	}
+	if !strings.Contains(err.Error(), "cannot lock") {
+		t.Errorf("refusal = %v, want it to say the chart cannot lock this box", err)
+	}
+
+	// A live box on that chart is untouched by any of this.
+	live, err := Load(fixture(t, "grant.yaml"), "")
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if _, err := live.Effective(c); err != nil {
+		t.Errorf("Effective of a live box against the 0.2.0 chart: %v", err)
+	}
+}

@@ -64,6 +64,11 @@ type Reporter struct {
 	ui     *UI
 	// yes answers every confirm without a form (--yes).
 	yes bool
+	// space is the empty line before every masthead. It is the UI's, because
+	// the sections this reporter draws and the questions that UI asks are one
+	// run and must not stack two gaps between them.
+	space *space
+
 	// pending is the wiring receipt's rows that wait on a person. They are
 	// printed after the success card, because they are what to do next.
 	pending []say.ReceiptRow
@@ -97,6 +102,7 @@ func NewReporter(o ReporterOptions) *Reporter {
 		width:  o.Width,
 		chrome: chrome{noColor: o.NoColor},
 		ui:     ui,
+		space:  ui.space,
 		yes:    o.Yes,
 		closed: false,
 	}
@@ -164,12 +170,13 @@ func (r *Reporter) SetPhase(name string) {
 }
 
 // Phase draws the masthead for a section. The same frame as init's step
-// header, with the section name where "seedbox setup" would be.
+// header, with the section name where "seedbox setup" would be, and the empty
+// line above it that every masthead opens with.
 func (r *Reporter) Phase(name string) {
 	r.chrome.phase = name
 	r.ui.chrome.phase = name
 	r.stopActive()
-	r.emit(r.chrome.phaseHead(name) + "\n\n")
+	r.emit(r.space.outset() + r.chrome.phaseHead(name) + "\n\n")
 }
 
 // Fact is one key and its value: a muted column and an ink value, wrapped
@@ -206,7 +213,8 @@ func (r *Reporter) List(title string, rows []string) {
 
 // Plan is the list box already prints before a confirm, with its marks
 // coloured: + installs, ~ changes, ? depends on an answer, ! is a warning,
-// = verifies and - removes.
+// = verifies and - removes. A component's sub-steps are drawn under it, two
+// columns past its text, with marks of their own.
 func (r *Reporter) Plan(title string, items []say.Item) {
 	r.plan(title, items)
 }
@@ -216,28 +224,105 @@ func (r *Reporter) Plan(title string, items []say.Item) {
 // renderer keeps its one block at box's two columns.
 func (r *Reporter) Diff(items []say.Item) { r.plan("", items) }
 
+// Table is a titled block of rows in two columns: the glyph in its status
+// colour, the name in ink, and the facts joined with a middle dot and wrapped
+// under themselves. The name column is as wide as the longest name that fits,
+// so a block reads as a table and a host name that would push everything off
+// the edge takes its own line.
+func (r *Reporter) Table(title string, rows []say.TableRow) {
+	if len(rows) == 0 {
+		return
+	}
+	var b strings.Builder
+	if title != "" {
+		b.WriteString(r.chrome.paint(title, accentStyle.Bold(true).Render(title)) + "\n")
+	}
+	nameWidth := 0
+	for _, row := range rows {
+		if w := lipgloss.Width(row.Name); w > nameWidth {
+			nameWidth = w
+		}
+	}
+	const nameMax = 24
+	if nameWidth > nameMax {
+		nameWidth = nameMax
+	}
+	for _, row := range rows {
+		glyph := row.Glyph
+		if glyph == "" {
+			glyph = "·"
+		}
+		facts := strings.Join(row.Facts, " · ")
+		prefix := indent + glyph + " "
+		if row.Name == "" {
+			for i, line := range wrapText(facts, r.width-lipgloss.Width(prefix)) {
+				if i == 0 {
+					b.WriteString(indent + r.chrome.paint(glyph, glyphStyle(glyph).Render(glyph)) + " " + r.chrome.paint(line, inkStyle.Render(line)) + "\n")
+					continue
+				}
+				b.WriteString(strings.Repeat(" ", lipgloss.Width(prefix)) + r.chrome.paint(line, inkStyle.Render(line)) + "\n")
+			}
+			continue
+		}
+		// A name longer than the column keeps its line to itself, with the
+		// facts under it: a table whose names push the facts off the edge is
+		// not a table any more.
+		if lipgloss.Width(row.Name) > nameWidth {
+			b.WriteString(indent + r.chrome.paint(glyph, glyphStyle(glyph).Render(glyph)) + " " + r.chrome.paint(row.Name, inkStyle.Render(row.Name)) + "\n")
+			pad := indent + "  "
+			for _, line := range wrapText(facts, r.width-lipgloss.Width(pad)) {
+				b.WriteString(pad + r.chrome.paint(line, mutedStyle.Render(line)) + "\n")
+			}
+			continue
+		}
+		pad := indent + strings.Repeat(" ", lipgloss.Width(glyph)+1+nameWidth+2)
+		for i, line := range wrapText(facts, r.width-lipgloss.Width(pad)) {
+			if i == 0 {
+				b.WriteString(indent + r.chrome.paint(glyph, glyphStyle(glyph).Render(glyph)) + " ")
+				b.WriteString(r.chrome.paint(fmt.Sprintf("%-*s", nameWidth, row.Name), inkStyle.Render(row.Name)))
+				b.WriteString("  " + r.chrome.paint(line, mutedStyle.Render(line)) + "\n")
+				continue
+			}
+			b.WriteString(pad + r.chrome.paint(line, mutedStyle.Render(line)) + "\n")
+		}
+	}
+	r.emit(b.String())
+}
+
 func (r *Reporter) plan(title string, items []say.Item) {
 	var b strings.Builder
 	if title != "" {
 		b.WriteString(indent + r.chrome.paint(title, accentStyle.Bold(true).Render(title)) + "\n")
 	}
 	for _, it := range items {
-		mark := string(it.Mark)
-		if mark == "" {
-			mark = "·"
-		}
-		prefix := indent + mark + " "
-		cont := strings.Repeat(" ", lipgloss.Width(prefix))
-		style := r.planStyle(it.Mark)
-		for i, line := range wrapText(it.Text, r.width-lipgloss.Width(prefix)) {
-			if i == 0 {
-				b.WriteString(indent + r.chrome.paint(mark, style.Render(mark)) + " " + r.chrome.paint(line, inkStyle.Render(line)) + "\n")
-				continue
-			}
-			b.WriteString(cont + r.chrome.paint(line, inkStyle.Render(line)) + "\n")
+		r.planItem(&b, indent, it)
+		for _, child := range it.Children {
+			// A child's mark sits past the item's own text: its mark and a
+			// space, then the two columns the indent is.
+			r.planItem(&b, indent+"    ", child)
 		}
 	}
 	r.emit(b.String())
+}
+
+// planItem draws one row of a plan at level: its mark coloured by what it does,
+// its text wrapped under itself. level is where the mark goes, so a child sits
+// two columns past the text of the row above it.
+func (r *Reporter) planItem(b *strings.Builder, level string, it say.Item) {
+	mark := string(it.Mark)
+	if mark == "" {
+		mark = "·"
+	}
+	prefix := level + mark + " "
+	cont := strings.Repeat(" ", lipgloss.Width(prefix))
+	style := r.planStyle(it.Mark)
+	for i, line := range wrapText(it.Text, r.width-lipgloss.Width(prefix)) {
+		if i == 0 {
+			b.WriteString(level + r.chrome.paint(mark, style.Render(mark)) + " " + r.chrome.paint(line, inkStyle.Render(line)) + "\n")
+			continue
+		}
+		b.WriteString(cont + r.chrome.paint(line, inkStyle.Render(line)) + "\n")
+	}
 }
 
 // planStyle colours a plan mark by what it does to the cluster.
@@ -534,6 +619,7 @@ func (r *Reporter) drawLocked() {
 func (r *Reporter) clearLocked() {
 	if r.active != nil {
 		fmt.Fprint(r.out, "\r\x1b[2K")
+		r.space.cleared()
 	}
 }
 
@@ -562,6 +648,7 @@ func (r *Reporter) emit(text string) {
 		r.clearLocked()
 	}
 	_, _ = io.WriteString(r.out, text)
+	r.space.wrote(text)
 	if r.active != nil {
 		r.drawLocked()
 	}
@@ -635,6 +722,7 @@ func (h *liveHandle) finish(mark, text, detail string) {
 		}
 	}
 	_, _ = io.WriteString(r.out, b.String())
+	r.space.wrote(b.String())
 	r.mu.Unlock()
 }
 

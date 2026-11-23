@@ -69,6 +69,10 @@ const (
 	// downloaderKind is what an adopted downloader is filed as in wiring's
 	// ownership record (internal/wiring/owned.go).
 	downloaderKind = "pbh-downloader"
+
+	// appQBittorrent is the one download client box runs, and so the one app a
+	// downloader of that type can point at on the box.
+	appQBittorrent = "qbittorrent"
 )
 
 type rewriter struct{}
@@ -182,16 +186,18 @@ func (d *decision) downloaders(in rewrite.Input, rep *rewrite.Report) error {
 			rep.Notes = append(rep.Notes, fmt.Sprintf("%s %s: %q is not an http URL; left as it is", configRel, where, stored))
 			continue
 		}
-		port := 0
+		// A URL's port is the one it names, or the one its scheme implies: an
+		// https endpoint with no port is 443, which is the port a rule has to
+		// name (and the one a refusal prints).
+		port := rewrite.URLPort(u)
 		if p := u.Port(); p != "" {
-			n, convErr := strconv.Atoi(p)
-			if convErr != nil {
+			if _, convErr := strconv.Atoi(p); convErr != nil {
 				rep.Notes = append(rep.Notes, fmt.Sprintf("%s %s: %q names a port that is not a number; left as it is", configRel, where, stored))
 				continue
 			}
-			port = n
 		}
-		res := in.Resolve(u.Hostname(), port)
+		typ := strings.ToLower(d.file.str(sectionClient, id, keyType))
+		res := in.ResolveURL(u)
 		switch res.Verdict {
 		case plan.Leave:
 			continue
@@ -200,6 +206,16 @@ func (d *decision) downloaders(in rewrite.Input, rep *rewrite.Report) error {
 			rep.Unclassified = append(rep.Unclassified, rewrite.Address{
 				App: in.App, File: configRel, Where: where, Host: u.Hostname(), Port: port,
 			})
+			// The downloader's own type says which app its address can only
+			// mean: box runs one qBittorrent, and a qBittorrent downloader the
+			// plan cannot place can be nothing else. That is a proposal for
+			// Settle to write as a default, never a rewrite here.
+			if name, ok := d.proposes(in, typ); ok {
+				rep.Defaults = append(rep.Defaults, rewrite.Default{
+					Host: u.Hostname(), Port: port, App: name,
+					Why: "it is a qBittorrent downloader, and this box runs one qBittorrent",
+				})
+			}
 			continue
 		}
 		end, ok := in.Targets[res.App]
@@ -209,8 +225,9 @@ func (d *decision) downloaders(in rewrite.Input, rep *rewrite.Report) error {
 		}
 		// A downloader's endpoint is the plain address: PBH appends /api/v2
 		// itself, and the loader strips one trailing slash
-		// (QBittorrentConfigImpl.java:33-35).
-		endpoint := "http://" + net.JoinHostPort(end.Host, strconv.Itoa(end.Port)) + strings.TrimSuffix(end.URLBase, "/")
+		// (QBittorrentConfigImpl.java:33-35). The box serves qBittorrent at no
+		// URL base, and a path the source stored is the source's own shape.
+		endpoint := end.URL()
 		if endpoint != stored {
 			edit, ok := d.file.set(endpoint, v.path...)
 			if !ok {
@@ -223,7 +240,16 @@ func (d *decision) downloaders(in rewrite.Input, rep *rewrite.Report) error {
 		// downloader the source already had can be adopted: it is filed under
 		// the id PBH stores it under, which is the string key `client:` uses
 		// (docs/box.md, "Migrated connections are adopted by ID").
-		switch strings.ToLower(d.file.str(sectionClient, id, keyType)) {
+		//
+		// That id is stale for every config older than PBH's own config
+		// migration 32, which re-keys each downloader to a generated UUID and
+		// keeps the old key as its `name:`
+		// (MainConfigUpdateScript.assignUniqueIdForDownloader at v9.5.4). It is
+		// still the only id this side knows: adopting a source already past 32
+		// records the UUID it will keep, and for an older one wiring adopts the
+		// downloader back by the endpoint this pass wrote (then by its name) and
+		// records the id the app really has. Nothing here can predict the UUID.
+		switch typ {
 		case "qbittorrent", "qbittorrentee":
 			name := d.file.str(sectionClient, id, keyName)
 			if name == "" {
@@ -235,6 +261,19 @@ func (d *decision) downloaders(in rewrite.Input, rep *rewrite.Report) error {
 		}
 	}
 	return nil
+}
+
+// proposes is the one qBittorrent a downloader of this type can only be, and
+// whether the box runs exactly one: two instances and an address nothing
+// settles cannot mean one of them, so nothing is proposed and the address is
+// left and called out.
+func (d *decision) proposes(in rewrite.Input, typ string) (string, bool) {
+	switch typ {
+	case "qbittorrent", "qbittorrentee":
+	default:
+		return "", false
+	}
+	return in.Sole(appQBittorrent)
 }
 
 // sortOwned orders adopted connections so a report reads the same twice.

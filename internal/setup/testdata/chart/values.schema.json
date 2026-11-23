@@ -24,6 +24,15 @@
       "properties": {
         "edge": {
           "type": "boolean"
+        },
+        "oidc": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "gatewayIP": {
+              "type": "string"
+            }
+          }
         }
       }
     },

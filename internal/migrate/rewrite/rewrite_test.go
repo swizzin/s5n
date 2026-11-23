@@ -2,6 +2,7 @@ package rewrite
 
 import (
 	"context"
+	"net/url"
 	"testing"
 
 	"github.com/swizzin/s5n/internal/migrate/plan"
@@ -33,6 +34,11 @@ func TestBlocked(t *testing.T) {
 	if (Report{Notes: []string{"x"}, Changes: []Change{{Count: 1}}}).Blocked() {
 		t.Error("notes and changes blocked apply")
 	}
+	// What a pass leaves on purpose, and what it proposes for an address, are
+	// decisions: neither is a gap, so neither may stop a migration.
+	if (Report{Left: []Left{{What: "192.0.2.10:9091"}}, Defaults: []Default{{Host: "192.0.2.10", Port: 9091}}}).Blocked() {
+		t.Error("a value left on purpose, or a proposed default, blocked apply")
+	}
 	if !(Report{Uncovered: []plan.Uncovered{{Path: "/x"}}}).Blocked() {
 		t.Error("an uncovered path did not block apply")
 	}
@@ -41,24 +47,71 @@ func TestBlocked(t *testing.T) {
 	}
 }
 
+// TestAddressText: the line an operator reads names the address the way the app
+// stored it, including the port only when there is one.
+func TestAddressText(t *testing.T) {
+	if got := (Address{Host: "192.0.2.10", Port: 32400}).Text(); got != "192.0.2.10:32400" {
+		t.Errorf("Text() = %q", got)
+	}
+	if got := (Address{Host: "qbt.example.org"}).Text(); got != "qbt.example.org" {
+		t.Errorf("Text() with no port = %q", got)
+	}
+}
+
+// TestURLPort: a URL addresses the port it names, and otherwise the port its
+// scheme implies. A stored https URL with no port is port 443, which is what
+// the plan settles it by and what a refusal has to print.
+func TestURLPort(t *testing.T) {
+	tests := []struct {
+		raw  string
+		want int
+	}{
+		{"https://qbt.example.org/qbittorrent", 443},
+		{"https://qbt.example.org:/x", 443},
+		{"http://qbt.example.org/x", 80},
+		{"https://qbt.example.org:8443/x", 8443},
+		{"http://192.0.2.10:8080", 8080},
+		{"ftp://qbt.example.org/x", 0},
+	}
+	for _, tt := range tests {
+		t.Run(tt.raw, func(t *testing.T) {
+			u, err := url.Parse(tt.raw)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := URLPort(u); got != tt.want {
+				t.Errorf("URLPort(%q) = %d, want %d", tt.raw, got, tt.want)
+			}
+		})
+	}
+	// url.Parse refuses a malformed port, which URLPort itself never guesses
+	// at either: a URL built without one reads as the scheme's.
+	if got := URLPort(&url.URL{Scheme: "https", Host: "qbt.example.org"}); got != 443 {
+		t.Errorf("URLPort of a hand-built URL = %d, want 443", got)
+	}
+}
+
 // TestResolveFallsBackToTheBoxEndpoints: an address no source rule settles but
 // that already names one of the box's own endpoints is that app, which is what
 // lets a second Check read a copy the first pass rewrote, and lets Write follow
 // the Check that made the rewrite.
 func TestResolveFallsBackToTheBoxEndpoints(t *testing.T) {
-	p, err := plan.Parse([]byte(`version: 1
+	p, err := plan.Parse([]byte(`version: 2
 apps:
   sonarr:
+    kind: kubernetes
     source: sonarr
     config: /srv/apps/sonarr
     ports: [8989]
     paths: []
   qbittorrent:
+    kind: kubernetes
     source: qbittorrent
     config: /srv/apps/qbittorrent
     ports: [8080]
     paths: []
   plex:
+    kind: kubernetes
     source: plex
     config: /srv/apps/plex
     ports: [32400]

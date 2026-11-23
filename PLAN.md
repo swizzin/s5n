@@ -272,7 +272,7 @@ lives in Go, where it can be tested, and none in bash.
 Candidates that were found but not used are always printed, on every path: a remote
 cluster's `~/.kube/config` skipping silently would read as "there was nothing there".
 
-The result is recorded in `/etc/swizzin/cluster.yaml` (source: `k0s-managed` or
+The result is recorded in `/etc/s5n/cluster.yaml` (source: `k0s-managed` or
 `external`, kubeconfig path, distribution, platform modes, node count). Re-running
 reads that record before the candidate scan, then probes the cluster it names again:
 version, privileges, node count and distribution, and the platform layer, with the
