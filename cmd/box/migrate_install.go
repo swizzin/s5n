@@ -379,7 +379,7 @@ func migrateSurvey(ctx context.Context, o *migrateApplyFlags, p *plan.Plan, open
 	if err != nil {
 		return apply.Summary{}, err
 	}
-	env, err := surveyEnv(p, opened, cat, values, rehearsal, carriedNotes(p, opened), dir)
+	env, err := surveyEnv(p, opened, cat, values, rehearsal, dir)
 	if err != nil {
 		return apply.Summary{}, err
 	}
@@ -391,7 +391,7 @@ func migrateSurvey(ctx context.Context, o *migrateApplyFlags, p *plan.Plan, open
 // the cluster. The config root is the caller's private directory, which is why
 // nothing here is owned as the seedbox's user: what this pass stages is measured
 // and thrown away.
-func surveyEnv(p *plan.Plan, opened *bundle.Opened, cat *catalog.Catalog, values map[string]any, rehearsal bool, carried []apply.Carried, configRoot string) (apply.Env, error) {
+func surveyEnv(p *plan.Plan, opened *bundle.Opened, cat *catalog.Catalog, values map[string]any, rehearsal bool, configRoot string) (apply.Env, error) {
 	var env apply.Env
 	env.ConfigRoot = configRoot
 	if p.Data != nil {
@@ -408,11 +408,6 @@ func surveyEnv(p *plan.Plan, opened *bundle.Opened, cat *catalog.Catalog, values
 	// run switches on.
 	env.Enabled = func(string) bool { return false }
 	env.Rehearsal = rehearsal
-	// The notes about what a snapshot does not hold of an app's config are the
-	// same two functions the run after the install uses: they come from the
-	// snapshot, not from the cluster, and a summary without them would not be the
-	// one that run shows.
-	env.Carried = carried
 	return env, nil
 }
 

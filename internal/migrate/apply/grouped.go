@@ -81,6 +81,12 @@ func appFacts(in InstanceSummary) []string {
 	if in.Staged.Files > 0 {
 		facts = append(facts, bytesText(in.Staged.Bytes))
 	}
+	if in.Carry != "" {
+		facts = append(facts, in.Carry)
+	}
+	if in.Short != "" {
+		facts = append(facts, in.Short)
+	}
 	if in.Deferred != "" {
 		facts = append(facts, in.Deferred)
 	}
@@ -145,14 +151,16 @@ func ownedPhrase(o rewrite.Owned) string {
 	return fmt.Sprintf("%s %q", kind, o.Name)
 }
 
-// CheckedRows is the rows an agreement left to this run, now that its checks
-// have run: one row per app whose check the question deferred, in the shape the
-// confirm showed it. The question said the app's databases would be checked once
-// its image ran; this is what that check found, said in the same place.
+// CheckedRows is the rows an agreement left to this run, now that it has run: one
+// row per app whose check the question deferred, and one for an app the run had
+// to carry less of than the question promised because the config root had no room,
+// in the shape the confirm showed it. The question said the app's databases would
+// be checked once its image ran; this is what that check found, said in the same
+// place, and the second is what the disk turned out to be.
 func (s Summary) CheckedRows(agreed Summary) []say.TableRow {
 	var rows []say.TableRow
 	for _, was := range agreed.Instances {
-		if was.Deferred == "" {
+		if was.Deferred == "" && was.Short == "" {
 			continue
 		}
 		for _, now := range s.Instances {

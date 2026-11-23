@@ -36,7 +36,6 @@ import (
 	"github.com/swizzin/s5n/internal/kube"
 	"github.com/swizzin/s5n/internal/migrate/apply"
 	"github.com/swizzin/s5n/internal/migrate/bundle"
-	"github.com/swizzin/s5n/internal/migrate/discover"
 	"github.com/swizzin/s5n/internal/migrate/lock"
 	"github.com/swizzin/s5n/internal/migrate/plan"
 	"github.com/swizzin/s5n/internal/platform"
@@ -305,7 +304,7 @@ func migrateApply(ctx context.Context, file string, o *migrateApplyFlags, out sa
 	if err != nil {
 		return err
 	}
-	env, cs, err := migrateEnv(p, opened, o, sb, chart, cat, kc, namespace, values, rehearsal, carriedNotes(p, opened), agreed, out)
+	env, cs, err := migrateEnv(p, opened, o, sb, chart, cat, kc, namespace, values, rehearsal, agreed, out)
 	if err != nil {
 		return err
 	}
@@ -370,7 +369,7 @@ func loadMigrateChart(ctx context.Context, charts *chartRelease) (release.Chart,
 }
 
 // migrateEnv builds everything apply touches outside the plan directory.
-func migrateEnv(p *plan.Plan, opened *bundle.Opened, o *migrateApplyFlags, sb *seedbox.Seedbox, chart release.Chart, cat *catalog.Catalog, kc, namespace string, values map[string]any, rehearsal bool, carried []apply.Carried, agreed *apply.Summary, out say.Reporter) (apply.Env, kubernetes.Interface, error) {
+func migrateEnv(p *plan.Plan, opened *bundle.Opened, o *migrateApplyFlags, sb *seedbox.Seedbox, chart release.Chart, cat *catalog.Catalog, kc, namespace string, values map[string]any, rehearsal bool, agreed *apply.Summary, out say.Reporter) (apply.Env, kubernetes.Interface, error) {
 	var env apply.Env
 	vols, err := sb.Storage()
 	if err != nil {
@@ -378,9 +377,9 @@ func migrateEnv(p *plan.Plan, opened *bundle.Opened, o *migrateApplyFlags, sb *s
 	}
 	for _, v := range vols {
 		switch v.Kind {
-		case "config":
+		case volumeConfig:
 			env.ConfigRoot = v.Path
-		case "data":
+		case volumeData:
 			env.DataRoot = v.Path
 		}
 	}
@@ -435,7 +434,7 @@ func migrateEnv(p *plan.Plan, opened *bundle.Opened, o *migrateApplyFlags, sb *s
 		}
 		claim := ""
 		for _, v := range vols {
-			if v.Kind == "config" {
+			if v.Kind == volumeConfig {
 				claim = v.Claim
 			}
 		}
@@ -452,7 +451,6 @@ func migrateEnv(p *plan.Plan, opened *bundle.Opened, o *migrateApplyFlags, sb *s
 		env.Run = runner.Run
 	}
 	env.Rehearsal = rehearsal
-	env.Carried = carried
 	env.Confirm = migrateAnswer(out, o, namespace, rehearsal, agreed)
 	return env, cs, nil
 }
@@ -467,74 +465,6 @@ func migrateAnswer(out say.Reporter, o *migrateApplyFlags, namespace string, reh
 		return migrateAgreed(out, *agreed)
 	}
 	return migrateConfirm(out, confirmer(out, *o.yes), namespace, rehearsal, *o.details, nil, "")
-}
-
-// carriedNotes is the confirm's half of the report's line about the part of a
-// config a snapshot does not hold: Plex's metadata is not in it, and the
-// operator reads that before the copy rather than after. It is said only for an
-// app whose extracted config is exactly what discovery's table names, so a
-// snapshot that carried a whole tree is never described as a subset.
-//
-// The note comes with the app it belongs to: the confirm shows it once, named,
-// and its line does not repeat the app's name twice.
-func carriedNotes(p *plan.Plan, opened *bundle.Opened) []apply.Carried {
-	if p == nil {
-		return nil
-	}
-	names := make([]string, 0, len(p.Apps))
-	for name := range p.Apps {
-		names = append(names, name)
-	}
-	sort.Strings(names)
-	var out []apply.Carried
-	for _, name := range names {
-		carry, ok := discover.SnapshotCarry(name)
-		if !ok || carry.Note == "" {
-			continue
-		}
-		if trimmed(opened.Configs[name], carry.Files) {
-			note := strings.TrimSpace(strings.TrimPrefix(carry.Note, name+": "))
-			out = append(out, apply.Carried{App: name, Note: note})
-		}
-	}
-	return out
-}
-
-// errNotCarried stops trimmed's walk at the first entry of a config directory
-// that a carried set does not name.
-var errNotCarried = errors.New("not part of the snapshot")
-
-// trimmed reports whether dir holds the files a snapshot carries for one app,
-// with the directories above them, and nothing else. It stops at the first
-// entry outside the set, which is what keeps a whole Plex tree cheap to refuse.
-func trimmed(dir string, files []discover.CarryFile) bool {
-	if dir == "" {
-		return false
-	}
-	carried := make(map[string]bool, len(files))
-	for _, f := range files {
-		carried[f.Path] = true
-		for i := strings.LastIndex(f.Path, "/"); i > 0; i = strings.LastIndex(f.Path[:i], "/") {
-			carried[f.Path[:i]] = true
-		}
-	}
-	err := filepath.WalkDir(dir, func(p string, d fs.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-		rel, err := filepath.Rel(dir, p)
-		if err != nil {
-			return err
-		}
-		if rel == "." {
-			return nil
-		}
-		if !carried[filepath.ToSlash(rel)] {
-			return errNotCarried
-		}
-		return nil
-	})
-	return err == nil
 }
 
 // migrateConfirm shows the summary and asks the one question. It is the same
@@ -924,6 +854,14 @@ func planNeedsRunner(p *plan.Plan, catalogApps []string) bool {
 	}
 	return false
 }
+
+// The grant's two storage keys, as `box init` writes them
+// (internal/seedbox/storage.go): the host path the apps' settings live on, and
+// the tree downloads and media are in.
+const (
+	volumeData   = "data"
+	volumeConfig = "config"
+)
 
 // wiringConfigMap is `<release>-wiring`: the ConfigMap the chart renders and
 // the wiring Job upserts its record into (charts/s5n/templates/wiring.yaml).

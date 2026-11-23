@@ -7855,17 +7855,28 @@ PY
 }
 
 # migrate_source_plex_covers <config dir>: the parts of a Plex config directory a
-# migration does not carry -- the metadata, artwork and thumbnails Plex rebuilds
-# from the media it is given. Written once the source has stopped, so nothing
-# Plex does at shutdown can prune the fixture, and a snapshot that carries them
-# is a snapshot that carried the library.
+# migration now carries, and the one it leaves out. The Metadata and Media trees
+# are the artwork, the chapter thumbnails and the preview thumbnails Plex built
+# from the media it is given -- hours of its own time to build again -- so a
+# snapshot carries them when there is room, which a fixture of a few hundred
+# bytes always has. The Cache tree beside them is what it leaves out. Written
+# once the source has stopped, so nothing Plex does at shutdown can prune the
+# fixture.
 migrate_source_plex_covers() { # migrate_source_plex_covers <config dir>
-  local dir=$1
-  mkdir -p "$dir/Metadata/Posters" "$dir/Cache/PhotoTranscoder" ||
-    { echo "could not write the covers Plex rebuilds under ${dir}"; return 1; }
-  printf 's5n e2e: a poster Plex rebuilds from the library\n' >"$dir/Metadata/Posters/poster.jpg" &&
-    printf 's5n e2e: a thumbnail Plex rebuilds from the library\n' >"$dir/Cache/PhotoTranscoder/thumb.jpg"
+  local dir=$1 home
+  home="${dir}/Library/Application Support/Plex Media Server"
+  mkdir -p "${home}/Metadata/Posters" "${home}/Media/localhost/bif" "${home}/Cache/PhotoTranscoder" ||
+    { echo "could not write the trees Plex keeps under ${home}"; return 1; }
+  printf 's5n e2e: a poster Plex built from the library\n' >"${home}/Metadata/Posters/poster.jpg" &&
+    printf 's5n e2e: a preview thumbnail Plex built from the library\n' >"${home}/Media/localhost/bif/index.bif" &&
+    printf 's5n e2e: a cache Plex rebuilds by itself\n' >"${home}/Cache/PhotoTranscoder/thumb.jpg"
 }
+
+# The two files a carried Plex tree puts on the box, and the one it leaves
+# behind: what every scenario asserts about a migration of Plex's library.
+PLEX_CARRIED_POSTER="Metadata/Posters/poster.jpg"
+PLEX_CARRIED_BIF="Media/localhost/bif/index.bif"
+PLEX_LEFT_CACHE="Cache/PhotoTranscoder/thumb.jpg"
 
 # migrate_seed_plex <config dir>: the rows a library holds, added to the database
 # Plex built for itself while the source ran. The schema is Plex's own -- a
@@ -8696,38 +8707,43 @@ migrate_box() {
   done
   grep -qE "^data: .* \(downloads: Downloads, media: library\)$" "$report" ||
     { echo "the plan does not name the data root with Downloads and library:"; sed -n '/^data:/p' "$report"; fail=1; }
-  # Plex's snapshot is its state, not its library. The preferences and the
-  # library database are in it -- Plex starts on those and nothing else -- and
-  # the Metadata and Cache trees it rebuilds are not, nor is the whole-tree
-  # marker the other apps carry, because Plex's config is not carried whole.
-  plex_carry="plex: carried Preferences.xml and its databases; Plex rebuilds its metadata, artwork and thumbnails (artwork uploaded by hand is not carried)"
+  # Plex's snapshot is its whole data when there is room: the preferences, the
+  # library database, and the Metadata and Media trees Plex spent hours building
+  # from the media it was given. The Cache tree beside them is what it leaves
+  # out, and so is the whole-tree marker the other apps carry, because a Plex
+  # snapshot is Plex's home and not the config mount.
+  plex_carry="plex: carried its whole data -- metadata, artwork, thumbnails and its databases -- except the caches, codecs, logs and crash reports Plex rebuilds or downloads again"
+  grep -qE "^ +carry: full$" "$WORK/plan.yaml" ||
+    { echo "the plan does not say Plex's whole data travels, and this fixture has room for it:"; sed -n '/plex:/,/paths:/p' "$WORK/plan.yaml"; fail=1; }
   tar -tzf "$snapshot" >"$WORK/snapshot-entries.txt" 2>/dev/null ||
     { echo "the snapshot's entries cannot be listed"; fail=1; return 0; }
   plex_config="config/plex/Library/Application Support/Plex Media Server"
   for carried in "${plex_config}/Preferences.xml" \
-                 "${plex_config}/Plug-in Support/Databases/com.plexapp.plugins.library.db"; do
+                 "${plex_config}/Plug-in Support/Databases/com.plexapp.plugins.library.db" \
+                 "${plex_config}/${PLEX_CARRIED_POSTER}" \
+                 "${plex_config}/${PLEX_CARRIED_BIF}"; do
     grep -qxF "$carried" "$WORK/snapshot-entries.txt" ||
-      { echo "the snapshot carries no ${carried}: Plex has nothing to start on"; fail=1; }
+      { echo "the snapshot carries no ${carried}: Plex starts on its state, and the library is the hours this saves"; fail=1; }
   done
-  if grep -qE "^config/plex/(Metadata|Cache)(/|$)" "$WORK/snapshot-entries.txt"; then
-    echo "the snapshot carries Plex's Metadata or Cache tree, and Plex rebuilds both:"
-    grep -E "^config/plex/(Metadata|Cache)(/|$)" "$WORK/snapshot-entries.txt" | head -3 | sed 's/^/    /'
-    fail=1
+  if grep -qxF "${plex_config}/${PLEX_LEFT_CACHE}" "$WORK/snapshot-entries.txt"; then
+    echo "the snapshot carries Plex's Cache tree, and Plex rebuilds it"; fail=1
   fi
   if grep -qxF "config/plex/.s5n-e2e-source" "$WORK/snapshot-entries.txt"; then
-    echo "the snapshot carries Plex's whole config directory, and a Plex snapshot is its state only"; fail=1
+    echo "the snapshot carries the file beside Plex's home, and a Plex snapshot is its home and nothing else in the mount"; fail=1
   fi
   # Said once, in the report the snapshot holds, and on the screen the run
-  # printed: what a Plex snapshot leaves behind is a decision the operator reads.
+  # printed: what a Plex snapshot carries is a decision the operator reads.
   [ "$(grep -cF "$plex_carry" "$report")" = 1 ] ||
-    { echo "the snapshot's report does not say once what Plex's snapshot leaves behind ($(grep -cF 'plex: carried' "$report" || true) times):"; grep -F "plex: carried" "$report" || true; fail=1; }
+    { echo "the snapshot's report does not say once what Plex's snapshot carries ($(grep -cF 'plex: carried' "$report" || true) times):"; grep -F "plex: carried" "$report" || true; fail=1; }
   grep -qF "$plex_carry" "$WORK/cutover.txt" ||
-    { echo "the cutover did not print the line about what Plex's snapshot leaves behind"; fail=1; }
-  # What trimming it is worth on this fixture: the whole config tree the source
-  # wrote, the bytes of it the snapshot carries, and the file itself.
+    { echo "the cutover did not print the line about what Plex's snapshot carries"; fail=1; }
+  # What the full carry is worth on this fixture: the whole config tree the
+  # source wrote, the bytes of it the snapshot carries, and the file itself.
   plex_tree=$(du -sb "$src/var/data/plex" | cut -f1) || plex_tree=0
   plex_carried=$(du -cb "${src}/var/data/plex/Library/Application Support/Plex Media Server/Preferences.xml" \
-    "${src}/var/data/plex/Library/Application Support/Plex Media Server/Plug-in Support/Databases/"* 2>/dev/null | tail -1 | cut -f1) || plex_carried=0
+    "${src}/var/data/plex/Library/Application Support/Plex Media Server/Plug-in Support/Databases/"* \
+    "${src}/var/data/plex/Library/Application Support/Plex Media Server/Metadata" \
+    "${src}/var/data/plex/Library/Application Support/Plex Media Server/Media" 2>/dev/null | tail -1 | cut -f1) || plex_carried=0
   echo "  plex: ${plex_tree} bytes of config tree, ${plex_carried:-0} of them carried, the snapshot is $(stat -c %s "$snapshot") bytes"
   grep -q 'service: qbittorrent\.legacy' "$WORK/plan.yaml" ||
     { echo "the plan has no host rule for the source's qbittorrent Service"; fail=1; }
@@ -8855,7 +8871,7 @@ migrate_box() {
   # one in until the install: its row says so, above the install, and the row the
   # check then fills in is below it. Both are the same operator's reading of the
   # same run.
-  grep -qE "^  ✓ plex +[0-9.]+ (KiB|MiB|GiB) · its databases are checked once Plex's image runs" \
+  grep -qE "^  ✓ plex +[0-9.]+ (KiB|MiB|GiB) · its whole data: metadata, artwork and thumbnails · its databases are checked once Plex's image runs$" \
     "$WORK/apply-migrate.txt" ||
     { echo "the confirm does not say when Plex's databases are checked";
       grep -E "plex" "$WORK/apply-migrate.txt" | head -5; fail=1; }
@@ -8924,11 +8940,11 @@ migrate_box() {
     { echo "the run did not name the snapshot it read"; fail=1; }
   grep -qF "chart: s5n ${CHART_VERSION} (${CHART_REPO}:${CHART_VERSION})" "$WORK/apply-migrate.txt" ||
     { echo "box did not pull ${CHART_REPO}:${CHART_VERSION}"; fail=1; }
-  # The confirm says what the snapshot left behind, once: an operator deciding
-  # to copy a Plex config reads that its artwork is not in it.
-  grep -qE "^  · plex +carried Preferences.xml and its databases; Plex rebuilds its metadata, artwork and thumbnails \(artwork uploaded by hand is not carried\)" \
+  # The confirm says what the snapshot carried, once: an operator deciding to
+  # copy a Plex config reads that its artwork and preview thumbnails are in it.
+  grep -qE "^  · plex +carried its whole data -- metadata, artwork, thumbnails and its databases -- except the caches, codecs, logs and crash reports Plex rebuilds or downloads again" \
     "$WORK/apply-migrate.txt" ||
-    { echo "apply's confirm does not say what Plex's snapshot left behind"; fail=1; }
+    { echo "apply's confirm does not say what Plex's snapshot carried"; fail=1; }
   # The box it installed runs nothing the plan migrates: the apps went in off,
   # and the adoption is what switches them on. The receipt for that empty
   # release is ok, which is what `box apply` waits on.
@@ -8982,7 +8998,7 @@ migrate_box() {
   # own image. The confirm's row counts them all as paths; which column and how
   # many times is the snapshot's report and --details, and the database itself
   # is read back below.
-  grep -qE "^  ✓ plex +[0-9.]+ (KiB|MiB|GiB) · [1-9][0-9,]* paths" "$WORK/apply-migrate.txt" ||
+  grep -qE "^  ✓ plex +[0-9.]+ (KiB|MiB|GiB) · its whole data: metadata, artwork and thumbnails · [1-9][0-9,]* paths$" "$WORK/apply-migrate.txt" ||
     { echo "the plan's Plex row does not count the paths the runner rewrote:"; grep -E "plex" "$WORK/apply-migrate.txt" | head -5; fail=1; }
   # autobrr and qui allow exactly one account and box owns it, so a source's
   # account has to become box's; the confirm says so once per app, with the name
@@ -9367,22 +9383,22 @@ PY
     [ -f "$CONFIG_PATH/${instance}/.s5n-e2e-source" ] ||
       { echo "${CONFIG_PATH}/${instance}/ holds no marker: migrate did not copy the whole config directory"; fail=1; }
   done
-  # Plex's config is its state, so its directory on the box holds the
-  # preferences and the databases and none of the library. Plex serving on those
-  # files is the Plex assertion below, which is what says a trimmed copy is one
-  # it can run. Plex makes its own Metadata and Cache directories when it
-  # starts, so what says the library was not carried is the two cover files this
-  # script put in the source's trees, and the whole-tree marker: Plex never
-  # writes those.
+  # Plex's config travels as its whole data, so the box has its preferences, its
+  # databases and the Metadata and Media trees this script put in the source --
+  # the artwork and preview thumbnails a migration exists to save Plex building
+  # again -- and neither the Cache it rebuilds nor the file beside its home.
+  # Plex serving on those files is the Plex assertion below.
   plex_home="$CONFIG_PATH/plex/Library/Application Support/Plex Media Server"
   for carried in "$plex_home/Preferences.xml" \
-                 "$plex_home/Plug-in Support/Databases/com.plexapp.plugins.library.db"; do
+                 "$plex_home/Plug-in Support/Databases/com.plexapp.plugins.library.db" \
+                 "$plex_home/${PLEX_CARRIED_POSTER}" \
+                 "$plex_home/${PLEX_CARRIED_BIF}"; do
     [ -f "$carried" ] ||
-      { echo "${CONFIG_PATH}/plex/ holds none of the state a Plex snapshot carries (${carried} is not there)"; fail=1; }
+      { echo "${CONFIG_PATH}/plex/ holds none of what a Plex snapshot carries (${carried} is not there)"; fail=1; }
   done
-  for left in ".s5n-e2e-source" "Metadata/Posters/poster.jpg" "Cache/PhotoTranscoder/thumb.jpg"; do
+  for left in ".s5n-e2e-source" "${PLEX_LEFT_CACHE}"; do
     if [ -e "$CONFIG_PATH/plex/${left}" ]; then
-      echo "${CONFIG_PATH}/plex/${left} is on the box, and a Plex snapshot carries neither its library nor its whole config tree"; fail=1
+      echo "${CONFIG_PATH}/plex/${left} is on the box, and a Plex snapshot carries neither its caches nor its whole config mount"; fail=1
     fi
   done
 
@@ -9830,10 +9846,11 @@ migrate_keep_box() {
   done
   grep -q "^wiring ok" "$WORK/keep-cutover.txt" ||
     { echo "box did not report a healthy receipt for the seedbox it installed beside the source"; fail=1; }
-  # Plex's snapshot is its state, and the run says so once, in the report and in
-  # the confirm the operator answers.
-  grep -qF "carried Preferences.xml and its databases" "$WORK/keep-cutover.txt" ||
-    { echo "the keep path does not say what Plex's snapshot leaves behind"; fail=1; }
+  # Plex's snapshot is its whole data here (the fixture is a few hundred bytes,
+  # so there is room), and the run says so once, in the report and in the confirm
+  # the operator answers.
+  grep -qF "plex: carried its whole data" "$WORK/keep-cutover.txt" ||
+    { echo "the keep path does not say what Plex's snapshot carries"; fail=1; }
   # What the migration did, named before it did it: the two renames, the kept keys
   # and the connections adopted by id.
   grep -qE "^  ✓ data +Downloads → downloads · library → media · media: 4K/Movies → movies-4k · 4K/TV → tv-4k · Movies → movies · TV → tv$" \
@@ -9964,22 +9981,22 @@ migrate_keep_box() {
     [ -f "$CONFIG_PATH/${instance}/.s5n-e2e-source" ] ||
       { echo "${CONFIG_PATH}/${instance}/ holds no marker: migrate did not copy the whole config directory"; fail=1; }
   done
-  # Plex's config is its state, so its directory on the box holds the
-  # preferences and the databases and none of the library. Plex serving on those
-  # files is the Plex assertion below, which is what says a trimmed copy is one
-  # it can run. Plex makes its own Metadata and Cache directories when it
-  # starts, so what says the library was not carried is the two cover files this
-  # script put in the source's trees, and the whole-tree marker: Plex never
-  # writes those.
+  # Plex's config travels as its whole data, so the box has its preferences, its
+  # databases and the Metadata and Media trees this script put in the source --
+  # the artwork and preview thumbnails a migration exists to save Plex building
+  # again -- and neither the Cache it rebuilds nor the file beside its home.
+  # Plex serving on those files is the Plex assertion below.
   plex_home="$CONFIG_PATH/plex/Library/Application Support/Plex Media Server"
   for carried in "$plex_home/Preferences.xml" \
-                 "$plex_home/Plug-in Support/Databases/com.plexapp.plugins.library.db"; do
+                 "$plex_home/Plug-in Support/Databases/com.plexapp.plugins.library.db" \
+                 "$plex_home/${PLEX_CARRIED_POSTER}" \
+                 "$plex_home/${PLEX_CARRIED_BIF}"; do
     [ -f "$carried" ] ||
-      { echo "${CONFIG_PATH}/plex/ holds none of the state a Plex snapshot carries (${carried} is not there)"; fail=1; }
+      { echo "${CONFIG_PATH}/plex/ holds none of what a Plex snapshot carries (${carried} is not there)"; fail=1; }
   done
-  for left in ".s5n-e2e-source" "Metadata/Posters/poster.jpg" "Cache/PhotoTranscoder/thumb.jpg"; do
+  for left in ".s5n-e2e-source" "${PLEX_LEFT_CACHE}"; do
     if [ -e "$CONFIG_PATH/plex/${left}" ]; then
-      echo "${CONFIG_PATH}/plex/${left} is on the box, and a Plex snapshot carries neither its library nor its whole config tree"; fail=1
+      echo "${CONFIG_PATH}/plex/${left} is on the box, and a Plex snapshot carries neither its caches nor its whole config mount"; fail=1
     fi
   done
 

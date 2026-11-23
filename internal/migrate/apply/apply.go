@@ -32,7 +32,9 @@ import (
 	"strings"
 
 	"github.com/swizzin/s5n/internal/migrate/plan"
+	"github.com/swizzin/s5n/internal/migrate/plex"
 	"github.com/swizzin/s5n/internal/migrate/rewrite"
+	"github.com/swizzin/s5n/internal/migrate/space"
 )
 
 // ErrCancelled says the operator answered no, or could not be asked. Nothing
@@ -58,6 +60,11 @@ type Env struct {
 	// never following a link (own.go). Nil means os.Lchown; a test that
 	// cannot change an owner records the calls instead.
 	Chown func(path string, uid, gid int) error
+	// Disk answers the one question a run asks about room: an app whose whole
+	// data the snapshot carries is staged whole only when the config root can
+	// hold it (carry.go). Nil means the host's own filesystems; a test that
+	// needs a short disk hands over its own.
+	Disk space.Disk
 	// Targets is where every instance answers inside the release (chart.go,
 	// Targets).
 	Targets map[string]rewrite.Endpoint
@@ -94,10 +101,6 @@ type Env struct {
 	// app would act on the network with nothing else to stop it writes its
 	// state quiet.
 	Rehearsal bool
-	// Carried are the notes about what a snapshot does not hold of an app's
-	// config, built by the caller that opened it: the confirm shows each once,
-	// with the app it belongs to.
-	Carried []Carried
 	// deferred is Survey's mode, set by Survey itself and never by a caller: an
 	// app whose rewriter needs its own image (NeedsRunner) is checked after the
 	// install instead, because this pass runs before there is a box to run one
@@ -150,12 +153,13 @@ type Summary struct {
 	// DefaultRules are the plan's own decisions in a form a grouped screen can
 	// count them by: Defaults is the same list as the lines a report prints.
 	DefaultRules []plan.Default
-	// Carried are the notes about the part of a config a snapshot does not
-	// hold, in the app's own words: Plex's is preferences and databases only.
+	// Carried are the notes about what each app's staged config holds, the
+	// app's own words: Plex's is its whole data, or its state alone.
 	Carried []Carried
 }
 
-// Carried is one app's note about what the snapshot did not carry.
+// Carried is one app's note about what its staged config holds: its whole data,
+// or the state alone with what the app builds again.
 type Carried struct {
 	App  string
 	Note string
@@ -194,6 +198,14 @@ type InstanceSummary struct {
 	// It is empty for every app the pass checked, and for every row a run after
 	// the install shows.
 	Deferred string
+	// Carry is what this run stages out of an app whose config is more than its
+	// state: its whole data, or the state it cannot rebuild. Empty for every app
+	// whose config is its state.
+	Carry string
+	// Short is the line with the numbers, when this run carries less than the
+	// plan says because there is no room at the config root. It is the one thing
+	// a summary shows that the plan did not: the confirm owes the operator it.
+	Short string
 }
 
 // Lines renders the summary as rows: one per change, note, rename, instance
@@ -208,6 +220,12 @@ func (s Summary) Lines() []string {
 	for _, in := range s.Instances {
 		if in.Staged.Files > 0 {
 			rows = append(rows, fmt.Sprintf("%s: copy %d files, %s", in.App, in.Staged.Files, bytesText(in.Staged.Bytes)))
+		}
+		if in.Carry != "" {
+			rows = append(rows, fmt.Sprintf("%s: carries %s", in.App, in.Carry))
+		}
+		if in.Short != "" {
+			rows = append(rows, in.Short)
 		}
 		if in.Deferred != "" {
 			rows = append(rows, fmt.Sprintf("%s: %s", in.App, in.Deferred))
@@ -325,6 +343,9 @@ type migration struct {
 	// deferred are the apps a Survey pass could not check: their rewriter runs
 	// the app's own image, and this pass runs before the box that has one.
 	deferred map[string]bool
+	// carry is what this run stages for each app whose config is more than its
+	// state (carry.go), settled before the first byte is copied.
+	carry map[string]carryDecision
 	// keys are the API keys read out of the staged copies, waiting for step 8,
 	// and keyNames is the same set as names for the summary.
 	keys     []keptKey
@@ -570,10 +591,14 @@ func planApps(p *plan.Plan) []string {
 }
 
 // stage is step 2: the whole of every source config directory, verbatim, into
-// the staging tree.
+// the staging tree; less, for an app whose config is more than its state, when
+// this run finds no room for the whole of it (carry.go).
 func (m *migration) stage(ctx context.Context) error {
 	if err := os.MkdirAll(m.dir, 0o755); err != nil {
 		return fmt.Errorf("create %s: %w", m.dir, err)
+	}
+	if err := m.decideCarry(); err != nil {
+		return err
 	}
 	for _, name := range planApps(m.p) {
 		if err := ctx.Err(); err != nil {
@@ -584,7 +609,7 @@ func (m *migration) stage(ctx context.Context) error {
 			return fmt.Errorf("clear %s: %w", dst, err)
 		}
 		src := filepath.Join(m.env.Configs, name)
-		staged, err := m.copyInto(dst, src)
+		staged, err := m.copyInto(name, dst, src)
 		if err != nil {
 			return fmt.Errorf("stage %s from %s: %w", name, src, err)
 		}
@@ -597,9 +622,35 @@ func (m *migration) stage(ctx context.Context) error {
 // copyInto is the copy one pass makes: a run stages what the release will run
 // and owns it as the seedbox's user; a Survey pass only measures the same bytes,
 // and the tree it counts is thrown away.
-func (m *migration) copyInto(dst, src string) (Staged, error) {
+//
+// Two apps are copied less than their whole config: one whose config is more than
+// its state, whose staged copy is the tree this run decided it can hold
+// (carry.go), and -- for the pass before an install -- the same app measured by a
+// walk rather than copied, because a library of covers is tens of gigabytes and
+// that pass stages into a temporary directory it removes.
+func (m *migration) copyInto(name, dst, src string) (Staged, error) {
+	treeApp := CatalogApp(name, m.env.Catalog) == appPlex
+	carry := m.carryOf(name)
 	if m.env.deferred {
+		if treeApp {
+			state := plex.Snapshot(false)
+			if carry.Full {
+				files, bytes, err := space.Tally(src, nil)
+				if err != nil {
+					return Staged{}, err
+				}
+				return Staged{Files: files, Bytes: bytes}, nil
+			}
+			names := make([]string, len(state.Files))
+			for i, f := range state.Files {
+				names[i] = f.Path
+			}
+			return measureFiles(dst, carriedDir(src, state.Sub), names)
+		}
 		return measureTree(dst, src)
+	}
+	if treeApp && !carry.Full {
+		return stageTrimmed(dst, src, plex.Snapshot(false), m.env.PUID, m.env.PGID)
 	}
 	return copyTree(dst, src, m.env.PUID, m.env.PGID)
 }
@@ -714,8 +765,12 @@ func (m *migration) summary() Summary {
 		Outside:      append([]string(nil), m.p.Outside...),
 		Defaults:     m.p.Defaults(),
 		DefaultRules: m.p.DefaultRules(),
-		Carried:      append([]Carried(nil), m.env.Carried...),
 		Rehearsal:    m.env.Rehearsal,
+	}
+	for _, name := range planApps(m.p) {
+		if note, _ := m.carried(name); note != "" {
+			s.Carried = append(s.Carried, Carried{App: name, Note: note})
+		}
 	}
 	// A rehearsal renames nothing (renameData), so its summary lists nothing
 	// to rename.
@@ -748,6 +803,10 @@ func (m *migration) summary() Summary {
 		if m.deferred[name] {
 			in.Deferred = deferredSentence(CatalogApp(name, m.env.Catalog))
 		}
+		if _, phrase := m.carried(name); phrase != "" {
+			in.Carry = phrase
+		}
+		in.Short = m.carryOf(name).Short
 		for _, st := range m.res.Staged {
 			if st.App == name {
 				in.Staged = st

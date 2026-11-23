@@ -231,9 +231,22 @@ func cutover(ctx context.Context, o cutoverOptions, out say.Reporter, seams cuto
 	}
 
 	path := freeSnapshotPath(o.discoverOptions, archive.ModeFinal)
-	// What the snapshot does not carry is part of the page: Plex's metadata
-	// stays on the source, and the operator reads that once, here.
-	read.report.Notes = append(read.report.Notes, skipLines(read.plan)...)
+	// What the snapshot carries is settled before it is written: on a host that
+	// already has a box this run writes the snapshot and the seedbox's copy on
+	// one machine, so Plex's whole data has to fit twice.
+	if o.apply != nil && o.apply.grantPath != nil {
+		o.TargetConfig = targetConfigPath(*o.apply.grantPath)
+	}
+	short, err := decideSnapshotCarry(&read, o.discoverOptions, path, archive.ModeFinal)
+	if err != nil {
+		out.Line(discoveryReport(read.plan, read.report, "", read.settled, err))
+		return err
+	}
+	// What the snapshot carries and does not is part of the page: Plex's caches,
+	// and its whole library when one does not fit. The operator reads that once,
+	// here.
+	read.report.Notes = append(read.report.Notes, carryLines(read.plan)...)
+	read.report.Notes = append(read.report.Notes, short...)
 	if err := encodeRead(&read); err != nil {
 		return err
 	}
@@ -311,6 +324,28 @@ func addCutoverApplyFlags(fs *flag.FlagSet, kubeconfig *string) *migrateApplyFla
 	o.yes = fs.Bool("yes", false, "apply without asking")
 	o.kubeconfig = kubeconfig
 	return o
+}
+
+// targetConfigPath is the config path this host's own grant names, or "" when it
+// has no box (or a grant it cannot read). It is the second place a cutover's
+// snapshot is written to, on the host that is both ends of the one migration.
+func targetConfigPath(grantPath string) string {
+	sb, err := seedbox.Load(grantPath, "")
+	if err != nil {
+		// No grant is a host with no box, which writes no copy; a grant box
+		// cannot read is the install's refusal to make, not this check's.
+		return ""
+	}
+	vols, err := sb.Storage()
+	if err != nil {
+		return ""
+	}
+	for _, v := range vols {
+		if v.Kind == volumeConfig {
+			return v.Path
+		}
+	}
+	return ""
 }
 
 // surveyPath is where the read a refusal keeps goes: beside the final snapshot

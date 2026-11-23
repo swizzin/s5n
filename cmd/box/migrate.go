@@ -35,6 +35,8 @@ import (
 	"github.com/swizzin/s5n/internal/migrate/bundle"
 	"github.com/swizzin/s5n/internal/migrate/discover"
 	"github.com/swizzin/s5n/internal/migrate/plan"
+	"github.com/swizzin/s5n/internal/migrate/plex"
+	"github.com/swizzin/s5n/internal/migrate/space"
 	"github.com/swizzin/s5n/internal/release"
 	"github.com/swizzin/s5n/internal/say"
 	"github.com/swizzin/s5n/internal/seedbox"
@@ -51,13 +53,20 @@ commands:
   cutover     take the final snapshot on the source host, then install or adopt
   apply       install or adopt from a snapshot
 
-box migrate discover [--rehearsal] [--out <file>] [--from-dir <manifests>] [--kubeconfig <file>] [--namespace <ns> ...] [--root <dir>] [--plain] [--chart-repo <ref>] [--chart-version <tag>]
-box migrate cutover [--replace-cluster] [--no-prior-discover] [--out <file>] [--from-dir <manifests>] [--kubeconfig <file>] [--namespace <ns> ...] [--root <dir>] [--chart-repo <ref>] [--chart-version <tag>] [--values <file>] [--yes] [--plain]
+box migrate discover [--rehearsal] [--plex-minimal] [--out <file>] [--from-dir <manifests>] [--kubeconfig <file>] [--namespace <ns> ...] [--root <dir>] [--plain] [--chart-repo <ref>] [--chart-version <tag>]
+box migrate cutover [--replace-cluster] [--no-prior-discover] [--plex-minimal] [--out <file>] [--from-dir <manifests>] [--kubeconfig <file>] [--namespace <ns> ...] [--root <dir>] [--chart-repo <ref>] [--chart-version <tag>] [--values <file>] [--yes] [--plain]
 box migrate apply [<snapshot>] [--values <file>] [--grant <file>] [--kubeconfig <file>] [--yes] [--plain] [--chart-repo <ref>] [--chart-version <tag>]
 
 A snapshot is one file in ` + bundle.Dir + `/ (or where --out names it). discover writes a
 survey -- the plan, the report and the source's manifests, no configs -- and --rehearsal
 adds the configs a locked rehearsal applies. cutover writes the final snapshot apply runs.
+
+A snapshot carries Plex's whole data -- its metadata, artwork and thumbnails, which is
+hours of the machine's time it does not have to build again -- when there is room for it
+wherever it is written: in the snapshot's directory, and on a host that is both ends of
+the migration, beside the seedbox's config too. Where there is not, it carries Plex's
+preferences and databases, says so with the numbers, and Plex builds the rest again.
+--plex-minimal asks for that, whatever the room.
 
 cutover compares its read with the newest earlier snapshot of the same source (the host and
 the namespaces in its plan): an app that read had and this one cannot find stops the run,
@@ -149,6 +158,21 @@ type discoverOptions struct {
 	Prompt setup.Prompter
 	// Plain is --plain: ask with line prompts even on a terminal.
 	Plain bool
+	// PlexMinimal is --plex-minimal: carry Plex's preferences and its databases
+	// only, and let it rebuild its metadata and artwork. Without it a snapshot
+	// carries Plex's whole data when there is room for it where it is written.
+	PlexMinimal bool
+	// TargetConfig is the config path this host's own seedbox already names,
+	// when it has one: a host that is both ends of the migration writes the
+	// snapshot and the seedbox's copy on one machine, so the room a full Plex
+	// snapshot needs is there twice. Empty on a read with no box to ask.
+	TargetConfig string
+	// Disk answers the room questions a full carry asks, and CarrySize is how
+	// many bytes a full carry of one app's config directory takes. Nil means the
+	// real ones; a test with a disk that is too small, or one whose tree it does
+	// not want to build, hands over its own.
+	Disk      space.Disk
+	CarrySize func(instance, dir string) (int64, error)
 }
 
 func (o discoverOptions) clock() time.Time {
@@ -165,6 +189,7 @@ func addDiscoverFlags(fs *flag.FlagSet, o *discoverOptions, outUsage string) *na
 	fs.StringVar(&o.FromDir, "from-dir", "", "read the source's manifests from this directory instead of a cluster")
 	fs.StringVar(&o.Kubeconfig, "kubeconfig", "", "explicit kubeconfig for the source cluster, or fail with no fallback")
 	fs.StringVar(&o.Root, "root", "/", "the host root the apps' config directories are read under")
+	fs.BoolVar(&o.PlexMinimal, "plex-minimal", false, "carry Plex's preferences and databases only, and let it rebuild its metadata and artwork")
 	var ns namespaces
 	fs.Var(&ns, "namespace", "limit discovery to this source namespace (repeatable; default every namespace)")
 	return &ns
@@ -257,10 +282,20 @@ func migrateDiscover(ctx context.Context, o discoverOptions, out say.Reporter) (
 	// The file is named before it is written, so the report inside it can name
 	// it: the operator reads one page that says where the snapshot is.
 	path := freeSnapshotPath(o, mode)
-	// What the snapshot does not carry is part of that page: Plex's metadata
-	// stays on the source, and the operator reads that once, here.
+	// What the snapshot carries is settled before it is written: Plex's whole
+	// data when there is room, its state when there is not, and that decision
+	// goes into the plan apply reads.
+	short, err := decideSnapshotCarry(&read, o, path, mode)
+	if err != nil {
+		read.text = discoveryReport(read.plan, read.report, "", read.settled, err)
+		return read.text, err
+	}
+	// What the snapshot does not carry is part of that page: Plex's caches, and
+	// its whole library when one does not fit. The operator reads that once,
+	// here.
 	if mode != archive.ModeSurvey {
-		read.report.Notes = append(read.report.Notes, skipLines(read.plan)...)
+		read.report.Notes = append(read.report.Notes, carryLines(read.plan)...)
+		read.report.Notes = append(read.report.Notes, short...)
 	}
 	if err := encodeRead(&read); err != nil {
 		read.text = discoveryReport(read.plan, read.report, "", read.settled, err)
@@ -427,18 +462,137 @@ func writeSnapshot(path string, mode archive.Mode, o discoverOptions, read migra
 				Dir:      filepath.Join(root, read.plan.Apps[name].Config),
 			}
 			// An app whose config is more than its state (Plex: a library of
-			// covers beside its databases) travels as the files discovery's
-			// table names. Every other app's whole tree goes in.
-			if carry, ok := discover.SnapshotCarry(name); ok {
-				app.Files = make([]bundle.File, len(carry.Files))
-				for i, f := range carry.Files {
-					app.Files[i] = bundle.File{Path: f.Path, Required: f.Required}
+			// covers and thumbnails beside its databases) travels as the tree
+			// or the files the plan says it carries. Every other app's whole
+			// tree goes in.
+			if carry, ok := discover.SnapshotCarry(name, read.plan.Apps[name].Carry == plan.CarryFull); ok {
+				app.Sub = carry.Sub
+				if home, err := plex.Home(app.Dir); err == nil {
+					app.Sub = home
+				}
+				if carry.Full {
+					app.Skip = carry.Skip
+				} else {
+					app.Files = make([]bundle.File, len(carry.Files))
+					for i, f := range carry.Files {
+						app.Files[i] = bundle.File{Path: f.Path, Required: f.Required}
+					}
 				}
 			}
 			s.Configs = append(s.Configs, app)
 		}
 	}
 	return bundle.Write(path, s)
+}
+
+// decideSnapshotCarry settles what a snapshot carries out of each app whose
+// config is more than its state, and writes that into the plan: the whole data
+// when there is room for it wherever it is written, its state alone when there
+// is not or when the operator asked for that with --plex-minimal.
+//
+// It returns the one line per app that did not fit, with the numbers, for the
+// report and the screen: a run that carries less than it could says why, and a
+// survey (which copies no config) settles the plan's answer without measuring
+// anything.
+func decideSnapshotCarry(read *migrationRead, o discoverOptions, path string, mode archive.Mode) ([]string, error) {
+	if read.plan == nil {
+		return nil, nil
+	}
+	root := o.Root
+	if root == "" {
+		root = "/"
+	}
+	var places []space.Place
+	var short []string
+	for _, name := range sortedKeys(read.plan.Apps) {
+		// ok says this is an app whose config is more than its state, which is
+		// the one app a snapshot's scope is a choice for.
+		if _, ok := discover.SnapshotCarry(name, true); !ok {
+			continue
+		}
+		app := read.plan.Apps[name]
+		full := !o.PlexMinimal
+		var why string
+		if full && mode != archive.ModeSurvey {
+			dir := filepath.Join(root, app.Config)
+			size, err := o.carrySize(name, dir)
+			if err != nil {
+				return nil, fmt.Errorf("%s: its whole data would be carried, and box cannot size %s: %w", name, dir, err)
+			}
+			if places == nil {
+				if places, err = o.writePlaces(path); err != nil {
+					return nil, err
+				}
+			}
+			if v := space.Choose(size, places); !v.Fits() {
+				full = false
+				why = fmt.Sprintf("%s: its whole data needs %s and %s is free at %s; carried its state instead, so Plex builds its artwork, thumbnails and detection again",
+					name, space.Human(v.Need), space.Human(v.Short.Free), v.Short.Path)
+			}
+		}
+		if full {
+			app.Carry = plan.CarryFull
+		} else {
+			app.Carry = plan.CarryMinimal
+		}
+		read.plan.Apps[name] = app
+		if why != "" {
+			short = append(short, why)
+		}
+	}
+	return short, nil
+}
+
+// writePlaces is the filesystems a full carry is written to: the one the
+// snapshot file goes to, and -- on a host whose own seedbox already names a
+// config path -- the target's, which is then a second copy. One filesystem
+// holding both counts the tree twice, which is what makes a same-host cutover
+// check the room it really needs.
+func (o discoverOptions) writePlaces(snapshot string) ([]space.Place, error) {
+	dir := filepath.Dir(snapshot)
+	free, err := o.freeAt(dir)
+	if err != nil {
+		return nil, fmt.Errorf("the room a snapshot needs at %s: %w", dir, err)
+	}
+	places := []space.Place{{Path: dir, Free: free, Copies: 1}}
+	if strings.TrimSpace(o.TargetConfig) == "" {
+		return places, nil
+	}
+	same, err := o.disk().Same(dir, o.TargetConfig)
+	if err != nil {
+		return nil, fmt.Errorf("the room a snapshot needs beside %s: %w", o.TargetConfig, err)
+	}
+	if same {
+		places[0].Copies = 2
+		return places, nil
+	}
+	free, err = o.freeAt(o.TargetConfig)
+	if err != nil {
+		return nil, fmt.Errorf("the room a snapshot needs at %s: %w", o.TargetConfig, err)
+	}
+	return append(places, space.Place{Path: o.TargetConfig, Free: free}), nil
+}
+
+// freeAt is how much room a filesystem has, through the caller's answer when it
+// gave one.
+func (o discoverOptions) freeAt(path string) (int64, error) { return o.disk().Free(path) }
+
+// disk is the filesystems this read asks about, or the host's own.
+func (o discoverOptions) disk() space.Disk {
+	if o.Disk != nil {
+		return o.Disk
+	}
+	return space.Real{}
+}
+
+// carrySize is how many bytes a full carry of one app's config directory takes,
+// through the caller's answer when it gave one.
+func (o discoverOptions) carrySize(instance, dir string) (int64, error) {
+	if o.CarrySize != nil {
+		return o.CarrySize(instance, dir)
+	}
+	size, _, err := discover.SnapshotSize(instance, dir)
+	return size, err
 }
 
 // discoverSource picks what discovery reads: a saved directory when the caller
@@ -604,11 +758,11 @@ func discoveryReport(p *plan.Plan, rep discover.Report, out string, settled appl
 	return b.String()
 }
 
-// skipLines is what a read says about the parts of a config its snapshot does
-// not carry: one line per planned app whose config is more than its state, said
-// once, in the report the snapshot holds and on the screen the operator reads.
-// Nothing is said on a survey, which carries no configs at all.
-func skipLines(p *plan.Plan) []string {
+// carryLines is what a read says about what its snapshot carries out of an
+// app's config directory: one line per planned app whose config is more than its
+// state, said once, in the report the snapshot holds and on the screen the
+// operator reads. Nothing is said on a survey, which carries no configs at all.
+func carryLines(p *plan.Plan) []string {
 	if p == nil {
 		return nil
 	}
@@ -619,7 +773,8 @@ func skipLines(p *plan.Plan) []string {
 	sort.Strings(names)
 	var out []string
 	for _, name := range names {
-		if carry, ok := discover.SnapshotCarry(name); ok && carry.Note != "" {
+		carry, ok := discover.SnapshotCarry(name, p.Apps[name].Carry == plan.CarryFull)
+		if ok && carry.Note != "" {
 			out = append(out, carry.Note)
 		}
 	}
