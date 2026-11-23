@@ -824,8 +824,9 @@ spec:
     # The live task stream is a Server-Sent Events connection that has to stay
     # open, and Envoy's route timeout defaults to 15s, which would cut it: the
     # UI's log and task views would go quiet with nothing in the logs to say
-    # why. So this one path asks for no request timeout (Gateway API reads "0s"
-    # as "none") and every other path keeps the default. Gateway API sends a
+    # why. It asks for no request timeout (Gateway API reads "0s" as "none"),
+    # as every app rule below does too; it is a rule of its own for the
+    # stream's path, kept so the reason is written next to it. Gateway API sends a
     # request to the rule with the longest matching path prefix, so the stream
     # takes this rule and the rest of /maintainerr the one below.
     - matches:
@@ -846,6 +847,12 @@ spec:
             {{- else }}
             value: {{ $urlBase }}
             {{- end }}
+      # No request timeout (Gateway API reads "0s" as none). Envoy's 15s default
+      # cut real work off mid-way: autobrr cleaning a large releases database
+      # answered 504 and the app's own request was cancelled with it. Every
+      # app here is behind the one login, so a long request is its person's.
+      timeouts:
+        request: 0s
       {{- if and (eq $exposure "path") $cfg.rewritePath }}
       filters:
         - type: URLRewrite
