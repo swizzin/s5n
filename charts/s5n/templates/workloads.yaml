@@ -801,6 +801,25 @@ spec:
   {{- end }}
   {{- end }}
   rules:
+    {{- if eq $exposure "path" }}
+    # The prefix without its slash is a redirect to the prefix with it. An app
+    # that mounts its routes under its base URL as a string (autobrr's
+    # `r.Mount(routeBaseURL, ...)` with "/autobrr/") answers nothing at
+    # "/autobrr", so a link or a typed address that drops the slash would be a
+    # dead end; every app served under a path gets the same rule, so none is.
+    # An Exact match outranks the PathPrefix rule below for this one path.
+    - matches:
+        - path:
+            type: Exact
+            value: {{ $urlBase }}
+      filters:
+        - type: RequestRedirect
+          requestRedirect:
+            path:
+              type: ReplaceFullPath
+              replaceFullPath: {{ printf "%s/" $urlBase }}
+            statusCode: 301
+    {{- end }}
     {{- if and (eq $exposure "path") (eq $inst.app "maintainerr") }}
     # The live task stream is a Server-Sent Events connection that has to stay
     # open, and Envoy's route timeout defaults to 15s, which would cut it: the
