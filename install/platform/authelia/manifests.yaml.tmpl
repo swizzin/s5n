@@ -263,10 +263,21 @@ spec:
       - x-forwarded-proto
       # Accept, because Authelia's ext-authz answer depends on it: it replies
       # 401 to an XHR or to a request that does not accept text/html, and 302
-      # to the portal otherwise (handler_authz_util.go: getAuthzRedirectStatusCode,
-      # 4.39.28). Without the header every browser gets a bare 401 with a
-      # Location it will not follow, and the portal is unreachable.
+      # to the portal otherwise (handler_authz_util.go's
+      # getAuthzRedirectStatusCode, 4.39.28). Without the header every browser
+      # gets a bare 401 with a Location it will not follow, and the portal is
+      # unreachable. Measured against the pinned image: `Accept: application/json`
+      # (an SPA's own fetch) is a 401, `text/html` (a navigation) is the
+      # portal's 302, and `*/*` -- which is what a fetch with no Accept of its
+      # own sends -- is read as accepting text/html, so that one is a 302 too.
       - accept
+      # X-Requested-With is the other half of the same rule
+      # (middlewares.AutheliaCtx.IsXHR): a client that marks its call as an XHR
+      # gets the 401 even when its Accept would read as a navigation, and
+      # several app pages mark exactly that way (qui's own front end, the
+      # wiring Job). It is not one of Envoy's five defaults, so without this
+      # line the header never arrives and the rule cannot fire.
+      - x-requested-with
     # Fail closed: an unreachable login refuses the request rather than serving
     # the app.
     failOpen: false

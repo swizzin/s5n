@@ -1524,8 +1524,12 @@ assert_front_door() {
 
   # Without a cookie the answer is the portal's redirect: the app is behind the
   # login, and what stands in front of it is root's, not the app's own form.
+  # Accept is a browser's navigation, spelled out: curl's own default is "*/*",
+  # which Authelia reads as accepting text/html, so the header this assertion
+  # is about would never be the one under test.
   : >"$hdrs"
   code=$(curl -sS -o /dev/null -D "$hdrs" -w '%{http_code}' \
+    -H 'Accept: text/html,application/xhtml+xml' \
     --resolve "${DOMAIN}:443:${addr}" "${ca_args[@]}" "https://${DOMAIN}/tautulli/" \
     2>"$WORK/front-door.err" || true)
   location=$(sed -n 's/^[Ll]ocation: *//p' "$hdrs" | tr -d '\r' | head -1)
@@ -1536,6 +1540,31 @@ assert_front_door() {
     "https://${DOMAIN}/auth/"*) : ;;
     *) echo "/tautulli/ sent the browser to ${location}, not the portal: the app is not behind the login"; fail=1 ;;
   esac
+
+  # A page's own background call is not a navigation, and an SPA reads a 302 to
+  # the login page as a broken endpoint: the edge answers 401 when the request
+  # says it wants JSON (Accept: application/json) and when it marks itself as an
+  # XHR (X-Requested-With: XMLHttpRequest -- Authelia's IsXHR, which the
+  # SecurityPolicy has to forward for it to arrive at all). The navigation
+  # above stays a 302, so a browser tab still lands on the sign-in page.
+  : >"$hdrs"
+  code=$(curl -sS -o /dev/null -D "$hdrs" -w '%{http_code}' \
+    -H 'Accept: application/json' \
+    --resolve "${DOMAIN}:443:${addr}" "${ca_args[@]}" "https://${DOMAIN}/tautulli/api/v2" \
+    2>"$WORK/front-door.err" || true)
+  echo "  front door: /tautulli/api/v2 with no cookie, Accept: application/json: ${code}"
+  [ "$code" = 401 ] ||
+    { echo "/tautulli/api/v2 answered ${code} to a JSON request with no session, want 401: an SPA reads a redirect to the login as a broken endpoint"; fail=1; }
+  # The same call the way a page marks its own XHRs, with the Accept a fetch
+  # leaves alone ("*/*", which Authelia would otherwise read as a navigation).
+  : >"$hdrs"
+  code=$(curl -sS -o /dev/null -D "$hdrs" -w '%{http_code}' \
+    -H 'Accept: */*' -H 'X-Requested-With: XMLHttpRequest' \
+    --resolve "${DOMAIN}:443:${addr}" "${ca_args[@]}" "https://${DOMAIN}/tautulli/api/v2" \
+    2>"$WORK/front-door.err" || true)
+  echo "  front door: /tautulli/api/v2 with no cookie, X-Requested-With: ${code}"
+  [ "$code" = 401 ] ||
+    { echo "/tautulli/api/v2 answered ${code} to an XHR with no session, want 401: the header does not reach the login, or the login ignores it"; fail=1; }
 
   # Signed in, the app's own redirect stays inside the prefix it is served
   # under, and the page it points at renders. Only the redirect's path is the
@@ -1954,6 +1983,18 @@ print("  app routes: %d HTTPRoutes, none pins a sectionName" % len(items))
   case " ${policy_headers} " in
     *" cookie "*) ;;
     *) echo "headersToExtAuth = [${policy_headers}]: without cookie every request is anonymous"; fail=1 ;;
+  esac
+  # Accept and X-Requested-With are what Authelia answers a page's own call
+  # with: a 401 when the request is not a navigation, and the portal's 302 when
+  # it is. Neither is among Envoy's ext_authz defaults, so both have to be
+  # named here or the rule cannot fire.
+  case " ${policy_headers} " in
+    *" accept "*) ;;
+    *) echo "headersToExtAuth = [${policy_headers}]: every request would be answered as a navigation, including a page's own XHR"; fail=1 ;;
+  esac
+  case " ${policy_headers} " in
+    *" x-requested-with "*) ;;
+    *) echo "headersToExtAuth = [${policy_headers}]: a client that marks its call as an XHR has the mark dropped before the login sees it"; fail=1 ;;
   esac
   # The endpoint asks for the session cookie and nothing else. No header an app
   # sends can then decide whether a signed-in person is let in -- an empty

@@ -363,6 +363,13 @@ func TestApplyWritesTheLogin(t *testing.T) {
 	if !contains(headers, "accept") {
 		t.Errorf("spec.extAuth.headersToExtAuth = %v: Authelia answers 401 instead of redirecting to the portal", headers)
 	}
+	// X-Requested-With is the other half of the same rule (IsXHR): a page's own
+	// call gets the 401 even when its Accept would read as a navigation. It is
+	// not one of Envoy's defaults either, so a policy that does not name it
+	// hands Authelia a request that looks like a browser navigating.
+	if !contains(headers, "x-requested-with") {
+		t.Errorf("spec.extAuth.headersToExtAuth = %v: a request that marks itself as an XHR is answered as a navigation", headers)
+	}
 	if wrong, _, _ := unstructured.NestedStringSlice(policy, "spec", "extAuth", "http", "headersToExtAuth"); len(wrong) != 0 {
 		t.Errorf("headersToExtAuth is under extAuth.http (%v): Envoy Gateway's ExtAuth struct declares it on extAuth", wrong)
 	}

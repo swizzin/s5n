@@ -306,6 +306,12 @@ together on a claim box creates, never in a Secret, because Authelia can't watch
 in a Secret volume. That means exactly one replica, with file watching on, so a password
 change shows up without a restart. Its sign-in page is served at `/auth` on each
 seedbox's own host name, so a seedbox needs one certificate and one cookie domain.
+A request that is not a navigation is refused rather than redirected: ext-authz answers
+401 when the request accepts JSON or marks itself as an XHR (`X-Requested-With`), and
+the portal's 302 otherwise, so an app whose session has ended fails its own background
+call instead of handing a page the login document. A request that accepts anything
+(`Accept: */*`, which a `fetch` with no header of its own sends) is read as a
+navigation and gets the 302, which is the one shape nothing at the edge can tell apart.
 
 **Apps that speak OIDC sign in through the login (decided).** Authelia is also an OIDC
 provider, with issuer `https://<host>/auth`; an app the chart's catalog marks `oidc: true`
