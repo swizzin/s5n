@@ -386,13 +386,39 @@ type Contents struct {
 // there is not room for it beside the snapshot, and the numbers it needs are the
 // manifest's, not a walk of a tree that is not on the host.
 func Open(file, dir string, keep archive.Filter, disk space.Disk) (*Opened, error) {
-	// The archive is verified whole before any of it is extracted: a run writes
-	// part of it after the box is installed, and a damaged copy has to stop the
-	// run now rather than halfway through the last thing it does.
-	//
-	// The same pass is what counts the snapshot: it is the only one that knows a
-	// directory from a file without walking a tree, and a tree is not on the host
-	// until Stage writes it.
+	m, held, err := verify(file, keep)
+	if err != nil {
+		return nil, err
+	}
+	if err := roomFor(dir, m, keep, disk); err != nil {
+		return nil, err
+	}
+	if err := archive.Extract(file, dir, m, keep, nil); err != nil {
+		return nil, err
+	}
+	o := &Opened{Path: file, Dir: dir, Mode: m.Mode, Source: map[string][]byte{}, Configs: map[string]string{}, Contents: held, manifest: m}
+	if o.Plan, err = readPart(dir, archive.PlanName); err != nil {
+		return nil, err
+	}
+	if len(o.Plan) == 0 {
+		return nil, fmt.Errorf("%s holds no %s: a snapshot is the plan apply runs, and this one has none", file, archive.PlanName)
+	}
+	if o.Report, err = readPart(dir, archive.ReportName); err != nil {
+		return nil, err
+	}
+	if err := o.parts(); err != nil {
+		return nil, err
+	}
+	return o, nil
+}
+
+// verify checks the archive whole before any of it is extracted -- a run writes
+// part of it after the box is installed, so a damaged copy has to stop the run now
+// rather than halfway through the last thing it does -- and counts what it holds
+// of each app's config in the same pass: it is the only one that knows a directory
+// from a file without walking a tree, and a tree is not on the host until Stage
+// writes it.
+func verify(file string, keep archive.Filter) (*archive.Manifest, map[string]Contents, error) {
 	held := map[string]Contents{}
 	m, err := archive.Verify(file, func(s archive.Seen) {
 		instance, ok := configInstance(s.Name)
@@ -410,59 +436,48 @@ func Open(file, dir string, keep archive.Filter, disk space.Disk) (*Opened, erro
 		held[instance] = c
 	})
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	if err := roomFor(dir, m, keep, disk); err != nil {
-		return nil, err
-	}
-	if err := archive.Extract(file, dir, m, keep, nil); err != nil {
-		return nil, err
-	}
-	o := &Opened{Path: file, Dir: dir, Mode: m.Mode, Source: map[string][]byte{}, Configs: map[string]string{}, Contents: held, manifest: m}
-	o.Plan, err = readPart(dir, archive.PlanName)
-	if err != nil {
-		return nil, err
-	}
-	if len(o.Plan) == 0 {
-		return nil, fmt.Errorf("%s holds no %s: a snapshot is the plan apply runs, and this one has none", file, archive.PlanName)
-	}
-	if o.Report, err = readPart(dir, archive.ReportName); err != nil {
-		return nil, err
-	}
-	for _, name := range sortedKeys(m.Entries) {
+	return m, held, nil
+}
+
+// parts finds the source's manifests and each app's config directory in what the
+// extraction wrote: the paths are the manifest's own, so an entry that is not the
+// directory it has to be is a refusal naming it.
+func (o *Opened) parts() error {
+	for _, name := range sortedKeys(o.manifest.Entries) {
 		switch {
 		case strings.HasPrefix(name, archive.SourcePrefix+"/"):
 			rel := strings.TrimPrefix(name, archive.SourcePrefix+"/")
-			info, err := os.Lstat(filepath.Join(dir, filepath.FromSlash(name)))
+			info, err := os.Lstat(filepath.Join(o.Dir, filepath.FromSlash(name)))
 			if err != nil {
-				return nil, err
+				return err
 			}
 			if info.IsDir() {
 				continue
 			}
-			key := strings.TrimSuffix(rel, ".json")
-			raw, err := readPart(dir, name)
+			raw, err := readPart(o.Dir, name)
 			if err != nil {
-				return nil, err
+				return err
 			}
-			o.Source[key] = raw
+			o.Source[strings.TrimSuffix(rel, ".json")] = raw
 		case strings.HasPrefix(name, archive.ConfigPrefix+"/"):
 			rel := strings.TrimPrefix(name, archive.ConfigPrefix+"/")
 			if strings.Contains(rel, "/") {
 				continue // a file inside a tree, whose directory is the entry
 			}
-			at := filepath.Join(dir, filepath.FromSlash(name))
+			at := filepath.Join(o.Dir, filepath.FromSlash(name))
 			info, err := os.Lstat(at)
 			if err != nil {
-				return nil, err
+				return err
 			}
 			if !info.IsDir() {
-				return nil, fmt.Errorf("%s holds %s, and every entry directly under %s/ is one app's config directory", file, name, archive.ConfigPrefix)
+				return fmt.Errorf("%s holds %s, and every entry directly under %s/ is one app's config directory", o.Path, name, archive.ConfigPrefix)
 			}
 			o.Configs[rel] = at
 		}
 	}
-	return o, nil
+	return nil
 }
 
 // Stage writes one instance's config out of the snapshot into dst, which must not
