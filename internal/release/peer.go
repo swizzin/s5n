@@ -35,7 +35,8 @@ const legacyPeerPort = 31111
 // port a box's peers already announce would drop every connection until the
 // next tracker announce, and moving it is never this command's business. A
 // release that records no port either falls back to the same old default, which
-// is the port its Service is on.
+// is the port its Service is on. A first install with no port is refused: there
+// is nothing to keep, and init is what picks.
 //
 // Nothing is written for a release that has no peer port at all (a chart from
 // before the key, or one without qBittorrent): its own schema would refuse it,
@@ -50,15 +51,20 @@ func keepPeerPort(values, deployed map[string]any, exists bool, schema []byte, r
 	if _, declared := valueAt(values, "apps."+peerPortApp+".torrent"); !declared {
 		return nil
 	}
-	if exists {
-		if port, ok := portAt(deployed); ok {
-			setValue(values, peerPortKey, port)
-			r.Line(fmt.Sprintf("torrent port: %d (already this box's; kept)", port))
-			return seedbox.Validate(schema, values)
-		}
+	if !exists {
+		// A first install has no port to keep, and picking one needs the
+		// cluster, which init asks and apply does not. Falling back to the old
+		// default here would put a new box on the very number the chart
+		// stopped shipping.
+		return fmt.Errorf("%s is not recorded in the grant: run `box init` to pick one", peerPortKey)
+	}
+	if port, ok := portAt(deployed); ok {
+		setValue(values, peerPortKey, port)
+		r.Line(fmt.Sprintf("torrent port: %d (already this box's; kept)", port))
+		return seedbox.Validate(schema, values)
 	}
 	setValue(values, peerPortKey, legacyPeerPort)
-	r.Line(fmt.Sprintf("torrent port: %d (the chart's old default; run `box init` to pick one)", legacyPeerPort))
+	r.Line(fmt.Sprintf("torrent port: %d (the chart's old default, which this box's release runs; kept)", legacyPeerPort))
 	return seedbox.Validate(schema, values)
 }
 

@@ -127,21 +127,19 @@ func TestARecordedPortIsNotMovedByTheAdoption(t *testing.T) {
 	}
 }
 
-// A first install with no recorded port is still a release that renders: the
-// chart ships no default, so box writes the one it left behind, and says where
-// the decision belongs.
-func TestAFirstInstallWithNoRecordedPortGetsTheOldDefault(t *testing.T) {
+// A first install with no recorded port has nothing to keep, and the chart ships
+// no default: apply refuses and names init, which picks one, rather than put a
+// new box on the old default.
+func TestAFirstInstallWithNoRecordedPortIsRefused(t *testing.T) {
 	f, _ := peerFakes(t)
 	f.rel.exists = false
 
-	if _, err := f.apply(t); err != nil {
-		t.Fatalf("apply: %v\n%s", err, f.out)
+	_, err := f.apply(t)
+	if err == nil || !strings.Contains(err.Error(), "box init") || !strings.Contains(err.Error(), peerPortKey) {
+		t.Fatalf("apply = %v, want a refusal naming %s and box init\n%s", err, peerPortKey, f.out)
 	}
-	if got := portIn(t, f.rel.upgraded[0]); got != legacyPeerPort {
-		t.Fatalf("the peer port this first install rendered = %d, want %d", got, legacyPeerPort)
-	}
-	if got := f.out.String(); !strings.Contains(got, "torrent port: 31111 (the chart's old default; run `box init` to pick one)") {
-		t.Fatalf("box did not say where the port came from:\n%s", got)
+	if len(f.rel.upgraded) != 0 {
+		t.Fatalf("a first install with no peer port was installed: %v", f.rel.upgraded)
 	}
 }
 

@@ -220,7 +220,8 @@ point at it, and one is picked for the band otherwise. The line init prints says
 The chart ships no default: a fixed number is the collision this decision exists for, so a
 helm install must set the key. A box installed while the chart did default it has no port
 in either file; `box apply` and `box update` keep the number its release already renders
-(31111, the chart's old default) and never pick a new one.
+(31111, the chart's old default) and never pick a new one. A first install with no port
+in its grant is refused and names `box init`, which picks one.
 
 ## Logins (decided, mechanism proposed)
 
