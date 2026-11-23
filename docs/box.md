@@ -1733,7 +1733,14 @@ into swizzin's upgrade scripts:
 - **Old migrations get deleted.** Each release declares the oldest release it can
   upgrade from, so migrations older than that can be removed.
 - **Every migration is proven** by the upgrade e2e: previous release → current, data
-  intact, wiring green.
+  intact, wiring green. `hack/e2e-box.sh upgrade` is that path from what the registry
+  actually publishes: every published chart mirrored into the run's own registry, the
+  published 0.6.0 box binary installed with chart 0.6.0, state put in (a setting in an
+  Arr, a torrent in qBittorrent, the login), this tree's chart published above every
+  published version, and `box update` from this tree's box. It takes exactly the steps the
+  releases' `upgrade-from` floors require, and after them the release is this tree's
+  chart, every app is ready, the wiring receipt is ok, and the setting, the torrent and
+  the login are all still there.
 
 ## The catalog and box (decided)
 

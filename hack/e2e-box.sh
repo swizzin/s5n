@@ -13,7 +13,7 @@
 # box pulls it from there with --chart-repo (and --chart-version). box never
 # reads `charts/` from its own tree; the kind cluster never pulls the chart.
 #
-# Five scenarios, five clusters:
+# Seven scenarios, seven clusters:
 #
 #   fresh         a cluster with nothing installed. The Gateway box applies
 #                 gets no address, so MetalLB and its pool are installed, and
@@ -46,9 +46,24 @@
 #                 `box apply` refuses to move the release, copies sonarr before
 #                 a values pin moves it, and a rollback restores that copy. This is
 #                 the only scenario box needs to reach the config it copies, so
-#                 it, migrate and migrate-keep are the three whose volume roots
-#                 are a directory on this host, mounted into the node (see
+#                 it, upgrade, migrate and migrate-keep are the four whose volume
+#                 roots are a directory on this host, mounted into the node (see
 #                 VOLUME ROOTS below).
+#   upgrade       a box installed by a *published* release, moved to this tree's
+#                 chart. Every chart version ghcr has ever published is mirrored
+#                 into the local registry, the 0.6.0 box binary is downloaded
+#                 from its GitHub release and verified, and the install is that
+#                 box with chart 0.6.0 -- the release a user's box is actually on.
+#                 Then state goes in (a naming setting in sonarr, a torrent in
+#                 qBittorrent that survives a restart because its resume data was
+#                 written, the login), this tree's chart is published as the next
+#                 version above every published one, and `box update` moves the
+#                 box along the path the releases' upgrade-from floors require.
+#                 The plan, the release, every app, the wiring receipt, the state
+#                 and the login are asserted afterwards. It is the only scenario
+#                 that needs the internet: the published charts come from ghcr
+#                 anonymously and box 0.6.0 from GitHub, so a host without a route
+#                 to either runs every other scenario and skips this one.
 #   migrate-keep  the same source cut over the other way: box installs onto the
 #                 cluster the source runs on and adopts in place, with the source's
 #                 workloads left at 0 replicas.
@@ -87,7 +102,7 @@
 # preinstalled scenario's name does not resolve, which proves the self-signed
 # half.
 #
-# Why one script and five clusters instead of a flag inside hack/e2e-kind.sh:
+# Why one script and seven clusters instead of a flag inside hack/e2e-kind.sh:
 # the existing e2e is the chart's acceptance test, and its helm install is what
 # proves the chart still installs the way users install it today. These
 # scenarios are about box's decision, share the bootstrap command line, and
@@ -95,7 +110,7 @@
 # cluster. `all` runs this script once per scenario, which gives each its own
 # work directory, cluster name and exit code.
 #
-# Usage: hack/e2e-box.sh [--keep] [fresh|preinstalled|foreign-gateway|update|migrate|migrate-keep|all]   (default: all)
+# Usage: hack/e2e-box.sh [--keep] [fresh|preinstalled|foreign-gateway|update|upgrade|migrate|migrate-keep|all]   (default: all)
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -146,13 +161,13 @@ SCENARIO=all
 for arg in "$@"; do
   case "$arg" in
     --keep) KEEP=--keep ;;
-    fresh | preinstalled | foreign-gateway | update | migrate | migrate-keep | all) SCENARIO=$arg ;;
+    fresh | preinstalled | foreign-gateway | update | upgrade | migrate | migrate-keep | all) SCENARIO=$arg ;;
     -h | --help)
       sed -n '2,/^set -euo pipefail/p' "$0" | sed 's/^# \{0,1\}//'
       exit 0
       ;;
     *)
-      echo "unknown argument: $arg (want fresh, preinstalled, foreign-gateway, update, migrate, migrate-keep or all)" >&2
+      echo "unknown argument: $arg (want fresh, preinstalled, foreign-gateway, update, upgrade, migrate, migrate-keep or all)" >&2
       exit 2
       ;;
   esac
@@ -164,6 +179,7 @@ if [ "$SCENARIO" = all ]; then
   "$0" preinstalled $KEEP || status=1
   "$0" foreign-gateway $KEEP || status=1
   "$0" update $KEEP || status=1
+  "$0" upgrade $KEEP || status=1
   "$0" migrate $KEEP || status=1
   "$0" migrate-keep $KEEP || status=1
   exit "$status"
@@ -174,6 +190,7 @@ case "$SCENARIO" in
   preinstalled) CLUSTER=s5n-box-lb; DOMAIN=box.internal.example ;;
   foreign-gateway) CLUSTER=s5n-box-gw; DOMAIN=box.example.com ;;
   update) CLUSTER=s5n-box-update; DOMAIN=box.update.example.test ;;
+  upgrade) CLUSTER=s5n-box-upgrade; DOMAIN=box.upgrade.example.test ;;
   migrate) CLUSTER=s5n-box-migrate; DOMAIN=box.migrate.example.test ;;
   migrate-keep) CLUSTER=s5n-box-migrate-keep; DOMAIN=box.keep.example.test ;;
 esac
@@ -217,18 +234,18 @@ REGISTRY=""
 # where box cannot reach them: --paths-in-node is how box skips the stat a real
 # host would have passed, and nothing box does touches an app's config.
 #
-# update, migrate and migrate-keep are the ones that need the opposite. A step copies an app's
-# config, restores it and writes the hold beside the copies -- all of it on the
-# filesystem the seedbox's /config comes from -- so box and the pods have to
-# see one tree; and migrate reads a source install's configs and renames its
-# data, from a box that runs on the host. Here the roots are a directory on this
-# host, bind-mounted into the node at the same absolute path (with the whole
-# work directory around them, below): the PV's hostPath, the pod's /config and
-# box's snapshot directory all name it, which is what a real host has.
+# update, upgrade, migrate and migrate-keep are the ones that need the opposite. update
+# and upgrade assert state that lives in an app's config directory, which is the
+# tree box reads and the pods write -- and a step copies what it moves there.
+# migrate reads a source install's configs and renames its data, from a box that
+# runs on the host. Here the roots are a directory on this host, bind-mounted
+# into the node at the same absolute path (with the whole work directory around
+# them, below): the PV's hostPath, the pod's /config and box's snapshot
+# directory all name it, which is what a real host has.
 DATA_PATH=/srv/s5n/data
 CONFIG_PATH=/srv/s5n/config
 KIND_CONFIG=hack/kind.yaml
-if [ "$SCENARIO" = update ] || [ "$SCENARIO" = migrate ] || [ "$SCENARIO" = migrate-keep ]; then
+if [ "$SCENARIO" = update ] || [ "$SCENARIO" = upgrade ] || [ "$SCENARIO" = migrate ] || [ "$SCENARIO" = migrate-keep ]; then
   DATA_PATH="$WORK/hostfs/data"
   CONFIG_PATH="$WORK/hostfs/config"
   KIND_CONFIG="$WORK/kind.yaml"
@@ -377,6 +394,13 @@ built=$("$WORK/box" version)
   echo "box reports version '${built}', want the chart version ${CHART_VERSION}"
   fail=1
 }
+# The box and the chart release a scenario installs with. Every scenario but
+# upgrade installs with this tree's own box and chart; upgrade starts from a
+# *published* release -- the 0.6.0 box binary from its GitHub release and chart
+# 0.6.0 from the mirror -- and only then moves the box to this tree's, so the
+# two are that scenario's to replace.
+BOX_BIN="$WORK/box"
+INSTALL_VERSION="$CHART_VERSION"
 $KIND get kubeconfig --name "$CLUSTER" >"$WORK/kubeconfig"
 
 # The login's password: generated per run, written where only `box init`
@@ -408,12 +432,13 @@ docker exec "${CLUSTER}-control-plane" bash -c "
            '$CONFIG_PATH'/{qbittorrent,prowlarr,sonarr,sonarr-4k,radarr,radarr-4k,plex,tautulli,seerr,qui,autobrr,maintainerr,pbh}
   chown -R 1000:1000 '$DATA_PATH' '$CONFIG_PATH'"
 
-# The update scenario's extra step. Its roots are a host directory mounted into
-# the node, so box -- which runs as whoever started the e2e -- writes its
-# snapshots and its hold into directories the apps own. Group and other get the
-# same rights as the owner: box has to be able to replace a file an app wrote,
-# and an app has to be able to write the config a restore put back.
-if [ "$SCENARIO" = update ]; then
+# The update and upgrade scenarios' extra step. Their roots are a host directory
+# mounted into the node, so box -- which runs as whoever started the e2e --
+# writes its snapshots and its hold into directories the apps own (upgrade reads
+# the tree too, for the state it asserts). Group and other get the same rights as
+# the owner: box has to be able to replace a file an app wrote, and an app has to
+# be able to write the config a restore put back.
+if [ "$SCENARIO" = update ] || [ "$SCENARIO" = upgrade ]; then
   docker exec "${CLUSTER}-control-plane" chmod -R a+rwX "$CONFIG_PATH"
 fi
 
@@ -485,7 +510,12 @@ bootstrap() { # bootstrap <output file>
   # (s5n-<login>); every other scenario names its own.
   local ns_args=()
   [ "$SCENARIO" = fresh ] || ns_args=(--namespace "$NS")
-  "$WORK/box" bootstrap --yes --chart-repo "$CHART_REPO" ${ACME_ARGS[@]+"${ACME_ARGS[@]}"} ${DNS_ARGS[@]+"${DNS_ARGS[@]}"} ${CA_ARGS[@]+"${CA_ARGS[@]}"} ${UNIT_ARGS[@]+"${UNIT_ARGS[@]}"} \
+  # A scenario that installs a published release names it. Every other scenario
+  # leaves the flag off, so bootstrap takes the default-version path and the e2e
+  # exercises the newest-release selection against a real registry.
+  local version_args=()
+  [ "$INSTALL_VERSION" = "$CHART_VERSION" ] || version_args=(--chart-version "$INSTALL_VERSION")
+  "$BOX_BIN" bootstrap --yes --chart-repo "$CHART_REPO" ${version_args[@]+"${version_args[@]}"} ${ACME_ARGS[@]+"${ACME_ARGS[@]}"} ${DNS_ARGS[@]+"${DNS_ARGS[@]}"} ${CA_ARGS[@]+"${CA_ARGS[@]}"} ${UNIT_ARGS[@]+"${UNIT_ARGS[@]}"} \
     --grant "$WORK/grant.yaml" --values "$WORK/values.yaml" \
     ${ns_args[@]+"${ns_args[@]}"} --domain "$DOMAIN" \
     --data-path "$DATA_PATH" --config-path "$CONFIG_PATH" \
@@ -506,7 +536,7 @@ init() { # init <output file> [extra dev flags]
   # one chart, and the apply it hands over to installs that same value.
   local ns_args=()
   [ "$SCENARIO" = fresh ] || ns_args=(--namespace "$NS")
-  "$WORK/box" init --yes --chart-repo "$CHART_REPO" --chart-version "$CHART_VERSION" ${DNS_ARGS[@]+"${DNS_ARGS[@]}"} ${CA_ARGS[@]+"${CA_ARGS[@]}"} \
+  "$BOX_BIN" init --yes --chart-repo "$CHART_REPO" --chart-version "$INSTALL_VERSION" ${DNS_ARGS[@]+"${DNS_ARGS[@]}"} ${CA_ARGS[@]+"${CA_ARGS[@]}"} \
     --grant "$WORK/grant.yaml" --values "$WORK/values.yaml" \
     ${ns_args[@]+"${ns_args[@]}"} --domain "$DOMAIN" \
     --data-path "$DATA_PATH" --config-path "$CONFIG_PATH" \
@@ -5424,6 +5454,578 @@ print(f"  values: apps.sonarr.image carries {tag} and {digest}")
 PY
 }
 
+# ---- scenario: upgrade ------------------------------------------------------
+# A box that a *published* release installed, moved to this tree's chart.
+#
+# Two bugs reached a real box because nothing here started from a published
+# release: 0.6.1's and 0.6.2's update listing read every chart ghcr holds and
+# failed on one from before platform.yaml. The scenario is the path a user's box
+# takes, done from what ghcr actually holds:
+#
+#   1. mirror every chart version ghcr publishes into the local registry, old
+#      ones included, and download the published 0.6.0 box binary, verified
+#      against its release's sha256sums.txt;
+#   2. install with that box and chart 0.6.0 -- the flags every scenario passes,
+#      against kind;
+#   3. put real state in: a naming setting through sonarr's own API, a torrent in
+#      qBittorrent that is only the box's once the client wrote its resume data,
+#      and the login's account;
+#   4. publish this tree's chart as the next version above every published one;
+#   5. run this tree's box `box update --yes` against the mirror.
+#
+# The tree's box runs the update, never the published one: `box update` replaces
+# itself before it reads a chart, and the signature it checks is over the release
+# page's sha256sums.txt, which this tree cannot sign. The published box installs;
+# the tree's box moves the box, which is what a user's next timer wake does once
+# root's update has brought a newer box.
+#
+# It is the only scenario that needs the internet: the charts come from ghcr
+# anonymously and the 0.6.0 binary from GitHub. Everything else runs off the
+# local registry and images already in the kind node.
+
+# The oldest release box updates from (Chart.yaml's upgrade-from, docs/box.md
+# "A minimum box version"), and so the release the box and the chart are
+# installed from: an install older than this is reinstalled, not upgraded.
+UPGRADE_FROM=0.6.0
+# Where the published releases are. The real ones, not the mirror: the point is
+# what a user's box pulls and what it was installed by.
+PUBLISHED_CHARTS_REPO=oci://ghcr.io/swizzin/charts/s5n
+BOX_RELEASES_URL=https://github.com/swizzin/s5n/releases/download
+
+# published_chart_versions: every chart version ghcr publishes, oldest first.
+# Helm cannot list an OCI repository, so this is the registry's own tag list,
+# read with the anonymous token ghcr hands out for a pull scope -- the same way
+# box learns that something is out (docs/box.md, "The timer").
+published_chart_versions() {
+  local token
+  token=$(curl -fsS --max-time 30 "https://ghcr.io/token?scope=repository:swizzin/charts/s5n:pull" |
+    python3 -c 'import json,sys; print(json.load(sys.stdin)["token"])') || return 1
+  curl -fsS --max-time 30 -H "Authorization: Bearer ${token}" \
+    "https://ghcr.io/v2/swizzin/charts/s5n/tags/list" |
+    python3 -c 'import json, re, sys
+tags = [t for t in json.load(sys.stdin)["tags"] if re.fullmatch(r"[0-9]+(\.[0-9]+)*", t)]
+tags.sort(key=lambda t: [int(p) for p in t.split(".")])
+print("\n".join(tags))'
+}
+
+# chart_annotations <chart .tgz>: a release's box.s5n annotations, one key=value
+# per line. They are what an update's path is planned from: a release may only be
+# installed over one at or above its upgrade-from, and only by a box at or above
+# its min-box.
+chart_annotations() {
+  python3 - "$1" <<'PY'
+import sys, tarfile
+import yaml
+
+with tarfile.open(sys.argv[1]) as tf:
+    name = next(n for n in tf.getnames() if n.endswith("/Chart.yaml"))
+    doc = yaml.safe_load(tf.extractfile(name)) or {}
+ann = doc.get("annotations") or {}
+for key in ("min-box", "upgrade-from"):
+    print("%s=%s" % (key, ann.get("box.s5n/" + key, "")))
+PY
+}
+
+# mirror_published_charts: every chart ghcr publishes, pulled anonymously and
+# pushed to this run's registry, the way the tree's own chart is published above.
+# The old ones are the point twice over: a release from before platform.yaml
+# cannot be read at all, and box's listing starts at the installed release, so
+# their presence in the repository is what proves it starts there.
+mirror_published_charts() {
+  local v
+  mkdir -p "$WORK/published-charts"
+  for v in $(published_chart_versions); do
+    helm pull "$PUBLISHED_CHARTS_REPO" --version "$v" --destination "$WORK/published-charts" >/dev/null ||
+      return 1
+    helm push "$WORK/published-charts/s5n-${v}.tgz" \
+      "oci://127.0.0.1:${REGISTRY_PORT}/charts" --plain-http >/dev/null || return 1
+    echo "  mirrored s5n ${v} ($(chart_annotations "$WORK/published-charts/s5n-${v}.tgz" | tr '\n' ' '))"
+  done
+}
+
+# fetch_published_box <version> <dir>: box's own binary for this architecture,
+# from its GitHub release, verified against the release's sha256sums.txt -- the
+# unsigned copy of the file box's self-update checks the signature over -- and
+# installed under the name the README installs it as. Leaves the binary's path in
+# PUBLISHED_BOX.
+#
+# The name is not cosmetic: Helm records the field manager of every object it
+# writes as the base name of the binary that ran, so an install made by
+# box-linux-amd64 is owned by a manager named that, and the next box -- named
+# box, as `install -m 0755 box-linux-$arch /usr/local/bin/box` makes it -- is a
+# second owner of the same fields and its upgrade is refused with a conflict.
+# The README's install step is therefore part of the install, here as on a host.
+fetch_published_box() {
+  local version=$1 dir=$2 arch name sums
+  case "$(uname -m)" in
+    x86_64 | amd64) arch=amd64 ;;
+    aarch64 | arm64) arch=arm64 ;;
+    *)
+      echo "no published box binary for $(uname -m)"
+      return 1
+      ;;
+  esac
+  name="box-linux-${arch}"
+  sums="${dir}/sha256sums-${version}.txt"
+  mkdir -p "$dir"
+  curl -fsSL --retry 3 --max-time 300 -o "${dir}/${name}" \
+    "${BOX_RELEASES_URL}/box-v${version}/${name}" || return 1
+  curl -fsSL --retry 3 --max-time 60 -o "$sums" \
+    "${BOX_RELEASES_URL}/box-v${version}/sha256sums.txt" || return 1
+  grep -q " ${name}\$" "$sums" ||
+    { echo "box-v${version}'s sha256sums.txt does not name ${name}"; return 1; }
+  # The sums name the asset as the release publishes it, which is the name the
+  # binary was downloaded under, so the file is verified where it lies.
+  (cd "$dir" && grep " ${name}\$" "$sums" | sha256sum -c -) ||
+    { echo "${dir}/${name} does not match box-v${version}'s sha256sums.txt"; return 1; }
+  install -m 0755 "${dir}/${name}" "${dir}/box" || return 1
+  PUBLISHED_BOX="${dir}/box"
+  echo "  ${PUBLISHED_BOX}: box-v${version} ${name}, sha256 verified, installed as box"
+}
+
+# upgrade_expected_steps <installed> <target> <box version> <dir>...: the releases
+# an update has to install, in order, as "from -> to" lines. The rule is the one
+# internal/update plans with: the target when its upgrade-from floor allows the
+# installed release, otherwise the newest release between them whose floor the
+# current release meets and whose min-box the box meets. The versions are the
+# charts' own, so a step box invents cannot pass this.
+upgrade_expected_steps() {
+  local installed=$1 target=$2 box=$3
+  shift 3
+  python3 - "$installed" "$target" "$box" "$@" <<'PY'
+import glob, os, sys, tarfile
+import yaml
+
+installed, target, box = sys.argv[1:4]
+def key(v):
+    return tuple(int(p) for p in v.split("."))
+
+charts = {}
+for d in sys.argv[4:]:
+    for path in glob.glob(os.path.join(d, "*.tgz")):
+        version = os.path.basename(path)[len("s5n-"):-len(".tgz")]
+        with tarfile.open(path) as tf:
+            name = next(n for n in tf.getnames() if n.endswith("/Chart.yaml"))
+            doc = yaml.safe_load(tf.extractfile(name)) or {}
+        ann = doc.get("annotations") or {}
+        charts[version] = (ann.get("box.s5n/min-box", ""), ann.get("box.s5n/upgrade-from", ""))
+
+if target not in charts:
+    sys.exit("the target release %s is not among the charts this run can read" % target)
+
+def floor(v):
+    f = charts.get(v, ("", ""))[1]
+    return key(f) if f else None
+
+def meets_box(v):
+    m = charts.get(v, ("", ""))[0]
+    return not m or not key(box) < key(m)
+
+steps, cur = [], installed
+while key(cur) < key(target):
+    f = floor(target)
+    if f is None or not key(cur) < f:
+        nxt = target
+    else:
+        nxt = None
+        for v in sorted((v for v in charts if key(cur) < key(v) < key(target)), key=key):
+            vf = floor(v)
+            if (vf is not None and key(cur) < vf) or not meets_box(v):
+                continue
+            nxt = v
+    if nxt is None:
+        sys.exit("no published release can be upgraded from %s" % cur)
+    steps.append((cur, nxt))
+    cur = nxt
+if not steps:
+    sys.exit("%s is not below %s: there is no step to assert" % (installed, target))
+for a, b in steps:
+    print(a + " -> " + b)
+PY
+}
+
+# upgrade_qbittorrent <jar>: sign in to the release's qBittorrent through the
+# tunnel. Any 2xx is a sign-in: qBittorrent 5 answers 204 with no body.
+upgrade_qbittorrent() {
+  local jar=$1 password code
+  password=$($K -n "$NS" get secret s5n-keys -o jsonpath='{.data.qbittorrent-password}' 2>/dev/null | base64 -d || true)
+  [ -n "$password" ] || { echo "the release Secret holds no qBittorrent password"; return 1; }
+  code=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 30 -c "$jar" \
+    --data-urlencode "username=admin" --data-urlencode "password=${password}" \
+    "http://127.0.0.1:${PF_PORT}/api/v2/auth/login" 2>/dev/null || true)
+  case "$code" in
+    2??) return 0 ;;
+    *)
+      echo "qBittorrent's API answered ${code:-nothing} to its own password"
+      return 1
+      ;;
+  esac
+}
+
+# upgrade_torrent_state <jar> <name>: one torrent as "state category bytes", or
+# nothing when the client does not hold it.
+upgrade_torrent_state() {
+  local jar=$1 name=$2
+  curl -sS --max-time 30 -b "$jar" "http://127.0.0.1:${PF_PORT}/api/v2/torrents/info" 2>/dev/null |
+    UPG_NAME="$name" python3 -c 'import json, os, sys
+try:
+    torrents = json.load(sys.stdin)
+except Exception:
+    sys.exit(0)
+mine = [t for t in torrents if t.get("name") == os.environ["UPG_NAME"]]
+if len(mine) != 1:
+    sys.exit(0)
+t = mine[0]
+print("%s %s %s" % (t.get("state", ""), t.get("category", ""), t.get("total_size", "")))' || true
+}
+
+# upgrade_sonarr_naming <set|check>: sonarr's naming settings, through sonarr's
+# own API, and the standardEpisodeFormat it answers with. The format is one no
+# default holds, so a value equal to it can only be there because the setting is.
+# It keeps the season and episode tokens because the app validates the format and
+# refuses one without them (ValidStandardEpisodeFormatValidator).
+#
+# The API is reachable only through the tunnel: the login at the edge stands in
+# front of the app for a browser, and a client sends the app's own API key (see
+# port_forward). The key is the chart's, in the release Secret -- the app reads it
+# from the environment, so its config file is not where to look for it.
+UPGRADE_NAMING_FORMAT='{Series Title} - S{season:00}E{episode:00} - s5n-e2e'
+upgrade_sonarr_naming() {
+  local mode=$1 key code
+  key=$($K -n "$NS" get secret s5n-keys -o jsonpath='{.data.sonarr-apikey}' 2>/dev/null | base64 -d || true)
+  [ -n "$key" ] || { echo "the release Secret holds no sonarr API key"; return 1; }
+  port_forward sonarr-0 8989 || return 1
+  if [ "$mode" = set ]; then
+    # The whole resource, read, one field changed, saved back: the API validates
+    # the object the way the UI's own save button does.
+    code=$(curl -sS -o "$WORK/upgrade-naming.json" -w '%{http_code}' --max-time 30 \
+      "http://127.0.0.1:${PF_PORT}/sonarr/api/v3/config/naming?apikey=${key}" || true)
+    case "$code" in
+      2??) ;;
+      *)
+        echo "sonarr answered ${code:-nothing} to its own API key"
+        port_forward_stop
+        return 1
+        ;;
+    esac
+    python3 - "$WORK/upgrade-naming.json" "$WORK/upgrade-naming-put.json" "$UPGRADE_NAMING_FORMAT" <<'PY'
+import json, sys
+doc = json.load(open(sys.argv[1]))
+doc["standardEpisodeFormat"] = sys.argv[3]
+json.dump(doc, open(sys.argv[2], "w"))
+PY
+    code=$(curl -sS -o "$WORK/upgrade-naming-put.out" -w '%{http_code}' --max-time 30 -X PUT \
+      -H 'Content-Type: application/json' --data @"$WORK/upgrade-naming-put.json" \
+      "http://127.0.0.1:${PF_PORT}/sonarr/api/v3/config/naming?apikey=${key}" || true)
+    case "$code" in
+      2??) ;;
+      *)
+        echo "sonarr answered ${code:-nothing} to the naming settings it was sent: $(head -c 300 "$WORK/upgrade-naming-put.out" 2>/dev/null)"
+        port_forward_stop
+        return 1
+        ;;
+    esac
+  fi
+  # Read back whatever this call did: a save that answered and did not stick is
+  # exactly what this read is for.
+  curl -sS -o "$WORK/upgrade-naming.json" --max-time 30 \
+    "http://127.0.0.1:${PF_PORT}/sonarr/api/v3/config/naming?apikey=${key}" 2>/dev/null || true
+  port_forward_stop
+  UPG_NAMING=$(python3 -c 'import json, sys
+try:
+    print(json.load(open(sys.argv[1])).get("standardEpisodeFormat", ""))
+except Exception:
+    print("")' "$WORK/upgrade-naming.json" 2>/dev/null || true)
+  echo "  sonarr naming (${mode}): standardEpisodeFormat=${UPG_NAMING:-unreadable}"
+  [ "$UPG_NAMING" = "$UPGRADE_NAMING_FORMAT" ] ||
+    { echo "sonarr's standardEpisodeFormat is '${UPG_NAMING}', not '${UPGRADE_NAMING_FORMAT}': the setting did not ${mode}"; fail=1; }
+}
+
+# upgrade_torrent_add <name>: one torrent into qBittorrent through its own API,
+# in a category the wiring made. It is added paused: the tracker does not exist,
+# so it would be stalled either way, and what the scenario holds the box to is
+# that the client still has it afterwards, not that it downloaded.
+upgrade_torrent_add() {
+  local name=$1 jar="$WORK/upgrade-qbt-add.jar" code
+  mkdir -p "$WORK/upgrade"
+  printf 's5n e2e: a payload the upgrade has to keep\n' >"$WORK/upgrade/${name}"
+  python3 hack/make-torrent.py --file "$WORK/upgrade/${name}" --name "$name" \
+    --announce http://tracker.example.invalid/announce \
+    --out "$WORK/upgrade/${name}.torrent" --meta "$WORK/upgrade/${name}.json" >/dev/null ||
+    { echo "could not build the upgrade's test torrent"; return 1; }
+  port_forward qbittorrent-0 8080 || return 1
+  upgrade_qbittorrent "$jar" || { port_forward_stop; return 1; }
+  code=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 60 -b "$jar" \
+    -F "torrents=@$WORK/upgrade/${name}.torrent" \
+    -F "savepath=/data/downloads/movies" -F "category=movies" -F "paused=true" \
+    "http://127.0.0.1:${PF_PORT}/api/v2/torrents/add" 2>/dev/null || true)
+  port_forward_stop
+  case "$code" in
+    2??) return 0 ;;
+    *)
+      echo "qBittorrent answered ${code:-nothing} when the upgrade's torrent was added"
+      return 1
+      ;;
+  esac
+}
+
+# upgrade_torrent_check <name> <when>: the client still holds the torrent, in the
+# category it was added under. <when> names the moment in the transcript.
+upgrade_torrent_check() {
+  local name=$1 when=$2 jar="$WORK/upgrade-qbt-read.jar" state="" i
+  port_forward qbittorrent-0 8080 || { fail=1; return 0; }
+  upgrade_qbittorrent "$jar" || { port_forward_stop; fail=1; return 0; }
+  for i in $(seq 1 30); do
+    state=$(upgrade_torrent_state "$jar" "$name")
+    [ -n "$state" ] && break
+    sleep 2
+  done
+  port_forward_stop
+  echo "  torrent ${when}: ${name}: ${state:-missing} (state category bytes)"
+  [ -n "$state" ] ||
+    { echo "qBittorrent does not hold ${name} ${when}"; fail=1; return 0; }
+  case "$state" in
+    *" movies "*) ;;
+    *) echo "${name} is not in the movies category ${when}: ${state}"; fail=1 ;;
+  esac
+}
+
+# upgrade_login <label> <address>: the box's one account at the edge, and an app
+# path behind it. Without a session the app path is the portal's redirect, the
+# portal takes the password the install generated, and with that session the edge
+# lets the browser through to the app -- which is the login a user has. The
+# certificate is not the subject here (it is self-signed on a name that does not
+# resolve, and the preinstalled scenario proves that half), so it is not
+# verified, and the app's own answer is not either: only that it is not the
+# portal's.
+upgrade_login() {
+  local label=$1 addr=$2 jar="$WORK/upgrade-login-jar.txt" hdrs="$WORK/upgrade-login-headers.txt" code location
+  rm -f "$jar"
+  : >"$hdrs"
+  code=$(curl -sS -k -D "$hdrs" -o /dev/null -w '%{http_code}' \
+    --resolve "${DOMAIN}:443:${addr}" "https://${DOMAIN}/sonarr/" 2>/dev/null || true)
+  location=$(sed -n 's/^[Ll]ocation: *//p' "$hdrs" | tr -d '\r' | head -1)
+  echo "  login ${label}: GET /sonarr/ with no cookie: ${code} -> ${location%%\?*}"
+  [ "$code" = 302 ] ||
+    { echo "an app path answered ${code} with no session ${label}: the login is not in front of it"; fail=1; return 0; }
+  case "$location" in
+    "https://${DOMAIN}/auth/"*) : ;;
+    *)
+      echo "an app path sent the browser to ${location} ${label}, not the portal"
+      fail=1
+      return 0
+      ;;
+  esac
+  portal_login "$jar" "$LOGIN" "$AUTHELIA_PASSWORD" "https://${DOMAIN}/sonarr/" "$addr" -
+  echo "  login ${label}: POST /auth/api/firstfactor: ${PORTAL_CODE}"
+  [ "$PORTAL_CODE" = 200 ] ||
+    { echo "the portal refused the box's own account ${label} (${PORTAL_CODE})"; fail=1; return 0; }
+  : >"$hdrs"
+  code=$(curl -sS -k -D "$hdrs" -o /dev/null -w '%{http_code}' -b "$jar" \
+    --resolve "${DOMAIN}:443:${addr}" "https://${DOMAIN}/sonarr/" 2>/dev/null || true)
+  location=$(sed -n 's/^[Ll]ocation: *//p' "$hdrs" | tr -d '\r' | head -1)
+  echo "  login ${label}: GET /sonarr/ with that session: ${code} -> ${location%%\?*}"
+  case "$code" in
+    2??) ;;
+    30*)
+      case "$location" in
+        "https://${DOMAIN}/auth/"*)
+          echo "an app path sent the signed-in browser back to the portal ${label}"
+          fail=1
+          ;;
+      esac
+      ;;
+    *)
+      echo "an app path answered ${code} to the session the portal issued ${label}"
+      fail=1
+      ;;
+  esac
+}
+
+# apps_ready <tag> <when>: every app pod the release runs, Ready, by the selector
+# the preinstalled scenario waits on after its install -- the chart's instance
+# and app labels, which no Job or controller pod carries. <tag> names the wait's
+# log file.
+apps_ready() {
+  if ! $K -n "$NS" wait --for=condition=Ready pod \
+    -l 'app.kubernetes.io/instance=s5n,s5n.io/app' --timeout=420s \
+    >"$WORK/upgrade-ready-$1.txt" 2>&1; then
+    echo "${2}: not every app is Ready:"
+    sed 's/^/    /' "$WORK/upgrade-ready-$1.txt"
+    $K -n "$NS" get pods
+    fail=1
+    return 1
+  fi
+  echo "  ${2}: every app Ready"
+}
+
+upgrade_box() {
+  # ---- what ghcr publishes --------------------------------------------------
+  # The mirror first, and the binary, before anything is installed: a host with
+  # no route to ghcr or GitHub fails here, in seconds, naming what it could not
+  # reach, rather than in the middle of an install.
+  log "mirroring every published chart from ${PUBLISHED_CHARTS_REPO}"
+  if ! published=$(published_chart_versions); then
+    echo "could not list ${PUBLISHED_CHARTS_REPO}: the upgrade scenario needs a route to ghcr.io"
+    fail=1
+    return 0
+  fi
+  if ! mirror_published_charts; then
+    echo "could not mirror the published charts"
+    fail=1
+    return 0
+  fi
+  if ! printf '%s\n' "$published" | grep -qxF "$UPGRADE_FROM"; then
+    echo "ghcr holds no ${UPGRADE_FROM}, the release this scenario installs: updates from it cannot be tested"
+    fail=1
+    return 0
+  fi
+
+  log "box ${UPGRADE_FROM} from its GitHub release, verified against sha256sums.txt"
+  if ! fetch_published_box "$UPGRADE_FROM" "$WORK/published-box"; then
+    echo "could not fetch box-v${UPGRADE_FROM}: the upgrade scenario needs a route to github.com"
+    fail=1
+    return 0
+  fi
+  published_says=$("$PUBLISHED_BOX" version 2>&1) || true
+  [ "$published_says" = "$UPGRADE_FROM" ] ||
+    { echo "the published binary reports '${published_says}', want ${UPGRADE_FROM}"; fail=1; return 0; }
+
+  # ---- this tree's chart, above everything published ------------------------
+  # The next version above every published one, which is what a release of this
+  # tree would be: the patch above the highest either side names.
+  if ! tree_release=$(printf '%s\n' "$published" | python3 -c 'import sys
+tree = [int(p) for p in sys.argv[1].split(".")]
+tree[2] += 1
+for v in sys.stdin.read().split():
+    if [int(p) for p in v.split(".")] >= tree:
+        sys.exit("the release %s would not be above the published %s" % (".".join(map(str, tree)), v))
+print(".".join(str(p) for p in tree))' "$CHART_VERSION"); then
+    fail=1
+    return 0
+  fi
+  log "publishing this tree's chart as ${tree_release}, above every published release"
+  update_chart "$WORK/chart-upgrade" "$tree_release" || { fail=1; return 0; }
+
+  # The path the update has to take, from the charts' own floors, before the box
+  # is installed: a chart set with no path would make every assertion below
+  # vacuous.
+  if ! expected_steps=$(upgrade_expected_steps "$UPGRADE_FROM" "$tree_release" "$CHART_VERSION" \
+    "$WORK/published-charts" "$WORK/charts"); then
+    echo "could not work out the update path from ${UPGRADE_FROM} to ${tree_release}"
+    fail=1
+    return 0
+  fi
+  echo "  the path the releases' upgrade-from floors require:"
+  printf '%s\n' "$expected_steps" | sed 's/^/    /'
+
+  # ---- the install a published release makes --------------------------------
+  # The published box and the published chart, with the flags every scenario
+  # passes, and the release named rather than "the newest".
+  log "box bootstrap: the platform layer, then root's first install (box and chart ${UPGRADE_FROM})"
+  BOX_BIN="$PUBLISHED_BOX"
+  INSTALL_VERSION="$UPGRADE_FROM"
+  if bootstrap "$WORK/bootstrap1.txt"; then
+    cat "$WORK/bootstrap1.txt"
+  else
+    cat "$WORK/bootstrap1.txt"; fail=1; return 0
+  fi
+  grep -qF "chart: s5n ${UPGRADE_FROM} (${CHART_REPO}:${UPGRADE_FROM})" "$WORK/bootstrap1.txt" ||
+    { echo "box did not pull ${CHART_REPO}:${UPGRADE_FROM}"; fail=1; }
+  grep -q "^wiring ok" "$WORK/bootstrap1.txt" ||
+    { echo "the published install did not report a healthy receipt"; fail=1; }
+  [ "$fail" = 0 ] || return 0
+  release_chart=$(helm_chart_version) || true
+  [ "$release_chart" = "$UPGRADE_FROM" ] ||
+    { echo "the release is on ${release_chart}, want the published ${UPGRADE_FROM}"; fail=1; }
+  apps_ready installed "the published install" || return 0
+
+  # ---- the state the upgrade has to keep ------------------------------------
+  # Three things a user's box has by the time an update runs, and three the
+  # upgrade could silently lose: a setting in an Arr, a torrent the client only
+  # keeps because it wrote its resume data, and the login.
+  log "state: a sonarr setting through its API, a torrent in qBittorrent, the login"
+  upgrade_sonarr_naming set || { fail=1; return 0; }
+  upgrade_torrent_add s5n-e2e-upgrade.bin || { fail=1; return 0; }
+  # qBittorrent writes its resume data when it shuts down, so a torrent added a
+  # second ago lives only in the running client's memory. The pod is replaced
+  # once: without that, the check after the upgrade would prove the pod never
+  # restarted, not that the torrent is the box's.
+  log "restarting qBittorrent so the torrent is on disk, then reading it back"
+  $K -n "$NS" delete pod qbittorrent-0 --wait=true --timeout=180s >/dev/null ||
+    { echo "could not restart qbittorrent-0"; fail=1; return 0; }
+  if ! $K -n "$NS" wait --for=condition=Ready pod/qbittorrent-0 --timeout=300s >/dev/null 2>&1; then
+    echo "qbittorrent-0 did not come back Ready after its restart"; fail=1; return 0
+  fi
+  upgrade_torrent_check s5n-e2e-upgrade.bin "before the update"
+  gw_addr=$($K -n s5n-gateway get gateway s5n -o jsonpath='{.status.addresses[0].value}') || true
+  [ -n "$gw_addr" ] || { echo "the Gateway has no address to ask the login at"; fail=1; return 0; }
+  upgrade_login "before the update" "$gw_addr"
+  [ "$fail" = 0 ] || return 0
+
+  # ---- the update ----------------------------------------------------------
+  # This tree's box, this tree's chart, against the mirror: the wake a user's
+  # box makes once root's update has brought a newer box.
+  log "box update: ${UPGRADE_FROM} -> ${tree_release}, the tree's box over the published install"
+  update_started=$(date -u +%Y-%m-%dT%H:%M:%SZ) || true
+  if "$WORK/box" update --yes --chart-repo "$CHART_REPO" --record "$WORK/cluster.yaml" \
+    --grant "$WORK/grant.yaml" --values "$WORK/values.yaml" --paths-in-node \
+    --kubeconfig "$WORK/kubeconfig" >"$WORK/update-upgrade.txt" 2>&1; then
+    cat "$WORK/update-upgrade.txt"
+  else
+    cat "$WORK/update-upgrade.txt"; fail=1; return 0
+  fi
+
+  # The plan: the release it moves from, the one it lands on, and one row per
+  # step the floors require -- in order, and none box made up.
+  step_count=$(printf '%s\n' "$expected_steps" | grep -c '')
+  case "$step_count" in
+    1) step_word=step ;;
+    *) step_word=steps ;;
+  esac
+  grep -qF "s5n ${UPGRADE_FROM} -> ${tree_release} in ${NS}: ${step_count} ${step_word}" "$WORK/update-upgrade.txt" ||
+    { echo "the update did not plan ${UPGRADE_FROM} -> ${tree_release} in ${NS} as ${step_count} ${step_word}:"; head -3 "$WORK/update-upgrade.txt"; fail=1; }
+  while read -r from arrow to; do
+    [ -n "$from" ] || continue
+    grep -qE "^ {2}${from//./\\.} ${arrow} ${to//./\\.} \(" "$WORK/update-upgrade.txt" ||
+      { echo "the plan has no step ${from} ${arrow} ${to}:"; sed -n '1,12p' "$WORK/update-upgrade.txt"; fail=1; }
+  done <<<"$expected_steps"
+
+  # The release is the tree's: a step that stopped at an intermediate release is
+  # not the update a user's timer makes.
+  release_chart=$(helm_chart_version) || true
+  [ "$release_chart" = "$tree_release" ] ||
+    { echo "the release is on ${release_chart}, want the tree's ${tree_release}"; fail=1; }
+
+  # Every app healthy, and the wiring that ran is this step's: the Job Helm
+  # created after this run began, completed, with a receipt that says ok.
+  apps_ready updated "after the update"
+  wiring_status=$(status_field 'd["status"]') || true
+  [ "$wiring_status" = ok ] ||
+    { echo "the wiring receipt says ${wiring_status:-nothing}: the step's wiring did not pass"; fail=1; }
+  job_start=$($K -n "$NS" get job s5n-wiring -o jsonpath='{.status.startTime}' 2>/dev/null) || true
+  job_done=$($K -n "$NS" get job s5n-wiring -o jsonpath='{.status.completionTime}' 2>/dev/null) || true
+  [ -n "$job_start" ] && [ -n "$job_done" ] ||
+    { echo "the step left no completed wiring Job (start '${job_start}', completion '${job_done}')"; fail=1; }
+  python3 - "$job_start" "$job_done" "$update_started" <<'PY' || fail=1
+import sys
+from datetime import datetime
+job_start, job_done, step = sys.argv[1:4]
+parse = lambda s: datetime.fromisoformat(s.replace("Z", "+00:00"))
+if parse(job_start) < parse(step):
+    sys.exit(f"the wiring Job started {job_start}, before this run began at {step}: it is the install's run, not the step's")
+print(f"  wiring Job {job_start} -> {job_done}")
+PY
+
+  # The state: the Arr's setting, the client's torrent, the login. Each is read
+  # through the app or the edge that owns it, never off the disk box wrote.
+  upgrade_sonarr_naming check || fail=1
+  upgrade_torrent_check s5n-e2e-upgrade.bin "after the update" || fail=1
+  gw_addr=$($K -n s5n-gateway get gateway s5n -o jsonpath='{.status.addresses[0].value}') ||
+    { echo "the Gateway has no address to ask the login at after the update"; fail=1; return 0; }
+  upgrade_login "after the update" "$gw_addr"
+}
+
 # ---- scenario: migrate ------------------------------------------------------
 # `box migrate` on a real cluster, end to end: an install box did not make, its
 # configs, its data and its connections, and the box that adopts them.
@@ -9268,6 +9870,8 @@ elif [ "$SCENARIO" = preinstalled ]; then
   preinstalled
 elif [ "$SCENARIO" = update ]; then
   update_box
+elif [ "$SCENARIO" = upgrade ]; then
+  upgrade_box
 elif [ "$SCENARIO" = migrate ]; then
   migrate_box
 elif [ "$SCENARIO" = migrate-keep ]; then
@@ -9293,7 +9897,7 @@ echo "wall time (${SCENARIO}): ${elapsed}s"
 # remove: the tree goes as the node's root, which is also why it goes before the
 # node does. migrate's config root is 0600 in places once the migration handed
 # it to a user this script is not.
-if { [ "$SCENARIO" = update ] || [ "$SCENARIO" = migrate ]; } && [ "$KEEP" != --keep ]; then
+if { [ "$SCENARIO" = update ] || [ "$SCENARIO" = upgrade ] || [ "$SCENARIO" = migrate ]; } && [ "$KEEP" != --keep ]; then
   docker exec "${CLUSTER}-control-plane" rm -rf "$WORK/hostfs" >/dev/null 2>&1 || true
 fi
 [ "$KEEP" = --keep ] || $KIND delete cluster --name "$CLUSTER"
