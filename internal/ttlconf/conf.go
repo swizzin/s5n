@@ -46,8 +46,12 @@
 //     (webstart.py:406-441, no_password_gate: the proxy's own address is local,
 //     but Envoy sends X-Forwarded-For and this app's own proxy setting is off,
 //     so the request is refused). allow_public_no_password is that gate's switch
-//     and says what box means: the login in front of this app is the edge's.
-//     It is load-bearing twice, because the same key is what keeps a config
+//     and says what box means: the login in front of this app is the edge's, and
+//     the release's NetworkPolicy is what bounds who reaches the port at all --
+//     the same trade as qBittorrent's private-subnet bypass. It lives in the
+//     [Advanced] section, because _CONFIG_DEFINITIONS gives it that one and
+//     Tautulli reads a setting under the section and the name it was defined
+//     with. It is load-bearing twice, because the same key is what keeps a config
 //     upgrading to 2.19 from minting a password on the way (config.py:796-800).
 package ttlconf
 
