@@ -1326,6 +1326,15 @@ data. Everything it will change is written down before it changes anything.
   name is tried, because a source's client is named by its operator (`qBT`) and the
   host is what makes it the release's own; two enabled qBittorrent clients at that
   host are refused, naming both, rather than one picked.
+- **The migrated server's Plex token is seeded (decided).** A claimed Plex keeps
+  the account's token in its own `Preferences.xml` (`PlexOnlineToken`), and the
+  release Secret's `plex-token` is what every Plex-dependent app reads: Tautulli for
+  its PMS link, Maintainerr for its connection. `migrate apply` reads it out of the
+  Plex it is copying and writes it into the release Secret, so a migrated box is
+  wired rather than pending on a token nobody was asked for. It is never written over
+  a `plex-token` the Secret already holds — that is the person's own, or one an
+  earlier run of the same plan wrote — and the token itself is never printed, only
+  the key's name on the confirm's row.
 - **Shown before it's done; unattended runs only what was shown (decided goal,
   mechanism proposed).** The plan holds the rules: the path rewrite table, the port
   map, every host reference marked rewritten or left alone, what is copied where, and

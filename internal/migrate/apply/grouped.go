@@ -94,6 +94,9 @@ func appFacts(in InstanceSummary) []string {
 	if len(in.Keys) > 0 {
 		facts = append(facts, "keeps its API key")
 	}
+	if in.Token != "" {
+		facts = append(facts, "keeps its Plex token")
+	}
 	if in.Stopped > 0 {
 		facts = append(facts, counted(in.Stopped, "torrent", "torrents")+" stopped")
 	}

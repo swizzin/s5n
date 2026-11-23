@@ -6233,6 +6233,14 @@ MIGRATE_TAUTULLI_IMAGE=""
 MIGRATE_TAUTULLI_ROOT=tautulli
 # Tautulli's own WebUI port, in the source and in the chart's own Tautulli.
 MIGRATE_TAUTULLI_PORT=8181
+# The Plex server token the source's Plex is signed in with, which a claimed
+# server keeps in its own Preferences.xml (PlexOnlineToken) and which is the one
+# thing on a source host that says which account every Plex-dependent app should
+# use. Synthetic, and no plex.tv account is involved: the release's Plex is never
+# actually signed in with it -- an unclaimed server answers its own API to any
+# token, which is the state this fixture can produce without an account (see the
+# Plex container's comment above).
+MIGRATE_PLEX_TOKEN=token-0000000000000000-synthetic
 
 # The image box runs in as root, below. The static binary on an empty base is
 # the whole of it: no shell, nothing installed, and `-u 0` is what makes the
@@ -7754,6 +7762,33 @@ migrate_plex_rows() { # migrate_plex_rows <config dir>
     migrate_plex_sqlite "$dir" "$MIGRATE_PLEX_DB"
 }
 
+# migrate_seed_plex_token <config dir>: the account token a claimed Plex keeps in
+# its own Preferences.xml. The fixture's server starts unclaimed (it has no
+# plex.tv account to sign in with), so the token is put in the file the app wrote
+# while the source is stopped -- which is the shape a real cutover meets: the
+# source's Plex is signed in, and the token is the only record on the host of
+# which account every Plex-dependent app should use.
+migrate_seed_plex_token() { # migrate_seed_plex_token <config dir>
+  local dir=$1 prefs
+  prefs="$dir/Library/Application Support/Plex Media Server/Preferences.xml"
+  [ -f "$prefs" ] ||
+    { echo "the source Plex wrote no Preferences.xml (${prefs}), so it has no token to seed"; return 1; }
+  python3 - "$prefs" "$MIGRATE_PLEX_TOKEN" <<'PY' || return 1
+import re, sys
+
+path, token = sys.argv[1:3]
+text = open(path, encoding="utf-8").read()
+if "PlexOnlineToken" in text:
+    sys.exit(f"{path} already names a token")
+text, n = re.subn(r"<Preferences\b", '<Preferences PlexOnlineToken="%s"' % token, text, count=1)
+if n != 1:
+    sys.exit(f"{path} has no <Preferences> element")
+with open(path, "w", encoding="utf-8") as f:
+    f.write(text)
+print("  source plex: its Preferences.xml carries the account token a claimed server has")
+PY
+}
+
 # migrate_source_plex_covers <config dir>: the parts of a Plex config directory a
 # migration does not carry -- the metadata, artwork and thumbnails Plex rebuilds
 # from the media it is given. Written once the source has stopped, so nothing
@@ -8548,6 +8583,7 @@ migrate_box() {
   # the runner Job will run.
   log "seeding the source Plex's library database: Plex's own schema, and the rows a library holds"
   migrate_seed_plex "$src/var/data/plex" || { fail=1; return 0; }
+  migrate_seed_plex_token "$src/var/data/plex" || { fail=1; return 0; }
   migrate_source_plex_covers "$src/var/data/plex" || { fail=1; return 0; }
 
   # ---- the final snapshot --------------------------------------------------
@@ -8852,6 +8888,11 @@ migrate_box() {
     grep -qE "^  ✓ ${instance} +.*keeps download client \"" "$WORK/apply-migrate.txt" ||
       { echo "the plan did not say it adopts ${instance}'s download client by id"; fail=1; }
   done
+  # Plex's token is the one credential that is not an app's own key: the plan
+  # says it keeps it, under the key the release Secret holds.
+  grep -qE "^  ✓ plex +.*keeps its Plex token \(plex-token\)" "$WORK/apply-migrate.txt" ||
+    { echo "the plan did not say it keeps Plex's server token";
+      grep -E "^  ✓ plex" "$WORK/apply-migrate.txt" || true; fail=1; }
   # The pbh rewriter files the downloader it finds under the source's key, which
   # is the id a v7 config stores it under; the record is what wiring then has to
   # reconcile, so the plan naming it is the other half of the adoption.
@@ -9056,19 +9097,25 @@ PY
     fail=1
   fi
   # And the receipt the layout's own Job published: ready where the app answers
-  # now, and the Plex link pending for the one reason a box with no claimed
-  # server has -- no plex-token in the release, so there is nothing to link with.
+  # now, and the Plex link settled with the token the migration read out of the
+  # source's own Preferences.xml. Nothing else on this host had that token: the
+  # release Secret's plex-token is what the migration seeded from the migrated
+  # server, and the link is what proves the wiring Job could use it.
+  plex_secret=$($K -n "$NS" get secret s5n-keys -o jsonpath='{.data.plex-token}' 2>/dev/null | base64 -d || true)
+  echo "  the release Secret's plex-token is the source's: ${plex_secret:+yes}"
+  [ "$plex_secret" = "$MIGRATE_PLEX_TOKEN" ] ||
+    { echo "the release Secret's plex-token is not the token the source's Plex was signed in with"; fail=1; }
   tautulli_ready=$(status_field "[s['result'] for s in d['steps'] if s['name']=='tautulli/ready'][0]" 2>/dev/null || true)
   tautulli_plex=$(status_field "[s['result'] for s in d['steps'] if s['name']=='tautulli/plex'][0]" 2>/dev/null || true)
   tautulli_detail=$(status_field "[s['detail'] for s in d['steps'] if s['name']=='tautulli/plex'][0]" 2>/dev/null || true)
   echo "  receipt: tautulli/ready ${tautulli_ready:-missing}, tautulli/plex ${tautulli_plex:-missing} (${tautulli_detail:-no detail})"
   [ "$tautulli_ready" = ok ] ||
     { echo "the receipt's tautulli/ready is ${tautulli_ready:-missing}: the wiring Job did not reach the app where it serves"; fail=1; }
-  [ "$tautulli_plex" = pending ] ||
-    { echo "the receipt's tautulli/plex is ${tautulli_plex:-missing}, want pending: this fixture's Plex is unclaimed"; fail=1; }
+  [ "$tautulli_plex" = ok ] ||
+    { echo "the receipt's tautulli/plex is ${tautulli_plex:-missing}, want ok: the migration seeded the source's Plex token"; fail=1; }
   case "$tautulli_detail" in
-    "no Plex token"*) ;;
-    *) echo "the receipt's tautulli/plex says ${tautulli_detail:-nothing}, want the line about the missing token"; fail=1 ;;
+    created | updated) ;;
+    *) echo "the receipt's tautulli/plex says ${tautulli_detail:-nothing}, want the link created or updated"; fail=1 ;;
   esac
 
   # ---- assertion 1e: the front door a browser meets --------------------------

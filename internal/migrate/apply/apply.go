@@ -181,6 +181,9 @@ type InstanceSummary struct {
 	// Keys are the release Secret's key names for the keys this instance keeps:
 	// names only, because a key is never printed.
 	Keys []string
+	// Token is the release Secret's key name for this instance's Plex server
+	// token, when the run keeps one: plex-token, and only ever on the Plex row.
+	Token string
 	// Owned are the connections that will be adopted by id.
 	Owned []rewrite.Owned
 	// Stopped is how many of this app's stored objects this run writes stopped:
@@ -244,6 +247,12 @@ func (s Summary) Lines() []string {
 	for _, in := range s.Instances {
 		for _, key := range in.Keys {
 			rows = append(rows, fmt.Sprintf("%s: keep its API key (%s)", in.App, key))
+		}
+		if in.Token != "" {
+			// The one credential that is not an app's own key: the migrated
+			// server's token, which every Plex-dependent app reads from the
+			// release Secret. Named as the token it is, never printed.
+			rows = append(rows, fmt.Sprintf("%s: keep its Plex token (%s)", in.App, in.Token))
 		}
 	}
 	for _, in := range s.Instances {
@@ -745,9 +754,14 @@ func (m *migration) summary() Summary {
 			}
 		}
 		for _, k := range m.keys {
-			if k.instance == name {
-				in.Keys = append(in.Keys, k.name)
+			if k.instance != name {
+				continue
 			}
+			if k.name == plexTokenKey {
+				in.Token = k.name
+				continue
+			}
+			in.Keys = append(in.Keys, k.name)
 		}
 		s.Instances = append(s.Instances, in)
 	}
