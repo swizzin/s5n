@@ -128,16 +128,28 @@ func (o *OCIChart) Load(ctx context.Context, ref ChartRef) (Chart, error) {
 	return o.chart(p, chosen)
 }
 
-// Releases lists every release the repository publishes, with the annotations
-// an update plans with, oldest first.
+// Releases lists every release the repository publishes at or above floor, with
+// the annotations an update plans with, oldest first.
 //
-// Listing costs a pull per version, because the floors live in Chart.yaml
-// inside the archive and nowhere else. Each pulled chart is cached on this
-// OCIChart, so the release an update settles on is not downloaded again when
-// Load fetches it to install. Tags that are not versions, and prereleases, are
-// left out for the same reason SelectVersion leaves them out: they are not
-// releases box installs unasked.
-func (o *OCIChart) Releases(ctx context.Context, ref ChartRef) ([]Published, error) {
+// floor is the release the box is on, and an update only ever steps forward, so
+// a version below it is never pulled. A repository keeps every chart ever
+// published, and not every old one is a chart today's box can read: a release
+// from before platform.yaml shipped has no platform pins at all, and one from
+// before the schema shipped has no values schema. A listing that read all of
+// them would fail on history before an update had chosen a target, and it costs
+// one pull per version ever published. The installed release itself is listed --
+// Load has already pulled and cached it -- and an empty floor lists everything.
+//
+// A release at or above the floor that cannot be read is still an error: that is
+// a broken release, not history. An empty listing is not an error either: a box
+// on the newest release, or on one ahead of everything published, has nothing to
+// do, and the caller reads that as current.
+//
+// Each pulled chart is cached on this OCIChart, so the release an update settles
+// on is not downloaded again when Load fetches it to install. Tags that are not
+// versions, and prereleases, are left out for the same reason SelectVersion
+// leaves them out: they are not releases box installs unasked.
+func (o *OCIChart) Releases(ctx context.Context, ref ChartRef, floor string) ([]Published, error) {
 	p, err := o.open(ctx, ref)
 	if err != nil {
 		return nil, err
@@ -148,10 +160,23 @@ func (o *OCIChart) Releases(ctx context.Context, ref ChartRef) ([]Published, err
 	if err != nil {
 		return nil, o.pullError(p.repo, "", err)
 	}
+	// An unreadable floor lists everything rather than nothing: a box that
+	// cannot say where it is must never be told it is current.
+	var from *semver.Version
+	if f := strings.TrimSpace(floor); f != "" {
+		if v, err := semver.NewVersion(f); err == nil {
+			from = v
+		}
+	}
 	var out []Published
+	versions := 0
 	for _, tag := range tags {
 		v, err := semver.NewVersion(tag)
 		if err != nil || v.Prerelease() != "" {
+			continue
+		}
+		versions++
+		if from != nil && v.LessThan(from) {
 			continue
 		}
 		chart, err := o.chart(p, tag)
@@ -164,7 +189,7 @@ func (o *OCIChart) Releases(ctx context.Context, ref ChartRef) ([]Published, err
 			UpgradeFrom: strings.TrimSpace(chart.Annotations[UpgradeFromAnnotation]),
 		})
 	}
-	if len(out) == 0 {
+	if versions == 0 {
 		return nil, o.noVersionError(p.repo, fmt.Errorf("no published release is a version box can read"))
 	}
 	sort.SliceStable(out, func(i, j int) bool {

@@ -53,11 +53,15 @@ import (
 )
 
 // ChartSource is where update reads the repository: one release by version
-// (apply's ChartSource), and every published release with the annotations the
-// update plan needs. release.OCIChart implements both.
+// (apply's ChartSource), and every published release from a floor up, with the
+// annotations the update plan needs. release.OCIChart implements both.
 type ChartSource interface {
 	release.ChartSource
-	Releases(ctx context.Context, ref release.ChartRef) ([]release.Published, error)
+	// Releases lists the published releases at or above floor, oldest first.
+	// floor is the installed release: an update only ever steps forward, so
+	// box never reads a version below it. An empty listing is a repository
+	// with nothing ahead of the box, which is current, not an error.
+	Releases(ctx context.Context, ref release.ChartRef, floor string) ([]release.Published, error)
 }
 
 // Release is the deployed release as update reads it: what Helm says is
@@ -464,7 +468,10 @@ func (u *Updater) plan(ctx context.Context, opts Options) (Result, error) {
 	res.Installed = installed.ChartVersion
 
 	repo := opts.Apply.ChartRepo
-	releases, err := u.Charts.Releases(ctx, release.ChartRef{Repo: repo})
+	// The listing starts at the installed release: an update never moves a
+	// release backwards, and the repository's older charts are history -- some
+	// of it a chart today's box cannot read at all.
+	releases, err := u.Charts.Releases(ctx, release.ChartRef{Repo: repo}, installed.ChartVersion)
 	if err != nil {
 		return res, err
 	}
@@ -478,6 +485,18 @@ func (u *Updater) plan(ctx context.Context, opts Options) (Result, error) {
 	res.Name = fromChart.Name
 	if res.Name == "" {
 		res.Name = release.ReleaseName
+	}
+	// Nothing at or above the installed release is published: the box is on the
+	// newest one, or ahead of every published one. That is current. A target the
+	// operator named is still read below, because naming one is a request.
+	if len(releases) == 0 && strings.TrimSpace(opts.Apply.ChartVersion) == "" {
+		res.Target = installed.ChartVersion
+		res.Current = true
+		res.state.LastCheck = u.now()
+		if err := u.State.Save(res.state); err != nil {
+			return res, err
+		}
+		return res, nil
 	}
 
 	target, skipped, skips, err := u.target(ctx, opts, releases, state)

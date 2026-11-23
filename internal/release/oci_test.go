@@ -332,7 +332,7 @@ func TestOCIReleasesListsTheFloorsUpdatePlansWith(t *testing.T) {
 	}
 
 	src := &OCIChart{BoxVersion: "0.4.0"}
-	got, err := src.Releases(context.Background(), ChartRef{Repo: "oci://" + host + "/charts/s5n"})
+	got, err := src.Releases(context.Background(), ChartRef{Repo: "oci://" + host + "/charts/s5n"}, "")
 	if err != nil {
 		t.Fatalf("Releases: %v", err)
 	}
@@ -342,6 +342,107 @@ func TestOCIReleasesListsTheFloorsUpdatePlansWith(t *testing.T) {
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("Releases = %+v, want %+v (prereleases are not releases box installs unasked)", got, want)
+	}
+}
+
+// vintageChart is this tree's chart as a release from before platform.yaml
+// shipped: an older version, and no platform pins at all. The published
+// repository still holds releases of that shape, and box cannot read one, which
+// is why a listing must pass over it rather than pull it.
+func vintageChart(t *testing.T, base []byte, version string) []byte {
+	t.Helper()
+	ch, err := loader.LoadArchive(bytes.NewReader(base))
+	if err != nil {
+		t.Fatal(err)
+	}
+	setChartVersion(t, ch, version, "")
+	kept := ch.Raw[:0]
+	for _, f := range ch.Raw {
+		if f.Name != PlatformFile {
+			kept = append(kept, f)
+		}
+	}
+	ch.Raw = kept
+	return archiveChart(t, ch)
+}
+
+// TestOCIReleasesNeverPullsBelowTheFloor: an update only ever steps forward, so
+// its listing starts at the release the box is on. A repository keeps every
+// chart ever published, and one from before platform.yaml cannot be read at
+// all: the floor is what lets the listing pass over history instead of failing
+// on it before an update has chosen a target.
+func TestOCIReleasesNeverPullsBelowTheFloor(t *testing.T) {
+	host := registry(t)
+	base := packageChart(t, filepath.Join("..", "..", "charts", "s5n"))
+	for _, rel := range []struct{ version, minBox, upgradeFrom string }{
+		{"0.5.0", "0.4.0", "0.4.0"},
+		{"0.6.0", "0.5.0", "0.5.0"},
+	} {
+		ch, err := loader.LoadArchive(bytes.NewReader(base))
+		if err != nil {
+			t.Fatal(err)
+		}
+		setChartFloors(t, ch, rel.version, rel.minBox, rel.upgradeFrom)
+		if err := pushData(t, host+"/charts/s5n:"+rel.version, archiveChart(t, ch)); err != nil {
+			t.Fatalf("push %s: %v", rel.version, err)
+		}
+	}
+	if err := pushData(t, host+"/charts/s5n:0.0.9", vintageChart(t, base, "0.0.9")); err != nil {
+		t.Fatalf("push a release from before the platform layer: %v", err)
+	}
+
+	src := &OCIChart{BoxVersion: "0.4.0"}
+	got, err := src.Releases(context.Background(), ChartRef{Repo: "oci://" + host + "/charts/s5n"}, "0.5.0")
+	if err != nil {
+		t.Fatalf("Releases from 0.5.0 up: %v", err)
+	}
+	want := []Published{
+		{Version: "0.5.0", MinBox: "0.4.0", UpgradeFrom: "0.4.0"},
+		{Version: "0.6.0", MinBox: "0.5.0", UpgradeFrom: "0.5.0"},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("Releases = %+v, want %+v", got, want)
+	}
+	if _, pulled := src.pulled["0.0.9"]; pulled {
+		t.Fatalf("the listing pulled 0.0.9, which is below the installed release: %v", src.pulled)
+	}
+}
+
+// TestOCIReleasesWithAFloorAboveEveryReleaseIsEmpty: a box on the newest release,
+// or ahead of every published one, has nothing to do. That is an empty listing,
+// not an error: the error is for a repository that publishes no release at all.
+func TestOCIReleasesWithAFloorAboveEveryReleaseIsEmpty(t *testing.T) {
+	host := registry(t)
+	pushChart(t, host)
+	src := &OCIChart{BoxVersion: "0.4.0"}
+	got, err := src.Releases(context.Background(), ChartRef{Repo: "oci://" + host + "/charts/s5n"}, "9.0.0")
+	if err != nil {
+		t.Fatalf("Releases with a floor above every published release: %v", err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("Releases = %+v, want nothing at or above 9.0.0", got)
+	}
+	if len(src.pulled) != 0 {
+		t.Fatalf("the listing pulled %v although every release is below the floor", src.pulled)
+	}
+}
+
+// TestOCIReleasesFailsOnAnUnreadableReleaseAtOrAboveTheFloor: a release at or
+// above the installed one that cannot be read is a broken release, not history,
+// and stops the listing loudly.
+func TestOCIReleasesFailsOnAnUnreadableReleaseAtOrAboveTheFloor(t *testing.T) {
+	host := registry(t)
+	base := packageChart(t, filepath.Join("..", "..", "charts", "s5n"))
+	if err := pushData(t, host+"/charts/s5n:0.5.0", vintageChart(t, base, "0.5.0")); err != nil {
+		t.Fatalf("push: %v", err)
+	}
+	src := &OCIChart{BoxVersion: "0.4.0"}
+	_, err := src.Releases(context.Background(), ChartRef{Repo: "oci://" + host + "/charts/s5n"}, "0.4.0")
+	if err == nil {
+		t.Fatal("a release with no platform.yaml was listed as readable")
+	}
+	if !strings.Contains(err.Error(), PlatformFile) || !strings.Contains(err.Error(), "0.5.0") {
+		t.Fatalf("error = %v, want the release and the file box cannot read", err)
 	}
 }
 
