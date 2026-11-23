@@ -17,11 +17,16 @@ is the chart's half of one decision, and the two can never name different apps.
 auth.oidc.gatewayIP is the switch, not the app's name: box writes it at init from
 the Gateway's proxy Service, and it is the one thing an OIDC app cannot do
 without -- its issuer is the box's own HTTPS URL, so without the address the pod
-cannot reach the login and qui refuses to start. A plain `helm install` (and a
-box whose grant predates the provider) has no such value, and gets the app's
-previous configuration: no login in the app, the edge's login in front. That is
-why this is not `oidc: true` alone -- that would crash-loop every helm-only
-install of the catalog file. */}}
+cannot reach the login, and an app whose only login is the provider has no way
+in at all. (Since qui v1.36.0 it does not refuse to start over it: discovery is
+per request, so the pod is Ready and its page can only say the provider is
+unavailable -- with its built-in login switched off, that is a page nobody can
+sign in to. autobrr retries in the background for a few minutes and then does
+the same.) A plain `helm install` (and a box whose grant predates the provider)
+has no such value, and gets the app's previous configuration: no login in the
+app, the edge's login in front. That is why this is not `oidc: true` alone --
+that would leave every helm-only install of the catalog file with an app that
+starts and cannot be signed in to. */}}
 {{- $oidcIP := "" }}
 {{- with $root.Values.auth }}
 {{- with .oidc }}
@@ -553,11 +558,18 @@ spec:
             # itself), is what keeps the form from being offered. qui answers a
             # password login in its own code and needs neither.
             #
-            # What an unreachable issuer costs differs: qui will not start,
-            # autobrr starts and retries discovery for about four minutes
-            # (internal/auth/oidc.go:78-96 and 156-167 at v1.90.0), so Ready is
-            # the proof for one and not the other. The e2e's sign-in is the
-            # proof for both.
+            # What an unreachable issuer costs does not differ: neither client
+            # refuses to start over it. qui v1.36.1 discovers the provider on
+            # demand (internal/api/handlers/oidc.go:87-113 and 209 at v1.36.1),
+            # so the pod is Ready and its page offers only the
+            # provider-unavailable line; autobrr starts and retries discovery
+            # for about four minutes (internal/auth/oidc.go:78-96 and 156-167
+            # at v1.90.0). Ready therefore proves nothing about the issuer for
+            # either one, and the e2e's sign-in is the proof for both. Before
+            # qui v1.36.0 the discovery happened at startup and qui would not
+            # start without it; the switch at the top of this file is unchanged
+            # by that, because an app whose only login is the provider still
+            # cannot be signed in to without the address.
             - name: {{ $oidcPrefix }}__OIDC_ENABLED
               value: "true"
             - name: {{ $oidcPrefix }}__OIDC_ISSUER

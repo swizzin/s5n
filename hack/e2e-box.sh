@@ -978,11 +978,14 @@ PYEOF
 # and a NetworkPolicy that lets it reach the proxy.
 #
 # What a client does when one of those is wrong differs, and it is worth knowing
-# which proof you have. qui refuses to start until it can read the discovery
-# document, so Ready is the three of them together. autobrr starts and retries
-# discovery for about four minutes in the background (50 attempts, five seconds
-# apart: internal/auth/oidc.go at v1.90.0), so its Ready says nothing about the
-# issuer -- the sign-in e2e does.
+# which proof you have. Neither client refuses to start over it: qui v1.36.1
+# discovers the provider on demand (internal/api/handlers/oidc.go:87-113 and 209
+# at v1.36.1), so its Ready says nothing about the issuer -- its page only says
+# the provider is unavailable -- and autobrr starts and retries discovery for
+# about four minutes in the background (50 attempts, five seconds apart:
+# internal/auth/oidc.go at v1.90.0), so neither does its. The fields below are
+# read from the objects instead, and the sign-in e2e is what proves the client
+# can actually reach the login.
 #
 # The client secret is one Secret in this namespace, written once by root; the
 # login keeps only its digest. Both are asserted here against each other.
@@ -990,9 +993,10 @@ assert_oidc() { # assert_oidc <domain> <app> <environment prefix>
   local domain=$1 app=$2 prefix=$3
   local secret_name proxy_ip alias_ip alias_host issuer client redirect ssl_dir disc
   local grant_ip cm_digest stored_digest plaintext policy provider has_hmac anchor eg_port
-  # The app's own readiness is the alias, the trust root and the egress rule
-  # proved together -- for the client that will not start without them, and as
-  # a first sign that nothing is wrong for the one that starts anyway.
+  # The app's own readiness proves nothing about the issuer -- neither client
+  # refuses to start over one it cannot reach -- so the fields below are read
+  # from the objects, and the sign-in e2e is the proof that the client can use
+  # them.
   $K -n "$NS" wait --for=condition=Ready "pod/${app}-0" --timeout=300s ||
     { echo "${app}-0 never became Ready"; fail=1; }
   secret_name=$($K -n "$NS" get statefulset "$app" \
