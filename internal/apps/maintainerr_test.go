@@ -45,67 +45,86 @@ func (f *fakeMaintainerr) handler() http.HandlerFunc {
 		case path == "/api/health/ready" && r.Method == http.MethodGet:
 			writeJSON(w, map[string]any{"status": "ok", "database": "ok"})
 		case path == "/api/settings" && r.Method == http.MethodGet:
-			out := f.settings
-			out.PlexAuthToken = nil
-			if f.storedToken != "" {
-				masked := "****"
-				if len(f.storedToken) > 6 {
-					masked = f.storedToken[:3] + "..." + f.storedToken[len(f.storedToken)-3:]
-				}
-				out.PlexAuthToken = &masked
-			}
-			writeJSON(w, out)
-		case path == "/api/settings/plex/token" && r.Method == http.MethodPost:
-			var body struct {
-				Token string `json:"plex_auth_token"`
-			}
-			if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.Token == "" {
-				writeJSON(w, map[string]any{"status": "NOK", "code": 0, "message": "Plex auth token is required"})
-				return
-			}
-			f.storedToken = body.Token
-			f.tokenSaves++
-			writeJSON(w, map[string]any{"status": "OK", "code": 1, "message": "Success"})
+			f.getSettings(w)
 		case path == "/api/settings" && r.Method == http.MethodPatch:
-			if f.failPatch {
-				http.Error(w, "cannot save", http.StatusInternalServerError)
-				return
-			}
-			var body map[string]any
-			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-				http.Error(w, "bad body", http.StatusBadRequest)
-				return
-			}
-			// The app's own rule: a Plex connection change without a stored
-			// token is refused.
-			if _, ok := body["plex_hostname"]; ok && f.storedToken == "" {
-				writeJSON(w, map[string]any{"status": "NOK", "code": 0,
-					"message": "Authenticate with Plex before saving Plex server settings."})
-				return
-			}
-			f.apply(body)
-			f.patches++
-			writeJSON(w, map[string]any{"status": "OK", "code": 1, "message": "Success"})
+			f.patchSettings(w, r)
+		case path == "/api/settings/plex/token" && r.Method == http.MethodPost:
+			f.saveToken(w, r)
 		case path == "/api/settings/test/plex" && r.Method == http.MethodGet:
-			if f.storedToken == "" {
-				writeJSON(w, map[string]any{"status": "NOK", "code": 0,
-					"message": "Authenticate with Plex before testing the connection."})
-				return
-			}
-			if f.testFails {
-				writeJSON(w, map[string]any{"status": "NOK", "code": 0,
-					"message": "Failed to connect to Plex. Verify host and credentials."})
-				return
-			}
-			answer := f.testAnswer
-			if answer == "" {
-				answer = "1.43.5.11079"
-			}
-			writeJSON(w, map[string]any{"status": "OK", "code": 1, "message": answer})
+			f.testPlex(w)
 		default:
 			http.Error(w, "unexpected "+r.Method+" "+r.URL.Path, http.StatusNotFound)
 		}
 	}
+}
+
+// getSettings answers the row with the token masked the way the app masks it.
+func (f *fakeMaintainerr) getSettings(w http.ResponseWriter) {
+	out := f.settings
+	out.PlexAuthToken = nil
+	if f.storedToken != "" {
+		masked := "****"
+		if len(f.storedToken) > 6 {
+			masked = f.storedToken[:3] + "..." + f.storedToken[len(f.storedToken)-3:]
+		}
+		out.PlexAuthToken = &masked
+	}
+	writeJSON(w, out)
+}
+
+// saveToken is the app's own token endpoint: an empty one is refused.
+func (f *fakeMaintainerr) saveToken(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Token string `json:"plex_auth_token"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.Token == "" {
+		writeJSON(w, map[string]any{"status": "NOK", "code": 0, "message": "Plex auth token is required"})
+		return
+	}
+	f.storedToken = body.Token
+	f.tokenSaves++
+	writeJSON(w, map[string]any{"status": "OK", "code": 1, "message": "Success"})
+}
+
+// patchSettings merges a body over the row, and refuses a server change until a
+// token is stored -- the app's own rule at v3.33.0.
+func (f *fakeMaintainerr) patchSettings(w http.ResponseWriter, r *http.Request) {
+	if f.failPatch {
+		http.Error(w, "cannot save", http.StatusInternalServerError)
+		return
+	}
+	var body map[string]any
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		http.Error(w, "bad body", http.StatusBadRequest)
+		return
+	}
+	if _, ok := body["plex_hostname"]; ok && f.storedToken == "" {
+		writeJSON(w, map[string]any{"status": "NOK", "code": 0,
+			"message": "Authenticate with Plex before saving Plex server settings."})
+		return
+	}
+	f.apply(body)
+	f.patches++
+	writeJSON(w, map[string]any{"status": "OK", "code": 1, "message": "Success"})
+}
+
+// testPlex is the app's own connection test.
+func (f *fakeMaintainerr) testPlex(w http.ResponseWriter) {
+	if f.storedToken == "" {
+		writeJSON(w, map[string]any{"status": "NOK", "code": 0,
+			"message": "Authenticate with Plex before testing the connection."})
+		return
+	}
+	if f.testFails {
+		writeJSON(w, map[string]any{"status": "NOK", "code": 0,
+			"message": "Failed to connect to Plex. Verify host and credentials."})
+		return
+	}
+	answer := f.testAnswer
+	if answer == "" {
+		answer = "1.43.5.11079"
+	}
+	writeJSON(w, map[string]any{"status": "OK", "code": 1, "message": answer})
 }
 
 // apply merges a PATCH body over the stored row, as the app does.

@@ -59,10 +59,10 @@ type fakeMediaStack struct {
 
 	// Maintainerr's one settings row, with the token it holds (which its GET
 	// masks) and the number of writes this harness saw.
-	maintainerr        apps.MaintainerrSettings
-	maintainerToken    string
-	maintainerrSaves   int
-	maintainerrPatches int
+	maintainerrSettings apps.MaintainerrSettings
+	maintainerToken     string
+	maintainerrSaves    int
+	maintainerrPatches  int
 }
 
 func (f *fakeMediaStack) plexHandler() http.HandlerFunc {
@@ -180,71 +180,96 @@ func (f *fakeMediaStack) maintainerrHandler() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		f.mu.Lock()
 		defer f.mu.Unlock()
+		path := strings.TrimPrefix(r.URL.Path, "/maintainerr")
 		switch {
-		case r.URL.Path == "/maintainerr/api/health/ready":
+		case path == "/api/health/ready":
 			writeJSONAny(w, map[string]any{"status": "ok", "database": "ok"})
-		case r.URL.Path == "/maintainerr/api/settings" && r.Method == http.MethodGet:
-			out := f.maintainerr
-			out.PlexAuthToken = nil
-			if f.maintainerToken != "" {
-				masked := f.maintainerToken[:3] + "..." + f.maintainerToken[len(f.maintainerToken)-3:]
-				out.PlexAuthToken = &masked
-			}
-			writeJSONAny(w, out)
-		case r.URL.Path == "/maintainerr/api/settings/plex/token" && r.Method == http.MethodPost:
-			var body struct {
-				Token string `json:"plex_auth_token"`
-			}
-			if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.Token == "" {
-				writeJSONAny(w, map[string]any{"status": "NOK", "code": 0, "message": "Plex auth token is required"})
-				return
-			}
-			f.maintainerToken = body.Token
-			f.maintainerrSaves++
-			writeJSONAny(w, map[string]any{"status": "OK", "code": 1, "message": "Success"})
-		case r.URL.Path == "/maintainerr/api/settings" && r.Method == http.MethodPatch:
-			var body map[string]any
-			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-				http.Error(w, "bad body", http.StatusBadRequest)
-				return
-			}
-			// The app refuses a server change until a token is stored.
-			if _, ok := body["plex_hostname"]; ok && f.maintainerToken == "" {
-				writeJSONAny(w, map[string]any{"status": "NOK", "code": 0,
-					"message": "Authenticate with Plex before saving Plex server settings."})
-				return
-			}
-			if v, ok := body["plex_hostname"].(string); ok {
-				f.maintainerr.PlexHostname = v
-			}
-			if v, ok := body["plex_port"].(float64); ok {
-				f.maintainerr.PlexPort = int(v)
-			}
-			if v, ok := body["plex_ssl"].(float64); ok {
-				f.maintainerr.PlexSSL = int(v)
-			}
-			if v, ok := body["plex_manual_mode"].(float64); ok {
-				f.maintainerr.PlexManualMode = int(v)
-			}
-			if v, ok := body["plex_name"].(string); ok {
-				f.maintainerr.PlexName = v
-			}
-			if v, ok := body["media_server_type"].(string); ok {
-				f.maintainerr.MediaServerType = v
-			}
-			f.maintainerrPatches++
-			writeJSONAny(w, map[string]any{"status": "OK", "code": 1, "message": "Success"})
-		case r.URL.Path == "/maintainerr/api/settings/test/plex" && r.Method == http.MethodGet:
-			if f.maintainerToken == "" {
-				writeJSONAny(w, map[string]any{"status": "NOK", "code": 0,
-					"message": "Authenticate with Plex before testing the connection."})
-				return
-			}
-			writeJSONAny(w, map[string]any{"status": "OK", "code": 1, "message": "1.43.5"})
+		case path == "/api/settings" && r.Method == http.MethodGet:
+			f.maintainerrGet(w)
+		case path == "/api/settings" && r.Method == http.MethodPatch:
+			f.maintainerrPatch(w, r)
+		case path == "/api/settings/plex/token" && r.Method == http.MethodPost:
+			f.maintainerrToken(w, r)
+		case path == "/api/settings/test/plex" && r.Method == http.MethodGet:
+			f.maintainerrTest(w)
 		default:
 			http.Error(w, "unexpected "+r.Method+" "+r.URL.Path, http.StatusNotFound)
 		}
 	}
+}
+
+func (f *fakeMediaStack) maintainerrGet(w http.ResponseWriter) {
+	out := f.maintainerrSettings
+	out.PlexAuthToken = nil
+	if f.maintainerToken != "" {
+		masked := f.maintainerToken[:3] + "..." + f.maintainerToken[len(f.maintainerToken)-3:]
+		out.PlexAuthToken = &masked
+	}
+	writeJSONAny(w, out)
+}
+
+func (f *fakeMediaStack) maintainerrToken(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Token string `json:"plex_auth_token"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.Token == "" {
+		writeJSONAny(w, map[string]any{"status": "NOK", "code": 0, "message": "Plex auth token is required"})
+		return
+	}
+	f.maintainerToken = body.Token
+	f.maintainerrSaves++
+	writeJSONAny(w, map[string]any{"status": "OK", "code": 1, "message": "Success"})
+}
+
+// maintainerrPatch merges a body over the row, refusing a server change until a
+// token is stored, as the app does.
+func (f *fakeMediaStack) maintainerrPatch(w http.ResponseWriter, r *http.Request) {
+	var body map[string]any
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		http.Error(w, "bad body", http.StatusBadRequest)
+		return
+	}
+	if _, ok := body["plex_hostname"]; ok && f.maintainerToken == "" {
+		writeJSONAny(w, map[string]any{"status": "NOK", "code": 0,
+			"message": "Authenticate with Plex before saving Plex server settings."})
+		return
+	}
+	f.maintainerrSettings = applyMaintainerrPatch(f.maintainerrSettings, body)
+	f.maintainerrPatches++
+	writeJSONAny(w, map[string]any{"status": "OK", "code": 1, "message": "Success"})
+}
+
+// applyMaintainerrPatch merges a PATCH body over a settings row the way the app
+// merges it: an absent key is left alone.
+func applyMaintainerrPatch(row apps.MaintainerrSettings, body map[string]any) apps.MaintainerrSettings {
+	if v, ok := body["plex_hostname"].(string); ok {
+		row.PlexHostname = v
+	}
+	if v, ok := body["plex_port"].(float64); ok {
+		row.PlexPort = int(v)
+	}
+	if v, ok := body["plex_ssl"].(float64); ok {
+		row.PlexSSL = int(v)
+	}
+	if v, ok := body["plex_manual_mode"].(float64); ok {
+		row.PlexManualMode = int(v)
+	}
+	if v, ok := body["plex_name"].(string); ok {
+		row.PlexName = v
+	}
+	if v, ok := body["media_server_type"].(string); ok {
+		row.MediaServerType = v
+	}
+	return row
+}
+
+func (f *fakeMediaStack) maintainerrTest(w http.ResponseWriter) {
+	if f.maintainerToken == "" {
+		writeJSONAny(w, map[string]any{"status": "NOK", "code": 0,
+			"message": "Authenticate with Plex before testing the connection."})
+		return
+	}
+	writeJSONAny(w, map[string]any{"status": "OK", "code": 1, "message": "1.43.5"})
 }
 
 func writeJSONAny(w http.ResponseWriter, v any) {

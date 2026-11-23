@@ -39,11 +39,11 @@ func TestWiringConnectsMaintainerrToPlex(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if f.maintainerr.PlexHostname != wantHost || f.maintainerr.PlexPort != wantPort || f.maintainerr.PlexSSL != 0 {
-		t.Fatalf("Maintainerr's connection is %+v, want %s:%d over plain HTTP", f.maintainerr, wantHost, wantPort)
+	if f.maintainerrSettings.PlexHostname != wantHost || f.maintainerrSettings.PlexPort != wantPort || f.maintainerrSettings.PlexSSL != 0 {
+		t.Fatalf("Maintainerr's connection is %+v, want %s:%d over plain HTTP", f.maintainerrSettings, wantHost, wantPort)
 	}
-	if f.maintainerr.PlexManualMode != 1 || f.maintainerr.MediaServerType != "plex" {
-		t.Fatalf("Maintainerr's connection is %+v, want manual mode and the plex media server", f.maintainerr)
+	if f.maintainerrSettings.PlexManualMode != 1 || f.maintainerrSettings.MediaServerType != "plex" {
+		t.Fatalf("Maintainerr's connection is %+v, want manual mode and the plex media server", f.maintainerrSettings)
 	}
 	// Nothing about the token reaches the receipt: it is a credential, and the
 	// receipt is a ConfigMap anyone in the namespace can read.
