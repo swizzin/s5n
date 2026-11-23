@@ -92,8 +92,8 @@ plex:
 tautulli:
   default:
     repository: ghcr.io/home-operations/tautulli
-    tag: "2.18.2"
-    digest: sha256:d7ea1a79cf8cc2603890287d7c0e5bc277e4909c1df93f48f000833d2771eca0
+    tag: "2.19.1"
+    digest: sha256:602dc59bbc24f3127e086c1b702860b02abb846e7669e2ed53157bc7572c5c9b
 
 seerr:
   default:
@@ -119,8 +119,8 @@ autobrr:
     # security context; it keeps its whole state (config.toml, the SQLite
     # database and its WAL) under /config.
     repository: ghcr.io/autobrr/autobrr
-    tag: "v1.90.0"
-    digest: sha256:72bb5fe5e8c73f85660f92502d9015b21b07156495f039b55864633b9f8b7a89
+    tag: "v1.91.1"
+    digest: sha256:8c63fa0ba732eb33b2e531a84b3de3c99ae88e87c49bf077a6194020667ef92f
 
 maintainerr:
   default:
