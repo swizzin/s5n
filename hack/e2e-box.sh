@@ -8145,11 +8145,17 @@ PY
       { echo "the box's Tautulli config.ini does not carry the chart's URL root: $(sed -n '/^http_root/p' <<<"$tautulli_conf")"; fail=1; }
     # Its own login is off: no name, no password, and the two flags that say a
     # value is a hash are back to their defaults. A source that had one is only
-    # safe because the app no longer asks for it.
+    # safe because the app no longer asks for it. 2.19 also decides that from two
+    # switches of its own -- without first_run_complete it mints itself a
+    # password for a wizard that never finished, and without
+    # allow_public_no_password it refuses the Gateway's forwarded request -- so
+    # the migrated file has to carry both, or the first restart is the one that
+    # puts the password back.
     for want in "^http_username = *(\"\"|'')?$" "^http_password = *(\"\"|'')?$" \
-                "^http_hash_password = *0$" "^http_hashed_password = *0$" "^http_basic_auth = *0$"; do
+                "^http_hash_password = *0$" "^http_hashed_password = *0$" "^http_basic_auth = *0$" \
+                "^first_run_complete = *1$" "^allow_public_no_password = *1$"; do
       grep -qE "$want" <<<"$tautulli_conf" ||
-        { echo "the box's Tautulli config.ini has not switched its own login off: $(grep -E '^http_(username|password|hash|hashed|basic)' <<<"$tautulli_conf" | tr '\n' ' ')"; fail=1; }
+        { echo "the box's Tautulli config.ini has not switched its own login off: $(grep -E '^http_|^first_run|^allow_public' <<<"$tautulli_conf" | tr '\n' ' ')"; fail=1; }
     done
     for want in "pms_ssl = 0" "pms_url = http://plex:32400"; do
       grep -qx "$want" <<<"$tautulli_conf" ||

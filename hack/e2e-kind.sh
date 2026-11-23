@@ -1215,9 +1215,9 @@ echo "qBittorrent enable_multi_connections_from_same_ip = ${multi} (PBH turns it
 # ---- the opt-in apps (apps-values.yaml) ---------------------------------------
 # Each serves itself under its own base path (its baseUrl / BASE_PATH, with no
 # rewrite). qui and Maintainerr keep no login of their own here: the edge is the
-# login, exactly as the Arrs run External. autobrr does, because v1.90.0 has no
-# way to turn its login off and this install gives the release no provider -- a
-# box's init does, and that is what the box e2e signs in to. So the HTML must
+# login, exactly as the Arrs run External. autobrr does, because this install
+# gives the release no provider, so its own password login stays on (a box's init
+# gives it one, and that is what the box e2e signs in to). So the HTML must
 # arrive without a redirect,
 # and the asset URLs it builds must resolve through the same prefix — that is
 # what makes the base-path setting right rather than merely present.
@@ -1253,10 +1253,10 @@ for app in qui autobrr maintainerr; do
       echo "GET /${app} in-pod /healthz/readiness -> ${code}"; [ "$code" = 200 ] || fail=1 ;;
     autobrr)
       # This install gives the release no provider (a plain helm install sets
-      # auth.edge and nothing else), so autobrr keeps the login it cannot turn
-      # off at v1.90.0: the UI is its own sign-in page behind the edge's, which
-      # is the state a box that never ran init has. Its base path covers every
-      # route, so health answers under the prefix like any other path.
+      # auth.edge and nothing else), so autobrr keeps its own login: the UI is
+      # its sign-in page behind the edge's, which is the state a box that never
+      # ran init has. Its base path covers every route, so health answers under
+      # the prefix like any other path.
       code=$(gw_get -s -o /dev/null -w '%{http_code}' "https://${DOMAIN}/${app}/api/healthz/readiness" || true)
       echo "GET /${app}/api/healthz/readiness via gateway -> ${code}"; [ "$code" = 200 ] || fail=1 ;;
     maintainerr)
