@@ -78,9 +78,18 @@ func runMigrateApply(ctx context.Context, args []string) {
 		fmt.Fprintf(os.Stderr, "box: %v\n", err)
 		os.Exit(2)
 	}
+	// --unit-dir is bootstrap's timer switch, taken out of the arguments the
+	// same way: on a host with no box this run installs one, and the timer it
+	// writes for it lands in the directory this run names.
+	unitDir, args, err := takeDevFlag(args, "unit-dir")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "box: %v\n", err)
+		os.Exit(2)
+	}
 	fs := flag.NewFlagSet("migrate apply", flag.ExitOnError)
 	o := addMigrateApplyFlags(fs)
 	o.install.pathsInNode = pathsInNode
+	o.install.unitDir = unitDir
 	// The apply this command hands over to reads the same switch: on a host
 	// whose paths are inside a test node, the second render must not stat them
 	// on the host that does not have them.

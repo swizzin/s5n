@@ -1112,6 +1112,11 @@ data. Everything it will change is written down before it changes anything.
   not have: an answer a flag or the plan already holds is not a question, and the app
   picker never appears, because the plan decides every app. On a host that already has
   a box it adopts into it, which is how one source is migrated per user.
+  The install ends the way bootstrap's does: once init has installed the release, the
+  run writes the update timer for the record, grant and values that run used, and says
+  so -- a migrated box updates itself like any other. A box whose install never
+  finished is never on a schedule, and a host that already had a box keeps the units
+  its own bootstrap wrote, because that run adopts and writes none.
   The torrent port is decided for the box rather than for the app list this run writes,
   and the source's own peer port is kept when this cluster can use it.
   The install is what the run's one answer buys, so it comes after that answer: on a
@@ -1456,7 +1461,8 @@ token is needed to learn that something moved.
 - **The unit wakes box every fifteen minutes; box decides whether to check (decided).**
   Two systemd units: `box-update.service` runs `box update --timer` as root with no
   timeout (an update can wait out an app's thirty-minute startup budget), for the
-  record, grant and values that install used; `box-update.timer` wakes it 10 minutes
+  record, grant and values that install used -- bootstrap's own, or the one a
+  migration installs on a host with no box; `box-update.timer` wakes it 10 minutes
   after boot, every 15 minutes after that, with up to 10 minutes of jitter.
   `box update --timer` answers yes and asks nothing. The wake reads the clock
   `update.json` holds: a check is due when the last one is zero or a whole interval
@@ -1466,8 +1472,9 @@ token is needed to learn that something moved.
   that failed leaves the last one unwritten, so every wake would be due again and a
   registry outage would otherwise silence every health notice while it lasted.
 - **Where box cannot schedule itself, it says so (decided).** The units are installed
-  only when bootstrap runs as root on a host whose systemd is up. Anywhere else --
-  a container, a non-root run -- bootstrap prints one line: box will not check for
+  only when the run that installs a box -- bootstrap, or `box migrate apply` on a host
+  with none -- is root on a host whose systemd is up. Anywhere else --
+  a container, a non-root run -- that run prints one line: box will not check for
   updates by itself, and `box update --timer` from cron every 15 minutes is the same
   job. A seedbox that never updates on its own is the failure this exists to prevent,
   so it is said out loud rather than left to be noticed.

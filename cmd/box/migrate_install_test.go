@@ -6,14 +6,19 @@ package main
 // Nothing here touches a host: installAnswers is the whole decision.
 
 import (
+	"bytes"
+	"context"
+	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
 	"github.com/swizzin/s5n/internal/archive"
 	"github.com/swizzin/s5n/internal/migrate/bundle"
 	"github.com/swizzin/s5n/internal/migrate/plan"
+	"github.com/swizzin/s5n/internal/say"
 )
 
 // planWithData is the plan a cutover writes: one app, a data root, and the
@@ -330,6 +335,67 @@ func TestInstallTargetNamesTheBoxTheFlagsDecide(t *testing.T) {
 	}
 	if got := confirmTarget(installTarget(inst)); got != "this box" {
 		t.Errorf("the question with no namespace reads %q, want it to name the box it is about", got)
+	}
+}
+
+// TestTheInstallerSchedulesTheTimerLast: the install a migration makes ends the
+// way bootstrap's does -- init's flow over the plan's answers, and then the
+// update timer for the record, grant and values that run used, which is what
+// makes a migrated box update itself. A box whose install never finished is
+// never on a schedule: a failed adoption schedules nothing.
+//
+// Both halves are fakes, so this reads the order and the paths without a host,
+// a cluster or a systemd.
+func TestTheInstallerSchedulesTheTimerLast(t *testing.T) {
+	var order, got []string
+	fin := installFinish{
+		adopt: func(context.Context) error {
+			order = append(order, "install")
+			return nil
+		},
+		schedule: func(_ context.Context, unitDir, record, grant, values string, _ say.Reporter) {
+			order = append(order, "timer")
+			got = []string{unitDir, record, grant, values}
+		},
+	}
+	o, inst := installFlagSet(t)
+	inst.unitDir = "/run/units"
+	inst.record = new(string)
+	*inst.record = "/etc/s5n/cluster.yaml"
+	iflg := &initFlags{grantPath: o.grantPath, valuesPath: o.valuesPath}
+	if err := fin.run(context.Background(), inst, iflg, &say.Plain{W: &bytes.Buffer{}}); err != nil {
+		t.Fatalf("the install's last step: %v", err)
+	}
+	if want := "install timer"; strings.Join(order, " ") != want {
+		t.Errorf("the install went %q, want %q: the timer is last, as bootstrap's is", strings.Join(order, " "), want)
+	}
+	// The three files are the ones this run installed from, and the directory is
+	// the one --unit-dir named: the timer has to update the box it was given, not
+	// a default one.
+	want := []string{"/run/units", "/etc/s5n/cluster.yaml", *o.grantPath, *o.valuesPath}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("the timer was scheduled for %v, want the run's own %v", got, want)
+	}
+
+	// The same step with an install that stopped: an error comes back as it is,
+	// and nothing is scheduled.
+	order = nil
+	stopped := errors.New("the release never became healthy")
+	failed := installFinish{
+		adopt: func(context.Context) error {
+			order = append(order, "install")
+			return stopped
+		},
+		schedule: func(context.Context, string, string, string, string, say.Reporter) {
+			order = append(order, "timer")
+		},
+	}
+	err := failed.run(context.Background(), inst, iflg, &say.Plain{W: &bytes.Buffer{}})
+	if !errors.Is(err, stopped) {
+		t.Fatalf("a failed install = %v, want the install's own error", err)
+	}
+	if want := "install"; strings.Join(order, " ") != want {
+		t.Errorf("a box that never finished went %q, want %q: it must not be on a schedule", strings.Join(order, " "), want)
 	}
 }
 
