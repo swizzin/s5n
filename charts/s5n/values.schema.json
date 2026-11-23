@@ -272,7 +272,6 @@
               "type": "object",
               "additionalProperties": false,
               "required": [
-                "port",
                 "service"
               ],
               "properties": {
@@ -280,7 +279,7 @@
                   "type": "integer",
                   "minimum": 1024,
                   "maximum": 65535,
-                  "description": "Externally reachable peer port. With a NodePort service it must also sit in the cluster's NodePort range; NodePort is the default; with LoadBalancer the LoadBalancer implementation assigns the address."
+                  "description": "Externally reachable peer port, and the one key this chart ships no default for: box picks a free port in the lower band of the NodePort range and records it in the grant, and a helm install must set it (the render refuses without it). With a NodePort service it must also sit in the cluster's NodePort range; with LoadBalancer the LoadBalancer implementation assigns the address."
                 },
                 "service": {
                   "type": "object",

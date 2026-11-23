@@ -18,6 +18,11 @@ storage:
     existingClaim: box-catalog-config
 
 apps:
+  qbittorrent:
+    torrent:
+      # No default in the chart: a helm install chooses its peer port, and the
+      # band box picks from is the one Kubernetes does not assign by itself.
+      port: 30080
   qui:
     enabled: true
   autobrr:

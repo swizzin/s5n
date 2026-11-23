@@ -229,11 +229,15 @@ step_package_chart() {
   # says there is one, as box does; an app served at its own host name
   # also needs the domain box serves it at, so gateway.host is the same
   # fixture the chart's own validation renders with (hack/validate-chart.sh).
-  helm lint "$tgz"
+  # It ships no torrent port either: a helm install sets one, from the band
+  # Kubernetes does not assign by itself.
+  helm lint "$tgz" --set auth.edge=true --set gateway.host=box.example.com \
+    --set apps.qbittorrent.torrent.port=30080
   helm show values "$tgz" >/dev/null
   local rendered want
   rendered=$(helm template release "$tgz" -n seedbox \
-    --set auth.edge=true --set gateway.host=box.example.com)
+    --set auth.edge=true --set gateway.host=box.example.com \
+    --set apps.qbittorrent.torrent.port=30080)
   want="${image}:${VERSION}@${DIGEST}"
   if ! grep -q "$want" <<<"$rendered"; then
     echo "the packaged chart does not render ${want}" >&2

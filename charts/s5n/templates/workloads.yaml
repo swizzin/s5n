@@ -31,6 +31,16 @@ install of the catalog file. */}}
 {{- $oidc := and (eq (include "s5n.oidc" (dict "root" $root "app" $inst.app) | trim) "true") (ne (toString $root.Values.gateway.host) "") (ne $oidcIP "") }}
 {{- $appHost := "" }}
 {{- if eq $exposure "host" }}{{ $appHost = include "s5n.appHost" (dict "root" $root "app" $inst.app) | trim }}{{ end }}
+{{- /* The peer port qBittorrent's Service and container take. The chart ships no
+default for it: a fixed number in the upper band of the NodePort range is one the
+API server can hand to another Service first (a LoadBalancer's, one per
+listener), and then every install of this seedbox is refused. box picks a free
+one from the lower band and records it in the grant; a helm install must choose
+its own. */}}
+{{- $torrentPort := "" }}
+{{- if eq $inst.app "qbittorrent" }}
+{{- $torrentPort = required "apps.qbittorrent.torrent.port: set the peer port peers reach this box on (box records one at init, from the lower band of the NodePort range, 30000-30085 by default)" (($cfg.torrent | default dict).port) }}
+{{- end }}
 ---
 apiVersion: apps/v1
 kind: StatefulSet
@@ -338,7 +348,7 @@ spec:
             - name: QBT_WEBUI_PORT
               value: {{ $cfg.port | quote }}
             - name: QBT_TORRENTING_PORT
-              value: {{ $cfg.torrent.port | quote }}
+              value: {{ $torrentPort | quote }}
             {{- else if eq $inst.app "plex" }}
             # Absent (optional secretKeyRef) when no claim token was supplied at
             # install, or once it has already been consumed: the entrypoint only
@@ -587,10 +597,10 @@ spec:
               containerPort: {{ $cfg.port }}
             {{- if eq $inst.app "qbittorrent" }}
             - name: bt-tcp
-              containerPort: {{ $cfg.torrent.port }}
+              containerPort: {{ $torrentPort }}
               protocol: TCP
             - name: bt-udp
-              containerPort: {{ $cfg.torrent.port }}
+              containerPort: {{ $torrentPort }}
               protocol: UDP
             {{- end }}
           # Thirty minutes to open the port, for every app. An app migrates its
@@ -758,18 +768,18 @@ spec:
     {{- include "s5n.selector" $ctx | nindent 4 }}
   ports:
     - name: bt-tcp
-      port: {{ $cfg.torrent.port }}
+      port: {{ $torrentPort }}
       targetPort: bt-tcp
       protocol: TCP
       {{- if eq $cfg.torrent.service.type "NodePort" }}
-      nodePort: {{ $cfg.torrent.port }}
+      nodePort: {{ $torrentPort }}
       {{- end }}
     - name: bt-udp
-      port: {{ $cfg.torrent.port }}
+      port: {{ $torrentPort }}
       targetPort: bt-udp
       protocol: UDP
       {{- if eq $cfg.torrent.service.type "NodePort" }}
-      nodePort: {{ $cfg.torrent.port }}
+      nodePort: {{ $torrentPort }}
       {{- end }}
 {{- end }}
 {{- if $root.Values.gateway.enabled }}

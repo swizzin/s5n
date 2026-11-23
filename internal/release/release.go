@@ -743,6 +743,14 @@ func (a *Applier) Apply(ctx context.Context, opts Options) (Result, error) {
 	hooksWait := opts.RunHooks && !opts.SkipHooks
 	res.FirstInstall = !exists
 	res.Host = hostOf(values)
+	// The peer port comes before the diff, not after it: a box installed while
+	// the chart defaulted the port has none in either file, and the number its
+	// release already runs is what this run installs. Written first, the port
+	// is not a change -- the box keeps the one its peers announce -- and the
+	// chart ships no default to fall back on.
+	if err := keepPeerPort(values, deployed, exists, chart.Schema, r); err != nil {
+		return res, err
+	}
 	if exists {
 		res.Changes = seedbox.Diff(deployed, values)
 	}

@@ -1,0 +1,58 @@
+# testdata/chart, plus the one values branch the real chart has and it does not:
+# qBittorrent's peers Service. The port itself is what a box records, so this
+# file ships none -- a chart release with no default for it, exactly like
+# charts/s5n. Every key below is the fixture chart's.
+global:
+  puid: 1000
+  pgid: 1000
+  tz: Etc/UTC
+
+# The palette box draws its dialogs in and the login is drawn in: box reads it
+# from this file, and the chart renders nothing from it.
+theme: s5n
+
+storage:
+  data:
+    existingClaim: ""
+    hostPath: /srv/s5n/data
+    size: 1Ti
+  config:
+    existingClaim: ""
+    hostPath: /srv/s5n/config
+    size: 20Gi
+
+gateway:
+  enabled: true
+  host: ""
+  parentRef:
+    name: s5n
+    namespace: s5n-gateway
+    sectionName: ""
+
+networkPolicy:
+  enabled: true
+  gatewayFrom: []
+
+wiring:
+  timeoutSeconds: 300
+
+# The one transient key a chart has today: box init asks for it after the
+# confirm and hands it to that one apply (charts/s5n/catalog.yaml).
+secrets:
+  plexClaimToken: ""
+
+apps:
+  qbittorrent:
+    enabled: true
+    port: 8080
+    torrent:
+      # No port: box picks one and records it, and a chart with no default is
+      # what makes an old box's missing port a decision box has to make.
+      service:
+        type: NodePort
+  sonarr:
+    enabled: true
+    port: 8989
+  radarr:
+    enabled: true
+    port: 7878

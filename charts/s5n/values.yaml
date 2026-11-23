@@ -157,16 +157,18 @@ apps:
     # qBittorrent has no URL base setting; the route strips the prefix.
     rewritePath: true
     torrent:
-      # Must equal the externally reachable port so peers are told the right one.
+      # The peer port: must equal the externally reachable port so peers are
+      # told the right one, and with a NodePort Service it must also sit in the
+      # cluster's NodePort range.
       #
-      # box does not use this default: `box init` picks a free port in the lower
-      # band of the NodePort range (30000-30085 for the default range) and
-      # records it in the grant, because the band the API server assigns its own
-      # nodePorts from is the upper one -- a fixed 31111 there is a port any
+      # The chart ships no default. A fixed number is what collides: the API
+      # server hands out its own nodePorts from the upper part of the range, so
+      # a default there (31111, which this chart used to ship) is a port any
       # Service asking for "any free port" can win first, and then this Service
-      # is refused for the rest of the install. A hand-picked port belongs in
-      # that lower band for the same reason.
-      port: 31111
+      # is refused for the rest of the install. `box init` picks a free port in
+      # the lower band (30000-30085 for the default range, the part Kubernetes
+      # does not assign by itself) and records it in the grant; a helm install
+      # must set this key, and is refused with a message saying so.
       service:
         # NodePort on the node's own address, so the peer port shares a single-IP box
         # with the Gateway's LoadBalancer address without any address sharing, and

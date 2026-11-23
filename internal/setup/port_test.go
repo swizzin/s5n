@@ -158,6 +158,9 @@ func torrentHarness(t *testing.T, held []NodePort) *harness {
 	h := newHarness(t)
 	h.chartDir = "testdata/chart-torrent"
 	h.decision.Catalog = catalogAt(t, h.chartDir)
+	// The chart ships no peer port: the schema is what says the key exists,
+	// and init is what decides it.
+	h.decision.Schema = chartAt(t, h.chartDir).Schema
 	h.prompt.inputs = []string{"box.example.com", "/srv/s5n/data", "/srv/s5n/config"}
 	h.prompt.multis = [][]string{{"alpha", torrentApp}}
 	h.decision.NodePorts = func(context.Context) ([]NodePort, error) { return held, nil }
@@ -218,6 +221,7 @@ func TestTorrentPortIsKeptAndTheClusterIsNotRead(t *testing.T) {
 	h := newHarness(t)
 	h.chartDir = "testdata/chart-torrent"
 	h.decision.Catalog = catalogAt(t, h.chartDir)
+	h.decision.Schema = chartAt(t, h.chartDir).Schema
 	write(t, h.grantPath, torrentGrant)
 	reads := 0
 	h.decision.NodePorts = func(context.Context) ([]NodePort, error) {

@@ -493,7 +493,7 @@ func (d *Decision) Run(ctx context.Context, opts Options) (Result, error) {
 	// keeps it from then on. It is read before any answer is written, because a
 	// cluster with no free port in the band is a refusal and not a
 	// half-finished dialog.
-	port, err := d.torrentPort(ctx, namespace, apps, base, grantNow, opts)
+	port, err := d.torrentPort(ctx, namespace, apps, grantNow, opts)
 	if err != nil {
 		return res, err
 	}

@@ -8,7 +8,8 @@ cd "$(dirname "$0")/.."
 KUBE=${1:-1.37.0}
 CRDS='https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json'
 
-helm lint charts/s5n --set auth.edge=true --set gateway.host=box.example.com
+helm lint charts/s5n --set auth.edge=true --set gateway.host=box.example.com \
+  --set apps.qbittorrent.torrent.port=30080
 
 # auth.edge is the operator's statement that a login sits in front of the
 # release. The chart ships no login, so a render with the key missing and a
@@ -19,7 +20,7 @@ for mode in missing false; do
   err=$(mktemp)
   args=()
   [ "$mode" = false ] && args=(--set auth.edge=false)
-  if helm template t charts/s5n -n seedbox "${args[@]}" >/dev/null 2>"$err"; then
+  if helm template t charts/s5n -n seedbox --set apps.qbittorrent.torrent.port=30080 "${args[@]}" >/dev/null 2>"$err"; then
     echo "auth.edge $mode: rendered; the chart must refuse a release with no login in front"
     rm -f "$err"; exit 1
   fi
@@ -32,12 +33,33 @@ for mode in missing false; do
   echo "== auth.edge $mode: refused"
 done
 
+# The chart ships no peer port: a fixed one in the upper band of the NodePort
+# range is a port the API server can hand to another Service first, and the
+# peers Service is then refused for the rest of the install. box records one;
+# a helm install must set it, and a render without it says which key and what it
+# is for.
+port_message='apps.qbittorrent.torrent.port: set the peer port peers reach this box on'
+err=$(mktemp)
+if helm template t charts/s5n -n seedbox --set auth.edge=true \
+     --set gateway.host=box.example.com >/dev/null 2>"$err"; then
+  echo "the peer port missing: rendered; a box whose peers Service has no port cannot install"
+  rm -f "$err"; exit 1
+fi
+if ! grep -qF "$port_message" "$err"; then
+  echo "the peer port missing: failed without the refusal message:"
+  cat "$err"
+  rm -f "$err"; exit 1
+fi
+rm -f "$err"
+echo "== peer port missing: refused, naming the key and the band box picks from"
+
 # Plex must never trust a network range by default. The public Gateway's Envoy
 # proxy connects to Plex from its own pod IP, which is inside the pod CIDR, so
 # PLEX_NO_AUTH_NETWORKS containing that range would make the whole internet look
 # like a "local" client: unauthenticated admin of the server. apps.plex.noAuthNetworks
 # is opt-in only, and the default render must not carry the env var at all.
-if helm template t charts/s5n -n seedbox --set auth.edge=true --set gateway.host=box.example.com | grep -q 'PLEX_NO_AUTH_NETWORKS'; then
+if helm template t charts/s5n -n seedbox --set auth.edge=true --set gateway.host=box.example.com \
+     --set apps.qbittorrent.torrent.port=30080 | grep -q 'PLEX_NO_AUTH_NETWORKS'; then
   echo "default render sets PLEX_NO_AUTH_NETWORKS: Plex would trust the pod network"
   exit 1
 fi

@@ -4790,6 +4790,49 @@ update_box() {
     { echo "box did not report a healthy receipt"; fail=1; }
   [ "$fail" = 0 ] || return 0
 
+  # ---- an old box: no recorded peer port ------------------------------------
+  # A box installed before box picked the port has none in its grant: the chart
+  # defaulted it to 31111, so that is the number its release renders and the one
+  # its peers Service is on. Dropping the key here is that box, and what follows
+  # proves the upgrade keeps the number instead of picking a new one or refusing
+  # a chart that no longer ships a default.
+  old_port=$(python3 - "$WORK/grant.yaml" <<'PY'
+import sys, yaml
+grant = yaml.safe_load(open(sys.argv[1])) or {}
+qbt = (grant.get("apps") or {}).get("qbittorrent") or {}
+print((qbt.get("torrent") or {}).get("port", ""))
+PY
+  ) || true
+  case "$old_port" in
+    ''|*[!0-9]*) echo "the grant records no torrent port before the removal, so there is nothing to keep"; fail=1; return 0 ;;
+  esac
+  python3 - "$WORK/grant.yaml" <<'PY' || { fail=1; return 0; }
+import sys
+path = sys.argv[1]
+out, torrent, removed = [], None, 0
+for line in open(path):
+    bare = line.strip()
+    indent = len(line) - len(line.lstrip())
+    if bare == "torrent:":
+        torrent = indent
+        out.append(line)
+        continue
+    if torrent is not None and bare and indent <= torrent:
+        torrent = None
+    if torrent is not None and bare.startswith("port:"):
+        removed += 1
+        continue
+    out.append(line)
+if removed != 1:
+    sys.exit(f"{path}: removed {removed} torrent ports, want one")
+open(path, "w").write("".join(out))
+print("  grant: apps.qbittorrent.torrent.port dropped, as a box installed before box recorded one")
+PY
+  svc_port=$($K -n "$NS" get service qbittorrent-peers -o jsonpath='{.spec.ports[0].nodePort}' 2>/dev/null || true)
+  [ "$svc_port" = "$old_port" ] ||
+    { echo "the peers Service is on ${svc_port}, the grant said ${old_port}"; fail=1; return 0; }
+  echo "  the box runs on the port its release renders (${old_port}), and its grant no longer names it"
+
   # ---- notices: the receiver box posts to -----------------------------------
   # box on this host posts to root's address; the pods never do, so a receiver
   # here is where a step's notices land. It is a stdlib http.server that appends
@@ -4925,6 +4968,22 @@ EOF
   fi
   grep -qF "s5n ${CHART_VERSION} -> ${release_b} in ${NS}:" "$WORK/update-b.txt" ||
     { echo "the update did not plan from the installed release ${CHART_VERSION} to ${release_b}:"; head -3 "$WORK/update-b.txt"; fail=1; }
+
+  # ---- the peer port the box already had ------------------------------------
+  # The grant named none, so this was the apply that had to settle it: the
+  # number the release already renders is the one it keeps. It says so, the
+  # peers Service does not move, and the values Helm now stores carry it -- that
+  # record is what every later run reads instead of picking a port again.
+  grep -qF "torrent port: ${old_port} (already this box's; kept)" "$WORK/update-b.txt" ||
+    { echo "box did not keep ${old_port} for a box whose grant names no port:"; grep -i "torrent" "$WORK/update-b.txt" | head -5; fail=1; }
+  svc_port=$($K -n "$NS" get service qbittorrent-peers -o jsonpath='{.spec.ports[0].nodePort}' 2>/dev/null || true)
+  [ "$svc_port" = "$old_port" ] ||
+    { echo "the peer port moved from ${old_port} to ${svc_port} on an upgrade that recorded none"; fail=1; }
+  $HELM get values s5n -n "$NS" -o json |
+    python3 -c 'import json,sys; print("release torrent port =", json.load(sys.stdin)["apps"]["qbittorrent"]["torrent"]["port"])' >"$WORK/stored-port.txt" 2>&1 ||
+    { echo "the release holds no torrent port after the upgrade:"; cat "$WORK/stored-port.txt"; fail=1; }
+  grep -qxF "release torrent port = ${old_port}" "$WORK/stored-port.txt" ||
+    { echo "the release does not hold the port the box runs on:"; cat "$WORK/stored-port.txt"; fail=1; }
 
   # What box says, in the words the step-back and the hold write. The first
   # sentence is the announcement before anything stops; the second is what it
@@ -5216,6 +5275,10 @@ PY
     { echo "apply's plan did not say it copies sonarr before the move:"; grep -i "sonarr" "$WORK/apply-pin.txt" | head -5; fail=1; }
   grep -qF "\`box rollback sonarr\` puts it back" "$WORK/apply-pin.txt" ||
     { echo "apply did not end by saying where the copy is and how to put it back:"; grep -i "snapshot" "$WORK/apply-pin.txt" | head -5; fail=1; }
+  # The same box, a plain apply: the grant still names no port, and the number
+  # the release holds is still the one it installs.
+  grep -qF "torrent port: ${old_port} (already this box's; kept)" "$WORK/apply-pin.txt" ||
+    { echo "a bare apply on a box whose grant names no port did not keep ${old_port}:"; grep -i "torrent" "$WORK/apply-pin.txt" | head -3; fail=1; }
   wait_image_ready sonarr-0 "${sonarr_repo}:${APPLIED_TAG}" ||
     { echo "sonarr-0 is not ready on ${sonarr_repo}:${APPLIED_TAG} (it runs $(pod_image sonarr-0 || true))"; fail=1; }
   release_chart=$(helm_chart_version) || true

@@ -5,6 +5,9 @@ import (
 	"crypto/rand"
 	"fmt"
 	"math/big"
+	"strings"
+
+	"github.com/swizzin/s5n/internal/seedbox"
 )
 
 // The peer port is a port on the node, shared by every seedbox, so it is the
@@ -142,10 +145,16 @@ func pickRandom(n int) int {
 // The app that holds the port is the box's, not this run's: a migrate install
 // answers init with every app off and switches the plan's on afterwards, so
 // opts.SwitchesOn is read beside apps.
-func (d *Decision) torrentPort(ctx context.Context, namespace string, apps []string, base, grantNow map[string]any, opts Options) (any, error) {
-	if _, declared := lookupPath(base, torrentPortKey); !declared {
-		// A chart release from before the peer port, or without qBittorrent:
-		// there is no key to decide.
+func (d *Decision) torrentPort(ctx context.Context, namespace string, apps []string, grantNow map[string]any, opts Options) (any, error) {
+	// The release being installed is what says whether the key exists at all:
+	// it ships no default for the port any more, so the chart's own values do
+	// not mention it, and a chart from before the port has no key in its schema
+	// for this box to fill in.
+	declared, err := seedbox.Declares(d.Schema, strings.Split(torrentPortKey, ".")...)
+	if err != nil {
+		return nil, err
+	}
+	if !declared {
 		return nil, nil
 	}
 	running := apps

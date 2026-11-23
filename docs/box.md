@@ -217,6 +217,10 @@ too, though it installs with every app off (the plan's qBittorrent is switched o
 afterwards): the source's own peer port is kept when it lies in this cluster's NodePort
 range and no Service holds it, because trackers and any forward the operator set already
 point at it, and one is picked for the band otherwise. The line init prints says which.
+The chart ships no default: a fixed number is the collision this decision exists for, so a
+helm install must set the key. A box installed while the chart did default it has no port
+in either file; `box apply` and `box update` keep the number its release already renders
+(31111, the chart's old default) and never pick a new one.
 
 ## Logins (decided, mechanism proposed)
 

@@ -7,6 +7,13 @@
 auth:
   edge: true
 
+apps:
+  qbittorrent:
+    torrent:
+      # No default in the chart: a helm install chooses its peer port, and the
+      # band box picks from is the one Kubernetes does not assign by itself.
+      port: 30080
+
 rehearsal: true
 # The address each app pod's gate waits on until the lock closes it: box writes
 # the cluster DNS Service's metrics port here with the flag.

@@ -229,8 +229,11 @@ helm install s5n oci://ghcr.io/swizzin/charts/s5n --version 0.6.0 -f values.yaml
 Bring two claims (`storage.data.existingClaim` and `storage.config.existingClaim`), a
 Gateway for its routes, and your domain in `gateway.host`. The chart ships no login: put
 one in front at your Gateway and set `auth.edge: true` to say you have, or it refuses to
-render. `charts/s5n/values.yaml` documents every key, and `values.schema.json` rejects
-anything it doesn't know.
+render. It ships no torrent port either: set `apps.qbittorrent.torrent.port` to the port
+peers reach the node on, and pick it from the lower band of your NodePort range
+(30000-30085 for the default range), where the API server does not hand out its own
+nodePorts. A render without it names the key and the band. `charts/s5n/values.yaml`
+documents every key, and `values.schema.json` rejects anything it doesn't know.
 
 ## The data layout
 
