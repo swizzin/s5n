@@ -898,6 +898,15 @@ together with the image the app had.
     overwrites itself. It names the package command instead.
 - It picks the newest release this box meets `min-box` for. A newer release that needs
   a newer box is shown, not taken: "s5n 0.6.0 is out and needs a newer box".
+- **It reads the repository from the installed release up (decided).** An update only
+  ever steps forward, so the listing starts at the release the box runs: a version
+  below it is never read. A repository keeps every chart ever published, and an old
+  release is not always one today's box can read -- a chart from before `platform.yaml`
+  shipped has no platform pins at all -- so a listing that read all of them would stop
+  on history before it chose a target, and it costs one pull per version ever
+  published. A version at or above the installed one that can't be read is still a
+  broken release and fails the run. A box on the newest release, or on one ahead of
+  everything published, has nothing to do, and that is `... is current`, not an error.
 - It never skips past `upgrade-from`. If the installed release is older than the
   target's floor, update steps through the intermediate releases, each with its own
   health and wiring gate. This is what lets old migrations be deleted safely.

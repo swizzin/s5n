@@ -11,6 +11,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Masterminds/semver/v3"
+
 	"github.com/swizzin/s5n/internal/release"
 	"github.com/swizzin/s5n/internal/say"
 	"github.com/swizzin/s5n/internal/snapshot"
@@ -36,6 +38,9 @@ type fakeCharts struct {
 	releases []release.Published
 	err      error
 	loads    []string
+	// floors is the floor each listing asked with, in order, so a test can
+	// assert what update told the repository to start from.
+	floors []string
 }
 
 func (f *fakeCharts) Load(_ context.Context, ref release.ChartRef) (release.Chart, error) {
@@ -50,8 +55,27 @@ func (f *fakeCharts) Load(_ context.Context, ref release.ChartRef) (release.Char
 	return chart, nil
 }
 
-func (f *fakeCharts) Releases(context.Context, release.ChartRef) ([]release.Published, error) {
-	return f.releases, f.err
+// Releases is the listing with OCIChart's floor: nothing below it is published
+// as far as the caller is concerned, and what is left is still whatever the
+// test published, because the release list here is the test's own.
+func (f *fakeCharts) Releases(_ context.Context, _ release.ChartRef, floor string) ([]release.Published, error) {
+	f.floors = append(f.floors, floor)
+	if f.err != nil {
+		return nil, f.err
+	}
+	from, err := semver.NewVersion(strings.TrimSpace(floor))
+	if floor == "" || err != nil {
+		return f.releases, nil
+	}
+	var out []release.Published
+	for _, r := range f.releases {
+		v, err := semver.NewVersion(r.Version)
+		if err != nil || v.LessThan(from) {
+			continue
+		}
+		out = append(out, r)
+	}
+	return out, nil
 }
 
 // publish adds one release. The chart's variant digests are what update
@@ -490,6 +514,73 @@ func TestAlreadyCurrentWritesOnlyTheCheckTime(t *testing.T) {
 	}
 	if !strings.HasPrefix(h.out.String(), "s5n 0.4.0 in testbox is current") {
 		t.Fatalf("first line does not answer:\n%s", h.out)
+	}
+}
+
+// TestUpdateAsksTheRepositoryFromTheInstalledReleaseUp: an update only steps
+// forward, so the listing it plans with starts at the release Helm reports as
+// deployed. Everything below it is history box never reads.
+func TestUpdateAsksTheRepositoryFromTheInstalledReleaseUp(t *testing.T) {
+	h := newHarness(t)
+	h.charts.publish("0.4.0", "0.4.0", "0.4.0", digestA)
+	h.charts.publish("0.5.0", "0.4.0", "0.4.0", digestB)
+
+	if _, err := h.run(t, false); err != nil {
+		t.Fatalf("update: %v\n%s", err, h.out)
+	}
+	if !reflect.DeepEqual(h.charts.floors, []string{"0.4.0"}) {
+		t.Fatalf("the repository was listed from %v, want the installed release 0.4.0", h.charts.floors)
+	}
+}
+
+// TestABoxAheadOfEveryPublishedReleaseIsCurrent: an empty listing is not an
+// error. A box on a release newer than anything published -- a hand-installed
+// prerelease, or the newest release with everything older behind the floor --
+// has nothing to do, and says so.
+func TestABoxAheadOfEveryPublishedReleaseIsCurrent(t *testing.T) {
+	h := newHarness(t)
+	h.rel.state.ChartVersion = "0.5.0-rc.1"
+	h.charts.publish("0.4.0", "0.4.0", "0.4.0", digestA)
+	h.charts.publish("0.5.0-rc.1", "0.4.0", "0.4.0", digestB)
+	// What OCIChart.Releases really returns: no prereleases. Everything that is
+	// left is below the release the box is on.
+	h.charts.releases = h.charts.releases[:1]
+
+	res, err := h.run(t, false)
+	if err != nil {
+		t.Fatalf("update on a box ahead of every published release: %v\n%s", err, h.out)
+	}
+	if !res.Current || res.Installed != "0.5.0-rc.1" || res.Target != "0.5.0-rc.1" {
+		t.Fatalf("result = %+v, want the box already current", res)
+	}
+	if !strings.HasPrefix(h.out.String(), "s5n 0.5.0-rc.1 in testbox is current") {
+		t.Fatalf("first line does not answer:\n%s", h.out)
+	}
+	if h.confirm.asks != 0 || len(h.app.calls) != 0 || len(h.scales()) != 0 {
+		t.Fatalf("a current box wrote: asks=%d applies=%d scales=%v", h.confirm.asks, len(h.app.calls), h.scales())
+	}
+	if !h.state.state.LastCheck.Equal(h.now) {
+		t.Fatalf("LastCheck = %v, want the check this run made (%v)", h.state.state.LastCheck, h.now)
+	}
+}
+
+// TestAPlanThatFailsBeforeChoosingATargetRecordsNothing: the record names a
+// release box tried and failed on. A listing that could not be read is not a
+// release, so nothing is recorded for the next run and the timer to pass over.
+func TestAPlanThatFailsBeforeChoosingATargetRecordsNothing(t *testing.T) {
+	h := newHarness(t)
+	h.charts.publish("0.4.0", "0.4.0", "0.4.0", digestA)
+	h.charts.err = errors.New("cannot list the releases at oci://registry.example.com/charts/s5n: the registry did not answer")
+
+	_, err := h.run(t, false)
+	if err == nil {
+		t.Fatalf("update: want the listing's failure\n%s", h.out)
+	}
+	if len(h.state.state.Failed) != 0 {
+		t.Fatalf("Failed = %v, want nothing recorded for a plan that chose no target", h.state.state.Failed)
+	}
+	if h.state.saves != 0 {
+		t.Fatalf("a plan that chose no target wrote update.json %d times", h.state.saves)
 	}
 }
 
