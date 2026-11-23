@@ -4700,6 +4700,21 @@ update_chart() {
   echo "  published s5n ${version}"
 }
 
+# vintage_chart <version>: this tree's chart as a release published before
+# platform.yaml shipped -- the version rewritten, the pins removed -- pushed to
+# the same registry. The published repository still holds releases of that
+# shape, and box cannot read one at all: it is what an update has to pass over.
+vintage_chart() {
+  local version=$1 dest="$WORK/chart-vintage"
+  rm -rf "$dest"
+  cp -R charts/s5n "$dest"
+  sed -i "s/^version: .*/version: ${version}/" "$dest/Chart.yaml"
+  rm -f "$dest/platform.yaml"
+  helm package "$dest" --destination "$WORK/charts" >/dev/null
+  helm push "$WORK/charts/s5n-${version}.tgz" "oci://127.0.0.1:${REGISTRY_PORT}/charts" --plain-http >/dev/null
+  echo "  published s5n ${version} without platform.yaml, as a release from before the platform layer"
+}
+
 # pod_image <pod>: the image reference the pod's app container runs.
 pod_image() {
   $K -n "$NS" get pod "$1" -o jsonpath='{.spec.containers[0].image}' 2>/dev/null || true
@@ -4883,6 +4898,13 @@ EOF
   update_chart "$WORK/chart-b" "$release_b" sonarr "$BROKEN_TAG" prowlarr "$MOVED_TAG"
 
   # ---- the step -------------------------------------------------------------
+  # A release from before the platform layer is in the registry too. It is below
+  # the one this box runs, so an update never reads it: a listing that pulled
+  # every version ever published would stop here, on history, before it chose a
+  # release to install.
+  log "the registry holds a release older than the installed one, with no platform.yaml"
+  vintage_chart 0.0.1
+
   log "box update: the step moves both apps, and box puts sonarr back on the image it ran"
   update_b_started=$(date -u +%Y-%m-%dT%H:%M:%SZ) || true
   if "$WORK/box" update --yes --chart-repo "$CHART_REPO" --record "$WORK/cluster.yaml" \
@@ -4892,6 +4914,17 @@ EOF
   else
     cat "$WORK/update-b.txt"; fail=1; return 0
   fi
+
+  # The release from before the platform layer was passed over rather than
+  # read: the plan starts at the release this box runs.
+  # The version alone, not inside an address: 127.0.0.1 holds the same digits.
+  if grep -qE '(^|[^0-9.])0\.0\.1([^0-9.]|$)' "$WORK/update-b.txt"; then
+    echo "box read release 0.0.1, which is below the installed release:"
+    grep -E '(^|[^0-9.])0\.0\.1([^0-9.]|$)' "$WORK/update-b.txt" | head -3
+    fail=1
+  fi
+  grep -qF "s5n ${CHART_VERSION} -> ${release_b} in ${NS}:" "$WORK/update-b.txt" ||
+    { echo "the update did not plan from the installed release ${CHART_VERSION} to ${release_b}:"; head -3 "$WORK/update-b.txt"; fail=1; }
 
   # What box says, in the words the step-back and the hold write. The first
   # sentence is the announcement before anything stops; the second is what it
