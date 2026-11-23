@@ -206,7 +206,9 @@ What a migration keeps:
   thumbnails it spent hours building -- a snapshot carries them whenever the disk has room
   for them, and only Plex's caches, codecs, logs and crash reports always stay behind. On a
   disk without the room (`--plex-minimal`, or a snapshot that will not fit beside the
-  config) it carries the state alone and Plex builds the rest again.
+  config) it carries the state alone and Plex builds the rest again. The tree is written
+  once, straight from the snapshot into the app's config directory, and everything a
+  migration makes on the way lives beside the snapshot rather than in `/tmp`.
 - **Your torrents, where they are.** qBittorrent's torrents and the categories they are in
   are kept, and downloads are not moved, so seeding carries on from the same files and every
   import is still a hardlink.

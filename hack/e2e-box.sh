@@ -6327,13 +6327,12 @@ BOX_ROOT_IMAGE=s5n-e2e-box-root
 box_root() { # box_root <node> <box arguments...>
   local node=$1
   shift
-  # The image has no /tmp, and Helm's private home, its chart tarballs and the
-  # copy a rewriter's check reads all need one: a tmpfs, since what this run
-  # stages is a handful of small config trees (the migration's own staging goes
-  # under the config root, where the pods can see it). HOME and DOCKER_CONFIG
-  # are there because Helm reads $DOCKER_CONFIG/config.json when its registry
-  # client is built, and there is no home directory in the image to read one
-  # from.
+  # The image has no /tmp, and Helm's private home and its chart tarballs need
+  # one: a tmpfs. A migrate run's own working directory is beside the snapshot it
+  # reads, and its staging goes under the config root, where the pods can see it,
+  # so what is left in $TMPDIR is Helm's. HOME and DOCKER_CONFIG are there because
+  # Helm reads $DOCKER_CONFIG/config.json when its registry client is built, and
+  # there is no home directory in the image to read one from.
   # The image is empty, and box pulls the platform's charts over TLS: the
   # host's CA bundle goes in read-only, as the file it resolves to (on some
   # hosts the bundle path is a symlink into a directory the container lacks).
@@ -6342,11 +6341,28 @@ box_root() { # box_root <node> <box arguments...>
     if [ -e "$candidate" ]; then bundle=$(readlink -f "$candidate"); break; fi
   done
   [ -n "$bundle" ] || { echo "box_root: this host has no CA bundle to give box"; return 1; }
+  # TMPDIR is a tmpfs of its own, sized by the calling scenario: a migrate run
+  # keeps nothing of a snapshot in the system's temporary directory, so a run that
+  # did would fail here instead of passing on a small fixture (see BOX_ROOT_TMPFS).
   docker run --rm -u 0 --network host -w "$WORK" \
     -v "${WORK}:${WORK}" --tmpfs /tmp:rw,size=1g \
+    --tmpfs /tmp/box-tmp:rw,size="${BOX_ROOT_TMPFS:-1g}" \
     -v "${bundle}:/etc/ssl/certs/ca-certificates.crt:ro" \
-    -e HOME=/tmp -e DOCKER_CONFIG=/tmp/.docker \
+    -e HOME=/tmp -e DOCKER_CONFIG=/tmp/.docker -e TMPDIR=/tmp/box-tmp \
     "$BOX_ROOT_IMAGE" /box "$@"
+}
+
+# box_migrate <box arguments...>: box as this script's user, with the system's
+# temporary directory pointed at a directory of this scenario's own. A migrate run
+# keeps what it extracts beside the snapshot it reads -- never in $TMPDIR, which on
+# a Fedora or an Arch host is a tmpfs, and a snapshot's state can be gigabytes --
+# so that directory has to be empty afterwards, which the scenarios assert.
+#
+# box-no-tmp is the same directory with no write bit on it: a run that fails before
+# it reads a chart (an apply that refuses a snapshot) must still work with it,
+# because nothing it does belongs in a temporary directory at all.
+box_migrate() {
+  TMPDIR="$BOX_TMP" "$WORK/box" "$@"
 }
 
 # node_root <node> <shell command>: one command as root inside the node, which
@@ -7867,7 +7883,12 @@ migrate_source_plex_covers() { # migrate_source_plex_covers <config dir>
   home="${dir}/Library/Application Support/Plex Media Server"
   mkdir -p "${home}/Metadata/Posters" "${home}/Media/localhost/bif" "${home}/Cache/PhotoTranscoder" ||
     { echo "could not write the trees Plex keeps under ${home}"; return 1; }
-  printf 's5n e2e: a poster Plex built from the library\n' >"${home}/Metadata/Posters/poster.jpg" &&
+  # The poster is 24 MiB, which is bigger than the 16 MiB $TMPDIR the root applies
+  # run with (BOX_ROOT_TMPFS): a run that extracted this tree into a temporary
+  # directory fails there, instead of passing because the fixture was small enough
+  # to fit anywhere. Random bytes, because a poster that gzipped to nothing would
+  # say less about the disk it lands on.
+  head -c 25165824 /dev/urandom >"${home}/Metadata/Posters/poster.jpg" &&
     printf 's5n e2e: a preview thumbnail Plex built from the library\n' >"${home}/Media/localhost/bif/index.bif" &&
     printf 's5n e2e: a cache Plex rebuilds by itself\n' >"${home}/Cache/PhotoTranscoder/thumb.jpg"
 }
@@ -8413,6 +8434,18 @@ migrate_box() {
   CONFIG_PATH="$WORK/hostfs/config"
   mkdir -p "$WORK/source"
 
+  # The system's temporary directory this scenario gives box, and the size of the
+  # one its root runs get: 16 MiB holds Helm's private home and one chart, and
+  # cannot hold a full Plex carry (the fixture's is 24 MiB). A run that kept the
+  # snapshot's data in a temporary directory fails here rather than passing.
+  BOX_TMP="$WORK/box-tmp"
+  BOX_NO_TMP="$WORK/box-no-tmp"
+  rm -rf "$BOX_TMP" "$BOX_NO_TMP"
+  mkdir -p "$BOX_TMP" "$BOX_NO_TMP"
+  chmod 700 "$BOX_TMP"
+  chmod 500 "$BOX_NO_TMP"
+  BOX_ROOT_TMPFS=16m
+
   # The one source image read from the chart rather than pinned here: the
   # database the migration rewrites must be the one the release's own Plex
   # binary writes and reads. Read once, into the variable the manifest and the
@@ -8592,13 +8625,16 @@ migrate_box() {
   snapshot="$WORK/final.tar.gz"
   rehearsal="$WORK/rehearsal.tar.gz"
   log "box migrate discover --rehearsal, and apply's refusal on the source's host"
-  if ! "$WORK/box" migrate discover --rehearsal --out "$rehearsal" \
+  if ! box_migrate migrate discover --rehearsal --out "$rehearsal" \
     --kubeconfig "$WORK/kubeconfig" --namespace "$MIGRATE_LEGACY_NS" --root / \
     --chart-repo "$CHART_REPO" --chart-version "$CHART_VERSION" \
     >"$WORK/migrate-rehearsal.txt" 2>&1; then
     cat "$WORK/migrate-rehearsal.txt"; fail=1; return 0
   fi
-  if "$WORK/box" migrate apply "$rehearsal" --yes \
+  # With $TMPDIR a directory box cannot write: the refusal comes before any chart
+  # is read, so nothing of this run may need a temporary directory -- and the
+  # extraction it does first is the whole of the snapshot.
+  if TMPDIR="$BOX_NO_TMP" "$WORK/box" migrate apply "$rehearsal" --yes \
     --values "$WORK/values.yaml" --grant "$WORK/grant.yaml" --record "$WORK/cluster.yaml" \
     --kubeconfig "$WORK/kubeconfig" >"$WORK/apply-rehearsal.txt" 2>&1; then
     echo "apply accepted a rehearsal snapshot on the host that holds the source's data"
@@ -8614,7 +8650,7 @@ migrate_box() {
     { echo "the refused rehearsal wrote a cluster record"; fail=1; }
 
   log "box migrate cutover while the source runs: refused, with a survey kept and the stop commands printed"
-  if "$WORK/box" migrate cutover --replace-cluster --yes --out "$snapshot" \
+  if box_migrate migrate cutover --replace-cluster --yes --out "$snapshot" \
     --kubeconfig "$WORK/kubeconfig" --namespace "$MIGRATE_LEGACY_NS" --root / \
     --chart-repo "$CHART_REPO" --chart-version "$CHART_VERSION" \
     --values "$WORK/values.yaml" --grant "$WORK/grant.yaml" \
@@ -8665,7 +8701,7 @@ migrate_box() {
   # ---- the final snapshot --------------------------------------------------
   cutover() { # cutover <out>
     local out=$1; shift
-    "$WORK/box" migrate cutover --replace-cluster --yes --out "$out" \
+    box_migrate migrate cutover --replace-cluster --yes --out "$out" \
       --kubeconfig "$WORK/kubeconfig" --namespace "$MIGRATE_LEGACY_NS" --root / \
       --chart-repo "$CHART_REPO" --chart-version "$CHART_VERSION" \
       --values "$WORK/values.yaml" --grant "$WORK/grant.yaml" \
@@ -8771,6 +8807,19 @@ migrate_box() {
   # /transcode, so the plan applies without a hand edit.
   grep -qF 'from: /transcode' "$WORK/plan.yaml" ||
     { echo "the plan has no rule for Plex's /transcode, and apply refuses a stored path no rule covers"; fail=1; }
+  [ "$fail" = 0 ] || return 0
+  # Nothing of the snapshot was made in the system's temporary directory. Every
+  # run above that reads one had $TMPDIR pointed at this scenario's own directory,
+  # and one had it pointed at a directory box cannot write: the extraction, the
+  # checks' copies and the databases discovery opens all live beside the snapshot.
+  left=$(find "$BOX_TMP" -mindepth 1 -print 2>/dev/null | head -5) || true
+  if [ -n "$left" ]; then
+    echo "box left these in \$TMPDIR, and a migrate run keeps nothing there:"
+    printf '%s\n' "$left" | sed 's/^/    /'
+    fail=1
+  else
+    echo "  \$TMPDIR (${BOX_TMP}) held nothing of the snapshot"
+  fi
   [ "$fail" = 0 ] || return 0
 
   # ---- the rehearsal box: a cluster of its own, the lock, and its proof ----
@@ -9600,6 +9649,14 @@ migrate_keep_box() {
   CONFIG_PATH="$WORK/hostfs/config"
   mkdir -p "$WORK/source"
 
+  # The system's temporary directory this scenario gives box: a migrate run keeps
+  # nothing of a snapshot in one, and it has to be empty at the end (see
+  # box_migrate).
+  BOX_TMP="$WORK/box-tmp"
+  rm -rf "$BOX_TMP"
+  mkdir -p "$BOX_TMP"
+  chmod 700 "$BOX_TMP"
+
   pin=$(variant_pin plex) ||
     { echo "could not read the chart's plex pin from charts/s5n/variants.yaml"; fail=1; return 0; }
   read -r plex_repo plex_tag plex_digest <<<"$pin"
@@ -9689,7 +9746,7 @@ migrate_keep_box() {
   keep_cutover() { # keep_cutover <snapshot> <extra arg>...
     local out=$1
     shift
-    "$WORK/box" migrate cutover --yes --out "$out" \
+    box_migrate migrate cutover --yes --out "$out" \
       --kubeconfig "$WORK/kubeconfig" --namespace "$MIGRATE_LEGACY_NS" --root / \
       --chart-repo "$CHART_REPO" --chart-version "$CHART_VERSION" \
       --values "$WORK/values.yaml" --grant "$WORK/grant.yaml" \
@@ -10049,7 +10106,7 @@ PY
   # ---- assertion 6: a second apply of the finished plan does nothing -------
   log "a second box migrate apply of the finished plan: one apply, nothing else"
   revision=$(helm_revision "$NS") || true
-  if ! "$WORK/box" migrate apply "$snapshot" --yes --chart-repo "$CHART_REPO" --chart-version "$CHART_VERSION" \
+  if ! box_migrate migrate apply "$snapshot" --yes --chart-repo "$CHART_REPO" --chart-version "$CHART_VERSION" \
     --grant "$WORK/grant.yaml" --values "$WORK/values.yaml" \
     --kubeconfig "$WORK/kubeconfig" --record "$WORK/cluster.yaml" \
     --domain "$DOMAIN" --login "$LOGIN" --password-file "$WORK/authelia-password" \
@@ -10072,6 +10129,16 @@ PY
     { echo "a second apply of a finished plan rewrote the update timer"; fail=1; }
   if grep -qF "box checks for a newer release" "$WORK/keep-apply-again.txt"; then
     echo "a second apply of a finished plan scheduled the timer again, on a host that already had a box"; fail=1
+  fi
+  # Every run above that read the snapshot had $TMPDIR pointed at this scenario's
+  # own directory, and none of them left anything of it there.
+  left=$(find "$BOX_TMP" -mindepth 1 -print 2>/dev/null | head -5) || true
+  if [ -n "$left" ]; then
+    echo "box left these in \$TMPDIR, and a migrate run keeps nothing there:"
+    printf '%s\n' "$left" | sed 's/^/    /'
+    fail=1
+  else
+    echo "  \$TMPDIR (${BOX_TMP}) held nothing of the snapshot"
   fi
 }
 

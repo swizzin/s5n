@@ -1229,6 +1229,17 @@ data. Everything it will change is written down before it changes anything.
   confirm repeats it for the copy it staged. The list is box's own, not the catalog's
   `snapshot:` key, which is what an upgrade may rewrite and which stays Plex's state: the
   per-update copy does not grow a library.
+  The tree is written once. apply reads the snapshot for what its checks and its rewrites
+  read — the plan, the report, the sources, every app's config, and Plex's state alone — and
+  the rest of a full carry is written straight from the snapshot into the instance's config
+  directory, at the staging step, after the box is installed. The snapshot is verified whole
+  first, by a pass that writes nothing, so a copy that lost a byte stops the run before its
+  first write rather than halfway through its last. The numbers the confirm prints are that
+  pass's, not a walk of a tree that is not on the host.
+  A run's working directories are beside the snapshot it reads (`/var/lib/s5n/migrate` for
+  one box names, the file's own directory otherwise), never in `$TMPDIR`: on a Fedora or an
+  Arch host that is a tmpfs, and a snapshot's state is gigabytes — a real source's autobrr
+  config alone was 8.5 GiB.
 - **A migrated app account becomes box's own.** autobrr and qui keep their own user
   table and allow exactly one account there, and box owns the account the init container
   creates, sets the release Secret's password on and signs in as (`s5n.wiringAccount`);
