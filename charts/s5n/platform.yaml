@@ -39,5 +39,5 @@ k0s: v1.37.2+k0s.1       # renovate: datasource=github-releases depName=k0sproje
 k0sSHA256amd64: "4770cf89ff45e43292819f6e3a02a25a453bc750c777f6f7ad2de335f3f41df5"
 k0sSHA256arm64: "d04426041ef9ac002b957fbf43fc36dd736398147db7589fad53687753bedd52"
 envoyGateway: 1.9.3       # renovate: datasource=docker depName=envoyproxy/gateway-helm
-metallb: 0.16.1           # renovate: datasource=helm depName=metallb registryUrl=https://metallb.github.io/metallb
+metallb: 0.16.2           # renovate: datasource=helm depName=metallb registryUrl=https://metallb.github.io/metallb
 certManager: v1.21.3      # renovate: datasource=docker depName=jetstack/charts/cert-manager registryUrl=https://quay.io
