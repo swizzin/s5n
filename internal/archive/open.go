@@ -8,8 +8,6 @@ import (
 	"archive/tar"
 	"bytes"
 	"compress/gzip"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -18,7 +16,6 @@ import (
 	"os"
 	"path"
 	"path/filepath"
-	"strconv"
 	"strings"
 
 	"github.com/swizzin/s5n/internal/linktree"
@@ -42,6 +39,15 @@ func Read(path string) (*Manifest, error) {
 	return readManifest(path)
 }
 
+// Filter selects the entries of an archive: a name it answers false for is left
+// in the file for a later pass.
+type Filter func(name string) bool
+
+// Owner is who an extraction's entries belong to. Nil is the user who ran box: a
+// snapshot's own extract is box's, and a staged copy belongs to the seedbox's
+// user, which the run that stages it has just read out of the values.
+type Owner struct{ UID, GID int }
+
 // Open verifies an archive and extracts it to dir, which must not exist yet.
 //
 // It refuses a missing or truncated archive, an entry the manifest does not name
@@ -57,23 +63,40 @@ func Open(archive, dir string) (*Manifest, error) {
 	if err != nil {
 		return nil, err
 	}
-	if _, err := os.Lstat(dir); err == nil {
-		return nil, fmt.Errorf("extract to %s: it already exists, and a snapshot extracts to a new directory", dir)
-	} else if !errors.Is(err, fs.ErrNotExist) {
-		return nil, fmt.Errorf("extract to %s: %w", dir, err)
-	}
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return nil, fmt.Errorf("extract to %s: %w", dir, err)
-	}
-	if err := os.Chmod(dir, 0o700); err != nil {
-		return nil, fmt.Errorf("extract to %s: %w", dir, err)
-	}
-	if err := extract(archive, dir, m); err != nil {
-		// A half-extracted tree is worse than none: it looks like a snapshot.
-		os.RemoveAll(dir)
+	if err := Extract(archive, dir, m, nil, nil); err != nil {
 		return nil, err
 	}
 	return m, nil
+}
+
+// Extract writes the entries keep accepts into dir, which must not exist yet, and
+// refuses a half-extracted tree: a failure leaves nothing at dir.
+//
+// keep is what part of an archive this pass writes -- nil is all of it -- and
+// every entry it leaves for a later pass has to have been checked already:
+// internal/archive's Verify is the pass that reads the whole archive without
+// writing any of it. What this pass does not write is still checked as it is
+// skipped, so an entry the manifest does not name is refused here too.
+//
+// own is who the written tree belongs to; nil is the user who ran box.
+func Extract(archive, dir string, m *Manifest, keep Filter, own *Owner) error {
+	if _, err := os.Lstat(dir); err == nil {
+		return fmt.Errorf("extract to %s: it already exists, and a snapshot extracts to a new directory", dir)
+	} else if !errors.Is(err, fs.ErrNotExist) {
+		return fmt.Errorf("extract to %s: %w", dir, err)
+	}
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return fmt.Errorf("extract to %s: %w", dir, err)
+	}
+	if err := os.Chmod(dir, 0o700); err != nil {
+		return fmt.Errorf("extract to %s: %w", dir, err)
+	}
+	if err := extract(archive, dir, m, keep, own); err != nil {
+		// A half-extracted tree is worse than none: it looks like a snapshot.
+		os.RemoveAll(dir)
+		return err
+	}
+	return nil
 }
 
 // readManifest is the first pass: walk the archive to its last entry, which the
@@ -145,9 +168,9 @@ func readManifest(archive string) (*Manifest, error) {
 	return &m, nil
 }
 
-// extract is the second pass: every tar entry is checked against the manifest
-// and written, and every manifest entry has to appear.
-func extract(archive, dir string, m *Manifest) error {
+// extract is the second pass: every tar entry keep accepts is checked against
+// the manifest and written, and every manifest entry keep accepts has to appear.
+func extract(archive, dir string, m *Manifest, keep Filter, own *Owner) error {
 	f, gz, err := openArchive(archive)
 	if err != nil {
 		return err
@@ -163,7 +186,7 @@ func extract(archive, dir string, m *Manifest) error {
 		if err != nil {
 			return fmt.Errorf("read %s: %w", archive, err)
 		}
-		if err := extractEntry(archive, dir, m, tr, hdr, seen); err != nil {
+		if err := extractEntry(archive, dir, m, tr, hdr, keep, own, seen); err != nil {
 			return err
 		}
 	}
@@ -173,6 +196,11 @@ func extract(archive, dir string, m *Manifest) error {
 		return fmt.Errorf("read %s: %w", archive, err)
 	}
 	for _, name := range m.names() {
+		if keep != nil && !keep(name) {
+			// A later pass writes it, and Verify checked it: this pass owes the
+			// entries it was told to write, and no others.
+			continue
+		}
 		if !seen[name] {
 			return fmt.Errorf("%s does not hold %s, which its manifest names: the copy is incomplete", archive, name)
 		}
@@ -180,8 +208,9 @@ func extract(archive, dir string, m *Manifest) error {
 	return nil
 }
 
-// extractEntry checks one tar entry against the manifest and writes it.
-func extractEntry(archive, dir string, m *Manifest, tr *tar.Reader, hdr *tar.Header, seen map[string]bool) error {
+// extractEntry checks one tar entry against the manifest and writes it, unless
+// keep leaves it for a later pass.
+func extractEntry(archive, dir string, m *Manifest, tr *tar.Reader, hdr *tar.Header, keep Filter, own *Owner, seen map[string]bool) error {
 	name := path.Clean(hdr.Name)
 	// The manifest was verified in the first pass, and readManifest refuses an
 	// archive with anything after it; the entry itself is not extracted.
@@ -191,52 +220,82 @@ func extractEntry(archive, dir string, m *Manifest, tr *tar.Reader, hdr *tar.Hea
 	if !safeName(name) {
 		return fmt.Errorf("%s holds %q, which is not a path inside an archive", archive, hdr.Name)
 	}
-	e := m.lookup(name)
-	if e == nil {
+	if m.lookup(name) == nil {
 		return fmt.Errorf("%s holds %s, which its manifest does not name", archive, name)
 	}
 	if seen[name] {
 		return fmt.Errorf("%s holds %s twice", archive, name)
+	}
+	if keep != nil && !keep(name) {
+		return nil
 	}
 	seen[name] = true
 	if err := makeParents(dir, name); err != nil {
 		return err
 	}
 	target := filepath.Join(dir, filepath.FromSlash(name))
-	want, err := strconv.ParseUint(e.Mode, 8, 32)
-	if err != nil {
-		return fmt.Errorf("%s: %s: mode %q is not octal", archive, name, e.Mode)
-	}
-	if uint32(hdr.Mode)&0o7777 != uint32(want) {
-		return fmt.Errorf("%s: %s is %04o and its manifest says %04o", archive, name, hdr.Mode, want)
-	}
 	switch hdr.Typeflag {
 	case tar.TypeDir:
-		if err := extractDir(target, name, *e); err != nil {
+		if _, err := checkEntry(archive, nil, m, tr, hdr); err != nil {
+			return err
+		}
+		if err := extractDir(target, name); err != nil {
 			return fmt.Errorf("%s: %w", archive, err)
 		}
+		return hand(own, target, false)
 	case tar.TypeReg:
-		if err := extractFile(target, name, tr, *e); err != nil {
-			return fmt.Errorf("%s: %w", archive, err)
+		out, err := os.OpenFile(target, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+		if err != nil {
+			return fmt.Errorf("extract %s: %w", name, err)
 		}
+		_, cerr := checkEntry(archive, out, m, tr, hdr)
+		if err := out.Close(); cerr == nil {
+			cerr = err
+		}
+		if cerr != nil {
+			return cerr
+		}
+		if err := os.Chmod(target, 0o600); err != nil {
+			return fmt.Errorf("extract %s: %w", name, err)
+		}
+		return hand(own, target, false)
 	case tar.TypeSymlink:
-		if err := extractLink(dir, target, name, hdr.Linkname, *e); err != nil {
+		if _, err := checkEntry(archive, nil, m, tr, hdr); err != nil {
+			return err
+		}
+		if err := extractLink(dir, target, name, hdr.Linkname); err != nil {
 			return fmt.Errorf("%s: %w", archive, err)
 		}
-	case tar.TypeLink:
-		return fmt.Errorf("%s holds a hardlink, %s -> %s: box writes none, so this is not an archive box wrote", archive, name, hdr.Linkname)
-	default:
-		return fmt.Errorf("%s holds %s, which is a %s: an archive carries files, directories and links", archive, name, typeName(hdr.Typeflag))
+		return hand(own, target, true)
+	}
+	// checkEntry refuses the rest by name: a hardlink, a device, a fifo.
+	_, err := checkEntry(archive, nil, m, tr, hdr)
+	return err
+}
+
+// hand gives one extracted path to the owner the extraction was told, and does
+// nothing when it was told none: a snapshot's own extract belongs to whoever ran
+// box, and a staged copy to the seedbox's user. link is a symlink, owned with
+// Lchown so the extraction never follows it.
+func hand(own *Owner, path string, link bool) error {
+	if own == nil {
+		return nil
+	}
+	var err error
+	if link {
+		err = os.Lchown(path, own.UID, own.GID)
+	} else {
+		err = os.Chown(path, own.UID, own.GID)
+	}
+	if err != nil {
+		return fmt.Errorf("own %s: %w", path, err)
 	}
 	return nil
 }
 
 // extractDir makes one directory entry, 0700, and refuses a path that is
 // already something else.
-func extractDir(target, name string, e Entry) error {
-	if e.Size != 0 || e.SHA256 != digest(nil) {
-		return fmt.Errorf("%s does not match its manifest", name)
-	}
+func extractDir(target, name string) error {
 	if info, err := os.Lstat(target); err == nil && !info.IsDir() {
 		return fmt.Errorf("extract %s: it is already there and is not a directory", name)
 	} else if err != nil && !errors.Is(err, fs.ErrNotExist) {
@@ -251,39 +310,9 @@ func extractDir(target, name string, e Entry) error {
 	return nil
 }
 
-// extractFile writes one regular entry, hashing as it writes, and refuses a byte
-// count or a digest that is not the manifest's.
-func extractFile(target, name string, r io.Reader, e Entry) error {
-	out, err := os.OpenFile(target, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
-	if err != nil {
-		return fmt.Errorf("extract %s: %w", name, err)
-	}
-	h := sha256.New()
-	n, err := io.Copy(io.MultiWriter(out, h), r)
-	if cerr := out.Close(); err == nil {
-		err = cerr
-	}
-	if err != nil {
-		return fmt.Errorf("extract %s: %w", name, err)
-	}
-	if n != e.Size {
-		return fmt.Errorf("%s is %d bytes and its manifest says %d", name, n, e.Size)
-	}
-	if got := hex.EncodeToString(h.Sum(nil)); got != e.SHA256 {
-		return fmt.Errorf("%s does not match its manifest: sha256 %s, want %s", name, got, e.SHA256)
-	}
-	if err := os.Chmod(target, 0o600); err != nil {
-		return fmt.Errorf("extract %s: %w", name, err)
-	}
-	return nil
-}
-
 // extractLink writes one symlink under internal/linktree's rule, so a link that
 // leaves the tree the archive names is refused rather than materialised.
-func extractLink(dir, target, name, linkname string, e Entry) error {
-	if int64(len(linkname)) != e.Size || digest([]byte(linkname)) != e.SHA256 {
-		return fmt.Errorf("%s does not match its manifest", name)
-	}
+func extractLink(dir, target, name, linkname string) error {
 	res, err := linktree.Resolve(dir, filepath.FromSlash(name), linkname)
 	if err != nil {
 		return err
