@@ -9441,6 +9441,100 @@ PY
   # And the port did not move: the grant is where the decision lives, so a run
   # that installs nothing new must not re-pick one peers are already announcing.
   assert_torrent_port "after a second migrate apply" "$TORRENT_PORT"
+
+  # ---- an app the plan did not bring: Maintainerr, wired to the Plex it didn't
+  # migrate ------------------------------------------------------------------
+  # Maintainerr is opt-in and was not in this source, so the migration did not
+  # switch it on. Turning it on is a one-key edit to the grant and an apply --
+  # the only way an app is added to a seedbox -- and what that apply's wiring Job
+  # then has to do is connect it to the Plex the migration did bring, with the
+  # token the migration seeded from the source's own Preferences.xml. This is the
+  # one e2e where a box has a Plex token, so it is the one that can prove the
+  # connection rather than the pending row.
+  log "Maintainerr: switched on by hand, and wired to the migrated Plex"
+  # `box init` creates <config>/<instance> for an app it switches on (a kubelet
+  # making a missing subPath makes it root-owned, and the app cannot write its
+  # own settings there). This box's apps were switched on by the migration, and
+  # adding one by hand is the same two steps, so the directory is made the way
+  # init would.
+  docker exec "${CLUSTER}-control-plane" bash -c "
+    mkdir -p '$CONFIG_PATH/maintainerr'
+    chown '${puid}:${pgid}' '$CONFIG_PATH/maintainerr'" ||
+    { echo "could not make the config directory box init makes for a new app"; fail=1; }
+  python3 - "$WORK/grant.yaml" <<'PY' || { echo "could not turn Maintainerr on in the grant"; fail=1; }
+import re, sys
+path = sys.argv[1]
+text = open(path).read()
+updated, count = re.subn(r"(?m)^(  maintainerr:\n    enabled: )false$", r"\1true", text)
+if count != 1:
+    sys.exit("the grant does not say apps.maintainerr.enabled: false (%d matches)" % count)
+open(path, "w").write(updated)
+PY
+  if apply "$WORK/apply-maintainerr.txt"; then
+    cat "$WORK/apply-maintainerr.txt"
+  else
+    cat "$WORK/apply-maintainerr.txt"; fail=1
+  fi
+  grep -q "^wiring ok" "$WORK/apply-maintainerr.txt" ||
+    { echo "the apply that switched Maintainerr on reported no healthy receipt"; fail=1; }
+  for step in maintainerr/ready maintainerr/plex; do
+    res=$(status_field "[s['result'] for s in d['steps'] if s['name']=='$step'][0]" 2>/dev/null || true)
+    detail=$(status_field "[s['detail'] for s in d['steps'] if s['name']=='$step'][0]" 2>/dev/null || true)
+    echo "  receipt: ${step} ${res:-missing} (${detail:-no detail})"
+    [ "$res" = ok ] ||
+      { echo "the receipt's ${step} is ${res:-missing}, want ok: the migrated Plex token is what wires it"; fail=1; }
+  done
+  maintainerr_detail=$(status_field "[s['detail'] for s in d['steps'] if s['name']=='maintainerr/plex'][0]" 2>/dev/null || true)
+  [ "$maintainerr_detail" = created ] ||
+    { echo "the receipt's maintainerr/plex says ${maintainerr_detail}, want created: the app had no Plex connection"; fail=1; }
+  # What the app itself holds is the other half: the release's Plex, over plain
+  # HTTP, in manual mode (so it never re-discovers a plex.direct address the pod
+  # cannot reach), with a token it masks and its own connection test answers for.
+  port_forward maintainerr-0 6246 || fail=1
+  curl -sS "http://127.0.0.1:${PF_PORT}/maintainerr/api/settings" >"$WORK/maintainerr-settings.json" 2>/dev/null || true
+  maintainerr_test=$(curl -sS "http://127.0.0.1:${PF_PORT}/maintainerr/api/settings/test/plex" 2>/dev/null || true)
+  port_forward_stop
+  plex_host=$(python3 -c 'import json,sys
+print(json.load(open(sys.argv[1])).get("plex_hostname",""))' "$WORK/maintainerr-settings.json" 2>/dev/null || true)
+  echo "  maintainerr: plex at ${plex_host:-nothing}, its own connection test: ${maintainerr_test:-no answer}"
+  python3 - "$WORK/maintainerr-settings.json" "$maintainerr_test" "$MIGRATE_PLEX_TOKEN" <<'PY' || fail=1
+import json, sys
+path, test, token = sys.argv[1:4]
+try:
+    s = json.load(open(path, encoding="utf-8"))
+except Exception:
+    sys.exit(f"{path} is not a settings row: the app did not answer")
+ok = True
+if s.get("media_server_type") != "plex":
+    print("  maintainerr's media server is %r, want plex" % s.get("media_server_type"))
+    ok = False
+if s.get("plex_hostname") != "plex" or s.get("plex_port") != 32400 or s.get("plex_ssl") != 0:
+    print("  maintainerr dials %r:%r (ssl %r), want the release's plex:32400 over HTTP"
+          % (s.get("plex_hostname"), s.get("plex_port"), s.get("plex_ssl")))
+    ok = False
+if s.get("plex_manual_mode") != 1:
+    print("  maintainerr's manual mode is %r, want 1: re-discovery would leave the cluster"
+          % s.get("plex_manual_mode"))
+    ok = False
+if not s.get("plex_auth_token"):
+    print("  maintainerr holds no Plex token")
+    ok = False
+if token in json.dumps(s):
+    print("  maintainerr's settings answer carries the token itself")
+    ok = False
+try:
+    body = json.loads(test)
+except Exception:
+    print("  maintainerr's connection test answered %r" % test[:200])
+    ok = False
+else:
+    if body.get("status") != "OK":
+        print("  maintainerr's connection test says %r: %s" % (body.get("status"), body.get("message")))
+        ok = False
+if not ok:
+    sys.exit(1)
+print("  maintainerr: the release's Plex, a masked token, and its own test answers OK")
+PY
 }
 
 # box is the whole interface: a client-go/klog line such as

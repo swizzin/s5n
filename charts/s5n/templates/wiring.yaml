@@ -70,6 +70,17 @@ previous run's logs stay readable until then.
       "apiKeyFile" "/etc/s5n/keys/tautulli-apikey"
       "plexTokenFile" "/etc/s5n/keys/plex-token") }}
 {{- end }}
+{{- if and .Values.apps.maintainerr .Values.apps.maintainerr.enabled }}
+{{- /* Maintainerr's BASE_PATH is set from the instance name and applies to its
+       API and its health route alike, so this Job's paths carry the prefix. Its
+       Plex connection is written through the API, with the same server token
+       Tautulli's PMS link takes; without one the row is pending, never a
+       connection with no credential. */}}
+{{- $_ := set $cfg "maintainerr" (dict
+      "url" (printf "http://maintainerr:%v" .Values.apps.maintainerr.port)
+      "urlBase" "/maintainerr"
+      "plexTokenFile" "/etc/s5n/keys/plex-token") }}
+{{- end }}
 {{- if and .Values.apps.seerr .Values.apps.seerr.enabled }}
 {{- /* The publicUrl is where a person opens Seerr, not where this Job dials it:
        Seerr's bundle loads its assets from the site root, so the chart serves it

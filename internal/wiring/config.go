@@ -31,18 +31,19 @@ const (
 // Config is rendered by the chart into /etc/s5n/wiring/wiring.json. It contains
 // no secrets: every credential is a file reference into the mounted Secret.
 type Config struct {
-	Namespace      string          `json:"namespace"`
-	ConfigMap      string          `json:"configMap"`
-	TimeoutSeconds int             `json:"timeoutSeconds"`
-	Qbittorrent    *QbitConfig     `json:"qbittorrent,omitempty"`
-	Prowlarr       *ProwlarrConfig `json:"prowlarr,omitempty"`
-	Plex           *PlexConfig     `json:"plex,omitempty"`
-	Tautulli       *TautulliConfig `json:"tautulli,omitempty"`
-	Seerr          *SeerrConfig    `json:"seerr,omitempty"`
-	Qui            *QuiConfig      `json:"qui,omitempty"`
-	Autobrr        *AutobrrConfig  `json:"autobrr,omitempty"`
-	Pbh            *PbhConfig      `json:"pbh,omitempty"`
-	Instances      []Instance      `json:"instances"`
+	Namespace      string             `json:"namespace"`
+	ConfigMap      string             `json:"configMap"`
+	TimeoutSeconds int                `json:"timeoutSeconds"`
+	Qbittorrent    *QbitConfig        `json:"qbittorrent,omitempty"`
+	Prowlarr       *ProwlarrConfig    `json:"prowlarr,omitempty"`
+	Plex           *PlexConfig        `json:"plex,omitempty"`
+	Tautulli       *TautulliConfig    `json:"tautulli,omitempty"`
+	Seerr          *SeerrConfig       `json:"seerr,omitempty"`
+	Maintainerr    *MaintainerrConfig `json:"maintainerr,omitempty"`
+	Qui            *QuiConfig         `json:"qui,omitempty"`
+	Autobrr        *AutobrrConfig     `json:"autobrr,omitempty"`
+	Pbh            *PbhConfig         `json:"pbh,omitempty"`
+	Instances      []Instance         `json:"instances"`
 }
 
 // QuiConfig points at qui's API. PasswordFile is the release Secret's
@@ -94,6 +95,22 @@ type PlexConfig struct {
 type TautulliConfig struct {
 	URL           string `json:"url"`
 	APIKeyFile    string `json:"apiKeyFile"`
+	PlexTokenFile string `json:"plexTokenFile"`
+}
+
+// MaintainerrConfig points at Maintainerr's API and at the Plex server token its
+// Plex connection uses.
+//
+// URLBase is the prefix the chart serves it under, and every route carries it:
+// Maintainerr applies its BASE_PATH to its API and its health route alike
+// (values.yaml's rewritePath comment, templates/workloads.yaml's BASE_PATH).
+//
+// PlexTokenFile is the same file Tautulli's PMS link reads — the release
+// Secret's plex-token — and is optional the same way: without it the Plex
+// connection is reported pending rather than configured without a credential.
+type MaintainerrConfig struct {
+	URL           string `json:"url"`
+	URLBase       string `json:"urlBase"`
 	PlexTokenFile string `json:"plexTokenFile"`
 }
 
@@ -239,6 +256,16 @@ func (c *Config) validate() error {
 			fieldPasswordFile: c.Autobrr.PasswordFile,
 		}); err != nil {
 			return err
+		}
+	}
+	if c.Maintainerr != nil {
+		if err := requireFields("maintainerr", map[string]string{
+			fieldURL: c.Maintainerr.URL, fieldURLBase: c.Maintainerr.URLBase,
+		}); err != nil {
+			return err
+		}
+		if c.Plex == nil {
+			return fmt.Errorf("maintainerr is configured but plex is not")
 		}
 	}
 	if c.Pbh != nil {

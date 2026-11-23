@@ -15,7 +15,7 @@ import (
 	"github.com/swizzin/s5n/internal/apps"
 )
 
-// fakeMediaStack is Plex + Tautulli + Seerr, standing in for
+// fakeMediaStack is Plex + Tautulli + Seerr + Maintainerr, standing in for
 // hack/e2e-kind.sh's live versions in the same spirit as fakeStack in
 // wiring_test.go: just enough of each API for the wiring Job's steps to be
 // provable without a cluster.
@@ -56,6 +56,13 @@ type fakeMediaStack struct {
 	// readiness and then refuses the read is one the run cannot report on.
 	seerrReads    int
 	seerrFailFrom int
+
+	// Maintainerr's one settings row, with the token it holds (which its GET
+	// masks) and the number of writes this harness saw.
+	maintainerr        apps.MaintainerrSettings
+	maintainerToken    string
+	maintainerrSaves   int
+	maintainerrPatches int
 }
 
 func (f *fakeMediaStack) plexHandler() http.HandlerFunc {
@@ -166,6 +173,80 @@ func (f *fakeMediaStack) seerrHandler() http.HandlerFunc {
 	}
 }
 
+// maintainerrHandler is Maintainerr's settings API at v3.33.0: the health route,
+// the one settings row with its token masked, the token's own endpoint, the merge
+// PATCH, and the connection test that proves what was written.
+func (f *fakeMediaStack) maintainerrHandler() http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		switch {
+		case r.URL.Path == "/maintainerr/api/health/ready":
+			writeJSONAny(w, map[string]any{"status": "ok", "database": "ok"})
+		case r.URL.Path == "/maintainerr/api/settings" && r.Method == http.MethodGet:
+			out := f.maintainerr
+			out.PlexAuthToken = nil
+			if f.maintainerToken != "" {
+				masked := f.maintainerToken[:3] + "..." + f.maintainerToken[len(f.maintainerToken)-3:]
+				out.PlexAuthToken = &masked
+			}
+			writeJSONAny(w, out)
+		case r.URL.Path == "/maintainerr/api/settings/plex/token" && r.Method == http.MethodPost:
+			var body struct {
+				Token string `json:"plex_auth_token"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.Token == "" {
+				writeJSONAny(w, map[string]any{"status": "NOK", "code": 0, "message": "Plex auth token is required"})
+				return
+			}
+			f.maintainerToken = body.Token
+			f.maintainerrSaves++
+			writeJSONAny(w, map[string]any{"status": "OK", "code": 1, "message": "Success"})
+		case r.URL.Path == "/maintainerr/api/settings" && r.Method == http.MethodPatch:
+			var body map[string]any
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				http.Error(w, "bad body", http.StatusBadRequest)
+				return
+			}
+			// The app refuses a server change until a token is stored.
+			if _, ok := body["plex_hostname"]; ok && f.maintainerToken == "" {
+				writeJSONAny(w, map[string]any{"status": "NOK", "code": 0,
+					"message": "Authenticate with Plex before saving Plex server settings."})
+				return
+			}
+			if v, ok := body["plex_hostname"].(string); ok {
+				f.maintainerr.PlexHostname = v
+			}
+			if v, ok := body["plex_port"].(float64); ok {
+				f.maintainerr.PlexPort = int(v)
+			}
+			if v, ok := body["plex_ssl"].(float64); ok {
+				f.maintainerr.PlexSSL = int(v)
+			}
+			if v, ok := body["plex_manual_mode"].(float64); ok {
+				f.maintainerr.PlexManualMode = int(v)
+			}
+			if v, ok := body["plex_name"].(string); ok {
+				f.maintainerr.PlexName = v
+			}
+			if v, ok := body["media_server_type"].(string); ok {
+				f.maintainerr.MediaServerType = v
+			}
+			f.maintainerrPatches++
+			writeJSONAny(w, map[string]any{"status": "OK", "code": 1, "message": "Success"})
+		case r.URL.Path == "/maintainerr/api/settings/test/plex" && r.Method == http.MethodGet:
+			if f.maintainerToken == "" {
+				writeJSONAny(w, map[string]any{"status": "NOK", "code": 0,
+					"message": "Authenticate with Plex before testing the connection."})
+				return
+			}
+			writeJSONAny(w, map[string]any{"status": "OK", "code": 1, "message": "1.43.5"})
+		default:
+			http.Error(w, "unexpected "+r.Method+" "+r.URL.Path, http.StatusNotFound)
+		}
+	}
+}
+
 func writeJSONAny(w http.ResponseWriter, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(v)
@@ -191,7 +272,8 @@ func newMediaHarness(t *testing.T, claimed bool) (*Runner, *fakeMediaStack) {
 	plex := httptest.NewServer(f.plexHandler())
 	tautulli := httptest.NewServer(f.tautulliHandler())
 	seerr := httptest.NewServer(f.seerrHandler())
-	t.Cleanup(func() { plex.Close(); tautulli.Close(); seerr.Close() })
+	maintainerr := httptest.NewServer(f.maintainerrHandler())
+	t.Cleanup(func() { plex.Close(); tautulli.Close(); seerr.Close(); maintainerr.Close() })
 
 	dir := t.TempDir()
 	apiKeyFile := dir + "/tautulli.key"
@@ -213,6 +295,10 @@ func newMediaHarness(t *testing.T, claimed bool) (*Runner, *fakeMediaStack) {
 		Plex:           &PlexConfig{URL: plex.URL},
 		Tautulli:       &TautulliConfig{URL: tautulli.URL, APIKeyFile: apiKeyFile, PlexTokenFile: plexTokenFile},
 		Seerr:          &SeerrConfig{URL: seerr.URL, PublicURL: mediaSeerrPublicURL},
+		Maintainerr: &MaintainerrConfig{
+			URL: maintainerr.URL, URLBase: "/maintainerr",
+			PlexTokenFile: plexTokenFile,
+		},
 	}
 	runner := &Runner{
 		Config: cfg,

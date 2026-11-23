@@ -84,6 +84,13 @@ func (c *Client) Post(ctx context.Context, path string, body, out any) error {
 	return c.sendJSON(ctx, http.MethodPost, path, body, out, nil)
 }
 
+// Patch sends a JSON body and decodes the response into out. Maintainerr's
+// settings row is merged rather than replaced, which is what its PATCH does and
+// why the wiring Job sends only the fields it owns.
+func (c *Client) Patch(ctx context.Context, path string, body, out any) error {
+	return c.sendJSON(ctx, http.MethodPatch, path, body, out, nil)
+}
+
 // Put sends a JSON body and decodes the response into out.
 func (c *Client) Put(ctx context.Context, path string, body, out any) error {
 	return c.sendJSON(ctx, http.MethodPut, path, body, out, nil)

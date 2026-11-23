@@ -697,6 +697,63 @@ func (r *Runner) work(ctx context.Context, res *Result) error {
 		}
 	}
 
+	if c.Maintainerr != nil {
+		// Maintainerr's Plex connection is a row in its settings, and it is the
+		// one thing that has to be right before any of its rules can run: one it
+		// cannot reach deletes nothing and reports nothing. It takes the same
+		// server token Tautulli's PMS link does.
+		if plexIdentity == nil {
+			res.Steps = append(res.Steps, Step{Name: "maintainerr/plex", Result: "pending", Detail: "plex is not deployed in this release"})
+		} else {
+			me := apps.NewMaintainerr(c.Maintainerr.URL, c.Maintainerr.URLBase)
+			r.logf("waiting for Maintainerr at %s%s", c.Maintainerr.URL, c.Maintainerr.URLBase)
+			// Its readiness answers from the app's own database, which is what
+			// says the settings this step writes land in a store that works.
+			if err := me.WaitReady(ctx, timeout); err != nil {
+				return r.ensure(res, "maintainerr/ready", apps.Unchanged, err)
+			}
+			r.okStep(res, "maintainerr/ready", c.Maintainerr.URL+c.Maintainerr.URLBase)
+			plexToken, haveToken, err := ReadOptionalSecret(c.Maintainerr.PlexTokenFile)
+			if err != nil {
+				return r.ensure(res, "maintainerr/plex", apps.Unchanged, err)
+			}
+			if haveToken {
+				// Proven against Plex first, for the same reason Tautulli's is:
+				// a token Plex refuses is a credential error, and nothing gets
+				// written with one.
+				if err := plex.VerifyToken(ctx, plexToken); err != nil {
+					return r.ensure(res, "maintainerr/plex", apps.Unchanged, err)
+				}
+			}
+			if !haveToken {
+				const detail = "no Plex token: set plex-token (from a claimed server) to let the wiring Job connect Maintainerr"
+				res.Steps = append(res.Steps, Step{Name: "maintainerr/plex", Result: "pending", Detail: detail})
+				r.logf("  %-38s pending: no Plex token", "maintainerr/plex")
+			} else {
+				plexHost, plexPort, err := hostPort(c.Plex.URL)
+				if err != nil {
+					return r.ensure(res, "maintainerr/plex", apps.Unchanged, err)
+				}
+				// Maintainerr masks the token it stores, so the fingerprint of
+				// the one last written and proven is what makes a rotation in the
+				// Secret visible (owned.json) -- the same rule as Tautulli's.
+				change, err := me.EnsurePlexConnection(ctx, apps.PlexConnection{
+					Host:             plexHost,
+					Port:             plexPort,
+					Token:            plexToken,
+					KnownFingerprint: owned.MaintainerrPlexTokenFingerprint(),
+				})
+				if err := r.ensure(res, "maintainerr/plex", change, err); err != nil {
+					return err
+				}
+				// Only after the write and its proof succeeded: a fingerprint
+				// recorded for a connection Maintainerr never proved would mask
+				// a rotation.
+				owned.SetMaintainerrPlexTokenFingerprint(apps.PlexTokenFingerprint(plexToken))
+			}
+		}
+	}
+
 	if c.Seerr != nil {
 		seerr := apps.NewSeerr(c.Seerr.URL)
 		r.logf("waiting for Seerr at %s", c.Seerr.URL)
