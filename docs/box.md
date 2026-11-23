@@ -871,6 +871,17 @@ switch in the repo: disabling the workflow in GitHub is the kill switch. Nothing
 released without a previous `s5n-v*` tag to build on, and nothing is published from a
 push to `develop`.
 
+A pull request that only bumps those files is tested by the tree it lands on. Renovate
+opens them against `main`, and a pull request otherwise runs the tests of the branch it
+targets: `main`'s, which lag `develop`'s between releases -- Tautulli 2.19.1 passed
+`main`'s suite and broke on `develop`'s that way. So a pull request into `main` whose
+whole change is `variants.yaml` and/or `platform.yaml` also runs `develop`'s suite with
+its own two files laid over `develop`, and a failure there fails the pull request. The
+set is `release images`, which reads the same files `decide` releases on, never a second
+list in the workflow; `release overlay` lays them down. Any other pull request runs what
+it always ran. The check is a job like the rest, so a run cancelled by hand or a
+branch protection rule that does not require it leaves the bump as untested as before.
+
 What makes this safe is the e2e first: a bump that breaks on a clean box never becomes
 a release. What the e2e can't see is one box's own data meeting a new image, and that
 is what the per-app rollback under Updates is for. The Arrs migrate their databases

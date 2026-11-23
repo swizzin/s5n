@@ -20,6 +20,12 @@
 //	release decide              the push's verdict, KEY=VALUE on stdout
 //	release notes PREV NEW      the s5n-v* release body between two refs
 //	release notes --all REF     every app image and platform pin a ref ships
+//	release images BASE HEAD    whether a pull request only bumps those files
+//	release overlay REF         lay those files from REF over the working tree
+//
+// The last two are what a pull request into main runs when it may be an image
+// bump: the same set decide releases on, applied to a branch instead of a tag
+// (see docs/box.md, "Automatic chart releases").
 package main
 
 import (
@@ -45,6 +51,10 @@ func main() {
 		err = decideCmd()
 	case "notes":
 		err = notesCmd(os.Args[2:])
+	case "images":
+		err = imagesCmd(os.Args[2:])
+	case "overlay":
+		err = overlayCmd(os.Args[2:])
 	default:
 		usage()
 	}
@@ -55,7 +65,7 @@ func main() {
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage: release decide | release notes <prev-ref> <new-ref> | release notes --all <ref>")
+	fmt.Fprintln(os.Stderr, "usage: release decide | release notes <prev-ref> <new-ref> | release notes --all <ref> | release images <base> <head> | release overlay <ref>")
 	os.Exit(2)
 }
 
