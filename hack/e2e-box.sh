@@ -8946,8 +8946,9 @@ migrate_box() {
       { echo "the plan did not say it adopts ${instance}'s download client by id"; fail=1; }
   done
   # Plex's token is the one credential that is not an app's own key: the plan
-  # says it keeps it, under the key the release Secret holds.
-  grep -qE "^  ✓ plex +.*keeps its Plex token \(plex-token\)" "$WORK/apply-migrate.txt" ||
+  # says it keeps it (the confirm's grouped row names the fact; the key's name is
+  # on the plain row, `plex: keep its Plex token (plex-token)`).
+  grep -qE "^  ✓ plex +.*keeps its Plex token" "$WORK/apply-migrate.txt" ||
     { echo "the plan did not say it keeps Plex's server token";
       grep -E "^  ✓ plex" "$WORK/apply-migrate.txt" || true; fail=1; }
   # The pbh rewriter files the downloader it finds under the source's key, which
