@@ -208,7 +208,9 @@ recorded in the wiring ConfigMap, not by name and not by tag (see AGENTS.md inva
   Plex is never told to trust a network range: the public
   Gateway's Envoy reaches Plex from its own pod IP, inside the cluster pod CIDR, so
   `apps.plex.noAuthNetworks` defaults to empty — a trusted range there would expose the
-  server unauthenticated through the Gateway. Without a token the row is `pending`.
+  server unauthenticated through the Gateway. Without a token the row is `pending`. So is a
+  server that is not claimed at all: Plex refuses every server token until it is, so a 401
+  there is the claim's absence rather than a bad credential, and the row says which.
 - Maintainerr: connected to Plex with the same server token, through its own settings API
   (`PATCH /api/settings` for the address, port, plain HTTP, manual mode and the media
   server type; `POST /api/settings/plex/token` for the token, which its API insists on

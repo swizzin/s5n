@@ -645,6 +645,38 @@ func TestWiringRejectedPlexTokenFailsBeforeAnyTautulliWrite(t *testing.T) {
 	}
 }
 
+// A server that is not claimed is not signed in to an account, and Plex refuses
+// every server token until it is: a 401 there is the claim's absence, not a bad
+// token. The row says so once and nothing is written with a token the server
+// would refuse — which is the state a migrated box is in when its Plex's account
+// is gone from plex.tv, and one that must not fail the release.
+func TestWiringUnclaimedPlexRefusesTokensAndSaysWhy(t *testing.T) {
+	r, f := newMediaHarness(t, false)
+	f.acceptToken = "a-token-no-unclaimed-server-knows"
+
+	res, err := r.Run(context.Background())
+	if err != nil {
+		t.Fatalf("an unclaimed server's refusal failed the run: %v\n%s", err, Summary(res))
+	}
+	const want = "Plex is not claimed yet, so it refuses every server token: claim it at https://plex.tv/claim, then run the wiring again"
+	for _, name := range []string{"tautulli/plex", "maintainerr/plex"} {
+		s := step(res, name)
+		if s == nil || s.Result != "pending" {
+			t.Fatalf("%s = %+v, want pending", name, s)
+		}
+		if s.Detail != want {
+			t.Fatalf("%s detail = %q, want %q", name, s.Detail, want)
+		}
+	}
+	if f.writes != 0 {
+		t.Fatalf("Tautulli was written %d time(s) with a token its server refuses", f.writes)
+	}
+	if f.maintainerrSaves != 0 || f.maintainerrPatches != 0 {
+		t.Fatalf("Maintainerr was written with a token its server refuses")
+	}
+	noTokenAnywhere(t, res, mediaPlexToken)
+}
+
 // Tautulli hides pms_token, so the fingerprint in owned.json is the only record
 // of what was last written. Same fingerprint: no write. Different fingerprint:
 // the Secret rotated, so the link is rewritten even though the live value is

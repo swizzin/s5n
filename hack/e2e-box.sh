@@ -8812,7 +8812,14 @@ migrate_box() {
     --domain "$DOMAIN" --login "$LOGIN" --password-file "$WORK/authelia-password" \
     --config-path "$CONFIG_PATH" --box-namespace "$NS" --paths-in-node --unit-dir "$MIGRATE_UNITS" \
     >"$WORK/apply-migrate.txt" 2>&1; then
-    cat "$WORK/apply-migrate.txt"; fail=1; return 0
+    cat "$WORK/apply-migrate.txt"
+    # The apps box installed are still there, and the one that refused a write
+    # is the one to ask: a wiring step that failed on an app's answer is not
+    # diagnosable from box's own line.
+    $K -n "$NS" get pods >&2 || true
+    $K -n "$NS" logs statefulset/plex --tail=60 >&2 2>/dev/null || true
+    $K -n "$NS" get cm s5n-wiring -o jsonpath='{.data.summary\.txt}' >&2 2>/dev/null || true
+    fail=1; return 0
   fi
   cat "$WORK/apply-migrate.txt"
   # The one confirm comes before anything is installed: the line that says the
@@ -9147,10 +9154,15 @@ PY
     fail=1
   fi
   # And the receipt the layout's own Job published: ready where the app answers
-  # now, and the Plex link settled with the token the migration read out of the
-  # source's own Preferences.xml. Nothing else on this host had that token: the
-  # release Secret's plex-token is what the migration seeded from the migrated
-  # server, and the link is what proves the wiring Job could use it.
+  # now, and the Plex row no longer pending for want of a token. The migration
+  # read the one the source's Plex was signed in with out of its own
+  # Preferences.xml and seeded the release Secret with it.
+  #
+  # The row is still pending here, for the one reason this fixture cannot
+  # remove: its Plex has no plex.tv account, so it is unclaimed and refuses
+  # every server token. A claimed server is not something an e2e can produce
+  # without one, which is why what is asserted about the token is the Secret
+  # itself -- and the row must now name the claim, not a missing token.
   plex_secret=$($K -n "$NS" get secret s5n-keys -o jsonpath='{.data.plex-token}' 2>/dev/null | base64 -d || true)
   echo "  the release Secret's plex-token is the source's: ${plex_secret:+yes}"
   [ "$plex_secret" = "$MIGRATE_PLEX_TOKEN" ] ||
@@ -9161,11 +9173,12 @@ PY
   echo "  receipt: tautulli/ready ${tautulli_ready:-missing}, tautulli/plex ${tautulli_plex:-missing} (${tautulli_detail:-no detail})"
   [ "$tautulli_ready" = ok ] ||
     { echo "the receipt's tautulli/ready is ${tautulli_ready:-missing}: the wiring Job did not reach the app where it serves"; fail=1; }
-  [ "$tautulli_plex" = ok ] ||
-    { echo "the receipt's tautulli/plex is ${tautulli_plex:-missing}, want ok: the migration seeded the source's Plex token"; fail=1; }
+  [ "$tautulli_plex" = pending ] ||
+    { echo "the receipt's tautulli/plex is ${tautulli_plex:-missing}, want pending on the claim: this fixture's Plex has no plex.tv account"; fail=1; }
   case "$tautulli_detail" in
-    created | updated) ;;
-    *) echo "the receipt's tautulli/plex says ${tautulli_detail:-nothing}, want the link created or updated"; fail=1 ;;
+    "Plex is not claimed yet, so it refuses every server token"*) ;;
+    "no Plex token"*) echo "the receipt's tautulli/plex still asks for a token the migration seeded: ${tautulli_detail}"; fail=1 ;;
+    *) echo "the receipt's tautulli/plex says ${tautulli_detail:-nothing}, want the row about the claim"; fail=1 ;;
   esac
 
   # ---- assertion 1e: the front door a browser meets --------------------------
@@ -9442,16 +9455,20 @@ PY
   # that installs nothing new must not re-pick one peers are already announcing.
   assert_torrent_port "after a second migrate apply" "$TORRENT_PORT"
 
-  # ---- an app the plan did not bring: Maintainerr, wired to the Plex it didn't
-  # migrate ------------------------------------------------------------------
+  # ---- an app the plan did not bring: Maintainerr, and the token it cannot use
+  # --------------------------------------------------------------------------
   # Maintainerr is opt-in and was not in this source, so the migration did not
   # switch it on. Turning it on is a one-key edit to the grant and an apply --
   # the only way an app is added to a seedbox -- and what that apply's wiring Job
-  # then has to do is connect it to the Plex the migration did bring, with the
-  # token the migration seeded from the source's own Preferences.xml. This is the
-  # one e2e where a box has a Plex token, so it is the one that can prove the
-  # connection rather than the pending row.
-  log "Maintainerr: switched on by hand, and wired to the migrated Plex"
+  # then has to say about it is the receipt's own answer.
+  #
+  # This fixture's Plex has no plex.tv account, so it is unclaimed and refuses
+  # every server token: the connection cannot be written here, and the row says
+  # that rather than asking for a token the migration already seeded. What the
+  # token itself does -- the token endpoint, the settings PATCH, the app's own
+  # connection test -- is internal/apps' and internal/wiring's, against a fake
+  # that answers the shapes v3.33.0 does.
+  log "Maintainerr: switched on by hand, waiting for the Plex token this fixture cannot use"
   # `box init` creates <config>/<instance> for an app it switches on (a kubelet
   # making a missing subPath makes it root-owned, and the app cannot write its
   # own settings there). This box's apps were switched on by the migration, and
@@ -9477,63 +9494,38 @@ PY
   fi
   grep -q "^wiring ok" "$WORK/apply-maintainerr.txt" ||
     { echo "the apply that switched Maintainerr on reported no healthy receipt"; fail=1; }
-  for step in maintainerr/ready maintainerr/plex; do
-    res=$(status_field "[s['result'] for s in d['steps'] if s['name']=='$step'][0]" 2>/dev/null || true)
-    detail=$(status_field "[s['detail'] for s in d['steps'] if s['name']=='$step'][0]" 2>/dev/null || true)
-    echo "  receipt: ${step} ${res:-missing} (${detail:-no detail})"
-    [ "$res" = ok ] ||
-      { echo "the receipt's ${step} is ${res:-missing}, want ok: the migrated Plex token is what wires it"; fail=1; }
-  done
+  maintainerr_ready=$(status_field "[s['result'] for s in d['steps'] if s['name']=='maintainerr/ready'][0]" 2>/dev/null || true)
+  maintainerr_plex=$(status_field "[s['result'] for s in d['steps'] if s['name']=='maintainerr/plex'][0]" 2>/dev/null || true)
   maintainerr_detail=$(status_field "[s['detail'] for s in d['steps'] if s['name']=='maintainerr/plex'][0]" 2>/dev/null || true)
-  [ "$maintainerr_detail" = created ] ||
-    { echo "the receipt's maintainerr/plex says ${maintainerr_detail}, want created: the app had no Plex connection"; fail=1; }
-  # What the app itself holds is the other half: the release's Plex, over plain
-  # HTTP, in manual mode (so it never re-discovers a plex.direct address the pod
-  # cannot reach), with a token it masks and its own connection test answers for.
+  echo "  receipt: maintainerr/ready ${maintainerr_ready:-missing}, maintainerr/plex ${maintainerr_plex:-missing} (${maintainerr_detail:-no detail})"
+  [ "$maintainerr_ready" = ok ] ||
+    { echo "the receipt's maintainerr/ready is ${maintainerr_ready:-missing}: the wiring Job never reached the app"; fail=1; }
+  [ "$maintainerr_plex" = pending ] ||
+    { echo "the receipt's maintainerr/plex is ${maintainerr_plex:-missing}, want pending on the claim"; fail=1; }
+  case "$maintainerr_detail" in
+    "Plex is not claimed yet, so it refuses every server token"*) ;;
+    "no Plex token"*) echo "the receipt's maintainerr/plex asks for a token the migration seeded: ${maintainerr_detail}"; fail=1 ;;
+    *) echo "the receipt's maintainerr/plex says ${maintainerr_detail:-nothing}, want the row about the claim"; fail=1 ;;
+  esac
+  # And the app was left alone: no Plex connection, no token, because the one
+  # this box has is one its Plex would refuse. The app answering at all is what
+  # makes the row's silence about it meaningful.
   port_forward maintainerr-0 6246 || fail=1
   curl -sS "http://127.0.0.1:${PF_PORT}/maintainerr/api/settings" >"$WORK/maintainerr-settings.json" 2>/dev/null || true
-  maintainerr_test=$(curl -sS "http://127.0.0.1:${PF_PORT}/maintainerr/api/settings/test/plex" 2>/dev/null || true)
   port_forward_stop
-  plex_host=$(python3 -c 'import json,sys
-print(json.load(open(sys.argv[1])).get("plex_hostname",""))' "$WORK/maintainerr-settings.json" 2>/dev/null || true)
-  echo "  maintainerr: plex at ${plex_host:-nothing}, its own connection test: ${maintainerr_test:-no answer}"
-  python3 - "$WORK/maintainerr-settings.json" "$maintainerr_test" "$MIGRATE_PLEX_TOKEN" <<'PY' || fail=1
+  python3 - "$WORK/maintainerr-settings.json" "$MIGRATE_PLEX_TOKEN" <<'PY' || fail=1
 import json, sys
-path, test, token = sys.argv[1:4]
+path, token = sys.argv[1:3]
 try:
     s = json.load(open(path, encoding="utf-8"))
 except Exception:
     sys.exit(f"{path} is not a settings row: the app did not answer")
-ok = True
-if s.get("media_server_type") != "plex":
-    print("  maintainerr's media server is %r, want plex" % s.get("media_server_type"))
-    ok = False
-if s.get("plex_hostname") != "plex" or s.get("plex_port") != 32400 or s.get("plex_ssl") != 0:
-    print("  maintainerr dials %r:%r (ssl %r), want the release's plex:32400 over HTTP"
-          % (s.get("plex_hostname"), s.get("plex_port"), s.get("plex_ssl")))
-    ok = False
-if s.get("plex_manual_mode") != 1:
-    print("  maintainerr's manual mode is %r, want 1: re-discovery would leave the cluster"
-          % s.get("plex_manual_mode"))
-    ok = False
-if not s.get("plex_auth_token"):
-    print("  maintainerr holds no Plex token")
-    ok = False
+if s.get("plex_hostname") or s.get("plex_auth_token") or s.get("media_server_type"):
+    sys.exit("the app was given a Plex connection anyway: %r" % {
+        k: s.get(k) for k in ("media_server_type", "plex_hostname", "plex_auth_token")})
 if token in json.dumps(s):
-    print("  maintainerr's settings answer carries the token itself")
-    ok = False
-try:
-    body = json.loads(test)
-except Exception:
-    print("  maintainerr's connection test answered %r" % test[:200])
-    ok = False
-else:
-    if body.get("status") != "OK":
-        print("  maintainerr's connection test says %r: %s" % (body.get("status"), body.get("message")))
-        ok = False
-if not ok:
-    sys.exit(1)
-print("  maintainerr: the release's Plex, a masked token, and its own test answers OK")
+    sys.exit("the app's settings answer carries the token itself")
+print("  maintainerr: no Plex connection written, and no token of the source's in it")
 PY
 }
 

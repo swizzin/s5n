@@ -655,17 +655,24 @@ func (r *Runner) work(ctx context.Context, res *Result) error {
 			if err != nil {
 				return r.ensure(res, "tautulli/plex", apps.Unchanged, err)
 			}
-			if haveToken {
-				// Prove the token against Plex itself, and before touching
-				// Tautulli at all. Tautulli's own get_server_identity reads
-				// Plex's unauthenticated /identity, so a bogus token would
-				// otherwise "prove" a link Plex refuses on every real request;
-				// /library/sections answers 401 to a token Plex does not
-				// accept. A rejected token is a release credential error like
-				// any other: no Tautulli write, and the run stops.
-				if err := plex.VerifyToken(ctx, plexToken); err != nil {
+			// Why the link will not be written, "" when it will. The token is
+			// proven against Plex itself, and before touching Tautulli at all:
+			// Tautulli's own get_server_identity reads Plex's unauthenticated
+			// /identity, so a bogus token would otherwise "prove" a link Plex
+			// refuses on every real request; /library/sections answers 401 to a
+			// token Plex does not accept. A rejected token is a release
+			// credential error like any other — except on a server that is not
+			// claimed, where every token is refused (see plexTokenPending).
+			pendingReason, pendingShort := "", ""
+			if !haveToken {
+				pendingReason = "no Plex token: set plex-token (from a claimed server) to let the wiring Job connect Tautulli"
+				pendingShort = "no Plex token"
+			} else if err := plex.VerifyToken(ctx, plexToken); err != nil {
+				detail, ok := plexTokenPending(plexIdentity, err)
+				if !ok {
 					return r.ensure(res, "tautulli/plex", apps.Unchanged, err)
 				}
+				pendingReason, pendingShort = detail, "plex is not claimed"
 			}
 			tt := apps.NewTautulli(c.Tautulli.URL, key)
 			r.logf("waiting for Tautulli at %s", c.Tautulli.URL)
@@ -673,10 +680,9 @@ func (r *Runner) work(ctx context.Context, res *Result) error {
 				return r.ensure(res, "tautulli/ready", apps.Unchanged, err)
 			}
 			r.okStep(res, "tautulli/ready", c.Tautulli.URL)
-			if !haveToken {
-				const detail = "no Plex token: set plex-token (from a claimed server) to let the wiring Job connect Tautulli"
-				res.Steps = append(res.Steps, Step{Name: "tautulli/plex", Result: "pending", Detail: detail})
-				r.logf("  %-38s pending: no Plex token", "tautulli/plex")
+			if pendingReason != "" {
+				res.Steps = append(res.Steps, Step{Name: "tautulli/plex", Result: "pending", Detail: pendingReason})
+				r.logf("  %-38s pending: %s", "tautulli/plex", pendingShort)
 			} else {
 				plexHost, plexPort, err := hostPort(c.Plex.URL)
 				if err != nil {
@@ -705,6 +711,24 @@ func (r *Runner) work(ctx context.Context, res *Result) error {
 		if plexIdentity == nil {
 			res.Steps = append(res.Steps, Step{Name: "maintainerr/plex", Result: "pending", Detail: "plex is not deployed in this release"})
 		} else {
+			plexToken, haveToken, err := ReadOptionalSecret(c.Maintainerr.PlexTokenFile)
+			if err != nil {
+				return r.ensure(res, "maintainerr/plex", apps.Unchanged, err)
+			}
+			// Same rule as Tautulli's: the token is proven against Plex before
+			// anything is written with it, and a server that is not claimed
+			// refuses every token, so that state is pending rather than failed.
+			pendingReason, pendingShort := "", ""
+			if !haveToken {
+				pendingReason = "no Plex token: set plex-token (from a claimed server) to let the wiring Job connect Maintainerr"
+				pendingShort = "no Plex token"
+			} else if err := plex.VerifyToken(ctx, plexToken); err != nil {
+				detail, ok := plexTokenPending(plexIdentity, err)
+				if !ok {
+					return r.ensure(res, "maintainerr/plex", apps.Unchanged, err)
+				}
+				pendingReason, pendingShort = detail, "plex is not claimed"
+			}
 			me := apps.NewMaintainerr(c.Maintainerr.URL, c.Maintainerr.URLBase)
 			r.logf("waiting for Maintainerr at %s%s", c.Maintainerr.URL, c.Maintainerr.URLBase)
 			// Its readiness answers from the app's own database, which is what
@@ -713,22 +737,9 @@ func (r *Runner) work(ctx context.Context, res *Result) error {
 				return r.ensure(res, "maintainerr/ready", apps.Unchanged, err)
 			}
 			r.okStep(res, "maintainerr/ready", c.Maintainerr.URL+c.Maintainerr.URLBase)
-			plexToken, haveToken, err := ReadOptionalSecret(c.Maintainerr.PlexTokenFile)
-			if err != nil {
-				return r.ensure(res, "maintainerr/plex", apps.Unchanged, err)
-			}
-			if haveToken {
-				// Proven against Plex first, for the same reason Tautulli's is:
-				// a token Plex refuses is a credential error, and nothing gets
-				// written with one.
-				if err := plex.VerifyToken(ctx, plexToken); err != nil {
-					return r.ensure(res, "maintainerr/plex", apps.Unchanged, err)
-				}
-			}
-			if !haveToken {
-				const detail = "no Plex token: set plex-token (from a claimed server) to let the wiring Job connect Maintainerr"
-				res.Steps = append(res.Steps, Step{Name: "maintainerr/plex", Result: "pending", Detail: detail})
-				r.logf("  %-38s pending: no Plex token", "maintainerr/plex")
+			if pendingReason != "" {
+				res.Steps = append(res.Steps, Step{Name: "maintainerr/plex", Result: "pending", Detail: pendingReason})
+				r.logf("  %-38s pending: %s", "maintainerr/plex", pendingShort)
 			} else {
 				plexHost, plexPort, err := hostPort(c.Plex.URL)
 				if err != nil {
@@ -838,6 +849,24 @@ func Summary(res *Result) string {
 		fmt.Fprintf(&b, "error: %s\n", res.Error)
 	}
 	return b.String()
+}
+
+// plexTokenPending says a Plex server token cannot be used because the server is
+// not signed in to a Plex.tv account at all: Plex refuses every server token
+// until it is claimed, so a 401 there is the claim's absence, not a bad token.
+// The row is pending, with the claim as the thing to do, and nothing is written
+// with a token the server would refuse.
+//
+// It is deliberately narrow. A claimed server that rejects the token is a
+// credential error like any other, and the caller stops the run: the token was
+// either supplied by a person or seeded from a server whose account plex.tv no
+// longer recognises, and neither is something a retry fixes.
+func plexTokenPending(ident *apps.Identity, err error) (string, bool) {
+	var rejected *apps.TokenRejectedError
+	if ident == nil || ident.Claimed || !errors.As(err, &rejected) {
+		return "", false
+	}
+	return "Plex is not claimed yet, so it refuses every server token: claim it at https://plex.tv/claim, then run the wiring again", true
 }
 
 // pbhReady names the one refusal PBH's own readiness can produce: it answers
