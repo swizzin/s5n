@@ -38,7 +38,9 @@ import (
 	"strings"
 
 	"github.com/swizzin/s5n/internal/migrate/plan"
+	"github.com/swizzin/s5n/internal/migrate/plex"
 	"github.com/swizzin/s5n/internal/migrate/rewrite"
+	"github.com/swizzin/s5n/internal/migrate/work"
 )
 
 // The three decisions the called-out list groups by.
@@ -67,6 +69,11 @@ type SettleInput struct {
 	// Run is the runner a rewriter needs for a format only the app's own image
 	// may write. nil records those apps as checked at apply.
 	Run rewrite.Runner
+	// Work is the directory the private copies are made in: the run's own working
+	// directory beside its snapshot (internal/migrate/work), never the system's
+	// temporary directory. A config tree is where a real source kept 8.5 GiB, and
+	// /tmp is a tmpfs on a Fedora or an Arch host.
+	Work string
 }
 
 // Settled is what Settle called out, grouped by decision: one line per host or
@@ -206,19 +213,19 @@ func (s Settled) sort() {
 // and returns the plan with everything the checks did not settle written into it
 // as a default, plus the list of what it called out.
 //
-// The plan handed in is never modified: the one returned is a copy. A plan whose
-// apps all check clean comes back unchanged. Settle writes nothing outside its
-// own temporary directory, so a run that stops here leaves the source exactly
-// as it was.
+// The plan handed in is never modified: the one returned is a copy. Settle writes
+// nothing outside its own working directory -- which is the caller's, beside the
+// snapshot the run is reading -- so a run that stops here leaves the source
+// exactly as it was.
 func Settle(ctx context.Context, p *plan.Plan, in SettleInput) (*plan.Plan, Settled, error) {
 	if p == nil {
 		return nil, nil, errors.New("settle: no plan: there is nothing to settle")
 	}
-	dir, err := os.MkdirTemp("", "box-settle-")
+	dir, done, err := work.New(in.Work)
 	if err != nil {
 		return nil, nil, fmt.Errorf("settle: %w", err)
 	}
-	defer os.RemoveAll(dir)
+	defer done()
 	s := &settler{in: in, plan: copyPlan(p), dir: dir}
 	if err := s.checkAll(ctx); err != nil {
 		return nil, nil, err
@@ -305,7 +312,7 @@ func (s *settler) checkAll(ctx context.Context) error {
 			continue
 		}
 		dir := filepath.Join(s.dir, name)
-		if _, err := copyForCheck(dir, src, os.Geteuid(), os.Getegid()); err != nil {
+		if err := s.stageForCheck(catalog, dir, src); err != nil {
 			return fmt.Errorf("settle %s from %s: %w", name, src, err)
 		}
 		rep, err := rw.Check(ctx, rewrite.Input{App: name, Dir: dir, Plan: s.plan, Targets: s.in.Targets, Runs: runs, Run: s.in.Run})
@@ -316,6 +323,22 @@ func (s *settler) checkAll(ctx context.Context) error {
 		s.reports = append(s.reports, rep)
 	}
 	return nil
+}
+
+// stageForCheck copies what one app's check reads into dst: its whole config, or
+// -- for an app whose config is a library as well as its state -- the state alone,
+// with the directories above it. A Plex config directory is tens of gigabytes of
+// artwork no check opens, and copying all of it to query two databases is how a
+// read of a source filled a host's disk. The copy is taken as a reader takes it
+// (stageTrimmed's rule: kernel files left out, links carried or skipped by
+// internal/linktree), because the source may still be running.
+func (s *settler) stageForCheck(app, dst, src string) error {
+	if app == appPlex {
+		_, err := stageTrimmed(dst, src, plex.Snapshot(false), os.Geteuid(), os.Getegid())
+		return err
+	}
+	_, err := copyForCheck(dst, src, os.Geteuid(), os.Getegid())
+	return err
 }
 
 // settleAddresses writes a host rule for every address no rule settles: a

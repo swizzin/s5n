@@ -37,6 +37,7 @@ import (
 	"github.com/swizzin/s5n/internal/migrate/plan"
 	"github.com/swizzin/s5n/internal/migrate/plex"
 	"github.com/swizzin/s5n/internal/migrate/space"
+	"github.com/swizzin/s5n/internal/migrate/work"
 	"github.com/swizzin/s5n/internal/release"
 	"github.com/swizzin/s5n/internal/say"
 	"github.com/swizzin/s5n/internal/seedbox"
@@ -173,6 +174,12 @@ type discoverOptions struct {
 	// not want to build, hands over its own.
 	Disk      space.Disk
 	CarrySize func(instance, dir string) (int64, error)
+	// Work is this run's private directory: the databases discovery copies before
+	// it opens them and the copies the checks read. It is beside the snapshot the
+	// run writes (internal/migrate/work), never the system's temporary directory,
+	// because a source's config can be gigabytes. The run that reads a source
+	// makes it; everything below only uses it.
+	Work string
 }
 
 func (o discoverOptions) clock() time.Time {
@@ -264,6 +271,14 @@ func migrateDiscover(ctx context.Context, o discoverOptions, out say.Reporter) (
 	if o.Rehearsal {
 		mode = archive.ModeRehearsal
 	}
+	// The run's working directory: the databases it copies and the copies its
+	// checks read go beside the snapshot this read writes, never in $TMPDIR.
+	dir, done, err := work.New(filepath.Dir(snapshotPath(o, mode)))
+	if err != nil {
+		return "", err
+	}
+	defer done()
+	o.Work = dir
 	read, err := readSource(ctx, o)
 	if err != nil {
 		return read.text, err
@@ -358,6 +373,9 @@ func readSource(ctx context.Context, o discoverOptions) (migrationRead, error) {
 		Categories: categories,
 		// The host's filesystem, read-only: every open below is a read.
 		ConfigFS: os.DirFS(root),
+		// A database is copied before it is opened, and the copy goes in this
+		// run's working directory beside the snapshot, never in $TMPDIR.
+		TempDir: o.Work,
 	})
 	read.plan, read.report = p, rep
 	if derr != nil {
@@ -391,7 +409,7 @@ func readCategories(o discoverOptions, chart release.Chart) (map[string]string, 
 // or a final snapshot copies: apply then rewrites a copy of the same config, so
 // the checks it repeats are the checks this run made.
 func settleRead(ctx context.Context, o discoverOptions, read *migrationRead) error {
-	in, err := settleInput(read, o.Root)
+	in, err := settleInput(read, o.Root, o.Work)
 	if err != nil {
 		return err
 	}
@@ -622,8 +640,9 @@ func (o discoverOptions) loadChart(ctx context.Context) (release.Chart, error) {
 }
 
 // settleInput is what Settle is handed: this chart's apps, the source
-// directories this read saw, and where the box serves every planned app.
-func settleInput(read *migrationRead, root string) (apply.SettleInput, error) {
+// directories this read saw, where the box serves every planned app, and the
+// directory the copies are made in.
+func settleInput(read *migrationRead, root, workDir string) (apply.SettleInput, error) {
 	var in apply.SettleInput
 	chart := read.chart
 	cat, err := catalog.Parse(chart.Ref+"/"+catalog.FileName, chart.Catalog, chart.Values, chart.Schema)
@@ -646,6 +665,7 @@ func settleInput(read *migrationRead, root string) (apply.SettleInput, error) {
 	}
 	return apply.SettleInput{
 		Catalog: cat.Names(),
+		Work:    workDir,
 		// The source's own directories: a rehearsal and a final snapshot copy
 		// these, so the checks read the bytes apply will rewrite. A survey
 		// copies nothing and still checks, which is what makes a read tell the

@@ -31,6 +31,7 @@ package plex
 // of that directory and of nothing else in the mount.
 
 import (
+	"path"
 	"path/filepath"
 
 	"github.com/swizzin/s5n/internal/migrate/space"
@@ -123,6 +124,29 @@ func Snapshot(full bool) Scope {
 // Support, and a source that mounted the support directory itself has it at the
 // top. Empty is a home at the top of the mount, which is not an error.
 func Home(dir string) (string, error) { return supportDirIn(dir) }
+
+// State reports whether one path inside a Plex config directory -- in slash form,
+// relative to it -- is part of the state a check reads: Preferences.xml or one of
+// the library databases, under whichever layout the config directory keeps its
+// home in.
+//
+// It is what an extraction keeps of a full carry. A Plex config directory is its
+// state and a library of its own, and only the state is ever read by a check, by
+// the pass before an install or by a rewriter; the tree (Metadata, Media) is
+// written once, at the config root, straight out of the snapshot.
+func State(rel string) bool {
+	if rel == "" {
+		return false
+	}
+	for _, home := range supportCandidates {
+		for _, f := range state {
+			if path.Join(home, f.Path) == rel {
+				return true
+			}
+		}
+	}
+	return false
+}
 
 // Size is the bytes a full carry of the Plex config directory at dir takes: the
 // tree under Plex's home, minus the directories Snapshot(true) leaves out. It is

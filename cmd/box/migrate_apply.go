@@ -36,8 +36,11 @@ import (
 	"github.com/swizzin/s5n/internal/kube"
 	"github.com/swizzin/s5n/internal/migrate/apply"
 	"github.com/swizzin/s5n/internal/migrate/bundle"
+	"github.com/swizzin/s5n/internal/migrate/discover"
 	"github.com/swizzin/s5n/internal/migrate/lock"
 	"github.com/swizzin/s5n/internal/migrate/plan"
+	"github.com/swizzin/s5n/internal/migrate/plex"
+	"github.com/swizzin/s5n/internal/migrate/work"
 	"github.com/swizzin/s5n/internal/platform"
 	"github.com/swizzin/s5n/internal/release"
 	"github.com/swizzin/s5n/internal/say"
@@ -134,9 +137,10 @@ func runMigrateApply(ctx context.Context, args []string) {
 	}
 }
 
-// openSnapshot finds the snapshot apply runs and extracts it into a private
-// directory. With no file named it is the newest one in bundle.Dir that is not
-// a survey, and the run says which file it read.
+// openSnapshot finds the snapshot apply runs, verifies it, and extracts the part
+// this run reads into a private directory beside it. With no file named it is the
+// newest one in bundle.Dir that is not a survey, and the run says which file it
+// read.
 //
 // The mode is what apply is allowed to do: a survey holds no configs, a
 // rehearsal applies locked and never adopts data, and a final snapshot is the
@@ -149,12 +153,23 @@ func openSnapshot(file string, out say.Reporter) (*bundle.Opened, func(), error)
 		}
 		file = newest
 	}
-	dir, err := os.MkdirTemp("", "box-migrate-")
+	// The plan says which part of each app's config this run's checks read, so it
+	// is read out of the archive first: a plan box cannot parse is a refusal
+	// before anything is extracted, and the bulk the plan says travels whole is
+	// left in the snapshot for the staging step.
+	p, err := snapshotPlan(file)
+	if err != nil {
+		return nil, func() {}, err
+	}
+	// The run works beside the snapshot and never in the system's temporary
+	// directory: what it extracts is the same disk the snapshot is already on, and
+	// on a Fedora or an Arch host /tmp is RAM.
+	dir, done, err := work.New(filepath.Dir(file))
 	if err != nil {
 		return nil, func() {}, fmt.Errorf("a private directory for the snapshot: %w", err)
 	}
-	cleanup := func() { os.RemoveAll(dir) }
-	opened, err := bundle.Open(file, filepath.Join(dir, "snapshot"))
+	cleanup := done
+	opened, err := bundle.Open(file, filepath.Join(dir, "snapshot"), keepFor(p), nil)
 	if err != nil {
 		cleanup()
 		return nil, func() {}, err
@@ -170,6 +185,55 @@ func openSnapshot(file string, out say.Reporter) (*bundle.Opened, func(), error)
 	}
 	out.Line(fmt.Sprintf("snapshot: %s (%s)", file, opened.Mode))
 	return opened, cleanup, nil
+}
+
+// keepFor is what an apply extracts out of its snapshot before its checks: the
+// plan, the report and the sources, and every app's config whole -- except an app
+// whose config is a library as well as its state, whose state is what a check
+// reads and whose tree is written at the config root, once, by apply.Bulk.
+//
+// The plan is what says which app that is and which carry the snapshot took of
+// it: a snapshot that carried the state alone has no tree to leave behind.
+func keepFor(p *plan.Plan) archive.Filter {
+	return func(name string) bool {
+		rest, ok := strings.CutPrefix(name, archive.ConfigPrefix+"/")
+		if !ok {
+			return true
+		}
+		instance, rel, _ := strings.Cut(rest, "/")
+		if p.Apps[instance].Carry != plan.CarryFull {
+			return true
+		}
+		if _, ok := discover.SnapshotCarry(instance, true); !ok {
+			return true
+		}
+		return plex.State(rel)
+	}
+}
+
+// snapshotPlan is the plan out of a snapshot, before any of it is extracted: it
+// is what says which part of each app's config the extraction has to keep.
+func snapshotPlan(file string) (*plan.Plan, error) {
+	raw, err := archive.ReadEntry(file, archive.PlanName)
+	if err != nil {
+		return nil, err
+	}
+	return parsePlan(raw, file)
+}
+
+// parsePlan parses a plan that came out of one snapshot, naming the snapshot and
+// the entry a refusal is about: that file is what an operator copies between
+// hosts and what a bug report has to name.
+func parsePlan(raw []byte, file string) (*plan.Plan, error) {
+	p, err := plan.Parse(raw)
+	if err != nil {
+		var perr *plan.Error
+		if errors.As(err, &perr) {
+			perr.Path = file + ":" + archive.PlanName
+		}
+		return nil, err
+	}
+	return p, nil
 }
 
 // migrateApply is the command without the exit, so a test can drive its
@@ -345,19 +409,36 @@ func migrateApply(ctx context.Context, file string, o *migrateApplyFlags, out sa
 	return migrateHandOver(ctx, o, chart, kc, out)
 }
 
-// loadPlan parses the plan the snapshot carries. A plan box cannot read is a
-// refusal that names the snapshot, because that file is what an operator copies
-// between hosts and what a bug report has to name.
+// loadPlan parses the plan the snapshot carries.
 func loadPlan(opened *bundle.Opened) (*plan.Plan, error) {
-	p, err := plan.Parse(opened.Plan)
-	if err != nil {
-		var perr *plan.Error
-		if errors.As(err, &perr) {
-			perr.Path = opened.Path + ":" + archive.PlanName
-		}
-		return nil, err
+	return parsePlan(opened.Plan, opened.Path)
+}
+
+// snapshotBulk is apply's view of the part of a snapshot it does not extract: what
+// the archive holds of each app's whole data, counted by the pass that verified it,
+// and the one pass that writes it into the staging tree.
+type snapshotBulk struct{ opened *bundle.Opened }
+
+// HoldsTree reports whether the snapshot's copy of one instance is more than the
+// extraction kept.
+func (b snapshotBulk) HoldsTree(instance string) bool { return b.opened.Contents[instance].Tree }
+
+// Measure is what staging one instance writes at the config root.
+func (b snapshotBulk) Measure(instance string) (apply.Staged, error) {
+	c, ok := b.opened.Contents[instance]
+	if !ok {
+		return apply.Staged{}, fmt.Errorf("%s: the snapshot holds no config for it", instance)
 	}
-	return p, nil
+	return apply.Staged{Files: c.Files, Bytes: c.Bytes}, nil
+}
+
+// Stage writes the whole of one instance's config out of the snapshot.
+func (b snapshotBulk) Stage(instance, dst string, uid, gid int) (apply.Staged, error) {
+	c, err := b.opened.Stage(instance, dst, uid, gid)
+	if err != nil {
+		return apply.Staged{}, err
+	}
+	return apply.Staged{Files: c.Files, Bytes: c.Bytes}, nil
 }
 
 // loadMigrateChart loads the one chart release this command reads and installs.
@@ -390,6 +471,9 @@ func migrateEnv(p *plan.Plan, opened *bundle.Opened, o *migrateApplyFlags, sb *s
 	// planned app. An app the plan names and the snapshot does not carry is a
 	// refusal preflight makes, naming the app.
 	env.Configs = filepath.Join(opened.Dir, archive.ConfigPrefix)
+	// What the extraction left in the snapshot, for the one app whose config is a
+	// library as well as its state: apply stages it once, at the config root.
+	env.Bulk = snapshotBulk{opened: opened}
 	env.Catalog = cat.Names()
 	// The globals are numbers in the effective document, which is where a
 	// renderer reads them too.

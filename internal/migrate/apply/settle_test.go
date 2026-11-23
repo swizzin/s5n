@@ -163,12 +163,13 @@ func (r *rehearsal) plan() *plan.Plan {
 }
 
 // settleInput is what a caller with no image runner has: the catalog, the
-// source paths, and the chart's endpoints.
+// source paths, the chart's endpoints, and the directory the copies are made in.
 func (r *rehearsal) settleInput() SettleInput {
 	return SettleInput{
 		Catalog: rehearsalCatalog,
 		Configs: func(app string) string { return r.path(app) },
 		Targets: rehearsalTargets(),
+		Work:    r.t.TempDir(),
 	}
 }
 

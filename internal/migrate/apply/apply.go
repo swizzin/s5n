@@ -65,6 +65,13 @@ type Env struct {
 	// hold it (carry.go). Nil means the host's own filesystems; a test that
 	// needs a short disk hands over its own.
 	Disk space.Disk
+	// Bulk is the rest of the snapshot's copy of an app's config: the whole data
+	// a full carry holds, which no check reads and which is never extracted
+	// beside them. A run stages it once, straight from the snapshot into the
+	// staging tree, and asks it for the numbers a summary prints rather than
+	// walking a tree that is not on this host. Nil means the extract under
+	// Configs is the whole of every app's config.
+	Bulk Bulk
 	// Targets is where every instance answers inside the release (chart.go,
 	// Targets).
 	Targets map[string]rewrite.Endpoint
@@ -627,12 +634,19 @@ func (m *migration) stage(ctx context.Context) error {
 // its state, whose staged copy is the tree this run decided it can hold
 // (carry.go), and -- for the pass before an install -- the same app measured by a
 // walk rather than copied, because a library of covers is tens of gigabytes and
-// that pass stages into a temporary directory it removes.
+// that pass stages into a working directory it removes.
 func (m *migration) copyInto(name, dst, src string) (Staged, error) {
 	treeApp := CatalogApp(name, m.env.Catalog) == appPlex
 	carry := m.carryOf(name)
 	if m.env.deferred {
 		if treeApp {
+			// The pass before an install stages nothing for this app: its check
+			// runs once the box that can run its image exists, so all this row
+			// needs is what the snapshot holds, which is what the pass that
+			// verified it counted.
+			if m.env.Bulk != nil {
+				return m.env.Bulk.Measure(name)
+			}
 			state := plex.Snapshot(false)
 			if carry.Full {
 				files, bytes, err := space.Tally(src, nil)
@@ -651,6 +665,12 @@ func (m *migration) copyInto(name, dst, src string) (Staged, error) {
 	}
 	if treeApp && !carry.Full {
 		return stageTrimmed(dst, src, plex.Snapshot(false), m.env.PUID, m.env.PGID)
+	}
+	if treeApp && m.env.Bulk != nil {
+		// The whole of it, once, out of the snapshot: the bulk was never
+		// extracted beside the checks, so this is the only copy the config root
+		// gets.
+		return m.env.Bulk.Stage(name, dst, m.env.PUID, m.env.PGID)
 	}
 	return copyTree(dst, src, m.env.PUID, m.env.PGID)
 }

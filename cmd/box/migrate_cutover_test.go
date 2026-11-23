@@ -128,7 +128,7 @@ func TestCutoverWritesTheFinalSnapshotWhenEveryAppStopped(t *testing.T) {
 		t.Errorf("mode = %q, want %q", m.Mode, archive.ModeFinal)
 	}
 	// The final snapshot is the one apply runs, so it carries the configs.
-	opened, err := bundle.Open(out, filepath.Join(t.TempDir(), "open"))
+	opened, err := bundle.Open(out, filepath.Join(t.TempDir(), "open"), nil, nil)
 	if err != nil {
 		t.Fatalf("the final snapshot does not open: %v", err)
 	}
@@ -169,7 +169,7 @@ func TestCutoverCallsOutWhatItCouldNotSettle(t *testing.T) {
 	if err := cutover(context.Background(), o, reporter, proofOf()); !errors.Is(err, errCutoverStopped) {
 		t.Fatalf("cutover = %v, want the replace path's stop", err)
 	}
-	opened, err := bundle.Open(out, filepath.Join(t.TempDir(), "open"))
+	opened, err := bundle.Open(out, filepath.Join(t.TempDir(), "open"), nil, nil)
 	if err != nil {
 		t.Fatalf("the final snapshot does not open: %v", err)
 	}

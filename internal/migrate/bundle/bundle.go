@@ -25,6 +25,7 @@ import (
 	"time"
 
 	"github.com/swizzin/s5n/internal/archive"
+	"github.com/swizzin/s5n/internal/migrate/space"
 )
 
 // Dir is where box keeps a host's snapshots: the default location
@@ -346,19 +347,78 @@ type Opened struct {
 	// Configs is each planned app's config directory inside Dir, keyed by
 	// box's instance name. Empty in a survey.
 	Configs map[string]string
+	// Contents is what the snapshot holds of each planned app's config, counted
+	// by the pass that verified it: the numbers a copy of it writes, whether that
+	// copy is the extraction under Configs or the tree Stage writes.
+	Contents map[string]Contents
+	// manifest is the verified list of everything the archive holds, which Stage
+	// writes a part of from.
+	manifest *archive.Manifest
 }
 
-// Open verifies a snapshot and extracts it into dir, which must not exist yet
-// and belongs to the caller afterwards (apply removes it when it is done).
+// Contents is what a snapshot holds of one planned app's config: the copy a run
+// writes into the config root.
+type Contents struct {
+	// Files and Bytes are what a copy of it writes: the regular files and their
+	// bytes, which is what a tree's own copy reports.
+	Files, Bytes int64
+	// Tree says the snapshot holds more of it than the extraction kept: the app's
+	// whole data, for the one app whose config is a library as well as its state.
+	// A run stages it once, straight into the config root (Stage).
+	Tree bool
+}
+
+// Open verifies a snapshot and extracts it into dir, which must not exist yet and
+// belongs to the caller afterwards (apply removes it when it is done).
 //
 // A snapshot with no plan is refused: apply runs one, and a survey from a box
 // that could not read the source is not something to hand it.
-func Open(file, dir string) (*Opened, error) {
-	m, err := archive.Open(file, dir)
+//
+// keep decides what is extracted now, and nil extracts everything. The one thing
+// a run leaves for later is the bulk of an app whose config is a library as well
+// as its state -- Plex's artwork and thumbnails, tens of gigabytes that no check
+// reads -- and the state alone is extracted in its place, so the checks, the
+// pre-install pass and the staging that follows them read it. Stage writes the
+// rest, once, at the config root.
+//
+// disk is where the room that extraction needs is asked about; nil asks the
+// host's own filesystems. The extraction is refused before its first write when
+// there is not room for it beside the snapshot, and the numbers it needs are the
+// manifest's, not a walk of a tree that is not on the host.
+func Open(file, dir string, keep archive.Filter, disk space.Disk) (*Opened, error) {
+	// The archive is verified whole before any of it is extracted: a run writes
+	// part of it after the box is installed, and a damaged copy has to stop the
+	// run now rather than halfway through the last thing it does.
+	//
+	// The same pass is what counts the snapshot: it is the only one that knows a
+	// directory from a file without walking a tree, and a tree is not on the host
+	// until Stage writes it.
+	held := map[string]Contents{}
+	m, err := archive.Verify(file, func(s archive.Seen) {
+		instance, ok := configInstance(s.Name)
+		if !ok {
+			return
+		}
+		c := held[instance]
+		if s.Kind == archive.EntryFile {
+			c.Files++
+			c.Bytes += s.Size
+		}
+		if keep != nil && !keep(s.Name) {
+			c.Tree = true
+		}
+		held[instance] = c
+	})
 	if err != nil {
 		return nil, err
 	}
-	o := &Opened{Path: file, Dir: dir, Mode: m.Mode, Source: map[string][]byte{}, Configs: map[string]string{}}
+	if err := roomFor(dir, m, keep, disk); err != nil {
+		return nil, err
+	}
+	if err := archive.Extract(file, dir, m, keep, nil); err != nil {
+		return nil, err
+	}
+	o := &Opened{Path: file, Dir: dir, Mode: m.Mode, Source: map[string][]byte{}, Configs: map[string]string{}, Contents: held, manifest: m}
 	o.Plan, err = readPart(dir, archive.PlanName)
 	if err != nil {
 		return nil, err
@@ -403,6 +463,73 @@ func Open(file, dir string) (*Opened, error) {
 		}
 	}
 	return o, nil
+}
+
+// Stage writes one instance's config out of the snapshot into dst, which must not
+// exist, owned by uid:gid, and reports what it wrote.
+//
+// It is the other half of Open's filter: the tree a full carry holds, written
+// once -- straight from the archive into the staging tree that becomes the
+// instance's config directory -- so the bulk is never a second copy on the host,
+// and never beside the checks. The bytes are checked against the manifest again
+// as they are written.
+func (o *Opened) Stage(instance, dst string, uid, gid int) (Contents, error) {
+	prefix := archive.ConfigPrefix + "/" + instance
+	keep := func(name string) bool {
+		return name == prefix || strings.HasPrefix(name, prefix+"/")
+	}
+	if err := archive.Extract(o.Path, dst, o.manifest, keep, &archive.Owner{UID: uid, GID: gid}); err != nil {
+		return Contents{}, err
+	}
+	return o.Contents[instance], nil
+}
+
+// configInstance is the app one path inside an archive belongs to, when it is one:
+// config/<instance>/... is that instance's config, and the manifest's paths are
+// the only place the name comes from.
+func configInstance(name string) (string, bool) {
+	rest, ok := strings.CutPrefix(name, archive.ConfigPrefix+"/")
+	if !ok {
+		return "", false
+	}
+	instance, _, _ := strings.Cut(rest, "/")
+	if instance == "" {
+		return "", false
+	}
+	return instance, true
+}
+
+// roomFor refuses a snapshot whose extraction will not fit beside it, before
+// anything is written: the plan, the report, the sources and the state of every
+// app, summed from the manifest.
+//
+// It is the extraction's own room and nothing more -- the bytes it writes, with
+// no margin -- because that is all it needs: a margin here would refuse a
+// migration for a disk that has room for everything it must write. The margin is
+// the carry's (carry.go), where a tree is written and space is left beside it.
+func roomFor(dir string, m *archive.Manifest, keep archive.Filter, disk space.Disk) error {
+	var need int64
+	for name, e := range m.Entries {
+		if keep != nil && !keep(name) {
+			continue
+		}
+		need += e.Size
+	}
+	if need == 0 {
+		return nil
+	}
+	if disk == nil {
+		disk = space.Real{}
+	}
+	free, err := disk.Free(dir)
+	if err != nil {
+		return fmt.Errorf("the room %s needs: %w", dir, err)
+	}
+	if free < need {
+		return fmt.Errorf("extracting the snapshot's plan, report and state needs %s and %s is free at %s: box extracts it beside the snapshot, so the room has to be there",
+			space.Human(need), space.Human(free), dir)
+	}
+	return nil
 }
 
 // readPart reads one file of an extracted snapshot. A file the manifest named

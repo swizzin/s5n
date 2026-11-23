@@ -60,7 +60,7 @@ func TestMigrateDiscoverTakesAndNamesEveryDefault(t *testing.T) {
 			t.Errorf("the report does not say %q:\n%s", want, text)
 		}
 	}
-	opened, err := bundle.Open(out, filepath.Join(t.TempDir(), "open"))
+	opened, err := bundle.Open(out, filepath.Join(t.TempDir(), "open"), nil, nil)
 	if err != nil {
 		t.Fatalf("the snapshot does not open: %v", err)
 	}
@@ -152,7 +152,7 @@ func TestMigrateDiscoverAsksEachDefault(t *testing.T) {
 	if len(asker.asked) != 0 {
 		t.Fatalf("asked %d questions about a source with no unsettled address", len(asker.asked))
 	}
-	opened, err := bundle.Open(out, filepath.Join(t.TempDir(), "open"))
+	opened, err := bundle.Open(out, filepath.Join(t.TempDir(), "open"), nil, nil)
 	if err != nil {
 		t.Fatalf("the snapshot does not open: %v", err)
 	}
@@ -219,7 +219,7 @@ func TestMigrateDiscoverAsksAboutAnUnsettledAddress(t *testing.T) {
 	if strings.Contains(q.Prompt, "\n") || !strings.Contains(q.Prompt, "leave it as it is, or point it at an app?") {
 		t.Errorf("the question reads:\n%s", q.Prompt)
 	}
-	opened, err := bundle.Open(out, filepath.Join(t.TempDir(), "open"))
+	opened, err := bundle.Open(out, filepath.Join(t.TempDir(), "open"), nil, nil)
 	if err != nil {
 		t.Fatalf("the snapshot does not open: %v", err)
 	}

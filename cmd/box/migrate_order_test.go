@@ -268,10 +268,17 @@ func (s *snapshotFixture) plan(t *testing.T) (*plan.Plan, []byte, *bundle.Opened
 		t.Fatalf("parse the plan: %v", err)
 	}
 	return p, raw, &bundle.Opened{
-		Path:    "snapshot.tar.gz",
+		Path:    filepath.Join(s.dir, "snapshot.tar.gz"),
 		Dir:     s.dir,
 		Mode:    archive.ModeFinal,
 		Plan:    raw,
 		Configs: s.configs,
+		// The numbers the pass that verified the snapshot counts: this fixture
+		// is a snapshot's extract, so what it holds of each app is its config
+		// directory's two files and its one.
+		Contents: map[string]bundle.Contents{
+			"plex":        {Files: 2, Bytes: 200},
+			"qbittorrent": {Files: 1, Bytes: 60},
+		},
 	}
 }

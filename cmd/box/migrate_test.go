@@ -235,7 +235,7 @@ func TestMigrateDiscoverWritesASurveyThatHoldsNoConfig(t *testing.T) {
 		t.Errorf("the snapshot is %04o, want 0600: it holds the source's API keys", info.Mode().Perm())
 	}
 
-	opened, err := bundle.Open(out, filepath.Join(t.TempDir(), "open"))
+	opened, err := bundle.Open(out, filepath.Join(t.TempDir(), "open"), nil, nil)
 	if err != nil {
 		t.Fatalf("the snapshot does not open: %v", err)
 	}
@@ -279,7 +279,7 @@ func TestMigrateDiscoverRehearsalCarriesEveryConfig(t *testing.T) {
 	if _, err := migrateDiscover(context.Background(), o, quiet(t)); err != nil {
 		t.Fatalf("discover --rehearsal: %v", err)
 	}
-	opened, err := bundle.Open(out, filepath.Join(t.TempDir(), "open"))
+	opened, err := bundle.Open(out, filepath.Join(t.TempDir(), "open"), nil, nil)
 	if err != nil {
 		t.Fatalf("the snapshot does not open: %v", err)
 	}
@@ -408,7 +408,7 @@ func TestMigrateDiscoverMapsImagesOntoTheChartsVariants(t *testing.T) {
 	if err != nil {
 		t.Fatalf("discover: %v\n%s", err, text)
 	}
-	opened, err := bundle.Open(out, filepath.Join(t.TempDir(), "open"))
+	opened, err := bundle.Open(out, filepath.Join(t.TempDir(), "open"), nil, nil)
 	if err != nil {
 		t.Fatalf("the snapshot does not open: %v", err)
 	}
@@ -597,7 +597,7 @@ apps:
 	if _, err := writeSnapshot(path, archive.ModeFinal, o, read); err != nil {
 		t.Fatalf("write the snapshot: %v", err)
 	}
-	opened, err := bundle.Open(path, filepath.Join(t.TempDir(), "open"))
+	opened, err := bundle.Open(path, filepath.Join(t.TempDir(), "open"), nil, nil)
 	if err != nil {
 		t.Fatalf("the snapshot does not open: %v", err)
 	}

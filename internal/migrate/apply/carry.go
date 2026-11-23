@@ -12,9 +12,7 @@ package apply
 // installed with a snapshot that cannot be used at all.
 
 import (
-	"errors"
 	"fmt"
-	"io/fs"
 	"path/filepath"
 	"strings"
 
@@ -22,6 +20,29 @@ import (
 	"github.com/swizzin/s5n/internal/migrate/plex"
 	"github.com/swizzin/s5n/internal/migrate/space"
 )
+
+// Bulk is what a snapshot holds of one app's config beyond the extract apply's
+// checks read: the whole data of the one app whose config is a library as well as
+// its state (Plex's artwork and thumbnails), which is tens of gigabytes and which
+// no check reads.
+//
+// A migration stages that bulk once, out of the snapshot itself, straight into the
+// staging tree that becomes the app's config directory: it is never extracted
+// beside the checks, never copied into a second temporary tree, and its numbers
+// come from the pass that verified the archive rather than a walk of a tree that
+// is not on the host.
+type Bulk interface {
+	// HoldsTree reports whether the snapshot's copy of one instance is its whole
+	// data, and the extract apply reads kept the state alone. A run stages what
+	// Stage writes when it is true, and the state under Configs when it is not.
+	HoldsTree(instance string) bool
+	// Measure is what staging one instance writes at the config root, counted as
+	// the snapshot was verified.
+	Measure(instance string) (Staged, error)
+	// Stage writes the whole of one instance's config into dst, which must not
+	// exist, owned by uid:gid, and reports what it wrote.
+	Stage(instance, dst string, uid, gid int) (Staged, error)
+}
 
 // carryDecision is one app's carry for this run: whether its whole data is
 // staged, and the sentence saying why it is not when the plan said it would be.
@@ -41,20 +62,27 @@ func (m *migration) decideCarry() error {
 		}
 		app := m.p.Apps[name]
 		d := carryDecision{Full: app.Carry == plan.CarryFull}
+		if d.Full && m.env.Bulk != nil && !m.env.Bulk.HoldsTree(name) {
+			// A plan that says the whole data over a snapshot that carried the
+			// state is a plan edited by hand: what this run stages is the state,
+			// and the row says what the bytes are rather than what the plan
+			// hoped.
+			d.Full = false
+		}
 		if d.Full {
-			dir := filepath.Join(m.env.Configs, name)
-			size, err := plex.Size(dir)
+			size, err := m.carrySize(name)
 			if err != nil {
-				return fmt.Errorf("apps.%s: the plan carries its whole data, and this run cannot size %s: %w", name, dir, err)
+				return err
 			}
 			free, err := m.freeAt(m.env.ConfigRoot)
 			if err != nil {
 				return fmt.Errorf("apps.%s: the room its whole data needs at %s: %w", name, m.env.ConfigRoot, err)
 			}
 			// One copy: the snapshot is written already, and what lands here is
-			// the instance's directory. The staging tree it is copied into is
+			// the instance's directory. The staging tree it is written into is
 			// on the same filesystem and is what moves into place, so the two
-			// are one copy, not two.
+			// are one copy, not two. A run that extracted part of the snapshot
+			// beside it has already spent those bytes, and this asks what is left.
 			if v := space.Choose(size, []space.Place{{Path: m.env.ConfigRoot, Free: free}}); !v.Fits() {
 				d.Full = false
 				d.Short = fmt.Sprintf("%s: its whole data needs %s and %s is free at %s; carrying its state instead, so Plex builds its artwork, thumbnails and detection again",
@@ -67,6 +95,25 @@ func (m *migration) decideCarry() error {
 		m.carry[name] = d
 	}
 	return nil
+}
+
+// carrySize is how many bytes one app's whole data is: what the snapshot holds of
+// it when the caller can say (the pass that verified the archive counted it), and
+// the tree this run has beside its checks otherwise.
+func (m *migration) carrySize(name string) (int64, error) {
+	if m.env.Bulk != nil {
+		staged, err := m.env.Bulk.Measure(name)
+		if err != nil {
+			return 0, fmt.Errorf("apps.%s: the plan carries its whole data, and this run cannot size the snapshot's copy of it: %w", name, err)
+		}
+		return staged.Bytes, nil
+	}
+	dir := filepath.Join(m.env.Configs, name)
+	size, err := plex.Size(dir)
+	if err != nil {
+		return 0, fmt.Errorf("apps.%s: the plan carries its whole data, and this run cannot size %s: %w", name, dir, err)
+	}
+	return size, nil
 }
 
 // carryOf is one app's carry, defaulting to the plan's answer for an app
@@ -92,24 +139,20 @@ func (m *migration) freeAt(path string) (int64, error) {
 // report and a confirm say, and the phrase the app's row carries. Both are empty
 // for every app whose config is its state.
 //
-// What it says is decided from the bytes staged, not from the plan alone: a
-// snapshot that carried a state is never described as a tree, and one that
-// carried a tree is never described as a subset.
+// What it says follows the bytes this run writes, not the plan alone: decideCarry
+// has already been through the snapshot's own copy (Bulk.HoldsTree, which is what
+// the archive holds) and the room at the config root, so Full is the tree when the
+// tree is what lands there, and the state when it is not.
 func (m *migration) carried(name string) (note, phrase string) {
 	if CatalogApp(name, m.env.Catalog) != appPlex {
 		return "", ""
 	}
-	tree, state := plex.Snapshot(true), plex.Snapshot(false)
-	dir := m.staging(name)
-	if !isDir(dir) {
-		// A pass that measured the tree instead of copying it has no staged
-		// directory: the snapshot's own is what it counted.
-		dir = filepath.Join(m.env.Configs, name)
+	if m.carryOf(name).Full {
+		tree := plex.Snapshot(true)
+		return appText(name, tree.Note), tree.Summary
 	}
-	if trimmed(carriedDir(dir, tree.Sub), state.Files) {
-		return appText(name, state.Note), state.Summary
-	}
-	return appText(name, tree.Note), tree.Summary
+	state := plex.Snapshot(false)
+	return appText(name, state.Note), state.Summary
 }
 
 // appText is one line of a report with the instance it belongs to taken off:
@@ -138,41 +181,4 @@ func carriedDir(dir, sub string) string {
 		return filepath.Join(dir, filepath.FromSlash(home))
 	}
 	return filepath.Join(dir, filepath.FromSlash(sub))
-}
-
-// errNotCarried stops trimmed's walk at the first entry of a config directory
-// that a carried set does not name.
-var errNotCarried = errors.New("not part of the snapshot")
-
-// trimmed reports whether dir holds the files a snapshot carries for one app,
-// with the directories above them, and nothing else. It stops at the first entry
-// outside the set, which is what keeps a whole Plex tree cheap to refuse.
-func trimmed(dir string, files []plex.File) bool {
-	if dir == "" {
-		return false
-	}
-	carried := make(map[string]bool, len(files))
-	for _, f := range files {
-		carried[f.Path] = true
-		for i := strings.LastIndex(f.Path, "/"); i > 0; i = strings.LastIndex(f.Path[:i], "/") {
-			carried[f.Path[:i]] = true
-		}
-	}
-	err := filepath.WalkDir(dir, func(p string, d fs.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-		rel, err := filepath.Rel(dir, p)
-		if err != nil {
-			return err
-		}
-		if rel == "." {
-			return nil
-		}
-		if !carried[filepath.ToSlash(rel)] {
-			return errNotCarried
-		}
-		return nil
-	})
-	return err == nil
 }

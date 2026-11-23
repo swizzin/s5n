@@ -101,7 +101,7 @@ func TestWriteThenOpenGivesBackTheSameSnapshot(t *testing.T) {
 	}
 
 	out := filepath.Join(dir, "open")
-	got, err := Open(path, out)
+	got, err := Open(path, out, nil, nil)
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
@@ -316,7 +316,7 @@ func TestOpenRefusesASnapshotItCannotTrust(t *testing.T) {
 	if err := os.WriteFile(truncated, raw[:len(raw)/2], 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := Open(truncated, filepath.Join(dir, "open")); err == nil {
+	if _, err := Open(truncated, filepath.Join(dir, "open"), nil, nil); err == nil {
 		t.Fatal("Open accepted a truncated snapshot")
 	}
 	if _, err := os.Stat(filepath.Join(dir, "open")); !errors.Is(err, os.ErrNotExist) {
@@ -333,7 +333,7 @@ func TestOpenRefusesAPlanlessSnapshot(t *testing.T) {
 		t.Fatalf("Write: %v", err)
 	}
 	out := filepath.Join(dir, "open")
-	got, err := Open(path, out)
+	got, err := Open(path, out, nil, nil)
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
@@ -452,7 +452,7 @@ func TestASnapshotCarriesOnlyTheFilesAConfigNames(t *testing.T) {
 		t.Errorf("the snapshot holds\n  %s\nwant\n  %s", strings.Join(got, "\n  "), strings.Join(want, "\n  "))
 	}
 	// The state comes back out of it, and what Plex rebuilds does not.
-	opened, err := Open(path, filepath.Join(dir, "open"))
+	opened, err := Open(path, filepath.Join(dir, "open"), nil, nil)
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}

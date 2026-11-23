@@ -27,6 +27,7 @@ import (
 	"github.com/swizzin/s5n/internal/migrate/apply"
 	"github.com/swizzin/s5n/internal/migrate/bundle"
 	"github.com/swizzin/s5n/internal/migrate/discover"
+	"github.com/swizzin/s5n/internal/migrate/work"
 	"github.com/swizzin/s5n/internal/release"
 	"github.com/swizzin/s5n/internal/say"
 	"github.com/swizzin/s5n/internal/seedbox"
@@ -181,6 +182,15 @@ func keepSurvey(read *migrationRead, o cutoverOptions) (string, error) {
 // drives every refusal without a cluster. Every other step is the real one.
 func cutover(ctx context.Context, o cutoverOptions, out say.Reporter, seams cutoverSeams) error {
 	out.Phase("cutover")
+	// The run's working directory is beside the final snapshot it writes: the
+	// databases it copies and the copies its checks read go there, never in
+	// $TMPDIR.
+	dir, done, err := work.New(priorDir(o))
+	if err != nil {
+		return err
+	}
+	defer done()
+	o.Work = dir
 	read, err := readSource(ctx, o.discoverOptions)
 	if err != nil {
 		if read.text != "" {

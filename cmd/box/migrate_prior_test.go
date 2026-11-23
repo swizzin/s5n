@@ -31,6 +31,7 @@ func readPlan(t *testing.T, o cutoverOptions) *plan.Plan {
 	if err != nil {
 		t.Fatalf("read the source: %v", err)
 	}
+	o.Work = t.TempDir()
 	if err := settleRead(context.Background(), o.discoverOptions, &read); err != nil {
 		t.Fatalf("settle the read: %v", err)
 	}
