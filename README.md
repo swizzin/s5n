@@ -201,9 +201,12 @@ What a migration keeps:
 - **Every app's settings and connections.** API keys stay as they are, and the apps find each
   other at the box's addresses -- an Arr's download clients, Prowlarr's applications, Seerr's
   servers -- with the clients the source already had taken over rather than duplicated.
-- **Plex's own state.** Its preferences, libraries and watch history come across; its
-  metadata, artwork and thumbnails are rebuilt from the media. Artwork uploaded by hand is
-  not carried.
+- **Plex's own state, and the library it built.** Its preferences, libraries and watch
+  history come across, and so do the metadata, artwork, chapter thumbnails and preview
+  thumbnails it spent hours building -- a snapshot carries them whenever the disk has room
+  for them, and only Plex's caches, codecs, logs and crash reports always stay behind. On a
+  disk without the room (`--plex-minimal`, or a snapshot that will not fit beside the
+  config) it carries the state alone and Plex builds the rest again.
 - **Your torrents, where they are.** qBittorrent's torrents and the categories they are in
   are kept, and downloads are not moved, so seeding carries on from the same files and every
   import is still a hardlink.

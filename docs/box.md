@@ -1184,7 +1184,8 @@ data. Everything it will change is written down before it changes anything.
   blocker there stops the run with the box installed and nothing of the snapshot moved,
   saying so and what running it again does; a clean one carries on without asking
   again. The summary the adoption is held to is the one that was shown -- the same
-  snapshot and plan read twice -- and a difference anywhere but Plex's filled-in row is
+  snapshot and plan read twice -- and a difference anywhere but Plex's filled-in row, or
+  the app whose whole data the config root it lands on turns out not to hold (below), is
   refused rather than done.
 - **One snapshot file, and it is the backup format (decided).** A snapshot is one tar +
   gzip archive with a manifest holding a sha256 per entry, so a truncated copy is
@@ -1192,20 +1193,42 @@ data. Everything it will change is written down before it changes anything.
   are inside it, and its mode says which of those apply may run. It holds secrets — API keys, the Plex token, qBittorrent's password
   hash — so it is root-only, 0600. `box backup` writes the same file from box itself,
   and `restore` is `migrate apply` of that snapshot: one format, one apply path.
-- **A config travels as what the app cannot rebuild (proposed).** Every app's config
+- **A config travels as what the app cannot rebuild (decided, hers).** Every app's config
   directory is copied whole — apply rewrites the copy and a file a rewriter never reads
   still has to come across — except the one whose config is mostly a library: Plex's
-  `Metadata`, `Media` and `Cache` trees are covers, artwork and thumbnails it rebuilds
-  from the media it is given, and on a real library they are tens of gigabytes. Plex's
-  snapshot carries its state instead: `Preferences.xml` and its library databases with
-  the `-wal` and `-shm` a writer leaves beside them. The two state files are required (a
-  snapshot without either is refused, naming the path); the companions are carried when
-  they are there, because a database nobody has open has none. The read says so once, in
-  its report and on the screen — "plex: carried Preferences.xml and its databases; Plex
-  rebuilds its metadata, artwork and thumbnails (artwork uploaded by hand is not
-  carried)" — and apply's confirm repeats it for a snapshot that really is trimmed. The
-  list is box's own, not the catalog's `snapshot:` key, which is what an upgrade may
-  rewrite; for qBittorrent that is only its conf, which would lose `BT_backup`.
+  `Metadata` and `Media` trees are the artwork, the chapter thumbnails and the preview
+  thumbnails it built from the media it is given, and on a real library they are tens of
+  gigabytes. Rebuilding them is hours of the machine's time at full load, so a migration
+  carries them too when there is room, and Plex's state alone when there is not.
+  What a snapshot carries of Plex is the whole of `Library/Application Support/Plex Media
+  Server` — preferences, both library databases, `Metadata`, `Media`, the agents' data —
+  less what Plex rebuilds or downloads again by itself: `Cache`, `Plug-in Support/Caches`,
+  `Codecs`, `Logs`, `Crash Reports`, `Diagnostics` and `Updates`. Nothing beside Plex's
+  home in the config mount travels.
+  The room is checked before anything is written, in both places a full carry is written
+  to: the snapshot's own directory, and — on a host that is both ends of a migration — the
+  seedbox's config path beside it, counted twice when they are one filesystem. The number
+  is a fast walk of the tree (no reads, one stat per entry) plus a tenth of it, never less
+  than 256 MiB; the free space is what an unprivileged writer has. A run without the room
+  carries the state instead, in one line with both numbers
+  ("plex: its whole data needs 62.4 GiB and 12.0 GiB is free at /var/lib/s5n/migrate; …"),
+  and apply's confirm says Plex will build its artwork, thumbnails and detection again.
+  `--plex-minimal` asks for that whatever the room. The choice is the plan's
+  (`apps.plex.carry: full|minimal`), so cutover and apply agree; apply checks the config
+  root again and, when the snapshot's tree does not fit there, carries the state and says
+  so — the one difference between the pre-install summary and the run after it that is not
+  a fault, because the config path is a question the install answers after the confirm.
+  Plex's state alone is `Preferences.xml` and the two library databases with the `-wal` and
+  `-shm` a writer leaves beside them. The two files are required (a snapshot without either
+  is refused, naming the path); the companions are carried when they are there, because a
+  database nobody has open has none. The read says which of the two it carries once, in its
+  report and on the screen — "plex: carried its whole data -- metadata, artwork, thumbnails
+  and its databases -- except the caches, codecs, logs and crash reports Plex rebuilds or
+  downloads again", or "plex: carried Preferences.xml and its databases; Plex rebuilds its
+  metadata, artwork and thumbnails (artwork uploaded by hand is not carried)" — and apply's
+  confirm repeats it for the copy it staged. The list is box's own, not the catalog's
+  `snapshot:` key, which is what an upgrade may rewrite and which stays Plex's state: the
+  per-update copy does not grow a library.
 - **A migrated app account becomes box's own.** autobrr and qui keep their own user
   table and allow exactly one account there, and box owns the account the init container
   creates, sets the release Secret's password on and signs in as (`s5n.wiringAccount`);
