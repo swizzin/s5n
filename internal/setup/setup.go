@@ -571,8 +571,8 @@ func (d *Decision) Run(ctx context.Context, opts Options) (Result, error) {
 	// user's apply renders the value from the grant and never touches the
 	// Gateway's namespace. An address that cannot be read yet is not a
 	// failure -- the chart renders the app without it, and the next root run
-	// fills it in -- but it is said out loud, because the app will not start
-	// until it is there.
+	// fills it in -- but it is said out loud, because nobody can sign in to
+	// the app until it is there.
 	//
 	// The question is whether this chart serves an app that way, not whether
 	// one of the apps this run switched on does. A migrate install answers init

@@ -53,9 +53,9 @@ func (q *Qui) Ping(ctx context.Context) error {
 	return err
 }
 
-// WaitReady blocks until qui answers or timeout passes. qui refuses to start
-// at all when its OIDC issuer is unreachable, so a failure here is a real
-// configuration error rather than a slow boot.
+// WaitReady blocks until qui answers or timeout passes. qui starts without its
+// OIDC issuer (it discovers the provider per request), so a pass here says
+// nothing about the login: the wiring Job's own sign-in is what proves that.
 func (q *Qui) WaitReady(ctx context.Context, timeout time.Duration) error {
 	return Retry(ctx, timeout, q.Ping)
 }

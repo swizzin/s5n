@@ -948,8 +948,8 @@ func TestAppsFlagNamesTheCatalog(t *testing.T) {
 // with the apps off still records the Gateway's proxy address, because that is
 // the shape `box migrate apply` installs into -- the plan's apps are switched on
 // afterwards, from the grant -- and an OIDC app that renders without the address
-// has no way to reach the login at the box's own name: qui refuses to start and
-// autobrr shows its own password form. The key is the box's, so the question is
+// has no way to reach the login at the box's own name: nobody can sign in to qui
+// and autobrr shows its own password form. The key is the box's, so the question is
 // what the chart serves, not what is on right now.
 func TestTheGatewayAddressIsWrittenWithEveryAppOff(t *testing.T) {
 	h := newHarness(t)
