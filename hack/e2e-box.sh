@@ -7912,12 +7912,15 @@ migrate_box() {
   log "box migrate apply: the installer on a host with no box, then the adoption"
   # As root, in a container: a real host runs it as root, and that is the whole
   # difference the assertions after it are about. `box init` would ask the same
-  # questions on a host whose console it owns.
+  # questions on a host whose console it owns. --unit-dir is bootstrap's timer
+  # switch: the install this run makes schedules the timer too, and the e2e is
+  # neither root's host nor a systemd, so the files land in a directory it names.
+  MIGRATE_UNITS="$WORK/migrate-units"
   if ! box_root "$CLUSTER" migrate apply "$snapshot" --yes --chart-repo "$CHART_REPO" --chart-version "$CHART_VERSION" \
     --grant "$WORK/grant.yaml" --values "$WORK/values.yaml" \
     --kubeconfig "$WORK/kubeconfig" --record "$WORK/cluster.yaml" \
     --domain "$DOMAIN" --login "$LOGIN" --password-file "$WORK/authelia-password" \
-    --config-path "$CONFIG_PATH" --box-namespace "$NS" --paths-in-node \
+    --config-path "$CONFIG_PATH" --box-namespace "$NS" --paths-in-node --unit-dir "$MIGRATE_UNITS" \
     >"$WORK/apply-migrate.txt" 2>&1; then
     cat "$WORK/apply-migrate.txt"; fail=1; return 0
   fi
@@ -7953,6 +7956,45 @@ migrate_box() {
   migrate_assert_ready "$CTX" qbittorrent $MIGRATE_ARRS autobrr qui pbh tautulli ||
     { fail=1; return 0; }
   box_files_back "$CLUSTER" "$CONFIG_PATH"
+  # ---- the timer, which a real migrated box was missing --------------------
+  # The install ends the way bootstrap's does: once init has installed the
+  # release, the run schedules the update timer for the record, grant and values
+  # it used. Without it a migrated box never updates itself, which is the fault
+  # this asserts against.
+  for unit in box-update.service box-update.timer; do
+    [ -f "$MIGRATE_UNITS/$unit" ] ||
+      { echo "migrate apply wrote no ${unit}: the box it installed would never update itself"; fail=1; continue; }
+    unit_mode=$(stat -c '%a' "$MIGRATE_UNITS/$unit" 2>/dev/null || true)
+    [ "$unit_mode" = 644 ] ||
+      { echo "migrate apply's ${unit} is mode ${unit_mode}, want 644: systemd reads it, not root alone"; fail=1; }
+  done
+  exec_start=$(sed -n 's/^ExecStart=//p' "$MIGRATE_UNITS/box-update.service" 2>/dev/null | sed 's/[[:space:]]*$//' || true)
+  echo "  ExecStart: ${exec_start}"
+  case "$exec_start" in
+    */box\ update\ --timer\ --record\ "${WORK}/cluster.yaml"\ --grant\ "${WORK}/grant.yaml"\ --values\ "${WORK}/values.yaml") : ;;
+    *) echo "migrate apply's box-update.service runs '${exec_start}', want box update --timer for this run's record, grant and values"; fail=1 ;;
+  esac
+  grep -qF "box checks for a newer release every 15 minutes: box-update.timer" "$WORK/apply-migrate.txt" ||
+    { echo "migrate apply did not say what it scheduled"; fail=1; }
+  # The timer wakes box often and box decides what a wake is worth, exactly as
+  # bootstrap writes it: the same file, from the same code.
+  for line in TimeoutStartSec=0 OnBootSec=10min OnUnitActiveSec=15min RandomizedDelaySec=10min WantedBy=timers.target; do
+    grep -qxF "$line" "$MIGRATE_UNITS"/box-update.* 2>/dev/null ||
+      { echo "migrate apply's units have no ${line}:"; cat "$MIGRATE_UNITS"/box-update.* 2>/dev/null | head -12; fail=1; }
+  done
+  # --unit-dir writes the files and starts nothing, as it does for bootstrap.
+  if grep -q "systemctl" "$WORK/apply-migrate.txt"; then
+    echo "--unit-dir ran systemctl: $(grep -m1 "systemctl" "$WORK/apply-migrate.txt")"; fail=1
+  fi
+  # What a host that already has a box must not touch: this run adopts into the
+  # box the install above made, and its bootstrap-equivalent already scheduled
+  # the timer, so the second apply below leaves both files alone.
+  migrate_unit_state() {
+    for unit in box-update.service box-update.timer; do
+      printf '%s %s\n' "$unit" "$(stat -c '%y' "$MIGRATE_UNITS/$unit")"
+    done
+  }
+  units_before=$(migrate_unit_state)
   # The torrent port. The box went in with every app off, and qBittorrent is
   # switched on afterwards, so the install had to decide the port for the app
   # the plan brings. The source announced 6881, outside the NodePort range, so
@@ -8488,6 +8530,13 @@ PY
   [ "$after" = "$revision" ] ||
     { echo "a second run of the same plan added Helm revision ${after} (was ${revision})"; fail=1; }
   echo "  the release stayed at revision ${after}"
+  # This host had a box before this run, so it adopts into it and writes no
+  # units: the timer the install wrote is untouched and unsaid.
+  [ "$(migrate_unit_state)" = "$units_before" ] ||
+    { echo "a second apply of a finished plan rewrote the update timer"; fail=1; }
+  if grep -qF "box checks for a newer release" "$WORK/apply-migrate-again.txt"; then
+    echo "a second apply of a finished plan scheduled the timer again, on a host that already had a box"; fail=1
+  fi
   # And the port did not move: the grant is where the decision lives, so a run
   # that installs nothing new must not re-pick one peers are already announcing.
   assert_torrent_port "after a second migrate apply" "$TORRENT_PORT"
@@ -8614,6 +8663,10 @@ migrate_keep_box() {
   [ "$fail" = 0 ] || return 0
   migrate_source_plex_covers "$src/var/data/plex" || { fail=1; return 0; }
 
+  # The timer's two units land in a directory this run names: --unit-dir is
+  # bootstrap's switch, and the keep path installs a box on this host, so it
+  # schedules the timer too.
+  KEEP_UNITS="$WORK/keep-units"
   keep_cutover() { # keep_cutover <snapshot> <extra arg>...
     local out=$1
     shift
@@ -8623,7 +8676,7 @@ migrate_keep_box() {
       --values "$WORK/values.yaml" --grant "$WORK/grant.yaml" \
       --record "$WORK/cluster.yaml" \
       --domain "$DOMAIN" --login "$LOGIN" --password-file "$WORK/authelia-password" \
-      --config-path "$CONFIG_PATH" --box-namespace "$NS" --paths-in-node "$@"
+      --config-path "$CONFIG_PATH" --box-namespace "$NS" --paths-in-node --unit-dir "$KEEP_UNITS" "$@"
   }
 
   # ---- the first read of a source nothing has read ------------------------
@@ -8734,6 +8787,11 @@ migrate_keep_box() {
   if $K get namespace "$NS" >/dev/null 2>&1; then
     echo "box installed into ${NS} over a blocker it said would stop it"; fail=1
   fi
+  # And a cutover that stopped before the install scheduled nothing: a box that
+  # was never installed is never on a schedule.
+  if [ -e "$KEEP_UNITS/box-update.service" ]; then
+    echo "a cutover that stopped after the snapshot wrote the update timer"; fail=1
+  fi
   # The operator clears it, because box will not.
   $K -n "$MIGRATE_LEGACY_NS" label deployment "$MIGRATE_RADARR_INSTANCE" \
     kustomize.toolkit.fluxcd.io/name- >/dev/null ||
@@ -8786,6 +8844,41 @@ migrate_keep_box() {
       { echo "the plan did not say it adopts ${instance}'s download client by id"; fail=1; }
   done
   [ "$fail" = 0 ] || return 0
+
+  # ---- the timer, which the install scheduled last ------------------------
+  # The keep path installs a box on this host, so it ends the way bootstrap and
+  # `box migrate apply` do: the update timer, written for the record, grant and
+  # values this cutover used. The units are in the directory this run named, and
+  # they are bootstrap's own bytes.
+  for unit in box-update.service box-update.timer; do
+    [ -f "$KEEP_UNITS/$unit" ] ||
+      { echo "the keep install wrote no ${unit}: the box it installed would never update itself"; fail=1; continue; }
+    unit_mode=$(stat -c '%a' "$KEEP_UNITS/$unit" 2>/dev/null || true)
+    [ "$unit_mode" = 644 ] ||
+      { echo "the keep install's ${unit} is mode ${unit_mode}, want 644: systemd reads it, not root alone"; fail=1; }
+  done
+  exec_start=$(sed -n 's/^ExecStart=//p' "$KEEP_UNITS/box-update.service" 2>/dev/null | sed 's/[[:space:]]*$//' || true)
+  echo "  ExecStart: ${exec_start}"
+  [ "$exec_start" = "${WORK}/box update --timer --record ${WORK}/cluster.yaml --grant ${WORK}/grant.yaml --values ${WORK}/values.yaml" ] ||
+    { echo "the keep install's box-update.service runs '${exec_start}', want box update --timer for this run's record, grant and values"; fail=1; }
+  grep -qF "box checks for a newer release every 15 minutes: box-update.timer" "$WORK/keep-cutover.txt" ||
+    { echo "the keep install did not say what it scheduled"; fail=1; }
+  for line in TimeoutStartSec=0 OnBootSec=10min OnUnitActiveSec=15min RandomizedDelaySec=10min WantedBy=timers.target; do
+    grep -qxF "$line" "$KEEP_UNITS"/box-update.* 2>/dev/null ||
+      { echo "the keep install's units have no ${line}:"; cat "$KEEP_UNITS"/box-update.* 2>/dev/null | head -12; fail=1; }
+  done
+  # --unit-dir writes the files and starts nothing, as it does for bootstrap.
+  if grep -q "systemctl" "$WORK/keep-cutover.txt"; then
+    echo "--unit-dir ran systemctl: $(grep -m1 "systemctl" "$WORK/keep-cutover.txt")"; fail=1
+  fi
+  # What a host that already has a box must not touch: the second apply below
+  # adopts into the box this install made, so both files stay as they are.
+  keep_unit_state() {
+    for unit in box-update.service box-update.timer; do
+      printf '%s %s\n' "$unit" "$(stat -c '%y' "$KEEP_UNITS/$unit")"
+    done
+  }
+  keep_units_before=$(keep_unit_state)
 
   # ---- assertion 1: healthy, on the chart's own images ---------------------
   log "the migrated apps are ready on the chart's images, beside the source they came from"
@@ -8953,6 +9046,13 @@ PY
   [ "$after" = "$revision" ] ||
     { echo "a second run of the same plan added Helm revision ${after} (was ${revision})"; fail=1; }
   echo "  the release stayed at revision ${after}"
+  # The keep path's second apply adopts into a box that already exists, so it
+  # writes no units: the timer the install made is untouched and unsaid.
+  [ "$(keep_unit_state)" = "$keep_units_before" ] ||
+    { echo "a second apply of a finished plan rewrote the update timer"; fail=1; }
+  if grep -qF "box checks for a newer release" "$WORK/keep-apply-again.txt"; then
+    echo "a second apply of a finished plan scheduled the timer again, on a host that already had a box"; fail=1
+  fi
 }
 
 no_klog() {
