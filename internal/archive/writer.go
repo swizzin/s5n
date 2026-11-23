@@ -119,11 +119,38 @@ func (w *Writer) AddFile(name string, data []byte, mode fs.FileMode) error {
 // Nothing of the tree's ownership is recorded: the extracted tree is box's, and
 // apply re-owns what it stages.
 func (w *Writer) AddTree(prefix, dir string) ([]Skipped, error) {
+	return w.AddTreeExcept(prefix, dir, "", nil)
+}
+
+// AddTreeExcept adds dir's contents under prefix, with two limits a full carry of
+// an app's config directory needs (internal/migrate/plex):
+//
+//   - sub names one directory inside dir whose contents travel, in slash form;
+//     the directories above it are added so the extracted tree has the path,
+//     and everything beside it is left out. Empty means all of dir.
+//   - skip names directories inside dir (relative to it in slash form) to leave
+//     out with everything beneath them: the caches Plex rebuilds.
+//
+// A skip entry that is not a directory inside dir is a refusal, not a silent
+// no-op: a path spelled wrong would put a library back into a snapshot somebody
+// decided to leave it out of.
+func (w *Writer) AddTreeExcept(prefix, dir, sub string, skip []string) ([]Skipped, error) {
 	if err := w.ready(prefix); err != nil {
 		return nil, err
 	}
 	if !safeName(prefix) {
 		return nil, fmt.Errorf("add %s: a tree's prefix is a path inside the archive", dir)
+	}
+	if sub != "" && !safeName(sub) {
+		return nil, fmt.Errorf("add %s: %q is not a directory inside it", dir, sub)
+	}
+	// A left-out directory is named relative to the subtree a snapshot carries,
+	// which is where the app's data is: Plex's caches are under its home. The
+	// set's keys are the walk's own, so a left-out path is matched where the
+	// walk meets it.
+	skipped, err := skipSet(joinSub(dir, sub), sub, skip)
+	if err != nil {
+		return nil, err
 	}
 	info, err := os.Lstat(dir)
 	if err != nil {
@@ -135,58 +162,137 @@ func (w *Writer) AddTree(prefix, dir string) ([]Skipped, error) {
 	if err := w.addDir(prefix, info); err != nil {
 		return nil, err
 	}
-	var skipped []Skipped
-	err = filepath.WalkDir(dir, func(p string, d fs.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-		rel, err := filepath.Rel(dir, p)
-		if err != nil {
-			return err
-		}
-		if rel == "." {
-			return nil
-		}
-		name := path.Join(prefix, filepath.ToSlash(rel))
-		info, err := os.Lstat(p)
-		if err != nil {
-			return err
-		}
-		switch {
-		case d.IsDir():
-			return w.addDir(name, info)
-		case info.Mode().IsRegular():
-			return w.addFileFrom(name, p, info)
-		case info.Mode()&fs.ModeSymlink != 0:
-			skip, err := w.addLink(name, p, dir, rel)
-			if err != nil {
-				return err
-			}
-			if skip != nil {
-				skipped = append(skipped, *skip)
-			}
-			return nil
-		case info.Mode()&(fs.ModeSocket|fs.ModeNamedPipe) != 0:
-			// A running app keeps its own IPC in its config directory --
-			// qBittorrent's qBittorrent/ipc-socket is one -- and a socket is
-			// not something an archive can carry or a receiving host restore.
-			// The app makes it again when it starts, so it is left out with
-			// the reason, as a link at the pod's stdout is.
-			skipped = append(skipped, Skipped{
-				Path:   name,
-				Target: "",
-				Why:    "it is a " + modeName(info.Mode()) + " the running app made for itself, which an archive cannot carry; the app makes it again when it starts",
-			})
-			return nil
-		}
-		return fmt.Errorf("%s is a %s: an archive carries files, directories and links inside the tree, not devices",
-			p, modeName(info.Mode()))
-	})
-	if err != nil {
+	var left []Skipped
+	t := &treeWalk{w: w, prefix: prefix, dir: dir, sub: sub, skip: skipped, left: &left}
+	if err := filepath.WalkDir(dir, t.entry); err != nil {
 		w.fail(err)
 		return nil, err
 	}
-	return skipped, nil
+	return left, nil
+}
+
+// treeWalk is one AddTreeExcept's walk: what it carries, what it leaves out, and
+// where what it left is reported.
+type treeWalk struct {
+	w      *Writer
+	prefix string
+	dir    string
+	// sub is the one directory of the tree whose contents travel, and skip the
+	// directories inside it that do not.
+	sub  string
+	skip map[string]bool
+	left *[]Skipped
+}
+
+// entry is one entry the walk met. A directory beside the subtree a snapshot
+// carries is not entered, and neither is a left-out one: everything under them
+// is another program's or something Plex rebuilds.
+func (t *treeWalk) entry(p string, d fs.DirEntry, err error) error {
+	if err != nil {
+		return err
+	}
+	rel, err := filepath.Rel(t.dir, p)
+	if err != nil {
+		return err
+	}
+	if rel == "." {
+		return nil
+	}
+	slash := filepath.ToSlash(rel)
+	if t.sub != "" && !within(slash, t.sub) {
+		return leave(d)
+	}
+	if t.skip[slash] {
+		return leave(d)
+	}
+	name := path.Join(t.prefix, slash)
+	info, err := os.Lstat(p)
+	if err != nil {
+		return err
+	}
+	switch {
+	case d.IsDir():
+		return t.w.addDir(name, info)
+	case info.Mode().IsRegular():
+		return t.w.addFileFrom(name, p, info)
+	case info.Mode()&fs.ModeSymlink != 0:
+		skip, err := t.w.addLink(name, p, t.dir, rel)
+		if err != nil {
+			return err
+		}
+		if skip != nil {
+			*t.left = append(*t.left, *skip)
+		}
+		return nil
+	case info.Mode()&(fs.ModeSocket|fs.ModeNamedPipe) != 0:
+		// A running app keeps its own IPC in its config directory --
+		// qBittorrent's qBittorrent/ipc-socket is one -- and a socket is not
+		// something an archive can carry or a receiving host restore. The app
+		// makes it again when it starts, so it is left out with the reason, as
+		// a link at the pod's stdout is.
+		*t.left = append(*t.left, Skipped{
+			Path:   name,
+			Target: "",
+			Why:    "it is a " + modeName(info.Mode()) + " the running app made for itself, which an archive cannot carry; the app makes it again when it starts",
+		})
+		return nil
+	}
+	return fmt.Errorf("%s is a %s: an archive carries files, directories and links inside the tree, not devices",
+		p, modeName(info.Mode()))
+}
+
+// leave is how a walk skips an entry: a directory with everything under it, or a
+// file that is not part of what travels.
+func leave(d fs.DirEntry) error {
+	if d.IsDir() {
+		return filepath.SkipDir
+	}
+	return nil
+}
+
+// joinSub is the subtree a snapshot carries, as the path it is on disk.
+func joinSub(dir, sub string) string {
+	if sub == "" {
+		return dir
+	}
+	return filepath.Join(dir, filepath.FromSlash(sub))
+}
+
+// within reports whether a walked path is sub itself, inside sub, or a directory
+// above it: what one subtree of a config directory carries.
+func within(rel, sub string) bool {
+	return rel == sub || strings.HasPrefix(rel, sub+"/") || strings.HasPrefix(sub, rel+"/")
+}
+
+// skipSet is the directories a tree is walked without: each one a path inside
+// dir (which is base inside the walked root), checked once before the walk so a
+// spelling that names nothing is a refusal. The keys are paths from the walked
+// root, which is what the walk compares.
+func skipSet(dir, base string, skip []string) (map[string]bool, error) {
+	if len(skip) == 0 {
+		return nil, nil
+	}
+	out := make(map[string]bool, len(skip))
+	for _, name := range skip {
+		if !safeName(name) || name == "." {
+			return nil, fmt.Errorf("leave out %q of %s: that is not a directory inside it", name, dir)
+		}
+		at := filepath.Join(dir, filepath.FromSlash(name))
+		info, err := os.Lstat(at)
+		if err != nil {
+			if errors.Is(err, fs.ErrNotExist) {
+				// A directory the app never made is nothing to leave out: a
+				// fresh Plex has no Updates until it has updated.
+				continue
+			}
+			return nil, fmt.Errorf("leave out %s: %w", at, err)
+		}
+		if !info.IsDir() {
+			return nil, fmt.Errorf("leave out %q of %s: it is not a directory", name, dir)
+		}
+		out[path.Join(base, name)] = true
+	}
+	return out, nil
 }
 
 // Carried is what AddFiles added: which of the named files went in, which were
@@ -207,21 +313,26 @@ type Carried struct {
 // its Metadata tree is tens of gigabytes of covers Plex rebuilds from the data
 // it is given.
 //
-// The rules are AddTree's: the same link rule, the same modes, and the same
-// sha256 per entry, so a carried subset is as verifiable as a whole tree. The
-// files are named relative to dir, in slash form.
+// sub names the directory the files are in, relative to dir in slash form (empty
+// for dir itself); it and the directories above it are added, so the extracted
+// tree has the app's path. The rules are AddTree's: the same link rule, the same
+// modes, and the same sha256 per entry, so a carried subset is as verifiable as a
+// whole tree. The files are named relative to sub, in slash form.
 //
 // A named file that is not there is returned in Missing and is not an error: a
 // SQLite database's -wal and -shm exist only while a writer has the database
 // open. Which of the set an app cannot do without is the caller's rule, and this
 // is one pass with one answer.
-func (w *Writer) AddFiles(prefix, dir string, files []string) (Carried, error) {
+func (w *Writer) AddFiles(prefix, dir, sub string, files []string) (Carried, error) {
 	var res Carried
 	if err := w.ready(prefix); err != nil {
 		return res, err
 	}
 	if !safeName(prefix) {
 		return res, fmt.Errorf("add %s: a tree's prefix is a path inside the archive", dir)
+	}
+	if sub != "" && !safeName(sub) {
+		return res, fmt.Errorf("add %s: %q is not a directory inside it", dir, sub)
 	}
 	info, err := os.Lstat(dir)
 	if err != nil {
@@ -233,6 +344,24 @@ func (w *Writer) AddFiles(prefix, dir string, files []string) (Carried, error) {
 	if err := w.addDir(prefix, info); err != nil {
 		return res, err
 	}
+	// The app's own directory, and the ones that lead to it: a file list is
+	// inside a tree, and the tree has to be in the archive for the extract to
+	// put the files where the app looks for them.
+	base, at := dir, prefix
+	if sub != "" {
+		parts := strings.Split(sub, "/")
+		for i := 1; i <= len(parts); i++ {
+			rel := strings.Join(parts[:i], "/")
+			info, err := os.Lstat(filepath.Join(dir, filepath.FromSlash(rel)))
+			if err != nil {
+				return res, fmt.Errorf("add %s: %w", filepath.Join(dir, filepath.FromSlash(rel)), err)
+			}
+			if err := w.addDir(path.Join(prefix, rel), info); err != nil {
+				return res, err
+			}
+		}
+		base, at = filepath.Join(dir, filepath.FromSlash(sub)), path.Join(prefix, sub)
+	}
 	// made is every directory of the tree already in the archive: a set of files
 	// shares them, and an entry asked for twice is a refusal rather than two.
 	made := map[string]bool{}
@@ -240,7 +369,7 @@ func (w *Writer) AddFiles(prefix, dir string, files []string) (Carried, error) {
 		if !safeName(rel) {
 			return res, fmt.Errorf("%q is not a file inside %s: a carried file is a relative path with no .. in it", rel, dir)
 		}
-		skip, added, err := w.addCarried(prefix, dir, rel, made)
+		skip, added, err := w.addCarried(at, base, rel, made)
 		switch {
 		case err != nil:
 			return res, err

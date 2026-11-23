@@ -58,11 +58,21 @@ type Config struct {
 	Instance string
 	// Dir is the source's own directory, read and never written.
 	Dir string
-	// Files are the files a snapshot carries out of Dir, with the directories
-	// above them. Empty means all of Dir: an app whose config is its state as a
+	// Sub is the directory inside Dir that the app's own data is in, in slash
+	// form, when a snapshot carries that and not the whole of Dir: Plex's home
+	// is Library/Application Support/Plex Media Server, and whatever else the
+	// source's config mount holds is not Plex's. Empty means Dir itself.
+	Sub string
+	// Files are the files a snapshot carries out of Sub, with the directories
+	// above them. Empty means all of Sub: an app whose config is its state as a
 	// whole takes its whole tree, and one that keeps a library's worth of
 	// covers beside the state it needs (Plex) names the state.
 	Files []File
+	// Skip are the directories a snapshot leaves out of Sub's whole tree, with
+	// everything under them, in slash form relative to Sub. Only an app whose
+	// config is as much a library as a state has them (Plex's caches), and the
+	// whole tree travels otherwise. Files and Skip are never both set.
+	Skip []string
 }
 
 // File is one file a Config carries instead of its whole tree.
@@ -180,7 +190,7 @@ func Write(path string, s Snapshot) (Written, error) {
 	}
 	for _, c := range s.Configs {
 		if len(c.Files) == 0 {
-			skipped, err := w.AddTree(archive.ConfigPrefix+"/"+c.Instance, c.Dir)
+			skipped, err := w.AddTreeExcept(archive.ConfigPrefix+"/"+c.Instance, c.Dir, c.Sub, c.Skip)
 			if err != nil {
 				w.Discard()
 				return res, fmt.Errorf("add %s's config from %s: %w", c.Instance, c.Dir, err)
@@ -194,7 +204,7 @@ func Write(path string, s Snapshot) (Written, error) {
 		for i, f := range c.Files {
 			names[i] = f.Path
 		}
-		carried, err := w.AddFiles(archive.ConfigPrefix+"/"+c.Instance, c.Dir, names)
+		carried, err := w.AddFiles(archive.ConfigPrefix+"/"+c.Instance, c.Dir, c.Sub, names)
 		if err != nil {
 			w.Discard()
 			return res, fmt.Errorf("add %s's config from %s: %w", c.Instance, c.Dir, err)
@@ -243,6 +253,9 @@ func checkConfigs(configs []Config) error {
 			return fmt.Errorf("instance %q is in the snapshot twice", c.Instance)
 		}
 		seen[c.Instance] = true
+		if c.Sub != "" && !filePath(c.Sub) {
+			return fmt.Errorf("%s carries %q as the directory its data is in, which is not one inside its config directory: a relative path, with no . or .. in it", c.Instance, c.Sub)
+		}
 		files := make(map[string]bool, len(c.Files))
 		for _, f := range c.Files {
 			if !filePath(f.Path) {
@@ -252,6 +265,19 @@ func checkConfigs(configs []Config) error {
 				return fmt.Errorf("%s carries %s twice", c.Instance, f.Path)
 			}
 			files[f.Path] = true
+		}
+		if len(c.Files) > 0 && len(c.Skip) > 0 {
+			return fmt.Errorf("%s carries %d files and leaves %d directories out: a snapshot carries a tree with things left out of it, or a list of files, never both", c.Instance, len(c.Files), len(c.Skip))
+		}
+		skips := make(map[string]bool, len(c.Skip))
+		for _, dir := range c.Skip {
+			if !filePath(dir) {
+				return fmt.Errorf("%s leaves out %q, which is not a directory inside its config directory: a left-out directory is a relative path, with no . or .. in it", c.Instance, dir)
+			}
+			if skips[dir] {
+				return fmt.Errorf("%s leaves %s out twice", c.Instance, dir)
+			}
+			skips[dir] = true
 		}
 		info, err := os.Lstat(c.Dir)
 		if err != nil {

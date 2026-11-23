@@ -466,6 +466,79 @@ func TestASnapshotCarriesOnlyTheFilesAConfigNames(t *testing.T) {
 	}
 }
 
+// TestASnapshotLeavesOutWhatAFullCarryRebuilds: a full carry of Plex's config
+// directory is its tree -- Metadata and Media included, which is the artwork and
+// the preview thumbnails -- with the caches and records Plex rebuilds left out of
+// it, and the directories above them kept.
+func TestASnapshotLeavesOutWhatAFullCarryRebuilds(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, FileName(archive.ModeFinal, time.Now()))
+	tree := plexTree(t)
+	server := filepath.Join(tree, "Library", "Application Support", "Plex Media Server")
+	if err := os.MkdirAll(filepath.Join(server, "Cache"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	res, err := Write(path, Snapshot{
+		Mode:   archive.ModeFinal,
+		Plan:   []byte(testPlan),
+		Report: []byte(testReport),
+		Configs: []Config{
+			{Instance: "plex", Dir: tree, Skip: []string{
+				"Library/Application Support/Plex Media Server/Cache",
+			}},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	if len(res.Skipped) != 0 {
+		t.Errorf("Write skipped %v, and leaving a directory out is not a skip", res.Skipped)
+	}
+	m, err := archive.Read(path)
+	if err != nil {
+		t.Fatalf("Read: %v", err)
+	}
+	const prefix = "config/plex/"
+	want := []string{
+		prefix + "Cache/PhotoTranscoder/thumb.jpg",
+		prefix + "Metadata/Posters/poster.jpg",
+	}
+	for _, entry := range want {
+		if _, ok := m.Entries[entry]; !ok {
+			t.Errorf("a full carry left out %s, which is what the whole transfer is for", entry)
+		}
+	}
+	if _, ok := m.Entries[prefix+"Library/Application Support/Plex Media Server/Cache"]; ok {
+		t.Error("a full carry kept the Cache tree it was told to leave out")
+	}
+	if _, ok := m.Entries[prefix+"Library/Application Support/Plex Media Server/Preferences.xml"]; !ok {
+		t.Error("a full carry left out Preferences.xml")
+	}
+}
+
+// TestASnapshotRefusesALeftOutPathItCannotPlace: a directory a caller says to
+// leave out has to be one inside the tree: a spelling that names nothing would
+// silently carry a library somebody decided against.
+func TestASnapshotRefusesALeftOutPathItCannotPlace(t *testing.T) {
+	tree := tree(t)
+	for _, c := range []Config{
+		{Instance: "app", Dir: tree, Skip: []string{"../elsewhere"}},
+		{Instance: "app", Dir: tree, Skip: []string{"/absolute"}},
+		{Instance: "app", Dir: tree, Skip: []string{"files", "files"}},
+		{Instance: "app", Dir: tree, Files: []File{{Path: "files/a.txt"}}, Skip: []string{"files"}},
+	} {
+		path := filepath.Join(t.TempDir(), "a.tar.gz")
+		_, err := Write(path, Snapshot{Mode: archive.ModeFinal, Plan: []byte(testPlan), Configs: []Config{c}})
+		if err == nil {
+			t.Errorf("Write accepted %+v", c)
+			continue
+		}
+		if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+			t.Errorf("a refused write left %s behind", path)
+		}
+	}
+}
+
 // TestASnapshotRefusesARequiredFileItCannotCarry: Preferences.xml and the
 // library database are the state Plex cannot start without, so a snapshot
 // missing one is a refusal that names the path, and it leaves no file behind.
