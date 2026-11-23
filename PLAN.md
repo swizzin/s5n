@@ -209,6 +209,13 @@ recorded in the wiring ConfigMap, not by name and not by tag (see AGENTS.md inva
   Gateway's Envoy reaches Plex from its own pod IP, inside the cluster pod CIDR, so
   `apps.plex.noAuthNetworks` defaults to empty — a trusted range there would expose the
   server unauthenticated through the Gateway. Without a token the row is `pending`.
+- Maintainerr: connected to Plex with the same server token, through its own settings API
+  (`PATCH /api/settings` for the address, port, plain HTTP, manual mode and the media
+  server type; `POST /api/settings/plex/token` for the token, which its API insists on
+  before the address may move). The connection is proven with Maintainerr's own
+  `/api/settings/test/plex`, manual mode keeps it from re-discovering a `plex.direct`
+  name the pod cannot reach, and the token it holds is masked, so the fingerprint in
+  `owned.json` is what makes a rotation visible. Without a token the row is `pending`.
 - End-to-end hardlink proof, for every distinct download/library pair: write a file
   under the download folder, link it into the library folder, assert `nlink == 2` and the
   same device, then clean up. Every pair, because one claim is not one filesystem: a disk

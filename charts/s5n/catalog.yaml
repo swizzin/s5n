@@ -295,8 +295,10 @@ apps:
     # Everything it acts on, and every place a rule is written: Plex and
     # Tautulli for what was watched, Seerr for what was requested, both Arrs to
     # delete, qBittorrent to retire a torrent. Each setting is filled in its own
-    # UI (v3.32's servarr, seerr, tautulli and download-client API modules), and
-    # one it cannot reach is a rule that silently never runs.
+    # UI (v3.32's servarr, seerr, tautulli and download-client API modules),
+    # except Plex: that one is the release's own server, so the wiring Job
+    # connects it with the release Secret's plex-token (internal/apps/maintainerr).
+    # One it cannot reach is a rule that silently never runs.
     calls: [plex, sonarr, radarr, seerr, tautulli, qbittorrent]
     # Everything it knows is in one SQLite database, at the root of the
     # directory DATA_DIR moves to /config (apps/server/src/app/config/
