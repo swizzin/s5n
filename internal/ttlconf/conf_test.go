@@ -115,6 +115,58 @@ func TestSealSwitchesOffAPasswordWithNoUsername(t *testing.T) {
 	}
 }
 
+// Tautulli 2.19 switched a login back on in two ways that clearing the password
+// does not reach, so the seal sets both switches that hold it off: the app mints
+// itself a random password on a start where the wizard never finished
+// (plexpy/__init__.py:3121-3145's generate_first_run_password at v2.19.1, the
+// "Setup wizard login" it logs), and without a password it refuses every client
+// outside the local network and every request a reverse proxy forwarded
+// (webstart.py:406-441, no_password_gate) -- which is every request the Gateway
+// makes, because Envoy sends X-Forwarded-For.
+func TestSealKeepsA219FileFromAskingForALogin(t *testing.T) {
+	// What 2.19.1 writes for itself: the whole of _CONFIG_DEFINITIONS, the two
+	// switches at their install defaults, and no password.
+	existing := []byte("[General]\n api_key = key-1\n api_enabled = 1\n http_root = tautulli\n" +
+		" first_run_complete = 0\n http_username = \"\"\n http_password = \"\"\n" +
+		" http_hash_password = 0\n http_hashed_password = 0\n http_basic_auth = 0\n\n" +
+		"[Advanced]\n allow_public_no_password = 0\n config_version = 23\n")
+	out, changed := Seal(existing, "key-1", "/tautulli")
+	if !changed {
+		t.Fatal("want changed: the file's two switches ask for a login")
+	}
+	doc := parse(out)
+	for _, want := range []struct{ section, key, value string }{
+		{"General", "first_run_complete", "1"},
+		{"Advanced", "allow_public_no_password", "1"},
+	} {
+		if v := doc.get(want.section, want.key); v != want.value {
+			t.Errorf("%s/%s = %q, want %q", want.section, want.key, v, want.value)
+		}
+	}
+	// The app's own settings around them are untouched, and the section the new
+	// key went into did not swallow the one after it.
+	if v := doc.get("Advanced", "config_version"); v != "23" {
+		t.Errorf("Advanced/config_version = %q, want it left alone", v)
+	}
+}
+
+// A file the app wrote before 2.19 has no switch to turn: the key is added,
+// because the app's default for it is the state that asks for a login.
+func TestSealAddsTheSwitchesToAnOlderFile(t *testing.T) {
+	existing := []byte("[General]\n api_key = key-1\n api_enabled = 1\n http_root = /tautulli\n http_password = \"\"\n")
+	out, changed := Seal(existing, "key-1", "/tautulli")
+	if !changed {
+		t.Fatal("want changed: an older file has neither switch")
+	}
+	doc := parse(out)
+	if v := doc.get("General", "first_run_complete"); v != "1" {
+		t.Errorf("General/first_run_complete = %q, want it added as 1", v)
+	}
+	if v := doc.get("Advanced", "allow_public_no_password"); v != "1" {
+		t.Errorf("Advanced/allow_public_no_password = %q, want it added as 1", v)
+	}
+}
+
 // Every other byte is the byte that was read: comments, ordering, the app's own
 // keys and the sections below General. Tautulli writes this file itself and
 // reads it back, so a reformat is a settings file the app no longer recognises.
@@ -122,7 +174,8 @@ func TestSealKeepsEveryOtherByte(t *testing.T) {
 	existing := []byte("# written by Tautulli\n[General]\n api_key = key-1\n api_enabled = 1\n" +
 		" http_root = /tautulli\n http_username = \"\"\n http_password = \"\"\n" +
 		" http_hash_password = 0\n http_hashed_password = 0\n http_basic_auth = 0\n" +
-		"  # a comment after a key\n cache_images = 1\n\n[PMS]\n pms_ip = plextower\n")
+		" first_run_complete = 1\n  # a comment after a key\n cache_images = 1\n\n[PMS]\n pms_ip = plextower\n\n" +
+		"[Advanced]\n allow_public_no_password = 1\n")
 	out, changed := Seal(existing, "key-1", "/tautulli")
 	if changed {
 		t.Fatalf("a file already sealed reported a change: %q", out)
