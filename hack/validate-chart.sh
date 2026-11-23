@@ -167,6 +167,25 @@ for want in 'hostnames: ["pbh.box.example.com"]' 'memory: 512Mi' 'pbh-token:' \
 done
 echo "== pbh render: host route, memory limit, Secret key, wiring entry, one-login switch"
 
+# No app route keeps Envoy's 15s request timeout: an app behind the one login
+# is one person doing real work, and a long request (autobrr cleaning a large
+# releases database, an Arr's bulk edit or import) answered 504 by the gateway
+# is cut off in the app too. Every rule that sends traffic to an app asks for
+# no request timeout ("0s"); only the slash redirect, which has no backend,
+# has none to set. Counted per HTTPRoute in the render with every app on.
+routes=$(helm template t charts/s5n -n seedbox -f charts/s5n/ci/catalog-values.yaml |
+  awk '/^---/{if(kind=="HTTPRoute")print name, refs, zero; kind=""; name=""; refs=0; zero=0}
+       /^kind: /{kind=$2} /^  name: /{if(name=="")name=$2}
+       /^ *backendRefs:/{refs++} /^ *request: 0s$/{zero++}
+       END{if(kind=="HTTPRoute")print name, refs, zero}')
+[ -n "$routes" ] || { echo "the catalog render has no HTTPRoute"; exit 1; }
+while read -r name refs zero; do
+  [ "$refs" -gt 0 ] || continue
+  [ "$refs" = "$zero" ] ||
+    { echo "HTTPRoute ${name}: ${refs} rules send to the app, ${zero} lift Envoy's 15s request timeout"; exit 1; }
+done <<<"$routes"
+echo "== every app route: no request timeout ($(grep -c . <<<"$routes") routes)"
+
 # A category is a value inside wiring.json only: never an object name, label,
 # port name or ConfigMap key. Upper case and "/" are legal in a category and
 # illegal in a Kubernetes name, so two renders of the same four instances --

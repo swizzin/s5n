@@ -1574,6 +1574,22 @@ assert_front_door() {
     fi
   fi
 
+  # An app's prefix typed without its trailing slash is the gateway's redirect
+  # to the prefix with it, signed in or not: autobrr mounts its routes under
+  # "/autobrr/" as a string, so "/autobrr" alone would be a dead end.
+  : >"$hdrs"
+  code=$(curl -sS -o /dev/null -D "$hdrs" -w '%{http_code}' -b "$jar" \
+    --resolve "${DOMAIN}:443:${addr}" "${ca_args[@]}" "https://${DOMAIN}/autobrr" \
+    2>"$WORK/front-door.err" || true)
+  location=$(sed -n 's/^[Ll]ocation: *//p' "$hdrs" | tr -d '\r' | head -1)
+  echo "  front door: /autobrr signed in: ${code} -> ${location}"
+  [ "$code" = 301 ] ||
+    { echo "/autobrr answered ${code} to a signed-in browser, want the gateway's 301 to /autobrr/"; fail=1; }
+  case "$(location_path "$location")" in
+    /autobrr/) : ;;
+    *) echo "/autobrr sent the browser to ${location}, want /autobrr/"; fail=1 ;;
+  esac
+
   # And the same request carrying a header credential of its own -- an app's
   # bundle sending the token it holds, empty because nobody gave it one -- is the
   # app's redirect again, not a 401 against a valid session. The cookie is what
