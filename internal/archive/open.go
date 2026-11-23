@@ -91,8 +91,36 @@ func Extract(archive, dir string, m *Manifest, keep Filter, own *Owner) error {
 	if err := os.Chmod(dir, 0o700); err != nil {
 		return fmt.Errorf("extract to %s: %w", dir, err)
 	}
-	if err := extract(archive, dir, m, keep, own); err != nil {
+	if err := extract(archive, dir, "", m, keep, own); err != nil {
 		// A half-extracted tree is worse than none: it looks like a snapshot.
+		os.RemoveAll(dir)
+		return err
+	}
+	return nil
+}
+
+// ExtractTree writes the subtree of an archive under prefix into dir, with the
+// prefix taken off its paths: a snapshot's config/<instance>/ becomes the
+// instance's config directory itself, which is what a run stages at the config
+// root.
+//
+// It is Extract's other caller: the tree a full carry holds is written once, here,
+// straight out of the snapshot, and its bytes are checked against the manifest
+// again as they are written. own is who the tree belongs to; nil is the user who
+// ran box.
+func ExtractTree(archive, dir, prefix string, m *Manifest, own *Owner) error {
+	if _, err := os.Lstat(dir); err == nil {
+		return fmt.Errorf("extract to %s: it already exists, and a snapshot extracts to a new directory", dir)
+	} else if !errors.Is(err, fs.ErrNotExist) {
+		return fmt.Errorf("extract to %s: %w", dir, err)
+	}
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return fmt.Errorf("extract to %s: %w", dir, err)
+	}
+	if err := os.Chmod(dir, 0o700); err != nil {
+		return fmt.Errorf("extract to %s: %w", dir, err)
+	}
+	if err := extract(archive, dir, path.Clean(prefix), m, nil, own); err != nil {
 		os.RemoveAll(dir)
 		return err
 	}
@@ -170,7 +198,9 @@ func readManifest(archive string) (*Manifest, error) {
 
 // extract is the second pass: every tar entry keep accepts is checked against
 // the manifest and written, and every manifest entry keep accepts has to appear.
-func extract(archive, dir string, m *Manifest, keep Filter, own *Owner) error {
+// base, when it is not empty, is the one subtree of the archive that is written,
+// with its own name taken off the paths.
+func extract(archive, dir, base string, m *Manifest, keep Filter, own *Owner) error {
 	f, gz, err := openArchive(archive)
 	if err != nil {
 		return err
@@ -186,7 +216,7 @@ func extract(archive, dir string, m *Manifest, keep Filter, own *Owner) error {
 		if err != nil {
 			return fmt.Errorf("read %s: %w", archive, err)
 		}
-		if err := extractEntry(archive, dir, m, tr, hdr, keep, own, seen); err != nil {
+		if err := extractEntry(archive, dir, base, m, tr, hdr, keep, own, seen); err != nil {
 			return err
 		}
 	}
@@ -201,6 +231,9 @@ func extract(archive, dir string, m *Manifest, keep Filter, own *Owner) error {
 			// entries it was told to write, and no others.
 			continue
 		}
+		if base != "" && name != base && !strings.HasPrefix(name, base+"/") {
+			continue
+		}
 		if !seen[name] {
 			return fmt.Errorf("%s does not hold %s, which its manifest names: the copy is incomplete", archive, name)
 		}
@@ -210,7 +243,7 @@ func extract(archive, dir string, m *Manifest, keep Filter, own *Owner) error {
 
 // extractEntry checks one tar entry against the manifest and writes it, unless
 // keep leaves it for a later pass.
-func extractEntry(archive, dir string, m *Manifest, tr *tar.Reader, hdr *tar.Header, keep Filter, own *Owner, seen map[string]bool) error {
+func extractEntry(archive, dir, base string, m *Manifest, tr *tar.Reader, hdr *tar.Header, keep Filter, own *Owner, seen map[string]bool) error {
 	name := path.Clean(hdr.Name)
 	// The manifest was verified in the first pass, and readManifest refuses an
 	// archive with anything after it; the entry itself is not extracted.
@@ -229,11 +262,24 @@ func extractEntry(archive, dir string, m *Manifest, tr *tar.Reader, hdr *tar.Hea
 	if keep != nil && !keep(name) {
 		return nil
 	}
+	rel := name
+	if base != "" {
+		if name == base {
+			// The subtree's own directory: the extraction directory itself is
+			// what it becomes, and it is already there.
+			seen[name] = true
+			return nil
+		}
+		var ok bool
+		if rel, ok = strings.CutPrefix(name, base+"/"); !ok {
+			return nil
+		}
+	}
 	seen[name] = true
-	if err := makeParents(dir, name); err != nil {
+	if err := makeParents(dir, rel); err != nil {
 		return err
 	}
-	target := filepath.Join(dir, filepath.FromSlash(name))
+	target := filepath.Join(dir, filepath.FromSlash(rel))
 	switch hdr.Typeflag {
 	case tar.TypeDir:
 		if _, err := checkEntry(archive, nil, m, tr, hdr); err != nil {
@@ -263,7 +309,7 @@ func extractEntry(archive, dir string, m *Manifest, tr *tar.Reader, hdr *tar.Hea
 		if _, err := checkEntry(archive, nil, m, tr, hdr); err != nil {
 			return err
 		}
-		if err := extractLink(dir, target, name, hdr.Linkname); err != nil {
+		if err := extractLink(dir, rel, target, name, hdr.Linkname); err != nil {
 			return fmt.Errorf("%s: %w", archive, err)
 		}
 		return hand(own, target, true)
@@ -312,8 +358,8 @@ func extractDir(target, name string) error {
 
 // extractLink writes one symlink under internal/linktree's rule, so a link that
 // leaves the tree the archive names is refused rather than materialised.
-func extractLink(dir, target, name, linkname string) error {
-	res, err := linktree.Resolve(dir, filepath.FromSlash(name), linkname)
+func extractLink(dir, rel, target, name, linkname string) error {
+	res, err := linktree.Resolve(dir, filepath.FromSlash(rel), linkname)
 	if err != nil {
 		return err
 	}

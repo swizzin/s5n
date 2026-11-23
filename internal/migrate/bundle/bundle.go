@@ -475,10 +475,7 @@ func Open(file, dir string, keep archive.Filter, disk space.Disk) (*Opened, erro
 // as they are written.
 func (o *Opened) Stage(instance, dst string, uid, gid int) (Contents, error) {
 	prefix := archive.ConfigPrefix + "/" + instance
-	keep := func(name string) bool {
-		return name == prefix || strings.HasPrefix(name, prefix+"/")
-	}
-	if err := archive.Extract(o.Path, dst, o.manifest, keep, &archive.Owner{UID: uid, GID: gid}); err != nil {
+	if err := archive.ExtractTree(o.Path, dst, prefix, o.manifest, &archive.Owner{UID: uid, GID: gid}); err != nil {
 		return Contents{}, err
 	}
 	return o.Contents[instance], nil

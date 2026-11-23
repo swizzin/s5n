@@ -274,3 +274,24 @@ func TestTheStateSetIsWhatTheSnapshotNames(t *testing.T) {
 		}
 	}
 }
+
+// TestTheStateLandsWhereTheAppReadsIt: a state-only carry puts Plex's
+// Preferences.xml and its databases under the directory its image reads them
+// from, not at the top of the mount. Plex that finds no Preferences.xml writes
+// itself a new identity, which is the one thing a migration must not make it do.
+func TestTheStateLandsWhereTheAppReadsIt(t *testing.T) {
+	env, p, raw := plexCarryEnv(t)
+	env.Disk = shortDisk{free: 1 << 20}
+	if _, err := Run(context.Background(), p, raw, env); err != nil {
+		t.Fatalf("apply: %v", err)
+	}
+	home := filepath.Join(env.ConfigRoot, "plex", "Library", "Application Support", "Plex Media Server")
+	for _, want := range []string{"Preferences.xml", "Plug-in Support/Databases/com.plexapp.plugins.library.db"} {
+		if _, err := os.Stat(filepath.Join(home, filepath.FromSlash(want))); err != nil {
+			t.Errorf("the staged config holds no %s where Plex reads it: %v", want, err)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(env.ConfigRoot, "plex", "Preferences.xml")); err == nil {
+		t.Error("the state was staged at the top of the mount, where Plex does not read it")
+	}
+}

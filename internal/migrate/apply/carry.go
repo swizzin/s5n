@@ -13,6 +13,7 @@ package apply
 
 import (
 	"fmt"
+	"path"
 	"path/filepath"
 	"strings"
 
@@ -162,15 +163,33 @@ func appText(name, line string) string {
 }
 
 // stageTrimmed stages one app's state out of a config directory that holds its
-// whole data: the files the plan's minimal carry names, with the directories
-// above them, under the same rules as a whole-tree copy (modes and times kept,
-// links carried or skipped by internal/linktree).
+// whole data: the files the plan's minimal carry names, under the directory the
+// app's home is in, with the directories above them, under the same rules as a
+// whole-tree copy (modes and times kept, links carried or skipped by
+// internal/linktree).
+//
+// The state is written where the app reads it. A config directory whose home is
+// one directory down (the image's own /config/Library/Application Support) stages
+// the state under that path, not at the top of the mount: an app that finds no
+// Preferences.xml writes itself a new identity, which is the one thing a
+// migration must not make it do.
 func stageTrimmed(dst, src string, state plex.Scope, uid, gid int) (Staged, error) {
 	names := make([]string, len(state.Files))
 	for i, f := range state.Files {
-		names[i] = f.Path
+		names[i] = path.Join(homeRelative(src, state), f.Path)
 	}
-	return copyFiles(dst, carriedDir(src, state.Sub), names, uid, gid)
+	return copyFiles(dst, src, names, uid, gid)
+}
+
+// homeRelative is where one app's home is inside the config directory at dir, in
+// slash form: empty when it is the directory itself, which is a path.Join with
+// nothing in front of it.
+func homeRelative(dir string, state plex.Scope) string {
+	home, err := filepath.Rel(dir, carriedDir(dir, state.Sub))
+	if err != nil || home == "." {
+		return ""
+	}
+	return filepath.ToSlash(home)
 }
 
 // carriedDir is where one app's own data is inside the config directory the
