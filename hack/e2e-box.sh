@@ -4809,24 +4809,26 @@ PY
   python3 - "$WORK/grant.yaml" <<'PY' || { fail=1; return 0; }
 import sys
 path = sys.argv[1]
-out, torrent, removed = [], None, 0
+out, torrent, ports = [], None, 0
 for line in open(path):
     bare = line.strip()
     indent = len(line) - len(line.lstrip())
-    if bare == "torrent:":
-        torrent = indent
-        out.append(line)
-        continue
     if torrent is not None and bare and indent <= torrent:
         torrent = None
-    if torrent is not None and bare.startswith("port:"):
-        removed += 1
+    if torrent is not None:
+        if bare.startswith("port:"):
+            ports += 1
+        continue
+    if bare == "torrent:":
+        torrent = indent
         continue
     out.append(line)
-if removed != 1:
-    sys.exit(f"{path}: removed {removed} torrent ports, want one")
+if torrent is not None:
+    sys.exit(f"{path}: the torrent block never ended")
+if ports != 1:
+    sys.exit(f"{path}: the torrent block held {ports} ports, want one")
 open(path, "w").write("".join(out))
-print("  grant: apps.qbittorrent.torrent.port dropped, as a box installed before box recorded one")
+print("  grant: apps.qbittorrent.torrent dropped, as a box installed before box recorded one")
 PY
   svc_port=$($K -n "$NS" get service qbittorrent-peers -o jsonpath='{.spec.ports[0].nodePort}' 2>/dev/null || true)
   [ "$svc_port" = "$old_port" ] ||
