@@ -275,7 +275,14 @@ login is switched off behind the box's, and box seals it off on every start: a
 non-empty `http_password` is the switch that makes Tautulli ask for a password
 (plexpy/webstart.py at v2.18.2), so the app's init container clears the pair and the
 two flags that hash it, and `migrate` writes the same into a source's file and says
-so in its confirm. It is served under `/tautulli`, and its own URL root is sealed to
+so in its confirm. 2.19 put two more switches in front of a password that is empty,
+and box seals both: without `first_run_complete` the app mints itself a random
+password on a start where the setup wizard never finished
+(plexpy/__init__.py:3121-3145 at v2.19.1), and without
+`allow_public_no_password` it refuses every client outside the local network and
+every request a reverse proxy forwarded (webstart.py:406-441) — which is every
+request the Gateway makes, because Envoy sends `X-Forwarded-For`. It is served under
+`/tautulli`, and its own URL root is sealed to
 that prefix: the redirects it builds are absolute (`/` to `/home`, a refused request
 to `auth/logout`), so an app that does not know its prefix leaves it -- and lands on
 the box's own `/auth`.
@@ -327,10 +334,15 @@ Secret, beside the qBittorrent password and the Arr keys, and box owns the accou
 outright: the app's init container creates it if it is missing and sets that password on
 every start, so a password changed inside the app is put back at the next restart, and
 until then the wiring Job's report names the mismatch. The Job signs in with it on every
-run; no API key is minted or kept. Hiding the app's own login form doesn't switch its
-password login off, so this account is reachable only past the edge's login or from the
-wiring Job, which the NetworkPolicy allows. The account is named `s5n` in both apps; it is the
-wiring Job's, not another way in for the person, whose way in is still the provider.
+run; no API key is minted or kept. This account's password login is the one the Job uses,
+so it stays routable: since autobrr 1.91 switching its built-in login off does not hide
+the form, it makes `POST /api/auth/login` answer 403
+(`internal/http/auth.go:122-126` at v1.91.1), and the Job then has no way in at all. For
+autobrr the form is not offered because the app sends the login page to the provider
+itself (its own automatic OIDC login), and the account is reachable only past the edge's
+login or from the wiring Job, which the NetworkPolicy allows. The account is named `s5n`
+in both apps; it is the wiring Job's, not another way in for the person, whose way in is
+still the provider.
 PeerBanHelper's token is that app's version of the same trade. It is generated once in
 the release Secret and handed to the app through its environment, and it is load-bearing
 twice over even though nobody signs in with it: PBH reads it as its own `pbh.apiToken`,

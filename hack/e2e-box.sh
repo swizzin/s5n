@@ -1249,6 +1249,21 @@ print(u.parse_qs(u.urlparse(sys.stdin.read()).query).get("rd", [""])[0])' || tru
     "https://${DOMAIN}/auth/"*) : ;;
     *) echo "the authorization URL is not this box's issuer: ${auth_url}"; fail=1 ;;
   esac
+  # autobrr 1.91: its own password login has to stay routable for the account
+  # the wiring Job signs in with (switching it off makes the endpoint answer
+  # 403, so no downloader is ever registered), and the form it would show is
+  # kept from a person by the app's own automatic login -- the page sends the
+  # browser to the provider. The two settings are one decision, so they are
+  # asserted together on the answer the page itself reads.
+  if [ "$app" = autobrr ]; then
+    auto=$(grep -o '"autoRedirect":[a-z]*' "$WORK/oidc-${app}-config.json" || true)
+    builtin=$(grep -o '"disableBuiltInLogin":[a-z]*' "$WORK/oidc-${app}-config.json" || true)
+    echo "  ${app}: login page ${auto:-no autoRedirect}, ${builtin:-no disableBuiltInLogin}"
+    [ "$auto" = '"autoRedirect":true' ] ||
+      { echo "autobrr's login page does not send a signed-out browser to the provider, so it offers its password form"; fail=1; }
+    [ "$builtin" = '"disableBuiltInLogin":false' ] ||
+      { echo "autobrr was told to switch its built-in login off, which also refuses the wiring Job's password login: ${builtin:-missing}"; fail=1; }
+  fi
 
   # 4a. Signed in at the edge already: the authorization endpoint answers with
   #     the callback and a code, and nothing in between. A consent page here
@@ -1540,6 +1555,9 @@ assert_front_door() {
     /tautulli/*) : ;;
     *) echo "/tautulli/ sent the signed-in browser to ${location}: the app does not know the prefix it is served under"; fail=1 ;;
   esac
+  case "$page" in
+    */auth/* | */auth) echo "/tautulli/ sent the signed-in browser to ${location}: the app asked for its own login, which box seals off (internal/ttlconf)"; fail=1 ;;
+  esac
   if [ -n "$page" ]; then
     code=$(curl -sS -o "$WORK/front-door-page.html" -w '%{http_code}' -b "$jar" -c "$jar" \
       --resolve "${DOMAIN}:443:${addr}" "${ca_args[@]}" "https://${DOMAIN}${page}" \
@@ -1548,6 +1566,12 @@ assert_front_door() {
     [ "$code" = 200 ] || { echo "${page} did not serve the app's page: ${code}"; fail=1; }
     grep -qi '<!doctype html' "$WORK/front-door-page.html" ||
       { echo "${page} answered ${code} without an HTML document"; fail=1; }
+    # The person signs in once, at the edge. A page holding Tautulli's own login
+    # form is a second password they were never given.
+    if grep -q 'id="login-form"' "$WORK/front-door-page.html"; then
+      echo "${page} served Tautulli's own login form: its web login is back in front of the box's"
+      fail=1
+    fi
   fi
 
   # And the same request carrying a header credential of its own -- an app's

@@ -1300,11 +1300,23 @@ case "$tpath" in
   /tautulli/*) : ;;
   *) echo "/tautulli/ redirected to ${loc}, which is outside its prefix: the app's URL root does not know it"; fail=1 ;;
 esac
+# Not its own login: box seals Tautulli's web login off on every start
+# (internal/ttlconf), and this install has no edge login in front of it, so a
+# redirect into the app's auth paths is the app asking for a password nobody was
+# given. Tautulli 2.19 does that from a password it mints itself, or refuses the
+# Gateway's forwarded request outright, unless the seal's two switches are set.
+case "$tpath" in
+  */auth/* | */auth) echo "/tautulli/ redirected to ${loc}: the app's own login is on, and nothing in front of it is box's"; fail=1 ;;
+esac
 if [ -n "$tpath" ]; then
   code=$(gw_get -s -o "$WORK/tautulli.html" -w '%{http_code}' "https://${DOMAIN}${tpath}" || true)
   echo "GET ${tpath} via gateway -> ${code}"
   [ "$code" = 200 ] || { echo "${tpath} did not serve the app's page: ${code}"; fail=1; }
   grep -qi '<!doctype html' "$WORK/tautulli.html" || { echo "${tpath} answered ${code} without an HTML document"; fail=1; }
+  if grep -q 'id="login-form"' "$WORK/tautulli.html"; then
+    echo "${tpath} served Tautulli's own login form: internal/ttlconf did not keep its login off"
+    fail=1
+  fi
 fi
 tasset=$(grep -oE '(src|href)="[^"]+\.(js|css)([?#][^"]*)?"' "$WORK/tautulli.html" | head -1 |
   sed 's/^[a-z]*="//; s/"$//' || true)
