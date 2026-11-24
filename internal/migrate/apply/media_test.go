@@ -156,11 +156,10 @@ func TestRunRenamesTheLibraryOntoBoxsCategories(t *testing.T) {
 	sameTree(t, "the downloads tree", downloadsBefore, hashTree(t, filepath.Join(f.dataRoot, "downloads")))
 	// The summary is where the operator read it first: one row for the two
 	// contract directories and one for the library.
-	row := dataRow(shown)
-	if !strings.Contains(row, "media: 4K/TV → tv-4k · TV → tv") {
-		t.Errorf("the confirm's data row is %q, want the library's two renames in it", row)
+	if row := dataRow(shown, "library"); !strings.Contains(row, "4K/TV → tv-4k · TV → tv") {
+		t.Errorf("the confirm's library row is %q, want the library's two renames in it", row)
 	}
-	if !strings.Contains(row, "Downloads → downloads") {
+	if row := dataRow(shown, "data"); !strings.Contains(row, "Downloads → downloads") {
 		t.Errorf("the confirm's data row is %q, want the contract directory's rename too", row)
 	}
 	if len(res.Renamed) != 3 || !strings.Contains(strings.Join(res.Renamed, " "), "media/TV to media/tv") {
@@ -180,8 +179,10 @@ func TestRunLeavesTheLibraryAloneInARehearsal(t *testing.T) {
 		t.Fatalf("Run: %v", err)
 	}
 	sameTree(t, "the data root", before, hashTree(t, f.dataRoot))
-	if row := dataRow(shown); row != "" {
-		t.Errorf("a rehearsal's confirm has a data row: %q", row)
+	for _, name := range []string{"data", "library"} {
+		if row := dataRow(shown, name); row != "" {
+			t.Errorf("a rehearsal's confirm has a %s row: %q", name, row)
+		}
 	}
 }
 
@@ -248,16 +249,16 @@ func TestRunRenamesNestedDirectoriesInTheLibrarysOwnName(t *testing.T) {
 }
 
 // dataRow is the confirm's data row as one line, "" when it has none.
-func dataRow(s Summary) string {
-	for _, row := range s.Grouped().Blocks {
-		if row.Title != "data" {
-			continue
+// dataRow is the confirm's row for one directory the run renames: the block has
+// a row per directory, so a test names the one it is about.
+func dataRow(s Summary, name string) string {
+	for _, block := range s.Grouped().Blocks {
+		for _, row := range block.Rows {
+			if row.Name != name {
+				continue
+			}
+			return strings.Join(row.Facts, " · ")
 		}
-		var facts []string
-		for _, r := range row.Rows {
-			facts = append(facts, r.Facts...)
-		}
-		return strings.Join(facts, " · ")
 	}
 	return ""
 }

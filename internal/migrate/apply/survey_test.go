@@ -239,7 +239,7 @@ func TestSurveyDefersTheAppThatNeedsItsImage(t *testing.T) {
 	}
 	// The grouped screen says the same thing in Plex's row.
 	rendered := renderGrouped(summary)
-	if !strings.Contains(rendered, "its databases are checked once Plex's image runs") {
+	if !strings.Contains(rendered, "its databases are checked once Plex's") {
 		t.Errorf("the grouped summary does not say when Plex is checked:\n%s", rendered)
 	}
 	// The state record of the pass is inside the directory the caller removes,

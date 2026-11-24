@@ -40,6 +40,7 @@ import (
 	"github.com/swizzin/s5n/internal/migrate/lock"
 	"github.com/swizzin/s5n/internal/migrate/plan"
 	"github.com/swizzin/s5n/internal/migrate/plex"
+	"github.com/swizzin/s5n/internal/migrate/report"
 	"github.com/swizzin/s5n/internal/migrate/work"
 	"github.com/swizzin/s5n/internal/platform"
 	"github.com/swizzin/s5n/internal/release"
@@ -306,7 +307,7 @@ func migrateApply(ctx context.Context, file string, o *migrateApplyFlags, out sa
 		if err != nil {
 			return err
 		}
-		agreed, err = steps.beforeInstall(ctx, confirmer(out, *o.yes), *o.details, installTarget(o.install), rehearsal, out)
+		agreed, err = steps.beforeInstall(ctx, confirmer(out, *o.yes), *o.details, installTarget(o.install), rehearsal, confirmScreenOf(opened, installTarget(o.install)), out)
 		if err != nil {
 			return err
 		}
@@ -368,7 +369,8 @@ func migrateApply(ctx context.Context, file string, o *migrateApplyFlags, out sa
 	if err != nil {
 		return err
 	}
-	env, cs, err := migrateEnv(p, opened, o, sb, chart, cat, kc, namespace, values, rehearsal, agreed, out)
+	screen := confirmScreenOf(opened, namespace)
+	env, cs, err := migrateEnv(p, opened, o, sb, chart, cat, kc, namespace, values, rehearsal, agreed, screen, out)
 	if err != nil {
 		return err
 	}
@@ -400,8 +402,18 @@ func migrateApply(ctx context.Context, file string, o *migrateApplyFlags, out sa
 	if res.Done {
 		out.Line(fmt.Sprintf("%s in %s: the plan is already applied", release.ReleaseName, namespace))
 	} else {
-		out.Success(fmt.Sprintf("moved %d instances into %s", len(res.Moved), env.ConfigRoot))
+		out.Rows([]say.Row{{
+			Mark:  say.MarkDone,
+			Name:  "moved",
+			Facts: []string{appsWord(len(res.Moved)), "into " + env.ConfigRoot},
+		}})
 	}
+	out.Rows([]say.Row{{
+		Mark:    say.MarkNote,
+		Name:    "report",
+		Facts:   []string{screen.Report},
+		Command: "less " + screen.Report,
+	}})
 
 	// Step 11: the same apply `box apply` runs, with the answer the operator
 	// gave above. The files are re-read there, which is what makes the release
@@ -450,7 +462,7 @@ func loadMigrateChart(ctx context.Context, charts *chartRelease) (release.Chart,
 }
 
 // migrateEnv builds everything apply touches outside the plan directory.
-func migrateEnv(p *plan.Plan, opened *bundle.Opened, o *migrateApplyFlags, sb *seedbox.Seedbox, chart release.Chart, cat *catalog.Catalog, kc, namespace string, values map[string]any, rehearsal bool, agreed *apply.Summary, out say.Reporter) (apply.Env, kubernetes.Interface, error) {
+func migrateEnv(p *plan.Plan, opened *bundle.Opened, o *migrateApplyFlags, sb *seedbox.Seedbox, chart release.Chart, cat *catalog.Catalog, kc, namespace string, values map[string]any, rehearsal bool, agreed *apply.Summary, screen confirmScreen, out say.Reporter) (apply.Env, kubernetes.Interface, error) {
 	var env apply.Env
 	vols, err := sb.Storage()
 	if err != nil {
@@ -535,7 +547,7 @@ func migrateEnv(p *plan.Plan, opened *bundle.Opened, o *migrateApplyFlags, sb *s
 		env.Run = runner.Run
 	}
 	env.Rehearsal = rehearsal
-	env.Confirm = migrateAnswer(out, o, namespace, rehearsal, agreed)
+	env.Confirm = migrateAnswer(out, o, namespace, rehearsal, agreed, screen)
 	return env, cs, nil
 }
 
@@ -544,11 +556,28 @@ func migrateEnv(p *plan.Plan, opened *bundle.Opened, o *migrateApplyFlags, sb *s
 // itself to the answer instead. On a host that already had one there is nothing
 // to agree to beforehand, and the question is asked here, inside the run, after
 // every app's Check -- Plex's included.
-func migrateAnswer(out say.Reporter, o *migrateApplyFlags, namespace string, rehearsal bool, agreed *apply.Summary) func(apply.Summary) (bool, error) {
+func migrateAnswer(out say.Reporter, o *migrateApplyFlags, namespace string, rehearsal bool, agreed *apply.Summary, screen confirmScreen) func(apply.Summary) (bool, error) {
 	if agreed != nil {
 		return migrateAgreed(out, *agreed)
 	}
-	return migrateConfirm(out, confirmer(out, *o.yes), namespace, rehearsal, *o.details, nil, "")
+	return migrateConfirm(out, confirmer(out, *o.yes), namespace, rehearsal, *o.details, nil, "", screen)
+}
+
+// confirmScreenOf is the heading and report path of one run: what it is about to
+// apply, and where its page goes. target is the seedbox's name, or "" before one
+// is chosen -- which reads as "this box" rather than as an empty column.
+func confirmScreenOf(opened *bundle.Opened, target string) confirmScreen {
+	when := ""
+	if !opened.Taken.IsZero() {
+		when = " from " + opened.Taken.UTC().Format("2006-01-02 15:04 UTC")
+	}
+	return confirmScreen{
+		Head:     fmt.Sprintf("box migrate apply · %s · %s snapshot%s", confirmTarget(target), opened.Mode, when),
+		Snapshot: opened.Path,
+		Report:   report.ApplyName(opened.Path),
+		Kind:     string(opened.Mode),
+		Taken:    opened.Taken.Format(time.RFC3339),
+	}
 }
 
 // migrateConfirm shows the summary and asks the one question. It is the same
@@ -563,9 +592,17 @@ func migrateAnswer(out say.Reporter, o *migrateApplyFlags, namespace string, reh
 // output. A run that asked "install the platform layer?" and then "move these
 // into ...?" was two questions about one decision, and the second one came after
 // both.
-func migrateConfirm(out say.Reporter, ask asker, namespace string, rehearsal bool, details bool, plat *platform.Plan, lead string) func(apply.Summary) (bool, error) {
+//
+// The screen is the heading, the blocks, and one footer line counting what folded
+// away; the page with every row in it is written beside the snapshot before the
+// question, so a person who says no still has what they were shown.
+func migrateConfirm(out say.Reporter, ask asker, namespace string, rehearsal bool, details bool, plat *platform.Plan, lead string, screen confirmScreen) func(apply.Summary) (bool, error) {
 	target := confirmTarget(namespace)
 	return func(s apply.Summary) (bool, error) {
+		if screen.Head != "" {
+			out.Line(screen.Head)
+			out.Line("")
+		}
 		if plat != nil {
 			if lead != "" {
 				out.Muted(lead)
@@ -573,9 +610,10 @@ func migrateConfirm(out say.Reporter, ask asker, namespace string, rehearsal boo
 			if items := plat.Items(); len(items) > 0 {
 				out.Plan("platform", items)
 			}
+			out.Line("")
 		}
 		if details {
-			// Every rewrite, column by column: the list report.txt holds, for
+			// Every rewrite, column by column: the list the report holds, for
 			// the operator who wants to check one row before saying yes.
 			out.List("this migration", s.Lines())
 		} else {
@@ -584,10 +622,17 @@ func migrateConfirm(out say.Reporter, ask asker, namespace string, rehearsal boo
 				out.Muted(g.Lead)
 			}
 			for _, block := range g.Blocks {
-				out.Table(block.Title, block.Rows)
+				apply.PrintGroup(out, block)
 			}
 			if g.Footer != "" {
-				out.Muted(g.Footer)
+				apply.PrintNote(out, g.Footer)
+			}
+			// The log keeps the whole account, and the report keeps the page.
+			for _, line := range s.Lines() {
+				out.Detail(line)
+			}
+			if err := writeApplyReport(out, s, screen); err != nil {
+				return false, err
 			}
 		}
 		if rehearsal {
@@ -597,10 +642,40 @@ func migrateConfirm(out say.Reporter, ask asker, namespace string, rehearsal boo
 				"nothing leaves this box: no internet egress, and the release's own pods only",
 				"every torrent starts stopped, and no data is renamed",
 			})
-			return ask.Ask(fmt.Sprintf("rehearse these into %s?", target))
+			return ask.Ask(fmt.Sprintf("rehearse these %s into %s?", appsWord(len(s.Instances)), target))
 		}
-		return ask.Ask(fmt.Sprintf("move these into %s?", target))
+		if plat != nil {
+			return ask.Ask(fmt.Sprintf("install, then move these %s in?", appsWord(len(s.Instances))))
+		}
+		return ask.Ask(fmt.Sprintf("move these %s in?", appsWord(len(s.Instances))))
 	}
+}
+
+// writeApplyReport puts this run's page beside the snapshot, before the question:
+// the file the footer and --details point at, written 0600 like everything else
+// next to a snapshot.
+func writeApplyReport(out say.Reporter, s apply.Summary, screen confirmScreen) error {
+	if screen.Report == "" {
+		return nil
+	}
+	taken := time.Now().UTC()
+	if at, err := time.Parse(time.RFC3339, screen.Taken); err == nil {
+		taken = at.UTC()
+	}
+	doc := s.Report(screen.Kind, screen.Snapshot, taken, version)
+	if err := report.Write(screen.Report, doc); err != nil {
+		return err
+	}
+	out.Detail("report: " + screen.Report)
+	return nil
+}
+
+// appsWord is "one app" or "12 apps", for the question.
+func appsWord(n int) string {
+	if n == 1 {
+		return "1 app"
+	}
+	return fmt.Sprintf("%d apps", n)
 }
 
 // confirmLead is the first line of the one question on a host with no box: what

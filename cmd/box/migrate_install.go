@@ -135,12 +135,12 @@ type migrateInstallSteps struct {
 // beforeInstall is the order the whole run exists for: decide, show, ask -- and
 // only after the answer install anything. It returns the summary the operator
 // agreed to, which the adoption is then held to.
-func (s migrateInstallSteps) beforeInstall(ctx context.Context, ask asker, details bool, target string, rehearsal bool, out say.Reporter) (*apply.Summary, error) {
+func (s migrateInstallSteps) beforeInstall(ctx context.Context, ask asker, details bool, target string, rehearsal bool, screen confirmScreen, out say.Reporter) (*apply.Summary, error) {
 	summary, plat, err := s.survey(ctx)
 	if err != nil {
 		return nil, err
 	}
-	ok, err := migrateConfirm(out, ask, target, rehearsal, details, plat, s.lead)(summary)
+	ok, err := migrateConfirm(out, ask, target, rehearsal, details, plat, s.lead, screen)(summary)
 	if err != nil {
 		return nil, err
 	}

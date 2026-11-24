@@ -59,7 +59,7 @@ func TestTheQuestionComesBeforeAnythingIsInstalled(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			ask := &stepAsker{yes: tc.yes}
 			steps := recordingSteps(ask)
-			agreed, err := steps.beforeInstall(context.Background(), ask, false, "s5n-alice", false, &say.Plain{W: &bytes.Buffer{}})
+			agreed, err := steps.beforeInstall(context.Background(), ask, false, "s5n-alice", false, confirmScreen{}, &say.Plain{W: &bytes.Buffer{}})
 			assertRunOutcome(t, err, agreed, tc.canceled)
 			if got := strings.Join(ask.order, " "); got != tc.want {
 				t.Errorf("the run went %q, want %q", got, tc.want)
@@ -67,7 +67,7 @@ func TestTheQuestionComesBeforeAnythingIsInstalled(t *testing.T) {
 			if len(ask.asked) != 1 {
 				t.Fatalf("the run asked %d questions (%v), want one", len(ask.asked), ask.asked)
 			}
-			if want := "move these into s5n-alice?"; ask.asked[0] != want {
+			if want := "move these 1 app in?"; ask.asked[0] != want {
 				t.Errorf("the question = %q, want %q", ask.asked[0], want)
 			}
 		})
@@ -173,7 +173,7 @@ func TestThePreInstallPassWritesOnlyWhereItIsThrownAway(t *testing.T) {
 			return nil
 		},
 	}
-	if _, err := steps.beforeInstall(context.Background(), &stepAsker{}, false, "", false, &say.Plain{W: &bytes.Buffer{}}); !errors.Is(err, apply.ErrCancelled) {
+	if _, err := steps.beforeInstall(context.Background(), &stepAsker{}, false, "", false, confirmScreen{}, &say.Plain{W: &bytes.Buffer{}}); !errors.Is(err, apply.ErrCancelled) {
 		t.Fatalf("answering no = %v, want a cancellation", err)
 	}
 	if installed {

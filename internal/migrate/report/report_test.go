@@ -190,3 +190,15 @@ func TestAnEmptySectionIsNotAHeading(t *testing.T) {
 		t.Errorf("the section with rows is not there:\n%s", text)
 	}
 }
+
+// TestTheRunsPageDoesNotReplaceTheReads: the snapshot's report is the read's, and
+// a run that applies it writes its own beside the same file rather than over it.
+func TestTheRunsPageDoesNotReplaceTheReads(t *testing.T) {
+	snapshot := "/var/lib/s5n/migrate/migrate-20261123T045038Z-final.tar.gz"
+	if got, want := Name(snapshot), "/var/lib/s5n/migrate/migrate-20261123T045038Z-final-report.txt"; got != want {
+		t.Errorf("the read's report = %q, want %q", got, want)
+	}
+	if got, want := ApplyName(snapshot), "/var/lib/s5n/migrate/migrate-20261123T045038Z-final-apply-report.txt"; got != want {
+		t.Errorf("the run's report = %q, want %q", got, want)
+	}
+}

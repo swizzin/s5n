@@ -15,11 +15,17 @@ import (
 	"github.com/swizzin/s5n/internal/say"
 )
 
-// Group is one titled block of the confirm: the rows of a table and the line
-// above them.
+// Group is one block of the confirm: its heading, the columns its rows read in,
+// and the rows. A group with Columns is a table -- the heading, then one column
+// heading per fact -- and one without is a list of rows whose facts are a
+// sentence each.
 type Group struct {
 	Title string
-	Rows  []say.TableRow
+	// Columns are the headings of the row's facts, in order, when this block
+	// reads as a table: "carries" and "changes" for the apps. Empty for a block
+	// whose facts are prose.
+	Columns []string
+	Rows    []say.TableRow
 }
 
 // Grouped is the summary as the one confirm shows it.
@@ -42,34 +48,130 @@ func (s Summary) Grouped() Grouped {
 		g.Lead = "rehearsal · nothing leaves this box · no data is renamed"
 	}
 	if rows := s.appRows(); len(rows) > 0 {
-		g.Blocks = append(g.Blocks, Group{Title: counted(len(rows), "app", "apps"), Rows: rows})
+		g.Blocks = append(g.Blocks, Group{Title: "apps", Columns: []string{"carries", "changes"}, Rows: rows})
 	}
 	if rows := s.dataRows(); len(rows) > 0 {
-		g.Blocks = append(g.Blocks, Group{Title: "data", Rows: rows})
+		g.Blocks = append(g.Blocks, Group{Rows: rows})
 	}
 	if rows := s.needsYou(); len(rows) > 0 {
-		g.Blocks = append(g.Blocks, Group{Title: "needs you", Rows: rows})
+		g.Blocks = append(g.Blocks, Group{Rows: rows})
 	}
 	if rows := s.goodToKnow(); len(rows) > 0 {
-		g.Blocks = append(g.Blocks, Group{Title: "good to know", Rows: rows})
+		g.Blocks = append(g.Blocks, Group{Rows: rows})
 	}
-	if rows := s.notMigrated(); len(rows) > 0 {
-		g.Blocks = append(g.Blocks, Group{Title: fmt.Sprintf("not migrated (%d)", len(s.Outside)), Rows: rows})
-	}
-	if len(g.Blocks) > 0 {
-		g.Footer = "every rewrite, column by column: report.txt in the snapshot, or --details"
+	if footer := s.footer(); footer != "" {
+		g.Footer = footer
 	}
 	return g
 }
 
+// foldAt is how many apps the confirm lists before it folds the rest into one
+// row: a person deciding to move a seedbox reads the apps, and a list past a
+// dozen is one nobody reads (rule 7). The report and --details carry every row.
+const foldAt = 8
+
+// footer is the one line under the blocks: what a person did not get to see in
+// full, by count, and the flag that shows it.
+func (s Summary) footer() string {
+	var facts []string
+	if notes := s.noteCount(); notes > 0 {
+		facts = append(facts, counted(notes, "note", "notes"))
+	}
+	if n := len(s.Outside); n > 0 {
+		facts = append(facts, counted(n, "other workload", "other workloads")+" stay behind")
+	}
+	if n := s.leftCount(); n > 0 {
+		facts = append(facts, counted(n, "value", "values")+" left as they are")
+	}
+	if len(facts) == 0 {
+		return ""
+	}
+	return strings.Join(facts, " · ") + " · --details"
+}
+
+// noteCount is how many notes the run has, said once each: a note two apps share
+// is one note.
+func (s Summary) noteCount() int {
+	seen := map[string]bool{}
+	for _, in := range s.Instances {
+		for _, n := range in.Notes {
+			seen[n] = true
+		}
+	}
+	for _, c := range s.Carried {
+		seen[c.Note] = true
+	}
+	return len(seen)
+}
+
+// leftCount is how many values this run leaves as they are.
+func (s Summary) leftCount() int {
+	n := 0
+	for _, in := range s.Instances {
+		n += len(in.Left)
+	}
+	return n
+}
+
 // appRows is one row per app: what it carries, how many stored values change,
 // and the one or two facts a person acts on.
+//
+// The first fact is what the app carries in columns, so the column lines up and a
+// person compares sizes down it; everything else is what changes.
 func (s Summary) appRows() []say.TableRow {
-	rows := make([]say.TableRow, 0, len(s.Instances))
-	for _, in := range s.Instances {
-		rows = append(rows, say.TableRow{Glyph: "✓", Name: in.App, Facts: appFacts(in)})
+	rows := make([]say.TableRow, 0, len(s.Instances)+1)
+	for i, in := range s.Instances {
+		if i == foldAt {
+			names := make([]string, 0, len(s.Instances)-foldAt)
+			for _, rest := range s.Instances[foldAt:] {
+				names = append(names, rest.App)
+			}
+			rows = append(rows, say.TableRow{
+				Glyph: "+",
+				Facts: []string{counted(len(names), "more", "more"), strings.Join(names, ", ")},
+			})
+			break
+		}
+		facts := []string{""}
+		if in.Staged.Files > 0 {
+			facts[0] = bytesText(in.Staged.Bytes)
+		}
+		facts = append(facts, changesOf(in))
+		rows = append(rows, say.TableRow{Name: in.App, Facts: facts})
 	}
 	return rows
+}
+
+// changesOf is one app's row after the column: what it carries that is not a
+// size, and every count of what changes.
+func changesOf(in InstanceSummary) string {
+	var facts []string
+	if in.Carry != "" {
+		facts = append(facts, in.Carry)
+	}
+	if in.Short != "" {
+		facts = append(facts, in.Short)
+	}
+	if in.Deferred != "" {
+		facts = append(facts, in.Deferred)
+	}
+	facts = append(facts, changeFacts(in.Changes)...)
+	for _, a := range in.Accounts {
+		facts = append(facts, fmt.Sprintf("login → %s", a.To))
+	}
+	for _, o := range in.Owned {
+		facts = append(facts, "keeps "+ownedPhrase(o))
+	}
+	if len(in.Keys) > 0 {
+		facts = append(facts, "keeps its API key")
+	}
+	if in.Token != "" {
+		facts = append(facts, "keeps its Plex token")
+	}
+	if in.Stopped > 0 {
+		facts = append(facts, counted(in.Stopped, "torrent", "torrents")+" stopped")
+	}
+	return strings.Join(facts, " · ")
 }
 
 // appFacts is one app's row: carried size, the counts of what changes, then the
@@ -173,16 +275,18 @@ func (s Summary) CheckedRows(agreed Summary) []say.TableRow {
 	return rows
 }
 
-// dataRows is what the run does to the data root: the two directories renamed
-// to box's names, and the library's own directories renamed to the categories
-// that hold them. A rehearsal renames nothing and has no row.
+// dataRows is what the run does to the data root: the directories renamed to
+// box's names on one line, and the library's own directories renamed to the
+// categories that hold them on the next. A rehearsal renames nothing and has no
+// row.
 func (s Summary) dataRows() []say.TableRow {
-	if len(s.Renames) == 0 && len(s.MediaRenames) == 0 {
-		return nil
-	}
-	facts := make([]string, 0, len(s.Renames)+1)
-	for _, r := range s.Renames {
-		facts = append(facts, arrow(r))
+	var rows []say.TableRow
+	if len(s.Renames) > 0 {
+		pairs := make([]string, 0, len(s.Renames))
+		for _, r := range s.Renames {
+			pairs = append(pairs, arrow(r))
+		}
+		rows = append(rows, say.TableRow{Glyph: "✓", Name: "data", Facts: []string{strings.Join(pairs, " · ")}})
 	}
 	if len(s.MediaRenames) > 0 {
 		// The library reads as one line: these are the directories a person
@@ -191,9 +295,9 @@ func (s Summary) dataRows() []say.TableRow {
 		for _, r := range s.MediaRenames {
 			pairs = append(pairs, arrow(r))
 		}
-		facts = append(facts, "media: "+strings.Join(pairs, " · "))
+		rows = append(rows, say.TableRow{Glyph: "✓", Name: "library", Facts: []string{strings.Join(pairs, " · ")}})
 	}
-	return []say.TableRow{{Glyph: "✓", Name: "data", Facts: facts}}
+	return rows
 }
 
 // arrow is one rename as a person reads it: "Downloads to downloads" is

@@ -337,6 +337,11 @@ type Opened struct {
 	Dir string
 	// Mode is what the source was when the snapshot was taken.
 	Mode archive.Mode
+	// Taken is when the snapshot was written, as its manifest says: the time
+	// the source was read, which is what a person decides about.
+	Taken time.Time
+	// Box is the box that wrote it, so a run can say what read the source.
+	Box string
 	// Plan is plan.yaml's bytes, which apply's plan id is computed over.
 	Plan []byte
 	// Report is report.txt, empty when the snapshot carries none.
@@ -396,7 +401,10 @@ func Open(file, dir string, keep archive.Filter, disk space.Disk) (*Opened, erro
 	if err := archive.Extract(file, dir, m, keep, nil); err != nil {
 		return nil, err
 	}
-	o := &Opened{Path: file, Dir: dir, Mode: m.Mode, Source: map[string][]byte{}, Configs: map[string]string{}, Contents: held, manifest: m}
+	o := &Opened{Path: file, Dir: dir, Mode: m.Mode, Box: m.Box, Source: map[string][]byte{}, Configs: map[string]string{}, Contents: held, manifest: m}
+	if at, err := time.Parse(time.RFC3339, m.Created); err == nil {
+		o.Taken = at.UTC()
+	}
 	if o.Plan, err = readPart(dir, archive.PlanName); err != nil {
 		return nil, err
 	}

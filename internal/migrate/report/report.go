@@ -103,8 +103,25 @@ func (d Doc) Text() string {
 	return b.String()
 }
 
-// Name is where a snapshot's report is written: beside it, named for it.
+// Name is where a snapshot's report is written: beside it, named for it. It is
+// the read's page -- what discovery found, what its checks settled -- and it is
+// the same text the snapshot carries as its report.txt.
 func Name(snapshot string) string {
+	return beside(snapshot, suffix)
+}
+
+// applySuffix is a run's own page, written beside the same snapshot: the other
+// half of the migration, so it never replaces the read's.
+const applySuffix = "-apply-report.txt"
+
+// ApplyName is where a run's own report is written: beside the snapshot, named
+// for it and for the run.
+func ApplyName(snapshot string) string {
+	return beside(snapshot, applySuffix)
+}
+
+// beside is a snapshot's own name with one suffix, in the snapshot's directory.
+func beside(snapshot, suffix string) string {
 	base := filepath.Base(snapshot)
 	if cut, ok := strings.CutSuffix(base, ".tar.gz"); ok {
 		base = cut
