@@ -259,9 +259,14 @@ func TestMigrateDiscoverWritesASurveyThatHoldsNoConfig(t *testing.T) {
 	if _, ok := opened.Source["StatefulSet/media/sonarr"]; !ok {
 		t.Errorf("the source's manifests are not in the snapshot: %v", sourceKeys(opened.Source))
 	}
-	// The report says where the snapshot is and what the plan holds, and the
-	// text the command printed is the text inside the file.
-	for _, want := range []string{"plan: " + out, "app: sonarr", "data: /srv/library"} {
+	// The report names the snapshot it is about and what the plan holds, its
+	// summary first, and the text the command keeps is the text inside the file.
+	for _, want := range []string{
+		"s5n migration report · survey · " + filepath.Base(out),
+		"\nsummary\n",
+		"\napps\n  qbittorrent  from qbittorrent · in media · config /srv/apps/qbittorrent\n",
+		"\ndata\n  root     /srv/library\n",
+	} {
 		if !strings.Contains(text, want) {
 			t.Errorf("the report does not say %q:\n%s", want, text)
 		}
@@ -328,7 +333,7 @@ func TestMigrateDiscoverReportsAPartialRead(t *testing.T) {
 	if err == nil {
 		t.Fatal("discovery of an empty directory planned something")
 	}
-	if !strings.Contains(text, "plan: not written") {
+	if !strings.Contains(text, "\nplan\n  not written  ") {
 		t.Errorf("the partial report does not say the plan was not written:\n%s", text)
 	}
 	if _, err := os.Stat(out); !os.IsNotExist(err) {

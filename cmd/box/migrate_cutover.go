@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -138,7 +139,7 @@ func runMigrateCutover(ctx context.Context, args []string) {
 }
 
 // errCutoverStillRunning says the source has not stopped: the refusal has
-// already been printed with every app and its command.
+// already been printed with the commands that stop it.
 var errCutoverStillRunning = errors.New("the source is still running")
 
 // errCutoverStopped says the run ended by design after the snapshot (the
@@ -170,12 +171,48 @@ func keepSurvey(read *migrationRead, o cutoverOptions) (string, error) {
 	if err := encodeRead(read); err != nil {
 		return "", err
 	}
-	read.text = discoveryReport(read.plan, read.report, "", read.settled, nil)
-	survey, err := writeSnapshot(surveyPath(o), archive.ModeSurvey, o.discoverOptions, *read)
+	path := surveyPath(o)
+	read.setReport(archive.ModeSurvey, path, o.discoverOptions, nil)
+	survey, err := writeSnapshot(path, archive.ModeSurvey, o.discoverOptions, *read)
 	if err != nil {
 		return "", err
 	}
 	return survey.Path, nil
+}
+
+// holders is the apps that hold one value, which is the subject a settle line is
+// about: the address is in their configs, so it is their connection.
+func holders(holds []apply.SettledHold) string {
+	seen := map[string]bool{}
+	var apps []string
+	for _, h := range holds {
+		if h.App == "" || seen[h.App] {
+			continue
+		}
+		seen[h.App] = true
+		apps = append(apps, h.App)
+	}
+	sort.Strings(apps)
+	return strings.Join(apps, ", ")
+}
+
+// showCarried is the answers a cutover did not ask for: one line each, the apps
+// that hold the address and what it now points at. The heading is only there
+// when there is something under it.
+func showCarried(out say.Reporter, carried []apply.KeptAnswer) {
+	if len(carried) == 0 {
+		return
+	}
+	out.Line("connections")
+	rows := make([]say.Row, 0, len(carried))
+	for _, c := range carried {
+		rows = append(rows, say.Row{
+			Mark:  say.MarkDone,
+			Name:  holders(c.Holds),
+			Facts: []string{c.Value + " → " + c.Answer()},
+		})
+	}
+	out.Rows(rows)
 }
 
 // cutover is the command with its live-cluster checks as parameters, so a test
@@ -191,17 +228,14 @@ func cutover(ctx context.Context, o cutoverOptions, out say.Reporter, seams cuto
 	}
 	defer done()
 	o.Work = dir
-	read, err := readSource(ctx, o.discoverOptions)
+	read, err := readSource(ctx, o.discoverOptions, archive.ModeFinal)
 	if err != nil {
-		if read.text != "" {
-			out.Line(read.text)
-		}
 		return err
 	}
 	// Every rewriter's check runs before anything is written, so the survey a
 	// refusal keeps carries the plan apply would run, defaults and all.
 	if err := settleRead(ctx, o.discoverOptions, &read); err != nil {
-		out.Line(discoveryReport(read.plan, read.report, "", read.settled, err))
+		read.setReport(archive.ModeSurvey, "", o.discoverOptions, err)
 		return err
 	}
 	// The read already on record, looked up before this run writes anything: the
@@ -221,10 +255,17 @@ func cutover(ctx context.Context, o cutoverOptions, out say.Reporter, seams cuto
 		if err != nil {
 			return errors.Join(errCutoverStillRunning, err)
 		}
-		out.Warn(fmt.Sprintf("%s still running: cutover takes the final snapshot with every planned app stopped", countApps(len(running))))
-		out.Line(surveyLine(kept))
-		out.List("stop these, and run cutover again", stopLines(running))
-		out.Muted("box never stops a source: these are commands to double-check and run yourself.")
+		out.Detail("survey: " + kept)
+		out.Rows([]say.Row{{
+			Mark:  say.MarkNeeds,
+			Facts: []string{countApps(len(running)) + " running", "stop them, then run this again"},
+		}})
+		// One command per namespace and kind: many similar stops become one
+		// (rule 3), and each is written for the cluster box found.
+		nodes, _ := read.src.Nodes(ctx)
+		for _, stop := range discover.Stops(running) {
+			commandLines(out, stop.Command(discover.Kubectl(nodes)))
+		}
 		return errCutoverStillRunning
 	}
 	// The source is stopped. What box saw of it before decides whether this read
@@ -233,9 +274,16 @@ func cutover(ctx context.Context, o cutoverOptions, out say.Reporter, seams cuto
 	if err := checkPriorRead(prior, &read, o, out, func() (string, error) { return keepSurvey(&read, o) }); err != nil {
 		return err
 	}
+	// What the earlier read already answered is carried, one line each, and
+	// never asked again (rule 10): a person's answer is theirs across runs.
+	if prior != nil {
+		settled, carried := apply.CarryAnswers(read.plan, read.settled, prior.plan)
+		read.settled = settled
+		showCarried(out, carried)
+	}
 	// The source is stopped, so the run is going ahead: this is where the
-	// operator answers the defaults, and where an unattended run says it took
-	// them all.
+	// operator answers what is left, and where an unattended run says how many
+	// it took.
 	if err := askDefaults(&read, out, o.discoverOptions); err != nil {
 		return err
 	}
@@ -249,7 +297,7 @@ func cutover(ctx context.Context, o cutoverOptions, out say.Reporter, seams cuto
 	}
 	short, err := decideSnapshotCarry(&read, o.discoverOptions, path, archive.ModeFinal)
 	if err != nil {
-		out.Line(discoveryReport(read.plan, read.report, "", read.settled, err))
+		read.setReport(archive.ModeFinal, "", o.discoverOptions, err)
 		return err
 	}
 	// What the snapshot carries and does not is part of the page: Plex's caches,
@@ -260,32 +308,40 @@ func cutover(ctx context.Context, o cutoverOptions, out say.Reporter, seams cuto
 	if err := encodeRead(&read); err != nil {
 		return err
 	}
-	read.text = discoveryReport(read.plan, read.report, path, read.settled, nil)
+	read.setReport(archive.ModeFinal, path, o.discoverOptions, nil)
 	wrote, err := writeSnapshot(path, archive.ModeFinal, o.discoverOptions, read)
 	if err != nil {
 		return err
 	}
-	out.Line(read.text)
-	out.Success("wrote " + wrote.Path + " (final)")
+	read.digest("box migrate cutover", out)
+	out.Detail("wrote " + wrote.Path + " (final)")
 	for _, s := range wrote.Skipped {
 		out.Muted(fmt.Sprintf("%s: left out of the snapshot: %s", s.Path, s.Why))
 	}
-	// The last screen names every default this run took: an address or a path
-	// nobody answered is a decision box made, and the operator leaves the run
-	// knowing which ones those were.
-	if defaults := read.settled.Defaults(); !defaults.Empty() {
-		out.List("defaults taken", defaults.Lines())
-	}
+	// The last screen names how many decisions this run took: an address or a
+	// path nobody answered is a decision box made, and the report names each one
+	// with its reason.
+	read.defaultsRow(out)
 
 	if o.Replace {
 		out.Phase("replace")
-		out.Line("the final snapshot is taken. This cluster is yours to replace: box does not remove a cluster it did not install.")
+		out.Rows([]say.Row{{
+			Mark:  say.MarkNeeds,
+			Facts: []string{"this cluster is yours to replace: box removes no cluster it did not install"},
+		}})
 		// The teardown names the distribution the source's own nodes carry.
 		// A node list the read could not get is already a report line, and it
 		// leaves the recipe saying box cannot tell rather than guessing.
 		nodes, _ := read.src.Nodes(ctx)
-		out.List("to double-check before you run it", resetLines(o, nodes))
-		out.Line(fmt.Sprintf("then: box migrate apply %s", wrote.Path))
+		for _, step := range resetSteps(o, nodes) {
+			if !step.Command {
+				out.Rows([]say.Row{{Mark: say.MarkNote, Facts: []string{step.Text}}})
+				continue
+			}
+			commandLines(out, step.Text)
+		}
+		commandLines(out, "box migrate apply "+wrote.Path)
+		out.Detail(fmt.Sprintf("the source's manifests are in the snapshot (%s) and its host directories are untouched", filepath.Base(wrote.Path)))
 		return errCutoverStopped
 	}
 	// The cluster is kept by default, so the same run continues into the install
@@ -388,36 +444,33 @@ func unstopped(ctx context.Context, o cutoverOptions, read migrationRead) ([]dis
 	return discover.Unstopped(ctx, read.src, read.plan)
 }
 
-// stopLines is one line per running app: what it is, and the command that stops
-// it.
-func stopLines(running []discover.Running) []string {
-	out := make([]string, 0, len(running))
-	for _, r := range running {
-		out = append(out, fmt.Sprintf("%s: %s in %s/%s; %s", r.App, r.Why(), r.Namespace, r.Name, r.StopCommand()))
-	}
-	return out
+// resetStep is one line of a teardown: a command a person runs, or a note that is
+// not a command at all (a `$` line is only ever something to copy, rule 3).
+type resetStep struct {
+	Command bool
+	Text    string
 }
 
-// resetLines is the teardown, as the one thing left for the operator to run
+// resetSteps is the teardown, as the one thing left for the operator to run
 // themselves before `box migrate apply` can install box's own cluster. It is
 // the recipe for the distribution the source's nodes say installed it
 // (discover.Distribution): the same command on another distribution removes
 // nothing, so a cluster box cannot place gets a line that says so instead of a
 // teardown for a guess.
-func resetLines(o cutoverOptions, nodes []discover.Node) []string {
-	var lines []string
+func resetSteps(o cutoverOptions, nodes []discover.Node) []resetStep {
 	switch discover.Distribution(nodes) {
 	case discover.K0s:
-		lines = []string{
-			"k0s stop; k0s reset",
-			"then remove the unit and the binary: systemctl disable --now k0scontroller; rm -f /etc/systemd/system/k0scontroller.service /usr/local/bin/k0s",
+		// `k0s reset` leaves /etc/k0s/k0s.yaml behind, and box's own bootstrap
+		// refuses a k0s config it did not write: the recipe removes it, so the
+		// next command is not a refusal this screen exists to save a person from.
+		return []resetStep{
+			{Command: true, Text: "sudo k0s stop; sudo k0s reset; sudo rm -f /etc/k0s/k0s.yaml"},
+			{Command: true, Text: "sudo systemctl disable --now k0scontroller; sudo rm -f /etc/systemd/system/k0scontroller.service /usr/local/bin/k0s"},
 		}
 	case discover.K3s:
-		lines = []string{"/usr/local/bin/k3s-uninstall.sh, which stops the server and the agent, then removes them and their data"}
-	default:
-		lines = []string{"box can't tell how this cluster was installed: remove it the way it was installed, before anything else uses this host"}
+		return []resetStep{{Command: true, Text: "sudo /usr/local/bin/k3s-uninstall.sh"}}
 	}
-	return append(lines, fmt.Sprintf("the source's manifests are in the snapshot (%s) and its host directories are untouched", filepath.Base(snapshotPath(o.discoverOptions, archive.ModeFinal))))
+	return []resetStep{{Text: "remove this cluster the way it was installed, before anything else uses this host"}}
 }
 
 // blockerWarning is the line over the keep path's list: how many things box found,
@@ -429,10 +482,10 @@ func blockerWarning(n int) string {
 	return fmt.Sprintf("%d things on this cluster stop box installing onto it, and box does not change a cluster it did not install", n)
 }
 
-// countApps is "one app" or "3 apps", for a warning.
+// countApps is "1 app" or "12 apps", for the line above the stop commands.
 func countApps(n int) string {
 	if n == 1 {
-		return "one planned app is"
+		return "1 app"
 	}
-	return fmt.Sprintf("%d planned apps are", n)
+	return fmt.Sprintf("%d apps", n)
 }

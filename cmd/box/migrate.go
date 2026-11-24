@@ -36,6 +36,7 @@ import (
 	"github.com/swizzin/s5n/internal/migrate/discover"
 	"github.com/swizzin/s5n/internal/migrate/plan"
 	"github.com/swizzin/s5n/internal/migrate/plex"
+	"github.com/swizzin/s5n/internal/migrate/report"
 	"github.com/swizzin/s5n/internal/migrate/space"
 	"github.com/swizzin/s5n/internal/migrate/work"
 	"github.com/swizzin/s5n/internal/release"
@@ -250,7 +251,7 @@ type migrationRead struct {
 	// the distribution that installed the cluster -- over the same read.
 	src discover.Source
 	// settled is what the checks could not settle, as Settle decided it: the
-	// list report.txt carries and a guided run asks about.
+	// list the report carries and a guided run asks about.
 	settled apply.Settled
 	// chart is the release this read is writing a plan for: its blessed
 	// variants, its catalog and the endpoints its values give every app.
@@ -259,13 +260,25 @@ type migrationRead struct {
 	// plan id is a digest of.
 	raw    []byte
 	report discover.Report
-	text   string
+	// doc is the migration report this read wrote: the same bytes the snapshot
+	// carries as report.txt and the file beside it.
+	doc report.Doc
+	// text is doc as text, which is what a snapshot's report.txt entry holds.
+	text string
+}
+
+// setReport builds this read's report and the text the snapshot carries. It is
+// the one place a read's report is made, so what the screen points at and what
+// the archive holds are one document.
+func (r *migrationRead) setReport(mode archive.Mode, snapshot string, o discoverOptions, failure error) {
+	r.doc = readReport(*r, mode, snapshot, o.clock(), o.Box, failure)
+	r.text = r.doc.Text()
 }
 
 // migrateDiscover is the command without the exit, so a test drives it. The
-// returned text is what it printed (and wrote into the snapshot's report.txt),
-// which an error also carries: a run that stopped halfway still has something
-// to say about what it read.
+// returned text is the migration report (which the snapshot also carries), which
+// an error also carries: a run that stopped halfway still has something to say
+// about what it read.
 func migrateDiscover(ctx context.Context, o discoverOptions, out say.Reporter) (string, error) {
 	mode := archive.ModeSurvey
 	if o.Rehearsal {
@@ -279,7 +292,7 @@ func migrateDiscover(ctx context.Context, o discoverOptions, out say.Reporter) (
 	}
 	defer done()
 	o.Work = dir
-	read, err := readSource(ctx, o)
+	read, err := readSource(ctx, o, mode)
 	if err != nil {
 		return read.text, err
 	}
@@ -287,11 +300,11 @@ func migrateDiscover(ctx context.Context, o discoverOptions, out say.Reporter) (
 	// bytes the snapshot will carry, and what they cannot settle is asked
 	// about now or written down as a default.
 	if err := settleRead(ctx, o, &read); err != nil {
-		read.text = discoveryReport(read.plan, read.report, "", read.settled, err)
+		read.setReport(mode, "", o, err)
 		return read.text, err
 	}
 	if err := askDefaults(&read, out, o); err != nil {
-		read.text = discoveryReport(read.plan, read.report, "", read.settled, err)
+		read.setReport(mode, "", o, err)
 		return read.text, err
 	}
 	// The file is named before it is written, so the report inside it can name
@@ -302,7 +315,7 @@ func migrateDiscover(ctx context.Context, o discoverOptions, out say.Reporter) (
 	// goes into the plan apply reads.
 	short, err := decideSnapshotCarry(&read, o, path, mode)
 	if err != nil {
-		read.text = discoveryReport(read.plan, read.report, "", read.settled, err)
+		read.setReport(mode, "", o, err)
 		return read.text, err
 	}
 	// What the snapshot does not carry is part of that page: Plex's caches, and
@@ -313,28 +326,26 @@ func migrateDiscover(ctx context.Context, o discoverOptions, out say.Reporter) (
 		read.report.Notes = append(read.report.Notes, short...)
 	}
 	if err := encodeRead(&read); err != nil {
-		read.text = discoveryReport(read.plan, read.report, "", read.settled, err)
+		read.setReport(mode, "", o, err)
 		return read.text, err
 	}
-	read.text = discoveryReport(read.plan, read.report, path, read.settled, nil)
+	read.setReport(mode, path, o, nil)
 	wrote, err := writeSnapshot(path, mode, o, read)
 	if err != nil {
 		return read.text, err
 	}
-	out.Line(read.text)
-	out.Success("wrote " + wrote.Path + " (" + string(mode) + ")")
-	// The last screen names every default this run took: an address or a path
-	// nobody answered is a decision box made, and the operator leaves the run
-	// knowing which ones those were.
-	if defaults := read.settled.Defaults(); !defaults.Empty() {
-		out.List("defaults taken", defaults.Lines())
-	}
+	read.digest("box migrate discover", out)
+	out.Detail("wrote " + wrote.Path + " (" + string(mode) + ")")
+	// The last screen names how many decisions this run took: an address or a
+	// path nobody answered is a decision box made, and the report names each one
+	// with its reason.
+	read.defaultsRow(out)
 	return read.text, nil
 }
 
 // readSource reads the source and builds the plan. Nothing is written: a run
 // that stops here leaves the source and the host exactly as it was.
-func readSource(ctx context.Context, o discoverOptions) (migrationRead, error) {
+func readSource(ctx context.Context, o discoverOptions, mode archive.Mode) (migrationRead, error) {
 	var read migrationRead
 	root := o.Root
 	if root == "" {
@@ -351,12 +362,12 @@ func readSource(ctx context.Context, o discoverOptions) (migrationRead, error) {
 	// image without saying so.
 	chart, err := o.loadChart(ctx)
 	if err != nil {
-		read.text = discoveryReport(nil, read.report, "", nil, err)
+		read.setReport(mode, "", o, err)
 		return read, err
 	}
 	if len(chart.Variants) == 0 {
 		err := fmt.Errorf("chart %s ships no variants.yaml, so no source image can be mapped onto one of its blessed variants", chart.Ref)
-		read.text = discoveryReport(nil, read.report, "", nil, err)
+		read.setReport(mode, "", o, err)
 		return read, err
 	}
 	read.chart = chart
@@ -364,7 +375,7 @@ func readSource(ctx context.Context, o discoverOptions) (migrationRead, error) {
 	// the values', so the read asks the release what it would render.
 	categories, err := readCategories(o, chart)
 	if err != nil {
-		read.text = discoveryReport(nil, read.report, "", nil, err)
+		read.setReport(mode, "", o, err)
 		return read, err
 	}
 	p, rep, derr := discover.Discover(ctx, src, discover.Options{
@@ -379,7 +390,7 @@ func readSource(ctx context.Context, o discoverOptions) (migrationRead, error) {
 	})
 	read.plan, read.report = p, rep
 	if derr != nil {
-		read.text = discoveryReport(p, rep, "", nil, derr)
+		read.setReport(mode, "", o, derr)
 		return read, derr
 	}
 	return read, nil
@@ -500,7 +511,17 @@ func writeSnapshot(path string, mode archive.Mode, o discoverOptions, read migra
 			s.Configs = append(s.Configs, app)
 		}
 	}
-	return bundle.Write(path, s)
+	wrote, err := bundle.Write(path, s)
+	if err != nil {
+		return wrote, err
+	}
+	// The same bytes the archive carries, beside the file: one report a person
+	// opens with `less` where the snapshot was taken, and one that travels with
+	// it to the host it is applied on.
+	if err := report.Write(report.Name(path), read.doc); err != nil {
+		return wrote, err
+	}
+	return wrote, nil
 }
 
 // decideSnapshotCarry settles what a snapshot carries out of each app whose
@@ -683,18 +704,20 @@ func settleInput(read *migrationRead, root, workDir string) (apply.SettleInput, 
 
 // askDefaults shows what Settle could not settle and, when there is somebody to
 // ask, has the operator answer each address. Unattended, it takes every default
-// and says so with the same lines: a default is never silent, whichever run
-// takes it.
+// and says so at the end, with the count: the report names each one and its
+// reason, so the screen keeps the number (rules 4 and 7) and the run log keeps
+// the lines in full.
 func askDefaults(read *migrationRead, out say.Reporter, o discoverOptions) error {
 	if read.settled.Empty() {
 		return nil
 	}
-	asker := &settleAsker{out: out, prompt: o.Prompt, apps: sortedKeys(read.plan.Apps)}
 	if o.Prompt == nil {
-		out.List("nothing else to ask: taking every one of these defaults", read.settled.Lines())
+		for _, line := range read.settled.Defaults().Lines() {
+			out.Detail(line)
+		}
 		return nil
 	}
-	out.List("box cannot settle these by itself: these are the defaults it would take", read.settled.Lines())
+	asker := &settleAsker{out: out, prompt: o.Prompt, apps: sortedKeys(read.plan.Apps)}
 	decided, err := apply.Decide(read.plan, read.settled, asker.ask)
 	if err != nil {
 		return err
@@ -722,62 +745,6 @@ func encodeRead(read *migrationRead) error {
 	return nil
 }
 
-// discoveryReport is report.txt: what the plan holds, everything discovery
-// would not migrate, and every decision box made that the operator did not:
-// what apply will leave as it is, what it points where, and what only apply can
-// check. It is printed and kept, so the operator reads one page before apply
-// writes one byte.
-func discoveryReport(p *plan.Plan, rep discover.Report, out string, settled apply.Settled, failure error) string {
-	var b strings.Builder
-	switch {
-	case failure != nil:
-		fmt.Fprintf(&b, "plan: not written: %v\n", failure)
-	case out != "":
-		fmt.Fprintf(&b, "plan: %s\n", out)
-	}
-	if p != nil {
-		names := make([]string, 0, len(p.Apps))
-		for name := range p.Apps {
-			names = append(names, name)
-		}
-		sort.Strings(names)
-		for _, name := range names {
-			app := p.Apps[name]
-			fmt.Fprintf(&b, "app: %s (from %s, config %s)\n", name, app.Source, app.Config)
-		}
-		if p.Data != nil {
-			fmt.Fprintf(&b, "data: %s (downloads: %s, media: %s)\n", p.Data.Root, p.Data.Downloads, p.Data.Media)
-		}
-	}
-	sections := []struct {
-		title string
-		rows  []string
-	}{
-		{"skipped", skippedRows(rep.Skipped)},
-		{"ignored", ignoredRows(rep.Ignored)},
-		{"notes", rep.Notes},
-	}
-	for _, s := range sections {
-		if len(s.rows) == 0 {
-			continue
-		}
-		fmt.Fprintf(&b, "%s:\n", s.title)
-		for _, row := range s.rows {
-			fmt.Fprintf(&b, "  %s\n", row)
-		}
-	}
-	// The called-out list, exactly as Settle wrote it: one header per decision,
-	// one line per host or path with its reason, and the places that hold it.
-	if !settled.Empty() {
-		b.WriteString("called out:\n")
-		for _, line := range settled.Lines() {
-			b.WriteString(line)
-			b.WriteString("\n")
-		}
-	}
-	return b.String()
-}
-
 // carryLines is what a read says about what its snapshot carries out of an
 // app's config directory: one line per planned app whose config is more than its
 // state, said once, in the report the snapshot holds and on the screen the
@@ -798,30 +765,5 @@ func carryLines(p *plan.Plan) []string {
 			out = append(out, carry.Note)
 		}
 	}
-	return out
-}
-
-// skippedRows is what discovery did not migrate, with its reason.
-func skippedRows(skipped []discover.Skipped) []string {
-	out := make([]string, 0, len(skipped))
-	for _, s := range skipped {
-		out = append(out, s.Workload+": "+s.Why)
-	}
-	sort.Strings(out)
-	return out
-}
-
-// ignoredRows is every mount that did not become a path rule.
-func ignoredRows(ignored []discover.Ignored) []string {
-	out := make([]string, 0, len(ignored))
-	for _, i := range ignored {
-		where := fmt.Sprintf("%s %s", i.App, i.Mount)
-		if i.Host != "" {
-			where += " (" + i.Host + ")"
-		}
-		where += " on " + i.Volume
-		out = append(out, where+": "+i.Why)
-	}
-	sort.Strings(out)
 	return out
 }

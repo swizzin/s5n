@@ -27,7 +27,7 @@ import (
 // a test edits it.
 func readPlan(t *testing.T, o cutoverOptions) *plan.Plan {
 	t.Helper()
-	read, err := readSource(context.Background(), o.discoverOptions)
+	read, err := readSource(context.Background(), o.discoverOptions, archive.ModeFinal)
 	if err != nil {
 		t.Fatalf("read the source: %v", err)
 	}
