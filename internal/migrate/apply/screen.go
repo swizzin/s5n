@@ -151,3 +151,44 @@ func PrintNote(out say.Reporter, text string) {
 		out.Line("    " + line)
 	}
 }
+
+// PrintRows is a block of status rows: the mark in the gutter, the name in the
+// fixed column, the facts wrapped under them, and a command under the row it
+// belongs to. It is the shape a command's own digest uses -- a report's path and
+// the `less` that opens it -- so a long path wraps instead of running past the
+// column (rule 7).
+func PrintRows(out say.Reporter, rows []say.Row) {
+	// The name column is the seam's fixed one, so a command's digest lines up
+	// with every other run's (rule 1), widened only by a name that does not fit.
+	width := say.NameCol
+	for _, r := range rows {
+		if w := len(r.Name); w > width {
+			width = w
+		}
+	}
+	for _, r := range rows {
+		mark := r.Mark
+		if mark == "" {
+			mark = say.MarkNote
+		}
+		head := mark + " "
+		if r.Name != "" {
+			head += padCol(r.Name, width) + "  "
+		}
+		facts := strings.Join(r.Facts, " · ")
+		if facts == "" {
+			out.Line(strings.TrimRight(head, " "))
+		} else {
+			for i, line := range report.Wrap(facts, report.Width-len(head)) {
+				if i == 0 {
+					out.Line(head + line)
+					continue
+				}
+				out.Line(strings.Repeat(" ", len(head)) + line)
+			}
+		}
+		if r.Command != "" {
+			out.Line(strings.Repeat(" ", len(head)) + say.MarkCommand + " " + r.Command)
+		}
+	}
+}

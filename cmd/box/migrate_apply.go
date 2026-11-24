@@ -402,13 +402,13 @@ func migrateApply(ctx context.Context, file string, o *migrateApplyFlags, out sa
 	if res.Done {
 		out.Line(fmt.Sprintf("%s in %s: the plan is already applied", release.ReleaseName, namespace))
 	} else {
-		out.Rows([]say.Row{{
+		apply.PrintRows(out, []say.Row{{
 			Mark:  say.MarkDone,
 			Name:  "moved",
 			Facts: []string{appsWord(len(res.Moved)), "into " + env.ConfigRoot},
 		}})
 	}
-	out.Rows([]say.Row{{
+	apply.PrintRows(out, []say.Row{{
 		Mark:    say.MarkNote,
 		Name:    "report",
 		Facts:   []string{screen.Report},

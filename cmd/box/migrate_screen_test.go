@@ -54,7 +54,7 @@ func TestTheDiscoverScreenIsCountsAndTheReport(t *testing.T) {
 		"✓ read           2 apps · 0 rewritten · 0 left as it is",
 		"· snapshot       " + out,
 		"· report         " + filepath.Join(dir, "migrate-20261123T045038Z-survey-report.txt"),
-		"                 $ less " + filepath.Join(dir, "migrate-20261123T045038Z-survey-report.txt"),
+		"                  $ less " + filepath.Join(dir, "migrate-20261123T045038Z-survey-report.txt"),
 		"",
 	}, "\n")
 	if got := screen(); got != want {

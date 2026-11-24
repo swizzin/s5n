@@ -9147,6 +9147,18 @@ migrate_box() {
   [ "$(stat -c '%a' "$apply_report" 2>/dev/null || echo none)" = 600 ] ||
     { echo "the run's report is mode $(stat -c '%a' "$apply_report" 2>/dev/null || echo none), want 600"; fail=1; }
   rows_of "$apply_report" >"$WORK/apply-report-rows.txt" 2>/dev/null || true
+  # Neither page holds a secret: not the login's password, not the qBittorrent
+  # one, not an app's API key. The report names the paths and the addresses a
+  # migration moves, and nothing that opens a door.
+  for secret in "$(cat "$WORK/authelia-password" 2>/dev/null || true)" \
+                "$($K -n "$NS" get secret s5n-keys -o jsonpath='{.data.qbittorrent-password}' 2>/dev/null | base64 -d || true)" \
+                "$(cat "$WORK/source/${MIGRATE_RADARR_INSTANCE}.key" 2>/dev/null || true)"; do
+    [ -n "$secret" ] || continue
+    if grep -qF -- "$secret" "$apply_report" "$report_file"; then
+      echo "a migration report holds a secret: a password or an API key is in $(grep -lF -- "$secret" "$apply_report" "$report_file" | head -1)"
+      fail=1
+    fi
+  done
   rows_of "$WORK/apply-migrate.txt" >"$WORK/apply-migrate-rows.txt" 2>/dev/null || true
   # The one confirm comes before anything is installed: the line that says the
   # run has not written anything yet, and the summary the answer applies to, are
