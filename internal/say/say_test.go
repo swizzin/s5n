@@ -209,3 +209,19 @@ func TestPlainPhaseIsALabel(t *testing.T) {
 		t.Fatalf("phase = %q, want %q", got, want)
 	}
 }
+
+// A question is a mark of its own: the `?` in the gutter, then the question as
+// the flow asked it, then the answer line the terminal echoes after it. The
+// mark is what makes a prompt one of box's lines rather than a bare sentence
+// in the middle of a run (rule 1).
+func TestPlainConfirmAsksWithTheQuestionMark(t *testing.T) {
+	var buf bytes.Buffer
+	p := &Plain{W: &buf, In: strings.NewReader("y\n")}
+	yes, err := p.Confirm("install the platform layer?")
+	if err != nil || !yes {
+		t.Fatalf("answer = %v, %v", yes, err)
+	}
+	if got, want := buf.String(), "? install the platform layer? [y/N] "; got != want {
+		t.Fatalf("prompt = %q, want %q", got, want)
+	}
+}

@@ -718,7 +718,9 @@ func (p *Plain) Confirm(question string) (bool, error) {
 	if p.reader == nil {
 		p.reader = bufio.NewReader(p.In)
 	}
-	fmt.Fprintf(p.out(), "%s [y/N] ", question)
+	// The question mark in the gutter, then the question as the flow wrote it:
+	// one mark per line, and a question is a mark of its own (rule 1).
+	fmt.Fprintf(p.out(), "%s %s [y/N] ", MarkAsk, question)
 	line, err := p.reader.ReadString('\n')
 	if err != nil && line == "" {
 		return false, fmt.Errorf("read the answer: %w", err)

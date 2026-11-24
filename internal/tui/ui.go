@@ -11,6 +11,7 @@ import (
 	"charm.land/huh/v2"
 	"charm.land/lipgloss/v2"
 
+	"github.com/swizzin/s5n/internal/say"
 	"github.com/swizzin/s5n/internal/setup"
 	"github.com/swizzin/s5n/internal/theme"
 )
@@ -363,7 +364,10 @@ func (u *UI) Confirm(f setup.Confirm) (bool, error) {
 	}
 	field := huh.NewConfirm().
 		Key("confirm").
-		Title(f.Prompt).
+		// The question mark in the gutter, as the plain renderer draws it: a
+		// question is a mark of its own (rule 1), and the record line below
+		// keeps the prompt without it.
+		Title(say.MarkAsk + " " + f.Prompt).
 		Affirmative(affirmative).
 		Negative(negative).
 		Value(&value)

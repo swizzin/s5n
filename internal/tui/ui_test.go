@@ -158,7 +158,9 @@ func TestConfirmUsesTheDefaultAndTheFlowLabels(t *testing.T) {
 	text := stripANSI(out.String())
 	// Buttons are huh's normal mode; the line mode asks y/n with the default
 	// marked, and an empty answer still has to take the safe choice.
-	for _, want := range []string{"create /srv/s5n/data on that filesystem?", "[y/N]"} {
+	// The `?` is the question's mark in the gutter, as on the plain path:
+	// without it a prompt is a bare sentence in the middle of a run (rule 1).
+	for _, want := range []string{"? create /srv/s5n/data on that filesystem? [y/N]", "✓ create /srv/s5n/data on that filesystem?  stop here"} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("the confirm is missing %q:\n%s", want, text)
 		}
