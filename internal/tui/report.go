@@ -297,10 +297,6 @@ func (r *Reporter) Table(title string, rows []say.TableRow) {
 			nameWidth = w
 		}
 	}
-	const nameMax = 24
-	if nameWidth > nameMax {
-		nameWidth = nameMax
-	}
 	for _, row := range rows {
 		glyph := row.Glyph
 		if glyph == "" {
@@ -315,17 +311,6 @@ func (r *Reporter) Table(title string, rows []say.TableRow) {
 					continue
 				}
 				b.WriteString(strings.Repeat(" ", lipgloss.Width(prefix)) + r.chrome.paint(line, inkStyle.Render(line)) + "\n")
-			}
-			continue
-		}
-		// A name longer than the column keeps its line to itself, with the
-		// facts under it: a table whose names push the facts off the edge is
-		// not a table any more.
-		if lipgloss.Width(row.Name) > nameWidth {
-			b.WriteString(indent + r.chrome.paint(glyph, glyphStyle(glyph).Render(glyph)) + " " + r.chrome.paint(row.Name, inkStyle.Render(row.Name)) + "\n")
-			pad := indent + "  "
-			for _, line := range wrapText(facts, r.width-lipgloss.Width(pad)) {
-				b.WriteString(pad + r.chrome.paint(line, mutedStyle.Render(line)) + "\n")
 			}
 			continue
 		}
@@ -352,7 +337,9 @@ func (r *Reporter) Rows(rows []say.Row) {
 		return
 	}
 	var b strings.Builder
-	for _, row := range rows {
+	// One block, one name column: a long name widens the block rather than
+	// pushing its own facts two columns off everyone else's.
+	for _, row := range say.Block(rows) {
 		b.WriteString(r.rowBlock(row))
 	}
 	r.emit(b.String())

@@ -19,6 +19,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 )
 
 // Mark is what a plan item does. The plain renderer prints it before the text;
@@ -108,6 +109,10 @@ type Row struct {
 	// Command is a command that belongs to this row: `box status` under the
 	// note that says what needs doing.
 	Command string
+	// width is the block's name column, set by Block: a block reads down one
+	// column, so one long name widens the block rather than pushing its own
+	// facts off to a column of its own. Zero is a row on its own.
+	width int
 }
 
 // TextCol is where a row's text starts, which is where a continuation line
@@ -458,12 +463,7 @@ func (p *Plain) Table(title string, rows []TableRow) {
 	if title != "" {
 		fmt.Fprintf(p.out(), "%s\n", title)
 	}
-	nameWidth := 0
-	for _, r := range rows {
-		if w := len(r.Name); w > nameWidth {
-			nameWidth = w
-		}
-	}
+	nameWidth := blockNameWidth(rows)
 	for _, r := range rows {
 		glyph := r.Glyph
 		if glyph == "" {
@@ -476,7 +476,7 @@ func (p *Plain) Table(title string, rows []TableRow) {
 		case facts == "":
 			fmt.Fprintf(p.out(), "  %s %s\n", glyph, r.Name)
 		default:
-			fmt.Fprintf(p.out(), "  %s %-*s  %s\n", glyph, nameWidth, r.Name, facts)
+			fmt.Fprintf(p.out(), "  %s %s  %s\n", glyph, pad(r.Name, nameWidth), facts)
 		}
 	}
 }
@@ -487,9 +487,29 @@ func (p *Plain) Table(title string, rows []TableRow) {
 // terminal was -- but a row's why and its command still hang at its own text
 // column, so the layout is the live one with the wrapping taken out.
 func (p *Plain) Rows(rows []Row) {
-	for _, row := range rows {
+	for _, row := range Block(rows) {
 		fmt.Fprint(p.out(), PlainRow(row))
 	}
+}
+
+// Block gives every row of a block the same name column: as wide as the widest
+// name in the block, and never narrower than NameCol. A block is read down its
+// column, so one long name widens the whole block rather than leaving one row's
+// facts two columns off the others'. Rows that share a block pass through here
+// once, in either renderer, so the transcript and the screen agree.
+func Block(rows []Row) []Row {
+	width := NameCol
+	for _, row := range rows {
+		if n := columns(row.Name); n > width {
+			width = n
+		}
+	}
+	out := make([]Row, len(rows))
+	for i, row := range rows {
+		row.width = width
+		out[i] = row
+	}
+	return out
 }
 
 // Group is the transcript's columned block: the heading, the column headings
@@ -660,24 +680,33 @@ func (r Row) Prefix(mark string) string {
 // Text is the row's facts, joined the way a table's are.
 func (r Row) Text() string { return strings.Join(r.Facts, " · ") }
 
-// nameWidth is the name column: fixed, unless one name is wider than it and
-// takes the column with it -- a truncated name is a different name.
+// nameWidth is the name column: the block's, when Block set one, and otherwise
+// this row's own -- fixed, unless its name is wider and takes the column with
+// it, because a truncated name is a different name.
 func (r Row) nameWidth() int {
-	if w := len(r.Name); w > NameCol {
+	if r.width > 0 {
+		return r.width
+	}
+	if w := columns(r.Name); w > NameCol {
 		return w
 	}
 	return NameCol
 }
 
 func (r Row) stateWidth() int {
-	if w := len(r.State); w > StateCol {
+	if w := columns(r.State); w > StateCol {
 		return w
 	}
 	return StateCol
 }
 
+// columns is a string's width in columns: box writes no double-width glyphs in
+// a name or a fact, so counting runes is counting columns, and a mark that costs
+// three bytes still costs one column.
+func columns(s string) int { return utf8.RuneCountInString(s) }
+
 func pad(s string, width int) string {
-	if n := width - len(s); n > 0 {
+	if n := width - columns(s); n > 0 {
 		return s + strings.Repeat(" ", n)
 	}
 	return s

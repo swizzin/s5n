@@ -156,10 +156,12 @@ func TestAFailedCheckIsOneCrossRow(t *testing.T) {
 		t.Fatalf("error = %v, want the rows the flow already drew", err)
 	}
 	out := f.out.String()
+	// One block, one name column: the longer check's name widens it, and the
+	// pending row after it keeps the same column rather than its own.
 	for _, want := range []string{
 		"✗ sonarr/downloadclient  failed",
 		"the API refused the client",
-		"! plex/claim     pending",
+		"! plex/claim             pending",
 		"no Plex token",
 	} {
 		if !strings.Contains(out, want) {

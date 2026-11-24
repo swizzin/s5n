@@ -395,3 +395,23 @@ func TestReporterGroupIsTheTranscriptsTable(t *testing.T) {
 		t.Fatalf("no note:\n%s", strings.Join(lines, "\n"))
 	}
 }
+
+// The live table widens the same way the transcript does: a name longer than
+// any other takes the block's column with it, and nothing is moved to a line of
+// its own with its facts under it.
+func TestReporterTableWidensForALongName(t *testing.T) {
+	var buf bytes.Buffer
+	r := NewReporter(ReporterOptions{Out: &buf, Width: 100, NoColor: true, Yes: true})
+	r.Table("", []say.TableRow{
+		{Glyph: "✓", Name: "box.example.test", Facts: []string{"https (Let's Encrypt)"}},
+		{Glyph: "!", Name: "an-app-host-name-that-is-longer-than-the-column", Facts: []string{"http only"}},
+	})
+	r.Close()
+	lines := strip(buf.String())
+	if got, want := lines[0], "  ✓ box.example.test                                 https (Let's Encrypt)"; got != want {
+		t.Fatalf("row 0 = %q, want %q", got, want)
+	}
+	if got, want := lines[1], "  ! an-app-host-name-that-is-longer-than-the-column  http only"; got != want {
+		t.Fatalf("row 1 = %q, want %q", got, want)
+	}
+}

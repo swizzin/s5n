@@ -212,3 +212,27 @@ func TestPlainWritesTheScreenAndTheLog(t *testing.T) {
 		t.Fatalf("log = %q, want %q", log.String(), want)
 	}
 }
+
+// A block is read down a column: one name wider than the built-in column
+// widens the whole block, so the rows after it keep their facts in the same
+// column instead of drifting two columns to the right (rule 1). It is what
+// `admission policies` needed: every row of a run starts its facts in one
+// place, or none of them do.
+func TestPlainRowsWidenTheWholeBlock(t *testing.T) {
+	var buf bytes.Buffer
+	p := &Plain{W: &buf}
+	p.Rows([]Row{
+		{Mark: MarkDone, Name: "Envoy Gateway", Facts: []string{"38s"}},
+		{Mark: MarkDone, Name: "cert-manager", Facts: []string{"52s"}},
+		{Mark: MarkDone, Name: "admission policies", Facts: []string{"2s"}},
+	})
+	want := strings.Join([]string{
+		"✓ Envoy Gateway       38s",
+		"✓ cert-manager        52s",
+		"✓ admission policies  2s",
+		"",
+	}, "\n")
+	if got := buf.String(); got != want {
+		t.Fatalf("rows:\n%s\nwant:\n%s", got, want)
+	}
+}
