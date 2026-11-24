@@ -595,17 +595,19 @@ func (p *Plain) Start(op Op) Handle {
 	h := &plainHandle{p: p, op: op, start: p.now()}
 	if op.Source != nil {
 		h.stop = make(chan struct{})
+		h.stopped = make(chan struct{})
 		go h.sample()
 	}
 	return h
 }
 
 type plainHandle struct {
-	p     *Plain
-	op    Op
-	start time.Time
-	stop  chan struct{}
-	once  sync.Once
+	p       *Plain
+	op      Op
+	start   time.Time
+	stop    chan struct{}
+	stopped chan struct{}
+	once    sync.Once
 }
 
 // sample reads the source about once a second, for as long as the step runs.
@@ -613,6 +615,7 @@ func (h *plainHandle) sample() {
 	w := &Watcher{Source: h.op.Source}
 	t := time.NewTicker(h.p.every())
 	defer t.Stop()
+	defer close(h.stopped)
 	for {
 		select {
 		case <-h.stop:
@@ -625,10 +628,15 @@ func (h *plainHandle) sample() {
 	}
 }
 
+// stopSampling ends the sampler and waits for it, so the step's finish line is
+// written after the last sampled one: a log written while the process ends is
+// a log that lost its tail.
 func (h *plainHandle) stopSampling() {
-	if h.stop != nil {
-		h.once.Do(func() { close(h.stop) })
+	if h.stop == nil {
+		return
 	}
+	h.once.Do(func() { close(h.stop) })
+	<-h.stopped
 }
 
 func (h *plainHandle) Detail(string) {}
