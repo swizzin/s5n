@@ -8977,6 +8977,20 @@ migrate_box() {
   [ "$fail" = 0 ] || return 0
   echo "  the source is stopped, and qBittorrent's categories are on disk"
 
+  # A source that ran a newer Sonarr than the chart ships is the one thing the
+  # migration refuses: an older app on a newer config. The fixture's own Sonarr
+  # is a 4.0.14 and this makes it a 9.9.9 -- at zero replicas the image never
+  # runs, and migrate reads the tag, which is what the version column compares.
+  # The other apps keep the versions they really ran, so one run shows all three
+  # directions: sonarr down, radarr and pbh up, qbittorrent the same.
+  MIGRATE_NEWER_SONARR_IMAGE=ghcr.io/home-operations/sonarr:9.9.9.9999
+  $K -n "$MIGRATE_LEGACY_NS" set image deployment/sonarr "sonarr=$MIGRATE_NEWER_SONARR_IMAGE" >/dev/null ||
+    { echo "could not pin the source's Sonarr newer than the chart"; fail=1; return 0; }
+  got_image=$($K -n "$MIGRATE_LEGACY_NS" get deployment sonarr -o jsonpath='{.spec.template.spec.containers[0].image}')
+  [ "$got_image" = "$MIGRATE_NEWER_SONARR_IMAGE" ] ||
+    { echo "the source's Sonarr is pinned at ${got_image}, want ${MIGRATE_NEWER_SONARR_IMAGE}"; fail=1; return 0; }
+  echo "  the source's Sonarr says it ran ${MIGRATE_NEWER_SONARR_IMAGE}, newer than the chart's"
+
   # The library database is closed now, which is the only state a migration may
   # see it in: Plex keeps a connection pool and a -wal beside it, and caches
   # pages. The rows go in with Plex's own shell, out of the same pinned image
@@ -9189,12 +9203,43 @@ migrate_box() {
   # switch: the install this run makes schedules the timer too, and the e2e is
   # neither root's host nor a systemd, so the files land in a directory it names.
   MIGRATE_UNITS="$WORK/migrate-units"
-  if ! box_root "$CLUSTER" migrate apply "$snapshot" --yes --chart-repo "$CHART_REPO" --chart-version "$CHART_VERSION" \
-    --grant "$WORK/grant.yaml" --values "$WORK/values.yaml" \
-    --kubeconfig "$WORK/kubeconfig" --record "$WORK/cluster.yaml" \
-    --domain "$DOMAIN" --login "$LOGIN" --password-file "$WORK/authelia-password" \
-    --config-path "$CONFIG_PATH" --box-namespace "$NS" --paths-in-node --unit-dir "$MIGRATE_UNITS" \
-    >"$WORK/apply-migrate.txt" 2>&1; then
+  apply_migrate() { # apply_migrate <transcript> [extra flags...]
+    local transcript=$1; shift
+    box_root "$CLUSTER" migrate apply "$snapshot" --yes --chart-repo "$CHART_REPO" --chart-version "$CHART_VERSION" \
+      --grant "$WORK/grant.yaml" --values "$WORK/values.yaml" \
+      --kubeconfig "$WORK/kubeconfig" --record "$WORK/cluster.yaml" \
+      --domain "$DOMAIN" --login "$LOGIN" --password-file "$WORK/authelia-password" \
+      --config-path "$CONFIG_PATH" --box-namespace "$NS" --paths-in-node --unit-dir "$MIGRATE_UNITS" \
+      "$@" >"$transcript" 2>&1
+  }
+  # The version column's one refusal. Sonarr's config was written by a 9.9.9 and
+  # this release runs a 5.0, so an older app would read a newer database: the run
+  # stops before anything moves -- no record, no grant, no cluster of its own --
+  # and says both versions and the command that goes ahead anyway.
+  log "box migrate apply: a downgrade refuses, before anything moves"
+  if apply_migrate "$WORK/apply-downgrade.txt"; then
+    echo "migrate apply ran a release older than the source's config without --yolo"; fail=1; return 0
+  fi
+  cat "$WORK/apply-downgrade.txt"
+  grep -qE '^✗ sonarr +9\.9\.9 → 5\.0$' "$WORK/apply-downgrade.txt" ||
+    { echo "the refusal does not name the app and both versions:"; tail -12 "$WORK/apply-downgrade.txt"; fail=1; }
+  grep -qE '^ +the config is newer than the app$' "$WORK/apply-downgrade.txt" ||
+    { echo "the refusal does not say what is wrong"; tail -12 "$WORK/apply-downgrade.txt"; fail=1; }
+  grep -qE '^  \$ box migrate apply ' "$WORK/apply-downgrade.txt" ||
+    { echo "the refusal does not print the command that runs it anyway:"; tail -12 "$WORK/apply-downgrade.txt"; fail=1; }
+  grep -qF -- '--yolo' "$WORK/apply-downgrade.txt" ||
+    { echo "the command the refusal prints does not carry --yolo"; fail=1; }
+  grep -qE '^· nothing has moved$' "$WORK/apply-downgrade.txt" ||
+    { echo "the refusal does not say that nothing has moved:"; tail -12 "$WORK/apply-downgrade.txt"; fail=1; }
+  for left in "$WORK/cluster.yaml" "$WORK/grant.yaml"; do
+    [ ! -e "$left" ] || { echo "a refused downgrade wrote ${left}"; fail=1; }
+  done
+  if grep -qE '^apps +carries' "$WORK/apply-downgrade.txt"; then
+    echo "a refused run showed the plan as if it were to be applied"; fail=1
+  fi
+  # --yolo is that word, and the run then goes ahead with the downgrade called
+  # out as a row that needs the operator rather than a refusal.
+  if ! apply_migrate "$WORK/apply-migrate.txt" --yolo; then
     cat "$WORK/apply-migrate.txt"
     # The apps box installed are still there, and the one that refused a write
     # is the one to ask: a wiring step that failed on an app's answer is not
@@ -9249,10 +9294,34 @@ migrate_box() {
   # one in until the install: its row says so, above the install, and the row the
   # check then fills in is below it. Both are the same operator's reading of the
   # same run.
-  grep -qE "^  plex +[0-9.]+ (KiB|MiB|GiB) +its whole data: metadata, artwork and thumbnails · its databases are checked once Plex's image runs · keeps its Plex token$" \
+  grep -qE "^  plex +[0-9.]+ (KiB|MiB|GiB) +[0-9.]+ +its whole data: metadata, artwork and thumbnails · its databases are checked once Plex's image runs · keeps its Plex token$" \
     "$WORK/apply-migrate-rows.txt" ||
     { echo "the confirm does not say when Plex's databases are checked";
       grep -E "plex" "$WORK/apply-migrate-rows.txt" | head -5; fail=1; }
+  # The version column: what the source ran, what this release runs, and the one
+  # downgrade --yolo allowed. The fixtures are real versions on every other row,
+  # so all three directions are on one screen: sonarr down, radarr and pbh up,
+  # qbittorrent the same.
+  grep -qE '^  sonarr +[0-9.]+ (KiB|MiB|GiB) +9\.9\.9 → 5\.0  ↓' "$WORK/apply-migrate-rows.txt" ||
+    { echo "the confirm does not show the downgrade's two versions:";
+      grep -E "^  sonarr" "$WORK/apply-migrate-rows.txt" | head -3; fail=1; }
+  grep -qE '^  radarr +[0-9.]+ (KiB|MiB|GiB) +5\.20\.1 → 7\.0\.3  ↑' "$WORK/apply-migrate-rows.txt" ||
+    { echo "the confirm does not show the upgrade's two versions:";
+      grep -E "^  radarr" "$WORK/apply-migrate-rows.txt" | head -3; fail=1; }
+  grep -qE '^  pbh +[0-9.]+ (KiB|MiB|GiB) +7\.3 → 9\.6  ↑' "$WORK/apply-migrate-rows.txt" ||
+    { echo "the confirm does not show PeerBanHelper's upgrade:";
+      grep -E "^  pbh" "$WORK/apply-migrate-rows.txt" | head -3; fail=1; }
+  grep -qE '^  qbittorrent +[0-9.]+ (KiB|MiB|GiB) +5\.3( |$)' "$WORK/apply-migrate-rows.txt" ||
+    { echo "the confirm does not show qBittorrent's one version:";
+      grep -E "^  qbittorrent" "$WORK/apply-migrate-rows.txt" | head -3; fail=1; }
+  grep -qE '^  ! sonarr +9\.9\.9 → 5\.0 · the config is newer than the app$' "$WORK/apply-migrate-rows.txt" ||
+    { echo "--yolo did not carry the downgrade as a row that needs the operator:";
+      grep -E "^  ! " "$WORK/apply-migrate-rows.txt" | head -5; fail=1; }
+  # The page has the same column, so the versions a person agreed to are the
+  # ones the run's own report keeps.
+  grep -qF '9.9.9 → 5.0  ↓' "$WORK/apply-page.txt" ||
+    { echo "the run's report does not carry the versions the confirm showed:";
+      grep -iE "^  (sonarr|radarr|pbh|qbittorrent) " "$WORK/apply-page.txt" | head -5; fail=1; }
   grep -qE "^checked after the install$" "$WORK/apply-migrate.txt" ||
     { echo "the run does not report the check the confirm deferred"; fail=1; }
   # The confirm lists the apps it decides on and folds the tail into one row
@@ -9397,7 +9466,7 @@ migrate_box() {
   # Plex's databases are checked once its image runs, so the row that counts what
   # the runner rewrote is the one the run fills in after the install, on the
   # screen; the page beside the snapshot is what the run showed before it.
-  grep -qE "^  ✓ plex +[0-9.]+ (KiB|MiB|GiB) · its whole data: metadata, artwork and thumbnails · [1-9][0-9,]* paths · keeps its Plex token$" "$WORK/apply-migrate-rows.txt" ||
+  grep -qE "^  ✓ plex +[0-9.]+ (KiB|MiB|GiB) · [0-9.]+ · its whole data: metadata, artwork and thumbnails · [1-9][0-9,]* paths · keeps its Plex token$" "$WORK/apply-migrate-rows.txt" ||
     { echo "the plan's Plex row does not count the paths the runner rewrote:"; grep -E "plex" "$WORK/apply-migrate-rows.txt" | head -5; fail=1; }
   # autobrr and qui allow exactly one account and box owns it, so a source's
   # account has to become box's; the confirm says so once per app, with the name
