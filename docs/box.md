@@ -793,6 +793,10 @@ They change different things, so they stay separate commands:
 
 Both end in the same step: diff, confirm, apply. Using one never locks out the other.
 
+One credential neither file has to carry is the Plex server token: a claimed server keeps it
+in its own settings file, and apply reads it into the release Secret when the Secret has none
+(docs above, "A claimed server's token reaches the Secret through apply too").
+
 ### How box versions against the chart (proposed)
 
 box and the chart live in one repo but ship as separate artifacts. The image and the
@@ -1377,6 +1381,19 @@ data. Everything it will change is written down before it changes anything.
   server token, so the rows that use it are `pending` with the claim as the next
   thing to do, never a failed release and never a link written with a token the
   server would reject.
+- **A claimed server's token reaches the Secret through apply too (decided).** The
+  token a Plex keeps in its own `Preferences.xml` is read by every `box apply` — `init`'s
+  re-run, `update`'s closing apply and a bare `apply` alike — and written into the release
+  Secret's `plex-token` when the Secret holds none, so a box claimed after it was installed
+  is wired by the next run rather than by a hand-patched Secret. That run installs the
+  release again even when no value changed, because the wiring Job is a hook and re-reading
+  the Secret is what turns the token into Tautulli's link. It reads and never writes Plex's
+  file, and it keeps the person's answers: a token in the values (`secrets.plexToken`), a
+  `secrets.existingSecret` box must not write into, and any key already in the Secret are
+  left alone, and a first install has no Plex state to read. A file that does not parse is
+  one line naming it and the apply goes on, and the token itself is never printed. The limit
+  is rotation: a present token is never replaced, so a server that signs in again keeps the
+  box on the old one until the key is deleted and `box apply` runs again.
 - **Shown before it's done; unattended runs only what was shown (decided goal,
   mechanism proposed).** The plan holds the rules: the path rewrite table, the port
   map, every host reference marked rewritten or left alone, what is copied where, and
