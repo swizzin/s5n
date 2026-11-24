@@ -2,8 +2,8 @@ apiVersion: v2
 name: s5n
 description: swizzin on Kubernetes — a wired, hardlink-safe seedbox stack in one release
 type: application
-version: 0.6.2
-appVersion: "0.6.2"
+version: 0.6.3
+appVersion: "0.6.3"
 # Distribution-agnostic: vanilla, k0s, k3s, managed. Only a floor, never a ceiling.
 # 1.30 is where ValidatingAdmissionPolicy is GA; the platform layer binds one to
 # every user namespace to enforce the grant.
@@ -26,6 +26,13 @@ keywords: [seedbox, swizzin, sonarr, radarr, prowlarr, qbittorrent]
 # A 0.5.0 box would render the older login in front of this chart, so it keeps
 # to the 0.5.0 chart. And no 0.5.0 install is upgraded in place: no e2e upgrades
 # a real 0.5.0 box and chart, so a 0.5.0 seedbox is reinstalled.
+#
+# 0.6.3 raises min-box. The chart ships no default peer port: a box installed
+# while it defaulted to 31111 has none in its grant or its values, and a 0.6.3
+# box writes the port the deployed release already runs into the values it
+# installs. An older box would hand this chart no port, and its render refuses.
+# upgrade-from stays 0.6.0: the upgrade e2e installs the published 0.6.0 box and
+# chart and updates them to this one.
 annotations:
-  box.s5n/min-box: "0.6.0"
+  box.s5n/min-box: "0.6.3"
   box.s5n/upgrade-from: "0.6.0"
