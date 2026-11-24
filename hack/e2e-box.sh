@@ -5194,7 +5194,7 @@ EOF
     { echo "box did not fold the wiring receipt to one row:"; grep -i "wiring" "$WORK/update-b.txt" | head -5; fail=1; }
   # The run log holds what the screen folded away: the receipt's rows, one per
   # check, with a timestamp on each -- and the screen does not.
-  update_log=$(ls -t "${BOX_LOG_DIR}"/update-*.log 2>/dev/null | head -1)
+  update_log=$(ls -t "${BOX_LOG_DIR}"/update-[0-9]*.log 2>/dev/null | head -1)
   [ -n "$update_log" ] && [ -f "$update_log" ] ||
     { echo "box update wrote no run log under ${BOX_LOG_DIR}"; ls -l "${BOX_LOG_DIR}" 2>/dev/null | head; fail=1; }
   grep -qE "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z  wiring " "$update_log" 2>/dev/null ||

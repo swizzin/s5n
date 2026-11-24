@@ -64,13 +64,28 @@ func commandName(command string) string {
 }
 
 // logName is the command this process is running, for the log's file name.
-func logName() string {
-	if len(os.Args) < 2 {
+func logName() string { return logNameFor(os.Args) }
+
+// logNameFor is logName for the arguments it is handed. An update timer's wake
+// logs under its own name (runlog.TimerCommand): the prune keeps only a few of
+// those, so a wake every fifteen minutes never pushes out a run a person started.
+func logNameFor(args []string) string {
+	if len(args) < 2 {
 		return boxName
 	}
-	name := os.Args[1]
-	if name == "migrate" && len(os.Args) > 2 && !strings.HasPrefix(os.Args[2], "-") {
-		return "migrate-" + os.Args[2]
+	name := args[1]
+	if name == "migrate" && len(args) > 2 && !strings.HasPrefix(args[2], "-") {
+		return "migrate-" + args[2]
+	}
+	if name == "update" {
+		for _, a := range args[2:] {
+			if a == "--" {
+				break
+			}
+			if a == "--timer" || a == "-timer" || a == "--timer=true" || a == "-timer=true" {
+				return runlog.TimerCommand
+			}
+		}
 	}
 	return name
 }

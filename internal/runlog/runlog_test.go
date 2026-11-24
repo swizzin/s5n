@@ -1,6 +1,7 @@
 package runlog
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -186,7 +187,7 @@ func TestDirectoryIsPruned(t *testing.T) {
 	dir := t.TempDir()
 	base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	for i := 0; i < 25; i++ {
-		path := filepath.Join(dir, "old-20260101T0000"+string(rune('a'+i))+"Z.log")
+		path := filepath.Join(dir, fmt.Sprintf("apply-20260101T0000%02dZ.log", i))
 		if err := os.WriteFile(path, []byte("x"), 0o600); err != nil {
 			t.Fatal(err)
 		}
@@ -207,7 +208,7 @@ func TestDirectoryIsPruned(t *testing.T) {
 	}
 	// The oldest six are the ones that went.
 	for i := 0; i < 6; i++ {
-		name := "old-20260101T0000" + string(rune('a'+i)) + "Z.log"
+		name := fmt.Sprintf("apply-20260101T0000%02dZ.log", i)
 		if _, err := os.Stat(filepath.Join(dir, name)); !os.IsNotExist(err) {
 			t.Fatalf("%s survived the prune", name)
 		}
@@ -221,7 +222,7 @@ func TestDirectoryIsPrunedBySize(t *testing.T) {
 	base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	big := strings.Repeat("x", 10<<20)
 	for i := 0; i < 10; i++ {
-		path := filepath.Join(dir, "big-0"+string(rune('a'+i))+".log")
+		path := filepath.Join(dir, fmt.Sprintf("init-20260101T0000%02dZ.log", i))
 		if err := os.WriteFile(path, []byte(big), 0o600); err != nil {
 			t.Fatal(err)
 		}
@@ -316,5 +317,99 @@ func TestTwoRunsInOneSecondBothKeepTheirLog(t *testing.T) {
 		if _, err := os.Stat(filepath.Join(dir, name)); err != nil {
 			t.Fatalf("%s is not on disk: %v", name, err)
 		}
+	}
+}
+
+// The prune is box's own: a directory an operator named with BOX_LOG_DIR can hold
+// other programs' logs, and a file that is not named the way box names its logs
+// is never box's to remove, whatever its age.
+func TestThePruneLeavesWhatBoxDidNotWrite(t *testing.T) {
+	dir := t.TempDir()
+	old := time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC)
+	foreign := []string{"syslog.log", "pacman.log", "apply.log", "apply-yesterday.log", "Xorg.0.log"}
+	for _, name := range foreign {
+		path := filepath.Join(dir, name)
+		if err := os.WriteFile(path, []byte(strings.Repeat("x", 1<<20)), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chtimes(path, old, old); err != nil {
+			t.Fatal(err)
+		}
+	}
+	base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	for i := 0; i < 25; i++ {
+		path := filepath.Join(dir, fmt.Sprintf("apply-20260101T0000%02dZ.log", i))
+		if err := os.WriteFile(path, []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		at := base.Add(time.Duration(i) * time.Minute)
+		if err := os.Chtimes(path, at, at); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := OpenAt(dir, "update"); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range foreign {
+		if _, err := os.Stat(filepath.Join(dir, name)); err != nil {
+			t.Fatalf("the prune removed %s, which box did not write: %v", name, err)
+		}
+	}
+	var mine int
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range entries {
+		if strings.HasPrefix(e.Name(), "apply-2026") || strings.HasPrefix(e.Name(), "update-") {
+			mine++
+		}
+	}
+	if mine != KeepFiles {
+		t.Fatalf("box's own logs number %d after the prune, want %d", mine, KeepFiles)
+	}
+}
+
+// The update timer wakes every fifteen minutes. Its wakes keep a few logs of
+// their own and never more, so a morning's failed apply is still there in the
+// evening rather than pushed out by twenty quiet checks.
+func TestTimerWakesNeverPushOutARealRun(t *testing.T) {
+	dir := t.TempDir()
+	base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	apply := filepath.Join(dir, "apply-20260101T000000Z.log")
+	if err := os.WriteFile(apply, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(apply, base, base); err != nil {
+		t.Fatal(err)
+	}
+	for i := 1; i <= 40; i++ {
+		at := base.Add(time.Duration(i) * 15 * time.Minute)
+		path := filepath.Join(dir, TimerCommand+"-"+at.Format(fileStamp)+".log")
+		if err := os.WriteFile(path, []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chtimes(path, at, at); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := OpenAt(dir, TimerCommand); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(apply); err != nil {
+		t.Fatalf("forty timer wakes pushed out the apply's log: %v", err)
+	}
+	var wakes int
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range entries {
+		if strings.HasPrefix(e.Name(), TimerCommand+"-") {
+			wakes++
+		}
+	}
+	if wakes != KeepTimer {
+		t.Fatalf("the directory keeps %d timer wakes, want %d (this one included)", wakes, KeepTimer)
 	}
 }

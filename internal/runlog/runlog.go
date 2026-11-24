@@ -42,6 +42,12 @@ const (
 	DirEnv = "BOX_LOG_DIR"
 	// Redacted is what a secret becomes.
 	Redacted = "<redacted>"
+	// TimerCommand is the name an update timer's wake logs under, so the prune
+	// can tell a wake from a run a person started.
+	TimerCommand = "update-timer"
+	// KeepTimer is how many of the KeepFiles a timer's wakes may hold, this
+	// wake's included.
+	KeepTimer = 5
 )
 
 // stamp is a log line's timestamp: UTC, second precision, sortable.
@@ -91,7 +97,7 @@ func OpenAt(dir, command string) (*Log, error) {
 		// operator's own directory keeps the mode they gave it.
 		_ = os.Chmod(dir, 0o700)
 	}
-	prune(dir)
+	prune(dir, command)
 	name, f, err := create(dir, command, time.Now())
 	if err != nil {
 		l.disabled = true
@@ -268,42 +274,75 @@ func (l *Log) Close() error {
 	return f.Close()
 }
 
-// prune keeps the newest KeepFiles-1 logs and at most KeepBytes of them, oldest
-// first, so this run's log is the twentieth at most and the directory never
-// outgrows the cap by more than one run.
-func prune(dir string) {
+// ownName is the name box gives a log: the command, the UTC second, and the
+// suffix a second run in that second takes. Nothing else in the directory is
+// box's to remove: BOX_LOG_DIR can name a directory other programs log into.
+var ownName = regexp.MustCompile(`^[A-Za-z0-9._-]+-[0-9]{8}T[0-9]{6}Z(-[0-9]+)?\.log$`)
+
+// logFile is one of box's logs as the prune sees it.
+type logFile struct {
+	path  string
+	mod   time.Time
+	size  int64
+	timer bool
+}
+
+// prune makes room for this run's log: an update timer's wakes keep the newest
+// KeepTimer-1 of their own first, so fifteen-minute checks never push out a run a
+// person started, and then the directory keeps the newest KeepFiles-1 of box's
+// logs and at most KeepBytes of them, oldest first. This run's log is the
+// KeepFiles-th at most, and the directory never outgrows the cap by more than one
+// run. command is this run's, so a wake makes room for itself among the wakes.
+func prune(dir, command string) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return
 	}
-	type logFile struct {
-		path string
-		mod  time.Time
-		size int64
-	}
 	var logs []logFile
-	var total int64
 	for _, e := range entries {
-		if e.IsDir() || !strings.HasSuffix(e.Name(), ".log") {
+		if !e.Type().IsRegular() || !ownName.MatchString(e.Name()) {
 			continue
 		}
 		info, err := e.Info()
 		if err != nil {
 			continue
 		}
-		logs = append(logs, logFile{path: filepath.Join(dir, e.Name()), mod: info.ModTime(), size: info.Size()})
-		total += info.Size()
+		logs = append(logs, logFile{
+			path:  filepath.Join(dir, e.Name()),
+			mod:   info.ModTime(),
+			size:  info.Size(),
+			timer: strings.HasPrefix(e.Name(), TimerCommand+"-"),
+		})
 	}
 	// Oldest first.
 	sort.Slice(logs, func(i, j int) bool { return logs[i].mod.Before(logs[j].mod) })
-	keep := KeepFiles - 1
-	for len(logs) > keep || total > KeepBytes {
-		oldest := logs[0]
-		_ = os.Remove(oldest.path)
-		total -= oldest.size
-		logs = logs[1:]
-		if len(logs) == 0 {
-			break
+	wakes := 0
+	for _, lf := range logs {
+		if lf.timer {
+			wakes++
 		}
+	}
+	keepWakes := KeepTimer
+	if command == TimerCommand {
+		keepWakes--
+	}
+	kept := logs[:0]
+	for _, lf := range logs {
+		if lf.timer && wakes > keepWakes {
+			_ = os.Remove(lf.path)
+			wakes--
+			continue
+		}
+		kept = append(kept, lf)
+	}
+	logs = kept
+	var total int64
+	for _, lf := range logs {
+		total += lf.size
+	}
+	for len(logs) > 0 && (len(logs) > KeepFiles-1 || total > KeepBytes) {
+		_ = os.Remove(logs[0].path)
+		total -= logs[0].size
+		logs = logs[1:]
 	}
 }

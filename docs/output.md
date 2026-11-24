@@ -79,7 +79,11 @@ The transcript is bounded, because a box that checks every fifteen minutes would
 otherwise fill a disk: `/var/log/box/<command>-<UTC yyyymmddThhmmssZ>.log` when root,
 `$XDG_STATE_HOME/box/` (default `~/.local/state/box/`) otherwise; 0600 files in a 0700
 directory; each run prunes the directory to the newest twenty logs and at most 64 MiB,
-oldest first; one run's log stops at 16 MiB with a line saying so. A secret is
+oldest first, and only ever removes files named the way box names its logs (the
+directory `BOX_LOG_DIR` names can hold other programs' logs). The update timer's wakes
+log as `update-timer-<UTC>.log` and keep five of those twenty at most, so checks every
+fifteen minutes never push out a run a person started. One run's log stops at 16 MiB
+with a line saying so. A secret is
 registered with the log before it can be written and is replaced where it would have
 gone. A log that cannot be written never fails the command: it is one muted line.
 
