@@ -578,6 +578,19 @@ revision() {
 release_secrets() {
   $K -n "$NS" get secret -l owner=helm,name=s5n -o name | wc -l
 }
+# has_receipt is box's healthy wiring receipt: one row, the checks it ran and how
+# long the Job took. The checks behind the count are in the run log, so a
+# transcript that prints a row per check is the old output.
+has_receipt() { # has_receipt <transcript>
+  grep -Eq '^✓ wiring +[0-9]+ checks · [0-9]+(h[0-9]+m[0-9]+s|m[0-9]+s|s)$' "$1"
+}
+
+# run_log is the newest transcript box wrote for a command under this run's log
+# directory: "the detail is in the log" is only true if the e2e reads it there.
+run_log() { # run_log <command>
+  ls -t "${BOX_LOG_DIR}"/"$1"-[0-9]*.log 2>/dev/null | head -1 || true
+}
+
 status_field() { # status_field <python expression over `d`>
   $K -n "$NS" get cm s5n-wiring -o jsonpath='{.data.status\.json}' |
     python3 -c "import json,sys; d=json.load(sys.stdin); print($1)"
@@ -1804,7 +1817,18 @@ fresh() {
   grep -qF "chart: s5n ${CHART_VERSION} (${CHART_REPO}:${CHART_VERSION})" "$WORK/bootstrap1.txt" ||
     { echo "box did not pull ${CHART_REPO}:${CHART_VERSION}"; fail=1; }
   grep -q "first install" "$WORK/bootstrap1.txt" || { echo "no 'first install' line"; fail=1; }
-  grep -q "^wiring ok" "$WORK/bootstrap1.txt" || { echo "box did not report a healthy receipt"; fail=1; }
+  has_receipt "$WORK/bootstrap1.txt" || { echo "box did not report a healthy receipt"; fail=1; }
+  # The wait shows one line of the wiring Job's log at a time; the log itself is
+  # the run log's, with every check the receipt folded into its count.
+  bootstrap_log=$(run_log bootstrap)
+  [ -n "$bootstrap_log" ] ||
+    { echo "box bootstrap wrote no run log under ${BOX_LOG_DIR}"; fail=1; }
+  if [ -n "$bootstrap_log" ]; then
+    grep -qE '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z  wiring Job log:$' "$bootstrap_log" ||
+      { echo "the run log has no copy of the wiring Job's log: ${bootstrap_log}"; fail=1; }
+    grep -qE '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z  +qbittorrent/ready: ok \([^)]*\)$' "$bootstrap_log" ||
+      { echo "the run log's copy of the Job's log is not the Job's lines:"; grep -n "qbittorrent/ready" "$bootstrap_log" | head -3; fail=1; }
+  fi
   # The peer port box picked for this cluster, and the three places it has to
   # agree: the grant, the Service and the app's own preference.
   assert_torrent_port "first install"
@@ -4078,7 +4102,7 @@ EOF
   fi
   grep -q "the Gateway already has an address: " "$WORK/bootstrap1.txt" ||
     { echo "the Gateway's own address did not answer the question"; fail=1; }
-  grep -q "^wiring ok" "$WORK/bootstrap1.txt" || { echo "box did not report a healthy receipt"; fail=1; }
+  has_receipt "$WORK/bootstrap1.txt" || { echo "box did not report a healthy receipt"; fail=1; }
   # One wait for the run's Certificates, not one per host: this run decided
   # every name, and a box whose names cannot issue yet pays one
   # CertificateTimeout for the run instead of one per name. The Done line says
@@ -4976,7 +5000,7 @@ update_box() {
   fi
   grep -qF "chart: s5n ${CHART_VERSION} (${CHART_REPO}:${CHART_VERSION})" "$WORK/bootstrap1.txt" ||
     { echo "box did not pull ${CHART_REPO}:${CHART_VERSION}"; fail=1; }
-  grep -q "^wiring ok" "$WORK/bootstrap1.txt" ||
+  has_receipt "$WORK/bootstrap1.txt" ||
     { echo "box did not report a healthy receipt"; fail=1; }
   [ "$fail" = 0 ] || return 0
 
@@ -5190,7 +5214,7 @@ EOF
     { echo "box did not name the one command that shows the hold:"; grep -i "box status" "$WORK/update-b.txt" | head -3; fail=1; }
   # The wiring receipt folded to one row, and every check of it went to the run
   # log rather than the screen.
-  grep -Eq "^✓ wiring +[0-9]+ checks$" "$WORK/update-b.txt" ||
+  grep -Eq "^✓ wiring +[0-9]+ checks · [0-9]+(h[0-9]+m[0-9]+s|m[0-9]+s|s)$" "$WORK/update-b.txt" ||
     { echo "box did not fold the wiring receipt to one row:"; grep -i "wiring" "$WORK/update-b.txt" | head -5; fail=1; }
   # The run log holds what the screen folded away: the receipt's rows, one per
   # check, with a timestamp on each -- and the screen does not.
@@ -5199,6 +5223,8 @@ EOF
     { echo "box update wrote no run log under ${BOX_LOG_DIR}"; ls -l "${BOX_LOG_DIR}" 2>/dev/null | head; fail=1; }
   grep -qE "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z  wiring " "$update_log" 2>/dev/null ||
     { echo "the run log does not carry the wiring receipt's rows with a timestamp:"; head -5 "$update_log" 2>/dev/null; fail=1; }
+  grep -qE '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z  wiring Job log:$' "$update_log" 2>/dev/null ||
+    { echo "the run log does not carry the Job's own log:"; grep -c "wiring" "$update_log" 2>/dev/null; fail=1; }
   if grep -qE "^  sonarr/downloadclient: " "$WORK/update-b.txt"; then
     echo "the screen still carries the wiring receipt's rows: they belong in the log"; fail=1
   fi
@@ -5580,10 +5606,18 @@ PY
     { echo "the release Secret's plex-token is not the one Plex holds: got '${plex_secret:+set}'"; fail=1; }
   # A fake token on a server that is not claimed: the token is refused and the
   # row says so, which is a different reason from the one that asked for a
-  # hand-patched key.
-  grep -qF "tautulli/plex: pending (Plex is not claimed yet, so it refuses every server token: claim it at https://plex.tv/claim, then run box apply)" \
+  # hand-patched key. The row is the mark, the check and its state -- the
+  # reason hangs under it -- and the whole receipt is in the run log.
+  grep -qE '^! tautulli/plex +pending$' "$WORK/apply-plex-token.txt" ||
+    { echo "the receipt has no pending row for Tautulli's Plex link:"; grep -i "plex" "$WORK/apply-plex-token.txt" | head -5; fail=1; }
+  grep -qF "Plex is not claimed yet, so it refuses every server token: claim it at https://plex.tv/claim, then run box apply" \
     "$WORK/apply-plex-token.txt" ||
     { echo "the receipt's tautulli/plex row is not the unclaimed-Plex one:"; grep -i "plex" "$WORK/apply-plex-token.txt" | head -5; fail=1; }
+  plex_log=$(run_log apply)
+  [ -n "$plex_log" ] || { echo "box apply wrote no run log under ${BOX_LOG_DIR}"; fail=1; }
+  if [ -n "$plex_log" ] && ! grep -qF "wiring tautulli/plex: pending (Plex is not claimed yet, so it refuses every server token: claim it at https://plex.tv/claim, then run box apply)" "$plex_log"; then
+    echo "the run log does not carry the pending row's whole reason: ${plex_log}"; fail=1
+  fi
   if grep -qF "no Plex token: set plex-token" "$WORK/apply-plex-token.txt"; then
     echo "the receipt still asks for a hand-patched plex-token with one in the Secret:"
     grep -F "set plex-token" "$WORK/apply-plex-token.txt" | head -3
@@ -6116,7 +6150,7 @@ print(".".join(str(p) for p in tree))' "$CHART_VERSION"); then
   fi
   grep -qF "chart: s5n ${UPGRADE_FROM} (${CHART_REPO}:${UPGRADE_FROM})" "$WORK/bootstrap1.txt" ||
     { echo "box did not pull ${CHART_REPO}:${UPGRADE_FROM}"; fail=1; }
-  grep -q "^wiring ok" "$WORK/bootstrap1.txt" ||
+  has_receipt "$WORK/bootstrap1.txt" ||
     { echo "the published install did not report a healthy receipt"; fail=1; }
   [ "$fail" = 0 ] || return 0
   release_chart=$(helm_chart_version) || true
@@ -9111,7 +9145,7 @@ migrate_box() {
   # The box it installed runs nothing the plan migrates: the apps went in off,
   # and the adoption is what switches them on. The receipt for that empty
   # release is ok, which is what `box apply` waits on.
-  grep -q "^wiring ok" "$WORK/apply-migrate.txt" ||
+  has_receipt "$WORK/apply-migrate.txt" ||
     { echo "box did not report a healthy receipt for the box the migration adopts into"; fail=1; }
   # The owner came from the plan, not from whoever ran box: the source's pods
   # ran as this user, discovery wrote that into `source.owner`, and the
@@ -9151,7 +9185,7 @@ migrate_box() {
   grep -qE "^  ✓ pbh +.*keeps downloader \"${MIGRATE_PBH_DOWNLOADER}\"" \
     "$WORK/apply-migrate.txt" ||
     { echo "the plan did not say it adopts PeerBanHelper's downloader ${MIGRATE_PBH_DOWNLOADER} by id"; fail=1; }
-  grep -q "^wiring ok" "$WORK/apply-migrate.txt" ||
+  has_receipt "$WORK/apply-migrate.txt" ||
     { echo "the apply the migration handed over to did not report a healthy receipt"; fail=1; }
   # Plex's rows are the ones only the runner Job can have rewritten: every other
   # app's rewriter edits files, and this one runs `Plex SQLite` in the release's
@@ -9687,7 +9721,7 @@ PY
   else
     cat "$WORK/apply-maintainerr.txt"; fail=1
   fi
-  grep -q "^wiring ok" "$WORK/apply-maintainerr.txt" ||
+  has_receipt "$WORK/apply-maintainerr.txt" ||
     { echo "the apply that switched Maintainerr on reported no healthy receipt"; fail=1; }
   maintainerr_ready=$(status_field "[s['result'] for s in d['steps'] if s['name']=='maintainerr/ready'][0]" 2>/dev/null || true)
   maintainerr_plex=$(status_field "[s['result'] for s in d['steps'] if s['name']=='maintainerr/plex'][0]" 2>/dev/null || true)
@@ -10015,7 +10049,7 @@ migrate_keep_box() {
     [ "$replicas" = 0 ] ||
       { echo "the source's ${app} is at ${replicas:-gone} replicas after the cutover: box changed a workload that is not its own"; fail=1; }
   done
-  grep -q "^wiring ok" "$WORK/keep-cutover.txt" ||
+  has_receipt "$WORK/keep-cutover.txt" ||
     { echo "box did not report a healthy receipt for the seedbox it installed beside the source"; fail=1; }
   # Plex's snapshot is its whole data here (the fixture is a few hundred bytes,
   # so there is room), and the run says so once, in the report and in the confirm

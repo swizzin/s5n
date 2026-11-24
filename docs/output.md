@@ -223,3 +223,54 @@ s5n 0.6.2 → 0.6.3 · 1 step · prowlarr and sonarr move
 The wiring receipt inside update folds to the one `✓ wiring` row; when something is
 pending or failed, those rows are listed instead and the full receipt goes to the log.
 `box update --check` and the timer's run follow the same rules.
+
+## The wiring wait and its receipt
+
+Every apply and every update waits for the chart's wiring Job, and the wait has a
+log to read: the Job's own. While it waits, one line, with the newest line of that
+log beside it.
+
+```
+◐ wiring  4m10s of 10m  pbh/ready: waiting at http://pbh:8080
+```
+
+The Job's own log goes into the run log, under a `wiring Job log:` heading, with
+one line per check, because the screen showed one line at a time and the log is
+where the rest is read.
+
+```
+✓ wiring         34 checks · 1m2s
+```
+
+The count is what the Job checked; the duration is the Job's own. When a check
+waits on a person, the count stays and the checks are rows under it -- one mark,
+the check's name, its state in the state column, and the reason -- the URL or the
+command -- hanging under that. A check that failed is a `✗` row the same way, and
+then the count is not printed.
+
+```
+✓ wiring         34 checks · 41s
+! plex/claim     pending
+                 claim it at https://plex.tv/claim
+! seerr/plex     pending
+                 Seerr has no admin account yet: sign in once at seerr.example.com
+```
+
+A box built from a rehearsal snapshot has no internet, so its pending rows are the
+real run's to clear. It says so once, under them.
+
+```
+· rehearsal · pending rows clear on the real run
+```
+
+A Job that never reports is one `✗` row: what box waited for, the Job's newest
+line as the reason, and the command that runs it again. The Job's whole log is in
+the run log, which the failed run names.
+
+```
+✗ wiring         no receipt after 10m
+                 pbh/ready: waiting at http://pbh:8080
+· your apps are running · only the wiring stopped
+  $ box apply
+· log            /var/log/box/apply-20261123T055500Z.log
+```
