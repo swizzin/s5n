@@ -9327,7 +9327,7 @@ migrate_box() {
       grep -E "^  ! " "$WORK/apply-migrate-rows.txt" | head -5; fail=1; }
   # The page has the same column, so the versions a person agreed to are the
   # ones the run's own report keeps.
-  grep -qF '9.9.9 → 5.0  ↓' "$WORK/apply-page.txt" ||
+  grep -qF '9.9.9 → 5.0  ↓' "$WORK/apply-report-rows.txt" ||
     { echo "the run's report does not carry the versions the confirm showed:";
       grep -iE "^  (sonarr|radarr|pbh|qbittorrent) " "$WORK/apply-page.txt" | head -5; fail=1; }
   grep -qE "^checked after the install$" "$WORK/apply-migrate.txt" ||
