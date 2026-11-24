@@ -108,7 +108,7 @@ func (k K0sInstaller) Install(ctx context.Context, plan InstallPlan) error {
 	config := k.configPath(plan)
 	r := say.Or(k.Say, nil)
 	if why := k0sConfigConflict(config, plan.ConfigText); why != "" {
-		r.Detail("box installs k0s with a config that pins the API address, and it does not overwrite a k0s config it did not write")
+		r.Detail("box installs k0s with a config that pins the API address, and leaves another k0s config alone")
 		return errors.New(why)
 	}
 
