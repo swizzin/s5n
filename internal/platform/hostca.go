@@ -198,7 +198,7 @@ func (d *HostCADecision) Apply(ctx context.Context) (HostCAResult, error) {
 		return res, fmt.Errorf("writing the host CA into %s: %w", d.Namespace, err)
 	}
 	step.Done("")
-	d.report().Rows([]say.Row{{Mark: say.MarkDone, Name: hostCARow, State: "written", Facts: []string{"an app that trusts the box trusts this certificate"}}})
+	d.report().Rows([]say.Row{{Mark: say.MarkDone, Name: hostCARow, State: "written", Facts: []string{"box's root certificate"}}})
 	d.report().Detail(fmt.Sprintf("host CA: wrote ConfigMap %s/%s from %s", d.Namespace, HostCAName, d.hostName()))
 	res.Wrote = true
 	return res, nil
