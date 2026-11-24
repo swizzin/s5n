@@ -1791,11 +1791,11 @@ fresh() {
   # plan first, then init's own rows (the seedbox: its paths, its host, the
   # torrent port), then the one answer. A second question means the release
   # asked again inside the apply.
-  questions=$(grep -cE '^install the platform and .+\? \[y/N\] y$' "$WORK/bootstrap1.txt") || true
+  questions=$(grep -cE '^\? install the platform and .+\? \[y/N\] y$' "$WORK/bootstrap1.txt") || true
   [ "$questions" = 1 ] ||
     { echo "a guided install asked ${questions} questions, want one: the platform and the seedbox together";
       grep -nE '\[y/[Nn]\]|\[Y/n\]' "$WORK/bootstrap1.txt"; fail=1; }
-  if grep -qE '^apply s5n in .+\? \[y/[Nn]\] ' "$WORK/bootstrap1.txt"; then
+  if grep -qE '^(\? )?apply s5n in .+\? \[y/[Nn]\] ' "$WORK/bootstrap1.txt"; then
     echo "the release asked its own question after the one answer"
     fail=1
   fi
@@ -1803,7 +1803,7 @@ fresh() {
   # it is asked on a terminal because root's config is there before the question.
   plan_line=$(grep -nE '^ *\+ cert-manager ' "$WORK/bootstrap1.txt" | head -1 | cut -d: -f1) || true
   notice_line=$(grep -nF "Where should box post notices?" "$WORK/bootstrap1.txt" | head -1 | cut -d: -f1) || true
-  question_line=$(grep -nE '^install the platform and .+\? \[y/N\] ' "$WORK/bootstrap1.txt" | head -1 | cut -d: -f1) || true
+  question_line=$(grep -nE '^\? install the platform and .+\? \[y/N\] ' "$WORK/bootstrap1.txt" | head -1 | cut -d: -f1) || true
   platform_row=$(grep -nE '^✓ Envoy Gateway ' "$WORK/bootstrap1.txt" | head -1 | cut -d: -f1) || true
   if [ -z "$plan_line" ] || [ -z "$question_line" ] || [ -z "$platform_row" ]; then
     echo "the transcript is missing the plan, the question or the first install row"
