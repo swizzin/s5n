@@ -274,3 +274,60 @@ the run log, which the failed run names.
   $ box apply
 · log            /var/log/box/apply-20261123T055500Z.log
 ```
+
+## Reference screens: bootstrap, init, apply
+
+`box bootstrap` on a fresh host: the cluster it found in one row, the platform
+plan as what this run installs and the one thing it cannot decide yet, and then
+one row per component with the time it took. The kubeconfig path, the four
+capability probes, the Helm releases and every Deployment wait are in the log.
+
+```
+cluster
+✓ kubeadm, 1 node · box uses it as it is
+platform
+  + cert-manager v1.21.3 · Envoy Gateway 1.9.3 · admission policies
+  ? MetalLB 0.16.2, unless the Gateway gets an address without it
+install the platform layer? [y/N] y
+✓ Envoy Gateway  38s
+✓ cert-manager   52s
+✓ MetalLB        21s
+✓ Envoy Gateway  172.18.0.4 · 38s
+✓ admission policies  2s
+```
+
+`box init` says where the two paths are as a table, one row per host's
+certificate, the port peers reach the box on, and one row per file it wrote:
+
+```
+where things live
+  data    /srv/s5n/data    exists  254:0  xfs  1.8 TiB free
+  config  /srv/s5n/config  new     254:0  xfs  1.8 TiB free
+· box.example.com  Let's Encrypt · resolves to 203.0.113.7
+· torrent port   picked    30013
+✓ grant          20 keys
+· values         already says this
+✓ directories    12 made
+```
+
+`box apply` names the release it pulled, shows the diff as the review, and ends
+with one row per thing that happened. A run with nothing to do is one note.
+
+```
+apply
+✓ chart          s5n 0.6.3
+s5n in s5n-alice · 1 change
+~ wiring.timeoutSeconds: 300 -> 600
+apply s5n in s5n-alice? [y/N] y
+✓ storage        4 objects · 1s
+✓ s5n 0.6.3      from 0.6.2 · 11 apps · 41s
+✓ wiring         38 checks
+```
+
+A refusal is one `✗` row with its consequences under it, two columns in:
+
+```
+✗ /etc/k0s/k0s.yaml exists
+  $ sudo mv /etc/k0s/k0s.yaml /etc/k0s/k0s.yaml.before-box
+  then run this again
+```
