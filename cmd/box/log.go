@@ -41,6 +41,10 @@ func redact(secret string) {
 	runLog.Register(secret)
 }
 
+// boxName is the fallback a log is named when box cannot tell which command
+// this is.
+const boxName = "box"
+
 // commandName is the command as the log names it: `box update`, `box migrate
 // discover`, and the command alone for anything box does not know. Only letters,
 // digits, dots, dashes and underscores survive: the name becomes a file name,
@@ -54,7 +58,7 @@ func commandName(command string) string {
 		}
 	}
 	if b.Len() == 0 {
-		return "box"
+		return boxName
 	}
 	return b.String()
 }
@@ -62,7 +66,7 @@ func commandName(command string) string {
 // logName is the command this process is running, for the log's file name.
 func logName() string {
 	if len(os.Args) < 2 {
-		return "box"
+		return boxName
 	}
 	name := os.Args[1]
 	if name == "migrate" && len(os.Args) > 2 && !strings.HasPrefix(os.Args[2], "-") {

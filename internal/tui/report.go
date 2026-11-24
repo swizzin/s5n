@@ -1086,7 +1086,3 @@ func (r *Reporter) Close() {
 		}
 	}
 }
-
-// elapsedLabel is how a wait's elapsed time reads, the same spelling the log
-// and the transcript use.
-func elapsedLabel(d time.Duration) string { return say.Duration(d) }

@@ -261,7 +261,7 @@ func TestAnUnwritableDirectoryIsOneLine(t *testing.T) {
 	if err := os.Chmod(dir, 0o500); err != nil {
 		t.Fatal(err)
 	}
-	defer os.Chmod(dir, 0o700)
+	defer func() { _ = os.Chmod(dir, 0o700) }()
 	l, err := OpenAt(dir, "update")
 	if err != nil && l == nil {
 		t.Fatal("OpenAt returned no log at all")

@@ -123,7 +123,7 @@ func (b *boxUpdate) rollback() error {
 	if err := b.Rollback(path); err != nil {
 		return err
 	}
-	b.Out.Rows([]say.Row{{Mark: say.MarkDone, Name: "box", Facts: []string{"put the previous one back at " + path}, Command: "box version"}})
+	b.Out.Rows([]say.Row{{Mark: say.MarkDone, Name: boxName, Facts: []string{"put the previous one back at " + path}, Command: "box version"}})
 	return nil
 }
 
@@ -137,13 +137,13 @@ func (b *boxUpdate) rollback() error {
 func (b *boxUpdate) reportNewer(ctx context.Context, who string) {
 	found, err := b.Check(ctx, b.Options)
 	if err != nil {
-		b.Out.Rows([]say.Row{{Mark: say.MarkNeeds, Name: "box", Facts: []string{"not checked: " + err.Error()}}})
+		b.Out.Rows([]say.Row{{Mark: say.MarkNeeds, Name: boxName, Facts: []string{"not checked: " + err.Error()}}})
 		return
 	}
 	if !found.Newer {
 		return
 	}
-	b.Out.Rows([]say.Row{{Mark: say.MarkNote, Name: "box", Facts: []string{found.Latest + " is out", who}}})
+	b.Out.Rows([]say.Row{{Mark: say.MarkNote, Name: boxName, Facts: []string{found.Latest + " is out", who}}})
 }
 
 // updateAsRoot replaces the binary when a newer release verifies, and reports
@@ -156,23 +156,23 @@ func (b *boxUpdate) updateAsRoot(ctx context.Context) (bool, error) {
 		// The one line an operator needs: the refusal already names its cause
 		// in selfupdate's own words (no key, a package manager, a signature
 		// that does not verify, the network).
-		b.Out.Rows([]say.Row{{Mark: say.MarkNeeds, Name: "box", Facts: []string{"not updated", err.Error()}}})
+		b.Out.Rows([]say.Row{{Mark: say.MarkNeeds, Name: boxName, Facts: []string{"not updated", err.Error()}}})
 		return true, nil
 	}
 	if b.Options.Hold {
 		// A hold says so on every run: the operator set it, and a silent run
 		// reads as one that found nothing newer.
 		if result.To != result.From {
-			b.Out.Rows([]say.Row{{Mark: say.MarkNote, Name: "box", Facts: []string{result.To + " is out", "--hold-box is set, so it is not installed"}}})
+			b.Out.Rows([]say.Row{{Mark: say.MarkNote, Name: boxName, Facts: []string{result.To + " is out", "--hold-box is set, so it is not installed"}}})
 		} else {
-			b.Out.Rows([]say.Row{{Mark: say.MarkNote, Name: "box", Facts: []string{result.From + " is the newest release", "--hold-box is set, so box does not replace itself"}}})
+			b.Out.Rows([]say.Row{{Mark: say.MarkNote, Name: boxName, Facts: []string{result.From + " is the newest release", "--hold-box is set, so box does not replace itself"}}})
 		}
 		return true, nil
 	}
 	if !result.Changed {
 		return true, nil
 	}
-	b.Out.Rows([]say.Row{{Mark: say.MarkDone, Name: "box", Facts: []string{result.From + " → " + result.To, "signature ok"}}})
+	b.Out.Rows([]say.Row{{Mark: say.MarkDone, Name: boxName, Facts: []string{result.From + " → " + result.To, "signature ok"}}})
 	b.Out.Detail("re-running the update as the new box, from " + result.Path)
 	// An exec replaces the process, so cmd/box's deferred Close never runs on
 	// this path: the line above could still be buffered, the spinner drawn and
