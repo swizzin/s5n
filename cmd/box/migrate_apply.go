@@ -634,6 +634,11 @@ func showSummary(out say.Reporter, s apply.Summary, details bool, plat *platform
 		}
 		out.Line("")
 	}
+	// The page is written whatever shape the screen takes: --details prints the
+	// list, and the report is the file an operator keeps.
+	if err := writeApplyReport(out, s, screen); err != nil {
+		return err
+	}
 	if details {
 		// Every rewrite, column by column: the list the report holds, for the
 		// operator who wants to check one row before saying yes.
@@ -654,7 +659,7 @@ func showSummary(out say.Reporter, s apply.Summary, details bool, plat *platform
 	for _, line := range s.Lines() {
 		out.Detail(line)
 	}
-	return writeApplyReport(out, s, screen)
+	return nil
 }
 
 // writeApplyReport puts this run's page beside the snapshot, before the question:
