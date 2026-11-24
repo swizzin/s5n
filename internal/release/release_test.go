@@ -486,7 +486,7 @@ func TestANewerReleaseWithTheSameValuesIsApplied(t *testing.T) {
 	if got := f.rel.chartVersion; got != "0.0.2" {
 		t.Fatalf("the release is deployed as %s, want 0.0.2", got)
 	}
-	if !strings.Contains(f.out.String(), "release 0.0.1 -> 0.0.2") {
+	if !strings.Contains(f.out.String(), "0.0.1 → 0.0.2") {
 		t.Fatalf("box did not say which release it is installing:\n%s", f.out)
 	}
 	if strings.Contains(f.out.String(), "nothing to change") {

@@ -230,7 +230,9 @@ func newFixture() *fixture {
 			return f.probe, nil
 		},
 		Confirm: f.confirm,
-		Say:     &say.Plain{W: f.log},
+		// One buffer for the screen and the log: a test reads the transcript the
+		// way a person reads a log, with the detail lines in their place.
+		Say: &say.Plain{W: f.log, Log: f.log},
 	}
 	return f
 }
@@ -591,13 +593,13 @@ func TestApplyRefusalWritesNothing(t *testing.T) {
 		t.Fatalf("asked %d times, want once", f.confirm.asked)
 	}
 	// The plan was still printed before the question: that is the review.
-	if !strings.Contains(f.log.String(), "Envoy Gateway "+pins.EnvoyGateway+" (the front door)") {
+	if !strings.Contains(f.log.String(), "Envoy Gateway "+pins.EnvoyGateway) {
 		t.Fatalf("the plan did not name the pinned Envoy Gateway: %q", f.log.String())
 	}
-	if !strings.Contains(f.log.String(), "? MetalLB "+pins.MetalLB+" (the gateway's address), unless the Gateway gets an address without it") {
+	if !strings.Contains(f.log.String(), "? MetalLB "+pins.MetalLB+", unless the Gateway gets an address without it") {
 		t.Fatalf("the plan did not say MetalLB is conditional: %q", f.log.String())
 	}
-	if !strings.Contains(f.log.String(), "? Gateway s5n-gateway/s5n getting an address") {
+	if !strings.Contains(f.log.String(), "plan: ? Gateway s5n-gateway/s5n getting an address") {
 		t.Fatalf("the plan did not say it waits for the Gateway's address: %q", f.log.String())
 	}
 }
@@ -691,7 +693,7 @@ func TestApplyInstallsInOrder(t *testing.T) {
 	if f.probe.addressCalls != 1 || f.probe.reachCalls != 1 {
 		t.Fatalf("address calls = %d, reach calls = %d, want the reachability check only", f.probe.addressCalls, f.probe.reachCalls)
 	}
-	if len(res.Installed) == 0 || !strings.Contains(f.log.String(), "platform ready") {
+	if len(res.Installed) == 0 || !strings.Contains(f.log.String(), "✓ Envoy Gateway") {
 		t.Fatalf("result/log do not report the install: %+v %q", res, f.log.String())
 	}
 }
@@ -993,7 +995,7 @@ func TestApplyVerifiesBoxMetalLBWithoutAsking(t *testing.T) {
 			t.Fatalf("Helm was called for MetalLB already at its pinned version: %+v", f.rel.installed)
 		}
 	}
-	if !strings.Contains(f.log.String(), "= MetalLB "+pins.MetalLB+" (the gateway's address): installed, verifying") {
+	if !strings.Contains(f.log.String(), "· MetalLB "+pins.MetalLB+"\n") {
 		t.Fatalf("the plan did not verify MetalLB: %q", f.log.String())
 	}
 	if strings.Contains(f.log.String(), "? MetalLB") {
@@ -1531,7 +1533,7 @@ func TestACallerThatShowsThePlanIsNotAsked(t *testing.T) {
 			if f.confirm.asked != tc.asks {
 				t.Errorf("asked %d questions, want %d", f.confirm.asked, tc.asks)
 			}
-			if got := strings.Contains(f.log.String(), "platform plan:"); got != tc.printed {
+			if got := strings.Contains(f.log.String(), "· admission policies\nplan:"); got != tc.printed {
 				t.Errorf("the plan is printed = %t, want %t:\n%s", got, tc.printed, f.log)
 			}
 		})

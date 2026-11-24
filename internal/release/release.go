@@ -838,7 +838,7 @@ func (a *Applier) Apply(ctx context.Context, opts Options) (Result, error) {
 	}
 
 	if exists && len(res.Changes) == 0 && len(plan) == 0 && nsp.Exists && len(hostPlan.Hosts) == 0 && !res.Login && anchorLine == "" && !chartMoved && !hooksWait {
-		r.Line(fmt.Sprintf("%s in %s: nothing to change", ReleaseName, namespace))
+		r.Rows([]say.Row{{Mark: say.MarkNote, Name: ReleaseName, Facts: []string{"nothing to change", namespace}}})
 		return res, nil
 	}
 
@@ -860,26 +860,26 @@ func (a *Applier) Apply(ctx context.Context, opts Options) (Result, error) {
 	if exists {
 		switch {
 		case len(res.Changes) > 0:
-			r.Line(fmt.Sprintf("%s in %s: %d %s", ReleaseName, namespace, len(res.Changes), plural(len(res.Changes), "change", "changes")))
+			r.Line(fmt.Sprintf("%s in %s · %d %s", ReleaseName, namespace, len(res.Changes), plural(len(res.Changes), "change", "changes")))
 			r.Diff(changeItems(res.Changes))
 		case chartMoved:
 			// Only the release moved: the values are the ones installed, and
 			// the pins the new chart carries are the whole change.
-			r.Line(fmt.Sprintf("%s in %s: release %s -> %s", ReleaseName, namespace, installed.ChartVersion, chart.Version))
+			r.Line(fmt.Sprintf("%s in %s · %s → %s", ReleaseName, namespace, installed.ChartVersion, chart.Version))
 		case hooksWait:
 			// The release is the one installed and its values are the ones it
 			// has: what this run has to do is the hook it carries, which the
 			// release was deployed without.
-			r.Line(fmt.Sprintf("%s in %s: release %s, running its hooks", ReleaseName, namespace, chart.Version))
+			r.Line(fmt.Sprintf("%s in %s · %s, running its hooks", ReleaseName, namespace, chart.Version))
 		default:
 			// The only work this run has is outside the release -- a host
 			// without its listener, or a login page that is not the one the
 			// values name -- which is why the early return above did not take
 			// it.
-			r.Line(fmt.Sprintf("%s in %s: the release is unchanged", ReleaseName, namespace))
+			r.Line(fmt.Sprintf("%s in %s · the release is unchanged", ReleaseName, namespace))
 		}
 	} else {
-		r.Line(fmt.Sprintf("%s in %s: first install", ReleaseName, namespace))
+		r.Line(fmt.Sprintf("%s in %s · first install", ReleaseName, namespace))
 		var details []string
 		if host := hostOf(values); host != "" {
 			details = append(details, "host: "+host)
@@ -1014,7 +1014,7 @@ func (a *Applier) Apply(ctx context.Context, opts Options) (Result, error) {
 			return res, err
 		}
 		res.NamespaceCreated = true
-		r.Success(fmt.Sprintf("created namespace %s (Pod Security %s)", namespace, podSecurityRestricted))
+		r.Detail(fmt.Sprintf("created namespace %s (Pod Security %s)", namespace, podSecurityRestricted))
 		// The anchor and the OIDC clients' Secrets are objects in that
 		// namespace, so they can only be written now -- and the login's
 		// configuration, which names those clients, after them.
@@ -1027,7 +1027,8 @@ func (a *Applier) Apply(ctx context.Context, opts Options) (Result, error) {
 	}
 
 	if len(plan) > 0 {
-		step := r.Start(say.Op{Label: fmt.Sprintf("writing the storage for %s", namespace)})
+		step := r.Start(say.Op{Name: "storage"})
+		r.Detail(fmt.Sprintf("writing the storage for %s", namespace))
 		for _, obj := range plan {
 			if err := store.Apply(ctx, obj); err != nil {
 				step.Failed(err)
@@ -1038,7 +1039,7 @@ func (a *Applier) Apply(ctx context.Context, opts Options) (Result, error) {
 				created = append(created, obj)
 			}
 		}
-		step.DoneAs("", fmt.Sprintf("wrote %d storage object%s", len(plan), plural(len(plan), "", "s")))
+		step.Done(fmt.Sprintf("%d object%s", len(plan), plural(len(plan), "", "s")))
 	}
 
 	// The apps the plan showed stopped are stopped here, immediately before the
@@ -1063,7 +1064,10 @@ func (a *Applier) Apply(ctx context.Context, opts Options) (Result, error) {
 	}
 
 	started := time.Now()
-	upgrade := r.Start(say.Op{Label: fmt.Sprintf("installing %s in %s", ReleaseName, namespace)})
+	// The release is one row: what moved, and what the box now runs. The
+	// revision and the namespace are the log's (rule 5).
+	upgrade := r.Start(say.Op{Name: ReleaseName + " " + chart.Version})
+	r.Detail(fmt.Sprintf("installing %s in %s", ReleaseName, namespace))
 	rev, err := client.Upgrade(ctx, chart, values)
 	if err != nil {
 		upgrade.Failed(err)
@@ -1071,7 +1075,8 @@ func (a *Applier) Apply(ctx context.Context, opts Options) (Result, error) {
 	}
 	res.Applied = true
 	res.Revision = rev
-	upgrade.Done(fmt.Sprintf("applied: %s revision %d in %s", ReleaseName, rev, namespace))
+	r.Detail(fmt.Sprintf("applied %s revision %d in %s", ReleaseName, rev, namespace))
+	upgrade.Done(strings.Join(releaseFacts(values, res.FirstInstall, chartMoved, installed.ChartVersion), " · "))
 
 	// An apply that ran no hooks has no receipt to wait for: the chart's
 	// wiring Job has not run, and its receipt would be the previous release's.
@@ -1600,4 +1605,25 @@ func overlayTree(dst, src map[string]any) {
 		}
 		dst[k] = v
 	}
+}
+
+// releaseFacts is what the release's row says besides the time it took: the
+// apps it installs, the port peers reach it on, and whether this run is the
+// first. A version that moved says so instead, because that is the change a
+// person is looking for.
+func releaseFacts(values map[string]any, first, moved bool, from string) []string {
+	var facts []string
+	switch {
+	case first:
+		facts = append(facts, "first install")
+	case moved && from != "":
+		facts = append(facts, "from "+from)
+	}
+	if apps := EnabledApps(values); len(apps) > 0 {
+		facts = append(facts, fmt.Sprintf("%d apps", len(apps)))
+	}
+	if port, ok := portAt(values); ok && port > 0 {
+		facts = append(facts, fmt.Sprintf("torrent port %d", port))
+	}
+	return facts
 }

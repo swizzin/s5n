@@ -688,8 +688,8 @@ func TestGuidedMissingPathSaysWhereItWouldLand(t *testing.T) {
 	note := h.prompt.notes[0]
 	for _, want := range []string{
 		"/srv/newbox/data",
-		"does not exist yet",
-		"device 8:1, mounted at / (ext4)",
+		"new",
+		"8:1",
 		"root filesystem",
 	} {
 		if !strings.Contains(note, want) {
@@ -796,7 +796,6 @@ func TestExistingPathSummaryIsCheapAndBounded(t *testing.T) {
 	note := h.prompt.notes[0]
 	t.Logf("the report init shows:\n%s", note)
 	for _, want := range []string{
-		"owner 1000:1000",
 		"4 entries at the top level: downloads, media, lost+found, note.txt",
 		"1 file, 2.0 KiB",
 	} {
@@ -1202,7 +1201,7 @@ func TestIssuerFollowsTheDomain(t *testing.T) {
 	if res.Issuer != IssuerLetsEncrypt {
 		t.Fatalf("issuer = %q, want Let's Encrypt", res.Issuer)
 	}
-	if !strings.Contains(h.out.String(), "box.example.com resolves to 203.0.113.7: using Let's Encrypt") {
+	if !strings.Contains(h.out.String(), "· box.example.com  Let's Encrypt · resolves to 203.0.113.7\n") {
 		t.Fatalf("init did not explain the issuer:\n%s", h.out)
 	}
 }

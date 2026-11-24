@@ -370,7 +370,7 @@ func (d *Decision) Run(ctx context.Context, opts Options) (Result, error) {
 		record = "add one"
 	}
 	res.Hosts = []Host{{Host: domain, Issuer: issuer, Why: why, NoDNS: noDNS, Record: record}}
-	d.report().Line("tls: " + why)
+	d.report().Rows([]say.Row{tlsRow(Host{Host: domain, Issuer: issuer, Why: why})})
 	d.step(2, "where should your data and settings live?")
 	dataPath, err := d.askText(textQuestion{
 		key: "storage.data.path", flag: "--data-path",
@@ -403,7 +403,7 @@ func (d *Decision) Run(ctx context.Context, opts Options) (Result, error) {
 		return res, d.stop(err)
 	}
 	if !opts.Unattended {
-		d.report().Fact("files", filesLine(d.UserLookup, puid, pgid))
+		d.report().Fact("owner", filesLine(d.UserLookup, puid, pgid))
 	}
 
 	// What is at those paths, and whether a missing one may be created. The
@@ -464,7 +464,7 @@ func (d *Decision) Run(ctx context.Context, opts Options) (Result, error) {
 	}
 	for _, h := range appHosts {
 		res.Hosts = append(res.Hosts, h)
-		d.report().Line("tls: " + h.Why)
+		d.report().Rows([]say.Row{tlsRow(h)})
 	}
 
 	// The login: one account, asked once. It is its own step because it is the
@@ -1196,18 +1196,33 @@ func (d *Decision) writeFiles(opts Options, sb *seedbox.Seedbox, grantNow, base 
 	return grantChanged, valuesChanged, nil
 }
 
+// reportWrites is the two files as rows: what each one got, or that it was
+// already right. The paths are the log's; a person reading the screen wants to
+// know that nothing moved (rule 4).
 func (d *Decision) reportWrites(opts Options, res Result) {
 	r := d.report()
-	if len(res.GrantChanged) == 0 {
-		r.Line(fmt.Sprintf("%s: already says this", opts.GrantPath))
-	} else {
-		r.Line(fmt.Sprintf("%s: edited %d %s", opts.GrantPath, len(res.GrantChanged), plural(len(res.GrantChanged), "key", "keys")))
+	r.Rows([]say.Row{
+		writeRow("grant", opts.GrantPath, res.GrantChanged),
+		writeRow("values", opts.ValuesPath, res.ValuesChanged),
+	})
+	r.Detail(opts.GrantPath + ": " + writeLine(res.GrantChanged))
+	r.Detail(opts.ValuesPath + ": " + writeLine(res.ValuesChanged))
+}
+
+// writeRow is one file: ✓ with the count of keys it got, or a note that it
+// already said this.
+func writeRow(name, path string, changed []string) say.Row {
+	if len(changed) == 0 {
+		return say.Row{Mark: say.MarkNote, Name: name, Facts: []string{"already says this"}}
 	}
-	if len(res.ValuesChanged) == 0 {
-		r.Line(fmt.Sprintf("%s: nothing to add", opts.ValuesPath))
-	} else {
-		r.Line(fmt.Sprintf("%s: edited %d %s", opts.ValuesPath, len(res.ValuesChanged), plural(len(res.ValuesChanged), "key", "keys")))
+	return say.Row{Mark: say.MarkDone, Name: name, Facts: []string{fmt.Sprintf("%d %s", len(changed), plural(len(changed), "key", "keys"))}}
+}
+
+func writeLine(changed []string) string {
+	if len(changed) == 0 {
+		return "already says this"
 	}
+	return fmt.Sprintf("edited %d %s", len(changed), plural(len(changed), "key", "keys"))
 }
 
 // pathTarget is one of the two host paths, with what init found and whether the

@@ -5,10 +5,10 @@ import (
 	"testing"
 )
 
-// TestPathCheckTextIsUnchanged pins the plain path report byte for byte. It is
-// what setup.LinePrompt is handed (through Note) and what every existing test
-// asserts fragments of; a terminal UI draws the same structure instead, but the
-// text a line prompt prints must not move.
+// TestPathCheckTextIsTheTable pins the plain path report byte for byte: the
+// path, its state, its device, its filesystem and its free space in columns, and
+// whatever is already there under the row. It is what setup.LinePrompt is handed
+// (through Note).
 func TestPathCheckTextIsUnchanged(t *testing.T) {
 	check := PathCheck{
 		Reports: []PathReport{
@@ -30,12 +30,9 @@ func TestPathCheckTextIsUnchanged(t *testing.T) {
 		},
 		Footer: pathCheckFooter,
 	}
-	const want = `paths
-  data   /srv/s5n/data
-          does not exist yet: it would be a new directory on device 8:2, mounted at /srv (btrfs), 900.0 GiB free
-  config /srv/s5n/config
-          device 8:2, mounted at /srv (btrfs), 900.0 GiB free
-          owner 1000:1000
+	const want = `where things live
+  data    /srv/s5n/data    new     8:2     btrfs  900.0 GiB free
+  config  /srv/s5n/config  exists  8:2     btrfs  900.0 GiB free
           empty
   downloads/<category> and media/<category> are made on the first start, owned as above`
 	if got := check.Text(); got != want {
@@ -89,7 +86,8 @@ func TestInspectMarksTheRootDevice(t *testing.T) {
 	if other.SameDevice || other.OnRoot {
 		t.Fatalf("a path on another disk should be quiet: %+v", other)
 	}
-	if got := other.String(); strings.Contains(got, "shares") || strings.Contains(got, "root filesystem") {
+	got := (PathCheck{Reports: []PathReport{other}}).Text()
+	if strings.Contains(got, "shares") || strings.Contains(got, "root filesystem") {
 		t.Fatalf("the plain report grew a warning it did not have before:\n%s", got)
 	}
 }

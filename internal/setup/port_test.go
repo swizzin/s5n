@@ -190,7 +190,7 @@ func TestTorrentPortIsPickedAndRecorded(t *testing.T) {
 	if !strings.Contains(grant, "torrent:\n      port: 30001") {
 		t.Fatalf("the grant does not record the picked port:\n%s", grant)
 	}
-	if got := h.out.String(); !strings.Contains(got, "torrent port: 30001") {
+	if got := h.out.String(); !strings.Contains(got, "· torrent port   picked    30001\n") {
 		t.Fatalf("init did not report the port it picked:\n%s", got)
 	}
 }
@@ -209,7 +209,7 @@ func TestTorrentPortAdoptsTheInstalledPeersService(t *testing.T) {
 	if grant := h.read(h.grantPath); !strings.Contains(grant, "torrent:\n      port: 31112") {
 		t.Fatalf("the grant does not keep the installed port:\n%s", grant)
 	}
-	if got := h.out.String(); !strings.Contains(got, "torrent port: 31112 (already this seedbox's; kept)") {
+	if got := h.out.String(); !strings.Contains(got, "· torrent port   kept      31112\n") {
 		t.Fatalf("init did not say it kept the port:\n%s", got)
 	}
 }
@@ -436,7 +436,7 @@ func TestTorrentPortIsDecidedForTheAppsAPlanBrings(t *testing.T) {
 	if !strings.Contains(grant, "qbittorrent:\n    enabled: false") {
 		t.Fatalf("the box did not go in with qBittorrent off:\n%s", grant)
 	}
-	if got := h.out.String(); !strings.Contains(got, "torrent port: 30001 (picked") {
+	if got := h.out.String(); !strings.Contains(got, "· torrent port   picked    30001\n") {
 		t.Fatalf("the migrating init did not say it picked a port:\n%s", got)
 	}
 }
@@ -473,7 +473,7 @@ func TestTorrentPortKeepsTheSourcesPortWhenThisClusterCanUseIt(t *testing.T) {
 	if grant := h.read(h.grantPath); !strings.Contains(grant, "torrent:\n      port: 30047") {
 		t.Fatalf("the grant does not keep the source's port:\n%s", grant)
 	}
-	if got := h.out.String(); !strings.Contains(got, "torrent port: 30047 (the source's, kept)") {
+	if got := h.out.String(); !strings.Contains(got, "· torrent port   kept      30047 from the source\n") {
 		t.Fatalf("init did not say it kept the source's port:\n%s", got)
 	}
 }
@@ -513,7 +513,7 @@ func TestTorrentPortPicksWhenTheSourcesPortCannotBeUsed(t *testing.T) {
 				t.Fatalf("the grant does not record the port box picked (%d):\n%s", tc.want, grant)
 			}
 			got := h.out.String()
-			if !strings.Contains(got, fmt.Sprintf("torrent port: %d (picked", tc.want)) {
+			if !strings.Contains(got, fmt.Sprintf("· torrent port   picked    %d\n", tc.want)) {
 				t.Fatalf("init did not say it picked %d:\n%s", tc.want, got)
 			}
 			if strings.Contains(got, "(the source's, kept)") {

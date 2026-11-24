@@ -7,6 +7,7 @@ import (
 	"math/big"
 	"strings"
 
+	"github.com/swizzin/s5n/internal/say"
 	"github.com/swizzin/s5n/internal/seedbox"
 )
 
@@ -178,7 +179,7 @@ func (d *Decision) torrentPort(ctx context.Context, namespace string, apps []str
 	// but its peers Service already holds the one its peers know. Keep that
 	// one: moving a working peer port only makes every tracker relearn it.
 	if port, ok := ownPeerPort(namespace, held); ok {
-		d.report().Line(fmt.Sprintf("torrent port: %d (already this seedbox's; kept)", port))
+		d.report().Rows([]say.Row{{Mark: say.MarkNote, Name: "torrent port", State: "kept", Facts: []string{fmt.Sprintf("%d", port)}}})
 		return port, nil
 	}
 	// A migrated box's peers, and any forward the operator set, already point
@@ -187,7 +188,7 @@ func (d *Decision) torrentPort(ctx context.Context, namespace string, apps []str
 	// box picks from, because this number was not picked on this cluster and
 	// moving it is exactly what costs the connections.
 	if port := opts.TorrentPort; port >= nodePortRangeStart && port <= nodePortRangeEnd && !portHeld(port, held) {
-		d.report().Line(fmt.Sprintf("torrent port: %d (the source's, kept)", port))
+		d.report().Rows([]say.Row{{Mark: say.MarkNote, Name: "torrent port", State: "kept", Facts: []string{fmt.Sprintf("%d from the source", port)}}})
 		return port, nil
 	}
 	lo, hi := staticBand(nodePortRangeStart, nodePortRangeEnd)
@@ -199,7 +200,7 @@ func (d *Decision) torrentPort(ctx context.Context, namespace string, apps []str
 	if err != nil {
 		return nil, err
 	}
-	d.report().Line(fmt.Sprintf("torrent port: %d (picked; peers learn it from the tracker)", port))
+	d.report().Rows([]say.Row{{Mark: say.MarkNote, Name: "torrent port", State: "picked", Facts: []string{fmt.Sprintf("%d", port)}}})
 	return port, nil
 }
 

@@ -2,6 +2,7 @@ package setup
 
 import (
 	"errors"
+	"fmt"
 	"io/fs"
 )
 
@@ -171,6 +172,16 @@ type Mount struct {
 	Point        string
 	FSType       string
 	Source       string
+}
+
+// MajorMinor is the device as the mount table names it, in the one column a
+// path row has for it: the kernel's own major:minor, because a device node's
+// name is not in the table.
+func (m Mount) MajorMinor() string {
+	if m.Point == "" {
+		return "-"
+	}
+	return fmt.Sprintf("%d:%d", m.Major, m.Minor)
 }
 
 // DirEntry is one name in a directory, with the size a regular file contributes

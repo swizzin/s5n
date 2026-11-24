@@ -306,7 +306,7 @@ func TestK0sInstallRefusesBeforeFetch(t *testing.T) {
 				}
 				return p
 			},
-			want: "already exists and box did not write it",
+			want: "exists\n$ sudo mv",
 		},
 	}
 	for _, tc := range cases {

@@ -392,10 +392,12 @@ func (d *Decision) Apply(ctx context.Context, components []bootstrap.ComponentRe
 	// is only known after the Gateway is applied, so the steps carry it: every
 	// step with Unless runs or not depending on it.
 	answered := ""
-	for _, s := range plan.Steps {
+	runs := newComponentRuns(r, plan)
+	for i, s := range plan.Steps {
 		if s.Unless != "" && answered != "" {
 			continue
 		}
+		run := runs.begin(i, s)
 		switch s.Kind {
 		case StepRelease:
 			if s.Foreign {
@@ -403,48 +405,45 @@ func (d *Decision) Apply(ctx context.Context, components []bootstrap.ComponentRe
 					s.Release.Name, s.Release.Namespace, kube.ManagedByLabel, kube.ManagedBy)
 			}
 			if AtPin(s.InstalledVersion, s.Release.Version) {
-				step := r.Start(say.Op{Label: "verifying " + s.Release.Name})
-				step.DoneAs(
-					fmt.Sprintf("= %s in %s: already at %s", s.Release.Name, s.Release.Namespace, s.Release.Version),
-					fmt.Sprintf("%s in %s is already at %s", s.Release.Name, s.Release.Namespace, s.Release.Version))
+				r.Detail(fmt.Sprintf("%s in %s: already at %s", s.Release.Name, s.Release.Namespace, s.Release.Version))
 				res.Verified = append(res.Verified, s.Release.Name)
 			} else {
-				step := r.Start(say.Op{
-					Label: "installing " + s.Release.String(),
-					Plain: "installing " + s.Release.String(),
-				})
+				r.Detail("installing " + s.Release.String())
 				if err := d.Releases.Install(ctx, s.Release); err != nil {
-					step.Failed(err)
+					run.fail(err)
 					return res, err
 				}
-				step.Done(fmt.Sprintf("installed %s in %s", s.Release.Name, s.Release.Namespace))
+				r.Detail(fmt.Sprintf("installed %s in %s", s.Release.Name, s.Release.Namespace))
 				res.Installed = append(res.Installed, s.Release.Name)
 			}
 			for _, w := range s.Wait {
 				if err := d.await(ctx, cl, w); err != nil {
+					run.fail(err)
 					return res, err
 				}
 			}
 		case StepManifests:
-			step := r.Start(say.Op{Label: "applying " + s.What})
+			r.Detail("applying " + s.What)
 			if err := cl.Apply(ctx, s.Documents); err != nil {
-				step.Failed(err)
+				run.fail(err)
 				return res, fmt.Errorf("%s: %w", s.What, err)
 			}
-			step.Done("applied " + s.What)
 			res.Installed = append(res.Installed, s.What)
 			for _, w := range s.Wait {
 				if err := d.await(ctx, cl, w); err != nil {
+					run.fail(err)
 					return res, err
 				}
 			}
 		case StepPool:
 			if err := d.applyPool(ctx, cl); err != nil {
+				run.fail(err)
 				return res, err
 			}
 			res.Installed = append(res.Installed, "MetalLB address pool")
 		case StepIssuers:
 			if err := d.applyIssuers(ctx, cl, s.Documents); err != nil {
+				run.fail(err)
 				return res, err
 			}
 			res.Installed = append(res.Installed, s.What)
@@ -452,14 +451,11 @@ func (d *Decision) Apply(ctx context.Context, components []bootstrap.ComponentRe
 			if d.HostFirewall == nil {
 				return res, errors.New("the plan trusts the cluster's pod and service networks with firewalld, and this run has no way to change the host's firewall")
 			}
-			step := r.Start(say.Op{
-				Label: "trusting firewalld's trusted zone with " + strings.Join(s.CIDRs, " and "),
-			})
 			if err := d.HostFirewall.Trust(ctx, s.CIDRs); err != nil {
-				step.Failed(err)
+				run.fail(err)
 				return res, err
 			}
-			step.Done("firewalld trusts " + strings.Join(s.CIDRs, " and "))
+			r.Detail("firewalld trusts " + strings.Join(s.CIDRs, " and "))
 			res.Installed = append(res.Installed, "firewalld's trusted zone")
 		case StepGatewayAddress:
 			answer, err := d.gatewayAddress(ctx, s.Mode)
@@ -473,10 +469,135 @@ func (d *Decision) Apply(ctx context.Context, components []bootstrap.ComponentRe
 				return res, err
 			}
 			res.Verified = append(res.Verified, "Gateway "+address)
+			// The address is the one fact worth keeping on the row: it is
+			// what the person types, and what MetalLB or the external
+			// load balancer just gave this box.
+			runs.fact(address)
+		}
+		runs.end(i)
+	}
+	runs.finish()
+	return res, nil
+}
+
+// componentRun is one component's row on the screen: started at its first step
+// and finished at its last, so cert-manager's install, its three Deployment
+// waits and its ClusterIssuers read as one line with the time they took (rule
+// 4). Its steps are the log's (rule 5).
+type componentRun struct {
+	handle say.Handle
+	// last is the index of the component's last step in the plan.
+	last int
+	// facts are what the row says besides the duration.
+	facts []string
+}
+
+// componentRuns keeps one row per component for the length of one apply.
+type componentRuns struct {
+	r     say.Reporter
+	last  map[string]int
+	runs  map[string]*componentRun
+	order []string
+	// current is the component the step being applied belongs to, if any.
+	current *componentRun
+	// currentKey is that component's key, "" for a step of its own.
+	currentKey string
+}
+
+// newComponentRuns reads the plan once to find each component's last step.
+func newComponentRuns(r say.Reporter, plan Plan) *componentRuns {
+	c := &componentRuns{
+		r:    r,
+		last: make(map[string]int, len(planComponents)),
+		runs: make(map[string]*componentRun, len(planComponents)),
+	}
+	for i, s := range plan.Steps {
+		if key := planGroupOf(s); key != "" {
+			c.last[key] = i
 		}
 	}
-	r.Success("platform ready")
-	return res, nil
+	return c
+}
+
+// begin starts the row of the component this step belongs to, or hands back the
+// one already running. A step that belongs to no component is its own row,
+// named by what it does.
+func (c *componentRuns) begin(i int, s Step) *componentRun {
+	key := planGroupOf(s)
+	c.currentKey = key
+	if key == "" {
+		c.current = &componentRun{last: i, handle: c.r.Start(say.Op{Name: planText(s)})}
+		return c.current
+	}
+	if run, ok := c.runs[key]; ok {
+		c.current = run
+		return run
+	}
+	run := &componentRun{last: c.last[key], handle: c.r.Start(say.Op{Name: componentName(key)})}
+	c.runs[key] = run
+	c.order = append(c.order, key)
+	c.current = run
+	return run
+}
+
+// end finishes the row of the step that just ran, when it was the component's
+// last step.
+func (c *componentRuns) end(i int) {
+	if c.current == nil || i != c.current.last {
+		return
+	}
+	c.current.done(c.r)
+}
+
+// fact adds one fact to the row of the component that is running, or to the
+// gateway's when it has a row: the address is what the Gateway answers on, and
+// the row that proves it is the Gateway's.
+func (c *componentRuns) fact(text string) {
+	if text == "" {
+		return
+	}
+	target := c.current
+	if run, ok := c.runs[groupGateway]; ok {
+		target = run
+	}
+	if target == nil {
+		return
+	}
+	target.facts = append(target.facts, text)
+}
+
+// finish closes any row whose last step never ran, so a stopped run leaves no
+// half-drawn component behind.
+func (c *componentRuns) finish() {
+	for _, key := range c.order {
+		c.runs[key].done(c.r)
+	}
+}
+
+func (c *componentRun) done(r say.Reporter) {
+	if c.handle == nil {
+		return
+	}
+	c.handle.Done(strings.Join(c.facts, " · "))
+	c.handle = nil
+}
+
+func (c *componentRun) fail(err error) {
+	if c.handle == nil {
+		return
+	}
+	c.handle.Failed(err)
+	c.handle = nil
+}
+
+// componentName is the name a component's row carries: the one the plan used.
+func componentName(key string) string {
+	for _, c := range planComponents {
+		if c.key == key {
+			return c.name
+		}
+	}
+	return key
 }
 
 // resolve reads which releases are already deployed, so the printed plan says
@@ -561,13 +682,8 @@ func (d *Decision) gatewayAddress(ctx context.Context, mode bootstrap.PlatformMo
 		// gets the whole wait.
 		quick = timeout
 	}
-	wait := r.Start(say.Op{
-		Label:  "waiting for the Gateway to report an address",
-		Plain:  fmt.Sprintf("waiting up to %s for Gateway %s/%s to report an address", quick, GatewayNamespace, GatewayName),
-		Budget: quick,
-	})
+	r.Detail(fmt.Sprintf("waiting up to %s for Gateway %s/%s to report an address", quick, GatewayNamespace, GatewayName))
 	answer, err := p.Address(ctx, quick)
-	wait.Done("")
 	if err != nil {
 		return answer, err
 	}
@@ -575,13 +691,8 @@ func (d *Decision) gatewayAddress(ctx context.Context, mode bootstrap.PlatformMo
 		// Only "no address, AddressNotAssigned" is an answer at the short
 		// deadline. Anything else is still moving, so it gets the rest of
 		// the whole wait before box judges it.
-		wait = r.Start(say.Op{
-			Label:  "waiting for the Gateway to settle",
-			Plain:  fmt.Sprintf("the Gateway is still settling (%s); waiting up to another %s", reasonOr(answer.Reason), timeout-quick),
-			Budget: timeout - quick,
-		})
+		r.Detail(fmt.Sprintf("the Gateway is still settling (%s); waiting up to another %s", reasonOr(answer.Reason), timeout-quick))
 		answer, err = p.Address(ctx, timeout-quick)
-		wait.Done("")
 		if err != nil {
 			return answer, err
 		}
@@ -590,9 +701,9 @@ func (d *Decision) gatewayAddress(ctx context.Context, mode bootstrap.PlatformMo
 	}
 	switch {
 	case answer.Address != "" && answer.Programmed() && mode == bootstrap.ModeExternal:
-		r.Success(fmt.Sprintf("the Gateway has an address from the external LoadBalancer: %s", answer.Address))
+		r.Detail("the Gateway has an address from the external LoadBalancer: " + answer.Address)
 	case answer.Address != "" && answer.Programmed():
-		r.Success(fmt.Sprintf("the Gateway already has an address: %s; MetalLB and its address pool are not installed", answer.Address))
+		r.Detail("the Gateway already has an address: " + answer.Address + "; MetalLB and its address pool are not installed")
 	case answer.Address != "" || !deferredReason(answer.Reason):
 		// An address the Gateway will not call Programmed, or no address for a
 		// reason an address layer cannot answer: both are failures at the
@@ -602,7 +713,7 @@ func (d *Decision) gatewayAddress(ctx context.Context, mode bootstrap.PlatformMo
 		return answer, fmt.Errorf("platform.loadbalancer.mode is external, but Gateway %s/%s got no address within %s (%s): something else has to assign one (MetalLB, k3s servicelb or a cloud provider). Install it and run `box bootstrap` again, or set platform.loadbalancer.mode=auto to let box install MetalLB",
 			GatewayNamespace, GatewayName, timeout, reasonOr(answer.Reason))
 	default:
-		r.Line(fmt.Sprintf("the Gateway has no address (%s) after waiting up to %s; installing MetalLB", reasonOr(answer.Reason), timeout))
+		r.Detail(fmt.Sprintf("the Gateway has no address (%s) after waiting up to %s; installing MetalLB", reasonOr(answer.Reason), timeout))
 	}
 	return answer, nil
 }
@@ -622,13 +733,8 @@ func (d *Decision) reachable(ctx context.Context) (string, error) {
 	// installed and its pool applied by now, so a second AddressNotAssigned is
 	// the end of what box can do.
 	r := d.report()
-	wait := r.Start(say.Op{
-		Label:  "waiting for the Gateway to be Programmed with its address",
-		Plain:  fmt.Sprintf("waiting up to %s for Gateway %s/%s to be Programmed with its address", timeout, GatewayNamespace, GatewayName),
-		Budget: timeout,
-	})
+	r.Detail(fmt.Sprintf("waiting up to %s for Gateway %s/%s to be Programmed with its address", timeout, GatewayNamespace, GatewayName))
 	answer, err := p.Address(ctx, timeout)
-	wait.Done("")
 	if err != nil {
 		return "", err
 	}
@@ -643,16 +749,12 @@ func (d *Decision) reachable(ctx context.Context) (string, error) {
 	if retry <= 0 {
 		retry = ReachTimeout
 	}
-	reach := r.Start(say.Op{
-		Label: fmt.Sprintf("checking that the Gateway answers on %s:80", answer.Address),
-		Plain: fmt.Sprintf("checking that the Gateway answers on %s:80 from this host", answer.Address),
-	})
+	r.Detail(fmt.Sprintf("checking that the Gateway answers on %s:80 from this host", answer.Address))
 	code, err := p.Reachable(ctx, answer.Address, retry)
 	if err != nil {
-		reach.Failed(err)
 		return "", fmt.Errorf("the Gateway has address %s, but nothing answers on %s:80 from this host: %w", answer.Address, answer.Address, err)
 	}
-	reach.Done(fmt.Sprintf("the Gateway answers on %s:80 (HTTP %d)", answer.Address, code))
+	r.Detail(fmt.Sprintf("the Gateway answers on %s:80 (HTTP %d)", answer.Address, code))
 	return answer.Address, nil
 }
 
@@ -716,15 +818,12 @@ func reasonOr(reason string) string {
 }
 
 func (d *Decision) await(ctx context.Context, cl Cluster, w Wait) error {
-	step := d.report().Start(say.Op{
-		Label: fmt.Sprintf("waiting for %s", w),
-		Plain: fmt.Sprintf("waiting for %s", w),
-	})
+	r := d.report()
+	r.Detail("waiting for " + w.String())
 	if err := cl.Await(ctx, w); err != nil {
-		step.Failed(err)
 		return fmt.Errorf("%s: %w", w, err)
 	}
-	step.Done(fmt.Sprintf("%s: rolled out", w))
+	r.Detail(w.String() + ": rolled out")
 	return nil
 }
 
@@ -764,15 +863,13 @@ func (d *Decision) retryApply(ctx context.Context, cl Cluster, docs []map[string
 // webhook answers.
 func (d *Decision) applyPool(ctx context.Context, cl Cluster) error {
 	r := d.report()
-	step := r.Start(say.Op{Label: "applying the MetalLB address pool"})
+	r.Detail("applying the MetalLB address pool")
 	ip, err := cl.PrimaryInternalIP(ctx)
 	if err != nil {
-		step.Failed(err)
 		return fmt.Errorf("MetalLB address pool: %w", err)
 	}
 	docs, err := ParseManifests(poolManifest(ip))
 	if err != nil {
-		step.Failed(err)
 		return fmt.Errorf("MetalLB address pool: %w", err)
 	}
 	wait := d.PoolTimeout
@@ -780,13 +877,12 @@ func (d *Decision) applyPool(ctx context.Context, cl Cluster) error {
 		wait = 2 * time.Minute
 	}
 	if err := d.retryApply(ctx, cl, docs, wait); err != nil {
-		step.Failed(err)
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
 		return fmt.Errorf("MetalLB refused its address pool for %s: %w (the chart is installed; fix the cause and run `box bootstrap` again)", wait, err)
 	}
-	step.Done(fmt.Sprintf("applied IPAddressPool %s (%s/32) and L2Advertisement %s", MetalLBPoolName, ip, MetalLBL2Name))
+	r.Detail(fmt.Sprintf("applied IPAddressPool %s (%s/32) and L2Advertisement %s", MetalLBPoolName, ip, MetalLBL2Name))
 	return nil
 }
 
@@ -815,17 +911,15 @@ func (d *Decision) applyIssuers(ctx context.Context, cl Cluster, docs []map[stri
 	// every host's Certificate would wait on a failure that names the Secret
 	// rather than the ordering. So: root Ready, then the issuer that uses it.
 	if err := d.awaitRoot(ctx, cl); err != nil {
-		step.Failed(err)
 		return err
 	}
 	if err := d.retryApply(ctx, cl, waves.ca, wait); err != nil {
-		step.Failed(err)
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
 		return fmt.Errorf("cert-manager's webhook refused its ClusterIssuers for %s: %w (cert-manager is installed; fix the cause and run `box bootstrap` again)", wait, err)
 	}
-	step.Done(fmt.Sprintf("applied ClusterIssuers %s and %s, and the root they sign with", LetsEncryptIssuer, SelfSignedIssuer))
+	r.Detail(fmt.Sprintf("applied ClusterIssuers %s and %s, and the root they sign with", LetsEncryptIssuer, SelfSignedIssuer))
 	return nil
 }
 
@@ -850,11 +944,7 @@ func (d *Decision) awaitRoot(ctx context.Context, cl Cluster) error {
 		poll = 2 * time.Second
 	}
 	r := d.report()
-	step := r.Start(say.Op{
-		Label:  "waiting for Certificate " + CertManagerNamespace + "/" + RootCertificateName + " to be Ready",
-		Plain:  fmt.Sprintf("waiting up to %s for Certificate %s/%s to be Ready", timeout, CertManagerNamespace, RootCertificateName),
-		Budget: timeout,
-	})
+	r.Detail(fmt.Sprintf("waiting up to %s for Certificate %s/%s to be Ready", timeout, CertManagerNamespace, RootCertificateName))
 	reason := ""
 	waited, err := wait.Until(ctx, timeout, poll, func(ctx context.Context) (bool, error) {
 		ready, why, err := cl.CertificateReady(ctx, CertManagerNamespace, RootCertificateName)
@@ -869,21 +959,19 @@ func (d *Decision) awaitRoot(ctx context.Context, cl Cluster) error {
 		return ready, nil
 	})
 	if err != nil {
-		step.Failed(err)
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
 		return fmt.Errorf("box's root Certificate %s/%s: %w", CertManagerNamespace, RootCertificateName, err)
 	}
 	if !waited.Done {
-		step.Failed(ErrNotReady)
 		if reason == "" {
 			reason = certNotReadyReason
 		}
 		return fmt.Errorf("box's root Certificate %s/%s is not Ready after %s (%s): every self-signed host's certificate is issued by it, so box stopped before the CA issuer; run `box bootstrap` again once cert-manager has issued it",
 			CertManagerNamespace, RootCertificateName, timeout, reason)
 	}
-	step.Done(fmt.Sprintf("Certificate %s/%s: Ready", CertManagerNamespace, RootCertificateName))
+	r.Detail(fmt.Sprintf("Certificate %s/%s: Ready", CertManagerNamespace, RootCertificateName))
 	return nil
 }
 
@@ -1072,7 +1160,7 @@ func BuildPlan(pins release.Versions, components []bootstrap.ComponentResult, ga
 		Component: bootstrap.ComponentGatewayAPI,
 		Kind:      StepManifests,
 		What:      "ValidatingAdmissionPolicies in s5n-system (the grant, enforced by the cluster)",
-		Plan:      "ValidatingAdmissionPolicies enforcing the grant",
+		Plan:      "admission policies",
 		Documents: policy,
 	})
 

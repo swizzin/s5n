@@ -53,47 +53,55 @@ type PathCheck struct {
 	Footer string
 }
 
-// Text renders the check the way `box init`'s line prompt has always printed
-// it: a heading, one block per path, and the footer. It is the contract for
-// prompters that cannot style anything.
+// Text renders the check the way `box init`'s line prompt prints it: one row
+// per path with the device, the filesystem and the free space in columns, then
+// whatever is already there under it. A value says what a sentence used to
+// (rule 13): the path, whether it is new, where it lives and how much room is
+// left are four columns, not four sentences.
 func (c PathCheck) Text() string {
 	var b strings.Builder
-	b.WriteString("paths\n")
+	b.WriteString("where things live\n")
+	kindW, pathW := 0, 0
 	for _, r := range c.Reports {
-		b.WriteString(r.String())
+		kindW = max(kindW, len(r.Kind))
+		pathW = max(pathW, len(r.Path))
+	}
+	for _, r := range c.Reports {
+		fmt.Fprintf(&b, "  %-*s  %-*s  %-6s  %-6s  %-4s  %s free\n",
+			kindW, r.Kind, pathW, r.Path, r.state(), r.Mount.MajorMinor(), r.Mount.FSType, humanBytes(r.Free))
+		for _, line := range r.notes() {
+			fmt.Fprintf(&b, "  %-*s  %s\n", kindW, "", line)
+		}
 	}
 	if c.Footer != "" {
-		b.WriteString(c.Footer)
-		b.WriteString("\n")
+		b.WriteString("  " + strings.TrimSpace(c.Footer) + "\n")
 	}
 	return strings.TrimRight(b.String(), "\n")
 }
 
-// String renders one path for the report block. Continuation lines are indented
-// under the path so the block reads as one table.
-func (r PathReport) String() string {
-	var b strings.Builder
-	fmt.Fprintf(&b, "  %-6s %s\n", r.Kind, r.Path)
-	where := r.location()
+// state is the one word in the state column: a path init has to make is `new`,
+// one that is already there `exists`.
+func (r PathReport) state() string {
 	if r.Exists {
-		fmt.Fprintf(&b, "          %s, %s free\n", where, humanBytes(r.Free))
-		fmt.Fprintf(&b, "          owner %s\n", r.Owner)
-		fmt.Fprintf(&b, "          %s\n", r.Summary)
-		return b.String()
+		return "exists"
 	}
-	fmt.Fprintf(&b, "          does not exist yet: it would be a new directory on %s, %s free\n", where, humanBytes(r.Free))
-	if r.OnRoot {
-		fmt.Fprintf(&b, "          note: that is the root filesystem, not a separate disk. If a disk\n")
-		fmt.Fprintf(&b, "          was meant to be mounted here, it is not there.\n")
-	}
-	return b.String()
+	return "new"
 }
 
-func (r PathReport) location() string {
-	if r.Mount.Point == "" {
-		return "an unknown filesystem"
+// notes are what the row cannot say in a column: what is already at a path, who
+// owns it when that is not the box's owner, and the unmounted-disk warning.
+func (r PathReport) notes() []string {
+	var lines []string
+	if r.Exists {
+		if r.Summary != "" {
+			lines = append(lines, strings.TrimSpace(r.Summary))
+		}
+		return lines
 	}
-	return fmt.Sprintf("device %d:%d, mounted at %s (%s)", r.Mount.Major, r.Mount.Minor, r.Mount.Point, r.Mount.FSType)
+	if r.OnRoot {
+		lines = append(lines, "! that is the root filesystem, not a separate disk: if one was meant to be mounted here, it is not there")
+	}
+	return lines
 }
 
 // inspect builds one path's report. A missing path is reported against the

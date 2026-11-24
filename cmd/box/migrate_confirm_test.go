@@ -107,7 +107,7 @@ func TestOneConfirmForTheWholeRun(t *testing.T) {
 		t.Fatalf("the platform plan is not shown first, after the lead line:\n%s", printed)
 	}
 	// The platform plan is the plan's own items, not a summary of them.
-	if !strings.Contains(printed, "Envoy Gateway 1.9.3 (the front door)") {
+	if !strings.Contains(printed, "Envoy Gateway 1.9.3") {
 		t.Errorf("the platform block is not the platform plan:\n%s", printed)
 	}
 	// The old two-question transcript is gone: nothing prints a platform plan

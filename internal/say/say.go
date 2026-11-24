@@ -322,7 +322,9 @@ func (p *Plain) out() io.Writer {
 	if w == nil {
 		w = io.Discard
 	}
-	if p.Log != nil {
+	// A caller may hand the same writer for both -- a test reads the transcript
+	// the way a log reads -- and then every line is written once.
+	if p.Log != nil && p.Log != w {
 		return io.MultiWriter(w, p.Log)
 	}
 	return w
@@ -589,15 +591,23 @@ func (p *Plain) Warn(text string) { fmt.Fprintln(p.out(), MarkNeeds+" "+text) }
 func (p *Plain) Success(text string)   { fmt.Fprintln(p.out(), MarkDone+" "+text) }
 func (p *Plain) Banner(string, string) {}
 
+// Chart names the release box pulled: the name and version on the screen, the
+// reference in the log, where plumbing belongs (rule 5).
 func (p *Plain) Chart(name, version, ref string) {
-	fmt.Fprintf(p.out(), "chart: %s %s (%s)\n", name, version, ref)
+	fmt.Fprint(p.out(), PlainRow(Row{Mark: MarkDone, Name: "chart", Facts: []string{name + " " + version}}))
+	p.Detail("chart " + name + " " + version + " (" + ref + ")")
 }
 
+// Created is one row: how many directories this run made. The paths are the
+// log's -- a person wants to know that init made them, not which ones.
 func (p *Plain) Created(paths []string) {
 	if len(paths) == 0 {
 		return
 	}
-	fmt.Fprintf(p.out(), "created %s\n", strings.Join(paths, ", "))
+	fmt.Fprint(p.out(), PlainRow(Row{Mark: MarkDone, Name: "directories", Facts: []string{fmt.Sprintf("%d made", len(paths))}}))
+	for _, path := range paths {
+		p.Detail("made " + path)
+	}
 }
 
 // Start prints the step's plain start line, if it has one, and returns a handle

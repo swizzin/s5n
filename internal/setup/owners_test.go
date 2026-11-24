@@ -273,7 +273,7 @@ func TestGuidedInitShowsTheLoginAndTheFileOwner(t *testing.T) {
 		t.Fatalf("init: %v\n%s", err, h.out)
 	}
 	out := h.out.String()
-	if !strings.Contains(out, "files: core (uid 1000, gid 1000)") {
+	if !strings.Contains(out, "owner: core (uid 1000, gid 1000)") {
 		t.Fatalf("the file owner is not shown:\n%s", out)
 	}
 }
