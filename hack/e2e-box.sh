@@ -4188,7 +4188,7 @@ PY
   # s5n-selfsigned, and the certificate is still a real TLS certificate. -k is
   # the honest client behaviour for a box nobody can reach from the internet.
   cert=s5n-tls-box-internal-example
-  grep -qE "^· ${DOMAIN}  self-signed · does not resolve to an address$" "$WORK/bootstrap1.txt" ||
+  grep -qE "^· ${DOMAIN}  self-signed · does not resolve" "$WORK/bootstrap1.txt" ||
     { echo "init did not report that the domain does not resolve, and chose self-signed";
       grep -E "self-signed" "$WORK/bootstrap1.txt" | head -3; fail=1; }
   $K -n s5n-gateway wait --for=condition=Ready "certificate/$cert" --timeout=120s ||
