@@ -331,3 +331,111 @@ A refusal is one `✗` row with its consequences under it, two columns in:
   $ sudo mv /etc/k0s/k0s.yaml /etc/k0s/k0s.yaml.before-box
   then run this again
 ```
+
+## The migration's screens
+
+`box migrate` has more to say than any other command, so it says the counts and
+writes the page. The report is one sectioned plain-text file with a summary at the
+top: the snapshot carries it as `report.txt`, which travels with the one file an
+operator moves between hosts, and the same bytes sit beside the snapshot as
+`migrate-<time>-<mode>-report.txt`, which is what a person opens with `less`. One
+builder writes both, so they cannot disagree. `box migrate apply` writes its own
+page beside the same snapshot (`…-apply-report.txt`), because the rows it knows --
+the keys it keeps, the connections it adopts by id, the notes -- are not facts
+discovery could have read.
+
+A read, and where its page is:
+
+```
+box migrate discover · survey from 2026-11-23 04:46 UTC
+✓ read           12 apps · 14 rewritten · 3 left as it is
+✓ decided        17
+· left           31 workloads and mounts behind
+· snapshot       /var/lib/s5n/migrate/migrate-20261123T044620Z-survey.tar.gz
+· report         /var/lib/s5n/migrate/migrate-20261123T044620Z-survey-report.txt
+                 $ less /var/lib/s5n/migrate/migrate-20261123T044620Z-survey-report.txt
+! defaults       2 defaults taken · the report names each one
+```
+
+A cutover that finds the source still running: one line of state and the one
+command that stops it, written for the cluster box found, and nothing after it.
+
+```
+! 12 apps running · stop them, then run this again
+  $ sudo k0s kubectl -n default scale --replicas=0 \
+      autobrr maintainerr peerbanhelper plex qbittorrent qui \
+      radarr radarr4k overseerr sonarr sonarr4k tautulli
+```
+
+The two other screens this command converted are the one confirm and the report
+itself. The confirm is:
+
+```
+box migrate apply · s5n-alice · final snapshot from 2026-11-23 04:50 UTC
+
+apps           carries    changes
+  autobrr      9.0 GiB    2 addresses · login → s5n
+  plex         48.0 GiB   its whole data: metadata, artwork and thumbnails ·
+                          keeps its Plex token
+  qbittorrent  570.0 MiB  1,565 paths
+  qui          16.0 MiB
+  radarr       1.0 GiB    2,937 paths · keeps download client "qBT" · keeps
+                          its API key
+  sonarr       1.0 GiB    keeps its API key
+  ✓ data     Downloads → downloads · library → media
+  ✓ library  4K/Movies → movies-4k · 4K/TV → tv-4k · Movies → movies · TV → tv
+  ! radarr, sonarr  "Deluge" (172.17.0.1:10365) and "rT" (172.17.0.1:443) stay
+                    as it is: "Deluge" is a Deluge client and this box runs only
+                    qBittorrent, so a rewrite would point it at an app that does
+                    not speak its protocol
+1 note · 2 other workloads stay behind · 2 values left as they are · --details
+
+install, then move these 6 apps in? [y/N]
+```
+
+The apps past the eighth fold into one `+ 5 more` row that names them. The notes
+are a count, not a list: the page has them once each. `--details` prints the
+per-rewrite list for someone checking one row.
+
+The report's shape, which is the same for a read and for the run that applies it:
+
+```
+s5n migration report · final · migrate-20261123T045038Z-final.tar.gz
+read 2026-11-23 04:50 UTC by box 0.6.2
+
+summary
+  apps       6
+  addresses  11 rewritten · 3 left as it is
+  data       2 renames · 4 library directories
+  decisions  17
+  notes      2
+  left       31 workloads and mounts
+
+apps
+  autobrr      from autobrr in legacy · config /var/data/autobrr
+  ...
+
+addresses
+  qbittorrent.legacy:8080  → qbittorrent · a Service of the source cluster
+  10.244.0.94:32400        → plex · Maintainerr's Plex connection
+  172.17.0.1:10365         left as it is · a Deluge client, and this box runs
+                           qBittorrent
+```
+
+An answer an earlier read gave is not asked again; it is one row:
+
+```
+connections
+✓ maintainerr  10.244.0.94:32400 → plex
+```
+
+And the replace path's teardown is commands, not prose: the k0s recipe removes the
+`/etc/k0s/k0s.yaml` that `k0s reset` leaves behind, because the next bootstrap
+refuses over it.
+
+```
+! this cluster is yours to replace: box removes no cluster it did not install
+  $ sudo k0s stop; sudo k0s reset; sudo rm -f /etc/k0s/k0s.yaml
+  $ sudo systemctl disable --now k0scontroller; sudo rm -f /etc/systemd/system/k0scontroller.service /usr/local/bin/k0s
+  $ box migrate apply /var/lib/s5n/migrate/migrate-20261123T045038Z-final.tar.gz
+```

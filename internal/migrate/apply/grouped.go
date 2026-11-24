@@ -42,6 +42,10 @@ type Grouped struct {
 
 // Grouped renders the summary in the shape the confirm uses. It reads nothing
 // but the summary: the same run rendered with --details prints Lines instead.
+//
+// The notes are counted, not listed: a note is something to know, and a dozen of
+// them is the paragraph before the question that rule 7 replaced with a page
+// (Summary.Report). What a person must act on stays as its own row.
 func (s Summary) Grouped() Grouped {
 	var g Grouped
 	if s.Rehearsal {
@@ -54,9 +58,6 @@ func (s Summary) Grouped() Grouped {
 		g.Blocks = append(g.Blocks, Group{Rows: rows})
 	}
 	if rows := s.needsYou(); len(rows) > 0 {
-		g.Blocks = append(g.Blocks, Group{Rows: rows})
-	}
-	if rows := s.goodToKnow(); len(rows) > 0 {
 		g.Blocks = append(g.Blocks, Group{Rows: rows})
 	}
 	if footer := s.footer(); footer != "" {

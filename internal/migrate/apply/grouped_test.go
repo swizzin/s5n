@@ -111,12 +111,6 @@ apps           carries    changes
                     qBittorrent, so a rewrite would point it at an app that does
                     not speak its protocol; delete it in the Arr if you do not
                     need it
-  · plex, sonarr  "RemotePathMappings" is not read by anything box runs, so it
-                   is left as it is
-  · plex          carried Preferences.xml and its databases; Plex rebuilds its
-                   metadata, artwork and thumbnails (artwork uploaded by hand is
-                   not carried)
-  · 1 path        the source never kept a media root this app writes to
 2 notes · 4 other workloads stay behind · 2 values left as they are · --details
 `
 	if got := renderGrouped(groupedFixture()); got != want {
@@ -126,15 +120,19 @@ apps           carries    changes
 
 // TestTheNotesAreSaidOnce: a note two apps report is one row naming both, not
 // two rows saying the same thing -- the report's duplicate that made the old
-// confirm four lines about one RemotePathMappings.
+// confirm four lines about one RemotePathMappings. The screen counts them; the
+// report is the page that names them.
 func TestTheNotesAreSaidOnce(t *testing.T) {
-	rendered := renderGrouped(groupedFixture())
-	if got := strings.Count(rendered, "RemotePathMappings"); got != 1 {
-		t.Errorf("the shared note is printed %d times, want once:\n%s", got, rendered)
+	if rendered := renderGrouped(groupedFixture()); strings.Contains(rendered, "RemotePathMappings") {
+		t.Errorf("the screen lists a note, and the notes are a count with the report:\n%s", rendered)
+	}
+	text := groupedFixture().Report("final", "snapshot.tar.gz", time.Time{}, "0.6.2").Text()
+	if got := strings.Count(text, "RemotePathMappings"); got != 1 {
+		t.Errorf("the report says the note %d times, want once:\n%s", got, text)
 	}
 	// And it names both apps that said it.
-	if !strings.Contains(rendered, "· plex, sonarr  \"RemotePathMappings\"") {
-		t.Errorf("the shared note does not name the apps it came from:\n%s", rendered)
+	if !strings.Contains(text, "  plex, sonarr  \"RemotePathMappings\"") {
+		t.Errorf("the note does not name the apps it came from:\n%s", text)
 	}
 }
 
@@ -146,8 +144,11 @@ func TestADefaultThatRewroteAnAddressIsCounted(t *testing.T) {
 	if strings.Contains(rendered, "10.244.0.5:8989") {
 		t.Errorf("a default that rewrote an address is printed as its own line:\n%s", rendered)
 	}
-	if !strings.Contains(rendered, "· 1 path        the source never kept a media root this app writes to") {
-		t.Errorf("a default that left a value alone is not said:\n%s", rendered)
+	if !strings.Contains(rendered, "2 values left as they are") {
+		t.Errorf("a default that left a value alone is not counted:\n%s", rendered)
+	}
+	if text := groupedFixture().Report("final", "snapshot.tar.gz", time.Time{}, "0.6.2").Text(); !strings.Contains(text, "old/library") {
+		t.Errorf("the report does not say which value the default left alone:\n%s", text)
 	}
 }
 

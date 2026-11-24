@@ -113,7 +113,6 @@ func TestTheConfirmScreenIsTheDecidingPage(t *testing.T) {
 		"                    as it is: \"Deluge\" is a Deluge client and this box runs only",
 		"                    qBittorrent, so a rewrite would point it at an app that does",
 		"                    not speak its protocol",
-		"  · radarr  its own login is switched off, and you sign in through the box",
 		"  1 note · 2 other workloads stay behind · 2 values left as they are ·",
 		"    --details",
 		"",

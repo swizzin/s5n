@@ -6573,6 +6573,22 @@ box_files_back() { # box_files_back <node> <config root>
     chown -R $(id -u):$(id -g) '$2/.box' 2>/dev/null || true"
 }
 
+# rows_of <file>: a report or a screen's rows joined back up, one row per line.
+#
+# A report and the confirm both wrap at 80 columns, with the continuation hung
+# under the facts column, so a row that says a lot is two lines of text and one
+# fact. This joins each continuation onto the row it belongs to, which is what an
+# assertion is about: a heading line is flush left, a row starts two columns in,
+# and a continuation starts deeper still.
+rows_of() { # rows_of <file>
+  awk '
+    /^  [^ ]/ { if (row != "") print row; row = $0; next }
+    /^ +[^ ]/ { sub(/^ +/, " "); row = row $0; next }
+    { if (row != "") print row; row = "" }
+    END { if (row != "") print row }
+  ' "$1"
+}
+
 # migrate_assert_ownership <node> <config root> <puid> <pgid>: what a migration
 # has to have left behind. Every path under the config root but box's own
 # staging and record area belongs to the seedbox's user, because box wrote as
@@ -8844,13 +8860,27 @@ migrate_box() {
     fail=1; return 0
   fi
   cat "$WORK/cutover-refused.txt"
+  # One line of state and one command per kind that stops them all: many similar
+  # stops become one (docs/output.md, rule 3), written for the cluster box found.
+  grep -qE '^! [0-9]+ apps running · stop them, then run this again$' "$WORK/cutover-refused.txt" ||
+    { echo "the refusal does not say how many apps are running and to stop them:"; cat "$WORK/cutover-refused.txt"; fail=1; }
+  rows_of "$WORK/cutover-refused.txt" >"$WORK/cutover-rows.txt"
+  stop_command=$(grep -E '^  \$ kubectl -n ' "$WORK/cutover-rows.txt" | head -1) || true
+  case "$stop_command" in
+    *"scale deployment --replicas=0"*) ;;
+    *) echo "the refusal prints no command that scales the source's deployments to zero: ${stop_command:-none}"; fail=1 ;;
+  esac
   for instance in qbittorrent $MIGRATE_ARRS plex autobrr qui pbh tautulli; do
-    grep -q "^  ${instance}: .* in ${MIGRATE_LEGACY_NS}/${instance}; kubectl -n ${MIGRATE_LEGACY_NS} scale " \
-      "$WORK/cutover-refused.txt" ||
-      { echo "the refusal does not name ${instance} and the command that stops it"; fail=1; }
+    case "$stop_command" in
+      *" ${instance}"*|*" ${instance} "*) ;;
+      *) echo "the one stop command does not name ${instance}: ${stop_command:-none}"; fail=1 ;;
+    esac
   done
-  grep -q "box never stops a source" "$WORK/cutover-refused.txt" ||
-    { echo "the refusal does not say box never stops a source"; fail=1; }
+  # Nothing trailing it: the screen is the state and the command, and the read it
+  # kept is in the log.
+  if grep -q "survey: " "$WORK/cutover-refused.txt"; then
+    echo "the refusal puts the survey's path on the screen, and plumbing belongs in the log"; fail=1
+  fi
   if [ -e "$snapshot" ]; then
     echo "a refused cutover wrote the final snapshot ${snapshot}"; fail=1
   fi
@@ -8903,10 +8933,14 @@ migrate_box() {
   # no `+k0s`/`+k3s` marker, so the recipe is the honest one: box cannot tell
   # how this cluster was installed, and says so instead of printing a k0s reset
   # for a cluster nobody proved is k0s.
-  grep -q "box can't tell how this cluster was installed" "$WORK/cutover.txt" ||
+  grep -q "remove this cluster the way it was installed" "$WORK/cutover.txt" ||
     { echo "the replace path printed no teardown the operator can check"; fail=1; }
-  grep -qF "box migrate apply ${snapshot}" "$WORK/cutover.txt" ||
-    { echo "the replace path did not name the command that finishes the job"; fail=1; }
+  # The next command, as one a person copies: it wraps like a shell and the path
+  # is on it whole.
+  grep -qE '^  \$ box migrate apply( | \\)' "$WORK/cutover.txt" ||
+    { echo "the replace path did not name the command that finishes the job:"; tail -6 "$WORK/cutover.txt"; fail=1; }
+  grep -qF "$(basename "$snapshot")" "$WORK/cutover.txt" ||
+    { echo "the command the replace path prints names no snapshot"; fail=1; }
   [ -f "$snapshot" ] ||
     { echo "cutover took no final snapshot at ${snapshot}"; fail=1; return 0; }
   # One file, root-only: it holds the source's API keys and Plex's token.
@@ -8919,15 +8953,29 @@ migrate_box() {
   tar -xzOf "$snapshot" report.txt >"$WORK/report.txt" 2>/dev/null ||
     { echo "the snapshot holds no report.txt"; fail=1; return 0; }
   report="$WORK/report.txt"
+  rows_of "$report" >"$WORK/report-rows.txt"
   for instance in qbittorrent $MIGRATE_ARRS plex autobrr qui pbh tautulli; do
     source=$instance
-    grep -q "^app: ${instance} (from ${source}, config " "$report" ||
-      { echo "the plan does not name ${instance}, and the source runs it"; fail=1; }
+    grep -qE "^  ${instance} +from ${source} .*config " "$WORK/report-rows.txt" ||
+      { echo "the report does not name ${instance}, and the source runs it:"; grep -E "^  ${instance} " "$WORK/report-rows.txt" || true; fail=1; }
     tar -tzf "$snapshot" "config/${instance}/" >/dev/null 2>&1 ||
       { echo "the snapshot carries no config tree for ${instance}"; fail=1; }
   done
-  grep -qE "^data: .* \(downloads: Downloads, media: library\)$" "$report" ||
-    { echo "the plan does not name the data root with Downloads and library:"; sed -n '/^data:/p' "$report"; fail=1; }
+  # The data root and the two directories the run renames into box's layout, in
+  # the report's data section, one row each.
+  grep -qE '^  root +/.*' "$WORK/report-rows.txt" ||
+    { echo "the report does not name the data root:"; sed -n '/^data$/,/^$/p' "$report"; fail=1; }
+  grep -qE '^  renames +Downloads → downloads · library → media$' "$WORK/report-rows.txt" ||
+    { echo "the report does not name the two directories the run renames:"; sed -n '/^data$/,/^$/p' "$report"; fail=1; }
+  # The page is beside the snapshot too, 0600, and it is the one inside it: one
+  # builder, so the file a person reads with less is the file that travels.
+  report_file="${snapshot%.tar.gz}-report.txt"
+  [ -f "$report_file" ] ||
+    { echo "cutover wrote no report beside the snapshot"; fail=1; }
+  [ "$(stat -c '%a' "$report_file" 2>/dev/null || echo none)" = 600 ] ||
+    { echo "the report beside the snapshot is mode $(stat -c '%a' "$report_file" 2>/dev/null || echo none), want 600"; fail=1; }
+  cmp -s "$report_file" "$report" ||
+    { echo "the report beside the snapshot is not the one inside it"; fail=1; }
   # Plex's snapshot is its whole data when there is room: the preferences, the
   # library database, and the Metadata and Media trees Plex spent hours building
   # from the media it was given. The Cache tree beside them is what it leaves
@@ -8952,12 +9000,14 @@ migrate_box() {
   if grep -qxF "config/plex/.s5n-e2e-source" "$WORK/snapshot-entries.txt"; then
     echo "the snapshot carries the file beside Plex's home, and a Plex snapshot is its home and nothing else in the mount"; fail=1
   fi
-  # Said once, in the report the snapshot holds, and on the screen the run
-  # printed: what a Plex snapshot carries is a decision the operator reads.
+  # Said once, in the report the snapshot holds: what a Plex snapshot carries is
+  # a decision the operator reads in full, so it is the page's line and not one
+  # the screen keeps (rule 7).
   [ "$(grep -cF "$plex_carry" "$report")" = 1 ] ||
     { echo "the snapshot's report does not say once what Plex's snapshot carries ($(grep -cF 'plex: carried' "$report" || true) times):"; grep -F "plex: carried" "$report" || true; fail=1; }
-  grep -qF "$plex_carry" "$WORK/cutover.txt" ||
-    { echo "the cutover did not print the line about what Plex's snapshot carries"; fail=1; }
+  if grep -qF "plex: carried" "$WORK/cutover.txt"; then
+    echo "the cutover put the note about Plex's snapshot on the screen, and the report is the page that holds it"; fail=1
+  fi
   # What the full carry is worth on this fixture: the whole config tree the
   # source wrote, the bytes of it the snapshot carries, and the file itself.
   plex_tree=$(du -sb "$src/var/data/plex" | cut -f1) || plex_tree=0
@@ -8973,19 +9023,14 @@ migrate_box() {
   # the one check only apply can make -- Plex's database is readable through its
   # own image alone -- is in it. The cutover ran unattended (--yes), so its last
   # screen lists every one of those defaults by name.
-  grep -q "^called out:$" "$report" ||
-    { echo "the snapshot's report carries no called-out block"; fail=1; }
-  grep -q "^checked at apply:$" "$report" ||
-    { echo "the report does not name what only apply can check"; sed -n '/^called out:/,$p' "$report"; fail=1; }
-  grep -qE "^  plex \(its database is only readable through its own image" "$report" ||
-    { echo "the report does not call out Plex's database as checked at apply"; fail=1; }
-  grep -q "^defaults taken:$" "$WORK/cutover.txt" ||
-    { echo "the unattended cutover did not name the defaults it took:"; tail -20 "$WORK/cutover.txt"; fail=1; }
-  cutover_tail=$(sed -n '/^defaults taken:$/,$p' "$WORK/cutover.txt") || true
-  case "$cutover_tail" in
-    *"plex (its database is only readable through its own image"*) ;;
-    *) echo "the cutover's list of defaults taken does not name the check it left to apply:"; printf '%s\n' "$cutover_tail"; fail=1 ;;
-  esac
+  grep -q "^checks$" "$report" ||
+    { echo "the snapshot's report carries no checks section"; fail=1; }
+  grep -qE "^  plex +checked at apply · its database is only readable through its own image" "$WORK/report-rows.txt" ||
+    { echo "the report does not name Plex's database as checked at apply:"; sed -n '/^checks$/,/^$/p' "$report"; fail=1; }
+  # The unattended run says how many decisions it took, and the report names
+  # each one: a default is never silent, and the screen is the count.
+  grep -qE '^! defaults +[0-9]+ defaults? taken · the report names each one$' "$WORK/cutover.txt" ||
+    { echo "the unattended cutover did not say how many defaults it took:"; tail -20 "$WORK/cutover.txt"; fail=1; }
   # The blessed Plex image's entrypoint writes its transcoder directory into
   # Preferences.xml as /transcode, which no mount of the source gives a rule:
   # discovery maps it onto itself because the release mounts the same
@@ -9087,6 +9132,16 @@ migrate_box() {
     fail=1; return 0
   fi
   cat "$WORK/apply-migrate.txt"
+  # The run's own page, beside the snapshot: this run's rows in full, where the
+  # screen keeps the table and the counts (rule 7). It is 0600 like everything
+  # next to a snapshot, and it says nothing of the release Secret.
+  apply_report="${snapshot%.tar.gz}-apply-report.txt"
+  [ -f "$apply_report" ] ||
+    { echo "migrate apply wrote no report beside the snapshot"; fail=1; }
+  [ "$(stat -c '%a' "$apply_report" 2>/dev/null || echo none)" = 600 ] ||
+    { echo "the run's report is mode $(stat -c '%a' "$apply_report" 2>/dev/null || echo none), want 600"; fail=1; }
+  rows_of "$apply_report" >"$WORK/apply-report-rows.txt" 2>/dev/null || true
+  rows_of "$WORK/apply-migrate.txt" >"$WORK/apply-migrate-rows.txt" 2>/dev/null || true
   # The one confirm comes before anything is installed: the line that says the
   # run has not written anything yet, and the summary the answer applies to, are
   # both above bootstrap's own decision and the chart init pulled. The order is
@@ -9105,10 +9160,10 @@ migrate_box() {
   # one in until the install: its row says so, above the install, and the row the
   # check then fills in is below it. Both are the same operator's reading of the
   # same run.
-  grep -qE "^  ✓ plex +[0-9.]+ (KiB|MiB|GiB) · its whole data: metadata, artwork and thumbnails · its databases are checked once Plex's image runs · keeps its Plex token$" \
-    "$WORK/apply-migrate.txt" ||
+  grep -qE "^  plex +[0-9.]+ (KiB|MiB|GiB) · its whole data: metadata, artwork and thumbnails · its databases are checked once Plex's image runs · keeps its Plex token$" \
+    "$WORK/apply-migrate-rows.txt" ||
     { echo "the confirm does not say when Plex's databases are checked";
-      grep -E "plex" "$WORK/apply-migrate.txt" | head -5; fail=1; }
+      grep -E "plex" "$WORK/apply-migrate-rows.txt" | head -5; fail=1; }
   grep -qE "^checked after the install$" "$WORK/apply-migrate.txt" ||
     { echo "the run does not report the check the confirm deferred"; fail=1; }
   # The two halves of the same bug the root run can now show: every path the
@@ -9184,9 +9239,9 @@ migrate_box() {
     { echo "box did not pull ${CHART_REPO}:${CHART_VERSION}"; fail=1; }
   # The confirm says what the snapshot carried, once: an operator deciding to
   # copy a Plex config reads that its artwork and preview thumbnails are in it.
-  grep -qE "^  · plex +carried its whole data -- metadata, artwork, thumbnails and its databases -- except the caches, codecs, logs and crash reports Plex rebuilds or downloads again" \
-    "$WORK/apply-migrate.txt" ||
-    { echo "apply's confirm does not say what Plex's snapshot carried"; fail=1; }
+  grep -qE "^  plex +carried its whole data -- metadata, artwork, thumbnails and its databases -- except the caches, codecs, logs and crash reports Plex rebuilds or downloads again$" \
+    "$WORK/apply-report-rows.txt" ||
+    { echo "apply's report does not say what Plex's snapshot carried"; fail=1; }
   # The box it installed runs nothing the plan migrates: the apps went in off,
   # and the adoption is what switches them on. The receipt for that empty
   # release is ok, which is what `box apply` waits on.
@@ -9208,27 +9263,32 @@ migrate_box() {
   # What the run said it would do, before it did it. The two renames, the kept
   # keys and the connections adopted by id are the whole point of a migration,
   # and a summary that does not name them is a run that did less.
-  grep -qE "^  ✓ data +Downloads → downloads · library → media · media: 4K/Movies → movies-4k · 4K/TV → tv-4k · Movies → movies · TV → tv$" \
-    "$WORK/apply-migrate.txt" ||
-    { echo "the plan does not say it renames the source's two data directories and the library's own:";
-      grep -E "^  ✓ data" "$WORK/apply-migrate.txt" || true; fail=1; }
+  grep -qE "^  ✓ data +Downloads → downloads · library → media$" "$WORK/apply-migrate-rows.txt" ||
+    { echo "the plan does not say it renames the source's two data directories:";
+      grep -E "^  ✓ data" "$WORK/apply-migrate-rows.txt" || true; fail=1; }
+  grep -qE "^  ✓ library +4K/Movies → movies-4k · 4K/TV → tv-4k · Movies → movies · TV → tv$" \
+    "$WORK/apply-migrate-rows.txt" ||
+    { echo "the plan does not say it renames the library's own directories onto box's categories:";
+      grep -E "^  ✓ library" "$WORK/apply-migrate-rows.txt" || true; fail=1; }
+  # The rows a person checks are the page's too: the screen folds the tail of a
+  # long app list, and the report is where every app's row is written in full.
   for instance in $MIGRATE_ARRS; do
-    grep -qE "^  ✓ ${instance} +.*keeps its API key" "$WORK/apply-migrate.txt" ||
+    grep -qE "^  ${instance} +.*keeps its API key$" "$WORK/apply-report-rows.txt" ||
       { echo "the plan did not say it keeps ${instance}'s API key"; fail=1; }
-    grep -qE "^  ✓ ${instance} +.*keeps download client \"" "$WORK/apply-migrate.txt" ||
+    grep -qE "^  ${instance} +.*keeps download client \"" "$WORK/apply-report-rows.txt" ||
       { echo "the plan did not say it adopts ${instance}'s download client by id"; fail=1; }
   done
   # Plex's token is the one credential that is not an app's own key: the plan
   # says it keeps it (the confirm's grouped row names the fact; the key's name is
   # on the plain row, `plex: keep its Plex token (plex-token)`).
-  grep -qE "^  ✓ plex +.*keeps its Plex token" "$WORK/apply-migrate.txt" ||
+  grep -qE "^  plex +.*keeps its Plex token$" "$WORK/apply-report-rows.txt" ||
     { echo "the plan did not say it keeps Plex's server token";
-      grep -E "^  ✓ plex" "$WORK/apply-migrate.txt" || true; fail=1; }
+      grep -E "^  plex" "$WORK/apply-report-rows.txt" || true; fail=1; }
   # The pbh rewriter files the downloader it finds under the source's key, which
   # is the id a v7 config stores it under; the record is what wiring then has to
   # reconcile, so the plan naming it is the other half of the adoption.
-  grep -qE "^  ✓ pbh +.*keeps downloader \"${MIGRATE_PBH_DOWNLOADER}\"" \
-    "$WORK/apply-migrate.txt" ||
+  grep -qE "^  pbh +.*keeps downloader \"${MIGRATE_PBH_DOWNLOADER}\"" \
+    "$WORK/apply-report-rows.txt" ||
     { echo "the plan did not say it adopts PeerBanHelper's downloader ${MIGRATE_PBH_DOWNLOADER} by id"; fail=1; }
   has_receipt "$WORK/apply-migrate.txt" ||
     { echo "the apply the migration handed over to did not report a healthy receipt"; fail=1; }
@@ -9240,15 +9300,15 @@ migrate_box() {
   # own image. The confirm's row counts them all as paths; which column and how
   # many times is the snapshot's report and --details, and the database itself
   # is read back below.
-  grep -qE "^  ✓ plex +[0-9.]+ (KiB|MiB|GiB) · its whole data: metadata, artwork and thumbnails · [1-9][0-9,]* paths · keeps its Plex token$" "$WORK/apply-migrate.txt" ||
-    { echo "the plan's Plex row does not count the paths the runner rewrote:"; grep -E "plex" "$WORK/apply-migrate.txt" | head -5; fail=1; }
+  grep -qE "^  plex +[0-9.]+ (KiB|MiB|GiB) · its whole data: metadata, artwork and thumbnails · [1-9][0-9,]* paths · keeps its Plex token$" "$WORK/apply-report-rows.txt" ||
+    { echo "the plan's Plex row does not count the paths the runner rewrote:"; grep -E "plex" "$WORK/apply-report-rows.txt" | head -5; fail=1; }
   # autobrr and qui allow exactly one account and box owns it, so a source's
   # account has to become box's; the confirm says so once per app, with the name
   # the source used, because that name is the operator's own and it is the one
   # that stops working.
   for instance in autobrr qui; do
-    grep -qE "^  ✓ ${instance} +.*account \"${MIGRATE_SOURCE_ACCOUNT}\" becomes s5n" \
-      "$WORK/apply-migrate.txt" ||
+    grep -qE "^  ${instance} +.*account \"${MIGRATE_SOURCE_ACCOUNT}\" becomes s5n" \
+      "$WORK/apply-report-rows.txt" ||
       { echo "the plan did not say ${instance}'s account ${MIGRATE_SOURCE_ACCOUNT} becomes box's own"; fail=1; }
   done
   # Tautulli's config.ini is rewritten where the app wrote it, and the plan says
@@ -9265,12 +9325,13 @@ migrate_box() {
     grep -qF "$want" "$WORK/apply-rehearsal.txt" ||
       { echo "the plan does not say \"${want}\":"; grep -F "tautulli:" "$WORK/apply-rehearsal.txt" || true; fail=1; }
   done
-  # The note is the app's, said once, and the key is a fact on its row.
-  grep -qE "^  · tautulli +its own login is switched off; you sign in through the box" \
-    "$WORK/apply-migrate.txt" ||
+  # The note is the app's, said once in the page, and the key is a fact on its
+  # row: the screen counts the notes and the report names them (rule 7).
+  grep -qE "^  tautulli +its own login is switched off, and you sign in through the box$" \
+    "$WORK/apply-report-rows.txt" ||
     { echo "the plan does not say tautulli's own login is switched off:";
-      grep -F "tautulli" "$WORK/apply-migrate.txt" || true; fail=1; }
-  grep -qE "^  ✓ tautulli +.*keeps its API key" "$WORK/apply-migrate.txt" ||
+      grep -F "tautulli" "$WORK/apply-report-rows.txt" || true; fail=1; }
+  grep -qE "^  tautulli +.*keeps its API key$" "$WORK/apply-report-rows.txt" ||
     { echo "the plan does not say tautulli keeps its API key"; fail=1; }
   [ "$fail" = 0 ] || return 0
 
