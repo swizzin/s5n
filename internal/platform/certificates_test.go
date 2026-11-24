@@ -973,7 +973,7 @@ func TestCertificatesWaitOnceForTheRun(t *testing.T) {
 	set := &Certificates{
 		Hosts:   hosts,
 		Open:    func() (CertificateCluster, error) { return cl, nil },
-		Say:     &say.Plain{W: &out, Err: &out},
+		Say:     &say.Plain{W: &out, Err: &out, Log: &out},
 		Timeout: 250 * time.Millisecond,
 	}
 	results, err := set.Apply(context.Background())
@@ -1104,7 +1104,7 @@ func TestCertificatesReadyOnTheFirstReadWaitOnce(t *testing.T) {
 	set := &Certificates{
 		Hosts:   hosts,
 		Open:    func() (CertificateCluster, error) { return cl, nil },
-		Say:     &say.Plain{W: &out, Err: &out},
+		Say:     &say.Plain{W: &out, Err: &out, Log: &out},
 		Timeout: time.Minute,
 	}
 	results, err := set.Apply(context.Background())

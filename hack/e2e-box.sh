@@ -2129,11 +2129,11 @@ print(",".join(s.get("name", "?") for s in endpoint.get("authn_strategies") or [
   [ "$node_mode" = 700 ] || { echo "the login's directory is mode ${node_mode}, want 700"; fail=1; }
   $K -n s5n-system get secret s5n-authelia -o jsonpath='{.data.storage-encryption-key}' >/dev/null 2>&1 ||
     { echo "the login's storage encryption key is not in s5n-authelia"; fail=1; }
-  # box's own words: it installed the login and reported the policy accepted,
-  # both before the release was written. The step's Label ("installing root's
-  # login") is TUI-only; the plain path prints the Done line, so that is what
-  # the log carries.
-  grep -qF "login ready: s5n-system/authelia, SecurityPolicy s5n-gateway/s5n-authelia accepted" "$WORK/bootstrap1.txt" ||
+  # box's own words: the login is one row on the screen, and the run log says
+  # which Deployment and which SecurityPolicy it waited on.
+  grep -qE "^✓ login +Authelia · " "$WORK/bootstrap1.txt" ||
+    { echo "box did not report the login as one row"; grep -i login "$WORK/bootstrap1.txt" | head -5; fail=1; }
+  grep -qF "login ready: s5n-system/authelia, SecurityPolicy s5n-gateway/s5n-authelia accepted" "$bootstrap_log" ||
     { echo "box did not say it installed the login and accepted its SecurityPolicy"; fail=1; }
   grep -qF "login: ${LOGIN} at https://${DOMAIN}/auth/" "$WORK/bootstrap1.txt" ||
     { echo "the final card did not print the login"; fail=1; }
@@ -2145,7 +2145,7 @@ print(",".join(s.get("name", "?") for s in endpoint.get("authn_strategies") or [
   # release apply in the transcript. (The step's Label is TUI-only, and the
   # "first install" line is part of init's plan, printed before any write, so
   # neither is the thing to look for.)
-  login_line=$(grep -n "login ready:" "$WORK/bootstrap1.txt" | head -1 | cut -d: -f1)
+  login_line=$(grep -nE "^✓ login " "$WORK/bootstrap1.txt" | head -1 | cut -d: -f1)
   release_line=$(grep -nE "^✓ s5n " "$WORK/bootstrap1.txt" | head -1 | cut -d: -f1)
   echo "  transcript: login at line ${login_line}, release at line ${release_line}"
   if [ -z "$login_line" ] || [ -z "$release_line" ]; then
@@ -4130,11 +4130,13 @@ EOF
   # every name, and a box whose names cannot issue yet pays one
   # CertificateTimeout for the run instead of one per name. The Done line says
   # how many of them came Ready.
-  cert_waits=$(grep -c 'Certificates to be Ready' "$WORK/bootstrap1.txt" || true)
+  cert_waits=$(grep -cE "^✓ certificates +[0-9]+ of [0-9]+" "$WORK/bootstrap1.txt" || true)
   [ "$cert_waits" = 1 ] ||
-    { echo "init printed ${cert_waits} Certificate wait lines, want one for the run's hosts"; fail=1; }
-  grep -qE '^[0-9]+ of [0-9]+ Certificates are Ready$' "$WORK/bootstrap1.txt" ||
-    { echo "init's Certificate wait did not say how many of the run's hosts came Ready"; fail=1; }
+    { echo "init printed ${cert_waits} certificate rows, want one for the run's hosts"; fail=1; }
+  grep -qE "^✓ certificates +[0-9]+ of [0-9]+" "$WORK/bootstrap1.txt" ||
+    { echo "init's certificate row did not say how many of the run's hosts came Ready"; fail=1; }
+  grep -qE "Certificates to be Ready" "$(box_log bootstrap)" ||
+    { echo "the run log does not carry the certificate wait's budget"; fail=1; }
   # A port in the band was already held by an unrelated Service when box ran,
   # and box must not have picked it -- nor anything else someone else holds.
   assert_torrent_port "the port another Service already held"

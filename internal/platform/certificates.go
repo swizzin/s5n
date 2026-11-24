@@ -294,6 +294,7 @@ func (c *Certificates) await(ctx context.Context, cl CertificateCluster, results
 	timeout := c.timeout()
 	r := c.report()
 	step := r.Start(waitOp(timeout, results))
+	r.Detail(waitDetail(timeout, results))
 	errs := make([]error, len(results))
 	var wg sync.WaitGroup
 	for i := range results {
@@ -329,27 +330,24 @@ func (c *Certificates) await(ctx context.Context, cl CertificateCluster, results
 		results[i].Ready = true
 		ready++
 	}
-	step.Done(waitDone(ready, results))
+	r.Detail(waitDone(ready, results))
+	step.Done(waitFact(ready, results))
 	return nil
 }
 
-// waitOp is the one wait step's screen line. A single host keeps the sentence
-// box has always printed for it; several are named by their count, because the
-// run has one budget for all of them.
+// waitOp is the one wait step: one row named `certificates` with how many of
+// the run's names came Ready, because the run has one budget for all of them.
+// The Certificate names and the budget are the log's.
 func waitOp(timeout time.Duration, results []CertificateResult) say.Op {
+	return say.Op{Name: "certificates", Budget: timeout}
+}
+
+// waitDetail is that step's log line: what it waits for, and how long it has.
+func waitDetail(timeout time.Duration, results []CertificateResult) string {
 	if len(results) == 1 {
-		name := GatewayNamespace + "/" + results[0].Name
-		return say.Op{
-			Label:  "waiting for Certificate " + name + " to be Ready",
-			Plain:  fmt.Sprintf("waiting up to %s for Certificate %s to be Ready", timeout, name),
-			Budget: timeout,
-		}
+		return fmt.Sprintf("waiting up to %s for Certificate %s/%s to be Ready", timeout, GatewayNamespace, results[0].Name)
 	}
-	return say.Op{
-		Label:  fmt.Sprintf("waiting for %d Certificates to be Ready", len(results)),
-		Plain:  fmt.Sprintf("waiting up to %s for %d Certificates to be Ready", timeout, len(results)),
-		Budget: timeout,
-	}
+	return fmt.Sprintf("waiting up to %s for %d Certificates to be Ready", timeout, len(results))
 }
 
 // waitDone names how many of the run's Certificates came Ready.
@@ -361,6 +359,30 @@ func waitDone(ready int, results []CertificateResult) string {
 		return ""
 	}
 	return fmt.Sprintf("%d of %d Certificates are Ready", ready, len(results))
+}
+
+// waitFact is the row's fact: how many came Ready, and from whom when every
+// name was issued by the same issuer -- which is the case on every box whose
+// names resolve the same way.
+func waitFact(ready int, results []CertificateResult) string {
+	fact := fmt.Sprintf("%d of %d", ready, len(results))
+	issuer := ""
+	for _, res := range results {
+		if res.Issuer == "" {
+			return fact
+		}
+		if issuer == "" {
+			issuer = res.Issuer
+			continue
+		}
+		if issuer != res.Issuer {
+			return fact
+		}
+	}
+	if issuer != "" {
+		fact += " from " + issuerLabel(issuer)
+	}
+	return fact
 }
 
 // serve is one host's second half, after the run's wait: the box-root re-issue
