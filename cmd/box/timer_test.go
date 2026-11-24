@@ -77,7 +77,7 @@ func TestTimerOffWritesNothingAndSaysWhere(t *testing.T) {
 	if err != nil {
 		t.Fatalf("run: %v", err)
 	}
-	if got, want := strings.TrimSpace(out), "box does not check for updates by itself: /etc/s5n/box.yaml says update.timer: off"; got != want {
+	if got, want := strings.TrimSpace(out), "· updates        off       /etc/s5n/box.yaml says update.timer: off"; got != want {
 		t.Fatalf("output = %q, want %q", got, want)
 	}
 	if body.updates != 0 || body.healths != 0 {

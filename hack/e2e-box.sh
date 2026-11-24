@@ -3325,7 +3325,7 @@ EOF
   else
     cat "$WORK/update-off.txt"; echo "a wake with the timer off exited non-zero"; fail=1
   fi
-  grep -qxF "box does not check for updates by itself: ${conf} says update.timer: off" "$WORK/update-off.txt" ||
+  grep -qxF "· updates        off       ${conf} says update.timer: off" "$WORK/update-off.txt" ||
     { echo "the switched-off wake did not say the one line naming the file:"; cat "$WORK/update-off.txt"; fail=1; }
   [ "$(sha256sum "$update_state" | cut -d' ' -f1)" = "$state_before_off" ] ||
     { echo "a wake with the timer off wrote update.json"; fail=1; }

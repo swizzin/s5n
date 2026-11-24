@@ -325,9 +325,12 @@ func cutover(ctx context.Context, o cutoverOptions, out say.Reporter, seams cuto
 
 	if o.Replace {
 		out.Phase("replace")
+		// The one fact: the cluster is the operator's to remove. What box does
+		// not do about it needs no sentence; the commands below are the answer
+		// (rule 11).
 		out.Rows([]say.Row{{
 			Mark:  say.MarkNeeds,
-			Facts: []string{"this cluster is yours to replace: box removes no cluster it did not install"},
+			Facts: []string{"this cluster is yours to replace"},
 		}})
 		// The teardown names the distribution the source's own nodes carry.
 		// A node list the read could not get is already a report line, and it

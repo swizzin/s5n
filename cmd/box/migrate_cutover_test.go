@@ -145,7 +145,7 @@ func TestCutoverWritesTheFinalSnapshotWhenEveryAppStopped(t *testing.T) {
 	// for a cluster nobody proved is k0s (TestResetRecipeNamesTheSourcesNode
 	// covers the recipes box does know).
 	for _, want := range []string{
-		"! this cluster is yours to replace: box removes no cluster it did not install",
+		"! this cluster is yours to replace",
 		"· remove this cluster the way it was installed, before anything else uses this host",
 		"$ box migrate apply \\",
 		filepath.Base(out),

@@ -60,7 +60,7 @@ func (t timerRun) run(ctx context.Context) error {
 		// One line and nothing else: no state write, no cluster client, no
 		// registry. The unit keeps waking box, and box keeps saying this, so an
 		// operator who turned the timer off can see that it is off.
-		t.report().Line(fmt.Sprintf("box does not check for updates by itself: %s says update.timer: off", t.Path))
+		t.report().Rows([]say.Row{{Mark: say.MarkNote, Name: "updates", State: "off", Facts: []string{t.Path + " says update.timer: off"}}})
 		return nil
 	}
 	state, err := t.State.Load()
@@ -99,7 +99,7 @@ func (o *updateFlags) unattended() (yes, plain bool) {
 // noTimerLine is what bootstrap says on a host where box cannot schedule its own
 // update: one line, naming the command cron would run, because a box that
 // silently never updates is the failure this feature exists to prevent.
-const noTimerLine = "box will not check for updates by itself: run `box update --timer` from cron every 15 minutes"
+const noTimerLine = "no update timer on this host: run box update --timer from cron every 15 minutes"
 
 // systemdRunning says this host's systemd is up: /run/systemd/system exists for
 // as long as it is. root on a host without it (a container, a PID 1 that is not
