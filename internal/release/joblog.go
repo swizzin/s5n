@@ -116,6 +116,13 @@ func (j *jobLog) follow() {
 			continue
 		}
 		j.setStream(rc)
+		// A wait that ended while the stream was opening has nothing more to
+		// read: closing it here is what ends this read rather than a context.
+		if !j.running() {
+			j.clearStream(rc)
+			_ = rc.Close()
+			return
+		}
 		j.read(rc)
 		j.clearStream(rc)
 		_ = rc.Close()
