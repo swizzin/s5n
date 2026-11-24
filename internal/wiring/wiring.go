@@ -665,7 +665,10 @@ func (r *Runner) work(ctx context.Context, res *Result) error {
 			// claimed, where every token is refused (see plexTokenPending).
 			pendingReason, pendingShort := "", ""
 			if !haveToken {
-				pendingReason = "no Plex token: set plex-token (from a claimed server) to let the wiring Job connect Tautulli"
+				// box fills the token in from Plex's own settings on every
+				// apply (internal/release), so a hand-set key is not what a
+				// person has to do here: claiming the server is.
+				pendingReason = plexTokenMissing(plexIdentity, "Tautulli")
 				pendingShort = "no Plex token"
 			} else if err := plex.VerifyToken(ctx, plexToken); err != nil {
 				detail, ok := plexTokenPending(plexIdentity, err)
@@ -720,7 +723,7 @@ func (r *Runner) work(ctx context.Context, res *Result) error {
 			// refuses every token, so that state is pending rather than failed.
 			pendingReason, pendingShort := "", ""
 			if !haveToken {
-				pendingReason = "no Plex token: set plex-token (from a claimed server) to let the wiring Job connect Maintainerr"
+				pendingReason = plexTokenMissing(plexIdentity, "Maintainerr")
 				pendingShort = "no Plex token"
 			} else if err := plex.VerifyToken(ctx, plexToken); err != nil {
 				detail, ok := plexTokenPending(plexIdentity, err)
@@ -867,6 +870,18 @@ func plexTokenPending(ident *apps.Identity, err error) (string, bool) {
 		return "", false
 	}
 	return "Plex is not claimed yet, so it refuses every server token: claim it at https://plex.tv/claim, then run the wiring again", true
+}
+
+// plexTokenMissing is the receipt's reason for a Plex-dependent row with no
+// server token to use, and it says what the person's part is, not what box's is:
+// box supplies the token from Plex's own settings on every apply
+// (internal/release), so a claimed server only has to wait for the next run,
+// and an unclaimed one cannot have a usable token at all until it is claimed.
+func plexTokenMissing(ident *apps.Identity, app string) string {
+	if ident != nil && ident.Claimed {
+		return "no plex-token in the release Secret: box reads it from Plex on the next apply"
+	}
+	return fmt.Sprintf("Plex is not claimed yet: claim it at https://plex.tv/claim, then apply again to connect %s", app)
 }
 
 // pbhReady names the one refusal PBH's own readiness can produce: it answers

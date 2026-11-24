@@ -97,7 +97,29 @@ func TestWiringMaintainerrPendingWithoutToken(t *testing.T) {
 	if s == nil || s.Result != "pending" {
 		t.Fatalf("maintainerr/plex = %+v, want pending", s)
 	}
-	const want = "no Plex token: set plex-token (from a claimed server) to let the wiring Job connect Maintainerr"
+	const want = "no plex-token in the release Secret: box reads it from Plex on the next apply"
+	if s.Detail != want {
+		t.Fatalf("maintainerr/plex detail = %q, want %q", s.Detail, want)
+	}
+	if f.maintainerrSaves != 0 || f.maintainerrPatches != 0 {
+		t.Fatalf("Maintainerr was written without a token: %d saves, %d patches", f.maintainerrSaves, f.maintainerrPatches)
+	}
+}
+
+// An unclaimed server cannot supply a token to anything, so the row names the
+// claim as the person's part, not a key to patch in by hand.
+func TestWiringMaintainerrPendingWithoutTokenOnAnUnclaimedServer(t *testing.T) {
+	r, f := newMediaHarness(t, false)
+	r.Config.Maintainerr.PlexTokenFile = t.TempDir() + "/plex-token" // absent
+	res, err := r.Run(context.Background())
+	if err != nil {
+		t.Fatalf("run: %v\n%s", err, Summary(res))
+	}
+	s := step(res, "maintainerr/plex")
+	if s == nil || s.Result != "pending" {
+		t.Fatalf("maintainerr/plex = %+v, want pending", s)
+	}
+	const want = "Plex is not claimed yet: claim it at https://plex.tv/claim, then apply again to connect Maintainerr"
 	if s.Detail != want {
 		t.Fatalf("maintainerr/plex detail = %q, want %q", s.Detail, want)
 	}

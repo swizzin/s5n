@@ -526,7 +526,7 @@ func TestWiringTautulliPlexPendingWithoutToken(t *testing.T) {
 			if s == nil || s.Result != "pending" {
 				t.Fatalf("tautulli/plex = %+v, want pending", s)
 			}
-			const want = "no Plex token: set plex-token (from a claimed server) to let the wiring Job connect Tautulli"
+			const want = "no plex-token in the release Secret: box reads it from Plex on the next apply"
 			if s.Detail != want {
 				t.Fatalf("tautulli/plex detail = %q, want %q", s.Detail, want)
 			}
@@ -534,6 +534,30 @@ func TestWiringTautulliPlexPendingWithoutToken(t *testing.T) {
 				t.Fatalf("Tautulli was written %d time(s) without a Plex token", f.writes)
 			}
 		})
+	}
+}
+
+// No token on a server that is not claimed: nothing can supply one, and the
+// reason is the claim rather than a key a person would patch in -- box takes the
+// token out of a claimed server's own settings on the next apply.
+func TestWiringTautulliPlexPendingWithoutTokenOnAnUnclaimedServer(t *testing.T) {
+	r, f := newMediaHarness(t, false)
+	r.Config.Tautulli.PlexTokenFile = t.TempDir() + "/plex-token" // absent
+
+	res, err := r.Run(context.Background())
+	if err != nil {
+		t.Fatalf("run: %v\n%s", err, Summary(res))
+	}
+	s := step(res, "tautulli/plex")
+	if s == nil || s.Result != "pending" {
+		t.Fatalf("tautulli/plex = %+v, want pending", s)
+	}
+	const want = "Plex is not claimed yet: claim it at https://plex.tv/claim, then apply again to connect Tautulli"
+	if s.Detail != want {
+		t.Fatalf("tautulli/plex detail = %q, want %q", s.Detail, want)
+	}
+	if f.writes != 0 {
+		t.Fatalf("Tautulli was written %d time(s) without a Plex token", f.writes)
 	}
 }
 
