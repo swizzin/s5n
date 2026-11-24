@@ -68,7 +68,9 @@
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "plexClaimToken": { "type": "string" }
+        "plexClaimToken": { "type": "string" },
+        "plexToken": { "type": "string" },
+        "existingSecret": { "type": "string" }
       }
     },
     "apps": {

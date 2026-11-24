@@ -5524,6 +5524,88 @@ PY
   release_chart=$(helm_chart_version) || true
   [ "$release_chart" = "$release_c" ] ||
     { echo "the release is on ${release_chart} after the rollback, want ${release_c}"; fail=1; }
+
+  # ---- box apply takes the Plex token out of Plex's own settings -----------
+  # A claimed server keeps the account's token in its own Preferences.xml, and
+  # the release Secret's plex-token is what Tautulli's PMS link and Maintainerr's
+  # connection read. Plex is stopped for the write: a running server rewrites
+  # that file, and the token would be back to the empty one it was installed
+  # with before box read it.
+  log "box apply seeds the release Secret's plex-token from Plex's Preferences.xml"
+  local prefs_dir="$CONFIG_PATH/plex/Library/Application Support/Plex Media Server"
+  local prefs="$prefs_dir/Preferences.xml"
+  local fake="table-token-zz1234"
+  $K -n "$NS" scale statefulset plex --replicas=0 >/dev/null ||
+    { echo "could not stop Plex to write its settings file"; fail=1; return 0; }
+  $K -n "$NS" wait --for=delete pod/plex-0 --timeout=180s >/dev/null 2>&1 || true
+  # Plex's settings file is the app's, owned by the user the app runs as, and box
+  # is neither that user nor root here: the edit is made as the node's root and
+  # the file is handed back, world-readable, so box reads what the app wrote.
+  if node_root "$CLUSTER" "cat '$prefs'" >"$WORK/plex-prefs.xml" 2>/dev/null; then
+    python3 - "$WORK/plex-prefs.xml" "$fake" <<'PY' || { fail=1; return 0; }
+import re, sys
+path, token = sys.argv[1:3]
+text = open(path).read()
+text, n = re.subn(r'PlexOnlineToken="[^"]*"', 'PlexOnlineToken="%s"' % token, text, count=1)
+if n == 0:
+    text = text.replace("/>", ' PlexOnlineToken="%s" />' % token, 1)
+if token not in text:
+    sys.exit("%s has no <Preferences> element to put the token in" % path)
+open(path, "w").write(text)
+PY
+  else
+    printf '<Preferences MachineIdentifier="e2e" PlexOnlineToken="%s" />\n' "$fake" >"$WORK/plex-prefs.xml"
+  fi
+  docker cp "$WORK/plex-prefs.xml" "${CLUSTER}-control-plane:$prefs" >/dev/null ||
+    { echo "could not put a token into Plex's settings file"; fail=1; return 0; }
+  node_root "$CLUSTER" "chmod 0644 '$prefs'; chown --reference='$prefs_dir' '$prefs'" ||
+    { echo "could not hand Plex's settings file back to the app's user"; fail=1; return 0; }
+  if "$WORK/box" apply --yes --chart-repo "$CHART_REPO" \
+    --grant "$WORK/grant.yaml" --values "$WORK/values.yaml" --paths-in-node \
+    --kubeconfig "$WORK/kubeconfig" >"$WORK/apply-plex-token.txt" 2>&1; then
+    cat "$WORK/apply-plex-token.txt"
+  else
+    cat "$WORK/apply-plex-token.txt"; fail=1; return 0
+  fi
+  grep -qF "· plex-token  read from Plex's Preferences.xml" "$WORK/apply-plex-token.txt" ||
+    { echo "box did not say it took the token from Plex's settings:"; head -20 "$WORK/apply-plex-token.txt"; fail=1; }
+  # The token is never printed, in the transcript or anywhere box says anything.
+  if grep -qF "$fake" "$WORK/apply-plex-token.txt"; then
+    echo "box printed the Plex token it read:"
+    grep -F "$fake" "$WORK/apply-plex-token.txt" | head -3
+    fail=1
+  fi
+  plex_secret=$($K -n "$NS" get secret s5n-keys -o jsonpath='{.data.plex-token}' 2>/dev/null | base64 -d || true)
+  [ "$plex_secret" = "$fake" ] ||
+    { echo "the release Secret's plex-token is not the one Plex holds: got '${plex_secret:+set}'"; fail=1; }
+  # A fake token on a server that is not claimed: the token is refused and the
+  # row says so, which is a different reason from the one that asked for a
+  # hand-patched key.
+  grep -qF "tautulli/plex: pending (Plex is not claimed yet, so it refuses every server token: claim it at https://plex.tv/claim, then run the wiring again)" \
+    "$WORK/apply-plex-token.txt" ||
+    { echo "the receipt's tautulli/plex row is not the unclaimed-Plex one:"; grep -i "plex" "$WORK/apply-plex-token.txt" | head -5; fail=1; }
+  if grep -qF "no Plex token: set plex-token" "$WORK/apply-plex-token.txt"; then
+    echo "the receipt still asks for a hand-patched plex-token with one in the Secret:"
+    grep -F "set plex-token" "$WORK/apply-plex-token.txt" | head -3
+    fail=1
+  fi
+  # A token the Secret already holds is the person's: a second apply leaves it
+  # alone, and with nothing else to do it is a no-op.
+  $K -n "$NS" patch secret s5n-keys --type merge \
+    -p "{\"data\":{\"plex-token\":\"$(printf 'a-token-a-person-set' | base64 -w0)\"}}" >/dev/null ||
+    { echo "could not set a plex-token by hand"; fail=1; return 0; }
+  if "$WORK/box" apply --yes --chart-repo "$CHART_REPO" \
+    --grant "$WORK/grant.yaml" --values "$WORK/values.yaml" --paths-in-node \
+    --kubeconfig "$WORK/kubeconfig" >"$WORK/apply-plex-token-kept.txt" 2>&1; then
+    cat "$WORK/apply-plex-token-kept.txt"
+  else
+    cat "$WORK/apply-plex-token-kept.txt"; fail=1; return 0
+  fi
+  grep -qF "s5n in ${NS}: nothing to change" "$WORK/apply-plex-token-kept.txt" ||
+    { echo "the apply over a token the Secret already holds was not a no-op:"; head -20 "$WORK/apply-plex-token-kept.txt"; fail=1; }
+  plex_secret=$($K -n "$NS" get secret s5n-keys -o jsonpath='{.data.plex-token}' 2>/dev/null | base64 -d || true)
+  [ "$plex_secret" = "a-token-a-person-set" ] ||
+    { echo "box wrote over the plex-token the Secret already held: got '${plex_secret:+$fake}'"; fail=1; }
 }
 
 # values_pin_assert <values file> <tag> <digest>: the operator's file pins the

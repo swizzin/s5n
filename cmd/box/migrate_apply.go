@@ -672,6 +672,9 @@ func migrateRelease(ctx context.Context, o *migrateApplyFlags, chart release.Cha
 		Open: func(namespace string) (release.ReleaseClient, error) {
 			return release.NewHelm(kc, namespace, release.ReleaseName)
 		},
+		OpenSecret: func(namespace string) (release.SecretKeys, error) {
+			return release.NewSecret(kc, namespace)
+		},
 		OpenStorage: func(namespace string) (release.StorageClient, error) {
 			return release.NewStorage(kc, namespace)
 		},

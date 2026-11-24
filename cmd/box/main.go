@@ -699,6 +699,9 @@ func runApply(ctx context.Context, args []string) {
 		Open: func(namespace string) (release.ReleaseClient, error) {
 			return release.NewHelm(kc, namespace, release.ReleaseName)
 		},
+		OpenSecret: func(namespace string) (release.SecretKeys, error) {
+			return release.NewSecret(kc, namespace)
+		},
 		OpenStorage: func(namespace string) (release.StorageClient, error) {
 			return release.NewStorage(kc, namespace)
 		},
@@ -942,6 +945,11 @@ func (o *initFlags) run(ctx context.Context, kubeconfig string, yes, plain bool,
 				Say:     out,
 				Open: func(namespace string) (release.ReleaseClient, error) {
 					return release.NewHelm(kc, namespace, release.ReleaseName)
+				},
+				// A re-run of init is a re-run of apply: a box claimed since
+				// the last run has its Plex token written the same way.
+				OpenSecret: func(namespace string) (release.SecretKeys, error) {
+					return release.NewSecret(kc, namespace)
 				},
 				OpenStorage: func(namespace string) (release.StorageClient, error) {
 					return release.NewStorage(kc, namespace)

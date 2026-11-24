@@ -550,6 +550,9 @@ type Result struct {
 	Storage []StorageObject
 	// AnchorWrote says this run wrote or removed the host CA ConfigMap.
 	AnchorWrote bool
+	// PlexToken says this run put the token Plex keeps for itself into the
+	// release Secret (plextoken.go).
+	PlexToken bool
 	// NamespaceCreated says apply created the seedbox's namespace, which only
 	// happens on a cluster where it is missing and this identity may create
 	// one (root's).
@@ -567,6 +570,11 @@ type Applier struct {
 	// Open returns the namespace-scoped release handle. The namespace comes
 	// from the grant, so it can only be opened after the files are read.
 	Open func(namespace string) (ReleaseClient, error)
+	// OpenSecret returns the release Secret, one data key at a time. apply
+	// reads and, when Plex has been claimed since the install, writes one key of
+	// it (plextoken.go). A caller that leaves it nil seeds no token, which is
+	// what a test about something else wants: nothing else in apply touches it.
+	OpenSecret func(namespace string) (SecretKeys, error)
 	// OpenStorage returns the storage handle for that namespace. It is separate
 	// from Open because the PVs are cluster-scoped and the claims are not part
 	// of the release: Helm must never own them.
@@ -743,6 +751,18 @@ func (a *Applier) Apply(ctx context.Context, opts Options) (Result, error) {
 	hooksWait := opts.RunHooks && !opts.SkipHooks
 	res.FirstInstall = !exists
 	res.Host = hostOf(values)
+	// The Plex server token, read here with the diff for the same reason the
+	// host step is: a run whose only work is that token has work, so it cannot
+	// answer "nothing to change". It is written after the confirm, before the
+	// release moves (plextoken.go).
+	plexToken := a.planPlexToken(ctx, r, values, vols, namespace, exists)
+	if plexToken.needed() {
+		// The release is the one installed and its values are the ones it has;
+		// what this run installs it for is the wiring Job, which has to run
+		// again now that it can read a token. Same work as `box update`'s
+		// closing apply, for the same reason.
+		hooksWait = true
+	}
 	// The peer port comes before the diff, not after it: a box installed while
 	// the chart defaulted the port has none in either file, and the number its
 	// release already runs is what this run installs. Written first, the port
@@ -1030,6 +1050,15 @@ func (a *Applier) Apply(ctx context.Context, opts Options) (Result, error) {
 		if err != nil {
 			return res, err
 		}
+	}
+
+	// The Plex token last, and still before the release moves: it is the one
+	// credential this run supplies, so it has to be in the Secret when the
+	// wiring Job this run re-runs mounts it. A token that cannot be written is
+	// one line and the apply goes on -- it is a convenience, and the wiring
+	// reports the same pending row it did before.
+	if plexToken.needed() {
+		res.PlexToken = a.writePlexToken(ctx, r, plexToken)
 	}
 
 	started := time.Now()

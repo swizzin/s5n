@@ -331,6 +331,9 @@ func updateCharts(ctx context.Context, o *updateFlags, out say.Reporter, resolve
 				h.SkipHooks = skipHooks
 				return h, nil
 			},
+			OpenSecret: func(namespace string) (release.SecretKeys, error) {
+				return release.NewSecret(kc, namespace)
+			},
 			OpenStorage: func(namespace string) (release.StorageClient, error) {
 				return release.NewStorage(kc, namespace)
 			},

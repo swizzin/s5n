@@ -122,6 +122,9 @@ func runRollback(ctx context.Context, args []string) {
 		Open: func(namespace string) (release.ReleaseClient, error) {
 			return updateHelm(kc, namespace)
 		},
+		OpenSecret: func(namespace string) (release.SecretKeys, error) {
+			return release.NewSecret(kc, namespace)
+		},
 		OpenStorage: func(namespace string) (release.StorageClient, error) {
 			return release.NewStorage(kc, namespace)
 		},
