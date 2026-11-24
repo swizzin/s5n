@@ -88,8 +88,7 @@ apps
 data
   root     /var/data/library
   renames  Downloads → downloads · library → media
-  library  Movies → movies · TV → tv · 4K/Movies → movies-4k · 4K/TV
-           → tv-4k
+  library  Movies → movies · TV → tv · 4K/Movies → movies-4k · 4K/TV → tv-4k
 
 addresses
   qbittorrent.legacy:8080  → qbittorrent · a Service of the source cluster
@@ -136,7 +135,7 @@ func TestEveryLineFitsTheColumn(t *testing.T) {
 	for _, line := range strings.Split(strings.TrimRight(d.Text(), "\n"), "\n") {
 		// One unbreakable token -- a path, an address -- is longer than the
 		// column and stays whole; every other line fits.
-		if len(line) > Width && strings.Contains(strings.TrimSpace(line), " ") {
+		if Cols(line) > Width && strings.Contains(strings.TrimSpace(line), " ") {
 			t.Errorf("%d columns: %q", len(line), line)
 		}
 	}

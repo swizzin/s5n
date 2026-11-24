@@ -18,6 +18,7 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/swizzin/s5n/internal/atomicfile"
 )
@@ -153,8 +154,8 @@ func writeField(b *strings.Builder, indent int, name string, column int, facts s
 	head := strings.Repeat(" ", indent)
 	if name != "" {
 		width := column
-		if len(name) > width {
-			width = len(name)
+		if Cols(name) > width {
+			width = Cols(name)
 		}
 		head += pad(name, width)
 		if facts == "" {
@@ -163,7 +164,7 @@ func writeField(b *strings.Builder, indent int, name string, column int, facts s
 		}
 		// A name that takes the whole column leaves no room for its facts on the
 		// same line: they go under it, at the row's own indentation, whole.
-		if len(head)+2+len(facts) > Width && width > column {
+		if Cols(head)+2+Cols(facts) > Width && width > column {
 			b.WriteString(strings.TrimRight(head, " ") + "\n")
 			head = strings.Repeat(" ", indent+2)
 		} else {
@@ -177,11 +178,11 @@ func writeField(b *strings.Builder, indent int, name string, column int, facts s
 	// further in: a wrapped line that started at the row's own indent would read
 	// as another row (a reader's eye, and every tool that joins a wrapped row
 	// back up).
-	hang := len(head)
+	hang := Cols(head)
 	if name == "" {
 		hang += 2
 	}
-	for i, line := range Wrap(facts, Width-len(head)) {
+	for i, line := range Wrap(facts, Width-Cols(head)) {
 		if i == 0 {
 			b.WriteString(head + line + "\n")
 			continue
@@ -190,6 +191,10 @@ func writeField(b *strings.Builder, indent int, name string, column int, facts s
 	}
 }
 
+// Cols is how many columns s takes on a terminal: one per character, so an
+// arrow or a middle dot (three bytes) is one column, as a person sees it.
+func Cols(s string) int { return utf8.RuneCountInString(s) }
+
 // Wrap breaks text into lines of at most width columns, never inside a word: a
 // path or an address that does not fit goes on a line of its own, whole, because
 // half a path is a different path.
@@ -197,14 +202,14 @@ func Wrap(text string, width int) []string {
 	if width < 1 {
 		width = 1
 	}
-	words := strings.Fields(text)
+	words := glueSeparators(strings.Fields(text))
 	if len(words) == 0 {
 		return []string{""}
 	}
 	var out []string
 	line := words[0]
 	for _, w := range words[1:] {
-		if len(line)+1+len(w) <= width {
+		if Cols(line)+1+Cols(w) <= width {
 			line += " " + w
 			continue
 		}
@@ -218,7 +223,7 @@ func Wrap(text string, width int) []string {
 func widestLabel(counts []Count) int {
 	w := 0
 	for _, c := range counts {
-		if n := len(c.Label); n > w {
+		if n := Cols(c.Label); n > w {
 			w = n
 		}
 	}
@@ -231,7 +236,7 @@ func widestRow(rows []Row) int {
 	const cap = 24
 	w := 0
 	for _, r := range rows {
-		if n := len(r.Name); n > w && n <= cap {
+		if n := Cols(r.Name); n > w && n <= cap {
 			w = n
 		}
 	}
@@ -240,8 +245,23 @@ func widestRow(rows []Row) int {
 
 // pad right-pads s to width.
 func pad(s string, width int) string {
-	if n := width - len(s); n > 0 {
+	if n := width - Cols(s); n > 0 {
 		return s + strings.Repeat(" ", n)
 	}
 	return s
+}
+
+// glueSeparators keeps a middle dot on the line of the fact before it: a wrapped
+// line that started with "·" would read as a row of its own, so the dot ends
+// the line it follows and the next line starts with a fact.
+func glueSeparators(words []string) []string {
+	out := make([]string, 0, len(words))
+	for _, w := range words {
+		if w == "·" && len(out) > 0 {
+			out[len(out)-1] += " ·"
+			continue
+		}
+		out = append(out, w)
+	}
+	return out
 }

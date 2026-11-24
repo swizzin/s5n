@@ -10,6 +10,7 @@ package main
 
 import (
 	"bytes"
+	"github.com/swizzin/s5n/internal/migrate/report"
 	"os"
 	"path/filepath"
 	"strings"
@@ -103,12 +104,11 @@ func TestTheConfirmScreenIsTheDecidingPage(t *testing.T) {
 		"                          keeps its Plex token",
 		"  qbittorrent  570.0 MiB  1,565 paths",
 		"  qui          16.0 MiB",
-		"  radarr       1.0 GiB    2,937 paths · keeps download client \"qBT\" · keeps",
-		"                          its API key",
+		"  radarr       1.0 GiB    2,937 paths · keeps download client \"qBT\" · keeps its",
+		"                          API key",
 		"  sonarr       1.0 GiB    keeps its API key",
 		"  ✓ data     Downloads → downloads · library → media",
-		"  ✓ library  4K/Movies → movies-4k · 4K/TV → tv-4k · Movies → movies",
-		"               · TV → tv",
+		"  ✓ library  4K/Movies → movies-4k · 4K/TV → tv-4k · Movies → movies · TV → tv",
 		"  ! radarr, sonarr  kept      \"Deluge\" (172.17.0.1:10365) and \"rT\"",
 		"                              (172.17.0.1:443) · Deluge client: this box runs",
 		"                              qBittorrent",
@@ -136,8 +136,8 @@ func TestTheAppFoldFoldsTheTail(t *testing.T) {
 	}
 	printed := out.String()
 	for _, line := range strings.Split(printed, "\n") {
-		if len(line) > 80 {
-			t.Errorf("%d columns: %q", len(line), line)
+		if report.Cols(line) > 80 {
+			t.Errorf("%d columns: %q", report.Cols(line), line)
 		}
 	}
 	// Eleven apps: eight rows, then one naming the three that did not fit.

@@ -76,8 +76,8 @@ func TestPlainNoteHangsUnderItsText(t *testing.T) {
 		}
 	}
 	for _, line := range lines {
-		if len(line) > Width {
-			t.Fatalf("a note line is %d columns, want at most %d: %q", len(line), Width, line)
+		if columns(line) > Width {
+			t.Fatalf("a note line is %d columns, want at most %d: %q", columns(line), Width, line)
 		}
 	}
 }

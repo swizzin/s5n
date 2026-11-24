@@ -11,6 +11,7 @@ package main
 import (
 	"context"
 	"errors"
+	"github.com/swizzin/s5n/internal/migrate/report"
 	"os"
 	"path/filepath"
 	"strings"
@@ -158,8 +159,8 @@ func TestACutoverStopCommandWrapsLikeAShell(t *testing.T) {
 	}
 	var command []string
 	for _, line := range lines[1:] {
-		if len(line) > 80 {
-			t.Errorf("%d columns: %q", len(line), line)
+		if report.Cols(line) > 80 {
+			t.Errorf("%d columns: %q", report.Cols(line), line)
 		}
 		command = append(command, strings.TrimSuffix(strings.TrimSpace(line), " \\"))
 	}

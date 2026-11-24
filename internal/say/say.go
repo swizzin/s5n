@@ -557,8 +557,8 @@ func (p *Plain) groupList(g Group, nameWidth int) {
 			// scans like a column of numbers (rule 1).
 			head += pad(r.State, stateWidth(r.State)) + "  "
 		}
-		hang := strings.Repeat(" ", len(head))
-		for i, line := range Wrap(strings.Join(r.Facts, " · "), Width-len(head)) {
+		hang := strings.Repeat(" ", columns(head))
+		for i, line := range Wrap(strings.Join(r.Facts, " · "), Width-columns(head)) {
 			if i == 0 {
 				fmt.Fprintln(p.out(), head+line)
 				continue
@@ -597,8 +597,8 @@ func (p *Plain) groupTable(g Group, nameWidth int) {
 			continue
 		}
 		line += "  "
-		hang := strings.Repeat(" ", len(line))
-		for i, wrapped := range Wrap(r.Facts[len(r.Facts)-1], Width-len(line)) {
+		hang := strings.Repeat(" ", columns(line))
+		for i, wrapped := range Wrap(r.Facts[len(r.Facts)-1], Width-columns(line)) {
 			if i == 0 {
 				fmt.Fprintln(p.out(), line+wrapped)
 				continue
@@ -625,7 +625,9 @@ func (p *Plain) Note(text string) {
 	if text == "" {
 		return
 	}
-	for i, line := range Wrap(text, Width-2) {
+	// The continuation hangs four columns in, so the text wraps at the width
+	// that leaves room for it on every line.
+	for i, line := range Wrap(text, Width-4) {
 		if i == 0 {
 			fmt.Fprintln(p.out(), "  "+line)
 			continue
@@ -643,8 +645,8 @@ func columnWidths(g Group) []int {
 			continue
 		}
 		for i := range g.Columns {
-			if i+1 < len(r.Facts) && len(r.Facts[i]) > cols[i] {
-				cols[i] = len(r.Facts[i])
+			if i+1 < len(r.Facts) && columns(r.Facts[i]) > cols[i] {
+				cols[i] = columns(r.Facts[i])
 			}
 		}
 	}
@@ -671,16 +673,16 @@ func (p *Plain) ToFinish(rows []Row) {
 		if row.Name != "" {
 			head += pad(row.Name, width) + "  "
 		}
-		hang := strings.Repeat(" ", len(head))
+		hang := strings.Repeat(" ", columns(head))
 		facts := strings.Join(row.Facts, " · ")
-		for i, line := range Wrap(facts, Width-len(head)) {
+		for i, line := range Wrap(facts, Width-columns(head)) {
 			if i == 0 {
 				fmt.Fprintln(p.out(), head+line)
 				continue
 			}
 			fmt.Fprintln(p.out(), hang+line)
 		}
-		for i, line := range WrapShell(row.Command, Width-len(hang)-2) {
+		for i, line := range WrapShell(row.Command, Width-columns(hang)-2) {
 			if row.Command == "" {
 				break
 			}
@@ -697,7 +699,7 @@ func (p *Plain) ToFinish(rows []Row) {
 func blockNameWidth(rows []TableRow) int {
 	w := 0
 	for _, r := range rows {
-		if n := len(r.Name); n > w {
+		if n := columns(r.Name); n > w {
 			w = n
 		}
 	}
@@ -824,14 +826,14 @@ func Wrap(text string, width int) []string {
 	if width < 1 {
 		width = 1
 	}
-	words := strings.Fields(text)
+	words := glueSeparators(strings.Fields(text))
 	if len(words) == 0 {
 		return []string{""}
 	}
 	out := []string{}
 	line := words[0]
 	for _, w := range words[1:] {
-		if len(line)+1+len(w) <= width {
+		if columns(line)+1+columns(w) <= width {
 			line += " " + w
 			continue
 		}
@@ -855,7 +857,7 @@ func WrapShell(text string, width int) []string {
 	var out []string
 	line := words[0]
 	for _, w := range words[1:] {
-		if len(line)+1+len(w) <= width {
+		if columns(line)+1+columns(w) <= width {
 			line += " " + w
 			continue
 		}
@@ -1109,3 +1111,18 @@ func (p *Plain) logRow() {
 }
 
 func (p *Plain) Close() {}
+
+// glueSeparators keeps a middle dot on the line of the fact before it: a wrapped
+// line that started with "·" would read as a row of its own, so the dot ends
+// the line it follows and the next line starts with a fact.
+func glueSeparators(words []string) []string {
+	out := make([]string, 0, len(words))
+	for _, w := range words {
+		if w == "·" && len(out) > 0 {
+			out[len(out)-1] += " ·"
+			continue
+		}
+		out = append(out, w)
+	}
+	return out
+}

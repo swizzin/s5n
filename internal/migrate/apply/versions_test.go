@@ -114,10 +114,10 @@ func versionFixture() Summary {
 func TestTheVersionColumnIsATableColumn(t *testing.T) {
 	var out strings.Builder
 	for _, block := range versionFixture().Grouped().Blocks {
-		PrintGroup(&say.Plain{W: &out}, block)
+		(&say.Plain{W: &out}).Group(block)
 	}
 	want := strings.Join([]string{
-		"apps           carries    version             changes",
+		"apps           carries    version         changes",
 		"  pbh          1.0 GiB    7.3 → 9.6  ↑",
 		"  qbittorrent  570.0 MiB  5.3",
 		"  seerr        8.0 MiB    ?",
