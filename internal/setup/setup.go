@@ -201,10 +201,8 @@ type Answers struct {
 	PUID, PGID int
 	// Apps are the catalog apps this box runs, sorted.
 	Apps []string
-	// Login is the account the login admits, and Password is this run's
-	// password: it exists for the hand-over and is never written to a file.
-	Login    string
-	Password string
+	// Login is the account the login admits.
+	Login string
 	// Namespace is the seedbox's namespace, which the login or the flag named.
 	Namespace string
 	// Port is the torrent port the grant records for this box, or nil when the
@@ -617,7 +615,6 @@ func (d *Decision) Run(ctx context.Context, opts Options) (Result, error) {
 			PGID:          pgid,
 			Apps:          apps,
 			Login:         loginName,
-			Password:      password,
 			Namespace:     namespace,
 			Port:          port,
 			Hosts:         res.Hosts,
