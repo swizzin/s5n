@@ -26,7 +26,7 @@ import (
 // keep a client they have and one they cannot run, and the renames that put the
 // source's data into box's layout.
 func confirmFixture() apply.Summary {
-	leaveWhy := `"Deluge" is a Deluge client and this box runs only qBittorrent, so a rewrite would point it at an app that does not speak its protocol`
+	leaveWhy := "Deluge client: this box runs qBittorrent"
 	instances := []apply.InstanceSummary{
 		{
 			App:      "autobrr",
@@ -109,10 +109,9 @@ func TestTheConfirmScreenIsTheDecidingPage(t *testing.T) {
 		"  ✓ data     Downloads → downloads · library → media",
 		"  ✓ library  4K/Movies → movies-4k · 4K/TV → tv-4k · Movies → movies",
 		"               · TV → tv",
-		"  ! radarr, sonarr  \"Deluge\" (172.17.0.1:10365) and \"rT\" (172.17.0.1:443) stay",
-		"                    as it is: \"Deluge\" is a Deluge client and this box runs only",
-		"                    qBittorrent, so a rewrite would point it at an app that does",
-		"                    not speak its protocol",
+		"  ! radarr, sonarr  kept      \"Deluge\" (172.17.0.1:10365) and \"rT\"",
+		"                              (172.17.0.1:443) · Deluge client: this box runs",
+		"                              qBittorrent",
 		"  1 note · 2 other workloads stay behind · 2 values left as they are ·",
 		"    --details",
 		"",

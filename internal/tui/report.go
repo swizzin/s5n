@@ -371,6 +371,9 @@ func (r *Reporter) Group(g say.Group) {
 		if row.Name != "" {
 			name = row.Name + strings.Repeat(" ", max(0, nameWidth-lipgloss.Width(row.Name))) + "  "
 		}
+		if row.State != "" {
+			name += row.State + strings.Repeat(" ", max(0, say.StateCol-lipgloss.Width(row.State))) + "  "
+		}
 		lead, last := groupColumns(row, cols)
 		avail := r.width - lipgloss.Width(prefix) - lipgloss.Width(name) - lipgloss.Width(lead)
 		if avail < 8 {

@@ -137,6 +137,10 @@ func (r Row) TextCol() int {
 type TableRow struct {
 	Glyph string
 	Name  string
+	// State is the one word that says what happened to the row -- kept, new,
+	// moved, skipped -- in its own column after the name. Empty for a row whose
+	// heading already says it.
+	State string
 	Facts []string
 }
 
@@ -548,6 +552,11 @@ func (p *Plain) groupList(g Group, nameWidth int) {
 		if r.Name != "" {
 			head += pad(r.Name, nameWidth) + "  "
 		}
+		if r.State != "" {
+			// The state is one word in its own column, so a block of them
+			// scans like a column of numbers (rule 1).
+			head += pad(r.State, stateWidth(r.State)) + "  "
+		}
 		hang := strings.Repeat(" ", len(head))
 		for i, line := range Wrap(strings.Join(r.Facts, " · "), Width-len(head)) {
 			if i == 0 {
@@ -597,6 +606,15 @@ func (p *Plain) groupTable(g Group, nameWidth int) {
 			fmt.Fprintln(p.out(), hang+wrapped)
 		}
 	}
+}
+
+// stateWidth is the state column: the built-in width, widened by a word that
+// does not fit it.
+func stateWidth(state string) int {
+	if w := columns(state); w > StateCol {
+		return w
+	}
+	return StateCol
 }
 
 // Note is the transcript's line of prose under a block: two columns in, so it

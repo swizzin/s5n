@@ -97,13 +97,18 @@ func (s Summary) reportLibrary() []report.Row {
 	return rows
 }
 
-// reportLeft is every value this run leaves as it is, per app, with the reason:
-// the list a person checks before the downtime, not after it.
+// reportLeft is every value this run leaves as it is, per app: the state, the
+// clause the screen showed, and the whole sentence the rewriter wrote about it,
+// which is what the screen has no room for (rules 2 and 7).
 func (s Summary) reportLeft() []report.Row {
 	var rows []report.Row
 	for _, in := range s.Instances {
 		for _, l := range in.Left {
-			rows = append(rows, report.Row{Name: in.App + " " + l.What, Facts: []string{"left as it is", l.Why}})
+			facts := []string{"kept", l.Why}
+			if l.Detail != "" {
+				facts = append(facts, l.Detail)
+			}
+			rows = append(rows, report.Row{Name: in.App + " " + l.What, Facts: facts})
 		}
 	}
 	return rows

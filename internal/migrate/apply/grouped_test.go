@@ -20,7 +20,7 @@ import (
 // one whose config a snapshot does not carry whole, one with torrents and
 // paths, and two that share a download client they keep and one they leave.
 func groupedFixture() Summary {
-	leaveWhy := `"Deluge" is a Deluge client and this box runs only qBittorrent, so a rewrite would point it at an app that does not speak its protocol; delete it in the Arr if you do not need it`
+	leaveWhy := "Deluge client: this box runs qBittorrent"
 	return Summary{
 		Rehearsal: true,
 		Instances: []InstanceSummary{
@@ -106,11 +106,9 @@ apps           carries    changes
                           "qBT" · keeps its API key
   sonarr       5.2 MiB    1 path
   ✓ data  the real run renames Downloads → downloads · library → media
-  ! radarr, sonarr  "Deluge" (172.17.0.1:10365) and "rT" (172.17.0.1:443) stay
-                    as it is: "Deluge" is a Deluge client and this box runs only
-                    qBittorrent, so a rewrite would point it at an app that does
-                    not speak its protocol; delete it in the Arr if you do not
-                    need it
+  ! radarr, sonarr  kept      "Deluge" (172.17.0.1:10365) and "rT"
+                              (172.17.0.1:443) · Deluge client: this box runs
+                              qBittorrent
   2 notes · 4 other workloads stay behind · 2 values left as they are ·
     --details
 `

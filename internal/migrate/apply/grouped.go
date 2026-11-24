@@ -352,11 +352,11 @@ func (s Summary) needsYou() []say.TableRow {
 			apps = append(apps, app)
 		}
 		sort.Strings(apps)
-		fact := strings.Join(g.what, " and ") + " stay as it is: " + g.why
-		if len(g.what) == 1 {
-			fact = g.what[0] + " stays as it is: " + g.why
-		}
-		rows = append(rows, say.TableRow{Glyph: "!", Name: strings.Join(apps, ", "), Facts: []string{fact}})
+		// One state word and one reason: the value stays, and the clause says
+		// why. The whole sentence the rewriter wrote is the report's
+		// (rules 1 and 2).
+		fact := strings.Join(g.what, " and ")
+		rows = append(rows, say.TableRow{Glyph: "!", Name: strings.Join(apps, ", "), State: "kept", Facts: []string{fact, why}})
 	}
 	return rows
 }
