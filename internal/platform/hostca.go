@@ -179,7 +179,9 @@ func (d *HostCADecision) Apply(ctx context.Context) (HostCAResult, error) {
 			step.Failed(err)
 			return res, fmt.Errorf("removing the host CA from %s: %w", d.Namespace, err)
 		}
-		step.Done(fmt.Sprintf("removed ConfigMap %s/%s: the host's certificate is publicly trusted, so there is nothing to copy", d.Namespace, HostCAName))
+		step.Done("")
+		d.report().Rows([]say.Row{{Mark: say.MarkNote, Name: hostCARow, State: "removed", Facts: []string{"the host's certificate is publicly trusted"}}})
+		d.report().Detail(fmt.Sprintf("host CA: removed ConfigMap %s/%s", d.Namespace, HostCAName))
 		res.Wrote, res.Removed = true, true
 		return res, nil
 	}
@@ -195,10 +197,16 @@ func (d *HostCADecision) Apply(ctx context.Context) (HostCAResult, error) {
 		step.Failed(err)
 		return res, fmt.Errorf("writing the host CA into %s: %w", d.Namespace, err)
 	}
-	step.Done(fmt.Sprintf("wrote ConfigMap %s/%s: box's root certificate, for an app that has to trust %s", d.Namespace, HostCAName, d.hostName()))
+	step.Done("")
+	d.report().Rows([]say.Row{{Mark: say.MarkDone, Name: hostCARow, State: "written", Facts: []string{"an app that trusts the box trusts this certificate"}}})
+	d.report().Detail(fmt.Sprintf("host CA: wrote ConfigMap %s/%s from %s", d.Namespace, HostCAName, d.hostName()))
 	res.Wrote = true
 	return res, nil
 }
+
+// hostCARow is the host CA's row on the screen: it is root's one object in a
+// seedbox's namespace, and the object's name is the log's (rules 1 and 5).
+const hostCARow = "host CA"
 
 // Plan is apply's read, before the confirm: the one line a run that has to
 // write, replace or remove the anchor adds to its plan, or "" when the anchor

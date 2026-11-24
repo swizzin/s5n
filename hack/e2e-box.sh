@@ -3468,12 +3468,15 @@ PY
     { echo "apply did not show the login rule it would write for ${SEERR_HOST}"; fail=1; }
   grep -qE "^  ✓ ${SEERR_HOST} +https \\(Let's Encrypt\\)" "$WORK/apply-seerr.txt" ||
     { echo "apply did not serve ${SEERR_HOST} from Let's Encrypt"; fail=1; }
-  grep -qF "login: the rule for ${SEERR_HOST} is in place" "$WORK/apply-seerr.txt" ||
-    { echo "apply did not write the login's rule for ${SEERR_HOST}"; fail=1; }
+  # The rule write is one row: what it did, and how many names it was for. The
+  # name itself is the run log's, so the screen is not a list of host names.
+  grep -qE "^✓ login rules +written +1 host$" "$WORK/apply-seerr.txt" ||
+    { echo "apply did not write the login's rule for ${SEERR_HOST}:";
+      grep -E "login rules" "$WORK/apply-seerr.txt" | head -3; fail=1; }
   # The order is the promise: the host is served before the release that renders
   # its route moves, so there is never a route on a name nothing answers on.
   seerr_cert_line=$(grep -nE "^  ✓ ${SEERR_HOST} +https" "$WORK/apply-seerr.txt" | head -1 | cut -d: -f1 || true)
-  seerr_rule_line=$(grep -n "login: the rule for ${SEERR_HOST} is in place" "$WORK/apply-seerr.txt" | head -1 | cut -d: -f1 || true)
+  seerr_rule_line=$(grep -nE "^✓ login rules +written" "$WORK/apply-seerr.txt" | head -1 | cut -d: -f1 || true)
   seerr_helm_line=$(grep -nE "^✓ s5n " "$WORK/apply-seerr.txt" | head -1 | cut -d: -f1 || true)
   echo "  login rule at line ${seerr_rule_line}, certificate at line ${seerr_cert_line}, release at line ${seerr_helm_line}"
   if [ -z "$seerr_rule_line" ] || [ -z "$seerr_cert_line" ] || [ -z "$seerr_helm_line" ] ||
