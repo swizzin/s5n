@@ -8987,7 +8987,7 @@ migrate_box() {
   # from the media it was given. The Cache tree beside them is what it leaves
   # out, and so is the whole-tree marker the other apps carry, because a Plex
   # snapshot is Plex's home and not the config mount.
-  plex_carry="plex: carried its whole data -- metadata, artwork, thumbnails and its databases -- except the caches, codecs, logs and crash reports Plex rebuilds or downloads again"
+  plex_carry="carried its whole data -- metadata, artwork, thumbnails and its databases -- except the caches, codecs, logs and crash reports Plex rebuilds or downloads again"
   grep -qE "^ +carry: full$" "$WORK/plan.yaml" ||
     { echo "the plan does not say Plex's whole data travels, and this fixture has room for it:"; sed -n '/plex:/,/paths:/p' "$WORK/plan.yaml"; fail=1; }
   tar -tzf "$snapshot" >"$WORK/snapshot-entries.txt" 2>/dev/null ||
@@ -9010,8 +9010,8 @@ migrate_box() {
   # a decision the operator reads in full, so it is the page's line and not one
   # the screen keeps (rule 7).
   [ "$(rows_of "$report" | grep -cF -- "$plex_carry")" = 1 ] ||
-    { echo "the snapshot's report does not say once what Plex's snapshot carries ($(grep -cF 'plex: carried' "$report" || true) times):"; grep -F "plex: carried" "$report" || true; fail=1; }
-  if grep -qF "plex: carried" "$WORK/cutover.txt"; then
+    { echo "the snapshot's report does not say once what Plex's snapshot carries ($(grep -cF "carried its whole data" "$report" || true) times):"; grep -F "carried its whole data" "$report" || true; fail=1; }
+  if grep -qF "carried its whole data" "$WORK/cutover.txt"; then
     echo "the cutover put the note about Plex's snapshot on the screen, and the report is the page that holds it"; fail=1
   fi
   # What the full carry is worth on this fixture: the whole config tree the
