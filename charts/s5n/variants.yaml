@@ -74,14 +74,14 @@ sonarr:
 radarr:
   default:
     repository: ghcr.io/home-operations/radarr
-    tag: "7.0.3.10918"
-    digest: sha256:55d3cf8a4c4c531bb8b5c1ba88eb270d4435e01e228fbdb16cdfc910a17e3b06
+    tag: "7.1.0.10948"
+    digest: sha256:d259bde2be6b1997c1832cf981d50017f919b305ed3dc9ce445c4661956553f3
 
 prowlarr:
   default:
     repository: ghcr.io/home-operations/prowlarr
-    tag: "3.0.2.5780"
-    digest: sha256:58fa5dbed20738ce0a72077315e818eeb731cb4b4a5173c4a837d343a9573750
+    tag: "3.1.0.5799"
+    digest: sha256:15b68a6e69f893a3ede6fed405594d3f5d9e9d13648246a0fefbafe4fd7f595b
 
 plex:
   default:

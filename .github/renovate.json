@@ -1,6 +1,6 @@
 {
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
-  "description": "main is what has been released and develop is where work lands (docs/box.md, \"Where a release lives\"). Renovate feeds the release train, and main takes nothing else: the chart's app images on main only, whose patch and digest bumps merge themselves once CI is green, and the platform pins on both branches, one pull request per pin, whose patch bumps on main merge themselves once CI is green (k0s excepted: no CI job installs it). Nothing merges itself on develop, from any file. What merges itself is merged by Renovate, not GitHub's auto-merge (platformAutomerge off): neither branch requires a status check, so GitHub would merge the moment a pull request is mergeable, before CI has run, where Renovate merges only once every check on the branch is green. The sums bot is listed in gitIgnoredAuthors: it commits k0s's asset checksums onto Renovate's own k0s branch, and without that listing Renovate reads the commit as another author's edit -- it stops committing to the branch, and the pull request is left alone.",
+  "description": "main is what has been released and develop is where work lands (docs/box.md, \"Where a release lives\"). Renovate feeds the release train, and main takes nothing else: the chart's app images on main only, whose patch, digest and minor bumps merge themselves once CI is green, and the platform pins on both branches, one pull request per pin, whose patch bumps on main merge themselves once CI is green (k0s excepted: no CI job installs it). On develop only Go module and GitHub Action patch, minor and digest bumps merge themselves. What merges itself is merged by Renovate, not GitHub's auto-merge (platformAutomerge off): neither branch requires a status check, so GitHub would merge the moment a pull request is mergeable, before CI has run, where Renovate merges only once every check on the branch is green. The sums bot is listed in gitIgnoredAuthors: it commits k0s's asset checksums onto Renovate's own k0s branch, and without that listing Renovate reads the commit as another author's edit -- it stops committing to the branch, and the pull request is left alone.",
   "extends": ["config:recommended"],
   "baseBranchPatterns": ["main", "develop"],
   "gitIgnoredAuthors": ["355469897+s5n-sums[bot]@users.noreply.github.com"],
@@ -64,6 +64,13 @@
       "automerge": true
     },
     {
+      "description": "A minor app image bump on main merges itself once the full e2e is green, in a pull request of its own (no groupName: one app's broken minor must not hold the others back, and its red e2e is what keeps it out). The e2e installs, wires and signs in to every app, which is what catches a minor that changes an app's login or API. This rule sits before the Zen 3 build's, which must win over it.",
+      "matchFileNames": ["charts/s5n/variants.yaml"],
+      "matchBaseBranches": ["main"],
+      "matchUpdateTypes": ["minor"],
+      "automerge": true
+    },
+    {
       "description": "The qBittorrent build compiled for AMD Zen 3 is the one image the e2e cannot run: it dies with SIGILL on CI's runners and most hosts, and it is amd64 only. So a green run says nothing about its new bytes, and it never merges itself, patch or digest. It gets a pull request of its own: a group merges itself only when every update in it may, so inside the app images group it would hold every other image back. This rule sits after the app images one because the later matching rule wins, and its tag is where the build profile is named (5.3.0-lt1.2-10g-znver3-mimalloc).",
       "matchFileNames": ["charts/s5n/variants.yaml"],
       "matchCurrentValue": "/-znver3/",
@@ -71,10 +78,10 @@
       "automerge": false
     },
     {
-      "description": "A minor or major app image bump changes an app's behaviour, and the e2e proves the images, not the release notes: it gets its own pull request (no groupName, so it never joins the app images one) and waits for the maintainer, who cuts the release that ships it.",
+      "description": "A major app image bump can change how an app stores its config or speaks its API in ways the e2e does not touch, so it gets its own pull request (no groupName, so it never joins the app images one) and waits for the maintainer, who cuts the release that ships it.",
       "matchFileNames": ["charts/s5n/variants.yaml"],
       "matchBaseBranches": ["main"],
-      "matchUpdateTypes": ["minor", "major"],
+      "matchUpdateTypes": ["major"],
       "automerge": false
     },
     {
@@ -105,9 +112,16 @@
       "prConcurrentLimit": 5
     },
     {
-      "description": "Nothing ever merges itself on develop, from any file, whatever a rule above says: develop is where a change is read before it is released. This rule is last so it wins.",
+      "description": "Nothing merges itself on develop, whatever a rule above says, except what the next rule names: develop is where a change is read before it is released.",
       "matchBaseBranches": ["develop"],
       "automerge": false
+    },
+    {
+      "description": "The one exception, after the rule above so it wins: a Go module or GitHub Action patch, minor or digest bump on develop merges itself once every check is green. CI runs the unit tests, the linters and the full e2e on it, and the release that later carries it to main runs them again. A major Go module bump changes its import path, so it is code to write, and waits; the test images in hack/ still never merge themselves.",
+      "matchBaseBranches": ["develop"],
+      "matchManagers": ["gomod", "github-actions"],
+      "matchUpdateTypes": ["patch", "minor", "digest"],
+      "automerge": true
     }
   ]
 }
