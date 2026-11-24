@@ -9331,8 +9331,11 @@ migrate_box() {
   # own image. The confirm's row counts them all as paths; which column and how
   # many times is the snapshot's report and --details, and the database itself
   # is read back below.
-  grep -qE "^  plex +[0-9.]+ (KiB|MiB|GiB) · its whole data: metadata, artwork and thumbnails · [1-9][0-9,]* paths · keeps its Plex token$" "$WORK/apply-report-rows.txt" ||
-    { echo "the plan's Plex row does not count the paths the runner rewrote:"; grep -E "plex" "$WORK/apply-report-rows.txt" | head -5; fail=1; }
+  # Plex's databases are checked once its image runs, so the row that counts what
+  # the runner rewrote is the one the run fills in after the install, on the
+  # screen; the page beside the snapshot is what the run showed before it.
+  grep -qE "^  ✓ plex +[0-9.]+ (KiB|MiB|GiB) · its whole data: metadata, artwork and thumbnails · [1-9][0-9,]* paths · keeps its Plex token$" "$WORK/apply-migrate-rows.txt" ||
+    { echo "the plan's Plex row does not count the paths the runner rewrote:"; grep -E "plex" "$WORK/apply-migrate-rows.txt" | head -5; fail=1; }
   # autobrr and qui allow exactly one account and box owns it, so a source's
   # account has to become box's; the confirm says so once per app, with the name
   # the source used, because that name is the operator's own and it is the one
@@ -10444,7 +10447,10 @@ no_klog() {
 no_dev_notice() {
   for f in "$WORK"/*.txt; do
     [ -e "$f" ] || continue
-    if grep -q "built without a version" "$f"; then
+    # A page a root run wrote beside a snapshot is 0600 and root's: the notice is
+    # never in one, and box says it on the screen, which is another file here.
+    grep -q "built without a version" "$f" 2>/dev/null || continue
+    if true; then
       echo "box skipped the min-box check: $(basename "$f") says it was built without a version"
       fail=1
     fi
