@@ -525,7 +525,7 @@ func (d *decision) overrideRule(in rewrite.Input, id int64, folder string, named
 	default:
 		d.left(rep, rewrite.Left{
 			Where: where, What: folder,
-			Why:    "the Arrs it names disagree about it",
+			Why: "the Arrs it names disagree about it",
 			Detail: fmt.Sprintf("the Arrs this override rule names do not agree about %s (%s)",
 				folder, strings.Join(parts, "; ")),
 		})
