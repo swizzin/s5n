@@ -7629,9 +7629,13 @@ migrate_source_tautulli() { # migrate_source_tautulli <src> <key out>
   printf '%s' "$key" >"$keyfile"
   chmod 600 "$keyfile"
   # Its own API, on the file it just wrote: the app is up and the key is real.
+  # The key is read again on every try: a first start can write config.ini
+  # before the app settles on the key it serves, and a key read once from that
+  # first file is answered 401 for as long as the loop runs.
   code=""
   for i in $(seq 1 60); do
-    if migrate_forward "$MIGRATE_LEGACY_NS" svc/tautulli "$MIGRATE_TAUTULLI_PORT"; then
+    key=$(sed -n 's/^api_key = *//p' "$file" | head -1) || true
+    if [ -n "${key:-}" ] && migrate_forward "$MIGRATE_LEGACY_NS" svc/tautulli "$MIGRATE_TAUTULLI_PORT"; then
       code=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 5 \
         "http://127.0.0.1:${MIGRATE_PF_PORT}/api/v2?apikey=${key}&cmd=status" 2>/dev/null || true)
       migrate_forward_stop
@@ -7640,7 +7644,7 @@ migrate_source_tautulli() { # migrate_source_tautulli <src> <key out>
     sleep 2
   done
   case "$code" in
-    2??) ;;
+    2??) printf '%s' "$key" >"$keyfile" ;;
     *) echo "the source Tautulli answered ${code:-nothing} to its own API key at the root"; return 1 ;;
   esac
   # Tautulli writes config.ini back out of its own memory whenever it shuts down
