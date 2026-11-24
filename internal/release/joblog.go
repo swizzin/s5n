@@ -32,24 +32,35 @@ type JobLogs interface {
 // rather than a wiring run.
 const maxJobLogLines = 4000
 
+// stopGrace bounds how long a wait's end waits for the log reader, so a pod
+// that stopped answering cannot hold the command open.
+const stopGrace = 5 * time.Second
+
 // jobLog is the wiring Job's log while box waits for its receipt: the newest
 // line for the live line, and every line kept for the run log.
 //
 // The stream is opened once, in the background, and read into memory: the
 // newest line is a field, not a request, so a pod that is not there, is
-// restarting, or is gone costs the screen nothing, and the wait's own budget is
-// never spent on a log.
+// restarting, or is gone costs the screen nothing, and a wait's budget is never
+// spent on a log.
+//
+// Nothing here cancels a request it made. A wait that ends closes the stream it
+// is reading instead, because client-go logs a cancelled read of a response
+// body to klog, and a klog line in the middle of box's output is the one thing
+// box's own warning policy exists to prevent.
 type jobLog struct {
-	open   func(context.Context, bool) (io.ReadCloser, error)
-	poll   time.Duration
-	ctx    context.Context
-	cancel context.CancelFunc
+	open func(context.Context, bool) (io.ReadCloser, error)
+	poll time.Duration
+	ctx  context.Context
+	end  chan struct{}
 
 	mu      sync.Mutex
 	lines   []string
 	dropped int
+	stream  io.ReadCloser
 
 	done chan struct{}
+	once sync.Once
 }
 
 // startJobLog follows the wiring Job's log for one wait. A client that cannot
@@ -63,9 +74,14 @@ func startJobLog(ctx context.Context, client ReleaseClient, poll time.Duration) 
 	if poll <= 0 {
 		poll = time.Second
 	}
-	runCtx, cancel := context.WithCancel(ctx)
-	j := &jobLog{open: src.JobLog, poll: poll, ctx: ctx, cancel: cancel, done: make(chan struct{})}
-	go j.follow(runCtx)
+	j := &jobLog{
+		open: src.JobLog,
+		poll: poll,
+		ctx:  ctx,
+		end:  make(chan struct{}),
+		done: make(chan struct{}),
+	}
+	go j.follow()
 	return j
 }
 
@@ -83,26 +99,72 @@ func (j *jobLog) newest() string {
 	return j.lines[len(j.lines)-1]
 }
 
-// follow reads the Job's log until it ends or ctx is cancelled. A pod that is
+// follow reads the Job's log until it ends or the wait stops it. A pod that is
 // not there yet is not a fault: the Job may still be scheduling, and the wait's
 // budget is what says how long box gives it.
-func (j *jobLog) follow(ctx context.Context) {
+func (j *jobLog) follow() {
 	defer close(j.done)
-	for ctx.Err() == nil {
-		rc, err := j.open(ctx, true)
+	for {
+		if !j.running() {
+			return
+		}
+		rc, err := j.open(j.ctx, true)
 		if err != nil {
-			if !pause(ctx, j.poll) {
+			if !j.pause() {
 				return
 			}
 			continue
 		}
+		j.setStream(rc)
 		j.read(rc)
+		j.clearStream(rc)
 		_ = rc.Close()
 		// The pod that wrote the log box was waiting on has finished. A Job
 		// that retried starts another pod, and the receipt -- not the log -- is
-		// what this wait is for; following the same pod again would only add
-		// the lines already read.
+		// what this wait is for; following the same pod again would only add the
+		// lines already read, so the reading stops here.
 		return
+	}
+}
+
+// running is false once the wait has stopped or its context ended.
+func (j *jobLog) running() bool {
+	select {
+	case <-j.end:
+		return false
+	case <-j.ctx.Done():
+		return false
+	default:
+		return true
+	}
+}
+
+// pause waits one poll interval. It is false when the wait ended.
+func (j *jobLog) pause() bool {
+	t := time.NewTimer(j.poll)
+	defer t.Stop()
+	select {
+	case <-j.end:
+		return false
+	case <-j.ctx.Done():
+		return false
+	case <-t.C:
+		return true
+	}
+}
+
+// setStream remembers the stream being read, so stopping can end it.
+func (j *jobLog) setStream(rc io.ReadCloser) {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	j.stream = rc
+}
+
+func (j *jobLog) clearStream(rc io.ReadCloser) {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	if j.stream == rc {
+		j.stream = nil
 	}
 }
 
@@ -127,26 +189,33 @@ func (j *jobLog) read(rc io.ReadCloser) {
 	}
 }
 
-// stop waits for the reader to end. Cancelling its context is what ends a
-// stream still being read; this is the wait for it, so the run log's copy of
-// the Job's log is the whole log rather than the part that happened to arrive.
+// stop ends the reader and waits for it: the run log's copy of the Job's log is
+// then the whole log, not the part that happened to arrive. A wait can end in
+// the same breath it began -- a receipt that was published before the wait
+// started -- and the reader may not have been scheduled at all, so a log that
+// was never read is read once here, in one request that ends at the log's end.
 func (j *jobLog) stop() {
 	if j == nil {
 		return
 	}
-	j.cancel()
-	<-j.done
-	// A wait can end in the same breath it began -- a receipt that was already
-	// published -- and the reader may not have been scheduled at all. Reading
-	// once here is what makes the run log's copy deterministic rather than a
-	// race with the scheduler.
+	j.once.Do(func() { close(j.end) })
+	j.mu.Lock()
+	stream := j.stream
+	j.mu.Unlock()
+	if stream != nil {
+		_ = stream.Close()
+	}
+	select {
+	case <-j.done:
+	case <-time.After(stopGrace):
+	}
 	if !j.empty() {
 		return
 	}
-	// The wait's log context is cancelled by now, and a followed log would wait
-	// for a line that may never come: this read is its own, not followed, and
-	// still bounded, so a Job that stopped answering cannot hold the command.
-	ctx, cancel := context.WithTimeout(context.WithoutCancel(j.ctx), finalRead)
+	// The wait's own context is over by now, and a followed log would wait for a
+	// line that may never come: this read is its own, not followed, and still
+	// bounded.
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(j.ctx), stopGrace)
 	defer cancel()
 	rc, err := j.open(ctx, false)
 	if err != nil {
@@ -155,10 +224,6 @@ func (j *jobLog) stop() {
 	defer rc.Close()
 	j.read(rc)
 }
-
-// finalRead bounds the one read a wait that never sampled does, so a job still
-// running cannot hold the command open: the stream ends at the deadline.
-const finalRead = 5 * time.Second
 
 // empty says whether nothing has been read yet.
 func (j *jobLog) empty() bool {
@@ -186,19 +251,5 @@ func (j *jobLog) logTo(r say.Reporter) {
 	}
 	if dropped > 0 {
 		r.Detail("  " + plural(dropped, "line", "lines") + " more, not kept")
-	}
-}
-
-// pause waits one poll interval, or until ctx is done. It is false when the
-// context ended, which is the one thing a retry loop has to tell apart from a
-// plain wait.
-func pause(ctx context.Context, d time.Duration) bool {
-	t := time.NewTimer(d)
-	defer t.Stop()
-	select {
-	case <-ctx.Done():
-		return false
-	case <-t.C:
-		return true
 	}
 }

@@ -1411,10 +1411,8 @@ func (a *Applier) waitReceipt(ctx context.Context, client ReleaseClient, since t
 	fresh := since.Add(-2 * time.Second)
 	r := a.report()
 
-	logged, stopLog := context.WithCancel(ctx)
-	tail := startJobLog(logged, client, poll)
+	tail := startJobLog(ctx, client, poll)
 	defer func() {
-		stopLog()
 		tail.stop()
 		tail.logTo(r)
 	}()

@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -91,21 +92,32 @@ func (f *fakeRelease) JobLog(ctx context.Context, follow bool) (io.ReadCloser, e
 		return nil, f.jobErr
 	}
 	if follow && f.jobHang {
-		return hangReader{ctx: ctx}, nil
+		return &hangReader{ctx: ctx, closed: make(chan struct{})}, nil
 	}
 	return io.NopCloser(strings.NewReader(strings.Join(f.job, "\n") + "\n")), nil
 }
 
 // hangReader is a log stream with no lines in it: it reads nothing until its
-// context ends, which is what a pod that is up and quiet looks like.
-type hangReader struct{ ctx context.Context }
+// context ends or its body is closed, which is what a pod that is up and quiet
+// looks like.
+type hangReader struct {
+	ctx    context.Context
+	closed chan struct{}
+	once   sync.Once
+}
 
-func (h hangReader) Read([]byte) (int, error) {
-	<-h.ctx.Done()
+func (h *hangReader) Read([]byte) (int, error) {
+	select {
+	case <-h.ctx.Done():
+	case <-h.closed:
+	}
 	return 0, io.EOF
 }
 
-func (h hangReader) Close() error { return nil }
+func (h *hangReader) Close() error {
+	h.once.Do(func() { close(h.closed) })
+	return nil
+}
 
 // fakeStorage is a tiny cluster of storage objects: a namespace and its claims
 // exist or they do not, and Apply records the order box wrote things in. It

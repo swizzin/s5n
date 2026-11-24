@@ -80,11 +80,16 @@ func rehearsalRow() say.Row {
 }
 
 // receiptFacts are the one row a healthy receipt gets: how many checks it ran,
-// and the Job's own duration. A receipt that carries no duration (a fake, or an
-// older Job) says the count alone rather than "0s".
+// and the Job's own duration. A Job that finished inside a second says one
+// second, so the column is never empty where every other receipt has a number;
+// a receipt with no duration at all (an older Job) says the count alone.
 func receiptFacts(rec Receipt) []string {
 	facts := []string{fmt.Sprintf("%d %s", len(rec.Steps), plural(len(rec.Steps), "check", "checks"))}
-	if d := rec.Duration.Round(time.Second); d > 0 {
+	if rec.Duration > 0 {
+		d := rec.Duration.Round(time.Second)
+		if d < time.Second {
+			d = time.Second
+		}
 		facts = append(facts, say.Duration(d))
 	}
 	return facts

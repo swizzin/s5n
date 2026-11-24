@@ -85,6 +85,25 @@ func TestEveryCheckPassedIsOneRow(t *testing.T) {
 	}
 }
 
+// TestAFastReceiptStillSaysHowLong: an empty box's wiring finishes inside a
+// second, and the row still has its duration rather than a gap where every
+// other receipt has a number.
+func TestAFastReceiptStillSaysHowLong(t *testing.T) {
+	screen, logf := receiptScreen(t, Receipt{
+		Status:    "ok",
+		StartedAt: time.Now(),
+		Duration:  400 * time.Millisecond,
+		Steps:     []Step{{Name: "publish", Result: "ok"}},
+	}, nil)
+
+	if want := "✓ wiring         1 check · 1s\n"; screen != want {
+		t.Fatalf("screen:\n%s\nwant:\n%s", screen, want)
+	}
+	if !strings.Contains(logf, "wiring publish: ok") {
+		t.Fatalf("the run log does not carry the one check:\n%s", logf)
+	}
+}
+
 // TestAPendingRowWaitsOnAPerson: a check a person still has to clear is a row
 // of its own, marked !, with the state in its column and the reason -- the URL
 // or the command -- hanging under it.
