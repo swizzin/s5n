@@ -91,6 +91,14 @@ func (r *Runner) logf(format string, args ...any) {
 	}
 }
 
+// stepLog is one line per check: the check's name, and what it cost. Every step
+// is this one shape, because box reads the newest line of this log and shows it
+// beside a spinner: a column padded for a forty-line table reads as noise on one
+// line, and a name with its result after it reads as what it is.
+func (r *Runner) stepLog(name, detail string) {
+	r.logf("%s: %s", name, detail)
+}
+
 func (r *Runner) contractRetry() time.Duration {
 	if r.ContractRetry > 0 {
 		return r.ContractRetry
@@ -124,7 +132,7 @@ func (r *Runner) Run(ctx context.Context) (*Result, error) {
 				res.Error = fmt.Sprintf("publish wiring result: %v", perr)
 				err = fmt.Errorf("%s", res.Error)
 			}
-			r.logf("  %-38s failed: %v", "publish", perr)
+			r.stepLog("publish", "failed: "+perr.Error())
 		}
 	}
 	r.logf("%s (%.1fs, %d created / %d updated / %d unchanged)",
@@ -137,7 +145,7 @@ func (r *Runner) Run(ctx context.Context) (*Result, error) {
 func (r *Runner) ensure(res *Result, name string, change apps.Change, err error) error {
 	if err != nil {
 		res.Steps = append(res.Steps, Step{Name: name, Result: "failed", Detail: err.Error()})
-		r.logf("  %-38s failed: %v", name, err)
+		r.stepLog(name, "failed: "+err.Error())
 		return fmt.Errorf("%s: %w", name, err)
 	}
 	switch change {
@@ -147,13 +155,13 @@ func (r *Runner) ensure(res *Result, name string, change apps.Change, err error)
 		res.Writes.Updated++
 	case apps.Skipped:
 		res.Steps = append(res.Steps, Step{Name: name, Result: "skipped"})
-		r.logf("  %-38s skipped", name)
+		r.stepLog(name, "skipped")
 		return nil
 	default:
 		res.Writes.Unchanged++
 	}
 	res.Steps = append(res.Steps, Step{Name: name, Result: "ok", Detail: change.String()})
-	r.logf("  %-38s %s", name, change)
+	r.stepLog(name, change.String())
 	return nil
 }
 
@@ -163,7 +171,7 @@ func (r *Runner) ensure(res *Result, name string, change apps.Change, err error)
 func (r *Runner) ensureResult(res *Result, name string, result apps.EnsureResult, err error) error {
 	if err != nil {
 		res.Steps = append(res.Steps, Step{Name: name, Result: "failed", Detail: err.Error()})
-		r.logf("  %-38s failed: %v", name, err)
+		r.stepLog(name, "failed: "+err.Error())
 		return fmt.Errorf("%s: %w", name, err)
 	}
 	switch result.Change {
@@ -173,7 +181,7 @@ func (r *Runner) ensureResult(res *Result, name string, result apps.EnsureResult
 		res.Writes.Updated++
 	case apps.Skipped:
 		res.Steps = append(res.Steps, Step{Name: name, Result: "skipped"})
-		r.logf("  %-38s skipped", name)
+		r.stepLog(name, "skipped")
 		return nil
 	default:
 		res.Writes.Unchanged++
@@ -188,9 +196,9 @@ func (r *Runner) ensureResult(res *Result, name string, result apps.EnsureResult
 	step := Step{Name: name, Result: "ok", Detail: detail, Drift: result.Drift}
 	res.Steps = append(res.Steps, step)
 	if len(result.Drift) > 0 {
-		r.logf("  %-38s %s (%d field(s) restored)", name, detail, len(result.Drift))
+		r.stepLog(name, fmt.Sprintf("%s (%d fields restored)", detail, len(result.Drift)))
 	} else {
-		r.logf("  %-38s %s", name, detail)
+		r.stepLog(name, detail)
 	}
 	return nil
 }
@@ -228,7 +236,7 @@ func (r *Runner) loadOwned(ctx context.Context) (rec *OwnedRecord, note string, 
 // okStep records a check that has no desired-state diff of its own.
 func (r *Runner) okStep(res *Result, name, detail string) {
 	res.Steps = append(res.Steps, Step{Name: name, Result: "ok", Detail: detail})
-	r.logf("  %-38s ok %s", name, detail)
+	r.stepLog(name, "ok ("+detail+")")
 }
 
 func (r *Runner) work(ctx context.Context, res *Result) error {
@@ -634,7 +642,7 @@ func (r *Runner) work(ctx context.Context, res *Result) error {
 				detail = "Plex is not claimed yet: until it is, whoever signs in to Seerr first becomes its owner. Claim it at https://plex.tv/claim"
 			}
 			res.Steps = append(res.Steps, Step{Name: "plex/claim", Result: "pending", Detail: detail})
-			r.logf("  %-38s pending: no claim token", "plex/claim")
+			r.stepLog("plex/claim", "pending (no claim token)")
 		}
 	}
 
@@ -685,7 +693,7 @@ func (r *Runner) work(ctx context.Context, res *Result) error {
 			r.okStep(res, "tautulli/ready", c.Tautulli.URL)
 			if pendingReason != "" {
 				res.Steps = append(res.Steps, Step{Name: "tautulli/plex", Result: "pending", Detail: pendingReason})
-				r.logf("  %-38s pending: %s", "tautulli/plex", pendingShort)
+				r.stepLog("tautulli/plex", "pending ("+pendingShort+")")
 			} else {
 				plexHost, plexPort, err := hostPort(c.Plex.URL)
 				if err != nil {
@@ -742,7 +750,7 @@ func (r *Runner) work(ctx context.Context, res *Result) error {
 			r.okStep(res, "maintainerr/ready", c.Maintainerr.URL+c.Maintainerr.URLBase)
 			if pendingReason != "" {
 				res.Steps = append(res.Steps, Step{Name: "maintainerr/plex", Result: "pending", Detail: pendingReason})
-				r.logf("  %-38s pending: %s", "maintainerr/plex", pendingShort)
+				r.stepLog("maintainerr/plex", "pending ("+pendingShort+")")
 			} else {
 				plexHost, plexPort, err := hostPort(c.Plex.URL)
 				if err != nil {
@@ -792,7 +800,7 @@ func (r *Runner) work(ctx context.Context, res *Result) error {
 		if !public.Initialized {
 			res.Steps = append(res.Steps, Step{Name: "seerr/plex", Result: "pending",
 				Detail: fmt.Sprintf("Seerr has no admin account yet: sign in once at %s with Plex to let the wiring Job take over", c.Seerr.PublicURL)})
-			r.logf("  %-38s pending: needs one interactive Plex sign-in", "seerr/plex")
+			r.stepLog("seerr/plex", "pending (needs one interactive Plex sign-in)")
 		}
 	}
 

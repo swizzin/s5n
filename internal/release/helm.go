@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/swizzin/s5n/internal/kube"
 	"helm.sh/helm/v4/pkg/action"
 	chartv2 "helm.sh/helm/v4/pkg/chart/v2"
 	helmkube "helm.sh/helm/v4/pkg/kube"
@@ -17,11 +18,10 @@ import (
 	"helm.sh/helm/v4/pkg/release/common"
 	v1release "helm.sh/helm/v4/pkg/release/v1"
 	"helm.sh/helm/v4/pkg/storage/driver"
+	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
-
-	"github.com/swizzin/s5n/internal/kube"
 )
 
 // Helm is the release client: the Helm SDK over client-go, which the maintainer
@@ -310,10 +310,11 @@ func (h *Helm) Receipt(ctx context.Context) (Receipt, error) {
 		return Receipt{}, ErrNoReceipt
 	}
 	var doc struct {
-		Status    string    `json:"status"`
-		StartedAt time.Time `json:"startedAt"`
-		Error     string    `json:"error"`
-		Steps     []struct {
+		Status          string    `json:"status"`
+		StartedAt       time.Time `json:"startedAt"`
+		DurationSeconds float64   `json:"durationSeconds"`
+		Error           string    `json:"error"`
+		Steps           []struct {
 			Name   string `json:"name"`
 			Result string `json:"result"`
 			Detail string `json:"detail"`
@@ -322,11 +323,54 @@ func (h *Helm) Receipt(ctx context.Context) (Receipt, error) {
 	if err := json.Unmarshal([]byte(raw), &doc); err != nil {
 		return Receipt{}, fmt.Errorf("wiring receipt: %w", err)
 	}
-	out := Receipt{Status: doc.Status, StartedAt: doc.StartedAt, Error: doc.Error}
+	out := Receipt{
+		Status:    doc.Status,
+		StartedAt: doc.StartedAt,
+		Duration:  time.Duration(doc.DurationSeconds * float64(time.Second)),
+		Error:     doc.Error,
+	}
 	for _, s := range doc.Steps {
 		out.Steps = append(out.Steps, Step{Name: s.Name, Result: s.Result, Detail: s.Detail})
 	}
 	return out, nil
+}
+
+// JobLog reads the log of the release's wiring Job, followed or once.
+//
+// The Job is a Helm hook, so it is not a release resource: box finds its pods by
+// the label the Job controller writes, reads the newest one, and asks for its
+// log from the beginning -- kept open when the caller follows it, which is what
+// the live line reads. A pod that is not there yet is an error, and the wait
+// asks again.
+func (h *Helm) JobLog(ctx context.Context, follow bool) (io.ReadCloser, error) {
+	job := h.Release + "-wiring"
+	pods, err := h.cs.CoreV1().Pods(h.Namespace).List(ctx, metav1.ListOptions{LabelSelector: "job-name=" + job})
+	if err != nil {
+		return nil, fmt.Errorf("read the %s pods: %w", job, err)
+	}
+	var pod *corev1.Pod
+	for i := range pods.Items {
+		p := &pods.Items[i]
+		// The Job controller keeps a pod that has finished; one being deleted is
+		// the next run's, not this one's.
+		if p.DeletionTimestamp != nil {
+			continue
+		}
+		if pod == nil || p.CreationTimestamp.After(pod.CreationTimestamp.Time) {
+			pod = p
+		}
+	}
+	if pod == nil {
+		return nil, fmt.Errorf("no %s pod yet", job)
+	}
+	stream, err := h.cs.CoreV1().Pods(h.Namespace).GetLogs(pod.Name, &corev1.PodLogOptions{
+		Container: "wiring",
+		Follow:    follow,
+	}).Stream(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("read the log of %s: %w", pod.Name, err)
+	}
+	return stream, nil
 }
 
 // configOf returns a release's own values. Helm v4 exposes the user-supplied

@@ -78,11 +78,12 @@ type ReleaseClient interface {
 var ErrNoReceipt = errors.New("no wiring receipt yet")
 
 // Receipt is the subset of `<release>-wiring`'s status.json box prints: the
-// overall state and one row per wiring step. The full document belongs to
-// internal/wiring; box reads only what it shows.
+// overall state, how long the Job ran, and one row per wiring step. The full
+// document belongs to internal/wiring; box reads only what it shows.
 type Receipt struct {
 	Status    string
 	StartedAt time.Time
+	Duration  time.Duration
 	Error     string
 	Steps     []Step
 }
@@ -1088,12 +1089,14 @@ func (a *Applier) Apply(ctx context.Context, opts Options) (Result, error) {
 		return res, withSnapshotDirs(err, snapDirs)
 	}
 	res.Receipt = receipt
-	a.printReceipt(r, receipt)
+	ReportReceipt(r, receipt, rehearsalOf(values))
 	if receipt.Status != "ok" {
+		// The receipt's own rows are on screen already, so the command says
+		// nothing more than where the run log is.
 		if receipt.Error != "" {
-			return res, withSnapshotDirs(fmt.Errorf("wiring failed: %s", receipt.Error), snapDirs)
+			return res, withSnapshotDirs(say.Reported{Err: fmt.Errorf("wiring failed: %s", receipt.Error)}, snapDirs)
 		}
-		return res, withSnapshotDirs(errors.New("wiring failed: the receipt does not say ok"), snapDirs)
+		return res, withSnapshotDirs(say.Reported{Err: errors.New("wiring failed: the receipt does not say ok")}, snapDirs)
 	}
 	// The release is up on the images it moved to, so the copies are what a
 	// rollback would restore rather than the state the apps are writing now:
@@ -1389,6 +1392,13 @@ func forcedIssuer(values map[string]any) string {
 // waitReceipt waits for a receipt from this run. A receipt left by an earlier
 // revision is not evidence about this one, so its start time must be after the
 // upgrade began (with a little slack for clock granularity).
+//
+// The wait shows the Job's own newest log line: a wiring run that spends ten
+// minutes in one app's database migration is not broken, and without that line
+// the screen says nothing at all. Its log is read in the background
+// (joblog.go); the newest line is a field there, so this loop's budget is
+// never spent on the log, and the Job's whole log goes into the run log when
+// the wait ends.
 func (a *Applier) waitReceipt(ctx context.Context, client ReleaseClient, since time.Time) (Receipt, error) {
 	budget := a.ReceiptWait
 	if budget <= 0 {
@@ -1400,7 +1410,21 @@ func (a *Applier) waitReceipt(ctx context.Context, client ReleaseClient, since t
 	}
 	fresh := since.Add(-2 * time.Second)
 	r := a.report()
-	task := r.Start(say.Op{Label: "waiting for the wiring receipt", Budget: budget})
+
+	logged, stopLog := context.WithCancel(ctx)
+	defer stopLog()
+	tail := startJobLog(logged, client, poll)
+	defer func() {
+		stopLog()
+		tail.stop()
+		tail.logTo(r)
+	}()
+
+	var source func() string
+	if tail != nil {
+		source = tail.newest
+	}
+	task := r.Start(say.Op{Label: "wiring", Budget: budget, Source: source})
 
 	var receipt Receipt
 	waited, err := wait.Until(ctx, budget, poll, func(ctx context.Context) (bool, error) {
@@ -1423,8 +1447,23 @@ func (a *Applier) waitReceipt(ctx context.Context, client ReleaseClient, since t
 		task.Done("")
 		return receipt, nil
 	}
-	task.Failed(nil)
-	return Receipt{}, errors.New("the wiring receipt never arrived: the release is installed but its wiring hook has not reported")
+	// The step is unnamed, so finishing it prints nothing: the row below is this
+	// wait's one line, and it says what the Job was doing when the budget ran
+	// out. The command is the one that runs the wiring again; the Job's log is
+	// in the run log the failure names.
+	task.Done("")
+	row := say.Row{
+		Mark:  say.MarkFailed,
+		Name:  "wiring",
+		Facts: []string{"no receipt after " + say.Duration(budget)},
+		Why:   tail.newest(),
+	}
+	r.Rows([]say.Row{row, {
+		Mark:    say.MarkNote,
+		Facts:   []string{"your apps are running", "only the wiring stopped"},
+		Command: "box apply",
+	}})
+	return Receipt{}, say.Reported{Err: errors.New("the wiring receipt never arrived: the release is installed but its wiring hook has not reported")}
 }
 
 // undoTimeout bounds the whole of undo: a few deletes on an answering API server
@@ -1482,12 +1521,12 @@ func (a *Applier) printPlan(r say.Reporter, nsp NamespacePlan, objs []StorageObj
 	r.Plan("plan", items)
 }
 
-func (a *Applier) printReceipt(r say.Reporter, rec Receipt) {
-	rows := make([]say.ReceiptRow, 0, len(rec.Steps))
-	for _, s := range rec.Steps {
-		rows = append(rows, say.ReceiptRow{Name: s.Name, Result: s.Result, Detail: s.Detail})
-	}
-	r.Receipt(rec.Status, rows)
+// rehearsalOf says whether this box is a rehearsal. It is the grant's own flag,
+// written by a rehearsal snapshot's apply and never by a file, so it is read
+// from the effective values the release renders from.
+func rehearsalOf(values map[string]any) bool {
+	on, _ := values["rehearsal"].(bool)
+	return on
 }
 
 // changeItems turns a values diff into the marked plan the reporter draws. The

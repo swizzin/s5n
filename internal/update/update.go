@@ -887,7 +887,7 @@ func (u *Updater) take(ctx context.Context, rel Release, cluster Cluster, snaps 
 		// stay.
 		return u.fail(ctx, rel, cluster, res, step, before.Revision, gateWiring, err, "")
 	}
-	reportReceipt(r, rec)
+	release.ReportReceipt(r, rec, false)
 
 	if len(copied) > 0 {
 		if perr := snaps.Prune(ctx, step.Step, copied); perr != nil {
@@ -961,41 +961,6 @@ func (u *Updater) wire(ctx context.Context, rel Release, cluster Cluster, step S
 		return applied.Receipt, fmt.Errorf("the release is not deployed and healthy after %s", u.healthWait())
 	}
 	return applied.Receipt, nil
-}
-
-// reportReceipt folds a wiring receipt into the one row a person reads: a count
-// when every check passed, and only the rows somebody has to do something about
-// otherwise. The receipt itself -- every check, its result and its detail --
-// goes to the run log.
-func reportReceipt(r say.Reporter, rec release.Receipt) {
-	if rec.Status == "" && len(rec.Steps) == 0 {
-		return
-	}
-	for _, step := range rec.Steps {
-		detail := step.Detail
-		if detail != "" {
-			detail = " (" + detail + ")"
-		}
-		r.Detail(fmt.Sprintf("wiring %s: %s%s", step.Name, step.Result, detail))
-	}
-	if rec.Status == "ok" {
-		r.Rows([]say.Row{{Mark: say.MarkDone, Name: "wiring", Facts: []string{plural(len(rec.Steps), "check", "checks")}}})
-		return
-	}
-	r.Detail("wiring " + rec.Status + ": " + rec.Error)
-	var rows []say.Row
-	for _, step := range rec.Steps {
-		switch step.Result {
-		case "pending":
-			rows = append(rows, say.Row{Mark: say.MarkNeeds, Name: step.Name, Facts: []string{step.Detail}})
-		case "failed":
-			rows = append(rows, say.Row{Mark: say.MarkFailed, Name: step.Name, Facts: []string{step.Detail}})
-		}
-	}
-	if len(rows) == 0 {
-		rows = append(rows, say.Row{Mark: say.MarkFailed, Name: "wiring", Facts: []string{rec.Error}})
-	}
-	r.Rows(rows)
 }
 
 // putBack is a step's answer to moved apps that keep exiting: it rolls them
