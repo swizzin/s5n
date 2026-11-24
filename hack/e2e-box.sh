@@ -4481,7 +4481,7 @@ EOF
   else
     cat "$WORK/bootstrap-upgrade.txt"; fail=1
   fi
-  grep -qF "re-issued from the box root" "$WORK/bootstrap-upgrade.txt" ||
+  grep -qF "re-issued from box's root" "$WORK/bootstrap-upgrade.txt" ||
     { echo "box did not report re-issuing the host certificate"; fail=1; }
   [ "$($K get clusterissuer s5n-selfsigned -o jsonpath='{.spec.ca.secretName}' || true)" = s5n-root-ca ] ||
     { echo "bootstrap did not restore s5n-selfsigned as a CA issuer"; fail=1; }
