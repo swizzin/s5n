@@ -291,11 +291,7 @@ cluster
 platform
   + cert-manager v1.21.3 · Envoy Gateway 1.9.3 · admission policies
   ? MetalLB 0.16.2, unless the Gateway gets an address without it
-where things live
-  data    /srv/s5n/data    exists  254:0  xfs  1.8 TiB free
-  config  /srv/s5n/config  new     254:0  xfs  1.8 TiB free
-· box.example.com  Let's Encrypt · resolves to 203.0.113.7
-· torrent port   picked    30013
+  … the seedbox's own answers: its domain, both paths, its apps, the login
 install the platform and alice's seedbox? [y/N] y
 ✓ Envoy Gateway  38s
 ✓ cert-manager   52s
