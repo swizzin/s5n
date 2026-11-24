@@ -839,8 +839,30 @@ PYEOF
   $K -n kube-system rollout status deploy/coredns --timeout=120s >/dev/null
 }
 
+# pebble_nodeports: the two nodePorts Pebble's Service is pinned to, acme then
+# management. They come from the top of the cluster's static band (the lower
+# 86 ports of 30000-32767, which the API server never hands out at random) and
+# are checked free first: a pin in the upper band can collide with a nodePort
+# the API server has already given another Service at random, which is
+# "provided port is already allocated" depending only on what else the cluster
+# holds. A Service that is already there keeps its own two.
+pebble_nodeports() {
+  local existing used p out=()
+  existing=$($K -n pebble get svc pebble -o jsonpath='{.spec.ports[*].nodePort}' 2>/dev/null || true)
+  if [ "$(wc -w <<<"$existing")" -eq 2 ]; then echo "$existing"; return 0; fi
+  used=" $($K get svc -A -o jsonpath='{.items[*].spec.ports[*].nodePort}' 2>/dev/null) "
+  for p in $(seq 30085 -1 30000); do
+    case "$used" in *" $p "*) continue ;; esac
+    out+=("$p")
+    [ "${#out[@]}" -eq 2 ] && break
+  done
+  [ "${#out[@]}" -eq 2 ] || { echo "no two free nodePorts in 30000-30085 for Pebble" >&2; return 1; }
+  echo "${out[@]}"
+}
+
 install_pebble() {
   log "Pebble 2.10.1 (the ACME test server) in the cluster, pinned by digest"
+  read -r PEBBLE_ACME_PORT PEBBLE_MGMT_PORT < <(pebble_nodeports) || { echo "Pebble has no nodePorts"; fail=1; return 0; }
   pebble_node_ip=$($K get node -o jsonpath='{.items[0].status.addresses[?(@.type=="InternalIP")].address}')
   $K create namespace pebble --dry-run=client -o yaml | $K apply -f - >/dev/null
   cat <<EOF | $K apply -f - >/dev/null
@@ -906,12 +928,13 @@ spec:
   selector:
     app: pebble
   ports:
-    - {name: acme, port: 14000, targetPort: 14000}
-    - {name: management, port: 15000, targetPort: 15000, nodePort: 31500}
+    # Both are pinned, from the static band (pebble_nodeports).
+    - {name: acme, port: 14000, targetPort: 14000, nodePort: ${PEBBLE_ACME_PORT}}
+    - {name: management, port: 15000, targetPort: 15000, nodePort: ${PEBBLE_MGMT_PORT}}
 EOF
   $K -n pebble rollout status deploy/pebble --timeout=180s || { echo "Pebble never rolled out"; fail=1; return 0; }
   for i in $(seq 1 60); do
-    if curl -k -fsS "https://${pebble_node_ip}:31500/roots/0" -o "$WORK/pebble-root.pem" 2>/dev/null; then
+    if curl -k -fsS "https://${pebble_node_ip}:${PEBBLE_MGMT_PORT}/roots/0" -o "$WORK/pebble-root.pem" 2>/dev/null; then
       break
     fi
     if [ "$i" = 60 ]; then
