@@ -29,8 +29,11 @@ func TestPreviewIsBuildPlanWithTheFirewallLine(t *testing.T) {
 	if plan.Steps[0].Kind != StepFirewall {
 		t.Fatalf("the preview's first step is %q, want the firewall", plan.Steps[0].Kind)
 	}
-	if !strings.Contains(plan.Steps[0].Plan, "10.244.0.0/16 and 10.96.0.0/12") {
-		t.Errorf("the firewall line is %q, want the two networks", plan.Steps[0].Plan)
+	if plan.Steps[0].Plan != "firewalld's trusted zone" {
+		t.Errorf("the firewall line is %q, want the zone alone: the networks are what the step does", plan.Steps[0].Plan)
+	}
+	if !strings.Contains(plan.Steps[0].What, "10.244.0.0/16 and 10.96.0.0/12") {
+		t.Errorf("the firewall step is %q, want the two networks", plan.Steps[0].What)
 	}
 	items := plan.Items()
 	if len(items) == 0 {

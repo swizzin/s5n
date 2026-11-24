@@ -1184,11 +1184,13 @@ func withFirewall(plan Plan, fw bootstrap.FirewallState) Plan {
 		return plan
 	}
 	if len(fw.CIDRs) > 0 {
+		// The plan names the zone and the networks it trusts; the row on the
+		// screen is the zone alone, because a name column is not a sentence.
 		line := "firewalld's trusted zone: " + strings.Join(fw.CIDRs, " and ")
 		plan.Steps = append([]Step{{
 			Kind:  StepFirewall,
 			What:  line,
-			Plan:  line,
+			Plan:  "firewalld's trusted zone",
 			CIDRs: append([]string(nil), fw.CIDRs...),
 		}}, plan.Steps...)
 	}

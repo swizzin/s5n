@@ -1481,7 +1481,7 @@ func TestApplyTrustsTheHostsFirewallBeforeAnythingIsInstalled(t *testing.T) {
 	if f.tr.steps[0] != "confirm" || len(f.tr.steps) < 2 || f.tr.steps[1] != "trust:10.244.0.0/16,10.96.0.0/12" {
 		t.Fatalf("the firewall is not the first write after the confirm: %v", f.tr.steps)
 	}
-	if !strings.Contains(f.log.String(), "+ firewalld's trusted zone: 10.244.0.0/16 and 10.96.0.0/12") {
+	if !strings.Contains(f.log.String(), "plan: + firewalld's trusted zone") {
 		t.Fatalf("the plan does not carry the host line:\n%s", f.log.String())
 	}
 	if !strings.Contains(f.log.String(), "firewalld trusts 10.244.0.0/16 and 10.96.0.0/12") {
