@@ -587,10 +587,32 @@ func (w *Writer) addDir(name string, info fs.FileInfo) error {
 	return nil
 }
 
-// addFileFrom records one regular file, streaming it: an app's config tree can
-// hold a database of gigabytes, and a file that changed under the copy is a
-// refusal rather than a torn entry.
+// smallFile is the size up to which a file is read whole before it is entered.
+const smallFile = 8 << 20
+
+// addFileFrom records one regular file.
+//
+// A small one is read whole and entered as what was read. A rehearsal reads a
+// source that is still running, and a running app rewrites its small files (a
+// cookie jar, a settings file) whenever it likes, so the size the walk saw is
+// not always the size the read finds; the entry is the bytes that were read, and
+// the archive and its manifest agree.
+//
+// A large one is streamed -- an app's config tree can hold a database of
+// gigabytes -- and one that changed under the copy is a refusal rather than a
+// torn entry.
 func (w *Writer) addFileFrom(name, file string, info fs.FileInfo) error {
+	if info.Size() <= smallFile {
+		raw, err := readSmall(file)
+		if err != nil {
+			return err
+		}
+		if raw != nil {
+			return w.write(name, bytes.NewReader(raw), int64(len(raw)), info.Mode().Perm(), info.ModTime())
+		}
+		// It grew past the small size since its stat: streamed like any
+		// large file, under the same refusal.
+	}
 	f, err := os.Open(file)
 	if err != nil {
 		return err
@@ -662,6 +684,24 @@ func (w *Writer) write(name string, r io.Reader, size int64, mode fs.FileMode, m
 	}
 	w.m.Entries[name] = Entry{Size: size, SHA256: hex.EncodeToString(h.Sum(nil)), Mode: modeText(uint32(mode.Perm()))}
 	return nil
+}
+
+// readSmall reads a file that was small when it was stat'ed, and returns nil
+// when it is no longer small: the caller streams that one instead.
+func readSmall(file string) ([]byte, error) {
+	f, err := os.Open(file)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	raw, err := io.ReadAll(io.LimitReader(f, smallFile+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(raw) > smallFile {
+		return nil, nil
+	}
+	return raw, nil
 }
 
 // digest is the manifest's sum of a handful of bytes.
