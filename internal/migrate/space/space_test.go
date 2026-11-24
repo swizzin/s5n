@@ -1,6 +1,7 @@
 package space
 
 import (
+	"io/fs"
 	"os"
 	"path/filepath"
 	"testing"
@@ -166,5 +167,45 @@ func TestHumanSaysSizesTheWayBoxDoes(t *testing.T) {
 		if got := Human(c.n); got != c.want {
 			t.Errorf("Human(%d) = %q, want %q", c.n, got, c.want)
 		}
+	}
+}
+
+// goneEntry is one entry whose file has gone by the time the walk asks what it
+// is: a running app rewriting its settings through a temporary file and a
+// rename, which is what a read of a live source sees.
+type goneEntry struct{ name string }
+
+func (e goneEntry) Name() string               { return e.name }
+func (e goneEntry) IsDir() bool                { return false }
+func (e goneEntry) Type() fs.FileMode          { return 0 }
+func (e goneEntry) Info() (fs.FileInfo, error) { return nil, fs.ErrNotExist }
+
+// TestTallyCountsAFileThatWentAwayAsNothing: the source a migration is read off is
+// still running, and a name a directory listing held can be gone by the time the
+// walk stats it. Counting nothing is the answer; failing the run for a file that
+// is not there to copy would stop a migration for a temporary file.
+func TestTallyCountsAFileThatWentAwayAsNothing(t *testing.T) {
+	dir := t.TempDir()
+	c := &counter{dir: dir}
+	if err := c.entry(filepath.Join(dir, "Preferences.xml.tmp.7133"), goneEntry{"Preferences.xml.tmp.7133"}, nil); err != nil {
+		t.Fatalf("a file that went away while the walk ran stopped it: %v", err)
+	}
+	if c.files != 0 || c.bytes != 0 {
+		t.Errorf("the walk counted %d files and %d bytes for a file that is not there", c.files, c.bytes)
+	}
+	// The tree itself is still a refusal: a path that is not there is not an
+	// empty tree.
+	if _, _, err := Tally(filepath.Join(dir, "gone"), nil); err == nil {
+		t.Error("a tree that is not there was counted as nothing")
+	}
+}
+
+// TestTallyCountsADirectoryThatWentAwayAsNothing: the same, one level up: a
+// directory the walk listed and cannot enter is nothing to count, not a failure.
+func TestTallyCountsADirectoryThatWentAwayAsNothing(t *testing.T) {
+	dir := t.TempDir()
+	c := &counter{dir: dir}
+	if err := c.entry(filepath.Join(dir, "Cache"), goneEntry{"Cache"}, fs.ErrNotExist); err != nil {
+		t.Fatalf("a directory that went away while the walk ran stopped it: %v", err)
 	}
 }

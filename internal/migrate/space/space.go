@@ -41,43 +41,65 @@ func Size(dir string, skip []string) (int64, error) {
 // Tally is Size with the count of files too: the two numbers a copy of the same
 // tree would report, from one walk instead of the copy.
 func Tally(dir string, skip []string) (files, bytes int64, err error) {
-	root := skipSet(skip)
-	err = filepath.WalkDir(dir, func(p string, d fs.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-		rel, err := filepath.Rel(dir, p)
-		if err != nil {
-			return err
-		}
-		rel = filepath.ToSlash(rel)
-		if rel == "." {
-			return nil
-		}
-		if root[rel] {
-			if d.IsDir() {
-				return filepath.SkipDir
-			}
-			return nil
-		}
-		if !d.Type().IsRegular() {
-			return nil
-		}
-		// The entry's own stat, taken once by the walk: a Plex tree is a
-		// million small files, and a second syscall each is what makes this
-		// slow enough to notice.
-		info, err := d.Info()
-		if err != nil {
-			return err
-		}
-		files++
-		bytes += info.Size()
-		return nil
-	})
-	if err != nil {
+	c := &counter{dir: dir, skip: skipSet(skip)}
+	if err := filepath.WalkDir(dir, c.entry); err != nil {
 		return 0, 0, err
 	}
-	return files, bytes, nil
+	return c.files, c.bytes, nil
+}
+
+// counter is one Tally walk: what it counts and what it does not walk into.
+type counter struct {
+	dir   string
+	skip  map[string]bool
+	files int64
+	bytes int64
+}
+
+// entry is one entry the walk met. A name that is gone by the time the walk asks
+// what it is is not counted and is not a failure: a migration is read off a
+// source that is still running, and a running app rewrites its settings through a
+// temporary file and a rename -- Plex's Preferences.xml.tmp.7133... exists in a
+// directory listing and is gone a moment later. The bytes are no longer there to
+// copy, so there is nothing to size. The tree itself, and a directory the walk
+// cannot read, are still refusals.
+func (c *counter) entry(p string, d fs.DirEntry, err error) error {
+	if err != nil {
+		if p != c.dir && errors.Is(err, fs.ErrNotExist) {
+			return nil
+		}
+		return err
+	}
+	rel, err := filepath.Rel(c.dir, p)
+	if err != nil {
+		return err
+	}
+	rel = filepath.ToSlash(rel)
+	if rel == "." {
+		return nil
+	}
+	if c.skip[rel] {
+		if d.IsDir() {
+			return filepath.SkipDir
+		}
+		return nil
+	}
+	if !d.Type().IsRegular() {
+		return nil
+	}
+	// The entry's own stat, taken once by the walk: a Plex tree is a million
+	// small files, and a second syscall each is what makes this slow enough to
+	// notice.
+	info, err := d.Info()
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil
+		}
+		return err
+	}
+	c.files++
+	c.bytes += info.Size()
+	return nil
 }
 
 // skipSet is the paths a Size walk does not go into, cleaned so a caller's
