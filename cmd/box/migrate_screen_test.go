@@ -111,6 +111,7 @@ func TestTheCutoverStopListIsOneCommand(t *testing.T) {
 		t.Fatalf("cutover = %v, want the still-running refusal", err)
 	}
 	want := strings.Join([]string{
+		"cutover",
 		"! 3 apps running · stop them, then run this again",
 		"  $ kubectl -n media scale deployment --replicas=0 qbittorrent sonarr",
 		"  $ kubectl -n media scale statefulset --replicas=0 prowlarr",
