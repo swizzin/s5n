@@ -301,7 +301,7 @@ func TestStepMovesTheMasthead(t *testing.T) {
 	}
 }
 
-func TestPathCheckDrawsTreeAndWarning(t *testing.T) {
+func TestPathCheckIsTheTranscriptsTable(t *testing.T) {
 	var out bytes.Buffer
 	// Wide enough for every line to stay whole: this test is about what the
 	// block says, and the 80-column wrapping has its own tests below.
@@ -333,14 +333,13 @@ func TestPathCheckDrawsTreeAndWarning(t *testing.T) {
 		t.Fatal(err)
 	}
 	text := stripANSI(out.String())
+	// One row per path, the columns the transcript prints: the path, whether
+	// it is there, the device, the filesystem and the room left (rule 13).
 	for _, want := range []string{
 		"2/4",
-		"path check",
-		"├ path",
-		"├ exists",
-		"no",
-		"free space    900.0 GiB",
-		"/dev/sda1",
+		"where things live",
+		"  data    /srv/s5n/data    new     8:1     ext4  900.0 GiB free",
+		"  config  /srv/s5n/config  exists  8:2     btrfs  400.0 GiB free",
 		"⚠ mount point is / — writing here grows the system disk",
 		"holds 2 entries at the top level: appdata, media",
 		"note: owned 0:0, not the box's 1000:1000; the apps cannot write there as it is",
@@ -353,8 +352,8 @@ func TestPathCheckDrawsTreeAndWarning(t *testing.T) {
 	if strings.Contains(text, "shares the root device") {
 		t.Fatalf("a path on / is warned about twice:\n%s", text)
 	}
-	if !strings.Contains(text, "yes") {
-		t.Fatalf("the existing path is not marked present:\n%s", text)
+	if got := strings.Count(text, "that is the root filesystem"); got != 0 {
+		t.Fatalf("the table printed the transcript's wording of the same warning %d times:\n%s", got, text)
 	}
 }
 
@@ -413,8 +412,8 @@ func TestPathCheckWrapsAtEightyColumns(t *testing.T) {
 	if !strings.Contains(text, "    downloads/<category> and media/<category> are made on the first start, owned\n    as above") {
 		t.Fatalf("the footer does not wrap under its indent:\n%s", text)
 	}
-	if !strings.Contains(text, "    note: owned 0:0, not the box's 1000:1000; the apps cannot write there as it\n    is") {
-		t.Fatalf("the ownership note does not wrap under the tree:\n%s", text)
+	if !strings.Contains(text, "          note: owned 0:0, not the box's 1000:1000; the apps cannot write there\n          as it is") {
+		t.Fatalf("the ownership note does not wrap under its column:\n%s", text)
 	}
 }
 
@@ -516,5 +515,55 @@ func TestInputRecordsTheFlowsNote(t *testing.T) {
 	}
 	if text := stripANSI(out.String()); !strings.Contains(text, "login name  liara  (web login)") {
 		t.Fatalf("the record does not carry the note:\n%s", text)
+	}
+}
+
+// TestPathCheckIsTheSameTableAsTheTranscript: the live report and the transcript
+// are one table, so a person reading a pasted init run sees the columns the
+// terminal drew. Nothing in the row changes but the two-column indent the form
+// draws everything at.
+func TestPathCheckIsTheSameTableAsTheTranscript(t *testing.T) {
+	check := setup.PathCheck{Reports: []setup.PathReport{
+		{
+			Kind:  "data",
+			Path:  "/srv/s5n/data",
+			Mount: setup.Mount{Major: 8, Minor: 2, Point: "/srv", FSType: "btrfs", Source: "/dev/sdb1"},
+			Free:  900 * 1024 * 1024 * 1024,
+		},
+		{
+			Kind:    "config",
+			Path:    "/srv/s5n/config",
+			Exists:  true,
+			Owner:   "1000:1000",
+			Mount:   setup.Mount{Major: 8, Minor: 41, Point: "/srv", FSType: "xfs", Source: "/dev/sdc1"},
+			Free:    400 * 1024 * 1024 * 1024,
+			Summary: "empty",
+		},
+	}}
+	var out bytes.Buffer
+	// Wide enough that neither renderer wraps: this is about the columns.
+	u := New(Options{Out: &out, Width: 200})
+	if err := u.ShowPathCheck(check); err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(strings.TrimRight(stripANSI(out.String()), "\n"), "\n")
+	// The masthead, its blank line, then the report.
+	var got []string
+	for _, line := range lines {
+		if strings.HasPrefix(line, "  where things live") || strings.HasPrefix(line, "  data") || strings.HasPrefix(line, "  config") || strings.HasPrefix(line, "          ") {
+			got = append(got, strings.TrimPrefix(line, "  "))
+		}
+	}
+	// The transcript's rows are two columns in of the heading it prints flush
+	// left; both renderers put every row at the same offset.
+	want := strings.Split(check.Text(), "\n")
+	for i, line := range want {
+		if strings.HasPrefix(line, "  ") {
+			want[i] = strings.TrimPrefix(line, "  ")
+		}
+	}
+	if strings.Join(got, "\n") != strings.Join(want, "\n") {
+		t.Fatalf("the live report is not the transcript's table:\n--- live ---\n%s\n--- transcript ---\n%s",
+			strings.Join(got, "\n"), strings.Join(want, "\n"))
 	}
 }

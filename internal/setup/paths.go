@@ -53,6 +53,43 @@ type PathCheck struct {
 	Footer string
 }
 
+// PathTitle is the report's heading: a lowercase noun, no colon (rule 9).
+const PathTitle = "where things live"
+
+// PathRow is one path as the report's table shows it: the columns a person
+// compares down, and the notes that are too long for a column. Both renderers
+// print these, so the live screen and the transcript are one table (rule 13).
+type PathRow struct {
+	Kind   string
+	Path   string
+	State  string // "new", or "exists"
+	Device string
+	FSType string
+	// Free is how much room is left, as a person reads it: "1.8 TiB free".
+	Free string
+	// Notes are what the row cannot say in a column: what is already at the
+	// path, and who owns it when that is not this box's owner.
+	Notes []string
+}
+
+// Rows is the report as rows: the same columns Text prints, so a prompter
+// draws the terminal's version of the transcript's table.
+func (c PathCheck) Rows() []PathRow {
+	rows := make([]PathRow, 0, len(c.Reports))
+	for _, r := range c.Reports {
+		rows = append(rows, PathRow{
+			Kind:   r.Kind,
+			Path:   r.Path,
+			State:  r.state(),
+			Device: r.Mount.MajorMinor(),
+			FSType: r.Mount.FSType,
+			Free:   humanBytes(r.Free) + " free",
+			Notes:  r.notes(),
+		})
+	}
+	return rows
+}
+
 // Text renders the check the way `box init`'s line prompt prints it: one row
 // per path with the device, the filesystem and the free space in columns, then
 // whatever is already there under it. A value says what a sentence used to
@@ -60,16 +97,17 @@ type PathCheck struct {
 // left are four columns, not four sentences.
 func (c PathCheck) Text() string {
 	var b strings.Builder
-	b.WriteString("where things live\n")
+	b.WriteString(PathTitle + "\n")
+	rows := c.Rows()
 	kindW, pathW := 0, 0
-	for _, r := range c.Reports {
+	for _, r := range rows {
 		kindW = max(kindW, len(r.Kind))
 		pathW = max(pathW, len(r.Path))
 	}
-	for _, r := range c.Reports {
-		fmt.Fprintf(&b, "  %-*s  %-*s  %-6s  %-6s  %-4s  %s free\n",
-			kindW, r.Kind, pathW, r.Path, r.state(), r.Mount.MajorMinor(), r.Mount.FSType, humanBytes(r.Free))
-		for _, line := range r.notes() {
+	for _, r := range rows {
+		fmt.Fprintf(&b, "  %-*s  %-*s  %-6s  %-6s  %-4s  %s\n",
+			kindW, r.Kind, pathW, r.Path, r.State, r.Device, r.FSType, r.Free)
+		for _, line := range r.Notes {
 			fmt.Fprintf(&b, "  %-*s  %s\n", kindW, "", line)
 		}
 	}
@@ -93,8 +131,10 @@ func (r PathReport) state() string {
 func (r PathReport) notes() []string {
 	var lines []string
 	if r.Exists {
-		if r.Summary != "" {
-			lines = append(lines, strings.TrimSpace(r.Summary))
+		for _, line := range strings.Split(r.Summary, "\n") {
+			if s := strings.TrimSpace(line); s != "" {
+				lines = append(lines, s)
+			}
 		}
 		return lines
 	}
