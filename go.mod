@@ -21,7 +21,7 @@ require (
 	k8s.io/apimachinery v0.37.2
 	k8s.io/cli-runtime v0.37.2
 	k8s.io/client-go v0.37.2
-	k8s.io/utils v0.0.0-20260626114624-be93311217bd
+	k8s.io/utils v0.0.0-20261023123148-ca04ba58ecab
 	modernc.org/sqlite v1.61.1
 	oras.land/oras-go/v2 v2.6.2
 )
