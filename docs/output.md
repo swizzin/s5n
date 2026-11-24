@@ -439,3 +439,49 @@ refuses over it.
   $ sudo systemctl disable --now k0scontroller; sudo rm -f /etc/systemd/system/k0scontroller.service /usr/local/bin/k0s
   $ box migrate apply /var/lib/s5n/migrate/migrate-20261123T045038Z-final.tar.gz
 ```
+
+## Rows that repeat, and the end of a run
+
+A question opens with the question mark in the gutter, on both paths: the
+terminal form and the plain prompt.
+
+```
+? install the platform layer and alice's seedbox?  [y/N]  y
+```
+
+Rows that differ only by their name are one fact and its size (rules 3 and 4).
+A box's four host certificates share one decision, so they are one row:
+
+```
+· certificates   Let's Encrypt for 4 hosts · tls.issuer=letsencrypt
+```
+
+A block's name column is as wide as the longest name in it, in both renderers,
+so every row's facts start in one column. One long name widens the block; it
+never moves a row's facts to a line of their own.
+
+What a run leaves a person is one block at its end. The label carries the one
+mark, each row says what is left, and the command that clears it hangs under
+the row it belongs to.
+
+```
+! to finish
+  certificates  add a DNS record for box.example.test, plex.box.example.test
+                $ box init
+  updates       run this from cron every 15 minutes
+                $ box update --timer
+```
+
+The live path report is the same table the transcript prints, with the two
+facts that carry meaning coloured: whether the path is there, and the line that
+says writing to it can sink the host.
+
+```
+where things live
+  data    /srv/s5n/data    new     254:0  xfs  1.8 TiB free
+  config  /srv/s5n/config  exists  254:0  xfs  1.8 TiB free
+```
+
+A value a migration leaves as it is says `kept` in the state column and gives
+one reason. The sentence explaining what a rewrite would have done is in the
+report's own section, where there is room for it (rule 7).
