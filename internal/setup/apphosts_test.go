@@ -42,8 +42,10 @@ func TestAppHostAnswersMatchTheDomain(t *testing.T) {
 			if app.Issuer != IssuerLetsEncrypt || app.NoDNS || app.Record != "" {
 				t.Fatalf("gamma's host = %+v, want Let's Encrypt and no record to add", app)
 			}
-			if !strings.Contains(h.out.String(), "· gamma.box.example.com  Let's Encrypt · resolves to 203.0.113.7\n") {
-				t.Fatalf("init did not explain gamma's issuer:\n%s", h.out)
+			// The box's own name and gamma's are two hosts with one decision:
+			// one row, folded, instead of the same sentence twice.
+			if !strings.Contains(h.out.String(), "· certificates   Let's Encrypt for 2 hosts · resolves to 203.0.113.7\n") {
+				t.Fatalf("init did not explain the hosts' issuer:\n%s", h.out)
 			}
 			if len(h.logins) != 1 || strings.Join(h.logins[0].Hosted, ",") != "gamma" {
 				t.Fatalf("the login was not told about gamma's host: %+v", h.logins)

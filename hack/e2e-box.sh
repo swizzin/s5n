@@ -1988,7 +1988,9 @@ EOF
   # Pebble's own CA. https with --cacert is the proof the listener serves it;
   # the redirect and the challenge path are the proof of which route wins.
   cert=s5n-tls-box-example-test
-  grep -qE "^· ${DOMAIN}  Let's Encrypt · tls\.issuer=letsencrypt forces Let's Encrypt$" "$WORK/bootstrap1.txt" ||
+  # The run's hosts are one row: the issuer they share, how many names it is
+  # for, and the reason. Four identical rows were one fact printed four times.
+  grep -qE "^· certificates +Let's Encrypt for 4 hosts · tls\.issuer=letsencrypt forces Let's Encrypt$" "$WORK/bootstrap1.txt" ||
     { echo "init did not say the issuer was forced:";
       grep -E "Let's Encrypt" "$WORK/bootstrap1.txt" | head -3; fail=1; }
   grep -qE "^  ✓ ${DOMAIN} +https \\(Let's Encrypt\\)" "$WORK/bootstrap1.txt" ||
@@ -4660,11 +4662,11 @@ EOF
   else
     cat "$WORK/bootstrap3.txt"; fail=1
   fi
-  for host in "$DOMAIN" "$PLEX_HOST" "$SEERR_HOST" "$PBH_HOST"; do
-    grep -qE "^· ${host//./\\.}  Let's Encrypt · resolves to 192\.0\.2\.10$" "$WORK/bootstrap3.txt" ||
-      { echo "init did not move ${host} to Let's Encrypt";
-        grep -E "^· ${host}" "$WORK/bootstrap3.txt" | head -2; fail=1; }
-  done
+  # One row for the names the move is about: all four answer the same address
+  # now, so the decision is one fact and its size.
+  grep -qE "^· certificates +Let's Encrypt for 4 hosts · resolves to 192\.0\.2\.10$" "$WORK/bootstrap3.txt" ||
+    { echo "init did not move the box's names to Let's Encrypt";
+      grep -E "^· (certificates|[a-z.]+ +Let's)" "$WORK/bootstrap3.txt" | head -3; fail=1; }
   if grep -qE "has no DNS record|have no DNS record" "$WORK/bootstrap3.txt"; then
     echo "the card still says a name has no record after the record was added"
     fail=1

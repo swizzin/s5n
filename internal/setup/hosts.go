@@ -238,6 +238,10 @@ func appHostRecord(domain, host string) string {
 	return fmt.Sprintf("add either a wildcard *.%s or a record for %s", domain, host)
 }
 
+// certificatesRow is the one row a run's host certificates fold into: the
+// issuer, how many names it is for, and the reason they share.
+const certificatesRow = "certificates"
+
 // tlsRow is one host's certificate decision as a row: the name in the name
 // column and the reason beside it, with the name not said twice. The issuer is
 // a word ("self-signed", "Let's Encrypt") because it is what the row is about;

@@ -236,3 +236,46 @@ func TestPlainRowsWidenTheWholeBlock(t *testing.T) {
 		t.Fatalf("rows:\n%s\nwant:\n%s", got, want)
 	}
 }
+
+// Rows that differ only by their name are one fact and its size: the group's
+// name, the shared fact with the count on it, and the rest of the facts as they
+// were. Four names with one decision are one line, not four.
+func TestFoldIsOneRowForNamesThatShareTheirFacts(t *testing.T) {
+	rows := []Row{
+		{Mark: MarkNote, Name: "box.example.test", Facts: []string{"Let's Encrypt", "tls.issuer=letsencrypt"}},
+		{Mark: MarkNote, Name: "plex.box.example.test", Facts: []string{"Let's Encrypt", "tls.issuer=letsencrypt"}},
+		{Mark: MarkNote, Name: "seerr.box.example.test", Facts: []string{"Let's Encrypt", "tls.issuer=letsencrypt"}},
+		{Mark: MarkNote, Name: "pbh.box.example.test", Facts: []string{"Let's Encrypt", "tls.issuer=letsencrypt"}},
+	}
+	got := Fold("certificates", "host", rows)
+	if len(got) != 1 {
+		t.Fatalf("folded to %d rows, want 1: %+v", len(got), got)
+	}
+	want := Row{Mark: MarkNote, Name: "certificates", Facts: []string{"Let's Encrypt for 4 hosts", "tls.issuer=letsencrypt"}}
+	if got[0].Name != want.Name || got[0].Mark != want.Mark || strings.Join(got[0].Facts, "|") != strings.Join(want.Facts, "|") {
+		t.Fatalf("fold = %+v, want %+v", got[0], want)
+	}
+	var buf bytes.Buffer
+	p := &Plain{W: &buf}
+	p.Rows(got)
+	if s, want := buf.String(), "· certificates   Let's Encrypt for 4 hosts · tls.issuer=letsencrypt\n"; s != want {
+		t.Fatalf("folded row = %q, want %q", s, want)
+	}
+}
+
+// A fold of one is the row itself, and rows that differ in anything but the
+// name are not folded at all: a different reason or a different mark is a
+// different fact, and counting them would lose it.
+func TestFoldLeavesWhatDiffers(t *testing.T) {
+	one := []Row{{Mark: MarkNote, Name: "box.example.test", Facts: []string{"Let's Encrypt"}}}
+	if got := Fold("certificates", "host", one); len(got) != 1 || got[0].Name != "box.example.test" {
+		t.Fatalf("a single row folded: %+v", got)
+	}
+	two := []Row{
+		{Mark: MarkNote, Name: "box.example.test", Facts: []string{"Let's Encrypt"}},
+		{Mark: MarkNeeds, Name: "plex.box.example.test", Facts: []string{"self-signed", "add a record"}},
+	}
+	if got := Fold("certificates", "host", two); len(got) != 2 {
+		t.Fatalf("rows that differ were folded: %+v", got)
+	}
+}

@@ -370,7 +370,10 @@ func (d *Decision) Run(ctx context.Context, opts Options) (Result, error) {
 		record = "add one"
 	}
 	res.Hosts = []Host{{Host: domain, Issuer: issuer, Why: why, NoDNS: noDNS, Record: record}}
-	d.report().Rows([]say.Row{tlsRow(Host{Host: domain, Issuer: issuer, Why: why})})
+	// Every host's certificate decision is one row, printed once the apps are
+	// known: a box with four names used to print the same row four times, and
+	// the row a person reads is the set (rules 3 and 4).
+	hostRows := []say.Row{tlsRow(Host{Host: domain, Issuer: issuer, Why: why})}
 	d.step(2, "where should your data and settings live?")
 	dataPath, err := d.askText(textQuestion{
 		key: "storage.data.path", flag: "--data-path",
@@ -464,8 +467,9 @@ func (d *Decision) Run(ctx context.Context, opts Options) (Result, error) {
 	}
 	for _, h := range appHosts {
 		res.Hosts = append(res.Hosts, h)
-		d.report().Rows([]say.Row{tlsRow(h)})
+		hostRows = append(hostRows, tlsRow(h))
 	}
+	d.report().Rows(say.Fold(certificatesRow, "host", hostRows))
 
 	// The login: one account, asked once. It is its own step because it is the
 	// one answer that is not the seedbox's shape but the identity on it, and

@@ -662,6 +662,40 @@ func PlainRow(r Row) string {
 	return b.String()
 }
 
+// Fold replaces rows that differ only by their name with one row, because a
+// column of identical rows is one fact and its size (rules 3 and 4): the group
+// gets Name, its first fact gains "for N unit", and the rest of the facts are
+// the ones they all shared. Rows that differ in anything else -- a mark, a
+// state, a reason, a command -- are returned as they are, in their own order.
+//
+// A single row is returned unchanged: a fold of one is the row itself.
+func Fold(name, unit string, rows []Row) []Row {
+	if len(rows) < 2 || len(rows[0].Facts) == 0 {
+		return rows
+	}
+	first := rows[0]
+	for _, row := range rows[1:] {
+		if row.Mark != first.Mark || row.State != first.State || row.Why != first.Why ||
+			row.Command != first.Command || len(row.Facts) != len(first.Facts) ||
+			strings.Join(row.Facts, "\x00") != strings.Join(first.Facts, "\x00") {
+			return rows
+		}
+	}
+	facts := make([]string, 0, len(first.Facts))
+	facts = append(facts, first.Facts[0]+" for "+fmt.Sprintf("%d", len(rows))+" "+plural(len(rows), unit))
+	facts = append(facts, first.Facts[1:]...)
+	return []Row{{Mark: first.Mark, Name: name, Facts: facts}}
+}
+
+// plural is "1 host" and "2 hosts": the regular English ending, which is every
+// unit box counts with.
+func plural(n int, one string) string {
+	if n == 1 {
+		return one
+	}
+	return one + "s"
+}
+
 // Prefix is the gutter and the name columns of a row, the mark drawn by the
 // renderer: one mark, the name padded to the fixed column, and the state, if
 // any. Everything after it is the row's text.

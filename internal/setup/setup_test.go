@@ -1201,6 +1201,7 @@ func TestIssuerFollowsTheDomain(t *testing.T) {
 	if res.Issuer != IssuerLetsEncrypt {
 		t.Fatalf("issuer = %q, want Let's Encrypt", res.Issuer)
 	}
+	// One host is one row: there is nothing to fold.
 	if !strings.Contains(h.out.String(), "· box.example.com  Let's Encrypt · resolves to 203.0.113.7\n") {
 		t.Fatalf("init did not explain the issuer:\n%s", h.out)
 	}
