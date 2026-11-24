@@ -77,6 +77,7 @@ func main() {
 	// half-written and a re-run refuses).
 	ctx, stop := signalContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	defer closeLog()
 	if len(os.Args) < 2 {
 		usage()
 	}
@@ -99,6 +100,15 @@ func main() {
 		fmt.Println(version)
 	default:
 		usage()
+	}
+}
+
+// closeLog finishes this run's transcript. It runs when a command returns
+// normally; a command that exits on a failure has already written every line it
+// had, because the log is not buffered.
+func closeLog() {
+	if runLog != nil {
+		_ = runLog.Close()
 	}
 }
 
@@ -156,16 +166,24 @@ func terminalSet(plain bool) tui.Terminal {
 // live reporter, and --plain, TERM=dumb or a piped stdout gets the exact plain
 // transcript. NO_COLOR keeps the live layout without colour.
 func newOutput(t tui.Terminal, yes bool, palette string) say.Reporter {
+	runLog = openRunLog(logName())
 	plan := tui.Decide(t)
 	if plan.Mode == tui.ModeHuh {
-		r := tui.NewReporter(tui.ReporterOptions{Width: terminalWidth(os.Stdout), NoColor: plan.NoColor, Yes: yes, Theme: palette})
+		r := tui.NewReporter(tui.ReporterOptions{
+			Width:   terminalWidth(os.Stdout),
+			NoColor: plan.NoColor,
+			Yes:     yes,
+			Theme:   palette,
+			Log:     runLog,
+			LogPath: logPath(runLog),
+		})
 		return r
 	}
 	// Output only: a flow that asks builds its own question through
 	// confirmer, because --yes is that flow's policy (the platform layer
 	// treats "no terminal" as unattended, apply refuses) and this reporter
 	// has one.
-	return &say.Plain{W: os.Stdout, Err: os.Stderr}
+	return &say.Plain{W: os.Stdout, Err: os.Stderr, Log: runLog, LogPath: logPath(runLog)}
 }
 
 // live returns the TUI reporter when this command has one. A plain run answers
@@ -195,7 +213,7 @@ func confirmer(out say.Reporter, yes bool) asker {
 		tr.SetYes(yes)
 		return tr
 	}
-	p := &say.Plain{W: os.Stdout, Err: os.Stderr, Yes: yes}
+	p := &say.Plain{W: os.Stdout, Err: os.Stderr, Yes: yes, Log: runLog, LogPath: logPath(runLog)}
 	if isTerminal(os.Stdin) {
 		p.In = os.Stdin
 	}
@@ -1010,6 +1028,9 @@ func (o *initFlags) run(ctx context.Context, kubeconfig string, yes, plain bool,
 		out.Line("login: " + res.Login + " at https://" + res.Domain + "/auth/")
 	}
 	if res.GeneratedPassword != "" {
+		// The one secret a run prints is also the one a transcript must never
+		// keep: the line is on screen, and the log says a password was shown.
+		redact(res.GeneratedPassword)
 		out.Line("password: " + res.GeneratedPassword + "  (shown once; box keeps only the hash)")
 	}
 	// The final card's one warning: a name with no DNS record still installs,
