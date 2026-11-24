@@ -61,6 +61,9 @@ type migrateApplyFlags struct {
 	// details prints every rewrite, column by column, instead of the grouped
 	// summary. The whole list is in the snapshot's report.txt either way.
 	details *bool
+	// yolo runs a downgrade: the release's app is older than the version that
+	// wrote the source's config, which box refuses unless this is given.
+	yolo *bool
 }
 
 func addMigrateApplyFlags(fs *flag.FlagSet) *migrateApplyFlags {
@@ -69,6 +72,7 @@ func addMigrateApplyFlags(fs *flag.FlagSet) *migrateApplyFlags {
 		install:    addInstallFlags(fs),
 		plain:      fs.Bool("plain", false, "ask with plain line prompts, even on a terminal (for a flaky terminal or a screen reader)"),
 		details:    fs.Bool("details", false, "print every rewrite, column by column, instead of the grouped summary"),
+		yolo:       fs.Bool("yolo", false, "run a downgrade: an older app on a config a newer one wrote (refused otherwise)"),
 	}
 }
 
@@ -307,7 +311,7 @@ func migrateApply(ctx context.Context, file string, o *migrateApplyFlags, out sa
 		if err != nil {
 			return err
 		}
-		agreed, err = steps.beforeInstall(ctx, confirmer(out, *o.yes), *o.details, installTarget(o.install), rehearsal, confirmScreenOf(opened, installTarget(o.install)), out)
+		agreed, err = steps.beforeInstall(ctx, confirmer(out, *o.yes), askOptionsOf(o, rehearsal), installTarget(o.install), confirmScreenOf(opened, installTarget(o.install)), out)
 		if err != nil {
 			return err
 		}
@@ -487,6 +491,7 @@ func migrateEnv(p *plan.Plan, opened *bundle.Opened, o *migrateApplyFlags, sb *s
 	// library as well as its state: apply stages it once, at the config root.
 	env.Bulk = snapshotBulk{opened: opened}
 	env.Catalog = cat.Names()
+	env.Image = chartImage(chart, values)
 	// The globals are numbers in the effective document, which is where a
 	// renderer reads them too.
 	if env.PUID, err = number(values, "global", "puid"); err != nil {
@@ -551,6 +556,28 @@ func migrateEnv(p *plan.Plan, opened *bundle.Opened, o *migrateApplyFlags, sb *s
 	return env, cs, nil
 }
 
+// askOptions is how one run asks its one question: what the screen shows, and
+// what it refuses.
+type askOptions struct {
+	// Rehearsal says this run locks the box and renames nothing, so the screen
+	// says what a rehearsal leaves alone.
+	Rehearsal bool
+	// Details prints every rewrite instead of the grouped summary.
+	Details bool
+	// AllowDowngrades is --yolo: run an older app on a config a newer one wrote.
+	AllowDowngrades bool
+}
+
+// askOptionsOf is this run's flags as askOptions. A nil flag is one this caller
+// never parsed, and reads as absent.
+func askOptionsOf(o *migrateApplyFlags, rehearsal bool) askOptions {
+	return askOptions{
+		Rehearsal:       rehearsal,
+		Details:         o.details != nil && *o.details,
+		AllowDowngrades: o.yolo != nil && *o.yolo,
+	}
+}
+
 // migrateAnswer is the confirm a run uses. On a host that had no box the question
 // was asked before anything was installed, so this run asks nothing and holds
 // itself to the answer instead. On a host that already had one there is nothing
@@ -560,7 +587,7 @@ func migrateAnswer(out say.Reporter, o *migrateApplyFlags, namespace string, reh
 	if agreed != nil {
 		return migrateAgreed(out, *agreed)
 	}
-	return migrateConfirm(out, confirmer(out, *o.yes), namespace, rehearsal, *o.details, nil, "", screen)
+	return migrateConfirm(out, confirmer(out, *o.yes), namespace, askOptionsOf(o, rehearsal), nil, "", screen)
 }
 
 // confirmScreenOf is the heading and report path of one run: what it is about to
@@ -596,13 +623,20 @@ func confirmScreenOf(opened *bundle.Opened, target string) confirmScreen {
 // The screen is the heading, the blocks, and one footer line counting what folded
 // away; the page with every row in it is written beside the snapshot before the
 // question, so a person who says no still has what they were shown.
-func migrateConfirm(out say.Reporter, ask asker, namespace string, rehearsal bool, details bool, plat *platform.Plan, lead string, screen confirmScreen) func(apply.Summary) (bool, error) {
+func migrateConfirm(out say.Reporter, ask asker, namespace string, opts askOptions, plat *platform.Plan, lead string, screen confirmScreen) func(apply.Summary) (bool, error) {
 	target := confirmTarget(namespace)
 	return func(s apply.Summary) (bool, error) {
-		if err := showSummary(out, s, details, plat, lead, screen); err != nil {
+		// The one refusal the plan itself can make, before anything is shown:
+		// a release older than the version that wrote the config is not a
+		// migration anyone can trust, and the row says which app and both
+		// versions.
+		if err := refuseDowngrades(out, s, opts.AllowDowngrades, screen); err != nil {
 			return false, err
 		}
-		if rehearsal {
+		if err := showSummary(out, s, opts.Details, plat, lead, screen); err != nil {
+			return false, err
+		}
+		if opts.Rehearsal {
 			// The screen a person reads before the first write says what this
 			// box is, not only what moves into it.
 			out.List("this rehearsal", []string{
@@ -617,6 +651,49 @@ func migrateConfirm(out say.Reporter, ask asker, namespace string, rehearsal boo
 		return ask.Ask(fmt.Sprintf("move these %s in?", appsWord(len(s.Instances))))
 	}
 }
+
+// refuseDowngrades stops a run whose release runs an older app than the version
+// that wrote the source's config, and names every such app with both versions.
+//
+// The config and the database belong to the version that wrote them: an older app
+// reads a newer schema at its peril, and a migration is the one moment the choice
+// is still open. --yolo is the operator's word that they want it anyway, and then
+// the confirm carries one `!` row per app instead of a refusal.
+//
+// The rows are the refusal: what the run found, the command that does it anyway,
+// and the one line saying what that costs. Reported says box has already put it on
+// screen, so the command exits non-zero without saying it twice.
+func refuseDowngrades(out say.Reporter, s apply.Summary, allow bool, screen confirmScreen) error {
+	if allow {
+		return nil
+	}
+	downs := s.Downgrades()
+	if len(downs) == 0 {
+		return nil
+	}
+	rows := make([]say.Row, 0, len(downs))
+	for _, v := range downs {
+		rows = append(rows, say.Row{
+			Mark:  say.MarkFailed,
+			Name:  v.App,
+			Facts: []string{v.Source + " → " + v.Box},
+			Why:   "the config is newer than the app",
+		})
+	}
+	out.Rows(rows)
+	command := "box migrate apply"
+	if screen.Snapshot != "" {
+		command += " " + screen.Snapshot
+	}
+	command += " --yolo"
+	commandLines(out, command)
+	out.Rows([]say.Row{{Mark: say.MarkNote, Facts: []string{"nothing has moved"}}})
+	return say.Reported{Err: errDowngrade}
+}
+
+// errDowngrade says the release is older than the source, and the refusal has
+// already been printed with the command that runs it anyway.
+var errDowngrade = errors.New("the release runs an older app than wrote this config")
 
 // showSummary is the screen above the question: the heading, the platform this
 // run would install, the blocks, the footer, and the page beside the snapshot.
@@ -1226,4 +1303,21 @@ func migrateProveLock(ctx context.Context, cs kubernetes.Interface, chart releas
 		out.Muted(rep.Note)
 	}
 	return nil
+}
+
+// chartImage is the image a release runs for one catalog app, resolved the way
+// the chart's own template resolves it: the variant the values select, a pinned
+// tag or digest narrowing it inside that repository. It is what the confirm's
+// version column compares the source's image against, so the version a person
+// reads is the one the release will run -- a hold an update wrote included.
+func chartImage(chart release.Chart, values map[string]any) func(app string) string {
+	return func(app string) string {
+		ref, err := apply.Image(chart.Variants, values, app)
+		if err != nil {
+			// A chart with no image for the app leaves that row `?`: the run is
+			// already refused elsewhere if it cannot install the app at all.
+			return ""
+		}
+		return ref
+	}
 }

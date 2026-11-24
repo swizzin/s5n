@@ -73,7 +73,7 @@ func migratingSummary() apply.Summary {
 func TestOneConfirmForTheWholeRun(t *testing.T) {
 	var out bytes.Buffer
 	ask := &countingAsker{}
-	confirm := migrateConfirm(&say.Plain{W: &out}, ask, "s5n-alice", false, false, installedPlatform(t), confirmLead(true), confirmScreen{})
+	confirm := migrateConfirm(&say.Plain{W: &out}, ask, "s5n-alice", askOptions{}, installedPlatform(t), confirmLead(true), confirmScreen{})
 
 	ok, err := confirm(migratingSummary())
 	if err != nil {
@@ -133,7 +133,7 @@ func TestOneConfirmForTheWholeRun(t *testing.T) {
 func TestTheOneConfirmWithoutAPlatform(t *testing.T) {
 	var out bytes.Buffer
 	ask := &countingAsker{}
-	confirm := migrateConfirm(&say.Plain{W: &out}, ask, "seedbox", false, false, nil, "", confirmScreen{})
+	confirm := migrateConfirm(&say.Plain{W: &out}, ask, "seedbox", askOptions{}, nil, "", confirmScreen{})
 
 	if _, err := confirm(migratingSummary()); err != nil {
 		t.Fatalf("confirm: %v", err)

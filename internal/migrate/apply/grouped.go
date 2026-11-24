@@ -55,8 +55,15 @@ func (s Summary) Grouped() Grouped {
 	if s.Rehearsal {
 		g.Lead = "rehearsal · nothing leaves this box · no data is renamed"
 	}
-	if rows := s.appRows(); len(rows) > 0 {
-		g.Blocks = append(g.Blocks, Group{Title: titleApps, Columns: []string{"carries", "changes"}, Rows: rows})
+	// The version column exists when this run had a chart to compare against: a
+	// caller with none says nothing about versions rather than a column of
+	// question marks.
+	columns := []string{"carries", "changes"}
+	if s.versions() {
+		columns = []string{"carries", "version", "changes"}
+	}
+	if rows := s.appRows(s.versions()); len(rows) > 0 {
+		g.Blocks = append(g.Blocks, Group{Title: titleApps, Columns: columns, Rows: rows})
 	}
 	if rows := s.dataRows(); len(rows) > 0 {
 		g.Blocks = append(g.Blocks, Group{Rows: rows})
@@ -68,6 +75,17 @@ func (s Summary) Grouped() Grouped {
 		g.Footer = footer
 	}
 	return g
+}
+
+// versions says the confirm has a version column: this run had a chart, so at
+// least one app's pair could be read.
+func (s Summary) versions() bool {
+	for _, in := range s.Instances {
+		if in.Version.Cell() != "" {
+			return true
+		}
+	}
+	return false
 }
 
 // foldAt is how many apps the confirm lists before it folds the rest into one
@@ -118,12 +136,12 @@ func (s Summary) leftCount() int {
 	return n
 }
 
-// appRows is one row per app: what it carries, how many stored values change,
+// appRows is one row per app: what it carries, the version it moves from and to,
 // and the one or two facts a person acts on.
 //
-// The first fact is what the app carries in columns, so the column lines up and a
-// person compares sizes down it; everything else is what changes.
-func (s Summary) appRows() []say.TableRow {
+// The first two facts are columns, so the sizes and the versions line up and a
+// person compares them down the block; everything else is what changes.
+func (s Summary) appRows(versions bool) []say.TableRow {
 	rows := make([]say.TableRow, 0, len(s.Instances)+1)
 	for i, in := range s.Instances {
 		if i == foldAt {
@@ -140,6 +158,9 @@ func (s Summary) appRows() []say.TableRow {
 		facts := []string{""}
 		if in.Staged.Files > 0 {
 			facts[0] = bytesText(in.Staged.Bytes)
+		}
+		if versions {
+			facts = append(facts, in.Version.Cell())
 		}
 		facts = append(facts, changesOf(in))
 		rows = append(rows, say.TableRow{Name: in.App, Facts: facts})
@@ -187,6 +208,9 @@ func appFacts(in InstanceSummary) []string {
 	var facts []string
 	if in.Staged.Files > 0 {
 		facts = append(facts, bytesText(in.Staged.Bytes))
+	}
+	if cell := in.Version.Cell(); cell != "" {
+		facts = append(facts, cell)
 	}
 	if in.Carry != "" {
 		facts = append(facts, in.Carry)
@@ -322,7 +346,8 @@ func arrow(rename string) string { return strings.Replace(rename, " to ", " → 
 
 // needsYou groups every value left as it is by the reason it is left: the apps
 // that share the reason are named together, and the values themselves are what
-// the operator has to decide about.
+// the operator has to decide about. An app this run would downgrade is the first
+// row of the block: it is the one thing here that refuses without --yolo.
 func (s Summary) needsYou() []say.TableRow {
 	type group struct {
 		why  string
@@ -332,6 +357,10 @@ func (s Summary) needsYou() []say.TableRow {
 	}
 	order := make([]string, 0)
 	groups := make(map[string]*group)
+	rows := make([]say.TableRow, 0)
+	for _, v := range s.Downgrades() {
+		rows = append(rows, say.TableRow{Glyph: "!", Name: v.App, Facts: []string{v.Source + " → " + v.Box, "the config is newer than the app"}})
+	}
 	for _, in := range s.Instances {
 		for _, l := range in.Left {
 			g, ok := groups[l.Why]
@@ -347,7 +376,6 @@ func (s Summary) needsYou() []say.TableRow {
 			}
 		}
 	}
-	rows := make([]say.TableRow, 0, len(order))
 	for _, why := range order {
 		g := groups[why]
 		apps := make([]string, 0, len(g.apps))

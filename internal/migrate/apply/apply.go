@@ -102,6 +102,11 @@ type Env struct {
 	// the plan and applying into a chart that has no such app is a refusal
 	// before the first write rather than a surprise after it.
 	Catalog []string
+	// Image is the image this release runs for one catalog app, or "" when the
+	// chart has none for it. It is what the confirm's version column compares
+	// the source's image against (versions.go); nil leaves every row `?`, which
+	// is what a caller with no chart to ask wants.
+	Image func(app string) string
 	// Rehearsal says this run applies a rehearsal snapshot: the release is
 	// locked (the box's grant carries the flag, so its egress policy has no
 	// internet), the data is neither adopted nor renamed, and a rewriter whose
@@ -213,6 +218,10 @@ type InstanceSummary struct {
 	// plan says because there is no room at the config root. It is the one thing
 	// a summary shows that the plan did not: the confirm owes the operator it.
 	Short string
+	// Version is what the source ran and what this release runs for it: the
+	// column a person decides a downgrade on (versions.go). Both sides empty
+	// when the caller had no chart to ask.
+	Version AppVersion
 }
 
 // Lines renders the summary as rows: one per change, note, rename, instance
@@ -828,6 +837,7 @@ func (m *migration) summary() Summary {
 		if _, phrase := m.carried(name); phrase != "" {
 			in.Carry = phrase
 		}
+		in.Version = m.version(name)
 		in.Short = m.carryOf(name).Short
 		for _, st := range m.res.Staged {
 			if st.App == name {
@@ -855,6 +865,19 @@ func (m *migration) summary() Summary {
 // alreadyEnabled reports whether the seedbox switches an instance on already.
 func (m *migration) alreadyEnabled(name string) bool {
 	return m.env.Enabled != nil && m.env.Enabled(name)
+}
+
+// version is one app's version pair: the image the source ran, from the plan, and
+// the image this release runs for it. A chart with no image for the app, or a
+// caller with no chart, leaves the row `?` rather than judging a pair it cannot
+// read.
+func (m *migration) version(name string) AppVersion {
+	app := CatalogApp(name, m.env.Catalog)
+	release := ""
+	if m.env.Image != nil && app != "" {
+		release = m.env.Image(app)
+	}
+	return versionOf(name, m.p.Apps[name].Image, release)
 }
 
 // write is step 5: every app's Write pass, held to the report its Check made.

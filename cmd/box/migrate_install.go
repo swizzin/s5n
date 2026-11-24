@@ -135,12 +135,12 @@ type migrateInstallSteps struct {
 // beforeInstall is the order the whole run exists for: decide, show, ask -- and
 // only after the answer install anything. It returns the summary the operator
 // agreed to, which the adoption is then held to.
-func (s migrateInstallSteps) beforeInstall(ctx context.Context, ask asker, details bool, target string, rehearsal bool, screen confirmScreen, out say.Reporter) (*apply.Summary, error) {
+func (s migrateInstallSteps) beforeInstall(ctx context.Context, ask asker, opts askOptions, target string, screen confirmScreen, out say.Reporter) (*apply.Summary, error) {
 	summary, plat, err := s.survey(ctx)
 	if err != nil {
 		return nil, err
 	}
-	ok, err := migrateConfirm(out, ask, target, rehearsal, details, plat, s.lead, screen)(summary)
+	ok, err := migrateConfirm(out, ask, target, opts, plat, s.lead, screen)(summary)
 	if err != nil {
 		return nil, err
 	}
@@ -386,7 +386,7 @@ func migrateSurvey(ctx context.Context, o *migrateApplyFlags, p *plan.Plan, open
 	if err != nil {
 		return apply.Summary{}, err
 	}
-	env, err := surveyEnv(p, opened, cat, values, rehearsal, dir)
+	env, err := surveyEnv(p, opened, cat, chart, values, rehearsal, dir)
 	if err != nil {
 		return apply.Summary{}, err
 	}
@@ -398,7 +398,7 @@ func migrateSurvey(ctx context.Context, o *migrateApplyFlags, p *plan.Plan, open
 // the cluster. The config root is the caller's private directory, which is why
 // nothing here is owned as the seedbox's user: what this pass stages is measured
 // and thrown away.
-func surveyEnv(p *plan.Plan, opened *bundle.Opened, cat *catalog.Catalog, values map[string]any, rehearsal bool, configRoot string) (apply.Env, error) {
+func surveyEnv(p *plan.Plan, opened *bundle.Opened, cat *catalog.Catalog, chart release.Chart, values map[string]any, rehearsal bool, configRoot string) (apply.Env, error) {
 	var env apply.Env
 	env.ConfigRoot = configRoot
 	if p.Data != nil {
@@ -409,6 +409,7 @@ func surveyEnv(p *plan.Plan, opened *bundle.Opened, cat *catalog.Catalog, values
 	// stages none of it, and the run after the install writes it once.
 	env.Bulk = snapshotBulk{opened: opened}
 	env.Catalog = cat.Names()
+	env.Image = chartImage(chart, values)
 	targets, err := apply.Targets(values, env.Catalog, sortedKeys(p.Apps))
 	if err != nil {
 		return env, err

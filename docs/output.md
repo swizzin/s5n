@@ -394,15 +394,14 @@ itself. The confirm is:
 ```
 box migrate apply · s5n-alice · final snapshot from 2026-11-23 04:50 UTC
 
-apps           carries    changes
-  autobrr      9.0 GiB    2 addresses · login → s5n
-  plex         48.0 GiB   its whole data: metadata, artwork and thumbnails ·
-                          keeps its Plex token
-  qbittorrent  570.0 MiB  1,565 paths
-  qui          16.0 MiB
-  radarr       1.0 GiB    2,937 paths · keeps download client "qBT" · keeps
-                          its API key
-  sonarr       1.0 GiB    keeps its API key
+apps           carries    version             changes
+  autobrr      9.0 GiB    1.91.1              login → s5n
+  plex         48.0 GiB   1.43.5              its whole data: artwork too
+  qbittorrent  570.0 MiB  5.1 → 5.3  ↑        1,565 paths
+  qui          16.0 MiB   1.36.1              login → s5n
+  radarr       1.0 GiB    6.0.4               keeps download client "qBT",
+                                              keeps its API key
+  sonarr       1.0 GiB    4.0.14 → 5.0  ↑     keeps its API key
   ✓ data     Downloads → downloads · library → media
   ✓ library  4K/Movies → movies-4k · 4K/TV → tv-4k · Movies → movies · TV → tv
   ! radarr, sonarr  "Deluge" (172.17.0.1:10365) and "rT" (172.17.0.1:443) stay
@@ -417,6 +416,32 @@ install, then move these 6 apps in? [y/N]
 The apps past the eighth fold into one `+ 5 more` row that names them. The notes
 are a count, not a list: the page has them once each. `--details` prints the
 per-rewrite list for someone checking one row.
+
+The version column is what the source ran and what this release runs, read from
+the source's image tag and the chart's pinned image. `↑` is an upgrade, a value
+with no arrow is the same version, and a version box could not read is `?` and
+judges nothing. The fourth part of a tag and beyond is a build number (Plex's
+1.43.5.11079), so it is in neither the column nor the comparison: two builds of
+one version are one version.
+
+A release older than the version that wrote the source's config is a downgrade:
+an older app is not one to trust with a newer database, so the run stops before
+anything moves, names each app with both versions, and gives the one command that
+runs it anyway.
+
+```
+✗ sonarr  4.0.29 → 4.0.14
+          the config is newer than the app
+  $ box migrate apply /var/lib/s5n/migrate/migrate-20261123T045038Z-final.tar.gz --yolo
+· nothing has moved
+```
+
+`--yolo` is that word: the confirm then carries one `!` row per downgraded app
+instead of the refusal, and the run goes ahead.
+
+```
+! sonarr  4.0.29 → 4.0.14 · the config is newer than the app
+```
 
 The report's shape, which is the same for a read and for the run that applies it:
 

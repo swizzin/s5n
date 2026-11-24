@@ -90,7 +90,7 @@ func TestTheConfirmScreenIsTheDecidingPage(t *testing.T) {
 		Head:   "box migrate apply · s5n-alice · final snapshot from 2026-11-23 04:50 UTC",
 		Report: "",
 	}
-	confirm := migrateConfirm(&say.Plain{W: &out}, ask, "s5n-alice", false, false, nil, "", screen)
+	confirm := migrateConfirm(&say.Plain{W: &out}, ask, "s5n-alice", askOptions{}, nil, "", screen)
 	if _, err := confirm(confirmFixture()); err != nil {
 		t.Fatalf("confirm: %v", err)
 	}
@@ -131,7 +131,7 @@ func TestTheAppFoldFoldsTheTail(t *testing.T) {
 	}
 	var out bytes.Buffer
 	ask := &countingAsker{}
-	if _, err := migrateConfirm(&say.Plain{W: &out}, ask, "s5n-alice", false, false, nil, "", confirmScreen{})(s); err != nil {
+	if _, err := migrateConfirm(&say.Plain{W: &out}, ask, "s5n-alice", askOptions{}, nil, "", confirmScreen{})(s); err != nil {
 		t.Fatalf("confirm: %v", err)
 	}
 	printed := out.String()
@@ -167,7 +167,7 @@ func TestTheRunWritesItsOwnPage(t *testing.T) {
 		Kind:     "final",
 		Taken:    time.Date(2026, 11, 23, 4, 50, 38, 0, time.UTC).Format(time.RFC3339),
 	}
-	if _, err := migrateConfirm(&say.Plain{W: &out}, ask, "s5n-alice", false, false, nil, "", screen)(confirmFixture()); err != nil {
+	if _, err := migrateConfirm(&say.Plain{W: &out}, ask, "s5n-alice", askOptions{}, nil, "", screen)(confirmFixture()); err != nil {
 		t.Fatalf("confirm: %v", err)
 	}
 	info, err := os.Stat(path)
