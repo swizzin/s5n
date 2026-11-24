@@ -91,6 +91,10 @@ func Extract(archive, dir string, m *Manifest, keep Filter, own *Owner) error {
 	if err := os.Chmod(dir, 0o700); err != nil {
 		return fmt.Errorf("extract to %s: %w", dir, err)
 	}
+	if err := hand(own, dir, false); err != nil {
+		os.RemoveAll(dir)
+		return err
+	}
 	if err := extract(archive, dir, "", m, keep, own); err != nil {
 		// A half-extracted tree is worse than none: it looks like a snapshot.
 		os.RemoveAll(dir)
@@ -119,6 +123,14 @@ func ExtractTree(archive, dir, prefix string, m *Manifest, own *Owner) error {
 	}
 	if err := os.Chmod(dir, 0o700); err != nil {
 		return fmt.Errorf("extract to %s: %w", dir, err)
+	}
+	// The tree's own directory belongs to whoever is going to run the app: the
+	// pod reads it as its subPath, and a directory of box's that only box can
+	// enter is a config the app cannot open at all -- "unable to open database
+	// file" from a database that is right there.
+	if err := hand(own, dir, false); err != nil {
+		os.RemoveAll(dir)
+		return err
 	}
 	if err := extract(archive, dir, path.Clean(prefix), m, nil, own); err != nil {
 		os.RemoveAll(dir)
