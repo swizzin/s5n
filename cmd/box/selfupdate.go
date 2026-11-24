@@ -91,7 +91,7 @@ func (b *boxUpdate) run(ctx context.Context) (bool, error) {
 		// selfupdate refuses it by name. Saying it as a line rather than an
 		// error is what keeps an e2e reading its own transcript from looking
 		// broken, and the chart work runs either way.
-		b.Out.Muted(fmt.Sprintf("this is a development build of box (version %q), so there is no released version to compare it with: skipping the self-update", b.Options.Version))
+		b.Out.Rows([]say.Row{{Mark: say.MarkNote, Facts: []string{fmt.Sprintf("this is a development build of box (version %q), so there is no released version to compare it with: box does not replace itself", b.Options.Version)}}})
 		return true, nil
 	}
 	if selfupdate.Reexecuted(b.Options.Version) {
@@ -123,7 +123,7 @@ func (b *boxUpdate) rollback() error {
 	if err := b.Rollback(path); err != nil {
 		return err
 	}
-	b.Out.Success(fmt.Sprintf("put the previous box back at %s; run `box version` to see what it is", path))
+	b.Out.Rows([]say.Row{{Mark: say.MarkDone, Name: "box", Facts: []string{"put the previous one back at " + path}, Command: "box version"}})
 	return nil
 }
 
@@ -137,13 +137,13 @@ func (b *boxUpdate) rollback() error {
 func (b *boxUpdate) reportNewer(ctx context.Context, who string) {
 	found, err := b.Check(ctx, b.Options)
 	if err != nil {
-		b.Out.Warn(fmt.Sprintf("not checking for a newer box: %v", err))
+		b.Out.Rows([]say.Row{{Mark: say.MarkNeeds, Name: "box", Facts: []string{"not checked: " + err.Error()}}})
 		return
 	}
 	if !found.Newer {
 		return
 	}
-	b.Out.Muted(fmt.Sprintf("box %s is out; %s", found.Latest, who))
+	b.Out.Rows([]say.Row{{Mark: say.MarkNote, Name: "box", Facts: []string{found.Latest + " is out", who}}})
 }
 
 // updateAsRoot replaces the binary when a newer release verifies, and reports
@@ -156,23 +156,24 @@ func (b *boxUpdate) updateAsRoot(ctx context.Context) (bool, error) {
 		// The one line an operator needs: the refusal already names its cause
 		// in selfupdate's own words (no key, a package manager, a signature
 		// that does not verify, the network).
-		b.Out.Warn(fmt.Sprintf("not updating box: %v", err))
+		b.Out.Rows([]say.Row{{Mark: say.MarkNeeds, Name: "box", Facts: []string{"not updated", err.Error()}}})
 		return true, nil
 	}
 	if b.Options.Hold {
 		// A hold says so on every run: the operator set it, and a silent run
 		// reads as one that found nothing newer.
 		if result.To != result.From {
-			b.Out.Muted(fmt.Sprintf("box %s is out; --hold-box is set, so it is not installed", result.To))
+			b.Out.Rows([]say.Row{{Mark: say.MarkNote, Name: "box", Facts: []string{result.To + " is out", "--hold-box is set, so it is not installed"}}})
 		} else {
-			b.Out.Muted(fmt.Sprintf("box %s is the newest release; --hold-box is set, so the self-update stays off", result.From))
+			b.Out.Rows([]say.Row{{Mark: say.MarkNote, Name: "box", Facts: []string{result.From + " is the newest release", "--hold-box is set, so box does not replace itself"}}})
 		}
 		return true, nil
 	}
 	if !result.Changed {
 		return true, nil
 	}
-	b.Out.Success(fmt.Sprintf("box updated from %s to %s; re-running the update as the new box", result.From, result.To))
+	b.Out.Rows([]say.Row{{Mark: say.MarkDone, Name: "box", Facts: []string{result.From + " → " + result.To, "signature ok"}}})
+	b.Out.Detail("re-running the update as the new box, from " + result.Path)
 	// An exec replaces the process, so cmd/box's deferred Close never runs on
 	// this path: the line above could still be buffered, the spinner drawn and
 	// the terminal's background painted. Close first; the reporter still prints

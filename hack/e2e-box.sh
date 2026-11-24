@@ -330,6 +330,12 @@ mkdir -p "$(dirname "$KUBECONFIG")"
 chmod 600 "$KUBECONFIG"
 log "scenario ${SCENARIO}: kubeconfig ${KUBECONFIG} (~/.kube/config is not used)"
 
+# Every box run's transcript goes under $WORK, not /var/log or the invoking
+# user's state directory: the e2e reads the log back, and it must not leave
+# anything of box's behind on the host it runs on.
+BOX_LOG_DIR="$WORK/logs"
+export BOX_LOG_DIR
+
 # ---- the chart a user would get -------------------------------------------
 # box only installs published charts (docs/box.md), so the e2e publishes one:
 # `helm package` from this working tree, `helm push` to a registry on this
@@ -3196,7 +3202,7 @@ EOF
   else
     cat "$WORK/update-wake.txt"; fail=1
   fi
-  grep -qF "s5n ${CHART_VERSION} in ${NS} is current" "$WORK/update-wake.txt" ||
+  grep -qF "s5n ${CHART_VERSION} is current" "$WORK/update-wake.txt" ||
     { echo "the due wake did not check the registry and find the box current:"; grep -i "current\|chart" "$WORK/update-wake.txt" | head -5; fail=1; }
   revision_after_wake=$(revision)
   [ "$revision_after_wake" = "$revision_before_wake" ] ||
@@ -5152,7 +5158,7 @@ EOF
     grep -E '(^|[^0-9.])0\.0\.1([^0-9.]|$)' "$WORK/update-b.txt" | head -3
     fail=1
   fi
-  grep -qF "s5n ${CHART_VERSION} -> ${release_b} in ${NS}:" "$WORK/update-b.txt" ||
+  grep -qF "s5n ${CHART_VERSION} → ${release_b} · 1 step" "$WORK/update-b.txt" ||
     { echo "the update did not plan from the installed release ${CHART_VERSION} to ${release_b}:"; head -3 "$WORK/update-b.txt"; fail=1; }
 
   # ---- the peer port the box already had ------------------------------------
@@ -5171,13 +5177,31 @@ EOF
   grep -qxF "release torrent port = ${old_port}" "$WORK/stored-port.txt" ||
     { echo "the release does not hold the port the box runs on:"; cat "$WORK/stored-port.txt"; fail=1; }
 
-  # What box says, in the words the step-back and the hold write. The first
-  # sentence is the announcement before anything stops; the second is what it
-  # restored and what the app is now waiting on.
-  grep -Eq "sonarr exited [0-9]+ times on ${BROKEN_TAG}: rolling it back to ${sonarr_tag}" "$WORK/update-b.txt" ||
-    { echo "box did not announce rolling sonarr back from ${BROKEN_TAG} to ${sonarr_tag}:"; grep -i "sonarr" "$WORK/update-b.txt" | head -5; fail=1; }
-  grep -qF "sonarr is back on ${sonarr_tag} with its snapshot from" "$WORK/update-b.txt" ||
-    { echo "box did not say sonarr was back on ${sonarr_tag} with its copy:"; grep -i "back on" "$WORK/update-b.txt" | head -5; fail=1; }
+  # What box says, in the words the step-back and the hold write: the ✗ row is
+  # what failed on the new image, the ✓ row is what box put back and from which
+  # copy, and the ! row is what the operator has to know next.
+  grep -Eq "^✗ sonarr +crashed [0-9]+ times on the new image$" "$WORK/update-b.txt" ||
+    { echo "box did not say sonarr crashed on the new image:"; grep -i "sonarr" "$WORK/update-b.txt" | head -5; fail=1; }
+  grep -Eq "^✓ sonarr +rolled back to ${sonarr_tag} · its [0-9]{2}:[0-9]{2} snapshot$" "$WORK/update-b.txt" ||
+    { echo "box did not say sonarr was back on ${sonarr_tag} with its copy:"; grep -i "rolled back" "$WORK/update-b.txt" | head -5; fail=1; }
+  grep -qF "! sonarr is held on ${sonarr_tag} until a release ships a fixed image" "$WORK/update-b.txt" ||
+    { echo "box did not say sonarr stays on ${sonarr_tag}:"; grep -i "held" "$WORK/update-b.txt" | head -5; fail=1; }
+  grep -qF "  \$ box status" "$WORK/update-b.txt" ||
+    { echo "box did not name the one command that shows the hold:"; grep -i "box status" "$WORK/update-b.txt" | head -3; fail=1; }
+  # The wiring receipt folded to one row, and every check of it went to the run
+  # log rather than the screen.
+  grep -Eq "^✓ wiring +[0-9]+ checks$" "$WORK/update-b.txt" ||
+    { echo "box did not fold the wiring receipt to one row:"; grep -i "wiring" "$WORK/update-b.txt" | head -5; fail=1; }
+  # The run log holds what the screen folded away: the receipt's rows, one per
+  # check, with a timestamp on each -- and the screen does not.
+  update_log=$(ls -t "${BOX_LOG_DIR}"/update-*.log 2>/dev/null | head -1)
+  [ -n "$update_log" ] && [ -f "$update_log" ] ||
+    { echo "box update wrote no run log under ${BOX_LOG_DIR}"; ls -l "${BOX_LOG_DIR}" 2>/dev/null | head; fail=1; }
+  grep -qE "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z  wiring " "$update_log" 2>/dev/null ||
+    { echo "the run log does not carry the wiring receipt's rows with a timestamp:"; head -5 "$update_log" 2>/dev/null; fail=1; }
+  if grep -qE "^  sonarr/downloadclient: " "$WORK/update-b.txt"; then
+    echo "the screen still carries the wiring receipt's rows: they belong in the log"; fail=1
+  fi
 
   # What it recorded: the step passed, and the app it put back is in the record
   # `box status` reads. update.json sits beside the cluster record, which is
@@ -6067,13 +6091,17 @@ EOF
     1) step_word=step ;;
     *) step_word=steps ;;
   esac
-  grep -qF "s5n ${UPGRADE_FROM} -> ${tree_release} in ${NS}: ${step_count} ${step_word}" "$WORK/update-upgrade.txt" ||
-    { echo "the update did not plan ${UPGRADE_FROM} -> ${tree_release} in ${NS} as ${step_count} ${step_word}:"; head -3 "$WORK/update-upgrade.txt"; fail=1; }
-  while read -r from arrow to; do
-    [ -n "$from" ] || continue
-    grep -qE "^ {2}${from//./\\.} ${arrow} ${to//./\\.} \(" "$WORK/update-upgrade.txt" ||
-      { echo "the plan has no step ${from} ${arrow} ${to}:"; sed -n '1,12p' "$WORK/update-upgrade.txt"; fail=1; }
-  done <<<"$expected_steps"
+  grep -qF "s5n ${UPGRADE_FROM} → ${tree_release} · ${step_count} ${step_word}" "$WORK/update-upgrade.txt" ||
+    { echo "the update did not plan ${UPGRADE_FROM} → ${tree_release} as ${step_count} ${step_word}:"; head -3 "$WORK/update-upgrade.txt"; fail=1; }
+  if [ "$step_count" -gt 1 ]; then
+    # More than one step: one quiet row per step, in the order the floors
+    # require, and none box made up.
+    while read -r from arrow to; do
+      [ -n "$from" ] || continue
+      grep -qE "^· ${from//./\\.} ${arrow} ${to//./\\.}  " "$WORK/update-upgrade.txt" ||
+        { echo "the plan has no row for step ${from} ${arrow} ${to}:"; sed -n '1,12p' "$WORK/update-upgrade.txt"; fail=1; }
+    done <<<"$expected_steps"
+  fi
 
   # The release is the tree's: a step that stopped at an intermediate release is
   # not the update a user's timer makes.
