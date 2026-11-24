@@ -5992,6 +5992,15 @@ print(".".join(str(p) for p in tree))' "$CHART_VERSION"); then
   # The published box and the published chart, with the flags every scenario
   # passes, and the release named rather than "the newest".
   log "box bootstrap: the platform layer, then root's first install (box and chart ${UPGRADE_FROM})"
+  # The published install runs the published wiring image too: the chart pins
+  # its own s5n image, and a real box never runs a newer wiring Job against an
+  # older chart. The e2e's image override comes back for the update below,
+  # which is what moves the release to this tree's chart and its Job.
+  awk '/^wiring:/{skip=1; next} skip && /^[^ #]/{skip=0} !skip' "$WORK/values.yaml" >"$WORK/values.published.yaml"
+  mv "$WORK/values.published.yaml" "$WORK/values.yaml"
+  if grep -q '^wiring:' "$WORK/values.yaml"; then
+    echo "the published install's values still override the wiring image"; fail=1; return 0
+  fi
   BOX_BIN="$PUBLISHED_BOX"
   INSTALL_VERSION="$UPGRADE_FROM"
   if bootstrap "$WORK/bootstrap1.txt"; then
@@ -6037,6 +6046,12 @@ print(".".join(str(p) for p in tree))' "$CHART_VERSION"); then
   # box makes once root's update has brought a newer box.
   log "box update: ${UPGRADE_FROM} -> ${tree_release}, the tree's box over the published install"
   update_started=$(date -u +%Y-%m-%dT%H:%M:%SZ) || true
+  # This tree's chart runs this tree's wiring Job: the locally built image.
+  cat >>"$WORK/values.yaml" <<'EOF'
+wiring:
+  image:
+    tag: e2e
+EOF
   if "$WORK/box" update --yes --chart-repo "$CHART_REPO" --record "$WORK/cluster.yaml" \
     --grant "$WORK/grant.yaml" --values "$WORK/values.yaml" --paths-in-node \
     --kubeconfig "$WORK/kubeconfig" >"$WORK/update-upgrade.txt" 2>&1; then
