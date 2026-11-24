@@ -402,13 +402,13 @@ func migrateApply(ctx context.Context, file string, o *migrateApplyFlags, out sa
 	if res.Done {
 		out.Line(fmt.Sprintf("%s in %s: the plan is already applied", release.ReleaseName, namespace))
 	} else {
-		apply.PrintRows(out, []say.Row{{
+		out.Rows([]say.Row{{
 			Mark:  say.MarkDone,
 			Name:  "moved",
 			Facts: []string{appsWord(len(res.Moved)), "into " + env.ConfigRoot},
 		}})
 	}
-	apply.PrintRows(out, []say.Row{{
+	out.Rows([]say.Row{{
 		Mark:    say.MarkNote,
 		Name:    "report",
 		Facts:   []string{screen.Report},
@@ -650,10 +650,10 @@ func showSummary(out say.Reporter, s apply.Summary, details bool, plat *platform
 		out.Muted(g.Lead)
 	}
 	for _, block := range g.Blocks {
-		apply.PrintGroup(out, block)
+		out.Group(block)
 	}
 	if g.Footer != "" {
-		apply.PrintNote(out, g.Footer)
+		out.Note(g.Footer)
 	}
 	// The log keeps the whole account, and the report keeps the page.
 	for _, line := range s.Lines() {

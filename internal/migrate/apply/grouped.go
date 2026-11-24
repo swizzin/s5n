@@ -25,15 +25,9 @@ const (
 // Group is one block of the confirm: its heading, the columns its rows read in,
 // and the rows. A group with Columns is a table -- the heading, then one column
 // heading per fact -- and one without is a list of rows whose facts are a
-// sentence each.
-type Group struct {
-	Title string
-	// Columns are the headings of the row's facts, in order, when this block
-	// reads as a table: "carries" and "changes" for the apps. Empty for a block
-	// whose facts are prose.
-	Columns []string
-	Rows    []say.TableRow
-}
+// sentence each. The block itself is say's, so the confirm and every other
+// command's table are one mechanism.
+type Group = say.Group
 
 // Grouped is the summary as the one confirm shows it.
 type Grouped struct {

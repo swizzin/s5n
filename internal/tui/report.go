@@ -358,6 +358,125 @@ func (r *Reporter) Rows(rows []say.Row) {
 	r.emit(b.String())
 }
 
+// Group is a titled table whose facts read down columns: the column headings
+// over the data they name, one row per thing, and the last column as the one
+// that carries the words, wrapped under itself. The whole block shares one name
+// column, as wide as its longest name, so the facts start in one column down
+// the block. A group with no headings is a list: the same marks, with each
+// row's facts joined into the one sentence they are.
+func (r *Reporter) Group(g say.Group) {
+	if len(g.Rows) == 0 {
+		return
+	}
+	nameWidth := blockNameWidth(g.Rows)
+	cols := groupColumnWidths(g)
+	var b strings.Builder
+	if head := groupHead(g, nameWidth, cols); head != "" {
+		b.WriteString(indent + r.chrome.paint(head, accentStyle.Bold(true).Render(head)) + "\n")
+	}
+	for _, row := range g.Rows {
+		glyph := row.Glyph
+		if glyph == "" {
+			glyph = say.MarkNote
+		}
+		prefix := indent + glyph + " "
+		name := ""
+		if row.Name != "" {
+			name = row.Name + strings.Repeat(" ", max(0, nameWidth-lipgloss.Width(row.Name))) + "  "
+		}
+		lead, last := groupColumns(row, cols)
+		avail := r.width - lipgloss.Width(prefix) - lipgloss.Width(name) - lipgloss.Width(lead)
+		if avail < 8 {
+			avail = 8
+		}
+		hang := strings.Repeat(" ", lipgloss.Width(prefix)+lipgloss.Width(name)+lipgloss.Width(lead))
+		head := indent + r.chrome.paint(glyph, glyphStyle(glyph).Render(glyph)) + " "
+		if name != "" {
+			head += r.chrome.paint(name[:len(name)-2], inkStyle.Render(strings.TrimRight(name, " "))) + "  "
+		}
+		for i, line := range wrapText(last, avail) {
+			if i == 0 {
+				b.WriteString(head + lead + r.chrome.paint(line, mutedStyle.Render(line)) + "\n")
+				continue
+			}
+			b.WriteString(hang + r.chrome.paint(line, mutedStyle.Render(line)) + "\n")
+		}
+	}
+	r.emit(b.String())
+}
+
+// groupHead is a block's heading line: the title in the name column and each
+// column heading over the facts it names.
+func groupHead(g say.Group, nameWidth int, cols []int) string {
+	if g.Title == "" && len(g.Columns) == 0 {
+		return ""
+	}
+	head := g.Title + strings.Repeat(" ", max(0, nameWidth-lipgloss.Width(g.Title)))
+	for i, c := range g.Columns {
+		head += "  " + c + strings.Repeat(" ", max(0, cols[i]-lipgloss.Width(c)))
+	}
+	return strings.TrimRight(head, " ")
+}
+
+// groupColumns splits one row's facts into the columns before the last, already
+// padded, and the last one, which is the text that wraps. A block with no
+// headings joins every fact into that one sentence.
+func groupColumns(row say.TableRow, cols []int) (lead, last string) {
+	if len(cols) == 0 {
+		return "", strings.Join(row.Facts, " · ")
+	}
+	var b strings.Builder
+	for i := 0; i+1 < len(row.Facts); i++ {
+		w := 0
+		if i < len(cols) {
+			w = cols[i]
+		}
+		b.WriteString(row.Facts[i] + strings.Repeat(" ", max(0, w-lipgloss.Width(row.Facts[i]))) + "  ")
+	}
+	if len(row.Facts) > 0 {
+		last = row.Facts[len(row.Facts)-1]
+	}
+	return b.String(), last
+}
+
+// blockNameWidth is a block's name column: as wide as its longest name.
+func blockNameWidth(rows []say.TableRow) int {
+	w := 0
+	for _, row := range rows {
+		if n := lipgloss.Width(row.Name); n > w {
+			w = n
+		}
+	}
+	return w
+}
+
+// groupColumnWidths are the widths of a block's leading columns: as wide as the
+// widest fact in each, so the headings sit over the data they name.
+func groupColumnWidths(g say.Group) []int {
+	cols := make([]int, len(g.Columns))
+	for _, row := range g.Rows {
+		if row.Glyph != "" {
+			continue
+		}
+		for i := range g.Columns {
+			if i+1 < len(row.Facts) && lipgloss.Width(row.Facts[i]) > cols[i] {
+				cols[i] = lipgloss.Width(row.Facts[i])
+			}
+		}
+	}
+	return cols
+}
+
+// Note is a line of prose under a block: two columns in, so it belongs to the
+// block above it, wrapped with its continuation hanging under the text.
+func (r *Reporter) Note(text string) {
+	text = strings.TrimSpace(text)
+	if text == "" {
+		return
+	}
+	r.block(text, "", mutedStyle, mutedStyle)
+}
+
 // rowBlock draws one row: the mark and the columns, then the facts wrapped under
 // them, then the why and the command at the same column. A command is broken the
 // way a shell would break it, never inside a token.

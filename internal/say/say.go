@@ -135,6 +135,22 @@ type TableRow struct {
 	Facts []string
 }
 
+// Group is one block of a review screen: a heading, the headings of the columns
+// its rows read in, and the rows. A group with no column headings is a list of
+// rows whose facts are one sentence each.
+//
+// It is the block a screen that compares things down a column is made of -- the
+// apps a migration moves, what each carries, what changes -- and it is the same
+// mechanism whatever the command: one table, one set of columns, in both
+// renderers.
+type Group struct {
+	Title string
+	// Columns are the headings of the rows' facts, in order, when this block
+	// reads as a table. Empty for a block whose facts are prose.
+	Columns []string
+	Rows    []TableRow
+}
+
 // Subject is an error that knows what it is about: a renderer draws it as the
 // one ✗ row, the subject in the name column, the refusal beside it, and the one
 // reason under that.
@@ -249,6 +265,14 @@ type Reporter interface {
 	// name in the block, so one block reads as a table and two blocks do not
 	// line up with each other.
 	Table(title string, rows []TableRow)
+	// Group is a titled table whose facts read down columns: the column
+	// headings over them, one row per thing, and the last column as the one
+	// that carries the words. A group with no headings is a list of rows whose
+	// facts are one sentence each.
+	Group(g Group)
+	// Note is one line of prose under a block, indented to the block's own
+	// column.
+	Note(text string)
 	// Rows is a block of status lines: a mark in the two-column gutter, a
 	// name in the fixed name column, an optional state word, and the facts
 	// joined with a middle dot. Text that does not fit hangs under itself.
@@ -468,8 +492,139 @@ func (p *Plain) Rows(rows []Row) {
 	}
 }
 
+// Group is the transcript's columned block: the heading, the column headings
+// over the facts they belong to, and one row per thing. The last column is the
+// one that carries the words, so it wraps at Width under its own column; a
+// list's facts are one sentence each and wrap the same way.
+func (p *Plain) Group(g Group) {
+	if len(g.Rows) == 0 {
+		return
+	}
+	nameWidth := blockNameWidth(g.Rows)
+	if len(g.Columns) == 0 {
+		p.groupList(g, nameWidth)
+		return
+	}
+	p.groupTable(g, nameWidth)
+}
+
+// groupList is a block whose rows are a sentence each: the mark two columns in,
+// the name in the block's column, and the facts after it.
+func (p *Plain) groupList(g Group, nameWidth int) {
+	if g.Title != "" {
+		fmt.Fprintln(p.out(), g.Title)
+	}
+	for _, r := range g.Rows {
+		glyph := r.Glyph
+		if glyph == "" {
+			glyph = MarkNote
+		}
+		head := "  " + glyph + " "
+		if r.Name != "" {
+			head += pad(r.Name, nameWidth) + "  "
+		}
+		hang := strings.Repeat(" ", len(head))
+		for i, line := range Wrap(strings.Join(r.Facts, " · "), Width-len(head)) {
+			if i == 0 {
+				fmt.Fprintln(p.out(), head+line)
+				continue
+			}
+			fmt.Fprintln(p.out(), hang+line)
+		}
+	}
+}
+
+// groupTable is a block with columns: the heading is the first column's, so the
+// column headings line up over the facts, and every column but the last is
+// padded to the widest fact in it.
+func (p *Plain) groupTable(g Group, nameWidth int) {
+	cols := columnWidths(g)
+	head := pad(g.Title, 2+nameWidth)
+	for i, c := range g.Columns {
+		head += "  " + pad(c, cols[i])
+	}
+	fmt.Fprintln(p.out(), strings.TrimRight(head, " "))
+	for _, r := range g.Rows {
+		if r.Glyph != "" {
+			// The fold: "+ 5 more" and the names that did not fit.
+			fmt.Fprintf(p.out(), "  %s %s\n", r.Glyph, strings.Join(r.Facts, "  "))
+			continue
+		}
+		line := "  " + pad(r.Name, nameWidth)
+		for i := 0; i+1 < len(r.Facts); i++ {
+			col := 0
+			if i < len(cols) {
+				col = cols[i]
+			}
+			line += "  " + pad(r.Facts[i], col)
+		}
+		if len(r.Facts) == 0 || strings.TrimSpace(r.Facts[len(r.Facts)-1]) == "" {
+			fmt.Fprintln(p.out(), strings.TrimRight(line, " "))
+			continue
+		}
+		line += "  "
+		hang := strings.Repeat(" ", len(line))
+		for i, wrapped := range Wrap(r.Facts[len(r.Facts)-1], Width-len(line)) {
+			if i == 0 {
+				fmt.Fprintln(p.out(), line+wrapped)
+				continue
+			}
+			fmt.Fprintln(p.out(), hang+wrapped)
+		}
+	}
+}
+
+// Note is the transcript's line of prose under a block: two columns in, so it
+// belongs to the block above it, and wrapped with the continuation hanging
+// under the text.
+func (p *Plain) Note(text string) {
+	text = strings.TrimSpace(text)
+	if text == "" {
+		return
+	}
+	for i, line := range Wrap(text, Width-2) {
+		if i == 0 {
+			fmt.Fprintln(p.out(), "  "+line)
+			continue
+		}
+		fmt.Fprintln(p.out(), "    "+line)
+	}
+}
+
+// columnWidths are the widths of a group's leading columns: as wide as the
+// widest fact in each, so the headings sit over the data they name.
+func columnWidths(g Group) []int {
+	cols := make([]int, len(g.Columns))
+	for _, r := range g.Rows {
+		if r.Glyph != "" {
+			continue
+		}
+		for i := range g.Columns {
+			if i+1 < len(r.Facts) && len(r.Facts[i]) > cols[i] {
+				cols[i] = len(r.Facts[i])
+			}
+		}
+	}
+	return cols
+}
+
+// blockNameWidth is a block's name column: as wide as its longest name.
+func blockNameWidth(rows []TableRow) int {
+	w := 0
+	for _, r := range rows {
+		if n := len(r.Name); n > w {
+			w = n
+		}
+	}
+	return w
+}
+
 // PlainRow lays one row out as the transcript prints it, and as the run log
-// keeps it: the two never differ.
+// keeps it: the two never differ. A row is one line per fact -- the facts, then
+// the why, then the command, each hanging under the row's own text column -- and
+// nothing is wrapped. A block that carries sentences (Group, Note) wraps at
+// Width; a status row is what a person scans, and a golden test reads the same
+// bytes whatever the terminal was.
 func PlainRow(r Row) string {
 	mark := r.Mark
 	if mark == "" {
@@ -526,6 +681,60 @@ func pad(s string, width int) string {
 		return s + strings.Repeat(" ", n)
 	}
 	return s
+}
+
+// Width is the column box writes to when a terminal is not the one deciding:
+// the plain transcript, the run log and the migration's report all read it, so
+// a piped run and the file beside a snapshot break their lines in the same
+// places.
+const Width = 80
+
+// Wrap breaks text into lines of at most width columns, never inside a word: a
+// path, an address or a name that does not fit goes on a line of its own,
+// whole, because half a path is a different path.
+func Wrap(text string, width int) []string {
+	if width < 1 {
+		width = 1
+	}
+	words := strings.Fields(text)
+	if len(words) == 0 {
+		return []string{""}
+	}
+	out := []string{}
+	line := words[0]
+	for _, w := range words[1:] {
+		if len(line)+1+len(w) <= width {
+			line += " " + w
+			continue
+		}
+		out = append(out, line)
+		line = w
+	}
+	return append(out, line)
+}
+
+// WrapShell breaks a command the way a shell does: at the spaces, with a
+// trailing `\` on every line but the last, so a pasted command runs as it
+// stands.
+func WrapShell(text string, width int) []string {
+	words := strings.Fields(text)
+	if len(words) == 0 {
+		return []string{""}
+	}
+	if width < 4 {
+		width = 4
+	}
+	var out []string
+	line := words[0]
+	for _, w := range words[1:] {
+		if len(line)+1+len(w) <= width {
+			line += " " + w
+			continue
+		}
+		out = append(out, line+" \\")
+		line = "    " + w
+	}
+	return append(out, line)
 }
 
 // Duration is a span of time as a person reads it: 41s, 6s, 4m10s, 10m. The

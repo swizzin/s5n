@@ -88,10 +88,10 @@ func renderGrouped(s Summary) string {
 		out.Muted(g.Lead)
 	}
 	for _, block := range g.Blocks {
-		PrintGroup(out, block)
+		out.Group(block)
 	}
 	if g.Footer != "" {
-		out.Muted(g.Footer)
+		out.Note(g.Footer)
 	}
 	return buf.String()
 }
@@ -111,7 +111,8 @@ apps           carries    changes
                     qBittorrent, so a rewrite would point it at an app that does
                     not speak its protocol; delete it in the Arr if you do not
                     need it
-2 notes · 4 other workloads stay behind · 2 values left as they are · --details
+  2 notes · 4 other workloads stay behind · 2 values left as they are ·
+    --details
 `
 	if got := renderGrouped(groupedFixture()); got != want {
 		t.Fatalf("the grouped summary is:\n%s\nwant:\n%s", got, want)

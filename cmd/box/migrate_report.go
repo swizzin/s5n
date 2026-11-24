@@ -323,7 +323,7 @@ func readDigest(d report.Doc, out say.Reporter) {
 	}
 	path := report.Name(d.Snapshot)
 	rows = append(rows, say.Row{Mark: say.MarkNote, Name: "report", Facts: []string{path}, Command: "less " + path})
-	apply.PrintRows(out, rows)
+	out.Rows(rows)
 }
 
 // digest prints a read's screen: one heading line naming the command and what it
@@ -351,7 +351,7 @@ func (r migrationRead) defaultsRow(out say.Reporter) {
 	for _, line := range defaults.Lines() {
 		out.Detail(line)
 	}
-	apply.PrintRows(out, []say.Row{{
+	out.Rows([]say.Row{{
 		Mark:  say.MarkNeeds,
 		Name:  "defaults",
 		Facts: []string{countText(n) + " taken", "the report names each one"},

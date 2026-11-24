@@ -352,3 +352,46 @@ func TestReporterTableWrapsUnderTheFacts(t *testing.T) {
 		t.Fatalf("the fact did not wrap under the facts column:\n%s", strings.Join(lines, "\n"))
 	}
 }
+
+// A block with columns is the same table the transcript prints: the heading in
+// the name column, each column heading over the facts it names, and the last
+// column wrapped under itself at the terminal's width so an 80-column terminal
+// still reads a row as one row.
+func TestReporterGroupIsTheTranscriptsTable(t *testing.T) {
+	var buf bytes.Buffer
+	r := NewReporter(ReporterOptions{Out: &buf, Width: 80, NoColor: true, Yes: true})
+	r.Group(say.Group{
+		Title:   "apps",
+		Columns: []string{"carries", "changes"},
+		Rows: []say.TableRow{
+			{Name: "autobrr", Facts: []string{"1.5 GiB", "2 addresses · login → s5n"}},
+			{Name: "radarr", Facts: []string{"34.0 MiB", `2,930 paths · 1 address · keeps download client "qBT" · keeps its API key`}},
+		},
+	})
+	r.Note("2 notes · 4 other workloads stay behind · 2 values left as they are · --details")
+	r.Close()
+
+	lines := strip(buf.String())
+	for i, line := range lines {
+		if len([]rune(line)) > 80 {
+			t.Fatalf("line %d is wider than the terminal: %q", i, line)
+		}
+	}
+	if got, want := lines[0], "  apps     carries   changes"; got != want {
+		t.Fatalf("heading = %q, want %q", got, want)
+	}
+	if got, want := lines[1], "  · autobrr  1.5 GiB   2 addresses · login → s5n"; got != want {
+		t.Fatalf("first row = %q, want %q", got, want)
+	}
+	// The last column wraps under the column it starts in, so the words line
+	// up with the facts above them.
+	if got := indexPrefix(lines, `  · radarr   34.0 MiB  2,930 paths · 1 address · keeps download client`); got < 0 {
+		t.Fatalf("the long row is not in the table:\n%s", strings.Join(lines, "\n"))
+	}
+	if got := indexPrefix(lines, "                       keeps its API key"); got < 0 {
+		t.Fatalf("the wrapped part does not hang under the facts column:\n%s", strings.Join(lines, "\n"))
+	}
+	if got := indexPrefix(lines, "  2 notes · 4 other workloads"); got < 0 {
+		t.Fatalf("no note:\n%s", strings.Join(lines, "\n"))
+	}
+}
