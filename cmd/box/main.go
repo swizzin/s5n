@@ -483,7 +483,10 @@ func runBootstrap(ctx context.Context, args []string) {
 		out.Error(err)
 		os.Exit(1)
 	} else if wrote {
-		out.Muted("wrote " + hostconf.Path(*recordPath) + ": whether this box updates by itself, how often, and where it posts notices")
+		// The file is a row and its path is the log's: what a person needs is
+		// that root's settings now have a home (rule 5).
+		out.Rows([]say.Row{{Mark: say.MarkNote, Name: "config", State: "new", Facts: []string{"updates and notices"}}})
+		out.Detail("wrote " + hostconf.Path(*recordPath))
 	}
 
 	// bootstrap sets the machine up once; init sets up root's seedbox. It runs
