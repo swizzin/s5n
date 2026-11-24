@@ -212,16 +212,6 @@ type Answers struct {
 	Hosts []Host
 	// NoticeURL is where box posts notices, when this run was asked.
 	NoticeURL string
-
-	// The rest is what the write half reads back: the documents the answers
-	// came from, and the questions the apply asks after its own confirm.
-	sb            *seedbox.Seedbox
-	base          map[string]any
-	grantNow      map[string]any
-	paths         []pathTarget
-	stored        []answer
-	transient     []catalog.Question
-	transientKeys []string
 }
 
 // ApplyOptions is what init hands the applier: the same arguments `box apply`
@@ -608,24 +598,17 @@ func (d *Decision) Run(ctx context.Context, opts Options) (Result, error) {
 	// here, with all of this run's answers in front of the operator.
 	if opts.BeforeWrite != nil {
 		if err := opts.BeforeWrite(ctx, Answers{
-			Result:        res,
-			DataPath:      dataPath,
-			ConfigPath:    configPath,
-			PUID:          puid,
-			PGID:          pgid,
-			Apps:          apps,
-			Login:         loginName,
-			Namespace:     namespace,
-			Port:          port,
-			Hosts:         res.Hosts,
-			NoticeURL:     noticeURL,
-			sb:            sb,
-			base:          base,
-			grantNow:      grantNow,
-			paths:         paths,
-			stored:        stored,
-			transient:     transient,
-			transientKeys: transientKeys,
+			Result:     res,
+			DataPath:   dataPath,
+			ConfigPath: configPath,
+			PUID:       puid,
+			PGID:       pgid,
+			Apps:       apps,
+			Login:      loginName,
+			Namespace:  namespace,
+			Port:       port,
+			Hosts:      res.Hosts,
+			NoticeURL:  noticeURL,
 		}); err != nil {
 			return res, err
 		}
