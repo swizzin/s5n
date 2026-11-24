@@ -343,6 +343,13 @@ box_log() {
   ls -t "${BOX_LOG_DIR}"/"$1"-[0-9]*.log 2>/dev/null | head -1
 }
 
+# box_logs <command>: every log that command wrote, newest first. A command that
+# hands over to another opens one log per output it builds, so the line a test
+# wants may not be in the newest.
+box_logs() {
+  ls -t "${BOX_LOG_DIR}"/"$1"-[0-9]*.log 2>/dev/null
+}
+
 # ---- the chart a user would get -------------------------------------------
 # box only installs published charts (docs/box.md), so the e2e publishes one:
 # `helm package` from this working tree, `helm push` to a registry on this
@@ -6175,7 +6182,7 @@ print(".".join(str(p) for p in tree))' "$CHART_VERSION"); then
   else
     cat "$WORK/bootstrap1.txt"; fail=1; return 0
   fi
-  grep -qF "chart s5n ${UPGRADE_FROM} (${CHART_REPO}:${UPGRADE_FROM})" "$(box_log bootstrap)" ||
+  grep -qF "chart: s5n ${UPGRADE_FROM} (${CHART_REPO}:${UPGRADE_FROM})" "$WORK/bootstrap1.txt" ||
     { echo "box did not pull ${CHART_REPO}:${UPGRADE_FROM}"; fail=1; }
   grep -q "^wiring ok" "$WORK/bootstrap1.txt" ||
     { echo "the published install did not report a healthy receipt"; fail=1; }
@@ -9086,7 +9093,7 @@ migrate_box() {
   # the point: this host had no box, and an answer of no has to leave it with no
   # cluster, no platform and no grant.
   confirm_at=$(grep -n '^nothing is installed yet: this run installs' "$WORK/apply-migrate.txt" | head -1 | cut -d: -f1) || true
-  install_at=$(grep -nE '^(decision|chart): ' "$WORK/apply-migrate.txt" | head -1 | cut -d: -f1) || true
+  install_at=$(grep -nE '^(decision|chart): |^✓ chart ' "$WORK/apply-migrate.txt" | head -1 | cut -d: -f1) || true
   if [ -z "$confirm_at" ]; then
     echo "the confirm does not say the run has installed nothing yet"; fail=1
   elif [ -z "$install_at" ]; then
@@ -9165,7 +9172,11 @@ migrate_box() {
   # this run pulled once for both halves.
   grep -qF "snapshot: ${snapshot} (final)" "$WORK/apply-migrate.txt" ||
     { echo "the run did not name the snapshot it read"; fail=1; }
-  grep -qF "chart s5n ${CHART_VERSION} (${CHART_REPO}:${CHART_VERSION})" "$(box_log migrate-apply)" ||
+  migrate_logs=$(box_logs migrate-apply)
+  [ -n "$migrate_logs" ] ||
+    { echo "box migrate apply wrote no run log under ${BOX_LOG_DIR}"; ls -l "${BOX_LOG_DIR}" 2>/dev/null | head; fail=1; }
+  # shellcheck disable=SC2086 # the logs are a list of files
+  grep -qhF "chart s5n ${CHART_VERSION} (${CHART_REPO}:${CHART_VERSION})" $migrate_logs ||
     { echo "box did not pull ${CHART_REPO}:${CHART_VERSION}"; fail=1; }
   # The confirm says what the snapshot carried, once: an operator deciding to
   # copy a Plex config reads that its artwork and preview thumbnails are in it.
