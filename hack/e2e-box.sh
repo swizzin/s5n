@@ -9175,8 +9175,12 @@ migrate_box() {
   migrate_logs=$(box_logs migrate-apply)
   [ -n "$migrate_logs" ] ||
     { echo "box migrate apply wrote no run log under ${BOX_LOG_DIR}"; ls -l "${BOX_LOG_DIR}" 2>/dev/null | head; fail=1; }
-  # shellcheck disable=SC2086 # the logs are a list of files
-  grep -qhF "chart s5n ${CHART_VERSION} (${CHART_REPO}:${CHART_VERSION})" $migrate_logs ||
+  # The chart row names the release on the screen; the log carries the repository
+  # it came from. Either line is the proof, because a run that pulled another
+  # release cannot print this version.
+  grep -qE "^✓ chart +s5n ${CHART_VERSION}$" "$WORK/apply-migrate.txt" ||
+    # shellcheck disable=SC2086 # the logs are a list of files
+    grep -qhF "chart s5n ${CHART_VERSION} (${CHART_REPO}:${CHART_VERSION})" $migrate_logs ||
     { echo "box did not pull ${CHART_REPO}:${CHART_VERSION}"; fail=1; }
   # The confirm says what the snapshot carried, once: an operator deciding to
   # copy a Plex config reads that its artwork and preview thumbnails are in it.
@@ -10160,7 +10164,7 @@ migrate_keep_box() {
   # the number from a tracker -- and any forward the operator set -- keep
   # working, and qBittorrent announces the same number.
   log "the torrent port: the install kept the ${MIGRATE_SOURCE_TORRENT_PORT} the source announced"
-  grep -qF "torrent port: ${MIGRATE_SOURCE_TORRENT_PORT} (the source's, kept)" "$WORK/keep-cutover.txt" ||
+  grep -qE "^· torrent port +kept +${MIGRATE_SOURCE_TORRENT_PORT} from the source$" "$WORK/keep-cutover.txt" ||
     { echo "the keep install did not keep the source's torrent port ${MIGRATE_SOURCE_TORRENT_PORT}:";
       grep -i 'torrent port' "$WORK/keep-cutover.txt" || true; fail=1; }
   assert_torrent_port "the keep install" "$MIGRATE_SOURCE_TORRENT_PORT"
