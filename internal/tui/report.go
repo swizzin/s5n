@@ -489,8 +489,9 @@ func (r *Reporter) Line(text string) { r.block(text, "", inkStyle, inkStyle) }
 // Muted is explanation.
 func (r *Reporter) Muted(text string) { r.block(text, "", mutedStyle, mutedStyle) }
 
-// Warn is a line that is a warning: marked and painted bad, wrapped.
-func (r *Reporter) Warn(text string) { r.block(text, "⚠ ", badStyle, badStyle) }
+// Warn is a line that needs a person: the `!` mark in the gutter, painted bad
+// and wrapped under itself. A line that is only worth knowing is a note.
+func (r *Reporter) Warn(text string) { r.block(text, "! ", badStyle, badStyle) }
 
 // Success is something that finished well: one accent ✓, then the words.
 func (r *Reporter) Success(text string) { r.block(text, "✓ ", glyphStyle("✓"), inkStyle) }

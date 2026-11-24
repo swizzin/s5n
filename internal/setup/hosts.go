@@ -107,7 +107,7 @@ func (t *TLSHosts) Ensure(ctx context.Context, hosts []string) error {
 	}
 	domain := strings.TrimSpace(t.Domain)
 	if domain == "" {
-		return errors.New("no domain: an app host is a name under the box's own")
+		return errors.New("no domain: an app host is a name under this host's own")
 	}
 	r := t.report()
 	// The box's own name is resolved only for a host this run has not decided

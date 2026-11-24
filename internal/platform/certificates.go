@@ -96,7 +96,7 @@ type CertificateResult struct {
 	// whose certificate never issues is never served over HTTPS.
 	HTTPS    bool
 	Redirect bool
-	// Reissued says the certificate box found was not signed by the box root
+	// Reissued says the certificate box found was not signed by box's root
 	// and this run asked cert-manager for a new one.
 	Reissued bool
 }
@@ -375,7 +375,7 @@ func (c *Certificates) serve(ctx context.Context, cl CertificateCluster, res *Ce
 		return nil
 	}
 
-	// A self-signed host's certificate has to chain to the box root, or the
+	// A self-signed host's certificate has to chain to box's root, or the
 	// anchor box writes into the seedbox's namespace is not the anchor its
 	// applications verify against. cert-manager does not re-issue on its own
 	// when the issuer behind an unchanged issuerRef changes what it signs with,
@@ -433,7 +433,7 @@ func clusterIssuerName(issuer string) (string, error) {
 	}
 }
 
-// followRoot keeps a self-signed host's certificate on the box root.
+// followRoot keeps a self-signed host's certificate on box's root.
 //
 // 0.3.0 wrote every host certificate from a bare `selfSigned` ClusterIssuer, so
 // its Secret's ca.crt is the leaf itself. A box upgraded from it keeps the same
@@ -479,7 +479,7 @@ func (d *CertificateDecision) followRoot(ctx context.Context, cl CertificateClus
 	}
 
 	r := d.report()
-	step := r.Start(say.Op{Label: "re-issuing Certificate " + GatewayNamespace + "/" + name + " from the box root"})
+	step := r.Start(say.Op{Label: "re-issuing Certificate " + GatewayNamespace + "/" + name + " from box's root"})
 	if err := triggerIssuing(ctx, cl, name); err != nil {
 		step.Failed(err)
 		return false, err
@@ -512,7 +512,7 @@ func (d *CertificateDecision) followRoot(ctx context.Context, cl CertificateClus
 		return false, fmt.Errorf("certificate %s/%s: cert-manager did not replace it within %s after box asked (check `kubectl -n %s describe certificate %s`)",
 			GatewayNamespace, name, timeout, GatewayNamespace, name)
 	}
-	step.Done(fmt.Sprintf("Certificate %s/%s: re-issued from the box root", GatewayNamespace, name))
+	step.Done(fmt.Sprintf("Certificate %s/%s: re-issued from box's root", GatewayNamespace, name))
 
 	// The new certificate should be the root's child now; if cert-manager
 	// answered with something else, say so rather than letting the anchor be
@@ -530,7 +530,7 @@ func (d *CertificateDecision) followRoot(ctx context.Context, cl CertificateClus
 		now, _, _ := unstructured.NestedStringMap(obj, "data")
 		caCert, _ := base64.StdEncoding.DecodeString(now["ca.crt"])
 		if ours, err := signedByRoot(caCert, root); err == nil && !ours {
-			r.Warn(fmt.Sprintf("certificate %s/%s was re-issued but does not chain to the box root: check that %s is a CA issuer over %s", GatewayNamespace, name, SelfSignedIssuer, RootSecretName))
+			r.Warn(fmt.Sprintf("certificate %s/%s was re-issued but does not chain to box's root: check that %s is a CA issuer over %s", GatewayNamespace, name, SelfSignedIssuer, RootSecretName))
 		}
 	}
 	return true, nil
@@ -538,11 +538,11 @@ func (d *CertificateDecision) followRoot(ctx context.Context, cl CertificateClus
 
 // CertificateNeedsWork reports whether a host's Certificate is there but is not
 // the one this run would issue: a different issuer than the run decided, or a
-// self-signed one whose ca.crt is not the box root.
+// self-signed one whose ca.crt is not box's root.
 //
 // It exists for a host that answers already. A Certificate's name and
 // issuerRef do not change when the issuer behind it changes what it signs with
-// (0.3.0's bare `selfSigned` became a CA over the box root), and cert-manager
+// (0.3.0's bare `selfSigned` became a CA over box's root), and cert-manager
 // never re-issues for that: the host is served, by a certificate nothing else
 // chains to. A run that only looked for missing hosts would leave it there.
 func CertificateNeedsWork(ctx context.Context, k objectReader, host, want string) (bool, error) {

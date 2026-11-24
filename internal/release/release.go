@@ -686,7 +686,7 @@ func (a *Applier) Apply(ctx context.Context, opts Options) (Result, error) {
 	}
 	if !nsp.Exists {
 		if !nsp.CanCreate {
-			return res, fmt.Errorf("the namespace %s does not exist, and this kubeconfig may not create namespaces: root creates a seedbox's namespace with `box adduser`; ask root to add the box, then apply again", namespace)
+			return res, fmt.Errorf("the namespace %s does not exist, and this kubeconfig may not create namespaces: root creates a seedbox's namespace with `box adduser`; ask root to add this box, then apply again", namespace)
 		}
 	} else if nsp.Enforce != podSecurityRestricted {
 		enforce := "no " + podSecurityEnforce + " label"

@@ -288,10 +288,11 @@ func writeNotes(b *strings.Builder, notes []string) {
 
 // writeWarnings prints what box saw but will not change. A warning is not a
 // note: a note is host evidence that does not matter here, a warning is
-// something wrong the operator has to fix somewhere box does not write.
+// something wrong the operator has to fix somewhere box does not write, so it
+// carries the `!` mark in the gutter rather than a word in front of it.
 func writeWarnings(b *strings.Builder, warnings []string) {
 	for _, w := range warnings {
-		fmt.Fprintf(b, "warning: %s\n", w)
+		fmt.Fprintf(b, "%s %s\n", say.MarkNeeds, w)
 	}
 }
 
@@ -367,6 +368,6 @@ func reportNotes(r say.Reporter, notes []string) {
 
 func reportWarnings(r say.Reporter, warnings []string) {
 	for _, w := range warnings {
-		r.Warn("warning: " + w)
+		r.Warn(w)
 	}
 }

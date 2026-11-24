@@ -50,7 +50,7 @@ const (
 	// anchorNothing: the host's certificate is publicly trusted, so a pod has
 	// nothing to add.
 	anchorNothing anchorSource = iota
-	// anchorFromRoot: the host's certificate is signed by the box root, and
+	// anchorFromRoot: the host's certificate is signed by box's root, and
 	// the anchor is that root's certificate.
 	anchorFromRoot
 	// anchorFromFile: a development run hands box the certificate to copy
@@ -74,7 +74,7 @@ const (
 // only init's per-host step moves a host to Let's Encrypt -- so deciding from
 // the resolution would take the login away from every app that restarted in
 // between. A self-signed host always wins when this run writes the
-// certificate: its certificate chains to the box root, so the root is the only
+// certificate: its certificate chains to box's root, so the root is the only
 // correct anchor whatever the file says.
 func anchorFor(written, certificate string, certificateThere bool, caFile string) (anchorSource, error) {
 	follows := ""
@@ -88,7 +88,7 @@ func anchorFor(written, certificate string, certificateThere bool, caFile string
 	case certificateThere:
 		// The Certificate's issuerRef is whatever cert-manager accepted
 		// there. box only has to recognise its own root; any other name is a
-		// certificate the box root did not sign, so there is nothing of
+		// certificate box's root did not sign, so there is nothing of
 		// box's to carry.
 		follows = certificate
 	default:
@@ -195,7 +195,7 @@ func (d *HostCADecision) Apply(ctx context.Context) (HostCAResult, error) {
 		step.Failed(err)
 		return res, fmt.Errorf("writing the host CA into %s: %w", d.Namespace, err)
 	}
-	step.Done(fmt.Sprintf("wrote ConfigMap %s/%s: the box's root certificate, for an app that has to trust %s", d.Namespace, HostCAName, d.hostName()))
+	step.Done(fmt.Sprintf("wrote ConfigMap %s/%s: box's root certificate, for an app that has to trust %s", d.Namespace, HostCAName, d.hostName()))
 	res.Wrote = true
 	return res, nil
 }
@@ -296,7 +296,7 @@ func certificateIssuer(ctx context.Context, cl objectReader, host string) (strin
 	return ref["name"], true, nil
 }
 
-// certificate is the certificate the anchor carries: the box root, or the file
+// certificate is the certificate the anchor carries: box's root, or the file
 // a development run supplied.
 func (d *HostCADecision) certificate(ctx context.Context, cl HostCACluster, source anchorSource) ([]byte, error) {
 	if source == anchorFromFile {
@@ -317,17 +317,17 @@ type objectReader interface {
 func rootCertificate(ctx context.Context, cl objectReader) ([]byte, error) {
 	obj, ok, err := cl.Get(ctx, "", "v1", "Secret", CertManagerNamespace, RootSecretName)
 	if err != nil {
-		return nil, fmt.Errorf("reading the box root: %w", err)
+		return nil, fmt.Errorf("reading box's root: %w", err)
 	}
 	if !ok {
-		return nil, fmt.Errorf("the box root's Secret %s/%s is not there: a self-signed box's certificates are signed by it, so run `box bootstrap` first", CertManagerNamespace, RootSecretName)
+		return nil, fmt.Errorf("box's root's Secret %s/%s is not there: a self-signed box's certificates are signed by it, so run `box bootstrap` first", CertManagerNamespace, RootSecretName)
 	}
 	pemBytes, err := secretPEM(obj, "tls.crt")
 	if err != nil {
-		return nil, fmt.Errorf("the box root's Secret %s/%s: %w", CertManagerNamespace, RootSecretName, err)
+		return nil, fmt.Errorf("box's root's Secret %s/%s: %w", CertManagerNamespace, RootSecretName, err)
 	}
 	if !isCA(pemBytes) {
-		return nil, fmt.Errorf("the box root's Secret %s/%s holds a certificate that is not a CA: %s is not the root box made", CertManagerNamespace, RootSecretName, RootCertificateName)
+		return nil, fmt.Errorf("box's root's Secret %s/%s holds a certificate that is not a CA: %s is not the root box made", CertManagerNamespace, RootSecretName, RootCertificateName)
 	}
 	return pemBytes, nil
 }
@@ -346,7 +346,7 @@ func secretPEM(obj map[string]any, key string) ([]byte, error) {
 // hostName is the box's own host, for box's output.
 func (d *HostCADecision) hostName() string {
 	if strings.TrimSpace(d.Host) == "" {
-		return "the box's own certificate"
+		return "box's own certificate"
 	}
 	return d.Host
 }
@@ -443,7 +443,7 @@ func isCA(pemBytes []byte) bool {
 // leaf's Secret today, or by something else?
 //
 // 0.3.0 wrote every host certificate with a bare selfSigned issuer, so the
-// Secret's ca.crt is the leaf itself; the box root is a different certificate,
+// Secret's ca.crt is the leaf itself; box's root is a different certificate,
 // and nothing in cert-manager re-issues a Certificate because the issuer's
 // spec changed -- only a new CertificateRequest does (the Issuing condition,
 // which is what `cmctl renew` sets). So box compares and asks for a new
@@ -455,7 +455,7 @@ func isCA(pemBytes []byte) bool {
 func signedByRoot(secretCACert, rootPEM []byte) (bool, error) {
 	root, err := firstCertificate(rootPEM)
 	if err != nil {
-		return false, fmt.Errorf("the box root: %w", err)
+		return false, fmt.Errorf("box's root: %w", err)
 	}
 	if len(secretCACert) == 0 {
 		return false, nil

@@ -114,7 +114,7 @@ func TestApplySeedsThePlexTokenFromPlexItself(t *testing.T) {
 		t.Fatalf("upgrades = %d, want the one install that re-runs the wiring", f.rel.upgrades)
 	}
 	out := f.out.String()
-	if !strings.Contains(out, "  · plex-token  read from Plex's Preferences.xml") {
+	if !strings.Contains(out, "· plex-token     read from Plex's Preferences.xml") {
 		t.Fatalf("apply did not say where the token came from:\n%s", out)
 	}
 	if !strings.Contains(out, "running its hooks") {

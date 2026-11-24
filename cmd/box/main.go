@@ -81,6 +81,12 @@ func main() {
 	if len(os.Args) < 2 {
 		usage()
 	}
+	// `box --version` and `box -v` are the same question as `box version`: what
+	// a script asks is the version, not a usage screen.
+	if versionFlag(os.Args[1]) {
+		fmt.Println(version)
+		return
+	}
 	switch os.Args[1] {
 	case "bootstrap":
 		runBootstrap(ctx, os.Args[2:])
@@ -96,11 +102,20 @@ func main() {
 		runRollback(ctx, os.Args[2:])
 	case "migrate":
 		runMigrate(ctx, os.Args[2:])
-	case "version":
-		fmt.Println(version)
 	default:
 		usage()
 	}
+}
+
+// versionFlag reports whether this invocation asks for the version. All three
+// spellings print the same line, so a script cannot get usage out of the one it
+// guessed.
+func versionFlag(arg string) bool {
+	switch arg {
+	case "version", "--version", "-v":
+		return true
+	}
+	return false
 }
 
 // closeLog finishes this run's transcript. It runs when a command returns
@@ -835,7 +850,7 @@ func addInitFlags(fs *flag.FlagSet) *initFlags {
 	o := &initFlags{fs: fs, chart: addChartFlags(fs, chartVersionInstalls)}
 	o.grantPath = fs.String("grant", seedbox.GrantPath("root"), "the root-owned grant file to write")
 	o.valuesPath = fs.String("values", valuesDefault, "the user's values file to edit")
-	o.namespace = fs.String("namespace", "", "the box's namespace (default s5n-<login>); a re-run keeps whatever the grant says")
+	o.namespace = fs.String("namespace", "", "this box's namespace (default s5n-<login>); a re-run keeps whatever the grant says")
 	o.domain = fs.String("domain", "", "the domain this box is reached at, e.g. box.example.com")
 	o.dataPath = fs.String("data-path", "", "the host path downloads and media live on")
 	o.configPath = fs.String("config-path", "", "the host path the apps keep their settings on")

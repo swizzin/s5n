@@ -138,7 +138,7 @@ func timerUnitsFor(unitDir string, root, systemd bool) (hostconf.Units, string) 
 func boxPath() (string, error) {
 	path, err := os.Executable()
 	if err != nil {
-		return "", fmt.Errorf("find the box binary to schedule: %w", err)
+		return "", fmt.Errorf("find box's binary to schedule: %w", err)
 	}
 	if resolved, err := filepath.EvalSymlinks(path); err == nil {
 		path = resolved

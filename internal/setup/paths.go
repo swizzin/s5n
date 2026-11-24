@@ -117,7 +117,7 @@ func (d *Decision) inspect(kind, path string, uid, gid int) (PathReport, error) 
 		}
 		rep.Summary = summary
 		if info.UID != uid || info.GID != gid {
-			rep.Summary += fmt.Sprintf("\n          note: owned %d:%d, not the box's %d:%d; the apps cannot write there as it is", info.UID, info.GID, uid, gid)
+			rep.Summary += fmt.Sprintf("\n          note: owned %d:%d, not this box's %d:%d; the apps cannot write there as it is", info.UID, info.GID, uid, gid)
 		}
 	case errors.Is(err, fs.ErrNotExist):
 		anchor = nearestExisting(d.Host, path)

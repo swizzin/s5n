@@ -323,7 +323,7 @@ type Decision struct {
 	// WebhookTimeout bounds how long cert-manager's webhook may refuse the
 	// first ClusterIssuer apply. Zero means two minutes.
 	WebhookTimeout time.Duration
-	// RootTimeout bounds the wait for the box root Certificate to be Ready
+	// RootTimeout bounds the wait for box's root Certificate to be Ready
 	// before the CA issuer that signs with it is applied. Zero means
 	// RootTimeout (two minutes).
 	RootTimeout time.Duration
@@ -792,7 +792,7 @@ func (d *Decision) applyPool(ctx context.Context, cl Cluster) error {
 
 func (d *Decision) applyIssuers(ctx context.Context, cl Cluster, docs []map[string]any) error {
 	r := d.report()
-	step := r.Start(say.Op{Label: "applying the cert-manager ClusterIssuers and the box root"})
+	step := r.Start(say.Op{Label: "applying the cert-manager ClusterIssuers and box's root"})
 	wait := d.WebhookTimeout
 	if wait <= 0 {
 		wait = 2 * time.Minute
@@ -829,12 +829,12 @@ func (d *Decision) applyIssuers(ctx context.Context, cl Cluster, docs []map[stri
 	return nil
 }
 
-// RootTimeout is how long the box root Certificate gets to be Ready before
+// RootTimeout is how long box's root Certificate gets to be Ready before
 // bootstrap stops. It is a local signing operation, not an ACME exchange, so
 // the bound is a webhook and a controller catching up, not DNS.
 const RootTimeout = 2 * time.Minute
 
-// awaitRoot waits for the box root Certificate, in the shape every other wait
+// awaitRoot waits for box's root Certificate, in the shape every other wait
 // in this package has: poll to the deadline, then branch on what the last
 // attempt said. A Certificate that is not Ready is cert-manager's reason to
 // report -- the root is the one thing a self-signed box can never re-derive
@@ -873,14 +873,14 @@ func (d *Decision) awaitRoot(ctx context.Context, cl Cluster) error {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
-		return fmt.Errorf("the box root Certificate %s/%s: %w", CertManagerNamespace, RootCertificateName, err)
+		return fmt.Errorf("box's root Certificate %s/%s: %w", CertManagerNamespace, RootCertificateName, err)
 	}
 	if !waited.Done {
 		step.Failed(ErrNotReady)
 		if reason == "" {
 			reason = certNotReadyReason
 		}
-		return fmt.Errorf("the box root Certificate %s/%s is not Ready after %s (%s): every self-signed host's certificate is issued by it, so box stopped before the CA issuer; run `box bootstrap` again once cert-manager has issued it",
+		return fmt.Errorf("box's root Certificate %s/%s is not Ready after %s (%s): every self-signed host's certificate is issued by it, so box stopped before the CA issuer; run `box bootstrap` again once cert-manager has issued it",
 			CertManagerNamespace, RootCertificateName, timeout, reason)
 	}
 	step.Done(fmt.Sprintf("Certificate %s/%s: Ready", CertManagerNamespace, RootCertificateName))

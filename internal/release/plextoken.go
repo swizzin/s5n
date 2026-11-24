@@ -123,14 +123,16 @@ func (a *Applier) planPlexToken(ctx context.Context, r say.Reporter, values map[
 // writePlexToken puts the token in the release Secret, before the release this
 // run installs re-runs the wiring Job with it. The one line it prints is the
 // record of a write that a later run cannot see: from then on the key is just
-// there, and the next apply says nothing about it.
+// there, and the next apply says nothing about it. It is a note (`·`): nothing
+// is asked of the person, and the file it came from is the one fact worth
+// keeping.
 func (a *Applier) writePlexToken(ctx context.Context, r say.Reporter, seed plexSeed) bool {
 	if err := seed.store.Set(ctx, plexTokenKey, seed.Token); err != nil {
 		r.Warn(fmt.Sprintf("%s could not be kept: %v", plexTokenKey, err))
 		return false
 	}
-	r.Table("", []say.TableRow{{
-		Glyph: "·",
+	r.Rows([]say.Row{{
+		Mark:  say.MarkNote,
 		Name:  plexTokenKey,
 		Facts: []string{"read from Plex's " + filepath.Base(seed.File)},
 	}})

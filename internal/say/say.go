@@ -350,7 +350,14 @@ func (p *Plain) Detail(text string) {
 	fmt.Fprintln(p.Log, text)
 }
 
-func (p *Plain) Phase(string) {}
+// Phase is a heading: a lowercase noun on a line of its own, with nothing after
+// it (rule 9). A live renderer draws the same name in its masthead.
+func (p *Plain) Phase(name string) {
+	if strings.TrimSpace(name) == "" {
+		return
+	}
+	fmt.Fprintln(p.out(), name)
+}
 
 func (p *Plain) Fact(key, value string) {
 	fmt.Fprintf(p.out(), "%s: %s\n", key, value)
@@ -569,10 +576,17 @@ func (w *Watcher) Next() (string, bool) {
 	return line, true
 }
 
-func (p *Plain) Line(text string)      { fmt.Fprintln(p.out(), text) }
-func (p *Plain) Muted(text string)     { fmt.Fprintln(p.out(), text) }
-func (p *Plain) Warn(text string)      { fmt.Fprintln(p.out(), text) }
-func (p *Plain) Success(text string)   { fmt.Fprintln(p.out(), text) }
+func (p *Plain) Line(text string)  { fmt.Fprintln(p.out(), text) }
+func (p *Plain) Muted(text string) { fmt.Fprintln(p.out(), text) }
+
+// Warn is a line that needs a person: the `!` mark in the gutter, in both
+// renderers (rule 1). A line that is only worth knowing is a note, and a note is
+// a `·` row.
+func (p *Plain) Warn(text string) { fmt.Fprintln(p.out(), MarkNeeds+" "+text) }
+
+// Success is something that finished well: the ✓ mark in the gutter, in both
+// renderers.
+func (p *Plain) Success(text string)   { fmt.Fprintln(p.out(), MarkDone+" "+text) }
 func (p *Plain) Banner(string, string) {}
 
 func (p *Plain) Chart(name, version, ref string) {

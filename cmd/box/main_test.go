@@ -559,3 +559,20 @@ func TestOnlyApplySetsTheSnapshotStep(t *testing.T) {
 		t.Fatalf("apply's snapshot step is incomplete: %+v", hook)
 	}
 }
+
+// TestEveryVersionSpellingPrintsTheVersion: `box --version` and `box -v` are
+// what a script asks, and they print what `box version` prints. Before this the
+// two flags fell through to the usage screen and exited 2, so the answer to
+// "which box is this" was an error.
+func TestEveryVersionSpellingPrintsTheVersion(t *testing.T) {
+	for _, arg := range []string{"version", "--version", "-v"} {
+		if !versionFlag(arg) {
+			t.Fatalf("box %s does not print the version", arg)
+		}
+	}
+	for _, arg := range []string{"bootstrap", "init", "apply", "-version", "--v", ""} {
+		if versionFlag(arg) {
+			t.Fatalf("box %s was read as a version question", arg)
+		}
+	}
+}

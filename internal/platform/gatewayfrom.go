@@ -138,7 +138,7 @@ func (k *Kubernetes) gatewayProxyIP(ctx context.Context) (string, error) {
 	case 1:
 		ip := services.Items[0].Spec.ClusterIP
 		if ip == "" || ip == "None" {
-			return "", fmt.Errorf("the Gateway's proxy Service %s/%s has no ClusterIP (%q), so an app pod has no address for the box's own name",
+			return "", fmt.Errorf("the Gateway's proxy Service %s/%s has no ClusterIP (%q), so an app pod has no address for box's own name",
 				EnvoyGatewayNamespace, services.Items[0].Name, ip)
 		}
 		return ip, nil

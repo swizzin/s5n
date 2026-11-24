@@ -386,7 +386,7 @@ func TestExistingClusterOnATunnelWarnsAndIsNotRefused(t *testing.T) {
 	if res.Warnings[0] != want {
 		t.Errorf("warning = %q, want %q", res.Warnings[0], want)
 	}
-	if out := FormatResult(res); !strings.Contains(out, "warning: "+want) {
+	if out := FormatResult(res); !strings.Contains(out, "! "+want) {
 		t.Errorf("the decision output does not carry the warning:\n%s", out)
 	}
 

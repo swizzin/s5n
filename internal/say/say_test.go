@@ -171,3 +171,41 @@ func TestPlainTableWithNoRows(t *testing.T) {
 		t.Fatalf("an empty table printed %q", buf.String())
 	}
 }
+
+// The gutter carries one mark per line, and a warning is `!`: it is something
+// that needs a person, which is the rulebook's word for the mark. `⚠` is not
+// one of the seven marks, so neither renderer prints it.
+func TestPlainWarnNeedsThePerson(t *testing.T) {
+	var buf bytes.Buffer
+	p := &Plain{W: &buf}
+	p.Warn("namespace seedbox does not enforce Pod Security restricted")
+	want := "! namespace seedbox does not enforce Pod Security restricted\n"
+	if got := buf.String(); got != want {
+		t.Fatalf("warn = %q, want %q", got, want)
+	}
+}
+
+// A success line is a done line: the ✓ in the gutter, the same mark a named
+// step ends with.
+func TestPlainSuccessIsADoneRow(t *testing.T) {
+	var buf bytes.Buffer
+	p := &Plain{W: &buf}
+	p.Success("created namespace s5n-alice (Pod Security restricted)")
+	want := "✓ created namespace s5n-alice (Pod Security restricted)\n"
+	if got := buf.String(); got != want {
+		t.Fatalf("success = %q, want %q", got, want)
+	}
+}
+
+// A phase is a heading: the lowercase noun on a line of its own, with no colon
+// and nothing after it. The live renderer draws the same name in its masthead.
+func TestPlainPhaseIsALabel(t *testing.T) {
+	var buf bytes.Buffer
+	p := &Plain{W: &buf}
+	p.Phase("platform")
+	p.Phase("")
+	want := "platform\n"
+	if got := buf.String(); got != want {
+		t.Fatalf("phase = %q, want %q", got, want)
+	}
+}

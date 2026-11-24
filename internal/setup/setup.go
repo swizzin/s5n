@@ -597,7 +597,7 @@ func (d *Decision) Run(ctx context.Context, opts Options) (Result, error) {
 				// waiting on anything, and a warning about an app nobody
 				// switched on is noise.
 				if len(d.Catalog.OIDCApps(apps)) > 0 {
-					d.report().Warn("the Gateway's proxy Service is not there yet, so the OIDC apps have no address for the box's own name: run `box init` again once `box bootstrap` has installed the Gateway")
+					d.report().Warn("the Gateway's proxy Service is not there yet, so the OIDC apps have no address for box's own name: run `box init` again once `box bootstrap` has installed the Gateway")
 				}
 			} else {
 				grantAnswers = append(grantAnswers, answer{key: "auth.oidc.gatewayIP", value: ip})
@@ -896,7 +896,7 @@ func (d *Decision) dataOwner(path string) (int, int, bool, error) {
 		return 0, 0, false, fmt.Errorf("read %s: %w", path, err)
 	}
 	if info.Symlink {
-		d.report().Warn(fmt.Sprintf("%s is a symlink: box does not read through it, so the owner of what it points at is not used for the box's files", path))
+		d.report().Warn(fmt.Sprintf("%s is a symlink: box does not read through it, so the owner of what it points at is not used for the files here", path))
 		return 0, 0, false, nil
 	}
 	if !info.IsDir {
@@ -1481,7 +1481,7 @@ func validDomain(v string) error {
 		return errors.New("that is not a host name")
 	}
 	if strings.Contains(v, ":") {
-		return errors.New("drop the port: the box serves HTTP itself")
+		return errors.New("drop the port: box serves HTTP itself")
 	}
 	return nil
 }
