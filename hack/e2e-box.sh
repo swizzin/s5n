@@ -8920,7 +8920,7 @@ migrate_box() {
   # one in until the install: its row says so, above the install, and the row the
   # check then fills in is below it. Both are the same operator's reading of the
   # same run.
-  grep -qE "^  ✓ plex +[0-9.]+ (KiB|MiB|GiB) · its whole data: metadata, artwork and thumbnails · its databases are checked once Plex's image runs$" \
+  grep -qE "^  ✓ plex +[0-9.]+ (KiB|MiB|GiB) · its whole data: metadata, artwork and thumbnails · its databases are checked once Plex's image runs · keeps its Plex token$" \
     "$WORK/apply-migrate.txt" ||
     { echo "the confirm does not say when Plex's databases are checked";
       grep -E "plex" "$WORK/apply-migrate.txt" | head -5; fail=1; }
@@ -9047,7 +9047,7 @@ migrate_box() {
   # own image. The confirm's row counts them all as paths; which column and how
   # many times is the snapshot's report and --details, and the database itself
   # is read back below.
-  grep -qE "^  ✓ plex +[0-9.]+ (KiB|MiB|GiB) · its whole data: metadata, artwork and thumbnails · [1-9][0-9,]* paths$" "$WORK/apply-migrate.txt" ||
+  grep -qE "^  ✓ plex +[0-9.]+ (KiB|MiB|GiB) · its whole data: metadata, artwork and thumbnails · [1-9][0-9,]* paths · keeps its Plex token$" "$WORK/apply-migrate.txt" ||
     { echo "the plan's Plex row does not count the paths the runner rewrote:"; grep -E "plex" "$WORK/apply-migrate.txt" | head -5; fail=1; }
   # autobrr and qui allow exactly one account and box owns it, so a source's
   # account has to become box's; the confirm says so once per app, with the name
