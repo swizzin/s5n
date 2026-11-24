@@ -20,11 +20,11 @@ import (
 )
 
 // plexFullSnapshot writes one final snapshot of a source whose Plex carried its
-// whole data, and returns its path and the config directory it was taken from.
-func plexFullSnapshot(t *testing.T) (path, tree string) {
+// whole data, and returns its path.
+func plexFullSnapshot(t *testing.T) string {
 	t.Helper()
 	dir := t.TempDir()
-	tree = filepath.Join(dir, "source", "plex")
+	tree := filepath.Join(dir, "source", "plex")
 	home := filepath.Join(tree, "Library", "Application Support", "Plex Media Server")
 	for rel, body := range map[string]string{
 		"Preferences.xml": `<Preferences MachineIdentifier="synthetic-machine"/>` + "\n",
@@ -52,7 +52,7 @@ apps:
         to: /config
 `)
 	scope := plex.Snapshot(true)
-	path = filepath.Join(dir, bundle.FileName(archive.ModeFinal, time.Now()))
+	path := filepath.Join(dir, bundle.FileName(archive.ModeFinal, time.Now()))
 	if _, err := bundle.Write(path, bundle.Snapshot{
 		Mode:   archive.ModeFinal,
 		Plan:   doc,
@@ -66,7 +66,7 @@ apps:
 	}); err != nil {
 		t.Fatalf("write the snapshot: %v", err)
 	}
-	return path, tree
+	return path
 }
 
 // TestAnApplyWorksBesideItsSnapshotAndNeverInTmp: a read-only $TMPDIR does not
@@ -77,7 +77,7 @@ func TestAnApplyWorksBesideItsSnapshotAndNeverInTmp(t *testing.T) {
 	if os.Geteuid() == 0 {
 		t.Skip("root writes into a directory it cannot write, so the read-only $TMPDIR would prove nothing")
 	}
-	path, _ := plexFullSnapshot(t)
+	path := plexFullSnapshot(t)
 	// Everything this test needs is made before $TMPDIR is taken away, because
 	// testing.TempDir is a temporary directory as well.
 	snapshotDir := filepath.Dir(path)
