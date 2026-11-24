@@ -228,7 +228,7 @@ report.
 The chart works on any conformant Kubernetes 1.30 or newer with plain Helm:
 
 ```sh
-helm install s5n oci://ghcr.io/swizzin/charts/s5n --version 0.6.0 -f values.yaml
+helm install s5n oci://ghcr.io/swizzin/charts/s5n --version 0.6.3 -f values.yaml
 ```
 
 Bring two claims (`storage.data.existingClaim` and `storage.config.existingClaim`), a
