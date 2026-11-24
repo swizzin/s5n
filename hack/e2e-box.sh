@@ -5581,7 +5581,7 @@ PY
   # A fake token on a server that is not claimed: the token is refused and the
   # row says so, which is a different reason from the one that asked for a
   # hand-patched key.
-  grep -qF "tautulli/plex: pending (Plex is not claimed yet, so it refuses every server token: claim it at https://plex.tv/claim, then run the wiring again)" \
+  grep -qF "tautulli/plex: pending (Plex is not claimed yet, so it refuses every server token: claim it at https://plex.tv/claim, then run box apply)" \
     "$WORK/apply-plex-token.txt" ||
     { echo "the receipt's tautulli/plex row is not the unclaimed-Plex one:"; grep -i "plex" "$WORK/apply-plex-token.txt" | head -5; fail=1; }
   if grep -qF "no Plex token: set plex-token" "$WORK/apply-plex-token.txt"; then

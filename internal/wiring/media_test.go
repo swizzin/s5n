@@ -682,7 +682,7 @@ func TestWiringUnclaimedPlexRefusesTokensAndSaysWhy(t *testing.T) {
 	if err != nil {
 		t.Fatalf("an unclaimed server's refusal failed the run: %v\n%s", err, Summary(res))
 	}
-	const want = "Plex is not claimed yet, so it refuses every server token: claim it at https://plex.tv/claim, then run the wiring again"
+	const want = "Plex is not claimed yet, so it refuses every server token: claim it at https://plex.tv/claim, then run box apply"
 	for _, name := range []string{"tautulli/plex", "maintainerr/plex"} {
 		s := step(res, name)
 		if s == nil || s.Result != "pending" {

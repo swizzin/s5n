@@ -869,7 +869,7 @@ func plexTokenPending(ident *apps.Identity, err error) (string, bool) {
 	if ident == nil || ident.Claimed || !errors.As(err, &rejected) {
 		return "", false
 	}
-	return "Plex is not claimed yet, so it refuses every server token: claim it at https://plex.tv/claim, then run the wiring again", true
+	return "Plex is not claimed yet, so it refuses every server token: claim it at https://plex.tv/claim, then run box apply", true
 }
 
 // plexTokenMissing is the receipt's reason for a Plex-dependent row with no
