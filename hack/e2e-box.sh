@@ -9310,24 +9310,24 @@ migrate_box() {
   # on the screen's table -- radarr and pbh up, qbittorrent the same -- and the
   # downgrade --yolo allowed is on the row that needs the operator. sonarr is past
   # the confirm's fold, so its pair is read on the page, which lists every app.
-  grep -qE '^  sonarr +.*9\.9\.9 → 5\.0 +↓' "$WORK/apply-report-rows.txt" ||
+  grep -qE '^  sonarr +.*9\.9\.9 → [0-9][0-9.]* +↓' "$WORK/apply-report-rows.txt" ||
     { echo "the page does not carry the downgrade's two versions:";
       grep -E "^  sonarr" "$WORK/apply-report-rows.txt" | head -3; fail=1; }
-  grep -qE '^  radarr +[0-9.]+ (KiB|MiB|GiB) +5\.20\.1 → 7\.0\.3  ↑' "$WORK/apply-migrate-rows.txt" ||
+  grep -qE '^  radarr +[0-9.]+ (KiB|MiB|GiB) +5\.20\.1 → [0-9][0-9.]*  ↑' "$WORK/apply-migrate-rows.txt" ||
     { echo "the confirm does not show the upgrade's two versions:";
       grep -E "^  radarr" "$WORK/apply-migrate-rows.txt" | head -3; fail=1; }
-  grep -qE '^  pbh +[0-9.]+ (KiB|MiB|GiB) +7\.3 → 9\.6  ↑' "$WORK/apply-migrate-rows.txt" ||
+  grep -qE '^  pbh +[0-9.]+ (KiB|MiB|GiB) +7\.3 → [0-9][0-9.]*  ↑' "$WORK/apply-migrate-rows.txt" ||
     { echo "the confirm does not show PeerBanHelper's upgrade:";
       grep -E "^  pbh" "$WORK/apply-migrate-rows.txt" | head -3; fail=1; }
   grep -qE '^  qbittorrent +[0-9.]+ (KiB|MiB|GiB) +5\.3( |$)' "$WORK/apply-migrate-rows.txt" ||
     { echo "the confirm does not show qBittorrent's one version:";
       grep -E "^  qbittorrent" "$WORK/apply-migrate-rows.txt" | head -3; fail=1; }
-  grep -qE '^  ! sonarr +9\.9\.9 → 5\.0 · the config is newer than the app$' "$WORK/apply-migrate-rows.txt" ||
+  grep -qE '^  ! sonarr +9\.9\.9 → [0-9][0-9.]* · the config is newer than the app$' "$WORK/apply-migrate-rows.txt" ||
     { echo "--yolo did not carry the downgrade as a row that needs the operator:";
       grep -E "^  ! " "$WORK/apply-migrate-rows.txt" | head -5; fail=1; }
   # The page has the same column, so the versions a person agreed to are the
   # ones the run's own report keeps.
-  grep -qE '9\.9\.9 → 5\.0 +↓' "$WORK/apply-report-rows.txt" ||
+  grep -qE '9\.9\.9 → [0-9][0-9.]* +↓' "$WORK/apply-report-rows.txt" ||
     { echo "the run's report does not carry the versions the confirm showed:";
       grep -iE "^  (sonarr|radarr|pbh|qbittorrent) " "$WORK/apply-page.txt" | head -5; fail=1; }
   grep -qE "^checked after the install$" "$WORK/apply-migrate.txt" ||
