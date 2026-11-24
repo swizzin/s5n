@@ -8464,9 +8464,15 @@ rehearsal_box() {
     return 1
   box_files_back "$rcluster" "$rconfig"
   cat "$WORK/apply-rehearsal.txt"
-  if grep -q "data: rename" "$WORK/apply-rehearsal.txt"; then
-    echo "the rehearsal's confirm lists a data rename it does not make"; return 1
-  fi
+  # A rehearsal writes its page too, and the page says what the real run renames:
+  # the locked box reviews the box the migration produces (rule 11).
+  rehearsal_report="${rehearsal%.tar.gz}-apply-report.txt"
+  [ -f "$rehearsal_report" ] ||
+    { echo "the rehearsal wrote no report beside its snapshot"; return 1; }
+  rows_of "$rehearsal_report" >"$WORK/rehearsal-report-rows.txt" 2>/dev/null || true
+  grep -qE '^  data +the real run renames ' "$WORK/rehearsal-report-rows.txt" ||
+    { echo "the rehearsal's page does not say what the real run renames:";
+      sed -n '/^library$/,/^$/p' "$rehearsal_report"; return 1; }
   for want in "snapshot: ${rehearsal} (rehearsal)" "rehearsal: nothing leaves this box" \
               "network lock: proven"; do
     grep -qF -- "$want" "$WORK/apply-rehearsal.txt" ||
@@ -9166,6 +9172,11 @@ migrate_box() {
       grep -E "plex" "$WORK/apply-migrate-rows.txt" | head -5; fail=1; }
   grep -qE "^checked after the install$" "$WORK/apply-migrate.txt" ||
     { echo "the run does not report the check the confirm deferred"; fail=1; }
+  # The confirm lists the apps it decides on and folds the tail into one row
+  # naming it: a person reads the table, and the page has every row.
+  grep -qE '^  \+ [0-9]+ more  .*sonarr-4k' "$WORK/apply-migrate-rows.txt" ||
+    { echo "the confirm folds the tail of the app list into no row naming it:";
+      grep -E "^  (\+|sonarr)" "$WORK/apply-migrate-rows.txt" | head -5; fail=1; }
   # The two halves of the same bug the root run can now show: every path the
   # migration left in the config root belongs to the seedbox's user, and every
   # app could read what it was given.
@@ -9327,7 +9338,7 @@ migrate_box() {
   done
   # The note is the app's, said once in the page, and the key is a fact on its
   # row: the screen counts the notes and the report names them (rule 7).
-  grep -qE "^  tautulli +its own login is switched off, and you sign in through the box$" \
+  grep -qE "^  tautulli +its own login is switched off; you sign in through the box$" \
     "$WORK/apply-report-rows.txt" ||
     { echo "the plan does not say tautulli's own login is switched off:";
       grep -F "tautulli" "$WORK/apply-report-rows.txt" || true; fail=1; }
