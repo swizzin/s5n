@@ -629,7 +629,9 @@ func showSummary(out say.Reporter, s apply.Summary, details bool, plat *platform
 		if lead != "" {
 			out.Muted(lead)
 		}
-		if items := plat.Items(); len(items) > 0 {
+		// The folded plan bootstrap prints, not the detailed one: the confirm
+		// is a decision, and the components it installs are one line of it.
+		if items := plat.Summary(); len(items) > 0 {
 			out.Plan("platform", items)
 		}
 		out.Line("")

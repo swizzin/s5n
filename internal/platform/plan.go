@@ -220,8 +220,15 @@ func detailLines(plan Plan) []string {
 
 // Items is the plan as a reader sees it, for a flow that shows the platform
 // plan inside its own confirm instead of letting this package print it
-// (Decision.CallerShowsPlan).
+// (Decision.CallerShowsPlan). It is the detailed plan: one line per component
+// and the sub-steps under it.
 func (p Plan) Items() []say.Item { return planItems(p) }
+
+// Summary is the plan as bootstrap prints it after its confirm: what this run
+// installs on one line, each conditional install on its own, and what box saw
+// and will not change. A migration's confirm shows the same summary, so the one
+// question a person answers reads like the run that follows it.
+func (p Plan) Summary() []say.Item { return summaryItems(p) }
 
 // group is the component's builder, made on first use.
 func (b *planBuilder) group(key string) *planGroup {

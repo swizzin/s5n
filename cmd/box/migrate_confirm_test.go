@@ -106,9 +106,16 @@ func TestOneConfirmForTheWholeRun(t *testing.T) {
 	if lead > planAt || planAt > migrationAt {
 		t.Fatalf("the platform plan is not shown first, after the lead line:\n%s", printed)
 	}
-	// The platform plan is the plan's own items, not a summary of them.
-	if !strings.Contains(printed, "Envoy Gateway 1.9.3") {
-		t.Errorf("the platform block is not the platform plan:\n%s", printed)
+	// The platform block is the folded plan bootstrap prints, not the detailed
+	// one: what the run installs is one line, and the components' sub-steps stay
+	// in the screen after the install and in the log.
+	if !strings.Contains(printed, "  + cert-manager v1.21.3 · Envoy Gateway 1.9.3 · MetalLB 0.16.1 · admission policies\n") {
+		t.Errorf("the platform block is not the folded plan:\n%s", printed)
+	}
+	for _, detailed := range []string{"ClusterIssuers", "IPAddressPool", "the s5n Gateway"} {
+		if strings.Contains(printed, detailed) {
+			t.Errorf("the platform block carries a sub-step (%q), which the folded plan folds away:\n%s", detailed, printed)
+		}
 	}
 	// The old two-question transcript is gone: nothing prints a platform plan
 	// heading outside the confirm, and no summary line is cut off by it.
