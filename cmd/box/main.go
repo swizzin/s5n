@@ -374,6 +374,11 @@ func runBootstrap(ctx context.Context, args []string) {
 	}
 
 	initFlags.takeDev(dev)
+	// init reads root's config beside the record, and on a terminal it asks for
+	// the one answer that file holds (the notice address). The record is
+	// bootstrap's flag, so init is handed it here: without this init looks for
+	// the file at a path of its own and never asks.
+	initFlags.recordPath = *recordPath
 
 	palette := startupTheme(*initFlags.valuesPath)
 	term := terminalSet(*plain)
