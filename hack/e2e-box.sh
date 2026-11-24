@@ -4729,7 +4729,7 @@ EOF
   log "box init --ca-file: an ACME host's anchor comes from the file"
   started=$(date +%s)
   if init "$WORK/init-ca.txt" --ca-file "$WORK/pebble-root.pem"; then
-    grep -qF "wrote ConfigMap ${NS}/s5n-host-ca" "$WORK/init-ca.txt" ||
+    grep -qE "^✓ host CA +written +box's root certificate$" "$WORK/init-ca.txt" ||
       { echo "box did not report writing the anchor from --ca-file"; cat "$WORK/init-ca.txt"; fail=1; }
   else
     cat "$WORK/init-ca.txt"; fail=1
