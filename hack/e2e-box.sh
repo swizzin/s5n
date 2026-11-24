@@ -10191,21 +10191,25 @@ migrate_keep_box() {
   done
   has_receipt "$WORK/keep-cutover.txt" ||
     { echo "box did not report a healthy receipt for the seedbox it installed beside the source"; fail=1; }
+  rows_of "$WORK/keep-cutover.txt" >"$WORK/keep-cutover-rows.txt"
+  rows_of "${snapshot%.tar.gz}-report.txt" >"$WORK/keep-report-rows.txt" 2>/dev/null || true
+  rows_of "${snapshot%.tar.gz}-apply-report.txt" >"$WORK/keep-apply-rows.txt" 2>/dev/null || true
   # Plex's snapshot is its whole data here (the fixture is a few hundred bytes,
-  # so there is room), and the run says so once, in the report and in the confirm
-  # the operator answers.
-  grep -qF "plex: carried its whole data" "$WORK/keep-cutover.txt" ||
+  # so there is room), and the run says so once, in the report beside the snapshot.
+  [ "$(grep -cF -- "carried its whole data -- metadata, artwork, thumbnails and its databases" "$WORK/keep-report-rows.txt")" = 1 ] ||
     { echo "the keep path does not say what Plex's snapshot carries"; fail=1; }
   # What the migration did, named before it did it: the two renames, the kept keys
   # and the connections adopted by id.
-  grep -qE "^  ✓ data +Downloads → downloads · library → media · media: 4K/Movies → movies-4k · 4K/TV → tv-4k · Movies → movies · TV → tv$" \
-    "$WORK/keep-cutover.txt" ||
-    { echo "the plan does not say it renames the source's two data directories and the library's own:";
-      grep -E "^  ✓ data" "$WORK/keep-cutover.txt" || true; fail=1; }
+  grep -qE "^  ✓ data +Downloads → downloads · library → media$" "$WORK/keep-cutover-rows.txt" ||
+    { echo "the plan does not say it renames the source's two data directories:";
+      grep -E "^  ✓ data" "$WORK/keep-cutover-rows.txt" || true; fail=1; }
+  grep -qE "^  ✓ library +4K/Movies → movies-4k · 4K/TV → tv-4k · Movies → movies · TV → tv$" "$WORK/keep-cutover-rows.txt" ||
+    { echo "the plan does not say it renames the library's own directories onto box's categories:";
+      grep -E "^  ✓ library" "$WORK/keep-cutover-rows.txt" || true; fail=1; }
   for instance in $MIGRATE_ARRS; do
-    grep -qE "^  ✓ ${instance} +.*keeps its API key" "$WORK/keep-cutover.txt" ||
+    grep -qE "^  ${instance} +.*keeps its API key$" "$WORK/keep-apply-rows.txt" ||
       { echo "the plan did not say it keeps ${instance}'s API key"; fail=1; }
-    grep -qE "^  ✓ ${instance} +.*keeps download client \"" "$WORK/keep-cutover.txt" ||
+    grep -qE "^  ${instance} +.*keeps download client \"" "$WORK/keep-apply-rows.txt" ||
       { echo "the plan did not say it adopts ${instance}'s download client by id"; fail=1; }
   done
   [ "$fail" = 0 ] || return 0
