@@ -68,7 +68,7 @@ func (a *settleAsker) ask(c apply.Choice) (string, error) {
 // answered is one answer as a row: who holds the address, the address, and what
 // it now means.
 func (a *settleAsker) answered(c apply.Choice, app string) {
-	to := "left as it is"
+	to := leftAsItIs
 	if app != "" {
 		to = app
 	}

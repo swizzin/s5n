@@ -16,7 +16,7 @@ import (
 	"github.com/swizzin/s5n/internal/say"
 )
 
-// printGroup is one block of the confirm: a heading, the columns its rows read
+// PrintGroup is one block of the confirm: a heading, the columns its rows read
 // in, and the rows. A block with columns is the table a person compares down; a
 // block without is rows whose facts are one sentence each.
 func PrintGroup(out say.Reporter, g Group) {
@@ -30,31 +30,38 @@ func PrintGroup(out say.Reporter, g Group) {
 		}
 	}
 	if len(g.Columns) == 0 {
-		if g.Title != "" {
-			out.Line(g.Title)
-		}
-		for _, r := range g.Rows {
-			glyph := r.Glyph
-			if glyph == "" {
-				glyph = say.MarkNote
-			}
-			writeRow(out, "  "+glyph+" ", r.Name, nameWidth, strings.Join(r.Facts, " · "))
-		}
+		printList(out, g, nameWidth)
 		return
 	}
-	// A table: the first column is the heading itself, so the column headings
-	// line up over the facts.
+	printTable(out, g, nameWidth)
+}
+
+// printList is a block whose rows are a sentence each: a mark, a name, and the
+// facts wrapped under them.
+func printList(out say.Reporter, g Group, nameWidth int) {
+	if g.Title != "" {
+		out.Line(g.Title)
+	}
+	for _, r := range g.Rows {
+		glyph := r.Glyph
+		if glyph == "" {
+			glyph = say.MarkNote
+		}
+		writeRow(out, "  "+glyph+" ", r.Name, nameWidth, strings.Join(r.Facts, " · "))
+	}
+}
+
+// printTable is a block with columns: the first column is the heading itself, so
+// the column headings line up over the facts, and the last column is what wraps.
+func printTable(out say.Reporter, g Group, nameWidth int) {
 	cols := make([]int, len(g.Columns))
 	for _, r := range g.Rows {
 		if r.Glyph != "" {
 			continue
 		}
 		for i := range g.Columns {
-			if i+1 >= len(r.Facts) {
-				continue
-			}
-			if w := len(r.Facts[i]); w > cols[i] {
-				cols[i] = w
+			if i+1 < len(r.Facts) && len(r.Facts[i]) > cols[i] {
+				cols[i] = len(r.Facts[i])
 			}
 		}
 	}
@@ -69,32 +76,36 @@ func PrintGroup(out say.Reporter, g Group) {
 			out.Line("  " + r.Glyph + " " + strings.Join(r.Facts, "  "))
 			continue
 		}
-		// Every column but the last is padded, so they line up; the last holds
-		// what changes, and is what wraps.
-		head := "  " + padCol(r.Name, nameWidth)
-		for i := 0; i+1 < len(r.Facts); i++ {
-			col := 0
-			if i < len(cols) {
-				col = cols[i]
-			}
-			head += "  " + padCol(r.Facts[i], col)
+		writeTableRow(out, r, nameWidth, cols)
+	}
+}
+
+// writeTableRow is one row of a table: every column but the last padded, and the
+// last one wrapped under the column it starts in.
+func writeTableRow(out say.Reporter, r say.TableRow, nameWidth int, cols []int) {
+	head := "  " + padCol(r.Name, nameWidth)
+	for i := 0; i+1 < len(r.Facts); i++ {
+		col := 0
+		if i < len(cols) {
+			col = cols[i]
 		}
-		last := ""
-		if len(r.Facts) > 0 {
-			last = r.Facts[len(r.Facts)-1]
-		}
-		if strings.TrimSpace(last) == "" {
-			out.Line(strings.TrimRight(head, " "))
+		head += "  " + padCol(r.Facts[i], col)
+	}
+	last := ""
+	if len(r.Facts) > 0 {
+		last = r.Facts[len(r.Facts)-1]
+	}
+	if strings.TrimSpace(last) == "" {
+		out.Line(strings.TrimRight(head, " "))
+		return
+	}
+	head += "  "
+	for i, line := range report.Wrap(last, report.Width-len(head)-2) {
+		if i == 0 {
+			out.Line(head + line)
 			continue
 		}
-		head += "  "
-		for i, line := range report.Wrap(last, report.Width-len(head)-2) {
-			if i == 0 {
-				out.Line(head + line)
-				continue
-			}
-			out.Line(strings.Repeat(" ", len(head)) + line)
-		}
+		out.Line(strings.Repeat(" ", len(head)) + line)
 	}
 }
 

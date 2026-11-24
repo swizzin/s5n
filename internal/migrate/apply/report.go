@@ -24,8 +24,8 @@ func (s Summary) Report(kind, snapshot string, taken time.Time, box string) repo
 	d := report.Doc{Kind: kind, Snapshot: snapshot, Taken: taken, Box: box}
 	d.Counts = s.reportCounts()
 	for _, sec := range []report.Section{
-		{Title: "apps", Rows: s.reportApps()},
-		{Title: "library", Rows: s.reportLibrary()},
+		{Title: titleApps, Rows: s.reportApps()},
+		{Title: titleLibrary, Rows: s.reportLibrary()},
 		{Title: "needs you", Rows: tableRows(s.needsYou())},
 		{Title: "left as they are", Rows: s.reportLeft()},
 		{Title: "notes", Rows: tableRows(s.goodToKnow())},

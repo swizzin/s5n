@@ -333,7 +333,7 @@ func cutover(ctx context.Context, o cutoverOptions, out say.Reporter, seams cuto
 		// A node list the read could not get is already a report line, and it
 		// leaves the recipe saying box cannot tell rather than guessing.
 		nodes, _ := read.src.Nodes(ctx)
-		for _, step := range resetSteps(o, nodes) {
+		for _, step := range resetSteps(nodes) {
 			if !step.Command {
 				out.Rows([]say.Row{{Mark: say.MarkNote, Facts: []string{step.Text}}})
 				continue
@@ -457,7 +457,7 @@ type resetStep struct {
 // (discover.Distribution): the same command on another distribution removes
 // nothing, so a cluster box cannot place gets a line that says so instead of a
 // teardown for a guess.
-func resetSteps(o cutoverOptions, nodes []discover.Node) []resetStep {
+func resetSteps(nodes []discover.Node) []resetStep {
 	switch discover.Distribution(nodes) {
 	case discover.K0s:
 		// `k0s reset` leaves /etc/k0s/k0s.yaml behind, and box's own bootstrap

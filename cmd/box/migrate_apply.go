@@ -599,41 +599,8 @@ func confirmScreenOf(opened *bundle.Opened, target string) confirmScreen {
 func migrateConfirm(out say.Reporter, ask asker, namespace string, rehearsal bool, details bool, plat *platform.Plan, lead string, screen confirmScreen) func(apply.Summary) (bool, error) {
 	target := confirmTarget(namespace)
 	return func(s apply.Summary) (bool, error) {
-		if screen.Head != "" {
-			out.Line(screen.Head)
-			out.Line("")
-		}
-		if plat != nil {
-			if lead != "" {
-				out.Muted(lead)
-			}
-			if items := plat.Items(); len(items) > 0 {
-				out.Plan("platform", items)
-			}
-			out.Line("")
-		}
-		if details {
-			// Every rewrite, column by column: the list the report holds, for
-			// the operator who wants to check one row before saying yes.
-			out.List("this migration", s.Lines())
-		} else {
-			g := s.Grouped()
-			if g.Lead != "" {
-				out.Muted(g.Lead)
-			}
-			for _, block := range g.Blocks {
-				apply.PrintGroup(out, block)
-			}
-			if g.Footer != "" {
-				apply.PrintNote(out, g.Footer)
-			}
-			// The log keeps the whole account, and the report keeps the page.
-			for _, line := range s.Lines() {
-				out.Detail(line)
-			}
-			if err := writeApplyReport(out, s, screen); err != nil {
-				return false, err
-			}
+		if err := showSummary(out, s, details, plat, lead, screen); err != nil {
+			return false, err
 		}
 		if rehearsal {
 			// The screen a person reads before the first write says what this
@@ -649,6 +616,45 @@ func migrateConfirm(out say.Reporter, ask asker, namespace string, rehearsal boo
 		}
 		return ask.Ask(fmt.Sprintf("move these %s in?", appsWord(len(s.Instances))))
 	}
+}
+
+// showSummary is the screen above the question: the heading, the platform this
+// run would install, the blocks, the footer, and the page beside the snapshot.
+func showSummary(out say.Reporter, s apply.Summary, details bool, plat *platform.Plan, lead string, screen confirmScreen) error {
+	if screen.Head != "" {
+		out.Line(screen.Head)
+		out.Line("")
+	}
+	if plat != nil {
+		if lead != "" {
+			out.Muted(lead)
+		}
+		if items := plat.Items(); len(items) > 0 {
+			out.Plan("platform", items)
+		}
+		out.Line("")
+	}
+	if details {
+		// Every rewrite, column by column: the list the report holds, for the
+		// operator who wants to check one row before saying yes.
+		out.List("this migration", s.Lines())
+		return nil
+	}
+	g := s.Grouped()
+	if g.Lead != "" {
+		out.Muted(g.Lead)
+	}
+	for _, block := range g.Blocks {
+		apply.PrintGroup(out, block)
+	}
+	if g.Footer != "" {
+		apply.PrintNote(out, g.Footer)
+	}
+	// The log keeps the whole account, and the report keeps the page.
+	for _, line := range s.Lines() {
+		out.Detail(line)
+	}
+	return writeApplyReport(out, s, screen)
 }
 
 // writeApplyReport puts this run's page beside the snapshot, before the question:

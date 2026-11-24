@@ -236,7 +236,6 @@ func TestCutoverRefusesASavedReadForTheStopProof(t *testing.T) {
 // the next bootstrap refuses over: the reset this screen prints has to end where
 // bootstrap can start.
 func TestResetRecipeNamesTheSourcesNode(t *testing.T) {
-	o := cutoverOptions{discoverOptions: discoverOptions{Out: "/var/lib/s5n/migrate/migrate-20261117T090000Z-final.tar.gz"}}
 	tests := []struct {
 		name  string
 		nodes []discover.Node
@@ -249,7 +248,7 @@ func TestResetRecipeNamesTheSourcesNode(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			steps := resetSteps(o, tt.nodes)
+			steps := resetSteps(tt.nodes)
 			if len(steps) == 0 {
 				t.Fatal("the recipe is empty")
 			}
@@ -273,7 +272,7 @@ func TestResetRecipeNamesTheSourcesNode(t *testing.T) {
 	}
 	// The k0s recipe is the one the k0s.yaml belongs to: `k0s reset` leaves the
 	// config behind and bootstrap refuses over it.
-	k0s := resetSteps(o, []discover.Node{{Name: "box", KubeletVersion: "v1.34.1+k0s.0"}})
+	k0s := resetSteps([]discover.Node{{Name: "box", KubeletVersion: "v1.34.1+k0s.0"}})
 	joined := k0s[0].Text + " " + k0s[1].Text
 	if !strings.Contains(joined, "rm -f /etc/k0s/k0s.yaml") {
 		t.Errorf("the k0s recipe leaves /etc/k0s/k0s.yaml behind, and the next bootstrap refuses over it: %q", joined)

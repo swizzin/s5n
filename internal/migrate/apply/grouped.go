@@ -15,6 +15,13 @@ import (
 	"github.com/swizzin/s5n/internal/say"
 )
 
+// The headings the confirm and the report share: a lowercase noun, no colon
+// (rule 9), spelled once so the two cannot drift apart.
+const (
+	titleApps    = "apps"
+	titleLibrary = "library"
+)
+
 // Group is one block of the confirm: its heading, the columns its rows read in,
 // and the rows. A group with Columns is a table -- the heading, then one column
 // heading per fact -- and one without is a list of rows whose facts are a
@@ -52,7 +59,7 @@ func (s Summary) Grouped() Grouped {
 		g.Lead = "rehearsal · nothing leaves this box · no data is renamed"
 	}
 	if rows := s.appRows(); len(rows) > 0 {
-		g.Blocks = append(g.Blocks, Group{Title: "apps", Columns: []string{"carries", "changes"}, Rows: rows})
+		g.Blocks = append(g.Blocks, Group{Title: titleApps, Columns: []string{"carries", "changes"}, Rows: rows})
 	}
 	if rows := s.dataRows(); len(rows) > 0 {
 		g.Blocks = append(g.Blocks, Group{Rows: rows})
@@ -296,7 +303,7 @@ func (s Summary) dataRows() []say.TableRow {
 		for _, r := range s.MediaRenames {
 			pairs = append(pairs, arrow(r))
 		}
-		rows = append(rows, say.TableRow{Glyph: "✓", Name: "library", Facts: []string{strings.Join(pairs, " · ")}})
+		rows = append(rows, say.TableRow{Glyph: "✓", Name: titleLibrary, Facts: []string{strings.Join(pairs, " · ")}})
 	}
 	return rows
 }

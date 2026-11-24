@@ -25,6 +25,13 @@ import (
 	"github.com/swizzin/s5n/internal/say"
 )
 
+// The two words a report and the settle screen both say: a row's name for where
+// the data root is, and the decision that leaves a stored value alone.
+const (
+	rowRoot    = "root"
+	leftAsItIs = "left as it is"
+)
+
 // readReport is the report of one read of a source: what the plan holds, every
 // address and path it settles, what box decided and nobody answered, its notes,
 // and what is not coming.
@@ -130,7 +137,7 @@ func dataReportRows(p *plan.Plan) []report.Row {
 	if p.Data == nil {
 		return nil
 	}
-	rows := []report.Row{{Name: "root", Facts: []string{p.Data.Root}}}
+	rows := []report.Row{{Name: rowRoot, Facts: []string{p.Data.Root}}}
 	if renames := pairs(p.Data.Renames()); len(renames) > 0 {
 		rows = append(rows, report.Row{Name: "renames", Facts: []string{renames}})
 	}
@@ -164,7 +171,7 @@ func pathReportRows(p *plan.Plan) []report.Row {
 		for _, r := range p.Apps[name].Paths {
 			facts := []string{"→ " + r.To}
 			if r.From == r.To {
-				facts = []string{"left as it is"}
+				facts = []string{leftAsItIs}
 			}
 			if r.Why != "" {
 				facts = append(facts, reasonOf(r.Why))
@@ -190,7 +197,7 @@ func addressReportRows(p *plan.Plan) []report.Row {
 		if r.Path != "" {
 			name += r.Path
 		}
-		facts := []string{"left as it is"}
+		facts := []string{leftAsItIs}
 		if r.App != "" {
 			facts = []string{"→ " + r.App}
 		}
