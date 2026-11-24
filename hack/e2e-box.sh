@@ -10435,11 +10435,16 @@ PY
 }
 
 no_klog() {
-  for f in "$WORK"/apply*.txt "$WORK"/bootstrap*.txt "$WORK"/update-*.txt "$WORK"/rollback.txt; do
+  # Every transcript box wrote in this run's directory: a new command names its
+  # file, and an init transcript once hid a klog line because this list was
+  # written by hand.
+  for f in "$WORK"/*.txt; do
     [ -e "$f" ] || continue
-    if grep -Eq '^[IWE][0-9]{4} ' "$f"; then
+    # A page a root run wrote beside a snapshot is 0600 and root's: klog writes
+    # to the screen, which is another file here.
+    if grep -Eq '^[IWE][0-9]{4} ' "$f" 2>/dev/null; then
       echo "client-go/klog noise in $(basename "$f"):"
-      grep -E '^[IWE][0-9]{4} ' "$f"
+      grep -E '^[IWE][0-9]{4} ' "$f" 2>/dev/null
       fail=1
     fi
   done
