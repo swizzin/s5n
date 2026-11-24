@@ -989,7 +989,7 @@ func (r *Reporter) Error(err error) {
 			mark = say.MarkFailed
 		}
 		col := strings.Repeat(" ", 2)
-		for j, line := range wrapTextRaw(raw, col2(mark+" ", r.width)) {
+		for j, line := range wrapKeepingBlanks(raw, lineRoom(mark+" ", r.width)) {
 			if j == 0 {
 				if mark == "" {
 					b.WriteString(col + r.chrome.paint(line, mutedStyle.Render(line)) + "\n")
@@ -1013,8 +1013,8 @@ func (r *Reporter) logRow() {
 	r.emit(r.rowBlock(say.Row{Mark: say.MarkNote, Name: "log", Facts: []string{r.logPath}}))
 }
 
-// col2 is how many columns a line has to work with, after its mark.
-func col2(mark string, width int) int {
+// lineRoom is how many columns a line has to work with, after its mark.
+func lineRoom(mark string, width int) int {
 	w := width - lipgloss.Width(mark)
 	if w < 8 {
 		return 8
@@ -1022,9 +1022,9 @@ func col2(mark string, width int) int {
 	return w
 }
 
-// wrapTextRaw is wrapText that keeps a blank line a blank line: an error's
-// empty line is a break between two facts, not a word to skip.
-func wrapTextRaw(s string, width int) []string {
+// wrapKeepingBlanks is wrapText that keeps a blank line a blank line: an
+// error's empty line is a break between two facts, not a word to skip.
+func wrapKeepingBlanks(s string, width int) []string {
 	if strings.TrimSpace(s) == "" {
 		return []string{""}
 	}
