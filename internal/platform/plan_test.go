@@ -14,7 +14,7 @@ func plainPlan(t *testing.T, plan Plan) string {
 	t.Helper()
 	var buf bytes.Buffer
 	d := &Decision{Say: &say.Plain{W: &buf}}
-	d.printPlan(d.Say, plan)
+	printPlan(d.Say, plan)
 	return buf.String()
 }
 

@@ -246,6 +246,7 @@ func migrateInstall(ctx context.Context, o *migrateApplyFlags, inst *installFlag
 	// The platform was the first half of the one confirm: it is not asked about
 	// here, and its plan is not printed here either, because the question came
 	// before anything was installed and showed it then.
+	out.Phase("platform")
 	if err := applyPlatform(ctx, res.Kubeconfig, res.Platform, res.Gateway.Class, "", chart.Pins, res.Firewall, answered{}, true, out); err != nil {
 		return err
 	}

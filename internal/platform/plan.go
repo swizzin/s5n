@@ -154,7 +154,7 @@ func planItems(plan Plan) []say.Item {
 // warnings last. The sub-steps that make up a component are the log's (rule 5),
 // so the screen says cert-manager 1.21.3 rather than the four Kubernetes kinds
 // that carry it.
-func (d *Decision) printPlan(r say.Reporter, plan Plan) {
+func printPlan(r say.Reporter, plan Plan) {
 	items := summaryItems(plan)
 	if len(items) == 0 {
 		return
@@ -164,6 +164,12 @@ func (d *Decision) printPlan(r say.Reporter, plan Plan) {
 		r.Detail(line)
 	}
 }
+
+// PrintPlan is the plan's printer for a flow that shows it itself and asks its
+// one question later: a guided fresh install shows the platform and the seedbox
+// in one plan, so the plan is printed where the questions are rather than by
+// Decision.Apply. The detail lines go to the run log either way.
+func PrintPlan(r say.Reporter, plan Plan) { printPlan(r, plan) }
 
 // summaryItems is the plan as the screen shows it: everything this run installs
 // on one line, everything it only verifies on another, each conditional install

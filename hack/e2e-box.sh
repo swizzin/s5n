@@ -517,17 +517,19 @@ fi
 # on sets it to `none`, the word for the empty list.
 APPS="qbittorrent,sonarr,radarr,prowlarr,plex,tautulli,seerr,qui,autobrr,maintainerr,pbh"
 
-bootstrap() { # bootstrap <output file>
-  # The platform and root's seedbox are one command now. --record points the
-  # cluster decision at this work directory: on a real host it is
-  # /etc/s5n/cluster.yaml, written by root, and the e2e is not root.
-  #
-  # No --chart-version: bootstrap takes the default-version path, so the e2e
-  # exercises the newest-release selection against a real registry. The chart
-  # is the one pushed above; box pulls it over loopback.
-  #
-  # The fresh scenario passes no --namespace, so box derives it from the login
-  # (s5n-<login>); every other scenario names its own.
+# box_bootstrap_args <extra...>: the arguments every bootstrap in this script
+# passes, without the one that decides whether it asks. The platform and root's
+# seedbox are one command now. --record points the cluster decision at this work
+# directory: on a real host it is /etc/s5n/cluster.yaml, written by root, and the
+# e2e is not root.
+#
+# No --chart-version: bootstrap takes the default-version path, so the e2e
+# exercises the newest-release selection against a real registry. The chart is
+# the one pushed above; box pulls it over loopback.
+#
+# The fresh scenario passes no --namespace, so box derives it from the login
+# (s5n-<login>); every other scenario names its own.
+box_bootstrap_args() { # box_bootstrap_args [extra...]
   local ns_args=()
   [ "$SCENARIO" = fresh ] || ns_args=(--namespace "$NS")
   # A scenario that installs a published release names it. Every other scenario
@@ -535,15 +537,36 @@ bootstrap() { # bootstrap <output file>
   # exercises the newest-release selection against a real registry.
   local version_args=()
   [ "$INSTALL_VERSION" = "$CHART_VERSION" ] || version_args=(--chart-version "$INSTALL_VERSION")
-  "$BOX_BIN" bootstrap --yes --chart-repo "$CHART_REPO" ${version_args[@]+"${version_args[@]}"} ${ACME_ARGS[@]+"${ACME_ARGS[@]}"} ${DNS_ARGS[@]+"${DNS_ARGS[@]}"} ${CA_ARGS[@]+"${CA_ARGS[@]}"} ${UNIT_ARGS[@]+"${UNIT_ARGS[@]}"} \
-    --grant "$WORK/grant.yaml" --values "$WORK/values.yaml" \
-    ${ns_args[@]+"${ns_args[@]}"} --domain "$DOMAIN" \
-    --data-path "$DATA_PATH" --config-path "$CONFIG_PATH" \
-    --apps "$APPS" \
-    --puid 1000 --pgid 1000 \
-    --login "$LOGIN" --password-file "$WORK/authelia-password" \
-    --paths-in-node --record "$WORK/cluster.yaml" \
-    --kubeconfig "$WORK/kubeconfig" >"$1" 2>&1
+  BOX_ARGS=(--chart-repo "$CHART_REPO" ${version_args[@]+"${version_args[@]}"} ${ACME_ARGS[@]+"${ACME_ARGS[@]}"} ${DNS_ARGS[@]+"${DNS_ARGS[@]}"} ${CA_ARGS[@]+"${CA_ARGS[@]}"} ${UNIT_ARGS[@]+"${UNIT_ARGS[@]}"}
+    --grant "$WORK/grant.yaml" --values "$WORK/values.yaml"
+    ${ns_args[@]+"${ns_args[@]}"} --domain "$DOMAIN"
+    --data-path "$DATA_PATH" --config-path "$CONFIG_PATH"
+    --apps "$APPS"
+    --puid 1000 --pgid 1000
+    --login "$LOGIN" --password-file "$WORK/authelia-password"
+    --paths-in-node --record "$WORK/cluster.yaml"
+    --kubeconfig "$WORK/kubeconfig" "$@")
+}
+
+bootstrap() { # bootstrap <output file>
+  box_bootstrap_args
+  "$BOX_BIN" bootstrap --yes "${BOX_ARGS[@]}" >"$1" 2>&1
+}
+
+# bootstrap_guided <output file>: the same install with a person in front of it,
+# which is the one path that asks. `box bootstrap` without --yes on a host with
+# no platform asks once, for the platform and the seedbox together: init's
+# questions come first (answered from the flags it was given, so an empty line
+# takes each default), then the one question, then both halves install. The
+# answers come from hack/answer-pty.py, which writes one per prompt on a real
+# terminal -- a pipe cannot: box refuses to ask where nobody can answer, and one
+# prompt would buffer the rest of a ready-made script away from the next.
+#
+# The pty ends every line with \r, so the transcript is stripped: every assertion
+# about it is anchored at a line end.
+bootstrap_guided() { # bootstrap_guided <output file>
+  box_bootstrap_args
+  python3 hack/answer-pty.py "$BOX_BIN" bootstrap --plain "${BOX_ARGS[@]}" 2>&1 | tr -d '\r' >"$1"
 }
 
 init() { # init <output file> [extra dev flags]
@@ -1756,11 +1779,38 @@ fresh() {
     { echo "could not patch CoreDNS for the box's names"; fail=1; return 0; }
   ACME_ARGS=(--acme-server "https://pebble.pebble.svc:14000/dir")
 
-  log "box bootstrap: the platform layer, then root's first install"
-  if bootstrap "$WORK/bootstrap1.txt"; then
+  # A person at the terminal, not --yes: a fresh host is the one path that asks,
+  # and it asks once (docs/output.md, "bootstrap, init, apply").
+  log "box bootstrap: the platform layer, then root's first install, one question"
+  if bootstrap_guided "$WORK/bootstrap1.txt"; then
     cat "$WORK/bootstrap1.txt"
   else
     cat "$WORK/bootstrap1.txt"; fail=1
+  fi
+  # One question, for both halves, and both plans before it: the platform's
+  # plan first, then init's own rows (the seedbox: its paths, its host, the
+  # torrent port), then the one answer. A second question means the release
+  # asked again inside the apply.
+  questions=$(grep -cE '^install the platform and .+\? \[y/N\] y$' "$WORK/bootstrap1.txt")
+  [ "$questions" = 1 ] ||
+    { echo "a guided install asked ${questions} questions, want one: the platform and the seedbox together";
+      grep -nE '\[y/[Nn]\]|\[Y/n\]' "$WORK/bootstrap1.txt"; fail=1; }
+  if grep -qE '^apply s5n in .+\? \[y/[Nn]\] ' "$WORK/bootstrap1.txt"; then
+    echo "the release asked its own question after the one answer"
+    fail=1
+  fi
+  plan_line=$(grep -nE '^\+ cert-manager ' "$WORK/bootstrap1.txt" | head -1 | cut -d: -f1)
+  question_line=$(grep -nE '^install the platform and .+\? \[y/N\] ' "$WORK/bootstrap1.txt" | head -1 | cut -d: -f1)
+  platform_row=$(grep -nE '^✓ Envoy Gateway ' "$WORK/bootstrap1.txt" | head -1 | cut -d: -f1)
+  if [ -z "$plan_line" ] || [ -z "$question_line" ] || [ -z "$platform_row" ]; then
+    echo "the transcript is missing the plan, the question or the first install row"
+    fail=1
+  elif [ "$plan_line" -ge "$question_line" ]; then
+    echo "the plan was not shown before the question (plan ${plan_line}, question ${question_line})"
+    fail=1
+  elif [ "$question_line" -ge "$platform_row" ]; then
+    echo "the platform was installed before the answer (question ${question_line}, row ${platform_row})"
+    fail=1
   fi
   # The plan is one line for what this run installs and one for what it cannot
   # decide yet: the components and their versions, not the Kubernetes kinds

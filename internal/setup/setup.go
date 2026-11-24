@@ -177,6 +177,53 @@ type Options struct {
 	// answer that belongs to the host rather than to the seedbox. Empty means
 	// this run does not ask (a box whose config bootstrap did not write).
 	NoticePath string
+	// BeforeWrite is the one hook a flow uses to ask about the platform and the
+	// seedbox together: it runs after init's last question and before its first
+	// write, with every answer settled, so the plan it shows has all of them and
+	// nothing is written yet. A hook that refuses stops the run there, with both
+	// files and both directories exactly as they were.
+	//
+	// `box bootstrap` on a fresh host sets it: the platform it installs and the
+	// seedbox init writes are one decision, and asking twice about it is the
+	// second form that screen removed (docs/output.md, "bootstrap, init, apply").
+	BeforeWrite func(ctx context.Context, a Answers) error
+}
+
+// Answers is what init's questions settled, in the shape a hook reads them: who
+// the box is for, where it lives, and what runs on it. It carries the partial
+// Result too, so a run that stops in the hook still reports the domain and the
+// login it decided.
+type Answers struct {
+	Result Result
+	// DataPath and ConfigPath are the host paths the box keeps its tree on.
+	DataPath, ConfigPath string
+	// PUID and PGID are the ids every file on those paths is owned by.
+	PUID, PGID int
+	// Apps are the catalog apps this box runs, sorted.
+	Apps []string
+	// Login is the account the login admits, and Password is this run's
+	// password: it exists for the hand-over and is never written to a file.
+	Login    string
+	Password string
+	// Namespace is the seedbox's namespace, which the login or the flag named.
+	Namespace string
+	// Port is the torrent port the grant records for this box, or nil when the
+	// box runs no app that has one.
+	Port any
+	// Hosts are the certificate names this run decided, the box's own first.
+	Hosts []Host
+	// NoticeURL is where box posts notices, when this run was asked.
+	NoticeURL string
+
+	// The rest is what the write half reads back: the documents the answers
+	// came from, and the questions the apply asks after its own confirm.
+	sb            *seedbox.Seedbox
+	base          map[string]any
+	grantNow      map[string]any
+	paths         []pathTarget
+	stored        []answer
+	transient     []catalog.Question
+	transientKeys []string
 }
 
 // ApplyOptions is what init hands the applier: the same arguments `box apply`
@@ -555,6 +602,35 @@ func (d *Decision) Run(ctx context.Context, opts Options) (Result, error) {
 			if strings.TrimSpace(opts.SetTransient[q.Key]) == "" {
 				return res, fmt.Errorf("%s is needed for this install: pass --set-transient %s=<value>", q.Prompt, q.Key)
 			}
+		}
+	}
+
+	// Every question has been asked, and nothing has been written: a flow that
+	// shows one plan for the platform and the seedbox asks its one question
+	// here, with all of this run's answers in front of the operator.
+	if opts.BeforeWrite != nil {
+		if err := opts.BeforeWrite(ctx, Answers{
+			Result:        res,
+			DataPath:      dataPath,
+			ConfigPath:    configPath,
+			PUID:          puid,
+			PGID:          pgid,
+			Apps:          apps,
+			Login:         loginName,
+			Password:      password,
+			Namespace:     namespace,
+			Port:          port,
+			Hosts:         res.Hosts,
+			NoticeURL:     noticeURL,
+			sb:            sb,
+			base:          base,
+			grantNow:      grantNow,
+			paths:         paths,
+			stored:        stored,
+			transient:     transient,
+			transientKeys: transientKeys,
+		}); err != nil {
+			return res, err
 		}
 	}
 

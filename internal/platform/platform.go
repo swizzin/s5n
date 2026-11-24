@@ -358,7 +358,7 @@ func (d *Decision) Apply(ctx context.Context, components []bootstrap.ComponentRe
 	res.Plan = plan
 	r := d.report()
 	if !d.CallerConfirms {
-		d.printPlan(r, plan)
+		printPlan(r, plan)
 	}
 
 	if len(plan.Steps) == 0 {

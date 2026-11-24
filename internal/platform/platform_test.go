@@ -1548,7 +1548,7 @@ func TestThePlanIsTheCallers(t *testing.T) {
 		t.Fatal(err)
 	}
 	f := newFixture()
-	f.d.printPlan(f.d.Say, plan)
+	PrintPlan(f.d.Say, plan)
 	printed := strings.Join(strings.Split(f.log.String(), "\n"), "\n")
 	items := plan.Items()
 	if len(items) == 0 {

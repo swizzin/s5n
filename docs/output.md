@@ -278,8 +278,11 @@ the run log, which the failed run names.
 ## Reference screens: bootstrap, init, apply
 
 `box bootstrap` on a fresh host: the cluster it found in one row, the platform
-plan as what this run installs and the one thing it cannot decide yet, and then
-one row per component with the time it took. The kubeconfig path, the four
+plan as what this run installs and the one thing it cannot decide yet, then
+init's own rows, and one question for both halves. The platform layer and the
+seedbox are one decision, so a fresh host is asked once: the platform's plan,
+what the seedbox will be (its paths, its host, the torrent port), and then the
+answer that installs both, in that order. The kubeconfig path, the four
 capability probes, the Helm releases and every Deployment wait are in the log.
 
 ```
@@ -288,13 +291,31 @@ cluster
 platform
   + cert-manager v1.21.3 · Envoy Gateway 1.9.3 · admission policies
   ? MetalLB 0.16.2, unless the Gateway gets an address without it
-install the platform layer? [y/N] y
+where things live
+  data    /srv/s5n/data    exists  254:0  xfs  1.8 TiB free
+  config  /srv/s5n/config  new     254:0  xfs  1.8 TiB free
+· box.example.com  Let's Encrypt · resolves to 203.0.113.7
+· torrent port   picked    30013
+install the platform and alice's seedbox? [y/N] y
 ✓ Envoy Gateway  38s
 ✓ cert-manager   52s
 ✓ MetalLB        21s
 ✓ Envoy Gateway  172.18.0.4 · 38s
 ✓ admission policies  2s
+✓ s5n 0.6.3      11 apps · torrent port 30013 · 2m40s
+✓ wiring         38 checks
 ```
+
+A box that already has a platform is not that decision: it asks about each half
+of what it will change, and a half with nothing to do asks nothing. `--yes`, or
+no terminal, answers without asking, and then the platform's and the release's
+confirms are both answered rather than shown.
+
+The two halves install in one order and in one run: the platform layer, then the
+seedbox. If the platform is up and the seedbox's install fails, the answers stay
+in the two files and the platform stays serving, so the next `box bootstrap`
+reads them back, finds the platform, asks only for what changed, and finishes the
+same install. Nothing is rolled back for a run that can simply be repeated.
 
 `box init` says where the two paths are as a table, one row per host's
 certificate, the port peers reach the box on, and one row per file it wrote:
