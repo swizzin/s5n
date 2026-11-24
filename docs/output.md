@@ -1,0 +1,221 @@
+# box's terminal output (decided)
+
+This is the style guide every command follows: thirteen rules, each marked
+**(decided)**. A renderer is `internal/say` (the plain transcript) and `internal/tui`
+(the live one); `internal/runlog` is the transcript file; `box update` is the first
+command converted, so its screens at the end are the shape the rest are moving to.
+
+Where a rule and an existing command disagree, the command is the one that has not
+been converted yet. New output follows the rules from the day it is written.
+
+## 1. One mark in a two-column gutter (decided)
+
+Every line starts with a mark, a space, and then the line. The marks are:
+
+```
+✓  done          ✗  failed        !  needs you      ·  a note
+◐  running       ?  a question    $  a command
+```
+
+The gutter is two columns wide whatever the glyph costs in bytes, so the columns after
+it line up down a whole run. A state is **one short word in its own column** (kept,
+new, moved, skipped), never a phrase.
+
+```
+✓ snapshots      prowlarr, sonarr · 6s
+✓ 0.6.2 → 0.6.3  41s
+· nothing on this box changed
+```
+
+Not `✓ prowlarr and sonarr were snapshotted and kept as they are`.
+
+## 2. One line, one fact (decided)
+
+No reasoning in the middle of a run. A refusal gets its one reason, and the rest is in
+the log.
+
+```
+✗ chart          can't read s5n 0.2.0 from the registry
+                 it has no platform.yaml
+```
+
+Not a paragraph explaining what a chart is and why 0.2.0 predates a file.
+
+## 3. Commands stand alone (decided)
+
+A command is on a line of its own, marked `$`, copyable as it stands. It is never
+wrapped in the middle of a token: a long one continues with a trailing ` \`, the way a
+shell does. Many similar commands become one.
+
+```
+! sonarr is held on 5.0.0.3041 until a release ships a fixed image
+  $ box status
+```
+
+Not `use box status to check` inside the sentence.
+
+## 4. Success is quiet (decided)
+
+What went to plan folds into a count. A person reading a successful run sees how much
+happened, not each thing.
+
+```
+✓ wiring         34 checks
+```
+
+Not thirty-four lines of `sonarr/downloadclient: ok`.
+
+## 5. Plumbing lives in the log (decided)
+
+Object names, revisions, digests and image ids stay off the screen unless they are the
+problem. Every run writes a plain transcript instead, and a failed run's last line
+names it.
+
+```
+· log            /var/log/box/update-20261123T075500Z.log
+```
+
+The transcript is bounded, because a box that checks every fifteen minutes would
+otherwise fill a disk: `/var/log/box/<command>-<UTC yyyymmddThhmmssZ>.log` when root,
+`$XDG_STATE_HOME/box/` (default `~/.local/state/box/`) otherwise; 0600 files in a 0700
+directory; each run prunes the directory to the newest twenty logs and at most 64 MiB,
+oldest first; one run's log stops at 16 MiB with a line saying so. A secret is
+registered with the log before it can be written and is replaced where it would have
+gone. A log that cannot be written never fails the command: it is one muted line.
+
+## 6. A wait is never silent (decided)
+
+A wait shows one live line: what is happening, how long it has taken against its limit,
+and the newest line of the thing being waited on, sampled about once a second and
+trimmed to the terminal.
+
+```
+◐ waiting for the wiring Job  4m10s of 10m  waiting for pbh to answer
+```
+
+Finished, it is one row with its duration. Every wait goes through the same mechanism
+(`say.Op` with a `Source`), so adding a log to read costs one argument and nothing else.
+
+```
+✓ 0.6.3 → 0.6.4  4m11s
+```
+
+The plain transcript does not redraw anything: it prints the finish row, and the log
+gets each distinct sampled line once.
+
+## 7. Fits 80 columns (decided)
+
+Text wraps at the terminal's width with continuation lines hanging under the text, never
+under the gutter. Tables line up. A list nobody needs in full folds to its size; a list
+a person will want to read in full (what a migration moves, renames or leaves behind,
+its notes) goes into a sectioned plain-text report beside the snapshot, named in one
+line. No ASCII-art panels around paragraphs: a failure is a `✗` row like any other.
+
+```
+✗ sonarr         crashed 3 times on the new image
+```
+
+## 8. Numbers a person reads (decided)
+
+Sizes, counts and durations are for a person: `491 MiB`, `66,931 paths`, `3m12s`. The
+exact byte count and the raw float are elsewhere.
+
+```
+✓ plex          1.2 GiB · 4m18s
+```
+
+Not `1258291200` or `258.9213s`.
+
+## 9. Headings are labels (decided)
+
+A heading is a lowercase noun, no colon, one level of nesting.
+
+```
+platform
+  ...
+```
+
+Not `=== PLATFORM ===` and not `Steps to perform:`.
+
+## 10. Questions are short (decided)
+
+Context above, as facts. One line of question. The answer collapses to `subject ->
+answer`. No annotations telling the reader where their answer goes.
+
+```
+s5n · cluster
+what domain will this box answer on?
+
+→ box.example.com
+```
+
+Not `Please enter the domain name you would like to use (this will also be used for
+the certificate) [required]:`.
+
+## 11. Plain voice (decided)
+
+Present tense, second person where a person is addressed. No "box never..." hedging, no
+dash or semicolon chains in a sentence. Humour only where it is chosen, and then once.
+
+```
+✗ /etc/k0s/k0s.yaml exists
+  $ mv /etc/k0s/k0s.yaml /etc/k0s/k0s.yaml.aside
+  then run this again
+```
+
+Not `box was unable to proceed because — unlike before — the installer's config file
+already exists; you may wish to move it.`
+
+## 12. The log looks like the screen (decided)
+
+The transcript is the screen's lines with timestamps, plus the detail lines the screen
+leaves out. Reading the log is reading the run in order.
+
+```
+2026-11-23T07:55:00Z  s5n 0.6.2 → 0.6.3 · 1 step · prowlarr and sonarr move
+2026-11-23T07:55:00Z  
+2026-11-23T07:55:06Z  ✓ snapshots      prowlarr, sonarr · 6s
+2026-11-23T07:55:06Z  wiring sonarr/downloadclient: ok (updated from 3.0.0)
+```
+
+## 13. Data over words (decided)
+
+Values in columns beat phrases that describe them. Less to read, less to translate.
+
+```
+/data         xfs     31 GiB
+/config       ext4   486 GiB
+```
+
+Not `the data and the config are on the same filesystem`.
+
+## The two reference screens
+
+`box update` is the first command converted end to end. A failed run:
+
+```
+✓ box            0.6.0 → 0.6.1 · signature ok
+✗ chart          can't read s5n 0.2.0 from the registry
+                 it has no platform.yaml
+· nothing on this box changed
+· log            /var/log/box/update-20261123T075500Z.log
+```
+
+A step that moved two apps, one of which was put back:
+
+```
+s5n 0.6.2 → 0.6.3 · 1 step · prowlarr and sonarr move
+
+✓ snapshots      prowlarr, sonarr · 6s
+✓ 0.6.2 → 0.6.3  41s
+✗ sonarr         crashed 3 times on the new image
+✓ sonarr         rolled back to 5.0.0.3041 · its 15:33 snapshot
+✓ wiring         34 checks
+
+! sonarr is held on 5.0.0.3041 until a release ships a fixed image
+  $ box status
+```
+
+The wiring receipt inside update folds to the one `✓ wiring` row; when something is
+pending or failed, those rows are listed instead and the full receipt goes to the log.
+`box update --check` and the timer's run follow the same rules.
