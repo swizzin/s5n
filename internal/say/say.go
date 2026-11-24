@@ -278,6 +278,11 @@ type Reporter interface {
 	// Note is one line of prose under a block, indented to the block's own
 	// column.
 	Note(text string)
+	// ToFinish is the block a run ends with when it leaves something for a
+	// person: a "to finish" label, then one row per thing, and the command
+	// that clears it hanging under the row it belongs to. A run with nothing
+	// left prints nothing.
+	ToFinish(rows []Row)
 	// Rows is a block of status lines: a mark in the two-column gutter, a
 	// name in the fixed name column, an optional state word, and the facts
 	// joined with a middle dot. Text that does not fit hangs under itself.
@@ -626,6 +631,48 @@ func columnWidths(g Group) []int {
 		}
 	}
 	return cols
+}
+
+// ToFinish is the transcript's block of what is left for a person: the label
+// with the `!` mark, then each row two columns in, its facts wrapped under the
+// column they start in, and its command under them. Nothing is repeated: the
+// label is said once for the block (rule 1).
+func (p *Plain) ToFinish(rows []Row) {
+	if len(rows) == 0 {
+		return
+	}
+	width := 0
+	for _, row := range rows {
+		if w := columns(row.Name); w > width {
+			width = w
+		}
+	}
+	fmt.Fprintln(p.out(), MarkNeeds+" to finish")
+	for _, row := range rows {
+		head := "  "
+		if row.Name != "" {
+			head += pad(row.Name, width) + "  "
+		}
+		hang := strings.Repeat(" ", len(head))
+		facts := strings.Join(row.Facts, " · ")
+		for i, line := range Wrap(facts, Width-len(head)) {
+			if i == 0 {
+				fmt.Fprintln(p.out(), head+line)
+				continue
+			}
+			fmt.Fprintln(p.out(), hang+line)
+		}
+		for i, line := range WrapShell(row.Command, Width-len(hang)-2) {
+			if row.Command == "" {
+				break
+			}
+			if i == 0 {
+				fmt.Fprintln(p.out(), hang+MarkCommand+" "+line)
+				continue
+			}
+			fmt.Fprintln(p.out(), hang+"  "+line)
+		}
+	}
 }
 
 // blockNameWidth is a block's name column: as wide as its longest name.

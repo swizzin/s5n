@@ -353,9 +353,10 @@ func TestTheInstallerSchedulesTheTimerLast(t *testing.T) {
 			order = append(order, "install")
 			return nil
 		},
-		schedule: func(_ context.Context, unitDir, record, grant, values string, _ say.Reporter) {
+		schedule: func(_ context.Context, unitDir, record, grant, values string, _ say.Reporter) []say.Row {
 			order = append(order, "timer")
 			got = []string{unitDir, record, grant, values}
+			return nil
 		},
 	}
 	o, inst := installFlagSet(t)
@@ -386,8 +387,9 @@ func TestTheInstallerSchedulesTheTimerLast(t *testing.T) {
 			order = append(order, "install")
 			return stopped
 		},
-		schedule: func(context.Context, string, string, string, string, say.Reporter) {
+		schedule: func(context.Context, string, string, string, string, say.Reporter) []say.Row {
 			order = append(order, "timer")
+			return nil
 		},
 	}
 	err := failed.run(context.Background(), inst, iflg, &say.Plain{W: &bytes.Buffer{}})

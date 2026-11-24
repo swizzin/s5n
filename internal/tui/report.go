@@ -454,6 +454,54 @@ func groupColumnWidths(g say.Group) []int {
 	return cols
 }
 
+// ToFinish is the block a run ends with when it leaves something for a person:
+// the label with the one `!` mark, then each row two columns in with the
+// command that clears it under it. The rows carry no mark of their own: the
+// label is what says the block needs them.
+func (r *Reporter) ToFinish(rows []say.Row) {
+	if len(rows) == 0 {
+		return
+	}
+	width := 0
+	for _, row := range rows {
+		if w := lipgloss.Width(row.Name); w > width {
+			width = w
+		}
+	}
+	var b strings.Builder
+	label := say.MarkNeeds + " to finish"
+	b.WriteString(indent + r.chrome.paint(label, badStyle.Render(label)) + "\n")
+	for _, row := range rows {
+		head := indent + "  "
+		if row.Name != "" {
+			head += row.Name + strings.Repeat(" ", width-lipgloss.Width(row.Name)) + "  "
+		}
+		hang := strings.Repeat(" ", lipgloss.Width(head))
+		painted := indent + "  "
+		if row.Name != "" {
+			painted += r.chrome.paint(row.Name, inkStyle.Render(row.Name)) + strings.Repeat(" ", width-lipgloss.Width(row.Name)) + "  "
+		}
+		facts := strings.Join(row.Facts, " · ")
+		for i, line := range wrapText(facts, r.width-lipgloss.Width(head)) {
+			if i == 0 {
+				b.WriteString(painted + r.chrome.paint(line, mutedStyle.Render(line)) + "\n")
+				continue
+			}
+			b.WriteString(hang + r.chrome.paint(line, mutedStyle.Render(line)) + "\n")
+		}
+		if row.Command != "" {
+			for i, line := range wrapShell(row.Command, r.width-lipgloss.Width(hang)-2) {
+				if i == 0 {
+					b.WriteString(hang + r.chrome.paint(say.MarkCommand, glyphStyle(say.MarkCommand).Render(say.MarkCommand)) + " " + r.chrome.paint(line, inkStyle.Render(line)) + "\n")
+					continue
+				}
+				b.WriteString(hang + "  " + r.chrome.paint(line, inkStyle.Render(line)) + "\n")
+			}
+		}
+	}
+	r.emit(b.String())
+}
+
 // Note is a line of prose under a block: two columns in, so it belongs to the
 // block above it, wrapped with its continuation hanging under the text.
 func (r *Reporter) Note(text string) {

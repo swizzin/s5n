@@ -499,7 +499,9 @@ func runBootstrap(ctx context.Context, args []string) {
 
 	// The timer comes last: it runs `box update --timer` for the files this run
 	// just installed, so a seedbox that never finished is never on a schedule.
-	scheduleUpdates(ctx, unitDir, *recordPath, *initFlags.grantPath, *initFlags.valuesPath, out)
+	// What it could not do, and any record still missing, are the run's last
+	// block: one label and one row each, with the command that clears it.
+	out.ToFinish(append(initFlags.followUps, scheduleUpdates(ctx, unitDir, *recordPath, *initFlags.grantPath, *initFlags.valuesPath, out)...))
 }
 
 // applyPlatform applies the platform layer the decision says install. confirm is
@@ -781,6 +783,7 @@ func runInit(ctx context.Context, args []string) {
 		out.Error(err)
 		os.Exit(1)
 	}
+	out.ToFinish(initFlags.followUps)
 }
 
 // initFlags are init's questions as flags. `box bootstrap` accepts the same
@@ -836,6 +839,10 @@ type initFlags struct {
 	// sets it: bootstrap passes the flag it was given, and `box init` alone uses
 	// the default. Root's config is read and written beside it.
 	recordPath string
+	// followUps are the rows the run ends with: what it left for a person,
+	// each with the command that clears it. init collects them as it goes, and
+	// the command that ran it prints them as one block after its last step.
+	followUps []say.Row
 	// charts is the release to install, when the command already has one:
 	// `box bootstrap` loads it for its k0s pin and hands the same value here,
 	// so bootstrap and init cannot ask the registry for two versions.
@@ -1056,13 +1063,39 @@ func (o *initFlags) run(ctx context.Context, kubeconfig string, yes, plain bool,
 		redact(res.GeneratedPassword)
 		out.Line("password: " + res.GeneratedPassword + "  (shown once; box keeps only the hash)")
 	}
-	// The final card's one warning: a name with no DNS record still installs,
-	// self-signed, and a re-run is what moves it. Named per host, because an
-	// app's name is a record the operator may not have thought about.
-	if warning, ok := setup.NoDNSWarning(res.Hosts, "init"); ok {
-		out.Warn(warning)
+	// What a name with no DNS record leaves a person: the records to add, and
+	// the command that moves the certificates once they exist. It is one row
+	// of the run's to-finish block, so a bootstrap that also could not install
+	// its update timer says both things in one place.
+	if row, ok := noDNSFollowUp(res.Hosts); ok {
+		if warning, ok := setup.NoDNSWarning(res.Hosts, "init"); ok {
+			out.Detail(warning)
+		}
+		o.followUps = append(o.followUps, row)
 	}
 	return nil
+}
+
+// noDNSFollowUp is the one thing a run whose names have no record leaves a
+// person: which names, and the command that moves them to Let's Encrypt once
+// their records exist. The sentence that says why their certificates are
+// self-signed is the run log's (rule 2).
+func noDNSFollowUp(hosts []setup.Host) (say.Row, bool) {
+	var names []string
+	for _, h := range hosts {
+		if h.NoDNS && strings.TrimSpace(h.Host) != "" {
+			names = append(names, h.Host)
+		}
+	}
+	if len(names) == 0 {
+		return say.Row{}, false
+	}
+	return say.Row{
+		Mark:    say.MarkNeeds,
+		Name:    "certificates",
+		Facts:   []string{"add a DNS record for " + strings.Join(names, ", ")},
+		Command: "box init",
+	}, true
 }
 
 // initApplyConfirmer is what init's hand-over asks its release question with.

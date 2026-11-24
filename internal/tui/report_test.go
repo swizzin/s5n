@@ -415,3 +415,28 @@ func TestReporterTableWidensForALongName(t *testing.T) {
 		t.Fatalf("row 1 = %q, want %q", got, want)
 	}
 }
+
+// The live renderer ends a run the same way: one `!` label, then the rows, with
+// each command under the row it clears.
+func TestReporterToFinishIsOneBlock(t *testing.T) {
+	var buf bytes.Buffer
+	r := NewReporter(ReporterOptions{Out: &buf, Width: 80, NoColor: true, Yes: true})
+	r.ToFinish([]say.Row{
+		{Mark: say.MarkNeeds, Name: "certificates", Facts: []string{"add a DNS record for box.example.test"}, Command: "box init"},
+		{Mark: say.MarkNeeds, Name: "updates", Facts: []string{"run this from cron every 15 minutes"}, Command: "box update --timer"},
+	})
+	r.Close()
+	lines := strip(buf.String())
+	want := []string{
+		"  ! to finish",
+		"    certificates  add a DNS record for box.example.test",
+		"                  $ box init",
+		"    updates       run this from cron every 15 minutes",
+		"                  $ box update --timer",
+	}
+	for i, w := range want {
+		if lines[i] != w {
+			t.Fatalf("line %d = %q, want %q:\n%s", i, lines[i], w, strings.Join(lines, "\n"))
+		}
+	}
+}

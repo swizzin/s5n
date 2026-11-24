@@ -279,3 +279,33 @@ func TestFoldLeavesWhatDiffers(t *testing.T) {
 		t.Fatalf("rows that differ were folded: %+v", got)
 	}
 }
+
+// What a run leaves a person is one block at its end: the label carries the one
+// mark, each row says what is left, and the command that clears it hangs under
+// the row it belongs to (rules 1 and 3).
+func TestPlainToFinishIsOneBlock(t *testing.T) {
+	var buf bytes.Buffer
+	p := &Plain{W: &buf}
+	p.ToFinish([]Row{
+		{Mark: MarkNeeds, Name: "certificates", Facts: []string{"add a DNS record for box.example.test"}, Command: "box init"},
+		{Mark: MarkNeeds, Name: "updates", Facts: []string{"run this from cron every 15 minutes"}, Command: "box update --timer"},
+	})
+	want := strings.Join([]string{
+		"! to finish",
+		"  certificates  add a DNS record for box.example.test",
+		"                $ box init",
+		"  updates       run this from cron every 15 minutes",
+		"                $ box update --timer",
+		"",
+	}, "\n")
+	if got := buf.String(); got != want {
+		t.Fatalf("block:\n%s\nwant:\n%s", got, want)
+	}
+	// A run with nothing left prints nothing at all: no empty label, no
+	// heading with no rows.
+	buf.Reset()
+	p.ToFinish(nil)
+	if buf.String() != "" {
+		t.Fatalf("an empty block printed %q", buf.String())
+	}
+}

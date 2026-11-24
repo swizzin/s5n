@@ -2551,8 +2551,8 @@ PYPBH
   echo "  GET https://${DOMAIN}/seerr/ (the old path): ${old_path}"
   [ "$old_path" = 404 ] || { echo "/seerr still answers ${old_path}: a path route was left behind"; fail=1; }
   # The card says nothing about missing records: every name answered here.
-  if grep -qE "has no DNS record|have no DNS record" "$WORK/bootstrap1.txt"; then
-    echo "init printed the no-DNS card line on a host whose names all resolve"
+  if grep -qE "add a DNS record for" "$WORK/bootstrap1.txt"; then
+    echo "init printed the no-DNS card row on a host whose names all resolve"
     fail=1
   fi
 
@@ -4606,20 +4606,26 @@ PYCHECK
   hosts=("$DOMAIN" "$PLEX_HOST" "$SEERR_HOST" "$PBH_HOST")
   certs=()
   for host in "${hosts[@]}"; do certs+=("$(host_cert "$host")"); done
-  no_dns_lines=$(grep -c "have no DNS record" "$WORK/bootstrap1.txt" || true)
+  # What the run leaves a person is one block at its end: a to-finish label,
+  # then one row per thing, with the command that clears it under it. The
+  # records are one row naming every host that needs one, wrapped or not.
+  rows_of "$WORK/bootstrap1.txt" >"$WORK/bootstrap1-rows.txt"
+  grep -qxF "! to finish" "$WORK/bootstrap1.txt" ||
+    { echo "the run left no to-finish block:"; tail -6 "$WORK/bootstrap1.txt"; fail=1; }
+  no_dns_lines=$(grep -c "add a DNS record for" "$WORK/bootstrap1-rows.txt" || true)
   [ "$no_dns_lines" = 1 ] ||
-    { echo "the final card prints ${no_dns_lines:-no} no-DNS lines, want one naming every host:";
-      grep "no DNS record" "$WORK/bootstrap1.txt" || true; fail=1; }
-  no_dns_line=$(grep "have no DNS record" "$WORK/bootstrap1.txt" | head -1 || true)
+    { echo "the final card prints ${no_dns_lines:-no} no-DNS rows, want one naming every host:";
+      grep "DNS record" "$WORK/bootstrap1.txt" || true; fail=1; }
+  no_dns_line=$(grep "add a DNS record for" "$WORK/bootstrap1-rows.txt" | head -1 || true)
   for host in "${hosts[@]}"; do
     case "$no_dns_line" in
       *"$host"*) ;;
-      *) echo "the one no-DNS line does not name ${host}: ${no_dns_line}"; fail=1 ;;
+      *) echo "the one no-DNS row does not name ${host}: ${no_dns_line}"; fail=1 ;;
     esac
   done
   case "$no_dns_line" in
-    *"add a record for each"*) ;;
-    *) echo "the no-DNS line does not say what to add: ${no_dns_line}"; fail=1 ;;
+    *"box init"*) ;;
+    *) echo "the no-DNS row does not name the command that moves them: ${no_dns_line}"; fail=1 ;;
   esac
   $K -n s5n-gateway wait --for=condition=Ready "certificate/$app_cert" --timeout=120s ||
     { echo "the app host's self-signed Certificate never became Ready"; fail=1; }
@@ -4670,7 +4676,7 @@ EOF
   grep -qE "^· certificates +Let's Encrypt for 4 hosts · resolves to 192\.0\.2\.10$" "$WORK/bootstrap3.txt" ||
     { echo "init did not move the box's names to Let's Encrypt";
       grep -E "^· (certificates|[a-z.]+ +Let's)" "$WORK/bootstrap3.txt" | head -3; fail=1; }
-  if grep -qE "has no DNS record|have no DNS record" "$WORK/bootstrap3.txt"; then
+  if grep -qE "add a DNS record for" "$WORK/bootstrap3.txt"; then
     echo "the card still says a name has no record after the record was added"
     fail=1
   fi

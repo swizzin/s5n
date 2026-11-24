@@ -147,29 +147,44 @@ func boxPath() (string, error) {
 }
 
 // scheduleUpdates writes the timer's units for the files this run installed, and
-// says what it did. A failure is a warning, not a failed bootstrap: the seedbox
-// is installed and serving, and the line names the cron command that does the
-// same job.
-func scheduleUpdates(ctx context.Context, unitDir, record, grant, values string, out say.Reporter) {
+// says what it did. A failure is a follow-up row, not a failed bootstrap: the
+// seedbox is installed and serving, and the row names the cron command that
+// does the same job. The rows are the caller's to print with whatever else the
+// run left a person.
+func scheduleUpdates(ctx context.Context, unitDir, record, grant, values string, out say.Reporter) []say.Row {
 	units, why := timerUnits(unitDir)
 	if units == nil {
-		out.Warn(why)
-		return
+		out.Detail(why)
+		return []say.Row{timerFollowUp(why)}
 	}
 	path, err := boxPath()
 	if err != nil {
-		out.Warn(noTimerLine + " (" + err.Error() + ")")
-		return
+		out.Detail(noTimerLine + " (" + err.Error() + ")")
+		return []say.Row{timerFollowUp(noTimerLine)}
 	}
 	changed, err := hostconf.Install(ctx, units, path, record, grant, values)
 	if err != nil {
-		out.Warn("box's update timer is not running: " + err.Error())
-		return
+		out.Detail("box's update timer is not running: " + err.Error())
+		return []say.Row{timerFollowUp("box's update timer is not running: " + err.Error())}
 	}
 	if changed {
 		out.Muted(fmt.Sprintf("box checks for a newer release every %d minutes: %s, and update.timer in %s turns that off",
 			hostconf.WakeInterval, hostconf.TimerFile, hostconf.Path(record)))
-		return
+		return nil
 	}
 	out.Muted(fmt.Sprintf("%s is already installed and up to date", hostconf.TimerFile))
+	return nil
+}
+
+// timerFollowUp is the row a host with no update timer gets: what is missing,
+// and the command cron runs in its place. The words are the same whatever the
+// reason -- root's run on a host with systemd is the only one that installs it
+// -- and the reason itself goes to the log with the row.
+func timerFollowUp(string) say.Row {
+	return say.Row{
+		Mark:    say.MarkNeeds,
+		Name:    "updates",
+		Facts:   []string{"run this from cron every 15 minutes"},
+		Command: "box update --timer",
+	}
 }

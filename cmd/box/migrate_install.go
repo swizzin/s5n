@@ -270,7 +270,7 @@ func migrateInstall(ctx context.Context, o *migrateApplyFlags, inst *installFlag
 // scheduler writes the update timer's two units for the files an install used.
 // It is bootstrap's own scheduleUpdates, and a field only so a test can watch
 // what the install hands it and when.
-type scheduler func(ctx context.Context, unitDir, record, grant, values string, out say.Reporter)
+type scheduler func(ctx context.Context, unitDir, record, grant, values string, out say.Reporter) []say.Row
 
 // installFinish is the last step of a host with no box: init's own flow over the
 // plan's answers, and then -- exactly as bootstrap puts it last -- the timer for
@@ -300,7 +300,9 @@ func (f installFinish) run(ctx context.Context, inst *installFlags, iflg *initFl
 	if err := f.adopt(ctx); err != nil {
 		return err
 	}
-	f.schedule(ctx, inst.unitDir, *inst.record, *iflg.grantPath, *iflg.valuesPath, out)
+	// The run's last block: what this install left a person, each with the
+	// command that clears it -- exactly as bootstrap ends.
+	out.ToFinish(append(iflg.followUps, f.schedule(ctx, inst.unitDir, *inst.record, *iflg.grantPath, *iflg.valuesPath, out)...))
 	return nil
 }
 
