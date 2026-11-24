@@ -235,3 +235,45 @@ func TestMigrateSeedsThePlexTokenInARehearsalToo(t *testing.T) {
 		t.Fatalf("the rehearsal names %v, want %s", res.Keys, plexTokenKey)
 	}
 }
+
+// The pass before an install promises the Plex token too. That pass stages
+// nothing of a Plex whose whole data travels -- the snapshot is counted, not
+// copied -- so a token read out of the staged copy is there for the run and not
+// for the question, and the run refuses itself for saying more than it was
+// agreed to. Both passes read the token out of the snapshot's own copy.
+func TestThePassBeforeAnInstallPromisesThePlexToken(t *testing.T) {
+	env, p, raw, bulk := plexSplitEnv(t)
+	env.Disk = shortDisk{free: 1 << 40}
+	keys := newFakeKeys()
+	env.Secret = keys
+	const prefs = "Library/Application Support/Plex Media Server/Preferences.xml"
+	for _, at := range []string{
+		filepath.Join(bulk.tree, filepath.FromSlash(prefs)),
+		filepath.Join(env.Configs, "plex", filepath.FromSlash(prefs)),
+	} {
+		writeFile(t, at, plexPrefs, 0o600)
+	}
+	agreed, err := Survey(context.Background(), p, raw, env)
+	if err != nil {
+		t.Fatalf("survey: %v", err)
+	}
+	want := "plex: keep its Plex token (" + plexTokenKey + ")"
+	if lines := strings.Join(agreed.Lines(), "\n"); !strings.Contains(lines, want) {
+		t.Fatalf("the question does not say the Plex token is kept:\n%s", lines)
+	}
+	bulk.measured, bulk.staged = nil, nil
+	var shown Summary
+	env.Confirm = func(s Summary) (bool, error) {
+		shown = s
+		return true, nil
+	}
+	if _, err := Run(context.Background(), p, raw, env); err != nil {
+		t.Fatalf("apply: %v", err)
+	}
+	if why := shown.Holds(agreed); why != "" {
+		t.Fatalf("the run does not hold what the question promised: %s", why)
+	}
+	if got := keys.values[plexTokenKey]; got != testPlexToken {
+		t.Fatalf("the release Secret's %s = %q, want the migrated token", plexTokenKey, got)
+	}
+}

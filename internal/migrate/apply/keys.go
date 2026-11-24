@@ -157,7 +157,7 @@ func (m *migration) readKeys() error {
 	return nil
 }
 
-// readPlexToken reads the Plex server token out of the staged Plex config and
+// readPlexToken reads the Plex server token out of the snapshot's Plex config and
 // queues it for the release Secret. It returns one problem line for the refusal
 // (and queues nothing), or "" -- including when the box is not migrating a Plex
 // at all, or the Plex it is copying was never signed in.
@@ -177,7 +177,12 @@ func (m *migration) readPlexToken() string {
 	if plexApp == "" {
 		return ""
 	}
-	token, ok, err := plex.ServerToken(m.staging(plexApp))
+	// The snapshot's own copy, not the staged one: the pass before an install
+	// stages nothing of a Plex whose whole data travels (it counts the snapshot
+	// instead), and the question has to promise the same token the run writes.
+	// Preferences.xml is part of the state every extraction keeps, and the
+	// rewrite never touches the token, so the two copies hold the same value.
+	token, ok, err := plex.ServerToken(filepath.Join(m.env.Configs, plexApp))
 	if err != nil {
 		return fmt.Sprintf("apps.%s: its Plex server token cannot be read (%v); a token it has today has to be kept", plexApp, err)
 	}
