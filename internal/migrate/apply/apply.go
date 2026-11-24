@@ -792,9 +792,11 @@ func (m *migration) summary() Summary {
 			s.Carried = append(s.Carried, Carried{App: name, Note: note})
 		}
 	}
-	// A rehearsal renames nothing (renameData), so its summary lists nothing
-	// to rename.
-	if m.p.Data != nil && !m.env.Rehearsal {
+	// A rehearsal renames nothing (renameData), so its rows say what the real
+	// run renames rather than leaving the library out of the screen a person
+	// reviews: the plan's renames are listed either way, and the screen's
+	// wording is the run's (grouped.go).
+	if m.p.Data != nil {
 		for _, pair := range m.p.Data.Renames() {
 			if has(m.st.Renamed, pair[0]) {
 				continue

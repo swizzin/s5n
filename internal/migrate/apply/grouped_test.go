@@ -105,7 +105,7 @@ apps           carries    changes
   radarr       34.0 MiB   2,930 paths · 1 address · keeps download client
                           "qBT" · keeps its API key
   sonarr       5.2 MiB    1 path
-  ✓ data  Downloads → downloads · library → media
+  ✓ data  the real run renames Downloads → downloads · library → media
   ! radarr, sonarr  "Deluge" (172.17.0.1:10365) and "rT" (172.17.0.1:443) stay
                     as it is: "Deluge" is a Deluge client and this box runs only
                     qBittorrent, so a rewrite would point it at an app that does

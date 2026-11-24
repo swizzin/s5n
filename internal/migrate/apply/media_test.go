@@ -179,10 +179,10 @@ func TestRunLeavesTheLibraryAloneInARehearsal(t *testing.T) {
 		t.Fatalf("Run: %v", err)
 	}
 	sameTree(t, "the data root", before, hashTree(t, f.dataRoot))
-	for _, name := range []string{"data", "library"} {
-		if row := dataRow(shown, name); row != "" {
-			t.Errorf("a rehearsal's confirm has a %s row: %q", name, row)
-		}
+	// The screen says what the real run renames: a rehearsal renames nothing
+	// itself, and a person reviewing it reads what the box will do.
+	if row := dataRow(shown, "library"); !strings.Contains(row, "the real run renames 4K/TV → tv-4k · TV → tv") {
+		t.Errorf("a rehearsal's confirm does not say what the real run renames: %q", row)
 	}
 }
 

@@ -289,23 +289,34 @@ func (s Summary) CheckedRows(agreed Summary) []say.TableRow {
 // row.
 func (s Summary) dataRows() []say.TableRow {
 	var rows []say.TableRow
-	if len(s.Renames) > 0 {
-		pairs := make([]string, 0, len(s.Renames))
-		for _, r := range s.Renames {
-			pairs = append(pairs, arrow(r))
-		}
-		rows = append(rows, say.TableRow{Glyph: "✓", Name: "data", Facts: []string{strings.Join(pairs, " · ")}})
+	if facts := renameFacts(s.Renames, s.Rehearsal); facts != "" {
+		rows = append(rows, say.TableRow{Glyph: "✓", Name: "data", Facts: []string{facts}})
 	}
-	if len(s.MediaRenames) > 0 {
+	if facts := renameFacts(s.MediaRenames, s.Rehearsal); facts != "" {
 		// The library reads as one line: these are the directories a person
 		// sees in every app, and they all become box's own names together.
-		pairs := make([]string, 0, len(s.MediaRenames))
-		for _, r := range s.MediaRenames {
-			pairs = append(pairs, arrow(r))
-		}
-		rows = append(rows, say.TableRow{Glyph: "✓", Name: titleLibrary, Facts: []string{strings.Join(pairs, " · ")}})
+		rows = append(rows, say.TableRow{Glyph: "✓", Name: titleLibrary, Facts: []string{facts}})
 	}
 	return rows
+}
+
+// renameFacts is one row of renames as the run says it: plainly for the run that
+// makes them, and named as the real run's for the rehearsal that does not. A
+// rehearsal's screen says what will happen to a box, never what this run left
+// undone (rule 11).
+func renameFacts(renames []string, rehearsal bool) string {
+	if len(renames) == 0 {
+		return ""
+	}
+	pairs := make([]string, 0, len(renames))
+	for _, r := range renames {
+		pairs = append(pairs, arrow(r))
+	}
+	facts := strings.Join(pairs, " · ")
+	if rehearsal {
+		return "the real run renames " + facts
+	}
+	return facts
 }
 
 // arrow is one rename as a person reads it: "Downloads to downloads" is

@@ -362,9 +362,9 @@ command that stops it, written for the cluster box found, and nothing after it.
 
 ```
 ! 12 apps running · stop them, then run this again
-  $ sudo k0s kubectl -n default scale --replicas=0 \
-      autobrr maintainerr peerbanhelper plex qbittorrent qui \
-      radarr radarr4k overseerr sonarr sonarr4k tautulli
+  $ sudo k0s kubectl -n default scale deployment --replicas=0 \
+      autobrr maintainerr overseerr peerbanhelper plex qbittorrent \
+      qui radarr radarr4k sonarr sonarr4k tautulli
 ```
 
 The two other screens this command converted are the one confirm and the report

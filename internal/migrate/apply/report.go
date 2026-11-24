@@ -88,19 +88,11 @@ func (s Summary) reportApps() []report.Row {
 // reportLibrary is what the run renames under the data root.
 func (s Summary) reportLibrary() []report.Row {
 	var rows []report.Row
-	if len(s.Renames) > 0 {
-		facts := make([]string, 0, len(s.Renames))
-		for _, r := range s.Renames {
-			facts = append(facts, arrow(r))
-		}
-		rows = append(rows, report.Row{Name: "data", Facts: facts})
+	if facts := renameFacts(s.Renames, s.Rehearsal); facts != "" {
+		rows = append(rows, report.Row{Name: "data", Facts: []string{facts}})
 	}
-	if len(s.MediaRenames) > 0 {
-		facts := make([]string, 0, len(s.MediaRenames))
-		for _, r := range s.MediaRenames {
-			facts = append(facts, arrow(r))
-		}
-		rows = append(rows, report.Row{Name: "library", Facts: facts})
+	if facts := renameFacts(s.MediaRenames, s.Rehearsal); facts != "" {
+		rows = append(rows, report.Row{Name: titleLibrary, Facts: []string{facts}})
 	}
 	return rows
 }
