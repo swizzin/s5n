@@ -292,3 +292,29 @@ func read(t *testing.T, path string) string {
 	}
 	return string(b)
 }
+
+// Two runs of one command in the same second are two runs: box applies and
+// checks faster than a filename's second, and neither may cost the other its
+// transcript.
+func TestTwoRunsInOneSecondBothKeepTheirLog(t *testing.T) {
+	dir := t.TempDir()
+	at := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+	name1, f1, err := create(dir, "apply", at)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f1.Close()
+	name2, f2, err := create(dir, "apply", at)
+	if err != nil {
+		t.Fatalf("the second run of the same command in the same second lost its log: %v", err)
+	}
+	defer f2.Close()
+	if name1 == name2 {
+		t.Fatalf("both runs are in %q: one overwrote the other", name1)
+	}
+	for _, name := range []string{name1, name2} {
+		if _, err := os.Stat(filepath.Join(dir, name)); err != nil {
+			t.Fatalf("%s is not on disk: %v", name, err)
+		}
+	}
+}

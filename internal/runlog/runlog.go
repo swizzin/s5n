@@ -92,16 +92,36 @@ func OpenAt(dir, command string) (*Log, error) {
 		_ = os.Chmod(dir, 0o700)
 	}
 	prune(dir)
-	name := command + "-" + time.Now().UTC().Format(fileStamp) + ".log"
-	path := filepath.Join(dir, name)
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+	name, f, err := create(dir, command, time.Now())
 	if err != nil {
 		l.disabled = true
-		return l, fmt.Errorf("no run log: %s: %w", path, err)
+		return l, err
 	}
-	l.path = path
+	l.path = filepath.Join(dir, name)
 	l.f = f
 	return l, nil
+}
+
+// create makes this run's log file. Two runs of one command in the same second
+// are two runs -- box applies, checks and hands over faster than that -- so a
+// taken name gets a suffix rather than costing one of them its transcript.
+func create(dir, command string, now time.Time) (string, *os.File, error) {
+	stamp := now.UTC().Format(fileStamp)
+	for i := 1; i <= 99; i++ {
+		name := command + "-" + stamp + ".log"
+		if i > 1 {
+			name = fmt.Sprintf("%s-%s-%d.log", command, stamp, i)
+		}
+		path := filepath.Join(dir, name)
+		f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+		if err == nil {
+			return name, f, nil
+		}
+		if !os.IsExist(err) {
+			return "", nil, fmt.Errorf("no run log: %s: %w", path, err)
+		}
+	}
+	return "", nil, fmt.Errorf("no run log: %s: ninety-nine runs of %s in one second", dir, command)
 }
 
 // Open starts this run's log where box keeps them.
