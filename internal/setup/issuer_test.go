@@ -67,13 +67,13 @@ func TestChooseIssuerResolves(t *testing.T) {
 			name:   "NXDOMAIN is self-signed",
 			err:    errors.New("lookup box.internal.example: no such host"),
 			issuer: IssuerSelfSigned,
-			says:   []string{"does not resolve", "no such host", "self-signed"},
+			says:   []string{"does not resolve", "self-signed"},
 		},
 		{
 			name:   "a resolver timeout is self-signed",
 			err:    context.DeadlineExceeded,
 			issuer: IssuerSelfSigned,
-			says:   []string{"does not resolve", "deadline exceeded"},
+			says:   []string{"does not resolve", "self-signed"},
 		},
 	}
 	for _, tc := range cases {

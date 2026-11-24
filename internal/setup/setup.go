@@ -369,7 +369,7 @@ func (d *Decision) Run(ctx context.Context, opts Options) (Result, error) {
 	if noDNS {
 		record = "add one"
 	}
-	res.Hosts = []Host{{Host: domain, Issuer: issuer, Why: why, NoDNS: noDNS, Record: record}}
+	res.Hosts = []Host{{Host: domain, Issuer: issuer, Why: why, NoDNS: noDNS, Record: record, Detail: domAnswer.detail(domain)}}
 	// Every host's certificate decision is one row, printed once the apps are
 	// known: a box with four names used to print the same row four times, and
 	// the row a person reads is the set (rules 3 and 4).
@@ -470,6 +470,11 @@ func (d *Decision) Run(ctx context.Context, opts Options) (Result, error) {
 		hostRows = append(hostRows, tlsRow(h))
 	}
 	d.report().Rows(say.Fold(certificatesRow, "host", hostRows))
+	for _, h := range res.Hosts {
+		if h.Detail != "" {
+			d.report().Detail(h.Detail)
+		}
+	}
 
 	// The login: one account, asked once. It is its own step because it is the
 	// one answer that is not the seedbox's shape but the identity on it, and

@@ -1,8 +1,11 @@
 package setup
 
 import (
+	"errors"
 	"strings"
 	"testing"
+
+	"github.com/swizzin/s5n/internal/say"
 )
 
 // hostedOptions is an unattended run with alpha (a path app) and gamma (the
@@ -163,5 +166,40 @@ func TestForcedIssuerAppliesToAppHosts(t *testing.T) {
 	}
 	if !strings.Contains(h.out.String(), "tls.issuer=selfsigned forces a self-signed certificate") {
 		t.Fatalf("init did not say the issuer was forced:\n%s", h.out)
+	}
+}
+
+// Four names that answer nothing are one row: each resolver error names its own
+// host, so the reason the screen shows is the same short fact for all of them,
+// and the resolver's own words go to the run log. Before this, four rows said
+// the same thing in four long sentences.
+func TestTheHostsWithNoRecordAreOneRow(t *testing.T) {
+	h := newHarness(t)
+	opts := hostedOptions(h)
+	opts.Apps = []string{"alpha", "gamma"}
+	// Nothing answers, and each name's error names that name: this is what a box
+	// with a made-up domain sees.
+	h.decision.Resolver = stubResolver{errs: map[string]error{
+		"box.example.com":       errors.New("lookup box.example.com: no such host"),
+		"gamma.box.example.com": errors.New("lookup gamma.box.example.com: no such host"),
+	}}
+	// A run log, because that is where the resolver's own answer goes.
+	var log strings.Builder
+	h.decision.Say = &say.Plain{W: h.out, Log: &log}
+	res, err := h.run(opts)
+	if err != nil {
+		t.Fatalf("init: %v\n%s", err, h.out)
+	}
+	if len(res.Hosts) != 2 || !res.Hosts[0].NoDNS || !res.Hosts[1].NoDNS {
+		t.Fatalf("hosts = %+v, want both self-signed with no record", res.Hosts)
+	}
+	out := h.out.String()
+	if got, want := strings.Count(out, "· certificates   self-signed for 2 hosts · does not resolve\n"), 1; got != want {
+		t.Fatalf("the two names are %d rows, want one:\n%s", got, out)
+	}
+	for _, name := range []string{"box.example.com", "gamma.box.example.com"} {
+		if !strings.Contains(log.String(), "dns "+name+": lookup "+name+": no such host") {
+			t.Fatalf("the log does not carry the resolver's answer for %s:\n%s", name, log.String())
+		}
 	}
 }

@@ -101,6 +101,15 @@ type hostAnswer struct {
 // certificate rather than inventing a lookup.
 var errNoResolver = errors.New("no DNS resolver is available")
 
+// detail is the resolver's own answer, for the run log: what the screen says
+// about a name that did not answer is one short fact, and this is the rest.
+func (a hostAnswer) detail(host string) string {
+	if a.err == nil {
+		return ""
+	}
+	return fmt.Sprintf("dns %s: %v", host, a.err)
+}
+
 // resolves reports whether the name answered with at least one address.
 func (a hostAnswer) resolves() bool { return len(a.addrs) > 0 }
 
@@ -169,7 +178,11 @@ func issuerFor(host string, ans hostAnswer, forced string) (issuer, line string)
 		return IssuerSelfSigned, "no DNS resolver is available: using a self-signed certificate"
 	}
 	if ans.err != nil {
-		return IssuerSelfSigned, fmt.Sprintf("%s does not resolve (%v): using a self-signed certificate", host, ans.err)
+		// The resolver's own words are the caller's to put in the log
+		// (hostAnswer.detail). The screen says "does not resolve" for every
+		// name that does not answer, which is what lets four names be one row
+		// (rules 2 and 4).
+		return IssuerSelfSigned, fmt.Sprintf("%s does not resolve: using a self-signed certificate", host)
 	}
 	issuer, why := classifyAddresses(ans.addrs)
 	if issuer == IssuerLetsEncrypt {
