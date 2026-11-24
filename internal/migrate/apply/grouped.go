@@ -58,11 +58,12 @@ func (s Summary) Grouped() Grouped {
 	// The version column exists when this run had a chart to compare against: a
 	// caller with none says nothing about versions rather than a column of
 	// question marks.
+	versions := s.versions()
 	columns := []string{"carries", "changes"}
-	if s.versions() {
+	if versions {
 		columns = []string{"carries", "version", "changes"}
 	}
-	if rows := s.appRows(s.versions()); len(rows) > 0 {
+	if rows := s.appRows(versions); len(rows) > 0 {
 		g.Blocks = append(g.Blocks, Group{Title: titleApps, Columns: columns, Rows: rows})
 	}
 	if rows := s.dataRows(); len(rows) > 0 {
