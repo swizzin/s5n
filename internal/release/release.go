@@ -693,7 +693,7 @@ func (a *Applier) Apply(ctx context.Context, opts Options) (Result, error) {
 		if nsp.Enforce != "" {
 			enforce = podSecurityEnforce + "=" + nsp.Enforce
 		}
-		r.Warn(fmt.Sprintf("namespace %s does not enforce Pod Security %s (%s): root's labels win, box leaves it alone",
+		r.Warn(fmt.Sprintf("namespace %s does not enforce Pod Security %s (%s): root's labels win",
 			namespace, podSecurityRestricted, enforce))
 	}
 

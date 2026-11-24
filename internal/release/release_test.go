@@ -855,7 +855,7 @@ func TestExistingNamespaceIsNeverRelabelled(t *testing.T) {
 	if f.store.nsCreates != 0 {
 		t.Fatalf("apply applied over an existing namespace %d times", f.store.nsCreates)
 	}
-	warn := "namespace testbox does not enforce Pod Security restricted (pod-security.kubernetes.io/enforce=baseline): root's labels win, box leaves it alone"
+	warn := "namespace testbox does not enforce Pod Security restricted (pod-security.kubernetes.io/enforce=baseline): root's labels win"
 	if got := strings.Count(f.out.String(), warn); got != 2 {
 		t.Fatalf("the weak-namespace warning printed %d times over two applies, want 2:\n%s", got, f.out)
 	}

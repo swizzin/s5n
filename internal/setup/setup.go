@@ -900,7 +900,7 @@ func (d *Decision) dataOwner(path string) (int, int, bool, error) {
 		return 0, 0, false, fmt.Errorf("read %s: %w", path, err)
 	}
 	if info.Symlink {
-		d.report().Warn(fmt.Sprintf("%s is a symlink: box does not read through it, so the owner of what it points at is not used for the files here", path))
+		d.report().Warn(fmt.Sprintf("%s is a symlink: its owner is not the owner of what it points at, so the files here keep the ids you gave", path))
 		return 0, 0, false, nil
 	}
 	if !info.IsDir {

@@ -128,7 +128,7 @@ func TestReporterNeverWritesAtColumnZero(t *testing.T) {
 	r.Diff([]say.Item{{Mark: say.Change, Text: "gateway.host: old.example.com -> box.example.com"}})
 	r.Line("s5n in seedbox: first install")
 	r.Muted("clean host: k0s v1.37.2+k0s.1 installed; using /var/lib/k0s/pki/admin.conf (k0s)")
-	r.Warn("namespace seedbox does not enforce Pod Security restricted (no label): root's labels win, box leaves it alone")
+	r.Warn("namespace seedbox does not enforce Pod Security restricted (no label): root's labels win")
 	r.Success("created namespace seedbox (Pod Security restricted)")
 	r.Chart("s5n", "0.2.0", "oci://ghcr.io/swizzin/charts/s5n:0.2.0")
 	r.Created([]string{"/srv/s5n/data", "/srv/s5n/config", "/srv/s5n/config/radarr-4k"})

@@ -1055,7 +1055,7 @@ func assertWarningsInHostOrder(t *testing.T, log string, results []CertificateRe
 		if row == "" {
 			t.Fatalf("missing the host row for %s:\n%s", res.Host, log)
 		}
-		if !strings.Contains(row, "http only: certificate not Ready (Issuing: waiting for HTTP-01 challenge)") {
+		if !strings.Contains(row, "http only: the certificate is not Ready (Issuing: waiting for HTTP-01 challenge) · the next run retries it") {
 			t.Fatalf("the host row for %s does not say why it is not served: %q", res.Host, row)
 		}
 		i := strings.Index(log, row)

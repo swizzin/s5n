@@ -228,7 +228,7 @@ func (c *Certificates) reportHosts(results []CertificateResult) {
 		case res.Ready:
 			rows = append(rows, say.TableRow{Glyph: "✓", Name: res.Host, Facts: []string{"https (" + issuerLabel(res.Issuer) + ")"}})
 		case res.Reason != "":
-			rows = append(rows, say.TableRow{Glyph: "!", Name: res.Host, Facts: []string{"http only: certificate not Ready (" + res.Reason + "); box retries on the next run"}})
+			rows = append(rows, say.TableRow{Glyph: "!", Name: res.Host, Facts: []string{"http only: the certificate is not Ready (" + res.Reason + ")", "the next run retries it"}})
 		default:
 			rows = append(rows, say.TableRow{Glyph: "·", Name: res.Host, Facts: []string{"not served yet"}})
 		}

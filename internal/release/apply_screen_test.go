@@ -66,7 +66,7 @@ func TestAnUnchangedApplyIsOneNote(t *testing.T) {
 		t.Fatalf("second apply: %v\n%s", err, f.out)
 	}
 	want := "apply\n" +
-		"! namespace testbox does not enforce Pod Security restricted (no pod-security.kubernetes.io/enforce label): root's labels win, box leaves it alone\n" +
+		"! namespace testbox does not enforce Pod Security restricted (no pod-security.kubernetes.io/enforce label): root's labels win\n" +
 		"· s5n            nothing to change · testbox\n"
 	if got := f.out.String(); got != want {
 		t.Fatalf("screen:\n%s\nwant:\n%s", got, want)
