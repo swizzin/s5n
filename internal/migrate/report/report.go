@@ -173,12 +173,20 @@ func writeField(b *strings.Builder, indent int, name string, column int, facts s
 	if facts == "" {
 		return
 	}
+	// A row with no name is its facts, and its continuation hangs two columns
+	// further in: a wrapped line that started at the row's own indent would read
+	// as another row (a reader's eye, and every tool that joins a wrapped row
+	// back up).
+	hang := len(head)
+	if name == "" {
+		hang += 2
+	}
 	for i, line := range Wrap(facts, Width-len(head)) {
 		if i == 0 {
 			b.WriteString(head + line + "\n")
 			continue
 		}
-		b.WriteString(strings.Repeat(" ", len(head)) + line + "\n")
+		b.WriteString(strings.Repeat(" ", hang) + line + "\n")
 	}
 }
 

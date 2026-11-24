@@ -113,8 +113,14 @@ func writeTableRow(out say.Reporter, r say.TableRow, nameWidth int, cols []int) 
 // column, and the facts wrapped under the facts column.
 func writeRow(out say.Reporter, gutter, name string, width int, facts string) {
 	head := gutter
+	hang := len(head)
 	if name != "" {
 		head += padCol(name, width) + "  "
+		hang = len(head)
+	} else {
+		// A row with no name is its facts, and its continuation hangs two
+		// columns past the mark so it does not read as another row.
+		hang += 2
 	}
 	if facts == "" {
 		out.Line(strings.TrimRight(head, " "))
@@ -125,7 +131,7 @@ func writeRow(out say.Reporter, gutter, name string, width int, facts string) {
 			out.Line(head + line)
 			continue
 		}
-		out.Line(strings.Repeat(" ", len(head)) + line)
+		out.Line(strings.Repeat(" ", hang) + line)
 	}
 }
 
