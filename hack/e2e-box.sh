@@ -9150,7 +9150,11 @@ migrate_box() {
     { echo "migrate apply wrote no report beside the snapshot"; fail=1; }
   [ "$(stat -c '%a' "$apply_report" 2>/dev/null || echo none)" = 600 ] ||
     { echo "the run's report is mode $(stat -c '%a' "$apply_report" 2>/dev/null || echo none), want 600"; fail=1; }
-  rows_of "$apply_report" >"$WORK/apply-report-rows.txt" 2>/dev/null || true
+  # The page is the root run's, 0600: it is read the way the rest of what that run
+  # wrote is, through the node's root.
+  config_read "$CLUSTER" "$apply_report" >"$WORK/apply-page.txt" 2>/dev/null ||
+    { echo "could not read the run's report"; fail=1; }
+  rows_of "$WORK/apply-page.txt" >"$WORK/apply-report-rows.txt" 2>/dev/null || true
   # Neither page holds a secret: not the login's password, not the qBittorrent
   # one, not an app's API key. The report names the paths and the addresses a
   # migration moves, and nothing that opens a door.
@@ -9158,8 +9162,8 @@ migrate_box() {
                 "$($K -n "$NS" get secret s5n-keys -o jsonpath='{.data.qbittorrent-password}' 2>/dev/null | base64 -d || true)" \
                 "$(cat "$WORK/source/${MIGRATE_RADARR_INSTANCE}.key" 2>/dev/null || true)"; do
     [ -n "$secret" ] || continue
-    if grep -qF -- "$secret" "$apply_report" "$report_file"; then
-      echo "a migration report holds a secret: a password or an API key is in $(grep -lF -- "$secret" "$apply_report" "$report_file" | head -1)"
+    if grep -qF -- "$secret" "$WORK/apply-page.txt" "$report_file"; then
+      echo "a migration report holds a secret: a password or an API key is in $(grep -lF -- "$secret" "$WORK/apply-page.txt" "$report_file" | head -1)"
       fail=1
     fi
   done
@@ -9182,7 +9186,7 @@ migrate_box() {
   # one in until the install: its row says so, above the install, and the row the
   # check then fills in is below it. Both are the same operator's reading of the
   # same run.
-  grep -qE "^  plex +[0-9.]+ (KiB|MiB|GiB) · its whole data: metadata, artwork and thumbnails · its databases are checked once Plex's image runs · keeps its Plex token$" \
+  grep -qE "^  plex +[0-9.]+ (KiB|MiB|GiB) +its whole data: metadata, artwork and thumbnails · its databases are checked once Plex's image runs · keeps its Plex token$" \
     "$WORK/apply-migrate-rows.txt" ||
     { echo "the confirm does not say when Plex's databases are checked";
       grep -E "plex" "$WORK/apply-migrate-rows.txt" | head -5; fail=1; }
