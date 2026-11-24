@@ -9009,7 +9009,7 @@ migrate_box() {
   # Said once, in the report the snapshot holds: what a Plex snapshot carries is
   # a decision the operator reads in full, so it is the page's line and not one
   # the screen keeps (rule 7).
-  [ "$(grep -cF "$plex_carry" "$report")" = 1 ] ||
+  [ "$(rows_of "$report" | grep -cF -- "$plex_carry")" = 1 ] ||
     { echo "the snapshot's report does not say once what Plex's snapshot carries ($(grep -cF 'plex: carried' "$report" || true) times):"; grep -F "plex: carried" "$report" || true; fail=1; }
   if grep -qF "plex: carried" "$WORK/cutover.txt"; then
     echo "the cutover put the note about Plex's snapshot on the screen, and the report is the page that holds it"; fail=1
