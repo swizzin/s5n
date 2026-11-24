@@ -126,20 +126,6 @@ func deviceName(r setup.PathReport) string {
 // unknown is what a row says when the host could not report the fact.
 const unknown = "unknown"
 
-func orUnknown(v string) string {
-	if v == "" {
-		return unknown
-	}
-	return v
-}
-
-func orDash(v string) string {
-	if v == "" {
-		return "—"
-	}
-	return v
-}
-
 // warnings are the red lines under a path's row: the two ways a path can sink
 // the host, both of which are about the disk rather than the directory. Only a
 // path that is not there is warned about -- an existing one has whatever the
