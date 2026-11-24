@@ -336,6 +336,13 @@ log "scenario ${SCENARIO}: kubeconfig ${KUBECONFIG} (~/.kube/config is not used)
 BOX_LOG_DIR="$WORK/logs"
 export BOX_LOG_DIR
 
+# box_log <command>: the newest run log that command wrote. A line the screen
+# folds away (the plan's sub-steps, a Deployment wait, a kubeconfig path) is
+# asserted here, the way the update scenario reads its own log.
+box_log() {
+  ls -t "${BOX_LOG_DIR}"/"$1"-[0-9]*.log 2>/dev/null | head -1
+}
+
 # ---- the chart a user would get -------------------------------------------
 # box only installs published charts (docs/box.md), so the e2e publishes one:
 # `helm package` from this working tree, `helm push` to a registry on this
@@ -583,12 +590,6 @@ release_secrets() {
 # transcript that prints a row per check is the old output.
 has_receipt() { # has_receipt <transcript>
   grep -Eq '^✓ wiring +[0-9]+ checks · [0-9]+(h[0-9]+m[0-9]+s|m[0-9]+s|s)$' "$1"
-}
-
-# run_log is the newest transcript box wrote for a command under this run's log
-# directory: "the detail is in the log" is only true if the e2e reads it there.
-run_log() { # run_log <command>
-  ls -t "${BOX_LOG_DIR}"/"$1"-[0-9]*.log 2>/dev/null | head -1 || true
 }
 
 status_field() { # status_field <python expression over `d`>
@@ -1754,29 +1755,41 @@ fresh() {
   else
     cat "$WORK/bootstrap1.txt"; fail=1
   fi
-  grep -q "^platform plan:" "$WORK/bootstrap1.txt" || { echo "bootstrap printed no platform plan"; fail=1; }
-  grep -qF "+ Envoy Gateway ${ENVOY_GATEWAY_VERSION} (the front door)" "$WORK/bootstrap1.txt" ||
-    { echo "the plan did not install Envoy Gateway at its pinned version"; fail=1; }
-  grep -qF "      + the s5n Gateway, HTTP on :80" "$WORK/bootstrap1.txt" ||
-    { echo "the plan did not apply the Gateway before the address layer"; fail=1; }
-  grep -qF "? Gateway s5n-gateway/s5n getting an address" "$WORK/bootstrap1.txt" ||
-    { echo "the plan did not print the Gateway's address as the question"; fail=1; }
-  grep -qF "? MetalLB ${METALLB_CHART_VERSION} (the gateway's address), unless the Gateway gets an address without it" "$WORK/bootstrap1.txt" ||
+  # The plan is one line for what this run installs and one for what it cannot
+  # decide yet: the components and their versions, not the Kubernetes kinds
+  # under them (those are the log's).
+  grep -qF "+ cert-manager ${CERT_MANAGER_VERSION} · Envoy Gateway ${ENVOY_GATEWAY_VERSION}" "$WORK/bootstrap1.txt" ||
+    { echo "the plan did not install cert-manager and Envoy Gateway at their pins"; fail=1; }
+  grep -qF "? MetalLB ${METALLB_CHART_VERSION}, unless the Gateway gets an address without it" "$WORK/bootstrap1.txt" ||
     { echo "the plan did not print MetalLB as conditional"; fail=1; }
-  grep -qF "      ? IPAddressPool: this node's IP as a /32, over L2" "$WORK/bootstrap1.txt" ||
-    { echo "the plan did not print the MetalLB pool as conditional"; fail=1; }
-  grep -qF "the Gateway has no address (AddressNotAssigned) after waiting up to 15s; installing MetalLB" "$WORK/bootstrap1.txt" ||
-    { echo "the Gateway's own status did not decide the install"; fail=1; }
-  grep -qF "the Gateway answers on " "$WORK/bootstrap1.txt" ||
-    { echo "box never checked that the Gateway's address answers from the host"; fail=1; }
   # The first run installs, it does not verify: the cluster had none of it.
-  if grep -q "^  = Envoy Gateway" "$WORK/bootstrap1.txt"; then
-    echo "bootstrap thought Envoy Gateway was already installed on a fresh cluster"; fail=1
+  if grep -qF "= cert-manager" "$WORK/bootstrap1.txt"; then
+    echo "bootstrap thought cert-manager was already installed on a fresh cluster"; fail=1
   fi
-  # cert-manager is part of the platform layer now: the plan names it at its
-  # pin, and the install waits for its controller, webhook and cainjector.
-  grep -qF "+ cert-manager ${CERT_MANAGER_VERSION} (certificates)" "$WORK/bootstrap1.txt" ||
-    { echo "the plan did not install cert-manager at its pinned version"; fail=1; }
+  # The sub-steps the screen folded away are in the run log, in the order they
+  # are applied: the Gateway before the address layer, the pool conditional on
+  # the Gateway's own answer.
+  bootstrap_log=$(box_log bootstrap)
+  [ -n "$bootstrap_log" ] ||
+    { echo "box bootstrap wrote no run log under ${BOX_LOG_DIR}"; ls -l "${BOX_LOG_DIR}" 2>/dev/null | head; fail=1; }
+  grep -qF "plan: + the s5n Gateway, HTTP on :80" "$bootstrap_log" ||
+    { echo "the log does not carry the Gateway's step"; fail=1; }
+  grep -qF "plan: ? Gateway s5n-gateway/s5n getting an address" "$bootstrap_log" ||
+    { echo "the log does not carry the Gateway's address as the question"; fail=1; }
+  grep -qF "plan: ? IPAddressPool: this node's IP as a /32, over L2" "$bootstrap_log" ||
+    { echo "the log does not carry the MetalLB pool as conditional"; fail=1; }
+  grep -qF "plan: + ClusterIssuers: Let's Encrypt, plus self-signed" "$bootstrap_log" ||
+    { echo "the log does not carry root's ClusterIssuers"; fail=1; }
+  # The Gateway's own status decided the install, and the address answered: the
+  # two facts the screen folds into the MetalLB and Envoy Gateway rows.
+  grep -qF "the Gateway has no address (AddressNotAssigned) after waiting up to 15s; installing MetalLB" "$bootstrap_log" ||
+    { echo "the Gateway's own status did not decide the install"; fail=1; }
+  grep -qF "the Gateway answers on " "$bootstrap_log" ||
+    { echo "box never checked that the Gateway's address answers from the host"; fail=1; }
+  grep -qE "^✓ Envoy Gateway  [0-9.]+ · " "$WORK/bootstrap1.txt" ||
+    { echo "the Gateway has no row of its own on the screen"; fail=1; }
+  grep -qE "^✓ MetalLB  " "$WORK/bootstrap1.txt" ||
+    { echo "MetalLB has no row of its own on the screen"; fail=1; }
   $K -n cert-manager rollout status deploy/cert-manager --timeout=180s >/dev/null ||
     { echo "cert-manager's controller never rolled out"; fail=1; }
   $K -n cert-manager rollout status deploy/cert-manager-webhook --timeout=180s >/dev/null ||
@@ -1794,8 +1807,8 @@ fresh() {
   # Root's two issuers are applied after the Gateway they solve through. The
   # production one keeps Let's Encrypt's directory: the override is the e2e's
   # own Pebble run, not this scenario.
-  grep -qF "      + ClusterIssuers: Let's Encrypt, plus self-signed" "$WORK/bootstrap1.txt" ||
-    { echo "the plan did not apply root's ClusterIssuers"; fail=1; }
+  grep -qF "applied ClusterIssuers s5n-letsencrypt and s5n-selfsigned, and the root they sign with" "$bootstrap_log" ||
+    { echo "box did not apply root's ClusterIssuers"; fail=1; }
   for issuer in s5n-letsencrypt s5n-selfsigned; do
     $K get clusterissuer "$issuer" >/dev/null 2>&1 ||
       { echo "ClusterIssuer ${issuer} was not applied"; fail=1; }
@@ -1814,13 +1827,15 @@ fresh() {
   # The chart was pulled from the registry the e2e pushed it to, not read from
   # this checkout: box only installs published charts. Bootstrap used the
   # default version, so the ref names the version box selected.
-  grep -qF "chart: s5n ${CHART_VERSION} (${CHART_REPO}:${CHART_VERSION})" "$WORK/bootstrap1.txt" ||
+  grep -qE "^✓ chart +s5n ${CHART_VERSION}$" "$WORK/bootstrap1.txt" ||
+    { echo "box did not name the chart it pulled on the screen"; fail=1; }
+  grep -qF "chart s5n ${CHART_VERSION} (${CHART_REPO}:${CHART_VERSION})" "$bootstrap_log" ||
     { echo "box did not pull ${CHART_REPO}:${CHART_VERSION}"; fail=1; }
   grep -q "first install" "$WORK/bootstrap1.txt" || { echo "no 'first install' line"; fail=1; }
   has_receipt "$WORK/bootstrap1.txt" || { echo "box did not report a healthy receipt"; fail=1; }
   # The wait shows one line of the wiring Job's log at a time; the log itself is
   # the run log's, with every check the receipt folded into its count.
-  bootstrap_log=$(run_log bootstrap)
+  bootstrap_log=$(box_log bootstrap)
   [ -n "$bootstrap_log" ] ||
     { echo "box bootstrap wrote no run log under ${BOX_LOG_DIR}"; fail=1; }
   if [ -n "$bootstrap_log" ]; then
@@ -1955,8 +1970,10 @@ EOF
   [ "$pool_addr" = "${node_ip}/32" ] || { echo "box's pool is ${pool_addr}, want ${node_ip}/32"; fail=1; }
   [ "$gw_addr" = "$node_ip" ] || { echo "the Gateway reports ${gw_addr}, want the pool's ${node_ip}"; fail=1; }
   [ "$gw_programmed" = True ] || { echo "the Gateway is not Programmed"; fail=1; }
-  grep -qF "the Gateway answers on ${gw_addr}:80 (HTTP " "$WORK/bootstrap1.txt" ||
+  grep -qF "the Gateway answers on ${gw_addr}:80 (HTTP " "$bootstrap_log" ||
     { echo "box did not report the reachability check on ${gw_addr}"; fail=1; }
+  grep -qE "^✓ Envoy Gateway  ${gw_addr} · " "$WORK/bootstrap1.txt" ||
+    { echo "the Gateway's row does not carry the address it answers on"; fail=1; }
 
   # ---- TLS: Pebble proved HTTP-01 through the Gateway ------------------------
   # The Certificate is real: cert-manager created an order, Pebble fetched the
@@ -1964,8 +1981,9 @@ EOF
   # Pebble's own CA. https with --cacert is the proof the listener serves it;
   # the redirect and the challenge path are the proof of which route wins.
   cert=s5n-tls-box-example-test
-  grep -qF "tls: tls.issuer=letsencrypt forces Let's Encrypt" "$WORK/bootstrap1.txt" ||
-    { echo "init did not say the issuer was forced"; fail=1; }
+  grep -qE "^· ${DOMAIN}  Let's Encrypt · tls\.issuer=letsencrypt forces Let's Encrypt$" "$WORK/bootstrap1.txt" ||
+    { echo "init did not say the issuer was forced:";
+      grep -E "Let's Encrypt" "$WORK/bootstrap1.txt" | head -3; fail=1; }
   grep -qE "^  ✓ ${DOMAIN} +https \\(Let's Encrypt\\)" "$WORK/bootstrap1.txt" ||
     { echo "box did not serve the box's own host from Let's Encrypt:";
       grep -E "front door|${DOMAIN}" "$WORK/bootstrap1.txt" | tail -3; fail=1; }
@@ -2128,7 +2146,7 @@ print(",".join(s.get("name", "?") for s in endpoint.get("authn_strategies") or [
   # "first install" line is part of init's plan, printed before any write, so
   # neither is the thing to look for.)
   login_line=$(grep -n "login ready:" "$WORK/bootstrap1.txt" | head -1 | cut -d: -f1)
-  release_line=$(grep -n "applied: s5n revision" "$WORK/bootstrap1.txt" | head -1 | cut -d: -f1)
+  release_line=$(grep -nE "^✓ s5n " "$WORK/bootstrap1.txt" | head -1 | cut -d: -f1)
   echo "  transcript: login at line ${login_line}, release at line ${release_line}"
   if [ -z "$login_line" ] || [ -z "$release_line" ]; then
     echo "the transcript does not show both the login and the release"
@@ -2988,8 +3006,9 @@ EOF
     grep -vxE '301|000' "$port80_window" | sort | uniq -c | head -5 || true
     fail=1
   fi
-  grep -qF "= MetalLB ${METALLB_CHART_VERSION} (the gateway's address): installed, verifying" "$WORK/bootstrap2.txt" ||
-    { echo "the second run did not verify MetalLB"; fail=1; }
+  grep -qE "^  = .*MetalLB ${METALLB_CHART_VERSION}" "$WORK/bootstrap2.txt" ||
+    { echo "the second run did not verify MetalLB";
+      grep -E "^  = " "$WORK/bootstrap2.txt" | head -2; fail=1; }
   # box's own MetalLB is the answer the question would look for, so the second
   # run does not ask it and does not wait for a Gateway it did not write.
   if grep -q "getting an address" "$WORK/bootstrap2.txt"; then
@@ -3446,7 +3465,7 @@ PY
   # its route moves, so there is never a route on a name nothing answers on.
   seerr_cert_line=$(grep -nE "^  ✓ ${SEERR_HOST} +https" "$WORK/apply-seerr.txt" | head -1 | cut -d: -f1 || true)
   seerr_rule_line=$(grep -n "login: the rule for ${SEERR_HOST} is in place" "$WORK/apply-seerr.txt" | head -1 | cut -d: -f1 || true)
-  seerr_helm_line=$(grep -n "applied: s5n revision" "$WORK/apply-seerr.txt" | head -1 | cut -d: -f1 || true)
+  seerr_helm_line=$(grep -nE "^✓ s5n " "$WORK/apply-seerr.txt" | head -1 | cut -d: -f1 || true)
   echo "  login rule at line ${seerr_rule_line}, certificate at line ${seerr_cert_line}, release at line ${seerr_helm_line}"
   if [ -z "$seerr_rule_line" ] || [ -z "$seerr_cert_line" ] || [ -z "$seerr_helm_line" ] ||
      [ "$seerr_rule_line" -ge "$seerr_helm_line" ] || [ "$seerr_cert_line" -ge "$seerr_helm_line" ]; then
@@ -4089,7 +4108,7 @@ EOF
   else
     cat "$WORK/bootstrap1.txt"; fail=1
   fi
-  grep -qF "? MetalLB ${METALLB_CHART_VERSION} (the gateway's address), unless the Gateway gets an address without it" "$WORK/bootstrap1.txt" ||
+  grep -qF "? MetalLB ${METALLB_CHART_VERSION}, unless the Gateway gets an address without it" "$WORK/bootstrap1.txt" ||
     { echo "the plan did not print MetalLB as conditional"; fail=1; }
   # The plan prints the question on every run -- that is the point of it -- so
   # what must not happen is the answer: no install, and no verification of a
@@ -4100,8 +4119,12 @@ EOF
   if grep -q "= metallb" "$WORK/bootstrap1.txt"; then
     echo "box treated the pre-installed MetalLB as its own release"; fail=1
   fi
-  grep -q "the Gateway already has an address: " "$WORK/bootstrap1.txt" ||
+  pre_log=$(box_log bootstrap)
+  grep -q "the Gateway already has an address: " "$pre_log" ||
     { echo "the Gateway's own address did not answer the question"; fail=1; }
+  if grep -qE "^✓ MetalLB  " "$WORK/bootstrap1.txt"; then
+    echo "MetalLB has a row on a run that installed none"; fail=1
+  fi
   has_receipt "$WORK/bootstrap1.txt" || { echo "box did not report a healthy receipt"; fail=1; }
   # One wait for the run's Certificates, not one per host: this run decided
   # every name, and a box whose names cannot issue yet pays one
@@ -4143,10 +4166,12 @@ EOF
   echo "  Gateway address: ${lb_addr} (Programmed ${gw_programmed})"
   [ -n "$lb_addr" ] || { echo "the Gateway has no address"; fail=1; }
   [ "$gw_programmed" = True ] || { echo "the Gateway is not Programmed"; fail=1; }
-  grep -qF "the Gateway already has an address: ${lb_addr}; MetalLB and its address pool are not installed" "$WORK/bootstrap1.txt" ||
+  grep -qF "the Gateway already has an address: ${lb_addr}; MetalLB and its address pool are not installed" "$pre_log" ||
     { echo "box did not say the Gateway's own address meant no MetalLB"; fail=1; }
-  grep -qF "the Gateway answers on ${lb_addr}:80 (HTTP " "$WORK/bootstrap1.txt" ||
+  grep -qF "the Gateway answers on ${lb_addr}:80 (HTTP " "$pre_log" ||
     { echo "box did not report the reachability check on ${lb_addr}"; fail=1; }
+  grep -qE "^✓ Envoy Gateway  ${lb_addr} · " "$WORK/bootstrap1.txt" ||
+    { echo "the Gateway's row does not carry the address that answered"; fail=1; }
   python3 - "$lb_addr" "$pool" <<'PY' || fail=1
 import ipaddress, sys
 addr, pool = sys.argv[1], sys.argv[2]
@@ -4161,10 +4186,9 @@ PY
   # s5n-selfsigned, and the certificate is still a real TLS certificate. -k is
   # the honest client behaviour for a box nobody can reach from the internet.
   cert=s5n-tls-box-internal-example
-  grep -qF "tls: ${DOMAIN} does not resolve" "$WORK/bootstrap1.txt" ||
-    { echo "init did not report that the domain does not resolve"; fail=1; }
-  grep -qF "using a self-signed certificate" "$WORK/bootstrap1.txt" ||
-    { echo "init did not choose the self-signed issuer"; fail=1; }
+  grep -qE "^· ${DOMAIN}  self-signed · does not resolve to an address$" "$WORK/bootstrap1.txt" ||
+    { echo "init did not report that the domain does not resolve, and chose self-signed";
+      grep -E "self-signed" "$WORK/bootstrap1.txt" | head -3; fail=1; }
   $K -n s5n-gateway wait --for=condition=Ready "certificate/$cert" --timeout=120s ||
     { echo "the self-signed Certificate never became Ready"; fail=1; }
   cert_issuer=$($K -n s5n-gateway get certificate "$cert" -o jsonpath='{.spec.issuerRef.name}')
@@ -4305,7 +4329,7 @@ PY
   else
     cat "$WORK/bootstrap2.txt"; fail=1
   fi
-  grep -qF "the Gateway already has an address: " "$WORK/bootstrap2.txt" ||
+  grep -qF "the Gateway already has an address: " "$(box_log bootstrap)" ||
     { echo "the second run did not ask the same question"; fail=1; }
   if grep -q "installing metallb" "$WORK/bootstrap2.txt"; then
     echo "the second run installed MetalLB"; fail=1
@@ -4628,8 +4652,9 @@ EOF
     cat "$WORK/bootstrap3.txt"; fail=1
   fi
   for host in "$DOMAIN" "$PLEX_HOST" "$SEERR_HOST" "$PBH_HOST"; do
-    grep -qF "tls: ${host} resolves to 192.0.2.10: using Let's Encrypt" "$WORK/bootstrap3.txt" ||
-      { echo "init did not move ${host} to Let's Encrypt"; fail=1; }
+    grep -qE "^· ${host//./\\.}  Let's Encrypt · resolves to 192\.0\.2\.10$" "$WORK/bootstrap3.txt" ||
+      { echo "init did not move ${host} to Let's Encrypt";
+        grep -E "^· ${host}" "$WORK/bootstrap3.txt" | head -2; fail=1; }
   done
   if grep -qE "has no DNS record|have no DNS record" "$WORK/bootstrap3.txt"; then
     echo "the card still says a name has no record after the record was added"
@@ -4998,7 +5023,7 @@ update_box() {
   else
     cat "$WORK/bootstrap1.txt"; fail=1; return 0
   fi
-  grep -qF "chart: s5n ${CHART_VERSION} (${CHART_REPO}:${CHART_VERSION})" "$WORK/bootstrap1.txt" ||
+  grep -qF "chart s5n ${CHART_VERSION} (${CHART_REPO}:${CHART_VERSION})" "$(box_log bootstrap)" ||
     { echo "box did not pull ${CHART_REPO}:${CHART_VERSION}"; fail=1; }
   has_receipt "$WORK/bootstrap1.txt" ||
     { echo "box did not report a healthy receipt"; fail=1; }
@@ -5593,7 +5618,7 @@ PY
   else
     cat "$WORK/apply-plex-token.txt"; fail=1; return 0
   fi
-  grep -qF "· plex-token  read from Plex's Preferences.xml" "$WORK/apply-plex-token.txt" ||
+  grep -qE "^· plex-token +read from Plex's Preferences\.xml$" "$WORK/apply-plex-token.txt" ||
     { echo "box did not say it took the token from Plex's settings:"; head -20 "$WORK/apply-plex-token.txt"; fail=1; }
   # The token is never printed, in the transcript or anywhere box says anything.
   if grep -qF "$fake" "$WORK/apply-plex-token.txt"; then
@@ -5613,7 +5638,7 @@ PY
   grep -qF "Plex is not claimed yet, so it refuses every server token: claim it at https://plex.tv/claim, then run box apply" \
     "$WORK/apply-plex-token.txt" ||
     { echo "the receipt's tautulli/plex row is not the unclaimed-Plex one:"; grep -i "plex" "$WORK/apply-plex-token.txt" | head -5; fail=1; }
-  plex_log=$(run_log apply)
+  plex_log=$(box_log apply)
   [ -n "$plex_log" ] || { echo "box apply wrote no run log under ${BOX_LOG_DIR}"; fail=1; }
   if [ -n "$plex_log" ] && ! grep -qF "wiring tautulli/plex: pending (Plex is not claimed yet, so it refuses every server token: claim it at https://plex.tv/claim, then run box apply)" "$plex_log"; then
     echo "the run log does not carry the pending row's whole reason: ${plex_log}"; fail=1
@@ -5635,7 +5660,7 @@ PY
   else
     cat "$WORK/apply-plex-token-kept.txt"; fail=1; return 0
   fi
-  grep -qF "s5n in ${NS}: nothing to change" "$WORK/apply-plex-token-kept.txt" ||
+  grep -qE "^· s5n +nothing to change · ${NS}$" "$WORK/apply-plex-token-kept.txt" ||
     { echo "the apply over a token the Secret already holds was not a no-op:"; head -20 "$WORK/apply-plex-token-kept.txt"; fail=1; }
   plex_secret=$($K -n "$NS" get secret s5n-keys -o jsonpath='{.data.plex-token}' 2>/dev/null | base64 -d || true)
   [ "$plex_secret" = "a-token-a-person-set" ] ||
@@ -6148,7 +6173,7 @@ print(".".join(str(p) for p in tree))' "$CHART_VERSION"); then
   else
     cat "$WORK/bootstrap1.txt"; fail=1; return 0
   fi
-  grep -qF "chart: s5n ${UPGRADE_FROM} (${CHART_REPO}:${UPGRADE_FROM})" "$WORK/bootstrap1.txt" ||
+  grep -qF "chart s5n ${UPGRADE_FROM} (${CHART_REPO}:${UPGRADE_FROM})" "$(box_log bootstrap)" ||
     { echo "box did not pull ${CHART_REPO}:${UPGRADE_FROM}"; fail=1; }
   grep -q "^wiring ok" "$WORK/bootstrap1.txt" ||
     { echo "the published install did not report a healthy receipt"; fail=1; }
@@ -9130,7 +9155,7 @@ migrate_box() {
   # must report it even though the config the migration wrote says 6881: the
   # chart's QBT_TORRENTING_PORT is what the image reads at every start.
   log "the torrent port: the install picked one for the band, and qBittorrent announces it"
-  grep -qE '^torrent port: [0-9]+ \(picked' "$WORK/apply-migrate.txt" ||
+  grep -qE '^· torrent port +picked +[0-9]+$' "$WORK/apply-migrate.txt" ||
     { echo "the migrate install did not say it picked a torrent port:";
       grep -i 'torrent port' "$WORK/apply-migrate.txt" || true; fail=1; }
   assert_torrent_port "the migrate install"
@@ -9138,7 +9163,7 @@ migrate_box() {
   # this run pulled once for both halves.
   grep -qF "snapshot: ${snapshot} (final)" "$WORK/apply-migrate.txt" ||
     { echo "the run did not name the snapshot it read"; fail=1; }
-  grep -qF "chart: s5n ${CHART_VERSION} (${CHART_REPO}:${CHART_VERSION})" "$WORK/apply-migrate.txt" ||
+  grep -qF "chart s5n ${CHART_VERSION} (${CHART_REPO}:${CHART_VERSION})" "$(box_log migrate-apply)" ||
     { echo "box did not pull ${CHART_REPO}:${CHART_VERSION}"; fail=1; }
   # The confirm says what the snapshot carried, once: an operator deciding to
   # copy a Plex config reads that its artwork and preview thumbnails are in it.
