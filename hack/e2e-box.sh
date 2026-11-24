@@ -151,7 +151,7 @@ GATEWAY_API_VERSION=${GATEWAY_API_VERSION:-v1.6.3}
 NGF_VERSION=${NGF_VERSION:-2.8.1}
 # Pebble 2.10.1, the ACME test server the fresh scenario proves HTTP-01
 # against, pinned by tag and digest like every other test image here.
-PEBBLE_IMAGE=${PEBBLE_IMAGE:-ghcr.io/letsencrypt/pebble:2.10.1@sha256:ddf230642b1a584f519f32e347de1b05a6e4c1f6c35c1863b33effeab5f78199}  # renovate: datasource=docker
+PEBBLE_IMAGE=${PEBBLE_IMAGE:-ghcr.io/letsencrypt/pebble:2.10.3@sha256:0c81f05db371f436c97fb894bd6d2ab8fc9c8e2ce40f8bef8a8e15941bcd75ef}  # renovate: datasource=docker
 # The image the NetworkPolicy probes use: curl, pinned like every other test
 # image here. It is what asks the login directly, which must time out.
 CURL_IMAGE=${CURL_IMAGE:-docker.io/curlimages/curl:8.11.1@sha256:c1fe1679c34d9784c1b0d1e5f62ac0a79fca01fb6377cdd33e90473c6f9f9a69}  # renovate: datasource=docker
