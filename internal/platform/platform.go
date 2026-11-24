@@ -546,7 +546,7 @@ func (c *componentRuns) end(i int) {
 	if c.current == nil || i != c.current.last {
 		return
 	}
-	c.current.done(c.r)
+	c.current.done()
 }
 
 // fact adds one fact to the row of the component that is running, or to the
@@ -570,11 +570,11 @@ func (c *componentRuns) fact(text string) {
 // half-drawn component behind.
 func (c *componentRuns) finish() {
 	for _, key := range c.order {
-		c.runs[key].done(c.r)
+		c.runs[key].done()
 	}
 }
 
-func (c *componentRun) done(r say.Reporter) {
+func (c *componentRun) done() {
 	if c.handle == nil {
 		return
 	}

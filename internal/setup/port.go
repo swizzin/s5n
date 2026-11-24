@@ -107,6 +107,9 @@ func pickPort(lo, hi int, held []NodePort, randInt func(int) int) (int, error) {
 	return free[randInt(len(free))], nil
 }
 
+// torrentPortRow is the row the decided port is printed as.
+const torrentPortRow = "torrent port"
+
 // ownPeerPort is the nodePort this seedbox's own peers Service holds, if the
 // release is already installed. The chart names it <instance>-peers, and
 // qBittorrent takes no instances, so the name is fixed.
@@ -179,7 +182,7 @@ func (d *Decision) torrentPort(ctx context.Context, namespace string, apps []str
 	// but its peers Service already holds the one its peers know. Keep that
 	// one: moving a working peer port only makes every tracker relearn it.
 	if port, ok := ownPeerPort(namespace, held); ok {
-		d.report().Rows([]say.Row{{Mark: say.MarkNote, Name: "torrent port", State: "kept", Facts: []string{fmt.Sprintf("%d", port)}}})
+		d.report().Rows([]say.Row{{Mark: say.MarkNote, Name: torrentPortRow, State: "kept", Facts: []string{fmt.Sprintf("%d", port)}}})
 		return port, nil
 	}
 	// A migrated box's peers, and any forward the operator set, already point
@@ -188,7 +191,7 @@ func (d *Decision) torrentPort(ctx context.Context, namespace string, apps []str
 	// box picks from, because this number was not picked on this cluster and
 	// moving it is exactly what costs the connections.
 	if port := opts.TorrentPort; port >= nodePortRangeStart && port <= nodePortRangeEnd && !portHeld(port, held) {
-		d.report().Rows([]say.Row{{Mark: say.MarkNote, Name: "torrent port", State: "kept", Facts: []string{fmt.Sprintf("%d from the source", port)}}})
+		d.report().Rows([]say.Row{{Mark: say.MarkNote, Name: torrentPortRow, State: "kept", Facts: []string{fmt.Sprintf("%d from the source", port)}}})
 		return port, nil
 	}
 	lo, hi := staticBand(nodePortRangeStart, nodePortRangeEnd)
@@ -200,7 +203,7 @@ func (d *Decision) torrentPort(ctx context.Context, namespace string, apps []str
 	if err != nil {
 		return nil, err
 	}
-	d.report().Rows([]say.Row{{Mark: say.MarkNote, Name: "torrent port", State: "picked", Facts: []string{fmt.Sprintf("%d", port)}}})
+	d.report().Rows([]say.Row{{Mark: say.MarkNote, Name: torrentPortRow, State: "picked", Facts: []string{fmt.Sprintf("%d", port)}}})
 	return port, nil
 }
 

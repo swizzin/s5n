@@ -1202,8 +1202,8 @@ func (d *Decision) writeFiles(opts Options, sb *seedbox.Seedbox, grantNow, base 
 func (d *Decision) reportWrites(opts Options, res Result) {
 	r := d.report()
 	r.Rows([]say.Row{
-		writeRow("grant", opts.GrantPath, res.GrantChanged),
-		writeRow("values", opts.ValuesPath, res.ValuesChanged),
+		writeRow("grant", res.GrantChanged),
+		writeRow("values", res.ValuesChanged),
 	})
 	r.Detail(opts.GrantPath + ": " + writeLine(res.GrantChanged))
 	r.Detail(opts.ValuesPath + ": " + writeLine(res.ValuesChanged))
@@ -1211,7 +1211,7 @@ func (d *Decision) reportWrites(opts Options, res Result) {
 
 // writeRow is one file: ✓ with the count of keys it got, or a note that it
 // already said this.
-func writeRow(name, path string, changed []string) say.Row {
+func writeRow(name string, changed []string) say.Row {
 	if len(changed) == 0 {
 		return say.Row{Mark: say.MarkNote, Name: name, Facts: []string{"already says this"}}
 	}

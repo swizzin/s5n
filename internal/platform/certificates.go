@@ -339,8 +339,12 @@ func (c *Certificates) await(ctx context.Context, cl CertificateCluster, results
 // the run's names came Ready, because the run has one budget for all of them.
 // The Certificate names and the budget are the log's.
 func waitOp(timeout time.Duration, results []CertificateResult) say.Op {
-	return say.Op{Name: "certificates", Budget: timeout}
+	return say.Op{Name: certificatesRow, Budget: timeout}
 }
+
+// certificatesRow is the one row the run's certificate wait is: how many of the
+// names came Ready.
+const certificatesRow = "certificates"
 
 // waitDetail is that step's log line: what it waits for, and how long it has.
 func waitDetail(timeout time.Duration, results []CertificateResult) string {
