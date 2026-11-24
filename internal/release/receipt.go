@@ -7,6 +7,17 @@ import (
 	"github.com/swizzin/s5n/internal/say"
 )
 
+// wiringName is what box calls the wiring Job: the row its receipt folds to, the
+// row a wait that ran out of time leaves, the line the live wait shows, and the
+// container the chart gives the Job's pod.
+const wiringName = "wiring"
+
+// The receipt's two not-ok results, as the Job writes them in status.json.
+const (
+	statePending = "pending"
+	stateFailed  = "failed"
+)
+
 // ReportReceipt folds a wiring receipt into the lines a person reads. A receipt
 // whose every check passed is one row: what the Job checked, and how long it
 // took. A check that failed, and one that waits on a person, are one row each,
@@ -29,7 +40,7 @@ func ReportReceipt(r say.Reporter, rec Receipt, rehearsal bool) {
 		// What went to plan is a count. What waits on a person is still a row:
 		// a healthy Job with an unclaimed Plex has done its work and needs the
 		// person for the next part.
-		r.Rows([]say.Row{{Mark: say.MarkDone, Name: "wiring", Facts: receiptFacts(rec)}})
+		r.Rows([]say.Row{{Mark: say.MarkDone, Name: wiringName, Facts: receiptFacts(rec)}})
 		r.Rows(rows)
 		if rehearsal && pending > 0 {
 			r.Rows([]say.Row{rehearsalRow()})
@@ -37,7 +48,7 @@ func ReportReceipt(r say.Reporter, rec Receipt, rehearsal bool) {
 		return
 	}
 	if len(rows) == 0 {
-		rows = []say.Row{{Mark: say.MarkFailed, Name: "wiring", State: "failed", Why: rec.Error}}
+		rows = []say.Row{{Mark: say.MarkFailed, Name: wiringName, State: stateFailed, Why: rec.Error}}
 	}
 	r.Rows(rows)
 	if rehearsal && pending > 0 {
@@ -51,12 +62,12 @@ func ReportReceipt(r say.Reporter, rec Receipt, rehearsal bool) {
 func receiptRows(rec Receipt) (rows []say.Row, pending int, hasFailed bool) {
 	for _, step := range rec.Steps {
 		switch step.Result {
-		case "failed":
+		case stateFailed:
 			hasFailed = true
-			rows = append(rows, say.Row{Mark: say.MarkFailed, Name: step.Name, State: "failed", Why: step.Detail})
-		case "pending":
+			rows = append(rows, say.Row{Mark: say.MarkFailed, Name: step.Name, State: stateFailed, Why: step.Detail})
+		case statePending:
 			pending++
-			rows = append(rows, say.Row{Mark: say.MarkNeeds, Name: step.Name, State: "pending", Why: step.Detail})
+			rows = append(rows, say.Row{Mark: say.MarkNeeds, Name: step.Name, State: statePending, Why: step.Detail})
 		}
 	}
 	return rows, pending, hasFailed

@@ -230,7 +230,7 @@ func TestTheWaitIsNotHeldByAJobWithNoLog(t *testing.T) {
 			f := newFakes(t)
 			var screen bytes.Buffer
 			f.app.Say = &say.Plain{W: &screen, Sample: time.Millisecond}
-			f.app.ReceiptWait = 300 * time.Millisecond
+			f.app.ReceiptWait = 1100 * time.Millisecond
 			f.app.Poll = 20 * time.Millisecond
 			f.rel.receiptErr = ErrNoReceipt
 			tc.setUp(f)
@@ -241,7 +241,7 @@ func TestTheWaitIsNotHeldByAJobWithNoLog(t *testing.T) {
 				t.Fatal("the wait reported success with no receipt")
 			}
 			if spent := time.Since(start); spent > 3*time.Second {
-				t.Fatalf("the wait spent %s on a Job with no log; its budget was 300ms", spent)
+				t.Fatalf("the wait spent %s on a Job with no log; its budget was 1s", spent)
 			}
 			if !strings.Contains(screen.String(), "✗ wiring") {
 				t.Fatalf("the wait drew no row:\n%s", screen.String())

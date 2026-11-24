@@ -1412,7 +1412,6 @@ func (a *Applier) waitReceipt(ctx context.Context, client ReleaseClient, since t
 	r := a.report()
 
 	logged, stopLog := context.WithCancel(ctx)
-	defer stopLog()
 	tail := startJobLog(logged, client, poll)
 	defer func() {
 		stopLog()
@@ -1424,7 +1423,7 @@ func (a *Applier) waitReceipt(ctx context.Context, client ReleaseClient, since t
 	if tail != nil {
 		source = tail.newest
 	}
-	task := r.Start(say.Op{Label: "wiring", Budget: budget, Source: source})
+	task := r.Start(say.Op{Label: wiringName, Budget: budget, Source: source})
 
 	var receipt Receipt
 	waited, err := wait.Until(ctx, budget, poll, func(ctx context.Context) (bool, error) {
@@ -1454,7 +1453,7 @@ func (a *Applier) waitReceipt(ctx context.Context, client ReleaseClient, since t
 	task.Done("")
 	row := say.Row{
 		Mark:  say.MarkFailed,
-		Name:  "wiring",
+		Name:  wiringName,
 		Facts: []string{"no receipt after " + say.Duration(budget)},
 		Why:   tail.newest(),
 	}
@@ -1463,7 +1462,11 @@ func (a *Applier) waitReceipt(ctx context.Context, client ReleaseClient, since t
 		Facts:   []string{"your apps are running", "only the wiring stopped"},
 		Command: "box apply",
 	}})
-	return Receipt{}, say.Reported{Err: errors.New("the wiring receipt never arrived: the release is installed but its wiring hook has not reported")}
+	// The rows are the screen's; the error itself is the log's, because the run
+	// ends non-zero and the reason has to be written down somewhere.
+	err = errors.New("the wiring receipt never arrived: the release is installed but its wiring hook has not reported")
+	r.Detail(err.Error())
+	return Receipt{}, say.Reported{Err: err}
 }
 
 // undoTimeout bounds the whole of undo: a few deletes on an answering API server

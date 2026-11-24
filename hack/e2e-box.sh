@@ -6150,8 +6150,11 @@ print(".".join(str(p) for p in tree))' "$CHART_VERSION"); then
   fi
   grep -qF "chart: s5n ${UPGRADE_FROM} (${CHART_REPO}:${UPGRADE_FROM})" "$WORK/bootstrap1.txt" ||
     { echo "box did not pull ${CHART_REPO}:${UPGRADE_FROM}"; fail=1; }
-  has_receipt "$WORK/bootstrap1.txt" ||
+  grep -q "^wiring ok" "$WORK/bootstrap1.txt" ||
     { echo "the published install did not report a healthy receipt"; fail=1; }
+  # The published box prints the receipt it always has: five rows, not this
+  # tree's folded one. It is the input to the update below, so what it says is
+  # the old output on purpose.
   [ "$fail" = 0 ] || return 0
   release_chart=$(helm_chart_version) || true
   [ "$release_chart" = "$UPGRADE_FROM" ] ||

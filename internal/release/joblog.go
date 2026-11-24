@@ -96,7 +96,7 @@ func (j *jobLog) follow(ctx context.Context) {
 			}
 			continue
 		}
-		j.read(ctx, rc)
+		j.read(rc)
 		_ = rc.Close()
 		// The pod that wrote the log box was waiting on has finished. A Job
 		// that retried starts another pod, and the receipt -- not the log -- is
@@ -109,7 +109,7 @@ func (j *jobLog) follow(ctx context.Context) {
 // read appends every line the stream carries. A line is trimmed of the padding
 // the Job's own columns add on the right, because this text goes into box's
 // lines, not into a table of the Job's.
-func (j *jobLog) read(ctx context.Context, rc io.ReadCloser) {
+func (j *jobLog) read(rc io.ReadCloser) {
 	sc := bufio.NewScanner(rc)
 	sc.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 	for sc.Scan() {
@@ -153,7 +153,7 @@ func (j *jobLog) stop() {
 		return
 	}
 	defer rc.Close()
-	j.read(ctx, rc)
+	j.read(rc)
 }
 
 // finalRead bounds the one read a wait that never sampled does, so a job still

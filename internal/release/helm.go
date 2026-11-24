@@ -364,7 +364,7 @@ func (h *Helm) JobLog(ctx context.Context, follow bool) (io.ReadCloser, error) {
 		return nil, fmt.Errorf("no %s pod yet", job)
 	}
 	stream, err := h.cs.CoreV1().Pods(h.Namespace).GetLogs(pod.Name, &corev1.PodLogOptions{
-		Container: "wiring",
+		Container: wiringName,
 		Follow:    follow,
 	}).Stream(ctx)
 	if err != nil {
@@ -405,5 +405,9 @@ func lastStatus(hist []helmrelease.Releaser) string {
 	return last
 }
 
-// interface check: Helm is what Applier opens from cmd/box.
-var _ ReleaseClient = (*Helm)(nil)
+// interface checks: Helm is what Applier opens from cmd/box, and the wait reads
+// the wiring Job's log through it.
+var (
+	_ ReleaseClient = (*Helm)(nil)
+	_ JobLogs       = (*Helm)(nil)
+)
