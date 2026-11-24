@@ -8465,14 +8465,18 @@ rehearsal_box() {
   box_files_back "$rcluster" "$rconfig"
   cat "$WORK/apply-rehearsal.txt"
   # A rehearsal writes its page too, and the page says what the real run renames:
-  # the locked box reviews the box the migration produces (rule 11).
+  # the locked box reviews the box the migration produces (rule 11). The page is
+  # 0600 and belongs to the root that applied the snapshot, so it is read the way
+  # the other files a root run wrote are.
   rehearsal_report="${rehearsal%.tar.gz}-apply-report.txt"
   [ -f "$rehearsal_report" ] ||
     { echo "the rehearsal wrote no report beside its snapshot"; return 1; }
-  rows_of "$rehearsal_report" >"$WORK/rehearsal-report-rows.txt" 2>/dev/null || true
+  config_read "$rcluster" "$rehearsal_report" >"$WORK/rehearsal-apply-report.txt" 2>/dev/null ||
+    { echo "could not read the rehearsal's report"; return 1; }
+  rows_of "$WORK/rehearsal-apply-report.txt" >"$WORK/rehearsal-report-rows.txt" 2>/dev/null || true
   grep -qE '^  data +the real run renames ' "$WORK/rehearsal-report-rows.txt" ||
     { echo "the rehearsal's page does not say what the real run renames:";
-      sed -n '/^library$/,/^$/p' "$rehearsal_report"; return 1; }
+      sed -n '/^library$/,/^$/p' "$WORK/rehearsal-apply-report.txt"; return 1; }
   for want in "snapshot: ${rehearsal} (rehearsal)" "rehearsal: nothing leaves this box" \
               "network lock: proven"; do
     grep -qF -- "$want" "$WORK/apply-rehearsal.txt" ||
