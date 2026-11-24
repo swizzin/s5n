@@ -17,6 +17,7 @@ import (
 	"fmt"
 	"io"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -62,6 +63,67 @@ type ReceiptRow struct {
 	Detail string
 }
 
+// The gutter's marks. One mark sits in a two-column gutter at the start of
+// every line a command prints: done, failed, needs you, a note, running, a
+// question, a command. A renderer colours them; nothing else about them varies.
+const (
+	MarkDone    = "✓" // something finished
+	MarkFailed  = "✗" // something failed
+	MarkNeeds   = "!" // something needs a person
+	MarkNote    = "·" // a note, and the default
+	MarkRunning = "◐" // the one line that is running
+	MarkAsk     = "?" // a question
+	MarkCommand = "$" // a command a person can copy
+)
+
+// markWidth is the gutter's mark in columns: one, whatever the glyph costs in
+// bytes.
+const markWidth = 1
+
+// The two fixed columns after the gutter. They are fixed rather than as wide as
+// the widest row in the block so two blocks line up, and a run of one row reads
+// like a run of ten. NameCol is thirteen columns: the widest name box puts in
+// the column is a release range, "0.6.2 → 0.6.3".
+const (
+	NameCol = 13
+	// StateCol is where a state word goes: kept, new, moved, skipped. One
+	// word, so a column of them scans like a column of numbers.
+	StateCol = 8
+)
+
+// Row is one line of box's status output: a mark in the gutter, a name, and the
+// facts that belong to it.
+//
+// Facts are joined with a middle dot and hang under the name on their own
+// column. Why is the one reason a refusal gives, on the line under the row;
+// Command is a line to copy, under that at the row's own text column. A row
+// with no name prints its facts straight after the gutter, which is what a note
+// is.
+type Row struct {
+	Mark  string
+	Name  string
+	State string
+	Facts []string
+	Why   string
+	// Command is a command that belongs to this row: `box status` under the
+	// note that says what needs doing.
+	Command string
+}
+
+// TextCol is where a row's text starts, which is where a continuation line
+// hangs: past the gutter, the name column and the state column.
+func (r Row) TextCol() int {
+	col := markWidth + 1
+	if r.Name == "" {
+		return col
+	}
+	col += NameCol + 2
+	if r.State != "" {
+		col += StateCol + 2
+	}
+	return col
+}
+
 // TableRow is one row of a table: a status glyph, a name and the facts that
 // belong to it, laid out in columns. The glyph is the row's own -- ✓ for
 // something carried, ! for something a person has to do, · for a note -- and an
@@ -73,16 +135,78 @@ type TableRow struct {
 	Facts []string
 }
 
+// Subject is an error that knows what it is about: a renderer draws it as the
+// one ✗ row, the subject in the name column, the refusal beside it, and the one
+// reason under that.
+type Subject struct {
+	Name  string
+	Facts []string
+	Why   string
+	Err   error
+}
+
+func (s Subject) Error() string { return s.Err.Error() }
+
+func (s Subject) Unwrap() error { return s.Err }
+
+// Reported marks an error the flow has already put on screen itself: box still
+// exits non-zero with it, and the reporter adds nothing but the line naming the
+// run log. A flow that draws its own failure row and then returns the error
+// would otherwise say it twice.
+type Reported struct{ Err error }
+
+func (r Reported) Error() string { return r.Err.Error() }
+
+func (r Reported) Unwrap() error { return r.Err }
+
+// SubjectOf is the subject an error chain is about, whether the flow built it as
+// a value or a pointer: both end on the one ✗ row.
+func SubjectOf(err error) (Subject, bool) {
+	var value Subject
+	if errors.As(err, &value) {
+		return value, true
+	}
+	var pointer *Subject
+	if errors.As(err, &pointer) && pointer != nil {
+		return *pointer, true
+	}
+	return Subject{}, false
+}
+
+// ReportedBy says whether this error is a failure the flow already drew: box
+// adds nothing but the line naming the run log.
+func ReportedBy(err error) bool {
+	var value Reported
+	if errors.As(err, &value) {
+		return true
+	}
+	var pointer *Reported
+	return errors.As(err, &pointer) && pointer != nil
+}
+
 // Op is one step that starts and then finishes.
 //
 // Label is the present-tense line a live renderer animates; Plain is the line
 // the plain transcript prints when the step starts (empty means the step is
 // silent until it finishes, which is what box did for a fast apply). Budget is
 // non-zero for a timed wait, where a live renderer shows elapsed against it.
+//
+// Name makes the step a status row of its own: the finish line is a Row named
+// Name whose facts are the duration and whatever the caller passes to Done,
+// instead of the one free sentence Done used to print. Source is the newest
+// line of the thing being waited on -- the last line of a Job's log, say --
+// sampled about once a second: a live renderer shows it beside the running
+// line, and the run log gets each distinct line once.
 type Op struct {
 	Label  string
 	Plain  string
 	Budget time.Duration
+	// Name is the row the finish line is drawn as. Empty keeps the old
+	// behaviour: Done prints its text as one line.
+	Name string
+	// Source returns the newest line of what this step waits on, or "" when
+	// there is nothing to say yet. It is called about once a second.
+	Source func() string
 }
 
 // Handle is a started step. A renderer that draws a spinner stops it on Done
@@ -125,6 +249,14 @@ type Reporter interface {
 	// name in the block, so one block reads as a table and two blocks do not
 	// line up with each other.
 	Table(title string, rows []TableRow)
+	// Rows is a block of status lines: a mark in the two-column gutter, a
+	// name in the fixed name column, an optional state word, and the facts
+	// joined with a middle dot. Text that does not fit hangs under itself.
+	Rows(rows []Row)
+	// Detail is a line for the run log alone: object names, revisions,
+	// digests, and the reasoning a person does not need on screen. A reporter
+	// with no log drops it.
+	Detail(text string)
 	// Diff is a values diff: marked items with no title, printed flush left by
 	// the plain transcript, which is how `box apply` has always printed them.
 	Diff(items []Item)
@@ -170,15 +302,52 @@ type Plain struct {
 	// an unattended run mean.
 	In  io.Reader
 	Yes bool
+	// Log is the run log: the same lines as the screen, plus the Detail lines,
+	// with a timestamp each. The writer behind it does the timestamping; nil
+	// is a run with no log.
+	Log io.Writer
+	// LogPath is that file, for the one line a failed run ends with. Empty
+	// with no log.
+	LogPath string
+	// Now is the clock a step's duration is measured with. Nil is time.Now.
+	Now func() time.Time
+	// Sample is how often a waiting step's source is read. Zero is a second.
+	Sample time.Duration
 
 	reader *bufio.Reader
 }
 
 func (p *Plain) out() io.Writer {
-	if p.W == nil {
-		return io.Discard
+	w := p.W
+	if w == nil {
+		w = io.Discard
 	}
-	return p.W
+	if p.Log != nil {
+		return io.MultiWriter(w, p.Log)
+	}
+	return w
+}
+
+func (p *Plain) now() time.Time {
+	if p.Now != nil {
+		return p.Now()
+	}
+	return time.Now()
+}
+
+func (p *Plain) every() time.Duration {
+	if p.Sample > 0 {
+		return p.Sample
+	}
+	return time.Second
+}
+
+// Detail is a line for the log alone: nothing about it reaches the screen.
+func (p *Plain) Detail(text string) {
+	if p.Log == nil || strings.TrimSpace(text) == "" {
+		return
+	}
+	fmt.Fprintln(p.Log, text)
 }
 
 func (p *Plain) Phase(string) {}
@@ -279,6 +448,127 @@ func (p *Plain) Table(title string, rows []TableRow) {
 	}
 }
 
+// Rows is the transcript's status block: the mark in the gutter, the name in
+// the fixed column, and the facts after it joined with a middle dot. Nothing is
+// wrapped -- a logged run and a golden test read the same bytes whatever the
+// terminal was -- but a row's why and its command still hang at its own text
+// column, so the layout is the live one with the wrapping taken out.
+func (p *Plain) Rows(rows []Row) {
+	for _, row := range rows {
+		fmt.Fprint(p.out(), PlainRow(row))
+	}
+}
+
+// PlainRow lays one row out as the transcript prints it, and as the run log
+// keeps it: the two never differ.
+func PlainRow(r Row) string {
+	mark := r.Mark
+	if mark == "" {
+		mark = MarkNote
+	}
+	var b strings.Builder
+	b.WriteString(strings.TrimRight(r.Prefix(mark)+r.Text(), " ") + "\n")
+	cont := strings.Repeat(" ", r.TextCol())
+	if r.Why != "" {
+		b.WriteString(cont + r.Why + "\n")
+	}
+	if r.Command != "" {
+		b.WriteString(cont + MarkCommand + " " + r.Command + "\n")
+	}
+	return b.String()
+}
+
+// Prefix is the gutter and the name columns of a row, the mark drawn by the
+// renderer: one mark, the name padded to the fixed column, and the state, if
+// any. Everything after it is the row's text.
+func (r Row) Prefix(mark string) string {
+	head := mark + " "
+	if r.Name == "" {
+		return head
+	}
+	head += pad(r.Name, r.nameWidth())
+	if r.State != "" {
+		head += "  " + pad(r.State, r.stateWidth())
+	}
+	return head + "  "
+}
+
+// Text is the row's facts, joined the way a table's are.
+func (r Row) Text() string { return strings.Join(r.Facts, " · ") }
+
+// nameWidth is the name column: fixed, unless one name is wider than it and
+// takes the column with it -- a truncated name is a different name.
+func (r Row) nameWidth() int {
+	if w := len(r.Name); w > NameCol {
+		return w
+	}
+	return NameCol
+}
+
+func (r Row) stateWidth() int {
+	if w := len(r.State); w > StateCol {
+		return w
+	}
+	return StateCol
+}
+
+func pad(s string, width int) string {
+	if n := width - len(s); n > 0 {
+		return s + strings.Repeat(" ", n)
+	}
+	return s
+}
+
+// Duration is a span of time as a person reads it: 41s, 6s, 4m10s, 10m. The
+// zeros are left out and nothing is left dangling, so elapsed and limit read
+// the same way in `4m10s of 10m`.
+func Duration(d time.Duration) string {
+	d = d.Round(time.Second)
+	if d < time.Minute {
+		return fmt.Sprintf("%ds", int(d.Seconds()))
+	}
+	h := int(d / time.Hour)
+	m := int(d%time.Hour) / int(time.Minute)
+	s := int(d%time.Minute) / int(time.Second)
+	switch {
+	case h > 0 && m > 0 && s > 0:
+		return fmt.Sprintf("%dh%dm%ds", h, m, s)
+	case h > 0 && m > 0:
+		return fmt.Sprintf("%dh%dm", h, m)
+	case h > 0 && s > 0:
+		return fmt.Sprintf("%dh%ds", h, s)
+	case h > 0:
+		return fmt.Sprintf("%dh", h)
+	case s > 0:
+		return fmt.Sprintf("%dm%ds", m, s)
+	}
+	return fmt.Sprintf("%dm", m)
+}
+
+// Watcher reads a waiting step's source and says which sampled lines are new.
+// The dedupe is one rule for both renderers: a source that repeats its last
+// line for four minutes adds nothing to the log.
+type Watcher struct {
+	// Source returns the newest line of what is being waited on.
+	Source func() string
+	last   string
+	seen   bool
+}
+
+// Next is the source's newest line, when it is not the one already reported.
+func (w *Watcher) Next() (string, bool) {
+	if w.Source == nil {
+		return "", false
+	}
+	line := strings.TrimSpace(w.Source())
+	if line == "" || (w.seen && line == w.last) {
+		return "", false
+	}
+	w.last = line
+	w.seen = true
+	return line, true
+}
+
 func (p *Plain) Line(text string)      { fmt.Fprintln(p.out(), text) }
 func (p *Plain) Muted(text string)     { fmt.Fprintln(p.out(), text) }
 func (p *Plain) Warn(text string)      { fmt.Fprintln(p.out(), text) }
@@ -302,19 +592,78 @@ func (p *Plain) Start(op Op) Handle {
 	if op.Plain != "" {
 		fmt.Fprintln(p.out(), op.Plain)
 	}
-	return plainHandle{p: p}
+	h := &plainHandle{p: p, op: op, start: p.now()}
+	if op.Source != nil {
+		h.stop = make(chan struct{})
+		go h.sample()
+	}
+	return h
 }
 
-type plainHandle struct{ p *Plain }
+type plainHandle struct {
+	p     *Plain
+	op    Op
+	start time.Time
+	stop  chan struct{}
+	once  sync.Once
+}
 
-func (h plainHandle) Detail(string) {}
-func (h plainHandle) Done(text string) {
-	if text != "" {
-		fmt.Fprintln(h.p.out(), text)
+// sample reads the source about once a second, for as long as the step runs.
+func (h *plainHandle) sample() {
+	w := &Watcher{Source: h.op.Source}
+	t := time.NewTicker(h.p.every())
+	defer t.Stop()
+	for {
+		select {
+		case <-h.stop:
+			return
+		case <-t.C:
+			if line, ok := w.Next(); ok {
+				h.p.Detail(line)
+			}
+		}
 	}
 }
-func (h plainHandle) DoneAs(plain, _ string) { h.Done(plain) }
-func (h plainHandle) Failed(error)           {}
+
+func (h *plainHandle) stopSampling() {
+	if h.stop != nil {
+		h.once.Do(func() { close(h.stop) })
+	}
+}
+
+func (h *plainHandle) Detail(string) {}
+
+// Done prints a named step's finish as the row it is: what it did, and how long
+// it took. An unnamed step keeps the sentence it always printed.
+func (h *plainHandle) Done(text string) {
+	h.stopSampling()
+	if h.op.Name == "" {
+		if text != "" {
+			fmt.Fprintln(h.p.out(), text)
+		}
+		return
+	}
+	fmt.Fprint(h.p.out(), PlainRow(Row{Mark: MarkDone, Name: h.op.Name, Facts: h.facts(text)}))
+}
+
+// facts are a named step's: what it did, then how long it took.
+func (h *plainHandle) facts(text string) []string {
+	var facts []string
+	if text != "" {
+		facts = append(facts, text)
+	}
+	return append(facts, Duration(h.p.now().Sub(h.start)))
+}
+
+func (h *plainHandle) DoneAs(plain, _ string) { h.Done(plain) }
+
+func (h *plainHandle) Failed(error) {
+	h.stopSampling()
+	if h.op.Name == "" {
+		return
+	}
+	fmt.Fprint(h.p.out(), PlainRow(Row{Mark: MarkFailed, Name: h.op.Name}))
+}
 
 // Ask is release.Confirmer and platform.Confirmer: the same question the live
 // reporter draws a form for, answered on the transcript. It names Confirm
@@ -351,12 +700,41 @@ func (p *Plain) Confirm(question string) (bool, error) {
 
 // Error is the one failure line, in box's voice. The plain path keeps it on
 // stderr exactly as cmd/box always printed it.
+// Error is the one failure line, in box's voice: a ✗ row, its reason hanging
+// under it, and the run log's path last. A plain path keeps it on stderr
+// exactly as cmd/box always printed it.
 func (p *Plain) Error(err error) {
 	w := p.Err
 	if w == nil {
 		w = p.out()
+	} else if p.Log != nil {
+		w = io.MultiWriter(w, p.Log)
 	}
-	fmt.Fprintf(w, "box: %v\n", err)
+	if ReportedBy(err) {
+		p.logRow()
+		return
+	}
+	if subject, ok := SubjectOf(err); ok {
+		fmt.Fprint(w, PlainRow(Row{Mark: MarkFailed, Name: subject.Name, Facts: subject.Facts, Why: subject.Why}))
+		p.logRow()
+		return
+	}
+	for i, line := range strings.Split(strings.TrimRight(err.Error(), "\n"), "\n") {
+		if i == 0 {
+			fmt.Fprintf(w, "%s %s\n", MarkFailed, line)
+			continue
+		}
+		fmt.Fprintf(w, "  %s\n", line)
+	}
+	p.logRow()
+}
+
+// logRow is the last line of a failed run: where the transcript is.
+func (p *Plain) logRow() {
+	if p.LogPath == "" {
+		return
+	}
+	fmt.Fprint(p.out(), PlainRow(Row{Mark: MarkNote, Name: "log", Facts: []string{p.LogPath}}))
 }
 
 func (p *Plain) Close() {}

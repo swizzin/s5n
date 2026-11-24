@@ -40,6 +40,16 @@ type ReporterOptions struct {
 	// Yes answers every confirm without a form, and leaves the same ✓ record
 	// line an answered form would.
 	Yes bool
+	// Log is the run log: the same finished lines as the screen, plus the
+	// Detail lines, with a timestamp each. The writer behind it does the
+	// timestamping and the redaction; nil is a run with no log.
+	Log io.Writer
+	// LogPath is that file, for the one line a failed run ends with.
+	LogPath string
+	// Now is the clock a step's duration is measured with, and Sample how
+	// often a waiting step's source is read. Zero is time.Now and a second.
+	Now    func() time.Time
+	Sample time.Duration
 }
 
 // indent is where every line the reporter prints under a phase frame starts.
@@ -69,6 +79,14 @@ type Reporter struct {
 	// run and must not stack two gaps between them.
 	space *space
 
+	// log is the run log, nil for a run that does not keep one.
+	log     io.Writer
+	logPath string
+	// now and sample are the clock and the sampling interval; the zero values
+	// mean time.Now and a second.
+	now    func() time.Time
+	sample time.Duration
+
 	// pending is the wiring receipt's rows that wait on a person. They are
 	// printed after the success card, because they are what to do next.
 	pending []say.ReceiptRow
@@ -97,14 +115,18 @@ func NewReporter(o ReporterOptions) *Reporter {
 	}
 	ui := New(Options{In: in, Out: out, NoColor: o.NoColor, Width: o.Width, Theme: o.Theme, Background: o.Background})
 	r := &Reporter{
-		out:    out,
-		errOut: errOut,
-		width:  o.Width,
-		chrome: chrome{noColor: o.NoColor},
-		ui:     ui,
-		space:  ui.space,
-		yes:    o.Yes,
-		closed: false,
+		out:     out,
+		errOut:  errOut,
+		width:   o.Width,
+		chrome:  chrome{noColor: o.NoColor},
+		ui:      ui,
+		space:   ui.space,
+		yes:     o.Yes,
+		closed:  false,
+		log:     o.Log,
+		logPath: o.LogPath,
+		now:     o.Now,
+		sample:  o.Sample,
 	}
 	if o.In == nil && o.Out == nil {
 		r.watchInterrupt()
@@ -156,6 +178,38 @@ func (r *Reporter) Palette() theme.Variant { return r.ui.Palette() }
 
 // Err is a theme name that did not resolve, or nil.
 func (r *Reporter) Err() error { return r.ui.Err() }
+
+func (r *Reporter) clock() time.Time {
+	if r.now != nil {
+		return r.now()
+	}
+	return time.Now()
+}
+
+func (r *Reporter) interval() time.Duration {
+	if r.sample > 0 {
+		return r.sample
+	}
+	return time.Second
+}
+
+// Detail is a line for the run log alone: nothing about it reaches the screen.
+func (r *Reporter) Detail(text string) {
+	if r.log == nil || strings.TrimSpace(text) == "" {
+		return
+	}
+	_, _ = io.WriteString(r.log, text+"\n")
+}
+
+// logged copies a finished block to the run log. The live line is never copied:
+// it is redrawn many times a second, and the log keeps what the screen left in
+// scrollback.
+func (r *Reporter) logged(text string) {
+	if r.log == nil || text == "" {
+		return
+	}
+	_, _ = io.WriteString(r.log, text)
+}
 
 // SetYes makes every confirm answer itself, which is what --yes means on a
 // terminal. It is set after the flags are parsed.
@@ -289,6 +343,79 @@ func (r *Reporter) Table(title string, rows []say.TableRow) {
 	r.emit(b.String())
 }
 
+// Rows is a block of status lines: the mark in the gutter, the name in the
+// fixed column, and the facts after it, wrapped under the row's own text column
+// so the gutter and the columns stay columns. It sits flush left, like the
+// masthead: a status block is the run's frame, not its content.
+func (r *Reporter) Rows(rows []say.Row) {
+	if len(rows) == 0 {
+		return
+	}
+	var b strings.Builder
+	for _, row := range rows {
+		b.WriteString(r.rowBlock(row))
+	}
+	r.emit(b.String())
+}
+
+// rowBlock draws one row: the mark and the columns, then the facts wrapped under
+// them, then the why and the command at the same column. A command is broken the
+// way a shell would break it, never inside a token.
+func (r *Reporter) rowBlock(row say.Row) string {
+	mark := row.Mark
+	if mark == "" {
+		mark = say.MarkNote
+	}
+	prefix := row.Prefix(mark)
+	col := row.TextCol()
+	avail := r.width - col
+	if avail < 8 {
+		avail = 8
+	}
+	paintedMark := r.chrome.paint(mark, glyphStyle(mark).Render(mark))
+	head := paintedMark + prefix[len(mark):]
+	var b strings.Builder
+	// A command breaks the way a shell breaks one; nothing else does.
+	lines := wrapText(row.Text(), avail)
+	cont := col
+	if mark == say.MarkCommand {
+		lines = wrapShell(row.Text(), avail)
+		cont = col + len(say.MarkCommand) + 1
+	}
+	if len(lines) == 0 || (len(lines) == 1 && lines[0] == "") {
+		b.WriteString(strings.TrimRight(head, " ") + "\n")
+	} else {
+		for i, line := range lines {
+			text := r.chrome.paint(line, inkStyle.Render(line))
+			if i == 0 {
+				if row.Text() == "" {
+					b.WriteString(strings.TrimRight(head, " ") + text + "\n")
+					continue
+				}
+				b.WriteString(head + text + "\n")
+				continue
+			}
+			b.WriteString(strings.Repeat(" ", cont) + text + "\n")
+		}
+	}
+	hang := strings.Repeat(" ", col)
+	if row.Why != "" {
+		for _, line := range wrapText(row.Why, avail) {
+			b.WriteString(hang + r.chrome.paint(line, mutedStyle.Render(line)) + "\n")
+		}
+	}
+	if row.Command != "" {
+		for i, line := range wrapShell(row.Command, avail-2) {
+			if i == 0 {
+				b.WriteString(hang + r.chrome.paint(say.MarkCommand, glyphStyle(say.MarkCommand).Render(say.MarkCommand)) + " " + r.chrome.paint(line, inkStyle.Render(line)) + "\n")
+				continue
+			}
+			b.WriteString(hang + "  " + r.chrome.paint(line, inkStyle.Render(line)) + "\n")
+		}
+	}
+	return b.String()
+}
+
 func (r *Reporter) plan(title string, items []say.Item) {
 	var b strings.Builder
 	if title != "" {
@@ -346,11 +473,11 @@ func (r *Reporter) planStyle(m say.Mark) lipgloss.Style {
 // colours.
 func glyphStyle(g string) lipgloss.Style {
 	switch g {
-	case "✓", "◌":
+	case "✓", "◌", "◐":
 		return accentStyle
 	case "✗", "!", "⚠":
 		return badStyle
-	case "·":
+	case "·", "?":
 		return mutedStyle
 	}
 	return inkStyle
@@ -561,23 +688,40 @@ func (r *Reporter) Start(op say.Op) say.Handle {
 	if op.Label == "" || r.closed {
 		return noHandle{}
 	}
-	l := &live{label: op.Label, budget: op.Budget, start: time.Now(), done: make(chan struct{})}
+	l := &live{label: op.Label, budget: op.Budget, start: r.clock(), done: make(chan struct{}), watch: say.Watcher{Source: op.Source}}
 	r.mu.Lock()
 	r.active = l
 	r.drawLocked()
 	r.mu.Unlock()
 	go r.animate(l)
-	return &liveHandle{r: r, l: l}
+	return &liveHandle{r: r, l: l, op: op}
 }
 
 func (r *Reporter) animate(l *live) {
 	ticker := time.NewTicker(80 * time.Millisecond)
 	defer ticker.Stop()
+	next := r.clock()
 	for {
 		select {
 		case <-l.done:
 			return
 		case <-ticker.C:
+			// The source is read about once a second, not once a frame:
+			// it is somebody's log, and the line only has to keep up.
+			l.mu.Lock()
+			due := l.watch.Source != nil && !r.clock().Before(next)
+			var tail string
+			if due {
+				if line, ok := l.watch.Next(); ok {
+					tail = line
+				}
+				next = r.clock().Add(r.interval())
+			}
+			if tail != "" {
+				l.tail = tail
+				r.Detail(tail)
+			}
+			l.mu.Unlock()
 			r.mu.Lock()
 			if r.active != l {
 				r.mu.Unlock()
@@ -592,7 +736,9 @@ func (r *Reporter) animate(l *live) {
 
 var spinnerFrames = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
 
-// drawLocked paints the active line in place. The caller holds r.mu.
+// drawLocked paints the active line in place. The caller holds r.mu. The line
+// is what a wait is never silent about: what is happening, how long it has
+// taken against its limit, and the newest line of the thing being waited on.
 func (r *Reporter) drawLocked() {
 	l := r.active
 	if l == nil {
@@ -601,17 +747,35 @@ func (r *Reporter) drawLocked() {
 	frame := spinnerFrames[l.frame%len(spinnerFrames)]
 	counter := ""
 	if l.budget > 0 {
-		counter = elapsedLabel(time.Since(l.start)) + " / " + durationLabel(l.budget)
+		counter = say.Duration(r.clock().Sub(l.start)) + " of " + say.Duration(l.budget)
 	}
+	l.mu.Lock()
+	tail := l.tail
+	l.mu.Unlock()
 	prefixWidth := lipgloss.Width(indent + frame + " ")
-	avail := r.width - prefixWidth - lipgloss.Width(counter) - 2
-	if avail < 8 {
-		avail = 8
+	room := r.width - prefixWidth - lipgloss.Width(counter) - 2
+	if room < 8 {
+		room = 8
 	}
-	label := clip(l.label, avail)
+	tailWidth := 0
+	if tail != "" {
+		// The newest line of the wait is the detail: give it half of
+		// what the label does not need, so neither one is squeezed out.
+		tailWidth = room / 2
+		room = room - tailWidth - 2
+		if room < 8 {
+			room = 8
+		}
+		detail := clip(tail, tailWidth)
+		tail = detail
+	}
+	label := clip(l.label, room)
 	line := indent + r.chrome.paint(frame, accentStyle.Render(frame)) + " " + r.chrome.paint(label, inkStyle.Render(label))
 	if counter != "" {
 		line += "  " + r.chrome.paint(counter, mutedStyle.Render(counter))
+	}
+	if tail != "" {
+		line += "  " + r.chrome.paint(tail, mutedStyle.Render(tail))
 	}
 	fmt.Fprint(r.out, "\r\x1b[2K"+line)
 }
@@ -648,6 +812,7 @@ func (r *Reporter) emit(text string) {
 		r.clearLocked()
 	}
 	_, _ = io.WriteString(r.out, text)
+	r.logged(text)
 	r.space.wrote(text)
 	if r.active != nil {
 		r.drawLocked()
@@ -661,12 +826,17 @@ type live struct {
 	start  time.Time
 	frame  int
 	detail string
-	done   chan struct{}
+	// tail is the newest line of what this step waits on, as the live line
+	// shows it.
+	tail  string
+	watch say.Watcher
+	done  chan struct{}
 }
 
 type liveHandle struct {
-	r *Reporter
-	l *live
+	r  *Reporter
+	l  *live
+	op say.Op
 }
 
 func (h *liveHandle) Detail(text string) {
@@ -675,14 +845,54 @@ func (h *liveHandle) Detail(text string) {
 	h.l.mu.Unlock()
 }
 
-func (h *liveHandle) Done(text string) { h.finish("✓", text, h.detail()) }
+func (h *liveHandle) Done(text string) {
+	if h.op.Name == "" {
+		h.finish("✓", text, h.detail())
+		return
+	}
+	facts := []string{}
+	if text != "" {
+		facts = append(facts, text)
+	}
+	if d := h.detail(); d != "" {
+		facts = append(facts, d)
+	}
+	facts = append(facts, say.Duration(h.r.clock().Sub(h.l.start)))
+	h.finishRow("✓", say.Row{Name: h.op.Name, Facts: facts})
+}
 
 func (h *liveHandle) DoneAs(_, pretty string) { h.Done(pretty) }
 
 func (h *liveHandle) Failed(err error) {
 	// The error itself is rendered once by the command; the step line says
 	// which step died.
-	h.finish("✗", h.l.label, "")
+	if h.op.Name == "" {
+		h.finish("✗", h.l.label, "")
+		return
+	}
+	h.finishRow("✗", say.Row{Name: h.op.Name})
+}
+
+// finishRow ends a named step as the row it is: a mark in the gutter, the
+// step's name, and its facts.
+func (h *liveHandle) finishRow(mark string, row say.Row) {
+	r := h.r
+	r.mu.Lock()
+	if r.active == h.l {
+		r.clearLocked()
+		r.active = nil
+	}
+	select {
+	case <-h.l.done:
+	default:
+		close(h.l.done)
+	}
+	row.Mark = mark
+	text := r.rowBlock(row)
+	_, _ = io.WriteString(r.out, text)
+	r.logged(text)
+	r.space.wrote(text)
+	r.mu.Unlock()
 }
 
 func (h *liveHandle) detail() string {
@@ -722,6 +932,7 @@ func (h *liveHandle) finish(mark, text, detail string) {
 		}
 	}
 	_, _ = io.WriteString(r.out, b.String())
+	r.logged(b.String())
 	r.space.wrote(b.String())
 	r.mu.Unlock()
 }
@@ -753,42 +964,71 @@ func (r *Reporter) Confirm(question string) (bool, error) {
 // huh form, the same record line.
 func (r *Reporter) Ask(question string) (bool, error) { return r.Confirm(question) }
 
-// Error is the end of a failed run: box's voice in a bad frame, wrapped.
+// Error is the end of a failed run: one ✗ row, its reason hanging under it, and
+// the run log's path last. A failure is a row like any other -- there is no
+// frame around it, and the reason is what the command can say, not a paragraph.
 func (r *Reporter) Error(err error) {
 	r.stopActive()
 	if err == nil {
 		return
 	}
 	r.flushPending()
-	width := mastheadWidth
-	if r.width > 0 && r.width < width {
-		width = r.width
+	if say.ReportedBy(err) {
+		r.logRow()
+		return
 	}
-	inner := width - 4
-	var body []string
-	for _, raw := range strings.Split(err.Error(), "\n") {
-		if strings.TrimSpace(raw) == "" {
-			body = append(body, "")
-			continue
-		}
-		body = append(body, wrapText(raw, inner-2)...)
+	if subject, ok := say.SubjectOf(err); ok {
+		r.emit(r.rowBlock(say.Row{Mark: say.MarkFailed, Name: subject.Name, Facts: subject.Facts, Why: subject.Why}))
+		r.logRow()
+		return
 	}
 	var b strings.Builder
-	b.WriteString(r.chrome.paint("╭"+strings.Repeat("─", width-2)+"╮", badStyle.Render("╭"+strings.Repeat("─", width-2)+"╮")) + "\n")
-	for i, line := range body {
-		prefix := "│ "
+	for i, raw := range strings.Split(strings.TrimRight(err.Error(), "\n"), "\n") {
+		mark := ""
 		if i == 0 {
-			prefix = "│ ✗ "
+			mark = say.MarkFailed
 		}
-		gap := inner + 2 - lipgloss.Width(prefix) - lipgloss.Width(line)
-		if gap < 0 {
-			gap = 0
+		col := strings.Repeat(" ", 2)
+		for j, line := range wrapTextRaw(raw, col2(mark+" ", r.width)) {
+			if j == 0 {
+				if mark == "" {
+					b.WriteString(col + r.chrome.paint(line, mutedStyle.Render(line)) + "\n")
+					continue
+				}
+				b.WriteString(r.chrome.paint(mark, glyphStyle(mark).Render(mark)) + " " + r.chrome.paint(line, inkStyle.Render(line)) + "\n")
+				continue
+			}
+			b.WriteString(col + r.chrome.paint(line, mutedStyle.Render(line)) + "\n")
 		}
-		row := prefix + line + strings.Repeat(" ", gap) + " │"
-		b.WriteString(r.chrome.paint(row, badStyle.Render(row)) + "\n")
 	}
-	b.WriteString(r.chrome.paint("╰"+strings.Repeat("─", width-2)+"╯", badStyle.Render("╰"+strings.Repeat("─", width-2)+"╯")) + "\n")
 	r.emit(b.String())
+	r.logRow()
+}
+
+// logRow is the last line of a failed run: where the transcript is.
+func (r *Reporter) logRow() {
+	if r.logPath == "" {
+		return
+	}
+	r.emit(r.rowBlock(say.Row{Mark: say.MarkNote, Name: "log", Facts: []string{r.logPath}}))
+}
+
+// col2 is how many columns a line has to work with, after its mark.
+func col2(mark string, width int) int {
+	w := width - lipgloss.Width(mark)
+	if w < 8 {
+		return 8
+	}
+	return w
+}
+
+// wrapTextRaw is wrapText that keeps a blank line a blank line: an error's
+// empty line is a break between two facts, not a word to skip.
+func wrapTextRaw(s string, width int) []string {
+	if strings.TrimSpace(s) == "" {
+		return []string{""}
+	}
+	return wrapText(s, width)
 }
 
 // Banner closes a good run with the one fact worth repeating: the domain.
@@ -847,12 +1087,6 @@ func (r *Reporter) Close() {
 	}
 }
 
-func elapsedLabel(d time.Duration) string { return durationLabel(d) }
-
-func durationLabel(d time.Duration) string {
-	d = d.Round(time.Second)
-	if d < time.Minute {
-		return fmt.Sprintf("%ds", int(d.Seconds()))
-	}
-	return d.String()
-}
+// elapsedLabel is how a wait's elapsed time reads, the same spelling the log
+// and the transcript use.
+func elapsedLabel(d time.Duration) string { return say.Duration(d) }
