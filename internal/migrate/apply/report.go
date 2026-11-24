@@ -104,7 +104,7 @@ func (s Summary) reportLeft() []report.Row {
 	var rows []report.Row
 	for _, in := range s.Instances {
 		for _, l := range in.Left {
-			facts := []string{"kept", l.Why}
+			facts := []string{stateKept, l.Why}
 			if l.Detail != "" {
 				facts = append(facts, l.Detail)
 			}

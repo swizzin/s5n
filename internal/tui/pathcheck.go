@@ -82,21 +82,6 @@ func (u *UI) pathRow(row setup.PathRow, warns []string, kindWidth, pathWidth int
 	}
 }
 
-// warning is the red line under a path's block: the two ways a path can sink
-// the host, both of which are about the disk rather than the directory. Its
-// continuation lines stay under the glyph, not against the margin.
-func (u *UI) warning(text string) {
-	const indent = "  ⚠ "
-	cont := strings.Repeat(" ", lipgloss.Width(indent))
-	for i, line := range wrapText(text, u.width-lipgloss.Width(indent)) {
-		if i == 0 {
-			fmt.Fprintf(u.out, "%s%s\n", u.chrome.paint(indent, badStyle.Render(indent)), u.chrome.paint(line, badStyle.Render(line)))
-			continue
-		}
-		fmt.Fprintf(u.out, "%s%s\n", cont, u.chrome.paint(line, badStyle.Render(line)))
-	}
-}
-
 // block prints a paragraph at one indent, wrapped to the terminal. The
 // continuation lines keep the indent, which is the whole point of wrapping
 // here rather than letting the terminal do it.
@@ -142,18 +127,4 @@ func warnings(r setup.PathReport) []string {
 		return []string{"shares the root device (" + deviceName(r) + ") — filling it takes the host down"}
 	}
 	return nil
-}
-
-// humanBytes renders a size the way the plain report does: 24.0 TiB, 512 GiB.
-func humanBytes(n int64) string {
-	const unit = 1024
-	if n < unit {
-		return fmt.Sprintf("%d B", n)
-	}
-	div, exp := int64(unit), 0
-	for v := n / unit; v >= unit && exp < 4; v /= unit {
-		div *= unit
-		exp++
-	}
-	return fmt.Sprintf("%.1f %ciB", float64(n)/float64(div), "KMGTP"[exp])
 }

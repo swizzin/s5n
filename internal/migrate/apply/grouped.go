@@ -20,6 +20,9 @@ import (
 const (
 	titleApps    = "apps"
 	titleLibrary = "library"
+	// stateKept is what a row says about a value this run leaves alone: one
+	// word in the state column, never a phrase (rule 1).
+	stateKept = "kept"
 )
 
 // Group is one block of the confirm: its heading, the columns its rows read in,
@@ -356,7 +359,7 @@ func (s Summary) needsYou() []say.TableRow {
 		// why. The whole sentence the rewriter wrote is the report's
 		// (rules 1 and 2).
 		fact := strings.Join(g.what, " and ")
-		rows = append(rows, say.TableRow{Glyph: "!", Name: strings.Join(apps, ", "), State: "kept", Facts: []string{fact, why}})
+		rows = append(rows, say.TableRow{Glyph: "!", Name: strings.Join(apps, ", "), State: stateKept, Facts: []string{fact, why}})
 	}
 	return rows
 }
