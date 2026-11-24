@@ -1791,7 +1791,7 @@ fresh() {
   # plan first, then init's own rows (the seedbox: its paths, its host, the
   # torrent port), then the one answer. A second question means the release
   # asked again inside the apply.
-  questions=$(grep -cE '^install the platform and .+\? \[y/N\] y$' "$WORK/bootstrap1.txt")
+  questions=$(grep -cE '^install the platform and .+\? \[y/N\] y$' "$WORK/bootstrap1.txt") || true
   [ "$questions" = 1 ] ||
     { echo "a guided install asked ${questions} questions, want one: the platform and the seedbox together";
       grep -nE '\[y/[Nn]\]|\[Y/n\]' "$WORK/bootstrap1.txt"; fail=1; }
@@ -1799,9 +1799,12 @@ fresh() {
     echo "the release asked its own question after the one answer"
     fail=1
   fi
-  plan_line=$(grep -nE '^\+ cert-manager ' "$WORK/bootstrap1.txt" | head -1 | cut -d: -f1)
-  question_line=$(grep -nE '^install the platform and .+\? \[y/N\] ' "$WORK/bootstrap1.txt" | head -1 | cut -d: -f1)
-  platform_row=$(grep -nE '^✓ Envoy Gateway ' "$WORK/bootstrap1.txt" | head -1 | cut -d: -f1)
+  # init's own answers are gathered first, and the notice address is one of them:
+  # it is asked on a terminal because root's config is there before the question.
+  plan_line=$(grep -nE '^ *\+ cert-manager ' "$WORK/bootstrap1.txt" | head -1 | cut -d: -f1) || true
+  notice_line=$(grep -nF "Where should box post notices?" "$WORK/bootstrap1.txt" | head -1 | cut -d: -f1) || true
+  question_line=$(grep -nE '^install the platform and .+\? \[y/N\] ' "$WORK/bootstrap1.txt" | head -1 | cut -d: -f1) || true
+  platform_row=$(grep -nE '^✓ Envoy Gateway ' "$WORK/bootstrap1.txt" | head -1 | cut -d: -f1) || true
   if [ -z "$plan_line" ] || [ -z "$question_line" ] || [ -z "$platform_row" ]; then
     echo "the transcript is missing the plan, the question or the first install row"
     fail=1
@@ -1810,6 +1813,10 @@ fresh() {
     fail=1
   elif [ "$question_line" -ge "$platform_row" ]; then
     echo "the platform was installed before the answer (question ${question_line}, row ${platform_row})"
+    fail=1
+  fi
+  if [ -z "$notice_line" ] || [ "$notice_line" -ge "$question_line" ]; then
+    echo "init's own questions do not come before the one question (notices ${notice_line:-none}, question ${question_line})"
     fail=1
   fi
   # The plan is one line for what this run installs and one for what it cannot
@@ -9298,13 +9305,14 @@ migrate_box() {
     "$WORK/apply-migrate-rows.txt" ||
     { echo "the confirm does not say when Plex's databases are checked";
       grep -E "plex" "$WORK/apply-migrate-rows.txt" | head -5; fail=1; }
-  # The version column: what the source ran, what this release runs, and the one
-  # downgrade --yolo allowed. The fixtures are real versions on every other row,
-  # so all three directions are on one screen: sonarr down, radarr and pbh up,
-  # qbittorrent the same.
-  grep -qE '^  sonarr +[0-9.]+ (KiB|MiB|GiB) +9\.9\.9 → 5\.0  ↓' "$WORK/apply-migrate-rows.txt" ||
-    { echo "the confirm does not show the downgrade's two versions:";
-      grep -E "^  sonarr" "$WORK/apply-migrate-rows.txt" | head -3; fail=1; }
+  # The version column: what the source ran, what this release runs, and the
+  # direction between them. The fixtures are real versions, so two directions are
+  # on the screen's table -- radarr and pbh up, qbittorrent the same -- and the
+  # downgrade --yolo allowed is on the row that needs the operator. sonarr is past
+  # the confirm's fold, so its pair is read on the page, which lists every app.
+  grep -qE '^  sonarr +.*9\.9\.9 → 5\.0  ↓' "$WORK/apply-report-rows.txt" ||
+    { echo "the page does not carry the downgrade's two versions:";
+      grep -E "^  sonarr" "$WORK/apply-report-rows.txt" | head -3; fail=1; }
   grep -qE '^  radarr +[0-9.]+ (KiB|MiB|GiB) +5\.20\.1 → 7\.0\.3  ↑' "$WORK/apply-migrate-rows.txt" ||
     { echo "the confirm does not show the upgrade's two versions:";
       grep -E "^  radarr" "$WORK/apply-migrate-rows.txt" | head -3; fail=1; }
