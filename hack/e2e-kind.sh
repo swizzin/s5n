@@ -232,7 +232,7 @@ $KIND load docker-image --name "$CLUSTER" "$IMAGE"
 log "preparing host paths inside the node (what box init creates on real hosts)"
 docker exec "${CLUSTER}-control-plane" bash -c '
   mkdir -p /srv/s5n/data \
-           /srv/s5n/config/{qbittorrent,prowlarr,sonarr,sonarr-4k,radarr,radarr-4k,plex,tautulli,seerr,qui,autobrr,maintainerr,pbh}
+           /srv/s5n/config/{qbittorrent,prowlarr,sonarr,sonarr-4k,radarr,radarr-4k,lidarr,plex,tautulli,seerr,qui,autobrr,maintainerr,pbh}
   chown -R 1000:1000 /srv/s5n'
 
 # Nothing below may prepare the data categories: the wiring Job owns them, and a
