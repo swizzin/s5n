@@ -488,10 +488,10 @@ func TestSettleCallsOutEveryUnsettledValue(t *testing.T) {
 		"checked at apply:",
 		"  plex (its database is only readable through its own image, and this run has no way to start one)",
 		"left as it is:",
-		"  172.17.0.1:10365 (Deluge client: this box runs qBittorrent)",
+		"  172.17.0.1:10365 (Deluge client: this box runs qBittorrent and SABnzbd)",
 		"    radarr: radarr.db DownloadClients.Settings.host",
 		"    sonarr: sonarr.db DownloadClients.Settings.host",
-		"  172.17.0.1:443 (RTorrent client: this box runs qBittorrent)",
+		"  172.17.0.1:443 (RTorrent client: this box runs qBittorrent and SABnzbd)",
 		"    radarr: radarr.db DownloadClients.Settings.host",
 		"    sonarr: sonarr.db DownloadClients.Settings.host",
 		"  192.0.2.10:8081 (switched off, so nothing dials it)",
@@ -849,8 +849,8 @@ func TestSummaryNamesEveryDefaultAndLeft(t *testing.T) {
 	for _, want := range []string{
 		"default: 10.244.0.56:32400 (rewritten to plex: it is Maintainerr's Plex connection, and this box runs one Plex)",
 		"default: example.com:443 (rewritten to qbittorrent: it is a qBittorrent downloader, and this box runs one qBittorrent)",
-		"sonarr: left as it is: 172.17.0.1:443 (RTorrent client: this box runs qBittorrent)",
-		"radarr: left as it is: 172.17.0.1:10365 (Deluge client: this box runs qBittorrent)",
+		"sonarr: left as it is: 172.17.0.1:443 (RTorrent client: this box runs qBittorrent and SABnzbd)",
+		"radarr: left as it is: 172.17.0.1:10365 (Deluge client: this box runs qBittorrent and SABnzbd)",
 		"autobrr: left as it is: 192.0.2.10:8081 (switched off, so nothing dials it)",
 	} {
 		if !strings.Contains(lines, want) {

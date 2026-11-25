@@ -13,6 +13,7 @@ import (
 	_ "github.com/swizzin/s5n/internal/migrate/plex"
 	_ "github.com/swizzin/s5n/internal/migrate/qbit"
 	_ "github.com/swizzin/s5n/internal/migrate/qui"
+	_ "github.com/swizzin/s5n/internal/migrate/sabnzbd"
 	_ "github.com/swizzin/s5n/internal/migrate/seerr"
 	_ "github.com/swizzin/s5n/internal/migrate/tautulli"
 )

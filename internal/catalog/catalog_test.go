@@ -828,6 +828,7 @@ func TestRealChartSnapshots(t *testing.T) {
 		"radarr":      "radarr.db,radarr.db-wal,radarr.db-shm,config.xml",
 		"lidarr":      "lidarr.db,lidarr.db-wal,lidarr.db-shm,config.xml",
 		"bazarr":      "config/config.yaml,db/bazarr.db,db/bazarr.db-wal,db/bazarr.db-shm",
+		"sabnzbd":     "sabnzbd.ini",
 		"prowlarr":    "prowlarr.db,prowlarr.db-wal,prowlarr.db-shm,config.xml",
 		"plex": "Library/Application Support/Plex Media Server/Preferences.xml," +
 			"Library/Application Support/Plex Media Server/Plug-in Support/Databases/com.plexapp.plugins.library.db," +
@@ -871,9 +872,9 @@ func TestRealChartCallsAreTheReleaseEdges(t *testing.T) {
 		t.Fatalf("load the chart's catalog: %v", err)
 	}
 	want := map[string]string{
-		"sonarr":      "prowlarr,qbittorrent",
-		"radarr":      "prowlarr,qbittorrent",
-		"lidarr":      "prowlarr,qbittorrent",
+		"sonarr":      "prowlarr,qbittorrent,sabnzbd",
+		"radarr":      "prowlarr,qbittorrent,sabnzbd",
+		"lidarr":      "prowlarr,qbittorrent,sabnzbd",
 		"bazarr":      "radarr,sonarr",
 		"prowlarr":    "lidarr,radarr,sonarr",
 		"tautulli":    "plex",

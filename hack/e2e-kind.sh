@@ -232,7 +232,7 @@ $KIND load docker-image --name "$CLUSTER" "$IMAGE"
 log "preparing host paths inside the node (what box init creates on real hosts)"
 docker exec "${CLUSTER}-control-plane" bash -c '
   mkdir -p /srv/s5n/data \
-           /srv/s5n/config/{qbittorrent,prowlarr,sonarr,sonarr-4k,radarr,radarr-4k,lidarr,bazarr,bazarr-4k,plex,tautulli,seerr,qui,autobrr,maintainerr,pbh}
+           /srv/s5n/config/{qbittorrent,prowlarr,sonarr,sonarr-4k,radarr,radarr-4k,lidarr,bazarr,bazarr-4k,sabnzbd,plex,tautulli,seerr,qui,autobrr,maintainerr,pbh}
   chown -R 1000:1000 /srv/s5n'
 
 # Nothing below may prepare the data categories: the wiring Job owns them, and a
@@ -675,6 +675,8 @@ apps:
   maintainerr:
     enabled: true
   pbh:
+    enabled: true
+  sabnzbd:
     enabled: true
 EOF
 
@@ -1778,6 +1780,19 @@ snapshot() { # snapshot <dir>
     { echo "qBittorrent answered no categories: $(head -c 200 "$dir/qbittorrent-categories.json")"; fail=1; }
   rm -f "$dir/qbittorrent-jar.txt"
   port_forward_stop
+  # SABnzbd's data contract and categories, through its own API with the release
+  # Secret's key: the proof a second wiring run rewrote no path and created no
+  # category, and that the key the init container sealed is one the app accepts.
+  local sabkey
+  sabkey=$($K -n "$NS" get secret s5n-keys -o jsonpath='{.data.sabnzbd-apikey}' | base64 -d)
+  for key in complete_dir download_dir; do
+    $K -n "$NS" exec sabnzbd-0 -- curl -s \
+      "http://localhost:8080/sabnzbd/api?mode=get_config&section=misc&keyword=${key}&output=json&apikey=${sabkey}" \
+      >"$dir/sabnzbd-${key}.json" || true
+  done
+  $K -n "$NS" exec sabnzbd-0 -- curl -s \
+    "http://localhost:8080/sabnzbd/api?mode=get_config&section=categories&output=json&apikey=${sabkey}" \
+    >"$dir/sabnzbd-categories.json" || true
   # Tautulli's settings, using the seeded api_key: also the proof that the
   # tautulli-config init container's seed is one Tautulli actually accepts, at
   # the prefix the same container seals into its http_root. The PMS section is
@@ -1824,6 +1839,9 @@ for expected in \
   prowlarr/application/lidarr \
   bazarr/ready bazarr/sonarr bazarr/radarr \
   bazarr-4k/ready bazarr-4k/sonarr bazarr-4k/radarr \
+  sabnzbd/ready sabnzbd/data-contract \
+  sabnzbd/category/tv sabnzbd/category/movies sabnzbd/category/4K/Movies sabnzbd/category/lidarr \
+  sonarr/sabnzbd radarr/sabnzbd radarr-4k/sabnzbd lidarr/sabnzbd \
   qbittorrent/data-contract qbittorrent/category/tv qbittorrent/category/movies \
   qbittorrent/category/4K/Movies qbittorrent/category/lidarr \
   data/hardlink/tv data/hardlink/movies data/hardlink/4K/Movies data/hardlink/music \
@@ -1875,6 +1893,97 @@ PY
 }
 assert_bazarr_pair bazarr sonarr radarr
 assert_bazarr_pair bazarr-4k - radarr-4k
+
+# SABnzbd's UI and API, through the Gateway. The UI is its own page (no login of
+# its own: username and password are empty, which is when check_login is off),
+# and a 200 here means both of the chart's 403 switches are right: the Host is
+# the box's name, which the entrypoint whitelists, and the Gateway's
+# X-Forwarded-For no longer marks the request external.
+: >"$WORK/sabnzbd-headers"
+# A SABnzbd with no news server yet answers its root with a 303 to its
+# wizard, both under the prefix, so the check follows the redirect and asserts
+# where it ended.
+sab_code=$(gw_get -s -L -D "$WORK/sabnzbd-headers" -o "$WORK/sabnzbd.html" -w '%{http_code}' \
+  "https://${DOMAIN}/sabnzbd/" || true)
+sab_loc=$(grep -i '^location:' "$WORK/sabnzbd-headers" | tr -d '\r' | sed 's/^[Ll]ocation: *//' || true)
+echo "GET /sabnzbd/ via gateway -> ${sab_code} ${sab_loc}"
+[ "$sab_code" = 200 ] || { echo "SABnzbd's UI did not serve through the Gateway (${sab_code})"; fail=1; }
+case "$sab_loc" in
+  "" | /sabnzbd/* | "https://${DOMAIN}/sabnzbd/"*) ;;
+  *) echo "/sabnzbd/ redirected to ${sab_loc}, which is outside the prefix: the app is asking for a login of its own"; fail=1 ;;
+esac
+grep -qi '<html' "$WORK/sabnzbd.html" || { echo "/sabnzbd/ answered without an HTML document"; fail=1; }
+sab_key=$($K -n "$NS" get secret s5n-keys -o jsonpath='{.data.sabnzbd-apikey}' | base64 -d)
+sab_version=$(gw_get -s "https://${DOMAIN}/sabnzbd/api?mode=version&output=json" || true)
+sab_config=$(gw_get -s "https://${DOMAIN}/sabnzbd/api?mode=get_config&section=misc&keyword=complete_dir&output=json&apikey=${sab_key}" || true)
+sab_cats=$(gw_get -s "https://${DOMAIN}/sabnzbd/api?mode=get_config&section=categories&output=json&apikey=${sab_key}" || true)
+printf '%s' "$sab_version" >"$WORK/sabnzbd-version.json"
+printf '%s' "$sab_config" >"$WORK/sabnzbd-complete-dir.json"
+printf '%s' "$sab_cats" >"$WORK/sabnzbd-categories.json"
+python3 - "$WORK/sabnzbd-version.json" "$WORK/sabnzbd-complete-dir.json" "$WORK/sabnzbd-categories.json" <<'PY' || fail=1
+import json, sys
+version = json.load(open(sys.argv[1], encoding="utf-8"))
+if not version.get("version"):
+    print(f"mode=version answered {version!r}")
+    sys.exit(1)
+complete = json.load(open(sys.argv[2], encoding="utf-8"))["config"]["misc"]["complete_dir"]
+if complete.rstrip("/") != "/data/downloads":
+    print(f"complete_dir = {complete!r}, want the data claim")
+    sys.exit(1)
+cats = {c["name"]: c["dir"] for c in json.load(open(sys.argv[3], encoding="utf-8"))["config"]["categories"]}
+want = {"tv": "tv", "movies": "movies", "lidarr": "lidarr", "4k/movies": "4K/Movies"}
+problems = [f"{n}: dir {cats.get(n)!r}, want {d!r}" for n, d in want.items() if cats.get(n) != d]
+if problems:
+    print("; ".join(problems))
+    sys.exit(1)
+print(f"SABnzbd {version['version']}: complete_dir {complete}, categories {sorted(want)}")
+PY
+
+# Each Arr holds the release's SABnzbd as its usenet client, beside qBittorrent,
+# with that instance's own category: the 4K Radarr's is the nested 4K/Movies,
+# the one the category API had to accept and the Job had to create first. SAB
+# folds every category name and the Arr refuses one the app does not list, so
+# the client carries 4k/movies while the directory keeps 4K/Movies. The row is
+# read back through the Arr; its key is masked on read, and the Job's own
+# connection test is what proved the key before it wrote anything.
+for app in sonarr radarr radarr-4k lidarr; do
+  case "$app" in
+    sonarr) category=tv ;;
+    radarr) category=movies ;;
+    radarr-4k) category=4k/movies ;;
+    lidarr) category=lidarr ;;
+  esac
+  key=$(arr_key "$app"); port=$(arr_port "$app"); api=api/v3
+  [ "$app" = lidarr ] && api=api/v1
+  $K -n "$NS" exec "${app}-0" -- curl -s -H "X-Api-Key: $key" \
+    "http://localhost:${port}/${app}/${api}/downloadclient" >"$WORK/${app}-clients.json"
+  python3 - "$WORK/${app}-clients.json" "$app" "$category" <<'PY' || fail=1
+import json, sys
+clients = json.load(open(sys.argv[1], encoding="utf-8"))
+app, category = sys.argv[2], sys.argv[3]
+found = [c for c in clients if c.get("implementation") == "Sabnzbd"]
+if len(found) != 1:
+    print(f"{app}: {len(found)} SABnzbd clients, want exactly one")
+    sys.exit(1)
+c = found[0]
+fields = {f["name"]: f.get("value") for f in c.get("fields", [])}
+category_field = {"sonarr": "tvCategory", "radarr": "movieCategory", "lidarr": "musicCategory"}
+field = "movieCategory" if app.startswith("radarr") else category_field[app]
+problems = []
+if fields.get("host") != "sabnzbd":
+    problems.append(f"host = {fields.get('host')!r}, want sabnzbd")
+if fields.get("port") != 8080:
+    problems.append(f"port = {fields.get('port')!r}, want 8080")
+if (fields.get("urlBase") or "").rstrip("/") != "/sabnzbd":
+    problems.append(f"urlBase = {fields.get('urlBase')!r}, want /sabnzbd")
+if fields.get(field) != category:
+    problems.append(f"{field} = {fields.get(field)!r}, want {category!r}")
+if problems:
+    print(f"{app}: " + "; ".join(problems))
+    sys.exit(1)
+print(f"{app}: SABnzbd client, category {category}")
+PY
+done
 
 # What the Job registered, read back through the apps themselves: exactly one
 # qui instance pointed at qBittorrent with local filesystem access, and one

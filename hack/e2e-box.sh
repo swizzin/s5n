@@ -679,7 +679,7 @@ fi
 log "preparing host paths (what box init creates on real hosts)"
 docker exec "${CLUSTER}-control-plane" bash -c "
   mkdir -p '$DATA_PATH' \\
-           '$CONFIG_PATH'/{qbittorrent,prowlarr,sonarr,sonarr-4k,radarr,radarr-4k,lidarr,bazarr,bazarr-4k,plex,tautulli,seerr,qui,autobrr,maintainerr,pbh}
+           '$CONFIG_PATH'/{qbittorrent,prowlarr,sonarr,sonarr-4k,radarr,radarr-4k,lidarr,bazarr,bazarr-4k,sabnzbd,plex,tautulli,seerr,qui,autobrr,maintainerr,pbh}
   chown -R $SEEDBOX_PUID:$SEEDBOX_PGID '$DATA_PATH' '$CONFIG_PATH'"
 
 # The update and upgrade scenarios' extra step. Their roots are a host directory
@@ -746,7 +746,7 @@ fi
 # APPS is the app list bootstrap and init write into the grant. Every run wants
 # the whole catalog in front of it; the one step that proves a box with nothing
 # on sets it to `none`, the word for the empty list.
-APPS="qbittorrent,sonarr,radarr,lidarr,bazarr,prowlarr,plex,tautulli,seerr,qui,autobrr,maintainerr,pbh"
+APPS="qbittorrent,sonarr,radarr,lidarr,bazarr,sabnzbd,prowlarr,plex,tautulli,seerr,qui,autobrr,maintainerr,pbh"
 
 # box_bootstrap_args <extra...>: the arguments every bootstrap in this script
 # passes, without the one that decides whether it asks. The platform and root's
@@ -2172,13 +2172,26 @@ fresh() {
               autobrr/downloader/lidarr pbh/ready pbh/downloader \
               lidarr/downloadclient lidarr/rootfolder lidarr/hardlinks \
               prowlarr/application/lidarr qbittorrent/category/lidarr \
-              bazarr/ready bazarr/sonarr bazarr/radarr; do
+              bazarr/ready bazarr/sonarr bazarr/radarr \
+              sabnzbd/ready sabnzbd/data-contract \
+              sabnzbd/category/tv sabnzbd/category/movies sabnzbd/category/lidarr \
+              sonarr/sabnzbd radarr/sabnzbd lidarr/sabnzbd; do
     res=$(status_field "[s['result'] for s in d['steps'] if s['name']=='$step'][0]" 2>/dev/null || echo missing)
     detail=$(status_field "[s['detail'] for s in d['steps'] if s['name']=='$step'][0]" 2>/dev/null || echo missing)
     echo "  ${step}: ${res} ${detail}"
     [ "$res" = ok ] || { echo "${step} is ${res}: the Job did not register this connection"; fail=1; }
     case "$step" in
-      qui/ready | autobrr/ready | qui/login | autobrr/login | pbh/ready | bazarr/ready) ;;
+      qui/ready | autobrr/ready | qui/login | autobrr/login | pbh/ready | bazarr/ready | sabnzbd/ready) ;;
+      # The chart's init container seals the two download paths onto the data
+      # claim before the app starts, so a fresh install finds them already
+      # right; a row that says updated here would be the seal not reaching the
+      # running app.
+      sabnzbd/data-contract) [ "$detail" = unchanged ] || { echo "${step} was ${res} ${detail}, want unchanged on a fresh install"; fail=1; } ;;
+      # SABnzbd ships suggestion categories named tv and movies with no
+      # directory of their own, so the Job sets the directory on those two; a
+      # category it has to create is created.
+      sabnzbd/category/tv | sabnzbd/category/movies)
+        [ "$detail" = updated ] || { echo "${step} was ${res} ${detail}, want updated on a fresh install"; fail=1; } ;;
       # An Arr's hardlink setting is on in the image's own defaults, so the Job
       # finds it already right and the row says unchanged rather than created.
       lidarr/hardlinks) ;;
@@ -2488,7 +2501,7 @@ print(",".join(s.get("name", "?") for s in endpoint.get("authn_strategies") or [
 
   # Every opt-in app is behind the same login, and none of them keeps one of its
   # own: an unauthenticated request must reach the edge before the app does.
-  for app in qui autobrr maintainerr lidarr bazarr; do
+  for app in qui autobrr maintainerr lidarr bazarr sabnzbd; do
     app_headers="$WORK/unauth-${app}-headers.txt"
     app_code=$(curl -sS -o /dev/null -D "$app_headers" -w '%{http_code}' \
       --resolve "${DOMAIN}:443:${gw_addr}" --cacert "$WORK/pebble-root.pem" \
@@ -2688,6 +2701,51 @@ print(d["sonarr"]["ip"], d["radarr"]["ip"], d["general"]["use_sonarr"], d["gener
   echo "  /bazarr reads its pair: ${pair}"
   [ "$pair" = "sonarr radarr True True" ] ||
     { echo "Bazarr is not pointed at this release's own Sonarr and Radarr: ${pair}"; fail=1; }
+
+  # SABnzbd's page behind the session and its API with the key the init
+  # container sealed. Both of the chart's 403 switches are what the 200s prove:
+  # the Host is the box's name, which the image's entrypoint whitelists from
+  # SABNZBD__HOST_WHITELIST_ENTRIES, and the Gateway's X-Forwarded-For no longer
+  # marks the request external because the sealed file sets verify_xff_header
+  # off. Its categories are the Arrs' download directories, and each Arr holds
+  # the client.
+  # Its root answers a 303 to its wizard until a news server is configured,
+  # both under the prefix, so the check follows it.
+  sab_code=$(curl -sSL -o "$WORK/sabnzbd-authed.html" -w '%{http_code}' \
+    -b "$JAR" --resolve "${DOMAIN}:443:${gw_addr}" --cacert "$WORK/pebble-root.pem" \
+    "https://${DOMAIN}/sabnzbd/" 2>/dev/null || true)
+  echo "  GET https://${DOMAIN}/sabnzbd/ with the session: ${sab_code}"
+  [ "$sab_code" = 200 ] || { echo "the login did not give access to SABnzbd (${sab_code})"; fail=1; }
+  grep -qi '<html' "$WORK/sabnzbd-authed.html" ||
+    { echo "the 200 was not SABnzbd's page"; fail=1; }
+  sab_key=$($K -n "$NS" get secret s5n-keys -o jsonpath='{.data.sabnzbd-apikey}' | base64 -d)
+  sab_version=$(curl -sS -b "$JAR" --resolve "${DOMAIN}:443:${gw_addr}" --cacert "$WORK/pebble-root.pem" \
+    "https://${DOMAIN}/sabnzbd/api?mode=version&output=json" 2>/dev/null || true)
+  sab_cats=$(curl -sS -b "$JAR" --resolve "${DOMAIN}:443:${gw_addr}" --cacert "$WORK/pebble-root.pem" \
+    "https://${DOMAIN}/sabnzbd/api?mode=get_config&section=categories&output=json&apikey=${sab_key}" 2>/dev/null || true)
+  sab_misc=$(curl -sS -b "$JAR" --resolve "${DOMAIN}:443:${gw_addr}" --cacert "$WORK/pebble-root.pem" \
+    "https://${DOMAIN}/sabnzbd/api?mode=get_config&section=misc&keyword=complete_dir&output=json&apikey=${sab_key}" 2>/dev/null || true)
+  printf '%s' "$sab_version" >"$WORK/sabnzbd-version.json"
+  printf '%s' "$sab_cats" >"$WORK/sabnzbd-categories.json"
+  printf '%s' "$sab_misc" >"$WORK/sabnzbd-misc.json"
+  python3 - "$WORK/sabnzbd-version.json" "$WORK/sabnzbd-categories.json" "$WORK/sabnzbd-misc.json" <<'PY' || fail=1
+import json, sys
+version = json.load(open(sys.argv[1], encoding="utf-8"))
+complete = json.load(open(sys.argv[3], encoding="utf-8"))["config"]["misc"]["complete_dir"]
+cats = {c["name"]: c["dir"] for c in json.load(open(sys.argv[2], encoding="utf-8"))["config"]["categories"]}
+problems = []
+if not version.get("version"):
+    problems.append(f"mode=version answered {version!r}")
+if complete.rstrip("/") != "/data/downloads":
+    problems.append(f"complete_dir = {complete!r}, want the data claim")
+for name, direction in {"tv": "tv", "movies": "movies", "lidarr": "lidarr"}.items():
+    if cats.get(name) != direction:
+        problems.append(f"{name}: dir {cats.get(name)!r}, want {direction!r}")
+if problems:
+    print("SABnzbd: " + "; ".join(problems))
+    sys.exit(1)
+print(f"  SABnzbd {version['version']}: {complete}, categories {sorted(cats)}")
+PY
 
   # ---- the login is reachable only through the Gateway ----------------------
   # Authelia believes X-Forwarded-Proto and X-Forwarded-Host, so a pod that can
@@ -4289,7 +4347,7 @@ PY
   # Secret, a ServiceAccount, the Job and the policies, and no workload.
   apps_pods() {
     $K -n "$NS" get pods -o name 2>/dev/null |
-      grep -cE 'pod/(qbittorrent|sonarr|radarr|lidarr|bazarr|prowlarr|plex|tautulli|seerr|qui|autobrr|maintainerr|pbh)(-|$)' || true
+      grep -cE 'pod/(qbittorrent|sonarr|radarr|lidarr|bazarr|sabnzbd|prowlarr|plex|tautulli|seerr|qui|autobrr|maintainerr|pbh)(-|$)' || true
   }
   for i in $(seq 1 120); do
     [ "$(apps_pods)" = 0 ] && break
@@ -6530,8 +6588,8 @@ print(".".join(str(p) for p in tree))' "$CHART_VERSION"); then
   INSTALL_VERSION="$UPGRADE_FROM"
   # The published release's catalog is its own, and box refuses an app that
   # release's chart does not have: the app list here is the one its catalog
-  # names, which is every app below except lidarr and bazarr (both newer than
-  # ${UPGRADE_FROM}).
+  # names, which is every app below except lidarr, bazarr and sabnzbd (all newer
+  # than ${UPGRADE_FROM}).
   APPS="qbittorrent,sonarr,radarr,prowlarr,plex,tautulli,seerr,qui,autobrr,maintainerr,pbh"
   PUBLISHED_TRANSCRIPTS="$WORK/bootstrap1.txt"
   if bootstrap "$WORK/bootstrap1.txt"; then

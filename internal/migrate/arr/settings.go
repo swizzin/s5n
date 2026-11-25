@@ -59,13 +59,13 @@ var downloadClientsKnown = map[string]bool{
 	"sabnzbd": true, "utorrent": true, "vuze": true,
 }
 
-// downloadClientsBoxRuns are the download clients this box runs: qBittorrent,
-// and only qBittorrent (charts/s5n/catalog.yaml). Every other implementation a
-// source Arr holds is a client of a type box does not run, and its connection is
-// left exactly as it is and called out: rewriting it would point that client at
-// an app that does not speak its protocol, and deleting it is the operator's
-// call, never migrate's.
-var downloadClientsBoxRuns = map[string]bool{"qbittorrent": true}
+// downloadClientsBoxRuns are the download clients this box runs: qBittorrent
+// and SABnzbd (charts/s5n/catalog.yaml). Every other implementation a source
+// Arr holds is a client of a type box does not run, and its connection is left
+// exactly as it is and called out: rewriting it would point that client at an
+// app that does not speak its protocol, and deleting it is the operator's call,
+// never migrate's.
+var downloadClientsBoxRuns = map[string]bool{"qbittorrent": true, "sabnzbd": true}
 
 // notificationTargets are the notifications whose settings name another
 // machine on the source: a media server box may run, or the same one under a
@@ -321,8 +321,8 @@ func (a *analysis) downloadClient(p provider) error {
 	if has && !downloadClientsBoxRuns[impl] {
 		a.left = append(a.left, rewrite.Left{
 			File: a.file, Where: where + ".host", What: ad.text(),
-			Why: fmt.Sprintf("%s client: this box runs qBittorrent", p.implementation),
-			Detail: fmt.Sprintf("%q is a %s client and this box runs only qBittorrent, so a rewrite would point it at an app that does not speak its protocol; delete it in the Arr if you do not need it",
+			Why: fmt.Sprintf("%s client: this box runs qBittorrent and SABnzbd", p.implementation),
+			Detail: fmt.Sprintf("%q is a %s client and this box runs only qBittorrent and SABnzbd, so a rewrite would point it at an app that does not speak its protocol; delete it in the Arr if you do not need it",
 				p.name, p.implementation),
 		})
 		return nil

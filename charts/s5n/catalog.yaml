@@ -114,7 +114,7 @@ apps:
     # Arr with the indexer's base URL rewritten to <prowlarr>/<indexer id>/, so
     # a search is an HTTP call from the Arr's pod to Prowlarr
     # (Prowlarr v2.7, src/NzbDrone.Core/Applications/Sonarr/Sonarr.cs).
-    calls: [qbittorrent, prowlarr]
+    calls: [qbittorrent, sabnzbd, prowlarr]
     # An Arr's database and the config.xml that points at it, with the SQLite
     # companions a migration writes beside them (PathExtensions.cs at
     # v5.0.0.2907: the DB constant, GetDatabase and GetConfigPath). The log
@@ -130,7 +130,7 @@ apps:
     default: true
     # The same two as Sonarr, for the same reason
     # (src/NzbDrone.Core/Applications/Radarr/Radarr.cs).
-    calls: [qbittorrent, prowlarr]
+    calls: [qbittorrent, sabnzbd, prowlarr]
     # The same as Sonarr (PathExtensions.cs at v7.0.0.10815: radarr.db,
     # config.xml).
     snapshot: [radarr.db, radarr.db-wal, radarr.db-shm, config.xml]
@@ -142,7 +142,9 @@ apps:
     default: true
     # It pushes indexers to the Arrs and tests each application it registers, so
     # the Arrs are what it dials. It has download clients of its own upstream,
-    # but this chart configures none and nothing grabs through it.
+    # but this chart configures none and nothing grabs through it -- which is
+    # why it names neither qBittorrent nor SABnzbd: an app it does not register
+    # is one it never dials, and naming a disabled app would open nothing.
     calls: [sonarr, radarr, lidarr]
     # The same again (PathExtensions.cs at v2.7.0.5723: prowlarr.db,
     # config.xml).
@@ -300,7 +302,7 @@ apps:
     # and Prowlarr, which syncs each indexer into it over Lidarr's /api/v1
     # (prowlarr@v3.1.0.5799: src/NzbDrone.Core/Applications/Lidarr/Lidarr.cs,
     # LidarrSettings.cs and ILidarrV1Proxy).
-    calls: [qbittorrent, prowlarr]
+    calls: [qbittorrent, sabnzbd, prowlarr]
     # Its database, the config.xml that points at it, and the SQLite
     # companions (PathExtensions.cs at v3.1.2.4902: APP_CONFIG_FILE and DB).
     snapshot: [lidarr.db, lidarr.db-wal, lidarr.db-shm, config.xml]
@@ -323,6 +325,26 @@ apps:
     # config/config.yaml relative to the config directory;
     # bazarr/app/database.py:82-97: db/bazarr.db, journal_mode=WAL).
     snapshot: [config/config.yaml, db/bazarr.db, db/bazarr.db-wal, db/bazarr.db-shm]
+    questions: []
+
+  # Opt-in: usenet. It is the second download client, an alternative to
+  # qBittorrent rather than a companion, so a box that installed the defaults
+  # has one already. Its own login is off when no username and password are set
+  # (sabnzbd/interface.py:358-361 at 5.1.3), which is the state the chart
+  # leaves it in: the edge is the only login.
+  #
+  # It calls nothing inside the release: its news servers and indexers are
+  # outside it. The Arrs call it (their usenet download client), which is the
+  # `calls: [sabnzbd]` they carry below.
+  sabnzbd:
+    description: the usenet download client; it fetches what the Arrs grab
+    instances: false
+    default: false
+    # Everything SABnzbd knows -- the servers, the categories, the folders and
+    # the switches -- is this one INI file, which its own config writer rewrites
+    # in place as versions add keys. The history database and the queue are not
+    # state a new image rewrites.
+    snapshot: [sabnzbd.ini]
     questions: []
 
   # Opt-in, and louder so: it deletes media and torrents on rules the operator

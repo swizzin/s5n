@@ -87,7 +87,7 @@ spec:
       {{- end }}
       securityContext:
         {{- include "s5n.podSecurity" $root | nindent 8 }}
-      {{- $credentialInit := or (eq $inst.app "qbittorrent") (eq $inst.app "tautulli") (eq $inst.app "qui") (eq $inst.app "autobrr") (eq $inst.app "pbh") (eq $inst.app "bazarr") }}
+      {{- $credentialInit := or (eq $inst.app "qbittorrent") (eq $inst.app "tautulli") (eq $inst.app "qui") (eq $inst.app "autobrr") (eq $inst.app "pbh") (eq $inst.app "bazarr") (eq $inst.app "sabnzbd") }}
       {{- if or $root.Values.rehearsal $credentialInit }}
       initContainers:
         {{- if $root.Values.rehearsal }}
@@ -119,7 +119,66 @@ spec:
         # Each gets an init container that seals a known value into its own config
         # or user table first -- one that runs before the app, on the app's own
         # config subPath, so the file it edits is the file the app reads.
-        {{- if eq $inst.app "qbittorrent" }}
+        {{- if eq $inst.app "sabnzbd" }}
+        # SABnzbd needs two things before it reads its own settings, and the
+        # image's own entrypoint does the first half of the work: it copies
+        # /defaults/sabnzbd.ini to /config on a first start and rewrites
+        # api_key, nzb_key and host_whitelist from SABNZBD__* on every start.
+        # Three settings cannot be expressed that way, and each one is a 403 or
+        # a copy instead of a hardlink if it is wrong:
+        #
+        #   url_base           read when the web app is mounted, so the API
+        #                      lives under the prefix a running process never
+        #                      changes;
+        #   complete_dir       the image's default is Downloads/complete,
+        #   download_dir       relative to /config, so an Arr's import could
+        #                      never be hardlinked from /data;
+        #   verify_xff_header  the Gateway sends X-Forwarded-For carrying the
+        #                      person's real address, and SAB classifies that as
+        #                      external and answers 403 to the UI and most of
+        #                      the API. Off means it trusts the only thing in
+        #                      front of it, which is the Gateway's proxy.
+        #
+        # The first container is the app's own image because only it has the
+        # defaults file; it writes nothing when one exists. The second is the
+        # s5n image, which seals the keys by line (internal/sabconf) and writes
+        # nothing when the file already says what the chart wants.
+        - name: defaults
+          image: {{ include "s5n.image" (dict "root" $root "app" $inst.app "path" (printf "apps.%s.image" $inst.app) "image" $cfg.image) }}
+          imagePullPolicy: IfNotPresent
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              set -eu
+              if [ ! -f /config/sabnzbd.ini ]; then
+                cp /defaults/sabnzbd.ini /config/sabnzbd.ini
+              fi
+          securityContext:
+            {{- include "s5n.containerSecurity" $root | nindent 12 }}
+          volumeMounts:
+            - name: config
+              mountPath: /config
+              subPath: {{ $inst.name }}
+        - name: config
+          image: {{ include "s5n.image" (dict "root" $root "app" "s5n" "path" "wiring.image" "image" $root.Values.wiring.image) }}
+          imagePullPolicy: IfNotPresent
+          args:
+            - sabnzbd-config
+            - --conf=/config/sabnzbd.ini
+            - --api-key-file={{ printf "/etc/s5n/keys/%s-apikey" $inst.name }}
+            - --url-base={{ $urlBase }}
+            - --complete-dir=/data/downloads
+            - --download-dir=/data/downloads/incomplete
+          securityContext:
+            {{- include "s5n.containerSecurity" $root | nindent 12 }}
+          volumeMounts:
+            - name: config
+              mountPath: /config
+              subPath: {{ $inst.name }}
+            - name: keys
+              mountPath: /etc/s5n/keys
+              readOnly: true
+        {{- else if eq $inst.app "qbittorrent" }}
         - name: webui-credentials
           image: {{ include "s5n.image" (dict "root" $root "app" "s5n" "path" "wiring.image" "image" $root.Values.wiring.image) }}
           imagePullPolicy: IfNotPresent
@@ -391,6 +450,34 @@ spec:
             # config/config.yaml, so the chart's port is the one it listens on.
             - name: BAZARR__PORT
               value: {{ $cfg.port | quote }}
+            {{- else if eq $inst.app "sabnzbd" }}
+            # The image's own environment: its entrypoint passes the address and
+            # port to `--server` and rewrites the file's key lines from these.
+            - name: SABNZBD__PORT
+              value: {{ $cfg.port | quote }}
+            # The key the init container sealed into sabnzbd.ini, re-applied by
+            # the image's own entrypoint on every start, so a file an older
+            # image wrote is the release Secret's key too.
+            - name: SABNZBD__API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "s5n.secretName" $root }}
+                  key: {{ printf "%s-apikey" $inst.name }}
+            {{- with $root.Values.gateway.host }}
+            # The names a browser and the wiring Job use through the Gateway
+            # and the Service. SABnzbd's own DNS-rebinding guard refuses any
+            # Host that is not localhost, an IP literal, a *.local name or on
+            # this list -- and with its own login off that guard is always
+            # active (sabnzbd/interface.py:249-275 at 5.1.3). The entrypoint
+            # writes these beside the pod's hostname. The Service name is here
+            # because the Job dials http://<instance>:<port>, and a 403 there
+            # would look like a routing fault rather than a host check.
+            - name: SABNZBD__HOST_WHITELIST_ENTRIES
+              value: {{ printf "%s, %s" $inst.name . | quote }}
+            {{- else }}
+            - name: SABNZBD__HOST_WHITELIST_ENTRIES
+              value: {{ $inst.name | quote }}
+            {{- end }}
             {{- else if eq $inst.app "plex" }}
             # Absent (optional secretKeyRef) when no claim token was supplied at
             # install, or once it has already been consumed: the entrypoint only
@@ -781,6 +868,17 @@ spec:
         {{- else if eq $inst.app "bazarr" }}
         # One key per instance, so a second Bazarr has its own and neither can
         # read the other's settings.
+        - name: keys
+          secret:
+            secretName: {{ include "s5n.secretName" $root }}
+            defaultMode: 0440
+            items:
+              - key: {{ printf "%s-apikey" $inst.name }}
+                path: {{ printf "%s-apikey" $inst.name }}
+        {{- else if eq $inst.app "sabnzbd" }}
+        # The API key the init container seals into sabnzbd.ini and the app's
+        # entrypoint re-applies from SABNZBD__API_KEY, so the file, the app and
+        # the wiring Job all answer to the release Secret's one value.
         - name: keys
           secret:
             secretName: {{ include "s5n.secretName" $root }}

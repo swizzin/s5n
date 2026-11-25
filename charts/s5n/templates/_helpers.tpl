@@ -313,5 +313,7 @@ edge's login: the NetworkPolicy admits the Gateway and the wiring Job alone.
 /api/downloaders
 {{- else if eq .app "bazarr" -}}
 {{ printf "/%s/api/system/ping" .name }}
+{{- else if eq .app "sabnzbd" -}}
+{{ printf "/%s/api?mode=version&output=json" .name }}
 {{- end -}}
 {{- end -}}

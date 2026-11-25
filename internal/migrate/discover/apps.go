@@ -73,7 +73,11 @@ var catalogApps = map[string]appInfo{
 	// Bazarr takes instances too, but it is not an Arr: no library of its own
 	// (its tables are the Arrs' libraries as they last saw them), no root
 	// folders, and its port is a plain `general.port` in a YAML settings file.
-	"bazarr":   {instances: true, config: []string{configPath}, port: bazarrPort},
+	"bazarr": {instances: true, config: []string{configPath}, port: bazarrPort},
+	// SABnzbd is not an Arr either: it keeps no library, and its port is
+	// [misc] port in sabnzbd.ini, the one file its image passes to
+	// --config-file.
+	"sabnzbd":  {config: []string{configPath}, port: sabnzbdPort},
 	"prowlarr": {config: []string{configPath}, port: arrPort},
 	// Plex's images write the transcoder's directory into Preferences.xml as
 	// /transcode, which the chart mounts as an emptyDir.
@@ -388,6 +392,22 @@ func bazarrPort(_ string, fsys fs.FS, dir string, env map[string]string) (int, b
 		return 0, false, err
 	}
 	return yamlBlockPort(data, "general", "port")
+}
+
+// sabnzbdPort is SABnzbd's web port: SABNZBD__PORT, which its image passes to
+// --server and which wins over the file, then [misc] port in sabnzbd.ini
+// (apps/sabnzbd/entrypoint.sh in home-operations/containers). The key is the
+// first `port` in the file: [misc] is the first section, and the nested server
+// sections write their own ports below it.
+func sabnzbdPort(_ string, fsys fs.FS, dir string, env map[string]string) (int, bool, error) {
+	if p, ok := envPort(env, "SABNZBD__PORT"); ok {
+		return p, true, nil
+	}
+	data, ok, err := readConfigFile(fsys, dir, "sabnzbd.ini")
+	if err != nil || !ok {
+		return 0, false, err
+	}
+	return iniPort(data, "port")
 }
 
 // qbittorrentPort is qBittorrent's WebUI port. QSettings writes a key A/B/C as

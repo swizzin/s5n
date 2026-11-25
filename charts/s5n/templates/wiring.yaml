@@ -76,6 +76,20 @@ previous run's logs stay readable until then.
       "url" (printf "http://qbittorrent:%v" .Values.apps.qbittorrent.port)
       "savePath" "/data/downloads") }}
 {{- end }}
+{{- if and .Values.apps.sabnzbd .Values.apps.sabnzbd.enabled }}
+{{- /* The usenet download client. The Job creates a category per Arr instance
+       under its complete_dir and registers the client in every Arr, so this
+       block is the whole address plus the two paths the data contract gives it.
+       downloadDir is the temporary tree: SAB moves a finished job from there to
+       complete_dir, and both are on /data, so the move is a rename and an
+       Arr's import is a hardlink. */}}
+{{- $_ := set $cfg "sabnzbd" (dict
+      "url" (printf "http://sabnzbd:%v" .Values.apps.sabnzbd.port)
+      "urlBase" "/sabnzbd"
+      "apiKeyFile" "/etc/s5n/keys/sabnzbd-apikey"
+      "savePath" "/data/downloads"
+      "downloadDir" "/data/downloads/incomplete") }}
+{{- end }}
 {{- if and .Values.apps.prowlarr .Values.apps.prowlarr.enabled }}
 {{- $_ := set $cfg "prowlarr" (dict
       "url" (printf "http://prowlarr:%v" .Values.apps.prowlarr.port)

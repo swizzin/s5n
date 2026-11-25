@@ -379,6 +379,29 @@ apps:
     resources: {}
     env: {}
 
+  # SABnzbd is opt-in: it is the second download client, for usenet, and a box
+  # that installed the defaults has a torrent client already. It is served under
+  # /sabnzbd by its own url_base, which the init container seals before the app
+  # starts, so the route keeps the prefix instead of stripping it. Its own login
+  # is off: the edge is the only login, like every other app here.
+  #
+  # It is the one app whose download paths are on the config claim by default
+  # (Downloads/incomplete and Downloads/complete, relative to /config), so the
+  # init container also seals complete_dir and download_dir onto the data claim.
+  # That is what makes an Arr's import a hardlink instead of a copy.
+  sabnzbd:
+    enabled: false
+    image:
+      # Blessed variant from variants.yaml. The repository comes only from
+      # there; a tag or digest pin here is held within that repository.
+      variant: default
+    port: 8080
+    # SABnzbd's url_base is set by the init container from the instance name;
+    # nothing is stripped, because the app builds its own URLs under it.
+    rewritePath: false
+    resources: {}
+    env: {}
+
   # PeerBanHelper is opt-in: once it is connected it starts banning peers on the
   # rules it ships, and it wants a host name of its own (its WebUI calls
   # /api/... from the site root). It is the one app whose memory limit is

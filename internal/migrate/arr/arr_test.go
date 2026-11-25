@@ -56,6 +56,12 @@ apps:
     paths:
       - from: /downloads
         to: /data/downloads
+  sabnzbd:
+    kind: kubernetes
+    source: sabnzbd
+    config: /srv/apps/sabnzbd
+    ports: [8090]
+    paths: []
   plex:
     kind: kubernetes
     source: plex
@@ -65,12 +71,15 @@ apps:
 hosts:
   - host: 192.0.2.50
     leave: true
+  - host: 192.0.2.70
+    app: sabnzbd
 `
 
 // targets is what the release serves each app at.
 var targets = map[string]rewrite.Endpoint{
 	"sonarr":      {Host: "sonarr", Port: 8989, URLBase: "/sonarr"},
 	"qbittorrent": {Host: "qbittorrent", Port: 8080},
+	"sabnzbd":     {Host: "sabnzbd", Port: 8080, URLBase: "/sabnzbd"},
 	"plex":        {Host: "plex", Port: 32400},
 }
 
@@ -891,6 +900,7 @@ func TestLidarrTables(t *testing.T) {
 	in.Targets = map[string]rewrite.Endpoint{
 		"lidarr":      {Host: "lidarr", Port: 8686, URLBase: "/lidarr"},
 		"qbittorrent": {Host: "qbittorrent", Port: 8080},
+		"sabnzbd":     {Host: "sabnzbd", Port: 8080, URLBase: "/sabnzbd"},
 	}
 
 	rep, err := (rewriter{kind: kindLidarr}).Check(context.Background(), in)
@@ -959,6 +969,7 @@ func TestProwlarrApplications(t *testing.T) {
 		"prowlarr":    {Host: "prowlarr", Port: 9696, URLBase: "/prowlarr"},
 		"sonarr":      {Host: "sonarr", Port: 8989, URLBase: "/sonarr"},
 		"qbittorrent": {Host: "qbittorrent", Port: 8080},
+		"sabnzbd":     {Host: "sabnzbd", Port: 8080, URLBase: "/sabnzbd"},
 	}
 
 	rep, err := (rewriter{kind: kindProwlarr}).Check(context.Background(), in)
@@ -1217,5 +1228,47 @@ apps:
 	}
 	if got := query(t, filepath.Join(dir, "sonarr.db"), `SELECT Path FROM Series`)[0][0]; got != "/data/media/tv/Night Shift" {
 		t.Errorf("series path = %q, want /data/media/tv/Night Shift", got)
+	}
+}
+
+// TestSabnzbdClientIsRewrittenToTheBox: SABnzbd is a download client this box
+// runs, so a source Arr's SAB client is pointed at the release's SABnzbd --
+// host, port, URL base, TLS off -- exactly as qBittorrent's is. It is the row
+// the wiring Job then adopts by address, so leaving it behind would duplicate
+// it on the first run.
+func TestSabnzbdClientIsRewrittenToTheBox(t *testing.T) {
+	dir := t.TempDir()
+	newDB(t, filepath.Join(dir, "sonarr.db"), append(sonarrSchema(),
+		`INSERT INTO DownloadClients (Id, Name, Implementation, Settings) VALUES
+			(1, 'SAB', 'Sabnzbd', '{"host":"192.0.2.70","port":8080,"useSsl":true,"urlBase":"/","tvCategory":"TV"}')`,
+	)...)
+	writeFile(t, filepath.Join(dir, "config.xml"), "<Config>\n  <Port>8989</Port>\n</Config>")
+	in := input(t, dir, "sonarr", sonarrPlan)
+
+	rep, err := (rewriter{kind: kindSonarr}).Check(context.Background(), in)
+	if err != nil {
+		t.Fatalf("Check: %v", err)
+	}
+	if rep.Blocked() {
+		t.Fatalf("the SAB client blocked the run: %v", addressStrings(rep.Unclassified))
+	}
+	if len(rep.Left) != 0 {
+		t.Fatalf("Left = %+v, want SABnzbd to be a client this box runs", rep.Left)
+	}
+	if _, err := (rewriter{kind: kindSonarr}).Write(context.Background(), in); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	got := setting(t, filepath.Join(dir, "sonarr.db"), "SELECT Settings FROM DownloadClients WHERE Id = 1")
+	if got["host"] != "sabnzbd" || got["port"] != float64(8080) {
+		t.Errorf("client = %v, want the release's SABnzbd Service", got)
+	}
+	if got["urlBase"] != "/sabnzbd" {
+		t.Errorf("urlBase = %v, want the chart's prefix", got["urlBase"])
+	}
+	if got["useSsl"] != false {
+		t.Errorf("useSsl = %v, want false (the pod's own listener is plain HTTP)", got["useSsl"])
+	}
+	if got["apiKey"] != nil {
+		t.Errorf("apiKey was invented: %v", got["apiKey"])
 	}
 }

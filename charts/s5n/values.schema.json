@@ -448,6 +448,9 @@
         },
         "pbh": {
           "$ref": "#/definitions/simpleApp"
+        },
+        "sabnzbd": {
+          "$ref": "#/definitions/simpleApp"
         }
       }
     }

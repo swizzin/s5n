@@ -42,6 +42,7 @@ const (
 	appAutobrr     = "autobrr"
 	appPBH         = "pbh"
 	appMaintainerr = "maintainerr"
+	appSabnzbd     = "sabnzbd"
 )
 
 // CatalogApp is the catalog app an instance name belongs to: "sonarr-4k" is
@@ -209,7 +210,7 @@ func EnabledIn(values map[string]any, instance string) bool {
 // instead.
 func urlBase(app, instance string) (string, bool) {
 	switch app {
-	case appSonarr, appRadarr, appLidarr, appBazarr, appProwlarr, appQui, appMaintainerr, appTautulli:
+	case appSonarr, appRadarr, appLidarr, appBazarr, appProwlarr, appQui, appMaintainerr, appTautulli, appSabnzbd:
 		return "/" + instance, true
 	case appAutobrr:
 		return "/" + instance + "/", true

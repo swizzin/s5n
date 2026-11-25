@@ -223,6 +223,21 @@ if problems:
 PY
 echo "== bazarr half pair: one side wired, the other absent from the Job's config"
 
+# SABnzbd's two 403 traps are settings in a file, not environment the image
+# passes through: url_base is what mounts its API, and X-Forwarded-For through
+# the Gateway carries the person's real address, which SAB calls external and
+# refuses. The render has to carry both, plus the API key the release Secret
+# mints and the two download paths on the data claim.
+sab=$(helm template t charts/s5n -n seedbox -f charts/s5n/ci/catalog-values.yaml)
+for want in '- sabnzbd-config' '--url-base=/sabnzbd'             '--complete-dir=/data/downloads' '--download-dir=/data/downloads/incomplete'             '--api-key-file=/etc/s5n/keys/sabnzbd-apikey'             '- name: SABNZBD__API_KEY' '- name: SABNZBD__HOST_WHITELIST_ENTRIES'             'sabnzbd-apikey:' '"sabnzbd":{"apiKeyFile":"/etc/s5n/keys/sabnzbd-apikey"'             'path: /sabnzbd/api?mode=version&output=json'; do
+  grep -qF -- "$want" <<<"$sab" || { echo "the sabnzbd render has no ${want}"; exit 1; }
+done
+if helm template t charts/s5n -n seedbox -f charts/s5n/ci/default-values.yaml | grep -qi 'sabnzbd'; then
+  echo "the default render mentions sabnzbd: an opt-in app must render nothing when it is off"
+  exit 1
+fi
+echo "== sabnzbd render: sealed settings and key, host whitelist, readiness; nothing when off"
+
 # No app route keeps Envoy's 15s request timeout: an app behind the one login
 # is one person doing real work, and a long request (autobrr cleaning a large
 # releases database, an Arr's bulk edit or import) answered 504 by the gateway
