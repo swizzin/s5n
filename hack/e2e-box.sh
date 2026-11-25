@@ -6495,6 +6495,10 @@ print(".".join(str(p) for p in tree))' "$CHART_VERSION"); then
   fi
   BOX_BIN="$PUBLISHED_BOX"
   INSTALL_VERSION="$UPGRADE_FROM"
+  # The published release's catalog is its own, and box refuses an app that
+  # release's chart does not have: the app list here is the one its catalog
+  # names, which is every app below except lidarr (newer than ${UPGRADE_FROM}).
+  APPS="qbittorrent,sonarr,radarr,prowlarr,plex,tautulli,seerr,qui,autobrr,maintainerr,pbh"
   PUBLISHED_TRANSCRIPTS="$WORK/bootstrap1.txt"
   if bootstrap "$WORK/bootstrap1.txt"; then
     cat "$WORK/bootstrap1.txt"
