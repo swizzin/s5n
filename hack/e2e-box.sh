@@ -6884,13 +6884,14 @@ config_read() { # config_read <node> <path>
 
 # box_files_back <node> <config root>: box ran as root above, the way a real
 # host runs it, so the files it wrote outside the seedbox's own tree -- the
-# grant, the record, its own config, the .box record under the config root --
-# are root's. The rest of this script reads those as the runner and a run
-# without --keep deletes them, so they are handed back here. The seedbox's
-# config tree is deliberately not in the list: whose it is, is what the
+# grant, the record, its own config, the .box record under the config root, and
+# the run log -- are root's. The rest of this script reads those as the runner
+# and a run without --keep deletes them, so they are handed back here. The
+# seedbox's config tree is deliberately not in the list: whose it is, is what the
 # assertion before this one is about.
 box_files_back() { # box_files_back <node> <config root>
   node_root "$1" "chown $(id -u):$(id -g) '$WORK'/*.yaml '$WORK'/box.yaml 2>/dev/null || true
+    chown -R $(id -u):$(id -g) '$WORK'/logs 2>/dev/null || true
     chown -R $(id -u):$(id -g) '$2/.box' 2>/dev/null || true"
 }
 
@@ -8804,8 +8805,12 @@ rehearsal_box() {
   done
   # Which file the run read is the log's line, not the screen's (rule 5): a
   # refusal opens with its fact, and the command it prints names the snapshot.
-  # shellcheck disable=SC2046 # the logs are a list of files
-  grep -qhF "snapshot: ${rehearsal} (rehearsal)" $(box_logs migrate-apply) ||
+  # The logs are the root run's, handed back above with the rest of its files.
+  rehearsal_logs=$(box_logs migrate-apply)
+  [ -n "$rehearsal_logs" ] ||
+    { echo "the rehearsal apply wrote no run log under ${BOX_LOG_DIR}"; return 1; }
+  # shellcheck disable=SC2086 # the logs are a list of files
+  grep -qhF "snapshot: ${rehearsal} (rehearsal)" $rehearsal_logs ||
     { echo "the rehearsal's log does not name the snapshot it read"; return 1; }
   # The rehearsal runs with --details, so the count is the per-column list's
   # line: that list is the whole account the grouped confirm summarises.
