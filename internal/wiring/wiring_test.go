@@ -113,93 +113,111 @@ func arrCategoryField(instance string) string {
 
 func (f *fakeStack) arrHandler(instance, urlBase string) http.HandlerFunc {
 	api := arrAPI(instance)
-	categoryField := arrCategoryField(instance)
-	lidarr := api == "/api/v1"
 	return func(w http.ResponseWriter, r *http.Request) {
 		f.mu.Lock()
 		defer f.mu.Unlock()
-		p := strings.TrimPrefix(r.URL.Path, urlBase)
-		switch {
-		case p == "/ping":
-			_, _ = w.Write([]byte("pong"))
-		case p == api+"/qualityprofile" && r.Method == http.MethodGet:
-			writeJSON(w, []apps.Item{{"id": 1, "name": "Any"}})
-		case p == api+"/metadataprofile" && r.Method == http.MethodGet:
-			writeJSON(w, []apps.Item{{"id": 2, "name": "Standard"}})
-		case p == api+"/downloadclient/schema":
-			writeJSON(w, []apps.Item{{
-				"implementation": "QBittorrent", "configContract": "QBittorrentSettings",
-				"fields": []any{
-					map[string]any{"name": "host"},
-					map[string]any{"name": "port"},
-					map[string]any{"name": "useSsl"},
-					map[string]any{"name": "urlBase"},
-					map[string]any{"name": "username"},
-					map[string]any{"name": "password", "privacy": "password"},
-					map[string]any{"name": categoryField},
-				},
-			}})
-		case p == api+"/downloadclient" && r.Method == http.MethodGet:
-			out := []apps.Item{}
-			for _, c := range f.clients[instance] {
-				out = append(out, maskedItem(c, "password"))
+		f.serveArr(w, r, instance, strings.TrimPrefix(r.URL.Path, urlBase), api)
+	}
+}
+
+// serveArr is one Arr's routes. The caller holds the fake's lock.
+func (f *fakeStack) serveArr(w http.ResponseWriter, r *http.Request, instance, p, api string) {
+	switch {
+	case p == "/ping":
+		_, _ = w.Write([]byte("pong"))
+	case p == api+"/qualityprofile" && r.Method == http.MethodGet:
+		writeJSON(w, []apps.Item{{"id": 1, "name": "Any"}})
+	case p == api+"/metadataprofile" && r.Method == http.MethodGet:
+		writeJSON(w, []apps.Item{{"id": 2, "name": "Standard"}})
+	case strings.HasPrefix(p, api+"/downloadclient"):
+		f.serveArrClients(w, r, instance, p, api)
+	case p == api+"/rootfolder" && r.Method == http.MethodGet:
+		out := []apps.Item{}
+		for key := range f.folders {
+			name, path, _ := strings.Cut(key, ":")
+			if name == instance {
+				out = append(out, apps.Item{"path": path, "accessible": true})
 			}
-			writeJSON(w, out)
-		case p == api+"/downloadclient" && r.Method == http.MethodPost:
-			var body apps.Item
-			_ = json.NewDecoder(r.Body).Decode(&body)
-			f.nextID++
-			body["id"] = f.nextID
-			f.clients[instance] = append(f.clients[instance], body)
-			f.writes++
-			writeJSON(w, body)
-		case strings.HasSuffix(p, "/downloadclient/test"):
-			f.tests++
-			writeJSON(w, map[string]any{"ok": true})
-		case strings.HasPrefix(p, api+"/downloadclient/") && r.Method == http.MethodPut:
-			var body apps.Item
-			_ = json.NewDecoder(r.Body).Decode(&body)
-			for i, c := range f.clients[instance] {
-				if c.Int("id") == body.Int("id") {
-					f.clients[instance][i] = body
-					f.writes++
-					writeJSON(w, body)
-					return
-				}
-			}
-			http.Error(w, "not found", http.StatusNotFound)
-		case p == api+"/rootfolder" && r.Method == http.MethodGet:
-			out := []apps.Item{}
-			for key := range f.folders {
-				name, path, _ := strings.Cut(key, ":")
-				if name == instance {
-					out = append(out, apps.Item{"path": path, "accessible": true})
-				}
-			}
-			writeJSON(w, out)
-		case p == api+"/rootfolder" && r.Method == http.MethodPost:
-			var body apps.Item
-			_ = json.NewDecoder(r.Body).Decode(&body)
-			if lidarr && (body.Str("name") == "" || body.Int("defaultQualityProfileId") <= 0 || body.Int("defaultMetadataProfileId") <= 0) {
-				// Lidarr's own SharedValidator: a name and both profiles.
-				http.Error(w, "Name must not be empty, and both profiles must be chosen", http.StatusBadRequest)
+		}
+		writeJSON(w, out)
+	case p == api+"/rootfolder" && r.Method == http.MethodPost:
+		f.createRootFolder(w, r, instance, api)
+	case p == api+"/config/mediamanagement" && r.Method == http.MethodGet:
+		writeJSON(w, apps.Item{"id": 1, "copyUsingHardlinks": f.hardlink})
+	case p == api+"/config/mediamanagement" && r.Method == http.MethodPut:
+		var body apps.Item
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		f.hardlink = body.Bool("copyUsingHardlinks")
+		f.writes++
+		writeJSON(w, body)
+	default:
+		http.Error(w, "unexpected "+r.Method+" "+r.URL.Path, http.StatusNotFound)
+	}
+}
+
+// serveArrClients is one Arr's download-client resource: the schema, the list,
+// a create, the connection test and an update. The caller holds the lock.
+func (f *fakeStack) serveArrClients(w http.ResponseWriter, r *http.Request, instance, p, api string) {
+	switch {
+	case p == api+"/downloadclient/schema":
+		writeJSON(w, []apps.Item{{
+			"implementation": "QBittorrent", "configContract": "QBittorrentSettings",
+			"fields": []any{
+				map[string]any{"name": "host"},
+				map[string]any{"name": "port"},
+				map[string]any{"name": "useSsl"},
+				map[string]any{"name": "urlBase"},
+				map[string]any{"name": "username"},
+				map[string]any{"name": "password", "privacy": "password"},
+				map[string]any{"name": arrCategoryField(instance)},
+			},
+		}})
+	case p == api+"/downloadclient" && r.Method == http.MethodGet:
+		out := []apps.Item{}
+		for _, c := range f.clients[instance] {
+			out = append(out, maskedItem(c, "password"))
+		}
+		writeJSON(w, out)
+	case p == api+"/downloadclient" && r.Method == http.MethodPost:
+		var body apps.Item
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		f.nextID++
+		body["id"] = f.nextID
+		f.clients[instance] = append(f.clients[instance], body)
+		f.writes++
+		writeJSON(w, body)
+	case strings.HasSuffix(p, "/downloadclient/test"):
+		f.tests++
+		writeJSON(w, map[string]any{"ok": true})
+	case strings.HasPrefix(p, api+"/downloadclient/") && r.Method == http.MethodPut:
+		var body apps.Item
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		for i, c := range f.clients[instance] {
+			if c.Int("id") == body.Int("id") {
+				f.clients[instance][i] = body
+				f.writes++
+				writeJSON(w, body)
 				return
 			}
-			f.folders[instance+":"+body.Str("path")] = true
-			f.writes++
-			writeJSON(w, body)
-		case p == api+"/config/mediamanagement" && r.Method == http.MethodGet:
-			writeJSON(w, apps.Item{"id": 1, "copyUsingHardlinks": f.hardlink})
-		case p == api+"/config/mediamanagement" && r.Method == http.MethodPut:
-			var body apps.Item
-			_ = json.NewDecoder(r.Body).Decode(&body)
-			f.hardlink = body.Bool("copyUsingHardlinks")
-			f.writes++
-			writeJSON(w, body)
-		default:
-			http.Error(w, "unexpected "+r.Method+" "+r.URL.Path, http.StatusNotFound)
 		}
+		http.Error(w, "not found", http.StatusNotFound)
+	default:
+		http.Error(w, "unexpected "+r.Method+" "+r.URL.Path, http.StatusNotFound)
 	}
+}
+
+// createRootFolder records one root folder, and refuses a Lidarr body its own
+// SharedValidator would refuse: a name and both default profile ids.
+func (f *fakeStack) createRootFolder(w http.ResponseWriter, r *http.Request, instance, api string) {
+	var body apps.Item
+	_ = json.NewDecoder(r.Body).Decode(&body)
+	if api == "/api/v1" && (body.Str("name") == "" || body.Int("defaultQualityProfileId") <= 0 || body.Int("defaultMetadataProfileId") <= 0) {
+		http.Error(w, "Name must not be empty, and both profiles must be chosen", http.StatusBadRequest)
+		return
+	}
+	f.folders[instance+":"+body.Str("path")] = true
+	f.writes++
+	writeJSON(w, body)
 }
 
 func (f *fakeStack) prowlarrHandler() http.HandlerFunc {
