@@ -440,6 +440,19 @@ SECOND_PASSWORD=$(openssl rand -hex 16)
 printf '%s\n' "$SECOND_PASSWORD" >"$WORK/second-password"
 chmod 600 "$WORK/second-password"
 
+# SEEDBOX_PUID/PGID are the user the apps run as. 1000:1000 everywhere, except
+# where box reads an app's own config as this run's user: `box update` snapshots
+# what a step moves, and an app writes its config directory 0750 or tighter, so
+# box -- root on a real host, this user here -- can only read it when it is this
+# user's. The update scenarios set it to this user (never root: then nothing
+# about ownership would be tested), as the migrate scenario does.
+SEEDBOX_PUID=1000
+SEEDBOX_PGID=1000
+if { [ "$SCENARIO" = update ] || [ "$SCENARIO" = upgrade ]; } && [ "$(id -u)" != 0 ]; then
+  SEEDBOX_PUID=$(id -u)
+  SEEDBOX_PGID=$(id -g)
+fi
+
 # Only what `box init` creates on a real host, and only because --paths-in-node
 # keeps it from touching this node itself: the two volume roots and one
 # /config/<instance> directory per enabled app (setup.settingsDirs). The data
@@ -450,7 +463,7 @@ log "preparing host paths (what box init creates on real hosts)"
 docker exec "${CLUSTER}-control-plane" bash -c "
   mkdir -p '$DATA_PATH' \\
            '$CONFIG_PATH'/{qbittorrent,prowlarr,sonarr,sonarr-4k,radarr,radarr-4k,plex,tautulli,seerr,qui,autobrr,maintainerr,pbh}
-  chown -R 1000:1000 '$DATA_PATH' '$CONFIG_PATH'"
+  chown -R $SEEDBOX_PUID:$SEEDBOX_PGID '$DATA_PATH' '$CONFIG_PATH'"
 
 # The update and upgrade scenarios' extra step. Their roots are a host directory
 # mounted into the node, so box -- which runs as whoever started the e2e --
@@ -542,7 +555,7 @@ box_bootstrap_args() { # box_bootstrap_args [extra...]
     ${ns_args[@]+"${ns_args[@]}"} --domain "$DOMAIN"
     --data-path "$DATA_PATH" --config-path "$CONFIG_PATH"
     --apps "$APPS"
-    --puid 1000 --pgid 1000
+    --puid "$SEEDBOX_PUID" --pgid "$SEEDBOX_PGID"
     --login "$LOGIN" --password-file "$WORK/authelia-password"
     --paths-in-node --record "$WORK/cluster.yaml"
     --kubeconfig "$WORK/kubeconfig" "$@")
