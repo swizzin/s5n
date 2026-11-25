@@ -66,7 +66,11 @@ var catalogApps = map[string]appInfo{
 	"qbittorrent": {config: []string{configPath}, port: qbittorrentPort},
 	"sonarr":      {instances: true, library: true, config: []string{configPath}, port: arrPort},
 	"radarr":      {instances: true, library: true, config: []string{configPath}, port: arrPort},
-	"prowlarr":    {config: []string{configPath}, port: arrPort},
+	// Lidarr is the third Arr: the same config directory, the same
+	// <PREFIX>__SERVER__PORT and config.xml's <Port>, and root folders in its
+	// own database (PathExtensions.cs at v3.1.2.4902).
+	"lidarr":   {instances: true, library: true, config: []string{configPath}, port: arrPort},
+	"prowlarr": {config: []string{configPath}, port: arrPort},
 	// Plex's images write the transcoder's directory into Preferences.xml as
 	// /transcode, which the chart mounts as an emptyDir.
 	//

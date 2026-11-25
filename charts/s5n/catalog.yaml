@@ -143,7 +143,7 @@ apps:
     # It pushes indexers to the Arrs and tests each application it registers, so
     # the Arrs are what it dials. It has download clients of its own upstream,
     # but this chart configures none and nothing grabs through it.
-    calls: [sonarr, radarr]
+    calls: [sonarr, radarr, lidarr]
     # The same again (PathExtensions.cs at v2.7.0.5723: prowlarr.db,
     # config.xml).
     snapshot: [prowlarr.db, prowlarr.db-wal, prowlarr.db-shm, config.xml]
@@ -258,7 +258,7 @@ apps:
     # client test is an Arr API call, made from autobrr's pod. qui too: its
     # qBittorrent proxy is a download client autobrr can be pointed at, and a
     # missing edge here is a policy that drops that connection without a word.
-    calls: [qbittorrent, qui, sonarr, radarr]
+    calls: [qbittorrent, qui, sonarr, radarr, lidarr]
     # Its SQLite database and config.toml (internal/database/database.go at
     # v1.90.0: dataSourceName(cfg.ConfigPath, "autobrr.db");
     # internal/config/config.go: config.toml).
@@ -286,6 +286,24 @@ apps:
     # config.yml). The GeoIP database and the rule subscriptions are downloads
     # PBH fetches again, and the ban history is a log.
     snapshot: [config.yml, persist/peerbanhelper-nt.db, persist/peerbanhelper-nt.db-wal, persist/peerbanhelper-nt.db-shm]
+    questions: []
+
+  # Opt-in: music, from the tracker to the library. It is an Arr like the other
+  # two, but a box that installs the defaults has no music library, and its
+  # root folder needs a quality profile and a metadata profile the operator
+  # tunes, so it is asked for rather than assumed.
+  lidarr:
+    description: music, from the tracker to the library
+    instances: true
+    default: false
+    # The same two as Sonarr and Radarr: its own qBittorrent download client,
+    # and Prowlarr, which syncs each indexer into it over Lidarr's /api/v1
+    # (prowlarr@v3.1.0.5799: src/NzbDrone.Core/Applications/Lidarr/Lidarr.cs,
+    # LidarrSettings.cs and ILidarrV1Proxy).
+    calls: [qbittorrent, prowlarr]
+    # Its database, the config.xml that points at it, and the SQLite
+    # companions (PathExtensions.cs at v3.1.2.4902: APP_CONFIG_FILE and DB).
+    snapshot: [lidarr.db, lidarr.db-wal, lidarr.db-shm, config.xml]
     questions: []
 
   # Opt-in, and louder so: it deletes media and torrents on rules the operator

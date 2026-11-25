@@ -412,10 +412,10 @@ func queryRootFolders(ctx context.Context, db *sql.DB) ([]string, error) {
 //
 // The category is a field of the client's settings, and which of the two a
 // client has is its own: a Sonarr client stores tvCategory, a Radarr one
-// movieCategory (Download/Clients/QBittorrent/QBittorrentSettings.cs at the
-// versions this package names). A client that names no category downloads into
-// the client's save path with no category at all, and that is no answer: the
-// caller then keeps box's own.
+// movieCategory, a Lidarr one musicCategory (Download/Clients/QBittorrent/
+// QBittorrentSettings.cs at the versions this package names). A client that
+// names no category downloads into the client's save path with no category at
+// all, and that is no answer: the caller then keeps box's own.
 func queryDownloadCategory(ctx context.Context, db *sql.DB, app string) (string, error) {
 	found, err := hasTable(ctx, db, "DownloadClients")
 	if err != nil || !found {
@@ -466,6 +466,11 @@ func settingsCategory(settings, app string) string {
 	key := "tvCategory"
 	if app == "radarr" {
 		key = "movieCategory"
+	}
+	if app == "lidarr" {
+		// A Lidarr client has one category and it is the one its downloads are
+		// in (QBittorrentSettings.MusicCategory at v3.1.2.4902).
+		key = "musicCategory"
 	}
 	for k, v := range f {
 		if !strings.EqualFold(k, key) {

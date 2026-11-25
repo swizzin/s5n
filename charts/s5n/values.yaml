@@ -323,6 +323,31 @@ apps:
     resources: {}
     env: {}
 
+  # Lidarr is opt-in: a box that installs the defaults has no music library,
+  # and its root folder wants a quality profile and a metadata profile the
+  # operator tunes. It is the third Arr, so its pod spec, URL base, API key and
+  # Prowlarr registration are the same shape as Sonarr's and Radarr's.
+  lidarr:
+    enabled: false
+    image:
+      # Blessed variant from variants.yaml. The repository comes only from
+      # there; a tag or digest pin here is held within that repository.
+      variant: default
+    port: 8686
+    envPrefix: LIDARR
+    instances:
+      # Music lives in /data/media/music and downloads into qBittorrent's
+      # `lidarr` category, which is the category Lidarr's own qBittorrent client
+      # defaults to (Download/Clients/QBittorrent/QBittorrentSettings.cs at
+      # v3.1.2.4902: MusicCategory = "lidarr"). A second instance is the Arr
+      # pattern like any other, though music rarely needs one.
+      - suffix: ""
+        category: music
+        downloadCategory: lidarr
+        enabled: true
+    resources: {}
+    env: {}
+
   # PeerBanHelper is opt-in: once it is connected it starts banning peers on the
   # rules it ships, and it wants a host name of its own (its WebUI calls
   # /api/... from the site root). It is the one app whose memory limit is

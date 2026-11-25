@@ -29,6 +29,8 @@ apps:
     instances:
       - { suffix: "", category: movies, enabled: true }
       - { suffix: 4k, category: movies-4k, enabled: true }
+  lidarr:
+    enabled: true
   qui:
     enabled: true
   autobrr:

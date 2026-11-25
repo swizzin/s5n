@@ -826,6 +826,7 @@ func TestRealChartSnapshots(t *testing.T) {
 		"qbittorrent": "qBittorrent/qBittorrent.conf",
 		"sonarr":      "sonarr.db,sonarr.db-wal,sonarr.db-shm,config.xml",
 		"radarr":      "radarr.db,radarr.db-wal,radarr.db-shm,config.xml",
+		"lidarr":      "lidarr.db,lidarr.db-wal,lidarr.db-shm,config.xml",
 		"prowlarr":    "prowlarr.db,prowlarr.db-wal,prowlarr.db-shm,config.xml",
 		"plex": "Library/Application Support/Plex Media Server/Preferences.xml," +
 			"Library/Application Support/Plex Media Server/Plug-in Support/Databases/com.plexapp.plugins.library.db," +
@@ -871,11 +872,12 @@ func TestRealChartCallsAreTheReleaseEdges(t *testing.T) {
 	want := map[string]string{
 		"sonarr":      "prowlarr,qbittorrent",
 		"radarr":      "prowlarr,qbittorrent",
-		"prowlarr":    "radarr,sonarr",
+		"lidarr":      "prowlarr,qbittorrent",
+		"prowlarr":    "lidarr,radarr,sonarr",
 		"tautulli":    "plex",
 		"seerr":       "plex,radarr,sonarr",
 		"qui":         "qbittorrent",
-		"autobrr":     "qbittorrent,qui,radarr,sonarr",
+		"autobrr":     "lidarr,qbittorrent,qui,radarr,sonarr",
 		"maintainerr": "plex,qbittorrent,radarr,seerr,sonarr,tautulli",
 	}
 	for name, edges := range want {

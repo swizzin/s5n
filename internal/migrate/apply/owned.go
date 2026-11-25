@@ -78,7 +78,7 @@ func place(rec *wiring.OwnedRecord, holder string, o rewrite.Owned, apps map[str
 	app := apps[holder]
 	switch o.Kind {
 	case "downloadclient":
-		if app != appSonarr && app != appRadarr {
+		if app != appSonarr && app != appRadarr && app != appLidarr {
 			return fmt.Errorf("%s (%s): this box has no place in owned.json for a %s on %s", holder, app, o.Kind, app)
 		}
 		if prev := rec.ArrDownloadClientID(holder); prev != 0 && prev != o.ID {
@@ -117,7 +117,7 @@ func place(rec *wiring.OwnedRecord, holder string, o rewrite.Owned, apps map[str
 // what a Prowlarr application has to point at to be keyed by it.
 func isArr(target string, apps map[string]string) bool {
 	app, ok := apps[target]
-	return ok && (app == appSonarr || app == appRadarr || app == appProwlarr)
+	return ok && (app == appSonarr || app == appRadarr || app == appLidarr || app == appProwlarr)
 }
 
 // ownedConflict refuses a record that already names another id.

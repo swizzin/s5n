@@ -31,6 +31,7 @@ import (
 const (
 	appSonarr      = "sonarr"
 	appRadarr      = "radarr"
+	appLidarr      = "lidarr"
 	appProwlarr    = "prowlarr"
 	appQBittorrent = "qbittorrent"
 	appPlex        = "plex"
@@ -206,7 +207,7 @@ func EnabledIn(values map[string]any, instance string) bool {
 // instead.
 func urlBase(app, instance string) (string, bool) {
 	switch app {
-	case appSonarr, appRadarr, appProwlarr, appQui, appMaintainerr, appTautulli:
+	case appSonarr, appRadarr, appLidarr, appProwlarr, appQui, appMaintainerr, appTautulli:
 		return "/" + instance, true
 	case appAutobrr:
 		return "/" + instance + "/", true

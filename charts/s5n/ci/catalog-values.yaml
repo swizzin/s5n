@@ -23,6 +23,8 @@ apps:
       # No default in the chart: a helm install chooses its peer port, and the
       # band box picks from is the one Kubernetes does not assign by itself.
       port: 30080
+  lidarr:
+    enabled: true
   qui:
     enabled: true
   autobrr:

@@ -80,6 +80,7 @@ type apiKey struct {
 var apiKeys = map[string]apiKey{
 	appSonarr:   {file: configXML, read: xmlAPIKey},
 	appRadarr:   {file: configXML, read: xmlAPIKey},
+	appLidarr:   {file: configXML, read: xmlAPIKey},
 	appProwlarr: {file: configXML, read: xmlAPIKey},
 	appTautulli: {file: configINI, read: iniAPIKey},
 }
