@@ -656,6 +656,8 @@ done
 # chart's own e2e is where each one is proven to serve under its own base path.
 cat >"$WORK/apps-values.yaml" <<'EOF'
 apps:
+  lidarr:
+    enabled: true
   qui:
     enabled: true
   autobrr:
@@ -1061,7 +1063,7 @@ for spec in "box:${DOMAIN}" "plex:${PLEX_HOST}" "seerr:${SEERR_HOST}" "pbh:${PBH
 done
 
 # Through the Gateway from the host, on its LoadBalancer address.
-for path in /sonarr/ping /radarr/ping /prowlarr/ping; do
+for path in /sonarr/ping /radarr/ping /prowlarr/ping /lidarr/ping; do
   code=$(gw_get -s -o /dev/null -w '%{http_code}' "https://${DOMAIN}${path}")
   echo "GET ${path} via gateway -> ${code}"; [ "$code" = 200 ] || fail=1
 done
@@ -1070,7 +1072,7 @@ done
 # Arr runs External authentication. Its UI and /initialize.json answer with no
 # credential, while /api stays API-key-gated. Forms with no user is a lockout,
 # and through the Gateway that is exactly a 302 to /login instead of the shell.
-for spec in sonarr:api/v3 radarr:api/v3 prowlarr:api/v1; do
+for spec in sonarr:api/v3 radarr:api/v3 prowlarr:api/v1 lidarr:api/v1; do
   app=${spec%%:*}; api=${spec##*:}
   : >"$WORK/ui-headers"
   code=$(gw_get -s -D "$WORK/ui-headers" -o "$WORK/ui-body" -w '%{http_code}' "https://${DOMAIN}/${app}/" || true)
@@ -1333,7 +1335,7 @@ echo "qBittorrent enable_multi_connections_from_same_ip = ${multi} (PBH turns it
 # arrive without a redirect,
 # and the asset URLs it builds must resolve through the same prefix — that is
 # what makes the base-path setting right rather than merely present.
-for app in qui autobrr maintainerr; do
+for app in qui autobrr maintainerr lidarr; do
   : >"$WORK/${app}-headers"
   code=$(gw_get -s -D "$WORK/${app}-headers" -o "$WORK/${app}.html" -w '%{http_code}' \
     "https://${DOMAIN}/${app}/" || true)
@@ -1371,6 +1373,11 @@ for app in qui autobrr maintainerr; do
       # the prefix like any other path.
       code=$(gw_get -s -o /dev/null -w '%{http_code}' "https://${DOMAIN}/${app}/api/healthz/readiness" || true)
       echo "GET /${app}/api/healthz/readiness via gateway -> ${code}"; [ "$code" = 200 ] || fail=1 ;;
+    lidarr)
+      # An Arr's health endpoint is /ping at the app's URL base, unauthenticated:
+      # the same probe the chart's readinessProbe uses.
+      code=$(gw_get -s -o /dev/null -w '%{http_code}' "https://${DOMAIN}/${app}/ping" || true)
+      echo "GET /${app}/ping via gateway -> ${code}"; [ "$code" = 200 ] || fail=1 ;;
     maintainerr)
       # BASE_PATH covers every route, health included, so this one is reachable
       # through the Gateway like any other path.
@@ -1488,7 +1495,8 @@ $K -n "$NS" exec sonarr-0 -- sh -c '
 # Arr create a leaf under it and then fail to write there.
 for d in /srv/s5n/data/downloads/tv /srv/s5n/data/media/tv \
          /srv/s5n/data/downloads/4K /srv/s5n/data/media/4K \
-         /srv/s5n/data/downloads/4K/Movies /srv/s5n/data/media/4K/Movies; do
+         /srv/s5n/data/downloads/4K/Movies /srv/s5n/data/media/4K/Movies \
+         /srv/s5n/data/downloads/lidarr /srv/s5n/data/media/music; do
   got=$(docker exec "${CLUSTER}-control-plane" stat -c '%u:%g %a' "$d" 2>/dev/null || echo missing)
   echo "  ${d}: ${got}"
   case "$got" in 1000:1000\ *) ;; *) echo "want 1000:1000, got ${got}"; fail=1 ;; esac
@@ -1687,11 +1695,15 @@ app_snapshot() { # app_snapshot <dir> <app>
 snapshot() { # snapshot <dir>
   local dir=$1 key port app
   mkdir -p "$dir"
-  for app in sonarr radarr radarr-4k; do
+  for app in sonarr radarr radarr-4k lidarr; do
     key=$(arr_key "$app"); port=$(arr_port "$app")
+    api=api/v3
+    # Lidarr is the Arr whose API is /api/v1; the rest of the shape is the same
+    # download client, root folder and media-management resource.
+    [ "$app" = lidarr ] && api=api/v1
     for path in downloadclient rootfolder config/mediamanagement; do
       $K -n "$NS" exec "${app}-0" -- curl -s -H "X-Api-Key: $key" \
-        "http://localhost:${port}/${app}/api/v3/${path}" >"$dir/${app}-${path//\//-}.json"
+        "http://localhost:${port}/${app}/${api}/${path}" >"$dir/${app}-${path//\//-}.json"
     done
   done
   key=$(arr_key prowlarr); port=$(arr_port prowlarr)
@@ -1748,17 +1760,21 @@ echo "wiring status = ${first_status}"
 for expected in \
   data/dirs/downloads/tv data/dirs/media/tv \
   data/dirs/downloads/movies data/dirs/media/movies \
+  data/dirs/downloads/lidarr data/dirs/media/music \
   data/dirs/downloads/4K/Movies data/dirs/media/4K/Movies \
   sonarr/downloadclient sonarr/rootfolder sonarr/hardlinks \
   radarr/downloadclient radarr/rootfolder radarr/hardlinks \
   radarr-4k/downloadclient radarr-4k/rootfolder radarr-4k/hardlinks \
+  lidarr/downloadclient lidarr/rootfolder lidarr/hardlinks \
   prowlarr/application/sonarr prowlarr/application/radarr prowlarr/application/radarr-4k \
+  prowlarr/application/lidarr \
   qbittorrent/data-contract qbittorrent/category/tv qbittorrent/category/movies \
-  qbittorrent/category/4K/Movies \
-  data/hardlink/tv data/hardlink/movies data/hardlink/4K/Movies \
+  qbittorrent/category/4K/Movies qbittorrent/category/lidarr \
+  data/hardlink/tv data/hardlink/movies data/hardlink/4K/Movies data/hardlink/music \
   qui/ready qui/login qui/instance \
   autobrr/ready autobrr/login autobrr/downloader/qbittorrent \
   autobrr/downloader/sonarr autobrr/downloader/radarr autobrr/downloader/radarr-4k \
+  autobrr/downloader/lidarr \
   pbh/ready pbh/downloader \
   plex/ready tautulli/ready seerr/ready; do
   res=$(status_field "[s['result'] for s in d['steps'] if s['name']=='$expected'][0]" 2>/dev/null || echo missing)

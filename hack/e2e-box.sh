@@ -679,7 +679,7 @@ fi
 log "preparing host paths (what box init creates on real hosts)"
 docker exec "${CLUSTER}-control-plane" bash -c "
   mkdir -p '$DATA_PATH' \\
-           '$CONFIG_PATH'/{qbittorrent,prowlarr,sonarr,sonarr-4k,radarr,radarr-4k,plex,tautulli,seerr,qui,autobrr,maintainerr,pbh}
+           '$CONFIG_PATH'/{qbittorrent,prowlarr,sonarr,sonarr-4k,radarr,radarr-4k,lidarr,plex,tautulli,seerr,qui,autobrr,maintainerr,pbh}
   chown -R $SEEDBOX_PUID:$SEEDBOX_PGID '$DATA_PATH' '$CONFIG_PATH'"
 
 # The update and upgrade scenarios' extra step. Their roots are a host directory
@@ -746,7 +746,7 @@ fi
 # APPS is the app list bootstrap and init write into the grant. Every run wants
 # the whole catalog in front of it; the one step that proves a box with nothing
 # on sets it to `none`, the word for the empty list.
-APPS="qbittorrent,sonarr,radarr,prowlarr,plex,tautulli,seerr,qui,autobrr,maintainerr,pbh"
+APPS="qbittorrent,sonarr,radarr,lidarr,prowlarr,plex,tautulli,seerr,qui,autobrr,maintainerr,pbh"
 
 # box_bootstrap_args <extra...>: the arguments every bootstrap in this script
 # passes, without the one that decides whether it asks. The platform and root's
@@ -2147,7 +2147,7 @@ fresh() {
   assert_torrent_port "first install"
   # The data path was empty before this run: these steps are the wiring Job
   # making both trees itself, before the Arr root-folder steps that need them.
-  for d in downloads/tv media/tv downloads/movies media/movies; do
+  for d in downloads/tv media/tv downloads/movies media/movies downloads/lidarr media/music; do
     got=$(status_field "[s['detail'] for s in d['steps'] if s['name']=='data/dirs/$d'][0]" 2>/dev/null || echo missing)
     echo "  data/dirs/${d}: ${got}"
     [ "$got" = created ] || { echo "the wiring Job did not create data/dirs/${d}"; fail=1; }
@@ -2169,7 +2169,9 @@ fresh() {
   # qBittorrent with the password the Job wrote.
   for step in qui/ready qui/login qui/instance autobrr/ready autobrr/login \
               autobrr/downloader/qbittorrent autobrr/downloader/sonarr autobrr/downloader/radarr \
-              pbh/ready pbh/downloader; do
+              autobrr/downloader/lidarr pbh/ready pbh/downloader \
+              lidarr/downloadclient lidarr/rootfolder lidarr/hardlinks \
+              prowlarr/application/lidarr qbittorrent/category/lidarr; do
     res=$(status_field "[s['result'] for s in d['steps'] if s['name']=='$step'][0]" 2>/dev/null || echo missing)
     detail=$(status_field "[s['detail'] for s in d['steps'] if s['name']=='$step'][0]" 2>/dev/null || echo missing)
     echo "  ${step}: ${res} ${detail}"
@@ -2477,7 +2479,7 @@ print(",".join(s.get("name", "?") for s in endpoint.get("authn_strategies") or [
 
   # Every opt-in app is behind the same login, and none of them keeps one of its
   # own: an unauthenticated request must reach the edge before the app does.
-  for app in qui autobrr maintainerr; do
+  for app in qui autobrr maintainerr lidarr; do
     app_headers="$WORK/unauth-${app}-headers.txt"
     app_code=$(curl -sS -o /dev/null -D "$app_headers" -w '%{http_code}' \
       --resolve "${DOMAIN}:443:${gw_addr}" --cacert "$WORK/pebble-root.pem" \
@@ -4047,7 +4049,7 @@ PY
   echo "  after the rotation: ${created} created, ${updated} updated"
   [ "$created" = 0 ] && [ "$updated" = 0 ] ||
     { echo "the rotation wrote ${created} created / ${updated} updated: something still holds the qBittorrent password"; fail=1; }
-  for step in qui/instance autobrr/downloader/qbittorrent pbh/downloader sonarr/downloadclient radarr/downloadclient; do
+  for step in qui/instance autobrr/downloader/qbittorrent pbh/downloader sonarr/downloadclient radarr/downloadclient lidarr/downloadclient; do
     detail=$(status_field "[s['detail'] for s in d['steps'] if s['name']=='$step'][0]" 2>/dev/null || echo missing)
     echo "  ${step}: ${detail}"
     [ "$detail" = unchanged ] || { echo "${step} changed after a qBittorrent password rotation: it holds a copy"; fail=1; }
@@ -4251,7 +4253,7 @@ PY
   # Secret, a ServiceAccount, the Job and the policies, and no workload.
   apps_pods() {
     $K -n "$NS" get pods -o name 2>/dev/null |
-      grep -cE 'pod/(qbittorrent|sonarr|radarr|prowlarr|plex|tautulli|seerr|qui|autobrr|maintainerr|pbh)(-|$)' || true
+      grep -cE 'pod/(qbittorrent|sonarr|radarr|lidarr|prowlarr|plex|tautulli|seerr|qui|autobrr|maintainerr|pbh)(-|$)' || true
   }
   for i in $(seq 1 120); do
     [ "$(apps_pods)" = 0 ] && break
