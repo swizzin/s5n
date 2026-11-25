@@ -8,8 +8,10 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
@@ -219,4 +221,16 @@ func Retry(ctx context.Context, timeout time.Duration, fn func(context.Context) 
 			delay *= 2
 		}
 	}
+}
+
+// IsTimeout reports whether err is a request that ran out of time: the app
+// accepted the connection and never answered, or the caller's deadline passed.
+// It is how a step that writes and then verifies tells "the app is holding the
+// response" from "the app refused".
+func IsTimeout(err error) bool {
+	var ne net.Error
+	if errors.As(err, &ne) && ne.Timeout() {
+		return true
+	}
+	return errors.Is(err, context.DeadlineExceeded)
 }
