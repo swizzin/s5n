@@ -12,6 +12,7 @@ import (
 	"github.com/swizzin/s5n/internal/atomicfile"
 	"github.com/swizzin/s5n/internal/bazconf"
 	"github.com/swizzin/s5n/internal/qbtconf"
+	"github.com/swizzin/s5n/internal/sabconf"
 	"github.com/swizzin/s5n/internal/ttlconf"
 	"github.com/swizzin/s5n/internal/wiring"
 )
@@ -33,6 +34,8 @@ func main() {
 		err = runTautulliConfig(os.Args[2:])
 	case "bazarr-config":
 		err = runBazarrConfig(os.Args[2:])
+	case "sabnzbd-config":
+		err = runSabnzbdConfig(os.Args[2:])
 	case "probe":
 		err = runProbe(os.Args[2:])
 	case "version":
@@ -54,6 +57,7 @@ commands:
   qbt-config       seed the qBittorrent WebUI username and password into qBittorrent.conf
   tautulli-config  seed Tautulli's api_key into config.ini
   bazarr-config    seed Bazarr's api key and URL base into config/config.yaml
+  sabnzbd-config   seed SABnzbd's URL base, download paths and API key into sabnzbd.ini
   probe            dial one address and report whether it opened, for box's lock proof
   version          print the build version
 `)
@@ -228,5 +232,59 @@ func runBazarrConfig(args []string) error {
 		return err
 	}
 	fmt.Printf("bazarr-config: sealed %s (auth.apikey, general.base_url %s)\n", *conf, *baseURL)
+	return nil
+}
+
+// runSabnzbdConfig is SABnzbd's init container: it seals the URL prefix, the
+// two download paths, the API key and the X-Forwarded-For switch into
+// sabnzbd.ini before the app reads it. None of them can wait for the API: the
+// prefix is what mounts the API, the paths are what the first job uses, and the
+// XFF switch is what decides whether a request through the Gateway is answered
+// at all. It runs after the image's own defaults container has put a file
+// there, and writes nothing when the file already says what the chart wants.
+func runSabnzbdConfig(args []string) error {
+	fs := flag.NewFlagSet("sabnzbd-config", flag.ExitOnError)
+	conf := fs.String("conf", "/config/sabnzbd.ini", "path to SABnzbd's sabnzbd.ini")
+	apiKeyFile := fs.String("api-key-file", "", "file holding the API key to seed")
+	urlBase := fs.String("url-base", "/sabnzbd", "the URL prefix the app is served under, e.g. /sabnzbd")
+	completeDir := fs.String("complete-dir", "/data/downloads", "where finished downloads wait for an Arr to import")
+	downloadDir := fs.String("download-dir", "/data/downloads/incomplete", "where a download is unpacked while it runs")
+	verifyXFF := fs.Bool("verify-xff", false, "take the client address from X-Forwarded-For (off: trust the Gateway in front of this pod)")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if *apiKeyFile == "" {
+		return fmt.Errorf("--api-key-file is required")
+	}
+	apiKey, err := wiring.ReadSecret(*apiKeyFile)
+	if err != nil {
+		return err
+	}
+
+	existing, err := os.ReadFile(*conf)
+	if err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("read %s: %w", *conf, err)
+	}
+	out, changed, err := sabconf.Seal(existing, sabconf.Settings{
+		URLBase:     *urlBase,
+		CompleteDir: *completeDir,
+		DownloadDir: *downloadDir,
+		APIKey:      apiKey,
+		VerifyXFF:   *verifyXFF,
+	})
+	if err != nil {
+		return fmt.Errorf("%s: %w", *conf, err)
+	}
+	if !changed {
+		fmt.Printf("sabnzbd-config: %s already holds the sealed settings\n", *conf)
+		return nil
+	}
+	if err := os.MkdirAll(filepath.Dir(*conf), 0o750); err != nil {
+		return fmt.Errorf("create %s: %w", filepath.Dir(*conf), err)
+	}
+	if err := atomicfile.Write(*conf, out, 0o600); err != nil {
+		return err
+	}
+	fmt.Printf("sabnzbd-config: sealed %s (url_base %s, downloads under %s)\n", *conf, *urlBase, *completeDir)
 	return nil
 }
