@@ -2178,6 +2178,9 @@ fresh() {
     [ "$res" = ok ] || { echo "${step} is ${res}: the Job did not register this connection"; fail=1; }
     case "$step" in
       qui/ready | autobrr/ready | qui/login | autobrr/login | pbh/ready) ;;
+      # An Arr's hardlink setting is on in the image's own defaults, so the Job
+      # finds it already right and the row says unchanged rather than created.
+      lidarr/hardlinks) ;;
       *) [ "$detail" = created ] || { echo "${step} was ${res} ${detail}, want created on a fresh install"; fail=1; } ;;
     esac
   done
