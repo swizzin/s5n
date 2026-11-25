@@ -8989,7 +8989,7 @@ migrate_box() {
   # is a 4.0.14 and this makes it a 9.9.9 -- at zero replicas the image never
   # runs, and migrate reads the tag, which is what the version column compares.
   # The other apps keep the versions they really ran, so one run shows all three
-  # directions: sonarr down, radarr and pbh up, qbittorrent the same.
+  # directions: sonarr down, radarr and pbh up, qbittorrent the same or up.
   MIGRATE_NEWER_SONARR_IMAGE=ghcr.io/home-operations/sonarr:9.9.9.9999
   $K -n "$MIGRATE_LEGACY_NS" set image deployment/sonarr "sonarr=$MIGRATE_NEWER_SONARR_IMAGE" >/dev/null ||
     { echo "could not pin the source's Sonarr newer than the chart"; fail=1; return 0; }
@@ -9307,7 +9307,7 @@ migrate_box() {
       grep -E "plex" "$WORK/apply-migrate-rows.txt" | head -5; fail=1; }
   # The version column: what the source ran, what this release runs, and the
   # direction between them. The fixtures are real versions, so two directions are
-  # on the screen's table -- radarr and pbh up, qbittorrent the same -- and the
+  # on the screen's table -- radarr and pbh up, qbittorrent the same or up -- and the
   # downgrade --yolo allowed is on the row that needs the operator. sonarr is past
   # the confirm's fold, so its pair is read on the page, which lists every app.
   grep -qE '^  sonarr +.*9\.9\.9 → [0-9][0-9.]* +↓' "$WORK/apply-report-rows.txt" ||
@@ -9319,8 +9319,11 @@ migrate_box() {
   grep -qE '^  pbh +[0-9.]+ (KiB|MiB|GiB) +7\.3 → [0-9][0-9.]*  ↑' "$WORK/apply-migrate-rows.txt" ||
     { echo "the confirm does not show PeerBanHelper's upgrade:";
       grep -E "^  pbh" "$WORK/apply-migrate-rows.txt" | head -3; fail=1; }
-  grep -qE '^  qbittorrent +[0-9.]+ (KiB|MiB|GiB) +5\.3( |$)' "$WORK/apply-migrate-rows.txt" ||
-    { echo "the confirm does not show qBittorrent's one version:";
+  # The source's qBittorrent is pinned to the schema the migration reads; the
+  # chart's follows releases. The row is one version while they agree and an
+  # upgrade once the chart moves on, never a downgrade.
+  grep -qE '^  qbittorrent +[0-9.]+ (KiB|MiB|GiB) +5\.3( {2,}|$| → [0-9][0-9.]*  ↑)' "$WORK/apply-migrate-rows.txt" ||
+    { echo "the confirm does not show qBittorrent's version, or its move up:";
       grep -E "^  qbittorrent" "$WORK/apply-migrate-rows.txt" | head -3; fail=1; }
   grep -qE '^  ! sonarr +9\.9\.9 → [0-9][0-9.]* · the config is newer than the app$' "$WORK/apply-migrate-rows.txt" ||
     { echo "--yolo did not carry the downgrade as a row that needs the operator:";
