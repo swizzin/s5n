@@ -7,6 +7,7 @@ package main
 import (
 	_ "github.com/swizzin/s5n/internal/migrate/arr"
 	_ "github.com/swizzin/s5n/internal/migrate/autobrr"
+	_ "github.com/swizzin/s5n/internal/migrate/bazarr"
 	_ "github.com/swizzin/s5n/internal/migrate/maintainerr"
 	_ "github.com/swizzin/s5n/internal/migrate/peerbanhelper"
 	_ "github.com/swizzin/s5n/internal/migrate/plex"
