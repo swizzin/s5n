@@ -16,7 +16,7 @@ const token = "claim-SECRET-do-not-print"
 
 type confirmFunc func(string) (bool, error)
 
-func (f confirmFunc) Ask(q string) (bool, error) { return f(q) }
+func (f confirmFunc) Ask(q string, _ bool) (bool, error) { return f(q) }
 
 // withTransient is one apply as `box init` runs it: the same files, the same
 // chart, plus the hook the claim token comes through.

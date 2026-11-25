@@ -67,7 +67,7 @@ func (orderStorage) Delete(context.Context, release.StorageObject) error {
 // wants a terminal, and a test has none.
 type answer bool
 
-func (a answer) Ask(string) (bool, error) { return bool(a), nil }
+func (a answer) Ask(string, bool) (bool, error) { return bool(a), nil }
 
 type orderFixture struct {
 	app     *release.Applier

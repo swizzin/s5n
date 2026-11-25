@@ -312,8 +312,12 @@ type Reporter interface {
 	Created(paths []string)
 	// Start begins a step.
 	Start(op Op) Handle
-	// Confirm asks one yes/no question and leaves a record of the answer.
-	Confirm(question string) (bool, error)
+	// Confirm asks one yes/no question and leaves a record of the answer. def is
+	// the answer a bare enter gives: the flow chooses it per question, because a
+	// question about something the run exists to do (the one install, creating
+	// the paths a box needs) is asked with yes as the default and every question
+	// about changing a box that is serving is asked with no.
+	Confirm(question string, def bool) (bool, error)
 	// Banner is the final success card. The plain transcript has no card.
 	Banner(title, detail string)
 	// Error renders a failure once, at the end.
@@ -1038,8 +1042,9 @@ func (h *plainHandle) Failed(error) {
 
 // Ask is release.Confirmer and platform.Confirmer: the same question the live
 // reporter draws a form for, answered on the transcript. It names Confirm
-// because that is what the plain path asks; the flows call Ask.
-func (p *Plain) Ask(question string) (bool, error) { return p.Confirm(question) }
+// because that is what the plain path asks; the flows call Ask, and def is what
+// the flow decided a bare enter means.
+func (p *Plain) Ask(question string, def bool) (bool, error) { return p.Confirm(question, def) }
 
 // Confirm is one yes/no question. --yes answers it, and there is no answer
 // without a reader: a prompt that cannot be shown is a refusal rather than an
@@ -1047,7 +1052,10 @@ func (p *Plain) Ask(question string) (bool, error) { return p.Confirm(question) 
 // must never mean "go ahead". cmd/box only gives a Plain a reader when stdin is
 // a terminal -- a character device is not enough, because /dev/null is one and
 // a question on it fails with an EOF nobody typed.
-func (p *Plain) Confirm(question string) (bool, error) {
+//
+// def is the answer an empty line gives, and the prompt says which way it cuts
+// ([Y/n] or [y/N]). An explicit y or n is always taken over it.
+func (p *Plain) Confirm(question string, def bool) (bool, error) {
 	if p.Yes {
 		return true, nil
 	}
@@ -1059,12 +1067,18 @@ func (p *Plain) Confirm(question string) (bool, error) {
 	}
 	// The question mark in the gutter, then the question as the flow wrote it:
 	// one mark per line, and a question is a mark of its own (rule 1).
-	fmt.Fprintf(p.out(), "%s %s [y/N] ", MarkAsk, question)
+	defaultHint := "[y/N]"
+	if def {
+		defaultHint = "[Y/n]"
+	}
+	fmt.Fprintf(p.out(), "%s %s %s ", MarkAsk, question, defaultHint)
 	line, err := p.reader.ReadString('\n')
 	if err != nil && line == "" {
 		return false, fmt.Errorf("read the answer: %w", err)
 	}
 	switch strings.ToLower(strings.TrimSpace(line)) {
+	case "":
+		return def, nil
 	case "y", "yes":
 		return true, nil
 	}

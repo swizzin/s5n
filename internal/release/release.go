@@ -97,9 +97,11 @@ type Step struct {
 
 // Confirmer asks the one question. It is an interface so the prompt's "no"
 // path can be tested, and because the voice is the only thing that varies
-// between an interactive box and --yes.
+// between an interactive box and --yes. def is the answer a bare enter gives;
+// the flows in this package ask with no, because every one of them changes a box
+// that is serving.
 type Confirmer interface {
-	Ask(question string) (bool, error)
+	Ask(question string, def bool) (bool, error)
 }
 
 // HostPlan is what apply tells its per-host TLS step. Domain is the box's own
@@ -916,7 +918,7 @@ func (a *Applier) Apply(ctx context.Context, opts Options) (Result, error) {
 		r.List("snapshots", lines)
 	}
 
-	ok, err := a.Confirm.Ask(fmt.Sprintf("apply %s in %s?", ReleaseName, namespace))
+	ok, err := a.Confirm.Ask(fmt.Sprintf("apply %s in %s?", ReleaseName, namespace), false)
 	if err != nil {
 		return res, err
 	}

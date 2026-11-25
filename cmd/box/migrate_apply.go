@@ -656,6 +656,9 @@ func migrateConfirm(out say.Reporter, ask asker, namespace string, opts askOptio
 		if err := showSummary(out, s, opts.Details, plat, lead, screen); err != nil {
 			return false, err
 		}
+		// Every question here is asked with no as the default: a migration
+		// rewrites a source's configs and switches apps on, and pressing enter
+		// at the end of a long screen should not be a decision to do that.
 		if opts.Rehearsal {
 			// The screen a person reads before the first write says what this
 			// box is, not only what moves into it.
@@ -663,12 +666,12 @@ func migrateConfirm(out say.Reporter, ask asker, namespace string, opts askOptio
 				"nothing leaves this box: no internet egress, and the release's own pods only",
 				"every torrent starts stopped, and no data is renamed",
 			})
-			return ask.Ask(fmt.Sprintf("rehearse these %s into %s?", appsWord(len(s.Instances)), target))
+			return ask.Ask(fmt.Sprintf("rehearse these %s into %s?", appsWord(len(s.Instances)), target), false)
 		}
 		if plat != nil {
-			return ask.Ask(fmt.Sprintf("install, then move these %s in?", appsWord(len(s.Instances))))
+			return ask.Ask(fmt.Sprintf("install, then move these %s in?", appsWord(len(s.Instances))), false)
 		}
-		return ask.Ask(fmt.Sprintf("move these %s in?", appsWord(len(s.Instances))))
+		return ask.Ask(fmt.Sprintf("move these %s in?", appsWord(len(s.Instances))), false)
 	}
 }
 

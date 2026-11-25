@@ -209,7 +209,7 @@ func (r *Rollback) Run(ctx context.Context, opts RollbackOptions) (RollbackResul
 	r.report().Warn(fmt.Sprintf("%s's newest snapshot is %s old (taken %s, before %s -> %s). Rolling back puts %s back on %s and loses everything %s wrote since.",
 		res.App, ageText(r.now().Sub(res.Taken)), res.Taken.UTC().Format("2006-01-02 15:04 UTC"),
 		res.From, res.To, res.App, res.Image.Label(), res.App))
-	ok, err := r.Confirm.Ask(fmt.Sprintf("roll %s back to %s?", res.App, res.Image.Label()))
+	ok, err := r.Confirm.Ask(fmt.Sprintf("roll %s back to %s?", res.App, res.Image.Label()), false)
 	if err != nil {
 		return res, err
 	}

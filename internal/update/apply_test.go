@@ -561,7 +561,7 @@ func (applyStorage) Delete(context.Context, release.StorageObject) error { retur
 // loggingConfirm answers yes and records the answer in the call log.
 type loggingConfirm struct{ log *callLog }
 
-func (c loggingConfirm) Ask(string) (bool, error) {
+func (c loggingConfirm) Ask(string, bool) (bool, error) {
 	c.log.add("confirm")
 	return true, nil
 }

@@ -1339,9 +1339,11 @@ func (d *Decision) reportPaths(paths []pathTarget, uid, gid int, unattended bool
 		}
 		ok, err := d.Prompt.Confirm(Confirm{
 			Prompt: "create " + paths[i].path + " on that filesystem?",
-			// The safe answer stays the focused one: init never creates a
-			// directory because somebody pressed enter.
-			Default:     false,
+			// Yes is the default: init cannot finish on a path that is not there
+			// (it refuses without asking on an unattended run), so the person
+			// who reached this question has one answer that goes on. Both paths
+			// are on the block above it.
+			Default:     true,
 			Affirmative: "create it",
 			Negative:    "stop here",
 		})

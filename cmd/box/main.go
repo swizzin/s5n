@@ -210,8 +210,11 @@ func live(r say.Reporter) (*tui.Reporter, bool) {
 }
 
 // asker is the one question release.Confirmer and platform.Confirmer both ask.
+// def is the answer a bare enter gives, and the flow chooses it per question:
+// the one guided install and init's own "create this path?" are asked with yes,
+// every question about a box that is already serving with no.
 type asker interface {
-	Ask(question string) (bool, error)
+	Ask(question string, def bool) (bool, error)
 }
 
 // confirmer is what a flow asks its one question with: the live reporter, which
@@ -243,7 +246,7 @@ func confirmer(out say.Reporter, yes bool) asker {
 // the form again.
 type answered struct{}
 
-func (answered) Ask(string) (bool, error) { return true, nil }
+func (answered) Ask(string, bool) (bool, error) { return true, nil }
 
 // chartFlags are the two flags that name a published release. Every command
 // that loads a chart takes them from here, so bootstrap, init and apply cannot

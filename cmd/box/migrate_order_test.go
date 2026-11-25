@@ -37,7 +37,7 @@ type stepAsker struct {
 	asked []string
 }
 
-func (a *stepAsker) Ask(question string) (bool, error) {
+func (a *stepAsker) Ask(question string, _ bool) (bool, error) {
 	a.order = append(a.order, "ask")
 	a.asked = append(a.asked, question)
 	return a.yes, nil

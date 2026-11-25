@@ -18,16 +18,19 @@ import (
 	"github.com/swizzin/s5n/internal/setup"
 )
 
-// fakeAsker is the one question: what it was asked, and the answer it gives.
+// fakeAsker is the one question: what it was asked, the default it was asked
+// with, and the answer it gives.
 type fakeAsker struct {
 	answer   bool
 	err      error
 	asked    []string
+	defaults []bool
 	onAnswer func()
 }
 
-func (f *fakeAsker) Ask(question string) (bool, error) {
+func (f *fakeAsker) Ask(question string, def bool) (bool, error) {
 	f.asked = append(f.asked, question)
+	f.defaults = append(f.defaults, def)
 	if f.onAnswer != nil {
 		f.onAnswer()
 	}
@@ -78,6 +81,12 @@ func TestOneQuestionInstallsThePlatformAfterTheAnswer(t *testing.T) {
 	}
 	if want := "install the platform and alice's seedbox?"; h.ask.asked[0] != want {
 		t.Errorf("the question was %q, want %q", h.ask.asked[0], want)
+	}
+	// A bare enter installs: the operator has answered every question of a fresh
+	// host already, and this is the decision they came for (rule 10's prompt says
+	// so: [Y/n]).
+	if len(h.ask.defaults) != 1 || !h.ask.defaults[0] {
+		t.Errorf("the question was asked with default %v, want yes", h.ask.defaults)
 	}
 	if h.platform != 1 {
 		t.Errorf("the platform was installed %d times, want once", h.platform)

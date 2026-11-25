@@ -1102,10 +1102,10 @@ func (noHandle) Done(string)           {}
 func (noHandle) DoneAs(string, string) {}
 func (noHandle) Failed(error)          {}
 
-// Confirm asks with the same huh confirm init uses, on no by default, and
-// leaves the same ✓ record line a setup question does. --yes answers without a
-// form and records the answer the same way.
-func (r *Reporter) Confirm(question string) (bool, error) {
+// Confirm asks with the same huh confirm init uses, on the default the flow
+// chose for this question, and leaves the same ✓ record line a setup question
+// does. --yes answers without a form and records the answer the same way.
+func (r *Reporter) Confirm(question string, def bool) (bool, error) {
 	r.stopActive()
 	r.ui.chrome.phase = r.chrome.phase
 	r.ui.chrome.question = ""
@@ -1115,12 +1115,12 @@ func (r *Reporter) Confirm(question string) (bool, error) {
 		r.ui.record(question, "yes")
 		return true, nil
 	}
-	return r.ui.Confirm(setup.Confirm{Prompt: question, Default: false})
+	return r.ui.Confirm(setup.Confirm{Prompt: question, Default: def})
 }
 
 // Ask is release.Confirmer and platform.Confirmer: the same question, the same
-// huh form, the same record line.
-func (r *Reporter) Ask(question string) (bool, error) { return r.Confirm(question) }
+// huh form, the same record line, and the default the flow chose for it.
+func (r *Reporter) Ask(question string, def bool) (bool, error) { return r.Confirm(question, def) }
 
 // Error is the end of a failed run: one ✗ row, its reason hanging under it, and
 // the run log's path last. A failure is a row like any other -- there is no

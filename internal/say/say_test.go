@@ -15,22 +15,25 @@ func TestPlainConfirmAnswers(t *testing.T) {
 	cases := []struct {
 		name string
 		in   string
+		def  bool
 		want bool
 	}{
-		{"yes", "y\n", true},
-		{"yes spelled out", "yes\n", true},
-		{"yes in capitals", "Yes\n", true},
-		{"surrounding whitespace", "  y  \n", true},
-		{"no", "n\n", false},
-		{"no spelled out", "no\n", false},
-		{"an empty line takes the default, which is no", "\n", false},
-		{"anything else is no", "sure, why not\n", false},
-		{"a whole line without its newline still answers", "y", true},
+		{"yes", "y\n", false, true},
+		{"yes spelled out", "yes\n", false, true},
+		{"yes in capitals", "Yes\n", false, true},
+		{"surrounding whitespace", "  y  \n", false, true},
+		{"no", "n\n", false, false},
+		{"no spelled out", "no\n", false, false},
+		{"an empty line takes a no default", "\n", false, false},
+		{"an empty line takes a yes default", "\n", true, true},
+		{"an explicit no beats a yes default", "n\n", true, false},
+		{"anything else is no", "sure, why not\n", false, false},
+		{"a whole line without its newline still answers", "y", false, true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			p := &Plain{In: strings.NewReader(tc.in)}
-			got, err := p.Confirm("apply s5n in the seedbox namespace?")
+			got, err := p.Confirm("apply s5n in the seedbox namespace?", tc.def)
 			if err != nil {
 				t.Fatalf("Confirm: %v", err)
 			}
@@ -45,7 +48,7 @@ func TestPlainConfirmAnswers(t *testing.T) {
 // nothing is read from a stdin nobody is typing into.
 func TestPlainConfirmYesNeverReads(t *testing.T) {
 	p := &Plain{Yes: true, In: failingReader{}}
-	got, err := p.Confirm("install the platform layer?")
+	got, err := p.Confirm("install the platform layer?", false)
 	if err != nil {
 		t.Fatalf("Confirm: %v", err)
 	}
@@ -58,7 +61,7 @@ func TestPlainConfirmYesNeverReads(t *testing.T) {
 // was not there, and saying so is different from being told no.
 func TestPlainConfirmReportsEOF(t *testing.T) {
 	p := &Plain{In: strings.NewReader("")}
-	if _, err := p.Confirm("apply s5n?"); !errors.Is(err, io.EOF) {
+	if _, err := p.Confirm("apply s5n?", false); !errors.Is(err, io.EOF) {
 		t.Fatalf("err = %v, want io.EOF", err)
 	}
 }
@@ -67,7 +70,7 @@ func TestPlainConfirmReportsEOF(t *testing.T) {
 // refusal rather than an implicit yes: box writes to a cluster as root.
 func TestPlainConfirmRefusesWithoutATerminal(t *testing.T) {
 	p := &Plain{}
-	_, err := p.Confirm("apply s5n?")
+	_, err := p.Confirm("apply s5n?", false)
 	if err == nil {
 		t.Fatal("a prompt with nobody to ask answered yes")
 	}
@@ -80,14 +83,14 @@ func TestPlainConfirmRefusesWithoutATerminal(t *testing.T) {
 // answer.
 func TestPlainAskIsConfirm(t *testing.T) {
 	p := &Plain{In: strings.NewReader("y\n")}
-	ok, err := p.Ask("apply s5n?")
+	ok, err := p.Ask("apply s5n?", false)
 	if err != nil {
 		t.Fatalf("Ask: %v", err)
 	}
 	if !ok {
 		t.Fatal("Ask answered no to a y")
 	}
-	if _, err := (&Plain{}).Ask("apply s5n?"); err == nil {
+	if _, err := (&Plain{}).Ask("apply s5n?", false); err == nil {
 		t.Fatal("Ask without a terminal answered")
 	}
 }
@@ -217,11 +220,29 @@ func TestPlainPhaseIsALabel(t *testing.T) {
 func TestPlainConfirmAsksWithTheQuestionMark(t *testing.T) {
 	var buf bytes.Buffer
 	p := &Plain{W: &buf, In: strings.NewReader("y\n")}
-	yes, err := p.Confirm("install the platform layer?")
+	yes, err := p.Confirm("install the platform layer?", false)
 	if err != nil || !yes {
 		t.Fatalf("answer = %v, %v", yes, err)
 	}
 	if got, want := buf.String(), "? install the platform layer? [y/N] "; got != want {
 		t.Fatalf("prompt = %q, want %q", got, want)
+	}
+}
+
+// The default a flow chose is on the prompt itself: [Y/n] says a bare enter
+// installs, [y/N] says it does not, and the same question asked both ways shows
+// both.
+func TestPlainConfirmShowsTheDefaultItWasGiven(t *testing.T) {
+	var buf bytes.Buffer
+	p := &Plain{W: &buf, In: strings.NewReader("\ny\n")}
+	if yes, err := p.Confirm("install the platform and alice's seedbox?", true); err != nil || !yes {
+		t.Fatalf("an empty line over a yes default answered %v, %v", yes, err)
+	}
+	if yes, err := p.Confirm("apply s5n in the seedbox namespace?", false); err != nil || !yes {
+		t.Fatalf("an explicit y over a no default answered %v, %v", yes, err)
+	}
+	want := "? install the platform and alice's seedbox? [Y/n] ? apply s5n in the seedbox namespace? [y/N] "
+	if got := buf.String(); got != want {
+		t.Fatalf("prompts = %q, want %q", got, want)
 	}
 }

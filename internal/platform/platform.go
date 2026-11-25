@@ -260,9 +260,11 @@ type Firewall interface {
 	Trust(ctx context.Context, cidrs []string) error
 }
 
-// Confirmer asks the one question before the first write.
+// Confirmer asks the one question before the first write. def is the answer a
+// bare enter gives: the platform layer is asked with no, because it is a change
+// to a host that already runs.
 type Confirmer interface {
-	Ask(question string) (bool, error)
+	Ask(question string, def bool) (bool, error)
 }
 
 // Decision is one `box bootstrap`'s platform half.
@@ -378,7 +380,7 @@ func (d *Decision) Apply(ctx context.Context, components []bootstrap.ComponentRe
 	}
 
 	if !d.CallerConfirms {
-		ok, err := d.Confirm.Ask("install the platform layer?")
+		ok, err := d.Confirm.Ask("install the platform layer?", false)
 		if err != nil {
 			return res, err
 		}

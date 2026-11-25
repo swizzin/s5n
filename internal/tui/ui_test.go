@@ -172,6 +172,30 @@ func TestConfirmUsesTheDefaultAndTheFlowLabels(t *testing.T) {
 	}
 }
 
+// A question whose flow chose yes as the default starts on yes and takes it from
+// a bare enter: the live form draws the same [Y/n] the plain prompt writes.
+func TestConfirmStartsOnTheDefaultTheFlowChose(t *testing.T) {
+	u, out := line("\n")
+	got, err := u.Confirm(setup.Confirm{
+		Prompt:      "install the platform and alice's seedbox?",
+		Default:     true,
+		Affirmative: "install it",
+		Negative:    "stop here",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !got {
+		t.Fatal("an empty answer did not take the yes default")
+	}
+	text := stripANSI(out.String())
+	for _, want := range []string{"? install the platform and alice's seedbox? [Y/n]", "✓ install the platform and alice's seedbox?  install it"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("the confirm is missing %q:\n%s", want, text)
+		}
+	}
+}
+
 func TestSelectMapsValuesAndKeepsTheDefault(t *testing.T) {
 	u, out := line("\n")
 	got, err := u.Select(setup.Select{

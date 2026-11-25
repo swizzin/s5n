@@ -16,8 +16,9 @@ transcript is the one a person would have seen (with the echo of their typing).
 
 The rules, in the order they are tried:
 
-  * a yes/no question gets "y" -- the fresh install this drives asks one, and a
-    person there says yes;
+  * a question defaulting to yes gets an empty line, which is that default -- the
+    fresh install this drives asks one, and a person there presses enter;
+  * any other yes/no question gets "y";
   * anything else gets an empty line, which is the default box prefilled from the
     flags it was given.
 """
@@ -31,6 +32,9 @@ import subprocess
 import sys
 
 PROMPTS = [
+    # A question whose default is yes is answered with a bare enter: the e2e
+    # proves the default a person's empty answer takes, not the keystroke.
+    (re.compile(r"\[Y/n\] $"), b"\n"),
     (re.compile(r"\[[yY]/[nN]\] $"), b"y\n"),
     (re.compile(r": $"), b"\n"),
 ]

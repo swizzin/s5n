@@ -123,7 +123,7 @@ type fakePrompt struct {
 	asked  []string // "key=default" for every Input, in order
 	notes  []string
 	// confirmDefaults is the starting answer of every Confirm, in order, so a
-	// test can prove the safe choice is the one an empty enter takes.
+	// test can prove which answer an empty enter takes.
 	confirmDefaults []bool
 }
 
@@ -677,10 +677,15 @@ func TestGuidedMissingPathSaysWhereItWouldLand(t *testing.T) {
 	h.prompt.inputs = []string{"box.example.com", "/srv/newbox/data", "/srv/s5n/config"}
 	h.prompt.multis = [][]string{{"alpha"}}
 
-	// The first run declines the creation.
+	// The first run declines the creation. Yes is the default the question
+	// starts on, so a decline is an explicit no.
+	h.prompt.confirms = []bool{false}
 	_, err := h.run(h.options())
 	if err == nil || !strings.Contains(err.Error(), "nothing was written") {
 		t.Fatalf("error = %v, want a refusal", err)
+	}
+	if len(h.prompt.confirmDefaults) != 1 || !h.prompt.confirmDefaults[0] {
+		t.Fatalf("confirm default = %v, want the question to start on yes", h.prompt.confirmDefaults)
 	}
 	if len(h.prompt.notes) != 1 {
 		t.Fatalf("notes = %v, want one path report", h.prompt.notes)
@@ -744,8 +749,10 @@ func TestBothMissingPathsAreAskedAboutSeparately(t *testing.T) {
 	if strings.Join(asked, "\n") != strings.Join(want, "\n") {
 		t.Fatalf("confirms asked:\n%s\nwant:\n%s", strings.Join(asked, "\n"), strings.Join(want, "\n"))
 	}
-	if len(h.prompt.confirmDefaults) != 2 || h.prompt.confirmDefaults[0] || h.prompt.confirmDefaults[1] {
-		t.Fatalf("confirm defaults = %v, want both to start on the safe no", h.prompt.confirmDefaults)
+	// Both questions start on create: init cannot finish on a path that is not
+	// there, so the answer that goes on is the one a bare enter gives.
+	if len(h.prompt.confirmDefaults) != 2 || !h.prompt.confirmDefaults[0] || !h.prompt.confirmDefaults[1] {
+		t.Fatalf("confirm defaults = %v, want both to start on create", h.prompt.confirmDefaults)
 	}
 	for _, want := range []string{"/srv/s5n/data", "/srv/s5n/config"} {
 		if !contains(res.Created, want) {

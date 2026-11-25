@@ -292,7 +292,7 @@ platform
   + cert-manager v1.21.3 · Envoy Gateway 1.9.3 · admission policies
   ? MetalLB 0.16.2, unless the Gateway gets an address without it
   … the seedbox's own answers: its domain, both paths, its apps, the login
-install the platform and alice's seedbox? [y/N] y
+install the platform and alice's seedbox? [Y/n] y
 ✓ Envoy Gateway  38s
 ✓ cert-manager   52s
 ✓ MetalLB        21s
@@ -485,10 +485,12 @@ refuses over it.
 ## Rows that repeat, and the end of a run
 
 A question opens with the question mark in the gutter, on both paths: the
-terminal form and the plain prompt.
+terminal form and the plain prompt. The prompt shows which answer a bare enter
+gives: `[Y/n]` for the one decision a fresh host's run exists for, `[y/N]` for
+every question that changes a box already serving.
 
 ```
-? install the platform layer and alice's seedbox?  [y/N]  y
+? install the platform layer and alice's seedbox?  [Y/n]  y
 ```
 
 Rows that differ only by their name are one fact and its size (rules 3 and 4).

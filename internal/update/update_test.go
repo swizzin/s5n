@@ -391,7 +391,7 @@ type fakeConfirm struct {
 	questions []string
 }
 
-func (f *fakeConfirm) Ask(question string) (bool, error) {
+func (f *fakeConfirm) Ask(question string, _ bool) (bool, error) {
 	f.asks++
 	f.questions = append(f.questions, question)
 	return f.answer, f.err
