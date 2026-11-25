@@ -24,6 +24,7 @@ func qbitSchema() []Item {
 		{"name": "password", "type": "password", "privacy": "password"},
 		{"name": "tvCategory", "type": "textbox"},
 		{"name": "movieCategory", "type": "textbox"},
+		{"name": "musicCategory", "type": "textbox"},
 	}
 	raw := make([]any, 0, len(fields))
 	for _, f := range fields {
@@ -32,11 +33,16 @@ func qbitSchema() []Item {
 	return []Item{{"implementation": "QBittorrent", "configContract": "QBittorrentSettings", "fields": raw}}
 }
 
-// fakeArr is a minimal Sonarr/Radarr: schema, download clients, root folders and
-// media management, with a write counter so idempotency is testable.
+// fakeArr is a minimal Sonarr, Radarr or Lidarr: schema, download clients, root
+// folders and media management, with a write counter so idempotency is
+// testable. api and kind are the app's own: Lidarr answers /api/v1, its
+// download client names the category musicCategory, and its root folder
+// resource is validated the way Lidarr validates it.
 type fakeArr struct {
 	mu       sync.Mutex
 	urlBase  string
+	api      string
+	kind     Kind
 	clients  []Item
 	folders  []Item
 	hardlink bool
@@ -49,7 +55,10 @@ func (f *fakeArr) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	p := strings.TrimPrefix(r.URL.Path, f.urlBase)
-	api := "/api/v3"
+	api := f.api
+	if api == "" {
+		api = "/api/v3"
+	}
 	switch {
 	case p == "/ping":
 		_, _ = w.Write([]byte("pong"))
@@ -84,6 +93,10 @@ func (f *fakeArr) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		http.Error(w, "not found", http.StatusNotFound)
+	case p == api+"/qualityprofile" && r.Method == http.MethodGet:
+		writeJSON(w, []Item{{"id": 1, "name": "Any"}, {"id": 2, "name": "Lossless"}})
+	case p == api+"/metadataprofile" && r.Method == http.MethodGet:
+		writeJSON(w, []Item{{"id": 2, "name": "Standard"}, {"id": 4, "name": "None"}})
 	case p == api+"/rootfolder" && r.Method == http.MethodGet:
 		writeJSON(w, f.folders)
 	case p == api+"/rootfolder" && r.Method == http.MethodPost:
@@ -91,9 +104,21 @@ func (f *fakeArr) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if !ok {
 			return
 		}
+		if f.kind == Lidarr {
+			// Lidarr's RootFolderController validates the resource the UI
+			// sends: Name is not empty and both profile ids are positive
+			// (SharedValidator in RootFolders/RootFolderController.cs at
+			// v3.1.2.4902; ValidId is GreaterThan(0)).
+			if body.Str("name") == "" || body.Int("defaultQualityProfileId") <= 0 || body.Int("defaultMetadataProfileId") <= 0 {
+				http.Error(w, "Name must not be empty, and both profiles must be chosen", http.StatusBadRequest)
+				return
+			}
+		}
 		f.writes++
-		f.folders = append(f.folders, Item{"path": body.Str("path"), "accessible": true})
-		writeJSON(w, f.folders[len(f.folders)-1])
+		stored := body.Clone()
+		stored["accessible"] = true
+		f.folders = append(f.folders, stored)
+		writeJSON(w, stored)
 	case p == api+"/config/mediamanagement" && r.Method == http.MethodGet:
 		writeJSON(w, Item{"id": 1, "copyUsingHardlinks": f.hardlink})
 	case p == api+"/config/mediamanagement" && r.Method == http.MethodPut:
@@ -420,6 +445,65 @@ func TestEnsureRootFolderAndHardlinks(t *testing.T) {
 	}
 	if !f.hardlink {
 		t.Fatal("hardlinks not enabled")
+	}
+}
+
+// TestLidarrIsAPIv1WithItsOwnCategoryAndRootFolder: Lidarr is the same code as
+// the other two Arrs with three differences this file must carry. Its HTTP API
+// is /api/v1 (Lidarr.Http/VersionedApiControllerAttribute.cs at v3.1.2.4902:
+// the template is api/v{version}/{resource}, and every controller is
+// [V1ApiController]). Its qBittorrent settings name the category
+// musicCategory (Download/Clients/QBittorrent/QBittorrentSettings.cs). And a
+// root folder POST is validated with Name not empty and both profile ids
+// positive (Lidarr.Api.V1/RootFolders/RootFolderController.cs, through
+// RuleBuilderExtensions.ValidId = GreaterThan(0)), so the box has to choose the
+// app's own first quality and metadata profile.
+func TestLidarrIsAPIv1WithItsOwnCategoryAndRootFolder(t *testing.T) {
+	f := &fakeArr{urlBase: "/lidarr", api: "/api/v1", kind: Lidarr, hardlink: true}
+	srv := httptest.NewServer(f)
+	t.Cleanup(srv.Close)
+	arr := NewArr(Lidarr, "lidarr", srv.URL, "/lidarr", "test-key")
+	ctx := context.Background()
+
+	result, err := arr.EnsureDownloadClient(ctx, DownloadClientSpec{
+		Name: "qBittorrent", Category: "lidarr", Host: "qbittorrent", Port: 8080,
+	}, 0)
+	if err != nil || result.Change != Created {
+		t.Fatalf("download client = %+v, %v; want created", result, err)
+	}
+	if v, _ := f.clients[0].FieldValue("musicCategory"); v != "lidarr" {
+		t.Fatalf("musicCategory = %v, want the instance's category", v)
+	}
+	if _, ok := f.clients[0].FieldValue("tvCategory"); ok {
+		if v, _ := f.clients[0].FieldValue("tvCategory"); v != nil {
+			t.Fatalf("a Lidarr client was given tvCategory = %v", v)
+		}
+	}
+
+	if got, err := arr.EnsureRootFolder(ctx, "/data/media/music"); err != nil || got != Created {
+		t.Fatalf("create root folder = %v, %v", got, err)
+	}
+	if len(f.folders) != 1 {
+		t.Fatalf("root folders = %d, want 1", len(f.folders))
+	}
+	folder := f.folders[0]
+	if folder.Str("name") != "music" {
+		t.Errorf("root folder name = %q, want the directory's name", folder.Str("name"))
+	}
+	if folder.Int("defaultQualityProfileId") != 1 || folder.Int("defaultMetadataProfileId") != 2 {
+		t.Errorf("root folder profiles = %d/%d, want the app's first quality and metadata profile",
+			folder.Int("defaultQualityProfileId"), folder.Int("defaultMetadataProfileId"))
+	}
+	if got, err := arr.EnsureRootFolder(ctx, "/data/media/music"); err != nil || got != Unchanged {
+		t.Fatalf("second root folder = %v, %v; want unchanged", got, err)
+	}
+
+	if got, err := arr.EnsureHardlinks(ctx); err != nil || got != Unchanged {
+		t.Fatalf("hardlinks already on = %v, %v", got, err)
+	}
+	f.hardlink = false
+	if got, err := arr.EnsureHardlinks(ctx); err != nil || got != Updated {
+		t.Fatalf("hardlinks off = %v, %v; want updated", got, err)
 	}
 }
 

@@ -3,18 +3,35 @@ package apps
 import (
 	"context"
 	"fmt"
+	pathpkg "path"
 	"strings"
 	"time"
 )
 
-// Kind is an Arr application type. The two share an API shape and differ in the
-// category field name and the endpoint of the same name.
+// Kind is an Arr application type. The three share an API shape and differ in
+// the API version they serve it under, the category field name and the
+// endpoint of the same name.
 type Kind string
 
 const (
 	Sonarr Kind = "sonarr"
 	Radarr Kind = "radarr"
+	// Lidarr is the third Arr. It is the same API with a different version and
+	// one extra step for its root folder; see apiVersion and EnsureRootFolder.
+	Lidarr Kind = "lidarr"
 )
+
+// apiVersion is the version each app serves its HTTP API under. Sonarr and
+// Radarr use /api/v3; Lidarr uses /api/v1, because every one of its controllers
+// is decorated [V1ApiController] and the route template is
+// api/v{version}/{resource} (src/Lidarr.Http/VersionedApiControllerAttribute.cs
+// at v3.1.2.4902).
+func (k Kind) apiVersion() string {
+	if k == Lidarr {
+		return "v1"
+	}
+	return "v3"
+}
 
 // Bool returns a boolean member.
 func (i Item) Bool(key string) bool {
@@ -22,7 +39,9 @@ func (i Item) Bool(key string) bool {
 	return b
 }
 
-// Arr is a Sonarr or Radarr instance.
+// Arr is a Sonarr, Radarr or Lidarr instance. All three are the same code with
+// a different API version, a different name for the download category and, for
+// Lidarr, a root folder that also carries the app's default profiles.
 type Arr struct {
 	Kind    Kind
 	Name    string
@@ -38,7 +57,7 @@ func NewArr(kind Kind, name, baseURL, urlBase, apiKey string) *Arr {
 	return &Arr{Kind: kind, Name: name, client: c, urlBase: strings.TrimRight(urlBase, "/")}
 }
 
-func (a *Arr) api(path string) string { return a.urlBase + "/api/v3" + path }
+func (a *Arr) api(path string) string { return a.urlBase + "/api/" + a.Kind.apiVersion() + path }
 
 // Ping hits the unauthenticated health endpoint the chart also uses as its
 // readiness probe.
@@ -75,9 +94,16 @@ type DownloadClientSpec struct {
 	Password string
 }
 
+// categoryField is the field each app's qBittorrent settings call the download
+// category: tvCategory in Sonarr, movieCategory in Radarr, musicCategory in
+// Lidarr (Download/Clients/QBittorrent/QBittorrentSettings.cs at each app's
+// tag). Lidarr has one category, not a separate imported one the box sets.
 func (a *Arr) categoryField() string {
-	if a.Kind == Radarr {
+	switch a.Kind {
+	case Radarr:
 		return "movieCategory"
+	case Lidarr:
+		return "musicCategory"
 	}
 	return "tvCategory"
 }
@@ -179,6 +205,16 @@ func (a *Arr) EnsureDownloadClient(ctx context.Context, spec DownloadClientSpec,
 }
 
 // EnsureRootFolder adds a root folder and asserts it is writable by the app.
+//
+// Lidarr's root folder is more than a path. Its resource is validated the way
+// the add-root-folder form is: Name is not empty, and DefaultQualityProfileId
+// and DefaultMetadataProfileId are both positive ids of profiles that exist
+// (Lidarr.Api.V1/RootFolders/RootFolderController.cs at v3.1.2.4902, whose
+// SharedValidator applies to POST as well as PUT; RuleBuilderExtensions.ValidId
+// is GreaterThan(0)). A body of {"path": ...} alone is refused there, so a
+// Lidarr folder is created with the directory's own name and the app's first
+// quality and metadata profile -- the defaults every artist added under it
+// inherits, which the operator tunes in the app afterwards.
 func (a *Arr) EnsureRootFolder(ctx context.Context, path string) (Change, error) {
 	var folders []Item
 	if err := a.client.Get(ctx, a.api("/rootfolder"), &folders); err != nil {
@@ -193,10 +229,49 @@ func (a *Arr) EnsureRootFolder(ctx context.Context, path string) (Change, error)
 		}
 		return Unchanged, nil
 	}
-	if err := a.client.Post(ctx, a.api("/rootfolder"), Item{"path": path}, nil); err != nil {
+	body := Item{"path": path}
+	if a.Kind == Lidarr {
+		name := pathpkg.Base(strings.TrimRight(path, "/"))
+		if name == "" || name == "." || name == "/" {
+			name = path
+		}
+		quality, err := a.firstProfile(ctx, "/qualityprofile", "quality profile")
+		if err != nil {
+			return Unchanged, err
+		}
+		metadata, err := a.firstProfile(ctx, "/metadataprofile", "metadata profile")
+		if err != nil {
+			return Unchanged, err
+		}
+		body["name"] = name
+		body["defaultQualityProfileId"] = quality
+		body["defaultMetadataProfileId"] = metadata
+	}
+	if err := a.client.Post(ctx, a.api("/rootfolder"), body, nil); err != nil {
 		return Unchanged, fmt.Errorf("create root folder %s: %w", path, err)
 	}
 	return Created, nil
+}
+
+// firstProfile is the lowest id an app offers in one of its profile lists. It
+// is the app's own first choice rather than a name this package invents: Lidarr
+// ships its metadata profiles and quality profiles in its own table, and a
+// migration or a fresh install both have at least one.
+func (a *Arr) firstProfile(ctx context.Context, endpoint, what string) (int, error) {
+	var list []Item
+	if err := a.client.Get(ctx, a.api(endpoint), &list); err != nil {
+		return 0, fmt.Errorf("list %ss: %w", what, err)
+	}
+	best := 0
+	for _, p := range list {
+		if id := p.Int("id"); id > 0 && (best == 0 || id < best) {
+			best = id
+		}
+	}
+	if best == 0 {
+		return 0, fmt.Errorf("this %s build has no %s to put on a root folder", a.Kind, what)
+	}
+	return best, nil
 }
 
 // EnsureHardlinks turns on hardlink imports. It is the setting the whole /data

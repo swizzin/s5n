@@ -395,6 +395,12 @@ func (r *Runner) work(ctx context.Context, res *Result) error {
 				impl = "Sonarr"
 			case apps.Radarr:
 				impl = "Radarr"
+			case apps.Lidarr:
+				// Prowlarr registers Lidarr as "Lidarr" and talks to it over
+				// Lidarr's /api/v1 (prowlarr@v3.1.0.5799:
+				// src/NzbDrone.Core/Applications/Lidarr/Lidarr.cs and
+				// ILidarrV1Proxy).
+				impl = "Lidarr"
 			default:
 				return r.ensure(res, "prowlarr/application/"+inst.Name, apps.Unchanged,
 					fmt.Errorf("instance %q: unknown Arr kind %q has no Prowlarr application implementation", inst.Name, inst.Kind))
@@ -519,6 +525,11 @@ func (r *Runner) work(ctx context.Context, res *Result) error {
 				kind = "SONARR"
 			case apps.Radarr:
 				kind = "RADARR"
+			case apps.Lidarr:
+				// autobrr's Arr clients are one type per app, and LIDARR is
+				// its own (internal/domain/downloader.go at v1.91.1:
+				// DownloaderTypeLidarr).
+				kind = "LIDARR"
 			default:
 				return r.ensure(res, "autobrr/downloader/"+inst.Name, apps.Unchanged,
 					fmt.Errorf("instance %q: unknown Arr kind %q has no autobrr download client type", inst.Name, inst.Kind))

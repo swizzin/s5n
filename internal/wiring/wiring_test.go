@@ -89,12 +89,32 @@ func (f *fakeStack) qbitHandler() http.HandlerFunc {
 	}
 }
 
-func (f *fakeStack) arrHandler(instance, urlBase string) http.HandlerFunc {
-	kind := "tv"
-	if strings.HasPrefix(instance, "radarr") {
-		kind = "movie"
+// arrAPI is the version the Arr at one instance serves its API under: Lidarr's
+// is /api/v1, the other two /api/v3 (internal/apps.Kind.apiVersion, from
+// Lidarr.Http/VersionedApiControllerAttribute.cs at v3.1.2.4902).
+func arrAPI(instance string) string {
+	if strings.HasPrefix(instance, "lidarr") {
+		return "/api/v1"
 	}
-	categoryField := kind + "Category"
+	return "/api/v3"
+}
+
+// arrCategoryField is the qBittorrent settings field each Arr calls its
+// download category (Download/Clients/QBittorrent/QBittorrentSettings.cs).
+func arrCategoryField(instance string) string {
+	switch {
+	case strings.HasPrefix(instance, "radarr"):
+		return "movieCategory"
+	case strings.HasPrefix(instance, "lidarr"):
+		return "musicCategory"
+	}
+	return "tvCategory"
+}
+
+func (f *fakeStack) arrHandler(instance, urlBase string) http.HandlerFunc {
+	api := arrAPI(instance)
+	categoryField := arrCategoryField(instance)
+	lidarr := api == "/api/v1"
 	return func(w http.ResponseWriter, r *http.Request) {
 		f.mu.Lock()
 		defer f.mu.Unlock()
@@ -102,7 +122,11 @@ func (f *fakeStack) arrHandler(instance, urlBase string) http.HandlerFunc {
 		switch {
 		case p == "/ping":
 			_, _ = w.Write([]byte("pong"))
-		case p == "/api/v3/downloadclient/schema":
+		case p == api+"/qualityprofile" && r.Method == http.MethodGet:
+			writeJSON(w, []apps.Item{{"id": 1, "name": "Any"}})
+		case p == api+"/metadataprofile" && r.Method == http.MethodGet:
+			writeJSON(w, []apps.Item{{"id": 2, "name": "Standard"}})
+		case p == api+"/downloadclient/schema":
 			writeJSON(w, []apps.Item{{
 				"implementation": "QBittorrent", "configContract": "QBittorrentSettings",
 				"fields": []any{
@@ -115,13 +139,13 @@ func (f *fakeStack) arrHandler(instance, urlBase string) http.HandlerFunc {
 					map[string]any{"name": categoryField},
 				},
 			}})
-		case p == "/api/v3/downloadclient" && r.Method == http.MethodGet:
+		case p == api+"/downloadclient" && r.Method == http.MethodGet:
 			out := []apps.Item{}
 			for _, c := range f.clients[instance] {
 				out = append(out, maskedItem(c, "password"))
 			}
 			writeJSON(w, out)
-		case p == "/api/v3/downloadclient" && r.Method == http.MethodPost:
+		case p == api+"/downloadclient" && r.Method == http.MethodPost:
 			var body apps.Item
 			_ = json.NewDecoder(r.Body).Decode(&body)
 			f.nextID++
@@ -132,7 +156,7 @@ func (f *fakeStack) arrHandler(instance, urlBase string) http.HandlerFunc {
 		case strings.HasSuffix(p, "/downloadclient/test"):
 			f.tests++
 			writeJSON(w, map[string]any{"ok": true})
-		case strings.HasPrefix(p, "/api/v3/downloadclient/") && r.Method == http.MethodPut:
+		case strings.HasPrefix(p, api+"/downloadclient/") && r.Method == http.MethodPut:
 			var body apps.Item
 			_ = json.NewDecoder(r.Body).Decode(&body)
 			for i, c := range f.clients[instance] {
@@ -144,7 +168,7 @@ func (f *fakeStack) arrHandler(instance, urlBase string) http.HandlerFunc {
 				}
 			}
 			http.Error(w, "not found", http.StatusNotFound)
-		case p == "/api/v3/rootfolder" && r.Method == http.MethodGet:
+		case p == api+"/rootfolder" && r.Method == http.MethodGet:
 			out := []apps.Item{}
 			for key := range f.folders {
 				name, path, _ := strings.Cut(key, ":")
@@ -153,15 +177,20 @@ func (f *fakeStack) arrHandler(instance, urlBase string) http.HandlerFunc {
 				}
 			}
 			writeJSON(w, out)
-		case p == "/api/v3/rootfolder" && r.Method == http.MethodPost:
+		case p == api+"/rootfolder" && r.Method == http.MethodPost:
 			var body apps.Item
 			_ = json.NewDecoder(r.Body).Decode(&body)
+			if lidarr && (body.Str("name") == "" || body.Int("defaultQualityProfileId") <= 0 || body.Int("defaultMetadataProfileId") <= 0) {
+				// Lidarr's own SharedValidator: a name and both profiles.
+				http.Error(w, "Name must not be empty, and both profiles must be chosen", http.StatusBadRequest)
+				return
+			}
 			f.folders[instance+":"+body.Str("path")] = true
 			f.writes++
 			writeJSON(w, body)
-		case p == "/api/v3/config/mediamanagement" && r.Method == http.MethodGet:
+		case p == api+"/config/mediamanagement" && r.Method == http.MethodGet:
 			writeJSON(w, apps.Item{"id": 1, "copyUsingHardlinks": f.hardlink})
-		case p == "/api/v3/config/mediamanagement" && r.Method == http.MethodPut:
+		case p == api+"/config/mediamanagement" && r.Method == http.MethodPut:
 			var body apps.Item
 			_ = json.NewDecoder(r.Body).Decode(&body)
 			f.hardlink = body.Bool("copyUsingHardlinks")
@@ -189,6 +218,11 @@ func (f *fakeStack) prowlarrHandler() http.HandlerFunc {
 					map[string]any{"name": "authUsername"}, map[string]any{"name": "authPassword"},
 				}},
 				{"implementation": "Radarr", "configContract": "RadarrSettings", "fields": []any{
+					map[string]any{"name": "prowlarrUrl"}, map[string]any{"name": "baseUrl"},
+					map[string]any{"name": "apiKey", "privacy": "apiKey"},
+					map[string]any{"name": "authUsername"}, map[string]any{"name": "authPassword"},
+				}},
+				{"implementation": "Lidarr", "configContract": "LidarrSettings", "fields": []any{
 					map[string]any{"name": "prowlarrUrl"}, map[string]any{"name": "baseUrl"},
 					map[string]any{"name": "apiKey", "privacy": "apiKey"},
 					map[string]any{"name": "authUsername"}, map[string]any{"name": "authPassword"},
@@ -391,6 +425,74 @@ func TestWiringIsIdempotent(t *testing.T) {
 	}
 	if !strings.Contains(h.results[1]["summary.txt"], "s5n wiring: ok") {
 		t.Fatalf("summary is not human-readable:\n%s", h.results[1]["summary.txt"])
+	}
+}
+
+// TestWiringWiresLidarr: the third Arr gets what the other two get -- the
+// release's qBittorrent as a download client with its own category, its root
+// folder, hardlink imports and a Prowlarr application -- over /api/v1, and with
+// the extra the app asks for on a root folder: a name and both default
+// profiles (Lidarr.Api.V1/RootFolders/RootFolderController.cs at v3.1.2.4902).
+func TestWiringWiresLidarr(t *testing.T) {
+	h := newHarness(t)
+	lidarr := httptest.NewServer(h.stack.arrHandler("lidarr", "/lidarr"))
+	t.Cleanup(lidarr.Close)
+	keyFile := filepath.Join(h.dir, "lidarr.key")
+	if err := os.WriteFile(keyFile, []byte("lidarr-key"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	root := filepath.Join(h.dir, "data", "media", "music")
+	h.runner.Config.Instances = append(h.runner.Config.Instances, Instance{
+		Name: "lidarr", Kind: "lidarr", URL: lidarr.URL, URLBase: "/lidarr",
+		APIKeyFile: keyFile, Category: "music", DownloadCategory: "lidarr",
+		SavePath:   filepath.Join(h.dir, "data", "downloads", "lidarr"),
+		RootFolder: root,
+	})
+
+	res, err := h.runner.Run(context.Background())
+	if err != nil {
+		t.Fatalf("run: %v\n%s", err, Summary(res))
+	}
+	for _, name := range []string{
+		"lidarr/ready", "lidarr/downloadclient", "lidarr/rootfolder", "lidarr/hardlinks",
+		"prowlarr/application/lidarr", "qbittorrent/category/lidarr", "data/hardlink/music",
+	} {
+		step := stepByName(t, res, name)
+		if step.Result != "ok" {
+			t.Errorf("%s = %+v, want ok", name, step)
+		}
+	}
+	clients := h.stack.clients["lidarr"]
+	if len(clients) != 1 {
+		t.Fatalf("lidarr has %d download clients, want 1", len(clients))
+	}
+	if v, _ := clients[0].FieldValue("musicCategory"); v != "lidarr" {
+		t.Errorf("the client's category is %v, want lidarr", v)
+	}
+	if !h.stack.folders["lidarr:"+root] {
+		t.Errorf("root folders = %v, want lidarr's own", h.stack.folders)
+	}
+	found := false
+	for _, a := range h.stack.apps {
+		if a.Str("implementation") == "Lidarr" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("Prowlarr applications = %v, want a Lidarr one", h.stack.apps)
+	}
+
+	// A second run is a no-op for the third Arr too.
+	writes := h.stack.count()
+	second, err := h.runner.Run(context.Background())
+	if err != nil {
+		t.Fatalf("second run: %v\n%s", err, Summary(second))
+	}
+	if got := h.stack.count(); got != writes {
+		t.Fatalf("second run made %d API writes", got-writes)
+	}
+	if step := stepByName(t, second, "lidarr/downloadclient"); step.Detail != "unchanged" {
+		t.Fatalf("second run lidarr/downloadclient = %+v", step)
 	}
 }
 
@@ -729,9 +831,11 @@ func TestWiringRecreatesDeletedOwnedDownloadClient(t *testing.T) {
 
 // An unknown Arr kind has no Prowlarr application implementation, and must
 // fail loudly rather than silently registering as Sonarr (the old default).
+// Readarr is the example because it is not a catalog app at all: it was
+// archived upstream in June 2025 and this chart never runs it.
 func TestWiringUnknownProwlarrKindErrors(t *testing.T) {
 	h := newHarness(t)
-	h.runner.Config.Instances[0].Kind = "lidarr"
+	h.runner.Config.Instances[0].Kind = "readarr"
 
 	res, err := h.runner.Run(context.Background())
 	if err == nil {

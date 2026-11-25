@@ -41,7 +41,7 @@ func (p *Prowlarr) WaitReady(ctx context.Context, timeout time.Duration) error {
 // ApplicationSpec registers one Arr instance with Prowlarr.
 type ApplicationSpec struct {
 	Name           string
-	Implementation string // "Sonarr" or "Radarr"
+	Implementation string // "Sonarr", "Radarr" or "Lidarr"
 	BaseURL        string // where Prowlarr reaches the Arr, including its URL base
 	APIKey         string
 }

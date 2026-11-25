@@ -294,7 +294,7 @@ func downloadCategory(inst Instance) string {
 // job knows how to register, and every field it registers must be set.
 func validateInstance(index int, inst Instance) error {
 	switch inst.Kind {
-	case "sonarr", "radarr":
+	case "sonarr", "radarr", "lidarr":
 	default:
 		return fmt.Errorf("instance %d: unknown kind %q", index, inst.Kind)
 	}
