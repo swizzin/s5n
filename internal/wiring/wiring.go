@@ -440,13 +440,18 @@ func (r *Runner) work(ctx context.Context, res *Result) error {
 			// lives; the key is the release Secret's.
 			result, err := arr.EnsureDownloadClient(ctx, apps.DownloadClientSpec{
 				Implementation: "Sabnzbd",
-				Protocol:       "nzb",
+				Protocol:       "usenet",
 				Name:           sabClientName,
-				Category:       downloadCategory(inst),
-				Host:           sabHost,
-				Port:           sabPort,
-				URLBase:        c.Sabnzbd.URLBase,
-				APIKey:         sabKey,
+				// SABnzbd folds every category name, and the Arr refuses a
+				// category the app does not list, so the client carries the
+				// folded name. The directory keeps the Arrs' spelling: the
+				// category is created with dir 4K/Movies under the name
+				// 4k/movies.
+				Category: strings.ToLower(downloadCategory(inst)),
+				Host:     sabHost,
+				Port:     sabPort,
+				URLBase:  c.Sabnzbd.URLBase,
+				APIKey:   sabKey,
 			}, owned.ArrSabnzbdClientID(inst.Name))
 			if err == nil && result.ID != 0 {
 				owned.SetArrSabnzbdClientID(inst.Name, result.ID)

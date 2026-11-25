@@ -89,8 +89,8 @@ type DownloadClientSpec struct {
 	// Implementation is the Arr's own name for the client type: "QBittorrent"
 	// or "Sabnzbd". Empty means qBittorrent, the client every release has.
 	Implementation string
-	// Protocol is the client's protocol as the Arr stores it: "torrent" or
-	// "nzb".
+	// Protocol is the client's protocol as the Arr parses it: "torrent" or
+	// "usenet" (NzbDrone.Core.Indexers.DownloadProtocol).
 	Protocol string
 	Name     string
 	Category string

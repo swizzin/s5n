@@ -22,6 +22,10 @@ func TestWiringWiresSabnzbd(t *testing.T) {
 	if err := os.WriteFile(keyFile, []byte("sab-key"), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	// The 4K instance's category is the nested one: SABnzbd folds the name and
+	// keeps the directory, and the Arr's own validator refuses a category the
+	// app does not list, so the client carries the folded name.
+	h.config.Instances[1].DownloadCategory = "4K/Movies"
 	h.config.Sabnzbd = &SabnzbdConfig{
 		URL: srv.URL, URLBase: "/sabnzbd", APIKeyFile: keyFile,
 		SavePath: "/data/downloads", DownloadDir: "/data/downloads/incomplete",
@@ -34,7 +38,7 @@ func TestWiringWiresSabnzbd(t *testing.T) {
 	}
 	for _, name := range []string{
 		"sabnzbd/ready", "sabnzbd/data-contract",
-		"sabnzbd/category/tv", "sabnzbd/category/movies",
+		"sabnzbd/category/tv", "sabnzbd/category/4K/Movies",
 		"sonarr/sabnzbd", "radarr/sabnzbd",
 	} {
 		if step := stepByName(t, res, name); step.Result != "ok" {
@@ -47,12 +51,12 @@ func TestWiringWiresSabnzbd(t *testing.T) {
 	if got := h.stack.sabMisc["download_dir"]; got != "/data/downloads/incomplete" {
 		t.Errorf("download_dir = %q, want the data claim", got)
 	}
-	for _, cat := range []string{"tv", "movies"} {
-		if got := h.stack.sabCats[cat]; got != cat {
-			t.Errorf("category %s dir = %q, want %q", cat, got, cat)
+	for cat, dir := range map[string]string{"tv": "tv", "4k/movies": "4K/Movies"} {
+		if got := h.stack.sabCats[cat]; got != dir {
+			t.Errorf("category %s dir = %q, want %q", cat, got, dir)
 		}
 	}
-	for instance, category := range map[string]string{"sonarr": "tv", "radarr": "movies"} {
+	for instance, category := range map[string]string{"sonarr": "tv", "radarr": "4k/movies"} {
 		var got apps.Item
 		for _, c := range h.stack.clients[instance] {
 			if strings.EqualFold(c.Str("implementation"), "Sabnzbd") {
@@ -110,7 +114,7 @@ func TestWiringAdoptsAMigratedSabnzbdClient(t *testing.T) {
 	// own category. The rewrite points the host at the release's Service.
 	host, _ := mustHostPort(t, srv.URL)
 	h.stack.clients["sonarr"] = []apps.Item{{
-		"id": 9, "name": "SAB", "implementation": "Sabnzbd", "enable": true, "protocol": "nzb", "priority": 1, "tags": []any{},
+		"id": 9, "name": "SAB", "implementation": "Sabnzbd", "enable": true, "protocol": "usenet", "priority": 1, "tags": []any{},
 		"fields": []any{
 			map[string]any{"name": "host", "value": host},
 			map[string]any{"name": "port", "value": 8080},

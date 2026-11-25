@@ -264,7 +264,7 @@ func TestArrAdoptsAMigratedSabnzbdClientByItsHost(t *testing.T) {
 	a := NewArr(Sonarr, "sonarr", srv.URL, "/sonarr", "key")
 	result, err := a.EnsureDownloadClient(context.Background(), DownloadClientSpec{
 		Implementation: "Sabnzbd",
-		Protocol:       "nzb",
+		Protocol:       "usenet",
 		Name:           "SABnzbd",
 		Category:       "tv",
 		Host:           "sabnzbd",
@@ -295,7 +295,7 @@ func TestArrDoesNotAdoptASabnzbdClientAtAnotherAddress(t *testing.T) {
 	a := NewArr(Sonarr, "sonarr", srv.URL, "/sonarr", "key")
 	result, err := a.EnsureDownloadClient(context.Background(), DownloadClientSpec{
 		Implementation: "Sabnzbd",
-		Protocol:       "nzb",
+		Protocol:       "usenet",
 		Name:           "SABnzbd",
 		Category:       "tv",
 		Host:           "sabnzbd",
@@ -322,7 +322,7 @@ func TestArrWritesTheSabnzbdClientFieldsTheDataContractNeeds(t *testing.T) {
 	a := NewArr(Radarr, "radarr", srv.URL, "/radarr", "key")
 	_, err := a.EnsureDownloadClient(context.Background(), DownloadClientSpec{
 		Implementation: "Sabnzbd",
-		Protocol:       "nzb",
+		Protocol:       "usenet",
 		Name:           "SABnzbd",
 		Category:       "4K/Movies",
 		Host:           "sabnzbd",
@@ -349,7 +349,7 @@ func TestArrWritesTheSabnzbdClientFieldsTheDataContractNeeds(t *testing.T) {
 			t.Errorf("%s = %v, want %v", name, got, want)
 		}
 	}
-	if c.Str("implementation") != "Sabnzbd" || c.Str("protocol") != "nzb" {
+	if c.Str("implementation") != "Sabnzbd" || c.Str("protocol") != "usenet" {
 		t.Fatalf("implementation/protocol = %q/%q", c.Str("implementation"), c.Str("protocol"))
 	}
 }
