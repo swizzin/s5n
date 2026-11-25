@@ -232,7 +232,7 @@ $KIND load docker-image --name "$CLUSTER" "$IMAGE"
 log "preparing host paths inside the node (what box init creates on real hosts)"
 docker exec "${CLUSTER}-control-plane" bash -c '
   mkdir -p /srv/s5n/data \
-           /srv/s5n/config/{qbittorrent,prowlarr,sonarr,sonarr-4k,radarr,radarr-4k,lidarr,plex,tautulli,seerr,qui,autobrr,maintainerr,pbh}
+           /srv/s5n/config/{qbittorrent,prowlarr,sonarr,sonarr-4k,radarr,radarr-4k,lidarr,bazarr,bazarr-4k,plex,tautulli,seerr,qui,autobrr,maintainerr,pbh}
   chown -R 1000:1000 /srv/s5n'
 
 # Nothing below may prepare the data categories: the wiring Job owns them, and a
@@ -658,6 +658,16 @@ cat >"$WORK/apps-values.yaml" <<'EOF'
 apps:
   lidarr:
     enabled: true
+  # Both Bazarr instances: the HD one reads sonarr and radarr, and the 4K one
+  # reads radarr-4k alone, because this install switches on the 4K Radarr and
+  # not the 4K Sonarr (hack/e2e-values.yaml). That half pair is the point: the
+  # Job turns the missing side's own switch off rather than leaving it pointing
+  # at a Service this release does not serve.
+  bazarr:
+    enabled: true
+    instances:
+      - { suffix: "", enabled: true }
+      - { suffix: 4k, enabled: true }
   qui:
     enabled: true
   autobrr:
@@ -1335,7 +1345,7 @@ echo "qBittorrent enable_multi_connections_from_same_ip = ${multi} (PBH turns it
 # arrive without a redirect,
 # and the asset URLs it builds must resolve through the same prefix — that is
 # what makes the base-path setting right rather than merely present.
-for app in qui autobrr maintainerr lidarr; do
+for app in qui autobrr maintainerr lidarr bazarr; do
   : >"$WORK/${app}-headers"
   code=$(gw_get -s -D "$WORK/${app}-headers" -o "$WORK/${app}.html" -w '%{http_code}' \
     "https://${DOMAIN}/${app}/" || true)
@@ -1344,8 +1354,13 @@ for app in qui autobrr maintainerr lidarr; do
   [ "$code" = 200 ] || { echo "/${app}/ did not serve its UI: ${code}"; fail=1; }
   [ -z "$loc" ] || { echo "/${app}/ redirected to ${loc}: the app is asking for a login of its own"; fail=1; }
   grep -qi '<!doctype html' "$WORK/${app}.html" || { echo "/${app}/ answered ${code} without an HTML document"; fail=1; }
-  asset=$(grep -oE '(src|href)="/[^"]+\.(js|css)"' "$WORK/${app}.html" | head -1 |
+  asset=$(grep -oE '(src|href)="[^"]+\.(js|css)"' "$WORK/${app}.html" | head -1 |
     sed 's/^[a-z]*="//; s/"$//' || true)
+  # A bundle can name its assets relative to the page's own <base href> (Bazarr
+  # does: <base href="/bazarr/"> and ./assets/index-*.js), which a browser
+  # resolves against the prefix. Resolve it the same way here, so the check is
+  # "the bundle's URLs reach the app" either way it writes them.
+  case "$asset" in ./*) asset="/${app}/${asset#./}" ;; esac
   echo "  asset the page references: ${asset}"
   case "$asset" in
     "/${app}/"*) ;;
@@ -1378,6 +1393,34 @@ for app in qui autobrr maintainerr lidarr; do
       # the same probe the chart's readinessProbe uses.
       code=$(gw_get -s -o /dev/null -w '%{http_code}' "https://${DOMAIN}/${app}/ping" || true)
       echo "GET /${app}/ping via gateway -> ${code}"; [ "$code" = 200 ] || fail=1 ;;
+    bazarr)
+      # Its health route is under the base URL the init container sealed into
+      # general.base_url, and it is unauthenticated: the chart's readinessProbe
+      # asks the same path. The settings read is the proof that the API key the
+      # same init container minted into auth.apikey is one the app accepts.
+      code=$(gw_get -s -o /dev/null -w '%{http_code}' "https://${DOMAIN}/${app}/api/system/ping" || true)
+      echo "GET /${app}/api/system/ping via gateway -> ${code}"; [ "$code" = 200 ] || fail=1
+      # The release Secret's key for this instance, read here rather than through
+      # the arr_key helper: that one is defined with the wiring helpers below,
+      # and this loop runs before them.
+      key=$($K -n "$NS" get secret s5n-keys -o jsonpath="{.data.${app}-apikey}" | base64 -d)
+      code=$(gw_get -s -o /dev/null -w '%{http_code}' -H "X-API-KEY: ${key}" \
+        "https://${DOMAIN}/${app}/api/system/settings" || true)
+      echo "GET /${app}/api/system/settings with the release Secret's key -> ${code}"
+      [ "$code" = 200 ] ||
+        { echo "${app} refused the API key the init container sealed into its config.yaml"; fail=1; }
+      # Both sides are this box's own Arrs, read back through the app.
+      settings=""
+      settings=$(gw_get -s -H "X-API-KEY: ${key}" "https://${DOMAIN}/${app}/api/system/settings" || true)
+      for pair in "general.use_sonarr:True" "general.use_radarr:True" "sonarr.ip:sonarr" "radarr.ip:radarr"; do
+        want=${pair%%:*}; wantvalue=${pair#*:}
+        got=$(printf '%s' "$settings" | python3 -c "import json,sys
+d=json.load(sys.stdin); section,key=sys.argv[1].split('.')
+print(d[section][key])" "$want" 2>/dev/null || true)
+        echo "  ${app} ${want} = ${got} (want ${wantvalue})"
+        [ "$got" = "$wantvalue" ] || fail=1
+      done
+      ;;
     maintainerr)
       # BASE_PATH covers every route, health included, so this one is reachable
       # through the Gateway like any other path.
@@ -1677,6 +1720,16 @@ app_snapshot() { # app_snapshot <dir> <app>
       curl -sS -b "$jar" "http://127.0.0.1:${PF_PORT}${base}/api/downloaders" >"$dir/autobrr-downloaders.json" 2>/dev/null || true
       rm -f "$jar"
       ;;
+    bazarr | bazarr-4k)
+      # Its settings document, through its own API: the proof that a second
+      # wiring run changed no setting, on an app whose whole connection is
+      # settings rather than rows.
+      key=$(arr_key "$app")
+      port=$(arr_port "$app")
+      port_forward "${app}-0" "$port" || return 1
+      curl -sS -H "X-API-KEY: ${key}" "http://127.0.0.1:${PF_PORT}/${app}/api/system/settings" \
+        >"$dir/${app}-settings.json" 2>/dev/null || true
+      ;;
     pbh)
       # The downloader the Job owns, which is the only object s5n writes there.
       # The status endpoint is left out on purpose: it carries live counters that
@@ -1737,10 +1790,11 @@ snapshot() { # snapshot <dir>
   # The two apps with their own user table: what the Job registered is an
   # instance and a set of download clients, so a duplicate row or a rewritten
   # client shows up in the diff like any Arr's download client would.
-  for app in qui autobrr pbh; do
+  for app in qui autobrr pbh bazarr bazarr-4k; do
     app_snapshot "$dir" "$app" || { echo "could not snapshot ${app}"; fail=1; }
   done
 }
+
 
 # The account the chart owns, and its password from the release Secret. Both
 # apps' init containers wrote it into their own user table at start-up.
@@ -1768,6 +1822,8 @@ for expected in \
   lidarr/downloadclient lidarr/rootfolder lidarr/hardlinks \
   prowlarr/application/sonarr prowlarr/application/radarr prowlarr/application/radarr-4k \
   prowlarr/application/lidarr \
+  bazarr/ready bazarr/sonarr bazarr/radarr \
+  bazarr-4k/ready bazarr-4k/sonarr bazarr-4k/radarr \
   qbittorrent/data-contract qbittorrent/category/tv qbittorrent/category/movies \
   qbittorrent/category/4K/Movies qbittorrent/category/lidarr \
   data/hardlink/tv data/hardlink/movies data/hardlink/4K/Movies data/hardlink/music \
@@ -1780,6 +1836,45 @@ for expected in \
   res=$(status_field "[s['result'] for s in d['steps'] if s['name']=='$expected'][0]" 2>/dev/null || echo missing)
   echo "  ${expected}: ${res}"; [ "$res" = ok ] || fail=1
 done
+
+# Each Bazarr is wired to its own pair, read back through the app: the 4K one
+# reads radarr-4k and no sonarr, because this install switches on the 4K Radarr
+# and not the 4K Sonarr. The Job turns the missing side's switch off, so the app
+# does not spend its life dialling a Service that does not exist.
+assert_bazarr_pair() { # assert_bazarr_pair <instance> <sonarr|-> <radarr|->
+  local inst=$1 sonarr=$2 radarr=$3 key got
+  key=$(arr_key "$inst")
+  port_forward "${inst}-0" "$(arr_port "$inst")" || return 1
+  got="$WORK/${inst}-settings.json"
+  curl -sS -H "X-API-KEY: ${key}" "http://127.0.0.1:${PF_PORT}/${inst}/api/system/settings" \
+    >"$got" 2>/dev/null || true
+  port_forward_stop
+  python3 - "$got" "$inst" "$sonarr" "$radarr" <<'PY' || fail=1
+import json, sys
+path, inst, sonarr, radarr = sys.argv[1:5]
+d = json.load(open(path))
+def want(flag):
+    return flag != "-"
+problems = []
+if d["general"]["use_sonarr"] != want(sonarr):
+    problems.append(f"general.use_sonarr = {d['general']['use_sonarr']}, want {want(sonarr)}")
+if d["general"]["use_radarr"] != want(radarr):
+    problems.append(f"general.use_radarr = {d['general']['use_radarr']}, want {want(radarr)}")
+for side, name in (("sonarr", sonarr), ("radarr", radarr)):
+    if not want(name):
+        continue
+    if d[side]["ip"] != name:
+        problems.append(f"{side}.ip = {d[side]['ip']}, want {name}")
+    if d[side]["base_url"].rstrip("/") not in ("/" + name, ""):
+        problems.append(f"{side}.base_url = {d[side]['base_url']}, want /{name}")
+if problems:
+    print(f"{inst}: " + "; ".join(problems))
+    sys.exit(1)
+print(f"{inst}: wired to its own pair")
+PY
+}
+assert_bazarr_pair bazarr sonarr radarr
+assert_bazarr_pair bazarr-4k - radarr-4k
 
 # What the Job registered, read back through the apps themselves: exactly one
 # qui instance pointed at qBittorrent with local filesystem access, and one
