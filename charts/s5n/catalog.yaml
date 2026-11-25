@@ -255,8 +255,10 @@ apps:
     # trust anchor from it, and box registers the client.
     oidc: true
     # Its download client, and every Arr its actions push to: autobrr's own
-    # client test is an Arr API call, made from autobrr's pod.
-    calls: [qbittorrent, sonarr, radarr]
+    # client test is an Arr API call, made from autobrr's pod. qui too: its
+    # qBittorrent proxy is a download client autobrr can be pointed at, and a
+    # missing edge here is a policy that drops that connection without a word.
+    calls: [qbittorrent, qui, sonarr, radarr]
     # Its SQLite database and config.toml (internal/database/database.go at
     # v1.90.0: dataSourceName(cfg.ConfigPath, "autobrr.db");
     # internal/config/config.go: config.toml).
