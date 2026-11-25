@@ -10,8 +10,15 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
+# Every host-side name this run creates -- the kind cluster, the kubeconfig and
+# the image tag -- carries an id derived from this checkout, so it never meets
+# another worktree's run of this script, or hack/e2e-box.sh's scenarios. On CI a
+# runner holds one checkout and runs one of these, so the id only lengthens the
+# names: nothing reads them.
+E2E_ID=${E2E_ID:-$(printf '%s' "$PWD" | sha256sum | cut -c1-6)}
+
 KIND=${KIND:-kind}
-CLUSTER=s5n
+CLUSTER="s5n-${E2E_ID}"
 NS=seedbox
 # The box's domain. Plex and Seerr are served at plex.<domain> and
 # seerr.<domain> -- the catalog says so, because their UIs write absolute asset
@@ -102,8 +109,11 @@ CTX="kind-${CLUSTER}"
 K="kubectl --context ${CTX}"
 HELM="helm --kube-context ${CTX}"
 # Built under the repository the chart's s5n variant names, so the release uses
-# the local image by tag instead of pulling the published one.
-IMAGE=ghcr.io/swizzin/s5n:e2e
+# the local image by tag instead of pulling the published one. The tag carries
+# the checkout's id: the docker store is the machine's, and two worktrees would
+# otherwise build over each other's image.
+IMAGE_TAG="e2e-${E2E_ID}"
+IMAGE="ghcr.io/swizzin/s5n:${IMAGE_TAG}"
 WORK=$(mktemp -d)
 # The last line of every log is the run's own answer, whatever the cleanup says.
 trap 'code=$?; rm -rf "$WORK"; printf "E2E EXIT: %s\n" "$code"' EXIT
@@ -122,7 +132,7 @@ fail=0
 # So the e2e brings its own kubeconfig and kind, kubectl and helm all read that
 # file; ~/.kube/config is never opened. It lives outside $WORK so a kept cluster
 # stays reachable after this script exits.
-KUBECONFIG=${S5N_E2E_KUBECONFIG:-${XDG_CACHE_HOME:-$HOME/.cache}/s5n-e2e/kubeconfig}
+KUBECONFIG=${S5N_E2E_KUBECONFIG:-${XDG_CACHE_HOME:-$HOME/.cache}/s5n-e2e/${E2E_ID}/kind/kubeconfig}
 export KUBECONFIG
 mkdir -p "$(dirname "$KUBECONFIG")"
 [ -e "$KUBECONFIG" ] || : >"$KUBECONFIG"
@@ -138,7 +148,10 @@ if $KIND get clusters 2>/dev/null | grep -qx "$CLUSTER"; then
   fi
 else
   log "creating kind cluster"
-  $KIND create cluster --config hack/kind.yaml --wait 120s
+  # --name as well as the config's own name: the id this run adds to CLUSTER has
+  # to be the cluster kind creates, or every later --name "$CLUSTER" (load,
+  # export, delete) looks for a cluster that does not exist.
+  $KIND create cluster --name "$CLUSTER" --config hack/kind.yaml --wait 120s
 fi
 
 log "building the s5n image (wiring Job + qBittorrent credential seed)"
@@ -186,12 +199,16 @@ done
 
 # Carve a small L2 pool from the top of the kind docker network's IPv4 subnet, so the
 # host reaches LoadBalancer addresses directly — the same trick GitHub ubuntu runners
-# rely on, and the same reason no extraPortMappings are needed.
+# rely on, and the same reason no extraPortMappings are needed. Every kind cluster on
+# this machine announces addresses on that one bridge, so the block is chosen by this
+# checkout's id (hack/e2e-box.sh's preinstalled scenario does the same): two clusters
+# that took the same block would answer each other's ARP.
 kind_subnet=$(docker network inspect kind -f '{{range .IPAM.Config}}{{.Subnet}} {{end}}' | tr ' ' '\n' | grep -v ':' | head -1)
-pool=$(python3 - "$kind_subnet" <<'PY'
-import ipaddress, sys
-net = ipaddress.ip_network(sys.argv[1], strict=False)
-ips = list(net.hosts())[-16:]
+pool=$(python3 - "$kind_subnet" "${E2E_ID}:kind" <<'PY'
+import hashlib, ipaddress, sys
+hosts = list(ipaddress.ip_network(sys.argv[1], strict=False).hosts())
+block = int(hashlib.sha256(sys.argv[2].encode()).hexdigest()[:8], 16) % 32
+ips = hosts[-8 * (block + 1):len(hosts) - 8 * block]
 print(f"{ips[0]}-{ips[-1]}")
 PY
 )
@@ -496,7 +513,7 @@ $K -n "$NS" delete deploy unblessed --ignore-not-found >/dev/null
 # release by name rather than install pods that wait for storage forever. A
 # server-side dry run does the cluster's lookups and writes nothing.
 log "asserting a release without its claims is refused at render"
-noclaim=$($HELM install s5n charts/s5n -n "$NS" -f hack/e2e-values.yaml --set gateway.host="$DOMAIN" --dry-run=server 2>&1) && {
+noclaim=$($HELM install s5n charts/s5n -n "$NS" -f hack/e2e-values.yaml --set gateway.host="$DOMAIN" --set wiring.image.tag="$IMAGE_TAG" --dry-run=server 2>&1) && {
   echo "a release whose claims do not exist rendered"; fail=1; } || true
 if grep -qF 'storage.data.existingClaim: PersistentVolumeClaim "s5n-data" does not exist in namespace "seedbox"' <<<"$noclaim"; then
   echo "  refused: missing claim s5n-data"
@@ -596,6 +613,7 @@ install_release() {
     -f hack/e2e-values.yaml \
     -f "$WORK/apps-values.yaml" \
     --set gateway.host="$DOMAIN" \
+    --set wiring.image.tag="$IMAGE_TAG" \
     --wait --timeout 15m
 }
 
@@ -664,8 +682,8 @@ log "admission: a blessed image through the same subresource is admitted"
 # The denied PATCH persisted nothing, so this appends the first ephemeral
 # container. The image is the one this e2e built and loaded, under the
 # repository the chart's s5n variant names.
-cat >"$WORK/ephemeral-blessed.json" <<'EOF'
-{"spec":{"ephemeralContainers":[{"name":"debugger-allow","image":"ghcr.io/swizzin/s5n:e2e","command":["/usr/local/bin/s5n","version"],"securityContext":{"allowPrivilegeEscalation":false,"runAsNonRoot":true,"capabilities":{"drop":["ALL"]},"seccompProfile":{"type":"RuntimeDefault"}}}]}}
+cat >"$WORK/ephemeral-blessed.json" <<EOF
+{"spec":{"ephemeralContainers":[{"name":"debugger-allow","image":"${IMAGE}","command":["/usr/local/bin/s5n","version"],"securityContext":{"allowPrivilegeEscalation":false,"runAsNonRoot":true,"capabilities":{"drop":["ALL"]},"seccompProfile":{"type":"RuntimeDefault"}}}]}}
 EOF
 if $K --as="$SA" -n "$NS" patch pod "$pod" --subresource=ephemeralcontainers --type=strategic \
   -p "$(cat "$WORK/ephemeral-blessed.json")" >"$WORK/allow-ephemeral.txt" 2>&1; then
@@ -673,7 +691,7 @@ if $K --as="$SA" -n "$NS" patch pod "$pod" --subresource=ephemeralcontainers --t
     -o jsonpath='{range .spec.ephemeralContainers[*]}{.name}={.image}{"\n"}{end}' |
     grep '^debugger-allow=' || true)
   echo "ephemeral image admitted: ${got}"
-  [ "$got" = "debugger-allow=ghcr.io/swizzin/s5n:e2e" ] || fail=1
+  [ "$got" = "debugger-allow=${IMAGE}" ] || fail=1
 else
   echo "$(cat "$WORK/allow-ephemeral.txt")"; fail=1
 fi

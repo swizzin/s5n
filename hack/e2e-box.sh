@@ -110,6 +110,14 @@
 # cluster. `all` runs this script once per scenario, which gives each its own
 # work directory, cluster name and exit code.
 #
+# `all` runs its scenarios at the same time, `E2E_SLOTS` of them at once
+# (default 3), each into its own log, and ends with one line per scenario and
+# the run's total. A scenario holds one slot for its whole life, and every
+# host-side name it creates carries an id for the checkout it runs in (see THE
+# RUN'S IDENTITY below), so two worktrees -- or two scenarios of one worktree --
+# can run at once without meeting. `all` also builds what every scenario needs
+# once: the image, the box binary and the chart package.
+#
 # Usage: hack/e2e-box.sh [--keep] [fresh|preinstalled|foreign-gateway|update|upgrade|migrate|migrate-keep|all]   (default: all)
 #
 # Every `==> ` line ends with the seconds elapsed since the script started
@@ -119,6 +127,14 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
+# ---- the run's identity ------------------------------------------------------
+# Every host-side name this run creates -- the kind cluster, the registry
+# container, the kubeconfig and the image tag -- carries an id derived from this
+# checkout, so two worktrees, or two scenarios of one worktree, never name the
+# same thing and can run at the same time. On CI a runner holds one checkout and
+# runs one scenario, so the id only lengthens the names: nothing reads them.
+E2E_ID=${E2E_ID:-$(printf '%s' "$PWD" | sha256sum | cut -c1-6)}
+
 KIND=${KIND:-kind}
 NS=seedbox
 # The one account the login admits. A generic name: the repo carries no real
@@ -126,7 +142,12 @@ NS=seedbox
 # only to be refused: no rule and no client names it.
 LOGIN=alice
 SECOND_LOGIN=bob
-IMAGE=ghcr.io/swizzin/s5n:e2e
+# The local build's tag, under the repository the chart's s5n variant names. It
+# carries the id because the docker store is the machine's, not this
+# checkout's: two worktrees would otherwise build over each other's image under
+# one tag.
+IMAGE_TAG="e2e-${E2E_ID}"
+IMAGE="ghcr.io/swizzin/s5n:${IMAGE_TAG}"
 # The platform versions box installs are not this script's: they come from
 # charts/s5n/platform.yaml, the file the chart release carries, printed by
 # hack/versions through the parser box uses, so the plan box prints is asserted
@@ -199,6 +220,9 @@ case "$SCENARIO" in
   migrate) CLUSTER=s5n-box-migrate; DOMAIN=box.migrate.example.test ;;
   migrate-keep) CLUSTER=s5n-box-migrate-keep; DOMAIN=box.keep.example.test ;;
 esac
+# The id last, so a kind cluster still reads scenario first in `kind get
+# clusters` and in a container name.
+CLUSTER="${CLUSTER}-${E2E_ID}"
 # The fresh scenario is the one that proves the namespace a first run derives
 # from its login: it passes no --namespace, and the box has to land in
 # s5n-<login>. The other scenarios keep an explicit namespace, which still wins
@@ -329,7 +353,12 @@ TORRENT_PORT=""
 # So the e2e brings its own kubeconfig and kind, kubectl and helm all read that
 # file; ~/.kube/config is never opened. It lives outside $WORK so a kept cluster
 # stays reachable after this script exits.
-KUBECONFIG=${S5N_E2E_KUBECONFIG:-${XDG_CACHE_HOME:-$HOME/.cache}/s5n-e2e/kubeconfig}
+#
+# One file per scenario, not one per machine or one per checkout: kind reads the
+# file, adds a cluster and writes it back, so two clusters created at once into
+# one file lose each other's context. The run's first log line names this path,
+# which is how a --keep cluster is reached afterwards.
+KUBECONFIG=${S5N_E2E_KUBECONFIG:-${XDG_CACHE_HOME:-$HOME/.cache}/s5n-e2e/${E2E_ID}/${SCENARIO}/kubeconfig}
 export KUBECONFIG
 mkdir -p "$(dirname "$KUBECONFIG")"
 [ -e "$KUBECONFIG" ] || : >"$KUBECONFIG"
@@ -365,7 +394,7 @@ box_logs() {
 # cluster never pulls the chart: box runs on the host.
 # distribution v3.1.2, pinned by tag and digest like every other test image.
 REGISTRY_IMAGE=registry:3@sha256:82f6ff4a7f982960c8aa51617fea3aabc485df6e55cce80d22deb1de36f1bc3c  # renovate: datasource=docker
-REGISTRY=s5n-e2e-registry-${SCENARIO}
+REGISTRY=s5n-e2e-registry-${SCENARIO}-${E2E_ID}
 log "OCI registry (distribution 3.1.2) on 127.0.0.1 only (container ${REGISTRY})"
 docker rm -f "$REGISTRY" >/dev/null 2>&1 || true
 docker run -d --rm --name "$REGISTRY" -p 127.0.0.1::5000 "$REGISTRY_IMAGE" >/dev/null
@@ -513,12 +542,13 @@ done
 # not a catalog question, so init has no opinion about it. It has to exist
 # before bootstrap: bootstrap hands over to init, which reads it.
 log "root's values file: the tuning init must leave alone"
-cat >"$WORK/values.yaml" <<'EOF'
+cat >"$WORK/values.yaml" <<EOF
 wiring:
   image:
     # The locally built image, under the repository the chart's s5n variant
-    # names: the same override hack/e2e-kind.sh passes as --set.
-    tag: e2e
+    # names: the same override hack/e2e-kind.sh passes as --set. Its tag carries
+    # this checkout's id (see THE RUN'S IDENTITY).
+    tag: ${IMAGE_TAG}
 EOF
 # The fresh scenario's ACME server is Pebble, not Let's Encrypt: the values
 # file forces the production issuer, so the Certificate names s5n-letsencrypt
@@ -4072,7 +4102,7 @@ PY
 }
 
 # install_metallb puts MetalLB on the cluster the way a user would: the
-# upstream manifest and an L2 pool carved from the bottom of the kind docker
+# upstream manifest and an L2 pool carved from the top of the kind docker
 # network, not through box. It sets MANUAL_POOL for the assertions that follow.
 # The preinstalled scenario needs this exact state: an address layer box did
 # not install and must not touch.
@@ -4096,11 +4126,18 @@ install_metallb() {
   # the same trick hack/e2e-kind.sh uses. The name is deliberately not box's:
   # after bootstrap, s5n-pool existing at all would mean box had installed its
   # own pool over this one.
+  #
+  # Every kind cluster on this machine puts its nodes on that one bridge and
+  # announces its LoadBalancer addresses on it, so two clusters that take the
+  # same block of it answer each other's ARP and one of them loses its Gateway.
+  # The block is therefore chosen by this checkout's id: 32 blocks of 8 addresses
+  # from the top down, which docker's own IPAM never reaches from the bottom.
   kind_subnet=$(docker network inspect kind -f '{{range .IPAM.Config}}{{.Subnet}} {{end}}' | tr ' ' '\n' | grep -v ':' | head -1)
-  pool=$(python3 - "$kind_subnet" <<'PY'
-import ipaddress, sys
-net = ipaddress.ip_network(sys.argv[1], strict=False)
-ips = list(net.hosts())[-16:]
+  pool=$(python3 - "$kind_subnet" "${E2E_ID}:preinstalled" <<'PY'
+import hashlib, ipaddress, sys
+hosts = list(ipaddress.ip_network(sys.argv[1], strict=False).hosts())
+block = int(hashlib.sha256(sys.argv[2].encode()).hexdigest()[:8], 16) % 32
+ips = hosts[-8 * (block + 1):len(hosts) - 8 * block]
 print(f"{ips[0]}-{ips[-1]}")
 PY
 )
@@ -4938,8 +4975,10 @@ PY
 # have to read for a tag-only release to move or lapse at all.
 
 # What the two new releases pin. The broken sonarr is built here; the other two
-# are images this cluster already runs, retagged.
-BROKEN_TAG=e2e-broken
+# are images this cluster already runs, retagged. The built one carries this
+# checkout's id: it is a tag in the machine's docker store, which two worktrees
+# share.
+BROKEN_TAG="e2e-broken-${E2E_ID}"
 MOVED_TAG=e2e-moved
 RESTORED_TAG=e2e-restored
 # What the operator pins sonarr to by hand after the last rollback: sonarr's
@@ -6313,10 +6352,10 @@ print(".".join(str(p) for p in tree))' "$CHART_VERSION"); then
   log "box update: ${UPGRADE_FROM} -> ${tree_release}, the tree's box over the published install"
   update_started=$(date -u +%Y-%m-%dT%H:%M:%SZ) || true
   # This tree's chart runs this tree's wiring Job: the locally built image.
-  cat >>"$WORK/values.yaml" <<'EOF'
+  cat >>"$WORK/values.yaml" <<EOF
 wiring:
   image:
-    tag: e2e
+    tag: ${IMAGE_TAG}
 EOF
   if "$WORK/box" update --yes --chart-repo "$CHART_REPO" --record "$WORK/cluster.yaml" \
     --grant "$WORK/grant.yaml" --values "$WORK/values.yaml" --paths-in-node \
