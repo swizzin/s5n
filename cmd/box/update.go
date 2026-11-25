@@ -394,18 +394,26 @@ func updateCharts(ctx context.Context, o *updateFlags, out say.Reporter, resolve
 		if errors.Is(err, release.ErrCancelled) {
 			return err
 		}
-		err = portRangeHint(err)
-		// Nothing was planned: the failure is the registry read, and the chart
-		// is the subject. Past that, the step's own ✗ row already says which
-		// step stopped, and the error carries what it was.
-		if res.Target == "" {
-			out.Rows([]say.Row{{Mark: say.MarkFailed, Name: "chart", Facts: []string{err.Error()}}})
-		}
-		if len(res.Steps) == 0 && len(res.Taken) == 0 {
-			out.Rows([]say.Row{{Mark: say.MarkNote, Facts: []string{"nothing on this box changed"}}})
-			out.Detail("the files are the only place this run wanted to write, and it wrote none of them")
-		}
-		return say.Reported{Err: err}
+		return reportUpdateFailure(out, res, portRangeHint(err))
 	}
 	return nil
+}
+
+// reportUpdateFailure puts a failed update's reason on screen once and returns
+// the error marked as drawn. Nothing was planned: the failure is the registry
+// read, and the chart is the subject of the one ✗ row. Past that, the step's own
+// ✗ row says which step stopped and the reason hangs under it: the updater says
+// nothing more itself, so an error left unprinted here is a ✗ with no reason
+// (rule 2: a refusal gets its one reason).
+func reportUpdateFailure(out say.Reporter, res update.Result, err error) error {
+	if res.Target == "" {
+		out.Rows([]say.Row{{Mark: say.MarkFailed, Name: "chart", Facts: []string{err.Error()}}})
+	} else {
+		out.Note(err.Error())
+	}
+	if len(res.Steps) == 0 && len(res.Taken) == 0 {
+		out.Rows([]say.Row{{Mark: say.MarkNote, Facts: []string{"nothing on this box changed"}}})
+		out.Detail("the files are the only place this run wanted to write, and it wrote none of them")
+	}
+	return say.Reported{Err: err}
 }
