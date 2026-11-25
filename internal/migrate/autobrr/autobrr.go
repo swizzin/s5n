@@ -11,7 +11,9 @@
 // internal/database/migrations/sqlite/0_base_schema.sql:117-123 and
 // 77_action_add_download_path.sql:2), and `client.host`, `client.port` and
 // `client.tls` for every download client *and* every Arr, because an Arr is a
-// client row with type SONARR or RADARR in this schema. A client autobrr cannot
+// client row with type SONARR, RADARR or LIDARR in this schema
+// (internal/domain/downloader.go at v1.91.1: DownloaderTypeLidarr). A client
+// autobrr cannot
 // reach is an action that silently never runs, which is the failure mode this
 // file exists to prevent.
 //
@@ -68,7 +70,7 @@ var hostPlusPort = map[string]bool{"QBITTORRENT": true, "TRANSMISSION": true}
 // any other type (Transmission, rTorrent, Deluge, another *arr) is left exactly
 // as it is and called out: rewriting it would point autobrr at an app box does
 // not run, and deleting it is the operator's call, never migrate's.
-var typesBoxRuns = map[string]bool{"QBITTORRENT": true, "SONARR": true, "RADARR": true}
+var typesBoxRuns = map[string]bool{"QBITTORRENT": true, "SONARR": true, "RADARR": true, "LIDARR": true}
 
 // actionPaths are the action columns that hold a path, macro-capable
 // (internal/domain/action.go:17-24).
@@ -552,6 +554,7 @@ const (
 	appQBittorrent = "qbittorrent"
 	appSonarr      = "sonarr"
 	appRadarr      = "radarr"
+	appLidarr      = "lidarr"
 	appProwlarr    = "prowlarr"
 )
 
@@ -566,6 +569,8 @@ func clientApp(kind string) (string, bool) {
 		return appSonarr, true
 	case "RADARR":
 		return appRadarr, true
+	case "LIDARR":
+		return appLidarr, true
 	case "PROWLARR":
 		return appProwlarr, true
 	}

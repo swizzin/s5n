@@ -438,6 +438,38 @@ func TestClientTypeBoxDoesNotRunIsLeft(t *testing.T) {
 	}
 }
 
+// TestLidarrClient: autobrr's LIDARR client type is the third Arr this box runs,
+// so a migrated autobrr's row is pointed at the box's Lidarr like the Sonarr and
+// Radarr rows are -- never left as a type box does not run.
+func TestLidarrClient(t *testing.T) {
+	ctx := context.Background()
+	in := setup(t, strings.Replace(dbFixture,
+		"VALUES (2, 'Sonarr', 1, 'SONARR', 'sonarr.default.svc', 8989, 1);",
+		"VALUES (2, 'Lidarr', 1, 'LIDARR', 'lidarr.default.svc', 8686, 1);", 1))
+	in.Plan.Hosts = append(in.Plan.Hosts, plan.HostRule{Service: "lidarr.default", App: "lidarr"})
+	in.Targets["lidarr"] = rewrite.Endpoint{Host: "lidarr", Port: 8686, URLBase: "/lidarr"}
+	in.Runs["lidarr"] = []string{"lidarr"}
+
+	rep, err := rewriter{}.Check(ctx, in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rep.Blocked() {
+		t.Fatalf("a LIDARR client was not settled: %v %v", rep.Uncovered, rep.Unclassified)
+	}
+	if len(rep.Left) != 0 {
+		t.Errorf("Left = %+v, want none: box runs the app this client dials", rep.Left)
+	}
+	if _, err := (rewriter{}).Write(ctx, in); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	// This fixture's row is a bare host and a port column, like the Sonarr one
+	// beside it, so that is the shape it keeps: the box's Service and port.
+	if got := readClients(t, in.Dir)[2]; got.host != "lidarr" || got.port != 8686 {
+		t.Errorf("the Lidarr row = %+v, want lidarr:8686", got)
+	}
+}
+
 func readConfig(t *testing.T, dir string) map[string]string {
 	t.Helper()
 	raw, err := os.ReadFile(filepath.Join(dir, configName))
