@@ -7,6 +7,10 @@
 # holds on /data, and the wiring Job does its job twice: the first run connects
 # everything, the second changes nothing.
 # Usage: hack/e2e-kind.sh [--keep]
+#
+# It takes one of the machine-wide slots hack/e2e-box.sh's scenarios take, for its
+# whole life, so it runs beside a scenario (or another worktree) without meeting
+# it; a fourth run waits for one. No lock file is needed around it.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -124,6 +128,55 @@ log() {
   printf '\n==> %s  [+%ss]\n' "$*" "$SECONDS"
 }
 fail=0
+
+# ---- the machine's slots -----------------------------------------------------
+# One of the same slots hack/e2e-box.sh's scenarios take, for this script's whole
+# life: three is what this machine's memory measured well (kind clusters, their
+# registry containers and the boots they run at once), the files live in the
+# user's cache so every checkout on the machine shares them, and E2E_SLOTS
+# overrides the count. A fourth run -- this one beside a scenario, or two
+# worktrees at once -- waits for one instead of meeting another run's cluster,
+# image tag or LoadBalancer address. There is no flock around either script any
+# more: the slot is what queues, and the id in every host-side name is what keeps
+# two runs apart.
+E2E_SLOTS=${E2E_SLOTS:-3}
+case "$E2E_SLOTS" in
+  '' | *[!0-9]* | 0)
+    echo "E2E_SLOTS=${E2E_SLOTS} is not a number of slots" >&2
+    exit 2
+    ;;
+esac
+SLOT_DIR=${S5N_E2E_SLOT_DIR:-${XDG_CACHE_HOME:-$HOME/.cache}/s5n-e2e/slots}
+
+# take_slot, called once: locks the first free slot file and keeps the descriptor
+# open, which is what holds the slot until this process exits. Every slot busy
+# means another run is in front of this one; it waits, saying so once, and when it
+# finally gets a slot its clock starts there: the seconds in its log are this
+# run's own, not the queue in front of it.
+take_slot() {
+  local i fd started=$SECONDS waited=""
+  mkdir -p "$SLOT_DIR"
+  while :; do
+    for i in $(seq 1 "$E2E_SLOTS"); do
+      exec {fd}>"$SLOT_DIR/slot-${i}.lock"
+      if flock -n "$fd"; then
+        SLOT_FD=$fd
+        [ -z "$waited" ] || SECONDS=$started
+        return 0
+      fi
+      exec {fd}>&-
+    done
+    if [ -z "$waited" ]; then
+      log "all ${E2E_SLOTS} e2e slots are taken: waiting (${SLOT_DIR})"
+      waited=1
+    fi
+    sleep 5
+  done
+}
+
+# Before anything of this run exists on the host: one of the machine's slots for
+# its whole life, before the kubeconfig, the cluster, the image or the registry.
+take_slot
 
 # kind writes the cluster's context into KUBECONFIG and makes it the
 # current-context, then `kind delete cluster` drops that context without putting
