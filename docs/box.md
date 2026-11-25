@@ -1047,17 +1047,18 @@ no extra step. Anything outside the catalog stays outside a user's namespace, wh
 the decided rule that root decides which apps a user has.
 
 **qBittorrent's own builds (decided).** qBittorrent is the one app where the
-libtorrent line is a real choice, so its list has six entries: `default`
-(home-operations, still the default) and five builds of
-`ghcr.io/swizzin/qbittorrent`, the project's own image — `lt1.2`, `lt1.2-10g`,
-`lt2.1`, `lt2.1-10g` and `lt1.2-10g-znver3-mimalloc`.
+libtorrent line is a real choice, so its list is the default (home-operations) plus
+six builds of `ghcr.io/swizzin/qbittorrent`, the project's own image — `lt1.2`,
+`lt1.2-10g`, `lt2.1`, `lt2.1-10g`, `lt1.2-10g-znver3` and `lt2.1-10g-znver3` —
+and the one former name still listed beside them, `lt1.2-10g-znver3-mimalloc`
+(see below).
 `lt1.2` is the static build on libtorrent 1.2 (musl, baseline x86-64-v2 and
 armv8-a) with the default's layout — `HOME` and `XDG_CONFIG_HOME` at `/config`, the
 conf at `/config/qBittorrent/qBittorrent.conf`, ports from `QBT_WEBUI_PORT` and
 `QBT_TORRENTING_PORT` — so the chart's one pod spec runs it unchanged and a box can
 switch variants in place. A variant name is the libtorrent line plus the build
 profile, never a version. The tag carries only qBittorrent's version and that line
-(`5.3.0-lt1.2`) — the version is what lets Renovate propose a qBittorrent release —
+(`5.3.1-lt1.2`) — the version is what lets Renovate propose a qBittorrent release —
 and libtorrent's own release is pinned by the digest alone, so a later 1.2.21 is a
 new digest on the same tag and the variant keeps its name.
 
@@ -1068,18 +1069,25 @@ chart sets no cache options, so the same pod spec runs it. `lt1.2-10g` and
 Gbit links — `max_peer_recv_buffer_size` 4 MiB against the base build's 2 MiB, and
 `send_not_sent_low_watermark` 1 MiB against 512 KiB — and nothing else differs: the
 base builds already carry five tuned defaults of their own, so `-10g` is not stock
-libtorrent plus two values. All four are built for both architectures, and
-`hack/e2e-kind.sh` switches through each one the way it runs `lt1.2`: the pod's own
-image and digest, and qBittorrent's `buildInfo` reporting the libtorrent line, which
-is what a tag alone cannot say.
+libtorrent plus two values. Every 10G build links mimalloc for its allocator and the
+base builds keep musl's own, which is what the two profiles differ in besides the
+buffers. All four are built for both architectures, and `hack/e2e-kind.sh` switches
+through each one the way it runs `lt1.2`: the pod's own image and digest, and
+qBittorrent's `buildInfo` reporting the libtorrent line, which is what a tag alone
+cannot say.
 
-`lt1.2-10g-znver3-mimalloc` is the one exemption from "the e2e tests every
-variant". It is compiled for AMD Zen 3 (`-march=znver3`), so it dies with SIGILL at
-start on CI's runners and most hosts, and it is amd64 only, so an arm64 node cannot
-pull it. What tests it instead is the `swizzin/qbittorrent` repository's own binary
-verify and smoke test, run on a Zen 3 runner before the tag is pushed. Its layout is
-the one `lt1.2` has, which `hack/e2e-kind.sh` runs on every push, so the pod spec is
-proven for both.
+The two Zen 3 builds, `lt1.2-10g-znver3` and `lt2.1-10g-znver3`, are the exemption
+from "the e2e tests every variant". They are compiled for AMD Zen 3
+(`-march=znver3`), so they die with SIGILL at start on CI's runners and most hosts,
+and they are amd64 only, so an arm64 node cannot pull them. What tests them instead
+is the `swizzin/qbittorrent` repository's own binary verify and smoke test, run on a
+Zen 3 runner before the tag is pushed. Their layout is the one `lt1.2` has, which
+`hack/e2e-kind.sh` runs on every push, so the pod spec is proven for both.
+
+`lt1.2-10g-znver3-mimalloc` is the former name of `lt1.2-10g-znver3`, from when only
+the Zen 3 build linked mimalloc. It stays in the list as a real entry pinned to the
+same image, because a name the chart does not have fails the render, and a box whose
+values still say it would otherwise stop updating: nothing chooses it anew.
 
 ### uninstall (decided)
 
@@ -1300,12 +1308,15 @@ data. Everything it will change is written down before it changes anything.
   that resolves an address gives the plan's domain default: the one name the source's hosts
   all are — box serves the apps under paths on it, as the source did — or the domain
   several hosts share. The source's own image is never carried, and the admission policy
-  stays the guard. A tag that names libtorrent's patch release beside qBittorrent's
-  version (`5.3.0-lt1.2.20-10g`) is the variant whose tag is the line and the profile
-  (`5.3.0-lt1.2-10g`), because that is what the chart's variants say a variant is, and
-  the patch release is an older spelling of the same build; the mapping is that one
-  repository's, and a tag no variant has is reported as exactly that, naming the tags
-  box compared.
+  stays the guard. A swizzin qBittorrent tag names its variant by its suffix: the
+  version in front (`5.3.1-`) is qBittorrent's and not part of the name, libtorrent's
+  patch release folds back to its line (`5.3.1-lt1.2.20-10g` is `5.3.1-lt1.2-10g`,
+  because a later 1.2.21 is a new digest on that same variant), and the rest is the
+  variant's name — so a source on an older qBittorrent of a build box ships maps onto
+  it, with a note saying the chart's version runs. The old Zen 3 name,
+  `lt1.2-10g-znver3-mimalloc`, maps onto `lt1.2-10g-znver3`, which is the same image
+  under its current name. The mapping is that one repository's, and a tag no variant
+  has is reported as exactly that, naming the tags box compared.
 - **One snapshot per owner (proposed).** discover groups the apps by the user that owns
   their config directories, so a source with several users yields one snapshot each. The
   plan records the owner's uid:gid, and every other snapshot is applied into that user's
@@ -1442,8 +1453,8 @@ data. Everything it will change is written down before it changes anything.
     qbittorrent:
       kind: docker
       source: qbittorrent
-      image: ghcr.io/swizzin/qbittorrent:5.3.0-lt1.2
-      variant: lt1.2                  # already one of the chart's blessed builds
+      image: ghcr.io/swizzin/qbittorrent:5.3.0-lt1.2  # what it ran, for the record
+      variant: lt1.2                  # the chart's build of it, at its own version
       config: /srv/apps/qbittorrent
       paths:
         - from: /downloads

@@ -184,6 +184,174 @@ func TestAutobrrEnsureDownloaderSendsTheWholeObjectSoPutDoesNotWipe(t *testing.T
 	}
 }
 
+// A migrated client keeps the operator's own name ("Sonarr4k" is the shape a
+// source install leaves), so a name can never be what finds it: the row is
+// adopted by the Arr it dials, which is the address box's own instance answers
+// on. Nothing is created beside it and nothing is written to it.
+func TestAutobrrEnsureDownloaderAdoptsAMigratedClientByHost(t *testing.T) {
+	f, a := newAutobrrFake(t)
+	mustLogin(t, a)
+	f.rows = []Item{{
+		"id": 12, "name": "Sonarr4k", "type": "SONARR", "enabled": true,
+		"host": "http://sonarr-4k:8990/sonarr-4k", "port": 0, "tls": false,
+		"username": "", "password": "",
+		"settings": map[string]any{"apikey": "sonarr-key"},
+	}}
+
+	res, err := a.EnsureDownloader(context.Background(), DownloaderSpec{
+		Name: "sonarr-4k", Type: "SONARR", Host: "http://sonarr-4k:8990/sonarr-4k", APIKey: "sonarr-key",
+	}, 0, "")
+	if err != nil {
+		t.Fatalf("adopt: %v", err)
+	}
+	// Nothing is on record yet, so the key it holds cannot be known to be the
+	// same one: the row is updated in place, once, rather than duplicated.
+	if res.Change != Updated || res.ID != 12 {
+		t.Fatalf("adopt = %+v, want an update on id 12", res)
+	}
+	if len(f.rows) != 1 {
+		t.Fatalf("%d rows: the migrated client was duplicated instead of adopted", len(f.rows))
+	}
+	if len(res.Drift) != 0 {
+		t.Fatalf("drift = %+v, want none: every readable field already matched", res.Drift)
+	}
+	if got := f.rows[0].Str("name"); got != "Sonarr4k" {
+		t.Fatalf("the adopted client's name is %q, want the operator's own", got)
+	}
+}
+
+// The migrated qBittorrent client stores a bare host and a port, which autobrr
+// folds into the host on the way out (autobrrDesired pins port 0). The two are
+// one address, so the row is adopted rather than duplicated.
+func TestAutobrrEnsureDownloaderAdoptsTheMigratedQBittorrentClient(t *testing.T) {
+	f, a := newAutobrrFake(t)
+	mustLogin(t, a)
+	f.rows = []Item{{
+		"id": 2, "name": "qbit", "type": "QBITTORRENT", "enabled": true,
+		"host": "qbittorrent", "port": 8080, "tls": false, "username": "", "password": "",
+	}}
+
+	res, err := a.EnsureDownloader(context.Background(), DownloaderSpec{
+		Name: "qBittorrent", Type: "QBITTORRENT", Host: "http://qbittorrent:8080",
+	}, 0, "")
+	if err != nil {
+		t.Fatalf("adopt: %v", err)
+	}
+	if res.ID != 2 || len(f.rows) != 1 {
+		t.Fatalf("adopt = %+v with %d rows, want id 2 and no second row", res, len(f.rows))
+	}
+	if got := f.rows[0].Str("host"); got != "http://qbittorrent:8080" {
+		t.Fatalf("host = %q, want the client folded into one URL", got)
+	}
+	if got := f.rows[0].Int("port"); got != 0 {
+		t.Fatalf("port = %d, want 0: the host carries it", got)
+	}
+}
+
+// A recorded id whose client the operator deleted is not a reason to make a new
+// row: the migrated one at the same address is adopted first, which is the
+// repair for a box that ended up with both pairs. The receipt says which id was
+// adopted, because it is not the one owned.json named.
+func TestAutobrrEnsureDownloaderAdoptsByHostWhenTheRecordedClientIsGone(t *testing.T) {
+	f, a := newAutobrrFake(t)
+	mustLogin(t, a)
+	f.rows = []Item{{
+		"id": 12, "name": "Radarr4k", "type": "RADARR", "enabled": true,
+		"host": "http://radarr-4k:7879/radarr-4k", "port": 0, "tls": false,
+		"username": "", "password": "",
+		"settings": map[string]any{"apikey": "radarr-key"},
+	}}
+
+	// owned.json keeps the key's fingerprint beside the id, so the repair does
+	// not even rewrite the row it adopts.
+	res, err := a.EnsureDownloader(context.Background(), DownloaderSpec{
+		Name: "radarr-4k", Type: "RADARR", Host: "http://radarr-4k:7879/radarr-4k", APIKey: "radarr-key",
+	}, 41, SecretFingerprint("radarr-key"))
+	if err != nil {
+		t.Fatalf("adopt: %v", err)
+	}
+	if res.Recreated {
+		t.Fatal("a deleted recorded id reported the client as recreated although the migrated one was adopted")
+	}
+	if res.ID != 12 || res.Change != Unchanged {
+		t.Fatalf("adopt = %+v, want unchanged on id 12", res)
+	}
+	if len(f.rows) != 1 || f.writes != 0 {
+		t.Fatalf("%d rows, %d writes: the deleted id made a second client beside the migrated one", len(f.rows), f.writes)
+	}
+	if !strings.Contains(res.Note, "12") || !strings.Contains(res.Note, "41") {
+		t.Fatalf("note = %q, want the adopted id and the recorded one it replaced", res.Note)
+	}
+}
+
+// A client the operator switched off, one of another type, and one that dials
+// the same host over TLS are not the client this box feeds: adopting any of
+// them would point the box's Arr at something nothing dials, at the other Arr,
+// or at a port with no plain-HTTP Arr behind it.
+func TestAutobrrEnsureDownloaderOnlyAdoptsAnEnabledClientOfItsOwnType(t *testing.T) {
+	f, a := newAutobrrFake(t)
+	mustLogin(t, a)
+	f.rows = []Item{
+		{"id": 3, "name": "Sonarr4k", "type": "SONARR", "enabled": false,
+			"host": "http://sonarr-4k:8990/sonarr-4k"},
+		{"id": 5, "name": "something else", "type": "RADARR", "enabled": true,
+			"host": "http://sonarr-4k:8990/sonarr-4k"},
+		{"id": 6, "name": "Sonarr4k tls", "type": "SONARR", "enabled": true,
+			"host": "sonarr-4k:8990/sonarr-4k", "tls": true},
+	}
+
+	res, err := a.EnsureDownloader(context.Background(), DownloaderSpec{
+		Name: "sonarr-4k", Type: "SONARR", Host: "http://sonarr-4k:8990/sonarr-4k", APIKey: "sonarr-key",
+	}, 0, "")
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if res.Change != Created || res.ID == 3 || res.ID == 5 || res.ID == 6 {
+		t.Fatalf("create = %+v, want a new client rather than a disabled, foreign or TLS one", res)
+	}
+	if len(f.rows) != 4 {
+		t.Fatalf("%d rows, want the three the operator has plus the one box made", len(f.rows))
+	}
+	for i, host := range []string{"http://sonarr-4k:8990/sonarr-4k", "http://sonarr-4k:8990/sonarr-4k", "sonarr-4k:8990/sonarr-4k"} {
+		if got := f.rows[i].Str("host"); got != host {
+			t.Fatalf("row %d's host = %q, want %q: nothing of the operator's is rewritten", f.rows[i].Int("id"), got, host)
+		}
+	}
+}
+
+// Two enabled clients of the same type at one address: autobrr allows both and
+// nothing says which the operator means, so the lowest id is adopted and the
+// receipt names the choice instead of creating a third.
+func TestAutobrrEnsureDownloaderAdoptsTheLowestOfTwoAtOneHost(t *testing.T) {
+	f, a := newAutobrrFake(t)
+	mustLogin(t, a)
+	f.rows = []Item{
+		{"id": 9, "name": "sonarr-4k", "type": "SONARR", "enabled": true,
+			"host": "http://sonarr-4k:8990/sonarr-4k"},
+		{"id": 3, "name": "Sonarr4k", "type": "SONARR", "enabled": true,
+			"host": "http://sonarr-4k:8990/sonarr-4k/"},
+	}
+
+	res, err := a.EnsureDownloader(context.Background(), DownloaderSpec{
+		Name: "sonarr-4k", Type: "SONARR", Host: "http://sonarr-4k:8990/sonarr-4k", APIKey: "sonarr-key",
+	}, 0, "")
+	if err != nil {
+		t.Fatalf("adopt: %v", err)
+	}
+	if res.ID != 3 {
+		t.Fatalf("adopted id %d, want the lowest of 3 and 9", res.ID)
+	}
+	if len(f.rows) != 2 {
+		t.Fatalf("%d rows, want the two that were there", len(f.rows))
+	}
+	if f.rows[0].Str("name") != "sonarr-4k" || !f.rows[0].Bool("enabled") {
+		t.Fatalf("the client that was not adopted changed: %v", f.rows[0])
+	}
+	if !strings.Contains(res.Note, "3") || !strings.Contains(res.Note, "9") {
+		t.Fatalf("note = %q, want both ids named", res.Note)
+	}
+}
+
 // autobrr accepts any number of clients with the same name, so a create has to
 // match first: the user's own row with s5n's name is adopted, its type and host
 // corrected, and no second row appears.
@@ -414,5 +582,24 @@ func TestAutobrrDesiredPinsPortAndKeepsSettings(t *testing.T) {
 	}
 	if fmt.Sprint(fields) != "[host port tls]" {
 		t.Fatalf("drift = %v, want host, port, tls", fields)
+	}
+}
+
+// The comparison the adoption rests on: the scheme and the DNS name are
+// case-blind, a trailing slash is not a different address, the Arr's base path
+// is compared as the app spells it, and a port stored beside the host is part
+// of the same address the Job writes into it.
+func TestNormalizeDownloaderHost(t *testing.T) {
+	for _, tc := range []struct{ raw, want string }{
+		{"http://sonarr-4k:8990/sonarr-4k", "http://sonarr-4k:8990/sonarr-4k"},
+		{"HTTP://Sonarr-4K:8990/sonarr-4k/", "http://sonarr-4k:8990/sonarr-4k"},
+		{"sonarr-4k:8990/sonarr-4k", "http://sonarr-4k:8990/sonarr-4k"},
+		{"sonarr-4k:8990/Sonarr-4K", "http://sonarr-4k:8990/Sonarr-4K"},
+		{"http://qbittorrent:8080", "http://qbittorrent:8080"},
+		{"", ""},
+	} {
+		if got := normalizeDownloaderHost(tc.raw); got != tc.want {
+			t.Fatalf("normalizeDownloaderHost(%q) = %q, want %q", tc.raw, got, tc.want)
+		}
 	}
 }

@@ -1844,13 +1844,17 @@ func TestDiscoverSourceHostNeedsOneNode(t *testing.T) {
 // repository, and the variant in it that its digest then its tag names. Anything
 // else keeps the chart's default, and the note names the key to set and the list
 // box would accept.
+//
+// The source image is the chart's own tag for that variant, read from the chart,
+// so a version bump is one line in variants.yaml and not an edit here.
 func TestDiscoverMapsOnlyBlessedImageVariants(t *testing.T) {
+	lt21 := qbittorrentImage(t, "lt2.1")
 	f := dataSource(t, func(name string, spec *appSpec) {
 		switch name {
 		case "qbittorrent":
-			// One of the project's own builds: five of the chart's variants are
+			// One of the project's own builds: six of the chart's variants are
 			// this one repository, and the tag says which.
-			spec.image = "ghcr.io/swizzin/qbittorrent:5.3.0-lt2.1"
+			spec.image = chartRef(lt21)
 		case "sonarr":
 			// The chart's only sonarr variant, one tag older than its pin.
 			spec.image = "ghcr.io/home-operations/sonarr:4.0.14"
@@ -1894,7 +1898,9 @@ func TestDiscoverMapsOnlyBlessedImageVariants(t *testing.T) {
 
 // TestDiscoverRefusesToGuessAVariant: a repository several blessed variants
 // share, with neither a digest nor a tag that names one of them, is not mapped:
-// running the wrong libtorrent build is worse than the chart's default.
+// running the wrong libtorrent build is worse than the chart's default. The note
+// names every tag the chart pins for that repository, read from the chart so a
+// version bump does not rewrite this test.
 func TestDiscoverRefusesToGuessAVariant(t *testing.T) {
 	f := dataSource(t, func(name string, spec *appSpec) {
 		if name == "qbittorrent" {
@@ -1920,49 +1926,53 @@ func TestDiscoverRefusesToGuessAVariant(t *testing.T) {
 	if strings.Contains(note, "no tag or digest to tell them apart") {
 		t.Errorf("the note still says the variants have no tags, and they do: %q", note)
 	}
-	for _, tag := range []string{"5.3.0-lt1.2", "5.3.0-lt1.2-10g", "5.3.0-lt2.1", "5.3.0-lt2.1-10g", "5.3.0-lt1.2-10g-znver3-mimalloc"} {
-		if !strings.Contains(note, tag) {
-			t.Errorf("the note does not name the tag %s it compared: %q", tag, note)
+	for _, image := range chartVariantsOf(t, "qbittorrent") {
+		if !strings.Contains(note, image.Tag) {
+			t.Errorf("the note does not name the tag %s it compared: %q", image.Tag, note)
 		}
 	}
 }
 
 // TestDiscoverMapsAPatchReleaseTagOntoItsVariant: the project's builds were
 // once tagged with libtorrent's patch release beside qBittorrent's version
-// (5.3.0-lt1.2.20-10g), and the chart's variants name the libtorrent line and
-// the build profile only (5.3.0-lt1.2-10g), because a later 1.2.21 is a new
-// digest on that same tag. So such an image is that variant. A qBittorrent the
-// chart does not ship is none of them, and the note says which tags were
-// compared.
+// (5.3.1-lt1.2.20-10g), and the chart's variants name the libtorrent line and
+// the build profile only (5.3.1-lt1.2-10g), because a later 1.2.21 is a new
+// digest on that same tag. So such an image is that variant. A build the chart
+// does not carry is none of them, and the note says which tags were compared.
 func TestDiscoverMapsAPatchReleaseTagOntoItsVariant(t *testing.T) {
 	tests := []struct {
-		image string
-		want  string
+		variant string
+		image   string
+		want    string
 	}{
-		{"ghcr.io/swizzin/qbittorrent:5.3.0-lt1.2.20-10g-znver3-mimalloc", "lt1.2-10g-znver3-mimalloc"},
-		{"ghcr.io/swizzin/qbittorrent:5.3.0-lt1.2.20", "lt1.2"},
-		{"ghcr.io/swizzin/qbittorrent:5.3.0-lt2.1.2", "lt2.1"},
-		{"ghcr.io/swizzin/qbittorrent:5.3.0-lt2.1.20-10g", "lt2.1-10g"},
-		// A qBittorrent release the chart does not carry: the libtorrent line
-		// matches, the version does not, so nothing does.
-		{"ghcr.io/swizzin/qbittorrent:4.6.0-lt1.2.20-10g", ""},
+		{variant: "lt1.2", want: "lt1.2"},
+		{variant: "lt1.2-10g", want: "lt1.2-10g"},
+		{variant: "lt2.1", want: "lt2.1"},
+		{variant: "lt2.1-10g", want: "lt2.1-10g"},
+		// A build the chart does not carry, in the same spelling: the
+		// libtorrent line folds, the profile does not, so nothing maps.
+		{image: "ghcr.io/swizzin/qbittorrent:5.3.1-lt1.2.20-20g", want: ""},
 	}
 	for _, tt := range tests {
+		image := tt.image
+		if tt.variant != "" {
+			image = libtorrentPatchTag(t, qbittorrentImage(t, tt.variant).Tag)
+		}
 		f := dataSource(t, func(name string, spec *appSpec) {
 			if name == "qbittorrent" {
-				spec.image = tt.image
+				spec.image = image
 			}
 		})
 		f.variants = chartVariants(t)
 		p, rep := f.discover(t)
 		if got := p.Apps["qbittorrent"].Variant; got != tt.want {
-			t.Errorf("%s mapped to variant %q, want %q", tt.image, got, tt.want)
+			t.Errorf("%s mapped to variant %q, want %q", image, got, tt.want)
 			continue
 		}
 		if tt.want != "" {
 			for _, n := range rep.Notes {
-				if strings.Contains(n, "image.variant") && strings.Contains(n, "qbittorrent") {
-					t.Errorf("%s is a blessed variant and needs no note: %q", tt.image, n)
+				if strings.Contains(n, "apps.qbittorrent.image.variant") {
+					t.Errorf("%s is a blessed variant, and the note says it is not: %q", image, n)
 				}
 			}
 			continue
@@ -1974,32 +1984,177 @@ func TestDiscoverMapsAPatchReleaseTagOntoItsVariant(t *testing.T) {
 			}
 		}
 		if !strings.Contains(note, "no blessed variant for that repository has its tag or digest") ||
-			!strings.Contains(note, "5.3.0-lt1.2-10g") {
-			t.Errorf("%s has no variant, and the note does not say so and name the tags compared: %q", tt.image, note)
+			!strings.Contains(note, qbittorrentImage(t, "lt1.2-10g").Tag) {
+			t.Errorf("%s has no variant, and the note does not say so and name the tags compared: %q", image, note)
 		}
 	}
 }
 
-// TestLibtorrentTagOnlyStripsAPatchRelease: the mapping is qBittorrent's own
-// repository and libtorrent's patch release, and nothing else: a tag that is
-// already a variant's is left to the exact comparison, and one that names no
-// libtorrent line is not guessed at.
-func TestLibtorrentTagOnlyStripsAPatchRelease(t *testing.T) {
+// libtorrentPatchTag is a chart tag as the project spelled its builds while
+// libtorrent's patch release was in the tag: the chart's 5.3.1-lt1.2-10g is
+// 5.3.1-lt1.2.20-10g with it, and the chart's 5.3.1-lt2.1 is 5.3.1-lt2.1.20.
+func libtorrentPatchTag(t *testing.T, tag string) string {
+	t.Helper()
+	i := strings.Index(tag, "-lt")
+	if i < 0 {
+		t.Fatalf("%q names no libtorrent line", tag)
+	}
+	rest := tag[i+3:]
+	end := 0
+	for end < len(rest) && (rest[end] == '.' || (rest[end] >= '0' && rest[end] <= '9')) {
+		end++
+	}
+	if parts := strings.Split(rest[:end], "."); len(parts) != 2 {
+		t.Fatalf("%q does not name a libtorrent line of major.minor", tag)
+	}
+	return "ghcr.io/swizzin/qbittorrent:" + tag[:i+3] + rest[:end] + ".20" + rest[end:]
+}
+
+// TestDiscoverMapsTheVariantATagNames: a swizzin qBittorrent tag names its
+// variant by its suffix, whatever qBittorrent version the source carried. The
+// version in front is qBittorrent's, so a source on an older release of a build
+// box ships is that build -- with a note saying the chart's release runs -- and
+// the project's former names are the variants they were renamed to. A suffix
+// that is no variant is none, and the note says which tags were compared.
+func TestDiscoverMapsTheVariantATagNames(t *testing.T) {
+	lt21 := qbittorrentImage(t, "lt2.1")
+	znver3 := qbittorrentImage(t, "lt1.2-10g-znver3")
+	tests := []struct {
+		why   string
+		image string
+		want  string
+		note  string
+	}{
+		{
+			why:   "an older qBittorrent of a build the chart ships",
+			image: olderQbittorrent(t, "lt2.1", "4.6.0"),
+			want:  "lt2.1",
+			note:  "the chart's qBittorrent version runs",
+		},
+		{
+			why:   "the Zen 3 build under the name it had while it named its allocator",
+			image: "ghcr.io/swizzin/qbittorrent:5.3.0-lt1.2-10g-znver3-mimalloc",
+			want:  "lt1.2-10g-znver3",
+		},
+		{
+			why:   "the Zen 3 build under its own name, on libtorrent 2.1",
+			image: "ghcr.io/swizzin/qbittorrent:5.3.0-lt2.1-10g-znver3",
+			want:  "lt2.1-10g-znver3",
+		},
+		{
+			why:   "a build profile the chart does not ship",
+			image: "ghcr.io/swizzin/qbittorrent:5.3.0-lt1.2-20g",
+			want:  "",
+		},
+		{
+			why:   "a build name with no qBittorrent version in front",
+			image: "ghcr.io/swizzin/qbittorrent:lt1.2",
+			want:  "",
+		},
+		{
+			why:   "a digest the chart blesses, which wins over the tag's name",
+			image: lt21.Repository + ":5.3.0-lt1.2@" + lt21.Digest,
+			want:  "lt2.1",
+		},
+		{
+			why:   "an image the chart keeps under its former name too",
+			image: chartRef(znver3),
+			want:  "lt1.2-10g-znver3",
+		},
+	}
+	for _, tt := range tests {
+		f := dataSource(t, func(name string, spec *appSpec) {
+			if name == "qbittorrent" {
+				spec.image = tt.image
+			}
+		})
+		f.variants = chartVariants(t)
+		p, rep := f.discover(t)
+		if got := p.Apps["qbittorrent"].Variant; got != tt.want {
+			t.Errorf("%s: %s mapped to variant %q, want %q", tt.why, tt.image, got, tt.want)
+			continue
+		}
+		if tt.note != "" {
+			var noted bool
+			for _, n := range rep.Notes {
+				if strings.Contains(n, tt.note) {
+					noted = true
+				}
+			}
+			if !noted {
+				t.Errorf("%s: %s: no note says %q: %#v", tt.why, tt.image, tt.note, rep.Notes)
+			}
+		}
+		if tt.want != "" {
+			for _, n := range rep.Notes {
+				if strings.Contains(n, "apps.qbittorrent.image.variant") {
+					t.Errorf("%s: %s is a blessed variant, and the note says it is not: %q", tt.why, tt.image, n)
+				}
+			}
+		}
+	}
+}
+
+// olderQbittorrent is a chart variant's tag with an older qBittorrent version in
+// front: the chart's 5.3.1-lt2.1 becomes 4.6.0-lt2.1, which is the same build on
+// the same libtorrent line.
+func olderQbittorrent(t *testing.T, variant, version string) string {
+	t.Helper()
+	image := qbittorrentImage(t, variant)
+	i := strings.IndexByte(image.Tag, '-')
+	if i < 0 {
+		t.Fatalf("the chart's %s tag %q names no build", variant, image.Tag)
+	}
+	return image.Repository + ":" + version + image.Tag[i:]
+}
+
+// TestLibtorrentVariantNamesABuild: the name a tag carries is the variant,
+// whatever version leads it, and the log is that a project renames a build
+// rather than changing it.
+func TestLibtorrentVariantNamesABuild(t *testing.T) {
 	tests := []struct{ tag, want string }{
-		{"5.3.0-lt1.2.20-10g-znver3-mimalloc", "5.3.0-lt1.2-10g-znver3-mimalloc"},
-		{"5.3.0-lt1.2.20", "5.3.0-lt1.2"},
-		{"5.3.0-lt2.1.2", "5.3.0-lt2.1"},
-		{"5.3.0-lt1.2", ""},
-		{"5.3.0-lt1.2-10g", ""},
-		{"5.3.0", ""},
-		{"5.3.0-rc1", ""},
-		{"5.3.0-lt1.2.x", ""},
-		{"5.3.0-lt1.2.20.30-10g", ""},
+		{"5.3.1-lt1.2", "lt1.2"},
+		{"5.3.1-lt1.2-10g", "lt1.2-10g"},
+		{"5.3.0-lt1.2.20-10g", "lt1.2-10g"},
+		{"5.3.0-lt1.2.20", "lt1.2"},
+		{"5.3.0-lt2.1.2", "lt2.1"},
+		{"5.3.1-lt1.2-10g-znver3", "lt1.2-10g-znver3"},
+		{"5.3.0-lt1.2-10g-znver3-mimalloc", "lt1.2-10g-znver3"},
+		{"5.3.0-lt2.1-10g-znver3-mimalloc", "lt2.1-10g-znver3-mimalloc"},
+		{"5.3.1", ""},
+		{"5.3.1-", ""},
+		{"lt1.2", ""},
+		{"latest", ""},
 		{"", ""},
 	}
 	for _, tt := range tests {
-		if got := libtorrentTag(tt.tag); got != tt.want {
-			t.Errorf("libtorrentTag(%q) = %q, want %q", tt.tag, got, tt.want)
+		if got := libtorrentVariant(tt.tag); got != tt.want {
+			t.Errorf("libtorrentVariant(%q) = %q, want %q", tt.tag, got, tt.want)
+		}
+	}
+}
+
+// TestLibtorrentLineFoldsAPatchRelease: only libtorrent's three-part release is
+// folded, and a name that is already the line is left to the exact name.
+func TestLibtorrentLineFoldsAPatchRelease(t *testing.T) {
+	tests := []struct {
+		name, want string
+		ok         bool
+	}{
+		{"lt1.2.20-10g", "lt1.2-10g", true},
+		{"lt1.2.20", "lt1.2", true},
+		{"lt2.1.2", "lt2.1", true},
+		{"lt1.2", "", false},
+		{"lt1.2-10g", "", false},
+		{"lt1.2.x", "", false},
+		{"lt1.2.20.30-10g", "", false},
+		{"1.2.20", "", false},
+		{"", "", false},
+	}
+	for _, tt := range tests {
+		got, ok := libtorrentLine(tt.name)
+		if ok != tt.ok || got != tt.want {
+			t.Errorf("libtorrentLine(%q) = %q, %v; want %q, %v", tt.name, got, ok, tt.want, tt.ok)
 		}
 	}
 }

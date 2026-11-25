@@ -267,6 +267,10 @@ type EnsureResult struct {
 	Recreated        bool
 	PreviousID       int
 	PreviousStringID string
+	// Note is the one thing about how the object was found that the receipt has
+	// to say and the change does not: an object adopted in place of the
+	// recorded one, or one of several the app allowed at the same address.
+	Note string
 }
 
 // ownedField is one field the wiring Job may write on an object it owns.

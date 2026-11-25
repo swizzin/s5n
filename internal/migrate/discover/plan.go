@@ -785,10 +785,12 @@ func (d *discovery) imageVariants() map[string]map[string]admission.Image {
 //
 // A source image is only ever mapped onto what the chart ships (docs/box.md,
 // "Images come from the blessed variants"): the same repository, and the
-// variant inside it that the digest or the tag names. box never carries the
-// source's image, so an image none of the chart's variants is keeps the chart's
-// default, and the report names the key that would choose another one and the
-// list box would accept.
+// variant inside it that the digest, then the tag, says. The project whose tags
+// name a build beside its app's version is read by the tag's name, so a source
+// on an older qBittorrent of a build the chart ships is that build. box never
+// carries the source's image, so an image none of the chart's variants is keeps
+// the chart's default, and the report names the key that would choose another
+// one and the list box would accept.
 func (d *discovery) variant(in *instance, variants map[string]map[string]admission.Image) string {
 	if variants == nil {
 		return ""
@@ -816,31 +818,25 @@ func (d *discovery) variant(in *instance, variants map[string]map[string]admissi
 	}
 	// Several of the chart's variants are the same repository, which is how one
 	// project publishes its builds: the digest and then the tag is what says
-	// which of them the source ran.
-	for _, pick := range []func(admission.Image) bool{
-		func(image admission.Image) bool { return digest != "" && image.Digest == digest },
-		func(image admission.Image) bool { return tag != "" && image.Tag == tag },
-		func(image admission.Image) bool {
-			if repo != libtorrentRepo || image.Tag == "" {
-				return false
+	// which of them the source ran. Failing that, on the one repository whose
+	// tags name a build beside qBittorrent's version, the tag's own name does
+	// (libtorrentRepo).
+	if name := named(candidates, byVariant, func(image admission.Image) bool {
+		return digest != "" && image.Digest == digest
+	}); name != "" {
+		return name
+	}
+	if name := named(candidates, byVariant, func(image admission.Image) bool {
+		return tag != "" && image.Tag == tag
+	}); name != "" {
+		return name
+	}
+	if repo == libtorrentRepo {
+		if name := libtorrentVariant(tag); name != "" {
+			if image, ok := byVariant[name]; ok {
+				d.variantVersionNote(in, tag, name, image)
+				return name
 			}
-			// An older spelling of the same builds: the tag named libtorrent's
-			// patch release (5.3.0-lt1.2.20-10g), and the variant is the line
-			// and the profile (5.3.0-lt1.2-10g), because a later 1.2.21 is a
-			// new digest on that same tag rather than a new variant
-			// (charts/s5n/variants.yaml).
-			line := libtorrentTag(tag)
-			return line != "" && image.Tag == line
-		},
-	} {
-		var matching []string
-		for _, name := range candidates {
-			if pick(byVariant[name]) {
-				matching = append(matching, name)
-			}
-		}
-		if len(matching) == 1 {
-			return matching[0]
 		}
 	}
 	// Nothing of the source's is one of them, and the note says what box
@@ -851,47 +847,141 @@ func (d *discovery) variant(in *instance, variants map[string]map[string]admissi
 	return ""
 }
 
+// named is the variant a picker answers among the chart's variants that share
+// the source's repository: the one name, or none.
+//
+// One image answers with two names when the chart keeps it under its former name
+// as well, because both entries are that image, so the variant's own name wins
+// over the alias values may still say. Two names that are different variants
+// carrying one digest or tag are the chart contradicting itself, and box names
+// none rather than picking one of two.
+func named(candidates []string, byVariant map[string]admission.Image, pick func(admission.Image) bool) string {
+	var matching []string
+	for _, name := range candidates {
+		if pick(byVariant[name]) {
+			matching = append(matching, name)
+		}
+	}
+	if len(matching) == 1 {
+		return matching[0]
+	}
+	var own []string
+	for _, name := range matching {
+		if _, alias := legacyVariants[name]; !alias {
+			own = append(own, name)
+		}
+	}
+	if len(own) == 1 {
+		return own[0]
+	}
+	return ""
+}
+
 // libtorrentRepo is the repository whose tags name libtorrent's build beside
 // qBittorrent's own version (charts/s5n/variants.yaml). It is the only place a
 // tag means more than a version, so it is the only place discovery reads one.
 const libtorrentRepo = "ghcr.io/swizzin/qbittorrent"
 
-// libtorrentTag is the variant tag an image tagged with libtorrent's patch
-// release already is: 5.3.0-lt1.2.20-10g-znver3-mimalloc is
-// 5.3.0-lt1.2-10g-znver3-mimalloc, which is a variant's tag.
+// legacyVariants is the build names the project has since renamed, each mapped
+// onto the variant it is today (charts/s5n/variants.yaml). A name is a fact the
+// project changed rather than a version, and the image under both names is the
+// same build, so a source that ran the old one is the variant. A name that never
+// changed needs no entry: the tag's own suffix is the variant's name.
+var legacyVariants = map[string]string{
+	// The Zen 3 build carried its allocator in its name until every 10G build
+	// linked mimalloc, which is why the suffix went away.
+	"lt1.2-10g-znver3-mimalloc": "lt1.2-10g-znver3",
+}
+
+// libtorrentVariant is the variant a swizzin qBittorrent tag names, whatever
+// qBittorrent version the tag carries: the tag is that version, a dash, then the
+// build's own name (5.3.1-lt1.2-10g is lt1.2-10g), with libtorrent's patch
+// release folded back to its line and a name the project has since renamed
+// mapped onto today's. So a source on an older qBittorrent of a build box ships
+// is that build: the chart's release of it is what runs.
 //
-// Empty when the tag names no patch release to strip -- 5.3.0-lt1.2 is already
-// the variant's own tag -- or no libtorrent line at all: box does not guess at
-// what a tag it does not know means.
-func libtorrentTag(tag string) string {
-	i := strings.Index(tag, "-lt")
-	if i < 0 {
+// Empty when the tag does not begin with a version, or names no build at all:
+// box does not guess at what a tag it does not know means.
+func libtorrentVariant(tag string) string {
+	version := qbittorrentVersion(tag)
+	if version == "" || len(version) == len(tag) || tag[len(version)] != '-' {
 		return ""
 	}
-	head, rest := tag[:i+len("-lt")], tag[i+len("-lt"):]
-	j := 0
-	for j < len(rest) && (rest[j] == '.' || (rest[j] >= '0' && rest[j] <= '9')) {
-		j++
+	name := tag[len(version)+1:]
+	if line, ok := libtorrentLine(name); ok {
+		name = line
 	}
-	parts := strings.Split(rest[:j], ".")
+	if renamed, ok := legacyVariants[name]; ok {
+		name = renamed
+	}
+	return name
+}
+
+// qbittorrentVersion is the version a swizzin tag begins with (5.3.1 in
+// 5.3.1-lt1.2), or "" when it begins with none.
+func qbittorrentVersion(tag string) string {
+	i := 0
+	for i < len(tag) && (tag[i] == '.' || (tag[i] >= '0' && tag[i] <= '9')) {
+		i++
+	}
+	return tag[:i]
+}
+
+// libtorrentLine folds libtorrent's patch release back into its line: the build
+// 1.2.20 is the 1.2 line, so lt1.2.20-10g names the variant lt1.2-10g, because a
+// later 1.2.21 is a new digest on that same variant rather than a new variant
+// (charts/s5n/variants.yaml). ok is false for a name with no such release to
+// fold, which is already the chart's spelling.
+func libtorrentLine(name string) (string, bool) {
+	rest, ok := strings.CutPrefix(name, "lt")
+	if !ok {
+		return "", false
+	}
+	end := 0
+	for end < len(rest) && (rest[end] == '.' || (rest[end] >= '0' && rest[end] <= '9')) {
+		end++
+	}
+	parts := strings.Split(rest[:end], ".")
 	if len(parts) != 3 || parts[0] == "" || parts[1] == "" || parts[2] == "" {
-		return ""
+		return "", false
 	}
-	return head + parts[0] + "." + parts[1] + rest[j:]
+	return "lt" + parts[0] + "." + parts[1] + rest[end:], true
+}
+
+// variantVersionNote says when the chart's build of a variant is not the
+// qBittorrent release the source ran. A variant is the libtorrent line and the
+// build profile, so the chart's release is what runs, and that is a version
+// change for the migration to read like any other.
+func (d *discovery) variantVersionNote(in *instance, tag, name string, image admission.Image) {
+	source, box := qbittorrentVersion(tag), qbittorrentVersion(image.Tag)
+	if source == "" || box == "" || source == box {
+		return
+	}
+	d.note("%s runs %s, and the chart's %s variant is %s, so the chart's qBittorrent version runs",
+		in.name, in.container.Image, name, image.Tag)
 }
 
 // comparedTags is the tags of the variants that share the source's repository,
-// as the note that matched none of them says them.
+// as the note that matched none of them says them. An image the chart keeps
+// under its former name too has that name's tag and the current one's, which are
+// one tag: the note says each tag once.
 func comparedTags(candidates []string, byVariant map[string]admission.Image) string {
 	out := make([]string, 0, len(candidates))
+	seen := make(map[string]bool, len(candidates))
 	for _, name := range candidates {
 		image := byVariant[name]
+		var said string
 		switch {
 		case image.Tag != "":
-			out = append(out, image.Tag)
+			said = image.Tag
 		case image.Digest != "":
-			out = append(out, image.Digest)
+			said = image.Digest
 		}
+		if said == "" || seen[said] {
+			continue
+		}
+		seen[said] = true
+		out = append(out, said)
 	}
 	return strings.Join(out, ", ")
 }
