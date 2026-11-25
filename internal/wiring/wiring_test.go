@@ -34,6 +34,76 @@ type fakeStack struct {
 	prefs       map[string]any
 	ignorePrefs bool   // a qBittorrent that accepts setPreferences and changes nothing
 	linkFail    string // a save path whose hardlink proof fails
+	// bazarr is Bazarr's settings document per instance, keyed by the instance
+	// name the chart gives it ("bazarr-4k"). It is the app's own shape: one key
+	// per section, the Arrs as objects.
+	bazarr map[string]map[string]any
+}
+
+// bazarrHandler serves one Bazarr instance: the unauthenticated ping, the
+// settings document behind X-API-KEY, and the partial form POST that changes it
+// (bazarr/api/system/settings.py at v1.6.2). The form is cast the way
+// save_settings casts it, so a comparison against the document sees types.
+func (f *fakeStack) bazarrHandler(instance, urlBase, key string) http.HandlerFunc {
+	f.mu.Lock()
+	f.bazarr[instance] = map[string]any{
+		"general": map[string]any{"base_url": urlBase, "use_sonarr": false, "use_radarr": false},
+		"sonarr":  map[string]any{"apikey": "", "base_url": "/", "ip": "127.0.0.1", "port": 8989, "ssl": false},
+		"radarr":  map[string]any{"apikey": "", "base_url": "/", "ip": "127.0.0.1", "port": 7878, "ssl": false},
+	}
+	f.mu.Unlock()
+	return func(w http.ResponseWriter, r *http.Request) {
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		p := strings.TrimPrefix(r.URL.Path, urlBase)
+		switch {
+		case p == "/api/system/ping":
+			writeJSON(w, map[string]any{"status": "OK"})
+		case p == "/api/system/settings" && r.Method == http.MethodGet:
+			if r.Header.Get("X-API-KEY") != key {
+				http.Error(w, "unauthorized", http.StatusUnauthorized)
+				return
+			}
+			writeJSON(w, f.bazarr[instance])
+		case p == "/api/system/settings" && r.Method == http.MethodPost:
+			if r.Header.Get("X-API-KEY") != key {
+				http.Error(w, "unauthorized", http.StatusUnauthorized)
+				return
+			}
+			if err := r.ParseForm(); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			doc := f.bazarr[instance]
+			for k := range r.Form {
+				section, field, ok := strings.Cut(strings.TrimPrefix(k, "settings-"), "-")
+				if !ok {
+					continue
+				}
+				sec, _ := doc[section].(map[string]any)
+				v := r.Form.Get(k)
+				if n, err := strconv.Atoi(v); err == nil {
+					sec[field] = n
+				} else if v == "true" || v == "false" {
+					sec[field] = v == "true"
+				} else {
+					sec[field] = v
+				}
+			}
+			f.writes++
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			http.Error(w, "unexpected "+r.URL.Path, http.StatusNotFound)
+		}
+	}
+}
+
+// bazarrValue reads one setting out of the fake's document.
+func (f *fakeStack) bazarrValue(instance, section, field string) any {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	sec, _ := f.bazarr[instance][section].(map[string]any)
+	return sec[field]
 }
 
 func (f *fakeStack) count() int {
@@ -322,6 +392,7 @@ func newHarness(t *testing.T) *harness {
 		// The image's own runtime default: on the config volume, category paths off.
 		prefs: map[string]any{"save_path": "/config/Downloads/", "temp_path": "/config/Downloads/temp/",
 			"use_category_paths_in_manual_mode": false},
+		bazarr: map[string]map[string]any{},
 	}
 	qbit := httptest.NewServer(f.qbitHandler())
 	sonarr := httptest.NewServer(f.arrHandler("sonarr", "/sonarr"))
@@ -740,6 +811,113 @@ func TestWiringProvesEveryPair(t *testing.T) {
 }
 
 // stepByName finds one step in the receipt, failing the test if it is absent.
+// TestWiringWiresBazarr: one Bazarr instance, pointed at the release's own
+// Sonarr and Radarr, over its own settings API. The two Arr keys are the
+// release Secret's, the addresses are the release's, and a second run writes
+// nothing.
+func TestWiringWiresBazarr(t *testing.T) {
+	h := newHarness(t)
+	bazarrSrv := httptest.NewServer(h.stack.bazarrHandler("bazarr", "/bazarr", "bazarr-key"))
+	t.Cleanup(bazarrSrv.Close)
+	sonarrHost, sonarrPort := mustHostPort(t, h.config.Instances[0].URL)
+	radarrHost, radarrPort := mustHostPort(t, h.config.Instances[1].URL)
+	keyFile := filepath.Join(h.dir, "bazarr.key")
+	if err := os.WriteFile(keyFile, []byte("bazarr-key"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	h.config.Bazarrs = append(h.config.Bazarrs, BazarrConfig{
+		Name: "bazarr", URL: bazarrSrv.URL, URLBase: "/bazarr", APIKeyFile: keyFile,
+		Sonarr: &BazarrSide{Host: sonarrHost, Port: sonarrPort, URLBase: "/sonarr", APIKeyFile: h.config.Instances[0].APIKeyFile},
+		Radarr: &BazarrSide{Host: radarrHost, Port: radarrPort, URLBase: "/radarr", APIKeyFile: h.config.Instances[1].APIKeyFile},
+	})
+	h.runner.Config = h.config
+
+	res, err := h.runner.Run(context.Background())
+	if err != nil {
+		t.Fatalf("run: %v\n%s", err, Summary(res))
+	}
+	for _, name := range []string{"bazarr/ready", "bazarr/sonarr", "bazarr/radarr"} {
+		if step := stepByName(t, res, name); step.Result != "ok" {
+			t.Errorf("%s = %+v, want ok", name, step)
+		}
+	}
+	if got := h.stack.bazarrValue("bazarr", "sonarr", "ip"); got != sonarrHost {
+		t.Errorf("bazarr sonarr.ip = %v, want %s", got, sonarrHost)
+	}
+	if got := h.stack.bazarrValue("bazarr", "sonarr", "apikey"); got != "sonarr-key" {
+		t.Errorf("bazarr sonarr.apikey = %v, want the release Secret's", got)
+	}
+	if got := h.stack.bazarrValue("bazarr", "radarr", "port"); got != radarrPort {
+		t.Errorf("bazarr radarr.port = %v, want %d", got, radarrPort)
+	}
+	if got := h.stack.bazarrValue("bazarr", "general", "use_radarr"); got != true {
+		t.Errorf("bazarr general.use_radarr = %v", got)
+	}
+
+	writes := h.stack.count()
+	second, err := h.runner.Run(context.Background())
+	if err != nil {
+		t.Fatalf("second run: %v\n%s", err, Summary(second))
+	}
+	if got := h.stack.count(); got != writes {
+		t.Fatalf("a second run made %d writes", got-writes)
+	}
+	if step := stepByName(t, second, "bazarr/sonarr"); step.Detail != "unchanged" {
+		t.Fatalf("second run bazarr/sonarr = %+v", step)
+	}
+}
+
+// TestWiringBazarrTurnsOffTheSideItHasNoArrFor: a 4K Bazarr whose pair is only
+// the 4K Radarr. The missing side is switched off rather than left pointing at
+// an address this box does not serve.
+func TestWiringBazarrTurnsOffTheSideItHasNoArrFor(t *testing.T) {
+	h := newHarness(t)
+	bazarrSrv := httptest.NewServer(h.stack.bazarrHandler("bazarr-4k", "/bazarr-4k", "b4k-key"))
+	t.Cleanup(bazarrSrv.Close)
+	h.stack.bazarr["bazarr-4k"]["general"].(map[string]any)["use_sonarr"] = true
+	host, port := mustHostPort(t, h.config.Instances[1].URL)
+	keyFile := filepath.Join(h.dir, "bazarr-4k.key")
+	if err := os.WriteFile(keyFile, []byte("b4k-key"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	radarrKey := filepath.Join(h.dir, "radarr-4k.key")
+	if err := os.WriteFile(radarrKey, []byte("radarr-4k-key"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	h.config.Bazarrs = append(h.config.Bazarrs, BazarrConfig{
+		Name: "bazarr-4k", URL: bazarrSrv.URL, URLBase: "/bazarr-4k", APIKeyFile: keyFile,
+		Radarr: &BazarrSide{Host: host, Port: port, URLBase: "/radarr-4k", APIKeyFile: radarrKey},
+	})
+	h.runner.Config = h.config
+
+	res, err := h.runner.Run(context.Background())
+	if err != nil {
+		t.Fatalf("run: %v\n%s", err, Summary(res))
+	}
+	if step := stepByName(t, res, "bazarr-4k/sonarr"); step.Result != "ok" || step.Detail != "updated" {
+		t.Fatalf("bazarr-4k/sonarr = %+v, want updated (the switch was on)", step)
+	}
+	if got := h.stack.bazarrValue("bazarr-4k", "general", "use_sonarr"); got != false {
+		t.Fatalf("bazarr-4k use_sonarr = %v, want false", got)
+	}
+	if got := h.stack.bazarrValue("bazarr-4k", "sonarr", "ip"); got != "127.0.0.1" {
+		t.Fatalf("bazarr-4k sonarr.ip = %v, want it left alone", got)
+	}
+	if got := h.stack.bazarrValue("bazarr-4k", "radarr", "apikey"); got != "radarr-4k-key" {
+		t.Fatalf("bazarr-4k radarr.apikey = %v", got)
+	}
+}
+
+// mustHostPort is hostPort for a test: the fake's own address.
+func mustHostPort(t *testing.T, raw string) (string, int) {
+	t.Helper()
+	host, port, err := hostPort(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return host, port
+}
+
 func stepByName(t *testing.T, res *Result, name string) Step {
 	t.Helper()
 	for _, s := range res.Steps {

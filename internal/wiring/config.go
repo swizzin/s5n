@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
+	"strconv"
 	"strings"
 )
 
@@ -44,6 +45,7 @@ type Config struct {
 	Autobrr        *AutobrrConfig     `json:"autobrr,omitempty"`
 	Pbh            *PbhConfig         `json:"pbh,omitempty"`
 	Instances      []Instance         `json:"instances"`
+	Bazarrs        []BazarrConfig     `json:"bazarrs,omitempty"`
 }
 
 // QuiConfig points at qui's API. PasswordFile is the release Secret's
@@ -149,6 +151,32 @@ type ProwlarrConfig struct {
 	URL        string `json:"url"`
 	URLBase    string `json:"urlBase"`
 	SelfURL    string `json:"selfUrl"`
+	APIKeyFile string `json:"apiKeyFile"`
+}
+
+// BazarrConfig is one Bazarr instance and the Arr pair it reads.
+//
+// Upstream Bazarr keeps exactly one Sonarr and one Radarr per instance
+// (bazarr/app/config.py at v1.6.2: the sonarr.* and radarr.* sections), so a 4K
+// pair is a second Bazarr pod with a pair of its own. A side the box runs no Arr
+// for is nil here and turned off in the app: its whole job is reading the two,
+// and one left pointing at an address nothing answers on is a subtitle search
+// that silently never runs.
+type BazarrConfig struct {
+	Name       string      `json:"name"`
+	URL        string      `json:"url"`
+	URLBase    string      `json:"urlBase"`
+	APIKeyFile string      `json:"apiKeyFile"`
+	Sonarr     *BazarrSide `json:"sonarr,omitempty"`
+	Radarr     *BazarrSide `json:"radarr,omitempty"`
+}
+
+// BazarrSide is one Arr a Bazarr instance reads: the Service it dials and the
+// Arr's own key, both rendered by the chart from that Arr's instance.
+type BazarrSide struct {
+	Host       string `json:"host"`
+	Port       int    `json:"port"`
+	URLBase    string `json:"urlBase"`
 	APIKeyFile string `json:"apiKeyFile"`
 }
 
@@ -275,6 +303,11 @@ func (c *Config) validate() error {
 			return err
 		}
 	}
+	for i, b := range c.Bazarrs {
+		if err := validateBazarr(i, b); err != nil {
+			return err
+		}
+	}
 	// Categories drive qBittorrent save paths; two instances sharing a name but
 	// not a path would fight over the same downloads.
 	return validateCategories(c.Instances)
@@ -302,6 +335,33 @@ func validateInstance(index int, inst Instance) error {
 		"name": inst.Name, "url": inst.URL, fieldAPIKeyFile: inst.APIKeyFile,
 		"category": inst.Category, "savePath": inst.SavePath, "rootFolder": inst.RootFolder,
 	})
+}
+
+// validateBazarr checks one Bazarr instance: what it needs to be dialled, and
+// that it has at least one Arr to read. An instance whose pair is both missing
+// would run and do nothing, which is a values mistake rather than a release.
+func validateBazarr(index int, b BazarrConfig) error {
+	where := fmt.Sprintf("bazarrs[%d] (%s)", index, b.Name)
+	if err := requireFields(where, map[string]string{
+		"name": b.Name, fieldURL: b.URL, fieldURLBase: b.URLBase, fieldAPIKeyFile: b.APIKeyFile,
+	}); err != nil {
+		return err
+	}
+	if b.Sonarr == nil && b.Radarr == nil {
+		return fmt.Errorf("%s: has no sonarr and no radarr to read, so it would fetch subtitles for nothing", where)
+	}
+	for name, side := range map[string]*BazarrSide{"sonarr": b.Sonarr, "radarr": b.Radarr} {
+		if side == nil {
+			continue
+		}
+		if err := requireFields(where+" "+name, map[string]string{
+			"host": side.Host, "port": strconv.Itoa(side.Port), fieldURLBase: side.URLBase,
+			fieldAPIKeyFile: side.APIKeyFile,
+		}); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // validateTautulli checks the fields the Tautulli steps need, and the one

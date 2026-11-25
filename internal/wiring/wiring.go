@@ -14,6 +14,12 @@ import (
 	"github.com/swizzin/s5n/internal/apps"
 )
 
+// The two Arrs a Bazarr instance reads, named as the app names its sections.
+const (
+	sideSonarr = "sonarr"
+	sideRadarr = "radarr"
+)
+
 // qbitClientName is what every app's own connection to qBittorrent is called:
 // the Arr's download client, qui's instance, autobrr's downloader and PBH's
 // downloader. It is the name the source's installs most often use, and the one
@@ -374,6 +380,47 @@ func (r *Runner) work(ctx context.Context, res *Result) error {
 		change, err = arr.EnsureHardlinks(ctx)
 		if err := r.ensure(res, inst.Name+"/hardlinks", change, err); err != nil {
 			return err
+		}
+	}
+
+	// Bazarr reads one Sonarr and one Radarr each, so a box with an HD and a 4K
+	// pair runs one Bazarr per pair. Nothing else ever holds a Bazarr
+	// connection, and the two sides are the release's: a side this box runs no
+	// Arr for is switched off rather than left pointing at a Service that does
+	// not answer. The steps come after the Arrs because the app dials them from
+	// the same request that saves the address (internal/apps.Bazarr).
+	for _, bz := range c.Bazarrs {
+		key, err := ReadSecret(bz.APIKeyFile)
+		if err != nil {
+			return r.ensure(res, bz.Name+"/credentials", apps.Unchanged, err)
+		}
+		b := apps.NewBazarr(bz.URL, bz.URLBase, key)
+		r.logf("waiting for %s at %s%s", bz.Name, bz.URL, bz.URLBase)
+		if err := b.WaitReady(ctx, timeout); err != nil {
+			return r.ensure(res, bz.Name+"/ready", apps.Unchanged, err)
+		}
+		r.okStep(res, bz.Name+"/ready", bz.URL+bz.URLBase)
+		for _, side := range []struct {
+			kind string
+			cfg  *BazarrSide
+		}{{sideSonarr, bz.Sonarr}, {sideRadarr, bz.Radarr}} {
+			name := bz.Name + "/" + side.kind
+			spec := apps.SubtitleSource{Kind: side.kind}
+			if side.cfg != nil {
+				apiKey, err := ReadSecret(side.cfg.APIKeyFile)
+				if err != nil {
+					return r.ensure(res, name, apps.Unchanged, err)
+				}
+				spec.Enabled = true
+				spec.Host = side.cfg.Host
+				spec.Port = side.cfg.Port
+				spec.URLBase = side.cfg.URLBase
+				spec.APIKey = apiKey
+			}
+			result, err := b.EnsureSource(ctx, spec)
+			if err := r.ensureResult(res, name, result, err); err != nil {
+				return err
+			}
 		}
 	}
 
