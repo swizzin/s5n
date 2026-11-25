@@ -100,9 +100,11 @@ def setup(ctx, ns, work):
     # an owned one (tvCategory) in the same save.
     sonarr_url = f"http://localhost:{sonarr_port}/sonarr/api/v3/downloadclient"
     clients = curl_get(ctx, ns, "sonarr-0", sonarr_key, sonarr_url)
-    if len(clients) != 1:
-        sys.exit(f"setup: expected exactly one sonarr download client, found {len(clients)}")
-    owned = clients[0]
+    # The release runs two download clients: qBittorrent and, when the catalog
+    # has it, SABnzbd. This run edits the qBittorrent one.
+    owned = next((c for c in clients if c.get("implementation") == "QBittorrent"), None)
+    if owned is None:
+        sys.exit(f"setup: sonarr has no qBittorrent download client: {clients!r}")
     owned_id = owned["id"]
     owned["name"] = "qBit (renamed)"
     owned["priority"] = 7
@@ -150,9 +152,10 @@ def setup(ctx, ns, work):
     # radarr: delete the owned client outright.
     radarr_url = f"http://localhost:{radarr_port}/radarr/api/v3/downloadclient"
     rclients = curl_get(ctx, ns, "radarr-0", radarr_key, radarr_url)
-    if len(rclients) != 1:
-        sys.exit(f"setup: expected exactly one radarr download client, found {len(rclients)}")
-    radarr_old_id = rclients[0]["id"]
+    radarr_owned = next((c for c in rclients if c.get("implementation") == "QBittorrent"), None)
+    if radarr_owned is None:
+        sys.exit(f"setup: radarr has no qBittorrent download client: {rclients!r}")
+    radarr_old_id = radarr_owned["id"]
     curl_delete(ctx, ns, "radarr-0", radarr_key, f"{radarr_url}/{radarr_old_id}")
     if curl_get(ctx, ns, "radarr-0", radarr_key, radarr_url):
         sys.exit("setup: radarr download client was not actually deleted")
@@ -187,7 +190,7 @@ def do_assert(ctx, ns, work):
 
     clients = curl_get(ctx, ns, "sonarr-0", sonarr_key, f"http://localhost:{sonarr_port}/sonarr/api/v3/downloadclient")
     others = [c for c in clients if c["id"] != mine_id]
-    failures += check(len(others) == 1, f"exactly one sonarr client besides mine (got {len(others)})")
+    failures += check(len(others) == 2, f"both owned sonarr clients besides mine (got {len(others)})")
     if others:
         owned = others[0]
         failures += check(owned["name"] == "qBit (renamed)", f"sonarr client keeps its rename (got {owned['name']!r})")
@@ -208,7 +211,7 @@ def do_assert(ctx, ns, work):
     failures += check(got_sync == "addOnly", f"prowlarr sonarr application keeps syncLevel addOnly (got {got_sync!r})")
 
     radarr_clients = curl_get(ctx, ns, "radarr-0", radarr_key, f"http://localhost:{radarr_port}/radarr/api/v3/downloadclient")
-    failures += check(len(radarr_clients) == 1, f"radarr has an owned client again (got {len(radarr_clients)})")
+    failures += check(len(radarr_clients) == 2, f"radarr has its owned clients again (got {len(radarr_clients)})")
 
     sonarr_step = step("sonarr/downloadclient") or {}
     drift = sonarr_step.get("drift") or []
