@@ -859,7 +859,8 @@ func TestRealChartSnapshots(t *testing.T) {
 
 // TestRealChartCallsAreTheReleaseEdges: the catalog's lists are the input the
 // chart's NetworkPolicy is derived from, so this pins the edges that a shipped
-// release got wrong -- Seerr into the Arrs, and everything Maintainerr calls.
+// release got wrong -- Seerr into the Arrs, everything Maintainerr calls, and
+// autobrr into qui, whose qBittorrent proxy is a download client autobrr can use.
 // A name here is also an app that must exist, which is the rule the render
 // depends on.
 func TestRealChartCallsAreTheReleaseEdges(t *testing.T) {
@@ -874,7 +875,7 @@ func TestRealChartCallsAreTheReleaseEdges(t *testing.T) {
 		"tautulli":    "plex",
 		"seerr":       "plex,radarr,sonarr",
 		"qui":         "qbittorrent",
-		"autobrr":     "qbittorrent,radarr,sonarr",
+		"autobrr":     "qbittorrent,qui,radarr,sonarr",
 		"maintainerr": "plex,qbittorrent,radarr,seerr,sonarr,tautulli",
 	}
 	for name, edges := range want {

@@ -133,7 +133,7 @@ type fakeConfirm struct {
 	tr     *trace
 }
 
-func (f *fakeConfirm) Ask(string) (bool, error) {
+func (f *fakeConfirm) Ask(string, bool) (bool, error) {
 	f.asked++
 	f.tr.add("confirm")
 	return f.answer, nil

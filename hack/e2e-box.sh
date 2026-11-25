@@ -110,9 +110,34 @@
 # cluster. `all` runs this script once per scenario, which gives each its own
 # work directory, cluster name and exit code.
 #
+# `all` runs its scenarios at the same time, `E2E_SLOTS` of them at once
+# (default 3), each into its own log, and ends with one line per scenario and
+# the run's total. A scenario holds one slot for its whole life, and every
+# host-side name it creates carries an id for the checkout it runs in (see THE
+# RUN'S IDENTITY below), so two worktrees -- or two scenarios of one worktree --
+# can run at once without meeting. `all` also builds what every scenario needs
+# once: the image, the box binary and the chart package. A scenario that waited
+# for a slot counts its own seconds from when it got one, so its log and its
+# `wall time` line are its work; the run's total is the number that includes the
+# queue.
+#
 # Usage: hack/e2e-box.sh [--keep] [fresh|preinstalled|foreign-gateway|update|upgrade|migrate|migrate-keep|all]   (default: all)
+#
+# Every `==> ` line ends with the seconds elapsed since the script started
+# (`==> PASS (fresh)  [+412s]`): a suffix, so a grep for `^==> PASS` still
+# matches. The last line before teardown is `wall time (<scenario>): Ns`. Both
+# come from bash's own $SECONDS, so a line costs no clock read and no subprocess.
 set -euo pipefail
 cd "$(dirname "$0")/.."
+
+# ---- the run's identity ------------------------------------------------------
+# Every host-side name this run creates -- the kind cluster, the registry
+# container, the kubeconfig and the image tag -- carries an id derived from this
+# checkout, so two worktrees, or two scenarios of one worktree, never name the
+# same thing and can run at the same time. On CI a runner holds one checkout and
+# runs one scenario, so the id only lengthens the names: nothing reads them.
+E2E_ID=${E2E_ID:-$(printf '%s' "$PWD" | sha256sum | cut -c1-6)}
+export E2E_ID
 
 KIND=${KIND:-kind}
 NS=seedbox
@@ -121,7 +146,12 @@ NS=seedbox
 # only to be refused: no rule and no client names it.
 LOGIN=alice
 SECOND_LOGIN=bob
-IMAGE=ghcr.io/swizzin/s5n:e2e
+# The local build's tag, under the repository the chart's s5n variant names. It
+# carries the id because the docker store is the machine's, not this
+# checkout's: two worktrees would otherwise build over each other's image under
+# one tag.
+IMAGE_TAG="e2e-${E2E_ID}"
+IMAGE="ghcr.io/swizzin/s5n:${IMAGE_TAG}"
 # The platform versions box installs are not this script's: they come from
 # charts/s5n/platform.yaml, the file the chart release carries, printed by
 # hack/versions through the parser box uses, so the plan box prints is asserted
@@ -173,16 +203,142 @@ for arg in "$@"; do
   esac
 done
 
-if [ "$SCENARIO" = all ]; then
-  status=0
-  "$0" fresh $KEEP || status=1
-  "$0" preinstalled $KEEP || status=1
-  "$0" foreign-gateway $KEEP || status=1
-  "$0" update $KEEP || status=1
-  "$0" upgrade $KEEP || status=1
-  "$0" migrate $KEEP || status=1
-  "$0" migrate-keep $KEEP || status=1
+# Every line says how far into the run it is, so a slow step is visible in the
+# transcript instead of only in the total at the end.
+log() { printf '\n==> %s  [+%ss]\n' "$*" "$SECONDS"; }
+
+# ---- the machine's slots -----------------------------------------------------
+# A scenario holds one of these slots for its whole life, and `all` runs its
+# scenarios through them. Three is what this machine's memory measured well
+# (three kind clusters, their registry containers and the boots they run at
+# once), and E2E_SLOTS overrides it. The files live in the user's cache, so
+# every checkout on the machine shares the slots with no path spelled here.
+#
+# The old one-slot lock still works: `flock .scratch/e2e.lock hack/e2e-box.sh
+# fresh` queues behind whoever holds that file and then takes a slot like every
+# other run. What keeps runs apart is the id in their names now, not the lock.
+E2E_SLOTS=${E2E_SLOTS:-3}
+case "$E2E_SLOTS" in
+  '' | *[!0-9]* | 0)
+    echo "E2E_SLOTS=${E2E_SLOTS} is not a number of slots" >&2
+    exit 2
+    ;;
+esac
+SLOT_DIR=${S5N_E2E_SLOT_DIR:-${XDG_CACHE_HOME:-$HOME/.cache}/s5n-e2e/slots}
+
+# take_slot, called once: locks the first free slot file and keeps the descriptor
+# open, which is what holds the slot until this process exits. Every slot busy
+# means another run is in front of this one; it waits, saying so once, and when it
+# finally gets a slot its clock starts there: the seconds in its log (and its
+# `wall time` line) are this scenario's own, not the queue in front of it. `all`
+# prints the run's total, which is the one number that includes the queue.
+take_slot() {
+  local i fd started=$SECONDS waited=""
+  mkdir -p "$SLOT_DIR"
+  while :; do
+    for i in $(seq 1 "$E2E_SLOTS"); do
+      exec {fd}>"$SLOT_DIR/slot-${i}.lock"
+      if flock -n "$fd"; then
+        SLOT_FD=$fd
+        [ -z "$waited" ] || SECONDS=$started
+        return 0
+      fi
+      exec {fd}>&-
+    done
+    if [ -z "$waited" ]; then
+      log "all ${E2E_SLOTS} e2e slots are taken: waiting (${SLOT_DIR})"
+      waited=1
+    fi
+    sleep 5
+  done
+}
+
+ALL_SCENARIOS=(fresh preinstalled foreign-gateway update upgrade migrate migrate-keep)
+
+# ---- all: build once, then the scenarios at once ------------------------------
+# The seven scenarios are separate processes so each keeps its own work
+# directory, cluster, kubeconfig and exit code, exactly as CI runs them -- but
+# they run here at the same time, as many as the slots allow, and each writes
+# its own log.
+#
+# What every scenario needs and none of them decides -- the image, the box
+# binary and the chart package -- is built here once and named to each of them
+# in S5N_E2E_PREBUILT. A scenario given that directory builds nothing: it
+# publishes the chart to its own registry, loads the image into its own node and
+# copies the box binary into its work directory, so --keep still holds the
+# binary that wrote its transcripts. A scenario run directly builds its own,
+# which is what CI does.
+all_run() {
+  local scenario i prebuilt log_dir wall status=0
+  local names=() pids=() logs=() results=()
+
+  prebuilt=$(mktemp -d)
+  if [ "$KEEP" = --keep ]; then
+    trap 'printf "\n==> kept prebuilt dir: %s\n" "$prebuilt"' EXIT
+  else
+    trap 'rm -rf "$prebuilt"' EXIT
+  fi
+  # The version `helm package` is about to write, which is also the version box
+  # must report: the chart's own, read the way a scenario reads it.
+  chart_version=$(helm show chart charts/s5n | awk '$1 == "version:" {print $2}')
+  [ -n "$chart_version" ] || {
+    echo "charts/s5n/Chart.yaml declares no version"
+    exit 1
+  }
+  log "building the s5n image, box ${chart_version} and the chart package once for all ${#ALL_SCENARIOS[@]} scenarios"
+  docker build -q -t "$IMAGE" .
+  CGO_ENABLED=0 go build -ldflags "-X main.version=${chart_version}" -o "$prebuilt/box" ./cmd/box
+  helm package charts/s5n --destination "$prebuilt" >/dev/null
+  [ -f "$prebuilt/s5n-${chart_version}.tgz" ] || {
+    echo "helm package wrote no s5n-${chart_version}.tgz into ${prebuilt}"
+    exit 1
+  }
+  # The image is in docker's store, not in the directory, so the directory names
+  # its tag and a scenario refuses a directory that names none or another one.
+  printf '%s\n' "$IMAGE" >"$prebuilt/image"
+  export S5N_E2E_PREBUILT=$prebuilt
+
+  # One log per scenario, and they are kept: a failure's reason is in its own
+  # log, not in this one, and the summary below names each path.
+  log_dir=${S5N_E2E_LOG_DIR:-${XDG_CACHE_HOME:-$HOME/.cache}/s5n-e2e/logs}/$(date -u +%Y%m%dT%H%M%SZ)
+  mkdir -p "$log_dir"
+  log "one log per scenario in ${log_dir}"
+
+  for scenario in "${ALL_SCENARIOS[@]}"; do
+    printf '\n==> starting %s  [+%ss]  log %s\n' "$scenario" "$SECONDS" "$log_dir/${scenario}.log"
+    "$0" "$scenario" $KEEP >"$log_dir/${scenario}.log" 2>&1 &
+    names+=("$scenario")
+    pids+=($!)
+    logs+=("$log_dir/${scenario}.log")
+  done
+  # Ctrl-C ends the run, not one scenario of it: the scenarios are this
+  # process's children and would otherwise keep their clusters.
+  trap 'kill "${pids[@]}" 2>/dev/null || true' INT TERM
+
+  for i in "${!names[@]}"; do
+    if wait "${pids[$i]}"; then
+      results+=(ok)
+    else
+      results+=(FAILED)
+      status=1
+    fi
+  done
+
+  log "per scenario"
+  for i in "${!names[@]}"; do
+    # The wall time a scenario printed for itself, in its own log: it counts from
+    # the moment the scenario got a slot, so this is its work and not the queue
+    # it waited in, which only the total below includes.
+    wall=$(sed -n "s/^wall time (${names[$i]}): \(.*\)s$/\1/p" "${logs[$i]}" | tail -1)
+    printf '  %-16s %6ss  %-7s %s\n' "${names[$i]}" "${wall:-?}" "${results[$i]}" "${logs[$i]}"
+  done
+  echo "wall time (all): ${SECONDS}s"
+  if [ "$status" = 0 ]; then log "PASS (all)"; else log "FAIL (all)"; fi
   exit "$status"
+}
+
+if [ "$SCENARIO" = all ]; then
+  all_run
 fi
 
 case "$SCENARIO" in
@@ -194,6 +350,12 @@ case "$SCENARIO" in
   migrate) CLUSTER=s5n-box-migrate; DOMAIN=box.migrate.example.test ;;
   migrate-keep) CLUSTER=s5n-box-migrate-keep; DOMAIN=box.keep.example.test ;;
 esac
+# The id last, so a kind cluster still reads scenario first in `kind get
+# clusters` and in a container name.
+CLUSTER="${CLUSTER}-${E2E_ID}"
+# Before anything of this run exists on the host: one of the machine's slots for
+# the whole life of this process.
+take_slot
 # The fresh scenario is the one that proves the namespace a first run derives
 # from its login: it passes no --namespace, and the box has to land in
 # s5n-<login>. The other scenarios keep an explicit namespace, which still wins
@@ -225,7 +387,6 @@ CTX="kind-${CLUSTER}"
 K="kubectl --context ${CTX}"
 HELM="helm --kube-context ${CTX}"
 WORK=$(mktemp -d)
-START=$(date +%s)
 REGISTRY=""
 
 # ---- the seedbox's volume roots --------------------------------------------
@@ -310,8 +471,36 @@ cleanup() {
 }
 trap cleanup EXIT
 
-log() { printf '\n==> %s\n' "$*"; }
 fail=0
+# Where `all` put the image, the box binary and the chart package it built once:
+# empty for a scenario run directly, which builds its own. Everything below that
+# reads it is a scenario's build step, and a scenario given this directory builds
+# nothing -- a silent rebuild would hide the one thing `all` is for -- so a
+# missing file stops the run rather than falling back.
+PREBUILT=${S5N_E2E_PREBUILT:-}
+prebuilt() { # prebuilt <file>: its path in the directory, or a refusal
+  local file="${PREBUILT}/$1"
+  [ -f "$file" ] || {
+    echo "S5N_E2E_PREBUILT=${PREBUILT} has no $1: a scenario given that directory builds nothing, so run it without S5N_E2E_PREBUILT or run all" >&2
+    exit 1
+  }
+  printf '%s' "$file"
+}
+# The image is in docker's store, not in the directory, so the directory names
+# the tag instead and a scenario loads that tag into its own node. The check
+# catches a directory with no tag or another one; it cannot tell which checkout
+# built the image now under that tag.
+prebuilt_image() {
+  local tag
+  tag=$(cat "${PREBUILT}/image" 2>/dev/null || true)
+  [ "$tag" = "$IMAGE" ] || {
+    echo "S5N_E2E_PREBUILT=${PREBUILT} carries image '${tag}', not ${IMAGE}: a scenario given that directory builds nothing, so run it without S5N_E2E_PREBUILT or run all" >&2
+    exit 1
+  }
+}
+# Refused before the registry, the cluster or anything else of this run exists:
+# a directory that names another checkout's image is not this run's to use.
+[ -z "$PREBUILT" ] || prebuilt_image
 # The torrent port the grant records, as the last assert_torrent_port read it:
 # the binding below admits exactly that number.
 TORRENT_PORT=""
@@ -323,7 +512,12 @@ TORRENT_PORT=""
 # So the e2e brings its own kubeconfig and kind, kubectl and helm all read that
 # file; ~/.kube/config is never opened. It lives outside $WORK so a kept cluster
 # stays reachable after this script exits.
-KUBECONFIG=${S5N_E2E_KUBECONFIG:-${XDG_CACHE_HOME:-$HOME/.cache}/s5n-e2e/kubeconfig}
+#
+# One file per scenario, not one per machine or one per checkout: kind reads the
+# file, adds a cluster and writes it back, so two clusters created at once into
+# one file lose each other's context. The run's first log line names this path,
+# which is how a --keep cluster is reached afterwards.
+KUBECONFIG=${S5N_E2E_KUBECONFIG:-${XDG_CACHE_HOME:-$HOME/.cache}/s5n-e2e/${E2E_ID}/${SCENARIO}/kubeconfig}
 export KUBECONFIG
 mkdir -p "$(dirname "$KUBECONFIG")"
 [ -e "$KUBECONFIG" ] || : >"$KUBECONFIG"
@@ -359,7 +553,7 @@ box_logs() {
 # cluster never pulls the chart: box runs on the host.
 # distribution v3.1.2, pinned by tag and digest like every other test image.
 REGISTRY_IMAGE=registry:3@sha256:82f6ff4a7f982960c8aa51617fea3aabc485df6e55cce80d22deb1de36f1bc3c  # renovate: datasource=docker
-REGISTRY=s5n-e2e-registry-${SCENARIO}
+REGISTRY=s5n-e2e-registry-${SCENARIO}-${E2E_ID}
 log "OCI registry (distribution 3.1.2) on 127.0.0.1 only (container ${REGISTRY})"
 docker rm -f "$REGISTRY" >/dev/null 2>&1 || true
 docker run -d --rm --name "$REGISTRY" -p 127.0.0.1::5000 "$REGISTRY_IMAGE" >/dev/null
@@ -386,10 +580,20 @@ CHART_VERSION=$(helm show chart charts/s5n | awk '$1 == "version:" {print $2}')
   exit 1
 }
 CHART_REPO="oci://127.0.0.1:${REGISTRY_PORT}/charts/s5n"
-log "packaging charts/s5n ${CHART_VERSION} from this commit and pushing it to ${CHART_REPO}"
+# Kept for the update scenario's own packages below (update_chart): a scenario
+# publishes more than the tree's release, prebuilt or not.
 mkdir -p "$WORK/charts"
-helm package charts/s5n --destination "$WORK/charts" >/dev/null
-helm push "$WORK/charts/s5n-${CHART_VERSION}.tgz" "oci://127.0.0.1:${REGISTRY_PORT}/charts" --plain-http >/dev/null
+if [ -n "$PREBUILT" ]; then
+  # All built it once, from this commit: a scenario still publishes it to its own
+  # registry, which is what box pulls from.
+  chart_tgz=$(prebuilt "s5n-${CHART_VERSION}.tgz")
+  log "pushing the chart ${CHART_VERSION} all built once to ${CHART_REPO}"
+else
+  log "packaging charts/s5n ${CHART_VERSION} from this commit and pushing it to ${CHART_REPO}"
+  helm package charts/s5n --destination "$WORK/charts" >/dev/null
+  chart_tgz="$WORK/charts/s5n-${CHART_VERSION}.tgz"
+fi
+helm push "$chart_tgz" "oci://127.0.0.1:${REGISTRY_PORT}/charts" --plain-http >/dev/null
 
 # Each scenario's premise is a cluster in one known state, so a leftover from an
 # interrupted run is deleted rather than reused: reusing one would leave the
@@ -403,12 +607,25 @@ fi
 log "creating kind cluster ${CLUSTER}"
 $KIND create cluster --name "$CLUSTER" --config "$KIND_CONFIG" --wait 120s
 
-log "building the s5n image (the wiring Job and the qBittorrent credential seed)"
-docker build -q -t "$IMAGE" .
+if [ -n "$PREBUILT" ]; then
+  log "loading the s5n image all built once into ${CLUSTER}"
+else
+  log "building the s5n image (the wiring Job and the qBittorrent credential seed)"
+  docker build -q -t "$IMAGE" .
+fi
 $KIND load docker-image --name "$CLUSTER" "$IMAGE"
 
-log "building box ${CHART_VERSION} (the version it pulls the chart as)"
-CGO_ENABLED=0 go build -ldflags "-X main.version=${CHART_VERSION}" -o "$WORK/box" ./cmd/box
+if [ -n "$PREBUILT" ]; then
+  # Copied, not run from where it was built: every call below says "$WORK/box",
+  # and --keep promises each kept work directory the binary that wrote its
+  # transcripts. Its version is checked below whatever it came from.
+  box_bin=$(prebuilt box)
+  cp "$box_bin" "$WORK/box"
+  log "using the box binary all built once as ${CHART_VERSION}"
+else
+  log "building box ${CHART_VERSION} (the version it pulls the chart as)"
+  CGO_ENABLED=0 go build -ldflags "-X main.version=${CHART_VERSION}" -o "$WORK/box" ./cmd/box
+fi
 built=$("$WORK/box" version)
 [ "$built" = "$CHART_VERSION" ] || {
   echo "box reports version '${built}', want the chart version ${CHART_VERSION}"
@@ -507,12 +724,13 @@ done
 # not a catalog question, so init has no opinion about it. It has to exist
 # before bootstrap: bootstrap hands over to init, which reads it.
 log "root's values file: the tuning init must leave alone"
-cat >"$WORK/values.yaml" <<'EOF'
+cat >"$WORK/values.yaml" <<EOF
 wiring:
   image:
     # The locally built image, under the repository the chart's s5n variant
-    # names: the same override hack/e2e-kind.sh passes as --set.
-    tag: e2e
+    # names: the same override hack/e2e-kind.sh passes as --set. Its tag carries
+    # this checkout's id (see THE RUN'S IDENTITY).
+    tag: ${IMAGE_TAG}
 EOF
 # The fresh scenario's ACME server is Pebble, not Let's Encrypt: the values
 # file forces the production issuer, so the Certificate names s5n-letsencrypt
@@ -1804,11 +2022,14 @@ fresh() {
   # plan first, then init's own rows (the seedbox: its paths, its host, the
   # torrent port), then the one answer. A second question means the release
   # asked again inside the apply.
-  questions=$(grep -cE '^\? install the platform and .+\? \[y/N\] y$' "$WORK/bootstrap1.txt") || true
+  # The answer is the bare enter the pty sends (hack/answer-pty.py), so this also
+  # proves which way the question's default cuts: a prompt with nothing typed
+  # after it installed the platform and the seedbox.
+  questions=$(grep -cE '^\? install the platform and .+\? \[Y/n\] $' "$WORK/bootstrap1.txt") || true
   [ "$questions" = 1 ] ||
     { echo "a guided install asked ${questions} questions, want one: the platform and the seedbox together";
       grep -nE '\[y/[Nn]\]|\[Y/n\]' "$WORK/bootstrap1.txt"; fail=1; }
-  if grep -qE '^(\? )?apply s5n in .+\? \[y/[Nn]\] ' "$WORK/bootstrap1.txt"; then
+  if grep -qE '^(\? )?apply s5n in .+\? \[[yY]/[nN]\] ' "$WORK/bootstrap1.txt"; then
     echo "the release asked its own question after the one answer"
     fail=1
   fi
@@ -1816,7 +2037,7 @@ fresh() {
   # it is asked on a terminal because root's config is there before the question.
   plan_line=$(grep -nE '^ *\+ cert-manager ' "$WORK/bootstrap1.txt" | head -1 | cut -d: -f1) || true
   notice_line=$(grep -nF "Where should box post notices?" "$WORK/bootstrap1.txt" | head -1 | cut -d: -f1) || true
-  question_line=$(grep -nE '^\? install the platform and .+\? \[y/N\] ' "$WORK/bootstrap1.txt" | head -1 | cut -d: -f1) || true
+  question_line=$(grep -nE '^\? install the platform and .+\? \[Y/n\] ' "$WORK/bootstrap1.txt" | head -1 | cut -d: -f1) || true
   platform_row=$(grep -nE '^✓ Envoy Gateway ' "$WORK/bootstrap1.txt" | head -1 | cut -d: -f1) || true
   if [ -z "$plan_line" ] || [ -z "$question_line" ] || [ -z "$platform_row" ]; then
     echo "the transcript is missing the plan, the question or the first install row"
@@ -4066,7 +4287,7 @@ PY
 }
 
 # install_metallb puts MetalLB on the cluster the way a user would: the
-# upstream manifest and an L2 pool carved from the bottom of the kind docker
+# upstream manifest and an L2 pool carved from the top of the kind docker
 # network, not through box. It sets MANUAL_POOL for the assertions that follow.
 # The preinstalled scenario needs this exact state: an address layer box did
 # not install and must not touch.
@@ -4090,11 +4311,18 @@ install_metallb() {
   # the same trick hack/e2e-kind.sh uses. The name is deliberately not box's:
   # after bootstrap, s5n-pool existing at all would mean box had installed its
   # own pool over this one.
+  #
+  # Every kind cluster on this machine puts its nodes on that one bridge and
+  # announces its LoadBalancer addresses on it, so two clusters that take the
+  # same block of it answer each other's ARP and one of them loses its Gateway.
+  # The block is therefore chosen by this checkout's id: 32 blocks of 8 addresses
+  # from the top down, which docker's own IPAM never reaches from the bottom.
   kind_subnet=$(docker network inspect kind -f '{{range .IPAM.Config}}{{.Subnet}} {{end}}' | tr ' ' '\n' | grep -v ':' | head -1)
-  pool=$(python3 - "$kind_subnet" <<'PY'
-import ipaddress, sys
-net = ipaddress.ip_network(sys.argv[1], strict=False)
-ips = list(net.hosts())[-16:]
+  pool=$(python3 - "$kind_subnet" "${E2E_ID}:preinstalled" <<'PY'
+import hashlib, ipaddress, sys
+hosts = list(ipaddress.ip_network(sys.argv[1], strict=False).hosts())
+block = int(hashlib.sha256(sys.argv[2].encode()).hexdigest()[:8], 16) % 32
+ips = hosts[-8 * (block + 1):len(hosts) - 8 * block]
 print(f"{ips[0]}-{ips[-1]}")
 PY
 )
@@ -4932,8 +5160,10 @@ PY
 # have to read for a tag-only release to move or lapse at all.
 
 # What the two new releases pin. The broken sonarr is built here; the other two
-# are images this cluster already runs, retagged.
-BROKEN_TAG=e2e-broken
+# are images this cluster already runs, retagged. The built one carries this
+# checkout's id: it is a tag in the machine's docker store, which two worktrees
+# share.
+BROKEN_TAG="e2e-broken-${E2E_ID}"
 MOVED_TAG=e2e-moved
 RESTORED_TAG=e2e-restored
 # What the operator pins sonarr to by hand after the last rollback: sonarr's
@@ -6260,6 +6490,7 @@ print(".".join(str(p) for p in tree))' "$CHART_VERSION"); then
   fi
   BOX_BIN="$PUBLISHED_BOX"
   INSTALL_VERSION="$UPGRADE_FROM"
+  PUBLISHED_TRANSCRIPTS="$WORK/bootstrap1.txt"
   if bootstrap "$WORK/bootstrap1.txt"; then
     cat "$WORK/bootstrap1.txt"
   else
@@ -6290,9 +6521,20 @@ print(".".join(str(p) for p in tree))' "$CHART_VERSION"); then
   # once: without that, the check after the upgrade would prove the pod never
   # restarted, not that the torrent is the box's.
   log "restarting qBittorrent so the torrent is on disk, then reading it back"
+  local old_uid new_uid="" i
+  old_uid=$($K -n "$NS" get pod qbittorrent-0 -o jsonpath='{.metadata.uid}' 2>/dev/null) || true
   $K -n "$NS" delete pod qbittorrent-0 --wait=true --timeout=180s >/dev/null ||
     { echo "could not restart qbittorrent-0"; fail=1; return 0; }
-  if ! $K -n "$NS" wait --for=condition=Ready pod/qbittorrent-0 --timeout=300s >/dev/null 2>&1; then
+  # The StatefulSet recreates the pod after the delete returns, not before, so a
+  # wait on the name alone can find no pod at all and fail at once. Wait for the
+  # replacement (a new uid) to exist first, then for it to be Ready.
+  for i in $(seq 1 60); do
+    new_uid=$($K -n "$NS" get pod qbittorrent-0 -o jsonpath='{.metadata.uid}' 2>/dev/null) || true
+    [ -n "$new_uid" ] && [ "$new_uid" != "$old_uid" ] && break
+    sleep 2
+  done
+  if [ -z "$new_uid" ] || [ "$new_uid" = "$old_uid" ] ||
+    ! $K -n "$NS" wait --for=condition=Ready pod/qbittorrent-0 --timeout=300s >/dev/null 2>&1; then
     echo "qbittorrent-0 did not come back Ready after its restart"; fail=1; return 0
   fi
   upgrade_torrent_check s5n-e2e-upgrade.bin "before the update"
@@ -6307,10 +6549,10 @@ print(".".join(str(p) for p in tree))' "$CHART_VERSION"); then
   log "box update: ${UPGRADE_FROM} -> ${tree_release}, the tree's box over the published install"
   update_started=$(date -u +%Y-%m-%dT%H:%M:%SZ) || true
   # This tree's chart runs this tree's wiring Job: the locally built image.
-  cat >>"$WORK/values.yaml" <<'EOF'
+  cat >>"$WORK/values.yaml" <<EOF
 wiring:
   image:
-    tag: e2e
+    tag: ${IMAGE_TAG}
 EOF
   if "$WORK/box" update --yes --chart-repo "$CHART_REPO" --record "$WORK/cluster.yaml" \
     --grant "$WORK/grant.yaml" --values "$WORK/values.yaml" --paths-in-node \
@@ -6608,10 +6850,18 @@ box_root() { # box_root <node> <box arguments...>
   # TMPDIR is a tmpfs of its own, sized by the calling scenario: a migrate run
   # keeps nothing of a snapshot in the system's temporary directory, so a run that
   # did would fail here instead of passing on a small fixture (see BOX_ROOT_TMPFS).
+  #
+  # The run log goes where every other box run's goes: box_root hands the e2e's
+  # directory in, because a container that wrote its own /var/log/box would take
+  # the transcript with it when it exits, and the lines the screen folds away (the
+  # snapshot a run read among them) are read back from there.
+  local log_args=()
+  [ -z "${BOX_LOG_DIR:-}" ] || log_args=(-e "BOX_LOG_DIR=${BOX_LOG_DIR}")
   docker run --rm -u 0 --network host -w "$WORK" \
     -v "${WORK}:${WORK}" --tmpfs /tmp:rw,size=1g \
     --tmpfs /tmp/box-tmp:rw,size="${BOX_ROOT_TMPFS:-1g}" \
     -v "${bundle}:/etc/ssl/certs/ca-certificates.crt:ro" \
+    ${log_args[@]+"${log_args[@]}"} \
     -e HOME=/tmp -e DOCKER_CONFIG=/tmp/.docker -e TMPDIR=/tmp/box-tmp \
     "$BOX_ROOT_IMAGE" /box "$@"
 }
@@ -6646,13 +6896,14 @@ config_read() { # config_read <node> <path>
 
 # box_files_back <node> <config root>: box ran as root above, the way a real
 # host runs it, so the files it wrote outside the seedbox's own tree -- the
-# grant, the record, its own config, the .box record under the config root --
-# are root's. The rest of this script reads those as the runner and a run
-# without --keep deletes them, so they are handed back here. The seedbox's
-# config tree is deliberately not in the list: whose it is, is what the
+# grant, the record, its own config, the .box record under the config root, and
+# the run log -- are root's. The rest of this script reads those as the runner
+# and a run without --keep deletes them, so they are handed back here. The
+# seedbox's config tree is deliberately not in the list: whose it is, is what the
 # assertion before this one is about.
 box_files_back() { # box_files_back <node> <config root>
   node_root "$1" "chown $(id -u):$(id -g) '$WORK'/*.yaml '$WORK'/box.yaml 2>/dev/null || true
+    chown -R $(id -u):$(id -g) '$WORK'/logs 2>/dev/null || true
     chown -R $(id -u):$(id -g) '$2/.box' 2>/dev/null || true"
 }
 
@@ -8560,11 +8811,19 @@ rehearsal_box() {
   grep -qE '^  data +the real run renames ' "$WORK/rehearsal-report-rows.txt" ||
     { echo "the rehearsal's page does not say what the real run renames:";
       sed -n '/^library$/,/^$/p' "$WORK/rehearsal-page.txt"; return 1; }
-  for want in "snapshot: ${rehearsal} (rehearsal)" "rehearsal: nothing leaves this box" \
-              "network lock: proven"; do
+  for want in "rehearsal: nothing leaves this box" "network lock: proven"; do
     grep -qF -- "$want" "$WORK/apply-rehearsal.txt" ||
       { echo "the rehearsal apply has no ${want}"; return 1; }
   done
+  # Which file the run read is the log's line, not the screen's (rule 5): a
+  # refusal opens with its fact, and the command it prints names the snapshot.
+  # The logs are the root run's, handed back above with the rest of its files.
+  rehearsal_logs=$(box_logs migrate-apply)
+  [ -n "$rehearsal_logs" ] ||
+    { echo "the rehearsal apply wrote no run log under ${BOX_LOG_DIR}"; return 1; }
+  # shellcheck disable=SC2086 # the logs are a list of files
+  grep -qhF "snapshot: ${rehearsal} (rehearsal)" $rehearsal_logs ||
+    { echo "the rehearsal's log does not name the snapshot it read"; return 1; }
   # The rehearsal runs with --details, so the count is the per-column list's
   # line: that list is the whole account the grouped confirm summarises.
   grep -qE "^ *1 torrents written stopped$" "$WORK/apply-rehearsal.txt" ||
@@ -9237,9 +9496,18 @@ migrate_box() {
   # stops before anything moves -- no record, no grant, no cluster of its own --
   # and says both versions and the command that goes ahead anyway.
   log "box migrate apply: a downgrade refuses, before anything moves"
+  refuse_started=$SECONDS
   if apply_migrate "$WORK/apply-downgrade.txt"; then
     echo "migrate apply ran a release older than the source's config without --yolo"; fail=1; return 0
   fi
+  # The refusal is read from the snapshot and the chart alone, so the step is
+  # seconds: staging a seedbox's configs, probing the cluster for a platform and
+  # installing one all come after it. The platform's two minutes of Helm releases
+  # are the number this is short of.
+  refuse_took=$((SECONDS - refuse_started))
+  echo "  the refusal took ${refuse_took}s"
+  [ "$refuse_took" -lt 90 ] ||
+    { echo "a refused downgrade took ${refuse_took}s, and the platform layer alone is two minutes: something before the refusal is doing the install's work"; fail=1; }
   cat "$WORK/apply-downgrade.txt"
   grep -qE '^✗ sonarr +9\.9\.9 → 5\.0$' "$WORK/apply-downgrade.txt" ||
     { echo "the refusal does not name the app and both versions:"; tail -12 "$WORK/apply-downgrade.txt"; fail=1; }
@@ -9254,6 +9522,18 @@ migrate_box() {
   for left in "$WORK/cluster.yaml" "$WORK/grant.yaml"; do
     [ ! -e "$left" ] || { echo "a refused downgrade wrote ${left}"; fail=1; }
   done
+  # Nothing of the platform was installed to reach the refusal: none of the three
+  # namespaces its releases live in exists on this cluster, and no Gateway was
+  # written. A refusal that installed a cert-manager, a MetalLB or an Envoy
+  # Gateway first spent two minutes on a host it then said no to.
+  for ns in cert-manager envoy-gateway-system metallb-system; do
+    if $K get namespace "$ns" >/dev/null 2>&1; then
+      echo "a refused downgrade left the platform's ${ns} namespace on the cluster"; fail=1
+    fi
+  done
+  if $K -n s5n-gateway get gateway s5n >/dev/null 2>&1; then
+    echo "a refused downgrade wrote box's Gateway"; fail=1
+  fi
   if grep -qE '^apps +carries' "$WORK/apply-downgrade.txt"; then
     echo "a refused run showed the plan as if it were to be applied"; fail=1
   fi
@@ -9410,13 +9690,17 @@ migrate_box() {
     { echo "the migrate install did not say it picked a torrent port:";
       grep -i 'torrent port' "$WORK/apply-migrate.txt" || true; fail=1; }
   assert_torrent_port "the migrate install"
-  # The snapshot it read is named, and the chart it installed is the release
-  # this run pulled once for both halves.
-  grep -qF "snapshot: ${snapshot} (final)" "$WORK/apply-migrate.txt" ||
-    { echo "the run did not name the snapshot it read"; fail=1; }
+  # The snapshot it read is named in the run log, and the chart it installed is
+  # the release this run pulled once for both halves.
   migrate_logs=$(box_logs migrate-apply)
   [ -n "$migrate_logs" ] ||
     { echo "box migrate apply wrote no run log under ${BOX_LOG_DIR}"; ls -l "${BOX_LOG_DIR}" 2>/dev/null | head; fail=1; }
+  # shellcheck disable=SC2086 # the logs are a list of files
+  grep -qhF "snapshot: ${snapshot} (final)" $migrate_logs ||
+    { echo "the run's log does not name the snapshot it read"; fail=1; }
+  if grep -qF "snapshot: ${snapshot} (final)" "$WORK/apply-migrate.txt"; then
+    echo "the run put the snapshot's path on the screen, and it is the log's line"; fail=1
+  fi
   # The chart row names the release on the screen; the log carries the repository
   # it came from. Either line is the proof, because a run that pulled another
   # release cannot print this version.
@@ -10599,6 +10883,17 @@ no_klog() {
     # A page a root run wrote beside a snapshot is 0600 and root's: klog writes
     # to the screen, which is another file here.
     if grep -Eq '^[IWE][0-9]{4} ' "$f" 2>/dev/null; then
+      # A transcript a published box wrote (the upgrade scenario's first install)
+      # is a released binary's output: nothing in this tree can change it, and a
+      # client-go line there is timing (a watch Helm cancels as its wait ends),
+      # so it is shown and not failed. This tree's box is held to the rule.
+      case " ${PUBLISHED_TRANSCRIPTS:-} " in
+        *" $f "*)
+          echo "  a klog line in $(basename "$f"), written by the published box (not this tree's):"
+          grep -E '^[IWE][0-9]{4} ' "$f" 2>/dev/null | sed 's/^/    /'
+          continue
+          ;;
+      esac
       echo "client-go/klog noise in $(basename "$f"):"
       grep -E '^[IWE][0-9]{4} ' "$f" 2>/dev/null
       fail=1
@@ -10647,7 +10942,7 @@ if [ "$fail" != 0 ]; then
   cat "$WORK/bootstrap1.txt" 2>/dev/null || true
 fi
 
-elapsed=$(( $(date +%s) - START ))
+elapsed=$SECONDS
 if [ "$fail" = 0 ]; then log "PASS (${SCENARIO})"; else log "FAIL (${SCENARIO})"; fi
 echo "wall time (${SCENARIO}): ${elapsed}s"
 # The update and migrate scenarios' volume roots are host directories the

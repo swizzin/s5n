@@ -342,10 +342,11 @@ jobs:
   # platform pins' patch automerge rests on it. It never installs k0s: kind
   # stands in for the cluster, so k0s bumps are not automerged.
   #
-  # Beside e2e-kind, not after it: each job gets its own runner, so they share
-  # no docker image tag, cluster name or kubeconfig. (On one machine they
-  # cannot run at once -- both write $HOME/.cache/s5n-e2e/kubeconfig -- which
-  # is why a maintainer runs them one after another by hand.)
+  # Beside e2e-kind, not after it: each job gets its own runner, so nothing here
+  # shares a resource. On one machine the scenarios can also run beside each
+  # other: every host-side name carries an id derived from the checkout, and a
+  # scenario holds one of three slots (hack/e2e-box.sh "all"), which is what a
+  # maintainer runs locally.
   #
   # One job per scenario, because a scenario owns its own kind cluster, registry
   # container and work directory (hack/e2e-box.sh): on one runner the seven are

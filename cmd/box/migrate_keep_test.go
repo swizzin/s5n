@@ -5,6 +5,7 @@ package main
 // asked.
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"flag"
@@ -14,6 +15,7 @@ import (
 	"testing"
 
 	"github.com/swizzin/s5n/internal/migrate/discover"
+	"github.com/swizzin/s5n/internal/say"
 )
 
 func TestCutoverStopsOnABlockerAfterTheFinalSnapshot(t *testing.T) {
@@ -114,7 +116,11 @@ func TestCutoverKeepPathGoesOnWithoutABlocker(t *testing.T) {
 	*o.apply.valuesPath = filepath.Join(dir, "values.yaml")
 	*o.apply.grantPath = filepath.Join(dir, "grant.yaml")
 	*o.apply.install.record = filepath.Join(dir, "cluster.yaml")
-	reporter, text := recording()
+	// Two buffers: the screen a person reads and the run log, which is the one
+	// that carries the file a run opened.
+	text := &bytes.Buffer{}
+	logs := &bytes.Buffer{}
+	reporter := &say.Plain{W: text, Err: text, Log: logs}
 
 	err := cutover(context.Background(), o, reporter, proofOf())
 	if err == nil {
@@ -131,9 +137,12 @@ func TestCutoverKeepPathGoesOnWithoutABlocker(t *testing.T) {
 	if _, err := os.Stat(o.Out); err != nil {
 		t.Errorf("the keep path wrote no final snapshot: %v", err)
 	}
-	// And it named the snapshot it opened: the install ran, rather than being
-	// skipped over.
-	if !strings.Contains(text.String(), "snapshot: ") {
-		t.Errorf("the run does not name the snapshot it opened:\n%s", text)
+	// And it named the snapshot it opened in the run log: the install ran, rather
+	// than being skipped over, and which file a run read is the log's line.
+	if !strings.Contains(logs.String(), "snapshot: ") {
+		t.Errorf("the run's log does not name the snapshot it opened:\n%s", logs)
+	}
+	if strings.Contains(text.String(), "snapshot: ") {
+		t.Errorf("the run put the snapshot's path on the screen:\n%s", text)
 	}
 }

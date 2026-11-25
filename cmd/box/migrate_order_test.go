@@ -37,7 +37,7 @@ type stepAsker struct {
 	asked []string
 }
 
-func (a *stepAsker) Ask(question string) (bool, error) {
+func (a *stepAsker) Ask(question string, _ bool) (bool, error) {
 	a.order = append(a.order, "ask")
 	a.asked = append(a.asked, question)
 	return a.yes, nil
@@ -138,7 +138,11 @@ func TestThePreInstallPassWritesOnlyWhereItIsThrownAway(t *testing.T) {
 	valuesPath := filepath.Join(t.TempDir(), "values.yaml")
 	o := &migrateApplyFlags{applyFlags: &applyFlags{grantPath: &grantPath, valuesPath: &valuesPath}}
 
-	summary, err := migrateSurvey(context.Background(), o, p, opened, raw, chart, cat, false)
+	values, err := pendingValues(o, chart)
+	if err != nil {
+		t.Fatalf("the values a fresh install would have: %v", err)
+	}
+	summary, err := migrateSurvey(context.Background(), p, opened, raw, chart, cat, false, values)
 	if err != nil {
 		t.Fatalf("migrateSurvey: %v", err)
 	}

@@ -41,7 +41,7 @@ func runApplyPlan(t *testing.T, opts release.Options, order *applyOrder, charts 
 		t.Fatalf("load: %v", err)
 	}
 	order.add("confirm")
-	if _, err := (answered{}).Ask("apply?"); err != nil {
+	if _, err := (answered{}).Ask("apply?", false); err != nil {
 		t.Fatalf("ask: %v", err)
 	}
 	order.add("write")

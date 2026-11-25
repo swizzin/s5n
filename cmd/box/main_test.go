@@ -433,7 +433,7 @@ func TestConfirmerRefusesAStdinThatIsNotATerminal(t *testing.T) {
 
 	var out strings.Builder
 	confirm := confirmer(&say.Plain{W: &out}, false)
-	ok, err := confirm.Ask("apply s5n in the seedbox namespace?")
+	ok, err := confirm.Ask("apply s5n in the seedbox namespace?", false)
 	if err == nil {
 		t.Fatal("a question was answered by nobody")
 	}
@@ -455,7 +455,7 @@ func TestConfirmerRefusesAStdinThatIsNotATerminal(t *testing.T) {
 func TestConfirmerAutoConfirmsWhenTheCallerSaysYes(t *testing.T) {
 	withStdin(t, mustOpen(t, os.DevNull))
 	confirm := confirmer(&say.Plain{W: io.Discard}, true)
-	ok, err := confirm.Ask("install the platform layer?")
+	ok, err := confirm.Ask("install the platform layer?", false)
 	if err != nil {
 		t.Fatalf("Ask: %v", err)
 	}

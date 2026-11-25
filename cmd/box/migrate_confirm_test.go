@@ -25,7 +25,7 @@ type countingAsker struct {
 	questions []string
 }
 
-func (c *countingAsker) Ask(question string) (bool, error) {
+func (c *countingAsker) Ask(question string, _ bool) (bool, error) {
 	c.questions = append(c.questions, question)
 	return true, nil
 }

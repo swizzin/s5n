@@ -118,11 +118,17 @@ func installTarget(inst *installFlags) string {
 // migrateInstallSteps is the half of `box migrate apply` a host with no box runs
 // before it adopts anything: the pre-install pass that decides what the run
 // would do, and the install that does it once the question is answered. They are
-// fields so a test can watch the order -- the one question comes before either
-// of them writes anything -- without a host, a cluster or a registry.
+// fields so a test can watch the order -- the one refusal, then the one question,
+// then the install -- without a host, a cluster or a registry.
 type migrateInstallSteps struct {
+	// versions is the confirm's version column, from the plan and the chart
+	// alone (planFacts): the one refusal this half makes on its own, and it is
+	// made before the survey, because a release older than the config it would
+	// move is a fact about two image references.
+	versions []apply.AppVersion
 	// survey is the pre-install pass: the migration's summary from the snapshot,
-	// and the platform plan this run would install.
+	// and the platform plan this run would install -- a read-only probe of the
+	// host and the cluster.
 	survey func(ctx context.Context) (apply.Summary, *platform.Plan, error)
 	// install is bootstrap, the platform and init: a host with no box becomes
 	// one, with the release's apps off.
@@ -132,10 +138,13 @@ type migrateInstallSteps struct {
 	lead string
 }
 
-// beforeInstall is the order the whole run exists for: decide, show, ask -- and
-// only after the answer install anything. It returns the summary the operator
-// agreed to, which the adoption is then held to.
+// beforeInstall is the order the whole run exists for: decide, refuse, show, ask
+// -- and only after the answer install anything. It returns the summary the
+// operator agreed to, which the adoption is then held to.
 func (s migrateInstallSteps) beforeInstall(ctx context.Context, ask asker, opts askOptions, target string, screen confirmScreen, out say.Reporter) (*apply.Summary, error) {
+	if err := refuseDowngrades(out, s.versions, opts.AllowDowngrades, screen.Snapshot); err != nil {
+		return nil, err
+	}
 	summary, plat, err := s.survey(ctx)
 	if err != nil {
 		return nil, err
@@ -153,7 +162,7 @@ func (s migrateInstallSteps) beforeInstall(ctx context.Context, ask asker, opts 
 	return &summary, nil
 }
 
-// migrationSteps builds the pre-install half for one run: the summary from the
+// migrationStepsWith builds the pre-install half for one run: the summary from the
 // snapshot's plan and the release's files, and the install from the plan's
 // answers.
 func migrationStepsWith(ctx context.Context, o *migrateApplyFlags, inst *installFlags, p *plan.Plan, opened *bundle.Opened, raw []byte, charts *chartRelease, chart release.Chart, cat *catalog.Catalog, rehearsal bool, out say.Reporter) (migrateInstallSteps, error) {
@@ -169,6 +178,18 @@ func migrationStepsWith(ctx context.Context, o *migrateApplyFlags, inst *install
 	// cannot disagree about them.
 	switchesOn := sortedKeys(p.Apps)
 	sourcePort := sourceTorrentPort(p, opened)
+	// The plan and the chart against each other, before the host is probed for a
+	// platform: the version column and the refusal a plan this release cannot
+	// honour makes. values are the ones a fresh install would have, which is
+	// what the commit below renders and what the survey stages against.
+	values, err := pendingValues(o, chart)
+	if err != nil {
+		return migrateInstallSteps{}, err
+	}
+	versions, err := planFacts(p, cat, values, chart)
+	if err != nil {
+		return migrateInstallSteps{}, err
+	}
 	// The platform this run would install, decided without installing it: a
 	// cluster box would create, or the one it found, probed read-only. It comes
 	// before the snapshot is staged, so a platform this host cannot have is a
@@ -178,8 +199,9 @@ func migrationStepsWith(ctx context.Context, o *migrateApplyFlags, inst *install
 		return migrateInstallSteps{}, err
 	}
 	return migrateInstallSteps{
+		versions: versions,
 		survey: func(ctx context.Context) (apply.Summary, *platform.Plan, error) {
-			summary, err := migrateSurvey(ctx, o, p, opened, raw, chart, cat, rehearsal)
+			summary, err := migrateSurvey(ctx, p, opened, raw, chart, cat, rehearsal, values)
 			return summary, preview.plan, err
 		},
 		install: func(ctx context.Context) error {
@@ -187,6 +209,13 @@ func migrationStepsWith(ctx context.Context, o *migrateApplyFlags, inst *install
 		},
 		lead: confirmLead(preview.cluster),
 	}, nil
+}
+
+// pendingValues is the values a host with no box would install from: the chart's
+// own defaults with the operator's file over them. There is no grant yet -- init
+// writes it -- so nothing else can be in it.
+func pendingValues(o *migrateApplyFlags, chart release.Chart) (map[string]any, error) {
+	return seedbox.Pending(seedbox.Chart{Values: chart.Values, Schema: chart.Schema}, *o.valuesPath)
 }
 
 // sourceTorrentPort is the port the source's qBittorrent announced to peers, as
@@ -376,16 +405,12 @@ type platformPreview struct {
 // snapshot and not in the system's temporary directory, because what it stages is
 // a seedbox's configs -- gigabytes of them on a real source -- and /tmp is a tmpfs
 // on a Fedora or an Arch host.
-func migrateSurvey(ctx context.Context, o *migrateApplyFlags, p *plan.Plan, opened *bundle.Opened, raw []byte, chart release.Chart, cat *catalog.Catalog, rehearsal bool) (apply.Summary, error) {
+func migrateSurvey(ctx context.Context, p *plan.Plan, opened *bundle.Opened, raw []byte, chart release.Chart, cat *catalog.Catalog, rehearsal bool, values map[string]any) (apply.Summary, error) {
 	dir, done, err := work.New(filepath.Dir(opened.Path))
 	if err != nil {
 		return apply.Summary{}, fmt.Errorf("a private directory for the pre-install pass: %w", err)
 	}
 	defer done()
-	values, err := seedbox.Pending(seedbox.Chart{Values: chart.Values, Schema: chart.Schema}, *o.valuesPath)
-	if err != nil {
-		return apply.Summary{}, err
-	}
 	env, err := surveyEnv(p, opened, cat, chart, values, rehearsal, dir)
 	if err != nil {
 		return apply.Summary{}, err

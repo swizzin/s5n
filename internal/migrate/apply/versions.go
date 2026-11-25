@@ -18,6 +18,8 @@ package apply
 import (
 	"strconv"
 	"strings"
+
+	"github.com/swizzin/s5n/internal/migrate/plan"
 )
 
 // AppVersion is one app's row in the version column: the image the source ran and
@@ -72,17 +74,55 @@ func versionOf(instance, source, release string) AppVersion {
 	return v
 }
 
-// Downgrades is every app this release would run at an older version than the
-// source's config was written by, sorted by name (the summary's order).
-func (s Summary) Downgrades() []AppVersion {
+// Versions is the confirm's version column, from the plan and the chart alone:
+// one row per planned instance, in the summary's order, with no staging copy and
+// no cluster behind it.
+//
+// It is what the confirm prints and what the refusal reads, so the run can
+// refuse a downgrade before it copies an app's config -- a release older than
+// the version that wrote the source is a fact about two image references. image
+// is the chart's own resolution, empty for a chart that has no image for the app
+// (the row then reads `?`).
+func Versions(p *plan.Plan, catalog []string, image func(app string) string) []AppVersion {
+	names := planApps(p)
+	out := make([]AppVersion, 0, len(names))
+	for _, name := range names {
+		app := CatalogApp(name, catalog)
+		release := ""
+		if image != nil && app != "" {
+			release = image(app)
+		}
+		out = append(out, versionOf(name, p.Apps[name].Image, release))
+	}
+	return out
+}
+
+// Downgrades filters a version column to the apps this release would run at an
+// older version than wrote their config, in the column's order.
+func Downgrades(versions []AppVersion) []AppVersion {
 	var out []AppVersion
-	for _, in := range s.Instances {
-		if in.Version.Downgrade() {
-			out = append(out, in.Version)
+	for _, v := range versions {
+		if v.Downgrade() {
+			out = append(out, v)
 		}
 	}
 	return out
 }
+
+// Versions is the summary's own version column, in its order: the rows the
+// confirm prints, so a caller that has the summary refuses on exactly what the
+// operator was shown.
+func (s Summary) Versions() []AppVersion {
+	versions := make([]AppVersion, 0, len(s.Instances))
+	for _, in := range s.Instances {
+		versions = append(versions, in.Version)
+	}
+	return versions
+}
+
+// Downgrades is every app this release would run at an older version than the
+// source's config was written by, sorted by name (the summary's order).
+func (s Summary) Downgrades() []AppVersion { return Downgrades(s.Versions()) }
 
 // tagVersion is the version an image reference names, as a person reads it, or ""
 // when it names none box can read.

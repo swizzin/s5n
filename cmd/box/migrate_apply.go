@@ -188,7 +188,10 @@ func openSnapshot(file string, out say.Reporter) (*bundle.Opened, func(), error)
 		cleanup()
 		return nil, func() {}, fmt.Errorf("%s is a %q snapshot, and apply runs a final one: `box migrate cutover` writes it", file, opened.Mode)
 	}
-	out.Line(fmt.Sprintf("snapshot: %s (%s)", file, opened.Mode))
+	// The snapshot this run read goes to the log, not to the screen: a refusal
+	// opens with its fact (rule 1), and the command it prints already names this
+	// file. A run that goes on names it in the log, where the plumbing lives.
+	out.Detail(fmt.Sprintf("snapshot: %s (%s)", file, opened.Mode))
 	return opened, cleanup, nil
 }
 
@@ -316,8 +319,29 @@ func migrateApply(ctx context.Context, file string, o *migrateApplyFlags, out sa
 			return err
 		}
 	}
+	// Every refusal the snapshot, the plan and the chart decide on their own has
+	// happened by now: the archive verified, the plan parsed, the chart loaded,
+	// and -- on a host with no box -- the version column read and the one
+	// question answered before anything was installed. What follows reads the
+	// cluster, and then writes.
 	sb, err := seedbox.Load(*o.grantPath, *o.valuesPath)
 	if err != nil {
+		return err
+	}
+	// A plan this release cannot honour is the one refusal this half can make
+	// before it writes anything at all: an instance the chart's catalog does not
+	// name, an app with no port or URL base to rewrite an address to. It comes
+	// before the rehearsal's lock goes into the grant, so a refused run leaves
+	// the grant as it found it.
+	//
+	// The version column's refusal stays with the confirm below, and it has to:
+	// whether there is anything to refuse is what apply.Run decides, and a second
+	// run of a plan that is already applied is its own no-op -- the apps it moved
+	// are running on the release's images, and box's update path, not this
+	// command, is what moves them next.
+	if effective, err := sb.Effective(seedbox.Chart{Values: chart.Values, Schema: chart.Schema}); err != nil {
+		return err
+	} else if _, err := planFacts(p, cat, effective, chart); err != nil {
 		return err
 	}
 	if rehearsal {
@@ -626,16 +650,18 @@ func confirmScreenOf(opened *bundle.Opened, target string) confirmScreen {
 func migrateConfirm(out say.Reporter, ask asker, namespace string, opts askOptions, plat *platform.Plan, lead string, screen confirmScreen) func(apply.Summary) (bool, error) {
 	target := confirmTarget(namespace)
 	return func(s apply.Summary) (bool, error) {
-		// The one refusal the plan itself can make, before anything is shown:
-		// a release older than the version that wrote the config is not a
-		// migration anyone can trust, and the row says which app and both
-		// versions.
-		if err := refuseDowngrades(out, s, opts.AllowDowngrades, screen); err != nil {
+		// The version column's one refusal, on the column the screen would show:
+		// a host that already has a box reaches it here, because only a run with
+		// something to move has a downgrade to refuse.
+		if err := refuseDowngrades(out, s.Versions(), opts.AllowDowngrades, screen.Snapshot); err != nil {
 			return false, err
 		}
 		if err := showSummary(out, s, opts.Details, plat, lead, screen); err != nil {
 			return false, err
 		}
+		// Every question here is asked with no as the default: a migration
+		// rewrites a source's configs and switches apps on, and pressing enter
+		// at the end of a long screen should not be a decision to do that.
 		if opts.Rehearsal {
 			// The screen a person reads before the first write says what this
 			// box is, not only what moves into it.
@@ -643,12 +669,12 @@ func migrateConfirm(out say.Reporter, ask asker, namespace string, opts askOptio
 				"nothing leaves this box: no internet egress, and the release's own pods only",
 				"every torrent starts stopped, and no data is renamed",
 			})
-			return ask.Ask(fmt.Sprintf("rehearse these %s into %s?", appsWord(len(s.Instances)), target))
+			return ask.Ask(fmt.Sprintf("rehearse these %s into %s?", appsWord(len(s.Instances)), target), false)
 		}
 		if plat != nil {
-			return ask.Ask(fmt.Sprintf("install, then move these %s in?", appsWord(len(s.Instances))))
+			return ask.Ask(fmt.Sprintf("install, then move these %s in?", appsWord(len(s.Instances))), false)
 		}
-		return ask.Ask(fmt.Sprintf("move these %s in?", appsWord(len(s.Instances))))
+		return ask.Ask(fmt.Sprintf("move these %s in?", appsWord(len(s.Instances))), false)
 	}
 }
 
@@ -660,14 +686,17 @@ func migrateConfirm(out say.Reporter, ask asker, namespace string, opts askOptio
 // is still open. --yolo is the operator's word that they want it anyway, and then
 // the confirm carries one `!` row per app instead of a refusal.
 //
-// The rows are the refusal: what the run found, the command that does it anyway,
-// and the one line saying what that costs. Reported says box has already put it on
-// screen, so the command exits non-zero without saying it twice.
-func refuseDowngrades(out say.Reporter, s apply.Summary, allow bool, screen confirmScreen) error {
+// It reads a version column rather than a summary: two image references are the
+// whole of the question, so a run can answer it before it stages a single file
+// (apply.Versions). The rows are the refusal: what the run found, the command
+// that does it anyway, and the one line saying what that costs. Reported says box
+// has already put it on screen, so the command exits non-zero without saying it
+// twice.
+func refuseDowngrades(out say.Reporter, versions []apply.AppVersion, allow bool, snapshot string) error {
 	if allow {
 		return nil
 	}
-	downs := s.Downgrades()
+	downs := apply.Downgrades(versions)
 	if len(downs) == 0 {
 		return nil
 	}
@@ -682,8 +711,8 @@ func refuseDowngrades(out say.Reporter, s apply.Summary, allow bool, screen conf
 	}
 	out.Rows(rows)
 	command := "box migrate apply"
-	if screen.Snapshot != "" {
-		command += " " + screen.Snapshot
+	if snapshot != "" {
+		command += " " + snapshot
 	}
 	command += " --yolo"
 	commandLines(out, command)
@@ -694,6 +723,23 @@ func refuseDowngrades(out say.Reporter, s apply.Summary, allow bool, screen conf
 // errDowngrade says the release is older than the source, and the refusal has
 // already been printed with the command that runs it anyway.
 var errDowngrade = errors.New("the release runs an older app than wrote this config")
+
+// planFacts is the plan and the chart against each other: the version column for
+// every planned app, and the error a plan this release cannot honour makes on the
+// way (apply.Targets: an instance the chart's catalog does not name, an app with
+// no port or URL base to rewrite an address to).
+//
+// None of it needs a snapshot's configs or a cluster, so the installer half reads
+// it before it probes the host for a platform or stages a copy, and refuses a
+// downgrade on it before either (beforeInstall). The checks that genuinely need
+// the cluster -- is the release installed, does this box already run these apps,
+// which address does the rehearsal gate answer at -- stay where they are.
+func planFacts(p *plan.Plan, cat *catalog.Catalog, values map[string]any, chart release.Chart) ([]apply.AppVersion, error) {
+	if _, err := apply.Targets(values, cat.Names(), sortedKeys(p.Apps)); err != nil {
+		return nil, err
+	}
+	return apply.Versions(p, cat.Names(), chartImage(chart, values)), nil
+}
 
 // showSummary is the screen above the question: the heading, the platform this
 // run would install, the blocks, the footer, and the page beside the snapshot.

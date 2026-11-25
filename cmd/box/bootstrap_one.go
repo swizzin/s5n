@@ -74,9 +74,12 @@ type oneQuestion struct {
 // beforeWrite is setup's BeforeWrite: the one question, then the layer.
 //
 // A "no" leaves the host as it was -- no platform, no file, no directory -- and
-// says so in box's own words, the way a refused question does.
+// says so in box's own words, the way a refused question does. The answer is yes
+// by default: this question is the whole of what the run is for, an operator has
+// just typed the domain, the login and the paths of a fresh host, and the cost of
+// a wrong yes is in the plan above it rather than in one more keystroke.
 func (q oneQuestion) beforeWrite(ctx context.Context, a setup.Answers) error {
-	ok, err := q.ask.Ask(questionFor(a))
+	ok, err := q.ask.Ask(questionFor(a), true)
 	if err != nil {
 		return err
 	}

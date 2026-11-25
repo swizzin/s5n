@@ -184,7 +184,7 @@ func TestReporterNeverExceedsWidth(t *testing.T) {
 	time.Sleep(120 * time.Millisecond)
 	h.Done("")
 	r.Created([]string{"/srv/s5n/data", "/srv/s5n/config", "/srv/s5n/config/qbittorrent", "/srv/s5n/config/sonarr", "/srv/s5n/config/radarr-4k", "/srv/s5n/config/prowlarr", "/srv/s5n/config/plex"})
-	if _, err := r.Confirm("create /srv/s5n/data on that filesystem?"); err != nil {
+	if _, err := r.Confirm("create /srv/s5n/data on that filesystem?", false); err != nil {
 		t.Fatal(err)
 	}
 	r.Banner("seedbox ready", "box.example.com")
@@ -205,7 +205,7 @@ func TestReporterLooksLikeBox(t *testing.T) {
 	r := NewReporter(ReporterOptions{Out: &buf, Width: 100, NoColor: true, Yes: true})
 	r.Phase("cluster")
 	r.Success("platform ready")
-	if _, err := r.Confirm("install the platform layer?"); err != nil {
+	if _, err := r.Confirm("install the platform layer?", false); err != nil {
 		t.Fatal(err)
 	}
 	r.Banner("seedbox ready", "box.example.com")
@@ -264,6 +264,29 @@ func TestReporterPlanIndentsChildren(t *testing.T) {
 	for _, line := range lines {
 		if w := lipgloss.Width(line); w > 80 {
 			t.Fatalf("line is %d columns wide: %q", w, line)
+		}
+	}
+}
+
+// The live reporter hands the default the flow chose to the same form init asks
+// with, and a bare enter takes it: a question about the one install starts on
+// yes, and one about a box that is serving starts on no.
+func TestReporterConfirmTakesTheDefaultTheFlowChose(t *testing.T) {
+	var buf bytes.Buffer
+	r := NewReporter(ReporterOptions{Out: &buf, Width: 80, NoColor: true, In: strings.NewReader("\n")})
+	r.ui.accessible = true
+	ok, err := r.Confirm("install the platform and alice's seedbox?", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ok {
+		t.Fatal("an empty answer over a yes default came back no")
+	}
+	r.Close()
+	text := stripANSI(buf.String())
+	for _, want := range []string{"? install the platform and alice's seedbox? [Y/n]", "✓ install the platform and alice's seedbox?  yes"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("the confirm is missing %q:\n%s", want, text)
 		}
 	}
 }

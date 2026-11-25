@@ -375,7 +375,7 @@ func (u *Updater) Run(ctx context.Context, opts Options) (Result, error) {
 	if u.OpenCluster == nil {
 		return res, errors.New("update needs a workload client: it stops what it snapshots")
 	}
-	ok, err := u.Confirm.Ask(fmt.Sprintf("update %s from %s to %s?", res.Name, res.Installed, res.Target))
+	ok, err := u.Confirm.Ask(fmt.Sprintf("update %s from %s to %s?", res.Name, res.Installed, res.Target), false)
 	if err != nil {
 		return res, err
 	}

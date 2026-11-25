@@ -11,7 +11,8 @@ require (
 	github.com/charmbracelet/x/ansi v0.11.10
 	github.com/distribution/distribution/v3 v3.1.2
 	github.com/santhosh-tekuri/jsonschema/v6 v6.0.3
-	go.yaml.in/yaml/v3 v3.0.6
+	go.yaml.in/yaml/v3 v3.0.5
+	go.yaml.in/yaml/v4 v4.0.0
 	golang.org/x/crypto v0.59.0
 	golang.org/x/sys v0.50.0
 	golang.org/x/term v0.48.0
@@ -23,7 +24,7 @@ require (
 	k8s.io/client-go v0.37.2
 	k8s.io/utils v0.0.0-20261023123148-ca04ba58ecab
 	modernc.org/sqlite v1.63.0
-	oras.land/oras-go/v2 v2.6.2
+	oras.land/oras-go/v2 v2.7.0
 )
 
 require (
