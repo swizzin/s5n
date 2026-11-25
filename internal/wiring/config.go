@@ -42,6 +42,7 @@ type Config struct {
 	Seerr          *SeerrConfig       `json:"seerr,omitempty"`
 	Maintainerr    *MaintainerrConfig `json:"maintainerr,omitempty"`
 	Qui            *QuiConfig         `json:"qui,omitempty"`
+	Sabnzbd        *SabnzbdConfig     `json:"sabnzbd,omitempty"`
 	Autobrr        *AutobrrConfig     `json:"autobrr,omitempty"`
 	Pbh            *PbhConfig         `json:"pbh,omitempty"`
 	Instances      []Instance         `json:"instances"`
@@ -154,6 +155,20 @@ type ProwlarrConfig struct {
 	APIKeyFile string `json:"apiKeyFile"`
 }
 
+// SabnzbdConfig points at SABnzbd, the usenet download client. It carries the
+// two paths the data contract gives it: SavePath is where a finished job is
+// left for an Arr to import, and DownloadDir is where it is unpacked while it
+// runs. Both are on /data, so SAB's own move from one to the other is a rename
+// and the Arr's import is a hardlink. Categories are the Arr instances' download
+// categories (Config.Instances), created here with their directories.
+type SabnzbdConfig struct {
+	URL         string `json:"url"`
+	URLBase     string `json:"urlBase"`
+	APIKeyFile  string `json:"apiKeyFile"`
+	SavePath    string `json:"savePath"`
+	DownloadDir string `json:"downloadDir"`
+}
+
 // BazarrConfig is one Bazarr instance and the Arr pair it reads.
 //
 // Upstream Bazarr keeps exactly one Sonarr and one Radarr per instance
@@ -244,6 +259,14 @@ func (c *Config) validate() error {
 	if c.Qbittorrent != nil {
 		if err := requireFields("qbittorrent", map[string]string{
 			fieldURL: c.Qbittorrent.URL,
+		}); err != nil {
+			return err
+		}
+	}
+	if c.Sabnzbd != nil {
+		if err := requireFields("sabnzbd", map[string]string{
+			fieldURL: c.Sabnzbd.URL, fieldURLBase: c.Sabnzbd.URLBase, fieldAPIKeyFile: c.Sabnzbd.APIKeyFile,
+			"savePath": c.Sabnzbd.SavePath, "downloadDir": c.Sabnzbd.DownloadDir,
 		}); err != nil {
 			return err
 		}

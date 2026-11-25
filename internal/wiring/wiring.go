@@ -26,6 +26,12 @@ const (
 // the Job writes when it creates the object itself.
 const qbitClientName = "qBittorrent"
 
+// sabClientName is what SABnzbd is called in an Arr's download client list,
+// beside qBittorrent's. The two are different clients of different protocols,
+// so the names are the apps' own: an Arr shows both and the operator knows
+// which one fetches what.
+const sabClientName = "SABnzbd"
+
 // Writes counts the application objects the run actually changed: download
 // clients, root folders, hardlink settings, Prowlarr applications, qBittorrent
 // categories and preferences, qui's instance and autobrr's download clients.
@@ -327,6 +333,60 @@ func (r *Runner) work(ctx context.Context, res *Result) error {
 		}
 	}
 
+	// SABnzbd is the second download client: the same categories the Arrs
+	// download into, each with its directory under complete_dir, and the two
+	// paths the data contract gives it. It comes before the Arrs because an
+	// Arr's client test dials SAB's API and its category has to exist by then.
+	var sab *apps.Sabnzbd
+	sabHost, sabPort, sabKey := "", 0, ""
+	if c.Sabnzbd != nil {
+		var err error
+		if sabKey, err = ReadSecret(c.Sabnzbd.APIKeyFile); err != nil {
+			return r.ensure(res, "sabnzbd/credentials", apps.Unchanged, err)
+		}
+		sab = apps.NewSabnzbd(c.Sabnzbd.URL, c.Sabnzbd.URLBase, sabKey)
+		if sabHost, sabPort, err = hostPort(c.Sabnzbd.URL); err != nil {
+			return r.ensure(res, "sabnzbd/url", apps.Unchanged, err)
+		}
+		r.logf("waiting for SABnzbd at %s%s", c.Sabnzbd.URL, c.Sabnzbd.URLBase)
+		if err := sab.WaitReady(ctx, timeout); err != nil {
+			return r.ensure(res, "sabnzbd/ready", apps.Unchanged, err)
+		}
+		version, _ := sab.Version(ctx)
+		r.okStep(res, "sabnzbd/ready", version)
+
+		// The image's own defaults are Downloads/complete and
+		// Downloads/incomplete under /config, where no import can be a
+		// hardlink. The chart seals them before the first start and this
+		// proves the running app agrees.
+		change, err := sab.EnsureDataContract(ctx, apps.Config{
+			CompleteDir: c.Sabnzbd.SavePath,
+			DownloadDir: c.Sabnzbd.DownloadDir,
+		})
+		if err := r.ensure(res, "sabnzbd/data-contract", change, err); err != nil {
+			return err
+		}
+
+		// One category per download directory, named the way the Arrs name it
+		// (a migrated box keeps the source's name) and with its directory
+		// under complete_dir. An Arr sends the category with its own spelling;
+		// SAB folds only the lookup key, and an unknown name silently falls
+		// back to "*" with no directory -- so the category is created before
+		// any Arr can grab into it.
+		seen := map[string]bool{}
+		for _, inst := range c.Instances {
+			category := downloadCategory(inst)
+			if seen[category] {
+				continue
+			}
+			seen[category] = true
+			change, err := sab.EnsureCategory(ctx, category, category)
+			if err := r.ensure(res, "sabnzbd/category/"+category, change, err); err != nil {
+				return err
+			}
+		}
+	}
+
 	// Every Arr gets the same qBittorrent, its own category, its root folder and
 	// hardlink imports. The Arr API keys are collected for Prowlarr.
 	arrKeys := map[string]string{}
@@ -370,6 +430,28 @@ func (r *Runner) work(ctx context.Context, res *Result) error {
 				owned.SetArrDownloadClientID(inst.Name, result.ID)
 			}
 			if err := r.ensureResult(res, inst.Name+"/downloadclient", result, err); err != nil {
+				return err
+			}
+		}
+		if sab != nil {
+			// The same rule as qBittorrent's client: the live object is the
+			// operator's, and only the data-contract fields are overlaid. The
+			// URL base is the chart's prefix, which is where SAB's own API
+			// lives; the key is the release Secret's.
+			result, err := arr.EnsureDownloadClient(ctx, apps.DownloadClientSpec{
+				Implementation: "Sabnzbd",
+				Protocol:       "nzb",
+				Name:           sabClientName,
+				Category:       downloadCategory(inst),
+				Host:           sabHost,
+				Port:           sabPort,
+				URLBase:        c.Sabnzbd.URLBase,
+				APIKey:         sabKey,
+			}, owned.ArrSabnzbdClientID(inst.Name))
+			if err == nil && result.ID != 0 {
+				owned.SetArrSabnzbdClientID(inst.Name, result.ID)
+			}
+			if err := r.ensureResult(res, inst.Name+"/sabnzbd", result, err); err != nil {
 				return err
 			}
 		}

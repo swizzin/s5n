@@ -38,6 +38,11 @@ type fakeStack struct {
 	// name the chart gives it ("bazarr-4k"). It is the app's own shape: one key
 	// per section, the Arrs as objects.
 	bazarr map[string]map[string]any
+	// sabMisc and sabCats are SABnzbd's [misc] and categories, in the app's own
+	// shape. They start on the image's defaults, which is the trap the Job
+	// corrects.
+	sabMisc map[string]string
+	sabCats map[string]string
 }
 
 // bazarrHandler serves one Bazarr instance: the unauthenticated ping, the
@@ -230,18 +235,33 @@ func (f *fakeStack) serveArr(w http.ResponseWriter, r *http.Request, instance, p
 func (f *fakeStack) serveArrClients(w http.ResponseWriter, r *http.Request, instance, p, api string) {
 	switch {
 	case p == api+"/downloadclient/schema":
-		writeJSON(w, []apps.Item{{
-			"implementation": "QBittorrent", "configContract": "QBittorrentSettings",
-			"fields": []any{
-				map[string]any{"name": "host"},
-				map[string]any{"name": "port"},
-				map[string]any{"name": "useSsl"},
-				map[string]any{"name": "urlBase"},
-				map[string]any{"name": "username"},
-				map[string]any{"name": "password", "privacy": "password"},
-				map[string]any{"name": arrCategoryField(instance)},
+		writeJSON(w, []apps.Item{
+			{
+				"implementation": "QBittorrent", "configContract": "QBittorrentSettings",
+				"fields": []any{
+					map[string]any{"name": "host"},
+					map[string]any{"name": "port"},
+					map[string]any{"name": "useSsl"},
+					map[string]any{"name": "urlBase"},
+					map[string]any{"name": "username"},
+					map[string]any{"name": "password", "privacy": "password"},
+					map[string]any{"name": arrCategoryField(instance)},
+				},
 			},
-		}})
+			{
+				"implementation": "Sabnzbd", "configContract": "SabnzbdSettings",
+				"fields": []any{
+					map[string]any{"name": "host"},
+					map[string]any{"name": "port"},
+					map[string]any{"name": "useSsl"},
+					map[string]any{"name": "urlBase"},
+					map[string]any{"name": "username"},
+					map[string]any{"name": "password", "privacy": "password"},
+					map[string]any{"name": "apiKey", "privacy": "password"},
+					map[string]any{"name": arrCategoryField(instance)},
+				},
+			},
+		})
 	case p == api+"/downloadclient" && r.Method == http.MethodGet:
 		out := []apps.Item{}
 		for _, c := range f.clients[instance] {
@@ -392,7 +412,9 @@ func newHarness(t *testing.T) *harness {
 		// The image's own runtime default: on the config volume, category paths off.
 		prefs: map[string]any{"save_path": "/config/Downloads/", "temp_path": "/config/Downloads/temp/",
 			"use_category_paths_in_manual_mode": false},
-		bazarr: map[string]map[string]any{},
+		bazarr:  map[string]map[string]any{},
+		sabMisc: map[string]string{"complete_dir": "Downloads/complete", "download_dir": "Downloads/incomplete"},
+		sabCats: map[string]string{},
 	}
 	qbit := httptest.NewServer(f.qbitHandler())
 	sonarr := httptest.NewServer(f.arrHandler("sonarr", "/sonarr"))
@@ -905,6 +927,67 @@ func TestWiringBazarrTurnsOffTheSideItHasNoArrFor(t *testing.T) {
 	}
 	if got := h.stack.bazarrValue("bazarr-4k", "radarr", "apikey"); got != "radarr-4k-key" {
 		t.Fatalf("bazarr-4k radarr.apikey = %v", got)
+	}
+}
+
+// sabnzbdHandler serves SABnzbd's API: version without a key, get_config and
+// set_config with one, and the app's own nested answer shape.
+func (f *fakeStack) sabnzbdHandler(urlBase, key string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		p := strings.TrimPrefix(r.URL.Path, urlBase)
+		if p != "/api" {
+			http.Error(w, "unexpected "+r.URL.Path, http.StatusNotFound)
+			return
+		}
+		q := r.URL.Query()
+		if q.Get("mode") == "version" {
+			writeJSON(w, map[string]any{"version": "5.1.3"})
+			return
+		}
+		if q.Get("apikey") != key {
+			http.Error(w, "API Key Incorrect", http.StatusForbidden)
+			return
+		}
+		switch q.Get("mode") {
+		case "get_config":
+			switch q.Get("section") {
+			case "misc":
+				writeJSON(w, map[string]any{"config": map[string]any{"misc": map[string]any{q.Get("keyword"): f.sabMisc[q.Get("keyword")]}}})
+			case "categories":
+				name := strings.ToLower(q.Get("keyword"))
+				if name == "" {
+					list := []any{}
+					for cat, dir := range f.sabCats {
+						list = append(list, map[string]any{"name": cat, "dir": dir})
+					}
+					writeJSON(w, map[string]any{"config": map[string]any{"categories": list}})
+					return
+				}
+				dir, ok := f.sabCats[name]
+				if !ok {
+					writeJSON(w, map[string]any{"config": map[string]any{}})
+					return
+				}
+				writeJSON(w, map[string]any{"config": map[string]any{"categories": []any{map[string]any{"name": name, "dir": dir}}}})
+			}
+		case "set_config":
+			f.writes++
+			switch q.Get("section") {
+			case "misc":
+				f.sabMisc[q.Get("keyword")] = q.Get("value")
+			case "categories":
+				name := strings.ToLower(q.Get("name"))
+				if name == "" {
+					name = strings.ToLower(q.Get("keyword"))
+				}
+				f.sabCats[name] = q.Get("dir")
+			}
+			writeJSON(w, map[string]any{"config": map[string]any{}})
+		default:
+			http.Error(w, "unexpected mode "+q.Get("mode"), http.StatusBadRequest)
+		}
 	}
 }
 

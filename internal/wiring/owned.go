@@ -72,11 +72,14 @@ type MaintainerrOwned struct {
 	PlexTokenFingerprint string `json:"plexTokenFingerprint,omitempty"`
 }
 
-// ArrOwned is what the Job owns on one Arr instance: the download client, by
-// id. Its qBittorrent login is written empty, so the record carries no
-// fingerprint of a credential that no longer exists.
+// ArrOwned is what the Job owns on one Arr instance: the qBittorrent download
+// client and, when the release runs it, the SABnzbd one, by id. Neither client
+// stores a credential the Job can read back (qBittorrent's login is bypassed
+// for the release's addresses, and SABnzbd's key is the release Secret's), so
+// the record carries no fingerprint.
 type ArrOwned struct {
 	DownloadClient int `json:"downloadClient,omitempty"`
+	Sabnzbd        int `json:"sabnzbd,omitempty"`
 }
 
 // ProwlarrOwned is what the Job owns in Prowlarr: one application per Arr
@@ -148,6 +151,23 @@ func (o *OwnedRecord) SetArrDownloadClientID(instance string, id int) {
 	}
 	rec := o.Arr[instance]
 	rec.DownloadClient = id
+	o.Arr[instance] = rec
+}
+
+// ArrSabnzbdClientID returns the recorded id for an Arr instance's SABnzbd
+// download client, or 0 when nothing is recorded.
+func (o *OwnedRecord) ArrSabnzbdClientID(instance string) int {
+	return o.Arr[instance].Sabnzbd
+}
+
+// SetArrSabnzbdClientID records the id of the SABnzbd client the Job created or
+// adopted for an Arr instance.
+func (o *OwnedRecord) SetArrSabnzbdClientID(instance string, id int) {
+	if o.Arr == nil {
+		o.Arr = map[string]ArrOwned{}
+	}
+	rec := o.Arr[instance]
+	rec.Sabnzbd = id
 	o.Arr[instance] = rec
 }
 
