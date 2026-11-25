@@ -105,7 +105,7 @@ QBIT_LT12="${qbit_repository}:${qbit_tag}@${qbit_digest}"
 # watches them here (.github/renovate.json), and the tag stays in the reference
 # so a bump to either the tag or the digest is one line.
 CURL_IMAGE=${CURL_IMAGE:-docker.io/curlimages/curl:8.23.0@sha256:3fb7e13e5d179a845c97d78204f3f1064d1907037f26a3ebf91710571151fd93}  # renovate: datasource=docker
-BUSYBOX_IMAGE=${BUSYBOX_IMAGE:-docker.io/library/busybox:1.36@sha256:73aaf090f3d85aa34ee199857f03fa3a95c8ede2ffd4cc2cdb5b94e566b11662}    # renovate: datasource=docker
+BUSYBOX_IMAGE=${BUSYBOX_IMAGE:-docker.io/library/busybox:1.38@sha256:a46257e06c82ad85242d0d38077d0a52d9896389ca60a1a59d3463db586e5fa4}    # renovate: datasource=docker
 # Pebble 2.10.1, the ACME test server: the same image hack/e2e-box.sh pins.
 PEBBLE_IMAGE=${PEBBLE_IMAGE:-ghcr.io/letsencrypt/pebble:2.10.3@sha256:0c81f05db371f436c97fb894bd6d2ab8fc9c8e2ce40f8bef8a8e15941bcd75ef}  # renovate: datasource=docker
 KEEP=${1:-}
@@ -740,7 +740,7 @@ else
   grep -q "not blessed by the chart" "$WORK/deny-ephemeral.txt" || fail=1
   # The denial must name the ephemeral image, not just the pod's own container:
   # that is the proof this path is actually evaluated.
-  grep -q "busybox:1.36" "$WORK/deny-ephemeral.txt" || fail=1
+  grep -qF "${BUSYBOX_IMAGE%%@*}" "$WORK/deny-ephemeral.txt" || fail=1
 fi
 
 log "admission: a blessed image through the same subresource is admitted"
