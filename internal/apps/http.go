@@ -72,8 +72,8 @@ func IsForbidden(err error) bool { return statusIs(err, http.StatusForbidden) }
 func IsConflict(err error) bool { return statusIs(err, http.StatusConflict) }
 
 func statusIs(err error, status int) bool {
-	he, ok := err.(*HTTPError)
-	return ok && he.Status == status
+	var he *HTTPError
+	return errors.As(err, &he) && he.Status == status
 }
 
 // Get decodes a JSON response into out.

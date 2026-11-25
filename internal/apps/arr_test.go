@@ -44,6 +44,7 @@ type fakeArr struct {
 	api      string
 	kind     Kind
 	clients  []Item
+	schemas  []Item
 	folders  []Item
 	hardlink bool
 	writes   int
@@ -63,7 +64,11 @@ func (f *fakeArr) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case p == "/ping":
 		_, _ = w.Write([]byte("pong"))
 	case p == api+"/downloadclient/schema" && r.Method == http.MethodGet:
-		writeJSON(w, qbitSchema())
+		schemas := f.schemas
+		if schemas == nil {
+			schemas = qbitSchema()
+		}
+		writeJSON(w, schemas)
 	case p == api+"/downloadclient" && r.Method == http.MethodGet:
 		writeJSON(w, f.clients)
 	case p == api+"/downloadclient" && r.Method == http.MethodPost:

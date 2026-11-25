@@ -83,15 +83,42 @@ func (a *Arr) downloadClientSchema(ctx context.Context) ([]Item, error) {
 	return out, err
 }
 
-// DownloadClientSpec is the qBittorrent client every Arr instance gets.
+// DownloadClientSpec is one download client every Arr instance gets: the
+// release's qBittorrent, and the release's SABnzbd when it is switched on.
 type DownloadClientSpec struct {
+	// Implementation is the Arr's own name for the client type: "QBittorrent"
+	// or "Sabnzbd". Empty means qBittorrent, the client every release has.
+	Implementation string
+	// Protocol is the client's protocol as the Arr stores it: "torrent" or
+	// "nzb".
+	Protocol string
 	Name     string
 	Category string
 	Host     string
 	Port     int
 	UseSSL   bool
+	// URLBase is the prefix the client is served under ("/sabnzbd"), or empty
+	// for qBittorrent, which has none.
+	URLBase  string
 	Username string
 	Password string
+	// APIKey is SABnzbd's key. An Arr stores it in a masked field, so it is
+	// overlaid like a password and never compared.
+	APIKey string
+}
+
+func (s DownloadClientSpec) implementation() string {
+	if s.Implementation == "" {
+		return "QBittorrent"
+	}
+	return s.Implementation
+}
+
+func (s DownloadClientSpec) protocol() string {
+	if s.Protocol == "" {
+		return "torrent"
+	}
+	return s.Protocol
 }
 
 // categoryField is the field each app's qBittorrent settings call the download
@@ -145,9 +172,10 @@ func (a *Arr) EnsureDownloadClient(ctx context.Context, spec DownloadClientSpec,
 		{"host", spec.Host, false},
 		{"port", spec.Port, false},
 		{"useSsl", spec.UseSSL, false},
-		{"urlBase", "", false},
+		{"urlBase", spec.URLBase, false},
 		{"username", spec.Username, false},
 		{"password", spec.Password, true},
+		{"apiKey", spec.APIKey, true},
 		{a.categoryField(), spec.Category, false},
 	}
 
@@ -167,14 +195,14 @@ func (a *Arr) EnsureDownloadClient(ctx context.Context, spec DownloadClientSpec,
 		if err != nil {
 			return EnsureResult{}, fmt.Errorf("read download client schema: %w", err)
 		}
-		tmpl, ok := FindImplementation(schemas, "QBittorrent")
+		tmpl, ok := FindImplementation(schemas, spec.implementation())
 		if !ok {
-			return EnsureResult{}, fmt.Errorf("this %s build has no qBittorrent download client implementation", a.Kind)
+			return EnsureResult{}, fmt.Errorf("this %s build has no %s download client implementation", a.Kind, spec.implementation())
 		}
 		desired = tmpl.Clone()
 		desired["name"] = spec.Name
 		desired["enable"] = true
-		desired["protocol"] = "torrent"
+		desired["protocol"] = spec.protocol()
 		desired["priority"] = 1
 		desired["tags"] = []any{}
 		for _, f := range fields {

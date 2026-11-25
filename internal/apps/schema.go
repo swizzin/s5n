@@ -306,26 +306,27 @@ func locateOwned(list []Item, ownedID int, name string) (cur Item, found, recrea
 	return nil, false, false, 0
 }
 
-// locateArrClient finds the qBittorrent download client the Job owns:
+// locateArrClient finds one download client the Job owns, of the
+// implementation the spec names (qBittorrent or SABnzbd):
 //
 //   - a recorded id is authoritative: a rename in the Arr's UI is the
 //     operator's business and must not create a second client, even when
-//     another client points at the same qBittorrent;
+//     another client points at the same downloader;
 //   - with nothing recorded, the client this box would own is adopted before
 //     one is created. On a migrated box there is no record yet, and the
-//     source's client has a name of the operator's own ("qBT"), so the name
-//     cannot find it -- the same reason qui's instance is adopted by its host.
-//     The host is what makes a client box's: an enabled qBittorrent client
-//     pointing at the release's own qBittorrent is the one the release exists
-//     to feed. The name stays the fallback, for a box that ran wiring before it
-//     recorded anything;
+//     source's client has a name of the operator's own ("qBT", "SAB"), so the
+//     name cannot find it -- the same reason qui's instance is adopted by its
+//     host. The host is what makes a client box's: an enabled client of that
+//     implementation pointing at the release's own Service is the one the
+//     release exists to feed. The name stays the fallback, for a box that ran
+//     wiring before it recorded anything;
 //   - only when neither exists was it deleted, so the run creates one and says
 //     which id disappeared.
 //
-// Two enabled qBittorrent clients at that host are a refusal rather than a
-// pick: the Arr allows both, nothing says which one the operator means, and
-// adopting one would leave the other downloading into a directory box never
-// wires.
+// Two enabled clients of that implementation at that host are a refusal rather
+// than a pick: the Arr allows both, nothing says which one the operator means,
+// and adopting one would leave the other downloading into a directory box
+// never wires.
 //
 //nolint:dupl // qui's instance and an Arr's client are different types with the same rules; sharing the body would mean sharing their specs too.
 func locateArrClient(list []Item, spec DownloadClientSpec, ownedID int) (cur Item, found, recreated bool, previousID int, err error) {
@@ -337,13 +338,13 @@ func locateArrClient(list []Item, spec DownloadClientSpec, ownedID int) (cur Ite
 		}
 		return nil, false, true, ownedID, nil
 	}
-	switch same := arrClientHostMatches(list, spec.Host); len(same) {
+	switch same := arrClientHostMatches(list, spec.implementation(), spec.Host); len(same) {
 	case 0:
 	case 1:
 		return same[0], true, false, 0, nil
 	default:
-		return nil, false, false, 0, fmt.Errorf("this Arr has %d enabled qBittorrent download clients at %s (ids %d and %d); remove all but one, this box can own only one",
-			len(same), spec.Host, same[0].Int("id"), same[1].Int("id"))
+		return nil, false, false, 0, fmt.Errorf("this Arr has %d enabled %s download clients at %s (ids %d and %d); remove all but one, this box can own only one",
+			len(same), spec.implementation(), spec.Host, same[0].Int("id"), same[1].Int("id"))
 	}
 	if item, ok := FindByName(list, spec.Name); ok {
 		return item, true, false, 0, nil
@@ -351,17 +352,18 @@ func locateArrClient(list []Item, spec DownloadClientSpec, ownedID int) (cur Ite
 	return nil, false, false, 0, nil
 }
 
-// arrClientHostMatches returns the enabled qBittorrent clients whose host is the
-// one the spec names. A client of another implementation is another downloader,
-// and a disabled one is never dialled: neither is the client this box feeds.
-func arrClientHostMatches(list []Item, host string) []Item {
+// arrClientHostMatches returns the enabled clients of one implementation whose
+// host is the one the spec names. A client of another implementation is another
+// downloader, and a disabled one is never dialled: neither is the client this
+// box feeds.
+func arrClientHostMatches(list []Item, implementation, host string) []Item {
 	want := normalizeArrHost(host)
 	if want == "" {
 		return nil
 	}
 	var out []Item
 	for _, item := range list {
-		if !strings.EqualFold(item.Str("implementation"), "QBittorrent") {
+		if !strings.EqualFold(item.Str("implementation"), implementation) {
 			continue
 		}
 		if on, ok := item["enable"].(bool); ok && !on {
