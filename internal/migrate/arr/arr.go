@@ -1,11 +1,12 @@
-// Package arr rewrites the stored paths of a migrated Sonarr, Radarr or
-// Prowlarr install, and the addresses it stored for the other apps on the
+// Package arr rewrites the stored paths of a migrated Sonarr, Radarr, Lidarr
+// or Prowlarr install, and the addresses it stored for the other apps on the
 // source, before box's release takes its config over.
 //
 // Everything here works on the copied config directory: the app's SQLite
 // database and config.xml beside it. The schema it reads is the source's
-// (Sonarr 4.0.14.2938, Radarr 5.20.1.9773, Prowlarr 2.7.0.5723): nothing in
-// either migration range renames, drops or re-bases a path column, so a
+// (Sonarr 4.0.14.2938, Radarr 5.20.1.9773, Lidarr 3.1.2.4902 and Prowlarr
+// 2.7.0.5723): nothing in either migration range renames, drops or re-bases a
+// path column, so a
 // rewrite before the target's first start is written against columns that
 // exist in both versions, and the first start reads paths that exist
 // (research: arr-qbit §3.2).

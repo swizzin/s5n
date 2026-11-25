@@ -169,9 +169,9 @@ func Rules(host, login string, instances []Instance, hosted, ownLogin []string) 
 		prefix := regexpQuote("/" + inst.Name)
 		switch {
 		case inst.Arr:
-			// The API key is the credential: Sonarr, Radarr and Prowlarr all
-			// answer /api and /ping without a session, and every integration
-			// box wires up uses them.
+			// The API key is the credential: the Arrs and Prowlarr all answer
+			// /api and /ping without a session, and every integration box
+			// wires up uses them.
 			rules = append(rules, Rule{Domain: host, Policy: PolicyBypass, Resources: []string{
 				"^" + prefix + `/api([/?].*)?$`,
 				"^" + prefix + `/ping$`,
