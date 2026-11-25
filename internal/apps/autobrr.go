@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/cookiejar"
+	"sort"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -120,6 +122,172 @@ type DownloaderSpec struct {
 	APIKey   string
 }
 
+// locateAutobrrClient finds the download client the Job owns. It is
+// locateArrClient's rule for autobrr, which has the same facts to go on:
+//
+//   - a recorded id is authoritative: a rename in autobrr is the operator's
+//     business and must never create a second client beside it;
+//   - a recorded id that no longer exists (the operator deleted the row the Job
+//     made) is not a create. A migrated box's client is adopted by the address
+//     it dials, which is this box's own Arr. That is what repairs a box a
+//     migration left holding both the source's clients and the Job's: delete
+//     the Job's, run again, and the source's is adopted -- the row the
+//     operator's own filters already refer to by id;
+//   - with nothing recorded, the same adoption is what a first run does, so a
+//     migrated client named "Sonarr4k" is not duplicated under the instance's
+//     name. The name stays the fallback, for a box that ran wiring before it
+//     recorded anything;
+//   - only when there is nothing to adopt is a client created.
+//
+// autobrr allows two enabled clients of one type at one address, and nothing
+// says which the operator means: the lowest id is adopted and the receipt says
+// so, rather than a third being made.
+func locateAutobrrClient(list []Item, spec DownloaderSpec, ownedID int) (cur Item, found, recreated bool, previousID int, note string) {
+	if ownedID != 0 {
+		for _, item := range list {
+			if item.Int("id") == ownedID {
+				return item, true, false, 0, ""
+			}
+		}
+	}
+	if same := autobrrHostMatches(list, spec); len(same) > 0 {
+		best := same[0]
+		for _, item := range same[1:] {
+			if item.Int("id") < best.Int("id") {
+				best = item
+			}
+		}
+		return best, true, false, 0, adoptionNote(best, same, ownedID)
+	}
+	if ownedID != 0 {
+		return nil, false, true, ownedID, ""
+	}
+	if item, ok := FindByName(list, spec.Name); ok {
+		return item, true, false, 0, ""
+	}
+	return nil, false, false, 0, ""
+}
+
+// adoptionNote is the receipt's line for a client found by its address rather
+// than by the id on record: which row box took, and why that one.
+func adoptionNote(best Item, same []Item, ownedID int) string {
+	id := best.Int("id")
+	note := ""
+	if len(same) > 1 {
+		ids := make([]int, 0, len(same))
+		for _, item := range same {
+			ids = append(ids, item.Int("id"))
+		}
+		sort.Ints(ids)
+		named := make([]string, len(ids))
+		for i, n := range ids {
+			named[i] = strconv.Itoa(n)
+		}
+		note = fmt.Sprintf("adopted id %d of %s", id, strings.Join(named, ", "))
+	} else if ownedID != 0 {
+		note = fmt.Sprintf("adopted id %d", id)
+	}
+	if note != "" && ownedID != 0 {
+		note += fmt.Sprintf(" (recorded %d was gone)", ownedID)
+	}
+	return note
+}
+
+// autobrrHostMatches returns the enabled clients of the spec's own type whose
+// address is the one the spec names. autobrr runs several kinds of client, and
+// an Arr client of the other Arr is another app: neither is the one this box
+// feeds, and neither is a client autobrr ever dials when it is switched off.
+func autobrrHostMatches(list []Item, spec DownloaderSpec) []Item {
+	want := normalizeDownloaderHost(spec.Host)
+	if want == "" {
+		return nil
+	}
+	var out []Item
+	for _, item := range list {
+		if !strings.EqualFold(item.Str("type"), spec.Type) {
+			continue
+		}
+		if on, ok := item["enabled"].(bool); ok && !on {
+			continue
+		}
+		if normalizeDownloaderHost(autobrrAddress(item)) == want {
+			out = append(out, item)
+		}
+	}
+	return out
+}
+
+// The two schemes a stored download-client address can carry: autobrr dials
+// plain HTTP inside the release, and https is a row an operator made by hand.
+const (
+	schemeHTTP  = "http://"
+	schemeHTTPS = "https://"
+)
+
+// autobrrAddress is the address a client dials, as one string. autobrr folds
+// the scheme and port into a qBittorrent client's host, and a migrated row can
+// still have them apart (host "qbittorrent", port 8080, tls off) while the one
+// this Job writes carries both in the host; the two are one address.
+func autobrrAddress(item Item) string {
+	host := strings.TrimSpace(item.Str(fieldHost))
+	if host == "" {
+		return ""
+	}
+	scheme, rest, ok := splitScheme(host)
+	if !ok {
+		// autobrr builds the scheme out of the switch, so a row whose host
+		// carries none but has tls set dials a different address.
+		scheme = schemeHTTP
+		if item.Bool("tls") {
+			scheme = schemeHTTPS
+		}
+	}
+	head, path := rest, ""
+	if i := strings.Index(rest, "/"); i >= 0 {
+		head, path = rest[:i], rest[i:]
+	}
+	// A port already written into the host, or an IPv6 literal's own colons,
+	// mean the stored port is not part of this address.
+	if p := item.Int("port"); p != 0 && !strings.Contains(head, ":") {
+		head += ":" + strconv.Itoa(p)
+	}
+	return scheme + head + path
+}
+
+// normalizeDownloaderHost is a client's address the way two of them are
+// compared: the scheme and the DNS name are case-blind, a trailing slash is not
+// a different address, and the Arr's base path is compared as the app spells
+// it.
+func normalizeDownloaderHost(raw string) string {
+	s := strings.TrimSpace(raw)
+	if s == "" {
+		return ""
+	}
+	scheme, rest, ok := splitScheme(s)
+	if !ok {
+		scheme = schemeHTTP
+	}
+	rest = strings.TrimRight(rest, "/")
+	host, path := rest, ""
+	if i := strings.Index(rest, "/"); i >= 0 {
+		host, path = rest[:i], rest[i:]
+	}
+	return strings.ToLower(scheme) + strings.ToLower(host) + path
+}
+
+// splitScheme separates a stored address into its scheme, "//" included, and
+// the rest: the scheme is case-blind, and an address without one is the case
+// the caller supplies a default for.
+func splitScheme(raw string) (scheme, rest string, ok bool) {
+	lower := strings.ToLower(raw)
+	for _, s := range []string{schemeHTTPS, schemeHTTP} {
+		if strings.HasPrefix(lower, s) {
+			return s, raw[len(s):], true
+		}
+	}
+	return "", raw, false
+}
+
 // autobrrDesired is the complete object an update must send: the live row with
 // only the fields s5n owns overlaid. Everything else (enabled, throttling rules,
 // basic auth, the Arr's external-client links) is carried through untouched,
@@ -179,7 +347,7 @@ func (a *Autobrr) EnsureDownloader(ctx context.Context, spec DownloaderSpec, own
 	if err != nil {
 		return EnsureResult{}, fmt.Errorf("list autobrr downloaders: %w", err)
 	}
-	cur, found, recreated, previousID := locateOwned(list, ownedID, spec.Name)
+	cur, found, recreated, previousID, note := locateAutobrrClient(list, spec, ownedID)
 
 	change := Created
 	var desired Item
@@ -227,7 +395,7 @@ func (a *Autobrr) EnsureDownloader(ctx context.Context, spec DownloaderSpec, own
 			return EnsureResult{}, fmt.Errorf("update autobrr downloader %q: %w", spec.Name, err)
 		}
 	}
-	return EnsureResult{Change: change, ID: desired.Int("id"), Drift: drift, Recreated: recreated, PreviousID: previousID}, nil
+	return EnsureResult{Change: change, ID: desired.Int("id"), Drift: drift, Recreated: recreated, PreviousID: previousID, Note: note}, nil
 }
 
 // downloaderFingerprint is what owned.json records per client: the secret that

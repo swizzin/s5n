@@ -410,3 +410,93 @@ func TestWiringSkipsQuiInstanceWithoutQbittorrent(t *testing.T) {
 		t.Fatalf("qui/instance = %+v, want skipped", step)
 	}
 }
+
+// The box a migration can leave behind: autobrr holds the source's own client
+// for each Arr -- the 4K ones named "Sonarr4k"/"Radarr4k" -- and the Job had
+// already made its own beside them, each by name. The operator deletes the
+// Job's rows, and owned.json still records the ids they had.
+//
+// The next run adopts the migrated row by the Arr it dials, which is the client
+// the operator's filters refer to by id, instead of recreating the Job's. Run
+// one proves the Job never removes the operator's row: that is theirs, and the
+// duplicate is theirs to delete.
+func TestWiringAdoptsTheMigratedAutobrrClientAfterItsRecordedOneIsDeleted(t *testing.T) {
+	h := newHarness(t)
+	f := h.withApps(t)
+	inst := h.config.Instances[0]
+	host := strings.TrimRight(inst.URL, "/") + inst.URLBase
+	migrated := apps.Item{
+		"id": 12, "name": "Sonarr", "type": "SONARR", "enabled": true,
+		"host": host, "port": 0, "tls": false, "username": "", "password": "",
+		"settings": map[string]any{"apikey": "sonarr-key"},
+	}
+	job := apps.Item{
+		"id": 41, "name": "sonarr", "type": "SONARR", "enabled": true,
+		"host": host, "port": 0, "tls": false, "username": "", "password": "",
+		"settings": map[string]any{"apikey": "sonarr-key"},
+	}
+	f.autoRows = []apps.Item{migrated.Clone(), job.Clone()}
+	rec := NewOwnedRecord()
+	rec.SetAutobrrClientID("sonarr", 41)
+	rec.SetAutobrrClientFingerprint("sonarr", apps.SecretFingerprint("sonarr-key"))
+	raw, err := json.Marshal(rec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.cmData = map[string]string{"owned.json": string(raw)}
+
+	first, err := h.runner.Run(context.Background())
+	if err != nil {
+		t.Fatalf("first run: %v\n%s", err, Summary(first))
+	}
+	// The recorded id is authoritative: the Job keeps its own row and never
+	// touches the operator's, so the receipt must not claim otherwise.
+	if got := ownedOf(t, h).AutobrrClientID("sonarr"); got != 41 {
+		t.Fatalf("owned.json records sonarr = %d, want the recorded 41", got)
+	}
+	for _, row := range f.autoRows {
+		if row.Int("id") == 12 && (row.Str("name") != "Sonarr" || !row.Bool("enabled")) {
+			t.Fatalf("the operator's own client was rewritten: %v", row)
+		}
+	}
+
+	// The operator deletes the Job's row, the way they would in autobrr.
+	rows := f.autoRows[:0]
+	for _, row := range f.autoRows {
+		if row.Int("id") != 41 {
+			rows = append(rows, row)
+		}
+	}
+	f.autoRows = rows
+	writes := f.autoWrites
+
+	second, err := h.runner.Run(context.Background())
+	if err != nil {
+		t.Fatalf("second run: %v\n%s", err, Summary(second))
+	}
+	step := stepByName(t, second, "autobrr/downloader/sonarr")
+	if step.Result != "ok" || !strings.Contains(step.Detail, "adopted") {
+		t.Fatalf("autobrr/downloader/sonarr = %+v, want the migrated client adopted", step)
+	}
+	if !strings.Contains(step.Detail, "41") {
+		t.Fatalf("detail = %q, want the recorded id it replaced", step.Detail)
+	}
+	if f.autoWrites != writes {
+		t.Fatalf("adoption wrote %d clients: the migrated row already matched", f.autoWrites-writes)
+	}
+	var sonarrRows []apps.Item
+	for _, row := range f.autoRows {
+		if row.Str("type") == "SONARR" {
+			sonarrRows = append(sonarrRows, row)
+		}
+	}
+	if len(sonarrRows) != 1 || sonarrRows[0].Int("id") != 12 {
+		t.Fatalf("autobrr holds %d SONARR clients, want the migrated id 12 alone", len(sonarrRows))
+	}
+	if got := ownedOf(t, h).AutobrrClientID("sonarr"); got != 12 {
+		t.Fatalf("owned.json records sonarr = %d, want the adopted 12", got)
+	}
+	if !strings.Contains(Summary(second), "adopted") {
+		t.Fatalf("the receipt a person reads says nothing about the adoption:\n%s", Summary(second))
+	}
+}

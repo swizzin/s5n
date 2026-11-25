@@ -192,6 +192,8 @@ func (r *Runner) ensureResult(res *Result, name string, result apps.EnsureResult
 		detail = fmt.Sprintf("recreated (previous id %s)", result.PreviousStringID)
 	case result.Recreated:
 		detail = fmt.Sprintf("recreated (previous id %d)", result.PreviousID)
+	case result.Note != "":
+		detail = result.Note
 	}
 	step := Step{Name: name, Result: "ok", Detail: detail, Drift: result.Drift}
 	res.Steps = append(res.Steps, step)
