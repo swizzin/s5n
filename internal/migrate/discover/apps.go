@@ -69,7 +69,11 @@ var catalogApps = map[string]appInfo{
 	// Lidarr is the third Arr: the same config directory, the same
 	// <PREFIX>__SERVER__PORT and config.xml's <Port>, and root folders in its
 	// own database (PathExtensions.cs at v3.1.2.4902).
-	"lidarr":   {instances: true, library: true, config: []string{configPath}, port: arrPort},
+	"lidarr": {instances: true, library: true, config: []string{configPath}, port: arrPort},
+	// Bazarr takes instances too, but it is not an Arr: no library of its own
+	// (its tables are the Arrs' libraries as they last saw them), no root
+	// folders, and its port is a plain `general.port` in a YAML settings file.
+	"bazarr":   {instances: true, config: []string{configPath}, port: bazarrPort},
 	"prowlarr": {config: []string{configPath}, port: arrPort},
 	// Plex's images write the transcoder's directory into Preferences.xml as
 	// /transcode, which the chart mounts as an emptyDir.
@@ -369,6 +373,21 @@ func arrPort(app string, fsys fs.FS, dir string, env map[string]string) (int, bo
 		return 0, false, err
 	}
 	return xmlPort(data, "Port")
+}
+
+// bazarrPort is Bazarr's web port: BAZARR__PORT, which its image passes to
+// `bazarr.py --port`, then general.port in config/config.yaml (config.py:519 at
+// v1.6.2). The flag wins over the file, so the environment is read first for the
+// same reason as the Arrs'.
+func bazarrPort(_ string, fsys fs.FS, dir string, env map[string]string) (int, bool, error) {
+	if p, ok := envPort(env, "BAZARR__PORT"); ok {
+		return p, true, nil
+	}
+	data, ok, err := readConfigFile(fsys, dir, "config/config.yaml")
+	if err != nil || !ok {
+		return 0, false, err
+	}
+	return yamlBlockPort(data, "general", "port")
 }
 
 // qbittorrentPort is qBittorrent's WebUI port. QSettings writes a key A/B/C as

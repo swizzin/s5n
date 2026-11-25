@@ -348,6 +348,37 @@ apps:
     resources: {}
     env: {}
 
+  # Bazarr is opt-in, and it is the one app whose instances pair with the Arrs'
+  # rather than adding a library of their own. Upstream Bazarr reads exactly one
+  # Sonarr and one Radarr (bazarr/app/config.py at v1.6.2: the sonarr.* and
+  # radarr.* sections), so a box with an HD and a 4K pair runs one Bazarr per
+  # pair, and `bazarr-4k` reads `sonarr-4k` and `radarr-4k`. An instance is a
+  # suffix and nothing else: it has no category, because it owns no library --
+  # it subtitles the ones the Arrs own. A pair with only one side enabled wires
+  # that side and switches the other off; with neither, the render stops and
+  # says which instance.
+  #
+  # It sits behind the box's one login with its own auth off: Bazarr's
+  # auth.type defaults to none (config.py:186), and the chart never sets one.
+  bazarr:
+    enabled: false
+    image:
+      # Blessed variant from variants.yaml. The repository comes only from
+      # there; a tag or digest pin here is held within that repository.
+      variant: default
+    port: 6767
+    # The app is told its prefix on every start (general.base_url, sealed by
+    # the init container): it registers both blueprints under it, so it builds
+    # its own asset URLs and the route keeps the path.
+    rewritePath: false
+    instances:
+      - suffix: ""
+        enabled: true
+      - suffix: 4k
+        enabled: false
+    resources: {}
+    env: {}
+
   # PeerBanHelper is opt-in: once it is connected it starts banning peers on the
   # rules it ships, and it wants a host name of its own (its WebUI calls
   # /api/... from the site root). It is the one app whose memory limit is

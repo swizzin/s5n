@@ -329,6 +329,39 @@
         "lidarr": {
           "$ref": "#/definitions/arr"
         },
+        "bazarr": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "enabled",
+            "image",
+            "port",
+            "instances"
+          ],
+          "properties": {
+            "enabled": {
+              "type": "boolean"
+            },
+            "image": {
+              "$ref": "#/definitions/image"
+            },
+            "port": {
+              "$ref": "#/definitions/port"
+            },
+            "rewritePath": {
+              "type": "boolean"
+            },
+            "instances": {
+              "$ref": "#/definitions/bazarrInstances"
+            },
+            "resources": {
+              "$ref": "#/definitions/resources"
+            },
+            "env": {
+              "$ref": "#/definitions/env"
+            }
+          }
+        },
         "prowlarr": {
           "type": "object",
           "additionalProperties": false,
@@ -579,6 +612,28 @@
         },
         "env": {
           "$ref": "#/definitions/env"
+        }
+      }
+    },
+    "bazarrInstances": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "suffix",
+          "enabled"
+        ],
+        "properties": {
+          "suffix": {
+            "type": "string",
+            "pattern": "^[a-z0-9]*$",
+            "description": "Appended to the app name: bazarr + \"4k\" = bazarr-4k. Empty for the primary instance. The instance reads the Sonarr and Radarr with the same suffix, so bazarr-4k is sonarr-4k and radarr-4k."
+          },
+          "enabled": {
+            "type": "boolean"
+          }
         }
       }
     }

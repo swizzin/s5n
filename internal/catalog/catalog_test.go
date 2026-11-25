@@ -827,6 +827,7 @@ func TestRealChartSnapshots(t *testing.T) {
 		"sonarr":      "sonarr.db,sonarr.db-wal,sonarr.db-shm,config.xml",
 		"radarr":      "radarr.db,radarr.db-wal,radarr.db-shm,config.xml",
 		"lidarr":      "lidarr.db,lidarr.db-wal,lidarr.db-shm,config.xml",
+		"bazarr":      "config/config.yaml,db/bazarr.db,db/bazarr.db-wal,db/bazarr.db-shm",
 		"prowlarr":    "prowlarr.db,prowlarr.db-wal,prowlarr.db-shm,config.xml",
 		"plex": "Library/Application Support/Plex Media Server/Preferences.xml," +
 			"Library/Application Support/Plex Media Server/Plug-in Support/Databases/com.plexapp.plugins.library.db," +
@@ -873,6 +874,7 @@ func TestRealChartCallsAreTheReleaseEdges(t *testing.T) {
 		"sonarr":      "prowlarr,qbittorrent",
 		"radarr":      "prowlarr,qbittorrent",
 		"lidarr":      "prowlarr,qbittorrent",
+		"bazarr":      "radarr,sonarr",
 		"prowlarr":    "lidarr,radarr,sonarr",
 		"tautulli":    "plex",
 		"seerr":       "plex,radarr,sonarr",

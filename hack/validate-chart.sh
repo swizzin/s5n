@@ -189,6 +189,40 @@ for want in 'hostnames: ["pbh.box.example.com"]' 'memory: 512Mi' 'pbh-token:' \
 done
 echo "== pbh render: host route, memory limit, Secret key, wiring entry, one-login switch"
 
+# A Bazarr instance reads one Sonarr and one Radarr, and its pair is the Arrs
+# with the same suffix. A side this release does not run must be *absent* from
+# the Job's config, not an empty object (which the Job refuses) and not an empty
+# string (which sprig's `get` answers for a missing key, and which the Job reads
+# as a wired side). charts/s5n/ci/bazarr-half-pair-values.yaml switches on the
+# 4K Radarr and not the 4K Sonarr, so bazarr-4k has exactly one side.
+pair=$(helm template t charts/s5n -n seedbox -f charts/s5n/ci/bazarr-half-pair-values.yaml |
+  sed -n 's/^    \({"bazarrs".*\)$/\1/p')
+[ -n "$pair" ] || { echo "the half-pair render has no bazarrs in the Job's config"; exit 1; }
+if ! printf '%s' "$pair" | python3 -; then
+  echo "the Job's bazarrs block is wrong for a half pair"; exit 1
+fi <<'PY'
+import json, sys
+d = json.loads(sys.stdin.read())
+by = {b["name"]: b for b in d["bazarrs"]}
+problems = []
+if sorted(by) != ["bazarr", "bazarr-4k"]:
+    problems.append(f"instances = {sorted(by)}, want both")
+hp = by.get("bazarr", {})
+if not isinstance(hp.get("sonarr"), dict) or not isinstance(hp.get("radarr"), dict):
+    problems.append("bazarr must read both Arrs")
+k4 = by.get("bazarr-4k", {})
+if "sonarr" in k4:
+    problems.append(f"bazarr-4k has a sonarr entry ({k4['sonarr']!r}) while the 4K Sonarr is off")
+if not isinstance(k4.get("radarr"), dict):
+    problems.append("bazarr-4k must read the 4K Radarr")
+elif k4["radarr"].get("host") != "radarr-4k":
+    problems.append(f"bazarr-4k reads {k4['radarr'].get('host')!r}, want radarr-4k")
+if problems:
+    print("; ".join(problems))
+    sys.exit(1)
+PY
+echo "== bazarr half pair: one side wired, the other absent from the Job's config"
+
 # No app route keeps Envoy's 15s request timeout: an app behind the one login
 # is one person doing real work, and a long request (autobrr cleaning a large
 # releases database, an Arr's bulk edit or import) answered 504 by the gateway

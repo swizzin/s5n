@@ -14,6 +14,29 @@ previous run's logs stay readable until then.
 {{- $root := . }}
 {{- $name := printf "%s-wiring" (include "s5n.fullname" .) }}
 
+{{- /* Every Bazarr instance and the Arr pair it reads (s5n.bazarrs): a pair
+       is resolved from the enabled instances, so a Bazarr whose sonarr-4k is
+       switched off reads the Radarr alone. Built here rather than in
+       workloads.yaml because this is the only consumer; the guard is for the
+       release's shape, not for this Job. */ -}}
+{{- $bazarrs := list }}
+{{- range $bz := include "s5n.bazarrs" . | fromJsonArray }}
+{{- $entry := dict
+      "name" $bz.name
+      "url" (printf "http://%s:%v" $bz.name $bz.port)
+      "urlBase" (printf "/%s" $bz.name)
+      "apiKeyFile" (printf "/etc/s5n/keys/%s-apikey" $bz.name) }}
+{{- /* Only the sides this release runs become keys. sprig's `get` answers ""
+       for a key that is not there, and an empty string is not the nil the Job
+       reads as "this box runs no such Arr": hasKey is what tells them apart. */}}
+{{- range $side := list "sonarr" "radarr" }}
+{{- if hasKey $bz $side }}
+{{- $_ := set $entry $side (get $bz $side) }}
+{{- end }}
+{{- end }}
+{{- $bazarrs = append $bazarrs $entry }}
+{{- end }}
+
 {{- /* One entry per enabled Arr instance. */ -}}
 {{- $instances := list }}
 {{- range $inst := include "s5n.instances" . | fromJsonArray }}
@@ -37,6 +60,11 @@ previous run's logs stay readable until then.
       "configMap" $name
       "timeoutSeconds" .Values.wiring.timeoutSeconds
       "instances" $instances }}
+{{- /* The key exists only when a Bazarr does: a release without one renders the
+       config it always has, and the Job reads an absent list as none. */ -}}
+{{- if $bazarrs }}
+{{- $_ := set $cfg "bazarrs" $bazarrs }}
+{{- end }}
 {{- if and .Values.apps.qbittorrent .Values.apps.qbittorrent.enabled }}
 {{- /* The WebUI skips its login for the release's addresses (the init container
        seals that), so this Job -- like every app that calls it -- carries no

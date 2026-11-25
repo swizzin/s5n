@@ -25,6 +25,8 @@ apps:
       port: 30080
   lidarr:
     enabled: true
+  bazarr:
+    enabled: true
   qui:
     enabled: true
   autobrr:

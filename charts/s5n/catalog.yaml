@@ -306,6 +306,25 @@ apps:
     snapshot: [lidarr.db, lidarr.db-wal, lidarr.db-shm, config.xml]
     questions: []
 
+  # Opt-in: subtitles for the libraries the Arrs already have. Upstream Bazarr
+  # reads exactly one Sonarr and one Radarr per instance, so it is one pod per
+  # Arr pair -- a box with a 4K pair runs bazarr-4k beside bazarr -- and it is
+  # asked for rather than assumed because a box with no libraries has nothing
+  # for it to subtitle.
+  bazarr:
+    description: subtitles for the TV and films the Arrs already have
+    instances: true
+    default: false
+    # The two it reads. Nothing inside the release calls it: the Arrs do not
+    # know it exists.
+    calls: [sonarr, radarr]
+    # Its settings file and its SQLite database, with the WAL companions a
+    # running instance writes beside it (bazarr/app/config.py:519 at v1.6.2:
+    # config/config.yaml relative to the config directory;
+    # bazarr/app/database.py:82-97: db/bazarr.db, journal_mode=WAL).
+    snapshot: [config/config.yaml, db/bazarr.db, db/bazarr.db-wal, db/bazarr.db-shm]
+    questions: []
+
   # Opt-in, and louder so: it deletes media and torrents on rules the operator
   # writes. Nothing here configures it; it is set up in its own UI.
   maintainerr:

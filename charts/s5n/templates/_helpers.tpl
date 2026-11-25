@@ -139,10 +139,17 @@ s5n
 s5n.instances: the flat list of workloads, as JSON, built from the keys under `apps:`.
 Every key there is an app -- values.schema.json rejects anything else -- so a new
 catalog app needs a values entry and its schema definition, never a template edit.
-Arr apps have `instances:` and expand into one entry per enabled instance (sonarr,
+An app with `instances:` expands into one entry per enabled instance (sonarr,
 sonarr-4k, ...); every other app contributes one entry. Helm ranges map keys in
 sorted order, so the list is alphabetical by app name; nothing downstream depends on
 that order (wiring.json's instance list is per-Arr work with no cross-entry ordering).
+
+`arr` is a property of the app, not of having instances. It means the app speaks the
+Arrs' own convention: a `<PREFIX>__SERVER__*` environment, a URL base, and an API key
+the chart mints into the release Secret. `envPrefix` is that convention's switch --
+every Arr has one and nothing else does -- so Bazarr, the first app that takes
+instances without being an Arr, is not one, and no template treats it as one. Its own
+env is a branch in workloads.yaml like qBittorrent's.
 */}}
 {{- define "s5n.instances" -}}
 {{- $out := list -}}
@@ -152,14 +159,61 @@ that order (wiring.json's instance list is per-Arr work with no cross-entry orde
       {{- range $i := $cfg.instances -}}
         {{- if $i.enabled -}}
           {{- $name := ternary $app (printf "%s-%s" $app $i.suffix) (empty $i.suffix) -}}
-          {{- $out = append $out (dict "name" $name "app" $app "cfg" $cfg "category" $i.category
-                "downloadCategory" (default $i.category $i.downloadCategory) "arr" true) -}}
+          {{- $out = append $out (dict "name" $name "app" $app "cfg" $cfg "suffix" $i.suffix
+                "category" (default "" $i.category)
+                "downloadCategory" (default "" (default $i.category $i.downloadCategory))
+                "arr" (hasKey $cfg "envPrefix")) -}}
         {{- end -}}
       {{- end -}}
     {{- else -}}
-      {{- $out = append $out (dict "name" $app "app" $app "cfg" $cfg "category" "" "arr" (hasKey $cfg "envPrefix")) -}}
+      {{- $out = append $out (dict "name" $app "app" $app "cfg" $cfg "suffix" "" "category" ""
+            "arr" (hasKey $cfg "envPrefix")) -}}
     {{- end -}}
   {{- end -}}
+{{- end -}}
+{{- toJson $out -}}
+{{- end -}}
+
+{{- /*
+s5n.bazarrs: every Bazarr instance and the Arr pair it reads, as JSON.
+
+Upstream Bazarr has exactly one Sonarr and one Radarr per instance, so a 4K pair is
+a second pod and an instance's pair is the Arrs with the same suffix: `bazarr-4k`
+reads `sonarr-4k` and `radarr-4k`. The pair is resolved from the enabled instances,
+so a side switched off is a side this Bazarr does not read; the wiring Job turns
+that side's own switch off rather than leaving it pointing at a Service nothing
+answers on.
+
+An instance with neither side is refused here, before anything is rendered: Bazarr's
+whole job is reading the two, so it would run and fetch nothing. The refusal is a
+render failure rather than a skipped instance because a skipped one is a values line
+that says bazarr is on while no pod exists -- and the wiring receipt, the only place
+that could say so, is produced by a Job for a release that would then be lying.
+*/}}
+{{- define "s5n.bazarrs" -}}
+{{- $out := list -}}
+{{- $all := include "s5n.instances" . | fromJsonArray -}}
+{{- $byName := dict -}}
+{{- range $i := $all -}}
+{{- $_ := set $byName $i.name $i -}}
+{{- end -}}
+{{- range $inst := $all -}}
+{{- if eq $inst.app "bazarr" -}}
+{{- $suffix := $inst.suffix -}}
+{{- $names := dict "sonarr" (ternary "sonarr" (printf "sonarr-%s" $suffix) (empty $suffix)) "radarr" (ternary "radarr" (printf "radarr-%s" $suffix) (empty $suffix)) -}}
+{{- $entry := dict "name" $inst.name "port" $inst.cfg.port -}}
+{{- range $side := list "sonarr" "radarr" -}}
+{{- $want := get $names $side -}}
+{{- with (get $byName $want) -}}
+{{- $_ := set $entry $side (dict "host" .name "port" .cfg.port "urlBase" (printf "/%s" .name)
+      "apiKeyFile" (printf "/etc/s5n/keys/%s-apikey" .name)) -}}
+{{- end -}}
+{{- end -}}
+{{- if and (not (hasKey $entry "sonarr")) (not (hasKey $entry "radarr")) -}}
+{{- fail (printf "apps.bazarr.instances: %s reads one Sonarr and one Radarr, and neither %s nor %s is enabled; switch one on, or switch %s off" $inst.name (get $names "sonarr") (get $names "radarr") $inst.name) -}}
+{{- end -}}
+{{- $out = append $out $entry -}}
+{{- end -}}
 {{- end -}}
 {{- toJson $out -}}
 {{- end -}}
@@ -257,5 +311,7 @@ edge's login: the NetworkPolicy admits the Gateway and the wiring Job alone.
 {{ printf "/%s/api/health/ready" .name }}
 {{- else if eq .app "pbh" -}}
 /api/downloaders
+{{- else if eq .app "bazarr" -}}
+{{ printf "/%s/api/system/ping" .name }}
 {{- end -}}
 {{- end -}}

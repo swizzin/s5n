@@ -32,6 +32,7 @@ const (
 	appSonarr      = "sonarr"
 	appRadarr      = "radarr"
 	appLidarr      = "lidarr"
+	appBazarr      = "bazarr"
 	appProwlarr    = "prowlarr"
 	appQBittorrent = "qbittorrent"
 	appPlex        = "plex"
@@ -192,9 +193,10 @@ func EnabledIn(values map[string]any, instance string) bool {
 // urlBase is the URL base the chart gives one app's pod, per instance:
 //
 //	/<instance>   the Arrs (workloads.yaml:248, <PREFIX>__SERVER__URLBASE), qui
-//	              (:287, QUI__BASE_URL), Maintainerr (:391, BASE_PATH) and
+//	              (:287, QUI__BASE_URL), Maintainerr (:391, BASE_PATH),
 //	              Tautulli, whose own http_root the init container seals to this
-//	              prefix (:123, --http-root)
+//	              prefix (:123, --http-root), and Bazarr, whose
+//	              general.base_url the same kind of init container seals
 //	/<instance>/  autobrr (:330), whose router mounts at base URL *plus* the
 //	              rest of the path, so the trailing slash is what puts its API
 //	              at /autobrr/api
@@ -207,7 +209,7 @@ func EnabledIn(values map[string]any, instance string) bool {
 // instead.
 func urlBase(app, instance string) (string, bool) {
 	switch app {
-	case appSonarr, appRadarr, appLidarr, appProwlarr, appQui, appMaintainerr, appTautulli:
+	case appSonarr, appRadarr, appLidarr, appBazarr, appProwlarr, appQui, appMaintainerr, appTautulli:
 		return "/" + instance, true
 	case appAutobrr:
 		return "/" + instance + "/", true

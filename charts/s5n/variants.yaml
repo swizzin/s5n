@@ -107,6 +107,12 @@ lidarr:
     tag: "3.1.2.4902"
     digest: sha256:dab0e07502a34436fc50c3e789388f0a29f8cbf681fb7a02ed703ad7c368a22c
 
+bazarr:
+  default:
+    repository: ghcr.io/home-operations/bazarr
+    tag: "1.6.2"
+    digest: sha256:6c40dfa683f767d28d1dc502837ed0a5a57682a84231f03e704e2b3f61b25a46
+
 plex:
   default:
     repository: ghcr.io/home-operations/plex

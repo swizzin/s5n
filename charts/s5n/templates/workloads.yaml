@@ -5,6 +5,9 @@ values.yaml; this template is the only place a pod spec is written.
 {{- include "s5n.authEdge" . -}}
 {{- include "s5n.claimsExist" . -}}
 {{- $root := . -}}
+{{- /* A Bazarr instance with neither Arr is refused before anything renders,
+       whether or not the wiring Job is switched on: see s5n.bazarrs. */ -}}
+{{- if and $root.Values.apps.bazarr $root.Values.apps.bazarr.enabled }}{{ $_ := include "s5n.bazarrs" $root }}{{ end -}}
 {{- range $inst := include "s5n.instances" . | fromJsonArray }}
 {{- $cfg := $inst.cfg }}
 {{- $ctx := dict "root" $root "inst" $inst }}
@@ -84,7 +87,7 @@ spec:
       {{- end }}
       securityContext:
         {{- include "s5n.podSecurity" $root | nindent 8 }}
-      {{- $credentialInit := or (eq $inst.app "qbittorrent") (eq $inst.app "tautulli") (eq $inst.app "qui") (eq $inst.app "autobrr") (eq $inst.app "pbh") }}
+      {{- $credentialInit := or (eq $inst.app "qbittorrent") (eq $inst.app "tautulli") (eq $inst.app "qui") (eq $inst.app "autobrr") (eq $inst.app "pbh") (eq $inst.app "bazarr") }}
       {{- if or $root.Values.rehearsal $credentialInit }}
       initContainers:
         {{- if $root.Values.rehearsal }}
@@ -147,6 +150,33 @@ spec:
             # so the value and the route have to be one decision: rewritePath is
             # false for this app in values.yaml.
             - --http-root={{ $urlBase }}
+          securityContext:
+            {{- include "s5n.containerSecurity" $root | nindent 12 }}
+          volumeMounts:
+            - name: config
+              mountPath: /config
+              subPath: {{ $inst.name }}
+            - name: keys
+              mountPath: /etc/s5n/keys
+              readOnly: true
+        {{- else if eq $inst.app "bazarr" }}
+        # Bazarr, the fifth app with this arrangement, generates the key its own
+        # API answers to and reads its URL prefix at import time, so both are
+        # sealed into its own settings file before it reads it. Neither can be set through the API: general.base_url
+        # is read when the app registers its blueprints, so the API itself lives
+        # under the prefix a running process never changes, and the key is what a
+        # request would have to present to change anything at all. The app
+        # rewrites the file whole from memory on every start and every settings
+        # save, so this runs before each one and writes only if a value differs
+        # (internal/bazconf).
+        - name: config
+          image: {{ include "s5n.image" (dict "root" $root "app" "s5n" "path" "wiring.image" "image" $root.Values.wiring.image) }}
+          imagePullPolicy: IfNotPresent
+          args:
+            - bazarr-config
+            - --conf=/config/config/config.yaml
+            - --api-key-file={{ printf "/etc/s5n/keys/%s-apikey" $inst.name }}
+            - --base-url={{ $urlBase }}
           securityContext:
             {{- include "s5n.containerSecurity" $root | nindent 12 }}
           volumeMounts:
@@ -354,6 +384,13 @@ spec:
               value: {{ $cfg.port | quote }}
             - name: QBT_TORRENTING_PORT
               value: {{ $torrentPort | quote }}
+            {{- else if eq $inst.app "bazarr" }}
+            # The image's own port variable, which its entrypoint passes to
+            # `bazarr.py --port` (apps/bazarr/entrypoint.sh in
+            # home-operations/containers): the CLI flag wins over the port in
+            # config/config.yaml, so the chart's port is the one it listens on.
+            - name: BAZARR__PORT
+              value: {{ $cfg.port | quote }}
             {{- else if eq $inst.app "plex" }}
             # Absent (optional secretKeyRef) when no claim token was supplied at
             # install, or once it has already been consumed: the entrypoint only
@@ -741,6 +778,16 @@ spec:
             items:
               - key: autobrr-password
                 path: autobrr-password
+        {{- else if eq $inst.app "bazarr" }}
+        # One key per instance, so a second Bazarr has its own and neither can
+        # read the other's settings.
+        - name: keys
+          secret:
+            secretName: {{ include "s5n.secretName" $root }}
+            defaultMode: 0440
+            items:
+              - key: {{ printf "%s-apikey" $inst.name }}
+                path: {{ printf "%s-apikey" $inst.name }}
         {{- end }}
 ---
 apiVersion: v1
