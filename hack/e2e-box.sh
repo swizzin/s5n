@@ -6490,6 +6490,7 @@ print(".".join(str(p) for p in tree))' "$CHART_VERSION"); then
   fi
   BOX_BIN="$PUBLISHED_BOX"
   INSTALL_VERSION="$UPGRADE_FROM"
+  PUBLISHED_TRANSCRIPTS="$WORK/bootstrap1.txt"
   if bootstrap "$WORK/bootstrap1.txt"; then
     cat "$WORK/bootstrap1.txt"
   else
@@ -10882,6 +10883,17 @@ no_klog() {
     # A page a root run wrote beside a snapshot is 0600 and root's: klog writes
     # to the screen, which is another file here.
     if grep -Eq '^[IWE][0-9]{4} ' "$f" 2>/dev/null; then
+      # A transcript a published box wrote (the upgrade scenario's first install)
+      # is a released binary's output: nothing in this tree can change it, and a
+      # client-go line there is timing (a watch Helm cancels as its wait ends),
+      # so it is shown and not failed. This tree's box is held to the rule.
+      case " ${PUBLISHED_TRANSCRIPTS:-} " in
+        *" $f "*)
+          echo "  a klog line in $(basename "$f"), written by the published box (not this tree's):"
+          grep -E '^[IWE][0-9]{4} ' "$f" 2>/dev/null | sed 's/^/    /'
+          continue
+          ;;
+      esac
       echo "client-go/klog noise in $(basename "$f"):"
       grep -E '^[IWE][0-9]{4} ' "$f" 2>/dev/null
       fail=1
