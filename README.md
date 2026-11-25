@@ -125,8 +125,8 @@ answers filled in.
 qBittorrent's build is a values edit too: `apps.qbittorrent.image.variant` picks one
 of swizzin's own — `lt1.2` and `lt2.1` for libtorrent 1.2 or 2.1, `lt1.2-10g` and
 `lt2.1-10g` for the same builds with larger peer buffers on a 10 Gbit link, or
-`lt1.2-10g-znver3-mimalloc` for the 10G build on an AMD Zen 3 machine (amd64 only).
-`box apply` moves it.
+`lt1.2-10g-znver3` and `lt2.1-10g-znver3` for those on an AMD Zen 3 machine (amd64
+only). `box apply` moves it.
 
 ## Keeping it current
 

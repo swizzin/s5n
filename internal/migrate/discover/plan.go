@@ -881,17 +881,26 @@ func libtorrentTag(tag string) string {
 }
 
 // comparedTags is the tags of the variants that share the source's repository,
-// as the note that matched none of them says them.
+// as the note that matched none of them says them. An image the chart keeps
+// under its former name too has that name's tag and the current one's, which are
+// one tag: the note says each tag once.
 func comparedTags(candidates []string, byVariant map[string]admission.Image) string {
 	out := make([]string, 0, len(candidates))
+	seen := make(map[string]bool, len(candidates))
 	for _, name := range candidates {
 		image := byVariant[name]
+		var said string
 		switch {
 		case image.Tag != "":
-			out = append(out, image.Tag)
+			said = image.Tag
 		case image.Digest != "":
-			out = append(out, image.Digest)
+			said = image.Digest
 		}
+		if said == "" || seen[said] {
+			continue
+		}
+		seen[said] = true
+		out = append(out, said)
 	}
 	return strings.Join(out, ", ")
 }

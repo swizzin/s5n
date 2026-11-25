@@ -14,6 +14,7 @@ import (
 
 	"go.yaml.in/yaml/v3"
 
+	"github.com/swizzin/s5n/internal/admission"
 	"github.com/swizzin/s5n/internal/migrate/plan"
 	"github.com/swizzin/s5n/internal/migrate/sqlitedb"
 )
@@ -447,6 +448,51 @@ func chartVariants(t *testing.T) []byte {
 		t.Fatalf("read the chart's variants: %v", err)
 	}
 	return raw
+}
+
+// chartImages is the chart's blessed images as the image table, read the one way
+// internal/admission reads it. A test that names a source image reads the tag the
+// chart pins rather than copying it, so a version bump is one line in the chart
+// and not a test edit.
+func chartImages(t *testing.T) map[string]map[string]admission.Image {
+	t.Helper()
+	images, err := admission.Images(chartVariants(t))
+	if err != nil {
+		t.Fatalf("read the chart's variants: %v", err)
+	}
+	return images
+}
+
+// chartImage is the one variant the chart ships for an app.
+func chartImage(t *testing.T, app, variant string) admission.Image {
+	t.Helper()
+	image, ok := chartImages(t)[app][variant]
+	if !ok {
+		t.Fatalf("the chart blesses no %s variant %q", app, variant)
+	}
+	return image
+}
+
+// chartVariantsOf is every variant the chart ships for an app, in name order.
+func chartVariantsOf(t *testing.T, app string) []admission.Image {
+	t.Helper()
+	byVariant := chartImages(t)[app]
+	names := make([]string, 0, len(byVariant))
+	for name := range byVariant {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	out := make([]admission.Image, len(names))
+	for i, name := range names {
+		out[i] = byVariant[name]
+	}
+	return out
+}
+
+// chartRef is one of the chart's variants as a source pod would name it: its
+// repository, its tag and its digest.
+func chartRef(image admission.Image) string {
+	return image.Repository + ":" + image.Tag + "@" + image.Digest
 }
 
 // sortedStringKeys is a map's keys, sorted, so a fixture manifest reads the same
