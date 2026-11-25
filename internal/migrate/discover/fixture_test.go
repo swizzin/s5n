@@ -463,12 +463,13 @@ func chartImages(t *testing.T) map[string]map[string]admission.Image {
 	return images
 }
 
-// chartImage is the one variant the chart ships for an app.
-func chartImage(t *testing.T, app, variant string) admission.Image {
+// qbittorrentImage is one build the chart blesses for qBittorrent: the only app
+// with a choice of variants, and so the only one a test reads by name.
+func qbittorrentImage(t *testing.T, variant string) admission.Image {
 	t.Helper()
-	image, ok := chartImages(t)[app][variant]
+	image, ok := chartImages(t)["qbittorrent"][variant]
 	if !ok {
-		t.Fatalf("the chart blesses no %s variant %q", app, variant)
+		t.Fatalf("the chart blesses no qbittorrent variant %q", variant)
 	}
 	return image
 }
