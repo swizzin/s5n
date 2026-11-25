@@ -1,6 +1,8 @@
 package platform
 
 import (
+	"strings"
+
 	"github.com/swizzin/s5n/internal/bootstrap"
 	"github.com/swizzin/s5n/internal/say"
 )
@@ -71,10 +73,11 @@ func planText(s Step) string {
 }
 
 // componentLine is a component's own line: what it is, its version, and what
-// this run does to it. The version and the not-at-pin explanation are the ones
-// box has always printed, so an upgrade still says what it replaces.
+// this run does to it. The phrase that says what the component is for belongs to
+// the log: on the screen a column of names and versions is what a person scans,
+// and three phrases after three versions is the paragraph rule 13 is about.
 func componentLine(c planComponent, s Step) say.Item {
-	base := c.name + " " + s.Release.Version + " (" + c.phrase + ")"
+	base := c.name + " " + s.Release.Version
 	switch {
 	case s.Foreign:
 		// Only a conditional foreign release reaches the plan: the
@@ -83,9 +86,9 @@ func componentLine(c planComponent, s Step) say.Item {
 		if s.Unless != "" {
 			text += ", " + string(s.Unless)
 		}
-		return say.Item{Mark: say.Question, Text: text + "; a release box did not install is already there, and box will not upgrade it"}
+		return say.Item{Mark: say.Question, Text: text + " (a release box did not install is already there, and box will not upgrade it)"}
 	case AtPin(s.InstalledVersion, s.Release.Version):
-		return say.Item{Mark: say.Verify, Text: base + ": installed, verifying"}
+		return say.Item{Mark: say.Verify, Text: base}
 	case s.Unless != "":
 		// A conditional release is never an upgrade: resolve() drops the
 		// condition as soon as the release is there, so `?` never has to
@@ -106,7 +109,7 @@ func componentLine(c planComponent, s Step) say.Item {
 // to print its version from, and saying so is the point: the operator's
 // implementation is what the sub-steps below go through.
 func usedLine(c planComponent) say.Item {
-	return say.Item{Mark: say.Verify, Text: c.name + " (" + c.phrase + "): already on this cluster, left alone"}
+	return say.Item{Mark: say.Verify, Text: c.name + " (already here, left alone)"}
 }
 
 // planGroup is the component being built and the sub-steps that belong to it.
@@ -146,19 +149,92 @@ func planItems(plan Plan) []say.Item {
 	return b.items(plan.Warnings, plan.NotHandled)
 }
 
-// printPlan is the plan's own printer: the items planItems built, in order.
-func (d *Decision) printPlan(r say.Reporter, plan Plan) {
-	items := planItems(plan)
+// printPlan is the plan's own printer: what this run is about to do, one line
+// for the installs, one for each thing the plan cannot decide yet, and the
+// warnings last. The sub-steps that make up a component are the log's (rule 5),
+// so the screen says cert-manager 1.21.3 rather than the four Kubernetes kinds
+// that carry it.
+func printPlan(r say.Reporter, plan Plan) {
+	items := summaryItems(plan)
 	if len(items) == 0 {
 		return
 	}
-	r.Plan("platform plan", items)
+	r.Plan("", items)
+	for _, line := range detailLines(plan) {
+		r.Detail(line)
+	}
+}
+
+// PrintPlan is the plan's printer for a flow that shows it itself and asks its
+// one question later: a guided fresh install shows the platform and the seedbox
+// in one plan, so the plan is printed where the questions are rather than by
+// Decision.Apply. The detail lines go to the run log either way.
+func PrintPlan(r say.Reporter, plan Plan) { printPlan(r, plan) }
+
+// summaryItems is the plan as the screen shows it: everything this run installs
+// on one line, everything it only verifies on another, each conditional install
+// on its own (it is a question, and the answer changes what happens), then what
+// box saw and will not change. It is pure, so the shape can be read in a test
+// without a cluster or a terminal.
+func summaryItems(plan Plan) []say.Item {
+	var installs, changes, verifies, questions, warnings []string
+	for _, it := range planItems(plan) {
+		switch it.Mark {
+		case say.Install:
+			installs = append(installs, it.Text)
+		case say.Change:
+			changes = append(changes, it.Text)
+		case say.Verify:
+			verifies = append(verifies, it.Text)
+		case say.Question:
+			questions = append(questions, it.Text)
+		default:
+			warnings = append(warnings, it.Text)
+		}
+	}
+	var items []say.Item
+	if len(installs) > 0 {
+		items = append(items, say.Item{Mark: say.Install, Text: strings.Join(installs, " · ")})
+	}
+	if len(changes) > 0 {
+		items = append(items, say.Item{Mark: say.Change, Text: strings.Join(changes, " · ")})
+	}
+	if len(verifies) > 0 {
+		items = append(items, say.Item{Mark: say.Verify, Text: strings.Join(verifies, " · ")})
+	}
+	for _, text := range questions {
+		items = append(items, say.Item{Mark: say.Question, Text: text})
+	}
+	for _, text := range warnings {
+		items = append(items, say.Item{Mark: say.Warning, Text: text})
+	}
+	return items
+}
+
+// detailLines is the plan's plumbing, for the log: each component's own line and
+// the sub-steps under it, in the order they are applied.
+func detailLines(plan Plan) []string {
+	var lines []string
+	for _, it := range planItems(plan) {
+		lines = append(lines, "plan: "+string(it.Mark)+" "+it.Text)
+		for _, child := range it.Children {
+			lines = append(lines, "plan: "+string(child.Mark)+" "+child.Text)
+		}
+	}
+	return lines
 }
 
 // Items is the plan as a reader sees it, for a flow that shows the platform
 // plan inside its own confirm instead of letting this package print it
-// (Decision.CallerShowsPlan).
+// (Decision.CallerShowsPlan). It is the detailed plan: one line per component
+// and the sub-steps under it.
 func (p Plan) Items() []say.Item { return planItems(p) }
+
+// Summary is the plan as bootstrap prints it after its confirm: what this run
+// installs on one line, each conditional install on its own, and what box saw
+// and will not change. A migration's confirm shows the same summary, so the one
+// question a person answers reads like the run that follows it.
+func (p Plan) Summary() []say.Item { return summaryItems(p) }
 
 // group is the component's builder, made on first use.
 func (b *planBuilder) group(key string) *planGroup {

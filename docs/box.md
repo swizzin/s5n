@@ -217,6 +217,11 @@ too, though it installs with every app off (the plan's qBittorrent is switched o
 afterwards): the source's own peer port is kept when it lies in this cluster's NodePort
 range and no Service holds it, because trackers and any forward the operator set already
 point at it, and one is picked for the band otherwise. The line init prints says which.
+The chart ships no default: a fixed number is the collision this decision exists for, so a
+helm install must set the key. A box installed while the chart did default it has no port
+in either file; `box apply` and `box update` keep the number its release already renders
+(31111, the chart's old default) and never pick a new one. A first install with no port
+in its grant is refused and names `box init`, which picks one.
 
 ## Logins (decided, mechanism proposed)
 
@@ -268,7 +273,12 @@ generated, kept in the release Secret, and never the person's password.
 directly, and Seerr's users are the Plex server's friends, so these two stay outside
 the provider. Skipping the Plex claim at `init` stays allowed, with a warning that
 until the server is claimed, whoever signs in to Seerr first becomes its owner. A
-migrated server that is already claimed needs no warning.
+migrated server that is already claimed needs no warning. Seerr's first admin is that
+one interactive sign-in and nothing in a release can create it, so the wiring Job's
+receipt asks for it only where there is none: it reads Seerr's own `initialized`
+flag, prints no row on a box whose Seerr already has its admin (a migrated one does,
+from the settings its snapshot carried), and names `seerr.<domain>` — never a
+`/seerr` path — as the address to sign in at.
 
 Tautulli used to be the third, with its own Plex-based login on top of the app. That
 login is switched off behind the box's, and box seals it off on every start: a
@@ -301,13 +311,22 @@ together on a claim box creates, never in a Secret, because Authelia can't watch
 in a Secret volume. That means exactly one replica, with file watching on, so a password
 change shows up without a restart. Its sign-in page is served at `/auth` on each
 seedbox's own host name, so a seedbox needs one certificate and one cookie domain.
+A request that is not a navigation is refused rather than redirected: ext-authz answers
+401 when the request accepts JSON or marks itself as an XHR (`X-Requested-With`), and
+the portal's 302 otherwise, so an app whose session has ended fails its own background
+call instead of handing a page the login document. A request that accepts anything
+(`Accept: */*`, which a `fetch` with no header of its own sends) is read as a
+navigation and gets the 302, which is the one shape nothing at the edge can tell apart.
 
 **Apps that speak OIDC sign in through the login (decided).** Authelia is also an OIDC
 provider, with issuer `https://<host>/auth`; an app the chart's catalog marks `oidc: true`
-(qui and autobrr) has its own login switched to it, so a user still signs in once and
-the app's first visit is a redirect that comes straight back. A healthy autobrr proves
-nothing about the provider, since it starts without one and keeps retrying; only a
-sign-in does. Each seedbox has its own client per
+(qui and autobrr) has its own login switched to it, so a user still signs in once.
+autobrr's sign-in page sends the browser to the provider itself (its own automatic OIDC
+login, new in 1.91); qui at v1.36.1 offers the provider as the one button its sign-in
+page has and has no automatic redirect, so that first visit is one click. Neither
+client refuses to start when the provider is unreachable -- qui since v1.36.0 discovers
+it per request rather than at start-up -- so a healthy pod proves nothing about the
+provider, and only a sign-in does. Each seedbox has its own client per
 app, `<namespace>-<app>`, and its own authorization policy that admits only that seedbox's
 user. root's `init` writes the client secret once into a Secret in the seedbox's
 namespace and only its digest into the login, and so does root's `apply` when it enables
@@ -356,7 +375,11 @@ Job is the only client that carries it. Readiness depends on the same switch: th
 asks the app's API, which answers without a credential only because the login is off.
 
 A browser that was ever given PBH's token keeps it in `localStorage` (a `?token=` link,
-or the form), and PBH counts every failed login against the caller's network: three per
+or the form), along with the API endpoint it was pointed at: a stale or bogus endpoint
+(a port on `127.0.0.1`, say) makes the page ask for one in a popup and answer
+"unable to parse", which is the same stored state and the same cure -- neither is
+something the box can fix from the server. And PBH counts every failed login against
+the caller's network: three per
 page load trip its 15-minute lockout, after which every request answers 429 and a
 working box looks like a routing fault. The cure is the browser's own: clear the site's
 data for the app's host (or open it in a private window). The token the form asks for is
@@ -770,6 +793,10 @@ They change different things, so they stay separate commands:
 
 Both end in the same step: diff, confirm, apply. Using one never locks out the other.
 
+One credential neither file has to carry is the Plex server token: a claimed server keeps it
+in its own settings file, and apply reads it into the release Secret when the Secret has none
+(docs above, "A claimed server's token reaches the Secret through apply too").
+
 ### How box versions against the chart (proposed)
 
 box and the chart live in one repo but ship as separate artifacts. The image and the
@@ -852,6 +879,17 @@ tuning Renovate never holds a release (nor makes one). There is no off
 switch in the repo: disabling the workflow in GitHub is the kill switch. Nothing is
 released without a previous `s5n-v*` tag to build on, and nothing is published from a
 push to `develop`.
+
+A pull request that only bumps those files is tested by the tree it lands on. Renovate
+opens them against `main`, and a pull request otherwise runs the tests of the branch it
+targets: `main`'s, which lag `develop`'s between releases -- Tautulli 2.19.1 passed
+`main`'s suite and broke on `develop`'s that way. So a pull request into `main` whose
+whole change is `variants.yaml` and/or `platform.yaml` also runs `develop`'s suite with
+its own two files laid over `develop`, and a failure there fails the pull request. The
+set is `release images`, which reads the same files `decide` releases on, never a second
+list in the workflow; `release overlay` lays them down. Any other pull request runs what
+it always ran. The check is a job like the rest, so a run cancelled by hand or a
+branch protection rule that does not require it leaves the bump as untested as before.
 
 What makes this safe is the e2e first: a bump that breaks on a clean box never becomes
 a release. What the e2e can't see is one box's own data meeting a new image, and that
@@ -1150,7 +1188,8 @@ data. Everything it will change is written down before it changes anything.
   blocker there stops the run with the box installed and nothing of the snapshot moved,
   saying so and what running it again does; a clean one carries on without asking
   again. The summary the adoption is held to is the one that was shown -- the same
-  snapshot and plan read twice -- and a difference anywhere but Plex's filled-in row is
+  snapshot and plan read twice -- and a difference anywhere but Plex's filled-in row, or
+  the app whose whole data the config root it lands on turns out not to hold (below), is
   refused rather than done.
 - **One snapshot file, and it is the backup format (decided).** A snapshot is one tar +
   gzip archive with a manifest holding a sha256 per entry, so a truncated copy is
@@ -1158,20 +1197,53 @@ data. Everything it will change is written down before it changes anything.
   are inside it, and its mode says which of those apply may run. It holds secrets — API keys, the Plex token, qBittorrent's password
   hash — so it is root-only, 0600. `box backup` writes the same file from box itself,
   and `restore` is `migrate apply` of that snapshot: one format, one apply path.
-- **A config travels as what the app cannot rebuild (proposed).** Every app's config
+- **A config travels as what the app cannot rebuild (decided, hers).** Every app's config
   directory is copied whole — apply rewrites the copy and a file a rewriter never reads
   still has to come across — except the one whose config is mostly a library: Plex's
-  `Metadata`, `Media` and `Cache` trees are covers, artwork and thumbnails it rebuilds
-  from the media it is given, and on a real library they are tens of gigabytes. Plex's
-  snapshot carries its state instead: `Preferences.xml` and its library databases with
-  the `-wal` and `-shm` a writer leaves beside them. The two state files are required (a
-  snapshot without either is refused, naming the path); the companions are carried when
-  they are there, because a database nobody has open has none. The read says so once, in
-  its report and on the screen — "plex: carried Preferences.xml and its databases; Plex
-  rebuilds its metadata, artwork and thumbnails (artwork uploaded by hand is not
-  carried)" — and apply's confirm repeats it for a snapshot that really is trimmed. The
-  list is box's own, not the catalog's `snapshot:` key, which is what an upgrade may
-  rewrite; for qBittorrent that is only its conf, which would lose `BT_backup`.
+  `Metadata` and `Media` trees are the artwork, the chapter thumbnails and the preview
+  thumbnails it built from the media it is given, and on a real library they are tens of
+  gigabytes. Rebuilding them is hours of the machine's time at full load, so a migration
+  carries them too when there is room, and Plex's state alone when there is not.
+  What a snapshot carries of Plex is the whole of `Library/Application Support/Plex Media
+  Server` — preferences, both library databases, `Metadata`, `Media`, the agents' data —
+  less what Plex rebuilds or downloads again by itself: `Cache`, `Plug-in Support/Caches`,
+  `Codecs`, `Logs`, `Crash Reports`, `Diagnostics` and `Updates`. Nothing beside Plex's
+  home in the config mount travels.
+  The room is checked before anything is written, in both places a full carry is written
+  to: the snapshot's own directory, and — on a host that is both ends of a migration — the
+  seedbox's config path beside it, counted twice when they are one filesystem. The number
+  is a fast walk of the tree (no reads, one stat per entry) plus a tenth of it, never less
+  than 256 MiB; the free space is what an unprivileged writer has. A run without the room
+  carries the state instead, in one line with both numbers
+  ("plex: its whole data needs 62.4 GiB and 12.0 GiB is free at /var/lib/s5n/migrate; …"),
+  and apply's confirm says Plex will build its artwork, thumbnails and detection again.
+  `--plex-minimal` asks for that whatever the room. The choice is the plan's
+  (`apps.plex.carry: full|minimal`), so cutover and apply agree; apply checks the config
+  root again and, when the snapshot's tree does not fit there, carries the state and says
+  so — the one difference between the pre-install summary and the run after it that is not
+  a fault, because the config path is a question the install answers after the confirm.
+  Plex's state alone is `Preferences.xml` and the two library databases with the `-wal` and
+  `-shm` a writer leaves beside them. The two files are required (a snapshot without either
+  is refused, naming the path); the companions are carried when they are there, because a
+  database nobody has open has none. The read says which of the two it carries once, in its
+  report and on the screen — "plex: carried its whole data -- metadata, artwork, thumbnails
+  and its databases -- except the caches, codecs, logs and crash reports Plex rebuilds or
+  downloads again", or "plex: carried Preferences.xml and its databases; Plex rebuilds its
+  metadata, artwork and thumbnails (artwork uploaded by hand is not carried)" — and apply's
+  confirm repeats it for the copy it staged. The list is box's own, not the catalog's
+  `snapshot:` key, which is what an upgrade may rewrite and which stays Plex's state: the
+  per-update copy does not grow a library.
+  The tree is written once. apply reads the snapshot for what its checks and its rewrites
+  read — the plan, the report, the sources, every app's config, and Plex's state alone — and
+  the rest of a full carry is written straight from the snapshot into the instance's config
+  directory, at the staging step, after the box is installed. The snapshot is verified whole
+  first, by a pass that writes nothing, so a copy that lost a byte stops the run before its
+  first write rather than halfway through its last. The numbers the confirm prints are that
+  pass's, not a walk of a tree that is not on the host.
+  A run's working directories are beside the snapshot it reads (`/var/lib/s5n/migrate` for
+  one box names, the file's own directory otherwise), never in `$TMPDIR`: on a Fedora or an
+  Arch host that is a tmpfs, and a snapshot's state is gigabytes — a real source's autobrr
+  config alone was 8.5 GiB.
 - **A migrated app account becomes box's own.** autobrr and qui keep their own user
   table and allow exactly one account there, and box owns the account the init container
   creates, sets the release Secret's password on and signs in as (`s5n.wiringAccount`);
@@ -1297,6 +1369,31 @@ data. Everything it will change is written down before it changes anything.
   name is tried, because a source's client is named by its operator (`qBT`) and the
   host is what makes it the release's own; two enabled qBittorrent clients at that
   host are refused, naming both, rather than one picked.
+- **The migrated server's Plex token is seeded (decided).** A claimed Plex keeps
+  the account's token in its own `Preferences.xml` (`PlexOnlineToken`), and the
+  release Secret's `plex-token` is what every Plex-dependent app reads: Tautulli for
+  its PMS link, Maintainerr for its connection. `migrate apply` reads it out of the
+  Plex it is copying and writes it into the release Secret, so a migrated box is
+  wired rather than pending on a token nobody was asked for. It is never written over
+  a `plex-token` the Secret already holds — that is the person's own, or one an
+  earlier run of the same plan wrote — and the token itself is never printed, only
+  the key's name on the confirm's row. A server that is not claimed refuses every
+  server token, so the rows that use it are `pending` with the claim as the next
+  thing to do, never a failed release and never a link written with a token the
+  server would reject.
+- **A claimed server's token reaches the Secret through apply too (decided).** The
+  token a Plex keeps in its own `Preferences.xml` is read by every `box apply` — `init`'s
+  re-run, `update`'s closing apply and a bare `apply` alike — and written into the release
+  Secret's `plex-token` when the Secret holds none, so a box claimed after it was installed
+  is wired by the next run rather than by a hand-patched Secret. That run installs the
+  release again even when no value changed, because the wiring Job is a hook and re-reading
+  the Secret is what turns the token into Tautulli's link. It reads and never writes Plex's
+  file, and it keeps the person's answers: a token in the values (`secrets.plexToken`), a
+  `secrets.existingSecret` box must not write into, and any key already in the Secret are
+  left alone, and a first install has no Plex state to read. A file that does not parse is
+  one line naming it and the apply goes on, and the token itself is never printed. The limit
+  is rotation: a present token is never replaced, so a server that signs in again keeps the
+  box on the old one until the key is deleted and `box apply` runs again.
 - **Shown before it's done; unattended runs only what was shown (decided goal,
   mechanism proposed).** The plan holds the rules: the path rewrite table, the port
   map, every host reference marked rewritten or left alone, what is copied where, and
@@ -1715,7 +1812,14 @@ into swizzin's upgrade scripts:
 - **Old migrations get deleted.** Each release declares the oldest release it can
   upgrade from, so migrations older than that can be removed.
 - **Every migration is proven** by the upgrade e2e: previous release → current, data
-  intact, wiring green.
+  intact, wiring green. `hack/e2e-box.sh upgrade` is that path from what the registry
+  actually publishes: every published chart mirrored into the run's own registry, the
+  published 0.6.0 box binary installed with chart 0.6.0, state put in (a setting in an
+  Arr, a torrent in qBittorrent, the login), this tree's chart published above every
+  published version, and `box update` from this tree's box. It takes exactly the steps the
+  releases' `upgrade-from` floors require, and after them the release is this tree's
+  chart, every app is ready, the wiring receipt is ok, and the setting, the torrent and
+  the login are all still there.
 
 ## The catalog and box (decided)
 

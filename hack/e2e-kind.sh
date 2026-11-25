@@ -93,10 +93,10 @@ QBIT_LT12="${qbit_repository}:${qbit_tag}@${qbit_digest}"
 # they stay in the scripts rather than the chart's platform.yaml; Renovate
 # watches them here (.github/renovate.json), and the tag stays in the reference
 # so a bump to either the tag or the digest is one line.
-CURL_IMAGE=${CURL_IMAGE:-docker.io/curlimages/curl:8.11.1@sha256:c1fe1679c34d9784c1b0d1e5f62ac0a79fca01fb6377cdd33e90473c6f9f9a69}  # renovate: datasource=docker
+CURL_IMAGE=${CURL_IMAGE:-docker.io/curlimages/curl:8.23.0@sha256:3fb7e13e5d179a845c97d78204f3f1064d1907037f26a3ebf91710571151fd93}  # renovate: datasource=docker
 BUSYBOX_IMAGE=${BUSYBOX_IMAGE:-docker.io/library/busybox:1.36@sha256:73aaf090f3d85aa34ee199857f03fa3a95c8ede2ffd4cc2cdb5b94e566b11662}    # renovate: datasource=docker
 # Pebble 2.10.1, the ACME test server: the same image hack/e2e-box.sh pins.
-PEBBLE_IMAGE=${PEBBLE_IMAGE:-ghcr.io/letsencrypt/pebble:2.10.1@sha256:ddf230642b1a584f519f32e347de1b05a6e4c1f6c35c1863b33effeab5f78199}  # renovate: datasource=docker
+PEBBLE_IMAGE=${PEBBLE_IMAGE:-ghcr.io/letsencrypt/pebble:2.10.3@sha256:0c81f05db371f436c97fb894bd6d2ab8fc9c8e2ce40f8bef8a8e15941bcd75ef}  # renovate: datasource=docker
 KEEP=${1:-}
 CTX="kind-${CLUSTER}"
 K="kubectl --context ${CTX}"
@@ -839,8 +839,30 @@ PYEOF
   $K -n kube-system rollout status deploy/coredns --timeout=120s >/dev/null
 }
 
+# pebble_nodeports: the two nodePorts Pebble's Service is pinned to, acme then
+# management. They come from the top of the cluster's static band (the lower
+# 86 ports of 30000-32767, which the API server never hands out at random) and
+# are checked free first: a pin in the upper band can collide with a nodePort
+# the API server has already given another Service at random, which is
+# "provided port is already allocated" depending only on what else the cluster
+# holds. A Service that is already there keeps its own two.
+pebble_nodeports() {
+  local existing used p out=()
+  existing=$($K -n pebble get svc pebble -o jsonpath='{.spec.ports[*].nodePort}' 2>/dev/null || true)
+  if [ "$(wc -w <<<"$existing")" -eq 2 ]; then echo "$existing"; return 0; fi
+  used=" $($K get svc -A -o jsonpath='{.items[*].spec.ports[*].nodePort}' 2>/dev/null) "
+  for p in $(seq 30085 -1 30000); do
+    case "$used" in *" $p "*) continue ;; esac
+    out+=("$p")
+    [ "${#out[@]}" -eq 2 ] && break
+  done
+  [ "${#out[@]}" -eq 2 ] || { echo "no two free nodePorts in 30000-30085 for Pebble" >&2; return 1; }
+  echo "${out[@]}"
+}
+
 install_pebble() {
   log "Pebble 2.10.1 (the ACME test server) in the cluster, pinned by digest"
+  read -r PEBBLE_ACME_PORT PEBBLE_MGMT_PORT < <(pebble_nodeports) || { echo "Pebble has no nodePorts"; fail=1; return 0; }
   pebble_node_ip=$($K get node -o jsonpath='{.items[0].status.addresses[?(@.type=="InternalIP")].address}')
   $K create namespace pebble --dry-run=client -o yaml | $K apply -f - >/dev/null
   cat <<EOF | $K apply -f - >/dev/null
@@ -906,12 +928,13 @@ spec:
   selector:
     app: pebble
   ports:
-    - {name: acme, port: 14000, targetPort: 14000}
-    - {name: management, port: 15000, targetPort: 15000, nodePort: 31500}
+    # Both are pinned, from the static band (pebble_nodeports).
+    - {name: acme, port: 14000, targetPort: 14000, nodePort: ${PEBBLE_ACME_PORT}}
+    - {name: management, port: 15000, targetPort: 15000, nodePort: ${PEBBLE_MGMT_PORT}}
 EOF
   $K -n pebble rollout status deploy/pebble --timeout=180s || { echo "Pebble never rolled out"; fail=1; return 0; }
   for i in $(seq 1 60); do
-    if curl -k -fsS "https://${pebble_node_ip}:31500/roots/0" -o "$WORK/pebble-root.pem" 2>/dev/null; then
+    if curl -k -fsS "https://${pebble_node_ip}:${PEBBLE_MGMT_PORT}/roots/0" -o "$WORK/pebble-root.pem" 2>/dev/null; then
       break
     fi
     if [ "$i" = 60 ]; then
@@ -1723,6 +1746,14 @@ for pending in plex/claim tautulli/plex seerr/plex; do
   echo "  ${pending}: ${res} (expected pending: no Plex token in this e2e)"
   [ "$res" = pending ] || fail=1
 done
+# Seerr is served at its own host, not under a /seerr path, so that is the
+# address the one row asking a human to sign in has to name.
+seerr_row=$(status_field "[s['detail'] for s in d['steps'] if s['name']=='seerr/plex'][0]" 2>/dev/null || echo missing)
+echo "  seerr/plex detail: ${seerr_row}"
+case "$seerr_row" in
+  *" sign in once at seerr.${DOMAIN} "*) ;;
+  *) echo "the seerr/plex row does not name seerr.${DOMAIN}: ${seerr_row}"; fail=1 ;;
+esac
 claimed=$(status_field "[s['detail'] for s in d['steps'] if s['name']=='plex/ready'][0]")
 echo "  plex/ready detail: ${claimed}"
 case "$claimed" in *claimed=false*) ;; *) echo "expected an unclaimed Plex in this e2e"; fail=1 ;; esac

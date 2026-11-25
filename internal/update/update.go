@@ -666,56 +666,125 @@ func (u *Updater) target(ctx context.Context, opts Options, releases []release.P
 	return chosen, skipped, skips, nil
 }
 
-// reportPlan is the first line and the plan, in box's words.
+// reportPlan is the one line that says what this run is, and then only the rows
+// a person acts on: a pin the operator set, a release box is passing over, and
+// what --check did not write. The step list is a heading's worth of information
+// while there is one step, and one quiet row per step while there are several.
 func (u *Updater) reportPlan(res Result, check bool) {
 	r := u.report()
 	if res.Current {
-		r.Line(fmt.Sprintf("%s %s in %s is current", res.Name, res.Installed, res.Namespace))
+		r.Rows([]say.Row{{Mark: say.MarkNote, Facts: []string{fmt.Sprintf("%s %s is current", res.Name, res.Installed)}}})
+		r.Detail(fmt.Sprintf("%s is in %s and nothing newer is published for this box", res.Installed, res.Namespace))
 	} else {
-		steps := plural(len(res.Steps), "step", "steps")
-		r.Line(fmt.Sprintf("%s %s -> %s in %s: %s", res.Name, res.Installed, res.Target, res.Namespace, steps))
-		rows := make([]string, 0, len(res.Steps))
-		var heldRows []string
+		r.Line(planHeading(res))
+		if len(res.Steps) > 1 {
+			rows := make([]say.Row, 0, len(res.Steps))
+			for _, step := range res.Steps {
+				facts := []string{"no image moves"}
+				if len(step.Moving) > 0 {
+					facts = []string{movingNames(step) + " move"}
+				}
+				rows = append(rows, say.Row{Mark: say.MarkNote, Name: step.From + " → " + step.To, Facts: facts})
+			}
+			r.Rows(rows)
+		}
+		r.Line("")
+		// A pin the operator set is why an app the chart moved stays where it
+		// is. Saying so is the difference between a plan that respects their
+		// values and one that looks like it forgot.
+		var held []say.Row
 		for _, step := range res.Steps {
-			row := step.From + " -> " + step.To
-			if len(step.Moving) == 0 {
-				row += " (no image moves)"
-			} else {
-				row += " (apps: " + movingNames(step) + ")"
+			// An app the catalog gives nothing to copy is never rolled back:
+			// box would have no state to put back. The plan says so before the
+			// step moves, because it is the one thing that changes what a
+			// failure costs.
+			for _, app := range step.Moving {
+				if step.Images[app].Snapshot {
+					continue
+				}
+				held = append(held, say.Row{Mark: say.MarkNeeds, Name: app,
+					Facts: []string{"is moved without a copy of its config"},
+					Why:   "if its new image fails, box has no copy to put back"})
 			}
-			rows = append(rows, row)
-			// A pin the operator set is why an app the chart moved stays
-			// where it is. Saying so is the difference between a plan that
-			// respects their values and one that looks like it forgot.
 			for _, app := range step.Held {
-				heldRows = append(heldRows, fmt.Sprintf("%s: held at %s by your values", app, res.pins[app]))
+				held = append(held, say.Row{Mark: say.MarkNeeds, Name: app, Facts: []string{"held at " + res.pins[app] + " by your values"}})
 			}
-			// A rollback hold keeps an app on the image it ran until a release
-			// pins another. The plan names the image it waits on, so the row
-			// does not read as a release that forgot the app.
+			// A rollback hold keeps an app on the image it ran until a
+			// release pins another: the row names the image it waits on, so
+			// it does not read as a release that forgot the app.
 			for _, app := range step.HeldBack {
 				h := res.holds[app]
-				heldRows = append(heldRows, fmt.Sprintf("%s: held at %s after a rollback, until a release pins something other than %s",
-					app, h.At.Label(), h.Avoiding.Label()))
+				held = append(held, say.Row{Mark: say.MarkNeeds, Name: app,
+					Facts: []string{"held at " + h.At.Label() + " after a rollback"},
+					Why:   "it moves again when a release pins something other than " + h.Avoiding.Label()})
 			}
 		}
-		r.List("steps", rows)
-		if len(heldRows) > 0 {
-			r.List("held", heldRows)
-		}
+		r.Rows(held)
 	}
 	// A release a box cannot take is said out loud even when there is nothing
 	// to do: "s5n 0.6.0 is out and needs a newer box" is the whole reason a
 	// user reads the output of a current box.
+	var rows []say.Row
 	for _, skip := range res.Skips {
-		r.Warn(fmt.Sprintf("%s %s is out and needs a newer box: install box %s or newer", res.Name, skip.Version, skip.MinBox))
+		rows = append(rows, say.Row{Mark: say.MarkNeeds, Facts: []string{
+			fmt.Sprintf("%s %s is out and needs box %s or newer: install it, or `box update` stays on %s", res.Name, skip.Version, skip.MinBox, res.Target)}})
 	}
 	for _, bad := range res.Skipped {
-		r.Warn(fmt.Sprintf("%s %s failed to update on this box before; box is not taking it again until a newer release is out", res.Name, bad))
+		rows = append(rows, say.Row{Mark: say.MarkNeeds, Facts: []string{
+			fmt.Sprintf("%s %s failed to update on this box before; box takes it again when a newer release is out", res.Name, bad)}})
 	}
 	if check {
-		r.Muted("--check: nothing written but the check time")
+		rows = append(rows, say.Row{Mark: say.MarkNote, Facts: []string{"--check: nothing was written but the check time"}})
 	}
+	r.Rows(rows)
+}
+
+// planHeading is the update's first line: what moves, how many steps it takes,
+// and which apps the image move touches -- the whole plan in one fact per
+// column, because a person reads this and then decides.
+func planHeading(res Result) string {
+	facts := []string{plural(len(res.Steps), "step", "steps")}
+	apps := movingText(res.Steps)
+	if apps == "" {
+		facts = append(facts, "no image moves")
+	} else {
+		verb := "move"
+		if strings.Count(apps, ",") == 0 && !strings.Contains(apps, " and ") {
+			verb = "moves"
+		}
+		facts = append(facts, apps+" "+verb)
+	}
+	return fmt.Sprintf("%s %s → %s · %s", res.Name, res.Installed, res.Target, strings.Join(facts, " · "))
+}
+
+// movingText names the apps the whole path moves, once each, in step order, as
+// a person says them: "prowlarr and sonarr".
+func movingText(steps []StepPlan) string {
+	var apps []string
+	seen := make(map[string]bool)
+	for _, step := range steps {
+		for _, app := range step.Moving {
+			if seen[app] {
+				continue
+			}
+			seen[app] = true
+			apps = append(apps, app)
+		}
+	}
+	return andList(apps)
+}
+
+// andList joins names the way a sentence does: "a", "a and b", "a, b and c".
+func andList(items []string) string {
+	switch len(items) {
+	case 0:
+		return ""
+	case 1:
+		return items[0]
+	case 2:
+		return items[0] + " and " + items[1]
+	}
+	return strings.Join(items[:len(items)-1], ", ") + " and " + items[len(items)-1]
 }
 
 // take is one step: stop and snapshot what moves, apply, gate, and then either
@@ -724,7 +793,8 @@ func (u *Updater) reportPlan(res Result, check bool) {
 // release, and the apps, where the step put them.
 func (u *Updater) take(ctx context.Context, rel Release, cluster Cluster, snaps Snapshotter, res *Result, step StepPlan, base release.Options) error {
 	r := u.report()
-	handle := r.Start(say.Op{Label: fmt.Sprintf("updating %s to %s", res.Name, step.To)})
+	name := step.From + " → " + step.To
+	handle := r.Start(say.Op{Name: name, Label: fmt.Sprintf("updating %s to %s", res.Name, step.To)})
 
 	// The revision this step starts from. It is read before the first write,
 	// not after the snapshot, so a failure in the stopping or the snapshot
@@ -743,6 +813,9 @@ func (u *Updater) take(ctx context.Context, rel Release, cluster Cluster, snaps 
 	copied := step.Copied()
 	var taken Taken
 	if len(copied) > 0 {
+		// The copy is one step of its own on screen: it stops the apps, which
+		// is long enough to be worth watching.
+		snap := r.Start(say.Op{Name: "snapshots", Label: "stopping " + andList(copied) + " to copy their config"})
 		// Whether the copy can be taken is asked before anything stops, so a
 		// box that cannot copy refuses with nothing down and nothing
 		// recorded: the box refused, not the release.
@@ -774,6 +847,7 @@ func (u *Updater) take(ctx context.Context, rel Release, cluster Cluster, snaps 
 			handle.Failed(err)
 			return err
 		}
+		snap.Done(strings.Join(copied, ", "))
 	}
 
 	applyOpts := base
@@ -793,33 +867,47 @@ func (u *Updater) take(ctx context.Context, rel Release, cluster Cluster, snaps 
 		handle.Failed(err)
 		return u.fail(ctx, rel, cluster, res, step, before.Revision, gate, err, "")
 	}
+	// The release has moved: the step's own row goes down here, above what the
+	// gate and the wiring did about it, because they are that step's story.
+	handle.Done("")
 
 	var rolledBack []string
+	var rec release.Receipt
 	if len(outcome.Exiting) > 0 {
 		// putBack's own apply is the hooks-on one: it installs the release
 		// once more with the app held at the image it ran, so the wiring runs
 		// against the images that stay.
-		rolledBack, err = u.putBack(ctx, rel, cluster, snaps, res, step, applyOpts, taken, outcome.Exiting, before.Revision, handle)
+		rolledBack, rec, err = u.putBack(ctx, rel, cluster, snaps, res, step, applyOpts, taken, outcome.Exiting, before.Revision)
 		if err != nil {
 			return err
 		}
-	} else if err := u.wire(ctx, rel, cluster, step, applyOpts); err != nil {
+	} else if rec, err = u.wire(ctx, rel, cluster, step, applyOpts); err != nil {
 		// No app was put back, so the hooks-on apply is this one: the same
 		// release, installed again so the wiring runs against the images that
 		// stay.
-		handle.Failed(err)
 		return u.fail(ctx, rel, cluster, res, step, before.Revision, gateWiring, err, "")
 	}
+	release.ReportReceipt(r, rec, false)
 
 	if len(copied) > 0 {
 		if perr := snaps.Prune(ctx, step.Step, copied); perr != nil {
 			// A snapshot that cannot be pruned is not a failed step: the
 			// release and the box are healthy, and keeping one extra copy
 			// costs disk, not correctness.
-			r.Warn(fmt.Sprintf("keeping the snapshot for %s: %v", step.To, perr))
+			r.Rows([]say.Row{{Mark: say.MarkNote, Facts: []string{"keeping the snapshot for " + step.To + ": " + perr.Error()}}})
 		}
 	}
-	handle.Done(fmt.Sprintf("%s is on %s", res.Name, step.To))
+	// An app box put back stays on its old image until a release pins another,
+	// and that is the next thing the operator needs to know. It is the last
+	// thing said about the step, with the one command that shows it.
+	for _, app := range rolledBack {
+		change := step.Images[app]
+		r.Rows([]say.Row{{
+			Mark:    say.MarkNeeds,
+			Facts:   []string{fmt.Sprintf("%s is held on %s until a release ships a fixed image", app, change.Ran.Label())},
+			Command: "box status",
+		}})
+	}
 	if err := u.recordOK(res, step, before.Revision, rolledBack); err != nil {
 		return fmt.Errorf("%s is on %s, but update's record could not be written: %w", res.Name, step.To, err)
 	}
@@ -851,27 +939,28 @@ func (u *Updater) take(ctx context.Context, rel Release, cluster Cluster, snaps 
 // Its failure is the chart's own: the apps are the ones the gate just read as
 // ready, so a wiring Job that cannot finish is the release's, and the step stops
 // where it is.
-func (u *Updater) wire(ctx context.Context, rel Release, cluster Cluster, step StepPlan, applyOpts release.Options) error {
+func (u *Updater) wire(ctx context.Context, rel Release, cluster Cluster, step StepPlan, applyOpts release.Options) (release.Receipt, error) {
 	wireOpts := applyOpts
 	wireOpts.SkipHooks = false
 	wireOpts.RunHooks = true
-	if _, err := u.Apply(ctx, wireOpts); err != nil {
-		return fmt.Errorf("applying %s with its hooks: %w", step.To, err)
+	applied, err := u.Apply(ctx, wireOpts)
+	if err != nil {
+		return applied.Receipt, fmt.Errorf("applying %s with its hooks: %w", step.To, err)
 	}
 	// The hooks have run: the release is read once more, because a Job that
 	// writes what an app reads at start is only worth anything if the app is
 	// still ready after it.
 	outcome, err := waitHealthy(ctx, rel, cluster, step.Moving, u.healthWait(), u.poll())
 	if err != nil {
-		return err
+		return applied.Receipt, err
 	}
 	if len(outcome.Exiting) > 0 {
-		return errors.New(exitingText(outcome.Exiting))
+		return applied.Receipt, errors.New(exitingText(outcome.Exiting))
 	}
 	if outcome.TimedOut {
-		return fmt.Errorf("the release is not deployed and healthy after %s", u.healthWait())
+		return applied.Receipt, fmt.Errorf("the release is not deployed and healthy after %s", u.healthWait())
 	}
-	return nil
+	return applied.Receipt, nil
 }
 
 // putBack is a step's answer to moved apps that keep exiting: it rolls them
@@ -879,19 +968,17 @@ func (u *Updater) wire(ctx context.Context, rel Release, cluster Cluster, step S
 // config box copied can be put back. One the catalog gives nothing to copy
 // was never stopped or copied, and rolling it back would be a scale-zero with
 // nothing to restore, so the failure is the gate's, unchanged.
-func (u *Updater) putBack(ctx context.Context, rel Release, cluster Cluster, snaps Snapshotter, res *Result, step StepPlan, applyOpts release.Options, taken Taken, exiting []Exiting, revision int, handle say.Handle) ([]string, error) {
+func (u *Updater) putBack(ctx context.Context, rel Release, cluster Cluster, snaps Snapshotter, res *Result, step StepPlan, applyOpts release.Options, taken Taken, exiting []Exiting, revision int) ([]string, release.Receipt, error) {
 	for _, app := range exiting {
 		if !step.Images[app.App].Snapshot {
 			err := errors.New(exitingText(exiting))
-			handle.Failed(err)
-			return nil, u.fail(ctx, rel, cluster, res, step, revision, gateHealth, err, "")
+			return nil, release.Receipt{}, u.fail(ctx, rel, cluster, res, step, revision, gateHealth, err, "")
 		}
 	}
-	rolledBack, err := u.stepBack(ctx, rel, cluster, snaps, res, step, applyOpts, taken, exiting)
+	rolledBack, rec, err := u.stepBack(ctx, rel, cluster, snaps, res, step, applyOpts, taken, exiting)
 	if err == nil {
-		return rolledBack, nil
+		return rolledBack, rec, nil
 	}
-	handle.Failed(err)
 	tail := ""
 	var failed *rollbackFailure
 	if errors.As(err, &failed) {
@@ -900,7 +987,7 @@ func (u *Updater) putBack(ctx context.Context, rel Release, cluster Cluster, sna
 			tail = fmt.Sprintf("; %s is stopped", failed.app) + tail
 		}
 	}
-	return nil, u.fail(ctx, rel, cluster, res, step, revision, gateRollback, err, tail)
+	return nil, rec, u.fail(ctx, rel, cluster, res, step, revision, gateRollback, err, tail)
 }
 
 // fail ends a step that did not pass. It says where the release is now, in
@@ -920,7 +1007,10 @@ func (u *Updater) fail(ctx context.Context, rel Release, cluster Cluster, res *R
 	cctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), u.cleanupWait())
 	defer cancel()
 
-	u.report().Warn(fmt.Sprintf("update %s to %s did not pass the %s gate: %v", res.Name, step.To, gate, cause))
+	// Nothing is said here: the error this returns is the one ✗ line, and a
+	// second sentence about the same failure is the noise the rulebook is
+	// against. What the operator acts on -- which release is deployed, where a
+	// snapshot is -- is in that error.
 
 	// Nothing else puts these replicas back when Helm never moved, and a
 	// second failure here belongs in the error rather than in a shrug.
@@ -1137,37 +1227,39 @@ func (f *rollbackFailure) Unwrap() error { return f.cause }
 // is re-rendered, and the hold is written before the re-apply, so the chart that
 // renders the rolled-back release names the old image. Nothing else in the
 // release moves: the rest of the step stays where it is.
-func (u *Updater) stepBack(ctx context.Context, rel Release, cluster Cluster, snaps Snapshotter, res *Result, step StepPlan, stepOpts release.Options, taken Taken, exiting []Exiting) ([]string, error) {
+func (u *Updater) stepBack(ctx context.Context, rel Release, cluster Cluster, snaps Snapshotter, res *Result, step StepPlan, stepOpts release.Options, taken Taken, exiting []Exiting) ([]string, release.Receipt, error) {
 	r := u.report()
 	apps := make([]string, 0, len(exiting))
 	for _, e := range exiting {
 		apps = append(apps, e.App)
 	}
 	// Announced before anything stops, so the operator knows why the app that
-	// just came up is going down again.
+	// just came up is going down again: the ✗ row is what went wrong with the
+	// new image, and the ✓ row below is what box did about it.
+	rows := make([]say.Row, 0, len(exiting))
 	for _, e := range exiting {
-		change := step.Images[e.App]
-		r.Warn(fmt.Sprintf("%s exited %d times on %s: rolling it back to %s",
-			e.App, e.Restarts, change.MovedTo.Label(), change.Ran.Label()))
+		rows = append(rows, say.Row{Mark: say.MarkFailed, Name: e.App,
+			Facts: []string{fmt.Sprintf("crashed %d times on the new image", e.Restarts)}})
 	}
+	r.Rows(rows)
 	if err := scaleApps(ctx, cluster, apps, 0); err != nil {
-		return nil, fmt.Errorf("stopping %s: %w", strings.Join(apps, ", "), err)
+		return nil, release.Receipt{}, fmt.Errorf("stopping %s: %w", strings.Join(apps, ", "), err)
 	}
 	if err := waitGone(ctx, cluster, apps, u.settleWait(), u.poll()); err != nil {
-		return nil, fmt.Errorf("waiting for %s to stop: %w", strings.Join(apps, ", "), err)
+		return nil, release.Receipt{}, fmt.Errorf("waiting for %s to stop: %w", strings.Join(apps, ", "), err)
 	}
 	if err := snaps.Restore(ctx, step.Step, apps); err != nil {
-		return nil, &rollbackFailure{cause: err, app: apps[0], dir: taken.Dirs[apps[0]], stopped: true}
+		return nil, release.Receipt{}, &rollbackFailure{cause: err, app: apps[0], dir: taken.Dirs[apps[0]], stopped: true}
 	}
 	if u.Holds == nil {
-		return nil, &rollbackFailure{
+		return nil, release.Receipt{}, &rollbackFailure{
 			cause: errors.New("this box keeps no holds, so the app cannot stay on its old image"),
 			app:   apps[0], dir: taken.Dirs[apps[0]],
 		}
 	}
 	holds, err := loadHolds(u.Holds, res.configRoot)
 	if err != nil {
-		return nil, &rollbackFailure{cause: err, app: apps[0], dir: taken.Dirs[apps[0]]}
+		return nil, release.Receipt{}, &rollbackFailure{cause: err, app: apps[0], dir: taken.Dirs[apps[0]]}
 	}
 	for _, app := range apps {
 		change := step.Images[app]
@@ -1180,7 +1272,7 @@ func (u *Updater) stepBack(ctx context.Context, rel Release, cluster Cluster, sn
 			By:       snapshot.ByUpdate,
 		})
 		if err := u.Holds.Save(res.configRoot, holds); err != nil {
-			return nil, &rollbackFailure{cause: fmt.Errorf("writing the hold for %s: %w", app, err), app: app, dir: taken.Dirs[app]}
+			return nil, release.Receipt{}, &rollbackFailure{cause: fmt.Errorf("writing the hold for %s: %w", app, err), app: app, dir: taken.Dirs[app]}
 		}
 	}
 	// The same release, so Helm records a deployed revision and runs its
@@ -1193,28 +1285,31 @@ func (u *Updater) stepBack(ctx context.Context, rel Release, cluster Cluster, sn
 	wireOpts := stepOpts
 	wireOpts.SkipHooks = false
 	wireOpts.RunHooks = true
-	if _, err := u.Apply(ctx, wireOpts); err != nil {
-		return nil, &rollbackFailure{cause: fmt.Errorf("re-applying %s: %w", step.To, err), app: apps[0], dir: taken.Dirs[apps[0]]}
+	applied, err := u.Apply(ctx, wireOpts)
+	if err != nil {
+		return nil, applied.Receipt, &rollbackFailure{cause: fmt.Errorf("re-applying %s: %w", step.To, err), app: apps[0], dir: taken.Dirs[apps[0]]}
 	}
 	outcome, err := waitHealthy(ctx, rel, cluster, step.Moving, u.healthWait(), u.poll())
 	if err != nil {
-		return nil, &rollbackFailure{cause: err, app: apps[0], dir: taken.Dirs[apps[0]]}
+		return nil, applied.Receipt, &rollbackFailure{cause: err, app: apps[0], dir: taken.Dirs[apps[0]]}
 	}
 	if len(outcome.Exiting) > 0 {
-		return nil, &rollbackFailure{cause: errors.New(exitingText(outcome.Exiting)), app: apps[0], dir: taken.Dirs[apps[0]]}
+		return nil, applied.Receipt, &rollbackFailure{cause: errors.New(exitingText(outcome.Exiting)), app: apps[0], dir: taken.Dirs[apps[0]]}
 	}
 	if outcome.TimedOut {
-		return nil, &rollbackFailure{
+		return nil, applied.Receipt, &rollbackFailure{
 			cause: fmt.Errorf("the release is not deployed and healthy after %s", u.healthWait()),
 			app:   apps[0], dir: taken.Dirs[apps[0]],
 		}
 	}
+	back := make([]say.Row, 0, len(apps))
 	for _, app := range apps {
 		change := step.Images[app]
-		r.Warn(fmt.Sprintf("%s is back on %s with its snapshot from %s; it stays there until a release pins something other than %s",
-			app, change.Ran.Label(), taken.At.Format("2006-01-02 15:04 UTC"), change.MovedTo.Label()))
+		back = append(back, say.Row{Mark: say.MarkDone, Name: app,
+			Facts: []string{fmt.Sprintf("rolled back to %s", change.Ran.Label()), "its " + taken.At.In(time.Local).Format("15:04") + " snapshot"}})
 	}
-	return apps, nil
+	r.Rows(back)
+	return apps, applied.Receipt, nil
 }
 
 // waitHealthy is the health gate. A moved app that keeps exiting ends it at

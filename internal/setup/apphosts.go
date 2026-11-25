@@ -26,6 +26,9 @@ type Host struct {
 	// Record is the fix a NoDNS host names: the DNS record to add, in both
 	// forms for an app host. The final card repeats it.
 	Record string
+	// Detail is the resolver's own answer, for the run log: the screen says
+	// "does not resolve", which is one fact for every name that has no record.
+	Detail string
 }
 
 // appHostsFor resolves every name an enabled app is served at (in catalog order) and checks
@@ -70,6 +73,7 @@ func appHostsFor(ctx context.Context, resolver Resolver, cat *catalog.Catalog, d
 			Why:    why,
 			NoDNS:  noDNS,
 			Record: record,
+			Detail: ans.detail(host),
 		})
 	}
 	return out, nil

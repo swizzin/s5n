@@ -288,55 +288,44 @@ func writeNotes(b *strings.Builder, notes []string) {
 
 // writeWarnings prints what box saw but will not change. A warning is not a
 // note: a note is host evidence that does not matter here, a warning is
-// something wrong the operator has to fix somewhere box does not write.
+// something wrong the operator has to fix somewhere box does not write, so it
+// carries the `!` mark in the gutter rather than a word in front of it.
 func writeWarnings(b *strings.Builder, warnings []string) {
 	for _, w := range warnings {
-		fmt.Fprintf(b, "warning: %s\n", w)
+		fmt.Fprintf(b, "%s %s\n", say.MarkNeeds, w)
 	}
 }
 
-// ReportResult is FormatResult through the output seam: the same facts, stated
-// as events so a live renderer can lay them out as rows and a wrapped list.
-// Under say.Plain it is byte-for-byte FormatResult, which is what the tests and
-// every piped run read; TestReportResultMatchesFormatResult pins that.
+// ReportResult is what `box bootstrap` says about the cluster it found, through
+// the output seam: one row for the decision, and the evidence behind it in the
+// log. FormatResult is still what --dry-run prints: a dry run's whole point is
+// the decision written out, and it writes nothing else.
 func ReportResult(res Result, r say.Reporter) {
-	switch res.Action {
-	case ActionStop:
-		r.Fact("decision", string(res.Action))
-		reportSkips(r, res.Skips)
-		reportNotes(r, res.Notes)
-		reportWarnings(r, res.Warnings)
-		r.Line(res.Reason)
-		return
-	case ActionInstall:
-		r.Fact("decision", string(res.Action))
-		r.Fact("source", string(res.Source))
-		r.Fact("distribution", string(res.Distribution))
-		r.Fact("kubeconfig", res.Kubeconfig)
-		reportSkips(r, res.Skips)
-		reportNotes(r, res.Notes)
-		reportWarnings(r, res.Warnings)
-		// The facts above already name the source, the distribution and the
-		// kubeconfig; the reason says why, in one muted sentence instead of a
-		// second raw line. The plain transcript is unchanged: Plain.Muted and
-		// Plain.Line print the same words.
-		r.Muted(res.Reason)
+	if res.Action == ActionStop {
+		reportStop(res, r)
 		return
 	}
-	// use-cluster / use-managed
-	r.Fact("decision", string(res.Action))
-	r.Fact("source", string(res.Source))
-	r.Fact("kubeconfig", res.Kubeconfig)
-	r.Fact("distribution", string(res.Distribution))
-	r.Fact("nodes", fmt.Sprintf("%d", res.Nodes))
-	reportSkips(r, res.Skips)
-	reportWarnings(r, res.Warnings)
-	if len(res.Platform) > 0 {
-		rows := make([]string, 0, len(res.Platform))
-		for _, c := range res.Platform {
-			rows = append(rows, fmt.Sprintf("%s: %s -> %s (%s)", c.Component, c.Mode, c.Action, c.Reason))
-		}
-		r.List("platform", rows)
+	r.Rows([]say.Row{clusterRow(res)})
+	for _, w := range res.Warnings {
+		r.Warn(w)
+	}
+	r.Detail("decision: " + string(res.Action))
+	r.Detail("source: " + string(res.Source))
+	if res.Kubeconfig != "" {
+		r.Detail("kubeconfig: " + res.Kubeconfig)
+	}
+	r.Detail("distribution: " + string(res.Distribution))
+	if res.Action != ActionInstall {
+		r.Detail(fmt.Sprintf("nodes: %d", res.Nodes))
+	}
+	for _, line := range res.Skips {
+		r.Detail("skipped: " + line)
+	}
+	for _, note := range res.Notes {
+		r.Detail("note: " + note)
+	}
+	for _, c := range res.Platform {
+		r.Detail(fmt.Sprintf("platform %s: %s -> %s (%s)", c.Component, c.Mode, c.Action, c.Reason))
 	}
 	if res.Gateway.Class != "" {
 		line := fmt.Sprintf("gateway class: %s", res.Gateway.Class)
@@ -346,27 +335,59 @@ func ReportResult(res Result, r say.Reporter) {
 		if res.Gateway.BoxInstalls {
 			line += ", installed by box"
 		}
-		r.Line(line)
+		r.Detail(line)
 	}
-	if res.Reason != "" {
-		r.Line(res.Reason)
+	r.Detail(res.Reason)
+}
+
+// clusterRow is the one line a bootstrap starts with: what the cluster is, and
+// what box does about it. The distribution, the node count and the source are
+// the three facts that decide everything after it.
+func clusterRow(res Result) say.Row {
+	dist := string(res.Distribution)
+	if dist == "" {
+		dist = "a cluster"
+	}
+	switch res.Action {
+	case ActionInstall:
+		return say.Row{Mark: say.MarkDone, Facts: []string{"clean host", "box installs k0s"}}
+	case ActionUseManaged:
+		return say.Row{Mark: say.MarkDone, Facts: []string{dist + ", " + plural(res.Nodes, "node", "nodes"), "box manages it"}}
+	default:
+		return say.Row{Mark: say.MarkDone, Facts: []string{dist + ", " + plural(res.Nodes, "node", "nodes"), "box uses it as it is"}}
 	}
 }
 
-func reportSkips(r say.Reporter, skips []string) {
-	if len(skips) > 0 {
-		r.List("skipped candidates", skips)
+// reportStop draws a refusal: the fact on the `✗` row, then whatever the
+// decision said under it, two columns in, so the paragraphs a stop carries read
+// as part of the row rather than as loose text. The candidates box skipped are
+// the log's: a person acting on the refusal does not need them.
+func reportStop(res Result, r say.Reporter) {
+	lines := strings.Split(strings.TrimRight(res.Reason, "\n"), "\n")
+	rows := []say.Row{{Mark: say.MarkFailed, Facts: []string{strings.TrimSpace(lines[0])}}}
+	for _, line := range lines[1:] {
+		if text := strings.TrimSpace(line); text != "" {
+			// A continuation carries a space for a mark: two columns in, under
+			// the text, which is where a wrapped line hangs.
+			rows = append(rows, say.Row{Mark: " ", Facts: []string{text}})
+		}
+	}
+	r.Rows(rows)
+	for _, w := range res.Warnings {
+		r.Warn(w)
+	}
+	for _, line := range res.Skips {
+		r.Detail("skipped: " + line)
+	}
+	for _, note := range res.Notes {
+		r.Detail("note: " + note)
 	}
 }
 
-func reportNotes(r say.Reporter, notes []string) {
-	for _, n := range notes {
-		r.Line("note: " + n)
+// plural is a count and the word for it: one node, two nodes.
+func plural(n int, one, many string) string {
+	if n == 1 {
+		return fmt.Sprintf("%d %s", n, one)
 	}
-}
-
-func reportWarnings(r say.Reporter, warnings []string) {
-	for _, w := range warnings {
-		r.Warn("warning: " + w)
-	}
+	return fmt.Sprintf("%d %s", n, many)
 }

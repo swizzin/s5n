@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/swizzin/s5n/internal/migrate/plex"
 	"github.com/swizzin/s5n/internal/qbtconf"
 )
 
@@ -52,29 +53,13 @@ type appInfo struct {
 	// upstream renamed them, so a source install still carrying the old name is
 	// the app it is rather than a workload box has no use for.
 	aliases []string
-	// carry is the part of the app's config directory a migration snapshot
-	// carries, relative to it. Empty means the whole tree, which is right for
-	// every app whose config is its state.
-	carry []snapshotFile
-	// carryNote is the one line a read's report says about the part a snapshot
-	// leaves behind, for an app whose config is more than its state.
-	carryNote string
+	// snapshot is what a migration snapshot takes out of the app's config
+	// directory, when its config is more than its state: Plex's Metadata tree is
+	// a library of covers, artwork and thumbnails it rebuilds from the media it
+	// is given, so a snapshot of it is a choice between its state and its whole
+	// data. Nil for every app whose config is its state.
+	snapshot func(full bool) plex.Scope
 }
-
-// snapshotFile is one file a migration snapshot carries out of an app's config
-// directory. required says the app cannot start on the state it was given
-// without it; a database's -wal and -shm are not required, because they exist
-// only while something has the database open.
-type snapshotFile struct {
-	path     string
-	required bool
-}
-
-// plexServer is Plex's own home inside its config directory: the image sets
-// PLEX_MEDIA_SERVER_APPLICATION_SUPPORT_DIR to
-// /config/Library/Application Support, and Plex makes the directory named after
-// itself under it (charts/s5n/catalog.yaml, "snapshot:").
-const plexServer = "Library/Application Support/Plex Media Server/"
 
 // catalogApps is every app box can install, by the catalog's name.
 var catalogApps = map[string]appInfo{
@@ -85,26 +70,16 @@ var catalogApps = map[string]appInfo{
 	// Plex's images write the transcoder's directory into Preferences.xml as
 	// /transcode, which the chart mounts as an emptyDir.
 	//
-	// A Plex config directory is mostly its library: Metadata holds covers,
-	// artwork, bundles and thumbnails Plex rebuilds from the media it is given,
-	// and Cache holds more of the same, which on a real library is tens of
-	// gigabytes. What a migration carries is what Plex cannot rebuild -- its
-	// preferences and its library databases -- so a snapshot of it is a few
-	// hundred megabytes rather than the whole tree. The list is box's own and
-	// deliberately not the catalog's `snapshot:`: that key is what an upgrade
-	// may rewrite, and here the question is what state a migration needs.
+	// A Plex config directory is mostly its library: Metadata and Media hold
+	// covers, artwork, thumbnails and the preview thumbnails Plex builds from the
+	// media it is given, and on a real library that is tens of gigabytes. What a
+	// migration snapshot carries of it is the app's own rule
+	// (internal/migrate/plex): its whole data when the space is there, its state
+	// -- preferences and databases -- when it is not. It is box's own and
+	// deliberately not the catalog's `snapshot:`, which is what an upgrade may
+	// rewrite.
 	"plex": {config: []string{configPath}, port: plexPort, scratch: []string{"/transcode"},
-		carry: []snapshotFile{
-			{path: plexServer + "Preferences.xml", required: true},
-			{path: plexServer + "Plug-in Support/Databases/com.plexapp.plugins.library.db", required: true},
-			{path: plexServer + "Plug-in Support/Databases/com.plexapp.plugins.library.db-wal"},
-			{path: plexServer + "Plug-in Support/Databases/com.plexapp.plugins.library.db-shm"},
-			{path: plexServer + "Plug-in Support/Databases/com.plexapp.plugins.library.blobs.db"},
-			{path: plexServer + "Plug-in Support/Databases/com.plexapp.plugins.library.blobs.db-wal"},
-			{path: plexServer + "Plug-in Support/Databases/com.plexapp.plugins.library.blobs.db-shm"},
-		},
-		carryNote: "plex: carried Preferences.xml and its databases; Plex rebuilds its metadata, artwork and thumbnails (artwork uploaded by hand is not carried)",
-	},
+		snapshot: plex.Snapshot},
 	"tautulli": {config: []string{configPath}, port: tautulliPort},
 	// Seerr's images default CONFIG_DIRECTORY to /app/config, and the chart
 	// mounts its claim there (the one app whose config is not /config); the
@@ -157,14 +132,27 @@ func imageApp(image string) (string, bool) {
 }
 
 // Carry is what a migration snapshot takes out of one app's config directory:
-// the files, which of them the app cannot start without, and the one line a
-// read's report says about the part the snapshot leaves behind.
+// the files, which of them the app cannot start without, the directories a full
+// carry leaves out, and the one line a read's report says about it.
 type Carry struct {
+	// Full says the app's whole data travels, less Skip.
+	Full bool
+	// Sub is the directory inside the app's config directory its own data is
+	// in, in slash form, when a snapshot takes that and not the whole of it.
+	Sub string
+	// Files is the state a snapshot carries when Full is false, relative to
+	// Sub.
 	Files []CarryFile
-	Note  string
+	// Skip is where a full carry leaves the app's caches behind, relative to
+	// Sub.
+	Skip []string
+	// Note is the one line the report and the confirm say.
+	Note string
+	// Summary is the app's row on the confirm, in a few words.
+	Summary string
 }
 
-// CarryFile is one file of a Carry, relative to the app's config directory.
+// CarryFile is one file of a Carry, relative to Sub.
 type CarryFile struct {
 	Path string
 	// Required says a snapshot without this file is refused.
@@ -172,33 +160,52 @@ type CarryFile struct {
 }
 
 // SnapshotCarry is what a snapshot carries for one planned app, by box's
-// instance name. ok is false when the app's config travels as its whole tree,
-// which is every app but the one whose config holds a library as well as its
-// state: a snapshot of an app's whole config is never wrong, and a trimmed one
-// of the wrong app would be.
-func SnapshotCarry(instance string) (Carry, bool) {
-	info, found := catalogApps[instance]
-	if !found {
-		// An instance of an app that takes more than one is the app's own
-		// entry: sonarr-4k carries what sonarr carries.
-		for app, cand := range catalogApps {
-			if !cand.instances {
-				continue
-			}
-			if rest, ok := strings.CutPrefix(instance, app+"-"); ok && rest != "" {
-				info, found = cand, true
-				break
-			}
-		}
-	}
-	if !found || len(info.carry) == 0 {
+// instance name, when that is a choice: full says the app's whole data travels,
+// and false its state alone. ok is false when the app's config travels as its
+// whole tree whatever full says, which is every app but the one whose config
+// holds a library as well as its state.
+func SnapshotCarry(instance string, full bool) (Carry, bool) {
+	info, found := instanceApps(instance)
+	if !found || info.snapshot == nil {
 		return Carry{}, false
 	}
-	c := Carry{Note: info.carryNote, Files: make([]CarryFile, len(info.carry))}
-	for i, f := range info.carry {
-		c.Files[i] = CarryFile{Path: f.path, Required: f.required}
+	scope := info.snapshot(full)
+	c := Carry{Full: scope.Full, Sub: scope.Sub, Skip: append([]string(nil), scope.Skip...), Note: scope.Note, Summary: scope.Summary}
+	c.Files = make([]CarryFile, len(scope.Files))
+	for i, f := range scope.Files {
+		c.Files[i] = CarryFile{Path: f.Path, Required: f.Required}
 	}
 	return c, true
+}
+
+// SnapshotSize is the bytes a full carry of one app's config directory at dir
+// takes, for the app whose config is more than its state. ok is false for every
+// other app, whose whole tree a run counts as it copies it.
+func SnapshotSize(instance, dir string) (int64, bool, error) {
+	info, found := instanceApps(instance)
+	if !found || info.snapshot == nil {
+		return 0, false, nil
+	}
+	size, err := plex.Size(dir)
+	return size, true, err
+}
+
+// instanceApps is the app one instance is: its own entry, or -- for an app that
+// takes more than one -- the entry its name starts with, so sonarr-4k is
+// sonarr's app.
+func instanceApps(instance string) (appInfo, bool) {
+	if info, found := catalogApps[instance]; found {
+		return info, true
+	}
+	for app, cand := range catalogApps {
+		if !cand.instances {
+			continue
+		}
+		if rest, ok := strings.CutPrefix(instance, app+"-"); ok && rest != "" {
+			return cand, true
+		}
+	}
+	return appInfo{}, false
 }
 
 // instanceName is box's name for one workload of an app: the app itself, or for

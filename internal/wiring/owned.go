@@ -12,13 +12,14 @@ import (
 // its identity — a rename in the app's own UI is the user's business — so
 // ownership is tracked by id instead (see AGENTS.md invariant 11).
 type OwnedRecord struct {
-	Version  int                 `json:"version"`
-	Arr      map[string]ArrOwned `json:"arr,omitempty"`
-	Prowlarr ProwlarrOwned       `json:"prowlarr,omitempty"`
-	Tautulli *TautulliOwned      `json:"tautulli,omitempty"`
-	Qui      *QuiOwned           `json:"qui,omitempty"`
-	Autobrr  *AutobrrOwned       `json:"autobrr,omitempty"`
-	Pbh      *PbhOwned           `json:"pbh,omitempty"`
+	Version     int                 `json:"version"`
+	Arr         map[string]ArrOwned `json:"arr,omitempty"`
+	Prowlarr    ProwlarrOwned       `json:"prowlarr,omitempty"`
+	Tautulli    *TautulliOwned      `json:"tautulli,omitempty"`
+	Maintainerr *MaintainerrOwned   `json:"maintainerr,omitempty"`
+	Qui         *QuiOwned           `json:"qui,omitempty"`
+	Autobrr     *AutobrrOwned       `json:"autobrr,omitempty"`
+	Pbh         *PbhOwned           `json:"pbh,omitempty"`
 }
 
 // PbhOwned is what the Job owns in PeerBanHelper: one qBittorrent downloader,
@@ -58,6 +59,16 @@ type AutobrrOwned struct {
 // owned.json because that record is already the Job's durable, fail-closed
 // state: a read error stops the run rather than guessing.
 type TautulliOwned struct {
+	PlexTokenFingerprint string `json:"plexTokenFingerprint,omitempty"`
+}
+
+// MaintainerrOwned is what the Job last wrote into Maintainerr that the app will
+// not read back: the Plex server token, as the sha256-hex of the one the
+// connection was last written and proven with. Maintainerr's GET /api/settings
+// masks plex_auth_token (`abc...xyz` when one is stored), so the fingerprint is
+// the only way a rotation in the release Secret can be detected -- the same rule
+// as Tautulli's PMS link, and never the token itself (AGENTS.md invariant 7).
+type MaintainerrOwned struct {
 	PlexTokenFingerprint string `json:"plexTokenFingerprint,omitempty"`
 }
 
@@ -191,6 +202,26 @@ func (o *OwnedRecord) SetTautulliPlexTokenFingerprint(fingerprint string) {
 		o.Tautulli = &TautulliOwned{}
 	}
 	o.Tautulli.PlexTokenFingerprint = fingerprint
+}
+
+// MaintainerrPlexTokenFingerprint returns the fingerprint of the Plex server token
+// last written and proven into Maintainerr's connection, or "" when no successful
+// write is on record.
+func (o *OwnedRecord) MaintainerrPlexTokenFingerprint() string {
+	if o.Maintainerr == nil {
+		return ""
+	}
+	return o.Maintainerr.PlexTokenFingerprint
+}
+
+// SetMaintainerrPlexTokenFingerprint records the fingerprint of the Plex server
+// token the Job just wrote and had Maintainerr prove. Call it only after that
+// succeeded.
+func (o *OwnedRecord) SetMaintainerrPlexTokenFingerprint(fingerprint string) {
+	if o.Maintainerr == nil {
+		o.Maintainerr = &MaintainerrOwned{}
+	}
+	o.Maintainerr.PlexTokenFingerprint = fingerprint
 }
 
 // QuiInstanceID returns the recorded qui instance id, or 0 when nothing is

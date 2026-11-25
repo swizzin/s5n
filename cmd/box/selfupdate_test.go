@@ -147,7 +147,7 @@ func TestUpdateInstallsANewerBoxInsteadOfDoingTheChartWork(t *testing.T) {
 	if charts != 0 {
 		t.Fatalf("the chart work ran %d times in the replaced process, want 0", charts)
 	}
-	if !strings.Contains(transcript.String(), "box updated from 0.4.0 to 0.5.0") {
+	if !strings.Contains(transcript.String(), "0.4.0 → 0.5.0 · signature ok") {
 		t.Fatalf("transcript %q does not say the box was updated", transcript.String())
 	}
 }
@@ -202,7 +202,7 @@ func TestUpdateRunsTheChartWorkWhenTheBoxCannotBeReplaced(t *testing.T) {
 						return selfupdate.Result{}, errors.New("fetching https://example.com/releases/latest: 503 Service Unavailable")
 					}}
 			},
-			want: "not updating box: fetching https://example.com/releases/latest: 503 Service Unavailable",
+			want: "not updated · fetching https://example.com/releases/latest: 503 Service Unavailable",
 		},
 		{
 			name: "this build has no signing key",
@@ -212,7 +212,7 @@ func TestUpdateRunsTheChartWorkWhenTheBoxCannotBeReplaced(t *testing.T) {
 						return selfupdate.Result{}, errors.New("this box was built without a signing key, so it cannot verify a box release and will not update itself: replace it by hand")
 					}}
 			},
-			want: "not updating box: this box was built without a signing key",
+			want: "not updated · this box was built without a signing key",
 		},
 		{
 			name: "the release does not verify",
@@ -222,7 +222,7 @@ func TestUpdateRunsTheChartWorkWhenTheBoxCannotBeReplaced(t *testing.T) {
 						return selfupdate.Result{}, errors.New("updating box 0.4.0 to 0.5.0: sha256sums.txt for box-v0.5.0 does not verify against the signing key compiled into this box")
 					}}
 			},
-			want: "not updating box: updating box 0.4.0 to 0.5.0: sha256sums.txt for box-v0.5.0 does not verify",
+			want: "not updated · updating box 0.4.0 to 0.5.0: sha256sums.txt for box-v0.5.0 does not verify",
 		},
 		{
 			name: "box came from a package",
@@ -232,7 +232,7 @@ func TestUpdateRunsTheChartWorkWhenTheBoxCannotBeReplaced(t *testing.T) {
 				return &boxUpdate{Options: selfupdate.Options{Version: "0.4.0", Packaged: "apt", Geteuid: func() int { return 0 }},
 					Out: out, Update: selfupdate.Update}
 			},
-			want: "not updating box: this box was installed by a package manager (apt), so the package owns the binary: upgrade it with apt, not with box",
+			want: "not updated · this box was installed by a package manager (apt), so the package owns the binary: upgrade it with apt, not with box",
 		},
 	}
 	for _, tc := range cases {
@@ -295,12 +295,12 @@ func TestUpdateNamesTheHeldRelease(t *testing.T) {
 		{
 			name:   "a newer box is held",
 			result: selfupdate.Result{From: "0.4.0", To: "0.5.0", Path: "/usr/local/bin/box", Held: true},
-			want:   "box 0.5.0 is out; --hold-box is set, so it is not installed",
+			want:   "0.5.0 is out · --hold-box is set, so it is not installed",
 		},
 		{
 			name:   "nothing newer is out",
 			result: selfupdate.Result{From: "0.4.0", To: "0.4.0", Path: "/usr/local/bin/box"},
-			want:   "box 0.4.0 is the newest release; --hold-box is set, so the self-update stays off",
+			want:   "0.4.0 is the newest release · --hold-box is set, so box does not replace itself",
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -341,7 +341,7 @@ func TestUpdateChecksNothingWhenItIsOnlyACheck(t *testing.T) {
 	if charts := runBox(t, b); charts != 1 {
 		t.Fatalf("the chart work ran %d times, want once: --check still plans the chart update", charts)
 	}
-	if want := "box 0.5.0 is out; --check, so this run installs nothing"; !strings.Contains(transcript.String(), want) {
+	if want := "0.5.0 is out · --check, so this run installs nothing"; !strings.Contains(transcript.String(), want) {
 		t.Fatalf("transcript %q does not say %q", transcript.String(), want)
 	}
 }
@@ -360,7 +360,7 @@ func TestUpdateNeverReplacesAUsersBox(t *testing.T) {
 	if charts := runBox(t, b); charts != 1 {
 		t.Fatalf("the chart work ran %d times, want once: a user's box still updates their seedbox", charts)
 	}
-	if want := "box 0.5.0 is out; root's next `box update` installs it"; !strings.Contains(transcript.String(), want) {
+	if want := "0.5.0 is out · root's next `box update` installs it"; !strings.Contains(transcript.String(), want) {
 		t.Fatalf("transcript %q does not say %q", transcript.String(), want)
 	}
 }
@@ -379,7 +379,7 @@ func TestUpdateReportsAFailedCheckWithoutStopping(t *testing.T) {
 	if charts := runBox(t, b); charts != 1 {
 		t.Fatalf("the chart work ran %d times, want once", charts)
 	}
-	if want := "not checking for a newer box: fetching https://example.com/releases/latest: 503"; !strings.Contains(transcript.String(), want) {
+	if want := "not checked: fetching https://example.com/releases/latest: 503"; !strings.Contains(transcript.String(), want) {
 		t.Fatalf("transcript %q does not say %q", transcript.String(), want)
 	}
 }
@@ -408,7 +408,7 @@ func TestRollbackBoxDoesNoChartWork(t *testing.T) {
 	if replaced != "/usr/local/bin/box" {
 		t.Fatalf("rollback put %q back, want the binary box runs from", replaced)
 	}
-	if want := "put the previous box back at /usr/local/bin/box"; !strings.Contains(transcript.String(), want) {
+	if want := "put the previous one back at /usr/local/bin/box"; !strings.Contains(transcript.String(), want) {
 		t.Fatalf("transcript %q does not say %q", transcript.String(), want)
 	}
 }
@@ -464,7 +464,7 @@ func TestUpdateSkipsTheSelfUpdateForADevBuild(t *testing.T) {
 			if charts := runBox(t, b); charts != 1 {
 				t.Fatalf("the chart work ran %d times, want once: a development build still updates the seedbox", charts)
 			}
-			if want := "skipping the self-update"; !strings.Contains(transcript.String(), want) {
+			if want := "box does not replace itself"; !strings.Contains(transcript.String(), want) {
 				t.Fatalf("transcript %q does not say %q", transcript.String(), want)
 			}
 		})

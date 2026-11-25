@@ -12,6 +12,7 @@ import (
 
 	"github.com/swizzin/s5n/internal/hostconf"
 	"github.com/swizzin/s5n/internal/say"
+	"github.com/swizzin/s5n/internal/setup"
 	"github.com/swizzin/s5n/internal/update"
 )
 
@@ -76,7 +77,7 @@ func TestTimerOffWritesNothingAndSaysWhere(t *testing.T) {
 	if err != nil {
 		t.Fatalf("run: %v", err)
 	}
-	if got, want := strings.TrimSpace(out), "box does not check for updates by itself: /etc/s5n/box.yaml says update.timer: off"; got != want {
+	if got, want := strings.TrimSpace(out), "· updates        off       /etc/s5n/box.yaml says update.timer: off"; got != want {
 		t.Fatalf("output = %q, want %q", got, want)
 	}
 	if body.updates != 0 || body.healths != 0 {
@@ -343,12 +344,46 @@ func TestScheduleUpdatesWritesTheFilesTheRunUsed(t *testing.T) {
 	}
 }
 
-// TestScheduleUpdatesSaysCronWhenThereIsNowhereToSchedule is the line that keeps
-// an unschedulable host from being a box nobody updates: it names the command.
+// TestScheduleUpdatesSaysCronWhenThereIsNowhereToSchedule is the row that keeps
+// an unschedulable host from being a box nobody updates: the command is the
+// row's, and the reason it could not install a timer is the log's.
 func TestScheduleUpdatesSaysCronWhenThereIsNowhereToSchedule(t *testing.T) {
 	var buf bytes.Buffer
-	scheduleUpdates(context.Background(), "", "c", "g", "v", &say.Plain{W: &buf})
-	if !strings.Contains(buf.String(), "run `box update --timer` from cron every 15 minutes") {
-		t.Fatalf("bootstrap said %q", buf.String())
+	rows := scheduleUpdates(context.Background(), "", "c", "g", "v", &say.Plain{W: &buf})
+	if len(rows) != 1 {
+		t.Fatalf("an unschedulable host left %d rows, want one: %+v", len(rows), rows)
+	}
+	if got, want := rows[0].Command, "box update --timer"; got != want {
+		t.Fatalf("the follow-up's command = %q, want %q", got, want)
+	}
+	var screen bytes.Buffer
+	(&say.Plain{W: &screen}).ToFinish(rows)
+	want := "! to finish\n  updates  run this from cron every 15 minutes\n           $ box update --timer\n"
+	if screen.String() != want {
+		t.Fatalf("the block = %q, want %q", screen.String(), want)
+	}
+}
+
+// What a name with no DNS record leaves a person is one row naming the records
+// and the command that moves the certificates once they exist; the run that
+// finds none leaves nothing (rule 4: a run with nothing to do says nothing).
+func TestNoDNSFollowUpNamesTheRecordsAndTheCommand(t *testing.T) {
+	hosts := []setup.Host{
+		{Host: "box.example.test", Issuer: setup.IssuerSelfSigned, NoDNS: true},
+		{Host: "plex.box.example.test", Issuer: setup.IssuerSelfSigned, NoDNS: true},
+		{Host: "sonarr.box.example.test", Issuer: setup.IssuerLetsEncrypt},
+	}
+	row, ok := noDNSFollowUp(hosts)
+	if !ok {
+		t.Fatal("two names with no record left no follow-up")
+	}
+	if got, want := strings.Join(row.Facts, " · "), "add a DNS record for box.example.test, plex.box.example.test"; got != want {
+		t.Fatalf("the row says %q, want %q", got, want)
+	}
+	if got, want := row.Command, "box init"; got != want {
+		t.Fatalf("the row's command = %q, want %q", got, want)
+	}
+	if _, ok := noDNSFollowUp([]setup.Host{{Host: "box.example.test", Issuer: setup.IssuerLetsEncrypt}}); ok {
+		t.Fatal("a name whose record exists left a follow-up")
 	}
 }

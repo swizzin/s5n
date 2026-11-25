@@ -77,8 +77,15 @@ func main() {
 	// half-written and a re-run refuses).
 	ctx, stop := signalContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	defer closeLog()
 	if len(os.Args) < 2 {
 		usage()
+	}
+	// `box --version` and `box -v` are the same question as `box version`: what
+	// a script asks is the version, not a usage screen.
+	if versionFlag(os.Args[1]) {
+		fmt.Println(version)
+		return
 	}
 	switch os.Args[1] {
 	case "bootstrap":
@@ -95,10 +102,28 @@ func main() {
 		runRollback(ctx, os.Args[2:])
 	case "migrate":
 		runMigrate(ctx, os.Args[2:])
-	case "version":
-		fmt.Println(version)
 	default:
 		usage()
+	}
+}
+
+// versionFlag reports whether this invocation asks for the version. All three
+// spellings print the same line, so a script cannot get usage out of the one it
+// guessed.
+func versionFlag(arg string) bool {
+	switch arg {
+	case "version", "--version", "-v":
+		return true
+	}
+	return false
+}
+
+// closeLog finishes this run's transcript. It runs when a command returns
+// normally; a command that exits on a failure has already written every line it
+// had, because the log is not buffered.
+func closeLog() {
+	if runLog != nil {
+		_ = runLog.Close()
 	}
 }
 
@@ -156,16 +181,24 @@ func terminalSet(plain bool) tui.Terminal {
 // live reporter, and --plain, TERM=dumb or a piped stdout gets the exact plain
 // transcript. NO_COLOR keeps the live layout without colour.
 func newOutput(t tui.Terminal, yes bool, palette string) say.Reporter {
+	runLog = openRunLog(logName())
 	plan := tui.Decide(t)
 	if plan.Mode == tui.ModeHuh {
-		r := tui.NewReporter(tui.ReporterOptions{Width: terminalWidth(os.Stdout), NoColor: plan.NoColor, Yes: yes, Theme: palette})
+		r := tui.NewReporter(tui.ReporterOptions{
+			Width:   terminalWidth(os.Stdout),
+			NoColor: plan.NoColor,
+			Yes:     yes,
+			Theme:   palette,
+			Log:     runLog,
+			LogPath: logPath(runLog),
+		})
 		return r
 	}
 	// Output only: a flow that asks builds its own question through
 	// confirmer, because --yes is that flow's policy (the platform layer
 	// treats "no terminal" as unattended, apply refuses) and this reporter
 	// has one.
-	return &say.Plain{W: os.Stdout, Err: os.Stderr}
+	return &say.Plain{W: os.Stdout, Err: os.Stderr, Log: runLog, LogPath: logPath(runLog)}
 }
 
 // live returns the TUI reporter when this command has one. A plain run answers
@@ -195,7 +228,7 @@ func confirmer(out say.Reporter, yes bool) asker {
 		tr.SetYes(yes)
 		return tr
 	}
-	p := &say.Plain{W: os.Stdout, Err: os.Stderr, Yes: yes}
+	p := &say.Plain{W: os.Stdout, Err: os.Stderr, Yes: yes, Log: runLog, LogPath: logPath(runLog)}
 	if isTerminal(os.Stdin) {
 		p.In = os.Stdin
 	}
@@ -341,6 +374,11 @@ func runBootstrap(ctx context.Context, args []string) {
 	}
 
 	initFlags.takeDev(dev)
+	// init reads root's config beside the record, and on a terminal it asks for
+	// the one answer that file holds (the notice address). The record is
+	// bootstrap's flag, so init is handed it here: without this init looks for
+	// the file at a path of its own and never asks.
+	initFlags.recordPath = *recordPath
 
 	palette := startupTheme(*initFlags.valuesPath)
 	term := terminalSet(*plain)
@@ -436,27 +474,77 @@ func runBootstrap(ctx context.Context, args []string) {
 		out.Error(err)
 		os.Exit(1)
 	}
-	if err := applyPlatform(ctx, res.Kubeconfig, res.Platform, res.Gateway.Class, acmeServer, chart.Pins, res.Firewall, confirmer(out, *yes || !isTerminal(os.Stdin)), false, out); err != nil {
-		if errors.Is(err, platform.ErrCancelled) {
+
+	// A guided fresh install asks once, for the platform and the seedbox
+	// together (bootstrap_one.go): the platform plan is the review, init asks its
+	// own questions, and the answer installs both halves in that order. The plan
+	// is built read-only, from the same decision that said every component is
+	// one box writes.
+	one := guidedFresh(*yes, isTerminal(os.Stdin), res.Platform)
+	wroteBoxConf := false
+	if one {
+		plan, err := platform.Preview(chart.Pins, res.Platform, res.Gateway.Class, acmeServer, res.Firewall)
+		if err != nil {
+			out.Error(err)
 			os.Exit(1)
 		}
-		out.Error(err)
-		os.Exit(1)
+		out.Phase("platform")
+		platform.PrintPlan(out, plan)
+		// Root's config goes in before init asks: the notice address is the one
+		// answer it holds, and init only asks for it when the file is there. A
+		// run that stops before the answer takes the file back below, so a
+		// cancelled install still leaves the host as it was.
+		if wroteBoxConf, err = hostconf.Ensure(hostconf.Path(*recordPath)); err != nil {
+			out.Error(err)
+			os.Exit(1)
+		}
+		oneQ := &oneQuestion{
+			ask: confirmer(out, false),
+			platform: func(ctx context.Context) error {
+				return applyPlatform(ctx, res.Kubeconfig, res.Platform, res.Gateway.Class, acmeServer, chart.Pins, res.Firewall, answered{}, true, out)
+			},
+			out: out,
+		}
+		initFlags.beforeWrite = oneQ.beforeWrite
+		// The release this init installs was in the plan a person agreed to:
+		// asking again inside the apply would be the second form.
+		initFlags.confirmed = true
+	} else {
+		out.Phase("platform")
+		if err := applyPlatform(ctx, res.Kubeconfig, res.Platform, res.Gateway.Class, acmeServer, chart.Pins, res.Firewall, confirmer(out, *yes || !isTerminal(os.Stdin)), false, out); err != nil {
+			if errors.Is(err, platform.ErrCancelled) {
+				os.Exit(1)
+			}
+			out.Error(err)
+			os.Exit(1)
+		}
+		// Root's config is written here, before init, because init asks for the
+		// one answer it holds (the notice address) and every later run reads the
+		// rest. box writes it once: an existing file is root's, and never
+		// rewritten.
+		if wroteBoxConf, err = hostconf.Ensure(hostconf.Path(*recordPath)); err != nil {
+			out.Error(err)
+			os.Exit(1)
+		}
 	}
-	// Root's config is written here, before init, because init asks for the one
-	// answer it holds (the notice address) and every later run reads the rest.
-	// box writes it once: an existing file is root's, and never rewritten.
-	if wrote, err := hostconf.Ensure(hostconf.Path(*recordPath)); err != nil {
-		out.Error(err)
-		os.Exit(1)
-	} else if wrote {
-		out.Muted("wrote " + hostconf.Path(*recordPath) + ": whether this box updates by itself, how often, and where it posts notices")
+	if wroteBoxConf {
+		// The file is a row and its path is the log's: what a person needs is
+		// that root's settings now have a home (rule 5).
+		out.Rows([]say.Row{{Mark: say.MarkNote, Name: "config", State: "new", Facts: []string{"updates and notices"}}})
+		out.Detail("wrote " + hostconf.Path(*recordPath))
 	}
 
 	// bootstrap sets the machine up once; init sets up root's seedbox. It runs
 	// here in the same process, over the same cluster, with the flags bootstrap
 	// was given -- and stays runnable on its own (`box init`).
 	if err := initFlags.run(ctx, res.Kubeconfig, *yes, *plain, out); err != nil {
+		// A question somebody declined stops the run before init writes
+		// anything, so the one file this flow wrote early -- root's config, so
+		// the notice address could be asked -- goes back: the host is the one
+		// the run found.
+		if one && errors.Is(err, setup.ErrCancelled) {
+			dropBoxConf(hostconf.Path(*recordPath), wroteBoxConf)
+		}
 		if errors.Is(err, release.ErrCancelled) || errors.Is(err, setup.ErrCancelled) {
 			os.Exit(1)
 		}
@@ -466,15 +554,19 @@ func runBootstrap(ctx context.Context, args []string) {
 
 	// The timer comes last: it runs `box update --timer` for the files this run
 	// just installed, so a seedbox that never finished is never on a schedule.
-	scheduleUpdates(ctx, unitDir, *recordPath, *initFlags.grantPath, *initFlags.valuesPath, out)
+	// What it could not do, and any record still missing, are the run's last
+	// block: one label and one row each, with the command that clears it.
+	out.ToFinish(append(initFlags.followUps, scheduleUpdates(ctx, unitDir, *recordPath, *initFlags.grantPath, *initFlags.valuesPath, out)...))
 }
 
 // applyPlatform applies the platform layer the decision says install. confirm is
 // the one question, and holdPlan says this package keeps quiet about the plan
 // because the caller showed it in its own confirm -- a migration asks once, for
-// the platform and its apps together, before it installs any of it.
+// the platform and its apps together, before it installs any of it. The section
+// heading is the caller's too: a flow that shows the plan before its question
+// puts the heading there, and one that lets this package show the plan puts it
+// where the plan is.
 func applyPlatform(ctx context.Context, kubeconfig string, components []bootstrap.ComponentResult, gatewayClass, acmeServer string, pins release.Versions, firewall bootstrap.FirewallState, confirm platform.Confirmer, holdPlan bool, out say.Reporter) error {
-	out.Phase("platform")
 	p := &platform.Decision{
 		GatewayClass: gatewayClass,
 		ACMEServer:   acmeServer,
@@ -496,6 +588,20 @@ func applyPlatform(ctx context.Context, kubeconfig string, components []bootstra
 	}
 	_, err := p.Apply(ctx, components)
 	return err
+}
+
+// dropBoxConf removes root's config when this run wrote it and then stopped
+// before the answer. A guided fresh install writes it before init asks, because
+// the notice address is the one answer that file holds; a "no" or a question
+// somebody cancelled then leaves a host with no box and no file, which is what it
+// found.
+func dropBoxConf(path string, wrote bool) {
+	if !wrote {
+		return
+	}
+	// A file box cannot remove is the one it should not have written; the run is
+	// already stopping, so this is best effort and says nothing.
+	_ = os.Remove(path)
 }
 
 // boxValues is what `box apply` reads from the cluster rather than from either
@@ -681,6 +787,9 @@ func runApply(ctx context.Context, args []string) {
 		Open: func(namespace string) (release.ReleaseClient, error) {
 			return release.NewHelm(kc, namespace, release.ReleaseName)
 		},
+		OpenSecret: func(namespace string) (release.SecretKeys, error) {
+			return release.NewSecret(kc, namespace)
+		},
 		OpenStorage: func(namespace string) (release.StorageClient, error) {
 			return release.NewStorage(kc, namespace)
 		},
@@ -745,6 +854,7 @@ func runInit(ctx context.Context, args []string) {
 		out.Error(err)
 		os.Exit(1)
 	}
+	out.ToFinish(initFlags.followUps)
 }
 
 // initFlags are init's questions as flags. `box bootstrap` accepts the same
@@ -800,10 +910,21 @@ type initFlags struct {
 	// sets it: bootstrap passes the flag it was given, and `box init` alone uses
 	// the default. Root's config is read and written beside it.
 	recordPath string
+	// followUps are the rows the run ends with: what it left for a person,
+	// each with the command that clears it. init collects them as it goes, and
+	// the command that ran it prints them as one block after its last step.
+	followUps []say.Row
 	// charts is the release to install, when the command already has one:
 	// `box bootstrap` loads it for its k0s pin and hands the same value here,
 	// so bootstrap and init cannot ask the registry for two versions.
 	charts *chartRelease
+	// beforeWrite is the one hook a flow uses to ask about the platform and the
+	// seedbox together (bootstrap_one.go). Nil asks nothing there.
+	beforeWrite func(ctx context.Context, a setup.Answers) error
+	// confirmed says the question about this release was already answered by the
+	// flow that runs init: the release's own confirm is the second form then, so
+	// the apply takes the answer rather than asking.
+	confirmed bool
 }
 
 func addInitFlags(fs *flag.FlagSet) *initFlags {
@@ -814,7 +935,7 @@ func addInitFlags(fs *flag.FlagSet) *initFlags {
 	o := &initFlags{fs: fs, chart: addChartFlags(fs, chartVersionInstalls)}
 	o.grantPath = fs.String("grant", seedbox.GrantPath("root"), "the root-owned grant file to write")
 	o.valuesPath = fs.String("values", valuesDefault, "the user's values file to edit")
-	o.namespace = fs.String("namespace", "", "the box's namespace (default s5n-<login>); a re-run keeps whatever the grant says")
+	o.namespace = fs.String("namespace", "", "this box's namespace (default s5n-<login>); a re-run keeps whatever the grant says")
 	o.domain = fs.String("domain", "", "the domain this box is reached at, e.g. box.example.com")
 	o.dataPath = fs.String("data-path", "", "the host path downloads and media live on")
 	o.configPath = fs.String("config-path", "", "the host path the apps keep their settings on")
@@ -917,13 +1038,18 @@ func (o *initFlags) run(ctx context.Context, kubeconfig string, yes, plain bool,
 			if err != nil {
 				return err
 			}
-			confirm := initApplyConfirmer(o.adopting, out, yes)
+			confirm := initApplyConfirmer(o.adopting || o.confirmed, out, yes)
 			app := &release.Applier{
 				Charts:  source,
 				Confirm: confirm,
 				Say:     out,
 				Open: func(namespace string) (release.ReleaseClient, error) {
 					return release.NewHelm(kc, namespace, release.ReleaseName)
+				},
+				// A re-run of init is a re-run of apply: a box claimed since
+				// the last run has its Plex token written the same way.
+				OpenSecret: func(namespace string) (release.SecretKeys, error) {
+					return release.NewSecret(kc, namespace)
 				},
 				OpenStorage: func(namespace string) (release.StorageClient, error) {
 					return release.NewStorage(kc, namespace)
@@ -997,6 +1123,7 @@ func (o *initFlags) run(ctx context.Context, kubeconfig string, yes, plain bool,
 		TorrentPort:  o.sourceTorrentPort,
 		PathsInNode:  o.pathsInNode,
 		NoticePath:   hostconf.Path(o.recordPath),
+		BeforeWrite:  o.beforeWrite,
 	})
 	if err != nil {
 		return err
@@ -1010,25 +1137,55 @@ func (o *initFlags) run(ctx context.Context, kubeconfig string, yes, plain bool,
 		out.Line("login: " + res.Login + " at https://" + res.Domain + "/auth/")
 	}
 	if res.GeneratedPassword != "" {
+		// The one secret a run prints is also the one a transcript must never
+		// keep: the line is on screen, and the log says a password was shown.
+		redact(res.GeneratedPassword)
 		out.Line("password: " + res.GeneratedPassword + "  (shown once; box keeps only the hash)")
 	}
-	// The final card's one warning: a name with no DNS record still installs,
-	// self-signed, and a re-run is what moves it. Named per host, because an
-	// app's name is a record the operator may not have thought about.
-	if warning, ok := setup.NoDNSWarning(res.Hosts, "init"); ok {
-		out.Warn(warning)
+	// What a name with no DNS record leaves a person: the records to add, and
+	// the command that moves the certificates once they exist. It is one row
+	// of the run's to-finish block, so a bootstrap that also could not install
+	// its update timer says both things in one place.
+	if row, ok := noDNSFollowUp(res.Hosts); ok {
+		if warning, ok := setup.NoDNSWarning(res.Hosts, "init"); ok {
+			out.Detail(warning)
+		}
+		o.followUps = append(o.followUps, row)
 	}
 	return nil
 }
 
+// noDNSFollowUp is the one thing a run whose names have no record leaves a
+// person: which names, and the command that moves them to Let's Encrypt once
+// their records exist. The sentence that says why their certificates are
+// self-signed is the run log's (rule 2).
+func noDNSFollowUp(hosts []setup.Host) (say.Row, bool) {
+	var names []string
+	for _, h := range hosts {
+		if h.NoDNS && strings.TrimSpace(h.Host) != "" {
+			names = append(names, h.Host)
+		}
+	}
+	if len(names) == 0 {
+		return say.Row{}, false
+	}
+	return say.Row{
+		Mark:    say.MarkNeeds,
+		Name:    "certificates",
+		Facts:   []string{"add a DNS record for " + strings.Join(names, ", ")},
+		Command: "box init",
+	}, true
+}
+
 // initApplyConfirmer is what init's hand-over asks its release question with.
-// It is init's own question on a box a person installed, and no question at
-// all when another flow runs init as one step: a migration asks once, at its
-// own confirm, which covers the empty release this install writes and the apps
-// it is about to move. A second form there would ask after the first step had
-// already written.
-func initApplyConfirmer(adopting bool, out say.Reporter, yes bool) asker {
-	if adopting {
+// It is init's own question on a box a person installed, and no question at all
+// when another flow runs init as one step: a migration asks once, at its own
+// confirm, which covers the empty release this install writes and the apps it is
+// about to move, and a guided fresh install asks once for the platform and the
+// seedbox together (bootstrap_one.go). A second form there would ask after the
+// first step had already written.
+func initApplyConfirmer(alreadyAnswered bool, out say.Reporter, yes bool) asker {
+	if alreadyAnswered {
 		return answered{}
 	}
 	return confirmer(out, yes)

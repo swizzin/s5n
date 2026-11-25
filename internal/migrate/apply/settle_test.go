@@ -163,12 +163,13 @@ func (r *rehearsal) plan() *plan.Plan {
 }
 
 // settleInput is what a caller with no image runner has: the catalog, the
-// source paths, and the chart's endpoints.
+// source paths, the chart's endpoints, and the directory the copies are made in.
 func (r *rehearsal) settleInput() SettleInput {
 	return SettleInput{
 		Catalog: rehearsalCatalog,
 		Configs: func(app string) string { return r.path(app) },
 		Targets: rehearsalTargets(),
+		Work:    r.t.TempDir(),
 	}
 }
 
@@ -487,13 +488,13 @@ func TestSettleCallsOutEveryUnsettledValue(t *testing.T) {
 		"checked at apply:",
 		"  plex (its database is only readable through its own image, and this run has no way to start one)",
 		"left as it is:",
-		"  172.17.0.1:10365 (\"Deluge\" is a Deluge client and this box runs only qBittorrent, so a rewrite would point it at an app that does not speak its protocol; delete it in the Arr if you do not need it)",
+		"  172.17.0.1:10365 (Deluge client: this box runs qBittorrent)",
 		"    radarr: radarr.db DownloadClients.Settings.host",
 		"    sonarr: sonarr.db DownloadClients.Settings.host",
-		"  172.17.0.1:443 (\"rTorrent\" is a RTorrent client and this box runs only qBittorrent, so a rewrite would point it at an app that does not speak its protocol; delete it in the Arr if you do not need it)",
+		"  172.17.0.1:443 (RTorrent client: this box runs qBittorrent)",
 		"    radarr: radarr.db DownloadClients.Settings.host",
 		"    sonarr: sonarr.db DownloadClients.Settings.host",
-		"  192.0.2.10:8081 (\"old nas\" is switched off, so 192.0.2.10:8081 is never dialled and nothing is migrated to it)",
+		"  192.0.2.10:8081 (switched off, so nothing dials it)",
 		"    autobrr: autobrr.db client.host",
 		"rewritten to plex:",
 		"  10.244.0.56:32400 (it is Maintainerr's Plex connection, and this box runs one Plex)",
@@ -848,9 +849,9 @@ func TestSummaryNamesEveryDefaultAndLeft(t *testing.T) {
 	for _, want := range []string{
 		"default: 10.244.0.56:32400 (rewritten to plex: it is Maintainerr's Plex connection, and this box runs one Plex)",
 		"default: example.com:443 (rewritten to qbittorrent: it is a qBittorrent downloader, and this box runs one qBittorrent)",
-		`sonarr: left as it is: 172.17.0.1:443 ("rTorrent" is a RTorrent client`,
-		`radarr: left as it is: 172.17.0.1:10365 ("Deluge" is a Deluge client`,
-		`autobrr: left as it is: 192.0.2.10:8081 ("old nas" is switched off`,
+		"sonarr: left as it is: 172.17.0.1:443 (RTorrent client: this box runs qBittorrent)",
+		"radarr: left as it is: 172.17.0.1:10365 (Deluge client: this box runs qBittorrent)",
+		"autobrr: left as it is: 192.0.2.10:8081 (switched off, so nothing dials it)",
 	} {
 		if !strings.Contains(lines, want) {
 			t.Errorf("the summary does not say %q:\n%s", want, lines)

@@ -45,8 +45,7 @@ apps:
     enabled: false
     port: 8080
     torrent:
-      # What a helm-only install gets; box picks its own and records it in the
-      # grant, so this test chart carries the same shape as the real one.
-      port: 31111
+      # No port: box picks one and records it in the grant, and the chart ships
+      # no default, so this fixture chart carries the same shape as the real one.
       service:
         type: NodePort

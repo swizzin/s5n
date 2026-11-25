@@ -234,5 +234,8 @@ func k0sConfigConflict(path, want string) string {
 	if string(got) == want {
 		return ""
 	}
-	return fmt.Sprintf("%s already exists and box did not write it: box installs k0s with a config that pins the API address, and it will not overwrite a k0s config it did not write. Move that file aside, or remove it and run bootstrap again.", path)
+	// A refusal is the fact, the one command that fixes it, and what happens
+	// next (rule 11). The why -- box pins the API address in that config -- is
+	// the log's.
+	return fmt.Sprintf("%s exists\n$ sudo mv %s %s.before-box\nthen run this again", path, path, path)
 }

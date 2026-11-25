@@ -8,15 +8,14 @@ import (
 )
 
 // The wiring config is the chart's render, and it names only the objects the
-// Job reconciles: qBittorrent, Prowlarr, Plex, Tautulli, Seerr, qui, autobrr
-// and one entry per enabled Arr instance. A catalog app that needs no wiring is
-// simply absent from it, which is what makes adding one a chart-only change.
+// Job reconciles: qBittorrent, Prowlarr, Plex, Tautulli, Seerr, Maintainerr,
+// qui, autobrr, PeerBanHelper and one entry per enabled Arr instance.
 //
-// The decode is strict, so a chart that started writing an app the Job does
-// not know is a loud failure instead of a key quietly ignored. This pins that:
-// maintainerr is in the catalog and is not a wiring key.
-func TestConfigRefusesAnAppItDoesNotWire(t *testing.T) {
-	for _, app := range []string{"maintainerr"} {
+// The decode is strict, so a chart that started writing a key the Job does not
+// act on is a loud failure instead of a key quietly ignored -- a typo, or an app
+// added to the chart a release before the Job learns to reconcile it.
+func TestConfigRefusesAKeyItDoesNotReconcile(t *testing.T) {
+	for _, app := range []string{"exampleapp"} {
 		t.Run(app, func(t *testing.T) {
 			path := filepath.Join(t.TempDir(), "wiring.json")
 			cfg := `{"namespace":"seedbox","configMap":"s5n-wiring","timeoutSeconds":300,` +
@@ -111,5 +110,38 @@ func TestConfigAcceptsAReleaseWithNoWiredApp(t *testing.T) {
 				t.Fatalf("a release with no wired app was refused: %v", err)
 			}
 		})
+	}
+}
+
+// Maintainerr is a wiring key: its Plex connection is a row in its own settings,
+// and nothing else can write it. Its BASE_PATH is part of the config because the
+// app mounts every route -- its API and its health route -- below the prefix.
+func TestConfigAcceptsMaintainerr(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "wiring.json")
+	cfg := `{"namespace":"seedbox","configMap":"s5n-wiring","timeoutSeconds":300,` +
+		`"instances":[],` +
+		`"plex":{"url":"http://plex:32400"},` +
+		`"maintainerr":{"url":"http://maintainerr:6246","urlBase":"/maintainerr","plexTokenFile":"/etc/s5n/keys/plex-token"}}`
+	if err := os.WriteFile(path, []byte(cfg), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	c, err := Load(path)
+	if err != nil {
+		t.Fatalf("a render with maintainerr was refused: %v", err)
+	}
+	if c.Maintainerr == nil || c.Maintainerr.URLBase != "/maintainerr" {
+		t.Fatalf("maintainerr = %+v", c.Maintainerr)
+	}
+
+	// Without Plex there is no server to point it at, and a half-configured
+	// connection is worse than a refusal.
+	cfg = `{"namespace":"seedbox","configMap":"s5n-wiring","timeoutSeconds":300,` +
+		`"instances":[],` +
+		`"maintainerr":{"url":"http://maintainerr:6246","urlBase":"/maintainerr"}}`
+	if err := os.WriteFile(path, []byte(cfg), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Load(path); err == nil {
+		t.Fatal("maintainerr without plex was accepted")
 	}
 }

@@ -116,7 +116,7 @@ func (s *Seedbox) Effective(c Chart) (map[string]any, error) {
 	// instead, the same way auth.edge is: after both files, so no file can
 	// shadow it, and only when the schema has the key, because a chart from
 	// before the provider would refuse the install.
-	declaresIP, err := declaresOIDCGatewayIP(c.Schema)
+	declaresIP, err := DeclaresOIDCGatewayIP(c.Schema)
 	if err != nil {
 		return nil, err
 	}
@@ -160,6 +160,36 @@ func (s *Seedbox) Effective(c Chart) (map[string]any, error) {
 	return base, nil
 }
 
+// Declares reports whether a chart's schema describes one values path, key by
+// key. Presence is the whole question, not what the schema requires of it: a
+// release from before a key has a chart that would refuse it, and box writes a
+// key it decides only where the release being installed can take it. An empty
+// schema declares nothing.
+func Declares(schema []byte, keys ...string) (bool, error) {
+	if len(schema) == 0 {
+		return false, nil
+	}
+	var doc map[string]any
+	if err := json.Unmarshal(schema, &doc); err != nil {
+		return false, fmt.Errorf("chart schema: %w", err)
+	}
+	var node any = doc
+	for _, key := range keys {
+		obj, ok := node.(map[string]any)
+		if !ok {
+			return false, nil
+		}
+		props, ok := obj["properties"].(map[string]any)
+		if !ok {
+			return false, nil
+		}
+		if node, ok = props[key]; !ok {
+			return false, nil
+		}
+	}
+	return true, nil
+}
+
 // declaresAuthEdge reports whether the chart's schema describes auth.edge.
 // Presence is the whole question: a schema that never mentions the key has a
 // release that would reject it, so box leaves it out rather than refusing the
@@ -167,75 +197,28 @@ func (s *Seedbox) Effective(c Chart) (map[string]any, error) {
 // this with the sentence about a schema nothing has checked, and a schema that
 // does not parse is reported here in the same words Validate uses.
 func declaresAuthEdge(schema []byte) (bool, error) {
-	if len(schema) == 0 {
-		return false, nil
-	}
-	var doc struct {
-		Properties map[string]struct {
-			Properties map[string]json.RawMessage `json:"properties"`
-		} `json:"properties"`
-	}
-	if err := json.Unmarshal(schema, &doc); err != nil {
-		return false, fmt.Errorf("chart schema: %w", err)
-	}
-	auth, ok := doc.Properties["auth"]
-	if !ok {
-		return false, nil
-	}
-	_, ok = auth.Properties["edge"]
-	return ok, nil
+	return Declares(schema, "auth", "edge")
 }
 
 // declaresRehearsal reports whether the chart's schema describes the top-level
 // rehearsal flag and its gate address. A release from before the lock has
 // neither, and Effective refuses to render a rehearsal box with it.
 func declaresRehearsal(schema []byte) (bool, error) {
-	if len(schema) == 0 {
-		return false, nil
+	flag, err := Declares(schema, "rehearsal")
+	if err != nil || !flag {
+		return false, err
 	}
-	var doc struct {
-		Properties map[string]json.RawMessage `json:"properties"`
-	}
-	if err := json.Unmarshal(schema, &doc); err != nil {
-		return false, fmt.Errorf("chart schema: %w", err)
-	}
-	_, flag := doc.Properties["rehearsal"]
-	_, gate := doc.Properties["rehearsalGate"]
-	return flag && gate, nil
+	return Declares(schema, "rehearsalGate")
 }
 
-// declaresOIDCGatewayIP reports whether the chart's schema describes
+// DeclaresOIDCGatewayIP reports whether a chart's schema describes
 // auth.oidc.gatewayIP. Presence is the whole question, exactly as for auth.edge:
 // a chart from before the provider has no such key, and a values document that
 // carried it would be refused by that chart's own schema.
 // DeclaresOIDCGatewayIP reports whether a chart's schema describes the key, for
 // a caller outside this package (init writes the grant key only when it does).
-func DeclaresOIDCGatewayIP(schema []byte) (bool, error) { return declaresOIDCGatewayIP(schema) }
-
-func declaresOIDCGatewayIP(schema []byte) (bool, error) {
-	if len(schema) == 0 {
-		return false, nil
-	}
-	var doc struct {
-		Properties map[string]struct {
-			Properties map[string]struct {
-				Properties map[string]json.RawMessage `json:"properties"`
-			} `json:"properties"`
-		} `json:"properties"`
-	}
-	if err := json.Unmarshal(schema, &doc); err != nil {
-		return false, fmt.Errorf("chart schema: %w", err)
-	}
-	auth, ok := doc.Properties["auth"]
-	if !ok {
-		return false, nil
-	}
-	oidc, ok := auth.Properties["oidc"]
-	if !ok {
-		return false, nil
-	}
-	_, ok = oidc.Properties["gatewayIP"]
-	return ok, nil
+func DeclaresOIDCGatewayIP(schema []byte) (bool, error) {
+	return Declares(schema, "auth", "oidc", "gatewayIP")
 }
 
 // setPath writes one value into the document at the given key path, creating

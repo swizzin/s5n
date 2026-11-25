@@ -19,6 +19,7 @@ import (
 	"github.com/swizzin/s5n/internal/kube"
 	"github.com/swizzin/s5n/internal/platform"
 	"github.com/swizzin/s5n/internal/release"
+	"github.com/swizzin/s5n/internal/say"
 	"github.com/swizzin/s5n/internal/seedbox"
 )
 
@@ -362,6 +363,13 @@ func TestApplyWritesTheLogin(t *testing.T) {
 	// defaults: without it a browser never reaches the login page.
 	if !contains(headers, "accept") {
 		t.Errorf("spec.extAuth.headersToExtAuth = %v: Authelia answers 401 instead of redirecting to the portal", headers)
+	}
+	// X-Requested-With is the other half of the same rule (IsXHR): a page's own
+	// call gets the 401 even when its Accept would read as a navigation. It is
+	// not one of Envoy's defaults either, so a policy that does not name it
+	// hands Authelia a request that looks like a browser navigating.
+	if !contains(headers, "x-requested-with") {
+		t.Errorf("spec.extAuth.headersToExtAuth = %v: a request that marks itself as an XHR is answered as a navigation", headers)
 	}
 	if wrong, _, _ := unstructured.NestedStringSlice(policy, "spec", "extAuth", "http", "headersToExtAuth"); len(wrong) != 0 {
 		t.Errorf("headersToExtAuth is under extAuth.http (%v): Envoy Gateway's ExtAuth struct declares it on extAuth", wrong)
@@ -1305,5 +1313,46 @@ func TestMayWriteIsRoots(t *testing.T) {
 	}
 	if ok {
 		t.Fatal("an identity the API server denies was told it may write the login")
+	}
+}
+
+// The rule write is two rows and nothing else: what it did (kept, written) in
+// the state column, and how many names it is for. The names are the log's,
+// because a list of four host names is plumbing (rules 1, 2 and 5).
+func TestEnsureRulesSaysWhatItDidInOneRow(t *testing.T) {
+	f := newFixture(t)
+	opts := testOptions()
+	opts.PathsInNode = true
+	opts.Values = hostedValues()
+	opts.Hosted = []string{"plex", "seerr"}
+	opts.OwnLogin = []string{"plex", "seerr"}
+	if _, err := f.decision.Apply(context.Background(), opts); err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+
+	var kept bytes.Buffer
+	f.decision.Say = &say.Plain{W: &kept}
+	if _, err := f.decision.EnsureRules(context.Background(), ruleOptions()); err != nil {
+		t.Fatalf("EnsureRules: %v", err)
+	}
+	if want := "· login rules    kept      1 host\n"; kept.String() != want {
+		t.Fatalf("a second rule write said %q, want %q", kept.String(), want)
+	}
+
+	// A name the configuration does not carry yet is a write: the file is
+	// rendered whole, so the new host's rule is what differs.
+	var written bytes.Buffer
+	f.decision.Say = &say.Plain{W: &written}
+	opts2 := ruleOptions()
+	opts2.Hosts = []string{"plex.box.example.com", "seerr.box.example.com", "pbh.box.example.com"}
+	opts2.Hosted = []string{"plex", "seerr", "pbh"}
+	opts2.OwnLogin = []string{"plex", "seerr", "pbh"}
+	opts2.Values = hostedValues()
+	opts2.Values["apps"].(map[string]any)["pbh"] = map[string]any{"enabled": true}
+	if _, err := f.decision.EnsureRules(context.Background(), opts2); err != nil {
+		t.Fatalf("EnsureRules: %v", err)
+	}
+	if want := "✓ login rules    written   3 hosts\n"; written.String() != want {
+		t.Fatalf("a rule write said %q, want %q", written.String(), want)
 	}
 }

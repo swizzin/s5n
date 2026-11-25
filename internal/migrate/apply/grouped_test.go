@@ -9,6 +9,7 @@ import (
 	"bytes"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/swizzin/s5n/internal/migrate/plan"
 	"github.com/swizzin/s5n/internal/migrate/rewrite"
@@ -19,7 +20,7 @@ import (
 // one whose config a snapshot does not carry whole, one with torrents and
 // paths, and two that share a download client they keep and one they leave.
 func groupedFixture() Summary {
-	leaveWhy := `"Deluge" is a Deluge client and this box runs only qBittorrent, so a rewrite would point it at an app that does not speak its protocol; delete it in the Arr if you do not need it`
+	leaveWhy := "Deluge client: this box runs qBittorrent"
 	return Summary{
 		Rehearsal: true,
 		Instances: []InstanceSummary{
@@ -87,34 +88,29 @@ func renderGrouped(s Summary) string {
 		out.Muted(g.Lead)
 	}
 	for _, block := range g.Blocks {
-		out.Table(block.Title, block.Rows)
+		out.Group(block)
 	}
 	if g.Footer != "" {
-		out.Muted(g.Footer)
+		out.Note(g.Footer)
 	}
 	return buf.String()
 }
 
 func TestTheGroupedSummaryGolden(t *testing.T) {
 	want := `rehearsal · nothing leaves this box · no data is renamed
-5 apps
-  ✓ autobrr      1.5 GiB · 2 addresses · account "the-source-owner" becomes s5n (sign in through the box)
-  ✓ plex         494.0 MiB · 8,264 paths
-  ✓ qbittorrent  571.0 MiB · 1,562 paths · 1,532 torrents stopped
-  ✓ radarr       34.0 MiB · 2,930 paths · 1 address · keeps download client "qBT" · keeps its API key
-  ✓ sonarr       5.2 MiB · 1 path
-data
-  ✓ data  Downloads → downloads · library → media
-needs you
-  ! radarr, sonarr  "Deluge" (172.17.0.1:10365) and "rT" (172.17.0.1:443) stay as it is: "Deluge" is a Deluge client and this box runs only qBittorrent, so a rewrite would point it at an app that does not speak its protocol; delete it in the Arr if you do not need it
-good to know
-  · plex, sonarr  "RemotePathMappings" is not read by anything box runs, so it is left as it is
-  · plex          carried Preferences.xml and its databases; Plex rebuilds its metadata, artwork and thumbnails (artwork uploaded by hand is not carried)
-  · 1 path        the source never kept a media root this app writes to
-not migrated (4)
-  · cluster  cert-manager
-  · default  actualbudget, changedetection, prowlarr/sidecar
-every rewrite, column by column: report.txt in the snapshot, or --details
+apps           carries    changes
+  autobrr      1.5 GiB    2 addresses · login → s5n
+  plex         494.0 MiB  8,264 paths
+  qbittorrent  571.0 MiB  1,562 paths · 1,532 torrents stopped
+  radarr       34.0 MiB   2,930 paths · 1 address · keeps download client
+                          "qBT" · keeps its API key
+  sonarr       5.2 MiB    1 path
+  ✓ data  the real run renames Downloads → downloads · library → media
+  ! radarr, sonarr  kept      "Deluge" (172.17.0.1:10365) and "rT"
+                              (172.17.0.1:443) · Deluge client: this box runs
+                              qBittorrent
+  2 notes · 4 other workloads stay behind · 2 values left as they are ·
+    --details
 `
 	if got := renderGrouped(groupedFixture()); got != want {
 		t.Fatalf("the grouped summary is:\n%s\nwant:\n%s", got, want)
@@ -123,15 +119,19 @@ every rewrite, column by column: report.txt in the snapshot, or --details
 
 // TestTheNotesAreSaidOnce: a note two apps report is one row naming both, not
 // two rows saying the same thing -- the report's duplicate that made the old
-// confirm four lines about one RemotePathMappings.
+// confirm four lines about one RemotePathMappings. The screen counts them; the
+// report is the page that names them.
 func TestTheNotesAreSaidOnce(t *testing.T) {
-	rendered := renderGrouped(groupedFixture())
-	if got := strings.Count(rendered, "RemotePathMappings"); got != 1 {
-		t.Errorf("the shared note is printed %d times, want once:\n%s", got, rendered)
+	if rendered := renderGrouped(groupedFixture()); strings.Contains(rendered, "RemotePathMappings") {
+		t.Errorf("the screen lists a note, and the notes are a count with the report:\n%s", rendered)
+	}
+	text := groupedFixture().Report("final", "snapshot.tar.gz", time.Time{}, "0.6.2").Text()
+	if got := strings.Count(text, "RemotePathMappings"); got != 1 {
+		t.Errorf("the report says the note %d times, want once:\n%s", got, text)
 	}
 	// And it names both apps that said it.
-	if !strings.Contains(rendered, "· plex, sonarr  \"RemotePathMappings\"") {
-		t.Errorf("the shared note does not name the apps it came from:\n%s", rendered)
+	if !strings.Contains(text, "  plex, sonarr  \"RemotePathMappings\"") {
+		t.Errorf("the note does not name the apps it came from:\n%s", text)
 	}
 }
 
@@ -143,27 +143,41 @@ func TestADefaultThatRewroteAnAddressIsCounted(t *testing.T) {
 	if strings.Contains(rendered, "10.244.0.5:8989") {
 		t.Errorf("a default that rewrote an address is printed as its own line:\n%s", rendered)
 	}
-	if !strings.Contains(rendered, "· 1 path        the source never kept a media root this app writes to") {
-		t.Errorf("a default that left a value alone is not said:\n%s", rendered)
+	if !strings.Contains(rendered, "2 values left as they are") {
+		t.Errorf("a default that left a value alone is not counted:\n%s", rendered)
+	}
+	if text := groupedFixture().Report("final", "snapshot.tar.gz", time.Time{}, "0.6.2").Text(); !strings.Contains(text, "old/library") {
+		t.Errorf("the report does not say which value the default left alone:\n%s", text)
 	}
 }
 
-// TestTheNotMigratedListIsFoldedByNamespace: one line per namespace, so a box
-// running fifteen things box has no app for is fifteen names on a line rather
-// than fifteen lines before the question.
-func TestTheNotMigratedListIsFoldedByNamespace(t *testing.T) {
+// TestTheNotMigratedListFoldsToItsCount: the workloads box has no app for are a
+// count on the screen and one row per namespace in the report. A person deciding
+// to move a seedbox reads the apps; the list of what stays behind is a page, not
+// a paragraph before the question (rule 7).
+func TestTheNotMigratedListFoldsToItsCount(t *testing.T) {
 	rendered := renderGrouped(groupedFixture())
-	if got := strings.Count(rendered, "actualbudget"); got != 1 {
-		t.Errorf("the not-migrated list repeats a name %d times", got)
+	if strings.Contains(rendered, "actualbudget") {
+		t.Errorf("the screen lists the workloads that stay behind:\n%s", rendered)
 	}
+	if !strings.Contains(rendered, "4 other workloads stay behind") {
+		t.Errorf("the screen does not count what stays behind:\n%s", rendered)
+	}
+	// The report is where they are, one row per namespace so ten names are one
+	// line: the list a person brings back by hand.
+	doc := groupedFixture().Report("final", "/var/lib/s5n/migrate/migrate-20261123T045038Z-final.tar.gz", time.Date(2026, 11, 23, 4, 50, 38, 0, time.UTC), "0.6.2")
+	text := doc.Text()
 	for _, want := range []string{
-		"not migrated (4)",
-		"· cluster  cert-manager",
-		"· default  actualbudget, changedetection, prowlarr/sidecar",
+		"\nnot migrated\n",
+		"  cluster  cert-manager\n",
+		"  default  actualbudget, changedetection, prowlarr/sidecar\n",
 	} {
-		if !strings.Contains(rendered, want) {
-			t.Errorf("the folded list is missing %q:\n%s", want, rendered)
+		if !strings.Contains(text, want) {
+			t.Errorf("the report is missing %q:\n%s", want, text)
 		}
+	}
+	if got := strings.Count(text, "actualbudget"); got != 1 {
+		t.Errorf("the report names a workload %d times, want once:\n%s", got, text)
 	}
 }
 

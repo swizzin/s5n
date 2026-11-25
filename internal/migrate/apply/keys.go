@@ -1,6 +1,7 @@
 package apply
 
-// keys.go is step 8: every migrated app keeps the API key it has today.
+// keys.go is step 8: every migrated app keeps the API key it has today, and the
+// Plex server token goes into the release Secret so a migrated box knows it.
 //
 // The chart hands an Arr its key through the environment, from the release
 // Secret (charts/s5n/templates/workloads.yaml, `<PREFIX>__AUTH__APIKEY`), and the
@@ -19,6 +20,15 @@ package apply
 // A key that cannot be read is a refusal naming the instance and the file. A
 // silent new key is exactly the failure this step exists to prevent, and a box
 // that cannot tell what the key was has nothing better to offer than to say so.
+//
+// The Plex server token is the one credential that is not an app's own key and
+// is not left out: it is the account token the migrated server is signed in
+// with (Preferences.xml's PlexOnlineToken), it lives in no release Secret until
+// a person supplies one, and every Plex-dependent row on the receipt (Tautulli's
+// PMS link, Maintainerr's connection) is pending without it. So a migration
+// reads it out of the Plex it is copying and seeds the Secret's plex-token with
+// it -- never over one already there, because an existing key is either the
+// person's own or one this step wrote on an earlier run of the same plan.
 
 import (
 	"context"
@@ -27,6 +37,8 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+
+	"github.com/swizzin/s5n/internal/migrate/plex"
 )
 
 // KeyStore is the release Secret, as one data key at a time.
@@ -62,7 +74,9 @@ type apiKey struct {
 // password is a PBKDF2 hash in its settings file, and the release's WebUI skips
 // its login for the box's own addresses; qui's, autobrr's and PeerBanHelper's
 // secrets are the chart's own automation account, not the source's; plex-token
-// and plex-claim-token are the Plex account's, and no app config holds them.
+// and plex-claim-token are the Plex account's, and no app config holds them —
+// except Plex's own, which is readPlexToken's job rather than this table's,
+// because a Plex config directory is not a file this package scans.
 var apiKeys = map[string]apiKey{
 	appSonarr:   {file: configXML, read: xmlAPIKey},
 	appRadarr:   {file: configXML, read: xmlAPIKey},
@@ -80,6 +94,12 @@ const (
 // name the chart renders (`<instance>-apikey`, secret.yaml:24) for the Arrs and
 // for Tautulli alike.
 func secretKey(instance string) string { return instance + "-apikey" }
+
+// plexTokenKey is the release Secret's `plex-token`: the Plex server token the
+// wiring Job hands Tautulli and Maintainerr (charts/s5n/templates/secret.yaml).
+// It is optional for the chart and is never generated, so on a plain box it
+// exists only when a person supplied one.
+const plexTokenKey = "plex-token"
 
 // keyed reports whether an app's key has to be kept, and where it lives.
 func keyed(app string) (apiKey, bool) {
@@ -121,24 +141,91 @@ func (m *migration) readKeys() error {
 			items = append(items, fmt.Sprintf("apps.%s: %s holds no API key; the app writes one on its first start, so start the source once before migrating it", name, src.file))
 			continue
 		}
-		m.keys = append(m.keys, keptKey{instance: name, name: secretKey(name), value: value})
+		m.keys = append(m.keys, keptKey{instance: name, name: secretKey(name), value: value, what: "API key"})
 		names = append(names, secretKey(name))
 	}
+	if item := m.readPlexToken(); item != "" {
+		items = append(items, item)
+	} else if k, ok := m.plexToken(); ok {
+		names = append(names, k.name)
+	}
 	if len(items) > 0 {
-		return &problems{lead: "the API keys these apps have today cannot all be kept", items: items}
+		return &problems{lead: "the credentials these apps have today cannot all be kept", items: items}
 	}
 	sort.Strings(names)
 	m.keyNames = names
 	return nil
 }
 
-// keptKey is one key read out of a source config, waiting for its Secret write.
-// The value never leaves this struct except into the Secret: no summary, no
-// error and no log line carries it.
+// readPlexToken reads the Plex server token out of the snapshot's Plex config and
+// queues it for the release Secret. It returns one problem line for the refusal
+// (and queues nothing), or "" -- including when the box is not migrating a Plex
+// at all, or the Plex it is copying was never signed in.
+//
+// The token comes from the server's own Preferences.xml, which is the same file
+// the rewriter edits: a Plex that was claimed carries the account's token there,
+// and a Plex that was not carries an empty one, which is exactly the state the
+// wiring Job reports pending for.
+func (m *migration) readPlexToken() string {
+	var plexApp string
+	for _, name := range planApps(m.p) {
+		if CatalogApp(name, m.env.Catalog) == appPlex {
+			plexApp = name
+			break
+		}
+	}
+	if plexApp == "" {
+		return ""
+	}
+	// The snapshot's own copy, not the staged one: the pass before an install
+	// stages nothing of a Plex whose whole data travels (it counts the snapshot
+	// instead), and the question has to promise the same token the run writes.
+	// Preferences.xml is part of the state every extraction keeps, and the
+	// rewrite never touches the token, so the two copies hold the same value.
+	token, ok, err := plex.ServerToken(filepath.Join(m.env.Configs, plexApp))
+	if err != nil {
+		return fmt.Sprintf("apps.%s: its Plex server token cannot be read (%v); a token it has today has to be kept", plexApp, err)
+	}
+	if !ok {
+		return ""
+	}
+	m.keys = append(m.keys, keptKey{
+		instance: plexApp,
+		name:     plexTokenKey,
+		value:    token,
+		what:     "Plex token",
+		// A person's own token wins. The Secret's plex-token is the one
+		// credential here that a box can be given before a migration (the
+		// documented way to patch one in), so it is never written over.
+		ifAbsent: true,
+	})
+	return ""
+}
+
+// plexToken is the queued Plex server token, if this run read one.
+func (m *migration) plexToken() (keptKey, bool) {
+	for _, k := range m.keys {
+		if k.name == plexTokenKey {
+			return k, true
+		}
+	}
+	return keptKey{}, false
+}
+
+// keptKey is one credential read out of a source config, waiting for its Secret
+// write. The value never leaves this struct except into the Secret: no summary,
+// no error and no log line carries it.
 type keptKey struct {
 	instance string
 	name     string
 	value    string
+	// what is what the value is, as the confirm's row names it ("API key",
+	// "Plex token"). It is a fact about the credential, never about its value.
+	what string
+	// ifAbsent makes the write skip a key the release Secret already holds. Only
+	// the Plex token is written this way: the others are the apps' own keys, and
+	// the source's is authoritative for them.
+	ifAbsent bool
 }
 
 // keepKeys is step 8: each key the source held is written into the release
@@ -148,17 +235,30 @@ func (m *migration) keepKeys(ctx context.Context) error {
 		return nil
 	}
 	if len(m.keys) > 0 && m.env.Secret == nil {
-		return fmt.Errorf("this run has no release Secret to keep %d API %s in, and an app whose key the chart replaces answers a key its own clients no longer know",
-			len(m.keys), plural(len(m.keys), "key", "keys"))
+		return fmt.Errorf("this run has no release Secret to keep %d %s in, and an app whose credential the chart supplies answers with one its own clients no longer know",
+			len(m.keys), plural(len(m.keys), "credential", "credentials"))
 	}
 	if err := ctx.Err(); err != nil {
 		return err
 	}
 	for _, k := range m.keys {
+		if k.ifAbsent {
+			// Never over a credential the release Secret already holds: the
+			// Plex token is the account's, and a person may have supplied one
+			// before this run. Nothing about the value is read out here.
+			existing, err := m.env.Secret.Get(ctx, k.name)
+			if err != nil {
+				return fmt.Errorf("read the release Secret's %s before keeping %s's %s: %w", k.name, k.instance, k.what, err)
+			}
+			if strings.TrimSpace(existing) != "" {
+				m.res.Notes = append(m.res.Notes, fmt.Sprintf("%s: the release Secret already holds a %s, so %s's was not written over", k.instance, k.name, k.instance))
+				continue
+			}
+		}
 		if err := m.env.Secret.Set(ctx, k.name, k.value); err != nil {
 			// The error is wrapped without the value: a Secret that refused the
 			// write says nothing about what it was asked to hold.
-			return fmt.Errorf("keep %s's API key in the release Secret (key %s): %w", k.instance, k.name, err)
+			return fmt.Errorf("keep %s's %s in the release Secret (key %s): %w", k.instance, k.what, k.name, err)
 		}
 		m.res.Keys = append(m.res.Keys, k.name)
 	}

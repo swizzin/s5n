@@ -70,8 +70,14 @@ func TestEffectiveAgainstTheRealChart(t *testing.T) {
 	if qbt["image"].(map[string]any)["variant"] != "default" {
 		t.Errorf("qbt image = %v, want the user's chosen variant", qbt["image"])
 	}
-	if port := qbt["torrent"].(map[string]any)["port"]; port != 31111 {
-		t.Errorf("torrent port = %v, want the chart default", port)
+	// The chart ships no peer port and this grant records none, so the
+	// effective values carry none: the box is one installed before box picked
+	// the port, and box keeps the number its release already renders (apply's
+	// keepPeerPort) rather than this merge inventing one. What matters here is
+	// that such a box still validates against the real chart -- an old box
+	// must never be refused by a chart that stopped defaulting the key.
+	if port, ok := qbt["torrent"].(map[string]any)["port"]; ok {
+		t.Errorf("torrent port = %v, want none: the chart ships no default", port)
 	}
 
 	global := got["global"].(map[string]any)

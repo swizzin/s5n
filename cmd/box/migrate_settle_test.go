@@ -53,14 +53,14 @@ func TestMigrateDiscoverTakesAndNamesEveryDefault(t *testing.T) {
 	if err != nil {
 		t.Fatalf("discover: %v\n%s", err, text)
 	}
-	// report.txt carries the called-out block, grouped by decision, with the
-	// reason and the places that hold the value.
-	for _, want := range []string{"called out:", "left as it is:", "/mnt/other/shows", "sonarr: sonarr.db ImportLists.RootFolderPath"} {
+	// The report's checks section carries every decision, with its reason and
+	// the places that hold the value.
+	for _, want := range []string{"\nchecks\n", "left as it is", "/mnt/other/shows", "held by sonarr:", "sonarr.db ImportLists.RootFolderPath"} {
 		if !strings.Contains(text, want) {
 			t.Errorf("the report does not say %q:\n%s", want, text)
 		}
 	}
-	opened, err := bundle.Open(out, filepath.Join(t.TempDir(), "open"))
+	opened, err := bundle.Open(out, filepath.Join(t.TempDir(), "open"), nil, nil)
 	if err != nil {
 		t.Fatalf("the snapshot does not open: %v", err)
 	}
@@ -81,17 +81,14 @@ func TestMigrateDiscoverTakesAndNamesEveryDefault(t *testing.T) {
 	if len(rules) != 1 || !rules[0].Default || rules[0].To != "/mnt/other/shows" || rules[0].Why == "" {
 		t.Errorf("sonarr's rule for the uncovered path = %+v, want an identity default with a reason", rules)
 	}
-	// And the run said so, twice: once where it could not settle it, and once
-	// as the last thing on the screen.
+	// And the run said so: one line naming how many decisions it took, and the
+	// report naming each one. The screen is counts, so the path is the report's.
 	lines := printed.String()
-	if !strings.Contains(lines, "taking every one of these defaults") {
-		t.Errorf("the run did not say it was taking the defaults:\n%s", lines)
+	if !strings.Contains(lines, "! defaults       1 default taken · the report names each one") {
+		t.Errorf("the run's last screen does not say how many defaults it took:\n%s", lines)
 	}
-	if !strings.Contains(lines, "defaults taken") {
-		t.Errorf("the run's last screen does not list the defaults it took:\n%s", lines)
-	}
-	if got := lines[strings.LastIndex(lines, "defaults taken"):]; !strings.Contains(got, "/mnt/other/shows") {
-		t.Errorf("the last screen does not name the path it defaulted:\n%s", got)
+	if strings.Contains(lines, "/mnt/other/shows") {
+		t.Errorf("the screen lists the default itself, and the report is the page that does:\n%s", lines)
 	}
 }
 
@@ -152,7 +149,7 @@ func TestMigrateDiscoverAsksEachDefault(t *testing.T) {
 	if len(asker.asked) != 0 {
 		t.Fatalf("asked %d questions about a source with no unsettled address", len(asker.asked))
 	}
-	opened, err := bundle.Open(out, filepath.Join(t.TempDir(), "open"))
+	opened, err := bundle.Open(out, filepath.Join(t.TempDir(), "open"), nil, nil)
 	if err != nil {
 		t.Fatalf("the snapshot does not open: %v", err)
 	}
@@ -165,8 +162,8 @@ func TestMigrateDiscoverAsksEachDefault(t *testing.T) {
 	if len(p.Defaults()) != 1 {
 		t.Errorf("the plan carries %d defaults, want the path nothing asked about", len(p.Defaults()))
 	}
-	if !strings.Contains(printed.String(), "defaults taken") {
-		t.Errorf("the guided run's last screen does not list what it took:\n%s", printed.String())
+	if !strings.Contains(printed.String(), "! defaults       1 default taken · the report names each one") {
+		t.Errorf("the guided run's last screen does not say what it took:\n%s", printed.String())
 	}
 }
 
@@ -200,26 +197,26 @@ func TestMigrateDiscoverAsksAboutAnUnsettledAddress(t *testing.T) {
 	if q.Default != "qbittorrent" {
 		t.Errorf("box's default for a qBittorrent downloader = %q, want qbittorrent", q.Default)
 	}
-	// The default is the first option and says so, and leaving the address is
-	// always one of the answers.
-	if !strings.Contains(q.Options[0].Label, "box's default") {
-		t.Errorf("box's answer is not labelled as the default: %+v", q.Options[0])
+	// The default is the first option, its label is the answer itself, and
+	// leaving the address is always one of the answers (rules 10 and 1).
+	if q.Options[0].Label != "point it at qbittorrent" {
+		t.Errorf("box's answer is not the first option: %+v", q.Options[0])
 	}
 	var leave bool
 	for _, o := range q.Options {
-		if o.Value == leaveValue && strings.Contains(o.Label, "leave it as it is") {
+		if o.Value == leaveValue && o.Label == "leave it" {
 			leave = true
 		}
 	}
 	if !leave {
 		t.Errorf("the question does not offer leaving the address alone: %+v", q.Options)
 	}
-	// And the reason is on the question, single-line, rather than a paragraph in
-	// the live form's title.
-	if strings.Contains(q.Prompt, "\n") || !strings.Contains(q.Prompt, "leave it as it is, or point it at an app?") {
+	// One line, and it is the question rather than a paragraph: the reason is
+	// the report's, and the answer is what the row after it says.
+	if q.Prompt != "example.com:443: point it at which app?" {
 		t.Errorf("the question reads:\n%s", q.Prompt)
 	}
-	opened, err := bundle.Open(out, filepath.Join(t.TempDir(), "open"))
+	opened, err := bundle.Open(out, filepath.Join(t.TempDir(), "open"), nil, nil)
 	if err != nil {
 		t.Fatalf("the snapshot does not open: %v", err)
 	}

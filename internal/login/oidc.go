@@ -14,6 +14,7 @@ import (
 
 	"github.com/swizzin/s5n/internal/authelia"
 	"github.com/swizzin/s5n/internal/kube"
+	"github.com/swizzin/s5n/internal/say"
 )
 
 // The identity provider's material is split in two, and which half lives where
@@ -315,13 +316,19 @@ func (d *Decision) writeLoginSecret(ctx context.Context, cl Cluster, found bool,
 		if err := cl.ApplyWith(ctx, kube.FieldManager, []map[string]any{secret}); err != nil {
 			return fmt.Errorf("update Secret %s/%s: %w", Namespace, authelia.SecretName, err)
 		}
-		d.report().Line(fmt.Sprintf("updated Secret %s/%s: the provider's key and one digest per client, added and never changed", Namespace, authelia.SecretName))
+		d.report().Detail(fmt.Sprintf("updated Secret %s/%s: the provider's key and one digest per client, added and never changed", Namespace, authelia.SecretName))
 		return nil
 	}
 	if err := cl.Create(ctx, secret); err != nil {
 		return fmt.Errorf("create Secret %s/%s: %w", Namespace, authelia.SecretName, err)
 	}
-	d.report().Line(fmt.Sprintf("created Secret %s/%s: its key must be backed up with the claim, and box never changes it", Namespace, authelia.SecretName))
+	// The one fact a person has to act on: the key is nowhere else, and it
+	// never changes once it exists.
+	d.report().Rows([]say.Row{{
+		Mark:  say.MarkNeeds,
+		Name:  "login key",
+		Facts: []string{"back it up with the claim, in " + Namespace + "/" + authelia.SecretName},
+	}})
 	return nil
 }
 
@@ -373,7 +380,7 @@ func (d *Decision) ensureClientSecrets(ctx context.Context, cl Cluster, namespac
 			if err := cl.ApplyWith(ctx, kube.FieldManager, []map[string]any{clientSecretDocument(namespace, secretName, secret)}); err != nil {
 				return changed, fmt.Errorf("write Secret %s/%s: %w", namespace, secretName, err)
 			}
-			d.report().Line(fmt.Sprintf("created Secret %s/%s: %s reads it as its client secret", namespace, secretName, app))
+			d.report().Detail(fmt.Sprintf("created Secret %s/%s: %s reads it as its client secret", namespace, secretName, app))
 			changed = true
 		}
 		if sec.digests[clientID] == "" {

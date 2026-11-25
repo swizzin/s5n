@@ -973,7 +973,7 @@ func TestCertificatesWaitOnceForTheRun(t *testing.T) {
 	set := &Certificates{
 		Hosts:   hosts,
 		Open:    func() (CertificateCluster, error) { return cl, nil },
-		Say:     &say.Plain{W: &out, Err: &out},
+		Say:     &say.Plain{W: &out, Err: &out, Log: &out},
 		Timeout: 250 * time.Millisecond,
 	}
 	results, err := set.Apply(context.Background())
@@ -1055,7 +1055,7 @@ func assertWarningsInHostOrder(t *testing.T, log string, results []CertificateRe
 		if row == "" {
 			t.Fatalf("missing the host row for %s:\n%s", res.Host, log)
 		}
-		if !strings.Contains(row, "http only: certificate not Ready (Issuing: waiting for HTTP-01 challenge)") {
+		if !strings.Contains(row, "http only: the certificate is not Ready (Issuing: waiting for HTTP-01 challenge) · the next run retries it") {
 			t.Fatalf("the host row for %s does not say why it is not served: %q", res.Host, row)
 		}
 		i := strings.Index(log, row)
@@ -1104,7 +1104,7 @@ func TestCertificatesReadyOnTheFirstReadWaitOnce(t *testing.T) {
 	set := &Certificates{
 		Hosts:   hosts,
 		Open:    func() (CertificateCluster, error) { return cl, nil },
-		Say:     &say.Plain{W: &out, Err: &out},
+		Say:     &say.Plain{W: &out, Err: &out, Log: &out},
 		Timeout: time.Minute,
 	}
 	results, err := set.Apply(context.Background())

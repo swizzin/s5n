@@ -60,7 +60,7 @@ func (t timerRun) run(ctx context.Context) error {
 		// One line and nothing else: no state write, no cluster client, no
 		// registry. The unit keeps waking box, and box keeps saying this, so an
 		// operator who turned the timer off can see that it is off.
-		t.report().Line(fmt.Sprintf("box does not check for updates by itself: %s says update.timer: off", t.Path))
+		t.report().Rows([]say.Row{{Mark: say.MarkNote, Name: "updates", State: "off", Facts: []string{t.Path + " says update.timer: off"}}})
 		return nil
 	}
 	state, err := t.State.Load()
@@ -99,7 +99,7 @@ func (o *updateFlags) unattended() (yes, plain bool) {
 // noTimerLine is what bootstrap says on a host where box cannot schedule its own
 // update: one line, naming the command cron would run, because a box that
 // silently never updates is the failure this feature exists to prevent.
-const noTimerLine = "box will not check for updates by itself: run `box update --timer` from cron every 15 minutes"
+const noTimerLine = "no update timer on this host: run box update --timer from cron every 15 minutes"
 
 // systemdRunning says this host's systemd is up: /run/systemd/system exists for
 // as long as it is. root on a host without it (a container, a PID 1 that is not
@@ -138,7 +138,7 @@ func timerUnitsFor(unitDir string, root, systemd bool) (hostconf.Units, string) 
 func boxPath() (string, error) {
 	path, err := os.Executable()
 	if err != nil {
-		return "", fmt.Errorf("find the box binary to schedule: %w", err)
+		return "", fmt.Errorf("find box's binary to schedule: %w", err)
 	}
 	if resolved, err := filepath.EvalSymlinks(path); err == nil {
 		path = resolved
@@ -147,29 +147,44 @@ func boxPath() (string, error) {
 }
 
 // scheduleUpdates writes the timer's units for the files this run installed, and
-// says what it did. A failure is a warning, not a failed bootstrap: the seedbox
-// is installed and serving, and the line names the cron command that does the
-// same job.
-func scheduleUpdates(ctx context.Context, unitDir, record, grant, values string, out say.Reporter) {
+// says what it did. A failure is a follow-up row, not a failed bootstrap: the
+// seedbox is installed and serving, and the row names the cron command that
+// does the same job. The rows are the caller's to print with whatever else the
+// run left a person.
+func scheduleUpdates(ctx context.Context, unitDir, record, grant, values string, out say.Reporter) []say.Row {
 	units, why := timerUnits(unitDir)
 	if units == nil {
-		out.Warn(why)
-		return
+		out.Detail(why)
+		return []say.Row{timerFollowUp(why)}
 	}
 	path, err := boxPath()
 	if err != nil {
-		out.Warn(noTimerLine + " (" + err.Error() + ")")
-		return
+		out.Detail(noTimerLine + " (" + err.Error() + ")")
+		return []say.Row{timerFollowUp(noTimerLine)}
 	}
 	changed, err := hostconf.Install(ctx, units, path, record, grant, values)
 	if err != nil {
-		out.Warn("box's update timer is not running: " + err.Error())
-		return
+		out.Detail("box's update timer is not running: " + err.Error())
+		return []say.Row{timerFollowUp("box's update timer is not running: " + err.Error())}
 	}
 	if changed {
 		out.Muted(fmt.Sprintf("box checks for a newer release every %d minutes: %s, and update.timer in %s turns that off",
 			hostconf.WakeInterval, hostconf.TimerFile, hostconf.Path(record)))
-		return
+		return nil
 	}
 	out.Muted(fmt.Sprintf("%s is already installed and up to date", hostconf.TimerFile))
+	return nil
+}
+
+// timerFollowUp is the row a host with no update timer gets: what is missing,
+// and the command cron runs in its place. The words are the same whatever the
+// reason -- root's run on a host with systemd is the only one that installs it
+// -- and the reason itself goes to the log with the row.
+func timerFollowUp(string) say.Row {
+	return say.Row{
+		Mark:    say.MarkNeeds,
+		Name:    "updates",
+		Facts:   []string{"run this from cron every 15 minutes"},
+		Command: "box update --timer",
+	}
 }

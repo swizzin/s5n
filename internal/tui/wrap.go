@@ -105,6 +105,43 @@ func wrapList(items []string, sep string, width int) []string {
 	return lines
 }
 
+// wrapShell breaks a command into lines a shell would continue: only at spaces,
+// with ` \` ending every line but the last, and the backslash counted in the
+// width. A token is never split -- a path broken across two lines is a path
+// someone copies wrong -- unless a single token is wider than the line, which
+// no width can fix.
+func wrapShell(cmd string, width int) []string {
+	if width < 4 {
+		width = 4
+	}
+	if lipgloss.Width(cmd) <= width {
+		return []string{cmd}
+	}
+	words := strings.Fields(cmd)
+	var lines []string
+	cur := ""
+	for _, word := range words {
+		candidate := word
+		if cur != "" {
+			candidate = cur + " " + word
+		}
+		if lipgloss.Width(candidate) <= width-2 {
+			cur = candidate
+			continue
+		}
+		if cur != "" {
+			lines = append(lines, cur+" \\")
+		}
+		// A token wider than the line cannot be kept whole at any width
+		// and must not be split, so it takes a line of its own.
+		cur = word
+	}
+	if cur != "" {
+		lines = append(lines, cur)
+	}
+	return lines
+}
+
 // hardBreak splits one token that cannot fit any line, at a cell boundary.
 func hardBreak(word string, width int) []string {
 	var out []string

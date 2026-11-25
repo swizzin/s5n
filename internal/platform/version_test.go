@@ -117,9 +117,7 @@ func TestApplyVerifiesAReleaseWhoseVersionCarriesAV(t *testing.T) {
 		t.Fatalf("Helm was called for releases already at their pin (the v-prefix bug): %+v", f.rel.installed)
 	}
 	for _, line := range []string{
-		"= Envoy Gateway " + pins.EnvoyGateway + " (the front door): installed, verifying",
-		"= cert-manager " + pins.CertManager + " (certificates): installed, verifying",
-		"= MetalLB " + pins.MetalLB + " (the gateway's address): installed, verifying",
+		"= cert-manager " + pins.CertManager + " · Envoy Gateway " + pins.EnvoyGateway + " · MetalLB " + pins.MetalLB,
 	} {
 		if !strings.Contains(f.log.String(), line) {
 			t.Fatalf("the plan did not verify %q: %q", line, f.log.String())

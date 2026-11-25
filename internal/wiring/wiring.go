@@ -91,6 +91,14 @@ func (r *Runner) logf(format string, args ...any) {
 	}
 }
 
+// stepLog is one line per check: the check's name, and what it cost. Every step
+// is this one shape, because box reads the newest line of this log and shows it
+// beside a spinner: a column padded for a forty-line table reads as noise on one
+// line, and a name with its result after it reads as what it is.
+func (r *Runner) stepLog(name, detail string) {
+	r.logf("%s: %s", name, detail)
+}
+
 func (r *Runner) contractRetry() time.Duration {
 	if r.ContractRetry > 0 {
 		return r.ContractRetry
@@ -124,7 +132,7 @@ func (r *Runner) Run(ctx context.Context) (*Result, error) {
 				res.Error = fmt.Sprintf("publish wiring result: %v", perr)
 				err = fmt.Errorf("%s", res.Error)
 			}
-			r.logf("  %-38s failed: %v", "publish", perr)
+			r.stepLog("publish", "failed: "+perr.Error())
 		}
 	}
 	r.logf("%s (%.1fs, %d created / %d updated / %d unchanged)",
@@ -137,7 +145,7 @@ func (r *Runner) Run(ctx context.Context) (*Result, error) {
 func (r *Runner) ensure(res *Result, name string, change apps.Change, err error) error {
 	if err != nil {
 		res.Steps = append(res.Steps, Step{Name: name, Result: "failed", Detail: err.Error()})
-		r.logf("  %-38s failed: %v", name, err)
+		r.stepLog(name, "failed: "+err.Error())
 		return fmt.Errorf("%s: %w", name, err)
 	}
 	switch change {
@@ -147,13 +155,13 @@ func (r *Runner) ensure(res *Result, name string, change apps.Change, err error)
 		res.Writes.Updated++
 	case apps.Skipped:
 		res.Steps = append(res.Steps, Step{Name: name, Result: "skipped"})
-		r.logf("  %-38s skipped", name)
+		r.stepLog(name, "skipped")
 		return nil
 	default:
 		res.Writes.Unchanged++
 	}
 	res.Steps = append(res.Steps, Step{Name: name, Result: "ok", Detail: change.String()})
-	r.logf("  %-38s %s", name, change)
+	r.stepLog(name, change.String())
 	return nil
 }
 
@@ -163,7 +171,7 @@ func (r *Runner) ensure(res *Result, name string, change apps.Change, err error)
 func (r *Runner) ensureResult(res *Result, name string, result apps.EnsureResult, err error) error {
 	if err != nil {
 		res.Steps = append(res.Steps, Step{Name: name, Result: "failed", Detail: err.Error()})
-		r.logf("  %-38s failed: %v", name, err)
+		r.stepLog(name, "failed: "+err.Error())
 		return fmt.Errorf("%s: %w", name, err)
 	}
 	switch result.Change {
@@ -173,7 +181,7 @@ func (r *Runner) ensureResult(res *Result, name string, result apps.EnsureResult
 		res.Writes.Updated++
 	case apps.Skipped:
 		res.Steps = append(res.Steps, Step{Name: name, Result: "skipped"})
-		r.logf("  %-38s skipped", name)
+		r.stepLog(name, "skipped")
 		return nil
 	default:
 		res.Writes.Unchanged++
@@ -188,9 +196,9 @@ func (r *Runner) ensureResult(res *Result, name string, result apps.EnsureResult
 	step := Step{Name: name, Result: "ok", Detail: detail, Drift: result.Drift}
 	res.Steps = append(res.Steps, step)
 	if len(result.Drift) > 0 {
-		r.logf("  %-38s %s (%d field(s) restored)", name, detail, len(result.Drift))
+		r.stepLog(name, fmt.Sprintf("%s (%d fields restored)", detail, len(result.Drift)))
 	} else {
-		r.logf("  %-38s %s", name, detail)
+		r.stepLog(name, detail)
 	}
 	return nil
 }
@@ -228,7 +236,7 @@ func (r *Runner) loadOwned(ctx context.Context) (rec *OwnedRecord, note string, 
 // okStep records a check that has no desired-state diff of its own.
 func (r *Runner) okStep(res *Result, name, detail string) {
 	res.Steps = append(res.Steps, Step{Name: name, Result: "ok", Detail: detail})
-	r.logf("  %-38s ok %s", name, detail)
+	r.stepLog(name, "ok ("+detail+")")
 }
 
 func (r *Runner) work(ctx context.Context, res *Result) error {
@@ -634,7 +642,7 @@ func (r *Runner) work(ctx context.Context, res *Result) error {
 				detail = "Plex is not claimed yet: until it is, whoever signs in to Seerr first becomes its owner. Claim it at https://plex.tv/claim"
 			}
 			res.Steps = append(res.Steps, Step{Name: "plex/claim", Result: "pending", Detail: detail})
-			r.logf("  %-38s pending: no claim token", "plex/claim")
+			r.stepLog("plex/claim", "pending (no claim token)")
 		}
 	}
 
@@ -655,17 +663,27 @@ func (r *Runner) work(ctx context.Context, res *Result) error {
 			if err != nil {
 				return r.ensure(res, "tautulli/plex", apps.Unchanged, err)
 			}
-			if haveToken {
-				// Prove the token against Plex itself, and before touching
-				// Tautulli at all. Tautulli's own get_server_identity reads
-				// Plex's unauthenticated /identity, so a bogus token would
-				// otherwise "prove" a link Plex refuses on every real request;
-				// /library/sections answers 401 to a token Plex does not
-				// accept. A rejected token is a release credential error like
-				// any other: no Tautulli write, and the run stops.
-				if err := plex.VerifyToken(ctx, plexToken); err != nil {
+			// Why the link will not be written, "" when it will. The token is
+			// proven against Plex itself, and before touching Tautulli at all:
+			// Tautulli's own get_server_identity reads Plex's unauthenticated
+			// /identity, so a bogus token would otherwise "prove" a link Plex
+			// refuses on every real request; /library/sections answers 401 to a
+			// token Plex does not accept. A rejected token is a release
+			// credential error like any other — except on a server that is not
+			// claimed, where every token is refused (see plexTokenPending).
+			pendingReason, pendingShort := "", ""
+			if !haveToken {
+				// box fills the token in from Plex's own settings on every
+				// apply (internal/release), so a hand-set key is not what a
+				// person has to do here: claiming the server is.
+				pendingReason = plexTokenMissing(plexIdentity, "Tautulli")
+				pendingShort = "no Plex token"
+			} else if err := plex.VerifyToken(ctx, plexToken); err != nil {
+				detail, ok := plexTokenPending(plexIdentity, err)
+				if !ok {
 					return r.ensure(res, "tautulli/plex", apps.Unchanged, err)
 				}
+				pendingReason, pendingShort = detail, "plex is not claimed"
 			}
 			tt := apps.NewTautulli(c.Tautulli.URL, key)
 			r.logf("waiting for Tautulli at %s", c.Tautulli.URL)
@@ -673,10 +691,9 @@ func (r *Runner) work(ctx context.Context, res *Result) error {
 				return r.ensure(res, "tautulli/ready", apps.Unchanged, err)
 			}
 			r.okStep(res, "tautulli/ready", c.Tautulli.URL)
-			if !haveToken {
-				const detail = "no Plex token: set plex-token (from a claimed server) to let the wiring Job connect Tautulli"
-				res.Steps = append(res.Steps, Step{Name: "tautulli/plex", Result: "pending", Detail: detail})
-				r.logf("  %-38s pending: no Plex token", "tautulli/plex")
+			if pendingReason != "" {
+				res.Steps = append(res.Steps, Step{Name: "tautulli/plex", Result: "pending", Detail: pendingReason})
+				r.stepLog("tautulli/plex", "pending ("+pendingShort+")")
 			} else {
 				plexHost, plexPort, err := hostPort(c.Plex.URL)
 				if err != nil {
@@ -697,6 +714,68 @@ func (r *Runner) work(ctx context.Context, res *Result) error {
 		}
 	}
 
+	if c.Maintainerr != nil {
+		// Maintainerr's Plex connection is a row in its settings, and it is the
+		// one thing that has to be right before any of its rules can run: one it
+		// cannot reach deletes nothing and reports nothing. It takes the same
+		// server token Tautulli's PMS link does.
+		if plexIdentity == nil {
+			res.Steps = append(res.Steps, Step{Name: "maintainerr/plex", Result: "pending", Detail: "plex is not deployed in this release"})
+		} else {
+			plexToken, haveToken, err := ReadOptionalSecret(c.Maintainerr.PlexTokenFile)
+			if err != nil {
+				return r.ensure(res, "maintainerr/plex", apps.Unchanged, err)
+			}
+			// Same rule as Tautulli's: the token is proven against Plex before
+			// anything is written with it, and a server that is not claimed
+			// refuses every token, so that state is pending rather than failed.
+			pendingReason, pendingShort := "", ""
+			if !haveToken {
+				pendingReason = plexTokenMissing(plexIdentity, "Maintainerr")
+				pendingShort = "no Plex token"
+			} else if err := plex.VerifyToken(ctx, plexToken); err != nil {
+				detail, ok := plexTokenPending(plexIdentity, err)
+				if !ok {
+					return r.ensure(res, "maintainerr/plex", apps.Unchanged, err)
+				}
+				pendingReason, pendingShort = detail, "plex is not claimed"
+			}
+			me := apps.NewMaintainerr(c.Maintainerr.URL, c.Maintainerr.URLBase)
+			r.logf("waiting for Maintainerr at %s%s", c.Maintainerr.URL, c.Maintainerr.URLBase)
+			// Its readiness answers from the app's own database, which is what
+			// says the settings this step writes land in a store that works.
+			if err := me.WaitReady(ctx, timeout); err != nil {
+				return r.ensure(res, "maintainerr/ready", apps.Unchanged, err)
+			}
+			r.okStep(res, "maintainerr/ready", c.Maintainerr.URL+c.Maintainerr.URLBase)
+			if pendingReason != "" {
+				res.Steps = append(res.Steps, Step{Name: "maintainerr/plex", Result: "pending", Detail: pendingReason})
+				r.stepLog("maintainerr/plex", "pending ("+pendingShort+")")
+			} else {
+				plexHost, plexPort, err := hostPort(c.Plex.URL)
+				if err != nil {
+					return r.ensure(res, "maintainerr/plex", apps.Unchanged, err)
+				}
+				// Maintainerr masks the token it stores, so the fingerprint of
+				// the one last written and proven is what makes a rotation in the
+				// Secret visible (owned.json) -- the same rule as Tautulli's.
+				change, err := me.EnsurePlexConnection(ctx, apps.PlexConnection{
+					Host:             plexHost,
+					Port:             plexPort,
+					Token:            plexToken,
+					KnownFingerprint: owned.MaintainerrPlexTokenFingerprint(),
+				})
+				if err := r.ensure(res, "maintainerr/plex", change, err); err != nil {
+					return err
+				}
+				// Only after the write and its proof succeeded: a fingerprint
+				// recorded for a connection Maintainerr never proved would mask
+				// a rotation.
+				owned.SetMaintainerrPlexTokenFingerprint(apps.PlexTokenFingerprint(plexToken))
+			}
+		}
+	}
+
 	if c.Seerr != nil {
 		seerr := apps.NewSeerr(c.Seerr.URL)
 		r.logf("waiting for Seerr at %s", c.Seerr.URL)
@@ -704,16 +783,25 @@ func (r *Runner) work(ctx context.Context, res *Result) error {
 			return r.ensure(res, "seerr/ready", apps.Unchanged, err)
 		}
 		r.okStep(res, "seerr/ready", c.Seerr.URL)
+		public, err := seerr.Settings(ctx)
+		if err != nil {
+			return r.ensure(res, "seerr/settings", apps.Unchanged, err)
+		}
 		// Every settings endpoint in Seerr needs an authenticated admin
 		// session, and the only way to create its first admin user is an
 		// interactive Plex (or Jellyfin) OAuth sign-in through a browser — a
 		// claim token does not help, because it authenticates the Plex
-		// *server* to plex.tv, not a plex.tv *account* into Seerr. This is
-		// always pending until a human signs in once, regardless of Plex's
-		// claim state.
-		res.Steps = append(res.Steps, Step{Name: "seerr/plex", Result: "pending",
-			Detail: "Seerr has no admin account yet: sign in once at /seerr with Plex to let the wiring Job take over"})
-		r.logf("  %-38s pending: needs one interactive Plex sign-in", "seerr/plex")
+		// *server* to plex.tv, not a plex.tv *account* into Seerr. So the
+		// question this run can answer is only whether an admin exists:
+		// Seerr's own `initialized` says so, and a migrated Seerr brings its
+		// admin — and its API key — in the settings its snapshot carried.
+		// There is nothing left to ask of a box whose Seerr is set up, so
+		// that box prints no row at all rather than a to-do it cannot do.
+		if !public.Initialized {
+			res.Steps = append(res.Steps, Step{Name: "seerr/plex", Result: "pending",
+				Detail: fmt.Sprintf("Seerr has no admin account yet: sign in once at %s with Plex to let the wiring Job take over", c.Seerr.PublicURL)})
+			r.stepLog("seerr/plex", "pending (needs one interactive Plex sign-in)")
+		}
 	}
 
 	if r.Publish != nil {
@@ -772,6 +860,36 @@ func Summary(res *Result) string {
 		fmt.Fprintf(&b, "error: %s\n", res.Error)
 	}
 	return b.String()
+}
+
+// plexTokenPending says a Plex server token cannot be used because the server is
+// not signed in to a Plex.tv account at all: Plex refuses every server token
+// until it is claimed, so a 401 there is the claim's absence, not a bad token.
+// The row is pending, with the claim as the thing to do, and nothing is written
+// with a token the server would refuse.
+//
+// It is deliberately narrow. A claimed server that rejects the token is a
+// credential error like any other, and the caller stops the run: the token was
+// either supplied by a person or seeded from a server whose account plex.tv no
+// longer recognises, and neither is something a retry fixes.
+func plexTokenPending(ident *apps.Identity, err error) (string, bool) {
+	var rejected *apps.TokenRejectedError
+	if ident == nil || ident.Claimed || !errors.As(err, &rejected) {
+		return "", false
+	}
+	return "Plex is not claimed yet, so it refuses every server token: claim it at https://plex.tv/claim, then run box apply", true
+}
+
+// plexTokenMissing is the receipt's reason for a Plex-dependent row with no
+// server token to use, and it says what the person's part is, not what box's is:
+// box supplies the token from Plex's own settings on every apply
+// (internal/release), so a claimed server only has to wait for the next run,
+// and an unclaimed one cannot have a usable token at all until it is claimed.
+func plexTokenMissing(ident *apps.Identity, app string) string {
+	if ident != nil && ident.Claimed {
+		return "no plex-token in the release Secret: box reads it from Plex on the next apply"
+	}
+	return fmt.Sprintf("Plex is not claimed yet: claim it at https://plex.tv/claim, then apply again to connect %s", app)
 }
 
 // pbhReady names the one refusal PBH's own readiness can produce: it answers

@@ -4,9 +4,11 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -32,6 +34,14 @@ type fakeRelease struct {
 
 	receipt    Receipt
 	receiptErr error
+
+	// job is the wiring Job's log as the fake release hands it to a wait: the
+	// lines a run wrote, or an error when the pod is not there. jobHang makes
+	// the stream stay open with nothing in it, which is a pod whose log box can
+	// read and which writes nothing.
+	job     []string
+	jobErr  error
+	jobHang bool
 
 	events *[]string
 }
@@ -72,6 +82,41 @@ func (f *fakeRelease) Receipt(context.Context) (Receipt, error) {
 		return Receipt{}, f.receiptErr
 	}
 	return f.receipt, nil
+}
+
+// JobLog is the fake's wiring Job log: the lines the test wrote, a stream that
+// says nothing until the wait ends when it is followed, and the lines as they
+// stand when it is read once.
+func (f *fakeRelease) JobLog(ctx context.Context, follow bool) (io.ReadCloser, error) {
+	if f.jobErr != nil {
+		return nil, f.jobErr
+	}
+	if follow && f.jobHang {
+		return &hangReader{ctx: ctx, closed: make(chan struct{})}, nil
+	}
+	return io.NopCloser(strings.NewReader(strings.Join(f.job, "\n") + "\n")), nil
+}
+
+// hangReader is a log stream with no lines in it: it reads nothing until its
+// context ends or its body is closed, which is what a pod that is up and quiet
+// looks like.
+type hangReader struct {
+	ctx    context.Context
+	closed chan struct{}
+	once   sync.Once
+}
+
+func (h *hangReader) Read([]byte) (int, error) {
+	select {
+	case <-h.ctx.Done():
+	case <-h.closed:
+	}
+	return 0, io.EOF
+}
+
+func (h *hangReader) Close() error {
+	h.once.Do(func() { close(h.closed) })
+	return nil
 }
 
 // fakeStorage is a tiny cluster of storage objects: a namespace and its claims
@@ -212,6 +257,10 @@ type fakes struct {
 	// snaps is the snapshot step, when the test is about where in the apply
 	// it runs rather than what it copies.
 	snaps *fakeSnapshots
+	// secret is the release Secret, when the test is about the token apply
+	// takes out of Plex's own settings; nil leaves the applier with no handle
+	// on it, which is every test about something else.
+	secret *fakeSecret
 }
 
 func newFakes(t *testing.T) *fakes {
@@ -297,6 +346,9 @@ func (f *fakes) apply(t *testing.T) (Result, error) {
 	opts.RunHooks = f.runHooks
 	if f.snaps != nil {
 		opts.Snapshots = f.snaps
+	}
+	if f.secret != nil {
+		f.app.OpenSecret = func(string) (SecretKeys, error) { return f.secret, nil }
 	}
 	return f.app.Apply(context.Background(), opts)
 }
@@ -434,7 +486,7 @@ func TestANewerReleaseWithTheSameValuesIsApplied(t *testing.T) {
 	if got := f.rel.chartVersion; got != "0.0.2" {
 		t.Fatalf("the release is deployed as %s, want 0.0.2", got)
 	}
-	if !strings.Contains(f.out.String(), "release 0.0.1 -> 0.0.2") {
+	if !strings.Contains(f.out.String(), "0.0.1 → 0.0.2") {
 		t.Fatalf("box did not say which release it is installing:\n%s", f.out)
 	}
 	if strings.Contains(f.out.String(), "nothing to change") {
@@ -600,7 +652,9 @@ func TestWiringFailureFailsTheApply(t *testing.T) {
 	}
 }
 
-func TestReceiptIsPrintedPerStep(t *testing.T) {
+// TestTheReceiptIsOneRowAndTheRestIsTheLog: a healthy receipt is a count, and
+// every check behind it is in the run log rather than on the screen.
+func TestTheReceiptIsOneRowAndTheRestIsTheLog(t *testing.T) {
 	f := newFakes(t)
 	f.rel.receipt = Receipt{
 		Status:    "ok",
@@ -613,14 +667,12 @@ func TestReceiptIsPrintedPerStep(t *testing.T) {
 	if _, err := f.apply(t); err != nil {
 		t.Fatalf("apply: %v\n%s", err, f.out)
 	}
-	for _, want := range []string{
-		"wiring ok",
-		"  sonarr/downloadclient: ok",
-		"  plex/claim: pending (no Plex token)",
-	} {
-		if !strings.Contains(f.out.String(), want) {
-			t.Fatalf("output is missing %q:\n%s", want, f.out)
-		}
+	out := f.out.String()
+	if !strings.Contains(out, "✓ wiring         2 checks") {
+		t.Fatalf("the receipt did not fold to one row:\n%s", out)
+	}
+	if strings.Contains(out, "sonarr/downloadclient") {
+		t.Fatalf("a check is still a row of the screen:\n%s", out)
 	}
 }
 
@@ -803,7 +855,7 @@ func TestExistingNamespaceIsNeverRelabelled(t *testing.T) {
 	if f.store.nsCreates != 0 {
 		t.Fatalf("apply applied over an existing namespace %d times", f.store.nsCreates)
 	}
-	warn := "namespace testbox does not enforce Pod Security restricted (pod-security.kubernetes.io/enforce=baseline): root's labels win, box leaves it alone"
+	warn := "namespace testbox does not enforce Pod Security restricted (pod-security.kubernetes.io/enforce=baseline): root's labels win"
 	if got := strings.Count(f.out.String(), warn); got != 2 {
 		t.Fatalf("the weak-namespace warning printed %d times over two applies, want 2:\n%s", got, f.out)
 	}

@@ -35,6 +35,7 @@ import (
 	"github.com/swizzin/s5n/internal/migrate/bundle"
 	"github.com/swizzin/s5n/internal/migrate/plan"
 	"github.com/swizzin/s5n/internal/migrate/qbit"
+	"github.com/swizzin/s5n/internal/migrate/work"
 	"github.com/swizzin/s5n/internal/platform"
 	"github.com/swizzin/s5n/internal/release"
 	"github.com/swizzin/s5n/internal/say"
@@ -134,12 +135,12 @@ type migrateInstallSteps struct {
 // beforeInstall is the order the whole run exists for: decide, show, ask -- and
 // only after the answer install anything. It returns the summary the operator
 // agreed to, which the adoption is then held to.
-func (s migrateInstallSteps) beforeInstall(ctx context.Context, ask asker, details bool, target string, rehearsal bool, out say.Reporter) (*apply.Summary, error) {
+func (s migrateInstallSteps) beforeInstall(ctx context.Context, ask asker, opts askOptions, target string, screen confirmScreen, out say.Reporter) (*apply.Summary, error) {
 	summary, plat, err := s.survey(ctx)
 	if err != nil {
 		return nil, err
 	}
-	ok, err := migrateConfirm(out, ask, target, rehearsal, details, plat, s.lead)(summary)
+	ok, err := migrateConfirm(out, ask, target, opts, plat, s.lead, screen)(summary)
 	if err != nil {
 		return nil, err
 	}
@@ -245,6 +246,7 @@ func migrateInstall(ctx context.Context, o *migrateApplyFlags, inst *installFlag
 	// The platform was the first half of the one confirm: it is not asked about
 	// here, and its plan is not printed here either, because the question came
 	// before anything was installed and showed it then.
+	out.Phase("platform")
 	if err := applyPlatform(ctx, res.Kubeconfig, res.Platform, res.Gateway.Class, "", chart.Pins, res.Firewall, answered{}, true, out); err != nil {
 		return err
 	}
@@ -269,7 +271,7 @@ func migrateInstall(ctx context.Context, o *migrateApplyFlags, inst *installFlag
 // scheduler writes the update timer's two units for the files an install used.
 // It is bootstrap's own scheduleUpdates, and a field only so a test can watch
 // what the install hands it and when.
-type scheduler func(ctx context.Context, unitDir, record, grant, values string, out say.Reporter)
+type scheduler func(ctx context.Context, unitDir, record, grant, values string, out say.Reporter) []say.Row
 
 // installFinish is the last step of a host with no box: init's own flow over the
 // plan's answers, and then -- exactly as bootstrap puts it last -- the timer for
@@ -299,7 +301,9 @@ func (f installFinish) run(ctx context.Context, inst *installFlags, iflg *initFl
 	if err := f.adopt(ctx); err != nil {
 		return err
 	}
-	f.schedule(ctx, inst.unitDir, *inst.record, *iflg.grantPath, *iflg.valuesPath, out)
+	// The run's last block: what this install left a person, each with the
+	// command that clears it -- exactly as bootstrap ends.
+	out.ToFinish(append(iflg.followUps, f.schedule(ctx, inst.unitDir, *inst.record, *iflg.grantPath, *iflg.valuesPath, out)...))
 	return nil
 }
 
@@ -366,20 +370,23 @@ type platformPreview struct {
 // plan and the same snapshot a run after the install reads, and from the values
 // the chart and the user's file already hold.
 //
-// It stages into a private directory it removes, so nothing of this pass stays on
-// the host: the run's own state directory under the config root is not created
-// until the answer is yes.
+// It stages into a private directory beside the snapshot and removes it, so
+// nothing of this pass stays on the host: the run's own state directory under the
+// config root is not created until the answer is yes. The directory is beside the
+// snapshot and not in the system's temporary directory, because what it stages is
+// a seedbox's configs -- gigabytes of them on a real source -- and /tmp is a tmpfs
+// on a Fedora or an Arch host.
 func migrateSurvey(ctx context.Context, o *migrateApplyFlags, p *plan.Plan, opened *bundle.Opened, raw []byte, chart release.Chart, cat *catalog.Catalog, rehearsal bool) (apply.Summary, error) {
-	dir, err := os.MkdirTemp("", "box-migrate-survey-")
+	dir, done, err := work.New(filepath.Dir(opened.Path))
 	if err != nil {
 		return apply.Summary{}, fmt.Errorf("a private directory for the pre-install pass: %w", err)
 	}
-	defer os.RemoveAll(dir)
+	defer done()
 	values, err := seedbox.Pending(seedbox.Chart{Values: chart.Values, Schema: chart.Schema}, *o.valuesPath)
 	if err != nil {
 		return apply.Summary{}, err
 	}
-	env, err := surveyEnv(p, opened, cat, values, rehearsal, carriedNotes(p, opened), dir)
+	env, err := surveyEnv(p, opened, cat, chart, values, rehearsal, dir)
 	if err != nil {
 		return apply.Summary{}, err
 	}
@@ -391,14 +398,18 @@ func migrateSurvey(ctx context.Context, o *migrateApplyFlags, p *plan.Plan, open
 // the cluster. The config root is the caller's private directory, which is why
 // nothing here is owned as the seedbox's user: what this pass stages is measured
 // and thrown away.
-func surveyEnv(p *plan.Plan, opened *bundle.Opened, cat *catalog.Catalog, values map[string]any, rehearsal bool, carried []apply.Carried, configRoot string) (apply.Env, error) {
+func surveyEnv(p *plan.Plan, opened *bundle.Opened, cat *catalog.Catalog, chart release.Chart, values map[string]any, rehearsal bool, configRoot string) (apply.Env, error) {
 	var env apply.Env
 	env.ConfigRoot = configRoot
 	if p.Data != nil {
 		env.DataRoot = p.Data.Root
 	}
 	env.Configs = filepath.Join(opened.Dir, archive.ConfigPrefix)
+	// The tree the extraction left in the snapshot: this pass counts it and
+	// stages none of it, and the run after the install writes it once.
+	env.Bulk = snapshotBulk{opened: opened}
 	env.Catalog = cat.Names()
+	env.Image = chartImage(chart, values)
 	targets, err := apply.Targets(values, env.Catalog, sortedKeys(p.Apps))
 	if err != nil {
 		return env, err
@@ -408,11 +419,6 @@ func surveyEnv(p *plan.Plan, opened *bundle.Opened, cat *catalog.Catalog, values
 	// run switches on.
 	env.Enabled = func(string) bool { return false }
 	env.Rehearsal = rehearsal
-	// The notes about what a snapshot does not hold of an app's config are the
-	// same two functions the run after the install uses: they come from the
-	// snapshot, not from the cluster, and a summary without them would not be the
-	// one that run shows.
-	env.Carried = carried
 	return env, nil
 }
 

@@ -177,6 +177,41 @@ type Options struct {
 	// answer that belongs to the host rather than to the seedbox. Empty means
 	// this run does not ask (a box whose config bootstrap did not write).
 	NoticePath string
+	// BeforeWrite is the one hook a flow uses to ask about the platform and the
+	// seedbox together: it runs after init's last question and before its first
+	// write, with every answer settled, so the plan it shows has all of them and
+	// nothing is written yet. A hook that refuses stops the run there, with both
+	// files and both directories exactly as they were.
+	//
+	// `box bootstrap` on a fresh host sets it: the platform it installs and the
+	// seedbox init writes are one decision, and asking twice about it is the
+	// second form that screen removed (docs/output.md, "bootstrap, init, apply").
+	BeforeWrite func(ctx context.Context, a Answers) error
+}
+
+// Answers is what init's questions settled, in the shape a hook reads them: who
+// the box is for, where it lives, and what runs on it. It carries the partial
+// Result too, so a run that stops in the hook still reports the domain and the
+// login it decided.
+type Answers struct {
+	Result Result
+	// DataPath and ConfigPath are the host paths the box keeps its tree on.
+	DataPath, ConfigPath string
+	// PUID and PGID are the ids every file on those paths is owned by.
+	PUID, PGID int
+	// Apps are the catalog apps this box runs, sorted.
+	Apps []string
+	// Login is the account the login admits.
+	Login string
+	// Namespace is the seedbox's namespace, which the login or the flag named.
+	Namespace string
+	// Port is the torrent port the grant records for this box, or nil when the
+	// box runs no app that has one.
+	Port any
+	// Hosts are the certificate names this run decided, the box's own first.
+	Hosts []Host
+	// NoticeURL is where box posts notices, when this run was asked.
+	NoticeURL string
 }
 
 // ApplyOptions is what init hands the applier: the same arguments `box apply`
@@ -369,8 +404,11 @@ func (d *Decision) Run(ctx context.Context, opts Options) (Result, error) {
 	if noDNS {
 		record = "add one"
 	}
-	res.Hosts = []Host{{Host: domain, Issuer: issuer, Why: why, NoDNS: noDNS, Record: record}}
-	d.report().Line("tls: " + why)
+	res.Hosts = []Host{{Host: domain, Issuer: issuer, Why: why, NoDNS: noDNS, Record: record, Detail: domAnswer.detail(domain)}}
+	// Every host's certificate decision is one row, printed once the apps are
+	// known: a box with four names used to print the same row four times, and
+	// the row a person reads is the set (rules 3 and 4).
+	hostRows := []say.Row{tlsRow(Host{Host: domain, Issuer: issuer, Why: why})}
 	d.step(2, "where should your data and settings live?")
 	dataPath, err := d.askText(textQuestion{
 		key: "storage.data.path", flag: "--data-path",
@@ -403,7 +441,7 @@ func (d *Decision) Run(ctx context.Context, opts Options) (Result, error) {
 		return res, d.stop(err)
 	}
 	if !opts.Unattended {
-		d.report().Fact("files", filesLine(d.UserLookup, puid, pgid))
+		d.report().Fact("owner", filesLine(d.UserLookup, puid, pgid))
 	}
 
 	// What is at those paths, and whether a missing one may be created. The
@@ -464,7 +502,13 @@ func (d *Decision) Run(ctx context.Context, opts Options) (Result, error) {
 	}
 	for _, h := range appHosts {
 		res.Hosts = append(res.Hosts, h)
-		d.report().Line("tls: " + h.Why)
+		hostRows = append(hostRows, tlsRow(h))
+	}
+	d.report().Rows(say.Fold(certificatesRow, "host", hostRows))
+	for _, h := range res.Hosts {
+		if h.Detail != "" {
+			d.report().Detail(h.Detail)
+		}
 	}
 
 	// The login: one account, asked once. It is its own step because it is the
@@ -493,7 +537,7 @@ func (d *Decision) Run(ctx context.Context, opts Options) (Result, error) {
 	// keeps it from then on. It is read before any answer is written, because a
 	// cluster with no free port in the band is a refusal and not a
 	// half-finished dialog.
-	port, err := d.torrentPort(ctx, namespace, apps, base, grantNow, opts)
+	port, err := d.torrentPort(ctx, namespace, apps, grantNow, opts)
 	if err != nil {
 		return res, err
 	}
@@ -549,6 +593,27 @@ func (d *Decision) Run(ctx context.Context, opts Options) (Result, error) {
 		}
 	}
 
+	// Every question has been asked, and nothing has been written: a flow that
+	// shows one plan for the platform and the seedbox asks its one question
+	// here, with all of this run's answers in front of the operator.
+	if opts.BeforeWrite != nil {
+		if err := opts.BeforeWrite(ctx, Answers{
+			Result:     res,
+			DataPath:   dataPath,
+			ConfigPath: configPath,
+			PUID:       puid,
+			PGID:       pgid,
+			Apps:       apps,
+			Login:      loginName,
+			Namespace:  namespace,
+			Port:       port,
+			Hosts:      res.Hosts,
+			NoticeURL:  noticeURL,
+		}); err != nil {
+			return res, err
+		}
+	}
+
 	grantAnswers := []answer{
 		{key: "namespace", value: namespace},
 		{key: "login", value: loginName},
@@ -571,8 +636,8 @@ func (d *Decision) Run(ctx context.Context, opts Options) (Result, error) {
 	// user's apply renders the value from the grant and never touches the
 	// Gateway's namespace. An address that cannot be read yet is not a
 	// failure -- the chart renders the app without it, and the next root run
-	// fills it in -- but it is said out loud, because the app will not start
-	// until it is there.
+	// fills it in -- but it is said out loud, because nobody can sign in to
+	// the app until it is there.
 	//
 	// The question is whether this chart serves an app that way, not whether
 	// one of the apps this run switched on does. A migrate install answers init
@@ -597,7 +662,7 @@ func (d *Decision) Run(ctx context.Context, opts Options) (Result, error) {
 				// waiting on anything, and a warning about an app nobody
 				// switched on is noise.
 				if len(d.Catalog.OIDCApps(apps)) > 0 {
-					d.report().Warn("the Gateway's proxy Service is not there yet, so the OIDC apps have no address for the box's own name: run `box init` again once `box bootstrap` has installed the Gateway")
+					d.report().Warn("the Gateway's proxy Service is not there yet, so the OIDC apps have no address for box's own name: run `box init` again once `box bootstrap` has installed the Gateway")
 				}
 			} else {
 				grantAnswers = append(grantAnswers, answer{key: "auth.oidc.gatewayIP", value: ip})
@@ -896,7 +961,7 @@ func (d *Decision) dataOwner(path string) (int, int, bool, error) {
 		return 0, 0, false, fmt.Errorf("read %s: %w", path, err)
 	}
 	if info.Symlink {
-		d.report().Warn(fmt.Sprintf("%s is a symlink: box does not read through it, so the owner of what it points at is not used for the box's files", path))
+		d.report().Warn(fmt.Sprintf("%s is a symlink: its owner is not the owner of what it points at, so the files here keep the ids you gave", path))
 		return 0, 0, false, nil
 	}
 	if !info.IsDir {
@@ -1196,18 +1261,33 @@ func (d *Decision) writeFiles(opts Options, sb *seedbox.Seedbox, grantNow, base 
 	return grantChanged, valuesChanged, nil
 }
 
+// reportWrites is the two files as rows: what each one got, or that it was
+// already right. The paths are the log's; a person reading the screen wants to
+// know that nothing moved (rule 4).
 func (d *Decision) reportWrites(opts Options, res Result) {
 	r := d.report()
-	if len(res.GrantChanged) == 0 {
-		r.Line(fmt.Sprintf("%s: already says this", opts.GrantPath))
-	} else {
-		r.Line(fmt.Sprintf("%s: edited %d %s", opts.GrantPath, len(res.GrantChanged), plural(len(res.GrantChanged), "key", "keys")))
+	r.Rows([]say.Row{
+		writeRow("grant", res.GrantChanged),
+		writeRow("values", res.ValuesChanged),
+	})
+	r.Detail(opts.GrantPath + ": " + writeLine(res.GrantChanged))
+	r.Detail(opts.ValuesPath + ": " + writeLine(res.ValuesChanged))
+}
+
+// writeRow is one file: ✓ with the count of keys it got, or a note that it
+// already said this.
+func writeRow(name string, changed []string) say.Row {
+	if len(changed) == 0 {
+		return say.Row{Mark: say.MarkNote, Name: name, Facts: []string{"already says this"}}
 	}
-	if len(res.ValuesChanged) == 0 {
-		r.Line(fmt.Sprintf("%s: nothing to add", opts.ValuesPath))
-	} else {
-		r.Line(fmt.Sprintf("%s: edited %d %s", opts.ValuesPath, len(res.ValuesChanged), plural(len(res.ValuesChanged), "key", "keys")))
+	return say.Row{Mark: say.MarkDone, Name: name, Facts: []string{fmt.Sprintf("%d %s", len(changed), plural(len(changed), "key", "keys"))}}
+}
+
+func writeLine(changed []string) string {
+	if len(changed) == 0 {
+		return "already says this"
 	}
+	return fmt.Sprintf("edited %d %s", len(changed), plural(len(changed), "key", "keys"))
 }
 
 // pathTarget is one of the two host paths, with what init found and whether the
@@ -1481,7 +1561,7 @@ func validDomain(v string) error {
 		return errors.New("that is not a host name")
 	}
 	if strings.Contains(v, ":") {
-		return errors.New("drop the port: the box serves HTTP itself")
+		return errors.New("drop the port: box serves HTTP itself")
 	}
 	return nil
 }

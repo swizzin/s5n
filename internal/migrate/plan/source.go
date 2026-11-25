@@ -178,6 +178,11 @@ func checkApp(name string, app App) []string {
 	if app.Variant != "" && app.Image == "" {
 		problems = append(problems, fmt.Sprintf("apps.%s: variant %q is a mapping from an image, and image is empty", name, app.Variant))
 	}
+	switch app.Carry {
+	case "", CarryFull, CarryMinimal:
+	default:
+		problems = append(problems, fmt.Sprintf("apps.%s: carry %q is not %q or %q: it is how much of the app's config directory the snapshot took", name, app.Carry, CarryFull, CarryMinimal))
+	}
 	for _, c := range []struct{ key, val string }{{"category", app.Category}, {"downloadCategory", app.DownloadCategory}} {
 		if c.val == "" {
 			continue

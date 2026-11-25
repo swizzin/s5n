@@ -23,6 +23,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/swizzin/s5n/internal/linktree"
 )
@@ -66,6 +67,123 @@ func measureTree(dst, src string) (Staged, error) {
 	return copy(dst, src, 0, 0, false, false)
 }
 
+// copyFiles copies the named files out of src into dst, which must not exist,
+// with the directories above them: one app's state out of a config directory that
+// holds its whole library as well (apply's room for a full carry, carry.go).
+//
+// The rules are copyTree's -- modes and times kept, every entry owned by uid:gid,
+// links carried as links -- and a named file that is not there is not a refusal:
+// a database's -wal exists only while something has it open.
+func copyFiles(dst, src string, files []string, uid, gid int) (Staged, error) {
+	c := &copier{dst: dst, src: src, uid: uid, gid: gid, skipKernel: true, own: true}
+	return c.files(src, files)
+}
+
+// measureFiles is copyFiles for a pass that throws the copy away: the same files,
+// counted, with no owner handed to anybody (measureTree's rule).
+func measureFiles(dst, src string, files []string) (Staged, error) {
+	c := &copier{dst: dst, src: src, skipKernel: true}
+	return c.files(src, files)
+}
+
+// files is the copy of a named set: everything above it made, every file under
+// the same rules as a whole tree, and the directories' own times set last.
+func (c *copier) files(src string, files []string) (Staged, error) {
+	info, err := os.Lstat(src)
+	if err != nil {
+		return Staged{}, err
+	}
+	if !info.IsDir() {
+		return Staged{}, fmt.Errorf("%s is not a directory", src)
+	}
+	dst := c.dst
+	if err := os.MkdirAll(dst, 0o755); err != nil {
+		return c.st, fmt.Errorf("create %s: %w", dst, err)
+	}
+	c.dirs = append(c.dirs, dirTime{dst, info})
+	made := map[string]bool{}
+	for _, rel := range files {
+		if err := c.copyNamed(rel, made); err != nil {
+			return c.st, err
+		}
+	}
+	if err := c.finishDirs(); err != nil {
+		return c.st, err
+	}
+	return c.st, nil
+}
+
+// finishDirs is the last thing a copy does to its directories: own them, give
+// them back the mode the widening took, and set the times, because a directory's
+// own mtime is the last child put in it.
+func (c *copier) finishDirs() error {
+	for _, m := range c.dirs {
+		if err := c.chown(m.path, false); err != nil {
+			return fmt.Errorf("own %s: %w", m.path, err)
+		}
+		if err := os.Chmod(m.path, m.info.Mode().Perm()); err != nil {
+			return fmt.Errorf("chmod %s: %w", m.path, err)
+		}
+		if err := os.Chtimes(m.path, m.info.ModTime(), m.info.ModTime()); err != nil {
+			return fmt.Errorf("touch %s: %w", m.path, err)
+		}
+	}
+	return nil
+}
+
+// copyNamed makes the directories above one named file and copies the file. A
+// directory above it that is not there means the file is not either.
+func (c *copier) copyNamed(rel string, made map[string]bool) error {
+	parts := strings.Split(rel, "/")
+	for i := 1; i < len(parts); i++ {
+		parent := strings.Join(parts[:i], "/")
+		if made[parent] {
+			continue
+		}
+		from := filepath.Join(c.src, filepath.FromSlash(parent))
+		info, err := os.Lstat(from)
+		if err != nil {
+			if errors.Is(err, fs.ErrNotExist) {
+				return nil
+			}
+			return err
+		}
+		if !info.IsDir() {
+			return fmt.Errorf("%s: %s is not a directory, so nothing can be carried under it", c.src, parent)
+		}
+		into := filepath.Join(c.dst, filepath.FromSlash(parent))
+		if err := os.Mkdir(into, info.Mode().Perm()|0o700); err != nil && !errors.Is(err, fs.ErrExist) {
+			return fmt.Errorf("create %s: %w", into, err)
+		}
+		c.dirs = append(c.dirs, dirTime{into, info})
+		made[parent] = true
+	}
+	from := filepath.Join(c.src, filepath.FromSlash(rel))
+	info, err := os.Lstat(from)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil
+		}
+		return err
+	}
+	into := filepath.Join(c.dst, filepath.FromSlash(rel))
+	switch {
+	case info.Mode().IsRegular():
+		n, err := c.copyFile(into, from, info)
+		if err != nil {
+			return err
+		}
+		c.st.Files++
+		c.st.Bytes += n
+		return nil
+	case info.Mode()&fs.ModeSymlink != 0:
+		return c.copyLink(into, from, rel)
+	}
+	// A directory or a kernel file where a state file was expected: the app's
+	// rewriter is what refuses that, in its own words.
+	return nil
+}
+
 // copy is every copy: the same walk, with the kernel's own files either left out
 // or refused, and with or without an owner.
 func copy(dst, src string, uid, gid int, skipKernel, own bool) (Staged, error) {
@@ -76,18 +194,8 @@ func copy(dst, src string, uid, gid int, skipKernel, own bool) (Staged, error) {
 	if err := filepath.WalkDir(src, c.entry); err != nil {
 		return c.st, err
 	}
-	for _, m := range c.dirs {
-		if err := c.chown(m.path, false); err != nil {
-			return c.st, fmt.Errorf("own %s: %w", m.path, err)
-		}
-		if err := os.Chmod(m.path, m.info.Mode().Perm()); err != nil {
-			return c.st, fmt.Errorf("chmod %s: %w", m.path, err)
-		}
-		// A directory's own mtime is the last child written into it, so it is
-		// restored once the children are done.
-		if err := os.Chtimes(m.path, m.info.ModTime(), m.info.ModTime()); err != nil {
-			return c.st, fmt.Errorf("touch %s: %w", m.path, err)
-		}
+	if err := c.finishDirs(); err != nil {
+		return c.st, err
 	}
 	return c.st, nil
 }

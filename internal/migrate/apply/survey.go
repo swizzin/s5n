@@ -76,26 +76,35 @@ func deferredSentence(app string) string {
 
 // Holds reports whether s is the summary the operator agreed to: the same lines,
 // except the rows of the apps the agreement said would be checked once their
-// image runs. Both sides of that exception are dropped, because the run after the
-// install is where those rows are filled in.
+// image runs, and of an app that this run finds no room for at the config root.
+// Both sides of those exceptions are dropped, because neither is something the
+// question could know: the check runs after the install, and the room is the
+// config path's, which a host with no box is asked for later.
 //
-// The snapshot and the plan are read twice, so a difference that is not that one
-// is a fault: the operator agreed to one summary, and the run would do another.
-// The returned sentence names the first difference, and is empty when the two
-// summaries are the same.
+// The snapshot and the plan are read twice, so a difference that is not one of
+// those is a fault: the operator agreed to one summary, and the run would do
+// another. The returned sentence names the first difference, and is empty when
+// the two summaries are the same.
 func (s Summary) Holds(agreed Summary) string {
 	deferred := map[string]bool{}
+	short := map[string]bool{}
 	for _, in := range agreed.Instances {
 		if in.Deferred != "" {
 			deferred[in.App] = true
+		}
+		if in.Short != "" {
+			short[in.App] = true
 		}
 	}
 	for _, in := range s.Instances {
 		if in.Deferred != "" {
 			deferred[in.App] = true
 		}
+		if in.Short != "" {
+			short[in.App] = true
+		}
 	}
-	was, now := agreed.linesFor(deferred), s.linesFor(deferred)
+	was, now := agreed.linesFor(deferred, short), s.linesFor(deferred, short)
 	for i := 0; i < len(was) || i < len(now); i++ {
 		switch {
 		case i >= len(now):
@@ -112,28 +121,46 @@ func (s Summary) Holds(agreed Summary) string {
 // linesFor is the summary's lines with the named apps reduced to the one thing this
 // comparison is allowed to know about them: that they are there, and what they
 // carry. A deferred app's check has not run on one side and has on the other, so
-// everything its check reports is dropped from both.
-func (s Summary) linesFor(deferred map[string]bool) []string {
-	if len(deferred) == 0 {
+// everything its check reports is dropped from both; an app whose carry a run
+// had to cut down for room is dropped the same way, down to the bytes it staged,
+// because the question could not see the disk it lands on.
+func (s Summary) linesFor(deferred, short map[string]bool) []string {
+	if len(deferred) == 0 && len(short) == 0 {
 		return s.Lines()
 	}
 	trimmed := s
 	trimmed.Instances = append([]InstanceSummary(nil), s.Instances...)
 	for i := range trimmed.Instances {
-		if !deferred[trimmed.Instances[i].App] {
-			continue
+		in := &trimmed.Instances[i]
+		if deferred[in.App] {
+			in.Changes = nil
+			in.Accounts = nil
+			in.Notes = nil
+			in.Left = nil
+			in.Owned = nil
+			in.Stopped = 0
+			in.Deferred = ""
 		}
-		trimmed.Instances[i].Changes = nil
-		trimmed.Instances[i].Accounts = nil
-		trimmed.Instances[i].Notes = nil
-		trimmed.Instances[i].Left = nil
-		trimmed.Instances[i].Owned = nil
-		trimmed.Instances[i].Stopped = 0
-		trimmed.Instances[i].Deferred = ""
+		if short[in.App] {
+			in.Staged = Staged{App: in.App}
+			in.Carry = ""
+			in.Short = ""
+		}
 	}
 	trimmed.Stopped = 0
 	for _, in := range trimmed.Instances {
 		trimmed.Stopped += in.Stopped
+	}
+	// The line about what a shortened app's config holds is the same decision,
+	// said once above the rows: it goes with them.
+	if len(short) > 0 {
+		kept := make([]Carried, 0, len(trimmed.Carried))
+		for _, c := range trimmed.Carried {
+			if !short[c.App] {
+				kept = append(kept, c)
+			}
+		}
+		trimmed.Carried = kept
 	}
 	return trimmed.Lines()
 }

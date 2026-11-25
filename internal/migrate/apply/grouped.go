@@ -15,12 +15,22 @@ import (
 	"github.com/swizzin/s5n/internal/say"
 )
 
-// Group is one titled block of the confirm: the rows of a table and the line
-// above them.
-type Group struct {
-	Title string
-	Rows  []say.TableRow
-}
+// The headings the confirm and the report share: a lowercase noun, no colon
+// (rule 9), spelled once so the two cannot drift apart.
+const (
+	titleApps    = "apps"
+	titleLibrary = "library"
+	// stateKept is what a row says about a value this run leaves alone: one
+	// word in the state column, never a phrase (rule 1).
+	stateKept = "kept"
+)
+
+// Group is one block of the confirm: its heading, the columns its rows read in,
+// and the rows. A group with Columns is a table -- the heading, then one column
+// heading per fact -- and one without is a list of rows whose facts are a
+// sentence each. The block itself is say's, so the confirm and every other
+// command's table are one mechanism.
+type Group = say.Group
 
 // Grouped is the summary as the one confirm shows it.
 type Grouped struct {
@@ -36,40 +46,159 @@ type Grouped struct {
 
 // Grouped renders the summary in the shape the confirm uses. It reads nothing
 // but the summary: the same run rendered with --details prints Lines instead.
+//
+// The notes are counted, not listed: a note is something to know, and a dozen of
+// them is the paragraph before the question that rule 7 replaced with a page
+// (Summary.Report). What a person must act on stays as its own row.
 func (s Summary) Grouped() Grouped {
 	var g Grouped
 	if s.Rehearsal {
 		g.Lead = "rehearsal · nothing leaves this box · no data is renamed"
 	}
-	if rows := s.appRows(); len(rows) > 0 {
-		g.Blocks = append(g.Blocks, Group{Title: counted(len(rows), "app", "apps"), Rows: rows})
+	// The version column exists when this run had a chart to compare against: a
+	// caller with none says nothing about versions rather than a column of
+	// question marks.
+	versions := s.versions()
+	columns := []string{"carries", "changes"}
+	if versions {
+		columns = []string{"carries", "version", "changes"}
+	}
+	if rows := s.appRows(versions); len(rows) > 0 {
+		g.Blocks = append(g.Blocks, Group{Title: titleApps, Columns: columns, Rows: rows})
 	}
 	if rows := s.dataRows(); len(rows) > 0 {
-		g.Blocks = append(g.Blocks, Group{Title: "data", Rows: rows})
+		g.Blocks = append(g.Blocks, Group{Rows: rows})
 	}
 	if rows := s.needsYou(); len(rows) > 0 {
-		g.Blocks = append(g.Blocks, Group{Title: "needs you", Rows: rows})
+		g.Blocks = append(g.Blocks, Group{Rows: rows})
 	}
-	if rows := s.goodToKnow(); len(rows) > 0 {
-		g.Blocks = append(g.Blocks, Group{Title: "good to know", Rows: rows})
-	}
-	if rows := s.notMigrated(); len(rows) > 0 {
-		g.Blocks = append(g.Blocks, Group{Title: fmt.Sprintf("not migrated (%d)", len(s.Outside)), Rows: rows})
-	}
-	if len(g.Blocks) > 0 {
-		g.Footer = "every rewrite, column by column: report.txt in the snapshot, or --details"
+	if footer := s.footer(); footer != "" {
+		g.Footer = footer
 	}
 	return g
 }
 
-// appRows is one row per app: what it carries, how many stored values change,
-// and the one or two facts a person acts on.
-func (s Summary) appRows() []say.TableRow {
-	rows := make([]say.TableRow, 0, len(s.Instances))
+// versions says the confirm has a version column: this run had a chart, so at
+// least one app's pair could be read.
+func (s Summary) versions() bool {
 	for _, in := range s.Instances {
-		rows = append(rows, say.TableRow{Glyph: "✓", Name: in.App, Facts: appFacts(in)})
+		if in.Version.Cell() != "" {
+			return true
+		}
+	}
+	return false
+}
+
+// foldAt is how many apps the confirm lists before it folds the rest into one
+// row: a person deciding to move a seedbox reads the apps, and a list past a
+// dozen is one nobody reads (rule 7). The report and --details carry every row.
+const foldAt = 8
+
+// footer is the one line under the blocks: what a person did not get to see in
+// full, by count, and the flag that shows it.
+func (s Summary) footer() string {
+	var facts []string
+	if notes := s.noteCount(); notes > 0 {
+		facts = append(facts, counted(notes, "note", "notes"))
+	}
+	if n := len(s.Outside); n > 0 {
+		facts = append(facts, counted(n, "other workload", "other workloads")+" stay behind")
+	}
+	if n := s.leftCount(); n > 0 {
+		facts = append(facts, counted(n, "value", "values")+" left as they are")
+	}
+	if len(facts) == 0 {
+		return ""
+	}
+	return strings.Join(facts, " · ") + " · --details"
+}
+
+// noteCount is how many notes the run has, said once each: a note two apps share
+// is one note.
+func (s Summary) noteCount() int {
+	seen := map[string]bool{}
+	for _, in := range s.Instances {
+		for _, n := range in.Notes {
+			seen[n] = true
+		}
+	}
+	for _, c := range s.Carried {
+		seen[c.Note] = true
+	}
+	return len(seen)
+}
+
+// leftCount is how many values this run leaves as they are.
+func (s Summary) leftCount() int {
+	n := 0
+	for _, in := range s.Instances {
+		n += len(in.Left)
+	}
+	return n
+}
+
+// appRows is one row per app: what it carries, the version it moves from and to,
+// and the one or two facts a person acts on.
+//
+// The first two facts are columns, so the sizes and the versions line up and a
+// person compares them down the block; everything else is what changes.
+func (s Summary) appRows(versions bool) []say.TableRow {
+	rows := make([]say.TableRow, 0, len(s.Instances)+1)
+	for i, in := range s.Instances {
+		if i == foldAt {
+			names := make([]string, 0, len(s.Instances)-foldAt)
+			for _, rest := range s.Instances[foldAt:] {
+				names = append(names, rest.App)
+			}
+			rows = append(rows, say.TableRow{
+				Glyph: "+",
+				Facts: []string{counted(len(names), "more", "more"), strings.Join(names, ", ")},
+			})
+			break
+		}
+		facts := []string{""}
+		if in.Staged.Files > 0 {
+			facts[0] = bytesText(in.Staged.Bytes)
+		}
+		if versions {
+			facts = append(facts, in.Version.Cell())
+		}
+		facts = append(facts, changesOf(in))
+		rows = append(rows, say.TableRow{Name: in.App, Facts: facts})
 	}
 	return rows
+}
+
+// changesOf is one app's row after the column: what it carries that is not a
+// size, and every count of what changes.
+func changesOf(in InstanceSummary) string {
+	var facts []string
+	if in.Carry != "" {
+		facts = append(facts, in.Carry)
+	}
+	if in.Short != "" {
+		facts = append(facts, in.Short)
+	}
+	if in.Deferred != "" {
+		facts = append(facts, in.Deferred)
+	}
+	facts = append(facts, changeFacts(in.Changes)...)
+	for _, a := range in.Accounts {
+		facts = append(facts, fmt.Sprintf("login → %s", a.To))
+	}
+	for _, o := range in.Owned {
+		facts = append(facts, "keeps "+ownedPhrase(o))
+	}
+	if len(in.Keys) > 0 {
+		facts = append(facts, "keeps its API key")
+	}
+	if in.Token != "" {
+		facts = append(facts, "keeps its Plex token")
+	}
+	if in.Stopped > 0 {
+		facts = append(facts, counted(in.Stopped, "torrent", "torrents")+" stopped")
+	}
+	return strings.Join(facts, " · ")
 }
 
 // appFacts is one app's row: carried size, the counts of what changes, then the
@@ -80,6 +209,15 @@ func appFacts(in InstanceSummary) []string {
 	var facts []string
 	if in.Staged.Files > 0 {
 		facts = append(facts, bytesText(in.Staged.Bytes))
+	}
+	if cell := in.Version.Cell(); cell != "" {
+		facts = append(facts, cell)
+	}
+	if in.Carry != "" {
+		facts = append(facts, in.Carry)
+	}
+	if in.Short != "" {
+		facts = append(facts, in.Short)
 	}
 	if in.Deferred != "" {
 		facts = append(facts, in.Deferred)
@@ -93,6 +231,9 @@ func appFacts(in InstanceSummary) []string {
 	}
 	if len(in.Keys) > 0 {
 		facts = append(facts, "keeps its API key")
+	}
+	if in.Token != "" {
+		facts = append(facts, "keeps its Plex token")
 	}
 	if in.Stopped > 0 {
 		facts = append(facts, counted(in.Stopped, "torrent", "torrents")+" stopped")
@@ -142,14 +283,16 @@ func ownedPhrase(o rewrite.Owned) string {
 	return fmt.Sprintf("%s %q", kind, o.Name)
 }
 
-// CheckedRows is the rows an agreement left to this run, now that its checks
-// have run: one row per app whose check the question deferred, in the shape the
-// confirm showed it. The question said the app's databases would be checked once
-// its image ran; this is what that check found, said in the same place.
+// CheckedRows is the rows an agreement left to this run, now that it has run: one
+// row per app whose check the question deferred, and one for an app the run had
+// to carry less of than the question promised because the config root had no room,
+// in the shape the confirm showed it. The question said the app's databases would
+// be checked once its image ran; this is what that check found, said in the same
+// place, and the second is what the disk turned out to be.
 func (s Summary) CheckedRows(agreed Summary) []say.TableRow {
 	var rows []say.TableRow
 	for _, was := range agreed.Instances {
-		if was.Deferred == "" {
+		if was.Deferred == "" && was.Short == "" {
 			continue
 		}
 		for _, now := range s.Instances {
@@ -162,27 +305,40 @@ func (s Summary) CheckedRows(agreed Summary) []say.TableRow {
 	return rows
 }
 
-// dataRows is what the run does to the data root: the two directories renamed
-// to box's names, and the library's own directories renamed to the categories
-// that hold them. A rehearsal renames nothing and has no row.
+// dataRows is what the run does to the data root: the directories renamed to
+// box's names on one line, and the library's own directories renamed to the
+// categories that hold them on the next. A rehearsal renames nothing and has no
+// row.
 func (s Summary) dataRows() []say.TableRow {
-	if len(s.Renames) == 0 && len(s.MediaRenames) == 0 {
-		return nil
+	var rows []say.TableRow
+	if facts := renameFacts(s.Renames, s.Rehearsal); facts != "" {
+		rows = append(rows, say.TableRow{Glyph: "✓", Name: "data", Facts: []string{facts}})
 	}
-	facts := make([]string, 0, len(s.Renames)+1)
-	for _, r := range s.Renames {
-		facts = append(facts, arrow(r))
-	}
-	if len(s.MediaRenames) > 0 {
+	if facts := renameFacts(s.MediaRenames, s.Rehearsal); facts != "" {
 		// The library reads as one line: these are the directories a person
 		// sees in every app, and they all become box's own names together.
-		pairs := make([]string, 0, len(s.MediaRenames))
-		for _, r := range s.MediaRenames {
-			pairs = append(pairs, arrow(r))
-		}
-		facts = append(facts, "media: "+strings.Join(pairs, " · "))
+		rows = append(rows, say.TableRow{Glyph: "✓", Name: titleLibrary, Facts: []string{facts}})
 	}
-	return []say.TableRow{{Glyph: "✓", Name: "data", Facts: facts}}
+	return rows
+}
+
+// renameFacts is one row of renames as the run says it: plainly for the run that
+// makes them, and named as the real run's for the rehearsal that does not. A
+// rehearsal's screen says what will happen to a box, never what this run left
+// undone (rule 11).
+func renameFacts(renames []string, rehearsal bool) string {
+	if len(renames) == 0 {
+		return ""
+	}
+	pairs := make([]string, 0, len(renames))
+	for _, r := range renames {
+		pairs = append(pairs, arrow(r))
+	}
+	facts := strings.Join(pairs, " · ")
+	if rehearsal {
+		return "the real run renames " + facts
+	}
+	return facts
 }
 
 // arrow is one rename as a person reads it: "Downloads to downloads" is
@@ -191,7 +347,8 @@ func arrow(rename string) string { return strings.Replace(rename, " to ", " → 
 
 // needsYou groups every value left as it is by the reason it is left: the apps
 // that share the reason are named together, and the values themselves are what
-// the operator has to decide about.
+// the operator has to decide about. An app this run would downgrade is the first
+// row of the block: it is the one thing here that refuses without --yolo.
 func (s Summary) needsYou() []say.TableRow {
 	type group struct {
 		why  string
@@ -201,6 +358,10 @@ func (s Summary) needsYou() []say.TableRow {
 	}
 	order := make([]string, 0)
 	groups := make(map[string]*group)
+	rows := make([]say.TableRow, 0)
+	for _, v := range s.Downgrades() {
+		rows = append(rows, say.TableRow{Glyph: "!", Name: v.App, Facts: []string{v.Source + " → " + v.Box, "the config is newer than the app"}})
+	}
 	for _, in := range s.Instances {
 		for _, l := range in.Left {
 			g, ok := groups[l.Why]
@@ -216,7 +377,6 @@ func (s Summary) needsYou() []say.TableRow {
 			}
 		}
 	}
-	rows := make([]say.TableRow, 0, len(order))
 	for _, why := range order {
 		g := groups[why]
 		apps := make([]string, 0, len(g.apps))
@@ -224,11 +384,11 @@ func (s Summary) needsYou() []say.TableRow {
 			apps = append(apps, app)
 		}
 		sort.Strings(apps)
-		fact := strings.Join(g.what, " and ") + " stay as it is: " + g.why
-		if len(g.what) == 1 {
-			fact = g.what[0] + " stays as it is: " + g.why
-		}
-		rows = append(rows, say.TableRow{Glyph: "!", Name: strings.Join(apps, ", "), Facts: []string{fact}})
+		// One state word and one reason: the value stays, and the clause says
+		// why. The whole sentence the rewriter wrote is the report's
+		// (rules 1 and 2).
+		fact := strings.Join(g.what, " and ")
+		rows = append(rows, say.TableRow{Glyph: "!", Name: strings.Join(apps, ", "), State: stateKept, Facts: []string{fact, why}})
 	}
 	return rows
 }

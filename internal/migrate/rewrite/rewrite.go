@@ -295,7 +295,14 @@ type Left struct {
 	File  string // relative to Dir
 	Where string // table.column, section/key, JSON pointer
 	What  string // the stored value, as the app has it
-	Why   string // one line: why it is left, and what happens to it
+	// Why is the one reason the value is left, in a short clause: "switched
+	// off, so nothing dials it". It is the screen's, where a row is one fact
+	// (docs/output.md, rule 2).
+	Why string
+	// Detail is the whole sentence the person may want: what the value means,
+	// what a rewrite would have done, and what to do about it. The report has
+	// it, where there is room to read (rule 7).
+	Detail string
 }
 
 // Default is one settlement a pass proposes for an address the plan does not

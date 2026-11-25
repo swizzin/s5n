@@ -1,18 +1,20 @@
 package main
 
-// migrate_settle.go is what a guided read asks: the same decisions report.txt
+// migrate_settle.go is what a guided read asks: the same decisions the report
 // carries, one question per address, and the answer written into the plan.
 //
-// A default is never silent. An unattended run takes every one and says so
-// (askDefaults, migrate.go); this file is the run with somebody at the terminal,
-// which asks in the order the called-out list is grouped and offers, for each
-// address, exactly the answers that exist: leave it as it is, or point it at one
-// of the plan's apps. A path has no question, because box has no alternative to
-// offer: identity is the only rewrite that cannot make that app worse.
+// A default is never silent. An unattended run takes every one and says how many
+// at the end, with the report naming each (askDefaults, migrate.go); this file is
+// the run with somebody at the terminal. Each answer collapses to one row -- the
+// apps that hold the address, the address, and what it now points at -- because a
+// question already answered is a fact (docs/output.md, rules 10 and 1). An answer
+// an earlier read gave never reaches this file at all: cutover carries it.
+//
+// A path has no question, because box has no alternative to offer: identity is
+// the only rewrite that cannot make that app worse.
 
 import (
 	"fmt"
-	"strings"
 
 	"github.com/swizzin/s5n/internal/migrate/apply"
 	"github.com/swizzin/s5n/internal/say"
@@ -23,7 +25,8 @@ import (
 // collide with it, because an instance name is the chart's.
 const leaveValue = "leave"
 
-// settleAsker turns one default into one question on the terminal.
+// settleAsker turns one default into one question on the terminal, and one row
+// into the transcript.
 type settleAsker struct {
 	out    say.Reporter
 	prompt setup.Prompter
@@ -50,25 +53,37 @@ func (a *settleAsker) ask(c apply.Choice) (string, error) {
 		return "", err
 	}
 	if answer == leaveValue {
+		a.answered(c, "")
 		return "", nil
 	}
 	for _, app := range a.apps {
 		if app == answer {
+			a.answered(c, app)
 			return app, nil
 		}
 	}
 	return "", fmt.Errorf("%s is not an app in this plan", answer)
 }
 
-// question is one address and why box took the decision it did, on one line:
-// the called-out list above the question names the places that hold it, so the
-// question itself stays short enough for the live form's title.
-func (a *settleAsker) question(c apply.Choice) string {
-	q := c.Value
-	if c.Why != "" && !strings.Contains(c.Why, c.Value) {
-		q += ": " + c.Why
+// answered is one answer as a row: who holds the address, the address, and what
+// it now means.
+func (a *settleAsker) answered(c apply.Choice, app string) {
+	to := leftAsItIs
+	if app != "" {
+		to = app
 	}
-	return q + " -- leave it as it is, or point it at an app?"
+	a.out.Rows([]say.Row{{
+		Mark:  say.MarkDone,
+		Name:  holders(c.Holds),
+		Facts: []string{c.Value + " → " + to},
+	}})
+}
+
+// question is the one line the form asks: the address, and what to do with it.
+// The reason is above it in the transcript (the answer rows and the report), so
+// the question stays short enough to read at a glance (rule 10).
+func (a *settleAsker) question(c apply.Choice) string {
+	return c.Value + ": point it at which app?"
 }
 
 // defaultValue is the value the select starts on: the default box took, so an
@@ -80,19 +95,15 @@ func (a *settleAsker) defaultValue(c apply.Choice) string {
 	return c.App
 }
 
-// options are leave and every app the plan has, with box's own answer first and
-// labelled as the default.
+// options are leave and every app the plan has, with box's own answer first. The
+// labels are what the answer is, with nothing telling the reader where it goes.
 func (a *settleAsker) options(c apply.Choice) []setup.Option {
 	def := a.defaultValue(c)
 	label := func(value string) string {
-		text := "leave it as it is"
-		if value != leaveValue {
-			text = "point it at " + value
+		if value == leaveValue {
+			return "leave it"
 		}
-		if value == def {
-			text += " (box's default)"
-		}
-		return text
+		return "point it at " + value
 	}
 	out := []setup.Option{{Value: def, Label: label(def)}}
 	if def != leaveValue {

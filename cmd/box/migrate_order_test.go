@@ -59,7 +59,7 @@ func TestTheQuestionComesBeforeAnythingIsInstalled(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			ask := &stepAsker{yes: tc.yes}
 			steps := recordingSteps(ask)
-			agreed, err := steps.beforeInstall(context.Background(), ask, false, "s5n-alice", false, &say.Plain{W: &bytes.Buffer{}})
+			agreed, err := steps.beforeInstall(context.Background(), ask, askOptions{}, "s5n-alice", confirmScreen{}, &say.Plain{W: &bytes.Buffer{}})
 			assertRunOutcome(t, err, agreed, tc.canceled)
 			if got := strings.Join(ask.order, " "); got != tc.want {
 				t.Errorf("the run went %q, want %q", got, tc.want)
@@ -67,7 +67,7 @@ func TestTheQuestionComesBeforeAnythingIsInstalled(t *testing.T) {
 			if len(ask.asked) != 1 {
 				t.Fatalf("the run asked %d questions (%v), want one", len(ask.asked), ask.asked)
 			}
-			if want := "move these into s5n-alice?"; ask.asked[0] != want {
+			if want := "move these 1 app in?"; ask.asked[0] != want {
 				t.Errorf("the question = %q, want %q", ask.asked[0], want)
 			}
 		})
@@ -173,7 +173,7 @@ func TestThePreInstallPassWritesOnlyWhereItIsThrownAway(t *testing.T) {
 			return nil
 		},
 	}
-	if _, err := steps.beforeInstall(context.Background(), &stepAsker{}, false, "", false, &say.Plain{W: &bytes.Buffer{}}); !errors.Is(err, apply.ErrCancelled) {
+	if _, err := steps.beforeInstall(context.Background(), &stepAsker{}, askOptions{}, "", confirmScreen{}, &say.Plain{W: &bytes.Buffer{}}); !errors.Is(err, apply.ErrCancelled) {
 		t.Fatalf("answering no = %v, want a cancellation", err)
 	}
 	if installed {
@@ -268,10 +268,17 @@ func (s *snapshotFixture) plan(t *testing.T) (*plan.Plan, []byte, *bundle.Opened
 		t.Fatalf("parse the plan: %v", err)
 	}
 	return p, raw, &bundle.Opened{
-		Path:    "snapshot.tar.gz",
+		Path:    filepath.Join(s.dir, "snapshot.tar.gz"),
 		Dir:     s.dir,
 		Mode:    archive.ModeFinal,
 		Plan:    raw,
 		Configs: s.configs,
+		// The numbers the pass that verified the snapshot counts: this fixture
+		// is a snapshot's extract, so what it holds of each app is its config
+		// directory's two files and its one.
+		Contents: map[string]bundle.Contents{
+			"plex":        {Files: 2, Bytes: 200},
+			"qbittorrent": {Files: 1, Bytes: 60},
+		},
 	}
 }

@@ -916,7 +916,7 @@ func TestAddFilesCarriesOnlyTheNamedFiles(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
-	carried, err := w.AddFiles("config/plex", dir, want)
+	carried, err := w.AddFiles("config/plex", dir, "", want)
 	if err != nil {
 		t.Fatalf("AddFiles: %v", err)
 	}
@@ -997,7 +997,7 @@ func TestAddFilesRefusesWhatTheSetCannotCarry(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Create: %v", err)
 		}
-		if _, err := w.AddFiles("config/app", dir, []string{tt.name}); err == nil || !strings.Contains(err.Error(), tt.want) {
+		if _, err := w.AddFiles("config/app", dir, "", []string{tt.name}); err == nil || !strings.Contains(err.Error(), tt.want) {
 			t.Errorf("AddFiles(%q) = %v, want it to name %q", tt.name, err, tt.want)
 		}
 		w.Discard()

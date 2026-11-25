@@ -472,8 +472,11 @@ func (d *decision) overrideRules(ctx context.Context, db *sql.DB, in rewrite.Inp
 func (d *decision) overrideRule(in rewrite.Input, id int64, folder string, named []service, rep *rewrite.Report) {
 	const where = "override_rule.rootFolder"
 	if len(named) == 0 {
-		d.left(rep, where, folder, fmt.Sprintf(
-			"this override rule names no Arr, so box cannot tell whose folder %s is", folder))
+		d.left(rep, rewrite.Left{
+			Where: where, What: folder,
+			Why:    "it names no Arr",
+			Detail: fmt.Sprintf("this override rule names no Arr, so box cannot tell whose folder %s is", folder),
+		})
 		return
 	}
 	var parts []string
@@ -520,9 +523,12 @@ func (d *decision) overrideRule(in rewrite.Input, id int64, folder string, named
 		d.dbEdits = append(d.dbEdits, dbEdit{table: "override_rule", column: colRootFolder, id: id, value: moved})
 		d.tally.add(dbName, where, "path")
 	default:
-		d.left(rep, where, folder, fmt.Sprintf(
-			"the Arrs this override rule names do not agree about %s (%s)",
-			folder, strings.Join(parts, "; ")))
+		d.left(rep, rewrite.Left{
+			Where: where, What: folder,
+			Why: "the Arrs it names disagree about it",
+			Detail: fmt.Sprintf("the Arrs this override rule names do not agree about %s (%s)",
+				folder, strings.Join(parts, "; ")),
+		})
 	}
 }
 
@@ -602,7 +608,8 @@ func (d *decision) requests(ctx context.Context, db *sql.DB, in rewrite.Input, r
 		// in the plan.
 		rep.Left = append(rep.Left, rewrite.Left{
 			File: dbName, Where: table + "." + colRootFolder, What: pastRequests(history),
-			Why: "their folders are history: seerr recorded where each request went and never reads the folder again, so the paths stay as they are",
+			Why:    "history: seerr never reads it again",
+			Detail: "their folders are history: seerr recorded where each request went and never reads the folder again, so the paths stay as they are",
 		})
 	}
 	return nil
@@ -617,8 +624,9 @@ func pastRequests(n int) string {
 }
 
 // left records one row this pass leaves exactly as it is.
-func (d *decision) left(rep *rewrite.Report, where, what, why string) {
-	rep.Left = append(rep.Left, rewrite.Left{File: dbName, Where: where, What: what, Why: why})
+func (d *decision) left(rep *rewrite.Report, l rewrite.Left) {
+	l.File = dbName
+	rep.Left = append(rep.Left, l)
 }
 
 // hasColumn reports whether a table exists with a column of that name.

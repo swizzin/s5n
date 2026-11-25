@@ -96,7 +96,7 @@ type CertificateResult struct {
 	// whose certificate never issues is never served over HTTPS.
 	HTTPS    bool
 	Redirect bool
-	// Reissued says the certificate box found was not signed by the box root
+	// Reissued says the certificate box found was not signed by box's root
 	// and this run asked cert-manager for a new one.
 	Reissued bool
 }
@@ -228,7 +228,7 @@ func (c *Certificates) reportHosts(results []CertificateResult) {
 		case res.Ready:
 			rows = append(rows, say.TableRow{Glyph: "✓", Name: res.Host, Facts: []string{"https (" + issuerLabel(res.Issuer) + ")"}})
 		case res.Reason != "":
-			rows = append(rows, say.TableRow{Glyph: "!", Name: res.Host, Facts: []string{"http only: certificate not Ready (" + res.Reason + "); box retries on the next run"}})
+			rows = append(rows, say.TableRow{Glyph: "!", Name: res.Host, Facts: []string{"http only: the certificate is not Ready (" + res.Reason + ")", "the next run retries it"}})
 		default:
 			rows = append(rows, say.TableRow{Glyph: "·", Name: res.Host, Facts: []string{"not served yet"}})
 		}
@@ -294,6 +294,7 @@ func (c *Certificates) await(ctx context.Context, cl CertificateCluster, results
 	timeout := c.timeout()
 	r := c.report()
 	step := r.Start(waitOp(timeout, results))
+	r.Detail(waitDetail(timeout, results))
 	errs := make([]error, len(results))
 	var wg sync.WaitGroup
 	for i := range results {
@@ -329,27 +330,28 @@ func (c *Certificates) await(ctx context.Context, cl CertificateCluster, results
 		results[i].Ready = true
 		ready++
 	}
-	step.Done(waitDone(ready, results))
+	r.Detail(waitDone(ready, results))
+	step.Done(waitFact(ready, results))
 	return nil
 }
 
-// waitOp is the one wait step's screen line. A single host keeps the sentence
-// box has always printed for it; several are named by their count, because the
-// run has one budget for all of them.
+// waitOp is the one wait step: one row named `certificates` with how many of
+// the run's names came Ready, because the run has one budget for all of them.
+// The Certificate names and the budget are the log's.
 func waitOp(timeout time.Duration, results []CertificateResult) say.Op {
+	return say.Op{Name: certificatesRow, Budget: timeout}
+}
+
+// certificatesRow is the one row the run's certificate wait is: how many of the
+// names came Ready.
+const certificatesRow = "certificates"
+
+// waitDetail is that step's log line: what it waits for, and how long it has.
+func waitDetail(timeout time.Duration, results []CertificateResult) string {
 	if len(results) == 1 {
-		name := GatewayNamespace + "/" + results[0].Name
-		return say.Op{
-			Label:  "waiting for Certificate " + name + " to be Ready",
-			Plain:  fmt.Sprintf("waiting up to %s for Certificate %s to be Ready", timeout, name),
-			Budget: timeout,
-		}
+		return fmt.Sprintf("waiting up to %s for Certificate %s/%s to be Ready", timeout, GatewayNamespace, results[0].Name)
 	}
-	return say.Op{
-		Label:  fmt.Sprintf("waiting for %d Certificates to be Ready", len(results)),
-		Plain:  fmt.Sprintf("waiting up to %s for %d Certificates to be Ready", timeout, len(results)),
-		Budget: timeout,
-	}
+	return fmt.Sprintf("waiting up to %s for %d Certificates to be Ready", timeout, len(results))
 }
 
 // waitDone names how many of the run's Certificates came Ready.
@@ -361,6 +363,30 @@ func waitDone(ready int, results []CertificateResult) string {
 		return ""
 	}
 	return fmt.Sprintf("%d of %d Certificates are Ready", ready, len(results))
+}
+
+// waitFact is the row's fact: how many came Ready, and from whom when every
+// name was issued by the same issuer -- which is the case on every box whose
+// names resolve the same way.
+func waitFact(ready int, results []CertificateResult) string {
+	fact := fmt.Sprintf("%d of %d", ready, len(results))
+	issuer := ""
+	for _, res := range results {
+		if res.Issuer == "" {
+			return fact
+		}
+		if issuer == "" {
+			issuer = res.Issuer
+			continue
+		}
+		if issuer != res.Issuer {
+			return fact
+		}
+	}
+	if issuer != "" {
+		fact += " from " + issuerLabel(issuer)
+	}
+	return fact
 }
 
 // serve is one host's second half, after the run's wait: the box-root re-issue
@@ -375,7 +401,7 @@ func (c *Certificates) serve(ctx context.Context, cl CertificateCluster, res *Ce
 		return nil
 	}
 
-	// A self-signed host's certificate has to chain to the box root, or the
+	// A self-signed host's certificate has to chain to box's root, or the
 	// anchor box writes into the seedbox's namespace is not the anchor its
 	// applications verify against. cert-manager does not re-issue on its own
 	// when the issuer behind an unchanged issuerRef changes what it signs with,
@@ -433,7 +459,7 @@ func clusterIssuerName(issuer string) (string, error) {
 	}
 }
 
-// followRoot keeps a self-signed host's certificate on the box root.
+// followRoot keeps a self-signed host's certificate on box's root.
 //
 // 0.3.0 wrote every host certificate from a bare `selfSigned` ClusterIssuer, so
 // its Secret's ca.crt is the leaf itself. A box upgraded from it keeps the same
@@ -479,7 +505,7 @@ func (d *CertificateDecision) followRoot(ctx context.Context, cl CertificateClus
 	}
 
 	r := d.report()
-	step := r.Start(say.Op{Label: "re-issuing Certificate " + GatewayNamespace + "/" + name + " from the box root"})
+	step := r.Start(say.Op{Label: "re-issuing Certificate " + GatewayNamespace + "/" + name + " from box's root"})
 	if err := triggerIssuing(ctx, cl, name); err != nil {
 		step.Failed(err)
 		return false, err
@@ -512,7 +538,7 @@ func (d *CertificateDecision) followRoot(ctx context.Context, cl CertificateClus
 		return false, fmt.Errorf("certificate %s/%s: cert-manager did not replace it within %s after box asked (check `kubectl -n %s describe certificate %s`)",
 			GatewayNamespace, name, timeout, GatewayNamespace, name)
 	}
-	step.Done(fmt.Sprintf("Certificate %s/%s: re-issued from the box root", GatewayNamespace, name))
+	step.Done(fmt.Sprintf("Certificate %s/%s: re-issued from box's root", GatewayNamespace, name))
 
 	// The new certificate should be the root's child now; if cert-manager
 	// answered with something else, say so rather than letting the anchor be
@@ -530,7 +556,7 @@ func (d *CertificateDecision) followRoot(ctx context.Context, cl CertificateClus
 		now, _, _ := unstructured.NestedStringMap(obj, "data")
 		caCert, _ := base64.StdEncoding.DecodeString(now["ca.crt"])
 		if ours, err := signedByRoot(caCert, root); err == nil && !ours {
-			r.Warn(fmt.Sprintf("certificate %s/%s was re-issued but does not chain to the box root: check that %s is a CA issuer over %s", GatewayNamespace, name, SelfSignedIssuer, RootSecretName))
+			r.Warn(fmt.Sprintf("certificate %s/%s was re-issued but does not chain to box's root: check that %s is a CA issuer over %s", GatewayNamespace, name, SelfSignedIssuer, RootSecretName))
 		}
 	}
 	return true, nil
@@ -538,11 +564,11 @@ func (d *CertificateDecision) followRoot(ctx context.Context, cl CertificateClus
 
 // CertificateNeedsWork reports whether a host's Certificate is there but is not
 // the one this run would issue: a different issuer than the run decided, or a
-// self-signed one whose ca.crt is not the box root.
+// self-signed one whose ca.crt is not box's root.
 //
 // It exists for a host that answers already. A Certificate's name and
 // issuerRef do not change when the issuer behind it changes what it signs with
-// (0.3.0's bare `selfSigned` became a CA over the box root), and cert-manager
+// (0.3.0's bare `selfSigned` became a CA over box's root), and cert-manager
 // never re-issues for that: the host is served, by a certificate nothing else
 // chains to. A run that only looked for missing hosts would leave it there.
 func CertificateNeedsWork(ctx context.Context, k objectReader, host, want string) (bool, error) {

@@ -545,10 +545,11 @@ func TestRehearsalRenamesNothingAndStopsTheTorrents(t *testing.T) {
 			t.Errorf("the confirm screen has no %q:\n%s", want, lines)
 		}
 	}
-	// The screen that says no data is renamed lists no renames: a row the run
-	// will not do is a contradiction the operator confirms.
-	if strings.Contains(lines, "data: rename") {
-		t.Errorf("a rehearsal's confirm screen lists a rename it will not make:\n%s", lines)
+	// The screen says what the real run renames rather than leaving it out: a
+	// rehearsal reviews the box the migration produces, and a row it will not
+	// do here is named as the one that will (rule 11).
+	if got := dataRow(shown, "data"); !strings.Contains(got, "the real run renames Downloads → downloads") {
+		t.Errorf("a rehearsal's confirm screen does not say what the real run renames: %q", got)
 	}
 	conf := f.readFile(filepath.Join("config", "qbittorrent", "qBittorrent", "qBittorrent.conf"))
 	for _, want := range []string{`Session\AddTorrentStopped=true`, `AutoDownloader\EnableProcessing=false`} {

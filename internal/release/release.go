@@ -78,11 +78,12 @@ type ReleaseClient interface {
 var ErrNoReceipt = errors.New("no wiring receipt yet")
 
 // Receipt is the subset of `<release>-wiring`'s status.json box prints: the
-// overall state and one row per wiring step. The full document belongs to
-// internal/wiring; box reads only what it shows.
+// overall state, how long the Job ran, and one row per wiring step. The full
+// document belongs to internal/wiring; box reads only what it shows.
 type Receipt struct {
 	Status    string
 	StartedAt time.Time
+	Duration  time.Duration
 	Error     string
 	Steps     []Step
 }
@@ -550,6 +551,9 @@ type Result struct {
 	Storage []StorageObject
 	// AnchorWrote says this run wrote or removed the host CA ConfigMap.
 	AnchorWrote bool
+	// PlexToken says this run put the token Plex keeps for itself into the
+	// release Secret (plextoken.go).
+	PlexToken bool
 	// NamespaceCreated says apply created the seedbox's namespace, which only
 	// happens on a cluster where it is missing and this identity may create
 	// one (root's).
@@ -567,6 +571,11 @@ type Applier struct {
 	// Open returns the namespace-scoped release handle. The namespace comes
 	// from the grant, so it can only be opened after the files are read.
 	Open func(namespace string) (ReleaseClient, error)
+	// OpenSecret returns the release Secret, one data key at a time. apply
+	// reads and, when Plex has been claimed since the install, writes one key of
+	// it (plextoken.go). A caller that leaves it nil seeds no token, which is
+	// what a test about something else wants: nothing else in apply touches it.
+	OpenSecret func(namespace string) (SecretKeys, error)
 	// OpenStorage returns the storage handle for that namespace. It is separate
 	// from Open because the PVs are cluster-scoped and the claims are not part
 	// of the release: Helm must never own them.
@@ -677,14 +686,14 @@ func (a *Applier) Apply(ctx context.Context, opts Options) (Result, error) {
 	}
 	if !nsp.Exists {
 		if !nsp.CanCreate {
-			return res, fmt.Errorf("the namespace %s does not exist, and this kubeconfig may not create namespaces: root creates a seedbox's namespace with `box adduser`; ask root to add the box, then apply again", namespace)
+			return res, fmt.Errorf("the namespace %s does not exist, and this kubeconfig may not create namespaces: root creates a seedbox's namespace with `box adduser`; ask root to add this box, then apply again", namespace)
 		}
 	} else if nsp.Enforce != podSecurityRestricted {
 		enforce := "no " + podSecurityEnforce + " label"
 		if nsp.Enforce != "" {
 			enforce = podSecurityEnforce + "=" + nsp.Enforce
 		}
-		r.Warn(fmt.Sprintf("namespace %s does not enforce Pod Security %s (%s): root's labels win, box leaves it alone",
+		r.Warn(fmt.Sprintf("namespace %s does not enforce Pod Security %s (%s): root's labels win",
 			namespace, podSecurityRestricted, enforce))
 	}
 
@@ -743,6 +752,26 @@ func (a *Applier) Apply(ctx context.Context, opts Options) (Result, error) {
 	hooksWait := opts.RunHooks && !opts.SkipHooks
 	res.FirstInstall = !exists
 	res.Host = hostOf(values)
+	// The Plex server token, read here with the diff for the same reason the
+	// host step is: a run whose only work is that token has work, so it cannot
+	// answer "nothing to change". It is written after the confirm, before the
+	// release moves (plextoken.go).
+	plexToken := a.planPlexToken(ctx, r, values, vols, namespace, exists)
+	if plexToken.needed() {
+		// The release is the one installed and its values are the ones it has;
+		// what this run installs it for is the wiring Job, which has to run
+		// again now that it can read a token. Same work as `box update`'s
+		// closing apply, for the same reason.
+		hooksWait = true
+	}
+	// The peer port comes before the diff, not after it: a box installed while
+	// the chart defaulted the port has none in either file, and the number its
+	// release already runs is what this run installs. Written first, the port
+	// is not a change -- the box keeps the one its peers announce -- and the
+	// chart ships no default to fall back on.
+	if err := keepPeerPort(values, deployed, exists, chart.Schema, r); err != nil {
+		return res, err
+	}
 	if exists {
 		res.Changes = seedbox.Diff(deployed, values)
 	}
@@ -809,7 +838,7 @@ func (a *Applier) Apply(ctx context.Context, opts Options) (Result, error) {
 	}
 
 	if exists && len(res.Changes) == 0 && len(plan) == 0 && nsp.Exists && len(hostPlan.Hosts) == 0 && !res.Login && anchorLine == "" && !chartMoved && !hooksWait {
-		r.Line(fmt.Sprintf("%s in %s: nothing to change", ReleaseName, namespace))
+		r.Rows([]say.Row{{Mark: say.MarkNote, Name: ReleaseName, Facts: []string{"nothing to change", namespace}}})
 		return res, nil
 	}
 
@@ -831,26 +860,26 @@ func (a *Applier) Apply(ctx context.Context, opts Options) (Result, error) {
 	if exists {
 		switch {
 		case len(res.Changes) > 0:
-			r.Line(fmt.Sprintf("%s in %s: %d %s", ReleaseName, namespace, len(res.Changes), plural(len(res.Changes), "change", "changes")))
+			r.Line(fmt.Sprintf("%s in %s · %d %s", ReleaseName, namespace, len(res.Changes), plural(len(res.Changes), "change", "changes")))
 			r.Diff(changeItems(res.Changes))
 		case chartMoved:
 			// Only the release moved: the values are the ones installed, and
 			// the pins the new chart carries are the whole change.
-			r.Line(fmt.Sprintf("%s in %s: release %s -> %s", ReleaseName, namespace, installed.ChartVersion, chart.Version))
+			r.Line(fmt.Sprintf("%s in %s · %s → %s", ReleaseName, namespace, installed.ChartVersion, chart.Version))
 		case hooksWait:
 			// The release is the one installed and its values are the ones it
 			// has: what this run has to do is the hook it carries, which the
 			// release was deployed without.
-			r.Line(fmt.Sprintf("%s in %s: release %s, running its hooks", ReleaseName, namespace, chart.Version))
+			r.Line(fmt.Sprintf("%s in %s · %s, running its hooks", ReleaseName, namespace, chart.Version))
 		default:
 			// The only work this run has is outside the release -- a host
 			// without its listener, or a login page that is not the one the
 			// values name -- which is why the early return above did not take
 			// it.
-			r.Line(fmt.Sprintf("%s in %s: the release is unchanged", ReleaseName, namespace))
+			r.Line(fmt.Sprintf("%s in %s · the release is unchanged", ReleaseName, namespace))
 		}
 	} else {
-		r.Line(fmt.Sprintf("%s in %s: first install", ReleaseName, namespace))
+		r.Line(fmt.Sprintf("%s in %s · first install", ReleaseName, namespace))
 		var details []string
 		if host := hostOf(values); host != "" {
 			details = append(details, "host: "+host)
@@ -985,7 +1014,7 @@ func (a *Applier) Apply(ctx context.Context, opts Options) (Result, error) {
 			return res, err
 		}
 		res.NamespaceCreated = true
-		r.Success(fmt.Sprintf("created namespace %s (Pod Security %s)", namespace, podSecurityRestricted))
+		r.Detail(fmt.Sprintf("created namespace %s (Pod Security %s)", namespace, podSecurityRestricted))
 		// The anchor and the OIDC clients' Secrets are objects in that
 		// namespace, so they can only be written now -- and the login's
 		// configuration, which names those clients, after them.
@@ -998,7 +1027,8 @@ func (a *Applier) Apply(ctx context.Context, opts Options) (Result, error) {
 	}
 
 	if len(plan) > 0 {
-		step := r.Start(say.Op{Label: fmt.Sprintf("writing the storage for %s", namespace)})
+		step := r.Start(say.Op{Name: "storage"})
+		r.Detail(fmt.Sprintf("writing the storage for %s", namespace))
 		for _, obj := range plan {
 			if err := store.Apply(ctx, obj); err != nil {
 				step.Failed(err)
@@ -1009,7 +1039,7 @@ func (a *Applier) Apply(ctx context.Context, opts Options) (Result, error) {
 				created = append(created, obj)
 			}
 		}
-		step.DoneAs("", fmt.Sprintf("wrote %d storage object%s", len(plan), plural(len(plan), "", "s")))
+		step.Done(fmt.Sprintf("%d object%s", len(plan), plural(len(plan), "", "s")))
 	}
 
 	// The apps the plan showed stopped are stopped here, immediately before the
@@ -1024,8 +1054,20 @@ func (a *Applier) Apply(ctx context.Context, opts Options) (Result, error) {
 		}
 	}
 
+	// The Plex token last, and still before the release moves: it is the one
+	// credential this run supplies, so it has to be in the Secret when the
+	// wiring Job this run re-runs mounts it. A token that cannot be written is
+	// one line and the apply goes on -- it is a convenience, and the wiring
+	// reports the same pending row it did before.
+	if plexToken.needed() {
+		res.PlexToken = a.writePlexToken(ctx, r, plexToken)
+	}
+
 	started := time.Now()
-	upgrade := r.Start(say.Op{Label: fmt.Sprintf("installing %s in %s", ReleaseName, namespace)})
+	// The release is one row: what moved, and what the box now runs. The
+	// revision and the namespace are the log's (rule 5).
+	upgrade := r.Start(say.Op{Name: ReleaseName + " " + chart.Version})
+	r.Detail(fmt.Sprintf("installing %s in %s", ReleaseName, namespace))
 	rev, err := client.Upgrade(ctx, chart, values)
 	if err != nil {
 		upgrade.Failed(err)
@@ -1033,7 +1075,8 @@ func (a *Applier) Apply(ctx context.Context, opts Options) (Result, error) {
 	}
 	res.Applied = true
 	res.Revision = rev
-	upgrade.Done(fmt.Sprintf("applied: %s revision %d in %s", ReleaseName, rev, namespace))
+	r.Detail(fmt.Sprintf("applied %s revision %d in %s", ReleaseName, rev, namespace))
+	upgrade.Done(strings.Join(releaseFacts(values, res.FirstInstall, chartMoved, installed.ChartVersion), " · "))
 
 	// An apply that ran no hooks has no receipt to wait for: the chart's
 	// wiring Job has not run, and its receipt would be the previous release's.
@@ -1051,12 +1094,14 @@ func (a *Applier) Apply(ctx context.Context, opts Options) (Result, error) {
 		return res, withSnapshotDirs(err, snapDirs)
 	}
 	res.Receipt = receipt
-	a.printReceipt(r, receipt)
+	ReportReceipt(r, receipt, rehearsalOf(values))
 	if receipt.Status != "ok" {
+		// The receipt's own rows are on screen already, so the command says
+		// nothing more than where the run log is.
 		if receipt.Error != "" {
-			return res, withSnapshotDirs(fmt.Errorf("wiring failed: %s", receipt.Error), snapDirs)
+			return res, withSnapshotDirs(say.Reported{Err: fmt.Errorf("wiring failed: %s", receipt.Error)}, snapDirs)
 		}
-		return res, withSnapshotDirs(errors.New("wiring failed: the receipt does not say ok"), snapDirs)
+		return res, withSnapshotDirs(say.Reported{Err: errors.New("wiring failed: the receipt does not say ok")}, snapDirs)
 	}
 	// The release is up on the images it moved to, so the copies are what a
 	// rollback would restore rather than the state the apps are writing now:
@@ -1352,6 +1397,13 @@ func forcedIssuer(values map[string]any) string {
 // waitReceipt waits for a receipt from this run. A receipt left by an earlier
 // revision is not evidence about this one, so its start time must be after the
 // upgrade began (with a little slack for clock granularity).
+//
+// The wait shows the Job's own newest log line: a wiring run that spends ten
+// minutes in one app's database migration is not broken, and without that line
+// the screen says nothing at all. Its log is read in the background
+// (joblog.go); the newest line is a field there, so this loop's budget is
+// never spent on the log, and the Job's whole log goes into the run log when
+// the wait ends.
 func (a *Applier) waitReceipt(ctx context.Context, client ReleaseClient, since time.Time) (Receipt, error) {
 	budget := a.ReceiptWait
 	if budget <= 0 {
@@ -1363,7 +1415,18 @@ func (a *Applier) waitReceipt(ctx context.Context, client ReleaseClient, since t
 	}
 	fresh := since.Add(-2 * time.Second)
 	r := a.report()
-	task := r.Start(say.Op{Label: "waiting for the wiring receipt", Budget: budget})
+
+	tail := startJobLog(ctx, client, poll)
+	defer func() {
+		tail.stop()
+		tail.logTo(r)
+	}()
+
+	var source func() string
+	if tail != nil {
+		source = tail.newest
+	}
+	task := r.Start(say.Op{Label: wiringName, Budget: budget, Source: source})
 
 	var receipt Receipt
 	waited, err := wait.Until(ctx, budget, poll, func(ctx context.Context) (bool, error) {
@@ -1386,8 +1449,27 @@ func (a *Applier) waitReceipt(ctx context.Context, client ReleaseClient, since t
 		task.Done("")
 		return receipt, nil
 	}
-	task.Failed(nil)
-	return Receipt{}, errors.New("the wiring receipt never arrived: the release is installed but its wiring hook has not reported")
+	// The step is unnamed, so finishing it prints nothing: the row below is this
+	// wait's one line, and it says what the Job was doing when the budget ran
+	// out. The command is the one that runs the wiring again; the Job's log is
+	// in the run log the failure names.
+	task.Done("")
+	row := say.Row{
+		Mark:  say.MarkFailed,
+		Name:  wiringName,
+		Facts: []string{"no receipt after " + say.Duration(budget)},
+		Why:   tail.newest(),
+	}
+	r.Rows([]say.Row{row, {
+		Mark:    say.MarkNote,
+		Facts:   []string{"your apps are running", "only the wiring stopped"},
+		Command: "box apply",
+	}})
+	// The rows are the screen's; the error itself is the log's, because the run
+	// ends non-zero and the reason has to be written down somewhere.
+	err = errors.New("the wiring receipt never arrived: the release is installed but its wiring hook has not reported")
+	r.Detail(err.Error())
+	return Receipt{}, say.Reported{Err: err}
 }
 
 // undoTimeout bounds the whole of undo: a few deletes on an answering API server
@@ -1445,12 +1527,12 @@ func (a *Applier) printPlan(r say.Reporter, nsp NamespacePlan, objs []StorageObj
 	r.Plan("plan", items)
 }
 
-func (a *Applier) printReceipt(r say.Reporter, rec Receipt) {
-	rows := make([]say.ReceiptRow, 0, len(rec.Steps))
-	for _, s := range rec.Steps {
-		rows = append(rows, say.ReceiptRow{Name: s.Name, Result: s.Result, Detail: s.Detail})
-	}
-	r.Receipt(rec.Status, rows)
+// rehearsalOf says whether this box is a rehearsal. It is the grant's own flag,
+// written by a rehearsal snapshot's apply and never by a file, so it is read
+// from the effective values the release renders from.
+func rehearsalOf(values map[string]any) bool {
+	on, _ := values["rehearsal"].(bool)
+	return on
 }
 
 // changeItems turns a values diff into the marked plan the reporter draws. The
@@ -1523,4 +1605,25 @@ func overlayTree(dst, src map[string]any) {
 		}
 		dst[k] = v
 	}
+}
+
+// releaseFacts is what the release's row says besides the time it took: the
+// apps it installs, the port peers reach it on, and whether this run is the
+// first. A version that moved says so instead, because that is the change a
+// person is looking for.
+func releaseFacts(values map[string]any, first, moved bool, from string) []string {
+	var facts []string
+	switch {
+	case first:
+		facts = append(facts, "first install")
+	case moved && from != "":
+		facts = append(facts, "from "+from)
+	}
+	if apps := EnabledApps(values); len(apps) > 0 {
+		facts = append(facts, fmt.Sprintf("%d apps", len(apps)))
+	}
+	if port, ok := portAt(values); ok && port > 0 {
+		facts = append(facts, fmt.Sprintf("torrent port %d", port))
+	}
+	return facts
 }

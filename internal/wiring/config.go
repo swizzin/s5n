@@ -31,18 +31,19 @@ const (
 // Config is rendered by the chart into /etc/s5n/wiring/wiring.json. It contains
 // no secrets: every credential is a file reference into the mounted Secret.
 type Config struct {
-	Namespace      string          `json:"namespace"`
-	ConfigMap      string          `json:"configMap"`
-	TimeoutSeconds int             `json:"timeoutSeconds"`
-	Qbittorrent    *QbitConfig     `json:"qbittorrent,omitempty"`
-	Prowlarr       *ProwlarrConfig `json:"prowlarr,omitempty"`
-	Plex           *PlexConfig     `json:"plex,omitempty"`
-	Tautulli       *TautulliConfig `json:"tautulli,omitempty"`
-	Seerr          *SeerrConfig    `json:"seerr,omitempty"`
-	Qui            *QuiConfig      `json:"qui,omitempty"`
-	Autobrr        *AutobrrConfig  `json:"autobrr,omitempty"`
-	Pbh            *PbhConfig      `json:"pbh,omitempty"`
-	Instances      []Instance      `json:"instances"`
+	Namespace      string             `json:"namespace"`
+	ConfigMap      string             `json:"configMap"`
+	TimeoutSeconds int                `json:"timeoutSeconds"`
+	Qbittorrent    *QbitConfig        `json:"qbittorrent,omitempty"`
+	Prowlarr       *ProwlarrConfig    `json:"prowlarr,omitempty"`
+	Plex           *PlexConfig        `json:"plex,omitempty"`
+	Tautulli       *TautulliConfig    `json:"tautulli,omitempty"`
+	Seerr          *SeerrConfig       `json:"seerr,omitempty"`
+	Maintainerr    *MaintainerrConfig `json:"maintainerr,omitempty"`
+	Qui            *QuiConfig         `json:"qui,omitempty"`
+	Autobrr        *AutobrrConfig     `json:"autobrr,omitempty"`
+	Pbh            *PbhConfig         `json:"pbh,omitempty"`
+	Instances      []Instance         `json:"instances"`
 }
 
 // QuiConfig points at qui's API. PasswordFile is the release Secret's
@@ -97,12 +98,35 @@ type TautulliConfig struct {
 	PlexTokenFile string `json:"plexTokenFile"`
 }
 
+// MaintainerrConfig points at Maintainerr's API and at the Plex server token its
+// Plex connection uses.
+//
+// URLBase is the prefix the chart serves it under, and every route carries it:
+// Maintainerr applies its BASE_PATH to its API and its health route alike
+// (values.yaml's rewritePath comment, templates/workloads.yaml's BASE_PATH).
+//
+// PlexTokenFile is the same file Tautulli's PMS link reads — the release
+// Secret's plex-token — and is optional the same way: without it the Plex
+// connection is reported pending rather than configured without a credential.
+type MaintainerrConfig struct {
+	URL           string `json:"url"`
+	URLBase       string `json:"urlBase"`
+	PlexTokenFile string `json:"plexTokenFile"`
+}
+
 // SeerrConfig points at Seerr. There is no API key here either: every
 // settings endpoint needs an authenticated admin session the wiring Job
 // cannot create (see internal/apps.Seerr), so this is only ever used to wait
-// for readiness before reporting the media rows pending.
+// for readiness and to read whether an admin exists at all.
+//
+// PublicURL is the address a person opens Seerr at, which is not this URL:
+// Seerr's bundle loads its assets from the site root, so the chart serves it at
+// <app>.<domain> with a listener of its own (catalog.yaml's `exposure: host`).
+// The receipt's one row that asks a human to sign in there names this, never
+// the in-cluster Service.
 type SeerrConfig struct {
-	URL string `json:"url"`
+	URL       string `json:"url"`
+	PublicURL string `json:"publicUrl"`
 }
 
 // QbitConfig points at the qBittorrent WebUI. It carries no credential: the
@@ -211,8 +235,12 @@ func (c *Config) validate() error {
 			return err
 		}
 	}
-	if c.Seerr != nil && c.Seerr.URL == "" {
-		return fmt.Errorf("seerr: url is empty")
+	if c.Seerr != nil {
+		if err := requireFields("seerr", map[string]string{
+			fieldURL: c.Seerr.URL, "publicUrl": c.Seerr.PublicURL,
+		}); err != nil {
+			return err
+		}
 	}
 	if c.Qui != nil {
 		if err := requireFields("qui", map[string]string{
@@ -228,6 +256,16 @@ func (c *Config) validate() error {
 			fieldPasswordFile: c.Autobrr.PasswordFile,
 		}); err != nil {
 			return err
+		}
+	}
+	if c.Maintainerr != nil {
+		if err := requireFields("maintainerr", map[string]string{
+			fieldURL: c.Maintainerr.URL, fieldURLBase: c.Maintainerr.URLBase,
+		}); err != nil {
+			return err
+		}
+		if c.Plex == nil {
+			return fmt.Errorf("maintainerr is configured but plex is not")
 		}
 	}
 	if c.Pbh != nil {

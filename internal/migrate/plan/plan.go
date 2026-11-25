@@ -104,9 +104,26 @@ type App struct {
 	// that directory and box never moves them; empty means the source said
 	// nothing (or said nothing useful), and box's own category is the answer.
 	DownloadCategory string `yaml:"downloadCategory,omitempty"`
+	// Carry is how much of this app's config directory the snapshot took:
+	// CarryFull for its whole data, CarryMinimal for the state the app cannot
+	// rebuild. Empty for every app whose config is its state, which is every
+	// app but Plex. A run that finds no room for the full set where it writes
+	// it says so and carries the state; the plan is what a read and the run
+	// that applies it agree on.
+	Carry string `yaml:"carry,omitempty"`
 	// Paths are this app's path rules.
 	Paths []PathRule `yaml:"paths"`
 }
+
+// The two ways a snapshot can carry an app whose config is more than its state,
+// for App.Carry.
+const (
+	// CarryFull is all of it, less what the app rebuilds by itself.
+	CarryFull = "full"
+	// CarryMinimal is the state the app cannot rebuild: its settings and its
+	// databases, and not the library it built from the media it was given.
+	CarryMinimal = "minimal"
+)
 
 // PathRule maps one directory the app saw to the directory it will see.
 type PathRule struct {

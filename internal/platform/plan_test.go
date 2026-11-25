@@ -14,7 +14,7 @@ func plainPlan(t *testing.T, plan Plan) string {
 	t.Helper()
 	var buf bytes.Buffer
 	d := &Decision{Say: &say.Plain{W: &buf}}
-	d.printPlan(d.Say, plan)
+	printPlan(d.Say, plan)
 	return buf.String()
 }
 
@@ -27,14 +27,8 @@ func TestPlanGroupsEachStepUnderWhatItConfigures(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := `platform plan:
-  + cert-manager ` + pins.CertManager + ` (certificates)
-      + ClusterIssuers: Let's Encrypt, plus self-signed
-  + Envoy Gateway ` + pins.EnvoyGateway + ` (the front door)
-      + the s5n Gateway, HTTP on :80
-  + MetalLB ` + pins.MetalLB + ` (the gateway's address)
-      + IPAddressPool: this node's IP as a /32, over L2
-  + ValidatingAdmissionPolicies enforcing the grant
+	want := `  + cert-manager ` + pins.CertManager + ` · Envoy Gateway ` + pins.EnvoyGateway +
+		` · MetalLB ` + pins.MetalLB + ` · admission policies
 `
 	if got := plainPlan(t, plan); got != want {
 		t.Fatalf("plan:\n%s\nwant:\n%s", got, want)
@@ -86,15 +80,9 @@ func TestPlanGroupsUnderAComponentBoxUses(t *testing.T) {
 	}
 	// The question the plan cannot answer yet stays an item of its own: it is
 	// about the address layer, which may or may not be box's to install.
-	want := `platform plan:
-  = cert-manager (certificates): already on this cluster, left alone
-      + ClusterIssuers: Let's Encrypt, plus self-signed
-  = Envoy Gateway (the front door): already on this cluster, left alone
-      + the s5n Gateway, HTTP on :80
-      ? Gateway s5n-gateway/s5n getting an address
-  ? MetalLB ` + pins.MetalLB + ` (the gateway's address), unless the Gateway gets an address without it
-      ? IPAddressPool: this node's IP as a /32, over L2
-  + ValidatingAdmissionPolicies enforcing the grant
+	want := `  + admission policies
+  = cert-manager (already here, left alone) · Envoy Gateway (already here, left alone)
+  ? MetalLB ` + pins.MetalLB + `, unless the Gateway gets an address without it
 `
 	if got := plainPlan(t, plan); got != want {
 		t.Fatalf("plan:\n%s\nwant:\n%s", got, want)
@@ -121,25 +109,22 @@ func TestPlanMarksWhatARunDoesToEachComponent(t *testing.T) {
 			s.InstalledVersion = "0.0.1"
 		}
 	}
-	want := map[string]string{
-		"cert-manager":  "  + cert-manager " + pins.CertManager + " (certificates)",
-		"Envoy Gateway": "  = Envoy Gateway " + pins.EnvoyGateway + " (the front door): installed, verifying",
-		"MetalLB":       "  ~ MetalLB " + pins.MetalLB + " (the gateway's address); upgrading from 0.0.1",
-	}
+	want := "  + cert-manager " + pins.CertManager + " · admission policies\n" +
+		"  ~ MetalLB " + pins.MetalLB + "; upgrading from 0.0.1\n" +
+		"  = Envoy Gateway " + pins.EnvoyGateway + "\n"
 	text := plainPlan(t, plan)
-	for _, line := range want {
-		if !strings.Contains(text, line+"\n") {
-			t.Fatalf("the plan is missing %q:\n%s", line, text)
-		}
+	if text != want {
+		t.Fatalf("the plan is:\n%s\nwant:\n%s", text, want)
 	}
 	// A component at its pin is verified, and its sub-steps still run: the
 	// issuers and the pool are applied on every run, because re-applying them
-	// is what repairs a cluster where they were removed.
-	if !strings.Contains(text, "      + ClusterIssuers: Let's Encrypt") {
-		t.Fatalf("a verified cert-manager lost its issuers:\n%s", text)
-	}
-	if !strings.Contains(text, "      + IPAddressPool: this node's IP") {
-		t.Fatalf("an upgraded MetalLB lost its pool:\n%s", text)
+	// is what repairs a cluster where they were removed. They are the log's
+	// (rule 5), so the screen above folds them and the transcript keeps them.
+	details := strings.Join(detailLines(plan), "\n")
+	for _, line := range []string{"plan: + ClusterIssuers: Let's Encrypt, plus self-signed", "plan: + IPAddressPool: this node's IP as a /32, over L2"} {
+		if !strings.Contains(details, line+"\n") {
+			t.Fatalf("the log is missing %q:\n%s", line, details)
+		}
 	}
 }
 
@@ -178,14 +163,14 @@ func TestPlanTrustsTheClusterNetworksFirst(t *testing.T) {
 		t.Fatalf("the step trusts %v", got)
 	}
 	text := plainPlan(t, plan)
-	line := "  + firewalld's trusted zone: 10.244.0.0/16 and 10.96.0.0/12\n"
+	line := "firewalld's trusted zone"
 	if !strings.Contains(text, line) {
 		t.Fatalf("the plan does not say what it does to the host:\n%s", text)
 	}
 	// It is one of box's own lines rather than a component's, so it is printed
 	// with the admission policy and applied before either: the narrative order
 	// is the components', and the plan is not a running order.
-	if strings.Index(text, line) > strings.Index(text, "+ ValidatingAdmissionPolicies") {
+	if strings.Index(text, line) > strings.Index(text, "admission policies") {
 		t.Fatalf("the host's firewall is printed after the policy:\n%s", text)
 	}
 }

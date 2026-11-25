@@ -14,6 +14,8 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/swizzin/s5n/internal/runlog"
 )
 
 // signalChildEnv marks the child process TestSecondSignalKills starts: the
@@ -130,13 +132,13 @@ func TestRunBootstrapUsesItsContext(t *testing.T) {
 	cmd := exec.Command(os.Args[0], "-test.run=^TestBootstrapCancelChild$")
 	// A KUBECONFIG in the test environment would take the explicit-cluster
 	// branch, whose refusal is not the cancellation this test is about.
-	cmd.Env = append(withoutEnv(os.Environ(), "KUBECONFIG"), entryChildEnv+"=1")
+	cmd.Env = append(withoutEnv(os.Environ(), "KUBECONFIG"), entryChildEnv+"=1", runlog.DirEnv+"="+t.TempDir())
 	out, err := cmd.CombinedOutput()
 	var exited *exec.ExitError
 	if !errors.As(err, &exited) || exited.ExitCode() != 1 {
 		t.Fatalf("bootstrap with a cancelled context exited %v (want 1):\n%s", err, out)
 	}
-	if !strings.Contains(string(out), "box: context canceled") {
+	if !strings.Contains(string(out), "✗ context canceled") {
 		t.Fatalf("bootstrap did not report the cancellation:\n%s", out)
 	}
 }

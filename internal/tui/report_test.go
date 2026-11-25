@@ -128,7 +128,7 @@ func TestReporterNeverWritesAtColumnZero(t *testing.T) {
 	r.Diff([]say.Item{{Mark: say.Change, Text: "gateway.host: old.example.com -> box.example.com"}})
 	r.Line("s5n in seedbox: first install")
 	r.Muted("clean host: k0s v1.37.2+k0s.1 installed; using /var/lib/k0s/pki/admin.conf (k0s)")
-	r.Warn("namespace seedbox does not enforce Pod Security restricted (no label): root's labels win, box leaves it alone")
+	r.Warn("namespace seedbox does not enforce Pod Security restricted (no label): root's labels win")
 	r.Success("created namespace seedbox (Pod Security restricted)")
 	r.Chart("s5n", "0.2.0", "oci://ghcr.io/swizzin/charts/s5n:0.2.0")
 	r.Created([]string{"/srv/s5n/data", "/srv/s5n/config", "/srv/s5n/config/radarr-4k"})
@@ -350,5 +350,93 @@ func TestReporterTableWrapsUnderTheFacts(t *testing.T) {
 	wrapped := indexPrefix(lines, "                    word")
 	if wrapped < 0 {
 		t.Fatalf("the fact did not wrap under the facts column:\n%s", strings.Join(lines, "\n"))
+	}
+}
+
+// A block with columns is the same table the transcript prints: the heading in
+// the name column, each column heading over the facts it names, and the last
+// column wrapped under itself at the terminal's width so an 80-column terminal
+// still reads a row as one row.
+func TestReporterGroupIsTheTranscriptsTable(t *testing.T) {
+	var buf bytes.Buffer
+	r := NewReporter(ReporterOptions{Out: &buf, Width: 80, NoColor: true, Yes: true})
+	r.Group(say.Group{
+		Title:   "apps",
+		Columns: []string{"carries", "changes"},
+		Rows: []say.TableRow{
+			{Name: "autobrr", Facts: []string{"1.5 GiB", "2 addresses · login → s5n"}},
+			{Name: "radarr", Facts: []string{"34.0 MiB", `2,930 paths · 1 address · keeps download client "qBT" · keeps its API key`}},
+		},
+	})
+	r.Note("2 notes · 4 other workloads stay behind · 2 values left as they are · --details")
+	r.Close()
+
+	lines := strip(buf.String())
+	for i, line := range lines {
+		if len([]rune(line)) > 80 {
+			t.Fatalf("line %d is wider than the terminal: %q", i, line)
+		}
+	}
+	if got, want := lines[0], "  apps     carries   changes"; got != want {
+		t.Fatalf("heading = %q, want %q", got, want)
+	}
+	if got, want := lines[1], "  · autobrr  1.5 GiB   2 addresses · login → s5n"; got != want {
+		t.Fatalf("first row = %q, want %q", got, want)
+	}
+	// The last column wraps under the column it starts in, so the words line
+	// up with the facts above them.
+	if got := indexPrefix(lines, `  · radarr   34.0 MiB  2,930 paths · 1 address · keeps download client`); got < 0 {
+		t.Fatalf("the long row is not in the table:\n%s", strings.Join(lines, "\n"))
+	}
+	if got := indexPrefix(lines, "                       keeps its API key"); got < 0 {
+		t.Fatalf("the wrapped part does not hang under the facts column:\n%s", strings.Join(lines, "\n"))
+	}
+	if got := indexPrefix(lines, "  2 notes · 4 other workloads"); got < 0 {
+		t.Fatalf("no note:\n%s", strings.Join(lines, "\n"))
+	}
+}
+
+// The live table widens the same way the transcript does: a name longer than
+// any other takes the block's column with it, and nothing is moved to a line of
+// its own with its facts under it.
+func TestReporterTableWidensForALongName(t *testing.T) {
+	var buf bytes.Buffer
+	r := NewReporter(ReporterOptions{Out: &buf, Width: 100, NoColor: true, Yes: true})
+	r.Table("", []say.TableRow{
+		{Glyph: "✓", Name: "box.example.test", Facts: []string{"https (Let's Encrypt)"}},
+		{Glyph: "!", Name: "an-app-host-name-that-is-longer-than-the-column", Facts: []string{"http only"}},
+	})
+	r.Close()
+	lines := strip(buf.String())
+	if got, want := lines[0], "  ✓ box.example.test                                 https (Let's Encrypt)"; got != want {
+		t.Fatalf("row 0 = %q, want %q", got, want)
+	}
+	if got, want := lines[1], "  ! an-app-host-name-that-is-longer-than-the-column  http only"; got != want {
+		t.Fatalf("row 1 = %q, want %q", got, want)
+	}
+}
+
+// The live renderer ends a run the same way: one `!` label, then the rows, with
+// each command under the row it clears.
+func TestReporterToFinishIsOneBlock(t *testing.T) {
+	var buf bytes.Buffer
+	r := NewReporter(ReporterOptions{Out: &buf, Width: 80, NoColor: true, Yes: true})
+	r.ToFinish([]say.Row{
+		{Mark: say.MarkNeeds, Name: "certificates", Facts: []string{"add a DNS record for box.example.test"}, Command: "box init"},
+		{Mark: say.MarkNeeds, Name: "updates", Facts: []string{"run this from cron every 15 minutes"}, Command: "box update --timer"},
+	})
+	r.Close()
+	lines := strip(buf.String())
+	want := []string{
+		"  ! to finish",
+		"    certificates  add a DNS record for box.example.test",
+		"                  $ box init",
+		"    updates       run this from cron every 15 minutes",
+		"                  $ box update --timer",
+	}
+	for i, w := range want {
+		if lines[i] != w {
+			t.Fatalf("line %d = %q, want %q:\n%s", i, lines[i], w, strings.Join(lines, "\n"))
+		}
 	}
 }

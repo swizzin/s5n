@@ -289,6 +289,9 @@ type fakeApply struct {
 	managed   *fakeRelease
 	nextRev   int
 	log       *callLog
+	// receipt is what a hooks-on apply reports as its wiring receipt; a zero
+	// one is an apply whose chart ran no wiring.
+	receipt release.Receipt
 }
 
 func (f *fakeApply) apply(_ context.Context, opts release.Options) (release.Result, error) {
@@ -325,7 +328,11 @@ func (f *fakeApply) apply(_ context.Context, opts release.Options) (release.Resu
 	if err != nil {
 		return release.Result{Applied: applied, Revision: f.nextRev}, err
 	}
-	return release.Result{Applied: true, Revision: f.nextRev}, nil
+	res := release.Result{Applied: true, Revision: f.nextRev}
+	if !opts.SkipHooks {
+		res.Receipt = f.receipt
+	}
+	return res, nil
 }
 
 // fakeHolds is holds.json in memory: the plan reads it and a step that rolls an
@@ -512,7 +519,7 @@ func TestAlreadyCurrentWritesOnlyTheCheckTime(t *testing.T) {
 	if !h.state.state.LastCheck.Equal(h.now) {
 		t.Fatalf("LastCheck = %v, want %v", h.state.state.LastCheck, h.now)
 	}
-	if !strings.HasPrefix(h.out.String(), "s5n 0.4.0 in testbox is current") {
+	if !strings.HasPrefix(h.out.String(), "· s5n 0.4.0 is current") {
 		t.Fatalf("first line does not answer:\n%s", h.out)
 	}
 }
@@ -553,7 +560,7 @@ func TestABoxAheadOfEveryPublishedReleaseIsCurrent(t *testing.T) {
 	if !res.Current || res.Installed != "0.5.0-rc.1" || res.Target != "0.5.0-rc.1" {
 		t.Fatalf("result = %+v, want the box already current", res)
 	}
-	if !strings.HasPrefix(h.out.String(), "s5n 0.5.0-rc.1 in testbox is current") {
+	if !strings.HasPrefix(h.out.String(), "· s5n 0.5.0-rc.1 is current") {
 		t.Fatalf("first line does not answer:\n%s", h.out)
 	}
 	if h.confirm.asks != 0 || len(h.app.calls) != 0 || len(h.scales()) != 0 {
@@ -646,7 +653,7 @@ func TestOneStepSnapshotsOnlyTheAppWhoseImageMoved(t *testing.T) {
 	if !reflect.DeepEqual(rec.Moved, []string{"sonarr"}) || rec.Gate != "" || rec.Error != "" {
 		t.Fatalf("LastStep = %+v, want the app it moved and no gate", rec)
 	}
-	if !strings.Contains(h.out.String(), "s5n 0.4.0 -> 0.5.0 in testbox: 1 step") {
+	if !strings.Contains(h.out.String(), "s5n 0.4.0 → 0.5.0 · 1 step · sonarr moves") {
 		t.Fatalf("plan line missing:\n%s", h.out)
 	}
 }
@@ -682,7 +689,7 @@ func TestAnAppWithNoSnapshotIsMovedWithoutACopy(t *testing.T) {
 	if len(h.snaps.takes) != 1 || !reflect.DeepEqual(h.snaps.takes[0].apps, []string{"radarr"}) {
 		t.Fatalf("takes = %+v, want one copy of radarr", h.snaps.takes)
 	}
-	if !strings.Contains(h.out.String(), "(apps: radarr, sonarr (no snapshot))") {
+	if !strings.Contains(h.out.String(), "is moved without a copy of its config") {
 		t.Fatalf("the plan does not mark sonarr as uncopied:\n%s", h.out)
 	}
 }
@@ -736,9 +743,9 @@ func TestAHeldAppIsNamedInThePlan(t *testing.T) {
 		t.Fatalf("applies = %+v, want the release applied at 0.5.0 and its hooks run after the gate", h.app.calls)
 	}
 	for _, want := range []string{
-		"0.4.0 -> 0.5.0 (no image moves)",
-		"held:",
-		"sonarr: held at " + digestA + " by your values",
+		"0.4.0 → 0.5.0 · 1 step · no image moves",
+		"sonarr",
+		"held at " + digestA + " by your values",
 	} {
 		if !strings.Contains(h.out.String(), want) {
 			t.Fatalf("plan does not print %q:\n%s", want, h.out)
@@ -776,9 +783,9 @@ func TestARollbackHoldIsNamedInThePlan(t *testing.T) {
 		t.Fatalf("a held-back app was stopped or copied: scales=%v takes=%+v", h.scales(), h.snaps.takes)
 	}
 	for _, want := range []string{
-		"0.4.0 -> 0.5.0 (no image moves)",
-		"held:",
-		"sonarr: held at 4.9.0 after a rollback, until a release pins something other than 5.0.0",
+		"0.4.0 → 0.5.0 · 1 step · no image moves",
+		"held at 4.9.0 after a rollback",
+		"it moves again when a release pins something other than 5.0.0",
 	} {
 		if !strings.Contains(h.out.String(), want) {
 			t.Fatalf("plan does not print %q:\n%s", want, h.out)
@@ -1023,8 +1030,10 @@ func TestACrashloopRollsTheAppBackAndTheUpdateContinues(t *testing.T) {
 		t.Fatalf("applies = %+v, want the first step's hooks run by its rollback's re-apply", h.app.calls)
 	}
 	for _, want := range []string{
-		"radarr exited 3 times on 7.1.0: rolling it back to 7.0.0",
-		"radarr is back on 7.0.0 with its snapshot from 2026-01-02 03:04 UTC; it stays there until a release pins something other than 7.1.0",
+		"✗ radarr         crashed 3 times on the new image",
+		"✓ radarr         rolled back to 7.0.0 · its " + h.now.In(time.Local).Format("15:04") + " snapshot",
+		"! radarr is held on 7.0.0 until a release ships a fixed image",
+		"  $ box status",
 	} {
 		if !strings.Contains(h.out.String(), want) {
 			t.Fatalf("transcript does not say %q:\n%s", want, h.out)
@@ -1574,7 +1583,7 @@ func TestTheNextRunSkipsAFailedRelease(t *testing.T) {
 	if !reflect.DeepEqual(res.Skipped, []string{"0.5.0"}) {
 		t.Fatalf("Skipped = %v, want the release that failed", res.Skipped)
 	}
-	if !strings.Contains(h.out.String(), "0.5.0 failed to update on this box before") {
+	if !strings.Contains(h.out.String(), "s5n 0.5.0 failed to update on this box before") {
 		t.Fatalf("the skipped release is not named:\n%s", h.out)
 	}
 	if len(h.app.calls) != 0 {
@@ -1616,7 +1625,7 @@ func TestAMinBoxSkipIsNamed(t *testing.T) {
 	if len(res.Skips) != 1 || res.Skips[0].Version != "0.7.0" {
 		t.Fatalf("Skips = %+v, want 0.7.0", res.Skips)
 	}
-	if !strings.Contains(h.out.String(), "s5n 0.7.0 is out and needs a newer box") {
+	if !strings.Contains(h.out.String(), "s5n 0.7.0 is out and needs box 9.0.0 or newer") {
 		t.Fatalf("the skipped release is not named:\n%s", h.out)
 	}
 }
@@ -1653,7 +1662,7 @@ func TestCheckWritesOnlyTheCheckTime(t *testing.T) {
 	if !reflect.DeepEqual(h.state.state.Failed, []string{"0.3.5"}) {
 		t.Fatalf("Failed = %v, --check rewrote it", h.state.state.Failed)
 	}
-	if !strings.Contains(h.out.String(), "--check: nothing written but the check time") {
+	if !strings.Contains(h.out.String(), "--check: nothing was written but the check time") {
 		t.Fatalf("--check does not say it wrote nothing:\n%s", h.out)
 	}
 }

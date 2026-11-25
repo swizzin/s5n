@@ -106,41 +106,53 @@ func (k K0sInstaller) Install(ctx context.Context, plan InstallPlan) error {
 		return errors.New(why)
 	}
 	config := k.configPath(plan)
+	r := say.Or(k.Say, nil)
 	if why := k0sConfigConflict(config, plan.ConfigText); why != "" {
+		r.Detail("box installs k0s with a config that pins the API address, and leaves another k0s config alone")
 		return errors.New(why)
 	}
 
-	r := say.Or(k.Say, nil)
 	bin := k.binPath()
-	step := r.Start(say.Op{
-		Label: fmt.Sprintf("installing k0s %s for %s", rel.Version, rel.Arch),
-		Plain: fmt.Sprintf("installing k0s %s for %s", rel.Version, rel.Arch),
-	})
+	// One row for the whole install: the download, the binary, the config and
+	// the service are one thing that either works or does not, and the paths
+	// are the log's (rule 5).
+	step := r.Start(say.Op{Name: "k0s " + rel.Version})
+	r.Detail(fmt.Sprintf("installing k0s %s for %s into %s", rel.Version, rel.Arch, bin))
 	if err := k.writeBinary(ctx, rel, bin); err != nil {
 		step.Failed(err)
 		return err
 	}
-	step.Done(fmt.Sprintf("installed %s", bin))
+	r.Detail("installed " + bin)
 
 	// From here the host is changed by this run: every failure names what is
 	// there now and the one command that removes it. box never runs that
 	// command itself -- `k0s reset` would also remove a k0s box did not
 	// install, and destroying a cluster is the operator's call to see happen.
 	if err := k.writeConfig(config, plan.ConfigText); err != nil {
+		step.Failed(err)
 		return k.leftBehind(plan, "box could not write the k0s config it installs with", nil, err)
 	}
+	r.Detail("wrote " + config)
 	out, err := k.runK0s(ctx, installArgs(plan, config)...)
 	if err != nil {
+		step.Failed(err)
 		return k.leftBehind(plan, "k0s could not be installed as a service", out, err)
 	}
 	out, err = k.runK0s(ctx, "start")
 	if err != nil {
+		step.Failed(err)
 		return k.leftBehind(plan, "k0s did not start", out, err)
 	}
 	if err := k.waitReady(ctx); err != nil {
+		step.Failed(err)
 		return k.leftBehind(plan, "the cluster API did not answer ready", nil, err)
 	}
-	return k.verifyNodeIP(ctx, plan)
+	if err := k.verifyNodeIP(ctx, plan); err != nil {
+		step.Failed(err)
+		return err
+	}
+	step.Done("installed")
+	return nil
 }
 
 // k0sInstallSubcommand is the k0s subcommand that writes the systemd unit.
@@ -264,11 +276,7 @@ func (k K0sInstaller) waitReady(ctx context.Context) error {
 	}
 
 	r := say.Or(k.Say, nil)
-	waitStep := r.Start(say.Op{
-		Label:  "waiting for the cluster API",
-		Plain:  fmt.Sprintf("waiting up to %s for the cluster API", timeout),
-		Budget: timeout,
-	})
+	r.Detail(fmt.Sprintf("waiting up to %s for the cluster API", timeout))
 	// The installer's own clock is the wait's: a test that proves how many
 	// attempts five seconds made moves a fake Now forward instead of spending
 	// the five seconds.
@@ -279,14 +287,12 @@ func (k K0sInstaller) waitReady(ctx context.Context) error {
 			return last == nil, nil
 		})
 	if err != nil {
-		waitStep.Failed(err)
 		return err
 	}
 	if waited.Done {
-		waitStep.Done("the cluster API is ready")
+		r.Detail("the cluster API is ready")
 		return nil
 	}
-	waitStep.Failed(last)
 	return fmt.Errorf("not ready after %s: %w", timeout, last)
 }
 

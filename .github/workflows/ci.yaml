@@ -35,6 +35,59 @@ jobs:
   test:
     uses: ./.github/workflows/test.yaml
 
+  # ---- an image bump, tested by the tree it lands on --------------------------
+  #
+  # Renovate opens app-image and platform-pin pull requests against main, and a
+  # pull request runs the tests of the branch it targets: main's, which lag
+  # develop's between releases. That is how Tautulli 2.19.1 passed main's suite
+  # and broke on develop's. So a pull request into main whose whole change is the
+  # two files an automatic release ships also runs develop's suite, with the pull
+  # request's files laid over develop; its failure fails the pull request. Any
+  # other pull request is unchanged.
+  #
+  # The file set is hack/release's (`release images`, which reads the same
+  # releasedFiles `decide` releases on), never a second list in YAML. A tool that
+  # cannot decide fails this job rather than answering "not a bump": a check that
+  # silently skipped is an assertion not held.
+  image-bump:
+    if: github.event_name == 'pull_request' && github.base_ref == 'main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      images: ${{ steps.decide.outputs.images }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # The diff is base...head: both sides, and the merge base between
+          # them.
+          fetch-depth: 0
+      - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
+        with:
+          go-version-file: go.mod
+          cache: false # one small command: no entry of its own
+      - name: is this pull request an image bump
+        id: decide
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          # stdout is KEY=VALUE for $GITHUB_OUTPUT; the reason on stderr is this
+          # step's log.
+          go run ./hack/release images "$BASE" "$HEAD" | tee -a "$GITHUB_OUTPUT"
+
+  # develop's suite, with this pull request's files over it. The workflow file is
+  # the caller's (GitHub resolves a called workflow from the calling commit); the
+  # tree it tests is develop's, with the bump on top -- which is what a back-merge
+  # would have produced, tested before it exists.
+  image-bump-test:
+    needs: [image-bump]
+    if: needs.image-bump.outputs.images == 'true'
+    uses: ./.github/workflows/test.yaml
+    with:
+      ref: develop
+      overlay-ref: ${{ github.event.pull_request.head.sha }}
+
   # ---- release: the decision, and the tag -------------------------------------
   #
   # The last job of a push to main, after every test job: the decision is
@@ -67,7 +120,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0 # every tag: "since the last s5n-v* one" is the question
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+      - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
         with:
           go-version-file: go.mod
       - name: decide (the diff since the last s5n-v* tag)

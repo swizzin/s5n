@@ -107,7 +107,7 @@ func (t *TLSHosts) Ensure(ctx context.Context, hosts []string) error {
 	}
 	domain := strings.TrimSpace(t.Domain)
 	if domain == "" {
-		return errors.New("no domain: an app host is a name under the box's own")
+		return errors.New("no domain: an app host is a name under this host's own")
 	}
 	r := t.report()
 	// The box's own name is resolved only for a host this run has not decided
@@ -236,4 +236,31 @@ func appName(host, domain string) string {
 // an operator who cannot use a wildcard needs.
 func appHostRecord(domain, host string) string {
 	return fmt.Sprintf("add either a wildcard *.%s or a record for %s", domain, host)
+}
+
+// certificatesRow is the one row a run's host certificates fold into: the
+// issuer, how many names it is for, and the reason they share.
+const certificatesRow = "certificates"
+
+// tlsRow is one host's certificate decision as a row: the name in the name
+// column and the reason beside it, with the name not said twice. The issuer is
+// a word ("self-signed", "Let's Encrypt") because it is what the row is about;
+// the rest of the sentence is why.
+func tlsRow(h Host) say.Row {
+	issuer := "self-signed"
+	if h.Issuer == IssuerLetsEncrypt {
+		issuer = "Let's Encrypt"
+	}
+	why := strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(h.Why), h.Host))
+	why = strings.TrimSpace(strings.TrimPrefix(why, ":"))
+	// The issuer is already a column, so the sentence's own "using ..." is the
+	// same fact a second time.
+	for _, tail := range []string{": using Let's Encrypt", ": using a self-signed certificate"} {
+		why = strings.TrimSuffix(why, tail)
+	}
+	row := say.Row{Mark: say.MarkNote, Name: h.Host, Facts: []string{issuer}}
+	if why != "" {
+		row.Facts = append(row.Facts, why)
+	}
+	return row
 }

@@ -40,6 +40,16 @@ type ReporterOptions struct {
 	// Yes answers every confirm without a form, and leaves the same ✓ record
 	// line an answered form would.
 	Yes bool
+	// Log is the run log: the same finished lines as the screen, plus the
+	// Detail lines, with a timestamp each. The writer behind it does the
+	// timestamping and the redaction; nil is a run with no log.
+	Log io.Writer
+	// LogPath is that file, for the one line a failed run ends with.
+	LogPath string
+	// Now is the clock a step's duration is measured with, and Sample how
+	// often a waiting step's source is read. Zero is time.Now and a second.
+	Now    func() time.Time
+	Sample time.Duration
 }
 
 // indent is where every line the reporter prints under a phase frame starts.
@@ -69,6 +79,14 @@ type Reporter struct {
 	// run and must not stack two gaps between them.
 	space *space
 
+	// log is the run log, nil for a run that does not keep one.
+	log     io.Writer
+	logPath string
+	// now and sample are the clock and the sampling interval; the zero values
+	// mean time.Now and a second.
+	now    func() time.Time
+	sample time.Duration
+
 	// pending is the wiring receipt's rows that wait on a person. They are
 	// printed after the success card, because they are what to do next.
 	pending []say.ReceiptRow
@@ -97,14 +115,18 @@ func NewReporter(o ReporterOptions) *Reporter {
 	}
 	ui := New(Options{In: in, Out: out, NoColor: o.NoColor, Width: o.Width, Theme: o.Theme, Background: o.Background})
 	r := &Reporter{
-		out:    out,
-		errOut: errOut,
-		width:  o.Width,
-		chrome: chrome{noColor: o.NoColor},
-		ui:     ui,
-		space:  ui.space,
-		yes:    o.Yes,
-		closed: false,
+		out:     out,
+		errOut:  errOut,
+		width:   o.Width,
+		chrome:  chrome{noColor: o.NoColor},
+		ui:      ui,
+		space:   ui.space,
+		yes:     o.Yes,
+		closed:  false,
+		log:     o.Log,
+		logPath: o.LogPath,
+		now:     o.Now,
+		sample:  o.Sample,
 	}
 	if o.In == nil && o.Out == nil {
 		r.watchInterrupt()
@@ -156,6 +178,38 @@ func (r *Reporter) Palette() theme.Variant { return r.ui.Palette() }
 
 // Err is a theme name that did not resolve, or nil.
 func (r *Reporter) Err() error { return r.ui.Err() }
+
+func (r *Reporter) clock() time.Time {
+	if r.now != nil {
+		return r.now()
+	}
+	return time.Now()
+}
+
+func (r *Reporter) interval() time.Duration {
+	if r.sample > 0 {
+		return r.sample
+	}
+	return time.Second
+}
+
+// Detail is a line for the run log alone: nothing about it reaches the screen.
+func (r *Reporter) Detail(text string) {
+	if r.log == nil || strings.TrimSpace(text) == "" {
+		return
+	}
+	_, _ = io.WriteString(r.log, text+"\n")
+}
+
+// logged copies a finished block to the run log. The live line is never copied:
+// it is redrawn many times a second, and the log keeps what the screen left in
+// scrollback.
+func (r *Reporter) logged(text string) {
+	if r.log == nil || text == "" {
+		return
+	}
+	_, _ = io.WriteString(r.log, text)
+}
 
 // SetYes makes every confirm answer itself, which is what --yes means on a
 // terminal. It is set after the flags are parsed.
@@ -243,10 +297,6 @@ func (r *Reporter) Table(title string, rows []say.TableRow) {
 			nameWidth = w
 		}
 	}
-	const nameMax = 24
-	if nameWidth > nameMax {
-		nameWidth = nameMax
-	}
 	for _, row := range rows {
 		glyph := row.Glyph
 		if glyph == "" {
@@ -264,17 +314,6 @@ func (r *Reporter) Table(title string, rows []say.TableRow) {
 			}
 			continue
 		}
-		// A name longer than the column keeps its line to itself, with the
-		// facts under it: a table whose names push the facts off the edge is
-		// not a table any more.
-		if lipgloss.Width(row.Name) > nameWidth {
-			b.WriteString(indent + r.chrome.paint(glyph, glyphStyle(glyph).Render(glyph)) + " " + r.chrome.paint(row.Name, inkStyle.Render(row.Name)) + "\n")
-			pad := indent + "  "
-			for _, line := range wrapText(facts, r.width-lipgloss.Width(pad)) {
-				b.WriteString(pad + r.chrome.paint(line, mutedStyle.Render(line)) + "\n")
-			}
-			continue
-		}
 		pad := indent + strings.Repeat(" ", lipgloss.Width(glyph)+1+nameWidth+2)
 		for i, line := range wrapText(facts, r.width-lipgloss.Width(pad)) {
 			if i == 0 {
@@ -287,6 +326,251 @@ func (r *Reporter) Table(title string, rows []say.TableRow) {
 		}
 	}
 	r.emit(b.String())
+}
+
+// Rows is a block of status lines: the mark in the gutter, the name in the
+// fixed column, and the facts after it, wrapped under the row's own text column
+// so the gutter and the columns stay columns. It sits flush left, like the
+// masthead: a status block is the run's frame, not its content.
+func (r *Reporter) Rows(rows []say.Row) {
+	if len(rows) == 0 {
+		return
+	}
+	var b strings.Builder
+	// One block, one name column: a long name widens the block rather than
+	// pushing its own facts two columns off everyone else's.
+	for _, row := range say.Block(rows) {
+		b.WriteString(r.rowBlock(row))
+	}
+	r.emit(b.String())
+}
+
+// Group is a titled table whose facts read down columns: the column headings
+// over the data they name, one row per thing, and the last column as the one
+// that carries the words, wrapped under itself. The whole block shares one name
+// column, as wide as its longest name, so the facts start in one column down
+// the block. A group with no headings is a list: the same marks, with each
+// row's facts joined into the one sentence they are.
+func (r *Reporter) Group(g say.Group) {
+	if len(g.Rows) == 0 {
+		return
+	}
+	nameWidth := blockNameWidth(g.Rows)
+	cols := groupColumnWidths(g)
+	var b strings.Builder
+	if head := groupHead(g, nameWidth, cols); head != "" {
+		b.WriteString(indent + r.chrome.paint(head, accentStyle.Bold(true).Render(head)) + "\n")
+	}
+	for _, row := range g.Rows {
+		glyph := row.Glyph
+		if glyph == "" {
+			glyph = say.MarkNote
+		}
+		prefix := indent + glyph + " "
+		name := ""
+		if row.Name != "" {
+			name = row.Name + strings.Repeat(" ", max(0, nameWidth-lipgloss.Width(row.Name))) + "  "
+		}
+		if row.State != "" {
+			name += row.State + strings.Repeat(" ", max(0, say.StateCol-lipgloss.Width(row.State))) + "  "
+		}
+		lead, last := groupColumns(row, cols)
+		avail := r.width - lipgloss.Width(prefix) - lipgloss.Width(name) - lipgloss.Width(lead)
+		if avail < 8 {
+			avail = 8
+		}
+		hang := strings.Repeat(" ", lipgloss.Width(prefix)+lipgloss.Width(name)+lipgloss.Width(lead))
+		head := indent + r.chrome.paint(glyph, glyphStyle(glyph).Render(glyph)) + " "
+		if name != "" {
+			head += r.chrome.paint(name[:len(name)-2], inkStyle.Render(strings.TrimRight(name, " "))) + "  "
+		}
+		for i, line := range wrapText(last, avail) {
+			if i == 0 {
+				b.WriteString(head + lead + r.chrome.paint(line, mutedStyle.Render(line)) + "\n")
+				continue
+			}
+			b.WriteString(hang + r.chrome.paint(line, mutedStyle.Render(line)) + "\n")
+		}
+	}
+	r.emit(b.String())
+}
+
+// groupHead is a block's heading line: the title in the name column and each
+// column heading over the facts it names.
+func groupHead(g say.Group, nameWidth int, cols []int) string {
+	if g.Title == "" && len(g.Columns) == 0 {
+		return ""
+	}
+	head := g.Title + strings.Repeat(" ", max(0, nameWidth-lipgloss.Width(g.Title)))
+	for i, c := range g.Columns {
+		head += "  " + c + strings.Repeat(" ", max(0, cols[i]-lipgloss.Width(c)))
+	}
+	return strings.TrimRight(head, " ")
+}
+
+// groupColumns splits one row's facts into the columns before the last, already
+// padded, and the last one, which is the text that wraps. A block with no
+// headings joins every fact into that one sentence.
+func groupColumns(row say.TableRow, cols []int) (lead, last string) {
+	if len(cols) == 0 {
+		return "", strings.Join(row.Facts, " · ")
+	}
+	var b strings.Builder
+	for i := 0; i+1 < len(row.Facts); i++ {
+		w := 0
+		if i < len(cols) {
+			w = cols[i]
+		}
+		b.WriteString(row.Facts[i] + strings.Repeat(" ", max(0, w-lipgloss.Width(row.Facts[i]))) + "  ")
+	}
+	if len(row.Facts) > 0 {
+		last = row.Facts[len(row.Facts)-1]
+	}
+	return b.String(), last
+}
+
+// blockNameWidth is a block's name column: as wide as its longest name.
+func blockNameWidth(rows []say.TableRow) int {
+	w := 0
+	for _, row := range rows {
+		if n := lipgloss.Width(row.Name); n > w {
+			w = n
+		}
+	}
+	return w
+}
+
+// groupColumnWidths are the widths of a block's leading columns: as wide as the
+// widest fact in each, so the headings sit over the data they name.
+func groupColumnWidths(g say.Group) []int {
+	cols := make([]int, len(g.Columns))
+	for _, row := range g.Rows {
+		if row.Glyph != "" {
+			continue
+		}
+		for i := range g.Columns {
+			if i+1 < len(row.Facts) && lipgloss.Width(row.Facts[i]) > cols[i] {
+				cols[i] = lipgloss.Width(row.Facts[i])
+			}
+		}
+	}
+	return cols
+}
+
+// ToFinish is the block a run ends with when it leaves something for a person:
+// the label with the one `!` mark, then each row two columns in with the
+// command that clears it under it. The rows carry no mark of their own: the
+// label is what says the block needs them.
+func (r *Reporter) ToFinish(rows []say.Row) {
+	if len(rows) == 0 {
+		return
+	}
+	width := 0
+	for _, row := range rows {
+		if w := lipgloss.Width(row.Name); w > width {
+			width = w
+		}
+	}
+	var b strings.Builder
+	label := say.MarkNeeds + " to finish"
+	b.WriteString(indent + r.chrome.paint(label, badStyle.Render(label)) + "\n")
+	for _, row := range rows {
+		head := indent + "  "
+		if row.Name != "" {
+			head += row.Name + strings.Repeat(" ", width-lipgloss.Width(row.Name)) + "  "
+		}
+		hang := strings.Repeat(" ", lipgloss.Width(head))
+		painted := indent + "  "
+		if row.Name != "" {
+			painted += r.chrome.paint(row.Name, inkStyle.Render(row.Name)) + strings.Repeat(" ", width-lipgloss.Width(row.Name)) + "  "
+		}
+		facts := strings.Join(row.Facts, " · ")
+		for i, line := range wrapText(facts, r.width-lipgloss.Width(head)) {
+			if i == 0 {
+				b.WriteString(painted + r.chrome.paint(line, mutedStyle.Render(line)) + "\n")
+				continue
+			}
+			b.WriteString(hang + r.chrome.paint(line, mutedStyle.Render(line)) + "\n")
+		}
+		if row.Command != "" {
+			for i, line := range wrapShell(row.Command, r.width-lipgloss.Width(hang)-2) {
+				if i == 0 {
+					b.WriteString(hang + r.chrome.paint(say.MarkCommand, glyphStyle(say.MarkCommand).Render(say.MarkCommand)) + " " + r.chrome.paint(line, inkStyle.Render(line)) + "\n")
+					continue
+				}
+				b.WriteString(hang + "  " + r.chrome.paint(line, inkStyle.Render(line)) + "\n")
+			}
+		}
+	}
+	r.emit(b.String())
+}
+
+// Note is a line of prose under a block: two columns in, so it belongs to the
+// block above it, wrapped with its continuation hanging under the text.
+func (r *Reporter) Note(text string) {
+	text = strings.TrimSpace(text)
+	if text == "" {
+		return
+	}
+	r.block(text, "", mutedStyle, mutedStyle)
+}
+
+// rowBlock draws one row: the mark and the columns, then the facts wrapped under
+// them, then the why and the command at the same column. A command is broken the
+// way a shell would break it, never inside a token.
+func (r *Reporter) rowBlock(row say.Row) string {
+	mark := row.Mark
+	if mark == "" {
+		mark = say.MarkNote
+	}
+	prefix := row.Prefix(mark)
+	col := row.TextCol()
+	avail := r.width - col
+	if avail < 8 {
+		avail = 8
+	}
+	paintedMark := r.chrome.paint(mark, glyphStyle(mark).Render(mark))
+	head := paintedMark + prefix[len(mark):]
+	var b strings.Builder
+	// A command breaks the way a shell breaks one; nothing else does.
+	lines := wrapText(row.Text(), avail)
+	cont := col
+	if mark == say.MarkCommand {
+		lines = wrapShell(row.Text(), avail)
+		cont = col + len(say.MarkCommand) + 1
+	}
+	if len(lines) == 0 || (len(lines) == 1 && lines[0] == "") {
+		b.WriteString(strings.TrimRight(head, " ") + "\n")
+	} else {
+		for i, line := range lines {
+			text := r.chrome.paint(line, inkStyle.Render(line))
+			if i == 0 {
+				if row.Text() == "" {
+					b.WriteString(strings.TrimRight(head, " ") + text + "\n")
+					continue
+				}
+				b.WriteString(head + text + "\n")
+				continue
+			}
+			b.WriteString(strings.Repeat(" ", cont) + text + "\n")
+		}
+	}
+	hang := strings.Repeat(" ", col)
+	if row.Why != "" {
+		for _, line := range wrapText(row.Why, avail) {
+			b.WriteString(hang + r.chrome.paint(line, mutedStyle.Render(line)) + "\n")
+		}
+	}
+	if row.Command != "" {
+		for i, line := range wrapShell(row.Command, avail-2) {
+			if i == 0 {
+				b.WriteString(hang + r.chrome.paint(say.MarkCommand, glyphStyle(say.MarkCommand).Render(say.MarkCommand)) + " " + r.chrome.paint(line, inkStyle.Render(line)) + "\n")
+				continue
+			}
+			b.WriteString(hang + "  " + r.chrome.paint(line, inkStyle.Render(line)) + "\n")
+		}
+	}
+	return b.String()
 }
 
 func (r *Reporter) plan(title string, items []say.Item) {
@@ -346,11 +630,11 @@ func (r *Reporter) planStyle(m say.Mark) lipgloss.Style {
 // colours.
 func glyphStyle(g string) lipgloss.Style {
 	switch g {
-	case "✓", "◌":
+	case "✓", "◌", "◐":
 		return accentStyle
 	case "✗", "!", "⚠":
 		return badStyle
-	case "·":
+	case "·", "?":
 		return mutedStyle
 	}
 	return inkStyle
@@ -362,8 +646,9 @@ func (r *Reporter) Line(text string) { r.block(text, "", inkStyle, inkStyle) }
 // Muted is explanation.
 func (r *Reporter) Muted(text string) { r.block(text, "", mutedStyle, mutedStyle) }
 
-// Warn is a line that is a warning: marked and painted bad, wrapped.
-func (r *Reporter) Warn(text string) { r.block(text, "⚠ ", badStyle, badStyle) }
+// Warn is a line that needs a person: the `!` mark in the gutter, painted bad
+// and wrapped under itself. A line that is only worth knowing is a note.
+func (r *Reporter) Warn(text string) { r.block(text, "! ", badStyle, badStyle) }
 
 // Success is something that finished well: one accent ✓, then the words.
 func (r *Reporter) Success(text string) { r.block(text, "✓ ", glyphStyle("✓"), inkStyle) }
@@ -561,23 +846,40 @@ func (r *Reporter) Start(op say.Op) say.Handle {
 	if op.Label == "" || r.closed {
 		return noHandle{}
 	}
-	l := &live{label: op.Label, budget: op.Budget, start: time.Now(), done: make(chan struct{})}
+	l := &live{label: op.Label, budget: op.Budget, start: r.clock(), done: make(chan struct{}), watch: say.Watcher{Source: op.Source}}
 	r.mu.Lock()
 	r.active = l
 	r.drawLocked()
 	r.mu.Unlock()
 	go r.animate(l)
-	return &liveHandle{r: r, l: l}
+	return &liveHandle{r: r, l: l, op: op}
 }
 
 func (r *Reporter) animate(l *live) {
 	ticker := time.NewTicker(80 * time.Millisecond)
 	defer ticker.Stop()
+	next := r.clock()
 	for {
 		select {
 		case <-l.done:
 			return
 		case <-ticker.C:
+			// The source is read about once a second, not once a frame:
+			// it is somebody's log, and the line only has to keep up.
+			l.mu.Lock()
+			due := l.watch.Source != nil && !r.clock().Before(next)
+			var tail string
+			if due {
+				if line, ok := l.watch.Next(); ok {
+					tail = line
+				}
+				next = r.clock().Add(r.interval())
+			}
+			if tail != "" {
+				l.tail = tail
+				r.Detail(tail)
+			}
+			l.mu.Unlock()
 			r.mu.Lock()
 			if r.active != l {
 				r.mu.Unlock()
@@ -592,7 +894,9 @@ func (r *Reporter) animate(l *live) {
 
 var spinnerFrames = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
 
-// drawLocked paints the active line in place. The caller holds r.mu.
+// drawLocked paints the active line in place. The caller holds r.mu. The line
+// is what a wait is never silent about: what is happening, how long it has
+// taken against its limit, and the newest line of the thing being waited on.
 func (r *Reporter) drawLocked() {
 	l := r.active
 	if l == nil {
@@ -601,17 +905,35 @@ func (r *Reporter) drawLocked() {
 	frame := spinnerFrames[l.frame%len(spinnerFrames)]
 	counter := ""
 	if l.budget > 0 {
-		counter = elapsedLabel(time.Since(l.start)) + " / " + durationLabel(l.budget)
+		counter = say.Duration(r.clock().Sub(l.start)) + " of " + say.Duration(l.budget)
 	}
+	l.mu.Lock()
+	tail := l.tail
+	l.mu.Unlock()
 	prefixWidth := lipgloss.Width(indent + frame + " ")
-	avail := r.width - prefixWidth - lipgloss.Width(counter) - 2
-	if avail < 8 {
-		avail = 8
+	room := r.width - prefixWidth - lipgloss.Width(counter) - 2
+	if room < 8 {
+		room = 8
 	}
-	label := clip(l.label, avail)
+	tailWidth := 0
+	if tail != "" {
+		// The newest line of the wait is the detail: give it half of
+		// what the label does not need, so neither one is squeezed out.
+		tailWidth = room / 2
+		room = room - tailWidth - 2
+		if room < 8 {
+			room = 8
+		}
+		detail := clip(tail, tailWidth)
+		tail = detail
+	}
+	label := clip(l.label, room)
 	line := indent + r.chrome.paint(frame, accentStyle.Render(frame)) + " " + r.chrome.paint(label, inkStyle.Render(label))
 	if counter != "" {
 		line += "  " + r.chrome.paint(counter, mutedStyle.Render(counter))
+	}
+	if tail != "" {
+		line += "  " + r.chrome.paint(tail, mutedStyle.Render(tail))
 	}
 	fmt.Fprint(r.out, "\r\x1b[2K"+line)
 }
@@ -648,6 +970,7 @@ func (r *Reporter) emit(text string) {
 		r.clearLocked()
 	}
 	_, _ = io.WriteString(r.out, text)
+	r.logged(text)
 	r.space.wrote(text)
 	if r.active != nil {
 		r.drawLocked()
@@ -661,12 +984,17 @@ type live struct {
 	start  time.Time
 	frame  int
 	detail string
-	done   chan struct{}
+	// tail is the newest line of what this step waits on, as the live line
+	// shows it.
+	tail  string
+	watch say.Watcher
+	done  chan struct{}
 }
 
 type liveHandle struct {
-	r *Reporter
-	l *live
+	r  *Reporter
+	l  *live
+	op say.Op
 }
 
 func (h *liveHandle) Detail(text string) {
@@ -675,14 +1003,54 @@ func (h *liveHandle) Detail(text string) {
 	h.l.mu.Unlock()
 }
 
-func (h *liveHandle) Done(text string) { h.finish("✓", text, h.detail()) }
+func (h *liveHandle) Done(text string) {
+	if h.op.Name == "" {
+		h.finish("✓", text, h.detail())
+		return
+	}
+	facts := []string{}
+	if text != "" {
+		facts = append(facts, text)
+	}
+	if d := h.detail(); d != "" {
+		facts = append(facts, d)
+	}
+	facts = append(facts, say.Duration(h.r.clock().Sub(h.l.start)))
+	h.finishRow("✓", say.Row{Name: h.op.Name, Facts: facts})
+}
 
 func (h *liveHandle) DoneAs(_, pretty string) { h.Done(pretty) }
 
 func (h *liveHandle) Failed(err error) {
 	// The error itself is rendered once by the command; the step line says
 	// which step died.
-	h.finish("✗", h.l.label, "")
+	if h.op.Name == "" {
+		h.finish("✗", h.l.label, "")
+		return
+	}
+	h.finishRow("✗", say.Row{Name: h.op.Name})
+}
+
+// finishRow ends a named step as the row it is: a mark in the gutter, the
+// step's name, and its facts.
+func (h *liveHandle) finishRow(mark string, row say.Row) {
+	r := h.r
+	r.mu.Lock()
+	if r.active == h.l {
+		r.clearLocked()
+		r.active = nil
+	}
+	select {
+	case <-h.l.done:
+	default:
+		close(h.l.done)
+	}
+	row.Mark = mark
+	text := r.rowBlock(row)
+	_, _ = io.WriteString(r.out, text)
+	r.logged(text)
+	r.space.wrote(text)
+	r.mu.Unlock()
 }
 
 func (h *liveHandle) detail() string {
@@ -722,6 +1090,7 @@ func (h *liveHandle) finish(mark, text, detail string) {
 		}
 	}
 	_, _ = io.WriteString(r.out, b.String())
+	r.logged(b.String())
 	r.space.wrote(b.String())
 	r.mu.Unlock()
 }
@@ -753,42 +1122,71 @@ func (r *Reporter) Confirm(question string) (bool, error) {
 // huh form, the same record line.
 func (r *Reporter) Ask(question string) (bool, error) { return r.Confirm(question) }
 
-// Error is the end of a failed run: box's voice in a bad frame, wrapped.
+// Error is the end of a failed run: one ✗ row, its reason hanging under it, and
+// the run log's path last. A failure is a row like any other -- there is no
+// frame around it, and the reason is what the command can say, not a paragraph.
 func (r *Reporter) Error(err error) {
 	r.stopActive()
 	if err == nil {
 		return
 	}
 	r.flushPending()
-	width := mastheadWidth
-	if r.width > 0 && r.width < width {
-		width = r.width
+	if say.ReportedBy(err) {
+		r.logRow()
+		return
 	}
-	inner := width - 4
-	var body []string
-	for _, raw := range strings.Split(err.Error(), "\n") {
-		if strings.TrimSpace(raw) == "" {
-			body = append(body, "")
-			continue
-		}
-		body = append(body, wrapText(raw, inner-2)...)
+	if subject, ok := say.SubjectOf(err); ok {
+		r.emit(r.rowBlock(say.Row{Mark: say.MarkFailed, Name: subject.Name, Facts: subject.Facts, Why: subject.Why}))
+		r.logRow()
+		return
 	}
 	var b strings.Builder
-	b.WriteString(r.chrome.paint("╭"+strings.Repeat("─", width-2)+"╮", badStyle.Render("╭"+strings.Repeat("─", width-2)+"╮")) + "\n")
-	for i, line := range body {
-		prefix := "│ "
+	for i, raw := range strings.Split(strings.TrimRight(err.Error(), "\n"), "\n") {
+		mark := ""
 		if i == 0 {
-			prefix = "│ ✗ "
+			mark = say.MarkFailed
 		}
-		gap := inner + 2 - lipgloss.Width(prefix) - lipgloss.Width(line)
-		if gap < 0 {
-			gap = 0
+		col := strings.Repeat(" ", 2)
+		for j, line := range wrapKeepingBlanks(raw, lineRoom(mark+" ", r.width)) {
+			if j == 0 {
+				if mark == "" {
+					b.WriteString(col + r.chrome.paint(line, mutedStyle.Render(line)) + "\n")
+					continue
+				}
+				b.WriteString(r.chrome.paint(mark, glyphStyle(mark).Render(mark)) + " " + r.chrome.paint(line, inkStyle.Render(line)) + "\n")
+				continue
+			}
+			b.WriteString(col + r.chrome.paint(line, mutedStyle.Render(line)) + "\n")
 		}
-		row := prefix + line + strings.Repeat(" ", gap) + " │"
-		b.WriteString(r.chrome.paint(row, badStyle.Render(row)) + "\n")
 	}
-	b.WriteString(r.chrome.paint("╰"+strings.Repeat("─", width-2)+"╯", badStyle.Render("╰"+strings.Repeat("─", width-2)+"╯")) + "\n")
 	r.emit(b.String())
+	r.logRow()
+}
+
+// logRow is the last line of a failed run: where the transcript is.
+func (r *Reporter) logRow() {
+	if r.logPath == "" {
+		return
+	}
+	r.emit(r.rowBlock(say.Row{Mark: say.MarkNote, Name: "log", Facts: []string{r.logPath}}))
+}
+
+// lineRoom is how many columns a line has to work with, after its mark.
+func lineRoom(mark string, width int) int {
+	w := width - lipgloss.Width(mark)
+	if w < 8 {
+		return 8
+	}
+	return w
+}
+
+// wrapKeepingBlanks is wrapText that keeps a blank line a blank line: an
+// error's empty line is a break between two facts, not a word to skip.
+func wrapKeepingBlanks(s string, width int) []string {
+	if strings.TrimSpace(s) == "" {
+		return []string{""}
+	}
+	return wrapText(s, width)
 }
 
 // Banner closes a good run with the one fact worth repeating: the domain.
@@ -845,14 +1243,4 @@ func (r *Reporter) Close() {
 			close(r.sigDone)
 		}
 	}
-}
-
-func elapsedLabel(d time.Duration) string { return durationLabel(d) }
-
-func durationLabel(d time.Duration) string {
-	d = d.Round(time.Second)
-	if d < time.Minute {
-		return fmt.Sprintf("%ds", int(d.Seconds()))
-	}
-	return d.String()
 }

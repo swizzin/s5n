@@ -41,15 +41,20 @@ func renderedExtAuthz(t *testing.T) extAuthzEndpoint {
 
 // The ext-authz endpoint checks the session cookie and nothing else.
 //
-// Authelia's ExtAuthz default is a header strategy first and the cookie
-// second, and its strategy loop returns on an error instead of trying the next
-// one (handler_authz.go:303-322 at 4.39.28). Envoy forwards the request's own
-// Authorization header to the auth server whether or not the SecurityPolicy
-// names it, so an app whose UI sends a token of its own -- PeerBanHelper's UI
-// sends `Authorization: Bearer <token>` on every call -- made the header
-// strategy fail and the whole request a 401, with a valid session right there.
-// A box that renders the default is a box that locks a signed-in user out of
-// that app, which is why the one strategy is pinned here.
+// Authelia 4.39.28's own default for this endpoint is a header strategy first
+// (HeaderAuthorization, scheme basic: internal/configuration/schema/server.go's
+// ServerEndpointsAuthz default) and the cookie second. Envoy forwards the
+// request's own Authorization header to the auth server whether or not the
+// SecurityPolicy names it, so an app whose UI sends a token of its own decides,
+// through that strategy, whether its signed-in user gets in. Measured against
+// the pinned image: a well-formed token this provider did not issue is swallowed
+// as an errTokenIntent and the cookie is tried (handler_authz_authn.go:581-592
+// at 4.39.28), but an empty one -- `Authorization: Bearer `, which is what
+// PeerBanHelper's page sends when it holds no token (webui/src/service/utils.ts
+// at v9.5.4) -- is an unparseable value, and the strategy loop returns on the
+// error (handler_authz.go:303-322) instead of falling through: a 401 to a
+// browser with a valid session. Pinning the one strategy is what makes the
+// answer independent of every one of those behaviours.
 func TestExtAuthzAsksOnlyForTheSessionCookie(t *testing.T) {
 	endpoint := renderedExtAuthz(t)
 	if endpoint.Implementation != "ExtAuthz" {

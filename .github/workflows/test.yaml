@@ -5,6 +5,13 @@
 # file because GitHub resolves called workflows before evaluating any `if:`, so a
 # workflow that called itself would recurse to the depth limit.
 #
+# overlay-ref is how an image-bump pull request is tested by the tree it lands on:
+# ci.yaml checks out develop here and lays the pull request's own two files over it.
+# The file list is hack/release's (`release overlay`, the same releasedFiles `decide`
+# releases on), so a file added to that set is overlaid without a second list here.
+# Every job that reads the chart, its images or its pins runs the overlay; `changes`
+# does not, because it reads no file the overlay touches.
+#
 # Actions are pinned by commit; the comment names the tag the commit belongs to.
 name: test
 
@@ -13,6 +20,11 @@ on:
     inputs:
       ref:
         description: "the ref to test; empty tests the commit that triggered the caller"
+        required: false
+        type: string
+        default: ""
+      overlay-ref:
+        description: "a commit whose release files are laid over the ref before testing (an image-bump pull request, tested against develop)"
         required: false
         type: string
         default: ""
@@ -66,7 +78,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ inputs.ref || github.sha }}
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+      - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
         id: go
         with:
           go-version-file: go.mod
@@ -76,6 +88,9 @@ jobs:
           path: ~/.cache/go-build
           key: go-test-${{ runner.os }}-${{ steps.go.outputs.go-version }}-${{ hashFiles('go.mod', 'go.sum') }}
           restore-keys: go-test-${{ runner.os }}-${{ steps.go.outputs.go-version }}-
+      - name: lay the pull request's release files over this ref
+        if: inputs.overlay-ref != ''
+        run: go run ./hack/release overlay "${{ inputs.overlay-ref }}"
       - name: gofmt
         run: |
           unformatted=$(gofmt -l .)
@@ -102,7 +117,7 @@ jobs:
         with:
           ref: ${{ inputs.ref || github.sha }}
           fetch-depth: 0
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+      - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
         id: go
         with:
           go-version-file: go.mod
@@ -112,6 +127,9 @@ jobs:
           path: ~/.cache/go-build
           key: go-lint-${{ runner.os }}-${{ steps.go.outputs.go-version }}-${{ hashFiles('go.mod', 'go.sum') }}
           restore-keys: go-lint-${{ runner.os }}-${{ steps.go.outputs.go-version }}-
+      - name: lay the pull request's release files over this ref
+        if: inputs.overlay-ref != ''
+        run: go run ./hack/release overlay "${{ inputs.overlay-ref }}"
       - uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
         with:
           version: v2.15.0
@@ -133,14 +151,14 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ inputs.ref || github.sha }}
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+      - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
         with:
           go-version-file: go.mod
           # helm and kubeconform compile nothing of this module, and this job is
           # the quickest to finish: its empty cache save was the one every other
           # job then hit, which is why they all built from zero.
           cache: false
-      - uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
+      - uses: azure/setup-helm@2f5e7bc67f1f9972ab16657bb795f36d8f04de0e # v5.1.0
         with:
           version: ${{ env.HELM_VERSION }}
       - name: install kubeconform
@@ -149,6 +167,9 @@ jobs:
           echo "${KUBECONFORM_SHA256}  kubeconform.tgz" | sha256sum -c -
           mkdir -p "$HOME/.local/bin" && tar -xzf kubeconform.tgz -C "$HOME/.local/bin" kubeconform && rm kubeconform.tgz
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+      - name: lay the pull request's release files over this ref
+        if: inputs.overlay-ref != ''
+        run: go run ./hack/release overlay "${{ inputs.overlay-ref }}"
       - run: hack/validate-chart.sh "${{ matrix.kubernetes }}"
 
   # The release's own steps, on every PR and push. release.yaml's s5n path ran
@@ -169,13 +190,13 @@ jobs:
         with:
           ref: ${{ inputs.ref || github.sha }}
           fetch-depth: 0 # every tag: the version check's previous s5n-v* is the question
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+      - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
         with:
           go-version-file: go.mod
           # It builds hack/release -- semver and yaml -- and nothing else of the
           # module, so it has no build output worth an entry of its own.
           cache: false
-      - uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
+      - uses: azure/setup-helm@2f5e7bc67f1f9972ab16657bb795f36d8f04de0e # v5.1.0
         with:
           version: ${{ env.HELM_VERSION }}
       - name: install kubeconform
@@ -184,6 +205,9 @@ jobs:
           echo "${KUBECONFORM_SHA256}  kubeconform.tgz" | sha256sum -c -
           mkdir -p "$HOME/.local/bin" && tar -xzf kubeconform.tgz -C "$HOME/.local/bin" kubeconform && rm kubeconform.tgz
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+      - name: lay the pull request's release files over this ref
+        if: inputs.overlay-ref != ''
+        run: go run ./hack/release overlay "${{ inputs.overlay-ref }}"
       - run: hack/release-rehearsal.sh
 
   # ---- whether an e2e is worth a runner --------------------------------------
@@ -224,7 +248,7 @@ jobs:
         with:
           ref: ${{ inputs.ref || github.sha }}
           fetch-depth: 0 # github.event.before has to be an object here
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+      - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
         with:
           go-version-file: go.mod
           cache: false # one small command: no entry of its own
@@ -281,7 +305,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ inputs.ref || github.sha }}
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+      - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
         id: go
         with:
           go-version-file: go.mod
@@ -291,7 +315,7 @@ jobs:
           path: ~/.cache/go-build
           key: go-build-${{ runner.os }}-${{ steps.go.outputs.go-version }}-${{ hashFiles('go.mod', 'go.sum') }}
           restore-keys: go-build-${{ runner.os }}-${{ steps.go.outputs.go-version }}-
-      - uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
+      - uses: azure/setup-helm@2f5e7bc67f1f9972ab16657bb795f36d8f04de0e # v5.1.0
         with:
           version: ${{ env.HELM_VERSION }}
       - name: install kind
@@ -301,6 +325,9 @@ jobs:
           echo "${KIND_SHA256}  $HOME/.local/bin/kind" | sha256sum -c -
           chmod +x "$HOME/.local/bin/kind"
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+      - name: lay the pull request's release files over this ref
+        if: inputs.overlay-ref != ''
+        run: go run ./hack/release overlay "${{ inputs.overlay-ref }}"
       - run: hack/e2e-kind.sh
 
   # The other half of the acceptance test: the same install done through
@@ -321,7 +348,7 @@ jobs:
   # is why a maintainer runs them one after another by hand.)
   #
   # One job per scenario, because a scenario owns its own kind cluster, registry
-  # container and work directory (hack/e2e-box.sh): on one runner the six are
+  # container and work directory (hack/e2e-box.sh): on one runner the seven are
   # a queue and the job costs their sum. fail-fast is off so one
   # scenario's failure does not hide the others: they disagree about what is
   # on the cluster before box runs, and a maintainer wants every verdict
@@ -340,7 +367,10 @@ jobs:
   # three times, by the source node, the release node and this host),
   # migrate-keep 13.0 -> 30 (the same source install,
   # then the whole platform layer and an install onto the cluster it runs on, and
-  # two rows of cutover refusals before that).
+  # two rows of cutover refusals before that), upgrade 4.1 -> 15 (the platform
+  # layer and one install, then the steps a published box's update takes: the
+  # whole stack moving under it, after the charts are mirrored and the published
+  # binary downloaded).
   e2e-box:
     needs: [changes]
     if: needs.changes.outputs.e2e == 'true'
@@ -357,6 +387,8 @@ jobs:
             timeout: 15
           - scenario: update
             timeout: 15
+          - scenario: upgrade
+            timeout: 15
           - scenario: migrate
             timeout: 30
           - scenario: migrate-keep
@@ -367,7 +399,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ inputs.ref || github.sha }}
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+      - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
         id: go
         with:
           go-version-file: go.mod
@@ -381,7 +413,7 @@ jobs:
           path: ~/.cache/go-build
           key: go-build-${{ runner.os }}-${{ steps.go.outputs.go-version }}-${{ hashFiles('go.mod', 'go.sum') }}
           restore-keys: go-build-${{ runner.os }}-${{ steps.go.outputs.go-version }}-
-      - uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
+      - uses: azure/setup-helm@2f5e7bc67f1f9972ab16657bb795f36d8f04de0e # v5.1.0
         with:
           version: ${{ env.HELM_VERSION }}
       - name: install kind
@@ -398,4 +430,7 @@ jobs:
           echo "${KUBECTL_SHA256}  $HOME/.local/bin/kubectl" | sha256sum -c -
           chmod +x "$HOME/.local/bin/kubectl"
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+      - name: lay the pull request's release files over this ref
+        if: inputs.overlay-ref != ''
+        run: go run ./hack/release overlay "${{ inputs.overlay-ref }}"
       - run: hack/e2e-box.sh ${{ matrix.scenario }}

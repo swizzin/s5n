@@ -282,8 +282,13 @@ func TestHistoryPathNeitherBlocksNorRewrites(t *testing.T) {
 	if len(counted) != 1 {
 		t.Fatalf("Left = %+v, want one count line for the requests left", rep.Left)
 	}
-	if counted[0].What != "1 past request" || !strings.Contains(counted[0].Why, "their folders are history") {
-		t.Errorf("the count line = %+v, want \"1 past request\" and why it is left", counted[0])
+	// The screen gets the clause and the report the sentence: the row is one
+	// state and one reason, and the explanation is where there is room.
+	if counted[0].What != "1 past request" || counted[0].Why != "history: seerr never reads it again" {
+		t.Errorf("the count line = %+v, want \"1 past request\" and its one reason", counted[0])
+	}
+	if !strings.Contains(counted[0].Detail, "their folders are history") {
+		t.Errorf("the report does not carry the whole sentence: %+v", counted[0])
 	}
 
 	// Several are still one line, counted.
@@ -467,8 +472,11 @@ func TestOverrideRuleBothArrsDisagreeIsLeft(t *testing.T) {
 	if len(rep.Left) != 1 || rep.Left[0].What != "/srv/media/Shared" {
 		t.Fatalf("Left = %+v, want one entry for /srv/media/Shared", rep.Left)
 	}
-	if !strings.Contains(rep.Left[0].Why, "do not agree") {
+	if !strings.Contains(rep.Left[0].Why, "disagree") {
 		t.Errorf("why = %q, want it to say the Arrs disagree", rep.Left[0].Why)
+	}
+	if !strings.Contains(rep.Left[0].Detail, "do not agree about /srv/media/Shared") {
+		t.Errorf("detail = %q, want the sentence naming the folder", rep.Left[0].Detail)
 	}
 	if _, err := (rewriter{}).Write(ctx, in); err != nil {
 		t.Fatal(err)

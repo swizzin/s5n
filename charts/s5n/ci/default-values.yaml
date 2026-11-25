@@ -5,6 +5,13 @@
 auth:
   edge: true
 
+apps:
+  qbittorrent:
+    torrent:
+      # No default in the chart: a helm install chooses its peer port, and the
+      # band box picks from is the one Kubernetes does not assign by itself.
+      port: 30080
+
 # The box's own name. Plex and Seerr are served at plex.<domain> and
 # seerr.<domain> (the catalog says so), so a render needs the domain.
 gateway:

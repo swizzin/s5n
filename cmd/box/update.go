@@ -129,6 +129,14 @@ func updateHelm(kubeconfig, namespace string) (*release.Helm, error) {
 	return h, nil
 }
 
+// foldedReceipt is the reporter a step's apply writes through: everything the
+// apply prints, and not the wiring receipt. update folds that receipt into one
+// row of its own from the apply's result, and the full check list goes to the
+// run log, so the apply printing it as well would say it twice.
+type foldedReceipt struct{ say.Reporter }
+
+func (foldedReceipt) Receipt(string, []say.ReceiptRow) {}
+
 // updateChartSource is the one chart source an update works with. It is not
 // chartSource's return type widened: this command needs the repository listing
 // as well as a load, and one OCIChart for the command is what makes the release
@@ -285,6 +293,9 @@ func updateCharts(ctx context.Context, o *updateFlags, out say.Reporter, resolve
 	if err != nil {
 		return err
 	}
+	// The notice address can carry the token that makes it work, and a failure
+	// to post it names the address: the log never keeps either.
+	redact(conf.NoticeURL)
 	poster := notice.Poster{URL: conf.NoticeURL}
 	noticeOpts := notice.Options{Box: grantDomain(sb), Seedbox: namespace}
 	post := func(n notice.Notice) {
@@ -311,7 +322,7 @@ func updateCharts(ctx context.Context, o *updateFlags, out say.Reporter, resolve
 			// partway through a multi-step path would be asking after the box
 			// had already moved.
 			Confirm: answered{},
-			Say:     out,
+			Say:     foldedReceipt{out},
 			Open: func(namespace string) (release.ReleaseClient, error) {
 				h, err := updateHelm(kc, namespace)
 				if err != nil {
@@ -319,6 +330,9 @@ func updateCharts(ctx context.Context, o *updateFlags, out say.Reporter, resolve
 				}
 				h.SkipHooks = skipHooks
 				return h, nil
+			},
+			OpenSecret: func(namespace string) (release.SecretKeys, error) {
+				return release.NewSecret(kc, namespace)
 			},
 			OpenStorage: func(namespace string) (release.StorageClient, error) {
 				return release.NewStorage(kc, namespace)
@@ -380,10 +394,26 @@ func updateCharts(ctx context.Context, o *updateFlags, out say.Reporter, resolve
 		if errors.Is(err, release.ErrCancelled) {
 			return err
 		}
-		return portRangeHint(err)
-	}
-	if !*o.check && !res.Current && len(res.Taken) > 0 {
-		out.Banner("seedbox updated", fmt.Sprintf("%s is on %s", res.Name, res.Target))
+		return reportUpdateFailure(out, res, portRangeHint(err))
 	}
 	return nil
+}
+
+// reportUpdateFailure puts a failed update's reason on screen once and returns
+// the error marked as drawn. Nothing was planned: the failure is the registry
+// read, and the chart is the subject of the one ✗ row. Past that, the step's own
+// ✗ row says which step stopped and the reason hangs under it: the updater says
+// nothing more itself, so an error left unprinted here is a ✗ with no reason
+// (rule 2: a refusal gets its one reason).
+func reportUpdateFailure(out say.Reporter, res update.Result, err error) error {
+	if res.Target == "" {
+		out.Rows([]say.Row{{Mark: say.MarkFailed, Name: "chart", Facts: []string{err.Error()}}})
+	} else {
+		out.Note(err.Error())
+	}
+	if len(res.Steps) == 0 && len(res.Taken) == 0 {
+		out.Rows([]say.Row{{Mark: say.MarkNote, Facts: []string{"nothing on this box changed"}}})
+		out.Detail("the files are the only place this run wanted to write, and it wrote none of them")
+	}
+	return say.Reported{Err: err}
 }

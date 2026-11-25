@@ -427,14 +427,16 @@ func planClients(ctx context.Context, db *sql.DB, in rewrite.Input, t tally, rep
 		case !typesBoxRuns[strings.ToUpper(kind.String)]:
 			rep.Left = append(rep.Left, rewrite.Left{
 				File: dbName, Where: where, What: address(clientName, p),
-				Why: fmt.Sprintf("%q is a %s client and this box runs only qBittorrent and the Arrs, so a rewrite would point autobrr at an app that is not there; delete it in autobrr if you do not need it",
+				Why: fmt.Sprintf("%s client: this box runs qBittorrent and the Arrs", kind.String),
+				Detail: fmt.Sprintf("%q is a %s client and this box runs only qBittorrent and the Arrs, so a rewrite would point autobrr at an app that is not there; delete it in autobrr if you do not need it",
 					label, kind.String),
 			})
 			continue
 		case res.Verdict == plan.Unclassified && off:
 			rep.Left = append(rep.Left, rewrite.Left{
 				File: dbName, Where: where, What: address(clientName, p),
-				Why: fmt.Sprintf("%q is switched off, so %s is never dialled and nothing is migrated to it",
+				Why: "switched off, so nothing dials it",
+				Detail: fmt.Sprintf("%q is switched off, so %s is never dialled and nothing is migrated to it",
 					label, address(clientName, p)),
 			})
 			continue

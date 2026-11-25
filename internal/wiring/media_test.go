@@ -15,7 +15,7 @@ import (
 	"github.com/swizzin/s5n/internal/apps"
 )
 
-// fakeMediaStack is Plex + Tautulli + Seerr, standing in for
+// fakeMediaStack is Plex + Tautulli + Seerr + Maintainerr, standing in for
 // hack/e2e-kind.sh's live versions in the same spirit as fakeStack in
 // wiring_test.go: just enough of each API for the wiring Job's steps to be
 // provable without a cluster.
@@ -48,6 +48,21 @@ type fakeMediaStack struct {
 	tokenFile string
 
 	seerrUp bool
+	// initialized is Seerr's own "an admin exists" flag, which a migrated
+	// Seerr brings in the settings its snapshot carried.
+	initialized bool
+	// seerrReads counts the public-settings calls, and seerrFailFrom makes
+	// every call from that number on answer 503: a Seerr that passes
+	// readiness and then refuses the read is one the run cannot report on.
+	seerrReads    int
+	seerrFailFrom int
+
+	// Maintainerr's one settings row, with the token it holds (which its GET
+	// masks) and the number of writes this harness saw.
+	maintainerrSettings apps.MaintainerrSettings
+	maintainerToken     string
+	maintainerrSaves    int
+	maintainerrPatches  int
 }
 
 func (f *fakeMediaStack) plexHandler() http.HandlerFunc {
@@ -149,12 +164,112 @@ func (f *fakeMediaStack) seerrHandler() http.HandlerFunc {
 			http.Error(w, "unexpected "+r.URL.Path, http.StatusNotFound)
 			return
 		}
-		if !f.seerrUp {
+		f.seerrReads++
+		if !f.seerrUp || (f.seerrFailFrom > 0 && f.seerrReads >= f.seerrFailFrom) {
 			http.Error(w, "starting", http.StatusServiceUnavailable)
 			return
 		}
-		writeJSONAny(w, map[string]any{"initialized": false})
+		writeJSONAny(w, map[string]any{"initialized": f.initialized})
 	}
+}
+
+// maintainerrHandler is Maintainerr's settings API at v3.33.0: the health route,
+// the one settings row with its token masked, the token's own endpoint, the merge
+// PATCH, and the connection test that proves what was written.
+func (f *fakeMediaStack) maintainerrHandler() http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		path := strings.TrimPrefix(r.URL.Path, "/maintainerr")
+		switch {
+		case path == "/api/health/ready":
+			writeJSONAny(w, map[string]any{"status": "ok", "database": "ok"})
+		case path == "/api/settings" && r.Method == http.MethodGet:
+			f.maintainerrGet(w)
+		case path == "/api/settings" && r.Method == http.MethodPatch:
+			f.maintainerrPatch(w, r)
+		case path == "/api/settings/plex/token" && r.Method == http.MethodPost:
+			f.maintainerrToken(w, r)
+		case path == "/api/settings/test/plex" && r.Method == http.MethodGet:
+			f.maintainerrTest(w)
+		default:
+			http.Error(w, "unexpected "+r.Method+" "+r.URL.Path, http.StatusNotFound)
+		}
+	}
+}
+
+func (f *fakeMediaStack) maintainerrGet(w http.ResponseWriter) {
+	out := f.maintainerrSettings
+	out.PlexAuthToken = nil
+	if f.maintainerToken != "" {
+		masked := f.maintainerToken[:3] + "..." + f.maintainerToken[len(f.maintainerToken)-3:]
+		out.PlexAuthToken = &masked
+	}
+	writeJSONAny(w, out)
+}
+
+func (f *fakeMediaStack) maintainerrToken(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Token string `json:"plex_auth_token"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.Token == "" {
+		writeJSONAny(w, map[string]any{"status": "NOK", "code": 0, "message": "Plex auth token is required"})
+		return
+	}
+	f.maintainerToken = body.Token
+	f.maintainerrSaves++
+	writeJSONAny(w, map[string]any{"status": "OK", "code": 1, "message": "Success"})
+}
+
+// maintainerrPatch merges a body over the row, refusing a server change until a
+// token is stored, as the app does.
+func (f *fakeMediaStack) maintainerrPatch(w http.ResponseWriter, r *http.Request) {
+	var body map[string]any
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		http.Error(w, "bad body", http.StatusBadRequest)
+		return
+	}
+	if _, ok := body["plex_hostname"]; ok && f.maintainerToken == "" {
+		writeJSONAny(w, map[string]any{"status": "NOK", "code": 0,
+			"message": "Authenticate with Plex before saving Plex server settings."})
+		return
+	}
+	f.maintainerrSettings = applyMaintainerrPatch(f.maintainerrSettings, body)
+	f.maintainerrPatches++
+	writeJSONAny(w, map[string]any{"status": "OK", "code": 1, "message": "Success"})
+}
+
+// applyMaintainerrPatch merges a PATCH body over a settings row the way the app
+// merges it: an absent key is left alone.
+func applyMaintainerrPatch(row apps.MaintainerrSettings, body map[string]any) apps.MaintainerrSettings {
+	if v, ok := body["plex_hostname"].(string); ok {
+		row.PlexHostname = v
+	}
+	if v, ok := body["plex_port"].(float64); ok {
+		row.PlexPort = int(v)
+	}
+	if v, ok := body["plex_ssl"].(float64); ok {
+		row.PlexSSL = int(v)
+	}
+	if v, ok := body["plex_manual_mode"].(float64); ok {
+		row.PlexManualMode = int(v)
+	}
+	if v, ok := body["plex_name"].(string); ok {
+		row.PlexName = v
+	}
+	if v, ok := body["media_server_type"].(string); ok {
+		row.MediaServerType = v
+	}
+	return row
+}
+
+func (f *fakeMediaStack) maintainerrTest(w http.ResponseWriter) {
+	if f.maintainerToken == "" {
+		writeJSONAny(w, map[string]any{"status": "NOK", "code": 0,
+			"message": "Authenticate with Plex before testing the connection."})
+		return
+	}
+	writeJSONAny(w, map[string]any{"status": "OK", "code": 1, "message": "1.43.5"})
 }
 
 func writeJSONAny(w http.ResponseWriter, v any) {
@@ -167,6 +282,10 @@ func writeJSONAny(w http.ResponseWriter, v any) {
 // claimed server.
 const mediaPlexToken = "plex-token-abc123"
 
+// mediaSeerrPublicURL is the address the harness's Seerr is served at, as the
+// chart renders it: <app>.<domain>, never the Service the Job dials.
+const mediaSeerrPublicURL = "seerr.example.test"
+
 // newMediaHarness builds a Runner wired to fake Plex, Tautulli and Seerr
 // servers only (no qBittorrent/Arr/Prowlarr), so the media steps can be
 // asserted in isolation from the rest of internal/wiring's coverage. The Plex
@@ -178,7 +297,8 @@ func newMediaHarness(t *testing.T, claimed bool) (*Runner, *fakeMediaStack) {
 	plex := httptest.NewServer(f.plexHandler())
 	tautulli := httptest.NewServer(f.tautulliHandler())
 	seerr := httptest.NewServer(f.seerrHandler())
-	t.Cleanup(func() { plex.Close(); tautulli.Close(); seerr.Close() })
+	maintainerr := httptest.NewServer(f.maintainerrHandler())
+	t.Cleanup(func() { plex.Close(); tautulli.Close(); seerr.Close(); maintainerr.Close() })
 
 	dir := t.TempDir()
 	apiKeyFile := dir + "/tautulli.key"
@@ -199,7 +319,11 @@ func newMediaHarness(t *testing.T, claimed bool) (*Runner, *fakeMediaStack) {
 		TimeoutSeconds: 10,
 		Plex:           &PlexConfig{URL: plex.URL},
 		Tautulli:       &TautulliConfig{URL: tautulli.URL, APIKeyFile: apiKeyFile, PlexTokenFile: plexTokenFile},
-		Seerr:          &SeerrConfig{URL: seerr.URL},
+		Seerr:          &SeerrConfig{URL: seerr.URL, PublicURL: mediaSeerrPublicURL},
+		Maintainerr: &MaintainerrConfig{
+			URL: maintainerr.URL, URLBase: "/maintainerr",
+			PlexTokenFile: plexTokenFile,
+		},
 	}
 	runner := &Runner{
 		Config: cfg,
@@ -402,7 +526,7 @@ func TestWiringTautulliPlexPendingWithoutToken(t *testing.T) {
 			if s == nil || s.Result != "pending" {
 				t.Fatalf("tautulli/plex = %+v, want pending", s)
 			}
-			const want = "no Plex token: set plex-token (from a claimed server) to let the wiring Job connect Tautulli"
+			const want = "no plex-token in the release Secret: box reads it from Plex on the next apply"
 			if s.Detail != want {
 				t.Fatalf("tautulli/plex detail = %q, want %q", s.Detail, want)
 			}
@@ -410,6 +534,30 @@ func TestWiringTautulliPlexPendingWithoutToken(t *testing.T) {
 				t.Fatalf("Tautulli was written %d time(s) without a Plex token", f.writes)
 			}
 		})
+	}
+}
+
+// No token on a server that is not claimed: nothing can supply one, and the
+// reason is the claim rather than a key a person would patch in -- box takes the
+// token out of a claimed server's own settings on the next apply.
+func TestWiringTautulliPlexPendingWithoutTokenOnAnUnclaimedServer(t *testing.T) {
+	r, f := newMediaHarness(t, false)
+	r.Config.Tautulli.PlexTokenFile = t.TempDir() + "/plex-token" // absent
+
+	res, err := r.Run(context.Background())
+	if err != nil {
+		t.Fatalf("run: %v\n%s", err, Summary(res))
+	}
+	s := step(res, "tautulli/plex")
+	if s == nil || s.Result != "pending" {
+		t.Fatalf("tautulli/plex = %+v, want pending", s)
+	}
+	const want = "Plex is not claimed yet: claim it at https://plex.tv/claim, then apply again to connect Tautulli"
+	if s.Detail != want {
+		t.Fatalf("tautulli/plex detail = %q, want %q", s.Detail, want)
+	}
+	if f.writes != 0 {
+		t.Fatalf("Tautulli was written %d time(s) without a Plex token", f.writes)
 	}
 }
 
@@ -519,6 +667,38 @@ func TestWiringRejectedPlexTokenFailsBeforeAnyTautulliWrite(t *testing.T) {
 	if got := rec.TautulliPlexTokenFingerprint(); got != "" {
 		t.Fatalf("rejected token recorded a fingerprint: %q", got)
 	}
+}
+
+// A server that is not claimed is not signed in to an account, and Plex refuses
+// every server token until it is: a 401 there is the claim's absence, not a bad
+// token. The row says so once and nothing is written with a token the server
+// would refuse — which is the state a migrated box is in when its Plex's account
+// is gone from plex.tv, and one that must not fail the release.
+func TestWiringUnclaimedPlexRefusesTokensAndSaysWhy(t *testing.T) {
+	r, f := newMediaHarness(t, false)
+	f.acceptToken = "a-token-no-unclaimed-server-knows"
+
+	res, err := r.Run(context.Background())
+	if err != nil {
+		t.Fatalf("an unclaimed server's refusal failed the run: %v\n%s", err, Summary(res))
+	}
+	const want = "Plex is not claimed yet, so it refuses every server token: claim it at https://plex.tv/claim, then run box apply"
+	for _, name := range []string{"tautulli/plex", "maintainerr/plex"} {
+		s := step(res, name)
+		if s == nil || s.Result != "pending" {
+			t.Fatalf("%s = %+v, want pending", name, s)
+		}
+		if s.Detail != want {
+			t.Fatalf("%s detail = %q, want %q", name, s.Detail, want)
+		}
+	}
+	if f.writes != 0 {
+		t.Fatalf("Tautulli was written %d time(s) with a token its server refuses", f.writes)
+	}
+	if f.maintainerrSaves != 0 || f.maintainerrPatches != 0 {
+		t.Fatalf("Maintainerr was written with a token its server refuses")
+	}
+	noTokenAnywhere(t, res, mediaPlexToken)
 }
 
 // Tautulli hides pms_token, so the fingerprint in owned.json is the only record

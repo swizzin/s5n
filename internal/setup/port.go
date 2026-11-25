@@ -5,6 +5,10 @@ import (
 	"crypto/rand"
 	"fmt"
 	"math/big"
+	"strings"
+
+	"github.com/swizzin/s5n/internal/say"
+	"github.com/swizzin/s5n/internal/seedbox"
 )
 
 // The peer port is a port on the node, shared by every seedbox, so it is the
@@ -103,6 +107,9 @@ func pickPort(lo, hi int, held []NodePort, randInt func(int) int) (int, error) {
 	return free[randInt(len(free))], nil
 }
 
+// torrentPortRow is the row the decided port is printed as.
+const torrentPortRow = "torrent port"
+
 // ownPeerPort is the nodePort this seedbox's own peers Service holds, if the
 // release is already installed. The chart names it <instance>-peers, and
 // qBittorrent takes no instances, so the name is fixed.
@@ -142,10 +149,16 @@ func pickRandom(n int) int {
 // The app that holds the port is the box's, not this run's: a migrate install
 // answers init with every app off and switches the plan's on afterwards, so
 // opts.SwitchesOn is read beside apps.
-func (d *Decision) torrentPort(ctx context.Context, namespace string, apps []string, base, grantNow map[string]any, opts Options) (any, error) {
-	if _, declared := lookupPath(base, torrentPortKey); !declared {
-		// A chart release from before the peer port, or without qBittorrent:
-		// there is no key to decide.
+func (d *Decision) torrentPort(ctx context.Context, namespace string, apps []string, grantNow map[string]any, opts Options) (any, error) {
+	// The release being installed is what says whether the key exists at all:
+	// it ships no default for the port any more, so the chart's own values do
+	// not mention it, and a chart from before the port has no key in its schema
+	// for this box to fill in.
+	declared, err := seedbox.Declares(d.Schema, strings.Split(torrentPortKey, ".")...)
+	if err != nil {
+		return nil, err
+	}
+	if !declared {
 		return nil, nil
 	}
 	running := apps
@@ -169,7 +182,7 @@ func (d *Decision) torrentPort(ctx context.Context, namespace string, apps []str
 	// but its peers Service already holds the one its peers know. Keep that
 	// one: moving a working peer port only makes every tracker relearn it.
 	if port, ok := ownPeerPort(namespace, held); ok {
-		d.report().Line(fmt.Sprintf("torrent port: %d (already this seedbox's; kept)", port))
+		d.report().Rows([]say.Row{{Mark: say.MarkNote, Name: torrentPortRow, State: "kept", Facts: []string{fmt.Sprintf("%d", port)}}})
 		return port, nil
 	}
 	// A migrated box's peers, and any forward the operator set, already point
@@ -178,7 +191,7 @@ func (d *Decision) torrentPort(ctx context.Context, namespace string, apps []str
 	// box picks from, because this number was not picked on this cluster and
 	// moving it is exactly what costs the connections.
 	if port := opts.TorrentPort; port >= nodePortRangeStart && port <= nodePortRangeEnd && !portHeld(port, held) {
-		d.report().Line(fmt.Sprintf("torrent port: %d (the source's, kept)", port))
+		d.report().Rows([]say.Row{{Mark: say.MarkNote, Name: torrentPortRow, State: "kept", Facts: []string{fmt.Sprintf("%d from the source", port)}}})
 		return port, nil
 	}
 	lo, hi := staticBand(nodePortRangeStart, nodePortRangeEnd)
@@ -190,7 +203,7 @@ func (d *Decision) torrentPort(ctx context.Context, namespace string, apps []str
 	if err != nil {
 		return nil, err
 	}
-	d.report().Line(fmt.Sprintf("torrent port: %d (picked; peers learn it from the tracker)", port))
+	d.report().Rows([]say.Row{{Mark: say.MarkNote, Name: torrentPortRow, State: "picked", Facts: []string{fmt.Sprintf("%d", port)}}})
 	return port, nil
 }
 

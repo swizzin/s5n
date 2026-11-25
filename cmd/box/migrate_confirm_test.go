@@ -73,7 +73,7 @@ func migratingSummary() apply.Summary {
 func TestOneConfirmForTheWholeRun(t *testing.T) {
 	var out bytes.Buffer
 	ask := &countingAsker{}
-	confirm := migrateConfirm(&say.Plain{W: &out}, ask, "s5n-alice", false, false, installedPlatform(t), confirmLead(true))
+	confirm := migrateConfirm(&say.Plain{W: &out}, ask, "s5n-alice", askOptions{}, installedPlatform(t), confirmLead(true), confirmScreen{})
 
 	ok, err := confirm(migratingSummary())
 	if err != nil {
@@ -85,7 +85,7 @@ func TestOneConfirmForTheWholeRun(t *testing.T) {
 	if len(ask.questions) != 1 {
 		t.Fatalf("the run asked %d questions (%v), want one", len(ask.questions), ask.questions)
 	}
-	if want := "move these into s5n-alice?"; ask.questions[0] != want {
+	if want := "install, then move these 1 app in?"; ask.questions[0] != want {
 		t.Errorf("question = %q, want %q", ask.questions[0], want)
 	}
 	printed := out.String()
@@ -96,7 +96,7 @@ func TestOneConfirmForTheWholeRun(t *testing.T) {
 		t.Fatalf("the confirm does not say the run has installed nothing yet:\n%s", printed)
 	}
 	planAt := strings.Index(printed, "platform:")
-	migrationAt := strings.Index(printed, "1 app\n")
+	migrationAt := strings.Index(printed, "apps      carries  changes\n")
 	if planAt < 0 {
 		t.Fatalf("the one confirm does not show the platform plan:\n%s", printed)
 	}
@@ -106,9 +106,16 @@ func TestOneConfirmForTheWholeRun(t *testing.T) {
 	if lead > planAt || planAt > migrationAt {
 		t.Fatalf("the platform plan is not shown first, after the lead line:\n%s", printed)
 	}
-	// The platform plan is the plan's own items, not a summary of them.
-	if !strings.Contains(printed, "Envoy Gateway 1.9.3 (the front door)") {
-		t.Errorf("the platform block is not the platform plan:\n%s", printed)
+	// The platform block is the folded plan bootstrap prints, not the detailed
+	// one: what the run installs is one line, and the components' sub-steps stay
+	// in the screen after the install and in the log.
+	if !strings.Contains(printed, "  + cert-manager v1.21.3 · Envoy Gateway 1.9.3 · MetalLB 0.16.1 · admission policies\n") {
+		t.Errorf("the platform block is not the folded plan:\n%s", printed)
+	}
+	for _, detailed := range []string{"ClusterIssuers", "IPAddressPool", "the s5n Gateway"} {
+		if strings.Contains(printed, detailed) {
+			t.Errorf("the platform block carries a sub-step (%q), which the folded plan folds away:\n%s", detailed, printed)
+		}
 	}
 	// The old two-question transcript is gone: nothing prints a platform plan
 	// heading outside the confirm, and no summary line is cut off by it.
@@ -126,7 +133,7 @@ func TestOneConfirmForTheWholeRun(t *testing.T) {
 func TestTheOneConfirmWithoutAPlatform(t *testing.T) {
 	var out bytes.Buffer
 	ask := &countingAsker{}
-	confirm := migrateConfirm(&say.Plain{W: &out}, ask, "seedbox", false, false, nil, "")
+	confirm := migrateConfirm(&say.Plain{W: &out}, ask, "seedbox", askOptions{}, nil, "", confirmScreen{})
 
 	if _, err := confirm(migratingSummary()); err != nil {
 		t.Fatalf("confirm: %v", err)
@@ -227,13 +234,13 @@ func TestAHostWithABoxAsksInsideTheRun(t *testing.T) {
 	grant, values := "/etc/s5n/seedboxes/root.yaml", "/root/.config/box/values.yaml"
 	o := &migrateApplyFlags{applyFlags: &applyFlags{grantPath: &grant, valuesPath: &values, yes: new(bool)}, details: new(bool)}
 	// No terminal and no --yes: the asking form refuses rather than answering.
-	ask := migrateAnswer(&say.Plain{W: &bytes.Buffer{}}, o, "seedbox", false, nil)
+	ask := migrateAnswer(&say.Plain{W: &bytes.Buffer{}}, o, "seedbox", false, nil, confirmScreen{})
 	if _, err := ask(migratingSummary()); err == nil || !strings.Contains(err.Error(), "--yes") {
 		t.Fatalf("a host with a box did not ask: %v", err)
 	}
 	// A run that agreed before installing does not.
 	agreed := migratingSummary()
-	ask = migrateAnswer(&say.Plain{W: &bytes.Buffer{}}, o, "seedbox", false, &agreed)
+	ask = migrateAnswer(&say.Plain{W: &bytes.Buffer{}}, o, "seedbox", false, &agreed, confirmScreen{})
 	if ok, err := ask(agreed); err != nil || !ok {
 		t.Fatalf("a run that already agreed asked again: %v %v", ok, err)
 	}

@@ -19,6 +19,7 @@ import (
 	"github.com/swizzin/s5n/internal/migrate/bundle"
 	"github.com/swizzin/s5n/internal/migrate/discover"
 	"github.com/swizzin/s5n/internal/migrate/plan"
+	reportfile "github.com/swizzin/s5n/internal/migrate/report"
 	"github.com/swizzin/s5n/internal/say"
 )
 
@@ -91,16 +92,18 @@ func TestCutoverRefusesWhileAnAppRunsAndWritesTheSurveyFirst(t *testing.T) {
 	if len(surveys) != 1 {
 		t.Fatalf("the refusal wrote %d surveys, want one: %v", len(surveys), surveys)
 	}
-	// What it says: the app, what is running, and the command to double-check.
+	// What it says: one line of state and the command that stops it (rule 3),
+	// with the survey kept but off the screen.
 	for _, want := range []string{
-		"sonarr: 1 replica, 1 pod left in media/sonarr",
-		"kubectl -n media scale deployment/sonarr --replicas=0",
-		"box never stops a source",
-		"survey: ",
+		"! 1 app running · stop them, then run this again",
+		"  $ kubectl -n media scale deployment --replicas=0 sonarr",
 	} {
 		if !strings.Contains(text.String(), want) {
 			t.Errorf("the refusal does not say %q:\n%s", want, text)
 		}
+	}
+	if strings.Contains(text.String(), "survey: ") {
+		t.Errorf("the refusal puts the survey's path on the screen, and plumbing belongs in the log:\n%s", text)
 	}
 }
 
@@ -128,7 +131,7 @@ func TestCutoverWritesTheFinalSnapshotWhenEveryAppStopped(t *testing.T) {
 		t.Errorf("mode = %q, want %q", m.Mode, archive.ModeFinal)
 	}
 	// The final snapshot is the one apply runs, so it carries the configs.
-	opened, err := bundle.Open(out, filepath.Join(t.TempDir(), "open"))
+	opened, err := bundle.Open(out, filepath.Join(t.TempDir(), "open"), nil, nil)
 	if err != nil {
 		t.Fatalf("the final snapshot does not open: %v", err)
 	}
@@ -142,9 +145,10 @@ func TestCutoverWritesTheFinalSnapshotWhenEveryAppStopped(t *testing.T) {
 	// for a cluster nobody proved is k0s (TestResetRecipeNamesTheSourcesNode
 	// covers the recipes box does know).
 	for _, want := range []string{
-		"box can't tell how this cluster was installed",
-		"box migrate apply " + out,
-		"box does not remove a cluster it did not install",
+		"! this cluster is yours to replace",
+		"· remove this cluster the way it was installed, before anything else uses this host",
+		"$ box migrate apply \\",
+		filepath.Base(out),
 	} {
 		if !strings.Contains(text.String(), want) {
 			t.Errorf("the replace path does not say %q:\n%s", want, text)
@@ -169,15 +173,24 @@ func TestCutoverCallsOutWhatItCouldNotSettle(t *testing.T) {
 	if err := cutover(context.Background(), o, reporter, proofOf()); !errors.Is(err, errCutoverStopped) {
 		t.Fatalf("cutover = %v, want the replace path's stop", err)
 	}
-	opened, err := bundle.Open(out, filepath.Join(t.TempDir(), "open"))
+	opened, err := bundle.Open(out, filepath.Join(t.TempDir(), "open"), nil, nil)
 	if err != nil {
 		t.Fatalf("the final snapshot does not open: %v", err)
 	}
 	report := string(opened.Report)
-	for _, want := range []string{"called out:", "left as it is:", "/mnt/other/shows"} {
+	for _, want := range []string{"\nchecks\n", "left as it is", "/mnt/other/shows"} {
 		if !strings.Contains(report, want) {
 			t.Errorf("the snapshot's report does not say %q:\n%s", want, report)
 		}
+	}
+	// The report is beside the snapshot too, and the two are one document: the
+	// entry travels with the file, the file is what a person opens.
+	beside, err := os.ReadFile(reportfile.Name(out))
+	if err != nil {
+		t.Fatalf("no report beside the snapshot: %v", err)
+	}
+	if string(beside) != report {
+		t.Errorf("the report beside the snapshot is not the one inside it:\n%s", beside)
 	}
 	p, err := plan.Parse(opened.Plan)
 	if err != nil {
@@ -186,12 +199,15 @@ func TestCutoverCallsOutWhatItCouldNotSettle(t *testing.T) {
 	if got := p.Defaults(); len(got) != 1 || !strings.Contains(got[0], "/mnt/other/shows") {
 		t.Errorf("the plan's defaults = %v, want the path nothing covered", got)
 	}
-	// Unattended, the run says what it took: the same lines, as the last thing
-	// on the screen.
+	// Unattended, the run says how many decisions it took and points at the
+	// page that names each one: a default is never silent, and the screen is
+	// counts (rules 4 and 7).
 	lines := text.String()
-	last := lines[strings.LastIndex(lines, "defaults taken"):]
-	if !strings.Contains(lines, "taking every one of these defaults") || !strings.Contains(last, "/mnt/other/shows") {
-		t.Errorf("the run does not name the default it took:\n%s", lines)
+	if !strings.Contains(lines, "! defaults       1 default taken · the report names each one") {
+		t.Errorf("the run does not say how many defaults it took:\n%s", lines)
+	}
+	if !strings.Contains(report, "/mnt/other/shows") {
+		t.Errorf("the report does not name the default it took:\n%s", report)
 	}
 }
 
@@ -215,42 +231,50 @@ func TestCutoverRefusesASavedReadForTheStopProof(t *testing.T) {
 // the one for the distribution the source's own nodes say installed it, and a
 // cluster box cannot place gets a line that says so. The versions are the shapes
 // k0s and k3s write, not a cluster this test ran against.
+//
+// The k0s recipe removes /etc/k0s/k0s.yaml, which `k0s reset` leaves behind and
+// the next bootstrap refuses over: the reset this screen prints has to end where
+// bootstrap can start.
 func TestResetRecipeNamesTheSourcesNode(t *testing.T) {
-	o := cutoverOptions{discoverOptions: discoverOptions{Out: "/var/lib/s5n/migrate/migrate-20261117T090000Z-final.tar.gz"}}
 	tests := []struct {
 		name  string
 		nodes []discover.Node
 		want  string
 	}{
-		{"k0s", []discover.Node{{Name: "box", KubeletVersion: "v1.34.1+k0s.0"}}, "k0s stop; k0s reset"},
+		{"k0s", []discover.Node{{Name: "box", KubeletVersion: "v1.34.1+k0s.0"}}, "sudo k0s stop; sudo k0s reset"},
 		{"k3s", []discover.Node{{Name: "box", KubeletVersion: "v1.34.1+k3s1"}}, "/usr/local/bin/k3s-uninstall.sh"},
-		{"no marker", []discover.Node{{Name: "box", KubeletVersion: "v1.34.1"}}, "box can't tell how this cluster was installed"},
-		{"no nodes", nil, "box can't tell how this cluster was installed"},
+		{"no marker", []discover.Node{{Name: "box", KubeletVersion: "v1.34.1"}}, "remove this cluster the way it was installed"},
+		{"no nodes", nil, "remove this cluster the way it was installed"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			lines := resetLines(o, tt.nodes)
-			if len(lines) < 2 {
-				t.Fatalf("the recipe is %v, want a teardown and where the manifests are", lines)
+			steps := resetSteps(tt.nodes)
+			if len(steps) == 0 {
+				t.Fatal("the recipe is empty")
 			}
-			if !strings.Contains(lines[0], tt.want) {
-				t.Errorf("teardown = %q, want it to name %q", lines[0], tt.want)
+			if step := steps[0]; !strings.Contains(step.Text, tt.want) {
+				t.Errorf("teardown = %q, want it to name %q", step.Text, tt.want)
 			}
-			// Whatever the distribution, the last line is the same and is the
-			// one that says the source is still there.
-			if !strings.Contains(lines[len(lines)-1], "manifest") {
-				t.Errorf("the recipe does not say where the source's manifests are: %v", lines)
-			}
-			// And a recipe for one distribution never carries another's
-			// command.
-			for _, line := range lines {
-				if tt.want == "/usr/local/bin/k3s-uninstall.sh" && strings.Contains(line, "k0s ") {
-					t.Errorf("k3s's recipe carries a k0s command: %q", line)
+			for _, step := range steps {
+				if tt.want == "/usr/local/bin/k3s-uninstall.sh" && strings.Contains(step.Text, "k0s ") {
+					t.Errorf("k3s's recipe carries a k0s command: %q", step.Text)
 				}
-				if tt.want == "k0s stop; k0s reset" && strings.Contains(line, "k3s-uninstall") {
-					t.Errorf("k0s's recipe carries a k3s command: %q", line)
+				if tt.want == "sudo k0s stop; sudo k0s reset" && strings.Contains(step.Text, "k3s-uninstall") {
+					t.Errorf("k0s's recipe carries a k3s command: %q", step.Text)
 				}
+			}
+			// A recipe box cannot place is a note, not a command: a `$` line is
+			// only ever something to copy and run.
+			if tt.want == "remove this cluster the way it was installed" && steps[0].Command {
+				t.Errorf("the cannot-tell recipe is printed as a command: %q", steps[0].Text)
 			}
 		})
+	}
+	// The k0s recipe is the one the k0s.yaml belongs to: `k0s reset` leaves the
+	// config behind and bootstrap refuses over it.
+	k0s := resetSteps([]discover.Node{{Name: "box", KubeletVersion: "v1.34.1+k0s.0"}})
+	joined := k0s[0].Text + " " + k0s[1].Text
+	if !strings.Contains(joined, "rm -f /etc/k0s/k0s.yaml") {
+		t.Errorf("the k0s recipe leaves /etc/k0s/k0s.yaml behind, and the next bootstrap refuses over it: %q", joined)
 	}
 }

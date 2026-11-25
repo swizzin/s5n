@@ -322,7 +322,10 @@ func (d *Decision) Apply(ctx context.Context, opts Options) (Result, error) {
 
 	// The claim, then the file, then the rest: Authelia can only read the
 	// database from the claim, and it will not start without it.
-	step := r.Start(say.Op{Label: "installing root's login"})
+	// The login is one row: the claim, the database, the Secret, the
+	// Deployment and the policy are one thing a person installed, and every
+	// object name is the log's (rule 5).
+	step := r.Start(say.Op{Name: "login"})
 	vols := []seedbox.Volume{{Kind: "login", Path: opts.Path, Claim: authelia.ClaimName}}
 	plan, err := store.Plan(ctx, Namespace, vols)
 	if err != nil {
@@ -355,12 +358,12 @@ func (d *Decision) Apply(ctx context.Context, opts Options) (Result, error) {
 			}
 			res.UsersChanged = true
 			res.Wrote = true
-			r.Line(fmt.Sprintf("users database: wrote %s (0600, login %s)", usersPath, opts.Login))
+			r.Detail(fmt.Sprintf("users database: wrote %s (0600, login %s)", usersPath, opts.Login))
 		} else {
-			r.Line(fmt.Sprintf("users database: %s already has %s, and this run supplied no new password", usersPath, opts.Login))
+			r.Detail(fmt.Sprintf("users database: %s already has %s, and this run supplied no new password", usersPath, opts.Login))
 		}
 	} else {
-		r.Line(fmt.Sprintf("users database: %s is inside the test node, so box cannot write it (--paths-in-node)", usersPath))
+		r.Detail(fmt.Sprintf("users database: %s is inside the test node, so box cannot write it (--paths-in-node)", usersPath))
 	}
 
 	// The Secret: its encryption key created once, never changed, and the
@@ -442,7 +445,8 @@ func (d *Decision) Apply(ctx context.Context, opts Options) (Result, error) {
 		step.Failed(err)
 		return res, keepAll(err)
 	}
-	step.Done(fmt.Sprintf("login ready: %s/%s, SecurityPolicy %s/%s accepted", Namespace, authelia.ServiceName, platform.GatewayNamespace, authelia.PolicyName))
+	step.Done("Authelia")
+	r.Detail(fmt.Sprintf("login ready: %s/%s, SecurityPolicy %s/%s accepted", Namespace, authelia.ServiceName, platform.GatewayNamespace, authelia.PolicyName))
 	return res, nil
 }
 
@@ -511,12 +515,14 @@ func (d *Decision) EnsureRules(ctx context.Context, opts RulesOptions) (bool, er
 	}
 	names := strings.Join(opts.Hosts, ", ")
 	if !changed {
-		d.report().Line(fmt.Sprintf("login: the rule for %s is already there", names))
+		d.report().Rows([]say.Row{{Mark: say.MarkNote, Name: rulesRow, State: "kept", Facts: []string{hostsWord(opts.Hosts)}}})
+		d.report().Detail("login rules kept: " + names)
 		return false, nil
 	}
+	d.report().Detail("login rules written: " + names)
 	return d.write(ctx, cl, opts, files,
-		"applying the login's rule for "+names,
-		fmt.Sprintf("login: the rule for %s is in place", names))
+		say.Op{Label: "applying the login's rule for " + names},
+		say.Row{Mark: say.MarkDone, Name: rulesRow, State: "written", Facts: []string{hostsWord(opts.Hosts)}})
 }
 
 // Pending reports whether the login's configuration or pictures differ from
@@ -551,9 +557,12 @@ func (d *Decision) Reconcile(ctx context.Context, opts RulesOptions) (bool, erro
 	if !changed {
 		return false, nil
 	}
+	// The page is plumbing: one row says it moved, and the log names the three
+	// things that moved with it (rule 5).
+	d.report().Detail("login page: configuration, mark and favicon")
 	return d.write(ctx, cl, opts, files,
-		"reconciling the login's page",
-		"login: the configuration, mark and favicon are up to date")
+		say.Op{Label: "reconciling the login's page"},
+		say.Row{Mark: say.MarkDone, Name: "login", State: "updated"})
 }
 
 // prepare is the read half of both writers: the login's rendering for these
@@ -692,7 +701,7 @@ type loginFiles struct {
 // it. The permissions are asked here, before the first write, so a kubeconfig
 // that may write a Gateway's listeners but not the login's configuration is
 // told so rather than half way through.
-func (d *Decision) write(ctx context.Context, cl Cluster, opts RulesOptions, files loginFiles, label, done string) (bool, error) {
+func (d *Decision) write(ctx context.Context, cl Cluster, opts RulesOptions, files loginFiles, op say.Op, row say.Row) (bool, error) {
 	if err := kube.Preflight(ctx, cl, rulesAccess()); err != nil {
 		return false, fmt.Errorf("login: %w", err)
 	}
@@ -708,7 +717,7 @@ func (d *Decision) write(ctx context.Context, cl Cluster, opts RulesOptions, fil
 	// rendered file, and it is written beside the objects that name it.
 	docs = append([]map[string]any{configMapDoc(files.config, files.assets)}, docs...)
 
-	step := d.report().Start(say.Op{Label: label})
+	step := d.report().Start(op)
 	if err := cl.ApplyWith(ctx, kube.FieldManager, docs); err != nil {
 		step.Failed(err)
 		return false, fmt.Errorf("login: %w", err)
@@ -720,8 +729,21 @@ func (d *Decision) write(ctx context.Context, cl Cluster, opts RulesOptions, fil
 		step.Failed(err)
 		return true, err
 	}
-	step.Done(done)
+	step.Done("")
+	d.report().Rows([]say.Row{row})
 	return true, nil
+}
+
+// rulesRow is the login's access rules as a row: kept or written, for how many
+// names. The names themselves are the log's, where a list of host names belongs.
+const rulesRow = "login rules"
+
+// hostsWord is how many names a rule write is for: "1 host", "4 hosts".
+func hostsWord(hosts []string) string {
+	if len(hosts) == 1 {
+		return "1 host"
+	}
+	return fmt.Sprintf("%d hosts", len(hosts))
 }
 
 // checkRules refuses a rule write that cannot be rendered, before a client
@@ -1016,19 +1038,14 @@ func (d *Decision) awaitDeployment(ctx context.Context, cl Cluster) error {
 		timeout = DeployTimeout
 	}
 	r := d.report()
-	task := r.Start(say.Op{
-		Label:  "waiting for the login to be ready",
-		Plain:  fmt.Sprintf("waiting up to %s for Deployment %s/%s", timeout, Namespace, authelia.ServiceName),
-		Budget: timeout,
-	})
+	r.Detail(fmt.Sprintf("waiting up to %s for Deployment %s/%s", timeout, Namespace, authelia.ServiceName))
 	// platform.Await is the one poll loop (internal/wait), with the workload
 	// readiness rule every other box wait uses.
 	err := cl.Await(ctx, platform.Wait{Kind: platform.WaitDeployment, Namespace: Namespace, Name: authelia.ServiceName, Timeout: timeout})
 	if err != nil {
-		task.Failed(err)
 		return fmt.Errorf("deployment %s/%s did not become ready within %s: the login is not answering, so the release behind it is not installed: %w", Namespace, authelia.ServiceName, timeout, err)
 	}
-	task.Done(fmt.Sprintf("Deployment %s/%s is ready", Namespace, authelia.ServiceName))
+	r.Detail(fmt.Sprintf("Deployment %s/%s is ready", Namespace, authelia.ServiceName))
 	return nil
 }
 
@@ -1056,11 +1073,7 @@ func (d *Decision) awaitPolicy(ctx context.Context, cl Cluster, res *Result) err
 		timeout = PolicyTimeout
 	}
 	r := d.report()
-	task := r.Start(say.Op{
-		Label:  "waiting for the SecurityPolicy to be accepted",
-		Plain:  fmt.Sprintf("waiting up to %s for SecurityPolicy %s/%s to be Accepted", timeout, platform.GatewayNamespace, authelia.PolicyName),
-		Budget: timeout,
-	})
+	r.Detail(fmt.Sprintf("waiting up to %s for SecurityPolicy %s/%s to be Accepted", timeout, platform.GatewayNamespace, authelia.PolicyName))
 	var reason string
 	waited, err := wait.Until(ctx, timeout, d.poll(), func(ctx context.Context) (bool, error) {
 		ok, why, err := cl.Accepted(ctx, PolicyGroup, PolicyVersion, "SecurityPolicy", platform.GatewayNamespace, authelia.PolicyName, policyTarget())
@@ -1075,14 +1088,12 @@ func (d *Decision) awaitPolicy(ctx context.Context, cl Cluster, res *Result) err
 	})
 	switch {
 	case err != nil:
-		task.Failed(err)
 		return err
 	case waited.Done:
 		res.PolicyAccepted = true
-		task.Done(fmt.Sprintf("SecurityPolicy %s/%s is Accepted", platform.GatewayNamespace, authelia.PolicyName))
+		r.Detail(fmt.Sprintf("SecurityPolicy %s/%s is Accepted", platform.GatewayNamespace, authelia.PolicyName))
 		return nil
 	}
-	task.Failed(nil)
 	if reason == "" {
 		reason = "Envoy Gateway has not marked it Accepted"
 	}

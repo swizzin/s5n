@@ -201,9 +201,14 @@ What a migration keeps:
 - **Every app's settings and connections.** API keys stay as they are, and the apps find each
   other at the box's addresses -- an Arr's download clients, Prowlarr's applications, Seerr's
   servers -- with the clients the source already had taken over rather than duplicated.
-- **Plex's own state.** Its preferences, libraries and watch history come across; its
-  metadata, artwork and thumbnails are rebuilt from the media. Artwork uploaded by hand is
-  not carried.
+- **Plex's own state, and the library it built.** Its preferences, libraries and watch
+  history come across, and so do the metadata, artwork, chapter thumbnails and preview
+  thumbnails it spent hours building -- a snapshot carries them whenever the disk has room
+  for them, and only Plex's caches, codecs, logs and crash reports always stay behind. On a
+  disk without the room (`--plex-minimal`, or a snapshot that will not fit beside the
+  config) it carries the state alone and Plex builds the rest again. The tree is written
+  once, straight from the snapshot into the app's config directory, and everything a
+  migration makes on the way lives beside the snapshot rather than in `/tmp`.
 - **Your torrents, where they are.** qBittorrent's torrents and the categories they are in
   are kept, and downloads are not moved, so seeding carries on from the same files and every
   import is still a hardlink.
@@ -223,14 +228,17 @@ report.
 The chart works on any conformant Kubernetes 1.30 or newer with plain Helm:
 
 ```sh
-helm install s5n oci://ghcr.io/swizzin/charts/s5n --version 0.6.0 -f values.yaml
+helm install s5n oci://ghcr.io/swizzin/charts/s5n --version 0.6.3 -f values.yaml
 ```
 
 Bring two claims (`storage.data.existingClaim` and `storage.config.existingClaim`), a
 Gateway for its routes, and your domain in `gateway.host`. The chart ships no login: put
 one in front at your Gateway and set `auth.edge: true` to say you have, or it refuses to
-render. `charts/s5n/values.yaml` documents every key, and `values.schema.json` rejects
-anything it doesn't know.
+render. It ships no torrent port either: set `apps.qbittorrent.torrent.port` to the port
+peers reach the node on, and pick it from the lower band of your NodePort range
+(30000-30085 for the default range), where the API server does not hand out its own
+nodePorts. A render without it names the key and the band. `charts/s5n/values.yaml`
+documents every key, and `values.schema.json` rejects anything it doesn't know.
 
 ## The data layout
 
