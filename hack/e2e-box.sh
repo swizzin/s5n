@@ -9464,9 +9464,18 @@ migrate_box() {
   # stops before anything moves -- no record, no grant, no cluster of its own --
   # and says both versions and the command that goes ahead anyway.
   log "box migrate apply: a downgrade refuses, before anything moves"
+  refuse_started=$SECONDS
   if apply_migrate "$WORK/apply-downgrade.txt"; then
     echo "migrate apply ran a release older than the source's config without --yolo"; fail=1; return 0
   fi
+  # The refusal is read from the snapshot and the chart alone, so the step is
+  # seconds: staging a seedbox's configs, probing the cluster for a platform and
+  # installing one all come after it. The platform's two minutes of Helm releases
+  # are the number this is short of.
+  refuse_took=$((SECONDS - refuse_started))
+  echo "  the refusal took ${refuse_took}s"
+  [ "$refuse_took" -lt 90 ] ||
+    { echo "a refused downgrade took ${refuse_took}s, and the platform layer alone is two minutes: something before the refusal is doing the install's work"; fail=1; }
   cat "$WORK/apply-downgrade.txt"
   grep -qE '^✗ sonarr +9\.9\.9 → 5\.0$' "$WORK/apply-downgrade.txt" ||
     { echo "the refusal does not name the app and both versions:"; tail -12 "$WORK/apply-downgrade.txt"; fail=1; }
@@ -9481,6 +9490,18 @@ migrate_box() {
   for left in "$WORK/cluster.yaml" "$WORK/grant.yaml"; do
     [ ! -e "$left" ] || { echo "a refused downgrade wrote ${left}"; fail=1; }
   done
+  # Nothing of the platform was installed to reach the refusal: none of the three
+  # namespaces its releases live in exists on this cluster, and no Gateway was
+  # written. A refusal that installed a cert-manager, a MetalLB or an Envoy
+  # Gateway first spent two minutes on a host it then said no to.
+  for ns in cert-manager envoy-gateway-system metallb-system; do
+    if $K get namespace "$ns" >/dev/null 2>&1; then
+      echo "a refused downgrade left the platform's ${ns} namespace on the cluster"; fail=1
+    fi
+  done
+  if $K -n s5n-gateway get gateway s5n >/dev/null 2>&1; then
+    echo "a refused downgrade wrote box's Gateway"; fail=1
+  fi
   if grep -qE '^apps +carries' "$WORK/apply-downgrade.txt"; then
     echo "a refused run showed the plan as if it were to be applied"; fail=1
   fi

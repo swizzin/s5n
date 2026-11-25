@@ -138,7 +138,11 @@ func TestThePreInstallPassWritesOnlyWhereItIsThrownAway(t *testing.T) {
 	valuesPath := filepath.Join(t.TempDir(), "values.yaml")
 	o := &migrateApplyFlags{applyFlags: &applyFlags{grantPath: &grantPath, valuesPath: &valuesPath}}
 
-	summary, err := migrateSurvey(context.Background(), o, p, opened, raw, chart, cat, false)
+	values, err := pendingValues(o, chart)
+	if err != nil {
+		t.Fatalf("the values a fresh install would have: %v", err)
+	}
+	summary, err := migrateSurvey(context.Background(), p, opened, raw, chart, cat, false, values)
 	if err != nil {
 		t.Fatalf("migrateSurvey: %v", err)
 	}
