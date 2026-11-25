@@ -106,7 +106,7 @@ func (s *Sabnzbd) config(ctx context.Context) (Config, error) {
 // misc reads one setting out of [misc].
 func (s *Sabnzbd) misc(ctx context.Context, keyword string) (string, bool, error) {
 	var body Item
-	err := s.call(ctx, "get_config", url.Values{"section": {"misc"}, "keyword": {keyword}}, &body)
+	err := s.call(ctx, "get_config", url.Values{fieldSection: {"misc"}, fieldKeyword: {keyword}}, &body)
 	if err != nil {
 		return "", false, fmt.Errorf("read misc.%s: %w", keyword, err)
 	}
@@ -156,7 +156,7 @@ func (s *Sabnzbd) EnsureDataContract(ctx context.Context, want Config) (Change, 
 }
 
 func (s *Sabnzbd) setMisc(ctx context.Context, keyword, value string) error {
-	err := s.call(ctx, "set_config", url.Values{"section": {"misc"}, "keyword": {keyword}, "value": {value}}, nil)
+	err := s.call(ctx, "set_config", url.Values{fieldSection: {"misc"}, fieldKeyword: {keyword}, "value": {value}}, nil)
 	if err != nil {
 		return fmt.Errorf("set misc.%s: %w", keyword, err)
 	}
@@ -173,7 +173,7 @@ type SabnzbdCategory struct {
 // categories lists the configured categories.
 func (s *Sabnzbd) categories(ctx context.Context) (map[string]SabnzbdCategory, error) {
 	var body Item
-	if err := s.call(ctx, "get_config", url.Values{"section": {"categories"}}, &body); err != nil {
+	if err := s.call(ctx, "get_config", url.Values{fieldSection: {"categories"}}, &body); err != nil {
 		return nil, fmt.Errorf("list categories: %w", err)
 	}
 	out := map[string]SabnzbdCategory{}
@@ -231,13 +231,13 @@ func (s *Sabnzbd) EnsureCategory(ctx context.Context, name, dir string) (Change,
 	// unpack, repair and delete); script=None is no script; priority=0 is
 	// normal. Every one of them is SAB's own default for a new category.
 	form := url.Values{
-		"section":  {"categories"},
-		"keyword":  {key},
-		"name":     {key},
-		"dir":      {dir},
-		"pp":       {"3"},
-		"script":   {"None"},
-		"priority": {"0"},
+		fieldSection: {"categories"},
+		fieldKeyword: {key},
+		fieldName:    {key},
+		"dir":        {dir},
+		"pp":         {"3"},
+		"script":     {"None"},
+		"priority":   {"0"},
 	}
 	if err := s.call(ctx, "set_config", form, nil); err != nil {
 		return Unchanged, fmt.Errorf("set category %q: %w", key, err)

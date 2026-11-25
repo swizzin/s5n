@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"sync"
 	"testing"
@@ -42,56 +43,67 @@ func (f *fakeSabnzbd) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "unexpected path "+r.URL.Path, http.StatusNotFound)
 		return
 	}
-	mode := r.URL.Query().Get("mode")
-	if mode != "version" && r.URL.Query().Get("apikey") != f.key {
+	q := r.URL.Query()
+	if q.Get("mode") != "version" && q.Get("apikey") != f.key {
 		http.Error(w, "API Key Incorrect", http.StatusForbidden)
 		return
 	}
-	switch mode {
+	switch q.Get("mode") {
 	case "version":
 		writeJSON(w, map[string]any{"version": "5.1.3"})
 	case "get_config":
-		switch r.URL.Query().Get("section") {
-		case "misc":
-			key := r.URL.Query().Get("keyword")
-			value, ok := f.misc[key]
-			if !ok {
-				writeJSON(w, map[string]any{"config": map[string]any{}})
-				return
-			}
-			writeJSON(w, map[string]any{"config": map[string]any{"misc": map[string]any{key: value}}})
-		case "categories":
-			key := strings.ToLower(r.URL.Query().Get("keyword"))
-			if key == "" {
-				var list []any
-				for name, dir := range f.cats {
-					list = append(list, map[string]any{"name": name, "dir": dir})
-				}
-				writeJSON(w, map[string]any{"config": map[string]any{"categories": list}})
-				return
-			}
-			dir, ok := f.cats[key]
-			if !ok {
-				writeJSON(w, map[string]any{"config": map[string]any{}})
-				return
-			}
-			writeJSON(w, map[string]any{"config": map[string]any{"categories": []any{map[string]any{"name": key, "dir": dir}}}})
-		default:
-			http.Error(w, "unexpected section", http.StatusBadRequest)
-		}
+		f.serveGetConfig(w, q)
 	case "set_config":
-		q := r.URL.Query()
-		f.writes++
-		f.lastSet = map[string]string{}
-		for k, v := range q {
-			if len(v) > 0 {
-				f.lastSet[k] = v[0]
-			}
-		}
-		if f.sticky {
+		f.serveSetConfig(w, q)
+	default:
+		http.Error(w, "unexpected mode "+q.Get("mode"), http.StatusBadRequest)
+	}
+}
+
+func (f *fakeSabnzbd) serveGetConfig(w http.ResponseWriter, q url.Values) {
+	switch q.Get("section") {
+	case "misc":
+		key := q.Get("keyword")
+		value, ok := f.misc[key]
+		if !ok {
 			writeJSON(w, map[string]any{"config": map[string]any{}})
 			return
 		}
+		writeJSON(w, map[string]any{"config": map[string]any{"misc": map[string]any{key: value}}})
+	case "categories":
+		f.serveGetCategories(w, q.Get("keyword"))
+	default:
+		http.Error(w, "unexpected section", http.StatusBadRequest)
+	}
+}
+
+func (f *fakeSabnzbd) serveGetCategories(w http.ResponseWriter, keyword string) {
+	if keyword == "" {
+		list := []any{}
+		for name, dir := range f.cats {
+			list = append(list, map[string]any{"name": name, "dir": dir})
+		}
+		writeJSON(w, map[string]any{"config": map[string]any{"categories": list}})
+		return
+	}
+	key := strings.ToLower(keyword)
+	dir, ok := f.cats[key]
+	if !ok {
+		writeJSON(w, map[string]any{"config": map[string]any{}})
+		return
+	}
+	writeJSON(w, map[string]any{"config": map[string]any{"categories": []any{map[string]any{"name": key, "dir": dir}}}})
+}
+
+func (f *fakeSabnzbd) serveSetConfig(w http.ResponseWriter, q url.Values) {
+	f.writes++
+	f.lastSet = map[string]string{}
+	for k, v := range q {
+		if len(v) > 0 {
+			f.lastSet[k] = v[0]
+		}
+	}
+	if !f.sticky {
 		switch q.Get("section") {
 		case "misc":
 			f.misc[q.Get("keyword")] = q.Get("value")
@@ -102,10 +114,8 @@ func (f *fakeSabnzbd) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			}
 			f.cats[name] = q.Get("dir")
 		}
-		writeJSON(w, map[string]any{"config": map[string]any{}})
-	default:
-		http.Error(w, "unexpected mode "+mode, http.StatusBadRequest)
 	}
+	writeJSON(w, map[string]any{"config": map[string]any{}})
 }
 
 func TestSabnzbdSealsTheDataContractAndProvesIt(t *testing.T) {

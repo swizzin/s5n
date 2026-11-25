@@ -175,7 +175,7 @@ func (a *Arr) EnsureDownloadClient(ctx context.Context, spec DownloadClientSpec,
 		{"urlBase", spec.URLBase, false},
 		{"username", spec.Username, false},
 		{"password", spec.Password, true},
-		{"apiKey", spec.APIKey, true},
+		{fieldAPIKey, spec.APIKey, true},
 		{a.categoryField(), spec.Category, false},
 	}
 

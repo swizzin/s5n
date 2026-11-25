@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -936,8 +937,7 @@ func (f *fakeStack) sabnzbdHandler(urlBase, key string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		f.mu.Lock()
 		defer f.mu.Unlock()
-		p := strings.TrimPrefix(r.URL.Path, urlBase)
-		if p != "/api" {
+		if strings.TrimPrefix(r.URL.Path, urlBase) != "/api" {
 			http.Error(w, "unexpected "+r.URL.Path, http.StatusNotFound)
 			return
 		}
@@ -952,43 +952,56 @@ func (f *fakeStack) sabnzbdHandler(urlBase, key string) http.HandlerFunc {
 		}
 		switch q.Get("mode") {
 		case "get_config":
-			switch q.Get("section") {
-			case "misc":
-				writeJSON(w, map[string]any{"config": map[string]any{"misc": map[string]any{q.Get("keyword"): f.sabMisc[q.Get("keyword")]}}})
-			case "categories":
-				name := strings.ToLower(q.Get("keyword"))
-				if name == "" {
-					list := []any{}
-					for cat, dir := range f.sabCats {
-						list = append(list, map[string]any{"name": cat, "dir": dir})
-					}
-					writeJSON(w, map[string]any{"config": map[string]any{"categories": list}})
-					return
-				}
-				dir, ok := f.sabCats[name]
-				if !ok {
-					writeJSON(w, map[string]any{"config": map[string]any{}})
-					return
-				}
-				writeJSON(w, map[string]any{"config": map[string]any{"categories": []any{map[string]any{"name": name, "dir": dir}}}})
-			}
+			f.serveSabGet(w, q)
 		case "set_config":
-			f.writes++
-			switch q.Get("section") {
-			case "misc":
-				f.sabMisc[q.Get("keyword")] = q.Get("value")
-			case "categories":
-				name := strings.ToLower(q.Get("name"))
-				if name == "" {
-					name = strings.ToLower(q.Get("keyword"))
-				}
-				f.sabCats[name] = q.Get("dir")
-			}
-			writeJSON(w, map[string]any{"config": map[string]any{}})
+			f.serveSabSet(w, q)
 		default:
 			http.Error(w, "unexpected mode "+q.Get("mode"), http.StatusBadRequest)
 		}
 	}
+}
+
+func (f *fakeStack) serveSabGet(w http.ResponseWriter, q url.Values) {
+	switch q.Get("section") {
+	case "misc":
+		key := q.Get("keyword")
+		writeJSON(w, map[string]any{"config": map[string]any{"misc": map[string]any{key: f.sabMisc[key]}}})
+	case "categories":
+		f.serveSabCategories(w, q.Get("keyword"))
+	}
+}
+
+func (f *fakeStack) serveSabCategories(w http.ResponseWriter, keyword string) {
+	if keyword == "" {
+		list := []any{}
+		for cat, dir := range f.sabCats {
+			list = append(list, map[string]any{"name": cat, "dir": dir})
+		}
+		writeJSON(w, map[string]any{"config": map[string]any{"categories": list}})
+		return
+	}
+	name := strings.ToLower(keyword)
+	dir, ok := f.sabCats[name]
+	if !ok {
+		writeJSON(w, map[string]any{"config": map[string]any{}})
+		return
+	}
+	writeJSON(w, map[string]any{"config": map[string]any{"categories": []any{map[string]any{"name": name, "dir": dir}}}})
+}
+
+func (f *fakeStack) serveSabSet(w http.ResponseWriter, q url.Values) {
+	f.writes++
+	switch q.Get("section") {
+	case "misc":
+		f.sabMisc[q.Get("keyword")] = q.Get("value")
+	case "categories":
+		name := strings.ToLower(q.Get("name"))
+		if name == "" {
+			name = strings.ToLower(q.Get("keyword"))
+		}
+		f.sabCats[name] = q.Get("dir")
+	}
+	writeJSON(w, map[string]any{"config": map[string]any{}})
 }
 
 // mustHostPort is hostPort for a test: the fake's own address.

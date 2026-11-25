@@ -73,76 +73,13 @@ func run(in rewrite.Input, write bool) (rewrite.Report, error) {
 	}
 
 	counts := map[[2]string]int{}
-	changed := false
-	note := func(where, what string) {
-		counts[[2]string{where, what}]++
-		changed = true
+	note := func(where, what string) { counts[[2]string{where, what}]++ }
+	if err := rewritePaths(in, f, &rep, note); err != nil {
+		return rep, err
 	}
-
-	// Every absolute path goes through this app's table. A rule covers it when
-	// the source's tree moved; one no rule covers is a gap, which stops the
-	// write pass before anything moves.
-	for _, key := range []string{keyCompleteDir, keyDownloadDir, keyScriptDir, keyBackupDir} {
-		value, ok := f.Get(sectionMisc, key)
-		if !ok || strings.TrimSpace(value) == "" {
-			continue
-		}
-		moved, covered := in.Plan.Rewrite(in.App, strings.TrimSpace(value))
-		if !covered {
-			rep.Uncovered = append(rep.Uncovered, plan.Uncovered{
-				App: in.App, File: configName, Key: sectionMisc + "/" + key, Path: strings.TrimSpace(value),
-			})
-			continue
-		}
-		if moved == strings.TrimSpace(value) {
-			continue
-		}
-		if err := f.Set(sectionMisc, key, moved); err != nil {
-			return rep, fmt.Errorf("sabnzbd: %s: %w", configName, err)
-		}
-		note(sectionMisc+"/"+key, "path")
-	}
-
-	// A category's directory is joined onto complete_dir when the job is
-	// post-processed, so it is a path in its own right. The category name is
-	// the Arrs' and never changes: only the directory behind it does.
-	for _, name := range f.Children("categories") {
-		where := "categories," + name
-		value, ok := f.Get(where, "dir")
-		if !ok || strings.TrimSpace(value) == "" {
-			continue
-		}
-		moved, covered := in.Plan.Rewrite(in.App, strings.TrimSpace(value))
-		if !covered {
-			rep.Uncovered = append(rep.Uncovered, plan.Uncovered{
-				App: in.App, File: configName, Key: where + "/dir", Path: strings.TrimSpace(value),
-			})
-			continue
-		}
-		if moved == strings.TrimSpace(value) {
-			continue
-		}
-		if err := f.Set(where, "dir", moved); err != nil {
-			return rep, fmt.Errorf("sabnzbd: %s: %w", configName, err)
-		}
-		note(where+"/dir", "path")
-	}
-
-	// Its own login goes: SABnzbd asks for one only when both username and
-	// password are set (sabnzbd/interface.py:358-361 at 5.1.3, check_login), and
-	// the box's edge is the login a person uses. Leaving them would be a second
-	// password nobody was given.
-	loginOff := false
-	for _, key := range []string{keyUsername, keyPassword} {
-		value, ok := f.Get(sectionMisc, key)
-		if !ok || value == "" {
-			continue
-		}
-		if err := f.Set(sectionMisc, key, ""); err != nil {
-			return rep, fmt.Errorf("sabnzbd: %s: %w", configName, err)
-		}
-		note(sectionMisc+"/"+key, "own login")
-		loginOff = true
+	loginOff, err := switchLoginOff(f, note)
+	if err != nil {
+		return rep, err
 	}
 	if loginOff {
 		rep.Notes = append(rep.Notes, "its own login is switched off; you sign in through the box")
@@ -161,7 +98,7 @@ func run(in rewrite.Input, write bool) (rewrite.Report, error) {
 	if write && rep.Blocked() {
 		return rep, fmt.Errorf("sabnzbd: the plan does not settle every path; nothing was written")
 	}
-	if !write || !changed {
+	if !write || len(counts) == 0 {
 		return rep, nil
 	}
 	info, err := os.Stat(path)
@@ -172,4 +109,65 @@ func run(in rewrite.Input, write bool) (rewrite.Report, error) {
 		return rep, fmt.Errorf("sabnzbd: %w", err)
 	}
 	return rep, nil
+}
+
+// rewritePaths moves every path the file stores through this app's table. A
+// path no rule covers is a gap, which stops the write pass before anything
+// moves.
+func rewritePaths(in rewrite.Input, f *sabconf.File, rep *rewrite.Report, note func(where, what string)) error {
+	for _, key := range []string{keyCompleteDir, keyDownloadDir, keyScriptDir, keyBackupDir} {
+		if err := rewritePath(in, f, rep, note, sectionMisc, key, sectionMisc+"/"+key); err != nil {
+			return err
+		}
+	}
+	// A category's directory is joined onto complete_dir when the job is
+	// post-processed, so it is a path in its own right. The category name is
+	// the Arrs' and never changes: only the directory behind it does.
+	for _, name := range f.Children("categories") {
+		where := "categories," + name
+		if err := rewritePath(in, f, rep, note, where, "dir", where+"/dir"); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func rewritePath(in rewrite.Input, f *sabconf.File, rep *rewrite.Report, note func(where, what string), section, key, where string) error {
+	value, ok := f.Get(section, key)
+	value = strings.TrimSpace(value)
+	if !ok || value == "" {
+		return nil
+	}
+	moved, covered := in.Plan.Rewrite(in.App, value)
+	if !covered {
+		rep.Uncovered = append(rep.Uncovered, plan.Uncovered{App: in.App, File: configName, Key: where, Path: value})
+		return nil
+	}
+	if moved == value {
+		return nil
+	}
+	if err := f.Set(section, key, moved); err != nil {
+		return fmt.Errorf("sabnzbd: %s: %w", configName, err)
+	}
+	note(where, "path")
+	return nil
+}
+
+// switchLoginOff clears the two settings that make SABnzbd ask for its own
+// password (sabnzbd/interface.py:358-361 at 5.1.3, check_login). It reports
+// whether it changed anything, so the report says so once.
+func switchLoginOff(f *sabconf.File, note func(where, what string)) (bool, error) {
+	changed := false
+	for _, key := range []string{keyUsername, keyPassword} {
+		value, ok := f.Get(sectionMisc, key)
+		if !ok || value == "" {
+			continue
+		}
+		if err := f.Set(sectionMisc, key, ""); err != nil {
+			return false, fmt.Errorf("sabnzbd: %s: %w", configName, err)
+		}
+		note(sectionMisc+"/"+key, "own login")
+		changed = true
+	}
+	return changed, nil
 }

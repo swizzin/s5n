@@ -50,63 +50,79 @@ func Parse(data []byte) (*File, error) {
 		if rel < 0 {
 			eol = ""
 		}
-		raw = strings.TrimSuffix(raw, "\r")
-		l := line{raw: raw, eol: eol}
-		trimmed := strings.TrimSpace(raw)
-		switch {
-		case trimmed == "" || strings.HasPrefix(trimmed, "#") || strings.HasPrefix(trimmed, ";"):
-			l.section = section
-		case strings.HasPrefix(trimmed, "["):
-			if !strings.HasSuffix(trimmed, "]") {
-				return nil, fmt.Errorf("line %d: section header without a closing ]", n)
-			}
-			name := strings.TrimSpace(trimmed[1 : len(trimmed)-1])
-			switch {
-			case strings.HasPrefix(name, "["):
-				// ConfigObj's nested section: [[name]] under the last [section].
-				// SABnzbd writes categories and servers this way.
-				inner := strings.TrimSpace(strings.TrimSuffix(strings.TrimPrefix(name, "["), "]"))
-				if parent == "" || inner == "" {
-					return nil, fmt.Errorf("line %d: nested section %q has no parent section", n, trimmed)
-				}
-				l.section = parent + "," + inner
-				section = l.section
-			default:
-				l.section = name
-				section, parent = name, name
-			}
-		default:
-			eq := strings.Index(raw, "=")
-			if eq < 0 {
-				return nil, fmt.Errorf("line %d: %q is not a key = value line", n, trimmed)
-			}
-			name := strings.TrimSpace(raw[:eq])
-			if name == "" {
-				return nil, fmt.Errorf("line %d: a value with no key", n)
-			}
-			l.section = section
-			l.key = name
-			rest := raw[eq+1:]
-			lead := len(rest) - len(strings.TrimLeft(rest, " \t"))
-			l.prefix = raw[:eq+1] + rest[:lead]
-			value := rest[lead:]
-			value = strings.TrimRight(value, " \t")
-			l.suffix = rest[lead+len(value):]
-			for _, q := range []string{`"`, `'`} {
-				if len(value) >= 2*len(q) && strings.HasPrefix(value, q) && strings.HasSuffix(value, q) {
-					l.quote = q
-					value = value[len(q) : len(value)-len(q)]
-					break
-				}
-			}
-			l.value = value
+		if err := f.readLine(strings.TrimSuffix(raw, "\r"), eol, n, &section, &parent); err != nil {
+			return nil, err
 		}
-		f.lines = append(f.lines, l)
 		if rel < 0 {
 			return f, nil
 		}
 		start = end + 1
 	}
+}
+
+// readLine appends one line, carrying the current section and its parent
+// section forward. It is one line's whole parse, so the loop above has no
+// branches of its own.
+func (f *File) readLine(raw, eol string, n int, section, parent *string) error {
+	l := line{raw: raw, eol: eol}
+	trimmed := strings.TrimSpace(raw)
+	switch {
+	case trimmed == "" || strings.HasPrefix(trimmed, "#") || strings.HasPrefix(trimmed, ";"):
+		l.section = *section
+	case strings.HasPrefix(trimmed, "["):
+		name := strings.TrimSpace(strings.TrimSuffix(strings.TrimPrefix(trimmed, "["), "]"))
+		if name == "" || !strings.HasSuffix(trimmed, "]") {
+			return fmt.Errorf("line %d: section header without a name and a closing ]", n)
+		}
+		switch {
+		case strings.HasPrefix(name, "["):
+			// ConfigObj's nested section: [[name]] under the last [section].
+			// SABnzbd writes categories and servers this way.
+			inner := strings.TrimSpace(strings.TrimSuffix(strings.TrimPrefix(name, "["), "]"))
+			if *parent == "" || inner == "" {
+				return fmt.Errorf("line %d: nested section %q has no parent section", n, trimmed)
+			}
+			l.section = *parent + "," + inner
+			*section = l.section
+		default:
+			l.section = name
+			*section, *parent = name, name
+		}
+	default:
+		if err := l.readKey(raw, n, *section); err != nil {
+			return err
+		}
+	}
+	f.lines = append(f.lines, l)
+	return nil
+}
+
+// readKey fills a key line's value and the offsets an edit keeps its spelling
+// with.
+func (l *line) readKey(raw string, n int, section string) error {
+	eq := strings.Index(raw, "=")
+	if eq < 0 {
+		return fmt.Errorf("line %d: %q is not a key = value line", n, strings.TrimSpace(raw))
+	}
+	name := strings.TrimSpace(raw[:eq])
+	if name == "" {
+		return fmt.Errorf("line %d: a value with no key", n)
+	}
+	l.section, l.key = section, name
+	rest := raw[eq+1:]
+	lead := len(rest) - len(strings.TrimLeft(rest, " \t"))
+	l.prefix = raw[:eq+1] + rest[:lead]
+	value := strings.TrimRight(rest[lead:], " \t")
+	l.suffix = rest[lead+len(value):]
+	for _, q := range []string{`"`, `'`} {
+		if len(value) >= 2*len(q) && strings.HasPrefix(value, q) && strings.HasSuffix(value, q) {
+			l.quote = q
+			value = value[len(q) : len(value)-len(q)]
+			break
+		}
+	}
+	l.value = value
+	return nil
 }
 
 // HasSection reports whether the file declares a section. A duplicate
@@ -181,30 +197,12 @@ func (f *File) find(section, key string) (line, bool) {
 // so comments, ordering and spacing survive; a key the section does not have is
 // inserted after the section's last key line, inside that section.
 func (f *File) Set(section, key, value string) error {
-	// A section declared twice is a file ConfigObj merges: refuse before
-	// editing either copy.
-	seen := false
-	for i, l := range f.lines {
-		if l.raw == "" || !strings.HasPrefix(strings.TrimSpace(l.raw), "[") {
-			continue
-		}
-		if l.section != section {
-			continue
-		}
-		if seen {
-			return fmt.Errorf("[%s] is declared twice (lines %d and %d); ConfigObj would merge them, so this cannot tell which value the app reads", section, f.sectionLine(section), i+1)
-		}
-		seen = true
+	if err := f.checkSection(section); err != nil {
+		return err
 	}
-	var found []int
-	for i := range f.lines {
-		l := &f.lines[i]
-		if l.section == section && l.key != "" && strings.EqualFold(l.key, key) {
-			found = append(found, i)
-		}
-	}
-	if len(found) > 1 {
-		return fmt.Errorf("%s is set twice in [%s] (lines %d and %d); the app reads one of them", key, section, found[0]+1, found[1]+1)
+	found, err := f.findKey(section, key)
+	if err != nil {
+		return err
 	}
 	if len(found) == 1 {
 		l := &f.lines[found[0]]
@@ -214,12 +212,46 @@ func (f *File) Set(section, key, value string) error {
 		l.raw = l.prefix + value + l.suffix
 		return nil
 	}
-	// Insert after the last key line of the section, or right after its header
-	// when it has none. A trailing blank line or comment stays after the new
-	// key, which is where the app's own writer puts one.
-	at := -1
-	header := -1
-	inSection := false
+	f.insert(section, key, value)
+	return nil
+}
+
+// checkSection refuses a section declared twice: ConfigObj merges the two, so
+// this cannot tell which value the app reads.
+func (f *File) checkSection(section string) error {
+	first, seen := 0, false
+	for i, l := range f.lines {
+		if l.raw == "" || !strings.HasPrefix(strings.TrimSpace(l.raw), "[") || l.section != section {
+			continue
+		}
+		if seen {
+			return fmt.Errorf("[%s] is declared twice (lines %d and %d); ConfigObj would merge them, so this cannot tell which value the app reads", section, first, i+1)
+		}
+		first, seen = i+1, true
+	}
+	return nil
+}
+
+// findKey is every line of one section that holds one key, without case.
+func (f *File) findKey(section, key string) ([]int, error) {
+	var found []int
+	for i := range f.lines {
+		l := &f.lines[i]
+		if l.section == section && l.key != "" && strings.EqualFold(l.key, key) {
+			found = append(found, i)
+		}
+	}
+	if len(found) > 1 {
+		return nil, fmt.Errorf("%s is set twice in [%s] (lines %d and %d); the app reads one of them", key, section, found[0]+1, found[1]+1)
+	}
+	return found, nil
+}
+
+// insert adds a key after the section's last key line, or right after its
+// header when it has none. A trailing blank line or comment stays after the new
+// key, which is where the app's own writer puts one.
+func (f *File) insert(section, key, value string) {
+	at, header, inSection := -1, -1, false
 	for i, l := range f.lines {
 		trimmed := strings.TrimSpace(l.raw)
 		if strings.HasPrefix(trimmed, "[") {
@@ -237,38 +269,23 @@ func (f *File) Set(section, key, value string) error {
 		at = header
 	}
 	if at == -1 {
-		// No section at all: append one. An empty file is the only caller that
-		// reaches this, and the section header is all it needs.
-		if len(f.lines) > 0 {
-			last := &f.lines[len(f.lines)-1]
-			if last.eol == "" {
-				last.eol = "\n"
-			}
+		// No section at all: an empty file is the only caller that reaches
+		// this, so the header and the key are the whole file.
+		if len(f.lines) > 0 && f.lines[len(f.lines)-1].eol == "" {
+			f.lines[len(f.lines)-1].eol = "\n"
 		}
-		f.lines = append(f.lines, line{raw: "[" + section + "]", eol: "\n"})
-		f.lines = append(f.lines, line{raw: key + " = " + value, eol: "\n", section: section, key: key})
-		return nil
+		f.lines = append(f.lines,
+			line{raw: "[" + section + "]", eol: "\n"},
+			line{raw: key + " = " + value, eol: "\n", section: section, key: key})
+		return
 	}
-	if at >= 0 {
-		l := &f.lines[at]
-		if l.eol == "" {
-			l.eol = "\n"
-		}
+	if f.lines[at].eol == "" {
+		f.lines[at].eol = "\n"
 	}
 	newLine := line{raw: key + " = " + value, eol: "\n", section: section, key: key}
 	f.lines = append(f.lines, line{})
 	copy(f.lines[at+2:], f.lines[at+1:])
 	f.lines[at+1] = newLine
-	return nil
-}
-
-func (f *File) sectionLine(section string) int {
-	for i, l := range f.lines {
-		if l.section == section && l.raw != "" && strings.HasPrefix(strings.TrimSpace(l.raw), "[") {
-			return i + 1
-		}
-	}
-	return 0
 }
 
 // Bytes renders the file.

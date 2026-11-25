@@ -49,6 +49,9 @@ const (
 	fieldPort     = "port"
 	fieldUsername = "username"
 	fieldPassword = "password"
+	fieldAPIKey   = "apiKey"
+	fieldSection  = "section"
+	fieldKeyword  = "keyword"
 )
 
 // Clone deep-copies an Item. Used to turn a schema template into a request body
