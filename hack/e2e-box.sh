@@ -6838,10 +6838,18 @@ box_root() { # box_root <node> <box arguments...>
   # TMPDIR is a tmpfs of its own, sized by the calling scenario: a migrate run
   # keeps nothing of a snapshot in the system's temporary directory, so a run that
   # did would fail here instead of passing on a small fixture (see BOX_ROOT_TMPFS).
+  #
+  # The run log goes where every other box run's goes: box_root hands the e2e's
+  # directory in, because a container that wrote its own /var/log/box would take
+  # the transcript with it when it exits, and the lines the screen folds away (the
+  # snapshot a run read among them) are read back from there.
+  local log_args=()
+  [ -z "${BOX_LOG_DIR:-}" ] || log_args=(-e "BOX_LOG_DIR=${BOX_LOG_DIR}")
   docker run --rm -u 0 --network host -w "$WORK" \
     -v "${WORK}:${WORK}" --tmpfs /tmp:rw,size=1g \
     --tmpfs /tmp/box-tmp:rw,size="${BOX_ROOT_TMPFS:-1g}" \
     -v "${bundle}:/etc/ssl/certs/ca-certificates.crt:ro" \
+    ${log_args[@]+"${log_args[@]}"} \
     -e HOME=/tmp -e DOCKER_CONFIG=/tmp/.docker -e TMPDIR=/tmp/box-tmp \
     "$BOX_ROOT_IMAGE" /box "$@"
 }
@@ -8790,11 +8798,15 @@ rehearsal_box() {
   grep -qE '^  data +the real run renames ' "$WORK/rehearsal-report-rows.txt" ||
     { echo "the rehearsal's page does not say what the real run renames:";
       sed -n '/^library$/,/^$/p' "$WORK/rehearsal-page.txt"; return 1; }
-  for want in "snapshot: ${rehearsal} (rehearsal)" "rehearsal: nothing leaves this box" \
-              "network lock: proven"; do
+  for want in "rehearsal: nothing leaves this box" "network lock: proven"; do
     grep -qF -- "$want" "$WORK/apply-rehearsal.txt" ||
       { echo "the rehearsal apply has no ${want}"; return 1; }
   done
+  # Which file the run read is the log's line, not the screen's (rule 5): a
+  # refusal opens with its fact, and the command it prints names the snapshot.
+  # shellcheck disable=SC2046 # the logs are a list of files
+  grep -qhF "snapshot: ${rehearsal} (rehearsal)" $(box_logs migrate-apply) ||
+    { echo "the rehearsal's log does not name the snapshot it read"; return 1; }
   # The rehearsal runs with --details, so the count is the per-column list's
   # line: that list is the whole account the grouped confirm summarises.
   grep -qE "^ *1 torrents written stopped$" "$WORK/apply-rehearsal.txt" ||
@@ -9661,13 +9673,17 @@ migrate_box() {
     { echo "the migrate install did not say it picked a torrent port:";
       grep -i 'torrent port' "$WORK/apply-migrate.txt" || true; fail=1; }
   assert_torrent_port "the migrate install"
-  # The snapshot it read is named, and the chart it installed is the release
-  # this run pulled once for both halves.
-  grep -qF "snapshot: ${snapshot} (final)" "$WORK/apply-migrate.txt" ||
-    { echo "the run did not name the snapshot it read"; fail=1; }
+  # The snapshot it read is named in the run log, and the chart it installed is
+  # the release this run pulled once for both halves.
   migrate_logs=$(box_logs migrate-apply)
   [ -n "$migrate_logs" ] ||
     { echo "box migrate apply wrote no run log under ${BOX_LOG_DIR}"; ls -l "${BOX_LOG_DIR}" 2>/dev/null | head; fail=1; }
+  # shellcheck disable=SC2086 # the logs are a list of files
+  grep -qhF "snapshot: ${snapshot} (final)" $migrate_logs ||
+    { echo "the run's log does not name the snapshot it read"; fail=1; }
+  if grep -qF "snapshot: ${snapshot} (final)" "$WORK/apply-migrate.txt"; then
+    echo "the run put the snapshot's path on the screen, and it is the log's line"; fail=1
+  fi
   # The chart row names the release on the screen; the log carries the repository
   # it came from. Either line is the proof, because a run that pulled another
   # release cannot print this version.

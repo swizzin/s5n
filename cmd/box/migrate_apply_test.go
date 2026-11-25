@@ -6,7 +6,9 @@ package main
 // loader's refusals. The run itself is internal/migrate/apply's own tests.
 
 import (
+	"bytes"
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -346,6 +348,41 @@ apps:
 		if err == nil {
 			t.Errorf("%s: openSnapshot accepted it", tc.mode)
 		}
+	}
+}
+
+// TestTheSnapshotIsNamedInTheLogAndNotOnTheScreen: which file a run read is the
+// kind of plumbing the log carries (rule 5). On screen it was a header line above
+// a refusal -- a run that stopped on a downgrade opened with "snapshot: ..." and
+// said its fact second, and the command the refusal prints names the file anyway.
+func TestTheSnapshotIsNamedInTheLogAndNotOnTheScreen(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "migrate-20261123T045038Z-final.tar.gz")
+	planYAML := []byte(`version: 2
+apps:
+  qbittorrent:
+    kind: kubernetes
+    source: qbittorrent
+    config: /srv/apps/qbittorrent
+    paths: []
+`)
+	if _, err := bundle.Write(path, bundle.Snapshot{Mode: archive.ModeFinal, Plan: planYAML}); err != nil {
+		t.Fatalf("write the snapshot: %v", err)
+	}
+	var screen, log bytes.Buffer
+	opened, cleanup, err := openSnapshot(path, &say.Plain{W: &screen, Log: &log})
+	cleanup()
+	if err != nil {
+		t.Fatalf("openSnapshot: %v", err)
+	}
+	if opened.Path != path {
+		t.Fatalf("the run read %s, want %s", opened.Path, path)
+	}
+	if got := screen.String(); got != "" {
+		t.Fatalf("the screen says %q before the run has done anything, want nothing: a refusal opens with its fact", got)
+	}
+	if want := fmt.Sprintf("snapshot: %s (final)\n", path); log.String() != want {
+		t.Fatalf("the log says %q, want %q", log.String(), want)
 	}
 }
 

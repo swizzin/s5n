@@ -188,7 +188,10 @@ func openSnapshot(file string, out say.Reporter) (*bundle.Opened, func(), error)
 		cleanup()
 		return nil, func() {}, fmt.Errorf("%s is a %q snapshot, and apply runs a final one: `box migrate cutover` writes it", file, opened.Mode)
 	}
-	out.Line(fmt.Sprintf("snapshot: %s (%s)", file, opened.Mode))
+	// The snapshot this run read goes to the log, not to the screen: a refusal
+	// opens with its fact (rule 1), and the command it prints already names this
+	// file. A run that goes on names it in the log, where the plumbing lives.
+	out.Detail(fmt.Sprintf("snapshot: %s (%s)", file, opened.Mode))
 	return opened, cleanup, nil
 }
 
