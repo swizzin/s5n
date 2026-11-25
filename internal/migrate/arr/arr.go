@@ -34,7 +34,7 @@ import (
 // because the tables are the app's: a plan's "sonarr-4k" reads its rows with
 // the same schema as any other Sonarr.
 func init() {
-	for _, name := range []string{kindSonarr, kindRadarr, kindProwlarr} {
+	for _, name := range []string{kindSonarr, kindRadarr, kindLidarr, kindProwlarr} {
 		rewrite.Register(name, rewriter{kind: name})
 	}
 }
@@ -42,6 +42,7 @@ func init() {
 const (
 	kindSonarr   = "sonarr"
 	kindRadarr   = "radarr"
+	kindLidarr   = "lidarr"
 	kindProwlarr = "prowlarr"
 )
 

@@ -52,6 +52,19 @@ func (a *analysis) mediaTables(ctx context.Context, db *sql.DB) error {
 		if err := a.column(ctx, db, "Collections", "RootFolderPath"); err != nil {
 			return err
 		}
+	case kindLidarr:
+		// An artist is Lidarr's library folder. Its files are a column of their
+		// own: migration 30 dropped TrackFiles.RelativePath and stores the full
+		// path, so a file follows its artist only if the column is rewritten
+		// too (Datastore/Migration/030_add_mediafilerepository_mtime.cs at
+		// v3.1.2.4902; Artist.Path and TrackFile.Path in Music/Model/Artist.cs
+		// and MediaFiles/TrackFile.cs).
+		if err := a.column(ctx, db, "Artists", "Path"); err != nil {
+			return err
+		}
+		if err := a.column(ctx, db, "TrackFiles", "Path"); err != nil {
+			return err
+		}
 	default:
 		return nil
 	}

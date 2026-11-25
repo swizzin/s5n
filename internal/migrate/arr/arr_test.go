@@ -219,6 +219,28 @@ func sonarrSchema() []string {
 	}
 }
 
+// lidarrSchema is Lidarr's tables at v3.1.2.4902, trimmed to the columns this
+// rewriter reads. It differs from Sonarr's and Radarr's in two ways that matter
+// here: the media table is Artists, and TrackFiles keeps the absolute path of
+// every file (migration 030 dropped RelativePath), where Sonarr's and Radarr's
+// file paths are computed from the library folder.
+func lidarrSchema() []string {
+	return []string{
+		`CREATE TABLE Artists (Id INTEGER PRIMARY KEY, Path TEXT)`,
+		`CREATE TABLE Albums (Id INTEGER PRIMARY KEY, Title TEXT)`,
+		`CREATE TABLE TrackFiles (Id INTEGER PRIMARY KEY, Path TEXT, AlbumId INTEGER)`,
+		`CREATE TABLE RootFolders (Id INTEGER PRIMARY KEY, Path TEXT)`,
+		`CREATE TABLE ImportLists (Id INTEGER PRIMARY KEY, Name TEXT, EnableAutomaticAdd INTEGER, Implementation TEXT, Settings TEXT, RootFolderPath TEXT)`,
+		`CREATE TABLE RemotePathMappings (Id INTEGER PRIMARY KEY, Host TEXT, RemotePath TEXT, LocalPath TEXT)`,
+		`CREATE TABLE DownloadClients (Id INTEGER PRIMARY KEY, Name TEXT, Enable INTEGER, Implementation TEXT, Settings TEXT)`,
+		`CREATE TABLE Notifications (Id INTEGER PRIMARY KEY, Name TEXT, Implementation TEXT, Settings TEXT)`,
+		`CREATE TABLE Config (Id INTEGER PRIMARY KEY, Key TEXT, Value TEXT)`,
+		`CREATE TABLE Commands (Id INTEGER PRIMARY KEY, Name TEXT, Status INTEGER, Body TEXT)`,
+		`CREATE TABLE History (Id INTEGER PRIMARY KEY, SourceTitle TEXT, Data TEXT)`,
+		`CREATE TABLE DownloadHistory (Id INTEGER PRIMARY KEY, SourceTitle TEXT, Data TEXT)`,
+	}
+}
+
 func radarrSchema() []string {
 	return []string{
 		`CREATE TABLE Movies (Id INTEGER PRIMARY KEY, Path TEXT)`,
@@ -802,6 +824,124 @@ apps:
       - from: /downloads
         to: /data/downloads
 `
+
+// lidarrPlan is the target-side shape for the third Arr: music under
+// /library/media/music, downloads in the same /library/Downloads tree.
+const lidarrPlan = `version: 2
+apps:
+  lidarr:
+    kind: kubernetes
+    source: lidarr
+    config: /srv/apps/lidarr
+    namespace: media
+    ports: [8686]
+    paths:
+      - from: /library/media
+        to: /data/media
+      - from: /library/Downloads
+        to: /data/downloads
+      - from: /library/scripts
+        to: /config/scripts
+      - from: /data/media
+        to: /data/media
+      - from: /data/downloads
+        to: /data/downloads
+      - from: /config/scripts
+        to: /config/scripts
+  qbittorrent:
+    kind: kubernetes
+    source: qbittorrent
+    config: /srv/apps/qbittorrent
+    ports: [8080]
+    paths:
+      - from: /downloads
+        to: /data/downloads
+`
+
+// TestLidarrTables: Lidarr keeps one absolute path on every row the app reads
+// back to act on a file. Artists.Path is its library folder, RootFolders.Path
+// the root, ImportLists.RootFolderPath where a list adds artists, and
+// TrackFiles.Path the file itself -- a real column in Lidarr, unlike Sonarr's
+// EpisodeFiles and Radarr's MovieFiles, because migration 30 dropped
+// RelativePath and stores the full path instead
+// (Datastore/Migration/030_add_mediafilerepository_mtime.cs at v3.1.2.4902).
+func TestLidarrTables(t *testing.T) {
+	dir := t.TempDir()
+	newDB(t, filepath.Join(dir, "lidarr.db"), append(lidarrSchema(),
+		`INSERT INTO Artists (Id, Path) VALUES (1, '/library/media/music/Harbour Lights')`,
+		`INSERT INTO Artists (Id, Path) VALUES (2, '/library/media/music/The Long Way')`,
+		`INSERT INTO Albums (Id, Title) VALUES (1, 'First Light')`,
+		`INSERT INTO TrackFiles (Id, Path, AlbumId) VALUES
+			(1, '/library/media/music/Harbour Lights/First Light/01 - Breakwater.flac', 1),
+			(2, '/library/media/music/The Long Way/Open Road/01 - Mile Zero.flac', 1)`,
+		`INSERT INTO RootFolders (Id, Path) VALUES (1, '/library/media/music')`,
+		`INSERT INTO ImportLists (Id, Name, Implementation, Settings, RootFolderPath) VALUES
+			(1, 'Another Lidarr', 'Lidarr', '{"baseUrl":"http://localhost:8686","apiKey":"k","rootFolderPaths":["/library/media/music"]}', '/library/media/music')`,
+		`INSERT INTO DownloadClients (Id, Name, Enable, Implementation, Settings) VALUES
+			(1, 'qBit', 1, 'QBittorrent', '{"host":"localhost","port":8080,"useSsl":true,"musicCategory":"lidarr"}')`,
+		`INSERT INTO Config (Id, Key, Value) VALUES (1, 'scriptimportpath', '/library/scripts/import.sh')`,
+		`INSERT INTO History (Id, SourceTitle, Data) VALUES
+			(1, '/library/media/music/Harbour Lights/First Light/01 - Breakwater.flac',
+			 '{"droppedPath":"/library/Downloads/lidarr/First.Light","importedPath":"/library/media/music/Harbour Lights/First Light/01 - Breakwater.flac"}')`,
+		`INSERT INTO DownloadHistory (Id, SourceTitle, Data) VALUES
+			(1, '/library/Downloads/lidarr/First.Light', '{"sourcePath":"/library/Downloads/lidarr/First.Light"}')`,
+	)...)
+	writeFile(t, filepath.Join(dir, "config.xml"), "<Config>\n  <Port>8686</Port>\n</Config>")
+	in := input(t, dir, "lidarr", lidarrPlan)
+	in.Targets = map[string]rewrite.Endpoint{
+		"lidarr":      {Host: "lidarr", Port: 8686, URLBase: "/lidarr"},
+		"qbittorrent": {Host: "qbittorrent", Port: 8080},
+	}
+
+	rep, err := (rewriter{kind: kindLidarr}).Check(context.Background(), in)
+	if err != nil {
+		t.Fatalf("Check: %v", err)
+	}
+	if rep.Blocked() {
+		t.Fatalf("Check blocked: %v", rep.Uncovered)
+	}
+	assertChanges(t, rep.Changes, map[string]int{
+		"lidarr.db Artists.Path":                    2,
+		"lidarr.db TrackFiles.Path":                 2,
+		"lidarr.db RootFolders.Path":                1,
+		"lidarr.db ImportLists.RootFolderPath":      1,
+		"lidarr.db DownloadClients.Settings":        1,
+		"lidarr.db Config.scriptimportpath":         1,
+		"lidarr.db History.Data.droppedPath":        1,
+		"lidarr.db History.Data.importedPath":       1,
+		"lidarr.db DownloadHistory.Data.sourcePath": 1,
+		"lidarr.db DownloadHistory.SourceTitle":     1,
+		"lidarr.db History.SourceTitle":             1,
+		"lidarr.db ImportLists.Settings":            1,
+		"config.xml BindAddress":                    1,
+		"config.xml EnableSsl":                      1,
+		"config.xml UrlBase":                        1,
+	})
+	if _, err := (rewriter{kind: kindLidarr}).Write(context.Background(), in); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	db := filepath.Join(dir, "lidarr.db")
+	if got := one(t, db, "SELECT Path FROM Artists ORDER BY Id"); !reflect.DeepEqual(got,
+		[]string{"/data/media/music/Harbour Lights", "/data/media/music/The Long Way"}) {
+		t.Errorf("Artists.Path = %v", got)
+	}
+	if got := one(t, db, "SELECT Path FROM TrackFiles ORDER BY Id"); !reflect.DeepEqual(got,
+		[]string{"/data/media/music/Harbour Lights/First Light/01 - Breakwater.flac",
+			"/data/media/music/The Long Way/Open Road/01 - Mile Zero.flac"}) {
+		t.Errorf("TrackFiles.Path = %v", got)
+	}
+	if got := one(t, db, "SELECT Path FROM RootFolders"); !reflect.DeepEqual(got, []string{"/data/media/music"}) {
+		t.Errorf("RootFolders.Path = %v", got)
+	}
+	if got := one(t, db, "SELECT RootFolderPath FROM ImportLists"); !reflect.DeepEqual(got, []string{"/data/media/music"}) {
+		t.Errorf("ImportLists.RootFolderPath = %v", got)
+	}
+	// The client's own category is not a path and is left alone.
+	settings := setting(t, db, "SELECT Settings FROM DownloadClients WHERE Id = 1")
+	if settings["musicCategory"] != "lidarr" {
+		t.Errorf("musicCategory = %v, want it left as it is", settings["musicCategory"])
+	}
+}
 
 func TestProwlarrApplications(t *testing.T) {
 	dir := t.TempDir()
