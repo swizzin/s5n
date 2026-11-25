@@ -116,7 +116,10 @@
 # host-side name it creates carries an id for the checkout it runs in (see THE
 # RUN'S IDENTITY below), so two worktrees -- or two scenarios of one worktree --
 # can run at once without meeting. `all` also builds what every scenario needs
-# once: the image, the box binary and the chart package.
+# once: the image, the box binary and the chart package. A scenario that waited
+# for a slot counts its own seconds from when it got one, so its log and its
+# `wall time` line are its work; the run's total is the number that includes the
+# queue.
 #
 # Usage: hack/e2e-box.sh [--keep] [fresh|preinstalled|foreign-gateway|update|upgrade|migrate|migrate-keep|all]   (default: all)
 #
@@ -134,6 +137,7 @@ cd "$(dirname "$0")/.."
 # same thing and can run at the same time. On CI a runner holds one checkout and
 # runs one scenario, so the id only lengthens the names: nothing reads them.
 E2E_ID=${E2E_ID:-$(printf '%s' "$PWD" | sha256sum | cut -c1-6)}
+export E2E_ID
 
 KIND=${KIND:-kind}
 NS=seedbox
@@ -199,16 +203,142 @@ for arg in "$@"; do
   esac
 done
 
-if [ "$SCENARIO" = all ]; then
-  status=0
-  "$0" fresh $KEEP || status=1
-  "$0" preinstalled $KEEP || status=1
-  "$0" foreign-gateway $KEEP || status=1
-  "$0" update $KEEP || status=1
-  "$0" upgrade $KEEP || status=1
-  "$0" migrate $KEEP || status=1
-  "$0" migrate-keep $KEEP || status=1
+# Every line says how far into the run it is, so a slow step is visible in the
+# transcript instead of only in the total at the end.
+log() { printf '\n==> %s  [+%ss]\n' "$*" "$SECONDS"; }
+
+# ---- the machine's slots -----------------------------------------------------
+# A scenario holds one of these slots for its whole life, and `all` runs its
+# scenarios through them. Three is what this machine's memory measured well
+# (three kind clusters, their registry containers and the boots they run at
+# once), and E2E_SLOTS overrides it. The files live in the user's cache, so
+# every checkout on the machine shares the slots with no path spelled here.
+#
+# The old one-slot lock still works: `flock .scratch/e2e.lock hack/e2e-box.sh
+# fresh` queues behind whoever holds that file and then takes a slot like every
+# other run. What keeps runs apart is the id in their names now, not the lock.
+E2E_SLOTS=${E2E_SLOTS:-3}
+case "$E2E_SLOTS" in
+  '' | *[!0-9]* | 0)
+    echo "E2E_SLOTS=${E2E_SLOTS} is not a number of slots" >&2
+    exit 2
+    ;;
+esac
+SLOT_DIR=${S5N_E2E_SLOT_DIR:-${XDG_CACHE_HOME:-$HOME/.cache}/s5n-e2e/slots}
+
+# take_slot, called once: locks the first free slot file and keeps the descriptor
+# open, which is what holds the slot until this process exits. Every slot busy
+# means another run is in front of this one; it waits, saying so once, and when it
+# finally gets a slot its clock starts there: the seconds in its log (and its
+# `wall time` line) are this scenario's own, not the queue in front of it. `all`
+# prints the run's total, which is the one number that includes the queue.
+take_slot() {
+  local i fd started=$SECONDS waited=""
+  mkdir -p "$SLOT_DIR"
+  while :; do
+    for i in $(seq 1 "$E2E_SLOTS"); do
+      exec {fd}>"$SLOT_DIR/slot-${i}.lock"
+      if flock -n "$fd"; then
+        SLOT_FD=$fd
+        [ -z "$waited" ] || SECONDS=$started
+        return 0
+      fi
+      exec {fd}>&-
+    done
+    if [ -z "$waited" ]; then
+      log "all ${E2E_SLOTS} e2e slots are taken: waiting (${SLOT_DIR})"
+      waited=1
+    fi
+    sleep 5
+  done
+}
+
+ALL_SCENARIOS=(fresh preinstalled foreign-gateway update upgrade migrate migrate-keep)
+
+# ---- all: build once, then the scenarios at once ------------------------------
+# The seven scenarios are separate processes so each keeps its own work
+# directory, cluster, kubeconfig and exit code, exactly as CI runs them -- but
+# they run here at the same time, as many as the slots allow, and each writes
+# its own log.
+#
+# What every scenario needs and none of them decides -- the image, the box
+# binary and the chart package -- is built here once and named to each of them
+# in S5N_E2E_PREBUILT. A scenario given that directory builds nothing: it
+# publishes the chart to its own registry, loads the image into its own node and
+# copies the box binary into its work directory, so --keep still holds the
+# binary that wrote its transcripts. A scenario run directly builds its own,
+# which is what CI does.
+all_run() {
+  local scenario i prebuilt log_dir wall status=0
+  local names=() pids=() logs=() results=()
+
+  prebuilt=$(mktemp -d)
+  if [ "$KEEP" = --keep ]; then
+    trap 'printf "\n==> kept prebuilt dir: %s\n" "$prebuilt"' EXIT
+  else
+    trap 'rm -rf "$prebuilt"' EXIT
+  fi
+  # The version `helm package` is about to write, which is also the version box
+  # must report: the chart's own, read the way a scenario reads it.
+  chart_version=$(helm show chart charts/s5n | awk '$1 == "version:" {print $2}')
+  [ -n "$chart_version" ] || {
+    echo "charts/s5n/Chart.yaml declares no version"
+    exit 1
+  }
+  log "building the s5n image, box ${chart_version} and the chart package once for all ${#ALL_SCENARIOS[@]} scenarios"
+  docker build -q -t "$IMAGE" .
+  CGO_ENABLED=0 go build -ldflags "-X main.version=${chart_version}" -o "$prebuilt/box" ./cmd/box
+  helm package charts/s5n --destination "$prebuilt" >/dev/null
+  [ -f "$prebuilt/s5n-${chart_version}.tgz" ] || {
+    echo "helm package wrote no s5n-${chart_version}.tgz into ${prebuilt}"
+    exit 1
+  }
+  # The image is in docker's store, not in the directory, so the directory names
+  # its tag and a scenario refuses a directory that names none or another one.
+  printf '%s\n' "$IMAGE" >"$prebuilt/image"
+  export S5N_E2E_PREBUILT=$prebuilt
+
+  # One log per scenario, and they are kept: a failure's reason is in its own
+  # log, not in this one, and the summary below names each path.
+  log_dir=${S5N_E2E_LOG_DIR:-${XDG_CACHE_HOME:-$HOME/.cache}/s5n-e2e/logs}/$(date -u +%Y%m%dT%H%M%SZ)
+  mkdir -p "$log_dir"
+  log "one log per scenario in ${log_dir}"
+
+  for scenario in "${ALL_SCENARIOS[@]}"; do
+    printf '\n==> starting %s  [+%ss]  log %s\n' "$scenario" "$SECONDS" "$log_dir/${scenario}.log"
+    "$0" "$scenario" $KEEP >"$log_dir/${scenario}.log" 2>&1 &
+    names+=("$scenario")
+    pids+=($!)
+    logs+=("$log_dir/${scenario}.log")
+  done
+  # Ctrl-C ends the run, not one scenario of it: the scenarios are this
+  # process's children and would otherwise keep their clusters.
+  trap 'kill "${pids[@]}" 2>/dev/null || true' INT TERM
+
+  for i in "${!names[@]}"; do
+    if wait "${pids[$i]}"; then
+      results+=(ok)
+    else
+      results+=(FAILED)
+      status=1
+    fi
+  done
+
+  log "per scenario"
+  for i in "${!names[@]}"; do
+    # The wall time a scenario printed for itself, in its own log: it counts from
+    # the moment the scenario got a slot, so this is its work and not the queue
+    # it waited in, which only the total below includes.
+    wall=$(sed -n "s/^wall time (${names[$i]}): \(.*\)s$/\1/p" "${logs[$i]}" | tail -1)
+    printf '  %-16s %6ss  %-7s %s\n' "${names[$i]}" "${wall:-?}" "${results[$i]}" "${logs[$i]}"
+  done
+  echo "wall time (all): ${SECONDS}s"
+  if [ "$status" = 0 ]; then log "PASS (all)"; else log "FAIL (all)"; fi
   exit "$status"
+}
+
+if [ "$SCENARIO" = all ]; then
+  all_run
 fi
 
 case "$SCENARIO" in
@@ -223,6 +353,9 @@ esac
 # The id last, so a kind cluster still reads scenario first in `kind get
 # clusters` and in a container name.
 CLUSTER="${CLUSTER}-${E2E_ID}"
+# Before anything of this run exists on the host: one of the machine's slots for
+# the whole life of this process.
+take_slot
 # The fresh scenario is the one that proves the namespace a first run derives
 # from its login: it passes no --namespace, and the box has to land in
 # s5n-<login>. The other scenarios keep an explicit namespace, which still wins
@@ -338,10 +471,36 @@ cleanup() {
 }
 trap cleanup EXIT
 
-# Every line says how far into the run it is, so a slow step is visible in the
-# transcript instead of only in the total at the end.
-log() { printf '\n==> %s  [+%ss]\n' "$*" "$SECONDS"; }
 fail=0
+# Where `all` put the image, the box binary and the chart package it built once:
+# empty for a scenario run directly, which builds its own. Everything below that
+# reads it is a scenario's build step, and a scenario given this directory builds
+# nothing -- a silent rebuild would hide the one thing `all` is for -- so a
+# missing file stops the run rather than falling back.
+PREBUILT=${S5N_E2E_PREBUILT:-}
+prebuilt() { # prebuilt <file>: its path in the directory, or a refusal
+  local file="${PREBUILT}/$1"
+  [ -f "$file" ] || {
+    echo "S5N_E2E_PREBUILT=${PREBUILT} has no $1: a scenario given that directory builds nothing, so run it without S5N_E2E_PREBUILT or run all" >&2
+    exit 1
+  }
+  printf '%s' "$file"
+}
+# The image is in docker's store, not in the directory, so the directory names
+# the tag instead and a scenario loads that tag into its own node. The check
+# catches a directory with no tag or another one; it cannot tell which checkout
+# built the image now under that tag.
+prebuilt_image() {
+  local tag
+  tag=$(cat "${PREBUILT}/image" 2>/dev/null || true)
+  [ "$tag" = "$IMAGE" ] || {
+    echo "S5N_E2E_PREBUILT=${PREBUILT} carries image '${tag}', not ${IMAGE}: a scenario given that directory builds nothing, so run it without S5N_E2E_PREBUILT or run all" >&2
+    exit 1
+  }
+}
+# Refused before the registry, the cluster or anything else of this run exists:
+# a directory that names another checkout's image is not this run's to use.
+[ -z "$PREBUILT" ] || prebuilt_image
 # The torrent port the grant records, as the last assert_torrent_port read it:
 # the binding below admits exactly that number.
 TORRENT_PORT=""
@@ -421,10 +580,20 @@ CHART_VERSION=$(helm show chart charts/s5n | awk '$1 == "version:" {print $2}')
   exit 1
 }
 CHART_REPO="oci://127.0.0.1:${REGISTRY_PORT}/charts/s5n"
-log "packaging charts/s5n ${CHART_VERSION} from this commit and pushing it to ${CHART_REPO}"
+# Kept for the update scenario's own packages below (update_chart): a scenario
+# publishes more than the tree's release, prebuilt or not.
 mkdir -p "$WORK/charts"
-helm package charts/s5n --destination "$WORK/charts" >/dev/null
-helm push "$WORK/charts/s5n-${CHART_VERSION}.tgz" "oci://127.0.0.1:${REGISTRY_PORT}/charts" --plain-http >/dev/null
+if [ -n "$PREBUILT" ]; then
+  # All built it once, from this commit: a scenario still publishes it to its own
+  # registry, which is what box pulls from.
+  chart_tgz=$(prebuilt "s5n-${CHART_VERSION}.tgz")
+  log "pushing the chart ${CHART_VERSION} all built once to ${CHART_REPO}"
+else
+  log "packaging charts/s5n ${CHART_VERSION} from this commit and pushing it to ${CHART_REPO}"
+  helm package charts/s5n --destination "$WORK/charts" >/dev/null
+  chart_tgz="$WORK/charts/s5n-${CHART_VERSION}.tgz"
+fi
+helm push "$chart_tgz" "oci://127.0.0.1:${REGISTRY_PORT}/charts" --plain-http >/dev/null
 
 # Each scenario's premise is a cluster in one known state, so a leftover from an
 # interrupted run is deleted rather than reused: reusing one would leave the
@@ -438,12 +607,25 @@ fi
 log "creating kind cluster ${CLUSTER}"
 $KIND create cluster --name "$CLUSTER" --config "$KIND_CONFIG" --wait 120s
 
-log "building the s5n image (the wiring Job and the qBittorrent credential seed)"
-docker build -q -t "$IMAGE" .
+if [ -n "$PREBUILT" ]; then
+  log "loading the s5n image all built once into ${CLUSTER}"
+else
+  log "building the s5n image (the wiring Job and the qBittorrent credential seed)"
+  docker build -q -t "$IMAGE" .
+fi
 $KIND load docker-image --name "$CLUSTER" "$IMAGE"
 
-log "building box ${CHART_VERSION} (the version it pulls the chart as)"
-CGO_ENABLED=0 go build -ldflags "-X main.version=${CHART_VERSION}" -o "$WORK/box" ./cmd/box
+if [ -n "$PREBUILT" ]; then
+  # Copied, not run from where it was built: every call below says "$WORK/box",
+  # and --keep promises each kept work directory the binary that wrote its
+  # transcripts. Its version is checked below whatever it came from.
+  box_bin=$(prebuilt box)
+  cp "$box_bin" "$WORK/box"
+  log "using the box binary all built once as ${CHART_VERSION}"
+else
+  log "building box ${CHART_VERSION} (the version it pulls the chart as)"
+  CGO_ENABLED=0 go build -ldflags "-X main.version=${CHART_VERSION}" -o "$WORK/box" ./cmd/box
+fi
 built=$("$WORK/box" version)
 [ "$built" = "$CHART_VERSION" ] || {
   echo "box reports version '${built}', want the chart version ${CHART_VERSION}"

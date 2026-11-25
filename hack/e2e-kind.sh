@@ -154,8 +154,20 @@ else
   $KIND create cluster --name "$CLUSTER" --config hack/kind.yaml --wait 120s
 fi
 
-log "building the s5n image (wiring Job + qBittorrent credential seed)"
-docker build -q -t "$IMAGE" .
+if [ -n "${S5N_E2E_PREBUILT:-}" ]; then
+  # The directory hack/e2e-box.sh all builds into and passes its scenarios: it
+  # holds the image's tag, not the image, so this only refuses a directory with
+  # no tag or another one. This script needs nothing else from it.
+  prebuilt_tag=$(cat "${S5N_E2E_PREBUILT}/image" 2>/dev/null || true)
+  [ "$prebuilt_tag" = "$IMAGE" ] || {
+    echo "S5N_E2E_PREBUILT=${S5N_E2E_PREBUILT} carries image '${prebuilt_tag}', not ${IMAGE}"
+    exit 1
+  }
+  log "loading the s5n image all built once (wiring Job + qBittorrent credential seed)"
+else
+  log "building the s5n image (wiring Job + qBittorrent credential seed)"
+  docker build -q -t "$IMAGE" .
+fi
 $KIND load docker-image --name "$CLUSTER" "$IMAGE"
 
 # Only what `box init` creates on a real host, repeated inside the node because
