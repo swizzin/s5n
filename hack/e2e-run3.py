@@ -192,12 +192,14 @@ def do_assert(ctx, ns, work):
     clients = curl_get(ctx, ns, "sonarr-0", sonarr_key, f"http://localhost:{sonarr_port}/sonarr/api/v3/downloadclient")
     others = [c for c in clients if c["id"] != mine_id]
     failures += check(len(others) == 2, f"both owned sonarr clients besides mine (got {len(others)})")
-    if others:
-        owned = others[0]
+    owned = next((c for c in others if c.get("implementation") == "QBittorrent"), None)
+    failures += check(owned is not None, "sonarr still has its qBittorrent client")
+    if owned is not None:
         failures += check(owned["name"] == "qBit (renamed)", f"sonarr client keeps its rename (got {owned['name']!r})")
         failures += check(owned.get("priority") == 7, f"sonarr client keeps priority 7 (got {owned.get('priority')!r})")
         tv_category = next((f["value"] for f in owned["fields"] if f["name"] == "tvCategory"), None)
         failures += check(tv_category == "tv", f"sonarr client's tvCategory restored to tv (got {tv_category!r})")
+    failures += check(any(c.get("implementation") == "Sabnzbd" for c in others), "sonarr keeps the release's SABnzbd client")
 
     mine_after = next((c for c in clients if c["id"] == mine_id), None)
     failures += check(mine_after is not None, "the user-added 'mine' client still exists")
