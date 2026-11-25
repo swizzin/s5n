@@ -1,5 +1,5 @@
-// Command s5n is the one binary the chart ships: the wiring Job, the
-// qBittorrent credential seed, and (later) the box CLI all live here.
+// Command s5n is the one binary the chart ships: the wiring Job and the init
+// containers that seed an app's own settings before it starts.
 package main
 
 import (
@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 
 	"github.com/swizzin/s5n/internal/atomicfile"
+	"github.com/swizzin/s5n/internal/bazconf"
 	"github.com/swizzin/s5n/internal/qbtconf"
 	"github.com/swizzin/s5n/internal/ttlconf"
 	"github.com/swizzin/s5n/internal/wiring"
@@ -30,6 +31,8 @@ func main() {
 		err = runQbtConfig(os.Args[2:])
 	case "tautulli-config":
 		err = runTautulliConfig(os.Args[2:])
+	case "bazarr-config":
+		err = runBazarrConfig(os.Args[2:])
 	case "probe":
 		err = runProbe(os.Args[2:])
 	case "version":
@@ -50,6 +53,7 @@ commands:
   wiring           connect qBittorrent, the Arrs, Prowlarr, Plex and Tautulli, and prove /data
   qbt-config       seed the qBittorrent WebUI username and password into qBittorrent.conf
   tautulli-config  seed Tautulli's api_key into config.ini
+  bazarr-config    seed Bazarr's api key and URL base into config/config.yaml
   probe            dial one address and report whether it opened, for box's lock proof
   version          print the build version
 `)
@@ -178,5 +182,51 @@ func runTautulliConfig(args []string) error {
 		return err
 	}
 	fmt.Printf("tautulli-config: sealed %s (api_key, http_root %s, its own login off)\n", *conf, *httpRoot)
+	return nil
+}
+
+// runBazarrConfig is Bazarr's init container: it seals the API key the wiring
+// Job uses and the URL prefix the chart serves the app under into
+// config/config.yaml before the app reads it. Neither can be set through the
+// API -- the prefix is read when the app registers its routes, and the key is
+// what a request would have to present -- so this runs before every start, the
+// same way Tautulli's does. Bazarr rewrites the file whole from memory when it
+// saves settings; the two keys it was given here are in that memory, so they
+// survive, and a start that finds them already right writes nothing.
+func runBazarrConfig(args []string) error {
+	fs := flag.NewFlagSet("bazarr-config", flag.ExitOnError)
+	conf := fs.String("conf", "/config/config/config.yaml", "path to Bazarr's config/config.yaml")
+	apiKeyFile := fs.String("api-key-file", "", "file holding the API key to seed")
+	baseURL := fs.String("base-url", "/bazarr", "the URL prefix the app is served under, e.g. /bazarr")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if *apiKeyFile == "" {
+		return fmt.Errorf("--api-key-file is required")
+	}
+	apiKey, err := wiring.ReadSecret(*apiKeyFile)
+	if err != nil {
+		return err
+	}
+
+	existing, err := os.ReadFile(*conf)
+	if err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("read %s: %w", *conf, err)
+	}
+	out, changed, err := bazconf.Seal(existing, apiKey, *baseURL)
+	if err != nil {
+		return fmt.Errorf("%s: %w", *conf, err)
+	}
+	if !changed {
+		fmt.Printf("bazarr-config: %s already holds the sealed settings\n", *conf)
+		return nil
+	}
+	if err := os.MkdirAll(filepath.Dir(*conf), 0o750); err != nil {
+		return fmt.Errorf("create %s: %w", filepath.Dir(*conf), err)
+	}
+	if err := atomicfile.Write(*conf, out, 0o600); err != nil {
+		return err
+	}
+	fmt.Printf("bazarr-config: sealed %s (auth.apikey, general.base_url %s)\n", *conf, *baseURL)
 	return nil
 }
