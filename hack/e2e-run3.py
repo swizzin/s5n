@@ -157,8 +157,9 @@ def setup(ctx, ns, work):
         sys.exit(f"setup: radarr has no qBittorrent download client: {rclients!r}")
     radarr_old_id = radarr_owned["id"]
     curl_delete(ctx, ns, "radarr-0", radarr_key, f"{radarr_url}/{radarr_old_id}")
-    if curl_get(ctx, ns, "radarr-0", radarr_key, radarr_url):
-        sys.exit("setup: radarr download client was not actually deleted")
+    remaining = curl_get(ctx, ns, "radarr-0", radarr_key, radarr_url)
+    if any(c.get("implementation") == "QBittorrent" for c in remaining):
+        sys.exit("setup: radarr's qBittorrent download client was not actually deleted")
 
     with open(f"{work}/run3-setup.json", "w", encoding="utf-8") as fh:
         json.dump({"radarrOldID": radarr_old_id, "mineID": created["id"]}, fh)
