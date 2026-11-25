@@ -8039,6 +8039,82 @@ print(json.load(open(sys.argv[1])).get("id", ""))' "$WORK/source-qui-instance.js
   echo "  qui: one qBittorrent instance, ${name} -> ${host} (id ${id})"
 }
 
+# migrate_source_autobrr_clients <instance>...: the source autobrr's own
+# download clients, the shape an install with a 4K pair of Arrs has them. Their
+# names are the operator's, not box's: the qBittorrent client is "qbit", and the
+# 4K Arrs are "Sonarr4k"/"Radarr4k" -- which is the case a migrated box held two
+# clients per 4K Arr for, because the wiring Job names its own after the
+# instance and found an existing row by nothing else. Every row is enabled, as
+# autobrr's own create makes it. Each id is kept: the assertion after the
+# migration reads it, and adopting these exact rows is what the Job has to do.
+migrate_source_autobrr_clients() { # migrate_source_autobrr_clients <instance>...
+  local args=() instance name kind out
+  for instance in "$@"; do
+    arr_facts "$instance" || return 1
+    case "$instance" in
+      sonarr)    name=Sonarr;    kind=SONARR ;;
+      radarr)    name=Radarr;    kind=RADARR ;;
+      sonarr-4k) name=Sonarr4k;  kind=SONARR ;;
+      radarr-4k) name=Radarr4k;  kind=RADARR ;;
+    esac
+    args+=("${instance}|${name}|${kind}|http://${instance}:${ARR_PORT}|0|$WORK/source/${instance}.key")
+  done
+  # A bare host with the port beside it, which is how autobrr stores one.
+  args+=("qbittorrent|qbit|QBITTORRENT|qbittorrent|${MIGRATE_QBIT_PORT}|")
+  migrate_forward "$MIGRATE_LEGACY_NS" svc/autobrr 7474 || return 1
+  out=$(python3 - "http://127.0.0.1:${MIGRATE_PF_PORT}" "$MIGRATE_SOURCE_ACCOUNT" \
+    "$WORK/source/source-account-password" "${args[@]}" <<'PY'
+import http.cookiejar, json, sys, urllib.error, urllib.request
+
+base, user, pwfile = sys.argv[1:4]
+specs = sys.argv[4:]
+
+with open(pwfile) as fh:
+    password = fh.read().strip()
+
+opener = urllib.request.build_opener(
+    urllib.request.HTTPCookieProcessor(http.cookiejar.CookieJar()))
+
+def send(path, body):
+    request = urllib.request.Request(
+        base + path, data=json.dumps(body).encode(),
+        headers={"Content-Type": "application/json"}, method="POST")
+    try:
+        with opener.open(request, timeout=30) as resp:
+            raw = resp.read()
+            status = resp.status
+    except urllib.error.HTTPError as err:
+        sys.exit(f"POST {path} answered {err.code}: "
+                 f"{err.read().decode('utf-8', 'replace')[:300]}")
+    return status, (json.loads(raw) if raw.strip() else None)
+
+status, _ = send("/api/auth/login", {"username": user, "password": password})
+if status not in (200, 204):
+    sys.exit(f"the source autobrr refused {user} ({status})")
+
+for spec in specs:
+    instance, name, kind, host, port, keyfile = spec.split("|")
+    settings = {"rules": {"enabled": False}}
+    if keyfile:
+        with open(keyfile) as fh:
+            settings["apikey"] = fh.read().strip()
+    _, created = send("/api/downloaders", {
+        "name": name, "type": kind, "enabled": True, "host": host,
+        "port": int(port), "username": "", "password": "", "settings": settings,
+    })
+    if not created or created.get("id") is None:
+        sys.exit(f"the source autobrr returned no id for {name}: {created!r}")
+    print(f"{instance}={created['id']}")
+PY
+  ) || { migrate_forward_stop; return 1; }
+  migrate_forward_stop
+  while IFS='=' read -r instance id; do
+    [ -n "$instance" ] || continue
+    printf '%s\n' "$id" >"$WORK/source/autobrr-${instance}.client-id"
+    echo "  autobrr: ${instance} client id ${id}"
+  done <<<"$out"
+}
+
 # migrate_source_pbh_config <src>: the source's PeerBanHelper writes its own
 # config on a first start, out of the jar its own image ships, and that is the
 # config a migration carries. This one is a v7.3.0: config-version 27, which is
@@ -9157,6 +9233,13 @@ migrate_box() {
   done
   [ "$fail" = 0 ] || return 0
 
+  # The source's autobrr keeps its own clients, under names of its own: the rows
+  # a Job that finds a client by name makes a duplicate set of.
+  if ! migrate_source_autobrr_clients $MIGRATE_ARRS; then
+    echo "could not seed the source autobrr's download clients"
+    fail=1; return 0
+  fi
+
   if ! migrate_source_torrent "$WORK/source/qbittorrent-password"; then
     fail=1; return 0
   fi
@@ -9870,6 +9953,114 @@ PY
       { echo "${instance}-0 is not ready on the chart's ${expected} (it runs $(pod_image "${instance}-0" || true))"; fail=1; }
   done
   [ "$fail" = 0 ] || return 0
+
+  # ---- assertion 1b-bis: autobrr's one client per Arr instance -------------
+  # The source's autobrr held a qBittorrent client and one per Arr, under its
+  # own names ("Sonarr4k" for the 4K Sonarr). The Job names its own after the
+  # instance, so a Job that found a client by its name alone made a second set
+  # beside these -- every one enabled, so both were used, while the operator's
+  # filters went on pointing at the rows box never touched. The source's ids are
+  # what proves which rows are here now.
+  log "autobrr: one client per Arr instance, on the source's own rows"
+  read -r AUTOBRR_BASE AUTOBRR_USER <<<"$(
+    $K -n "$NS" get cm s5n-wiring -o jsonpath='{.data.wiring\.json}' |
+      python3 -c 'import json, sys
+cfg = json.load(sys.stdin)
+print(cfg["autobrr"]["urlBase"], cfg["autobrr"]["username"])' 2>/dev/null || true)" || true
+  AUTOBRR_PASSWORD=$($K -n "$NS" get secret s5n-keys -o jsonpath='{.data.autobrr-password}' 2>/dev/null | base64 -d || true)
+  port_forward autobrr-0 7474 || fail=1
+  autobrr_session "$AUTOBRR_BASE" "$WORK/autobrr-migrate.jar"
+  curl -sS -b "$WORK/autobrr-migrate.jar" "http://127.0.0.1:${PF_PORT}${AUTOBRR_BASE}/api/downloaders" >"$WORK/autobrr-migrate.json" 2>/dev/null || true
+  port_forward_stop
+  echo "  autobrr: POST ${AUTOBRR_BASE}/api/auth/login with the Secret's password: ${AUTOBRR_LOGIN_CODE}"
+  [ "$AUTOBRR_LOGIN_CODE" = 204 ] ||
+    { echo "autobrr refused the account box owns (${AUTOBRR_LOGIN_CODE})"; fail=1; }
+  AUTOBRR_PORTS=()
+  for instance in $MIGRATE_ARRS; do
+    AUTOBRR_PORTS+=("${instance}=$(release_port "$instance")")
+  done
+  python3 - "$WORK/autobrr-migrate.json" "$WORK/source" "$MIGRATE_ARRS" "${QBIT_URL%/}" \
+    "${AUTOBRR_PORTS[@]}" <<'PY' || fail=1
+import json, os, sys
+
+path, work, arrs, qbit_url = sys.argv[1:5]
+ports = dict(arg.split("=", 1) for arg in sys.argv[5:])
+kinds = {"sonarr": "SONARR", "radarr": "RADARR"}
+
+def source_id(instance):
+    try:
+        with open(os.path.join(work, "autobrr-%s.client-id" % instance)) as fh:
+            return fh.read().strip()
+    except FileNotFoundError:
+        return ""
+
+with open(path) as fh:
+    rows = json.load(fh)
+
+print("  autobrr holds: %s"
+      % ", ".join("%s(%s)" % (r.get("name"), r.get("type")) for r in rows))
+problems = []
+want = len(arrs.split()) + 1
+if len(rows) != want:
+    problems.append("autobrr holds %d clients, want %d (qBittorrent + one per Arr)"
+                    % (len(rows), want))
+
+by_id = {str(row.get("id")): row for row in rows}
+for instance in arrs.split():
+    kind = kinds[instance.split("-")[0]]
+    host = "http://%s:%s/%s" % (instance, ports[instance], instance)
+    want_id = source_id(instance)
+    row = by_id.get(want_id)
+    if row is None:
+        problems.append("the source's %s client (id %s) is not here"
+                        % (instance, want_id or "unknown"))
+        continue
+    if row.get("type") != kind:
+        problems.append("the client at id %s is a %s, want %s"
+                        % (want_id, row.get("type"), kind))
+    if (row.get("host") or "").rstrip("/") != host:
+        problems.append("the %s client dials %r, want %r" % (instance, row.get("host"), host))
+    if not row.get("enabled"):
+        problems.append("the %s client is switched off" % row.get("name"))
+    print("  %s: id %s %r -> %s" % (instance, want_id, row.get("name"), row.get("host")))
+
+qbit_id = source_id("qbittorrent")
+qbit = by_id.get(qbit_id)
+if qbit is None:
+    problems.append("the source's qBittorrent client (id %s) is not here" % (qbit_id or "unknown"))
+elif qbit.get("type") != "QBITTORRENT":
+    problems.append("the client at id %s is a %s, want QBITTORRENT" % (qbit_id, qbit.get("type")))
+elif (qbit.get("host") or "").rstrip("/") != qbit_url:
+    problems.append("the qBittorrent client dials %r, want the release's %r"
+                    % (qbit.get("host"), qbit_url))
+else:
+    print("  qBittorrent: id %s %r -> %s" % (qbit_id, qbit.get("name"), qbit.get("host")))
+
+# Two enabled clients at one address are the duplicate this migration must not
+# leave: both are used, and only one of them is the box's.
+seen = {}
+for row in rows:
+    key = (row.get("type"), (row.get("host") or "").rstrip("/"))
+    seen.setdefault(key, []).append(row.get("id"))
+for (kind, host), ids in seen.items():
+    if len(ids) > 1:
+        problems.append("%d %s clients dial %s (ids %s)"
+                        % (len(ids), kind, host, ", ".join(str(i) for i in ids)))
+
+if problems:
+    sys.exit("\n  ".join(["autobrr:"] + problems))
+PY
+  # The record says the same thing: the ids the Job now owns are the source's,
+  # which is what makes the next run find them without asking again.
+  for instance in $MIGRATE_ARRS; do
+    want=$(cat "$WORK/source/autobrr-${instance}.client-id") || true
+    got=$($K -n "$NS" get cm s5n-wiring -o jsonpath='{.data.owned\.json}' 2>/dev/null |
+      python3 -c 'import json, sys
+rec = json.load(sys.stdin)
+print(((rec.get("autobrr") or {}).get("clients") or {}).get(sys.argv[1], ""))' "$instance" 2>/dev/null || true)
+    [ -n "$want" ] && [ "$got" = "$want" ] ||
+      { echo "owned.json records autobrr's ${instance} client as ${got:-nothing}, want the source's ${want:-unknown}"; fail=1; }
+  done
 
   # ---- assertion 1c: the apps box's own init containers write into ---------
   # A migrated autobrr and qui had an account of their own name, and a migrated
