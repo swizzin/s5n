@@ -6520,9 +6520,20 @@ print(".".join(str(p) for p in tree))' "$CHART_VERSION"); then
   # once: without that, the check after the upgrade would prove the pod never
   # restarted, not that the torrent is the box's.
   log "restarting qBittorrent so the torrent is on disk, then reading it back"
+  local old_uid new_uid="" i
+  old_uid=$($K -n "$NS" get pod qbittorrent-0 -o jsonpath='{.metadata.uid}' 2>/dev/null) || true
   $K -n "$NS" delete pod qbittorrent-0 --wait=true --timeout=180s >/dev/null ||
     { echo "could not restart qbittorrent-0"; fail=1; return 0; }
-  if ! $K -n "$NS" wait --for=condition=Ready pod/qbittorrent-0 --timeout=300s >/dev/null 2>&1; then
+  # The StatefulSet recreates the pod after the delete returns, not before, so a
+  # wait on the name alone can find no pod at all and fail at once. Wait for the
+  # replacement (a new uid) to exist first, then for it to be Ready.
+  for i in $(seq 1 60); do
+    new_uid=$($K -n "$NS" get pod qbittorrent-0 -o jsonpath='{.metadata.uid}' 2>/dev/null) || true
+    [ -n "$new_uid" ] && [ "$new_uid" != "$old_uid" ] && break
+    sleep 2
+  done
+  if [ -z "$new_uid" ] || [ "$new_uid" = "$old_uid" ] ||
+    ! $K -n "$NS" wait --for=condition=Ready pod/qbittorrent-0 --timeout=300s >/dev/null 2>&1; then
     echo "qbittorrent-0 did not come back Ready after its restart"; fail=1; return 0
   fi
   upgrade_torrent_check s5n-e2e-upgrade.bin "before the update"
