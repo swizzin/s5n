@@ -108,7 +108,11 @@ WORK=$(mktemp -d)
 # The last line of every log is the run's own answer, whatever the cleanup says.
 trap 'code=$?; rm -rf "$WORK"; printf "E2E EXIT: %s\n" "$code"' EXIT
 
-log() { printf '\n==> %s\n' "$*"; }
+log() {
+  # The same suffix hack/e2e-box.sh puts on its lines: how far into the run this
+  # step starts (+412s), from bash's own counter, with no clock read per line.
+  printf '\n==> %s  [+%ss]\n' "$*" "$SECONDS"
+}
 fail=0
 
 # kind writes the cluster's context into KUBECONFIG and makes it the
@@ -1817,5 +1821,9 @@ if [ "$fail" != 0 ]; then
 fi
 
 if [ "$fail" = 0 ]; then log "PASS"; else log "FAIL"; fi
+# The same line hack/e2e-box.sh prints per scenario, in the same place: after the
+# assertions, before the cluster is thrown away. Without it a run leaves no
+# number behind at all.
+echo "wall time (kind): ${SECONDS}s"
 [ "$KEEP" = --keep ] || $KIND delete cluster --name "$CLUSTER"
 exit "$fail"

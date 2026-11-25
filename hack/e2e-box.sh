@@ -111,6 +111,11 @@
 # work directory, cluster name and exit code.
 #
 # Usage: hack/e2e-box.sh [--keep] [fresh|preinstalled|foreign-gateway|update|upgrade|migrate|migrate-keep|all]   (default: all)
+#
+# Every `==> ` line ends with the seconds elapsed since the script started
+# (`==> PASS (fresh)  [+412s]`): a suffix, so a grep for `^==> PASS` still
+# matches. The last line before teardown is `wall time (<scenario>): Ns`. Both
+# come from bash's own $SECONDS, so a line costs no clock read and no subprocess.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -225,7 +230,6 @@ CTX="kind-${CLUSTER}"
 K="kubectl --context ${CTX}"
 HELM="helm --kube-context ${CTX}"
 WORK=$(mktemp -d)
-START=$(date +%s)
 REGISTRY=""
 
 # ---- the seedbox's volume roots --------------------------------------------
@@ -310,7 +314,9 @@ cleanup() {
 }
 trap cleanup EXIT
 
-log() { printf '\n==> %s\n' "$*"; }
+# Every line says how far into the run it is, so a slow step is visible in the
+# transcript instead of only in the total at the end.
+log() { printf '\n==> %s  [+%ss]\n' "$*" "$SECONDS"; }
 fail=0
 # The torrent port the grant records, as the last assert_torrent_port read it:
 # the binding below admits exactly that number.
@@ -10647,7 +10653,7 @@ if [ "$fail" != 0 ]; then
   cat "$WORK/bootstrap1.txt" 2>/dev/null || true
 fi
 
-elapsed=$(( $(date +%s) - START ))
+elapsed=$SECONDS
 if [ "$fail" = 0 ]; then log "PASS (${SCENARIO})"; else log "FAIL (${SCENARIO})"; fi
 echo "wall time (${SCENARIO}): ${elapsed}s"
 # The update and migrate scenarios' volume roots are host directories the
