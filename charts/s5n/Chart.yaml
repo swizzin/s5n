@@ -27,12 +27,11 @@ keywords: [seedbox, swizzin, sonarr, radarr, prowlarr, qbittorrent]
 # to the 0.5.0 chart. And no 0.5.0 install is upgraded in place: no e2e upgrades
 # a real 0.5.0 box and chart, so a 0.5.0 seedbox is reinstalled.
 #
-# 0.6.3 raises min-box. The chart ships no default peer port: a box installed
-# while it defaulted to 31111 has none in its grant or its values, and a 0.6.3
-# box writes the port the deployed release already runs into the values it
-# installs. An older box would hand this chart no port, and its render refuses.
-# upgrade-from stays 0.6.0: the upgrade e2e installs the published 0.6.0 box and
-# chart and updates them to this one.
+# 0.6.3 raises neither. The chart ships no default peer port, but every box since
+# 0.4.0 records the port in the grant at init (a migrate install answers init the
+# same way), so an older box hands this chart the port it already runs. The
+# upgrade e2e installs the published 0.6.0 box and chart and updates them to this
+# one.
 annotations:
-  box.s5n/min-box: "0.6.3"
+  box.s5n/min-box: "0.6.0"
   box.s5n/upgrade-from: "0.6.0"
