@@ -942,9 +942,10 @@ maintainer tags it there. After every release, `main` is merged back into `devel
 **Automatic chart releases (decided).** Renovate bumps the app images in `variants.yaml`
 on `main` only; `develop` gets them through the back-merge. The platform pins are bumped
 on both branches, so work on `develop` is built and tested against the platform it will
-ship on. On `main`, a patch or digest bump merges itself as soon as the full e2e is
-green; anything larger waits for the maintainer. Renovate groups the bumps that land in
-one window into one pull request. There is no waiting period: the upstream projects
+ship on. On `main`, an app image's patch, minor or digest bump merges itself as soon as
+the full e2e is green, a minor in a pull request of its own; a major, and a platform pin
+past a patch, waits for the maintainer. Renovate groups the patch and digest bumps that
+land in one window into one pull request. There is no waiting period: the upstream projects
 stage their own releases, and holding a build longer adds age, not testing. On every
 push to `main`, if `main` has changed since the last `s5n-v*` tag and every change since
 is one of those bumps, CI raises the chart's patch version and tags it. Any other change

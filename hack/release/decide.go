@@ -51,8 +51,8 @@ type Decision struct {
 // when absent; prevVersion has no prefix and is empty with no tag.
 //
 // A release is cut only when every changed path is one of the two files, both files' changes
-// are patch or digest bumps, and something moved: exactly the set Renovate may merge
-// unattended, so the release confirms a change CI already ran the full e2e on.
+// are bumps Renovate may merge unattended (an app image's patch, minor or digest; a pin's patch
+// or digest) and something moved, so the release confirms what CI ran the full e2e on.
 func decideRange(changed []string, oldVariants, newVariants, oldPlatform, newPlatform []byte, prevVersion string) (Decision, error) {
 	if prevVersion == "" {
 		// v0.2.0 predates the s5n-v family, so it is not a base to count a patch from.
@@ -110,7 +110,7 @@ func decideRange(changed []string, oldVariants, newVariants, oldPlatform, newPla
 	return Decision{
 		Release: true,
 		Version: next.String(),
-		Reason: fmt.Sprintf("%d app image and %d platform pin bump(s) since %s, all patches or digests: releasing %s%s",
+		Reason: fmt.Sprintf("%d app image and %d platform pin bump(s) since %s, each one a release may carry: releasing %s%s",
 			images, pins, since, tagPrefix, next),
 	}, nil
 }
@@ -146,8 +146,8 @@ func parseVariants(b []byte) (map[string]map[string]variant, error) {
 }
 
 // variantReason: how many app images moved, and the reason to refuse when one did not move
-// the way a release may. A patch or digest change is a move; a minor or major tag, a
-// changed repository, or an added or removed app or variant is not.
+// the way a release may. A patch, minor or digest change is a move (renovate.json merges an app
+// minor on main); a major tag, a changed repository, or an added or removed app or variant is not.
 func variantReason(oldApps, newApps map[string]map[string]variant) (int, string) {
 	moved := 0
 	for _, key := range unionKeys(oldApps, newApps) {
@@ -167,14 +167,12 @@ func variantReason(oldApps, newApps map[string]map[string]variant) (int, string)
 			moved++ // digest-only
 		default:
 			switch classify(oldV.Tag, newV.Tag) {
-			case bumpPatch:
+			case bumpPatch, bumpMinor:
 				moved++
-			case bumpMinor:
-				return 0, "variant " + key.String() + ": " + oldV.Tag + " -> " + newV.Tag + " is a minor bump"
 			case bumpMajor:
 				return 0, "variant " + key.String() + ": " + oldV.Tag + " -> " + newV.Tag + " is a major bump"
 			default:
-				return 0, "variant " + key.String() + ": " + oldV.Tag + " -> " + newV.Tag + " is not a patch or digest bump"
+				return 0, "variant " + key.String() + ": " + oldV.Tag + " -> " + newV.Tag + " is not a patch, minor or digest bump"
 			}
 		}
 	}

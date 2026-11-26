@@ -158,8 +158,8 @@ qui:
     # default with an entrypoint that execs the binary as whichever uid runs it, and keeps its
     # whole state under /config.
     repository: ghcr.io/autobrr/qui
-    tag: "v1.36.1"
-    digest: sha256:83399374ea680d2c2790b4552c2a2c732837611710bcb5e4f7b63d79cfcae416
+    tag: "v1.37.0"
+    digest: sha256:73e662791712a01dd1f7565b21792a406e3478f7257937e9e0bb110614cc4075
 
 autobrr:
   default:

@@ -2,8 +2,8 @@ apiVersion: v2
 name: s5n
 description: swizzin on Kubernetes — a wired, hardlink-safe seedbox stack in one release
 type: application
-version: 0.6.5
-appVersion: "0.6.5"
+version: 0.6.6
+appVersion: "0.6.6"
 # Distribution-agnostic: vanilla, k0s, k3s, managed. A floor, never a ceiling: 1.30 is
 # where ValidatingAdmissionPolicy is GA, and the platform layer binds one to every user
 # namespace to enforce the grant.
@@ -23,6 +23,9 @@ keywords: [seedbox, swizzin, sonarr, radarr, prowlarr, qbittorrent]
 # longer locks a signed-in person out, with Tautulli behind it and its own login off. A
 # 0.5.0 box would render the older login in front of this chart, and no 0.5.0 install is
 # upgraded in place.
+#
+# 0.6.6 raises neither: its one change is qui's image (v1.37.0), which an older box
+# reads as data and hands the chart the same values.
 annotations:
   box.s5n/min-box: "0.6.0"
   box.s5n/upgrade-from: "0.6.0"
