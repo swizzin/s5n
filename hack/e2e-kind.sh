@@ -1439,11 +1439,13 @@ print(d[section][key])" "$want" 2>/dev/null || true)
         { echo "maintainerr's database is not on the config mount"; fail=1; } ;;
     filebrowser)
       # Its health route is under the base URL the chart's config sets, and it
-      # answers without a login because auth.methods.noauth makes every request
-      # the one admin user: the box's login at the edge is the only gate. The
-      # listing is the API's view of /data's top level -- the data contract's
-      # two directories -- which proves the source is the claim and not the
-      # config directory, and that the mounted config was the one it read.
+      # answers without a login: this install has no provider (a plain helm
+      # install records no Gateway address), so the chart renders the app's
+      # no-login branch and every request is the one user -- the same shape the
+      # other apps have on such a box. The listing is the API's view of /data's
+      # top level -- the data contract's two directories -- which proves the
+      # source is the claim and not the config directory, and that the mounted
+      # config was the one it read.
       code=$(gw_get -s -o /dev/null -w '%{http_code}' "https://${DOMAIN}/${app}/health" || true)
       echo "GET /${app}/health via gateway -> ${code}"; [ "$code" = 200 ] || fail=1
       # The index is built in the background after start, so the poll waits for

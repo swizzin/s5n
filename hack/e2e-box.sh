@@ -1313,9 +1313,11 @@ PYEOF
 # at v1.36.1), so its Ready says nothing about the issuer -- its page only says
 # the provider is unavailable -- and autobrr starts and retries discovery for
 # about four minutes in the background (50 attempts, five seconds apart:
-# internal/auth/oidc.go at v1.90.0), so neither does its. The fields below are
-# read from the objects instead, and the sign-in e2e is what proves the client
-# can actually reach the login.
+# internal/auth/oidc.go at v1.90.0), so neither does its. FileBrowser Quantum is
+# the opposite: its discovery runs at start and a provider that will not answer
+# is fatal (pkg/settings/config.go:562-571 at v2.1.0-stable), so its Ready is
+# proof the three are right, and the sign-in is what proves the client's own
+# configuration. The fields below are read from the objects either way.
 #
 # The client secret is one Secret in this namespace, written once by root; the
 # login keeps only its digest. Both are asserted here against each other.
@@ -1323,17 +1325,48 @@ assert_oidc() { # assert_oidc <domain> <app> <environment prefix>
   local domain=$1 app=$2 prefix=$3
   local secret_name proxy_ip alias_ip alias_host issuer client redirect ssl_dir disc
   local grant_ip cm_digest stored_digest plaintext policy provider has_hmac anchor eg_port
+  local config
   # The app's own readiness proves nothing about the issuer -- neither client
   # refuses to start over one it cannot reach -- so the fields below are read
   # from the objects, and the sign-in e2e is the proof that the client can use
   # them.
   $K -n "$NS" wait --for=condition=Ready "pod/${app}-0" --timeout=300s ||
     { echo "${app}-0 never became Ready"; fail=1; }
-  secret_name=$($K -n "$NS" get statefulset "$app" \
-    -o jsonpath='{.spec.template.spec.volumes[?(@.name=="oidc")].secret.secretName}' 2>/dev/null || true)
-  echo "  ${app} mounts client secret: ${secret_name:-nothing}"
-  [ "$secret_name" = "s5n-oidc-${app}" ] ||
-    { echo "${app} does not mount the client secret box wrote"; fail=1; }
+  case "$app" in
+    filebrowser)
+      # FileBrowser Quantum reads its whole configuration from a file the chart
+      # writes, so the client id and the issuer are in that ConfigMap, not in
+      # the environment. Its one secret cannot be: the app has no file spelling
+      # for it, so the chart hands it the Secret through the environment -- and
+      # the Secret is still the one box wrote, under the one name.
+      config=$($K -n "$NS" get configmap "${app}-config" -o jsonpath='{.data.config\.yaml}' 2>/dev/null || true)
+      echo "  ${app} config: $(printf '%s' "$config" | grep -c '') lines"
+      local want
+      for want in 'oidc:' 'enabled: true' "clientId: \"${NS}-${app}\"" \
+                  "issuerUrl: \"https://${domain}/auth\"" 'trustProxyHeaders: true' \
+                  'password:' 'enabled: false'; do
+        printf '%s' "$config" | grep -qF -- "$want" ||
+          { echo "${app}'s config.yaml has no ${want}"; fail=1; }
+      done
+      printf '%s' "$config" | grep -qF 'noauth: true' &&
+        { echo "${app}'s config.yaml carries noauth beside the provider"; fail=1; }
+      printf '%s' "$config" | grep -qi 'clientSecret' &&
+        { echo "${app}'s config.yaml carries the client secret: a ConfigMap is not a Secret"; fail=1; }
+      secret_name=$($K -n "$NS" get statefulset "$app" -o jsonpath='{.spec.template.spec.containers[0].env[?(@.name=="FILEBROWSER_OIDC_CLIENT_SECRET")].valueFrom.secretKeyRef.name}' 2>/dev/null || true)
+      local secret_key
+      secret_key=$($K -n "$NS" get statefulset "$app" -o jsonpath='{.spec.template.spec.containers[0].env[?(@.name=="FILEBROWSER_OIDC_CLIENT_SECRET")].valueFrom.secretKeyRef.key}' 2>/dev/null || true)
+      echo "  ${app} reads client secret from ${secret_name:-nothing}, key ${secret_key:-nothing}"
+      [ "$secret_name" = "s5n-oidc-${app}" ] && [ "$secret_key" = client-secret ] ||
+        { echo "${app} does not read the client secret box wrote"; fail=1; }
+      ;;
+    *)
+      secret_name=$($K -n "$NS" get statefulset "$app" \
+        -o jsonpath='{.spec.template.spec.volumes[?(@.name=="oidc")].secret.secretName}' 2>/dev/null || true)
+      echo "  ${app} mounts client secret: ${secret_name:-nothing}"
+      [ "$secret_name" = "s5n-oidc-${app}" ] ||
+        { echo "${app} does not mount the client secret box wrote"; fail=1; }
+      ;;
+  esac
 
   proxy_ip=$($K -n envoy-gateway-system get service \
     -l 'app.kubernetes.io/name=envoy,gateway.envoyproxy.io/owning-gateway-name=s5n,gateway.envoyproxy.io/owning-gateway-namespace=s5n-gateway' \
@@ -1354,15 +1387,25 @@ assert_oidc() { # assert_oidc <domain> <app> <environment prefix>
   [ "$grant_ip" = "$proxy_ip" ] ||
     { echo "the grant records ${grant_ip:-no address}, want the proxy Service's ${proxy_ip}"; fail=1; }
 
-  issuer=$($K -n "$NS" get statefulset "$app" -o jsonpath="{.spec.template.spec.containers[0].env[?(@.name==\"${prefix}__OIDC_ISSUER\")].value}" 2>/dev/null || true)
-  client=$($K -n "$NS" get statefulset "$app" -o jsonpath="{.spec.template.spec.containers[0].env[?(@.name==\"${prefix}__OIDC_CLIENT_ID\")].value}" 2>/dev/null || true)
-  redirect=$($K -n "$NS" get statefulset "$app" -o jsonpath="{.spec.template.spec.containers[0].env[?(@.name==\"${prefix}__OIDC_REDIRECT_URL\")].value}" 2>/dev/null || true)
+  # The redirect URI is what the login has registered for this client, so the
+  # client's own config has to agree: qui and autobrr are told theirs through
+  # the environment, and FileBrowser Quantum builds it from the request -- the
+  # proxy headers the chart trusts make it the box's own HTTPS name, and box's
+  # client names that same path (the discovery below is what proves the pod can
+  # reach the issuer at all).
   ssl_dir=$($K -n "$NS" get statefulset "$app" -o jsonpath='{.spec.template.spec.containers[0].env[?(@.name=="SSL_CERT_DIR")].value}' 2>/dev/null || true)
-  echo "  ${app}: issuer ${issuer}, client ${client}, redirect ${redirect}, SSL_CERT_DIR ${ssl_dir}"
-  [ "$issuer" = "https://${domain}/auth" ] || { echo "${app}'s issuer is ${issuer}"; fail=1; }
-  [ "$client" = "${NS}-${app}" ] || { echo "${app}'s client id is ${client}"; fail=1; }
-  [ "$redirect" = "https://${domain}/${app}/api/auth/oidc/callback" ] ||
-    { echo "${app}'s redirect URI is ${redirect}: it must be the callback path it builds from its base URL"; fail=1; }
+  if [ "$app" != filebrowser ]; then
+    issuer=$($K -n "$NS" get statefulset "$app" -o jsonpath="{.spec.template.spec.containers[0].env[?(@.name==\"${prefix}__OIDC_ISSUER\")].value}" 2>/dev/null || true)
+    client=$($K -n "$NS" get statefulset "$app" -o jsonpath="{.spec.template.spec.containers[0].env[?(@.name==\"${prefix}__OIDC_CLIENT_ID\")].value}" 2>/dev/null || true)
+    redirect=$($K -n "$NS" get statefulset "$app" -o jsonpath="{.spec.template.spec.containers[0].env[?(@.name==\"${prefix}__OIDC_REDIRECT_URL\")].value}" 2>/dev/null || true)
+    echo "  ${app}: issuer ${issuer}, client ${client}, redirect ${redirect}, SSL_CERT_DIR ${ssl_dir}"
+    [ "$issuer" = "https://${domain}/auth" ] || { echo "${app}'s issuer is ${issuer}"; fail=1; }
+    [ "$client" = "${NS}-${app}" ] || { echo "${app}'s client id is ${client}"; fail=1; }
+    [ "$redirect" = "https://${domain}/${app}/api/auth/oidc/callback" ] ||
+      { echo "${app}'s redirect URI is ${redirect}: it must be the callback path it builds from its base URL"; fail=1; }
+  else
+    echo "  ${app}: issuer, client and callback are its config.yaml (asserted above), SSL_CERT_DIR ${ssl_dir}"
+  fi
   [ "$ssl_dir" = /etc/s5n-host-ca ] ||
     { echo "SSL_CERT_DIR is ${ssl_dir}: the anchor is added to the bundle, never substituted for it"; fail=1; }
 
@@ -1572,13 +1615,29 @@ print(u.parse_qs(u.urlparse(sys.stdin.read()).query).get("rd", [""])[0])' || tru
 
   # 3. The app's own start. Its state lives in the app's session, so the same
   #    jar has to make the callback.
-  code=$(curl -sS -o "$WORK/oidc-${app}-config.json" -w '%{http_code}' \
-    -b "$jar" -c "$jar" --resolve "${DOMAIN}:443:${addr}" "${ca_args[@]}" \
-    "$url/api/auth/oidc/config" 2>"$WORK/oidc.err" || true)
-  body=$(cat "$WORK/oidc-${app}-config.json" 2>/dev/null || true)
-  auth_url=$(json_field "$WORK/oidc-${app}-config.json" authorizationUrl)
-  echo "  ${app}: GET ${base}/api/auth/oidc/config: ${code}, authorization URL ${auth_url%%\?*}"
-  [ "$code" = 200 ] || { echo "the app's OIDC start answered ${code}"; fail=1; }
+  #
+  #    Two shapes, and which one an app has is its own: qui and autobrr answer
+  #    with the authorization URL as JSON, and FileBrowser Quantum answers with
+  #    a redirect to it (its route is a browser's click, not an API call). Both
+  #    set the state cookie the callback checks, so both need this jar.
+  if [ "$app" = filebrowser ]; then
+    : >"$hdrs"
+    code=$(curl -sS -o /dev/null -D "$hdrs" -w '%{http_code}' \
+      -b "$jar" -c "$jar" --resolve "${DOMAIN}:443:${addr}" "${ca_args[@]}" \
+      "$url/api/auth/oidc/login" 2>"$WORK/oidc.err" || true)
+    auth_url=$(sed -n 's/^[Ll]ocation: *//p' "$hdrs" | tr -d '\r' | head -1)
+    echo "  ${app}: GET ${base}/api/auth/oidc/login: ${code}, authorization URL ${auth_url%%\?*}"
+    [ "$code" = 302 ] || { echo "the app's OIDC start answered ${code}, not the provider's redirect"; fail=1; }
+  else
+    code=$(curl -sS -o "$WORK/oidc-${app}-config.json" -w '%{http_code}' \
+      -b "$jar" -c "$jar" --resolve "${DOMAIN}:443:${addr}" "${ca_args[@]}" \
+      "$url/api/auth/oidc/config" 2>"$WORK/oidc.err" || true)
+    body=$(cat "$WORK/oidc-${app}-config.json" 2>/dev/null || true)
+    auth_url=$(json_field "$WORK/oidc-${app}-config.json" authorizationUrl)
+    echo "  ${app}: GET ${base}/api/auth/oidc/config: ${code}, authorization URL ${auth_url%%\?*}"
+    [ "$code" = 200 ] || { echo "the app's OIDC start answered ${code}"; fail=1; }
+  fi
+  printf '%s\n' "$auth_url" >"$WORK/oidc-${app}-authurl"
   case "$auth_url" in
     "https://${DOMAIN}/auth/"*) : ;;
     *) echo "the authorization URL is not this box's issuer: ${auth_url}"; fail=1 ;;
@@ -1714,7 +1773,21 @@ print(json.dumps({"username": sys.argv[1], "password": sys.argv[2],
   body=$(cat "$WORK/oidc-${app}-me.json" 2>/dev/null || true)
   echo "  ${app}: GET ${api} with the session: ${code} ${body}"
   [ "$code" = 200 ] || { echo "${api} answered ${code} for a signed-in user"; fail=1; }
-  if ! printf '%s' "$body" | python3 -c 'import json, sys
+  # The two shapes again: qui and autobrr answer with their own session document
+  # (username, auth_method), and FileBrowser Quantum answers with the user row
+  # the provider made -- the same two facts under its own field names.
+  if [ "$app" = filebrowser ]; then
+    if ! printf '%s' "$body" | python3 -c 'import json, sys
+d = json.load(sys.stdin)
+want = sys.argv[1]
+bad = [f for f in ("username", "loginMethod") if d.get(f) != {"username": want, "loginMethod": "oidc"}[f]]
+if bad:
+    print("  the session says %s" % {f: d.get(f) for f in ("username", "loginMethod")})
+    sys.exit(1)' "$LOGIN"; then
+      echo "${api} does not identify ${LOGIN} as an OIDC session"
+      fail=1
+    fi
+  elif ! printf '%s' "$body" | python3 -c 'import json, sys
 d = json.load(sys.stdin)
 want = sys.argv[1]
 bad = [f for f in ("username", "auth_method") if d.get(f) != {"username": want, "auth_method": "oidc"}[f]]
@@ -1767,7 +1840,7 @@ oidc_refuses_another_login() {
   local hdrs="$WORK/oidc-${app}-other-headers.txt"
   local code auth_url location
   rm -f "$jar"
-  auth_url=$(json_field "$WORK/oidc-${app}-config.json" authorizationUrl)
+  auth_url=$(cat "$WORK/oidc-${app}-authurl" 2>/dev/null || true)
   [ -n "$auth_url" ] || { echo "no authorization URL to test the policy with"; fail=1; return 0; }
   portal_login "$jar" "$SECOND_LOGIN" "$SECOND_PASSWORD" "https://${DOMAIN}/" "$addr" "$ca"
   echo "  ${app}: ${SECOND_LOGIN} signs in at the portal: ${PORTAL_CODE}"
@@ -2747,48 +2820,6 @@ if problems:
 print(f"  SABnzbd {version['version']}: {complete}, categories {sorted(cats)}")
 PY
 
-  # FileBrowser Quantum behind the same session: its page (no login of its own,
-  # auth.methods.noauth makes every request the one admin user), its health
-  # route under the prefix the chart's config sets, and its API listing /data's
-  # top level -- the data contract's two directories -- which is the proof that
-  # the source the chart sealed is the claim and not the config directory.
-  fb_code=$(curl -sS -o "$WORK/filebrowser-authed.html" -w '%{http_code}' \
-    -b "$JAR" --resolve "${DOMAIN}:443:${gw_addr}" --cacert "$WORK/pebble-root.pem" \
-    "https://${DOMAIN}/filebrowser/" 2>/dev/null || true)
-  echo "  GET https://${DOMAIN}/filebrowser/ with the session: ${fb_code}"
-  [ "$fb_code" = 200 ] || { echo "the login did not give access to FileBrowser Quantum (${fb_code})"; fail=1; }
-  grep -qi '<!doctype html' "$WORK/filebrowser-authed.html" ||
-    { echo "the 200 was not FileBrowser Quantum's page"; fail=1; }
-  fb_health=$(curl -sS -o "$WORK/filebrowser-health.json" -w '%{http_code}' \
-    --resolve "${DOMAIN}:443:${gw_addr}" --cacert "$WORK/pebble-root.pem" \
-    "https://${DOMAIN}/filebrowser/health" 2>/dev/null || true)
-  echo "  GET /filebrowser/health: ${fb_health}"
-  [ "$fb_health" = 200 ] ||
-    { echo "/filebrowser/health answered ${fb_health}: the chart's readiness path is not the one the app serves"; fail=1; }
-  # The index is built in the background after start, so the poll waits for the
-  # first scan instead of racing it.
-  fb_items=""
-  for _ in $(seq 1 60); do
-    fb_items=$(curl -sS -b "$JAR" --resolve "${DOMAIN}:443:${gw_addr}" --cacert "$WORK/pebble-root.pem" \
-      "https://${DOMAIN}/filebrowser/api/resources/items?source=data&path=/" 2>/dev/null || true)
-    case "$fb_items" in *'"downloads"'*'"media"'*) break ;; esac
-    sleep 2
-  done
-  printf '%s' "$fb_items" >"$WORK/filebrowser-items.json"
-  python3 - "$WORK/filebrowser-items.json" <<'PY' || fail=1
-import json, sys
-try:
-    d = json.load(open(sys.argv[1], encoding="utf-8"))
-except ValueError:
-    print(f"the items API answered no JSON: {open(sys.argv[1]).read()[:200]!r}")
-    sys.exit(1)
-folders = set(d.get("folders") or [])
-missing = {"downloads", "media"} - folders
-if missing:
-    print(f"FileBrowser Quantum's /data has no {', '.join(sorted(missing))}: {sorted(folders)}")
-    sys.exit(1)
-print(f"  FileBrowser Quantum lists /data: {sorted(folders)}")
-PY
 
   # ---- the login is reachable only through the Gateway ----------------------
   # Authelia believes X-Forwarded-Proto and X-Forwarded-Host, so a pod that can
@@ -3121,17 +3152,75 @@ for r in items:
   log "the provider: both clients, the issuer they dial, and the anchor"
   assert_oidc "$DOMAIN" qui QUI
   assert_oidc "$DOMAIN" autobrr AUTOBRR
+  assert_oidc "$DOMAIN" filebrowser FILEBROWSER
   # ---- the sign-in itself ----------------------------------------------------
   # Ready proves a pod read the discovery document -- for the client that will
   # not start without it. It does not prove anyone can sign in, which is the
   # thing an operator does, so the flow is run here as a browser runs it, for
-  # both clients; a second account then tries the same flow to show the client's
+  # each client; a second account then tries the same flow to show the client's
   # policy is this seedbox's alone.
-  log "the sign-in: both clients' OIDC round trips, and the client that refuses another login"
+  log "the sign-in: every client's OIDC round trips, and the client that refuses another login"
   oidc_login qui /qui /qui/api/auth/me "$gw_addr" "$WORK/pebble-root.pem"
   oidc_refuses_another_login qui /qui "$gw_addr" "$WORK/pebble-root.pem"
   oidc_login autobrr /autobrr /autobrr/api/auth/validate "$gw_addr" "$WORK/pebble-root.pem"
   oidc_refuses_another_login autobrr /autobrr "$gw_addr" "$WORK/pebble-root.pem"
+  oidc_login filebrowser /filebrowser "/filebrowser/api/users?username=self" "$gw_addr" "$WORK/pebble-root.pem"
+  oidc_refuses_another_login filebrowser /filebrowser "$gw_addr" "$WORK/pebble-root.pem"
+
+  # FileBrowser Quantum behind the same session, and then behind its own: it is
+  # a client of the login's provider, so its page is served to a signed-in
+  # person and its API needs the app's own session. Its health route is under
+  # the prefix the chart's config sets, and its API's listing of /data's top
+  # level -- the data contract's two directories -- is the proof that the source
+  # the chart sealed is the claim and not the config directory.
+  fb_code=$(curl -sS -o "$WORK/filebrowser-authed.html" -w '%{http_code}' \
+    -b "$JAR" --resolve "${DOMAIN}:443:${gw_addr}" --cacert "$WORK/pebble-root.pem" \
+    "https://${DOMAIN}/filebrowser/" 2>/dev/null || true)
+  echo "  GET https://${DOMAIN}/filebrowser/ with the session: ${fb_code}"
+  [ "$fb_code" = 200 ] || { echo "the login did not give access to FileBrowser Quantum (${fb_code})"; fail=1; }
+  grep -qi '<!doctype html' "$WORK/filebrowser-authed.html" ||
+    { echo "the 200 was not FileBrowser Quantum's page"; fail=1; }
+  # The edge's session alone opens the page and not the files: this is the
+  # assertion that the source is served to the provider's session only.
+  fb_api_code=$(curl -sS -o /dev/null -w '%{http_code}' -b "$JAR" \
+    --resolve "${DOMAIN}:443:${gw_addr}" --cacert "$WORK/pebble-root.pem" \
+    "https://${DOMAIN}/filebrowser/api/resources/items?source=data&path=/" 2>/dev/null || true)
+  echo "  GET /filebrowser/api/resources/items with the portal's cookie only: ${fb_api_code}"
+  case "$fb_api_code" in
+    401 | 403) : ;;
+    *) echo "the app's API answered ${fb_api_code} to the edge's cookie alone: the chart's own login is not standing"; fail=1 ;;
+  esac
+  fb_health=$(curl -sS -o "$WORK/filebrowser-health.json" -w '%{http_code}' \
+    --resolve "${DOMAIN}:443:${gw_addr}" --cacert "$WORK/pebble-root.pem" \
+    "https://${DOMAIN}/filebrowser/health" 2>/dev/null || true)
+  echo "  GET /filebrowser/health: ${fb_health}"
+  [ "$fb_health" = 200 ] ||
+    { echo "/filebrowser/health answered ${fb_health}: the chart's readiness path is not the one the app serves"; fail=1; }
+  # The index is built in the background after start, so the poll waits for the
+  # first scan instead of racing it. The jar is the one the sign-in above left:
+  # this app's API is not the edge's to open.
+  fb_items=""
+  for _ in $(seq 1 60); do
+    fb_items=$(curl -sS -b "$WORK/oidc-filebrowser-jar.txt" --resolve "${DOMAIN}:443:${gw_addr}" --cacert "$WORK/pebble-root.pem" \
+      "https://${DOMAIN}/filebrowser/api/resources/items?source=data&path=/" 2>/dev/null || true)
+    case "$fb_items" in *'"downloads"'*'"media"'*) break ;; esac
+    sleep 2
+  done
+  printf '%s' "$fb_items" >"$WORK/filebrowser-items.json"
+  python3 - "$WORK/filebrowser-items.json" <<'PY' || fail=1
+import json, sys
+try:
+    d = json.load(open(sys.argv[1], encoding="utf-8"))
+except ValueError:
+    print(f"the items API answered no JSON: {open(sys.argv[1]).read()[:200]!r}")
+    sys.exit(1)
+folders = set(d.get("folders") or [])
+missing = {"downloads", "media"} - folders
+if missing:
+    print(f"FileBrowser Quantum's /data has no {', '.join(sorted(missing))}: {sorted(folders)}")
+    sys.exit(1)
+print(f"  FileBrowser Quantum lists /data: {sorted(folders)}")
+PY
   # ---- the front door a browser meets ---------------------------------------
   # An API client never sees these: Tautulli's own login, the prefix its
   # redirects are built from, and a request that carries a header credential.
@@ -4743,14 +4832,17 @@ PY
   log "the provider on a self-signed host: the box root is the anchor"
   assert_oidc "$DOMAIN" qui QUI
   assert_oidc "$DOMAIN" autobrr AUTOBRR
+  assert_oidc "$DOMAIN" filebrowser FILEBROWSER
   # The same sign-in on a host nothing public signs: the browser's side of it
   # trusts s5n-host-ca alone, which is what a person's browser does after
   # importing the box's root.
-  log "the sign-in on a self-signed host: both clients' OIDC round trips"
+  log "the sign-in on a self-signed host: every client's OIDC round trips"
   oidc_login qui /qui /qui/api/auth/me "$lb_addr" "$WORK/anchor-ca.pem"
   oidc_refuses_another_login qui /qui "$lb_addr" "$WORK/anchor-ca.pem"
   oidc_login autobrr /autobrr /autobrr/api/auth/validate "$lb_addr" "$WORK/anchor-ca.pem"
   oidc_refuses_another_login autobrr /autobrr "$lb_addr" "$WORK/anchor-ca.pem"
+  oidc_login filebrowser /filebrowser "/filebrowser/api/users?username=self" "$lb_addr" "$WORK/anchor-ca.pem"
+  oidc_refuses_another_login filebrowser /filebrowser "$lb_addr" "$WORK/anchor-ca.pem"
   log "the front door on a self-signed host: the same three answers"
   assert_front_door "$lb_addr" "$WORK/anchor-ca.pem"
 
@@ -6631,8 +6723,8 @@ print(".".join(str(p) for p in tree))' "$CHART_VERSION"); then
   INSTALL_VERSION="$UPGRADE_FROM"
   # The published release's catalog is its own, and box refuses an app that
   # release's chart does not have: the app list here is the one its catalog
-  # names, which is every app below except lidarr, bazarr and sabnzbd (all newer
-  # than ${UPGRADE_FROM}).
+  # names, which is every app below except lidarr, bazarr, sabnzbd and
+  # filebrowser (all newer than ${UPGRADE_FROM}).
   APPS="qbittorrent,sonarr,radarr,prowlarr,plex,tautulli,seerr,qui,autobrr,maintainerr,pbh"
   PUBLISHED_TRANSCRIPTS="$WORK/bootstrap1.txt"
   if bootstrap "$WORK/bootstrap1.txt"; then
