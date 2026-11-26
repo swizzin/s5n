@@ -11,10 +11,8 @@ import (
 	"testing"
 )
 
-// quiFake is qui's instance API as the probe transcript found it: the login
-// answers a Secure session cookie, a create answers 201 before it tests
-// anything, a PUT without a password keeps the stored one, and the instance's
-// test answers 200 with a "connected" flag rather than a status.
+// quiFake is qui's instance API: a Secure cookie, a 201 before the connection test,
+// a PUT without a password keeping the stored one, and a 200 test with a flag.
 type quiFake struct {
 	mu       sync.Mutex
 	rows     []Item
@@ -28,10 +26,9 @@ type quiFake struct {
 	password string // what the app holds; a PUT without one keeps it
 	disabled bool   // QUI__AUTH_DISABLED: the API is open, the login refuses
 
-	// The Arr instances, qui's other owned objects. Their API is the app's own
-	// (internal/api/handlers/arr.go at v1.36.1): a create is refused 409 at a
-	// URL the type already has, the list never carries a stored API key, and an
-	// update leaves every field it is not sent alone.
+	// Arr rows: a create is refused 409 at an existing URL, the list never carries a
+	// key, and an update leaves unsent fields alone
+	// (internal/api/handlers/arr.go at v1.36.1).
 	arrRows     []Item
 	arrNext     int
 	arrWrites   int
@@ -91,8 +88,8 @@ func (f *quiFake) loginHandler(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, map[string]string{"error": "Invalid credentials"})
 		return
 	}
-	// The Secure attribute is the whole reason the client captures the cookie
-	// itself: a jar would refuse to replay it over http://.
+	// Secure is why the client captures the cookie: a jar would not replay it over
+	// http.
 	w.Header().Set("Set-Cookie", "qui_user_session=sess-abc; Path=/qui/; HttpOnly; Secure; SameSite=Lax")
 	writeJSON(w, map[string]any{"message": "Login successful"})
 }
@@ -172,9 +169,8 @@ func newQuiFake(t *testing.T) (*quiFake, *Qui) {
 	return f, NewQui(srv.URL, "/qui", "s5n", "qui-pass-123")
 }
 
-// arrListHandler is GET /api/arr/instances: every row, and no stored API key --
-// internal/models/arr_instance.go marks APIKeyEncrypted json:"-", so the key is
-// never in the response at all (not even as a mask).
+// arrListHandler is GET /api/arr/instances: no stored key at all
+// (internal/models/arr_instance.go marks it json:"-").
 func (f *quiFake) arrListHandler(w http.ResponseWriter) {
 	out := []Item{}
 	for _, row := range f.arrRows {
@@ -185,9 +181,8 @@ func (f *quiFake) arrListHandler(w http.ResponseWriter) {
 	writeJSON(w, out)
 }
 
-// arrCreateHandler is POST /api/arr/instances. The table has a UNIQUE index on
-// (type, base_url), and the handler answers 409 for it, so a create beside an
-// existing row is refused rather than becoming a duplicate.
+// arrCreateHandler is POST /api/arr/instances: UNIQUE on (type, base_url), answered
+// 409.
 func (f *quiFake) arrCreateHandler(w http.ResponseWriter, r *http.Request) {
 	var body Item
 	_ = json.NewDecoder(r.Body).Decode(&body)
@@ -209,8 +204,8 @@ func (f *quiFake) arrCreateHandler(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, body)
 }
 
-// arrUpdateHandler is PUT /api/arr/instances/{id}: every field it is not sent is
-// left alone, which is what makes "write only the key" an update of the key.
+// arrUpdateHandler is PUT /api/arr/instances/{id}: unsent fields stay, so "write only
+// the key" works.
 func (f *quiFake) arrUpdateHandler(w http.ResponseWriter, r *http.Request) {
 	id, _ := strconv.Atoi(strings.TrimPrefix(r.URL.Path, "/qui/api/arr/instances/"))
 	var body Item
@@ -254,8 +249,7 @@ func loginQui(t *testing.T, q *Qui) {
 	}
 }
 
-// The session cookie is Secure, so the client has to keep the name=value and
-// set Cookie itself: a jar would drop it over the plain http:// Service.
+// A Secure cookie over plain http means the client sets Cookie itself.
 func TestQuiLoginReplaysTheSecureCookieByHand(t *testing.T) {
 	f, q := newQuiFake(t)
 	loginQui(t, q)
@@ -275,8 +269,7 @@ func TestQuiLoginReplaysTheSecureCookieByHand(t *testing.T) {
 	}
 }
 
-// qui has no uniqueness on name or host, so a create that did not match first
-// would add a second row beside the user's own instance.
+// No uniqueness on name or host, so a create must match first.
 func TestQuiEnsureInstanceAdoptsByNameAndDoesNotDuplicate(t *testing.T) {
 	f, q := newQuiFake(t)
 	loginQui(t, q)
@@ -314,10 +307,7 @@ func TestQuiEnsureInstanceAdoptsByNameAndDoesNotDuplicate(t *testing.T) {
 	}
 }
 
-// A migrated box's qui holds the source's own instance, named by the operator,
-// already pointing at the release's qBittorrent: wiring must adopt it, record
-// its id and leave the name alone. Creating one would leave two rows polling
-// the same qBittorrent.
+// A migrated instance is adopted by its host, its id recorded, its name kept.
 func TestQuiEnsureInstanceAdoptsByHostAndKeepsTheOperatorsName(t *testing.T) {
 	f, q := newQuiFake(t)
 	loginQui(t, q)
@@ -395,8 +385,7 @@ func TestQuiEnsureInstanceCreatesWhenNothingIsThere(t *testing.T) {
 	}
 }
 
-// Two instances at the release's qBittorrent: qui allows both, and nothing
-// says which history to keep, so the run refuses and writes nothing.
+// Two at one host are a refusal that writes nothing.
 func TestQuiEnsureInstanceRefusesTwoAtTheHost(t *testing.T) {
 	f, q := newQuiFake(t)
 	loginQui(t, q)
@@ -422,9 +411,7 @@ func TestQuiEnsureInstanceRefusesTwoAtTheHost(t *testing.T) {
 	}
 }
 
-// The recorded id is authoritative even when another instance is at the same
-// host: a rename in qui's UI, or a second one the operator made, does not move
-// which row box owns.
+// The recorded id wins over a second instance at the host.
 func TestQuiEnsureInstanceOwnedIDWinsOverAHostMatch(t *testing.T) {
 	f, q := newQuiFake(t)
 	loginQui(t, q)
@@ -483,8 +470,7 @@ func TestQuiEnsureInstanceIsIdempotent(t *testing.T) {
 	}
 }
 
-// The create's 201 is not proof: qui tests the connection in a goroutine after
-// it answers, so the client's own test call is what decides.
+// The 201 is not proof: qui tests in a goroutine, so the client's own test decides.
 func TestQuiEnsureInstanceFailsWhenTheInstanceIsNotConnected(t *testing.T) {
 	f, q := newQuiFake(t)
 	loginQui(t, q)

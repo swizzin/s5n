@@ -8,31 +8,27 @@ import (
 	"time"
 )
 
-// Sabnzbd is SABnzbd's own API (sabnzbd/api.py at 5.1.3). Every call is a GET
-// under the app's url_base with mode=..., and output=json is what makes it
-// answer JSON instead of XML.
+// Sabnzbd is SABnzbd's own API (sabnzbd/api.py at 5.1.3): every call is a GET under
+// the app's url_base with mode=..., and output=json.
 //
-// Its settings are not files the Job may write: the app keeps them in memory
-// and rewrites sabnzbd.ini whole on every save, and a server password it stores
-// is obfuscated ("!!!encoded!!!" + hexlify, sabnzbd/config.py:1224-1240), so the
-// only honest way in is the API. The three settings the chart seals before the
-// first start are asserted here as well, because an image upgrade or a source's
-// ini may put them back and a job that downloaded to /config can never be
-// hardlinked.
+// Its settings are not files the Job may write: the app rewrites sabnzbd.ini whole
+// and obfuscates a stored server password ("!!!encoded!!!" + hexlify,
+// sabnzbd/config.py:1224-1240), so the API is the only honest way in. The three
+// settings the chart seals are asserted here too, because an image upgrade or a
+// source ini may put them back.
 type Sabnzbd struct {
 	client  *Client
 	urlBase string
 	apiKey  string
 }
 
-// NewSabnzbd builds a client. urlBase is the prefix the chart serves the app
-// under ("/sabnzbd"), which is also where its API lives.
+// NewSabnzbd builds a client. urlBase is where the chart serves the app and its API.
 func NewSabnzbd(baseURL, urlBase, apiKey string) *Sabnzbd {
 	return &Sabnzbd{client: NewClient(baseURL, nil), urlBase: strings.TrimRight(urlBase, "/"), apiKey: apiKey}
 }
 
-// call is one API request. mode=version is the only mode that needs no key; the
-// rest send it, and the app answers 403 to a wrong one.
+// call is one API request. mode=version is the only one needing no key; the rest
+// send it, and a wrong one answers 403.
 func (s *Sabnzbd) call(ctx context.Context, mode string, params url.Values, out any) error {
 	q := url.Values{"mode": {mode}, "output": {"json"}}
 	for k, v := range params {
@@ -44,9 +40,9 @@ func (s *Sabnzbd) call(ctx context.Context, mode string, params url.Values, out 
 	return s.client.Get(ctx, s.urlBase+"/api?"+q.Encode(), out)
 }
 
-// Ping asks the one endpoint SABnzbd answers without a key. It is the chart's
-// readiness path too (mode=version is exempt from check_apikey,
-// sabnzbd/api.py:1081 and interface.py:397-420 at 5.1.3).
+// Ping asks the one endpoint SABnzbd answers without a key, which is the chart's
+// readiness path too (mode=version is exempt from check_apikey, sabnzbd/api.py:1081
+// and interface.py:397-420 at 5.1.3).
 func (s *Sabnzbd) Ping(ctx context.Context) error {
 	var body Item
 	if err := s.call(ctx, "version", nil, &body); err != nil {
@@ -81,9 +77,8 @@ type Config struct {
 	// CompleteDir is where a finished download is left: the directory an Arr
 	// imports from.
 	CompleteDir string
-	// DownloadDir is where a job is unpacked while it runs. It must be on the
-	// same filesystem as CompleteDir, or SAB's own move is a copy and the
-	// Arr's import can never be a hardlink.
+	// DownloadDir must be on the same filesystem as CompleteDir, or SAB's move is a
+	// copy and the Arr's import can never be a hardlink.
 	DownloadDir string
 }
 
@@ -118,13 +113,11 @@ func (s *Sabnzbd) misc(ctx context.Context, keyword string) (string, bool, error
 
 // EnsureDataContract makes the two download paths match and reads them back.
 //
-// SABnzbd's image starts with Downloads/incomplete and Downloads/complete
-// relative to its config directory (sabnzbd/constants.py:61-62, and
-// cfg.py:743's set_root(home)), which is the qBittorrent /config/Downloads trap
-// again: every job would be unpacked on the config claim, where an Arr's import
-// could only copy. The chart seals them before the first start
-// (internal/sabconf); this repairs a file an image upgrade rewrote and proves
-// the running app agrees, which is the only state a job actually uses.
+// SABnzbd starts with Downloads/incomplete and Downloads/complete relative to its
+// config directory (sabnzbd/constants.py:61-62, cfg.py:743's set_root(home)), which
+// is the qBittorrent /config trap again: every job would unpack where an import can
+// only copy. The chart seals them (internal/sabconf); this repairs an upgraded file
+// and proves the running app agrees.
 func (s *Sabnzbd) EnsureDataContract(ctx context.Context, want Config) (Change, error) {
 	cur, err := s.config(ctx)
 	if err != nil {
@@ -198,22 +191,17 @@ func (s *Sabnzbd) Category(ctx context.Context, name string) (SabnzbdCategory, b
 	return c, ok, nil
 }
 
-// EnsureCategory creates a category with its directory, or repairs the
-// directory of one that exists, and reads it back.
+// EnsureCategory creates a category with its directory, or repairs one, and reads it
+// back.
 //
-// The name is what the Arr sends, lower-cased: SAB's own set_config handler
-// folds every category name with name.lower() (sabnzbd/api.py:1349-1366), and
-// its job path folds the incoming category the same way before looking it up
-// (sabnzbd/misc.py:282-296, cat_to_opts). The directory keeps the spelling the
-// Arrs use -- /data/downloads/4K/Movies -- because that is the directory the
-// data contract and qBittorrent's category already name; only the lookup key is
-// folded.
+// The name is folded as SAB folds it: set_config lower-cases it (sabnzbd/api.py:1349-1366)
+// and cat_to_opts does the same (sabnzbd/misc.py:282-296). The directory keeps the
+// Arrs' spelling -- /data/downloads/4K/Movies -- because it names the data contract's
+// directory.
 //
-// An unknown category is the silent failure this exists for: SAB falls back to
-// "*" with no directory (sabnzbd/config.py:1153-1159, get_category), so a job
-// unpacks into the root of complete_dir and the Arr's import still works, while
-// the box's category layout is wrong forever. The read-back is what proves the
-// name survived the app's own section-name cleaning.
+// An unknown category is the silent failure this exists for: SAB falls back to "*"
+// with no directory (sabnzbd/config.py:1153-1159), so a job unpacks into the root and
+// the box's layout is wrong forever. The read-back proves the name survived.
 func (s *Sabnzbd) EnsureCategory(ctx context.Context, name, dir string) (Change, error) {
 	key := strings.ToLower(name)
 	cur, ok, err := s.Category(ctx, key)
@@ -227,9 +215,8 @@ func (s *Sabnzbd) EnsureCategory(ctx context.Context, name, dir string) (Change,
 	if ok {
 		change = Updated
 	}
-	// pp=3 is the post-processing SAB's own "*" category uses (download,
-	// unpack, repair and delete); script=None is no script; priority=0 is
-	// normal. Every one of them is SAB's own default for a new category.
+	// pp=3 is SAB's own "*" post-processing, script=None none, priority=0 normal:
+	// the app's defaults for a new category.
 	form := url.Values{
 		fieldSection: {"categories"},
 		fieldKeyword: {key},

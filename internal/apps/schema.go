@@ -39,10 +39,8 @@ func (c Change) String() string {
 // can drive the payload.
 type Item map[string]any
 
-// The field names qui's instances and autobrr's download clients share with the
-// Arrs. They are the apps' own API spellings: a wrong one is a silent no-op
-// (the field is absent from the update), so each is written once here rather
-// than at every call site.
+// The field names qui's instances and autobrr's clients share with the Arrs, in the
+// apps' own spellings: a wrong one is a silent no-op, so each is written once.
 const (
 	fieldName     = "name"
 	fieldHost     = "host"
@@ -52,14 +50,13 @@ const (
 	fieldAPIKey   = "apiKey"
 	fieldSection  = "section"
 	fieldKeyword  = "keyword"
-	// qui's Arr instances name two fields of their own: which Arr a row is,
-	// and whether it is on (internal/models/arr_instance.go at v1.36.1).
+	// qui's Arr rows name which Arr a row is, and whether it is on
+	// (internal/models/arr_instance.go at v1.36.1).
 	fieldType    = "type"
 	fieldEnabled = "enabled"
 )
 
-// Clone deep-copies an Item. Used to turn a schema template into a request body
-// without mutating the cached template.
+// Clone deep-copies an Item, so a schema template becomes a body unmutated.
 func (i Item) Clone() Item {
 	b, _ := json.Marshal(i)
 	var out Item
@@ -114,8 +111,8 @@ func (i Item) FieldValue(name string) (any, bool) {
 }
 
 // ownedValue reads one owned field from a live object, whichever shape the API
-// returns: an Arr or Prowlarr object carries its settings in a "fields" list,
-// while qui's instances and autobrr's download clients are plain objects.
+// returns: an Arr/Prowlarr object carries settings in "fields", while qui's
+// instances and autobrr's clients are plain objects.
 func (i Item) ownedValue(name string) (any, bool) {
 	if _, ok := i["fields"].([]any); ok {
 		return i.FieldValue(name)
@@ -124,10 +121,9 @@ func (i Item) ownedValue(name string) (any, bool) {
 	return v, ok
 }
 
-// setOwned writes one owned field onto an object, in the shape that object uses
-// (see ownedValue). An Arr field the schema no longer has is simply not
-// written, which is how version drift is tolerated; a plain object always takes
-// the key, because its API decodes the struct it is sent.
+// setOwned writes one owned field in the object's own shape (see ownedValue). An Arr
+// field the schema no longer has is not written, which is how version drift is
+// tolerated.
 func (i Item) setOwned(name string, value any) {
 	if _, ok := i["fields"].([]any); ok {
 		i.SetField(name, value)
@@ -136,9 +132,8 @@ func (i Item) setOwned(name string, value any) {
 	i[name] = value
 }
 
-// SetField sets a named field's value. It returns false when the schema has no
-// such field, which is how version drift is tolerated: a field that no longer
-// exists is simply not written.
+// SetField sets a named field's value, reporting false when the schema has no such
+// field -- how version drift is tolerated.
 func (i Item) SetField(name string, value any) bool {
 	raw, ok := i["fields"].([]any)
 	if !ok {
@@ -170,8 +165,8 @@ func (i Item) TagList(key string) []string {
 	return out
 }
 
-// FindImplementation returns the schema entry for an implementation name
-// (case-insensitive), e.g. "QBittorrent" or "Sonarr".
+// FindImplementation returns the schema entry for an implementation name,
+// case-insensitively.
 func FindImplementation(list []Item, impl string) (Item, bool) {
 	for _, e := range list {
 		if strings.EqualFold(e.Str("implementation"), impl) {
@@ -223,10 +218,9 @@ func masked(v any) bool {
 	return ok && strings.Trim(s, "*") == ""
 }
 
-// MatchesFields reports whether every field in want is already present with the
-// same value in have. Fields whose live value is masked (passwords, API keys) are
-// not compared: the API never returns them, and the connection test is what
-// proves they still work.
+// MatchesFields reports whether every field in want is present with the same value
+// in have. Masked values are not compared: the API never returns them, and the
+// connection test proves they work.
 func MatchesFields(want, have Item, names []string) bool {
 	for _, name := range names {
 		wv, ok := want.FieldValue(name)
@@ -247,25 +241,20 @@ func MatchesFields(want, have Item, names []string) bool {
 	return true
 }
 
-// FieldChange records one owned field that had drifted from what the wiring
-// Job last set and was restored. Old and New are human-readable; a secret
-// field is never represented here at all (see ownedField.secret) so a
-// password or API key can never leak into the receipt.
+// FieldChange records one owned field that drifted and was restored. A secret
+// field is never represented here, so a credential cannot leak into the receipt.
 type FieldChange struct {
 	Field string `json:"field"`
 	Old   string `json:"old,omitempty"`
 	New   string `json:"new,omitempty"`
 }
 
-// EnsureResult is what an Ensure call against an owned Arr/Prowlarr object did.
-// ID is the object's id after the call, which the caller persists as
-// ownership. Drift lists owned fields that were found different on the live
-// object and were restored. Recreated/PreviousID describe a deleted owned
-// object that had to be created again.
+// EnsureResult is what an Ensure call against an owned object did. ID is the id the
+// caller persists; Drift lists restored owned fields; Recreated/PreviousID describe
+// a deleted object created again.
 //
-// StringID and PreviousStringID are the same two facts for an app that keys its
-// objects by a name rather than a number (PBH's downloaders are keys in its own
-// config file), so one receipt line can name either.
+// StringID and PreviousStringID are the same facts for an app keying objects by name
+// (PBH's downloaders are keys in its config).
 type EnsureResult struct {
 	Change           Change
 	ID               int
@@ -274,30 +263,23 @@ type EnsureResult struct {
 	Recreated        bool
 	PreviousID       int
 	PreviousStringID string
-	// Note is the one thing about how the object was found that the receipt has
-	// to say and the change does not: an object adopted in place of the
-	// recorded one, or one of several the app allowed at the same address.
+	// Note is the one thing about how the object was found that the change does not
+	// say: an object adopted in place of the recorded one, or one of several at the
+	// same address.
 	Note string
 }
 
-// ownedField is one field the wiring Job may write on an object it owns.
-// Secret fields (password, apiKey) are always overlaid but never compared:
-// the API never returns their real value, only a mask.
+// ownedField is one field the Job may write on an object it owns. Secret fields are
+// always overlaid but never compared: the API returns only a mask.
 type ownedField struct {
 	name   string
 	value  any
 	secret bool
 }
 
-// locateOwned finds the object the wiring Job owns, by rule, not by habit:
-//
-//   - ownedID != 0: only an id match counts. A rename in the app's own UI is
-//     the user's business and must never cause a second object to be created.
-//     If no object carries that id, it was deleted: report recreated=true so
-//     the caller creates a fresh one and the receipt can say so.
-//   - ownedID == 0: nothing is recorded yet (first run, or an owned.json the
-//     Job could not read). Adopt an existing object with the expected name,
-//     exactly as a first run always has.
+// locateOwned finds the object the Job owns: a recorded id is authoritative (a rename
+// is the user's, and a missing id means recreate), and with nothing recorded an object
+// with the expected name is adopted, as a first run always has.
 func locateOwned(list []Item, ownedID int, name string) (cur Item, found, recreated bool, previousID int) {
 	if ownedID != 0 {
 		for _, item := range list {
@@ -313,27 +295,17 @@ func locateOwned(list []Item, ownedID int, name string) (cur Item, found, recrea
 	return nil, false, false, 0
 }
 
-// locateArrClient finds one download client the Job owns, of the
-// implementation the spec names (qBittorrent or SABnzbd):
+// locateArrClient finds one download client the Job owns, of the implementation the
+// spec names.
 //
-//   - a recorded id is authoritative: a rename in the Arr's UI is the
-//     operator's business and must not create a second client, even when
-//     another client points at the same downloader;
-//   - with nothing recorded, the client this box would own is adopted before
-//     one is created. On a migrated box there is no record yet, and the
-//     source's client has a name of the operator's own ("qBT", "SAB"), so the
-//     name cannot find it -- the same reason qui's instance is adopted by its
-//     host. The host is what makes a client box's: an enabled client of that
-//     implementation pointing at the release's own Service is the one the
-//     release exists to feed. The name stays the fallback, for a box that ran
-//     wiring before it recorded anything;
-//   - only when neither exists was it deleted, so the run creates one and says
-//     which id disappeared.
+// A recorded id is authoritative. With nothing recorded, an enabled client of that
+// implementation pointing at the release's own host is adopted before one is created:
+// a migrated box's client has the operator's own name ("qBT"), so the host is what
+// makes it box's, and the name is the fallback. Only when neither exists was it
+// deleted.
 //
-// Two enabled clients of that implementation at that host are a refusal rather
-// than a pick: the Arr allows both, nothing says which one the operator means,
-// and adopting one would leave the other downloading into a directory box
-// never wires.
+// Two enabled clients of that implementation at that host are a refusal rather than a
+// pick: nothing says which the operator means.
 //
 //nolint:dupl // qui's instance and an Arr's client are different types with the same rules; sharing the body would mean sharing their specs too.
 func locateArrClient(list []Item, spec DownloadClientSpec, ownedID int) (cur Item, found, recreated bool, previousID int, err error) {
@@ -359,10 +331,9 @@ func locateArrClient(list []Item, spec DownloadClientSpec, ownedID int) (cur Ite
 	return nil, false, false, 0, nil
 }
 
-// arrClientHostMatches returns the enabled clients of one implementation whose
-// host is the one the spec names. A client of another implementation is another
-// downloader, and a disabled one is never dialled: neither is the client this
-// box feeds.
+// arrClientHostMatches returns the enabled clients of one implementation at the spec's
+// host: another implementation is another downloader, and a disabled one is never
+// dialled.
 func arrClientHostMatches(list []Item, implementation, host string) []Item {
 	want := normalizeArrHost(host)
 	if want == "" {
@@ -385,8 +356,8 @@ func arrClientHostMatches(list []Item, implementation, host string) []Item {
 	return out
 }
 
-// normalizeArrHost is a download client's host the way two of them are compared:
-// the Arr stores what the operator typed, and "qbittorrent", "QBittorrent" and
+// normalizeArrHost is a download client's host as two are compared: the Arr stores
+// what the operator typed, and "qbittorrent", "QBittorrent" and
 // "http://qbittorrent/" are one address.
 func normalizeArrHost(host string) string {
 	h := strings.TrimSpace(host)
@@ -394,14 +365,10 @@ func normalizeArrHost(host string) string {
 	return strings.ToLower(strings.TrimRight(h, "/"))
 }
 
-// overlayOwned clones the live object and writes only the owned fields onto
-// it, so every other field — name, enable, priority, tags, syncLevel, and
-// anything a future schema adds — is left exactly as the user last set it.
-// It reports drift for every non-secret owned field whose live value did not
-// already match.
-//
-// The fields go on in the shape the live object uses (ownedValue): an Arr's
-// "fields" list, or a plain key for qui's instances and autobrr's clients.
+// overlayOwned clones the live object and writes only the owned fields onto it, so
+// every other field -- name, enable, priority, tags and anything a future schema
+// adds -- is left as the user set it. Drift is reported for non-secret fields whose
+// live value did not match.
 func overlayOwned(live Item, fields []ownedField) (Item, []FieldChange) {
 	desired := live.Clone()
 	var drift []FieldChange
@@ -416,8 +383,8 @@ func overlayOwned(live Item, fields []ownedField) (Item, []FieldChange) {
 	return desired, drift
 }
 
-// formatValue renders a decoded JSON scalar the way a human reading the
-// receipt expects: whole numbers without a trailing ".0".
+// formatValue renders a decoded JSON scalar the way the receipt reads: whole numbers
+// without a trailing ".0".
 func formatValue(v any) string {
 	if f, ok := number(v); ok {
 		if f == float64(int64(f)) {

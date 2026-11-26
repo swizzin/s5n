@@ -7,18 +7,16 @@ import (
 	"time"
 )
 
-// Prowlarr is the indexer manager. s5n keeps indexers in Prowlarr and lets it
-// sync them out to the Arrs, so the wiring Job registers the Arrs as
-// applications rather than touching indexers at all.
+// Prowlarr is the indexer manager: s5n keeps indexers there and lets it sync them to
+// the Arrs, so the Job registers the Arrs as applications and touches no indexer.
 type Prowlarr struct {
 	client  *Client
 	urlBase string
 	selfURL string
 }
 
-// NewProwlarr builds a client. selfURL is how the Arrs reach Prowlarr
-// (http://prowlarr:9696/prowlarr), which Prowlarr hands to each application it
-// registers.
+// NewProwlarr builds a client. selfURL is how the Arrs reach Prowlarr, which it hands
+// to each application.
 func NewProwlarr(baseURL, urlBase, selfURL, apiKey string) *Prowlarr {
 	c := NewClient(baseURL, nil)
 	c.Header.Set("X-Api-Key", apiKey)
@@ -46,26 +44,16 @@ type ApplicationSpec struct {
 	APIKey         string
 }
 
-// EnsureApplication registers the Arr and proves Prowlarr can talk to it.
-// Like the Arr download client, the API key is never returned by the API, so
-// a passing connection test is the evidence that the stored key is the right
-// one.
+// EnsureApplication registers the Arr and proves Prowlarr can talk to it. The key is
+// never returned, so a passing test is the evidence.
 //
-// ownedID carries the id the wiring Job recorded the last time it created or
-// adopted this application: a nonzero id is trusted over the object's current
-// name, so a rename never creates a duplicate registration. A zero ownedID
-// adopts an existing application named spec.Name instead.
+// A nonzero ownedID is trusted over the current name, so a rename never duplicates; a
+// zero adopts the application named spec.Name. On update only prowlarrUrl, baseUrl and
+// apiKey are overlaid, and a deleted owned application is recreated.
 //
-// On update the live object is cloned and only prowlarrUrl, baseUrl and
-// apiKey are overlaid; name, enable, syncLevel, tags and anything else are
-// left exactly as the user set them. A deleted owned application is
-// recreated.
-//
-// apiKey is the Arr's key, copied out of the release Secret, and Prowlarr
-// answers a mask for it rather than the value, so a rotated key is invisible to
-// a field comparison: knownFingerprint is the sha256 of the key last written and
-// proven, and a difference rewrites the application. Prowlarr's own test is what
-// proves the new key before anything is written.
+// Prowlarr answers a mask for the key, so a rotated key is invisible to field
+// comparison: knownFingerprint is the sha256 of the key last written and proven, and
+// a difference rewrites the application after Prowlarr's own test.
 func (p *Prowlarr) EnsureApplication(ctx context.Context, spec ApplicationSpec, ownedID int, knownFingerprint string) (EnsureResult, error) {
 	var list []Item
 	if err := p.client.Get(ctx, p.api("/applications"), &list); err != nil {
@@ -110,8 +98,8 @@ func (p *Prowlarr) EnsureApplication(ctx context.Context, spec ApplicationSpec, 
 		}
 	}
 
-	// Test before writing, with the id carried (when present) so the
-	// uniqueness check ignores the application being tested.
+	// Test before writing, carrying the id so the uniqueness check ignores the
+	// application being tested.
 	if err := p.client.Post(ctx, p.api("/applications/test"), desired, nil); err != nil {
 		return EnsureResult{Change: change, ID: desired.Int("id")}, fmt.Errorf("test %s: %w", spec.Name, err)
 	}

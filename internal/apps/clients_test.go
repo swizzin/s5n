@@ -10,8 +10,8 @@ import (
 	"testing"
 )
 
-// fakeQbit answers like qBittorrent 5: 204 on login, a session cookie that every
-// other call must carry, and a 409 on a duplicate category.
+// fakeQbit answers like qBittorrent 5: 204 login, a session cookie, 409 on a
+// duplicate category.
 type fakeQbit struct {
 	mu       sync.Mutex
 	creds    [2]string
@@ -321,9 +321,8 @@ func TestProwlarrEnsureApplicationRecreatesWhenDeleted(t *testing.T) {
 	}
 }
 
-// A category may be one qBittorrent subcategory level. The name is sent
-// form-encoded, read back under the same key, and a later run matches it
-// without writing; repairing its save path is an edit, never a second create.
+// A subcategory name is sent form-encoded, matched on a later run, and repaired as
+// an edit, never a second create.
 func TestQbitSubcategory(t *testing.T) {
 	f := &fakeQbit{creds: [2]string{"admin", "hunter2"}, cats: map[string]string{}, sessions: map[string]bool{}}
 	srv := httptest.NewServer(f)
@@ -353,9 +352,8 @@ func TestQbitSubcategory(t *testing.T) {
 	}
 }
 
-// Prowlarr stores the Arr's API key and answers a mask for it, so a rotated key
-// is invisible to the field comparison: the fingerprint rewrites the
-// application, and Prowlarr's own test proves the new key first.
+// A rotated key is invisible through the mask: the fingerprint rewrites it after
+// Prowlarr's own test.
 func TestProwlarrEnsureApplicationRewritesOnRotatedKey(t *testing.T) {
 	f := &fakeProwlarr{urlBase: "/prowlarr"}
 	srv := httptest.NewServer(f)

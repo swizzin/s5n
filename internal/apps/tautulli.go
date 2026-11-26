@@ -14,22 +14,17 @@ import (
 	"time"
 )
 
-// Tautulli is the Plex watch-history/analytics app. There is no documented
-// "set_settings" api/v2 command (only get_settings), so the only way to write
-// its PMS_* settings programmatically is the same /configUpdate endpoint its
-// own settings page posts to. That endpoint skips CSRF only under /api, so it
-// needs a session cookie plus the CSRF token embedded in the /settings page,
-// both obtained unauthenticated (Tautulli ships with web auth disabled by
-// default and no setup wizard required for the API or this endpoint to work).
+// Tautulli is the Plex watch-history app. There is no set_settings API command, so
+// the PMS_* settings are written through the same /configUpdate endpoint its settings
+// page posts to: that needs a session cookie and the CSRF token from /settings, both
+// obtained unauthenticated because the app's own login is off.
 type Tautulli struct {
 	client *Client
 	apiKey string
 }
 
-// NewTautulli builds a client. apiKey is seeded into config.ini by the
-// tautulli-config init container (see cmd/s5n), not read back from a live app:
-// Tautulli's own generated key is not reachable from the wiring Job, which has
-// no mount into this app's /config.
+// NewTautulli builds a client; apiKey is seeded into config.ini by the init
+// container, because the Job has no mount into the app's /config.
 func NewTautulli(baseURL, apiKey string) *Tautulli {
 	jar, _ := cookiejar.New(nil)
 	c := NewClient(baseURL, &http.Client{Timeout: 60 * time.Second, Jar: jar})
@@ -62,9 +57,8 @@ func (t *Tautulli) call(ctx context.Context, cmd string, extra url.Values, out *
 	return nil
 }
 
-// Ping is the readiness probe: cmd=status succeeds once the seeded api_key is
-// live and api_enabled is on, which is also proof the init container's config
-// seed took.
+// Ping is the readiness probe: status succeeds once the seeded key is live and the
+// API on, which also proves the config seed took.
 func (t *Tautulli) Ping(ctx context.Context) error {
 	var out apiResponse
 	return t.call(ctx, "status", nil, &out)
@@ -75,10 +69,9 @@ func (t *Tautulli) WaitReady(ctx context.Context, timeout time.Duration) error {
 	return Retry(ctx, timeout, t.Ping)
 }
 
-// PMSSettings is the subset of Tautulli's "PMS" settings section the data
-// contract depends on. Token is a pointer because get_settings may withhold it
-// (see EnsurePlexConnection): null and "the stored token is empty" must not
-// look the same.
+// PMSSettings is the PMS section the data contract depends on. Token is a pointer
+// because get_settings may withhold it: null and an empty token must not look
+// alike.
 type PMSSettings struct {
 	IP         string
 	Port       int
@@ -87,8 +80,7 @@ type PMSSettings struct {
 	APIEnabled bool
 }
 
-// currentPMS reads the live PMS section (and General.api_enabled) through the
-// documented, read-only get_settings command.
+// currentPMS reads the live PMS section and api_enabled through get_settings.
 func (t *Tautulli) currentPMS(ctx context.Context) (PMSSettings, error) {
 	var out struct {
 		Response struct {
@@ -123,10 +115,8 @@ func (t *Tautulli) currentPMS(ctx context.Context) (PMSSettings, error) {
 
 var csrfTokenRE = regexp.MustCompile(`csrf-token"\s+content="([^"]*)"`)
 
-// csrfToken fetches /settings to establish a session and read the CSRF token
-// embedded in its page, both of which /configUpdate requires. /settings is a
-// cherrypy page, not part of the stdlib-friendly JSON API, so this is a plain
-// text scrape of one meta tag rather than parsing HTML properly.
+// csrfToken fetches /settings for a session and the CSRF token /configUpdate
+// requires: a plain scrape of one meta tag, not an HTML parse.
 func (t *Tautulli) csrfToken(ctx context.Context) (string, error) {
 	text, err := t.client.GetText(ctx, "/settings")
 	if err != nil {
@@ -139,41 +129,20 @@ func (t *Tautulli) csrfToken(ctx context.Context) (string, error) {
 	return m[1], nil
 }
 
-// EnsurePlexConnection points Tautulli's PMS section at the release's Plex,
-// with the Plex server token (X-Plex-Token) supplied in the release Secret, and
-// proves the connection with get_server_identity, Tautulli's equivalent of the
-// Arr apps' own /test endpoint: it makes Tautulli fetch identity from the live
-// Plex server, so a wrong host/port cannot pass as "configured".
+// EnsurePlexConnection points the PMS section at the release's Plex with the
+// Secret's token, and proves it with get_server_identity: address and identity, not
+// authorization, because that call reads Plex's unauthenticated /identity. Callers
+// prove the token against Plex first (apps.Plex.VerifyToken).
 //
-// That proof is reachability and identity, not authorization: Tautulli's
-// get_server_identity reads Plex's /identity, which answers unauthenticated on
-// every build, so it cannot tell a valid token from an invalid one. Callers
-// must prove the token against Plex's authenticated API first
-// (apps.Plex.VerifyToken); by the time this runs the token is known good.
+// A token is mandatory: trusting a network range instead would hand anyone who can
+// reach the Gateway admin of the server, because Envoy connects from the pod CIDR.
 //
-// A token is mandatory. Plex must never be configured to trust a network range
-// instead (the chart's apps.plex.noAuthNetworks defaults to empty): the public
-// Gateway's Envoy proxy connects to Plex from its own pod IP, which is inside
-// the cluster pod CIDR, so a trusted range there would hand anyone who can
-// reach the Gateway unauthenticated admin of the server. An empty token is
-// therefore an error here rather than a tokenless write.
+// Tautulli returns PMS_TOKEN as null (a do-not-download key), so the comparison falls
+// back to knownFingerprint; an absent or different one is a rotation. The write always
+// carries the Secret's token, never a value just read.
 //
-// The token cannot always be compared: Tautulli lists PMS_TOKEN among its
-// config's do-not-download keys, so get_settings returns it as JSON null rather
-// than as a value. A null (or a "********" placeholder from a build that masks
-// it) is "unknown", so the comparison falls back to knownFingerprint, the
-// sha256-hex fingerprint of the token last written and proven (see
-// apps.PlexTokenFingerprint). An absent or different fingerprint is a rotation:
-// the write goes out again. With no record at all — a first run on an existing
-// release — the link is rewritten once, which is the only safe reading of
-// "unknown". When the value is readable a difference is real drift, and the
-// write below always carries the Secret's token, never the value just read: a
-// masked placeholder must never be stored back (see MatchesFields' masked-value
-// rule).
-//
-// api_enabled is resent on every write: /configUpdate treats an absent
-// checkbox field as "unchecked" (CherryPy form semantics), so omitting it
-// would silently disable Tautulli's own API on the very call that configures it.
+// api_enabled is resent: /configUpdate treats an absent checkbox as unchecked, which
+// would disable the API on the call that configures it.
 func (t *Tautulli) EnsurePlexConnection(ctx context.Context, host string, port int, machineIdentifier, token, knownFingerprint string) (Change, error) {
 	if strings.TrimSpace(token) == "" {
 		return Unchanged, fmt.Errorf("no Plex token: refusing to configure a tokenless PMS link")
@@ -231,15 +200,9 @@ func (t *Tautulli) EnsurePlexConnection(ctx context.Context, host string, port i
 	return change, nil
 }
 
-// plexTokenMatches reports whether the PMS token Tautulli has stored is the one
-// in the release Secret. live is nil when get_settings withheld the token
-// (PMS_TOKEN is a do-not-download key there, so it arrives as JSON null); a
-// masked placeholder is treated the same way. Both mean "cannot compare", so
-// the answer comes from knownFingerprint: the sha256-hex fingerprint of the
-// token the Job last wrote and proved. An absent fingerprint means no successful
-// write is on record, and a different one means the Secret's token was rotated
-// since — both are differences. A genuinely empty stored token is a difference
-// too.
+// plexTokenMatches reports whether the stored PMS token is the Secret's. A nil or
+// masked live value cannot be compared, so knownFingerprint decides; an absent one
+// means no write on record, and an empty stored token is a difference.
 func plexTokenMatches(live *string, want, knownFingerprint string) bool {
 	if live != nil && *live == "" {
 		return false
@@ -250,10 +213,8 @@ func plexTokenMatches(live *string, want, knownFingerprint string) bool {
 	return *live == want
 }
 
-// postForm is a small helper for the one non-JSON, cookie-and-header-carrying
-// POST this package needs; Client.PostForm does not thread extra headers or a
-// response struct through, and duplicating Client here would re-implement its
-// cookie jar.
+// postForm is for the one POST needing extra headers and a response struct;
+// Client.PostForm threads neither.
 func postForm(ctx context.Context, c *Client, url string, form url.Values, hdr http.Header, out any) error {
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, strings.NewReader(form.Encode()))
 	if err != nil {
@@ -276,10 +237,7 @@ func postForm(ctx context.Context, c *Client, url string, form url.Values, hdr h
 	return decodeJSON(resp, out)
 }
 
-// decodeJSON reads, decodes and closes a response body. Tautulli's
-// /configUpdate is the one call in this package that needs custom headers
-// (X-CSRF-Token) alongside a JSON response, which Client's own helpers do not
-// thread through.
+// decodeJSON reads, decodes and closes a response body for /configUpdate.
 func decodeJSON(resp *http.Response, out any) error {
 	defer func() { _ = resp.Body.Close() }()
 	data, err := io.ReadAll(io.LimitReader(resp.Body, 4<<20))

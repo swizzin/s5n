@@ -11,11 +11,8 @@ import (
 	"testing"
 )
 
-// fakeTautulli is a minimal Tautulli: api/v2 (status, get_settings,
-// get_server_identity) plus /settings (CSRF token) and /configUpdate, with a
-// write counter so idempotency and the api_enabled-resend behavior are
-// testable the same way fakeArr proves qBittorrent/Sonarr/Radarr in
-// internal/wiring's tests.
+// fakeTautulli is a minimal Tautulli: api/v2, /settings' CSRF token and
+// /configUpdate, with a write counter.
 type fakeTautulli struct {
 	mu       sync.Mutex
 	apiKey   string
@@ -23,10 +20,8 @@ type fakeTautulli struct {
 	pmsPort  int
 	pmsID    string
 	pmsToken string
-	// tokenMode mimics how get_settings exposes pms_token: "" returns the
-	// stored value, "hide" returns null (Tautulli's PMS_TOKEN is a
-	// do-not-download key) and "mask" returns the placeholder a masking
-	// build would send.
+	// tokenMode: "" returns the stored value, "hide" null (a do-not-download key),
+	// "mask" a placeholder.
 	tokenMode    string
 	apiEnabled   bool
 	writes       int
@@ -135,8 +130,7 @@ func writeTautulliJSON(w http.ResponseWriter, v any) {
 	_ = json.NewEncoder(w).Encode(v)
 }
 
-// testPlexToken is the Plex server token every test hands the wiring, standing
-// in for the release Secret's plex-token key.
+// testPlexToken stands in for the Secret's plex-token.
 const testPlexToken = "plex-token-abc123"
 
 func TestTautulliWaitReady(t *testing.T) {
@@ -155,10 +149,8 @@ func TestTautulliWaitReadyFailsOnBadKey(t *testing.T) {
 	}
 }
 
-// The chart serves Tautulli under /tautulli and seals its own http_root to that
-// prefix, so the URL the Job is given carries it (charts/s5n/templates/
-// wiring.yaml) and every request has to land under it: the app's API is at
-// /tautulli/api/v2, and the root of the port answers with a redirect instead.
+// The chart seals http_root to /tautulli, so every request lands under it and the
+// port's root redirects.
 func TestTautulliAsksUnderThePrefixItIsServedAt(t *testing.T) {
 	var paths []string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -197,9 +189,8 @@ func TestEnsurePlexConnectionCreatesThenIsIdempotent(t *testing.T) {
 	if f.configUpdate != 1 {
 		t.Fatalf("configUpdate called %d times, want 1", f.configUpdate)
 	}
-	// api_enabled must be resent explicitly: an absent checkbox field is
-	// "unchecked" in Tautulli's own form-handling, so omitting it on this
-	// write would disable the API on the very call that configures it.
+	// An absent checkbox is "unchecked": omitting api_enabled would disable the
+	// API on the call that configures it.
 	if f.lastForm.Get("api_enabled") != "1" {
 		t.Fatalf("api_enabled not resent: form = %v", f.lastForm)
 	}
@@ -244,9 +235,7 @@ func TestEnsurePlexConnectionRepairsDrift(t *testing.T) {
 func TestEnsurePlexConnectionFailsWhenIdentityDoesNotMatch(t *testing.T) {
 	f, srv := newFakeTautulli(t)
 	tt := NewTautulli(srv.URL, "test-key")
-	// Simulate Tautulli saving the settings but reaching a different Plex
-	// than the one asked for (e.g. a DNS/host mixup): get_server_identity
-	// must be the proof, not the write's own 200 OK.
+	// A save that reaches a different Plex must fail the identity proof.
 	origHandler := f
 	_ = origHandler
 	srv.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -297,8 +286,7 @@ func TestEnsurePlexConnectionSendsPlexToken(t *testing.T) {
 	}
 }
 
-// A rotated token is drift even though host, port and identifier still match:
-// otherwise Tautulli would keep using a token the release no longer has.
+// A rotated token is drift even when host, port and identifier match.
 func TestEnsurePlexConnectionRewritesRotatedToken(t *testing.T) {
 	f, srv := newFakeTautulli(t)
 	tt := NewTautulli(srv.URL, "test-key")
@@ -329,10 +317,8 @@ func TestEnsurePlexConnectionRewritesRotatedToken(t *testing.T) {
 	}
 }
 
-// Tautulli withholds pms_token from get_settings (PMS_TOKEN is a
-// do-not-download key), so it arrives as null. The recorded fingerprint of the
-// token last written is then the only evidence the link is current: when it
-// matches, the second run must stay a no-op rather than rewrite every time.
+// With pms_token hidden, the fingerprint is the only evidence the link is current: a
+// match is a no-op.
 func TestEnsurePlexConnectionWithheldTokenSameFingerprintStaysUnchanged(t *testing.T) {
 	f, srv := newFakeTautulli(t)
 	tt := NewTautulli(srv.URL, "test-key")
@@ -355,9 +341,8 @@ func TestEnsurePlexConnectionWithheldTokenSameFingerprintStaysUnchanged(t *testi
 	}
 }
 
-// A null live token with a fingerprint that belongs to a different token means
-// the Secret rotated while Tautulli hid the stored value: the link must be
-// rewritten with the current token, and the new token must be what is sent.
+// A fingerprint for another token means the Secret rotated: rewrite with the current
+// one.
 func TestEnsurePlexConnectionWithheldTokenRewritesRotatedToken(t *testing.T) {
 	f, srv := newFakeTautulli(t)
 	tt := NewTautulli(srv.URL, "test-key")
@@ -388,9 +373,8 @@ func TestEnsurePlexConnectionWithheldTokenRewritesRotatedToken(t *testing.T) {
 	}
 }
 
-// No fingerprint on record (a first run against an existing install) with a
-// hidden live token is "unknown", not "unchanged": rewrite once so the link is
-// known to be current, then the fingerprint makes the next run a no-op.
+// No fingerprint with a hidden token is "unknown": rewrite once, then it is a
+// no-op.
 func TestEnsurePlexConnectionWithheldTokenWithoutFingerprintRewritesOnce(t *testing.T) {
 	f, srv := newFakeTautulli(t)
 	tt := NewTautulli(srv.URL, "test-key")
@@ -417,10 +401,8 @@ func TestEnsurePlexConnectionWithheldTokenWithoutFingerprintRewritesOnce(t *test
 	}
 }
 
-// A masked placeholder must never be compared as if it were the stored token,
-// and — the failure mode that matters — never written back. Force a real drift
-// (the host) so a write happens, then assert the body carried the Secret's
-// token and not the placeholder.
+// A masked placeholder is never compared or written back: a write still carries the
+// Secret's token.
 func TestEnsurePlexConnectionNeverWritesMaskedToken(t *testing.T) {
 	f, srv := newFakeTautulli(t)
 	tt := NewTautulli(srv.URL, "test-key")
@@ -446,8 +428,7 @@ func TestEnsurePlexConnectionNeverWritesMaskedToken(t *testing.T) {
 	}
 }
 
-// Without a token the client must refuse outright: the only alternative
-// (relying on Plex trusting a network range) is the hole this replaced.
+// Without a token the client refuses: the alternative is the network-trust hole.
 func TestEnsurePlexConnectionRequiresToken(t *testing.T) {
 	f, srv := newFakeTautulli(t)
 	tt := NewTautulli(srv.URL, "test-key")

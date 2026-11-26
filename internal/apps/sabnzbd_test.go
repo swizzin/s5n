@@ -10,9 +10,8 @@ import (
 	"testing"
 )
 
-// fakeSabnzbd answers like SABnzbd 5: mode=version without a key, everything
-// else with one, get_config in the app's own nested shape, and set_config that
-// applies what it is given unless the test says otherwise.
+// fakeSabnzbd answers like SABnzbd 5: version without a key, get_config nested, and
+// set_config applying what it is given unless told otherwise.
 type fakeSabnzbd struct {
 	mu      sync.Mutex
 	key     string
@@ -146,8 +145,7 @@ func TestSabnzbdSealsTheDataContractAndProvesIt(t *testing.T) {
 	}
 }
 
-// TestSabnzbdRefusesADataContractThatDoesNotStick: set_config answers 200 whether
-// or not the value was accepted, which is why the read-back is the proof.
+// set_config answers 200 either way, so the read-back is the proof.
 func TestSabnzbdRefusesADataContractThatDoesNotStick(t *testing.T) {
 	f := newFakeSabnzbd()
 	f.sticky = true
@@ -161,9 +159,8 @@ func TestSabnzbdRefusesADataContractThatDoesNotStick(t *testing.T) {
 	}
 }
 
-// TestSabnzbdCreatesACategoryWithItsDirectory is the silent failure this package
-// exists for: an unknown category falls back to "*" with no directory, so a job
-// unpacks into the root of complete_dir and the Arr's import still works.
+// An unknown category falls back to "*" with no directory: the silent failure this
+// exists for.
 func TestSabnzbdCreatesACategoryWithItsDirectory(t *testing.T) {
 	f := newFakeSabnzbd()
 	srv := httptest.NewServer(f)
@@ -212,9 +209,7 @@ func TestSabnzbdRefusesACategoryThatDoesNotStick(t *testing.T) {
 	}
 }
 
-// TestSabnzbdNamesTheEdgeSettingsOnA403: the two traps the chart seals are the
-// only things that answer 403 to every request through the Gateway, and the
-// message has to name them rather than an HTTP status.
+// A 403 names the two chart-sealed settings rather than an HTTP status.
 func TestSabnzbdNamesTheEdgeSettingsOnA403(t *testing.T) {
 	f := newFakeSabnzbd()
 	f.forbid = true
@@ -227,9 +222,7 @@ func TestSabnzbdNamesTheEdgeSettingsOnA403(t *testing.T) {
 	}
 }
 
-// sabnzbdSchema is the shape Sonarr and Radarr return for their SABnzbd
-// implementation: the same fields as qBittorrent's, plus the API key, minus the
-// qBittorrent-only ones.
+// sabnzbdSchema is the Arr's SABnzbd schema: qBittorrent's fields plus the key.
 func sabnzbdSchema() []Item {
 	var raw []any
 	for _, f := range []Item{

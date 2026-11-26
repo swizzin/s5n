@@ -8,24 +8,22 @@ import (
 	"time"
 )
 
-// Kind is an Arr application type. The three share an API shape and differ in
-// the API version they serve it under, the category field name and the
-// endpoint of the same name.
+// Kind is an Arr application type: the three share an API shape and differ in the
+// version, the category field name and the endpoint of the same name.
 type Kind string
 
 const (
 	Sonarr Kind = "sonarr"
 	Radarr Kind = "radarr"
-	// Lidarr is the third Arr. It is the same API with a different version and
-	// one extra step for its root folder; see apiVersion and EnsureRootFolder.
+	// Lidarr is the third Arr: the same API with a different version and one extra
+	// step for its root folder; see apiVersion and EnsureRootFolder.
 	Lidarr Kind = "lidarr"
 )
 
-// apiVersion is the version each app serves its HTTP API under. Sonarr and
-// Radarr use /api/v3; Lidarr uses /api/v1, because every one of its controllers
-// is decorated [V1ApiController] and the route template is
-// api/v{version}/{resource} (src/Lidarr.Http/VersionedApiControllerAttribute.cs
-// at v3.1.2.4902).
+// apiVersion is the version each app serves: Sonarr and Radarr /api/v3, Lidarr
+// /api/v1, because its controllers are [V1ApiController] and the route template is
+// api/v{version}/{resource} (src/Lidarr.Http/VersionedApiControllerAttribute.cs at
+// v3.1.2.4902).
 func (k Kind) apiVersion() string {
 	if k == Lidarr {
 		return "v1"
@@ -39,9 +37,9 @@ func (i Item) Bool(key string) bool {
 	return b
 }
 
-// Arr is a Sonarr, Radarr or Lidarr instance. All three are the same code with
-// a different API version, a different name for the download category and, for
-// Lidarr, a root folder that also carries the app's default profiles.
+// Arr is a Sonarr, Radarr or Lidarr instance: the same code with an API version, a
+// download-category field name, and for Lidarr a root folder carrying its default
+// profiles.
 type Arr struct {
 	Kind    Kind
 	Name    string
@@ -49,8 +47,8 @@ type Arr struct {
 	urlBase string
 }
 
-// NewArr builds a client. urlBase is the app's own URL base ("/sonarr"), which is
-// what the chart sets through the Arr's SERVER__URLBASE env var.
+// NewArr builds a client. urlBase is the app's own URL base ("/sonarr"), set by the
+// chart through its SERVER__URLBASE env var.
 func NewArr(kind Kind, name, baseURL, urlBase, apiKey string) *Arr {
 	c := NewClient(baseURL, nil)
 	c.Header.Set("X-Api-Key", apiKey)
@@ -59,8 +57,8 @@ func NewArr(kind Kind, name, baseURL, urlBase, apiKey string) *Arr {
 
 func (a *Arr) api(path string) string { return a.urlBase + "/api/" + a.Kind.apiVersion() + path }
 
-// Ping hits the unauthenticated health endpoint the chart also uses as its
-// readiness probe.
+// Ping hits the unauthenticated health endpoint the chart uses as its readiness
+// probe.
 func (a *Arr) Ping(ctx context.Context) error {
 	var s string
 	return a.client.send(ctx, "GET", a.urlBase+"/ping", "", nil, nil, &s)
@@ -83,27 +81,25 @@ func (a *Arr) downloadClientSchema(ctx context.Context) ([]Item, error) {
 	return out, err
 }
 
-// DownloadClientSpec is one download client every Arr instance gets: the
-// release's qBittorrent, and the release's SABnzbd when it is switched on.
+// DownloadClientSpec is one download client every Arr instance gets: the release's
+// qBittorrent, and SABnzbd when it is on.
 type DownloadClientSpec struct {
-	// Implementation is the Arr's own name for the client type: "QBittorrent"
-	// or "Sabnzbd". Empty means qBittorrent, the client every release has.
+	// Implementation is the Arr's own name for the client type; empty means
+	// qBittorrent, the client every release has.
 	Implementation string
-	// Protocol is the client's protocol as the Arr parses it: "torrent" or
-	// "usenet" (NzbDrone.Core.Indexers.DownloadProtocol).
+	// Protocol is "torrent" or "usenet" (NzbDrone.Core.Indexers.DownloadProtocol).
 	Protocol string
 	Name     string
 	Category string
 	Host     string
 	Port     int
 	UseSSL   bool
-	// URLBase is the prefix the client is served under ("/sabnzbd"), or empty
-	// for qBittorrent, which has none.
+	// URLBase is the client's prefix ("/sabnzbd"), or empty for qBittorrent.
 	URLBase  string
 	Username string
 	Password string
-	// APIKey is SABnzbd's key. An Arr stores it in a masked field, so it is
-	// overlaid like a password and never compared.
+	// APIKey is SABnzbd's key: a masked field, overlaid like a password and never
+	// compared.
 	APIKey string
 }
 
@@ -122,9 +118,7 @@ func (s DownloadClientSpec) protocol() string {
 }
 
 // categoryField is the field each app's qBittorrent settings call the download
-// category: tvCategory in Sonarr, movieCategory in Radarr, musicCategory in
-// Lidarr (Download/Clients/QBittorrent/QBittorrentSettings.cs at each app's
-// tag). Lidarr has one category, not a separate imported one the box sets.
+// category (Download/Clients/QBittorrent/QBittorrentSettings.cs at each tag).
 func (a *Arr) categoryField() string {
 	switch a.Kind {
 	case Radarr:
@@ -135,29 +129,19 @@ func (a *Arr) categoryField() string {
 	return "tvCategory"
 }
 
-// EnsureDownloadClient makes the Arr's qBittorrent download client match the
-// spec and then proves the connection with the app's own test endpoint.
-// Secrets are never read back by the API, so a passing test is the only
-// honest evidence that the stored password still works.
+// EnsureDownloadClient makes the Arr's client match the spec and proves it with the
+// app's own test endpoint: a passing test is the only evidence a stored secret works.
 //
-// ownedID, when nonzero, is the id the wiring Job recorded the last time it
-// created or adopted this client: only an id match counts as "ours", so a
-// rename in the Sonarr/Radarr UI is the user's business and never creates a
-// duplicate. A zero ownedID means nothing is recorded (first run, or an
-// owned.json the Job could not read), so the enabled qBittorrent client
-// pointing at the release's own qBittorrent is adopted (locateArrClient), and
-// a client named spec.Name is the fallback.
+// A nonzero ownedID is authoritative, so a UI rename never creates a duplicate; zero
+// adopts the enabled client pointing at the release's host (locateArrClient), with
+// spec.Name as the fallback.
 //
-// On update the live object is cloned and only the data-contract fields are
-// overlaid (host, port, useSsl, urlBase, username, password, the category
-// field) — name, enable, priority, tags and anything else are left exactly as
-// the user set them. A deleted owned client is recreated.
+// On update only the data-contract fields are overlaid; everything else stays as the
+// user set it. A deleted owned client is recreated.
 //
-// username and password are owned fields that s5n writes empty: qBittorrent's
-// login is bypassed for the release's addresses, so the client carries no
-// credential and an install that stored one has it cleared on the next run.
-// That is why there is no fingerprint to compare here: nothing this client
-// holds can rotate.
+// username and password are written empty: qBittorrent's login is bypassed for the
+// release's addresses, so an old install's credential is cleared and nothing can
+// rotate.
 func (a *Arr) EnsureDownloadClient(ctx context.Context, spec DownloadClientSpec, ownedID int) (EnsureResult, error) {
 	list, err := a.downloadClients(ctx)
 	if err != nil {
@@ -210,9 +194,8 @@ func (a *Arr) EnsureDownloadClient(ctx context.Context, spec DownloadClientSpec,
 		}
 	}
 
-	// Test before writing. Arr validates the payload as if it were being saved,
-	// so sending it with the id above (when present) is what makes the test
-	// idempotent instead of reporting this very client's own name as a clash.
+	// Test before writing. The Arr validates the payload as if saving, so carrying
+	// the id is what keeps the test from reporting this client's own name as a clash.
 	if err := a.client.Post(ctx, a.api("/downloadclient/test"), desired, nil); err != nil {
 		return EnsureResult{Change: change, ID: desired.Int("id")}, fmt.Errorf("test download client %q: %w", spec.Name, err)
 	}
@@ -232,17 +215,13 @@ func (a *Arr) EnsureDownloadClient(ctx context.Context, spec DownloadClientSpec,
 	return EnsureResult{Change: change, ID: desired.Int("id"), Drift: drift, Recreated: recreated, PreviousID: previousID}, nil
 }
 
-// EnsureRootFolder adds a root folder and asserts it is writable by the app.
+// EnsureRootFolder adds a root folder and asserts it is writable.
 //
-// Lidarr's root folder is more than a path. Its resource is validated the way
-// the add-root-folder form is: Name is not empty, and DefaultQualityProfileId
-// and DefaultMetadataProfileId are both positive ids of profiles that exist
-// (Lidarr.Api.V1/RootFolders/RootFolderController.cs at v3.1.2.4902, whose
-// SharedValidator applies to POST as well as PUT; RuleBuilderExtensions.ValidId
-// is GreaterThan(0)). A body of {"path": ...} alone is refused there, so a
-// Lidarr folder is created with the directory's own name and the app's first
-// quality and metadata profile -- the defaults every artist added under it
-// inherits, which the operator tunes in the app afterwards.
+// Lidarr's is more than a path: its SharedValidator requires a name and positive
+// default quality and metadata profile ids (Lidarr.Api.V1/RootFolders/RootFolderController.cs
+// at v3.1.2.4902; RuleBuilderExtensions.ValidId is GreaterThan(0)), so a bare path
+// is refused. It is created with the directory's name and the app's first two
+// profiles.
 func (a *Arr) EnsureRootFolder(ctx context.Context, path string) (Change, error) {
 	var folders []Item
 	if err := a.client.Get(ctx, a.api("/rootfolder"), &folders); err != nil {
@@ -281,10 +260,8 @@ func (a *Arr) EnsureRootFolder(ctx context.Context, path string) (Change, error)
 	return Created, nil
 }
 
-// firstProfile is the lowest id an app offers in one of its profile lists. It
-// is the app's own first choice rather than a name this package invents: Lidarr
-// ships its metadata profiles and quality profiles in its own table, and a
-// migration or a fresh install both have at least one.
+// firstProfile is the lowest id an app offers in one of its profile lists: the app's
+// own first choice, not a name this package invents.
 func (a *Arr) firstProfile(ctx context.Context, endpoint, what string) (int, error) {
 	var list []Item
 	if err := a.client.Get(ctx, a.api(endpoint), &list); err != nil {
@@ -302,8 +279,8 @@ func (a *Arr) firstProfile(ctx context.Context, endpoint, what string) (int, err
 	return best, nil
 }
 
-// EnsureHardlinks turns on hardlink imports. It is the setting the whole /data
-// contract exists for, so it is asserted rather than assumed.
+// EnsureHardlinks turns on hardlink imports: the setting the whole /data contract
+// exists for, so it is asserted rather than assumed.
 func (a *Arr) EnsureHardlinks(ctx context.Context) (Change, error) {
 	var mm Item
 	if err := a.client.Get(ctx, a.api("/config/mediamanagement"), &mm); err != nil {

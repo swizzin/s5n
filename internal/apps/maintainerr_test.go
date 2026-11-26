@@ -1,9 +1,7 @@
 package apps
 
-// maintainerr_test.go is the fake of Maintainerr's settings API: the shapes are
-// the ones its settings controller answers at v3.33.0, and the one rule that
-// matters is its own -- a PATCH that moves the server is refused until a token is
-// stored.
+// The fake of Maintainerr's settings API at v3.33.0, including its rule: a PATCH that
+// moves the server is refused until a token is stored.
 
 import (
 	"context"
@@ -20,16 +18,13 @@ const testMaintainerrToken = "synthetic-plex-token-42"
 // fakeMaintainerr is one settings row and the routes that write it.
 type fakeMaintainerr struct {
 	mu sync.Mutex
-	// settings is what GET /api/settings answers, with the token masked the way
-	// the app masks it.
+	// settings is the masked row GET /api/settings answers.
 	settings MaintainerrSettings
 	// storedToken is the token the app holds, which the mask is made from.
 	storedToken string
-	// tokenSaves and patches count the writes, so a test can prove a second run
-	// wrote nothing.
+	// tokenSaves and patches count writes, so a second run can be proved silent.
 	tokenSaves, patches int
-	// testAnswer is the connection test's message, and testFails makes it
-	// answer NOK the way the app does when Plex refuses the stored token.
+	// testFails makes the connection test answer NOK.
 	testAnswer string
 	testFails  bool
 	// failPatch makes every PATCH answer 500.
@@ -86,8 +81,7 @@ func (f *fakeMaintainerr) saveToken(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]any{"status": "OK", "code": 1, "message": "Success"})
 }
 
-// patchSettings merges a body over the row, and refuses a server change until a
-// token is stored -- the app's own rule at v3.33.0.
+// patchSettings merges a body, refusing a server change until a token is stored.
 func (f *fakeMaintainerr) patchSettings(w http.ResponseWriter, r *http.Request) {
 	if f.failPatch {
 		http.Error(w, "cannot save", http.StatusInternalServerError)
@@ -161,9 +155,7 @@ func maintainerrSpec(token, fingerprint string) PlexConnection {
 	return PlexConnection{Host: "plex", Port: 32400, Token: token, KnownFingerprint: fingerprint}
 }
 
-// A fresh Maintainerr has no connection and no token: the token goes in first
-// (a PATCH that moves the server is refused until one is stored), the connection
-// second, and its own test proves the two.
+// A fresh Maintainerr gets the token first, then the connection, then the app's test.
 func TestMaintainerrConfiguresAFreshPlexConnection(t *testing.T) {
 	m, f := newMaintainerrHarness(t)
 	change, err := m.EnsurePlexConnection(context.Background(), maintainerrSpec(testMaintainerrToken, ""))
@@ -179,8 +171,7 @@ func TestMaintainerrConfiguresAFreshPlexConnection(t *testing.T) {
 	if f.settings.PlexHostname != "plex" || f.settings.PlexPort != 32400 || f.settings.PlexSSL != 0 {
 		t.Fatalf("the connection is %+v", f.settings)
 	}
-	// Manual mode is what keeps the release's in-cluster address: re-discovery
-	// would replace it with a plex.direct hostname the pod cannot reach.
+	// Manual mode keeps the in-cluster address instead of a plex.direct name.
 	if f.settings.PlexManualMode != 1 {
 		t.Fatalf("plex_manual_mode = %d, want 1", f.settings.PlexManualMode)
 	}
@@ -192,8 +183,8 @@ func TestMaintainerrConfiguresAFreshPlexConnection(t *testing.T) {
 	}
 }
 
-// The same token and the same connection is a no-op: nothing is written, and the
-// fingerprint the Job recorded is what makes the masked token enough to decide.
+// The same token and connection is a no-op: the fingerprint decides through the
+// mask.
 func TestMaintainerrPlexConnectionIsIdempotent(t *testing.T) {
 	m, f := newMaintainerrHarness(t)
 	ctx := context.Background()
@@ -215,8 +206,7 @@ func TestMaintainerrPlexConnectionIsIdempotent(t *testing.T) {
 	}
 }
 
-// A token rotated in the release Secret is written again even though the app
-// masks what it holds: the recorded fingerprint is the difference.
+// A rotated token is written again: the fingerprint is the difference.
 func TestMaintainerrNoticesARotatedPlexToken(t *testing.T) {
 	m, f := newMaintainerrHarness(t)
 	ctx := context.Background()
@@ -245,10 +235,8 @@ func TestMaintainerrNoticesARotatedPlexToken(t *testing.T) {
 	}
 }
 
-// A no-op run on a Maintainerr that holds a token writes nothing even with no
-// fingerprint recorded: the connection is right, so there is nothing to say
-// about the token. (A rotation is still detected once a fingerprint exists --
-// the run that proves the current one records it.)
+// With the connection right and a token held, a run with no fingerprint writes
+// nothing.
 func TestMaintainerrLeavesAMatchingConnectionAlone(t *testing.T) {
 	m, f := newMaintainerrHarness(t)
 	f.storedToken = testMaintainerrToken
@@ -268,8 +256,7 @@ func TestMaintainerrLeavesAMatchingConnectionAlone(t *testing.T) {
 	}
 }
 
-// A migration's Maintainerr is usually pointed at the source's own Plex: the
-// connection moves to the release's, and it is an update, not a first setup.
+// A migrated Maintainerr's connection moves to the release's: an update.
 func TestMaintainerrMovesAMigratedConnection(t *testing.T) {
 	m, f := newMaintainerrHarness(t)
 	f.storedToken = "source-token"
@@ -290,11 +277,9 @@ func TestMaintainerrMovesAMigratedConnection(t *testing.T) {
 	}
 }
 
-// A connection the app cannot prove is an error naming the app's own answer: a
-// rule written against a Plex Maintainerr cannot reach silently never runs.
+// A connection the app cannot prove fails with its own answer.
 func TestMaintainerrProvesTheConnection(t *testing.T) {
-	// Its own connection test is what says the stored host and token work, so a
-	// test that answers NOK is a failed step, not a configured app.
+	// A NOK test is a failed step, not a configured app.
 	hostile := &fakeMaintainerr{testFails: true}
 	srv := httptest.NewServer(hostile.handler())
 	t.Cleanup(srv.Close)
@@ -322,8 +307,7 @@ func TestMaintainerrProvesTheConnection(t *testing.T) {
 	}
 }
 
-// An empty token is a refusal before any request: the app would refuse the
-// connection write anyway, and a tokenless Plex is one Plex does not serve.
+// An empty token is refused before any request.
 func TestMaintainerrRefusesAnEmptyToken(t *testing.T) {
 	m, f := newMaintainerrHarness(t)
 	if _, err := m.EnsurePlexConnection(context.Background(), PlexConnection{Host: "plex", Port: 32400}); err == nil {
@@ -334,8 +318,7 @@ func TestMaintainerrRefusesAnEmptyToken(t *testing.T) {
 	}
 }
 
-// The port is a number in its schema, and a host that arrives case-folded or
-// space-padded still compares as the same server.
+// A case-folded or padded host still compares as the same server.
 func TestMaintainerrSettingsNormaliseTheHost(t *testing.T) {
 	for _, tc := range []struct{ raw, want string }{
 		{"plex", "plex"},

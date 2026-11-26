@@ -12,20 +12,16 @@ import (
 	"time"
 )
 
-// Qui is qui's WebUI API (v1.35.0). Route and payload shapes are the app's own:
-// instances live under /api/instances (internal/api/server.go), a create
-// answers 201 before it tests the connection, and a PUT without a password
-// keeps the stored one (internal/api/handlers/instances.go).
+// Qui is qui's WebUI API (v1.35.0): instances under /api/instances
+// (internal/api/server.go), a create answering 201 before it tests the connection,
+// and a PUT without a password keeping the stored one (internal/api/handlers/
+// instances.go).
 //
-// Two things shape this client beyond the shared Client:
-//
-//   - The session cookie is Secure whenever the OIDC redirect URL is https
-//     (internal/domain/config.go's SecureSessionCookie, and every s5n box sets
-//     one), so a cookie jar will not replay it over the plain http:// Service
-//     the Job talks to. Login therefore captures Set-Cookie itself and every
-//     request carries the raw name=value as a Cookie header.
-//   - A cookie-authenticated write needs X-Requested-With
-//     (internal/api/middleware/auth.go), which is set on every request here.
+// The session cookie is Secure whenever the OIDC redirect URL is https
+// (internal/domain/config.go's SecureSessionCookie, and every s5n box sets one), so
+// a jar will not replay it over plain http: Login captures Set-Cookie itself. A
+// cookie-authenticated write also needs X-Requested-With
+// (internal/api/middleware/auth.go).
 type Qui struct {
 	client   *Client
 	urlBase  string
@@ -34,8 +30,8 @@ type Qui struct {
 	session  string
 }
 
-// NewQui builds a client. urlBase is qui's own base URL ("/qui"), which the
-// chart sets through QUI__BASE_URL; its API is under it.
+// NewQui builds a client. urlBase is qui's own base URL ("/qui"), set through
+// QUI__BASE_URL.
 func NewQui(baseURL, urlBase, username, password string) *Qui {
 	c := NewClient(baseURL, nil)
 	c.Header.Set("X-Requested-With", "XMLHttpRequest")
@@ -44,32 +40,24 @@ func NewQui(baseURL, urlBase, username, password string) *Qui {
 
 func (q *Qui) api(path string) string { return q.urlBase + "/api" + path }
 
-// Ping is the readiness probe. qui registers /healthz/readiness on its root
-// router and only /api and the UI under its base URL, so the prefixed path
-// (not /api/healthz/...) is the one that answers: the API-prefixed form is a
-// 404 and the bare prefix is the SPA's catch-all.
+// Ping is the readiness probe: /healthz/readiness is on the root router, so the
+// prefixed path answers and /api/healthz/... is a 404.
 func (q *Qui) Ping(ctx context.Context) error {
 	_, err := q.client.GetText(ctx, q.urlBase+"/healthz/readiness")
 	return err
 }
 
-// WaitReady blocks until qui answers or timeout passes. qui starts without its
-// OIDC issuer (it discovers the provider per request), so a pass here says
-// nothing about the login: the wiring Job's own sign-in is what proves that.
+// WaitReady blocks until qui answers. It starts without its OIDC issuer, so a pass
+// says nothing about the login: the Job's sign-in proves that.
 func (q *Qui) WaitReady(ctx context.Context, timeout time.Duration) error {
 	return Retry(ctx, timeout, q.Ping)
 }
 
-// Login opens the session the instance calls ride on and keeps only the
-// cookie's name=value. A wrong password is reported as a LoginRejectedError,
-// never retried: a retry cannot fix it, and the app's own failure tracking
-// would only add noise.
+// Login opens the session the instance calls ride on, keeping only the cookie's
+// name=value. A wrong password is a LoginRejectedError, never retried.
 //
-// qui with its login switched off (a plain helm install, or a grant from before
-// the OIDC provider, where the chart sets QUI__AUTH_DISABLED) answers this
-// endpoint 403 and needs no session at all -- its API is then open to anything
-// inside the release, which the NetworkPolicy already limits to the Gateway and
-// the wiring Job. That case is "no session", not a failure.
+// With login switched off (QUI__AUTH_DISABLED) the endpoint answers 403 and needs no
+// session: that is "no session", not a failure.
 func (q *Qui) Login(ctx context.Context) error {
 	payload, err := json.Marshal(map[string]string{fieldUsername: q.username, fieldPassword: q.password})
 	if err != nil {
@@ -122,26 +110,17 @@ type QuiInstanceSpec struct {
 	HasLocalFilesystemAccess bool
 }
 
-// EnsureInstance makes qui's instance for s5n's qBittorrent match the spec and
-// proves it with qui's own connection test.
+// EnsureInstance makes qui's qBittorrent instance match the spec and proves it with
+// qui's own test.
 //
-// ownedID, when nonzero, is the id the Job recorded the last time it created or
-// adopted this instance: only an id match counts as "ours", so a rename in
-// qui's UI is the user's business and never creates a duplicate. A zero ownedID
-// means nothing is recorded yet, so an existing instance at the spec's host is
-// adopted instead -- the shape a migration leaves behind, and the reason this
-// looks at the host before the name. qui has no uniqueness on name or host, so
-// a blind create would add a second row beside it.
+// A nonzero ownedID is authoritative, so a UI rename never duplicates; zero adopts
+// an instance at the spec's host, the shape a migration leaves, because qui has no
+// uniqueness on name or host and a blind create would add a second row. An adopted
+// instance keeps its name.
 //
-// An adopted instance keeps its name: it is the operator's, chosen in qui's own
-// UI or brought over from their old install, and box has no reason to change it.
-//
-// On update the live object is cloned and only the data-contract fields are
-// overlaid (name is left as the user renamed it only on a create: the API
-// requires a name, and the live one is what goes back). Its username and
-// password are written empty, like the Arrs' download clients: qBittorrent's
-// login is bypassed for the release's addresses, so there is no credential to
-// keep in step and none to fingerprint.
+// On update only the data-contract fields are overlaid, and username/password are
+// written empty: qBittorrent's login is bypassed, so there is no credential and none
+// to fingerprint.
 func (q *Qui) EnsureInstance(ctx context.Context, spec QuiInstanceSpec, ownedID int) (EnsureResult, error) {
 	list, err := q.instances(ctx)
 	if err != nil {
@@ -201,24 +180,11 @@ func (q *Qui) EnsureInstance(ctx context.Context, spec QuiInstanceSpec, ownedID 
 	return EnsureResult{Change: change, ID: id, Drift: drift, Recreated: recreated, PreviousID: previousID}, nil
 }
 
-// locateQui finds the qBittorrent instance the Job owns:
-//
-//   - a recorded id is authoritative: a rename in qui's UI is the user's
-//     business and must not create a second row, even when another instance
-//     points at the same host;
-//   - with nothing recorded, the instance this box would own is adopted before
-//     one is created. On a migrated box there is no record yet (owned.json is
-//     box's own file, and the migration did not write one), and the source's
-//     qui usually had one instance under the operator's own name -- which the
-//     migration's rewriter has already pointed at the release's qBittorrent.
-//     The host is what makes two instances the same one for box, and the name
-//     is the fallback for a box that ran wiring before it recorded anything;
-//   - only when neither exists was it deleted, so the run creates one and says
-//     which id disappeared.
-//
-// Two instances at the same host are a refusal rather than a pick: qui allows
-// both (it has no uniqueness on name or host), and nothing says which history
-// is the one to keep.
+// locateQui finds the qBittorrent instance the Job owns: a recorded id is
+// authoritative; with nothing recorded, an instance at the spec's host is adopted (a
+// migration leaves one under the operator's name, already pointed at the release),
+// with the name as fallback; a missing id means recreate. Two instances at one host
+// are a refusal, because nothing says which history to keep.
 func locateQui(list []Item, spec QuiInstanceSpec, ownedID int) (cur Item, found, recreated bool, previousID int, err error) {
 	if ownedID != 0 {
 		for _, item := range list {
@@ -259,11 +225,8 @@ func quiHostMatches(list []Item, host string) []Item {
 	return out
 }
 
-// normalizeQuiHost is the form qui itself stores and reports a host in: its
-// store trims the answer, adds http:// when the operator typed no scheme, and
-// re-serialises the parsed URL (models.validateAndNormalizeHost at v1.35.0).
-// A trailing slash is dropped on both sides: a base URL with one is the same
-// qBittorrent as without, and qBittorrent appends its own API path either way.
+// normalizeQuiHost is the stored form: trimmed, http:// added when absent, the URL
+// re-serialised (models.validateAndNormalizeHost at v1.35.0), and no trailing slash.
 func normalizeQuiHost(raw string) string {
 	s := strings.TrimSpace(raw)
 	if s == "" {
@@ -279,9 +242,8 @@ func normalizeQuiHost(raw string) string {
 	return strings.TrimRight(u.String(), "/")
 }
 
-// TestInstance asks qui to dial the instance now. It answers 200 with
-// {"connected":false,"error":...} on a failure, so the status alone would pass a
-// broken instance.
+// TestInstance asks qui to dial now: it answers 200 with connected:false on failure,
+// so the status alone would pass a broken instance.
 func (q *Qui) TestInstance(ctx context.Context, id int) error {
 	var out struct {
 		Connected bool   `json:"connected"`
@@ -326,19 +288,12 @@ func (q *Qui) ArrInstances(ctx context.Context) ([]Item, error) {
 	return out, nil
 }
 
-// EnsureArrInstance makes one Arr instance match the spec and proves it with
-// qui's own test, which is an Arr API call made from qui's pod: it is the only
-// thing that shows the release's NetworkPolicy admits qui to that Arr.
+// EnsureArrInstance makes one Arr row match the spec and proves it with qui's own
+// test -- an Arr call from qui's pod, the only proof the NetworkPolicy admits it.
 //
-// ownedID and knownFingerprint are owned.json's record. The id keeps a rename in
-// qui's UI from creating a second row; the fingerprint of the key last written
-// and proven is the only way a rotation in the release Secret is visible, since
-// qui never answers a stored key.
-//
-// Only the key is ever written to a row that already exists. A row box adopted
-// is the operator's -- its name, its enabled flag, its priority and its timeout
-// are what they chose, or what their old install had -- and a disabled one is
-// left disabled: nothing dials it, so there is nothing to prove.
+// The id keeps a rename from duplicating, and the key fingerprint is the only way a
+// Secret rotation is visible. Only the key is written to an existing row: a disabled
+// one stays disabled and is not tested.
 func (q *Qui) EnsureArrInstance(ctx context.Context, spec QuiArrSpec, ownedID int, knownFingerprint string) (EnsureResult, error) {
 	list, err := q.ArrInstances(ctx)
 	if err != nil {
@@ -397,23 +352,13 @@ func (q *Qui) EnsureArrInstance(ctx context.Context, spec QuiArrSpec, ownedID in
 	return result, nil
 }
 
-// locateQuiArr finds the Arr instance the Job owns:
+// locateQuiArr finds the Arr row the Job owns: a recorded id is authoritative; with
+// nothing recorded (or its row gone), the row at this box's address is adopted,
+// because the table is UNIQUE on (type, base_url) and a migrated row is already
+// pointed there. Any row counts, and the lowest id wins on duplicate spellings.
 //
-//   - a recorded id is authoritative, so a rename in qui's UI never creates a
-//     second row;
-//   - with nothing recorded -- or a record whose row is gone -- the row at this
-//     box's address is adopted. The table is UNIQUE on (type, base_url), so a
-//     create there is refused 409, and a migrated box's row is already pointed
-//     at the release by internal/migrate/qui. Any row counts, enabled or not:
-//     the uniqueness is the reason, not the state. Two spellings of one address
-//     (the index is on the interned text, so a differently-cased host is a
-//     second row) are the lowest id, with the receipt naming both;
-//   - there is deliberately no fallback by name. A row of the right name at
-//     another address is another Arr -- the operator's remote one, say -- and
-//     adopting it would point nothing at this box's Arr while leaving the
-//     remote one holding a key from this release;
-//   - only when neither exists was the recorded row deleted, so the run creates
-//     one and says which id went.
+// There is deliberately no fallback by name: a same-named row at another address is
+// another Arr, and adopting it would leave the remote one holding this release's key.
 func locateQuiArr(list []Item, spec QuiArrSpec, ownedID int) (cur Item, found, recreated bool, previousID int, note string) {
 	if ownedID != 0 {
 		for _, item := range list {
@@ -456,13 +401,9 @@ func quiArrURLMatches(list []Item, spec QuiArrSpec) []Item {
 	return out
 }
 
-// normalizeQuiArrBaseURL is an Arr base URL the way two of them are compared.
-// qui stores what the operator typed, minus the surrounding space and any
-// trailing slash (internal/models/arr_instance.go: normalizeBaseURL at
-// v1.36.1), so only what DNS and HTTP themselves fold is folded here: the
-// scheme and the host are case-blind, and the path is compared as stored --
-// box's own shape serves several apps under one name, and the path is what says
-// which one an address meant.
+// normalizeQuiArrBaseURL compares as qui stores it (internal/models/arr_instance.go:
+// normalizeBaseURL at v1.36.1): scheme and host case-folded, the path compared as
+// stored, because the path says which app an address meant.
 func normalizeQuiArrBaseURL(raw string) string {
 	s := strings.TrimSpace(raw)
 	if s == "" {
@@ -490,10 +431,8 @@ func quiArrEnabled(item Item) bool {
 	return true
 }
 
-// TestArrInstance asks qui to dial the Arr now (POST
-// /api/arr/instances/{id}/test). It answers 200 either way, with
-// {"success":false,"error":...} on a failure, so the status alone would pass a
-// row that reaches nothing.
+// TestArrInstance asks qui to dial (POST /api/arr/instances/{id}/test): it answers
+// 200 either way, so the status alone would pass a row that reaches nothing.
 func (q *Qui) TestArrInstance(ctx context.Context, id int) error {
 	var out struct {
 		Success bool   `json:"success"`

@@ -10,45 +10,28 @@ import (
 	"time"
 )
 
-// Pbh is PeerBanHelper's WebAPI (v9.5.4). It is the downloader-side half of the
-// app: PBH reads qBittorrent's Web API to find peers to ban, so the only object
-// s5n owns in it is one downloader.
+// Pbh is PeerBanHelper's WebAPI (v9.5.4): it reads qBittorrent's API for peers to
+// ban, so the only object s5n owns is one downloader.
 //
-// Three of PBH's own behaviours shape this client:
-//
-//   - Every answer is wrapped: {"success":bool,"message":string,"data":...}. A
-//     write answers with data:null, and a failure carries its reason in message
-//     rather than in the status alone ("Downloader created successfully" is the
-//     201 body).
-//   - Downloaders are keys in PBH's own config.yml (`client: <id>:`), so the id
-//     is a string the caller chooses and everything after a create addresses
-//     /api/downloaders/<id>. The same id may be a name a human renamed, which is
-//     why the record in owned.json holds it (internal/wiring/owned.go).
-//   - PUT creates and PATCH replaces; a second PUT of the same id answers 400
-//     ("already exists"), so an update has to be the PATCH. The list endpoint
-//     reports each downloader's *API* endpoint (http://host:port/api/v2), while
-//     the config - and what the status endpoint echoes back - carries the plain
-//     one, so a comparison of the two would drift on every run.
-//
-// The WebAPI is a config-file editor with a token in front of it, not an OAuth
-// surface: the token goes in an Authorization: Bearer header, and the chart
-// gives this Job the release Secret's pbh-token.
+// Every answer is wrapped in {"success","message","data"}; downloaders are keys in
+// its config.yml, so the id is a chosen string; PUT creates and PATCH replaces (a
+// second PUT answers 400), and the list reports the /api/v2 endpoint while the config
+// carries the plain one. The token goes in an Authorization: Bearer header.
 type Pbh struct {
 	client *Client
 }
 
-// NewPbh builds a client. baseURL is PBH's own Service address; the WebAPI is
-// mounted at the root (there is no base-path setting, which is why the chart
-// serves PBH on a host of its own). token is the release Secret's pbh-token.
+// NewPbh builds a client. The WebAPI is at the root (PBH has no base-path setting,
+// which is why the chart serves it on a host of its own); token is the Secret's
+// pbh-token.
 func NewPbh(baseURL, token string) *Pbh {
 	c := NewClient(baseURL, nil)
 	c.Header.Set("Authorization", "Bearer "+token)
 	return &Pbh{client: c}
 }
 
-// pbhFieldEndpoint is qBittorrent's endpoint in PBH's downloader config: the
-// plain http://host:port, no /api/v2 and no trailing slash (the loader strips a
-// trailing one, and a create stores what it is given verbatim).
+// pbhFieldEndpoint is the plain http://host:port, no /api/v2 and no trailing slash
+// (the loader strips one, and a create stores what it is given).
 const pbhFieldEndpoint = "endpoint"
 
 // pbhResponse is PBH's envelope for every WebAPI answer. Data is kept raw so one
@@ -106,10 +89,8 @@ func (p *Pbh) Ping(ctx context.Context) error {
 	return err
 }
 
-// WaitReady blocks until PBH answers or timeout passes. A refused token is
-// returned at once rather than retried: no timeout makes a wrong credential
-// right, and PBH blacklists an address for 15 minutes after ten failed
-// attempts on one endpoint.
+// WaitReady blocks until PBH answers. A refused token returns at once: PBH
+// blacklists an address for 15 minutes after ten failed attempts.
 func (p *Pbh) WaitReady(ctx context.Context, timeout time.Duration) error {
 	deadline := time.Now().Add(timeout)
 	delay := 500 * time.Millisecond
@@ -135,9 +116,8 @@ func (p *Pbh) WaitReady(ctx context.Context, timeout time.Duration) error {
 	}
 }
 
-// Version is PBH's own version string, from the manifest every WebUI reads
-// first. It is unauthenticated, so it is also the receipt's evidence that the
-// app serving requests is the one the chart pinned.
+// Version is PBH's version from the unauthenticated manifest: the receipt's evidence
+// that the app serving is the one the chart pinned.
 func (p *Pbh) Version(ctx context.Context) (string, error) {
 	data, err := p.raw(ctx, http.MethodGet, "/api/metadata/manifest", nil)
 	if err != nil {
@@ -169,10 +149,8 @@ func (p *Pbh) Downloaders(ctx context.Context) ([]Item, error) {
 	return out, nil
 }
 
-// DownloaderStatus is one downloader's health and the config PBH stored for it.
-// The config is the read path for the fields s5n owns - and it echoes the
-// qBittorrent password in clear text, which is why nothing here ever compares
-// or records one (the fingerprint in owned.json is the comparison).
+// DownloaderStatus is one downloader's health and stored config. It echoes the
+// password in clear text, so nothing here compares or records one.
 func (p *Pbh) DownloaderStatus(ctx context.Context, id string) (Item, error) {
 	data, err := p.raw(ctx, http.MethodGet, "/api/downloaders/"+url.PathEscape(id)+"/status", nil)
 	if err != nil {
@@ -198,12 +176,9 @@ type PbhDownloaderSpec struct {
 	Password string
 }
 
-// pbhDesired is the stored config with only the fields s5n owns overlaid, in
-// the shape PBH's status endpoint reports: everything else (paused, the shadow
-// ban, TLS verification, the ignore-private flag, a name a person renamed)
-// survives an update. The password is a secret field: it is always written —
-// empty, since qBittorrent skips its login for the release's addresses — and
-// never compared.
+// pbhDesired is the stored config with the owned fields overlaid; everything else
+// survives. The password is written empty (qBittorrent skips its login) and never
+// compared.
 func pbhDesired(live Item, spec PbhDownloaderSpec) (Item, []FieldChange) {
 	desired, drift := overlayOwned(live, []ownedField{
 		{pbhFieldEndpoint, spec.Endpoint, false},
@@ -218,9 +193,8 @@ func pbhDesired(live Item, spec PbhDownloaderSpec) (Item, []FieldChange) {
 	return desired, drift
 }
 
-// pbhCreateConfig is the whole object a create sends. PBH deserialises it into
-// its own config class, which has no defaults of its own: an absent key is
-// null, so every field the class has is written here.
+// pbhCreateConfig is the whole object a create sends: PBH's config class has no
+// defaults, so every field is written.
 func pbhCreateConfig(spec PbhDownloaderSpec) Item {
 	return Item{
 		"type":           "qbittorrent",
@@ -238,31 +212,15 @@ func pbhCreateConfig(spec PbhDownloaderSpec) Item {
 	}
 }
 
-// locatePbh finds the downloader the Job owns:
+// locatePbh finds the downloader the Job owns: a recorded id is authoritative, but
+// PBH's config migration 32 re-keys downloaders to a UUID
+// (MainConfigUpdateScript.assignUniqueIdForDownloader at v9.5.4), so a stale id is
+// normal. With none matching, the endpoint (the release's qBittorrent) is adopted,
+// with the name as fallback; a missing one is recreated.
 //
-//   - a recorded id is authoritative: a rename in PBH's UI is the user's
-//     business and must not create a second row, even when another downloader
-//     points at the same endpoint;
-//   - with the recorded id missing (or nothing recorded), the downloader this
-//     box would own is adopted before one is created. The recorded id can be
-//     stale without anyone deleting anything: PBH's own config migration 32
-//     re-keys every downloader to a generated UUID and keeps the old key as its
-//     name (MainConfigUpdateScript.assignUniqueIdForDownloader at v9.5.4), so a
-//     migration that adopted a pre-UUID source's downloader under the source's
-//     key records an id the app no longer has. The endpoint is what makes two
-//     downloaders the same one for box (the release's qBittorrent, which the pbh
-//     rewriter already wrote), and the name is the fallback;
-//   - only when neither exists was it deleted, so the run recreates it and says
-//     which id disappeared.
-//
-// PBH's own duplicate check is narrower than the endpoint match: registering a
-// downloader is refused when an existing one has the same id or the same name
-// (DownloaderManagerImpl.registerDownloader at v9.5.4, which is what answers
-// "a similar downloader configuration already exists"), and the endpoint is
-// never compared. A create beside a re-keyed copy is therefore allowed by PBH
-// and leaves two downloaders polling one qBittorrent - which is why the
-// endpoint is looked for first, and why two of them are a refusal rather than a
-// pick.
+// PBH refuses a duplicate id or name, never a duplicate endpoint
+// (DownloaderManagerImpl.registerDownloader at v9.5.4), so two at one endpoint are a
+// refusal rather than a third row.
 func locatePbh(list []Item, spec PbhDownloaderSpec, ownedID string) (cur Item, found, recreated bool, previousID string, err error) {
 	if ownedID != "" {
 		for _, item := range list {
@@ -285,11 +243,9 @@ func locatePbh(list []Item, spec PbhDownloaderSpec, ownedID string) (cur Item, f
 	return nil, false, ownedID != "", ownedID, nil
 }
 
-// pbhEndpointMatches returns the downloaders whose endpoint is the one the spec
-// names. The list reports each downloader's *API* endpoint - the configured
-// endpoint with /api/v2 appended (AbstractQbittorrent.java:59,217, and
-// PBHDownloaderController.handleDownloaderList) - while the spec and the status
-// endpoint carry the plain one, so both sides are reduced to it first.
+// pbhEndpointMatches returns downloaders whose endpoint matches: the list reports the
+// /api/v2 form (AbstractQbittorrent.java:59,217) and the config the plain one, so both
+// are reduced.
 func pbhEndpointMatches(list []Item, endpoint string) []Item {
 	want := normalizePbhEndpoint(endpoint)
 	var out []Item
@@ -314,14 +270,9 @@ func normalizePbhEndpoint(endpoint string) string {
 	return strings.ToLower(u.Scheme) + "://" + strings.ToLower(u.Host) + u.Path
 }
 
-// EnsureDownloader makes PBH's qBittorrent downloader match the spec and
-// returns the id it lives under, which the caller records only after
-// WaitHealthy has proven the write.
-//
-// ownedID is owned.json's record: it keeps a rename working. There is no
-// fingerprint beside it any more: the downloader's only secret was the
-// qBittorrent password, and that is written empty now that qBittorrent skips
-// its login for the release's addresses.
+// EnsureDownloader makes the downloader match the spec and returns its id, which the
+// caller records only after WaitHealthy proves the write. There is no fingerprint:
+// the only secret was the qBittorrent password, written empty.
 func (p *Pbh) EnsureDownloader(ctx context.Context, spec PbhDownloaderSpec, ownedID string) (EnsureResult, error) {
 	list, err := p.Downloaders(ctx)
 	if err != nil {
@@ -349,8 +300,8 @@ func (p *Pbh) EnsureDownloader(ctx context.Context, spec PbhDownloaderSpec, owne
 	if raw, ok := status["config"].(map[string]any); ok {
 		live = Item(raw)
 	}
-	// A registered downloader always reports its config; one that does not is a
-	// config s5n cannot compare, so it is written back whole rather than trusted.
+	// A downloader that reports no config cannot be compared, so it is written
+	// whole.
 	missing := len(live) == 0
 	if missing {
 		live = pbhCreateConfig(spec)
@@ -370,13 +321,9 @@ func (p *Pbh) EnsureDownloader(ctx context.Context, spec PbhDownloaderSpec, owne
 	return EnsureResult{Change: change, StringID: id, Drift: drift, Recreated: recreated}, nil
 }
 
-// WaitHealthy polls until PBH reports the downloader HEALTHY, which is the only
-// evidence that it really logged in to qBittorrent with the password the Job
-// wrote. A create or a PATCH only registers the downloader: PBH's own poll loop
-// (the ban wave, every five seconds by default) is what dials it, so the status
-// is UNKNOWN for a moment and ERROR if the credential is wrong.
-//
-// It returns the last status it saw, so a caller can say what it waited on.
+// WaitHealthy polls until PBH reports HEALTHY, the only evidence it logged in with the
+// password written: a create or PATCH only registers, and PBH's own poll loop dials
+// it. The last status is returned so a caller can say what it waited on.
 func (p *Pbh) WaitHealthy(ctx context.Context, id string, timeout time.Duration) (string, error) {
 	last := ""
 	deadline := time.Now().Add(timeout)
