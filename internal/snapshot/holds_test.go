@@ -13,15 +13,14 @@ import (
 // heldAt is when the fixtures' holds were written, in UTC.
 var heldAt = time.Date(2026, 3, 4, 5, 6, 7, 0, time.UTC)
 
-// oneHold is one complete hold as a file spells it: the fixture the refusals
-// below are each one edit away from.
+// oneHold is one complete hold as a file spells it, the fixture each refusal below
+// is one edit away from.
 const oneHold = `{"app":"sonarr","at":{"repository":"registry.example.com/media/sonarr","tag":"4.0.13"},"avoiding":{"repository":"registry.example.com/media/sonarr","tag":"4.0.14"},"snapshot":"0.4.0-0.5.0-20260304T050607Z","since":"2026-03-04T05:06:07Z","by":"update"}`
 
 // oneDoc is a holds file holding that one hold.
 const oneDoc = `{"holds":[` + oneHold + `]}`
 
-// holdFor is one app's hold, with refs an update step would have written: the
-// image it ran and the image the step moved it to.
+// holdFor is one app's hold, with refs an update step would have written.
 func holdFor(app string, since time.Time) Hold {
 	return Hold{
 		App:      app,
@@ -35,8 +34,7 @@ func holdFor(app string, since time.Time) Hold {
 
 func TestSaveAndLoadHolds(t *testing.T) {
 	configRoot := t.TempDir()
-	// Written out of app order, which is what SaveHolds is given in practice:
-	// a caller holds the result of WithHold on a slice it has been carrying.
+	// Written out of app order, as SaveHolds is given it in practice.
 	want := []Hold{holdFor("sonarr-4k", heldAt), holdFor("radarr", heldAt)}
 	if err := SaveHolds(configRoot, want); err != nil {
 		t.Fatalf("save: %v", err)
@@ -53,8 +51,7 @@ func TestSaveAndLoadHolds(t *testing.T) {
 	if got := []string{doc.Holds[0].App, doc.Holds[1].App}; !reflect.DeepEqual(got, []string{"radarr", "sonarr-4k"}) {
 		t.Fatalf("the file is in %v order, want app order: %s", got, data)
 	}
-	// The one shape a reader expects: an object with a holds list, never a
-	// bare array.
+	// An object with a holds list, never a bare array.
 	if !strings.HasPrefix(string(data), "{\n  \"holds\": [\n") {
 		t.Fatalf("the file does not start with the holds list:\n%s", data)
 	}
@@ -69,8 +66,8 @@ func TestSaveAndLoadHolds(t *testing.T) {
 	}
 }
 
-// TestSaveHoldsWritesTheTimeInUTC: since is one instant however a caller's clock
-// is zoned, and the file says it the way every other time box records is said.
+// Since is one instant however a caller's clock is zoned, and the file says it the
+// way every other time box records is said.
 func TestSaveHoldsWritesTheTimeInUTC(t *testing.T) {
 	configRoot := t.TempDir()
 	zone := time.FixedZone("elsewhere", 3600)
@@ -96,8 +93,8 @@ func TestSaveHoldsWritesTheTimeInUTC(t *testing.T) {
 	}
 }
 
-// TestLoadHoldsWithoutAFile: a box that holds nothing keeps no record of the
-// fact, and reading that absence is not a failure.
+// A box that holds nothing keeps no record of the fact, and reading that absence
+// is not a failure.
 func TestLoadHoldsWithoutAFile(t *testing.T) {
 	holds, err := LoadHolds(t.TempDir())
 	if err != nil {
@@ -108,9 +105,8 @@ func TestLoadHoldsWithoutAFile(t *testing.T) {
 	}
 }
 
-// TestLoadHoldsRefuses: a file box cannot understand is an error naming its
-// path, never a guess. Dropping a hold would move an app onto the image the
-// rollback avoided.
+// A file box cannot understand is an error naming its path, never a guess: dropping
+// a hold would move an app onto the image the rollback avoided.
 func TestLoadHoldsRefuses(t *testing.T) {
 	cases := []struct {
 		name    string
@@ -156,8 +152,8 @@ func replaceApp(app string) string {
 	return strings.Replace(oneDoc, `"app":"sonarr"`, `"app":"`+app+`"`, 1)
 }
 
-// TestSaveHoldsRefuses: the writer checks what it writes too, so a bad hold is
-// refused where it was built rather than at the next read.
+// The writer checks what it writes too, so a bad hold is refused where it was
+// built rather than at the next read.
 func TestSaveHoldsRefuses(t *testing.T) {
 	bad := []struct {
 		name    string
@@ -186,8 +182,8 @@ func TestSaveHoldsRefuses(t *testing.T) {
 	}
 }
 
-// TestSaveHoldsWithoutHoldsRemovesTheFile: the absence of the file is how a box
-// with nothing held reads, so an empty list has to leave no file behind.
+// The absence of the file is how a box with nothing held reads, so an empty list
+// leaves no file behind.
 func TestSaveHoldsWithoutHoldsRemovesTheFile(t *testing.T) {
 	configRoot := t.TempDir()
 	if err := SaveHolds(configRoot, []Hold{holdFor("sonarr", heldAt)}); err != nil {
@@ -210,8 +206,8 @@ func TestSaveHoldsWithoutHoldsRemovesTheFile(t *testing.T) {
 	}
 }
 
-// TestWithHoldReplacesAndSorts: one hold per app, replaced in place of the old
-// one, and the slice keeps app order so the file it becomes is stable.
+// One hold per app, replaced in place of the old one, in app order so the file it
+// becomes is stable.
 func TestWithHoldReplacesAndSorts(t *testing.T) {
 	holds := []Hold{holdFor("sonarr", heldAt)}
 	holds = WithHold(holds, holdFor("radarr", heldAt))
@@ -259,9 +255,8 @@ func appOrder(holds []Hold) []string {
 	return out
 }
 
-// TestHoldsBelongToTheSeedbox: the hold file is written where the seedbox's own
-// box can write it, and with the mode that lets that user read the one root
-// wrote.
+// The hold file is written where the seedbox's own box can write it, with the mode
+// that lets that user read what root wrote.
 func TestHoldsBelongToTheSeedbox(t *testing.T) {
 	configRoot := t.TempDir()
 	if os.Geteuid() == 0 {
@@ -301,9 +296,8 @@ func TestHoldsBelongToTheSeedbox(t *testing.T) {
 	}
 }
 
-// TestHoldsSurviveARewrite: what SaveHolds writes is what LoadHolds reads, for
-// every field a hold carries. It is the whole contract between a rollback that
-// writes a hold and the update that later reads it.
+// What SaveHolds writes is what LoadHolds reads, for every field a hold carries:
+// the contract between a rollback that writes a hold and the update that reads it.
 func TestHoldsSurviveARewrite(t *testing.T) {
 	configRoot := t.TempDir()
 	want := Hold{
@@ -326,8 +320,8 @@ func TestHoldsSurviveARewrite(t *testing.T) {
 	}
 }
 
-// TestLoadHoldsRefusesAnUnreadableFile: a file box may not read is an error and
-// not "no holds", because the two lead to opposite decisions about an app.
+// A file box may not read is an error and not "no holds", because the two lead to
+// opposite decisions about an app.
 func TestLoadHoldsRefusesAnUnreadableFile(t *testing.T) {
 	configRoot := t.TempDir()
 	// A directory where the file should be: readable path, unreadable content.

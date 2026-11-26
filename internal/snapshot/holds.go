@@ -15,30 +15,28 @@ import (
 	"github.com/swizzin/s5n/internal/atomicfile"
 )
 
-// HoldsName is the file beside the snapshots that records which apps this box
-// is holding at an older image.
+// HoldsName is the file beside the snapshots that records which apps this box holds
+// at an older image.
 const HoldsName = "holds.json"
 
-// The two things that write a hold, as the record says them: an update step
-// that rolled an app back itself, and an operator's `box rollback`.
+// The two things that write a hold: an update step that rolled an app back itself,
+// and an operator's `box rollback`.
 const (
 	ByUpdate   = "update"
 	ByRollback = "rollback"
 )
 
-// Hold is one app held at the image it ran before a step moved it. It is what
-// the chart's pin is compared against on every later step: while the chart still
-// pins At, the app stays there; once a release pins something else, the hold has
-// lapsed and the app moves with the release. That is why Avoiding is recorded
-// too -- without it a hold could not tell "the chart moved on" from "the chart
-// still pins the image this app was rolled back from".
+// Hold is one app held at the image it ran before a step moved it, and what the
+// chart's pin is compared against on every later step: while the chart still pins At
+// the app stays there, and once a release pins something else the hold has lapsed.
+// Avoiding is recorded so a hold can tell "the chart moved on" from "the chart still
+// pins the image this app was rolled back from".
 //
-// The record lives with the snapshots it refers to rather than in the values
-// file, so a seedbox's own box can write one without a write to the release.
+// The record lives with the snapshots rather than in the values file, so a seedbox's
+// own box can write one without a write to the release.
 type Hold struct {
-	// App is the app key -- sonarr, not one instance's config directory
-	// (sonarr-4k): the hold overlays apps.<app>.image, which the chart keeps
-	// per app and every instance of it shares.
+	// App is the app key (sonarr, not sonarr-4k): the hold overlays
+	// apps.<app>.image, which the chart keeps per app and instances share.
 	App string `json:"app"`
 	// At is the image the app ran before the step, and Avoiding the image the
 	// step moved it to.
@@ -59,26 +57,22 @@ type holdsFile struct {
 	Holds []Hold `json:"holds"`
 }
 
-// HoldsPath is where a seedbox's holds live: <config root>/.box/holds.json,
-// beside the snapshots they refer to, under a directory the seedbox's own box
-// can write.
+// HoldsPath is where a seedbox's holds live: <config root>/.box/holds.json, beside
+// the snapshots they refer to, under a directory the seedbox's own box can write.
 func HoldsPath(configRoot string) string {
 	return filepath.Join(configRoot, boxDir, HoldsName)
 }
 
-// LoadHolds reads the box's holds, in app order. A box that holds nothing has
-// no file at all, which is not an error.
-//
-// Anything else is an error naming the path: a file box cannot parse, a field
-// it does not know, two holds for one app. Guessing here is how a hold is
-// silently dropped, and a dropped hold moves an app onto the very image its
-// rollback avoided.
+// LoadHolds reads the box's holds, in app order. A box that holds nothing has no
+// file, which is not an error; anything else is an error naming the path: a file
+// box cannot parse, an unknown field, two holds for one app. Guessing here drops a
+// hold, and a dropped hold moves an app onto the very image its rollback avoided.
 func LoadHolds(configRoot string) ([]Hold, error) {
 	path := HoldsPath(configRoot)
 	t, err := openTree(configRoot)
 	if err != nil {
-		// A config root that is not there holds nothing, exactly as a box with
-		// no hold file does.
+		// A config root that is not there holds nothing, like a box with no hold
+		// file.
 		if errors.Is(err, fs.ErrNotExist) {
 			return nil, nil
 		}
@@ -102,8 +96,8 @@ func LoadHolds(configRoot string) ([]Hold, error) {
 	if err := dec.Decode(&doc); err != nil {
 		return nil, fmt.Errorf("holds %s: %w", path, err)
 	}
-	// A second document after the first is trailing junk, not an empty
-	// trailing read: only io.EOF means the file ended where the object did.
+	// A second document after the first is trailing junk: only io.EOF means the
+	// file ended where the object did.
 	if err := dec.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
 		return nil, fmt.Errorf("holds %s: holds more than the one document", path)
 	}
@@ -117,10 +111,9 @@ func LoadHolds(configRoot string) ([]Hold, error) {
 	return holds, nil
 }
 
-// SaveHolds writes the box's holds, sorted by app and at most one per app,
-// through internal/atomicfile so a crash leaves the file either as it was or
-// complete. An empty list removes the file: a box that holds nothing should not
-// leave a record saying so, and its absence is what LoadHolds reads as none.
+// SaveHolds writes the box's holds, sorted by app and at most one per app, through
+// internal/atomicfile so a crash leaves the file as it was or complete. An empty
+// list removes the file: its absence is what LoadHolds reads as none.
 func SaveHolds(configRoot string, holds []Hold) error {
 	path := HoldsPath(configRoot)
 	checked, err := checkedHolds(holds)
@@ -142,10 +135,9 @@ func SaveHolds(configRoot string, holds []Hold) error {
 		}
 		return nil
 	}
-	// A link where the hold file goes is a refusal: box writes this file itself,
-	// and the seedbox's user can only have put a link there to point box
-	// somewhere. The rename below would replace the link rather than follow it,
-	// which is safe and still not what the operator asked for.
+	// A link where the hold file goes is a refusal: box writes this file itself, and
+	// the user can only have put a link there to point box somewhere. The rename would
+	// safely replace the link, which is still not what the operator asked for.
 	info, err := t.lstat(name)
 	switch {
 	case err == nil && info.Mode()&fs.ModeSymlink != 0:
@@ -176,9 +168,9 @@ func SaveHolds(configRoot string, holds []Hold) error {
 	return nil
 }
 
-// WithHold puts one app's hold in place of any it had, in app order. It is the
-// only way a caller changes one, so a hold is never added beside the hold it
-// replaces: two of them would leave box whichever it read first.
+// WithHold puts one app's hold in place of any it had, in app order: a hold is never
+// added beside the one it replaces, or two of them would leave box whichever it read
+// first.
 func WithHold(holds []Hold, h Hold) []Hold {
 	out := WithoutHold(holds, h.App)
 	out = append(out, h)
@@ -186,8 +178,8 @@ func WithHold(holds []Hold, h Hold) []Hold {
 	return out
 }
 
-// WithoutHold drops one app's hold and keeps the rest in the order they came
-// in. Removing a hold an app does not have is not a change.
+// WithoutHold drops one app's hold and keeps the rest in order. Removing a hold an
+// app does not have is not a change.
 func WithoutHold(holds []Hold, app string) []Hold {
 	out := make([]Hold, 0, len(holds))
 	for _, h := range holds {
@@ -198,10 +190,9 @@ func WithoutHold(holds []Hold, app string) []Hold {
 	return out
 }
 
-// checkedHolds copies a list, sorts it by app and refuses anything box could not
-// act on: a name that is not an instance name, an image that names nothing (or
-// only half a reference), a step that is not a name, a writer box does not know,
-// and two holds for one app.
+// checkedHolds copies a list, sorts it by app and refuses anything box could not act
+// on: a name that is not an instance name, half an image reference, a step that is
+// not a name, an unknown writer, two holds for one app.
 func checkedHolds(holds []Hold) ([]Hold, error) {
 	out := make([]Hold, len(holds))
 	copy(out, holds)
@@ -217,8 +208,7 @@ func checkedHolds(holds []Hold) ([]Hold, error) {
 	return out, nil
 }
 
-// checkHold refuses one hold that box could not apply or could apply to the
-// wrong app.
+// checkHold refuses one hold box could not apply, or could apply to the wrong app.
 func checkHold(h Hold) error {
 	if err := checkApp(h.App); err != nil {
 		return fmt.Errorf("app %q: %w", h.App, err)
@@ -240,10 +230,9 @@ func checkHold(h Hold) error {
 	return nil
 }
 
-// checkApp refuses a name a hold may carry: one path element, in the shape the
-// catalog gives an instance -- a lowercase app key and an optional suffix,
-// sonarr-4k. It is the config directory a rollback reads and writes, so anything
-// else is a refusal rather than a path box builds and joins.
+// checkApp refuses a name a hold may carry: one path element in the catalog's shape
+// for an instance (sonarr-4k). It is the config directory a rollback reads and
+// writes, so anything else is refused rather than joined into a path.
 func checkApp(app string) error {
 	if err := checkName(app); err != nil {
 		return err
@@ -262,8 +251,8 @@ func checkApp(app string) error {
 	return nil
 }
 
-// sortHolds orders holds by app, the only order the file is written and read in,
-// so two runs that hold the same apps write the same bytes.
+// sortHolds orders holds by app, so two runs that hold the same apps write the same
+// bytes.
 func sortHolds(holds []Hold) {
 	sort.Slice(holds, func(i, j int) bool { return holds[i].App < holds[j].App })
 }

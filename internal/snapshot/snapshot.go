@@ -1,30 +1,18 @@
-// Package snapshot copies the app state an image upgrade can rewrite, so a
-// failed update can put it back.
+// Package snapshot copies the app state an image upgrade can rewrite, so a failed
+// update can put it back. Updates run forward-only migrations, so a step copies
+// the files a catalog entry's `snapshot:` globs name before the release moves, and
+// rollback puts them back. It is not backup: one update step, on the config
+// claim's own filesystem, and nothing ages a snapshot out.
 //
-// An unattended update runs over forward-only migrations: a new Arr migrates
-// its SQLite database, an app rewrites its settings file into a new shape, and
-// neither knows how to go back. So a step copies the files the chart says an
-// upgrade can change (a catalog entry's `snapshot:` globs) before the release
-// moves, and rollback puts them back. It is not backup: one update step, on the
-// same filesystem as the config claim, and nothing here ages a snapshot out on
-// its own schedule.
+// Take builds dest+".partial" and renames the whole tree into place, so a crash
+// leaves nothing a Restore would trust; Restore writes one file at a time through
+// internal/atomicfile into a live config directory, so a crash leaves each file
+// old or new, never truncated, and it verifies the whole snapshot against the
+// manifest before it touches anything.
 //
-// A snapshot is a directory, not a set of files. Take copies into dest
-// +".partial" and renames the whole tree into place, so a crash halfway through
-// leaves nothing a Restore would trust with a live database. Restore goes the
-// other way, one file at a time through internal/atomicfile, because it writes
-// into a live config directory: a crash mid-restore leaves each file either old
-// or new, never truncated.
-//
-// The manifest is what makes a restore safe to attempt. Restore verifies every
-// snapshot file against it, before it touches the config directory, because a
-// snapshot that rotted on disk is not something to copy over a working
-// database.
-//
-// All of this runs as root over a config root the seedbox's user owns, so every
-// file it reads, writes, creates, renames, removes or chowns under one is reached
-// through an os.Root opened on that root (tree.go). The checks below refuse a
-// link with a sentence an operator can act on; the root is what holds when the
+// This runs as root over a config root the seedbox's user owns, so every path under
+// one goes through an os.Root opened on that root (tree.go): the checks below refuse
+// a link with a sentence an operator can act on, and the root is what holds when the
 // link arrives between the check and the use.
 package snapshot
 
@@ -52,67 +40,55 @@ const ManifestName = "manifest.json"
 
 // File is one regular file in a snapshot.
 type File struct {
-	// Path is relative to the app's config directory, slash-separated, and is
-	// the manifest's key: it is what Restore writes back and what the globs are
-	// matched against.
+	// Path is relative to the app's config directory, slash-separated, and is the
+	// manifest's key: what Restore writes back, and what the globs match.
 	Path string `json:"path"`
-	// Size and SHA256 are the verification Restore does before it writes
-	// anything: a snapshot file that changed on disk is a refusal, not a copy.
+	// Size and SHA256 are the verification Restore does before it writes anything:
+	// a snapshot file that changed on disk is a refusal, not a copy.
 	Size   int64  `json:"size"`
 	SHA256 string `json:"sha256"`
-	// Mode holds the permission bits, and UID/GID their owner, as they were
-	// when the copy was taken: a restored file must look like the one the app
-	// wrote, not like the root process that restored it.
+	// Mode holds the permission bits, and UID/GID their owner, as they were when
+	// the copy was taken: a restored file must look like the one the app wrote,
+	// not like the root process that restored it.
 	Mode uint32 `json:"mode"`
 	UID  int    `json:"uid"`
 	GID  int    `json:"gid"`
-	// ModTime is restored too, because an app that compares a settings file
-	// with the database reads a bumped mtime as a change it has not seen.
+	// ModTime is restored too: an app comparing a settings file with the database
+	// reads a bumped mtime as a change it has not seen.
 	ModTime time.Time `json:"mtime"`
 }
 
 // Manifest is what one app's snapshot holds.
 type Manifest struct {
-	// App is the config directory's name, which is the instance name: a
-	// snapshot found without its path still says whose state it is.
+	// App is the config directory's name, which is the instance name.
 	App string `json:"app"`
 	// Taken is when the copy was made, in UTC.
 	Taken time.Time `json:"taken"`
-	// Image is what the app ran when the copy was taken, and MovedTo is what
-	// the step moved it to. They are what a rollback needs and nothing else
-	// keeps: once the release has moved, the box no longer says which image
-	// wrote these files. A snapshot taken before box recorded them has both
-	// zero, and a caller decides what that means.
+	// Image is what the app ran when the copy was taken, and MovedTo is what the step
+	// moved it to: a rollback needs both, and nothing else says which image wrote these
+	// files once the release has moved. A snapshot that predates both has them zero, and
+	// a caller decides what that means.
 	Image   ImageRef `json:"image"`
 	MovedTo ImageRef `json:"movedTo"`
-	// Globs are the globs the copy was taken with. A restore of this copy
-	// uses exactly these: it removes every match the copy lacks, and a
-	// catalog that names more files since would have it delete files the
-	// snapshot never held. Empty in a snapshot taken before box recorded
-	// them, and a caller decides what that means.
+	// Globs are the globs the copy was taken with, and a restore uses exactly
+	// these: the catalog naming more files since would have it delete files the
+	// snapshot never held.
 	Globs []string `json:"globs,omitempty"`
-	// Files are in path order, so two manifests of the same state compare
-	// equal and a diff of one is readable.
+	// Files are in path order, so two manifests of the same state compare equal.
 	Files []File `json:"files"`
 }
 
-// Take copies every regular file under configDir that matches a glob into dest,
-// which must not exist yet, and writes the manifest beside the copies. The tree
-// is built at dest+".partial" and renamed, so dest is either a complete
-// snapshot or absent.
+// Take copies every regular file under configDir that matches a glob into dest, which
+// must not exist yet, and writes the manifest beside the copies; the tree is built at
+// dest+".partial" and renamed, so dest is either complete or absent.
 //
-// The two images are recorded in the manifest before the first file is copied:
-// they are what a rollback reads a week later to know what to hold the app at
-// and what the hold avoids, and neither the step nor the release remembers them
-// once the release has moved. A step that cannot say both is refused before it
-// creates anything.
+// Both images are recorded before the first file is copied, because neither the step
+// nor the release remembers them once the release has moved.
 //
-// A symlink that matches is a refusal: following it would copy something
-// outside the app's config directory, and a restore would then write through
-// it. So is a symlinked directory a glob names files under: the walk does not
-// follow it, and the snapshot would hold everything except those files. Only
-// regular files are copied, and a glob that matches nothing at all is a refusal
-// too: a snapshot that restores nothing must not look like one that worked.
+// A matching symlink is a refusal (following it would copy from outside the config
+// directory, and a restore would write through it), and so is a symlinked directory a
+// glob names files under. A glob that matches nothing is a refusal too: a snapshot
+// that restores nothing must not look like one that worked.
 func Take(configDir string, globs []string, dest string, images Images) (Manifest, error) {
 	if checkImage(images.Ran) != nil || checkImage(images.MovedTo) != nil {
 		return Manifest{}, errors.New("snapshot: the image the app ran and the image it moves to are both needed")
@@ -121,9 +97,9 @@ func Take(configDir string, globs []string, dest string, images Images) (Manifes
 		return Manifest{}, err
 	}
 	// The app's state and the snapshot tree beside it are both under the config
-	// root, so one tree reaches both. Opening the root rather than either
-	// directory is what makes a link planted at the config directory itself a
-	// refusal instead of the tree's own root.
+	// root, so one tree reaches both; opening the root rather than either directory
+	// is what makes a link planted at the config directory a refusal instead of the
+	// tree's own root.
 	t, err := openTreeAround(configDir, dest)
 	if err != nil {
 		return Manifest{}, fmt.Errorf("snapshot %s: %w", configDir, err)
@@ -149,27 +125,26 @@ func Take(configDir string, globs []string, dest string, images Images) (Manifes
 	} else if !errors.Is(err, fs.ErrNotExist) {
 		return Manifest{}, fmt.Errorf("snapshot %s: %w", dest, err)
 	}
-	// An app's config directory is a direct child of the config root, and that
-	// is what makes its owner the seedbox user's ids.
+	// An app's config directory is a direct child of the config root, and that is
+	// what makes its owner the seedbox user's ids.
 	own, err := treeOwnerOf(t)
 	if err != nil {
 		return Manifest{}, err
 	}
 
 	partial, partialPath := destName+".partial", dest+".partial"
-	// A partial tree is a snapshot whose run died before the rename. It was
-	// never complete, so it is ours to replace rather than a reason to refuse:
-	// the next run would otherwise never get past a crash.
+	// A partial tree is a snapshot whose run died before the rename: never complete,
+	// so it is ours to replace rather than a reason to refuse, or the next run would
+	// never get past a crash.
 	if err := t.removeAll(partial); err != nil {
 		return Manifest{}, fmt.Errorf("snapshot %s: %w", partialPath, err)
 	}
 	if err := makeDirIn(t, partial, own); err != nil {
 		return Manifest{}, fmt.Errorf("snapshot %s: %w", partialPath, err)
 	}
-	// A take that fails leaves nothing a restore could mistake for a snapshot:
-	// the partial tree goes when this call does, and the rename clears the flag.
-	// A failed cleanup is not the error worth reporting -- the take's own
-	// failure is, and the next run replaces whatever is left.
+	// A take that fails leaves nothing a restore could mistake for a snapshot. A
+	// failed cleanup is not the error worth reporting; the next run replaces
+	// whatever is left.
 	complete := false
 	defer func() {
 		if !complete {
@@ -187,9 +162,8 @@ func Take(configDir string, globs []string, dest string, images Images) (Manifes
 	return man, nil
 }
 
-// writeTree copies the matching files under the app's config directory into
-// partial and writes the manifest there. It is the half of Take that owns the
-// temporary tree, so a failure anywhere in it is cleaned up by the only caller.
+// writeTree copies the matching files under the app's config directory into partial
+// and writes the manifest there; Take owns the temporary tree and cleans it up.
 func writeTree(t *tree, app, partial string, globs []string, images Images, own treeOwner) (Manifest, error) {
 	configDir := t.path(app)
 	entries, err := matchEntries(t, app, globs)
@@ -208,9 +182,9 @@ func writeTree(t *tree, app, partial string, globs []string, images Images, own 
 		if e.above {
 			return Manifest{}, fmt.Errorf("snapshot %s: %s is a symlink and a glob names files under it; a snapshot copies regular files and never follows a link, so they would be left out", configDir, e.path)
 		}
-		// Following a link would copy something outside the app's config
-		// directory, and a restore would then write through it; anything that
-		// is not a regular file has no content a snapshot could hold.
+		// Following a link would copy something outside the app's config directory,
+		// and a restore would then write through it; anything that is not a regular
+		// file has no content a snapshot could hold.
 		if e.mode&fs.ModeSymlink != 0 {
 			return Manifest{}, fmt.Errorf("snapshot %s: %s is a symlink; a snapshot copies regular files and never follows a link", configDir, e.path)
 		}
@@ -231,8 +205,8 @@ func writeTree(t *tree, app, partial string, globs []string, images Images, own 
 		return Manifest{}, fmt.Errorf("snapshot %s: %w", configDir, err)
 	}
 	name := path.Join(partial, ManifestName)
-	// The manifest is box's own file, not a copy, so it is written readable by
-	// the seedbox's user: their box reads it to find what a rollback restores.
+	// The manifest is box's own file, so it is readable by the seedbox's user: their
+	// box reads it to find what a rollback restores.
 	if err := t.writeFile(name, append(data, '\n'), treeFileMode); err != nil {
 		return Manifest{}, fmt.Errorf("snapshot %s: %w", configDir, err)
 	}
@@ -247,10 +221,9 @@ func writeTree(t *tree, app, partial string, globs []string, images Images, own 
 	return man, nil
 }
 
-// copyFile copies one relative path from the app's config directory into the
-// snapshot tree, keeping its mode, mtime and (as root) its owner. It streams,
-// because a Plex library database is bigger than the memory of a small box: the
-// hash is computed as the bytes go past.
+// copyFile copies one relative path into the snapshot tree, keeping its mode, mtime
+// and (as root) its owner. It streams -- a Plex library database is bigger than a
+// small box's memory -- hashing as the bytes go past.
 func copyFile(t *tree, app, partial, rel string, own treeOwner) (File, error) {
 	src := path.Join(app, rel)
 	info, err := t.lstat(src)
@@ -266,16 +239,14 @@ func copyFile(t *tree, app, partial, rel string, own treeOwner) (File, error) {
 	if err := makeDirIn(t, path.Dir(dst), own); err != nil {
 		return File{}, fmt.Errorf("snapshot: %w", err)
 	}
-	// A copy inside the partial tree needs no temporary name of its own: the
-	// whole tree is renamed into place at the end, so nothing reads these files
-	// until they are complete.
+	// No temporary name is needed inside the partial tree: the whole tree is renamed
+	// into place, so nothing reads these files until they are complete.
 	out, err := t.create(dst, info.Mode().Perm())
 	if err != nil {
 		return File{}, fmt.Errorf("snapshot: %w", err)
 	}
-	// A copy that fails is not left half-written for a later step to read: the
-	// deferred remove covers every failure below, and the return clears it. A
-	// failed remove is not the error worth reporting -- the copy's own is.
+	// A copy that fails is not left half-written for a later step to read; a failed
+	// remove is not the error worth reporting, the copy's own is.
 	written := false
 	defer func() {
 		if !written {
@@ -291,9 +262,9 @@ func copyFile(t *tree, app, partial, rel string, own treeOwner) (File, error) {
 	if err := out.Close(); err != nil {
 		return File{}, fmt.Errorf("snapshot: %w", err)
 	}
-	// The apps are stopped for a snapshot, so this cannot happen on the path
-	// box drives: but a size that moved is a copy of neither version, and the
-	// manifest's sha256 would describe neither either.
+	// The apps are stopped for a snapshot, so this cannot happen on the path box
+	// drives: but a size that moved is a copy of neither version, and the manifest's
+	// sha256 would describe neither either.
 	if n != info.Size() {
 		return File{}, fmt.Errorf("snapshot: %s changed while it was copied (%d bytes, the file says %d)", t.path(src), n, info.Size())
 	}
@@ -305,8 +276,8 @@ func copyFile(t *tree, app, partial, rel string, own treeOwner) (File, error) {
 	}
 	uid, gid := owner(info)
 	// Only root can hand a file to the seedbox's user, which is what makes the
-	// restored file the app's rather than root's. A run that is not root owns
-	// what it copies already, and the manifest still records the truth.
+	// restored file the app's rather than root's; a run that is not root owns what
+	// it copies already, and the manifest still records the truth.
 	if os.Geteuid() == 0 {
 		if err := t.chown(dst, uid, gid); err != nil {
 			return File{}, fmt.Errorf("snapshot: %w", err)
@@ -324,26 +295,22 @@ func copyFile(t *tree, app, partial, rel string, own treeOwner) (File, error) {
 	}, nil
 }
 
-// Restore puts an app's snapshot back. It verifies the snapshot against its
-// manifest first and refuses on any mismatch, before it touches the config
-// directory: the only safe order, because half a restored database is worse
-// than the failed update it is undoing.
+// Restore puts an app's snapshot back. It verifies the snapshot against its manifest
+// first and refuses on any mismatch before it touches the config directory: half a
+// restored database is worse than the failed update it undoes.
 //
-// Then it removes what the globs match that the snapshot does not hold -- a
-// `-wal` the failed run created, most often, which SQLite would otherwise
-// replay over the file just restored -- and writes each snapshot file back
-// through internal/atomicfile.
+// It then removes what the globs match that the snapshot does not hold (a `-wal` the
+// failed run created, which SQLite would replay over the restored file) and writes
+// each snapshot file back through internal/atomicfile.
 //
-// The app that failed ran as the seedbox's user and could leave anything in its
-// own directory, a link where a directory was included. Restore writes as
-// whoever runs box, so a directory on a snapshot file's way down that is now a
-// symlink is a refusal: the write would land wherever the link points.
+// The failed app ran as the seedbox's user and could leave a link where a directory
+// was, so a symlinked directory on a snapshot file's way down is a refusal.
 func Restore(configDir string, globs []string, src string) error {
 	if err := CheckGlobs(globs); err != nil {
 		return err
 	}
-	// The snapshot being read lives under the same config root as the app it
-	// restores: box took it there, and one tree reaches both halves.
+	// The snapshot lives under the same config root as the app it restores: box took
+	// it there, and one tree reaches both halves.
 	t, err := openTreeAround(configDir, src)
 	if err != nil {
 		return fmt.Errorf("restore %s: %w", configDir, err)
@@ -368,14 +335,13 @@ func Restore(configDir string, globs []string, src string) error {
 	if err != nil {
 		return err
 	}
-	// The manifest decides what is written, so it is verified in full before
-	// the first removal: a refusal here leaves the config directory exactly as
-	// the failed update left it, which the operator can still inspect.
+	// The manifest decides what is written, so it is verified in full before the
+	// first removal: a refusal leaves the config directory as the failed update left
+	// it, which the operator can still inspect.
 	if err := verify(t, snap, src, man); err != nil {
 		return err
 	}
-	// This refusal comes before the first removal like the others, so it too
-	// leaves the config directory as the failed update left it.
+	// Like the others, this refusal comes before the first removal.
 	for _, f := range man.Files {
 		link, err := linkedDir(t, app, f.Path)
 		if err != nil {
@@ -396,10 +362,9 @@ func Restore(configDir string, globs []string, src string) error {
 	return nil
 }
 
-// loadManifest reads a snapshot's manifest without deciding whether it holds
-// enough to restore. Newest needs the images a snapshot names even from a step
-// whose copy a restore would refuse, so the "lists no files" rule stays with
-// Restore, which is the only caller it protects.
+// loadManifest reads a snapshot's manifest without deciding whether it holds enough
+// to restore: Newest needs the images a snapshot names even from a step a restore
+// would refuse, so the "lists no files" rule stays with Restore.
 func loadManifest(t *tree, src string) (Manifest, error) {
 	data, err := t.readFile(path.Join(src, ManifestName))
 	if err != nil {
@@ -412,10 +377,10 @@ func loadManifest(t *tree, src string) (Manifest, error) {
 	return man, nil
 }
 
-// readManifest reads a snapshot's manifest for a restore. A manifest that lists
-// no files is a refusal rather than an empty restore, because Restore's next
-// step deletes every file the globs match: an unreadable manifest would read as
-// "the app had nothing", which is the one answer that loses data.
+// readManifest reads a snapshot's manifest for a restore. A manifest that lists no
+// files is a refusal rather than an empty restore, because Restore's next step
+// deletes every file the globs match: "the app had nothing" is the one answer
+// that loses data.
 func readManifest(t *tree, snap, src string) (Manifest, error) {
 	man, err := loadManifest(t, snap)
 	if err != nil {
@@ -427,10 +392,9 @@ func readManifest(t *tree, snap, src string) (Manifest, error) {
 	return man, nil
 }
 
-// verify checks every file the manifest names: present, a regular file, the
-// recorded size, and the recorded sha256. A manifest path is checked to be
-// strictly inside the config directory, because the manifest is what tells
-// Restore where to write.
+// verify checks every file the manifest names: present, a regular file, the recorded
+// size, and the recorded sha256. A manifest path is checked to be strictly inside
+// the config directory, because the manifest tells Restore where to write.
 func verify(t *tree, snap, src string, man Manifest) error {
 	for _, f := range man.Files {
 		if err := checkRel(f.Path); err != nil {
@@ -458,10 +422,9 @@ func verify(t *tree, snap, src string, man Manifest) error {
 	return nil
 }
 
-// removeExtras deletes the files the globs match that the snapshot does not
-// hold. The common case is a `-wal` or `-shm` the failed run left behind: it
-// describes a database that no longer exists, and SQLite would replay it over
-// the restored file.
+// removeExtras deletes the files the globs match that the snapshot does not hold: a
+// `-wal` or `-shm` the failed run left describes a database that no longer exists,
+// and SQLite would replay it over the restored file.
 func removeExtras(t *tree, app string, globs []string, man Manifest) error {
 	held := make(map[string]bool, len(man.Files))
 	for _, f := range man.Files {
@@ -472,8 +435,8 @@ func removeExtras(t *tree, app string, globs []string, man Manifest) error {
 		return err
 	}
 	for _, e := range entries {
-		// A link a glob reaches below is not a match: nothing under it was
-		// walked, and the link itself is not this function's to remove.
+		// A link a glob reaches below is not a match: nothing under it was walked,
+		// and the link itself is not this function's to remove.
 		if held[e.path] || e.above {
 			continue
 		}
@@ -486,9 +449,9 @@ func removeExtras(t *tree, app string, globs []string, man Manifest) error {
 	return nil
 }
 
-// restoreFile writes one snapshot file back into the config directory, through
-// internal/atomicfile so a crash leaves the old file or the new one and never
-// half of either, then restores the mode, mtime and (as root) the owner.
+// restoreFile writes one snapshot file back through internal/atomicfile, so a crash
+// leaves the old file or the new one and never half of either, then restores the
+// mode, mtime and (as root) the owner.
 func restoreFile(t *tree, app, src string, f File) error {
 	in, err := t.open(path.Join(src, f.Path))
 	if err != nil {
@@ -505,9 +468,8 @@ func restoreFile(t *tree, app, src string, f File) error {
 	if err := t.chtimes(target, f.ModTime, f.ModTime); err != nil {
 		return fmt.Errorf("restore: %w", err)
 	}
-	// A restored file belongs to the seedbox's user, not to the root process
-	// that put it back. A non-root run can only leave what it owns, so it sets
-	// no owner; the manifest's owner is still what it recorded.
+	// A restored file belongs to the seedbox's user, not to the root process that put
+	// it back; a non-root run can only leave what it owns, so it sets no owner.
 	if os.Geteuid() == 0 {
 		if err := t.chown(target, f.UID, f.GID); err != nil {
 			return fmt.Errorf("restore: %w", err)
@@ -516,14 +478,13 @@ func restoreFile(t *tree, app, src string, f File) error {
 	return nil
 }
 
-// linkedDir names the first directory between the app's config directory and rel
-// that is a symlink, or "" when none is. A directory that is missing ends the
-// search: makeDirs creates it and everything below it as real directories.
+// linkedDir names the first directory between the app's config directory and rel that
+// is a symlink, or "" when none is; a missing directory ends the search, because
+// makeDirs creates it as a real directory.
 //
-// A link inside the config root is refused as well, although the tree would let
-// the write through: a restore that followed one would put the app's state where
-// the app does not look for it. The tree is what holds when the link arrives
-// after this walk has read it.
+// A link inside the config root is refused too, although the tree would let the write
+// through: a restore that followed one would put the app's state where the app does
+// not look for it.
 func linkedDir(t *tree, app, rel string) (string, error) {
 	segs := strings.Split(rel, "/")
 	at := app
@@ -543,11 +504,10 @@ func linkedDir(t *tree, app, rel string) (string, error) {
 	return "", nil
 }
 
-// makeDirs creates the directories between the app's config directory and a
-// restored file that are missing, at dirMode, and (as root) hands each one it
-// made to the file's owner: a directory left as root's would lock the app out of
-// the file inside it. A directory that is already there is the app's, and is
-// left as it is.
+// makeDirs creates the missing directories between the app's config directory and a
+// restored file at dirMode, and (as root) hands each one it made to the file's
+// owner: a directory left as root's would lock the app out of the file inside it.
+// A directory that is already there is the app's.
 func makeDirs(t *tree, app, relDir string, uid, gid int) error {
 	if relDir == "." {
 		return nil
@@ -574,9 +534,8 @@ func makeDirs(t *tree, app, relDir string, uid, gid int) error {
 	return nil
 }
 
-// entry is one path under a config directory that a glob matched, with the
-// type bits of what is there (regular, symlink, directory) so the caller
-// decides what to do with it.
+// entry is one path under a config directory that a glob matched, with the type bits
+// of what is there, so the caller decides what to do with it.
 type entry struct {
 	path string
 	mode fs.FileMode
@@ -585,16 +544,13 @@ type entry struct {
 	above bool
 }
 
-// matchEntries lists the entries under the app's config directory whose relative
-// path matches a glob, in path order. Directories are not entries: a snapshot
-// holds files, and a glob that names a directory names nothing to copy.
+// matchEntries lists the entries under the app's config directory whose relative path
+// matches a glob, in path order; directories are not entries.
 //
-// The walk is the tree's own file system, so it does not follow links: a symlink
-// is reported where it sits rather than copied from wherever it points, and one
-// that stands where a glob names files below it is reported too (entry.above), or
-// the walk would refuse it. A directory no glob reaches below is not read at all:
-// Plex keeps its metadata bundles beside its databases, and that tree is most of
-// the files on a media server's config claim.
+// The walk does not follow links: a symlink is reported where it sits, and one where a
+// glob names files below it is reported too (entry.above), or the walk would refuse
+// it. A directory no glob reaches below is not read at all: Plex's metadata bundles
+// are most of the files on a media server's config claim.
 func matchEntries(t *tree, app string, globs []string) ([]entry, error) {
 	rootPath := filepath.ToSlash(app)
 	var out []entry
@@ -629,9 +585,8 @@ func matchEntries(t *tree, app string, globs []string) ([]entry, error) {
 	return out, nil
 }
 
-// reachesBelow reports whether a glob names something under rel: the glob has
-// more segments than rel, and its leading ones match rel's. A `/` in a glob is
-// always a separator here, as it is to whoever reads the catalog.
+// reachesBelow reports whether a glob names something under rel: it has more
+// segments than rel, and its leading ones match rel's.
 func reachesBelow(globs []string, rel string) bool {
 	segs := strings.Split(rel, "/")
 	for _, glob := range globs {
@@ -653,10 +608,9 @@ func reachesBelow(globs []string, rel string) bool {
 	return false
 }
 
-// matches reports whether one relative path matches any of the globs. Each glob
-// is matched against the whole relative path, so `*` never crosses a directory
-// separator and there is no `**`: what a glob can reach is exactly what a
-// reviewer can see in the catalog.
+// matches reports whether one relative path matches any of the globs. Each glob is
+// matched against the whole path, so `*` never crosses a directory separator and
+// there is no `**`: what a glob can reach is what a reviewer sees in the catalog.
 func matches(globs []string, rel string) bool {
 	for _, glob := range globs {
 		if ok, err := path.Match(glob, rel); err == nil && ok {
@@ -679,9 +633,8 @@ func hashFile(t *tree, name string) (string, error) {
 	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
-// owner reads a file's uid and gid. A filesystem whose stat box cannot read
-// reports -1/-1, which is what the manifest then records: nothing to restore,
-// rather than a guess at root.
+// owner reads a file's uid and gid. A filesystem whose stat box cannot read reports
+// -1/-1, which the manifest records: nothing to restore, rather than a guess.
 func owner(info fs.FileInfo) (uid, gid int) {
 	if st, ok := info.Sys().(*syscall.Stat_t); ok {
 		return int(st.Uid), int(st.Gid)

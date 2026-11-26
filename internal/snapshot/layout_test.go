@@ -21,8 +21,8 @@ func TestDirNamesTheStepAndTheApp(t *testing.T) {
 	if got != want {
 		t.Fatalf("dir = %s, want %s", got, want)
 	}
-	// Two instances of one app are two config directories and so two
-	// snapshots, which is why the last element is the instance name.
+	// Two instances are two config directories and so two snapshots, which is why the
+	// last element is the instance name.
 	other, err := Dir(root, "0.4.0", "0.5.0", at, "sonarr-4k")
 	if err != nil {
 		t.Fatalf("dir: %v", err)
@@ -30,8 +30,7 @@ func TestDirNamesTheStepAndTheApp(t *testing.T) {
 	if other == got || filepath.Dir(other) != filepath.Dir(got) {
 		t.Fatalf("second instance dir = %s, want a sibling of %s", other, got)
 	}
-	// The name is UTC, whatever zone the run is in: the directory name is what
-	// Prune orders by.
+	// The name is UTC whatever zone the run is in: it is what Prune orders by.
 	local := time.Date(2026, 3, 4, 5, 6, 7, 0, time.FixedZone("x", 3600))
 	shifted, err := Dir(root, "0.4.0", "0.5.0", local, "sonarr")
 	if err != nil {
@@ -42,9 +41,8 @@ func TestDirNamesTheStepAndTheApp(t *testing.T) {
 	}
 }
 
-// TestDirRefusesANameThatIsAPath: the versions come from chart metadata, and a
-// name that walks up would put the snapshot, and the restore that reads it,
-// outside the box's own tree.
+// The versions come from chart metadata, and a name that walks up would put the
+// snapshot, and the restore that reads it, outside box's own tree.
 func TestDirRefusesANameThatIsAPath(t *testing.T) {
 	at := time.Unix(1700000000, 0).UTC()
 	cases := []struct {
@@ -72,9 +70,8 @@ func TestDirRefusesANameThatIsAPath(t *testing.T) {
 	}
 }
 
-// TestNewestPicksTheNewest: three steps for one app, and the answer is the one
-// whose name carries the latest time -- with its own manifest read, not
-// another step's.
+// Three steps for one app: the answer is the one whose name carries the latest
+// time, with its own manifest read.
 func TestNewestPicksTheNewest(t *testing.T) {
 	configRoot := t.TempDir()
 	app := filepath.Join(configRoot, "sonarr")
@@ -112,10 +109,8 @@ func TestNewestPicksTheNewest(t *testing.T) {
 	}
 }
 
-// TestNewestIgnoresAPartialTree: a tree Take is still building (or one whose run
-// died before its rename) is not a snapshot, so the answer is the newest step
-// that is complete. A newer step holding only another app is not this app's
-// either.
+// A tree Take is still building is not a snapshot, so the answer is the newest
+// complete step, and a newer step holding only another app is not this app's.
 func TestNewestIgnoresAPartialTree(t *testing.T) {
 	configRoot := t.TempDir()
 	app := filepath.Join(configRoot, "sonarr")
@@ -153,8 +148,7 @@ func TestNewestIgnoresAPartialTree(t *testing.T) {
 	}
 }
 
-// TestNewestWithNoSnapshot: a box that has never copied this app is a state, not
-// a failure to read the disk: the caller answers it with its own sentence.
+// A box that has never copied this app is a state, not a failure to read the disk.
 func TestNewestWithNoSnapshot(t *testing.T) {
 	cases := []struct {
 		name string
@@ -198,8 +192,7 @@ func TestNewestWithNoSnapshot(t *testing.T) {
 	}
 }
 
-// TestNewestRefusesANameThatIsAPath: the instance is a config directory's name
-// and becomes part of a path box reads from.
+// The instance is a config directory's name and becomes part of a path box reads.
 func TestNewestRefusesANameThatIsAPath(t *testing.T) {
 	for _, name := range []string{"", ".", "..", "sonarr/4k", `sonarr\4k`} {
 		if _, _, err := Newest(t.TempDir(), name); err == nil {
@@ -245,9 +238,8 @@ func TestCheckGlob(t *testing.T) {
 	}
 }
 
-// TestPruneKeepsTheNewest puts three steps on disk for one app, and a newer step
-// that only holds another app's snapshot: the app keeps its two newest and the
-// other app's step stays exactly as it was.
+// Three steps for one app and a newer step holding only another app: the app keeps
+// its two newest and the other app's step stays as it was.
 func TestPruneKeepsTheNewest(t *testing.T) {
 	configRoot := t.TempDir()
 	root := Root(configRoot)
@@ -291,8 +283,7 @@ func TestPruneKeepsTheNewest(t *testing.T) {
 		t.Fatalf("a directory that is not a step was pruned: %v", err)
 	}
 
-	// And keeping one deletes the newer of the two, which is what makes the
-	// order by time rather than by name.
+	// Keeping one deletes the newer of the two: the order is by time, not by name.
 	if err := Prune(root, "sonarr", 1); err != nil {
 		t.Fatalf("prune: %v", err)
 	}
@@ -312,16 +303,16 @@ func TestPruneRefusesToDeleteEverything(t *testing.T) {
 	}
 }
 
-// TestPruneWithNothingThere: a box that has never updated has no snapshots
-// root, and asking to prune it is not a failure.
+// A box that has never updated has no snapshots root, and pruning it is not a
+// failure.
 func TestPruneWithNothingThere(t *testing.T) {
 	if err := Prune(Root(t.TempDir()), "sonarr", 2); err != nil {
 		t.Fatalf("prune of nothing: %v", err)
 	}
 }
 
-// TestPruneLeavesAYoungerAppAlone: an app enabled after a step was taken has no
-// snapshot in it, so the step is not this app's to remove.
+// An app enabled after a step was taken has no snapshot in it, so the step is not
+// this app's to remove.
 func TestPruneLeavesAnOlderStepWithoutTheApp(t *testing.T) {
 	configRoot := t.TempDir()
 	root := Root(configRoot)

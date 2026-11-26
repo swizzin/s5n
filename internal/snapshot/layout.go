@@ -21,21 +21,18 @@ const stepTimeLayout = "20060102T150405Z"
 // pod and never mounted.
 const boxDir = ".box"
 
-// Root is where a seedbox's snapshots live: <configRoot>/.box/snapshots, beside
-// the app config directories rather than inside one, so no app can see another
-// app's state and an app pointed at its own directory cannot copy the
-// snapshots into itself.
+// Root is where a seedbox's snapshots live: <configRoot>/.box/snapshots, beside the
+// app config directories rather than inside one, so no app can see another app's
+// state and an app pointed at its own directory cannot copy the snapshots into
+// itself.
 func Root(configRoot string) string {
 	return filepath.Join(configRoot, boxDir, "snapshots")
 }
 
 // Dir names one app's snapshot for one update step:
-// <configRoot>/.box/snapshots/<from>-<to>-<time>/<app>.
-//
-// The versions come from chart metadata and the app name from the catalog, and
-// a name that is not a single path element would move the snapshot out of the
-// tree: a `..` version would write somewhere else entirely, and a restore would
-// then read from there. So each name is checked, not cleaned.
+// <configRoot>/.box/snapshots/<from>-<to>-<time>/<app>. Each name is checked, not
+// cleaned, because a `..` version would write somewhere else entirely and a restore
+// would read from there.
 func Dir(configRoot, from, to string, at time.Time, app string) (string, error) {
 	named := []struct{ what, name string }{
 		{"the version it moves from", from},
@@ -51,7 +48,6 @@ func Dir(configRoot, from, to string, at time.Time, app string) (string, error) 
 	return filepath.Join(Root(configRoot), step, app), nil
 }
 
-// checkName refuses a single path element that is not one.
 func checkName(name string) error {
 	switch {
 	case name == "":
@@ -64,14 +60,13 @@ func checkName(name string) error {
 	return nil
 }
 
-// snapshotsTree opens the config root that holds one of box's snapshots roots,
-// and names that root inside it.
+// snapshotsTree opens the config root that holds one of box's snapshots roots, and
+// names that root inside it.
 //
-// The tree is opened on the config root rather than on the snapshots root itself,
-// because os.OpenRoot follows the path it is handed: a link planted at
-// .box/snapshots would become the tree's own root, and everything below it would
-// be read and written wherever the link points. Spelled as a name inside the
-// config root, that link is a link out of the tree, which the root refuses.
+// It is opened on the config root rather than on the snapshots root, because
+// os.OpenRoot follows the path it is handed: a link planted at .box/snapshots would
+// become the tree's own root. Named inside the config root, it is a link out, which
+// the root refuses.
 func snapshotsTree(snapshots string) (*tree, string, error) {
 	t, err := openTree(filepath.Dir(filepath.Dir(snapshots)))
 	if err != nil {
@@ -85,14 +80,11 @@ func snapshotsTree(snapshots string) (*tree, string, error) {
 	return t, name, nil
 }
 
-// Prune keeps the newest keep snapshots of one app and deletes the rest, by the
-// time in the step directory's name (not the manifest's: the directory name is
-// what box chose, and a manifest can be missing while its directory is real).
-//
-// A directory that is not a step of ours is left alone, because the snapshots
-// root sits inside a config root the operator owns: anything else there is
-// theirs. A step left with no apps after the prune goes too, so an emptied
-// directory does not accumulate.
+// Prune keeps the newest keep snapshots of one app and deletes the rest, by the time
+// in the step directory's name (not the manifest's: a manifest can be missing while
+// its directory is real). A directory that is not a step of ours is left alone, the
+// snapshots root sitting inside a config root the operator owns, and a step left with
+// no apps after the prune goes too.
 func Prune(root, app string, keep int) error {
 	if keep < 1 {
 		return fmt.Errorf("prune %s: keep %d would delete every snapshot; box keeps at least one", app, keep)
@@ -128,10 +120,10 @@ func Prune(root, app string, keep int) error {
 		if !ok {
 			continue
 		}
-		// A step the app has no copy in is not this app's to prune. A step box
-		// could not read at all is an error rather than a skip: "the disk did
-		// not answer" and "there is no copy here" lead to opposite decisions
-		// about what may be deleted.
+		// A step the app has no copy in is not this app's to prune; a step box could
+		// not read at all is an error rather than a skip, because "the disk did not
+		// answer" and "there is no copy here" lead to opposite decisions about what
+		// may be deleted.
 		if _, err := t.lstat(path.Join(snapshots, e.Name(), app)); err != nil {
 			if errors.Is(err, fs.ErrNotExist) {
 				continue
@@ -182,18 +174,11 @@ func stepTime(name string) (time.Time, bool) {
 // answers differently from a disk it could not read.
 var ErrNoSnapshot = errors.New("snapshot: there is no snapshot of this app")
 
-// Newest finds the newest complete snapshot of one instance under root and
-// reads its manifest, which is what a rollback needs: the files to put back and
-// the image the app ran when they were copied.
-//
-// The order is the time in the step directory's name, not the manifest's: the
-// directory name is what box chose and it is there even for a tree whose
-// manifest is unreadable. A tree still being built (`<app>.partial`, which Take
-// renames only when it is complete) is not a snapshot of the app, so it is
-// never picked; neither is another instance's copy in the same step.
-//
-// A step directory is left alone unless it is one of box's own names, because
-// the snapshots root sits inside a config root the operator owns.
+// Newest finds the newest complete snapshot of one instance under root and reads its
+// manifest: the files to put back and the image the app ran when they were copied.
+// The order is the time in the step directory's name, not the manifest's, because the
+// name is there even for a tree whose manifest is unreadable; a tree still being
+// built (`<app>.partial`) is never picked.
 func Newest(root, instance string) (string, Manifest, error) {
 	if err := checkName(instance); err != nil {
 		return "", Manifest{}, fmt.Errorf("snapshot: instance %q: %w", instance, err)
@@ -251,9 +236,8 @@ func Newest(root, instance string) (string, Manifest, error) {
 		}
 		return have[i].path > have[j].path
 	})
-	// The newest tree that exists is the answer, and a manifest it cannot read
-	// is an error rather than a reason to fall back to an older one: the older
-	// copy holds state the app has already written past.
+	// A manifest the newest tree cannot read is an error rather than a reason to fall
+	// back: the older copy holds state the app has already written past.
 	man, err := loadManifest(t, have[0].dir)
 	if err != nil {
 		return "", Manifest{}, fmt.Errorf("snapshot %s: %w", have[0].path, err)
@@ -268,13 +252,10 @@ func StepName(dir string) string {
 	return filepath.Base(filepath.Dir(dir))
 }
 
-// CheckGlob checks one catalog glob: a relative path, in path.Match syntax,
-// matched against a whole path relative to an app's config directory.
-//
-// The rule lives here, beside the code that copies and deletes by it, and
-// internal/catalog calls it: the globs decide which files a restore deletes, so
-// there is one definition and a manifest that satisfies the loader is one the
-// copier can run.
+// CheckGlob checks one catalog glob: a relative path, in path.Match syntax, matched
+// against a whole path relative to an app's config directory. The rule lives beside
+// the code that copies and deletes by it, so a manifest that satisfies the loader is
+// one the copier can run.
 func CheckGlob(glob string) error {
 	switch {
 	case glob == "":
@@ -287,10 +268,9 @@ func CheckGlob(glob string) error {
 			return errors.New(`has a ".." segment; a snapshot never leaves the app's config directory`)
 		}
 	}
-	// A pattern that is not clean would match nothing the way its author read
-	// it (`./db.sqlite3` matches no relative path as this package walks them),
-	// so it is refused at load rather than discovered as an empty snapshot at
-	// the first update.
+	// A pattern that is not clean would match nothing the way its author read it
+	// (`./db.sqlite3` matches no relative path as this package walks them), so it is
+	// refused at load rather than discovered as an empty snapshot at the first update.
 	if clean := path.Clean(glob); clean != glob {
 		return fmt.Errorf("is not a clean relative path (write %q)", clean)
 	}
@@ -313,8 +293,8 @@ func CheckGlobs(globs []string) error {
 }
 
 // checkRel refuses a manifest path that would leave the config directory it is
-// written into. The paths come from a file box wrote, but it is a file on disk
-// an app's user could have reached, and Restore writes where it points.
+// written into: the file is one box wrote, but it is on disk where an app's user
+// could have reached it, and Restore writes where it points.
 func checkRel(rel string) error {
 	switch {
 	case rel == "":
