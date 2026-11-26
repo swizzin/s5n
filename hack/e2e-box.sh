@@ -370,6 +370,9 @@ SEERR_HOST="seerr.${DOMAIN}"
 # PeerBanHelper's page calls /api/... from the site root, so the catalog serves it
 # at a host of its own as well.
 PBH_HOST="pbh.${DOMAIN}"
+# Jellyfin's players are given a server address, so it is served at a name of its
+# own as well.
+JELLYFIN_HOST="jellyfin.${DOMAIN}"
 # The fresh scenario points the production issuer at Pebble; every other
 # scenario keeps Let's Encrypt's directory and never issues from it.
 ACME_ARGS=()
@@ -746,7 +749,7 @@ fi
 # APPS is the app list bootstrap and init write into the grant. Every run wants
 # the whole catalog in front of it; the one step that proves a box with nothing
 # on sets it to `none`, the word for the empty list.
-APPS="qbittorrent,sonarr,radarr,lidarr,bazarr,sabnzbd,filebrowser,prowlarr,plex,tautulli,seerr,qui,autobrr,maintainerr,pbh"
+APPS="qbittorrent,sonarr,radarr,lidarr,bazarr,sabnzbd,filebrowser,prowlarr,plex,tautulli,seerr,jellyfin,qui,autobrr,maintainerr,pbh"
 
 # box_bootstrap_args <extra...>: the arguments every bootstrap in this script
 # passes, without the one that decides whether it asks. The platform and root's
@@ -2084,7 +2087,7 @@ fresh() {
   # Every name the box serves: its own and each app's own host. init resolves
   # them and refuses an app name that does not answer where the domain does, so
   # the app hosts have to be here before bootstrap or it stops on purpose.
-  patch_coredns "$node_ip" "$DOMAIN" "$PLEX_HOST" "$SEERR_HOST" "$PBH_HOST" ||
+  patch_coredns "$node_ip" "$DOMAIN" "$PLEX_HOST" "$SEERR_HOST" "$PBH_HOST" "$JELLYFIN_HOST" ||
     { echo "could not patch CoreDNS for the box's names"; fail=1; return 0; }
   ACME_ARGS=(--acme-server "https://pebble.pebble.svc:14000/dir")
 
@@ -2861,7 +2864,7 @@ PY
   # final card and the grant are what init decided; these assertions are what
   # cluster got.
   log "the app hosts: a certificate and a listener each, and Seerr on its own name"
-  for app_host in "plex:${PLEX_HOST}" "seerr:${SEERR_HOST}" "pbh:${PBH_HOST}"; do
+  for app_host in "plex:${PLEX_HOST}" "seerr:${SEERR_HOST}" "pbh:${PBH_HOST}" "jellyfin:${JELLYFIN_HOST}"; do
     app=${app_host%%:*}; host=${app_host##*:}
     label=${host//./-}
     cert=s5n-tls-${label}
@@ -3050,6 +3053,86 @@ PYPBH
   # The challenge path is not asserted here: cert-manager's solver HTTPRoute
   # exists only while an order is pending, so after issuance that path is the
   # redirect's. The renewal below observes the solver route while it exists.
+
+  # ---- Jellyfin: its own accounts and a closed first-run window -------------
+  # The app keeps its accounts in its database, so the wiring Job completes its
+  # first-run wizard and box makes the person's password and shows it once: the
+  # line below is that once, and the release Secret is the only copy.
+  log "Jellyfin: the person's account, the Job's account, and no window in front"
+  jf_user_pw=$($K -n "$NS" get secret s5n-keys -o jsonpath='{.data.jellyfin-user-password}' | base64 -d || true)
+  jf_box_pw=$($K -n "$NS" get secret s5n-keys -o jsonpath='{.data.jellyfin-box-password}' | base64 -d || true)
+  [ -n "$jf_user_pw" ] || { echo "the release Secret has no jellyfin-user-password"; fail=1; }
+  [ -n "$jf_box_pw" ] || { echo "the release Secret has no jellyfin-box-password"; fail=1; }
+  grep -qF "jellyfin password: ${jf_user_pw}" "$WORK/bootstrap1.txt" ||
+    { echo "init did not show the Jellyfin password once: the person has no way to sign in"; fail=1; }
+  grep -qF "sign in to Jellyfin as ${LOGIN}" "$WORK/bootstrap1.txt" ||
+    { echo "the shown password does not name the account it belongs to (${LOGIN})"; fail=1; }
+
+  jf_code=$(curl -sS -o "$WORK/jf-info.json" -w '%{http_code}' \
+    --resolve "${JELLYFIN_HOST}:443:${gw_addr}" --cacert "$WORK/pebble-root.pem" \
+    "https://${JELLYFIN_HOST}/System/Info/Public" 2>/dev/null || true)
+  echo "  GET https://${JELLYFIN_HOST}/System/Info/Public: ${jf_code}"
+  [ "$jf_code" = 200 ] || fail=1
+  grep -q '"StartupWizardCompleted":true' "$WORK/jf-info.json" ||
+    { echo "Jellyfin reports the wizard incomplete: the Job did not finish it"; fail=1; }
+  jf_ui=$(curl -sS -L -o "$WORK/jellyfin.html" -w '%{http_code}' \
+    --resolve "${JELLYFIN_HOST}:443:${gw_addr}" --cacert "$WORK/pebble-root.pem" \
+    "https://${JELLYFIN_HOST}/" 2>/dev/null || true)
+  echo "  GET https://${JELLYFIN_HOST}/: ${jf_ui}"
+  [ "$jf_ui" = 200 ] && grep -qi '<!doctype html' "$WORK/jellyfin.html" ||
+    { echo "Jellyfin's own host did not serve its UI: ${jf_ui}"; fail=1; }
+
+  # jf_token <user> <password>: a session token, empty when refused.
+  jf_token() {
+    curl -sS --max-time 30 --resolve "${JELLYFIN_HOST}:443:${gw_addr}" --cacert "$WORK/pebble-root.pem" \
+      -H 'Content-Type: application/json' -d "{\"Username\":\"$1\",\"Pw\":\"$2\"}" \
+      "https://${JELLYFIN_HOST}/Users/AuthenticateByName" 2>/dev/null |
+      python3 -c 'import json,sys
+try: print(json.load(sys.stdin).get("AccessToken") or "")
+except Exception: print("")' || true
+  }
+  jf_user_token=$(jf_token "$LOGIN" "$jf_user_pw")
+  [ -n "$jf_user_token" ] ||
+    { echo "${LOGIN} cannot sign in with the password box showed"; fail=1; }
+  jf_box_token=$(jf_token s5n "$jf_box_pw")
+  [ -n "$jf_box_token" ] || { echo "the Job's own Jellyfin account cannot sign in"; fail=1; }
+  jf_api() {
+    local token=$1; shift
+    curl -sS --max-time 30 --resolve "${JELLYFIN_HOST}:443:${gw_addr}" --cacert "$WORK/pebble-root.pem" \
+      -H "X-Emby-Token: ${token}" "$@"
+  }
+  jf_api "$jf_box_token" "https://${JELLYFIN_HOST}/Library/VirtualFolders" >"$WORK/jf-libs.json" || true
+  for dir in /data/media/movies /data/media/4K/Movies /data/media/tv; do
+    grep -q "\"${dir}\"" "$WORK/jf-libs.json" ||
+      { echo "Jellyfin has no library over ${dir}"; fail=1; }
+  done
+  # The window: this host has no edge login in front of it (players sign in
+  # themselves), so the anonymous-until-wizard endpoints must never be served
+  # from the Gateway at all.
+  : >"$WORK/jf-startup-headers"
+  jf_startup=$(curl -sS -X POST -H 'Content-Type: application/json' \
+    -d '{"Name":"intruder","Password":"intruder-password"}' \
+    -D "$WORK/jf-startup-headers" -o /dev/null -w '%{http_code}' \
+    --resolve "${JELLYFIN_HOST}:443:${gw_addr}" --cacert "$WORK/pebble-root.pem" \
+    "https://${JELLYFIN_HOST}/Startup/User" 2>/dev/null || true)
+  echo "  POST https://${JELLYFIN_HOST}/Startup/User from outside: ${jf_startup} (want a redirect)"
+  case "$jf_startup" in
+    2*) echo "an outsider's /Startup/User was served (${jf_startup})"; fail=1 ;;
+  esac
+  [ -z "$(jf_token intruder intruder-password)" ] ||
+    { echo "an outsider claimed Jellyfin through the Gateway"; fail=1; }
+  # The forwarded address. Through the Gateway the peer is the proxy's pod, so
+  # an app that trusts nothing sees every request as local -- and the endpoints
+  # a local caller reaches without a credential are then open to the internet.
+  jf_api "$jf_user_token" "https://${JELLYFIN_HOST}/System/Configuration/network" >"$WORK/jf-network.json" || true
+  python3 -c 'import json,sys
+d=json.load(open("'"$WORK"'/jf-network.json")); p=d.get("KnownProxies") or d.get("knownProxies") or []
+print("  KnownProxies: %s" % p)
+sys.exit(0 if p and any("10.244." in x or "/" in x for x in p) else 1)' ||
+    { echo "Jellyfin's KnownProxies is empty: it ignores the Gateway's forwarded address"; fail=1; }
+  jf_api "$jf_user_token" "https://${JELLYFIN_HOST}/System/Endpoint" >"$WORK/jf-endpoint.json" || true
+  grep -q '"IsLocal":false' "$WORK/jf-endpoint.json" ||
+    { echo "Jellyfin counts a request through the Gateway as local ($(cat "$WORK/jf-endpoint.json"))"; fail=1; }
 
   # ---- a renewal, with the redirect and the narrowed listener in place -------
   # The renewal is triggered the way `cmctl renew` does: the Certificate's

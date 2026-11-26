@@ -10,11 +10,25 @@
 auth:
   edge: true
 
+# The account root's login admits, which box writes from the grant: Jellyfin's
+# first user is named after it, and this script installs with Helm, so the name
+# is here (hack/e2e-kind.sh's APP_LOGIN must be the same one).
+login: e2e
+
 wiring:
   image:
     tag: e2e
 
 apps:
+  # The second media server. It is opt-in, and this is the one run that turns
+  # everything on.
+  jellyfin:
+    enabled: true
+    # The pod network Jellyfin must trust for the Gateway's forwarded address.
+    # box writes this from the cluster's Nodes at init; a Helm install names it.
+    # kind's default pod subnet is 10.244.0.0/16.
+    knownProxies:
+      - 10.244.0.0/16
   qbittorrent:
     image:
       # The project's own static build, so this run proves it, not only default.

@@ -27,6 +27,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/swizzin/s5n/internal/authelia"
 	"github.com/swizzin/s5n/internal/catalog"
 	"github.com/swizzin/s5n/internal/say"
 	"github.com/swizzin/s5n/internal/seedbox"
@@ -59,6 +60,12 @@ type Decision struct {
 	// read by root's run and written into the grant; a user's apply only
 	// renders what the grant says, because the Gateway's namespace is root's.
 	GatewayIP func(context.Context) (string, error)
+	// PodCIDRs reads the cluster's pod network from its Nodes. It is what an
+	// app that trusts the Gateway's forwarded address has to be told: the peer
+	// that connects is the proxy's pod, and the proxy changes on every restart,
+	// so the range it lives in is the only stable answer. Read by root's run and
+	// written into the grant, like the address above.
+	PodCIDRs func(context.Context) ([]string, error)
 	// Schema is the chart's values.schema.json, so a box installing a release
 	// from before the provider does not write a grant key that release would
 	// refuse.
@@ -273,6 +280,11 @@ type Result struct {
 	Login             string
 	NewPassword       bool
 	GeneratedPassword string
+	// JellyfinPassword is the password box made for the person's Jellyfin
+	// account, on the one run that creates it. The caller shows it once, like
+	// the login's; it reaches the release Secret through the apply it is handed
+	// to and is written to no file here.
+	JellyfinPassword string
 	// Applied says the hand-over ran. It does not say the release changed:
 	// apply decides that, and a re-run is a no-op there too.
 	Applied bool
@@ -525,6 +537,24 @@ func (d *Decision) Run(ctx context.Context, opts Options) (Result, error) {
 	}
 	res.Login, res.NewPassword, res.GeneratedPassword = loginName, newPassword, generated
 
+	// Jellyfin's person account. It is the one app credential a person has to
+	// know, because nothing can put it in a file: the account is a row the
+	// wiring Job creates inside the app, and its players sign in with it. So box
+	// makes it the way it makes the login's own password and shows it once
+	// (cmd/box), and hands it to that one apply as a transient answer, which is
+	// what keeps it off this host: the release Secret is the only copy.
+	//
+	// Only a first install makes one. From then on the Secret keeps it -- the
+	// chart preserves an existing key -- and a re-run that generated a new one
+	// would print a password the app does not accept.
+	if !res.ReRun && contains(apps, "jellyfin") {
+		jellyfinPassword, err := authelia.GeneratePassword()
+		if err != nil {
+			return res, d.stop(err)
+		}
+		res.JellyfinPassword = jellyfinPassword
+	}
+
 	// The namespace follows the login: a seedbox's is s5n-<login>, beside box's
 	// own s5n-system and s5n-gateway. A re-run keeps the grant's, so a box that
 	// already has `seedbox` keeps it whatever this run's login is, and an
@@ -669,6 +699,36 @@ func (d *Decision) Run(ctx context.Context, opts Options) (Result, error) {
 			}
 		}
 	}
+	// The cluster's pod network, for an app that has to trust the Gateway's
+	// forwarded address. The chart's key is what decides whether this release
+	// can carry it at all: an older chart has no such value, and writing a grant
+	// key it would refuse is a failed apply on a box that was fine.
+	//
+	// Empty is not fatal: the app still runs, every request through the Gateway
+	// just looks local, and the wiring Job's receipt says so. It is written only
+	// when the chart serves that app at all, so a box without it carries no
+	// unused key.
+	if d.PodCIDRs != nil {
+		declared, err := seedbox.Declares(d.Schema, "apps", "jellyfin", "knownProxies")
+		if err != nil {
+			return res, err
+		}
+		if declared && contains(apps, "jellyfin") {
+			cidrs, err := d.PodCIDRs(ctx)
+			if err != nil {
+				return res, err
+			}
+			if len(cidrs) == 0 {
+				d.report().Warn("this cluster's Nodes name no pod network yet, so Jellyfin would treat every request through the Gateway as local: run `box init` again once a Node has its pod CIDR")
+			} else {
+				list := make([]any, len(cidrs))
+				for i, c := range cidrs {
+					list[i] = c
+				}
+				grantAnswers = append(grantAnswers, answer{key: "apps.jellyfin.knownProxies", value: list})
+			}
+		}
+	}
 
 	res.GrantChanged, res.ValuesChanged, err = d.writeFiles(opts, sb, grantNow, base, grantAnswers, stored)
 	if err != nil {
@@ -728,8 +788,25 @@ func (d *Decision) Run(ctx context.Context, opts Options) (Result, error) {
 		}
 		req.Login = func(ctx context.Context) error { return d.Login(ctx, l) }
 	}
-	if len(transient) > 0 {
-		req.AfterConfirm = d.transientAsker(transient, opts)
+	// The answers that outlive no file: the catalog's transient questions, and
+	// the password box just made for an app that keeps its own accounts.
+	extra := map[string]any{}
+	if res.JellyfinPassword != "" {
+		extra["secrets.jellyfinUserPassword"] = res.JellyfinPassword
+		req.TransientKeys = append(req.TransientKeys, "secrets.jellyfinUserPassword")
+	}
+	if len(transient) > 0 || len(extra) > 0 {
+		asked := d.transientAsker(transient, opts)
+		req.AfterConfirm = func(ctx context.Context) (map[string]any, error) {
+			out, err := asked(ctx)
+			if err != nil {
+				return nil, err
+			}
+			for k, v := range extra {
+				out[k] = v
+			}
+			return out, nil
+		}
 	}
 	if err := d.Apply(ctx, req); err != nil {
 		return res, err

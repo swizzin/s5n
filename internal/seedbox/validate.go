@@ -169,10 +169,53 @@ func (s *Seedbox) Effective(c Chart) (map[string]any, error) {
 			setPath(base, []string{"login"}, name)
 		}
 	}
+	// The cluster's pod network, for the one app that has to trust the Gateway's
+	// forwarded address: it is read from the Nodes at init, and injected here for
+	// the same reason as the address above -- it is BoxOnly, so overlay() leaves
+	// it out, and a chart from before the app has no such key to give it to.
+	if declared, err := Declares(c.Schema, "apps", "jellyfin", "knownProxies"); err != nil {
+		return nil, err
+	} else if declared {
+		if proxies := grantStringList(s.Grant.data, "apps", "jellyfin", "knownProxies"); len(proxies) > 0 {
+			list := make([]any, len(proxies))
+			for i, p := range proxies {
+				list[i] = p
+			}
+			setPath(base, []string{"apps", "jellyfin", "knownProxies"}, list)
+		}
+	}
 	if err := Validate(c.Schema, base); err != nil {
 		return nil, err
 	}
 	return base, nil
+}
+
+// grantStringList reads a list of strings at a key path of the grant, or nil
+// when the path is absent or holds anything else. It is the one shape of grant
+// value that is not a scalar, and the caller is what decides whether the chart
+// has a key for it.
+func grantStringList(data map[string]any, keys ...string) []string {
+	var cur any = data
+	for _, k := range keys {
+		m, ok := cur.(map[string]any)
+		if !ok {
+			return nil
+		}
+		cur = m[k]
+	}
+	items, ok := cur.([]any)
+	if !ok {
+		return nil
+	}
+	out := make([]string, 0, len(items))
+	for _, item := range items {
+		s, ok := item.(string)
+		if !ok || strings.TrimSpace(s) == "" {
+			continue
+		}
+		out = append(out, s)
+	}
+	return out
 }
 
 // Declares reports whether a chart's schema describes one values path, key by

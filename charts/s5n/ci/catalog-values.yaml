@@ -11,6 +11,10 @@ auth:
   oidc:
     gatewayIP: 10.96.31.116
 
+# The account root's login admits, which box writes from the grant: Jellyfin's
+# first user is named after it.
+login: example
+
 storage:
   data:
     existingClaim: box-catalog-data
@@ -39,6 +43,12 @@ apps:
     enabled: true
   filebrowser:
     enabled: true
+  # The second media server: its own host name, its own accounts, and the
+  # /cache emptyDir its transcodes need on a read-only root filesystem.
+  jellyfin:
+    enabled: true
+    knownProxies:
+      - 10.244.0.0/16
 
 # The box's own name. Plex and Seerr are served at plex.<domain> and
 # seerr.<domain> (the catalog says so), so a render needs the domain.

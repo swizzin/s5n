@@ -1031,6 +1031,7 @@ func (o *initFlags) run(ctx context.Context, kubeconfig string, yes, plain bool,
 		UserLookup: osUserName,
 		HasLogin:   hasLogin(o.pathsInNode),
 		GatewayIP:  gatewayProxyIP(kubeconfig),
+		PodCIDRs:   podCIDRs(kubeconfig),
 		NodePorts:  nodePorts(kubeconfig),
 		Schema:     chart.Schema,
 		Apply: func(ctx context.Context, req setup.ApplyOptions) error {
@@ -1145,6 +1146,14 @@ func (o *initFlags) run(ctx context.Context, kubeconfig string, yes, plain bool,
 		redact(res.GeneratedPassword)
 		out.Line("password: " + res.GeneratedPassword + "  (shown once; box keeps only the hash)")
 	}
+	if res.JellyfinPassword != "" {
+		// The second credential a person has to know, and the only app
+		// credential box makes: Jellyfin keeps its accounts in its database, its
+		// players sign in with this, and nothing writes it to a file. The
+		// account is the login's name, printed above with the login.
+		redact(res.JellyfinPassword)
+		out.Line("jellyfin password: " + res.JellyfinPassword + "  (shown once; sign in to Jellyfin as " + res.Login + ", and change it there if you like)")
+	}
 	// What a name with no DNS record leaves a person: the records to add, and
 	// the command that moves the certificates once they exist. It is one row
 	// of the run's to-finish block, so a bootstrap that also could not install
@@ -1227,6 +1236,19 @@ func gatewayProxyIP(kubeconfig string) func(context.Context) (string, error) {
 			return "", err
 		}
 		return platform.GatewayProxyIP(ctx, kc)
+	}
+}
+
+// podCIDRs reads the cluster's pod network for the one app that has to trust
+// the Gateway's forwarded address, resolving the cluster the same way the
+// address step does: a refusal at the confirm must not have opened a client.
+func podCIDRs(kubeconfig string) func(context.Context) ([]string, error) {
+	return func(ctx context.Context) ([]string, error) {
+		kc, err := release.ResolveKubeconfig(kubeconfig, os.Getenv("KUBECONFIG"), bootstrap.FilesystemRecords{Path: bootstrap.RecordPath})
+		if err != nil {
+			return nil, err
+		}
+		return platform.PodCIDRs(ctx, kc)
 	}
 }
 

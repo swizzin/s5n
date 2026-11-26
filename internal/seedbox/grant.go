@@ -140,6 +140,15 @@ var GrantKeys = []Rule{
 	{Path: "apps.*.enabled", Why: "which apps this box has"},
 	{Path: "apps.*.instances", Whole: true, Why: "which instances exist: a suffix is a host name and a category is a directory"},
 
+	// The cluster's pod network, for the one app that has to trust a forwarded
+	// address to know who a person is. It is read from the Nodes' podCIDRs at
+	// init, and it is the grant's rather than a value because only root can
+	// read the cluster: a user setting it could name a range they do not own,
+	// and the app would then believe any client in it. BoxOnly, not BoxSets,
+	// because init is the write: a BoxSets key may not appear in either file,
+	// and the grant is exactly where init records what it read.
+	{Path: "apps.jellyfin.knownProxies", Whole: true, BoxOnly: true, Why: "the cluster's pod network, read from the Nodes at init: it is the range the Gateway's proxy connects from, and an app cannot tell whose forwarded address to trust without it"},
+
 	{Path: "apps.qbittorrent.torrent.port", Why: "the peer port exposed on the node, shared with every other box"},
 	{Path: "apps.qbittorrent.torrent.service.type", Why: "whether the peer port is on the node at all"},
 	{Path: "apps.qbittorrent.torrent.service.annotations", Whole: true, Why: "the address and sharing of the peer Service"},
