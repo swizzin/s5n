@@ -15,9 +15,8 @@ import (
 	"github.com/swizzin/s5n/internal/migrate/sqlitedb"
 )
 
-// configFixture is a config.toml shaped like autobrr's own template
-// (internal/config/config.go at v1.90.0): root settings, comments, baseUrl
-// commented out and legacy mode on.
+// configFixture is autobrr's template shape (config.go at v1.90.0): root
+// settings, baseUrl commented out and legacy mode on.
 const configFixture = `# config.toml
 host = "127.0.0.1"
 port = 7474
@@ -36,9 +35,8 @@ sessionSecret = "synthetic-secret"
 enabled = false
 `
 
-// dbFixture is the two tables this package reads, shaped after
-// internal/database/migrations/sqlite at v1.90.0: a client row is a download
-// client or an Arr, and an action carries the macro-capable paths.
+// dbFixture is the two tables this package reads (migrations at v1.90.0): a
+// client row is a download client or an Arr, an action carries the path columns.
 const dbFixture = `
 CREATE TABLE client (
     id INTEGER PRIMARY KEY,
@@ -147,16 +145,14 @@ func setup(t *testing.T, dbSQL string) rewrite.Input {
 	return rewrite.Input{App: "autobrr", Dir: dir, Plan: p, Targets: targets(), Runs: runs()}
 }
 
-// TestArrRowResolvesByItsURLPath: an Arr row stores a whole URL, so its path
-// says which app it meant on a host that serves several, and the box's own URL
-// replaces it in the row the operator still sees in autobrr.
+// TestArrRowResolvesByItsURLPath: the URL's path says which app it meant, and the
+// box's URL replaces it in the row the operator sees.
 func TestArrRowResolvesByItsURLPath(t *testing.T) {
 	ctx := context.Background()
 	fixture := strings.Replace(dbFixture, "'sonarr.default.svc', 8989, 1",
 		"'https://panel.example.com/sonarr/api', 10000, 1", 1)
 	in := setup(t, fixture)
-	// The source's own Service rule is gone: this host is the source's public
-	// name, and only the paths say which app each address is.
+	// This host is the source's public name; only the paths say which app each is.
 	in.Plan.Hosts = []plan.HostRule{
 		{Host: "panel.example.com", Path: "/sonarr", App: "sonarr"},
 		{Host: "panel.example.com", Path: "/qbittorrent", App: "qbittorrent"},
@@ -176,17 +172,15 @@ func TestArrRowResolvesByItsURLPath(t *testing.T) {
 	}
 }
 
-// runs is every instance the fixture plan has of each catalog app: one of each,
-// which is what a proposal needs.
+// runs is one instance of each catalog app, which is what a proposal needs.
 func runs() map[string][]string {
 	return map[string][]string{
 		"qbittorrent": {"qbittorrent"}, "sonarr": {"sonarr"}, "autobrr": {"autobrr"},
 	}
 }
 
-// TestUnsettledClientProposesItsApp: a client row's type says which app its
-// address can only mean, so an address nothing settles is proposed as that app
-// when the box runs exactly one of it, and left and called out when it runs two.
+// TestUnsettledClientProposesItsApp: the type says what an unsettled address can
+// only mean, so it is proposed when the box runs one and left when it runs two.
 func TestUnsettledClientProposesItsApp(t *testing.T) {
 	ctx := context.Background()
 	in := setup(t, strings.Replace(dbFixture, "'localhost', 8081, 1", "'192.0.2.10', 8081, 1", 1))
@@ -202,7 +196,7 @@ func TestUnsettledClientProposesItsApp(t *testing.T) {
 		t.Fatalf("Defaults = %+v, want %+v", rep.Defaults, want)
 	}
 
-	// Two qBittorrents: an address nothing settles cannot mean one of them.
+	// Two qBittorrents: nothing can be proposed.
 	in = setup(t, strings.Replace(dbFixture, "'localhost', 8081, 1", "'192.0.2.10', 8081, 1", 1))
 	in.Runs["qbittorrent"] = []string{"qbittorrent", "qbittorrent-4k"}
 	rep, err = rewriter{}.Check(ctx, in)
@@ -218,9 +212,8 @@ func TestUnsettledClientProposesItsApp(t *testing.T) {
 }
 
 func TestRewritesPathsAndConnections(t *testing.T) {
-	// The Sonarr row is the shape autobrr stores for an Arr: a whole URL in
-	// host, the port column left at the form's 10000. A bare host with the
-	// port in the column is a download client's shape, not an Arr's.
+	// An Arr row's shape: a whole URL in host, the port column left at the form's
+	// 10000; a bare host with the port in the column is a client's shape.
 	in := setup(t, arrFixture())
 	rep, err := rewriter{}.Check(context.Background(), in)
 	if err != nil {
@@ -246,8 +239,8 @@ func TestRewritesPathsAndConnections(t *testing.T) {
 			t.Errorf("config.toml %s = %q, want %q", key, cfg[key], want)
 		}
 	}
-	// The inserted key went into the root table, not into [metrics], and the
-	// comment that shipped with the file is still there.
+	// The key went into the root table, not [metrics], and the shipped comment
+	// stands.
 	raw, err := os.ReadFile(filepath.Join(in.Dir, configName))
 	if err != nil {
 		t.Fatal(err)
@@ -266,8 +259,7 @@ func TestRewritesPathsAndConnections(t *testing.T) {
 		tls  int
 	}{
 		1: {"qbittorrent", 8080, 0},
-		// The Arr's address is its host URL, the box's this time; the port
-		// column stays where the form left it, because nothing reads it.
+		// The host holds box's URL; the port column stays, since nothing reads it.
 		2: {"http://sonarr:8989/sonarr", 10000, 0},
 	} {
 		got := clients[id]
@@ -289,7 +281,7 @@ func TestRewritesPathsAndConnections(t *testing.T) {
 		}
 	}
 
-	// A second pass has nothing left to do, and no address is unclassified.
+	// A second pass has nothing to do, and no address is unclassified.
 	rep2, err := rewriter{}.Check(context.Background(), in)
 	if err != nil {
 		t.Fatal(err)
@@ -353,9 +345,8 @@ func TestUnclassifiedClientAddressBlocks(t *testing.T) {
 	}
 }
 
-// TestMacroOnlyValueIsRelative: a save path that starts with a macro is
-// qBittorrent's own save path plus text, so no rule can cover it and none is
-// needed.
+// TestMacroOnlyValueIsRelative: a value starting with a macro is relative to the
+// save path, so no rule covers it and none is needed.
 func TestMacroOnlyValueIsRelative(t *testing.T) {
 	ctx := context.Background()
 	in := setup(t, strings.Replace(dbFixture,
@@ -369,9 +360,8 @@ func TestMacroOnlyValueIsRelative(t *testing.T) {
 	}
 }
 
-// TestDisabledClientIsLeft: an address no rule settles on a client autobrr has
-// switched off is not a gap. It is left exactly as it is, the report says so,
-// and the run is not stopped.
+// TestDisabledClientIsLeft: an unsettled address on a switched-off client is not a
+// gap; it is left, said, and the run goes on.
 func TestDisabledClientIsLeft(t *testing.T) {
 	ctx := context.Background()
 	fixture := strings.Replace(dbFixture, "'localhost', 8081, 1", "'192.0.2.10', 8081, 1", 1)
@@ -407,10 +397,8 @@ func TestDisabledClientIsLeft(t *testing.T) {
 	}
 }
 
-// TestClientTypeBoxDoesNotRunIsLeft: box runs qBittorrent and the Arrs, and
-// nothing else. Any other row is left and called out, never rewritten and never
-// a refusal: pointing autobrr at an app that is not there is worse than leaving
-// a row the operator can delete.
+// TestClientTypeBoxDoesNotRunIsLeft: another type is left and called out, never
+// rewritten and never a refusal: pointing autobrr at a missing app is worse.
 func TestClientTypeBoxDoesNotRunIsLeft(t *testing.T) {
 	ctx := context.Background()
 	fixture := strings.Replace(dbFixture,
@@ -438,9 +426,8 @@ func TestClientTypeBoxDoesNotRunIsLeft(t *testing.T) {
 	}
 }
 
-// TestLidarrClient: autobrr's LIDARR client type is the third Arr this box runs,
-// so a migrated autobrr's row is pointed at the box's Lidarr like the Sonarr and
-// Radarr rows are -- never left as a type box does not run.
+// TestLidarrClient: LIDARR is an Arr box runs, so its row is pointed at the box's
+// Lidarr like Sonarr and Radarr.
 func TestLidarrClient(t *testing.T) {
 	ctx := context.Background()
 	in := setup(t, strings.Replace(dbFixture,
@@ -463,8 +450,7 @@ func TestLidarrClient(t *testing.T) {
 	if _, err := (rewriter{}).Write(ctx, in); err != nil {
 		t.Fatalf("Write: %v", err)
 	}
-	// This fixture's row is a bare host and a port column, like the Sonarr one
-	// beside it, so that is the shape it keeps: the box's Service and port.
+	// A bare host and a port column, like the Sonarr row: it keeps that shape.
 	if got := readClients(t, in.Dir)[2]; got.host != "lidarr" || got.port != 8686 {
 		t.Errorf("the Lidarr row = %+v, want lidarr:8686", got)
 	}
@@ -541,8 +527,7 @@ func readActions(t *testing.T, dir string) map[string]string {
 	}
 }
 
-// treeHash is every file's name, mode and bytes, so a pass that writes anything
-// at all changes it.
+// treeHash is every file's name, mode and bytes: a pass that writes changes it.
 func treeHash(t *testing.T, dir string) string {
 	t.Helper()
 	h := sha256.New()

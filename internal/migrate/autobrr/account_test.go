@@ -11,11 +11,8 @@ import (
 	"github.com/swizzin/s5n/internal/migrate/sqlitedb"
 )
 
-// usersTable is autobrr's own user table at v1.90.0
-// (internal/database/migrations/sqlite/0_base_schema.sql:1-9). It is the whole
-// of autobrr's account: nothing else in the schema refers to a user row, because
-// api_key is keyed by its own key and sessions by their own token, so a rename
-// that keeps the id moves nothing.
+// usersTable is autobrr's account table (0_base_schema.sql:1-9 at v1.90.0);
+// nothing else refers to a user row, so a rename keeping the id moves nothing.
 const usersTable = `
 CREATE TABLE users (
     id INTEGER PRIMARY KEY,
@@ -27,7 +24,7 @@ CREATE TABLE users (
 );
 `
 
-// withUsers is the fixture database with an account table in it, holding rows.
+// withUsers is the fixture with the account table and its rows.
 func withUsers(rows string) string { return dbFixture + usersTable + rows }
 
 // accountRows is the users table as the file has it now.
@@ -59,11 +56,9 @@ func accountRows(t *testing.T, dir string) map[int64]string {
 	return out
 }
 
-// TestTheAccountsNameBecomesBoxs: autobrr allows one account, and the chart's
-// init container signs in as box's own (rewrite.WiringAccount) on every start.
-// A source's account is the only row there is, so the migration renames it in
-// place -- the same id, so nothing the app ties to the row moves -- and the init
-// then writes the release Secret's password onto it as on any start.
+// TestTheAccountsNameBecomesBoxs: the init signs in as rewrite.WiringAccount, so
+// the one row is renamed in place, keeping its id, and the init then writes the
+// release Secret's password onto it.
 func TestTheAccountsNameBecomesBoxs(t *testing.T) {
 	ctx := context.Background()
 	in := setup(t, withUsers(`INSERT INTO users (id, username, password) VALUES (7, 'source-login', 'a-hash');`))
@@ -92,8 +87,7 @@ func TestTheAccountsNameBecomesBoxs(t *testing.T) {
 		t.Errorf("the account table is %v, want id 7 named s5n: the row keeps its id", got)
 	}
 
-	// A second pass has nothing left to rename, so a re-run is not a second
-	// rename.
+	// A second pass has nothing to rename.
 	again, err := (rewriter{}).Check(ctx, in)
 	if err != nil {
 		t.Fatal(err)
@@ -103,9 +97,8 @@ func TestTheAccountsNameBecomesBoxs(t *testing.T) {
 	}
 }
 
-// TestAnAccountAlreadyBoxsIsNotRenamed: a source that already signs in as box's
-// account needs nothing, and reporting a rename would be a change apply makes
-// that changes nothing.
+// TestAnAccountAlreadyBoxsIsNotRenamed: reporting a rename would be a change that
+// changes nothing.
 func TestAnAccountAlreadyBoxsIsNotRenamed(t *testing.T) {
 	in := setup(t, withUsers(`INSERT INTO users (id, username, password) VALUES (1, 's5n', 'a-hash');`))
 	rep, err := rewriter{}.Check(context.Background(), in)

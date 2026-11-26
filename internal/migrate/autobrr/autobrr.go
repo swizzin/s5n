@@ -1,26 +1,13 @@
-// Package autobrr rewrites the paths autobrr's filters and actions hold and the
-// connections it keeps to the download client and the Arrs.
-//
-// autobrr keeps its whole state under /config (`--config /config`, and HOME,
-// XDG_CONFIG_HOME and XDG_DATA_HOME all point there in its Dockerfile): a
-// config.toml and one SQLite database beside it (internal/database/database.go
-// at v1.90.0: dataSourceName(cfg.ConfigPath, "autobrr.db")).
-//
-// The database columns are the app's own: `action.exec_cmd`, `watch_folder`,
-// `save_path` and `download_path` (internal/domain/action.go:17-24;
-// internal/database/migrations/sqlite/0_base_schema.sql:117-123 and
-// 77_action_add_download_path.sql:2), and `client.host`, `client.port` and
-// `client.tls` for every download client *and* every Arr, because an Arr is a
-// client row with type SONARR, RADARR or LIDARR in this schema
-// (internal/domain/downloader.go at v1.91.1: DownloaderTypeLidarr). A client
-// autobrr cannot
-// reach is an action that silently never runs, which is the failure mode this
-// file exists to prevent.
-//
-// The path columns are macro-expanded per release before they name a file
-// (internal/domain/action.go:68,123,142,146), so a value can be
-// "/data/downloads/{{ .Category }}": the absolute prefix is rewritten and
-// everything from the first macro on is left exactly as it was written.
+// Package autobrr rewrites the paths its actions hold and the connections it
+// keeps to the download client and the Arrs. Its state is config.toml and
+// autobrr.db under /config (internal/database/database.go at v1.90.0). The
+// database columns are the app's own: the action path columns
+// (internal/domain/action.go:17-24) and client.host, port and tls for every
+// download client and every Arr, which is a client row here
+// (internal/domain/downloader.go at v1.91.1). A client autobrr cannot reach is an
+// action that silently never runs. The path columns are macro-expanded per
+// release (action.go:68), so only the absolute prefix before the first `{{` is
+// rewritten.
 package autobrr
 
 import (
@@ -46,34 +33,30 @@ func init() { rewrite.Register("autobrr", rewriter{}) }
 const (
 	configName = "config.toml"
 	dbName     = "autobrr.db"
-	// bindAddr is what a pod needs; autobrr's own default is 127.0.0.1, which
-	// inside a pod answers nobody but itself (internal/config/config.go:171).
+	// bindAddr is what a pod needs; autobrr's 127.0.0.1 default answers the pod
+	// itself (internal/config/config.go:171).
 	bindAddr = "0.0.0.0"
-	// tableClient is the one table both a download client and an Arr live in
-	// (internal/database/migrations/sqlite/0_base_schema.sql at v1.90.0).
+	// tableClient holds both a download client and an Arr (0_base_schema.sql at
+	// v1.90.0).
 	tableClient = "client"
 	keyPort     = "port"
 
-	// tableUsers is autobrr's account table, and keyUsername its one name column
-	// (internal/database/migrations/sqlite/0_base_schema.sql:1-9 at v1.90.0).
-	// autobrr allows exactly one row in it.
+	// tableUsers is autobrr's account table (0_base_schema.sql:1-9 at v1.90.0),
+	// exactly one row; keyUsername is its name column.
 	tableUsers  = "users"
 	keyUsername = "username"
 )
 
-// hostPlusPort are the client types autobrr dials at host plus the port column
-// (internal/domain/downloader.go:234-242 at v1.90.0, BuildLegacyHost).
+// hostPlusPort are the types dialled at host plus the port column
+// (downloader.go:234-242 at v1.90.0, BuildLegacyHost).
 var hostPlusPort = map[string]bool{"QBITTORRENT": true, "TRANSMISSION": true}
 
-// typesBoxRuns are the client types this box runs: qBittorrent, and the Arrs
-// that are clients of autobrr in this schema (charts/s5n/catalog.yaml). A row of
-// any other type (Transmission, rTorrent, Deluge, another *arr) is left exactly
-// as it is and called out: rewriting it would point autobrr at an app box does
-// not run, and deleting it is the operator's call, never migrate's.
+// typesBoxRuns are the types this box runs (charts/s5n/catalog.yaml). Any other
+// row is left and called out: rewriting it would point autobrr at an app box does
+// not run, and deleting it is the operator's call.
 var typesBoxRuns = map[string]bool{"QBITTORRENT": true, "SONARR": true, "RADARR": true, "LIDARR": true}
 
-// actionPaths are the action columns that hold a path, macro-capable
-// (internal/domain/action.go:17-24).
+// actionPaths are the macro-capable path columns (action.go:17-24).
 var actionPaths = []string{"exec_cmd", "watch_folder", "save_path", "download_path"}
 
 type rewriter struct{}
@@ -166,8 +149,7 @@ func planTOML(in rewrite.Input, end rewrite.Endpoint, t tally, rep *rewrite.Repo
 	}
 	var edits []tomlEdit
 
-	// logPath is a path when it is set; unset means stdout
-	// (internal/config/config.go:532-533).
+	// logPath is a path only when set; unset means stdout (config.go:532-533).
 	if v, ok := f.get("logPath"); ok && strings.TrimSpace(v.str) != "" {
 		moved, covered := in.Plan.Rewrite(in.App, v.str)
 		if !covered {
@@ -180,9 +162,8 @@ func planTOML(in rewrite.Input, end rewrite.Endpoint, t tally, rep *rewrite.Repo
 		}
 	}
 
-	// Listen settings become the chart's. baseUrl keeps its trailing slash:
-	// the server mounts its routers at the base URL's string plus the rest of
-	// the path (internal/http/server.go:300-302 at v1.90.0), so "/autobrr"
+	// baseUrl keeps its trailing slash: routers are mounted at the base's string
+	// plus the rest (internal/http/server.go:300-302 at v1.90.0), so "/autobrr"
 	// would put the API at "/autobrrapi".
 	base := end.URLBase
 	if base != "" && !strings.HasSuffix(base, "/") {
@@ -201,8 +182,7 @@ func planTOML(in rewrite.Input, end rewrite.Endpoint, t tally, rep *rewrite.Repo
 		v, ok := f.get(s.key)
 		switch {
 		case !ok:
-			// A commented-out setting is not a setting: the chart's value is
-			// added so the file agrees with what the release runs.
+			// A commented-out setting is not one: the chart's value is added.
 			edits = append(edits, insertString(s.key, s.value))
 			t.add(configName, s.key, s.what)
 		case v.str != s.value:
@@ -214,10 +194,8 @@ func planTOML(in rewrite.Input, end rewrite.Endpoint, t tally, rep *rewrite.Repo
 			t.add(configName, s.key, s.what)
 		}
 	}
-	// Legacy mode rewrites the UI's URLs for a proxy that strips the prefix,
-	// and nothing strips here (charts/s5n/templates/workloads.yaml sets it with
-	// the base URL). A config that still has it on would build the wrong links
-	// once baseUrl is the chart's.
+	// Legacy mode rewrites URLs for a proxy that strips the prefix, and nothing
+	// strips here; with the chart's baseUrl it would build the wrong links.
 	if v, ok := f.get("baseUrlModeLegacy"); ok && base != "" && v.str == "true" {
 		edits = append(edits, v.setLiteral("false"))
 		t.add(configName, "baseUrlModeLegacy", "url base mode")
@@ -244,8 +222,7 @@ func (e dbEdit) apply(ctx context.Context, db *sql.DB) error {
 	return nil
 }
 
-// planDB is the database: every client's address, every action's path, and the
-// one account.
+// planDB is every client's address, every action's path, and the one account.
 func planDB(ctx context.Context, in rewrite.Input, t tally, rep *rewrite.Report) ([]dbEdit, error) {
 	path := filepath.Join(in.Dir, dbName)
 	if _, err := os.Stat(path); err != nil {
@@ -279,29 +256,20 @@ func planDB(ctx context.Context, in rewrite.Input, t tally, rep *rewrite.Report)
 	return append(edits, accountEdits...), nil
 }
 
-// planAccounts makes the source's one account box's own.
-//
-// autobrr allows exactly one account (internal/user/service.go:51 at v1.90.0),
-// and the chart's init container signs in as s5n.wiringAccount on every start:
-// it creates the account when the table is empty and writes the release
-// Secret's password onto it otherwise. A migrated database therefore has to name
-// its one row that account, or the init's change-password looks for a name the
-// table does not have and the pod never starts. The row keeps its id: it is what
-// the app's own bookkeeping would key by, and nothing in autobrr's schema refers
-// to it in any case (api_key is keyed by its own key and sessions by their own
-// token, 0_base_schema.sql and 26_create_api_key_table.sql at v1.90.0).
-//
-// A table with two rows is not a source this migration understands: autobrr
-// cannot hold two, so picking one of them would drop an account nobody asked it
-// to drop, and the run stops naming the count.
+// planAccounts makes the source's one account box's own. autobrr allows exactly
+// one (internal/user/service.go:51 at v1.90.0), and the chart's init signs in as
+// s5n.wiringAccount: a row with another name leaves its change-password looking
+// for a name the table lacks, and the pod never starts. The id is kept; nothing
+// in the schema refers to it (api_key and sessions are keyed by their own values).
+// Two rows is not a source this migration understands, so the run stops naming
+// the count.
 func planAccounts(ctx context.Context, db *sql.DB, rep *rewrite.Report) ([]dbEdit, error) {
 	empty, err := tableEmpty(ctx, db, tableUsers)
 	if err != nil {
 		return nil, err
 	}
 	if empty {
-		// No table, or a table with no row: the init container creates the
-		// account on the first start, which is the fresh install's path.
+		// No table or no row: the init creates the account on the first start.
 		return nil, nil
 	}
 	rows, err := db.QueryContext(ctx, `SELECT id, username FROM `+tableUsers+` ORDER BY id`)
@@ -335,10 +303,8 @@ func planAccounts(ctx context.Context, db *sql.DB, rep *rewrite.Report) ([]dbEdi
 	return []dbEdit{{tableUsers, keyUsername, found[0].id, rewrite.WiringAccount}}, nil
 }
 
-// tableEmpty reports whether a table exists and holds no row. autobrr's database
-// is the app's own and its migrations run at the app's next start, so a table
-// this version has and an older one did not yet have is a table that is simply
-// not there: the app writes it, empty, before it can hold an account.
+// tableEmpty reports whether a table exists and holds no row: migrations run at
+// the app's next start, so an older source simply has no table yet.
 func tableEmpty(ctx context.Context, db *sql.DB, table string) (bool, error) {
 	rows, err := db.QueryContext(ctx, `SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?`, table)
 	if err != nil {
@@ -362,24 +328,13 @@ func tableEmpty(ctx context.Context, db *sql.DB, table string) (bool, error) {
 	return !found, rows.Err()
 }
 
-// planClients rewrites the download clients and the Arr connections, which are
-// rows of the same table.
-//
-// The rows are dialled from different columns. qBittorrent and Transmission
-// combine host, port and tls into one URL, appending the port column to whatever
-// host holds (internal/domain/downloader.go:234-281 at v1.90.0), so their port
-// column is part of the address. Every other type is dialled by the host column
-// alone: an Arr's config is built from Hostname: cfg.Host
-// (internal/downloader/service.go:514-515) and the Arr client parses that as a
-// URL and joins /api/v3 onto it (pkg/arr/sonarr/client.go:19-24), so the column
-// holds a whole URL and the port column keeps whatever the form left there
-// (10000), never read. Such a row is resolved on its URL's host and port,
-// rewritten to a URL again, and its port column left exactly as it was.
-//
-// Two rows are left exactly as they are, and called out rather than refused: a
-// client of a type box does not run (there is nothing in the release for it to
-// talk to), and a client autobrr has switched off (it is never dialled, so an
-// address nothing settles is not a gap).
+// planClients rewrites the download clients and the Arr rows. qBittorrent and
+// Transmission are dialled at host plus the port column
+// (downloader.go:234-281), while an Arr row is dialled by its host column alone as
+// a whole URL (internal/downloader/service.go:514-515, pkg/arr/sonarr/client.go:
+// 19-24), its port column left at whatever the form wrote. Two rows are left and
+// called out rather than refused: a type box does not run, and a switched-off
+// client nothing dials, whose unsettled address is not a gap.
 func planClients(ctx context.Context, db *sql.DB, in rewrite.Input, t tally, rep *rewrite.Report) ([]dbEdit, error) {
 	rows, err := db.QueryContext(ctx, `SELECT id, name, type, host, port, tls, enabled FROM client`)
 	if err != nil {
@@ -395,8 +350,7 @@ func planClients(ctx context.Context, db *sql.DB, in rewrite.Input, t tally, rep
 		if err := rows.Scan(&id, &name, &kind, &host, &port, &tls, &enabled); err != nil {
 			return nil, fmt.Errorf("autobrr: read client: %w", err)
 		}
-		// arr is a row dialled by its host URL alone; a bare host, or a
-		// client that adds the port column to its host, is host and port.
+		// An Arr is dialled by its host URL alone; anything else is host and port.
 		arr := strings.Contains(host, "://") && !hostPlusPort[strings.ToUpper(kind.String)]
 		clientName, urlPort := splitAddress(host)
 		p := urlPort
@@ -411,19 +365,16 @@ func planClients(ctx context.Context, db *sql.DB, in rewrite.Input, t tally, rep
 			label = fmt.Sprintf("client %d", id)
 		}
 		where := tableClient + ".host"
-		// An Arr row stores a whole URL, so its path is part of what settles it
-		// on a host that serves several apps; a client's own row stores a host
-		// and a port, which is all its plan rule needs.
+		// An Arr's URL path settles it on a host of paths; a client stores host
+		// and port, which is all its rule needs.
 		res := in.Resolve(clientName, p)
 		if arr {
 			if u, err := url.Parse(strings.TrimSpace(host)); err == nil {
 				res = in.ResolveURL(u)
 			}
 		}
-		// Two rows are left exactly as they are, and called out rather than
-		// refused: a type box does not run, and a client autobrr has switched
-		// off whose address nothing settles. That second one is the ruling's
-		// own case: a client nothing dials is not a gap in the plan.
+		// A type box does not run, and a switched-off client nothing dials: left
+		// and called out, because neither is a gap in the plan.
 		off := enabled.Valid && enabled.Int64 == 0
 		switch {
 		case !typesBoxRuns[strings.ToUpper(kind.String)]:
@@ -452,9 +403,7 @@ func planClients(ctx context.Context, db *sql.DB, in rewrite.Input, t tally, rep
 			}
 			want := end.Host
 			if arr {
-				// A rewritten Arr row is still the URL autobrr dials: the
-				// box's scheme, Service, port and URL base. The path the
-				// source stored is the source's shape.
+				// Still the URL autobrr dials: box's scheme, Service, port and base.
 				want = end.URL()
 			}
 			if host != want {
@@ -465,7 +414,7 @@ func planClients(ctx context.Context, db *sql.DB, in rewrite.Input, t tally, rep
 				edits = append(edits, dbEdit{tableClient, keyPort, id, end.Port})
 				t.add(dbName, tableClient+"."+keyPort, "port")
 			}
-			// autobrr dials plain HTTP inside the release.
+			// Plain HTTP inside the release.
 			if tls.Int64 != 0 {
 				edits = append(edits, dbEdit{tableClient, "tls", id, 0})
 				t.add(dbName, tableClient+".tls", "tls")
@@ -475,9 +424,8 @@ func planClients(ctx context.Context, db *sql.DB, in rewrite.Input, t tally, rep
 			rep.Unclassified = append(rep.Unclassified, rewrite.Address{
 				App: in.App, File: dbName, Where: where, Host: clientName, Port: p,
 			})
-			// A qBittorrent client's own type says which app its address can
-			// only mean; the box runs one of it, or nothing is proposed. The
-			// same for an Arr row, whose type names the Arr it dials.
+			// The type says what the address can only mean; with two instances
+			// nothing is proposed.
 			app, ok := clientApp(strings.ToUpper(kind.String))
 			if _, sole := in.Sole(app); !ok || !sole {
 				continue
@@ -527,11 +475,9 @@ func planActions(ctx context.Context, db *sql.DB, in rewrite.Input, t tally, rep
 	return edits, nil
 }
 
-// rewriteTemplate rewrites the absolute prefix of a value that may hold
-// autobrr macros. The literal text around a macro is the handler's own
-// (internal/domain/action.go:68), so only the part before the first macro is a
-// path the plan can map; a value that does not start with a slash is relative
-// to the client's save path and stays as it is.
+// rewriteTemplate rewrites the absolute prefix before the first macro: the text
+// around a macro is the handler's own (action.go:68), and a value not starting
+// with a slash is relative to the save path.
 func rewriteTemplate(in rewrite.Input, value string) (moved, gap string, covered bool) {
 	if !strings.HasPrefix(value, "/") {
 		return value, "", true
@@ -548,8 +494,7 @@ func rewriteTemplate(in rewrite.Input, value string) (moved, gap string, covered
 	return moved + rest, "", true
 }
 
-// The app names a client row's type maps to: the same catalog names the plan
-// and the chart use.
+// The catalog names a client row's type maps to.
 const (
 	appQBittorrent = "qbittorrent"
 	appSonarr      = "sonarr"
@@ -558,9 +503,8 @@ const (
 	appProwlarr    = "prowlarr"
 )
 
-// clientApp is the app a client row's type names: a qBittorrent client can only
-// be the box's qBittorrent, and an Arr row can only be that Arr. A type box does
-// not run names none, which is the caller's Left case.
+// clientApp is the app a type names; a type box does not run names none, which is
+// the caller's Left case.
 func clientApp(kind string) (string, bool) {
 	switch kind {
 	case "QBITTORRENT", "QBITTORRENTEE":
@@ -577,9 +521,8 @@ func clientApp(kind string) (string, bool) {
 	return "", false
 }
 
-// splitAddress separates a stored host from an optional port: autobrr stores
-// the two in their own columns, so a host holding a URL is the exception. A URL
-// with no port is the port its scheme implies (rewrite.URLPort).
+// splitAddress separates a stored host from an optional port; a host holding a URL
+// is the exception, and its port is the scheme's (rewrite.URLPort).
 func splitAddress(host string) (string, int) {
 	host = strings.TrimSpace(host)
 	if strings.Contains(host, "://") {
@@ -595,8 +538,7 @@ func splitAddress(host string) (string, int) {
 	return host, 0
 }
 
-// address is a host and port as one line for the operator: host:port, or the
-// host alone when autobrr stored no port.
+// address is host:port, or the host alone when no port was stored.
 func address(host string, port int) string {
 	if port == 0 {
 		return host
