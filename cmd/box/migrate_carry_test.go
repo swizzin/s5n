@@ -1,9 +1,6 @@
 package main
 
-// migrate_carry_test.go is the read's one large decision: how much of Plex's
-// config directory a snapshot takes. The tree is too large to copy twice on a
-// small disk, so it travels only when there is room for it wherever the run
-// writes it, and a run that leaves it behind says so with the numbers.
+// migrate_carry_test.go proves how much of Plex's tree a snapshot carries.
 
 import (
 	"strings"

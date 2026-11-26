@@ -1,13 +1,6 @@
 package main
 
-// migrate_test.go drives `box migrate discover` over a saved manifest set and a
-// copy of the source's host directories: no cluster, no API server.
-//
-// What it pins is the snapshot: a survey holds the plan, the report and the
-// source's manifests and no config at all, --rehearsal adds one config
-// directory per planned app, the plan is one `plan.Load` reads back as the same
-// plan (apply trusts it with the data root), and the report the command prints
-// is the report inside the file, naming that file.
+// migrate_test.go drives discover over a saved source; it pins the snapshot.
 
 import (
 	"context"

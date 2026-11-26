@@ -1,15 +1,6 @@
 package main
 
-// migrate_order_test.go proves the order `box migrate apply` takes on a host with
-// no box: the whole run is decided and shown first, the one question is asked,
-// and only then is anything installed. It is the one thing about this command
-// that no single step can show: a run that installed the cluster, the platform
-// and the empty release before asking left a host nobody agreed to when the
-// answer was no.
-//
-// The survey is driven twice: once with a fake, to read the order of the calls,
-// and once with the real pre-install pass, to prove what it does is confined to a
-// directory it removes.
+// migrate_order_test.go proves decide, ask, then install on a fresh host.
 
 import (
 	"bytes"

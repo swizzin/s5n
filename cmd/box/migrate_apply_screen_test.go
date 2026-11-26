@@ -1,12 +1,6 @@
 package main
 
-// migrate_apply_screen_test.go is the one confirm as a person reads it, and the
-// report the run writes beside the snapshot: the apps in columns, the library
-// the run lays out, the rows that need a person, one footer line counting what
-// folded away, and the one question.
-//
-// It is built from a report the run would write: no cluster, no snapshot, no
-// host.
+// migrate_apply_screen_test.go is the confirm and report as a person reads them.
 
 import (
 	"bytes"

@@ -1,9 +1,6 @@
 package main
 
-// migrate_prior_test.go drives cutover's second read: the refusal with nothing
-// earlier on record, the diff against the read that is on record, and the two
-// things a planned app can be there -- gone, which stops the run, or new, which is
-// kept and named.
+// migrate_prior_test.go drives the prior-read refusal and app diff.
 
 import (
 	"context"

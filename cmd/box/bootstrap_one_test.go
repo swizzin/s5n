@@ -1,10 +1,6 @@
 package main
 
-// bootstrap_one_test.go proves the one question a guided fresh install asks: a
-// person is asked once, for the platform and the seedbox, and the layer is
-// installed only after that answer. The two halves are fakes -- the platform here,
-// init's flow in internal/setup's beforewrite_test.go -- so the order, the "no"
-// and a failure in either half are read without a cluster.
+// bootstrap_one_test.go proves a fresh install asks once, for platform and seedbox.
 
 import (
 	"bytes"

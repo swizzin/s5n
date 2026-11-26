@@ -1,10 +1,6 @@
 package main
 
-// migrate_cutover_test.go drives `box migrate cutover`'s two outcomes over a
-// saved read and an injected stop proof: a source that still runs is refused
-// with a survey written first and the stop command printed, and a source that
-// has stopped gets the final snapshot, which is what apply runs. No cluster is
-// involved: the proof is the only thing that reads one.
+// migrate_cutover_test.go drives the refused and stopped cutover outcomes.
 
 import (
 	"bytes"
