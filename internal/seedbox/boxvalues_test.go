@@ -6,16 +6,10 @@ import (
 	"testing"
 )
 
-// TestEffectiveCarriesTheGrantsLoginAndPodNetwork: two values reach the release
-// from the grant rather than from a file.
-//
-// login is the account root's login admits, and one app's own account is named
-// after it (Jellyfin's first user). knownProxies is the cluster's pod network,
-// read from the Nodes at init: the range the Gateway's proxy connects from, so
-// the app knows whose forwarded address to trust. Both are the grant's -- a
-// values file naming either is refused -- and both are written only for a chart
-// that declares them, because box reads every release back to the oldest it can
-// upgrade from and those charts have no such keys.
+// Two values reach the release from the grant rather than a file: login (one
+// app's own account is named after it) and knownProxies (the pod network the app
+// trusts a forwarded address from). Both are written only for a chart that
+// declares them, because box reads releases back to its oldest upgrade-from.
 func TestEffectiveCarriesTheGrantsLoginAndPodNetwork(t *testing.T) {
 	s := loadFixture(t, "values.yaml")
 	// The fixture grant has no login; the one this box was made for does.
@@ -43,9 +37,7 @@ func TestEffectiveCarriesTheGrantsLoginAndPodNetwork(t *testing.T) {
 	}
 }
 
-// TestAValuesFileMayNotNameTheGrantsLoginOrPodNetwork: both keys are root's, so
-// a user editing their own file is refused by name rather than silently
-// overridden.
+// Both keys are root's, so a user editing their own file is refused by name.
 func TestAValuesFileMayNotNameTheGrantsLoginOrPodNetwork(t *testing.T) {
 	s := loadFixture(t, "values.yaml")
 	for _, key := range []string{"login", "apps.jellyfin.knownProxies"} {

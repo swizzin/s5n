@@ -49,10 +49,8 @@ func TestDiff(t *testing.T) {
 	}
 }
 
-// TestFormatChangesNeverPrintsASecret is the one thing a confirmation prompt
-// may not do: a change under secrets. is shown as a change, and its value is
-// not on screen. The prompt is read by whoever runs the box and is kept in the
-// run log, so a value here would be a credential in a file.
+// The one thing a confirmation prompt may not do: a change under secrets. is
+// shown as a change, and its value is kept out of the screen and the run log.
 func TestFormatChangesNeverPrintsASecret(t *testing.T) {
 	before := map[string]any{
 		"secrets": map[string]any{
@@ -95,8 +93,8 @@ func TestDiffOfIdenticalDocumentsIsEmpty(t *testing.T) {
 	}
 }
 
-// TestDiffAroundAnEdit is the shape box apply uses: effective values before,
-// one edit, effective values after, and one line of difference.
+// The shape box apply uses: effective values before, one edit, effective values
+// after, and one line of difference.
 func TestDiffAroundAnEdit(t *testing.T) {
 	path := copyFixture(t, "values.yaml")
 	s, err := Load(fixture(t, "grant.yaml"), path)

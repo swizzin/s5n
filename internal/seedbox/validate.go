@@ -15,9 +15,8 @@ import (
 )
 
 // Chart is one chart release's own defaults: the values.yaml and
-// values.schema.json that ship inside it. box reads both out of the release it
-// is installing, so this package never hard-codes a repository path — a box
-// tracks the release, not the git checkout box was built from.
+// values.schema.json that ship inside it. box reads both from the release it is
+// installing, never from the git checkout box was built from.
 type Chart struct {
 	Values []byte
 	Schema []byte
@@ -26,17 +25,11 @@ type Chart struct {
 // Base is the chart's own values with every app switched off: the document a
 // seedbox starts from before either file is read.
 //
-// Starting from the chart's defaults is not a shortcut. The schema requires
-// `image` and `port` on every app object, so a "disabled" app can only be
-// written as a complete object, and the only complete objects are the chart's
-// own. Starting from them is also what makes the grant authoritative over which
-// apps exist: Helm would otherwise take the chart default `enabled: true` for
-// any app the grant never mentions, and a new app in a new release would appear
-// on every box without root deciding it.
-//
-// `box init` reads it directly for a host that has no files yet: the questions
-// are prefilled from what the chart would render, which is the same document an
-// apply of those files would produce.
+// The schema requires `image` and `port` on every app, so a disabled app can only
+// be a complete object, and the complete objects are the chart's own. Starting
+// from them also makes the grant authoritative over which apps exist: Helm would
+// otherwise take `enabled: true` for an app the grant never mentions, and a new
+// app in a new release would appear on every box without root deciding it.
 func Base(c Chart) (map[string]any, error) {
 	base, err := parseChartValues(c.Values)
 	if err != nil {
@@ -54,14 +47,10 @@ func Base(c Chart) (map[string]any, error) {
 	return base, nil
 }
 
-// Pending is the values a chart would render for a box whose grant is not
-// written yet: the chart's defaults with the user's values over them, and no
-// grant at all. It is what a flow can show before the box exists -- `box migrate
-// apply` decides what the whole run will do before it installs anything, and the
-// summary it shows must read the values the same way the run after the install
-// will -- and it is deliberately not checked against the schema: the files box
-// installs are validated when they are loaded, and a preview must not refuse a
-// box the install would have made.
+// Pending is the values a chart would render for a box whose grant is not written
+// yet: the chart's defaults with the user's values over them. It is what a flow
+// can show before the box exists, and it is deliberately not checked against the
+// schema: a preview must not refuse a box the install would have made.
 func Pending(c Chart, valuesPath string) (map[string]any, error) {
 	base, err := Base(c)
 	if err != nil {
@@ -94,15 +83,11 @@ func (s *Seedbox) Effective(c Chart) (map[string]any, error) {
 		return nil, err
 	}
 	overlay(base, merged, nil)
-	// auth.edge is box's: the chart ships no login and refuses to render
-	// without the statement that one is in front, and box is what puts it
-	// there. It is written here, not in Merge, because only the release being
-	// installed can say whether the key exists at all: a box keeps reading
-	// every release back to the oldest upgrade-from it knows, and 0.2.0's
-	// schema has no auth section, so writing it blindly would refuse a
-	// perfectly good install with "auth: is not a key the chart knows".
-	// Overlaid after both files so no file can shadow it; a file that tries
-	// (true or false) is already refused by checkValues and checkGrant.
+	// auth.edge is box's: the chart ships no login and refuses to render without
+	// the statement that one is in front. It is written here, not in Merge,
+	// because only the release being installed can say whether the key exists: box
+	// reads every release back to the oldest upgrade-from, and 0.2.0's schema has
+	// no auth section. Overlaid after both files so no file can shadow it.
 	declares, err := declaresAuthEdge(c.Schema)
 	if err != nil {
 		return nil, err
@@ -110,12 +95,9 @@ func (s *Seedbox) Effective(c Chart) (map[string]any, error) {
 	if declares {
 		overlay(base, map[string]any{"auth": map[string]any{"edge": true}}, nil)
 	}
-	// The Gateway's proxy address, when the box's grant has one and the chart
-	// declares the key. It is BoxOnly, which overlay() skips by design -- the
-	// grant is box's record and never a chart value -- so it is injected here
-	// instead, the same way auth.edge is: after both files, so no file can
-	// shadow it, and only when the schema has the key, because a chart from
-	// before the provider would refuse the install.
+	// The Gateway proxy's address, injected rather than overlaid because it is
+	// BoxOnly (the grant is box's record, never a chart value), and only when the
+	// schema declares the key: a chart from before the provider would refuse it.
 	declaresIP, err := DeclaresOIDCGatewayIP(c.Schema)
 	if err != nil {
 		return nil, err
@@ -129,13 +111,10 @@ func (s *Seedbox) Effective(c Chart) (map[string]any, error) {
 			}
 		}
 	}
-	// rehearsal is box's own record of what kind of box this is, and
-	// rehearsalGate the address each app's gate dials. Both are BoxOnly, so
-	// overlay() never carries them from the grant; they are written here the
-	// way the Gateway's address is. Unlike that address, the lock fails
-	// closed: a rehearsal box rendered by a chart from before the lock, or
-	// without its gate, would reach the internet as the live box, so that is a
-	// refusal rather than a quietly dropped key.
+	// rehearsal and rehearsalGate are BoxOnly, so overlay() never carries them
+	// from the grant; they are written here like the Gateway's address. The lock
+	// fails closed: a rehearsal box rendered by a chart without it would reach the
+	// internet as the live box, so that is a refusal, not a dropped key.
 	if on, _ := s.Grant.data["rehearsal"].(bool); on {
 		declares, err := declaresRehearsal(c.Schema)
 		if err != nil {
@@ -151,15 +130,12 @@ func (s *Seedbox) Effective(c Chart) (map[string]any, error) {
 		base["rehearsal"] = true
 		base["rehearsalGate"] = gate
 	}
-	// The claim names are box's, from the volumes it creates: not the chart's
-	// defaults and not either file. Applied last so nothing can shadow them.
+	// The claim names are box's, from the volumes it creates, applied last so
+	// nothing can shadow them.
 	overlay(base, claims(vols), nil)
-	// login is the account root's login admits, and the one chart value that
-	// comes from it: an app that keeps its own accounts (Jellyfin) names the
-	// person's first account after it. Like auth.edge it is written only when
-	// the release being installed declares the key, because box reads every
-	// release back to the oldest it can upgrade from and those charts have no
-	// such value.
+	// login is the one chart value that comes from root's account record: an app
+	// that keeps its own accounts (Jellyfin) names the person's first account
+	// after it. Written only where the release declares the key.
 	declaresLogin, err := Declares(c.Schema, "login")
 	if err != nil {
 		return nil, err
@@ -169,10 +145,9 @@ func (s *Seedbox) Effective(c Chart) (map[string]any, error) {
 			setPath(base, []string{"login"}, name)
 		}
 	}
-	// The cluster's pod network, for the one app that has to trust the Gateway's
-	// forwarded address: it is read from the Nodes at init, and injected here for
-	// the same reason as the address above -- it is BoxOnly, so overlay() leaves
-	// it out, and a chart from before the app has no such key to give it to.
+	// The cluster's pod network, for the app that trusts the Gateway's forwarded
+	// address: BoxOnly, so it is injected here, and a chart before the app has no
+	// such key.
 	if declared, err := Declares(c.Schema, "apps", "jellyfin", "knownProxies"); err != nil {
 		return nil, err
 	} else if declared {
@@ -190,10 +165,8 @@ func (s *Seedbox) Effective(c Chart) (map[string]any, error) {
 	return base, nil
 }
 
-// grantStringList reads a list of strings at a key path of the grant, or nil
-// when the path is absent or holds anything else. It is the one shape of grant
-// value that is not a scalar, and the caller is what decides whether the chart
-// has a key for it.
+// grantStringList reads a list of strings at a key path of the grant, or nil when
+// the path is absent or holds anything else.
 func grantStringList(data map[string]any, keys ...string) []string {
 	var cur any = data
 	for _, k := range keys {
@@ -218,11 +191,10 @@ func grantStringList(data map[string]any, keys ...string) []string {
 	return out
 }
 
-// Declares reports whether a chart's schema describes one values path, key by
-// key. Presence is the whole question, not what the schema requires of it: a
-// release from before a key has a chart that would refuse it, and box writes a
-// key it decides only where the release being installed can take it. An empty
-// schema declares nothing.
+// Declares reports whether a chart's schema describes one values path, key by key.
+// Presence is the whole question: a release from before a key has a chart that
+// would refuse it, and box writes a key only where the release can take it. An
+// empty schema declares nothing.
 func Declares(schema []byte, keys ...string) (bool, error) {
 	if len(schema) == 0 {
 		return false, nil
@@ -248,19 +220,14 @@ func Declares(schema []byte, keys ...string) (bool, error) {
 	return true, nil
 }
 
-// declaresAuthEdge reports whether the chart's schema describes auth.edge.
-// Presence is the whole question: a schema that never mentions the key has a
-// release that would reject it, so box leaves it out rather than refusing the
-// install. An empty schema answers false; Validate refuses that document after
-// this with the sentence about a schema nothing has checked, and a schema that
-// does not parse is reported here in the same words Validate uses.
+// declaresAuthEdge reports whether the chart's schema describes auth.edge; a
+// schema that never mentions it has a release that would reject it.
 func declaresAuthEdge(schema []byte) (bool, error) {
 	return Declares(schema, "auth", "edge")
 }
 
-// declaresRehearsal reports whether the chart's schema describes the top-level
-// rehearsal flag and its gate address. A release from before the lock has
-// neither, and Effective refuses to render a rehearsal box with it.
+// declaresRehearsal reports whether the chart's schema describes the rehearsal
+// flag and its gate; a release from before the lock has neither.
 func declaresRehearsal(schema []byte) (bool, error) {
 	flag, err := Declares(schema, "rehearsal")
 	if err != nil || !flag {
@@ -270,18 +237,14 @@ func declaresRehearsal(schema []byte) (bool, error) {
 }
 
 // DeclaresOIDCGatewayIP reports whether a chart's schema describes
-// auth.oidc.gatewayIP. Presence is the whole question, exactly as for auth.edge:
-// a chart from before the provider has no such key, and a values document that
-// carried it would be refused by that chart's own schema.
-// DeclaresOIDCGatewayIP reports whether a chart's schema describes the key, for
-// a caller outside this package (init writes the grant key only when it does).
+// auth.oidc.gatewayIP, for a caller outside this package.
 func DeclaresOIDCGatewayIP(schema []byte) (bool, error) {
 	return Declares(schema, "auth", "oidc", "gatewayIP")
 }
 
-// setPath writes one value into the document at the given key path, creating
-// mappings as it goes. It bypasses overlay() deliberately: the keys it writes
-// are box's, and overlay() is the function that keeps box's keys out.
+// setPath writes one value into the document at a key path, creating mappings as
+// it goes. It bypasses overlay() deliberately: overlay() is what keeps box's keys
+// out.
 func setPath(root map[string]any, keys []string, value any) {
 	cur := root
 	for i, k := range keys {
@@ -333,9 +296,8 @@ func (e *SchemaError) Error() string {
 	return b.String()
 }
 
-// schemaURL is the name the chart schema is compiled under. It is a bare
-// synthetic URL, not a path: the compiler resolves relative references against
-// it and never has a reason to touch the filesystem for it.
+// schemaURL is the name the chart schema is compiled under: a synthetic URL, so
+// the compiler never touches the filesystem for it.
 const schemaURL = "https://chart.s5n.invalid/values.schema.json"
 
 // noRefLoader refuses every URL the compiler would otherwise load. See Validate.
@@ -345,9 +307,8 @@ func (noRefLoader) Load(url string) (any, error) {
 	return nil, fmt.Errorf("schema reference %q is outside the chart schema; refusing to load it", url)
 }
 
-// Validate checks a complete values document against a chart release's schema.
-// The schema is a parameter, not a file this package reads: the schema that
-// matters is the one in the release being installed.
+// Validate checks a complete values document against a chart release's schema:
+// the schema that matters is the one in the release being installed.
 func Validate(schema []byte, values map[string]any) error {
 	if len(schema) == 0 {
 		return errors.New("no chart schema: refusing to apply values nothing has checked")
@@ -358,9 +319,8 @@ func Validate(schema []byte, values map[string]any) error {
 	}
 	c := jsonschema.NewCompiler()
 	// The schema arrives inside a chart and box runs as root, so a $ref must
-	// never reach outside the schema itself. v6 loads meta-schemas from an
-	// embedded copy and sends everything else to this loader, which opens
-	// nothing.
+	// never reach outside it. v6 loads meta-schemas from an embedded copy and
+	// sends everything else to this loader, which opens nothing.
 	c.UseLoader(noRefLoader{})
 	if err := c.AddResource(schemaURL, doc); err != nil {
 		return fmt.Errorf("chart schema: %w", err)
@@ -432,16 +392,15 @@ func problemsFor(e *jsonschema.ValidationError) []Problem {
 	case *kind.Not:
 		return []Problem{{Path: base, Message: "is not an allowed value"}}
 	case *kind.Type:
-		// The library words this "got string, want integer"; the user's file
-		// reads better the other way round, and the existing errors keep their
-		// wording across the v5 -> v6 move.
+		// The library words this "got string, want integer"; the user's file reads
+		// better the other way round.
 		return []Problem{{Path: base, Message: fmt.Sprintf("expected %s, got %s", strings.Join(k.Want, " or "), k.Got)}}
 	}
 	return []Problem{{Path: base, Message: e.ErrorKind.LocalizedString(printer)}}
 }
 
-// tokenPath turns the validator's instance tokens (apps, sonarr, instances,
-// 1, enabled) into apps.sonarr.instances[1].enabled.
+// tokenPath turns the validator's instance tokens into
+// apps.sonarr.instances[1].enabled.
 func tokenPath(tokens []string) string {
 	if len(tokens) == 0 {
 		return "(top level)"

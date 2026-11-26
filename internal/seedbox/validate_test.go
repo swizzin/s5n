@@ -21,9 +21,8 @@ func realChart(t *testing.T) Chart {
 	return Chart{Values: values, Schema: schema}
 }
 
-// TestEffectiveAgainstTheRealChart is the end-to-end claim: this fixture's grant
-// and values, merged the way box merges them, are values the shipped chart would
-// accept.
+// The end-to-end claim: this fixture's grant and values, merged the way box merges
+// them, are values the shipped chart would accept.
 func TestEffectiveAgainstTheRealChart(t *testing.T) {
 	s := loadFixture(t, "values.yaml")
 	got, err := s.Effective(realChart(t))
@@ -70,12 +69,9 @@ func TestEffectiveAgainstTheRealChart(t *testing.T) {
 	if qbt["image"].(map[string]any)["variant"] != "default" {
 		t.Errorf("qbt image = %v, want the user's chosen variant", qbt["image"])
 	}
-	// The chart ships no peer port and this grant records none, so the
-	// effective values carry none: the box is one installed before box picked
-	// the port, and box keeps the number its release already renders (apply's
-	// keepPeerPort) rather than this merge inventing one. What matters here is
-	// that such a box still validates against the real chart -- an old box
-	// must never be refused by a chart that stopped defaulting the key.
+	// The chart ships no peer port and this grant records none, so the effective
+	// values carry none: the number the release already renders is kept rather than
+	// invented here, and an old box still validates against the chart.
 	if port, ok := qbt["torrent"].(map[string]any)["port"]; ok {
 		t.Errorf("torrent port = %v, want none: the chart ships no default", port)
 	}
@@ -89,9 +85,8 @@ func TestEffectiveAgainstTheRealChart(t *testing.T) {
 	}
 }
 
-// chartAt reads a chart release out of testdata: a release's values.yaml and
-// values.schema.json are the whole of what box takes from one, so a pair of
-// files is a release as far as this package is concerned.
+// chartAt reads a chart release out of testdata: its values.yaml and
+// values.schema.json are the whole of what box takes from one.
 func chartAt(t *testing.T, valuesName, schemaName string) Chart {
 	t.Helper()
 	values, err := os.ReadFile("testdata/" + valuesName)
@@ -105,10 +100,9 @@ func chartAt(t *testing.T, valuesName, schemaName string) Chart {
 	return Chart{Values: values, Schema: schema}
 }
 
-// TestEffectiveWritesAuthEdgeWhereTheChartDeclaresIt: the chart ships no login
-// and refuses to render without auth.edge, so box's values carry it -- but only
-// for a release whose schema says the key exists. It is written after the
-// chart's defaults and after both files, so neither can shadow it.
+// The chart ships no login and refuses to render without auth.edge, so box's
+// values carry it, but only where the schema declares it. It is written last, so
+// neither file can shadow it.
 func TestEffectiveWritesAuthEdgeWhereTheChartDeclaresIt(t *testing.T) {
 	t.Run("the chart main ships", func(t *testing.T) {
 		s := loadFixture(t, "values.yaml")
@@ -139,13 +133,10 @@ func TestEffectiveWritesAuthEdgeWhereTheChartDeclaresIt(t *testing.T) {
 	})
 }
 
-// TestEffectiveOmitsAuthEdgeForChart020 is the compatibility claim: a box that
-// knows auth.edge still applies to the release that predates it. The pair below
-// is copied verbatim from the published tag v0.2.0 (`git show
-// v0.2.0:charts/s5n/values.yaml` and the schema beside it). That schema sets
-// additionalProperties: false and has no auth section, so writing the key is
-// exactly the refusal -- "auth: is not a key the chart knows" -- an older
-// install must not get from a newer box.
+// The compatibility claim: a box that knows auth.edge still applies to the release
+// that predates it. The pair is copied verbatim from the published tag v0.2.0,
+// whose schema sets additionalProperties: false and has no auth section: writing
+// the key is exactly the refusal an older install must not get.
 func TestEffectiveOmitsAuthEdgeForChart020(t *testing.T) {
 	c := chartAt(t, "chart-0.2.0.values.yaml", "chart-0.2.0.schema.json")
 
@@ -171,10 +162,9 @@ func TestEffectiveOmitsAuthEdgeForChart020(t *testing.T) {
 	}
 }
 
-// TestEffectiveOmitsAuthEdgeWhenOnlyTheBranchIsDeclared: presence of
-// properties.auth.properties.edge is the question, not presence of an auth
-// branch. A release that describes some other auth key would still reject
-// auth.edge, so box writes nothing.
+// Presence of properties.auth.properties.edge is the question, not presence of an
+// auth branch: a release that describes some other auth key would still reject
+// auth.edge.
 func TestEffectiveOmitsAuthEdgeWhenOnlyTheBranchIsDeclared(t *testing.T) {
 	c := Chart{
 		Values: []byte("apps: {}\n"),
@@ -190,10 +180,9 @@ func TestEffectiveOmitsAuthEdgeWhenOnlyTheBranchIsDeclared(t *testing.T) {
 	}
 }
 
-// TestEffectiveRefusesAuthInEitherChart: moving the write out of Merge must not
-// move the refusal. A file that sets auth.edge is refused whatever release is
-// being applied, old or new, because the refusal is about the file: box writes
-// the key, so saying it in either file is a mistake in that file.
+// Moving the write out of Merge must not move the refusal: a file that sets
+// auth.edge is refused whatever release is applied, because the refusal is about
+// the file.
 func TestEffectiveRefusesAuthInEitherChart(t *testing.T) {
 	charts := map[string]func(*testing.T) Chart{
 		"chart 0.2.0": func(t *testing.T) Chart {
@@ -276,10 +265,8 @@ func TestValidateNamesTheKeyPath(t *testing.T) {
 			msg:  "not a key the chart knows",
 		},
 		{
-			// An app's OIDC client is the catalog's flag, not a values key: a
-			// user cannot make an app a client (or stop it being one) from
-			// their file, because the chart is what wires the issuer, the
-			// secret and the trust anchor into it.
+			// An app's OIDC client is the catalog's flag, not a values key: the
+			// chart wires the issuer, secret and trust anchor into it.
 			name: "an oidc flag in values",
 			mutate: func(m map[string]any) {
 				m["apps"].(map[string]any)["qui"].(map[string]any)["oidc"] = true
@@ -378,8 +365,7 @@ func TestValidateReportsEveryProblemAtOnce(t *testing.T) {
 }
 
 // The variant list is the chart's, not the user's: a repository in the user's
-// values file must fail as a key the chart does not have, naming the path, not
-// as a value that was quietly overridden.
+// values file fails as a key the chart does not have, naming the path.
 func TestEffectiveRefusesARepositoryInValues(t *testing.T) {
 	values := writeTemp(t, "values.yaml", `apps:
   radarr:
@@ -406,8 +392,6 @@ func TestEffectiveRefusesARepositoryInValues(t *testing.T) {
 	t.Fatalf("no problem names apps.radarr.image.repository; got:\n%s", err)
 }
 
-// A chart schema is untrusted input to a root process: a $ref to a local file
-// must fail to compile rather than be read.
 func TestValidateRefusesExternalRefs(t *testing.T) {
 	schema := []byte(`{"$schema":"http://json-schema.org/draft-07/schema#","properties":{"x":{"$ref":"file:///etc/hostname"}}}`)
 	err := Validate(schema, map[string]any{"x": 1})
@@ -416,11 +400,9 @@ func TestValidateRefusesExternalRefs(t *testing.T) {
 	}
 }
 
-// A category names one qBittorrent category and both /data trees, and an
-// existing seedbox keeps the names it already used (docs/box.md, migrate): so
-// upper case and one subcategory level are legal, while anything that could
-// escape a tree, split differently in the two apps, or that qBittorrent itself
-// refuses is not.
+// An existing seedbox keeps the category names it already used (docs/box.md,
+// migrate): upper case and one subcategory are legal, anything that escapes a tree
+// or qBittorrent refuses is not.
 func TestCategoryPattern(t *testing.T) {
 	c := realChart(t)
 	base, err := Base(c)
@@ -467,10 +449,9 @@ func TestCategoryPattern(t *testing.T) {
 	}
 }
 
-// TestEffectiveTakesTheRehearsalLockFromTheGrant: rehearsal is box's record,
-// not a value. The chart's default is a live box; a grant carrying the lock
-// renders a locked release; and a values file that tries to set either answer
-// is refused, because allowing it would let a user unlock the box box applied.
+// rehearsal is box's record, not a value: the chart's default is a live box, a
+// grant carrying the lock renders a locked release, and a values file trying to
+// set either answer is refused.
 func TestEffectiveTakesTheRehearsalLockFromTheGrant(t *testing.T) {
 	s := loadFixture(t, "values.yaml")
 	got, err := s.Effective(realChart(t))
@@ -500,8 +481,8 @@ func TestEffectiveTakesTheRehearsalLockFromTheGrant(t *testing.T) {
 		t.Errorf("rehearsalGate = %q, want the grant's address", gate)
 	}
 
-	// A lock with no gate address would start each app before its pod's
-	// policy is in place: refused, never rendered without the gate.
+	// A lock with no gate would start each app before its pod's policy is in
+	// place.
 	gateless, err := Load(writeTemp(t, "grant.yaml", string(raw)+"\nrehearsal: true\n"), "")
 	if err != nil {
 		t.Fatalf("Load: %v", err)
@@ -521,10 +502,9 @@ func TestEffectiveTakesTheRehearsalLockFromTheGrant(t *testing.T) {
 	}
 }
 
-// TestEffectiveRefusesTheLockOnAReleaseWithoutIt: a release from before the lock
-// has no key for it, and rendering a rehearsal box with that chart would give it
-// the internet back. The lock fails closed: box refuses the install rather than
-// drop the flag, because a rehearsal box is never one that can reach out.
+// A release from before the lock has no key for it, and rendering a rehearsal box
+// with that chart would give it the internet back: box refuses the install rather
+// than drop the flag.
 func TestEffectiveRefusesTheLockOnAReleaseWithoutIt(t *testing.T) {
 	c := chartAt(t, "chart-0.2.0.values.yaml", "chart-0.2.0.schema.json")
 	raw, err := os.ReadFile(fixture(t, "grant.yaml"))

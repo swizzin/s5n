@@ -40,9 +40,8 @@ func readYAMLFile(t *testing.T, path string) map[string]any {
 	return out
 }
 
-// TestGrantKeysAreRealKeys is the guard against a grant rule that names a key
-// the chart does not have: a typo there would leave the key user-writable and
-// silently unprotected.
+// The guard against a grant rule that names a key the chart does not have: a typo
+// there would leave the key user-writable and silently unprotected.
 func TestGrantKeysAreRealKeys(t *testing.T) {
 	schema := readJSONFile(t, chartSchemaPath)
 	values := readYAMLFile(t, chartValuesPath)
@@ -58,8 +57,8 @@ func TestGrantKeysAreRealKeys(t *testing.T) {
 			}
 			continue
 		}
-		// A wildcard rule ("every app") has to exist for at least one app: the
-		// wildcard also covers apps that legitimately have no such key.
+		// A wildcard rule ("every app") has to exist for at least one app: it also
+		// covers apps that legitimately have no such key.
 		found := 0
 		for _, app := range apps {
 			path := strings.Replace(rule.Path, "*", app, 1)
@@ -73,9 +72,8 @@ func TestGrantKeysAreRealKeys(t *testing.T) {
 	}
 }
 
-// TestEveryAppIsGrantable: an app the chart ships but no rule covers would be an
-// app a user's values could switch on. The wildcard should make this true by
-// construction; the test proves the wildcard actually reaches every app.
+// An app the chart ships but no rule covers would be an app a user's values could
+// switch on; the test proves the wildcard reaches every app.
 func TestEveryAppIsGrantable(t *testing.T) {
 	values := readYAMLFile(t, chartValuesPath)
 	apps := values["apps"].(map[string]any)
@@ -86,8 +84,8 @@ func TestEveryAppIsGrantable(t *testing.T) {
 	}
 }
 
-// TestEveryInstanceListIsGranted: only the Arrs take instances, but the rule is
-// a wildcard, so this asserts the schema agrees about which apps have them.
+// Only the Arrs take instances, but the rule is a wildcard: this asserts the
+// schema agrees about which apps have them.
 func TestEveryInstanceListIsGranted(t *testing.T) {
 	schema := readJSONFile(t, chartSchemaPath)
 	values := readYAMLFile(t, chartValuesPath)

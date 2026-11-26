@@ -6,9 +6,8 @@ import (
 	"testing"
 )
 
-// TestStorageDerivesClaims: the grant records two host paths and nothing else.
-// The claim names come from the namespace, so that two boxes on one host can
-// never ask for the same cluster-scoped PersistentVolume.
+// The grant records two host paths and nothing else; the claim names come from the
+// namespace, so two boxes on one host never ask for the same cluster-scoped PV.
 func TestStorageDerivesClaims(t *testing.T) {
 	s := loadFixture(t, "values.yaml")
 	vols, err := s.Storage()
@@ -29,8 +28,8 @@ func TestStorageDerivesClaims(t *testing.T) {
 	}
 }
 
-// TestEffectiveCarriesBoxClaims: the claim names are in the values handed to
-// Helm, and they are box's -- the chart's defaults never reach the release.
+// The claim names are in the values handed to Helm, and they are box's: the chart's
+// defaults never reach the release.
 func TestEffectiveCarriesBoxClaims(t *testing.T) {
 	s := loadFixture(t, "values.yaml")
 	values, err := s.Effective(realChart(t))
@@ -77,9 +76,8 @@ func TestStorageRefusesABadPath(t *testing.T) {
 	}
 }
 
-// TestStorageRulesAreBoxOwned: the host path is the grant's record, and the
-// claim name is box's own. A user who writes either one gets an error that
-// names the key, not a silent overwrite.
+// The host path is the grant's record and the claim name box's own: a user who
+// writes either gets an error naming the key.
 func TestStorageRulesAreBoxOwned(t *testing.T) {
 	path, ok := GrantRule([]string{"storage", "data", "path"})
 	if !ok || !path.BoxOnly {

@@ -10,22 +10,16 @@ import (
 )
 
 // Merge returns the values document box hands Helm: the user's values with the
-// grant overlaid on top. Two rules decide the result.
+// grant overlaid.
 //
-// Grant wins. The overlay is applied last and replaces whatever was there,
-// including a whole list, because lists are never merged element by element in
-// values files: `helm -f` replaces a list, and so does this. The only grant list
-// is apps.*.instances, and it is grant-owned as a unit, so no list ever has to
-// be merged entry by entry.
-//
-// A grant key in values is an error, not a value to override, because a user
-// who sets gateway.host and sees no change will assume it worked. The error
-// names the key and the line, in both directions: a grant key in values, and a
-// non-grant key in the grant.
+// Grant wins, and a list is replaced whole: `helm -f` replaces a list, and the
+// only grant list (apps.*.instances) is owned as a unit. A grant key in values is
+// an error, not a value to override, because a user who sets gateway.host and sees
+// no change will assume it worked; the error names the key and line in both
+// directions.
 //
 // Merge reads the two files and nothing else. The keys box writes from its own
-// decision are not added here: they belong to Effective, which has the release
-// being installed and can tell which of its keys the chart actually declares.
+// decision belong to Effective, which knows the release being installed.
 func (s *Seedbox) Merge() (map[string]any, error) {
 	if err := s.checkGrant(); err != nil {
 		return nil, err
@@ -41,10 +35,10 @@ func (s *Seedbox) Merge() (map[string]any, error) {
 	return out, nil
 }
 
-// overlay applies src on top of dst. Scalars and lists are replaced; mappings
-// are merged key by key so that a grant's global.puid does not discard the
-// user's global.tz. A BoxOnly key is skipped at any depth: it is box's own
-// record -- the namespace, the host paths -- and never a chart value.
+// overlay applies src on top of dst: scalars and lists are replaced, mappings are
+// merged key by key so a grant's global.puid does not discard the user's
+// global.tz. A BoxOnly key is skipped at any depth: it is box's own record and
+// never a chart value.
 func overlay(dst, src map[string]any, path []string) {
 	for k, v := range src {
 		keys := make([]string, len(path)+1)
@@ -63,11 +57,9 @@ func overlay(dst, src map[string]any, path []string) {
 	}
 }
 
-// checkGrant refuses a grant that says something the grant cannot say. Root
-// edits this file by hand and by command, so the mistakes to catch are a typo'd
-// key (which would otherwise be tuned in two places), a missing domain (the box
-// cannot be reached without one) and an app entry that does not say whether the
-// app exists.
+// checkGrant refuses a grant that says something the grant cannot say: a typo'd
+// key (otherwise tuned in two places), a missing domain, or an app entry that does
+// not say whether the app exists.
 func (s *Seedbox) checkGrant() error {
 	g := s.Grant
 	var problems []string
@@ -126,10 +118,8 @@ func (s *Seedbox) checkGrant() error {
 	return nil
 }
 
-// checkValues refuses every grant key a user's file sets. It reports all of
-// them at once: a user who copied a grant-shaped file wants the whole list, not
-// one key per run. A branch is not a decision, so a rule on a branch reports
-// the leaves beneath it -- that is what names the key the user actually wrote.
+// checkValues refuses every grant key a user's file sets, all at once. A branch is
+// not a decision, so a rule on a branch reports the leaves beneath it.
 func (s *Seedbox) checkValues() error {
 	v := s.Values
 	var problems []string
@@ -154,9 +144,8 @@ func (s *Seedbox) checkValues() error {
 	return nil
 }
 
-// walkKeys visits every mapping key in the document, outermost first, with the
-// key's path. A list is not descended: lists are values, they are replaced
-// whole, and an index in a path is only meaningful to an editor.
+// walkKeys visits every mapping key in the document, outermost first. A list is
+// not descended: lists are values, replaced whole.
 func walkKeys(n *yaml.Node, keys []string, fn func(keys []string, key, val *yaml.Node)) {
 	if n == nil || n.Kind != yaml.MappingNode {
 		return
