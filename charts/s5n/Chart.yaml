@@ -2,8 +2,8 @@ apiVersion: v2
 name: s5n
 description: swizzin on Kubernetes — a wired, hardlink-safe seedbox stack in one release
 type: application
-version: 0.6.5
-appVersion: "0.6.5"
+version: 0.6.6
+appVersion: "0.6.6"
 # Distribution-agnostic: vanilla, k0s, k3s, managed. Only a floor, never a ceiling.
 # 1.30 is where ValidatingAdmissionPolicy is GA; the platform layer binds one to
 # every user namespace to enforce the grant.
@@ -36,10 +36,8 @@ keywords: [seedbox, swizzin, sonarr, radarr, prowlarr, qbittorrent]
 # 0.6.4 raises neither. The chart's one change is a NetworkPolicy edge (autobrr
 # may call qui), which box never reads.
 #
-# 0.6.5 raises neither. The chart's change is its image list (qBittorrent 5.3.1,
-# the two Zen 3 builds, the former variant name kept as an entry of its own), and
-# the wiring Job's autobrr change ships in the s5n image; an older box reads the
-# variants as data and hands the chart the same values.
+# 0.6.6 raises neither: its one change is qui's image (v1.37.0), which an older
+# box reads as data and hands the chart the same values.
 annotations:
   box.s5n/min-box: "0.6.0"
   box.s5n/upgrade-from: "0.6.0"
