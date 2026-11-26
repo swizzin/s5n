@@ -8,11 +8,10 @@ import (
 	"strings"
 )
 
-// prefsPaths are the Preferences.xml attributes that hold an absolute path.
-// TranscoderTempDirectory and iTunesLibraryXmlPath are documented as paths
-// (support article "Advanced, Hidden Server Settings"); ButlerDatabaseBackupPath
-// is the directory scheduled backups are written to; customCertificatePath is a
-// PKCS#12 file. All four are strings in the 1.43.5 binary.
+// prefsPaths are the Preferences.xml attributes holding an absolute path, all
+// strings in the 1.43.5 binary: transcoder temp and iTunes XML are documented
+// paths, ButlerDatabaseBackupPath is the backup directory, customCertificatePath
+// a PKCS#12 file.
 var prefsPaths = []string{
 	"TranscoderTempDirectory",
 	"ButlerDatabaseBackupPath",
@@ -20,14 +19,11 @@ var prefsPaths = []string{
 	"iTunesLibraryXmlPath",
 }
 
-// prefsList is the one attribute that holds a list of paths: pre-roll videos,
-// comma- or semicolon-separated.
+// prefsList is the one attribute holding a list: pre-roll videos.
 const prefsList = "CinemaTrailersPrerollID"
 
-// attr is one attribute of the <Preferences> element and where its quoted value
-// sits, so an edit changes the value and leaves the rest of the file -- the
-// other attributes, their order, the XML declaration -- exactly as Plex wrote
-// it.
+// attr is one attribute and where its quoted value sits: an edit leaves the rest
+// of the file exactly as Plex wrote it.
 type attr struct {
 	name       string
 	start, end int // the value's span, quotes included
@@ -61,9 +57,8 @@ type prefsFile struct {
 	attrs []attr
 }
 
-// parsePrefs finds the <Preferences> start tag and the attributes on it. It is
-// not an XML parser on purpose: Plex's file is one element with attributes, and
-// a decoder would rewrite its quoting and entity escaping on the way back out.
+// parsePrefs finds the <Preferences> start tag's attributes. It is not an XML
+// parser on purpose: a decoder would rewrite quoting and entity escaping.
 func parsePrefs(data []byte) (*prefsFile, error) {
 	i := bytes.Index(data, []byte("<Preferences"))
 	if i < 0 {
@@ -154,7 +149,7 @@ func (f *prefsFile) get(name string) (attr, bool) {
 	return attr{}, false
 }
 
-// apply writes the edits back, back to front so an earlier span stays put.
+// apply writes the edits back to front, so an earlier span stays put.
 func (f *prefsFile) apply(edits []prefEdit) []byte {
 	order := append([]prefEdit(nil), edits...)
 	for i := 1; i < len(order); i++ {
@@ -170,8 +165,7 @@ func (f *prefsFile) apply(edits []prefEdit) []byte {
 	return out
 }
 
-// unescapeXML decodes the five named entities and numeric character
-// references Plex can write into an attribute.
+// unescapeXML decodes the entities Plex writes into an attribute.
 func unescapeXML(s string) string {
 	if !strings.Contains(s, "&") {
 		return s
