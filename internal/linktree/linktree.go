@@ -1,12 +1,7 @@
-// Package linktree is the one rule for a symlink inside a config tree that is
-// being copied: a copy carries the tree and the links between its files, so a
-// link that leaves the tree is refused and one that names the kernel's own
-// filesystems is left out.
-//
-// Both copies box makes use it: migrate's staging copy of an app's config
-// (internal/migrate/apply) and a snapshot's config/ tree (internal/snapshot). A
-// rule in one and a different one in the other would make the snapshot a
-// different tree from the one apply reads.
+// Package linktree is the one rule for a symlink in a copied config tree: an
+// inside link is carried, a kernel-filesystem link is skipped, one that leaves
+// the tree is refused. Migrate's staging copy and archive's config/ tree must
+// agree, or the snapshot is a different tree from the one apply reads.
 package linktree
 
 import (
@@ -17,15 +12,14 @@ import (
 
 // Result is what a copy does with one link.
 type Result struct {
-	// Target is the text the copy's link is written with. A link that named an
-	// absolute path inside the tree is written relative to the link's own
-	// directory, because the tree is about to move and the absolute text would
-	// still name where it came from.
+	// Target is the text the copy's link is written with. An absolute path
+	// inside the tree is written relative to the link's own directory: the tree
+	// is about to move, and the absolute text would still name where it came
+	// from.
 	Target string
 	// Skip says the link is left out of the copy. It names one of the kernel's
-	// filesystems: the images point an app's log at the pod's own stdout, which
-	// is plumbing, never a file a config tree keeps, and the app writes the
-	// link again when it starts.
+	// filesystems: an app's log points at the pod's own stdout, which is
+	// plumbing, and the app writes the link again when it starts.
 	Skip bool
 }
 
@@ -33,9 +27,6 @@ type Result struct {
 // at root, whose target is target as os.Readlink answered it. An error means the
 // link leaves the tree, which a copy cannot carry: after the move it would name
 // a path the receiving host does not have.
-//
-// root, rel and target are filesystem paths. box runs on Linux, so they are also
-// the names inside a snapshot's archive.
 func Resolve(root, rel, target string) (Result, error) {
 	if filepath.IsAbs(target) && kernel(target) {
 		return Result{Skip: true}, nil
