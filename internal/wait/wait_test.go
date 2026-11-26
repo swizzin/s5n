@@ -8,9 +8,7 @@ import (
 	"time"
 )
 
-// fakeClock is the installer's seam: Now never moves on its own, and Sleep
-// moves it, so a wait that would take a minute runs at once and still proves
-// how many attempts it made.
+// fakeClock injects time: Sleep moves Now, so a long wait runs at once.
 type fakeClock struct {
 	now    time.Time
 	sleeps []time.Duration
@@ -37,8 +35,6 @@ func TestUntilReturnsAsSoonAsItIsDone(t *testing.T) {
 	}
 }
 
-// A later try is the case every wait exists for: a webhook that refuses once,
-// a Certificate that is written a moment after it is asked for.
 func TestUntilSucceedsOnALaterTry(t *testing.T) {
 	f := &fakeClock{now: time.Unix(0, 0)}
 	calls := 0
@@ -57,8 +53,6 @@ func TestUntilSucceedsOnALaterTry(t *testing.T) {
 	}
 }
 
-// The budget is a deadline, not an endless poll: the attempt at the deadline
-// happens, and the wait gives up without sleeping past it.
 func TestUntilStopsAtTheDeadline(t *testing.T) {
 	f := &fakeClock{now: time.Unix(0, 0)}
 	got, err := UntilClock(context.Background(), f.clock(), 5*time.Second, time.Second, func(context.Context) (bool, error) {
@@ -81,10 +75,6 @@ func TestUntilStopsAtTheDeadline(t *testing.T) {
 	}
 }
 
-// The last sleep never runs past the deadline: a 50ms budget with a 2m poll
-// waits 50ms, not two minutes. This is the behaviour the Gateway probe had and
-// the readiness Await did not, and the reason two waits with one timeout could
-// take different times to give up.
 func TestUntilNeverSleepsPastTheDeadline(t *testing.T) {
 	f := &fakeClock{now: time.Unix(0, 0)}
 	got, err := UntilClock(context.Background(), f.clock(), 50*time.Millisecond, 2*time.Minute, func(context.Context) (bool, error) {
@@ -101,8 +91,7 @@ func TestUntilNeverSleepsPastTheDeadline(t *testing.T) {
 	}
 }
 
-// An error ends the wait, and it is the error the caller returns: a failed read
-// is not a state to keep polling.
+// An error ends the wait and is returned: a failed read is not a state to poll.
 func TestUntilStopsOnAnError(t *testing.T) {
 	refused := errors.New("connection refused")
 	got, err := Until(context.Background(), time.Minute, time.Millisecond, func(context.Context) (bool, error) {
@@ -116,9 +105,7 @@ func TestUntilStopsOnAnError(t *testing.T) {
 	}
 }
 
-// A cancelled context stops the wait between attempts, and one cancelled
-// before the first attempt never asks at all: nothing box waits for should be
-// read after an interrupt.
+// A wait cancelled before its first attempt never asks.
 func TestUntilStopsOnACancelledContext(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
@@ -135,8 +122,6 @@ func TestUntilStopsOnACancelledContext(t *testing.T) {
 	}
 }
 
-// The real clock's sleep is cut short by the context, so a cancelled wait does
-// not sit out its poll interval.
 func TestUntilWakesOnCancellationDuringTheSleep(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	start := time.Now()
@@ -152,8 +137,6 @@ func TestUntilWakesOnCancellationDuringTheSleep(t *testing.T) {
 	}
 }
 
-// A zero poll is a programming error said out loud, not a busy loop for the
-// whole budget.
 func TestUntilRefusesAZeroPoll(t *testing.T) {
 	_, err := Until(context.Background(), time.Minute, 0, func(context.Context) (bool, error) {
 		t.Fatal("a zero poll still called the function")
