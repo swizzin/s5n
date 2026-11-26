@@ -109,9 +109,10 @@ type Entry struct {
 	// SHA256 is the hex digest of those bytes, so a copy that stopped halfway
 	// or a byte changed in transit is refused.
 	SHA256 string `json:"sha256"`
-	// Mode is the source's permission bits, as octal text ("0600"). The
-	// extracted tree is not these: it is 0700 directories and 0600 files,
-	// because the archive holds secrets and box owns what it extracts.
+	// Mode is the source's permission bits, as octal text ("0600"), and the
+	// mode the entry is extracted with: a config tree comes back as the app
+	// left it, an executable script included. What keeps an extraction private
+	// is the directory it is written into, which is box's and 0700.
 	Mode string `json:"mode"`
 }
 

@@ -163,9 +163,10 @@ func checkExtractedTree(t *testing.T, dir string) {
 	if _, err := os.Lstat(filepath.Join(dir, "config", "qbittorrent", "qBittorrent", "logs", "qbittorrent.log")); !errors.Is(err, os.ErrNotExist) {
 		t.Errorf("the log link was extracted (%v): a link to the kernel's filesystems is left out", err)
 	}
-	// The extracted tree is box's: 0700 directories, 0600 files, whatever the
-	// source's own modes were.
-	for _, d := range []string{"", PlanName, "config", "config/qbittorrent", "config/qbittorrent/qBittorrent"} {
+	// What box wrote for itself is box's: the extraction's own directory and
+	// the one above the config trees 0700, its plan 0600. The trees inside are
+	// the source's modes (mode_test.go).
+	for _, d := range []string{"", PlanName, "config"} {
 		info, err := os.Lstat(filepath.Join(dir, d))
 		if err != nil {
 			t.Fatalf("%s: %v", d, err)

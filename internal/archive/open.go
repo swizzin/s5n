@@ -17,6 +17,7 @@ import (
 	"path"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/swizzin/s5n/internal/linktree"
 )
@@ -55,9 +56,11 @@ type Owner struct{ UID, GID int }
 // match, a path that is absolute or steps out with `..`, and a link, device, fifo
 // or hardlink that is not something box writes. A failure leaves nothing at dir.
 //
-// The extracted tree is 0700 directories and 0600 files and belongs to whoever
-// ran box: ownership is not carried, because only apply knows the uid that will
-// own the staged copy.
+// The extraction is box's: dir itself, and every directory the archive did not
+// name, is 0700, and it belongs to whoever ran box -- ownership is not carried,
+// because only apply knows the uid that will own the staged copy. Inside it,
+// every entry has the mode and time the manifest says the source gave it: a
+// config tree is copied on from here, and a script in it has to stay one.
 func Open(archive, dir string) (*Manifest, error) {
 	m, err := readManifest(archive)
 	if err != nil {
@@ -220,6 +223,7 @@ func extract(archive, dir, base string, m *Manifest, keep Filter, own *Owner) er
 	defer f.Close()
 	tr := tar.NewReader(gz)
 	seen := make(map[string]bool, len(m.Entries))
+	var dirs []restore
 	for {
 		hdr, err := tr.Next()
 		if err == io.EOF {
@@ -228,7 +232,7 @@ func extract(archive, dir, base string, m *Manifest, keep Filter, own *Owner) er
 		if err != nil {
 			return fmt.Errorf("read %s: %w", archive, err)
 		}
-		if err := extractEntry(archive, dir, base, m, tr, hdr, keep, own, seen); err != nil {
+		if err := extractEntry(archive, dir, base, m, tr, hdr, keep, own, seen, &dirs); err != nil {
 			return err
 		}
 	}
@@ -250,12 +254,48 @@ func extract(archive, dir, base string, m *Manifest, keep Filter, own *Owner) er
 			return fmt.Errorf("%s does not hold %s, which its manifest names: the copy is incomplete", archive, name)
 		}
 	}
+	// The directories last: each is written 0700 so the extraction can put its
+	// children in it whatever the source's mode was, and its own time is the
+	// last child written, so neither is the source's until nothing more is.
+	for _, d := range dirs {
+		if err := d.apply(); err != nil {
+			return fmt.Errorf("%s: %w", archive, err)
+		}
+	}
+	return nil
+}
+
+// restore is one extracted path's source mode and time, out of its tar header,
+// which checkEntry has held to the manifest's mode.
+type restore struct {
+	path  string
+	name  string
+	mode  fs.FileMode
+	mtime time.Time
+}
+
+func restoreOf(target, name string, hdr *tar.Header) restore {
+	return restore{path: target, name: name, mode: fs.FileMode(hdr.Mode) & fs.ModePerm, mtime: hdr.ModTime}
+}
+
+// apply sets the mode, then the time: a chmod is not a write, so the order
+// only matters to a reader, and this is the order a reader expects.
+func (r restore) apply() error {
+	if err := os.Chmod(r.path, r.mode); err != nil {
+		return fmt.Errorf("extract %s: %w", r.name, err)
+	}
+	if err := os.Chtimes(r.path, r.mtime, r.mtime); err != nil {
+		return fmt.Errorf("extract %s: %w", r.name, err)
+	}
 	return nil
 }
 
 // extractEntry checks one tar entry against the manifest and writes it, unless
 // keep leaves it for a later pass.
-func extractEntry(archive, dir, base string, m *Manifest, tr *tar.Reader, hdr *tar.Header, keep Filter, own *Owner, seen map[string]bool) error {
+//
+// A directory's mode and time are added to dirs, for extract to set once every
+// entry is written; a file's are set here, as soon as its bytes are checked.
+func extractEntry(archive, dir, base string, m *Manifest, tr *tar.Reader, hdr *tar.Header, keep Filter, own *Owner, seen map[string]bool, dirs *[]restore) error {
 	name := path.Clean(hdr.Name)
 	// The manifest was verified in the first pass, and readManifest refuses an
 	// archive with anything after it; the entry itself is not extracted.
@@ -277,10 +317,8 @@ func extractEntry(archive, dir, base string, m *Manifest, tr *tar.Reader, hdr *t
 	rel := name
 	if base != "" {
 		if name == base {
-			// The subtree's own directory: the extraction directory itself is
-			// what it becomes, and it is already there.
 			seen[name] = true
-			return nil
+			return extractBase(archive, dir, name, m, tr, hdr, dirs)
 		}
 		var ok bool
 		if rel, ok = strings.CutPrefix(name, base+"/"); !ok {
@@ -300,21 +338,11 @@ func extractEntry(archive, dir, base string, m *Manifest, tr *tar.Reader, hdr *t
 		if err := extractDir(target, name); err != nil {
 			return fmt.Errorf("%s: %w", archive, err)
 		}
+		*dirs = append(*dirs, restoreOf(target, name, hdr))
 		return hand(own, target, false)
 	case tar.TypeReg:
-		out, err := os.OpenFile(target, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
-		if err != nil {
-			return fmt.Errorf("extract %s: %w", name, err)
-		}
-		_, cerr := checkEntry(archive, out, m, tr, hdr)
-		if err := out.Close(); cerr == nil {
-			cerr = err
-		}
-		if cerr != nil {
-			return cerr
-		}
-		if err := os.Chmod(target, 0o600); err != nil {
-			return fmt.Errorf("extract %s: %w", name, err)
+		if err := extractFile(archive, target, name, m, tr, hdr); err != nil {
+			return err
 		}
 		return hand(own, target, false)
 	case tar.TypeSymlink:
@@ -329,6 +357,37 @@ func extractEntry(archive, dir, base string, m *Manifest, tr *tar.Reader, hdr *t
 	// checkEntry refuses the rest by name: a hardlink, a device, a fifo.
 	_, err := checkEntry(archive, nil, m, tr, hdr)
 	return err
+}
+
+// extractBase takes the subtree's own directory entry: the extraction directory
+// itself is what it becomes, and it is already there. It is the instance's
+// config directory, so its mode is the source's too.
+func extractBase(archive, dir, name string, m *Manifest, tr *tar.Reader, hdr *tar.Header, dirs *[]restore) error {
+	if hdr.Typeflag != tar.TypeDir {
+		return fmt.Errorf("%s holds %s as a %s, and it is the tree being extracted: it has to be a directory", archive, name, typeName(hdr.Typeflag))
+	}
+	if _, err := checkEntry(archive, nil, m, tr, hdr); err != nil {
+		return err
+	}
+	*dirs = append(*dirs, restoreOf(dir, name, hdr))
+	return nil
+}
+
+// extractFile writes one regular file, checks its bytes against the manifest as
+// they are written, and gives it the source's mode and time.
+func extractFile(archive, target, name string, m *Manifest, tr *tar.Reader, hdr *tar.Header) error {
+	out, err := os.OpenFile(target, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		return fmt.Errorf("extract %s: %w", name, err)
+	}
+	_, cerr := checkEntry(archive, out, m, tr, hdr)
+	if err := out.Close(); cerr == nil {
+		cerr = err
+	}
+	if cerr != nil {
+		return cerr
+	}
+	return restoreOf(target, name, hdr).apply()
 }
 
 // hand gives one extracted path to the owner the extraction was told, and does
@@ -351,8 +410,8 @@ func hand(own *Owner, path string, link bool) error {
 	return nil
 }
 
-// extractDir makes one directory entry, 0700, and refuses a path that is
-// already something else.
+// extractDir makes one directory entry, 0700 until extract gives it the
+// source's mode, and refuses a path that is already something else.
 func extractDir(target, name string) error {
 	if info, err := os.Lstat(target); err == nil && !info.IsDir() {
 		return fmt.Errorf("extract %s: it is already there and is not a directory", name)
