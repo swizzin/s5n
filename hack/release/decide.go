@@ -58,9 +58,10 @@ type Decision struct {
 // the tag's version without its prefix, empty when there is no tag.
 //
 // A release is cut only when every changed path is one of the two files, both
-// files' changes are patch or digest bumps, and something moved. That is
-// exactly the set Renovate may merge on main unattended, so the release
-// confirms a change CI already ran the full e2e on and never invents one.
+// files' changes are bumps Renovate may merge on main unattended (an app
+// image's patch, minor or digest; a platform pin's patch or digest), and
+// something moved. So the release confirms a change CI already ran the full
+// e2e on and never invents one.
 func decideRange(changed []string, oldVariants, newVariants, oldPlatform, newPlatform []byte, prevVersion string) (Decision, error) {
 	if prevVersion == "" {
 		// v0.2.0 predates the s5n-v family: it says nothing about what this
@@ -119,7 +120,7 @@ func decideRange(changed []string, oldVariants, newVariants, oldPlatform, newPla
 	return Decision{
 		Release: true,
 		Version: next.String(),
-		Reason: fmt.Sprintf("%d app image and %d platform pin bump(s) since %s, all patches or digests: releasing %s%s",
+		Reason: fmt.Sprintf("%d app image and %d platform pin bump(s) since %s, each one a release may carry: releasing %s%s",
 			images, pins, since, tagPrefix, next),
 	}, nil
 }
@@ -159,8 +160,9 @@ func parseVariants(b []byte) (map[string]map[string]variant, error) {
 
 // variantReason compares two variants.yaml files: it returns how many app
 // images moved and, when one did not move the way a release may, the reason to
-// refuse. A moved image is a patch or digest change; a minor or major tag, a
-// changed repository, an added or removed app or variant is not.
+// refuse. A moved image is a patch, minor or digest change (Renovate merges an
+// app image's minor on main once the e2e is green, .github/renovate.json); a
+// major tag, a changed repository, an added or removed app or variant is not.
 func variantReason(oldApps, newApps map[string]map[string]variant) (int, string) {
 	moved := 0
 	for _, key := range unionKeys(oldApps, newApps) {
@@ -180,14 +182,12 @@ func variantReason(oldApps, newApps map[string]map[string]variant) (int, string)
 			moved++ // digest-only
 		default:
 			switch classify(oldV.Tag, newV.Tag) {
-			case bumpPatch:
+			case bumpPatch, bumpMinor:
 				moved++
-			case bumpMinor:
-				return 0, "variant " + key.String() + ": " + oldV.Tag + " -> " + newV.Tag + " is a minor bump"
 			case bumpMajor:
 				return 0, "variant " + key.String() + ": " + oldV.Tag + " -> " + newV.Tag + " is a major bump"
 			default:
-				return 0, "variant " + key.String() + ": " + oldV.Tag + " -> " + newV.Tag + " is not a patch or digest bump"
+				return 0, "variant " + key.String() + ": " + oldV.Tag + " -> " + newV.Tag + " is not a patch, minor or digest bump"
 			}
 		}
 	}
