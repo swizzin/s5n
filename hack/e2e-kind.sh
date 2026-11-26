@@ -1268,7 +1268,8 @@ done
 # Jellyfin keeps its accounts, its API keys and its library paths in
 # data/jellyfin.db, so nothing can seed it before it starts: the wiring Job
 # completes its first-run wizard and every later run signs in as an account of
-# its own. The two passwords are the release Secret's, which is the only copy.
+# its own. The two passwords are the release Secret's, and the person's is the
+# one box made and showed once.
 jf_user_pw=$($K -n "$NS" get secret s5n-keys -o jsonpath='{.data.jellyfin-user-password}' | base64 -d || true)
 jf_box_pw=$($K -n "$NS" get secret s5n-keys -o jsonpath='{.data.jellyfin-box-password}' | base64 -d || true)
 [ -n "$jf_user_pw" ] || { echo "the release Secret has no jellyfin-user-password: the Job had no account to make"; fail=1; }
@@ -1287,127 +1288,75 @@ echo "GET https://${JELLYFIN_HOST}/ -> ${code}"
 [ "$code" = 200 ] || { echo "Jellyfin's own host did not serve its UI: ${code}"; fail=1; }
 grep -qi '<!doctype html' "$WORK/jellyfin.html" || { echo "${JELLYFIN_HOST} answered without an HTML document"; fail=1; }
 
-# jf_api <token> <curl args...>: one authenticated call through the Gateway.
-jf_api() {
-  local token=$1; shift
+# Every Jellyfin call carries the app's own client header, and a session's token
+# goes in that header's Token parameter: a 12.4 server reads no other.
+jf_client='MediaBrowser Client="s5n", Device="e2e", DeviceId="e2e", Version="1.0"'
+jf_signin() { # jf_signin <user> <password>: the token of a session, empty when refused
   curl -sS --max-time 30 --resolve "${JELLYFIN_HOST}:443:${GW_ADDR}" --cacert "$WORK/pebble-root.pem" \
-    -H "Authorization: MediaBrowser Client=\"s5n\", Device=\"e2e\", DeviceId=\"e2e\", Version=\"1.0\", Token=\"${token}\"" "$@"
-}
-# jf_signin <user> <password>: the token of a session, empty when refused.
-jf_signin() {
-  curl -sS --max-time 30 --resolve "${JELLYFIN_HOST}:443:${GW_ADDR}" --cacert "$WORK/pebble-root.pem" \
-    -H 'Content-Type: application/json' -d "{\"Username\":\"$1\",\"Pw\":\"$2\"}" \
-    -H "Authorization: MediaBrowser Client=\"s5n\", Device=\"e2e\", DeviceId=\"e2e\", Version=\"1.0\"" \
+    -H "Authorization: ${jf_client}" -H 'Content-Type: application/json' \
+    -d "{\"Username\":\"$1\",\"Pw\":\"$2\"}" \
     "https://${JELLYFIN_HOST}/Users/AuthenticateByName" 2>/dev/null |
     python3 -c 'import json,sys
 try: print(json.load(sys.stdin).get("AccessToken") or "")
 except Exception: print("")' || true
 }
+jf_api() { # jf_api <token> <curl args...>: one authenticated call through the Gateway
+  local token=$1; shift
+  curl -sS --max-time 30 --resolve "${JELLYFIN_HOST}:443:${GW_ADDR}" --cacert "$WORK/pebble-root.pem" \
+    -H "Authorization: ${jf_client}, Token=\"${token}\"" "$@"
+}
 
-# The person's account is the box login's name, and their password is the one
-# box made when it installed the app.
 jf_user_token=$(jf_signin "$APP_LOGIN" "$jf_user_pw")
 echo "POST /Users/AuthenticateByName as ${APP_LOGIN} -> ${jf_user_token:+a session}"
 [ -n "$jf_user_token" ] || { echo "${APP_LOGIN} cannot sign in to Jellyfin with the password the release made"; fail=1; }
-# The automation account the Job signs in as.
 jf_box_token=$(jf_signin s5n "$jf_box_pw")
 [ -n "$jf_box_token" ] || { echo "the wiring Job's own Jellyfin account cannot sign in"; fail=1; }
-# Its key, minted once, is what an API client uses: the row the Job made is
-# there and its token is one this server accepts.
+
+# The automation account's key, minted once: a credential the person can use
+# without their own password, and the proof the Job reached the API as an
+# administrator.
 jf_api "$jf_box_token" "https://${JELLYFIN_HOST}/Auth/Keys" >"$WORK/jf-keys.json" || true
 grep -q '"AppName":"s5n"' "$WORK/jf-keys.json" ||
   { echo "the Job minted no API key named s5n"; fail=1; }
-jf_key=$(python3 -c 'import json,sys
-d=json.load(open("'"$WORK"'/jf-keys.json"))
-items=d.get("Items") or d.get("items") or []
-print(next((k.get("AccessToken") or k.get("accessToken") or "" for k in items if (k.get("AppName") or k.get("appName"))=="s5n"), ""))' 2>/dev/null || true)
+jf_key=$(python3 - "$WORK/jf-keys.json" <<'PYKEY' || true
+import json, sys
+try:
+    rows = json.load(open(sys.argv[1])).get("Items") or []
+except Exception:
+    rows = []
+print(next((r.get("AccessToken") or "" for r in rows if r.get("AppName") == "s5n"), ""))
+PYKEY
+)
 [ -n "$jf_key" ] || { echo "the s5n key has no token"; fail=1; }
-# The libraries: one per Arr instance, over the directories the Arrs write.
-jf_api "$jf_key" "https://${JELLYFIN_HOST}/Library/VirtualFolders" >"$WORK/jf-libs.json" || true
+
+# The libraries, one per Arr instance over the Arrs' own directories. This is
+# the one assertion that cannot go through the Gateway: /Library/VirtualFolders
+# is a prefix the chart deliberately does not serve (a fresh server answers it
+# anonymously, and this host has no login in front of it), so the call is made
+# the way the Job makes it -- on the pod's own port, through a port-forward,
+# which is also where an API key belongs.
+port_forward jellyfin-0 8096 || fail=1
+: >"$WORK/jf-libs.json"
+curl -sS --max-time 30 -H "Authorization: ${jf_client}, Token=\"${jf_key}\"" \
+  -o "$WORK/jf-libs.json" -w '%{http_code}' "http://127.0.0.1:${PF_PORT}/Library/VirtualFolders" >"$WORK/jf-libs.code" || true
+port_forward_stop
+echo "GET /Library/VirtualFolders as the s5n key -> $(cat "$WORK/jf-libs.code")"
+[ "$(cat "$WORK/jf-libs.code")" = 200 ] ||
+  { echo "the box key could not list the libraries: $(cat "$WORK/jf-libs.code")"; fail=1; }
 for dir in /data/media/movies /data/media/4K/Movies /data/media/tv; do
   grep -q "\"${dir}\"" "$WORK/jf-libs.json" ||
     { echo "Jellyfin has no library over ${dir}: the Job's library step did not run"; fail=1; }
 done
 
-# The first-run window. Until the wizard is complete, Jellyfin's own controller
-# answers anyone, so whoever reached a fresh server first could name its first
-# user -- and this host deliberately has no edge login in front of it, because
-# players sign in themselves. The chart serves the two anonymous prefixes from
-# the app's own page instead, so the window cannot be entered from outside.
+# KnownProxies. Through the Gateway the app's peer is the proxy's pod, whose
+# address is in the cluster's pod network, so a server that trusts nothing reads
+# every request as coming from its own network and answers the endpoints marked
+# LocalAccessOrRequiresElevation to it with no credential at all.
 #
-# The flag is an administrator's setting, which is what makes the window
-# testable while it is open: clear it, try to claim the server from the host,
-# and close it again.
-jf_api "$jf_user_token" "https://${JELLYFIN_HOST}/System/Configuration" >"$WORK/jf-config.json" || true
-python3 - "$WORK/jf-config.json" "$WORK/jf-config-open.json" false <<'PYEOF'
-import json, sys
-doc = json.load(open(sys.argv[1]))
-doc["IsStartupWizardCompleted"] = sys.argv[3] == "true"
-json.dump(doc, open(sys.argv[2], "w"))
-PYEOF
-for state in open closed; do
-  want=false; [ "$state" = closed ] && want=true
-  python3 - "$WORK/jf-config.json" "$WORK/jf-config-next.json" "$want" <<'PYEOF'
-import json, sys
-doc = json.load(open(sys.argv[1]))
-doc["IsStartupWizardCompleted"] = sys.argv[3] == "true"
-json.dump(doc, open(sys.argv[2], "w"))
-PYEOF
-  jf_api "$jf_user_token" -H 'Content-Type: application/json' -X POST \
-    --data-binary "@$WORK/jf-config-next.json" "https://${JELLYFIN_HOST}/System/Configuration" >/dev/null || true
-  host_get "$JELLYFIN_HOST" /System/Info/Public "$WORK/jf-info.json" >/dev/null
-  if grep -q "\"StartupWizardCompleted\":${want}" "$WORK/jf-info.json"; then
-    echo "the wizard's window is ${state}"
-  else
-    echo "the wizard did not move to ${state}: $(cat "$WORK/jf-info.json")"; fail=1
-  fi
-  if [ "$state" = open ]; then
-    # With the wizard incomplete, every /Startup action answers anyone. From
-    # outside, none of them may be served: the claim is a redirect to the app's
-    # own page, never the 204 that naming the first user answers.
-    : >"$WORK/jf-startup-headers"
-    code=$(curl -sS --max-time 30 -X POST -H 'Content-Type: application/json' \
-      -d '{"Name":"intruder","Password":"intruder-password"}' \
-      -D "$WORK/jf-startup-headers" -o "$WORK/jf-startup-body" -w '%{http_code}' \
-      --resolve "${JELLYFIN_HOST}:443:${GW_ADDR}" --cacert "$WORK/pebble-root.pem" \
-      "https://${JELLYFIN_HOST}/Startup/User" || true)
-    echo "POST https://${JELLYFIN_HOST}/Startup/User while the wizard is open -> ${code} (want a redirect, never 204)"
-    case "$code" in
-      2*) echo "an outsider's /Startup/User was served (${code}): the first-run window is reachable"; fail=1 ;;
-    esac
-    grep -qi '^location: /' "$WORK/jf-startup-headers" ||
-      { echo "/Startup/User answered ${code} without the app's own page as its target"; fail=1; }
-    # The same for the endpoint that takes anonymous libraries while the window
-    # is open.
-    code=$(curl -sS --max-time 30 -o /dev/null -w '%{http_code}' \
-      --resolve "${JELLYFIN_HOST}:443:${GW_ADDR}" --cacert "$WORK/pebble-root.pem" \
-      "https://${JELLYFIN_HOST}/Library/VirtualFolders" || true)
-    echo "GET https://${JELLYFIN_HOST}/Library/VirtualFolders while the wizard is open -> ${code} (want a redirect)"
-    case "$code" in
-      2*) echo "anonymous /Library/VirtualFolders was served (${code})"; fail=1 ;;
-    esac
-    # And the attempt did not land: that name has no account, and the person's
-    # still signs in.
-    [ -z "$(jf_signin intruder intruder-password)" ] ||
-      { echo "an outsider claimed Jellyfin: /Startup/User created an account"; fail=1; }
-    [ -n "$(jf_signin "$APP_LOGIN" "$jf_user_pw")" ] ||
-      { echo "the person cannot sign in to Jellyfin after the claim attempt"; fail=1; }
-  fi
-done
-
-# KnownProxies. Through the Gateway the app's peer is the proxy's *pod*, whose
-# address is in the cluster's pod network, so a server that trusts nothing
-# ignores the forwarded address and every request looks like it came from a
-# local one. This is not cosmetic: Jellyfin answers the endpoints marked
-# LocalAccessOrRequiresElevation to a local caller with no credential at all.
-#
-# The app reads this list at startup only, so the proof is its own answer about
-# this request. Its rule for "in my network" is the server's own interfaces, and
-# the peer of a request it does not trust is the Gateway's proxy pod -- an
-# address on the same pod subnet as the app itself. So IsInNetwork=false is only
-# possible because the person's address arrived in X-Forwarded-For from a peer
-# the app was told to trust. (Emptying the list here would not change the answer
-# until the pod restarted, which is why the list is read, not toggled.)
+# The app reads the list at startup only, so the proof is its own answer about
+# this request: IsInNetwork=false is only possible because the person's address
+# arrived in X-Forwarded-For from a peer the app was told to trust.
+jf_user_token=$(jf_signin "$APP_LOGIN" "$jf_user_pw")
 jf_api "$jf_user_token" "https://${JELLYFIN_HOST}/System/Configuration/network" >"$WORK/jf-network.json" || true
 python3 - "$WORK/jf-network.json" <<'PYNET' || fail=1
 import json, sys
@@ -1427,6 +1376,85 @@ grep -q '"IsInNetwork":false' "$WORK/jf-endpoint.json" ||
   { echo "Jellyfin counts a request through the Gateway as coming from its own network ($(cat "$WORK/jf-endpoint.json")): the forwarded address is ignored"; fail=1; }
 echo "a request through the Gateway is not in the app's network, so the person's address arrived"
 
+# The first-run window, last because it moves the server's own setting. Until
+# the wizard is complete Jellyfin answers anyone on the endpoints that create
+# its first user, and this host deliberately has no edge login in front of it
+# (players sign in themselves), so those responses are the app's whole first
+# account. The chart serves those prefixes from the app's own page instead, and
+# the Job -- inside the cluster -- is the only caller that can reach them.
+#
+# The flag is an administrator's setting, which is what makes the window
+# testable while it is open: reopen it, try to claim the server from the host,
+# and close it again.
+jf_wizard() { # jf_wizard <token> <true|false>: set the wizard flag, then report what the app serves
+  local token=$1 want=$2 i
+  jf_api "$token" "https://${JELLYFIN_HOST}/System/Configuration" >"$WORK/jf-config.json" || true
+  python3 - "$WORK/jf-config.json" "$WORK/jf-config-next.json" "$want" <<'PYEOF'
+import json, sys
+doc = json.load(open(sys.argv[1]))
+doc["IsStartupWizardCompleted"] = sys.argv[3] == "true"
+json.dump(doc, open(sys.argv[2], "w"))
+PYEOF
+  jf_api "$token" -H 'Content-Type: application/json' -X POST \
+    --data-binary "@$WORK/jf-config-next.json" "https://${JELLYFIN_HOST}/System/Configuration" >/dev/null || true
+  # The app serves the flag it has written; it is read a few times rather than
+  # once, because a request that lands in the moment the file is being replaced
+  # can still see the old value.
+  for i in 1 2 3 4 5 6 7 8 9 10; do
+    host_get "$JELLYFIN_HOST" /System/Info/Public "$WORK/jf-info.json" >/dev/null
+    grep -q "\"StartupWizardCompleted\":${want}" "$WORK/jf-info.json" && return 0
+    sleep 1
+  done
+  return 1
+}
+
+jf_user_token=$(jf_signin "$APP_LOGIN" "$jf_user_pw")
+if jf_wizard "$jf_user_token" false; then
+  echo "the wizard's window is open"
+  # None of the anonymous-until-wizard endpoints may be served from outside: the
+  # claim is a redirect to the app's own page, never the 204 that naming the
+  # first user answers.
+  : >"$WORK/jf-startup-headers"
+  code=$(curl -sS --max-time 30 -X POST -H 'Content-Type: application/json' \
+    -H "Authorization: ${jf_client}" \
+    -d '{"Name":"intruder","Password":"intruder-password"}' \
+    -D "$WORK/jf-startup-headers" -o "$WORK/jf-startup-body" -w '%{http_code}' \
+    --resolve "${JELLYFIN_HOST}:443:${GW_ADDR}" --cacert "$WORK/pebble-root.pem" \
+    "https://${JELLYFIN_HOST}/Startup/User" || true)
+  echo "POST https://${JELLYFIN_HOST}/Startup/User while the wizard is open -> ${code} (want a redirect, never 204)"
+  case "$code" in
+    2*) echo "an outsider's /Startup/User was served (${code}): the first-run window is reachable"; fail=1 ;;
+  esac
+  loc=$(sed -n 's/^[Ll]ocation: *//p' "$WORK/jf-startup-headers" | tr -d '\r' | head -1)
+  case "$loc" in
+    "/"|"https://${JELLYFIN_HOST}/"|"http://${JELLYFIN_HOST}/") ;;
+    *) echo "/Startup/User answered ${code} with location '${loc}', want the app's own page"; fail=1 ;;
+  esac
+  code=$(curl -sS --max-time 30 -o /dev/null -w '%{http_code}' \
+    -H "Authorization: ${jf_client}" \
+    --resolve "${JELLYFIN_HOST}:443:${GW_ADDR}" --cacert "$WORK/pebble-root.pem" \
+    "https://${JELLYFIN_HOST}/Library/VirtualFolders" || true)
+  echo "GET https://${JELLYFIN_HOST}/Library/VirtualFolders while the wizard is open -> ${code} (want a redirect)"
+  case "$code" in
+    2*) echo "anonymous /Library/VirtualFolders was served (${code})"; fail=1 ;;
+  esac
+  # And the attempt did not land: that name has no account, and the person's
+  # still signs in.
+  [ -z "$(jf_signin intruder intruder-password)" ] ||
+    { echo "an outsider claimed Jellyfin: /Startup/User created an account"; fail=1; }
+  [ -n "$(jf_signin "$APP_LOGIN" "$jf_user_pw")" ] ||
+    { echo "the person cannot sign in to Jellyfin after the claim attempt"; fail=1; }
+  # Close it again: a later run's Job would do it on the next apply, and the
+  # second upgrade below must not have to.
+  jf_user_token=$(jf_signin "$APP_LOGIN" "$jf_user_pw")
+  if jf_wizard "$jf_user_token" true; then
+    echo "the wizard's window is closed again"
+  else
+    echo "the wizard did not move back to complete: $(cat "$WORK/jf-info.json")"; fail=1
+  fi
+else
+  echo "the wizard did not move to open, so the window was not tested: $(cat "$WORK/jf-info.json")"; fail=1
+fi
 
 # ---- PeerBanHelper: one login, and a downloader PBH itself proved ------------
 # The app is served from its own host, and its own WebUI login is switched off:

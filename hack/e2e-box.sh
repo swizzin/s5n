@@ -3102,11 +3102,19 @@ except Exception: print("")' || true
     curl -sS --max-time 30 --resolve "${JELLYFIN_HOST}:443:${gw_addr}" --cacert "$WORK/pebble-root.pem" \
       -H "Authorization: MediaBrowser Client=\"s5n\", Device=\"e2e\", DeviceId=\"e2e\", Version=\"1.0\", Token=\"${token}\"" "$@"
   }
-  jf_api "$jf_box_token" "https://${JELLYFIN_HOST}/Library/VirtualFolders" >"$WORK/jf-libs.json" || true
-  for dir in /data/media/movies /data/media/4K/Movies /data/media/tv; do
-    grep -q "\"${dir}\"" "$WORK/jf-libs.json" ||
-      { echo "Jellyfin has no library over ${dir}"; fail=1; }
+  # The libraries the Job created, from the receipt it published: one per Arr
+  # instance, over the directories the Arrs write. The live API is not asked
+  # through the host on purpose -- /Library/VirtualFolders is a prefix the chart
+  # never serves there (a fresh server answers it anonymously) -- and the
+  # receipt is the Job's own record of the same work. The kind e2e reads the API
+  # on the pod's port, where the box's key belongs.
+  for lib in sonarr radarr radarr-4k lidarr; do
+    grep -q "jellyfin/library/${lib} " "$WORK/bootstrap1.txt" ||
+      { echo "the receipt has no jellyfin/library/${lib} row: the Job built no library for it"; fail=1; }
   done
+  jf_api "$jf_box_token" "https://${JELLYFIN_HOST}/Auth/Keys" >"$WORK/jf-keys.json" || true
+  grep -q '"AppName":"s5n"' "$WORK/jf-keys.json" ||
+    { echo "the Job minted no API key named s5n"; fail=1; }
   # The window: this host has no edge login in front of it (players sign in
   # themselves), so the anonymous-until-wizard endpoints must never be served
   # from the Gateway at all.
