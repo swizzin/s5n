@@ -133,13 +133,12 @@ func TestPlanSteps(t *testing.T) {
 	}
 }
 
-// variants is a chart's variants.yaml with one digest per app.
+// variants is a variants.yaml with one digest per app.
 func variants(sonarrDigest string) []byte {
 	return variantsRepo(sonarrDigest, "registry.example.com/seedbox/sonarr")
 }
 
-// variantsRepo is the same file with sonarr published from another repository,
-// for the case where the chart moves an app and not just its digest.
+// variantsRepo moves sonarr's repository, not just its digest.
 func variantsRepo(sonarrDigest, sonarrRepo string) []byte {
 	return []byte(fmt.Sprintf(`qbittorrent:
   default:
@@ -163,9 +162,7 @@ radarr:
 `, sonarrRepo, sonarrDigest))
 }
 
-// variantsTagOnly is a chart whose sonarr has no digest to pin: the image a
-// release names when it was built here and never pushed, so its tag is the only
-// handle the hold can compare.
+// variantsTagOnly has no sonarr digest, so its tag is the only handle.
 func variantsTagOnly(sonarrTag string) []byte {
 	return []byte(fmt.Sprintf(`sonarr:
   default:
@@ -174,14 +171,12 @@ func variantsTagOnly(sonarrTag string) []byte {
 `, sonarrTag))
 }
 
-// variantsBoth digests is the fixture variants.yaml with sonarr and radarr
-// moving independently, for a step that moves two apps and copies only one.
+// variantsBoth moves sonarr and radarr independently.
 func variantsBoth(sonarrDigest, radarrDigest string) []byte {
 	return variantsMoving(sonarrDigest, radarrDigest, "7.0.0")
 }
 
-// variantsMoving is variantsBoth with radarr's tag named, so a test that prints
-// an image's label can tell the two sides apart.
+// variantsMoving names radarr's tag so labels differ.
 func variantsMoving(sonarrDigest, radarrDigest, radarrTag string) []byte {
 	return []byte(fmt.Sprintf(`qbittorrent:
   default:
@@ -201,9 +196,6 @@ radarr:
 `, sonarrDigest, radarrTag, radarrDigest))
 }
 
-// TestMovingApps: what a step stops and copies, and what the operator's own pin
-// holds in place. qbittorrent's image never moves and radarr is off, so the
-// only app either list can name is sonarr.
 func TestMovingApps(t *testing.T) {
 	const (
 		digestOld = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
@@ -285,8 +277,7 @@ func TestMovingApps(t *testing.T) {
 			values: on(defaultImage),
 		},
 		{
-			// The release still pins the image the rollback avoided, so the
-			// app stays where the rollback left it.
+			// The release still pins the avoided image, so the app stays.
 			name: "a rollback hold keeps the app until the release pins another",
 			from: old, to: next, values: on(defaultImage),
 			holds: []snapshot.Hold{{
@@ -298,8 +289,7 @@ func TestMovingApps(t *testing.T) {
 			heldBack: []string{"sonarr"},
 		},
 		{
-			// The release pins an image other than the one the rollback
-			// avoided, so the hold has lapsed and the app moves.
+			// The release pins another image, so the hold lapsed.
 			name: "a rollback hold lapses when the release pins another image",
 			from: old, to: next, values: on(defaultImage),
 			holds: []snapshot.Hold{{
@@ -315,7 +305,7 @@ func TestMovingApps(t *testing.T) {
 			}},
 		},
 		{
-			// A hand pin is the operator's decision; the hold stands aside.
+			// A hand pin wins; the hold stands aside.
 			name: "a values pin wins over a hold",
 			from: old, to: next,
 			values: on(map[string]any{"variant": "default", "digest": digestOld}),
@@ -328,8 +318,7 @@ func TestMovingApps(t *testing.T) {
 			held: []string{"sonarr"},
 		},
 		{
-			// A chart that pins no digest moves an app by its tag: Helm
-			// replaces the pod and the app may migrate, so the step copies it.
+			// A tag-only pin still replaces the pod, so the step copies.
 			name:   "a tag-only release that changes the tag moves the app",
 			from:   release.Chart{Version: "0.4.0", Variants: variantsTagOnly("5.0.0")},
 			to:     release.Chart{Version: "0.5.0", Variants: variantsTagOnly("5.0.1")},
@@ -341,16 +330,14 @@ func TestMovingApps(t *testing.T) {
 			}},
 		},
 		{
-			// The same tag on both sides: nothing moved, and the app is
-			// neither stopped nor copied.
+			// The same tag on both sides: nothing moved.
 			name:   "a tag-only release that keeps its tag moves nothing",
 			from:   release.Chart{Version: "0.4.0", Variants: variantsTagOnly("5.0.0")},
 			to:     release.Chart{Version: "0.5.0", Variants: variantsTagOnly("5.0.0")},
 			values: on(defaultImage),
 		},
 		{
-			// A hold taken against a tag-only image lapses on the next tag,
-			// and the app moves from the image the rollback left it on.
+			// A tag-only hold lapses on the next tag.
 			name:   "a hold on a tag-only image lapses when the release pins another tag",
 			from:   release.Chart{Version: "0.4.0", Variants: variantsTagOnly("5.0.0")},
 			to:     release.Chart{Version: "0.5.0", Variants: variantsTagOnly("5.0.1")},

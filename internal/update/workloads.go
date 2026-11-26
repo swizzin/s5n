@@ -17,22 +17,17 @@ import (
 )
 
 const (
-	// instanceLabel is the chart's release label (s5n.labels in _helpers.tpl):
-	// every object of one seedbox carries it.
+	// instanceLabel is the chart's release label (s5n.labels in _helpers.tpl).
 	instanceLabel = "app.kubernetes.io/instance"
-	// nameLabel is the chart's object name label. On a StatefulSet it is the
-	// instance (`sonarr`, `radarr-4k`), which is why update identifies the app
-	// from the pod template below rather than from this.
+	// nameLabel is the chart's object name label: the instance on a StatefulSet,
+	// which is why the app comes from the pod template instead.
 	nameLabel = "app.kubernetes.io/name"
-	// appLabel is the app key on the pod template (workloads.yaml). It is the
-	// same for every instance of one app, so one scale covers an Arr's HD and
-	// 4K instances together.
+	// appLabel is the app key on the pod template, the same for every instance.
 	appLabel = "s5n.io/app"
 )
 
-// Workloads is Cluster over client-go: the StatefulSets of one release in one
-// namespace. It is built after the grant names the namespace, which is why it
-// takes it rather than a kubeconfig alone.
+// Workloads is Cluster over client-go: one release's StatefulSets in a
+// namespace, named after the grant.
 type Workloads struct {
 	namespace string
 	release   string
@@ -61,10 +56,8 @@ func NewWorkloadsFor(namespace, releaseName string, cs kubernetes.Interface) *Wo
 	return &Workloads{namespace: namespace, release: releaseName, cs: cs}
 }
 
-// Scale sets one app's replicas through the scale subresource, on every
-// StatefulSet of the release whose pod template names that app. An app with no
-// StatefulSet here (the values just enabled it) is not an error: there is
-// nothing of it to stop, and the apply that follows creates it.
+// Scale sets one app's replicas on every StatefulSet whose pod template names
+// it. An app with none is not an error: the apply that follows creates it.
 func (w *Workloads) Scale(ctx context.Context, app string, replicas int32) error {
 	sets, err := w.statefulSets(ctx)
 	if err != nil {
@@ -86,9 +79,7 @@ func (w *Workloads) Scale(ctx context.Context, app string, replicas int32) error
 	return nil
 }
 
-// Gone reports whether no pod of the app is left. The pods carry the release
-// and app labels (the chart's s5n.labels plus s5n.io/app), so this is one list
-// per app, instances included.
+// Gone reports whether no pod of the app is left, instances included.
 func (w *Workloads) Gone(ctx context.Context, app string) (bool, error) {
 	selector := labels.SelectorFromSet(labels.Set{
 		instanceLabel: w.release,
@@ -101,31 +92,21 @@ func (w *Workloads) Gone(ctx context.Context, app string) (bool, error) {
 	return len(pods.Items) == 0, nil
 }
 
-// crashloopRestarts is how many times a moved app's container has to exit
-// since the step before box calls it a crashloop rather than an app that is
-// still starting: docs/box.md, "An app that crashloops on its new image is
-// rolled back by box" -- keeps exiting means the container has exited three
-// times since the step. Three leaves an app that restarts once or twice and
-// then serves its port alone, and still names a broken image long before the
-// startup budget, which the kubelet would spend restarting it.
+// crashloopRestarts is when a moved app counts as crashlooping rather than
+// starting (docs/box.md, "An app that crashloops on its new image is rolled back
+// by box"): three exits leaves one that restarts once or twice alone, and names
+// a broken image long before the startup budget would.
 const crashloopRestarts int32 = 3
 
-// Health is one reading of the release for the health gate: whether it is
-// ready, which of the apps a step moved keep exiting, and how often each of
-// their containers has restarted.
+// Health is one health-gate reading: whether the release is ready, and which
+// moved apps keep exiting.
 type Health struct {
-	// Ready is every StatefulSet of the release rolled out on its current
-	// generation with all its replicas ready and updated. It is the gate's
-	// pass, and the only thing it asks about the release as a whole.
+	// Ready is every StatefulSet rolled out with all replicas ready.
 	Ready bool
-	// Exiting is the moved apps that keep exiting, sorted by app. They are
-	// the ones box cannot wait out: waiting only adds restarts.
+	// Exiting is the moved apps that keep exiting; waiting only adds restarts.
 	Exiting []Exiting
-	// Restarts is the highest restart count of each moved app's container,
-	// across its pods and instances. An app with no pod yet is absent rather
-	// than zero. box reads it once after a failed apply, to tell an image
-	// Helm gave up on from a release that failed for some other reason: a
-	// moved app that restarted at all deserves the health gate's watch.
+	// Restarts is each moved app's highest restart count. box reads it once after
+	// a failed apply: an app that restarted at all deserves the health gate.
 	Restarts map[string]int32
 }
 
@@ -136,12 +117,9 @@ type Exiting struct {
 	Restarts int32
 }
 
-// Health reads the release once: whether every StatefulSet of it is ready, and
-// whether any of the apps this step moved is exiting rather than slow to start.
-//
-// Only the moved apps are asked to keep exiting. An app the step did not touch
-// kept its image, so its restarts are history and not this step's fault, and a
-// step that moved nothing lists no pods at all.
+// Health reads the release once: every StatefulSet ready, and any moved app
+// exiting rather than slow. Only moved apps are asked: an untouched app's
+// restarts are history, not this step's fault.
 func (w *Workloads) Health(ctx context.Context, moving []string) (Health, error) {
 	sets, err := w.statefulSets(ctx)
 	if err != nil {
@@ -159,8 +137,7 @@ func (w *Workloads) Health(ctx context.Context, moving []string) (Health, error)
 	for _, app := range moving {
 		moved[app] = true
 	}
-	// The highest count across the app's pods: one instance crashlooping is
-	// the app crashlooping, whatever its other instances are doing.
+	// One instance crashlooping is the app crashlooping.
 	restarts := make(map[string]int32, len(moving))
 	for i := range pods {
 		app := pods[i].Labels[appLabel]
@@ -181,10 +158,8 @@ func (w *Workloads) Health(ctx context.Context, moving []string) (Health, error)
 	return health, nil
 }
 
-// rolledOut is the gate's pass over the release's workloads: every StatefulSet
-// has rolled out its current generation with all its replicas ready. A release
-// with no StatefulSets at all is ready, because there is nothing that can be
-// unready.
+// rolledOut: every StatefulSet has rolled out its generation with all replicas
+// ready. No StatefulSets at all is ready.
 func rolledOut(sets []appsv1.StatefulSet) bool {
 	for i := range sets {
 		set := &sets[i]
@@ -199,8 +174,7 @@ func rolledOut(sets []appsv1.StatefulSet) bool {
 	return true
 }
 
-// replicasOf is how many replicas one StatefulSet asks for. A set with no
-// replicas field runs one, which is what the chart leaves when it does not say.
+// replicasOf is one StatefulSet's replicas, one when unset.
 func replicasOf(set *appsv1.StatefulSet) int32 {
 	if set.Spec.Replicas != nil {
 		return *set.Spec.Replicas
@@ -208,15 +182,9 @@ func replicasOf(set *appsv1.StatefulSet) int32 {
 	return 1
 }
 
-// Readiness reads every app of the release once, for the timer: whether all of
-// its pods are ready, and a short reason when one is not. It is the same app
-// key the plan and the rollback use, so a reading and a step name an app the
-// same way.
-//
-// This is the "is anything wrong now" question, not the health gate's "did this
-// step break it": nothing moved, so every app is asked about. An app the values
-// disabled has no StatefulSet and is not here at all; one box scaled to zero
-// while it copies has nothing that should be running, so it is ready.
+// Readiness reads every app for the timer: all pods ready, or a short reason.
+// This asks "is anything wrong now", not the gate's "did this step break it", so
+// every app is asked; an app scaled to zero has nothing to run and is ready.
 func (w *Workloads) Readiness(ctx context.Context) (map[string]AppHealth, error) {
 	sets, err := w.statefulSets(ctx)
 	if err != nil {
@@ -272,7 +240,7 @@ func (w *Workloads) Readiness(ctx context.Context) (map[string]AppHealth, error)
 	return out, nil
 }
 
-// podReady is a pod's Ready condition: the app has opened its port.
+// podReady is a pod's Ready condition.
 func podReady(pod *corev1.Pod) bool {
 	if pod.DeletionTimestamp != nil {
 		return false
@@ -285,12 +253,8 @@ func podReady(pod *corev1.Pod) bool {
 	return false
 }
 
-// appRestarts is how many times one pod's app container has exited. The chart
-// names that container after the app key (workloads.yaml), so that is the one
-// the count is read from; a pod whose container is named something else falls
-// back to its first, so a chart that renames it still gets a count rather than
-// silence. Init containers are the chart's own (the wiring and permission
-// steps) and are not the app, so their restarts are not counted.
+// appRestarts is one pod's app-container exits. Init containers are the chart's
+// and never the app, so their restarts do not count.
 func appRestarts(pod *corev1.Pod) int32 {
 	name := appContainer(pod, pod.Labels[appLabel])
 	for _, status := range pod.Status.ContainerStatuses {
@@ -301,9 +265,8 @@ func appRestarts(pod *corev1.Pod) int32 {
 	return 0
 }
 
-// appContainer is the pod's app container: the one the chart names after the
-// app key, or the first when the chart names it something else. Init containers
-// are the chart's own and are never the app.
+// appContainer is the container named for the app, else the first; init
+// containers are never the app.
 func appContainer(pod *corev1.Pod, app string) string {
 	if len(pod.Spec.Containers) == 0 {
 		return ""
@@ -316,28 +279,19 @@ func appContainer(pod *corev1.Pod, app string) string {
 	return pod.Spec.Containers[0].Name
 }
 
-// Running is one app as the cluster runs it: the image each instance's
-// StatefulSet asks for, and the digests the pods report for it.
-//
-// Both halves are needed because a values pin may be a tag alone. The chart
-// then names no digest, so the reference says which release of the app was
-// asked for and nothing about the bytes; the bytes are in the pods' imageID,
-// which is what the kubelet pulled.
+// Running is one app as the cluster runs it: each instance's asked-for image,
+// and the digests its pods report. Both are needed because a tag-only pin names
+// no bytes; the pods' imageID is what the kubelet pulled.
 type Running struct {
-	// Images is each instance's image as its StatefulSet asks for it, keyed
-	// by the StatefulSet's name. An instance scaled to zero keeps its
-	// StatefulSet, so it is still here.
+	// Images is each instance's image as its StatefulSet asks for it.
 	Images map[string]snapshot.ImageRef
-	// Digests is the digest each instance's pods report, sorted and without
-	// repeats. An instance with no pod, or whose container has not started,
-	// has no entry: the caller decides whether that is answerable.
+	// Digests is each instance's reported digests; an instance with no started
+	// pod has no entry, and the caller decides whether that is answerable.
 	Digests map[string][]string
 }
 
-// Running reads every app of the release: the image each of its StatefulSets
-// asks for and, from the pods, the digest that reference resolved to. It is how
-// an apply knows what it moves an app from: the values file and Helm's stored
-// values are what was asked for, never what runs.
+// Running reads each StatefulSet's asked-for image and its pods' digests: what
+// runs, never what values or Helm asked for.
 func (w *Workloads) Running(ctx context.Context) (map[string]Running, error) {
 	sets, err := w.statefulSets(ctx)
 	if err != nil {
@@ -364,9 +318,8 @@ func (w *Workloads) Running(ctx context.Context) (map[string]Running, error) {
 		return nil, err
 	}
 	for i := range pods {
-		// A pod of the wiring Job or of an init container carries the
-		// release label and no app key, and an app whose StatefulSet is gone
-		// is not one this release runs: neither has an image to report.
+		// The wiring Job and init pods carry no app key; a gone StatefulSet
+		// is not this release's app. Neither has an image to report.
 		app := pods[i].Labels[appLabel]
 		run, ok := out[app]
 		if !ok {
@@ -406,10 +359,8 @@ func containerImage(set *appsv1.StatefulSet, app string) string {
 	return containers[0].Image
 }
 
-// podDigest is the digest a pod reports for the app container: the part after
-// the `@` in containerStatuses[].imageID. Kubernetes spells it with the
-// repository in front (and, from older runtimes, a `docker-pullable://`
-// scheme), so only the tail is the digest.
+// podDigest is the part after `@` in imageID; the repository and an older
+// `docker-pullable://` scheme are in front of it.
 func podDigest(pod *corev1.Pod, app string) string {
 	name := appContainer(pod, app)
 	for _, status := range pod.Status.ContainerStatuses {
@@ -423,10 +374,8 @@ func podDigest(pod *corev1.Pod, app string) string {
 	return ""
 }
 
-// parseImage splits an image reference the way Kubernetes spells it --
-// [registry[:port]/]repository[:tag][@digest] -- into the three parts box
-// compares. The tag is the colon after the last slash, because the registry's
-// port is a colon before it.
+// parseImage splits [registry[:port]/]repository[:tag][@digest]. The tag is the
+// colon after the last slash, because the registry's port is before it.
 func parseImage(ref string) snapshot.ImageRef {
 	out := snapshot.ImageRef{}
 	if at := strings.Index(ref, "@"); at >= 0 {
@@ -441,9 +390,8 @@ func parseImage(ref string) snapshot.ImageRef {
 	return out
 }
 
-// sortedUnique is one instance's reported digests, sorted and without repeats:
-// box's plan names the pair in the same order on every run, and a pod that
-// restarted onto the same image reports one digest twice.
+// sortedUnique sorts and dedups an instance's digests: a restarted pod can
+// report the same one twice.
 func sortedUnique(in []string) []string {
 	sort.Strings(in)
 	out := make([]string, 0, len(in))
@@ -474,9 +422,7 @@ func (w *Workloads) pods(ctx context.Context) ([]corev1.Pod, error) {
 	return list.Items, nil
 }
 
-// appOf is the app key one StatefulSet belongs to. It is on the pod template;
-// a set without it falls back to its own name label, which is the app for the
-// default instance and only wrong for a second Arr instance.
+// appOf is the app key from the pod template; without it, the name label.
 func appOf(set *appsv1.StatefulSet) string {
 	if app := set.Spec.Template.Labels[appLabel]; app != "" {
 		return app

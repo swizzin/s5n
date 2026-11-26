@@ -12,8 +12,7 @@ import (
 	"github.com/swizzin/s5n/internal/snapshot"
 )
 
-// configRoot is a temp config root holding one app's two instances, with the
-// files the catalog says an upgrade rewrites.
+// configRoot holds one app's two instances.
 func configRoot(t *testing.T) string {
 	t.Helper()
 	root := t.TempDir()
@@ -38,7 +37,7 @@ func configRoot(t *testing.T) string {
 	return root
 }
 
-// twoInstances is the values of an app with its 4K instance enabled.
+// twoInstances enables an app's 4K instance.
 func twoInstances() map[string]any {
 	return map[string]any{"apps": map[string]any{"sonarr": map[string]any{
 		"enabled": true,
@@ -53,10 +52,6 @@ func sonarrGlobs(context.Context, string) (map[string][]string, error) {
 	return map[string][]string{"sonarr": {"sonarr.db", "sonarr.db-wal", "sonarr.db-shm", "config.xml"}}, nil
 }
 
-// TestConfigSnapshotsCopiesEveryInstance: one app's snapshot is every enabled
-// instance's files, in one step directory, with the images the step moved
-// between recorded in each manifest. Restore puts the content back and removes a
-// file the failed run added that the globs match.
 func TestConfigSnapshotsCopiesEveryInstance(t *testing.T) {
 	root := configRoot(t)
 	at := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
@@ -94,7 +89,7 @@ func TestConfigSnapshotsCopiesEveryInstance(t *testing.T) {
 			man.Image, man.MovedTo, images["sonarr"].Ran, images["sonarr"].MovedTo)
 	}
 
-	// The failed run migrated one instance and left a -wal behind.
+	// The failed run left a -wal behind.
 	for name, content := range map[string]string{
 		"sonarr/sonarr.db":     "migrated",
 		"sonarr/sonarr.db-wal": "wal",
@@ -124,9 +119,6 @@ func TestConfigSnapshotsCopiesEveryInstance(t *testing.T) {
 	}
 }
 
-// TestConfigSnapshotsRefusesAMissingInstance: an app is covered only when every
-// instance of it can be copied. A missing config directory is refused before
-// anything stops, because the restore could not put that instance back.
 func TestConfigSnapshotsRefusesAMissingInstance(t *testing.T) {
 	root := configRoot(t)
 	if err := os.RemoveAll(filepath.Join(root, "sonarr-4k")); err != nil {
@@ -142,8 +134,6 @@ func TestConfigSnapshotsRefusesAMissingInstance(t *testing.T) {
 	}
 }
 
-// TestConfigSnapshotsKeepsTwoPerInstance: pruning is per config directory, so a
-// box that has updated three times keeps the two newest copies of each instance.
 func TestConfigSnapshotsKeepsTwoPerInstance(t *testing.T) {
 	root := configRoot(t)
 	at := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
@@ -178,9 +168,6 @@ func TestConfigSnapshotsKeepsTwoPerInstance(t *testing.T) {
 	}
 }
 
-// TestConfigSnapshotsRestoresOnlyTheStepItTook: a restore of a step this run
-// never copied refuses rather than reading the newest snapshot, which holds
-// state the app has already written past.
 func TestConfigSnapshotsRestoresOnlyTheStepItTook(t *testing.T) {
 	root := configRoot(t)
 	s := &ConfigSnapshots{ConfigRoot: root, Values: twoInstances(), Globs: sonarrGlobs}

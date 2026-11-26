@@ -18,55 +18,38 @@ import (
 	"github.com/swizzin/s5n/internal/snapshot"
 )
 
-// Rollback is `box rollback <app>`: the hand-run version of the step-back update
-// does by itself.
-//
-// A step rolls an app back when its new image keeps exiting, which is the one
-// failure the health gate can see. A fault no gate sees -- an app that starts,
-// serves and then mangles its own database -- is the operator's call, and this
-// is the command for it. It restores the app's newest snapshot and then either
-// leaves the hold a step-back would leave, which lapses when a release pins
-// another image, or pins the image in the values file, which stays until the
-// operator removes it.
-//
-// It is one app and one copy. The rest of the release stays where it is, and
-// the release itself is never moved: the app runs its old image under the chart
-// that is installed (docs/box.md, "Snapshot and rollback").
+// Rollback is `box rollback <app>`: the hand-run step back for a fault no gate
+// sees. It restores the app's newest snapshot, then leaves a hold that lapses
+// when a release pins another image, or a values pin that stays until removed.
+// It moves one app, never the release (docs/box.md, "Snapshot and rollback").
 type Rollback struct {
-	// Charts is the chart repository. A rollback reads only the release that
-	// is installed -- it neither lists releases nor picks one.
+	// Charts reads the installed release; it never lists or picks one.
 	Charts release.ChartSource
 	// Open returns the release handle for the grant's namespace.
 	Open func(namespace string) (Release, error)
-	// OpenCluster returns the release's StatefulSets. The namespace comes from
-	// the grant, so it can only be opened after the files are read.
+	// OpenCluster returns the release's StatefulSets, after the grant is read.
 	OpenCluster func(namespace string) (Cluster, error)
-	// OpenSnapshots returns the newest-copy store for the grant's config root,
-	// with the effective values this run planned with (the instance names come
-	// from them). nil is a box that cannot roll anything back.
+	// OpenSnapshots returns the newest-copy store for the config root; nil means
+	// this box cannot roll anything back.
 	OpenSnapshots func(configRoot string, values map[string]any) (Snapshots, error)
 	// Apply runs the one apply the rollback ends in.
 	Apply ApplyFunc
-	// Holds is the record of apps a rollback holds at an older image. The
-	// default rollback writes one; nil is a box that keeps none, which only
-	// the --pin path can finish.
+	// Holds is the record of apps held at an older image; nil means only the
+	// --pin path can finish.
 	Holds HoldStore
 	// Confirm asks the one question, before anything is stopped.
 	Confirm release.Confirmer
 	// Say is every line the rollback writes.
 	Say say.Reporter
 
-	// HealthWait bounds the wait for the release to be healthy after the
-	// apply. Zero means thirty-five minutes, as a step's gate does: the app
-	// that comes back has the chart's thirty minutes to open its port.
+	// HealthWait bounds the health gate after the apply; zero is thirty-five
+	// minutes, the chart's thirty plus room to settle.
 	HealthWait time.Duration
 	// SettleWait bounds the wait for the scaled-down app's pods to go. Zero
 	// means five minutes.
 	SettleWait time.Duration
-	// CleanupWait bounds what a failure does after it: starting the app again
-	// when nothing was restored, and reading where Helm left the release. It
-	// runs after the context that would have cancelled it is gone. Zero means
-	// five minutes.
+	// CleanupWait bounds a failure's cleanup -- starting the app again, reading
+	// where Helm left the release -- after the run's context is gone.
 	CleanupWait time.Duration
 	// Poll is how often the waits re-read state. Zero means two seconds.
 	Poll time.Duration
@@ -76,16 +59,12 @@ type Rollback struct {
 
 // RollbackOptions are one `box rollback`.
 type RollbackOptions struct {
-	// App is the app key the operator named: the update app, not one instance
-	// of it.
+	// App is the app key, not one instance of it.
 	App string
-	// Apply is the apply the rollback ends in, as apply's own options. Its
-	// ChartVersion is overwritten with the installed release: a rollback never
-	// chooses a release.
+	// Apply is the apply the rollback ends in; its ChartVersion is overwritten
+	// with the installed release.
 	Apply release.Options
-	// Pin writes the image into the values file instead of the hold, so it
-	// holds until the operator removes it rather than until a release pins
-	// another image.
+	// Pin writes the image into the values file, where it stays until removed.
 	Pin bool
 }
 
@@ -94,29 +73,23 @@ type RollbackResult struct {
 	// App is the app key, Namespace the seedbox's from the grant.
 	App       string
 	Namespace string
-	// Installed is the chart release Helm reports deployed, which the
-	// rollback re-applies: it never moves the release.
+	// Installed is the release Helm reports deployed, which is re-applied.
 	Installed string
-	// Image is the image the newest snapshot says the app ran, and Avoided
-	// the image the step moved it to -- what the hold compares a release
-	// against.
+	// Image is what the newest snapshot says the app ran; Avoided is what the
+	// step moved it to, which the hold compares a release against.
 	Image   snapshot.ImageRef
 	Avoided snapshot.ImageRef
-	// Step is the step directory the snapshot came from, with the two chart
-	// versions its name records and when the copy was taken.
+	// Step is the step directory, with the versions its name records.
 	Step     string
 	From, To string
 	Taken    time.Time
-	// Dirs is each instance's copy, for box's sentence when a rollback fails:
-	// the operator needs to know where to look.
+	// Dirs is each instance's copy, named when a rollback fails.
 	Dirs []string
 	// Pinned says this run wrote the pin into the values file instead of a
 	// hold.
 	Pinned bool
 
-	// snaps, snap and globs are what the restore half needs and no caller
-	// reads: the store the copy was found in, the copy itself, and the files
-	// the installed release's catalog names under the app's config directory.
+	// The restore half: the store, the copy, and the installed catalog's globs.
 	snaps  Snapshots
 	snap   AppSnapshot
 	globs  []string
@@ -125,19 +98,14 @@ type RollbackResult struct {
 	values string
 }
 
-// Snapshots is the copy a hand rollback reads: the newest snapshot of each of an
-// app's instances, and putting it back. NewestSnapshots implements it over
-// internal/snapshot; the interface is what lets a test put the restore in the
-// same ordered log as the stop, the wait and the apply.
+// Snapshots is the copy a hand rollback reads and puts back; NewestSnapshots
+// implements it.
 type Snapshots interface {
-	// Newest reads the newest snapshot of every instance the values enable. An
-	// instance no step copied comes back with an empty Dir; a store that cannot
-	// read one at all is an error.
+	// Newest reads every enabled instance's newest snapshot; an uncopied one
+	// has an empty Dir.
 	Newest(ctx context.Context, app string) (AppSnapshot, error)
-	// Restore puts each of the app's instances back to the copy its step took.
-	// globs is what the installed release's catalog names under the app's
-	// config directory: Restore removes the files they match that the snapshot
-	// does not hold.
+	// Restore puts the instances back; globs are what the snapshot's files are
+	// matched against, and unmatched matches are removed.
 	Restore(ctx context.Context, snap AppSnapshot, globs []string) error
 }
 
@@ -149,18 +117,15 @@ type AppSnapshot struct {
 	Instances []InstanceSnapshot
 }
 
-// InstanceSnapshot is one instance's newest copy. Dir is empty when that
-// instance has no snapshot at all, which is a refusal the caller names by app
-// rather than a copy it restores.
+// InstanceSnapshot is one instance's newest copy; an empty Dir is a refusal
+// the caller names by app.
 type InstanceSnapshot struct {
-	// Name is the config directory's name, which is the instance name
-	// (sonarr, sonarr-4k).
+	// Name is the config directory's name, the instance name.
 	Name string
 	// Dir is the snapshot directory, and Step the step directory holding it.
 	Dir  string
 	Step string
-	// Manifest is the copy's manifest: the files it holds and the images the
-	// app ran and moved to.
+	// Manifest is the files the copy holds and the images it ran and moved to.
 	Manifest snapshot.Manifest
 }
 
@@ -181,15 +146,12 @@ func (r *Rollback) cleanupWait() time.Duration { return orDuration(r.CleanupWait
 
 func (r *Rollback) poll() time.Duration { return orDuration(r.Poll, 2*time.Second) }
 
-// Run reads what the rollback would do, says it, asks once, and then stops the
-// app, restores the copy, writes the hold or the pin, and re-applies the
-// release that is installed.
+// Run reads what the rollback would do, asks once, then stops the app, restores
+// the copy, writes the hold or pin, and re-applies the installed release.
 //
-// The order is the one thing that makes it safe. The app is stopped before
-// anything is written, so the restore never runs against a writer and a pod
-// that came back mid-restore cannot read half a database. The hold (or pin) is
-// written before the apply, because that is what makes the chart render the
-// image the snapshot recorded. Nothing is put back after the apply.
+// The order is what makes it safe: stopping before the restore means no writer
+// and no pod can see half a database; writing the hold before the apply is what
+// makes the chart render the snapshot's image.
 func (r *Rollback) Run(ctx context.Context, opts RollbackOptions) (RollbackResult, error) {
 	res, err := r.plan(ctx, opts)
 	if err != nil {
@@ -204,8 +166,7 @@ func (r *Rollback) Run(ctx context.Context, opts RollbackOptions) (RollbackResul
 	if r.OpenCluster == nil {
 		return res, errors.New("rollback needs a workload client: it stops the app first")
 	}
-	// Before the question, because the answer loses data: everything the app
-	// wrote since the copy is what a restore drops.
+	// Before the question: the answer loses everything written since the copy.
 	r.report().Warn(fmt.Sprintf("%s's newest snapshot is %s old (taken %s, before %s -> %s). Rolling back puts %s back on %s and loses everything %s wrote since.",
 		res.App, ageText(r.now().Sub(res.Taken)), res.Taken.UTC().Format("2006-01-02 15:04 UTC"),
 		res.From, res.To, res.App, res.Image.Label(), res.App))
@@ -227,9 +188,8 @@ func (r *Rollback) Run(ctx context.Context, opts RollbackOptions) (RollbackResul
 	}
 	handle := r.report().Start(say.Op{Label: fmt.Sprintf("rolling %s back to %s", res.App, res.Image.Label())})
 
-	// A failure down to the restore is this run's own doing: it stopped an app
-	// nothing has been written for yet, so it starts it again rather than
-	// leaving a seedbox with the app down.
+	// Nothing was written yet, so start the app again rather than leaving it
+	// down.
 	if err := scaleApps(ctx, cluster, []string{res.App}, 0); err != nil {
 		r.startAgain(ctx, cluster, res.App)
 		err = fmt.Errorf("stopping %s: %w", res.App, err)
@@ -253,8 +213,7 @@ func (r *Rollback) Run(ctx context.Context, opts RollbackOptions) (RollbackResul
 			handle.Failed(err)
 			return res, r.fail(ctx, rel, res, true, err)
 		}
-		// The values file is the stronger claim, so the hold goes: leaving it
-		// would be the same answer written twice, and a hold that lapses would
+		// The pin is the stronger claim, so drop the hold: one that lapses would
 		// read as a pin that did not.
 		if err := r.dropHold(res.root, res.App); err != nil {
 			err = fmt.Errorf("removing %s's hold: %w", res.App, err)
@@ -268,9 +227,8 @@ func (r *Rollback) Run(ctx context.Context, opts RollbackOptions) (RollbackResul
 	}
 
 	applyOpts := opts.Apply
-	// The release that is installed, with the operator's files untouched.
-	// Chart is nil so this apply pulls by version exactly as a bare apply
-	// would, and the hold or the pin is what makes it render the old image.
+	// Chart is nil so this pulls by version as a bare apply would; the hold or
+	// pin makes it render the old image.
 	applyOpts.Chart = nil
 	applyOpts.ChartVersion = res.Installed
 	if _, err := r.Apply(ctx, applyOpts); err != nil {
@@ -278,9 +236,8 @@ func (r *Rollback) Run(ctx context.Context, opts RollbackOptions) (RollbackResul
 		handle.Failed(err)
 		return res, r.fail(ctx, rel, res, false, err)
 	}
-	// The gate, and nothing behind it: this is the app the operator put back by
-	// hand, so an old image that does not come up either is where box stops
-	// rather than a second rollback.
+	// The gate, and nothing behind it: an old image that does not come up is
+	// where box stops, not a second rollback.
 	outcome, err := waitHealthy(ctx, rel, cluster, []string{res.App}, r.healthWait(), r.poll())
 	var cause error
 	switch {
@@ -300,10 +257,7 @@ func (r *Rollback) Run(ctx context.Context, opts RollbackOptions) (RollbackResul
 	return res, nil
 }
 
-// plan is every read a rollback makes, and every refusal: the files, the
-// deployed release, its chart, the newest copy and what the release renders
-// today. Nothing is stopped and nothing is written, so a refusal leaves the box
-// exactly as it was.
+// plan is every read and refusal, before anything is stopped or written.
 func (r *Rollback) plan(ctx context.Context, opts RollbackOptions) (RollbackResult, error) {
 	res := RollbackResult{App: opts.App}
 	if r.Charts == nil {
@@ -312,9 +266,7 @@ func (r *Rollback) plan(ctx context.Context, opts RollbackOptions) (RollbackResu
 	if err := checkAppName(opts.App); err != nil {
 		return res, err
 	}
-	// The files first: a grant that does not load, or a values file the chart
-	// refuses, is the operator's problem and is not worth a registry round
-	// trip.
+	// Files first: a bad grant is not worth a registry round trip.
 	sb, err := seedbox.Load(opts.Apply.GrantPath, opts.Apply.ValuesPath)
 	if err != nil {
 		return res, err
@@ -394,33 +346,25 @@ func (r *Rollback) plan(ctx context.Context, opts RollbackOptions) (RollbackResu
 		}
 	}
 
-	// Nothing to do is worth saying before the app goes down: the release
-	// already renders the image the snapshot would put back.
+	// Say nothing to do before the app goes down.
 	if rendered, ok := renderedImage(chart, values, holds, opts.App); ok && sameImage(rendered, res.Image) {
 		return res, fmt.Errorf("%s already runs %s", opts.App, res.Image.Label())
 	}
-	// A hand pin is the operator's decision about this app, so only --pin
-	// replaces it: silently writing over one would undo a choice nobody asked
-	// box to revisit.
+	// Only --pin replaces a hand pin: overwriting one would undo the operator's
+	// choice.
 	if tag, digest := pinOf(values, opts.App); !opts.Pin && (tag != "" || digest != "") {
 		return res, fmt.Errorf("%s is pinned in your values (%s); remove the pin, or pass --pin to replace it",
 			opts.App, pinLabel(values, opts.App))
 	}
-	// The copy is restored with the globs it was taken with, not with what the
-	// installed release's catalog names now: a restore removes every match the
-	// copy lacks, so a glob added since would delete files it never held.
+	// Restore with the copy's own globs: a glob added since would delete files
+	// the copy never held.
 	res.snaps, res.snap, res.globs = snaps, found, latest.Manifest.Globs
 	return res, nil
 }
 
-// newestOf is the one copy a rollback uses: the step every enabled instance has
-// a copy in.
-//
-// It refuses rather than choosing. A step that holds only some of an app's
-// instances would restore one database over another instance's schema, and
-// instances whose newest copies come from different steps have no single step
-// box can put back -- an older step that happens to hold them all is state the
-// app has already written past.
+// newestOf is the one step every enabled instance has a copy in. It refuses
+// rather than choosing: a partial step would restore one database over another
+// instance's schema, and different steps have no single copy to put back.
 func newestOf(app string, found AppSnapshot) (InstanceSnapshot, error) {
 	var have []InstanceSnapshot
 	var missing []string
@@ -453,8 +397,7 @@ func newestOf(app string, found AppSnapshot) (InstanceSnapshot, error) {
 	return first, nil
 }
 
-// stepsText names which step each instance's newest copy came from, in
-// instance order: the one fact that makes "different steps" actionable.
+// stepsText names each instance's step, which makes "different steps" actionable.
 func stepsText(instances []InstanceSnapshot) string {
 	parts := make([]string, 0, len(instances))
 	for _, inst := range instances {
@@ -463,9 +406,7 @@ func stepsText(instances []InstanceSnapshot) string {
 	return strings.Join(parts, ", ")
 }
 
-// hold writes the hold a step-back would write: the app stays on the image the
-// snapshot recorded until a release pins another, and the release the rollback
-// applies is what renders it.
+// hold keeps the app on the snapshot's image until a release pins another.
 func (r *Rollback) hold(root string, res RollbackResult) error {
 	if r.Holds == nil {
 		return errors.New("this box keeps no holds, so the app could not stay on its old image; pass --pin to write the image into your values instead")
@@ -502,10 +443,8 @@ func (r *Rollback) dropHold(root, app string) error {
 	return r.Holds.Save(root, kept)
 }
 
-// pin writes the image into the values file as an ordinary hand pin: the digest
-// the release pins, and the tag it was published under, in the one write that
-// keeps the reference whole. A pin is an override on whatever release is
-// installed, so the release keeps updating around it.
+// pin writes the image into the values file as a hand pin, keeping the
+// reference whole; the release keeps updating around it.
 func (r *Rollback) pin(grantPath, valuesPath, app string, image snapshot.ImageRef) error {
 	sb, err := seedbox.Load(grantPath, valuesPath)
 	if err != nil {
@@ -519,8 +458,7 @@ func (r *Rollback) pin(grantPath, valuesPath, app string, image snapshot.ImageRe
 		edits = append(edits, seedbox.Edit{Path: "apps." + app + ".image.tag", Value: image.Tag})
 	}
 	if len(edits) == 0 {
-		// A snapshot records an image or it is refused, so this is a
-		// reference no manifest box accepted could carry.
+		// A snapshot records an image or it is refused; this cannot happen.
 		return fmt.Errorf("%s: the snapshot's image names neither a tag nor a digest", image.String())
 	}
 	return sb.SetValues(edits)
@@ -532,18 +470,15 @@ func (r *Rollback) startAgain(ctx context.Context, cluster Cluster, app string) 
 	startApps(ctx, cluster, []string{app}, r.cleanupWait())
 }
 
-// fail ends a rollback that did not finish. It says what the app is on now --
-// Helm's own answer, read after the failure -- and where the snapshot is, which
-// is what the operator needs to finish the job by hand. Nothing is retried: a
-// second restore over a half-restored config is worse than the failure it would
-// be undoing.
+// fail ends a rollback that did not finish, saying what the app is on now and
+// where the snapshot is. Nothing is retried: a second restore over a
+// half-restored config is worse.
 func (r *Rollback) fail(ctx context.Context, rel Release, res RollbackResult, stopped bool, cause error) error {
 	cctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), r.cleanupWait())
 	defer cancel()
 	msg := fmt.Sprintf("rolling %s back to %s: %v", res.App, res.Image.Label(), cause)
 	if stopped {
-		// The app was scaled to zero for the restore and this run never got as
-		// far as the apply that starts it again.
+		// Scaled to zero for the restore, and the apply never started it.
 		msg += fmt.Sprintf("; %s is stopped", res.App)
 	} else {
 		state, stateErr := rel.State(cctx)
@@ -570,14 +505,10 @@ func doneLine(res RollbackResult) string {
 		res.App, res.Image.Label(), res.Avoided.Label())
 }
 
-// ageText is how old a snapshot is, in the one unit the operator reads it in:
-// minutes under an hour, hours under a day, days after that, always rounded
-// down because "2 days" for a copy taken yesterday evening is the honest
-// answer.
+// ageText is a snapshot's age in one unit, rounded down.
 func ageText(d time.Duration) string {
 	if d < 0 {
-		// A copy stamped in the future is a clock that moved, not a younger
-		// snapshot; saying "0 minutes" is the only answer that is not a lie.
+		// A future stamp is a moved clock; "0 minutes" is the honest answer.
 		d = 0
 	}
 	switch {
@@ -590,12 +521,8 @@ func ageText(d time.Duration) string {
 	}
 }
 
-// stepVersions reads the two chart releases a step directory's name records:
-// <from>-<to>-<timestamp>.
-//
-// A version can carry a hyphen of its own (0.5.0-rc1), so the split is the first
-// one whose halves both parse as versions -- the leftmost, because a version
-// starts with digits and the prerelease tail of the left half cannot.
+// stepVersions splits <from>-<to>-<timestamp>. A version can carry a hyphen
+// (0.5.0-rc1), so the split is the first whose halves both parse as versions.
 func stepVersions(step string) (from, to string, ok bool) {
 	end := strings.LastIndex(step, "-")
 	if end < 0 {
@@ -619,16 +546,11 @@ func isVersion(s string) bool {
 	return err == nil
 }
 
-// renderedImage is the image the installed release renders for one app today:
-// the variant the values select, resolved the way
-// charts/s5n/templates/_helpers.tpl resolves it -- a pinned digest replaces the
-// variant's, a pinned tag replaces its tag and drops its digest -- and then the
-// hold overlay, which only applies where the values pin nothing (the precedence
-// HoldValues uses).
-//
-// A chart with no variants, or one without this app's variant, says nothing:
-// box then cannot tell whether the app already runs the image, and the rollback
-// goes ahead rather than refusing on a guess.
+// renderedImage is what the installed chart renders for one app, resolved as
+// charts/s5n/templates/_helpers.tpl does: a pinned digest replaces the
+// variant's, a pinned tag drops the digest, then the hold overlay where nothing
+// is pinned. A missing chart or variant says nothing, so the rollback goes ahead
+// rather than refusing on a guess.
 func renderedImage(chart release.Chart, values map[string]any, holds []snapshot.Hold, app string) (snapshot.ImageRef, bool) {
 	if len(chart.Variants) == 0 {
 		return snapshot.ImageRef{}, false
@@ -645,9 +567,7 @@ func renderedImage(chart release.Chart, values map[string]any, holds []snapshot.
 	tag, digest := pinOf(values, app)
 	switch {
 	case digest != "":
-		// The digest replaces the variant's, and a pinned tag replaces its
-		// tag too: a pin box wrote (a rollback's, a hold's) names both, and
-		// the chart renders both (charts/s5n/templates/_helpers.tpl).
+		// A pin box wrote names both; the chart renders both.
 		ref.Digest = digest
 		if tag != "" {
 			ref.Tag = tag
@@ -662,10 +582,8 @@ func renderedImage(chart release.Chart, values map[string]any, holds []snapshot.
 	return ref, true
 }
 
-// sameImage reports whether two references name the same image: the repository
-// must match, and the digest when either side names one, because the chart pins
-// digest and a re-pushed tag is new bytes. Without a digest on either side the
-// tag is what names the image.
+// sameImage: the repository must match, then the digest when either side names
+// one (a re-pushed tag is new bytes), else the tag.
 func sameImage(a, b snapshot.ImageRef) bool {
 	if a.Repository != b.Repository {
 		return false
@@ -676,10 +594,8 @@ func sameImage(a, b snapshot.ImageRef) bool {
 	return a.Tag == b.Tag
 }
 
-// checkEnabledApp refuses a name that is not an app this seedbox runs. An
-// instance name (sonarr-4k) is the likely slip: every instance of an app runs the
-// one image the app pins, so a rollback is per app and puts all of them back
-// together, and the refusal says which app to name.
+// checkEnabledApp refuses an app this seedbox does not run; an instance name is
+// the likely slip, so the refusal names the app that holds it.
 func checkEnabledApp(root string, values map[string]any, app string) error {
 	enabled := release.EnabledApps(values)
 	for _, name := range enabled {
@@ -697,9 +613,8 @@ func checkEnabledApp(root string, values map[string]any, app string) error {
 	return fmt.Errorf("%s is not an app this seedbox runs: box rollback takes an app from your values (%s)", app, strings.Join(enabled, ", "))
 }
 
-// checkAppName refuses an app that is not one path element. The app key names a
-// config directory under the grant's root, which is a write a restore performs,
-// so a name with a separator (or a "..") would point that write somewhere else.
+// checkAppName refuses an app that is not one path element: the key names a
+// config directory a restore writes, so a separator or ".." would escape it.
 func checkAppName(app string) error {
 	switch {
 	case app == "":

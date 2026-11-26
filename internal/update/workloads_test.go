@@ -17,8 +17,7 @@ import (
 	"github.com/swizzin/s5n/internal/snapshot"
 )
 
-// statefulSet is one app workload with the labels the chart writes: the
-// release and instance on the object, the app key on the pod template.
+// statefulSet has the chart's labels: release and instance, app on the template.
 func statefulSet(name, app string, generation, observed int64, ready, updated int32) *appsv1.StatefulSet {
 	one := int32(1)
 	return &appsv1.StatefulSet{
@@ -50,9 +49,6 @@ func statefulSet(name, app string, generation, observed int64, ready, updated in
 	}
 }
 
-// TestScaleCoversEveryInstanceOfOneApp: an App's second instance is another
-// StatefulSet with the same app key. Scaling the app stops both, and leaves
-// every other app alone.
 func TestScaleCoversEveryInstanceOfOneApp(t *testing.T) {
 	cs := k8sfake.NewClientset(
 		statefulSet("sonarr", "sonarr", 1, 1, 1, 1),
@@ -60,9 +56,7 @@ func TestScaleCoversEveryInstanceOfOneApp(t *testing.T) {
 		statefulSet("radarr", "radarr", 1, 1, 1, 1),
 	)
 	var scaled []string
-	// The fake client does not understand the scale subresource, so the two
-	// verbs are served from the StatefulSet itself: this is what the real API
-	// server does with them.
+	// The fake client serves scale from the StatefulSet, as the API server does.
 	cs.PrependReactor("get", "statefulsets", func(action k8stesting.Action) (bool, runtime.Object, error) {
 		if action.GetSubresource() != "scale" {
 			return false, nil, nil
@@ -100,8 +94,7 @@ func TestScaleCoversEveryInstanceOfOneApp(t *testing.T) {
 		t.Fatalf("scaled = %v, want %v through the scale subresource", scaled, want)
 	}
 
-	// An app with no StatefulSet in the release (the values just enabled it)
-	// is nothing to stop, not an error.
+	// An app with no StatefulSet is nothing to stop.
 	if err := w.Scale(context.Background(), "plex", 0); err != nil {
 		t.Fatalf("Scale of an app with no workload: %v", err)
 	}
@@ -132,18 +125,13 @@ func TestGoneWaitsForEveryPod(t *testing.T) {
 	}
 }
 
-// containerRestarts is one container of a test pod and how many times it has
-// exited since the step. The first one named is the pod's first container,
-// which is what the fallback reads.
+// containerRestarts is one container and its exits since the step.
 type containerRestarts struct {
 	name     string
 	restarts int32
 }
 
-// appPod is one pod of an app as the chart's workload leaves it: the release
-// and app labels, a container per name, and the statuses the kubelet reports
-// for them. The app's own container is named after the app key, as
-// workloads.yaml names it.
+// appPod is one pod with the chart's labels and a container per name.
 func appPod(name, app string, containers ...containerRestarts) *corev1.Pod {
 	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
 		Name:      name,
@@ -160,9 +148,6 @@ func appPod(name, app string, containers ...containerRestarts) *corev1.Pod {
 	return pod
 }
 
-// TestHealthIsPerGenerationAndReady: Ready is the gate's pass, and it is the
-// rule the gate always had -- every StatefulSet on its current generation with
-// all its replicas ready and updated.
 func TestHealthIsPerGenerationAndReady(t *testing.T) {
 	cases := []struct {
 		name string
@@ -197,9 +182,6 @@ func TestHealthIsPerGenerationAndReady(t *testing.T) {
 	}
 }
 
-// TestHealthListsOnlyAnAppThatKeepsExiting: the third exit since the step is
-// what makes it a crashloop; a first or second one is an app that restarted
-// and then served its port.
 func TestHealthListsOnlyAnAppThatKeepsExiting(t *testing.T) {
 	cases := []struct {
 		name     string
@@ -221,10 +203,8 @@ func TestHealthListsOnlyAnAppThatKeepsExiting(t *testing.T) {
 			if !reflect.DeepEqual(got.Exiting, tc.want) {
 				t.Fatalf("Exiting = %+v, want %+v", got.Exiting, tc.want)
 			}
-			// The count itself is what a failed apply is re-read for: one exit
-			// is the difference between "the image is broken" and "something
-			// else failed", so Health reports it whatever the crashloop
-			// threshold does.
+			// One exit distinguishes a broken image from another failure, so the
+			// count is reported whatever the crashloop threshold.
 			if got.Restarts["sonarr"] != tc.restarts {
 				t.Fatalf("Restarts = %+v, want sonarr at %d", got.Restarts, tc.restarts)
 			}
@@ -232,8 +212,6 @@ func TestHealthListsOnlyAnAppThatKeepsExiting(t *testing.T) {
 	}
 }
 
-// TestHealthIgnoresAnAppTheStepDidNotMove: an app that kept its image cannot
-// be this step's fault, whatever its restarts say.
 func TestHealthIgnoresAnAppTheStepDidNotMove(t *testing.T) {
 	cs := k8sfake.NewClientset(
 		appPod("sonarr-0", "sonarr", containerRestarts{"sonarr", 0}),
@@ -248,9 +226,6 @@ func TestHealthIgnoresAnAppTheStepDidNotMove(t *testing.T) {
 	}
 }
 
-// TestHealthCountsAnAppOnceAcrossItsInstances: an Arr's second instance is
-// another pod of the same app, and the count reported is the highest, because
-// one instance crashlooping is the app crashlooping.
 func TestHealthCountsAnAppOnceAcrossItsInstances(t *testing.T) {
 	cs := k8sfake.NewClientset(
 		appPod("sonarr-0", "sonarr", containerRestarts{"sonarr", 4}),
@@ -266,9 +241,6 @@ func TestHealthCountsAnAppOnceAcrossItsInstances(t *testing.T) {
 	}
 }
 
-// TestHealthIgnoresInitContainers: the chart's init containers are its own
-// wiring and permission steps, not the app. A restart there says nothing about
-// the image the step moved to.
 func TestHealthIgnoresInitContainers(t *testing.T) {
 	pod := appPod("sonarr-0", "sonarr", containerRestarts{"sonarr", 0})
 	pod.Spec.InitContainers = []corev1.Container{{Name: "permissions"}, {Name: "wiring"}}
@@ -286,9 +258,6 @@ func TestHealthIgnoresInitContainers(t *testing.T) {
 	}
 }
 
-// TestHealthFallsBackToTheFirstContainer: a chart that names the app's
-// container something else still gets a count, and it is the first container
-// the fallback reads -- not the highest of them, which could be a sidecar.
 func TestHealthFallsBackToTheFirstContainer(t *testing.T) {
 	cs := k8sfake.NewClientset(
 		appPod("sonarr-0", "sonarr",
@@ -308,7 +277,7 @@ func TestHealthFallsBackToTheFirstContainer(t *testing.T) {
 	if want := []Exiting{{App: "sonarr", Restarts: 3}}; !reflect.DeepEqual(got.Exiting, want) {
 		t.Fatalf("Exiting = %+v, want %+v: the first container is the app's", got.Exiting, want)
 	}
-	// The same pod shape with the first container over the line is listed.
+	// The same pod shape with the first container over the line.
 	got, err = w.Health(context.Background(), []string{"radarr"})
 	if err != nil {
 		t.Fatalf("Health: %v", err)
@@ -318,8 +287,6 @@ func TestHealthFallsBackToTheFirstContainer(t *testing.T) {
 	}
 }
 
-// TestHealthSortsTheAppsItNames: two apps exiting are reported in one order,
-// so the sentence and the record read the same on every run.
 func TestHealthSortsTheAppsItNames(t *testing.T) {
 	cs := k8sfake.NewClientset(
 		appPod("sonarr-0", "sonarr", containerRestarts{"sonarr", 3}),
@@ -335,16 +302,14 @@ func TestHealthSortsTheAppsItNames(t *testing.T) {
 	}
 }
 
-// runningSet is one app's StatefulSet as the chart renders it: the container is
-// named after the app key, and its image is whatever the values left there.
+// runningSet is an app's StatefulSet with its image as the values left it.
 func runningSet(name, app, image string) *appsv1.StatefulSet {
 	set := statefulSet(name, app, 1, 1, 1, 1)
 	set.Spec.Template.Spec.Containers = []corev1.Container{{Name: app, Image: image}}
 	return set
 }
 
-// runningPod is one pod of an app with the digest its container reports: the
-// kubelet's imageID, which names the repository the reference was pulled from.
+// runningPod carries the kubelet's imageID, with its repository in front.
 func runningPod(name, instance, app, imageID string) *corev1.Pod {
 	return &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
@@ -363,9 +328,7 @@ func runningPod(name, instance, app, imageID string) *corev1.Pod {
 	}
 }
 
-// readyPod is appPod with the Ready condition a serving app's pod carries; one
-// that is not ready has no condition, which is what a pod that never opened its
-// port looks like.
+// readyPod is appPod with the Ready condition; a closed port has none.
 func readyPod(name, app string, ready bool, restarts int32) *corev1.Pod {
 	pod := appPod(name, app, containerRestarts{name: app, restarts: restarts})
 	status := corev1.ConditionFalse
@@ -376,8 +339,6 @@ func readyPod(name, app string, ready bool, restarts int32) *corev1.Pod {
 	return pod
 }
 
-// TestReadinessIsEveryAppNotOnlyTheMovedOnes is the timer's reading: nothing
-// moved, so every app of the release is asked, and an app that is up is quiet.
 func TestReadinessIsEveryAppNotOnlyTheMovedOnes(t *testing.T) {
 	cs := k8sfake.NewClientset(
 		statefulSet("sonarr", "sonarr", 1, 1, 1, 1),
@@ -398,9 +359,6 @@ func TestReadinessIsEveryAppNotOnlyTheMovedOnes(t *testing.T) {
 	}
 }
 
-// TestReadinessSaysWhyAnAppIsNotReady: the reason is what a notice shows in place
-// of a log, so it distinguishes an app that keeps exiting from one that is merely
-// slow.
 func TestReadinessSaysWhyAnAppIsNotReady(t *testing.T) {
 	for _, c := range []struct {
 		name string
@@ -463,8 +421,6 @@ func TestReadinessSaysWhyAnAppIsNotReady(t *testing.T) {
 	}
 }
 
-// TestReadinessKeepsASecondInstanceWithItsApp: an app's 4K instance is another
-// StatefulSet with the same key, and it has to be up for the app to be.
 func TestReadinessKeepsASecondInstanceWithItsApp(t *testing.T) {
 	cs := k8sfake.NewClientset(
 		statefulSet("radarr", "radarr", 1, 1, 1, 1),
@@ -481,8 +437,6 @@ func TestReadinessKeepsASecondInstanceWithItsApp(t *testing.T) {
 	}
 }
 
-// TestReadinessAcceptsAnAppScaledToZero: a step scales an app down to copy it,
-// and nothing that should be running is not a fault.
 func TestReadinessAcceptsAnAppScaledToZero(t *testing.T) {
 	set := statefulSet("sonarr", "sonarr", 1, 1, 0, 0)
 	zero := int32(0)
@@ -509,10 +463,6 @@ func TestReadinessIsEmptyOnAReleaseWithNoWorkloads(t *testing.T) {
 	}
 }
 
-// TestRunningReadsEachInstanceImageAndPodDigest: the reference comes from the
-// StatefulSet and the bytes from the pods, because a values pin may be a tag
-// alone. An instance is its own StatefulSet, and a pod of an app this release
-// does not run is nobody's image.
 func TestRunningReadsEachInstanceImageAndPodDigest(t *testing.T) {
 	cs := k8sfake.NewClientset(
 		runningSet("sonarr", "sonarr", "registry.example.com/seedbox/sonarr:4.9.0"),
