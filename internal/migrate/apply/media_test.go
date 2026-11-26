@@ -16,8 +16,6 @@ import (
 	"github.com/swizzin/s5n/internal/migrate/rewrite"
 )
 
-// mediaFixture is the fixture with a second Sonarr instance whose library is a
-// subdirectory of its own, and a plan that renames both onto box's categories.
 func mediaFixture(t *testing.T) *fixture {
 	t.Helper()
 	f := newFixture(t)
@@ -45,9 +43,6 @@ func mediaFixture(t *testing.T) *fixture {
 	return f
 }
 
-// mediaDoc is the plan discovery writes for a source whose Arrs keep their
-// libraries under two directories, and whose downloads are named after the same
-// instances.
 func mediaDoc(f *fixture, sonarr, sonarr4k, qbit string) string {
 	return fmt.Sprintf(`version: 2
 data:

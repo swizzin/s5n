@@ -5,8 +5,6 @@ package apply
 // A rewriter files itself under its catalog app from its own init()
 // (internal/migrate/rewrite, Register), so a package that is not linked has no
 // rewriter at all and every plan naming its app is refused. That is the same
-// list cmd/box carries: this test is a run of every app box can migrate, in
-// the same binary.
 
 import (
 	_ "github.com/swizzin/s5n/internal/migrate/arr"

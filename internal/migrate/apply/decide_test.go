@@ -1,9 +1,5 @@
 package apply
 
-// decide_test.go proves the guided half of Settle: an operator's answer becomes
-// the plan's rule, and the list says the decision is theirs. What is left
-// unanswered stays a default, which is what the end of a run names.
-
 import (
 	"context"
 	"strings"
@@ -12,8 +8,6 @@ import (
 	"github.com/swizzin/s5n/internal/migrate/plan"
 )
 
-// settleFixture settles the shared rehearsal and hands back the plan Settle
-// wrote and its list.
 func settleFixture(t *testing.T) (*plan.Plan, Settled) {
 	t.Helper()
 	r := newRehearsal(t, rehearsalHosts(true), true)

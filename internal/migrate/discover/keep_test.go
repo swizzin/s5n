@@ -1,8 +1,5 @@
 package discover
 
-// keep_test.go covers the keep path's pre-flight: what a source cluster has that
-// stops box installing onto it, and what a source with none of it looks like.
-
 import (
 	"context"
 	"strings"

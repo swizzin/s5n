@@ -2,8 +2,6 @@ package apply
 
 // grouped_test.go pins the confirm's summary: one row per app, the data it
 // renames, what needs a person, every note once, and what is not migrated
-// folded by namespace. It is read through say's plain renderer, which is the
-// transcript a logged run and this golden read.
 
 import (
 	"bytes"

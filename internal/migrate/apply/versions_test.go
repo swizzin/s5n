@@ -1,8 +1,6 @@
 package apply
 
 // versions_test.go is the confirm's version column and the refusal it can make:
-// what a tag says as a person reads it, which pairs are an upgrade, which are a
-// downgrade, and the row each becomes.
 
 import (
 	"strings"

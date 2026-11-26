@@ -34,8 +34,6 @@ func (s stoppedSource) Raw(context.Context) (map[string][]byte, error) {
 	return nil, nil
 }
 
-// workload is one planned app's workload, as the read carries it: the kind and
-// the two things a stop proof asks (the replica count and what its pods carry).
 func workload(kind, name string, replicas int, selector map[string]string) Workload {
 	return Workload{
 		Namespace: "media",

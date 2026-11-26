@@ -114,8 +114,6 @@ func (w *plexWorld) plan() (*plan.Plan, []byte) {
 	return p, []byte(w.doc)
 }
 
-// env is a run's environment: the fakes for the three things outside the plan,
-// and the runner when the test gives one.
 func (w *plexWorld) env(v *fakeValues, o *fakeOwned, keys *fakeKeys, ask confirmFunc, run rewrite.Runner) Env {
 	return Env{
 		ConfigRoot: w.configRoot,
@@ -137,8 +135,6 @@ func (w *plexWorld) env(v *fakeValues, o *fakeOwned, keys *fakeKeys, ask confirm
 	}
 }
 
-// surveyEnv is what the pre-install pass gets: no cluster, and a config root the
-// caller throws away.
 func (w *plexWorld) surveyEnv(staging string) Env {
 	return Env{
 		ConfigRoot: staging,
