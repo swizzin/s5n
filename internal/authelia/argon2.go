@@ -1,16 +1,12 @@
-// Package authelia is root's login: the few pure decisions box makes for
-// Authelia, and the bytes it writes from them.
+// Package authelia is root's login: the pure decisions box makes for Authelia,
+// and the bytes it writes from them. Everything here is a function of strings and
+// a chart's values, so it is tested without a cluster; the cluster half is
+// internal/login.
 //
-// It is split from where it is installed on purpose. Everything here is a
-// function of strings and a chart's values -- the hash format, the users
-// database, the configuration, the access-control rules -- so it is tested
-// without a cluster or a host directory. The cluster half lives in
-// internal/login, which imports this package and nothing here imports it.
-//
-// The parameter set, the digest syntax and the required configuration keys
-// were read from Authelia v4.39.28 itself (schema/authentication.go,
-// schema/types.go, validator/*.go), not from its documentation, because the
-// validator is what refuses to start.
+// The parameter set, digest syntax and required configuration keys were read from
+// Authelia v4.39.28 itself (schema/authentication.go, schema/types.go,
+// validator/*.go), not its documentation, because the validator is what refuses
+// to start.
 package authelia
 
 import (
@@ -44,9 +40,8 @@ type Argon2 struct {
 }
 
 // DefaultArgon2 is Authelia's own default (internal/configuration/schema/
-// authentication.go, DefaultPasswordConfig) written into the configuration box
-// generates. Keeping the two identical is what makes a rehash on a future
-// login possible without box's row being unreadable in the meantime.
+// authentication.go, DefaultPasswordConfig), written into the configuration box
+// generates: identical values let Authelia rehash a box row on a later login.
 var DefaultArgon2 = Argon2{
 	Variant:     "argon2id",
 	Iterations:  3,
@@ -57,22 +52,20 @@ var DefaultArgon2 = Argon2{
 }
 
 // DigestPattern is Authelia's own JSON-schema pattern for a password digest
-// (internal/configuration/schema/types.go), narrowed to the algorithms box
-// writes. It is the contract a row has to satisfy: Authelia validates the
-// whole file on load, so one malformed row breaks every login, not one.
+// (internal/configuration/schema/types.go), narrowed to the algorithms box writes.
+// Authelia validates the whole file on load, so one malformed row breaks every
+// login.
 var DigestPattern = regexp.MustCompile(`^\$argon2(id|i|d)\$v=[0-9]+\$m=[0-9]+,t=[0-9]+,p=[0-9]+\$[A-Za-z0-9+/]+\$[A-Za-z0-9+/]+$`)
 
 // ErrBadDigest says a row is not a digest box can verify or Authelia would
 // accept: the caller never writes one of these.
 var ErrBadDigest = errors.New("not an argon2 digest")
 
-// HashPassword returns Authelia's PHC string for a password: the format its
-// own go-crypt encoder writes, which is what `$argon2id$v=19$m=…
-// ,t=…,p=…$salt$key` means, with both halves base64 standard alphabet and no
-// padding.
+// HashPassword returns Authelia's PHC string for a password: the format its own
+// go-crypt encoder writes, both halves base64 standard alphabet without padding.
 //
-// The salt comes from crypto/rand. A password is never logged, never returned
-// by anything but this string, and never stored: only this digest is.
+// The salt comes from crypto/rand. A password is never logged or stored: only this
+// digest is.
 func HashPassword(password string) (string, error) {
 	return hashWith(DefaultArgon2, password)
 }
@@ -95,19 +88,18 @@ func hashWith(p Argon2, password string) (string, error) {
 		base64.RawStdEncoding.EncodeToString(key)), nil
 }
 
-// VerifyPassword checks a password against a digest, reading the parameters
-// out of the digest itself exactly as Authelia does. It exists so a test can
-// prove the format with Authelia's own template vector: a hash box writes that
-// Authelia cannot verify would be a login that never works.
+// VerifyPassword checks a password against a digest, reading the parameters out of
+// the digest exactly as Authelia does. It exists so a test can prove the format
+// with Authelia's own template vector: a hash that Authelia cannot verify would be
+// a login that never works.
 func VerifyPassword(digest, password string) (bool, error) {
 	params, salt, want, err := decodeDigest(digest)
 	if err != nil {
 		return false, err
 	}
 	got := argon2.IDKey([]byte(password), salt, uint32(params.Iterations), uint32(params.Memory), uint8(params.Parallelism), uint32(len(want)))
-	// Constant time is not a requirement of a login check that already has to
-	// hash (the hash dominates), but comparing in the same loop keeps this
-	// honest for any future caller.
+	// Constant time is not required (the hash dominates), but comparing in one
+	// loop keeps this honest for any future caller.
 	var diff byte
 	for i := range got {
 		diff |= got[i] ^ want[i]
@@ -169,9 +161,8 @@ func decodeDigest(digest string) (Argon2, []byte, []byte, error) {
 	return p, salt, key, nil
 }
 
-// maskDigest is what an error may quote: the parameter header only. A digest
-// is not a secret in the way a password is, but printing half of one in a
-// message box shows an operator is noise nobody asked for.
+// maskDigest is what an error may quote: the algorithm only. A digest is not a
+// secret, but half of one in a message is noise nobody asked for.
 func maskDigest(digest string) string {
 	if i := strings.IndexByte(digest, '$'); i >= 0 {
 		if j := strings.LastIndexByte(digest, '$'); j > i {

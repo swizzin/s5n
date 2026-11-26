@@ -36,9 +36,7 @@ func TestUsersRoundTrip(t *testing.T) {
 	}
 }
 
-// Re-running init with no new password keeps the digest byte for byte: the row
-// is read back, the caller writes nothing, and the file on the host is the same
-// bytes. This is the property the login relies on so a re-run does not log
+// A re-run with no new password keeps the digest byte for byte, so it does not log
 // everyone out for nothing.
 func TestUsersKeepsARowItDidNotChange(t *testing.T) {
 	original := []byte(`## box: root's login for this seedbox.
@@ -66,8 +64,8 @@ users:
 	}
 }
 
-// A row without a display name or a digest fails the whole file in Authelia,
-// so box refuses to read it rather than writing a file Authelia will not load.
+// A malformed row fails the whole file in Authelia, so box refuses to read it
+// rather than write one Authelia will not load.
 func TestParseUsersRefusesARowAutheliaWould(t *testing.T) {
 	cases := map[string]string{
 		"no users key":   "people:\n  alice:\n    displayname: 'a'\n",
@@ -86,8 +84,8 @@ func TestParseUsersRefusesARowAutheliaWould(t *testing.T) {
 	}
 }
 
-// Groups survive a rewrite: they are not box's to write, and dropping one
-// would silently change who an access_control rule admits.
+// Groups survive a rewrite: dropping one would silently change who an
+// access_control rule admits.
 func TestUsersKeepsGroups(t *testing.T) {
 	doc := []byte("users:\n  alice:\n    displayname: 'alice'\n    password: '$argon2id$v=19$m=1,t=1,p=1$c2FsdA$a2V5'\n    groups: [admins, media]\n")
 	db, err := ParseUsers(doc)

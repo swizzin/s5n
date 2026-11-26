@@ -6,8 +6,7 @@ import (
 	"go.yaml.in/yaml/v3"
 )
 
-// extAuthzEndpoint is the part of the rendered configuration this test is
-// about: the ext-authz endpoint's own settings, as Authelia reads them.
+// extAuthzEndpoint is the part of the rendered configuration this test is about.
 type extAuthzEndpoint struct {
 	Implementation  string `yaml:"implementation"`
 	AuthnStrategies []struct {
@@ -41,20 +40,16 @@ func renderedExtAuthz(t *testing.T) extAuthzEndpoint {
 
 // The ext-authz endpoint checks the session cookie and nothing else.
 //
-// Authelia 4.39.28's own default for this endpoint is a header strategy first
-// (HeaderAuthorization, scheme basic: internal/configuration/schema/server.go's
-// ServerEndpointsAuthz default) and the cookie second. Envoy forwards the
-// request's own Authorization header to the auth server whether or not the
-// SecurityPolicy names it, so an app whose UI sends a token of its own decides,
-// through that strategy, whether its signed-in user gets in. Measured against
-// the pinned image: a well-formed token this provider did not issue is swallowed
-// as an errTokenIntent and the cookie is tried (handler_authz_authn.go:581-592
-// at 4.39.28), but an empty one -- `Authorization: Bearer `, which is what
-// PeerBanHelper's page sends when it holds no token (webui/src/service/utils.ts
-// at v9.5.4) -- is an unparseable value, and the strategy loop returns on the
-// error (handler_authz.go:303-322) instead of falling through: a 401 to a
-// browser with a valid session. Pinning the one strategy is what makes the
-// answer independent of every one of those behaviours.
+// Authelia 4.39.28 defaults to a header strategy first (HeaderAuthorization,
+// scheme basic: internal/configuration/schema/server.go) and the cookie second.
+// Envoy forwards the request's Authorization header whether or not the
+// SecurityPolicy names it, so an app whose UI sends its own token decides whether
+// its signed-in user gets in. Measured against the pinned image: a well-formed
+// foreign token is swallowed as errTokenIntent and the cookie is tried
+// (handler_authz_authn.go:581-592 at 4.39.28), but an empty one -- `Authorization:
+// Bearer `, which PeerBanHelper's page sends with no token
+// (webui/src/service/utils.ts at v9.5.4) -- makes the strategy loop return
+// (handler_authz.go:303-322): a 401 to a browser with a valid session.
 func TestExtAuthzAsksOnlyForTheSessionCookie(t *testing.T) {
 	endpoint := renderedExtAuthz(t)
 	if endpoint.Implementation != "ExtAuthz" {
@@ -73,8 +68,8 @@ func TestExtAuthzAsksOnlyForTheSessionCookie(t *testing.T) {
 	}
 }
 
-// The ext-authz endpoint's name and path are what the SecurityPolicy dials, so
-// the strategies cannot be moved onto an endpoint nothing calls.
+// The endpoint's name and path are what the SecurityPolicy dials, so the
+// strategies cannot be moved onto an endpoint nothing calls.
 func TestExtAuthzIsTheEndpointTheEdgeCalls(t *testing.T) {
 	raw, err := RenderConfiguration(testConfiguration())
 	if err != nil {

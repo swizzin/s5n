@@ -13,36 +13,32 @@ import (
 	autheliaassets "github.com/swizzin/s5n/install/platform/authelia"
 )
 
-// The names box gives the login's objects. They are constants because the
-// SecurityPolicy's backendRef, the Deployment's claim and the ReferenceGrant
-// all have to name the same objects, and a name derived per host would clone
-// the login once per seedbox on a host that has several.
+// The names box gives the login's objects: the SecurityPolicy's backendRef, the
+// Deployment's claim and the ReferenceGrant must all name the same objects, and a
+// per-host name would clone the login per seedbox.
 const (
-	// SystemNamespace is where the login lives: s5n-system, the platform's own
-	// namespace, beside the admission policy that protects it. It is declared
-	// here so the package that writes the login and the cluster client that
-	// reads its configuration cannot disagree about where it is.
+	// SystemNamespace is s5n-system, beside the admission policy that protects
+	// it, declared here so the writer and the reader cannot disagree.
 	SystemNamespace = "s5n-system"
-	// ServiceName is the Service the SecurityPolicy calls. It is also the
-	// Deployment's name.
+	// ServiceName is the Service the SecurityPolicy calls, and the Deployment's
+	// name.
 	ServiceName = "authelia"
 	// ConfigMapName holds configuration.yml.
 	ConfigMapName = "s5n-authelia"
-	// SecretName holds the storage encryption key. Created once, never
-	// updated: rotating it orphans every encrypted row in SQLite.
+	// SecretName holds the storage encryption key. Created once, never updated:
+	// rotating it orphans every encrypted row in SQLite.
 	SecretName = "s5n-authelia"
 	// ClaimName is the claim and the volume for the login's state.
 	ClaimName = "s5n-authelia"
 	// PolicyName is the SecurityPolicy that puts the login in front of the
-	// Gateway. One per host, in the Gateway's namespace.
+	// Gateway, one per host in the Gateway's namespace.
 	PolicyName = "s5n-authelia"
 	// RouteName is the HTTPRoute that publishes the portal on the host's own
-	// name. It is a route, not a policy, so it sits in the login's namespace
-	// beside the Service it forwards to.
+	// name, in the login's namespace beside the Service it forwards to.
 	RouteName = "s5n-authelia"
 	// ReferenceGrantName is the grant for the cross-namespace backendRef.
 	ReferenceGrantName = "s5n-authelia"
-	// ServicePort is the port Authelia listens on, and the one the
+	// ServicePort is the port Authelia listens on and the one the
 	// SecurityPolicy names.
 	ServicePort = 9091
 	// EncryptionKeySecretKey is the Secret's key name.
@@ -51,52 +47,42 @@ const (
 
 // The login's fixed identity in the cluster.
 const (
-	// UID and GID are the login's own: fixed rather than the seedbox's
-	// puid/pgid, because the login is root's and serves every seedbox on the
-	// host. 65532 is the conventional unprivileged id (distroless's nonroot),
-	// which keeps the value legible to anyone who has read a Kubernetes
-	// manifest before; nothing in the image depends on it, only the claim's
-	// ownership does.
+	// UID and GID are the login's own, not the seedbox's puid/pgid: the login is
+	// root's and serves every seedbox. 65532 is distroless's nonroot; only the
+	// claim's ownership depends on it.
 	UID = 65532
 	GID = 65532
-	// HostPath is where the login's state lives on the host: one directory,
-	// created by box, owned by UID and mode 0700. It sits under /var/lib
-	// rather than /etc because it is state (a SQLite database that changes on
-	// every login), not configuration -- box's only other host state is
-	// /etc/s5n/cluster.yaml, which is root's record of a decision.
+	// HostPath is where the login's state lives on the host, created by box, owned
+	// by UID and 0700. Under /var/lib because it is state, not configuration.
 	HostPath = "/var/lib/s5n/authelia"
-	// ServerPath is where the configuration is mounted inside the pod. It is
-	// not /config: /config is the claim, and a ConfigMap mounted over it
-	// would hide the users database.
+	// ServerPath is where the configuration is mounted. Not /config: /config is
+	// the claim, and a ConfigMap over it would hide the users database.
 	ServerPath = "/etc/authelia"
-	// ConfigFile is the configuration's file name in the ConfigMap and under
-	// ServerPath.
+	// ConfigFile is the configuration's file name.
 	ConfigFile = "configuration.yml"
 )
 
-// Manifests is what the manifests template needs. Every field is a decision
-// box made, so a rendering test can name the one it is checking.
+// Manifests is what the manifests template needs; every field is a decision box
+// made.
 type Manifests struct {
 	// Namespace is s5n-system: the login is platform, not a seedbox.
 	Namespace string
-	// GatewayNamespace and Gateway name the Gateway the SecurityPolicy
-	// targets and the portal route attaches to.
+	// GatewayNamespace and Gateway name the Gateway the SecurityPolicy targets
+	// and the portal route attaches to.
 	GatewayNamespace string
 	Gateway          string
-	// ProxyNamespace is where the Gateway's proxy pods run. It is the peer
-	// the login's NetworkPolicy admits and nobody else: the proxy is what sets
-	// the headers Authelia trusts, so it is the only caller there may be.
+	// ProxyNamespace is where the Gateway's proxy pods run: the only peer the
+	// login's NetworkPolicy admits, and the only caller that sets the headers
+	// Authelia trusts.
 	ProxyNamespace string
-	// Host is the one name the portal is published on: the hostname of the
-	// HTTPRoute that makes /auth reachable. It is the same name the
-	// configuration's cookie lives on, because the 302 Authelia sends points
-	// at https://<host>/auth/.
+	// Host is the one name the portal is published on, and the name the
+	// configuration's cookie lives on.
 	Host string
 	// Claim, ConfigMap and Image are the names the objects refer to.
 	Claim     string
 	ConfigMap string
-	// Secret is the login's Secret. Its OIDC file is mounted when this box has
-	// a provider; the Deployment never mounts the encryption key.
+	// Secret is the login's Secret; its OIDC file is mounted when this box has a
+	// provider, and the Deployment never mounts the encryption key.
 	Secret string
 	Image  string
 	UID    int
@@ -106,8 +92,8 @@ type Manifests struct {
 	OIDC      bool
 	OIDCFile  string
 	OIDCMount string
-	// ConfigHash is the sha256 of the rendered configuration, written as a
-	// pod-template annotation so a configuration change rolls the pod.
+	// ConfigHash is the sha256 of the rendered configuration, annotated on the pod
+	// template so a configuration change rolls the pod.
 	ConfigHash string
 }
 
@@ -140,9 +126,9 @@ func RenderManifests(m Manifests) ([]byte, error) {
 		}
 	}
 	if m.OIDC {
-		// The provider's file is a Secret the Deployment mounts: with no name
-		// to mount, Authelia starts without the issuer's keys and every token
-		// request fails.
+		// The provider's file is a Secret the Deployment mounts: with no name to
+		// mount, Authelia starts without the issuer's keys and every token request
+		// fails.
 		for name, value := range map[string]string{
 			"secret":     m.Secret,
 			"oidc file":  m.OIDCFile,
@@ -166,11 +152,9 @@ func RenderManifests(m Manifests) ([]byte, error) {
 	return []byte(b.String()), nil
 }
 
-// ValidateLogin is the shape of the one account box creates: Authelia's file
-// backend keys rows by this name, and a name with whitespace or a colon in it
-// is a row a hand-written file could not express. Every application that signs
-// in with this account, and the seedbox's own unix account, allows this
-// alphabet.
+// ValidateLogin is the shape of the one account box creates: a name with
+// whitespace or a colon is a row a hand-written file could not express, and every
+// application that signs in with it allows this alphabet.
 func ValidateLogin(login string) error {
 	if login == "" {
 		return errors.New("no login name")
@@ -189,24 +173,20 @@ func ValidateLogin(login string) error {
 	return nil
 }
 
-// GeneratedPasswordLength is how long a generated password is. Authelia has no
-// minimum of its own; 32 characters from crypto/rand is long enough that the
-// only reason to change it is that it was printed once and lost.
+// GeneratedPasswordLength is how long a generated password is: 32 characters from
+// crypto/rand, long enough that the only reason to change it is that it was lost.
 const GeneratedPasswordLength = 32
 
-// passwordAlphabet omits nothing and relies on rejection instead: every byte is
-// drawn from crypto/rand and mapped onto a URL- and shell-safe alphabet.
+// passwordAlphabet is URL- and shell-safe.
 const passwordAlphabet = "abcdefghijkmnopqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789"
 
-// GeneratePassword returns a random password. crypto/rand.Read is the only
-// source; a failure is an error rather than a fallback, because a predictable
-// password here is the login itself.
+// GeneratePassword returns a random password from crypto/rand only; a failure is
+// an error rather than a fallback, because a predictable password is the login.
 func GeneratePassword() (string, error) {
 	out := make([]byte, 0, GeneratedPasswordLength)
 	buf := make([]byte, 64)
-	// 58 is not a divisor of 256, so a byte outside the largest multiple of
-	// the alphabet's length is rejected rather than folded in: a modulo there
-	// would make some characters likelier than others.
+	// 58 is not a divisor of 256, so a byte outside the largest multiple is
+	// rejected rather than folded in: a modulo would bias some characters.
 	limit := 256 - (256 % len(passwordAlphabet))
 	for len(out) < GeneratedPasswordLength {
 		if _, err := rand.Read(buf); err != nil {

@@ -25,9 +25,9 @@ func testOIDC() OIDC {
 	}
 }
 
-// TestRenderOIDC is the provider Authelia has to start with, and the two things
-// that must not be in it: no signing material (that is the Secret's file), and
-// no client that could authorize a different seedbox's login.
+// The provider Authelia has to start with, and the two things that must not be in
+// it: signing material (that is the Secret's file), and a client that could
+// authorize a different seedbox's login.
 func TestRenderOIDC(t *testing.T) {
 	got, err := RenderOIDC(testOIDC())
 	if err != nil {
@@ -62,8 +62,7 @@ func TestRenderOIDC(t *testing.T) {
 	}
 }
 
-// TestRenderOIDCNoClientsIsNoProvider: a box with no OIDC app renders nothing,
-// so Authelia registers no provider routes and its discovery endpoint is a 404
+// A box with no OIDC app renders nothing, so its discovery endpoint is a 404
 // rather than an issuer with no clients.
 func TestRenderOIDCNoClientsIsNoProvider(t *testing.T) {
 	got, err := RenderOIDC(OIDC{})
@@ -91,8 +90,7 @@ func TestRenderOIDCNoClientsIsNoProvider(t *testing.T) {
 	}
 }
 
-// TestRenderConfigurationCarriesTheProvider: the block reaches the file box
-// writes, which is what Authelia starts with.
+// The block reaches the file box writes, which is what Authelia starts with.
 func TestRenderConfigurationCarriesTheProvider(t *testing.T) {
 	o := testOIDC()
 	c := testConfiguration()
@@ -111,11 +109,10 @@ func TestRenderConfigurationCarriesTheProvider(t *testing.T) {
 	}
 }
 
-// TestTwoClientsOfOneSeedboxShareOnePolicy is the second client on the same box:
-// two clients, two digests, two callbacks under their own base paths, and one
-// authorization policy between them -- the seedbox's. A policy per client would
-// be a second place to edit when the account changes, and a policy they do not
-// share would let one app admit someone the other does not.
+// The second client on the same box: two clients, two digests, two callbacks and
+// one authorization policy -- the seedbox's. A policy per client would be a second
+// place to edit, and separate policies would let one app admit someone the other
+// does not.
 func TestTwoClientsOfOneSeedboxShareOnePolicy(t *testing.T) {
 	o := testOIDC()
 	other, err := HashClientSecret("another-client-secret-of-48-chars-abcdefgh")
@@ -157,10 +154,8 @@ func TestTwoClientsOfOneSeedboxShareOnePolicy(t *testing.T) {
 	}
 }
 
-// TestEachClientHasItsOwnPolicy is the isolation the design rests on: two
-// seedboxes on one login render two policies and two clients, and neither
-// client points at the other's policy. A shared policy would let one box's
-// account authorize the other's app.
+// The isolation the design rests on: two seedboxes on one login render two
+// policies and two clients, and neither client points at the other's policy.
 func TestEachClientHasItsOwnPolicy(t *testing.T) {
 	digest, err := HashClientSecret("another-client-secret-of-48-chars-abcdefgh")
 	if err != nil {
@@ -200,9 +195,8 @@ func TestEachClientHasItsOwnPolicy(t *testing.T) {
 	}
 }
 
-// TestRenderOIDCSecrets: the Secret's file is a complete configuration document
-// with the two pieces of signing material, and the key it carries is a real RSA
-// key of the size the provider advertises.
+// The Secret's file is a complete configuration with the two pieces of signing
+// material, and the key is a real RSA key of the advertised size.
 func TestRenderOIDCSecrets(t *testing.T) {
 	file, err := GenerateOIDCSecrets()
 	if err != nil {
@@ -229,8 +223,8 @@ func TestRenderOIDCSecrets(t *testing.T) {
 	if start < 0 || end < 0 {
 		t.Fatal("the file carries no RSA private key block")
 	}
-	// The block is indented by the YAML scalar; strip it before parsing, which
-	// is what Authelia's YAML parser does for us in the real file.
+	// The block is indented by the YAML scalar; strip it before parsing, as
+	// Authelia's parser does for us in the real file.
 	body := strings.TrimSpace(strings.ReplaceAll(text[start:end+len("-----END RSA PRIVATE KEY-----")], "          ", ""))
 	parsed, _ := pem.Decode([]byte(body + "\n"))
 	if parsed == nil {
@@ -253,9 +247,9 @@ func TestRenderOIDCSecrets(t *testing.T) {
 	}
 }
 
-// TestClientSecretDigestIsAuthelia's: the digest box writes is one Authelia
-// verifies, with the algorithm and parameters its own documentation names
-// (pbkdf2-sha512, 310000 iterations, the crypt base64 alphabet, no padding).
+// The digest box writes is one Authelia verifies, with the algorithm and
+// parameters its documentation names (pbkdf2-sha512, 310000 iterations, the crypt
+// base64 alphabet, no padding).
 func TestClientSecretDigestIsAuthelia(t *testing.T) {
 	secret, err := GenerateOIDCClientSecret()
 	if err != nil {
@@ -275,8 +269,8 @@ func TestClientSecretDigestIsAuthelia(t *testing.T) {
 	if len(parts) != 5 {
 		t.Fatalf("digest = %q, want five $-separated fields", digest)
 	}
-	// 16 bytes of salt, 64 of SHA-512 key, both raw base64: 22 and 86
-	// characters, which is the shape of Authelia's documented example.
+	// 16 bytes of salt and 64 of key, raw base64: 22 and 86 characters, the shape
+	// of Authelia's documented example.
 	if len(parts[3]) != 22 || len(parts[4]) != 86 {
 		t.Fatalf("digest halves are %d/%d characters, want 22/86", len(parts[3]), len(parts[4]))
 	}
@@ -289,17 +283,15 @@ func TestClientSecretDigestIsAuthelia(t *testing.T) {
 	if VerifyClientSecret(digest, secret+"x") {
 		t.Fatal("a different secret verified against the digest")
 	}
-	// Authelia's documented example also verifies: the format is not
-	// box-specific.
+	// Authelia's documented example verifies too: the format is not box-specific.
 	const documented = "$pbkdf2-sha512$310000$c8p78n7pUMln0jzvd4aK4Q$JNRBzwAo0ek5qKn50cFzzvE9RXV88h1wJn5KGiHrD0YKtZaR/nCb2CJPOsKaPK0hjf.9yHxzQGZziziccp6Yng"
 	if !VerifyClientSecret(documented, "insecure_secret") {
 		t.Fatal("Authelia's own documented digest does not verify: the encoding or parameters differ from 4.39.28's")
 	}
 }
 
-// TestTwoHashesDiffer: the salt is random, so the same secret hashed twice is
-// two different digests -- and box stores the one it wrote rather than
-// recomputing it, which is what keeps the login's ConfigMap stable.
+// The salt is random, so the same secret hashed twice gives two digests -- and box
+// stores the one it wrote, which keeps the ConfigMap stable.
 func TestTwoHashesDiffer(t *testing.T) {
 	a, err := HashClientSecret("the-same-client-secret-twice-over")
 	if err != nil {
@@ -317,8 +309,8 @@ func TestTwoHashesDiffer(t *testing.T) {
 	}
 }
 
-// TestRenderOIDCRefusesWhatAutheliaWould: every refusal here is a login that
-// would fail its own startup, and a login that does not start serves nothing.
+// Every refusal here is a login that would fail its own startup, and a login that
+// does not start serves nothing.
 func TestRenderOIDCRefusesWhatAutheliaWould(t *testing.T) {
 	broken := []struct {
 		name string
@@ -341,9 +333,8 @@ func TestRenderOIDCRefusesWhatAutheliaWould(t *testing.T) {
 	}
 }
 
-// TestRedirectURI: the callback is the app's own, under its base path. qui
-// builds it from its baseUrl and mounts /callback under /api/auth/oidc, so a
-// different string here is a redirect_uris mismatch and a failed login.
+// The callback is the app's own, under its base path: a different string is a
+// redirect_uris mismatch and a failed login.
 func TestRedirectURI(t *testing.T) {
 	if got, want := RedirectURI("box.example.com", "/qui"), "https://box.example.com/qui/api/auth/oidc/callback"; got != want {
 		t.Fatalf("RedirectURI = %q, want %q", got, want)

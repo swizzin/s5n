@@ -13,15 +13,12 @@ import (
 	utilyaml "k8s.io/apimachinery/pkg/util/yaml"
 )
 
-// TestThemeMappingIsEveryNameInTheRegistry is the whole mapping, over every
-// name internal/theme accepts: a pair is the dark page drawn in the pair's dark
-// variant, a pinned dark variant pins the dark page, a pinned light variant
-// pins the light one. Authelia's `auto` is never an answer.
+// The whole mapping, over every name internal/theme accepts: a pair is the dark
+// page in its dark variant, a pinned dark variant pins dark, a pinned light one
+// light. Authelia's `auto` is never an answer.
 //
-// The table is built from the registry rather than written out, so a new theme
-// cannot ship without an answer here, and the names are checked through
-// theme.Parse: a variant whose name equals its sibling's would map ambiguously,
-// and that is a registry bug this catches.
+// The table is built from the registry, so a new theme cannot ship without an
+// answer, and names go through theme.Parse, which catches an ambiguous variant.
 func TestThemeMappingIsEveryNameInTheRegistry(t *testing.T) {
 	pairs := theme.Themes()
 	if len(pairs) == 0 {
@@ -57,8 +54,7 @@ func TestThemeMappingIsEveryNameInTheRegistry(t *testing.T) {
 			}
 		}
 	}
-	// Every name Names() lists has an answer, and nothing it lists is missing
-	// from the table above.
+	// Every name Names() lists has an answer, and nothing is missing from the table.
 	for _, name := range theme.Names() {
 		if _, err := ResolveTheme(name); err != nil {
 			t.Errorf("%s: %v", name, err)
@@ -77,8 +73,7 @@ func TestThemeMappingIsEveryNameInTheRegistry(t *testing.T) {
 	}
 }
 
-// TestLoginThemeLook: every resolved theme is drawn in a variant's own palette
-// -- the pinned one, or the pair's dark variant -- and never in a colour no
+// Every resolved theme is drawn in a variant's own palette, never in a colour no
 // palette has.
 func TestLoginThemeLook(t *testing.T) {
 	for _, th := range theme.Themes() {
@@ -105,10 +100,9 @@ func TestLoginThemeLook(t *testing.T) {
 	}
 }
 
-// TestRenderConfigurationCarriesTheTheme is the template's half of the mapping:
-// a pair writes dark -- the same line its dark variant writes -- and a pinned
-// light variant writes light, and every rendering names the asset directory,
-// without which Authelia serves its own logo and box's mark never appears.
+// The template's half of the mapping: a pair writes dark, a pinned light variant
+// writes light, and every rendering names the asset directory, without which
+// Authelia serves its own logo.
 func TestRenderConfigurationCarriesTheTheme(t *testing.T) {
 	cases := []struct{ theme, want string }{
 		{"s5n", "dark"},
@@ -141,11 +135,9 @@ func TestRenderConfigurationCarriesTheTheme(t *testing.T) {
 	}
 }
 
-// TestRenderConfigurationRefusesABaseAutheliaWouldNot: a theme Authelia does not
-// know stops its startup, and a login that never starts serves nothing, so box
-// refuses the file before it writes it. `auto` is refused with grey and oled:
-// box resolves every name onto a page, and a file that hands that choice to the
-// browser is one the mark was not drawn for.
+// A theme Authelia does not know stops its startup, so box refuses the file before
+// it writes it. `auto` is refused with grey and oled: box resolves every name onto
+// a page, and the mark was not drawn for the browser's choice.
 func TestRenderConfigurationRefusesABaseAutheliaWouldNot(t *testing.T) {
 	cases := map[string]func(*Configuration){
 		"no theme":     func(c *Configuration) { c.Theme = "" },
@@ -167,8 +159,8 @@ func TestRenderConfigurationRefusesABaseAutheliaWouldNot(t *testing.T) {
 	}
 }
 
-// TestRenderAssets: the login gets its own mark and favicon, drawn from the
-// theme, and both are files Authelia's handler can serve.
+// The login gets its own mark and favicon, drawn from the theme, both files
+// Authelia's handler can serve.
 func TestRenderAssets(t *testing.T) {
 	for _, name := range []string{"s5n", "s5n-dark", "s5n-light", "dracula-alucard"} {
 		lt, err := ResolveTheme(name)
@@ -189,9 +181,8 @@ func TestRenderAssets(t *testing.T) {
 		if got, want := logo.Bounds().Dy(), brand.Rows*LogoCell; got != want {
 			t.Errorf("%s: logo is %d px high, want %d", name, got, want)
 		}
-		// An ICO: ICONDIR says two images, and the first payload is the 16 px
-		// PNG. brand's own test reads the container in full; here the point is
-		// that the login ships one.
+		// An ICO: ICONDIR says two images, the first payload is the 16 px PNG;
+		// brand's own test reads the container in full.
 		if got := int(assets.Favicon[4]) | int(assets.Favicon[5])<<8; got != 2 {
 			t.Errorf("%s: favicon carries %d images, want 2", name, got)
 		}
@@ -202,10 +193,9 @@ func TestRenderAssets(t *testing.T) {
 	}
 }
 
-// TestRenderedDeploymentMountsTheAssetsReadOnly: the ConfigMap the assets ride
-// in is the one mounted at server.asset_path, and it is mounted read-only --
-// the login runs with a read-only root filesystem under Pod Security
-// `restricted`, and a writable mount there would be the one hole in it.
+// The ConfigMap the assets ride in is the one mounted at server.asset_path, and it
+// is read-only: the login runs with a read-only root filesystem under Pod Security
+// restricted.
 func TestRenderedDeploymentMountsTheAssetsReadOnly(t *testing.T) {
 	manifests, err := RenderManifests(testManifests())
 	if err != nil {

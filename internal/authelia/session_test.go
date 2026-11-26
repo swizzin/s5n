@@ -6,12 +6,9 @@ import (
 	"go.yaml.in/yaml/v3"
 )
 
-// A sign-in lasts a week, and an hour of nothing ends it sooner.
-//
-// The login is the one door to every app on the box, so a short absolute
-// lifetime is a sign-in a person repeats all day: an hour sent the person back
-// to the portal in the middle of using an app. The hour of inactivity stays:
-// a browser left open and unused is signed out the same hour it always was.
+// A sign-in lasts a week, and an hour of activity ends it sooner: a short absolute
+// lifetime is a sign-in a person repeats all day, while an idle browser is signed
+// out at the same hour it always was.
 func TestASessionLastsAWeekAndEndsAfterAnIdleHour(t *testing.T) {
 	raw, err := RenderConfiguration(testConfiguration())
 	if err != nil {

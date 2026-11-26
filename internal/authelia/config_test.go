@@ -6,9 +6,7 @@ import (
 	"testing"
 )
 
-// fixtureValues is a seedbox's merged values with both flavours of instance:
-// the Arrs' HD and 4K entries, Prowlarr (an Arr with no instances), the three
-// apps that authenticate their own clients, and qBittorrent, which does not.
+// fixtureValues is a seedbox's merged values with both flavours of instance.
 func fixtureValues() map[string]any {
 	app := func(extra map[string]any) map[string]any {
 		out := map[string]any{"enabled": true, "port": 1}
@@ -58,7 +56,7 @@ func TestInstancesFromValues(t *testing.T) {
 }
 
 // A disabled instance is not served, so a rule for it would be a rule about a
-// route that does not exist. The 4K Radarr in this fixture is off.
+// route that does not exist: the 4K Radarr here is off.
 func TestInstancesFromValuesSkipsDisabled(t *testing.T) {
 	for _, inst := range InstancesFromValues(fixtureValues()) {
 		if inst.Name == "radarr-4k" {
@@ -67,15 +65,13 @@ func TestInstancesFromValuesSkipsDisabled(t *testing.T) {
 	}
 }
 
-// selfLogin is the catalog's answer for this fixture: the apps it marks as
-// signing their users in themselves, so the rules bypass the login in front of
-// them.
+// selfLogin is the catalog's answer for this fixture: the apps that sign their
+// users in themselves.
 var selfLogin = []string{"plex", "seerr", "tautulli"}
 
-// TestRulesExact is the access_control contract, in order: the portal, each
-// app's own credentials, then the login. The order is what Authelia evaluates,
-// so a reordering here is a login that answers its own redirect, or an API
-// client that is asked for a form.
+// The access_control contract, in order: the portal, each app's own credentials,
+// then the login. A reordering is a login that answers its own redirect, or an API
+// client asked for a form.
 func TestRulesExact(t *testing.T) {
 	got := Rules("box.example.com", "alice", InstancesFromValues(fixtureValues()), nil, selfLogin)
 	host := "box.example.com"
@@ -86,8 +82,7 @@ func TestRulesExact(t *testing.T) {
 		{Domain: host, Policy: "bypass", Resources: []string{`^/radarr/api([/?].*)?$`, `^/radarr/ping$`}},
 		{Domain: host, Policy: "bypass", Resources: []string{`^/seerr([/?].*)?$`}},
 		{Domain: host, Policy: "bypass", Resources: []string{`^/sonarr/api([/?].*)?$`, `^/sonarr/ping$`}},
-		// The 4K instance is its own prefix on the same host, so it needs its
-		// own rules: a rule written for /sonarr does not cover /sonarr-4k.
+		// The 4K instance is its own prefix, so it needs its own rules.
 		{Domain: host, Policy: "bypass", Resources: []string{`^/sonarr-4k/api([/?].*)?$`, `^/sonarr-4k/ping$`}},
 		{Domain: host, Policy: "bypass", Resources: []string{`^/tautulli([/?].*)?$`}},
 		{Domain: host, Policy: "one_factor", Subject: "alice"},
@@ -101,8 +96,7 @@ func TestRulesExact(t *testing.T) {
 	}
 }
 
-// qBittorrent's UI and API are behind the login: it is the one app that
-// authenticates browsers and nothing else, and the Arrs reach it over the
+// qBittorrent's UI and API are behind the login: the Arrs reach it over the
 // cluster network, not through the Gateway.
 func TestRulesLeaveQBittorrentBehindTheLogin(t *testing.T) {
 	for _, r := range Rules("box.example.com", "alice", InstancesFromValues(fixtureValues()), nil, selfLogin) {
@@ -114,8 +108,7 @@ func TestRulesLeaveQBittorrentBehindTheLogin(t *testing.T) {
 	}
 }
 
-// A host with no apps still has a login: the portal is always there, and the
-// last rule is the one that matters.
+// A host with no apps still has a login: the portal is always there.
 func TestRulesWithNoApps(t *testing.T) {
 	got := Rules("box.example.com", "alice", nil, nil, nil)
 	if len(got) != 2 {
@@ -129,11 +122,9 @@ func TestRulesWithNoApps(t *testing.T) {
 	}
 }
 
-// An app served at a name of its own leaves its path behind: its rule is the
-// whole <app>.<domain>, and no rule mentions /<app> any more. Authelia checks
-// the request's host, so without the domain rule the name falls into
-// default_policy deny, and without removing the path rule a request under the
-// old path would still be served although the chart no longer routes it.
+// An app served at a name of its own leaves its path behind: its rule is the whole
+// <app>.<domain>, and a leftover path rule would serve a route the chart no longer
+// creates.
 func TestRulesFollowAnAppToItsOwnHost(t *testing.T) {
 	got := Rules("box.example.com", "alice", InstancesFromValues(fixtureValues()), []string{"plex", "seerr"}, selfLogin)
 	host := "box.example.com"
@@ -161,9 +152,8 @@ func TestRulesFollowAnAppToItsOwnHost(t *testing.T) {
 	}
 }
 
-// No rule mentions the ACME challenge: the challenge is answered on the host's
-// own port-80 listener, which has no login, so a bypass here would be dead
-// config pretending the challenge goes through Authelia.
+// No rule mentions the ACME challenge: it is answered on the host's port-80
+// listener, which has no login, so a bypass would be dead config.
 func TestRulesMentionNoACMEChallenge(t *testing.T) {
 	for _, r := range Rules("box.example.com", "alice", InstancesFromValues(fixtureValues()), nil, selfLogin) {
 		for _, resource := range r.Resources {
@@ -174,11 +164,8 @@ func TestRulesMentionNoACMEChallenge(t *testing.T) {
 	}
 }
 
-// The bypass comes from the list, not from a name in this package: an app the
-// catalog marks as signing its users in is exempt under its path, and the whole
-// name is exempt when the chart serves it at one of its own. qBittorrent is
-// neither of the fixture's own sign-in apps, so a bypass for it can only be the
-// list this test passed.
+// The bypass comes from the list, not from a name in this package: qBittorrent is
+// neither own sign-in app, so its bypass can only be what this test passed.
 func TestRulesBypassAnAppThatSignsItsUsersIn(t *testing.T) {
 	host := "box.example.com"
 	pathRule := Rule{Domain: host, Policy: PolicyBypass, Resources: []string{`^/qbittorrent([/?].*)?$`}}
@@ -193,9 +180,7 @@ func TestRulesBypassAnAppThatSignsItsUsersIn(t *testing.T) {
 	}
 }
 
-// A name the list leaves out is behind the login, whatever it is called: the
-// list is the whole answer, so a chart that stops marking an app that way puts
-// the one-factor rule back in front of it.
+// A name the list leaves out is behind the login: the list is the whole answer.
 func TestRulesLeaveAnAppOutOfTheBypass(t *testing.T) {
 	host := "box.example.com"
 	got := Rules(host, "alice", InstancesFromValues(fixtureValues()), nil, []string{"plex", "seerr"})
@@ -211,8 +196,7 @@ func TestRulesLeaveAnAppOutOfTheBypass(t *testing.T) {
 	}
 }
 
-// hasRule reports whether one rendered rule is in the list, compared field for
-// field, because that is what Authelia reads.
+// hasRule reports whether one rendered rule is in the list, field for field.
 func hasRule(rules []Rule, want Rule) bool {
 	for _, r := range rules {
 		if r.Domain != want.Domain || r.Policy != want.Policy || r.Subject != want.Subject {
