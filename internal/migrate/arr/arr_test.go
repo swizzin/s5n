@@ -400,8 +400,7 @@ func TestSonarrRewritesEveryPath(t *testing.T) {
 	assertSonarrDatabase(t, dir)
 	assertSonarrConfig(t, dir)
 
-	// Nothing left to do: a second check finds no change, which is what "write
-	// makes exactly what check reported" means for the next run.
+	// A second check finds no change.
 	rep2, err := (rewriter{kind: kindSonarr}).Check(context.Background(), in)
 	if err != nil {
 		t.Fatalf("second Check: %v", err)
@@ -595,8 +594,7 @@ func TestUnclassifiedClientReported(t *testing.T) {
 			(1, 'seedbox', 'QBittorrent', '{"host":"192.0.2.77","port":8080,"useSsl":true,"tvCategory":"tv"}')`,
 	)...)
 	writeFile(t, filepath.Join(dir, "config.xml"), "<Config>\n  <Port>8989</Port>\n</Config>")
-	// The plan from above leaves 192.0.2.50 alone; this client is another
-	// address, so nothing settles it.
+	// The plan leaves 192.0.2.50 alone; this client is another unsettled address.
 	in := input(t, dir, "sonarr", sonarrPlan)
 
 	rep, err := (rewriter{kind: kindSonarr}).Check(context.Background(), in)
@@ -614,9 +612,8 @@ func TestUnclassifiedClientReported(t *testing.T) {
 	}
 }
 
-// TestDisabledClientIsLeft: a client the app never dials is not a gap. Its
-// address stays exactly as it was, the report says so, and the run is not
-// stopped by an address no rule settles.
+// TestDisabledClientIsLeft: a client never dialled is not a gap; its address
+// stays, the report says so, and the run goes on.
 func TestDisabledClientIsLeft(t *testing.T) {
 	dir := t.TempDir()
 	newDB(t, filepath.Join(dir, "sonarr.db"), append(sonarrSchema(),
@@ -647,11 +644,8 @@ func TestDisabledClientIsLeft(t *testing.T) {
 	}
 }
 
-// TestDisabledSyncIsLeft: an import list or a Prowlarr application the app has
-// switched off is never dialled either, and each app stores that flag in its own
-// column (ImportListDefinition.Enable is EnableAutomaticAdd,
-// ApplicationDefinition.Enable is SyncLevel). A base URL nothing settles there is
-// left and called out, not a refusal.
+// TestDisabledSyncIsLeft: a switched-off list or application stores its flag in
+// EnableAutomaticAdd or SyncLevel, and its unsettled base URL is left, not refused.
 func TestDisabledSyncIsLeft(t *testing.T) {
 	ctx := context.Background()
 	t.Run("import list", func(t *testing.T) {
@@ -699,9 +693,8 @@ func TestDisabledSyncIsLeft(t *testing.T) {
 	})
 }
 
-// TestClientTypeBoxDoesNotRunExistsIsLeft: box runs qBittorrent and nothing
-// else. A client of another type is left exactly as it is and called out,
-// because a rewrite would point it at an app that does not speak its protocol.
+// TestClientTypeBoxDoesNotRunExistsIsLeft: another type is left and called out;
+// rewriting it would point at an app that does not speak its protocol.
 func TestClientTypeBoxDoesNotRunExistsIsLeft(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
@@ -747,14 +740,13 @@ func TestRemoteMappingUsesEachSideItsOwnTable(t *testing.T) {
 	newDB(t, filepath.Join(dir, "sonarr.db"), append(sonarrSchema(),
 		`INSERT INTO DownloadClients (Id, Name, Implementation, Settings) VALUES
 			(1, 'qBit', 'QBittorrent', '{"host":"localhost","port":8080,"tvCategory":"TV"}')`,
-		// qBittorrent's /downloads/tv is the Arr's /library/Downloads/tv, and
-		// after migration the two sit under different box directories only
-		// because the test plan says so.
+		// The client's /downloads/tv is the Arr's /library/Downloads/tv; only the
+		// test plan separates them after migration.
 		`INSERT INTO RemotePathMappings (Id, Host, RemotePath, LocalPath) VALUES (1, 'localhost', '/downloads/tv', '/library/Downloads/tv')`,
 	)...)
 	writeFile(t, filepath.Join(dir, "config.xml"), "<Config>\n  <Port>8989</Port>\n</Config>")
-	// This plan maps the client's downloads somewhere the Arr does not see, so
-	// the mapping survives and both sides are rewritten from different tables.
+	// The plan maps the client's downloads elsewhere, so the row survives and each
+	// side uses its own table.
 	doc := strings.Replace(sonarrPlan, "      - from: /downloads\n        to: /data/downloads",
 		"      - from: /downloads\n        to: /data/torrents", 1)
 	in := input(t, dir, "sonarr", doc)
@@ -805,8 +797,7 @@ func TestRadarrTables(t *testing.T) {
 	}
 }
 
-// prowlarrPlan is the target-side shape §6.2 describes: Prowlarr holds an
-// application to a Sonarr and a download client, and no library.
+// prowlarrPlan is §6.2's shape: an application, a client and no library.
 const prowlarrPlan = `version: 2
 apps:
   prowlarr:
@@ -834,8 +825,7 @@ apps:
         to: /data/downloads
 `
 
-// lidarrPlan is the target-side shape for the third Arr: music under
-// /library/media/music, downloads in the same /library/Downloads tree.
+// lidarrPlan: music under /library/media/music, downloads in /library/Downloads.
 const lidarrPlan = `version: 2
 apps:
   lidarr:
@@ -867,12 +857,8 @@ apps:
         to: /data/downloads
 `
 
-// TestLidarrTables: Lidarr keeps one absolute path on every row the app reads
-// back to act on a file. Artists.Path is its library folder, RootFolders.Path
-// the root, ImportLists.RootFolderPath where a list adds artists, and
-// TrackFiles.Path the file itself -- a real column in Lidarr, unlike Sonarr's
-// EpisodeFiles and Radarr's MovieFiles, because migration 30 dropped
-// RelativePath and stores the full path instead
+// TestLidarrTables: TrackFiles.Path is a real column in Lidarr, unlike Sonarr's
+// EpisodeFiles and Radarr's MovieFiles, because migration 30 stores the full path
 // (Datastore/Migration/030_add_mediafilerepository_mtime.cs at v3.1.2.4902).
 func TestLidarrTables(t *testing.T) {
 	dir := t.TempDir()
@@ -946,7 +932,7 @@ func TestLidarrTables(t *testing.T) {
 	if got := one(t, db, "SELECT RootFolderPath FROM ImportLists"); !reflect.DeepEqual(got, []string{"/data/media/music"}) {
 		t.Errorf("ImportLists.RootFolderPath = %v", got)
 	}
-	// The client's own category is not a path and is left alone.
+	// The client's category is not a path.
 	settings := setting(t, db, "SELECT Settings FROM DownloadClients WHERE Id = 1")
 	if settings["musicCategory"] != "lidarr" {
 		t.Errorf("musicCategory = %v, want it left as it is", settings["musicCategory"])
@@ -1000,8 +986,7 @@ func TestProwlarrApplications(t *testing.T) {
 	if got := one(t, db, "SELECT Value FROM Config"); !reflect.DeepEqual(got, []string{"/config/backups"}) {
 		t.Errorf("backupfolder = %v", got)
 	}
-	// Prowlarr's config file has no SslKeyPath, and this pass must not invent
-	// one.
+	// Prowlarr has no SslKeyPath, and this pass must not invent one.
 	if conf := readFile(t, filepath.Join(dir, "config.xml")); strings.Contains(conf, "SslKeyPath") {
 		t.Errorf("config.xml gained a key Prowlarr does not have:\n%s", conf)
 	}
@@ -1132,9 +1117,6 @@ func readFile(t *testing.T, path string) string {
 	return string(data)
 }
 
-// TestEveryDownloadClientPathField writes one client per implementation the
-// table names, each path field under the source's downloads root, and proves
-// the pass rewrites every one of them.
 func TestEveryDownloadClientPathField(t *testing.T) {
 	dir := t.TempDir()
 	statements := sonarrSchema()
@@ -1182,10 +1164,6 @@ func TestEveryDownloadClientPathField(t *testing.T) {
 	}
 }
 
-// TestSonarrFollowsTheLibrarysCategory: a migrated library is renamed onto box's
-// own category, so the root folder the source had becomes /data/media/<category>
-// and every series under it moves with it. That is what makes wiring's root
-// folder step find the folder it expects instead of adding a second one.
 func TestSonarrFollowsTheLibrarysCategory(t *testing.T) {
 	dir := t.TempDir()
 	writeFile(t, filepath.Join(dir, "config.xml"), sonarrConfig())
@@ -1203,9 +1181,8 @@ func TestSonarrFollowsTheLibrarysCategory(t *testing.T) {
 		`CREATE TABLE History (Id INTEGER PRIMARY KEY, Data TEXT, SourceTitle TEXT)`,
 		`CREATE TABLE DownloadHistory (Id INTEGER PRIMARY KEY, Data TEXT, SourceTitle TEXT)`,
 	)
-	// The plan discovery writes once the library has been mapped onto the
-	// category the instance has: a rule for the directory itself, more
-	// specific than the library's, and one for everything else under it.
+	// Discovery's rules once the library is mapped onto the instance's category:
+	// one for that directory, more specific than the library's.
 	const mapped = `version: 2
 apps:
   sonarr:
@@ -1231,11 +1208,9 @@ apps:
 	}
 }
 
-// TestSabnzbdClientIsRewrittenToTheBox: SABnzbd is a download client this box
-// runs, so a source Arr's SAB client is pointed at the release's SABnzbd --
-// host, port, URL base, TLS off -- exactly as qBittorrent's is. It is the row
-// the wiring Job then adopts by address, so leaving it behind would duplicate
-// it on the first run.
+// TestSabnzbdClientIsRewrittenToTheBox: SABnzbd is a client box runs, so the
+// source's row points at the release's, host, port, base and TLS; the row wiring
+// then adopts by address, so leaving it would duplicate it.
 func TestSabnzbdClientIsRewrittenToTheBox(t *testing.T) {
 	dir := t.TempDir()
 	newDB(t, filepath.Join(dir, "sonarr.db"), append(sonarrSchema(),

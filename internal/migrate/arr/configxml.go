@@ -9,16 +9,10 @@ import (
 	"strings"
 )
 
-// configXML rewrites the elements of config.xml that hold a path or a listen
-// setting. Everything else is left byte for byte, including the API key, the
-// element order and the file's own indentation: the app reads this file at
-// startup and writes it back when a setting changes, so only what migration
-// decides is touched.
-//
-// config.xml is one flat list of elements under <Config>: GetConfigDictionary
-// reflects over the config file provider's properties
-// (sonarr@v4.0.14.2938:src/NzbDrone.Core/Configuration/ConfigFileProvider.cs:124-140),
-// so a full XML parse would only add a reformatting risk.
+// configXML rewrites the path and listen elements, leaving every other byte as it
+// was, because the app reads this file at startup and writes it back. It is one
+// flat list under <Config> (ConfigFileProvider.cs:124-140 at v4.0.14.2938), so a
+// full XML parse would only add a reformatting risk.
 func (a *analysis) configXML() error {
 	ep, ok := a.in.Targets[a.app]
 	if !ok {
@@ -36,13 +30,10 @@ func (a *analysis) configXML() error {
 
 	type element struct{ name, value, what string }
 	var edits []element
-	// The chart's port, bind address and URL base are the ones the app has to
-	// listen on: a source's OIDC or reverse-proxy address is gone, and the
-	// release's Service and probes assume these (docs/box.md, "Ports go to the
-	// chart's defaults"). TLS ends at box's gateway and the probes speak plain
-	// HTTP to Port, so an app that served HTTPS itself is turned back to HTTP;
-	// its certificate paths are still rewritten below, and turning it on again
-	// is one setting.
+	// The chart's port, bind address and URL base are what the app must listen on
+	// (docs/box.md, "Ports go to the chart's defaults"). TLS ends at the gateway and
+	// probes speak plain HTTP, so an HTTPS source is turned back to HTTP; its
+	// certificate paths are still rewritten below.
 	for _, e := range []element{
 		{"BindAddress", "*", "bind address"},
 		{"Port", strconv.Itoa(ep.Port), "port"},
@@ -55,11 +46,9 @@ func (a *analysis) configXML() error {
 		}
 		edits = append(edits, element{e.name, want, e.what})
 	}
-	// The path elements stay absent or empty when they were: an empty
-	// SslCertPath means "no certificate", and writing a path into it would
-	// turn on nothing but a startup read of a file that is not there. A
-	// non-empty one is read at startup, so a path no rule covers stops the
-	// migration rather than naming a directory the pod cannot see.
+	// An empty SslCertPath means "no certificate" and stays empty: writing a path
+	// would only add a startup read of a missing file. A non-empty one is read at
+	// startup, so an uncovered path is a gap.
 	for _, name := range a.configPathElements() {
 		stored, ok := elementText(raw, name)
 		if !ok || stored == "" {
@@ -91,9 +80,8 @@ func (a *analysis) configXML() error {
 	return nil
 }
 
-// configPathElements are the config.xml elements that hold a filesystem path.
-// Prowlarr's config file has no SslKeyPath at all
-// (prowlarr@v2.7.0.5723:src/NzbDrone.Core/Configuration/ConfigFileProvider.cs:50-58).
+// configPathElements are the path elements; Prowlarr has no SslKeyPath
+// (ConfigFileProvider.cs:50-58 at v2.7.0.5723).
 func (a *analysis) configPathElements() []string {
 	if a.kind == kindProwlarr {
 		return []string{"SslCertPath", "UpdateScriptPath"}
@@ -120,10 +108,9 @@ func elementText(raw []byte, name string) (string, bool) {
 	return "", false
 }
 
-// setElement replaces one element's text, or adds the element before the root
-// closes when the file does not have it. A source written by an older version
-// can lack UrlBase or UpdateScriptPath, and the app's own default for a missing
-// element is not the release's value.
+// setElement replaces an element's text, or adds it before the root closes: an
+// older source can lack UrlBase or UpdateScriptPath, and its default is not the
+// release's value.
 func setElement(raw []byte, name, value string) ([]byte, error) {
 	open := []byte("<" + name + ">")
 	if i := bytes.Index(raw, open); i >= 0 {
@@ -167,8 +154,7 @@ func setElement(raw []byte, name, value string) ([]byte, error) {
 	return out, nil
 }
 
-// childIndent is the indentation the file gives its own elements, so an added
-// one does not stand out. A file without a newline gets none.
+// childIndent is the file's own element indentation; no newline means none.
 func childIndent(raw []byte) string {
 	nl := bytes.IndexByte(raw, '\n')
 	if nl < 0 {
