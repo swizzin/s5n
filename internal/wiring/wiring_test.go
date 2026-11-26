@@ -18,9 +18,8 @@ import (
 	"github.com/swizzin/s5n/internal/apps"
 )
 
-// fakeStack is a qBittorrent + Sonarr + Radarr + Prowlarr that behave like the
-// real APIs where wiring touches them, including masked secrets and the
-// connection-test endpoints.
+// fakeStack is qBittorrent + the Arrs + Prowlarr behaving like the real APIs where
+// wiring touches them, masked secrets and connection tests included.
 type fakeStack struct {
 	mu          sync.Mutex
 	cats        map[string]string
@@ -35,21 +34,16 @@ type fakeStack struct {
 	prefs       map[string]any
 	ignorePrefs bool   // a qBittorrent that accepts setPreferences and changes nothing
 	linkFail    string // a save path whose hardlink proof fails
-	// bazarr is Bazarr's settings document per instance, keyed by the instance
-	// name the chart gives it ("bazarr-4k"). It is the app's own shape: one key
-	// per section, the Arrs as objects.
+	// bazarr is each instance's settings document, in the app's own shape.
 	bazarr map[string]map[string]any
-	// sabMisc and sabCats are SABnzbd's [misc] and categories, in the app's own
-	// shape. They start on the image's defaults, which is the trap the Job
-	// corrects.
+	// sabMisc and sabCats start on the image's defaults, the trap the Job corrects.
 	sabMisc map[string]string
 	sabCats map[string]string
 }
 
-// bazarrHandler serves one Bazarr instance: the unauthenticated ping, the
-// settings document behind X-API-KEY, and the partial form POST that changes it
-// (bazarr/api/system/settings.py at v1.6.2). The form is cast the way
-// save_settings casts it, so a comparison against the document sees types.
+// bazarrHandler serves one instance: ping, the settings document behind an API key,
+// and the partial form POST (bazarr/api/system/settings.py at v1.6.2), cast as
+// save_settings casts it.
 func (f *fakeStack) bazarrHandler(instance, urlBase, key string) http.HandlerFunc {
 	f.mu.Lock()
 	f.bazarr[instance] = map[string]any{
@@ -165,9 +159,8 @@ func (f *fakeStack) qbitHandler() http.HandlerFunc {
 	}
 }
 
-// arrAPI is the version the Arr at one instance serves its API under: Lidarr's
-// is /api/v1, the other two /api/v3 (internal/apps.Kind.apiVersion, from
-// Lidarr.Http/VersionedApiControllerAttribute.cs at v3.1.2.4902).
+// arrAPI is the API version one instance serves: Lidarr /api/v1, the others /api/v3
+// (Lidarr.Http/VersionedApiControllerAttribute.cs at v3.1.2.4902).
 func arrAPI(instance string) string {
 	if strings.HasPrefix(instance, "lidarr") {
 		return "/api/v1"
@@ -175,8 +168,8 @@ func arrAPI(instance string) string {
 	return "/api/v3"
 }
 
-// arrCategoryField is the qBittorrent settings field each Arr calls its
-// download category (Download/Clients/QBittorrent/QBittorrentSettings.cs).
+// arrCategoryField is each Arr's download-category field
+// (Download/Clients/QBittorrent/QBittorrentSettings.cs).
 func arrCategoryField(instance string) string {
 	switch {
 	case strings.HasPrefix(instance, "radarr"):
@@ -297,8 +290,8 @@ func (f *fakeStack) serveArrClients(w http.ResponseWriter, r *http.Request, inst
 	}
 }
 
-// createRootFolder records one root folder, and refuses a Lidarr body its own
-// SharedValidator would refuse: a name and both default profile ids.
+// createRootFolder records one root folder, refusing a Lidarr body without a name
+// and both profile ids.
 func (f *fakeStack) createRootFolder(w http.ResponseWriter, r *http.Request, instance, api string) {
 	var body apps.Item
 	_ = json.NewDecoder(r.Body).Decode(&body)
@@ -398,10 +391,8 @@ type harness struct {
 	runner  *Runner
 	dir     string
 	results []map[string]string
-	// cmData models the `<release>-wiring` ConfigMap across runs, the same way
-	// Publisher.Upsert merges keys without blanking ones it was not asked to
-	// write. LoadOwned reads owned.json back out of it, so a test can run the
-	// Runner twice and see ownership survive exactly as it would in the cluster.
+	// cmData models the wiring ConfigMap across runs: Upsert merges keys, and
+	// LoadOwned reads owned.json back, as in a cluster.
 	cmData map[string]string
 }
 
@@ -433,9 +424,8 @@ func newHarness(t *testing.T) *harness {
 		return path
 	}
 	h := &harness{stack: f, dir: dir}
-	// The data paths are real, under this test's temp directory: the wiring run
-	// creates them itself (the Arr root-folder step needs them to exist), so a
-	// fixed /data would need root and would hide a failure to create them.
+	// The data paths are real, under a temp directory the run creates itself; a
+	// fixed /data would need root and hide a failure to create them.
 	data := filepath.Join(dir, "data")
 	h.config = Config{
 		Namespace: "seedbox", ConfigMap: "s5n-wiring", TimeoutSeconds: 10,
@@ -491,8 +481,7 @@ func TestWiringIsIdempotent(t *testing.T) {
 		t.Fatalf("first run status = %s", first.Status)
 	}
 	wantCreated := 8 // 2 categories, 2 download clients, 2 root folders, 2 Prowlarr applications
-	// The data contract starts on the image's default and is corrected once; the
-	// Arrs' hardlink setting starts true in the fake.
+	// The data contract starts on the image's default and is corrected once.
 	if first.Writes.Created != wantCreated || first.Writes.Updated != 1 || first.Writes.Unchanged != 2 {
 		t.Fatalf("first run writes = %+v, want created=%d updated=1 (data contract) unchanged=2 (hardlinks)\n%s",
 			first.Writes, wantCreated, Summary(first))
@@ -518,8 +507,8 @@ func TestWiringIsIdempotent(t *testing.T) {
 	if second.Writes.Unchanged != 11 {
 		t.Fatalf("second run unchanged = %d, want 11\n%s", second.Writes.Unchanged, Summary(second))
 	}
-	// The connection tests still run every time: that is the proof, not a write.
-	// One download-client test per Arr plus one application test per Arr, per run.
+	// The connection tests run every time: that is the proof, not a write -- one
+	// client test and one application test per Arr.
 	if h.stack.tests != 8 {
 		t.Fatalf("connection tests = %d, want 8 (4 per run)", h.stack.tests)
 	}
@@ -540,11 +529,9 @@ func TestWiringIsIdempotent(t *testing.T) {
 	}
 }
 
-// TestWiringWiresLidarr: the third Arr gets what the other two get -- the
-// release's qBittorrent as a download client with its own category, its root
-// folder, hardlink imports and a Prowlarr application -- over /api/v1, and with
-// the extra the app asks for on a root folder: a name and both default
-// profiles (Lidarr.Api.V1/RootFolders/RootFolderController.cs at v3.1.2.4902).
+// The third Arr gets what the other two get over /api/v1, plus the root folder's
+// name and both profile ids (Lidarr.Api.V1/RootFolders/RootFolderController.cs at
+// v3.1.2.4902).
 func TestWiringWiresLidarr(t *testing.T) {
 	h := newHarness(t)
 	lidarr := httptest.NewServer(h.stack.arrHandler("lidarr", "/lidarr"))
@@ -610,8 +597,7 @@ func TestWiringWiresLidarr(t *testing.T) {
 
 func TestWiringFailsLoudlyAndStillPublishes(t *testing.T) {
 	h := newHarness(t)
-	// A qBittorrent nothing answers on: with the login bypassed, an unreachable
-	// WebUI is the one way this step can fail.
+	// With the login bypassed, an unreachable WebUI is the one way this step fails.
 	h.config.Qbittorrent.URL = "http://127.0.0.1:1"
 	h.config.TimeoutSeconds = 1
 	h.runner.Config = h.config
@@ -627,9 +613,8 @@ func TestWiringFailsLoudlyAndStillPublishes(t *testing.T) {
 	}
 }
 
-// The Job has no qBittorrent password to give, so it never posts the login
-// form: qBittorrent skips its login for the release's addresses, and a failed
-// attempt is what gets an address banned.
+// The Job never posts qBittorrent's login form: a failed attempt is what gets an
+// address banned.
 func TestWiringNeverPostsTheQbitLogin(t *testing.T) {
 	h := newHarness(t)
 	ctx := context.Background()
@@ -644,9 +629,8 @@ func TestWiringNeverPostsTheQbitLogin(t *testing.T) {
 	}
 }
 
-// An install from before the bypass left its own copy of the qBittorrent
-// password in the Arr. Both credential fields are owned, so the next run
-// clears them and the receipt says the client was updated.
+// An old install left a qBittorrent password in the Arr; both credential fields are
+// owned, so the next run clears them and reports an update.
 func TestWiringClearsAStoredQbittorrentPassword(t *testing.T) {
 	h := newHarness(t)
 	ctx := context.Background()
@@ -697,10 +681,9 @@ func TestWiringClearsAStoredQbittorrentPassword(t *testing.T) {
 	}
 }
 
-// A failed read of owned.json must stop the run rather than fall back to
-// adoption by name: a renamed owned client would be missed, duplicated, and the
-// duplicate's id would replace the real one. The published receipt must leave
-// the existing owned.json untouched.
+// A failed owned.json read stops the run rather than adopting by name: a renamed
+// client would be missed, duplicated, and the duplicate's id recorded. The receipt
+// leaves the existing owned.json untouched.
 func TestWiringStopsWhenOwnedRecordCannotBeRead(t *testing.T) {
 	h := newHarness(t)
 	ctx := context.Background()
@@ -735,10 +718,9 @@ func TestWiringStopsWhenOwnedRecordCannotBeRead(t *testing.T) {
 	}
 }
 
-// A release with no wired app still gets a receipt, and it says ok: `box apply`
-// waits for one, so a Job that failed the release because it had nothing to do
-// would make a seedbox installed with its apps off impossible -- which is the
-// box `box migrate apply` adopts into.
+// A release with no wired app still gets an ok receipt: `box apply` waits for one, so
+// failing because there was nothing to do would make an apps-off seedbox
+// impossible.
 func TestWiringWithNoWiredAppReportsOK(t *testing.T) {
 	var published []map[string]string
 	r := &Runner{
@@ -788,8 +770,8 @@ func writeFile(t *testing.T, content string) string {
 	return path
 }
 
-// A qBittorrent that answers 200 to setPreferences but keeps its own default must
-// fail the run, not report "updated".
+// A qBittorrent that answers 200 but keeps its own default must fail, not read as
+// "updated".
 func TestWiringFailsWhenQbitIgnoresPreferences(t *testing.T) {
 	h := newHarness(t)
 	h.stack.ignorePrefs = true
@@ -816,8 +798,8 @@ func TestWiringCorrectsNearMissSavePath(t *testing.T) {
 	}
 }
 
-// Every download/library pair is proven, so a separate filesystem mounted under one
-// library folder is caught even when the first pair links fine.
+// Every download/library pair is proven: a separate filesystem under one library is
+// caught even when the first pair links.
 func TestWiringProvesEveryPair(t *testing.T) {
 	h := newHarness(t)
 	h.stack.linkFail = h.config.Instances[1].SavePath
@@ -834,10 +816,8 @@ func TestWiringProvesEveryPair(t *testing.T) {
 }
 
 // stepByName finds one step in the receipt, failing the test if it is absent.
-// TestWiringWiresBazarr: one Bazarr instance, pointed at the release's own
-// Sonarr and Radarr, over its own settings API. The two Arr keys are the
-// release Secret's, the addresses are the release's, and a second run writes
-// nothing.
+// One Bazarr instance pointed at the release's Sonarr and Radarr over its settings
+// API, with the Secret's keys; a second run writes nothing.
 func TestWiringWiresBazarr(t *testing.T) {
 	h := newHarness(t)
 	bazarrSrv := httptest.NewServer(h.stack.bazarrHandler("bazarr", "/bazarr", "bazarr-key"))
@@ -890,9 +870,7 @@ func TestWiringWiresBazarr(t *testing.T) {
 	}
 }
 
-// TestWiringBazarrTurnsOffTheSideItHasNoArrFor: a 4K Bazarr whose pair is only
-// the 4K Radarr. The missing side is switched off rather than left pointing at
-// an address this box does not serve.
+// A 4K Bazarr whose pair is only the 4K Radarr switches the missing side off.
 func TestWiringBazarrTurnsOffTheSideItHasNoArrFor(t *testing.T) {
 	h := newHarness(t)
 	bazarrSrv := httptest.NewServer(h.stack.bazarrHandler("bazarr-4k", "/bazarr-4k", "b4k-key"))
@@ -1025,8 +1003,8 @@ func stepByName(t *testing.T, res *Result, name string) Step {
 	return Step{}
 }
 
-// With no owned.json yet, the first run adopts by name and records the id it
-// found, so a second process (or a restarted Job) has something to trust.
+// With no owned.json the first run adopts by name and records the id, so a later
+// process has something to trust.
 func TestWiringRecordsOwnershipOnFirstRun(t *testing.T) {
 	h := newHarness(t)
 	res, err := h.runner.Run(context.Background())
@@ -1049,10 +1027,8 @@ func TestWiringRecordsOwnershipOnFirstRun(t *testing.T) {
 	}
 }
 
-// A rename in the Sonarr UI, an owned field drifted (tvCategory), and a
-// non-owned field changed (priority) must all be handled correctly on the
-// next run: the rename is left alone (found by id), the owned field is
-// restored and reported with old/new, and the non-owned field survives.
+// A UI rename is left alone (found by id), a drifted owned field is restored and
+// reported with old/new, and a non-owned change survives.
 func TestWiringFollowsRenameRestoresOwnedDriftKeepsNonOwned(t *testing.T) {
 	h := newHarness(t)
 	if _, err := h.runner.Run(context.Background()); err != nil {
@@ -1121,10 +1097,8 @@ func TestWiringRecreatesDeletedOwnedDownloadClient(t *testing.T) {
 	}
 }
 
-// An unknown Arr kind has no Prowlarr application implementation, and must
-// fail loudly rather than silently registering as Sonarr (the old default).
-// Readarr is the example because it is not a catalog app at all: it was
-// archived upstream in June 2025 and this chart never runs it.
+// An unknown Arr kind has no Prowlarr implementation and must fail loudly; Readarr
+// is the example because it is not a catalog app at all.
 func TestWiringUnknownProwlarrKindErrors(t *testing.T) {
 	h := newHarness(t)
 	h.runner.Config.Instances[0].Kind = "readarr"
@@ -1155,12 +1129,8 @@ func TestConfigValidation(t *testing.T) {
 	}
 }
 
-// TestWiringKeepsAMigratedDownloadCategory: a migrated Arr downloads into the
-// category its torrents are already in, which is not the directory box lays its
-// library out in. The client keeps that category, qBittorrent's own category is
-// left exactly as it is -- an empty save path means the downloads root plus the
-// category's name, so it is already right -- and no category box would not use
-// is created.
+// A migrated Arr keeps the category its torrents are in; qBittorrent's own category
+// is left as it is, and no unused category is created.
 func TestWiringKeepsAMigratedDownloadCategory(t *testing.T) {
 	h := newHarness(t)
 	inst := &h.runner.Config.Instances[0]
@@ -1169,8 +1139,7 @@ func TestWiringKeepsAMigratedDownloadCategory(t *testing.T) {
 	// The chart's own downloads root, which a category with no save path of
 	// its own downloads into.
 	h.runner.Config.Qbittorrent.SavePath = filepath.Join(h.dir, "data", "downloads")
-	// The source's category: qBittorrent's own, with the save path a migrated
-	// category has -- none at all, which means the downloads root.
+	// The source's category has no save path, which means the downloads root.
 	h.stack.cats["TV"] = ""
 	writesBefore := h.stack.count()
 
@@ -1194,8 +1163,7 @@ func TestWiringKeepsAMigratedDownloadCategory(t *testing.T) {
 	if len(res.Hardlinks) == 0 || !strings.HasSuffix(res.Hardlinks[0].Source, "/downloads/TV") {
 		t.Errorf("the hardlink proof ran on %+v, want the downloads category TV", res.Hardlinks)
 	}
-	// The receipt names the directories it made by the name each is: the
-	// download tree's category, not the library's.
+	// The receipt names each directory by its tree's name.
 	var made []string
 	for _, step := range res.Steps {
 		if strings.HasPrefix(step.Name, "data/dirs/downloads/") {

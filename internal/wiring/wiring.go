@@ -20,33 +20,25 @@ const (
 	sideRadarr = "radarr"
 )
 
-// qbitClientName is what every app's own connection to qBittorrent is called:
-// the Arr's download client, qui's instance, autobrr's downloader and PBH's
-// downloader. It is the name the source's installs most often use, and the one
-// the Job writes when it creates the object itself.
+// qbitClientName is what every app's own connection to qBittorrent is called, and
+// the name the Job writes when it creates the object.
 const qbitClientName = "qBittorrent"
 
-// sabClientName is what SABnzbd is called in an Arr's download client list,
-// beside qBittorrent's. The two are different clients of different protocols,
-// so the names are the apps' own: an Arr shows both and the operator knows
-// which one fetches what.
+// sabClientName is what SABnzbd is called in an Arr's download client list, beside
+// qBittorrent's: two clients of different protocols.
 const sabClientName = "SABnzbd"
 
-// Writes counts the application objects the run actually changed: download
-// clients, root folders, hardlink settings, Prowlarr applications, qBittorrent
-// categories and preferences, qui's instance and autobrr's download clients.
-// Directory creation is reported per step (data/dirs/...) instead, because a
-// directory is not an owned object and is made only when it is missing. The e2e
-// asserts that a second run reports zero created and zero updated.
+// Writes counts the application objects the run changed. Directories are reported
+// per step instead, because a directory is not an owned object. The e2e asserts a
+// second run reports zero created and zero updated.
 type Writes struct {
 	Created   int `json:"created"`
 	Updated   int `json:"updated"`
 	Unchanged int `json:"unchanged"`
 }
 
-// Step is one line of the receipt: what was checked and what it cost. Drift
-// lists owned fields that had been changed on the live object and were
-// restored; a secret field is never represented in it (see apps.ownedField).
+// Step is one line of the receipt. Drift lists owned fields that had been changed on
+// the live object and were restored; a secret field is never represented in it.
 type Step struct {
 	Name   string             `json:"name"`
 	Result string             `json:"result"` // ok | skipped | failed
@@ -54,10 +46,8 @@ type Step struct {
 	Drift  []apps.FieldChange `json:"drift,omitempty"`
 }
 
-// Result is the whole receipt, written to the wiring ConfigMap so that `box
-// status` and a human with kubectl can both read it. OwnedRecord is published
-// separately as owned.json (see Render) rather than embedded in status.json,
-// so it is excluded from this struct's own JSON.
+// Result is the whole receipt, published into the wiring ConfigMap. OwnedRecord is
+// published separately as owned.json, so it is excluded here.
 type Result struct {
 	Status          string          `json:"status"` // ok | failed
 	StartedAt       time.Time       `json:"startedAt"`
@@ -76,17 +66,14 @@ type Runner struct {
 	Log     io.Writer
 	Publish func(ctx context.Context, data map[string]string) error
 	Now     func() time.Time
-	// HardlinkCheck is injectable so tests can avoid needing a real filesystem
-	// proof; production uses the real thing.
+	// HardlinkCheck is injectable so tests can avoid a real filesystem proof.
 	HardlinkCheck func(savePath, rootFolder string) *HardlinkCheck
 	// ContractRetry bounds how long qBittorrent gets to settle on the data
-	// contract, since its image can re-apply its own default after start-up.
-	// Zero means 90 seconds.
+	// contract; zero means 90 seconds.
 	ContractRetry time.Duration
-	// LoadOwned reads owned.json from the wiring ConfigMap, returning nil with
-	// no error when the key or the ConfigMap is absent. It is injectable, like
-	// Publish, so unit tests need no cluster; nil means ownership is never
-	// recorded, so every run adopts by name.
+	// LoadOwned reads owned.json from the wiring ConfigMap, nil with no error when
+	// the key or ConfigMap is absent. Injectable, so unit tests need no cluster;
+	// nil means every run adopts by name.
 	LoadOwned func(ctx context.Context) ([]byte, error)
 }
 
@@ -103,10 +90,8 @@ func (r *Runner) logf(format string, args ...any) {
 	}
 }
 
-// stepLog is one line per check: the check's name, and what it cost. Every step
-// is this one shape, because box reads the newest line of this log and shows it
-// beside a spinner: a column padded for a forty-line table reads as noise on one
-// line, and a name with its result after it reads as what it is.
+// stepLog is one line per check: the check's name and what it cost. box reads the
+// newest line and shows it beside a spinner.
 func (r *Runner) stepLog(name, detail string) {
 	r.logf("%s: %s", name, detail)
 }
@@ -125,8 +110,8 @@ func (r *Runner) hardlink() func(string, string) *HardlinkCheck {
 	return CheckHardlink
 }
 
-// Run performs the wiring and always returns a receipt. A non-nil error means the
-// release is not wired correctly; the receipt says where it stopped.
+// Run performs the wiring and always returns a receipt; a non-nil error means the
+// release is not wired correctly.
 func (r *Runner) Run(ctx context.Context) (*Result, error) {
 	res := &Result{Status: "ok", StartedAt: r.now()}
 	err := r.work(ctx, res)
@@ -177,9 +162,8 @@ func (r *Runner) ensure(res *Result, name string, change apps.Change, err error)
 	return nil
 }
 
-// ensureResult is ensure's counterpart for an owned object: it records drift
-// (an owned field that was restored) and a recreated object's previous id in
-// the step detail, on top of counting the write.
+// ensureResult is ensure's counterpart for an owned object: it records drift and a
+// recreated object's previous id on top of counting the write.
 func (r *Runner) ensureResult(res *Result, name string, result apps.EnsureResult, err error) error {
 	if err != nil {
 		res.Steps = append(res.Steps, Step{Name: name, Result: "failed", Detail: err.Error()})
@@ -217,19 +201,14 @@ func (r *Runner) ensureResult(res *Result, name string, result apps.EnsureResult
 	return nil
 }
 
-// loadOwned reads owned.json through LoadOwned. A record that is absent (a new
-// release, or a ConfigMap `helm uninstall` removed) or unparsable falls back to
-// an empty record, which makes every lookup below adopt by name; note says why,
-// so the receipt can show it.
+// loadOwned reads owned.json. An absent or unparsable record falls back to an empty
+// one, which makes every lookup adopt by name; note says why.
 //
-// A failed *read* is different and stops the run. Adopting by name after a
-// transient API error would miss any owned object the user has renamed, create
-// a second one beside it, and then overwrite owned.json with the duplicate's id,
-// so a blip would turn into a permanent duplicate.
+// A failed read is different and stops the run: adopting by name after an API blip
+// would miss a renamed object, create a duplicate, and record the duplicate's id.
 func (r *Runner) loadOwned(ctx context.Context) (rec *OwnedRecord, note string, err error) {
 	if r.LoadOwned == nil {
-		// Ownership tracking is not wired up at all (e.g. --no-publish): there is
-		// no ConfigMap to read, so adopt by name without a receipt line.
+		// Ownership tracking is not wired up at all (e.g. --no-publish).
 		return NewOwnedRecord(), "", nil
 	}
 	raw, err := r.LoadOwned(ctx)
@@ -260,9 +239,8 @@ func (r *Runner) work(ctx context.Context, res *Result) error {
 	r.logf("s5n wiring: %d Arr instance(s), qBittorrent=%v, Prowlarr=%v",
 		len(c.Instances), c.Qbittorrent != nil, c.Prowlarr != nil)
 
-	// Ownership (AGENTS.md invariant 11): only an object whose id is recorded
-	// here is "ours" to update, drift-correct or recreate. Everything else,
-	// including an object merely named the same, is the user's.
+	// Ownership (AGENTS.md invariant 11): only an object whose id is recorded here is
+	// ours to update, drift-correct or recreate.
 	owned, note, err := r.loadOwned(ctx)
 	if err != nil {
 		// res.OwnedRecord stays nil, so the receipt is published without an
@@ -274,9 +252,9 @@ func (r *Runner) work(ctx context.Context, res *Result) error {
 		r.okStep(res, "wiring/owned", note)
 	}
 
-	// The data directories before any app step (dirs.go): the Arr root-folder
-	// step rejects a library path that does not exist yet, so on an empty data
-	// path this is what makes the first install possible at all.
+	// The data directories before any app step: the Arr root-folder step rejects a
+	// library path that does not exist, so this makes an empty data path possible at
+	// all.
 	dirs, err := EnsureDataDirs(c.Instances)
 	for _, d := range dirs {
 		detail := "exists"
@@ -289,10 +267,9 @@ func (r *Runner) work(ctx context.Context, res *Result) error {
 		return r.ensure(res, "data/dirs", apps.Unchanged, err)
 	}
 
-	// Every app that calls qBittorrent does so with an empty username and
-	// password: the WebUI skips its login for the release's addresses
-	// (docs/box.md, "Logins"), so no app's database holds a copy of a
-	// credential and there is nothing here to read out of the Secret.
+	// Every app calls qBittorrent with an empty username and password: the WebUI
+	// skips its login for the release's addresses (docs/box.md, "Logins"), so no
+	// app's database holds a credential.
 	var qbit *apps.Qbit
 	if c.Qbittorrent != nil {
 		qbit = apps.NewQbit(c.Qbittorrent.URL, "", "")
@@ -303,8 +280,8 @@ func (r *Runner) work(ctx context.Context, res *Result) error {
 		version, _ := qbit.Version(ctx)
 		r.okStep(res, "qbittorrent/ready", version)
 
-		// qBittorrent's image re-applies its own save path at runtime, so the config
-		// seed cannot be trusted alone: set it through the API, then assert.
+		// qBittorrent's image re-applies its own save path, so the config seed cannot
+		// be trusted alone: set it through the API, then assert.
 		change := apps.Unchanged
 		err = apps.Retry(ctx, r.contractRetry(), func(ctx context.Context) error {
 			var e error
@@ -315,10 +292,8 @@ func (r *Runner) work(ctx context.Context, res *Result) error {
 			return err
 		}
 
-		// One category per download directory, named the way the instance's
-		// torrents are: a migrated box keeps the source's name, and its own
-		// library category is never created in qBittorrent because nothing
-		// would download into it.
+		// One category per download directory, named the way the instance's torrents
+		// are; a migrated box keeps the source's name.
 		seen := map[string]bool{}
 		for _, inst := range c.Instances {
 			category := downloadCategory(inst)
@@ -333,10 +308,9 @@ func (r *Runner) work(ctx context.Context, res *Result) error {
 		}
 	}
 
-	// SABnzbd is the second download client: the same categories the Arrs
-	// download into, each with its directory under complete_dir, and the two
-	// paths the data contract gives it. It comes before the Arrs because an
-	// Arr's client test dials SAB's API and its category has to exist by then.
+	// SABnzbd is the second download client: the same categories, each with its
+	// directory under complete_dir. It comes before the Arrs, because an Arr's client
+	// test dials SAB and its category has to exist by then.
 	var sab *apps.Sabnzbd
 	sabHost, sabPort, sabKey := "", 0, ""
 	if c.Sabnzbd != nil {
@@ -355,10 +329,8 @@ func (r *Runner) work(ctx context.Context, res *Result) error {
 		version, _ := sab.Version(ctx)
 		r.okStep(res, "sabnzbd/ready", version)
 
-		// The image's own defaults are Downloads/complete and
-		// Downloads/incomplete under /config, where no import can be a
-		// hardlink. The chart seals them before the first start and this
-		// proves the running app agrees.
+		// The image's defaults are on /config, where no import can be a hardlink; the
+		// chart seals them and this proves the running app agrees.
 		change, err := sab.EnsureDataContract(ctx, apps.Config{
 			CompleteDir: c.Sabnzbd.SavePath,
 			DownloadDir: c.Sabnzbd.DownloadDir,
@@ -367,12 +339,9 @@ func (r *Runner) work(ctx context.Context, res *Result) error {
 			return err
 		}
 
-		// One category per download directory, named the way the Arrs name it
-		// (a migrated box keeps the source's name) and with its directory
-		// under complete_dir. An Arr sends the category with its own spelling;
-		// SAB folds only the lookup key, and an unknown name silently falls
-		// back to "*" with no directory -- so the category is created before
-		// any Arr can grab into it.
+		// One category per download directory, with its directory under
+		// complete_dir. An unknown name falls back to "*" with no directory, so the
+		// category is created before any Arr can grab into it.
 		seen := map[string]bool{}
 		for _, inst := range c.Instances {
 			category := downloadCategory(inst)
@@ -388,7 +357,7 @@ func (r *Runner) work(ctx context.Context, res *Result) error {
 	}
 
 	// Every Arr gets the same qBittorrent, its own category, its root folder and
-	// hardlink imports. The Arr API keys are collected for Prowlarr.
+	// hardlink imports. The Arr keys are collected for Prowlarr.
 	arrKeys := map[string]string{}
 	host, port := "", 0
 	if c.Qbittorrent != nil {
@@ -419,10 +388,8 @@ func (r *Runner) work(ctx context.Context, res *Result) error {
 				Category: downloadCategory(inst),
 				Host:     host,
 				Port:     port,
-				// Owned, and owned as empty. qBittorrent skips its login for
-				// the release's addresses, so the client needs no credential —
-				// and one an older install stored in this Arr's database is
-				// overwritten here on the next run.
+				// Owned as empty: qBittorrent skips its login for the release's
+				// addresses, so one an older install stored is overwritten here.
 				Username: "",
 				Password: "",
 			}, owned.ArrDownloadClientID(inst.Name))
@@ -434,19 +401,15 @@ func (r *Runner) work(ctx context.Context, res *Result) error {
 			}
 		}
 		if sab != nil {
-			// The same rule as qBittorrent's client: the live object is the
-			// operator's, and only the data-contract fields are overlaid. The
-			// URL base is the chart's prefix, which is where SAB's own API
-			// lives; the key is the release Secret's.
+			// The same rule as qBittorrent's client: the live object is the operator's,
+			// and only the data-contract fields are overlaid.
 			result, err := arr.EnsureDownloadClient(ctx, apps.DownloadClientSpec{
 				Implementation: "Sabnzbd",
 				Protocol:       "usenet",
 				Name:           sabClientName,
-				// SABnzbd folds every category name, and the Arr refuses a
-				// category the app does not list, so the client carries the
-				// folded name. The directory keeps the Arrs' spelling: the
-				// category is created with dir 4K/Movies under the name
-				// 4k/movies.
+				// SABnzbd folds every category name and the Arr refuses one the app
+				// does not list, so the client carries the folded name; the directory
+				// keeps the Arrs' spelling (4K/Movies under 4k/movies).
 				Category: strings.ToLower(downloadCategory(inst)),
 				Host:     sabHost,
 				Port:     sabPort,
@@ -470,12 +433,9 @@ func (r *Runner) work(ctx context.Context, res *Result) error {
 		}
 	}
 
-	// Bazarr reads one Sonarr and one Radarr each, so a box with an HD and a 4K
-	// pair runs one Bazarr per pair. Nothing else ever holds a Bazarr
-	// connection, and the two sides are the release's: a side this box runs no
-	// Arr for is switched off rather than left pointing at a Service that does
-	// not answer. The steps come after the Arrs because the app dials them from
-	// the same request that saves the address (internal/apps.Bazarr).
+	// Bazarr reads one Sonarr and one Radarr each, so a box with an HD and a 4K pair
+	// runs one per pair. A side this box runs no Arr for is switched off rather than
+	// left pointing at a Service that does not answer.
 	for _, bz := range c.Bazarrs {
 		key, err := ReadSecret(bz.APIKeyFile)
 		if err != nil {
@@ -532,8 +492,7 @@ func (r *Runner) work(ctx context.Context, res *Result) error {
 			case apps.Lidarr:
 				// Prowlarr registers Lidarr as "Lidarr" and talks to it over
 				// Lidarr's /api/v1 (prowlarr@v3.1.0.5799:
-				// src/NzbDrone.Core/Applications/Lidarr/Lidarr.cs and
-				// ILidarrV1Proxy).
+				// src/NzbDrone.Core/Applications/Lidarr/Lidarr.cs).
 				impl = "Lidarr"
 			default:
 				return r.ensure(res, "prowlarr/application/"+inst.Name, apps.Unchanged,
@@ -547,8 +506,8 @@ func (r *Runner) work(ctx context.Context, res *Result) error {
 			}, owned.ProwlarrApplicationID(inst.Name), owned.ProwlarrApplicationFingerprint(inst.Name))
 			if err == nil && result.ID != 0 {
 				owned.SetProwlarrApplicationID(inst.Name, result.ID)
-				// The Arr's key, proven by Prowlarr's own test above: recorded
-				// only now, for the same reason as every other fingerprint.
+				// The Arr's key, proven by Prowlarr's own test above: recorded only
+				// now, like every other fingerprint.
 				owned.SetProwlarrApplicationFingerprint(inst.Name, apps.SecretFingerprint(arrKeys[inst.Name]))
 			}
 			if err := r.ensureResult(res, "prowlarr/application/"+inst.Name, result, err); err != nil {
@@ -557,13 +516,10 @@ func (r *Runner) work(ctx context.Context, res *Result) error {
 		}
 	}
 
-	// qui and autobrr keep their own user tables, and both hand out an API key
-	// only to a session (docs/box.md, "An app that keeps its own user table has
-	// one account box owns"). The chart gives each a password in the release
-	// Secret and an init container that writes it into the app at every start;
-	// the Job opens a session with it per run and mints nothing. A rejected
-	// login is the one state an operator has to fix by hand, so it is reported
-	// as such rather than as an HTTP status.
+	// qui and autobrr keep their own user tables and hand out an API key only to a
+	// session (docs/box.md). The chart gives each a password in the release Secret
+	// and an init container that writes it at every start; the Job opens a session
+	// with it. A rejected login is the one state an operator must fix by hand.
 	if c.Qui != nil {
 		password, err := ReadSecret(c.Qui.PasswordFile)
 		if err != nil {
@@ -572,7 +528,7 @@ func (r *Runner) work(ctx context.Context, res *Result) error {
 		q := apps.NewQui(c.Qui.URL, c.Qui.URLBase, c.Qui.Username, password)
 		r.logf("waiting for qui at %s%s", c.Qui.URL, c.Qui.URLBase)
 		// qui exits instead of serving when its OIDC issuer is unreachable, so a
-		// timeout here is a configuration error, not a slow start.
+		// timeout here is a configuration error.
 		if err := q.WaitReady(ctx, timeout); err != nil {
 			return r.ensure(res, "qui/ready", apps.Unchanged, err)
 		}
@@ -582,8 +538,8 @@ func (r *Runner) work(ctx context.Context, res *Result) error {
 		}
 		r.okStep(res, "qui/login", c.Qui.Username)
 		if c.Qbittorrent == nil {
-			// An instance needs a qBittorrent to point at; without one there is
-			// nothing to register, and saying so beats a step that never runs.
+			// An instance needs a qBittorrent to point at; saying so beats a step that
+			// never runs.
 			if err := r.ensure(res, "qui/instance", apps.Skipped, nil); err != nil {
 				return err
 			}
@@ -591,15 +547,12 @@ func (r *Runner) work(ctx context.Context, res *Result) error {
 			result, err := q.EnsureInstance(ctx, apps.QuiInstanceSpec{
 				Name: qbitClientName,
 				Host: strings.TrimRight(c.Qbittorrent.URL, "/"),
-				// Owned, and owned as empty: qBittorrent skips its login for
-				// the release's addresses, so qui's instance holds no
-				// credential either.
+				// Owned as empty: qBittorrent skips its login for the release's
+				// addresses, so qui's instance holds no credential either.
 				Username: "",
 				Password: "",
-				// /data is mounted at /data in every app and qBittorrent saves
-				// under /data/downloads/<category>, so qui's own path is the
-				// one the apps write: hardlink detection and the orphan scan
-				// work without a second path mapping.
+				// /data is the same path in every app and qBittorrent saves under
+				// /data/downloads/<category>, so no second path mapping is needed.
 				HasLocalFilesystemAccess: true,
 			}, owned.QuiInstanceID())
 			if err == nil && result.ID != 0 {
@@ -609,16 +562,14 @@ func (r *Runner) work(ctx context.Context, res *Result) error {
 				return err
 			}
 		}
-		// One Arr instance per Sonarr and Radarr on the box. qui's Arr
-		// integration is what resolves a title to the ID it searches for, and
-		// the request is made from qui's pod, so a row that cannot reach its
-		// Arr is qui's own test failing -- which is the receipt's proof that the
-		// catalog's `calls` and the callee's ingress agree.
+		// One Arr instance per Sonarr and Radarr: qui's integration resolves a title
+		// to the ID it searches for, made from qui's pod, so a row that cannot reach
+		// its Arr is qui's own test failing -- the receipt's proof that the catalog's
+		// `calls` and the callee's ingress agree.
 		//
-		// The address carries the Arr's own URL base, the way autobrr's client
-		// does: qui stores the whole URL and dials it as given. Lidarr has no
-		// instance type in qui (internal/models/arr_instance.go at v1.36.1), so
-		// a box's music Arr is reported as skipped rather than left unsaid.
+		// The address carries the Arr's URL base, as autobrr's does. Lidarr has no
+		// instance type in qui (internal/models/arr_instance.go at v1.36.1), so it is
+		// reported skipped.
 		for _, inst := range c.Instances {
 			var kind string
 			switch apps.Kind(inst.Kind) {
@@ -643,8 +594,8 @@ func (r *Runner) work(ctx context.Context, res *Result) error {
 			}, owned.QuiArrInstanceID(inst.Name), owned.QuiArrInstanceFingerprint(inst.Name))
 			if err == nil && result.ID != 0 {
 				owned.SetQuiArrInstanceID(inst.Name, result.ID)
-				// Only after qui's own test proved the row: a fingerprint
-				// recorded for a write nothing accepted would hide a rotation.
+				// Only after qui's own test proved the row: a fingerprint recorded for
+				// a write nothing accepted would hide a rotation.
 				owned.SetQuiArrInstanceFingerprint(inst.Name, apps.SecretFingerprint(arrKeys[inst.Name]))
 			}
 			if err := r.ensureResult(res, "qui/arr/"+inst.Name, result, err); err != nil {
@@ -661,7 +612,7 @@ func (r *Runner) work(ctx context.Context, res *Result) error {
 		a := apps.NewAutobrr(c.Autobrr.URL, c.Autobrr.URLBase, c.Autobrr.Username, password)
 		r.logf("waiting for autobrr at %s%s", c.Autobrr.URL, c.Autobrr.URLBase)
 		// autobrr starts with an unreachable OIDC issuer and retries in the
-		// background, so its readiness is only the HTTP API's.
+		// background, so readiness is only the HTTP API's.
 		if err := a.WaitReady(ctx, timeout); err != nil {
 			return r.ensure(res, "autobrr/ready", apps.Unchanged, err)
 		}
@@ -675,9 +626,7 @@ func (r *Runner) work(ctx context.Context, res *Result) error {
 				Name: qbitClientName,
 				Type: "QBITTORRENT",
 				Host: strings.TrimRight(c.Qbittorrent.URL, "/"),
-				// Owned, and owned as empty; autobrr holds no credential for
-				// qBittorrent, which skips its login for the release's
-				// addresses.
+				// Owned as empty; autobrr holds no qBittorrent credential.
 				Username: "",
 				Password: "",
 			}, owned.AutobrrClientID(qbitClientName), owned.AutobrrClientFingerprint(qbitClientName))
@@ -688,12 +637,9 @@ func (r *Runner) work(ctx context.Context, res *Result) error {
 				return err
 			}
 		}
-		// One client per Arr instance, HD and 4K alike. The host carries the
-		// Arr's own base path, which autobrr uses verbatim as the Arr's base
-		// URL, and the key is the Arr's own key from the release Secret (the
-		// same one the app was given). Filters and actions are the operator's:
-		// a filter is their indexers, quality and show list, and an action
-		// refers to these clients by id.
+		// One client per Arr instance, HD and 4K alike. The host carries the Arr's
+		// base path, which autobrr uses verbatim, and the key is the Arr's own from
+		// the release Secret. Filters and actions are the operator's.
 		for _, inst := range c.Instances {
 			var kind string
 			switch apps.Kind(inst.Kind) {
@@ -702,9 +648,8 @@ func (r *Runner) work(ctx context.Context, res *Result) error {
 			case apps.Radarr:
 				kind = "RADARR"
 			case apps.Lidarr:
-				// autobrr's Arr clients are one type per app, and LIDARR is
-				// its own (internal/domain/downloader.go at v1.91.1:
-				// DownloaderTypeLidarr).
+				// autobrr's Arr clients are one type per app, and LIDARR is its own
+				// (internal/domain/downloader.go at v1.91.1: DownloaderTypeLidarr).
 				kind = "LIDARR"
 			default:
 				return r.ensure(res, "autobrr/downloader/"+inst.Name, apps.Unchanged,
@@ -726,11 +671,9 @@ func (r *Runner) work(ctx context.Context, res *Result) error {
 		}
 	}
 
-	// PeerBanHelper reads qBittorrent's Web API to find peers to ban, so what it
-	// needs is one downloader holding the same password every other copy has.
-	// Its id is a key in its own config file, not a number, and PBH answers
-	// HEALTHY only once its own poll loop has logged in to qBittorrent with
-	// what was written -- which is what the record waits for.
+	// PeerBanHelper reads qBittorrent's Web API for peers to ban, so it needs one
+	// downloader. Its id is a key in its own config, and PBH answers HEALTHY only
+	// once its poll loop has logged in with what was written.
 	if c.Pbh != nil {
 		token, err := ReadSecret(c.Pbh.TokenFile)
 		if err != nil {
@@ -757,8 +700,7 @@ func (r *Runner) work(ctx context.Context, res *Result) error {
 				ID:       "qbittorrent",
 				Name:     qbitClientName,
 				Endpoint: strings.TrimRight(c.Qbittorrent.URL, "/"),
-				// Owned, and owned as empty: PBH reads qBittorrent's API
-				// without a login, the same way every other caller does.
+				// Owned as empty: PBH reads qBittorrent's API without a login.
 				Username: "",
 				Password: "",
 			}, owned.PbhDownloaderID())
@@ -777,9 +719,9 @@ func (r *Runner) work(ctx context.Context, res *Result) error {
 		}
 	}
 
-	// Prove every distinct download/library pair, not just the first. One claim is
-	// not one filesystem: a disk mounted on the host at, say, /data/media/movies-4k
-	// sits inside the claim, passes a tv check, and turns every 4K import into a copy.
+	// Prove every distinct download/library pair: one claim is not one filesystem,
+	// and a disk mounted inside it passes a tv check while turning every 4K import
+	// into a copy.
 	proven := map[[2]string]bool{}
 	for _, inst := range c.Instances {
 		pair := [2]string{inst.SavePath, inst.RootFolder}
@@ -805,13 +747,10 @@ func (r *Runner) work(ctx context.Context, res *Result) error {
 		}
 	}
 
-	// Plex, then the two apps that attach to it (PLAN.md's catalog order).
-	// A missing or not-yet-successful claim token leaves Plex unclaimed —
-	// /identity still answers, so that alone is not a failure — and the media
-	// rows below report pending rather than failing the release. Tautulli needs
-	// its own Plex server token for the PMS link (the release Secret's
-	// plex-token), which is independent of the claim token: claim signs the
-	// server in to Plex.tv, plex-token authorizes a client against the server.
+	// Plex, then the two apps that attach to it (PLAN.md's catalog order). A missing
+	// or failed claim token leaves Plex unclaimed -- /identity still answers, so that
+	// is not a failure -- and the media rows report pending. Tautulli's PMS link uses
+	// the release Secret's plex-token, which is independent of the claim token.
 	var plexIdentity *apps.Identity
 	var plex *apps.Plex
 	if c.Plex != nil {
@@ -829,11 +768,8 @@ func (r *Runner) work(ctx context.Context, res *Result) error {
 		if ident.Claimed {
 			r.okStep(res, "plex/claim", "machineIdentifier="+ident.MachineIdentifier)
 		} else {
-			// Skipping the claim is allowed, but the consequence is not
-			// obvious: Seerr builds its first admin from a Plex sign-in, so
-			// on an unclaimed server the first visitor to Seerr owns it.
-			// Say that only when Seerr is in this release; without Seerr the
-			// older, narrower sentence is the whole truth.
+			// Skipping the claim is allowed, but on an unclaimed server the first
+			// visitor to Seerr owns it. Say that only when Seerr is in the release.
 			detail := "no claim token (or it expired before Plex started): Plex is not signed in to a Plex.tv account"
 			if c.Seerr != nil {
 				detail = "Plex is not claimed yet: until it is, whoever signs in to Seerr first becomes its owner. Claim it at https://plex.tv/claim"
@@ -851,28 +787,21 @@ func (r *Runner) work(ctx context.Context, res *Result) error {
 			if err != nil {
 				return r.ensure(res, "tautulli/credentials", apps.Unchanged, err)
 			}
-			// The PMS link is token-based. Without a Plex server token the only
-			// alternative would be Plex trusting a network range, and the
-			// Gateway's Envoy reaches Plex from a pod IP inside the pod CIDR —
-			// that would expose the server unauthenticated through the Gateway.
-			// No token therefore means pending, not a tokenless write.
+			// The PMS link is token-based: trusting a network range would expose the
+			// server unauthenticated through the Gateway, whose Envoy comes from a pod
+			// IP. No token therefore means pending, not a tokenless write.
 			plexToken, haveToken, err := ReadOptionalSecret(c.Tautulli.PlexTokenFile)
 			if err != nil {
 				return r.ensure(res, "tautulli/plex", apps.Unchanged, err)
 			}
-			// Why the link will not be written, "" when it will. The token is
-			// proven against Plex itself, and before touching Tautulli at all:
-			// Tautulli's own get_server_identity reads Plex's unauthenticated
-			// /identity, so a bogus token would otherwise "prove" a link Plex
-			// refuses on every real request; /library/sections answers 401 to a
-			// token Plex does not accept. A rejected token is a release
-			// credential error like any other — except on a server that is not
-			// claimed, where every token is refused (see plexTokenPending).
+			// Why the link will not be written, "" when it will. The token is proven
+			// against Plex before touching Tautulli: its identity check reads Plex's
+			// unauthenticated /identity, and /library/sections answers 401 to a token
+			// Plex does not accept.
 			pendingReason, pendingShort := "", ""
 			if !haveToken {
-				// box fills the token in from Plex's own settings on every
-				// apply (internal/release), so a hand-set key is not what a
-				// person has to do here: claiming the server is.
+				// box fills the token in from Plex's own settings on every apply, so
+				// claiming the server is the person's part here.
 				pendingReason = plexTokenMissing(plexIdentity, "Tautulli")
 				pendingShort = "no Plex token"
 			} else if err := plex.VerifyToken(ctx, plexToken); err != nil {
@@ -896,26 +825,24 @@ func (r *Runner) work(ctx context.Context, res *Result) error {
 				if err != nil {
 					return r.ensure(res, "tautulli/plex", apps.Unchanged, err)
 				}
-				// Tautulli withholds pms_token from get_settings, so the
-				// fingerprint of the token last written and proven is what
-				// makes a rotation in the Secret visible (owned.json).
+				// Tautulli withholds pms_token, so the fingerprint of the token last
+				// written and proven makes a Secret rotation visible (owned.json).
 				change, err := tt.EnsurePlexConnection(ctx, plexHost, plexPort,
 					plexIdentity.MachineIdentifier, plexToken, owned.TautulliPlexTokenFingerprint())
 				if err := r.ensure(res, "tautulli/plex", change, err); err != nil {
 					return err
 				}
-				// Only after the write and its proof succeeded: a fingerprint
-				// recorded for an unaccepted write would mask a rotation.
+				// Only after the write and its proof succeeded: a fingerprint recorded
+				// for an unaccepted write would mask a rotation.
 				owned.SetTautulliPlexTokenFingerprint(apps.PlexTokenFingerprint(plexToken))
 			}
 		}
 	}
 
 	if c.Maintainerr != nil {
-		// Maintainerr's Plex connection is a row in its settings, and it is the
-		// one thing that has to be right before any of its rules can run: one it
-		// cannot reach deletes nothing and reports nothing. It takes the same
-		// server token Tautulli's PMS link does.
+		// Maintainerr's Plex connection is a row in its settings and the one thing
+		// that must be right before any rule can run: one it cannot reach deletes
+		// nothing. It takes the same server token as Tautulli's link.
 		if plexIdentity == nil {
 			res.Steps = append(res.Steps, Step{Name: "maintainerr/plex", Result: stepPending, Detail: "plex is not deployed in this release"})
 		} else {
@@ -923,9 +850,8 @@ func (r *Runner) work(ctx context.Context, res *Result) error {
 			if err != nil {
 				return r.ensure(res, "maintainerr/plex", apps.Unchanged, err)
 			}
-			// Same rule as Tautulli's: the token is proven against Plex before
-			// anything is written with it, and a server that is not claimed
-			// refuses every token, so that state is pending rather than failed.
+			// Same rule as Tautulli's: prove the token against Plex first, and an
+			// unclaimed server refuses every token, so that state is pending.
 			pendingReason, pendingShort := "", ""
 			if !haveToken {
 				pendingReason = plexTokenMissing(plexIdentity, "Maintainerr")
@@ -939,8 +865,8 @@ func (r *Runner) work(ctx context.Context, res *Result) error {
 			}
 			me := apps.NewMaintainerr(c.Maintainerr.URL, c.Maintainerr.URLBase)
 			r.logf("waiting for Maintainerr at %s%s", c.Maintainerr.URL, c.Maintainerr.URLBase)
-			// Its readiness answers from the app's own database, which is what
-			// says the settings this step writes land in a store that works.
+			// Its readiness answers from the app's own database, which says the
+			// settings written here land in a store that works.
 			if err := me.WaitReady(ctx, timeout); err != nil {
 				return r.ensure(res, "maintainerr/ready", apps.Unchanged, err)
 			}
@@ -953,9 +879,8 @@ func (r *Runner) work(ctx context.Context, res *Result) error {
 				if err != nil {
 					return r.ensure(res, "maintainerr/plex", apps.Unchanged, err)
 				}
-				// Maintainerr masks the token it stores, so the fingerprint of
-				// the one last written and proven is what makes a rotation in the
-				// Secret visible (owned.json) -- the same rule as Tautulli's.
+				// Maintainerr masks the token, so the fingerprint of the one last
+				// written and proven makes a rotation visible (owned.json).
 				change, err := me.EnsurePlexConnection(ctx, apps.PlexConnection{
 					Host:             plexHost,
 					Port:             plexPort,
@@ -965,9 +890,8 @@ func (r *Runner) work(ctx context.Context, res *Result) error {
 				if err := r.ensure(res, "maintainerr/plex", change, err); err != nil {
 					return err
 				}
-				// Only after the write and its proof succeeded: a fingerprint
-				// recorded for a connection Maintainerr never proved would mask
-				// a rotation.
+				// Only after the write and its proof succeeded, or a rotation would be
+				// masked.
 				owned.SetMaintainerrPlexTokenFingerprint(apps.PlexTokenFingerprint(plexToken))
 			}
 		}
@@ -984,16 +908,11 @@ func (r *Runner) work(ctx context.Context, res *Result) error {
 		if err != nil {
 			return r.ensure(res, "seerr/settings", apps.Unchanged, err)
 		}
-		// Every settings endpoint in Seerr needs an authenticated admin
-		// session, and the only way to create its first admin user is an
-		// interactive Plex (or Jellyfin) OAuth sign-in through a browser — a
-		// claim token does not help, because it authenticates the Plex
-		// *server* to plex.tv, not a plex.tv *account* into Seerr. So the
-		// question this run can answer is only whether an admin exists:
-		// Seerr's own `initialized` says so, and a migrated Seerr brings its
-		// admin — and its API key — in the settings its snapshot carried.
-		// There is nothing left to ask of a box whose Seerr is set up, so
-		// that box prints no row at all rather than a to-do it cannot do.
+		// Every settings endpoint needs an authenticated admin, and the only way to
+		// create Seerr's first admin is an interactive Plex sign-in through a browser:
+		// a claim token authenticates the server to plex.tv, not an account into
+		// Seerr. So the only answer this run can give is whether an admin exists; a
+		// migrated Seerr brings its admin in its snapshot, and that box gets no row.
 		if !public.Initialized {
 			res.Steps = append(res.Steps, Step{Name: "seerr/plex", Result: stepPending,
 				Detail: fmt.Sprintf("Seerr has no admin account yet: sign in once at %s with Plex to let the wiring Job take over", c.Seerr.PublicURL)})
@@ -1007,8 +926,8 @@ func (r *Runner) work(ctx context.Context, res *Result) error {
 	return nil
 }
 
-// publish writes status.json and a readable summary into the wiring ConfigMap. It
-// survives an expired context: a failed run is exactly when the receipt matters.
+// publish writes status.json and the summary into the wiring ConfigMap, surviving an
+// expired context: a failed run is when the receipt matters.
 func (r *Runner) publish(ctx context.Context, res *Result) error {
 	data, err := Render(res)
 	if err != nil {
@@ -1019,10 +938,8 @@ func (r *Runner) publish(ctx context.Context, res *Result) error {
 	return r.Publish(pctx, data)
 }
 
-// Render builds the ConfigMap payload for a receipt. owned.json is written
-// alongside status.json and summary.txt in the same Upsert — including on a
-// failed run, so the record reflects whatever ids were confirmed before the
-// run stopped (AGENTS.md invariant 11).
+// Render builds the ConfigMap payload. owned.json is written with status.json and
+// summary.txt in the same Upsert, including on a failed run.
 func Render(res *Result) (map[string]string, error) {
 	b, err := json.MarshalIndent(res, "", "  ")
 	if err != nil {
@@ -1059,16 +976,12 @@ func Summary(res *Result) string {
 	return b.String()
 }
 
-// plexTokenPending says a Plex server token cannot be used because the server is
-// not signed in to a Plex.tv account at all: Plex refuses every server token
-// until it is claimed, so a 401 there is the claim's absence, not a bad token.
-// The row is pending, with the claim as the thing to do, and nothing is written
-// with a token the server would refuse.
+// plexTokenPending says a Plex token cannot be used because the server is not
+// signed in to plex.tv at all: it refuses every token until claimed, so a 401 there
+// is the claim's absence.
 //
-// It is deliberately narrow. A claimed server that rejects the token is a
-// credential error like any other, and the caller stops the run: the token was
-// either supplied by a person or seeded from a server whose account plex.tv no
-// longer recognises, and neither is something a retry fixes.
+// A claimed server that rejects the token is a credential error, and the caller
+// stops the run.
 func plexTokenPending(ident *apps.Identity, err error) (string, bool) {
 	var rejected *apps.TokenRejectedError
 	if ident == nil || ident.Claimed || !errors.As(err, &rejected) {
@@ -1077,11 +990,9 @@ func plexTokenPending(ident *apps.Identity, err error) (string, bool) {
 	return "Plex is not claimed yet, so it refuses every server token: claim it at https://plex.tv/claim, then run box apply", true
 }
 
-// plexTokenMissing is the receipt's reason for a Plex-dependent row with no
-// server token to use, and it says what the person's part is, not what box's is:
-// box supplies the token from Plex's own settings on every apply
-// (internal/release), so a claimed server only has to wait for the next run,
-// and an unclaimed one cannot have a usable token at all until it is claimed.
+// plexTokenMissing is the receipt's reason for a Plex-dependent row with no token,
+// and it says what the person's part is: box supplies the token on every apply, so a
+// claimed server only waits for the next run.
 func plexTokenMissing(ident *apps.Identity, app string) string {
 	if ident != nil && ident.Claimed {
 		return "no plex-token in the release Secret: box reads it from Plex on the next apply"
@@ -1089,10 +1000,8 @@ func plexTokenMissing(ident *apps.Identity, app string) string {
 	return fmt.Sprintf("Plex is not claimed yet: claim it at https://plex.tv/claim, then apply again to connect %s", app)
 }
 
-// pbhReady names the one refusal PBH's own readiness can produce: it answers
-// 403 to everything when the Bearer token is not its WebUI token. The chart
-// gives the app the release Secret's pbh-token through its environment, so the
-// two can only disagree if something else set one of them.
+// pbhReady names the one refusal PBH's readiness can produce: it answers 403 to
+// everything when the Bearer token is not its WebUI token.
 func pbhReady(err error) error {
 	if !apps.IsForbidden(err) {
 		return err
@@ -1100,12 +1009,10 @@ func pbhReady(err error) error {
 	return fmt.Errorf("%w: PeerBanHelper refused the release Secret's pbh-token, so its WebUI token is something else", err)
 }
 
-// loginFailed turns an app's credential refusal into the sentence an operator
-// can act on. Both apps take their password from the release Secret only when
-// their pod starts, so a password changed inside the running app is not a
-// broken release: it is a pod that has not restarted since. The Job must not
-// restart pods itself (it is a Helm hook, and a restart loop would hide the
-// real cause), so it names the cause and the command.
+// loginFailed turns an app's credential refusal into the sentence an operator can
+// act on. Both apps take their password from the Secret only at pod start, so a
+// password changed inside the running app is a pod that has not restarted. The Job
+// names the cause and the command rather than restarting pods itself.
 func loginFailed(err error, workload string) error {
 	var rejected *apps.LoginRejectedError
 	if !errors.As(err, &rejected) {

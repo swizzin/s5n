@@ -6,11 +6,9 @@ import (
 	"fmt"
 )
 
-// OwnedRecord is the `owned.json` key in the `<release>-wiring` ConfigMap: the
-// only evidence of which Arr download client or Prowlarr application the
-// wiring Job itself created or adopted. The live object's name is not part of
-// its identity — a rename in the app's own UI is the user's business — so
-// ownership is tracked by id instead (see AGENTS.md invariant 11).
+// OwnedRecord is the owned.json key in the wiring ConfigMap: the evidence of which
+// Arr client or Prowlarr application the Job created or adopted. Ownership is by id,
+// because a rename in the app's UI is the user's business (AGENTS.md invariant 11).
 type OwnedRecord struct {
 	Version     int                 `json:"version"`
 	Arr         map[string]ArrOwned `json:"arr,omitempty"`
@@ -22,87 +20,64 @@ type OwnedRecord struct {
 	Pbh         *PbhOwned           `json:"pbh,omitempty"`
 }
 
-// PbhOwned is what the Job owns in PeerBanHelper: one qBittorrent downloader,
-// recorded by the string id it lives under in PBH's own `client:` config (PBH
-// numbers nothing, and a name is the user's to change). There is no
-// fingerprint beside it: the downloader is written with an empty username and
-// password, so it holds no secret that could rotate.
+// PbhOwned is what the Job owns in PeerBanHelper: one downloader, recorded by the
+// string id in PBH's own config. No fingerprint: it holds no secret.
 type PbhOwned struct {
 	Downloader string `json:"downloader,omitempty"`
 }
 
-// QuiOwned is what the Job owns in qui, an app that keeps its own user table
-// and hands out API keys only to a signed-in session, so its instance can be
-// registered only with the account the chart owns (see docs/box.md, "An app
-// that keeps its own user table has one account box owns"). The instance's
-// qBittorrent login is written empty, so there is no fingerprint beside the id.
-//
-// ArrInstances is one row per Arr instance on the box, keyed by the instance's
-// name ("sonarr-4k"), and ArrFingerprints is the sha256-hex of the Arr API key
-// each row was last written and proven with: qui never answers a stored key
-// (internal/models/arr_instance.go marks it json:"-"), so the fingerprint is the
-// only way a rotation in the release Secret is visible.
+// QuiOwned is what the Job owns in qui, whose instance is registered with the account
+// the chart owns (docs/box.md). Its qBittorrent login is empty, so only the Arr rows
+// carry fingerprints: qui never answers a stored key
+// (internal/models/arr_instance.go marks it json:"-"), so the sha256 of the Arr key is
+// the only way a rotation is visible.
 type QuiOwned struct {
 	Instance        int               `json:"instance,omitempty"`
 	ArrInstances    map[string]int    `json:"arrInstances,omitempty"`
 	ArrFingerprints map[string]string `json:"arrFingerprints,omitempty"`
 }
 
-// AutobrrOwned is what the Job owns in autobrr: one download client per Arr
-// instance plus qBittorrent, each recorded by id (a rename is the user's
-// business) and each with a fingerprint of the secret last written and proven
-// — the qBittorrent password or that Arr's API key, neither of which autobrr
-// returns. A changed fingerprint is a stale copy and gets an update.
+// AutobrrOwned is what the Job owns in autobrr: one client per Arr instance plus
+// qBittorrent, each by id and with a fingerprint of the secret last written, which
+// autobrr never returns. A changed fingerprint means a stale copy.
 type AutobrrOwned struct {
 	Clients      map[string]int    `json:"clients,omitempty"`
 	Fingerprints map[string]string `json:"fingerprints,omitempty"`
 }
 
-// TautulliOwned is what the Job last wrote into Tautulli that the app will not
-// read back. PlexTokenFingerprint is sha256-hex of the Plex server token the
-// PMS link was last written and proven with: Tautulli lists PMS_TOKEN among its
-// do-not-download keys, so get_settings answers null and the fingerprint is the
-// only way a rotated token in the release Secret can be detected. It is a
-// fingerprint, never the token itself (AGENTS.md invariant 7), and it lives in
-// owned.json because that record is already the Job's durable, fail-closed
-// state: a read error stops the run rather than guessing.
+// TautulliOwned is what the Job last wrote that the app will not read back:
+// Tautulli lists PMS_TOKEN among its do-not-download keys, so get_settings answers
+// null and this fingerprint is the only way a rotated token is visible. It is never
+// the token itself (AGENTS.md invariant 7), and it lives in owned.json because that
+// record fails closed.
 type TautulliOwned struct {
 	PlexTokenFingerprint string `json:"plexTokenFingerprint,omitempty"`
 }
 
-// MaintainerrOwned is what the Job last wrote into Maintainerr that the app will
-// not read back: the Plex server token, as the sha256-hex of the one the
-// connection was last written and proven with. Maintainerr's GET /api/settings
-// masks plex_auth_token (`abc...xyz` when one is stored), so the fingerprint is
-// the only way a rotation in the release Secret can be detected -- the same rule
-// as Tautulli's PMS link, and never the token itself (AGENTS.md invariant 7).
+// MaintainerrOwned is what the Job last wrote that the app will not read back:
+// Maintainerr masks plex_auth_token, so this fingerprint is the only way a rotation
+// is visible -- never the token itself (AGENTS.md invariant 7).
 type MaintainerrOwned struct {
 	PlexTokenFingerprint string `json:"plexTokenFingerprint,omitempty"`
 }
 
-// ArrOwned is what the Job owns on one Arr instance: the qBittorrent download
-// client and, when the release runs it, the SABnzbd one, by id. Neither client
-// stores a credential the Job can read back (qBittorrent's login is bypassed
-// for the release's addresses, and SABnzbd's key is the release Secret's), so
-// the record carries no fingerprint.
+// ArrOwned is what the Job owns on one Arr instance: the qBittorrent client and,
+// when the release runs it, the SABnzbd one. Neither stores a credential the Job can
+// read back, so there is no fingerprint.
 type ArrOwned struct {
 	DownloadClient int `json:"downloadClient,omitempty"`
 	Sabnzbd        int `json:"sabnzbd,omitempty"`
 }
 
-// ProwlarrOwned is what the Job owns in Prowlarr: one application per Arr
-// instance, each recorded by id, and the sha256-hex of the Arr API key it was
-// last written and proven with. Prowlarr answers a mask for a stored key, so the
-// fingerprint is what makes a rotated key in the release Secret visible -- the
-// same rule as the qBittorrent password in qui, autobrr and every Arr.
+// ProwlarrOwned is what the Job owns in Prowlarr: one application per Arr instance,
+// by id, with the sha256 of the Arr key it was written with. Prowlarr answers a mask,
+// so the fingerprint is what makes a rotation visible.
 type ProwlarrOwned struct {
 	Applications map[string]int    `json:"applications,omitempty"`
 	Fingerprints map[string]string `json:"fingerprints,omitempty"`
 }
 
-// NewOwnedRecord returns an empty record ready to be filled in during a run
-// that has nothing to adopt yet (a brand-new release, or a ConfigMap the Job
-// could not read).
+// NewOwnedRecord returns an empty record for a run with nothing to adopt yet.
 func NewOwnedRecord() *OwnedRecord {
 	return &OwnedRecord{
 		Version:  1,
@@ -113,9 +88,8 @@ func NewOwnedRecord() *OwnedRecord {
 	}
 }
 
-// ParseOwnedRecord decodes owned.json. Empty input is not an error: it is
-// what a fresh release's ConfigMap looks like before the first successful
-// run, and callers should adopt existing objects by name.
+// ParseOwnedRecord decodes owned.json. Empty input is not an error: it is a fresh
+// release's ConfigMap before the first successful run.
 func ParseOwnedRecord(raw []byte) (*OwnedRecord, error) {
 	rec := NewOwnedRecord()
 	if len(bytes.TrimSpace(raw)) == 0 {
@@ -210,9 +184,9 @@ func (o *OwnedRecord) ProwlarrApplicationFingerprint(instance string) string {
 	return o.Prowlarr.Fingerprints[instance]
 }
 
-// SetProwlarrApplicationFingerprint records the fingerprint of the Arr API key
-// the Job just wrote into one Prowlarr application and proved with Prowlarr's
-// own test endpoint. Call it only after that succeeded.
+// SetProwlarrApplicationFingerprint records the fingerprint of the Arr key just
+// written and proved with Prowlarr's own test endpoint. Call it only after it
+// succeeded.
 func (o *OwnedRecord) SetProwlarrApplicationFingerprint(instance, fingerprint string) {
 	if o.Prowlarr.Fingerprints == nil {
 		o.Prowlarr.Fingerprints = map[string]string{}
@@ -230,9 +204,9 @@ func (o *OwnedRecord) TautulliPlexTokenFingerprint() string {
 	return o.Tautulli.PlexTokenFingerprint
 }
 
-// SetTautulliPlexTokenFingerprint records the fingerprint of the Plex server
-// token the Job just wrote and proved. Call it only after that succeeded: a
-// fingerprint stored for a write the app did not accept would hide a rotation.
+// SetTautulliPlexTokenFingerprint records the fingerprint of the token just written
+// and proved. Call it only after that succeeded: one stored for a write the app did
+// not accept would hide a rotation.
 func (o *OwnedRecord) SetTautulliPlexTokenFingerprint(fingerprint string) {
 	if o.Tautulli == nil {
 		o.Tautulli = &TautulliOwned{}
@@ -308,10 +282,8 @@ func (o *OwnedRecord) QuiArrInstanceFingerprint(instance string) string {
 	return o.Qui.ArrFingerprints[instance]
 }
 
-// SetQuiArrInstanceFingerprint records the fingerprint of the Arr API key the
-// Job just wrote into one of qui's Arr rows and proved with qui's own test. Call
-// it only after that succeeded: a fingerprint stored for a write the app did not
-// accept would hide a rotation.
+// SetQuiArrInstanceFingerprint records the fingerprint of the Arr key just written
+// into a qui row and proved with qui's own test. Call it only after it succeeded.
 func (o *OwnedRecord) SetQuiArrInstanceFingerprint(instance, fingerprint string) {
 	if o.Qui == nil {
 		o.Qui = &QuiOwned{}
@@ -353,9 +325,8 @@ func (o *OwnedRecord) AutobrrClientFingerprint(name string) string {
 	return o.Autobrr.Fingerprints[name]
 }
 
-// SetAutobrrClientFingerprint records the fingerprint of the secret the Job
-// just wrote into one autobrr download client and proved with autobrr's own
-// test. Call it only after that succeeded.
+// SetAutobrrClientFingerprint records the fingerprint of the secret just written and
+// proved with autobrr's own test. Call it only after it succeeded.
 func (o *OwnedRecord) SetAutobrrClientFingerprint(name, fingerprint string) {
 	if o.Autobrr == nil {
 		o.Autobrr = &AutobrrOwned{}

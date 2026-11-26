@@ -12,10 +12,8 @@ import (
 	"github.com/swizzin/s5n/internal/apps"
 )
 
-// fakePbh is PeerBanHelper's WebAPI as the wiring Job meets it: an envelope
-// around every answer, downloaders keyed by a string id, PUT creating, PATCH
-// replacing, and a status endpoint that reports what its own poll loop found.
-// The health is a switch so a test can make it healthy, stuck or refused.
+// fakePbh is PBH's WebAPI: an envelope, downloaders keyed by a string id, PUT
+// creating, PATCH replacing, and a status endpoint reporting its poll loop's find.
 type fakePbh struct {
 	mu        sync.Mutex
 	token     string
@@ -102,8 +100,7 @@ func (f *fakePbh) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// withPbh points the harness at a PeerBanHelper whose token is the release
-// Secret's pbh-token, and returns the fake so a test can read what was stored.
+// withPbh points the harness at a PBH whose token is the Secret's pbh-token.
 func (h *harness) withPbh(t *testing.T) *fakePbh {
 	t.Helper()
 	f := &fakePbh{token: "pbh-token-abc", cfg: map[string]apps.Item{}}
@@ -115,9 +112,8 @@ func (h *harness) withPbh(t *testing.T) *fakePbh {
 	return f
 }
 
-// PBH holds one qBittorrent downloader, and it is recorded only once PBH's own
-// status says HEALTHY - which is the proof it reached the downloader with the
-// (empty) credentials written. A second run then writes nothing.
+// PBH holds one downloader, recorded only once its status says HEALTHY, the proof
+// it reached it with the empty credentials written. A second run writes nothing.
 func TestWiringRegistersPbhDownloader(t *testing.T) {
 	h := newHarness(t)
 	f := h.withPbh(t)
@@ -169,8 +165,8 @@ func TestWiringRegistersPbhDownloader(t *testing.T) {
 	}
 }
 
-// A downloader PBH cannot reach is a failed step, not a recorded one: the id
-// must not be written for a write the app never accepted.
+// A downloader PBH cannot reach is a failed step: the id is not recorded for a write
+// the app never accepted.
 func TestWiringPbhWaitsForHealthy(t *testing.T) {
 	h := newHarness(t)
 	f := h.withPbh(t)
@@ -190,8 +186,7 @@ func TestWiringPbhWaitsForHealthy(t *testing.T) {
 	}
 }
 
-// Without qBittorrent there is nothing for PBH to read, and the step says so
-// rather than failing.
+// Without qBittorrent the step says so rather than failing.
 func TestWiringSkipsPbhWithoutQbittorrent(t *testing.T) {
 	h := newHarness(t)
 	h.withPbh(t)
@@ -208,8 +203,8 @@ func TestWiringSkipsPbhWithoutQbittorrent(t *testing.T) {
 	}
 }
 
-// A token that is not PBH's is a release credential error with the sentence an
-// operator can act on, and it is not retried into PBH's own fail2ban.
+// A token that is not PBH's is a credential error with a sentence to act on, not
+// retried into PBH's fail2ban.
 func TestWiringNamesARejectedPbhToken(t *testing.T) {
 	h := newHarness(t)
 	h.withPbh(t)

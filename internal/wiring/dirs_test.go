@@ -11,9 +11,8 @@ import (
 	"testing"
 )
 
-// The first install runs against a data path nothing has prepared: the two
-// trees under every category must be made before the Arr root-folder step, or
-// that step is refused. This drives the function from an empty temp directory.
+// The first install runs against an unprepared data path: both trees must be made
+// before the Arr root-folder step or it is refused.
 func TestEnsureDataDirsCreatesBothTrees(t *testing.T) {
 	root := t.TempDir()
 	insts := []Instance{
@@ -38,9 +37,8 @@ func TestEnsureDataDirsCreatesBothTrees(t *testing.T) {
 		if !info.IsDir() {
 			t.Fatalf("%s is not a directory", d.Path)
 		}
-		// The chart runs the wiring Job as the release's puid:pgid, so a
-		// directory this process creates is owned by that uid:gid. init tells the
-		// operator exactly that, so it cannot be a different owner here.
+		// The Job runs as the release's puid:pgid, so a directory it creates is
+		// owned by that uid:gid.
 		st, ok := info.Sys().(*syscall.Stat_t)
 		if !ok {
 			t.Fatalf("%s: no stat_t", d.Path)
@@ -48,8 +46,8 @@ func TestEnsureDataDirsCreatesBothTrees(t *testing.T) {
 		if int(st.Uid) != os.Geteuid() || int(st.Gid) != os.Getegid() {
 			t.Fatalf("%s owned %d:%d, want the creating process %d:%d", d.Path, st.Uid, st.Gid, os.Geteuid(), os.Getegid())
 		}
-		// Owner write is what the Arr and qBittorrent need; a restrictive umask
-		// may drop the group bits, so only the owner bits are asserted.
+		// A restrictive umask may drop the group bits, so only owner bits are
+		// asserted.
 		if info.Mode().Perm()&0o700 != 0o700 {
 			t.Fatalf("%s mode %v is not owner-writable", d.Path, info.Mode().Perm())
 		}
@@ -70,8 +68,7 @@ func TestEnsureDataDirsCreatesBothTrees(t *testing.T) {
 	}
 }
 
-// A directory that is already there (the operator made it, or a previous run
-// did) is left alone, and only the missing one is made.
+// An existing directory is left alone; only the missing one is made.
 func TestEnsureDataDirsReportsExistingAndCreatesMissing(t *testing.T) {
 	root := t.TempDir()
 	save := filepath.Join(root, "downloads/tv")
@@ -87,8 +84,7 @@ func TestEnsureDataDirsReportsExistingAndCreatesMissing(t *testing.T) {
 	}
 }
 
-// Two instances that share a category and its paths must not produce two
-// receipt lines for one directory.
+// Two instances sharing a category must not produce two receipt lines.
 func TestEnsureDataDirsDeduplicatesSharedPaths(t *testing.T) {
 	root := t.TempDir()
 	shared := Instance{Name: "sonarr", Category: "tv", SavePath: filepath.Join(root, "downloads/tv"), RootFolder: filepath.Join(root, "media/tv")}
@@ -104,8 +100,7 @@ func TestEnsureDataDirsDeduplicatesSharedPaths(t *testing.T) {
 	}
 }
 
-// A library path that is a file, or that sits under one, fails hard and names
-// the path: an Arr would otherwise be handed a root folder it cannot write.
+// A library path that is a file fails hard and names the path.
 func TestEnsureDataDirsFailsWithPathAndError(t *testing.T) {
 	root := t.TempDir()
 	blocker := filepath.Join(root, "blocker")
@@ -129,9 +124,7 @@ func TestEnsureDataDirsFailsWithPathAndError(t *testing.T) {
 	}
 }
 
-// The hardlink proof must not create what it proves: with a missing directory
-// it has to fail, not silently prepare the path (that is what hid the empty
-// first install).
+// The hardlink proof must not create what it proves: a missing directory fails.
 func TestCheckHardlinkDoesNotCreateDirectories(t *testing.T) {
 	root := t.TempDir()
 	save := filepath.Join(root, "downloads/tv")
@@ -147,8 +140,8 @@ func TestCheckHardlinkDoesNotCreateDirectories(t *testing.T) {
 	}
 }
 
-// The order in the run is the bug being fixed: on an empty data path the
-// directories are made before the Arr root-folder step, and the run succeeds.
+// The order is the bug being fixed: on an empty data path the directories are made
+// before the Arr root-folder step.
 func TestWiringMakesDataDirsBeforeTheArrSteps(t *testing.T) {
 	h := newHarness(t)
 	res, err := h.runner.Run(context.Background())
@@ -184,10 +177,8 @@ func TestWiringMakesDataDirsBeforeTheArrSteps(t *testing.T) {
 	}
 }
 
-// A category may be one qBittorrent subcategory level. Both trees then have an
-// intermediate directory the Job must make before the Arr asks for its root
-// folder, and it must carry the leaf's owner: the Arr writes into the leaf, so
-// a root-owned parent is a permission failure one level up.
+// A subcategory gives both trees an intermediate directory, made before the Arr
+// asks for its root folder and carrying the leaf's owner.
 func TestEnsureDataDirsNestedCategory(t *testing.T) {
 	root := t.TempDir()
 	save := filepath.Join(root, "downloads/4K/Movies")
@@ -231,8 +222,7 @@ func TestEnsureDataDirsNestedCategory(t *testing.T) {
 		}
 	}
 
-	// The hardlink proof runs per download/library pair, so it must pass on the
-	// nested leaf and leave nothing behind in either tree.
+	// The proof runs per pair, so it must pass on the nested leaf.
 	check := CheckHardlink(save, lib)
 	if !check.OK || check.Nlink != 2 || !check.SameDevice {
 		t.Fatalf("hardlink proof on the nested pair = %+v", check)
@@ -246,8 +236,8 @@ func TestEnsureDataDirsNestedCategory(t *testing.T) {
 	}
 }
 
-// The intermediate is made once, not per instance: two 4K instances share 4K.
-// A second run reports the leaves without pretending it created the parent.
+// The intermediate is made once: two 4K instances share 4K, and a second run
+// reports the leaves.
 func TestEnsureDataDirsNestedParentShared(t *testing.T) {
 	root := t.TempDir()
 	insts := []Instance{

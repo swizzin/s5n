@@ -1,10 +1,8 @@
 package wiring
 
-// Jellyfin's first-run wizard is closed inside the pod (the chart's init
-// container), not by this Job. These are the two decisions that used to be the
-// Job's writes and are now reads: a server whose wizard is still open is
-// refused, and the account the person was told to use is reported, never
-// invented or renamed.
+// Jellyfin's first-run wizard is closed inside the pod, not by this Job. A server
+// whose wizard is still open is refused, and the account the person was told to
+// use is reported, never invented or renamed.
 
 import (
 	"context"
@@ -40,8 +38,7 @@ func TestTheJobRefusesAServerWhoseWizardIsOpen(t *testing.T) {
 	}
 }
 
-// jellyfinUsers is a server with the accounts a migrated box brought: its own,
-// and box's automation account beside them.
+// jellyfinUsers is a server with a migrated box's accounts and box's own.
 func jellyfinUsers(t *testing.T, rows ...string) *apps.Jellyfin {
 	t.Helper()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -63,10 +60,8 @@ func jellyfinUsers(t *testing.T, rows ...string) *apps.Jellyfin {
 	return j
 }
 
-// jellyfinNoAccount is a server neither of the Job's two passwords opens: what a
-// migrated box looks like, where the administrator's password is one the source
-// set and box does not hold. Every signed-in call it receives is recorded, so a
-// test can prove the Job stopped asking rather than guessed.
+// jellyfinNoAccount is a server neither password opens, as a migrated box is: every
+// signed-in call is recorded, so a test can prove the Job stopped asking.
 type jellyfinNoAccount struct {
 	mu       sync.Mutex
 	signIns  []string
@@ -85,10 +80,8 @@ func (f *jellyfinNoAccount) handler() http.HandlerFunc {
 			var body struct{ Username string }
 			_ = json.NewDecoder(r.Body).Decode(&body)
 			f.signIns = append(f.signIns, body.Username)
-			// A 12.4 server answers 401 for a name it has no account for and for
-			// the wrong password alike (DefaultAuthenticationProvider throws
-			// AuthenticationException, which Jellyfin.Api/Middleware/
-			// ExceptionMiddleware.cs maps to 401).
+			// A 12.4 server answers 401 for an unknown name and a wrong password
+			// alike (Jellyfin.Api/Middleware/ExceptionMiddleware.cs).
 			w.WriteHeader(http.StatusUnauthorized)
 		default:
 			f.sessions = append(f.sessions, r.Method+" "+r.URL.Path)
@@ -97,11 +90,8 @@ func (f *jellyfinNoAccount) handler() http.HandlerFunc {
 	}
 }
 
-// TestAMigratedServerWithoutASessionIsPendingNotFatal: box holds no password
-// that opens a migrated server's administrator, and that is its normal state,
-// not an error. The run reports what the person has to do, marks every step
-// that needs a session skipped, and goes on to the apps wired after it -- which
-// is what a failed step here used to prevent.
+// box holding no password for a migrated server's administrator is normal, not an
+// error: the run says what to do, skips session-bound steps, and goes on.
 func TestAMigratedServerWithoutASessionIsPendingNotFatal(t *testing.T) {
 	r, media := newMediaHarness(t, true)
 	f := &jellyfinNoAccount{}
@@ -161,8 +151,7 @@ func TestAMigratedServerWithoutASessionIsPendingNotFatal(t *testing.T) {
 	if media.pmsID != "machine-123" {
 		t.Fatalf("Plex was not wired: pmsID = %q", media.pmsID)
 	}
-	// And it asked only what a signed-out caller may ask: two sign-ins, and no
-	// call that needed the session it never had.
+	// Only what a signed-out caller may ask: two sign-ins, no session call.
 	if got := strings.Join(f.signIns, ","); got != "s5n,alice" {
 		t.Fatalf("the Job tried to sign in as %q, want the box's account and the person's", got)
 	}
@@ -171,9 +160,8 @@ func TestAMigratedServerWithoutASessionIsPendingNotFatal(t *testing.T) {
 	}
 }
 
-// TestAServerThatRefusesForAnotherReasonStillFails: a 5xx or an unreachable
-// server is not "box does not hold this password" -- that is a broken release
-// and the receipt has to say so.
+// A 5xx or an unreachable server is not "box lacks this password": that is a broken
+// release.
 func TestAServerThatRefusesForAnotherReasonStillFails(t *testing.T) {
 	broken := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
@@ -208,10 +196,8 @@ func TestThePersonAccountIsCheckedNotCreated(t *testing.T) {
 	}
 }
 
-// TestAMigratedServersAccountsAreReported: the database rewriter renames nothing,
-// so a source server's first account keeps its own name. The Job says so, with
-// the names it found, and creates no account of its own beyond the automation
-// one -- an account box invented would have a password nobody was shown.
+// The rewriter renames nothing, so a source server keeps its account names: the Job
+// reports them and creates nothing beyond the automation account.
 func TestAMigratedServersAccountsAreReported(t *testing.T) {
 	r := &Runner{}
 	c := &JellyfinConfig{Username: "alice"}

@@ -10,15 +10,13 @@ import (
 	"github.com/swizzin/s5n/internal/apps"
 )
 
-// jellyfinBoxAccount is the account the wiring Job signs in as. It is not the
-// person's: the Job must be able to connect on every re-run, and the person may
-// change their own password at any time. It is the same name the chart gives the
-// automation account of an app that keeps its own user table (s5n.wiringAccount),
-// because it is the same thing -- the box's own account, not a person's.
+// jellyfinBoxAccount is the account the Job signs in as: not the person's, because
+// the Job must connect on every re-run and the person may change their password. It
+// is the chart's automation account name (s5n.wiringAccount).
 const jellyfinBoxAccount = "s5n"
 
-// stepPending is the receipt's word for a step that left something for a person
-// to decide. It is the same word wiring.go uses for Plex's claim.
+// stepPending is the receipt's word for a step that left something for a person to
+// decide, the same word wiring.go uses for Plex's claim.
 const (
 	stepPending = "pending"
 	stepSkipped = "skipped"
@@ -26,37 +24,22 @@ const (
 
 // wireJellyfin makes a Jellyfin server usable and keeps it that way.
 //
-// It is the one app here whose first conversation is a write: Jellyfin keeps its
-// users, API keys and libraries in data/jellyfin.db, so no file can be sealed
-// before it starts. The order is the whole design:
+// It is the one app whose first conversation is a write, because users, keys and
+// libraries are rows in data/jellyfin.db. The order is the design:
 //
-//  1. wait for the server and read whether its wizard is done. The wizard is
-//     *not* this Job's: the app's own init container completes it before the
-//     server the Service reaches ever starts (templates/workloads.yaml), so a
-//     server still reporting an open wizard is one whose pod is not the pod
-//     this Job should be wiring, and this Job refuses rather than completing it
-//     from outside the pod;
-//  2. keep an automation account with a password from the release Secret and
-//     sign in as it. The person's password is used only for the first run's
-//     administrator -- the init container named that account, and the Job needs
-//     an administrator to make its own -- so the person changing it does not
-//     break a later run. When neither password opens the server, nothing below
-//     can run: that is the normal state of a migrated box, so it is reported as
-//     a pending login with every session-bound step skipped, and the Job carries
-//     on. An unreachable server or a 5xx is still a failure;
-//  3. check that the account the box login names is on the server. A fresh box
-//     has it (the init container named the first user after it); a migrated
-//     server keeps the accounts it had, and this is reported, never repaired by
-//     renaming or resetting one;
-//  4. prove the server's view of the client address: with KnownProxies empty
-//     Jellyfin ignores X-Forwarded-For completely, so every request through the
-//     Gateway looks local and the endpoints a local caller may use without a
-//     credential would be open to the internet;
-//  5. one library per Arr instance, adopted by path when it already exists.
-//
-// A second run writes nothing: the wizard is already complete, the account and
-// the key are looked up before they are made, and a library is adopted by the
-// directory it holds.
+//  1. wait and read whether the wizard is done. The wizard is the app's init
+//     container's job (templates/workloads.yaml), so a reachable server still
+//     reporting it open is refused rather than completed from outside the pod;
+//  2. keep an automation account with a password from the release Secret and sign
+//     in as it. The person's password is used only for the first run's administrator.
+//     When neither opens the server, every session-bound step is skipped and
+//     reported: that is a migrated box, not a failure. An unreachable server or a
+//     5xx is still a failure;
+//  3. check that the box login's account is on the server; a migrated server keeps
+//     its own, and this reports, never renames;
+//  4. prove the server's known proxies: with none it ignores X-Forwarded-For, so
+//     every request through the Gateway looks local;
+//  5. one library per Arr instance, adopted by path when it exists.
 func (r *Runner) wireJellyfin(ctx context.Context, res *Result, c *JellyfinConfig) error {
 	userPassword, err := ReadSecret(c.UserPasswordFile)
 	if err != nil {
@@ -81,11 +64,9 @@ func (r *Runner) wireJellyfin(ctx context.Context, res *Result, c *JellyfinConfi
 		return err
 	}
 	if !signedIn {
-		// No session, so everything below it is a step this run cannot take.
-		// The receipt says so and the Job goes on: the apps wired after this one
-		// have nothing to do with Jellyfin's accounts, and a migrated box whose
-		// administrator password box does not hold is the normal case, not a
-		// broken release.
+		// No session, so every step below is one this run cannot take: the apps
+		// wired after this one do not depend on Jellyfin's accounts, and a migrated
+		// box whose administrator password box lacks is normal.
 		r.jellyfinNoSession(res, c)
 		return nil
 	}
@@ -98,16 +79,9 @@ func (r *Runner) wireJellyfin(ctx context.Context, res *Result, c *JellyfinConfi
 	return r.jellyfinLibraries(ctx, res, j)
 }
 
-// jellyfinNoSession is the receipt of a server box holds no password for: every
-// step that needs a session says why it did not run, as one sentence the person
-// can act on, and nothing is invented to look as if it worked.
-//
-// The string is shared by all of them on purpose: each row is a different part
-// of the server, and repeating the whole reason four times is what makes a
-// receipt unreadable. The reason names no secret -- box never prints the
-// password the Secret holds, only where it is -- and no box command that does
-// not exist: the app's own dashboard is where an administrator changes a
-// password, and this Job cannot open a session to do it for them.
+// jellyfinNoSession is the receipt of a server box holds no password for: one shared
+// sentence for every step that needed a session. It names no secret and no box command
+// that does not exist.
 func (r *Runner) jellyfinNoSession(res *Result, c *JellyfinConfig) {
 	reason := fmt.Sprintf("neither the box's account %q nor %q signs in, so this server holds a password box does not: sign in to Jellyfin as one of its administrators and set %q's password to the release Secret's jellyfin-box-password, or create that account there, then apply again",
 		jellyfinBoxAccount, c.Username, jellyfinBoxAccount)
@@ -123,9 +97,8 @@ func (r *Runner) jellyfinNoSession(res *Result, c *JellyfinConfig) {
 	}
 }
 
-// jellyfinReady waits for /System/Info/Public, which carries no [Authorize] at
-// the pinned tag and is where a client discovers a server, and reports whether
-// the wizard is complete.
+// jellyfinReady waits for /System/Info/Public, which carries no [Authorize] and is
+// where a client discovers a server, and reports whether the wizard is complete.
 func (r *Runner) jellyfinReady(ctx context.Context, res *Result, j *apps.Jellyfin) (bool, error) {
 	var info apps.PublicInfo
 	err := apps.Retry(ctx, timeoutDuration(r.Config.TimeoutSeconds), func(ctx context.Context) error {
@@ -143,13 +116,10 @@ func (r *Runner) jellyfinReady(ctx context.Context, res *Result, j *apps.Jellyfi
 	return info.StartupWizardCompleted, nil
 }
 
-// jellyfinWizard checks the one thing this Job will not do itself: the app's
-// first-run wizard. The chart's init container completes it inside the pod,
-// before the server the Service reaches starts, and a pod does not become Ready
-// while an init container runs. A server the Job can reach with the wizard still
-// open is therefore a server something else started with its window open -- and
-// completing the wizard over the in-cluster Service would leave that server
-// answering the Gateway. So this refuses and says so.
+// jellyfinWizard checks the one thing this Job will not do: the first-run wizard,
+// which the init container completes before the server the Service reaches starts. A
+// reachable server with the wizard open was started by something else, so this
+// refuses.
 func (r *Runner) jellyfinWizard(res *Result, done bool) error {
 	if !done {
 		return r.ensure(res, "jellyfin/wizard", apps.Unchanged,
@@ -159,13 +129,9 @@ func (r *Runner) jellyfinWizard(res *Result, done bool) error {
 	return nil
 }
 
-// jellyfinPerson checks that the account the person was told to sign in with is
-// on this server. The app's init container names the server's first account
-// after the box login, so a fresh box has it. A migrated box keeps the accounts
-// the source had -- the database rewriter renames nothing -- and gets box's own
-// automation account beside them, so a login name that names no row there is a
-// decision for the person: this reports it and creates nothing, because an
-// account box invents would have a password box shows to nobody.
+// jellyfinPerson checks that the account the person was told to sign in with exists.
+// A fresh box has it; a migrated server keeps its own, and this reports rather than
+// inventing an account whose password nobody knows.
 func (r *Runner) jellyfinPerson(ctx context.Context, res *Result, c *JellyfinConfig, j *apps.Jellyfin) error {
 	account, found, err := j.FindUser(ctx, c.Username)
 	if err != nil {
@@ -189,17 +155,13 @@ func (r *Runner) jellyfinPerson(ctx context.Context, res *Result, c *JellyfinCon
 	return nil
 }
 
-// jellyfinAccount makes sure the automation account exists, is an
-// administrator, and answers to the release Secret's password -- then signs in
-// as it. Signing in as the person is the fallback rather than the rule: it is
-// how a first run gets an administrator at all, and how a run recovers when the
-// account's password was changed inside the app.
+// jellyfinAccount makes sure the automation account exists, is an administrator, and
+// answers to the release Secret's password, then signs in as it. Signing in as the
+// person is the fallback that gives a first run an administrator.
 //
-// It reports false, with no error, when neither account signs in: a server whose
-// accounts are the ones it arrived with, which is what a migrated box is. Only
-// the app's own refusal of the *credential* means that (a 401 for
-// /Users/AuthenticateByName); an unreachable server, a 5xx or a session the app
-// refused for another reason is still a failed step.
+// It reports false, with no error, when neither account signs in: only the app's
+// refusal of the credential means that. An unreachable server or a 5xx is still a
+// failed step.
 func (r *Runner) jellyfinAccount(ctx context.Context, res *Result, c *JellyfinConfig, j *apps.Jellyfin, userPassword, boxPassword string) (bool, error) {
 	token, err := j.AuthenticateByName(ctx, jellyfinBoxAccount, boxPassword)
 	if err == nil {
@@ -237,10 +199,9 @@ func isRejected(err error) bool {
 	return errors.As(err, &rejected)
 }
 
-// jellyfinMakeAccount creates the automation account, or puts the release
-// Secret's password back on it. An administrator may set another account's
-// password without knowing the old one (UserController.cs, UpdateUserPassword),
-// which is why this needs no session of the account itself.
+// jellyfinMakeAccount creates the automation account, or puts the Secret's password
+// back on it. An administrator may set another account's password without knowing the
+// old one (UserController.cs, UpdateUserPassword).
 func (r *Runner) jellyfinMakeAccount(ctx context.Context, res *Result, j *apps.Jellyfin, boxPassword string) error {
 	account, found, err := j.FindUser(ctx, jellyfinBoxAccount)
 	if err != nil {
@@ -269,19 +230,17 @@ func (r *Runner) jellyfinMakeAccount(ctx context.Context, res *Result, j *apps.J
 	return r.ensure(res, "jellyfin/account", change, nil)
 }
 
-// jellyfinAPIKey mints the box's key once and re-reads it on every later run.
-// Nothing in the release calls Jellyfin with it, so it is the person's handle on
-// their own server -- and the proof this Job reaches the API as an
-// administrator. The key is a credential: it is used and never recorded.
+// jellyfinAPIKey mints the box's key once and re-reads it later: it is the person's
+// handle on their server, and the proof this Job reaches the API as an administrator.
+// It is used and never recorded.
 func (r *Runner) jellyfinAPIKey(ctx context.Context, res *Result, j *apps.Jellyfin) error {
 	_, change, err := j.EnsureAPIKey(ctx, jellyfinBoxAccount)
 	return r.ensure(res, "jellyfin/apikey", change, err)
 }
 
-// jellyfinProxies tells the server whose forwarded address to trust. An empty
-// list is not "no proxies": it switches X-Forwarded-For off entirely, and this
-// server is only ever reached through the Gateway, so the person's real address
-// would never arrive and every request would look local.
+// jellyfinProxies tells the server whose forwarded address to trust. An empty list
+// switches X-Forwarded-For off entirely, and this server is only reached through the
+// Gateway, so every request would look local.
 func (r *Runner) jellyfinProxies(ctx context.Context, res *Result, c *JellyfinConfig, j *apps.Jellyfin) error {
 	if len(c.KnownProxies) == 0 {
 		res.Steps = append(res.Steps, Step{Name: "jellyfin/known-proxies", Result: stepPending,
@@ -289,12 +248,9 @@ func (r *Runner) jellyfinProxies(ctx context.Context, res *Result, c *JellyfinCo
 		r.stepLog("jellyfin/known-proxies", stepPending+" (empty)")
 		return nil
 	}
-	// The list is read, never written: the app builds its forwarded-header
-	// handling from it once, at startup, so the chart's init container puts it
-	// in network.xml before the app reads it and this step is what proves the
-	// running server has it. A server without it is not failed -- it works, and
-	// everything through the Gateway just looks local -- so the step says
-	// pending and what fixing it takes.
+	// The list is read, never written: the app builds its forwarded-header handling
+	// from it at startup, so this proves the running server has it. A server without
+	// it is not failed -- it works, and everything through the Gateway looks local.
 	live, err := j.Proxies(ctx)
 	if err != nil {
 		return r.ensure(res, "jellyfin/known-proxies", apps.Unchanged, err)
@@ -312,9 +268,8 @@ func (r *Runner) jellyfinProxies(ctx context.Context, res *Result, c *JellyfinCo
 	return nil
 }
 
-// jellyfinLibraries gives each Arr instance's library directory a virtual
-// folder. One library per directory, adopted when it already exists, so a
-// migrated server keeps the name the person gave it.
+// jellyfinLibraries gives each Arr instance's directory a virtual folder, adopted
+// when it exists, so a migrated server keeps the name the person gave it.
 func (r *Runner) jellyfinLibraries(ctx context.Context, res *Result, j *apps.Jellyfin) error {
 	for _, lib := range r.Config.Jellyfin.Libraries {
 		change, err := j.EnsureLibrary(ctx, lib.Name, lib.CollectionType, lib.Path)

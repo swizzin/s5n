@@ -7,13 +7,9 @@ import (
 	"testing"
 )
 
-// The wiring config is the chart's render, and it names only the objects the
-// Job reconciles: qBittorrent, Prowlarr, Plex, Tautulli, Seerr, Maintainerr,
-// qui, autobrr, PeerBanHelper and one entry per enabled Arr instance.
-//
-// The decode is strict, so a chart that started writing a key the Job does not
-// act on is a loud failure instead of a key quietly ignored -- a typo, or an app
-// added to the chart a release before the Job learns to reconcile it.
+// The wiring config is the chart's render, naming only the objects the Job
+// reconciles. The decode is strict, so a key the Job does not act on is a loud
+// failure rather than one quietly ignored.
 func TestConfigRefusesAKeyItDoesNotReconcile(t *testing.T) {
 	for _, app := range []string{"exampleapp"} {
 		t.Run(app, func(t *testing.T) {
@@ -34,9 +30,8 @@ func TestConfigRefusesAKeyItDoesNotReconcile(t *testing.T) {
 	}
 }
 
-// qui and autobrr are wiring keys now: both apps own their user table, so the
-// Job signs in and registers their connections. A render that leaves a field
-// out is an error naming the app, not a half-configured client.
+// qui and autobrr own their user tables, so the Job signs in and registers their
+// connections; a render that leaves a field out names the app.
 func TestConfigAcceptsQuiAndAutobrr(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "wiring.json")
 	cfg := `{"namespace":"seedbox","configMap":"s5n-wiring","timeoutSeconds":300,` +
@@ -55,8 +50,7 @@ func TestConfigAcceptsQuiAndAutobrr(t *testing.T) {
 		t.Fatalf("qui = %+v, autobrr = %+v", c.Qui, c.Autobrr)
 	}
 
-	// The same render with one app's password file missing: the failure names
-	// the app and the field, so a chart change is obvious in the Job's log.
+	// One app's password file missing names the app and the field.
 	broken := strings.Replace(cfg, `"passwordFile":"/etc/s5n/keys/qui-password"`, `"passwordFile":""`, 1)
 	if err := os.WriteFile(path, []byte(broken), 0o600); err != nil {
 		t.Fatal(err)
@@ -68,10 +62,8 @@ func TestConfigAcceptsQuiAndAutobrr(t *testing.T) {
 	}
 }
 
-// The qBittorrent block carries a URL and nothing else. A render that still
-// passes a credential is refused by name rather than silently ignored: the Job
-// has no password to read, and qBittorrent's own login is bypassed for the
-// release's addresses.
+// The qBittorrent block carries a URL and nothing else: the Job has no password to
+// read, and an unknown key is refused by name.
 func TestConfigRefusesAQbitCredential(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "wiring.json")
 	cfg := `{"namespace":"seedbox","configMap":"s5n-wiring","timeoutSeconds":300,"instances":[],` +
@@ -86,19 +78,15 @@ func TestConfigRefusesAQbitCredential(t *testing.T) {
 	}
 }
 
-// A release with no wired app is a shape a seedbox is installed in, not a bad
-// render: `box init --apps` turns every Arr and qBittorrent off, and `box
-// migrate apply` adopts into that box and switches them on itself. The Job has
-// nothing per-app to do there, and the config must load so it can say so.
+// A release with no wired app is valid: a seedbox can be installed with apps off,
+// and the Job then has nothing per-app to do.
 func TestConfigAcceptsAReleaseWithNoWiredApp(t *testing.T) {
 	for name, cfg := range map[string]string{
-		// The box `box migrate apply` adopts into: Prowlarr is not part of a
-		// plan, and none of the apps a plan names is on yet.
+		// The box `box migrate apply` adopts into, with its apps still off.
 		"prowlarr only": `{"namespace":"seedbox","configMap":"s5n-wiring","timeoutSeconds":300,"instances":[],` +
 			`"prowlarr":{"url":"http://prowlarr:9696","urlBase":"/prowlarr","selfUrl":"http://prowlarr:9696/prowlarr",` +
 			`"apiKeyFile":"/etc/s5n/keys/prowlarr-apikey"}}`,
-		// Every app off: nothing at all to reconcile, and the receipt is the
-		// whole of what the Job has to publish.
+		// Every app off: the receipt is all the Job has to publish.
 		"nothing at all": `{"namespace":"seedbox","configMap":"s5n-wiring","timeoutSeconds":300,"instances":[]}`,
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -113,9 +101,8 @@ func TestConfigAcceptsAReleaseWithNoWiredApp(t *testing.T) {
 	}
 }
 
-// Maintainerr is a wiring key: its Plex connection is a row in its own settings,
-// and nothing else can write it. Its BASE_PATH is part of the config because the
-// app mounts every route -- its API and its health route -- below the prefix.
+// Maintainerr's Plex connection is a row in its own settings, and its BASE_PATH
+// covers every route -- API and health alike.
 func TestConfigAcceptsMaintainerr(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "wiring.json")
 	cfg := `{"namespace":"seedbox","configMap":"s5n-wiring","timeoutSeconds":300,` +
@@ -133,8 +120,7 @@ func TestConfigAcceptsMaintainerr(t *testing.T) {
 		t.Fatalf("maintainerr = %+v", c.Maintainerr)
 	}
 
-	// Without Plex there is no server to point it at, and a half-configured
-	// connection is worse than a refusal.
+	// Without Plex there is no server to point it at.
 	cfg = `{"namespace":"seedbox","configMap":"s5n-wiring","timeoutSeconds":300,` +
 		`"instances":[],` +
 		`"maintainerr":{"url":"http://maintainerr:6246","urlBase":"/maintainerr"}}`
