@@ -7,11 +7,9 @@ import (
 	"strings"
 )
 
-// tomlFile is a TOML file's top-level scalar values, with where each value sits
-// in the bytes read. It is not a TOML parser: app configs put their settings one
-// per line at the top of the file, and this reads exactly that so a rewrite can
-// replace one value and leave every other byte -- comments, ordering, other
-// tables -- as it was.
+// tomlFile is a TOML file's top-level scalars with where each sits. It is not a
+// parser: app configs put settings one per line at the top, and this reads
+// exactly that so a rewrite leaves every other byte as it was.
 type tomlFile struct {
 	data     []byte
 	values   []tomlValue // top-level keys, in the order they appear
@@ -62,8 +60,7 @@ func parseTOML(data []byte) (*tomlFile, error) {
 func (f *tomlFile) parseLine(start int, text []byte, lineEnd int) error {
 	eq := bytes.IndexByte(text, '=')
 	if eq < 0 {
-		// A continuation line of an array or a multi-line string: nothing at
-		// the top level that migrate owns.
+		// A continuation line: not migrate's.
 		return nil
 	}
 	key := strings.TrimSpace(string(text[:eq]))
@@ -108,8 +105,7 @@ func (f *tomlFile) parseLine(start int, text []byte, lineEnd int) error {
 	return nil
 }
 
-// get is the last line holding key, which is how TOML itself resolves a
-// duplicate at the top level.
+// get is the last line holding key, as TOML resolves a duplicate.
 func (f *tomlFile) get(key string) (tomlValue, bool) {
 	for i := len(f.values) - 1; i >= 0; i-- {
 		if f.values[i].key == key {
@@ -119,8 +115,7 @@ func (f *tomlFile) get(key string) (tomlValue, bool) {
 	return tomlValue{}, false
 }
 
-// tomlEdit is one top-level key's new value: a string, quoted on the way out,
-// or a bare literal such as a number or a boolean.
+// tomlEdit is one key's new value: a string or a bare literal.
 type tomlEdit struct {
 	key   string
 	value string
@@ -140,14 +135,13 @@ func (v tomlValue) setLiteral(s string) tomlEdit {
 	return tomlEdit{key: v.key, value: s}
 }
 
-// insertString is a key that is not in the file yet, added with baseUrl's own
-// double quotes.
+// insertString adds a missing key with baseUrl's own double quotes.
 func insertString(key, value string) tomlEdit {
 	return tomlEdit{key: key, value: value, isStr: true, quote: '"'}
 }
 
-// apply replaces the edited values and adds the keys that are not there yet.
-// Every other byte is written back as it was read.
+// apply replaces the edited values, adds missing keys, and copies every other byte
+// as read.
 func (f *tomlFile) apply(edits []tomlEdit) []byte {
 	byKey := make(map[string]tomlEdit, len(edits))
 	for _, e := range edits {
@@ -167,9 +161,8 @@ func (f *tomlFile) apply(edits []tomlEdit) []byte {
 		spans = append(spans, span{v.start, v.end, e.render()})
 	}
 	if len(byKey) > 0 {
-		// What is left is keys the file does not have. They go at the end of
-		// the root table so the app reads them as settings rather than as a
-		// table's.
+		// Missing keys go at the end of the root table, so the app reads settings
+		// rather than a table's.
 		keys := make([]string, 0, len(byKey))
 		for k := range byKey {
 			keys = append(keys, k)
@@ -179,9 +172,8 @@ func (f *tomlFile) apply(edits []tomlEdit) []byte {
 		for _, k := range keys {
 			add.WriteString(k + " = " + byKey[k].render() + "\n")
 		}
-		// The insertion point is an offset into the bytes that were read, and
-		// the splice below works on those same bytes, so it needs no
-		// adjustment for the replacements before it.
+		// The offset is into the bytes read, which the splice also works on, so
+		// replacements before it need no adjustment.
 		at := f.insertAt
 		prefix := ""
 		if at >= len(f.data) && len(f.data) > 0 && f.data[len(f.data)-1] != '\n' {
@@ -212,8 +204,7 @@ func (e tomlEdit) render() string {
 	return `"` + escape(e.value) + `"`
 }
 
-// escape is a TOML basic string's escaping, which only has to cover what a path
-// or a URL can hold.
+// escape is a TOML basic string's escaping for what a path or URL holds.
 func escape(s string) string {
 	var b strings.Builder
 	for _, r := range s {
