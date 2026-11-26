@@ -19,6 +19,12 @@ wiring:
   image:
     tag: e2e
 
+secrets:
+  # The person's Jellyfin password. box init makes one and shows it once; this
+  # script installs with Helm, so it names its own, and the assertion below signs
+  # in with the key the release Secret carries.
+  jellyfinUserPassword: e2e-jellyfin-password
+
 apps:
   # The second media server. It is opt-in, and this is the one run that turns
   # everything on.
