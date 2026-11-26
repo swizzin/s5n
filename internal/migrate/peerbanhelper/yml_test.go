@@ -2,10 +2,8 @@ package peerbanhelper
 
 import "testing"
 
-// TestParseYAMLFollowsBlocks: the keys this package reads are found by the block
-// they sit in, not by their name, so a sequence under another block -- PBH's
-// template has several -- cannot make `client:`'s endpoint look like something
-// else, and a comment is never a value.
+// TestParseYAMLFollowsBlocks: keys are found by their block, not their name, so
+// another block's sequence cannot shadow `client:`'s endpoint.
 func TestParseYAMLFollowsBlocks(t *testing.T) {
 	const doc = `language: default
 nat64:

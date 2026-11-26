@@ -9,9 +9,8 @@ import (
 	"github.com/swizzin/s5n/internal/migrate/plan"
 )
 
-// A downloader reached through a public name is stored as an https URL with no
-// port. Its port is the scheme's, 443: the refusal should name that port, and a
-// rule narrowed to it should settle it.
+// An https downloader with no port is port 443: the refusal names it, and a rule
+// narrowed to it settles it.
 func TestHTTPSEndpointWithoutAPortIsPort443(t *testing.T) {
 	ctx := context.Background()
 	in := setup(t)
