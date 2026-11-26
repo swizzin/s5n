@@ -5,10 +5,9 @@ import (
 	"testing"
 )
 
-// The init screen is what `box init` says about the answers it took: where the
-// two paths are and what is on them, which certificate each name gets, the port
-// peers reach the box on, what the two files got, and what the hand-over does.
-// One row per fact, and nothing a person would have to translate.
+// The init screen says what box init took: the paths and what is on them, each
+// name's certificate, the peer port, what the two files got, and the hand-over --
+// one row per fact.
 func TestTheInitScreenIsOneRowPerFact(t *testing.T) {
 	h := newHarness(t)
 	h.prompt.multis = [][]string{{"sonarr"}}
@@ -23,8 +22,7 @@ func TestTheInitScreenIsOneRowPerFact(t *testing.T) {
 		"· values",
 		"✓ directories",
 	}
-	// The path block is the prompt's note: the line prompt prints it, and a
-	// terminal draws the same table.
+	// The path block is the prompt's note; a terminal draws the same table.
 	paths := strings.Join(h.prompt.notes, "\n")
 	for _, want := range []string{"where things live", "  data    /srv/s5n/data    exists", "  config  /srv/s5n/config  exists"} {
 		if !strings.Contains(paths, want) {
@@ -36,13 +34,11 @@ func TestTheInitScreenIsOneRowPerFact(t *testing.T) {
 			t.Fatalf("the screen is missing %q:\n%s", want, h.out)
 		}
 	}
-	// The two files are rows, not sentences: a count of keys or the word for
-	// nothing to do.
+	// The two files are rows: a count of keys or the word for nothing to do.
 	if !strings.Contains(h.out.String(), "✓ grant          10 keys") {
 		t.Fatalf("the grant is not one row:\n%s", h.out)
 	}
-	// No line is a bare sentence about the run's plumbing: the files' paths and
-	// each directory are the log's.
+	// No line is a bare sentence about plumbing: paths and directories are the log's.
 	for _, gone := range []string{"edited 12 keys", "created /srv/s5n/config"} {
 		if strings.Contains(h.out.String(), gone) {
 			t.Fatalf("the screen still carries %q:\n%s", gone, h.out)

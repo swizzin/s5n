@@ -12,50 +12,43 @@ import (
 )
 
 // The peer port is a port on the node, shared by every seedbox, so it is the
-// grant's and root assigns it (docs/box.md, "Root assigns the torrent port").
-// box picks it once, from the band Kubernetes does not auto-assign from, and
-// records it; every later run keeps what the grant says.
+// grant's and root assigns it (docs/box.md, "Root assigns the torrent port"). box
+// picks it once, from the band Kubernetes does not auto-assign from, and every
+// later run keeps what the grant says.
 //
-// Why a band rather than any port in the range: with the
-// ServiceNodePortStaticSubrange behaviour (GA in 1.29) the API server hands out
-// dynamic nodePorts from the top of the range and only falls into the bottom
-// band once the top is exhausted. A port in that band is therefore never taken
-// by a Service that asked for "any free port" -- which is what happened to the
-// chart's fixed 31111: an implementation's LoadBalancer Service got 31111 first
-// and the seedbox's own peers Service was refused for the rest of the install.
+// The band: with ServiceNodePortStaticSubrange (GA in 1.29) the API server hands
+// out dynamic nodePorts from the top of the range, falling into the bottom band
+// only when the top is exhausted, so a port there is never taken by a Service that
+// asked for "any free port" -- as happened to the chart's fixed 31111, which an
+// implementation's LoadBalancer Service got first.
 const (
-	// torrentPortKey is the values path the port lives at. It is a grant key
-	// (internal/seedbox/grant.go): the port is exposed on the node, beside every
-	// other box's, so a values file may not set it.
+	// torrentPortKey is the values path the port lives at, a grant key
+	// (internal/seedbox/grant.go): it is exposed on the node, so no values file may
+	// set it.
 	torrentPortKey = "apps.qbittorrent.torrent.port"
-	// torrentApp is that key's app: the port is decided for the box that runs
-	// it, and nothing else in the catalog exposes a peer port.
+	// torrentApp is that key's app: nothing else in the catalog exposes a peer port.
 	torrentApp = "qbittorrent"
 
-	// nodePortRangeStart and nodePortRangeEnd are the default
-	// --service-node-port-range. box cannot read an apiserver's own range from
-	// the API, so it assumes the default: a cluster that narrowed the range
-	// refuses the picked port at apply, and that refusal is translated there
-	// (cmd/box's portRangeHint) into the flag that widens it.
+	// nodePortRangeStart and nodePortRangeEnd are the default --service-node-port-range.
+	// box cannot read an apiserver's own range, so it assumes the default: a
+	// narrowed cluster refuses the port at apply, and cmd/box's portRangeHint turns
+	// that refusal into the flag that widens it.
 	nodePortRangeStart = 30000
 	nodePortRangeEnd   = 32767
 )
 
-// NodePort is one nodePort a Service in the cluster already holds. Service is
-// the Service that holds it (namespace/name), so a refusal can name how many
-// Services stand in the way rather than how many numbers.
+// NodePort is one nodePort a Service holds. Service is that Service
+// (namespace/name), so a refusal counts Services rather than numbers.
 type NodePort struct {
 	Port    int
 	Service string
 }
 
-// staticBand is the part of a port range reserved for ports a person picks by
-// hand: [start, start+offset-1], where the offset is the one Kubernetes
-// computes. It mirrors calculateRangeOffset in
+// staticBand is the part of a range reserved for ports picked by hand,
+// [start, start+offset-1]. It mirrors calculateRangeOffset in
 // pkg/registry/core/service/portallocator/allocator.go at the version
-// charts/s5n/platform.yaml pins -- `min(max(16, size/32), 128)`, and nothing at
-// all for a range of 16 ports or fewer. The default range holds 2768 ports, so
-// the band is its first 86: 30000-30085.
+// charts/s5n/platform.yaml pins: `min(max(16, size/32), 128)`, and nothing for 16
+// ports or fewer. The default range's band is its first 86: 30000-30085.
 func staticBand(start, end int) (lo, hi int) {
 	size := end - start + 1
 	const (
@@ -64,8 +57,7 @@ func staticBand(start, end int) (lo, hi int) {
 		step = 32
 	)
 	if size <= min {
-		// Kubernetes reserves nothing, so every port is fair game for its own
-		// allocations and box has no band to pick from.
+		// Kubernetes reserves nothing, so box has no band to pick from.
 		return start, start - 1
 	}
 	offset := size / step
@@ -78,13 +70,10 @@ func staticBand(start, end int) (lo, hi int) {
 	return start, start + offset - 1
 }
 
-// pickPort answers one free port in [lo, hi], chosen at random rather than as
-// the lowest free one: boxes installed on the same day would otherwise walk the
-// band in step and collide with each other on the next install.
-//
-// held is every nodePort the cluster already has. A Service holds two of them
-// when its ports share a number over TCP and UDP, so the count of Services in a
-// refusal is distinct names, not entries.
+// pickPort answers one free port in [lo, hi], at random rather than the lowest:
+// boxes installed the same day would otherwise walk the band in step and collide on
+// the next install. held is every nodePort the cluster has; a Service holds two
+// entries when a number is shared over TCP and UDP, so a refusal counts names.
 func pickPort(lo, hi int, held []NodePort, randInt func(int) int) (int, error) {
 	used := make(map[int]bool, len(held))
 	blocking := make(map[string]bool, len(held))
@@ -110,9 +99,8 @@ func pickPort(lo, hi int, held []NodePort, randInt func(int) int) (int, error) {
 // torrentPortRow is the row the decided port is printed as.
 const torrentPortRow = "torrent port"
 
-// ownPeerPort is the nodePort this seedbox's own peers Service holds, if the
-// release is already installed. The chart names it <instance>-peers, and
-// qBittorrent takes no instances, so the name is fixed.
+// ownPeerPort is the nodePort this seedbox's peers Service holds, if the release is
+// installed. qBittorrent takes no instances, so the name is fixed.
 func ownPeerPort(namespace string, held []NodePort) (int, bool) {
 	if namespace == "" {
 		return 0, false
@@ -126,34 +114,31 @@ func ownPeerPort(namespace string, held []NodePort) (int, bool) {
 	return 0, false
 }
 
-// pickRandom is the default draw: crypto/rand, because a port that two boxes
-// booting together can predict is a port they can both pick.
+// pickRandom is the default draw: crypto/rand, because a predictable port is one
+// two boxes booting together can both pick.
 func pickRandom(n int) int {
 	if n <= 1 {
 		return 0
 	}
 	v, err := rand.Int(rand.Reader, big.NewInt(int64(n)))
 	if err != nil {
-		// crypto/rand does not fail on a running host; a fallback that guesses
-		// is still better than refusing an install over a random source.
+		// crypto/rand does not fail on a running host; guessing beats refusing an
+		// install over a random source.
 		return 0
 	}
 	return int(v.Int64())
 }
 
 // torrentPort settles the grant's torrent port, or nil when there is nothing to
-// write. It keeps what the grant already says and only picks for a box that has
-// no port yet: a working port is never moved, because peers learned it from the
-// tracker and a new number drops every connection until the next announce.
+// write. It keeps what the grant says and picks only for a box with no port: a
+// working port is never moved, because peers learned it from the tracker and a new
+// number drops every connection until the next announce.
 //
 // The app that holds the port is the box's, not this run's: a migrate install
-// answers init with every app off and switches the plan's on afterwards, so
-// opts.SwitchesOn is read beside apps.
+// answers with every app off and switches the plan's on later, so SwitchesOn counts.
 func (d *Decision) torrentPort(ctx context.Context, namespace string, apps []string, grantNow map[string]any, opts Options) (any, error) {
-	// The release being installed is what says whether the key exists at all:
-	// it ships no default for the port any more, so the chart's own values do
-	// not mention it, and a chart from before the port has no key in its schema
-	// for this box to fill in.
+	// The release says whether the key exists: the chart ships no default for the
+	// port, and one from before it has no key in its schema to fill in.
 	declared, err := seedbox.Declares(d.Schema, strings.Split(torrentPortKey, ".")...)
 	if err != nil {
 		return nil, err
@@ -178,18 +163,16 @@ func (d *Decision) torrentPort(ctx context.Context, namespace string, apps []str
 	if err != nil {
 		return nil, fmt.Errorf("read this cluster's Services to pick a free torrent port: %w", err)
 	}
-	// A seedbox installed before box picked the port has none in its grant,
-	// but its peers Service already holds the one its peers know. Keep that
-	// one: moving a working peer port only makes every tracker relearn it.
+	// A seedbox installed before box picked the port has none in its grant, but its
+	// peers Service holds the one its peers know: keep it.
 	if port, ok := ownPeerPort(namespace, held); ok {
 		d.report().Rows([]say.Row{{Mark: say.MarkNote, Name: torrentPortRow, State: "kept", Facts: []string{fmt.Sprintf("%d", port)}}})
 		return port, nil
 	}
-	// A migrated box's peers, and any forward the operator set, already point
-	// at the port the source announced. Keep it when a Service could hold it
-	// here and nothing does: the whole NodePort range is the test, not the band
-	// box picks from, because this number was not picked on this cluster and
-	// moving it is exactly what costs the connections.
+	// A migrated box's peers, and any forward the operator set, point at the port the
+	// source announced. Keep it when a Service could hold it and nothing does: the
+	// whole NodePort range is the test, not box's band, since this number was not
+	// picked here and moving it costs the connections.
 	if port := opts.TorrentPort; port >= nodePortRangeStart && port <= nodePortRangeEnd && !portHeld(port, held) {
 		d.report().Rows([]say.Row{{Mark: say.MarkNote, Name: torrentPortRow, State: "kept", Facts: []string{fmt.Sprintf("%d from the source", port)}}})
 		return port, nil

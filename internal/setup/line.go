@@ -9,28 +9,25 @@ import (
 	"strings"
 )
 
-// LinePrompt is the plain implementation of Prompter: one line per answer, on
-// stdin and stdout, with no cursor movement and no colour. It is what a server
-// with a serial console gets, and it is the reference for the TUI lane.
+// LinePrompt is the plain Prompter: one line per answer, no cursor movement, no
+// colour -- what a serial console gets, and the reference TUI implementation.
 //
-// Cancel is Ctrl-D (or a lone "q"), reflected as ErrCancelled. Ctrl-C is the
-// terminal's own signal, and it leaves nothing written for the same reason: init
-// writes the two files only after every question is answered.
+// Cancel is Ctrl-D or a lone "q", as ErrCancelled. Ctrl-C is the terminal's own
+// signal; it leaves nothing written, since init writes the two files only after
+// every question is answered.
 type LinePrompt struct {
 	In  io.Reader
 	Out io.Writer
-	// Mask reads a secret without echoing it, when In is a terminal. cmd/box
-	// supplies the terminal implementation; nil reads a plain line, which is
-	// what a pipe and the tests get.
+	// Mask reads a secret without echoing it when In is a terminal; nil reads a plain
+	// line, which is what a pipe and the tests get.
 	Mask func() (string, error)
 
 	reader *bufio.Reader
 }
 
 func (p *LinePrompt) printf(format string, args ...any) {
-	// A zero-value prompt has nowhere to write. The unattended init path asks
-	// nothing but does print the path report through here, so a nil Out must
-	// be quiet rather than a nil dereference; cmd/box passes real streams.
+	// The unattended path asks nothing but still prints the path report through
+	// here, so a nil Out must be quiet rather than a nil dereference.
 	w := p.Out
 	if w == nil {
 		w = io.Discard
@@ -183,8 +180,8 @@ func (p *LinePrompt) MultiSelect(f MultiSelect) ([]string, error) {
 		case answer == "":
 			picked = append(picked, f.Selected...)
 		case f.Min == 0 && strings.EqualFold(answer, "none"):
-			// A list that may be empty needs a word for it: this prompt has no
-			// toggle, and "enter keeps them" cannot untick what is there.
+			// A list that may be empty needs a word for it: "enter keeps them" cannot
+			// untick what is there.
 			picked = nil
 		default:
 			seen := map[string]bool{}
@@ -218,8 +215,7 @@ func (p *LinePrompt) Note(text string) error {
 	return nil
 }
 
-// readLine reads one answer. End of input is a cancel, and so is a lone "q":
-// both are how somebody says "not now" without a TUI's escape key.
+// readLine reads one answer. End of input is a cancel, and so is a lone "q".
 func (p *LinePrompt) readLine() (string, error) {
 	if p.reader == nil {
 		if p.In == nil {
@@ -244,8 +240,7 @@ func (p *LinePrompt) readLine() (string, error) {
 	return line, nil
 }
 
-// pickOption matches a number (1-based, as printed) or a value or label,
-// case-insensitively, so "2", "sonarr" and "Sonarr" all work.
+// pickOption matches a 1-based number, a value or a label, case-insensitively.
 func pickOption(options []Option, answer string) (string, bool) {
 	if n, err := strconv.Atoi(answer); err == nil && n >= 1 && n <= len(options) {
 		return options[n-1].Value, true

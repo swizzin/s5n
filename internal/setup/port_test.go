@@ -10,11 +10,9 @@ import (
 	"github.com/swizzin/s5n/internal/seedbox"
 )
 
-// The band is Kubernetes' own: min(max(16, size/32), 128) ports from the start
-// of the range (pkg/registry/core/service/portallocator's calculateRangeOffset
-// at the pinned version). The default range is 32768 ports, so the band is its
-// first 128 -- not the whole range, and not the upper part the API server
-// assigns from.
+// The band is Kubernetes' own, min(max(16, size/32), 128) ports from the start of
+// the range (pkg/registry/core/service/portallocator's calculateRangeOffset at the
+// pinned version): its first 128, not the upper part the API server assigns from.
 func TestStaticBandMatchesKubernetes(t *testing.T) {
 	cases := []struct {
 		name       string
@@ -43,7 +41,7 @@ func inBand(port int) bool {
 	return port >= lo && port <= hi
 }
 
-// An empty cluster: any of the band's ports, and the draw decides which.
+// An empty cluster: any of the band's ports, the draw decides which.
 func TestPickPortEmptyCluster(t *testing.T) {
 	lo, hi := staticBand(nodePortRangeStart, nodePortRangeEnd)
 	for _, want := range []int{lo, lo + 1, hi} {
@@ -65,7 +63,7 @@ func TestPickPortEmptyCluster(t *testing.T) {
 	}
 }
 
-// A band with one free port left: that port, whatever the draw would have said.
+// One free port left is that port, whatever the draw says.
 func TestPickPortAlmostFull(t *testing.T) {
 	lo, hi := staticBand(nodePortRangeStart, nodePortRangeEnd)
 	var held []NodePort
@@ -84,8 +82,7 @@ func TestPickPortAlmostFull(t *testing.T) {
 	}
 }
 
-// A full band is a refusal, and the refusal names the band and how many
-// Services are in it, so an operator can go and look.
+// A full band is a refusal naming the band and how many Services are in it.
 func TestPickPortFullNamesTheBandAndTheServices(t *testing.T) {
 	lo, hi := staticBand(nodePortRangeStart, nodePortRangeEnd)
 	var held []NodePort
@@ -103,8 +100,7 @@ func TestPickPortFullNamesTheBandAndTheServices(t *testing.T) {
 	}
 }
 
-// Two ports of one Service (TCP and UDP on the same number) are one Service in
-// the way, not two.
+// TCP and UDP on one number are one Service in the way, not two.
 func TestPickPortCountsServicesNotPorts(t *testing.T) {
 	_, err := pickPort(30000, 30000, []NodePort{
 		{Port: 30000, Service: "other/peers"},
@@ -118,9 +114,8 @@ func TestPickPortCountsServicesNotPorts(t *testing.T) {
 	}
 }
 
-// A port outside the band is not "in the way": the band is what box picks from,
-// and the upper part of the range is where the API server puts its own
-// allocations.
+// A port outside the band is not in the way: the upper range is where the API
+// server puts its own allocations.
 func TestPickPortIgnoresPortsOutsideTheBand(t *testing.T) {
 	lo, hi := staticBand(nodePortRangeStart, nodePortRangeEnd)
 	got, err := pickPort(lo, hi, []NodePort{
@@ -140,8 +135,7 @@ func TestPickPortIgnoresPortsOutsideTheBand(t *testing.T) {
 	}
 }
 
-// catalogAt is the fixture chart's manifest, loaded the way cmd/box loads the
-// release's.
+// catalogAt is the fixture chart's manifest, loaded as cmd/box loads the release's.
 func catalogAt(t *testing.T, dir string) *catalog.Catalog {
 	t.Helper()
 	cat, err := catalog.Load(dir)
@@ -151,28 +145,25 @@ func catalogAt(t *testing.T, dir string) *catalog.Catalog {
 	return cat
 }
 
-// torrentHarness is a harness on the fixture chart that has qBittorrent, with
-// the cluster holding the two ports a test says it holds.
+// torrentHarness is a harness on the qBittorrent fixture chart, with the cluster
+// holding the ports the test says.
 func torrentHarness(t *testing.T, held []NodePort) *harness {
 	t.Helper()
 	h := newHarness(t)
 	h.chartDir = "testdata/chart-torrent"
 	h.decision.Catalog = catalogAt(t, h.chartDir)
-	// The chart ships no peer port: the schema is what says the key exists,
-	// and init is what decides it.
+	// The chart ships no peer port: the schema says the key exists, init decides it.
 	h.decision.Schema = chartAt(t, h.chartDir).Schema
 	h.prompt.inputs = []string{"box.example.com", "/srv/s5n/data", "/srv/s5n/config"}
 	h.prompt.multis = [][]string{{"alpha", torrentApp}}
 	h.decision.NodePorts = func(context.Context) ([]NodePort, error) { return held, nil }
-	// The first free port in the band, so the assertion is about the pick and
-	// not about the random source.
+	// The first free port in the band, so the assertion is about the pick.
 	h.decision.Rand = func(int) int { return 0 }
 	return h
 }
 
-// The port is decided at init, from the cluster's own Services, and recorded in
-// the grant: that is the whole fix for a fixed port that the API server had
-// already given away.
+// The port is decided at init from the cluster's Services and recorded in the
+// grant: the fix for a fixed port the API server had already given away.
 func TestTorrentPortIsPickedAndRecorded(t *testing.T) {
 	h := torrentHarness(t, []NodePort{
 		{Port: 30000, Service: "envoy-gateway-system/envoy"},
@@ -195,9 +186,9 @@ func TestTorrentPortIsPickedAndRecorded(t *testing.T) {
 	}
 }
 
-// A seedbox installed before box picked the port has no port in its grant, but
-// its peers Service already holds one, outside the band: that one is kept, not
-// moved to a fresh pick. Another namespace's peers Service is not this box's.
+// A box installed before box picked the port has none in its grant but its peers
+// Service holds one outside the band: kept, not moved. Another namespace's peers
+// Service is not this box's.
 func TestTorrentPortAdoptsTheInstalledPeersService(t *testing.T) {
 	h := torrentHarness(t, []NodePort{
 		{Port: 31111, Service: "other/qbittorrent-peers"},
@@ -214,9 +205,9 @@ func TestTorrentPortAdoptsTheInstalledPeersService(t *testing.T) {
 	}
 }
 
-// A grant that already holds a port keeps it, and nothing reads the cluster:
-// the peers learned that number from the tracker, and this is also the path a
-// user's run takes, where a cluster-wide LIST is not permitted at all.
+// A grant with a port keeps it and nothing reads the cluster -- the peers learned
+// that number from the tracker -- which is also the path a user's run takes, where a
+// cluster-wide LIST is not permitted.
 func TestTorrentPortIsKeptAndTheClusterIsNotRead(t *testing.T) {
 	h := newHarness(t)
 	h.chartDir = "testdata/chart-torrent"
@@ -244,8 +235,7 @@ func TestTorrentPortIsKeptAndTheClusterIsNotRead(t *testing.T) {
 	}
 }
 
-// A full band is refused before anything is written: no grant, no values file,
-// no apply.
+// A full band is refused before anything is written.
 func TestTorrentPortFullBandRefusesBeforeAnyWrite(t *testing.T) {
 	lo, hi := staticBand(nodePortRangeStart, nodePortRangeEnd)
 	var held []NodePort
@@ -274,9 +264,8 @@ func TestTorrentPortFullBandRefusesBeforeAnyWrite(t *testing.T) {
 	}
 }
 
-// The first install's plan shows the port as a grant addition, and the second
-// run has nothing to add: the grant is where the decision lives, so a re-run
-// cannot move a port peers are already announcing.
+// The first plan shows the port as a grant addition and the second adds nothing: a
+// re-run cannot move a port peers are announcing.
 func TestPlanShowsTheTorrentPortOnce(t *testing.T) {
 	h := torrentHarness(t, []NodePort{{Port: 30000, Service: "other/svc"}})
 	if _, err := h.run(h.options()); err != nil {
@@ -292,8 +281,7 @@ func TestPlanShowsTheTorrentPortOnce(t *testing.T) {
 	if err != nil {
 		t.Fatalf("effective values: %v", err)
 	}
-	// A first install has no deployed release, so every effective value is an
-	// addition -- the port among them.
+	// A first install has no deployed release, so every value is an addition.
 	var shown *seedbox.Change
 	for _, change := range seedbox.Diff(map[string]any{}, effective) {
 		if change.Path == torrentPortKey {
@@ -335,8 +323,7 @@ func TestPlanShowsTheTorrentPortOnce(t *testing.T) {
 	}
 }
 
-// A chart with no peer port at all (or one from before the key existed) is not
-// a reason to read the cluster or to write anything.
+// A chart with no peer port is no reason to read the cluster or write anything.
 func TestTorrentPortUnaskedWithoutTheKey(t *testing.T) {
 	h := newHarness(t) // testdata/chart has no qbittorrent
 	h.prompt.inputs = []string{"box.example.com", "/srv/s5n/data", "/srv/s5n/config"}
@@ -350,8 +337,7 @@ func TestTorrentPortUnaskedWithoutTheKey(t *testing.T) {
 	}
 }
 
-// A box that does not run qBittorrent has no peer port to decide, and init does
-// not write one: nothing listens on it, so nothing may hold it either.
+// A box without qBittorrent has no peer port: nothing listens, so nothing holds it.
 func TestTorrentPortUnaskedWithoutTheApp(t *testing.T) {
 	h := torrentHarness(t, nil)
 	h.prompt.multis = [][]string{{"alpha"}}
@@ -367,8 +353,7 @@ func TestTorrentPortUnaskedWithoutTheApp(t *testing.T) {
 	}
 }
 
-// torrentGrant is a box that already has a peer port, as an operator's first
-// install left it.
+// torrentGrant is a box that already has a peer port.
 const torrentGrant = `# root's grant for this box
 namespace: seedbox
 login: alice
@@ -399,9 +384,8 @@ apps:
       port: 30042
 `
 
-// migratingOptions is the shape `box migrate apply` gives init on a host with no
-// box: every app off (the migration switches on what it moved), the plan's
-// answers already given, and the apps the plan will switch on named beside them.
+// migratingOptions is what `box migrate apply` gives init on a host with no box:
+// every app off, the plan's answers given, and the apps it will switch on named.
 func migratingOptions(h *harness, switchesOn ...string) Options {
 	opts := h.unattended()
 	opts.Apps = []string{"none"}
@@ -410,11 +394,10 @@ func migratingOptions(h *harness, switchesOn ...string) Options {
 	return opts
 }
 
-// The migrate install answers init with `--apps none`, and the migration
-// switches the plan's apps on after the configs are in place. The peer port is
-// decided for the box that is coming, not for the app list this one run has:
-// otherwise a migrated box keeps the chart's fixed 31111 for good, the port in
-// the upper band a LoadBalancer Service already took.
+// A migrate install answers `--apps none` and switches the plan's apps on later, so
+// the peer port is decided for the box that is coming, not this run's list:
+// otherwise a migrated box keeps 31111, the port a LoadBalancer Service already
+// took.
 func TestTorrentPortIsDecidedForTheAppsAPlanBrings(t *testing.T) {
 	h := torrentHarness(t, []NodePort{
 		{Port: 30000, Service: "envoy-gateway-system/envoy"},
@@ -427,8 +410,7 @@ func TestTorrentPortIsDecidedForTheAppsAPlanBrings(t *testing.T) {
 	if !contains(res.GrantChanged, torrentPortKey) {
 		t.Fatalf("grant keys changed = %v, want %s", res.GrantChanged, torrentPortKey)
 	}
-	// 30000 is held, so the band's first free port is 30001, and every app the
-	// run installed is off.
+	// 30000 is held: the band's first free port is 30001, with every app off.
 	grant := h.read(h.grantPath)
 	if !strings.Contains(grant, "torrent:\n      port: 30001") {
 		t.Fatalf("the grant does not record the port the plan's qBittorrent will use:\n%s", grant)
@@ -441,8 +423,7 @@ func TestTorrentPortIsDecidedForTheAppsAPlanBrings(t *testing.T) {
 	}
 }
 
-// A plan without qBittorrent has no peer port to decide, and init writes none:
-// nothing would listen on it, so nothing may hold it either.
+// A plan without qBittorrent has no peer port, and init writes none.
 func TestTorrentPortUnaskedWhenThePlanBringsNoQbittorrent(t *testing.T) {
 	h := torrentHarness(t, nil)
 	h.decision.NodePorts = func(context.Context) ([]NodePort, error) {
@@ -457,11 +438,9 @@ func TestTorrentPortUnaskedWhenThePlanBringsNoQbittorrent(t *testing.T) {
 	}
 }
 
-// The source's own peer port is preferred when this cluster can use it: peers
-// learned it from the tracker and any port forward the operator set points at
-// it, so a migration that moved it would drop every connection until the next
-// announce. It is kept only when it lies in this cluster's NodePort range and
-// no Service holds it.
+// The source's peer port is preferred when this cluster can use it: peers and any
+// forward point at it, so moving it drops every connection until the next announce.
+// Kept only inside this cluster's NodePort range and unheld.
 func TestTorrentPortKeepsTheSourcesPortWhenThisClusterCanUseIt(t *testing.T) {
 	h := torrentHarness(t, []NodePort{{Port: 30000, Service: "other/svc"}})
 	opts := migratingOptions(h, torrentApp)
@@ -478,9 +457,8 @@ func TestTorrentPortKeepsTheSourcesPortWhenThisClusterCanUseIt(t *testing.T) {
 	}
 }
 
-// The source's port is a hint, not an answer. One outside this cluster's
-// NodePort range cannot be a Service's, and one a Service already holds cannot
-// be this box's: both are picked for fresh, from the band, and init says so.
+// The source's port is a hint, not an answer: one outside the range or already held
+// is picked fresh from the band, and init says so.
 func TestTorrentPortPicksWhenTheSourcesPortCannotBeUsed(t *testing.T) {
 	for _, tc := range []struct {
 		name  string

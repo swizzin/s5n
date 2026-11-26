@@ -1,19 +1,12 @@
-// Package setup is `box init`: it asks the questions a seedbox has, writes the
-// answers into the grant and the values file one key at a time, and hands over
-// to `box apply`, whose diff and confirm are the review. There is no separate
-// "here is your file" step (docs/box.md, "bootstrap and init").
+// Package setup is `box init`: it asks the questions a seedbox has, splices the
+// answers into the grant and the values file one key at a time, and hands over to
+// `box apply`, whose diff and confirm are the review (docs/box.md).
 //
-// Two properties shape the code. Re-running init edits: every question is
-// prefilled from the current merged values and only a changed answer is spliced,
-// so hand edits elsewhere in either file survive byte for byte. And nothing is
-// written until every question has an answer, so a cancel leaves both files
-// exactly as they were.
-//
-// It is a pure decision over small interfaces, like internal/bootstrap: the UI
-// is a Prompter, the host filesystem a PathHost, the files internal/seedbox, the
-// questions internal/catalog, and the hand-over a function. Everything is tested
-// from fixtures; the only implementation that touches a machine is
-// LinuxPathHost, and only cmd/box builds it.
+// Re-running init edits: every question is prefilled from the merged values, only
+// a changed answer is spliced, and nothing is written until every question has an
+// answer, so a cancel leaves both files as they were. It is a pure decision over
+// small interfaces (Prompter, PathHost, seedbox, catalog) tested from fixtures;
+// LinuxPathHost is the only implementation that touches a machine.
 package setup
 
 import (
@@ -40,56 +33,43 @@ type Decision struct {
 	// Apply is the hand-over: the same `box apply` a user runs. It is a
 	// function rather than the release package so init does not link Helm.
 	Apply ApplyFunc
-	// Login installs root's login. init calls it from the hook apply runs
-	// after its confirm and before its first write, so a refused confirm never
-	// reaches it and a login that does not come up stops the run before the
-	// release exists.
+	// Login installs root's login, from the hook apply runs after its confirm and
+	// before its first write: a refused confirm never reaches it, and a login that
+	// does not come up stops the run before the release exists.
 	Login LoginFunc
-	// UserLookup names the OS account behind a uid, when the host has one.
-	// init never creates an account; this only reads the host's own database,
-	// and it is what makes the login's default the account that owns the box's
-	// files rather than whoever ran sudo.
+	// UserLookup names the OS account behind a uid. init never creates an account;
+	// this only reads the host's database, and it makes the login's default the
+	// account that owns the box's files rather than whoever ran sudo.
 	UserLookup UserLookupFunc
-	// HasLogin answers whether the users database already holds this login.
-	// It is how init tells a first run (an empty password means box makes one)
-	// from a re-run (an empty password keeps the one that is there).
+	// HasLogin answers whether the users database already holds this login, which
+	// tells a first run (an empty password means box makes one) from a re-run (it
+	// keeps the one that is there).
 	HasLogin HasLoginFunc
-	// GatewayIP reads the ClusterIP of the Gateway's proxy Service, which is
-	// how an OIDC app's pod reaches the issuer at the box's own name. It is
-	// read by root's run and written into the grant; a user's apply only
-	// renders what the grant says, because the Gateway's namespace is root's.
+	// GatewayIP reads the ClusterIP of the Gateway's proxy Service, how an OIDC
+	// app's pod reaches the issuer at the box's own name. Root's run reads it into
+	// the grant: a user's apply renders the grant and never the Gateway's namespace.
 	GatewayIP func(context.Context) (string, error)
-	// PodCIDRs reads the cluster's pod network from its Nodes. It is what an
-	// app that trusts the Gateway's forwarded address has to be told: the peer
-	// that connects is the proxy's pod, and the proxy changes on every restart,
-	// so the range it lives in is the only stable answer. Read by root's run and
-	// written into the grant, like the address above.
+	// PodCIDRs reads the cluster's pod network from its Nodes: an app trusting the
+	// Gateway's forwarded address sees the proxy's pod, which changes on every
+	// restart, so the range is the only stable answer. Written into the grant.
 	PodCIDRs func(context.Context) ([]string, error)
-	// Schema is the chart's values.schema.json, so a box installing a release
-	// from before the provider does not write a grant key that release would
-	// refuse.
+	// Schema is the chart's values.schema.json, so init does not write a grant key
+	// an older release would refuse.
 	Schema []byte
-	// Say is every line init writes. A nil reporter writes nothing; cmd/box
-	// always gives the plain or the live one.
+	// Say is every line init writes; nil writes nothing.
 	Say say.Reporter
-	// Resolver answers what the box's domain resolves to, which decides
-	// between Let's Encrypt and a self-signed certificate. Nil answers
-	// "nothing", so the safe issuer is chosen rather than a DNS lookup
-	// invented.
+	// Resolver answers what the box's domain resolves to, which decides between
+	// Let's Encrypt and a self-signed certificate. Nil answers "nothing", so the
+	// safe issuer is chosen rather than a lookup invented.
 	Resolver Resolver
-	// NodePorts lists every nodePort the cluster's Services already hold: one
-	// LIST of Services in every namespace, which is a cluster-wide read only
-	// root's kubeconfig may do (k0s's admin.conf is cluster-admin). It is how
-	// the torrent port is picked free on a box that has none yet. Nil means
-	// init cannot read a cluster, and a first install then refuses rather than
-	// guessing a port the API server may already have given away.
+	// NodePorts lists every nodePort the cluster's Services hold: one LIST in every
+	// namespace, a cluster-wide read only root may do. It is how the torrent port is
+	// picked free; nil means a first install refuses rather than guessing one.
 	NodePorts func(ctx context.Context) ([]NodePort, error)
-	// Rand answers a number in [0, n) for the torrent port pick. A field so a
-	// test can pin the answer; nil means crypto/rand.
+	// Rand answers a number in [0, n) for the torrent port pick; nil is crypto/rand.
 	Rand func(n int) int
 
-	// steps is how many steps this run shows, for a prompter that draws a step
-	// counter. It is advice for a UI, never an input: nothing reads it back.
+	// steps is how many steps this run shows: advice for a UI, never an input.
 	steps int
 }
 
@@ -104,101 +84,77 @@ func (d *Decision) step(n int, question string) {
 // Options are one `box init`. Every grant question has a field here: that is
 // what makes an unattended run possible, and the flags are the same names.
 type Options struct {
-	// Chart is the release box is installing: the defaults every question is
-	// prefilled from and the schema every answer is checked against. init does
-	// not read charts/ from its own tree, so the caller loads the published
-	// release and hands it over.
+	// Chart is the release box installs: the defaults every question is prefilled
+	// from and the schema every answer is checked against. The caller loads the
+	// published release; init never reads charts/ from its own tree.
 	Chart      seedbox.Chart
 	GrantPath  string
 	ValuesPath string
 
-	// Namespace is the release namespace. It is not one of the questions init
-	// asks: a seedbox's namespace is its identity, so a re-run keeps whatever
-	// the grant already says. The flag exists for the first run.
+	// Namespace is the release namespace, which is not a question: a seedbox's
+	// namespace is its identity, so a re-run keeps the grant's. The flag is for a
+	// first run.
 	Namespace  string
 	Domain     string
 	DataPath   string
 	ConfigPath string
-	// Apps is the grant's app list, by catalog name ("sonarr", not
-	// "sonarr-4k": instances are root's, through `box install`).
+	// Apps is the grant's app list, by catalog name ("sonarr", not "sonarr-4k":
+	// instances are root's, through `box install`).
 	Apps []string
-	// SwitchesOn are the apps another flow turns on after this install, by
-	// instance name: `box migrate apply` installs the box with every app off
-	// and switches the plan's on once their configs are in place, so a
-	// decision that belongs to the box and not to this run's app list -- the
-	// torrent port -- is still decided for it. It never becomes the app list
-	// init writes: Apps is.
+	// SwitchesOn are the apps another flow turns on after this install, by instance
+	// name: `box migrate apply` installs with every app off and switches the plan's
+	// on later, so a box-wide decision (the torrent port) is still made for it.
 	SwitchesOn []string
-	// TorrentPort is the peer port the source install's qBittorrent announced,
-	// when a migration read one from its config. init keeps it if this cluster
-	// can use it (it is in the NodePort range and no Service holds it), because
-	// trackers and any forward the operator set already point at it, and picks
-	// one from the band otherwise. Zero means the source named none.
+	// TorrentPort is the peer port a migration read from the source's qBittorrent.
+	// init keeps it if this cluster can use it (in the NodePort range, unheld),
+	// because trackers and forwards already point at it, and picks one otherwise.
 	TorrentPort int
-	// PUID and PGID are the ids every file on the data path is owned by.
-	// PUIDSet and PGIDSet say the operator named them, so they win over a
-	// re-run's grant; without them the grant's own values do.
+	// PUID and PGID are the ids every file on the data path is owned by. PUIDSet
+	// and PGIDSet say the operator named them, so they win over a re-run's grant.
 	PUID, PGID int
 	PUIDSet    bool
 	PGIDSet    bool
-	// SetTransient answers a transient question by its values path, which is
-	// the unattended form of a question that cannot live in a file.
+	// SetTransient answers a transient question by its values path: the unattended
+	// form of a question that cannot live in a file.
 	SetTransient map[string]string
 
-	// Login is the account root's login admits (--login). LoginSet says the
-	// flag was given, which is what makes it win over a re-run's grant.
+	// Login is the account root's login admits (--login); LoginSet says the flag
+	// was given, which makes it win over a re-run's grant.
 	Login    string
 	LoginSet bool
-	// DefaultLogin is what a fresh box offers when no flag was given: the
-	// invoking user's account name, which cmd/box reads from the environment.
+	// DefaultLogin is what a fresh box offers with no flag: the invoking user's
+	// account name, read from the environment.
 	DefaultLogin string
-	// PasswordFile is where the login's password is read from (--password-file,
-	// "-" for stdin). Empty means box asks, or generates one.
+	// PasswordFile is where the login's password is read from (--password-file, "-"
+	// for stdin); empty means box asks or generates one.
 	PasswordFile string
 
-	// Unattended asks nothing: flags and file keys only, and a missing required
-	// answer is an error naming the flag or key.
+	// Unattended asks nothing: flags and file keys only, and a missing answer is an
+	// error naming the flag.
 	Unattended bool
-	// Adopting says another flow is running init as one step of its own, and
-	// that the empty app list is deliberate: `box migrate apply` installs a box
-	// with every app off and switches on what it moved once the configs are in
-	// place. The line init prints for an empty box ("nothing runs yet ... add
-	// one with box install") would be wrong there, so this suppresses it.
-	//
-	// It also makes every answer that flow already holds a decision rather than
-	// a default: the data root and the app list come from the plan, so neither
-	// is asked, and a flag that was given is used as it is instead of being
-	// offered back as a starting answer. A run that was given all four of its
-	// own answers asks nothing at all; one missing is asked with init's own
-	// question, which is what makes a guided migration on a host with no box
-	// ask only for what it lacks. The notice address belongs to bootstrap's
-	// host, not to this install, so it is not asked here either.
+	// Adopting says another flow runs init as one step of its own, so the empty app
+	// list is deliberate (`box migrate apply` installs with every app off and
+	// switches on what it moved), and an answer that flow holds is a decision, not a
+	// default: it is used as given, and only a missing one is asked, so a guided
+	// migration asks only for what it lacks. The empty-box line and the notice
+	// address belong elsewhere, so neither appears.
 	Adopting bool
-	// PathsInNode says the storage paths live inside a test node (kind), not on
-	// this host, so init neither verifies nor creates them. `box apply` has the
-	// same flag for the same reason.
+	// PathsInNode says the storage paths live inside a test node (kind), so init
+	// neither verifies nor creates them; `box apply` has the same flag.
 	PathsInNode bool
-	// NoticePath is root's config, beside the cluster record. When the file is
-	// there and its notice address is empty, init asks for one -- it is the one
-	// answer that belongs to the host rather than to the seedbox. Empty means
-	// this run does not ask (a box whose config bootstrap did not write).
+	// NoticePath is root's config, beside the cluster record: when it is there with
+	// an empty address, init asks for one, the one answer that belongs to the host
+	// rather than the seedbox. Empty means this run does not ask.
 	NoticePath string
-	// BeforeWrite is the one hook a flow uses to ask about the platform and the
-	// seedbox together: it runs after init's last question and before its first
-	// write, with every answer settled, so the plan it shows has all of them and
-	// nothing is written yet. A hook that refuses stops the run there, with both
-	// files and both directories exactly as they were.
-	//
-	// `box bootstrap` on a fresh host sets it: the platform it installs and the
-	// seedbox init writes are one decision, and asking twice about it is the
-	// second form that screen removed (docs/output.md, "bootstrap, init, apply").
+	// BeforeWrite asks about the platform and the seedbox together: it runs after
+	// init's last question and before its first write, with every answer settled, so
+	// the plan it shows has all of them, and a refusal leaves both files and both
+	// directories as they were. `box bootstrap` sets it on a fresh host.
 	BeforeWrite func(ctx context.Context, a Answers) error
 }
 
-// Answers is what init's questions settled, in the shape a hook reads them: who
-// the box is for, where it lives, and what runs on it. It carries the partial
-// Result too, so a run that stops in the hook still reports the domain and the
-// login it decided.
+// Answers is what init's questions settled, as a hook reads them, carrying the
+// partial Result so a run that stops in the hook still reports what it decided.
 type Answers struct {
 	Result Result
 	// DataPath and ConfigPath are the host paths the box keeps its tree on.
@@ -211,8 +167,7 @@ type Answers struct {
 	Login string
 	// Namespace is the seedbox's namespace, which the login or the flag named.
 	Namespace string
-	// Port is the torrent port the grant records for this box, or nil when the
-	// box runs no app that has one.
+	// Port is the torrent port the grant records, or nil when no app has one.
 	Port any
 	// Hosts are the certificate names this run decided, the box's own first.
 	Hosts []Host
@@ -220,32 +175,27 @@ type Answers struct {
 	NoticeURL string
 }
 
-// ApplyOptions is what init hands the applier: the same arguments `box apply`
-// takes, plus the hook for answers that outlive no file.
+// ApplyOptions is what init hands the applier: `box apply`'s arguments, plus the
+// hook for answers that outlive no file.
 type ApplyOptions struct {
 	GrantPath   string
 	ValuesPath  string
 	PathsInNode bool
 	// AfterConfirm asks the transient questions, after apply's own confirm.
 	AfterConfirm func(ctx context.Context) (map[string]any, error)
-	// TransientKeys are the values paths AfterConfirm answers, so the apply
-	// keeps them out of its diff.
+	// TransientKeys are the paths AfterConfirm answers, kept out of the diff.
 	TransientKeys []string
-	// Login installs root's login, after the same confirm and before the
-	// first write. It is separate from AfterConfirm because its failure is a
-	// refusal (the release must not exist behind a login nobody can pass),
-	// not an answer to merge.
+	// Login installs root's login after the same confirm and before the first
+	// write. It is separate from AfterConfirm because a failure is a refusal (no
+	// release behind a login nobody can pass), not an answer to merge.
 	Login func(ctx context.Context) error
-	// Issuer is the ClusterIssuer this run writes the box's own host
-	// Certificate with, for root's host-CA step, which runs before init's
-	// per-host step writes that Certificate: on a first init there is nothing
-	// in the cluster to read it from.
+	// Issuer is the ClusterIssuer for the box's own host Certificate, for root's
+	// host-CA step, which runs before init's per-host step: on a first init there
+	// is nothing in the cluster to read it from.
 	Issuer string
-	// HostIssuers is the issuer init decided for each name it serves, by
-	// host. The apply's plan compares each Certificate that already answers
-	// with its own host's decision, so a name moved to Let's Encrypt by this
-	// run is written even though tls.issuer is empty, and its per-host step
-	// writes that same issuer instead of resolving the name again.
+	// HostIssuers is the issuer init decided per host. The apply compares each
+	// answering Certificate with its host's decision, so a name moved to Let's
+	// Encrypt is written even though tls.issuer is empty.
 	HostIssuers map[string]string
 }
 
@@ -255,74 +205,63 @@ type ApplyFunc func(ctx context.Context, opts ApplyOptions) error
 // Result is what init did, for the caller to report and a test to assert.
 type Result struct {
 	ReRun bool
-	// Domain is the host name the box answered with, so the caller can close
-	// the run with the one fact a person wants repeated back.
+	// Domain is the host name the box answered with, for the closing card.
 	Domain string
-	// Issuer is the ClusterIssuer the host's certificate should name:
-	// IssuerLetsEncrypt or IssuerSelfSigned. It is the values file's
-	// tls.issuer when that is set, and otherwise what the domain resolved to.
+	// Issuer is the ClusterIssuer the host's certificate should name, from
+	// tls.issuer when set and otherwise from what the domain resolved to.
 	Issuer string
-	// Hosts is every certificate name this run decided, the box's domain
-	// first and then one per app served at a name of its own. Each carries its
-	// own issuer: tls.issuer forces them all, and otherwise each name's own
-	// answer decides.
+	// Hosts is every certificate name this run decided, the domain first, each with
+	// its own issuer: tls.issuer forces them all, else each name's own answer.
 	Hosts []Host
-	// GrantChanged and ValuesChanged are the keys spliced, in the order they
-	// were written. A re-run with identical answers leaves both empty.
+	// GrantChanged and ValuesChanged are the keys spliced, in written order; a
+	// re-run with identical answers leaves both empty.
 	GrantChanged  []string
 	ValuesChanged []string
 	// Created are the directories init made, owned by the box's uid:gid.
 	Created []string
-	// Login is the account the login admits, and NewPassword says this run
-	// supplied one. GeneratedPassword is set only when box made it, and the
-	// caller prints it once: it is nowhere on disk.
+	// Login is the account the login admits; NewPassword says this run supplied
+	// one. GeneratedPassword is set only when box made it, and is printed once: it
+	// is nowhere on disk.
 	Login             string
 	NewPassword       bool
 	GeneratedPassword string
-	// Applied says the hand-over ran. It does not say the release changed:
-	// apply decides that, and a re-run is a no-op there too.
+	// Applied says the hand-over ran, not that the release changed: apply decides
+	// that, and a re-run is a no-op there too.
 	Applied bool
 }
 
-// LoginFunc installs root's login: it is internal/login's Apply, and its
-// options are the four values init decided.
+// LoginFunc installs root's login: internal/login's Apply, over what init decided.
 type LoginFunc func(ctx context.Context, l Login) error
 
-// UserLookupFunc names one OS account by its uid. The second return says the
-// host has an account for it: a uid with no account is not a login name.
+// UserLookupFunc names one OS account by its uid; false means the host has none,
+// and a uid with no account is not a login name.
 type UserLookupFunc func(uid int) (string, bool)
 
-// HasLoginFunc answers whether the users database already has a row. The file
-// lives on the login's claim, so the login package reads it; init only needs
-// the yes or no.
+// HasLoginFunc answers whether the users database already has a row. The file lives
+// on the login's claim, so internal/login reads it; init only needs the yes or no.
 type HasLoginFunc func(login string) bool
 
 // Login is one login install as init decided it. Password is the plaintext for
-// this run only: the login hashes it and writes the digest, and nothing here
-// is ever written to a file.
+// this run only: the login hashes it, and nothing here is written to a file.
 type Login struct {
 	Host        string
 	Name        string
 	Password    string
 	NewPassword bool
-	// Hosted are the apps the chart serves at a name of their own
-	// (plex.example.com, seerr.example.com). The login's rules need them: the
-	// edge checks every listener, so each app host needs the rule that matches
-	// the login posture the app had on its path.
+	// Hosted are the apps the chart serves at a name of their own. The edge checks
+	// every listener, so each needs the rule matching the posture it had on its path.
 	Hosted []string
-	// OwnLogin are the apps the chart's catalog says sign their users in
-	// themselves. Their host or path prefix bypasses the login: an app with
-	// its own sign-in behind the login would ask for two passwords.
+	// OwnLogin are the apps that sign their users in themselves: their host or path
+	// bypasses the login, since two passwords would be two.
 	OwnLogin []string
-	// Values is the document the release will render: chart defaults, then
-	// the user's file, then the grant, read back after init wrote them. The
-	// access_control rules come from its instance list, so the login and the
+	// Values is the document the release will render, read back after init wrote it.
+	// The access_control rules come from its instance list, so the login and the
 	// release cannot disagree about which URL prefixes exist.
 	Values map[string]any
 	// Namespace is the seedbox's namespace, half of every OIDC client id.
 	Namespace string
-	// OIDC are the apps that sign in through the login, from the chart's
-	// catalog: a box's first one is what makes it a provider at all.
+	// OIDC are the apps that sign in through the login: the first one is what makes
+	// a box a provider at all.
 	OIDC []string
 }
 
@@ -343,10 +282,8 @@ func (d *Decision) Run(ctx context.Context, opts Options) (Result, error) {
 	if err := d.check(); err != nil {
 		return res, err
 	}
-	// Root's config is read first, and strictly: a file init cannot parse stops
-	// the run before its first question, naming the line, so nothing is asked
-	// and nothing is written. init writes one line into that file, and it is
-	// the same read `box update` and `box status` make.
+	// Root's config is read first, and strictly: a file init cannot parse stops the
+	// run before its first question, so nothing is asked and nothing is written.
 	if _, _, err := readNotice(opts.NoticePath); err != nil {
 		return res, err
 	}
@@ -359,20 +296,16 @@ func (d *Decision) Run(ctx context.Context, opts Options) (Result, error) {
 	}
 	res.ReRun = sb.Grant.Exists
 
-	// The baseline every question is prefilled from: what the two files say
-	// today (merged, checked against the chart) or, on a fresh host, the chart's
-	// own defaults with every app off.
+	// The baseline every question is prefilled from: what the two files say today,
+	// or on a fresh host the chart's defaults with every app off.
 	base, err := d.baseline(sb, opts.Chart)
 	if err != nil {
 		return res, err
 	}
 	grantNow := sb.Grant.Map()
 
-	// The grant's questions, in the order docs/box.md lists them.
-	//
-	// The flow has four steps of its own, and a fifth when an app has
-	// questions of its own (the catalog's qBittorrent does). A prompter that
-	// draws a counter is told, and a prompter without one never notices.
+	// The grant's questions, in docs/box.md's order: four steps, and a fifth when an
+	// app has questions of its own (the catalog's qBittorrent does).
 	d.steps = 4
 	for _, name := range d.appsOn(grantNow, res.ReRun) {
 		if app, ok := d.Catalog.App(name); ok && len(app.Stored()) > 0 {
@@ -391,13 +324,10 @@ func (d *Decision) Run(ctx context.Context, opts Options) (Result, error) {
 		return res, d.stop(err)
 	}
 	res.Domain = domain
-	// The certificate's issuer follows the name, not the node: a public
-	// answer gets Let's Encrypt, and a private one, no answer or a forced
-	// tls.issuer says otherwise. init says which and why before it asks
-	// anything else, so the operator can correct the domain.
-	// tls.issuer is the operator's own file, not a chart default: on a first
-	// run base is the chart's values only, so the answer is read from the
-	// values document first.
+	// The issuer follows the name, not the node: a public answer gets Let's Encrypt,
+	// a private one or no answer the self-signed one, and tls.issuer overrides both.
+	// It is read from the values document first, since a first run's base is the
+	// chart's defaults.
 	forced, _ := lookupPath(base, "tls.issuer")
 	if v, ok := lookupPath(sb.Values.Map(), "tls.issuer"); ok && text(v) != "" {
 		forced = v
@@ -411,8 +341,7 @@ func (d *Decision) Run(ctx context.Context, opts Options) (Result, error) {
 		record = "add one"
 	}
 	res.Hosts = []Host{{Host: domain, Issuer: issuer, Why: why, NoDNS: noDNS, Record: record, Detail: domAnswer.detail(domain)}}
-	// Every host's certificate decision is one row, printed once the apps are
-	// known: a box with four names used to print the same row four times, and
+	// Every host's certificate decision is one row, printed once the apps are known:
 	// the row a person reads is the set (rules 3 and 4).
 	hostRows := []say.Row{tlsRow(Host{Host: domain, Issuer: issuer, Why: why})}
 	d.step(2, "where should your data and settings live?")
@@ -438,10 +367,9 @@ func (d *Decision) Run(ctx context.Context, opts Options) (Result, error) {
 		return res, err
 	}
 
-	// Who the files belong to is settled here, after the data path is known and
-	// before anything is reported about it: a data path that already holds
-	// files names its own owner, and the report below says which ids init is
-	// working with.
+	// Who the files belong to is settled after the data path is known: a path that
+	// already holds files names its own owner, and the report says which ids init
+	// uses.
 	puid, pgid, err := d.owners(opts, grantNow, res.ReRun, dataPath)
 	if err != nil {
 		return res, d.stop(err)
@@ -450,9 +378,8 @@ func (d *Decision) Run(ctx context.Context, opts Options) (Result, error) {
 		d.report().Fact("owner", filesLine(d.UserLookup, puid, pgid))
 	}
 
-	// What is at those paths, and whether a missing one may be created. The
-	// report is read-only; the directories are made after the last question, so
-	// a cancel here still leaves the host alone.
+	// What is at those paths, and whether a missing one may be created. The report
+	// is read-only; the directories are made after the last question.
 	paths := []pathTarget{
 		{kind: "data", flag: "--data-path", path: dataPath},
 		{kind: "config", flag: "--config-path", path: configPath},
@@ -470,13 +397,11 @@ func (d *Decision) Run(ctx context.Context, opts Options) (Result, error) {
 		return res, d.stop(err)
 	}
 	if len(apps) == 0 && !opts.Adopting {
-		// Said once, and not asked again: an empty box is a state, and the way
-		// out of it is a command rather than another form. A migration says
-		// nothing here: it is about to switch the apps it moved on.
+		// Said once, not asked again: an empty box is a state, and the way out is a
+		// command. A migration says nothing, as it is about to switch its apps on.
 		d.report().Muted("nothing runs yet: this box has no apps. add one with `box install <app>`, or run `box migrate` for an install that already exists")
 	}
-	// The app list decides whether there is a fifth step, so correct the
-	// counter before the questions that belong to it.
+	// The app list decides whether there is a fifth step: correct the counter.
 	d.steps = 4
 	for _, name := range apps {
 		if app, ok := d.Catalog.App(name); ok && len(app.Stored()) > 0 {
@@ -484,9 +409,8 @@ func (d *Decision) Run(ctx context.Context, opts Options) (Result, error) {
 			break
 		}
 	}
-	// Root's notice address is its own step, and the last one: it is the
-	// host's, not the seedbox's. It is only asked when bootstrap wrote the file
-	// and left the address empty, so a re-run with one set asks nothing.
+	// Root's notice address is the last step and belongs to the host, not the
+	// seedbox; it is asked only when bootstrap left it empty.
 	askNotice := false
 	pending, err := d.noticePending(opts)
 	if err != nil {
@@ -497,10 +421,9 @@ func (d *Decision) Run(ctx context.Context, opts Options) (Result, error) {
 		d.steps++
 	}
 
-	// The names the chosen apps are served at, before anything is written for
-	// one: an app's own host has to answer where the domain does, or the
-	// certificate for it can never issue. Both names resolving to nothing is
-	// the test-box case and proceeds self-signed; a real mismatch stops here,
+	// The names the chosen apps are served at, before anything is written: an app's
+	// host has to answer where the domain does, or its certificate can never issue.
+	// Both resolving to nothing is the test-box case; a real mismatch stops here
 	// naming the record to add (docs/box.md, "Certificates").
 	appHosts, err := appHostsFor(ctx, d.Resolver, d.Catalog, domain, domAnswer, text(forced), "init", apps)
 	if err != nil {
@@ -518,8 +441,7 @@ func (d *Decision) Run(ctx context.Context, opts Options) (Result, error) {
 	}
 
 	// The login: one account, asked once. It is its own step because it is the
-	// one answer that is not the seedbox's shape but the identity on it, and
-	// every path in front of the Gateway is admitted only to this user.
+	// identity on the seedbox, and every path in front of the Gateway admits only it.
 	d.step(4, "who logs in to this box?")
 	loginName, err := d.askLogin(opts, base, grantNow, puid, derivesNamespace(opts, grantNow, res.ReRun))
 	if err != nil {
@@ -531,25 +453,23 @@ func (d *Decision) Run(ctx context.Context, opts Options) (Result, error) {
 	}
 	res.Login, res.NewPassword, res.GeneratedPassword = loginName, newPassword, generated
 
-	// The namespace follows the login: a seedbox's is s5n-<login>, beside box's
-	// own s5n-system and s5n-gateway. A re-run keeps the grant's, so a box that
-	// already has `seedbox` keeps it whatever this run's login is, and an
-	// explicit --namespace still wins on a first run.
+	// The namespace follows the login (s5n-<login>), beside s5n-system and
+	// s5n-gateway. A re-run keeps the grant's, so an existing `seedbox` stays
+	// whatever the login is, and --namespace still wins on a first run.
 	namespace, err := d.namespace(opts, grantNow, res.ReRun, loginName)
 	if err != nil {
 		return res, err
 	}
-	// The peer port: a port on the node, so root settles it once and the grant
-	// keeps it from then on. It is read before any answer is written, because a
-	// cluster with no free port in the band is a refusal and not a
-	// half-finished dialog.
+	// The peer port is a port on the node: root settles it once and the grant keeps
+	// it. It is read before any answer is written, so a cluster with no free port is
+	// a refusal and not a half-finished dialog.
 	port, err := d.torrentPort(ctx, namespace, apps, grantNow, opts)
 	if err != nil {
 		return res, err
 	}
 
-	// Each selected app's own questions, from the catalog. A transient one is
-	// not asked here: it goes to the apply, after its confirm.
+	// Each selected app's own questions. A transient one goes to the apply, after
+	// its confirm.
 	var stored []answer
 	var transient []catalog.Question
 	for _, name := range apps {
@@ -573,9 +493,8 @@ func (d *Decision) Run(ctx context.Context, opts Options) (Result, error) {
 		}
 	}
 
-	// Where box tells someone who is not watching what it did. It is asked here,
-	// after the seedbox's own questions, and written with the other answers
-	// below: a cancel before this point writes nothing at all.
+	// Where box tells someone not watching what it did, written with the other
+	// answers below so a cancel before this point writes nothing.
 	noticeURL, err := d.askNoticeURL(askNotice)
 	if err != nil {
 		return res, d.stop(err)
@@ -599,9 +518,8 @@ func (d *Decision) Run(ctx context.Context, opts Options) (Result, error) {
 		}
 	}
 
-	// Every question has been asked, and nothing has been written: a flow that
-	// shows one plan for the platform and the seedbox asks its one question
-	// here, with all of this run's answers in front of the operator.
+	// Every question has been asked and nothing written: a flow showing one plan for
+	// platform and seedbox asks its one question here.
 	if opts.BeforeWrite != nil {
 		if err := opts.BeforeWrite(ctx, Answers{
 			Result:     res,
@@ -632,27 +550,18 @@ func (d *Decision) Run(ctx context.Context, opts Options) (Result, error) {
 	for _, name := range d.Catalog.Names() {
 		grantAnswers = append(grantAnswers, answer{key: "apps." + name + ".enabled", value: contains(apps, name)})
 	}
-	// The peer port last, so the grant reads app by app: what is on, then the
-	// one number that app cannot share with its own settings file.
+	// The peer port last, so the grant reads app by app: what is on, then the one
+	// number an app cannot keep in its own settings file.
 	if port != nil {
 		grantAnswers = append(grantAnswers, answer{key: torrentPortKey, value: port})
 	}
-	// The Gateway's proxy address, for an app that signs in through the login.
-	// It is written here because init is root's and the read is root's: a
-	// user's apply renders the value from the grant and never touches the
-	// Gateway's namespace. An address that cannot be read yet is not a
-	// failure -- the chart renders the app without it, and the next root run
-	// fills it in -- but it is said out loud, because nobody can sign in to
-	// the app until it is there.
-	//
-	// The question is whether this chart serves an app that way, not whether
-	// one of the apps this run switched on does. A migrate install answers init
-	// with every app off and switches the plan's on afterwards, from the grant
-	// (cmd/box/migrate_apply.go), so "an OIDC app is on now" was false on the
-	// one run that had two to install: autobrr and qui rendered without the
-	// alias, their client Secrets went unused, and autobrr showed its own
-	// password form. The address is the box's, not the app's; a box that never
-	// switches one on carries an unused key, and a re-run of init refreshes it.
+	// The Gateway's proxy address, for an app that signs in through the login. The
+	// question is whether this chart serves an app that way, not whether one this
+	// run switched on does: a migrate install answers with every app off and
+	// switches the plan's on afterwards, so "an OIDC app is on now" was false on a
+	// run with two to install and their client Secrets went unused
+	// (cmd/box/migrate_apply.go). An address that cannot be read yet is a warning:
+	// the next root run fills it in.
 	if d.GatewayIP != nil {
 		declared, err := seedbox.DeclaresOIDCGatewayIP(d.Schema)
 		if err != nil {
@@ -664,9 +573,8 @@ func (d *Decision) Run(ctx context.Context, opts Options) (Result, error) {
 				return res, err
 			}
 			if strings.TrimSpace(ip) == "" {
-				// Only an app that is on now waits for it: an empty box is not
-				// waiting on anything, and a warning about an app nobody
-				// switched on is noise.
+				// Only an app that is on now waits for it; a warning about an
+				// app nobody switched on is noise.
 				if len(d.Catalog.OIDCApps(apps)) > 0 {
 					d.report().Warn("the Gateway's proxy Service is not there yet, so the OIDC apps have no address for box's own name: run `box init` again once `box bootstrap` has installed the Gateway")
 				}
@@ -675,15 +583,10 @@ func (d *Decision) Run(ctx context.Context, opts Options) (Result, error) {
 			}
 		}
 	}
-	// The cluster's pod network, for an app that has to trust the Gateway's
-	// forwarded address. The chart's key is what decides whether this release
-	// can carry it at all: an older chart has no such value, and writing a grant
-	// key it would refuse is a failed apply on a box that was fine.
-	//
-	// Empty is not fatal: the app still runs, every request through the Gateway
-	// just looks local, and the wiring Job's receipt says so. It is written only
-	// when the chart serves that app at all, so a box without it carries no
-	// unused key.
+	// The cluster's pod network, for an app that trusts the Gateway's forwarded
+	// address. The chart's key decides whether this release can carry it: an older
+	// chart has no such value, and writing it fails an apply on a box that was fine.
+	// Empty is not fatal -- every request just looks local, and the receipt says so.
 	if d.PodCIDRs != nil {
 		declared, err := seedbox.Declares(d.Schema, "apps", "jellyfin", "knownProxies")
 		if err != nil {
@@ -746,11 +649,8 @@ func (d *Decision) Run(ctx context.Context, opts Options) (Result, error) {
 		HostIssuers:   hostIssuers(res.Hosts),
 	}
 	if d.Login != nil {
-		// The rules the login writes are derived from the document the release
-		// will render. Its apps section is the one part init just decided, and
-		// the instances under them are grant keys, so this is the same list the
-		// chart derives -- a 4K instance the operator enabled has its own
-		// rules, and one that is off has none.
+		// The login's rules come from the document the release will render: a 4K
+		// instance that is on has its rules, and one that is off has none.
 		l := Login{
 			Host:        domain,
 			Name:        loginName,
@@ -765,8 +665,7 @@ func (d *Decision) Run(ctx context.Context, opts Options) (Result, error) {
 		req.Login = func(ctx context.Context) error { return d.Login(ctx, l) }
 	}
 	// The answers that outlive no file: the catalog's transient questions, and
-	// nothing else -- an app password is a key of the release Secret now, not a
-	// value this run carries.
+	// nothing else.
 	if len(transient) > 0 {
 		asked := d.transientAsker(transient, opts)
 		req.AfterConfirm = func(ctx context.Context) (map[string]any, error) {
@@ -818,11 +717,9 @@ type textQuestion struct {
 	value      string
 	prefill    any
 	unattended bool
-	// decided says this answer is already known: the flow that runs init (a
-	// migration, whose plan holds the data root) answers it, so init uses it as
-	// it is and never offers it back as a prompt's starting answer. An empty
-	// one is a refusal naming the flag rather than a question, because the
-	// flow that decided it is the one that has to supply it.
+	// decided says the flow running init (a migration, whose plan holds the data
+	// root) already answered this: init uses it as given and never offers it back as
+	// a starting answer, and an empty one is a refusal naming the flag.
 	decided  bool
 	validate func(string) error
 }
@@ -853,8 +750,8 @@ func (d *Decision) askText(q textQuestion) (string, error) {
 	}
 	def := strings.TrimSpace(text(q.prefill))
 	if given != "" {
-		// A flag given in guided mode is the starting answer, not a decision:
-		// the prompt still shows it and the operator can change it.
+		// A flag in guided mode is the starting answer, not a decision: the prompt
+		// shows it and the operator can change it.
 		def = given
 	}
 	return d.Prompt.Input(Input{
@@ -862,11 +759,9 @@ func (d *Decision) askText(q textQuestion) (string, error) {
 	})
 }
 
-// namespace resolves the one grant key that is not a question. A seedbox's
-// namespace is its identity -- claim names and storage are derived from it -- so
-// a re-run never changes it, whatever the flag says. A first run takes the flag
-// when it was given, and otherwise derives s5n-<login>: every seedbox gets one,
-// root's included, beside box's own s5n-system and s5n-gateway.
+// namespace resolves the one grant key that is not a question: a seedbox's
+// namespace is its identity (claim names and storage derive from it), so a re-run
+// never changes it. A first run takes the flag or derives s5n-<login>.
 func (d *Decision) namespace(opts Options, grantNow map[string]any, reRun bool, login string) (string, error) {
 	if ns, ok := grantNamespace(grantNow, reRun); ok {
 		return ns, nil
@@ -913,14 +808,11 @@ type id struct {
 // take records the answer for this id.
 func (i *id) take(v int) { i.value, i.set = v, true }
 
-// owners resolves puid and pgid, in the order docs/box.md sets out: the flag
-// when it was given, the grant's value on a re-run, the owner of a data path
-// that already holds files, and only then what cmd/box derived from the invoking
-// user (sudo's ids, else the caller's).
-//
-// The data path comes before sudo's ids because the files are the answer: an
-// install that changed the owner of an existing library would leave the apps
-// unable to write it. It is never read through a symlink.
+// owners resolves puid and pgid in docs/box.md's order: the flag, the grant on a
+// re-run, the owner of a data path that holds files, then what cmd/box derived from
+// the invoking user. The files come before sudo's ids: re-chowning an existing
+// library would leave the apps unable to write it. The path is never read through a
+// symlink.
 func (d *Decision) owners(opts Options, grantNow map[string]any, reRun bool, dataPath string) (int, int, error) {
 	var puid, pgid id
 	if opts.PUIDSet {
@@ -963,10 +855,8 @@ func (d *Decision) owners(opts Options, grantNow map[string]any, reRun bool, dat
 	return d.usableIDs(opts, dataPath, puid.value, pgid.value)
 }
 
-// usableIDs is the last word on the two ids: root is never the answer, because
-// the apps run unprivileged and a root-owned data path is one they could not
-// write. Unattended names the flags; a terminal asks, because the operator knows
-// whose files those are.
+// usableIDs is the last word on the two ids: root is never the answer, because the
+// apps run unprivileged. Unattended names the flags; a terminal asks.
 func (d *Decision) usableIDs(opts Options, dataPath string, puid, pgid int) (int, int, error) {
 	if puid > 0 && pgid > 0 {
 		return puid, pgid, nil
@@ -989,11 +879,9 @@ func (d *Decision) usableIDs(opts Options, dataPath string, puid, pgid int) (int
 	return puid, pgid, nil
 }
 
-// dataOwner is the account that owns the data path, when the path already holds
-// something. A missing path, an empty one, a file and a symlink are all "no
-// data": the first two because nobody owns an empty directory yet, the last
-// because box never reads through a link, and the owner on the other side of one
-// is not the box's answer.
+// dataOwner is the account that owns the data path, when it already holds
+// something. A missing or empty path, a file and a symlink are all "no data": box
+// never reads through a link, and the owner beyond one is not the box's answer.
 func (d *Decision) dataOwner(path string) (int, int, bool, error) {
 	info, err := d.Host.Lstat(path)
 	switch {
@@ -1045,8 +933,7 @@ func validID(v string) error {
 	return nil
 }
 
-// filesLine is the record line for the account the box's files belong to:
-// "core (uid 1000, gid 1000)", with the name when the host has one.
+// filesLine is the record line for the owner, "alice (uid 1000, gid 1000)".
 func filesLine(lookup UserLookupFunc, puid, pgid int) string {
 	ids := fmt.Sprintf("uid %d, gid %d", puid, pgid)
 	if lookup == nil {
@@ -1059,10 +946,9 @@ func filesLine(lookup UserLookupFunc, puid, pgid int) string {
 	return name + " (" + ids + ")"
 }
 
-// appsOn is the app list init offers preselected: the grant's on a re-run, the
-// catalog's defaults on a fresh box. `--apps` is not here: in guided mode it is
-// a starting answer the multi-select still shows, so the only use for this list
-// is the step count before that question is asked.
+// appsOn is the app list init preselects: the grant's on a re-run, the catalog's
+// defaults on a fresh box. `--apps` is not here: in guided mode it is a starting
+// answer the multi-select still shows.
 func (d *Decision) appsOn(grantNow map[string]any, reRun bool) []string {
 	names := d.Catalog.Names()
 	var current []string
@@ -1079,22 +965,15 @@ func (d *Decision) appsOn(grantNow map[string]any, reRun bool) []string {
 	return d.Catalog.Defaults()
 }
 
-// appsNone is the word that answers the app question with nothing: an explicit
-// empty list. `--apps ""` is not it -- an empty flag is a flag nobody filled in
-// -- and neither is leaving the picker's cursor where it started.
+// appsNone answers the app question with an explicit empty list. `--apps ""` is
+// not it (an empty flag is one nobody filled in), nor is the cursor's position.
 const appsNone = "none"
 
-// AskApps resolves the app list: the flag, a multi-select otherwise,
-// preselected from the grant on a re-run and from the catalog on a fresh box.
-// There is no multi-select when another flow runs init: a migration's plan
-// decides every app, and it hands init the list (`--apps none`) because the
-// migration switches on what it moved at its end. The picker never appears
-// there, which is also why `--apps` is required rather than optional on that
-// path.
-//
-// Nothing is a legitimate answer. A box with no apps is a state of its own:
-// apps arrive later with `box install`, or all at once with the install
-// `box migrate apply` adopts into, and that is why the picker's minimum is zero.
+// AskApps resolves the app list: the flag, else a multi-select prefilled from the
+// grant or the catalog. Another flow running init (a migration, which hands over
+// `--apps none` and switches its apps on at its end) never sees the picker, which
+// is why `--apps` is required there. Nothing is a legitimate answer, since apps
+// arrive later with `box install`; that is why the picker's minimum is zero.
 func (d *Decision) askApps(opts Options, grantNow map[string]any, reRun bool) ([]string, error) {
 	names := d.Catalog.Names()
 	options := make([]Option, 0, len(names))
@@ -1105,9 +984,8 @@ func (d *Decision) askApps(opts Options, grantNow map[string]any, reRun bool) ([
 
 	current := d.appsOn(grantNow, reRun)
 
-	// "none" is the empty list spelled out, so it can never be one of the
-	// answers beside an app: one of the two is not what the operator meant, and
-	// guessing which would install the wrong box.
+	// "none" is the empty list spelled out, so it cannot sit beside an app: one of
+	// the two is not what the operator meant.
 	var given []string
 	none := false
 	for _, part := range splitApps(opts.Apps) {
@@ -1154,9 +1032,8 @@ func (d *Decision) askApps(opts Options, grantNow map[string]any, reRun bool) ([
 	})
 }
 
-// splitApps flattens --apps: one flag value that may carry commas, or several
-// if it is ever made repeatable. Empty pieces disappear, so `--apps ""` is the
-// same as not passing it.
+// splitApps flattens --apps on commas; empty pieces disappear, so `--apps ""` is
+// the same as not passing it.
 func splitApps(given []string) []string {
 	var out []string
 	for _, raw := range given {
@@ -1215,8 +1092,8 @@ func (d *Decision) askQuestion(q catalog.Question, base map[string]any) (any, er
 		}
 	}
 	if q.Kind == catalog.KindSecret {
-		// A stored secret is never offered back as a default: pressing enter
-		// keeps it (writeFiles skips an empty answer over a current value).
+		// A stored secret is never offered back as a default: enter keeps it
+		// (writeFiles skips an empty answer over a current value).
 		return d.Prompt.Secret(Secret{Key: q.Key, Prompt: q.Prompt, Help: q.Help, Optional: true})
 	}
 	var validate func(string) error
@@ -1264,10 +1141,9 @@ type answer struct {
 	value any
 }
 
-// writeFiles splices every changed answer into its file. Both files are loaded,
-// each key is compared with what is there, and only a difference is written, so
-// a re-run with the same answers touches nothing and hand edits elsewhere
-// survive byte for byte.
+// writeFiles splices every changed answer into its file: only a difference is
+// written, so a re-run with the same answers touches nothing and hand edits
+// elsewhere survive byte for byte.
 func (d *Decision) writeFiles(opts Options, sb *seedbox.Seedbox, grantNow, base map[string]any, grantAnswers, storedAnswers []answer) ([]string, []string, error) {
 	for _, dir := range []string{filepath.Dir(opts.GrantPath), filepath.Dir(opts.ValuesPath)} {
 		if err := d.Host.MkdirAll(dir, 0o755); err != nil {
@@ -1289,9 +1165,8 @@ func (d *Decision) writeFiles(opts Options, sb *seedbox.Seedbox, grantNow, base 
 		if same(current, a.value) {
 			continue
 		}
-		// An empty answer over a value that is already set is "keep it": a
-		// secret question cannot offer its current value back, and init never
-		// clears a setting by accident.
+		// An empty answer over a set value is "keep it": init never clears a setting
+		// by accident.
 		if s, isString := a.value.(string); isString && strings.TrimSpace(s) == "" && ok {
 			continue
 		}
@@ -1303,9 +1178,8 @@ func (d *Decision) writeFiles(opts Options, sb *seedbox.Seedbox, grantNow, base 
 	return grantChanged, valuesChanged, nil
 }
 
-// reportWrites is the two files as rows: what each one got, or that it was
-// already right. The paths are the log's; a person reading the screen wants to
-// know that nothing moved (rule 4).
+// reportWrites is the two files as rows: what each got, or that it was already
+// right. The paths are the log's (rule 4).
 func (d *Decision) reportWrites(opts Options, res Result) {
 	r := d.report()
 	r.Rows([]say.Row{
@@ -1316,8 +1190,7 @@ func (d *Decision) reportWrites(opts Options, res Result) {
 	r.Detail(opts.ValuesPath + ": " + writeLine(res.ValuesChanged))
 }
 
-// writeRow is one file: ✓ with the count of keys it got, or a note that it
-// already said this.
+// writeRow is one file: ✓ with its count of keys, or a note that it already said so.
 func writeRow(name string, changed []string) say.Row {
 	if len(changed) == 0 {
 		return say.Row{Mark: say.MarkNote, Name: name, Facts: []string{"already says this"}}
@@ -1332,8 +1205,7 @@ func writeLine(changed []string) string {
 	return fmt.Sprintf("edited %d %s", len(changed), plural(len(changed), "key", "keys"))
 }
 
-// pathTarget is one of the two host paths, with what init found and whether the
-// operator let it create the directory.
+// pathTarget is one host path, what init found and whether it may create it.
 type pathTarget struct {
 	kind   string
 	flag   string
@@ -1342,15 +1214,13 @@ type pathTarget struct {
 	create bool
 }
 
-// pathCheckFooter says what init then does without asking: the directories
-// under the two paths that belong to the apps. It lives here, not in a UI,
-// because both prompters must say the same thing.
+// pathCheckFooter says what init then does without asking. It lives here, not in a
+// UI, because both prompters must say the same thing.
 const pathCheckFooter = "  downloads/<category> and media/<category> are made on the first start, owned as above"
 
 // reportPaths shows what is at both paths and asks about each missing one, in
 // data-then-config order: they are two volumes, and accepting one is no answer
-// about the other. The answer is remembered, not acted on: the directories are
-// created after the last question, so a cancel leaves the host as it was.
+// about the other. The answer is remembered and acted on after the last question.
 func (d *Decision) reportPaths(paths []pathTarget, uid, gid int, unattended bool) error {
 	check := PathCheck{Footer: pathCheckFooter}
 	for i := range paths {
@@ -1361,8 +1231,7 @@ func (d *Decision) reportPaths(paths []pathTarget, uid, gid int, unattended bool
 		paths[i].report = rep
 		check.Reports = append(check.Reports, rep)
 	}
-	// A terminal UI draws the block; the line prompt gets the plain text, which
-	// is exactly what it printed before this seam existed.
+	// A terminal UI draws the block; the line prompt gets the plain text.
 	var err error
 	if pc, ok := d.Prompt.(PathChecker); ok {
 		err = pc.ShowPathCheck(check)
@@ -1381,10 +1250,9 @@ func (d *Decision) reportPaths(paths []pathTarget, uid, gid int, unattended bool
 		}
 		ok, err := d.Prompt.Confirm(Confirm{
 			Prompt: "create " + paths[i].path + " on that filesystem?",
-			// Yes is the default: init cannot finish on a path that is not there
-			// (it refuses without asking on an unattended run), so the person
-			// who reached this question has one answer that goes on. Both paths
-			// are on the block above it.
+			// Yes is the default: init cannot finish on a missing path, so the person
+			// who reached this question has one answer that goes on. Both paths are
+			// on the block above.
 			Default:     true,
 			Affirmative: "create it",
 			Negative:    "stop here",
@@ -1400,9 +1268,8 @@ func (d *Decision) reportPaths(paths []pathTarget, uid, gid int, unattended bool
 	return nil
 }
 
-// checkPathPair refuses a config path inside the data path (or the reverse).
-// Two volumes that overlap are a nested mount neither the chart nor a hardlink
-// survives, and it is always a typo.
+// checkPathPair refuses one path inside the other: overlapping volumes are a
+// nested mount neither the chart nor a hardlink survives.
 func checkPathPair(data, config string) error {
 	data = filepath.Clean(data)
 	config = filepath.Clean(config)
@@ -1418,9 +1285,8 @@ func checkPathPair(data, config string) error {
 	return nil
 }
 
-// loadSeedbox reads the two files, or starts from empty ones. A missing grant is
-// the normal case on a host that has never run init; a grant that is there but
-// does not parse is not.
+// loadSeedbox reads the two files, or starts from empty ones: a missing grant is
+// normal on a host that never ran init, one that does not parse is not.
 func loadSeedbox(grantPath, valuesPath string) (*seedbox.Seedbox, error) {
 	if grantPath == "" {
 		return nil, errors.New("no grant file: pass --grant")
@@ -1432,10 +1298,8 @@ func loadSeedbox(grantPath, valuesPath string) (*seedbox.Seedbox, error) {
 		if !errors.Is(err, fs.ErrNotExist) {
 			return nil, fmt.Errorf("read %s: %w", grantPath, err)
 		}
-		// The grant is root's and does not exist yet; the values file is the
-		// user's and may already say something (tuning, tls.issuer). Read it
-		// rather than starting from empty, so init's questions and its one
-		// forced answer see what is there.
+		// The values file may already say something (tuning, tls.issuer), so read it
+		// rather than starting from empty.
 		values, err := seedbox.LoadValues(valuesPath)
 		if err != nil {
 			return nil, err
@@ -1448,8 +1312,7 @@ func loadSeedbox(grantPath, valuesPath string) (*seedbox.Seedbox, error) {
 }
 
 // checkTransientFlags refuses an answer nothing asked for: a typo in
-// --set-transient that was silently ignored would be a claim token the operator
-// believes they supplied.
+// --set-transient would be a claim token the operator believes they supplied.
 func checkTransientFlags(given map[string]string, keys []string) error {
 	known := make(map[string]bool, len(keys))
 	for _, k := range keys {
@@ -1473,8 +1336,7 @@ func checkTransientFlags(given map[string]string, keys []string) error {
 }
 
 // prefill reads a key from the merged values, falling back to the grant for the
-// keys that are box's own record and never reach the chart (the namespace, the
-// host paths).
+// keys that never reach the chart (the namespace, the host paths).
 func prefill(base, grantNow map[string]any, key string) any {
 	if v, ok := lookupPath(base, key); ok {
 		return v
@@ -1592,8 +1454,8 @@ func nonEmpty(v string) error {
 	return nil
 }
 
-// validDomain is deliberately about shape, not reachability: init cannot know
-// whether DNS points here, and doctor is the command that asks.
+// validDomain is about shape, not reachability: doctor is the command that asks
+// whether DNS points here.
 func validDomain(v string) error {
 	if err := nonEmpty(v); err != nil {
 		return err
@@ -1610,8 +1472,7 @@ func validDomain(v string) error {
 	return nil
 }
 
-// validHostPath insists on the shape of a path the box will turn into a volume:
-// absolute, clean, and not the root of the filesystem.
+// validHostPath insists on a volume path's shape: absolute, clean, not the root.
 func validHostPath(v string) error {
 	if err := nonEmpty(v); err != nil {
 		return err
@@ -1628,9 +1489,8 @@ func validHostPath(v string) error {
 	return nil
 }
 
-// validNamespace is the shape a Kubernetes namespace name has to have, said
-// without Kubernetes words: a DNS-1123 label, which is also what a node port's
-// Kubernetes rules and a Service's DNS name need it to be.
+// validNamespace is a DNS-1123 label, said without Kubernetes words: what a
+// namespace name, a node port and a Service's DNS name all need.
 func validNamespace(v string) error {
 	if v == "" {
 		return errors.New("a seedbox name cannot be empty")

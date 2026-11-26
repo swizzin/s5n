@@ -9,12 +9,11 @@ import (
 	"github.com/swizzin/s5n/internal/say"
 )
 
-// testDomain is the box's own name in every case here; the app hosts hang under
-// it.
+// testDomain is the box's own name; the app hosts hang under it.
 const testDomain = "box.example.com"
 
-// hostRecorder is the per-host write a TLSHosts step is given: what names it
-// was asked for, with which issuer, and in what order.
+// hostRecorder is the per-host write a step is given: which names, which issuer,
+// and in what order.
 type hostRecorder struct {
 	hosts []Host
 	err   error
@@ -40,8 +39,8 @@ func hostStep(t *testing.T, r *hostRecorder) (*TLSHosts, *strings.Builder) {
 	}, out
 }
 
-// countingResolver counts how many names a step asked DNS about, so a test can
-// prove a decision taken earlier is not taken again.
+// countingResolver counts the DNS questions, so a test proves a decision is not
+// retaken.
 type countingResolver struct{ calls *int }
 
 func (c countingResolver) LookupHost(context.Context, string) ([]string, error) {
@@ -49,11 +48,9 @@ func (c countingResolver) LookupHost(context.Context, string) ([]string, error) 
 	return nil, nil
 }
 
-// TestTLSHostsWritesTheIssuerTheRunDecided: init decides every name's issuer
-// before it hands over, and its plan compares each existing Certificate with
-// that decision. The step that writes them has to use the same one -- a second
-// DNS answer could disagree with what the operator confirmed -- so a name in
-// Decided is written with that issuer and never resolved again.
+// init decides every name's issuer before it hands over, and the step writing the
+// Certificates must use the same one: a second DNS answer could disagree with what
+// the operator confirmed, so a Decided name is written and never resolved again.
 func TestTLSHostsWritesTheIssuerTheRunDecided(t *testing.T) {
 	rec := &hostRecorder{}
 	step, out := hostStep(t, rec)
@@ -82,8 +79,8 @@ func TestTLSHostsWritesTheIssuerTheRunDecided(t *testing.T) {
 	}
 }
 
-// The apply step with matching answers: both names answered where the domain
-// did, so both are written, each with the issuer its own answer picked.
+// Both names answered where the domain did, so both are written with their own
+// issuer.
 func TestTLSHostsWritesEveryNameThatMatchesTheDomain(t *testing.T) {
 	rec := &hostRecorder{}
 	step, out := hostStep(t, rec)
@@ -106,9 +103,8 @@ func TestTLSHostsWritesEveryNameThatMatchesTheDomain(t *testing.T) {
 	}
 }
 
-// A name that answers somewhere else can never get a certificate through this
-// box, so the step stops before a single write and names the record to add in
-// both forms — and names the command that has to run again, which is apply's.
+// A name answering elsewhere can never issue, so the step stops before a write,
+// names the record to add in both forms, and names the command to run again.
 func TestTLSHostsStopsOnAMismatchBeforeWriting(t *testing.T) {
 	rec := &hostRecorder{}
 	step, _ := hostStep(t, rec)
@@ -130,8 +126,7 @@ func TestTLSHostsStopsOnAMismatchBeforeWriting(t *testing.T) {
 	}
 }
 
-// A test box with no records at all is not a mismatch: the step proceeds
-// self-signed and says so, with the record to add.
+// A test box with no records is not a mismatch: self-signed, with the record.
 func TestTLSHostsProceedsSelfSignedWhenNothingResolves(t *testing.T) {
 	rec := &hostRecorder{}
 	step, out := hostStep(t, rec)
@@ -149,8 +144,7 @@ func TestTLSHostsProceedsSelfSignedWhenNothingResolves(t *testing.T) {
 	if got.Record != wantRecord {
 		t.Fatalf("record = %q, want %q", got.Record, wantRecord)
 	}
-	// One sentence, naming the host, in the words box has always used: the
-	// record to add and the command that moves it once the record exists.
+	// One sentence naming the host, the record to add and the command to move it.
 	wantLine := "gamma.box.example.com has no DNS record, so its certificate is self-signed; " +
 		"add a record for it, then run box apply again to move it to Let's Encrypt"
 	if !strings.Contains(out.String(), wantLine) {
@@ -158,8 +152,7 @@ func TestTLSHostsProceedsSelfSignedWhenNothingResolves(t *testing.T) {
 	}
 }
 
-// A user's run cannot write a listener, so it stops before a write naming the
-// command that can: root's box init for this seedbox.
+// A user's run cannot write a listener: it stops naming root's box init.
 func TestTLSHostsStopsWhenThisIdentityCannotWriteTheListener(t *testing.T) {
 	rec := &hostRecorder{}
 	step, _ := hostStep(t, rec)
@@ -181,8 +174,7 @@ func TestTLSHostsStopsWhenThisIdentityCannotWriteTheListener(t *testing.T) {
 	}
 }
 
-// An access question that cannot be answered is an error, not a "no": a run
-// that cannot tell whether it may write has to stop rather than guess.
+// An access question that cannot be answered is an error, not a "no".
 func TestTLSHostsReportsAFailedAccessQuestion(t *testing.T) {
 	rec := &hostRecorder{}
 	step, _ := hostStep(t, rec)
@@ -196,9 +188,8 @@ func TestTLSHostsReportsAFailedAccessQuestion(t *testing.T) {
 	}
 }
 
-// The step writes the login's rule for the names it serves before it writes any
-// listener: the login keeps one configuration for the box and a rule the running
-// login has not read is a 403 for the host the step exists to serve.
+// The login's rule is written before any listener: a rule the running login has not
+// read is a 403 for the host the step exists to serve.
 func TestTLSHostsWritesTheLoginRuleBeforeTheListener(t *testing.T) {
 	rec := &hostRecorder{}
 	step, out := hostStep(t, rec)
@@ -229,8 +220,8 @@ func TestTLSHostsWritesTheLoginRuleBeforeTheListener(t *testing.T) {
 	}
 }
 
-// A rule write that fails stops the step before a listener exists: a host with
-// a listener and no rule is the 403 this step is here to prevent.
+// A failed rule write stops the step: a listener with no rule is the 403 this step
+// prevents.
 func TestTLSHostsStopsWhenTheLoginRuleCannotBeWritten(t *testing.T) {
 	rec := &hostRecorder{}
 	step, _ := hostStep(t, rec)
@@ -250,8 +241,8 @@ func TestTLSHostsStopsWhenTheLoginRuleCannotBeWritten(t *testing.T) {
 	}
 }
 
-// A name that answers somewhere else is refused before either write: the step
-// does not touch the login's configuration for a host it is not going to serve.
+// A name answering elsewhere is refused before either write, so the login's
+// configuration is untouched.
 func TestTLSHostsDoesNotWriteARuleForANameItRefuses(t *testing.T) {
 	rec := &hostRecorder{}
 	step, _ := hostStep(t, rec)
@@ -272,8 +263,7 @@ func TestTLSHostsDoesNotWriteARuleForANameItRefuses(t *testing.T) {
 	}
 }
 
-// ApplyHosts is the shared write: no names is not an error, and a host without
-// an issuer is skipped rather than written with an empty one.
+// No names is not an error, and a host without an issuer is skipped.
 func TestApplyHostsSkipsNamesWithoutAnIssuer(t *testing.T) {
 	rec := &hostRecorder{}
 	err := ApplyHosts(context.Background(), rec.apply, []Host{
@@ -292,8 +282,7 @@ func TestApplyHostsSkipsNamesWithoutAnIssuer(t *testing.T) {
 	}
 }
 
-// TestOneDNSWarningNamesEveryHost: a run whose names have no records says so
-// once, naming all of them, instead of printing the same sentence per host.
+// Names with no record are one sentence naming all of them, not one per host.
 func TestOneDNSWarningNamesEveryHost(t *testing.T) {
 	rec := &hostRecorder{}
 	step, out := hostStep(t, rec)
@@ -311,8 +300,7 @@ func TestOneDNSWarningNamesEveryHost(t *testing.T) {
 	if !strings.Contains(out.String(), want) {
 		t.Fatalf("the one warning does not name every host:\n%s", out)
 	}
-	// And nothing was answered per host: every name is written once, in one
-	// step, exactly as before.
+	// Every name is written once, in one step.
 	if len(rec.hosts) != len(hosts) {
 		t.Fatalf("wrote %d hosts, want all %d", len(rec.hosts), len(hosts))
 	}

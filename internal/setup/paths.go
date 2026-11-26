@@ -8,20 +8,17 @@ import (
 	"strings"
 )
 
-// summaryEntries bounds the "what is already there" summary. A seedbox data
-// path can hold a million names; one directory read of 200 of them is cheap and
-// enough to tell "empty" from "an existing library", and it is why init never
-// walks the tree (a multi-TB walk is the thing that makes an installer look
-// hung).
+// summaryEntries bounds the "what is already there" summary: one bounded directory
+// read is enough to tell "empty" from "an existing library", and init never walks the
+// tree, since a multi-TB walk makes an installer look hung.
 const summaryEntries = 200
 
 // summaryNames is how many top-level names the report prints before "and N
 // more".
 const summaryNames = 5
 
-// PathReport is what init found at one of the box's two host paths. It is what
-// the operator is shown before anything is written: the device, the mount, the
-// filesystem, the free space and the owner, because the failure this exists to
+// PathReport is what init found at one host path, shown before anything is written:
+// the device, mount, filesystem, free space and owner. The failure it exists to
 // catch is a disk that did not mount and left an empty directory on /.
 type PathReport struct {
 	Kind    string // "data" or "config"
@@ -31,34 +28,31 @@ type PathReport struct {
 	Mount   Mount
 	Free    int64
 	Summary string
-	// OnRoot says the path (or the ancestor a missing path would land under)
-	// is on the root filesystem, which is the unmounted-disk case.
+	// OnRoot says the path (or the ancestor a missing one lands under) is on the root
+	// filesystem: the unmounted-disk case.
 	OnRoot bool
-	// SameDevice says the path sits on the same device as the root filesystem
-	// without being on its mount point: a separate partition of the system
-	// disk. Filling it takes the host down just the same, and the plain text
-	// does not say so (it is a warning a terminal UI draws; the line prompt's
-	// report is older than this field and stays byte for byte what it was).
+	// SameDevice says the path is on the root filesystem's device without being on
+	// its mount point: a separate partition of the system disk, whose filling takes
+	// the host down just the same. Only the live renderer warns about it; the line
+	// prompt's report stays byte for byte what it was.
 	SameDevice bool
 }
 
-// PathCheck is the whole report: one entry per host path, and the line about
-// the directories the apps create themselves on first start. It is structure
-// rather than text so a prompter can draw it as a table with glyphs and a
-// coloured warning; Text is the plain rendering init has always shown.
+// PathCheck is the whole report: one entry per host path and the line about the
+// directories the apps create themselves. Structure rather than text, so a prompter
+// can draw a table and a coloured warning; Text is the plain rendering.
 type PathCheck struct {
 	Reports []PathReport
-	// Footer is the line about the directories beneath the paths, which init
-	// does create without asking.
+	// Footer is the line about the directories beneath the paths, which init creates
+	// without asking.
 	Footer string
 }
 
 // PathTitle is the report's heading: a lowercase noun, no colon (rule 9).
 const PathTitle = "where things live"
 
-// PathRow is one path as the report's table shows it: the columns a person
-// compares down, and the notes that are too long for a column. Both renderers
-// print these, so the live screen and the transcript are one table (rule 13).
+// PathRow is one path as the table shows it: the columns a person compares down,
+// and notes too long for one. Both renderers print these (rule 13).
 type PathRow struct {
 	Kind   string
 	Path   string
@@ -67,8 +61,8 @@ type PathRow struct {
 	FSType string
 	// Free is how much room is left, as a person reads it: "1.8 TiB free".
 	Free string
-	// Notes are what the row cannot say in a column: what is already at the
-	// path, and who owns it when that is not this box's owner.
+	// Notes are what a column cannot hold: what is already at the path, and who owns
+	// it when that is not this box's owner.
 	Notes []string
 }
 
@@ -90,11 +84,9 @@ func (c PathCheck) Rows() []PathRow {
 	return rows
 }
 
-// Text renders the check the way `box init`'s line prompt prints it: one row
-// per path with the device, the filesystem and the free space in columns, then
-// whatever is already there under it. A value says what a sentence used to
-// (rule 13): the path, whether it is new, where it lives and how much room is
-// left are four columns, not four sentences.
+// Text renders the check as the line prompt prints it: one row per path with the
+// device, filesystem and free space in columns, then what is already there. Values
+// are columns, not sentences (rule 13).
 func (c PathCheck) Text() string {
 	var b strings.Builder
 	b.WriteString(PathTitle + "\n")
@@ -117,8 +109,7 @@ func (c PathCheck) Text() string {
 	return strings.TrimRight(b.String(), "\n")
 }
 
-// state is the one word in the state column: a path init has to make is `new`,
-// one that is already there `exists`.
+// state is the state column's word: `new` or `exists`.
 func (r PathReport) state() string {
 	if r.Exists {
 		return "exists"
@@ -126,8 +117,7 @@ func (r PathReport) state() string {
 	return "new"
 }
 
-// notes are what the row cannot say in a column: what is already at a path, who
-// owns it when that is not the box's owner, and the unmounted-disk warning.
+// notes are what the row cannot say in a column, and the unmounted-disk warning.
 func (r PathReport) notes() []string {
 	var lines []string
 	if r.Exists {
@@ -144,9 +134,8 @@ func (r PathReport) notes() []string {
 	return lines
 }
 
-// inspect builds one path's report. A missing path is reported against the
-// nearest ancestor that does exist, because that is where the filesystem the
-// new directory would land on is decided.
+// inspect builds one path's report. A missing path is reported against its nearest
+// existing ancestor, which decides the filesystem a new directory lands on.
 func (d *Decision) inspect(kind, path string, uid, gid int) (PathReport, error) {
 	rep := PathReport{Kind: kind, Path: path}
 	anchor := path
@@ -195,9 +184,8 @@ func (d *Decision) inspect(kind, path string, uid, gid int) (PathReport, error) 
 	return rep, nil
 }
 
-// summarise describes what is already at a path, cheaply: one bounded directory
-// read, no recursion. A top-level file's size counts; a directory's does not,
-// because knowing it means walking the tree.
+// summarise describes what is already at a path: one bounded read, no recursion. A
+// top-level file's size counts, a directory's does not, since that means walking it.
 func (d *Decision) summarise(path string) (string, error) {
 	entries, more, err := d.Host.ReadDir(path, summaryEntries)
 	if err != nil {
@@ -249,9 +237,8 @@ func summariseEntries(entries []DirEntry, more bool) string {
 	return line
 }
 
-// nearestExisting walks up from a missing path to the first ancestor that is
-// there. That ancestor, not the missing path, is what decides which filesystem
-// a new directory would land on.
+// nearestExisting walks up to the first ancestor that is there: that one decides
+// which filesystem a new directory lands on.
 func nearestExisting(h PathHost, path string) string {
 	for p := filepath.Clean(path); ; {
 		if _, err := h.Stat(p); err == nil {
@@ -265,9 +252,8 @@ func nearestExisting(h PathHost, path string) string {
 	}
 }
 
-// mountFor picks the mount a path lives on: the longest mount point that is a
-// prefix of it. The comparison is by path element, so /srv/s5n is not taken to
-// be under /srv/s5.
+// mountFor picks the longest mount point that is a prefix of the path, by element,
+// so /srv/s5n is not taken to be under /srv/s5.
 func mountFor(mounts []Mount, path string) (Mount, bool) {
 	best := Mount{}
 	found := false
@@ -296,12 +282,10 @@ func under(path, point string) bool {
 	return strings.HasPrefix(path, strings.TrimSuffix(point, "/")+"/")
 }
 
-// makeDirs creates the directories init owns and gives each the box's owner:
-// the two path roots it was allowed to create, and one directory per app
-// instance beneath the config path. Those per-instance directories are what the
-// chart mounts as `subPath: <instance>`; the images expect them to exist and be
-// writable by puid, and a kubelet creating a missing one makes it root-owned,
-// which is a container that starts and cannot save its settings.
+// makeDirs creates the directories init owns, each with the box's owner: the path
+// roots it may create and one directory per app instance under the config path,
+// which the chart mounts as `subPath: <instance>`. A kubelet creating a missing one
+// makes it root-owned: an app that starts and cannot save its settings.
 func (d *Decision) makeDirs(paths []string, uid, gid int) ([]string, error) {
 	seen := map[string]bool{}
 	var created []string
@@ -321,14 +305,11 @@ func (d *Decision) makeDirs(paths []string, uid, gid int) ([]string, error) {
 	return created, nil
 }
 
-// SettingsDirs is the per-instance list under the config path: one directory
-// per enabled instance, named as the chart names the workload (sonarr,
-// sonarr-4k), because that is the subPath each pod mounts. It reads the
-// instances from the values, which are the grant's, so it agrees with what the
-// chart renders without box knowing which apps are Arrs.
-//
-// init creates these directories and update copies and restores them per
-// instance, so both name them here rather than each deriving a subPath.
+// SettingsDirs is the per-instance list under the config path, named as the chart
+// names the workload (sonarr, sonarr-4k), which is the subPath each pod mounts. The
+// instances come from the grant's values, so this agrees with the chart without box
+// knowing which apps are Arrs. init creates these, update copies them, and both name
+// them here rather than each deriving a subPath.
 func SettingsDirs(configPath string, apps []string, values map[string]any) []string {
 	var out []string
 	for _, name := range apps {

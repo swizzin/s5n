@@ -1,9 +1,9 @@
 package setup
 
-// beforewrite_test.go proves the one hook a flow uses to ask about the platform
-// and the seedbox together: it runs after init's last question and before init's
-// first write, so a plan shown there has every answer in it and a "no" leaves
-// both files, both directories and the release exactly as they were.
+// The hook a flow uses to ask about the platform and the seedbox together: it runs
+// after init's last question and before its first write, so a plan shown there has
+// every answer, and a "no" leaves both files, both directories and the release as
+// they were.
 
 import (
 	"context"
@@ -12,9 +12,8 @@ import (
 	"testing"
 )
 
-// TestBeforeWriteRunsAfterTheLastQuestionAndBeforeTheFirstWrite: the hook sees
-// the answers every question settled, and nothing of the box is on disk yet --
-// no grant, no values file, no directory, no hand-over.
+// The hook sees every answer and nothing of the box on disk: no grant, no values
+// file, no directory, no hand-over.
 func TestBeforeWriteRunsAfterTheLastQuestionAndBeforeTheFirstWrite(t *testing.T) {
 	h := newHarness(t)
 	h.prompt.inputs = []string{"box.example.com", "/srv/s5n/data", "/srv/s5n/config"}
@@ -45,7 +44,7 @@ func TestBeforeWriteRunsAfterTheLastQuestionAndBeforeTheFirstWrite(t *testing.T)
 	if !ran {
 		t.Fatal("the hook never ran")
 	}
-	// The answers, in the shape the plan and its question read them.
+	// The answers, in the shape the plan reads them.
 	if got.Login != "alice" {
 		t.Errorf("the hook saw login %q, want alice", got.Login)
 	}
@@ -64,8 +63,7 @@ func TestBeforeWriteRunsAfterTheLastQuestionAndBeforeTheFirstWrite(t *testing.T)
 	if got.Result.ReRun {
 		t.Error("the hook was told this is a re-run: the first run of an empty host is not one")
 	}
-	// Before the last question was not asked, the hook is not run: the answers
-	// it shows have to be the ones a person gave.
+	// The hook is not run before the last question: it shows what a person gave.
 	if askedLen == 0 {
 		t.Error("the hook ran before any question was asked")
 	}
@@ -84,9 +82,8 @@ func TestBeforeWriteRunsAfterTheLastQuestionAndBeforeTheFirstWrite(t *testing.T)
 	}
 }
 
-// TestBeforeWriteRefusalWritesNothing: the hook is where a flow asks its one
-// question, so an answer of no is the last read-only moment. Nothing is left
-// behind for a person to clean up.
+// The hook is where a flow asks its one question, so a no is the last read-only
+// moment: nothing is left to clean up.
 func TestBeforeWriteRefusalWritesNothing(t *testing.T) {
 	h := newHarness(t)
 	h.prompt.inputs = []string{"box.example.com", "/srv/s5n/data", "/srv/s5n/config"}
@@ -109,11 +106,9 @@ func TestBeforeWriteRefusalWritesNothing(t *testing.T) {
 	}
 }
 
-// TestASeedboxThatFailsAfterTheAnswerLeavesThePlatform: the hook answered yes
-// and installed the platform, and then init's own write failed. The answers init
-// wrote stay -- a re-run reads them back and asks only for what changed -- and
-// the failure is what the run stops on, so the next run can finish the same
-// install.
+// The hook installed the platform and init's own write then failed: the answers init
+// wrote stay, a re-run reads them back and asks only for what changed, and the next
+// run finishes the install.
 func TestASeedboxThatFailsAfterTheAnswerLeavesThePlatform(t *testing.T) {
 	h := newHarness(t)
 	h.prompt.inputs = []string{"box.example.com", "/srv/s5n/data", "/srv/s5n/config"}
