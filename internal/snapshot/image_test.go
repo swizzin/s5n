@@ -5,9 +5,8 @@ import (
 	"testing"
 )
 
-// TestImageRefSpelling: a reference is spelled the way a registry spells it,
-// and its short label is the handle a person reads. A release may pin a tag, a
-// digest, or both, and each has to survive a round trip through a manifest.
+// A reference is spelled the way a registry spells it, and its short label is the
+// handle a person reads. A release may pin a tag, a digest or both.
 func TestImageRefSpelling(t *testing.T) {
 	const digest = "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 	cases := []struct {
@@ -35,9 +34,8 @@ func TestImageRefSpelling(t *testing.T) {
 			wantLabel:  "4.0.14",
 		},
 		{
-			// Nothing to label, which is what a snapshot taken before box
-			// recorded images reads as. Callers test IsZero instead of
-			// printing this.
+			// Nothing to label: what a snapshot taken before box recorded images reads as.
+			// Callers test IsZero instead of printing this.
 			name:       "zero",
 			wantString: "",
 			wantLabel:  "",
@@ -58,10 +56,8 @@ func TestImageRefSpelling(t *testing.T) {
 	}
 }
 
-// TestCheckImage: what counts as a reference box can hold an app at: a
-// repository and one of the two handles. A repository with neither is as
-// useless as an empty one, and refusing it here is what makes Take's refusal a
-// rule rather than a coincidence.
+// What counts as a reference box can hold an app at: a repository and one of the
+// two handles. A repository with neither is as useless as an empty one.
 func TestCheckImage(t *testing.T) {
 	const digest = "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 	cases := []struct {

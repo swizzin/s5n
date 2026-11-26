@@ -13,13 +13,11 @@ import (
 	"time"
 )
 
-// taken is the mtime every fixture file gets, so a restored mtime can be
-// compared exactly: the filesystem stores whole seconds either way.
+// taken is the mtime every fixture file gets, so a restored mtime compares exactly.
 var taken = time.Unix(1700000000, 0).UTC()
 
-// configDir builds an app's config directory with the state an Arr keeps: a
-// database, its WAL, the file that points at the database, and a log directory
-// that no glob names.
+// configDir builds the state an Arr keeps: a database, its WAL, the file that
+// points at the database, and a log directory no glob names.
 func configDir(t *testing.T) string {
 	t.Helper()
 	dir := t.TempDir()
@@ -48,9 +46,8 @@ func write(t *testing.T, path, content string, mode os.FileMode) {
 
 func globs() []string { return []string{"config.xml", "app.db", "app.db-wal", "app.db-shm"} }
 
-// images are the pair one step knows about an app: what it ran when the copy
-// was taken and what the step moves it to. The values are invented; none of
-// these tests is about which image, only that the copy names both.
+// images are the pair one step knows: what it ran and what it moves to. The values
+// are invented; no test here is about which image, only that both are named.
 func images() Images {
 	return Images{
 		Ran:     ImageRef{Repository: "registry.example.com/media/sonarr", Tag: "4.0.14", Digest: "sha256:" + strings.Repeat("a", 64)},
@@ -95,8 +92,8 @@ func TestTakeCopiesTheMatchingFiles(t *testing.T) {
 			t.Fatalf("%s mtime = %s, want %s", f.Path, f.ModTime, taken)
 		}
 	}
-	// The WAL keeps its mode and the config file its own: a restore has to be
-	// able to put each back as the app had it.
+	// The WAL keeps its mode and the config file its own: a restore puts each back as
+	// the app had it.
 	modes := map[string]os.FileMode{"config.xml": 0o640, "app.db": 0o640, "app.db-wal": 0o600}
 	for _, f := range man.Files {
 		if f.Mode != uint32(modes[f.Path]) {
@@ -135,9 +132,9 @@ func TestTakeCopiesTheMatchingFiles(t *testing.T) {
 	}
 }
 
-// TestTakeRecordsTheImages: the copy and the images that produced it belong
-// together, because nothing else on the box remembers them once the release has
-// moved. Both are read back from the file, not from the value Take returned.
+// The copy and the images that produced it belong together, because nothing else
+// on the box remembers them once the release has moved. Both are read back from
+// the file, not from the value Take returned.
 func TestTakeRecordsTheImages(t *testing.T) {
 	dir := configDir(t)
 	dest := filepath.Join(t.TempDir(), "step", "app")
@@ -164,9 +161,8 @@ func TestTakeRecordsTheImages(t *testing.T) {
 	if reread.MovedTo != want.MovedTo {
 		t.Fatalf("stored movedTo = %+v, want %+v", reread.MovedTo, want.MovedTo)
 	}
-	// The keys are always written, tag and digest included: a rollback reads
-	// them by name, and one omitted key is a field that silently reads as
-	// empty.
+	// The keys are always written, tag and digest included: a rollback reads them by
+	// name, and an omitted key reads as empty.
 	for _, key := range []string{`"image"`, `"movedTo"`, `"repository"`, `"tag"`, `"digest"`} {
 		if !strings.Contains(string(data), key) {
 			t.Fatalf("the manifest does not carry %s: %s", key, data)
@@ -174,10 +170,8 @@ func TestTakeRecordsTheImages(t *testing.T) {
 	}
 }
 
-// TestTakeRefusesWithoutBothImages: a copy that names only one of the two
-// images cannot be rolled back, so Take refuses before it creates anything --
-// before it even reads the config directory, which is why the missing-directory
-// case still reports the images.
+// A copy that names only one image cannot be rolled back, so Take refuses before it
+// creates anything and before it even reads the config directory.
 func TestTakeRefusesWithoutBothImages(t *testing.T) {
 	ran, moved := images().Ran, images().MovedTo
 	cases := []struct {
@@ -200,8 +194,8 @@ func TestTakeRefusesWithoutBothImages(t *testing.T) {
 			if err == nil {
 				t.Fatal("the snapshot was taken without both images")
 			}
-			// The sentence is box's, verbatim: it is the one thing the
-			// operator reads when a step cannot say what it is moving from.
+			// The sentence is box's, verbatim: the one thing the operator reads when a step
+			// cannot say what it is moving from.
 			const want = "snapshot: the image the app ran and the image it moves to are both needed"
 			if err.Error() != want {
 				t.Fatalf("error = %q, want %q", err, want)
@@ -211,14 +205,13 @@ func TestTakeRefusesWithoutBothImages(t *testing.T) {
 					t.Fatalf("%s exists after the refusal: %v", p, statErr)
 				}
 			}
-			// Nothing was copied: the refusal comes before the tree, so the
-			// rest of the config directory is untouched too.
+			// Nothing was copied: the refusal comes before the tree, so the rest of the config
+			// directory is untouched too.
 			if _, statErr := os.Lstat(filepath.Join(dir, "app.db")); statErr != nil {
 				t.Fatalf("the config directory was touched: %v", statErr)
 			}
-			// And before the config directory is even read: a step that
-			// cannot name its images is refused whether or not the app has
-			// state on disk.
+			// And before the config directory is read: a step that cannot name its images is
+			// refused whether or not the app has state on disk.
 			_, err = Take(filepath.Join(dir, "gone"), globs(), filepath.Join(t.TempDir(), "app"), tc.images)
 			if err == nil || err.Error() != want {
 				t.Fatalf("error with no config directory = %v, want the images' refusal", err)
@@ -227,18 +220,15 @@ func TestTakeRefusesWithoutBothImages(t *testing.T) {
 	}
 }
 
-// TestRestoreAManifestFromBeforeImages: an update step taken by an older box
-// wrote a manifest with app, taken and files only. It still restores, and the
-// images read back zero, which is the caller's to interpret rather than a
-// reason to refuse a copy that is otherwise intact.
+// An update step taken by an older box wrote app, taken and files only. It still
+// restores, and the images read back zero, which is the caller's to interpret.
 func TestRestoreAManifestFromBeforeImages(t *testing.T) {
 	dir := configDir(t)
 	dest := filepath.Join(t.TempDir(), "step", "app")
 	if _, err := Take(dir, globs(), dest, images()); err != nil {
 		t.Fatalf("take: %v", err)
 	}
-	// Exactly what the older manifest held: the same object with the two keys
-	// gone, which is what a file written before them reads as.
+	// What the older manifest held: the same object with the two keys gone.
 	path := filepath.Join(dest, ManifestName)
 	old, err := os.ReadFile(path)
 	if err != nil {
@@ -258,8 +248,7 @@ func TestRestoreAManifestFromBeforeImages(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// The manifest is read the way Restore reads it: through a tree on the
-	// config root, which is the only way this package reaches a file under one.
+	// The manifest is read the way Restore reads it: through a tree on the config root.
 	root, err := openTree(filepath.Dir(dir))
 	if err != nil {
 		t.Fatal(err)
@@ -290,14 +279,9 @@ func TestRestoreAManifestFromBeforeImages(t *testing.T) {
 	}
 }
 
-// TestTakeOwnsTheTree: what box creates under a config root belongs to the
-// config root's owner, not to the root process that wrote it, and the manifest
-// is readable by that user. A tree only root could read would make rolling back
-// a seedbox's own app a root command: the seedbox's box runs as its user, reads
-// the copy and writes the hold.
-//
-// A copied file keeps the owner and mode it had, because an app's own files are
-// already the seedbox's and a restore has to put each back as the app wrote it.
+// What box creates under a config root belongs to the config root's owner, not to the
+// root process, so the seedbox's own box can read the copy and write the hold; a
+// copied file keeps the owner and mode it had.
 func TestTakeOwnsTheTree(t *testing.T) {
 	configRoot := t.TempDir()
 	app := filepath.Join(configRoot, "sonarr-4k")
@@ -347,8 +331,7 @@ func TestTakeOwnsTheTree(t *testing.T) {
 	if info.Mode().Perm() != treeFileMode {
 		t.Fatalf("manifest mode = %o, want %o: the seedbox's box reads it", info.Mode().Perm(), treeFileMode)
 	}
-	// The copy is the app's file, not box's: its owner and mode come from the
-	// file it was copied from.
+	// The copy is the app's file, not box's: its owner and mode come from the original.
 	copyPath := filepath.Join(dest, "db", "sonarr.db")
 	copied, err := os.Lstat(copyPath)
 	if err != nil {
@@ -381,8 +364,8 @@ func TestTakeRefuses(t *testing.T) {
 		name    string
 		prepare func(t *testing.T) (dir string, globs []string, dest string)
 		wants   []string
-		// destExists is the case that refuses because a snapshot is already
-		// there, so the destination is the one thing a refusal leaves alone.
+		// destExists refuses because a snapshot is already there, so the destination is the
+		// one thing a refusal leaves alone.
 		destExists bool
 	}{
 		{
@@ -460,8 +443,7 @@ func TestTakeRefuses(t *testing.T) {
 					t.Fatalf("error does not name %q: %v", want, err)
 				}
 			}
-			// A refusal leaves nothing a later restore could mistake for a
-			// snapshot.
+			// A refusal leaves nothing a later restore could mistake for a snapshot.
 			paths := []string{dest + ".partial"}
 			if !tc.destExists {
 				paths = append(paths, dest)
@@ -475,8 +457,8 @@ func TestTakeRefuses(t *testing.T) {
 	}
 }
 
-// TestTakeReplacesAStalePartial: a run that died before its rename leaves a
-// partial tree, and the next run must not be blocked by its own crash.
+// A run that died before its rename leaves a partial tree, and the next run must
+// not be blocked by its own crash.
 func TestTakeReplacesAStalePartial(t *testing.T) {
 	dir := configDir(t)
 	dest := filepath.Join(t.TempDir(), "app")
@@ -496,9 +478,8 @@ func TestTakeReplacesAStalePartial(t *testing.T) {
 
 func TestRestorePutsEverythingBack(t *testing.T) {
 	dir := configDir(t)
-	// As root, hand the config file to the seedbox's user so the restore's
-	// ownership is a real assertion; a non-root test can only own its own
-	// files, and Take records what it finds either way.
+	// As root, hand the config file to the seedbox's user so the restore's ownership is
+	// a real assertion; a non-root test owns only its own files.
 	if os.Geteuid() == 0 {
 		if err := os.Chown(filepath.Join(dir, "config.xml"), 1234, 1234); err != nil {
 			t.Fatal(err)
@@ -532,8 +513,8 @@ func TestRestorePutsEverythingBack(t *testing.T) {
 			t.Fatalf("%s = %q, want %q", path, body, want)
 		}
 	}
-	// The SHM was created by the failed run and is in no manifest: a database
-	// restored under a stranger's shared-memory file is a corrupted one.
+	// The SHM is the failed run's and is in no manifest: a database restored under a
+	// stranger's shared-memory file is a corrupted one.
 	if _, err := os.Lstat(filepath.Join(dir, "app.db-shm")); !os.IsNotExist(err) {
 		t.Fatalf("app.db-shm survived the restore: %v", err)
 	}
@@ -559,8 +540,8 @@ func TestRestorePutsEverythingBack(t *testing.T) {
 			}
 		}
 	}
-	// The log directory is untouched: no glob names it, so restore is not a
-	// wholesale replacement of the config directory.
+	// The log directory is untouched: no glob names it, so restore is not a wholesale
+	// replacement of the config directory.
 	body, err := os.ReadFile(filepath.Join(dir, "logs", "logs.db"))
 	if err != nil {
 		t.Fatal(err)
@@ -570,10 +551,9 @@ func TestRestorePutsEverythingBack(t *testing.T) {
 	}
 }
 
-// TestRestoreRemovesANewWAL: the database was copied while nothing else held
-// it open, so the manifest names no WAL. A failed run leaves one behind, and it
-// describes transactions that no longer exist: replaying it over the restored
-// database is how a rollback corrupts one.
+// The database was copied while nothing held it open, so the manifest names no WAL.
+// One the failed run left describes transactions that no longer exist, and
+// replaying it over the restored database is how a rollback corrupts one.
 func TestRestoreRemovesANewWAL(t *testing.T) {
 	dir := configDir(t)
 	if err := os.Remove(filepath.Join(dir, "app.db-wal")); err != nil {
@@ -607,9 +587,8 @@ func TestRestoreRemovesANewWAL(t *testing.T) {
 	}
 }
 
-// TestRestoreRefusesATamperedSnapshot: verification is what makes the copy
-// trustworthy, and it has to happen before the first removal, not after the
-// database has already been deleted.
+// Verification is what makes the copy trustworthy, and it has to happen before the
+// first removal, not after the database is already deleted.
 func TestRestoreRefusesATamperedSnapshot(t *testing.T) {
 	dir := configDir(t)
 	dest := filepath.Join(t.TempDir(), "step", "app")
@@ -639,8 +618,8 @@ func TestRestoreRefusesATamperedSnapshot(t *testing.T) {
 	}
 }
 
-// TestRestoreRefusesAManifestPathOutside: the manifest is a file on disk inside
-// a config root the seedbox's user can write, and Restore writes where it says.
+// The manifest is a file on disk inside a config root the seedbox's user can write,
+// and Restore writes where it says.
 func TestRestoreRefusesAManifestPathOutside(t *testing.T) {
 	dir := configDir(t)
 	dest := filepath.Join(t.TempDir(), "step", "app")
@@ -668,10 +647,9 @@ func TestRestoreRefusesAManifestPathOutside(t *testing.T) {
 	}
 }
 
-// TestRestoreRefusesALinkedDirectory: the version that failed ran as the
-// seedbox's user and can leave a link where its database directory was. Restore
-// runs as whoever runs box, so writing through that link is writing wherever
-// the app pointed it.
+// The version that failed ran as the seedbox's user and can leave a link where its
+// database directory was; Restore runs as whoever runs box, so writing through that
+// link writes wherever the app pointed it.
 func TestRestoreRefusesALinkedDirectory(t *testing.T) {
 	dir := configDir(t)
 	write(t, filepath.Join(dir, "db", "db.sqlite3"), "the nested database", 0o640)
@@ -709,8 +687,8 @@ func TestRestoreRefusesALinkedDirectory(t *testing.T) {
 	}
 }
 
-// TestRestoreRebuildsAMissingDirectory: a failed version that removed its
-// database directory gets it back as a real directory, with the file in it.
+// A failed version that removed its database directory gets it back as a real
+// directory, with the file in it.
 func TestRestoreRebuildsAMissingDirectory(t *testing.T) {
 	dir := configDir(t)
 	write(t, filepath.Join(dir, "db", "db.sqlite3"), "the nested database", 0o640)
@@ -740,8 +718,8 @@ func TestRestoreRebuildsAMissingDirectory(t *testing.T) {
 	}
 }
 
-// TestReachesBelow: which directories the walk reads, and which symlinks stand
-// where a glob names files.
+// Which directories the walk reads, and which symlinks stand where a glob names
+// files.
 func TestReachesBelow(t *testing.T) {
 	globs := []string{"config.xml", "db/*.db", "a/*/c/file"}
 	cases := []struct {
@@ -765,9 +743,8 @@ func TestReachesBelow(t *testing.T) {
 	}
 }
 
-// TestTakeDoesNotReadADirectoryNoGlobNames: the directory is closed, so a walk
-// that entered it would fail the snapshot (run as root nothing is closed, and
-// TestReachesBelow is what holds the rule).
+// The directory is closed, so a walk that entered it would fail the snapshot; run
+// as root nothing is closed, and TestReachesBelow is what holds the rule.
 func TestTakeDoesNotReadADirectoryNoGlobNames(t *testing.T) {
 	dir := configDir(t)
 	closed := filepath.Join(dir, "Metadata")
@@ -781,8 +758,8 @@ func TestTakeDoesNotReadADirectoryNoGlobNames(t *testing.T) {
 	}
 }
 
-// TestRestoreRefusesAnEmptyManifest: an unreadable manifest that decodes to no
-// files would make Restore delete every file its globs match.
+// An unreadable manifest that decodes to no files would make Restore delete every
+// file its globs match.
 func TestRestoreRefusesAnEmptyManifest(t *testing.T) {
 	dir := configDir(t)
 	dest := filepath.Join(t.TempDir(), "step", "app")
@@ -801,8 +778,8 @@ func TestRestoreRefusesAnEmptyManifest(t *testing.T) {
 	}
 }
 
-// TestRestoreWithoutAManifest: a directory under the snapshots root that is not
-// a snapshot box made is refused, not read as an empty one.
+// A directory under the snapshots root that is not a snapshot box made is refused,
+// not read as an empty one.
 func TestRestoreWithoutAManifest(t *testing.T) {
 	dir := configDir(t)
 	err := Restore(dir, globs(), t.TempDir())
@@ -811,9 +788,8 @@ func TestRestoreWithoutAManifest(t *testing.T) {
 	}
 }
 
-// TestMatchesStayInsideTheirDirectory: a glob sees a whole relative path, so
-// `*` never crosses a directory separator and there is no `**`. What a glob can
-// reach is what a reviewer can read in the catalog.
+// A glob sees a whole relative path, so `*` never crosses a separator and there is
+// no `**`: what it can reach is what a reviewer reads in the catalog.
 func TestMatchesStayInsideTheirDirectory(t *testing.T) {
 	dir := t.TempDir()
 	write(t, filepath.Join(dir, "app.db"), "top level", 0o600)
@@ -825,8 +801,7 @@ func TestMatchesStayInsideTheirDirectory(t *testing.T) {
 		paths []string
 	}{
 		{glob: "*.db", paths: []string{"app.db"}},
-		// `**` is two stars in one segment, not recursion: the whole path is
-		// matched, so neither form reaches a file below `db/`.
+		// `**` is two stars in one segment, not recursion: the whole path is matched.
 		{glob: "**", paths: []string{"app.db"}},
 		{glob: "db/*.db", paths: []string{"db/app.db"}},
 		{glob: "db/**", paths: []string{"db/app.db"}},
@@ -837,8 +812,7 @@ func TestMatchesStayInsideTheirDirectory(t *testing.T) {
 	}
 	for i, tc := range cases {
 		t.Run(tc.glob, func(t *testing.T) {
-			// Each case's copy goes beside the config directory, inside the
-			// same config root, which is the only place Take writes one.
+			// Each case's copy goes beside the config directory, inside the same config root.
 			dest := filepath.Join(filepath.Dir(dir), ".box", strconv.Itoa(i), "app")
 			man, err := Take(dir, []string{tc.glob}, dest, images())
 			if tc.paths == nil {
@@ -861,9 +835,7 @@ func TestMatchesStayInsideTheirDirectory(t *testing.T) {
 	}
 }
 
-// TestOwnerIsReadFromTheFile keeps the manifest's owner honest on the platform
-// box runs on: a stat box cannot read would record -1, which a restore would
-// then try to apply.
+// A stat box cannot read records -1, which a restore would then try to apply.
 func TestOwnerIsReadFromTheFile(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "app.db")
 	write(t, path, "the database", 0o600)

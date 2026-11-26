@@ -10,14 +10,11 @@ import (
 	"testing"
 )
 
-// confined is the fixture the confinement tests share: a config root with one
-// app's config directory under it, and a sentinel directory beside the root.
-//
-// The sentinel is what a link planted in the tree would reach if box followed it:
-// it stands for anything on the host that is not the seedbox's -- another user's
-// home, another seedbox's config, a system directory. Every test here plants a
-// link at one of the places box touches and checks two things: the call fails, and
-// the sentinel is exactly as it was afterwards, down to the file it holds.
+// confined is the fixture the confinement tests share: a config root with one app's
+// config directory under it, and a sentinel directory beside the root standing for
+// anything on the host that is not the seedbox's. Every test here plants a link at one
+// of the places box touches and checks that the call fails and the sentinel is exactly
+// as it was.
 type confined struct {
 	root     string // the config root
 	app      string // <root>/sonarr, one app's config directory
@@ -47,9 +44,8 @@ func newConfined(t *testing.T) *confined {
 	return c
 }
 
-// shape is what a directory holds, path by path: the type and mode of every
-// entry, a link's target, and a file's content. Two equal shapes mean box left
-// nothing behind -- no new file, no new directory, no rewritten content.
+// shape is what a directory holds, path by path, so two equal shapes mean box
+// left nothing behind: no new file, no rewritten content.
 func shape(t *testing.T, dir string) map[string]string {
 	t.Helper()
 	out := make(map[string]string)
@@ -85,8 +81,7 @@ func shape(t *testing.T, dir string) map[string]string {
 	return out
 }
 
-// mustBeUnchanged fails the test if the sentinel's shape is not the one recorded
-// before the call under test.
+// mustBeUnchanged fails the test if the sentinel's shape is not the one recorded.
 func (c *confined) mustBeUnchanged(t *testing.T, before map[string]string) {
 	t.Helper()
 	if after := shape(t, c.sentinel); !reflect.DeepEqual(before, after) {
@@ -94,10 +89,8 @@ func (c *confined) mustBeUnchanged(t *testing.T, before map[string]string) {
 	}
 }
 
-// TestTakeAndHoldsRefuseALinkedBoxDirectory: .box is the seedbox's to replace,
-// and a link there is the widest hole there is -- the snapshot tree and the hold
-// file both hang off it, so one link would put a copy of every app's database,
-// and the record of what box holds, wherever it points.
+// .box is the seedbox's to replace, and a link there is the widest hole there is:
+// the snapshot tree and the hold file both hang off it.
 func TestTakeAndHoldsRefuseALinkedBoxDirectory(t *testing.T) {
 	c := newConfined(t)
 	if err := os.Symlink(c.sentinel, filepath.Join(c.root, boxDir)); err != nil {
@@ -116,9 +109,8 @@ func TestTakeAndHoldsRefuseALinkedBoxDirectory(t *testing.T) {
 	c.mustBeUnchanged(t, before)
 }
 
-// TestTakeRefusesALinkedSnapshotsRoot: .box is real and .box/snapshots is a link
-// out of the tree, so every step directory a take creates would be created
-// outside it.
+// .box is real and .box/snapshots is a link out, so every step directory a take
+// creates would be created outside the tree.
 func TestTakeRefusesALinkedSnapshotsRoot(t *testing.T) {
 	c := newConfined(t)
 	if err := os.MkdirAll(filepath.Join(c.root, boxDir), 0o750); err != nil {
@@ -135,9 +127,8 @@ func TestTakeRefusesALinkedSnapshotsRoot(t *testing.T) {
 	c.mustBeUnchanged(t, before)
 }
 
-// TestNewestAndPruneRefuseALinkedSnapshotsRoot: a read through the link would
-// find another tree's snapshots and restore them over this app's state, and a
-// prune through it would delete another tree's copies.
+// A read through the link would find another tree's snapshots and restore them
+// over this app's state; a prune through it would delete another tree's copies.
 func TestNewestAndPruneRefuseALinkedSnapshotsRoot(t *testing.T) {
 	c := newConfined(t)
 	if err := os.MkdirAll(filepath.Join(c.root, boxDir), 0o750); err != nil {
@@ -159,9 +150,8 @@ func TestNewestAndPruneRefuseALinkedSnapshotsRoot(t *testing.T) {
 	c.mustBeUnchanged(t, before)
 }
 
-// TestNewestAndTakeRefuseALinkedStepDirectory: a step is where one copy of every
-// app that moved lives, and a link there sends both halves of the step outside
-// the tree -- the copy a take writes and the copy a rollback reads.
+// A step holds one copy of every app that moved, and a link there sends both
+// halves of the step outside the tree.
 func TestNewestAndTakeRefuseALinkedStepDirectory(t *testing.T) {
 	c := newConfined(t)
 	if err := os.MkdirAll(Root(c.root), 0o750); err != nil {
@@ -183,9 +173,8 @@ func TestNewestAndTakeRefuseALinkedStepDirectory(t *testing.T) {
 	c.mustBeUnchanged(t, before)
 }
 
-// TestTakeRefusesALinkedSnapshotDirectory: the copy's own directory is a link out
-// of the tree. Take refuses because a snapshot is already there by that name --
-// box never overwrites one -- and what the link points at is not touched either.
+// The copy's own directory is a link out. Take refuses because a snapshot is
+// already there by that name, and what the link points at is not touched either.
 func TestTakeRefusesALinkedSnapshotDirectory(t *testing.T) {
 	c := newConfined(t)
 	if err := os.MkdirAll(c.step, 0o750); err != nil {
@@ -202,11 +191,9 @@ func TestTakeRefusesALinkedSnapshotDirectory(t *testing.T) {
 	c.mustBeUnchanged(t, before)
 }
 
-// TestRestoreRefusesALinkedSnapshotDirectory: the copy a rollback would put back
-// is a link out of the tree, and the directory it points at holds a complete
-// snapshot -- so without the tree the restore would read it, verify it and write
-// it over the app's state. The sentinel is exactly the shape a restore would
-// accept, which is what makes this refusal the tree's and not a manifest error.
+// The copy a rollback would put back is a link out of the tree, and what it points
+// at holds a complete snapshot: without the tree, the restore would read it,
+// verify it and write it over the app's state.
 func TestRestoreRefusesALinkedSnapshotDirectory(t *testing.T) {
 	c := newConfined(t)
 	if _, err := Take(c.app, globs(), c.dest, images()); err != nil {
@@ -244,10 +231,9 @@ func TestRestoreRefusesALinkedSnapshotDirectory(t *testing.T) {
 	}
 }
 
-// TestTakeRefusesALinkedDirectoryUnderTheApp: a directory inside the app's config
-// directory is the app's own to replace, and the walk does not follow it -- a
-// snapshot that skipped everything under it would restore the app to a state it
-// was never in.
+// A directory inside the app's config directory is the app's own to replace, and
+// the walk does not follow it: a snapshot that skipped everything under it would
+// restore the app to a state it was never in.
 func TestTakeRefusesALinkedDirectoryUnderTheApp(t *testing.T) {
 	c := newConfined(t)
 	write(t, filepath.Join(c.app, "db", "db.sqlite3"), "the nested database", 0o640)
@@ -269,10 +255,9 @@ func TestTakeRefusesALinkedDirectoryUnderTheApp(t *testing.T) {
 	c.mustBeUnchanged(t, before)
 }
 
-// TestTakeRefusesALinkedAppDirectory: the app's config directory itself is a link
-// out of the tree. Its owner is what a snapshot is handed to, so a take that
-// followed it would copy another tree's files and then hand them to this
-// seedbox's user.
+// The app's config directory itself is a link out. Its owner is what a snapshot
+// is handed to, so a take that followed it would copy another tree's files and
+// hand them to this seedbox's user.
 func TestTakeRefusesALinkedAppDirectory(t *testing.T) {
 	c := newConfined(t)
 	if err := os.RemoveAll(c.app); err != nil {
@@ -289,10 +274,8 @@ func TestTakeRefusesALinkedAppDirectory(t *testing.T) {
 	c.mustBeUnchanged(t, before)
 }
 
-// TestHoldsRefuseALinkedHoldFile: the hold file is box's own, and a link there
-// points the record at another tree. Reading it would take another box's holds as
-// this box's; writing it would replace the link, which is safe and still not what
-// the operator asked for.
+// The hold file is box's own, and a link there points the record at another tree:
+// reading it would take another box's holds as this box's.
 func TestHoldsRefuseALinkedHoldFile(t *testing.T) {
 	c := newConfined(t)
 	if err := os.MkdirAll(filepath.Join(c.root, boxDir), 0o750); err != nil {
@@ -318,15 +301,11 @@ func TestHoldsRefuseALinkedHoldFile(t *testing.T) {
 	c.mustBeUnchanged(t, before)
 }
 
-// TestALinkInsideTheConfigRootStillWorks: a link that stays inside the tree is
-// the seedbox's own business -- their files, their link -- and every operation
-// behaves as it did before the tree existed: box writes and reads through it.
+// A link that stays inside the tree is the seedbox's own business and every operation
+// keeps working through it.
 //
-// The link has to be relative. os.Root refuses an absolute link wherever it
-// points, because resolving it is what a link out of the tree looks like, so an
-// operator's absolute link inside the tree is refused where it used to work. That
-// is the one behaviour the root cannot keep, and it is the price of the guarantee:
-// see TestAnAbsoluteLinkInsideTheRootIsRefused.
+// It has to be relative: os.Root refuses an absolute link wherever it points, the one
+// behaviour the root cannot keep (TestAnAbsoluteLinkInsideTheRootIsRefused).
 func TestALinkInsideTheConfigRootStillWorks(t *testing.T) {
 	c := newConfined(t)
 	inside := filepath.Join(c.root, "box-tree")
@@ -356,12 +335,9 @@ func TestALinkInsideTheConfigRootStillWorks(t *testing.T) {
 	}
 }
 
-// TestAnAbsoluteLinkInsideTheRootIsRefused pins the one behaviour the root cannot
-// keep. os.Root will not resolve an absolute link even when it points inside the
-// tree, so a seedbox whose .box is an absolute link inside its own config root is
-// refused where box used to follow it. The refusal is the same one a link out of
-// the tree gets, and box names the path it was reaching for; what protects the
-// operator is that box never creates such a link itself.
+// os.Root will not resolve an absolute link even when it points inside the tree,
+// so a seedbox whose .box is one is refused where box used to follow it. Box never
+// creates such a link itself.
 func TestAnAbsoluteLinkInsideTheRootIsRefused(t *testing.T) {
 	c := newConfined(t)
 	if err := os.MkdirAll(filepath.Join(c.root, "box-tree"), 0o750); err != nil {
@@ -380,11 +356,9 @@ func TestAnAbsoluteLinkInsideTheRootIsRefused(t *testing.T) {
 	}
 }
 
-// TestPruneAndNewestReportAStepTheyCannotRead: a step box cannot open is not a
-// step without this app's copy. Prune would otherwise delete nothing and report
-// success, and Newest would answer "there is no snapshot" about a disk it never
-// read -- two answers a caller acts on differently, one of them by taking a copy
-// the box already has for none.
+// A step box cannot open is not a step without this app's copy: Prune would report
+// success having deleted nothing, and Newest would answer "there is no snapshot"
+// about a disk it never read.
 func TestPruneAndNewestReportAStepTheyCannotRead(t *testing.T) {
 	if os.Geteuid() == 0 {
 		t.Skip("root reads a directory whatever its mode")
@@ -406,10 +380,9 @@ func TestPruneAndNewestReportAStepTheyCannotRead(t *testing.T) {
 	}
 }
 
-// TestTakeAndRestoreRefuseACopyOutsideTheConfigRoot pins the tree's edge: the
-// copy a take writes, or a restore reads, must sit inside the config root that
-// holds the app's config directory. A tree widened to reach it would be one the
-// seedbox's links could leave.
+// The tree's edge: the copy a take writes, or a restore reads, must sit inside the
+// config root holding the app's config directory, or it is a tree the seedbox's
+// links could leave.
 func TestTakeAndRestoreRefuseACopyOutsideTheConfigRoot(t *testing.T) {
 	root := t.TempDir()
 	app := filepath.Join(root, "app")
