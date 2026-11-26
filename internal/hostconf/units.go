@@ -14,8 +14,7 @@ import (
 	"github.com/swizzin/s5n/internal/atomicfile"
 )
 
-// The two units that make `box update` run by itself, and where systemd reads
-// them.
+// The two units that make `box update` run by itself, and where systemd reads them.
 const (
 	// UnitDir is systemd's own directory for unit files.
 	UnitDir = "/etc/systemd/system"
@@ -25,32 +24,26 @@ const (
 	TimerFile = "box-update.timer"
 )
 
-// WakeInterval is how often the timer unit wakes box. It is not the check
-// interval: box decides from root's config whether a wake has anything to do, so
-// changing how often it checks is an edit in box.yaml and never in systemd.
+// WakeInterval is how often the timer wakes box, not the check interval: box
+// decides from root's config whether a wake has anything to do, so the interval
+// is an edit in box.yaml and never in systemd.
 const WakeInterval = 15
 
 // Units is where the timer's two files go and how they are turned on. It is an
-// interface so bootstrap's tests assert on what it wrote without touching this
-// host's systemd.
+// interface so bootstrap's tests assert on what it wrote without touching systemd.
 type Units interface {
-	// Install writes both unit files and reports whether either changed. A
-	// re-run whose bytes are the same writes nothing.
+	// Install writes both unit files and reports whether either changed.
 	Install(service, timer []byte) (bool, error)
-	// Enable makes systemd read the files and start the timer now. It is not
-	// called when nothing changed: a reload of untouched units is a no-op that
-	// looks like work.
+	// Enable makes systemd read the files and start the timer. It is not called
+	// when nothing changed: reloading untouched units only looks like work.
 	Enable(ctx context.Context) error
 }
 
-// UnitFiles renders the two units for one box: the binary to run, and the three
-// files this bootstrap or init run used, so the timer updates the seedbox the
-// operator just installed.
-//
-// The service is a oneshot that runs as root (systemd's default for a system
-// unit) with no timeout: an update can wait out an app's thirty-minute startup
-// budget, and systemd's ninety-second default would kill it in the middle of a
-// migration.
+// UnitFiles renders the two units for one box: the binary, and the three paths
+// this bootstrap or init run used, so the timer updates the seedbox just
+// installed. The service is a oneshot that runs as root (systemd's default) with
+// no timeout: an update can wait out an app's thirty-minute startup budget, and
+// systemd's ninety-second default would kill it in the middle of a migration.
 func UnitFiles(boxPath, record, grant, values string) (service, timer []byte) {
 	var s strings.Builder
 	s.WriteString("[Unit]\n")
@@ -84,9 +77,9 @@ func UnitFiles(boxPath, record, grant, values string) (service, timer []byte) {
 	return []byte(s.String()), []byte(t.String())
 }
 
-// execArg is one ExecStart argument. systemd splits the line on whitespace and
-// understands double quotes, so a path with a space in it has to be quoted or
-// box would be started as two commands.
+// execArg is one ExecStart argument: systemd splits the line on whitespace and
+// understands double quotes, so a path with a space has to be quoted or box would
+// start as two commands.
 func execArg(arg string) string {
 	if arg != "" && !strings.ContainsAny(arg, " \t\n\"'\\") {
 		return arg
@@ -94,10 +87,9 @@ func execArg(arg string) string {
 	return strconv.Quote(arg)
 }
 
-// DirUnits writes the units into a directory. Enable is the difference between
-// the two kinds: the real systemd asks systemctl to read the files and start the
-// timer, and --unit-dir's leaves it nil, because the host those files are for is
-// not this one.
+// DirUnits writes the units into a directory. EnableWith is the difference
+// between the two kinds: systemctl for real systemd, nil for --unit-dir, whose
+// files are for another host.
 type DirUnits struct {
 	Dir string
 	// EnableWith is what turns the timer on. Nil writes the files and stops
@@ -105,9 +97,8 @@ type DirUnits struct {
 	EnableWith func(ctx context.Context) error
 }
 
-// Install writes each file whose bytes are not already there, mode 0644: a unit
-// file is read by systemd, not by root alone. Files that are the same are not
-// rewritten, so a second bootstrap leaves their mtimes alone.
+// Install writes each file whose bytes are not already there, mode 0644: systemd
+// reads a unit file, not root alone. A file that is the same keeps its mtime.
 func (d DirUnits) Install(service, timer []byte) (bool, error) {
 	changed := false
 	for _, f := range []struct {
@@ -140,9 +131,9 @@ func Systemd() DirUnits {
 	return DirUnits{Dir: UnitDir, EnableWith: systemctlEnable}
 }
 
-// systemctlEnable is `systemctl daemon-reload` and `systemctl enable --now
-// box-update.timer`: the first makes systemd read the files just written, the
-// second starts the timer now and at every boot.
+// systemctlEnable is `systemctl daemon-reload` then `enable --now
+// box-update.timer`: the first makes systemd read the files, the second starts the
+// timer now and at every boot.
 func systemctlEnable(ctx context.Context) error {
 	if err := systemctl(ctx, "daemon-reload"); err != nil {
 		return err
@@ -164,9 +155,8 @@ func systemctl(ctx context.Context, args ...string) error {
 	return nil
 }
 
-// Install renders the timer's units and puts them where units says. changed says
-// whether anything was written, which is what decides whether systemd is asked
-// to reload.
+// Install renders the timer's units and puts them where units says; changed
+// decides whether systemd is asked to reload.
 func Install(ctx context.Context, units Units, boxPath, record, grant, values string) (changed bool, err error) {
 	service, timer := UnitFiles(boxPath, record, grant, values)
 	changed, err = units.Install(service, timer)
@@ -179,10 +169,9 @@ func Install(ctx context.Context, units Units, boxPath, record, grant, values st
 	return true, units.Enable(ctx)
 }
 
-// writeIfChanged writes data to path unless the file already holds exactly
-// those bytes, and reports whether it wrote. A file that cannot be read is
-// rewritten rather than refused: the unit is box's, and its content is the
-// answer, not what was there before.
+// writeIfChanged writes data unless the file already holds exactly those bytes,
+// reporting whether it wrote. A file that cannot be read is rewritten rather than
+// refused: the unit is box's, and its content is the answer.
 func writeIfChanged(path string, data []byte) (bool, error) {
 	if old, err := os.ReadFile(path); err == nil && string(old) == string(data) {
 		return false, nil

@@ -1,17 +1,9 @@
-// Package hostconf is root's config file for the host: /etc/s5n/box.yaml,
-// the one file that decides whether this box updates by itself and where it
-// posts notices.
-//
-// It sits beside the cluster record bootstrap writes, so `--record` moves it
-// too, and it is root's to edit: box writes the file once (the template below)
-// and afterwards only ever writes the one line `box init` asks about
-// (SetNoticeURL). Everything else box reads from it strictly -- an unknown key,
-// a malformed line or a bad value names the file, the line and the key -- so a
-// typo is a message rather than a silently ignored setting.
-//
-// The package is stdlib only. It is read by bootstrap, `box init`, `box update`
-// and `box status`, none of which may grow a YAML dependency: the four keys are
-// a hand-written parser in the style of internal/bootstrap's record.
+// Package hostconf is root's config file for the host: /etc/s5n/box.yaml, beside
+// the cluster record, which decides whether this box updates itself and where it
+// posts notices. box writes the file once and afterwards only the one line `box
+// init` asks about (SetNoticeURL); it reads strictly, naming file, line and key,
+// so a typo is a message rather than a silently ignored setting. Stdlib only, as
+// bootstrap, init, update and status may not grow a YAML dependency.
 package hostconf
 
 import (
@@ -32,9 +24,8 @@ import (
 // FileName is root's config, beside the cluster record.
 const FileName = hostroot.ConfigName
 
-// MinInterval is the shortest interval the file accepts. Anything shorter is a
-// busy loop against the registry: a release lands hours after upstream, and the
-// timer's own jitter is ten minutes.
+// MinInterval is the shortest interval the file accepts: anything shorter is a
+// busy loop against the registry, and the timer's own jitter is ten minutes.
 const MinInterval = 15 * time.Minute
 
 // Config is what root's file says. The zero value is not the default; Defaults
@@ -47,9 +38,8 @@ type Config struct {
 	Interval time.Duration
 	// HoldBox says take no new box, the same as --hold-box on every run.
 	HoldBox bool
-	// NoticeURL is where box posts a JSON notice, or empty for none. It can
-	// carry a token, which is why the file is 0600 and why nothing ever prints
-	// it: see Redact.
+	// NoticeURL is where box posts a JSON notice, or empty for none. It can carry
+	// a token, hence the 0600 file and Redact.
 	NoticeURL string
 }
 
@@ -65,8 +55,7 @@ func Path(recordPath string) string {
 }
 
 // Template is the file bootstrap writes on a host that has none, byte for byte.
-// The comments are the documentation: box never rewrites them, and an operator
-// who reads the file sees what each key does.
+// Its comments are the documentation: box never rewrites them.
 func Template() []byte {
 	return []byte(`# box's settings for this host. box never rewrites this file; edit it by hand.
 update:
@@ -78,10 +67,10 @@ notices:
 `)
 }
 
-// Ensure writes the default file when path is missing, and never touches one
-// that is there: the comments and the answers in it are root's. It reports
-// whether it wrote. A file that cannot be stat'ed is an error -- "there is none"
-// and "the disk did not answer" lead to opposite decisions about writing.
+// Ensure writes the default file when path is missing, and never touches one that
+// is there: the comments and the answers in it are root's. It reports whether it
+// wrote; a stat that fails is an error, because "there is none" and "the disk did
+// not answer" lead to opposite decisions about writing.
 func Ensure(path string) (bool, error) {
 	_, err := os.Stat(path)
 	switch {
@@ -109,9 +98,8 @@ func Write(path string, data []byte) error {
 	return nil
 }
 
-// Load reads root's config. A missing file is the defaults, not an error: a box
-// bootstrap made on a newer host has one, and one upgraded by hand may not.
-// exists says whether there was a file to read.
+// Load reads root's config; a missing file is the defaults, not an error, because
+// a box upgraded by hand may not have one. exists says whether there was a file.
 func Load(path string) (cfg Config, exists bool, err error) {
 	data, err := os.ReadFile(path)
 	if errors.Is(err, fs.ErrNotExist) {
@@ -135,10 +123,10 @@ const (
 	sectionNotices section = "notices"
 )
 
-// parse reads the four keys strictly. The file has two levels: update and
-// notices, and the leaves under them. A key outside them, a leaf at the top
-// level, an indented line before a section, a repeated key and a value that is
-// not what its key takes are all errors naming file, line and key.
+// parse reads the four keys strictly: two levels, update and notices, and their
+// leaves. A key outside them, a leaf at the top level, an indented line before a
+// section, a repeated key and a bad value are all errors naming file, line and
+// key.
 func parse(path string, data []byte) (Config, error) {
 	cfg := Defaults()
 	var current section
@@ -204,8 +192,7 @@ func parse(path string, data []byte) (Config, error) {
 	return cfg, nil
 }
 
-// parseOnOff is a switch's value: on/off, and true/false for someone who writes
-// the file from a shell script.
+// parseOnOff accepts on/off and, for a shell script, true/false.
 func parseOnOff(v string) (bool, error) {
 	switch strings.ToLower(strings.TrimSpace(v)) {
 	case "on", "true":
@@ -217,8 +204,8 @@ func parseOnOff(v string) (bool, error) {
 	}
 }
 
-// parseInterval is a Go duration, and at least MinInterval: a shorter one would
-// hammer the registry, and the timer's jitter makes it pointless anyway.
+// parseInterval takes a Go duration of at least MinInterval, or the timer would
+// hammer the registry.
 func parseInterval(v string) (time.Duration, error) {
 	d, err := time.ParseDuration(strings.TrimSpace(v))
 	if err != nil {
@@ -242,9 +229,8 @@ func parseURL(v string) (string, error) {
 	return raw, nil
 }
 
-// ValidURL is the rule the notice address follows, exported because `box init`
-// asks for it: an empty answer means no notices, and anything else has to be an
-// absolute http or https address whose host a post can reach.
+// ValidURL is the rule the notice address follows, exported for `box init`: empty
+// means no notices, anything else an absolute http(s) address.
 func ValidURL(raw string) error {
 	u, err := url.Parse(strings.TrimSpace(raw))
 	if err != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") {
@@ -253,8 +239,7 @@ func ValidURL(raw string) error {
 	return nil
 }
 
-// splitKV splits "key: value" on the first colon, keeping any colon after it:
-// "url: https://example.test/a" is one key and one value.
+// splitKV splits on the first colon only, so a URL keeps its own.
 func splitKV(line string) (key, value string, ok bool) {
 	i := strings.Index(line, ":")
 	if i < 0 {
@@ -273,9 +258,9 @@ func unquote(s string) string {
 	return s
 }
 
-// stripComment removes a trailing comment: a `#` that starts a line or follows
-// whitespace, outside quotes. A `#` inside a quoted value is the value's, which
-// is what keeps a URL's fragment from cutting its line in half.
+// stripComment removes a trailing comment, a `#` starting a line or following
+// whitespace, outside quotes: a `#` inside a quoted value is the value's, which
+// keeps a URL's fragment from cutting its line in half.
 func stripComment(line string) string {
 	var quote byte
 	for i := 0; i < len(line); i++ {
@@ -295,9 +280,9 @@ func stripComment(line string) string {
 }
 
 // SetNoticeURL rewrites the one `notices.url` line of data and keeps every other
-// byte, so `box init`'s answer does not reflow root's file: comments, key order,
-// blank lines and the three other keys survive. A file with no url line is an
-// error -- init writes the answer into root's file, it does not make one up.
+// byte: comments, key order and the three other keys survive `box init`'s answer.
+// A file with no url line is an error -- init writes into root's file, it does not
+// make one up.
 func SetNoticeURL(src []byte, raw string) ([]byte, error) {
 	lines := strings.Split(string(src), "\n")
 	current := ""
@@ -324,8 +309,7 @@ func SetNoticeURL(src []byte, raw string) ([]byte, error) {
 		}
 		indent := stripped[:len(stripped)-len(strings.TrimLeft(stripped, " \t"))]
 		out := indent + "url: " + strconv.Quote(strings.TrimSpace(raw))
-		// The template's comment says what the line is for, and it is not
-		// box's to delete: keep it where it was.
+		// The template's comment is the operator's, not box's to delete.
 		if comment := strings.TrimSpace(stripped[len(body):]); comment != "" {
 			out += "  " + comment
 		}
@@ -338,9 +322,9 @@ func SetNoticeURL(src []byte, raw string) ([]byte, error) {
 	return []byte(strings.Join(lines, "\n")), nil
 }
 
-// Redact is a notice address as box may print it: scheme and host, never the
-// path or the query, because either can be the token that makes the URL work.
-// A string that is not an absolute URL redacts to nothing rather than to itself.
+// Redact is a notice address as box may print it: scheme and host, never path or
+// query, either being able to carry the token. Anything that is not an absolute
+// URL redacts to nothing rather than to itself.
 func Redact(raw string) string {
 	if strings.TrimSpace(raw) == "" {
 		return ""
