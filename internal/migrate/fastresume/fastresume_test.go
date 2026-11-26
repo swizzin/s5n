@@ -14,12 +14,11 @@ import (
 	"github.com/swizzin/s5n/internal/migrate/plan"
 )
 
-// infoHash is invented: 20 bytes, as libtorrent stores a v1 hash.
+// infoHash is 20 invented bytes, as libtorrent stores a v1 hash.
 const infoHash = "0123456789abcdefghij"
 
-// qbtPlan is the table a migrated qBittorrent gets: the source's download root
-// and its Series subdirectory move under box's data contract. Every path in it
-// is invented.
+// qbtPlan moves the download root and its Series subdirectory under box's data
+// contract. Paths are invented.
 const qbtPlan = `version: 2
 apps:
   qbittorrent:
@@ -42,11 +41,11 @@ func testTable(t *testing.T) *plan.Plan {
 	return p
 }
 
-// bstr renders a bencode string the way libtorrent's writer does.
+// bstr renders a bencode string as libtorrent's writer does.
 func bstr(s string) string { return strconv.Itoa(len(s)) + ":" + s }
 
-// dict joins name/value pairs into a dictionary in the order given, which for
-// the fixtures below is libtorrent's own: its keys are sorted.
+// dict joins pairs in the order given, which for these fixtures is libtorrent's:
+// keys sorted.
 func dict(pairs ...string) string {
 	var b strings.Builder
 	b.WriteString("d")
@@ -58,12 +57,11 @@ func dict(pairs ...string) string {
 	return b.String()
 }
 
-// list renders a list of already-encoded values.
+// list renders a list of encoded values.
 func list(values ...string) string { return "l" + strings.Join(values, "") + "e" }
 
-// lt12Resume is a resume file shaped like the one libtorrent 1.2 writes for
-// qBittorrent 5: the keys that hold a path, an empty one to prove it is left
-// empty, and enough of the rest that a reordering or a dropped key would show.
+// lt12Resume is shaped like libtorrent 1.2's file for qBittorrent 5, with enough
+// keys that a reordering or a dropped one would show.
 func lt12Resume(savePath, qbtSavePath, qbtDownloadPath string, mapped ...string) []byte {
 	names := make([]string, 0, len(mapped))
 	for _, m := range mapped {
@@ -88,9 +86,8 @@ func lt12Resume(savePath, qbtSavePath, qbtDownloadPath string, mapped ...string)
 	))
 }
 
-// lt2Resume is the same torrent written by libtorrent 2: it carries two keys
-// libtorrent 1.2 does not (info-hash2 and piece layers) and the path keys are
-// unchanged, which is why one rewriter serves both.
+// lt2Resume is libtorrent 2's: two keys 1.2 lacks, the path keys unchanged, which
+// is why one rewriter serves both.
 func lt2Resume(savePath, qbtSavePath, qbtDownloadPath string, mapped ...string) []byte {
 	names := make([]string, 0, len(mapped))
 	for _, m := range mapped {
@@ -318,10 +315,8 @@ func TestRewriteDirRefusals(t *testing.T) {
 }
 
 func TestRewriteDirLeavesAFileThatIsAlreadyRight(t *testing.T) {
-	// A source that already keeps the data contract gets an identity rule from
-	// discovery, which is the only way a plan can say "this tree stays where it
-	// is": an absolute path no rule mentions is a gap, not a path to leave
-	// alone.
+	// An identity rule is a plan's only way to say "this tree stays": an absolute
+	// path no rule mentions is a gap.
 	identity, err := plan.Parse([]byte(`version: 2
 apps:
   qbittorrent:
@@ -339,9 +334,8 @@ apps:
 	root := t.TempDir()
 	src := filepath.Join(root, "resume")
 	dst := filepath.Join(root, "copy")
-	// Already under the data contract, with automatic torrent management on:
-	// qBittorrent writes no qBt-savePath at all in that case, and the mapped
-	// name is relative to save_path.
+	// Under the contract with automatic torrent management: no qBt-savePath, and
+	// the mapped name is relative to save_path.
 	writeFiles(t, src, map[string][]byte{
 		"h1.fastresume": lt12Resume("/data/downloads/Movies", "", "", "a/relative.name.mkv"),
 	})
@@ -367,8 +361,8 @@ func TestRewriteDirRefusesAFileItCannotRead(t *testing.T) {
 	dst := filepath.Join(root, "copy")
 	writeFiles(t, src, map[string][]byte{
 		"h1.fastresume": []byte("d8:save_path"),
-		// The .torrent beside it is copied untouched, so a broken resume file
-		// is the only thing that stops the run.
+		// The .torrent is copied untouched, so a broken resume file alone stops the
+		// run.
 		"h1.torrent": []byte("d4:infodee"),
 	})
 
@@ -401,9 +395,8 @@ func TestRewriteDirRefusesASubdirectory(t *testing.T) {
 }
 
 func TestRewriteDirKeepsModesAndMakesTheDestination(t *testing.T) {
-	// The created directory is requested as dirPerm and the umask decides what
-	// survives, so pin the umask a group-writable config root assumes; the mode
-	// itself is asserted below.
+	// The umask decides what survives of dirPerm, so pin the one a
+	// group-writable config root assumes.
 	defer syscall.Umask(syscall.Umask(0o002))
 
 	root := t.TempDir()
@@ -521,8 +514,7 @@ func namesOf(files map[string][]byte) []string {
 	return names
 }
 
-// TestScanWritesNothing is the check pass on the app's own directory: it reads
-// every resume file and leaves every byte where it was.
+// TestScanWritesNothing reads every resume file and leaves every byte.
 func TestScanWritesNothing(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "resume")
 	writeFiles(t, dir, map[string][]byte{
@@ -546,8 +538,8 @@ func TestScanWritesNothing(t *testing.T) {
 	}
 }
 
-// TestRewriteInPlace rewrites the files that need it and leaves the rest
-// exactly as they were, including the one whose paths are already right.
+// TestRewriteInPlace rewrites what needs it and leaves the rest, including the
+// file whose paths are already right.
 func TestRewriteInPlace(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "resume")
 	writeFiles(t, dir, map[string][]byte{
@@ -557,8 +549,8 @@ func TestRewriteInPlace(t *testing.T) {
 	})
 	untouched := snapshot(t, dir)["h2.fastresume"]
 
-	// An identity rule is how a plan says "this tree stays where it is": that
-	// is what makes the second file's paths already right rather than a gap.
+	// An identity rule is how a plan says "this tree stays"; without it the
+	// second file is a gap.
 	identity, err := plan.Parse([]byte(`version: 2
 apps:
   qbittorrent:
@@ -595,9 +587,8 @@ apps:
 	}
 }
 
-// TestRewriteInPlaceRefusesBeforeWriting is the other half of the promise: a
-// directory with one unmapped path is left whole, even the files it could have
-// rewritten.
+// TestRewriteInPlaceRefusesBeforeWriting: one unmapped path leaves the directory
+// whole, even the files it could have rewritten.
 func TestRewriteInPlaceRefusesBeforeWriting(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "resume")
 	writeFiles(t, dir, map[string][]byte{
@@ -618,8 +609,7 @@ func TestRewriteInPlaceRefusesBeforeWriting(t *testing.T) {
 	}
 }
 
-// TestBlob is the SQLite store's half: the same resume data, rewritten in
-// memory, with the key qBittorrent never writes but libtorrent 2 reads.
+// TestBlob is the SQLite store's half: the same data, rewritten in memory.
 func TestBlob(t *testing.T) {
 	raw := []byte(dict(
 		"file-format", bstr("libtorrent resume file"),
@@ -661,17 +651,14 @@ func TestBlob(t *testing.T) {
 	}
 }
 
-// TestStopMarksEveryTorrentStopped is the rehearsal's app-specific half: a
-// resume file whose paths are already right is still written, because a torrent
-// that is not stopped seeds, rechecks and announces. Both keys are inserted in
-// libtorrent's sorted order when the file does not carry them, and nothing else
-// in the file changes.
+// TestStopMarksEveryTorrentStopped: a file whose paths are already right is still
+// written -- an unstoppped torrent seeds and announces -- with both keys inserted
+// in libtorrent's sorted order and nothing else changed.
 func TestStopMarksEveryTorrentStopped(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "resume")
 	raw := lt12Resume("/data/downloads/Movies", "", "")
 	writeFiles(t, dir, map[string][]byte{"h1.fastresume": raw})
-	// The paths are already right: this pass is only about the torrent's state,
-	// so any other byte changing would be a rewrite it did not report.
+	// Only the torrent's state changes; any other byte would be unreported.
 	identity, err := plan.Parse([]byte(`version: 2
 apps:
   qbittorrent:
@@ -730,8 +717,7 @@ apps:
 		}
 	}
 
-	// A second pass finds nothing to stop and writes nothing: a re-run is a
-	// no-op, which is what makes the state file's "done" believable.
+	// A second pass writes nothing, which makes the state file's "done" believable.
 	rep, _, err = Rewrite(dir, "qbittorrent", identity, Stop())
 	if err != nil {
 		t.Fatalf("a second Rewrite with Stop: %v", err)
@@ -741,10 +727,8 @@ apps:
 	}
 }
 
-// TestScanWithStopCountsAndWritesNothing: apply runs every Check before any
-// write, and the summary's "N torrents written stopped" comes from that pass.
-// The count has to be the number the Write then changes, without the Check
-// touching the staged copy.
+// TestScanWithStopCountsAndWritesNothing: the summary's count comes from Check,
+// and must be what Write then changes without Check touching the staged copy.
 func TestScanWithStopCountsAndWritesNothing(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "resume")
 	stopped, changed, err := stopBytes("h2.fastresume", lt12Resume("/downloads/Series", "", ""))
@@ -772,9 +756,8 @@ func TestScanWithStopCountsAndWritesNothing(t *testing.T) {
 	}
 }
 
-// TestStopBlobMarksTheSQLiteResumeDataStopped: qBittorrent 5's torrents.db
-// carries the same bencoded dictionary in libtorrent_resume_data, and a torrent
-// loaded from there has to come up stopped too.
+// TestStopBlobMarksTheSQLiteResumeDataStopped: a torrent loaded from
+// libtorrent_resume_data comes up stopped too.
 func TestStopBlobMarksTheSQLiteResumeDataStopped(t *testing.T) {
 	raw := lt2Resume("/downloads/Movies", "", "")
 	out, _, gaps, stopped, err := Blob("torrents.db", raw, "qbittorrent", testTable(t), Stop())
