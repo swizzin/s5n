@@ -176,8 +176,6 @@ type IngressRule struct {
 	// Service is the name of the backend Service, in the Ingress's namespace.
 	Service string
 	// Port is the backend port's number, and PortName is the name the Service's
-	// own port is declared under, when the Ingress names it that way instead.
-	// Exactly one is set, as a ServicePort's target is.
 	Port     int
 	PortName string
 }
@@ -225,11 +223,8 @@ type Source interface {
 	Ingresses(ctx context.Context) ([]Ingress, error)
 	// Pods are the pods the source still has, for the two things a workload's
 	// template cannot say: the addresses the app answered on, and whether any
-	// pod of a workload is left.
 	Pods(ctx context.Context) ([]Pod, error)
 	// Nodes are the source cluster's nodes. Its error is not fatal: a
-	// kubeconfig scoped to a namespace may not read a cluster-scoped object,
-	// and the host a single-node source ran on only decorates the plan.
 	Nodes(ctx context.Context) ([]Node, error)
 	Raw(ctx context.Context) (map[string][]byte, error)
 }
@@ -237,24 +232,13 @@ type Source interface {
 // Options is what discovery is told that the source cannot say.
 type Options struct {
 	// Namespaces limits discovery to these source namespaces; empty means
-	// every namespace. A workload outside them is neither migrated nor
-	// reported: the operator said it is not part of this migration.
 	Namespaces []string
 	// Variants is the chart's variants.yaml: the blessed image list a source
-	// image is mapped to a variant through (charts/s5n/variants.yaml, read the
-	// way internal/admission reads it). Nil when the caller has no chart to
 	// hand over, which maps nothing and says so.
 	Variants []byte
 	// Categories is the directory box's values lay each instance's library out
-	// in, by box's instance name (charts/s5n/values.yaml, an instance's
-	// `category`). It is what the source's library directories are renamed
-	// onto and what every app that stored one is rewritten to. Nil when the
-	// caller has no chart: nothing is renamed then, and the report says so.
 	Categories map[string]string
 	// ConfigFS is the host's filesystem rooted at its /, read-only. Discovery
-	// opens each app's config directory and the Arrs' databases through it and
-	// writes nothing anywhere. It is required: the mounts name host
-	// directories, and without it there is nothing to read them from.
 	ConfigFS fs.FS
 	// TempDir is where a database is copied before it is opened; empty uses
 	// the system's temporary directory. The source's own file is never opened,
@@ -268,15 +252,12 @@ type Options struct {
 // Report is everything the operator should see that the plan does not hold.
 type Report struct {
 	// Skipped are the source's workloads that are not in the plan, with the
-	// reason, and the containers of a migrated app's pod that the chart's pod
-	// does not carry. They are also the plan's Outside list, which is what
 	// apply prints; the reason is why discovery refused them.
 	Skipped []Skipped
 	// Ignored are the mounts discovery did not turn into a path rule.
 	Ignored []Ignored
 	// Notes are the decisions and fallbacks that stop nothing: a port read
 	// from the pod because the app's config did not say, a Service that
-	// selects two apps, the library found without an Arr to ask.
 	Notes []string
 	// Raw is the source's manifests as Source.Raw returned them, for the
 	// caller to write into the plan directory.
@@ -306,8 +287,6 @@ type discovery struct {
 	opt Options
 	rep Report
 	// svcs is the source's Services, kept for the fallback that needs them (an
-	// app whose config names no port takes the ports a Service that selects
-	// only it forwards to) and for the rules a Service's own addresses earn.
 	svcs []Service
 	// ings are the source's Ingress rules, which turn a public address into an
 	// app and give the plan its domain default.
@@ -316,8 +295,6 @@ type discovery struct {
 	// a workload's pods are what says it is stopped.
 	pods []Pod
 	// nodes are the source cluster's nodes, and nodeErr why there are none:
-	// the host the source ran on is a single node's name, and the distribution
-	// that installed it is the marker in its kubelet's version.
 	nodes   []Node
 	nodeErr error
 	// served are the Ingress hosts that reach a planned app, which the plan's
@@ -333,12 +310,7 @@ type discovery struct {
 
 // Discover reads a source and returns the plan that migrates it, with what it
 // could not settle in the report. Nothing is written anywhere, here or by the
-// filesystem it reads.
-//
-// An error means no plan: the caller gets the report as far as it got, and the
-// message names the workload, directory or app that stopped it. A source
 // discovery cannot map onto the chart's data contract is refused here rather
-// than half-migrated, which is why the checks name the move the operator has to
 // make by hand (docs/box.md, "Data is adopted by renaming, never by moving").
 func Discover(ctx context.Context, src Source, opt Options) (*plan.Plan, Report, error) {
 	d := &discovery{opt: opt}
@@ -368,8 +340,6 @@ func Discover(ctx context.Context, src Source, opt Options) (*plan.Plan, Report,
 	}
 	d.pods = pods
 	// The node list is the one read discovery can do without: a kubeconfig
-	// scoped to a namespace may not read a cluster-scoped object, and the host
-	// only decorates the plan, so its failure is a line in the report.
 	if nodes, err := src.Nodes(ctx); err != nil {
 		d.nodeErr = err
 	} else {
@@ -448,8 +418,6 @@ type instance struct {
 	// ports are the ports the app listened on in the source.
 	ports []int
 	// downloadCategory is the qBittorrent category this app's own download
-	// client uses, read from its database: the directory its torrents are in,
-	// which a migrated box keeps.
 	downloadCategory string
 }
 
@@ -490,7 +458,6 @@ func (d *discovery) classify(wls []Workload) error {
 
 // classifyWorkload maps one workload onto a catalog app and box's instance
 // name, or says why it is not one. An error is two apps in one pod, which no
-// instance name can express.
 func classifyWorkload(wl Workload) (*instance, string, error) {
 	app, container, other, ok := wl.catalogContainer()
 	if !ok {
@@ -558,9 +525,7 @@ func (wl Workload) images() []string {
 }
 
 // trimDir returns what p has after dir when dir covers it whole at a segment
-// boundary, and false otherwise. It is the plan's rule: /downloads2 is not
 // under /downloads, and mapping it as though it were would point an app at a
-// directory holding nothing it knows.
 func trimDir(p, dir string) (string, bool) {
 	p, dir = path.Clean(p), path.Clean(dir)
 	if dir == "/" {
@@ -579,7 +544,6 @@ func trimDir(p, dir string) (string, bool) {
 }
 
 // readConfigFile reads one file under a host directory through the config
-// filesystem, which is rooted at the host's /. ok is false when the file is
 // absent, which is a normal state for an app that has never started.
 func readConfigFile(fsys fs.FS, dir, name string) ([]byte, bool, error) {
 	p := strings.TrimPrefix(path.Join(dir, name), "/")

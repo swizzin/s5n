@@ -51,18 +51,13 @@ type Env struct {
 	Targets map[string]rewrite.Endpoint
 	// Run executes a tool inside an app's pinned image. nil when this caller
 	// cannot run one: the one rewriter that needs it (Plex) then refuses with
-	// its own message, and preflight says so before anything is staged.
 	Run rewrite.Runner
 	// Enabled reports whether the seedbox already switches an instance on.
 	Enabled func(instance string) bool
 	// Owned is the release's wiring ownership record. nil on a run that only
 	// wants the files moved (the tests, and a box whose migration cannot seed
-	// it): an app that adopted a connection then stops the run rather than
-	// dropping the ids on the floor.
 	Owned OwnedStore
 	// Secret is the release Secret, where each app's own API key is written so
-	// the chart hands the app the key it has today (keys.go). nil on a run
-	// whose apps have no key of their own.
 	Secret KeyStore
 	// Values turns an instance on in the seedbox's files.
 	Values ValuesEditor
@@ -77,7 +72,6 @@ type Env struct {
 	Image func(app string) string
 	// Rehearsal applies a rehearsal snapshot: the release is locked, data is
 	// neither adopted nor renamed, and a rewriter that would act on the network
-	// writes its state quiet.
 	Rehearsal bool
 	// deferred is Survey's mode: an app needing its own image is checked after the
 	// install. Its row carries InstanceSummary.Deferred.
@@ -352,7 +346,6 @@ func Run(ctx context.Context, p *plan.Plan, planBytes []byte, env Env) (Result, 
 
 // StoppedBeforeWrite reports an error returned before the first write outside
 // staging -- a preflight refusal or a Check gap -- which is the only case where
-// "nothing has been moved" is true.
 func StoppedBeforeWrite(err error) bool {
 	var p *problems
 	return errors.As(err, &p)
@@ -453,7 +446,6 @@ func preflightData(p *plan.Plan, env Env, st *State) []string {
 
 // preflightApp checks one instance: that this box can rewrite the app at all,
 // that the seedbox is not already running it, that its source config is there,
-// and that the directory it moves into is free.
 func preflightApp(p *plan.Plan, env Env, st *State, name string) []string {
 	app := p.Apps[name]
 	catalog := CatalogApp(name, env.Catalog)
@@ -493,9 +485,7 @@ func preflightApp(p *plan.Plan, env Env, st *State, name string) []string {
 }
 
 // NeedsRunner reports whether an app's rewriter can only work with a runner:
-// the rewriter says so itself (rewrite.RunnerUser), so this package names no
 // app. Preflight refuses a plan naming one on a run that cannot start images,
-// before anything is staged.
 func NeedsRunner(app string) bool {
 	r, ok := rewrite.For(app)
 	if !ok {
@@ -559,9 +549,6 @@ func (m *migration) copyInto(name, dst, src string) (Staged, error) {
 	if m.env.deferred {
 		if treeApp {
 			// The pass before an install stages nothing for this app: its check
-			// runs once the box that can run its image exists, so all this row
-			// needs is what the snapshot holds, which is what the pass that
-			// verified it counted.
 			if m.env.Bulk != nil {
 				return m.env.Bulk.Measure(name)
 			}
@@ -586,8 +573,6 @@ func (m *migration) copyInto(name, dst, src string) (Staged, error) {
 	}
 	if treeApp && m.env.Bulk != nil {
 		// The whole of it, once, out of the snapshot: the bulk was never
-		// extracted beside the checks, so this is the only copy the config root
-		// gets.
 		return m.env.Bulk.Stage(name, dst, m.env.PUID, m.env.PGID)
 	}
 	return copyTree(dst, src, m.env.PUID, m.env.PGID)
@@ -613,8 +598,6 @@ func (m *migration) check(ctx context.Context) error {
 		}
 		if m.env.deferred && NeedsRunner(app) {
 			// The check is a query through the app's pinned image, and there is
-			// no release to run one in yet: the row says so, and Run makes it
-			// before anything of the snapshot moves.
 			m.deferred[name] = true
 			continue
 		}
@@ -711,9 +694,6 @@ func (m *migration) summary() Summary {
 		}
 	}
 	// A rehearsal renames nothing (renameData), so its rows say what the real
-	// run renames rather than leaving the library out of the screen a person
-	// reviews: the plan's renames are listed either way, and the screen's
-	// wording is the run's (grouped.go).
 	if m.p.Data != nil {
 		for _, pair := range m.p.Data.Renames() {
 			if has(m.st.Renamed, pair[0]) {
@@ -829,7 +809,6 @@ func appendNotes(into, wrote, checked []string) []string {
 }
 
 // sameReport compares a Check and a Write report: the same changes, counted the
-// same way, and the same adopted connections.
 func sameReport(check, write rewrite.Report) (string, bool) {
 	a, b := flattenChanges(check.Changes), flattenChanges(write.Changes)
 	if len(a) != len(b) {
@@ -870,7 +849,6 @@ func sameReport(check, write rewrite.Report) (string, bool) {
 }
 
 // flattenChanges renders changes as one sorted line each, so two reports with
-// the same counts in another order compare equal.
 func flattenChanges(changes []rewrite.Change) []string {
 	out := make([]string, 0, len(changes))
 	for _, c := range changes {
@@ -906,8 +884,6 @@ func (m *migration) renameData() error {
 		if exists(to) {
 			// A box's own release makes /data/downloads/<category> for every
 			// Arr it runs, so a target of empty directories is the box's, not
-			// the operator's data: it goes, and the source is renamed into the
-			// name. A target with a file anywhere under it stops the run.
 			if err := m.removeEmptyTarget(to); err != nil {
 				return err
 			}
@@ -1000,9 +976,6 @@ func (m *migration) removeEmptyTarget(to string) error {
 func mediaKey(from string) string { return plan.MediaDir + "/" + from }
 
 // mediaRename is one library directory as apply moves it: the directory the
-// source has, and the one box's category is, in the library's directory --
-// whichever name this run gives that directory, which is the source's until the
-// rename of step 6 above has run.
 func mediaRename(dataRoot string, d *plan.Data, pair [2]string) (from, to string, ok bool) {
 	base := filepath.Join(dataRoot, plan.MediaDir)
 	if !isDir(filepath.Join(base, pair[0])) {

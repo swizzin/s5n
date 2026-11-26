@@ -182,12 +182,7 @@ func (s Settled) sort() {
 
 // Settle runs every rewriter's Check over a private copy of every app's config,
 // and returns the plan with everything the checks did not settle written into it
-// as a default, plus the list of what it called out.
-//
 // The plan handed in is never modified: the one returned is a copy. Settle writes
-// nothing outside its own working directory -- which is the caller's, beside the
-// snapshot the run is reading -- so a run that stops here leaves the source
-// exactly as it was.
 func Settle(ctx context.Context, p *plan.Plan, in SettleInput) (*plan.Plan, Settled, error) {
 	if p == nil {
 		return nil, nil, errors.New("settle: no plan: there is nothing to settle")
@@ -223,8 +218,6 @@ type settler struct {
 }
 
 // copyPlan is the plan Settle hands back. The apps' path tables and the host
-// rules are copied so a rule can be added to one app without touching another,
-// and the caller's plan keeps exactly what it was read from.
 func copyPlan(p *plan.Plan) *plan.Plan {
 	out := *p
 	out.Apps = make(map[string]plan.App, len(p.Apps))
@@ -272,10 +265,7 @@ func (s *settler) checkAll(ctx context.Context) error {
 		}
 		if !isDir(src) {
 			// A read with no source tree behind it (--from-dir, or a survey on
-			// a host that does not hold the configs) has no bytes to check.
-			// That is recorded, not failed: it is what apply checks, and a
 			// survey that refused to be written would be a read with nothing
-			// to show for it.
 			s.settled.add(actionAtApply, SettledItem{
 				Value: name, Default: true,
 				Why: fmt.Sprintf("its config is not at %s on this host, so the addresses and paths it stores are checked at apply", src),
@@ -337,8 +327,6 @@ func (s *settler) settleAddresses() error {
 		}
 	}
 	// A proposal is about an address some app reported, and the app that
-	// proposed it may not be the app that reported it, so they are matched once
-	// every address is known.
 	for _, rep := range s.reports {
 		for _, d := range rep.Defaults {
 			if g, ok := groups[addressKey(d.Host, d.Port)]; ok {
@@ -367,7 +355,6 @@ func (s *settler) settleAddresses() error {
 		}
 		if app, why, ok := proposal(g.apps); ok {
 			// A proposal names an app, and a rule may only name one the plan
-			// has: a rewriter that proposed something else is a proposal this
 			// plan cannot carry, so it is left rather than written as a file
 			// the plan validation refuses.
 			if _, ok := s.plan.Apps[app]; ok {
@@ -399,7 +386,6 @@ func (s *settler) settleAddresses() error {
 }
 
 // proposal is the one app every proposal for an address names. Two apps
-// proposing different ones is a disagreement, and a disagreement is a leave.
 func proposal(defaults []rewrite.Default) (string, string, bool) {
 	app, why := "", ""
 	for _, d := range defaults {
@@ -485,8 +471,6 @@ func (s *settler) settleExisting() {
 }
 
 // ruleReason is a rule's why without the action a rule writes in front of it:
-// discovery and Settle both begin with the decision, and the called-out list
-// already says it in the group's header.
 func ruleReason(why string) string {
 	for _, action := range []string{actionLeave + ": ", "rewrite to "} {
 		if !strings.HasPrefix(why, action) {
@@ -505,7 +489,6 @@ func ruleReason(why string) string {
 }
 
 // addressKey is how two reports' addresses are known to be the same one: DNS
-// names are case-insensitive, and the port is part of the address.
 func addressKey(host string, port int) string {
 	return strings.ToLower(strings.TrimSuffix(strings.Trim(host, "[]"), ".")) + ":" + strconv.Itoa(port)
 }

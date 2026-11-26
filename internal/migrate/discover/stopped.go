@@ -80,11 +80,8 @@ func (r Running) StopNote() string {
 }
 
 // Unstopped is every planned app that is still running, sorted by box's name
-// for it. An empty answer is the proof cutover needs.
-//
 // It refuses rather than guesses: an app whose workload the read does not carry,
 // an app from a source kind box cannot prove yet, and a saved read of manifests
-// (which has no pods behind it) are all errors naming what is wrong. A cutover
 // that silently treated any of them as stopped would copy a live app's config.
 func Unstopped(ctx context.Context, src Source, p *plan.Plan) ([]Running, error) {
 	if p == nil {
@@ -94,9 +91,7 @@ func Unstopped(ctx context.Context, src Source, p *plan.Plan) ([]Running, error)
 		return nil, fmt.Errorf("no source: proving a source stopped means reading the workloads and pods it still has, and this run cannot")
 	}
 	// A saved read answers with the pods it was saved with, and a directory
-	// saved without them answers none -- which looks exactly like a source that
 	// has stopped. The proof is the reason cutover exists, so it is refused
-	// here as well as by its caller.
 	if _, saved := src.(*Directory); saved {
 		return nil, fmt.Errorf("a saved read of manifests cannot prove a source stopped: it carries no live pods, so run cutover against the cluster")
 	}
@@ -141,8 +136,6 @@ func Unstopped(ctx context.Context, src Source, p *plan.Plan) ([]Running, error)
 
 // workloadForApp finds the app's workload in what the read carries. The plan
 // records the platform ("kubernetes"), not the kind, because a Deployment where
-// a StatefulSet belonged is a fine thing to migrate; the read is kind-neutral
-// for the same reason, so the object is looked for by its namespace and its name.
 func workloadForApp(wls []Workload, app plan.App) (Workload, bool) {
 	for _, wl := range wls {
 		if wl.Namespace == app.Namespace && wl.Name == app.Source {

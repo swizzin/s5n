@@ -58,8 +58,6 @@ var catalogApps = map[string]appInfo{
 	"sabnzbd":  {config: []string{configPath}, port: sabnzbdPort},
 	"prowlarr": {config: []string{configPath}, port: arrPort},
 	// Plex's config is mostly its library (Metadata, Media: artwork and previews
-	// Plex rebuilds), so its snapshot rule (internal/migrate/plex) is the app's
-	// own, not the catalog's `snapshot:`.
 	"plex": {config: []string{configPath}, port: plexPort, scratch: []string{"/transcode"},
 		snapshot: plex.Snapshot},
 	"tautulli": {config: []string{configPath}, port: tautulliPort},
@@ -83,8 +81,6 @@ var catalogApps = map[string]appInfo{
 }
 
 // appAliases maps a renamed image repository onto the catalog's app. imageApp reads
-// the last repository segment, dropping tag and digest: a source pins whatever it
-// likes.
 func imageApp(image string) (string, bool) {
 	ref := image
 	if i := strings.IndexByte(ref, '@'); i >= 0 {
@@ -135,7 +131,6 @@ type CarryFile struct {
 }
 
 // SnapshotCarry is what a snapshot carries for an app when that is a choice; ok is
-// false for every app whose whole config tree travels.
 func SnapshotCarry(instance string, full bool) (Carry, bool) {
 	info, found := instanceApps(instance)
 	if !found || info.snapshot == nil {
@@ -151,7 +146,6 @@ func SnapshotCarry(instance string, full bool) (Carry, bool) {
 }
 
 // SnapshotSize is a full carry's bytes for the app whose config is more than its
-// state.
 func SnapshotSize(instance, dir string) (int64, bool, error) {
 	info, found := instanceApps(instance)
 	if !found || info.snapshot == nil {
@@ -178,7 +172,6 @@ func instanceApps(instance string) (appInfo, bool) {
 }
 
 // instanceName is box's name for a workload: sonarr4k and sonarr-4k are both
-// sonarr-4k, which is what the chart and every rewriter use.
 func instanceName(app string, info appInfo, workload string) (string, bool) {
 	name := strings.ToLower(workload)
 	for _, known := range append([]string{app}, info.aliases...) {
@@ -297,7 +290,6 @@ func (d *discovery) selectsOnly(svc Service, in *instance) bool {
 type portReader func(app string, fsys fs.FS, dir string, env map[string]string) (int, bool, error)
 
 // listenPort reads the port an app listened on from its own config. An app whose
-// catalog entry names no reader has no such setting discovery knows about.
 func listenPort(app string, fsys fs.FS, dir string, env map[string]string) (int, bool, error) {
 	info, ok := catalogApps[app]
 	if !ok || info.port == nil {
@@ -307,7 +299,6 @@ func listenPort(app string, fsys fs.FS, dir string, env map[string]string) (int,
 }
 
 // arrPort is <PREFIX>__SERVER__PORT first -- the environment wins over
-// config.xml's <Port> -- then the file.
 func arrPort(app string, fsys fs.FS, dir string, env map[string]string) (int, bool, error) {
 	if p, ok := envPort(env, strings.ToUpper(app)+"__SERVER__PORT"); ok {
 		return p, true, nil
@@ -320,7 +311,6 @@ func arrPort(app string, fsys fs.FS, dir string, env map[string]string) (int, bo
 }
 
 // bazarrPort is BAZARR__PORT, then general.port in config.yaml (config.py:519 at
-// v1.6.2); the flag wins.
 func bazarrPort(_ string, fsys fs.FS, dir string, env map[string]string) (int, bool, error) {
 	if p, ok := envPort(env, "BAZARR__PORT"); ok {
 		return p, true, nil
@@ -333,7 +323,6 @@ func bazarrPort(_ string, fsys fs.FS, dir string, env map[string]string) (int, b
 }
 
 // sabnzbdPort is SABNZBD__PORT, then the first `port` (section [misc]) in
-// sabnzbd.ini; the nested server sections write their own below it.
 func sabnzbdPort(_ string, fsys fs.FS, dir string, env map[string]string) (int, bool, error) {
 	if p, ok := envPort(env, "SABNZBD__PORT"); ok {
 		return p, true, nil
@@ -363,7 +352,6 @@ func filebrowserPort(_ string, fsys fs.FS, dir string, _ map[string]string) (int
 }
 
 // qbittorrentPort is WebUI/Port; an upgraded conf may still carry the pre-4.x
-// spelling under [Preferences].
 func qbittorrentPort(_ string, fsys fs.FS, dir string, env map[string]string) (int, bool, error) {
 	if p, ok := envPort(env, "QBT_WEBUI_PORT"); ok {
 		return p, true, nil
@@ -405,7 +393,6 @@ func tomlConfigPort(_ string, fsys fs.FS, dir string, _ map[string]string) (int,
 }
 
 // peerBanHelperPort is `server.http` in config.yml, not `port`: the template names
-// the listen port there (src/main/resources/config.yml at v9.5.4).
 func peerBanHelperPort(_ string, fsys fs.FS, dir string, _ map[string]string) (int, bool, error) {
 	data, ok, err := readConfigFile(fsys, dir, "config/config.yml")
 	if err != nil || !ok {
@@ -415,7 +402,6 @@ func peerBanHelperPort(_ string, fsys fs.FS, dir string, _ map[string]string) (i
 }
 
 // jellyfinPort is NetworkConfiguration.InternalHttpPort in config/network.xml, or
-// 8096 (NetworkConfiguration.cs at v12.4).
 func jellyfinPort(_ string, fsys fs.FS, dir string, _ map[string]string) (int, bool, error) {
 	data, ok, err := readConfigFile(fsys, dir, "config/network.xml")
 	if err != nil || !ok {
@@ -489,7 +475,6 @@ func xmlPort(data []byte, element string) (int, bool, error) {
 }
 
 // iniPort reads a key in any section and any case: upgraded installs keep the
-// spelling of the version that wrote them.
 func iniPort(data []byte, key string) (int, bool, error) {
 	for _, line := range lines(data) {
 		k, v, ok := strings.Cut(line, "=")
@@ -506,7 +491,6 @@ func iniPort(data []byte, key string) (int, bool, error) {
 }
 
 // tomlPort reads a top-level integer; a full parser is a dependency box does not
-// need for two integers.
 func tomlPort(data []byte, key string) (int, bool, error) {
 	for _, line := range lines(data) {
 		if strings.HasPrefix(line, "[") {
@@ -527,7 +511,6 @@ func tomlPort(data []byte, key string) (int, bool, error) {
 }
 
 // yamlBlockPort reads an integer from PeerBanHelper's `server:` block; a block
-// scan avoids a second YAML parser.
 func yamlBlockPort(data []byte, block, key string) (int, bool, error) {
 	inBlock := false
 	for _, raw := range strings.Split(string(data), "\n") {

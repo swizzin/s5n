@@ -43,7 +43,6 @@ type savedObject struct {
 }
 
 // NewDirectory reads a saved source from fsys. Files ending in .yaml, .yml or
-// .json are read, in name order; anything else is left alone, so pointing
 // discovery at a directory that also holds a backup or a log is not an error.
 func NewDirectory(fsys fs.FS) *Directory { return &Directory{fsys: fsys} }
 
@@ -213,7 +212,6 @@ func (d *Directory) read(ctx context.Context) ([]savedObject, error) {
 }
 
 // indexSavedClaims files the claims and volumes a saved directory holds, so a
-// claim-backed mount resolves exactly as it does in the live source.
 func indexSavedClaims(objs []savedObject) claimIndex {
 	var pvcs []*corev1.PersistentVolumeClaim
 	var pvs []*corev1.PersistentVolume
@@ -230,7 +228,6 @@ func indexSavedClaims(objs []savedObject) claimIndex {
 
 // decodeDocuments reads one file's documents, in order. A `kind: List` is the
 // items it holds rather than a document of its own, because `kubectl get
-// deploy,sts -o yaml` writes one and the objects inside are the manifests.
 func decodeDocuments(name string, data []byte) ([]savedObject, error) {
 	dec := utilyaml.NewYAMLOrJSONDecoder(bytes.NewReader(data), 4096)
 	var out []savedObject

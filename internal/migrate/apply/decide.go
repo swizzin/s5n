@@ -28,8 +28,6 @@ type Choice struct {
 }
 
 // Decide asks about every address default and writes the answers in; ask returns
-// the app or "" to leave it. Answered values stop being defaults; nothing else in
-// the list changes.
 func Decide(p *plan.Plan, s Settled, ask func(Choice) (string, error)) (Settled, error) {
 	if p == nil {
 		return nil, fmt.Errorf("decide: no plan: there is nothing to decide")
@@ -81,7 +79,6 @@ func answerWhy(app string) string {
 }
 
 // setAddressRule writes one answer into Settle's rule; only a default is ever
-// replaced.
 func setAddressRule(p *plan.Plan, host string, port int, app string) error {
 	for i := range p.Hosts {
 		r := &p.Hosts[i]
@@ -98,7 +95,6 @@ func setAddressRule(p *plan.Plan, host string, port int, app string) error {
 }
 
 // sameAddress compares hosts as a rule does: case-insensitive, brackets and a
-// trailing dot are spelling.
 func sameAddress(a, b string) bool {
 	key := func(h string) string { return strings.ToLower(strings.TrimSuffix(strings.Trim(h, "[]"), ".")) }
 	return key(a) == key(b)

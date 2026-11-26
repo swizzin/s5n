@@ -168,8 +168,6 @@ func (d *discovery) categoryOf(instance string) string {
 }
 
 // mediaName is the one directory under the data root the Arrs' root folders live
-// in. A root folder is a category inside it (/library/media/TV), so it is the
-// first segment below the root, and every root folder has to agree on it.
 func mediaName(root string, hosts []string) (string, error) {
 	var name string
 	var problems []string
@@ -198,13 +196,8 @@ func mediaName(root string, hosts []string) (string, error) {
 }
 
 // movedByHand is the one refusal a data layout box cannot adopt gets: the
-// operator moves one of the two directories so that both sit directly under one
-// parent, and runs discovery again.
-//
 // A rename keeps every hardlink, so it is the only way the data moves; a move
 // between filesystems copies, and the copy an Arr imports would stop sharing an
-// inode with the download it came from. That is why this is a stop rather than
-// something apply does with a copy (docs/box.md, "Data is adopted by renaming,
 // never by moving").
 func movedByHand(root, downloadsHost string, mediaHosts []string, problem string) error {
 	where := ""
@@ -241,8 +234,6 @@ func (d *discovery) qbtSavePath(qbit *instance) (string, bool, error) {
 			// Session/DefaultSavePath, escaped as QSettings writes it.
 			{"BitTorrent", `Session\DefaultSavePath`},
 			// The chart's init container seeds that section, and an install
-			// that was started by an older chart can still carry the spelling
-			// (internal/qbtconf/conf.go, Seal).
 			{preferencesSection, `Session\DefaultSavePath`},
 			// Pre-4.2, folded forward on first start.
 			{preferencesSection, `Downloads\SavePath`},
@@ -320,7 +311,6 @@ func (d *discovery) mediaDirs(root, downloadsHost string, placed []placed) ([]st
 }
 
 // placedHosts is every root folder's host directory, for a refusal that names
-// what it found.
 func placedHosts(placed []placed) []string {
 	out := make([]string, len(placed))
 	for i, p := range placed {
@@ -373,8 +363,6 @@ func (d *discovery) readLibrary(ctx context.Context, in *instance) ([]string, st
 }
 
 // queryRootFolders reads the one table discovery needs: the Arr's root folders,
-// absolute as the app saw them (RootFolder.cs:8 at v5.0.0.2907 for Sonarr,
-// Movie.cs's sibling at v7.0.0.10815 for Radarr).
 func queryRootFolders(ctx context.Context, db *sql.DB) ([]string, error) {
 	rows, err := db.QueryContext(ctx, `SELECT "Path" FROM "RootFolders" ORDER BY "Path"`)
 	if err != nil {
@@ -397,14 +385,6 @@ func queryRootFolders(ctx context.Context, db *sql.DB) ([]string, error) {
 // queryDownloadCategory reads the category the Arr's own download client
 // downloads into: the one enabled qBittorrent client's category, because that
 // is the directory the app's torrents are in and a migrated box never moves
-// them.
-//
-// The category is a field of the client's settings, and which of the two a
-// client has is its own: a Sonarr client stores tvCategory, a Radarr one
-// movieCategory, a Lidarr one musicCategory (Download/Clients/QBittorrent/
-// QBittorrentSettings.cs at the versions this package names). A client that
-// names no category downloads into the client's save path with no category at
-// all, and that is no answer: the caller then keeps box's own.
 func queryDownloadCategory(ctx context.Context, db *sql.DB, app string) (string, error) {
 	found, err := hasTable(ctx, db, "DownloadClients")
 	if err != nil || !found {
@@ -442,8 +422,6 @@ func queryDownloadCategory(ctx context.Context, db *sql.DB, app string) (string,
 }
 
 // settingsCategory is the category one client's settings name, read out of the
-// JSON blob the Arr stores it in. The key is camel-cased on disk whatever the
-// class calls it, so it is matched without case.
 func settingsCategory(settings, app string) string {
 	if strings.TrimSpace(settings) == "" {
 		return ""
@@ -473,7 +451,6 @@ func settingsCategory(settings, app string) string {
 
 // hasTable reports whether a database has a table of that name. A schema is the
 // app's, not this package's: a synthetic one, and an app before it wrote its
-// first client, have none.
 func hasTable(ctx context.Context, db *sql.DB, name string) (bool, error) {
 	rows, err := db.QueryContext(ctx, `SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?`, name)
 	if err != nil {
@@ -485,11 +462,7 @@ func hasTable(ctx context.Context, db *sql.DB, name string) (bool, error) {
 
 // copyDatabase copies a SQLite database and the two companion files a WAL-mode
 // database needs, through the read-only config filesystem. The WAL holds the
-// app's most recent writes -- the root folder it added yesterday is in it -- so
 // copying the database alone would read an older state than the app has.
-//
-// It streams rather than reads: an Arr's database is hundreds of megabytes and
-// discovery runs on the host that holds it.
 func copyDatabase(fsys fs.FS, dir, name, dest string) error {
 	found := false
 	for _, suffix := range []string{"", "-wal", "-shm"} {
