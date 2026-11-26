@@ -165,9 +165,8 @@ func TestSealCreatesMissingFile(t *testing.T) {
 	}
 }
 
-// preBypassConfig is a config a box from before the private-range bypass
-// leaves behind: the login is required everywhere, the whitelist is off, and
-// the credential the release Secret still holds is already sealed.
+// preBypassConfig is a config with the login required everywhere and the
+// whitelist off, holding an already-sealed credential.
 func preBypassConfig(t *testing.T, password string) (conf []byte, hash string) {
 	t.Helper()
 	hash, err := Hash(password)
@@ -195,9 +194,8 @@ Username=admin
 `), hash
 }
 
-// The bypass is the release's login story, so sealing any config must leave
-// the three keys exactly as docs/box.md decided: loopback skipped, the private
-// ranges listed, and the list in the form QSettings reads back as a
+// The bypass is the release's login story (docs/box.md): loopback skipped, the
+// private ranges listed, and the list in the form QSettings reads as a
 // QStringList rather than one quoted string.
 func TestSealBypassesTheLoginForPrivateAddresses(t *testing.T) {
 	const password = "s3cret"
@@ -233,8 +231,8 @@ func TestSealBypassesTheLoginForPrivateAddresses(t *testing.T) {
 			}
 		}
 
-		// Sealing is what an init container does on every pod start, so the
-		// second pass over its own output must be a byte-for-byte no-op.
+		// Sealing runs on every pod start, so a second pass must be a byte-for-byte
+		// no-op.
 		again, changed, err := Seal(out, "admin", password, 8080)
 		if err != nil {
 			t.Fatalf("%s: re-seal: %v", name, err)
@@ -244,8 +242,8 @@ func TestSealBypassesTheLoginForPrivateAddresses(t *testing.T) {
 		}
 	}
 
-	// The stored credential is reused rather than re-minted: a new salt on
-	// every start would rewrite the file forever.
+	// The stored credential is reused rather than re-minted: a new salt on every
+	// start would rewrite the file forever.
 	out, _, err := Seal(old, "admin", password, 8080)
 	if err != nil {
 		t.Fatal(err)
