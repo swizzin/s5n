@@ -1,7 +1,7 @@
 package archive
 
 // entry_test.go covers reading one entry out of an archive without extracting the
-// rest: it is how a run asks a snapshot who it is before opening it.
+// rest: how a run asks a snapshot who it is before opening it.
 
 import (
 	"errors"
@@ -10,8 +10,7 @@ import (
 	"testing"
 )
 
-// TestReadEntryReturnsOneEntry: the plan comes back as it was written, and the
-// rest of the archive -- which is where the config trees are -- is not touched.
+// The rest of the archive -- where the config trees are -- is not touched.
 func TestReadEntryReturnsOneEntry(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "snapshot.tar.gz")
 	w, err := Create(path, Manifest{Kind: KindMigrate, Mode: "survey", Created: "2026-11-17T09:00:00Z", Box: "0.5.0"})
@@ -36,9 +35,8 @@ func TestReadEntryReturnsOneEntry(t *testing.T) {
 	}
 }
 
-// TestReadEntryRefusesWhatIsNotAnEntry: a name the archive does not hold, a path
-// that would step outside it, and a directory are all no answer, named rather than
-// returned empty.
+// A name the archive does not hold, a path that would step outside it, and a
+// directory are all named refusals rather than empty answers.
 func TestReadEntryRefusesWhatIsNotAnEntry(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "snapshot.tar.gz")
 	w, err := Create(path, Manifest{Kind: KindMigrate, Mode: "survey", Created: "2026-11-17T09:00:00Z", Box: "0.5.0"})

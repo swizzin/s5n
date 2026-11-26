@@ -34,7 +34,7 @@ func testManifest(kind Kind, mode Mode) Manifest {
 }
 
 // writeTree builds the config tree a migration carries, with the two links a
-// real qBittorrent config has: one inside the tree and one at the pod's stdout.
+// real qBittorrent config has: one inside the tree, one at the pod's stdout.
 func writeTree(t *testing.T) string {
 	t.Helper()
 	dir := t.TempDir()
@@ -54,8 +54,8 @@ func writeTree(t *testing.T) string {
 }
 
 // migrationArchive writes the archive every round-trip test reads: a plan, a
-// report, one config tree with the two links a real qBittorrent config has, and
-// the source's manifests.
+// report, one config tree with a real qBittorrent config's two links, and the
+// source's manifests.
 func migrationArchive(t *testing.T) (path string, plan []byte) {
 	t.Helper()
 	tree := writeTree(t)
@@ -80,9 +80,8 @@ func migrationArchive(t *testing.T) (path string, plan []byte) {
 	return path, plan
 }
 
-// TestWriterWritesOneFile: what the write half promises on its own -- a file
-// only root can read, a name that is never taken twice, the manifest last, and
-// the link it left out reported to the caller.
+// TestWriterWritesOneFile is what the write half promises on its own: a file
+// only root can read, the manifest last, and the link it left out reported.
 func TestWriterWritesOneFile(t *testing.T) {
 	tree := writeTree(t)
 	path := filepath.Join(t.TempDir(), "source.tar.gz")
@@ -116,8 +115,6 @@ func TestWriterWritesOneFile(t *testing.T) {
 	}
 }
 
-// TestRoundTrip: what comes back out is the tree that went in, under box's own
-// modes, with the links inside it and without the ones that named the pod.
 func TestRoundTrip(t *testing.T) {
 	path, plan := migrationArchive(t)
 	dir := filepath.Join(t.TempDir(), "extracted")
@@ -163,9 +160,8 @@ func checkExtractedTree(t *testing.T, dir string) {
 	if _, err := os.Lstat(filepath.Join(dir, "config", "qbittorrent", "qBittorrent", "logs", "qbittorrent.log")); !errors.Is(err, os.ErrNotExist) {
 		t.Errorf("the log link was extracted (%v): a link to the kernel's filesystems is left out", err)
 	}
-	// What box wrote for itself is box's: the extraction's own directory and
-	// the one above the config trees 0700, its plan 0600. The trees inside are
-	// the source's modes (mode_test.go).
+	// What box wrote for itself is box's: the extraction's directory 0700, its
+	// plan 0600. The trees inside are the source's modes (mode_test.go).
 	for _, d := range []string{"", PlanName, "config"} {
 		info, err := os.Lstat(filepath.Join(dir, d))
 		if err != nil {
@@ -181,8 +177,6 @@ func checkExtractedTree(t *testing.T, dir string) {
 	}
 }
 
-// TestReadAgreesWithOpen: the manifest a caller reads to choose an archive is
-// the one Open verified.
 func TestReadAgreesWithOpen(t *testing.T) {
 	path, _ := migrationArchive(t)
 	m, err := Read(path)
@@ -250,11 +244,9 @@ func TestWriterRefusesALinkThatLeavesTheTree(t *testing.T) {
 	}
 }
 
-// TestWriterLeavesOutASpecialFile: a running app keeps its own IPC in its
-// config directory -- qBittorrent's ipc-socket is one -- and an archive cannot
-// carry a socket or a named pipe. The app makes it again when it starts, so the
-// tree is carried without it and the reason is reported, rather than the whole
-// snapshot being refused while the app is up.
+// A running app keeps its own IPC in its config directory (qBittorrent's
+// ipc-socket), and the tree is carried without it, with the reason reported,
+// rather than the whole snapshot refused while the app is up.
 func TestWriterLeavesOutASpecialFile(t *testing.T) {
 	tree := t.TempDir()
 	if err := syscall.Mkfifo(filepath.Join(tree, "pipe"), 0o600); err != nil {
@@ -318,11 +310,8 @@ func TestCreateRefusesAManifestItCannotVouchFor(t *testing.T) {
 	}
 }
 
-// TestASurveyHoldsNoConfigs: a survey is the read `box migrate discover` writes
-// when it is not rehearsing -- the plan, the report and the source's manifests.
-// It is a mode a migration archive may have, and the one thing it may never
-// carry is a config tree, because apply would then have configs a survey is
-// defined not to have.
+// The one entry a survey may never carry is a config tree: apply would then
+// have configs a survey is defined not to have.
 func TestASurveyHoldsNoConfigs(t *testing.T) {
 	t.Run("a survey of a plan and a report is an archive", func(t *testing.T) {
 		path := filepath.Join(t.TempDir(), "survey.tar.gz")
@@ -400,8 +389,8 @@ func TestCreateDefaultsTheHeader(t *testing.T) {
 	}
 }
 
-// TestOpenRefusesWhatIsNotBoxs: one crafted archive per way a copy can be
-// wrong. Each case starts from a valid manifest and changes one thing.
+// One crafted archive per way a copy can be wrong, each from a valid manifest
+// with one thing changed.
 func TestOpenRefusesWhatIsNotBoxs(t *testing.T) {
 	file := craftEntry{name: "config/x", typeflag: tar.TypeReg, mode: 0o600, data: []byte("hello")}
 	link := craftEntry{name: "config/link", typeflag: tar.TypeSymlink, mode: 0o777, linkname: "../../outside"}
@@ -640,9 +629,8 @@ func TestOpenRefusesADestinationThatExists(t *testing.T) {
 	}
 }
 
-// TestBigFileStreams: a config tree can hold a database of gigabytes. Neither
-// half may hold it: the writer copies through to the archive and the reader
-// through to the extracted file, and only the manifest's sum sees the bytes.
+// Neither half holds the gigabytes: the writer copies through to the archive and
+// the reader through to the file, and only the manifest's sum sees the bytes.
 func TestBigFileStreams(t *testing.T) {
 	const size = 64 << 20
 	tree := t.TempDir()
@@ -711,7 +699,7 @@ func validArchive(t *testing.T) string {
 }
 
 // truncateOneByte is a whole archive with its last byte gone: the copy that ran
-// out of space just before it finished.
+// out of space.
 func truncateOneByte(t *testing.T) string {
 	t.Helper()
 	path := validArchive(t)
@@ -766,8 +754,8 @@ func craft(t *testing.T, entries []craftEntry, m *Manifest, manifestFirst bool) 
 	return craftRaw(t, entries, raw, manifestFirst)
 }
 
-// craftRaw is craft with the manifest's bytes given: a test that needs a
-// manifest that is not JSON, or one with a field from a newer box.
+// craftRaw is craft with the manifest's bytes given: one that is not JSON, or
+// one with a field from a newer box.
 func craftRaw(t *testing.T, entries []craftEntry, manifestBytes []byte, manifestFirst bool) string {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "crafted.tar.gz")
@@ -821,8 +809,6 @@ func craftRaw(t *testing.T, entries []craftEntry, manifestBytes []byte, manifest
 	return path
 }
 
-// TestEntryDigestMatchesTheBytes is the manifest's promise in one line: the sum
-// of a file written by the writer is the sum of the file that comes back.
 func TestEntryDigestMatchesTheBytes(t *testing.T) {
 	path := validArchive(t)
 	m, err := Read(path)
@@ -839,9 +825,8 @@ func TestEntryDigestMatchesTheBytes(t *testing.T) {
 	}
 }
 
-// TestWriterRefusesNamesThatCollide: a writer that added a file where a
-// directory has to be would produce an archive Open refuses, so it refuses
-// first and names the two entries.
+// A file where a directory has to be would produce an archive Open refuses, so
+// the writer refuses first and names the two entries.
 func TestWriterRefusesNamesThatCollide(t *testing.T) {
 	tree := t.TempDir()
 	if err := os.WriteFile(filepath.Join(tree, "file"), []byte("x"), 0o600); err != nil {
@@ -876,11 +861,9 @@ func TestWriterRefusesNamesThatCollide(t *testing.T) {
 	}
 }
 
-// TestAddFilesCarriesOnlyTheNamedFiles: a tree an archive carries a part of
-// goes in as exactly the files named and the directories above them, so the set
-// is what adders read and what Open puts back. A named file the tree does not
-// have is reported, not refused: a database's -wal exists only while something
-// has it open.
+// The set goes in as exactly the files named and the directories above them. A
+// named file the tree does not have is reported, not refused: a database's -wal
+// exists only while something has it open.
 func TestAddFilesCarriesOnlyTheNamedFiles(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(dir, "Library", "Application Support", "Databases"), 0o750); err != nil {
@@ -951,8 +934,8 @@ func TestAddFilesCarriesOnlyTheNamedFiles(t *testing.T) {
 	if !reflect.DeepEqual(got, wantEntries) {
 		t.Errorf("the archive holds\n  %v\nwant\n  %v", got, wantEntries)
 	}
-	// The directories keep the modes the tree had, and a carried file keeps its
-	// own: the archive's rule, on a subset as on a whole tree.
+	// The archive's rule, on a subset as on a whole tree: each entry keeps its
+	// mode.
 	if e := m.lookup("config/plex/Library"); e == nil || e.Mode != "0750" {
 		t.Errorf("config/plex/Library = %+v, want the tree's 0750", e)
 	}
@@ -974,9 +957,8 @@ func TestAddFilesCarriesOnlyTheNamedFiles(t *testing.T) {
 	}
 }
 
-// TestAddFilesRefusesWhatTheSetCannotCarry: a name that is not a file inside the
-// tree, and a listed directory, are refusals rather than an archive with a hole
-// in it.
+// A name outside the tree, and a listed directory, are refusals rather than an
+// archive with a hole in it.
 func TestAddFilesRefusesWhatTheSetCannotCarry(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(dir, "Databases"), 0o755); err != nil {
@@ -1008,9 +990,8 @@ func TestAddFilesRefusesWhatTheSetCannotCarry(t *testing.T) {
 	}
 }
 
-// manyFiles builds a config tree the size of a real torrent client's: one
-// resume file and one torrent per hash, thousands of them, so the manifest
-// holds one entry per file and runs to megabytes.
+// manyFiles builds a config tree the size of a real torrent client's, a torrent
+// per hash, so the manifest runs to megabytes.
 func manyFiles(t *testing.T, n int) string {
 	t.Helper()
 	tree := t.TempDir()
@@ -1030,8 +1011,8 @@ func manyFiles(t *testing.T, n int) string {
 	return tree
 }
 
-// A real config tree is thousands of files: a qBittorrent with 1500 torrents
-// alone is 3000 entries, and a box must read back the snapshot it wrote of one.
+// A qBittorrent with 1500 torrents is 3000 entries, and a box must read back the
+// snapshot it wrote of one.
 func TestReadsTheManifestOfAThousandsOfFilesTree(t *testing.T) {
 	tree := manyFiles(t, 4000)
 	path := filepath.Join(t.TempDir(), "rehearsal.tar.gz")
@@ -1058,7 +1039,7 @@ func TestReadsTheManifestOfAThousandsOfFilesTree(t *testing.T) {
 }
 
 // A manifest past what a box reads is refused when it is written, naming how
-// many files it holds, so no archive exists that its own box cannot open.
+// many files it holds, so its own box can always open what it wrote.
 func TestCloseRefusesAManifestNoBoxCouldRead(t *testing.T) {
 	old := maxManifest
 	maxManifest = 64 << 10

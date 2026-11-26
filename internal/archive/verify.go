@@ -2,13 +2,11 @@ package archive
 
 // verify.go is the pass that reads an archive whole and writes nothing of it.
 //
-// Extraction verifies every entry as it writes it, which is enough while
-// everything an archive holds is extracted before it is used. A migration
-// snapshot no longer is: the bulk of an app's config -- a Plex library of
-// artwork and thumbnails, tens of gigabytes -- is written at the config root
-// straight out of the archive, after the box is installed. So the archive is
-// verified first, by a pass that touches nothing, and a copy that stopped
-// halfway or lost a byte is a refusal before the first write of any kind.
+// Extraction verifies each entry as it writes it, which is enough while everything
+// an archive holds is extracted before it is used. A migration snapshot is not: the
+// bulk of an app's config (a Plex library of artwork, tens of gigabytes) is written
+// straight out of the archive after the box is installed. So a copy that stopped
+// halfway or lost a byte is refused before the first write of any kind.
 
 import (
 	"archive/tar"
@@ -44,18 +42,14 @@ type Seen struct {
 	Size int64
 }
 
-// Verify streams an archive against its manifest and writes nothing: every entry
-// is checked against the manifest -- its name, its mode, its type, and the bytes
-// a digest covers -- and every entry the manifest names has to appear.
+// Verify streams an archive against its manifest and writes nothing: every entry is
+// checked against the manifest (name, mode, type, and the bytes a digest covers), and
+// every entry the manifest names has to appear.
 //
-// It is what a caller that extracts part of an archive runs first, so a damaged
-// snapshot is refused before anything is written anywhere: a snapshot is
-// gigabytes, and a copy that lost a byte must stop the run before its first
-// write rather than halfway through the last one.
-//
-// seen, when it is not nil, is told every entry as it is checked, which is how a
-// caller counts what it will write later without walking a tree that is not on
-// the host.
+// It is what a caller extracting part of an archive runs first, so a damaged snapshot
+// is refused before anything is written anywhere. seen, when not nil, is told every
+// entry as it is checked, so a caller counts what it will write without walking a
+// tree that is not on the host.
 func Verify(archive string, seen func(Seen)) (*Manifest, error) {
 	m, err := readManifest(archive)
 	if err != nil {
@@ -108,11 +102,10 @@ func Verify(archive string, seen func(Seen)) (*Manifest, error) {
 	return m, nil
 }
 
-// checkEntry checks one tar entry against the manifest: the entry is one the
-// manifest names, its mode is the manifest's, and its bytes are the size and the
-// digest the manifest promises. w, when it is not nil, is written those bytes --
-// extraction writes them where the tree goes, verification throws them away -- so
-// one pass of checks serves both.
+// checkEntry checks one tar entry against the manifest: the entry is one the manifest
+// names, its mode is the manifest's, and its bytes are the promised size and digest.
+// w, when not nil, is written those bytes, so one pass of checks serves extraction and
+// verification both.
 func checkEntry(archive string, w io.Writer, m *Manifest, tr *tar.Reader, hdr *tar.Header) (Seen, error) {
 	name := path.Clean(hdr.Name)
 	e := m.lookup(name)
