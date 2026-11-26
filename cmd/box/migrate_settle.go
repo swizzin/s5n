@@ -1,17 +1,10 @@
 package main
 
-// migrate_settle.go is what a guided read asks: the same decisions the report
-// carries, one question per address, and the answer written into the plan.
-//
-// A default is never silent. An unattended run takes every one and says how many
-// at the end, with the report naming each (askDefaults, migrate.go); this file is
-// the run with somebody at the terminal. Each answer collapses to one row -- the
-// apps that hold the address, the address, and what it now points at -- because a
-// question already answered is a fact (docs/output.md, rules 10 and 1). An answer
-// an earlier read gave never reaches this file at all: cutover carries it.
-//
-// A path has no question, because box has no alternative to offer: identity is
-// the only rewrite that cannot make that app worse.
+// migrate_settle.go asks a guided read's defaults, one question per address,
+// writing the answer into the plan. An unattended run takes them all and counts
+// (askDefaults). Each answer is one row (docs/output.md, rules 10 and 1); a prior
+// read's answers never reach here. A path has no question: identity is the only
+// safe rewrite.
 
 import (
 	"fmt"
@@ -21,21 +14,18 @@ import (
 	"github.com/swizzin/s5n/internal/setup"
 )
 
-// leaveValue is the select's answer for "leave it as it is": no app name can
-// collide with it, because an instance name is the chart's.
+// leaveValue is "leave it"; no app name can collide with it.
 const leaveValue = "leave"
 
-// settleAsker turns one default into one question on the terminal, and one row
-// into the transcript.
+// settleAsker asks one default and writes one row.
 type settleAsker struct {
 	out    say.Reporter
 	prompt setup.Prompter
-	// apps are the plan's instance names: every answer a rewrite can take.
+	// apps are the plan's instance names, every possible answer.
 	apps []string
 }
 
-// ask is the callback apply.Decide takes. It returns the app to point the
-// address at, or "" to leave it as it is.
+// ask returns the app to point at, or "" to leave it.
 func (a *settleAsker) ask(c apply.Choice) (string, error) {
 	if a.prompt == nil {
 		return c.App, nil
@@ -43,9 +33,7 @@ func (a *settleAsker) ask(c apply.Choice) (string, error) {
 	answer, err := a.prompt.Select(setup.Select{
 		Key:    "migrate.hosts",
 		Prompt: a.question(c),
-		// The options are what the operator can do about this one address, and
-		// box's own answer is the one focused first: taking the default has to
-		// be one key away.
+		// Box's own answer is focused first: the default is one key away.
 		Options: a.options(c),
 		Default: a.defaultValue(c),
 	})
@@ -65,8 +53,7 @@ func (a *settleAsker) ask(c apply.Choice) (string, error) {
 	return "", fmt.Errorf("%s is not an app in this plan", answer)
 }
 
-// answered is one answer as a row: who holds the address, the address, and what
-// it now means.
+// answered is one answer as a row.
 func (a *settleAsker) answered(c apply.Choice, app string) {
 	to := leftAsItIs
 	if app != "" {
@@ -79,15 +66,12 @@ func (a *settleAsker) answered(c apply.Choice, app string) {
 	}})
 }
 
-// question is the one line the form asks: the address, and what to do with it.
-// The reason is above it in the transcript (the answer rows and the report), so
-// the question stays short enough to read at a glance (rule 10).
+// question is the address and what to do; the reason is above (rule 10).
 func (a *settleAsker) question(c apply.Choice) string {
 	return c.Value + ": point it at which app?"
 }
 
-// defaultValue is the value the select starts on: the default box took, so an
-// empty answer keeps it.
+// defaultValue is box's default, so an empty answer keeps it.
 func (a *settleAsker) defaultValue(c apply.Choice) string {
 	if c.App == "" {
 		return leaveValue
@@ -95,8 +79,7 @@ func (a *settleAsker) defaultValue(c apply.Choice) string {
 	return c.App
 }
 
-// options are leave and every app the plan has, with box's own answer first. The
-// labels are what the answer is, with nothing telling the reader where it goes.
+// options are leave and every app, box's answer first.
 func (a *settleAsker) options(c apply.Choice) []setup.Option {
 	def := a.defaultValue(c)
 	label := func(value string) string {

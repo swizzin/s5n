@@ -16,35 +16,29 @@ import (
 	"github.com/swizzin/s5n/internal/update"
 )
 
-// healthRead is the timer's health read: one look at every app of the release,
-// a notice for each app whose readiness changed since the last look, and the new
-// reading kept in update.json for the next wake.
-//
-// It is a value so the decision is tested without a cluster: the reading, the
-// record and the poster are three small things, and what is box's own is the
-// comparing and the sentence.
+// healthRead is the timer's read: every app, a notice per readiness flip, and
+// the new reading kept for the next wake.
 type healthRead struct {
-	// Read is one reading of the release's apps, keyed by app.
+	// Read is one reading, keyed by app.
 	Read func(context.Context) (map[string]update.AppHealth, error)
-	// State is update.json: the last reading is in it, and this one replaces it.
+	// State is update.json; this reading replaces the last.
 	State update.StateStore
-	// Poster is where a flip is told, empty for a box with no address.
+	// Poster is where a flip is told; empty means nowhere.
 	Poster notice.Poster
-	// Options is the box and seedbox every notice is about.
+	// Options is the box and seedbox of every notice.
 	Options notice.Options
 	Out     say.Reporter
-	// ConfigRoot is the grant's config path, where a step's snapshots are: an
-	// unhealthy app with a copy from the last step can be rolled back.
+	// ConfigRoot holds snapshots: an app with a copy from the last step can be
+	// rolled back.
 	ConfigRoot string
-	// Namespace is where the app's pods are, for the command a notice names.
+	// Namespace is for the command a notice names.
 	Namespace string
 }
 
 func (h healthRead) report() say.Reporter { return say.Or(h.Out, nil) }
 
-// run reads, compares, posts and records. Nothing in it fails the wake: a health
-// read is a check on a box that has already been updated, and a check that could
-// not be made is one line.
+// run reads, compares, posts and records; a failed check is one line, never a
+// failed wake.
 func (h healthRead) run(ctx context.Context) {
 	now, err := h.Read(ctx)
 	if err != nil {
@@ -60,9 +54,8 @@ func (h healthRead) run(ctx context.Context) {
 	for _, app := range notice.Flips(before, readings(now)) {
 		h.post(ctx, app, now[app], state)
 	}
-	// The reading is kept even when a notice could not be posted: the flip
-	// happened, and the next wake must not report it a second time. The last
-	// check is untouched -- this wake checked nothing.
+	// Keep the reading even when posting failed, so the next wake does not report
+	// the flip again. LastCheck is untouched: this wake checked nothing.
 	state.Health = now
 	if err := h.State.Save(state); err != nil {
 		h.report().Warn(fmt.Sprintf("keeping what this wake saw of the apps: %v", err))
@@ -80,13 +73,9 @@ func (h healthRead) post(ctx context.Context, app string, health update.AppHealt
 	}
 }
 
-// command is what an unhealthy notice tells someone to do about it: the rollback
-// when the app moved in update.json's last step and the newest copy box has of it
-// is from that step, and the logs otherwise.
-//
-// `box logs` does not exist yet, so the logs are kubectl's: the StatefulSet's own
-// name is the app's, which is where a single-instance app's pods are. A second
-// instance is its own StatefulSet (`radarr-4k`), and box says the app's.
+// command is the rollback when the app moved in the last step and that step's
+// copy is newest, else the logs. There is no `box logs` yet, so logs are
+// kubectl's; a second instance is its own StatefulSet (`radarr-4k`).
 func (h healthRead) command(app string, state update.State) string {
 	if h.rollbackable(app, state) {
 		return "box rollback " + app
@@ -94,9 +83,8 @@ func (h healthRead) command(app string, state update.State) string {
 	return fmt.Sprintf("kubectl -n %s logs statefulset/%s", h.Namespace, app)
 }
 
-// rollbackable reports whether `box rollback` is the way out of this app: it
-// moved in the last step, box did not already put it back, and its newest
-// snapshot is that step's.
+// rollbackable: the app moved in the last step, was not put back, and that
+// step's copy is newest.
 func (h healthRead) rollbackable(app string, state update.State) bool {
 	step := state.LastStep
 	if step == nil || h.ConfigRoot == "" {
@@ -121,10 +109,8 @@ func readings(in map[string]update.AppHealth) map[string]notice.Reading {
 	return out
 }
 
-// healthOnly is the read a wake that is not due makes: the same reading and the
-// same notices, with no registry round trip and no self-update. It resolves the
-// cluster and the two files itself, because the chart half that would have done
-// that does not run.
+// healthOnly is a not-due wake's read: no registry, no self-update. It resolves
+// the cluster and files itself, because the chart half does not run.
 func healthOnly(ctx context.Context, o *updateFlags, out say.Reporter, conf hostconf.Config) {
 	kc, err := release.ResolveKubeconfig(*o.kubeconfig, os.Getenv("KUBECONFIG"), bootstrap.FilesystemRecords{Path: *o.record})
 	if err != nil {
@@ -149,8 +135,7 @@ func healthOnly(ctx context.Context, o *updateFlags, out say.Reporter, conf host
 	boxHealth(kc, namespace, configRoot, out, conf, o.statePath(), grantDomain(sb)).run(ctx)
 }
 
-// boxHealth is the health read of one box: the cluster's apps, update.json, and
-// the notices root's config asks for.
+// boxHealth is one box's read, record and notices.
 func boxHealth(kc, namespace, configRoot string, out say.Reporter, conf hostconf.Config, statePath string, domain string) healthRead {
 	return healthRead{
 		Read: func(ctx context.Context) (map[string]update.AppHealth, error) {
@@ -189,8 +174,7 @@ func noticeFrom(o notice.Options, n update.Notice) notice.Notice {
 	}
 }
 
-// grantDomain is the box's own name, from the grant: gateway.host. It is what a
-// notice calls the box, and an empty one is a grant init has not written yet.
+// grantDomain is gateway.host, the name a notice calls the box.
 func grantDomain(sb *seedbox.Seedbox) string {
 	gw, _ := sb.Grant.Map()["gateway"].(map[string]any)
 	host, _ := gw["host"].(string)

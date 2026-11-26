@@ -27,9 +27,6 @@ const signalChildEnv = "BOX_SIGNAL_CHILD"
 // the command exits the process, which would take the test binary with it.
 const entryChildEnv = "BOX_ENTRY_CHILD"
 
-// TestSignalContextCancelsOnSignal covers the first half of box's Ctrl-C
-// behaviour: os.Interrupt and SIGTERM cancel the one context every command
-// runs under, so the step in flight stops instead of the process dying.
 func TestSignalContextCancelsOnSignal(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("box runs on Linux hosts")
@@ -57,9 +54,6 @@ func TestSignalContextCancelsOnSignal(t *testing.T) {
 	}
 }
 
-// TestSecondSignalKills covers the other half: once the first signal has
-// cancelled the context, box must not swallow the second one. It runs in a
-// child process because the assertion is that the process dies.
 func TestSecondSignalKills(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("box runs on Linux hosts")
@@ -100,7 +94,6 @@ func TestSecondSignalKills(t *testing.T) {
 	}
 }
 
-// TestSignalChild is the body of TestSecondSignalKills's child process.
 func TestSignalChild(t *testing.T) {
 	if os.Getenv(signalChildEnv) == "" {
 		t.Skip("runs in a child process from TestSecondSignalKills")
@@ -118,10 +111,6 @@ func TestSignalChild(t *testing.T) {
 	}
 }
 
-// TestRunBootstrapUsesItsContext closes the loop from the other side: a
-// cancelled context handed to a command entry point is the one the command
-// works under, so the cancellation surfaces through the error path the command
-// already has. The command exits the process, so it runs in a child.
 func TestRunBootstrapUsesItsContext(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("box runs on Linux hosts")
@@ -143,8 +132,6 @@ func TestRunBootstrapUsesItsContext(t *testing.T) {
 	}
 }
 
-// TestBootstrapCancelChild is the body of TestRunBootstrapUsesItsContext's
-// child process.
 func TestBootstrapCancelChild(t *testing.T) {
 	if os.Getenv(entryChildEnv) == "" {
 		t.Skip("runs in a child process from TestRunBootstrapUsesItsContext")

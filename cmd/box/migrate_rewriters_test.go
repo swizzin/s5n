@@ -8,10 +8,6 @@ import (
 	"github.com/swizzin/s5n/internal/migrate/rewrite"
 )
 
-// TestEveryCatalogAppHasARewriterInTheBinary: box rewrites every migrated
-// app's stored paths with no exceptions (docs/box.md, "### migrate"), and a
-// rewriter exists only if this binary links its package. No test file in this
-// package imports a rewriter, so what registers here is exactly what ships.
 func TestEveryCatalogAppHasARewriterInTheBinary(t *testing.T) {
 	cat, err := catalog.Load(filepath.Join("..", "..", "charts", "s5n"))
 	if err != nil {

@@ -18,9 +18,6 @@ import (
 	"github.com/swizzin/s5n/internal/say"
 )
 
-// TestCutoverCarriesTheEarlierReadsAnswers: the plan an earlier read settled
-// travels with the survey, so a cutover after it writes the same answer into this
-// plan and shows it as one row instead of asking again.
 func TestCutoverCarriesTheEarlierReadsAnswers(t *testing.T) {
 	manifests, root := unsettledSource(t)
 	// PeerBanHelper's downloader points at a public name, which no source object

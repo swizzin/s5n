@@ -80,8 +80,6 @@ func healthHarness(t *testing.T, state *healthState, now map[string]update.AppHe
 	}, &buf
 }
 
-// TestAHealthFlipPostsOneNotice: the timer tells someone when an app changes
-// state, once, and keeps the new reading so the next wake is quiet.
 func TestAHealthFlipPostsOneNotice(t *testing.T) {
 	state := &healthState{state: update.State{
 		LastCheck: time.Date(2026, 11, 15, 3, 0, 0, 0, time.UTC),
@@ -119,8 +117,6 @@ func TestAHealthFlipPostsOneNotice(t *testing.T) {
 	}
 }
 
-// TestTheFirstReadingIsSilent: a box's first wake records what it sees instead of
-// paging about every app it runs.
 func TestTheFirstReadingIsSilent(t *testing.T) {
 	state := &healthState{}
 	rec := newReceiver(t)
@@ -137,8 +133,6 @@ func TestTheFirstReadingIsSilent(t *testing.T) {
 	}
 }
 
-// TestACloudOfFlipsPostsInAppOrder: several apps changing is several notices,
-// named in one order every time so two runs read the same.
 func TestACloudOfFlipsPostsInAppOrder(t *testing.T) {
 	state := &healthState{state: update.State{Health: map[string]update.AppHealth{
 		"autobrr": {Ready: false, Reason: "not ready"},
@@ -163,9 +157,6 @@ func TestACloudOfFlipsPostsInAppOrder(t *testing.T) {
 	}
 }
 
-// TestTheRollbackCommandNeedsASnapshotFromTheLastStep: `box rollback` is only the
-// way out when the app moved in the last step and box has that step's copy; every
-// other unhealthy app is the logs.
 func TestTheRollbackCommandNeedsASnapshotFromTheLastStep(t *testing.T) {
 	root := t.TempDir()
 	step := "0.5.1-0.5.2-20261115T031500Z"
@@ -202,8 +193,6 @@ func TestTheRollbackCommandNeedsASnapshotFromTheLastStep(t *testing.T) {
 	}
 }
 
-// TestAHealthReadThatFailsIsOneLine: a box that cannot read its apps says so and
-// keeps the record it had; the update it just did is not undone by it.
 func TestAHealthReadThatFailsIsOneLine(t *testing.T) {
 	state := &healthState{state: update.State{Health: map[string]update.AppHealth{"sonarr": {Ready: true}}}}
 	var buf bytes.Buffer
@@ -223,9 +212,6 @@ func TestAHealthReadThatFailsIsOneLine(t *testing.T) {
 	}
 }
 
-// TestANoticeThatCannotBePostedStillRecordsTheFlip: a receiver that is down is one
-// warning naming the host and never the address, and the flip is not reported
-// again on every wake.
 func TestANoticeThatCannotBePostedStillRecordsTheFlip(t *testing.T) {
 	state := &healthState{state: update.State{Health: map[string]update.AppHealth{"sonarr": {Ready: true}}}}
 	var buf bytes.Buffer
@@ -252,8 +238,6 @@ func TestANoticeThatCannotBePostedStillRecordsTheFlip(t *testing.T) {
 	}
 }
 
-// TestNoticeFromMapsEveryEvent: update reports the three events; the body says
-// what a person reads, and a rolled-back app's images are the right way round.
 func TestNoticeFromMapsEveryEvent(t *testing.T) {
 	o := notice.Options{Box: "box.example.com", Seedbox: "seedbox"}
 	got := noticeFrom(o, update.Notice{

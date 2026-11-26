@@ -50,9 +50,6 @@ func carryOf(t *testing.T, read migrationRead, app string) string {
 	return got.Carry
 }
 
-// TestCarryTakesTheWholeDataWhenThereIsRoom: the read carries Plex's whole data
-// when the snapshot's filesystem has room for it with the margin, and the plan
-// says so; the app whose config is its state is left out of the decision.
 func TestCarryTakesTheWholeDataWhenThereIsRoom(t *testing.T) {
 	o, read := carryRead(t)
 	o.Out = "/snapshots/final.tar.gz"
@@ -72,9 +69,6 @@ func TestCarryTakesTheWholeDataWhenThereIsRoom(t *testing.T) {
 	}
 }
 
-// TestCarryFallsBackToTheStateWhenTheSnapshotCannotHoldTheTree: a filesystem
-// without the room gets the state, the plan records it, and the line the
-// operator reads has both numbers and the path.
 func TestCarryFallsBackToTheStateWhenTheSnapshotCannotHoldTheTree(t *testing.T) {
 	o, read := carryRead(t)
 	o.Out = "/snapshots/final.tar.gz"
@@ -96,9 +90,6 @@ func TestCarryFallsBackToTheStateWhenTheSnapshotCannotHoldTheTree(t *testing.T) 
 	}
 }
 
-// TestCarryCountsBothCopiesOnTheHostThatIsBothEnds: a seedbox on the same host
-// writes the snapshot and the config copy on one filesystem, so the room has to
-// be there twice -- and one tree's worth is not enough.
 func TestCarryCountsBothCopiesOnTheHostThatIsBothEnds(t *testing.T) {
 	o, read := carryRead(t)
 	o.Out = "/snapshots/final.tar.gz"
@@ -131,10 +122,6 @@ func TestCarryCountsBothCopiesOnTheHostThatIsBothEnds(t *testing.T) {
 	}
 }
 
-// TestCarryFallsBackWhenTheTargetCannotHoldTheCopy: the snapshot's own
-// filesystem has the room and the seedbox's does not, which is a different
-// filesystem on the same host. The run that would fail at apply is the one this
-// check exists to save.
 func TestCarryFallsBackWhenTheTargetCannotHoldTheCopy(t *testing.T) {
 	o, read := carryRead(t)
 	o.Out = "/snapshots/final.tar.gz"
@@ -151,8 +138,6 @@ func TestCarryFallsBackWhenTheTargetCannotHoldTheCopy(t *testing.T) {
 	}
 }
 
-// TestPlexMinimalIsTheOperatorsChoiceAndIsNeverSized: --plex-minimal settles the
-// plan without asking the disk anything, because there is nothing to compare.
 func TestPlexMinimalIsTheOperatorsChoiceAndIsNeverSized(t *testing.T) {
 	o, read := carryRead(t)
 	o.Out = "/snapshots/final.tar.gz"
@@ -174,9 +159,6 @@ func TestPlexMinimalIsTheOperatorsChoiceAndIsNeverSized(t *testing.T) {
 	}
 }
 
-// TestASurveySettlesThePlanWithoutMeasuringAnything: a survey copies no config,
-// so its plan says what a cutover would carry without asking the disk; the
-// cutover is the run with something to write.
 func TestASurveySettlesThePlanWithoutMeasuringAnything(t *testing.T) {
 	o, read := carryRead(t)
 	o.Out = "/snapshots/survey.tar.gz"
@@ -193,9 +175,6 @@ func TestASurveySettlesThePlanWithoutMeasuringAnything(t *testing.T) {
 	}
 }
 
-// TestTheDecisionFollowsThePlansCarryIntoTheSnapshot: the plan's carry is what
-// the snapshot writer reads, so a plan that says "the state" never puts a library
-// in an archive, and one that says "the whole data" never leaves it out.
 func TestTheDecisionFollowsThePlansCarryIntoTheSnapshot(t *testing.T) {
 	if plan.CarryFull == plan.CarryMinimal {
 		t.Fatal("the plan's two carries are one value")

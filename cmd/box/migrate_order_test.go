@@ -43,9 +43,6 @@ func (a *stepAsker) Ask(question string, _ bool) (bool, error) {
 	return a.yes, nil
 }
 
-// TestTheQuestionComesBeforeAnythingIsInstalled: the pre-install pass, then the
-// question, then the install -- and the answer is what decides whether the
-// install happens at all.
 func TestTheQuestionComesBeforeAnythingIsInstalled(t *testing.T) {
 	for _, tc := range []struct {
 		name     string
@@ -121,10 +118,6 @@ func migrationSummaryForOrder() apply.Summary {
 	}}}
 }
 
-// TestThePreInstallPassWritesOnlyWhereItIsThrownAway: the real pass, over a real
-// snapshot, against a config root and a grant path that must survive it
-// untouched. The run's state directory under the config root is the adoption's,
-// and it is not created until the answer is yes.
 func TestThePreInstallPassWritesOnlyWhereItIsThrownAway(t *testing.T) {
 	snapshot := preInstallSnapshot(t)
 	p, raw, opened := snapshot.plan(t)

@@ -12,25 +12,20 @@ import (
 	"github.com/swizzin/s5n/internal/update"
 )
 
-// boxHolds is what a command gives release.Options.Holds: the apps a rollback
-// left on an older image, read from the file beside the grant's config root and
-// overlaid onto the values the chart renders. A hold only lives while its
-// release still pins the image the rollback avoided, so the same value names the
-// holds a release has moved past, which box removes once an apply that rendered
-// without them has succeeded.
+// boxHolds is release.Options.Holds: apps kept on an older image, overlaid onto
+// the values. A hold lives while its release pins the avoided image; lapsed ones
+// are removed after a successful apply.
 type boxHolds struct {
 	out say.Reporter
-	// root and lapsed are this apply's: the config root it read and the holds
-	// the release it applied has lapsed.
+	// root and lapsed are this apply's config root and lapsed holds.
 	root   string
 	lapsed []update.Lapse
 }
 
 func newBoxHolds(out say.Reporter) *boxHolds { return &boxHolds{out: out} }
 
-// values is release.Options.Holds. It runs after apply has loaded both files, so
-// the config root comes from the grant it already parsed; reading the holds is
-// the only second look, and it is a small file beside the snapshots.
+// values reads holds after apply loaded the files; the config root is the
+// grant's, and the holds file is small.
 func (b *boxHolds) values(_ context.Context, sb *seedbox.Seedbox, chart release.Chart, values map[string]any) (map[string]any, error) {
 	root, err := update.ConfigRoot(sb)
 	if err != nil {
@@ -48,9 +43,8 @@ func (b *boxHolds) values(_ context.Context, sb *seedbox.Seedbox, chart release.
 	return overlay, nil
 }
 
-// applyThenSettle runs one apply and, only when it succeeded, forgets the holds
-// that release moved past. A failed or declined apply leaves every hold where it
-// was: dropping one would move the app onto the image its rollback avoided.
+// applyThenSettle forgets lapsed holds only after success: dropping one on a
+// failure would move the app onto the avoided image.
 func applyThenSettle(ctx context.Context, apply func(context.Context, release.Options) (release.Result, error), opts release.Options, holds *boxHolds) (release.Result, error) {
 	res, err := apply(ctx, opts)
 	if err != nil {
@@ -60,11 +54,8 @@ func applyThenSettle(ctx context.Context, apply func(context.Context, release.Op
 	return res, nil
 }
 
-// applied removes the holds this apply's release moved past. It is called only
-// after an apply returned without error: a hold dropped by a run whose apply
-// failed would move the app onto the very image its rollback avoided. A hold that
-// cannot be removed stays, and box says so -- the app is still held, which is
-// the safe half of the failure.
+// applied removes lapsed holds, only after a successful apply. A hold that
+// cannot be removed stays and box says so: being held is the safe half.
 func (b *boxHolds) applied() {
 	if len(b.lapsed) == 0 {
 		return
@@ -87,7 +78,7 @@ func (b *boxHolds) applied() {
 	b.lapsed = nil
 }
 
-// lapsedApps names the apps in one of box's sentences.
+// lapsedApps names the apps for a sentence.
 func lapsedApps(lapses []update.Lapse) string {
 	apps := make([]string, 0, len(lapses))
 	for _, lapse := range lapses {

@@ -1,17 +1,10 @@
 package main
 
-// migrate_cutover.go is `box migrate cutover`: the window.
-//
-// It reads the source the way discover does, then proves every planned app
-// stopped -- no replicas and no pod left, Terminating included -- and only then
-// copies the configs into the final snapshot apply runs. While any app still
-// runs it writes a survey first and refuses, printing the command that stops
-// each one for the operator to double-check: box never stops a source.
-//
-// The source's cluster is kept by default, so an all-stopped cutover continues
-// in the same run into the install and the adoption. --replace-cluster stops
-// after the snapshot with the reset recipe and the next command, because that
-// cluster is the operator's to throw away.
+// migrate_cutover.go is `box migrate cutover`: the window. It reads the source,
+// proves every planned app stopped (Terminating counts as running), then copies
+// into the final snapshot. While any app runs it keeps a survey and prints the
+// stop commands; box never stops a source. --replace-cluster stops after the
+// snapshot with the reset recipe; the default continues into install.
 
 import (
 	"context"
@@ -34,36 +27,26 @@ import (
 	"github.com/swizzin/s5n/internal/seedbox"
 )
 
-// cutoverOptions is cutover's flags: everything a read of the source takes, the
-// one choice about the cluster, and the flags the install it continues into
-// needs.
+// cutoverOptions is a read's flags, the cluster choice, and the install's flags.
 type cutoverOptions struct {
 	discoverOptions
 	// Replace is --replace-cluster: stop after the final snapshot.
 	Replace bool
-	// NoPriorDiscover is --no-prior-discover: the operator's word that there is
-	// no earlier read of this source to compare against, so a first read is
-	// enough to cut over from. It skips the warning, never the diff.
+	// NoPriorDiscover says there is no earlier read; it skips the warning, never
+	// the diff.
 	NoPriorDiscover bool
-	// apply is the second half's flags, shared with `box migrate apply` so a
-	// cutover and an apply of its snapshot cannot take different files -- and
-	// so the answers a host with no box needs are asked for once.
+	// apply is shared with `box migrate apply`, so both take one set of files.
 	apply *migrateApplyFlags
 }
 
 func runMigrateCutover(ctx context.Context, args []string) {
-	// --paths-in-node is the e2e's storage switch, taken out of the arguments
-	// before the FlagSet sees them, exactly as `box migrate apply` takes it: the
-	// keep path hands over to that same install, and the app's directories and the
-	// login's are inside the node there.
+	// --paths-in-node is the e2e's switch, as `box migrate apply` takes it.
 	pathsInNode, args, err := takePathsInNode(args)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "box: %v\n", err)
 		os.Exit(2)
 	}
-	// --unit-dir is bootstrap's timer switch: the keep path can install a box on
-	// a host with none, and the timer that install writes lands in the directory
-	// this run names.
+	// --unit-dir names where a fresh host's timer units land.
 	unitDir, args, err := takeDevFlag(args, "unit-dir")
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "box: %v\n", err)
@@ -75,9 +58,7 @@ func runMigrateCutover(ctx context.Context, args []string) {
 	o.apply = addCutoverApplyFlags(fs, &o.Kubeconfig)
 	o.apply.install.pathsInNode = pathsInNode
 	o.apply.install.unitDir = unitDir
-	// The read and the install name one release: --chart-repo and
-	// --chart-version are apply's flags, and the plan's image variants come
-	// from that same chart.
+	// One release for the read and the install: apply's flags supply it.
 	o.chart = o.apply.chart
 	o.ValuesPath = *o.apply.valuesPath
 	replace := fs.Bool("replace-cluster", false, "stop after the final snapshot, for a host whose cluster box should replace with its own")
@@ -97,9 +78,8 @@ func runMigrateCutover(ctx context.Context, args []string) {
 		fmt.Fprintln(os.Stderr, "box: no values file: pass --values")
 		os.Exit(2)
 	}
-	// --yes is this verb's "go ahead without asking", and the defaults Settle
-	// takes are part of what it answers. Without it, a terminal on stdin is
-	// asked; a pipe is nobody to ask, and takes them all, saying so.
+	// --yes answers for the defaults too; otherwise a terminal is asked and a
+	// pipe takes them all, saying so.
 	o.Plain = *o.apply.plain
 	if !*o.apply.yes && isTerminal(os.Stdin) {
 		o.Prompt = newPrompt(terminalSet(o.Plain), startupTheme(*o.apply.valuesPath))
@@ -113,20 +93,17 @@ func runMigrateCutover(ctx context.Context, args []string) {
 	}
 	if err := migrateCutover(ctx, o, out); err != nil {
 		if errors.Is(err, errCutoverStillRunning) {
-			// The refusal already printed what is running and what stops it:
-			// the commands are the point, and an error line on top of them
-			// would bury them.
+			// The refusal already printed the commands; an error line would bury
+			// them.
 			os.Exit(1)
 		}
 		if errors.Is(err, errCutoverPrior) {
-			// The read already on record stopped it: what it found, where the
-			// survey went and what to do next are all printed, so an error line
-			// on top would only repeat them.
+			// The printed read stopped it; an error line would repeat it.
 			os.Exit(1)
 		}
 		if errors.Is(err, errCutoverStopped) || errors.Is(err, errCutoverBlocked) {
-			// The run did what it was asked: the snapshot is written and the
-			// rest is the operator's. That is a finished run, not a failed one.
+			// The snapshot is written and the rest is the operator's: not a
+			// failure.
 			os.Exit(0)
 		}
 		if errors.Is(err, apply.ErrCancelled) || errors.Is(err, release.ErrCancelled) {
@@ -146,14 +123,11 @@ var errCutoverStillRunning = errors.New("the source is still running")
 // replace path), so the exit is a stop and not a failure of anything.
 var errCutoverStopped = errors.New("stopped after the snapshot")
 
-// errCutoverBlocked says the keep path found something on the source cluster box
-// will not install over, and stopped after the final snapshot. That is a finished
-// run, not a failed one: the other road is the operator's next command.
+// errCutoverBlocked is a finished run: the snapshot is written, the next command
+// is the operator's.
 var errCutoverBlocked = errors.New("the keep path's pre-flight stopped the cutover")
 
-// cutoverSeams are the two checks that read a live cluster, so a test hands over
-// an answer instead of a cluster: the stop proof, and the keep path's pre-flight.
-// Everything else cutover does is the real one.
+// cutoverSeams are the two live-cluster checks a test replaces with answers.
 type cutoverSeams struct {
 	proof func(context.Context, cutoverOptions, migrationRead) ([]discover.Running, error)
 	keep  func(context.Context, cutoverOptions, migrationRead) ([]discover.Blocker, error)
@@ -164,9 +138,7 @@ func migrateCutover(ctx context.Context, o cutoverOptions, out say.Reporter) err
 	return cutover(ctx, o, out, cutoverSeams{proof: unstopped, keep: keepBlockers})
 }
 
-// keepSurvey writes this read as a survey and returns its file: it is what every
-// refusing cutover does with what it read, so following box's advice is always
-// safe and the next cutover has an earlier read to diff against.
+// keepSurvey keeps a refusing cutover's read, so the next run has a prior.
 func keepSurvey(read *migrationRead, o cutoverOptions) (string, error) {
 	if err := encodeRead(read); err != nil {
 		return "", err
@@ -180,8 +152,7 @@ func keepSurvey(read *migrationRead, o cutoverOptions) (string, error) {
 	return survey.Path, nil
 }
 
-// holders is the apps that hold one value, which is the subject a settle line is
-// about: the address is in their configs, so it is their connection.
+// holders is the apps holding one value: the address is in their configs.
 func holders(holds []apply.SettledHold) string {
 	seen := map[string]bool{}
 	var apps []string
@@ -196,9 +167,7 @@ func holders(holds []apply.SettledHold) string {
 	return strings.Join(apps, ", ")
 }
 
-// showCarried is the answers a cutover did not ask for: one line each, the apps
-// that hold the address and what it now points at. The heading is only there
-// when there is something under it.
+// showCarried is the answers carried from the prior read, one line each.
 func showCarried(out say.Reporter, carried []apply.KeptAnswer) {
 	if len(carried) == 0 {
 		return
@@ -215,13 +184,10 @@ func showCarried(out say.Reporter, carried []apply.KeptAnswer) {
 	out.Rows(rows)
 }
 
-// cutover is the command with its live-cluster checks as parameters, so a test
-// drives every refusal without a cluster. Every other step is the real one.
+// cutover is the command with its live checks as parameters.
 func cutover(ctx context.Context, o cutoverOptions, out say.Reporter, seams cutoverSeams) error {
 	out.Phase("cutover")
-	// The run's working directory is beside the final snapshot it writes: the
-	// databases it copies and the copies its checks read go there, never in
-	// $TMPDIR.
+	// Work beside the final snapshot, never $TMPDIR.
 	dir, done, err := work.New(priorDir(o))
 	if err != nil {
 		return err
@@ -232,14 +198,12 @@ func cutover(ctx context.Context, o cutoverOptions, out say.Reporter, seams cuto
 	if err != nil {
 		return err
 	}
-	// Every rewriter's check runs before anything is written, so the survey a
-	// refusal keeps carries the plan apply would run, defaults and all.
+	// Check before writing, so a kept survey carries the plan apply would run.
 	if err := settleRead(ctx, o.discoverOptions, &read); err != nil {
 		read.setReport(archive.ModeSurvey, "", o.discoverOptions, err)
 		return err
 	}
-	// The read already on record, looked up before this run writes anything: the
-	// question is what box saw last time, not what this run is about to save.
+	// Look up the prior read before writing: it is what box saw last time.
 	prior, err := findPriorRead(priorDir(o), read)
 	if err != nil {
 		return err
@@ -249,8 +213,7 @@ func cutover(ctx context.Context, o cutoverOptions, out say.Reporter, seams cuto
 		return err
 	}
 	if len(running) > 0 {
-		// The read is saved before any stop command is printed, so following
-		// box's advice is always safe: the next cutover carries this read.
+		// Save the read before printing stops, so the next cutover has it.
 		kept, err := keepSurvey(&read, o)
 		if err != nil {
 			return errors.Join(errCutoverStillRunning, err)
@@ -260,38 +223,31 @@ func cutover(ctx context.Context, o cutoverOptions, out say.Reporter, seams cuto
 			Mark:  say.MarkNeeds,
 			Facts: []string{countApps(len(running)) + " running", "stop them, then run this again"},
 		}})
-		// One command per namespace and kind: many similar stops become one
-		// (rule 3), and each is written for the cluster box found.
+		// One command per namespace and kind (rule 3), for the cluster found.
 		nodes, _ := read.src.Nodes(ctx)
 		for _, stop := range discover.Stops(running) {
 			commandLines(out, stop.Command(discover.Kubectl(nodes)))
 		}
 		return errCutoverStillRunning
 	}
-	// The source is stopped. What box saw of it before decides whether this read
-	// is enough to migrate from: an app gone missing since then stops the run
-	// here, with this read kept.
+	// The prior read decides whether this one is enough: an app gone missing
+	// stops the run, keeping this read.
 	if err := checkPriorRead(prior, &read, o, out, func() (string, error) { return keepSurvey(&read, o) }); err != nil {
 		return err
 	}
-	// What the earlier read already answered is carried, one line each, and
-	// never asked again (rule 10): a person's answer is theirs across runs.
+	// Carry the earlier read's answers and never ask again (rule 10).
 	if prior != nil {
 		settled, carried := apply.CarryAnswers(read.plan, read.settled, prior.plan)
 		read.settled = settled
 		showCarried(out, carried)
 	}
-	// The source is stopped, so the run is going ahead: this is where the
-	// operator answers what is left, and where an unattended run says how many
-	// it took.
+	// Ask what is left; an unattended run says how many it took.
 	if err := askDefaults(&read, out, o.discoverOptions); err != nil {
 		return err
 	}
 
 	path := freeSnapshotPath(o.discoverOptions, archive.ModeFinal)
-	// What the snapshot carries is settled before it is written: on a host that
-	// already has a box this run writes the snapshot and the seedbox's copy on
-	// one machine, so Plex's whole data has to fit twice.
+	// Settle the carry first: a same-host cutover writes two copies of Plex.
 	if o.apply != nil && o.apply.grantPath != nil {
 		o.TargetConfig = targetConfigPath(*o.apply.grantPath)
 	}
@@ -300,9 +256,7 @@ func cutover(ctx context.Context, o cutoverOptions, out say.Reporter, seams cuto
 		read.setReport(archive.ModeFinal, "", o.discoverOptions, err)
 		return err
 	}
-	// What the snapshot carries and does not is part of the page: Plex's caches,
-	// and its whole library when one does not fit. The operator reads that once,
-	// here.
+	// The page says what is left out, read once by the operator.
 	read.report.Notes = append(read.report.Notes, carryLines(read.plan)...)
 	read.report.Notes = append(read.report.Notes, short...)
 	if err := encodeRead(&read); err != nil {
@@ -318,23 +272,19 @@ func cutover(ctx context.Context, o cutoverOptions, out say.Reporter, seams cuto
 	for _, s := range wrote.Skipped {
 		out.Muted(fmt.Sprintf("%s: left out of the snapshot: %s", s.Path, s.Why))
 	}
-	// The last screen names how many decisions this run took: an address or a
-	// path nobody answered is a decision box made, and the report names each one
-	// with its reason.
+	// End with the count of decisions box took; the report names each reason.
 	read.defaultsRow(out)
 
 	if o.Replace {
 		out.Phase("replace")
-		// The one fact: the cluster is the operator's to remove. What box does
-		// not do about it needs no sentence; the commands below are the answer
+		// The cluster is the operator's to remove; the commands are the answer
 		// (rule 11).
 		out.Rows([]say.Row{{
 			Mark:  say.MarkNeeds,
 			Facts: []string{"this cluster is yours to replace"},
 		}})
-		// The teardown names the distribution the source's own nodes carry.
-		// A node list the read could not get is already a report line, and it
-		// leaves the recipe saying box cannot tell rather than guessing.
+		// The teardown follows the nodes' distribution; an unread list leaves the
+		// recipe saying so rather than guessing.
 		nodes, _ := read.src.Nodes(ctx)
 		for _, step := range resetSteps(nodes) {
 			if !step.Command {
@@ -347,10 +297,8 @@ func cutover(ctx context.Context, o cutoverOptions, out say.Reporter, seams cuto
 		out.Detail(fmt.Sprintf("the source's manifests are in the snapshot (%s) and its host directories are untouched", filepath.Base(wrote.Path)))
 		return errCutoverStopped
 	}
-	// The cluster is kept by default, so the same run continues into the install
-	// and the adoption. What it must not do first is install over something on a
-	// cluster box did not make: the pre-flight names each of those, and the road
-	// for a cluster that has them.
+	// The kept cluster continues into install, unless the pre-flight finds
+	// something box did not make and must not install over.
 	if seams.keep != nil {
 		blockers, err := seams.keep(ctx, o, read)
 		if err != nil {
@@ -372,11 +320,8 @@ func cutover(ctx context.Context, o cutoverOptions, out say.Reporter, seams cuto
 	return migrateApply(ctx, wrote.Path, o.apply, out)
 }
 
-// addCutoverApplyFlags registers the half of apply's flags a cutover needs and
-// points them at the kubeconfig discover's own flag holds: this verb reads one
-// cluster and installs into the same one, so --kubeconfig means one thing here.
-// The values file is shared the same way -- the read writes a plan, the install
-// applies this file's values, and bootstrap, init and apply all take it alike.
+// addCutoverApplyFlags shares apply's flags and discover's kubeconfig: one
+// cluster is read and installed into, and one values file feeds both halves.
 func addCutoverApplyFlags(fs *flag.FlagSet, kubeconfig *string) *migrateApplyFlags {
 	valuesDefault := ""
 	if home, err := os.UserHomeDir(); err == nil {
@@ -418,15 +363,12 @@ func targetConfigPath(grantPath string) string {
 	return ""
 }
 
-// surveyPath is where the read a refusal keeps goes: beside the final snapshot
-// when --out named one, so both are in the directory the operator chose, and
-// otherwise in the snapshot directory under a survey's own name.
+// surveyPath is beside a named --out, else a survey name in bundle.Dir.
 func surveyPath(o cutoverOptions) string {
 	if strings.TrimSpace(o.Out) == "" {
 		return freeSnapshotPath(o.discoverOptions, archive.ModeSurvey)
 	}
-	// The survey goes beside the final snapshot the operator named, and its name
-	// is made free the same way: two refusals in one second are two reads.
+	// Beside the named final, with a free name: two refusals are two reads.
 	at := o.clock()
 	dir := filepath.Dir(o.Out)
 	for i := 0; i < 60; i++ {
@@ -438,9 +380,8 @@ func surveyPath(o cutoverOptions) string {
 	return filepath.Join(dir, bundle.FileName(archive.ModeSurvey, at))
 }
 
-// unstopped is the stop proof: the source's workloads and pods, over the plan
-// that was just read. A read from a saved directory has no pods behind it, and
-// cutover refuses it: the proof is the whole reason cutover exists.
+// unstopped proves the source stopped; a saved read has no pods, so cutover
+// refuses it: the proof is the reason cutover exists.
 func unstopped(ctx context.Context, o cutoverOptions, read migrationRead) ([]discover.Running, error) {
 	if o.FromDir != "" {
 		return nil, fmt.Errorf("cutover proves the source stopped by reading the pods it still has, and --from-dir is a saved read with none: run cutover against the cluster")
@@ -455,18 +396,13 @@ type resetStep struct {
 	Text    string
 }
 
-// resetSteps is the teardown, as the one thing left for the operator to run
-// themselves before `box migrate apply` can install box's own cluster. It is
-// the recipe for the distribution the source's nodes say installed it
-// (discover.Distribution): the same command on another distribution removes
-// nothing, so a cluster box cannot place gets a line that says so instead of a
-// teardown for a guess.
+// resetSteps is the operator's teardown for the distribution the nodes name
+// (discover.Distribution); an unknown cluster gets a line rather than a guess.
 func resetSteps(nodes []discover.Node) []resetStep {
 	switch discover.Distribution(nodes) {
 	case discover.K0s:
-		// `k0s reset` leaves /etc/k0s/k0s.yaml behind, and box's own bootstrap
-		// refuses a k0s config it did not write: the recipe removes it, so the
-		// next command is not a refusal this screen exists to save a person from.
+		// k0s reset leaves /etc/k0s/k0s.yaml, which bootstrap refuses; remove it
+		// so the next command does not fail.
 		return []resetStep{
 			{Command: true, Text: "sudo k0s stop; sudo k0s reset; sudo rm -f /etc/k0s/k0s.yaml"},
 			{Command: true, Text: "sudo systemctl disable --now k0scontroller; sudo rm -f /etc/systemd/system/k0scontroller.service /usr/local/bin/k0s"},
@@ -477,8 +413,7 @@ func resetSteps(nodes []discover.Node) []resetStep {
 	return []resetStep{{Text: "remove this cluster the way it was installed, before anything else uses this host"}}
 }
 
-// blockerWarning is the line over the keep path's list: how many things box found,
-// and the rule that keeps box from touching any of them.
+// blockerWarning counts what box found and states that it touches none of it.
 func blockerWarning(n int) string {
 	if n == 1 {
 		return "one thing on this cluster stops box installing onto it, and box does not change a cluster it did not install"

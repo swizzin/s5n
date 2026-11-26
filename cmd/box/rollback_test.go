@@ -8,9 +8,6 @@ import (
 	"github.com/swizzin/s5n/internal/release"
 )
 
-// TestRollbackMapsItsFlagsToTheOptions: the app is what the command line names,
-// and the two switches of its own sit over apply's flags -- a rollback ends in
-// an apply, so it must not grow a second set of file paths to keep in step.
 func TestRollbackMapsItsFlagsToTheOptions(t *testing.T) {
 	var flags *rollbackFlags
 	parse(t, "rollback", func(fs *flag.FlagSet) { flags = addRollbackFlags(fs) },

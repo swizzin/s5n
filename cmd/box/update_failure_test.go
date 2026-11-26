@@ -10,10 +10,6 @@ import (
 	"github.com/swizzin/s5n/internal/update"
 )
 
-// A step that stops before its apply -- the release could not be read, the
-// apps could not be stopped or copied -- has drawn only its ✗ row. Its reason
-// is the error, and it is said once, under that row: a ✗ with no reason is a
-// failure nobody can act on without the log.
 func TestAFailedStepSaysWhyUnderItsRow(t *testing.T) {
 	var buf bytes.Buffer
 	out := &say.Plain{W: &buf, Err: &buf}
@@ -33,7 +29,6 @@ func TestAFailedStepSaysWhyUnderItsRow(t *testing.T) {
 	}
 }
 
-// Nothing planned: the chart is the subject, and its row carries the reason.
 func TestAnUpdateThatPlannedNothingNamesTheChart(t *testing.T) {
 	var buf bytes.Buffer
 	out := &say.Plain{W: &buf, Err: &buf}

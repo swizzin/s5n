@@ -6,8 +6,6 @@ import (
 	"github.com/swizzin/s5n/internal/runlog"
 )
 
-// A log is named for the command that wrote it, and an update timer's wake is
-// named apart from an update a person ran: the prune keeps only a few wakes.
 func TestALogIsNamedForItsCommand(t *testing.T) {
 	cases := []struct {
 		args []string

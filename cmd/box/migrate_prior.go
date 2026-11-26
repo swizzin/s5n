@@ -1,23 +1,10 @@
 package main
 
-// migrate_prior.go is cutover's second read of the source: the one already on
-// record.
-//
-// A cutover that has never read this source is the first thing box has seen of
-// it, so anything the operator deleted before that is invisible: a workload
-// scaled to 0 is still there to read, a deleted one is gone. So a cutover with no
-// earlier read says what it found and asks; an unattended run refuses instead and
-// names `box migrate discover`, the read to take while the source is whole.
-//
-// With an earlier read of the same source on record it diffs instead: an app the
-// earlier read had and this one cannot find is named and the cutover stops, and an
-// app this read has and the earlier one did not is new, listed, and kept.
-//
-// The source is one host and one scope (plan.Source's host and namespaces), so the
-// search is for the newest snapshot in the directory whose plan names both. Both
-// the diff and the first-read refusals write their read as a survey first, exactly
-// as the still-running refusal does: whatever stops the run, the next cutover
-// carries this read.
+// migrate_prior.go is cutover's read already on record. With none, a deleted
+// workload is invisible, so the run says what it found and asks, or refuses and
+// names `box migrate discover`. With one, an app it had and this read cannot find
+// stops the run, and a new app is listed and kept. A source is one host and
+// namespaces; any refusal keeps this read as a survey.
 
 import (
 	"errors"
@@ -41,16 +28,13 @@ var errCutoverPrior = errors.New("cutover stopped on the earlier read of this so
 type priorRead struct {
 	// path is the snapshot file, named in what the run says.
 	path string
-	// mode is what the source was when it was read, so the operator knows
-	// whether the earlier read was taken with the apps running.
+	// mode says whether the earlier read saw running apps.
 	mode archive.Mode
 	plan *plan.Plan
 }
 
-// findPriorRead is the newest snapshot in dir whose plan names the same source as
-// this read: the same host, and the same namespaces. A plan that names no host --
-// a source whose nodes could not be read -- matches another such plan by its
-// namespaces alone, and the run says so rather than implying a host matched.
+// findPriorRead is the newest snapshot of the same host and namespaces; a plan
+// without a host matches by namespaces alone, and the run says so.
 func findPriorRead(dir string, read migrationRead) (*priorRead, error) {
 	reads, err := bundle.Reads(dir)
 	if err != nil {
@@ -60,8 +44,7 @@ func findPriorRead(dir string, read migrationRead) (*priorRead, error) {
 	for _, r := range reads {
 		p, err := plan.Parse(r.Plan)
 		if err != nil || p.Source == nil {
-			// A plan box cannot read is not a read of anything: it stays for the
-			// operator, and the search goes on with the next one.
+			// An unreadable plan is not a read: keep it, search on.
 			continue
 		}
 		priorHost, priorNamespaces := scopeOf(p)
@@ -73,8 +56,7 @@ func findPriorRead(dir string, read migrationRead) (*priorRead, error) {
 	return nil, nil
 }
 
-// scopeOf is what makes two reads of one cluster the same source: the host it ran
-// on and the namespaces it was read for.
+// scopeOf is the host and namespaces that make two reads one source.
 func scopeOf(p *plan.Plan) (string, []string) {
 	if p == nil || p.Source == nil {
 		return "", nil
@@ -97,8 +79,7 @@ func sameList(a, b []string) bool {
 	return true
 }
 
-// matchedOn says what this read and the earlier one were matched on, so the
-// operator can check box compared the two reads it should have.
+// matchedOn says what the two reads were matched on.
 func (p *priorRead) matchedOn(host string, namespaces []string) string {
 	scope := "every namespace"
 	if len(namespaces) > 0 {
@@ -116,8 +97,7 @@ type priorApp struct {
 	app  plan.App
 }
 
-// diffApps is what changed between an earlier read and this one, by box's
-// instance name: the apps that are gone, and the apps that are new.
+// diffApps is the gone and new apps by instance name.
 func diffApps(prior, now *plan.Plan) (gone []priorApp, added []string) {
 	for _, name := range sortedKeys(prior.Apps) {
 		if _, ok := now.Apps[name]; !ok {
@@ -132,13 +112,9 @@ func diffApps(prior, now *plan.Plan) (gone []priorApp, added []string) {
 	return gone, added
 }
 
-// checkPriorRead is what a cutover does about the read already on record. It
-// returns nil when the run may go ahead, and the refusal to stop on otherwise;
-// every refusal saves this read as a survey first, through keep, so following
-// what box says is always safe.
-//
-// --no-prior-discover is the operator's own word that there is nothing earlier to
-// compare against: it skips the first-read refusal, never the diff, because a read
+// checkPriorRead returns nil to go ahead, else the refusal; every refusal keeps
+// this read as a survey. --no-prior-discover skips the first-read refusal, never
+// the diff, because a read
 // that does exist is evidence either way.
 func checkPriorRead(prior *priorRead, read *migrationRead, o cutoverOptions, out say.Reporter, keep func() (string, error)) error {
 	host, namespaces := scopeOf(read.plan)

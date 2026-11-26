@@ -35,9 +35,6 @@ func statusTest() statusFacts {
 	}
 }
 
-// TestStatusLine pins every variant of the one line, against the exact strings
-// docs/box.md writes down. The line is a contract -- the e2e greps it and a
-// person reads it from a shell -- so a change to it is a test change.
 func TestStatusLine(t *testing.T) {
 	for _, c := range []struct {
 		name  string
@@ -114,8 +111,6 @@ func TestStatusLine(t *testing.T) {
 	}
 }
 
-// TestStatusNextCheckIsLocalTime: the clock the line names is the operator's, not
-// the record's UTC.
 func TestStatusNextCheckIsLocalTime(t *testing.T) {
 	f := statusTest()
 	at := time.Date(2026, 11, 15, 3, 12, 0, 0, time.Local)
@@ -126,8 +121,6 @@ func TestStatusNextCheckIsLocalTime(t *testing.T) {
 	}
 }
 
-// TestValuePinsReadsOnlyWhatTheUserPinned: status names the apps the values hold,
-// with the label the pin is, and says nothing about an app it merely enables.
 func TestValuePins(t *testing.T) {
 	pins := valuePins(loadStatusSeedbox(t, `apps:
   sonarr:
@@ -171,8 +164,6 @@ func loadStatusSeedbox(t *testing.T, values string) *seedbox.Seedbox {
 	return sb
 }
 
-// TestStatusHeldNamesItsReason: a held thing without a reason does not tell
-// anyone what to do, so each kind carries its own words.
 func TestStatusHeldNamesItsReason(t *testing.T) {
 	f := statusTest()
 	f.Holds = []snapshot.Hold{{App: "radarr", Avoiding: snapshot.ImageRef{Tag: "6.3"}}}
@@ -187,10 +178,6 @@ func TestStatusHeldNamesItsReason(t *testing.T) {
 	}
 }
 
-// TestStatusClusterReadIsBounded: the line is one line and someone runs it from
-// a shell prompt, so its one cluster read cannot outlast it. A server that never
-// answers is not an error -- it is "cluster not reachable", and the other three
-// segments still print. A Ctrl-C is still the operator's, not an answer.
 func TestStatusClusterReadIsBounded(t *testing.T) {
 	t.Run("a server that never answers", func(t *testing.T) {
 		var passed context.Context

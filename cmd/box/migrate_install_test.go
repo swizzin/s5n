@@ -132,9 +132,6 @@ func TestInstallAnswersRefuseALoginThatCannotBeASeedbox(t *testing.T) {
 	}
 }
 
-// With --box-namespace given the login names nothing but the account, so any
-// login Authelia accepts goes through: the namespace rule is the derived
-// namespace's, not the account's.
 func TestInstallAnswersTakeAnyLoginWithAnExplicitNamespace(t *testing.T) {
 	o, inst := installFlagSet(t)
 	*inst.domain = "box.example.com"
@@ -161,9 +158,6 @@ func TestInstallAnswersNeedADataRoot(t *testing.T) {
 	}
 }
 
-// TestInstallAnswersLeaveTheOwnerToHostFoundations: a plan with no recorded
-// owner names no uid, so init settles it the way host foundations does rather
-// than being told 0.
 func TestInstallAnswersLeaveTheOwnerToHostFoundations(t *testing.T) {
 	o, inst := installFlagSet(t)
 	*inst.domain = "box.example.com"
@@ -183,11 +177,6 @@ func TestInstallAnswersLeaveTheOwnerToHostFoundations(t *testing.T) {
 	}
 }
 
-// TestMigrationInitTellsInitTheAppsAreComing: init runs here with every app
-// off, because the migration switches on what it moved, so the flags it is
-// given say so -- otherwise a migrating install tells the operator that
-// nothing runs yet, one step before it switches everything on. Everything else
-// is init's own: the plan's answers, and the release this run already loaded.
 func TestMigrationInitTellsInitTheAppsAreComing(t *testing.T) {
 	o, inst := installFlagSet(t)
 	*inst.domain = "box.example.com"
@@ -231,13 +220,6 @@ func TestMigrationInitTellsInitTheAppsAreComing(t *testing.T) {
 	}
 }
 
-// TestInstallAnswersTakeThePlansOwnerOrNone: the uid:gid the source's files
-// belonged to is the plan's (`source.owner`, which discovery writes when every
-// planned app agrees), and init is handed it as its own flags so the data root
-// and the copied configs keep the owner they had. A plan with no owner names
-// neither flag: init then settles the ids the way it does on any host -- the
-// flag, the data path's owner, $SUDO_UID, the invoking user -- rather than
-// being handed a zero the grant would keep.
 func TestInstallAnswersTakeThePlansOwnerOrNone(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
@@ -275,11 +257,6 @@ func TestInstallAnswersTakeThePlansOwnerOrNone(t *testing.T) {
 	}
 }
 
-// TestInstallAnswersAskOnlyWhatTheRunLacks: on a terminal without --yes the
-// four answers a plan cannot hold are init's own questions, so the ones this
-// run has are handed over and the ones it does not are simply left off. The
-// old refusal named all four on a terminal, which is the run a person on a
-// console actually makes.
 func TestInstallAnswersAskOnlyWhatTheRunLacks(t *testing.T) {
 	o, inst := installFlagSet(t)
 	*inst.login = "someone"
@@ -300,8 +277,6 @@ func TestInstallAnswersAskOnlyWhatTheRunLacks(t *testing.T) {
 	}
 }
 
-// TestInstallAnswersRefuseAnEmptyGuidedRun: guided asks for what is missing and
-// still refuses the one thing no question can supply -- the plan's data root.
 func TestInstallAnswersRefuseAPlanWithNoDataRootEvenGuided(t *testing.T) {
 	o, inst := installFlagSet(t)
 	p := planWithData()
@@ -312,10 +287,6 @@ func TestInstallAnswersRefuseAPlanWithNoDataRootEvenGuided(t *testing.T) {
 	}
 }
 
-// TestInstallTargetNamesTheBoxTheFlagsDecide: the question a host with no box
-// asks names the namespace the install will have -- the flag, or the one init
-// derives from the login. A guided run with neither has not chosen it yet, and
-// the question says "this box" rather than inventing a name.
 func TestInstallTargetNamesTheBoxTheFlagsDecide(t *testing.T) {
 	_, inst := installFlagSet(t)
 	if got := installTarget(inst); got != "seedbox" {
@@ -338,14 +309,6 @@ func TestInstallTargetNamesTheBoxTheFlagsDecide(t *testing.T) {
 	}
 }
 
-// TestTheInstallerSchedulesTheTimerLast: the install a migration makes ends the
-// way bootstrap's does -- init's flow over the plan's answers, and then the
-// update timer for the record, grant and values that run used, which is what
-// makes a migrated box update itself. A box whose install never finished is
-// never on a schedule: a failed adoption schedules nothing.
-//
-// Both halves are fakes, so this reads the order and the paths without a host,
-// a cluster or a systemd.
 func TestTheInstallerSchedulesTheTimerLast(t *testing.T) {
 	var order, got []string
 	fin := installFinish{
@@ -409,11 +372,6 @@ func planWithQbittorrent() *plan.Plan {
 	return p
 }
 
-// TestMigrationInitTellsInitWhatThePlanWillSwitchOn: init installs the box with
-// every app off, and the migration switches the plan's apps on afterwards. The
-// torrent port belongs to the box qBittorrent is coming to, so init has to know
-// the plan's apps as well as its own empty --apps, or a migrated box keeps the
-// chart's fixed port for good.
 func TestMigrationInitTellsInitWhatThePlanWillSwitchOn(t *testing.T) {
 	o, inst := installFlagSet(t)
 	*inst.domain = "box.example.com"
@@ -440,10 +398,6 @@ func TestMigrationInitTellsInitWhatThePlanWillSwitchOn(t *testing.T) {
 	}
 }
 
-// TestSourceTorrentPortReadsTheSnapshotsQbittorrent: the port comes from the
-// copy the snapshot carries, because a snapshot applied on another host has no
-// access to the source's own config directory. The plan's other apps hold no
-// qBittorrent config, so they say nothing rather than stopping the install.
 func TestSourceTorrentPortReadsTheSnapshotsQbittorrent(t *testing.T) {
 	dir := t.TempDir()
 	opened := &bundle.Opened{Dir: dir, Configs: map[string]string{}}

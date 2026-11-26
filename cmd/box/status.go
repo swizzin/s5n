@@ -19,32 +19,23 @@ import (
 	"github.com/swizzin/s5n/internal/update"
 )
 
-// `box status` is one line, and it is the line docs/box.md decided: what the box
-// is on, what the last update did, when box checks again, and anything held. It
-// reads what is already written -- Helm's deployed release, update.json, root's
-// config, the holds -- and asks no registry, so it is cheap enough to run from a
-// shell prompt.
-//
-// The line is built by a function of the facts, because it is a contract: the
-// e2e greps it and a person reads it, so every variant is pinned by a test.
+// `box status` is one line, as docs/box.md decided: what the box is on, the last
+// update, the next check, and anything held. It reads files and Helm only, never
+// a registry. The line is a contract, pinned by a test.
 
 // statusFacts is everything the line says, read before it is written.
 type statusFacts struct {
-	// Name is the chart's name ("s5n") and Installed the release Helm has
-	// deployed. Unreachable says the cluster could not be read at all.
+	// Name and Installed are the chart and release; Unreachable means no read.
 	Name        string
 	Installed   string
 	Unreachable bool
-	// State is update.json: the last step, the last check and the releases box
-	// failed on.
+	// State is update.json: last step, last check and failures.
 	State update.State
-	// Timer is root's `update.timer`, and TimerInstalled whether the unit that
-	// wakes box is on this host.
+	// Timer is `update.timer`; TimerInstalled says the unit is here.
 	Timer          bool
 	TimerInstalled bool
 	Interval       time.Duration
-	// HoldBox is root's `update.hold-box`, Holds are the apps a rollback holds,
-	// and Pins are the apps the values file pins.
+	// HoldBox, Holds and Pins are the three things kept where they are.
 	HoldBox bool
 	Holds   []snapshot.Hold
 	Pins    map[string]string
@@ -52,9 +43,8 @@ type statusFacts struct {
 	Now time.Time
 }
 
-// statusLine is the one line, in the order docs/box.md lists the segments. The
-// held segment is left out when nothing is held, so a healthy box is three
-// segments and an operator can tell the fourth apart.
+// statusLine is the line in docs/box.md's order; the held segment is omitted
+// when empty.
 func statusLine(f statusFacts) string {
 	segments := []string{
 		statusRelease(f),
@@ -67,9 +57,7 @@ func statusLine(f statusFacts) string {
 	return strings.Join(segments, " · ")
 }
 
-// statusRelease is what is running: Helm's deployed version, or an honest "?"
-// when the cluster could not be read. The rest of the line still prints, because
-// the two questions the other segments answer need no cluster.
+// statusRelease is Helm's version or "?"; the rest of the line needs no cluster.
 func statusRelease(f statusFacts) string {
 	switch {
 	case f.Unreachable:
@@ -81,8 +69,7 @@ func statusRelease(f statusFacts) string {
 	}
 }
 
-// statusLastUpdate is the last step box attempted, in local time, with how it
-// ended: "ok", "ok, radarr rolled back", or "failed (health)".
+// statusLastUpdate is the last step in local time and how it ended.
 func statusLastUpdate(state update.State) string {
 	step := state.LastStep
 	if step == nil {
@@ -99,8 +86,7 @@ func statusLastUpdate(state update.State) string {
 	return line
 }
 
-// statusNextCheck is when box next asks the registry: off, not installed, within
-// the wake interval, or the clock time it is due.
+// statusNextCheck is off, not installed, within the interval, or a clock time.
 func statusNextCheck(f statusFacts) string {
 	switch {
 	case !f.Timer:
@@ -114,9 +100,7 @@ func statusNextCheck(f statusFacts) string {
 	}
 }
 
-// statusHeld is what is being kept where it is: the box itself, the releases it
-// failed on, the apps a rollback holds, and the apps the values pin. Each names
-// why, because "held" alone does not tell anyone what to do about it.
+// statusHeld names each held thing and why: "held" alone says nothing to do.
 func statusHeld(f statusFacts) string {
 	var parts []string
 	if f.HoldBox {
@@ -142,9 +126,7 @@ func statusHeld(f statusFacts) string {
 	return "held: " + strings.Join(parts, ", ")
 }
 
-// statusFlags are `box status`'s: the record, the two seedbox files, the
-// kubeconfig, and the development switch that says where the timer's unit would
-// be on a host that is not this one.
+// statusFlags are status's flags, including the dev unit directory.
 type statusFlags struct {
 	record     *string
 	grantPath  *string
@@ -166,9 +148,7 @@ func addStatusFlags(fs *flag.FlagSet) *statusFlags {
 }
 
 func runStatus(ctx context.Context, args []string) {
-	// --unit-dir is where the timer's unit would be, for a host whose systemd is
-	// not this one. It is a development switch, out of the arguments the same
-	// way --acme-server is: --help must not offer it.
+	// --unit-dir is a dev switch: the unit location on another host.
 	unitDir, args, err := takeDevFlag(args, "unit-dir")
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "box: %v\n", err)
@@ -197,8 +177,7 @@ func runStatus(ctx context.Context, args []string) {
 	out.Line(statusLine(facts))
 }
 
-// readStatus reads every fact the line is built from. Nothing it reads asks a
-// registry: the release is Helm's deployed one, and the rest are files.
+// readStatus reads files and Helm's deployed release, never a registry.
 func readStatus(ctx context.Context, o *statusFlags, unitDir string) (statusFacts, error) {
 	facts := statusFacts{Name: release.ReleaseName, Now: time.Now()}
 
@@ -225,8 +204,7 @@ func readStatus(ctx context.Context, o *statusFlags, unitDir string) (statusFact
 	}
 	facts.State = state
 
-	// The holds live beside the config root, under the grant's config path. A
-	// box without one holds nothing: that is the same read a rollback makes.
+	// Holds live beside the config root; no grant holds nothing.
 	if root, err := update.ConfigRoot(sb); err == nil {
 		holds, err := snapshot.LoadHolds(root)
 		if err != nil {
@@ -235,9 +213,7 @@ func readStatus(ctx context.Context, o *statusFlags, unitDir string) (statusFact
 		facts.Holds = holds
 	}
 
-	// The cluster is the one read that can fail without the line being wrong:
-	// "cluster not reachable" is an answer, and the other three segments are
-	// what someone looking at an unreachable box needs to see.
+	// A failed cluster read is an answer; the other segments still print.
 	deployed, unreachable, err := readDeployed(ctx, statusClusterTimeout, func(ctx context.Context) (release.ReleaseState, error) {
 		kc, err := release.ResolveKubeconfig(*o.kubeconfig, os.Getenv("KUBECONFIG"), bootstrap.FilesystemRecords{Path: *o.record})
 		if err != nil {
@@ -257,7 +233,7 @@ func readStatus(ctx context.Context, o *statusFlags, unitDir string) (statusFact
 	return facts, nil
 }
 
-// statusClusterTimeout bounds the one cluster read the line makes. Helm's
+// statusClusterTimeout bounds the line's one cluster read. Helm's
 // release storage reads with a context of its own (context.Background()), so it
 // is set as client-go's per-request timeout as well as this deadline: the
 // deadline is what the read is judged by, the timeout is what stops a server

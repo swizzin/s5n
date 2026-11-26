@@ -85,10 +85,6 @@ func editPlan(t *testing.T, p *plan.Plan, change func(*plan.Plan)) *plan.Plan {
 	return out
 }
 
-// TestCutoverRefusesTheFirstReadUnattended: with no earlier read of this source on
-// record, an unattended cutover says what it found, keeps its read as a survey and
-// stops, naming `box migrate discover` -- the read to take while the source is
-// whole -- and the flag that says there is nothing earlier to compare against.
 func TestCutoverRefusesTheFirstReadUnattended(t *testing.T) {
 	manifests, root := discoverySource(t)
 	o := cutoverOptionsFor(t, manifests)
@@ -128,9 +124,6 @@ func TestCutoverRefusesTheFirstReadUnattended(t *testing.T) {
 	}
 }
 
-// TestCutoverFirstReadGoesAheadWithNoPriorDiscover: the flag is the operator's own
-// word that there is nothing earlier to compare against, so the same read goes on
-// to the final snapshot.
 func TestCutoverFirstReadGoesAheadWithNoPriorDiscover(t *testing.T) {
 	manifests, root := discoverySource(t)
 	o := cutoverOptionsFor(t, manifests)
@@ -152,10 +145,6 @@ func TestCutoverFirstReadGoesAheadWithNoPriorDiscover(t *testing.T) {
 	}
 }
 
-// TestCutoverAsksOnTheFirstRead: with somebody to ask, the run lists what it found
-// and asks whether that is everything, and the safe answer -- the one an empty
-// enter takes -- sends the operator to discover rather than to a cutover of a read
-// nobody has compared.
 func TestCutoverAsksOnTheFirstRead(t *testing.T) {
 	manifests, root := discoverySource(t)
 	o := cutoverOptionsFor(t, manifests)
@@ -186,8 +175,6 @@ func TestCutoverAsksOnTheFirstRead(t *testing.T) {
 	}
 }
 
-// TestCutoverAnswersYesOnTheFirstRead: the operator's answer that it is everything
-// is what lets a first read through, and the run does not ask twice.
 func TestCutoverAnswersYesOnTheFirstRead(t *testing.T) {
 	manifests, root := discoverySource(t)
 	o := cutoverOptionsFor(t, manifests)
@@ -207,9 +194,6 @@ func TestCutoverAnswersYesOnTheFirstRead(t *testing.T) {
 	}
 }
 
-// TestCutoverStopsOnAnAppTheEarlierReadHad: the earlier read found an app and this
-// one cannot, which is what a deleted workload looks like -- so the run stops,
-// names the app, and keeps this read as a survey first.
 func TestCutoverStopsOnAnAppTheEarlierReadHad(t *testing.T) {
 	manifests, root := discoverySource(t)
 	dir := t.TempDir()
@@ -258,8 +242,6 @@ func TestCutoverStopsOnAnAppTheEarlierReadHad(t *testing.T) {
 	}
 }
 
-// TestCutoverKeepsAnAppNewSinceTheEarlierRead: an app the earlier read did not have
-// is a migration target, not a gap: it is listed and kept.
 func TestCutoverKeepsAnAppNewSinceTheEarlierRead(t *testing.T) {
 	manifests, root := discoverySource(t)
 	dir := t.TempDir()
@@ -293,11 +275,6 @@ func TestCutoverKeepsAnAppNewSinceTheEarlierRead(t *testing.T) {
 	}
 }
 
-// TestFindPriorReadMatchesOnHostAndNamespaces: the source is one host and one
-// scope, so a snapshot of another host -- or of the same host read for another set
-// of namespaces -- is not an earlier read of this source. It is the whole point of
-// matching: a diff against someone else's read would either miss a real gap or
-// invent one.
 func TestFindPriorReadMatchesOnHostAndNamespaces(t *testing.T) {
 	manifests, root := discoverySource(t)
 	dir := t.TempDir()
@@ -380,11 +357,6 @@ func nameStampOf(t *testing.T, path string) time.Time {
 	return time.Time{}
 }
 
-// TestTwoRefusalsInOneSecondKeepTwoReads: a snapshot's name carries the second it
-// was taken, and two cutovers that refuse in the same second are two reads of the
-// source -- the second is named a second later rather than refused, because a
-// refusal there would be about the clock. Two refusals in one second is what an
-// operator following box's own advice produces: stop the app, run cutover again.
 func TestTwoRefusalsInOneSecondKeepTwoReads(t *testing.T) {
 	manifests, root := discoverySource(t)
 	at := time.Date(2026, 11, 17, 9, 0, 0, 0, time.UTC)

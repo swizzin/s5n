@@ -5,11 +5,8 @@ import (
 	"fmt"
 )
 
-// parseNoArgs parses a verb's flags and refuses anything left over. Go's flag
-// package stops at the first argument that is not a flag and leaves the rest
-// unread, so `box update sonarr --check` would otherwise drop --check with the
-// app and run a whole update, and a --kubeconfig after a stray word would fall
-// back to the default cluster. A verb that takes no arguments says so instead.
+// parseNoArgs refuses a leftover argument: Go's parser stops at a stray word, so
+// `box update sonarr --check` would silently run a whole update.
 func parseNoArgs(fs *flag.FlagSet, verb string, args []string) error {
 	if err := fs.Parse(args); err != nil {
 		return err

@@ -1,24 +1,11 @@
 package main
 
-// bootstrap_one.go is the one question a guided fresh install asks.
-//
-// A host with no platform has two halves to install -- the layer box puts under
-// the seedbox and the seedbox itself -- and they are one decision: a person who
-// says yes to the platform has already said yes to the box on it
-// (docs/output.md, "bootstrap, init, apply"). So the platform plan is printed
-// first, init asks its own questions, and the answer covers both.
-//
-// The question is asked inside init's flow, between its last question and its
-// first write (setup.Options.BeforeWrite): by then every answer is settled, so
-// the operator sees the platform plan and what the seedbox will be, and nothing
-// has been written. The platform is installed from here, which is what makes
-// init's writes happen on a cluster that has a Gateway, a cert-manager and a
-// login -- init reads the Gateway's address for the apps that sign in through
-// the login, and that read has to happen after this point.
-//
-// A box that already has a platform keeps asking per half: there it is the
-// platform that has nothing to do (so it asks nothing), and init's release is
-// the only question. And --yes, or no terminal, answers without asking at all.
+// bootstrap_one.go is the one question a guided fresh install asks: the platform
+// layer and the seedbox are one decision (docs/output.md). It comes inside
+// init's flow between the last question and the first write, so the platform
+// plan is shown with every answer settled and nothing written; the platform is
+// installed there, before init reads the Gateway. An existing platform asks per
+// half; --yes or no terminal asks nothing.
 
 import (
 	"context"
@@ -28,23 +15,13 @@ import (
 	"github.com/swizzin/s5n/internal/setup"
 )
 
-// guidedFresh says this run asks one question: a person to ask, and a platform
-// layer that is not there yet.
-//
-// A platform that is there -- a box on somebody's own Envoy Gateway, a re-run --
-// is not the same decision: those runs change one half or neither, and each half
-// asks about what it will change.
+// guidedFresh is a person and a missing platform; an existing one asks per half.
 func guidedFresh(yes, terminal bool, components []bootstrap.ComponentResult) bool {
 	return !yes && terminal && platformAbsent(components)
 }
 
-// platformAbsent reports whether every component of the layer is one box writes:
-// the cluster has none of it, so the plan this run shows is an install of all of
-// it.
-//
-// The LoadBalancer's "probe" is the plan's own question -- MetalLB unless the
-// Gateway gets an address without it -- and it is the one action a fresh cluster
-// has for that component.
+// platformAbsent: every component is box's, so the plan installs all of it. The
+// LoadBalancer "probe" is that component's one action.
 func platformAbsent(components []bootstrap.ComponentResult) bool {
 	writes := 0
 	for _, c := range components {
@@ -59,25 +36,18 @@ func platformAbsent(components []bootstrap.ComponentResult) bool {
 	return writes > 0
 }
 
-// oneQuestion is a guided fresh install's single answer: the platform layer is
-// installed when the answer is yes, and init writes the seedbox after it.
+// oneQuestion is a guided fresh install's single answer.
 type oneQuestion struct {
-	// ask is the one question. It is the flow's own confirmer, so a live run
-	// draws the form every other question draws.
+	// ask is the flow's own confirmer.
 	ask asker
-	// platform installs the layer the plan showed. It is a field so a test can
-	// watch the order without a cluster.
+	// platform installs the shown layer; a field so a test watches the order.
 	platform func(ctx context.Context) error
 	out      say.Reporter
 }
 
-// beforeWrite is setup's BeforeWrite: the one question, then the layer.
-//
-// A "no" leaves the host as it was -- no platform, no file, no directory -- and
-// says so in box's own words, the way a refused question does. The answer is yes
-// by default: this question is the whole of what the run is for, an operator has
-// just typed the domain, the login and the paths of a fresh host, and the cost of
-// a wrong yes is in the plan above it rather than in one more keystroke.
+// beforeWrite asks, then installs. A no leaves the host as it was. Yes is the
+// default: the operator just answered the whole run, and the plan above is the
+// review.
 func (q oneQuestion) beforeWrite(ctx context.Context, a setup.Answers) error {
 	ok, err := q.ask.Ask(questionFor(a), true)
 	if err != nil {

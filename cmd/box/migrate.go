@@ -1,18 +1,11 @@
 package main
 
-// migrate.go is `box migrate`: the read half, and the dispatch.
-//
-// `discover` reads an install box did not make and writes a snapshot: the plan
-// apply runs, the source's manifests, the report, and -- when it is rehearsing
-// -- each planned app's config tree. It changes nothing: the source cluster is
-// listed, the source's host files are read through a filesystem rooted where box
-// thinks the host's / is, and every manifest read is kept so the plan can be
-// rebuilt after the source is gone (docs/box.md, "migrate").
-//
-// A snapshot is one file (internal/archive's format, internal/migrate/bundle's
-// shape) in /var/lib/s5n/migrate/, named for the time the source was read and
-// the mode it was read in. A survey holds no configs, so it can be taken at any
-// time on a running source; a rehearsal and a final snapshot carry them.
+// migrate.go is `box migrate`: the read half and the dispatch. `discover` reads
+// an install box did not make and writes a snapshot -- plan, manifests, report,
+// and a rehearsal's config trees -- changing nothing. A snapshot is one archive
+// (internal/archive, internal/migrate/bundle) in /var/lib/s5n/migrate/, named
+// for its time and mode; a survey holds no configs, so a rehearsal or final
+// snapshot is the one that carries them (docs/box.md, "migrate").
 
 import (
 	"context"
@@ -82,8 +75,7 @@ plan carries a rule, with its reason, for everything the configs say and no rule
 a guided run asks about each one, and an unattended run takes it and says so.
 `
 
-// The commands, as names: the dispatch, the usage line and the messages they
-// print all spell them once.
+// The command names, spelled once.
 const (
 	migrateDiscoverCmd = "discover"
 	migrateCutoverCmd  = "cutover"
@@ -122,64 +114,44 @@ func (n *namespaces) Set(v string) error {
 	return nil
 }
 
-// discoverOptions is what a read of a source needs: the same flags for discover
-// and cutover, because they read one source the same way.
+// discoverOptions is what discover and cutover share to read one source.
 type discoverOptions struct {
-	// Out is the snapshot file to write; empty means bundle.Dir with the name
-	// its mode and the time give it.
+	// Out is the snapshot file; empty means bundle.Dir with a name from mode
+	// and time.
 	Out        string
 	FromDir    string
 	Kubeconfig string
 	Namespaces []string
 	Root       string
-	// chart is the release this run installs. The read needs it for the one
-	// thing a source cannot say: which of the chart's blessed variants a
-	// source image already is. cutover points it at its apply's flags, so a
-	// cutover and the install it hands over to name one release.
+	// chart is the release this run installs: its blessed variants map source
+	// images. cutover points it at its apply's flags, so both name one release.
 	chart *chartFlags
-	// Charts is where that release comes from. Nil means the published
-	// repository; a test hands over a fixed one.
+	// Charts is where that release comes from; nil is the published repository.
 	Charts release.ChartSource
-	// Rehearsal makes discover's snapshot a rehearsal: the configs are copied
-	// in, and the snapshot may only be applied locked.
+	// Rehearsal copies configs in and may only be applied locked.
 	Rehearsal bool
-	// Box is the version that wrote the snapshot, as the manifest records it.
+	// Box is the writing version, as the manifest records it.
 	Box string
-	// Now is the clock the snapshot's name and manifest come from. Empty means
-	// time.Now: a test that compares two runs' names hands it one.
+	// Now is the clock behind the name and manifest; nil is time.Now.
 	Now func() time.Time
-	// ValuesPath is the values file this read is for, when it has one: the
-	// categories the plan renames the library onto are the ones the release
-	// will render, so cutover hands over the file it installs from. Empty is a
-	// read with the chart's own values: discover names no file.
+	// ValuesPath is the values this read is for: its categories are the ones the
+	// release renders. Empty is the chart's own values.
 	ValuesPath string
-	// Prompt asks the defaults Settle took. Nil is an unattended run: every
-	// default is taken and the run says so, through Say. A run with a terminal
-	// on stdin builds one (runMigrateDiscover, runMigrateCutover); a test
-	// hands over its own.
+	// Prompt asks the defaults Settle took; nil takes them all and says so.
 	Prompt setup.Prompter
-	// Plain is --plain: ask with line prompts even on a terminal.
+	// Plain is --plain: line prompts even on a terminal.
 	Plain bool
-	// PlexMinimal is --plex-minimal: carry Plex's preferences and its databases
-	// only, and let it rebuild its metadata and artwork. Without it a snapshot
-	// carries Plex's whole data when there is room for it where it is written.
+	// PlexMinimal carries Plex's preferences and databases only; otherwise its
+	// whole data goes when there is room.
 	PlexMinimal bool
-	// TargetConfig is the config path this host's own seedbox already names,
-	// when it has one: a host that is both ends of the migration writes the
-	// snapshot and the seedbox's copy on one machine, so the room a full Plex
-	// snapshot needs is there twice. Empty on a read with no box to ask.
+	// TargetConfig is this host's seedbox config path: a same-host cutover
+	// writes two copies on one filesystem. Empty when there is no box to ask.
 	TargetConfig string
-	// Disk answers the room questions a full carry asks, and CarrySize is how
-	// many bytes a full carry of one app's config directory takes. Nil means the
-	// real ones; a test with a disk that is too small, or one whose tree it does
-	// not want to build, hands over its own.
+	// Disk and CarrySize answer the room questions; nil uses the real ones.
 	Disk      space.Disk
 	CarrySize func(instance, dir string) (int64, error)
-	// Work is this run's private directory: the databases discovery copies before
-	// it opens them and the copies the checks read. It is beside the snapshot the
-	// run writes (internal/migrate/work), never the system's temporary directory,
-	// because a source's config can be gigabytes. The run that reads a source
-	// makes it; everything below only uses it.
+	// Work is the private directory for database copies, beside the snapshot
+	// (internal/migrate/work): a source's config can be gigabytes.
 	Work string
 }
 
@@ -190,8 +162,7 @@ func (o discoverOptions) clock() time.Time {
 	return time.Now()
 }
 
-// addDiscoverFlags registers what both verbs that read a source take, and
-// returns the repeatable namespace the caller copies out after parsing.
+// addDiscoverFlags registers the shared read flags and returns the namespaces.
 func addDiscoverFlags(fs *flag.FlagSet, o *discoverOptions, outUsage string) *namespaces {
 	fs.StringVar(&o.Out, "out", "", outUsage)
 	fs.StringVar(&o.FromDir, "from-dir", "", "read the source's manifests from this directory instead of a cluster")
@@ -207,8 +178,7 @@ func runMigrateDiscover(ctx context.Context, args []string) {
 	fs := flag.NewFlagSet("migrate discover", flag.ExitOnError)
 	o := discoverOptions{Box: version}
 	ns := addDiscoverFlags(fs, &o, "the snapshot file to write (default: "+bundle.Dir+"/migrate-<time>-survey.tar.gz)")
-	// The read needs the release for the blessed variants an image maps onto,
-	// so discover names the chart the same way the install it leads to does.
+	// The read names its release the same way the install it leads to does.
 	o.chart = addChartFlags(fs, chartVersionInstalls)
 	rehearsal := fs.Bool("rehearsal", false, "copy every planned app's config into the snapshot, so it can be applied as a locked rehearsal")
 	plain := fs.Bool("plain", false, "ask the defaults with plain line prompts, even on a terminal (for a flaky terminal or a screen reader)")
@@ -224,9 +194,8 @@ func runMigrateDiscover(ctx context.Context, args []string) {
 	o.Rehearsal = *rehearsal
 	o.Plain = *plain
 	if isTerminal(os.Stdin) {
-		// A read with somebody at the terminal asks about the defaults it takes.
-		// Without one it takes them all and says so: a question nobody can
-		// answer is not a question.
+		// With a terminal, ask about the defaults; without one, take them and
+		// say so.
 		o.Prompt = newPrompt(terminalSet(o.Plain), startupTheme(""))
 	}
 	out := newOutput(terminalSet(o.Plain), false, "")
@@ -241,51 +210,39 @@ func runMigrateDiscover(ctx context.Context, args []string) {
 	}
 }
 
-// migrationRead is one read of a source: the plan, the bytes it will be written
-// as, what discovery could not migrate, what its checks could not settle, and
-// the text the operator sees.
+// migrationRead is one read: plan, bytes, gaps, unsettled defaults and text.
 type migrationRead struct {
 	plan *plan.Plan
-	// src is what the plan was read from. The stop proof and the reset recipe
-	// ask it the two things a plan cannot hold -- the pods that are left and
-	// the distribution that installed the cluster -- over the same read.
+	// src holds the pods left and the installing distribution, for the stop
+	// proof and reset recipe.
 	src discover.Source
-	// settled is what the checks could not settle, as Settle decided it: the
-	// list the report carries and a guided run asks about.
+	// settled is what the checks could not settle, for the report and questions.
 	settled apply.Settled
-	// chart is the release this read is writing a plan for: its blessed
-	// variants, its catalog and the endpoints its values give every app.
+	// chart is the release this plan is for: variants, catalog and endpoints.
 	chart release.Chart
-	// raw is the plan's YAML, which is what a snapshot carries and what apply's
-	// plan id is a digest of.
+	// raw is the plan's YAML, carried in the snapshot.
 	raw    []byte
 	report discover.Report
-	// doc is the migration report this read wrote: the same bytes the snapshot
-	// carries as report.txt and the file beside it.
+	// doc is the report the snapshot carries as report.txt and writes beside it.
 	doc report.Doc
 	// text is doc as text, which is what a snapshot's report.txt entry holds.
 	text string
 }
 
-// setReport builds this read's report and the text the snapshot carries. It is
-// the one place a read's report is made, so what the screen points at and what
-// the archive holds are one document.
+// setReport builds the report; screen and archive share one document.
 func (r *migrationRead) setReport(mode archive.Mode, snapshot string, o discoverOptions, failure error) {
 	r.doc = readReport(*r, mode, snapshot, o.clock(), o.Box, failure)
 	r.text = r.doc.Text()
 }
 
-// migrateDiscover is the command without the exit, so a test drives it. The
-// returned text is the migration report (which the snapshot also carries), which
-// an error also carries: a run that stopped halfway still has something to say
-// about what it read.
+// migrateDiscover is the command without the exit; the returned text is the
+// report, carried even on an error.
 func migrateDiscover(ctx context.Context, o discoverOptions, out say.Reporter) (string, error) {
 	mode := archive.ModeSurvey
 	if o.Rehearsal {
 		mode = archive.ModeRehearsal
 	}
-	// The run's working directory: the databases it copies and the copies its
-	// checks read go beside the snapshot this read writes, never in $TMPDIR.
+	// Working directory beside the snapshot, never in $TMPDIR.
 	dir, done, err := work.New(filepath.Dir(snapshotPath(o, mode)))
 	if err != nil {
 		return "", err
@@ -296,9 +253,8 @@ func migrateDiscover(ctx context.Context, o discoverOptions, out say.Reporter) (
 	if err != nil {
 		return read.text, err
 	}
-	// Nothing unsettled reaches the install: the checks run here, on the very
-	// bytes the snapshot will carry, and what they cannot settle is asked
-	// about now or written down as a default.
+	// Check the very bytes the snapshot will carry; anything unsettled is asked
+	// about or written as a default.
 	if err := settleRead(ctx, o, &read); err != nil {
 		read.setReport(mode, "", o, err)
 		return read.text, err
@@ -307,20 +263,16 @@ func migrateDiscover(ctx context.Context, o discoverOptions, out say.Reporter) (
 		read.setReport(mode, "", o, err)
 		return read.text, err
 	}
-	// The file is named before it is written, so the report inside it can name
-	// it: the operator reads one page that says where the snapshot is.
+	// Name the file before writing, so the report inside can name it.
 	path := freeSnapshotPath(o, mode)
-	// What the snapshot carries is settled before it is written: Plex's whole
-	// data when there is room, its state when there is not, and that decision
-	// goes into the plan apply reads.
+	// Settle what the snapshot carries before writing; the decision goes into
+	// the plan apply reads.
 	short, err := decideSnapshotCarry(&read, o, path, mode)
 	if err != nil {
 		read.setReport(mode, "", o, err)
 		return read.text, err
 	}
-	// What the snapshot does not carry is part of that page: Plex's caches, and
-	// its whole library when one does not fit. The operator reads that once,
-	// here.
+	// What the snapshot leaves out is part of the page the operator reads.
 	if mode != archive.ModeSurvey {
 		read.report.Notes = append(read.report.Notes, carryLines(read.plan)...)
 		read.report.Notes = append(read.report.Notes, short...)
@@ -336,15 +288,12 @@ func migrateDiscover(ctx context.Context, o discoverOptions, out say.Reporter) (
 	}
 	read.digest("box migrate discover", out)
 	out.Detail("wrote " + wrote.Path + " (" + string(mode) + ")")
-	// The last screen names how many decisions this run took: an address or a
-	// path nobody answered is a decision box made, and the report names each one
-	// with its reason.
+	// End with the count of decisions box took; the report names each reason.
 	read.defaultsRow(out)
 	return read.text, nil
 }
 
-// readSource reads the source and builds the plan. Nothing is written: a run
-// that stops here leaves the source and the host exactly as it was.
+// readSource reads the source and builds the plan; nothing is written.
 func readSource(ctx context.Context, o discoverOptions, mode archive.Mode) (migrationRead, error) {
 	var read migrationRead
 	root := o.Root
@@ -356,10 +305,8 @@ func readSource(ctx context.Context, o discoverOptions, mode archive.Mode) (migr
 		return read, err
 	}
 	read.src = src
-	// The blessed variants are the chart's, so the read loads the release it is
-	// writing a plan for. A chart that cannot be read stops the read: a plan
-	// that names no variant would migrate every app onto the chart's default
-	// image without saying so.
+	// The blessed variants are the chart's; no variants means no plan, rather
+	// than every app silently on the default image.
 	chart, err := o.loadChart(ctx)
 	if err != nil {
 		read.setReport(mode, "", o, err)
@@ -371,8 +318,7 @@ func readSource(ctx context.Context, o discoverOptions, mode archive.Mode) (migr
 		return read, err
 	}
 	read.chart = chart
-	// The library's directories are box's categories, and the categories are
-	// the values', so the read asks the release what it would render.
+	// Ask the release for its categories: the library renames onto them.
 	categories, err := readCategories(o, chart)
 	if err != nil {
 		read.setReport(mode, "", o, err)
@@ -382,10 +328,9 @@ func readSource(ctx context.Context, o discoverOptions, mode archive.Mode) (migr
 		Namespaces: o.Namespaces,
 		Variants:   chart.Variants,
 		Categories: categories,
-		// The host's filesystem, read-only: every open below is a read.
+		// The host's filesystem, read-only.
 		ConfigFS: os.DirFS(root),
-		// A database is copied before it is opened, and the copy goes in this
-		// run's working directory beside the snapshot, never in $TMPDIR.
+		// A database is copied before opening, into the run's working directory.
 		TempDir: o.Work,
 	})
 	read.plan, read.report = p, rep
@@ -396,13 +341,9 @@ func readSource(ctx context.Context, o discoverOptions, mode archive.Mode) (migr
 	return read, nil
 }
 
-// readCategories is the directory each instance's library is laid out in, from
-// the values this read is for: the file cutover was given, or the chart's own.
-//
-// A read that cannot work them out is refused rather than continued: every
-// library directory would keep the source's name, and the Arrs would be wired
-// with a second root folder beside it -- which is the migration this mapping
-// exists to make unnecessary.
+// readCategories is each instance's library directory from this read's values.
+// A read that cannot work them out refuses: every directory would keep the
+// source's name and the Arrs would get a second root folder.
 func readCategories(o discoverOptions, chart release.Chart) (map[string]string, error) {
 	values, err := seedbox.Pending(seedbox.Chart{Values: chart.Values, Schema: chart.Schema}, o.ValuesPath)
 	if err != nil {
@@ -411,14 +352,9 @@ func readCategories(o discoverOptions, chart release.Chart) (map[string]string, 
 	return apply.Categories(values), nil
 }
 
-// settleRead runs every rewriter's check over the configs this read saw and
-// writes what they could not settle into the plan as defaults with reasons. The
-// plan a run writes is Settle's plan: a gap that reached apply would be a
-// refusal after the downtime, and this is where it becomes a decision instead.
-//
-// The checks read the source's own directories, which are the bytes a rehearsal
-// or a final snapshot copies: apply then rewrites a copy of the same config, so
-// the checks it repeats are the checks this run made.
+// settleRead runs every rewriter's check over the configs and writes what they
+// could not settle as defaults with reasons: a gap reaching apply would be a
+// refusal after the downtime. The checks read the bytes the snapshot copies.
 func settleRead(ctx context.Context, o discoverOptions, read *migrationRead) error {
 	in, err := settleInput(read, o.Root, o.Work)
 	if err != nil {
@@ -432,8 +368,7 @@ func settleRead(ctx context.Context, o discoverOptions, read *migrationRead) err
 	return nil
 }
 
-// snapshotPath is where one run writes: --out when the operator named a file,
-// otherwise bundle.Dir under the name its mode and the time give it.
+// snapshotPath is --out, or bundle.Dir with mode and time.
 func snapshotPath(o discoverOptions, mode archive.Mode) string {
 	if strings.TrimSpace(o.Out) != "" {
 		return o.Out
@@ -441,13 +376,8 @@ func snapshotPath(o discoverOptions, mode archive.Mode) string {
 	return filepath.Join(bundle.Dir, bundle.FileName(mode, o.clock()))
 }
 
-// freeSnapshotPath is snapshotPath with the name made free. A snapshot's name
-// carries the second it was taken, and two reads of one source can be taken in one
-// second -- a cutover that refuses twice in a script, or an operator who answers a
-// question and runs it again. The second one is a second later rather than a
-// refusal, because a refusal there would be about the clock and not about the
-// source. A file --out named is the operator's own and is never renamed: writing
-// over their file stays a refusal.
+// freeSnapshotPath moves a name carried to the next second rather than refusing
+// over the clock; --out is the operator's file and is never renamed.
 func freeSnapshotPath(o discoverOptions, mode archive.Mode) string {
 	path := snapshotPath(o, mode)
 	if strings.TrimSpace(o.Out) != "" {
@@ -463,9 +393,8 @@ func freeSnapshotPath(o discoverOptions, mode archive.Mode) string {
 	return path
 }
 
-// writeSnapshot writes one snapshot of a read at path. The configs travel only
-// in a rehearsal or a final snapshot: a survey is the read alone, so it can be
-// taken on a running source without copying a library's worth of config.
+// writeSnapshot writes one read; only a rehearsal or final carries configs, so
+// a survey can be taken on a running source.
 func writeSnapshot(path string, mode archive.Mode, o discoverOptions, read migrationRead) (bundle.Written, error) {
 	s := bundle.Snapshot{
 		Mode:   mode,
@@ -490,10 +419,8 @@ func writeSnapshot(path string, mode archive.Mode, o discoverOptions, read migra
 				Instance: name,
 				Dir:      filepath.Join(root, read.plan.Apps[name].Config),
 			}
-			// An app whose config is more than its state (Plex: a library of
-			// covers and thumbnails beside its databases) travels as the tree
-			// or the files the plan says it carries. Every other app's whole
-			// tree goes in.
+			// An app carrying more than state travels as its plan says; every
+			// other app's whole tree goes in.
 			if carry, ok := discover.SnapshotCarry(name, read.plan.Apps[name].Carry == plan.CarryFull); ok {
 				app.Sub = carry.Sub
 				if home, err := plex.Home(app.Dir); err == nil {
@@ -515,24 +442,16 @@ func writeSnapshot(path string, mode archive.Mode, o discoverOptions, read migra
 	if err != nil {
 		return wrote, err
 	}
-	// The same bytes the archive carries, beside the file: one report a person
-	// opens with `less` where the snapshot was taken, and one that travels with
-	// it to the host it is applied on.
+	// The same report beside the file, to read where it was taken.
 	if err := report.Write(report.Name(path), read.doc); err != nil {
 		return wrote, err
 	}
 	return wrote, nil
 }
 
-// decideSnapshotCarry settles what a snapshot carries out of each app whose
-// config is more than its state, and writes that into the plan: the whole data
-// when there is room for it wherever it is written, its state alone when there
-// is not or when the operator asked for that with --plex-minimal.
-//
-// It returns the one line per app that did not fit, with the numbers, for the
-// report and the screen: a run that carries less than it could says why, and a
-// survey (which copies no config) settles the plan's answer without measuring
-// anything.
+// decideSnapshotCarry writes into the plan whether each oversized app travels
+// whole or as state, and returns the line for an app that did not fit, with
+// numbers. A survey settles the answer without measuring.
 func decideSnapshotCarry(read *migrationRead, o discoverOptions, path string, mode archive.Mode) ([]string, error) {
 	if read.plan == nil {
 		return nil, nil
@@ -544,8 +463,7 @@ func decideSnapshotCarry(read *migrationRead, o discoverOptions, path string, mo
 	var places []space.Place
 	var short []string
 	for _, name := range sortedKeys(read.plan.Apps) {
-		// ok says this is an app whose config is more than its state, which is
-		// the one app a snapshot's scope is a choice for.
+		// Only an app carrying more than state has a scope choice.
 		if _, ok := discover.SnapshotCarry(name, true); !ok {
 			continue
 		}
@@ -582,11 +500,8 @@ func decideSnapshotCarry(read *migrationRead, o discoverOptions, path string, mo
 	return short, nil
 }
 
-// writePlaces is the filesystems a full carry is written to: the one the
-// snapshot file goes to, and -- on a host whose own seedbox already names a
-// config path -- the target's, which is then a second copy. One filesystem
-// holding both counts the tree twice, which is what makes a same-host cutover
-// check the room it really needs.
+// writePlaces is the filesystems a full carry needs; a same-host cutover counts
+// its two copies on one filesystem twice.
 func (o discoverOptions) writePlaces(snapshot string) ([]space.Place, error) {
 	dir := filepath.Dir(snapshot)
 	free, err := o.freeAt(dir)
@@ -612,11 +527,10 @@ func (o discoverOptions) writePlaces(snapshot string) ([]space.Place, error) {
 	return append(places, space.Place{Path: o.TargetConfig, Free: free}), nil
 }
 
-// freeAt is how much room a filesystem has, through the caller's answer when it
-// gave one.
+// freeAt is a filesystem's free space through the caller's answer.
 func (o discoverOptions) freeAt(path string) (int64, error) { return o.disk().Free(path) }
 
-// disk is the filesystems this read asks about, or the host's own.
+// disk is the filesystems this read asks about, or the host's.
 func (o discoverOptions) disk() space.Disk {
 	if o.Disk != nil {
 		return o.Disk
@@ -624,8 +538,7 @@ func (o discoverOptions) disk() space.Disk {
 	return space.Real{}
 }
 
-// carrySize is how many bytes a full carry of one app's config directory takes,
-// through the caller's answer when it gave one.
+// carrySize is a full carry's bytes through the caller's answer.
 func (o discoverOptions) carrySize(instance, dir string) (int64, error) {
 	if o.CarrySize != nil {
 		return o.CarrySize(instance, dir)
@@ -634,15 +547,12 @@ func (o discoverOptions) carrySize(instance, dir string) (int64, error) {
 	return size, err
 }
 
-// discoverSource picks what discovery reads: a saved directory when the caller
-// has one (the source may already be gone), otherwise the live cluster.
+// discoverSource reads a saved directory if given, else the live cluster.
 func discoverSource(o discoverOptions) (discover.Source, error) {
 	if o.FromDir != "" {
 		return discover.NewDirectory(os.DirFS(o.FromDir)), nil
 	}
-	// The cluster decision belongs to `box bootstrap`; a migration of a source
-	// cluster reuses it exactly as apply reuses root's, and an explicit path
-	// always wins.
+	// Reuse bootstrap's cluster, as apply does; an explicit path wins.
 	kc, err := release.ResolveKubeconfig(o.Kubeconfig, os.Getenv("KUBECONFIG"), bootstrap.FilesystemRecords{Path: bootstrap.RecordPath})
 	if err != nil {
 		return nil, err
@@ -650,19 +560,14 @@ func discoverSource(o discoverOptions) (discover.Source, error) {
 	return discover.NewCluster(kc, o.Namespaces)
 }
 
-// loadChart is the release this read writes a plan for: its variants.yaml (the
-// blessed image list a source image is mapped onto a variant through), its
-// catalog, and the values whose ports and URL bases are where the box serves
-// each app. It is parsed by internal/admission and internal/catalog, the one
-// parser of each file, so a plan cannot name a variant or an app the release it
-// is applied onto does not have.
+// loadChart is the release this plan is for. internal/admission and
+// internal/catalog parse it, so a plan cannot name a variant or app the release
+// lacks.
 func (o discoverOptions) loadChart(ctx context.Context) (release.Chart, error) {
 	return (&chartRelease{flags: o.chart, source: o.Charts}).load(ctx)
 }
 
-// settleInput is what Settle is handed: this chart's apps, the source
-// directories this read saw, where the box serves every planned app, and the
-// directory the copies are made in.
+// settleInput is Settle's apps, source directories, targets and work directory.
 func settleInput(read *migrationRead, root, workDir string) (apply.SettleInput, error) {
 	var in apply.SettleInput
 	chart := read.chart
@@ -670,9 +575,8 @@ func settleInput(read *migrationRead, root, workDir string) (apply.SettleInput, 
 	if err != nil {
 		return in, err
 	}
-	// The chart's own values: the ports and URL bases this release gives every
-	// app are what a rewritten address points at, and a read on the source host
-	// has no seedbox's files to ask.
+	// The chart's values are what a rewritten address points at; the source host
+	// has no seedbox files to ask.
 	var chartValues map[string]any
 	if err := yaml.Unmarshal(chart.Values, &chartValues); err != nil {
 		return in, fmt.Errorf("%s: read the chart's values: %w", chart.Ref, err)
@@ -687,10 +591,8 @@ func settleInput(read *migrationRead, root, workDir string) (apply.SettleInput, 
 	return apply.SettleInput{
 		Catalog: cat.Names(),
 		Work:    workDir,
-		// The source's own directories: a rehearsal and a final snapshot copy
-		// these, so the checks read the bytes apply will rewrite. A survey
-		// copies nothing and still checks, which is what makes a read tell the
-		// operator what apply would have refused.
+		// The source's own directories, the bytes apply will rewrite; a survey
+		// still checks, so it reports what apply would have refused.
 		Configs: func(name string) string {
 			config := read.plan.Apps[name].Config
 			if config == "" {
@@ -702,11 +604,8 @@ func settleInput(read *migrationRead, root, workDir string) (apply.SettleInput, 
 	}, nil
 }
 
-// askDefaults shows what Settle could not settle and, when there is somebody to
-// ask, has the operator answer each address. Unattended, it takes every default
-// and says so at the end, with the count: the report names each one and its
-// reason, so the screen keeps the number (rules 4 and 7) and the run log keeps
-// the lines in full.
+// askDefaults asks each unsettled address, or takes every default and says so
+// with the count; the report and run log keep each reason (rules 4 and 7).
 func askDefaults(read *migrationRead, out say.Reporter, o discoverOptions) error {
 	if read.settled.Empty() {
 		return nil
@@ -726,9 +625,8 @@ func askDefaults(read *migrationRead, out say.Reporter, o discoverOptions) error
 	return nil
 }
 
-// encodeRead writes the plan this run will carry, and refuses one that does not
-// read back: apply trusts it with the data root and every instance's config, and
-// a field the encoder dropped would be a rule that silently does nothing.
+// encodeRead refuses a plan that does not read back: a dropped field would be a
+// rule that silently does nothing.
 func encodeRead(read *migrationRead) error {
 	raw, err := yaml.Marshal(read.plan)
 	if err != nil {
@@ -745,10 +643,8 @@ func encodeRead(read *migrationRead) error {
 	return nil
 }
 
-// carryLines is what a read says about what its snapshot carries out of an
-// app's config directory: one line per planned app whose config is more than its
-// state, said once, in the report the snapshot holds and on the screen the
-// operator reads. Nothing is said on a survey, which carries no configs at all.
+// carryLines is one line per app carrying more than state, in report and screen;
+// a survey says nothing.
 func carryLines(p *plan.Plan) []string {
 	if p == nil {
 		return nil

@@ -12,10 +12,7 @@ import (
 	"github.com/swizzin/s5n/internal/update"
 )
 
-// rollbackFlags are `box rollback`'s flags: apply's, because a rollback ends in
-// an apply, plus the two of its own. They are a value rather than locals in
-// runRollback so the mapping from flags to options is testable without a
-// cluster, the way apply's is.
+// rollbackFlags are apply's flags plus rollback's two, a value for testing.
 type rollbackFlags struct {
 	*applyFlags
 	pin   *bool
@@ -28,33 +25,23 @@ func addRollbackFlags(fs *flag.FlagSet) *rollbackFlags {
 		pin:        fs.Bool("pin", false, "pin the image in your values instead of holding it, so it lasts until you remove the pin"),
 		plain:      fs.Bool("plain", false, "ask with plain line prompts, even on a terminal (for a flaky terminal or a screen reader)"),
 	}
-	// apply's flag offers the release that is installed, which a rollback
-	// cannot honour either: its apply names the installed release itself, from
-	// the cluster. --help has to say so, because the flag is refused rather
-	// than ignored.
+	// The chart flag is refused, not ignored, so --help says the installed release
+	// is used.
 	if f := fs.Lookup("chart-version"); f != nil {
 		f.Usage = "not used: a rollback applies the release that is installed"
 	}
 	return o
 }
 
-// options is what this invocation hands the Rollback: apply's options, because
-// the apply at the end of a rollback is apply's own, and the app the operator
-// named.
+// options is apply's options and the named app.
 func (o *rollbackFlags) options(app string) update.RollbackOptions {
 	return update.RollbackOptions{App: app, Apply: o.applyFlags.options(), Pin: *o.pin}
 }
 
-// runRollback is `box rollback <app>`: it puts one app back on the image it ran
-// before an update moved it, from its newest snapshot.
-//
-// It is the hand-run version of the step-back an update does by itself, for the
-// fault no gate sees. The release is not moved: the app runs its old image
-// under the chart that is installed.
+// runRollback puts one app back on its old image from its newest snapshot; the
+// release is not moved.
 func runRollback(ctx context.Context, args []string) {
-	// The same dev switch apply takes, stripped before the FlagSet sees it so
-	// --help cannot offer it: --paths-in-node skips the host-path check for
-	// the kind e2e, which this apply runs too.
+	// --paths-in-node, as apply takes it, out of --help.
 	pathsInNode, args, err := takePathsInNode(args)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "box: %v\n", err)
@@ -67,10 +54,7 @@ func runRollback(ctx context.Context, args []string) {
 		os.Exit(2)
 	}
 	o.pathsInNode = pathsInNode
-	// Go's flag package stops at the first argument that is not a flag, and the
-	// app is one: `box rollback sonarr --pin` would otherwise read --pin as a
-	// second app. So whatever follows the app is parsed as flags, and only the
-	// app itself may be left over.
+	// Go's parser stops at the app, so parse what follows as flags.
 	app := ""
 	if rest := fs.Args(); len(rest) > 0 {
 		app = rest[0]
@@ -87,9 +71,7 @@ func runRollback(ctx context.Context, args []string) {
 		fmt.Fprintln(os.Stderr, "box: no values file: pass --values")
 		os.Exit(2)
 	}
-	// A rollback applies the release that is installed, so naming one is a
-	// question box cannot answer: moving the release is `box update`, and
-	// going back a release is not something 0.5 does at all.
+	// Naming a release cannot be honoured: moving one is `box update`.
 	if version := *o.chart.version; version != "" {
 		fmt.Fprintf(os.Stderr, "box: rollback applies the release that is installed, so --chart-version %s has nothing to do: it puts one app back, not the release\n", version)
 		os.Exit(2)
@@ -102,21 +84,18 @@ func runRollback(ctx context.Context, args []string) {
 		os.Exit(1)
 	}
 
-	// The cluster decision belongs to `box bootstrap`; a rollback reuses it the
-	// same way apply does and never probes a cluster of its own.
+	// Reuse bootstrap's cluster, as apply does.
 	kc, err := release.ResolveKubeconfig(*o.kubeconfig, os.Getenv("KUBECONFIG"), bootstrap.FilesystemRecords{Path: bootstrap.RecordPath})
 	if err != nil {
 		out.Error(err)
 		os.Exit(1)
 	}
 
-	// One chart source for the plan and the apply: the release the rollback
-	// read from Helm is the one the apply installs back.
+	// One chart source: the release read from Helm is the one applied back.
 	charts := updateChartSource(out)
 	applier := &release.Applier{
 		Charts: charts,
-		// The rollback asked once, before anything stopped. The apply at the
-		// end is the same answer.
+		// The one question was asked before anything stopped.
 		Confirm: answered{},
 		Say:     out,
 		Open: func(namespace string) (release.ReleaseClient, error) {
@@ -132,9 +111,8 @@ func runRollback(ctx context.Context, args []string) {
 	opts := o.options(app)
 	opts.Apply.BoxValues = boxValues(kc)
 	opts.Apply.PathsInNode = pathsInNode
-	// The hold this rollback writes is overlaid by the apply that follows, the
-	// same way `box apply` and an update's step overlay one -- and a hold the
-	// release has moved past is forgotten only after an apply that succeeded.
+	// The apply overlays the hold; one the release moved past is forgotten only
+	// after a successful apply.
 	holds := newBoxHolds(out)
 	opts.Apply.Holds = holds.values
 
@@ -146,8 +124,7 @@ func runRollback(ctx context.Context, args []string) {
 		OpenCluster: func(namespace string) (update.Cluster, error) {
 			return update.NewWorkloads(kc, namespace, release.ReleaseName)
 		},
-		// The newest copy of each instance, under the grant's config root: the
-		// snapshot the step that moved this app took.
+		// The newest copy under the grant's config root.
 		OpenSnapshots: func(configRoot string, values map[string]any) (update.Snapshots, error) {
 			return &update.NewestSnapshots{ConfigRoot: configRoot, Values: values}, nil
 		},

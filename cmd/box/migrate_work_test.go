@@ -69,10 +69,6 @@ apps:
 	return path
 }
 
-// TestAnApplyWorksBesideItsSnapshotAndNeverInTmp: a read-only $TMPDIR does not
-// stop the run, the extraction lands under the snapshot's own directory, it holds
-// Plex's state and not its library, and the working directory is gone when the
-// run ends.
 func TestAnApplyWorksBesideItsSnapshotAndNeverInTmp(t *testing.T) {
 	if os.Geteuid() == 0 {
 		t.Skip("root writes into a directory it cannot write, so the read-only $TMPDIR would prove nothing")
@@ -132,9 +128,6 @@ func TestAnApplyWorksBesideItsSnapshotAndNeverInTmp(t *testing.T) {
 	}
 }
 
-// TestAnApplyOfASnapshotThatCarriesTheStateKeepsAllOfIt: the plan says which carry
-// the snapshot took, so a snapshot that carries Plex's state is extracted whole
-// and has no tree to leave behind.
 func TestAnApplyOfASnapshotThatCarriesTheStateKeepsAllOfIt(t *testing.T) {
 	dir := t.TempDir()
 	tree := filepath.Join(dir, "source", "plex")

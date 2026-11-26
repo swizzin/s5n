@@ -68,9 +68,6 @@ func TestCutoverStopsOnABlockerAfterTheFinalSnapshot(t *testing.T) {
 	}
 }
 
-// TestCutoverReplaceClusterNeverAsksTheKeepPreFlight: replacing the cluster is what
-// --replace-cluster is for, so that path does not ask a question about a cluster
-// the operator is about to throw away.
 func TestCutoverReplaceClusterNeverAsksTheKeepPreFlight(t *testing.T) {
 	manifests, root := discoverySource(t)
 	o := cutoverOptionsFor(t, manifests)
@@ -96,10 +93,6 @@ func TestCutoverReplaceClusterNeverAsksTheKeepPreFlight(t *testing.T) {
 	}
 }
 
-// TestCutoverKeepPathGoesOnWithoutABlocker: a cluster with nothing on it the
-// pre-flight objects to is one box installs onto in the same run, so the run
-// reaches the install -- which, on a host with no box, is where the answers a plan
-// cannot hold are required.
 func TestCutoverKeepPathGoesOnWithoutABlocker(t *testing.T) {
 	manifests, root := discoverySource(t)
 	dir := t.TempDir()

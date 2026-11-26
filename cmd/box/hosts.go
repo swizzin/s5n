@@ -14,10 +14,8 @@ import (
 )
 
 // certificateStep is the run's TLS: every host's port-80 listener and
-// Certificate first, one wait for all of them, then the HTTPS listener and the
-// redirect for each host that is Ready. Both box commands write their hosts
-// through this one function, so init's names and an apply's new app host cannot
-// be served differently.
+// Certificate, one wait, then 443 and the redirect for each Ready host. Both
+// commands use it, so a host is served one way.
 func certificateStep(kubeconfig string, out say.Reporter) setup.HostsFunc {
 	return func(ctx context.Context, hosts []setup.Host) error {
 		reqs := make([]platform.CertificateRequest, 0, len(hosts))
@@ -34,35 +32,25 @@ func certificateStep(kubeconfig string, out say.Reporter) setup.HostsFunc {
 	}
 }
 
-// applyHosts is `box apply`'s per-host step (docs/box.md, "No run leaves an
-// app host without its listener"): the shared setup decision over the
-// platform's writes, plus the three questions only a cluster can answer.
-//
-// Missing asks whether each name is served at all -- its login rule, its
-// listener and its Certificate -- so apply does this work only for a host
-// nothing has answered on before. Ensure asks whether this identity may write
-// them at all, which is what tells a user's run to ask root instead of failing
-// on its first write. Rules writes the login's half through the login's own
-// writer, so the rule an apply adds is the rule init adds.
+// applyHosts is apply's per-host step (docs/box.md, "No run leaves an app host
+// without its listener"). Missing checks rule, listener and Certificate; Ensure
+// asks whether this identity may write them; Rules uses the login's own writer.
 type applyHosts struct {
 	kubeconfig string
 	out        say.Reporter
 	resolver   setup.Resolver
-	// installs says this run installs the login after the confirm: `box init`
-	// does, and its apply plans before that. A cluster without a login is then
-	// a page this run will write, not a refusal.
+	// installs says the login comes after the confirm, so a missing one is this
+	// run's page, not a refusal.
 	installs bool
 }
 
-// cluster opens the client for one question. It is lazy the way every other
-// client box opens is: a run refused before this point never contacts the
-// cluster.
+// cluster is lazy: a run refused earlier never contacts the cluster.
 func (a applyHosts) cluster() (*platform.Kubernetes, error) {
 	return platform.NewCluster(a.kubeconfig)
 }
 
-// Missing reads the Gateway, the Certificates and the login's configuration: a
-// host without all three is one this run has to write.
+// Missing reads the Gateway, Certificates and login; a host without all three
+// is this run's work.
 func (a applyHosts) Missing(ctx context.Context, plan release.HostPlan) ([]string, error) {
 	if len(plan.Hosts) == 0 {
 		return nil, nil
@@ -84,11 +72,8 @@ func (a applyHosts) Missing(ctx context.Context, plan release.HostPlan) ([]strin
 	return missing, nil
 }
 
-// Stale is Missing's other half: the hosts that answer already but whose
-// Certificate is not the one this run would issue -- the issuer changed under
-// it, or a self-signed one is not on the box root. Only a run that owns the
-// whole box asks: `box init` re-issues, a bare apply leaves a served host
-// alone.
+// Stale is Missing's other half: answering hosts whose Certificate is not the
+// one this run would issue. Only `box init` asks; a bare apply leaves them.
 func (a applyHosts) Stale(ctx context.Context, plan release.HostPlan) ([]string, error) {
 	if len(plan.Hosts) == 0 {
 		return nil, nil
@@ -99,10 +84,7 @@ func (a applyHosts) Stale(ctx context.Context, plan release.HostPlan) ([]string,
 	}
 	var stale []string
 	for _, host := range plan.Hosts {
-		// The issuer this run decided for this name. Forced is only the file's
-		// answer, and it is empty on the run whose issuer came from DNS --
-		// the run that can find a Certificate naming an issuer it no longer
-		// wants.
+		// This run's decision. Forced alone misses the DNS-chosen issuer.
 		want := plan.Issuers[host]
 		if want == "" {
 			want = plan.Forced
@@ -118,9 +100,8 @@ func (a applyHosts) Stale(ctx context.Context, plan release.HostPlan) ([]string,
 	return stale, nil
 }
 
-// Ensure runs the step: every name is DNS-checked against the box's domain
-// before anything is written, then the login's rule for them, then each one's
-// listener and Certificate.
+// Ensure DNS-checks every name, writes the login's rule, then listeners and
+// Certificates.
 func (a applyHosts) Ensure(ctx context.Context, plan release.HostPlan) error {
 	cl, err := a.cluster()
 	if err != nil {
@@ -139,18 +120,15 @@ func (a applyHosts) Ensure(ctx context.Context, plan release.HostPlan) error {
 	}
 	names := plan.Hosts
 	if len(plan.All) > 0 {
-		// Every name this run decided, not only the ones nothing answers on:
-		// init re-issues a self-signed host under the box root, and that is a
-		// host the plan has nothing new to show for.
+		// Every decided name: init re-issues a self-signed host the plan shows
+		// nothing new for.
 		names = plan.All
 	}
 	return step.Ensure(ctx, names)
 }
 
-// rules is the login's half of the per-host step: the access_control rule for
-// every name this run serves, written by internal/login from the inputs init
-// gives it. The rule is what the Gateway asks the login about, so a host
-// without one answers 403 whatever its listener and Certificate say.
+// rules writes every served name's access_control rule: without it a host
+// answers 403 whatever its listener and Certificate say.
 func (a applyHosts) rules(cl login.Cluster, plan release.HostPlan) setup.RuleFunc {
 	return func(ctx context.Context, hosts []setup.Host) error {
 		names := make([]string, 0, len(hosts))

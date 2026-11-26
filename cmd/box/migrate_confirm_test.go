@@ -66,10 +66,6 @@ func migratingSummary() apply.Summary {
 	}
 }
 
-// TestOneConfirmForTheWholeRun: a guided run is asked once, and the platform
-// plan is the first thing in that question -- not a question of its own and not
-// printed outside it. The first line says nothing has been installed yet, which
-// is what makes the answer the whole run's.
 func TestOneConfirmForTheWholeRun(t *testing.T) {
 	var out bytes.Buffer
 	ask := &countingAsker{}
@@ -127,9 +123,6 @@ func TestOneConfirmForTheWholeRun(t *testing.T) {
 	}
 }
 
-// TestTheOneConfirmWithoutAPlatform: a run that adopted into an existing box
-// installed no platform, so the question shows only the migration -- and does not
-// claim it is about to install anything.
 func TestTheOneConfirmWithoutAPlatform(t *testing.T) {
 	var out bytes.Buffer
 	ask := &countingAsker{}
@@ -149,10 +142,6 @@ func TestTheOneConfirmWithoutAPlatform(t *testing.T) {
 	}
 }
 
-// TestTheAgreedSummaryIsNotAskedAgain: on a host that had no box the question was
-// asked before anything was installed, so the run that follows holds itself to
-// that answer. It asks nothing, it refuses a summary that is not the one agreed
-// to, and it fills in the rows the question deferred.
 func TestTheAgreedSummaryIsNotAskedAgain(t *testing.T) {
 	agreed := apply.Summary{
 		Instances: []apply.InstanceSummary{
@@ -207,9 +196,6 @@ func TestTheAgreedSummaryIsNotAskedAgain(t *testing.T) {
 	}
 }
 
-// TestTheQuestionNamesOnlyWhatThisRunInstalls: a host with no cluster is told the
-// answer installs one; a host whose cluster is already there is told the platform
-// layer and the box, which is the whole of what box would do to it.
 func TestTheQuestionNamesOnlyWhatThisRunInstalls(t *testing.T) {
 	if got := confirmLead(true); !strings.Contains(got, "installs the cluster and the platform layer") {
 		t.Errorf("a clean host's lead says %q, want it to name the cluster", got)
@@ -226,10 +212,6 @@ func TestTheQuestionNamesOnlyWhatThisRunInstalls(t *testing.T) {
 	}
 }
 
-// TestAHostWithABoxAsksInsideTheRun: nothing was agreed to before an install that
-// did not happen, so the run asks its one question itself -- after every check,
-// including the one Plex's image makes (internal/migrate/apply proves the order;
-// this is the choice between the two).
 func TestAHostWithABoxAsksInsideTheRun(t *testing.T) {
 	grant, values := "/etc/s5n/seedboxes/root.yaml", "/root/.config/box/values.yaml"
 	o := &migrateApplyFlags{applyFlags: &applyFlags{grantPath: &grant, valuesPath: &values, yes: new(bool)}, details: new(bool)}
@@ -246,10 +228,6 @@ func TestAHostWithABoxAsksInsideTheRun(t *testing.T) {
 	}
 }
 
-// TestTheMigratingInitCannotAskItsOwnRelease: init's hand-over asks its release
-// question on a box a person installed, and never when a migration runs init as
-// one step of its own: the run's single confirm is asked after this, and a form
-// here would be a second one.
 func TestTheMigratingInitCannotAskItsOwnRelease(t *testing.T) {
 	if _, ok := initApplyConfirmer(true, &say.Plain{W: &bytes.Buffer{}}, false).(answered); !ok {
 		t.Fatal("a migrating init kept its own release question, so a guided migrate asks twice")
@@ -259,10 +237,6 @@ func TestTheMigratingInitCannotAskItsOwnRelease(t *testing.T) {
 	}
 }
 
-// TestEveryPathThatBuildsTheApplyFlagsHasTheDetailsSwitch: a cutover that
-// keeps its cluster continues into `migrate apply`, and it builds its own copy
-// of that command's flags. A switch missing there is a nil dereference in the
-// confirm on the one path a keep-cluster cutover takes.
 func TestEveryPathThatBuildsTheApplyFlagsHasTheDetailsSwitch(t *testing.T) {
 	fs := flag.NewFlagSet("cutover apply", flag.ContinueOnError)
 	kubeconfig := ""
