@@ -34,8 +34,8 @@ func TestBlocked(t *testing.T) {
 	if (Report{Notes: []string{"x"}, Changes: []Change{{Count: 1}}}).Blocked() {
 		t.Error("notes and changes blocked apply")
 	}
-	// What a pass leaves on purpose, and what it proposes for an address, are
-	// decisions: neither is a gap, so neither may stop a migration.
+	// A value left on purpose or an address proposed for are decisions, not
+	// gaps.
 	if (Report{Left: []Left{{What: "192.0.2.10:9091"}}, Defaults: []Default{{Host: "192.0.2.10", Port: 9091}}}).Blocked() {
 		t.Error("a value left on purpose, or a proposed default, blocked apply")
 	}
@@ -47,8 +47,7 @@ func TestBlocked(t *testing.T) {
 	}
 }
 
-// TestAddressText: the line an operator reads names the address the way the app
-// stored it, including the port only when there is one.
+// TestAddressText: the port appears only when the app stored one.
 func TestAddressText(t *testing.T) {
 	if got := (Address{Host: "192.0.2.10", Port: 32400}).Text(); got != "192.0.2.10:32400" {
 		t.Errorf("Text() = %q", got)
@@ -58,9 +57,7 @@ func TestAddressText(t *testing.T) {
 	}
 }
 
-// TestURLPort: a URL addresses the port it names, and otherwise the port its
-// scheme implies. A stored https URL with no port is port 443, which is what
-// the plan settles it by and what a refusal has to print.
+// TestURLPort: a URL addresses the port it names, else its scheme's.
 func TestURLPort(t *testing.T) {
 	tests := []struct {
 		raw  string
@@ -84,17 +81,15 @@ func TestURLPort(t *testing.T) {
 			}
 		})
 	}
-	// url.Parse refuses a malformed port, which URLPort itself never guesses
-	// at either: a URL built without one reads as the scheme's.
+	// A URL built without a port reads as the scheme's; a malformed one is
+	// refused by url.Parse.
 	if got := URLPort(&url.URL{Scheme: "https", Host: "qbt.example.org"}); got != 443 {
 		t.Errorf("URLPort of a hand-built URL = %d, want 443", got)
 	}
 }
 
-// TestResolveFallsBackToTheBoxEndpoints: an address no source rule settles but
-// that already names one of the box's own endpoints is that app, which is what
-// lets a second Check read a copy the first pass rewrote, and lets Write follow
-// the Check that made the rewrite.
+// TestResolveFallsBackToTheBoxEndpoints: an address naming one of the box's own
+// endpoints is that app, which lets Write follow the Check that rewrote it.
 func TestResolveFallsBackToTheBoxEndpoints(t *testing.T) {
 	p, err := plan.Parse([]byte(`version: 2
 apps:
