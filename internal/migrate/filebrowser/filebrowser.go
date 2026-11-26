@@ -1,33 +1,14 @@
-// Package filebrowser rewrites the source paths FileBrowser Quantum stored in
-// its database, so the one source the chart gives it is the one its users,
-// shares and access rules point at.
-//
-// The app keeps no library and dials nothing. Its settings are a config.yaml the
-// chart owns (charts/s5n/templates/workloads.yaml writes it into a ConfigMap),
-// and its database at the root of the config directory is state: users, their
-// scopes, shares, access rules and quotas. A source path is absolute in exactly
-// one place -- a source's own configured `path` -- and everything else refers to
-// a source by that path or by its name:
-//
-//   - a user's `backendScopes[].path`, the path-keyed `backendSourcePermissions`
-//     and `sourcePermissions` maps, `pinnedItems`' keys, `declinedDefaultSources`
-//     and a sidebar link's `sourceName` are all the source's path;
-//   - `shares.source`, `access_rules.source` and `quotas.source` are its name,
-//     and their `path` is relative to it (users.User and the tables in
-//     internal/database/sqldb at v2.1.0-stable).
-//
-// The chart gives the app one source: /data, the data contract's root
-// (charts/s5n/templates/workloads.yaml, the filebrowser ConfigMap). It is named
-// after the last part of its path, which is what the app does with any source
-// that has no explicit name (pkg/settings/config.go, setupSources), so a source
-// install that already used /data needs no rewrite at all. Every other source
-// path the source's config.yaml named is mapped through the plan, which is what
-// turns a mount at another name into the directory apply's renames leave
-// behind; a user's scope that named it becomes a scope of the box's one source,
-// with the directory's position kept as a prefix. A source path the plan cannot
-// place blocks the run unless the source's own config no longer names it -- a
-// path only the database remembers is a stale row, and it is left as it is and
-// called out.
+// Package filebrowser rewrites the source paths FileBrowser Quantum stored, so the
+// one source the chart gives it is the one its users, shares and rules point at.
+// Its config.yaml is the chart's (charts/s5n/templates/workloads.yaml); its
+// database is state. A source path is absolute in one place, a source's own
+// `path`: user scopes, the path-keyed permission and pinned maps, declined
+// defaults and a sidebar link's sourceName store it, while shares, access_rules
+// and quotas store the source's name with a path relative to it
+// (internal/database/sqldb at v2.1.0-stable). The chart's one source is /data,
+// named "data" (pkg/settings/config.go, setupSources). A path the plan cannot
+// place blocks the run unless the config no longer names it: a database-only path
+// is stale, left as it is and called out.
 package filebrowser
 
 import (
@@ -49,20 +30,18 @@ import (
 func init() { rewrite.Register("filebrowser", rewriter{}) }
 
 const (
-	// dbName is the app's database, at the root of its config directory
-	// (FILEBROWSER_DATABASE_PATH, and server.database.path in the chart's
-	// config.yaml).
+	// dbName is the database at the config root (FILEBROWSER_DATABASE_PATH, the
+	// chart's server.database.path).
 	dbName = "database.sqlite"
-	// configName is where the app reads its settings from: the file the chart
-	// writes, and the one a source install kept its source list in.
+	// configName is the chart's settings file, which a source also kept sources in.
 	configName = "config.yaml"
-	// targetPath is the one source the chart gives the app: the data contract's
-	// root. The chart names no source, so the name follows the path.
+	// targetPath is the chart's one source, the data root; it names no source, so
+	// the name follows the path.
 	targetPath = "/data"
 )
 
-// targetName is what the app calls the chart's source: the last part of its
-// path, which setupSources uses when a source has no name of its own.
+// targetName is the last part of the path, what setupSources names a sourceless
+// source.
 const targetName = "data"
 
 type rewriter struct{}
@@ -78,15 +57,13 @@ func (rewriter) Write(ctx context.Context, in rewrite.Input) (rewrite.Report, er
 	return run(ctx, in, true)
 }
 
-// source is one source the app had: the directory, and the name its own config
-// gave it (or the name setupSources derives from the path when it gave none).
+// source is one source: the directory and its name, derived when unnamed.
 type source struct {
 	path string
 	name string
 }
 
-// run is both passes: read everything, then (for Write only) apply it. One code
-// path is what keeps the two reports identical.
+// run is both passes, so the two reports stay identical.
 func run(ctx context.Context, in rewrite.Input, write bool) (rep rewrite.Report, err error) {
 	rep.App = in.App
 	if err := ctx.Err(); err != nil {
@@ -115,9 +92,8 @@ func run(ctx context.Context, in rewrite.Input, write bool) (rep rewrite.Report,
 		return rep, err
 	}
 
-	// The app's own config says which sources it had and what it called them; a
-	// source install that never wrote one defaulted its source to the working
-	// directory, and then the database's stored paths are the only record.
+	// The config says which sources it had and their names; one that never wrote
+	// it defaulted to the working directory, leaving the database the only record.
 	configured, err := configSources(filepath.Join(in.Dir, configName))
 	if err != nil {
 		return rep, err
@@ -128,9 +104,8 @@ func run(ctx context.Context, in rewrite.Input, write bool) (rep rewrite.Report,
 	}
 	m := newMapping(configured, users)
 
-	// Settle every stored source path through the plan before anything is
-	// counted: a path the app's config names and the plan cannot place is a gap
-	// the operator has to settle, one path at a time.
+	// Settle every stored path first: a configured one the plan cannot place is a
+	// gap for the operator.
 	for _, p := range m.storedPaths() {
 		if m.settle(in, p) {
 			continue
@@ -157,15 +132,12 @@ func run(ctx context.Context, in rewrite.Input, write bool) (rep rewrite.Report,
 		}
 	}
 	tableWrites := m.rewriteTables(tables, t)
-	// The app signs its users in through the box's login now (catalog.yaml:
-	// `oidc: true`), and it resolves an incoming identity to a stored row by
-	// username -- and refuses a row that belongs to another login method
-	// (internal/web/auth.go, getOrCreateAuthenticatedUser, at v2.1.0-stable).
-	// So an account the source's own form created is not the account the box's
-	// login produces, and its scopes, shares and rules stay with it. Renaming it
-	// would need the plan to carry box's login name, and which of several
-	// accounts is the owner's is the operator's answer: this pass leaves it and
-	// says so.
+	// The app signs users in through the box's login (catalog.yaml: `oidc:
+	// true`) and resolves an identity by username, refusing a row of another login
+	// method (internal/web/auth.go, getOrCreateAuthenticatedUser, at
+	// v2.1.0-stable). An account the source's own form made is therefore not the
+	// one the person signs in as, and which is the owner's is the operator's
+	// answer: leave it and say so.
 	rep.Left = append(rep.Left, leftLocalAccounts(users)...)
 
 	rep.Changes = t.changes()
@@ -188,28 +160,22 @@ func open(ctx context.Context, path string, write bool) (*sql.DB, error) {
 	return sqlitedb.OpenReadOnly(ctx, path)
 }
 
-// mapping is what a stored value is rewritten to: the source path that
-// referred to each source, and where under the box's data root that source's
-// directory sits.
+// mapping is what a stored value is rewritten to, by source path.
 type mapping struct {
-	// rel is each source path's position under /data: "" for the data root
-	// itself, "/media" for a source that was the library tree.
+	// rel is each source's position under /data: "" for the root, "/media" for a
+	// library tree.
 	rel map[string]string
 	// name is each source's name, by its path.
 	name map[string]string
-	// configured is every source path the app's own config.yaml named.
+	// configured is every source path config.yaml named.
 	configured map[string]bool
-	// stored is every source path the database still refers to, which is what
-	// has to settle: a path the config names and nothing references is a source
-	// with no rows, not a gap.
+	// stored is every path the database refers to, which is what has to settle.
 	stored map[string]bool
-	// stale is every stored path the config no longer names: a row left behind
-	// by a source someone reconfigured.
+	// stale is every stored path the config no longer names.
 	stale []string
 }
 
-// newMapping settles every source the app had: the ones its config named, and
-// the ones only the database still remembers.
+// newMapping settles every source: the config's, and the database's alone.
 func newMapping(configured []source, users []userRow) *mapping {
 	m := &mapping{
 		rel:        map[string]string{},
@@ -240,14 +206,12 @@ func newMapping(configured []source, users []userRow) *mapping {
 		add(source{path: p})
 		m.stored[p] = true
 	}
-	// The box's own source always exists, and a stored scope already pointing
-	// at it is the migration's no-op case.
+	// The box's source always exists; a scope already on it is the no-op case.
 	add(source{path: targetPath, name: targetName})
 	m.rel[targetPath] = ""
 	m.name[targetPath] = targetName
 	if configured == nil {
-		// No config file: the database's own paths are all this box has to go
-		// on, so each of them is a source the app had, not a stale row.
+		// No config file: each database path is a source it had, not a stale row.
 		for p := range m.stored {
 			m.configured[p] = true
 		}
@@ -255,8 +219,7 @@ func newMapping(configured []source, users []userRow) *mapping {
 	return m
 }
 
-// settle records where one source path sits under the box's data root, given
-// the plan's mapping. It is called by the caller, which has the plan.
+// settle records where one source sits under the data root, through the plan.
 func (m *mapping) settle(in rewrite.Input, p string) bool {
 	if _, ok := m.rel[p]; ok {
 		return true
@@ -287,8 +250,7 @@ func underData(p string) (string, bool) {
 	return "", false
 }
 
-// storedPaths is every distinct source path the database stored, the box's own
-// one aside: those are the paths the plan has to settle.
+// storedPaths is every stored source path except the box's, the ones to settle.
 func (m *mapping) storedPaths() []string {
 	out := make([]string, 0, len(m.stored))
 	for p := range m.stored {
@@ -305,15 +267,13 @@ func (m *mapping) storedPaths() []string {
 // The database side.
 //
 
-// userRow is one users table row: the id it is keyed by, and the JSON document
-// holding everything about the user.
+// userRow is one users row: its id and its JSON document.
 type userRow struct {
 	id   string
 	data []byte
 }
 
-// namedAccount is the two fields of a user document that say who it is: the
-// name the app lists it under, and the login method that made it.
+// namedAccount is a document's username and the login method that made it.
 func namedAccount(raw []byte) (name, method string) {
 	doc, err := decodeUser(raw)
 	if err != nil {
@@ -324,10 +284,9 @@ func namedAccount(raw []byte) (name, method string) {
 	return name, method
 }
 
-// leftLocalAccounts is one Left entry per account the source's own login made,
-// which the box's login will not resolve to. A row with no login method at all
-// is a document from before the app had the field, and one already made by the
-// provider is the account the box's login does find: neither is left.
+// leftLocalAccounts is one Left per account the source's own login made, which
+// the box's login will not resolve. A row with no method predates the field, and
+// an oidc one is what the box finds: neither is left.
 func leftLocalAccounts(users []userRow) []rewrite.Left {
 	var out []rewrite.Left
 	for _, u := range users {
@@ -356,8 +315,7 @@ type dbTables struct {
 	quotas      []namedRow
 }
 
-// namedRow is one row keyed by an id, holding a source name and a path
-// relative to that source.
+// namedRow is one row: an id, a source name, and a path relative to it.
 type namedRow struct {
 	id     any
 	source string
@@ -383,9 +341,8 @@ func readUsers(ctx context.Context, db *sql.DB) ([]userRow, error) {
 	return out, rows.Err()
 }
 
-// readTables reads the tables that name a source by name. Every one of them is
-// optional: which exist depends on the version the source ran, so the file's
-// own schema answers rather than an assumption.
+// readTables reads the tables naming a source; each is optional, since the
+// source's version decides what exists.
 func readTables(ctx context.Context, db *sql.DB) (dbTables, error) {
 	var out dbTables
 	tables := []struct {
@@ -450,9 +407,8 @@ func hasTable(ctx context.Context, db *sql.DB, name string) (bool, error) {
 // userPathMaps are the document's fields whose keys are a source's path.
 var userPathMaps = []string{"backendSourcePermissions", "sourcePermissions", "pinnedItems"}
 
-// storedSourcePaths is every path-shaped source reference the database holds: a
-// user's scope, the permission maps' keys, a pinned item's source, a sidebar
-// link's source and a declined default source all store the source's path.
+// storedSourcePaths is every path-shaped reference: a scope, the permission maps'
+// keys, a pinned item's source, a sidebar link's source, a declined default.
 func storedSourcePaths(users []userRow) []string {
 	var out []string
 	seen := map[string]bool{}
@@ -466,8 +422,7 @@ func storedSourcePaths(users []userRow) []string {
 	for _, u := range users {
 		doc, err := decodeUser(u.data)
 		if err != nil {
-			// A document this pass cannot read is one the app's own migrations
-			// would refuse; there is no path in it to rewrite.
+			// A document this pass cannot read has no path to rewrite.
 			continue
 		}
 		eachSourcePath(doc, add)
@@ -499,11 +454,9 @@ func eachSourcePath(doc map[string]any, add func(string)) {
 	}
 }
 
-// sidebarLinks is where a user document keeps its links. The app persists them
-// inside the settings overlay (internal/database/sqldb/users.go, UserData's
-// Settings raw message, decoded into NonAdminEditable.SidebarLinks at
-// v2.1.0-stable), and a document an older version wrote may carry the list at
-// the top level as well.
+// sidebarLinks is where a document keeps its links: inside the settings overlay
+// (internal/database/sqldb/users.go, NonAdminEditable.SidebarLinks at
+// v2.1.0-stable), and at the top level in an older document.
 func sidebarLinks(doc map[string]any) []map[string]any {
 	links := objects(doc["sidebarLinks"])
 	if settings, ok := doc["settings"].(map[string]any); ok {
@@ -556,13 +509,11 @@ type tableWrite struct {
 	path   string
 }
 
-// rewriteUser rewrites every source-path reference in one user's document. It
-// returns the encoded document and whether anything changed.
+// rewriteUser rewrites every source-path reference in one document.
 func (m *mapping) rewriteUser(raw []byte, t *tally) ([]byte, bool) {
 	doc, err := decodeUser(raw)
 	if err != nil {
-		// A document this pass cannot read is one the app's own migrations would
-		// refuse; rewriting it would be a guess at a shape nothing else knows.
+		// A document this pass cannot read would be a guess at an unknown shape.
 		return nil, false
 	}
 	changed := m.rewriteScopes(doc, t)
@@ -579,8 +530,8 @@ func (m *mapping) rewriteUser(raw []byte, t *tally) ([]byte, bool) {
 	return data, true
 }
 
-// rewriteScopes moves each scope onto the box's one source, keeping the
-// directory the scope named as a prefix of its own scope.
+// rewriteScopes moves each scope onto the box's source, keeping its directory as
+// a prefix.
 func (m *mapping) rewriteScopes(doc map[string]any, t *tally) bool {
 	changed := false
 	for _, scope := range objects(doc["backendScopes"]) {
@@ -597,9 +548,8 @@ func (m *mapping) rewriteScopes(doc map[string]any, t *tally) bool {
 	return changed
 }
 
-// rewritePathMaps moves the maps keyed by a source path -- the permission maps
-// and the pinned items -- onto the box's one source. A source the box already
-// owns is not a change.
+// rewritePathMaps moves the path-keyed permission and pinned maps onto the box's
+// source; one already there is no change.
 func (m *mapping) rewritePathMaps(doc map[string]any, t *tally) bool {
 	changed := false
 	for _, key := range userPathMaps {
@@ -620,9 +570,7 @@ func (m *mapping) rewritePathMaps(doc map[string]any, t *tally) bool {
 	return changed
 }
 
-// rewriteDeclined moves the sources a user said no to: the list is keyed by
-// path, and a source folded into the box's one source is not declined by
-// default any more.
+// rewriteDeclined moves a declined source onto the box's, which needs no decline.
 func (m *mapping) rewriteDeclined(doc map[string]any, t *tally) bool {
 	list, ok := doc["declinedDefaultSources"].([]any)
 	if !ok {
@@ -641,8 +589,7 @@ func (m *mapping) rewriteDeclined(doc map[string]any, t *tally) bool {
 	return changed
 }
 
-// rewriteSidebar moves a sidebar link that names its source by path. The
-// target is relative to that source, so it moves with it.
+// rewriteSidebar moves a path-named link, its relative target with it.
 func (m *mapping) rewriteSidebar(doc map[string]any, t *tally) bool {
 	changed := false
 	for _, link := range sidebarLinks(doc) {
@@ -659,9 +606,8 @@ func (m *mapping) rewriteSidebar(doc map[string]any, t *tally) bool {
 	return changed
 }
 
-// moved is where a stored source path now sits: the mapping's position for it
-// under /data, and false for a path that is already the box's own source, is a
-// stale row, or has no settle yet -- none of which is an edit.
+// moved is a stored path's position under /data; false for the box's own source,
+// a stale row, or one with no settle -- none of which is an edit.
 func (m *mapping) moved(p string) (string, bool) {
 	if p == targetPath {
 		return "", false
@@ -670,14 +616,12 @@ func (m *mapping) moved(p string) (string, bool) {
 	return rel, ok
 }
 
-// rewriteTables rewrites the rows that name a source by name. A row of a name
-// the source's config no longer uses is left as it is: it is a leftover, and
-// the note above says so.
+// rewriteTables rewrites rows naming a source; a name the config no longer uses is
+// a leftover, left and noted.
 func (m *mapping) rewriteTables(tables dbTables, t *tally) []tableWrite {
 	out := make([]tableWrite, 0)
-	// A source row names its source, so the name is what has to match. The
-	// paths are walked in order so two sources that ended up with one name
-	// settle the same way twice.
+	// The name is what matches; paths are walked in order so two sources that
+	// ended with one name settle the same way twice.
 	paths := make([]string, 0, len(m.name))
 	for p := range m.name {
 		paths = append(paths, p)
@@ -758,8 +702,8 @@ func apply(ctx context.Context, db *sql.DB, users []userWrite, tables []tableWri
 // Small helpers.
 //
 
-// decodeUser reads one user document, keeping numbers as the text they were
-// written as: a user id is a uint64, and a float64 would lose its low digits.
+// decodeUser keeps numbers as text: a user id is a uint64, and a float64 would
+// lose its low digits.
 func decodeUser(raw []byte) (map[string]any, error) {
 	dec := json.NewDecoder(strings.NewReader(string(raw)))
 	dec.UseNumber()
@@ -783,8 +727,8 @@ func stringValue(v any) string {
 	return s
 }
 
-// joinScope puts a scope inside a directory's new position under the box's one
-// source. An empty prefix is the data root itself, so nothing moves.
+// joinScope puts a scope inside a directory's new position; an empty prefix is the
+// data root.
 func joinScope(rel, scope string) string {
 	if rel == "" {
 		if scope == "" {
@@ -829,10 +773,9 @@ func (t *tally) changes() []rewrite.Change {
 	return out
 }
 
-// configSources reads `server.sources` out of the app's config.yaml: the path
-// and name of each source, in the file's order. It is a scan rather than a YAML
-// decode because the two keys are flat scalars in a list and the package that
-// owns the YAML library is not this one.
+// configSources reads `server.sources` from config.yaml, a scan rather than a YAML
+// decode: the keys are flat scalars in a list, and this package may not import
+// the YAML library.
 func configSources(name string) ([]source, error) {
 	raw, err := os.ReadFile(name)
 	if err != nil {
@@ -855,16 +798,14 @@ func configSources(name string) ([]source, error) {
 	return out, nil
 }
 
-// line is one non-empty, non-comment line of a config document, with the
-// indentation that says what it belongs to.
+// line is one meaningful config line, with the indentation that places it.
 type line struct {
 	indent int
 	text   string
 }
 
-// configLines is a document's meaningful lines, and the index of its
-// `server.sources:` line, or -1 for a document that configures no source (the
-// app's own default is its working directory).
+// configLines is a document's meaningful lines and its `server.sources:` index, or
+// -1 when it configures no source (the app defaults to its working directory).
 func configLines(doc string) ([]line, int) {
 	var out []line
 	start := -1
@@ -892,9 +833,8 @@ func configLines(doc string) ([]line, int) {
 	return out, start
 }
 
-// listItems is the `- key: value` items under one block, each as the scalar
-// keys it sets. An item's own nested block (a source's `config:`) is not one of
-// those keys: its lines are indented past the item's, and they are skipped.
+// listItems is the `- key: value` items under one block. An item's nested block
+// (a source's `config:`) is indented past the item and skipped.
 func listItems(lines []line, parentIndent int) []map[string]string {
 	var out []map[string]string
 	var cur map[string]string
