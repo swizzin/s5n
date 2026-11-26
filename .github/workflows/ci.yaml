@@ -76,10 +76,9 @@ jobs:
           # step's log.
           go run ./hack/release images "$BASE" "$HEAD" | tee -a "$GITHUB_OUTPUT"
 
-  # develop's suite, with this pull request's files over it. The workflow file is
-  # the caller's (GitHub resolves a called workflow from the calling commit); the
-  # tree it tests is develop's, with the bump on top -- which is what a back-merge
-  # would have produced, tested before it exists.
+  # develop's suite, with this pull request's bump merged into it. The workflow
+  # file is the caller's (GitHub resolves a called workflow from the calling
+  # commit); a back-merge would produce the same tree, tested before it exists.
   image-bump-test:
     needs: [image-bump]
     if: needs.image-bump.outputs.images == 'true'

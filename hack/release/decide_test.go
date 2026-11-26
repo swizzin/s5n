@@ -30,6 +30,23 @@ s5n:
 `)
 }
 
+// qbittorrentBumped is variantsYAML with qbittorrent's own tag moved too, so a
+// test can change a line the sonarr bump does not touch.
+func qbittorrentBumped(sonarrTag, sonarrDigest string) []byte {
+	return []byte(strings.Replace(string(variantsYAML(sonarrTag, sonarrDigest)), `tag: "5.3.0"`, `tag: "5.3.1"`, 1))
+}
+
+// withBazarr is a variants.yaml with an app entry the other side never had: what
+// develop adds after an image bump's branch forked.
+func withBazarr(b []byte) []byte {
+	return append(append([]byte{}, b...), []byte(`bazarr:
+  default:
+    repository: ghcr.io/home-operations/bazarr
+    tag: "1.5.2"
+    digest: `+hex64("e")+`
+`)...)
+}
+
 // platformYAML is a charts/s5n/platform.yaml: the login's whole image reference,
 // k0s's release tag, and two chart pins. k0s is constant, so the pins under
 // test are the only things that can move.

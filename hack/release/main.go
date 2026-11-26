@@ -18,7 +18,7 @@
 //	release notes PREV NEW      the s5n-v* release body between two refs
 //	release notes --all REF     every app image and platform pin a ref ships
 //	release images BASE HEAD    whether a pull request only bumps those files
-//	release overlay REF         lay those files from REF over the working tree
+//	release overlay REF         merge those files from REF into the working tree
 //
 // The last two are what a pull request into main runs when it may be an image bump (see
 // docs/box.md, "Automatic chart releases").

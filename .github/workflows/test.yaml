@@ -6,11 +6,11 @@
 # workflow that called itself would recurse to the depth limit.
 #
 # overlay-ref is how an image-bump pull request is tested by the tree it lands on:
-# ci.yaml checks out develop here and lays the pull request's own two files over it.
-# The file list is hack/release's (`release overlay`, the same releasedFiles `decide`
-# releases on), so a file added to that set is overlaid without a second list here.
-# Every job that reads the chart, its images or its pins runs the overlay; `changes`
-# does not, because it reads no file the overlay touches.
+# ci.yaml checks out develop here and merges the pull request's own two files into
+# it, as a back-merge would. The file list is hack/release's (`release overlay`, the
+# same releasedFiles `decide` releases on), so a file added to that set is merged
+# without a second list here. Every job that reads the chart, its images or its pins
+# runs the overlay; `changes` does not, because it reads no file the overlay touches.
 #
 # Actions are pinned by commit; the comment names the tag the commit belongs to.
 name: test
@@ -88,7 +88,7 @@ jobs:
           path: ~/.cache/go-build
           key: go-test-${{ runner.os }}-${{ steps.go.outputs.go-version }}-${{ hashFiles('go.mod', 'go.sum') }}
           restore-keys: go-test-${{ runner.os }}-${{ steps.go.outputs.go-version }}-
-      - name: lay the pull request's release files over this ref
+      - name: merge the pull request's release files into this ref
         if: inputs.overlay-ref != ''
         run: go run ./hack/release overlay "${{ inputs.overlay-ref }}"
       - name: gofmt
@@ -127,7 +127,7 @@ jobs:
           path: ~/.cache/go-build
           key: go-lint-${{ runner.os }}-${{ steps.go.outputs.go-version }}-${{ hashFiles('go.mod', 'go.sum') }}
           restore-keys: go-lint-${{ runner.os }}-${{ steps.go.outputs.go-version }}-
-      - name: lay the pull request's release files over this ref
+      - name: merge the pull request's release files into this ref
         if: inputs.overlay-ref != ''
         run: go run ./hack/release overlay "${{ inputs.overlay-ref }}"
       - uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
@@ -167,7 +167,7 @@ jobs:
           echo "${KUBECONFORM_SHA256}  kubeconform.tgz" | sha256sum -c -
           mkdir -p "$HOME/.local/bin" && tar -xzf kubeconform.tgz -C "$HOME/.local/bin" kubeconform && rm kubeconform.tgz
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
-      - name: lay the pull request's release files over this ref
+      - name: merge the pull request's release files into this ref
         if: inputs.overlay-ref != ''
         run: go run ./hack/release overlay "${{ inputs.overlay-ref }}"
       - run: hack/validate-chart.sh "${{ matrix.kubernetes }}"
@@ -205,7 +205,7 @@ jobs:
           echo "${KUBECONFORM_SHA256}  kubeconform.tgz" | sha256sum -c -
           mkdir -p "$HOME/.local/bin" && tar -xzf kubeconform.tgz -C "$HOME/.local/bin" kubeconform && rm kubeconform.tgz
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
-      - name: lay the pull request's release files over this ref
+      - name: merge the pull request's release files into this ref
         if: inputs.overlay-ref != ''
         run: go run ./hack/release overlay "${{ inputs.overlay-ref }}"
       - run: hack/release-rehearsal.sh
@@ -325,7 +325,7 @@ jobs:
           echo "${KIND_SHA256}  $HOME/.local/bin/kind" | sha256sum -c -
           chmod +x "$HOME/.local/bin/kind"
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
-      - name: lay the pull request's release files over this ref
+      - name: merge the pull request's release files into this ref
         if: inputs.overlay-ref != ''
         run: go run ./hack/release overlay "${{ inputs.overlay-ref }}"
       - run: hack/e2e-kind.sh
@@ -431,7 +431,7 @@ jobs:
           echo "${KUBECTL_SHA256}  $HOME/.local/bin/kubectl" | sha256sum -c -
           chmod +x "$HOME/.local/bin/kubectl"
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
-      - name: lay the pull request's release files over this ref
+      - name: merge the pull request's release files into this ref
         if: inputs.overlay-ref != ''
         run: go run ./hack/release overlay "${{ inputs.overlay-ref }}"
       - run: hack/e2e-box.sh ${{ matrix.scenario }}

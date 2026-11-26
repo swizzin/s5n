@@ -960,9 +960,11 @@ opens them against `main`, and a pull request otherwise runs the tests of the br
 targets: `main`'s, which lag `develop`'s between releases -- Tautulli 2.19.1 passed
 `main`'s suite and broke on `develop`'s that way. So a pull request into `main` whose
 whole change is `variants.yaml` and/or `platform.yaml` also runs `develop`'s suite with
-its own two files laid over `develop`, and a failure there fails the pull request. The
+its own change to those two files merged into `develop`'s (a three-way merge, as a
+back-merge would make it), and a failure there fails the pull request. The
 set is `release images`, which reads the same files `decide` releases on, never a second
-list in the workflow; `release overlay` lays them down. Any other pull request runs what
+list in the workflow; `release overlay` merges them, and refuses a bump that would
+conflict with `develop`. Any other pull request runs what
 it always ran. The check is a job like the rest, so a run cancelled by hand or a
 branch protection rule that does not require it leaves the bump as untested as before.
 
