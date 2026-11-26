@@ -14,12 +14,12 @@ import (
 	"github.com/swizzin/s5n/internal/setup"
 )
 
-// sgr matches the escape sequences a renderer writes. It is not named ansi:
-// the package of that name is imported here through paint.go.
+// sgr matches a renderer's escape sequences. It is not named ansi: that package
+// is imported here through paint.go.
 var sgr = regexp.MustCompile(`\x1b\[[0-9;?]*[A-Za-z]`)
 
-// strip turns what the live renderer wrote into the lines a terminal would
-// show, without colour or cursor movement.
+// strip turns the live renderer's output into the lines a terminal would show,
+// without colour or cursor movement.
 func strip(s string) []string {
 	s = strings.ReplaceAll(s, "\r", "\n")
 	s = sgr.ReplaceAllString(s, "")
@@ -27,9 +27,8 @@ func strip(s string) []string {
 	return out
 }
 
-// The wiring receipt is drawn row by row, and a row that waits on a person is
-// not buried in the middle of it: it comes after the card, under its own
-// heading, because it is the next thing to do.
+// A row that waits on a person comes after the card under its own heading: it is
+// the next thing to do, not part of the receipt.
 func TestReporterReceiptPutsPendingAfterTheCard(t *testing.T) {
 	var buf bytes.Buffer
 	r := NewReporter(ReporterOptions{Out: &buf, Width: 100, NoColor: true, Yes: true})
@@ -60,10 +59,9 @@ func TestReporterReceiptPutsPendingAfterTheCard(t *testing.T) {
 	}
 }
 
-// Every check mark is one colour: the accent of the theme in force, wherever it
-// is drawn. A ✓ in the plan, a finished step, the chart and the card are the
-// same glyph and the same escape. The escape is not written down here: the
-// palette is the theme's, and this is about the reporter using one of it.
+// Every ✓ is one colour, the theme's accent, wherever it is drawn: the plan, a
+// finished step, the chart and the card. The escape is not written down here,
+// because the palette is the theme's and this is about the reporter using it.
 func TestReporterUsesOneCheckColour(t *testing.T) {
 	var buf bytes.Buffer
 	r := NewReporter(ReporterOptions{Out: &buf, Width: 100, Yes: true})
@@ -76,8 +74,8 @@ func TestReporterUsesOneCheckColour(t *testing.T) {
 	r.Close()
 
 	out := buf.String()
-	// The escape accentStyle writes in front of its text, so the check
-	// survives any palette: what must not vary is the reporter's choice.
+	// The escape accentStyle writes, so the check survives any palette: what must
+	// not vary is the reporter's choice.
 	painted := accentStyle.Render("✓")
 	accent := painted[:strings.Index(painted, "✓")]
 	total := 0
@@ -114,10 +112,9 @@ func indexOf(lines []string, want string) int {
 	return -1
 }
 
-// One block: nothing the reporter prints sits at column 0 under a phase frame.
-// Only the frames themselves (the masthead, the card, the error box) are flush
-// left; every fact, plan, step, list, warning, receipt row and continuation
-// starts at box's two columns, the same place huh's fields do.
+// Nothing the reporter prints sits at column 0 under a phase frame: only the
+// frames themselves are flush left, and every fact, plan, step, list, warning,
+// receipt row and continuation starts at box's two columns like huh's fields.
 func TestReporterNeverWritesAtColumnZero(t *testing.T) {
 	var buf bytes.Buffer
 	r := NewReporter(ReporterOptions{Out: &buf, Width: 96, NoColor: true, Yes: true})
@@ -152,9 +149,8 @@ func TestReporterNeverWritesAtColumnZero(t *testing.T) {
 	}
 }
 
-// Every line the live renderer leaves behind fits the terminal. The plain
-// transcript has the same promise, and the 80-column terminal is the narrowest
-// box claims to support.
+// Every line fits the terminal, as the plain transcript's do; 80 columns is the
+// narrowest box supports.
 func TestReporterNeverExceedsWidth(t *testing.T) {
 	var buf bytes.Buffer
 	r := NewReporter(ReporterOptions{Out: &buf, Width: 80, NoColor: true, Yes: true})
@@ -198,8 +194,7 @@ func TestReporterNeverExceedsWidth(t *testing.T) {
 	}
 }
 
-// The live renderer says the same things in box's voice: the section frame,
-// the ✓ record lines, and the final card with the domain.
+// The same things in box's voice: the section frame, the ✓ record lines, the card.
 func TestReporterLooksLikeBox(t *testing.T) {
 	var buf bytes.Buffer
 	r := NewReporter(ReporterOptions{Out: &buf, Width: 100, NoColor: true, Yes: true})
@@ -219,9 +214,8 @@ func TestReporterLooksLikeBox(t *testing.T) {
 	}
 }
 
-// A plan's sub-steps are drawn under the item they configure, two columns past
-// its text, with their own marks and their own wrapping: a child that runs past
-// the terminal keeps starting at its indent, never at column 0.
+// A plan's sub-steps sit two columns past their item's text with their own marks,
+// and a child that runs past the terminal keeps its indent, never column 0.
 func TestReporterPlanIndentsChildren(t *testing.T) {
 	var buf bytes.Buffer
 	r := NewReporter(ReporterOptions{Out: &buf, Width: 80, NoColor: true, Yes: true})
@@ -245,7 +239,7 @@ func TestReporterPlanIndentsChildren(t *testing.T) {
 	if indexOf(lines, "      + the s5n gateway, answering HTTP on 80") < parent {
 		t.Fatalf("the first child is not under its item:\n%s", strings.Join(lines, "\n"))
 	}
-	// The long child wraps, and its continuation keeps the child's indent.
+	// The long child wraps, its continuation keeping the child's indent.
 	var wrapped []string
 	for _, line := range lines[parent+1:] {
 		if strings.HasPrefix(line, "      ") {
@@ -268,9 +262,8 @@ func TestReporterPlanIndentsChildren(t *testing.T) {
 	}
 }
 
-// The live reporter hands the default the flow chose to the same form init asks
-// with, and a bare enter takes it: a question about the one install starts on
-// yes, and one about a box that is serving starts on no.
+// A bare enter takes the default the flow chose: yes for the one install, no for
+// changing a box that is serving.
 func TestReporterConfirmTakesTheDefaultTheFlowChose(t *testing.T) {
 	var buf bytes.Buffer
 	r := NewReporter(ReporterOptions{Out: &buf, Width: 80, NoColor: true, In: strings.NewReader("\n")})
@@ -291,9 +284,8 @@ func TestReporterConfirmTakesTheDefaultTheFlowChose(t *testing.T) {
 	}
 }
 
-// A masthead box opens with exactly one empty line, and never two: the frames a
-// person saw sat directly under the line above them, and a section's own box is
-// the same box the setup questions draw, so the gap is counted once for both.
+// A masthead opens with exactly one empty line and never two: a section's box is
+// the one the setup questions draw, so the gap is counted once for both.
 func TestEveryMastheadOpensWithOneBlankLine(t *testing.T) {
 	var buf bytes.Buffer
 	r := NewReporter(ReporterOptions{Out: &buf, Width: 100, NoColor: true, Yes: true})
@@ -303,9 +295,8 @@ func TestEveryMastheadOpensWithOneBlankLine(t *testing.T) {
 	r.Plan("platform plan", []say.Item{{Mark: say.Install, Text: "MetalLB, which gives the gateway this node's address"}})
 	// Two sections in a row: the second must not stack a second gap.
 	r.Phase("apply")
-	// A finished step, then init's first question: the question's masthead is
-	// the same box as a section's, one line under the step until it opens with
-	// its own gap.
+	// A finished step, then init's first question: the question's masthead is the
+	// same box as a section's.
 	r.Chart("s5n", "0.5.0", "oci://ghcr.io/swizzin/charts/s5n:0.5.0")
 	r.ui.accessible = true
 	r.ui.in = strings.NewReader("box.example.com\n")
@@ -338,8 +329,8 @@ func TestEveryMastheadOpensWithOneBlankLine(t *testing.T) {
 	}
 }
 
-// The live reporter draws a table as the transcript does, plus colour: a titled
-// block with the glyph, the padded name and the facts wrapped under themselves.
+// A table as the transcript draws it, plus colour: glyph, padded name, wrapped
+// facts.
 func TestReporterTable(t *testing.T) {
 	var buf bytes.Buffer
 	r := NewReporter(ReporterOptions{Out: &buf, Width: 60, NoColor: true, Yes: true})
@@ -357,8 +348,7 @@ func TestReporterTable(t *testing.T) {
 	}
 }
 
-// A long fact wraps under the facts column and not under the name, so the name
-// column stays a column.
+// A long fact wraps under the facts column, so the name column stays a column.
 func TestReporterTableWrapsUnderTheFacts(t *testing.T) {
 	var buf bytes.Buffer
 	r := NewReporter(ReporterOptions{Out: &buf, Width: 40, NoColor: true, Yes: true})
@@ -376,10 +366,8 @@ func TestReporterTableWrapsUnderTheFacts(t *testing.T) {
 	}
 }
 
-// A block with columns is the same table the transcript prints: the heading in
-// the name column, each column heading over the facts it names, and the last
-// column wrapped under itself at the terminal's width so an 80-column terminal
-// still reads a row as one row.
+// The transcript's table with columns: the heading in the name column, each heading
+// over its facts, and the last column wrapped at the terminal's width.
 func TestReporterGroupIsTheTranscriptsTable(t *testing.T) {
 	var buf bytes.Buffer
 	r := NewReporter(ReporterOptions{Out: &buf, Width: 80, NoColor: true, Yes: true})
@@ -406,8 +394,7 @@ func TestReporterGroupIsTheTranscriptsTable(t *testing.T) {
 	if got, want := lines[1], "  · autobrr  1.5 GiB   2 addresses · login → s5n"; got != want {
 		t.Fatalf("first row = %q, want %q", got, want)
 	}
-	// The last column wraps under the column it starts in, so the words line
-	// up with the facts above them.
+	// The last column wraps under itself, so the words line up with the facts above.
 	if got := indexPrefix(lines, `  · radarr   34.0 MiB  2,930 paths · 1 address · keeps download client`); got < 0 {
 		t.Fatalf("the long row is not in the table:\n%s", strings.Join(lines, "\n"))
 	}
@@ -419,9 +406,8 @@ func TestReporterGroupIsTheTranscriptsTable(t *testing.T) {
 	}
 }
 
-// The live table widens the same way the transcript does: a name longer than
-// any other takes the block's column with it, and nothing is moved to a line of
-// its own with its facts under it.
+// A name longer than any other takes the block's column with it, and nothing is
+// moved to a line of its own.
 func TestReporterTableWidensForALongName(t *testing.T) {
 	var buf bytes.Buffer
 	r := NewReporter(ReporterOptions{Out: &buf, Width: 100, NoColor: true, Yes: true})
@@ -439,8 +425,8 @@ func TestReporterTableWidensForALongName(t *testing.T) {
 	}
 }
 
-// The live renderer ends a run the same way: one `!` label, then the rows, with
-// each command under the row it clears.
+// A run ends the same way: one `!` label, then the rows, each command under its
+// row.
 func TestReporterToFinishIsOneBlock(t *testing.T) {
 	var buf bytes.Buffer
 	r := NewReporter(ReporterOptions{Out: &buf, Width: 80, NoColor: true, Yes: true})

@@ -13,18 +13,14 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// These tests need a terminal, because the query is about one: it puts the
-// descriptor in raw mode, polls it and reads it. A pseudo-terminal is the only
-// thing that behaves like the wire box talks to, so the tests open one and play
-// the terminal on the master side.
-//
-// The build tag is for the pseudo-terminal, not the query: /dev/ptmx and the
-// ioctls that name its slave are Linux's. The test's own reads go through the
-// same poll the query uses, because a pseudo-terminal is not one of the files
-// os.File can put a deadline on.
+// These tests need a terminal: the query puts a descriptor in raw mode, polls it
+// and reads it, so the tests open a pseudo-terminal and play the terminal on the
+// master side. The build tag is for the pseudo-terminal, not the query. The test's
+// reads go through the same poll the query uses, because a pseudo-terminal takes
+// no os.File deadline.
 
-// ptyPair is a terminal: master is what the terminal emulator would be, slave is
-// box's end of the wire (one descriptor, both streams, as a real run has).
+// ptyPair is a terminal: master is the emulator, slave is box's end of the wire
+// (one descriptor, both streams, as a real run has).
 func ptyPair(t *testing.T) (master, slave *os.File) {
 	t.Helper()
 	ptmx, err := os.OpenFile("/dev/ptmx", os.O_RDWR|syscall.O_NOCTTY, 0)
@@ -52,8 +48,7 @@ func ptyPair(t *testing.T) (master, slave *os.File) {
 	return ptmx, slave
 }
 
-// waitReadable polls fd for at most timeout and reports whether there are bytes
-// to read.
+// waitReadable polls fd for at most timeout for bytes to read.
 func waitReadable(fd int, timeout time.Duration) bool {
 	deadline := time.Now().Add(timeout)
 	for {
@@ -96,8 +91,7 @@ func readExactly(t *testing.T, fd int, n int) []byte {
 }
 
 // respond plays the terminal: it reads exactly the query box writes and answers
-// with reply. The read is exact so a reply written by the test cannot be taken
-// for the query itself.
+// with reply, so the test's reply cannot be taken for the query.
 func respond(t *testing.T, master *os.File, reply string) <-chan struct{} {
 	t.Helper()
 	done := make(chan struct{})
@@ -126,8 +120,8 @@ func silent(t *testing.T, master *os.File) <-chan struct{} {
 	return done
 }
 
-// empty asserts the terminal's input has nothing left: a reply box read and did
-// not consume would be delivered to the first form as keystrokes.
+// empty asserts nothing is left on the terminal: a reply box read and did not
+// consume would reach the first form as keystrokes.
 func empty(t *testing.T, slave *os.File) {
 	t.Helper()
 	if waitReadable(int(slave.Fd()), 50*time.Millisecond) {
@@ -137,8 +131,8 @@ func empty(t *testing.T, slave *os.File) {
 	}
 }
 
-// A terminal that answers OSC 11 and then the fence: the colour decides the
-// palette, and both replies are consumed.
+// The colour comes before the fence: it decides the palette, and both replies are
+// consumed.
 func TestQueryBackgroundUsesTheColourBeforeTheFence(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
@@ -170,8 +164,7 @@ func TestQueryBackgroundUsesTheColourBeforeTheFence(t *testing.T) {
 }
 
 // A terminal that answers the fence and not OSC 11 -- PuTTY, KiTTY, GNU screen,
-// mosh -- says so at once, and box does not wait for a colour it is not going to
-// get.
+// mosh -- says so at once, and box does not wait for a colour it will not get.
 func TestQueryBackgroundTakesDA1AsNoAnswer(t *testing.T) {
 	master, slave := ptyPair(t)
 	done := respond(t, master, "\x1b[?62;22c")
@@ -188,9 +181,9 @@ func TestQueryBackgroundTakesDA1AsNoAnswer(t *testing.T) {
 	empty(t, slave)
 }
 
-// A terminal that answers neither is the one case capped by the timeout, and the
-// cap leaves nothing behind: the read happens on this goroutine, after a poll,
-// so there is no reader holding the terminal when the query gives up.
+// A terminal that answers neither is capped by the timeout, and the cap leaves
+// nothing behind: the read happens here, after a poll, so no reader holds the
+// terminal when the query gives up.
 func TestQueryBackgroundCapsATerminalThatNeverAnswers(t *testing.T) {
 	master, slave := ptyPair(t)
 	done := silent(t, master)

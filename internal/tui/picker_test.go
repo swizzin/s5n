@@ -11,8 +11,8 @@ import (
 	"github.com/swizzin/s5n/internal/setup"
 )
 
-// pickerApps is the picker's list in the test: one short, distinct name per
-// app, so counting a name in the drawn view counts one row.
+// pickerApps is the test's list: one short, distinct name per app, so counting a
+// name counts one row.
 var pickerApps = []setup.Option{
 	{Value: "qbittorrent", Label: "qbittorrent"},
 	{Value: "sonarr", Label: "sonarr"},
@@ -24,31 +24,25 @@ var pickerApps = []setup.Option{
 	{Value: "bazarr", Label: "bazarr"},
 }
 
-// TestPickerKeepsEveryAppOnScreen drives the app picker the way a person moves
-// down it, and reads what the terminal would show.
+// Drives the app picker the way a person moves down it and reads what the
+// terminal would show.
 //
-// It is the regression test for the redraw a person saw on her terminal: the
-// hint and the first apps repeated above the list, and stale rows left behind.
-// The cause is the field's height. huh's Height is the whole field (its own doc
-// says "including padding"), and its option viewport is that minus the title
-// and the description, so "one row per app" was one row short of the list: the
-// viewport scrolled as the cursor passed the bottom, and bubbletea's inline
-// renderer, which counts the lines it drew in the frame before, left the rows
-// the scroll created on screen. At 100x40 the picker saw no reason to scroll,
-// and every app and the hint are drawn exactly once.
+// It pins the redraw bug: the hint and the first apps repeated above the list and
+// stale rows left behind. huh's Height is the whole field ("including padding"),
+// and its viewport is that minus title and description, so one row per app was one
+// short: the viewport scrolled past the bottom and bubbletea's inline renderer left
+// the rows the scroll created on screen.
 func TestPickerKeepsEveryAppOnScreen(t *testing.T) {
 	u := New(Options{In: strings.NewReader(""), Out: &bytes.Buffer{}, Width: 100, NoColor: true})
 	var value []string
 	field := u.pickerField(setup.MultiSelect{Key: "apps", Options: pickerApps}, optionKeys(pickerApps), &value)
-	// What the form does before it hands the field to the terminal: box's look,
-	// box's keys, and the width the terminal reported.
+	// What the form does before handing the field to the terminal.
 	field.WithTheme(huh.ThemeFunc(func(bool) *huh.Styles { return u.styles }))
 	field.WithKeyMap(keyMap())
 	field.WithWidth(100)
 	field.Focus()
 
-	// One frame per move, exactly as the terminal would draw them: the state
-	// that scrolls is the state that redraws badly.
+	// One frame per move: the state that scrolls is the state that redraws badly.
 	views := []string{field.View()}
 	for range pickerApps {
 		model, _ := field.Update(tea.KeyPressMsg{Code: tea.KeyDown})
@@ -68,8 +62,7 @@ func TestPickerKeepsEveryAppOnScreen(t *testing.T) {
 		}
 	}
 
-	// And the last option is the one under the cursor, with the whole list --
-	// the hint and one row per app -- in the frame that has to hold it.
+	// The last option is under the cursor, with the whole list in the frame.
 	lines := strings.Split(strings.TrimRight(stripANSI(views[len(views)-1]), " \n"), "\n")
 	if len(lines) != len(pickerApps)+1 {
 		t.Fatalf("the picker is %d lines for a hint and %d apps:\n%s", len(lines), len(pickerApps), strings.Join(lines, "\n"))

@@ -18,67 +18,60 @@ import (
 
 // Options is one box UI: where its terminal is, and whether colour is allowed.
 type Options struct {
-	// In is the terminal to read keys from, Out the one to draw on. Both must
-	// be terminals: Decide is what guarantees that.
+	// In is the terminal to read keys from, Out the one to draw on; both must be
+	// terminals, which Decide guarantees.
 	In  io.Reader
 	Out io.Writer
 	// NoColor draws the same layout with every colour dropped (NO_COLOR).
 	NoColor bool
-	// Width is how many columns the terminal has, as cmd/box measured it. A
-	// zero (a caller that did not measure) is the narrowest width init
-	// supports, so text still wraps rather than running off the screen.
+	// Width is the terminal's columns as cmd/box measured them. Zero is the
+	// narrowest width init supports, so text still wraps rather than running off
+	// the screen.
 	Width int
-	// Theme names the palette to draw with: a pair ("s5n", "catppuccin")
-	// follows the terminal's background, a variant ("s5n-light",
-	// "catppuccin-mocha") pins one, and empty is s5n. theme.Parse is the
-	// authority on the names; a name it does not know is reported by Err.
+	// Theme names the palette: a pair ("s5n") follows the terminal's background, a
+	// variant ("s5n-light") pins one, empty is s5n. theme.Parse is the authority;
+	// a name it does not know is reported by Err.
 	Theme string
-	// Background paints the terminal's own background with the theme's, for
-	// the whole run, and puts it back on Close. Off by default: it is a change
-	// to the terminal that a kill -9 or a dropped connection leaves behind. It
-	// does nothing under NO_COLOR, which is the terminal asking for no colour
-	// at all.
+	// Background paints the terminal's background with the theme's for the whole
+	// run and puts it back on Close. Off by default: a kill -9 or a dropped
+	// connection leaves the colour behind. Nothing under NO_COLOR.
 	Background bool
 }
 
-// UI is setup.Prompter on huh.
-//
-// One small form per call, deliberately: init's questions depend on earlier
-// answers, so the flow is the wizard and huh only draws one field at a time.
-// That also keeps the transcript: each answered form stays on screen above the
-// next masthead, which is what makes a run reviewable by scrolling back.
+// UI is setup.Prompter on huh. One small form per call: init's questions depend
+// on earlier answers, so the flow is the wizard and huh draws one field at a
+// time. That also keeps the transcript, each answered form staying on screen
+// above the next masthead, which is what makes a run reviewable by scrolling back.
 type UI struct {
 	in     io.Reader
 	out    io.Writer
 	styles *huh.Styles
 	keys   *huh.KeyMap
 	chrome chrome
-	// width is the terminal's columns. Everything box draws outside huh's own
-	// form wraps to it; see wrapText.
+	// width is the terminal's columns; everything box draws outside huh's form
+	// wraps to it (see wrapText).
 	width int
 
-	// space is the empty line before every masthead, shared with the reporter
-	// this UI belongs to so a run counts its gaps once.
+	// space is the empty line before every masthead, shared with the reporter so a
+	// run counts its gaps once.
 	space *space
 
 	// accessible is huh's line mode, driven by a scripted reader in tests. box
-	// never selects it: without a terminal huh's own secret field returns an
-	// empty string without an error, which is why Decide falls back to
-	// setup.LinePrompt instead of huh's accessible mode.
+	// never selects it: without a terminal huh's secret field returns an empty
+	// string with no error, which is why Decide uses setup.LinePrompt.
 	accessible bool
 
-	// variant is the colours in force. box resolves it once, when the UI is
-	// built, so a form and the masthead above it cannot disagree.
+	// variant is the colours in force, resolved once when the UI is built, so a
+	// form and the masthead above it cannot disagree.
 	variant theme.Variant
-	// themeErr is a theme name that did not resolve. New has no error to
-	// return -- cmd/box builds the UI in a function that only hands it back --
-	// so the first question asked is where the operator hears about it,
-	// rather than a run in colours nobody chose.
+	// themeErr is a theme name that did not resolve. New returns no error, so the
+	// first question asked is where the operator hears about it, rather than a run
+	// in colours nobody chose.
 	themeErr error
 
-	// painter owns the terminal background for the whole run, when it was
-	// asked for. Every form's view hook and the reporter's lines between
-	// forms go through it, so the run has one ground.
+	// painter owns the terminal background for the whole run, when asked for:
+	// every form's view hook and the reporter's lines between forms go through it,
+	// so the run has one ground.
 	painter *painter
 }
 
@@ -93,9 +86,8 @@ func New(o Options) *UI {
 		out = os.Stdout
 	}
 	sel, err := theme.Parse(o.Theme)
-	// A pinned variant is not going to use the answer, so the terminal is not
-	// asked: the query costs up to its one-second cap on a terminal that does
-	// not reply at all.
+	// A pinned variant does not use the answer, so the terminal is not asked: the
+	// query costs up to its one-second cap on a terminal that never replies.
 	dark := true
 	if sel.Variant == nil {
 		dark = darkBackground(in, out, o.NoColor)
@@ -117,17 +109,16 @@ func New(o Options) *UI {
 	u.chrome.noColor = o.NoColor
 	u.space = &space{}
 	u.painter = newPainter(out, variant, o.Background && !o.NoColor)
-	// Painted here rather than at the first form: box prints its masthead and
-	// its facts before it asks anything, and those lines are the run too.
+	// Painted here, not at the first form: box prints its masthead and facts before
+	// it asks anything, and those lines are the run too.
 	u.painter.begin()
 	return u
 }
 
-// Close puts the terminal's own background back. It is safe to call twice, and
-// it is meant to be deferred: a defer is what makes the reset happen on a
-// normal return, on an error and on a panic. Ctrl-C and SIGTERM reach the
-// reporter's own handler, which closes before it exits. Nothing can catch
-// kill -9 or a connection that goes away, and those leave the colour behind.
+// Close puts the terminal's own background back. Safe to call twice, and meant to
+// be deferred, so the reset happens on a normal return, an error and a panic;
+// Ctrl-C and SIGTERM reach the reporter's handler, which closes before it exits.
+// kill -9 and a dropped connection leave the colour behind.
 func (u *UI) Close() { u.painter.reset() }
 
 // Palette is the variant this UI draws with, resolved and in force.
@@ -136,16 +127,16 @@ func (u *UI) Palette() theme.Variant { return u.variant }
 // Err is why the UI is not drawing the theme it was asked for, or nil.
 func (u *UI) Err() error { return u.themeErr }
 
-// keyMap is box's keys: huh quits on Ctrl-C only, and box's cancel gesture is
-// Esc anywhere too, the way every other command's is.
+// keyMap is box's keys: huh quits on Ctrl-C only, and box's cancel gesture is Esc
+// anywhere too.
 func keyMap() *huh.KeyMap {
 	km := huh.NewDefaultKeyMap()
 	km.Quit = key.NewBinding(key.WithKeys("ctrl+c", "esc"))
 	return km
 }
 
-// cancel maps huh's abort to setup's. init prints its own voice for it
-// ("oh heck, nvm") exactly once, so nothing here writes a word.
+// cancel maps huh's abort to setup's. init prints its own voice for it ("oh heck,
+// nvm") exactly once, so nothing here writes a word.
 func cancel(err error) error {
 	if errors.Is(err, huh.ErrUserAborted) {
 		return setup.ErrCancelled
@@ -158,11 +149,9 @@ func (u *UI) Step(n, total int, question string) {
 	u.chrome.step, u.chrome.total, u.chrome.question = n, total, question
 }
 
-// begin prints the chrome above a field and leaves one blank line, so the form
-// is drawn under the masthead rather than against it. A step asked in several
-// fields shows its masthead once: the fields and the path report under it are
-// all the same step. The masthead opens with the empty line that separates it
-// from whatever came before (see space.outset).
+// begin prints the chrome above a field and leaves one blank line, so the form is
+// drawn under the masthead. A step asked in several fields shows its masthead
+// once. The empty line that separates it from what came before is space.outset's.
 func (u *UI) begin() {
 	head, ok := u.chrome.head()
 	if !ok {
@@ -182,10 +171,9 @@ func (u *UI) end() {
 	u.space.separator()
 }
 
-// run draws one field as a whole (one-field) form and waits for the answer.
-// answered is called only when the field was answered, and before the blank
-// line that separates it from what comes next, so the record it leaves reads
-// as part of the field rather than as a stray line.
+// run draws one field as a whole form and waits for the answer. answered is called
+// only when the field was answered, and before the blank line that follows, so the
+// record it leaves reads as part of the field.
 func (u *UI) run(field huh.Field, answered func()) error {
 	if u.themeErr != nil {
 		return u.themeErr
@@ -211,14 +199,12 @@ func (u *UI) run(field huh.Field, answered func()) error {
 	return err
 }
 
-// record is the one line a finished form leaves in the scrollback: what was
-// asked, then what was answered. huh clears its own drawing when the form
-// ends, and without this the transcript would keep each question's title and
-// drop the answer, which is exactly the part a run is reviewed for.
-//
-// The value is the answer as a person would say it (an option's label, not the
-// value a file keeps), and a secret is recorded as hidden. NO_COLOR keeps the
-// same words with no escapes: the check is a glyph, not a colour.
+// record is the one line a finished form leaves in the scrollback: what was asked,
+// then what was answered. huh clears its own drawing when the form ends, and
+// without this the transcript keeps each question's title and drops the answer--
+// the part a run is reviewed for. The value is the answer as a person would say
+// it (an option's label), a secret is recorded as hidden, and NO_COLOR keeps the
+// same words with no escapes.
 func (u *UI) record(label, value string) {
 	label = strings.TrimSpace(label)
 	value = strings.TrimSpace(value)
@@ -243,7 +229,7 @@ func (u *UI) record(label, value string) {
 const hidden = "•••• (hidden)"
 
 // recordSecret is a secret's record line. The value is not an argument, so no
-// caller can pass it here by mistake: a secret never reaches the scrollback.
+// caller can pass it by mistake: a secret never reaches the scrollback.
 func (u *UI) recordSecret(label string) {
 	u.record(label, hidden)
 }
@@ -259,8 +245,8 @@ func optionLabel(options []setup.Option, value string) string {
 	return value
 }
 
-// noted is an answer with the flow's note beside it, for the one question where
-// the answer alone is ambiguous: "login  liara  (web login)".
+// noted is an answer with the flow's note beside it, where the answer alone is
+// ambiguous: "login  alice  (web login)".
 func noted(value, note string) string {
 	if note = strings.TrimSpace(note); note == "" {
 		return value
@@ -268,9 +254,8 @@ func noted(value, note string) string {
 	return value + "  (" + note + ")"
 }
 
-// chosenList is a multi-select answer as its record line shows it. Nothing
-// chosen is said, not left blank: "apps  none" is an answer a person gave, and
-// a record line with no value is one the scrollback drops entirely.
+// chosenList is a multi-select answer as its record line shows it: nothing chosen
+// is said, because the scrollback drops a record line with no value.
 func chosenList(options []setup.Option, values []string) string {
 	if len(values) == 0 {
 		return "none"
@@ -308,8 +293,8 @@ func (u *UI) Input(f setup.Input) (string, error) {
 		Value(&value)
 	if f.Validate != nil {
 		validate := f.Validate
-		// The line prompt trims an answer before it validates it, so a stray
-		// space cannot decide whether a domain is valid.
+		// The line prompt trims before validating, so a stray space cannot decide
+		// whether a domain is valid.
 		field = field.Validate(func(s string) error { return validate(strings.TrimSpace(s)) })
 	}
 	if err := u.run(field, func() {
@@ -323,8 +308,8 @@ func (u *UI) Input(f setup.Input) (string, error) {
 	return value, nil
 }
 
-// Secret asks for a value that must not appear on screen. Nothing about it is
-// remembered for the breadcrumb, and huh masks it with its own echo mode.
+// Secret asks for a value that must not appear on screen: huh masks it, and it is
+// not remembered for the breadcrumb.
 func (u *UI) Secret(f setup.Secret) (string, error) {
 	var value string
 	field := huh.NewInput().
@@ -350,8 +335,8 @@ func (u *UI) Secret(f setup.Secret) (string, error) {
 	return strings.TrimSpace(value), nil
 }
 
-// Confirm asks yes or no. The focused button is the answer to enter, so a
-// question whose safe answer is no starts on no.
+// Confirm asks yes or no. The focused button is enter's answer, so a question
+// whose safe answer is no starts on no.
 func (u *UI) Confirm(f setup.Confirm) (bool, error) {
 	value := f.Default
 	affirmative := f.Affirmative
@@ -364,9 +349,8 @@ func (u *UI) Confirm(f setup.Confirm) (bool, error) {
 	}
 	field := huh.NewConfirm().
 		Key("confirm").
-		// The question mark in the gutter, as the plain renderer draws it: a
-		// question is a mark of its own (rule 1), and the record line below
-		// keeps the prompt without it.
+		// The question mark in the gutter, as the plain renderer draws it (rule 1);
+		// the record line below keeps the prompt without it.
 		Title(say.MarkAsk + " " + f.Prompt).
 		Affirmative(affirmative).
 		Negative(negative).
@@ -383,8 +367,8 @@ func (u *UI) Confirm(f setup.Confirm) (bool, error) {
 	return value, nil
 }
 
-// Select picks exactly one option. huh matches values by comparison, so the
-// answer is the option's value and never its label.
+// Select picks exactly one option: huh matches values by comparison, so the
+// answer is the option's value, never its label.
 func (u *UI) Select(f setup.Select) (string, error) {
 	value := f.Default
 	if value == "" && len(f.Options) > 0 {
@@ -410,18 +394,15 @@ const multiSelectHelp = "space toggles · ctrl+a all/none · enter continues"
 // pickerField is the app picker: the options with their help column, the keys
 // above them, and a height that holds the whole list.
 //
-// The height is the field's total, not the list's. huh's own doc: "WithHeight
-// sets the total height of the multi-select field. Including padding and help
-// menu heights", and its viewport is that total minus the title and the
-// description. Passing one row per app therefore left the viewport a row short
-// whenever there was a hint: the list scrolled under a static hint while a
-// person moved down it, and bubbletea's inline renderer -- which counts the
-// lines it drew last frame -- left the rows it had not accounted for on screen.
-// That is the repeated hint and the first apps above the list.
+// The height must be the field's total, not the list's: huh's WithHeight "sets
+// the total height of the multi-select field. Including padding and help menu
+// heights", and its viewport is that total minus title and description. One row
+// per app left the viewport a row short whenever there was a hint, so the list
+// scrolled under a static hint and bubbletea's inline renderer left the unaccounted
+// rows on screen: the repeated hint and the first apps above the list.
 func (u *UI) pickerField(f setup.MultiSelect, keys []huh.Option[string], value *[]string) *huh.MultiSelect[string] {
-	// The hint is wrapped by huh to the field's width less its own two-column
-	// indent, so measuring it that way keeps the height right in a narrow
-	// terminal, where the hint itself takes two rows.
+	// huh wraps the hint to the width less its own two-column indent, so measuring
+	// it that way keeps the height right in a narrow terminal.
 	hint := wrapText(multiSelectHelp, u.width-2)
 	field := huh.NewMultiSelect[string]().
 		Key(f.Key).
@@ -436,9 +417,8 @@ func (u *UI) pickerField(f setup.MultiSelect, keys []huh.Option[string], value *
 	return field
 }
 
-// MultiSelect picks any number of options. Selected is what a re-run shows
-// preselected, and Min is the flow's rule, shown in the form rather than
-// decided here.
+// MultiSelect picks any number of options: Selected is what a re-run preselects,
+// and Min is the flow's rule, shown in the form rather than decided here.
 func (u *UI) MultiSelect(f setup.MultiSelect) ([]string, error) {
 	keys := optionKeys(f.Options)
 	picked := map[string]bool{}
@@ -451,8 +431,8 @@ func (u *UI) MultiSelect(f setup.MultiSelect) ([]string, error) {
 	value := append([]string(nil), f.Selected...)
 	field := u.pickerField(f, keys, &value)
 	if err := u.run(field, func() {
-		// The field's own title is empty (the masthead carries the question),
-		// so the record names it by its key: "apps  qbittorrent, sonarr".
+		// The field's title is empty (the masthead carries the question), so the
+		// record names it by its key: "apps  qbittorrent, sonarr".
 		name := f.Key
 		if strings.TrimSpace(name) == "" {
 			name = f.Prompt
@@ -464,9 +444,8 @@ func (u *UI) MultiSelect(f setup.MultiSelect) ([]string, error) {
 	return value, nil
 }
 
-// Note shows a block of text without asking anything. init sends the path
-// report through ShowPathCheck instead; Note is the general seam, kept so this
-// type is a complete Prompter.
+// Note shows a block of text without asking anything; init sends the path report
+// through ShowPathCheck, and Note keeps this type a complete Prompter.
 func (u *UI) Note(text string) error {
 	if u.themeErr != nil {
 		return u.themeErr
@@ -477,8 +456,8 @@ func (u *UI) Note(text string) error {
 	return nil
 }
 
-// optionKeys maps setup's options onto huh's: the label, padded so a column of
-// help reads as a column, then the help in the same row.
+// optionKeys maps setup's options onto huh's: the label padded so a column of help
+// reads as a column, then the help.
 func optionKeys(options []setup.Option) []huh.Option[string] {
 	width := 0
 	for _, o := range options {
@@ -497,8 +476,8 @@ func optionKeys(options []setup.Option) []huh.Option[string] {
 	return out
 }
 
-// tooFew is the multi-select's rule: the same words the line prompt uses, so a
-// person sees the same sentence whichever UI they got.
+// tooFew is the multi-select's rule, in the words the line prompt uses, so a person
+// sees the same sentence whichever UI they got.
 func tooFew(min, got int) error {
 	if got >= min {
 		return nil

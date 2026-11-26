@@ -7,9 +7,8 @@ import (
 	"charm.land/lipgloss/v2"
 )
 
-// A dotted, hyphenated key and a slashed path are each one token. Wrapping may
-// move a token to the next line, but it may never split it: `platform.cert-` /
-// `manager.mode=external` would be two settings, not a line break.
+// A dotted, hyphenated key and a slashed path are one token each: wrapping may
+// move a token but never split it, or it would read as two settings.
 func TestWrapTextBreaksOnlyBetweenTokens(t *testing.T) {
 	text := "cert-manager: box does not install it yet; set platform.cert-manager.mode=external and check /var/data/s5n/config/radarr-4k"
 	width := 48
@@ -41,8 +40,7 @@ func TestWrapTextBreaksOnlyBetweenTokens(t *testing.T) {
 	}
 }
 
-// Only a token that cannot fit a line at all is hard-broken, and then nothing
-// may overflow the terminal.
+// Only a token that cannot fit a line at all is hard-broken, and nothing overflows.
 func TestWrapTextHardBreaksOnlyAnOverlongToken(t *testing.T) {
 	const long = "supercalifragilisticexpialidocious"
 	for _, width := range []int{4, 8, 12} {
@@ -61,8 +59,7 @@ func TestWrapTextHardBreaksOnlyAnOverlongToken(t *testing.T) {
 	}
 }
 
-// A list wraps between its items, never inside one, and keeps the separator on
-// the line it belongs to.
+// A list wraps between its items, never inside one, the separator on its line.
 func TestWrapListKeepsNamesWhole(t *testing.T) {
 	names := []string{"data", "config", "config/qbittorrent", "config/sonarr", "config/radarr-4k", "config/prowlarr"}
 	lines := wrapList(names, " · ", 34)

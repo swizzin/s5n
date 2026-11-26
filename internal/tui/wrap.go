@@ -7,20 +7,17 @@ import (
 )
 
 // defaultWidth is what a caller that did not measure the terminal gets: the
-// narrowest width init supports. Wrapping to it is always safe; an unwrapped
-// line is not.
+// narrowest width init supports. Wrapping to it is safe; an unwrapped line is not.
 const defaultWidth = 80
 
-// wrapText breaks plain text into lines of at most width columns. It is fed
-// unstyled text on purpose: lipgloss.Width ignores escapes, but a wrap that
-// has to count them is one more place to get wrong, so every caller wraps
-// first and paints each line afterwards.
+// wrapText breaks plain text into lines of at most width columns, fed unstyled
+// text on purpose: every caller wraps first and paints each line afterwards, so a
+// wrap never has to count escapes.
 //
-// A line breaks only at a space. A token is never split to make a line fit: a
-// wrapped `platform.cert-` / `manager.mode=external` or `/var/data/s5n/config/`
-// / `radarr-4k` reads as two different settings, which is exactly how someone
-// copies the wrong one. Only a single token wider than the whole line is
-// hard-broken, and then by display width.
+// A line breaks only at a space, and a token is never split to fit: a wrapped
+// `manager.mode=extern` / `al` reads as two different settings, and that is how
+// someone copies the wrong one. Only a token wider than the whole line is
+// hard-broken, by display width.
 func wrapText(s string, width int) []string {
 	if width < 1 {
 		width = 1
@@ -66,10 +63,9 @@ func wrapText(s string, width int) []string {
 	return lines
 }
 
-// wrapList packs a list of items into lines of at most width columns, breaking
-// only between items. It is how a list of names stays a list: the separator
-// stays on the line it belongs to, and no item is split unless it is wider
-// than a whole line on its own.
+// wrapList packs items into lines of at most width columns, breaking only between
+// them: the separator stays on its line, and no item is split unless it is wider
+// than a whole line.
 func wrapList(items []string, sep string, width int) []string {
 	if width < 1 {
 		width = 1
@@ -106,10 +102,8 @@ func wrapList(items []string, sep string, width int) []string {
 }
 
 // wrapShell breaks a command into lines a shell would continue: only at spaces,
-// with ` \` ending every line but the last, and the backslash counted in the
-// width. A token is never split -- a path broken across two lines is a path
-// someone copies wrong -- unless a single token is wider than the line, which
-// no width can fix.
+// ` \` ending every line but the last and counted in the width. A token is never
+// split -- half a path is copied wrong -- unless it is wider than the line.
 func wrapShell(cmd string, width int) []string {
 	if width < 4 {
 		width = 4
@@ -132,8 +126,7 @@ func wrapShell(cmd string, width int) []string {
 		if cur != "" {
 			lines = append(lines, cur+" \\")
 		}
-		// A token wider than the line cannot be kept whole at any width
-		// and must not be split, so it takes a line of its own.
+		// A token wider than the line cannot be kept whole and must not be split.
 		cur = word
 	}
 	if cur != "" {

@@ -9,10 +9,9 @@ import (
 	"github.com/swizzin/s5n/internal/setup"
 )
 
-// fakeBackground answers the OSC 11 query for one test and counts how often it
-// was asked. box only asks when both ends are files it could put in raw mode,
-// so the tests that care about the answer pass os.Pipe ends; the rest pass
-// buffers and get the dark default.
+// fakeBackground answers the OSC 11 query for one test and counts the asks. box
+// asks only when both ends are files it could put in raw mode, so tests caring
+// about the answer pass os.Pipe ends; the rest get the dark default.
 func fakeBackground(t *testing.T, dark bool) *int {
 	t.Helper()
 	calls := 0
@@ -25,9 +24,8 @@ func fakeBackground(t *testing.T, dark bool) *int {
 	return &calls
 }
 
-// terminalFiles is a pair of *os.File for a UI that needs terminal-shaped
-// streams. Nothing is ever written to them: the tests that use this look at the
-// palette, not the output.
+// terminalFiles is a pair of *os.File for a UI that needs terminal-shaped streams;
+// the tests using it look at the palette, not the output.
 func terminalFiles(t *testing.T) (in, out *os.File) {
 	t.Helper()
 	in, _, err := os.Pipe()
@@ -42,9 +40,8 @@ func terminalFiles(t *testing.T) (in, out *os.File) {
 	return in, out
 }
 
-// TestNewFollowsTheTerminalBackground: a pair name has no colours of its own.
-// A terminal that says it is light gets the light side, without the operator
-// naming a variant.
+// A pair name has no colours of its own: a terminal that says it is light gets the
+// light side without the operator naming a variant.
 func TestNewFollowsTheTerminalBackground(t *testing.T) {
 	for _, tc := range []struct {
 		dark bool
@@ -65,9 +62,8 @@ func TestNewFollowsTheTerminalBackground(t *testing.T) {
 	}
 }
 
-// TestNewPinsAVariant: a variant name is the answer for a terminal that will
-// not say what it is drawing on. It ignores the query entirely, so a pinned
-// run pays no two-second wait for an answer it is not going to use.
+// A variant name is the answer for a terminal that will not say what it draws on;
+// it skips the query, so a pinned run pays no wait for an answer it will not use.
 func TestNewPinsAVariant(t *testing.T) {
 	calls := fakeBackground(t, true)
 	in, out := terminalFiles(t)
@@ -83,9 +79,8 @@ func TestNewPinsAVariant(t *testing.T) {
 	}
 }
 
-// TestUnknownThemeIsAnErrorWithTheList: the name comes from a values file, so a
-// typo has to surface as a sentence naming what would have worked -- not as a
-// run in colours nobody chose.
+// The name comes from a values file, so a typo surfaces as a sentence naming what
+// would have worked, not a run in colours nobody chose.
 func TestUnknownThemeIsAnErrorWithTheList(t *testing.T) {
 	u := New(Options{Out: &bytes.Buffer{}, Theme: "amber"})
 	err := u.Err()
@@ -97,17 +92,15 @@ func TestUnknownThemeIsAnErrorWithTheList(t *testing.T) {
 			t.Fatalf("the error does not mention %q: %v", want, err)
 		}
 	}
-	// The first question asked reports it too: cmd/box builds the UI in a
-	// function that has no error to return, and the operator still has to hear
-	// about the name they typed.
+	// The first question reports it too: cmd/box builds the UI where there is no
+	// error to return.
 	if _, got := u.Input(setup.Input{Key: "gateway.host", Prompt: "domain"}); got == nil {
 		t.Fatal("the first question did not report the bad theme name")
 	}
 }
 
-// TestNoColorIgnoresTheTheme: NO_COLOR is the terminal saying it cannot be
-// trusted with colour, so it wins over the theme, and the background is not
-// even asked about -- there is nothing to pick between.
+// NO_COLOR wins over the theme, and the background is not asked about: there is
+// nothing to pick between.
 func TestNoColorIgnoresTheTheme(t *testing.T) {
 	calls := fakeBackground(t, false)
 	in, out := terminalFiles(t)
@@ -132,9 +125,8 @@ func TestNoColorIgnoresTheTheme(t *testing.T) {
 	}
 }
 
-// TestTheMastheadIsDrawnInTheSelectedTheme: the palette reaches what a person
-// reads, not just the form. The masthead's wordmark is the accent of the
-// variant the UI resolved, and the frame is the muted colour.
+// The palette reaches what a person reads: the wordmark is the resolved variant's
+// accent, and the frame its muted colour.
 func TestTheMastheadIsDrawnInTheSelectedTheme(t *testing.T) {
 	u, out := line("x\n")
 	u.Step(1, 2, "first")
@@ -149,9 +141,8 @@ func TestTheMastheadIsDrawnInTheSelectedTheme(t *testing.T) {
 	}
 }
 
-// TestTheReporterDrawsTheSameVariant: one run, one palette. The reporter builds
-// the UI it asks through, so a section frame and a finished step cannot be two
-// different looks.
+// One run, one palette: the reporter builds the UI it asks through, so a section
+// frame and a finished step cannot differ.
 func TestTheReporterDrawsTheSameVariant(t *testing.T) {
 	var buf bytes.Buffer
 	r := NewReporter(ReporterOptions{Out: &buf, Width: 100, Yes: true, Theme: "gruvbox"})
