@@ -6,11 +6,10 @@ import (
 	"testing"
 )
 
-// TestBlessedMatchesThePolicyRule is the case-by-case table of the image rule:
-// each row is the image, the blessed list, and what policy.yaml's
-// `i.startsWith(r + ':') || i.startsWith(r + '@')` answers. The rows that
-// differ from what a "parse the reference" rule would answer are marked, and
-// they are the ones the Go copy has to get wrong on purpose.
+// The case-by-case table of the image rule: each row is an image, a blessed list,
+// and what policy.yaml's `i.startsWith(r + ':') || i.startsWith(r + '@')`
+// answers. The rows a "parse the reference" rule would answer differently are the
+// ones the Go copy has to get wrong on purpose.
 func TestBlessedMatchesThePolicyRule(t *testing.T) {
 	const (
 		sonarr = "ghcr.io/home-operations/sonarr"
@@ -162,11 +161,9 @@ func TestUnblessedImageString(t *testing.T) {
 	}
 }
 
-// TestPolicyCELStillMatchesTheGoRule fails when policy.yaml's image rule stops
-// being the prefix test Blessed reproduces: the Go copy is what names the pods a
-// new binding strands, and it is only useful while it answers what the cluster
-// answers. A string check, not a CEL evaluator — this module carries no CEL
-// dependency and a disagreement shows up here before it shows up in a cluster.
+// Fails when policy.yaml's image rule stops being the prefix test Blessed
+// reproduces: the Go copy names the pods a new binding strands, so it must answer
+// what the cluster answers. A string check, not a CEL evaluator.
 func TestPolicyCELStillMatchesTheGoRule(t *testing.T) {
 	policy := string(readFixture(t, "../../install/platform/admission/policy.yaml"))
 	for _, want := range []string{
