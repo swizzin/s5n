@@ -1,13 +1,6 @@
-// Package plan is the file `box migrate` writes while it reads a source
-// install: what each app was called there, where its config came from, and how
-// the paths it stored translate into the ones box's release gives it.
-//
-// The table is per app because every app saw its own paths. A source install
-// commonly mounts the downloads into the torrent client and the library into
-// the Arrs under different names, and one app's table applied to another app's
-// files would move a path that app never had. So a stored path is always
-// rewritten through the table of the app that stored it, which is why Rewrite
-// takes the app's name.
+// Package plan is the file `box migrate` writes: what each app was called, where
+// its config came from, and how the paths it stored translate. The table is per
+// app because each app saw the same files under its own names.
 package plan
 
 import (
@@ -23,41 +16,31 @@ import (
 	"go.yaml.in/yaml/v3"
 )
 
-// Version is the only plan version this box reads. A plan is a promise about
-// what apply will do, so a box that meets a shape it does not know refuses the
-// file rather than applying the half of it that it happens to parse.
-//
-// 2 adds the source block, each app's kind, image and variant, and the why and
-// default a rule carries when discovery wrote it as a default. Version 1 plans
-// existed only in test runs: apply refuses one and names the way forward.
+// Version is the only plan version this box reads: a plan is a promise about
+// what apply will do, so an unknown shape is refused, not half-applied.
 const Version = 2
 
 // Plan is the whole file.
 type Plan struct {
 	Version int `yaml:"version"`
-	// Source is the install the plan was read from: the platform(s) that
-	// contributed an app, when it was read, and who owned what was read.
-	// Absent for a plan written by hand with no source behind it.
+	// Source is the install the plan was read from; absent for a hand-written
+	// plan.
 	Source *Source `yaml:"source,omitempty"`
-	// Data is where the source kept its downloads and media, when box adopts
-	// them in place. Absent, apply touches no data.
+	// Data is where the source kept downloads and media, when box adopts them
+	// in place. Absent, apply touches no data.
 	Data *Data `yaml:"data,omitempty"`
-	// Domain is the DNS name box will serve this seedbox under, when discovery
-	// could read it from the source: the one name the source's Ingress hosts
-	// all are, or the domain they share. It is the plan's default for the
-	// run's question, never a question discovery asks, and empty when the
-	// source could not say -- which is when the run asks for it.
+	// Domain is the DNS name discovery read off the source, the run's default
+	// answer; empty when the source could not say and the run asks.
 	Domain string `yaml:"domain,omitempty"`
 	// Apps is keyed by box's instance name.
 	Apps map[string]App `yaml:"apps"`
-	// Hosts classifies every address one source app stored for another that
-	// is not a localhost address (those are resolved through Apps' ports).
+	// Hosts classifies every non-localhost address one app stored for another;
+	// localhost addresses are resolved through Apps' ports.
 	Hosts []HostRule `yaml:"hosts,omitempty"`
-	// Outside are the source's workloads that are not catalog apps, as
-	// <namespace>/<name>, and the containers of a migrated app's pod that the
-	// chart's pod does not carry, as <namespace>/<name>/<container>. migrate
-	// never touches them; they are listed so the operator sees what has to come
-	// back by hand.
+	// Outside are the source's workloads that are not catalog apps and the
+	// containers of a migrated app's pod the chart's pod does not carry, as
+	// <namespace>/<name>[/<container>]. migrate never touches them; they are
+	// listed so the operator knows what has to come back by hand.
 	Outside []string `yaml:"outside,omitempty"`
 }
 
@@ -65,51 +48,35 @@ type Plan struct {
 // filed under in Plan.Apps is box's instance name, which is what the chart
 // calls the pod and what every caller passes to Rewrite.
 type App struct {
-	// Kind is the platform the app ran on. One plan can hold apps from
-	// several sources, and each app says which one it came from.
+	// Kind is the platform the app ran on; one plan can hold apps from
+	// several.
 	Kind string `yaml:"kind"`
-	// Source is the name the app had in the install being migrated: how
-	// discovery found it, and what the operator recognises in the source's own
-	// interface.
+	// Source is the name the app had in the install being migrated.
 	Source string `yaml:"source"`
-	// Image is the image reference the source ran. It is informational: the
-	// chart's variant is what runs after the migration, and the source's own
-	// image is never carried, because the admission policy is the guard on
-	// what a pod may run.
+	// Image is informational: the chart's variant is what runs, since admission
+	// is the guard on what a pod may run.
 	Image string `yaml:"image,omitempty"`
 	// Variant is the blessed variant that image already is, empty when it is
-	// none of them and the chart's default is what runs. A variant is only
-	// ever one of the chart's own (charts/s5n/variants.yaml).
+	// none and the chart's default runs.
 	Variant string `yaml:"variant,omitempty"`
-	// Config is the directory the app's config is copied from. migrate reads
-	// it and never writes it, so the running source stays the rollback until
-	// the operator tears it down.
+	// Config is the directory the app's config is copied from; migrate never
+	// writes it.
 	Config string `yaml:"config"`
-	// Namespace is the source namespace the app ran in, which is what a
-	// Service's short name stored in this app's config resolves against.
-	// Empty for a source that is not a cluster.
+	// Namespace is the source namespace, which a Service's short name in this
+	// app's config resolves against.
 	Namespace string `yaml:"namespace,omitempty"`
-	// Ports are the ports this app listened on in the source, as its own
-	// config set them. A localhost address another app stored is resolved to
-	// this app by its port.
+	// Ports are the ports this app listened on in the source; a localhost
+	// address another app stored resolves to this app by its port.
 	Ports []int `yaml:"ports,omitempty"`
-	// Category is the directory under /data/media box lays this instance's
-	// library out in, as the chart's values name it: `movies` for radarr,
-	// `movies-4k` for radarr-4k. Empty for an app that keeps no library, and
-	// for a read that had no chart to ask.
+	// Category is the /data/media directory this instance's library lives in,
+	// as the chart's values name it; empty for an app with no library.
 	Category string `yaml:"category,omitempty"`
-	// DownloadCategory is the qBittorrent category this instance's downloads
-	// are in, as the source's own download client named it: `Movies`,
-	// `4K/TV`. A migrated box keeps it, because the torrents are already in
-	// that directory and box never moves them; empty means the source said
-	// nothing (or said nothing useful), and box's own category is the answer.
+	// DownloadCategory is the qBittorrent category the source's client named
+	// (`4K/TV`), kept because the torrents are already there and box never
+	// moves them. Empty means box's own category.
 	DownloadCategory string `yaml:"downloadCategory,omitempty"`
-	// Carry is how much of this app's config directory the snapshot took:
-	// CarryFull for its whole data, CarryMinimal for the state the app cannot
-	// rebuild. Empty for every app whose config is its state, which is every
-	// app but Plex. A run that finds no room for the full set where it writes
-	// it says so and carries the state; the plan is what a read and the run
-	// that applies it agree on.
+	// Carry is how much of the config directory the snapshot took: CarryFull,
+	// or CarryMinimal for the state the app cannot rebuild (Plex only).
 	Carry string `yaml:"carry,omitempty"`
 	// Paths are this app's path rules.
 	Paths []PathRule `yaml:"paths"`
@@ -118,10 +85,10 @@ type App struct {
 // The two ways a snapshot can carry an app whose config is more than its state,
 // for App.Carry.
 const (
-	// CarryFull is all of it, less what the app rebuilds by itself.
+	// CarryFull is all of it, less what the app rebuilds.
 	CarryFull = "full"
-	// CarryMinimal is the state the app cannot rebuild: its settings and its
-	// databases, and not the library it built from the media it was given.
+	// CarryMinimal is the state the app cannot rebuild: settings and databases,
+	// not the library it built from the media.
 	CarryMinimal = "minimal"
 )
 
@@ -129,12 +96,11 @@ const (
 type PathRule struct {
 	From string `yaml:"from"`
 	To   string `yaml:"to"`
-	// Why is one line saying why discovery settled this mapping for the
-	// operator, written when the rule is a default rather than the operator's
-	// own: the directory it could not place, and what it took instead.
+	// Why is one line saying why discovery settled this mapping, required when
+	// the rule is a default.
 	Why string `yaml:"why,omitempty"`
-	// Default says discovery chose this rule, and the operator has not
-	// confirmed it. A default without a Why is a decision with no reason.
+	// Default says discovery chose this rule and the operator has not confirmed
+	// it.
 	Default bool `yaml:"default,omitempty"`
 }
 
@@ -155,9 +121,8 @@ func Load(name string) (*Plan, error) {
 	return p, nil
 }
 
-// Parse reads and checks a plan. Unknown keys are refused rather than ignored:
-// a plan is written by hand or by a discovery run, and a misspelled key
-// ("path:" for "paths:") would otherwise be a rule that silently does nothing.
+// Parse reads and checks a plan. Unknown keys are refused: a misspelled key
+// would otherwise be a rule that silently does nothing.
 func Parse(data []byte) (*Plan, error) {
 	var p Plan
 	dec := yaml.NewDecoder(bytes.NewReader(data))
@@ -168,8 +133,7 @@ func Parse(data []byte) (*Plan, error) {
 		}
 		return nil, &Error{Problems: []string{err.Error()}}
 	}
-	// A second document would be ignored by the decoder above, so refuse it
-	// instead of reading only the first.
+	// A second document would be silently ignored, so refuse it.
 	var extra yaml.Node
 	if err := dec.Decode(&extra); err == nil {
 		return nil, &Error{Problems: []string{"has more than one YAML document"}}
@@ -180,9 +144,9 @@ func Parse(data []byte) (*Plan, error) {
 	return &p, nil
 }
 
-// check enforces what a rule has to be for Rewrite to be total, and normalises
-// every path it accepts. Problems are returned together: an operator fixes the
-// file once, not once per line.
+// check enforces what a rule has to be for Rewrite to be total, normalising
+// every path it accepts. Problems come back together: an operator fixes the file
+// once.
 func (p *Plan) check() []string {
 	var problems []string
 	if p.Version != Version {
@@ -200,18 +164,16 @@ func (p *Plan) check() []string {
 		for i := range app.Paths {
 			r := &app.Paths[i]
 			at := fmt.Sprintf("apps.%s paths[%d]", name, i)
-			// The rule is about how a path the app itself stored reads now, so
-			// both sides name directories the app saw or will see, and both are
-			// absolute. A relative one could mean either side of the mount.
+			// Both sides are absolute: a relative one could mean either side of
+			// the mount.
 			if !path.IsAbs(r.From) {
 				problems = append(problems, fmt.Sprintf("apps.%s: from %q is not an absolute path", name, r.From))
 			}
 			if !path.IsAbs(r.To) {
 				problems = append(problems, fmt.Sprintf("apps.%s: to %q is not an absolute path", name, r.To))
 			}
-			// Clean first, then compare: /downloads and /downloads/ are one
-			// directory, and two rules for it would leave the winner to the
-			// order of the list.
+			// Clean first: two rules for /downloads/ would leave the winner to
+			// the order of the list.
 			r.From, r.To = path.Clean(r.From), path.Clean(r.To)
 			if path.IsAbs(r.From) {
 				if seen[r.From] {
@@ -230,9 +192,8 @@ func (p *Plan) check() []string {
 	}
 	for _, o := range p.Outside {
 		parts := strings.Split(o, "/")
-		// An outside entry is a workload, or one container of a workload: a
-		// pod a catalog app ran beside a sidecar the chart's pod does not
-		// carry. Nothing else is a thing an operator can bring back by hand.
+		// A workload, or one container of one: a sidecar the chart's pod does
+		// not carry.
 		if len(parts) < 2 || len(parts) > 3 || parts[0] == "" || parts[1] == "" || (len(parts) == 3 && parts[2] == "") {
 			problems = append(problems, fmt.Sprintf("outside: %q is not <namespace>/<name> or <namespace>/<name>/<container>", o))
 		}
@@ -254,21 +215,10 @@ func (p *Plan) appNames() []string {
 	return names
 }
 
-// Rewrite maps one stored path through the named app's table.
-//
-// A path that is not absolute comes back unchanged and true: an empty value, or
-// a name relative to the save path it sits under, follows whatever save path the
-// app is given, so no rule can be written for it and none is needed.
-//
-// An absolute path no rule covers comes back unchanged and false. That is a gap
-// in the plan, and the caller collects it rather than guessing at the mapping.
-//
-// The longest From wins and only whole path segments match, because /downloads2
-// is not a subdirectory of /downloads: mapping it as one would point the app at
-// a directory holding nothing it knows, which libtorrent would recheck from
-// scratch and the Arrs would read as a vanished episode. The rest of the path
-// is passed through exactly as it was found, including a trailing slash and any
-// doubled separator, because it names a file inside the mapped directory.
+// Rewrite maps one stored path through the named app's table. The longest From
+// wins and only whole segments match (/downloads2 is not under /downloads). A
+// relative path comes back unchanged and true; an absolute one no rule covers,
+// unchanged and false -- a gap the caller collects.
 func (p *Plan) Rewrite(appName, stored string) (string, bool) {
 	if !path.IsAbs(stored) {
 		return stored, true

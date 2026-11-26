@@ -7,39 +7,31 @@ import (
 	"strings"
 )
 
-// HostRule classifies one address a source app stored for another app.
-//
-// Only addresses plainly inside the source are rewritten (docs/box.md,
-// "Only local addresses are rewritten"): a localhost address, which Resolve
-// settles through the apps' Ports without a rule, or a Service discovery found
-// in the source cluster. Anything else, a LAN address, a domain or another
-// machine, stays as it is unless the plan maps it by hand, and every one apply
-// meets has to be classified here, or apply refuses.
+// HostRule classifies one address a source app stored for another. Only
+// addresses plainly inside the source are rewritten (docs/box.md, "Only local
+// addresses are rewritten"): localhost, settled by port, or a Service in the
+// source cluster. Everything else apply meets must be classified here or it
+// refuses.
 type HostRule struct {
-	// Service is a Service found in the source cluster, as <name>.<namespace>.
-	// It matches the short name (from an app in the same namespace),
-	// <name>.<namespace>, <name>.<namespace>.svc and
-	// <name>.<namespace>.svc.cluster.local.
+	// Service is a Service found in the source cluster, as <name>.<namespace>,
+	// matched in every cluster-DNS form, the short one only inside namespace.
 	Service string `yaml:"service,omitempty"`
-	// Host is any other address, matched exactly (case-insensitively).
+	// Host is any other address, matched case-insensitively.
 	Host string `yaml:"host,omitempty"`
-	// Path narrows a host rule to one URL path prefix: the path itself, and
-	// anything under it, on a "/" boundary. Empty matches every path. Only a
-	// host has a path -- a Service address is the app's own, and an address
-	// stored for it carries no path worth matching.
+	// Path narrows a host rule to one URL path prefix, on a "/" boundary; empty
+	// matches every path. Only a host has a path.
 	Path string `yaml:"path,omitempty"`
-	// Port narrows the rule to one port. Zero matches any port.
+	// Port narrows the rule to one port; zero matches any.
 	Port int `yaml:"port,omitempty"`
-	// App is the box instance the address now means. Exactly one of App and
+	// App is the box instance the address now means; exactly one of App and
 	// Leave is set.
 	App string `yaml:"app,omitempty"`
 	// Leave keeps the address as it is: it points outside the source.
 	Leave bool `yaml:"leave,omitempty"`
-	// Why is one line saying why discovery settled this address this way,
-	// written when the rule is a default rather than the operator's own.
+	// Why is one line saying why discovery settled this address, required when
+	// the rule is a default.
 	Why string `yaml:"why,omitempty"`
-	// Default says discovery chose this rule, and the operator has not
-	// confirmed it. A default without a Why is a decision with no reason.
+	// Default says discovery chose this rule, unconfirmed.
 	Default bool `yaml:"default,omitempty"`
 }
 
@@ -61,18 +53,11 @@ type Resolution struct {
 	App     string // set when Verdict is Rewrite
 }
 
-// Resolve classifies an address that app fromApp stored, host and port as the
-// app stored them (port 0 when it stored none).
-//
-// A localhost address is resolved by its port against every app's Ports: the
-// port is the only thing that says which app it was. Two apps claiming one port
-// is ambiguous and reads as Unclassified, so the operator settles it.
-//
-// A rule that names a path is not considered: an address read without a path is
-// no evidence for one of the apps a host serves under paths (ResolveURL is what
-// a caller holding the path uses). A host that has only path rules therefore
-// stays Unclassified, rather than naming the app at "/" or whichever rule comes
-// first.
+// Resolve classifies an address that app fromApp stored, host and port as stored
+// (0 when none). A localhost address is resolved by its port across every app's
+// Ports; two apps on one port is ambiguous and reads Unclassified. A path rule is
+// not considered -- ResolveURL is what a caller holding a path uses -- so a host
+// that only has path rules stays Unclassified rather than guessing.
 func (p *Plan) Resolve(fromApp, host string, port int) Resolution {
 	h := normaliseHost(host)
 	if isLocalhost(h) {
@@ -93,16 +78,11 @@ func (p *Plan) Resolve(fromApp, host string, port int) Resolution {
 	return Resolution{}
 }
 
-// ResolveURL classifies an address that app fromApp stored, with the URL path it
-// stored when it has one ("" when the address names no path).
-//
-// It is Resolve with the path, because one host can serve several apps -- box's
-// own shape is one domain with each app under a path -- and the path is then the
-// only thing that says which app an address meant. The rule whose path is the
-// longest prefix of urlPath wins, on a "/" boundary, and a rule with no path
-// covers every path. A host that has only path rules settles an address with no
-// path as Unclassified: never one of its apps, because that would be a guess,
-// and a guess points one app's connection at another.
+// ResolveURL classifies an address with the URL path stored with it ("" when
+// none). One host can serve several apps -- one domain, each app under a path --
+// and then the path is the only thing that says which app an address meant: the
+// longest prefix wins, on a "/" boundary. An address with no path on such a host
+// stays Unclassified, because a guess points one app's connection at another.
 func (p *Plan) ResolveURL(fromApp, host string, port int, urlPath string) Resolution {
 	h := normaliseHost(host)
 	if isLocalhost(h) {
@@ -125,8 +105,7 @@ func (p *Plan) ResolveURL(fromApp, host string, port int, urlPath string) Resolu
 		case n > best:
 			best, out = n, r.verdict()
 		case n == best && r.verdict() != out:
-			// Two rules say different things about one address: the
-			// operator settles it.
+			// Two rules disagree about one address: the operator settles it.
 			return Resolution{}
 		}
 	}
@@ -152,8 +131,8 @@ func (p *Plan) resolveLocal(port int) Resolution {
 	return Resolution{Verdict: Rewrite, App: match}
 }
 
-// matches reports whether the rule is about the host, as normaliseHost wrote it,
-// from an app in namespace fromNS.
+// matches reports whether the rule is about the host, normalised, from an app in
+// namespace fromNS.
 func (r HostRule) matches(h, fromNS string) bool {
 	return (r.Service != "" && serviceMatches(r.Service, h, fromNS)) || (r.Host != "" && strings.EqualFold(r.Host, h))
 }
@@ -166,10 +145,9 @@ func (r HostRule) verdict() Resolution {
 	return Resolution{Verdict: Rewrite, App: r.App}
 }
 
-// pathCovers reports whether prefix covers urlPath: the same path, or one under
-// it, on a segment boundary -- /qbittorrentx is not under /qbittorrent. A
-// prefix of "/" covers every path, and an address with no path is covered only
-// by that.
+// pathCovers reports whether prefix covers urlPath on a segment boundary
+// (/qbittorrentx is not under /qbittorrent); "/" covers every path, and "" only
+// an address with no path.
 func pathCovers(prefix, urlPath string) bool {
 	prefix = strings.TrimSuffix(prefix, "/")
 	if prefix == "" {
@@ -178,8 +156,8 @@ func pathCovers(prefix, urlPath string) bool {
 	return urlPath == prefix || strings.HasPrefix(urlPath, prefix+"/")
 }
 
-// normaliseHost is a stored host as rules are matched against it: lower case,
-// no brackets and no trailing dot.
+// normaliseHost is a stored host lower-cased, without brackets or a trailing
+// dot.
 func normaliseHost(host string) string {
 	return strings.ToLower(strings.TrimSuffix(strings.Trim(host, "[]"), "."))
 }
@@ -192,8 +170,8 @@ func isLocalhost(h string) bool {
 	return err == nil && a.Unmap().IsLoopback()
 }
 
-// serviceMatches reports whether host names the Service svc ("name.ns") in one
-// of the forms cluster DNS answers, the short form only from inside ns.
+// serviceMatches reports whether host names the Service svc ("name.ns") in a
+// cluster-DNS form, the short one only from inside ns.
 func serviceMatches(svc, host, fromNS string) bool {
 	svc = strings.ToLower(svc)
 	name, ns, _ := strings.Cut(svc, ".")
@@ -237,9 +215,8 @@ func (p *Plan) checkHosts() []string {
 		if r.Port < 0 || r.Port > 65535 {
 			problems = append(problems, fmt.Sprintf("%s: port %d is not a port", at, r.Port))
 		}
-		// One address is said once: two rules for the same host, port and
-		// path (or the same Service and port) would leave the answer to the
-		// order of the list. A host at several paths is several rules.
+		// One address is said once, or the answer is the list's order; a host at
+		// several paths is several rules.
 		key := fmt.Sprintf("%s\x00%s\x00%d\x00%s",
 			strings.ToLower(r.Service), strings.ToLower(r.Host), r.Port, r.Path)
 		if seen[key] {
@@ -259,8 +236,7 @@ func (p *Plan) checkHosts() []string {
 	return problems
 }
 
-// ruleAt is a rule's address as a refusal names it: the host with its path, or
-// the Service, and the port when the rule was narrowed to one.
+// ruleAt is a rule's address as a refusal names it.
 func ruleAt(r HostRule) string {
 	at := r.Service
 	if at == "" {

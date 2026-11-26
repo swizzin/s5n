@@ -10,7 +10,7 @@ func TestUncoveredErrorListsEveryGapSorted(t *testing.T) {
 		{App: "sonarr-4k", File: "b.fastresume", Key: "save_path", Path: "/mnt/one/a.mkv"},
 		{App: "sonarr-4k", File: "a.fastresume", Key: "save_path", Path: "/mnt/two/b.mkv"},
 		{App: "qbittorrent", File: "c.fastresume", Key: "mapped_files[2]", Path: "/mnt/three/c.mkv"},
-		// The same gap found twice is one decision, so it is listed once.
+		// The same gap found twice is one decision.
 		{App: "qbittorrent", File: "c.fastresume", Key: "mapped_files[2]", Path: "/mnt/three/c.mkv"},
 	}}
 	got := err.Error()

@@ -6,9 +6,8 @@ import (
 	"testing"
 )
 
-// sourceV2 is a plan with the whole version 2 shape: the source it was read
-// from, one app per platform, an image and the variant it maps to, and the two
-// kinds of rule discovery can write as a default. Every name is invented.
+// sourceV2 is the whole version 2 shape: source, one app per platform, image and
+// variant, and both kinds of defaulted rule. Every name is invented.
 const sourceV2 = `version: 2
 source:
   host: media-host.example.test
@@ -91,8 +90,6 @@ func TestParseReadsTheSourceBlock(t *testing.T) {
 	}
 }
 
-// TestPlanHoldsAppsFromEveryPlatform: one plan carries the apps of several
-// sources, which is what "combinations in one plan" means for the file.
 func TestPlanHoldsAppsFromEveryPlatform(t *testing.T) {
 	p := mustParse(t, sourceV2)
 	kinds := map[string]bool{}
@@ -102,8 +99,7 @@ func TestPlanHoldsAppsFromEveryPlatform(t *testing.T) {
 	if !kinds[Kubernetes] || !kinds[Swizzin] {
 		t.Fatalf("apps' kinds = %v, want apps from both platforms", kinds)
 	}
-	// The path tables stay per app: a swizzin app's rule does not touch the
-	// cluster app's paths.
+	// The path tables stay per app.
 	if got, ok := p.Rewrite("qbittorrent", "/home/user/torrents/a.mkv"); !ok || got != "/data/downloads/a.mkv" {
 		t.Errorf("qbittorrent rewrite = (%q, %v), want its own rule", got, ok)
 	}
@@ -128,8 +124,6 @@ func TestVersion1IsRefusedWithTheWayForward(t *testing.T) {
 	}
 }
 
-// TestV2Refusals: what a version 2 plan has to say, one test per way it can be
-// wrong. Each case is the smallest file that shows one problem.
 func TestV2Refusals(t *testing.T) {
 	app := func(fields string) string {
 		return "version: 2\napps:\n  q:\n    kind: kubernetes\n    source: q\n    config: /srv/q\n" + fields
@@ -224,8 +218,7 @@ func TestV2Refusals(t *testing.T) {
 	}
 }
 
-// TestSourceBlockIsOptional: a plan for one app's path table needs no source
-// behind it, which is what the rewriters' own fixtures are.
+// TestSourceBlockIsOptional: the rewriters' own fixtures have no source block.
 func TestSourceBlockIsOptional(t *testing.T) {
 	p := mustParse(t, `version: 2
 apps:
@@ -240,10 +233,8 @@ apps:
 	}
 }
 
-// TestDomainDefault: the plan carries the domain discovery read off the source's
-// Ingress hosts, normalised to the name box would serve. A value that is not a
-// DNS name is refused, because the plan's default is what the run would offer as
-// its answer.
+// TestDomainDefault: the domain is normalised to the name box would serve, and
+// anything that is not one is refused.
 func TestDomainDefault(t *testing.T) {
 	p := mustParse(t, `version: 2
 domain: Example.COM.
@@ -274,9 +265,8 @@ apps:
 	}
 }
 
-// TestSourceNamespacesAreNormalised: the source's scope is what makes two reads
-// one source, so it is one order with no repeats whatever the file says -- and a
-// list that is not namespaces is refused rather than matched against.
+// TestSourceNamespacesAreNormalised: the scope is one order with no repeats
+// whatever the file says, so two reads of one source match.
 func TestSourceNamespacesAreNormalised(t *testing.T) {
 	withNamespaces := func(list string) string {
 		return `version: 2

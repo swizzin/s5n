@@ -7,11 +7,9 @@ import (
 )
 
 // Error is a plan this box refuses, with every problem found in it rather than
-// the first. A plan is a few dozen lines an operator edits by hand, so one pass
-// should name everything that has to change.
+// the first: a hand-edited file should need one pass.
 type Error struct {
-	// Path is the file the plan was read from, empty when it was parsed from
-	// memory.
+	// Path is the file the plan was read from, empty when parsed from memory.
 	Path string
 	// Problems are the lines the operator has to fix.
 	Problems []string
@@ -28,10 +26,8 @@ func (e *Error) Error() string {
 	return name + ":\n  " + strings.Join(e.Problems, "\n  ")
 }
 
-// Uncovered is one absolute path a rewrite met with no rule in the plan behind
-// it: the app whose table was asked, the file the path was found in (empty when
-// the question was asked of a table rather than a file), the key inside that
-// file, and the path.
+// Uncovered is one absolute path a rewrite met with no rule behind it: the app
+// whose table was asked, the file and key it was found in, and the path.
 type Uncovered struct {
 	App  string
 	File string
@@ -39,12 +35,9 @@ type Uncovered struct {
 	Path string
 }
 
-// UncoveredError is every gap found in one run.
-//
-// A config tree holds thousands of stored paths, so a rewriter that returned on
-// the first one would make the operator add a rule, run again and find the next
-// one, repeatedly, while the source install keeps running. Collecting them
-// makes it one edit. Nothing is written while any gap exists.
+// UncoveredError is every gap found in one run: a config tree holds thousands of
+// stored paths, so failing on the first would cost an edit and a re-run per gap
+// while the source keeps running. Nothing is written while any gap exists.
 type UncoveredError struct {
 	Paths []Uncovered
 }
@@ -65,8 +58,7 @@ func (e *UncoveredError) Error() string {
 	return b.String()
 }
 
-// sorted is the gaps in a stable order, with an entry found twice listed once:
-// the same path under the same key is one decision to make.
+// sorted is the gaps in a stable order, a duplicate listed once.
 func (e *UncoveredError) sorted() []Uncovered {
 	out := append([]Uncovered(nil), e.Paths...)
 	sort.Slice(out, func(i, j int) bool {
@@ -92,8 +84,7 @@ func (e *UncoveredError) sorted() []Uncovered {
 	return deduped
 }
 
-// String renders one gap the way the operator has to read it: where it is, then
-// the path no rule covers.
+// String renders one gap: where it is, then the path.
 func (u Uncovered) String() string {
 	where := u.App
 	if u.File != "" {

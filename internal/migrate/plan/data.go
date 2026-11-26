@@ -6,34 +6,18 @@ import (
 	"strings"
 )
 
-// The directories box's data contract names under the data root: qBittorrent
-// saves under the first, the Arrs keep their root folders under the second
-// (charts/s5n/values.yaml, "The data contract").
+// The directories box's data contract names under the data root (see
+// charts/s5n/values.yaml, "The data contract").
 const (
 	DownloadsDir = "downloads"
 	MediaDir     = "media"
 )
 
-// Data is where the source kept its downloads and media, when box adopts them
-// where they are. Data never moves between filesystems: hardlinks between a
-// download and its imported copy survive only a rename, so the root becomes
-// box's data path as it is, and the two directories under it are renamed to
-// the names box's contract uses when they differ.
-//
-// The library's own directories are box's categories after a migration, so
-// `folders` names the one source directory each category is: a source that
-// called its films media/Movies ends up with media/movies, and the Arrs, Plex
-// and everything else that stored the old name is rewritten to the new one.
-// The downloads are not touched: a category there keeps its name and its
-// torrents stay where they are.
-//
-//	data:
-//	  root: /srv/library
-//	  downloads: Downloads      # renamed to downloads
-//	  media: media              # already the contract's name
-//	  folders:
-//	    - from: Movies          # media/Movies becomes media/movies
-//	      to: movies
+// Data is where the source kept its downloads and media, adopted where it is:
+// hardlinks survive only a rename, so the root becomes box's data path and the
+// directories under it are renamed to the contract's names. `folders` maps each
+// library directory onto the category an instance's media lives in; downloads
+// are never renamed. See docs/box.md "migrate" for the full shape.
 type Data struct {
 	// Root is the host directory that becomes the seedbox's data path.
 	Root string `yaml:"root"`
@@ -41,36 +25,29 @@ type Data struct {
 	Downloads string `yaml:"downloads"`
 	// Media is the directory under Root the source kept its library in.
 	Media string `yaml:"media"`
-	// Folders is one entry per library directory the source had, mapped onto
-	// the category the box instance's media lives in. A directory already
-	// named as its category is listed too, and changes nothing.
+	// Folders maps each library directory onto a category; one already named as
+	// its category changes nothing.
 	Folders []MediaFolder `yaml:"folders,omitempty"`
 }
 
-// MediaFolder is one library directory under Data.Media and the box category
-// it becomes. From and To are both relative to the media directory, and at most
-// one '/' deep, because a category may be a qBittorrent subcategory
-// (4K/Movies): a rename moves one directory, never a tree.
-//
-// To is a category some app in the plan has (Plan.Apps[*].Category), which is
-// what makes it the directory box's own release, its wiring and its Plex
-// library all expect.
+// MediaFolder is one library directory under Data.Media and the box category it
+// becomes, both relative to the media directory and at most one '/' deep: a
+// rename moves one directory, never a tree. To must be a category an app in the
+// plan has, which is what the release, wiring and Plex expect.
 type MediaFolder struct {
 	// From is the directory as the source named it, relative to Data.Media.
 	From string `yaml:"from"`
-	// To is the box category the directory becomes, relative to the media
-	// directory.
+	// To is the category the directory becomes.
 	To string `yaml:"to"`
-	// Why is one line saying why discovery settled this mapping when it is a
-	// default: the root folders it had to choose between, and what it took.
+	// Why is one line saying why discovery settled this mapping, required when
+	// it is a default.
 	Why string `yaml:"why,omitempty"`
-	// Default says discovery chose this mapping, and the operator has not
-	// confirmed it. A default without a Why is a decision with no reason.
+	// Default says discovery chose this mapping, unconfirmed.
 	Default bool `yaml:"default,omitempty"`
 }
 
-// Renames is what apply renames under Root, source name to contract name, in a
-// fixed order. A directory already named as the contract wants is not listed.
+// Renames is what apply renames under Root, in a fixed order; a directory already
+// named as the contract wants is not listed.
 func (d *Data) Renames() [][2]string {
 	var out [][2]string
 	for _, r := range [][2]string{{d.Downloads, DownloadsDir}, {d.Media, MediaDir}} {
@@ -81,13 +58,9 @@ func (d *Data) Renames() [][2]string {
 	return out
 }
 
-// MediaRenames is the library directories apply renames inside the media
-// directory, as the pairs a summary prints: the source's name and the category
-// the instance's media lives in. A directory already named as its category is
-// not listed, which is what makes a source already in box's layout a no-op.
-//
-// They happen after Renames, so both sides are under the media directory's
-// contract name whichever the source used.
+// MediaRenames is the library renames inside the media directory, as the pairs a
+// summary prints; an already-named directory is not listed. They happen after
+// Renames, so both sides are under the contract name.
 func (d *Data) MediaRenames() [][2]string {
 	var out [][2]string
 	for _, f := range d.Folders {
@@ -99,9 +72,8 @@ func (d *Data) MediaRenames() [][2]string {
 	return out
 }
 
-// checkData enforces that the renames are plain, single-segment and can't
-// collide: a rename is the one write migrate makes to the data, so it has to
-// be the obvious one.
+// checkData enforces that the renames are plain, single-segment and cannot
+// collide.
 func (p *Plan) checkData() []string {
 	d := p.Data
 	if d == nil {
@@ -127,22 +99,16 @@ func (p *Plan) checkData() []string {
 	if d.Downloads != "" && d.Downloads == d.Media {
 		problems = append(problems, fmt.Sprintf("data: downloads and media are both %q", d.Downloads))
 	}
-	// Renaming downloads to "media" or media to "downloads" would have the
-	// first rename land on the second's source.
+	// Otherwise the first rename lands on the second's source.
 	if d.Downloads == MediaDir || d.Media == DownloadsDir {
 		problems = append(problems, "data: downloads and media are swapped relative to box's names; rename one by hand first")
 	}
 	return append(problems, p.checkFolders()...)
 }
 
-// checkFolders enforces that the library mapping says one thing about one
-// directory: one entry per source directory, one entry per category, and a
-// category an app in the plan actually has.
-//
-// The mapping is a rename, and a rename is the only write migrate makes to the
-// data, so it has to be the obvious one: two source directories becoming one
-// category would have the second land on the first, and a category no instance
-// has is a directory box would never mount or wire.
+// checkFolders enforces one entry per source directory and per category, and a
+// category an app actually has: two sources becoming one category would have the
+// second land on the first, and an unused category is never mounted or wired.
 func (p *Plan) checkFolders() []string {
 	d := p.Data
 	if d == nil {
@@ -156,9 +122,8 @@ func (p *Plan) checkFolders() []string {
 		f.From, f.To = path.Clean(f.From), path.Clean(f.To)
 		problems = append(problems, p.checkFolder(i, f, seenFrom, seenTo)...)
 	}
-	// A directory inside another one is two renames that cannot both happen:
-	// moving the outer one first carries the inner one with it, and the inner
-	// one's rename then names nothing.
+	// A directory inside another is two renames that cannot both happen: the
+	// outer move carries the inner, whose rename then names nothing.
 	for i := range d.Folders {
 		for j := range d.Folders {
 			a, b := d.Folders[i].From, d.Folders[j].From
@@ -173,9 +138,8 @@ func (p *Plan) checkFolders() []string {
 	return problems
 }
 
-// checkFolder is one entry's half of checkFolders: its two sides are plain
-// directories under the media directory, it is the only entry for each, and the
-// category it becomes is one an app in the plan has.
+// checkFolder checks one entry: both sides plain directories under the media
+// directory, unique, and landing on a category the plan has.
 func (p *Plan) checkFolder(i int, f *MediaFolder, seenFrom, seenTo map[string]bool) []string {
 	at := fmt.Sprintf("data.folders[%d]", i)
 	var problems []string
@@ -206,8 +170,7 @@ func (p *Plan) checkFolder(i int, f *MediaFolder, seenFrom, seenTo map[string]bo
 	return append(problems, whyProblems(at, f.Why, f.Default)...)
 }
 
-// hasCategory reports whether one of the plan's apps keeps its library in this
-// category.
+// hasCategory reports whether an app keeps its library in this category.
 func (p *Plan) hasCategory(category string) bool {
 	for _, app := range p.Apps {
 		if app.Category == category {
@@ -217,8 +180,7 @@ func (p *Plan) hasCategory(category string) bool {
 	return false
 }
 
-// categories is every category the plan's apps have, sorted, as a refusal lists
-// them.
+// categories is every category the plan's apps have, in app order.
 func (p *Plan) categories() []string {
 	var out []string
 	for _, name := range p.appNames() {

@@ -5,9 +5,8 @@ import (
 	"testing"
 )
 
-// foldersPlan is a plan for a source whose library is called the names its
-// Arrs and Plex gave it: box's own layout for the same seedbox is movies,
-// movies-4k, tv and tv-4k, so every one of them is a rename.
+// foldersPlan: the source's library names are not box's categories, so every one
+// is a rename.
 const foldersPlan = `version: 2
 data:
   root: /srv/library
@@ -49,8 +48,6 @@ apps:
         to: /data/media/tv
 `
 
-// TestDataMediaRenames: the library's own directories are renamed onto the
-// categories the plan's apps have, and the pair is what a summary prints.
 func TestDataMediaRenames(t *testing.T) {
 	p := mustParse(t, foldersPlan)
 	got := p.Data.MediaRenames()
@@ -63,16 +60,12 @@ func TestDataMediaRenames(t *testing.T) {
 			t.Fatalf("MediaRenames() = %v, want %v", got, want)
 		}
 	}
-	// The two contract directories are renamed as they always were, and the
-	// library is one of them: the folders are steps inside it.
+	// The folders are steps inside the library, which is renamed first.
 	if renames := p.Data.Renames(); len(renames) != 2 || renames[1] != [2]string{"library", "media"} {
 		t.Errorf("Renames() = %v, want Downloads -> downloads and library -> media", renames)
 	}
 }
 
-// TestDataMediaRenamesAreAFirstRunNoOp: a source already in box's layout needs
-// no folder renamed, which is what makes a re-run and a box-named source
-// change nothing on disk.
 func TestDataMediaRenamesAreAFirstRunNoOp(t *testing.T) {
 	p := mustParse(t, `version: 2
 data:
@@ -97,9 +90,8 @@ apps:
 	}
 }
 
-// TestParseRefusesBadMediaFolders: the mapping is a rename of the operator's
-// library, so every way it could move the wrong directory is a refusal that
-// names the entry.
+// TestParseRefusesBadMediaFolders: every way the mapping could move the wrong
+// directory is a refusal that names the entry.
 func TestParseRefusesBadMediaFolders(t *testing.T) {
 	base := "version: 2\napps:\n  radarr:\n    kind: kubernetes\n    source: radarr\n    config: /srv/r\n    category: movies\n" +
 		"data:\n  root: /srv/library\n  downloads: Downloads\n  media: library\n"
@@ -126,8 +118,6 @@ func TestParseRefusesBadMediaFolders(t *testing.T) {
 	}
 }
 
-// TestParseAcceptsTwoNestedSources: the two 4K instances' libraries sit under
-// one parent, and neither is inside the other, so both are renames.
 func TestParseAcceptsTwoNestedSources(t *testing.T) {
 	_, err := Parse([]byte(`version: 2
 apps:
@@ -154,8 +144,6 @@ data:
 	}
 }
 
-// TestParseRefusesBadCategories: a category is a path segment box lays out
-// itself, so a value that is not one is refused where it is written.
 func TestParseRefusesBadCategories(t *testing.T) {
 	base := "version: 2\napps:\n  radarr:\n    kind: kubernetes\n    source: radarr\n    config: /srv/r\n"
 	tests := []struct{ name, extra, want string }{

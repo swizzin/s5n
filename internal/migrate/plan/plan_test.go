@@ -8,9 +8,9 @@ import (
 	"testing"
 )
 
-// sourcePlan is a plan for an install whose Arrs saw the library under
-// /library and whose torrent client saw the same files as /downloads, which is
-// the case the table exists for. Every path is invented.
+// sourcePlan: the Arrs saw the library under /library and the torrent client the
+// same files as /downloads, which is the case the table exists for. Paths are
+// invented.
 const sourcePlan = `version: 2
 apps:
   qbittorrent:
