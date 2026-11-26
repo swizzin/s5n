@@ -1,13 +1,11 @@
-// Package qbit rewrites what a migrated qBittorrent install stored about
-// paths: its configuration file, the three JSON files beside it, and the
-// resume data in whichever store the source used.
+// Package qbit rewrites what a migrated qBittorrent stored about paths: its
+// configuration file, the three JSON files beside it, and the resume data in
+// whichever store the source used.
 //
-// The work happens on the copied config directory before the app's first
-// start, for one reason above all: qBittorrent 5 converts its resume store on
-// startup, and a store it converts carries whatever paths it held at that
-// moment into the new one (research: qbittorrent.md §Q3.5). Rewriting first is
-// one stop and one write; rewriting after means re-encoding a database the app
-// has already touched, and leaves a stale BT_backup/ behind as a trap.
+// It runs on the copied config before the app's first start because qBittorrent 5
+// converts its resume store on startup and carries the paths it held at that
+// moment into the new one (research: qbittorrent.md §Q3.5); rewriting after would
+// re-encode a database the app already touched and leave a stale BT_backup/ trap.
 package qbit
 
 import (
@@ -58,10 +56,9 @@ type layout struct {
 	resume     string
 }
 
-// findLayout settles the layout before anything is read, and refuses the older
-// one by name: migrate copies a config tree and rewrites it, and a tree whose
-// conf sits in config/ while its torrent data sits in data/ is a layout box
-// does not produce, so converting it would be a guess.
+// findLayout settles the layout before anything is read and refuses the older one
+// by name: a tree whose conf sits in config/ while its data sits in data/ is not a
+// layout box produces, so converting it would be a guess.
 func findLayout(dir string) (layout, error) {
 	l := layout{
 		root:       filepath.Join(dir, dirRel),
@@ -94,15 +91,10 @@ func exists(path string) bool {
 	return err == nil
 }
 
-// TorrentPort reads the port the source's qBittorrent announced to peers, or
-// says it named none. qBittorrent 5 keeps it at [BitTorrent] Session\Port, and
-// a conf that upgraded in place -- or that qBittorrent 4 wrote -- carries
-// [Preferences] Connection\PortRangeMin for the same setting; the session key
-// is the live one when both are there.
-//
-// A directory in the layout this package refuses names no port: the rewriter
-// stops the run before anything is written, and a number read out of a shape
-// box does not produce would be a guess.
+// TorrentPort reads the port the source announced to peers, or says it named
+// none: [BitTorrent] Session\Port is live when both spellings are present, the
+// older [Preferences] Connection\PortRangeMin otherwise. A refused layout names no
+// port: a number read out of a shape box does not produce would be a guess.
 func TorrentPort(dir string) (int, bool) {
 	lay, err := findLayout(dir)
 	if err != nil {
@@ -184,10 +176,8 @@ func (rewriter) Write(ctx context.Context, in rewrite.Input) (rewrite.Report, er
 	return a.report(), nil
 }
 
-// openResume opens the SQLite resume store when the source has one. Which
-// store the source used is read off the directory, never assumed: the image's
-// own defaults pick SQLite while qBittorrent's code default is the file store,
-// and either can be what a source holds (research: qbittorrent.md §Q3.4).
+// openResume opens the SQLite resume store when the source has one; which store it
+// used is read off the directory, never assumed (research: qbittorrent.md §Q3.4).
 func openResume(ctx context.Context, lay layout, writable bool) (*sql.DB, error) {
 	if !exists(lay.resume) {
 		return nil, nil
@@ -198,8 +188,7 @@ func openResume(ctx context.Context, lay layout, writable bool) (*sql.DB, error)
 	return sqlitedb.OpenReadOnly(ctx, lay.resume)
 }
 
-// outFile is one file the write pass replaces: its bytes and the mode the
-// source file had, so a config root's permissions survive.
+// outFile is one file the write pass replaces, with the source's mode.
 type outFile struct {
 	data []byte
 	mode fs.FileMode
@@ -218,8 +207,7 @@ type changeKey struct {
 	what  string
 }
 
-// analysis is one pass's findings and the writes that make them true. Check
-// drops the writes; Write makes them.
+// analysis is one pass's findings and the writes that make them true.
 type analysis struct {
 	in       rewrite.Input
 	lay      layout
@@ -259,8 +247,8 @@ func (a *analysis) gap(file, key, stored string) {
 	a.uncover = append(a.uncover, plan.Uncovered{App: a.in.App, File: file, Key: key, Path: stored})
 }
 
-// path maps one stored path through the app's table. A path no rule covers is
-// a gap only where the app acts on it; a cosmetic one is left alone.
+// path maps one stored path through the app's table; one no rule covers is a gap
+// only where the app acts on it.
 func (a *analysis) path(file, where, stored string, live bool) (string, bool) {
 	out, covered := a.in.Plan.Rewrite(a.in.App, stored)
 	if !covered {
@@ -294,9 +282,8 @@ func (a *analysis) report() rewrite.Report {
 	return rep
 }
 
-// refuse stops a write pass that found something its Check did not report.
-// Apply runs every app's Check before any app's Write, so a new gap here means
-// the staged copy moved under the run; half a migration is worse than none.
+// refuse stops a write pass that found what its Check did not: every Check runs
+// before any Write, so a new gap means the staged copy moved under the run.
 func (a *analysis) refuse() error {
 	if len(a.uncover) > 0 {
 		return &plan.UncoveredError{Paths: a.uncover}
@@ -304,9 +291,8 @@ func (a *analysis) refuse() error {
 	return nil
 }
 
-// apply writes what the pass found. The database is one transaction; each file
-// goes through atomicfile, so a crash leaves complete files rather than half a
-// conf qBittorrent would rewrite from defaults.
+// apply writes what the pass found: the database in one transaction, each file
+// through atomicfile, so a crash never leaves half a conf.
 func (a *analysis) apply(ctx context.Context) error {
 	if err := a.refuse(); err != nil {
 		return err
@@ -362,8 +348,7 @@ func (a *analysis) writeFile(name string, data []byte, mode fs.FileMode) {
 	a.files[name] = outFile{data: data, mode: mode}
 }
 
-// readJSON reads one of the app's JSON files. A missing file is no error: an
-// install that never used categories has none, and there is nothing to rewrite.
+// readJSON reads one of the app's JSON files; a missing one is no error.
 func readJSON(path string) (raw []byte, mode fs.FileMode, ok bool, err error) {
 	info, err := os.Stat(path)
 	switch {
@@ -379,11 +364,10 @@ func readJSON(path string) (raw []byte, mode fs.FileMode, ok bool, err error) {
 	return data, info.Mode().Perm(), true, nil
 }
 
-// legacyMap decides what to do with one of the two QVariant maps qBittorrent 5
-// migrates on first start. When the JSON file beside it exists, the map is
-// never read and is left alone; when it does not, the map *is* how the app
-// learns the paths, and this tool cannot rewrite an escaped QDataStream blob
-// safely, so it refuses with the one step that settles it.
+// legacyMap handles one of the two QVariant maps qBittorrent 5 migrates on first
+// start: with the JSON file beside it the map is never read, and without one it
+// is how the app learns the paths -- an escaped QDataStream blob this tool cannot
+// rewrite safely, so it refuses with the step that settles it.
 func (a *analysis) legacyMap(section, key, jsonFile, jsonRel string) error {
 	where := section + " " + key
 	if exists(jsonFile) {
@@ -416,8 +400,7 @@ func (a *analysis) confFile() error {
 		}
 		changed = changed || keyChanged
 	}
-	// qBittorrent has no URL base, and the chart's route strips a prefix, so
-	// its own listen setting is the port and nothing else.
+	// No URL base: the chart's route strips a prefix, so the port is all box sets.
 	ep, ok := a.in.Targets[a.in.App]
 	if !ok {
 		return fmt.Errorf("the plan has no endpoint for %s, so its WebUI port cannot be set", a.in.App)
@@ -428,10 +411,8 @@ func (a *analysis) confFile() error {
 		a.change(confRel, sectionWebUI+" Port", "port")
 		changed = true
 	}
-	// A rehearsal's two settings, and they are settings rather than a rewrite:
-	// anything autobrr and the Arrs add from here on lands stopped, and RSS
-	// rules grab nothing. Both are read at start, so they have to be in the
-	// file before the app's first run.
+	// A rehearsal's two settings, read at start: anything added from here lands
+	// stopped, and RSS rules grab nothing.
 	if a.in.Rehearsal {
 		for _, k := range rehearsalConfKeys {
 			where := k.section + " " + k.key
@@ -476,9 +457,8 @@ func (a *analysis) confKey(c *conf, k confKey) (bool, error) {
 	}
 }
 
-// confList rewrites a QSettings string list, rewriting only the elements a
-// rule covers: a history list is cosmetic, so an uncovered entry stays where
-// it is rather than stopping the migration.
+// confList rewrites the elements a rule covers; a history list is cosmetic, so an
+// uncovered entry stays rather than stopping the migration.
 func (a *analysis) confList(c *conf, k confKey, where, value string) bool {
 	items := splitList(value)
 	rewritten := make([]string, len(items))
@@ -515,10 +495,10 @@ func (a *analysis) jsonRelFor(key string) string {
 	return watchedRel
 }
 
-// resumeData rewrites whichever resume stores the source has. A source can
-// have both (a Legacy → SQLite conversion leaves BT_backup behind,
-// sessionimpl.cpp:1741-1755), so every store present is rewritten and the
-// operator is told when there are two.
+// resumeData rewrites whichever resume stores the source has. A source can have
+// both (a Legacy → SQLite conversion leaves BT_backup behind,
+// sessionimpl.cpp:1741-1755), so each present store is rewritten and the operator
+// is told when there are two.
 func (a *analysis) resumeData(ctx context.Context) error {
 	legacy, err := isDir(a.lay.legacy)
 	if err != nil {
@@ -583,16 +563,14 @@ func (a *analysis) resumeStore(ctx context.Context) error {
 	return rows.Err()
 }
 
-// resumeColumns rewrites one torrent's resume row: its two path columns, and
-// the bencoded libtorrent blob that carries the save path again.
+// resumeColumns rewrites one row's two path columns and its bencoded blob.
 func (a *analysis) resumeColumns(id int64, save, download sql.NullString, blob []byte) error {
 	for _, column := range []struct {
 		name  string
 		value sql.NullString
 	}{{"target_save_path", save}, {keyDownloadPath, download}} {
 		if !column.value.Valid || column.value.String == "" {
-			// An empty save path means automatic torrent management, which
-			// follows the app's own settings.
+			// An empty save path means automatic torrent management.
 			continue
 		}
 		out, covered := a.path(resumeRel, "torrents."+column.name, column.value.String, true)
@@ -623,9 +601,8 @@ func (a *analysis) resumeColumns(id int64, save, download sql.NullString, blob [
 	return nil
 }
 
-// resumeOptions is what every resume-store pass is told: a rehearsal stops the
-// torrents as well as rewriting their paths, so both stores come out stopped
-// whether the source kept one or both.
+// resumeOptions stops the torrents in a rehearsal, so either store comes out
+// stopped.
 func (a *analysis) resumeOptions() []fastresume.Option {
 	if a.in.Rehearsal {
 		return []fastresume.Option{fastresume.Stop()}
