@@ -5,9 +5,6 @@ package apply
 // Preferences.xml, and the release Secret's plex-token is what every
 // Plex-dependent app reads -- so the run reads it out of the file it is copying
 // and seeds the Secret, never over a token a person supplied.
-//
-// Every fixture here is synthetic: a Preferences.xml shaped the way Plex writes
-// one, an invented token, and the seedbox's two host paths.
 
 import (
 	"context"
@@ -25,8 +22,6 @@ import (
 // with. Deliberately not shaped like a real one.
 const testPlexToken = "synthetic-server-token-0000"
 
-// plexPrefs is Preferences.xml as a claimed Plex writes it, in the image's own
-// layout.
 const plexPrefs = `<?xml version="1.0" encoding="utf-8"?>
 <Preferences OldestPreviousVersion="1.43.5.11079" MachineIdentifier="synthetic-machine" FriendlyName="synthetic" PlexOnlineUsername="synthetic-account" PlexOnlineMail="synthetic@example.test" PlexOnlineToken="` + testPlexToken + `" PlexOnlineHome="1" TranscoderTempDirectory="/srv/apps/plex/transcode" />
 `

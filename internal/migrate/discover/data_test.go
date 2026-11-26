@@ -8,9 +8,6 @@ import (
 	"github.com/swizzin/s5n/internal/migrate/plan"
 )
 
-// categories is the chart's own directory for each instance of the source
-// install's Arrs, which is what a caller hands discovery so the library it
-// finds can be renamed onto box's layout.
 func categories() map[string]string {
 	return map[string]string{
 		"sonarr": "tv", "sonarr-4k": "tv-4k",
@@ -73,8 +70,6 @@ func arrInstall(t *testing.T) *fixture {
 	return f
 }
 
-// withCategories hands discovery the chart's directories, the way cmd/box hands
-// over the categories its values name.
 func (f *fixture) withCategories() *fixture {
 	f.categories = categories()
 	return f
@@ -250,8 +245,6 @@ func mentions(notes []string, want string) bool {
 }
 
 // clientRow is one row of an Arr's DownloadClients table, as the database
-// stores it: the implementation, whether the app dials it, and the category its
-// settings name.
 type clientRow struct {
 	implementation string
 	enabled        bool

@@ -88,8 +88,6 @@ func assertSonarrConfig(t *testing.T, f *fixture) {
 	}
 }
 
-// assertQbitConfig is the client's half: the contract's save path in the file
-// and in the resume store beside it.
 func assertQbitConfig(t *testing.T, f *fixture) {
 	t.Helper()
 	conf := f.readFile("config/qbittorrent/qBittorrent/qBittorrent.conf")
@@ -134,8 +132,6 @@ func assertRecord(t *testing.T, f *fixture, res Result, raw []byte) {
 	}
 }
 
-// assertOwned: the connection the rewriter adopted is in wiring's record, keyed
-// the way wiring looks it up (the Arr that stores the client).
 func assertOwned(t *testing.T, owned *fakeOwned) {
 	t.Helper()
 	rec, err := wiring.ParseOwnedRecord(owned.data)
@@ -147,8 +143,6 @@ func assertOwned(t *testing.T, owned *fakeOwned) {
 	}
 }
 
-// assertKeys: each app keeps the key it has today, in the release Secret and in
-// its own file.
 func assertKeys(t *testing.T, f *fixture, res Result) {
 	t.Helper()
 	if got := f.keys.values["sonarr-apikey"]; got != testAPIKey {

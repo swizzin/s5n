@@ -13,10 +13,6 @@ import (
 	"github.com/swizzin/s5n/internal/migrate/plan"
 )
 
-// sourceInstall is the shape migrate was written for: two Sonarr instances
-// sharing one library mounted at /library, qBittorrent seeing the same downloads
-// as /downloads, Plex with only the library mounted, and something box has no
-// app for running beside them.
 func sourceInstall(t *testing.T) *fixture {
 	t.Helper()
 	f := newFixture(t)
@@ -1488,8 +1484,6 @@ func TestDiscoverPodOwnedByTwoApps(t *testing.T) {
 }
 
 // dataSource is the smallest source discovery can plan: qBittorrent naming the
-// downloads and one Arr naming the library. mut shapes both pods, which is how a
-// test says what account they run as.
 func dataSource(t *testing.T, mut func(name string, spec *appSpec)) *fixture {
 	t.Helper()
 	f := newFixture(t)
@@ -1840,9 +1834,6 @@ func TestDiscoverMapsAPatchReleaseTagOntoItsVariant(t *testing.T) {
 	}
 }
 
-// libtorrentPatchTag is a chart tag as the project spelled its builds while
-// libtorrent's patch release was in the tag: the chart's 5.3.1-lt1.2-10g is
-// 5.3.1-lt1.2.20-10g with it, and the chart's 5.3.1-lt2.1 is 5.3.1-lt2.1.20.
 func libtorrentPatchTag(t *testing.T, tag string) string {
 	t.Helper()
 	i := strings.Index(tag, "-lt")
@@ -1939,9 +1930,6 @@ func TestDiscoverMapsTheVariantATagNames(t *testing.T) {
 	}
 }
 
-// olderQbittorrent is a chart variant's tag with an older qBittorrent version in
-// front: the chart's 5.3.1-lt2.1 becomes 4.6.0-lt2.1, which is the same build on
-// the same libtorrent line.
 func olderQbittorrent(t *testing.T, variant, version string) string {
 	t.Helper()
 	image := qbittorrentImage(t, variant)

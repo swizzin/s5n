@@ -1,9 +1,5 @@
 package apply
 
-// runner_test.go drives the Job runner against client-go's fake: the Job's spec,
-// the file protocol box and the pod pass each other, and the three ways a run
-// ends (success, a non-zero exit, a cancellation).
-
 import (
 	"context"
 	"fmt"
@@ -43,9 +39,6 @@ type runnerFixture struct {
 	onCreated func()
 }
 
-// newRunnerFixture builds a runner with a fake cluster whose "pod" answers the
-// file protocol the moment the Job is created: it writes stdout, stderr and the
-// exit status it was told to.
 func newRunnerFixture(t *testing.T, stdout, stderr string, code int) *runnerFixture {
 	t.Helper()
 	root := t.TempDir()
@@ -103,8 +96,6 @@ func newRunnerFixture(t *testing.T, stdout, stderr string, code int) *runnerFixt
 	return f
 }
 
-// extraGroups is the invoking user's groups other than its effective one: a
-// non-root process may only give a file away to a group it belongs to.
 func extraGroups() []int {
 	var out []int
 	groups, err := os.Getgroups()

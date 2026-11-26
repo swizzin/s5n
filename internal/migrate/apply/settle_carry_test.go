@@ -1,8 +1,6 @@
 package apply
 
 // settle_carry_test.go is the answers a cutover does not ask again: what an
-// earlier read of the same source settled, written into this run's plan as an
-// answer rather than a default, and shown one row each.
 
 import (
 	"strings"

@@ -2,8 +2,6 @@ package apply
 
 // carry_test.go is the other end of the read's decision: what a run stages at the
 // config root, where a full carry may not fit even though the snapshot was taken
-// with room. A run that carries less than the plan says says so, and its staged
-// copy is the state alone.
 
 import (
 	"context"
@@ -26,9 +24,6 @@ func (d shortDisk) Free(string) (int64, error) { return d.free, nil }
 
 func (d shortDisk) Same(string, string) (bool, error) { return true, nil }
 
-// plexCarryEnv is one plan naming Plex and the source's config tree, as a
-// snapshot's config/ directory holds it: the state, the artwork Plex built, and
-// the caches it rebuilds.
 func plexCarryEnv(t *testing.T) (Env, *plan.Plan, []byte) {
 	t.Helper()
 	root := t.TempDir()
@@ -184,8 +179,6 @@ func TestAPlanThatSaysTheStateNeverStagesTheTree(t *testing.T) {
 	}
 }
 
-// envelopeFor is the summary Survey shows for one snapshot, which is the read
-// that has no cluster.
 func envelopeFor(t *testing.T, env Env, p *plan.Plan, raw []byte) Summary {
 	t.Helper()
 	env.Run = func(context.Context, string, []string, []byte) ([]byte, error) {

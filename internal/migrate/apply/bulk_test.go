@@ -1,9 +1,5 @@
 package apply
 
-// bulk_test.go proves the other half of a full carry: the tree the snapshot holds
-// and no check reads is written once, at the config root, out of the snapshot --
-// and the pass before an install counts it without staging it.
-
 import (
 	"context"
 	"os"
@@ -44,9 +40,6 @@ func (b *fakeBulk) Stage(instance, dst string, uid, gid int) (Staged, error) {
 	return Staged{Files: b.files, Bytes: b.bytes}, nil
 }
 
-// plexSplitEnv is a snapshot of Plex as an apply reads it now: the extract holds
-// the state a check reads, and the tree -- the artwork Plex spent hours building
-// -- is what the snapshot holds for the staging step.
 func plexSplitEnv(t *testing.T) (Env, *plan.Plan, []byte, *fakeBulk) {
 	t.Helper()
 	root := t.TempDir()

@@ -51,8 +51,6 @@ const sonarrConfigXML = `<?xml version="1.0" encoding="utf-8"?>
 </Config>
 `
 
-// qbitConf is a qBittorrent 5 settings file: the two save paths it acts on, one
-// path in a cosmetic list, and its WebUI section.
 const qbitConf = `[BitTorrent]
 Session\DefaultSavePath="/downloads"
 Session\TempPath="/downloads/temp"
@@ -136,8 +134,6 @@ func (f *fixture) writeSonarr() {
 	)
 }
 
-// writeQbittorrent builds the client's config directory: its settings file and
-// one SQLite resume row, the store qBittorrent 5 writes.
 func (f *fixture) writeQbittorrent() {
 	dir := filepath.Join(f.configs, "qbittorrent")
 	writeFile(f.t, filepath.Join(dir, "qBittorrent", "qBittorrent.conf"), qbitConf, 0o600)
@@ -183,8 +179,6 @@ hosts:
 `, f.dataRoot, sonarrConfig, qbitConfig)
 }
 
-// plan parses the fixture's plan and returns it with the bytes it was read
-// from, which is what the plan id is computed over.
 func (f *fixture) plan() (*plan.Plan, []byte) {
 	f.t.Helper()
 	p, err := plan.Parse([]byte(f.doc))

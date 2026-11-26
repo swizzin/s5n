@@ -78,9 +78,6 @@ func (r *rehearsal) path(app string) string {
 }
 
 // planDoc is the plan discovery would have written: the Arrs' library and the
-// shared downloads under one root, the apps' ports, and the Service rules it
-// resolved. hosts is the whole hosts block, so a test can add to it or replace
-// it.
 func (r *rehearsal) planDoc(hosts string, plex bool) string {
 	apps := []string{
 		`  qbittorrent:
@@ -162,8 +159,6 @@ func (r *rehearsal) plan() *plan.Plan {
 	return p
 }
 
-// settleInput is what a caller with no image runner has: the catalog, the
-// source paths, the chart's endpoints, and the directory the copies are made in.
 func (r *rehearsal) settleInput() SettleInput {
 	return SettleInput{
 		Catalog: rehearsalCatalog,
@@ -173,10 +168,6 @@ func (r *rehearsal) settleInput() SettleInput {
 	}
 }
 
-// snapshotConfigs is a snapshot's config/ tree: one directory per planned app,
-// copied from the source the way a snapshot copies it. It is the only place
-// apply reads an app's config from (Env.Configs), so a test that runs apply over
-// a plan settles the source and applies the snapshot.
 func (r *rehearsal) snapshotConfigs() string {
 	r.t.Helper()
 	dir := filepath.Join(r.dir, "snapshot", "config")
@@ -270,9 +261,6 @@ func (r *rehearsal) writeQbittorrent() {
 	)
 }
 
-// writeAutobrr is autobrr's config.toml and its client table: the Arrs as the
-// whole URL autobrr stores for them, its qBittorrent, and a client it has
-// switched off.
 func (r *rehearsal) writeAutobrr() {
 	dir := r.path("autobrr")
 	writeFile(r.t, filepath.Join(dir, "config.toml"), `# config.toml
@@ -408,8 +396,6 @@ func (r *rehearsal) writeMaintainerr() {
 	)
 }
 
-// writePbh is PeerBanHelper's config.yml, with its downloader reached through
-// the public name of the very qBittorrent being migrated.
 func (r *rehearsal) writePbh() {
 	if err := os.MkdirAll(filepath.Join(r.path("pbh"), "config"), 0o755); err != nil {
 		r.t.Fatal(err)
@@ -431,8 +417,6 @@ client:
 `, 0o600)
 }
 
-// rehearsalHosts are the Service rules discovery resolved for the addresses the
-// apps store.
 func rehearsalHosts(plex bool) string {
 	hosts := `  - service: qbittorrent.media
     app: qbittorrent

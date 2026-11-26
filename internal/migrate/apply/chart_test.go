@@ -32,8 +32,6 @@ func readChart(t *testing.T, name string) string {
 	return string(raw)
 }
 
-// catalogApps reads the chart's catalog manifest: every app box installs, and
-// whether it takes more than one instance.
 func catalogApps(t *testing.T) map[string]bool {
 	t.Helper()
 	var cat struct {
@@ -55,8 +53,6 @@ func catalogApps(t *testing.T) map[string]bool {
 	return out
 }
 
-// chartValues reads the chart's values.yaml as the document a chart release
-// hands apply.
 func chartValues(t *testing.T) map[string]any {
 	t.Helper()
 	var values map[string]any
@@ -163,8 +159,6 @@ func TestURLBasesMatchTheTemplates(t *testing.T) {
 	}
 }
 
-// topLevelBlock is one `  <name>:` block of a two-space-indented YAML file: the
-// app's own entry, without the ones around it.
 func topLevelBlock(doc, name string) string {
 	lines := strings.Split(doc, "\n")
 	start := -1

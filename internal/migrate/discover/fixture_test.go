@@ -19,9 +19,6 @@ import (
 	"github.com/swizzin/s5n/internal/migrate/sqlitedb"
 )
 
-// fixture is one source install in memory: the manifests saved to disk, and the
-// host's files as discovery reads them. Every path, name and image here is
-// invented; the shape is what a real install has.
 type fixture struct {
 	manifests fstest.MapFS
 	files     fstest.MapFS
@@ -40,14 +37,10 @@ func newFixture(t *testing.T) *fixture {
 	return &fixture{manifests: fstest.MapFS{}, files: fstest.MapFS{}}
 }
 
-// mount is one volume of a fixture app: the volume's name, where it appears in
-// the container and the host directory behind it.
 type mount struct {
 	volume, path, host string
 }
 
-// appSpec is one fixture app as a pod: one container, one image, the mounts the
-// test cares about.
 type appSpec struct {
 	name      string
 	namespace string
@@ -86,8 +79,6 @@ type ownerRef struct {
 	kind, name string
 }
 
-// app adds one app workload, shaped like the chart's own StatefulSet unless the
-// spec names another kind.
 func (f *fixture) app(t *testing.T, spec appSpec) {
 	t.Helper()
 	if spec.namespace == "" {
@@ -243,15 +234,11 @@ func (f *fixture) object(t *testing.T, name, doc string) {
 	f.manifests[fmt.Sprintf("manifests/%02d-%s.yaml", f.next, name)] = &fstest.MapFile{Data: []byte(doc)}
 }
 
-// servicePort is one port of a fixture Service: the port it answers on and what
-// it forwards to, a container port's number or the name it declares.
 type servicePort struct {
 	port   int
 	target string
 }
 
-// service adds one Service selecting a fixture app by its pod label, on port 80
-// forwarding to the app's named http port.
 func (f *fixture) service(t *testing.T, name, namespace, app string) {
 	t.Helper()
 	f.servicePorts(t, name, namespace, app, servicePort{port: 80, target: "http"})
@@ -331,8 +318,6 @@ func arrDB(t *testing.T, folders ...string) []byte {
 	return arrDBWith(t, folders, nil)
 }
 
-// arrDBWith is arrDB with the source's download clients: the rows that say
-// which category each instance downloads into.
 func arrDBWith(t *testing.T, folders []string, clients []clientRow) []byte {
 	t.Helper()
 	name := filepath.Join(t.TempDir(), "app.db")
@@ -439,8 +424,6 @@ func notesWithoutDefaults(t *testing.T, rep Report) []string {
 	return out
 }
 
-// chartVariants is the chart's own variants.yaml, which is what a caller hands
-// discovery so a source image can be mapped onto a blessed variant.
 func chartVariants(t *testing.T) []byte {
 	t.Helper()
 	raw, err := os.ReadFile(filepath.Join("..", "..", "..", "charts", "s5n", "variants.yaml"))
@@ -463,8 +446,6 @@ func chartImages(t *testing.T) map[string]map[string]admission.Image {
 	return images
 }
 
-// qbittorrentImage is one build the chart blesses for qBittorrent: the only app
-// with a choice of variants, and so the only one a test reads by name.
 func qbittorrentImage(t *testing.T, variant string) admission.Image {
 	t.Helper()
 	image, ok := chartImages(t)["qbittorrent"][variant]
@@ -496,8 +477,6 @@ func chartRef(image admission.Image) string {
 	return image.Repository + ":" + image.Tag + "@" + image.Digest
 }
 
-// sortedStringKeys is a map's keys, sorted, so a fixture manifest reads the same
-// twice.
 func sortedStringKeys(m map[string]string) []string {
 	out := make([]string, 0, len(m))
 	for k := range m {
@@ -507,8 +486,6 @@ func sortedStringKeys(m map[string]string) []string {
 	return out
 }
 
-// planYAML is a plan as the file discovery writes, for a test that has to show
-// one.
 func planYAML(t *testing.T, p *plan.Plan) string {
 	t.Helper()
 	raw, err := yaml.Marshal(p)
