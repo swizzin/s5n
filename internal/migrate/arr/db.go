@@ -18,9 +18,8 @@ func (a *analysis) database(ctx context.Context, db *sql.DB) error {
 		a.mediaTables,
 		a.providers,
 	}
-	// Prowlarr has no remote path mappings: its download clients are the
-	// source's Arrs', and the mapping tables belong to them
-	// (prowlarr@v2.7.0.5723:src/NzbDrone.Core/Datastore/TableMapping.cs:41-101).
+	// Prowlarr has no remote path mappings; its clients are the source's Arrs'
+	// (TableMapping.cs:41-101 at v2.7.0.5723).
 	if a.kind != kindProwlarr {
 		steps = append(steps, a.pathMappings)
 	}
@@ -33,10 +32,8 @@ func (a *analysis) database(ctx context.Context, db *sql.DB) error {
 	return nil
 }
 
-// mediaTables rewrites the columns that name the library itself.
-//
-// Prowlarr keeps no library: its tables are settings, indexers and history
-// (prowlarr@v2.7.0.5723:src/NzbDrone.Core/Datastore/TableMapping.cs:41-101).
+// mediaTables rewrites the columns naming the library. Prowlarr keeps none: its
+// tables are settings, indexers and history.
 func (a *analysis) mediaTables(ctx context.Context, db *sql.DB) error {
 	switch a.kind {
 	case kindSonarr:
@@ -44,8 +41,8 @@ func (a *analysis) mediaTables(ctx context.Context, db *sql.DB) error {
 			return err
 		}
 	case kindRadarr:
-		// Collections carry a root folder of their own, which a sync uses when
-		// it adds a film (radarr@v5.20.1.9773:src/NzbDrone.Core/Movies/Collections/MovieCollection.cs:22).
+		// A collection's own root folder is used when a sync adds a film
+		// (MovieCollection.cs:22 at v5.20.1.9773).
 		if err := a.column(ctx, db, "Movies", "Path"); err != nil {
 			return err
 		}
@@ -53,12 +50,9 @@ func (a *analysis) mediaTables(ctx context.Context, db *sql.DB) error {
 			return err
 		}
 	case kindLidarr:
-		// An artist is Lidarr's library folder. Its files are a column of their
-		// own: migration 30 dropped TrackFiles.RelativePath and stores the full
-		// path, so a file follows its artist only if the column is rewritten
-		// too (Datastore/Migration/030_add_mediafilerepository_mtime.cs at
-		// v3.1.2.4902; Artist.Path and TrackFile.Path in Music/Model/Artist.cs
-		// and MediaFiles/TrackFile.cs).
+		// An artist is the library folder, and its files are a column of their own:
+		// migration 30 stores the full path, so a file follows its artist only when
+		// TrackFiles.Path is rewritten too (v3.1.2.4902).
 		if err := a.column(ctx, db, "Artists", "Path"); err != nil {
 			return err
 		}
@@ -71,15 +65,13 @@ func (a *analysis) mediaTables(ctx context.Context, db *sql.DB) error {
 	if err := a.column(ctx, db, "RootFolders", "Path"); err != nil {
 		return err
 	}
-	// The list's root folder is where the app puts what the list adds, so it is
-	// a live column; the list's own RootFolderPaths in Settings is the remote
-	// server's filter and is left alone (research: §2.2, §5).
+	// The list's root folder is live; its RootFolderPaths in Settings is the remote
+	// server's filter and is left (research: §2.2, §5).
 	return a.column(ctx, db, "ImportLists", "RootFolderPath")
 }
 
-// column rewrites one path column. The table and column names are this
-// package's own constants, so building the statement from them is safe; no
-// value read from the database is ever part of a statement.
+// column rewrites one path column, built only from constants; no stored value is
+// ever part of a statement.
 func (a *analysis) column(ctx context.Context, db *sql.DB, table, column string) error {
 	//nolint:gosec // identifiers are constants in this package
 	rows, err := db.QueryContext(ctx, "SELECT Id, "+column+" FROM "+table)
@@ -104,9 +96,8 @@ func (a *analysis) column(ctx context.Context, db *sql.DB, table, column string)
 	return rows.Err()
 }
 
-// rewritePath maps one stored path through app's table and reports whether the
-// value changed. A path no rule covers is recorded as a gap: every column
-// this is called for is one the app reads back to act on a file.
+// rewritePath maps one stored path; every column it is called for is live, so a
+// gap is recorded.
 func (a *analysis) rewritePath(app, where, stored string) (string, bool) {
 	out, ok := a.in.Plan.Rewrite(app, stored)
 	if !ok {
@@ -119,14 +110,10 @@ func (a *analysis) rewritePath(app, where, stored string) (string, bool) {
 	return out, true
 }
 
-// pathMappings rewrites the remote path mappings, which translate a path in
-// the download client's filesystem into this app's.
-//
-// The two sides are two filesystems, so the two sides use two tables: the
-// remote side is the download client's path, the local side this app's
-// (research: §5.1, sonarr@v4.0.14.2938:src/NzbDrone.Core/RemotePathMappings/RemotePathMappingService.cs:20-21).
-// After migration both apps see /data, so a row whose sides come out equal
-// says nothing and is deleted: wiring's model is one filesystem and no
+// pathMappings rewrites the remote path mappings. A side is a path in its own
+// app's filesystem, so each goes through its own table (research: §5.1,
+// RemotePathMappingService.cs:20-21 at v4.0.14.2938). After migration both apps see
+// /data, so a row whose sides come out equal is deleted: one filesystem needs no
 // mappings (docs/box.md, "The data contract").
 func (a *analysis) pathMappings(ctx context.Context, db *sql.DB) error {
 	rows, err := db.QueryContext(ctx, "SELECT Id, Host, RemotePath, LocalPath FROM RemotePathMappings")
@@ -158,9 +145,8 @@ func (a *analysis) pathMappings(ctx context.Context, db *sql.DB) error {
 		if !ok {
 			continue
 		}
-		// The two sides are rewritten before either is counted: a row that is
-		// about to be deleted changed nothing, and counting its two paths would
-		// report a write that never happens.
+		// Both sides are rewritten before either is counted: a row about to be
+		// deleted would otherwise report writes that never happen.
 		remote, remoteOK := a.in.Plan.Rewrite(client, m.remote)
 		if !remoteOK {
 			a.gap(client, a.file, "RemotePathMappings.RemotePath", m.remote)
@@ -191,15 +177,10 @@ func (a *analysis) pathMappings(ctx context.Context, db *sql.DB) error {
 	return nil
 }
 
-// mappingClient settles which app a mapping's host names, which is what picks
-// the path table for the remote side.
-//
-// The host a mapping stores is the download client's host as the client row
-// stores it (that is how the app matches the two), so a client this pass
-// already pointed at the box answers first. Without one, in.Resolve answers: the
-// plan's rules, then the box's own endpoints, so a mapping the first pass left
-// pointing at the box reads back settled. An address neither settles is
-// reported like any other.
+// mappingClient settles which app a mapping's host names, picking the remote
+// side's table. A client this pass already pointed at the box answers first; then
+// in.Resolve, so a mapping left on the box reads back settled. An address neither
+// settles is reported.
 func (a *analysis) mappingClient(host string) (string, bool) {
 	if target, ok := a.clientTargets[strings.ToLower(host)]; ok {
 		return target, true
@@ -215,12 +196,9 @@ func (a *analysis) mappingClient(host string) (string, bool) {
 	return "", false
 }
 
-// configTable rewrites the two Config keys that hold a path.
-//
-// Every other key is a scalar or a name: downloadclientworkingfolders holds
-// folder *names*, chmodfolder a permission mode (sonarr@v4.0.14.2938:src/NzbDrone.Core/Configuration/ConfigService.cs:181-185,296-301).
-// A relative value follows the config directory and needs no rule, so only an
-// absolute one is asked about.
+// configTable rewrites the two Config keys holding a path; other keys are names or
+// modes (ConfigService.cs:181-185,296-301 at v4.0.14.2938). A relative value
+// follows the config directory.
 func (a *analysis) configTable(ctx context.Context, db *sql.DB) error {
 	keys := map[string]bool{"backupfolder": true}
 	if a.kind != kindProwlarr {
@@ -237,8 +215,7 @@ func (a *analysis) configTable(ctx context.Context, db *sql.DB) error {
 		if err := rows.Scan(&id, &key, &value); err != nil {
 			return fmt.Errorf("read Config in %s: %w", a.file, err)
 		}
-		// Config rows are written lowercased (ConfigService.cs:476), and the
-		// app reads them back that way, so a case folded key is the one.
+		// Rows are written lowercased (ConfigService.cs:476), so a folded key is it.
 		key = strings.ToLower(key)
 		if !keys[key] || !path.IsAbs(value) {
 			continue
@@ -251,15 +228,14 @@ func (a *analysis) configTable(ctx context.Context, db *sql.DB) error {
 	return rows.Err()
 }
 
-// history rewrites what the app recorded. History is never read back to act on
-// a file, so a path no rule covers is left as it is rather than stopping the
-// migration; a path a rule does cover is rewritten so the UI reads
-// consistently (docs/box.md, "Every rewriter runs twice").
+// history rewrites the record: never read back to act on a file, so an uncovered
+// path is left, while a covered one is rewritten for the UI (docs/box.md, "Every
+// rewriter runs twice").
 func (a *analysis) history(ctx context.Context, db *sql.DB) error {
 	tables := []string{"History"}
 	if a.kind != kindProwlarr {
-		// Prowlarr has no DownloadHistory and its History.Data holds search
-		// criteria only (research: §2.3), so there is nothing to rewrite there.
+		// Prowlarr has no DownloadHistory and its Data holds search criteria
+		// (research: §2.3).
 		tables = append(tables, "DownloadHistory")
 	}
 	for _, table := range tables {
@@ -270,13 +246,11 @@ func (a *analysis) history(ctx context.Context, db *sql.DB) error {
 	return nil
 }
 
-// historyTable rewrites the four JSON keys that hold a path in History.Data,
-// and the column SourceTitle, which a rename or a failed import sets to the
-// file's path. Only the named keys are touched: Message and SourceTitle are
-// otherwise free text and are never string-replaced.
+// historyTable rewrites the JSON path keys in Data and SourceTitle (set to a path
+// by a rename or failed import). Only named keys are touched: the rest is free
+// text and is never string-replaced.
 func (a *analysis) historyTable(ctx context.Context, db *sql.DB, table string, hasTitle bool) error {
-	// Prowlarr's History entity has no SourceTitle at all
-	// (prowlarr@v2.7.0.5723:src/NzbDrone.Core/History/History.cs:9-19).
+	// Prowlarr's History has no SourceTitle (History.cs:9-19 at v2.7.0.5723).
 	columns := "Id, Data"
 	if hasTitle {
 		columns = "Id, Data, SourceTitle"
@@ -311,8 +285,8 @@ func (a *analysis) historyTable(ctx context.Context, db *sql.DB, table string, h
 	return rows.Err()
 }
 
-// historyData rewrites the path keys of one row's Data blob. A path no rule
-// covers is left as it is and never counted: history is not acted on.
+// historyData rewrites one row's path keys; an uncovered path is left and not
+// counted.
 func (a *analysis) historyData(table string, id int64, data sql.NullString) (string, bool, error) {
 	f, err := parseFields(data)
 	if err != nil {
@@ -346,8 +320,7 @@ func (a *analysis) historyData(table string, id int64, data sql.NullString) (str
 	return blob, true, nil
 }
 
-// historyTitle rewrites a SourceTitle that is an absolute path a rule covers.
-// A release title that only looks like a path is left where it is.
+// historyTitle rewrites a SourceTitle that is an absolute covered path.
 func (a *analysis) historyTitle(table string, title sql.NullString) (string, bool) {
 	if !title.Valid || title.String == "" {
 		return "", false
@@ -360,11 +333,9 @@ func (a *analysis) historyTitle(table string, title sql.NullString) (string, boo
 	return out, true
 }
 
-// commands drops the rows that were still queued or running when the source
-// stopped. They name paths this migration moves, they will never run again,
-// and a stale scan path would make the first start look in a directory that no
-// longer holds anything; the app trims finished rows itself
-// (sonarr@v4.0.14.2938:src/NzbDrone.Core/Messaging/Commands/CommandRepository.cs:25-30).
+// commands drops queued or running rows: they name moved paths, never run again,
+// and a stale scan path would look in a directory that no longer holds anything
+// (CommandRepository.cs:25-30 at v4.0.14.2938).
 func (a *analysis) commands(ctx context.Context, db *sql.DB) error {
 	rows, err := db.QueryContext(ctx, "SELECT Id, Status FROM Commands WHERE Status IN (0, 1)")
 	if err != nil {

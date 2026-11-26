@@ -1,19 +1,10 @@
-// Package arr rewrites the stored paths of a migrated Sonarr, Radarr, Lidarr
-// or Prowlarr install, and the addresses it stored for the other apps on the
-// source, before box's release takes its config over.
-//
-// Everything here works on the copied config directory: the app's SQLite
-// database and config.xml beside it. The schema it reads is the source's
-// (Sonarr 4.0.14.2938, Radarr 5.20.1.9773, Lidarr 3.1.2.4902 and Prowlarr
-// 2.7.0.5723): nothing in either migration range renames, drops or re-bases a
-// path column, so a
-// rewrite before the target's first start is written against columns that
-// exist in both versions, and the first start reads paths that exist
-// (research: arr-qbit §3.2).
-//
-// Check opens the database read-only and writes nothing anywhere. Write makes
-// exactly the changes the Check before it reported: one transaction per
-// database, one atomic write for config.xml.
+// Package arr rewrites the stored paths of a migrated Sonarr, Radarr, Lidarr or
+// Prowlarr and the addresses it stored for other apps. It works on the copied
+// database and config.xml against the source's schema (Sonarr 4.0.14.2938,
+// Radarr 5.20.1.9773, Lidarr 3.1.2.4902, Prowlarr 2.7.0.5723): no migration in
+// either range renames or re-bases a path column (research: arr-qbit §3.2). Check
+// writes nothing; Write makes exactly what Check reported, one transaction and one
+// atomic config.xml.
 package arr
 
 import (
@@ -31,9 +22,8 @@ import (
 	"github.com/swizzin/s5n/internal/migrate/sqlitedb"
 )
 
-// The catalog apps this package serves. One rewriter serves every instance,
-// because the tables are the app's: a plan's "sonarr-4k" reads its rows with
-// the same schema as any other Sonarr.
+// One rewriter serves every instance: the tables are the app's, so "sonarr-4k"
+// reads the same schema as any Sonarr.
 func init() {
 	for _, name := range []string{kindSonarr, kindRadarr, kindLidarr, kindProwlarr} {
 		rewrite.Register(name, rewriter{kind: name})
@@ -48,8 +38,7 @@ const (
 )
 
 type rewriter struct {
-	// kind is the catalog app, which decides the tables and the settings this
-	// package reads. in.App is the instance name, the plan's key.
+	// kind decides the tables and settings; in.App is the instance name.
 	kind string
 }
 
@@ -92,9 +81,8 @@ func (r rewriter) analyse(ctx context.Context, in rewrite.Input, db *sql.DB) (*a
 		return nil, fmt.Errorf("check %s: %w", file, err)
 	}
 	if len(findings) > 0 {
-		// A copy taken from a running app can be torn, and rewriting one would
-		// carry the tear into the target. The fix is another copy from the
-		// stopped source, so this is an error rather than a report entry.
+		// A torn copy would carry the tear into the target; the fix is another copy
+		// from the stopped source, so this is an error.
 		return nil, fmt.Errorf("%s is damaged (%s); copy it again from the stopped source", file, strings.Join(findings, "; "))
 	}
 	a := &analysis{
@@ -115,8 +103,8 @@ func (r rewriter) analyse(ctx context.Context, in rewrite.Input, db *sql.DB) (*a
 	return a, nil
 }
 
-// edit is one row update the write pass makes. The table and column are this
-// package's own constants, never a value read from the database.
+// edit is one row update; the table and column are constants, never a stored
+// value.
 type edit struct {
 	table  string
 	column string
@@ -131,15 +119,12 @@ type changeKey struct {
 	what  string
 }
 
-// analysis is one pass's findings: what to report, and the edits that make it
-// true. Check keeps the report and drops the edits; Write keeps both.
+// analysis is one pass's findings and the edits that make them true.
 type analysis struct {
 	kind string
-	// app is the instance name the plan is keyed by and the app whose path
-	// table its own stored paths go through.
-	app string
-	// in is the whole input: the plan, the endpoints, and Resolve, which is
-	// how this pass settles every address it meets.
+	// app is the instance name the plan is keyed by and whose path table its
+	// stored paths go through.
+	app      string
 	in       rewrite.Input
 	dir      string
 	file     string // the database's name, relative to dir
@@ -155,9 +140,8 @@ type analysis struct {
 	conf     []byte  // new config.xml, nil when it does not change
 	confMode fs.FileMode
 
-	// clientTargets is the app each download client's stored host now means,
-	// by the host as stored: a remote path mapping names a client by that host,
-	// so it inherits the client's path table.
+	// clientTargets is the app each client's stored host now means; a remote path
+	// mapping names a client by host, so it inherits the client's table.
 	clientTargets map[string]string
 }
 
@@ -166,15 +150,13 @@ func (a *analysis) add(file, where, what string) {
 	a.changes[changeKey{file: file, where: where, what: what}]++
 }
 
-// gap records a stored absolute path no rule in the plan covers. The app named
-// is the one whose table was asked: a download client's directory is that
-// client's path, not this app's.
+// gap records a stored path no rule covers; app is whose table was asked, since a
+// client's directory is that client's path.
 func (a *analysis) gap(app, file, key, stored string) {
 	a.uncover = append(a.uncover, plan.Uncovered{App: app, File: file, Key: key, Path: stored})
 }
 
-// report renders the pass in a stable order, so one run reads the same as the
-// next and a test can hold it to it.
+// report renders the pass in a stable order.
 func (a *analysis) report() rewrite.Report {
 	rep := rewrite.Report{
 		App:          a.app,
@@ -209,8 +191,7 @@ func (a *analysis) report() rewrite.Report {
 	return rep
 }
 
-// apply makes exactly what the pass found. The database is one transaction:
-// half a rewrite is a target whose rows disagree about where the library is.
+// apply makes exactly what the pass found, the database in one transaction.
 func (a *analysis) apply(ctx context.Context, db *sql.DB) error {
 	if err := a.refuse(); err != nil {
 		return err
@@ -229,10 +210,8 @@ func (a *analysis) apply(ctx context.Context, db *sql.DB) error {
 	return nil
 }
 
-// refuse stops a write pass that met something its Check did not report. Apply
-// runs every app's Check before any app's Write, so a gap or an unclassified
-// address here means the staged copy moved under the run; half a migration is
-// worse than none.
+// refuse stops a write pass that met what its Check did not: every Check runs
+// before any Write, so a new gap means the staged copy moved under the run.
 func (a *analysis) refuse() error {
 	if len(a.uncover) > 0 {
 		return &plan.UncoveredError{Paths: a.uncover}

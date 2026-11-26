@@ -32,11 +32,9 @@ const (
 // library folder, so they follow the folder and need no rule.
 var historyPathKeys = []string{"droppedpath", "importedpath", "path", "sourcepath", "destinationpath"}
 
-// downloadPaths is the JSON field each download client implementation keeps a
-// filesystem path in, keyed by the Implementation column lowercased
-// (research: §2.2, read off Download/Clients/*/…Settings.cs at the source
-// tags). A client with no path here keeps its paths on a machine that is not
-// this app's, or has no path at all: qBittorrent learns them over its API.
+// downloadPaths is the path field each implementation keeps, keyed by its
+// lowercased Implementation (research: §2.2). A client absent here keeps its paths
+// elsewhere or has none: qBittorrent learns them over its API.
 var downloadPaths = map[string][]string{
 	"aria2":            {fieldDirectory},
 	"deluge":           {"downloaddirectory", "completeddirectory"},
@@ -51,26 +49,20 @@ var downloadPaths = map[string][]string{
 	"usenetblackhole":  {"nzbfolder", "watchfolder"},
 }
 
-// downloadClientsKnown is every implementation whose settings were checked for
-// paths, including the ones that have none, so an unknown client is the only
-// thing that raises a note.
+// downloadClientsKnown is every implementation checked for paths, including those
+// with none, so only an unknown client raises a note.
 var downloadClientsKnown = map[string]bool{
 	"hadouken": true, "nzbget": true, "nzbvortex": true, "qbittorrent": true,
 	"sabnzbd": true, "utorrent": true, "vuze": true,
 }
 
-// downloadClientsBoxRuns are the download clients this box runs: qBittorrent
-// and SABnzbd (charts/s5n/catalog.yaml). Every other implementation a source
-// Arr holds is a client of a type box does not run, and its connection is left
-// exactly as it is and called out: rewriting it would point that client at an
-// app that does not speak its protocol, and deleting it is the operator's call,
-// never migrate's.
+// downloadClientsBoxRuns are the clients box runs (charts/s5n/catalog.yaml). Any
+// other implementation is left and called out: rewriting it would point at an app
+// that does not speak its protocol, and deleting it is the operator's call.
 var downloadClientsBoxRuns = map[string]bool{"qbittorrent": true, "sabnzbd": true}
 
-// notificationTargets are the notifications whose settings name another
-// machine on the source: a media server box may run, or the same one under a
-// different name. Every other notifier (a chat service, a webhook, a mail
-// relay) points outside the source and is left alone.
+// notificationTargets name another machine on the source; other notifiers point
+// outside it and are left alone.
 var notificationTargets = map[string]bool{
 	"plexserver":   true,
 	"mediabrowser": true,
@@ -78,15 +70,12 @@ var notificationTargets = map[string]bool{
 	"xbmc":         true,
 }
 
-// fields is a provider's settings blob kept as raw values: a field this
-// package does not touch is written back exactly as the app stored it, a
-// number keeps its own text, and a value that is not a string is never
-// mistaken for one (Settings is a JSON text column,
-// sonarr@v4.0.14.2938:src/NzbDrone.Core/ThingiProvider/ProviderDefinition.cs:15-30).
+// fields is a settings blob kept as raw values, so an untouched field is written
+// back as stored and a number keeps its text (ProviderDefinition.cs:15-30 at
+// v4.0.14.2938).
 type fields map[string]json.RawMessage
 
-// parseFields reads a settings column. An empty or NULL column is an empty
-// object: a provider with no settings has nothing to rewrite.
+// parseFields reads a settings column; empty or NULL is an empty object.
 func parseFields(col sql.NullString) (fields, error) {
 	if !col.Valid || strings.TrimSpace(col.String) == "" {
 		return fields{}, nil
@@ -101,11 +90,8 @@ func parseFields(col sql.NullString) (fields, error) {
 	return f, nil
 }
 
-// find returns the key the blob stores under name, whatever case the
-// serializer gave it. The app writes provider properties camel-cased while the
-// classes name them PascalCase, and History's dictionary keys are camel-cased
-// on disk although the code adds them PascalCase
-// (sonarr@v4.0.14.2938:src/NzbDrone.Core/History/HistoryService.cs:219).
+// find is the key the blob stores under name in any case: properties are written
+// camel-cased from PascalCase classes (HistoryService.cs:219 at v4.0.14.2938).
 func (f fields) find(name string) (string, bool) {
 	for key := range f {
 		if strings.EqualFold(key, name) {
@@ -175,8 +161,7 @@ func (f fields) marshal() (string, error) {
 	return string(data), nil
 }
 
-// mustJSON renders one string as a JSON value. It cannot fail: a string always
-// has an encoding.
+// mustJSON renders a string as JSON; it cannot fail.
 func mustJSON(v string) json.RawMessage {
 	data, err := json.Marshal(v)
 	if err != nil {
@@ -185,17 +170,10 @@ func mustJSON(v string) json.RawMessage {
 	return data
 }
 
-// providerEnable is the column each provider table stores "this provider is on"
-// in. An app's definition may compute the flag instead of storing it
-// (NotificationDefinition.Enable is derived from its event flags,
-// sonarr@v4.0.14.2938:src/NzbDrone.Core/Notifications/NotificationDefinition.cs),
-// and then the table has no column and every row is on. The three that do store
-// it: DownloadClients.Enable (ProviderDefinition.Enable,
-// src/NzbDrone.Core/ThingiProvider/ProviderDefinition.cs), an Arr import list's
-// EnableAutomaticAdd (ImportListDefinition.Enable, src/NzbDrone.Core/ImportLists)
-// and a Prowlarr application's SyncLevel (ApplicationDefinition.Enable,
-// prowlarr@v2.7.0.5723:src/NzbDrone.Core/Applications/ApplicationDefinition.cs,
-// Disabled = 0).
+// providerEnable is the column each table stores "this provider is on" in.
+// Notifications compute the flag from event flags and have no column, so every row
+// is on. The three that store it: DownloadClients.Enable, ImportLists'
+// EnableAutomaticAdd, and Applications' SyncLevel (Disabled = 0).
 var providerEnable = map[string]string{
 	"DownloadClients": "Enable",
 	"ImportLists":     "EnableAutomaticAdd",
@@ -207,18 +185,14 @@ type provider struct {
 	id             int64
 	name           string
 	implementation string
-	// enabled is false for a provider the app never dials, so an address it
-	// stores that cannot be placed is left alone rather than made a refusal. A
-	// row in a table without the flag is on.
+	// enabled is false for a provider never dialled, so an unplaceable address is
+	// left rather than refused; a table without the flag is on.
 	enabled  bool
 	settings fields
 }
 
-// providerTable reads a provider table. Every one of them has the same four
-// columns this pass needs: the row's id and name, the implementation that
-// decides the settings' shape, and the settings blob. A table that also stores
-// whether the provider is on is read with it (providerEnable); a row without the
-// flag is one the app dials.
+// providerTable reads a provider table: id, name, implementation and settings,
+// plus the enable column when the table has one.
 func (a *analysis) providerTable(ctx context.Context, db *sql.DB, table string, visit func(provider) error) error {
 	withEnable := false
 	if column := providerEnable[table]; column != "" {
@@ -265,9 +239,8 @@ func (a *analysis) providerTable(ctx context.Context, db *sql.DB, table string, 
 	return rows.Err()
 }
 
-// hasColumn reports whether a table the database has carries a column of that
-// name. A schema is the app's, not this package's: versions differ, and a
-// synthetic one omits what a real app always writes.
+// hasColumn reports whether a table carries a column: versions differ, and a
+// synthetic schema omits what a real app writes.
 func hasColumn(ctx context.Context, db *sql.DB, table, column string) (bool, error) {
 	rows, err := db.QueryContext(ctx, `SELECT 1 FROM pragma_table_info(?) WHERE name = ?`, table, column)
 	if err != nil {
@@ -277,8 +250,7 @@ func hasColumn(ctx context.Context, db *sql.DB, table, column string) (bool, err
 	return rows.Next(), rows.Err()
 }
 
-// providers rewrites what the apps' settings rows say about paths and about
-// the other apps they talk to.
+// providers rewrites the settings rows: paths and the apps they talk to.
 func (a *analysis) providers(ctx context.Context, db *sql.DB) error {
 	steps := []func(context.Context, *sql.DB) error{a.downloadClients, a.notifications}
 	if a.kind == kindProwlarr {
@@ -298,19 +270,11 @@ func (a *analysis) downloadClients(ctx context.Context, db *sql.DB) error {
 	return a.providerTable(ctx, db, "DownloadClients", a.downloadClient)
 }
 
-// downloadClient points a client's connection at the box, and rewrites the
-// paths it stores.
-//
-// A client with no host (a blackhole folder, pneumatic) keeps its files on
-// this app's filesystem, so its paths go through this app's table. A client
-// that is left where it is keeps its own paths as well: rewriting them with
-// this app's table would tell that machine about a directory it does not have.
-//
-// Two clients are never rewritten and never a refusal, because neither one can
-// be wrong: one this box does not run (nothing in the release speaks its
-// protocol), and a disabled one whose address cannot be placed (the app never
-// dials it). Both are left exactly as they are, with the reason, in the report's
-// Left list.
+// downloadClient points a client at the box and rewrites its paths. A client with
+// no host (a blackhole folder) keeps its files on this filesystem, so its paths go
+// through this app's table; a client left where it is keeps its own paths, since
+// this app's table would name a directory that machine does not have. A type box
+// does not run, and a disabled client nothing dials, are left with a reason.
 func (a *analysis) downloadClient(p provider) error {
 	const where = "DownloadClients.Settings"
 	ad, has, err := a.hostPort(where, p.settings)
@@ -361,9 +325,8 @@ func (a *analysis) downloadClient(p provider) error {
 			p.name, p.implementation))
 	}
 	if has {
-		// Wiring adopts the client by id, so the one the source already had
-		// becomes the one the release manages (docs/box.md, "Migrated
-		// connections are adopted by ID").
+		// Wiring adopts the client by id, so the source's becomes the release's
+		// (docs/box.md, "Migrated connections are adopted by ID").
 		a.owned = append(a.owned, rewrite.Owned{Kind: "downloadclient", ID: int(p.id), Name: p.name, Target: ad.target})
 	}
 	return a.store("DownloadClients", p, changed)
@@ -373,10 +336,8 @@ func (a *analysis) notifications(ctx context.Context, db *sql.DB) error {
 	return a.providerTable(ctx, db, "Notifications", a.notification)
 }
 
-// notification rewrites a notifier that names a media server. A CustomScript
-// runs on this app's filesystem, so its path goes through this app's table; a
-// notifier with no server of its own (a chat service, a webhook) is left
-// alone, because box has nothing to say about where it lives.
+// notification rewrites a notifier naming a media server; a CustomScript's path is
+// this app's, and a notifier with no server is left alone.
 func (a *analysis) notification(p provider) error {
 	const where = "Notifications.Settings"
 	changed := false
@@ -402,11 +363,9 @@ func (a *analysis) notification(p provider) error {
 	return a.store("Notifications", p, changed)
 }
 
-// importLists points a list at the box. The Sonarr and Radarr list types take
-// the remote server's address in baseUrl and its folders in RootFolderPaths;
-// the folders are a filter over the *other* server's filesystem and are left
-// alone, because rewriting them would silently disable the filter
-// (research: §2.2, §5.5). A list the app does not sync is left where it is.
+// importLists points a list at the box. RootFolderPaths is a filter over the other
+// server's filesystem, so it is left alone: rewriting it would silently disable
+// the filter (research: §2.2, §5.5). An unsynced list is left.
 func (a *analysis) importLists(ctx context.Context, db *sql.DB) error {
 	return a.providerTable(ctx, db, "ImportLists", func(p provider) error {
 		const where = "ImportLists.Settings.baseUrl"
@@ -444,11 +403,9 @@ func (a *analysis) importLists(ctx context.Context, db *sql.DB) error {
 	})
 }
 
-// applications rewrites Prowlarr's applications: the URL Prowlarr reaches the
-// Arr at (baseUrl) and the URL the Arr reaches Prowlarr at (prowlarrUrl).
-// Prowlarr's application settings hold no filesystem path
-// (prowlarr@v2.7.0.5723:src/NzbDrone.Core/Applications/Sonarr/SonarrSettings.cs:32-35).
-// An application whose sync is off is left where it is.
+// applications rewrites Prowlarr's baseUrl and prowlarrUrl; its application
+// settings hold no filesystem path (SonarrSettings.cs:32-35 at v2.7.0.5723). An
+// application whose sync is off is left.
 func (a *analysis) applications(ctx context.Context, db *sql.DB) error {
 	return a.providerTable(ctx, db, "Applications", func(p provider) error {
 		const where = "Applications.Settings"
@@ -500,8 +457,7 @@ func (a *analysis) applications(ctx context.Context, db *sql.DB) error {
 	})
 }
 
-// store writes a provider's settings back when they changed, and counts it
-// against the row's own key when a path changed.
+// store writes changed settings back, counting a path change against its key.
 func (a *analysis) store(table string, p provider, changed bool) error {
 	if !changed {
 		return nil
@@ -514,10 +470,8 @@ func (a *analysis) store(table string, p provider, changed bool) error {
 	return nil
 }
 
-// objectPath rewrites one path-valued field of a settings blob. The path is
-// looked up by its field name, never by replacing text: a path is one value
-// among others and a string replacement would also hit a category name, a
-// comment or a password that happens to look like one.
+// objectPath rewrites one path field by name: replacing text would also hit a
+// category name or a password that looks like a path.
 func (a *analysis) objectPath(table, where string, f fields, name string) bool {
 	key, ok := f.find(name)
 	if !ok {
@@ -525,8 +479,8 @@ func (a *analysis) objectPath(table, where string, f fields, name string) bool {
 	}
 	stored, ok := f.str(key)
 	if !ok || stored == "" {
-		// An empty value means "use the default", which follows whatever the
-		// app is given; a relative one follows the directory it sits under.
+		// Empty means "the default", which follows the app's settings; a relative
+		// value follows its directory.
 		return false
 	}
 	out, covered := a.in.Plan.Rewrite(table, stored)
@@ -564,15 +518,10 @@ func (ad address) address(app, file, where string) rewrite.Address {
 	return rewrite.Address{App: app, File: file, Where: where, Host: ad.host, Port: ad.port}
 }
 
-// hostPort settles the host and port a provider's settings store.
-//
-// has is false when the blob stores no host at all: a blackhole client has
-// none, and nothing about its address can be wrong. The verdict is in.Resolve's:
-// the plan's rules and the apps' ports decide, and an address the plan does not
-// settle but that already names one of the box's endpoints is that app, which is
-// what a second pass over a copy the first one wrote needs. Recording an
-// unclassified address is the caller's: one client is never dialled, so its
-// address is left instead of reported.
+// hostPort settles a provider's stored host and port; has is false when it stores
+// none, as a blackhole client does. in.Resolve decides, its fallback letting a
+// second pass read the box's own endpoints. Recording an unclassified address is
+// the caller's, since a client nothing dials leaves it.
 func (a *analysis) hostPort(where string, f fields) (address, bool, error) {
 	hostKey, ok := f.find("host")
 	if !ok {
@@ -602,9 +551,8 @@ func (a *analysis) hostPort(where string, f fields) (address, bool, error) {
 	return address{verdict: plan.Rewrite, target: res.App, host: host, port: port, ep: ep}, true, nil
 }
 
-// pointAt writes the box's address into a provider's settings. HTTPS is off
-// because everything in the release sits behind one Gateway and the pod's own
-// listener is plain HTTP.
+// pointAt writes the box's address; HTTPS is off because the Gateway terminates
+// TLS.
 func (a *analysis) pointAt(where string, f fields, ad address) bool {
 	changed := false
 	if key, ok := f.find("host"); ok && f.setString(key, ad.ep.Host) {
@@ -636,9 +584,7 @@ func (a *analysis) resolveURL(where, stored string) (newURL, target string, reso
 		a.notes = append(a.notes, fmt.Sprintf("%s in %s: %q is not an http URL; left as it is", where, a.file, stored))
 		return "", "", false, nil, nil
 	}
-	// A URL's port is the one it names, or the one its scheme implies: a
-	// stored https URL with no port is port 443, not port 0, and a rule
-	// narrowed to 443 is what settles it.
+	// An https URL with no port is 443, the port a narrowed rule names.
 	port := rewrite.URLPort(u)
 	if p := u.Port(); p != "" {
 		if _, convErr := strconv.Atoi(p); convErr != nil {
@@ -658,8 +604,7 @@ func (a *analysis) resolveURL(where, stored string) (newURL, target string, reso
 	if !ok {
 		return "", "", false, nil, fmt.Errorf("%s in %s: the plan maps %s to %s, which this run has no endpoint for", where, a.file, u.Host, res.App)
 	}
-	// The box's own address, whole: plain HTTP, the Service, the chart's port
-	// and the chart's URL base. A path the source's URL carried is the source's
-	// shape, and box serves the app under its own base.
+	// The box's address whole; a source path is its own shape, since box serves
+	// under its own base.
 	return ep.URL(), res.App, true, nil, nil
 }
