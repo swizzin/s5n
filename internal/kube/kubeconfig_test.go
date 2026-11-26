@@ -8,8 +8,7 @@ import (
 	"testing"
 )
 
-// fakeRecords is the cluster record as the resolver sees it: the kubeconfig an
-// earlier `box bootstrap` wrote, or no record at all.
+// fakeRecords is the cluster record as the resolver sees it.
 type fakeRecords struct {
 	path     string
 	recorded bool
@@ -27,9 +26,8 @@ func tempKubeconfig(t *testing.T) string {
 	return path
 }
 
-// TestResolveKubeconfigPrecedence is the rule in one table: the flag, then the
-// first KUBECONFIG entry, then the recorded cluster -- and an explicit path is
-// never silently replaced by a later source.
+// The rule in one table: the flag, then the first KUBECONFIG entry, then the
+// record -- and an explicit path is never silently replaced by a later source.
 func TestResolveKubeconfigPrecedence(t *testing.T) {
 	flag := tempKubeconfig(t)
 	fromEnv := tempKubeconfig(t)
@@ -144,8 +142,7 @@ func TestResolveKubeconfigRecordedPathMustExist(t *testing.T) {
 	}
 }
 
-// TestResolveKubeconfigRecordWithoutAPath is the case the old signature could
-// not distinguish from "no record": a record that exists but names nothing.
+// A record that exists but names nothing is not "no record".
 func TestResolveKubeconfigRecordWithoutAPath(t *testing.T) {
 	_, err := ResolveKubeconfig("", "", fakeRecords{recorded: true})
 	if err == nil || !strings.Contains(err.Error(), "names no kubeconfig") {

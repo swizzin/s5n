@@ -7,9 +7,7 @@ import (
 	"testing"
 )
 
-// fakeReviewer answers the review with a scripted verdict per verb and records
-// what it was asked. A write is anything that is not a review: this fake has no
-// such method, so a test that reaches the write has to say so itself.
+// fakeReviewer answers a scripted verdict per verb and records what it was asked.
 type fakeReviewer struct {
 	allow map[string]bool // verb -> allowed; a missing verb is allowed
 	err   error
@@ -27,9 +25,8 @@ func (f *fakeReviewer) Allowed(_ context.Context, a Access) (bool, error) {
 	return true, nil
 }
 
-// TestAccessChecksAsksTheVerbsTheWriteNeeds pins the one thing the preflights
-// used to get wrong: a server-side apply is authorized as create on a new
-// object and patch on an existing one, so "apply" is two questions.
+// An apply is authorized as create on a new object and patch on an existing one,
+// so "apply" is two questions.
 func TestAccessChecksAsksTheVerbsTheWriteNeeds(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -64,9 +61,8 @@ func TestAccessChecksAsksTheVerbsTheWriteNeeds(t *testing.T) {
 	}
 }
 
-// TestPreflightRefusesWhenPatchIsDenied is the reviewer's finding as a test: an
-// identity that may create but not patch the object box is about to server-side
-// apply has to be refused before the write, not after the plan was confirmed.
+// An identity that may create but not patch must be refused before the write,
+// not after the plan was confirmed.
 func TestPreflightRefusesWhenPatchIsDenied(t *testing.T) {
 	r := &fakeReviewer{allow: map[string]bool{VerbCreate: true, VerbPatch: false}}
 	err := Preflight(context.Background(), r, []Access{
@@ -87,8 +83,7 @@ func TestPreflightRefusesWhenPatchIsDenied(t *testing.T) {
 	}
 }
 
-// TestPreflightAllowsWhenBothVerbsAreAllowed is the other half: a cluster-admin
-// identity is not refused by the stricter question.
+// The other half: the stricter question does not refuse a cluster-admin.
 func TestPreflightAllowsWhenBothVerbsAreAllowed(t *testing.T) {
 	r := &fakeReviewer{}
 	if err := Preflight(context.Background(), r, []Access{
@@ -101,9 +96,8 @@ func TestPreflightAllowsWhenBothVerbsAreAllowed(t *testing.T) {
 	}
 }
 
-// TestAllowedRefusesAPartlyAnsweredAccess covers the callers that want a
-// yes/no rather than a sentence: `box apply` asks whether it may create the
-// seedbox namespace, and a create-only identity has not answered.
+// Some callers want a yes/no rather than a sentence: `box apply` asks whether it
+// may create the seedbox namespace, and a create-only identity has not answered.
 func TestAllowedRefusesAPartlyAnsweredAccess(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -125,8 +119,7 @@ func TestAllowedRefusesAPartlyAnsweredAccess(t *testing.T) {
 	}
 }
 
-// TestDeniedNamesEveryMissingRight keeps the probe's sentence honest: it is
-// built from the same loop, so a patch-only denial is reported as patch.
+// The same loop builds the probe's sentence, so each denial is named by its verb.
 func TestDeniedNamesEveryMissingRight(t *testing.T) {
 	r := &fakeReviewer{allow: map[string]bool{VerbCreate: false, VerbPatch: true}}
 	got, err := Denied(context.Background(), r, []Access{
@@ -142,9 +135,8 @@ func TestDeniedNamesEveryMissingRight(t *testing.T) {
 	}
 }
 
-// TestPreflightReportsAReviewError keeps a failed review (an RBAC-blind API
-// server, a dead connection) distinct from a denial: box cannot tell the
-// operator "you are not allowed" when it did not get an answer.
+// A failed review (an RBAC-blind API server, a dead connection) is not a denial:
+// box cannot say "you are not allowed" when it got no answer.
 func TestPreflightReportsAReviewError(t *testing.T) {
 	r := &fakeReviewer{err: errors.New("connection refused")}
 	err := Preflight(context.Background(), r, []Access{{Verb: VerbCreate, Resource: "namespaces"}})

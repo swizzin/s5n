@@ -14,19 +14,14 @@ import (
 const (
 	VerbCreate = "create"
 	VerbPatch  = "patch"
-	// VerbApply is how box writes: server-side apply.
-	//
-	// It is deliberately not an RBAC verb. The API server authorizes a
-	// server-side apply as create when the object has to be made and as patch
-	// when it already exists, so asking only for create admits an identity
-	// that cannot patch and lets the first re-run fail after the plan was
-	// confirmed. Every box write is an apply: a second `box bootstrap`
-	// patches the Gateway, the Certificate and the HTTPRoute the first one
-	// created, and `box apply` patches the release's objects.
+	// VerbApply is how box writes: server-side apply. It is not an RBAC verb --
+	// the API server authorizes an apply as create when the object must be made
+	// and as patch when it exists -- so asking only for create admits an identity
+	// that cannot patch, and the first re-run fails after the plan was confirmed.
 	VerbApply = "apply"
-	// VerbGet and VerbDelete are reads and removals: box asks about them
-	// before a step that needs one, so a user's run names root's command
-	// instead of failing on its first forbidden call.
+	// VerbGet and VerbDelete are reads and removals, asked about before a step
+	// that needs one so a run names root's command instead of failing on its
+	// first forbidden call.
 	VerbGet    = "get"
 	VerbDelete = "delete"
 )
@@ -44,9 +39,8 @@ type Access struct {
 	What string
 }
 
-// Checks is what the API server is actually asked for this access: one
-// question per verb the write needs. Apply is create and patch; every other
-// verb is itself.
+// Checks is what the API server is asked for this access: one question per verb
+// the write needs, apply being create and patch.
 func (a Access) Checks() []Access {
 	if a.Verb != VerbApply {
 		return []Access{a}
@@ -60,9 +54,9 @@ func (a Access) Checks() []Access {
 	return out
 }
 
-// Reviewer answers a SelfSubjectAccessReview as the kubeconfig's identity.
-// The platform's client, `box apply`'s storage client and bootstrap's prober
-// all answer it, so the question and its verbs are written once.
+// Reviewer answers a SelfSubjectAccessReview as the kubeconfig's identity. The
+// platform's client, apply's storage client and bootstrap's prober all answer it,
+// so the question and its verbs are written once.
 type Reviewer interface {
 	Allowed(ctx context.Context, a Access) (bool, error)
 }
@@ -107,10 +101,9 @@ func Allowed(ctx context.Context, r Reviewer, a Access) (bool, error) {
 }
 
 // Denied asks every access and returns one "verb what" phrase per missing
-// permission, in the order asked. It is the one check loop: callers share the
-// questions and the verbs and write their own refusal, because a probe's
-// sentence ("this identity cannot …") and a write's ("box needs cluster
-// admin …") are different things to different readers.
+// permission, in the order asked. It is the one check loop; callers write their
+// own refusal, because a probe's sentence and a write's address different
+// readers.
 func Denied(ctx context.Context, r Reviewer, access []Access) ([]string, error) {
 	var denied []string
 	for _, a := range access {
