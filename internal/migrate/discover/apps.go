@@ -107,6 +107,13 @@ var catalogApps = map[string]appInfo{
 	// Maintainerr moves everything it writes to DATA_DIR, which the chart sets
 	// to its config claim; the image's own default is /opt/data.
 	"maintainerr": {config: []string{configPath, "/opt/data"}, port: maintainerrPort},
+	// FileBrowser Quantum keeps no library: it is a file manager over the data
+	// contract, and its state is one SQLite database beside its config.yaml.
+	// The chart puts that settings file in a ConfigMap and the directory the
+	// claim is mounted on keeps the database; a source install keeps both in
+	// the same directory, which is /config in the images it is published as.
+	// The image's own default path is under its home directory.
+	"filebrowser": {config: []string{configPath, "/home/filebrowser/data"}, port: filebrowserPort},
 }
 
 // appAliases maps an image repository name that is the same app under another
@@ -408,6 +415,26 @@ func sabnzbdPort(_ string, fsys fs.FS, dir string, env map[string]string) (int, 
 		return 0, false, err
 	}
 	return iniPort(data, "port")
+}
+
+// filebrowserPort is FileBrowser Quantum's web port: http.port in its
+// config.yaml, and the image's own default of 80 when the file does not set
+// one. Unlike the Arrs it has no port environment variable -- its only global
+// flag is the config file's path (`FILEBROWSER_CONFIG`, cmd/kong.go at
+// v2.1.0-stable) -- so the file is the only place a source's port can be.
+func filebrowserPort(_ string, fsys fs.FS, dir string, _ map[string]string) (int, bool, error) {
+	data, ok, err := readConfigFile(fsys, dir, "config.yaml")
+	if err != nil || !ok {
+		return 0, false, err
+	}
+	port, ok, err := yamlBlockPort(data, "http", "port")
+	if err != nil {
+		return 0, false, err
+	}
+	if !ok {
+		return 80, true, nil
+	}
+	return port, true, nil
 }
 
 // qbittorrentPort is qBittorrent's WebUI port. QSettings writes a key A/B/C as

@@ -43,6 +43,7 @@ const (
 	appPBH         = "pbh"
 	appMaintainerr = "maintainerr"
 	appSabnzbd     = "sabnzbd"
+	appFilebrowser = "filebrowser"
 )
 
 // CatalogApp is the catalog app an instance name belongs to: "sonarr-4k" is
@@ -196,8 +197,10 @@ func EnabledIn(values map[string]any, instance string) bool {
 //	/<instance>   the Arrs (workloads.yaml:248, <PREFIX>__SERVER__URLBASE), qui
 //	              (:287, QUI__BASE_URL), Maintainerr (:391, BASE_PATH),
 //	              Tautulli, whose own http_root the init container seals to this
-//	              prefix (:123, --http-root), and Bazarr, whose
-//	              general.base_url the same kind of init container seals
+//	              prefix (:123, --http-root), Bazarr, whose
+//	              general.base_url the same kind of init container seals, and
+//	              FileBrowser Quantum, whose http.baseURL is in the ConfigMap the
+//	              chart writes
 //	/<instance>/  autobrr (:330), whose router mounts at base URL *plus* the
 //	              rest of the path, so the trailing slash is what puts its API
 //	              at /autobrr/api
@@ -210,7 +213,7 @@ func EnabledIn(values map[string]any, instance string) bool {
 // instead.
 func urlBase(app, instance string) (string, bool) {
 	switch app {
-	case appSonarr, appRadarr, appLidarr, appBazarr, appProwlarr, appQui, appMaintainerr, appTautulli, appSabnzbd:
+	case appSonarr, appRadarr, appLidarr, appBazarr, appProwlarr, appQui, appMaintainerr, appTautulli, appSabnzbd, appFilebrowser:
 		return "/" + instance, true
 	case appAutobrr:
 		return "/" + instance + "/", true

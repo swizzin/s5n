@@ -147,6 +147,12 @@ func TestURLBasesMatchTheTemplates(t *testing.T) {
 			if app == "tautulli" && !strings.Contains(workloads, "--http-root={{ $urlBase }}") {
 				t.Error("tautulli: the chart gives it /<instance>, and the init container does not seal http_root to it")
 			}
+			// FileBrowser Quantum's prefix is its http.baseURL, in the ConfigMap
+			// the chart writes: it mounts its routes and builds its asset URLs
+			// from it, and the route keeps the path.
+			if app == "filebrowser" && !strings.Contains(workloads, "baseURL: {{ $urlBase | quote }}") {
+				t.Error("filebrowser: the chart gives it /<instance>, and its config.yaml does not set http.baseURL")
+			}
 		case "/srv/":
 			// autobrr mounts its router at the base URL's string plus the
 			// rest of the path, so the template writes it with the slash.

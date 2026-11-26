@@ -468,6 +468,8 @@ func TestDiscoverPorts(t *testing.T) {
 		{name: "Maintainerr's UI_PORT", app: "maintainerr", env: map[string]string{"UI_PORT": "6247"}, want: 6247, ok: true},
 		{name: "SABnzbd's sabnzbd.ini", app: "sabnzbd", files: map[string]string{"sabnzbd.ini": "__version__ = 19\n[misc]\nhost = 0.0.0.0\nport = 8080\n[categories]\n"}, want: 8080, ok: true},
 		{name: "SABnzbd's port from the environment", app: "sabnzbd", files: map[string]string{"sabnzbd.ini": "[misc]\nport = 8080\n"}, env: map[string]string{"SABNZBD__PORT": "8090"}, want: 8090, ok: true},
+		{name: "FileBrowser Quantum's http.port", app: "filebrowser", files: map[string]string{"config.yaml": "http:\n  port: 8081\n  baseURL: /files\n"}, want: 8081, ok: true},
+		{name: "FileBrowser Quantum's image default", app: "filebrowser", files: map[string]string{"config.yaml": "auth:\n  methods:\n    noauth: true\n"}, want: 80, ok: true},
 		{name: "an app whose config has never been written", app: "sonarr", want: 0, ok: false},
 		{name: "an app with no port setting", app: "gluetun", want: 0, ok: false},
 	}
