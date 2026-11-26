@@ -245,7 +245,10 @@ Read `PLAN.md` first. It is the architecture; this file is how to work in the re
   the data root, the owner; `setup.Options.Adopting` keeps init's empty-box line quiet) with
   only the domain, the login, the password and the config path from flags
   (`--box-namespace` names the target). Every verb takes `--values`; discover and cutover
-  load the chart (the blessed variants are the chart's).
+  load the chart (the blessed variants are the chart's). client-go's klog never reaches the
+  terminal: it writes nowhere until a command opens its run log, then into it,
+  `client-go: `-prefixed and redacted like every other line (`cmd/box/clientlog.go`); a
+  command that opens no output, such as `status`, keeps no log.
 - `Dockerfile` — static binary on distroless; the image the wiring Job and the
   qBittorrent init container run.
 - `hack/grab-test.sh` — the end-to-end grab: a local mock indexer (`hack/mock-indexer.py`,
@@ -327,6 +330,21 @@ calling any chart change done. A change is not done until the e2e prints PASS.
 
 `helm template` renders the wiring Job but *not* the API-server egress policy, because that
 one needs a live `lookup`. The e2e asserts the policy exists in the cluster.
+
+## Comments
+
+A comment says what the code cannot: why, an invariant or hazard, an upstream fact with its
+`path:line at tag`, security reasoning, and directives exactly as they are (`//go:`,
+`//nolint:x // reason`, `# renovate:`, `# shellcheck`). Three lines is the cap; a longer reason
+belongs in `docs/` and the comment points there. No change history ("no longer", "used to",
+"now"), no designs that were dropped, no restating the line below or the test's name. An
+exported identifier gets a one-line doc comment that starts with its name.
+
+In a chart template a note is `{{- /* */}}`, never `#`: a `#` line renders into every
+manifest and Helm's release Secret. A `#` inside a block scalar (a ConfigMap's file, a script
+under `args:`) is the app's own content, and changing it changes the ConfigMap's checksum. In
+shell, a `#` line inside a `python3 -c '...'` string is part of the string: an apostrophe
+there ends it.
 
 ## Invariants — do not break these
 
