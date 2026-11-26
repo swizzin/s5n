@@ -366,7 +366,10 @@ Secret, beside the qBittorrent password and the Arr keys, and box owns the accou
 outright: the app's init container creates it if it is missing and sets that password on
 every start, so a password changed inside the app is put back at the next restart, and
 until then the wiring Job's report names the mismatch. The Job signs in with it on every
-run; no API key is minted or kept. This account's password login is the one the Job uses,
+run; no API key is minted or kept. With that session it registers what the box holds: qui's
+one qBittorrent instance and one Arr instance per Sonarr and Radarr, each adopted rather
+than duplicated when the box already has a row for it, and each proved by the app's own
+connection test. This account's password login is the one the Job uses,
 so it stays routable: since autobrr 1.91 switching its built-in login off does not hide
 the form, it makes `POST /api/auth/login` answer 403
 (`internal/http/auth.go:122-126` at v1.91.1), and the Job then has no way in at all. For
