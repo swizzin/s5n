@@ -15,33 +15,23 @@ type DirResult struct {
 	Created bool
 }
 
-// EnsureDataDirs creates every instance's download and library directory, and
-// runs before any application is asked anything.
+// EnsureDataDirs creates every instance's download and library directory, before any
+// application is asked anything.
 //
-// The order is the contract, not an optimisation. Sonarr and Radarr validate a
-// root folder when it is added and refuse a path whose directory does not
-// exist, so on a completely empty data path the root-folder step cannot succeed
-// until /data/media/<category> is there — and nothing else in the install makes
-// it. The hardlink proof was the only code creating these directories, and it
-// runs after the Arrs, so a fresh install only worked on a host where something
-// else had already prepared the paths.
+// The order is the contract: Sonarr and Radarr refuse a root folder whose directory
+// does not exist, so an empty data path needs /data/media/<category> first and
+// nothing else makes it. Both trees are provisioned together under the one /data
+// mount, which is what keeps an import a hardlink.
 //
-// qBittorrent's category save paths are the other half of the same tree, so
-// both are provisioned together, under the one /data mount: that is what keeps
-// an import a hardlink instead of a copy.
-//
-// It is idempotent: an existing directory is reported, never rewritten or
-// re-owned. The owner is the process — the chart runs the wiring Job as the
-// release's puid:pgid — which is what `box init` tells the operator to expect.
-// A path that is a file, or that cannot be created, stops the run with the path
-// in the error; the directories made before it stay, which is safe because the
-// next run is the same idempotent call and the data contract needs them anyway.
+// It is idempotent: an existing directory is reported, never rewritten or re-owned.
+// A path that is a file, or cannot be created, stops the run; the directories made
+// before it stay, because the next run is the same idempotent call.
 func EnsureDataDirs(instances []Instance) ([]DirResult, error) {
 	var out []DirResult
 	seen := map[string]bool{}
 	for _, inst := range instances {
-		// The directory each tree is named after: the library's category, and
-		// the download category, which a migrated box keeps from its source.
+		// The library's category and the download category, which a migrated box
+		// keeps from its source.
 		for _, d := range []struct{ tree, name, path string }{
 			{"downloads", downloadCategory(inst), inst.SavePath},
 			{"media", inst.Category, inst.RootFolder},

@@ -7,10 +7,8 @@ import (
 	"testing"
 )
 
-// TestEveryStepIsOneLineOfItsOwn is the shape box reads: the wait shows the
-// newest line of this log beside what it is waiting for, so a check is its name
-// and what it cost on one line. A name padded to a column is readable as a
-// forty-line table and as noise on the one line box shows.
+// The shape box reads: a check is its name and what it cost on one line, because
+// the wait shows the newest line beside what it waits for.
 func TestEveryStepIsOneLineOfItsOwn(t *testing.T) {
 	h := newHarness(t)
 	var log bytes.Buffer
@@ -30,7 +28,7 @@ func TestEveryStepIsOneLineOfItsOwn(t *testing.T) {
 	if strings.Contains(out, "sonarr/downloadclient                   created") {
 		t.Fatalf("a step is still padded to the summary's column:\n%s", out)
 	}
-	// A check is one line, never a name on one and its result on the next.
+	// A check is one line.
 	for _, line := range strings.Split(strings.TrimRight(out, "\n"), "\n") {
 		if strings.HasPrefix(line, " ") {
 			t.Fatalf("a step line is indented under nothing:\n%s", out)

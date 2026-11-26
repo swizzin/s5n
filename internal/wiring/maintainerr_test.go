@@ -1,10 +1,8 @@
 package wiring
 
-// maintainerr_test.go is item 3 of the receipt's Plex rows: Maintainerr is wired
-// to Plex the way Tautulli is, with the release Secret's plex-token, through the
-// app's own settings API. The fake answers the shapes apps/maintainerr.go reads
-// from v3.33.0, and the harness's Plex accepts exactly the token the Secret
-// carries -- so a test can rotate one and watch the wiring notice.
+// Maintainerr is wired to Plex like Tautulli, with the release Secret's plex-token
+// through its settings API. The fake answers the shapes apps/maintainerr.go reads at
+// v3.33.0, and Plex accepts exactly the Secret's token.
 
 import (
 	"context"
@@ -16,9 +14,8 @@ import (
 	"github.com/swizzin/s5n/internal/apps"
 )
 
-// A fresh Maintainerr gets the release's Plex: the token, then the connection,
-// then the app's own test. Manual mode is not cosmetic -- it is what stops
-// Maintainerr re-discovering a plex.direct address the pod cannot reach.
+// A fresh Maintainerr gets the token, the connection, then the app's own test.
+// Manual mode stops it re-discovering a plex.direct address the pod cannot reach.
 func TestWiringConnectsMaintainerrToPlex(t *testing.T) {
 	r, f := newMediaHarness(t, true)
 	res, err := r.Run(context.Background())
@@ -45,14 +42,13 @@ func TestWiringConnectsMaintainerrToPlex(t *testing.T) {
 	if f.maintainerrSettings.PlexManualMode != 1 || f.maintainerrSettings.MediaServerType != "plex" {
 		t.Fatalf("Maintainerr's connection is %+v, want manual mode and the plex media server", f.maintainerrSettings)
 	}
-	// Nothing about the token reaches the receipt: it is a credential, and the
-	// receipt is a ConfigMap anyone in the namespace can read.
+	// Nothing about the token reaches the receipt, which anyone in the namespace
+	// can read.
 	noTokenAnywhere(t, res, mediaPlexToken)
 }
 
-// A second run is a no-op: the token is masked by the app, so the fingerprint the
-// Job recorded in owned.json is what says the Secret's token is the one already
-// there.
+// A second run is a no-op: the app masks the token, so the fingerprint in
+// owned.json says the Secret's token is already there.
 func TestWiringMaintainerrSecondRunWritesNothing(t *testing.T) {
 	r, f := newMediaHarness(t, true)
 	ctx := context.Background()
@@ -84,8 +80,8 @@ func TestWiringMaintainerrSecondRunWritesNothing(t *testing.T) {
 	}
 }
 
-// No token in the release Secret is a pending row with the reason and the fix,
-// never a connection written without a credential.
+// No token is a pending row with the reason and the fix, never a tokenless
+// connection.
 func TestWiringMaintainerrPendingWithoutToken(t *testing.T) {
 	r, f := newMediaHarness(t, true)
 	r.Config.Maintainerr.PlexTokenFile = t.TempDir() + "/plex-token" // absent
@@ -106,8 +102,8 @@ func TestWiringMaintainerrPendingWithoutToken(t *testing.T) {
 	}
 }
 
-// An unclaimed server cannot supply a token to anything, so the row names the
-// claim as the person's part, not a key to patch in by hand.
+// An unclaimed server supplies no token: the row names the claim as the person's
+// part.
 func TestWiringMaintainerrPendingWithoutTokenOnAnUnclaimedServer(t *testing.T) {
 	r, f := newMediaHarness(t, false)
 	r.Config.Maintainerr.PlexTokenFile = t.TempDir() + "/plex-token" // absent
@@ -128,8 +124,7 @@ func TestWiringMaintainerrPendingWithoutTokenOnAnUnclaimedServer(t *testing.T) {
 	}
 }
 
-// Without Plex in the release there is no server to point it at: the row says so
-// rather than leaving a connection nobody wrote.
+// Without Plex the row says so.
 func TestWiringMaintainerrPendingWithoutPlex(t *testing.T) {
 	r, f := newMediaHarness(t, true)
 	r.Config.Plex = nil
@@ -149,8 +144,8 @@ func TestWiringMaintainerrPendingWithoutPlex(t *testing.T) {
 	}
 }
 
-// A token rotated in the release Secret is pushed again: Maintainerr masks what
-// it holds, so the recorded fingerprint is the difference the Job can see.
+// A rotated token is pushed again: the recorded fingerprint is the difference the
+// masking app lets the Job see.
 func TestWiringMaintainerrNoticesARotatedPlexToken(t *testing.T) {
 	r, f := newMediaHarness(t, true)
 	ctx := context.Background()
@@ -175,9 +170,8 @@ func TestWiringMaintainerrNoticesARotatedPlexToken(t *testing.T) {
 	noTokenAnywhere(t, res, rotated)
 }
 
-// A token Plex refuses stops the run before Maintainerr is written: the same
-// rule Tautulli's link follows, so no app is configured against a server that
-// will refuse every request.
+// A token Plex refuses stops the run before Maintainerr is written: no app is
+// configured against a server that refuses every request.
 func TestWiringMaintainerrRejectedTokenFailsFirst(t *testing.T) {
 	r, f := newMediaHarness(t, true)
 	f.acceptToken = "something-else"

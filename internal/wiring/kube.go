@@ -16,10 +16,9 @@ import (
 
 const serviceAccountDir = "/var/run/secrets/kubernetes.io/serviceaccount"
 
-// Publisher writes the receipt into the release's wiring ConfigMap. It talks to
-// the API server with the Pod's own service account: the Job's RBAC is a single
-// namespaced Role on that one object, so a compromised Job cannot reach anything
-// else in the cluster.
+// Publisher writes the receipt into the release's wiring ConfigMap with the pod's
+// own service account: the Job's RBAC is one namespaced Role on that object, so a
+// compromised Job cannot reach anything else.
 type Publisher struct {
 	BaseURL   string
 	Namespace string
@@ -69,9 +68,8 @@ type configMap struct {
 	Data       map[string]string `json:"data,omitempty"`
 }
 
-// Upsert sets keys on the ConfigMap, creating it when absent. Existing keys the
-// caller did not mention (the chart's own wiring.json) are preserved: the Job
-// shares the object with the chart and must not blank it.
+// Upsert sets keys on the ConfigMap, creating it when absent. Keys the caller did not
+// mention (the chart's own wiring.json) are preserved: the Job shares the object.
 func (p *Publisher) Upsert(ctx context.Context, name string, data map[string]string) error {
 	path := fmt.Sprintf("%s/api/v1/namespaces/%s/configmaps/%s", p.BaseURL, p.Namespace, name)
 	var cur configMap
@@ -102,9 +100,7 @@ func (p *Publisher) Upsert(ctx context.Context, name string, data map[string]str
 }
 
 // Get reads one key from the ConfigMap. ok is false, with no error, when the
-// ConfigMap or the key does not exist: that is the normal shape of a release's
-// first run, not a fault, so the wiring Job can fall back to adopting existing
-// objects by name without treating absence as a hard failure.
+// ConfigMap or key is absent: that is a release's first run, not a fault.
 func (p *Publisher) Get(ctx context.Context, name, key string) (value string, ok bool, err error) {
 	path := fmt.Sprintf("%s/api/v1/namespaces/%s/configmaps/%s", p.BaseURL, p.Namespace, name)
 	var cur configMap

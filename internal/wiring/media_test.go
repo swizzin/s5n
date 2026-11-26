@@ -15,10 +15,8 @@ import (
 	"github.com/swizzin/s5n/internal/apps"
 )
 
-// fakeMediaStack is Plex + Tautulli + Seerr + Maintainerr, standing in for
-// hack/e2e-kind.sh's live versions in the same spirit as fakeStack in
-// wiring_test.go: just enough of each API for the wiring Job's steps to be
-// provable without a cluster.
+// fakeMediaStack is Plex + Tautulli + Seerr + Maintainerr: just enough of each API
+// for the media steps to be provable without a cluster.
 type fakeMediaStack struct {
 	mu      sync.Mutex
 	claimed bool
@@ -31,17 +29,14 @@ type fakeMediaStack struct {
 	pmsToken   string
 	apiEnabled bool
 	writes     int
-	// acceptToken is the server token Plex accepts at /library/sections; the
-	// harness sets it to the token the release Secret carries. tokenChecks
-	// counts authenticated calls, so a test can prove the token was verified
-	// rather than assumed.
+	// acceptToken is the token Plex accepts; tokenChecks counts authenticated calls,
+	// so a test can prove the token was verified rather than assumed.
 	acceptToken string
 	tokenChecks int
-	// hideToken makes get_settings answer pms_token as null, as Tautulli's
-	// PMS_TOKEN do-not-download rule does on a real install.
+	// hideToken makes get_settings answer pms_token null, as Tautulli's
+	// do-not-download rule does.
 	hideToken bool
-	// cm models the `<release>-wiring` ConfigMap across runs, so owned.json
-	// (and the token fingerprint inside it) survives exactly as in a cluster.
+	// cm models the wiring ConfigMap, so owned.json survives across runs.
 	cm map[string]string
 	// tokenFile is the mounted Secret's plex-token path, so a rotation test can
 	// rewrite it between runs.
@@ -51,14 +46,12 @@ type fakeMediaStack struct {
 	// initialized is Seerr's own "an admin exists" flag, which a migrated
 	// Seerr brings in the settings its snapshot carried.
 	initialized bool
-	// seerrReads counts the public-settings calls, and seerrFailFrom makes
-	// every call from that number on answer 503: a Seerr that passes
-	// readiness and then refuses the read is one the run cannot report on.
+	// seerrFailFrom makes every public-settings call from that number on answer 503:
+	// a Seerr that passes readiness and then refuses the read.
 	seerrReads    int
 	seerrFailFrom int
 
-	// Maintainerr's one settings row, with the token it holds (which its GET
-	// masks) and the number of writes this harness saw.
+	// Maintainerr's settings row, with its masked token and the writes seen.
 	maintainerrSettings apps.MaintainerrSettings
 	maintainerToken     string
 	maintainerrSaves    int
@@ -70,9 +63,8 @@ func (f *fakeMediaStack) plexHandler() http.HandlerFunc {
 		f.mu.Lock()
 		defer f.mu.Unlock()
 		if r.URL.Path == "/library/sections" {
-			// Authenticated, exactly like a real Plex: the token in the
-			// header decides, and /identity below stays tokenless so a test
-			// cannot pass by reading it.
+			// Authenticated like a real Plex: the header's token decides, and
+			// /identity stays tokenless.
 			f.tokenChecks++
 			if r.Header.Get("X-Plex-Token") != f.acceptToken {
 				http.Error(w, "unauthorized", http.StatusUnauthorized)
@@ -173,9 +165,8 @@ func (f *fakeMediaStack) seerrHandler() http.HandlerFunc {
 	}
 }
 
-// maintainerrHandler is Maintainerr's settings API at v3.33.0: the health route,
-// the one settings row with its token masked, the token's own endpoint, the merge
-// PATCH, and the connection test that proves what was written.
+// maintainerrHandler is Maintainerr's settings API at v3.33.0: health, the masked
+// row, the token endpoint, the merge PATCH, and the connection test.
 func (f *fakeMediaStack) maintainerrHandler() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		f.mu.Lock()
@@ -222,7 +213,7 @@ func (f *fakeMediaStack) maintainerrToken(w http.ResponseWriter, r *http.Request
 }
 
 // maintainerrPatch merges a body over the row, refusing a server change until a
-// token is stored, as the app does.
+// token is stored.
 func (f *fakeMediaStack) maintainerrPatch(w http.ResponseWriter, r *http.Request) {
 	var body map[string]any
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
@@ -239,8 +230,7 @@ func (f *fakeMediaStack) maintainerrPatch(w http.ResponseWriter, r *http.Request
 	writeJSONAny(w, map[string]any{"status": "OK", "code": 1, "message": "Success"})
 }
 
-// applyMaintainerrPatch merges a PATCH body over a settings row the way the app
-// merges it: an absent key is left alone.
+// applyMaintainerrPatch merges a PATCH body; an absent key is left alone.
 func applyMaintainerrPatch(row apps.MaintainerrSettings, body map[string]any) apps.MaintainerrSettings {
 	if v, ok := body["plex_hostname"].(string); ok {
 		row.PlexHostname = v
@@ -277,20 +267,15 @@ func writeJSONAny(w http.ResponseWriter, v any) {
 	_ = json.NewEncoder(w).Encode(v)
 }
 
-// mediaPlexToken is the Plex server token the media harness mounts as the
-// release Secret's plex-token key, standing in for a token taken from a
-// claimed server.
+// mediaPlexToken is the token the harness mounts as the Secret's plex-token.
 const mediaPlexToken = "plex-token-abc123"
 
-// mediaSeerrPublicURL is the address the harness's Seerr is served at, as the
-// chart renders it: <app>.<domain>, never the Service the Job dials.
+// mediaSeerrPublicURL is <app>.<domain>, never the Service the Job dials.
 const mediaSeerrPublicURL = "seerr.example.test"
 
-// newMediaHarness builds a Runner wired to fake Plex, Tautulli and Seerr
-// servers only (no qBittorrent/Arr/Prowlarr), so the media steps can be
-// asserted in isolation from the rest of internal/wiring's coverage. The Plex
-// token file is present and non-empty; tests about a missing token repoint
-// Config.Tautulli.PlexTokenFile at an absent, empty or unreadable path.
+// newMediaHarness wires fake Plex, Tautulli and Seerr only, so the media steps are
+// asserted apart from the rest. The token file is present and non-empty; tests
+// about a missing token repoint it.
 func newMediaHarness(t *testing.T, claimed bool) (*Runner, *fakeMediaStack) {
 	t.Helper()
 	f := &fakeMediaStack{claimed: claimed, machine: "machine-123", apiKey: "tautulli-key", seerrUp: true}
@@ -306,8 +291,7 @@ func newMediaHarness(t *testing.T, claimed bool) (*Runner, *fakeMediaStack) {
 		t.Fatal(err)
 	}
 	plexTokenFile := dir + "/plex-token"
-	// Plex accepts exactly the token the release Secret carries, so a test can
-	// rotate the file and watch the wiring notice.
+	// Plex accepts exactly the Secret's token, so a test can rotate the file.
 	f.acceptToken = mediaPlexToken
 	f.tokenFile = plexTokenFile
 	// A trailing newline, as a Secret patched from a shell prompt usually has.
@@ -370,8 +354,7 @@ func TestWiringClaimedPlexWiresTautulliButSeerrStaysPending(t *testing.T) {
 	if s := step(res, "plex/claim"); s == nil || s.Result != "ok" {
 		t.Fatalf("plex/claim = %+v, want ok (claimed)", s)
 	} else if s.Detail != "machineIdentifier=machine-123" {
-		// An already-claimed server (a migrated Preferences.xml, say) needs
-		// no claim warning: the consequence cannot apply to it.
+		// An already-claimed server needs no claim warning.
 		t.Fatalf("plex/claim detail = %q, want the machineIdentifier only", s.Detail)
 	}
 	if s := step(res, "tautulli/plex"); s == nil || s.Result != "ok" || s.Detail != "created" {
@@ -400,8 +383,7 @@ func TestWiringUnclaimedPlexLeavesClaimPendingButStillWiresTautulli(t *testing.T
 	if s := step(res, "plex/claim"); s == nil || s.Result != "pending" {
 		t.Fatalf("plex/claim = %+v, want pending (no claim token)", s)
 	} else {
-		// Seerr is deployed in this harness, so the to-finish row must say
-		// what skipping the claim costs, and end on the claim URL.
+		// With Seerr deployed, the pending row says what skipping the claim costs.
 		if !strings.HasPrefix(s.Detail, "Plex is not claimed yet: ") {
 			t.Fatalf("plex/claim detail = %q, want it to start with the claim state", s.Detail)
 		}
@@ -412,8 +394,8 @@ func TestWiringUnclaimedPlexLeavesClaimPendingButStillWiresTautulli(t *testing.T
 			t.Fatalf("plex/claim detail = %q, want it to end on the claim URL", s.Detail)
 		}
 	}
-	// The claim token only signs the server in to Plex.tv; the PMS link uses
-	// the release Secret's plex-token, so it wires regardless of claim state.
+	// The claim signs the server in to Plex.tv; the PMS link uses plex-token, so it
+	// wires regardless of claim state.
 	if s := step(res, "tautulli/plex"); s == nil || s.Result != "ok" {
 		t.Fatalf("tautulli/plex = %+v, want ok even though Plex is unclaimed", s)
 	}
@@ -425,8 +407,7 @@ func TestWiringUnclaimedPlexLeavesClaimPendingButStillWiresTautulli(t *testing.T
 	}
 }
 
-// Without Seerr in the release the ownership consequence cannot happen, so
-// the pending row keeps the narrow sentence and never mentions Seerr.
+// Without Seerr the pending row keeps the narrow sentence and never mentions it.
 func TestWiringUnclaimedPlexWithoutSeerrDoesNotMentionAnOwner(t *testing.T) {
 	r, _ := newMediaHarness(t, false)
 	r.Config.Seerr = nil
@@ -497,8 +478,7 @@ func TestTautulliConfigValidationRequiresPlex(t *testing.T) {
 	}
 }
 
-// No Plex token: the PMS link is pending, not configured tokenless and not a
-// failure of the release. Nothing may be written to Tautulli.
+// No Plex token: the link is pending, nothing is written to Tautulli.
 func TestWiringTautulliPlexPendingWithoutToken(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -537,9 +517,8 @@ func TestWiringTautulliPlexPendingWithoutToken(t *testing.T) {
 	}
 }
 
-// No token on a server that is not claimed: nothing can supply one, and the
-// reason is the claim rather than a key a person would patch in -- box takes the
-// token out of a claimed server's own settings on the next apply.
+// No token on an unclaimed server: the reason is the claim, and box takes the token
+// from a claimed server's settings on the next apply.
 func TestWiringTautulliPlexPendingWithoutTokenOnAnUnclaimedServer(t *testing.T) {
 	r, f := newMediaHarness(t, false)
 	r.Config.Tautulli.PlexTokenFile = t.TempDir() + "/plex-token" // absent
@@ -561,8 +540,7 @@ func TestWiringTautulliPlexPendingWithoutTokenOnAnUnclaimedServer(t *testing.T) 
 	}
 }
 
-// A token file that exists but cannot be read is an error: fail closed rather
-// than quietly configuring a tokenless link.
+// A token file that cannot be read is an error: fail closed.
 func TestWiringTautulliPlexErrorsOnUnreadableToken(t *testing.T) {
 	r, f := newMediaHarness(t, true)
 	r.Config.Tautulli.PlexTokenFile = t.TempDir() // a directory: EISDIR, not ENOENT
@@ -576,9 +554,8 @@ func TestWiringTautulliPlexErrorsOnUnreadableToken(t *testing.T) {
 	}
 }
 
-// noTokenAnywhere fails when the Plex token reached the receipt in any form.
-// The receipt is a ConfigMap any user in the namespace can read, so the token
-// must exist only in the Secret and in the request to Tautulli.
+// noTokenAnywhere fails when the token reached the receipt: it must exist only in
+// the Secret and the request to Tautulli.
 func noTokenAnywhere(t *testing.T, res *Result, token string) {
 	t.Helper()
 	if strings.Contains(Summary(res), token) {
@@ -599,8 +576,7 @@ func noTokenAnywhere(t *testing.T, res *Result, token string) {
 	}
 }
 
-// A token Plex accepts is verified against Plex itself before Tautulli is
-// configured, and nothing about it reaches the receipt.
+// A token Plex accepts is verified against Plex before Tautulli is configured.
 func TestWiringProvesThePlexTokenAgainstPlex(t *testing.T) {
 	r, f := newMediaHarness(t, true)
 	res, err := r.Run(context.Background())
@@ -619,9 +595,8 @@ func TestWiringProvesThePlexTokenAgainstPlex(t *testing.T) {
 	noTokenAnywhere(t, res, mediaPlexToken)
 }
 
-// A token Plex rejects (expired, revoked, wrong server) is a credential error:
-// the step fails with a token-free detail, Tautulli is never written, and the
-// run stops instead of reporting a link that Plex would refuse.
+// A token Plex rejects is a credential error: the step fails token-free, Tautulli is
+// never written, and the run stops.
 func TestWiringRejectedPlexTokenFailsBeforeAnyTautulliWrite(t *testing.T) {
 	r, f := newMediaHarness(t, true)
 	// Plex now only accepts a different token: the mounted one is no longer
@@ -656,8 +631,7 @@ func TestWiringRejectedPlexTokenFailsBeforeAnyTautulliWrite(t *testing.T) {
 	if s := step(res, "seerr/ready"); s != nil {
 		t.Fatal("the run continued past a rejected Plex token")
 	}
-	// Nothing was proven, so no fingerprint may be recorded: it would make the
-	// next run treat this token as current.
+	// Nothing was proven, so no fingerprint is recorded.
 	var rec OwnedRecord
 	if raw, ok := f.cm["owned.json"]; ok {
 		if err := json.Unmarshal([]byte(raw), &rec); err != nil {
@@ -669,11 +643,8 @@ func TestWiringRejectedPlexTokenFailsBeforeAnyTautulliWrite(t *testing.T) {
 	}
 }
 
-// A server that is not claimed is not signed in to an account, and Plex refuses
-// every server token until it is: a 401 there is the claim's absence, not a bad
-// token. The row says so once and nothing is written with a token the server
-// would refuse — which is the state a migrated box is in when its Plex's account
-// is gone from plex.tv, and one that must not fail the release.
+// An unclaimed server refuses every token, so a 401 there is the claim's absence,
+// not a bad token: the row says so once and nothing is written with it.
 func TestWiringUnclaimedPlexRefusesTokensAndSaysWhy(t *testing.T) {
 	r, f := newMediaHarness(t, false)
 	f.acceptToken = "a-token-no-unclaimed-server-knows"
@@ -701,14 +672,12 @@ func TestWiringUnclaimedPlexRefusesTokensAndSaysWhy(t *testing.T) {
 	noTokenAnywhere(t, res, mediaPlexToken)
 }
 
-// Tautulli hides pms_token, so the fingerprint in owned.json is the only record
-// of what was last written. Same fingerprint: no write. Different fingerprint:
-// the Secret rotated, so the link is rewritten even though the live value is
-// unreadable. This is the case that used to be silently skipped forever.
+// Tautulli hides pms_token, so the fingerprint in owned.json is the only record of
+// what was last written: a changed one rewrites the link.
 func TestWiringWithheldTokenDetectsRotation(t *testing.T) {
 	r, f := newMediaHarness(t, true)
 	ctx := context.Background()
-	// A real Tautulli withholds PMS_TOKEN from get_settings.
+	// A real Tautulli withholds PMS_TOKEN.
 	f.hideToken = true
 
 	first, err := r.Run(ctx)
@@ -733,7 +702,7 @@ func TestWiringWithheldTokenDetectsRotation(t *testing.T) {
 		t.Fatalf("owned.json contains the Plex token: %s", raw)
 	}
 
-	// Same token, still hidden: the recorded fingerprint makes this a no-op.
+	// Same token, still hidden: the fingerprint makes this a no-op.
 	writes := f.writes
 	second, err := r.Run(ctx)
 	if err != nil {
@@ -788,10 +757,8 @@ func TestWiringWithheldTokenDetectsRotation(t *testing.T) {
 	}
 }
 
-// The fingerprint lives in owned.json, whose read failure already stops the run
-// (AGENTS.md invariant 11). That must hold here too: without the record the Job
-// cannot tell an unchanged hidden token from a rotated one, and guessing would
-// either rewrite every run or never push a rotation.
+// A failed owned.json read must stop the run (AGENTS.md invariant 11): without the
+// record the Job cannot tell an unchanged hidden token from a rotated one.
 func TestWiringFailsClosedWhenOwnedStateCannotBeRead(t *testing.T) {
 	r, f := newMediaHarness(t, true)
 	f.hideToken = true

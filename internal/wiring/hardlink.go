@@ -24,11 +24,9 @@ type HardlinkCheck struct {
 
 const linkCheckName = ".s5n-linkcheck"
 
-// CheckHardlink proves the data contract on a live filesystem: a file written
-// under the download tree and hardlinked into the media tree must show nlink 2 on
-// the same device. (The kernel already refuses a cross-device link with EXDEV, so
-// sameDevice is belt and braces; it makes the receipt self-explanatory.) If this fails, imports will copy instead of link and the box
-// will fill up twice as fast, so it is a hard failure rather than a warning.
+// CheckHardlink proves the data contract: a file written under the download tree and
+// hardlinked into the media tree must show nlink 2 on the same device. Otherwise
+// imports copy and the box fills twice as fast, so it is a hard failure.
 func CheckHardlink(savePath, rootFolder string) *HardlinkCheck {
 	out := &HardlinkCheck{
 		Source: filepath.Join(savePath, linkCheckName),
@@ -38,11 +36,9 @@ func CheckHardlink(savePath, rootFolder string) *HardlinkCheck {
 		out.Error = fmt.Sprintf(format, args...)
 		return out
 	}
-	// Both directories belong to the data contract and EnsureDataDirs made them
-	// before any app step. The proof deliberately does not create them: a check
-	// that prepares what it proves would hide exactly the empty-path first
-	// install this file exists to catch, and it did — this used to be the only
-	// MkdirAll in the package, and it ran after the Arr root-folder step.
+	// Both directories are EnsureDataDirs'. The proof deliberately does not create
+	// them: a check that prepares what it proves would hide the empty-path first
+	// install this file exists to catch.
 	_ = os.Remove(out.Source)
 	_ = os.Remove(out.Target)
 	defer func() {

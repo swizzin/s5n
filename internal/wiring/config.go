@@ -1,10 +1,10 @@
-// Package wiring is the idempotent post-install step: it connects qBittorrent,
-// the Arrs and Prowlarr to each other, proves the /data hardlink contract, and
-// records what it verified in a ConfigMap.
+// Package wiring is the idempotent post-install step: it connects qBittorrent, the
+// Arrs and Prowlarr, proves the /data hardlink contract, and records what it
+// verified in a ConfigMap.
 //
-// It is swizzin's install.sh written as a reconciler: every step reads the live
-// state, changes only what differs, and proves the result. A second run on an
-// unchanged release performs zero writes, which the e2e asserts.
+// It is swizzin's install.sh as a reconciler: every step reads the live state,
+// changes only what differs, and proves the result; a second run on an unchanged
+// release performs zero writes, which the e2e asserts.
 package wiring
 
 import (
@@ -18,9 +18,8 @@ import (
 	"strings"
 )
 
-// The field names the component blocks share. Each is both the JSON key the
-// chart writes and the name a validation error prints, so writing it once is
-// what keeps the two in step.
+// The field names the component blocks share: both the JSON key the chart writes
+// and the name a validation error prints.
 const (
 	fieldURL          = "url"
 	fieldURLBase      = "urlBase"
@@ -30,8 +29,8 @@ const (
 	fieldName         = "name"
 )
 
-// Config is rendered by the chart into /etc/s5n/wiring/wiring.json. It contains
-// no secrets: every credential is a file reference into the mounted Secret.
+// Config is rendered by the chart into /etc/s5n/wiring/wiring.json. It contains no
+// secrets: every credential is a file reference into the mounted Secret.
 type Config struct {
 	Namespace      string             `json:"namespace"`
 	ConfigMap      string             `json:"configMap"`
@@ -51,22 +50,16 @@ type Config struct {
 	Bazarrs        []BazarrConfig     `json:"bazarrs,omitempty"`
 }
 
-// JellyfinConfig points at Jellyfin and carries what the Job needs to make the
-// server usable: the person's account, the automation account it signs in as,
-// the peers whose forwarded header the server honours, and the libraries the
-// release's Arrs write into.
+// JellyfinConfig carries what the Job needs to make the server usable: the
+// person's account, the automation account, the proxies the server honours, and the
+// libraries the Arrs write into.
 //
-// Unlike every other app here, none of this can be sealed into a file before
-// the app starts. Jellyfin's users, its API keys and its libraries are rows in
-// data/jellyfin.db, and its first-run wizard is an API: the chart's init
-// container completes it inside the pod, before the server the Service reaches
-// starts, and the Job checks that it is complete.
+// None of this can be sealed into a file before the app starts: users, API keys and
+// libraries are rows in data/jellyfin.db, and the first-run wizard is an API. The
+// chart's init container completes it inside the pod, and the Job checks it.
 //
-// Username is the account root's login admits (the chart's `login`), so the
-// person's Jellyfin account carries the name they already use on the box.
-// UserPasswordFile is the first-run administrator's password, which the Job
-// needs once to make its own account; BoxPasswordFile is that account's, and
-// it is never shown to anyone.
+// Username is the account root's login admits, and UserPasswordFile is the first-run
+// administrator's password, needed once to make the box's own account.
 type JellyfinConfig struct {
 	URL              string            `json:"url"`
 	Username         string            `json:"username"`
@@ -76,20 +69,17 @@ type JellyfinConfig struct {
 	Libraries        []JellyfinLibrary `json:"libraries,omitempty"`
 }
 
-// JellyfinLibrary is one virtual folder: the Arr instance whose library
-// directory it holds, the collection type that Arr writes, and the directory
-// itself (the same one the data-contract step creates).
+// JellyfinLibrary is one virtual folder: the Arr instance's library directory, its
+// collection type, and the directory itself (created by the data-contract step).
 type JellyfinLibrary struct {
 	Name           string `json:"name"`
 	CollectionType string `json:"collectionType"`
 	Path           string `json:"path"`
 }
 
-// QuiConfig points at qui's API. PasswordFile is the release Secret's
-// qui-password: the chart generates it once and qui's init container writes it
-// into the app's own user table on every start, so this is the one account the
-// Job signs in with. No API key is minted or stored — qui only issues one to a
-// session, and a session is something this Job can open by itself.
+// QuiConfig points at qui's API. PasswordFile is the release Secret's qui-password,
+// which qui's init container writes into the app's user table on every start. No API
+// key is minted: qui issues one only to a session, and the Job can open one.
 type QuiConfig struct {
 	URL          string `json:"url"`
 	URLBase      string `json:"urlBase"`
@@ -97,9 +87,7 @@ type QuiConfig struct {
 	PasswordFile string `json:"passwordFile"`
 }
 
-// AutobrrConfig points at autobrr's API, with the same account arrangement as
-// qui's: autobrr-password in the release Secret, written into autobrr's own
-// user table by its init container at every start.
+// AutobrrConfig points at autobrr's API, with the same account arrangement as qui's.
 type AutobrrConfig struct {
 	URL          string `json:"url"`
 	URLBase      string `json:"urlBase"`
@@ -108,82 +96,68 @@ type AutobrrConfig struct {
 }
 
 // PbhConfig points at PeerBanHelper's WebAPI. TokenFile is the release Secret's
-// pbh-token, which is PBH's own WebUI token: the chart generates it once and
-// gives the app the same value through its environment, so this Job and the
-// app always agree. It is read from the mount like every other credential, and
-// sent as a Bearer header.
+// pbh-token, which is PBH's own WebUI token: the chart gives the app the same value
+// through its environment, and the Job sends it as a Bearer header.
 type PbhConfig struct {
 	URL       string `json:"url"`
 	TokenFile string `json:"tokenFile"`
 }
 
-// PlexConfig points at Plex. There is no API key: /identity answers
-// unauthenticated on every build, claimed or not (see internal/apps.Plex).
+// PlexConfig points at Plex. There is no API key: /identity answers unauthenticated
+// on every build, claimed or not (see internal/apps.Plex).
 type PlexConfig struct {
 	URL string `json:"url"`
 }
 
-// TautulliConfig points at Tautulli. APIKeyFile is a file reference into the
-// mounted Secret, seeded by the tautulli-config init container — the wiring
-// Job has no mount into Tautulli's own /config to read its generated key back.
+// TautulliConfig points at Tautulli. APIKeyFile is seeded by the tautulli-config
+// init container, because the Job has no mount into Tautulli's /config.
 //
-// PlexTokenFile is the Plex server token (X-Plex-Token) the PMS link uses, also
-// a file reference into the mounted Secret. It is optional: absent or empty
-// means "no token yet", which makes the PMS link pending rather than
-// configuring Tautulli against a Plex that trusts the pod network.
+// PlexTokenFile is the optional Plex server token the PMS link uses: absent means
+// "no token yet", which makes the link pending rather than configuring Tautulli
+// against a Plex that trusts the pod network.
 type TautulliConfig struct {
 	URL           string `json:"url"`
 	APIKeyFile    string `json:"apiKeyFile"`
 	PlexTokenFile string `json:"plexTokenFile"`
 }
 
-// MaintainerrConfig points at Maintainerr's API and at the Plex server token its
-// Plex connection uses.
+// MaintainerrConfig points at Maintainerr's API and at the Plex token its connection
+// uses.
 //
 // URLBase is the prefix the chart serves it under, and every route carries it:
-// Maintainerr applies its BASE_PATH to its API and its health route alike
-// (values.yaml's rewritePath comment, templates/workloads.yaml's BASE_PATH).
-//
-// PlexTokenFile is the same file Tautulli's PMS link reads — the release
-// Secret's plex-token — and is optional the same way: without it the Plex
-// connection is reported pending rather than configured without a credential.
+// Maintainerr applies BASE_PATH to its API and its health route alike
+// (templates/workloads.yaml). PlexTokenFile is the same file Tautulli reads, and
+// optional the same way.
 type MaintainerrConfig struct {
 	URL           string `json:"url"`
 	URLBase       string `json:"urlBase"`
 	PlexTokenFile string `json:"plexTokenFile"`
 }
 
-// SeerrConfig points at Seerr. There is no API key here either: every
-// settings endpoint needs an authenticated admin session the wiring Job
-// cannot create (see internal/apps.Seerr), so this is only ever used to wait
-// for readiness and to read whether an admin exists at all.
+// SeerrConfig points at Seerr. There is no API key: every settings endpoint needs an
+// authenticated admin session the Job cannot create, so this only waits for
+// readiness and reads whether an admin exists.
 //
-// PublicURL is the address a person opens Seerr at, which is not this URL:
-// Seerr's bundle loads its assets from the site root, so the chart serves it at
-// <app>.<domain> with a listener of its own (catalog.yaml's `exposure: host`).
-// The receipt's one row that asks a human to sign in there names this, never
-// the in-cluster Service.
+// PublicURL is where a person opens Seerr: its bundle loads assets from the site
+// root, so the chart serves it at <app>.<domain> (catalog.yaml's `exposure: host`).
 type SeerrConfig struct {
 	URL       string `json:"url"`
 	PublicURL string `json:"publicUrl"`
 }
 
-// QbitConfig points at the qBittorrent WebUI. It carries no credential: the
-// WebUI skips its login for the release's addresses (internal/qbtconf seals
-// that; docs/box.md, "Logins"), so this Job talks to it with an empty username
-// and password, like every other app that calls it.
+// QbitConfig points at the qBittorrent WebUI. It carries no credential: the WebUI
+// skips its login for the release's addresses (internal/qbtconf; docs/box.md,
+// "Logins").
 //
-// SavePath is the downloads root the data contract gives qBittorrent
-// (/data/downloads). A category with no save path of its own downloads into
-// <SavePath>/<category>, which is what a migrated category has and what makes
-// it already right.
+// SavePath is /data/downloads; a category with no save path of its own downloads
+// into <SavePath>/<category>, which is what a migrated category already has.
 type QbitConfig struct {
 	URL      string `json:"url"`
 	SavePath string `json:"savePath"`
 }
 
-// ProwlarrConfig points at Prowlarr. SelfURL is Prowlarr's own address as the
-// Arrs reach it, which Prowlarr hands to each application it registers.
+// ProwlarrConfig points at Prowlarr. SelfURL is Prowlarr's own address as the Arrs
+// reach it, which it hands to each application.
 type ProwlarrConfig struct {
 	URL        string `json:"url"`
 	URLBase    string `json:"urlBase"`
@@ -191,12 +165,9 @@ type ProwlarrConfig struct {
 	APIKeyFile string `json:"apiKeyFile"`
 }
 
-// SabnzbdConfig points at SABnzbd, the usenet download client. It carries the
-// two paths the data contract gives it: SavePath is where a finished job is
-// left for an Arr to import, and DownloadDir is where it is unpacked while it
-// runs. Both are on /data, so SAB's own move from one to the other is a rename
-// and the Arr's import is a hardlink. Categories are the Arr instances' download
-// categories (Config.Instances), created here with their directories.
+// SabnzbdConfig points at SABnzbd. SavePath is where a finished job is left for an
+// Arr to import, DownloadDir where it is unpacked. Both are on /data, so SAB's move
+// is a rename and the import a hardlink.
 type SabnzbdConfig struct {
 	URL         string `json:"url"`
 	URLBase     string `json:"urlBase"`
@@ -205,14 +176,10 @@ type SabnzbdConfig struct {
 	DownloadDir string `json:"downloadDir"`
 }
 
-// BazarrConfig is one Bazarr instance and the Arr pair it reads.
-//
-// Upstream Bazarr keeps exactly one Sonarr and one Radarr per instance
-// (bazarr/app/config.py at v1.6.2: the sonarr.* and radarr.* sections), so a 4K
-// pair is a second Bazarr pod with a pair of its own. A side the box runs no Arr
-// for is nil here and turned off in the app: its whole job is reading the two,
-// and one left pointing at an address nothing answers on is a subtitle search
-// that silently never runs.
+// BazarrConfig is one Bazarr instance and the Arr pair it reads: upstream keeps one
+// Sonarr and one Radarr per instance (bazarr/app/config.py at v1.6.2: the sonarr.*
+// and radarr.* sections), so a 4K pair is a second pod. A side with no Arr is nil
+// and turned off: one left pointing at nothing is a search that never runs.
 type BazarrConfig struct {
 	Name       string      `json:"name"`
 	URL        string      `json:"url"`
@@ -222,8 +189,8 @@ type BazarrConfig struct {
 	Radarr     *BazarrSide `json:"radarr,omitempty"`
 }
 
-// BazarrSide is one Arr a Bazarr instance reads: the Service it dials and the
-// Arr's own key, both rendered by the chart from that Arr's instance.
+// BazarrSide is one Arr a Bazarr instance reads: the Service it dials and the Arr's
+// key.
 type BazarrSide struct {
 	Host       string `json:"host"`
 	Port       int    `json:"port"`
@@ -233,11 +200,10 @@ type BazarrSide struct {
 
 // Instance is one Arr instance (sonarr, sonarr-4k, radarr, ...).
 //
-// Category is the directory box lays this instance's library out in
-// (/data/media/<category>), and DownloadCategory is the qBittorrent category it
-// downloads into (/data/downloads/<downloadCategory>). They are the same value
-// on a fresh box; a migrated one keeps the source's download category, because
-// its torrents are already in that directory and box never moves them.
+// Category is its library directory (/data/media/<category>), DownloadCategory its
+// qBittorrent category (/data/downloads/<downloadCategory>). They are equal on a
+// fresh box; a migrated one keeps the source's download category, because box never
+// moves torrents.
 type Instance struct {
 	Name             string `json:"name"`
 	Kind             string `json:"kind"`
@@ -265,9 +231,8 @@ func Load(path string) (*Config, error) {
 	if c.TimeoutSeconds <= 0 {
 		c.TimeoutSeconds = 300
 	}
-	// A release from before the download category existed, or a hand-written
-	// config, downloads into the directory its library is in: the one value is
-	// both.
+	// A config from before the download category existed downloads into its library
+	// directory: the one value is both.
 	for i := range c.Instances {
 		if c.Instances[i].DownloadCategory == "" {
 			c.Instances[i].DownloadCategory = c.Instances[i].Category
@@ -279,13 +244,10 @@ func Load(path string) (*Config, error) {
 	return &c, nil
 }
 
-// validate checks the rendered config. An empty app list is valid, and the Job
-// must accept it: a seedbox is installed with apps off (`box init --apps`, which
-// is how `box migrate apply` finds a box whose plan's apps it switches on
-// itself), and a release with no Arr and no qBittorrent has nothing per-app to
-// reconcile. The Job is a Helm hook, so refusing it fails the release and
-// `box apply` waits on a receipt that can never come -- there is no install to
-// repair, only a shape to accept.
+// validate checks the rendered config. An empty app list is valid: a seedbox can be
+// installed with apps off, and a release with no Arr and no qBittorrent has nothing
+// to reconcile. The Job is a Helm hook, so refusing it fails the release and `box
+// apply` waits on a receipt that can never come.
 func (c *Config) validate() error {
 	for i, inst := range c.Instances {
 		if err := validateInstance(i, inst); err != nil {
@@ -402,8 +364,8 @@ func downloadCategory(inst Instance) string {
 	return inst.Category
 }
 
-// validateInstance checks one Arr instance: its kind must be one the wiring
-// job knows how to register, and every field it registers must be set.
+// validateInstance checks one Arr instance: a kind the Job can register, and every
+// field it registers set.
 func validateInstance(index int, inst Instance) error {
 	switch inst.Kind {
 	case "sonarr", "radarr", "lidarr":
@@ -416,9 +378,8 @@ func validateInstance(index int, inst Instance) error {
 	})
 }
 
-// validateBazarr checks one Bazarr instance: what it needs to be dialled, and
-// that it has at least one Arr to read. An instance whose pair is both missing
-// would run and do nothing, which is a values mistake rather than a release.
+// validateBazarr checks one Bazarr instance and that it has at least one Arr to read:
+// one with neither would run and do nothing.
 func validateBazarr(index int, b BazarrConfig) error {
 	where := fmt.Sprintf("bazarrs[%d] (%s)", index, b.Name)
 	if err := requireFields(where, map[string]string{
@@ -443,8 +404,7 @@ func validateBazarr(index int, b BazarrConfig) error {
 	return nil
 }
 
-// validateTautulli checks the fields the Tautulli steps need, and the one
-// dependency those steps have: the PMS link has no meaning without Plex.
+// validateTautulli checks the fields the Tautulli steps need, and that Plex exists.
 func validateTautulli(t *TautulliConfig, plex *PlexConfig) error {
 	if err := requireFields("tautulli", map[string]string{
 		"url": t.URL, "apiKeyFile": t.APIKeyFile,
@@ -457,8 +417,8 @@ func validateTautulli(t *TautulliConfig, plex *PlexConfig) error {
 	return nil
 }
 
-// validateCategories refuses one download category pointing at two save paths,
-// because both instances would then write into the same downloads.
+// validateCategories refuses one download category pointing at two save paths: both
+// instances would write into the same downloads.
 func validateCategories(instances []Instance) error {
 	seen := map[string]string{}
 	for _, inst := range instances {
@@ -470,9 +430,7 @@ func validateCategories(instances []Instance) error {
 	return nil
 }
 
-// requireFields reports the first empty field, named with the component it
-// belongs to. The fields are a map because each component's set is written
-// once here, next to the struct it mirrors.
+// requireFields reports the first empty field, named with its component.
 func requireFields(component string, fields map[string]string) error {
 	for field, value := range fields {
 		if value == "" {
@@ -482,8 +440,7 @@ func requireFields(component string, fields map[string]string) error {
 	return nil
 }
 
-// ReadSecret reads a secret file, tolerating one trailing newline so that
-// hand-written Secrets behave like generated ones.
+// ReadSecret reads a secret file, tolerating one trailing newline.
 func ReadSecret(path string) (string, error) {
 	b, err := os.ReadFile(path)
 	if err != nil {
@@ -498,10 +455,9 @@ func ReadSecret(path string) (string, error) {
 
 // ReadOptionalSecret reads a secret file that may legitimately be absent.
 //
-// An unconfigured path, a missing file, or an empty one all mean "not supplied
-// yet" — the caller reports its dependent step as pending, which is a normal
-// state and not an error. Any other read error is returned: a credential that
-// cannot be read must never degrade into configuring the app without it.
+// An unconfigured path, a missing file or an empty one all mean "not supplied yet".
+// Any other read error is returned: a credential that cannot be read must never
+// degrade into configuring the app without it.
 func ReadOptionalSecret(path string) (string, bool, error) {
 	if path == "" {
 		return "", false, nil

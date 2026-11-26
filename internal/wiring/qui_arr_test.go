@@ -10,9 +10,8 @@ import (
 	"github.com/swizzin/s5n/internal/apps"
 )
 
-// One Arr row per Sonarr and Radarr on the box, with the release's address, the
-// Arr's own key and qui's own test proving each one from qui's pod. The ids and
-// key fingerprints are recorded, and a second run writes nothing at all.
+// One Arr row per Sonarr and Radarr, with qui's own test proving each from its pod;
+// ids and fingerprints are recorded, and a second run writes nothing.
 func TestWiringRegistersQuisArrInstances(t *testing.T) {
 	h := newHarness(t)
 	f := h.withApps(t)
@@ -80,18 +79,14 @@ func TestWiringRegistersQuisArrInstances(t *testing.T) {
 	}
 }
 
-// A migrated box's qui already holds the source's Arr rows, and the migration
-// has pointed each at the release (internal/migrate/qui rewrites
-// arr_instances.base_url). A create there is refused 409 by the table's UNIQUE
-// index, so the Job adopts the source's rows -- their ids are recorded, their
-// names and their enabled flags are left as they were -- and only the key, which
-// was the source Arr's, is written.
+// A migrated qui already holds the source's Arr rows, pointed at the release
+// (internal/migrate/qui rewrites base_url). A create is refused 409 by the UNIQUE
+// index, so the Job adopts those rows and writes only the key.
 func TestWiringAdoptsAMigratedQuisArrInstances(t *testing.T) {
 	h := newHarness(t)
 	f := h.withApps(t)
-	// What the rewriter leaves: the release's address, the source's name, the
-	// source's (encrypted, unreadable) key, and an id the migration did not
-	// renumber.
+	// The rewriter leaves the release's address, the source's name and key, and an
+	// id the migration did not renumber.
 	for i, inst := range h.config.Instances {
 		f.quiArrRows = append(f.quiArrRows, apps.Item{
 			"id": 40 + i, "type": inst.Kind, "name": "source " + inst.Name,

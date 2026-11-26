@@ -14,10 +14,9 @@ import (
 	"github.com/swizzin/s5n/internal/apps"
 )
 
-// appFakes are qui and autobrr as the wiring Job finds them: both keep their
-// own user table, both answer a login and then a list of the objects s5n owns,
-// and both mask the stored secrets. They record what was written so a test can
-// prove a second run is a no-op.
+// appFakes are qui and autobrr as the Job finds them: own user tables, a login,
+// masked stored secrets, and a record of writes so a second run can be proved a
+// no-op.
 type appFakes struct {
 	mu         sync.Mutex
 	quiRows    []apps.Item
@@ -28,14 +27,13 @@ type appFakes struct {
 	autoWrites int
 	quiLogin   int // status the login answers with; 0 is 200
 	autoLogin  int // status the login answers with; 0 is 204
-	// autoLoginBody is the message autobrr's refusal carries, which is what
-	// separates a bad password from a login the app's auth mode does not offer.
+	// autoLoginBody is what separates a bad password from an auth mode that does
+	// not offer one.
 	autoLoginBody string
 
-	// qui's Arr instances: the rows the Job registers for ID lookups. A create
-	// is refused 409 at a (type, base_url) the table already has, the list never
-	// carries a stored key, and an update leaves unsent fields alone -- the
-	// app's own rules (internal/api/handlers/arr.go at v1.36.1).
+	// qui's Arr rows: a create is refused 409 at an existing (type, base_url), the
+	// list never carries a key, and an update leaves unsent fields alone
+	// (internal/api/handlers/arr.go at v1.36.1).
 	quiArrRows     []apps.Item
 	quiArrNext     int
 	quiArrWrites   int
@@ -213,9 +211,8 @@ func (f *appFakes) autobrrHandler() http.HandlerFunc {
 	}
 }
 
-// withApps points the harness at a qui and an autobrr, with the same password
-// files the chart mounts. The fake qBittorrent password is the one already in
-// the harness's Secret file.
+// withApps points the harness at a qui and an autobrr, with the chart's password
+// files.
 func (h *harness) withApps(t *testing.T) *appFakes {
 	t.Helper()
 	f := &appFakes{}
@@ -226,8 +223,7 @@ func (h *harness) withApps(t *testing.T) *appFakes {
 		PasswordFile: h.write(t, "qui.pw", "qui-pass-123\n")}
 	h.config.Autobrr = &AutobrrConfig{URL: auto.URL, URLBase: "/autobrr", Username: "s5n",
 		PasswordFile: h.write(t, "autobrr.pw", "autobrr-pass-123\n")}
-	// PeerBanHelper's downloader is the release's qBittorrent too, and it holds
-	// no more of a credential than the others.
+	// PBH's downloader holds no more of a credential than the others.
 	h.withPbh(t)
 	h.runner.Config = h.config
 	return f
@@ -255,9 +251,8 @@ func ownedOf(t *testing.T, h *harness) *OwnedRecord {
 	return rec
 }
 
-// Both apps are registered once, with ids and secret fingerprints recorded, and
-// a second run writes nothing at all: no duplicate instance, no duplicate
-// client.
+// Both apps are registered once, with ids and fingerprints recorded; a second run
+// writes nothing.
 func TestWiringRegistersQuiAndAutobrr(t *testing.T) {
 	h := newHarness(t)
 	f := h.withApps(t)
@@ -331,12 +326,9 @@ func TestWiringRegistersQuiAndAutobrr(t *testing.T) {
 	}
 }
 
-// qBittorrent skips its login for the release's addresses, so the Job hands
-// every caller an empty username and password. That is the rule this test
-// pins: the five objects that used to hold a copy of the password (the Arrs'
-// download clients, qui's instance, autobrr's qBittorrent client and
-// PeerBanHelper's downloader) hold nothing, and the release Secret's
-// password is read by qBittorrent's own init container alone.
+// qBittorrent skips its login for the release's addresses, so the Job hands every
+// caller an empty username and password: no client object holds the Secret's
+// password.
 func TestWiringGivesQbittorrentNoCredentials(t *testing.T) {
 	h := newHarness(t)
 	f := h.withApps(t)
@@ -374,9 +366,8 @@ func TestWiringGivesQbittorrentNoCredentials(t *testing.T) {
 	}
 }
 
-// A password changed inside the app is not a generic HTTP failure: the step
-// says what happened and the command that fixes it, and the Job never restarts
-// a pod itself.
+// A password changed inside the app is not a generic HTTP failure: the step names
+// the cause and the command, and the Job never restarts a pod itself.
 func TestWiringNamesAChangedPasswordAndTheFix(t *testing.T) {
 	h := newHarness(t)
 	f := h.withApps(t)
@@ -401,8 +392,8 @@ func TestWiringNamesAChangedPasswordAndTheFix(t *testing.T) {
 	}
 }
 
-// autobrr answers a bad login with 403 rather than 401, so the classification
-// cannot be the status alone: it is the app's own body that says "rejected".
+// autobrr answers a bad login with 403, so the classification is the app's body,
+// not the status.
 func TestWiringNamesAChangedAutobrrPassword(t *testing.T) {
 	h := newHarness(t)
 	f := h.withApps(t)
@@ -418,12 +409,9 @@ func TestWiringNamesAChangedAutobrrPassword(t *testing.T) {
 	}
 }
 
-// autobrr v1.91 refuses the password login itself when OIDC is on with the
-// built-in login switched off ("password login is unavailable in oidc
-// authentication mode", internal/http/auth.go:122-126 at v1.91.1), and the
-// wiring Job's account then never signs in, so no downloader is registered. The
-// receipt has to say that: a restart would not put a password nobody changed
-// back, and an operator told to run one would look for the wrong fault.
+// autobrr v1.91 refuses password login when OIDC is on with the built-in login off
+// (internal/http/auth.go:122-126 at v1.91.1), so no downloader is registered. The
+// receipt says so: a restart would not fix it.
 func TestWiringNamesAnAppThatRefusesItsOwnPasswordLogin(t *testing.T) {
 	h := newHarness(t)
 	f := h.withApps(t)
@@ -477,15 +465,10 @@ func TestWiringSkipsQuiInstanceWithoutQbittorrent(t *testing.T) {
 	}
 }
 
-// The box a migration can leave behind: autobrr holds the source's own client
-// for each Arr -- the 4K ones named "Sonarr4k"/"Radarr4k" -- and the Job had
-// already made its own beside them, each by name. The operator deletes the
-// Job's rows, and owned.json still records the ids they had.
-//
-// The next run adopts the migrated row by the Arr it dials, which is the client
-// the operator's filters refer to by id, instead of recreating the Job's. Run
-// one proves the Job never removes the operator's row: that is theirs, and the
-// duplicate is theirs to delete.
+// A migration can leave autobrr with the source's own Arr clients and the Job's
+// beside them. The operator deletes the Job's rows and owned.json still records
+// their ids; the next run adopts the migrated row by the Arr it dials rather than
+// recreating the Job's, and never removes the operator's.
 func TestWiringAdoptsTheMigratedAutobrrClientAfterItsRecordedOneIsDeleted(t *testing.T) {
 	h := newHarness(t)
 	f := h.withApps(t)
