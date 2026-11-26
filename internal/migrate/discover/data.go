@@ -19,19 +19,12 @@ import (
 	"github.com/swizzin/s5n/internal/qbtconf"
 )
 
-// findData decides where the source kept the downloads and the library, which is
-// the one fact the whole path table is built from: box adopts the data where it
-// is, so the plan names the root and the two directories under it, and apply
-// renames those to box's names (plan.Data).
-//
-// The downloads are where qBittorrent saved, read from its own config: the
-// library is where the Arrs' root folders are, read from their databases. The
-// two have to be two directories directly under one parent, or a download and
-// the copy imported from it cannot share an inode -- which is the one thing this
-// migration exists to keep.
-//
-// The library's own directories are the categories box's release lays out, so
-// the same read maps each Arr's root folder onto the one its instance has.
+// findData decides where the source kept downloads and library, the one fact the
+// path table is built from. Downloads come from qBittorrent's save path, the
+// library from the Arrs' root folders, and both must be directories directly under
+// one root: otherwise a download and its import cannot share an inode, the one
+// thing this migration keeps. The library's directories map onto box's
+// categories.
 func (d *discovery) findData(ctx context.Context) (*plan.Data, error) {
 	qbit := d.byApp("qbittorrent")
 	if qbit == nil {
@@ -85,10 +78,8 @@ type placed struct {
 	host string
 }
 
-// rootFolderPaths is every library instance's root folders, as the app saw
-// them and as they are on this host. They are read once, here, because two
-// things need the same list: the directory the library lives in, and the
-// category each instance's library becomes.
+// rootFolderPaths is every library root folder as the app saw it and on this host;
+// both the library directory and the categories come from it.
 func (d *discovery) rootFolderPaths(ctx context.Context) ([]placed, error) {
 	var out []placed
 	for _, in := range d.instances {
@@ -112,9 +103,7 @@ func (d *discovery) rootFolderPaths(ctx context.Context) ([]placed, error) {
 	return out, nil
 }
 
-// mediaFolders is the plan's library mapping: one entry per instance, from the
-// directory the source's library keeps that instance's media in to the category
-// box's own release does.
+// mediaFolders maps each instance's library directory onto its box category.
 //
 // One root folder under the library per instance is the normal case. Two is a
 // decision rather than a guess: the first in name order is taken, marked as a

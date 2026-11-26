@@ -59,8 +59,6 @@ func stoppedPlan() *plan.Plan {
 	}}
 }
 
-// TestStoppedIsNoReplicasAndNoPod: the two halves of "stopped", one case each,
-// over every kind discovery reads.
 func TestStoppedIsNoReplicasAndNoPod(t *testing.T) {
 	selector := map[string]string{"app": "sonarr"}
 	tests := []struct {
@@ -173,10 +171,6 @@ func TestStoppedIsNoReplicasAndNoPod(t *testing.T) {
 	}
 }
 
-// TestTheStopCommandNamesTheSource: what the operator is told to run is the
-// source's own workload, in its own namespace. A kind with a count is scaled; a
-// DaemonSet and a bare Pod, which have none, are deleted, and the line says why
-// that is safe.
 func TestTheStopCommandNamesTheSource(t *testing.T) {
 	selector := map[string]string{"app": "sonarr"}
 	tests := []struct {
@@ -226,8 +220,6 @@ func TestTheStopCommandNamesTheSource(t *testing.T) {
 	}
 }
 
-// TestTheAppsAreSorted: a refusal reads the same way twice, so the apps are in
-// box's own name order.
 func TestTheAppsAreSorted(t *testing.T) {
 	p := &plan.Plan{Version: 2, Apps: map[string]plan.App{
 		"sonarr": {Kind: plan.Kubernetes, Source: "sonarr", Config: "/srv/apps/sonarr", Namespace: "media"},
@@ -245,8 +237,6 @@ func TestTheAppsAreSorted(t *testing.T) {
 	}
 }
 
-// TestStoppedRefusesWhatItCannotProve: a proof that guessed is worse than a
-// refusal, because the guess is what copies a live app's config.
 func TestStoppedRefusesWhatItCannotProve(t *testing.T) {
 	selector := map[string]string{"app": "sonarr"}
 	tests := []struct {
@@ -301,8 +291,6 @@ func TestStoppedRefusesWhatItCannotProve(t *testing.T) {
 	}
 }
 
-// TestStoppedPassesTheReadsFailureOn: a read that failed is the run's error, not
-// "nothing is running".
 func TestStoppedPassesTheReadsFailureOn(t *testing.T) {
 	want := errors.New("the API server refused")
 	src := stoppedSource{err: want}

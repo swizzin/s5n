@@ -16,9 +16,6 @@ import (
 	"github.com/swizzin/s5n/internal/migrate/plan"
 )
 
-// TestClusterReadsALiveSource: the client-go source flattens the same install
-// the saved manifests describe, resolves a claim to the host directory behind its
-// volume, and never asks for a Secret.
 func TestClusterReadsALiveSource(t *testing.T) {
 	labels := map[string]string{"app.kubernetes.io/name": "sonarr"}
 	statefulset := func() *appsv1.StatefulSet {
@@ -146,12 +143,6 @@ func TestClusterReadsALiveSource(t *testing.T) {
 	}
 }
 
-// TestClusterReadsEveryOwnerlessKind: the live source reads the same set a saved
-// directory does, so a catalog app run as a DaemonSet, as a ReplicaSet nothing
-// owns or as a bare Pod is not invisible. A ReplicaSet a Deployment made and a
-// pod a workload made are the same app's template twice, so they are not read as
-// workloads -- but the pod is still one the source holds, which is where a hint
-// address and the proof that a workload is stopped come from.
 func TestClusterReadsEveryOwnerlessKind(t *testing.T) {
 	labels := map[string]string{"app.kubernetes.io/name": "prowlarr"}
 	prowlarrPod := func(name string, owned bool) *corev1.Pod {

@@ -11,12 +11,6 @@ import (
 	"go.yaml.in/yaml/v3"
 )
 
-// TestTableMatchesTheChart is what keeps discovery's app table honest. The table
-// is a compile-time copy of two chart files -- the catalog's app list, and the
-// config mount each app's pod carries -- because discovery reads a source
-// install, where no chart release is present to ask. A chart that adds an app,
-// renames one or moves an app's config must fail here, in the commit that does
-// it, rather than migrate the wrong directory on someone's box.
 func TestTableMatchesTheChart(t *testing.T) {
 	chart := filepath.Join("..", "..", "..", "charts", "s5n")
 	var catalog struct {
@@ -76,13 +70,6 @@ func TestTableMatchesTheChart(t *testing.T) {
 	}
 }
 
-// TestSnapshotCarryIsPlexsStateOrItsWholeData: a migration copies every planned
-// app's config whole, except Plex's, whose config directory is mostly a library
-// of covers, artwork, thumbnails and preview thumbnails it built from the media
-// it was given. What Plex's snapshot carries is either its whole data -- less the
-// caches and records it rebuilds or downloads again -- or the state it cannot
-// rebuild: Preferences.xml and the library databases, the two of which a
-// snapshot without refuses. Nothing else in the table has a scope of its own.
 func TestSnapshotCarryIsPlexsStateOrItsWholeData(t *testing.T) {
 	full, ok := SnapshotCarry("plex", true)
 	if !ok {

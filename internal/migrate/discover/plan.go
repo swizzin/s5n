@@ -12,26 +12,21 @@ import (
 	"github.com/swizzin/s5n/internal/migrate/plan"
 )
 
-// plan assembles the whole file: one entry per app with its own path table, the
-// data root, the addresses the apps reached each other by, and the workloads
-// left behind.
+// plan assembles the file: apps with their path tables, the data root, addresses
+// and leftovers.
 func (d *discovery) plan(data *plan.Data) *plan.Plan {
-	// The rules are what the domain default is read from, so they come first:
-	// the hosts an Ingress serves an app at are the names this box will have to
-	// answer to as well.
+	// Host rules come first: the Ingress names are the domain box must answer to.
 	hosts := d.hostRules()
 	p := &plan.Plan{
 		Version: plan.Version,
-		// Only the cluster reader exists so far, and it is the one that
-		// answered; a docker or swizzin reader adds its kind here.
+		// Only the cluster reader exists; another reader adds its kind here.
 		Source: &plan.Source{
 			Taken: d.now().UTC().Format(time.RFC3339),
 			Kinds: []string{plan.Kubernetes},
 			Host:  d.sourceHost(),
 			Owner: d.owner(),
-			// The scope this read was asked for, which is half of what makes
-			// two reads of one host the same source: a cutover matches its own
-			// read against an earlier one on the host and on this.
+			// The scope asked for: half of what makes two reads one source, which
+			// cutover matches on.
 			Namespaces: sortedNamespaces(d.opt.Namespaces),
 		},
 		Domain: d.domain(),
@@ -61,9 +56,8 @@ func (d *discovery) plan(data *plan.Data) *plan.Plan {
 	return p
 }
 
-// sortedNamespaces is the run's --namespace list, deduped and in one order: the
-// plan is compared with another read's by its namespaces, so the order the
-// operator typed them in must not make two reads of one source differ.
+// sortedNamespaces is --namespace deduped and sorted: the operator's order must
+// not make two reads of one source differ.
 func sortedNamespaces(list []string) []string {
 	seen := make(map[string]bool, len(list))
 	var out []string
@@ -79,10 +73,8 @@ func sortedNamespaces(list []string) []string {
 	return out
 }
 
-// sourceHost is the host the source ran on: a single-node cluster is named by
-// its one node, and a cluster with more than one -- or one discovery could not
-// read -- names no host at all rather than picking a node that may hold none of
-// the data.
+// sourceHost is the single node's name; several nodes, or none readable, name no
+// host rather than picking one that may hold none of the data.
 func (d *discovery) sourceHost() string {
 	switch {
 	case len(d.nodes) == 1:
@@ -96,11 +88,8 @@ func (d *discovery) sourceHost() string {
 	return ""
 }
 
-// owner is the uid:gid the planned apps run as, when every one of them says the
-// same thing: the plan's answer for who the data root and the configs belong to
-// after the migration. A source whose apps disagree, or one that says nothing
-// (no PUID/PGID in its environment, no securityContext), names no owner and
-// leaves the question to the run.
+// owner is the uid:gid every planned app agrees on; disagreement or silence names
+// none and leaves the question to the run.
 func (d *discovery) owner() *plan.Owner {
 	type appUser struct {
 		name     string
@@ -114,8 +103,7 @@ func (d *discovery) owner() *plan.Owner {
 			return nil
 		}
 		if uid == 0 {
-			// box never runs an app as root, so root's files are not an owner
-			// it could adopt: the run asks who they should become.
+			// box never runs an app as root, so root's files are not adoptable.
 			d.note("%s's pod runs as root, which box does not, so the plan names no owner", in.name)
 			return nil
 		}
@@ -138,10 +126,8 @@ func (d *discovery) owner() *plan.Owner {
 	return &plan.Owner{UID: users[0].uid, GID: users[0].gid}
 }
 
-// appIDs is the uid:gid one app runs as. A pod's securityContext is what the
-// container actually runs as, so it answers first; a linuxserver image with none
-// takes the account it writes as from PUID and PGID, which is the only place a
-// source that never set a securityContext says it.
+// appIDs is one app's uid:gid: the container's securityContext, then the pod's,
+// then PUID/PGID, the only place a linuxserver source says it.
 func appIDs(in *instance) (uid, gid int, ok bool) {
 	uid, gid = in.container.RunAsUser, in.container.RunAsGroup
 	if uid < 0 {
@@ -174,18 +160,12 @@ func envID(env map[string]string, name string) (int, bool) {
 	return n, true
 }
 
-// pathRules is one app's table: the paths it stored, as it stored them, mapped
-// onto the paths box's release gives it.
-//
-// The table is per app because every app saw its own paths: the client mounted
-// the downloads at /downloads while an Arr may have mounted the same data at
-// /library, and one app's table applied to another app's files would move a path
-// that app never had (internal/migrate/plan).
+// pathRules is one app's table. It is per app because each mounted the same data
+// differently, and one app's table on another's files would move a path it never
+// had (internal/migrate/plan).
 func (d *discovery) pathRules(in *instance, data *plan.Data) []plan.PathRule {
-	// An app stores paths into its own config directory too (Plex's metadata
-	// paths, Tautulli's backups, qui's), so the config mount maps to where box
-	// puts it. It is the same directory either way, which is a rule and not a
-	// gap: apply copies the config into box's config root.
+	// The config mount maps to box's /config: the same directory, a rule rather
+	// than a gap.
 	rules := []plan.PathRule{{From: in.configMount, To: "/config"}}
 	seen := map[string]bool{in.configMount: true}
 	for _, m := range in.container.Mounts {
@@ -197,10 +177,8 @@ func (d *discovery) pathRules(in *instance, data *plan.Data) []plan.PathRule {
 			continue
 		}
 		if vol.HostPath == "" {
-			// A mount that holds no host directory is not data: an emptyDir's
-			// scratch space, a config map, a secret. A persistent volume with
-			// none is data box cannot reach, and the operator has to hear
-			// about it.
+			// No host directory is not data -- scratch, a config map, a secret --
+			// unless it is persistent, which is data box cannot reach.
 			if vol.Persistent {
 				d.rep.Ignored = append(d.rep.Ignored, Ignored{
 					App: in.name, Mount: path.Clean(m.Path), Volume: vol.String(),
@@ -219,18 +197,16 @@ func (d *discovery) pathRules(in *instance, data *plan.Data) []plan.PathRule {
 		}
 		for _, r := range mountRules(path.Clean(m.Path), rel, data) {
 			if seen[r.From] {
-				// One container path can only be one directory; a second rule
-				// for it would leave the winner to the order of the list.
+				// One container path is one directory; a second rule would leave
+				// the winner to the list's order.
 				continue
 			}
 			seen[r.From] = true
 			rules = append(rules, r)
 		}
 	}
-	// The release mounts the app's scratch directories at the same paths, so a
-	// path the app stored under one (Plex's transcoder directory) is a rule onto
-	// itself, not a gap the operator has to settle. A source that kept data
-	// there under the data root already has its rule above, and that one wins.
+	// Scratch directories are mounted at the same paths in the release, so a stored
+	// one is a rule onto itself, not a gap; a data rule above wins.
 	for _, dir := range in.info.scratch {
 		if !seen[dir] {
 			seen[dir] = true
@@ -240,15 +216,9 @@ func (d *discovery) pathRules(in *instance, data *plan.Data) []plan.PathRule {
 	return rules
 }
 
-// mountRules turns one mount into the rules its app needs, given where the host
-// directory sits under the data root.
-//
-// A mount of the root itself is the whole data directory under another name, so
-// the app saw both of the contract's directories: the rules name each of them
-// under that mount, and every library directory mapped onto a box category. A
-// mount of one of them, or of something below one, is one rule, and its target
-// is what apply's renames leave behind -- a source whose downloads are in
-// Downloads/ files under /data/downloads/ once apply has renamed the directory.
+// mountRules turns one mount into its rules. A mount of the data root names both
+// contract directories under it plus every library category; a mount of one
+// directory is one rule, its target what apply's renames leave behind.
 func mountRules(mountPath, rel string, data *plan.Data) []plan.PathRule {
 	if rel == "" {
 		return append([]plan.PathRule{

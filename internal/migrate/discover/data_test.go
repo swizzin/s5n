@@ -80,10 +80,6 @@ func (f *fixture) withCategories() *fixture {
 	return f
 }
 
-// TestDiscoverMapsTheLibraryOntoBoxCategories: every root folder under the
-// media directory becomes the box category of the instance that keeps it, and
-// the path table says so -- which is what makes the rewriter, Plex and the
-// rename all agree about where a film is.
 func TestDiscoverMapsTheLibraryOntoBoxCategories(t *testing.T) {
 	f := arrInstall(t).withCategories()
 	p, _ := f.discover(t)
@@ -134,9 +130,6 @@ func TestDiscoverMapsTheLibraryOntoBoxCategories(t *testing.T) {
 	}
 }
 
-// TestDiscoverRecordsTheDownloadCategory: the category the source's own
-// qBittorrent client downloads into is what the Arr keeps, because its torrents
-// are already in that directory.
 func TestDiscoverRecordsTheDownloadCategory(t *testing.T) {
 	f := arrInstall(t).withCategories()
 	p, _ := f.discover(t)
@@ -156,9 +149,6 @@ func TestDiscoverRecordsTheDownloadCategory(t *testing.T) {
 	}
 }
 
-// TestDiscoverIgnoresAClientItDoesNotDial: only the enabled qBittorrent client
-// is the one the instance downloads into. A disabled row, or a client of a type
-// box does not run, says nothing about the files on the disk.
 func TestDiscoverIgnoresAClientItDoesNotDial(t *testing.T) {
 	f := arrInstall(t).withCategories()
 	f.bytes(t, "/srv/apps/sonarr/sonarr.db", arrDBWith(t, []string{"/library/TV"}, []clientRow{
@@ -172,9 +162,6 @@ func TestDiscoverIgnoresAClientItDoesNotDial(t *testing.T) {
 	}
 }
 
-// TestDiscoverChoosesBetweenTwoRootFoldersWithAReason: an Arr keeping two
-// folders under the library is a decision, and the plan says which one it took
-// and why rather than guessing silently.
 func TestDiscoverChoosesBetweenTwoRootFoldersWithAReason(t *testing.T) {
 	f := arrInstall(t).withCategories()
 	f.bytes(t, "/srv/apps/radarr/radarr.db", arrDBWith(t, []string{"/library/Movies", "/library/Old"}, []clientRow{
@@ -200,9 +187,6 @@ func TestDiscoverChoosesBetweenTwoRootFoldersWithAReason(t *testing.T) {
 	}
 }
 
-// TestDiscoverLeavesARootFolderOutsideTheLibrary: a library on another
-// filesystem is not the one box adopts, so it is not renamed and the operator
-// hears about it once.
 func TestDiscoverLeavesARootFolderOutsideTheLibrary(t *testing.T) {
 	f := arrInstall(t).withCategories()
 	f.app(t, appSpec{
@@ -225,9 +209,6 @@ func TestDiscoverLeavesARootFolderOutsideTheLibrary(t *testing.T) {
 	}
 }
 
-// TestDiscoverMapsABoxNamedLibraryToItself: a source that already uses box's
-// names maps each directory onto itself, which is what makes the apply a no-op
-// on disk.
 func TestDiscoverMapsABoxNamedLibraryToItself(t *testing.T) {
 	f := arrInstall(t).withCategories()
 	f.bytes(t, "/srv/apps/radarr/radarr.db", arrDBWith(t, []string{"/library/movies"}, []clientRow{
@@ -248,9 +229,6 @@ func TestDiscoverMapsABoxNamedLibraryToItself(t *testing.T) {
 	}
 }
 
-// TestDiscoverWithoutChartCategoriesKeepsTheLibrary: a read with no chart to ask
-// cannot know what box would call a directory, so it renames nothing and says
-// so once.
 func TestDiscoverWithoutChartCategoriesKeepsTheLibrary(t *testing.T) {
 	f := arrInstall(t)
 	p, rep := f.discover(t)

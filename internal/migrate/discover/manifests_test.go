@@ -7,9 +7,6 @@ import (
 	"testing/fstest"
 )
 
-// TestDirectoryReadsEveryDocumentShape: a saved source is whatever `kubectl get
-// -o yaml` wrote, which is several documents in one file, a List of objects, or
-// JSON. All of them are the same source.
 func TestDirectoryReadsEveryDocumentShape(t *testing.T) {
 	fsys := fstest.MapFS{
 		"save/a.yaml": {Data: []byte(`apiVersion: apps/v1
@@ -118,8 +115,6 @@ items:
 	}
 }
 
-// TestDirectoryNamesTheFileItCannotRead: a saved source is an operator's file, so
-// a document that does not decode says which one.
 func TestDirectoryNamesTheFileItCannotRead(t *testing.T) {
 	fsys := fstest.MapFS{
 		"save/good.yaml": {Data: []byte("apiVersion: v1\nkind: Service\nmetadata:\n  name: x\n")},
@@ -137,8 +132,6 @@ kind: Deployment
 	}
 }
 
-// TestDirectoryNeedsManifests: an empty directory is a refusal rather than a
-// source with no apps, because the two look the same from the plan.
 func TestDirectoryNeedsManifests(t *testing.T) {
 	_, err := NewDirectory(fstest.MapFS{"readme.md": {Data: []byte("nothing")}}).Workloads(context.Background())
 	if err == nil {
