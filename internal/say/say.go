@@ -43,10 +43,9 @@ type Item struct {
 	Children []Item
 }
 
-// ReceiptRow is one step of the wiring receipt: what was checked, what it cost
-// ("ok", "pending", "skipped" or "failed") and the reason, when there is room.
-// Pending means a person still has to act, and a live renderer collects those for
-// after the final card.
+// ReceiptRow is one wiring step: what was checked, its result ("ok", "pending",
+// "skipped", "failed") and the reason. Pending means a person must act, and a live
+// renderer collects those for after the final card.
 type ReceiptRow struct {
 	Name   string
 	Result string
@@ -78,10 +77,9 @@ const (
 	StateCol = 8
 )
 
-// Row is one line of box's status output: a mark in the gutter, a name, and the
-// facts that belong to it, joined with a middle dot. Why is the one reason a
-// refusal gives, on the line under the row; Command is a line to copy, under
-// that. A row with no name prints its facts straight after the gutter: a note.
+// Row is one line of status output: a mark, a name, and its facts. Why is a refusal's
+// one reason, under the row; Command a line to copy under that. No name prints the facts
+// after the gutter: a note.
 type Row struct {
 	Mark  string
 	Name  string
@@ -174,15 +172,10 @@ func ReportedBy(err error) bool {
 	return errors.As(err, &pointer) && pointer != nil
 }
 
-// Op is one step that starts and then finishes. Label is the present-tense line a
-// live renderer animates; Plain is what the transcript prints at the start (empty
-// for silent until it finishes). Budget is non-zero for a timed wait, shown as
-// elapsed against it.
-//
-// Name makes the finish line a Row named Name whose facts are the duration and
-// Done's text. Source returns the newest line of what is waited on, sampled about
-// once a second: a live renderer shows it beside the running line, and the run
-// log gets each distinct line once.
+// Op is one step that starts and finishes: Label animates when live, Plain is what the
+// transcript prints at the start, Budget a timed wait shown as elapsed. Name makes the
+// finish line a Row; Source is the newest line of what is waited on, sampled about once
+// a second, shown beside the running line and logged once each.
 type Op struct {
 	Label  string
 	Plain  string
@@ -630,9 +623,8 @@ func blockNameWidth(rows []TableRow) int {
 	return w
 }
 
-// PlainRow lays one row out as the transcript prints it and the run log keeps it:
-// facts, why and command, each hanging under the row's text column, nothing
-// wrapped -- a status row is what a person scans, and a golden test reads the same
+// PlainRow lays one row out for the transcript and the log alike: facts, why and
+// command under the row's text column, never wrapped, so a golden test reads the same
 // bytes whatever the terminal was.
 func PlainRow(r Row) string {
 	mark := r.Mark
@@ -651,10 +643,8 @@ func PlainRow(r Row) string {
 	return b.String()
 }
 
-// Fold replaces rows that differ only by name with one row, because a column of
-// identical rows is one fact and its size (rules 3 and 4): Name, its first fact
-// gaining "for N unit", and the rest as they all were. Rows differing in anything
-// else are returned as they are, and a lone row is itself.
+// Fold replaces rows that differ only by name with one: Name, its first fact gaining
+// "for N unit", the rest as they were (rules 3 and 4). A lone row is itself.
 func Fold(name, unit string, rows []Row) []Row {
 	if len(rows) < 2 || len(rows[0].Facts) == 0 {
 		return rows
@@ -950,15 +940,11 @@ func (h *plainHandle) Failed(error) {
 // reporter draws a form for, answered on the transcript.
 func (p *Plain) Ask(question string, def bool) (bool, error) { return p.Confirm(question, def) }
 
-// Confirm is one yes/no question. --yes answers it, and there is no answer
-// without a reader: a prompt that cannot be shown is a refusal, never an implicit
-// yes, because box writes to a cluster as root and "nobody was there" must not
-// mean "go ahead". cmd/box gives a Plain a reader only when stdin is a terminal --
-// a character device is not enough, since /dev/null is one and fails with an EOF
-// nobody typed.
-//
-// def is what an empty line answers, and the prompt shows which way it cuts
-// ([Y/n] or [y/N]); an explicit y or n wins.
+// Confirm is one yes/no question. --yes answers it, and there is no answer without a
+// reader: a prompt that cannot be shown is a refusal, never an implicit yes, because box
+// writes to a cluster as root. cmd/box gives a Plain a reader only when stdin is a
+// terminal (a character device is not enough: /dev/null is one). def is what an empty
+// line answers, shown as [Y/n] or [y/N]; an explicit y or n wins.
 func (p *Plain) Confirm(question string, def bool) (bool, error) {
 	if p.Yes {
 		return true, nil

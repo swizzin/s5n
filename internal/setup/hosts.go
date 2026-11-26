@@ -43,15 +43,11 @@ func ApplyHosts(ctx context.Context, apply HostsFunc, hosts []Host) error {
 	return apply(ctx, decided)
 }
 
-// TLSHosts is root's per-host step for names a run is about to serve: an app served
-// at a host of its own gets the login's rule, that host's listener and its
-// Certificate before anything else moves (docs/box.md).
-//
-// It makes the same decision init makes, over the same DNS check: a name that does
-// not answer where the box's domain does can never issue, so the run stops before a
-// write naming the record to add. Both names answering nothing is a test box and
-// proceeds self-signed. The caller finds the names, which is why init and apply
-// cannot disagree about what a host needs.
+// TLSHosts is root's per-host step: an app served at its own host gets the login's rule,
+// its listener and its Certificate before anything else moves (docs/box.md). It makes
+// init's decision over the same DNS check, so a name answering elsewhere stops before a
+// write; two empty answers are a test box. The caller finds the names, which is why init
+// and apply cannot disagree.
 type TLSHosts struct {
 	// Domain is the box's own host name, which every app host is compared with.
 	Domain string

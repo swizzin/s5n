@@ -423,18 +423,15 @@ func clusterIssuerName(issuer string) (string, error) {
 
 // followRoot keeps a self-signed host's certificate on box's root.
 //
-// A certificate written from a bare `selfSigned` issuer has ca.crt == the leaf, and
-// cert-manager does not re-issue when the issuer behind an unchanged issuerRef changes
-// what it signs with: at v1.21.3 the trigger chain looks at the Secret, the current
-// CertificateRequest and the expiry, never at the issuer's spec
-// (internal/controller/certificates/policies/policies.go:71-85). The served
-// certificate would stay self-signed until it expired, chaining to nothing box wrote.
+// A certificate from a bare `selfSigned` issuer has ca.crt == the leaf, and cert-manager
+// does not re-issue when the issuer behind an unchanged issuerRef changes what it signs
+// with: at v1.21.3 the trigger chain reads the Secret, the CertificateRequest and the
+// expiry, never the issuer's spec
+// (internal/controller/certificates/policies/policies.go:71-85).
 //
-// What starts an issuance is the `Issuing` status condition, which is exactly what
-// `cmctl renew` sets (cert-manager/cmctl, pkg/renew/renew.go:217), acted on by the
-// issuing controller (pkg/controller/certificates/issuing/issuing_controller.go:197-204).
-// Box sets the same condition, with the same reason, after comparing the certificates
-// itself (signedByRoot).
+// The `Issuing` condition starts an issuance -- what `cmctl renew` sets
+// (cert-manager/cmctl, pkg/renew/renew.go:217; issuing_controller.go:197-204 acts on it)
+// -- and box sets it after comparing the certificates itself (signedByRoot).
 func (d *CertificateDecision) followRoot(ctx context.Context, cl CertificateCluster, name string) (bool, error) {
 	root, err := rootCertificate(ctx, cl)
 	if err != nil {
@@ -515,11 +512,8 @@ func (d *CertificateDecision) followRoot(ctx context.Context, cl CertificateClus
 }
 
 // CertificateNeedsWork reports a Certificate that exists but is not the one this run
-// would issue: another issuer, or a self-signed one whose ca.crt is not box's root.
-//
-// It exists for a host that already answers: name and issuerRef do not change when
-// the issuer behind them changes what it signs with, and cert-manager never re-issues
-// for that, so a run looking only for missing hosts would leave it there.
+// would issue: another issuer, or a self-signed one not chaining to box's root. A run
+// looking only for missing hosts would leave it there.
 func CertificateNeedsWork(ctx context.Context, k objectReader, host, want string) (bool, error) {
 	name := CertificateName(host)
 	obj, ok, err := k.Get(ctx, "cert-manager.io", "v1", "Certificate", GatewayNamespace, name)
@@ -634,17 +628,12 @@ func (d *CertificateDecision) awaitCertificate(ctx context.Context, cl Certifica
 	return false, "", fmt.Errorf("certificate %s/%s: %w", GatewayNamespace, name, err)
 }
 
-// attachHTTP adds this host's port-80 listener, and only that listener.
+// attachHTTP adds this host's port-80 listener, and only that one.
 //
-// It runs before the Certificate because the HTTP-01 challenge is served by a route on
-// this listener: the solver's route names the Gateway with no sectionName, and Gateway
-// API listener isolation sends a request whose Host matches to the most specific
-// listener. The listener admits only the Gateway's own namespace, where the redirect
-// and the solver's route live, so no app route attaches and every other host stays on
-// the generic http listener.
-//
-// The host's own field manager writes it, so the platform's full Gateway apply and
-// another host's TLS apply cannot remove it.
+// It runs before the Certificate because the HTTP-01 challenge is a route on this
+// listener: listener isolation sends a matching Host here. It admits only the Gateway's
+// namespace, where the redirect and the solver's route live, so no app route attaches.
+// The host's own field manager writes it, so no other apply can remove it.
 func (d *CertificateDecision) attachHTTP(ctx context.Context, cl CertificateCluster) error {
 	r := d.report()
 	host := d.Host
@@ -661,11 +650,8 @@ func (d *CertificateDecision) attachHTTP(ctx context.Context, cl CertificateClus
 
 // attachHTTPS adds this host's TLS terminator, once its certificate is Ready.
 //
-// The two listeners have two managers, one each, not one manager per host carrying
-// both: an apply removes any field its manager owned and left out, so a single manager
-// would make the port-80 apply (which runs while there is no HTTPS listener to name)
-// delete the HTTPS listener on every re-run. One manager per listener keeps each apply
-// minimal, and no apply can remove a listener it does not own.
+// The two listeners have a manager each: an apply removes what its manager left out, so
+// one manager would make the port-80 apply delete the HTTPS listener on every re-run.
 func (d *CertificateDecision) attachHTTPS(ctx context.Context, cl CertificateCluster, name string) error {
 	r := d.report()
 	host := d.Host
@@ -682,16 +668,11 @@ func (d *CertificateDecision) attachHTTPS(ctx context.Context, cl CertificateClu
 
 // listenerPolicy takes the login off this host's port-80 listener.
 //
-// The Gateway's SecurityPolicy covers every listener unless that listener has its own,
-// and Envoy applies the listener-scoped one instead
-// (internal/gatewayapi/securitypolicy.go, v1.9.3). Without this, a plain-HTTP request
-// here never reaches the router: ext_authz runs first and Authelia answers 400 at an
-// http scheme, so the 301 never happens and an ACME renewal is answered by a login.
-//
-// An explicit Allow is right because no app route can attach to this listener, which
-// admits only the Gateway's namespace; the shared generic listener keeps the login, so
-// a host without a certificate stays closed. It is written before the Certificate: the
-// challenge arrives while the certificate is being issued.
+// The Gateway's SecurityPolicy covers every listener unless it has its own, and Envoy
+// applies the narrower one (internal/gatewayapi/securitypolicy.go, v1.9.3). Without it a
+// plain-HTTP request is answered 400 by ext_authz at the http scheme, so the 301 never
+// happens and an ACME renewal meets a login. An explicit Allow is safe because no app
+// route can attach here; the generic listener keeps the login.
 func (d *CertificateDecision) listenerPolicy(ctx context.Context, cl CertificateCluster) error {
 	docs, err := ParseManifests(listenerPolicyManifest(d.Host))
 	if err != nil {
@@ -724,14 +705,9 @@ func (d *CertificateDecision) redirect(ctx context.Context, cl Cluster, name str
 	return nil
 }
 
-// HostServed reports whether a host already has the three objects an app host needs:
-// its HTTPS listener, its Certificate and the login's access_control rule. It reads the
-// cluster, never a record, so a deleted listener or rule is missing again and the next
-// run puts it back.
-//
-// The port-80 listener and its Allow are not part of the answer. The rule is: the
-// Gateway asks the login about every listener, and a host with no rule gets
-// default_policy deny -- an app that answers nothing, which this read exists to catch.
+// HostServed reports whether a host has the three objects it needs: its HTTPS listener,
+// its Certificate and the login's rule. It reads the cluster, never a record, so a
+// deleted object is missing again. The port-80 listener and Allow are not part of it.
 func (k *Kubernetes) HostServed(ctx context.Context, host string) (bool, error) {
 	gw, ok, err := k.Get(ctx, "gateway.networking.k8s.io", "v1", "Gateway", GatewayNamespace, GatewayName)
 	if err != nil {
@@ -850,11 +826,10 @@ var plainHost = regexp.MustCompile(`^[a-z0-9]+(\.[a-z0-9]+)*$`)
 
 // dnsLabel flattens a host into characters object names and field managers accept.
 //
-// Flattening alone is lossy: "a-b.example.com" and "a.b.example.com" both become
-// "a-b-example-com", and two hosts sharing a label would share a Certificate, a
-// listener and a manager, so whichever applied last would own the other's objects.
-// An unambiguous, short enough host keeps its readable name; every other gets that
-// prefix plus eight hex characters of the lowercased host's sha256.
+// Flattening alone is lossy ("a-b.example.com" and "a.b.example.com" both become
+// "a-b-example-com"), and two hosts sharing a label would share objects and managers. An
+// unambiguous, short host keeps its readable name; every other gets eight hex characters
+// of the lowercased host's sha256 appended.
 func dnsLabel(host string) string {
 	lower := strings.ToLower(host)
 	out := flattenHost(lower)

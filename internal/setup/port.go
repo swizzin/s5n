@@ -11,16 +11,14 @@ import (
 	"github.com/swizzin/s5n/internal/seedbox"
 )
 
-// The peer port is a port on the node, shared by every seedbox, so it is the
-// grant's and root assigns it (docs/box.md, "Root assigns the torrent port"). box
-// picks it once, from the band Kubernetes does not auto-assign from, and every
-// later run keeps what the grant says.
+// The peer port is a port on the node, shared by every seedbox: the grant's, assigned
+// once by root (docs/box.md, "Root assigns the torrent port"), from the band Kubernetes
+// does not auto-assign from.
 //
-// The band: with ServiceNodePortStaticSubrange (GA in 1.29) the API server hands
-// out dynamic nodePorts from the top of the range, falling into the bottom band
-// only when the top is exhausted, so a port there is never taken by a Service that
-// asked for "any free port" -- as happened to the chart's fixed 31111, which an
-// implementation's LoadBalancer Service got first.
+// With ServiceNodePortStaticSubrange (GA in 1.29) dynamic nodePorts come from the top of
+// the range, falling into the bottom band only when it is exhausted, so a port there is
+// never taken by a Service asking for "any free port" -- as happened to the chart's fixed
+// 31111.
 const (
 	// torrentPortKey is the values path the port lives at, a grant key
 	// (internal/seedbox/grant.go): it is exposed on the node, so no values file may
@@ -129,13 +127,10 @@ func pickRandom(n int) int {
 	return int(v.Int64())
 }
 
-// torrentPort settles the grant's torrent port, or nil when there is nothing to
-// write. It keeps what the grant says and picks only for a box with no port: a
-// working port is never moved, because peers learned it from the tracker and a new
-// number drops every connection until the next announce.
-//
-// The app that holds the port is the box's, not this run's: a migrate install
-// answers with every app off and switches the plan's on later, so SwitchesOn counts.
+// torrentPort settles the grant's port, or nil: it keeps what the grant says and picks
+// only for a box with none, since a working port's peers learned it from the tracker.
+// The app is the box's, not this run's: a migrate install answers with every app off, so
+// SwitchesOn counts.
 func (d *Decision) torrentPort(ctx context.Context, namespace string, apps []string, grantNow map[string]any, opts Options) (any, error) {
 	// The release says whether the key exists: the chart ships no default for the
 	// port, and one from before it has no key in its schema to fill in.

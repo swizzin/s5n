@@ -73,18 +73,14 @@ type K0sInstaller struct {
 	Sleep func(time.Duration)
 }
 
-// Install is the whole clean-host sequence: everything that can refuse happens
-// before the first byte is fetched, and everything after the binary is in place
-// reports what it left and how to undo it.
+// Install is the whole clean-host sequence: every refusal happens before the first byte,
+// and everything after the binary reports what it left and how to undo it. The checksum
+// is the release's, so nothing resolves it again; a plan without one is refused by
+// architecture.
 //
-// The plan's checksum is the release's, from the chart's platform.yaml by k0sPlan:
-// the pins are the only place a k0s sum is written, so nothing here resolves it
-// again. A plan with no sum is refused by architecture before the download.
-//
-// The node's address is pinned twice, because two components choose one
-// independently: --kubelet-extra-args=--node-ip for the Node's InternalIP, and
-// spec.api.address for the API server. Both are the uplink, so the CNI's auto-MTU
-// follows it, and the plan carries them.
+// The node's address is pinned twice -- --kubelet-extra-args=--node-ip for the Node's
+// InternalIP, spec.api.address for the API server -- both the uplink, so the CNI's
+// auto-MTU follows it.
 func (k K0sInstaller) Install(ctx context.Context, plan InstallPlan) error {
 	arch := plan.Arch
 	if arch == "" {

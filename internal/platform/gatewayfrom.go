@@ -16,17 +16,13 @@ import (
 // namespaceSelector can name one without the operator labelling anything.
 const NamespaceNameLabel = "kubernetes.io/metadata.name"
 
-// GatewayFrom derives the NetworkPolicy peers the seedbox's apps must admit.
+// GatewayFrom derives the NetworkPolicy peers the seedbox's apps must admit: another
+// implementation runs its proxy in its own namespace (NGINX Gateway Fabric v2 per
+// Gateway), so the peer is read from the cluster, not assumed.
 //
-// The chart's default (a selector on envoy-gateway-system) is right only for box's
-// Envoy Gateway: another implementation runs its proxy elsewhere (NGINX Gateway
-// Fabric v2 runs a data-plane pod per Gateway in the Gateway's namespace), so the peer
-// is read from the cluster.
-//
-// The Gateway's address is the join: the Service whose status.loadBalancer holds it is
-// forwarding to the proxy, and its namespace is where the proxy runs. An address no
-// Service holds but a node does is a host-networked proxy, reached by node IP. Anything
-// else is refused: guessing would block the Gateway or admit an unrelated namespace.
+// The Gateway's address is the join: the Service whose status.loadBalancer holds it
+// forwards to the proxy, and its namespace is where the proxy runs. A node address no
+// Service holds is a host-networked proxy. Anything else is refused.
 func GatewayFrom(ctx context.Context, kubeconfig string) ([]any, error) {
 	k, err := NewCluster(kubeconfig)
 	if err != nil {
@@ -102,13 +98,10 @@ func namespacePeer(namespace string) map[string]any {
 	}
 }
 
-// GatewayProxyIP is the ClusterIP of the Service in front of the Gateway's proxy pods:
-// the address an app's pod uses to reach the box's own name, which resolves nowhere
-// (docs/box.md, "Apps that call the login themselves").
-//
-// It is found by Envoy's labels on the proxy Service, not the Gateway's status
-// address: the status address is a LoadBalancer's and empty until MetalLB picks one,
-// while the ClusterIP exists as soon as the Service does.
+// GatewayProxyIP is the ClusterIP in front of the Gateway's proxy pods: the address an
+// app's pod uses to reach the box's own name, which resolves nowhere (docs/box.md). It is
+// found by Envoy's labels, not the status address, which is empty until MetalLB picks
+// one.
 func GatewayProxyIP(ctx context.Context, kubeconfig string) (string, error) {
 	k, err := NewCluster(kubeconfig)
 	if err != nil {

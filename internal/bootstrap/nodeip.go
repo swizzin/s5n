@@ -11,17 +11,14 @@ import (
 	"strings"
 )
 
-// This file answers one question for the host box installs k0s on: which address
-// should the node register with? The address of the link carrying the default route,
-// which box pins.
+// This file answers one question for the host box installs k0s on: which address should
+// the node register with? The address of the link carrying the default route.
 //
-// The reason is the CNI's MTU, not the address. kube-router runs with auto-MTU and
-// takes the MTU from the interface holding the node's primary IP
-// (cloudnativelabs/kube-router v2.6.3, pkg/utils/node.go:180 GetNodeMTU, the CNI k0s
-// ships), so a node registering on a tailnet address gives kube-bridge that
-// interface's MTU -- 1280 for tailscale0 -- and everything a pod sends through the
-// tunnel fragments. box never sets an MTU: it pins the address the MTU derives from,
-// so the MTU follows whatever the uplink is.
+// The reason is the CNI's MTU: kube-router takes it from the interface holding the node's
+// primary IP (cloudnativelabs/kube-router v2.6.3, pkg/utils/node.go:180 GetNodeMTU, the
+// CNI k0s ships), so a node on a tailnet address gives kube-bridge 1280 and every pod
+// through the tunnel fragments. box never sets an MTU; it pins the address it derives
+// from.
 
 const (
 	// ARPHRD device types as /sys/class/net/<name>/type reports them: a tun device,
@@ -47,13 +44,9 @@ type Link struct {
 	Addrs        []netip.Addr
 }
 
-// Tunnel reports whether pods on this interface would talk through a tunnel rather
-// than the uplink.
-//
-// The device type decides, not the name: nothing reads "tailscale" or "wg" from an
-// interface name. IFF_POINTOPOINT is the second signal, but a PPPoE link is
-// point-to-point and a real uplink -- a home line with 1492 on ppp0 must install
-// normally -- so ARPHRD_PPP is excluded by type.
+// Tunnel reports whether pods on this interface would talk through a tunnel. The device
+// type decides, not the name; IFF_POINTOPOINT is the second signal, but a PPPoE link is
+// point-to-point and a real uplink, so ARPHRD_PPP is excluded.
 func (l Link) Tunnel() bool {
 	switch l.Type {
 	case arphrdNone, arphrdTunnel, arphrdTunnel6:
@@ -84,11 +77,9 @@ type Net interface {
 	InterfaceFor(addr string) (Link, bool)
 }
 
-// LinuxNet is the running host, read from the kernel's own files: the route tables
-// say which family has a default route, a connected UDP socket says which address the
-// kernel would source (connecting sends no packet), and /sys/class/net says what each
-// device is. No netlink, no new dependency, no write. The fields let a test run
-// against a fixture; the zero value is the real host.
+// LinuxNet is the running host, from the kernel's own files: the route tables for the
+// family, a connected UDP socket for the source address (connecting sends no packet),
+// /sys/class/net for the device types. No netlink, no write.
 type LinuxNet struct {
 	procRoute, procRoute6, sysNet string
 	links                         func() ([]Link, error)

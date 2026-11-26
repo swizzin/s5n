@@ -10,16 +10,13 @@ import (
 	"github.com/swizzin/s5n/internal/release"
 )
 
-// This file is box's k0s policy: the conditions under which box may touch a host,
-// and the release it installs there with that asset's checksum. Neither is compiled
-// in: the version and its sums are pins of the chart release box pulled
-// (charts/s5n/platform.yaml), so a k0s bump is a chart release.
+// This file is box's k0s policy: when box may touch a host, and the release it installs
+// with that asset's checksum. Both are the chart release's pins, so a k0s bump is a
+// chart release.
 //
-// Every value here is a decision expensive to get wrong: the binary box writes runs
-// as root and registers a service, so the checksum cannot be the one served beside
-// the archive -- that only proves both left the same place. The pinned sums come from
-// each release's published sha256sums.txt and are checked before they land
-// (hack/k0s-sums --check runs in CI).
+// The binary box writes runs as root and registers a service, so the checksum cannot be
+// the one served beside the archive. The pinned sums come from each release's
+// sha256sums.txt and are checked before they land (hack/k0s-sums --check, in CI).
 
 const (
 	// K0sBinaryPath is where box puts the k0s binary, and where its unit points.
@@ -68,11 +65,9 @@ func (r k0sRelease) URL() string {
 	return k0sReleaseBase + "/" + url.PathEscape(r.Version) + "/k0s-" + r.Version + "-" + r.Arch
 }
 
-// k0sPlan is the install plan on the clean-host branch: the pin for this
-// architecture, the affirmative install choice, and the node identity. A host whose
-// release pins no sum still gets a plan naming the version; the installer refuses it
-// on the missing sum before downloading. The node IP is resolved from the host, never
-// guessed, and the installer refuses a plan without one.
+// k0sPlan is the clean-host install plan: the pin for this architecture, the affirmative
+// choice, the node identity. A host whose release pins no sum still gets a plan; the
+// installer refuses it on the missing sum before downloading.
 func k0sPlan(pins release.Versions, up Uplink) InstallPlan {
 	plan := InstallPlan{
 		Version:    pins.K0s,
@@ -91,19 +86,16 @@ func k0sPlan(pins release.Versions, up Uplink) InstallPlan {
 	return plan
 }
 
-// k0sNodeConfig is the minimal config box installs with, for two values k0s would
-// otherwise choose.
+// k0sNodeConfig is the minimal config box installs with, for two values k0s would choose.
 //
-// spec.api.address: left unset, k0s fills it with iface.FirstPublicAddress(), the
-// first non-loopback IPv4 in the kernel's interface order, which on a host with a
-// tunnel up can be the tunnel (pkg/apis/k0s/v1beta1/api.go setDefaults,
-// internal/pkg/iface/iface.go). That address goes into the admin kubeconfig and
-// binds the API server, so such a cluster is reachable only while the tunnel is; no
-// `k0s install` flag exists for it, so the config is the mechanism.
+// spec.api.address: unset, k0s fills it with iface.FirstPublicAddress(), the first
+// non-loopback IPv4 in interface order, which can be a tunnel (pkg/apis/k0s/v1beta1/api.go
+// setDefaults, internal/pkg/iface/iface.go) -- and that address goes into the admin
+// kubeconfig and binds the API server. No `k0s install` flag exists, so this is the
+// mechanism.
 //
-// spec.network: the networks are written here because the firewall rule must trust
-// what the cluster was installed with, and a second copy could disagree.
-// k0sNetworks reads them back out of box's own text.
+// spec.network: written here so the firewall rule trusts what was installed, with no
+// second copy to disagree; k0sNetworks reads it back.
 func k0sNodeConfig(nodeIP string) string {
 	return fmt.Sprintf(`# Written by box when it installed k0s. The API address is pinned to the
 # uplink so it is not whatever address the kernel lists first; the node's
@@ -160,15 +152,12 @@ func k0sNetworks(config []byte) (pod, service string, err error) {
 	return pod, service, nil
 }
 
-// installRefusal is "may box touch this host", from the plan and read-only evidence.
-// Every refusal happens before the download, so a run that stops here wrote and
-// fetched nothing.
+// installRefusal is "may box touch this host", before the download, so a run that stops
+// here wrote and fetched nothing.
 //
-// The order is the order of the mistakes: no privilege is box run wrong; no
-// clean-host choice is box asked to install by a path that did not decide to; k0s
-// already present is the one case where installing destroys what box did not
-// create; an unpinned node, or one on a tunnel, is a cluster every pod would talk
-// through badly.
+// The order is the order of the mistakes: no privilege, no clean-host choice, k0s
+// already present (the one case where installing destroys), an unpinned node or one on
+// a tunnel.
 func installRefusal(plan InstallPlan, root bool, findings []Finding) string {
 	if !root {
 		return "box installs k0s as root: run it with sudo (or as root)"
