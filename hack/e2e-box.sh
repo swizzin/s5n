@@ -4200,6 +4200,63 @@ if not tested.get("connected"):
 sys.exit(0 if ok else 1)
 PY
 
+  # ---- qui's Arr instances ---------------------------------------------------
+  # qui resolves a title to an ID through a Sonarr or Radarr it registers itself,
+  # so the Job writes one row per Arr instance on the box: the Arr's own address
+  # with its URL base, its key, and enabled. qui's test is an Arr API call made
+  # from qui's pod, so it is also the proof that the catalog's `calls` and the
+  # callee's ingress agree -- the row is useless without it.
+  port_forward qui-0 7476 || fail=1
+  qui_session "$QUI_BASE"
+  curl -sS -H "Cookie: ${QUI_COOKIE}" "http://127.0.0.1:${PF_PORT}${QUI_BASE}/api/arr/instances" >"$WORK/qui-arr-instances.json" 2>/dev/null || true
+  QUI_ARR_PORTS=()
+  for instance in $($K -n "$NS" get statefulset -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' 2>/dev/null |
+      grep -E '^(sonarr|radarr)(-4k)?$' | sort || true); do
+    QUI_ARR_PORTS+=("${instance}=$(release_port "$instance")")
+  done
+  [ "${#QUI_ARR_PORTS[@]}" -gt 0 ] || { echo "the release runs no Sonarr or Radarr to register in qui"; fail=1; }
+  echo "  qui: Arr rows for ${QUI_ARR_PORTS[*]}"
+  python3 - "$WORK/qui-arr-instances.json" "http://127.0.0.1:${PF_PORT}${QUI_BASE}" "$QUI_COOKIE" \
+    "${QUI_ARR_PORTS[@]}" <<'PY' || fail=1
+import json, sys, urllib.error, urllib.request
+
+path, base, cookie, *specs = sys.argv[1:]
+ports = dict(spec.split("=", 1) for spec in specs)
+rows = json.load(open(path, encoding="utf-8"))
+problems = []
+if len(rows) != len(ports):
+    problems.append("qui holds %d Arr instances for %d Arrs on the box: %s"
+                    % (len(rows), len(ports), [r.get("base_url") for r in rows]))
+for instance, port in sorted(ports.items()):
+    want = "http://%s:%s/%s" % (instance, port, instance)
+    match = [r for r in rows if r.get("base_url") == want]
+    if not match:
+        problems.append("%s: no row at %s" % (instance, want))
+        continue
+    row = match[0]
+    if row.get("name") != instance:
+        problems.append("%s: the row is named %r" % (instance, row.get("name")))
+    if not row.get("enabled"):
+        problems.append("%s: the row is disabled, so qui never looks anything up with it" % instance)
+    request = urllib.request.Request(
+        "%s/api/arr/instances/%d/test" % (base, row["id"]),
+        data=b"", method="POST",
+        headers={"Cookie": cookie, "X-Requested-With": "XMLHttpRequest"})
+    try:
+        with urllib.request.urlopen(request, timeout=30) as response:
+            tested = json.loads(response.read() or b"{}")
+    except urllib.error.HTTPError as err:
+        problems.append("%s: qui's test answered %d: %s" % (instance, err.code, err.read()[:200]))
+        continue
+    print("  qui Arr %s -> %s (id %s), test: %s" % (instance, want, row["id"], tested))
+    if not tested.get("success"):
+        problems.append("%s: qui cannot reach it: %s" % (instance, tested.get("error")))
+if problems:
+    print("\n".join("  " + problem for problem in problems))
+    sys.exit(1)
+PY
+  port_forward_stop
+
   # ---- what autobrr holds, through its API -----------------------------------
   port_forward autobrr-0 7474 || fail=1
   autobrr_session "$AUTOBRR_BASE" "$WORK/autobrr-live.jar"
@@ -8306,6 +8363,74 @@ print(json.load(open(sys.argv[1])).get("id", ""))' "$WORK/source-qui-instance.js
   echo "  qui: one qBittorrent instance, ${name} -> ${host} (id ${id})"
 }
 
+# migrate_source_qui_arr_instances <instance>...: the source qui's Arr instances,
+# one per Arr, at the address the source's own Services answer on -- no box URL
+# base, and under names of the operator's own ("Sonarr4k"). The migration
+# rewrites each base_url to the release's endpoint, and qui's
+# UNIQUE(type, base_url) refuses a create at an address it already has, so the
+# Job has to adopt these rows: their ids are what the assertion after the
+# migration reads, and their names are what proves the Job did not rename them.
+migrate_source_qui_arr_instances() { # migrate_source_qui_arr_instances <instance>...
+  local args=() instance name kind out
+  for instance in "$@"; do
+    arr_facts "$instance" || return 1
+    case "$instance" in
+      sonarr)    name=Sonarr;    kind=sonarr ;;
+      radarr)    name=Radarr;    kind=radarr ;;
+      sonarr-4k) name=Sonarr4k;  kind=sonarr ;;
+      radarr-4k) name=Radarr4k;  kind=radarr ;;
+      *) echo "migrate_source_qui_arr_instances: ${instance} is not an Arr"; return 1 ;;
+    esac
+    args+=("${instance}|${name}|${kind}|http://${instance}:${ARR_PORT}")
+  done
+  migrate_forward "$MIGRATE_LEGACY_NS" svc/qui 7476 || return 1
+  out=$(python3 - "http://127.0.0.1:${MIGRATE_PF_PORT}" "$MIGRATE_SOURCE_ACCOUNT" \
+    "$WORK/source/source-account-password" "$WORK/source" "${args[@]}" <<'PY'
+import http.cookiejar, json, os, sys, urllib.error, urllib.request
+
+base, user, pwfile, work = sys.argv[1:5]
+specs = sys.argv[5:]
+
+with open(pwfile) as fh:
+    password = fh.read().strip()
+
+opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(http.cookiejar.CookieJar()))
+
+def send(path, body):
+    request = urllib.request.Request(
+        base + path, data=json.dumps(body).encode(),
+        headers={"Content-Type": "application/json", "X-Requested-With": "XMLHttpRequest"},
+        method="POST")
+    try:
+        with opener.open(request, timeout=30) as resp:
+            raw = resp.read()
+            status = resp.status
+    except urllib.error.HTTPError as err:
+        sys.exit(f"POST {path} answered {err.code}: {err.read().decode('utf-8', 'replace')[:300]}")
+    return status, (json.loads(raw) if raw.strip() else None)
+
+status, _ = send("/api/auth/login", {"username": user, "password": password})
+if status not in (200, 204):
+    sys.exit(f"the source qui refused {user} ({status})")
+
+for spec in specs:
+    instance, name, kind, url = spec.split("|", 3)
+    status, row = send("/api/arr/instances", {
+        "type": kind, "name": name, "base_url": url, "api_key": "%s-source-key" % kind,
+        "enabled": True, "priority": 0, "timeout_seconds": 15})
+    if status != 201 or not (row or {}).get("id"):
+        sys.exit(f"the source qui did not accept the {kind} instance {name} ({status})")
+    with open(os.path.join(work, "qui-arr-%s.id" % instance), "w") as fh:
+        fh.write(str(row["id"]) + "\n")
+    with open(os.path.join(work, "qui-arr-%s.name" % instance), "w") as fh:
+        fh.write(name + "\n")
+    print("  qui: one %s instance, %s -> %s (id %s)" % (kind, name, url, row["id"]))
+PY
+  ) || { echo "$out"; migrate_forward_stop; return 1; }
+  migrate_forward_stop
+  printf '%s\n' "$out"
+}
+
 # migrate_source_autobrr_clients <instance>...: the source autobrr's own
 # download clients, the shape an install with a 4K pair of Arrs has them. Their
 # names are the operator's, not box's: the qBittorrent client is "qbit", and the
@@ -9481,6 +9606,11 @@ migrate_box() {
   if ! migrate_source_qui_instance "$MIGRATE_QUI_INSTANCE" "http://qbittorrent:${MIGRATE_QBIT_PORT}"; then
     fail=1; return 0
   fi
+  # ... and one Arr instance per Arr, at the source's own addresses: the rows a
+  # migration points at the release and the Job then has to adopt.
+  if ! migrate_source_qui_arr_instances $MIGRATE_ARRS; then
+    fail=1; return 0
+  fi
   if ! migrate_source_pbh_config "$src"; then
     fail=1; return 0
   fi
@@ -10214,6 +10344,89 @@ if row.get("host") != want_host:
 if row.get("name") != want_name:
     sys.exit("  its name is %r, want the source's %r" % (row.get("name"), want_name))
 PY
+
+  # ---- assertion 1c: qui's Arr instances, the source's rows adopted ---------
+  # The source's qui held one Arr instance per Arr, at the address its own
+  # Services answered on and under the operator's names. The migration pointed
+  # each at the release; the Job adopts those rows by address -- qui's
+  # UNIQUE(type, base_url) refuses a create at the release's address, so a Job
+  # that did not look would fail the run -- records the source's ids, leaves the
+  # names alone, and writes only the key, which was the source Arr's.
+  log "qui: the source's Arr rows, adopted and pointed at the release"
+  QUI_BASE=$($K -n "$NS" get cm s5n-wiring -o jsonpath='{.data.wiring\.json}' |
+    python3 -c 'import json, sys
+cfg = json.load(sys.stdin)
+print(cfg["qui"]["urlBase"])' 2>/dev/null || true)
+  port_forward qui-0 7476 || fail=1
+  qui_session "$QUI_BASE"
+  curl -sS -H "Cookie: ${QUI_COOKIE}" "http://127.0.0.1:${PF_PORT}${QUI_BASE}/api/arr/instances" >"$WORK/qui-arr-migrate.json" 2>/dev/null || true
+  QUI_ARR_SOURCE=$($K -n "$NS" get cm s5n-wiring -o jsonpath='{.data.owned\.json}' 2>/dev/null |
+    python3 -c 'import json,sys
+rec = json.load(sys.stdin)
+print(" ".join("%s=%s" % (k, v) for k, v in sorted(((rec.get("qui") or {}).get("arrInstances") or {}).items())))' 2>/dev/null || true)
+  QUI_ARR_PORTS=()
+  for instance in $MIGRATE_ARRS; do
+    QUI_ARR_PORTS+=("${instance}=$(release_port "$instance")")
+  done
+  echo "  owned.json Arr rows: ${QUI_ARR_SOURCE:-none}"
+  [ "$QUI_LOGIN_CODE" = 200 ] ||
+    { echo "qui refused the account box owns: $(head -c 200 "$WORK/qui-login.json" 2>/dev/null || true)"; fail=1; }
+  python3 - "$WORK/qui-arr-migrate.json" "$WORK/source" "http://127.0.0.1:${PF_PORT}${QUI_BASE}" "$QUI_COOKIE" \
+    "$QUI_ARR_SOURCE" "${QUI_ARR_PORTS[@]}" <<'PY' || fail=1
+import json, os, sys, urllib.error, urllib.request
+
+path, work, base, cookie, owned, *specs = sys.argv[1:]
+ports = dict(spec.split("=", 1) for spec in specs)
+recorded = dict(pair.split("=", 1) for pair in owned.split()) if owned else {}
+rows = json.load(open(path, encoding="utf-8"))
+problems = []
+if len(rows) != len(ports):
+    problems.append("qui holds %d Arr instances for %d Arrs on the box: %s"
+                    % (len(rows), len(ports), [r.get("base_url") for r in rows]))
+for instance, port in sorted(ports.items()):
+    want = "http://%s:%s/%s" % (instance, port, instance)
+    match = [r for r in rows if r.get("base_url") == want]
+    if not match:
+        problems.append("%s: no row at %s, so the source's row was not the one adopted"
+                        % (instance, want))
+        continue
+    row = match[0]
+    try:
+        with open(os.path.join(work, "qui-arr-%s.id" % instance)) as fh:
+            source_id = fh.read().strip()
+        with open(os.path.join(work, "qui-arr-%s.name" % instance)) as fh:
+            source_name = fh.read().strip()
+    except OSError:
+        source_id, source_name = "", ""
+    if source_id and recorded.get(instance) != source_id:
+        problems.append("%s: owned.json records %r, want the source's row %s"
+                        % (instance, recorded.get(instance), source_id))
+    if source_name and row.get("name") != source_name:
+        problems.append("%s: the row is named %r, want the source's %r"
+                        % (instance, row.get("name"), source_name))
+    if source_id and recorded.get(instance) != source_id:
+        problems.append("%s: owned.json records %r, want the source's row %s"
+                        % (instance, recorded.get(instance), source_id))
+    request = urllib.request.Request(
+        "%s/api/arr/instances/%d/test" % (base, row["id"]), data=b"", method="POST",
+        headers={"Cookie": cookie, "X-Requested-With": "XMLHttpRequest"})
+    try:
+        with urllib.request.urlopen(request, timeout=30) as response:
+            tested = json.loads(response.read() or b"{}")
+    except urllib.error.HTTPError as err:
+        problems.append("%s: qui's test answered %d: %s" % (instance, err.code, err.read()[:200]))
+        continue
+    print("  qui Arr %s: %r -> %s (id %s), test: %s"
+          % (instance, row.get("name"), row.get("base_url"), row.get("id"), tested))
+    if not tested.get("success"):
+        problems.append("%s: qui cannot reach the release's Arr: %s" % (instance, tested.get("error")))
+    if not row.get("enabled"):
+        problems.append("%s: the row the source had enabled is disabled" % instance)
+if problems:
+    print("\n".join("  " + problem for problem in problems))
+    sys.exit(1)
+PY
+  port_forward_stop
 
   # ---- assertion 1: healthy, on the chart's own images ---------------------
   log "the migrated apps are ready on the chart's images"
