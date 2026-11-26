@@ -14,27 +14,23 @@ import (
 	"github.com/swizzin/s5n/internal/migrate/rewrite"
 )
 
-// The two Arrs a Bazarr instance reads. The constants are the app's own section
-// names, which its API spells the same way.
+// The two Arrs a Bazarr instance reads: the app's own section names.
 const (
 	arrSonarr = "sonarr"
 	arrRadarr = "radarr"
 )
 
-// sides are the two sections, and the switch in general that turns each on
-// (config.py:176-240 at v1.6.2: the sonarr.* and radarr.* validators and
-// general.use_sonarr / general.use_radarr).
+// sides are the two sections and the switch that turns each on (config.py:176-240
+// at v1.6.2).
 var sides = []struct{ kind, useKey string }{
 	{arrSonarr, "use_sonarr"},
 	{arrRadarr, "use_radarr"},
 }
 
-// pathMappingKeys are the two path-mapping lists, each with the Arr whose paths
-// its `from` side names: series come from Sonarr, films from Radarr. A pair is
-// [from, to], where `from` is the path the Arr reports and `to` the path this
-// app sees (bazarr/app/config.py:95-96 and utilities/path_mappings.py's
-// path_replace). The two sides are therefore two different apps' paths, and
-// each is rewritten through its own app's table.
+// pathMappingKeys are the two mapping lists with the Arr whose paths a pair's
+// `from` side names. `from` is the path the Arr reports and `to` the path this app
+// sees (config.py:95-96, utilities/path_mappings.py's path_replace), so each side
+// goes through its own app's table.
 var pathMappingKeys = []struct{ key, arr string }{
 	{"path_mappings", arrSonarr},
 	{"path_mappings_movie", arrRadarr},
@@ -67,9 +63,8 @@ func (a *analysis) settings() error {
 	return nil
 }
 
-// side rewrites one Arr's address. A side the source switched off is left
-// exactly as it is and said so: nothing dials it, so an address that no longer
-// resolves is not a gap.
+// side rewrites one Arr's address. A side the source switched off is left and
+// said so: nothing dials it, so an address that no longer resolves is not a gap.
 func (a *analysis) side(section, useKey string) error {
 	host, haveHost := a.doc.scalar(section, "ip")
 	if !haveHost || host == "" {
@@ -116,13 +111,11 @@ func (a *analysis) side(section, useKey string) error {
 			baseURL = "/"
 		}
 		a.setScalar(section, "base_url", baseURL, true, section+".base_url")
-		// Every address inside the release is plain HTTP: the Gateway terminates
-		// TLS, and a pod talking to another pod's Service would need a
-		// certificate for a name nothing serves one for.
+		// Plain HTTP inside the release: the Gateway terminates TLS, and a pod
+		// calling another pod's Service would need a certificate nothing issues.
 		a.setScalar(section, "ssl", "false", false, section+".ssl")
 	case plan.Leave:
-		// The plan says this address points outside the source, and the operator
-		// owns that decision. Nothing to say.
+		// The address points outside the source; the operator owns that.
 	default:
 		a.unclass = append(a.unclass, rewrite.Address{
 			App: a.app, File: settingsFile, Where: where, Host: host, Port: port,
@@ -131,15 +124,11 @@ func (a *analysis) side(section, useKey string) error {
 	return nil
 }
 
-// mappings rewrites one path-mapping list: the Arr's side through that Arr's
-// table, this app's side through its own. A pair whose two sides now name the
-// same path is dropped, because on the box the Arrs and this app both see
-// /data, which is the one thing a mapping exists to bridge -- and a mapping
-// left in place would map every path it now matches.
-//
-// The Arr's side is settled only when this box runs exactly one of it: with two
-// Sonarrs the pair cannot say which one's path it names, so it is left and said
-// so rather than rewritten at a guess.
+// mappings rewrites one mapping list: each side through its own app's table. A
+// pair whose sides now name the same path is dropped -- on the box both apps see
+// /data, and a mapping left in place would map every path it matches. The Arr's
+// side is settled only when the box runs exactly one of it: with two Sonarrs the
+// pair cannot say whose path it names, so it is left and said so.
 func (a *analysis) mappings(key, arr string) error {
 	pairs, present, err := a.doc.pairs("general", key)
 	if err != nil {
@@ -197,10 +186,9 @@ func (a *analysis) mappings(key, arr string) error {
 	return nil
 }
 
-// setScalar writes one scalar and counts it, when it differs from what the
-// document holds. quoted is what keeps a path a string and a port a number:
-// Bazarr's validators are typed (config.py), and a quoted port fails
-// validation and is reset to the app's default.
+// setScalar writes one scalar and counts it when it differs. quoted keeps a path
+// a string and a port a number: Bazarr's validators are typed (config.py), and a
+// quoted port is reset to the app's default.
 func (a *analysis) setScalar(section, key, value string, quoted bool, where string) {
 	current, ok := a.doc.scalar(section, key)
 	if ok && current == value {
@@ -234,10 +222,8 @@ func isTrue(v string) bool {
 	return false
 }
 
-// settingsDoc is config/config.yaml as lines. Only the keys this package owns
-// are ever looked at or replaced: every other line is the app's own and is
-// written back exactly as it was, and the app rewrites the whole file in its
-// own formatting on its first start anyway.
+// settingsDoc is config.yaml as lines: only the keys this package owns are looked
+// at or replaced, and every other byte is written back as it was.
 type settingsDoc struct {
 	lines []string
 	tail  bool // the file ended with a newline
@@ -293,8 +279,8 @@ func (d *settingsDoc) section(name string) (start, end int, ok bool) {
 	return 0, 0, false
 }
 
-// childIndent is the indentation a section's keys are written at: the first
-// non-empty line under it, or two spaces for an empty one.
+// childIndent is a section's key indentation: its first non-empty line, or two
+// spaces.
 func (d *settingsDoc) childIndent(start, end int) string {
 	for _, line := range d.lines[start+1 : end] {
 		if strings.TrimSpace(line) == "" {
@@ -339,9 +325,8 @@ func (d *settingsDoc) scalar(section, key string) (string, bool) {
 func (d *settingsDoc) setScalar(section, key, value string, quoted bool) {
 	i, ok := d.keyIndex(section, key)
 	if !ok {
-		// The section exists but not the key, or neither: append the key to the
-		// section (or the section to the file). Bazarr itself rewrites this file
-		// on the next start, so where a key sits is a detail of this one write.
+		// Append the key to its section, or the section to the file: Bazarr
+		// rewrites this file on the next start, so placement is a detail.
 		line := key + ": " + scalarText(value, quoted)
 		if s, e, has := d.section(section); has {
 			indent := d.childIndent(s, e)
@@ -426,9 +411,8 @@ func (d *settingsDoc) setPairs(section, key string, pairs [][2]string) {
 	d.lines = append(d.lines[:i], append(block, d.lines[end:]...)...)
 }
 
-// scalarText writes a value as a YAML scalar: a string is quoted so a path that
-// starts with a symbol YAML reads as a comment or a tag stays a path, and a
-// number is left bare because the app's validators are typed.
+// scalarText writes a YAML scalar: a string is quoted so a path starting with a
+// YAML symbol stays a path, a number is left bare for the typed validators.
 func scalarText(value string, quoted bool) string {
 	if !quoted {
 		return value
@@ -451,8 +435,7 @@ func scalarText(value string, quoted bool) string {
 	return b.String()
 }
 
-// unquoteScalar reads a YAML scalar the two shapes this file uses can take: a
-// double- or single-quoted string, or a plain one with an optional comment.
+// unquoteScalar reads a quoted string or a plain one with an optional comment.
 func unquoteScalar(raw string) string {
 	v := strings.TrimSpace(raw)
 	if v == "" {
