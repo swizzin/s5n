@@ -149,12 +149,11 @@ func TestDecideRange(t *testing.T) {
 			prev: "0.2.0", release: true, version: "0.2.1",
 		},
 		{
-			name:    "a platform minor does not release",
+			name:    "a platform pin's minor releases the chart",
 			changed: []string{platformFile},
 			oldV:    variants, newV: variants,
 			oldP: platform, newP: platformYAML("1.10.0", "0.16.1", "4.39.28"),
-			prev:     "0.2.0",
-			reasonIn: []string{"envoyGateway", "minor bump"},
+			prev: "0.2.0", release: true, version: "0.2.1",
 		},
 		{
 			name:    "the login's digest moving with its tag releases",

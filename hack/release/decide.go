@@ -51,8 +51,8 @@ type Decision struct {
 // when absent; prevVersion has no prefix and is empty with no tag.
 //
 // A release is cut only when every changed path is one of the two files, both files' changes
-// are bumps Renovate may merge unattended (an app image's patch, minor or digest; a pin's patch
-// or digest) and something moved, so the release confirms what CI ran the full e2e on.
+// are bumps Renovate may merge unattended (a patch, minor or digest; past a patch, k0s and 0.x
+// pins excepted) and something moved, so the release confirms what CI ran the full e2e on.
 func decideRange(changed []string, oldVariants, newVariants, oldPlatform, newPlatform []byte, prevVersion string) (Decision, error) {
 	if prevVersion == "" {
 		// v0.2.0 predates the s5n-v family, so it is not a base to count a patch from.
@@ -210,7 +210,9 @@ func isK0sSumKey(key string) bool {
 	return strings.HasPrefix(key, "k0sSHA256")
 }
 
-// pinReason: how many pins moved, and the reason to refuse when one moved past a patch. The
+// pinReason: how many pins moved, and the reason to refuse when one moved past a minor, or past
+// a patch for k0s (a Kubernetes minor, which no CI job boots) or a 0.x pin (semver's breaking
+// position). The
 // k0s sums add nothing -- a k0s bump is counted once on the k0s line -- and sums that move
 // without that line are refused, since they would describe an unpinned release.
 func pinReason(oldPins, newPins map[string]string) (int, string) {
@@ -239,11 +241,17 @@ func pinReason(oldPins, newPins map[string]string) (int, string) {
 		case bumpPatch:
 			moved++
 		case bumpMinor:
-			return 0, "pin " + key + ": " + oldV + " -> " + newV + " is a minor bump"
+			if key == "k0s" {
+				return 0, "pin k0s: " + oldV + " -> " + newV + " is a minor bump: a Kubernetes minor, and no CI job boots k0s"
+			}
+			if preOne(pinVersion(oldV)) {
+				return 0, "pin " + key + ": " + oldV + " -> " + newV + " is a minor bump of a 0.x version, which semver lets break"
+			}
+			moved++
 		case bumpMajor:
 			return 0, "pin " + key + ": " + oldV + " -> " + newV + " is a major bump"
 		default:
-			return 0, "pin " + key + ": " + oldV + " -> " + newV + " is not a patch or digest bump"
+			return 0, "pin " + key + ": " + oldV + " -> " + newV + " is not a patch, minor or digest bump"
 		}
 	}
 	return moved, ""
@@ -259,6 +267,12 @@ func pinVersion(value string) string {
 		return ref[i+1:]
 	}
 	return ref
+}
+
+// preOne reports whether a version is 0.x, where a minor is semver's breaking change.
+func preOne(v string) bool {
+	sv, err := semver.NewVersion(v)
+	return err == nil && sv.Major() == 0
 }
 
 // bump is how one tag or pin moved between two releases.

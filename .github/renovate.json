@@ -85,16 +85,23 @@
       "automerge": false
     },
     {
-      "description": "The platform pins are bumped on both branches, so work on develop is built and tested against the platform it will ship on. One pull request per pin: no groupName here on purpose, because a bad cert-manager and a bad k0s are different questions and the maintainer reads them one at a time. Patch bumps on main merge themselves through the next rule.",
+      "description": "The platform pins are bumped on both branches, so work on develop is built and tested against the platform it will ship on. One pull request per pin: no groupName here on purpose, because a bad cert-manager and a bad k0s are different questions and the maintainer reads them one at a time. Patch and minor bumps on main merge themselves through the next rules.",
       "matchFileNames": ["charts/s5n/platform.yaml"],
       "automerge": false
     },
     {
-      "description": "Platform pin patch bumps on main merge themselves once CI is green: hack/e2e-box.sh runs in CI and installs the platform through box (Envoy Gateway, MetalLB, cert-manager and the login; not k0s, since kind stands in for the cluster), so a green run tests exactly the pins that ship, and the push that carries the merge cuts the chart patch release. The authelia line's digest moves with its tag, so a patch covers it. A minor or major bump (MetalLB is still 0.x) always waits for the maintainer. k0s is excluded by the next rule, which must stay after this one: in Renovate the later matching rule wins.",
+      "description": "Platform pin patch and minor bumps on main merge themselves once CI is green: hack/e2e-box.sh runs in CI and installs the platform through box (Envoy Gateway, MetalLB, cert-manager and the login; not k0s, since kind stands in for the cluster), so a green run tests exactly the pins that ship, and the push that carries the merge cuts the chart patch release. The authelia line's digest moves with its tag, so a patch covers it. A major always waits for the maintainer, and so does a 0.x pin's minor (MetalLB), through the next rule. k0s is excluded by the rule after that. Both must stay after this one: in Renovate the later matching rule wins.",
       "matchFileNames": ["charts/s5n/platform.yaml"],
       "matchBaseBranches": ["main"],
-      "matchUpdateTypes": ["patch"],
+      "matchUpdateTypes": ["patch", "minor"],
       "automerge": true
+    },
+    {
+      "description": "A 0.x platform pin's minor (MetalLB) never merges itself: semver lets a 0.x minor break the way a major would, and hack/release decide refuses to release one. It sits after the platform automerge rule so it wins over it.",
+      "matchFileNames": ["charts/s5n/platform.yaml"],
+      "matchCurrentValue": "/^v?0\\./",
+      "matchUpdateTypes": ["minor"],
+      "automerge": false
     },
     {
       "description": "A k0s bump never merges itself, and this rule sits after the platform patch rule so it wins over it. No CI job installs k0s: hack/e2e-box.sh runs on kind, which stands in for the cluster, so a green run says nothing about a new k0s. .github/workflows/k0s-sums.yaml writes the asset checksums Renovate cannot (as the sums bot, whose App token push starts CI where a GITHUB_TOKEN one would not), so the pull request can go green; a maintainer still merges it. Patch bumps join the platform automerge when an e2e that boots k0s runs in CI; a k0s minor is a Kubernetes minor and always waits.",

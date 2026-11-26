@@ -3,9 +3,9 @@
 //
 // A release is cut on a push to main, after CI is green (docs/box.md, "Where a release
 // lives"). The decision is whether the net change since the last s5n-v* tag is only a bump
-// Renovate may merge unattended: a patch or digest bump of charts/s5n/variants.yaml or
-// charts/s5n/platform.yaml, and nothing else. Anything else -- a hand edit, a minor or major
-// bump, any other file -- waits for the maintainer's own tag, and the job names it.
+// Renovate may merge unattended: a patch, minor or digest bump of charts/s5n/variants.yaml or
+// charts/s5n/platform.yaml (k0s and a 0.x pin's minor excepted), and nothing else. Anything
+// else -- a hand edit, a major bump, any other file -- waits for the maintainer's own tag.
 //
 // The decision is a pure function over the changed paths and the two files at the tag and
 // at HEAD (decide.go), so the case table is the test; a thin git wrapper builds those

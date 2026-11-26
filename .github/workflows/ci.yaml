@@ -91,8 +91,8 @@ jobs:
   #
   # The last job of a push to main, after every test job: the decision is
   # whether the net change since the last s5n-v* tag is only bumps Renovate may
-  # merge unattended (an app image's patch, minor or digest; a platform pin's
-  # patch or digest) in charts/s5n/variants.yaml or platform.yaml (Renovate's
+  # merge unattended (a patch, minor or digest; k0s and a 0.x pin's minor
+  # excepted) in charts/s5n/variants.yaml or platform.yaml (Renovate's
   # own config aside: nothing ships it), and it lives in hack/release so it is
   # tested rather than written in YAML. If it says
   # release, this job tags the pushed commit and the job after it publishes.

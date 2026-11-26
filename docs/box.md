@@ -943,8 +943,9 @@ maintainer tags it there. After every release, `main` is merged back into `devel
 on `main` only; `develop` gets them through the back-merge. The platform pins are bumped
 on both branches, so work on `develop` is built and tested against the platform it will
 ship on. On `main`, an app image's patch, minor or digest bump merges itself as soon as
-the full e2e is green, a minor in a pull request of its own; a major, and a platform pin
-past a patch, waits for the maintainer. Renovate groups the patch and digest bumps that
+the full e2e is green, a minor in a pull request of its own; a major waits for the
+maintainer. Platform pins follow the same rule, except k0s (always the maintainer's) and a
+0.x pin's minor. Renovate groups the patch and digest bumps that
 land in one window into one pull request. There is no waiting period: the upstream projects
 stage their own releases, and holding a build longer adds age, not testing. On every
 push to `main`, if `main` has changed since the last `s5n-v*` tag and every change since
@@ -1837,10 +1838,10 @@ images. Their pins ship in the chart:
 
 1. Renovate opens a pull request when an upstream release lands for a pinned component,
    on `main` and on `develop`.
-2. CI runs the full e2e on it. On `main`, a patch bump merges itself as soon as it is
-   green (k0s excepted until an e2e that boots k0s runs in CI), and the push cuts a chart patch release like any image bump. Minor and major
-   bumps (a k0s minor is a Kubernetes minor; MetalLB is still 0.x) wait for the
-   maintainer.
+2. CI runs the full e2e on it. On `main`, a patch or minor bump merges itself as soon as
+   it is green, and the push cuts a chart patch release like any image bump. A major waits
+   for the maintainer, and so do k0s (no CI job boots it, and its minor is a Kubernetes
+   minor) and a 0.x pin's minor (MetalLB: semver lets a 0.x minor break).
 3. Root's `update` takes the pins from the release it is moving to and upgrades the
    components box manages before it moves any seedbox, with doctor run before and
    after. A component box doesn't manage (`external`, or `auto` that found the admin's
