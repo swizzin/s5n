@@ -98,7 +98,15 @@ func (j *Jellyfin) SetFirstUser(ctx context.Context, name, password string) (boo
 	return false, err
 }
 
-// StartupUser is the name of the first user, as GET /Startup/User reports it.
+// StartupUser is GET /Startup/User: the name of the first user.
+//
+// It is also the call that *makes* that user exist. Jellyfin starts with an
+// empty user table and creates its default account inside
+// UserManager.InitializeAsync (Jellyfin.Server.Implementations/Users/UserManager.cs
+// at v12.4), which only the wizard's own read reaches: a POST /Startup/User
+// before it answers 404, because UpdateStartupUser looks the first user up and
+// refuses when there is none. So a client that wants to name the first account
+// reads it first, then renames it.
 func (j *Jellyfin) StartupUser(ctx context.Context) (string, error) {
 	var out struct {
 		Name string `json:"Name"`

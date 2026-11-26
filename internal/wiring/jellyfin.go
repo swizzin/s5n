@@ -9,9 +9,10 @@ import (
 	"github.com/swizzin/s5n/internal/apps"
 )
 
-// startUpBudget is how long a fresh server gets to have created its first user:
-// /Startup/User answers 404 in the moment between the listener opening and the
-// user table being seeded, and that moment is not a failure.
+// startUpBudget is how long a fresh server gets to answer the wizard's own
+// read-and-write pair: the account it names does not exist until that read has
+// created it, so the pair is retried together rather than a 404 being read as a
+// failure.
 const startUpBudget = 60 * time.Second
 
 // jellyfinBoxAccount is the account the wiring Job signs in as. It is not the
@@ -116,6 +117,14 @@ func (r *Runner) jellyfinWizard(ctx context.Context, res *Result, c *JellyfinCon
 	}
 	started := false
 	err := apps.Retry(ctx, startUpBudget, func(ctx context.Context) error {
+		// The wizard's GET is what creates the account. Jellyfin starts with an
+		// empty user table and makes its default one inside
+		// UserManager.InitializeAsync, which only that call reaches; naming it
+		// before it exists is a 404, so the read comes first and the write
+		// follows it in the same attempt.
+		if _, e := j.StartupUser(ctx); e != nil {
+			return e
+		}
 		var e error
 		started, e = j.SetFirstUser(ctx, c.Username, userPassword)
 		return e

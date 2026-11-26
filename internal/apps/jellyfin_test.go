@@ -32,6 +32,7 @@ type jellyfinFake struct {
 	passwordWrites   int
 	networkWrites    int
 	startupUserCalls int
+	defaultUsers     int
 }
 
 func newJellyfinFake(t *testing.T) (*jellyfinFake, *Jellyfin) {
@@ -83,12 +84,21 @@ func (f *jellyfinFake) startup(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case r.URL.Path == "/Startup/User" && r.Method == http.MethodPost:
 		f.startupUserCalls++
+		if f.firstUser == "" {
+			// No user exists yet: Jellyfin creates its default account only from
+			// inside the wizard's own read, and UpdateStartupUser refuses while
+			// there is nothing to rename.
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
 		if f.wizardDone || f.firstUserPw != "" {
 			w.WriteHeader(http.StatusForbidden)
 			return
 		}
 		var body struct{ Name, Password string }
 		_ = json.NewDecoder(r.Body).Decode(&body)
+		delete(f.users, f.firstUser)
+		delete(f.passwords, f.firstUser)
 		f.firstUser, f.firstUserPw = body.Name, body.Password
 		f.users[body.Name] = map[string]any{"Id": "id-" + body.Name, "Name": body.Name,
 			"Policy": map[string]any{"IsAdministrator": true, "IsDisabled": false}}
@@ -97,8 +107,11 @@ func (f *jellyfinFake) startup(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNoContent)
 	case r.URL.Path == "/Startup/User":
 		if f.firstUser == "" {
-			w.WriteHeader(http.StatusNotFound)
-			return
+			// UserManager.InitializeAsync: the app's own default account.
+			f.defaultUsers++
+			f.firstUser = "default-user"
+			f.users[f.firstUser] = map[string]any{"Id": "id-" + f.firstUser, "Name": f.firstUser,
+				"Policy": map[string]any{"IsAdministrator": true, "IsDisabled": false}}
 		}
 		writeJSON(w, map[string]any{"Name": f.firstUser})
 	case r.URL.Path == "/Startup/RemoteAccess":
@@ -285,7 +298,7 @@ func TestJellyfinWizardIsIdempotent(t *testing.T) {
 	ctx := context.Background()
 	f, j := newJellyfinFake(t)
 
-	if _, err := j.SetFirstUser(ctx, "alice", "person-pw"); err != nil {
+	if err := wizardUser(ctx, j); err != nil {
 		t.Fatalf("first wizard run: %v", err)
 	}
 	if err := j.AllowRemoteAccess(ctx); err != nil {
@@ -339,7 +352,7 @@ func TestJellyfinInfoReportsTheWizard(t *testing.T) {
 func TestJellyfinAdministratorIsWrittenOnce(t *testing.T) {
 	ctx := context.Background()
 	f, j := newJellyfinFake(t)
-	if _, err := j.SetFirstUser(ctx, "alice", "person-pw"); err != nil {
+	if err := wizardUser(ctx, j); err != nil {
 		t.Fatal(err)
 	}
 	if err := j.CompleteWizard(ctx); err != nil {
@@ -390,7 +403,7 @@ func TestJellyfinAdministratorIsWrittenOnce(t *testing.T) {
 func TestJellyfinAPIKeyIsReused(t *testing.T) {
 	ctx := context.Background()
 	f, j := newJellyfinFake(t)
-	if _, err := j.SetFirstUser(ctx, "alice", "person-pw"); err != nil {
+	if err := wizardUser(ctx, j); err != nil {
 		t.Fatal(err)
 	}
 	if err := j.CompleteWizard(ctx); err != nil {
@@ -427,7 +440,7 @@ func TestJellyfinAPIKeyIsReused(t *testing.T) {
 func TestJellyfinLibraryAdoptsByPath(t *testing.T) {
 	ctx := context.Background()
 	f, j := newJellyfinFake(t)
-	if _, err := j.SetFirstUser(ctx, "alice", "person-pw"); err != nil {
+	if err := wizardUser(ctx, j); err != nil {
 		t.Fatal(err)
 	}
 	if err := j.CompleteWizard(ctx); err != nil {
@@ -472,7 +485,7 @@ func TestJellyfinLibraryAdoptsByPath(t *testing.T) {
 func TestJellyfinKnownProxiesAreWrittenOnce(t *testing.T) {
 	ctx := context.Background()
 	f, j := newJellyfinFake(t)
-	if _, err := j.SetFirstUser(ctx, "alice", "person-pw"); err != nil {
+	if err := wizardUser(ctx, j); err != nil {
 		t.Fatal(err)
 	}
 	if err := j.CompleteWizard(ctx); err != nil {
@@ -504,5 +517,39 @@ func TestJellyfinKnownProxiesAreWrittenOnce(t *testing.T) {
 	}
 	if got := f.network["BaseUrl"]; got != "/jellyfin" {
 		t.Fatalf("the app's own setting was lost: %v", got)
+	}
+}
+
+// wizardUser names the first account the way the wizard's own flow does: the
+// read that makes the default account exist, then the write that renames it.
+func wizardUser(ctx context.Context, j *Jellyfin) error {
+	if _, err := j.StartupUser(ctx); err != nil {
+		return err
+	}
+	_, err := j.SetFirstUser(ctx, "alice", "person-pw")
+	return err
+}
+
+// TestTheWizardReadCreatesTheAccount: the first account does not exist until
+// the wizard's own read, and a write before it is a 404 -- the app's behaviour,
+// and the reason the Job makes the pair together.
+func TestTheWizardReadCreatesTheAccount(t *testing.T) {
+	ctx := context.Background()
+	f, j := newJellyfinFake(t)
+	if _, err := j.SetFirstUser(ctx, "alice", "person-pw"); !IsNotFound(err) {
+		t.Fatalf("a write before the read = %v, want the app's 404", err)
+	}
+	name, err := j.StartupUser(ctx)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if name == "" || f.defaultUsers != 1 {
+		t.Fatalf("the read did not create the app's default account: name=%q created=%d", name, f.defaultUsers)
+	}
+	if ok, err := j.SetFirstUser(ctx, "alice", "person-pw"); err != nil || ok {
+		t.Fatalf("the write after the read: ok=%v err=%v", ok, err)
+	}
+	if _, ok := f.users["alice"]; !ok {
+		t.Fatal("the first account was not renamed")
 	}
 }

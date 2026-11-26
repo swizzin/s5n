@@ -1197,7 +1197,10 @@ for spec in "plex:${PLEX_HOST}" "seerr:${SEERR_HOST}" "pbh:${PBH_HOST}" "jellyfi
   http_listener=$($K -n s5n-gateway get gateway s5n \
     -o jsonpath="{.spec.listeners[?(@.name==\"http-${label}\")].hostname}" || true)
   route_host=$($K -n "$NS" get httproute "$app" -o jsonpath='{.spec.hostnames[0]}' || true)
-  route_path=$($K -n "$NS" get httproute "$app" -o jsonpath='{.spec.rules[0].matches[0].path.value}' || true)
+  # The last rule is the app's own catch-all: Jellyfin's route also carries the
+  # two prefixes that are never served (its first-run endpoints), and every
+  # other app's route is one rule.
+  route_path=$($K -n "$NS" get httproute "$app" -o jsonpath='{.spec.rules[-1:].matches[0].path.value}' || true)
   echo "  ${host}: route ${route_host}${route_path}, listener https-${label} -> ${listener}, http-${label} on ${http_listener}"
   [ "$route_host" = "$host" ] || { echo "the ${app} route is on ${route_host}, want its own host"; fail=1; }
   [ "$route_path" = / ] || { echo "the ${app} route's path is ${route_path}, want /"; fail=1; }
@@ -1391,41 +1394,35 @@ PYEOF
   fi
 done
 
-# KnownProxies. Through the Gateway, the app's peer is the proxy's pod, so with
-# nothing trusted it ignores the forwarded address entirely and every request
-# looks local. This is not cosmetic: a local caller reaches the endpoints marked
-# LocalAccessOrRequiresElevation without a credential. The proof is the app's own
-# answer about the request, taken twice: as the chart wrote it, then with the
-# list emptied, which is the state that must never be a box's steady state.
+# KnownProxies. Through the Gateway the app's peer is the proxy's *pod*, whose
+# address is in the cluster's pod network, so a server that trusts nothing
+# ignores the forwarded address and every request looks like it came from a
+# local one. This is not cosmetic: Jellyfin answers the endpoints marked
+# LocalAccessOrRequiresElevation to a local caller with no credential at all.
+#
+# The app reads this list at startup only, so the proof is its own answer about
+# this request: IsLocal can be false only because the person's address arrived
+# in X-Forwarded-For from a peer the app was told to trust. (Emptying the list
+# here would not change the answer until the pod restarted, which is why the
+# list is read, not toggled.)
 jf_api "$jf_user_token" "https://${JELLYFIN_HOST}/System/Configuration/network" >"$WORK/jf-network.json" || true
-jf_local() { jf_api "$1" "https://${JELLYFIN_HOST}/System/Endpoint" || true; }
+python3 - "$WORK/jf-network.json" <<'PYNET' || fail=1
+import json, sys
+try:
+    doc = json.load(open(sys.argv[1]))
+except Exception as exc:
+    print("  Jellyfin's network configuration did not parse: %s" % exc)
+    sys.exit(1)
+proxies = doc.get("KnownProxies") or doc.get("knownProxies") or []
+if not proxies:
+    print("  KnownProxies is empty: the app is not told whose address to trust")
+    sys.exit(1)
+print("  KnownProxies: %s" % ", ".join(proxies))
+PYNET
 jf_api "$jf_user_token" "https://${JELLYFIN_HOST}/System/Endpoint" >"$WORK/jf-endpoint.json" || true
 grep -q '"IsLocal":false' "$WORK/jf-endpoint.json" ||
-  { echo "Jellyfin treats a request through the Gateway as local ($(cat "$WORK/jf-endpoint.json")): KnownProxies does not reach the app"; fail=1; }
-if python3 -c 'import json,sys; d=json.load(open("'"$WORK"'/jf-network.json")); p=d.get("KnownProxies") or d.get("knownProxies") or []
-sys.exit(0 if p else 1)' 2>/dev/null; then
-  python3 - "$WORK/jf-network.json" "$WORK/jf-network-empty.json" <<'PYEOF'
-import json, sys
-doc = json.load(open(sys.argv[1]))
-if "KnownProxies" in doc: doc["KnownProxies"] = []
-else: doc["knownProxies"] = []
-json.dump(doc, open(sys.argv[2], "w"))
-PYEOF
-  jf_api "$jf_user_token" -H 'Content-Type: application/json' -X POST \
-    --data-binary "@$WORK/jf-network-empty.json" "https://${JELLYFIN_HOST}/System/Configuration/network" >/dev/null || true
-  jf_api "$jf_user_token" "https://${JELLYFIN_HOST}/System/Endpoint" >"$WORK/jf-endpoint-empty.json" || true
-  grep -q '"IsLocal":true' "$WORK/jf-endpoint-empty.json" ||
-    { echo "with KnownProxies empty the same request is still not local ($(cat "$WORK/jf-endpoint-empty.json")): the setting is not what decides"; fail=1; }
-  echo "KnownProxies empty -> the same request counts as local, and with the chart's list it does not"
-  # Put back what the chart wrote: a later run's diff must be empty.
-  jf_api "$jf_user_token" -H 'Content-Type: application/json' -X POST \
-    --data-binary "@$WORK/jf-network.json" "https://${JELLYFIN_HOST}/System/Configuration/network" >/dev/null || true
-  jf_api "$jf_user_token" "https://${JELLYFIN_HOST}/System/Endpoint" >"$WORK/jf-endpoint.json" || true
-  grep -q '"IsLocal":false' "$WORK/jf-endpoint.json" ||
-    { echo "restoring KnownProxies did not restore the forwarded address"; fail=1; }
-else
-  echo "Jellyfin's network configuration has no KnownProxies: the app is not told whose address to trust"; fail=1
-fi
+  { echo "Jellyfin counts a request through the Gateway as local ($(cat "$WORK/jf-endpoint.json")): the forwarded address is ignored"; fail=1; }
+echo "a request through the Gateway is not local, so the person's address arrived"
 
 
 # ---- PeerBanHelper: one login, and a downloader PBH itself proved ------------
