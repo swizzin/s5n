@@ -14,12 +14,9 @@ import (
 	"github.com/swizzin/s5n/internal/seedbox"
 )
 
-// The ordering contract of `box init` is in two places at once: release.Applier
-// owns the confirm, and login.Decision is what init runs after it. These tests
-// drive both together, with real grant and values files and a fake release
-// client, so "a refused confirm writes nothing" and "a login that does not come
-// up stops the run before the release" are facts about the code and not about
-// the shape of a diagram.
+// The ordering contract of `box init`: release.Applier owns the confirm and
+// login.Decision is what init runs after it. These tests drive both together, with
+// real grant and values files and a fake release client.
 
 // orderRelease is the Helm client, recording when the release was written.
 type orderRelease struct {
@@ -31,8 +28,7 @@ func (r *orderRelease) Deployed(context.Context) (map[string]any, bool, error) {
 	return nil, false, nil
 }
 
-// State: the order test starts on a cluster with no release, so there is no
-// chart version to compare with and the run is the first install.
+// The order test starts on a cluster with no release, so the run is the first install.
 func (r *orderRelease) State(context.Context) (release.ReleaseState, error) {
 	return release.ReleaseState{}, nil
 }
@@ -63,8 +59,8 @@ func (orderStorage) Delete(context.Context, release.StorageObject) error {
 	return nil
 }
 
-// answer is the one question apply asks. A plain reporter with Yes=false
-// wants a terminal, and a test has none.
+// answer is the one question apply asks; a plain reporter with Yes=false wants a
+// terminal, and a test has none.
 type answer bool
 
 func (a answer) Ask(string, bool) (bool, error) { return bool(a), nil }
@@ -161,8 +157,8 @@ func mustRead(t *testing.T, path string) []byte {
 	return data
 }
 
-// TestRefusedConfirmWritesNoLogin: the login is asked for after the confirm,
-// so a "no" is a run that never touched the cluster or the host.
+// The login is asked for after the confirm, so a "no" is a run that never touched
+// the cluster or the host.
 func TestRefusedConfirmWritesNoLogin(t *testing.T) {
 	f := newOrderFixture(t, false)
 	_, err := f.apply(t)
@@ -179,8 +175,8 @@ func TestRefusedConfirmWritesNoLogin(t *testing.T) {
 	}
 }
 
-// TestLoginRunsBeforeTheRelease: Authelia has to be answering and the policy
-// accepted before the apps behind the Gateway exist.
+// Authelia has to be answering and the policy accepted before the apps behind the
+// Gateway exist.
 func TestLoginRunsBeforeTheRelease(t *testing.T) {
 	f := newOrderFixture(t, true)
 	if _, err := f.apply(t); err != nil {
@@ -194,8 +190,8 @@ func TestLoginRunsBeforeTheRelease(t *testing.T) {
 	}
 }
 
-// TestLoginFailureAbortsBeforeTheRelease: a Deployment that never answers is a
-// login nobody can pass, so the release must not be written at all.
+// A Deployment that never answers is a login nobody can pass, so the release must not
+// be written at all.
 func TestLoginFailureAbortsBeforeTheRelease(t *testing.T) {
 	f := newOrderFixture(t, true)
 	f.cluster.awaitErr = errors.New("the login never answered")

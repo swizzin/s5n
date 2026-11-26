@@ -17,25 +17,20 @@ import (
 	"github.com/swizzin/s5n/internal/say"
 )
 
-// The identity provider's material is split in two, and which half lives where
-// is the point of this file.
+// The provider's material is split in two.
 //
-// The issuer's signing material (an HMAC key and one RSA key) is one file in
-// the login's Secret, mounted into the pod and read as a second `--config`: it
-// never touches the ConfigMap and neither does its plaintext ever exist
-// anywhere but that Secret.
+// The signing material (an HMAC key and one RSA key) is one file in the login's
+// Secret, mounted and read as a second `--config`: its plaintext exists nowhere else
+// and never touches the ConfigMap.
 //
-// Each client's secret is the opposite: the plaintext belongs in the seedbox's
-// own namespace, in a Secret the app mounts (QUI__OIDC_CLIENT_SECRET_FILE), and
-// the login keeps only the digest the token endpoint checks it against. That
-// digest is stored -- not recomputed -- because it carries a random salt: a
-// recomputed digest would differ on every render, and the login's ConfigMap
-// would change on every apply, rolling the login and dropping every session.
+// Each client's secret is the opposite: the plaintext belongs in the seedbox's own
+// namespace, and the login keeps only the digest the token endpoint checks. The digest
+// is stored, not recomputed, because its random salt would change the ConfigMap on
+// every apply and roll the login, dropping every session.
 
 // loginSecret is the login's Secret as this run needs it.
 type loginSecret struct {
-	// key is the storage encryption key, which encrypts rows in the SQLite
-	// database and is never rotated.
+	// key is the storage encryption key, which is never rotated.
 	key string
 	// provider is the rendered oidc.yml file (the signing material), or nil on
 	// a box whose provider was never set up.
@@ -44,21 +39,17 @@ type loginSecret struct {
 	digests map[string]string
 }
 
-// ErrNotInstalled says the login is not in this cluster yet. `box init` is the
-// command that installs it, so a run that installs it -- init's own apply --
-// treats this as work it is about to do, not as the refusal every other run
-// makes.
+// ErrNotInstalled says the login is not in this cluster yet: the installing run
+// treats it as work it is about to do, every other run as a refusal.
 var ErrNotInstalled = errors.New("the login is not installed")
 
-// notInstalled is the one refusal, in the one wording: the command that fixes
-// it, and the sentinel a caller can test.
+// notInstalled is the one refusal, in the one wording.
 func notInstalled() error {
 	return fmt.Errorf("%w (%s/%s is missing): run `box init` as root, which installs it and writes its rules", ErrNotInstalled, Namespace, authelia.SecretName)
 }
 
-// readSecret reads the login's Secret. It is the read half: no generation, so a
-// run that may not write the login can still render the configuration it would
-// have.
+// readSecret reads the login's Secret: no generation, so a run that may not write
+// the login can still render the configuration it would have.
 func (d *Decision) readSecret(ctx context.Context, cl Cluster) (loginSecret, error) {
 	doc, found, err := cl.Get(ctx, CoreGroup, "v1", "Secret", Namespace, authelia.SecretName)
 	if err != nil {
@@ -102,23 +93,20 @@ func parseLoginSecret(doc map[string]any) (loginSecret, error) {
 }
 
 // ensureKey is readSecret plus the two things only root's init may create: the
-// storage encryption key (once, ever) and the provider's signing material. It
-// writes nothing into the seedbox's namespace -- that namespace does not exist
-// on a first install until apply creates it -- so the clients are a separate
-// step that runs where the namespace is known to be there (EnsureClients).
+// storage encryption key (once, ever) and the provider's signing material. It writes
+// nothing into the seedbox's namespace, so the clients are a separate step
+// (EnsureClients).
 //
-// "Once" is per key, not per Secret: a box installed before the provider
-// existed has a Secret with the encryption key alone, and an upgrade has to add
-// keys to it without touching what is already there. Nothing here ever rewrites
-// a value it found.
+// "Once" is per key: a box from before the provider has a Secret with the encryption
+// key alone, and an upgrade adds keys without rewriting what is there.
 func (d *Decision) ensureKey(ctx context.Context, cl Cluster, create bool, wantProvider bool) (loginSecret, bool, error) {
 	doc, found, err := cl.Get(ctx, CoreGroup, "v1", "Secret", Namespace, authelia.SecretName)
 	if err != nil {
 		return loginSecret{}, false, err
 	}
 	if !found && !create {
-		// A rule write is not an install: a box with no login is refused, not
-		// given a Secret and a provider nobody asked for.
+		// A rule write is not an install: a box with no login is refused, not given
+		// a Secret nobody asked for.
 		return loginSecret{}, false, notInstalled()
 	}
 	kept := found
@@ -160,22 +148,18 @@ func (d *Decision) ensureKey(ctx context.Context, cl Cluster, create bool, wantP
 	return sec, kept, nil
 }
 
-// EnsureClients is the per-app half of the provider, at the one point in an
-// install where the seedbox's namespace exists: box's host-CA step, which runs
-// after apply has created the namespace and before Helm runs. It writes one
-// Secret per client into that namespace, keeps only the digest in the login's,
-// and is idempotent -- a Secret that is there is never regenerated, and a
-// digest that already matches is not rewritten.
+// EnsureClients is the per-app half of the provider, at the one point where the
+// seedbox's namespace exists: after apply created it and before Helm runs. It writes
+// one Secret per client into that namespace, keeps only the digest in the login's, and
+// is idempotent.
 //
-// A failure stops the run here: an app whose client secret is missing cannot
-// start, and failing before the release says so once instead of crash-looping
-// through Helm's wait.
+// A failure stops the run here: an app whose client secret is missing cannot start,
+// and failing before the release says so once instead of crash-looping through Helm.
 func (d *Decision) EnsureClients(ctx context.Context, namespace string, apps []string) (bool, error) {
 	apps = oidcApps(apps)
-	// An empty list is not "nothing to do": a box whose app was turned off
-	// still has that client's digest in its Secret, and the configuration is
-	// rendered whole, so a digest left behind would be a client Authelia still
-	// answers for. The prune below is what removes it.
+	// An empty list is not "nothing to do": a box whose app was turned off still has
+	// that client's digest, and the configuration is rendered whole. The prune below
+	// removes it.
 	if len(apps) == 0 {
 		return d.pruneClients(ctx)
 	}
@@ -208,9 +192,8 @@ func (d *Decision) EnsureClients(ctx context.Context, namespace string, apps []s
 	if _, err := d.ensureClientSecrets(ctx, cl, namespace, apps, sec, data); err != nil {
 		return false, err
 	}
-	// A client whose app is off loses its registration: the configuration is
-	// rendered whole, so a digest left behind would be a client Authelia still
-	// answers for.
+	// A client whose app is off loses its registration: a digest left behind would
+	// be a client Authelia still answers for.
 	want := map[string]bool{}
 	for _, app := range apps {
 		want[authelia.OIDCClientDigestKey(authelia.ClientID(namespace, app))] = true
@@ -261,9 +244,8 @@ func (d *Decision) pruneClients(ctx context.Context) (bool, error) {
 }
 
 // PlanClients is EnsureClients' read half: the apps whose Secret or digest is
-// missing, so the run that would write them says so in its plan. A namespace
-// that is not there yet counts as every app, because the write creates it after
-// the namespace does.
+// missing. A namespace that is not there yet counts as every app, because the write
+// creates it after the namespace does.
 func (d *Decision) PlanClients(ctx context.Context, namespace string, apps []string) ([]string, error) {
 	apps = oidcApps(apps)
 	if len(apps) == 0 || strings.TrimSpace(namespace) == "" {
@@ -308,8 +290,8 @@ func (d *Decision) PlanClients(ctx context.Context, namespace string, apps []str
 	return out, nil
 }
 
-// writeLoginSecret applies the Secret whole: server-side apply would drop the
-// keys this run did not name, and most of them are not this run's.
+// writeLoginSecret applies the Secret whole: server-side apply would drop the keys
+// this run did not name.
 func (d *Decision) writeLoginSecret(ctx context.Context, cl Cluster, found bool, data map[string]string) error {
 	secret := secretDocument(data)
 	if found {
@@ -322,8 +304,8 @@ func (d *Decision) writeLoginSecret(ctx context.Context, cl Cluster, found bool,
 	if err := cl.Create(ctx, secret); err != nil {
 		return fmt.Errorf("create Secret %s/%s: %w", Namespace, authelia.SecretName, err)
 	}
-	// The one fact a person has to act on: the key is nowhere else, and it
-	// never changes once it exists.
+	// The one fact a person has to act on: the key exists nowhere else and never
+	// changes.
 	d.report().Rows([]say.Row{{
 		Mark:  say.MarkNeeds,
 		Name:  "login key",
@@ -345,16 +327,13 @@ func sameData(a, b map[string]string) bool {
 	return true
 }
 
-// ensureClientSecrets makes one Secret per OIDC app in the seedbox's namespace,
-// holding the plaintext the app reads, and records its digest in the login's
-// Secret. A Secret that is already there is never regenerated: the app is
-// configured with that value and its digest is what Authelia has, so replacing
-// it would break the login it is for.
+// ensureClientSecrets makes one Secret per OIDC app and records its digest in the
+// login's Secret. A Secret that is there is never regenerated: the app is configured
+// with that value, so replacing it would break the login it is for.
 func (d *Decision) ensureClientSecrets(ctx context.Context, cl Cluster, namespace string, apps []string, sec loginSecret, data map[string]string) (bool, error) {
-	// On a first install this step runs before apply has created the
-	// namespace, and a Secret cannot be written into one that is not there. The
-	// caller that runs after apply created it is the host-CA step; this guard
-	// keeps the earlier one (a rule write, an upgrade) from trying.
+	// On a first install this runs before apply created the namespace, and a Secret
+	// cannot be written into one that is not there; this guard keeps an earlier
+	// caller from trying.
 	there, err := cl.NamespaceExists(ctx, namespace)
 	if err != nil {
 		return false, err
@@ -384,9 +363,8 @@ func (d *Decision) ensureClientSecrets(ctx context.Context, cl Cluster, namespac
 			changed = true
 		}
 		if sec.digests[clientID] == "" {
-			// The plaintext may be older than the provider (an upgrade), or
-			// newer (somebody rotated it by hand): the digest follows whatever
-			// the app is actually configured with.
+			// The plaintext may predate the provider (an upgrade) or postdate it (a
+			// hand rotation): the digest follows what the app is configured with.
 			digest, err := authelia.HashClientSecret(secret)
 			if err != nil {
 				return changed, err
@@ -395,10 +373,9 @@ func (d *Decision) ensureClientSecrets(ctx context.Context, cl Cluster, namespac
 			sec.digests[clientID] = digest
 			changed = true
 		} else if !authelia.VerifyClientSecret(sec.digests[clientID], secret) {
-			// The Secret and the digest disagree, which means the plaintext
-			// was replaced by hand. Re-hash rather than refuse: the app is
-			// configured with the plaintext that is there, and a login that
-			// refuses to start over it helps nobody.
+			// The Secret and the digest disagree, so the plaintext was replaced by
+			// hand. Re-hash rather than refuse: a login that will not start helps
+			// nobody.
 			digest, err := authelia.HashClientSecret(secret)
 			if err != nil {
 				return changed, err
@@ -412,8 +389,7 @@ func (d *Decision) ensureClientSecrets(ctx context.Context, cl Cluster, namespac
 	return changed, nil
 }
 
-// clientSecret reads one app's client secret. An absent Secret is "" rather
-// than an error: it is the first run's state.
+// clientSecret reads one app's client secret; an absent Secret is "".
 func (d *Decision) clientSecret(ctx context.Context, cl Cluster, namespace, name string) (string, error) {
 	doc, found, err := cl.Get(ctx, CoreGroup, "v1", "Secret", namespace, name)
 	if err != nil || !found {
@@ -431,35 +407,25 @@ func (d *Decision) clientSecret(ctx context.Context, cl Cluster, namespace, name
 	return string(secret), nil
 }
 
-// providerEnabled is the one predicate for "this login serves an identity
-// provider": the rendering names at least one client, so its signing material
-// is mounted and passed as a second --config. The configuration's
-// identity_providers block and the Deployment's mount are both read from it,
-// because Authelia refuses a block with no clients ("option 'clients' must have
-// one or more clients configured"): a mount without the block is a login that
-// does not start, and a block without the mount is a token Authelia cannot
-// sign.
+// providerEnabled is the one predicate for "this login serves an identity provider":
+// the rendering names at least one client, so the signing material is mounted and
+// passed as a second --config. The block and the mount both read it, because Authelia
+// refuses a block with no clients: either half alone is a login that does not start.
 //
-// It is deliberately not "the Secret holds a digest". A box whose last OIDC
-// app was turned off keeps its signing material -- it is generated once and
-// never rotated, so a client that comes back must not reissue tokens its app
-// has cached -- and has no provider until an app signs in again.
+// It is deliberately not "the Secret holds a digest": a box whose last OIDC app was
+// turned off keeps its signing material, so a client that comes back does not reissue
+// cached tokens, and has no provider until an app signs in again.
 func providerEnabled(clients *authelia.OIDC) bool {
 	return clients != nil && clients.Enabled()
 }
 
-// oidcClients is the provider's client list for one seedbox, from what the
-// login's Secret holds: one client per enabled app, each pointing at that
-// seedbox's own authorization policy. An app with no digest yet is left out, so
-// the configuration never names a client Authelia cannot check. That the client
-// is missing is planned where it is known (PlanClients, which Decision.Pending
-// asks) and written where it can be (EnsureClients): the rendering is identical
-// with and without such an app, so a difference here is no signal at all.
+// oidcClients is the provider's client list for one seedbox: one client per enabled
+// app with a digest, pointing at that seedbox's policy. An app with no digest is left
+// out, so the configuration never names a client Authelia cannot check; the missing
+// client is planned and written where that is known.
 //
-// What it returns is the whole provider decision for this run (providerEnabled):
-// nil means the configuration has no identity_providers block and the
-// Deployment mounts nothing. Callers render the configuration and the manifests
-// from this one value so the two cannot disagree.
+// The return is the whole provider decision: nil means no identity_providers block and
+// nothing mounted. Callers render both from it so they cannot disagree.
 func oidcClients(host, namespace, loginName string, apps []string, digests map[string]string) *authelia.OIDC {
 	if len(apps) == 0 {
 		return nil
@@ -490,9 +456,8 @@ func oidcClients(host, namespace, loginName string, apps []string, digests map[s
 	return o
 }
 
-// The fields box's own object documents are built from: the login's Secret and
-// the per-app ones are the same shape, and a misspelt key in either is a write
-// that silently drops it.
+// The fields box's object documents are built from: the login's Secret and the
+// per-app ones are the same shape, and a misspelt key drops it silently.
 const (
 	fieldAPIVersion = "apiVersion"
 	fieldKind       = "kind"
@@ -503,9 +468,8 @@ const (
 	fieldData       = "data"
 )
 
-// secretDocument is the login's Secret as box writes it: the whole data map,
-// because server-side apply would otherwise drop the keys this run did not
-// name.
+// secretDocument is the login's Secret as box writes it: the whole data map, because
+// server-side apply would otherwise drop the keys this run did not name.
 func secretDocument(data map[string]string) map[string]any {
 	encoded := make(map[string]any, len(data))
 	for k, v := range data {
@@ -558,9 +522,8 @@ func oidcAccess(namespace string) []kube.Access {
 	}
 }
 
-// oidcApps is the app list as sorted, de-duplicated names: the rendered
-// configuration has to be identical for the same inputs whatever order the
-// catalog was read in.
+// oidcApps is the app list as sorted, de-duplicated names: the rendering has to be
+// identical for the same inputs whatever order the catalog was read in.
 func oidcApps(apps []string) []string {
 	seen := map[string]bool{}
 	out := make([]string, 0, len(apps))
@@ -576,6 +539,6 @@ func oidcApps(apps []string) []string {
 	return out
 }
 
-// ErrOIDCNotInstalled says a run was asked to render a provider for an app but
-// the login has no material for it yet.
+// ErrOIDCNotInstalled says a run was asked to render a provider but the login has no
+// material for it yet.
 var ErrOIDCNotInstalled = errors.New("the login has no OIDC client yet")

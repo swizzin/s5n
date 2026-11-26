@@ -14,8 +14,8 @@ import (
 	"github.com/swizzin/s5n/internal/platform"
 )
 
-// oidcOptions is init's install for a box whose catalog says qui signs in
-// through the login.
+// oidcOptions is init's install for a box whose catalog says qui signs in through
+// the login.
 func oidcOptions() Options {
 	o := testOptions()
 	o.PathsInNode = true
@@ -24,9 +24,7 @@ func oidcOptions() Options {
 	return o
 }
 
-// lastConfig is the configuration.yml in the ConfigMap's most recent write: a
-// second write appends to the fake's list, and the question is what the cluster
-// is left with.
+// lastConfig is the configuration.yml in the ConfigMap's most recent write.
 func lastConfig(t *testing.T, docs []map[string]any) string {
 	t.Helper()
 	for i := len(docs) - 1; i >= 0; i-- {
@@ -63,8 +61,7 @@ func lastLoginSecretData(t *testing.T, docs []map[string]any) map[string]string 
 	return nil
 }
 
-// allWrites is every document this run wrote, applied or created: the login's
-// Secret is the one object written with Create on a fresh box.
+// allWrites is every document this run wrote, applied or created.
 func allWrites(f *fixture) []map[string]any {
 	return append(append([]map[string]any{}, f.cluster.applied...), f.cluster.created...)
 }
@@ -133,9 +130,8 @@ func deploymentOf(t *testing.T, docs []map[string]any) map[string]any {
 	return podSpec
 }
 
-// lastDeploymentOf is the most recent Deployment among the writes: the first
-// install writes one without the provider, and the write that adds a client
-// writes it again with one.
+// lastDeploymentOf is the most recent Deployment among the writes: the first install
+// writes one without the provider, the write that adds a client one with it.
 func lastDeploymentOf(t *testing.T, docs []map[string]any) map[string]any {
 	t.Helper()
 	for i := len(docs) - 1; i >= 0; i-- {
@@ -190,8 +186,8 @@ func podMounts(t *testing.T, c map[string]any) []map[string]any {
 	return out
 }
 
-// providerMounted reports whether the container mounts the provider's Secret
-// and passes its file as a second --config.
+// providerMounted reports whether the container mounts the provider's Secret and
+// passes its file as a second --config.
 func providerMounted(t *testing.T, c map[string]any) (args, mount bool) {
 	t.Helper()
 	joined := podArgs(t, c)
@@ -208,11 +204,8 @@ func providerMounted(t *testing.T, c map[string]any) (args, mount bool) {
 	return args, mount
 }
 
-// TestApplyWritesTheSigningMaterialOnly: init's login step runs before apply
-// has created the seedbox's namespace, so it writes the provider's signing
-// material into the login's Secret and nothing into the namespace. A first
-// install has no namespace to write a client Secret into, and the step that
-// does have one is the host-CA step (EnsureClients).
+// init's login step runs before apply created the seedbox's namespace, so it writes
+// the signing material into the login's Secret and nothing into the namespace.
 func TestApplyWritesTheSigningMaterialOnly(t *testing.T) {
 	f := newFixture(t)
 	if _, err := f.decision.Apply(context.Background(), oidcOptions()); err != nil {
@@ -235,8 +228,7 @@ func TestApplyWritesTheSigningMaterialOnly(t *testing.T) {
 			t.Fatalf("init wrote a client digest before the client exists: %s", k)
 		}
 	}
-	// Nothing in the seedbox's namespace: that is the bug this shape cannot
-	// have. The login's own Secret is in s5n-system.
+	// Nothing in the seedbox's namespace: that is the bug this shape cannot have.
 	for _, doc := range allWrites(f) {
 		meta, _ := doc["metadata"].(map[string]any)
 		if meta["namespace"] == "seedbox" {
@@ -244,20 +236,17 @@ func TestApplyWritesTheSigningMaterialOnly(t *testing.T) {
 				doc["kind"], meta["name"])
 		}
 	}
-	// And it is not mounted yet: Authelia refuses an identity_providers.oidc
-	// block with no clients ("option 'clients' must have one or more clients
-	// configured"), and a first install has none -- the client Secrets are the
-	// anchor step's write. The signing material waits in the Secret until the
-	// render that names a client turns the provider on.
+	// Not mounted yet either: Authelia refuses an identity_providers.oidc block with
+	// no clients, so the signing material waits until a render names a client.
 	c := podContainer(t, deploymentOf(t, f.cluster.applied))
 	if args, mount := providerMounted(t, c); args || mount {
 		t.Fatalf("the Deployment reads the provider's file before there is a client (args %v, mount %v): Authelia exits on a provider with no clients", podArgs(t, c), mount)
 	}
 }
 
-// TestEnsureClientsWritesTheClientIntoTheNamespace is the step that runs after
-// apply created the namespace: one Secret holding the plaintext the app reads,
-// and the digest in the login's Secret. The two verify against each other.
+// The step that runs after apply created the namespace: one Secret holding the
+// plaintext the app reads, and the digest in the login's Secret, verifying against
+// each other.
 func TestEnsureClientsWritesTheClientIntoTheNamespace(t *testing.T) {
 	f := newFixture(t)
 	if _, err := f.decision.Apply(context.Background(), oidcOptions()); err != nil {
@@ -313,16 +302,15 @@ func TestEnsureClientsWritesTheClientIntoTheNamespace(t *testing.T) {
 	if strings.Contains(config, "BEGIN RSA PRIVATE KEY") {
 		t.Fatal("the configuration carries the signing key: it belongs in the Secret's file")
 	}
-	// And now that a client exists, the Deployment reads the provider's file:
-	// the two writes are one install, and the second one turns the provider on.
+	// Now that a client exists, the Deployment reads the provider's file: the two
+	// writes are one install, and the second turns the provider on.
 	c := podContainer(t, lastDeploymentOf(t, allWrites(f)))
 	if args, mount := providerMounted(t, c); !args || !mount {
 		t.Fatalf("the Deployment does not read the provider's file once a client exists (args %v, mount %v)", podArgs(t, c), mount)
 	}
 }
 
-// TestEnsureClientsDoesNothingWithoutTheNamespace: the first-install state. The
-// write is skipped rather than attempted, because a Secret cannot be written
+// The first-install state: the write is skipped, because a Secret cannot be written
 // into a namespace that is not there and the host-CA step will do it later.
 func TestEnsureClientsDoesNothingWithoutTheNamespace(t *testing.T) {
 	f := newFixture(t)
@@ -339,10 +327,8 @@ func TestEnsureClientsDoesNothingWithoutTheNamespace(t *testing.T) {
 	}
 }
 
-// TestApplyWithNoOIDCAppIsNotAProvider: a box that installed no OIDC client has
-// no identity_providers block, no client Secret, and a Deployment that reads one
-// configuration file. That is what every box did before this existed, and it is
-// still what a box with qui off must be.
+// A box that installed no OIDC client has no identity_providers block, no client
+// Secret, and a Deployment reading one configuration file.
 func TestApplyWithNoOIDCAppIsNotAProvider(t *testing.T) {
 	f := newFixture(t)
 	opts := testOptions()
@@ -371,10 +357,9 @@ func TestApplyWithNoOIDCAppIsNotAProvider(t *testing.T) {
 	}
 }
 
-// TestEnsureRulesRendersTheSameProviderTwice: init writes the signing material
-// and the rule write writes the clients, so the first rule write after an
-// install is real work -- and the second is not. A configuration that changed on
-// every render would roll the login, and drop every session, for nothing.
+// init writes the signing material and the rule write the clients, so the first rule
+// write after an install is real work and the second is not: a render that changed
+// every time would roll the login and drop every session.
 func TestEnsureRulesRendersTheSameProviderTwice(t *testing.T) {
 	f := newFixture(t)
 	opts := oidcOptions()
@@ -413,10 +398,9 @@ func TestEnsureRulesRendersTheSameProviderTwice(t *testing.T) {
 	}
 }
 
-// TestUpgradeAddsTheProviderAndKeepsTheKey: a box installed before the provider
-// existed has a Secret with the encryption key alone. The next init adds the
-// signing material and the client, and never rewrites the key -- rotating it
-// would orphan every row in the SQLite database.
+// A box from before the provider has a Secret with the encryption key alone. The next
+// init adds the signing material and the client and never rewrites the key: rotating
+// it would orphan every row in the database.
 func TestUpgradeAddsTheProviderAndKeepsTheKey(t *testing.T) {
 	f := newFixture(t)
 	const existing = "0123456789abcdef0123456789abcdef"
@@ -447,8 +431,8 @@ func TestUpgradeAddsTheProviderAndKeepsTheKey(t *testing.T) {
 	}
 }
 
-// TestClientSecretIsGeneratedOnce: the app is configured with the plaintext in
-// its Secret, so a second run must read it rather than make a new one.
+// The app is configured with the plaintext in its Secret, so a second run must read
+// it rather than make a new one.
 func TestClientSecretIsGeneratedOnce(t *testing.T) {
 	f := newFixture(t)
 	if _, err := f.decision.Apply(context.Background(), oidcOptions()); err != nil {
@@ -471,8 +455,8 @@ func TestClientSecretIsGeneratedOnce(t *testing.T) {
 	}
 }
 
-// TestTurningTheAppOffRemovesTheClient: the configuration is rendered whole, so
-// a digest left behind would be a client Authelia still answers for.
+// The configuration is rendered whole, so a digest left behind would be a client
+// Authelia still answers for.
 func TestTurningTheAppOffRemovesTheClient(t *testing.T) {
 	f := newFixture(t)
 	if _, err := f.decision.Apply(context.Background(), oidcOptions()); err != nil {
@@ -499,21 +483,17 @@ func TestTurningTheAppOffRemovesTheClient(t *testing.T) {
 			t.Fatalf("the login's Secret still holds %s", k)
 		}
 	}
-	// The signing material stays: it is generate-once, and a box that turns
-	// its app back on must not reissue tokens clients have cached.
+	// The signing material stays: it is generate-once, and a box that turns its app
+	// back on must not reissue cached tokens.
 	if _, ok := lastLoginSecretData(t, allWrites(f))[authelia.OIDCFile]; !ok {
 		t.Fatal("turning the app off removed the signing material: it is generated once and never rotated")
 	}
 }
 
-// TestTurningTheAppOffAtInitDropsTheProvider: the same box installed again by
-// `box init` after its only OIDC app was turned off. Apply renders a
-// configuration with no identity_providers block, and the Deployment it writes
-// must not mount the signing material: Authelia exits on a provider with no
-// clients ("option 'clients' must have one or more clients configured"), so a
-// mount left over from the run before takes the whole box's login down. qui's
-// digest is still in the Secret at that point -- the prune is a later step in
-// the same run -- which is why the mount cannot be decided from the digests.
+// The same box installed again after its only OIDC app was turned off: the
+// configuration has no block, and the Deployment must not mount the signing material,
+// or Authelia exits and takes the whole login down. qui's digest is still in the
+// Secret at that point, so the mount cannot be decided from the digests.
 func TestTurningTheAppOffAtInitDropsTheProvider(t *testing.T) {
 	f := newFixture(t)
 	ctx := context.Background()
@@ -554,12 +534,9 @@ func TestTurningTheAppOffAtInitDropsTheProvider(t *testing.T) {
 	}
 }
 
-// TestPendingHealsADeploymentThatStillMountsTheProvider: the state the old
-// predicate could leave a box in -- the Deployment reads the provider's file,
-// the configuration names no client -- read as "nothing to change" on every
-// run after, because only the ConfigMap was compared. The plan has to see the
-// mount, the write has to drop it, and the run after that has to be quiet
-// again.
+// The state the old predicate could leave: the Deployment reads the provider, the
+// configuration names no client, and only the ConfigMap was compared. The plan must
+// see the mount, the write must drop it, and the run after must be quiet.
 func TestPendingHealsADeploymentThatStillMountsTheProvider(t *testing.T) {
 	f := newFixture(t)
 	ctx := context.Background()
@@ -617,8 +594,7 @@ func TestPendingHealsADeploymentThatStillMountsTheProvider(t *testing.T) {
 	}
 }
 
-// TestPendingCreatesNothing: a run that may not write the login must not create
-// the provider's material either.
+// A run that may not write the login must not create the provider's material either.
 func TestPendingCreatesNothing(t *testing.T) {
 	f := newFixture(t)
 	const existing = "0123456789abcdef0123456789abcdef"
@@ -639,9 +615,8 @@ func TestPendingCreatesNothing(t *testing.T) {
 	}
 }
 
-// TestOIDCClientNeedsTheNamespace: a client id is <namespace>-<app>, so a run
-// with apps and no namespace is refused rather than writing a client called
-// "-qui".
+// A client id is <namespace>-<app>, so a run with apps and no namespace is refused
+// rather than writing a client called "-qui".
 func TestOIDCClientNeedsTheNamespace(t *testing.T) {
 	f := newFixture(t)
 	opts := oidcOptions()
@@ -651,10 +626,8 @@ func TestOIDCClientNeedsTheNamespace(t *testing.T) {
 	}
 }
 
-// TestPendingAgreesWithReconcile: the plan is what a run promises, and the
-// write is what it does. A rendering that differs between the two makes every
-// apply promise a login it then decides not to write -- the idempotent second
-// run stops saying "nothing to change", which is the one thing it must say.
+// The plan is what a run promises and the write is what it does: a rendering that
+// differs between them makes every apply promise a login it then does not write.
 func TestPendingAgreesWithReconcile(t *testing.T) {
 	f := newFixture(t)
 	if _, err := f.decision.Apply(context.Background(), oidcOptions()); err != nil {
@@ -687,14 +660,10 @@ func TestPendingAgreesWithReconcile(t *testing.T) {
 	}
 }
 
-// TestApplyTurnsAnAppOn: a login that already answers for qui, then a bare
-// apply -- no anchor step, no host to serve -- whose values newly enable
-// autobrr. The rendering leaves an app with no digest out, so it is identical
-// to what the cluster holds; only the plan's client read makes this run's
-// Reconcile write it. Without that, apply answers "nothing to change", the
-// login's configuration never names autobrr, and its pod waits on a Secret
-// nobody writes. The write has to leave both clients in the configuration, and
-// the run after it nothing to change.
+// A login that already answers for qui, then a bare apply whose values newly enable
+// autobrr. The rendering leaves an app with no digest out, so only the plan's client
+// read makes this run's Reconcile write it; without that, apply says "nothing to
+// change" and the pod waits on a Secret nobody writes.
 func TestApplyTurnsAnAppOn(t *testing.T) {
 	f := newFixture(t)
 	ctx := context.Background()
@@ -773,10 +742,9 @@ func TestApplyTurnsAnAppOn(t *testing.T) {
 	}
 }
 
-// TestAnInstallPlansTheLoginItWrites: init's apply reads the cluster before the
-// login is installed (it is installed after the confirm), so "no login yet" is
-// work that run is about to do. Every other run keeps the refusal: nothing in
-// it would install one, and a plan that promised it would be a lie.
+// init's apply reads the cluster before the login is installed (it is installed after
+// the confirm), so "no login yet" is work that run is about to do. Every other run
+// keeps the refusal.
 func TestAnInstallPlansTheLoginItWrites(t *testing.T) {
 	f := newFixture(t) // no login in this cluster yet
 	rules := ruleOptions()
@@ -803,12 +771,9 @@ func TestAnInstallPlansTheLoginItWrites(t *testing.T) {
 	}
 }
 
-// TestTwoClientsGetTheirOwnSecretsAndOnePolicy is the second client: the same
-// machinery, one more Secret in the seedbox's namespace and one more digest in
-// the login's, with ids that name their app. The two plaintexts differ because
-// a copy would let either app present the other's credential at the token
-// endpoint, and both clients name the one policy this seedbox has -- a client
-// pointing anywhere else is a token issued to someone the box did not name.
+// The second client: one more Secret in the seedbox's namespace and one more digest in
+// the login's. The plaintexts differ, because a copy would let either app present the
+// other's credential, and both clients name the one policy this seedbox has.
 func TestTwoClientsGetTheirOwnSecretsAndOnePolicy(t *testing.T) {
 	f := newFixture(t)
 	opts := oidcOptions()
@@ -885,11 +850,9 @@ func TestTwoClientsGetTheirOwnSecretsAndOnePolicy(t *testing.T) {
 	}
 }
 
-// TestBothClientsArePlannedOnceAndWrittenOnce is the read and write halves
-// agreeing across two runs of the same inputs -- an apply after a command that
-// changed nothing. Nothing is planned, nothing is written, and neither a
-// secret nor a digest is regenerated: a new digest would change the login's
-// ConfigMap on every apply and roll the login, which drops every session.
+// The read and write halves agreeing across two runs of the same inputs: nothing is
+// planned, nothing written, and no digest regenerated, which would roll the login on
+// every apply.
 func TestBothClientsArePlannedOnceAndWrittenOnce(t *testing.T) {
 	f := newFixture(t)
 	opts := oidcOptions()
@@ -948,9 +911,8 @@ func TestBothClientsArePlannedOnceAndWrittenOnce(t *testing.T) {
 	}
 }
 
-// TestTheClientThatIsOffIsNotRegistered: an app the catalog marks but the box
-// did not install is not a client -- no Secret in its namespace, no digest in
-// the login's, and nothing in the provider that would issue a token for it.
+// An app the catalog marks but the box did not install is not a client: no Secret, no
+// digest, and nothing that would issue a token for it.
 func TestTheClientThatIsOffIsNotRegistered(t *testing.T) {
 	f := newFixture(t)
 	opts := oidcOptions()

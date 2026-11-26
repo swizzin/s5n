@@ -25,8 +25,7 @@ import (
 
 // ---- fakes ------------------------------------------------------------------
 
-// fakeCluster answers the reads the login does and records every write, in
-// order, so a test can assert what was written and that nothing was.
+// fakeCluster answers the reads the login does and records every write, in order.
 type fakeCluster struct {
 	servesPolicy bool
 	namespace    bool
@@ -37,9 +36,8 @@ type fakeCluster struct {
 	applied []map[string]any
 	created []map[string]any
 
-	// status is the sequence of policy status documents the API server
-	// returns: the last one repeats, and each is read by platform.PolicyAccepted
-	// so the tests exercise the shape Envoy Gateway really writes.
+	// status is the sequence of policy status documents the API server returns:
+	// the last one repeats, read by platform.PolicyAccepted.
 	status []map[string]any
 	// deploys is how many Deployment waits happened; awaitErr fails them.
 	deploys  int
@@ -54,8 +52,7 @@ type fakeCluster struct {
 }
 
 // policyStatus is the document Envoy Gateway writes for a SecurityPolicy: the
-// acceptance lives under status.ancestors, one entry per target and controller,
-// and the policy itself has no status.conditions at all.
+// acceptance lives under status.ancestors, and the policy has no status.conditions.
 func policyStatus(accepted bool, reason, message string) map[string]any {
 	cond := map[string]any{"type": "Accepted", "status": "False"}
 	if accepted {
@@ -251,8 +248,8 @@ func newFixture(t *testing.T) *fixture {
 		Open:    func() (Cluster, error) { return f.cluster, nil },
 		Storage: func() (release.StorageClient, error) { return f.storage, nil },
 		Host:    f.host,
-		// A millisecond budget and poll: the policy test is about what box
-		// does with the answers, not about how long it waits.
+		// A millisecond budget and poll: this test is about what box does with the
+		// answers, not about how long it waits.
 		PolicyTimeout: 5 * time.Millisecond,
 		Poll:          time.Millisecond,
 	}
@@ -267,8 +264,8 @@ func testOptions() Options {
 		NewPassword: true,
 		Image:       "authelia/authelia:4.39.28@sha256:" + strings.Repeat("a", 64),
 		Values:      testValues,
-		// The chart's catalog marks Plex as signing its own users in, so the
-		// fixture says so too: its whole path bypasses the login.
+		// The catalog marks Plex as signing its own users in, so its whole path
+		// bypasses the login.
 		OwnLogin: []string{"plex"},
 	}
 }
@@ -291,9 +288,9 @@ func find(t *testing.T, docs []map[string]any, kind, ns, name string) map[string
 
 // ---- the objects ------------------------------------------------------------
 
-// TestApplyWritesTheLogin is the object contract: one ConfigMap, the Service,
-// the Deployment, the ReferenceGrant and the SecurityPolicy, with the wiring
-// that makes the login actually enforce anything.
+// The object contract: one ConfigMap, the Service, the Deployment, the
+// ReferenceGrant and the SecurityPolicy, with the wiring that makes the login
+// enforce anything.
 func TestApplyWritesTheLogin(t *testing.T) {
 	f := newFixture(t)
 	opts := testOptions()
@@ -306,8 +303,8 @@ func TestApplyWritesTheLogin(t *testing.T) {
 		t.Fatalf("result = %+v", res)
 	}
 
-	// The ConfigMap holds the configuration, and it is the configuration the
-	// Deployment's hash names: that pair is what rolls the pod.
+	// The ConfigMap holds the configuration the Deployment's hash names: that pair
+	// is what rolls the pod.
 	cm := find(t, f.cluster.applied, "ConfigMap", Namespace, authelia.ConfigMapName)
 	data, _, _ := unstructured.NestedStringMap(cm, "data")
 	configuration := data[authelia.ConfigFile]
@@ -322,8 +319,8 @@ func TestApplyWritesTheLogin(t *testing.T) {
 		t.Errorf("pod annotation %q is not the configuration's hash: a config change would not roll the pod", got)
 	}
 
-	// One replica, Recreate: two pods would answer one cookie from two
-	// in-memory session stores.
+	// One replica, Recreate: two pods would answer one cookie from two in-memory
+	// session stores.
 	if n, _, _ := unstructured.NestedFloat64(deploy, "spec", "replicas"); n != 1 {
 		t.Errorf("replicas = %v", n)
 	}
@@ -331,8 +328,8 @@ func TestApplyWritesTheLogin(t *testing.T) {
 		t.Errorf("strategy = %q", strategy)
 	}
 
-	// The policy: the Gateway itself, the ext-authz endpoint, the cookie
-	// header (without it every request looks anonymous) and fail-closed.
+	// The policy: the Gateway itself, the ext-authz endpoint, the cookie header
+	// (without it every request looks anonymous) and fail-closed.
 	policy := find(t, f.cluster.applied, "SecurityPolicy", platform.GatewayNamespace, authelia.PolicyName)
 	if on, _, _ := unstructured.NestedBool(policy, "spec", "extAuth", "failOpen"); on {
 		t.Error("failOpen is true: an unreachable login would serve the apps")
@@ -348,9 +345,9 @@ func TestApplyWritesTheLogin(t *testing.T) {
 	if _, ok := ref["sectionName"]; ok {
 		t.Error("the policy pins a sectionName: it must cover every listener")
 	}
-	// headersToExtAuth is a field of extAuth, beside http -- not of http. The
-	// API server is strict about it (an unknown field is refused), and a test
-	// that read it from the wrong place would pass while every install failed.
+	// headersToExtAuth is a field of extAuth, beside http -- not of http. The API
+	// server refuses an unknown field, so reading it from the wrong place would pass
+	// while every install failed.
 	headers, _, _ := unstructured.NestedStringSlice(policy, "spec", "extAuth", "headersToExtAuth")
 	if !contains(headers, "cookie") {
 		t.Errorf("spec.extAuth.headersToExtAuth = %v: without cookie every request is anonymous", headers)
@@ -359,15 +356,13 @@ func TestApplyWritesTheLogin(t *testing.T) {
 		t.Errorf("spec.extAuth.headersToExtAuth = %v: Authelia would see every object as http and refuse it", headers)
 	}
 	// Accept decides 302-to-the-portal versus a bare 401 (Authelia's
-	// getAuthzRedirectStatusCode), and it is not among Envoy's ext_authz
-	// defaults: without it a browser never reaches the login page.
+	// getAuthzRedirectStatusCode) and is not one of Envoy's defaults: without it a
+	// browser never reaches the login page.
 	if !contains(headers, "accept") {
 		t.Errorf("spec.extAuth.headersToExtAuth = %v: Authelia answers 401 instead of redirecting to the portal", headers)
 	}
-	// X-Requested-With is the other half of the same rule (IsXHR): a page's own
-	// call gets the 401 even when its Accept would read as a navigation. It is
-	// not one of Envoy's defaults either, so a policy that does not name it
-	// hands Authelia a request that looks like a browser navigating.
+	// X-Requested-With is the other half (IsXHR): a page's own call gets the 401 even
+	// when its Accept reads as a navigation. Not an Envoy default either.
 	if !contains(headers, "x-requested-with") {
 		t.Errorf("spec.extAuth.headersToExtAuth = %v: a request that marks itself as an XHR is answered as a navigation", headers)
 	}
@@ -386,8 +381,8 @@ func TestApplyWritesTheLogin(t *testing.T) {
 		t.Errorf("backendRef = %v", backend)
 	}
 
-	// The ReferenceGrant: the cross-namespace reference Gateway API requires,
-	// written for correctness even though EG 1.9.3 does not ask for it.
+	// The ReferenceGrant: the cross-namespace reference Gateway API requires, even
+	// though EG 1.9.3 does not ask for it.
 	grant := find(t, f.cluster.applied, "ReferenceGrant", Namespace, authelia.ReferenceGrantName)
 	from, _, _ := unstructured.NestedSlice(grant, "spec", "from")
 	entry, _ := from[0].(map[string]any)
@@ -395,9 +390,8 @@ func TestApplyWritesTheLogin(t *testing.T) {
 		t.Errorf("ReferenceGrant from = %v", entry)
 	}
 
-	// The portal route: /auth on the host's own name, forwarding to the Service
-	// the policy calls. Without it Authelia's 302 lands on a 404 and the login
-	// is unreachable -- the one object the flow cannot do without.
+	// The portal route: /auth on the host's own name. Without it Authelia's 302
+	// lands on a 404 and the login is unreachable.
 	route := find(t, f.cluster.applied, "HTTPRoute", Namespace, authelia.RouteName)
 	if hosts, _, _ := unstructured.NestedStringSlice(route, "spec", "hostnames"); len(hosts) != 1 || hosts[0] != "box.example.com" {
 		t.Errorf("portal route hostnames = %v, want the host's own name", hosts)
@@ -432,8 +426,8 @@ func TestApplyWritesTheLogin(t *testing.T) {
 		t.Errorf("Service port = %v", port["port"])
 	}
 
-	// The container is what Pod Security restricted admits, and it can read
-	// its own claim because box owns that directory.
+	// The container is what Pod Security restricted admits, and it can read its own
+	// claim because box owns that directory.
 	container, _, _ := unstructured.NestedSlice(deploy, "spec", "template", "spec", "containers")
 	c, _ := container[0].(map[string]any)
 	sc, _ := c["securityContext"].(map[string]any)
@@ -454,9 +448,8 @@ func contains(list []string, want string) bool {
 	return false
 }
 
-// TestApplyWritesTheFileBeforeTheDeployment is the ordering Authelia requires:
-// watch:true fails at startup when the file is missing, so the file has to be
-// on the claim before the pod exists.
+// The ordering Authelia requires: watch:true fails at startup when the file is
+// missing, so it has to be on the claim before the pod exists.
 func TestApplyWritesTheFileBeforeTheDeployment(t *testing.T) {
 	f := newFixture(t)
 	res, err := f.decision.Apply(context.Background(), testOptions())
@@ -489,8 +482,8 @@ func TestApplyWritesTheFileBeforeTheDeployment(t *testing.T) {
 	}
 }
 
-// TestApplyKeepsTheEncryptionKey: the Secret is created once and never
-// updated, because rotating it orphans every encrypted row.
+// The Secret is created once and never updated, because rotating it orphans every
+// encrypted row.
 func TestApplyKeepsTheEncryptionKey(t *testing.T) {
 	f := newFixture(t)
 	encKey := strings.Repeat("k", 32)
@@ -517,8 +510,7 @@ func TestApplyKeepsTheEncryptionKey(t *testing.T) {
 	}
 }
 
-// TestApplyCreatesTheSecretOnce proves the other half: a first run makes one
-// 32-byte key, hex-encoded.
+// The other half: a first run makes one 32-byte key, hex-encoded.
 func TestApplyCreatesTheSecretOnce(t *testing.T) {
 	f := newFixture(t)
 	if _, err := f.decision.Apply(context.Background(), testOptions()); err != nil {
@@ -541,8 +533,7 @@ func TestApplyCreatesTheSecretOnce(t *testing.T) {
 	}
 }
 
-// TestApplyKeepsARowItWasNotGivenAPasswordFor: a re-run with no new password
-// leaves the file alone, digest and all.
+// A re-run with no new password leaves the file alone, digest and all.
 func TestApplyKeepsARowItWasNotGivenAPasswordFor(t *testing.T) {
 	f := newFixture(t)
 	digest := "$argon2id$v=19$m=32768,t=1,p=8$eUhVT1dQa082YVk2VUhDMQ$E8QI4jHbUBt3EdsU1NFDu4Bq5jObKNx7nBKSn1EYQxk"
@@ -563,8 +554,8 @@ func TestApplyKeepsARowItWasNotGivenAPasswordFor(t *testing.T) {
 	}
 }
 
-// TestApplyRefusesWithoutAPassword: there is nothing to write, and inventing a
-// digest for a login nobody knows is worse than stopping.
+// There is nothing to write, and inventing a digest for a login nobody knows is
+// worse than stopping.
 func TestApplyRefusesWithoutAPassword(t *testing.T) {
 	f := newFixture(t)
 	opts := testOptions()
@@ -578,8 +569,7 @@ func TestApplyRefusesWithoutAPassword(t *testing.T) {
 	}
 }
 
-// TestApplyRefusesAFileItCannotRead: rewriting an unreadable file would
-// discard the only copy of a digest.
+// Rewriting an unreadable file would discard the only copy of a digest.
 func TestApplyRefusesAFileItCannotRead(t *testing.T) {
 	f := newFixture(t)
 	path := authelia.HostPath + "/" + authelia.UsersDBFile
@@ -592,8 +582,8 @@ func TestApplyRefusesAFileItCannotRead(t *testing.T) {
 	}
 }
 
-// TestApplyRefusesWithoutThePlatform: a cluster with no SecurityPolicy CRD or
-// no s5n-system is one box bootstrap has not finished on.
+// A cluster with no SecurityPolicy CRD or no s5n-system is one bootstrap has not
+// finished on.
 func TestApplyRefusesWithoutThePlatform(t *testing.T) {
 	for name, mutate := range map[string]func(*fakeCluster){
 		"no SecurityPolicy": func(c *fakeCluster) { c.servesPolicy = false },
@@ -613,9 +603,8 @@ func TestApplyRefusesWithoutThePlatform(t *testing.T) {
 	}
 }
 
-// TestApplyRollsBackTheVolumeItCreated: a PV is cluster-scoped and Retain, so
-// one left behind by a run that stopped before any of the login's own objects
-// existed is a volume nothing uses.
+// A PV is cluster-scoped and Retain, so one left behind before any of the login's
+// objects existed is a volume nothing uses.
 func TestApplyRollsBackTheVolumeItCreated(t *testing.T) {
 	f := newFixture(t)
 	f.cluster.failCreate = errors.New("the API server refused the Secret")
@@ -630,9 +619,8 @@ func TestApplyRollsBackTheVolumeItCreated(t *testing.T) {
 	}
 }
 
-// TestApplyKeepsEverythingOnceTheLoginIsWritten: from the first write of the
-// login's objects on, a failure removes nothing. Undoing only the volume would
-// leave the Deployment waiting on a claim that is gone, which hides the cause.
+// From the first write of the login's objects on, a failure removes nothing: a
+// Deployment waiting on a claim that is gone hides the cause.
 func TestApplyKeepsEverythingOnceTheLoginIsWritten(t *testing.T) {
 	for name, set := range map[string]func(*fixture){
 		"apply refused":   func(f *fixture) { f.cluster.failApply = 1 },
@@ -662,8 +650,7 @@ func TestApplyKeepsEverythingOnceTheLoginIsWritten(t *testing.T) {
 	}
 }
 
-// TestApplyStopsWhenTheLoginIsNotReady: the release must not be written behind
-// a login that is not answering.
+// The release must not be written behind a login that is not answering.
 func TestApplyStopsWhenTheLoginIsNotReady(t *testing.T) {
 	f := newFixture(t)
 	f.cluster.awaitErr = errors.New("not ready")
@@ -672,8 +659,8 @@ func TestApplyStopsWhenTheLoginIsNotReady(t *testing.T) {
 	}
 }
 
-// TestApplyPollsATransientPolicyRefusal: Envoy Gateway reports a policy it has
-// not translated yet with a reason; box keeps asking to the deadline.
+// Envoy Gateway reports a policy it has not translated yet with a reason; box keeps
+// asking to the deadline.
 func TestApplyPollsATransientPolicyRefusal(t *testing.T) {
 	f := newFixture(t)
 	f.decision.PolicyTimeout = time.Second
@@ -693,8 +680,7 @@ func TestApplyPollsATransientPolicyRefusal(t *testing.T) {
 	}
 }
 
-// TestApplyReportsThePolicyRefusal: a policy that is never accepted stops the
-// run with Envoy Gateway's own reason in the sentence.
+// A policy that is never accepted stops the run with Envoy Gateway's own reason.
 func TestApplyReportsThePolicyRefusal(t *testing.T) {
 	f := newFixture(t)
 	f.decision.PolicyTimeout = time.Millisecond
@@ -705,8 +691,7 @@ func TestApplyReportsThePolicyRefusal(t *testing.T) {
 	}
 }
 
-// TestApplyIsIdempotent: a second run with the same answers writes the same
-// documents and reports no change to the configuration.
+// A second run with the same answers writes the same documents and reports no change.
 func TestApplyIsIdempotent(t *testing.T) {
 	f := newFixture(t)
 	opts := testOptions()
@@ -726,8 +711,7 @@ func TestApplyIsIdempotent(t *testing.T) {
 	}
 }
 
-// TestApplyRefusesAnUnpinnedImage: box writes the Deployment, so the image is
-// box's pin and a tag alone is not one.
+// box writes the Deployment, so the image is box's pin and a tag alone is not one.
 func TestApplyRefusesAnUnpinnedImage(t *testing.T) {
 	f := newFixture(t)
 	opts := testOptions()
@@ -740,9 +724,8 @@ func TestApplyRefusesAnUnpinnedImage(t *testing.T) {
 	}
 }
 
-// TestApplyValidatesTheLoginName: the name is a row key and a box option, and
-// a name Authelia's file could not express must be refused before anything is
-// written.
+// The name is a row key and a box option: one Authelia's file could not express must
+// be refused before anything is written.
 func TestApplyValidatesTheLoginName(t *testing.T) {
 	f := newFixture(t)
 	opts := testOptions()
@@ -754,9 +737,8 @@ func TestApplyValidatesTheLoginName(t *testing.T) {
 
 // ---- the rules one host needs ------------------------------------------------
 
-// hostedValues is testValues with Seerr on: the app served at a name of its own
-// that an apply adds to a box installed without it. Built fresh each call so a
-// test cannot change what the next one sees.
+// hostedValues is testValues with Seerr on: the app served at a name of its own that
+// an apply adds to a box installed without it.
 func hostedValues() map[string]any {
 	return map[string]any{
 		"apps": map[string]any{
@@ -783,8 +765,8 @@ func ruleOptions() RulesOptions {
 		Image:  "authelia/authelia:4.39.28@sha256:" + strings.Repeat("a", 64),
 		Values: hostedValues(),
 		Hosted: []string{"plex", "seerr"},
-		// The same catalog answer the hosted list comes from: both sign their
-		// own users in, so each name is a bypass.
+		// The same catalog answer the hosted list comes from: both sign their own
+		// users in, so each name is a bypass.
 		OwnLogin: []string{"plex", "seerr"},
 	}
 }
@@ -797,10 +779,9 @@ func configOf(t *testing.T, docs []map[string]any) string {
 	return data[authelia.ConfigFile]
 }
 
-// TestEnsureRulesWritesTheRuleForANewAppHost: a host with its listener and
-// Certificate but no access_control rule answers the login's default deny, so
-// the rule is written -- and the pod rolls, because the running login has read
-// the old file.
+// A host with its listener and Certificate but no rule answers the login's default
+// deny, so the rule is written -- and the pod rolls, because the running login has
+// read the old file.
 func TestEnsureRulesWritesTheRuleForANewAppHost(t *testing.T) {
 	f := newFixture(t)
 	// The box as init installed it, without Seerr.
@@ -829,13 +810,13 @@ func TestEnsureRulesWritesTheRuleForANewAppHost(t *testing.T) {
 	if !strings.Contains(after, "- domain: ['seerr.box.example.com']") {
 		t.Fatalf("the configuration has no rule for the app host:\n%s", after)
 	}
-	// The posture the app had on its path: Seerr signs its own users in, so the
-	// whole name bypasses the login exactly as ^/seerr did.
+	// The posture the app had on its path: Seerr signs its own users in, so the whole
+	// name bypasses the login exactly as ^/seerr did.
 	if !strings.Contains(after, "- domain: ['seerr.box.example.com']\n      policy: 'bypass'") {
 		t.Fatalf("the app host's rule is not a bypass:\n%s", after)
 	}
-	// The rule the box's own name already had is still there: the configuration
-	// is rewritten whole, and a name left out would lose its rule.
+	// The rule the box's own name already had is still there: the configuration is
+	// rewritten whole, and a name left out would lose its rule.
 	if !strings.Contains(after, "user:alice") || !strings.Contains(after, "^/sonarr-4k/api") {
 		t.Fatalf("the rewrite lost the box's own rules:\n%s", after)
 	}
@@ -849,8 +830,8 @@ func TestEnsureRulesWritesTheRuleForANewAppHost(t *testing.T) {
 	}
 }
 
-// keyed is the fixture with a known storage encryption key, so two fixtures in
-// one test render the same configuration: the key is part of it.
+// keyed is the fixture with a known storage encryption key, so two fixtures in one
+// test render the same configuration.
 func keyed(f *fixture, enc string) {
 	f.cluster.objects[key("", "Secret", Namespace, authelia.SecretName)] = map[string]any{
 		"apiVersion": "v1",
@@ -860,9 +841,8 @@ func keyed(f *fixture, enc string) {
 	}
 }
 
-// TestEnsureRulesWritesNothingWhenTheRuleIsThere: the configuration is
-// deterministic, so a run whose rules are already in the cluster is not a write
-// and cannot churn the login's pod.
+// The configuration is deterministic, so a run whose rules are already in the
+// cluster writes nothing and cannot churn the pod.
 func TestEnsureRulesWritesNothingWhenTheRuleIsThere(t *testing.T) {
 	f := newFixture(t)
 	opts := testOptions()
@@ -886,10 +866,9 @@ func TestEnsureRulesWritesNothingWhenTheRuleIsThere(t *testing.T) {
 	}
 }
 
-// TestEnsureRulesRendersWhatInitRenders: init installs the login with its rules
-// and apply adds one host's rule; for the same box the two must write the same
-// file, because both render it from authelia.Rules. Anything else is two
-// spellings of one rule, and the next init would rewrite what apply wrote.
+// init installs the login with its rules and apply adds one host's rule; for the
+// same box the two must write the same file, because both render it from
+// authelia.Rules. Anything else is two spellings of one rule.
 func TestEnsureRulesRendersWhatInitRenders(t *testing.T) {
 	const key = "0123456789abcdef0123456789abcdef"
 
@@ -916,9 +895,7 @@ func TestEnsureRulesRendersWhatInitRenders(t *testing.T) {
 	}
 }
 
-// appSet is a seedbox's values with the apps a plan migrates, switched on or
-// off: the box `box migrate apply` adopts into renders them off, and the apply
-// it hands over to renders them on, because the migration writes the grant.
+// appSet is a seedbox's values with the apps a plan migrates switched on or off.
 func appSet(on bool) map[string]any {
 	arr := func(prefix string) map[string]any {
 		return map[string]any{
@@ -935,13 +912,10 @@ func appSet(on bool) map[string]any {
 	}}
 }
 
-// TestARunThatSwitchedAppsOnWritesTheirRules: an Arr's /api carries its own key,
-// so the login's rules have to let it through to the app, and the only writer of
-// those rules is the login step every apply runs. `box migrate apply` switches
-// its apps on by writing the grant and then hands over to that same apply, so
-// the file it leaves is init's for the app set the migration leaves behind --
-// otherwise each migrated Arr's integrations are answered by the portal instead
-// of by the app.
+// An Arr's /api carries its own key, and the only writer of the rules is the login
+// step every apply runs. `box migrate apply` switches its apps on by writing the
+// grant and hands over to that same apply, so each migrated Arr's integrations are
+// answered by the app, not by the portal.
 func TestARunThatSwitchedAppsOnWritesTheirRules(t *testing.T) {
 	const key = "0123456789abcdef0123456789abcdef"
 	ctx := context.Background()
@@ -989,8 +963,8 @@ func TestARunThatSwitchedAppsOnWritesTheirRules(t *testing.T) {
 		}
 	}
 
-	// And it is the file init writes for that same app set: one renderer, so a
-	// rule cannot be spelled two ways or generated from a stale app list.
+	// And it is the file init writes for that same app set: one renderer, so a rule
+	// cannot be spelled two ways or generated from a stale app list.
 	init := newFixture(t)
 	keyed(init, key)
 	initOpts := testOptions()
@@ -1004,8 +978,8 @@ func TestARunThatSwitchedAppsOnWritesTheirRules(t *testing.T) {
 	}
 }
 
-// TestEnsureRulesWithoutALoginNamesInit: a rule write is not an install, so a
-// box with no login is refused rather than given a second, half-configured one.
+// A rule write is not an install, so a box with no login is refused rather than given
+// a second, half-configured one.
 func TestEnsureRulesWithoutALoginNamesInit(t *testing.T) {
 	f := newFixture(t)
 	_, err := f.decision.EnsureRules(context.Background(), ruleOptions())
@@ -1020,8 +994,8 @@ func TestEnsureRulesWithoutALoginNamesInit(t *testing.T) {
 	}
 }
 
-// TestEnsureRulesRefusesAnUnpinnedImage: the rule write re-applies the login's
-// objects, so the image it names is pinned by digest like every other write.
+// The rule write re-applies the login's objects, so the image it names is pinned by
+// digest like every other write.
 func TestEnsureRulesRefusesAnUnpinnedImage(t *testing.T) {
 	f := newFixture(t)
 	opts := ruleOptions()
@@ -1036,9 +1010,7 @@ func TestEnsureRulesRefusesAnUnpinnedImage(t *testing.T) {
 
 // ---- the login's face -------------------------------------------------------
 
-// lastOf is the newest applied document of a kind and name in the login's
-// namespace: every apply writes the login's ConfigMap again, and a test that
-// applies twice wants the second one rather than the first.
+// lastOf is the newest applied document of a kind and name in the login's namespace.
 func lastOf(t *testing.T, docs []map[string]any, kind, name string) map[string]any {
 	t.Helper()
 	for i := len(docs) - 1; i >= 0; i-- {
@@ -1055,9 +1027,8 @@ func lastOf(t *testing.T, docs []map[string]any, kind, name string) map[string]a
 	return nil
 }
 
-// TestApplyWritesTheMarkAndFavicon: the login page carries box's mark, so the
-// ConfigMap that holds the configuration holds the two files server.asset_path
-// points at -- and the configuration names that path and the mapped theme.
+// The login page carries box's mark: the ConfigMap holds the two files
+// server.asset_path points at, and the configuration names that path and the theme.
 func TestApplyWritesTheMarkAndFavicon(t *testing.T) {
 	f := newFixture(t)
 	opts := testOptions()
@@ -1094,10 +1065,8 @@ func TestApplyWritesTheMarkAndFavicon(t *testing.T) {
 	}
 }
 
-// TestAThemeChangeRewritesTheMark: the theme is a values key, so changing it
-// changes the configuration and the pictures in one write. A second apply that
-// differs only in the theme has to say so, or the login keeps the old face and
-// the pod keeps the old page.
+// The theme is a values key, so changing it changes the configuration and the
+// pictures in one write; a second apply that differs only in the theme must say so.
 func TestAThemeChangeRewritesTheMark(t *testing.T) {
 	f := newFixture(t)
 	opts := testOptions()
@@ -1128,10 +1097,8 @@ func TestAThemeChangeRewritesTheMark(t *testing.T) {
 	}
 }
 
-// TestEnsureRulesCarriesTheMark: a rule write re-applies the login's objects
-// from the same template, so it carries the pictures too -- a box whose theme
-// changed and whose only new work is a host's rule still ends up with the
-// right face.
+// A rule write re-applies the login's objects from the same template, so it carries
+// the pictures too.
 func TestEnsureRulesCarriesTheMark(t *testing.T) {
 	f := newFixture(t)
 	opts := testOptions()
@@ -1162,9 +1129,7 @@ func TestEnsureRulesCarriesTheMark(t *testing.T) {
 
 // ---- the login's own step ---------------------------------------------------
 
-// initRules is what `box init` installed the login with in these tests, as the
-// rule options the read and the write take: the same host, account, document
-// and image, so "nothing differs" means nothing about the login.
+// initRules is what `box init` installed the login with in these tests.
 func initRules(opts Options) RulesOptions {
 	return RulesOptions{
 		Host:     opts.Host,
@@ -1176,10 +1141,9 @@ func initRules(opts Options) RulesOptions {
 	}
 }
 
-// TestPendingWritesNothing: the read an apply makes before its confirm renders
-// the login the values name and compares it with the cluster, and writes
-// neither the ConfigMap nor a roll. A read that wrote would be work done before
-// the operator said yes.
+// The read an apply makes before its confirm renders the login and compares it with
+// the cluster, and writes neither the ConfigMap nor a roll: work before the yes is
+// work nobody asked for.
 func TestPendingWritesNothing(t *testing.T) {
 	f := newFixture(t)
 	opts := testOptions()
@@ -1217,10 +1181,8 @@ func TestPendingWritesNothing(t *testing.T) {
 	}
 }
 
-// TestReconcileWritesThePageOnce: the write half of the same read. A theme
-// change re-renders the configuration and the mark in one apply, rolls the pod
-// through the configuration's hash, and the second run is empty -- which is what
-// keeps an apply with no change from churning the login.
+// The write half of the same read: a theme change re-renders the configuration and
+// the mark in one apply, rolls the pod through the hash, and the second run is empty.
 func TestReconcileWritesThePageOnce(t *testing.T) {
 	f := newFixture(t)
 	opts := testOptions()
@@ -1257,8 +1219,8 @@ func TestReconcileWritesThePageOnce(t *testing.T) {
 	if beforeBinary[authelia.AssetLogo] == afterBinary[authelia.AssetLogo] {
 		t.Error("the light page's mark is the dark page's: the pictures did not follow the theme")
 	}
-	// The Deployment the write applied carries the new configuration's hash, or
-	// the running login keeps the old page.
+	// The Deployment the write applied carries the new hash, or the running login
+	// keeps the old page.
 	deploy := lastOf(t, f.cluster.applied, "Deployment", authelia.ServiceName)
 	annotations, _, _ := unstructured.NestedStringMap(deploy, "spec", "template", "metadata", "annotations")
 	if got := annotations["s5n.io/config-hash"]; got != authelia.ConfigHash([]byte(data[authelia.ConfigFile])) {
@@ -1279,8 +1241,7 @@ func TestReconcileWritesThePageOnce(t *testing.T) {
 	}
 }
 
-// TestReconcileWithoutALoginNamesInit: the login's step is not an install
-// either, so a box with no login is refused by the command that makes one.
+// The login's step is not an install either, so a box with no login is refused.
 func TestReconcileWithoutALoginNamesInit(t *testing.T) {
 	f := newFixture(t)
 	if _, err := f.decision.Reconcile(context.Background(), ruleOptions()); err == nil {
@@ -1293,10 +1254,9 @@ func TestReconcileWithoutALoginNamesInit(t *testing.T) {
 	}
 }
 
-// TestMayWriteIsRoots: the login is one page for the whole host, and only an
-// identity that may apply a ConfigMap in the platform's namespace writes it. A
-// seedbox user's apply is somebody else's configmap, which is why a `theme:` in
-// their values file never reaches the sign-in page.
+// The login is one page for the whole host, and only an identity that may apply a
+// ConfigMap in the platform's namespace writes it: a user's `theme:` never reaches
+// the sign-in page.
 func TestMayWriteIsRoots(t *testing.T) {
 	f := newFixture(t)
 	ok, err := MayWrite(context.Background(), f.cluster)
@@ -1316,9 +1276,8 @@ func TestMayWriteIsRoots(t *testing.T) {
 	}
 }
 
-// The rule write is two rows and nothing else: what it did (kept, written) in
-// the state column, and how many names it is for. The names are the log's,
-// because a list of four host names is plumbing (rules 1, 2 and 5).
+// The rule write is two rows and nothing else: what it did and how many names; the
+// names themselves are the log's.
 func TestEnsureRulesSaysWhatItDidInOneRow(t *testing.T) {
 	f := newFixture(t)
 	opts := testOptions()
