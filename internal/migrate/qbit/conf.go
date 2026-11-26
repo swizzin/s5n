@@ -7,15 +7,10 @@ import (
 )
 
 // conf is qBittorrent.conf kept line by line, so every line this pass does not
-// change is written back exactly as the app wrote it. QSettings owns the file
-// and reads it at startup; a reformatted line (a dropped blank one, a section
-// in another order) is a change migrate did not report.
-//
-// internal/qbtconf has an INI document of its own, but it exists to seed the
-// WebUI section qBittorrent's image leaves empty: it trims blank lines at every
-// section's edges, it cannot read a string list or rewrite one key of a map,
-// and it has no notion of the legacy spellings a conf upgraded in place still
-// carries. Reusing it here would change bytes this pass never reported.
+// change is written back as the app wrote it: QSettings owns the file, and a
+// reformatted line is a change migrate did not report. internal/qbtconf's INI
+// document exists to seed the WebUI section and would change bytes here (it trims
+// blank lines, cannot read a string list, and ignores legacy spellings).
 type conf struct {
 	lines []string
 }
@@ -26,8 +21,7 @@ func parseConf(raw []byte) *conf {
 
 func (c *conf) bytes() []byte { return []byte(strings.Join(c.lines, "\n")) }
 
-// section returns the half-open line range inside one [section]. QSettings
-// writes a key "A/B" as section [A], key "B" with a backslash, and never
+// section is the half-open line range inside one [section]; QSettings never
 // repeats an element, so the first match is the only one.
 func (c *conf) section(name string) (int, int, bool) {
 	for i, line := range c.lines {
@@ -70,8 +64,7 @@ func (c *conf) get(section, key string) (string, bool) {
 	return "", false
 }
 
-// set writes key = value into a section, replacing the key in place, adding it
-// to the section, or adding the section when the file has none.
+// set replaces a key in place, or adds it (or its section) when absent.
 func (c *conf) set(section, key, value string) {
 	start, end, ok := c.section(section)
 	if !ok {
@@ -87,8 +80,7 @@ func (c *conf) set(section, key, value string) {
 			return
 		}
 	}
-	// Insert before the blank lines that close the section, so the section
-	// keeps the shape the app gave it.
+	// Insert before the blank lines closing the section, keeping the app's shape.
 	at := end
 	for at > start && strings.TrimSpace(c.lines[at-1]) == "" {
 		at--
@@ -96,10 +88,8 @@ func (c *conf) set(section, key, value string) {
 	c.lines = append(c.lines[:at], append([]string{key + "=" + value}, c.lines[at:]...)...)
 }
 
-// quote renders a path back the way QSettings would: bare when it is safe,
-// quoted (with its escapes) when it holds whitespace, a quote, a backslash or
-// one of the characters that would otherwise read as list syntax
-// (qBittorrent's qsettings.cpp, iniEscapedString).
+// quote renders a path as QSettings would: bare when safe, quoted and escaped when
+// it holds whitespace or list syntax (qsettings.cpp, iniEscapedString).
 func quote(v string) string {
 	if v != "" && !strings.ContainsAny(v, "\"'\\ \t\n,;=@[]") {
 		return v
@@ -126,8 +116,7 @@ func quote(v string) string {
 	return b.String()
 }
 
-// splitList reads a QSettings string list, which the writer joins with ", "
-// and quotes element by element.
+// splitList reads a QSettings string list, joined with ", " per element.
 func splitList(raw string) []string {
 	if strings.TrimSpace(raw) == "" {
 		return nil

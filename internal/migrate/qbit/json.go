@@ -5,9 +5,8 @@ import (
 	"fmt"
 )
 
-// object is a JSON object kept as raw values, so a field this pass does not
-// change is written back exactly as the app stored it, and a number keeps its
-// own text rather than becoming a float.
+// object is a JSON object kept as raw values: an untouched field is written back
+// as stored, and a number keeps its text rather than becoming a float.
 type object map[string]json.RawMessage
 
 func parseObject(raw []byte) (object, error) {
@@ -54,15 +53,12 @@ func mustJSON(v string) json.RawMessage {
 	return data
 }
 
-// jsonPath rewrites one path-valued field of a JSON object and reports whether
-// it changed. The field is looked up by name: a path is one value among
-// others, and replacing text would also hit a category name or a rule that
-// happens to look like one.
+// jsonPath rewrites one path field by name: replacing text would also hit a
+// category name or a rule that looks like a path.
 func (a *analysis) jsonPath(file, where string, o object, key string) bool {
 	stored, ok := o.str(key)
 	if !ok || stored == "" {
-		// An empty value means "use the default", which follows whatever the
-		// app is given.
+		// Empty means "use the default", which follows the app's own settings.
 		return false
 	}
 	out, covered := a.path(file, where, stored, true)
@@ -73,9 +69,8 @@ func (a *analysis) jsonPath(file, where string, o object, key string) bool {
 	return true
 }
 
-// categories rewrites the save and download path of every category.
-// qBittorrent's categories are what an Arr's download client names, so a
-// category name never changes: only the directories behind it do
+// categories rewrites each category's save and download path. A category name is
+// what an Arr's download client names, so only the directories behind it change
 // (research: qbittorrent.md §Q3.3).
 func (a *analysis) categories() error {
 	raw, mode, ok, err := readJSON(a.lay.categories)
@@ -119,9 +114,8 @@ func (a *analysis) categories() error {
 	return nil
 }
 
-// watchedFolders rewrites the watched folder paths, which are the JSON keys
-// themselves, and the save and download path of the torrent parameters each
-// one carries (torrentfileswatcher.cpp:64-67,71-84,196-206).
+// watchedFolders rewrites the folder paths, which are the JSON keys, and each
+// one's torrent parameters (torrentfileswatcher.cpp:64-67,71-84,196-206).
 func (a *analysis) watchedFolders() error {
 	raw, mode, ok, err := readJSON(a.lay.watched)
 	if err != nil || !ok {
@@ -139,9 +133,8 @@ func (a *analysis) watchedFolders() error {
 			return err
 		}
 		if _, taken := out[key]; taken && key != folder {
-			// Two watched folders landing on one directory would silently drop
-			// one of them; the plan maps directories, so this only happens when
-			// it maps two to the same place.
+			// Two folders on one directory would silently drop one, which only
+			// a plan mapping two to the same place does.
 			return fmt.Errorf("%s: watched folders %q and another both rewrite to %s", watchedRel, folder, key)
 		}
 		out[key] = blob
@@ -195,9 +188,8 @@ func (a *analysis) watchedFolder(folder string, value json.RawMessage) (string, 
 	return key, blob, true, nil
 }
 
-// downloadRules rewrites the RSS download rules' paths. A rule keeps its name;
-// its save path sits both at the top (the deprecated spelling) and inside the
-// torrent parameters it hands to the client
+// downloadRules rewrites the RSS rules' paths: a rule keeps its name, and its save
+// path sits both at the top (deprecated) and in the torrent parameters
 // (rss_autodownloadrule.cpp:117-120,470-486,575-593).
 func (a *analysis) downloadRules() error {
 	raw, mode, ok, err := readJSON(a.lay.rules)
@@ -231,8 +223,7 @@ func (a *analysis) downloadRules() error {
 	return nil
 }
 
-// downloadRule rewrites one rule's paths, at the rule's top level and inside
-// its torrent parameters.
+// downloadRule rewrites one rule's paths, top level and torrent parameters.
 func (a *analysis) downloadRule(name string, value json.RawMessage) (json.RawMessage, bool, error) {
 	rule, err := parseObject(value)
 	if err != nil {

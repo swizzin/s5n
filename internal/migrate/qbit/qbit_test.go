@@ -18,10 +18,8 @@ import (
 	"github.com/swizzin/s5n/internal/qbtconf"
 )
 
-// qbitPlan is the plan a discovery run would write for this source: qBittorrent
-// saw its downloads at /downloads and its own config at /config, and one
-// save path had a space in it. The identity rules are what discovery writes on
-// a second run, when the tree already sits where box wants it.
+// qbitPlan is what discovery writes for this source: downloads at /downloads and
+// one save path with a space. The identity rules are a second run's.
 const qbitPlan = `version: 2
 apps:
   qbittorrent:
@@ -128,9 +126,8 @@ func newDB(t *testing.T, path string, statements ...string) {
 	}
 }
 
-// source builds a config directory the way a stopped qBittorrent 5.3.0 leaves
-// one: the conf, the JSON files, a Legacy resume store and an SQLite one (a
-// source that converted and kept both).
+// source is what a stopped qBittorrent 5.3.0 leaves: conf, JSON files, and both
+// resume stores (a source that converted and kept both).
 func source(t *testing.T) string {
 	t.Helper()
 	dir := t.TempDir()
@@ -152,15 +149,14 @@ func source(t *testing.T) string {
 		`CREATE TABLE torrents (id INTEGER PRIMARY KEY, target_save_path TEXT, download_path TEXT, libtorrent_resume_data BLOB NOT NULL)`,
 		fmt.Sprintf(`INSERT INTO torrents (id, target_save_path, download_path, libtorrent_resume_data)
 			VALUES (1, '/downloads/tv', '/downloads/tv/.tmp', X'%x')`, blob),
-		// A torrent in portable mode stores a relative path, which follows the
-		// app and needs no rule.
+		// A portable-mode torrent stores a relative path: no rule needed.
 		fmt.Sprintf(`INSERT INTO torrents (id, target_save_path, download_path, libtorrent_resume_data)
 			VALUES (2, 'downloads/Movies', '', X'%x')`, resumeBlob("downloads/Movies")),
 	)
 	return dir
 }
 
-// snapshot is every file under dir, so a test can prove a pass wrote nothing.
+// snapshot is every file under dir, so a test proves a pass wrote nothing.
 func snapshot(t *testing.T, root string) map[string][]byte {
 	t.Helper()
 	out := make(map[string][]byte)
@@ -231,8 +227,7 @@ func TestRewritesEveryPath(t *testing.T) {
 
 	assertQbitFiles(t, dir)
 
-	// The next run has nothing to do: every store, file and column already
-	// holds what the plan says.
+	// The next run has nothing to do: everything already holds the plan's answer.
 	rep2, err := (rewriter{}).Check(context.Background(), in)
 	if err != nil {
 		t.Fatalf("second Check: %v", err)
@@ -242,7 +237,7 @@ func TestRewritesEveryPath(t *testing.T) {
 	}
 }
 
-// readRows reads the three resume columns, keeping the blob as bytes.
+// readRows reads the three resume columns, the blob as bytes.
 func readRows(t *testing.T, path string) [][3]any {
 	t.Helper()
 	db, err := sqlitedb.OpenReadOnly(context.Background(), path)
@@ -270,8 +265,7 @@ func readRows(t *testing.T, path string) [][3]any {
 	return out
 }
 
-// assertQbitFiles checks the conf, the three JSON files and both resume
-// stores after a write.
+// assertQbitFiles checks the conf, JSON files and both resume stores.
 func assertQbitFiles(t *testing.T, dir string) {
 	t.Helper()
 	conf := readFile(t, filepath.Join(dir, confRel))
@@ -287,7 +281,7 @@ func assertQbitFiles(t *testing.T, dir string) {
 		`Port=8080`,
 		`SavePathHistory=/data/downloads, "/data/My Downloads"`,
 		`LastDir=@Invalid()`,
-		// A key with no rule behind it and no effect on a download stays.
+		// A cosmetic key with no rule behind it stays.
 		`General\CustomUIThemePath=/mnt/theme`,
 	} {
 		if !strings.Contains(conf, want) {
@@ -483,8 +477,7 @@ func TestLegacyMapWithoutItsJSONFileRefused(t *testing.T) {
 }
 
 func TestConfRoundTripsWhatItDoesNotChange(t *testing.T) {
-	// A conf with a comment, an unusual blank line and an empty value: none of
-	// them may move.
+	// A comment, an unusual blank line and an empty value: none may move.
 	raw := "[BitTorrent]\nSession\\DefaultSavePath=/downloads/tv\n\n; a comment\n\n[WebUI]\nPort=8080\n\n"
 	dir := t.TempDir()
 	writeFile(t, filepath.Join(dir, dirRel, "qBittorrent.conf"), raw)
@@ -522,9 +515,8 @@ func TestSplitAndJoinList(t *testing.T) {
 	}
 }
 
-// TestEveryPathKeyIsRewritten builds a conf holding every key the table names
-// and proves each one is rewritten: the table is what decides what a migrated
-// conf still points at the source's filesystem.
+// TestEveryPathKeyIsRewritten proves every key the table names is rewritten: the
+// table decides what a migrated conf still points at.
 func TestEveryPathKeyIsRewritten(t *testing.T) {
 	doc := &conf{}
 	var wanted []confKey
@@ -577,11 +569,9 @@ func TestEveryPathKeyIsRewritten(t *testing.T) {
 	}
 }
 
-// TestRehearsalStopsEveryTorrentAndWritesTheTwoSettings is the one app-specific
-// part of a rehearsal: a copy of a live qBittorrent must come up quiet. Every
-// torrent in both resume stores is marked paused=1/auto_managed=0, and the conf
-// makes anything pushed later land stopped and RSS grab nothing. Check counts
-// the torrents without writing; Write makes the count true.
+// TestRehearsalStopsEveryTorrentAndWritesTheTwoSettings: a copy of a live
+// qBittorrent must come up quiet, so every torrent is paused and anything pushed
+// later lands stopped; Check counts without writing, Write makes it true.
 func TestRehearsalStopsEveryTorrentAndWritesTheTwoSettings(t *testing.T) {
 	dir := source(t)
 	in := testInput(t, dir)
@@ -618,8 +608,7 @@ func TestRehearsalStopsEveryTorrentAndWritesTheTwoSettings(t *testing.T) {
 			t.Errorf("the rehearsal conf has no %q:\n%s", want, conf)
 		}
 	}
-	// The path rewrites still happened: stopping a torrent does not mean
-	// leaving it pointing at a tree this box does not have.
+	// Stopping a torrent still leaves its paths rewritten.
 	if !strings.Contains(conf, `Session\DefaultSavePath="/data/My Downloads"`) {
 		t.Errorf("the rehearsal conf did not rewrite the save path:\n%s", conf)
 	}
@@ -664,9 +653,8 @@ func TestRehearsalStopsEveryTorrentAndWritesTheTwoSettings(t *testing.T) {
 	}
 }
 
-// TestWithoutRehearsalTorrentsKeepTheirState: the lock is the snapshot's mode,
-// not qBittorrent's normal migration. A final run rewrites paths and leaves a
-// seeding torrent seeding.
+// TestWithoutRehearsalTorrentsKeepTheirState: a final run rewrites paths and
+// leaves a seeding torrent seeding; the lock is the snapshot's mode.
 func TestWithoutRehearsalTorrentsKeepTheirState(t *testing.T) {
 	dir := source(t)
 	in := testInput(t, dir)
@@ -696,13 +684,9 @@ func TestWithoutRehearsalTorrentsKeepTheirState(t *testing.T) {
 	}
 }
 
-// TorrentPort is the port the source's qBittorrent announced to peers: a
-// migrated box keeps it when the cluster can use it, because trackers and any
-// port forward the operator set already point at that number. qBittorrent 5
-// keeps it in [BitTorrent] Session\Port; an install that upgraded in place, or
-// whose conf qBittorrent 4 wrote, carries [Preferences]
-// Connection\PortRangeMin instead, and the live key is the one the app reads
-// when both are there (5.3.0's own default file carries the old key as well).
+// TorrentPort keeps the port the source announced: trackers and a forward already
+// point at it. Session\Port is live when both spellings exist, the older
+// Connection\PortRangeMin otherwise (5.3.0's default file carries both).
 func TestTorrentPortReadsTheSourcesListenPort(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -755,9 +739,8 @@ func TestTorrentPortReadsTheSourcesListenPort(t *testing.T) {
 	}
 }
 
-// A config in the layout migrate refuses says nothing about a port either: the
-// rewriter stops the run before any of this is written, and a port read out of
-// a directory shape box does not produce would be a guess.
+// A refused layout says nothing about a port either: a number read out of a
+// shape box does not produce would be a guess.
 func TestTorrentPortNothingInTheOlderLayout(t *testing.T) {
 	dir := t.TempDir()
 	writeFile(t, filepath.Join(dir, "config", "qBittorrent.conf"), "[BitTorrent]\nSession\\Port=51413\n")

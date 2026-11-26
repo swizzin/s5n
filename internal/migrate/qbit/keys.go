@@ -1,7 +1,7 @@
 package qbit
 
-// The sections a migrated conf's path keys live in, and the two field names
-// the JSON files and the resume store share.
+// The sections path keys live in, and the two field names JSON and the resume
+// store share.
 const (
 	sectionBitTorrent  = "BitTorrent"
 	sectionPreferences = "Preferences"
@@ -10,10 +10,8 @@ const (
 	keySavePath        = "save_path"
 	keyDownloadPath    = "download_path"
 
-	// keySessionPort is where qBittorrent 5 keeps the port it announces to
-	// peers, and keyLegacyPortRangeMin the spelling every version keeps (and
-	// 5.3.0's own default file still carries) for the same setting: the session
-	// key is the live one when a conf has both.
+	// keySessionPort is qBittorrent 5's peer port; keyLegacyPortRangeMin is the
+	// spelling every version keeps for it, and the session key wins when both exist.
 	keySessionPort        = `Session\Port`
 	keyLegacyPortRangeMin = `Connection\PortRangeMin`
 )
@@ -26,29 +24,24 @@ const (
 	scalarPath valueKind = iota
 	// pathList is a QSettings string list of absolute paths.
 	pathList
-	// legacyMap is a QVariant map, which QSettings writes as a binary
-	// @Variant(…) blob; this tool does not decode it.
+	// legacyMap is a binary @Variant(…) blob this tool does not decode.
 	legacyMap
 )
 
-// confKey is one key qBittorrent.conf stores an absolute path in, as the
-// section and key QSettings writes: a settings key "A/B/C" is section [A],
-// key "B\C".
+// confKey is one key conf stores an absolute path in: "A/B/C" is section [A], key
+// "B\C".
 type confKey struct {
 	section string
 	name    string
 	kind    valueKind
-	// live marks a key the app reads back to act on a file. A path no rule
-	// covers there stops the migration. A GUI-history key only fills a dialog,
-	// so a path no rule covers is left alone and never reported: it is the
-	// same judgement as a History row in an Arr.
+	// live marks a key the app acts on, where an uncovered path stops the
+	// migration; a GUI-history key only fills a dialog, so it is left alone.
 	live bool
 }
 
 // confKeys is every path-valued key in qBittorrent 5.3.0 (research:
-// qbittorrent.md §Q3.2). The torrenting port is deliberately absent: the
-// chart sets it from the environment, and a rewritten value here would only
-// fight it.
+// qbittorrent.md §Q3.2). The torrenting port is absent: the chart sets it from the
+// environment.
 var confKeys = []confKey{
 	// The data contract: where torrents and their partial files go.
 	{sectionBitTorrent, `Session\DefaultSavePath`, scalarPath, true},                // sessionimpl.cpp:610
@@ -64,9 +57,8 @@ var confKeys = []confKey{
 	{"AutoRun", `OnTorrentAdded\Program`, scalarPath, true},                         // preferences.cpp:1258
 	{"AutoRun", "program", scalarPath, true},                                        // preferences.cpp:1284
 
-	// A conf upgraded through older versions can still carry these; the app
-	// renames them at startup, and rewriting them is what makes that rename
-	// carry the box's paths (upgrade.cpp:302,307,318,340).
+	// An upgraded conf can still carry these; rewriting them makes the app's
+	// startup rename carry the box's paths (upgrade.cpp:302,307,318,340).
 	{sectionPreferences, `Downloads\SavePath`, scalarPath, true},
 	{sectionPreferences, `Downloads\TempPath`, scalarPath, true},
 	{sectionPreferences, `IPFilter\File`, scalarPath, true},
@@ -74,8 +66,7 @@ var confKeys = []confKey{
 	{sectionPreferences, `Downloads\FinishedTorrentExportDirectory`, scalarPath, true},
 	{sectionPreferences, `Downloads\TorrentExportDirectory`, scalarPath, true},
 
-	// GUI history: the last directory a dialog opened in, and the list of
-	// save paths it offers. Cosmetic, so never reported uncovered.
+	// GUI history, cosmetic: never reported uncovered.
 	{sectionPreferences, `General\CustomUIThemePath`, scalarPath, false},  // preferences.cpp:124
 	{sectionPreferences, `Downloads\ScanDirsLastPath`, scalarPath, false}, // preferences.cpp:519
 	{"MainWindow", "LastDir", scalarPath, false},                          // preferences.cpp:1698
@@ -83,25 +74,23 @@ var confKeys = []confKey{
 	{"AddNewTorrentDialog", "SavePathHistory", pathList, false},           // addnewtorrentdialog.cpp:79
 	{"AddNewTorrentDialog", "DownloadPathHistory", pathList, false},       // addnewtorrentdialog.cpp:80
 
-	// The two maps qBittorrent 5 converts on its first start: categories into
-	// categories.json (sessionimpl.cpp:5889-5901) and watched folders into
-	// watched_folders.json (torrentfileswatcher.cpp:207,239). Both are read only
-	// when the JSON file beside them is missing, so they are live when it is.
+	// The two maps qBittorrent 5 converts on first start (sessionimpl.cpp:5889-5901,
+	// torrentfileswatcher.cpp:207,239), read only when the JSON beside them is
+	// missing, so live when it is.
 	{sectionBitTorrent, `Session\Categories`, legacyMap, true},
 	{sectionPreferences, `Downloads\ScanDirsV2`, legacyMap, true},
 }
 
-// categoriesKey and watchedKey are the two legacy maps above, named for the
-// code that decides whether a JSON file supersedes them.
+// categoriesKey and watchedKey are the two legacy maps, named for the code
+// deciding whether a JSON file supersedes them.
 const (
 	categoriesKey = `Session\Categories`
 	watchedKey    = `Downloads\ScanDirsV2`
 )
 
-// rehearsalConfKeys are the two settings a rehearsal writes, in the section and
-// key QSettings gives them: a settings key "A/B/C" is section [A], key "B\C".
-// AddTorrentStopped makes everything autobrr and the Arrs push land stopped;
-// EnableProcessing is RSS's own switch, which no other key implies.
+// rehearsalConfKeys are the two settings a rehearsal writes: AddTorrentStopped
+// lands everything autobrr and the Arrs push stopped, and EnableProcessing is
+// RSS's own switch, which no other key implies.
 var rehearsalConfKeys = []struct {
 	section, key, value string
 }{
