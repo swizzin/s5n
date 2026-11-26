@@ -1,20 +1,13 @@
 package seedbox
 
-// pending_test.go is the values a chart would render for a host whose grant is
-// not written yet: the chart's defaults with the user's values over them, and no
-// grant at all. A migration shows its one question before it installs the box
-// that writes a grant, and the summary it shows has to read the values the run
-// after the install will.
-
 import (
 	"os"
 	"path/filepath"
 	"testing"
 )
 
-// TestPendingIsTheChartWithTheUsersValues: the user's own keys win over the
-// chart's, every app stays off because no grant switched one on, and nothing of
-// a grant is in the document.
+// The user's own keys win over the chart's, every app stays off because no grant
+// switched one on, and nothing of a grant is in the document.
 func TestPendingIsTheChartWithTheUsersValues(t *testing.T) {
 	dir := t.TempDir()
 	values := filepath.Join(dir, "values.yaml")
@@ -36,9 +29,9 @@ func TestPendingIsTheChartWithTheUsersValues(t *testing.T) {
 			t.Errorf("apps.%s is enabled, and no grant has switched anything on", name)
 		}
 	}
-	// The grant's own keys are box's record, and none of them exist yet: the
-	// chart's defaults carry `storage` and `rehearsal` as shapes, but the paths,
-	// the claim names, the namespace and the lock are all the grant's.
+	// The grant's keys are box's record and none exist yet: the chart carries
+	// `storage` and `rehearsal` as shapes, but the paths, claim names, namespace
+	// and lock are the grant's.
 	if _, ok := got["namespace"]; ok {
 		t.Error("the pending values carry a namespace, which is a grant key")
 	}
@@ -59,10 +52,8 @@ func TestPendingIsTheChartWithTheUsersValues(t *testing.T) {
 	}
 }
 
-// TestPendingIsNotCheckedAgainstTheSchema: a preview must not refuse a box the
-// install would have made. The chart's schema requires auth.edge, which box
-// writes rather than either file, so validating the pending document would
-// refuse every host before it had a chance to be installed.
+// A preview must not refuse a box the install would have made: the schema requires
+// auth.edge, which box writes rather than either file.
 func TestPendingIsNotCheckedAgainstTheSchema(t *testing.T) {
 	dir := t.TempDir()
 	values := filepath.Join(dir, "values.yaml")
@@ -71,14 +62,12 @@ func TestPendingIsNotCheckedAgainstTheSchema(t *testing.T) {
 	}
 }
 
-// TestPendingLeavesAGrantKeyInValuesToTheLoadThatRefusesIt: a values file naming
-// a key root decides is refused when the box reads its two files, and the
-// preview does not carry that key into the values a release would render.
+// A values file naming a key root decides is refused when the box reads its two
+// files, and the preview does not carry it either.
 func TestPendingIgnoresBoxOnlyKeysInValues(t *testing.T) {
 	dir := t.TempDir()
 	values := filepath.Join(dir, "values.yaml")
-	// storage.data.path is box's record of where the data is; a values file that
-	// names it is refused by the merge, and it must not shape a preview either.
+	// storage.data.path is box's record of where the data is.
 	if err := os.WriteFile(values, []byte("storage:\n  data:\n    path: /srv/elsewhere\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}

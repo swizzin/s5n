@@ -31,9 +31,8 @@ func TestMergeGrantWins(t *testing.T) {
 	}
 }
 
-// TestOverlayPrecedence proves the rule itself, without the conflict check in
-// front of it: whatever the user's document holds, the grant's value is what
-// comes out, and a list is replaced whole rather than merged entry by entry.
+// The rule itself, without the conflict check in front of it: whatever the user's
+// document holds, the grant's value comes out, and a list is replaced whole.
 func TestOverlayPrecedence(t *testing.T) {
 	values := map[string]any{
 		"gateway": map[string]any{"host": "values.example.com"},
@@ -201,9 +200,8 @@ func TestMergeDoesNotMutateDocuments(t *testing.T) {
 	}
 }
 
-// TestMergeRefusesAuthEdgeInValues: auth.edge is box's, like a claim name. A
-// user's file may not turn the login off -- or on: setting it at all is a grant
-// key in values, and the error names the key and the line.
+// auth.edge is box's, like a claim name: setting it at all is a grant key in
+// values, and the error names the key and the line.
 func TestMergeRefusesAuthEdgeInValues(t *testing.T) {
 	for _, edge := range []string{"false", "true"} {
 		t.Run(edge, func(t *testing.T) {
@@ -222,9 +220,8 @@ func TestMergeRefusesAuthEdgeInValues(t *testing.T) {
 	}
 }
 
-// TestMergeRefusesAuthEdgeInGrant: root's grant may not carry it either. box
-// writes the constant itself, so the grant refusal says so rather than claiming
-// it is derived from the grant.
+// Root's grant may not carry it either: box writes the constant itself, and the
+// refusal says so rather than claiming it is derived.
 func TestMergeRefusesAuthEdgeInGrant(t *testing.T) {
 	grant := writeTemp(t, "grant.yaml", "namespace: alice\ngateway:\n  host: alice.example.com\nauth:\n  edge: true\n")
 	s, err := Load(grant, "")

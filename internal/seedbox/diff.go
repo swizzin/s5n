@@ -25,10 +25,9 @@ type Change struct {
 	New  any
 }
 
-// Diff compares two effective values documents. It is what `box apply` shows
-// before it applies anything: the differences, by key path, in the same words as
-// the file. Lists are compared entry by entry, and an entry that appears or
-// disappears is reported at its index.
+// Diff compares two effective values documents: what `box apply` shows before it
+// applies anything. Lists are compared entry by entry, and an entry that appears
+// or disappears is reported at its index.
 func Diff(before, after map[string]any) []Change {
 	var out []Change
 	diffMaps("", before, after, &out)
@@ -122,11 +121,9 @@ func whole(path string, v any, kind Kind) Change {
 
 // FormatChanges renders a diff as the lines of a confirmation prompt.
 //
-// A change under secrets. is named, never shown: the prompt is read on screen
-// and kept in the run log, and every value there is a credential -- an Arr API
-// key, a Plex token, a generated password. Whether a secret changed is what a
-// person reviewing an apply needs to see, and its value is exactly what they
-// must not.
+// A change under secrets. is named, never shown: the prompt is read on screen and
+// kept in the run log, and every value there is a credential. Whether a secret
+// changed is what a reviewer needs; its value is what they must not see.
 func FormatChanges(changes []Change) string {
 	var b strings.Builder
 	for i, c := range changes {
@@ -156,15 +153,14 @@ func FormatChanges(changes []Change) string {
 	return b.String()
 }
 
-// isSecretPath says whether a key path is under the document's secrets map,
-// which is the one place a values file holds a credential. An index under it
-// (secrets.tokens[0]) is part of the same subtree.
+// isSecretPath says whether a key path is under the document's secrets map, the
+// one place a values file holds a credential.
 func isSecretPath(path string) bool {
 	return path == "secrets" || strings.HasPrefix(path, "secrets.") || strings.HasPrefix(path, "secrets[")
 }
 
-// renderValue is the short form a user reads: strings quoted so they can see the
-// type, lists and maps inline. No Kubernetes words anywhere in a diff.
+// renderValue is the short form a user reads: strings quoted, lists and maps
+// inline.
 func renderValue(v any) string {
 	switch x := v.(type) {
 	case nil:
@@ -205,8 +201,8 @@ func unionKeys(a, b map[string]any) []string {
 	return out
 }
 
-// equalValues compares two decoded values, treating numbers of different widths
-// as equal (the chart sees no difference between 1000 and 1000.0).
+// equalValues compares two decoded values, treating numbers of different widths as
+// equal (the chart sees no difference between 1000 and 1000.0).
 func equalValues(a, b any) bool {
 	if reflect.DeepEqual(a, b) {
 		return true

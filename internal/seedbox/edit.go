@@ -14,29 +14,24 @@ import (
 
 // Editor changes one key at a time and writes the file back atomically. It uses
 // the parser only to find where the key lives; the bytes are spliced, never
-// re-rendered. That is what keeps a user's comments, blank lines, quoting, key
-// order and odd indentation through a box command, and it is why box can
-// promise it never rewrites a file it did not have to.
+// re-rendered, so a user's comments, blank lines, quoting, key order and odd
+// indentation survive.
 //
-// What it will not do: replace a block (a mapping or a list that already exists),
-// edit inside a flow-style collection, or write a value that needs more than one
-// line in place of one that does not. Those cases are refused with a message
-// that says to edit the file by hand, because silently reformatting the
-// surrounding document is the failure this type exists to prevent.
+// It refuses to replace a block, edit inside a flow collection, or write a
+// multi-line value in place of a single one: silently reformatting the surrounding
+// document is the failure this type exists to prevent.
 type Editor struct {
 	doc *Doc
 	src []byte
 }
 
-// Editor returns an editor over the document. The document is not changed until
-// Save succeeds.
+// Editor returns an editor over the document; nothing changes until Save.
 func (d *Doc) Editor() *Editor {
 	return &Editor{doc: d, src: d.Src}
 }
 
 // SetGrant sets one key in the grant and saves it. Only grant keys may be
-// written: root's file decides isolation, and a key that tunes an app belongs
-// in the user's values file.
+// written: root's file decides isolation.
 func (s *Seedbox) SetGrant(path string, value any) error {
 	p, err := ParsePath(path)
 	if err != nil {
@@ -52,8 +47,7 @@ func (s *Seedbox) SetGrant(path string, value any) error {
 }
 
 // SetValue sets one key in the user's values file and saves it. A grant key is
-// refused: the grant always wins, so writing it here would be a change that
-// silently does nothing.
+// refused: the grant wins, so a write here would silently do nothing.
 func (s *Seedbox) SetValue(path string, value any) error {
 	p, err := ParsePath(path)
 	if err != nil {
@@ -76,10 +70,9 @@ type Edit struct {
 }
 
 // SetValues sets several keys in the user's values file in one write, with the
-// same grant-key refusal SetValue has for one. A caller with two keys that
-// belong together (an app's pinned digest and the tag it was published under)
-// writes them together: two writes leave a moment where the file names a tag
-// and a digest that are not the same image.
+// same grant-key refusal. Keys that belong together (an app's digest and the tag
+// it was published under) go together: two writes leave a moment where they name
+// different images.
 func (s *Seedbox) SetValues(edits []Edit) error {
 	for _, edit := range edits {
 		p, err := ParsePath(edit.Path)
@@ -158,11 +151,9 @@ func (e *Editor) Set(path string, value any) error {
 	return nil
 }
 
-// SetAll sets several keys and leaves the result in the editor, and nothing is
-// written until Save. Each key is applied to the document the one before it
-// produced, because an edit splices by the line and column of the document it
-// parsed: a second key set against the first key's line numbers would land on a
-// line the first had already moved.
+// SetAll sets several keys and leaves the result in the editor. Each key is applied
+// to the document the one before it produced, because an edit splices by the line
+// and column of the document it parsed.
 func (e *Editor) SetAll(edits []Edit) error {
 	for _, edit := range edits {
 		p, err := ParsePath(edit.Path)
@@ -185,9 +176,9 @@ func (e *Editor) SetAll(edits []Edit) error {
 	return nil
 }
 
-// Delete removes one key (or one list entry) and leaves the result in the
-// editor. A delete that would leave its parent empty is refused: an empty
-// mapping is a null value, and the caller meant to remove the parent.
+// Delete removes one key (or one list entry) and leaves the result in the editor.
+// A delete that would leave its parent empty is refused: an empty mapping would
+// be a null value, and the caller meant to remove the parent.
 func (e *Editor) Delete(path string) error {
 	p, err := ParsePath(path)
 	if err != nil {
@@ -211,7 +202,7 @@ func (e *Editor) Bytes() []byte { return append([]byte(nil), e.src...) }
 // Changed reports whether the editor holds any edit.
 func (e *Editor) Changed() bool { return !bytes.Equal(e.src, e.doc.Src) }
 
-// Save writes the document back, atomically, keeping its permission bits. A
+// Save writes the document back atomically, keeping its permission bits. A
 // document with no edit is not rewritten, so its mtime still means "the user
 // changed this".
 func (e *Editor) Save() error {
@@ -276,8 +267,8 @@ func (e *Editor) set(p Path, value any) error {
 	return fmt.Errorf("cannot set %s", p)
 }
 
-// replace swaps one scalar in place. Everything else on the line — the key, the
-// spacing before the value, a trailing comment — stays byte for byte.
+// replace swaps one scalar in place. Everything else on the line -- the key, the
+// spacing, a trailing comment -- stays byte for byte.
 func (e *Editor) replace(p Path, n, parent *yaml.Node, value any) error {
 	if n.Kind == yaml.SequenceNode {
 		return e.replaceSequence(p, n, value)
@@ -310,11 +301,9 @@ func (e *Editor) replace(p Path, n, parent *yaml.Node, value any) error {
 	return nil
 }
 
-// replaceSequence rewrites one block list where it stands, for a value box owns
-// as a whole (a box's trusted proxy networks: a node added to the cluster is a
-// different list, not an entry to add). The list's own indentation is kept, and
-// the entries are the app's own encoding of the new value -- a flow list
-// ("[a, b]") is rewritten as a block, which is how the file's author reads it.
+// replaceSequence rewrites one block list where it stands, for a value box owns as
+// a whole (a box's trusted proxy networks: a node added to the cluster is a
+// different list, not an entry to add). The list's indentation is kept.
 func (e *Editor) replaceSequence(p Path, n *yaml.Node, value any) error {
 	block, err := isBlockValue(value)
 	if err != nil {
@@ -351,8 +340,8 @@ func (e *Editor) replaceLines(from, to int, lines []string) error {
 	return nil
 }
 
-// appendToMapping adds the rest of the path at the end of a block mapping, so a
-// new key lands after the ones already there and before any trailing comment.
+// appendToMapping adds the rest of the path at the end of a block mapping, so a new
+// key lands after the ones there and before a trailing comment.
 func (e *Editor) appendToMapping(p Path, m *yaml.Node, rest Path, value any) error {
 	if m.Style&yaml.FlowStyle != 0 {
 		return fmt.Errorf("%s is written on one line; write it out over several lines before box can add to it", Path(p[:len(p)-len(rest)]))
@@ -398,8 +387,8 @@ func (e *Editor) appendToSequence(p Path, seq *yaml.Node, value any) error {
 	return e.insertAfter(e.nodeEnd(seq), lines)
 }
 
-// appendAtRoot handles a document with no keys at all, which is what a box that
-// has never been tuned has. Comments already in the file are left above.
+// appendAtRoot handles a document with no keys, which is what a box that has never
+// been tuned has; comments already in the file are left above.
 func (e *Editor) appendAtRoot(rest Path, value any) error {
 	lines, err := chainLines(rest, value, 0, 2)
 	if err != nil {
@@ -502,9 +491,8 @@ func (e *Editor) insertAfter(line int, lines []string) error {
 	return nil
 }
 
-// verify re-reads the edited bytes and proves they parse and that the path holds
-// the value asked for. An edit that does not survive this never reaches the
-// disk.
+// verify re-reads the edited bytes and proves they parse and hold the value asked
+// for; an edit that does not survive never reaches the disk.
 func (e *Editor) verify(p Path, want any) error {
 	d, err := parseDoc(e.doc.Path, e.src)
 	if err != nil {
@@ -538,9 +526,8 @@ func (e *Editor) verifyGone(p Path) error {
 	return nil
 }
 
-// sameValue compares a decoded node with a value the caller supplied by putting
-// the caller's value through YAML too, so int/float64 and map shapes line up the
-// way they will on disk.
+// sameValue compares a decoded node with a caller value put through YAML too, so
+// int/float64 and map shapes line up the way they will on disk.
 func sameValue(got, want any) bool {
 	b, err := yaml.Marshal(want)
 	if err != nil {
@@ -583,10 +570,8 @@ func renderKeyLine(pad, key string, value any, step int) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	// A list or a mapping is always written under its key, never after it: a
-	// one-element sequence encodes as a single line ("- app.db"), and
-	// "key: - app.db" is not YAML. A scalar that happens to be one line stays
-	// inline, which is what keeps a set of scalars readable.
+	// A list or mapping is always written under its key, never after it: a
+	// one-element sequence encodes as "- app.db", and "key: - app.db" is not YAML.
 	block, err := isBlockValue(value)
 	if err != nil {
 		return "", err
@@ -637,9 +622,8 @@ func encodeValue(v any) (string, error) {
 	return text, nil
 }
 
-// encodeStyled renders a scalar, keeping the quoting style the file already used
-// when the new value is a string. A quoted "1000" therefore stays a string, and
-// a plain 1000 stays a number.
+// encodeStyled renders a scalar, keeping the quoting style the file used when the
+// new value is a string: a quoted "1000" stays a string, a plain 1000 a number.
 func encodeStyled(v any, style yaml.Style) (string, error) {
 	n := &yaml.Node{}
 	if err := n.Encode(v); err != nil {
@@ -673,9 +657,9 @@ func encodeStyled(v any, style yaml.Style) (string, error) {
 	return text, nil
 }
 
-// sameToken proves the bytes found on the line are the whole value and nothing
-// else: a block scalar, a multi-line plain scalar, an anchor or a flow collection
-// would all fail this, and are refused rather than half-replaced.
+// sameToken proves the bytes found on the line are the whole value: a block
+// scalar, a multi-line plain scalar, an anchor or a flow collection fail it and
+// are refused rather than half-replaced.
 func sameToken(token []byte, n *yaml.Node) error {
 	var got any
 	if err := yaml.Unmarshal(token, &got); err != nil {
@@ -691,9 +675,9 @@ func sameToken(token []byte, n *yaml.Node) error {
 	return nil
 }
 
-// tokenEnd finds the end of a scalar token at the start of s. In a flow
-// collection (on a single line), a plain scalar also ends at , ] or } — that is
-// what lets box change {memory: 1Gi} without rewriting the line around it.
+// tokenEnd finds the end of a scalar token at the start of s. In a flow collection
+// a plain scalar also ends at , ] or }, which is what lets box change {memory:
+// 1Gi} without rewriting the line around it.
 func tokenEnd(s []byte, inFlow bool) int {
 	if len(s) == 0 {
 		return 0
@@ -718,9 +702,8 @@ func tokenEnd(s []byte, inFlow bool) int {
 	return trimTrailing(s)
 }
 
-// doubleQuotedEnd is the offset just past the closing quote of a double-quoted
-// scalar at the start of s, where a backslash escapes the next byte. 0 is an
-// unterminated scalar, which the caller refuses rather than half-replaces.
+// doubleQuotedEnd is the offset past the closing quote of a double-quoted scalar
+// where a backslash escapes the next byte; 0 is unterminated and refused.
 func doubleQuotedEnd(s []byte) int {
 	for i := 1; i < len(s); i++ {
 		if s[i] == '\\' {
@@ -759,7 +742,7 @@ func trimTrailing(s []byte) int {
 }
 
 // runeOffset converts a 1-based column, which yaml counts in characters, into a
-// byte offset in the line.
+// byte offset.
 func runeOffset(line []byte, column int) int {
 	if column <= 1 {
 		return 0
@@ -823,7 +806,7 @@ func splice(src []byte, from, to int, repl []byte) []byte {
 }
 
 // indentStep is the indentation the file already uses, so a key box adds lines up
-// with its neighbours instead of imposing two spaces on a four-space file.
+// with its neighbours.
 func (e *Editor) indentStep() int {
 	step := 0
 	var walk func(n *yaml.Node)
@@ -850,10 +833,9 @@ func (e *Editor) indentStep() int {
 }
 
 // nodeEnd is the last source line a node occupies. Nodes carry only a start
-// position, and a block or multi-line plain scalar has no child nodes for its
-// lines, so the end is found by walking lines that are indented deeper than the
-// scalar's own line. Without this, appending to a mapping whose last value is a
-// block scalar would write inside that text.
+// position, and a block scalar has no child nodes, so the end is found by walking
+// lines indented deeper. Without it, appending after a block scalar writes inside
+// that text.
 func (e *Editor) nodeEnd(n *yaml.Node) int {
 	if n == nil {
 		return 0
@@ -891,8 +873,7 @@ func (e *Editor) nodeEnd(n *yaml.Node) int {
 }
 
 // indentedAfter reports whether the next non-blank line is deeper than indent,
-// which is what makes a blank line part of a block scalar rather than a gap
-// between keys.
+// which makes a blank line part of a block scalar rather than a gap between keys.
 func (e *Editor) indentedAfter(from, indent int) bool {
 	for n := from; ; n++ {
 		line := e.line(n)

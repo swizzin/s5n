@@ -11,7 +11,7 @@ import (
 )
 
 // blockDiff trims the unchanged prefix and suffix, so an assertion is about the
-// only region that moved: that is what "box changes one key" has to mean.
+// only region that moved.
 func blockDiff(before, after []byte) (oldBlock, newBlock []string) {
 	a := strings.Split(string(before), "\n")
 	b := strings.Split(string(after), "\n")
@@ -58,8 +58,7 @@ func TestRoundTripIsByteIdentical(t *testing.T) {
 			if string(e.Bytes()) != string(before) {
 				t.Error("the editor's bytes differ from the file it read")
 			}
-			// And the writer itself adds nothing: the same bytes through the
-			// atomic path come back byte for byte.
+			// The writer adds nothing: the same bytes through the atomic path.
 			out := filepath.Join(t.TempDir(), "copy.yaml")
 			if err := atomicfile.Write(out, before, 0o600); err != nil {
 				t.Fatalf("atomicfile.Write: %v", err)
@@ -359,9 +358,8 @@ func TestSetRefusals(t *testing.T) {
 	}{
 		{name: "a mapping in place", fixture: "values.yaml", path: "apps.sonarr.resources", value: map[string]any{}, want: "is a mapping"},
 		{
-			// A list is replaced as a whole (see TestAOneEntryListIsWrittenUnderItsKey
-			// and TestAListIsReplacedWhereItStands); a mapping is not, because
-			// each of its keys is the file's author's.
+			// A list is replaced whole; a mapping is not, because each of its keys
+			// is the file's author's.
 			name:  "a mapping in place",
 			doc:   "apps:\n  plex:\n    env:\n      A: b\n",
 			path:  "apps.plex.env",
@@ -469,10 +467,8 @@ func TestSaveKeepsTheFileMode(t *testing.T) {
 	}
 }
 
-// A save that cannot write reports the failure and leaves the document as it
-// was: what the atomic write itself promises (the target's old bytes, no
-// temporary file left beside it) is internal/atomicfile's test, since that is
-// where the write now lives.
+// A save that cannot write reports the failure and leaves the document as it was;
+// the write's own promises are internal/atomicfile's test.
 func TestFailedSaveKeepsTheDocument(t *testing.T) {
 	path := copyFixture(t, "values.yaml")
 	before, _ := os.ReadFile(path)
@@ -646,11 +642,8 @@ func TestDeleteAListEntry(t *testing.T) {
 	}
 }
 
-// TestSetValuesWritesEveryKeyInOneWrite: a pin is two keys that belong together
-// (the digest and the tag of one image), and each key is applied to the document
-// the one before it produced -- appending a key moves the lines below it, so a
-// second key set against the first key's line numbers would land in the wrong
-// place.
+// A pin is two keys that belong together (the digest and the tag of one image),
+// and each is applied to the document the one before produced.
 func TestSetValuesWritesEveryKeyInOneWrite(t *testing.T) {
 	path := copyFixture(t, "values.yaml")
 	before, err := os.ReadFile(path)

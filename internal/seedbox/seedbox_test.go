@@ -8,15 +8,14 @@ import (
 	"testing"
 )
 
-// fixture is a file under testdata. Testdata is read-only: anything that saves
-// works on a copy.
+// fixture is a file under testdata; anything that saves works on a copy.
 func fixture(t *testing.T, name string) string {
 	t.Helper()
 	return filepath.Join("testdata", name)
 }
 
-// copyFixture writes a fixture into a temporary directory, with a mode that is
-// not the one box would create, so a write that forgets the mode is visible.
+// copyFixture writes a fixture into a temporary directory, with a mode that is not
+// the one box would create, so a write that forgets the mode is visible.
 func copyFixture(t *testing.T, name string) string {
 	t.Helper()
 	src, err := os.ReadFile(fixture(t, name))
@@ -181,9 +180,8 @@ func TestDocMapIsACopy(t *testing.T) {
 	}
 }
 
-// LoadValues exists for the one caller that has a values file and no grant
-// yet: box init on a host root has decided nothing about. The file is read,
-// not assumed empty.
+// LoadValues is for the one caller with a values file and no grant yet: box init
+// on a host root has decided nothing about.
 func TestLoadValues(t *testing.T) {
 	doc, err := LoadValues(fixture(t, "values.yaml"))
 	if err != nil {

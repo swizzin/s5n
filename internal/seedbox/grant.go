@@ -4,107 +4,68 @@ import "strings"
 
 // Rule is one grant-owned key, written as a chart values path.
 type Rule struct {
-	// Path is a dotted values path. "*" matches any single key, which is how
+	// Path is a dotted values path; "*" matches any single key, which is how
 	// "every app" is written without listing the catalog here.
 	Path string
 	// Whole says the value at Path is owned as a unit: everything beneath it
-	// belongs to the grant too, and values may not touch any of it. It is set
-	// for lists and for objects whose every field is a decision, never for a
-	// branch that merely contains grant keys.
+	// belongs to the grant too. It is set for lists and for objects whose every
+	// field is a decision, never for a branch that merely contains grant keys.
 	Whole bool
-	// BoxOnly marks a key that is box's own record rather than a chart value.
-	// namespace is one: it names the release namespace, so box reads it and
-	// never hands it to Helm. storage.<kind>.path is the other: it is the host
-	// directory box turns into a PersistentVolume, so it is read, never charted.
+	// BoxOnly marks a key that is box's own record rather than a chart value:
+	// namespace, storage.<kind>.path and auth.oidc.gatewayIP are read by box and
+	// never handed to Helm.
 	BoxOnly bool
 	// BoxSets marks a chart key box writes from its own decision, which no file
-	// may set. The claim names are one: box derives them from the namespace and
-	// creates the claim, so a name in either file would either be overwritten
-	// or clone the volume. auth.edge is the other: box puts a login in front of
-	// every release, and the chart ships none.
+	// may set: the claim names and auth.edge.
 	BoxSets bool
-	// Fixed marks a BoxSets key box writes as a constant rather than deriving
-	// it from the grant. auth.edge is the only one: it says a login is in
-	// front, which is a fact about box's deployment, not about this grant.
+	// Fixed marks a BoxSets key box writes as a constant rather than deriving it
+	// from the grant. auth.edge is the only one.
 	Fixed bool
-	// Why is the line box shows when a user's values file sets this key. It
-	// should say what the grant is protecting, not repeat the key name.
+	// Why is the line box shows when a user's values file sets this key; it says
+	// what the grant is protecting, not the key's name.
 	Why string
 }
 
-// GrantKeys is the grant's key set. The principle behind it: a key belongs to
-// the grant when it decides what this box can reach or which apps exist — host
-// names, the namespace, paths on the host, uids, ports exposed on the node, the
-// storage roots, the network boundary, and the app and instance list. Every
-// other key is the user's: settings inside an app they were given, tuning,
-// image variants, schedules.
+// GrantKeys is the grant's key set: a key belongs to the grant when it decides
+// what this box can reach or which apps exist -- host names, the namespace, host
+// paths, uids, node ports, storage roots, the network boundary, and the app and
+// instance list. Everything else is the user's: tuning, image variants,
+// schedules.
 //
-// The judgement calls, and why they land where they do:
-//
-//   - auth.edge is BoxSets, and Fixed: the chart ships no login and refuses to
-//     render without the statement that one is in front, so box writes true
-//     when it builds the release's values (Effective), for every release whose
-//     schema declares it. It is a fact about the deployment, not a setting a
-//     file gets to deny.
-//   - global.tz is values. It changes how a user's own apps name files, and
-//     nothing about who can read them.
-//   - storage.<kind>.path is grant and box-only: it is where this box's volume
-//     lives on the host, which is the same class of decision as the domain. The
-//     chart's storage.<kind>.existingClaim is set by box, from the claim it
-//     creates for that path, so it is BoxSets: neither file names a claim, and
-//     neither file has a size or a storage class to set any more.
-//   - storage.*.size is gone with the chart's storage objects. A static claim's
-//     capacity is nominal and a per-user cap would be a quota, which PLAN.md
-//     keeps out.
-//   - gateway.enabled is values: taking your own box off the air is yours.
-//     gateway.parentRef.* is grant: the Gateway and the listener belong to
-//     root, and a user who could point at another listener could attach their
-//     routes to somebody else's host name.
-//   - networkPolicy.enabled is grant. It is the default-deny between boxes, so
-//     a user must not be able to switch it off; widening ingress to their own
-//     apps (gatewayFrom, extraHttpFrom) stays theirs.
-//   - apps.*.instances is grant as a whole list: a suffix becomes a host name
-//     (sonarr-4k), a category becomes a downloads directory, and enabled
-//     decides existence. There is nothing left in an instance for a user to
-//     tune, and a user who could add an instance could add a second category
-//     under their own name only — but also a second host name, which root
-//     routes. So the list is one grant decision, never merged entry by entry.
-//   - apps.qbittorrent.torrent.port and .service.type are grant because a
-//     NodePort is a port on the node, shared with every other box. docs/box.md
-//     leaves port assignment open; until root assigns it, the grant is where it
-//     would live, so it is grant now rather than a value that has to move
-//     later. The Service's annotations are grant for the same reason: they
-//     choose the address a LoadBalancer gets.
-//   - apps.*.image is values, but only as a choice: the variant name and a
-//     tag or digest pin inside that variant's repository. The repository
-//     comes from the chart's own variant list, and values.schema.json rejects
-//     a repository key outright, so this is not a grant key — it is not a key
-//     a user has at all.
+// The judgement calls:
+//   - auth.edge is BoxSets and Fixed: the chart ships no login and refuses to
+//     render without the statement that one is in front, so box writes true in
+//     Effective, for every release whose schema declares it.
+//   - storage.<kind>.path is grant and BoxOnly; the claim name is box's, from
+//     that path, so neither file names a claim or a size.
+//   - gateway.enabled is values (taking your own box off the air is yours);
+//     gateway.parentRef.* is grant, because a user pointing at another listener
+//     could attach their routes to somebody else's host name.
+//   - networkPolicy.enabled is grant: it is the default-deny between boxes.
+//     Widening ingress to their own apps stays theirs.
+//   - apps.*.instances is grant as a whole list: a suffix becomes a host name and
+//     a category a downloads directory, so the list is one decision, never merged
+//     entry by entry.
+//   - apps.qbittorrent.torrent.port and .service.type are grant: a NodePort is a
+//     port on the node, shared with every other box.
+//   - apps.*.image is values only as a choice: the variant name and a pin inside
+//     its repository. The repository is the chart's, and the schema rejects one.
 var GrantKeys = []Rule{
 	{Path: "namespace", BoxOnly: true, Why: "the release namespace: one user is one namespace"},
 
-	// login is the account the login in front of the Gateway is for: root's
-	// own identity on this box, written once at init and read back on every
-	// re-run. It is BoxOnly, because it is box's record of who the box belongs
-	// to and never a chart value a user edits -- the chart knows nothing about
-	// Authelia, and a user changing this key would be renaming their own
-	// account behind root's back. It is still handed to the release, because an
-	// app that keeps its own accounts (Jellyfin) names the person's first
-	// account after it; Effective writes it from the grant for a chart whose
-	// schema declares the key.
+	// login is the account root's login admits: box's record of who the box
+	// belongs to, never a chart value. Still handed to the release, because an
+	// app that keeps its own accounts (Jellyfin) names the person's first account
+	// after it.
 	{Path: "login", BoxOnly: true, Why: "the account root's login creates: this box's own identity, and the name one app's own first account gets"},
 
-	// The chart ships no login; box is what puts one in front of every release,
-	// so no file may say otherwise. Fixed: box writes true rather than deriving
-	// it from anything in the grant.
+	// The chart ships no login; box puts one in front of every release. Fixed: true
+	// is written, not derived.
 	{Path: "auth.edge", BoxSets: true, Fixed: true, Why: "box puts a login in front of every release, and the chart refuses to render one without it"},
 
-	// The Gateway's proxy address, so an app that speaks OIDC can reach the
-	// issuer at the box's own name. It is box's record rather than a chart
-	// value: a user cannot read the Gateway's namespace, and an app pod that
-	// resolved the name any way but the proxy would fail the certificate
-	// check. Empty on a grant written before the provider existed, and the
-	// chart then renders the app without it.
+	// The Gateway proxy's address, so an OIDC app's pod reaches the issuer at the
+	// box's own name. Box's record: a user cannot read the Gateway's namespace, and
+	// an app that resolved the name any other way would fail the certificate check.
 	{Path: "auth.oidc.gatewayIP", BoxOnly: true, Why: "the address of the Gateway's proxy, which is how an OIDC app's pod reaches the login at the box's own name"},
 
 	{Path: "global.puid", Why: "the uid every file on the data volume is owned by"},
@@ -122,31 +83,23 @@ var GrantKeys = []Rule{
 	{Path: "gateway.parentRef.sectionName", Why: "the listener root opened for this box"},
 
 	{Path: "networkPolicy.enabled", Why: "the default-deny that keeps one box off another"},
-	// rehearsal is box's own record of what kind of box this is, never a chart
-	// value a file sets: box writes it into the grant when it applies a
-	// rehearsal snapshot and reads it back on every later apply and update, so
-	// the lock is sticky. BoxOnly rather than grant-and-visible because a
-	// rehearsal is disposable and the lock is not a setting the operator tunes;
-	// a box with it set refuses a final snapshot instead.
+	// Box's own record of what kind of box this is: written when it applies a
+	// rehearsal snapshot and read on every later apply and update, so the lock is
+	// sticky. A box with it set refuses a final snapshot.
 	{Path: "rehearsal", BoxOnly: true, Why: "a rehearsal box has no internet egress; box sets this when it applies a rehearsal snapshot, and nothing unlocks it"},
 	{Path: "rehearsalGate", BoxOnly: true, Why: "the address a rehearsal box's apps wait on until the lock closes it; box writes it with rehearsal"},
 
-	// gatewayFrom is box's because it is read from the cluster: the namespace
-	// the chosen Gateway implementation's proxy actually runs in. A user who
-	// could set it could widen their apps to whatever namespace they named,
-	// and it would be overwritten on the next apply anyway.
+	// Read from the cluster: the namespace the chosen Gateway implementation's
+	// proxy actually runs in. A user who could set it could widen their apps to
+	// whatever namespace they named.
 	{Path: "networkPolicy.gatewayFrom", Whole: true, BoxSets: true, Why: "box reads where the Gateway's proxy runs from the Gateway's own address, so the peer follows the implementation in use rather than a namespace a file guessed"},
 
 	{Path: "apps.*.enabled", Why: "which apps this box has"},
 	{Path: "apps.*.instances", Whole: true, Why: "which instances exist: a suffix is a host name and a category is a directory"},
 
-	// The cluster's pod network, for the one app that has to trust a forwarded
-	// address to know who a person is. It is read from the Nodes' podCIDRs at
-	// init, and it is the grant's rather than a value because only root can
-	// read the cluster: a user setting it could name a range they do not own,
-	// and the app would then believe any client in it. BoxOnly, not BoxSets,
-	// because init is the write: a BoxSets key may not appear in either file,
-	// and the grant is exactly where init records what it read.
+	// The cluster's pod network, read from the Nodes at init: only root can read
+	// the cluster, and a user naming a range they do not own would make the app
+	// trust any client in it. BoxOnly, not BoxSets, because init is the write.
 	{Path: "apps.jellyfin.knownProxies", Whole: true, BoxOnly: true, Why: "the cluster's pod network, read from the Nodes at init: it is the range the Gateway's proxy connects from, and an app cannot tell whose forwarded address to trust without it"},
 
 	{Path: "apps.qbittorrent.torrent.port", Why: "the peer port exposed on the node, shared with every other box"},

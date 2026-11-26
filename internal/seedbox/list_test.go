@@ -7,9 +7,8 @@ import (
 	"testing"
 )
 
-// TestAListIsReplacedWhereItStands: a box-owned list whose value changed (a
-// node added to the cluster) is rewritten at the list's own indentation, and the
-// file still parses to the new list.
+// A box-owned list whose value changed (a node added to the cluster) is rewritten
+// at its own indentation, and the file still parses to the new list.
 func TestAListIsReplacedWhereItStands(t *testing.T) {
 	dir := t.TempDir()
 	grant := filepath.Join(dir, "grant.yaml")
@@ -31,10 +30,8 @@ func TestAListIsReplacedWhereItStands(t *testing.T) {
 	}
 }
 
-// TestAOneEntryListIsWrittenUnderItsKey: a list value is a block, never a scalar
-// on the key's line. A one-element sequence encodes as one line ("- app.db"),
-// and "key: - app.db" is not YAML -- which is what a box with one proxy network,
-// or any single-entry answer, would have written.
+// A list value is a block, never a scalar on the key's line: a one-element
+// sequence encodes as "- app.db", and "key: - app.db" is not YAML.
 func TestAOneEntryListIsWrittenUnderItsKey(t *testing.T) {
 	dir := t.TempDir()
 	grant := filepath.Join(dir, "grant.yaml")

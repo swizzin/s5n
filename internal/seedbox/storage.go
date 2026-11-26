@@ -16,23 +16,20 @@ type Volume struct {
 	Claim string
 }
 
-// VolumeKinds is the chart's two storage keys, in the order box creates them.
-// Data first, because a box whose data claim is missing is the one with
-// something to lose.
+// VolumeKinds is the chart's two storage keys, in creation order: data first,
+// because a box whose data claim is missing has something to lose.
 var VolumeKinds = []string{"data", "config"}
 
-// ClaimName is the claim box creates for one volume of one seedbox. It is named
-// per namespace, not per release: a PersistentVolume is cluster-scoped, so a
-// fixed name would collide between two boxes on one host, and the namespace is
-// the one cluster object a box owns alone.
+// ClaimName is the claim box creates for one volume of one seedbox, named per
+// namespace: a PersistentVolume is cluster-scoped, so a fixed name would collide
+// between two boxes on one host.
 func ClaimName(namespace, kind string) string {
 	return namespace + "-s5n-" + kind
 }
 
-// Login is the account root's login admits: the grant's box-only record of who
-// this box belongs to, written once by `box init` and read back on every run.
-// An apply that has a host to serve needs it, because that host's access_control
-// rule admits exactly this account.
+// Login is the account root's login admits, the grant's box-only record of who
+// this box belongs to. An apply with a host to serve needs it: that host's
+// access_control rule admits exactly this account.
 func (s *Seedbox) Login() (string, error) {
 	name, _ := s.Grant.data["login"].(string)
 	if strings.TrimSpace(name) == "" {
@@ -41,9 +38,8 @@ func (s *Seedbox) Login() (string, error) {
 	return name, nil
 }
 
-// Namespace is the grant's `namespace` key, which is box's own record and never
-// a chart value. It names the release namespace and every object box creates
-// beside the release, so it is read before anything is sent to Helm.
+// Namespace is the grant's `namespace` key: it names the release namespace and
+// every object box creates beside the release, so it is read before Helm.
 func (s *Seedbox) Namespace() (string, error) {
 	ns, _ := s.Grant.data["namespace"].(string)
 	if strings.TrimSpace(ns) == "" {
@@ -52,13 +48,12 @@ func (s *Seedbox) Namespace() (string, error) {
 	return ns, nil
 }
 
-// Storage reads the grant's two host paths and derives the claims box creates
-// for them. It is the one place that names a volume, so the PersistentVolume box
-// writes, the claim it writes and the claim it hands the chart cannot disagree.
+// Storage reads the grant's two host paths and derives the claims box creates: the
+// one place that names a volume, so the PV, the claim and the chart cannot
+// disagree.
 //
-// The path is required and absolute: a relative one would be resolved against
-// whatever directory box happened to run in, which is how a box ends up
-// mounting an empty volume beside the data it meant to use.
+// The path is required and absolute: a relative one resolves against whatever
+// directory box ran in, which is how a box mounts an empty volume beside its data.
 func (s *Seedbox) Storage() ([]Volume, error) {
 	ns, err := s.Namespace()
 	if err != nil {
@@ -97,8 +92,7 @@ func (s *Seedbox) hostPath(kind string) (string, error) {
 }
 
 // claims is the storage block box writes into the effective values: the claim
-// names it creates. No file carries them, so this is applied last, after both
-// files and the chart's own defaults.
+// names it creates. No file carries them, so it is applied last.
 func claims(vols []Volume) map[string]any {
 	storage := make(map[string]any, len(vols))
 	for _, v := range vols {

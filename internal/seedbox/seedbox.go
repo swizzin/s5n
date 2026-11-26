@@ -1,20 +1,17 @@
-// Package seedbox owns the two files that define one seedbox: the root-owned
-// grant in /etc/s5n/seedboxes/<user>.yaml and the user-owned values file in
+// Package seedbox owns the two files that define one seedbox: the root-owned grant
+// in /etc/s5n/seedboxes/<user>.yaml and the user-owned values file in
 // ~<user>/.config/box/values.yaml.
 //
-// Why two files: a user's values file is applied with root's power, so one
-// storage.data.path pointing at someone else's downloads would end the
-// isolation between boxes. The split is therefore not a convenience. The grant
-// holds every key that decides what a box can reach; values holds everything a
-// user may tune. The grant always wins, and a grant key in values is an error
-// rather than something silently ignored: "I set it and nothing happened" is
-// how somebody discovers a security boundary by accident.
+// The split is not a convenience: a user's values file is applied with root's
+// power, so one storage.data.path pointing at someone else's downloads would end
+// the isolation between boxes. The grant holds every key that decides what a box
+// can reach, values holds what a user may tune, the grant wins, and a grant key in
+// values is an error: "I set it and nothing happened" is how somebody discovers a
+// security boundary by accident.
 //
-// Nothing here regenerates a file. Load reads what is on disk, Merge combines
-// the two documents, and Editor changes the smallest byte range that has to
-// change, so a hand edit, a comment and an odd indent all survive a box
-// command. That is the same rule PLAN.md sets for migrations: change one key,
-// never rewrite the file.
+// Nothing here regenerates a file: Load reads what is on disk, Merge combines the
+// two documents, and Editor changes the smallest byte range, so a hand edit, a
+// comment and an odd indent all survive a box command.
 package seedbox
 
 import (
@@ -46,13 +43,13 @@ func ValuesPath(home string) string {
 	return filepath.Join(home, ".config", "box", "values.yaml")
 }
 
-// Doc is one parsed YAML document plus the bytes it came from. The bytes are
-// kept because every edit is a splice against them, not a re-render.
+// Doc is one parsed YAML document plus the bytes it came from: every edit is a
+// splice against those bytes, not a re-render.
 type Doc struct {
 	Path string // the file the document came from, for error messages
 	Src  []byte // the exact bytes on disk
-	// Exists is false when the file is absent. A missing values file is normal
-	// (a box that has never been tuned); a missing grant is not.
+	// Exists is false when the file is absent: normal for a values file, never
+	// for a grant.
 	Exists bool
 
 	root *yaml.Node
@@ -66,10 +63,8 @@ type Seedbox struct {
 	Values *Doc
 }
 
-// New returns a seedbox whose files may not exist yet. `box init` writes a
-// grant that was never there, so it starts from an empty document with the
-// right path and permission bits; a file already on disk is read with Load,
-// never assumed empty.
+// New returns a seedbox whose files may not exist yet: `box init` writes a grant
+// that was never there, and a file already on disk is read with Load.
 func New(grantPath, valuesPath string) *Seedbox {
 	return &Seedbox{Grant: newDoc(grantPath), Values: newDoc(valuesPath)}
 }
@@ -78,16 +73,14 @@ func newDoc(path string) *Doc {
 	return &Doc{Path: path, data: map[string]any{}, mode: 0o600}
 }
 
-// LoadValues reads a values file on its own. `box init` needs it on a host
-// whose grant is not written yet: the user's tuning (and tls.issuer) is
-// already there even when root has decided nothing.
+// LoadValues reads a values file on its own, for a host whose grant is not
+// written yet: the user's tuning (and tls.issuer) may already be there.
 func LoadValues(valuesPath string) (*Doc, error) {
 	return loadDoc(valuesPath, false)
 }
 
-// Load reads a seedbox's two files. The grant must exist: it is what root
-// decided. A missing values file is an empty document, because a user who has
-// never run `box init` or edited anything has no file yet.
+// Load reads a seedbox's two files. The grant must exist; a missing values file
+// is an empty document.
 func Load(grantPath, valuesPath string) (*Seedbox, error) {
 	grant, err := loadDoc(grantPath, true)
 	if err != nil {
@@ -127,9 +120,8 @@ func loadDoc(path string, required bool) (*Doc, error) {
 	return d, nil
 }
 
-// parseDoc parses one file into a document. It is used for the initial load and
-// again after every edit, so an edit that would not parse is refused before it
-// reaches the disk.
+// parseDoc parses one file. It runs again after every edit, so an edit that
+// would not parse is refused before it reaches the disk.
 func parseDoc(path string, src []byte) (*Doc, error) {
 	d := &Doc{Path: path, Src: src, Exists: true, data: map[string]any{}, mode: 0o600}
 	if len(strings.TrimSpace(string(src))) == 0 {
@@ -162,10 +154,10 @@ func parseDoc(path string, src []byte) (*Doc, error) {
 func (d *Doc) Map() map[string]any { return cloneMap(d.data) }
 
 // fromNode converts a YAML node tree into the JSON-shaped values a chart takes.
-// It is deliberately stricter than yaml.Unmarshal into interface{}: timestamps
-// stay the text the author wrote (yaml would turn `2020-01-01` into a time.Time,
-// which then re-marshals as a different string), and anything box cannot safely
-// round-trip is an error rather than a surprise.
+// It is stricter than yaml.Unmarshal into interface{}: a timestamp stays the text
+// the author wrote (yaml would turn `2020-01-01` into a time.Time and
+// re-marshal it differently), and anything box cannot safely round-trip is an
+// error.
 func fromNode(n *yaml.Node) (any, error) {
 	switch n.Kind {
 	case yaml.MappingNode:
@@ -208,8 +200,7 @@ func fromNode(n *yaml.Node) (any, error) {
 
 func scalarValue(n *yaml.Node) (any, error) {
 	if n.Tag == "!!timestamp" {
-		// Keep the text: a schedule or a date in values is a string to the
-		// chart, and re-encoding a time.Time would rewrite it.
+		// A date is a string to the chart; re-encoding a time.Time rewrites it.
 		return n.Value, nil
 	}
 	if n.Tag == "!!binary" {
@@ -249,8 +240,8 @@ type Step struct {
 	IsIndex bool
 }
 
-// Path is a values path such as apps.sonarr.instances[1].enabled. It is the
-// name box uses in messages, so a user can paste it back into their file.
+// Path is a values path such as apps.sonarr.instances[1].enabled: the name box
+// shows, so a user can paste it back into their file.
 type Path []Step
 
 // ParsePath parses a dotted path with optional [n] list indices.
@@ -309,8 +300,8 @@ func (p Path) String() string {
 	return b.String()
 }
 
-// Keys is the path with list indices dropped. Grant rules are written against
-// keys, because an instance the grant owns is owned whichever index it sits at.
+// Keys is the path with list indices dropped: grant rules are written against
+// keys, because an owned instance is owned at whichever index it sits.
 func (p Path) Keys() []string {
 	out := make([]string, 0, len(p))
 	for _, st := range p {
@@ -321,10 +312,9 @@ func (p Path) Keys() []string {
 	return out
 }
 
-// resolve walks as far into the document as the path goes. depth is how many
-// steps matched; a depth below len(p) means the rest of the path does not exist
-// (or runs into a value of the wrong shape), which is what Set turns into an
-// insertion.
+// resolve walks as far into the document as the path goes. A depth below len(p)
+// means the rest does not exist or runs into a value of the wrong shape, which is
+// what Set turns into an insertion.
 func resolve(root *yaml.Node, p Path) (cur, parent, key *yaml.Node, depth int) {
 	cur = root
 	for i, st := range p {
