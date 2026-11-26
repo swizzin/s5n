@@ -451,6 +451,9 @@
         },
         "sabnzbd": {
           "$ref": "#/definitions/simpleApp"
+        },
+        "filebrowser": {
+          "$ref": "#/definitions/simpleApp"
         }
       }
     }

@@ -829,6 +829,7 @@ func TestRealChartSnapshots(t *testing.T) {
 		"lidarr":      "lidarr.db,lidarr.db-wal,lidarr.db-shm,config.xml",
 		"bazarr":      "config/config.yaml,db/bazarr.db,db/bazarr.db-wal,db/bazarr.db-shm",
 		"sabnzbd":     "sabnzbd.ini",
+		"filebrowser": "database.sqlite,database.sqlite-wal,database.sqlite-shm",
 		"prowlarr":    "prowlarr.db,prowlarr.db-wal,prowlarr.db-shm,config.xml",
 		"plex": "Library/Application Support/Plex Media Server/Preferences.xml," +
 			"Library/Application Support/Plex Media Server/Plug-in Support/Databases/com.plexapp.plugins.library.db," +

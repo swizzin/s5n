@@ -37,6 +37,8 @@ apps:
     enabled: true
   sabnzbd:
     enabled: true
+  filebrowser:
+    enabled: true
 
 # The box's own name. Plex and Seerr are served at plex.<domain> and
 # seerr.<domain> (the catalog says so), so a render needs the domain.

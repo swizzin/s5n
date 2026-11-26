@@ -49,6 +49,78 @@ its own. */}}
 {{- if eq $inst.app "qbittorrent" }}
 {{- $torrentPort = required "apps.qbittorrent.torrent.port: set the peer port peers reach this box on (box records one at init, from the lower band of the NodePort range, 30000-30085 by default)" (($cfg.torrent | default dict).port) }}
 {{- end }}
+{{- /* FileBrowser Quantum's whole configuration is this file: it reads
+       config.yaml at start and never writes it back (every setting its UI
+       changes is a row in the database), so a ConfigMap is the config, and the
+       app owns no init container. It is mounted at the app's own config path so
+       a migrated source's copy is what the mount hides, and the app never reads
+       two files. */}}
+{{- if eq $inst.app "filebrowser" }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ $inst.name }}-config
+  labels:
+    {{- include "s5n.labels" $root | nindent 4 }}
+    app.kubernetes.io/name: {{ $inst.name }}
+data:
+  config.yaml: |
+    http:
+      port: {{ $cfg.port }}
+      # The app mounts its routes and builds its own asset and API URLs from
+      # this prefix, so the route keeps the path (values.yaml, rewritePath).
+      baseURL: {{ $urlBase | quote }}
+      # Through the Gateway the person's address arrives in X-Forwarded-For, and
+      # the app reads it for its logs and activity table only. A chart cannot
+      # know the proxy's address list, and trusting a header without one is a
+      # spoof anyone in the pod network could write; nothing here decides who a
+      # request is (auth.methods.noauth), so the cost of not trusting it is one
+      # startup warning.
+      trustProxyHeaders: false
+      # WebDAV is a second protocol over the same tree, on with no login of its
+      # own; the browser is the only client this box serves.
+      disableWebDAV: true
+    server:
+      # The cache is regenerable, and it says so itself: the file index under it
+      # is opened with sync off because "DB can be rebuilt"
+      # (internal/database/sql/index.go at v2.1.0-stable), the download spool is
+      # cleared at every start and the preview thumbnails are LRU-bounded below.
+      # So it lives on the pod's emptyDir with a sizeLimit: an index of a large
+      # library can never fill the config claim every app's settings live on. A
+      # restart re-indexes in the background and the app answers while it does.
+      cacheDir: /cache
+      # cacheDir/diskcache: 1 GiB of previews, least recently used evicted
+      # first. Unlimited, it grows with the library.
+      cacheDirMaxSizeMB: 1024
+      # A startup call to GitHub is a phone-home nothing here asked for: the
+      # chart moves the image by digest and the box updates itself.
+      disableUpdateCheck: true
+      database:
+        path: /config/database.sqlite
+      sources:
+        # The whole data contract, read-write: the box owner's own file manager
+        # behind the box's one login, with an Arr UI's trust and no more. It
+        # runs as the release's uid/gid, so the filesystem's owner is the limit.
+        #
+        # No `name`: the app names a source after the last part of its path
+        # ("data"), which is the name a source install already had at /data, so
+        # a migrated database's shares and access rules keep resolving.
+        - path: /data
+          config:
+            defaultEnabled: true
+            defaultPermissions:
+              view: true
+              download: true
+              modify: true
+              create: true
+              delete: true
+    auth:
+      methods:
+        # Whoever reaches it is the one admin user, and the edge is the only
+        # login in front of it (catalog.yaml, login: portal).
+        noauth: true
+{{- end }}
 ---
 apiVersion: apps/v1
 kind: StatefulSet
@@ -600,6 +672,12 @@ spec:
             # OOBE instead of serving the API at all.
             - name: PBH_WEB_REQUIRELOGIN
               value: "false"
+            {{- else if eq $inst.app "filebrowser" }}
+            # The image's default path is under its home directory, which is on
+            # the read-only root filesystem. This is the file the ConfigMap
+            # above writes.
+            - name: FILEBROWSER_CONFIG
+              value: /config/config.yaml
             {{- else if eq $inst.app "maintainerr" }}
             - name: UI_HOSTNAME
               value: 0.0.0.0
@@ -790,6 +868,16 @@ spec:
               subPath: {{ $inst.name }}
             - name: tmp
               mountPath: /tmp
+            {{- if eq $inst.app "filebrowser" }}
+            # The chart's config, read-only over the claim's own copy of the
+            # path, and the cache the app rebuilds.
+            - name: config-file
+              mountPath: /config/config.yaml
+              subPath: config.yaml
+              readOnly: true
+            - name: cache
+              mountPath: /cache
+            {{- end }}
             {{- if $oidc }}
             - name: oidc
               mountPath: /etc/s5n-oidc
@@ -811,6 +899,21 @@ spec:
             claimName: {{ include "s5n.configClaim" $root }}
         - name: tmp
           emptyDir: {}
+        {{- if eq $inst.app "filebrowser" }}
+        # The index of a large library and 1 GiB of previews fit here; the app's
+        # own archive limit is 20 GB, so a resumable download of a folder larger
+        # than the free space in the cache fails, while a plain download streams
+        # through it. Losing the cache is a re-index, never a lost setting.
+        - name: cache
+          emptyDir:
+            sizeLimit: 5Gi
+        - name: config-file
+          configMap:
+            name: {{ $inst.name }}-config
+            items:
+              - key: config.yaml
+                path: config.yaml
+        {{- end }}
         {{- if $oidc }}
         # The client secret box wrote into this namespace, created once and
         # never regenerated: the login holds only its digest.

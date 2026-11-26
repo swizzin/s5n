@@ -347,6 +347,27 @@ apps:
     snapshot: [sabnzbd.ini]
     questions: []
 
+  # Opt-in: a file manager over the same downloads and library the Arrs and the
+  # download client already keep. A box does not need one to be useful, and it
+  # is the whole data tree in a browser, so it is asked for.
+  #
+  # It is behind the box's one login with its own auth off: auth.methods.noauth
+  # makes every request the one admin user, the same boundary Maintainerr and
+  # PeerBanHelper rely on (and it has no /api bypass to give it one). Its whole
+  # configuration is the chart's config.yaml; the database is state, not a
+  # setting anyone hands it, so there are no questions.
+  filebrowser:
+    description: a file manager for the downloads and the library, in a browser
+    instances: false
+    default: false
+    login: portal
+    # Its database, and the SQLite companions: the app opens it in WAL mode
+    # whatever FILEBROWSER_SQL_WAL says -- that switch is the file index, which
+    # lives in the cache -- because the user store's DSN carries
+    # _journal_mode=WAL at v2.1.0-stable (internal/database/sqldb/sqldb.go).
+    snapshot: [database.sqlite, database.sqlite-wal, database.sqlite-shm]
+    questions: []
+
   # Opt-in, and louder so: it deletes media and torrents on rules the operator
   # writes. Nothing here configures it; it is set up in its own UI.
   maintainerr:

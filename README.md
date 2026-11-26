@@ -5,7 +5,7 @@
   </picture>
 </h1>
 
-[swizzin](https://github.com/swizzin/swizzin) re-imagined for a modern era, powered by Kubernetes. A free, self-hosted seedbox environment: qBittorrent, Prowlarr, Sonarr, Radarr, Plex, Seerr and Tautulli, plus opt-in Lidarr, Bazarr, SABnzbd, autobrr, qui, PeerBanHelper and Maintainerr, installed and managed by `box`. Applications wired for minimal config, hardlink-friendly, and locked down by default. Your media server isn't a pet -- stop treating it like one.
+[swizzin](https://github.com/swizzin/swizzin) re-imagined for a modern era, powered by Kubernetes. A free, self-hosted seedbox environment: qBittorrent, Prowlarr, Sonarr, Radarr, Plex, Seerr and Tautulli, plus opt-in Lidarr, Bazarr, SABnzbd, FileBrowser Quantum, autobrr, qui, PeerBanHelper and Maintainerr, installed and managed by `box`. Applications wired for minimal config, hardlink-friendly, and locked down by default. Your media server isn't a pet -- stop treating it like one.
 
 You never type `kubectl`. `box`, your familiar friend since 2017, finds or installs the cluster, asks
 you a few questions, and runs the stack. s5n is built on Kubernetes to address current
@@ -27,7 +27,7 @@ isolation, ease of upgrading _all the things_ and a way back when something brea
 - **A Kubernetes cluster.** Install out-of-scope projects easily in their own namespace, as long as they ship a container image.
 - **Hardlinks that just work.** One data layout for every app: imports are hardlinks, never copies, and no remote path mappings.
 - **Apps that already talk to each other.** qBittorrent, Prowlarr, the Arrs, Seerr and Tautulli come wired together, and box keeps them that way.
-- **Opt-in extras.** Lidarr, Bazarr, SABnzbd, qui, autobrr, PeerBanHelper and Maintainerr, off until you ask for them.
+- **Opt-in extras.** Lidarr, Bazarr, SABnzbd, FileBrowser Quantum, qui, autobrr, PeerBanHelper and Maintainerr, off until you ask for them.
 - **HD and 4K.** Sonarr and Radarr can each run a second instance for 4K, and Bazarr gets one per Arr pair.
 - **swizzin's own qBittorrent.** The project's builds on libtorrent 1.2 or 2.1, a 10G build of each, and one for AMD Zen 3, one line in your values away.
 - **One login in front of everything.** Sign in once at the gateway for qBittorrent, the Arrs, Prowlarr, Tautulli, autobrr and qui, with Tautulli's and PeerBanHelper's own logins switched off behind it, and a sign-in that lasts a week (an idle hour still ends it).

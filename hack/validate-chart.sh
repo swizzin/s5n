@@ -238,6 +238,25 @@ if helm template t charts/s5n -n seedbox -f charts/s5n/ci/default-values.yaml | 
 fi
 echo "== sabnzbd render: sealed settings and key, host whitelist, readiness; nothing when off"
 
+# FileBrowser Quantum's whole configuration is one config.yaml the chart owns:
+# the prefix the route keeps, its own auth off, the data contract as its one
+# source read-write, the database on the config claim and the cache on the pod's
+# emptyDir (the file index and the previews are regenerable; the config claim is
+# every app's settings). The default render carries none of it.
+fb=$(helm template t charts/s5n -n seedbox -f charts/s5n/ci/catalog-values.yaml)
+for want in 'name: filebrowser-config' 'config.yaml: |' 'baseURL: "/filebrowser"' \
+            'noauth: true' 'disableWebDAV: true' 'path: /data' \
+            'path: /config/database.sqlite' 'cacheDir: /cache' \
+            '- name: FILEBROWSER_CONFIG' 'mountPath: /config/config.yaml' \
+            'sizeLimit: 5Gi' 'path: /filebrowser/health'; do
+  grep -qF -- "$want" <<<"$fb" || { echo "the filebrowser render has no ${want}"; exit 1; }
+done
+if helm template t charts/s5n -n seedbox -f charts/s5n/ci/default-values.yaml | grep -qi 'filebrowser'; then
+  echo "the default render mentions filebrowser: an opt-in app must render nothing when it is off"
+  exit 1
+fi
+echo "== filebrowser render: sealed config, noauth, the data source, database and cache; nothing when off"
+
 # No app route keeps Envoy's 15s request timeout: an app behind the one login
 # is one person doing real work, and a long request (autobrr cleaning a large
 # releases database, an Arr's bulk edit or import) answered 504 by the gateway
