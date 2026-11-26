@@ -27,9 +27,8 @@ import (
 // The platform releases: where each chart comes from and what box calls the result.
 // The versions are the chart release's platform.yaml, so a bump moves one chart line.
 const (
-	// EnvoyGatewayChart is the Envoy Gateway chart, which ships the Gateway API CRDs at
-	// the channel it is built against: a separately pinned bundle could drift from the
-	// set the controller expects.
+	// EnvoyGatewayChart ships the Gateway API CRDs at the channel the controller is built
+	// against; a separately pinned bundle could drift from that set.
 	EnvoyGatewayChart     = "gateway-helm"
 	EnvoyGatewayRef       = "oci://docker.io/envoyproxy/gateway-helm"
 	EnvoyGatewayRelease   = "envoy-gateway"
@@ -41,9 +40,8 @@ const (
 	MetalLBRelease   = "metallb"
 	MetalLBNamespace = "metallb-system"
 
-	// CertManagerChart is the cert-manager chart, CRDs and Gateway API support
-	// included: the CRDs are what a Certificate is, and config.gatewayAPI.enabled is
-	// what lets the controller solve HTTP-01 through the Gateway's HTTPRoute.
+	// CertManagerChart ships its CRDs, and config.gatewayAPI.enabled is what lets it
+	// solve HTTP-01 through the Gateway's HTTPRoute.
 	CertManagerChart     = "cert-manager"
 	CertManagerRef       = "oci://quay.io/jetstack/charts/cert-manager"
 	CertManagerRelease   = "cert-manager"
@@ -78,18 +76,16 @@ const (
 	StepManifests StepKind = "manifests"
 	// StepPool is MetalLB's IPAddressPool/L2Advertisement, from the node's InternalIP.
 	StepPool StepKind = "metallb-pool"
-	// StepIssuers is cert-manager's two ClusterIssuers, retried like the MetalLB pool:
-	// the webhook's endpoint can be Ready while its server still refuses a
-	// connection.
+	// StepIssuers is cert-manager's two ClusterIssuers, retried like the pool: the
+	// webhook's endpoint can be Ready while its server still refuses.
 	StepIssuers StepKind = "cert-manager-issuers"
-	// StepGatewayAddress is the question the plan could not answer before the confirm:
-	// does the Gateway get an address without MetalLB? Its answer decides the
-	// conditional steps.
+	// StepGatewayAddress asks whether the Gateway gets an address without MetalLB; the
+	// answer decides the conditional steps.
 	StepGatewayAddress StepKind = "gateway-address"
 	// StepReachable is the Gateway's address answering HTTP from this host.
 	StepReachable StepKind = "gateway-reachable"
-	// StepFirewall is the host's packet filter where box installed k0s and firewalld
-	// runs: the cluster's networks are trusted before anything is installed behind it.
+	// StepFirewall trusts the cluster's networks where box installed k0s and firewalld
+	// runs, before anything is installed behind it.
 	StepFirewall StepKind = "host-firewall"
 )
 
@@ -107,8 +103,8 @@ type Wait struct {
 	Kind      WaitKind
 	Namespace string
 	Name      string
-	// Timeout bounds this wait when non-zero; otherwise the client's own bound
-	// applies. A caller with a shorter budget uses it.
+	// Timeout bounds this wait when non-zero, else the client's own bound; a caller with
+	// a shorter budget uses it.
 	Timeout time.Duration
 }
 
@@ -135,7 +131,7 @@ type Release struct {
 	Values  map[string]any
 }
 
-// Was is how the plan names a release.
+// String is how the plan names a release.
 func (r Release) String() string {
 	return fmt.Sprintf("%s %s (Helm, %s)", r.Name, r.Version, r.Namespace)
 }
@@ -150,37 +146,31 @@ type Step struct {
 	// means What.
 	Plan    string
 	Release Release
-	// Documents is the objects of a StepManifests step, already parsed and
-	// (for the Gateway) pointed at the chosen GatewayClass. Parsing at plan
-	// time keeps the apply path free of YAML.
+	// Documents are the step's objects, parsed and pointed at the chosen class at plan
+	// time, so the apply path is free of YAML.
 	Documents []map[string]any
 	Wait      []Wait
-	// Unless makes the step conditional on the question the plan cannot answer:
-	// MetalLB and its pool are skipped when the Gateway has an address without them.
+	// Unless makes the step conditional; MetalLB and its pool are skipped when the
+	// Gateway has an address without them.
 	Unless Condition
-	// Mode is the ownership a questioning step acts under: external must get an
-	// address from something box does not manage, auto's absence is box's to fix.
+	// Mode is the ownership a questioning step acts under: external's address comes from
+	// elsewhere, auto's absence is box's to fix.
 	Mode bootstrap.PlatformMode
-	// InstalledVersion is filled by resolution: what a deployed release has.
-	// AtPin(InstalledVersion, Release.Version) means verification only, no Helm call.
+	// InstalledVersion is what a deployed release has; at its pin, no Helm call.
 	InstalledVersion string
-	// Foreign marks a same-named release box did not install: never upgraded, and a
-	// conditional step that would have to run stops instead.
+	// Foreign marks a same-named release box did not install: never upgraded.
 	Foreign bool
-	// CIDRs are the networks a StepFirewall trusts, read by bootstrap from the k0s
-	// config it installed with.
+	// CIDRs are the networks a StepFirewall trusts, from bootstrap's k0s config.
 	CIDRs []string
 }
 
 // Plan is what bootstrap will apply, in order.
 type Plan struct {
 	Steps []Step
-	// Warnings are what box saw and will not change, printed with the plan so the
-	// operator reads them beside what box does do (a firewalld it does not own, with
-	// the commands that would open it).
+	// Warnings are what box saw and will not change, printed with the plan (a firewalld
+	// it does not own, with the commands that would open it).
 	Warnings []string
-	// NotHandled names decided installs box does not do, with the reason: printed,
-	// never silently dropped.
+	// NotHandled names decided installs box does not do: printed, never dropped.
 	NotHandled []string
 }
 
@@ -204,73 +194,62 @@ type Cluster interface {
 	Apply(ctx context.Context, docs []map[string]any) error
 	// Await blocks until the object is ready or the bound expires.
 	Await(ctx context.Context, w Wait) error
-	// CertificateReady answers a Certificate's Ready condition with cert-manager's
-	// reason. Bootstrap polls it for the box root; the per-host step reads it after a
-	// wait ran out.
+	// CertificateReady answers the Ready condition with cert-manager's reason; bootstrap
+	// polls it for the root, the per-host step reads it after a wait.
 	CertificateReady(ctx context.Context, namespace, name string) (bool, string, error)
 }
 
 // Releases is the Helm side.
 type Releases interface {
-	// Version returns a deployed release's chart version, whether box installed it (its
-	// ownership label), and false when it is not installed.
+	// Version is a deployed release's chart version and whether box owns it.
 	Version(ctx context.Context, name, namespace string) (version string, owned, exists bool, err error)
-	// Install installs or upgrades the release, waits for its workloads and stamps
-	// box's ownership label.
+	// Install installs or upgrades the release, waits, and stamps box's label.
 	Install(ctx context.Context, spec Release) error
 }
 
-// Firewall is the one step that changes the host's filter: the networks into
-// firewalld's trusted zone, permanently and now (bootstrap.Firewalld). Reading it is
-// bootstrap's.
+// Firewall is the one step that changes the host's filter, permanently and now
+// (bootstrap.Firewalld); reading it is bootstrap's.
 type Firewall interface {
 	Trust(ctx context.Context, cidrs []string) error
 }
 
-// Confirmer asks the one question before the first write. def is a bare enter's
-// answer; the platform layer is asked with no, since it changes a running host.
+// Confirmer asks the one question before the first write; the platform layer is asked
+// with no, since it changes a running host.
 type Confirmer interface {
 	Ask(question string, def bool) (bool, error)
 }
 
 // Decision is one `box bootstrap`'s platform half.
 type Decision struct {
-	// Open builds the cluster client, contacting nothing, and is called only when
-	// something will be read or written.
+	// Open builds the cluster client, contacting nothing, only when something is read or
+	// written.
 	Open     func() (Cluster, error)
 	Releases Releases
-	// Probe builds the Gateway probe, only from a step that needs it (after the
-	// confirm), and contacts nothing.
+	// Probe builds the Gateway probe only from a step that needs it, contacting nothing.
 	Probe   func() (GatewayProbe, error)
 	Confirm Confirmer
-	// Say is every line the decision writes; nil writes nothing. Policy stays here --
-	// only how a plan, a wait and a finished step look is the reporter's.
+	// Say is every line; policy stays here, appearance is the reporter's.
 	Say say.Reporter
-	// GatewayClass is the class bootstrap chose. The Gateway box applies attaches to
-	// it; the class itself is created only when this run installs the implementation.
+	// GatewayClass is the class bootstrap chose; the class is created only when this run
+	// installs the implementation.
 	GatewayClass string
-	// Pins is the chart release's platform pins: the versions this plan installs. A
-	// plan cannot be built without them, and they are the release's rather than this
-	// package's, so a platform patch is a chart release.
+	// Pins is the release's platform pins: the versions this plan installs, a platform
+	// patch being a chart release.
 	Pins release.Versions
-	// Firewall is what bootstrap found about the packet filter: whether firewalld
-	// runs, the networks box will trust, or the warning for a host box does not
-	// change.
+	// Firewall is what bootstrap found: firewalld running, the networks to trust, or the
+	// warning for a host box does not change.
 	Firewall bootstrap.FirewallState
-	// HostFirewall carries out a StepFirewall, reached only on a host where box
-	// installed k0s.
+	// HostFirewall carries out a StepFirewall, only where box installed k0s.
 	HostFirewall Firewall
-	// ACMEServer points the s5n-letsencrypt issuer at another ACME directory; empty in
-	// every real run, it exists for the e2e's Pebble, which has no production URL and
-	// a self-signed certificate.
+	// ACMEServer points s5n-letsencrypt elsewhere; empty in every real run, it exists for
+	// the e2e's Pebble.
 	ACMEServer string
-	// CallerConfirms says the flow shows the plan and asks the question itself: a
-	// migration puts the platform plan in its single confirm, and asking twice is the
-	// form that run exists to remove.
+	// CallerConfirms says the flow shows the plan and asks itself, as a migration's
+	// single confirm does.
 	CallerConfirms bool
 
-	// AddressTimeout is how long the Gateway gets to say it has no address before
-	// MetalLB is installed; zero means AddressTimeout.
+	// AddressTimeout is how long the Gateway has to say it has no address; zero means
+	// the constant.
 	AddressTimeout time.Duration
 	// ProbeTimeout is the whole wait for the Gateway to be Programmed; zero means
 	// ProbeTimeout.
@@ -278,14 +257,12 @@ type Decision struct {
 	// ReachTimeout is how long that address gets to answer HTTP; zero means
 	// ReachTimeout.
 	ReachTimeout time.Duration
-	// PoolTimeout bounds how long the MetalLB webhook may refuse its pool.
-	// Zero means two minutes.
+	// PoolTimeout bounds the MetalLB webhook refusing its pool; zero means two minutes.
 	PoolTimeout time.Duration
-	// WebhookTimeout bounds how long cert-manager's webhook may refuse the
-	// first ClusterIssuer apply. Zero means two minutes.
+	// WebhookTimeout bounds cert-manager's webhook refusing the first issuer apply; zero
+	// means two minutes.
 	WebhookTimeout time.Duration
-	// RootTimeout bounds the wait for box's root Certificate before the CA issuer that
-	// signs with it is applied; zero means RootTimeout.
+	// RootTimeout bounds the root Certificate's wait before the CA issuer is applied.
 	RootTimeout time.Duration
 	// Poll is how often a refused pool is retried. Zero means two seconds.
 	Poll time.Duration
