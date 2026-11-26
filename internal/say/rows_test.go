@@ -10,9 +10,8 @@ import (
 	"time"
 )
 
-// The gutter and the columns: one mark, the name padded to the fixed column,
-// and the facts after it. A note has no name, so its text starts in the gutter's
-// own column; a refusal's reason and a row's command hang under the text.
+// The gutter and the columns: a note's text starts in the gutter's own column, and
+// a refusal's reason and a row's command hang under the text.
 func TestPlainRows(t *testing.T) {
 	var buf bytes.Buffer
 	p := &Plain{W: &buf}
@@ -40,8 +39,7 @@ func TestPlainRows(t *testing.T) {
 	}
 }
 
-// A row with no mark is a note: nothing is left blank where a mark would be, and
-// nothing is left dangling where a name would be.
+// A row with no mark is a note: no blank where a mark would be.
 func TestPlainRowDefaultsTheMark(t *testing.T) {
 	var buf bytes.Buffer
 	p := &Plain{W: &buf}
@@ -53,7 +51,7 @@ func TestPlainRowDefaultsTheMark(t *testing.T) {
 }
 
 // A name wider than the column takes the column with it: a truncated name is a
-// different name, and the facts still start one column past the longest one.
+// different name.
 func TestPlainRowKeepsALongNameWhole(t *testing.T) {
 	var buf bytes.Buffer
 	p := &Plain{W: &buf}
@@ -64,8 +62,8 @@ func TestPlainRowKeepsALongNameWhole(t *testing.T) {
 	}
 }
 
-// Durations are numbers a person reads: 41s, 6s, 4m10s, 10m -- no trailing
-// zeros, and no unit a person does not need.
+// Durations are numbers a person reads: no trailing zeros, no unit they do not
+// need.
 func TestDuration(t *testing.T) {
 	cases := []struct {
 		d    time.Duration
@@ -87,9 +85,8 @@ func TestDuration(t *testing.T) {
 	}
 }
 
-// A waiting step's source is sampled, and only a line it has not already given
-// is new: a log that repeats itself for four minutes adds four minutes of noise
-// to the transcript otherwise.
+// Only a line the source has not already given is new: one that repeats itself for
+// four minutes would otherwise add four minutes of noise.
 func TestWatcherSaysEachLineOnce(t *testing.T) {
 	lines := []string{"pulling", " pulling ", "starting", "", "starting", "ready"}
 	i := 0
@@ -112,9 +109,8 @@ func TestWatcherSaysEachLineOnce(t *testing.T) {
 	}
 }
 
-// A named step ends as a row: the name in its column, what it did beside it, and
-// how long it took. The transcript never wraps, so the row is the same bytes
-// whatever the terminal was.
+// A named step ends as a row: what it did, and how long it took, in fixed
+// columns.
 func TestPlainNamedStepEndsAsARow(t *testing.T) {
 	var buf bytes.Buffer
 	p := &Plain{W: &buf}
@@ -135,8 +131,8 @@ func TestPlainNamedStepEndsAsARow(t *testing.T) {
 	}
 }
 
-// A named wait puts each new line from its source in the log and nowhere else:
-// a transcript has no line to redraw, so the screen only sees the finish.
+// A named wait puts each new source line in the log and nowhere else: a transcript
+// has no line to redraw.
 func TestPlainWaitSamplesIntoTheLogOnly(t *testing.T) {
 	var screen, log bytes.Buffer
 	p := &Plain{W: &screen, Log: &log, Sample: 5 * time.Millisecond}
@@ -167,8 +163,7 @@ func TestPlainWaitSamplesIntoTheLogOnly(t *testing.T) {
 	}
 }
 
-// A failure is the one ✗ row: the subject in its column, the refusal beside it,
-// the reason under it -- and a failed run's last line is where its log is.
+// A failure is the one ✗ row, and a failed run's last line is where its log is.
 func TestPlainErrorIsOneRowAndTheLogPath(t *testing.T) {
 	var buf bytes.Buffer
 	p := &Plain{W: &buf, LogPath: "/var/log/box/update-20261123T075500Z.log"}
@@ -187,8 +182,8 @@ func TestPlainErrorIsOneRowAndTheLogPath(t *testing.T) {
 	}
 }
 
-// An error a flow has already drawn says nothing more, and the log's path is
-// still the last line: the run failed, and the transcript is where the rest is.
+// An error a flow already drew says nothing more, and the log's path is still the
+// last line.
 func TestPlainReportedErrorOnlyNamesTheLog(t *testing.T) {
 	var buf bytes.Buffer
 	p := &Plain{W: &buf, LogPath: "/var/log/box/update-20260101T000000Z.log"}
@@ -198,8 +193,7 @@ func TestPlainReportedErrorOnlyNamesTheLog(t *testing.T) {
 	}
 }
 
-// A run with no log says nothing about one, and a run with a log keeps the
-// screen and the transcript in step: every line, twice.
+// A run with a log keeps the screen and the transcript in step: every line, twice.
 func TestPlainWritesTheScreenAndTheLog(t *testing.T) {
 	var screen, log bytes.Buffer
 	p := &Plain{W: &screen, Log: &log}
@@ -213,11 +207,8 @@ func TestPlainWritesTheScreenAndTheLog(t *testing.T) {
 	}
 }
 
-// A block is read down a column: one name wider than the built-in column
-// widens the whole block, so the rows after it keep their facts in the same
-// column instead of drifting two columns to the right (rule 1). It is what
-// `admission policies` needed: every row of a run starts its facts in one
-// place, or none of them do.
+// A block is read down a column: one long name widens the whole block, so every
+// row's facts start in the same place, or none of them do (rule 1).
 func TestPlainRowsWidenTheWholeBlock(t *testing.T) {
 	var buf bytes.Buffer
 	p := &Plain{W: &buf}
@@ -237,9 +228,8 @@ func TestPlainRowsWidenTheWholeBlock(t *testing.T) {
 	}
 }
 
-// Rows that differ only by their name are one fact and its size: the group's
-// name, the shared fact with the count on it, and the rest of the facts as they
-// were. Four names with one decision are one line, not four.
+// Rows that differ only by name are one fact and its size: four names with one
+// decision are one line, not four.
 func TestFoldIsOneRowForNamesThatShareTheirFacts(t *testing.T) {
 	rows := []Row{
 		{Mark: MarkNote, Name: "box.example.test", Facts: []string{"Let's Encrypt", "tls.issuer=letsencrypt"}},
@@ -263,9 +253,8 @@ func TestFoldIsOneRowForNamesThatShareTheirFacts(t *testing.T) {
 	}
 }
 
-// A fold of one is the row itself, and rows that differ in anything but the
-// name are not folded at all: a different reason or a different mark is a
-// different fact, and counting them would lose it.
+// A fold of one is the row itself, and rows differing in anything but the name are
+// not folded: counting them would lose the difference.
 func TestFoldLeavesWhatDiffers(t *testing.T) {
 	one := []Row{{Mark: MarkNote, Name: "box.example.test", Facts: []string{"Let's Encrypt"}}}
 	if got := Fold("certificates", "host", one); len(got) != 1 || got[0].Name != "box.example.test" {
@@ -280,9 +269,8 @@ func TestFoldLeavesWhatDiffers(t *testing.T) {
 	}
 }
 
-// What a run leaves a person is one block at its end: the label carries the one
-// mark, each row says what is left, and the command that clears it hangs under
-// the row it belongs to (rules 1 and 3).
+// What a run leaves a person is one block at its end: one mark on the label, and
+// each command under the row it belongs to (rules 1 and 3).
 func TestPlainToFinishIsOneBlock(t *testing.T) {
 	var buf bytes.Buffer
 	p := &Plain{W: &buf}
@@ -301,8 +289,7 @@ func TestPlainToFinishIsOneBlock(t *testing.T) {
 	if got := buf.String(); got != want {
 		t.Fatalf("block:\n%s\nwant:\n%s", got, want)
 	}
-	// A run with nothing left prints nothing at all: no empty label, no
-	// heading with no rows.
+	// A run with nothing left prints nothing: no empty label.
 	buf.Reset()
 	p.ToFinish(nil)
 	if buf.String() != "" {

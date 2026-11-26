@@ -1,19 +1,12 @@
-// Package theme is box's colours: seven named light/dark pairs, as plain data.
+// Package theme is box's colours: seven named light/dark pairs, as plain data --
+// hex strings and names, no lipgloss, huh or Bubble Tea, because the chart's
+// portal page and the dashboard read the same palettes.
 //
-// Nothing here imports lipgloss, huh or Bubble Tea, because the same names are
-// read by more than the terminal: the chart's portal page and the dashboard
-// carry the palettes too. A theme is therefore hex strings and names, and the
-// TUI turns them into styles.
-//
-// A theme is a PAIR, not one palette. box does not own the terminal's
-// background, so which variant is right depends on what the terminal is
-// painting behind it; a variant is also selectable on its own, for an operator
-// who knows what they want. See Parse.
-//
-// Every contrast threshold in themes_test.go is met by the data here. Where an
-// upstream palette's own value did not reach one, the value was changed and the
-// change is noted on the field with the ratio that made it necessary; no
-// threshold was lowered.
+// A theme is a PAIR, not one palette: box does not own the terminal's background,
+// so the right variant depends on what the terminal paints behind it, and a
+// variant can be pinned on its own (see Parse). Every contrast threshold in
+// themes_test.go is met by this data; where an upstream value did not reach one it
+// was changed, and the field notes the ratio; no threshold was lowered.
 package theme
 
 import (
@@ -21,13 +14,10 @@ import (
 	"strings"
 )
 
-// Palette is one variant's colours, as #rrggbb strings.
-//
-// The eight are the whole vocabulary the TUI needs: BG and FG are the ground
-// and the words, Muted is explanation, Dim is furniture that should be seen and
-// not read (the masthead's unlit pieces), Accent is the one loud colour, Good
-// and Bad are the two verdicts, and OnAccent is what is drawn on top of an
-// accent fill.
+// Palette is one variant's colours, as #rrggbb strings: the eight the TUI needs.
+// BG and FG are the ground and the words, Muted explanation, Dim furniture seen
+// not read (the masthead's unlit pieces), Accent the one loud colour, Good and Bad
+// the two verdicts, OnAccent what is drawn on an accent fill.
 type Palette struct {
 	BG       string
 	FG       string
@@ -39,11 +29,9 @@ type Palette struct {
 	OnAccent string
 }
 
-// Variant is a palette and the name it is selected by within its pair.
-//
-// The name is a suffix, not a sentence: catppuccin's two variants are "mocha"
-// and "latte", so the pair selects "catppuccin" and a person pins
-// "catppuccin-mocha". Names are the upstream palette's own where it has them.
+// Variant is a palette and the name it is selected by within its pair: a suffix,
+// so a person pins "catppuccin-mocha". Names are the upstream palette's own where
+// it has them.
 type Variant struct {
 	Name string
 	Palette
@@ -58,21 +46,15 @@ type Theme struct {
 }
 
 // themes is the registry, in the order the error message lists it: the default
-// first, then the palettes it was chosen against.
-//
-// Comments name the source and the tag each palette was read from, because the
-// values are the only thing that makes a theme recognisable and a hand-edited
-// one is a bug report waiting to happen.
+// first. Comments name each palette's source, because the values are the only
+// thing that makes a theme recognisable.
 //
 //nolint:goconst // palette data mirrors the upstream tables; a value repeated across two palettes is a coincidence of those tables, not a shared meaning worth a name.
 var themes = []Theme{
 	{
-		// s5n is ours, from the brand notes: the mark's mint on the mark's
-		// ink. The light variant is derived rather than upstream — mint
-		// #3DD6B5 on white is 1.5:1, so the light accent is the same hue
-		// taken down to #0B7F6C (4.62:1). Amber was the old accent and is
-		// gone: it sat too close to Plex's orange to be told apart in a
-		// terminal.
+		// s5n is ours, from the brand notes: the mark's mint on the mark's ink.
+		// The light variant is derived: mint #3DD6B5 on white is 1.5:1, so the
+		// light accent is the same hue at #0B7F6C (4.62:1).
 		Name: "s5n",
 		Dark: Variant{Name: "dark", Palette: Palette{
 			BG:       "#11161B",
@@ -113,11 +95,9 @@ var themes = []Theme{
 			OnAccent: "#222222",
 		}},
 		// Flatly: bg $white, fg $gray-900 #212529, dim $gray-200 #ECF0F1,
-		// bad $danger #E74C3C.
-		// Muted is $gray-700 #7B8A8B darkened to #6B797A: 3.59:1 on white,
-		// and the next value up is $gray-800, which reads as text. Accent and
-		// good are $success #18BC9C darkened to #11866F: 2.41:1 on white is
-		// unreadable, and darkening keeps Flatly's teal where taking $primary
+		// bad $danger #E74C3C. Muted is $gray-700 #7B8A8B darkened to #6B797A
+		// (3.59:1 on white; $gray-800 reads as text). Accent and good are
+		// $success #18BC9C darkened to #11866F: 2.41:1 is unreadable, and $primary
 		// #2C3E50 would have made swizzin's light side navy.
 		// https://github.com/thomaspark/bootswatch/blob/v5.3.8/dist/flatly/_variables.scss
 		Light: Variant{Name: "flatly", Palette: Palette{
@@ -159,15 +139,12 @@ var themes = []Theme{
 		}},
 	},
 	{
-		// Solarized, from the vim palette's own table.
+		// Solarized, from the vim palette's own table:
 		// https://github.com/altercation/solarized/blob/master/vim-colors-solarized/colors/solarized.vim
-		//
-		// Solarized is deliberately low contrast, and neither side's own body
-		// text reaches 7:1: base1 #93A1A1 on base03 is 5.61:1, base01 #586E75
-		// on base3 is 4.99:1. Each foreground is the nearest of its side's own
-		// values that does, nudged along its own hue instead of jumping to
-		// base2/base02, which would have made solarized into a high-contrast
-		// theme wearing solarized's colours.
+		// It is deliberately low contrast and neither side's body text reaches
+		// 7:1 (base1 on base03 is 5.61:1, base01 on base3 4.99:1), so each
+		// foreground is the nearest own value nudged along its hue, not a jump to
+		// base2/base02 that would be a high-contrast theme wearing these colours.
 		Name: "solarized",
 		Dark: Variant{Name: "dark", Palette: Palette{
 			BG:       "#002B36",

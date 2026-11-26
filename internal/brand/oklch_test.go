@@ -6,18 +6,18 @@ import (
 )
 
 // The OKLCH conversion below exists only so a test can recompute Authelia's page
-// colours from its own CSS (oklch values) and catch them drifting from the hex
-// the contrast checks use. Nothing box draws needs it.
+// colours from its own CSS and catch them drifting from the hex the contrast
+// checks use; nothing box draws needs it.
 
-// srgbOfOKLCH is the colour at one lightness with a hue and chroma, chroma
-// reduced as far as the sRGB gamut needs so the result is a colour and not a
-// clamped one wearing its hue.
+// srgbOfOKLCH is the colour at one lightness with a hue and chroma, the chroma
+// reduced to the sRGB gamut so the result is a colour and not a clamped one
+// wearing its hue.
 func srgbOfOKLCH(l, chroma, hue float64) color.NRGBA {
 	rad := hue * math.Pi / 180
 	cos, sin := math.Cos(rad), math.Sin(rad)
 
-	// The largest chroma that stays inside the gamut, by bisection: 30 steps
-	// resolve far below an 8-bit channel.
+	// The largest in-gamut chroma, by bisection: 30 steps resolve far below an
+	// 8-bit channel.
 	lo, hi := 0.0, chroma
 	for i := 0; i < 30; i++ {
 		mid := (lo + hi) / 2

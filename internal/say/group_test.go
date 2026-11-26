@@ -6,10 +6,9 @@ import (
 	"testing"
 )
 
-// A block with columns is a table: the heading in the first column, one column
-// heading over the facts it names, and every row's facts starting in the same
-// column down the block. The words in the last column wrap under their own
-// column, so a row that says a lot is still a row (rule 7).
+// A block with columns is a table, every row's facts starting in the same
+// column; the last column wraps under itself, so a wordy row is still a row
+// (rule 7).
 func TestPlainGroupIsOneTable(t *testing.T) {
 	var buf bytes.Buffer
 	p := &Plain{W: &buf}
@@ -35,8 +34,8 @@ func TestPlainGroupIsOneTable(t *testing.T) {
 	}
 }
 
-// A block with no columns is a list: the same marks, each row's facts joined
-// into the one sentence they are, wrapped under the column the facts start in.
+// A block with no columns is a list: one sentence per row, wrapped under the
+// column its facts start in.
 func TestPlainGroupWithoutColumnsIsAList(t *testing.T) {
 	var buf bytes.Buffer
 	p := &Plain{W: &buf}
@@ -54,9 +53,8 @@ func TestPlainGroupWithoutColumnsIsAList(t *testing.T) {
 	}
 }
 
-// A note belongs to the block above it: two columns in, wrapped with the
-// continuation indented past the text, so a footer is one note and not a
-// paragraph against the margin.
+// A note belongs to the block above it: two columns in, its continuation indented
+// past the text, so a footer is one note and not a paragraph against the margin.
 func TestPlainNoteHangsUnderItsText(t *testing.T) {
 	var buf bytes.Buffer
 	p := &Plain{W: &buf}
