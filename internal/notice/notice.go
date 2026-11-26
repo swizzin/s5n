@@ -1,17 +1,11 @@
-// Package notice is the one message box posts when something happened to a
-// seedbox: a step passed, an app was put back, a step stopped, an app became
-// unhealthy or healthy again.
+// Package notice is the one message box posts when something happens to a
+// seedbox. The body is JSON: the human sentence in text (Slack, Mattermost)
+// and content (Discord), plus structured fields. Posting is one attempt, and a
+// failed delivery never fails the update it is about.
 //
-// A body is JSON with the human sentence in both text (Slack, Mattermost) and
-// content (Discord), plus the fields a script would want: what moved, from what
-// to what, which gate, and the command that answers an unhealthy app. Posting is
-// one attempt with a short timeout, and a delivery that fails never fails the
-// update it is about -- the update happened either way.
-//
-// The address is a secret: it is box.yaml's, mode 0600, and the only part of it
-// this package ever prints is the scheme and host (hostconf.Redact). net/http's
-// own errors print the whole URL, query included, so every error here is cleaned
-// before it is returned.
+// The address is box.yaml's secret (0600). Only hostconf.Redact may print it:
+// net/http's *url.Error embeds the whole URL, query included, so every error is
+// cleaned before it is returned.
 package notice
 
 import (
@@ -30,8 +24,8 @@ import (
 	"github.com/swizzin/s5n/internal/hostconf"
 )
 
-// The events a notice reports. They are the words a receiver's rules are
-// written against, so they are stable.
+// The events a notice reports; receivers' rules are written against these
+// words, so they are stable.
 const (
 	EventUpdated    = "updated"
 	EventRolledBack = "rolled-back"
@@ -40,9 +34,8 @@ const (
 	EventHealthy    = "healthy"
 )
 
-// DefaultTimeout bounds one post. A notice about a step that passed must not
-// hold the run open when the receiver is down: the update is the work, the
-// notice is the telling.
+// DefaultTimeout bounds one post: the update is the work, the notice is the
+// telling.
 const DefaultTimeout = 10 * time.Second
 
 // Options are what every notice about this host says about it.
@@ -74,14 +67,12 @@ type Notice struct {
 	Error   string `json:"error,omitempty"`
 	Command string `json:"command,omitempty"`
 	// Text and Content are the same sentence: Slack and Mattermost read text,
-	// Discord reads content, and a person reading either should see box's own
-	// words rather than a rendering of the fields.
+	// Discord reads content.
 	Text    string `json:"text"`
 	Content string `json:"content"`
 }
 
-// Updated is a step that passed: the releases it moved between and the apps it
-// moved, each with the image it was on and the one it now runs.
+// Updated is a step that passed: the releases and the apps it moved.
 func Updated(o Options, name, from, to string, apps []App) Notice {
 	n := Notice{Event: EventUpdated, Box: o.Box, Seedbox: o.Seedbox, From: from, To: to, Apps: apps}
 	line := subject(o) + name + " " + from + " → " + to
@@ -92,8 +83,7 @@ func Updated(o Options, name, from, to string, apps []App) Notice {
 	return n
 }
 
-// RolledBack is one app box put back on the image it ran, because the new one
-// kept exiting.
+// RolledBack is one app box put back on the image it ran.
 func RolledBack(o Options, name, app, from, to string) Notice {
 	n := Notice{Event: EventRolledBack, Box: o.Box, Seedbox: o.Seedbox, Apps: []App{{App: app, From: to, To: from}}}
 	line := subject(o) + name + ": " + app + " rolled back"
@@ -108,8 +98,8 @@ func RolledBack(o Options, name, app, from, to string) Notice {
 	return n
 }
 
-// Stopped is a step that did not pass: which gate, what it said, and the release
-// the box is on now -- the last of which is what someone acts on.
+// Stopped is a step that did not pass: the gate, what it said, and the release
+// the box is on now.
 func Stopped(o Options, name, from, to, gate, reason, on string) Notice {
 	n := Notice{Event: EventStopped, Box: o.Box, Seedbox: o.Seedbox, From: from, To: to, Gate: gate, Error: reason}
 	line := subject(o) + name + " " + from + " → " + to + " stopped"
@@ -128,9 +118,8 @@ func Stopped(o Options, name, from, to, gate, reason, on string) Notice {
 	return n
 }
 
-// Health is an app's readiness changing. An unhealthy one names the command that
-// answers it: the rollback when box has a copy of what the app ran, the logs
-// otherwise. A healthy one says it is serving again.
+// Health is an app's readiness changing; an unhealthy one names the command
+// that answers it.
 func Health(o Options, app string, ready bool, reason, command string) Notice {
 	event := EventHealthy
 	line := subject(o) + app + " is ready again"
@@ -163,9 +152,8 @@ func subject(o Options) string {
 	return o.Box + ": "
 }
 
-// appMoves is the parenthesised list of what moved: "sonarr 4.0.14 → 4.0.15".
-// An app whose images box could not name is its name alone, which is honest
-// about knowing the app moved and not what it moved from.
+// appMoves is the parenthesised list of what moved; an app whose images box
+// could not name is its name alone.
 func appMoves(apps []App) string {
 	parts := make([]string, 0, len(apps))
 	for _, app := range apps {
@@ -185,11 +173,9 @@ type Reading struct {
 	Reason string
 }
 
-// Flips returns the apps whose readiness changed between two readings, sorted. A
-// reason that changed alone is not a change: an app that is still not ready is
-// still one notice, not one per wake. A box with no earlier reading has no flips
-// at all -- its first reading is recorded silently, because a box's first wake
-// should not be a page about every app it runs.
+// Flips returns the apps whose readiness changed between two readings, sorted.
+// A changed reason alone is not a change, and a box with no earlier reading has
+// no flips: its first wake should not page about every app it runs.
 func Flips(before, now map[string]Reading) []string {
 	if len(before) == 0 {
 		return nil
@@ -198,8 +184,7 @@ func Flips(before, now map[string]Reading) []string {
 	for app, h := range now {
 		old, ok := before[app]
 		if !ok {
-			// An app enabled since the last wake: there is nothing it changed
-			// from.
+			// An app enabled since the last wake has nothing it changed from.
 			continue
 		}
 		if old.Ready != h.Ready {
@@ -219,9 +204,8 @@ type Poster struct {
 	Client *http.Client
 }
 
-// Post sends one notice as JSON, once. A failure is the caller's to warn about:
-// the update happened, and a notice that cannot be delivered must not turn it
-// into a failed one. Every error names the address by Redact alone.
+// Post sends one notice as JSON, once. A failure is the caller's to warn about,
+// and every error names the address by Redact alone.
 func (p Poster) Post(ctx context.Context, n Notice) error {
 	if strings.TrimSpace(p.URL) == "" {
 		return nil
@@ -240,8 +224,7 @@ func (p Poster) Post(ctx context.Context, n Notice) error {
 		return fmt.Errorf("posting a notice: %s", p.clean(err))
 	}
 	defer resp.Body.Close()
-	// The answer's body is not box's: drain it so the connection can be reused,
-	// and say only the status.
+	// Drain the answer's body so the connection can be reused; say only the status.
 	_, _ = io.Copy(io.Discard, resp.Body)
 	if resp.StatusCode < 200 || resp.StatusCode > 299 {
 		return fmt.Errorf("posting a notice to %s: %s", hostconf.Redact(p.URL), resp.Status)
@@ -249,9 +232,8 @@ func (p Poster) Post(ctx context.Context, n Notice) error {
 	return nil
 }
 
-// clean is an error with the address taken out of it. net/http wraps every
-// transport failure in a *url.Error whose message is the whole URL, query
-// included, and the query is the token: the wrapped error is what gets printed.
+// clean takes the address out of an error: net/http wraps every transport
+// failure in a *url.Error whose message is the whole URL, query included.
 func (p Poster) clean(err error) string {
 	var uerr *url.Error
 	if errors.As(err, &uerr) {
