@@ -24,7 +24,6 @@ type Stop struct {
 }
 
 // Stops groups what is still running into one command per namespace and kind,
-// in a fixed order so two runs read the same way.
 func Stops(running []Running) []Stop {
 	index := map[string]*Stop{}
 	var order []string
@@ -77,9 +76,6 @@ func (s Stop) Command(kubectl string) string {
 }
 
 // Kubectl is how this cluster's kubectl is spelled: the distribution's own
-// wrapper where the source's nodes say which one installed it, and plain
-// kubectl where they do not. It is printed for a person on the host to run, so
-// it carries the sudo a distribution's wrapper needs.
 func Kubectl(nodes []Node) string {
 	switch Distribution(nodes) {
 	case K0s:

@@ -27,33 +27,28 @@ type Staged struct {
 }
 
 // copyTree copies src into dst, which must not exist: modes and mtimes kept, every
-// entry owned by uid:gid, directory times set after their children.
 func copyTree(dst, src string, uid, gid int) (Staged, error) {
 	return copy(dst, src, uid, gid, false, true)
 }
 
 // copyForCheck copies a tree for a read-only pass, from a source that may still be
-// running: a socket or fifo is left out and reported, as an archive's copy does.
 func copyForCheck(dst, src string, uid, gid int) (Staged, error) {
 	return copy(dst, src, uid, gid, true, true)
 }
 
 // measureTree copies for measurement only: no owner is needed, and it is what the
-// pre-install summary counts.
 func measureTree(dst, src string) (Staged, error) {
 	return copy(dst, src, 0, 0, false, false)
 }
 
 // copyFiles copies the named files with their directories, under copyTree's rules;
 // a missing one is not a refusal, since a -wal exists only while the database is
-// open.
 func copyFiles(dst, src string, files []string, uid, gid int) (Staged, error) {
 	c := &copier{dst: dst, src: src, uid: uid, gid: gid, skipKernel: true, own: true}
 	return c.files(src, files)
 }
 
 // measureFiles is copyFiles for a pass that throws the copy away: the same files,
-// counted, with no owner handed to anybody (measureTree's rule).
 func measureFiles(dst, src string, files []string) (Staged, error) {
 	c := &copier{dst: dst, src: src, skipKernel: true}
 	return c.files(src, files)
@@ -354,7 +349,6 @@ func emptyTree(path string) (bool, error) {
 }
 
 // removeEmptyTree removes empty directories only: os.Remove fails if one stopped
-// being empty, so a file that appears is an error rather than deleted.
 func removeEmptyTree(path string) error {
 	entries, err := os.ReadDir(path)
 	if err != nil {
@@ -372,7 +366,6 @@ func removeEmptyTree(path string) error {
 }
 
 // isDir reports whether path is a directory, without an error: callers are
-// asking a yes/no question about a path the operator named.
 func isDir(path string) bool {
 	info, err := os.Stat(path)
 	return err == nil && info.IsDir()

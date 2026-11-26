@@ -39,7 +39,6 @@ const (
 )
 
 // CatalogApp is an instance's app ("sonarr-4k" is sonarr), discovery's naming read
-// backwards; the catalog is the chart's list, so a new app needs no table here.
 func CatalogApp(instance string, catalog []string) string {
 	best := ""
 	for _, app := range catalog {
@@ -59,7 +58,6 @@ func CatalogApp(instance string, catalog []string) string {
 }
 
 // Suffix is the instance's own part ("4k" for sonarr-4k), the chart's list key
-// (s5n.instances).
 func Suffix(instance, app string) string {
 	if app == "" || instance == app {
 		return ""
@@ -68,7 +66,6 @@ func Suffix(instance, app string) string {
 }
 
 // CatalogRuns is the plan's instances by catalog app, what a rewriter answers Sole
-// from.
 func CatalogRuns(p *plan.Plan, catalog []string) map[string][]string {
 	out := make(map[string][]string, len(p.Apps))
 	for _, name := range sortedPlanApps(p) {
@@ -82,7 +79,6 @@ func CatalogRuns(p *plan.Plan, catalog []string) map[string][]string {
 }
 
 // sortedPlanApps is a plan's instance names, sorted, so CatalogRuns reads the
-// same way twice.
 func sortedPlanApps(p *plan.Plan) []string {
 	out := make([]string, 0, len(p.Apps))
 	for name := range p.Apps {
@@ -121,7 +117,6 @@ func Instances(values map[string]any) []string {
 }
 
 // joinInstance is the chart's name for one instance (s5n.instances: ternary
-// `empty $i.suffix`).
 func joinInstance(app, suffix string) string {
 	if suffix == "" {
 		return app
@@ -130,7 +125,6 @@ func joinInstance(app, suffix string) string {
 }
 
 // Categories is each instance's library directory from the values, on or off: a
-// migration switches its instances on after the read.
 func Categories(values map[string]any) map[string]string {
 	apps, _ := values["apps"].(map[string]any)
 	out := map[string]string{}
@@ -154,7 +148,6 @@ func Categories(values map[string]any) map[string]string {
 }
 
 // EnabledIn reports whether an instance is both present and on; an app on with its
-// 4K entry off runs one Sonarr.
 func EnabledIn(values map[string]any, instance string) bool {
 	for _, name := range Instances(values) {
 		if name == instance {
@@ -165,8 +158,6 @@ func EnabledIn(values map[string]any, instance string) bool {
 }
 
 // urlBase is the chart's base per app: /<instance> for most, /<instance>/ for
-// autobrr, whose router mounts at base plus the rest, and none for qBittorrent,
-// Plex, Seerr and PeerBanHelper. ok is false for an unknown app, since guessing ""
 // would answer at the wrong path.
 func urlBase(app, instance string) (string, bool) {
 	switch app {
@@ -183,7 +174,6 @@ func urlBase(app, instance string) (string, bool) {
 }
 
 // Targets is where every instance answers: the chart's Service, its port and base.
-// The port comes from the values, which an operator may have changed.
 func Targets(values map[string]any, catalog, names []string) (map[string]rewrite.Endpoint, error) {
 	apps, _ := values["apps"].(map[string]any)
 	out := make(map[string]rewrite.Endpoint, len(names))
@@ -207,7 +197,6 @@ func Targets(values map[string]any, catalog, names []string) (map[string]rewrite
 }
 
 // Image is the app's rendered image, resolved as _helpers.tpl does: variant, then a
-// pinned digest or tag. It is the exact reference the pod gets.
 func Image(variants []byte, values map[string]any, app string) (string, error) {
 	images, err := admission.Images(variants)
 	if err != nil {
@@ -269,7 +258,6 @@ func sortStrings(s []string) {
 
 // WiringImage resolves the s5n image the release's Job and probe pods run, as the
 // template does; a probe is a pod in a seedbox namespace, so it must be an image
-// the blessed-image policy admits.
 func WiringImage(variants []byte, appVersion string, values map[string]any) (string, error) {
 	images, err := admission.Images(variants)
 	if err != nil {

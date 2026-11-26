@@ -48,7 +48,6 @@ func (v AppVersion) Cell() string {
 }
 
 // versionOf reads one app's pair: the image the source ran, from the plan, and
-// the image this release runs for it, from the chart.
 func versionOf(instance, source, release string) AppVersion {
 	v := AppVersion{App: instance, Source: tagVersion(source), Box: tagVersion(release)}
 	_, sourceOK := parseVersion(source)
@@ -77,7 +76,6 @@ func Versions(p *plan.Plan, catalog []string, image func(app string) string) []A
 }
 
 // Downgrades filters a version column to the apps this release would run at an
-// older version than wrote their config, in the column's order.
 func Downgrades(versions []AppVersion) []AppVersion {
 	var out []AppVersion
 	for _, v := range versions {
@@ -140,7 +138,6 @@ const versionParts = 3
 const wildcard = -1
 
 // parseVersion reads the tag minus packaging; ok is false for a digest or
-// `latest`, which is the `?`. A wildcard part reads as its leading number.
 func parseVersion(ref string) ([]int, bool) {
 	tag := ref
 	if i := strings.IndexByte(tag, '@'); i >= 0 {

@@ -20,8 +20,6 @@ const (
 
 // Distribution is the distribution that installed the source cluster, or "" when
 // box cannot tell: the nodes disagree, no node carries a marker, or the marker is
-// one box has no teardown for. A caller prints its own wording for "" rather than
-// picking a distribution to guess at.
 func Distribution(nodes []Node) string {
 	dist := ""
 	for _, node := range nodes {
@@ -35,7 +33,6 @@ func Distribution(nodes []Node) string {
 }
 
 // distributionOf is the one node's marker: the build metadata a distribution adds
-// to the kubelet's version, matched on its name so `+k0s.0` and `+k3s1` are both
 // read and `+rke2r1` is not read as k3s.
 func distributionOf(kubeletVersion string) string {
 	i := strings.IndexByte(kubeletVersion, '+')

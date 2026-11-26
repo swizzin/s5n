@@ -15,8 +15,6 @@ import (
 )
 
 // Survey is the pre-install pass from the same plan and snapshot, without a
-// cluster. env.ConfigRoot is the caller's to remove; Run, Secret, Owned and Values
-// are unused, since this pass writes no key and switches nothing on.
 func Survey(ctx context.Context, p *plan.Plan, planBytes []byte, env Env) (Summary, error) {
 	env.deferred = true
 	m := &migration{p: p, env: env, id: PlanID(planBytes), checks: map[string]rewrite.Report{}, deferred: map[string]bool{}}
@@ -46,8 +44,6 @@ func Survey(ctx context.Context, p *plan.Plan, planBytes []byte, env Env) (Summa
 }
 
 // deferredSentence is the row's sentence about a check a pass could not make, and
-// the sentence is on the summary (InstanceSummary.Deferred) so the same row reads
-// the same way in the grouped screen and the plain list.
 func deferredSentence(app string) string {
 	if app == appPlex {
 		// Plex's check needs its own image, not a read of the file.

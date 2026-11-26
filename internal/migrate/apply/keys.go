@@ -49,8 +49,6 @@ var apiKeys = map[string]apiKey{
 	appProwlarr: {file: configXML, read: xmlAPIKey},
 	appTautulli: {file: configINI, read: iniAPIKey},
 	// SABnzbd's key is api_key in [misc], the one the app answers to and the
-	// one the chart hands it back through SABNZBD__API_KEY. It is the file the
-	// image's own entrypoint rewrites, so the two agree on a migrated box.
 	appSabnzbd: {file: "sabnzbd.ini", read: iniAPIKey},
 }
 

@@ -53,7 +53,6 @@ func seedOwned(data []byte, reports []rewrite.Report, apps map[string]string) (*
 }
 
 // place files one connection under wiring's key: the storing instance, or PBH's
-// string id (internal/wiring/wiring.go).
 func place(rec *wiring.OwnedRecord, holder string, o rewrite.Owned, apps map[string]string) error {
 	app := apps[holder]
 	switch o.Kind {
@@ -93,7 +92,6 @@ func place(rec *wiring.OwnedRecord, holder string, o rewrite.Owned, apps map[str
 }
 
 // isArr reports whether target is an Arr instance of this migration, which is
-// what a Prowlarr application has to point at to be keyed by it.
 func isArr(target string, apps map[string]string) bool {
 	app, ok := apps[target]
 	return ok && (app == appSonarr || app == appRadarr || app == appLidarr || app == appProwlarr)
@@ -108,7 +106,6 @@ func ownedConflict(key, kind string, prev, now int) error {
 }
 
 // encodeOwned is the record as owned.json holds it: the Job's own encoding,
-// which the record's tags pin.
 func encodeOwned(rec *wiring.OwnedRecord) ([]byte, error) {
 	raw, err := json.MarshalIndent(rec, "", "  ")
 	if err != nil {

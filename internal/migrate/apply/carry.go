@@ -22,8 +22,6 @@ import (
 // tree, and its numbers come from the verifying pass rather than a walk.
 type Bulk interface {
 	// HoldsTree reports whether the snapshot's copy of one instance is its whole
-	// data, and the extract apply reads kept the state alone. A run stages what
-	// Stage writes when it is true, and the state under Configs when it is not.
 	HoldsTree(instance string) bool
 	// Measure is what staging one instance writes at the config root, counted as
 	// the snapshot was verified.
@@ -131,13 +129,11 @@ func (m *migration) carried(name string) (note, phrase string) {
 }
 
 // appText is one line of a report with the instance it belongs to taken off:
-// the confirm names the app in its own column.
 func appText(name, line string) string {
 	return strings.TrimSpace(strings.TrimPrefix(line, name+": "))
 }
 
 // stageTrimmed stages the state under the app's home, not at the mount's top: an
-// app that finds no Preferences.xml writes itself a new identity, the one thing a
 // migration must not cause.
 func stageTrimmed(dst, src string, state plex.Scope, uid, gid int) (Staged, error) {
 	names := make([]string, len(state.Files))

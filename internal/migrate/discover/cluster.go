@@ -36,17 +36,11 @@ type Cluster struct {
 	raw     map[string][]byte
 	err     error
 	// nodeErr is why the nodes could not be read, kept apart from err: a
-	// namespace-scoped kubeconfig may not list a cluster-scoped object, and
-	// that is the plan's host missing rather than the read failing.
 	nodeErr error
 }
 
 // NewCluster builds the source client for one kubeconfig.
-//
-// namespaces limits every list to those namespaces, one call each; empty lists
-// across all namespaces, which needs cluster-wide read access. A namespace-
 // scoped kubeconfig -- a user's, where root's is not -- can only read the
-// namespaces it names, so the same list is Options.Namespaces.
 func NewCluster(kubeconfig string, namespaces []string) (*Cluster, error) {
 	if kubeconfig == "" {
 		return nil, fmt.Errorf("no kubeconfig: discovery reads a source cluster through one")
@@ -63,7 +57,6 @@ func NewCluster(kubeconfig string, namespaces []string) (*Cluster, error) {
 }
 
 // NewClusterFor is NewCluster over an existing clientset, which is what the
-// tests drive.
 func NewClusterFor(cs kubernetes.Interface, namespaces []string) *Cluster {
 	return &Cluster{cs: cs, namespaces: namespaces}
 }
@@ -138,7 +131,6 @@ type readObjects struct {
 	stss       []*appsv1.StatefulSet
 	daemonsets []*appsv1.DaemonSet
 	// sets and barePods are the objects nothing owns: a ReplicaSet a
-	// Deployment made, and a pod any workload made, are read through their
 	// template and never as a workload of their own.
 	sets     []*appsv1.ReplicaSet
 	barePods []*corev1.Pod

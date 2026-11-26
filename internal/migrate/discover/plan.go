@@ -217,8 +217,6 @@ func (d *discovery) pathRules(in *instance, data *plan.Data) []plan.PathRule {
 }
 
 // mountRules turns one mount into its rules. A mount of the data root names both
-// contract directories under it plus every library category; a mount of one
-// directory is one rule, its target what apply's renames leave behind.
 func mountRules(mountPath, rel string, data *plan.Data) []plan.PathRule {
 	if rel == "" {
 		return append([]plan.PathRule{
@@ -235,8 +233,6 @@ func mountRules(mountPath, rel string, data *plan.Data) []plan.PathRule {
 }
 
 // folderRules is every library directory under mediaPath, mapped onto the
-// category it becomes. A directory already named as its category needs no rule:
-// the media directory's own rule covers it.
 func folderRules(mediaPath string, data *plan.Data) []plan.PathRule {
 	out := make([]plan.PathRule, 0, len(data.Folders))
 	for _, f := range data.Folders {
@@ -249,10 +245,6 @@ func folderRules(mediaPath string, data *plan.Data) []plan.PathRule {
 }
 
 // contractPath maps a path relative to the data root onto the path the app will
-// see, as apply's renames leave it: the downloads directory is called
-// /data/downloads whatever the source called it, and everything below it keeps
-// its name -- except the library's own directories, which are the categories
-// box lays out.
 func contractPath(rel string, data *plan.Data) string {
 	for _, d := range []struct{ from, to string }{
 		{data.Downloads, plan.DownloadsDir},
@@ -269,7 +261,6 @@ func contractPath(rel string, data *plan.Data) string {
 }
 
 // folderRest maps what is left of a path under the media directory onto the
-// category it became, and leaves everything else as it was.
 func folderRest(rest string, data *plan.Data) string {
 	for _, f := range data.Folders {
 		if rest == f.From {
@@ -315,8 +306,6 @@ func (d *discovery) hostRules() []plan.HostRule {
 		switch len(picked) {
 		case 0:
 			// A Service beside the apps that selects none of them is some
-			// other part of the install (a database, a proxy), and no rule
-			// can name an app for it.
 		case 1:
 			in := picked[0]
 			rules := reachingRules(svc, in)
@@ -357,10 +346,7 @@ func (d *discovery) inNamespaces(namespace string) bool {
 }
 
 // clusterIPRules is one Service rule's cluster addresses: an app that stored
-// 10.96.0.14:8989 stored sonarr.media's address. A cluster IP outlives the pods
-// behind it, so it resolves outright rather than as a hint, and the port is the
 // Service port the rule already names, because that is the number an address
-// carries.
 func clusterIPRules(svc Service, rule plan.HostRule) []plan.HostRule {
 	out := make([]plan.HostRule, 0, len(svc.ClusterIPs))
 	for _, ip := range svc.ClusterIPs {
@@ -465,7 +451,6 @@ func (d *discovery) ingressPathRules(host string, apps map[string][]string) []pl
 }
 
 // ingressPath is an Ingress path as a rule carries it: one prefix starting with
-// "/", and "/" for the path that covers the whole host.
 func ingressPath(p string) string {
 	p = strings.TrimSpace(p)
 	if p == "" {
@@ -481,7 +466,6 @@ func ingressPath(p string) string {
 }
 
 // ingressWhy is one Ingress rule's reason, one line, saying the action: the
-// address is rewritten to the app, and the public path it named is why.
 func ingressWhy(app, host string, paths []string) string {
 	places := ingressPlaces(host, paths)
 	if len(places) == 1 {
@@ -491,8 +475,6 @@ func ingressWhy(app, host string, paths []string) string {
 }
 
 // ingressPlaces is a host and its paths as one address each: panel.example.com
-// serving /qbittorrent is panel.example.com/qbittorrent, and a host serving /
-// is the host on its own.
 func ingressPlaces(host string, paths []string) []string {
 	out := make([]string, 0, len(paths))
 	for _, p := range paths {
@@ -563,7 +545,6 @@ func (d *discovery) ingressOwner(ing Ingress, rule IngressRule) (*instance, bool
 }
 
 // ingressServicePort is the Service port an Ingress rule's backend names, by
-// number or by the name the Service declares it under.
 func ingressServicePort(svc Service, rule IngressRule) (ServicePort, bool) {
 	for _, p := range svc.Ports {
 		if rule.PortName != "" && p.Name == rule.PortName {
@@ -585,7 +566,6 @@ func ingressPortName(rule IngressRule) string {
 }
 
 // forwarded is what a Service port forwards to, as a note says it: the name it
-// declares when nothing answers to that name, the port when something does.
 func forwarded(port ServicePort, target int, reached bool) string {
 	if !reached {
 		return port.TargetName
@@ -661,12 +641,7 @@ func (d *discovery) domain() string {
 }
 
 // domainFrom is the DNS name every one of these hosts shares, when they share
-// one box can serve: the longest run of trailing labels all of them end in, with
-// a name above the hosts. A wildcard names its domain outright (*.example.com is
-// example.com), and one name is the domain itself: a source that serves every
-// app on media.example.net, under a path each, is the shape box installs, so
 // that name is what the seedbox is served under. A single name that is not a
-// domain a certificate can name -- "media" -- gives none, and the run asks.
 func domainFrom(hosts []string) string {
 	var names []string
 	wildcards := 0
@@ -695,7 +670,6 @@ func domainFrom(hosts []string) string {
 	}
 	if wildcards == 0 {
 		// The shared part has to leave a name above a host: if every host is
-		// only as long as it, the common part is a host's own name rather than
 		// a domain over the hosts.
 		above := false
 		for _, name := range names {
@@ -787,10 +761,6 @@ func (d *discovery) variant(in *instance, variants map[string]map[string]admissi
 		return candidates[0]
 	}
 	// Several of the chart's variants are the same repository, which is how one
-	// project publishes its builds: the digest and then the tag is what says
-	// which of them the source ran. Failing that, on the one repository whose
-	// tags name a build beside qBittorrent's version, the tag's own name does
-	// (libtorrentRepo).
 	if name := named(candidates, byVariant, func(image admission.Image) bool {
 		return digest != "" && image.Digest == digest
 	}); name != "" {
@@ -810,21 +780,13 @@ func (d *discovery) variant(in *instance, variants map[string]map[string]admissi
 		}
 	}
 	// Nothing of the source's is one of them, and the note says what box
-	// compared rather than claiming the variants carry no tag: they do, and the
-	// one the source ran is not any of them.
 	d.note("%s runs %s, and no blessed variant for that repository has its tag or digest (%s), so the chart's default runs: apps.%s.image.variant names one of %s",
 		in.name, in.container.Image, comparedTags(candidates, byVariant), in.app, variantList(byVariant))
 	return ""
 }
 
 // named is the variant a picker answers among the chart's variants that share
-// the source's repository: the one name, or none.
-//
-// One image answers with two names when the chart keeps it under its former name
 // as well, because both entries are that image, so the variant's own name wins
-// over the alias values may still say. Two names that are different variants
-// carrying one digest or tag are the chart contradicting itself, and box names
-// none rather than picking one of two.
 func named(candidates []string, byVariant map[string]admission.Image, pick func(admission.Image) bool) string {
 	var matching []string
 	for _, name := range candidates {
@@ -864,12 +826,6 @@ var legacyVariants = map[string]string{
 }
 
 // libtorrentVariant is the variant a swizzin qBittorrent tag names, whatever
-// qBittorrent version the tag carries: the tag is that version, a dash, then the
-// build's own name (5.3.1-lt1.2-10g is lt1.2-10g), with libtorrent's patch
-// release folded back to its line and a name the project has since renamed
-// mapped onto today's. So a source on an older qBittorrent of a build box ships
-// is that build: the chart's release of it is what runs.
-//
 // Empty when the tag does not begin with a version, or names no build at all:
 // box does not guess at what a tag it does not know means.
 func libtorrentVariant(tag string) string {
@@ -888,7 +844,6 @@ func libtorrentVariant(tag string) string {
 }
 
 // qbittorrentVersion is the version a swizzin tag begins with (5.3.1 in
-// 5.3.1-lt1.2), or "" when it begins with none.
 func qbittorrentVersion(tag string) string {
 	i := 0
 	for i < len(tag) && (tag[i] == '.' || (tag[i] >= '0' && tag[i] <= '9')) {
@@ -899,9 +854,6 @@ func qbittorrentVersion(tag string) string {
 
 // libtorrentLine folds libtorrent's patch release back into its line: the build
 // 1.2.20 is the 1.2 line, so lt1.2.20-10g names the variant lt1.2-10g, because a
-// later 1.2.21 is a new digest on that same variant rather than a new variant
-// (charts/s5n/variants.yaml). ok is false for a name with no such release to
-// fold, which is already the chart's spelling.
 func libtorrentLine(name string) (string, bool) {
 	rest, ok := strings.CutPrefix(name, "lt")
 	if !ok {
@@ -932,9 +884,6 @@ func (d *discovery) variantVersionNote(in *instance, tag, name string, image adm
 }
 
 // comparedTags is the tags of the variants that share the source's repository,
-// as the note that matched none of them says them. An image the chart keeps
-// under its former name too has that name's tag and the current one's, which are
-// one tag: the note says each tag once.
 func comparedTags(candidates []string, byVariant map[string]admission.Image) string {
 	out := make([]string, 0, len(candidates))
 	seen := make(map[string]bool, len(candidates))
@@ -957,8 +906,6 @@ func comparedTags(candidates []string, byVariant map[string]admission.Image) str
 }
 
 // splitImageRef splits an image reference into the repository, its tag and its
-// digest. The repository is compared as written: box's variants name their own
-// registry, and a reference to another one is a different image.
 func splitImageRef(image string) (repo, tag, digest string) {
 	repo = image
 	if i := strings.IndexByte(repo, '@'); i >= 0 {
@@ -998,8 +945,6 @@ func sortedKeysOf[V any](m map[string]V) []string {
 }
 
 // sortHostRules is the order a plan file is written in: Services first, then the
-// hosts, each by name, with the app and port breaking a tie, and the path last
-// so one host serving an app at several paths reads the same twice.
 func sortHostRules(rules []plan.HostRule) {
 	sort.Slice(rules, func(i, j int) bool {
 		a, b := rules[i], rules[j]
@@ -1018,11 +963,7 @@ func sortHostRules(rules []plan.HostRule) {
 }
 
 // reachingRules is the rules one Service that selects one app earns: one per
-// Service port whose target port is one the app listens on.
-//
 // The rule's port is the Service's own, because that is the number the address
-// an app stored carries; a Service on 80 forwarding to 8080 is reached as :80,
-// and no app ever stored 8080 for it.
 func reachingRules(svc Service, in *instance) []plan.HostRule {
 	var out []plan.HostRule
 	for _, sp := range svc.Ports {
@@ -1045,7 +986,6 @@ func whyNoRule(svc Service, in *instance) string {
 }
 
 // portList renders a Service's ports the way a note says them: what each
-// answers on, and what it forwards to.
 func portList(ports []ServicePort) string {
 	parts := make([]string, len(ports))
 	for i, p := range ports {
@@ -1065,8 +1005,6 @@ func hasPort(ports []int, p int) bool {
 }
 
 // selects reports whether a Service's selector matches a pod's labels. An empty
-// selector selects nothing: a Service with none is an ExternalName or one an
-// operator points at addresses by hand, and neither is an app.
 func selects(selector, labels map[string]string) bool {
 	if len(selector) == 0 {
 		return false

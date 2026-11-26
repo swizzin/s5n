@@ -100,7 +100,6 @@ func (c *Cluster) readWide(ctx context.Context) (readObjects, error) {
 }
 
 // sortBlockers puts blockers in one order, so two runs over one cluster read the
-// same way.
 func sortBlockers(out []Blocker) {
 	sort.Slice(out, func(i, j int) bool {
 		if out[i].Where != out[j].Where {
@@ -111,13 +110,9 @@ func sortBlockers(out []Blocker) {
 }
 
 // theirFrontDoor reports whether a port is one box's Gateway needs: 80 for the
-// redirect every host gets, 443 for the certificate.
 func theirFrontDoor(port int32) bool { return port == 80 || port == 443 }
 
 // portBlockers is everything that already holds the node's port 80 or 443, one
-// line per object: a LoadBalancer Service answering on one (its address may be
-// the node's own), a Service whose node port is one, a container binding one as a
-// hostPort, and a container listening on one on the node's own network. A
 // NodePort Service's in-cluster port is not the node's: its node port is.
 func portBlockers(objs readObjects) []Blocker {
 	var out []Blocker
@@ -153,7 +148,6 @@ func portBlockers(objs readObjects) []Blocker {
 }
 
 // podPortBlocker is the one line a pod gets when one of its containers holds the
-// node's 80 or 443, by hostPort or by listening on the node's own network.
 func podPortBlocker(pod *corev1.Pod) (Blocker, bool) {
 	for _, c := range pod.Spec.Containers {
 		for _, p := range c.Ports {
@@ -183,7 +177,6 @@ const keelAnnotation = "keel.sh/policy"
 
 // watchedBlockers is every workload in the source's namespaces that keel is told
 // to watch, or that a GitOps controller manages. Read from the scoped lists: a workload outside the source is not this
-// migration's business.
 func watchedBlockers(objs readObjects) []Blocker {
 	var out []Blocker
 	for _, wl := range updaterCandidates(objs) {
@@ -206,7 +199,6 @@ func watchedBlockers(objs readObjects) []Blocker {
 
 // keelBlockers is keel itself, wherever it runs: it usually has a namespace of its
 // own, and an updater that rewrote the release box installs would be a box whose
-// images nobody chose.
 func keelBlockers(objs readObjects) []Blocker {
 	var out []Blocker
 	for _, wl := range updaterCandidates(objs) {
@@ -249,7 +241,6 @@ var gitopsMarks = []struct{ key, who string }{
 }
 
 // gitopsMark is the blocker a source workload gets when it carries a GitOps
-// controller's mark, as a label or an annotation.
 func gitopsMark(wl updater) (Blocker, bool) {
 	for _, m := range gitopsMarks {
 		v, ok := wl.labels[m.key]
@@ -288,8 +279,6 @@ func gitopsController(wl updater) string {
 }
 
 // gitopsBlockers is every GitOps controller on the cluster, wherever it runs: one
-// that manages the source's namespace from a namespace of its own leaves no mark
-// box can be sure to read, so the controller itself is the blocker.
 func gitopsBlockers(objs readObjects) []Blocker {
 	var out []Blocker
 	for _, wl := range updaterCandidates(objs) {
@@ -320,8 +309,6 @@ func imageName(image string) string {
 }
 
 // isKeel reports whether an image is keel. The name is the whole test: keel is
-// published under more than one registry, and a repository whose last element is
-// "keel" is the one programme.
 func isKeel(image string) bool {
 	return imageName(image) == "keel"
 }
@@ -337,9 +324,7 @@ type updater struct {
 }
 
 // updaterCandidates is every workload a read holds, with what an updater is
-// configured by: the object's own labels and annotations, and the images its pod
 // runs. It is the objects, not the pods they made -- an updater marks the
-// workload, and a pod carries its owner's marks second-hand.
 func updaterCandidates(objs readObjects) []updater {
 	var out []updater
 	add := func(meta metav1.ObjectMeta, kind string, spec corev1.PodSpec) {
@@ -368,8 +353,6 @@ func updaterCandidates(objs readObjects) []updater {
 }
 
 // ClusterBlocker is the third blocker, the one only the caller can ask: bootstrap's
-// own gates over this cluster, whose sentence it fills in here so a cluster blocker
-// reads like the other two.
 func ClusterBlocker(refusal string) Blocker {
 	return Blocker{
 		What:  "cluster",

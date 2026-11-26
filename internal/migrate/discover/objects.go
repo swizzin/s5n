@@ -126,7 +126,6 @@ func workloadOf(t template, claims claimIndex) Workload {
 }
 
 // containerOf keeps what discovery asks a container: image, environment, ports,
-// mounts and account.
 func containerOf(c corev1.Container) Container {
 	out := Container{
 		Name: c.Name, Image: c.Image, Env: make(map[string]string, len(c.Env)),
@@ -192,7 +191,6 @@ func servicesOf(svcs []*corev1.Service) []Service {
 }
 
 // ingressOf flattens an Ingress to host-and-path rules. A hostless rule catches
-// every name, and the default backend is no rule at all.
 func ingressOf(ing *networkingv1.Ingress) Ingress {
 	out := Ingress{Namespace: ing.Namespace, Name: ing.Name}
 	for _, rule := range ing.Spec.Rules {
@@ -261,7 +259,6 @@ func podIPs(pod *corev1.Pod) []string {
 }
 
 // nodesOf is node names (the source's host) and kubelet versions (which
-// distribution installed the cluster).
 func nodesOf(nodes []*corev1.Node) []Node {
 	out := make([]Node, 0, len(nodes))
 	for _, node := range nodes {
@@ -271,12 +268,9 @@ func nodesOf(nodes []*corev1.Node) []Node {
 }
 
 // ownerless reports whether nothing else owns the object, so it is not a mirror of
-// a template already read.
 func ownerless(refs []metav1.OwnerReference) bool { return len(refs) == 0 }
 
 // servicePortOf keeps one Service port: what an address carries and what it
-// forwards to. An unset targetPort is its own port (types.go:6555 at v0.37.1), a
-// default a saved manifest lacks, so it is applied here.
 func servicePortOf(p corev1.ServicePort) ServicePort {
 	sp := ServicePort{Name: p.Name, Port: int(p.Port)}
 	if p.TargetPort.Type == intstr.String && p.TargetPort.StrVal != "" {
@@ -291,7 +285,6 @@ func servicePortOf(p corev1.ServicePort) ServicePort {
 }
 
 // volumeOf says where a volume's bytes live: a hostPath, or a claim bound to one or
-// to local storage; everything else is scratch or elsewhere.
 func volumeOf(namespace string, v corev1.Volume, claims claimIndex) Volume {
 	switch {
 	case v.HostPath != nil:
@@ -416,7 +409,6 @@ func objectKey(kind, namespace, name string) string {
 }
 
 // manifestBytes is the object as the plan directory keeps it: JSON with status and
-// manager bookkeeping dropped, so the source's specification is recorded.
 func manifestBytes(obj map[string]any) ([]byte, error) {
 	out := make(map[string]any, len(obj))
 	for k, v := range obj {
@@ -474,7 +466,6 @@ func record(into map[string][]byte, apiVersion, kind string, objs []any) error {
 }
 
 // nodeNames is every node's name, which is what a note about a cluster too big
-// for one host names.
 func nodeNames(nodes []Node) []string {
 	out := make([]string, 0, len(nodes))
 	for _, node := range nodes {

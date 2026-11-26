@@ -189,7 +189,6 @@ func (r *JobRunner) read(dir, name string) (stdout, stderr []byte, code int, err
 }
 
 // job checks: a Job that carries a Complete or Failed condition is over even
-// before the controller has counted it.
 func jobFinished(status *batchv1.JobStatus) bool {
 	for _, c := range status.Conditions {
 		if c.Type == batchv1.JobComplete || c.Type == batchv1.JobFailed {

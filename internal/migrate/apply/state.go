@@ -41,15 +41,12 @@ type State struct {
 func PlanID(planBytes []byte) string { return PlanDigest(planBytes)[:12] }
 
 // PlanDigest is the full sha256 hex of the plan file, which is what State
-// records: the short id is a directory name, the digest is the identity.
 func PlanDigest(planBytes []byte) string {
 	sum := sha256.Sum256(planBytes)
 	return hex.EncodeToString(sum[:])
 }
 
 // stateDir is where one plan stages and records: `<config>/.box/migrate/<id>`.
-// It sits on the config claim, so the one app that has to write its own format
-// (Plex's database, through the image's shell) runs a Job that mounts a
 // subPath of the same claim at /config and never a second volume.
 func stateDir(configRoot, id string) string {
 	return filepath.Join(configRoot, ".box", "migrate", id)
@@ -59,7 +56,6 @@ func stateDir(configRoot, id string) string {
 func stateFile(dir string) string { return filepath.Join(dir, "state.json") }
 
 // loadState reads one plan's record. An absent file is an empty record: a plan
-// that has run nothing yet is the normal case.
 func loadState(dir string) (*State, error) {
 	raw, err := os.ReadFile(stateFile(dir))
 	if err != nil {
@@ -77,7 +73,6 @@ func loadState(dir string) (*State, error) {
 }
 
 // saveState writes the record atomically, keeping the staging directory. Every
-// step that changes something on the host calls it before the next step starts,
 // so a crash loses at most the step in flight.
 func saveState(dir string, st *State) error {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
@@ -94,12 +89,8 @@ func saveState(dir string, st *State) error {
 }
 
 // otherPlan refuses a run while another plan is half done.
-//
 // Two plans share the data root and the config root, and the second one would
-// rename a directory the first has already renamed, or move a config over the
-// instance the first put there. A plan whose last step (enabling the instances)
 // never ran is therefore a stop, not something to work around: the operator
-// finishes it, or removes its directory to say the source is untouched.
 func otherPlan(root, own string, digest string) error {
 	entries, err := os.ReadDir(root)
 	if err != nil {

@@ -291,9 +291,7 @@ func (s Summary) dataRows() []say.TableRow {
 }
 
 // renameFacts is one row of renames as the run says it: plainly for the run that
-// makes them, and named as the real run's for the rehearsal that does not. A
 // rehearsal's screen says what will happen to a box, never what this run left
-// undone (rule 11).
 func renameFacts(renames []string, rehearsal bool) string {
 	if len(renames) == 0 {
 		return ""
@@ -310,7 +308,6 @@ func renameFacts(renames []string, rehearsal bool) string {
 }
 
 // arrow is one rename as a person reads it: "Downloads to downloads" is
-// "Downloads → downloads".
 func arrow(rename string) string { return strings.Replace(rename, " to ", " → ", 1) }
 
 // needsYou groups every value left as it is by the reason it is left: the apps
@@ -353,8 +350,6 @@ func (s Summary) needsYou() []say.TableRow {
 		}
 		sort.Strings(apps)
 		// One state word and one reason: the value stays, and the clause says
-		// why. The whole sentence the rewriter wrote is the report's
-		// (rules 1 and 2).
 		fact := strings.Join(g.what, " and ")
 		rows = append(rows, say.TableRow{Glyph: "!", Name: strings.Join(apps, ", "), State: stateKept, Facts: []string{fact, why}})
 	}
@@ -392,8 +387,6 @@ func (s Summary) goodToKnow() []say.TableRow {
 		add(c.Note, c.App)
 	}
 	// Defaults that rewrote an app's own address are counted in that app's row
-	// (the rewrite itself is one of its changes); the ones that left a value
-	// alone are said here, once per reason.
 	counts := map[string]int{}
 	var defaultOrder []string
 	for _, d := range s.DefaultRules {
