@@ -652,7 +652,7 @@ func TestBlob(t *testing.T) {
 }
 
 // TestStopMarksEveryTorrentStopped: a file whose paths are already right is still
-// written -- an unstoppped torrent seeds and announces -- with both keys inserted
+// written -- an unstopped torrent seeds and announces -- with both keys inserted
 // in libtorrent's sorted order and nothing else changed.
 func TestStopMarksEveryTorrentStopped(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "resume")
