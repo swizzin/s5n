@@ -1,20 +1,11 @@
 // Package discover reads an install box did not make and works out the plan
-// `box migrate` applies.
-//
-// Discovery is migrate's read half, and it changes nothing: the source cluster
-// is only ever got and listed, each app's config directory is read through a
-// read-only view of the host's filesystem, and a database is copied before it
-// is opened so the running app keeps its own file. What discovery works out
-// goes into a plan.Plan -- which catalog apps the source ran and what box will
-// call them, where their config came from, the namespaces and ports, the path
-// table per app and the Services the apps reached each other by -- and
-// everything else it saw is in the Report, so the operator reads one page
-// before apply writes one byte (docs/box.md, "migrate").
-//
-// Nothing here decides an app-specific rewrite: the rewriters do that, on the
-// staged copy, against the plan this package writes. What discovery owns is
-// where things were, which is the part the stopped source will still answer
-// when apply runs.
+// `box migrate` applies. It changes nothing: the cluster is only got and listed,
+// configs are read through a read-only view, and a database is copied before it is
+// opened. Its output is a plan.Plan -- apps and box's names for them, config
+// origins, namespaces and ports, per-app path tables, the Services the apps reached
+// each other by -- and a Report of everything else, so the operator reads one page
+// before apply writes a byte (docs/box.md, "migrate"). App-specific rewrites are
+// the rewriters' job; discovery owns where things were.
 package discover
 
 import (
@@ -31,9 +22,7 @@ import (
 	"github.com/swizzin/s5n/internal/migrate/plan"
 )
 
-// The workload kinds discovery reads, by the name the object carries. A kind is
-// on Workload because everything after the read is kind-neutral -- an app is an
-// app wherever it ran -- and what the kind decides is which pods are the
+// The workload kinds discovery reads; the kind decides only which pods are the
 // workload's own.
 const (
 	kindDeployment  = "Deployment"
@@ -43,43 +32,31 @@ const (
 	kindPod         = "Pod"
 )
 
-// Workload is one pod template the source runs and nothing above it owns, or a
-// bare Pod, flattened to what discovery reads: the pod template's labels, which
-// a Service selects by, its containers, and the volumes their mounts name.
-//
-// The kind is on it because discovery reads every one: a Deployment, a
-// StatefulSet, a DaemonSet, a ReplicaSet nothing owns, and a Pod nothing owns.
-// Everything after the read is kind-neutral -- an app is an app wherever it ran.
+// Workload is one pod template nothing above it owns, or a bare Pod, flattened to
+// what discovery reads: labels, containers and volumes.
 type Workload struct {
 	Namespace string
 	Name      string
-	// Kind is the object's Kubernetes kind: kindDeployment, kindStatefulSet,
-	// kindDaemonSet, kindReplicaSet or kindPod.
+	// Kind is kindDeployment, kindStatefulSet, kindDaemonSet, kindReplicaSet or
+	// kindPod.
 	Kind   string
 	Labels map[string]string
-	// Selector is what this workload's pods carry, which is how a pod the
-	// source still holds is known to be one of its replicas. For a bare Pod it
-	// is the pod's own labels, because that pod is itself.
+	// Selector is what its pods carry, which says a pod is a replica; a bare Pod's
+	// selector is its own labels.
 	Selector map[string]string
-	// Replicas is how many replicas the workload asks for, -1 for a kind with
-	// no count of its own: a DaemonSet runs one pod per node, and a bare Pod is
-	// the pod. With the pods the source still holds (Owns), it is what says a
-	// workload is stopped.
+	// Replicas is what the workload asks for, -1 for a kind without a count; with
+	// Owns it says whether the workload is stopped.
 	Replicas int
-	// RunAsUser and RunAsGroup are the pod's securityContext as the source
-	// wrote it, -1 when it pins neither. RunAsGroup is the pod's runAsGroup, or
-	// its fsGroup when that is unset: the group a container is given is the one
-	// it writes files as.
+	// RunAsUser and RunAsGroup are the pod's securityContext, -1 when unpinned;
+	// the group falls back to fsGroup, since that is what it writes files as.
 	RunAsUser  int
 	RunAsGroup int
 	Containers []Container
 	Volumes    map[string]Volume
 }
 
-// Owns reports whether one of the source's pods is a replica of this workload:
-// a pod carrying its selector in its namespace, or, for a bare Pod, that pod
-// itself. A pod that is terminating is still a pod -- the kubelet has it until
-// it is gone -- so a caller proving a workload stopped counts it.
+// Owns reports whether a pod is a replica of this workload, or the bare Pod
+// itself. A terminating pod still counts: the kubelet has it until it is gone.
 func (wl Workload) Owns(p Pod) bool {
 	if p.Namespace != wl.Namespace {
 		return false
@@ -96,12 +73,10 @@ type Container struct {
 	Image string
 	Env   map[string]string
 	Ports []int
-	// PortNames are the ports the container declares a name for, which is what
-	// a Service's targetPort resolves through.
+	// PortNames are the ports declared with a name, what a targetPort resolves.
 	PortNames map[string]int
 	Mounts    []Mount
-	// RunAsUser and RunAsGroup are the container's own securityContext, -1 when
-	// it pins neither: a pod-level setting is Workload's.
+	// RunAsUser and RunAsGroup are the container's own, -1 when the pod's applies.
 	RunAsUser  int
 	RunAsGroup int
 }
@@ -115,18 +90,15 @@ type Mount struct {
 
 // Volume is where one of a workload's volumes keeps its bytes.
 type Volume struct {
-	// Kind names the volume the way the operator has to think about it:
-	// "hostPath", "claim", "emptyDir", "configMap", "secret", "projected",
-	// "csi", ... It is what a report prints, and all a non-host volume is.
+	// Kind is what the report prints: "hostPath", "claim", "emptyDir", "configMap",
+	// "secret", "csi" and so on.
 	Kind string
-	// HostPath is the host directory behind the volume, "" when the volume
-	// holds no host directory: an emptyDir, a config map, or a claim a
-	// provisioner filled.
+	// HostPath is the host directory, "" when the volume has none.
 	HostPath string
-	// Claim is the claim the mount went through, when it went through one.
+	// Claim is the claim the mount went through, when it did.
 	Claim string
-	// Persistent says the volume's contents outlive the pod, so a persistent
-	// volume with no host path is data discovery cannot adopt where it is.
+	// Persistent says the contents outlive the pod, so a persistent volume with no
+	// host path is data box cannot adopt.
 	Persistent bool
 }
 
@@ -145,13 +117,10 @@ type Service struct {
 	Namespace string
 	Name      string
 	Selector  map[string]string
-	// Ports are the Service's own ports. A Service beside an app's pod is not
-	// necessarily an address of that app -- a metrics sidecar, the torrent
-	// port -- so a rule is made only for the ports that reach the app.
+	// Ports are the Service's ports; only one that reaches the app gets a rule,
+	// since a metrics sidecar is not an address of the app.
 	Ports []ServicePort
-	// ClusterIPs are the addresses the Service answers at, its cluster IP and
-	// any others the cluster gave it. An app that stored one of these stored an
-	// address of this Service, which is why it resolves outright.
+	// ClusterIPs are the addresses it answers at: a stored one resolves outright.
 	ClusterIPs []string
 }
 
@@ -161,20 +130,17 @@ type ServicePort struct {
 	// Name is what the Service calls this port, which is how an Ingress rule's
 	// backend names it. Empty for an unnamed port.
 	Name string
-	// Port is the Service's port: the number another app stored in an address.
+	// Port is the number another app stored in an address.
 	Port int
-	// TargetPort is the container port it forwards to, and TargetName is the
-	// name the container declares that port under when the Service names it
-	// instead of numbering it. Exactly one is set.
+	// TargetPort or TargetName: the container port, or the name it is declared
+	// under. Exactly one is set.
 	TargetPort int
 	TargetName string
 }
 
-// target is the container port this Service port forwards to, as the workload's
-// own pod declares it. A name that no container of the pod declares forwards to
-// nothing, which is what the kubelet does with it too: a named targetPort is
-// looked up in the target pod's container ports
-// (k8s.io/api@v0.37.1:core/v1/types.go:6553).
+// target is the container port this forwards to. A name no container declares
+// forwards to nothing, as the kubelet finds it (k8s.io/api@v0.37.1:core/v1/
+// types.go:6553).
 func (p ServicePort) target(wl Workload) (int, bool) {
 	if p.TargetName != "" {
 		return wl.portNamed(p.TargetName)
@@ -191,8 +157,7 @@ func (p ServicePort) String() string {
 	return fmt.Sprintf("%d->%d", p.Port, p.TargetPort)
 }
 
-// Ingress is one Ingress of the source, flattened to what a host rule needs: the
-// public names and paths it serves, and the Service behind each.
+// Ingress is one Ingress: its public names and paths, and the Service behind each.
 type Ingress struct {
 	Namespace string
 	Name      string

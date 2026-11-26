@@ -80,9 +80,6 @@ Port=8080
 	return f
 }
 
-// TestDiscoverTwoArrs is the whole answer for the source install: every app with
-// its own path table, the data root with its two directories, one rule per
-// Service, and the workload left behind.
 func TestDiscoverTwoArrs(t *testing.T) {
 	f := sourceInstall(t)
 	p, rep := f.discover(t)
@@ -180,10 +177,6 @@ func TestDiscoverTwoArrs(t *testing.T) {
 	}
 }
 
-// TestDiscoverRefusesTwoLibraries is the one layout box cannot adopt: the Arrs'
-// root folders sit under two different directories of the data root, so nothing
-// says which one is the library -- and a library renamed into the wrong parent
-// is a move of the operator's own tree.
 func TestDiscoverRefusesTwoLibraries(t *testing.T) {
 	f := sourceInstall(t)
 	// The same Sonarr, with its library in a directory of its own beside the
@@ -210,9 +203,6 @@ func TestDiscoverRefusesTwoLibraries(t *testing.T) {
 	}
 }
 
-// TestDiscoverLeavesALibraryOnAnotherFilesystem: a root folder outside the data
-// root is not the library box adopts -- a rename cannot cross filesystems, so a
-// move is the operator's -- and it is reported rather than refused.
 func TestDiscoverLeavesALibraryOnAnotherFilesystem(t *testing.T) {
 	f := sourceInstall(t)
 	f.app(t, appSpec{
@@ -237,8 +227,6 @@ func TestDiscoverLeavesALibraryOnAnotherFilesystem(t *testing.T) {
 	}
 }
 
-// TestDiscoverRefusesOneInstanceTwice: two workloads cannot both be box's
-// sonarr-4k, and the refusal names both so the operator knows which to remove.
 func TestDiscoverRefusesOneInstanceTwice(t *testing.T) {
 	f := sourceInstall(t)
 	f.app(t, appSpec{
@@ -256,8 +244,6 @@ func TestDiscoverRefusesOneInstanceTwice(t *testing.T) {
 	}
 }
 
-// TestDiscoverOutside: a workload of an app box installs but which takes no
-// second instance is not migrated either, and says so.
 func TestDiscoverOutside(t *testing.T) {
 	f := sourceInstall(t)
 	f.app(t, appSpec{
@@ -280,9 +266,6 @@ func TestDiscoverOutside(t *testing.T) {
 	roundTrip(t, p)
 }
 
-// TestDiscoverConfigMountPerApp: Seerr keeps its config at /app/config and
-// PeerBanHelper at /app/data under the upstream images, and each is the
-// directory the app will see as /config.
 func TestDiscoverConfigMountPerApp(t *testing.T) {
 	f := sourceInstall(t)
 	f.app(t, appSpec{
@@ -329,8 +312,6 @@ func TestDiscoverConfigMountPerApp(t *testing.T) {
 	roundTrip(t, p)
 }
 
-// TestDiscoverRefusesConfigWithoutHostDirectory: a config in a volume that is
-// not a host directory has nothing to copy, and the refusal names the claim.
 func TestDiscoverRefusesConfigWithoutHostDirectory(t *testing.T) {
 	f := newFixture(t)
 	f.object(t, "sonarr", `apiVersion: apps/v1
@@ -363,8 +344,6 @@ spec:
 	}
 }
 
-// TestDiscoverReportsADataClaimItCannotReach: a persistent volume nothing on this
-// host backs is data box cannot adopt, and it is reported rather than dropped.
 func TestDiscoverReportsADataClaimItCannotReach(t *testing.T) {
 	f := newFixture(t)
 	f.object(t, "qbittorrent", `apiVersion: apps/v1
@@ -442,8 +421,6 @@ spec:
 	}
 }
 
-// TestDiscoverPorts is where each app keeps the port it listened on, and what
-// happens when its config does not say.
 func TestDiscoverPorts(t *testing.T) {
 	tests := []struct {
 		name  string
@@ -487,9 +464,6 @@ func TestDiscoverPorts(t *testing.T) {
 	}
 }
 
-// TestDiscoverPortFromThePod: an app whose config says nothing takes the ports
-// its pod declares, and says so, because a port guessed from a pod is a weaker
-// answer than one the app wrote.
 func TestDiscoverPortFromThePod(t *testing.T) {
 	f := sourceInstall(t)
 	f.app(t, appSpec{
@@ -508,10 +482,6 @@ func TestDiscoverPortFromThePod(t *testing.T) {
 	}
 }
 
-// TestDiscoverPortFromThePodAndItsService: a pod's declared port can be stale --
-// a real source declared 5006 while the app served 9898, which its Service
-// forwarded to -- so a Service that selects only this app is evidence of the
-// port too, and the note says where each one came from.
 func TestDiscoverPortFromThePodAndItsService(t *testing.T) {
 	f := sourceInstall(t)
 	f.app(t, appSpec{
@@ -542,10 +512,6 @@ func TestDiscoverPortFromThePodAndItsService(t *testing.T) {
 	}
 }
 
-// TestDiscoverSidecarContainer: the chart's pod carries the app and nothing
-// else, so a second container in a migrated app's pod -- a real source ran a
-// metrics exporter beside Plex -- is left behind and listed as its own outside
-// entry, with the image, rather than disappearing with the pod.
 func TestDiscoverSidecarContainer(t *testing.T) {
 	f := newFixture(t)
 	f.app(t, appSpec{
@@ -604,8 +570,6 @@ spec:
 	roundTrip(t, p)
 }
 
-// TestDiscoverNoArrNamesItsLibrary: with no Arr in the source, the library is the
-// one directory beside the downloads, and that is reported as the shape it is.
 func TestDiscoverNoArrNamesItsLibrary(t *testing.T) {
 	f := newFixture(t)
 	f.app(t, appSpec{
@@ -639,8 +603,6 @@ func TestDiscoverNoArrNamesItsLibrary(t *testing.T) {
 	roundTrip(t, p)
 }
 
-// TestDiscoverRenamesTheContractDirs: a source whose directories are already
-// named as the contract wants needs no rename, and its rules say so.
 func TestDiscoverRenamesTheContractDirs(t *testing.T) {
 	f := newFixture(t)
 	f.app(t, appSpec{
@@ -680,8 +642,6 @@ func TestDiscoverRenamesTheContractDirs(t *testing.T) {
 	roundTrip(t, p)
 }
 
-// TestDiscoverRefusesASourceWithNoTorrentClient: without qBittorrent there is no
-// downloads directory, and a plan with no data adopts nothing.
 func TestDiscoverRefusesASourceWithNoTorrentClient(t *testing.T) {
 	f := newFixture(t)
 	f.app(t, appSpec{
@@ -768,11 +728,6 @@ func keys[V any](m map[string]V) []string {
 	return out
 }
 
-// TestDiscoverSideServiceReachesNoApp: a Service that selects an app's pod is
-// not automatically an address of that app. A metrics Service forwarding to a
-// sidecar's port and one forwarding to the torrent port both select the pod and
-// reach neither app, so a rule for either would rewrite an address that was
-// never the app's -- a stored plex-exporter:9000 into Plex's web endpoint.
 func TestDiscoverSideServiceReachesNoApp(t *testing.T) {
 	f := sourceInstall(t)
 	// Plex's metrics sidecar, and qBittorrent's torrent port: both Services
@@ -823,9 +778,6 @@ func TestDiscoverSideServiceReachesNoApp(t *testing.T) {
 	}
 }
 
-// TestDiscoverServiceRuleCarriesTheServicePort: a Service on 80 forwarding to
-// 8080 is reached as :80, so that is the port the rule narrows to. A rule on the
-// target port would not match the address any app stored.
 func TestDiscoverServiceRuleCarriesTheServicePort(t *testing.T) {
 	f := sourceInstall(t)
 	f.servicePorts(t, "qbittorrent-web", "media", "qbittorrent", servicePort{port: 80, target: "8080"})
@@ -845,9 +797,6 @@ func TestDiscoverServiceRuleCarriesTheServicePort(t *testing.T) {
 	}
 }
 
-// TestDiscoverServiceWithSeveralPortsReachesOne: one Service can answer on more
-// than one port and forward only one of them to the app, so the rule set is per
-// port, not per Service.
 func TestDiscoverServiceWithSeveralPortsReachesOne(t *testing.T) {
 	f := sourceInstall(t)
 	f.servicePorts(t, "plex-all", "media", "plex",
@@ -867,9 +816,6 @@ func TestDiscoverServiceWithSeveralPortsReachesOne(t *testing.T) {
 	}
 }
 
-// TestDiscoverNamespaces: a source install can run beside things the operator
-// is not migrating, and a namespaced read is what a user's kubeconfig is
-// allowed.
 func TestDiscoverNamespaces(t *testing.T) {
 	f := sourceInstall(t)
 	f.app(t, appSpec{
@@ -907,9 +853,6 @@ func TestDiscoverNamespaces(t *testing.T) {
 	}
 }
 
-// TestDiscoverServiceThatSelectsTwoApps: a rule has to name one app, so an
-// ambiguous selector gets none and the operator hears about it. Apply then lists
-// every stored address that meant it, which is the honest consequence.
 func TestDiscoverServiceThatSelectsTwoApps(t *testing.T) {
 	f := newFixture(t)
 	shared := map[string]string{"app": "media"}
@@ -963,9 +906,6 @@ spec:
 	}
 }
 
-// TestContractPath: a path below the data root maps to what apply's renames
-// leave behind, so an app that stored the source's directory name reads the
-// contract's.
 func TestContractPath(t *testing.T) {
 	data := &plan.Data{Root: "/srv/library", Downloads: "Downloads", Media: "media"}
 	tests := map[string]string{
@@ -995,8 +935,6 @@ func TestContractPath(t *testing.T) {
 	}
 }
 
-// TestDiscoverRefusesOneWorkloadTwoApps: one pod cannot be two of box's apps, so
-// the source has to be split before discovery can name it.
 func TestDiscoverRefusesOneWorkloadTwoApps(t *testing.T) {
 	f := newFixture(t)
 	f.object(t, "arrs", `apiVersion: apps/v1
@@ -1035,8 +973,6 @@ spec:
 	}
 }
 
-// TestDiscoverNeedsTheHost: the mounts name host directories, and a caller that
-// brings no way to read them is refused before the source is read.
 func TestDiscoverNeedsTheHost(t *testing.T) {
 	f := sourceInstall(t)
 	_, _, err := Discover(context.Background(), NewDirectory(f.manifests), Options{TempDir: t.TempDir()})
@@ -1048,10 +984,6 @@ func TestDiscoverNeedsTheHost(t *testing.T) {
 	}
 }
 
-// TestDiscoverRecordsTheRead: the plan says which platform it read and when,
-// and what image each app ran, so apply and the operator can see where the file
-// came from. The fields this reader cannot answer -- the source host and the
-// owner -- stay empty rather than guessed.
 func TestDiscoverRecordsTheRead(t *testing.T) {
 	f := sourceInstall(t)
 	at := time.Date(2026, time.December, 1, 8, 30, 0, 0, time.UTC)
@@ -1097,12 +1029,6 @@ func TestDiscoverRecordsTheRead(t *testing.T) {
 	roundTrip(t, p)
 }
 
-// TestDiscoverReadsEveryOwnerlessKind: a catalog app is an app wherever it ran,
-// so discovery reads a DaemonSet, a ReplicaSet nothing owns and a bare Pod the
-// same way it reads a Deployment. The object above them is the workload: a
-// ReplicaSet a Deployment made, and a pod a DaemonSet made, are one app's
-// template twice, so reading them as their own workloads would migrate the app
-// twice and name the second one after a template hash.
 func TestDiscoverReadsEveryOwnerlessKind(t *testing.T) {
 	f := newFixture(t)
 	f.app(t, appSpec{
@@ -1213,9 +1139,6 @@ func TestDiscoverReadsEveryOwnerlessKind(t *testing.T) {
 	roundTrip(t, p)
 }
 
-// TestWorkloadOwns is how the next reader proves a workload is stopped: by the
-// pods the source still has. A bare Pod is its own pod, and a pod of another
-// namespace is somebody else's.
 func TestWorkloadOwns(t *testing.T) {
 	templated := Workload{
 		Namespace: "media", Kind: "DaemonSet",
@@ -1242,10 +1165,6 @@ func TestWorkloadOwns(t *testing.T) {
 	}
 }
 
-// TestDiscoverResolvesAnIngressAddress: an app stored a public name and path for
-// another app, and the source's Ingress is what says which app that was. The
-// rule resolves outright -- it is not a guess like a pod's address -- and the why
-// line says what the address becomes and which Ingress path made it that app.
 func TestDiscoverResolvesAnIngressAddress(t *testing.T) {
 	f := sourceInstall(t)
 	f.ingress(t, "panel", "panel.example.com", "/qbittorrent", "qbittorrent")
@@ -1267,11 +1186,6 @@ func TestDiscoverResolvesAnIngressAddress(t *testing.T) {
 	}
 }
 
-// TestDiscoverIngressHostServingManyAppsByPath: box's own shape is one name with
-// each app under a path, so a source laid out the same way resolves by path. The
-// host earns one rule per path, and an address on that host resolves to the app
-// whose path it is under -- never to one of them by guesswork, which is what an
-// address with no path would need.
 func TestDiscoverIngressHostServingManyAppsByPath(t *testing.T) {
 	f := sourceInstall(t)
 	f.ingress(t, "panel", "panel.example.com", "/qbittorrent", "qbittorrent")
@@ -1311,9 +1225,6 @@ func TestDiscoverIngressHostServingManyAppsByPath(t *testing.T) {
 	}
 }
 
-// TestDiscoverIngressDeepestPathWins: a rule for the whole host is the shape a
-// source serves one app at "/" beside another, and it must not swallow the
-// deeper app: the longest path covering an address is the app it meant.
 func TestDiscoverIngressDeepestPathWins(t *testing.T) {
 	f := sourceInstall(t)
 	f.ingress(t, "panel", "panel.example.com", "/", "qbittorrent")
@@ -1338,9 +1249,6 @@ func TestDiscoverIngressDeepestPathWins(t *testing.T) {
 	}
 }
 
-// TestDiscoverIngressPathClaimedTwice: two apps routed at one host and path is
-// one address with two answers, so neither is a rule and the operator hears
-// about it. Apply then lists every address that referred to it.
 func TestDiscoverIngressPathClaimedTwice(t *testing.T) {
 	f := sourceInstall(t)
 	f.ingress(t, "panel", "panel.example.com", "/app", "qbittorrent")
@@ -1364,11 +1272,6 @@ func TestDiscoverIngressPathClaimedTwice(t *testing.T) {
 	}
 }
 
-// TestDiscoverIngressReachesNoApp: an Ingress is an address of an app only when
-// its backend Service reaches that app on a port the app itself listens on. A
-// Service it does not have, a backend port it names and the Service does not
-// declare, and a port that forwards to a sidecar all reach no app, so no rule
-// rewrites an address that never was the app's.
 func TestDiscoverIngressReachesNoApp(t *testing.T) {
 	tests := []struct {
 		name string
@@ -1423,8 +1326,6 @@ spec:
 	}
 }
 
-// TestDiscoverIngressBackendPortByName: an Ingress backend names a Service port
-// as often as it numbers it, and the rule is the same either way.
 func TestDiscoverIngressBackendPortByName(t *testing.T) {
 	f := sourceInstall(t)
 	f.object(t, "qbittorrent-web", `apiVersion: v1
@@ -1473,9 +1374,6 @@ spec:
 	}
 }
 
-// TestDiscoverClusterIPRules: an app that stored a Service's cluster address
-// stored an address of that Service's app, and a cluster IP outlives the pods
-// behind it, so it resolves outright -- on the port the address carries.
 func TestDiscoverClusterIPRules(t *testing.T) {
 	f := sourceInstall(t)
 	f.object(t, "sonarr-address", `apiVersion: v1
@@ -1516,10 +1414,6 @@ spec:
 	roundTrip(t, p)
 }
 
-// TestDiscoverPodIPIsAHint: an address a pod answered on is only a hint. The app
-// that ran there is one box will run, so an address an app stored is worth a
-// default -- but the address does not survive the move and may be another pod's
-// by now, so the rule says so and marks itself a default.
 func TestDiscoverPodIPIsAHint(t *testing.T) {
 	f := sourceInstall(t)
 	f.pod(t, "plex-0", map[string]string{"app.kubernetes.io/name": "plex"}, "10.244.0.56",
@@ -1548,8 +1442,6 @@ func TestDiscoverPodIPIsAHint(t *testing.T) {
 	roundTrip(t, p)
 }
 
-// TestDiscoverPodOwnedByTwoApps: a pod carrying two apps' selectors names
-// neither, because the address could have been either one's.
 func TestDiscoverPodOwnedByTwoApps(t *testing.T) {
 	f := newFixture(t)
 	shared := map[string]string{"app": "media"}
@@ -1627,9 +1519,6 @@ func dataSource(t *testing.T, mut func(name string, spec *appSpec)) *fixture {
 	return f
 }
 
-// TestDiscoverDomainFromIngress: the Ingress hosts the source serves its apps at
-// are the names this box will answer to, so their shared domain is the plan's
-// default for the run's domain question. Discovery never asks.
 func TestDiscoverDomainFromIngress(t *testing.T) {
 	f := sourceInstall(t)
 	f.ingress(t, "panel", "panel.example.com", "/qbittorrent", "qbittorrent")
@@ -1641,9 +1530,6 @@ func TestDiscoverDomainFromIngress(t *testing.T) {
 	roundTrip(t, p)
 }
 
-// TestDiscoverDomainNeedsADomain: one Ingress host is the domain, because box
-// serves the apps under paths on the one name the source served them on. A
-// single name that is not a domain box can serve names none, and the run asks.
 func TestDiscoverDomainNeedsADomain(t *testing.T) {
 	f := sourceInstall(t)
 	f.ingress(t, "panel", "panel.example.com", "/qbittorrent", "qbittorrent")
@@ -1672,9 +1558,6 @@ func TestDiscoverDomainNeedsADomain(t *testing.T) {
 	}
 }
 
-// TestDiscoverDomainNoSharedName: hosts that share only a top-level domain say
-// nothing about what one domain over both would be, so the plan names none and
-// the run asks, saying what it saw.
 func TestDiscoverDomainNoSharedName(t *testing.T) {
 	f := sourceInstall(t)
 	f.ingress(t, "panel", "panel.example.com", "/qbittorrent", "qbittorrent")
@@ -1694,8 +1577,6 @@ func TestDiscoverDomainNoSharedName(t *testing.T) {
 	}
 }
 
-// TestDomainFrom: what the source's names share, and what they do not. One name
-// is the domain: box serves the apps under paths on it, as the source did.
 func TestDomainFrom(t *testing.T) {
 	tests := []struct {
 		name  string
@@ -1723,10 +1604,6 @@ func TestDomainFrom(t *testing.T) {
 	}
 }
 
-// TestDiscoverSourceHostAndOwner: the plan says what host the source ran on (a
-// single node names it) and who its files belong to, when every app agrees --
-// from PUID/PGID, which is where a linuxserver image says it, or from the pod's
-// securityContext.
 func TestDiscoverSourceHostAndOwner(t *testing.T) {
 	image := func(name string, spec *appSpec) {
 		spec.env = map[string]string{"PUID": "1000", "PGID": "1001"}
@@ -1746,11 +1623,6 @@ func TestDiscoverSourceHostAndOwner(t *testing.T) {
 	roundTrip(t, p)
 }
 
-// TestDiscoverOwnerFromSecurityContext: a source that pins its account in the
-// pod's securityContext says the same thing as one that sets PUID/PGID, and it
-// is the pod-level setting every container of the pod runs as. The
-// securityContext answers first, because that is what the container runs as: a
-// linuxserver image's PUID and PGID are the account it switches to inside.
 func TestDiscoverOwnerFromSecurityContext(t *testing.T) {
 	f := dataSource(t, func(name string, spec *appSpec) {
 		spec.user = &podUser{uid: 1002, gid: 1003}
@@ -1763,10 +1635,6 @@ func TestDiscoverOwnerFromSecurityContext(t *testing.T) {
 	}
 }
 
-// TestDiscoverOwnerNeedsEveryAppToAgree: an owner the plan cannot stand behind
-// is no owner: apps that disagree, a pod that names no account, and a source
-// that runs as root each leave the plan's answer empty with a line saying so,
-// rather than adopting a media tree for one app and breaking the others.
 func TestDiscoverOwnerNeedsEveryAppToAgree(t *testing.T) {
 	tests := []struct {
 		name string
@@ -1821,9 +1689,6 @@ func TestDiscoverOwnerNeedsEveryAppToAgree(t *testing.T) {
 	}
 }
 
-// TestDiscoverSourceHostNeedsOneNode: a source on several nodes has no single
-// host, so the plan names none and says how many it saw. An empty plan host is a
-// question for the run, not a guess at a node that holds none of the data.
 func TestDiscoverSourceHostNeedsOneNode(t *testing.T) {
 	f := dataSource(t, nil)
 	f.node(t, "node-a")
@@ -1843,14 +1708,6 @@ func TestDiscoverSourceHostNeedsOneNode(t *testing.T) {
 	}
 }
 
-// TestDiscoverMapsOnlyBlessedImageVariants: a source image is mapped onto one of
-// the chart's blessed variants only when it already is one -- the same
-// repository, and the variant in it that its digest then its tag names. Anything
-// else keeps the chart's default, and the note names the key to set and the list
-// box would accept.
-//
-// The source image is the chart's own tag for that variant, read from the chart,
-// so a version bump is one line in variants.yaml and not an edit here.
 func TestDiscoverMapsOnlyBlessedImageVariants(t *testing.T) {
 	lt21 := qbittorrentImage(t, "lt2.1")
 	f := dataSource(t, func(name string, spec *appSpec) {
@@ -1900,11 +1757,6 @@ func TestDiscoverMapsOnlyBlessedImageVariants(t *testing.T) {
 	}
 }
 
-// TestDiscoverRefusesToGuessAVariant: a repository several blessed variants
-// share, with neither a digest nor a tag that names one of them, is not mapped:
-// running the wrong libtorrent build is worse than the chart's default. The note
-// names every tag the chart pins for that repository, read from the chart so a
-// version bump does not rewrite this test.
 func TestDiscoverRefusesToGuessAVariant(t *testing.T) {
 	f := dataSource(t, func(name string, spec *appSpec) {
 		if name == "qbittorrent" {
@@ -1937,12 +1789,6 @@ func TestDiscoverRefusesToGuessAVariant(t *testing.T) {
 	}
 }
 
-// TestDiscoverMapsAPatchReleaseTagOntoItsVariant: the project's builds were
-// once tagged with libtorrent's patch release beside qBittorrent's version
-// (5.3.1-lt1.2.20-10g), and the chart's variants name the libtorrent line and
-// the build profile only (5.3.1-lt1.2-10g), because a later 1.2.21 is a new
-// digest on that same tag. So such an image is that variant. A build the chart
-// does not carry is none of them, and the note says which tags were compared.
 func TestDiscoverMapsAPatchReleaseTagOntoItsVariant(t *testing.T) {
 	tests := []struct {
 		variant string
@@ -2014,12 +1860,6 @@ func libtorrentPatchTag(t *testing.T, tag string) string {
 	return "ghcr.io/swizzin/qbittorrent:" + tag[:i+3] + rest[:end] + ".20" + rest[end:]
 }
 
-// TestDiscoverMapsTheVariantATagNames: a swizzin qBittorrent tag names its
-// variant by its suffix, whatever qBittorrent version the source carried. The
-// version in front is qBittorrent's, so a source on an older release of a build
-// box ships is that build -- with a note saying the chart's release runs -- and
-// the project's former names are the variants they were renamed to. A suffix
-// that is no variant is none, and the note says which tags were compared.
 func TestDiscoverMapsTheVariantATagNames(t *testing.T) {
 	lt21 := qbittorrentImage(t, "lt2.1")
 	znver3 := qbittorrentImage(t, "lt1.2-10g-znver3")
@@ -2112,9 +1952,6 @@ func olderQbittorrent(t *testing.T, variant, version string) string {
 	return image.Repository + ":" + version + image.Tag[i:]
 }
 
-// TestLibtorrentVariantNamesABuild: the name a tag carries is the variant,
-// whatever version leads it, and the log is that a project renames a build
-// rather than changing it.
 func TestLibtorrentVariantNamesABuild(t *testing.T) {
 	tests := []struct{ tag, want string }{
 		{"5.3.1-lt1.2", "lt1.2"},
@@ -2138,8 +1975,6 @@ func TestLibtorrentVariantNamesABuild(t *testing.T) {
 	}
 }
 
-// TestLibtorrentLineFoldsAPatchRelease: only libtorrent's three-part release is
-// folded, and a name that is already the line is left to the exact name.
 func TestLibtorrentLineFoldsAPatchRelease(t *testing.T) {
 	tests := []struct {
 		name, want string
@@ -2163,8 +1998,6 @@ func TestLibtorrentLineFoldsAPatchRelease(t *testing.T) {
 	}
 }
 
-// TestSplitImageRef: the repository is what a variant names, and a registry's
-// port is not a tag.
 func TestSplitImageRef(t *testing.T) {
 	tests := []struct {
 		image, repo, tag, digest string
@@ -2184,10 +2017,6 @@ func TestSplitImageRef(t *testing.T) {
 	}
 }
 
-// TestDiscoverPlanForASourceWithEveryDefault is the whole read in one plan: a
-// DaemonSet and a bare Pod beside the StatefulSets, an address resolved through
-// an Ingress, a pod address offered as a hint, the domain and the owner the
-// source gives, and an image that is not one of the chart's blessed variants.
 func TestDiscoverPlanForASourceWithEveryDefault(t *testing.T) {
 	f := newFixture(t)
 	account := map[string]string{"PUID": "1000", "PGID": "1000"}

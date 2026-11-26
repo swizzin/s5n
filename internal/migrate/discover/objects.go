@@ -13,37 +13,26 @@ import (
 	"k8s.io/apimachinery/pkg/util/intstr"
 )
 
-// objects.go is the one place a Kubernetes object becomes what discovery reads
-// from it, so the live source and a saved directory cannot disagree about a
-// mount, a selector or a host directory.
+// objects.go is the one place a Kubernetes object becomes what discovery reads, so
+// the live source and a saved directory cannot disagree.
 
-// template is one workload's pod template as a source hands it over: what the
-// object calls itself, the labels its pods carry, the template itself, and the
-// two things only the workload knows -- what selects its pods, and how many it
-// asks for.
+// template is one workload's pod template and what only the workload knows:
+// selector and replica count.
 type template struct {
 	kind      string
 	namespace string
 	name      string
 	labels    map[string]string
 	spec      corev1.PodSpec
-	// selector is what the workload's pods carry. A manifest saved off disk
-	// does not always carry one (an older export, a hand-written file), so an
-	// empty selector falls back to the template's own labels, which is what
-	// its pods will carry once it runs.
+	// selector is what its pods carry; a saved manifest may lack one, so empty falls
+	// back to the template's labels.
 	selector map[string]string
-	// replicas is the count the workload asks for, -1 for a kind that has no
-	// count of its own: a DaemonSet runs one pod per node, and a bare Pod is
-	// the pod.
+	// replicas is the desired count, -1 for a kind without one.
 	replicas int
 }
 
-// workloadsOf is every pod template these objects hold, flattened the one way:
-// Deployments, StatefulSets and DaemonSets as they are, and a ReplicaSet or a
-// Pod only when nothing owns it. A ReplicaSet a Deployment made, and every pod
-// a workload made, mirror a template discovery has already read; reading one of
-// them as its own workload would count one app twice and could name the app
-// after a template hash.
+// workloadsOf is every pod template: Deployments, StatefulSets and DaemonSets, and
+// a ReplicaSet or Pod only when nothing owns it, or one app would count twice.
 func workloadsOf(deploys []*appsv1.Deployment, stss []*appsv1.StatefulSet, daemonsets []*appsv1.DaemonSet, sets []*appsv1.ReplicaSet, pods []*corev1.Pod, claims claimIndex) []Workload {
 	var out []Workload
 	for _, d := range deploys {
@@ -83,11 +72,8 @@ func workloadsOf(deploys []*appsv1.Deployment, stss []*appsv1.StatefulSet, daemo
 	return out
 }
 
-// selectorOf is what a workload's pods carry: the matchLabels its selector
-// names, or nil when it names none, which template falls back from to the
-// pod template's own labels. A selector's matchExpressions are not kept: a pod
-// is known to be a replica by the labels it carries, and an expression's
-// answer is what the cluster has already applied to them.
+// selectorOf is a selector's matchLabels; nil when it names none. Expressions are
+// not kept: a pod is known by the labels it carries.
 func selectorOf(sel *metav1.LabelSelector) map[string]string {
 	if sel == nil || len(sel.MatchLabels) == 0 {
 		return nil
@@ -95,8 +81,7 @@ func selectorOf(sel *metav1.LabelSelector) map[string]string {
 	return sel.MatchLabels
 }
 
-// replicasOf is a workload's desired count: the API server defaults an absent
-// one to 1, and a manifest read off disk carries whatever was saved.
+// replicasOf is the desired count; absent means 1, as the API server defaults.
 func replicasOf(replicas *int32) int {
 	if replicas == nil {
 		return 1
@@ -140,9 +125,8 @@ func workloadOf(t template, claims claimIndex) Workload {
 	return wl
 }
 
-// containerOf keeps what discovery asks a container: its image, the literal
-// environment the app reads its port from, the ports it declares, where the
-// volumes appear and the account it runs as.
+// containerOf keeps what discovery asks a container: image, environment, ports,
+// mounts and account.
 func containerOf(c corev1.Container) Container {
 	out := Container{
 		Name: c.Name, Image: c.Image, Env: make(map[string]string, len(c.Env)),
@@ -178,19 +162,17 @@ func containerOf(c corev1.Container) Container {
 	return out
 }
 
-// serviceOf flattens a Service to what a host rule is made of: where it is,
-// what it selects, the ports it answers on and the addresses it answers at.
+// serviceOf flattens a Service to what a host rule needs.
 func serviceOf(svc *corev1.Service) Service {
 	out := Service{Namespace: svc.Namespace, Name: svc.Name, Selector: svc.Spec.Selector}
 	for _, p := range svc.Spec.Ports {
 		out.Ports = append(out.Ports, servicePortOf(p))
 	}
-	// A Service written to disk has one address and a live one has the list;
-	// either way the short one was once the way to reach it.
+	// A saved Service has one address, a live one the list; the short one was once
+	// the way to reach it.
 	seen := make(map[string]bool, 2)
 	for _, ip := range append([]string{svc.Spec.ClusterIP}, svc.Spec.ClusterIPs...) {
-		// "None" is a headless Service: it has no address of its own, which is
-		// exactly what an app that stored one never used.
+		// "None" is headless: no address, so no stored one used it.
 		if ip == "" || ip == "None" || seen[ip] {
 			continue
 		}
@@ -209,10 +191,8 @@ func servicesOf(svcs []*corev1.Service) []Service {
 	return out
 }
 
-// ingressOf flattens an Ingress to the rules an app's stored address can be one
-// of: a public host and path, and the Service behind them. A rule with no host
-// catches every name, so no address is that rule rather than another one; the
-// default backend has no name at all and is not a rule.
+// ingressOf flattens an Ingress to host-and-path rules. A hostless rule catches
+// every name, and the default backend is no rule at all.
 func ingressOf(ing *networkingv1.Ingress) Ingress {
 	out := Ingress{Namespace: ing.Namespace, Name: ing.Name}
 	for _, rule := range ing.Spec.Rules {
@@ -245,16 +225,13 @@ func ingressesOf(ings []*networkingv1.Ingress) []Ingress {
 	return out
 }
 
-// serviceBackendPort is the port an Ingress rule names for its Service: the
-// number, or the name the Service's own ports declare it under. Exactly one is
-// set, and both are empty only in an Ingress the API server would have refused.
+// serviceBackendPort is the number or the name an Ingress rule names; both empty
+// only in an Ingress the API server would have refused.
 func serviceBackendPort(port networkingv1.ServiceBackendPort) (number int, name string) {
 	return int(port.Number), port.Name
 }
 
-// podsOf is every pod a source holds, flattened to the three questions discovery
-// asks of one: which addresses it answered on, whether it is on its way out, and
-// whether the workload that made it still has a pod.
+// podsOf flattens pods: addresses, terminating, and ownership.
 func podsOf(pods []*corev1.Pod) []Pod {
 	out := make([]Pod, 0, len(pods))
 	for _, pod := range pods {
@@ -269,8 +246,7 @@ func podsOf(pods []*corev1.Pod) []Pod {
 	return out
 }
 
-// podIPs is what a pod answers on, status.podIPs (a dual-stack pod has two)
-// with status.podIP beside it for a manifest saved before the list existed.
+// podIPs is status.podIPs, with status.podIP for a manifest saved before the list.
 func podIPs(pod *corev1.Pod) []string {
 	seen := make(map[string]bool, len(pod.Status.PodIPs)+1)
 	var out []string
@@ -284,10 +260,8 @@ func podIPs(pod *corev1.Pod) []string {
 	return out
 }
 
-// nodesOf flattens the source's Nodes to the two things discovery reads off
-// them: the names, which is how a source says what host it ran on, and the
-// kubelet versions, which is how the teardown a replace cutover prints knows
-// which distribution installed the cluster.
+// nodesOf is node names (the source's host) and kubelet versions (which
+// distribution installed the cluster).
 func nodesOf(nodes []*corev1.Node) []Node {
 	out := make([]Node, 0, len(nodes))
 	for _, node := range nodes {
@@ -296,18 +270,13 @@ func nodesOf(nodes []*corev1.Node) []Node {
 	return out
 }
 
-// ownerless reports whether an object belongs to no other object: a ReplicaSet
-// a Deployment made, or a pod any workload made, mirrors a template discovery
-// already reads, so it is not a workload of its own.
+// ownerless reports whether nothing else owns the object, so it is not a mirror of
+// a template already read.
 func ownerless(refs []metav1.OwnerReference) bool { return len(refs) == 0 }
 
-// servicePortOf keeps one Service port as an app's stored address saw it: the
-// port the address carries, and what it forwards to.
-//
-// A Service that leaves targetPort unset forwards to its own port -- an identity
-// map (k8s.io/api@v0.37.1:core/v1/types.go:6555) -- which the API server
-// defaults but a manifest read off disk does not, so the default is applied here
-// rather than left to which source read the object.
+// servicePortOf keeps one Service port: what an address carries and what it
+// forwards to. An unset targetPort is its own port (types.go:6555 at v0.37.1), a
+// default a saved manifest lacks, so it is applied here.
 func servicePortOf(p corev1.ServicePort) ServicePort {
 	sp := ServicePort{Name: p.Name, Port: int(p.Port)}
 	if p.TargetPort.Type == intstr.String && p.TargetPort.StrVal != "" {
@@ -321,10 +290,8 @@ func servicePortOf(p corev1.ServicePort) ServicePort {
 	return sp
 }
 
-// volumeOf says where a pod volume's bytes live. Only two kinds of volume hold a
-// host directory -- a hostPath, and a claim bound to a hostPath or local volume
-// -- and everything else is either scratch or data on a filesystem this host
-// does not have.
+// volumeOf says where a volume's bytes live: a hostPath, or a claim bound to one or
+// to local storage; everything else is scratch or elsewhere.
 func volumeOf(namespace string, v corev1.Volume, claims claimIndex) Volume {
 	switch {
 	case v.HostPath != nil:
@@ -346,8 +313,7 @@ func volumeOf(namespace string, v corev1.Volume, claims claimIndex) Volume {
 	case v.DownwardAPI != nil:
 		return Volume{Kind: "downwardAPI"}
 	case v.Ephemeral != nil:
-		// A generic ephemeral volume is a claim that dies with the pod: data
-		// that outlives nothing and is not worth adopting.
+		// A generic ephemeral claim dies with the pod: nothing to adopt.
 		return Volume{Kind: "ephemeral"}
 	case v.CSI != nil:
 		return Volume{Kind: "csi", Persistent: true}
@@ -357,9 +323,8 @@ func volumeOf(namespace string, v corev1.Volume, claims claimIndex) Volume {
 	return Volume{Kind: "volume", Persistent: true}
 }
 
-// claimIndex is what a claim-backed mount resolves through: the claim, and the
-// volume the claim is bound to. A claim with no volume yet, or one a provisioner
-// filled, has no host directory, and that is the answer Volume.HostPath gives.
+// claimIndex resolves a claim to its volume; an unbound or provisioned one has no
+// host directory.
 type claimIndex struct {
 	claims  map[string]*corev1.PersistentVolumeClaim // <namespace>/<name>
 	volumes map[string]*corev1.PersistentVolume      // by volume name
@@ -380,10 +345,8 @@ func indexClaims(pvcs []*corev1.PersistentVolumeClaim, pvs []*corev1.PersistentV
 	return idx
 }
 
-// hostPath is the host directory behind a claim, when the volume bound to it is
-// a hostPath or a local volume. A local volume is node-affine host storage: the
-// same bytes on the same machine, which is exactly what a migration in place
-// needs.
+// hostPath is the host directory behind a claim bound to hostPath or local storage,
+// which is node-affine and therefore what an in-place migration needs.
 func (idx claimIndex) hostPath(namespace, claim string) (string, bool) {
 	pvc, ok := idx.claims[namespace+"/"+claim]
 	if !ok || pvc.Spec.VolumeName == "" {
@@ -408,9 +371,7 @@ const (
 	networkingV1 = "networking.k8s.io/v1"
 )
 
-// typed turns one decoded document into the object discovery reads. A kind it
-// has no use for is not an error: a saved directory holds whatever the operator
-// saved, and the document is still recorded.
+// typed decodes one document; a kind discovery has no use for is still recorded.
 func typed(u *unstructured.Unstructured) (any, error) {
 	convert := func(into any) (any, error) {
 		if err := runtime.DefaultUnstructuredConverter.FromUnstructured(u.Object, into); err != nil {
@@ -454,10 +415,8 @@ func objectKey(kind, namespace, name string) string {
 	return kind + "/" + namespace + "/" + name
 }
 
-// manifestBytes is one object as the plan directory keeps it: JSON, which is a
-// YAML document too, with the status and the field manager's bookkeeping
-// dropped. What is recorded is the source's specification, not the state it
-// happened to be in while discovery read it.
+// manifestBytes is the object as the plan directory keeps it: JSON with status and
+// manager bookkeeping dropped, so the source's specification is recorded.
 func manifestBytes(obj map[string]any) ([]byte, error) {
 	out := make(map[string]any, len(obj))
 	for k, v := range obj {
@@ -493,9 +452,8 @@ func anySlice[T any](items []*T) []any {
 	return out
 }
 
-// record files every object of one kind in the plan directory's manifests. The
-// apiVersion and kind are written here because a typed Go object carries no
-// TypeMeta once it has been decoded out of the API's response.
+// record files every object of one kind; apiVersion and kind are written here
+// because a decoded typed object carries no TypeMeta.
 func record(into map[string][]byte, apiVersion, kind string, objs []any) error {
 	for _, obj := range objs {
 		m, err := unstructuredOf(obj)

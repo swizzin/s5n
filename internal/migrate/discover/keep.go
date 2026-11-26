@@ -1,29 +1,12 @@
 package discover
 
-// keep.go is the keep path's pre-flight: what a source cluster has that stops box
-// installing onto it.
-//
-// Keeping the source's cluster is the default cutover because it destroys
-// nothing, so the one thing it must not do is half-take a cluster somebody else
-// runs. Four things on a source stop it, and box never changes a cluster it did
-// not install: it names each with the command to look at it (box's advice is
-// always one to double-check) and the operator decides.
-//
-//   - a Service holding the node's address on port 80 or 443, or a container with
-//     hostPort 80/443: that is an ingress controller (or whatever else serves the
-//     source's front door), and box's Gateway needs those ports on the same node;
-//   - an auto-updater watching the source's namespaces (keel, by its annotation or
-//     the Deployment itself): it would rewrite the release box installs, which is
-//     the one thing a kept cluster must not do to box's own apps;
-//   - a GitOps controller (Flux, Argo CD) on the cluster or marking the source's
-//     workloads: it puts back what it manages, so a source stopped by hand comes
-//     back up beside box;
-//   - a cluster bootstrap's own gates refuse (a managed control plane, more than
-//     one node, an API that does not answer): that is bootstrap's answer, asked
-//     through bootstrap, not a second copy of the rules.
-//
-// The last one is asked by the caller, which holds the kubeconfig; this file reads
-// objects.
+// keep.go is the keep path's pre-flight. Keeping the source's cluster destroys
+// nothing, so it must never half-take a cluster someone else runs: box names each
+// blocker with a command to check it and never changes what it did not install.
+// Four block: an ingress or anything holding node ports 80/443, an auto-updater
+// (keel) that would rewrite box's release, a GitOps controller that would put the
+// source back, and bootstrap's own gates (a managed control plane, several nodes,
+// a dead API), which the caller asks through bootstrap.
 
 import (
 	"context"
@@ -54,14 +37,9 @@ func (b Blocker) String() string {
 	return fmt.Sprintf("%s: %s (check: %s)", b.Where, b.Why, b.Check)
 }
 
-// Blockers is the keep path's pre-flight over a live source. Empty is a cluster
-// box can install onto; anything else is a reason to stop after the final snapshot
-// and to prefer `--replace-cluster`.
-//
-// The node's ports and an updater's own pod belong to the whole cluster, not to
-// the namespaces this read was scoped to, so those are listed across every
-// namespace: an ingress controller lives in its own. Only the annotations are the
-// source's business, and they come from the scoped read.
+// Blockers is the pre-flight; empty means box can install. Node ports and an
+// updater's pod belong to the whole cluster, so they are listed across every
+// namespace; only annotations come from the scoped read.
 func (c *Cluster) Blockers(ctx context.Context) ([]Blocker, error) {
 	if err := c.load(ctx); err != nil {
 		return nil, err
@@ -78,11 +56,9 @@ func (c *Cluster) Blockers(ctx context.Context) ([]Blocker, error) {
 	return out, nil
 }
 
-// readWide lists, across every namespace, what the cluster-wide questions need:
-// the Services and pods that could hold the node's 80/443, and the workloads keel
-// could run as. A kubeconfig that cannot list them is a refusal: bootstrap
-// already requires an admin one for the keep path, and a pre-flight that saw
-// half the cluster would be a guess.
+// readWide lists what the cluster-wide questions need, across every namespace. A
+// kubeconfig that cannot list them is a refusal: a pre-flight that saw half the
+// cluster would be a guess.
 func (c *Cluster) readWide(ctx context.Context) (readObjects, error) {
 	var objs readObjects
 	svcs, err := c.cs.CoreV1().Services("").List(ctx, metav1.ListOptions{})

@@ -14,10 +14,6 @@ import (
 	"k8s.io/client-go/kubernetes/fake"
 )
 
-// TestBlockersNameWhatHoldsBoxsPortsAndWhatWouldRewriteIt: an ingress controller
-// holding the node's 80/443, a container binding a host port, and an auto-updater
-// are each named with a command, because box changes nothing on a cluster it did
-// not install.
 func TestBlockersNameWhatHoldsBoxsPortsAndWhatWouldRewriteIt(t *testing.T) {
 	ingress := &corev1.Service{
 		ObjectMeta: metav1.ObjectMeta{Name: "traefik", Namespace: "kube-system"},
@@ -94,9 +90,6 @@ func TestBlockersNameWhatHoldsBoxsPortsAndWhatWouldRewriteIt(t *testing.T) {
 	}
 }
 
-// TestBlockersOfAClusterBoxMayKeep: a source with nothing on the node's front door
-// and no updater is a cluster box may install onto, and an empty list is that
-// answer rather than a failure.
 func TestBlockersOfAClusterBoxMayKeep(t *testing.T) {
 	sonarr := &appsv1.Deployment{
 		ObjectMeta: metav1.ObjectMeta{Name: "sonarr", Namespace: "media"},
@@ -129,12 +122,6 @@ func countContaining(lines []string, what string) int {
 	return n
 }
 
-// TestBlockersLookPastTheSourcesNamespaces: the node's 80 and 443 belong to the
-// whole cluster, so a read scoped to the source's namespace still finds an ingress
-// controller in its own namespace, a hostNetwork pod listening on 443, a NodePort
-// whose node port is 80, and keel running anywhere. A NodePort Service whose
-// in-cluster port is 80 holds a node port from the 30000s, not 80, so it is not
-// one.
 func TestBlockersLookPastTheSourcesNamespaces(t *testing.T) {
 	ingress := &corev1.Service{
 		ObjectMeta: metav1.ObjectMeta{Name: "ingress-nginx-controller", Namespace: "ingress-nginx"},
@@ -210,11 +197,6 @@ func TestBlockersLookPastTheSourcesNamespaces(t *testing.T) {
 	}
 }
 
-// TestBlockersNameAGitOpsController: a GitOps controller puts back what it
-// manages, so a source stopped by hand comes back up beside box. Flux's and Argo
-// CD's controllers are named wherever they run, and so is their mark on a source
-// workload; a workload outside the source with a mark is not this migration's,
-// and Helm's own instance label is not a GitOps mark.
 func TestBlockersNameAGitOpsController(t *testing.T) {
 	deploy := func(ns, name string, labels, annotations map[string]string, image string) *appsv1.Deployment {
 		return &appsv1.Deployment{

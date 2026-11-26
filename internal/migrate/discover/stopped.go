@@ -1,21 +1,11 @@
 package discover
 
-// stopped.go is cutover's proof: discovery reads templates and needs no pod, but
-// "this app is stopped" is two facts, and only one of them is in the workload.
-// A Deployment at replicas 0 can still have a pod on its way out, and a pod on
-// its way out is still writing; a cutover that copied configs under it would
-// copy a database mid-write.
-//
-// So this file reads the workloads and the pods the source holds now -- the same
-// two reads discovery itself starts from -- and answers, per planned app,
-// whether the workload has replicas and whether any pod of it is left.
-// Terminating counts as running, because the process has not exited yet, and a
-// pod is one of a workload's own by the one rule the read already carries
-// (Workload.Owns).
-//
-// Nothing here stops anything: box never stops a source (docs/box.md, "box
-// never stops or resets a source"). What it returns is what the operator has to
-// do, as a command to double-check.
+// stopped.go is cutover's proof. "Stopped" is two facts and only one is in the
+// workload: a Deployment at replicas 0 can still have a terminating pod, which is
+// still writing, and copying its database mid-write is the trap. So this reads the
+// workloads and pods and answers per app whether replicas remain and whether any
+// pod is left; Terminating counts as running. Nothing here stops anything (box
+// never stops a source); it returns the command the operator has to run.
 
 import (
 	"context"
@@ -35,9 +25,7 @@ type Running struct {
 	Kind      string
 	Namespace string
 	Name      string
-	// Replicas is the workload's replica count, as it stands. It is -1 for a
-	// kind that has no count of its own: a DaemonSet runs one pod per node,
-	// and a bare Pod is the pod.
+	// Replicas is the count as it stands, -1 for a kind without one.
 	Replicas int
 	// Pods are the pods still matching the workload's template, Terminating
 	// ones included.
