@@ -7,8 +7,6 @@ import (
 	"testing"
 )
 
-// TestResolve: the rule every copy of a config tree follows. Every name is
-// invented.
 func TestResolve(t *testing.T) {
 	root := filepath.Join(string(filepath.Separator), "srv", "apps", "qbittorrent")
 	tests := []struct {
@@ -75,8 +73,7 @@ func TestResolveRefusesWhatLeavesTheTree(t *testing.T) {
 			if err == nil {
 				t.Fatalf("Resolve accepted %q -> %q", tt.rel, tt.target)
 			}
-			// Both copies read this one sentence, so it says the tree, not the
-			// copy: it is the same rule for a staging copy and for a snapshot.
+			// Both copies read this one sentence: the refusal says the tree, not the copy.
 			if !strings.Contains(err.Error(), "outside the config directory") {
 				t.Fatalf("the refusal does not say where the link goes:\n%s", err)
 			}
@@ -84,8 +81,6 @@ func TestResolveRefusesWhatLeavesTheTree(t *testing.T) {
 	}
 }
 
-// TestResolveLeavesARealLinkAlone: the rule holds for a link on disk, which is
-// what both callers hand it.
 func TestResolveLeavesARealLinkAlone(t *testing.T) {
 	root := t.TempDir()
 	if err := os.WriteFile(filepath.Join(root, "file"), []byte("x"), 0o600); err != nil {
