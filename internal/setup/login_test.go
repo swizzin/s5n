@@ -9,12 +9,11 @@ import (
 	"github.com/swizzin/s5n/internal/authelia"
 )
 
-// The login's password has three sources and one rule: it is used once, it is
-// never written to either file, and an empty answer never silently replaces a
-// password that is already working.
+// The password has three sources and one rule: used once, never written to either
+// file, and an empty answer never replaces a working password.
 
-// TestPasswordFileReachesTheLogin: --password-file is the unattended form, and
-// the password reaches the login and nothing else.
+// --password-file is the unattended form: the password reaches the login and
+// nothing else.
 func TestPasswordFileReachesTheLogin(t *testing.T) {
 	h := newHarness(t)
 	opts := h.unattended()
@@ -51,8 +50,7 @@ func TestPasswordFileReachesTheLogin(t *testing.T) {
 	}
 }
 
-// TestGeneratedPasswordIsReportedOnce: no answer means box makes one, reports
-// it in the result for the caller's card, and writes it nowhere.
+// No answer means box makes one and reports it for the card, writing it nowhere.
 func TestGeneratedPasswordIsReportedOnce(t *testing.T) {
 	h := newHarness(t)
 	opts := h.unattended()
@@ -81,8 +79,7 @@ func TestGeneratedPasswordIsReportedOnce(t *testing.T) {
 	}
 }
 
-// TestExistingPasswordIsKept: a re-run with no new password keeps the row, so
-// pressing enter on a box that already has one does not rotate it.
+// Enter on a box that already has a password keeps it.
 func TestExistingPasswordIsKept(t *testing.T) {
 	h := newHarness(t)
 	h.decision.HasLogin = func(string) bool { return true }
@@ -101,8 +98,7 @@ func TestExistingPasswordIsKept(t *testing.T) {
 	}
 }
 
-// TestPasswordFromStdin: `--password-file -` reads the standard input, which
-// is how a pipeline supplies it without a temp file.
+// `--password-file -` reads stdin, so a pipeline needs no temp file.
 func TestPasswordFromStdin(t *testing.T) {
 	h := newHarness(t)
 	opts := h.unattended()
@@ -129,9 +125,8 @@ func TestPasswordFromStdin(t *testing.T) {
 	}
 }
 
-// TestPasswordFileRefusesWhatItCannotUse: an empty file and a two-line file
-// are refused by name before anything is written, because guessing which line
-// was meant is how a box ends up with a password nobody knows.
+// An empty file and a two-line file are refused by name before anything is
+// written: guessing a line is how a box gets a password nobody knows.
 func TestPasswordFileRefusesWhatItCannotUse(t *testing.T) {
 	for name, content := range map[string]string{
 		"empty":     "",
@@ -155,8 +150,7 @@ func TestPasswordFileRefusesWhatItCannotUse(t *testing.T) {
 	}
 }
 
-// TestLoginCarriesTheEnabledApps: the rules are generated from this document,
-// so the app list init just decided has to be in it.
+// The rules are generated from this document, so init's app list must be in it.
 func TestLoginCarriesTheEnabledApps(t *testing.T) {
 	h := newHarness(t)
 	opts := h.unattended()
@@ -174,8 +168,7 @@ func TestLoginCarriesTheEnabledApps(t *testing.T) {
 	}
 }
 
-// TestCancelledAtThePasswordWritesNothing: the login questions come before the
-// files are written, like every other question.
+// The login questions come before the files are written, like every other one.
 func TestCancelledAtThePasswordWritesNothing(t *testing.T) {
 	h := newHarness(t)
 	h.prompt.inputs = []string{"box.example.com", "/srv/s5n/data", "/srv/s5n/config"}

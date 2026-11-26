@@ -27,15 +27,15 @@ type fakeHost struct {
 	mounts  []Mount
 	free    int64
 
-	// links are paths that are a symlink of their own: Lstat reports them and
-	// never looks at what they point to.
+	// links are paths that are a symlink of their own: Lstat reports them and never
+	// looks at what they point to.
 	links map[string]bool
 
 	mkdirs []string
 	chowns []string
 	reads  []string
-	// readMax is the limit each read was given, in the same order as reads: a
-	// walk shows up here as a read that could have returned everything.
+	// readMax is the limit each read was given: a walk shows up here as a read that
+	// could have returned everything.
 	readMax []int
 }
 
@@ -53,8 +53,8 @@ func newFakeHost() *fakeHost {
 
 func (h *fakeHost) Stat(path string) (FileInfo, error) {
 	if h.dirs[path] {
-		// An unrecorded owner is an ordinary account. A recorded one is used as
-		// it is, 0:0 included: a root-owned directory has to be expressible.
+		// An unrecorded owner is an ordinary account; a recorded one is used as it is,
+		// 0:0 included.
 		o, ok := h.owners[path]
 		if !ok {
 			o = owner{1000, 1000}
@@ -67,8 +67,8 @@ func (h *fakeHost) Stat(path string) (FileInfo, error) {
 	return FileInfo{}, fs.ErrNotExist
 }
 
-// Lstat is Stat with the link check Stat does not make: a link is reported as
-// itself, with no directory and no contents.
+// Lstat is Stat with the link check: a link is reported as itself, with no
+// contents.
 func (h *fakeHost) Lstat(path string) (FileInfo, error) {
 	if h.links[path] {
 		return FileInfo{Symlink: true, Mode: 0o777}, nil
@@ -122,8 +122,7 @@ type fakePrompt struct {
 	events []string
 	asked  []string // "key=default" for every Input, in order
 	notes  []string
-	// confirmDefaults is the starting answer of every Confirm, in order, so a
-	// test can prove which answer an empty enter takes.
+	// confirmDefaults is the starting answer of every Confirm, in order.
 	confirmDefaults []bool
 }
 
@@ -206,7 +205,7 @@ func (p *fakePrompt) Note(text string) error {
 	return nil
 }
 
-// chartAt is the chart box would hand init: the two files a question's default
+// chartAt is the chart box hands init: the values and schema a question's default
 // and every answer are read against. init never reads a chart itself.
 func chartAt(t *testing.T, dir string) seedbox.Chart {
 	t.Helper()
@@ -237,8 +236,8 @@ type harness struct {
 	applied   []ApplyOptions
 	transient map[string]any
 	applyErr  error
-	// logins is every login the hand-over carried, and loginErr fails it: the
-	// hook runs after apply's confirm, so a test can prove both orders.
+	// logins is every login the hand-over carried, and loginErr fails it, so a test
+	// can prove the hook's order.
 	logins   []Login
 	loginErr error
 }
@@ -270,16 +269,16 @@ func newHarness(t *testing.T) *harness {
 		Catalog:  cat,
 		Say:      &say.Plain{W: h.out},
 		Resolver: stubResolver{},
-		// The login is installed by internal/login; these tests only need to
-		// know what init decided, and that the hook ran where apply runs it.
+		// internal/login installs the login; these tests only need what init decided
+		// and that the hook ran where apply runs it.
 		Login: func(_ context.Context, l Login) error {
 			h.logins = append(h.logins, l)
 			return h.loginErr
 		},
 		Apply: func(ctx context.Context, opts ApplyOptions) error {
 			h.applied = append(h.applied, opts)
-			// The real hand-over runs the login hook here: after its own
-			// confirm and before the release. The fake does the same.
+			// The real hand-over runs the login hook here: after its confirm and
+			// before the release.
 			if opts.Login != nil {
 				if err := opts.Login(ctx); err != nil {
 					return err
@@ -298,8 +297,8 @@ func newHarness(t *testing.T) *harness {
 	return h
 }
 
-// options are the defaults every test starts from: a first run whose answers
-// come from the prompts, not the flags.
+// options are the defaults every test starts from: a first run answered from the
+// prompts, not the flags.
 func (h *harness) options() Options {
 	return Options{
 		Chart:      chartAt(h.t, h.chartDir),
@@ -308,8 +307,8 @@ func (h *harness) options() Options {
 		Namespace:  "seedbox",
 		PUID:       1000,
 		PGID:       1000,
-		// The login is a question like the others; the flag is its starting
-		// answer, so a test that says nothing about it gets this one.
+		// The login is a question like the others, and the flag is its starting
+		// answer.
 		Login: "alice",
 	}
 }
@@ -345,10 +344,9 @@ func (h *harness) exists(path string) bool {
 
 // ---- the tests ---------------------------------------------------------------
 
-// TestFirstRunAsksTheQuestionsInOrder: domain, data path, config path, the app
-// list, then each selected app's questions, then the hand-over. The grant gets
-// every decision; a values answer equal to the chart's default is not written,
-// because a file that only repeats the defaults is noise.
+// Domain, data path, config path, the app list, each selected app's questions, then
+// the hand-over. A values answer equal to the chart's default is not written: a file
+// that only repeats the defaults is noise.
 func TestFirstRunAsksTheQuestionsInOrder(t *testing.T) {
 	h := newHarness(t)
 	h.prompt.inputs = []string{"box.example.com", "/srv/s5n/data", "/srv/s5n/config"}
@@ -386,8 +384,7 @@ func TestFirstRunAsksTheQuestionsInOrder(t *testing.T) {
 			t.Fatalf("the grant is missing %q:\n%s", want, grant)
 		}
 	}
-	// The greeting was answered with the value the chart already defaults to,
-	// so there is nothing to write and no file to create.
+	// The greeting's answer is the chart's default: nothing to write, no file.
 	if h.exists(h.valuesPath) {
 		t.Fatalf("the values file was written with only defaults:\n%s", h.read(h.valuesPath))
 	}
@@ -399,13 +396,8 @@ func TestFirstRunAsksTheQuestionsInOrder(t *testing.T) {
 	}
 }
 
-// TestReRunSplicesOnlyTheChangedKey: a hand-edited pair of files, one answer
-// changed. The rest of both files must come out byte for byte, comments and odd
-// indentation included, and a second run with the same answers must not write at
-// all.
-// TestTheSeedboxNamespaceFollowsTheLogin: a first run with no --namespace puts
-// the box in s5n-<login>, root's own included, beside box's s5n-system and
-// s5n-gateway.
+// A first run with no --namespace puts the box in s5n-<login>, root's own
+// included.
 func TestTheSeedboxNamespaceFollowsTheLogin(t *testing.T) {
 	h := newHarness(t)
 	h.prompt.inputs = []string{"box.example.com", "/srv/s5n/data", "/srv/s5n/config"}
@@ -422,8 +414,7 @@ func TestTheSeedboxNamespaceFollowsTheLogin(t *testing.T) {
 	}
 }
 
-// An explicit --namespace still wins on a first run: the login only decides the
-// default.
+// An explicit --namespace still wins on a first run.
 func TestAnExplicitNamespaceWinsOnAFirstRun(t *testing.T) {
 	h := newHarness(t)
 	h.prompt.inputs = []string{"box.example.com", "/srv/s5n/data", "/srv/s5n/config"}
@@ -440,8 +431,7 @@ func TestAnExplicitNamespaceWinsOnAFirstRun(t *testing.T) {
 	}
 }
 
-// A re-run reads the grant's namespace: a box installed before the s5n-<login>
-// default keeps `seedbox` whatever this run's flag or login says.
+// A box installed before the s5n-<login> default keeps `seedbox`.
 func TestAReRunKeepsTheGrantsNamespace(t *testing.T) {
 	h := newHarness(t)
 	write(t, h.grantPath, reRunGrant)
@@ -467,10 +457,8 @@ func TestAReRunKeepsTheGrantsNamespace(t *testing.T) {
 	}
 }
 
-// TestLoginsThatCannotBeASeedboxAreRefused: the namespace is s5n-<login>, so a
-// login box's own namespaces belong to, or one that does not make a DNS-1123
-// label after the prefix, is refused when it is given -- naming the login and
-// why.
+// A login whose s5n-<login> is box's own namespace, or not a DNS-1123 label, is
+// refused when it is given, naming the login and why.
 func TestLoginsThatCannotBeASeedboxAreRefused(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
@@ -485,7 +473,7 @@ func TestLoginsThatCannotBeASeedboxAreRefused(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			h := newHarness(t)
 			opts := h.unattended()
-			opts.Namespace = "" // a first run that derives it, which is when the login names it
+			opts.Namespace = "" // a first run derives it, which is when the login names it
 			opts.Login = tc.login
 			_, err := h.run(opts)
 			if err == nil {
@@ -503,11 +491,9 @@ func TestLoginsThatCannotBeASeedboxAreRefused(t *testing.T) {
 	}
 }
 
-// The namespace rule applies only where a namespace is derived from the
-// login. A box that already has a grant keeps its namespace, so a login
-// Authelia accepts -- capitals, a dot, an @ -- is still its login on a re-run,
-// and an explicit --namespace on a first run takes the login's place in the
-// name. Refusing either would lock out a box that has always worked.
+// The namespace rule applies only where a namespace is derived from the login: a
+// re-run's login may be any Authelia accepts (capitals, a dot, an @), and an
+// explicit --namespace takes the login's place in the name.
 func TestALoginOnlyHasToMakeANamespaceWhenItMakesOne(t *testing.T) {
 	t.Run("a re-run keeps a grant's login and namespace", func(t *testing.T) {
 		h := newHarness(t)
@@ -542,8 +528,7 @@ func TestALoginOnlyHasToMakeANamespaceWhenItMakesOne(t *testing.T) {
 	})
 }
 
-// An explicit namespace is a DNS-1123 label too, length included: the same rule
-// a login-derived one has to pass.
+// An explicit namespace is held to the same DNS-1123 label rule.
 func TestAnExplicitNamespaceIsHeldToALabel(t *testing.T) {
 	h := newHarness(t)
 	opts := h.unattended()
@@ -611,8 +596,8 @@ func TestReRunSplicesOnlyTheChangedKey(t *testing.T) {
 	}
 }
 
-// TestCancelWritesNothing: the files are written after the last question, so a
-// "no" anywhere leaves the host alone -- no files, no directories, no apply.
+// The files are written after the last question, so a cancel anywhere leaves the
+// host alone: no files, no directories, no apply.
 func TestCancelWritesNothing(t *testing.T) {
 	h := newHarness(t)
 	h.prompt.inputs = []string{"box.example.com", "/srv/s5n/data", "/srv/s5n/config"}
@@ -636,8 +621,7 @@ func TestCancelWritesNothing(t *testing.T) {
 	}
 }
 
-// TestUnattendedNamesTheMissingFlag: with --yes nothing is asked, and a missing
-// answer is an error naming the flag rather than a prompt nobody sees.
+// With --yes nothing is asked, so a missing answer is an error naming the flag.
 func TestUnattendedNamesTheMissingFlag(t *testing.T) {
 	h := newHarness(t)
 	opts := h.unattended()
@@ -668,17 +652,15 @@ func TestUnattendedNamesTheMissingFlag(t *testing.T) {
 	}
 }
 
-// TestGuidedMissingPathSaysWhereItWouldLand: the unmounted-disk case. The path
-// is missing, the nearest ancestor is on /, and that has to be said before the
-// operator says yes.
+// The unmounted-disk case: the path is missing, its nearest ancestor is on /, and
+// that is said before the operator says yes.
 func TestGuidedMissingPathSaysWhereItWouldLand(t *testing.T) {
 	h := newHarness(t)
 	delete(h.host.dirs, "/srv/s5n/data")
 	h.prompt.inputs = []string{"box.example.com", "/srv/newbox/data", "/srv/s5n/config"}
 	h.prompt.multis = [][]string{{"alpha"}}
 
-	// The first run declines the creation. Yes is the default the question
-	// starts on, so a decline is an explicit no.
+	// Yes is the default, so a decline is an explicit no.
 	h.prompt.confirms = []bool{false}
 	_, err := h.run(h.options())
 	if err == nil || !strings.Contains(err.Error(), "nothing was written") {
@@ -720,10 +702,8 @@ func TestGuidedMissingPathSaysWhereItWouldLand(t *testing.T) {
 	}
 }
 
-// TestBothMissingPathsAreAskedAboutSeparately: data and config are two
-// volumes, so a run where both are missing asks two questions, in
-// data-then-config order, each naming its own path, each starting on the safe
-// answer. Answering the first does not answer the second.
+// Two volumes, two questions: in data-then-config order, each naming its own path
+// and starting on the safe answer. Answering the first does not answer the second.
 func TestBothMissingPathsAreAskedAboutSeparately(t *testing.T) {
 	h := newHarness(t)
 	delete(h.host.dirs, "/srv/s5n/data")
@@ -749,8 +729,7 @@ func TestBothMissingPathsAreAskedAboutSeparately(t *testing.T) {
 	if strings.Join(asked, "\n") != strings.Join(want, "\n") {
 		t.Fatalf("confirms asked:\n%s\nwant:\n%s", strings.Join(asked, "\n"), strings.Join(want, "\n"))
 	}
-	// Both questions start on create: init cannot finish on a path that is not
-	// there, so the answer that goes on is the one a bare enter gives.
+	// Both start on create: init cannot finish on a missing path.
 	if len(h.prompt.confirmDefaults) != 2 || !h.prompt.confirmDefaults[0] || !h.prompt.confirmDefaults[1] {
 		t.Fatalf("confirm defaults = %v, want both to start on create", h.prompt.confirmDefaults)
 	}
@@ -761,8 +740,7 @@ func TestBothMissingPathsAreAskedAboutSeparately(t *testing.T) {
 	}
 }
 
-// TestDecliningEitherMissingPathStopsBeforeAnythingIsWritten: the second
-// path's no is as final as the first's, and the error names which one.
+// The second path's no is as final as the first's, and the error names which one.
 func TestDecliningEitherMissingPathStopsBeforeAnythingIsWritten(t *testing.T) {
 	h := newHarness(t)
 	delete(h.host.dirs, "/srv/s5n/data")
@@ -786,7 +764,7 @@ func TestDecliningEitherMissingPathStopsBeforeAnythingIsWritten(t *testing.T) {
 	}
 }
 
-// TestExistingPathSummaryIsCheapAndBounded: one bounded directory read, no walk.
+// One bounded directory read, no walk.
 func TestExistingPathSummaryIsCheapAndBounded(t *testing.T) {
 	h := newHarness(t)
 	h.host.listing["/srv/s5n/data"] = []DirEntry{
@@ -810,9 +788,8 @@ func TestExistingPathSummaryIsCheapAndBounded(t *testing.T) {
 			t.Fatalf("the report is missing %q:\n%s", want, note)
 		}
 	}
-	// No read is a walk, and the data path's extra one is the owner probe: the
-	// account the files belong to is decided before the report is drawn, and
-	// "does it hold anything" is one entry, not the tree.
+	// No read is a walk; the data path's extra one is the owner probe, one entry
+	// rather than the tree.
 	if got := strings.Join(h.host.reads, " "); got != "/srv/s5n/data /srv/s5n/data /srv/s5n/config" {
 		t.Fatalf("ReadDir calls = %v, want the owner probe then the two paths", h.host.reads)
 	}
@@ -822,7 +799,7 @@ func TestExistingPathSummaryIsCheapAndBounded(t *testing.T) {
 		}
 	}
 
-	// A directory with more names than the cap reports the cap, not a walk.
+	// More names than the cap reports the cap, not a walk.
 	many := make([]DirEntry, 0, summaryEntries+50)
 	for i := 0; i < summaryEntries+50; i++ {
 		many = append(many, DirEntry{Name: "d", IsDir: true})
@@ -839,14 +816,14 @@ func TestExistingPathSummaryIsCheapAndBounded(t *testing.T) {
 	}
 }
 
-// TestTransientAnswerReachesApplyAndNoFile: the claim token's case. It is asked
-// after the hand-over begins, it reaches the apply, and neither file has it.
+// The claim token's case: asked after the hand-over begins, it reaches the apply,
+// and neither file has it.
 func TestTransientAnswerReachesApplyAndNoFile(t *testing.T) {
 	h := newHarness(t)
 	h.prompt.inputs = []string{"box.example.com", "/srv/s5n/data", "/srv/s5n/config"}
 	h.prompt.multis = [][]string{{"alpha", "beta"}}
-	// The first secret is the login's password question (empty: box makes
-	// one), the second is the claim token.
+	// The first secret is the login's password (empty: box makes one), the second the
+	// claim token.
 	h.prompt.secrets = []string{"", "tok-do-not-write"}
 
 	res, err := h.run(h.options())
@@ -881,8 +858,8 @@ func TestTransientAnswerReachesApplyAndNoFile(t *testing.T) {
 	}
 }
 
-// TestUnattendedTransientIsAFlag: a required transient answer has no file to
-// live in, so --yes needs --set-transient, and a typo must not be ignored.
+// A required transient answer has no file to live in, so --yes needs
+// --set-transient, and a typo must not be ignored.
 func TestUnattendedTransientIsAFlag(t *testing.T) {
 	h := newHarness(t)
 	opts := h.unattended()
@@ -909,8 +886,7 @@ func TestUnattendedTransientIsAFlag(t *testing.T) {
 	}
 }
 
-// TestUnattendedTwiceIsSilent: the same answers must splice nothing the second
-// time -- the property the kind e2e asserts on the files it compares.
+// The same answers splice nothing the second time, as the kind e2e asserts.
 func TestUnattendedTwiceIsSilent(t *testing.T) {
 	h := newHarness(t)
 	opts := h.unattended()
@@ -939,7 +915,7 @@ func TestUnattendedTwiceIsSilent(t *testing.T) {
 	}
 }
 
-// TestAppsFlagNamesTheCatalog: a typo in --apps is refused with the list.
+// A typo in --apps is refused with the list.
 func TestAppsFlagNamesTheCatalog(t *testing.T) {
 	h := newHarness(t)
 	opts := h.unattended()
@@ -950,13 +926,11 @@ func TestAppsFlagNamesTheCatalog(t *testing.T) {
 	}
 }
 
-// TestTheGatewayAddressIsWrittenWithEveryAppOff: an install that answers init
-// with the apps off still records the Gateway's proxy address, because that is
-// the shape `box migrate apply` installs into -- the plan's apps are switched on
-// afterwards, from the grant -- and an OIDC app that renders without the address
-// has no way to reach the login at the box's own name: nobody can sign in to qui
-// and autobrr shows its own password form. The key is the box's, so the question is
-// what the chart serves, not what is on right now.
+// An install with every app off still records the Gateway's proxy address, the shape
+// `box migrate apply` installs into (the plan's apps are switched on later, from the
+// grant): an OIDC app rendered without it cannot reach the login at the box's name,
+// so qui has nobody able to sign in and autobrr shows its own password form. The key
+// is the box's, so the question is what the chart serves, not what is on now.
 func TestTheGatewayAddressIsWrittenWithEveryAppOff(t *testing.T) {
 	h := newHarness(t)
 	h.decision.GatewayIP = func(context.Context) (string, error) { return "10.96.0.10", nil }
@@ -970,8 +944,7 @@ func TestTheGatewayAddressIsWrittenWithEveryAppOff(t *testing.T) {
 	if !strings.Contains(grant, "gatewayIP: 10.96.0.10") {
 		t.Fatalf("the grant carries no Gateway address, and this chart's OIDC apps need it:\n%s", grant)
 	}
-	// A box with an OIDC app on gets the same write, and the re-run changes
-	// nothing: the address is not a per-app answer.
+	// With an OIDC app on the write is the same, and a re-run changes nothing.
 	h2 := newHarness(t)
 	h2.decision.GatewayIP = h.decision.GatewayIP
 	h2.decision.Schema = h.decision.Schema
@@ -992,8 +965,7 @@ func TestTheGatewayAddressIsWrittenWithEveryAppOff(t *testing.T) {
 	}
 }
 
-// A chart that does not declare the key is never given it: box does not invent
-// a values key for a release that has no OIDC app to use it.
+// A chart without the key is never given it.
 func TestNoGatewayAddressWithoutTheKey(t *testing.T) {
 	h := newHarness(t)
 	called := false
@@ -1012,8 +984,7 @@ func TestNoGatewayAddressWithoutTheKey(t *testing.T) {
 	}
 }
 
-// TestSettingsDirsFollowTheInstances: one directory per enabled instance, named
-// as the chart names the workload, because that is the subPath the pod mounts.
+// One directory per enabled instance, named as the chart names the workload.
 func TestSettingsDirsFollowTheInstances(t *testing.T) {
 	chart := chartAt(t, "testdata/chart")
 	base, err := seedbox.Base(chart)
@@ -1027,7 +998,7 @@ func TestSettingsDirsFollowTheInstances(t *testing.T) {
 	}
 }
 
-// TestPathPairIsRefused: the two volumes must not overlap.
+// The two volumes must not overlap.
 func TestPathPairIsRefused(t *testing.T) {
 	cases := [][2]string{
 		{"/srv/s5n/data", "/srv/s5n/data"},
@@ -1047,7 +1018,7 @@ func TestPathPairIsRefused(t *testing.T) {
 	}
 }
 
-// TestMountForPicksTheLongestPrefix: /srv/s5n/data is not on /srv/s5.
+// /srv/s5n/data is not on /srv/s5.
 func TestMountForPicksTheLongestPrefix(t *testing.T) {
 	mounts := []Mount{
 		{Point: "/", FSType: "ext4"},
@@ -1071,7 +1042,7 @@ func TestMountForPicksTheLongestPrefix(t *testing.T) {
 	}
 }
 
-// TestParseMountInfo reads the real format, including an escaped space.
+// The real format, including an escaped space.
 func TestParseMountInfo(t *testing.T) {
 	src := `22 1 8:1 / / rw,relatime shared:1 - ext4 /dev/sda1 rw,errors=remount-ro
 36 22 0:32 / /srv/my\040disk rw,nosuid - zfs tank/srv rw,xattr
@@ -1095,7 +1066,7 @@ func TestParseMountInfo(t *testing.T) {
 	}
 }
 
-// TestHumanBytes keeps the report readable at every scale it will meet.
+// Sizes at every scale the report meets.
 func TestHumanBytes(t *testing.T) {
 	cases := map[int64]string{
 		512:                           "512 B",
@@ -1118,7 +1089,7 @@ func write(t *testing.T, path, content string) {
 }
 
 // reRunGrant is root's file as a hand edit left it: a comment, four-space
-// indentation in one section, and a comment between a key and its value.
+// indentation, and a comment between a key and its value.
 const reRunGrant = `# root's grant for this box, edited by hand
 namespace: seedbox
 login: alice
@@ -1146,8 +1117,8 @@ apps:
     enabled: false
 `
 
-// reRunValues is the user's own file: comments and a four-space indent that a
-// splice must not disturb.
+// reRunValues is the user's own file: comments and an indent a splice must not
+// disturb.
 const reRunValues = `# my tuning, not root's
 apps:
     alpha:
@@ -1155,8 +1126,8 @@ apps:
         greeting: "hi"
 `
 
-// stubResolver answers one fixed lookups map, so init's issuer decision never
-// depends on the machine a test runs on.
+// stubResolver answers a fixed map, so init's issuer decision never depends on the
+// machine.
 type stubResolver struct {
 	addrs map[string][]string
 	errs  map[string]error
@@ -1169,9 +1140,8 @@ func (s stubResolver) LookupHost(_ context.Context, host string) ([]string, erro
 	return s.addrs[host], nil
 }
 
-// tls.issuer in the values file forces the issuer, even on a first run where
-// the chart's defaults are the baseline. It is the operator's file, not the
-// chart's, so init reads it directly.
+// tls.issuer in the values file forces the issuer even on a first run: it is the
+// operator's file, so init reads it directly.
 func TestForcedIssuerFromTheValuesFile(t *testing.T) {
 	h := newHarness(t)
 	if err := os.WriteFile(h.valuesPath, []byte("tls:\n  issuer: selfsigned\n"), 0o644); err != nil {
@@ -1193,8 +1163,7 @@ func TestForcedIssuerFromTheValuesFile(t *testing.T) {
 	}
 }
 
-// The resolution is init's default: a public answer gets Let's Encrypt, and
-// the line says so.
+// A public answer gets Let's Encrypt, and the line says so.
 func TestIssuerFollowsTheDomain(t *testing.T) {
 	h := newHarness(t)
 	h.decision.Resolver = stubResolver{addrs: map[string][]string{"box.example.com": {"203.0.113.7"}}}
@@ -1214,11 +1183,9 @@ func TestIssuerFollowsTheDomain(t *testing.T) {
 	}
 }
 
-// TestTheHandOverCarriesEachHostsIssuer: init decides each name's issuer from
-// its own DNS answer, and the apply it hands over compares every Certificate
-// that already answers with that decision. tls.issuer is empty in this run, so
-// the map is the only thing that can carry it -- and the names must be the ones
-// init decided, including an app served at a host of its own.
+// init decides each name's issuer from its own answer, and the apply compares every
+// answering Certificate with that decision. tls.issuer is empty here, so the map is
+// the only thing that carries it, for every name init decided.
 func TestTheHandOverCarriesEachHostsIssuer(t *testing.T) {
 	h := newHarness(t)
 	h.decision.Resolver = stubResolver{addrs: map[string][]string{

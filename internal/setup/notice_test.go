@@ -9,7 +9,7 @@ import (
 	"github.com/swizzin/s5n/internal/hostconf"
 )
 
-// noticeFile is root's config as bootstrap writes it, at a path a test can own.
+// noticeFile is root's config as bootstrap writes it.
 func noticeFile(t *testing.T) string {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), hostconf.FileName)
@@ -19,17 +19,15 @@ func noticeFile(t *testing.T) string {
 	return path
 }
 
-// TestInitAsksForTheNoticeAddressLastAndWritesIt: root's file is where box says
-// what happened, and init is the one run that asks. The answer goes into the one
-// url line and every other byte of the file is kept.
+// init is the one run that asks for the address; the answer goes into the one url
+// line and every other byte is kept.
 func TestInitAsksForTheNoticeAddressLastAndWritesIt(t *testing.T) {
 	h := newHarness(t)
 	path := noticeFile(t)
 	before := h.read(path)
 	h.prompt.inputs = []string{"box.example.com", "/srv/s5n/data", "/srv/s5n/config"}
 	h.prompt.multis = [][]string{{"alpha"}}
-	// The first secret is the login's password (empty: box makes one), the
-	// last is the address this test is about.
+	// The first secret is the login's password, the last the address.
 	h.prompt.secrets = []string{"", "https://hooks.example.test/services/T00/B00/token"}
 
 	opts := h.options()
@@ -59,7 +57,7 @@ func TestInitAsksForTheNoticeAddressLastAndWritesIt(t *testing.T) {
 			t.Fatalf("init changed a line of root's file: %q is gone from\n%s", line, after)
 		}
 	}
-	// What init says about it is the host, never the token.
+	// What init says is the host, never the token.
 	if strings.Contains(h.out.String(), "T00/B00") {
 		t.Fatalf("init printed the address:\n%s", h.out)
 	}
@@ -68,8 +66,8 @@ func TestInitAsksForTheNoticeAddressLastAndWritesIt(t *testing.T) {
 	}
 }
 
-// TestInitSkipsAnEmptyNoticeAddress: Enter is a real answer -- no notices -- and
-// it leaves root's file exactly as bootstrap wrote it.
+// Enter is a real answer -- no notices -- and leaves root's file as bootstrap wrote
+// it.
 func TestInitSkipsAnEmptyNoticeAddress(t *testing.T) {
 	h := newHarness(t)
 	path := noticeFile(t)
@@ -88,8 +86,7 @@ func TestInitSkipsAnEmptyNoticeAddress(t *testing.T) {
 	}
 }
 
-// TestInitDoesNotAskWhenTheAddressIsSet: a re-run with an address asks nothing
-// about it, and the file is not rewritten.
+// A re-run with an address asks nothing and does not rewrite the file.
 func TestInitDoesNotAskWhenTheAddressIsSet(t *testing.T) {
 	for _, c := range []struct {
 		name  string
@@ -146,8 +143,8 @@ func TestInitDoesNotAskWhenTheAddressIsSet(t *testing.T) {
 	}
 }
 
-// TestACancelledNoticeQuestionWritesNothing: the question is init's last, so a
-// cancel there leaves both of the seedbox's files and root's alone.
+// A cancel at the last question leaves both of the seedbox's files and root's
+// alone.
 func TestACancelledNoticeQuestionWritesNothing(t *testing.T) {
 	h := newHarness(t)
 	path := noticeFile(t)
@@ -172,7 +169,7 @@ func TestACancelledNoticeQuestionWritesNothing(t *testing.T) {
 	}
 }
 
-// unattendedForTest is a fully answered --yes run, for a subtest that needs one.
+// unattendedForTest is a fully answered --yes run.
 func (o Options) unattendedForTest() Options {
 	o.Unattended = true
 	o.Domain = "box.example.com"
@@ -182,11 +179,9 @@ func (o Options) unattendedForTest() Options {
 	return o
 }
 
-// TestAFilesTypoStopsInitBeforeTheFirstQuestion: init reads root's config the
-// way every other run does -- strictly -- and stops naming file, line and key,
-// before it asks anything. Nothing is asked, nothing is written: a run that
-// cannot read the file it would write the notice address into has no business
-// asking about anything else first.
+// init reads root's config strictly and stops naming file, line and key before it
+// asks anything: a run that cannot read the file it would write has no business
+// asking about anything else.
 func TestAFilesTypoStopsInitBeforeTheFirstQuestion(t *testing.T) {
 	h := newHarness(t)
 	path := filepath.Join(t.TempDir(), hostconf.FileName)
@@ -211,7 +206,7 @@ func TestAFilesTypoStopsInitBeforeTheFirstQuestion(t *testing.T) {
 	if h.exists(h.grantPath) || h.exists(h.valuesPath) {
 		t.Fatal("init wrote one of the seedbox's files")
 	}
-	// And the file is exactly as it was: init never rewrites it.
+	// The file is exactly as it was: init never rewrites it.
 	if got := h.read(path); got != "update:\n  timmer: on\n" {
 		t.Fatalf("init rewrote root's file:\n%s", got)
 	}

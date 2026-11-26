@@ -95,7 +95,7 @@ func TestChooseIssuerResolves(t *testing.T) {
 	}
 }
 
-// tls.issuer forces either issuer, whatever the name resolves to, and says so.
+// tls.issuer forces either issuer, whatever the name resolves to.
 func TestChooseIssuerForced(t *testing.T) {
 	r := stubResolver{addrs: map[string][]string{"box.example.test": {"203.0.113.10"}}}
 
@@ -116,9 +116,8 @@ func TestChooseIssuerWithoutAResolver(t *testing.T) {
 	}
 }
 
-// The e2e's resolver: a hosts-style file read on every call, so changing the
-// file between two init runs is what a new DNS record looks like, and a name
-// the file does not list is a not-found answer rather than a mismatch.
+// The e2e's resolver: a hosts-style file read on every call, so changing it between
+// runs is what a new DNS record looks like, and an unlisted name is not-found.
 func TestFileResolverReadsTheAnswerEveryTime(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "dns")
 	if err := os.WriteFile(path, []byte("# test\n203.0.113.10 box.example.test seerr.box.example.test\n"), 0o600); err != nil {

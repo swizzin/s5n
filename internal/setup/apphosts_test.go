@@ -8,17 +8,16 @@ import (
 	"github.com/swizzin/s5n/internal/say"
 )
 
-// hostedOptions is an unattended run with alpha (a path app) and gamma (the
-// fixture's app served at a host of its own) selected.
+// hostedOptions is an unattended run with alpha (a path app) and gamma (served at a
+// host of its own).
 func hostedOptions(h *harness) Options {
 	opts := h.unattended()
 	opts.Apps = []string{"alpha", "gamma"}
 	return opts
 }
 
-// Both record shapes are the same answer to init: a wildcard record and one
-// record per app both make gamma.<domain> resolve where the domain does, so
-// the check is about the addresses, not about which DNS feature produced them.
+// A wildcard and one record per app are the same answer: the check is about the
+// addresses, not which DNS feature produced them.
 func TestAppHostAnswersMatchTheDomain(t *testing.T) {
 	for _, name := range []string{"a wildcard record", "one record per app"} {
 		t.Run(name, func(t *testing.T) {
@@ -45,16 +44,14 @@ func TestAppHostAnswersMatchTheDomain(t *testing.T) {
 			if app.Issuer != IssuerLetsEncrypt || app.NoDNS || app.Record != "" {
 				t.Fatalf("gamma's host = %+v, want Let's Encrypt and no record to add", app)
 			}
-			// The box's own name and gamma's are two hosts with one decision:
-			// one row, folded, instead of the same sentence twice.
+			// The domain and gamma are two hosts with one decision: one folded row.
 			if !strings.Contains(h.out.String(), "· certificates   Let's Encrypt for 2 hosts · resolves to 203.0.113.7\n") {
 				t.Fatalf("init did not explain the hosts' issuer:\n%s", h.out)
 			}
 			if len(h.logins) != 1 || strings.Join(h.logins[0].Hosted, ",") != "gamma" {
 				t.Fatalf("the login was not told about gamma's host: %+v", h.logins)
 			}
-			// And the catalog's answer for it: gamma signs its own users in, so
-			// the login bypasses it rather than asking for a second password.
+			// gamma signs its own users in, so the login bypasses it.
 			if len(h.logins) != 1 || strings.Join(h.logins[0].OwnLogin, ",") != "gamma" {
 				t.Fatalf("the login was not told gamma signs its users in: %+v", h.logins)
 			}
@@ -62,9 +59,8 @@ func TestAppHostAnswersMatchTheDomain(t *testing.T) {
 	}
 }
 
-// A test box with a made-up name resolves nothing under it either: that is a
-// match, init proceeds self-signed, and each name carries the record the final
-// card repeats — both forms for an app host.
+// A made-up name resolves nothing under it either, which is a match: init proceeds
+// self-signed, each name carrying the record the card repeats.
 func TestNoDNSAnywhereProceedsSelfSigned(t *testing.T) {
 	h := newHarness(t)
 	res, err := h.run(hostedOptions(h))
@@ -98,9 +94,8 @@ func TestNoDNSAnywhereProceedsSelfSigned(t *testing.T) {
 	}
 }
 
-// An app name that answers somewhere else can never get a certificate through a
-// listener on this box, so init stops before it writes anything and names the
-// record to add, in both forms.
+// An app name answering elsewhere can never issue, so init stops before writing and
+// names the record to add, in both forms.
 func TestAppHostAnsweringElsewhereStopsInit(t *testing.T) {
 	h := newHarness(t)
 	h.decision.Resolver = stubResolver{addrs: map[string][]string{
@@ -124,8 +119,8 @@ func TestAppHostAnsweringElsewhereStopsInit(t *testing.T) {
 	}
 }
 
-// The domain answering and the app's name not is the other real mismatch: a
-// wildcard that does not cover this name, or a record nobody added yet.
+// The domain answering and the app's not is the other mismatch: a wildcard that does
+// not cover this name, or a record not added yet.
 func TestAppHostMissingWhileTheDomainAnswersStopsInit(t *testing.T) {
 	h := newHarness(t)
 	h.decision.Resolver = stubResolver{addrs: map[string][]string{
@@ -145,9 +140,8 @@ func TestAppHostMissingWhileTheDomainAnswersStopsInit(t *testing.T) {
 	}
 }
 
-// tls.issuer forces every host, the app's included: the operator's file wins
-// over what DNS says, and no host gets a "no record" line because the record
-// is not why the certificate is self-signed.
+// tls.issuer forces every host: the operator's file wins over DNS, and no host gets
+// a "no record" line, since the record is not why it is self-signed.
 func TestForcedIssuerAppliesToAppHosts(t *testing.T) {
 	h := newHarness(t)
 	write(t, h.valuesPath, "tls:\n  issuer: selfsigned\n")
@@ -170,20 +164,18 @@ func TestForcedIssuerAppliesToAppHosts(t *testing.T) {
 }
 
 // Four names that answer nothing are one row: each resolver error names its own
-// host, so the reason the screen shows is the same short fact for all of them,
-// and the resolver's own words go to the run log. Before this, four rows said
-// the same thing in four long sentences.
+// host, so the screen shows the same short fact for all of them and the resolver's
+// own words go to the run log.
 func TestTheHostsWithNoRecordAreOneRow(t *testing.T) {
 	h := newHarness(t)
 	opts := hostedOptions(h)
 	opts.Apps = []string{"alpha", "gamma"}
-	// Nothing answers, and each name's error names that name: this is what a box
-	// with a made-up domain sees.
+	// Each name's error names that name: what a made-up domain sees.
 	h.decision.Resolver = stubResolver{errs: map[string]error{
 		"box.example.com":       errors.New("lookup box.example.com: no such host"),
 		"gamma.box.example.com": errors.New("lookup gamma.box.example.com: no such host"),
 	}}
-	// A run log, because that is where the resolver's own answer goes.
+	// A run log, where the resolver's own answer goes.
 	var log strings.Builder
 	h.decision.Say = &say.Plain{W: h.out, Log: &log}
 	res, err := h.run(opts)

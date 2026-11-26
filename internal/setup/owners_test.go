@@ -10,8 +10,7 @@ import (
 
 // ---- the account that owns the files ----------------------------------------
 
-// dataWith puts one file in the data path, owned by uid:gid: the state this
-// rule is about (a data path that already holds somebody's files).
+// dataWith puts one file in the data path, owned by uid:gid.
 func dataWith(h *fakeHost, uid, gid int) {
 	const path = "/srv/s5n/data"
 	h.listing[path] = []DirEntry{{Name: "downloads", IsDir: true}}
@@ -38,9 +37,8 @@ func grantID(t *testing.T, h *harness, key string) int {
 	return n
 }
 
-// TestFilesOwnerComesFromTheDataPath: an install must not change who owns a data
-// path that already holds files -- the account is the answer, and sudo's ids are
-// only the fallback for a path with nothing in it.
+// An install must not change who owns a data path that holds files: the account is
+// the answer, and sudo's ids are the fallback for an empty path.
 func TestFilesOwnerComesFromTheDataPath(t *testing.T) {
 	h := newHarness(t)
 	dataWith(h.host, 1500, 1600)
@@ -59,8 +57,7 @@ func TestFilesOwnerComesFromTheDataPath(t *testing.T) {
 	}
 }
 
-// TestFilesOwnerFallsBackToTheInvokingUser: an empty data path is nobody's yet,
-// so what sudo carried is the answer.
+// An empty data path is nobody's yet, so what sudo carried is the answer.
 func TestFilesOwnerFallsBackToTheInvokingUser(t *testing.T) {
 	h := newHarness(t)
 	opts := h.unattended()
@@ -78,8 +75,8 @@ func TestFilesOwnerFallsBackToTheInvokingUser(t *testing.T) {
 	}
 }
 
-// TestFilesFlagsBeatTheDataOwner: --puid/--pgid are the operator saying who the
-// files belong to, and that is not a guess box overrides from a directory.
+// --puid/--pgid are the operator saying who the files belong to, which box does not
+// override from a directory.
 func TestFilesFlagsBeatTheDataOwner(t *testing.T) {
 	h := newHarness(t)
 	dataWith(h.host, 1500, 1600)
@@ -95,8 +92,8 @@ func TestFilesFlagsBeatTheDataOwner(t *testing.T) {
 	}
 }
 
-// TestFilesOwnerOnAReRunIsTheGrants: an installed box keeps its owner. Reading
-// the data path would let a stray root-owned file re-chown the whole release.
+// An installed box keeps its owner: reading the data path would let a stray
+// root-owned file re-chown the whole release.
 func TestFilesOwnerOnAReRunIsTheGrants(t *testing.T) {
 	h := newHarness(t)
 	write(t, h.grantPath, reRunGrant)
@@ -114,9 +111,8 @@ func TestFilesOwnerOnAReRunIsTheGrants(t *testing.T) {
 	}
 }
 
-// TestRootOwnedDataPathIsRefusedUnattended: uid 0 is never the answer -- the apps
-// run unprivileged and could not write a root-owned tree -- so an unattended run
-// stops and names the flags rather than installing a box that cannot work.
+// uid 0 is never the answer, since the apps run unprivileged, so an unattended run
+// names the flags instead of installing a box that cannot work.
 func TestRootOwnedDataPathIsRefusedUnattended(t *testing.T) {
 	h := newHarness(t)
 	dataWith(h.host, 0, 0)
@@ -138,8 +134,8 @@ func TestRootOwnedDataPathIsRefusedUnattended(t *testing.T) {
 	}
 }
 
-// TestRootOwnedDataPathAsksForTheOwnerGuided: on a terminal the operator knows
-// whose files those are, so the same state is a question instead of a refusal.
+// On a terminal the operator knows whose files those are: the same state is a
+// question, not a refusal.
 func TestRootOwnedDataPathAsksForTheOwnerGuided(t *testing.T) {
 	h := newHarness(t)
 	dataWith(h.host, 0, 0)
@@ -147,7 +143,7 @@ func TestRootOwnedDataPathAsksForTheOwnerGuided(t *testing.T) {
 	h.prompt.multis = [][]string{{"alpha"}}
 	opts := h.options()
 	opts.PUID, opts.PGID = 0, 0
-	// The two owner questions are asked between the paths and the app list.
+	// The owner questions come between the paths and the app list.
 	h.prompt.inputs = append(h.prompt.inputs, "1500", "1600")
 
 	if _, err := h.run(opts); err != nil {
@@ -164,15 +160,13 @@ func TestRootOwnedDataPathAsksForTheOwnerGuided(t *testing.T) {
 	}
 }
 
-// TestASymlinkedDataPathIsNoData: box never follows a symlink when it walks a
-// seedbox's files on the host, so the owner on the other side of a link is not
-// the box's answer -- the path has no data for this rule, the invoking user's
-// ids are used, and the link is said out loud.
+// box never follows a symlink when it walks a seedbox's files, so the owner beyond
+// one is not the box's answer: the path has no data, the invoking user's ids are
+// used, and the link is said out loud.
 func TestASymlinkedDataPathIsNoData(t *testing.T) {
 	h := newHarness(t)
 	h.host.links["/srv/s5n/data"] = true
-	// What the link points at, which box must not read: it is a directory full
-	// of somebody else's files.
+	// What the link points at, which box must not read.
 	h.host.dirs["/srv/elsewhere"] = true
 	h.host.owners["/srv/elsewhere"] = owner{1500, 1600}
 	h.host.listing["/srv/elsewhere"] = []DirEntry{{Name: "downloads", IsDir: true}}
@@ -193,8 +187,7 @@ func TestASymlinkedDataPathIsNoData(t *testing.T) {
 
 // ---- the web login ---------------------------------------------------------
 
-// TestLoginDefaultsToTheAccountThatOwnsTheFiles: the box's files belong to an
-// OS account, so that account's name is the login page's default. Still just a
+// The account that owns the files is the login page's default -- still only a
 // default: the answer is the operator's.
 func TestLoginDefaultsToTheAccountThatOwnsTheFiles(t *testing.T) {
 	h := newHarness(t)
@@ -227,8 +220,7 @@ func TestLoginDefaultsToTheAccountThatOwnsTheFiles(t *testing.T) {
 	}
 }
 
-// TestLoginFallsBackWhenTheUidHasNoAccount: a uid with no account in the host's
-// database is not a login name, so the old default (sudo's user) stands.
+// A uid with no account is not a login name, so sudo's user stands as the default.
 func TestLoginFallsBackWhenTheUidHasNoAccount(t *testing.T) {
 	h := newHarness(t)
 	h.decision.UserLookup = func(int) (string, bool) { return "", false }
@@ -252,9 +244,8 @@ func TestLoginFallsBackWhenTheUidHasNoAccount(t *testing.T) {
 	t.Fatalf("the login was not asked for: %v", h.prompt.asked)
 }
 
-// TestGuidedInitShowsTheLoginAndTheFileOwner: one is the web login, the other is
-// who the files belong to; a box where they differ must not look like a box
-// where they agree. Both are shown, in the run's own record style.
+// One is the web login, the other the file owner: a box where they differ must not
+// look like a box where they agree, so both are shown.
 func TestGuidedInitShowsTheLoginAndTheFileOwner(t *testing.T) {
 	h := newHarness(t)
 	h.decision.UserLookup = func(uid int) (string, bool) {
@@ -278,11 +269,10 @@ func TestGuidedInitShowsTheLoginAndTheFileOwner(t *testing.T) {
 	}
 }
 
-// TestTheHostSeamCannotCreateAnOSUser: bootstrap and init never create an OS
-// user -- the files belong to an account that already exists, and only
-// `box adduser` makes one. PathHost is the whole of init's write surface, so the
-// rule is checked where it could be broken: the interface has the probes and two
-// writes, and nothing that could add an account.
+// bootstrap and init never create an OS user: the files belong to an existing
+// account, and only `box adduser` makes one. PathHost is init's whole write surface,
+// so the rule is checked here: it has the probes and two writes, and nothing that
+// could add an account.
 func TestTheHostSeamCannotCreateAnOSUser(t *testing.T) {
 	want := map[string]bool{
 		"Stat": true, "Lstat": true, "StatFS": true, "MountInfo": true,

@@ -12,9 +12,7 @@ import (
 )
 
 // LinuxPathHost is the real host: stat, statfs, /proc/self/mountinfo, mkdir and
-// chown. It is the only implementation that touches a machine, and the flow
-// behind PathHost never calls it directly, so every branch of init is tested
-// against a fixture instead.
+// chown. The only implementation that touches a machine; init runs against a fixture.
 type LinuxPathHost struct{}
 
 func (LinuxPathHost) Stat(path string) (FileInfo, error) { return statPath(path, false) }
@@ -63,8 +61,8 @@ func (LinuxPathHost) ReadDir(path string, max int) ([]DirEntry, bool, error) {
 		return nil, false, err
 	}
 	defer f.Close()
-	// ReadDir(n>0) reports the end of the directory as io.EOF, the way Read
-	// does; an empty directory is not a failure.
+	// ReadDir(n>0) reports the end of the directory as io.EOF; an empty directory is
+	// not a failure.
 	entries, err := f.ReadDir(max + 1)
 	if err != nil && !errors.Is(err, io.EOF) && len(entries) == 0 {
 		return nil, false, err
@@ -96,14 +94,13 @@ func (LinuxPathHost) Chown(path string, uid, gid int) error {
 
 var _ PathHost = LinuxPathHost{}
 
-// parseMountInfo reads /proc/self/mountinfo. Each line is
+// parseMountInfo reads /proc/self/mountinfo:
 //
 //	36 35 98:0 /mnt1 /mnt2 rw,noatime master:1 - ext3 /dev/root rw,errors=continue
 //
-// and only the device, the mount point, the filesystem type and the source are
-// kept, because those are what the report names. The fields box needs are all
-// reachable without parsing the optional ones: everything before the "-"
-// separator is fixed, and the type and source follow it.
+// Only the device, mount point, filesystem type and source are kept. Everything
+// before the "-" separator is fixed, and the type and source follow it, so the
+// optional fields need no parsing.
 func parseMountInfo(r io.Reader) ([]Mount, error) {
 	scanner := bufio.NewScanner(r)
 	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
@@ -157,8 +154,7 @@ func splitDevice(s string) (int, int, bool) {
 	return major, minor, true
 }
 
-// unescapeMount decodes the octal escapes mountinfo uses for the characters a
-// path cannot carry literally: \040 is a space, and so on.
+// unescapeMount decodes mountinfo's octal escapes (\040 is a space).
 func unescapeMount(s string) string {
 	if !strings.Contains(s, `\`) {
 		return s

@@ -7,17 +7,14 @@ import (
 	"github.com/swizzin/s5n/internal/hostconf"
 )
 
-// The notice address is root's, not the seedbox's: its file is written by
-// bootstrap, it is mode 0600 because the address can carry a token, and init is
-// the one run that asks for it. It is asked last, masked, optional, and written
-// with the rest of the answers -- so a cancel before it leaves root's file
-// exactly as bootstrap wrote it.
+// The notice address is root's, not the seedbox's: bootstrap writes the file, mode
+// 0600 because the address can carry a token, and init is the one run that asks for
+// it -- last, masked, optional, and written with the rest of the answers.
 
-// readNotice is root's config, read strictly. Every run that reads the file
-// parses it the same way, and init is no exception: an unknown key, a malformed
-// line or a bad value stops the run before its first question, naming the file,
-// the line and the key. A typo that a run asked around would be one that quietly
-// stopped updating.
+// readNotice is root's config, read strictly like every other run reads it: an
+// unknown key, a malformed line or a bad value stops init before its first
+// question, naming file, line and key. A typo a run asked around would quietly stop
+// updating.
 func readNotice(path string) (hostconf.Config, bool, error) {
 	if strings.TrimSpace(path) == "" {
 		return hostconf.Defaults(), false, nil
@@ -25,8 +22,7 @@ func readNotice(path string) (hostconf.Config, bool, error) {
 	return hostconf.Load(path)
 }
 
-// noticePending reports whether this run has an address to ask for: root's file
-// exists, and it has none.
+// noticePending reports whether root's file exists and has no address.
 func (d *Decision) noticePending(opts Options) (bool, error) {
 	conf, exists, err := readNotice(opts.NoticePath)
 	if err != nil {
@@ -38,10 +34,8 @@ func (d *Decision) noticePending(opts Options) (bool, error) {
 	return conf.NoticeURL == "", nil
 }
 
-// askNoticeURL is the one optional question: a URL, or Enter to skip. It is a
-// Secret because the address can carry the token that makes it work, so it is
-// never echoed and never printed back. ask is false when this run has nothing to
-// ask, and the answer is empty then.
+// askNoticeURL is the one optional question: a URL, or Enter to skip. A Secret
+// because the address can carry a token, so it is never echoed or printed back.
 func (d *Decision) askNoticeURL(ask bool) (string, error) {
 	if !ask {
 		return "", nil
@@ -66,9 +60,8 @@ func (d *Decision) askNoticeURL(ask bool) (string, error) {
 	return answer, nil
 }
 
-// writeNoticeURL splices the answer into root's file: the one url line, every
-// other byte kept. What box says about it afterwards is the host, never the
-// address.
+// writeNoticeURL splices the answer into root's file, every other byte kept. What
+// box says afterwards is the host, never the address.
 func (d *Decision) writeNoticeURL(path, url string) error {
 	data, err := os.ReadFile(path)
 	if err != nil {

@@ -5,10 +5,9 @@ import (
 	"testing"
 )
 
-// TestPathCheckTextIsTheTable pins the plain path report byte for byte: the
-// path, its state, its device, its filesystem and its free space in columns, and
-// whatever is already there under the row. It is what setup.LinePrompt is handed
-// (through Note).
+// The plain path report, byte for byte: path, state, device, filesystem and free
+// space in columns, what is already there under the row. It is what LinePrompt's
+// Note gets.
 func TestPathCheckTextIsUnchanged(t *testing.T) {
 	check := PathCheck{
 		Reports: []PathReport{
@@ -40,9 +39,8 @@ func TestPathCheckTextIsUnchanged(t *testing.T) {
 	}
 }
 
-// TestLinePromptStaysOnTheTextPath pins the other half of the seam: LinePrompt
-// does not implement PathChecker, so init hands it Note(check.Text()) and its
-// output stays exactly what it was before the structured report existed.
+// LinePrompt does not implement PathChecker, so init hands it Note(check.Text())
+// and its output stays what it was.
 func TestLinePromptStaysOnTheTextPath(t *testing.T) {
 	var p Prompter = &LinePrompt{}
 	if _, ok := p.(PathChecker); ok {
@@ -50,17 +48,16 @@ func TestLinePromptStaysOnTheTextPath(t *testing.T) {
 	}
 }
 
-// The unattended init path uses a zero-value prompt: it asks nothing, but the
-// path report still reaches Note. That must be silent, not a nil dereference.
+// The unattended path uses a zero-value prompt: the report still reaches Note, and
+// that must be silent, not a nil dereference.
 func TestZeroLinePromptNoteDoesNotPanic(t *testing.T) {
 	if err := (&LinePrompt{}).Note("a report"); err != nil {
 		t.Fatalf("Note: %v", err)
 	}
 }
 
-// TestInspectMarksTheRootDevice covers the warning a terminal UI draws: a path
-// on a separate mount that is the same device as /. It is not in the plain
-// text, so nothing here may leak into PathReport.String.
+// The warning a terminal UI draws: a path on a separate mount that is the same
+// device as /. Nothing may leak into the plain text.
 func TestInspectMarksTheRootDevice(t *testing.T) {
 	h := newFakeHost()
 	h.mounts = []Mount{

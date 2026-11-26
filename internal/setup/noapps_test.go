@@ -6,12 +6,10 @@ import (
 	"testing"
 )
 
-// emptyBox is what init says once about a box with no apps. It is the same
-// sentence in every run that ends with nothing on, so a test can look for it.
+// emptyBox is what init says once about a box with no apps.
 const emptyBox = "nothing runs yet"
 
-// noApps is the grant's app section for a box with every app off: what init
-// writes when nothing was picked.
+// noApps is the grant's app section for a box with every app off.
 func assertNoApps(t *testing.T, grant string) {
 	t.Helper()
 	for _, want := range []string{
@@ -28,10 +26,8 @@ func assertNoApps(t *testing.T, grant string) {
 	}
 }
 
-// TestGuidedInitAcceptsAnEmptySelection: picking nothing is an answer, not a
-// refusal. The box is a real state -- apps arrive by `box install` or by
-// migrate -- so the picker's minimum is zero and init says once what an empty
-// box means instead of asking a confirm nobody expected.
+// Picking nothing is an answer: apps arrive by `box install` or migrate, so the
+// picker's minimum is zero and init says once what an empty box means.
 func TestGuidedInitAcceptsAnEmptySelection(t *testing.T) {
 	h := newHarness(t)
 	h.prompt.inputs = []string{"box.example.com", "/srv/s5n/data", "/srv/s5n/config"}
@@ -53,10 +49,8 @@ func TestGuidedInitAcceptsAnEmptySelection(t *testing.T) {
 	}
 }
 
-// TestGuidedReRunUnticksEveryApp: refusing the empty list also made "turn every
-// app off" impossible. What init does to one unticked app -- writes its
-// enabled: false and changes nothing else -- is what it now does to all of
-// them, and it says the same one line.
+// Unticking every app on a re-run writes enabled: false for each and changes
+// nothing else, and says the same one line.
 func TestGuidedReRunUnticksEveryApp(t *testing.T) {
 	h := newHarness(t)
 	write(t, h.grantPath, reRunGrant)
@@ -74,15 +68,14 @@ func TestGuidedReRunUnticksEveryApp(t *testing.T) {
 	if got := strings.Count(h.out.String(), emptyBox); got != 1 {
 		t.Fatalf("the empty box was explained %d times, want once:\n%s", got, h.out)
 	}
-	// Only the app keys changed: the rest of the file is the old bytes.
+	// Only the app keys changed: the rest is the old bytes.
 	if got, want := strings.Join(res.GrantChanged, ","), "apps.alpha.enabled"; got != want {
 		t.Fatalf("grant keys changed = %s, want %s", got, want)
 	}
 }
 
-// TestUnattendedAppsNone: the word, not an empty string, is the explicit empty
-// list -- `--apps ""` stays "not given", which on a fresh box is still the
-// refusal.
+// The word, not an empty string, is the explicit empty list: `--apps ""` stays "not
+// given", which on a fresh box is still the refusal.
 func TestUnattendedAppsNone(t *testing.T) {
 	h := newHarness(t)
 	opts := h.unattended()
@@ -97,8 +90,7 @@ func TestUnattendedAppsNone(t *testing.T) {
 	}
 }
 
-// TestUnattendedEmptyAppsStillRefuses: `--apps ""` is a flag with nothing in
-// it, which is not an answer. The refusal names the flag and now lists the word
+// `--apps ""` is a flag with nothing in it: the refusal names the flag and the word
 // that is an answer.
 func TestUnattendedEmptyAppsStillRefuses(t *testing.T) {
 	h := newHarness(t)
@@ -117,9 +109,8 @@ func TestUnattendedEmptyAppsStillRefuses(t *testing.T) {
 	}
 }
 
-// TestUnattendedNoneWithNames: "none" and an app cannot both be the answer. The
-// error names both, because either one alone is a box that runs something
-// different from what was asked for.
+// "none" and an app cannot both be the answer: either alone is a box running
+// something else.
 func TestUnattendedNoneWithNames(t *testing.T) {
 	h := newHarness(t)
 	opts := h.unattended()
@@ -139,9 +130,8 @@ func TestUnattendedNoneWithNames(t *testing.T) {
 	}
 }
 
-// TestLinePromptAcceptsNoneWhenAnyAnswerWillDo: the plain prompt has no toggle,
-// so a list that may be empty needs a word for it. It only exists where the
-// flow allows zero: with a minimum of one, "none" is still not an answer.
+// The plain prompt has no toggle, so an empty list needs a word for it -- only where
+// the flow allows zero; with a minimum of one, "none" is not an answer.
 func TestLinePromptAcceptsNoneWhenAnyAnswerWillDo(t *testing.T) {
 	field := MultiSelect{
 		Key:      "apps",
@@ -169,8 +159,7 @@ func TestLinePromptAcceptsNoneWhenAnyAnswerWillDo(t *testing.T) {
 	}
 }
 
-// TestLinePromptAcceptsAnEmptyAnswerWhenNothingIsSelected: enter keeps what is
-// selected, and on a fresh box that is nothing.
+// Enter keeps what is selected, and on a fresh box that is nothing.
 func TestLinePromptAcceptsAnEmptyAnswerWhenNothingIsSelected(t *testing.T) {
 	p := &LinePrompt{In: strings.NewReader("\n"), Out: &bytes.Buffer{}}
 	got, err := p.MultiSelect(MultiSelect{Key: "apps", Options: []Option{{Value: "alpha", Label: "alpha"}}})
@@ -182,11 +171,8 @@ func TestLinePromptAcceptsAnEmptyAnswerWhenNothingIsSelected(t *testing.T) {
 	}
 }
 
-// TestAMigratingInitSaysNothingAboutAnEmptyBox: `box migrate apply` runs init as
-// one step of its own, with every app off on purpose -- the migration switches
-// on what it moved once the configs are in place. The empty-box line is init's
-// for a box nobody is adopting into, so the installer's run passes Adopting and
-// the line is not printed; the grant, the answers and every other line are
+// A migrating init has every app off on purpose, so it passes Adopting and the
+// empty-box line is not printed; the grant, the answers and every other line are
 // init's own.
 func TestAMigratingInitSaysNothingAboutAnEmptyBox(t *testing.T) {
 	h := newHarness(t)

@@ -11,25 +11,18 @@ import (
 	"github.com/swizzin/s5n/internal/catalog"
 )
 
-// The login's two questions, and the three ways box gets a password.
-//
-// The name is a grant answer like the namespace: it lives in the grant, is
-// offered back on a re-run, and wins over the flag only in the sense that a
-// flag in guided mode is the starting answer. The password is not an answer at
-// all: it is used once, hashed, and never written to a file, a log or either of
-// the two documents init edits.
+// The login's two questions. The name is a grant answer like the namespace: it lives
+// in the grant and is offered back on a re-run. The password is not an answer at
+// all: it is used once, hashed, and never written to a file, a log or either
+// document init edits.
 
-// SeedboxNamespace is the namespace a login's seedbox gets: s5n-<login>, beside
-// box's own s5n-system and s5n-gateway (docs/box.md, "Scopes: root and users").
-// Root's own seedbox is not special: login alice lands in s5n-alice, and a
-// second user is another s5n-<login>.
+// SeedboxNamespace is s5n-<login>, beside box's own s5n-system and s5n-gateway
+// (docs/box.md, "Scopes: root and users"). Root's seedbox is not special.
 func SeedboxNamespace(login string) string { return "s5n-" + login }
 
-// NamespaceFor is the namespace a login's seedbox gets, refused when the login
-// cannot make one: box's own namespaces are not a seedbox's, and the name has to
-// be a DNS-1123 label after the prefix. It is asked only where box derives a
-// namespace from the login -- a first run with no --namespace -- because a box
-// that already has a grant keeps the grant's namespace whatever its login is.
+// NamespaceFor is SeedboxNamespace, refused when the login cannot make one: box's own
+// namespaces are not a seedbox's, and the result must be a DNS-1123 label. Only a
+// first run with no --namespace derives one; a re-run keeps the grant's.
 func NamespaceFor(login string) (string, error) {
 	ns := SeedboxNamespace(login)
 	switch ns {
@@ -42,10 +35,9 @@ func NamespaceFor(login string) (string, error) {
 	return ns, nil
 }
 
-// ValidateLogin is the whole rule for a login that names its seedbox: Authelia's
-// own login shape, and that the login makes a namespace box can create. Where
-// the namespace does not come from the login (a re-run keeps the grant's, and an
-// explicit --namespace names it), only Authelia's shape applies: see askLogin.
+// ValidateLogin is Authelia's login shape plus a namespace box can create. Where the
+// namespace comes from elsewhere (the grant, or --namespace), only the shape applies;
+// see askLogin.
 func ValidateLogin(login string) error {
 	if err := authelia.ValidateLogin(login); err != nil {
 		return err
@@ -54,17 +46,13 @@ func ValidateLogin(login string) error {
 	return err
 }
 
-// askLogin resolves the one account. In an interactive run it is a question
-// the operator can change; unattended, the flag, then the grant, then the name
-// of the OS account that owns the box's files (puid), and only then the account
-// of whoever ran the command.
-//
-// The login and the file owner are different things -- one is who the browser
-// admits, the other who the files belong to -- so the default follows the files
-// and the operator can still say otherwise.
+// askLogin resolves the one account: the flag, the grant, the OS account that owns
+// the box's files (puid), then whoever ran the command. The login and the file owner
+// are different things, so the default follows the files and the operator can say
+// otherwise.
 func (d *Decision) askLogin(opts Options, base, grantNow map[string]any, puid int, derives bool) (string, error) {
-	// The login names the seedbox's namespace only when this run derives one;
-	// otherwise it is only Authelia's account, held to Authelia's shape.
+	// The login names the namespace only when this run derives one; otherwise it is
+	// only Authelia's account.
 	validate := authelia.ValidateLogin
 	if derives {
 		validate = ValidateLogin
@@ -81,10 +69,8 @@ func (d *Decision) askLogin(opts Options, base, grantNow map[string]any, puid in
 	if def == "" {
 		def = strings.TrimSpace(opts.DefaultLogin)
 	}
-	// A flow that runs init on a host with no box holds this answer already: it
-	// asked for it before anything was installed, or was given it. It is a
-	// decision, not a starting answer, so it is used as it is and the question
-	// is not asked again.
+	// A flow running init on a host with no box holds this answer already: it is a
+	// decision, not a starting answer, so the question is not asked again.
 	if opts.Adopting && strings.TrimSpace(opts.Login) != "" {
 		given := strings.TrimSpace(opts.Login)
 		if err := validate(given); err != nil {
@@ -111,14 +97,10 @@ func (d *Decision) askLogin(opts Options, base, grantNow map[string]any, puid in
 	})
 }
 
-// askPassword is the password for one run: read from --password-file, asked
-// twice on a terminal, or generated when nothing is supplied.
-//
-// The second return says whether this run supplies a password at all. An empty
-// answer on a box that already has a row means "keep it": re-running init must
-// not log everyone out because somebody pressed enter. An empty answer on a box
-// that has none means box makes one, and the third return is that password,
-// for the caller to print once.
+// askPassword is the password for one run: from --password-file, asked twice on a
+// terminal, or generated. newPassword says this run supplies one: an empty answer on
+// a box with a row means "keep it", so a re-run does not log everyone out, while on
+// a box with none box makes one and returns it as generated, to print once.
 func (d *Decision) askPassword(opts Options, login string) (password string, newPassword bool, generated string, err error) {
 	if opts.PasswordFile != "" {
 		password, err := readPasswordFile(opts.PasswordFile)
@@ -175,9 +157,9 @@ func (d *Decision) askPassword(opts Options, login string) (password string, new
 	return password, true, password, nil
 }
 
-// readPasswordFile reads one password from a file, or from stdin when the path
-// is "-". A file with more than one line is refused rather than guessing which
-// line was meant, and the value is never echoed back in an error.
+// readPasswordFile reads one password from a file, or stdin for "-". A file with more
+// than one line is refused rather than guessed at, and the value never appears in an
+// error.
 func readPasswordFile(path string) (string, error) {
 	var (
 		raw []byte
@@ -201,11 +183,9 @@ func readPasswordFile(path string) (string, error) {
 	return value, nil
 }
 
-// withApps is the values document with the app list init just decided applied
-// to it: the chart's defaults, the user's file and the grant, and then the
-// enabled flag for every app the catalog knows. It is what the login's rule
-// generation reads, and it needs no schema check: the instances it walks are
-// grant keys, which a values file cannot set at all.
+// withApps is the values document with init's app list applied: the enabled flag for
+// every app the catalog knows. The login's rule generation reads it, and it needs no
+// schema check: the instances it walks are grant keys a values file cannot set.
 func withApps(base map[string]any, apps []string, cat *catalog.Catalog) map[string]any {
 	entries, _ := base["apps"].(map[string]any)
 	for _, name := range cat.Names() {
