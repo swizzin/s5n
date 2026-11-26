@@ -9,9 +9,7 @@ import (
 
 const testKey = "0123456789abcdef0123456789abcdef"
 
-// realFile is what the pinned image writes after a first start, with the two
-// keys this package owns changed to the test values. Only the shape matters:
-// two-space indentation, one level of mapping per section, keys sorted.
+// realFile is what the pinned image writes after a first start.
 const realFile = `---
 auth:
   apikey: ` + testKey + `
@@ -32,8 +30,7 @@ sonarr:
   port: 8989
 `
 
-// decoded reads the document back the way the app's own loader does, so a test
-// proves values rather than bytes.
+// decoded reads the document back the way the app's own loader does.
 func decoded(t *testing.T, doc []byte) map[string]any {
 	t.Helper()
 	var out map[string]any
@@ -69,10 +66,8 @@ func TestSealWritesBothKeysIntoAnEmptyFile(t *testing.T) {
 	}
 }
 
-// TestSealIsANoOpOnAFileTheAppWrote is the case that matters on every start
-// after the first: the app rewrote the whole file from its own memory, and the
-// init container must not touch it again. The file starts with a YAML document
-// marker, which is what the app's own writer emits.
+// The first start after this one finds a file the app rewrote whole, with the
+// document marker its writer emits.
 func TestSealIsANoOpOnAFileTheAppWrote(t *testing.T) {
 	out, changed, err := Seal([]byte(realFile), testKey, "/bazarr")
 	if err != nil {
@@ -86,9 +81,8 @@ func TestSealIsANoOpOnAFileTheAppWrote(t *testing.T) {
 	}
 }
 
-// TestSealRepairsWhatTheAppOrAPersonChanged: base_url is not on a settings page
-// but a restored or hand-edited config can carry another one, and the API key is
-// box's, so both are put back the way the Job and the Gateway expect.
+// base_url has no settings page, but a restored or hand-edited config can carry
+// another one, and the API key is box's.
 func TestSealRepairsBothKeysAndKeepsEveryOtherSetting(t *testing.T) {
 	existing := strings.NewReplacer(
 		"  apikey: "+testKey, "  apikey: someone-elses-key",
@@ -108,8 +102,7 @@ func TestSealRepairsBothKeysAndKeepsEveryOtherSetting(t *testing.T) {
 	if got := sect(t, doc, "auth")["apikey"]; got != testKey {
 		t.Fatalf("auth.apikey = %v", got)
 	}
-	// Everything else is the app's: a value it wrote, a key it wrote, and a
-	// section this package does not own.
+	// Everything else is the app's.
 	if got := sect(t, doc, "auth")["type"]; got != nil {
 		t.Fatalf("auth.type = %v, want the app's null left alone", got)
 	}
@@ -119,16 +112,14 @@ func TestSealRepairsBothKeysAndKeepsEveryOtherSetting(t *testing.T) {
 	if got := sect(t, doc, "sonarr")["ip"]; got != "127.0.0.1" {
 		t.Fatalf("sonarr.ip = %v", got)
 	}
-	// ... and only the two owned lines changed: the rest is byte-identical.
+	// ... and only the two owned lines changed.
 	if before, after := strings.Split(existing, "\n"), strings.Split(string(out), "\n"); len(before) != len(after) {
 		t.Fatalf("line count changed: %d -> %d", len(before), len(after))
 	}
 }
 
-// TestSealKeepsTheDocumentMarkerTheAppWrote: a restart must not fail on the file
-// it wrote last time. The marker is kept, not stripped: the app's own loader
-// writes one, and a file the init container trimmed would be the one difference
-// between its output and the app's.
+// A restart must not fail on the file the app wrote last time: the marker the
+// app's own writer emits is kept, not stripped.
 func TestSealKeepsTheDocumentMarker(t *testing.T) {
 	existing := []byte(strings.ReplaceAll(realFile, "  base_url: /bazarr", "  base_url: /somewhere-else"))
 	out, changed, err := Seal(existing, testKey, "/bazarr")
@@ -146,8 +137,8 @@ func TestSealKeepsTheDocumentMarker(t *testing.T) {
 	}
 }
 
-// TestSealRefusesASecondDocument: one marker starts the document, a second one
-// starts another file's worth of settings, and the app would read only one.
+// A second document is another file's worth of settings, and the app reads only
+// one.
 func TestSealRefusesASecondDocument(t *testing.T) {
 	existing := []byte(realFile + "---\nsonarr:\n  ip: other\n")
 	if _, _, err := Seal(existing, testKey, "/bazarr"); err == nil {
@@ -155,8 +146,6 @@ func TestSealRefusesASecondDocument(t *testing.T) {
 	}
 }
 
-// TestSealAddsAMissingSection: a config the app wrote before a key existed, or
-// a hand-written two-line file, still gets the section it needs.
 func TestSealAddsAMissingSection(t *testing.T) {
 	existing := []byte("general:\n  branch: master\n")
 	out, changed, err := Seal(existing, testKey, "/bazarr")
@@ -178,8 +167,8 @@ func TestSealAddsAMissingSection(t *testing.T) {
 	}
 }
 
-// TestSealQuotesAValueYAMLWouldOtherwiseRead: a prefix with a leading symbol is
-// a comment or a tag to a YAML reader, so the value is always quoted.
+// A leading symbol is a comment or a tag to a YAML reader, so the value is
+// always quoted.
 func TestSealQuotesAValueYAMLWouldOtherwiseRead(t *testing.T) {
 	out, _, err := Seal(nil, "key: with # markers", "/bazarr")
 	if err != nil {
