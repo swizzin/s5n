@@ -5,16 +5,10 @@ import (
 	"github.com/swizzin/s5n/internal/release"
 )
 
-// ChartGlobs is what one release's catalog says an image upgrade can rewrite:
-// per app, the globs under its config directory that a migration moves forward
-// (a database and the settings file that points at it). An app the catalog
-// gives none has nothing to copy, so a step moves it without a snapshot and box
-// will not roll it back.
-//
-// The chart is untrusted input to a process that may run as root, so the
-// catalog is read through internal/catalog -- which caps the file, refuses a
-// field it does not know and checks every glob against the chart's own values
-// and schema -- rather than by taking the bytes apart here.
+// ChartGlobs is one release's catalog: per app, the config globs an upgrade can
+// rewrite. An app with none is moved without a snapshot and cannot be rolled
+// back. The chart is untrusted input to a root process, so internal/catalog
+// parses it, not this function.
 func ChartGlobs(chart release.Chart) (map[string][]string, error) {
 	if len(chart.Catalog) == 0 {
 		return nil, nil

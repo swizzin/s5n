@@ -10,10 +10,8 @@ import (
 	"github.com/swizzin/s5n/internal/snapshot"
 )
 
-// ConfigRoot is the grant's storage.config.path: the host directory whose child
-// per instance is that instance's /config (the chart's subPath). Snapshots are
-// taken under it and the holds that name them sit beside it, so a caller that
-// reads or writes either names the same directory from here.
+// ConfigRoot is the grant's storage.config.path, whose child per instance is
+// that instance's /config. Snapshots and holds both sit under it.
 func ConfigRoot(sb *seedbox.Seedbox) (string, error) {
 	vols, err := sb.Storage()
 	if err != nil {
@@ -35,14 +33,9 @@ func loadHolds(store HoldStore, configRoot string) ([]snapshot.Hold, error) {
 	return store.Load(configRoot)
 }
 
-// HoldStore is the record of the apps box is holding at the image they ran
-// before a step moved them: `<config root>/.box/holds.json`, written by a
-// rollback and read by every plan and apply.
-//
-// It is an interface for the same reason the rest of this package is: a test
-// plans and rolls back against a value it can assert on, and cmd/box wires the
-// file in. The path comes from the grant, so it is an argument rather than a
-// field: a hold lives beside the config root it belongs to.
+// HoldStore is the record of apps held at the image they ran before a step
+// moved them: `<config root>/.box/holds.json`. The path is an argument because a
+// hold lives beside its config root.
 type HoldStore interface {
 	Load(configRoot string) ([]snapshot.Hold, error)
 	Save(configRoot string, holds []snapshot.Hold) error
@@ -71,44 +64,28 @@ func holdFor(holds []snapshot.Hold, app string) (snapshot.Hold, bool) {
 	return snapshot.Hold{}, false
 }
 
-// holdLapsed reports whether one release has moved past a hold: it pins, for
-// the app's selected variant, an image other than the one the rollback avoided.
-//
-// It is the identity a rollback already uses to answer "the app runs this
-// image" (sameImage): the repository, then the digest when either side has one,
-// then the tag. The tag is the fallback a release that pins no digest leaves --
-// a locally built image, or a variant the chart has not tagged with one yet --
-// and without it such a hold could never lapse: "" equals "" for every tag, so
-// the app would stay on its old image while box went on saying it was waiting
-// for a release that had already moved past it.
+// holdLapsed reports whether a release pins something other than the image a
+// rollback avoided, using sameImage's identity. The tag fallback matters: a
+// release pinning no digest would otherwise leave the hold forever, because ""
+// equals "" for every tag.
 func holdLapsed(pinned snapshot.ImageRef, h snapshot.Hold) bool {
 	return !sameImage(pinned, h.Avoiding)
 }
 
 // Lapse is one hold a release has moved past, and the sentence box says when it
-// removes it: the app moves with the release again because the chart pins
-// something other than the image the rollback avoided.
+// removes it.
 type Lapse struct {
 	Hold snapshot.Hold
 	Text string
 }
 
 // HoldValues is the overlay release.Options.Holds applies: the values that keep
-// each held app on the image it ran, and the holds this release has lapsed.
+// each held app on its image, and the holds this release has lapsed. An
+// operator's pin wins; a release pinning another image lapses the hold; a
+// release whose catalog cannot name the variant leaves it standing.
 //
-// A hold only ever says an app runs the image a snapshot recorded, so it loses
-// to anything with a better claim:
-//
-//   - a pin in the operator's values wins, because a hand pin is the operator's
-//     decision about this app and the hold is box's;
-//   - a release that pins a different repository or digest has lapsed the hold,
-//     because the chart's own image is what the next release is for;
-//   - a release whose catalog cannot say what the app's variant is cannot be
-//     compared, so the hold stands.
-//
-// The lapsed list is what the caller removes from the file, and only after an
-// apply that rendered without those holds has succeeded: a hold dropped by a
-// run whose apply failed would move the app onto the image its rollback avoided.
+// The caller removes lapsed holds only after an apply without them succeeded: a
+// failed run that dropped one would move the app onto the image it avoided.
 func HoldValues(chart release.Chart, values map[string]any, holds []snapshot.Hold) (map[string]any, []Lapse, error) {
 	out := make(map[string]any)
 	var lapsed []Lapse
@@ -146,8 +123,7 @@ func addHold(out map[string]any, h snapshot.Hold) {
 		image["tag"] = h.At.Tag
 	}
 	if len(image) == 0 {
-		// A hold is validated when it is read and when it is written, so
-		// this is a value no file box accepted could carry.
+		// A validated hold always names an image; this cannot happen.
 		return
 	}
 	apps, _ := out["apps"].(map[string]any)
@@ -158,9 +134,8 @@ func addHold(out map[string]any, h snapshot.Hold) {
 	apps[h.App] = map[string]any{"image": image}
 }
 
-// chartAppImage is the image one release pins for an app, for the variant the
-// values select. A chart without variants.yaml, or one whose app or variant is
-// not there, says nothing.
+// chartAppImage is the image a release pins for an app's selected variant; a
+// chart or variant that says nothing yields false.
 func chartAppImage(chart release.Chart, values map[string]any, app string) (snapshot.ImageRef, bool) {
 	if len(chart.Variants) == 0 {
 		return snapshot.ImageRef{}, false
