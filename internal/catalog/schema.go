@@ -6,17 +6,15 @@ import (
 	"strings"
 )
 
-// schema is the part of a chart's values.schema.json the catalog needs: does a
-// values path exist as a leaf, and what type does it have. Local references
-// into "definitions" are followed (the chart uses them for the Arrs); any other
-// reference is refused, because following it would mean loading something
-// outside the chart that box was given.
+// schema is the part of a chart's values.schema.json the catalog needs: whether a
+// values path is a leaf, and its type. Local "definitions" references are
+// followed; any other reference is refused, because following it would load
+// something outside the chart box was given.
 type schema struct {
 	root map[string]any
 }
 
-// maxRefDepth bounds $ref chasing in a hand-written schema. The chart's schema
-// nests two at most.
+// maxRefDepth bounds $ref chasing in a hand-written schema; the chart nests two.
 const maxRefDepth = 10
 
 func parseSchema(src []byte) (*schema, error) {
@@ -30,8 +28,8 @@ func parseSchema(src []byte) (*schema, error) {
 	return &schema{root: root}, nil
 }
 
-// at walks a key path through the schema's properties. A nil node with a nil
-// error means the key is not described by the schema.
+// at walks a key path through the schema's properties; a nil node with a nil
+// error means the schema does not describe the key.
 func (s *schema) at(keys []string) (map[string]any, error) {
 	node := s.root
 	for _, k := range keys {
